@@ -67,8 +67,11 @@ def _resolve_graph_backend(config: dict) -> str:
 def _validate_npu_cp_model_config(config: dict, num_decoding_tokens: int) -> None:
     """Mirror model-side CP admission for callers without the C++ master."""
     model_type = config.get("model_type", "")
-    algorithm = str(config.get("speculative_algorithm", "mtp")).lower()
-    is_glm_mtp_draft = model_type == "glm_moe_dsa_mtp" and config.get("is_draft_engine", False) and algorithm == "mtp"
+    is_glm_mtp_draft = (
+        model_type == "glm_moe_dsa_mtp"
+        and config.get("is_draft_engine", False)
+        and bool(config.get("is_mtp_algorithm", False))
+    )
     if model_type not in ("qwen3", "glm_moe_dsa", "deepseek_v4") and not is_glm_mtp_draft:
         raise NotImplementedError(
             f"Python model-side CP does not support model_type={model_type!r}; "
@@ -80,7 +83,7 @@ def _validate_npu_cp_model_config(config: dict, num_decoding_tokens: int) -> Non
     if role not in ("DEFAULT", "PREFILL"):
         raise NotImplementedError("Python model-side CP supports only DEFAULT or PREFILL roles")
     speculative = int(config.get("num_speculative_tokens", 0)) > 0 or num_decoding_tokens > 1
-    if speculative and algorithm in ("eagle3", "dflash", "dflash2", "dspark"):
+    if speculative and bool(config.get("requires_aux_hidden_capture", False)):
         raise NotImplementedError("Python model-side CP does not support aux-hidden-capture speculative algorithms")
     kv_split = int(config.get("kv_split_size", 0)) or int(config["cp_size"])
     if model_type == "deepseek_v4" and kv_split != 1:
@@ -185,16 +188,17 @@ def _unified_mtp_graph_enabled(config: dict) -> bool:
     """
     if not bool(config.get("enable_unified_mtp_graph", False)):
         return False
-    algorithm = str(config.get("speculative_algorithm", "mtp")).lower()
-    if algorithm not in ("mtp", "dflash", "dflash2", "dspark"):
+    is_mtp = bool(config.get("is_mtp_algorithm", False))
+    is_block_draft = bool(config.get("is_block_diffusion_algorithm", False))
+    if not is_mtp and not is_block_draft:
         return False
-    if algorithm != "mtp" and not (config.get("enable_task_pipeline", False) and config.get("enable_graph", False)):
+    if is_block_draft and not (config.get("enable_task_pipeline", False) and config.get("enable_graph", False)):
         return False
 
     model_type = config.get("model_type")
     is_draft_engine = bool(config.get("is_draft_engine", False))
     if model_type == "glm_moe_dsa_mtp":
-        return is_draft_engine and algorithm == "mtp"
+        return is_draft_engine and is_mtp
     return model_type == "glm_moe_dsa" and not is_draft_engine and int(config.get("num_speculative_tokens", 0)) > 0
 
 

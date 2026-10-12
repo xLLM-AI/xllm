@@ -184,7 +184,7 @@ def test_model_executor_propagates_unified_switch_to_moe_modules() -> None:
                 "model_type": "glm_moe_dsa",
                 "is_draft_engine": False,
                 "num_speculative_tokens": 3,
-                "speculative_algorithm": "mtp",
+                "is_mtp_algorithm": True,
             },
             True,
         ),
@@ -194,7 +194,7 @@ def test_model_executor_propagates_unified_switch_to_moe_modules() -> None:
                 "model_type": "glm_moe_dsa_mtp",
                 "is_draft_engine": True,
                 "num_speculative_tokens": 0,
-                "speculative_algorithm": "mtp",
+                "is_mtp_algorithm": True,
             },
             True,
         ),
@@ -204,7 +204,7 @@ def test_model_executor_propagates_unified_switch_to_moe_modules() -> None:
                 "model_type": "glm_moe_dsa_mtp",
                 "is_draft_engine": True,
                 "num_speculative_tokens": 0,
-                "speculative_algorithm": "mtp",
+                "is_mtp_algorithm": True,
             },
             False,
         ),
@@ -214,7 +214,7 @@ def test_model_executor_propagates_unified_switch_to_moe_modules() -> None:
                 "model_type": "glm_moe_dsa",
                 "is_draft_engine": False,
                 "num_speculative_tokens": 0,
-                "speculative_algorithm": "mtp",
+                "is_mtp_algorithm": True,
             },
             False,
         ),
@@ -224,7 +224,7 @@ def test_model_executor_propagates_unified_switch_to_moe_modules() -> None:
                 "model_type": "qwen3",
                 "is_draft_engine": False,
                 "num_speculative_tokens": 3,
-                "speculative_algorithm": "eagle3",
+                "is_mtp_algorithm": False,
             },
             False,
         ),
@@ -1359,6 +1359,7 @@ def test_cp_admission_preserves_model_specific_kv_support(
     config = {
         "model_type": model_type,
         "is_draft_engine": is_draft,
+        "is_mtp_algorithm": model_type == "glm_moe_dsa_mtp",
         "num_speculative_tokens": speculative_tokens,
         "cp_size": 2,
         "kv_split_size": kv_split,
@@ -1377,7 +1378,7 @@ def test_glm_cp_draft_admission_requires_mtp_draft_engine(is_draft: bool, algori
     config = {
         "model_type": "glm_moe_dsa_mtp",
         "is_draft_engine": is_draft,
-        "speculative_algorithm": algorithm,
+        "is_mtp_algorithm": algorithm == "mtp",
         "cp_size": 2,
         "kv_split_size": 1,
     }
@@ -1973,7 +1974,7 @@ def test_executor_accepts_prepared_glm_prefill_cp(
         "model_type": model_type,
         "is_draft_engine": model_type == "glm_moe_dsa_mtp",
         "num_speculative_tokens": 2,
-        "speculative_algorithm": "mtp",
+        "is_mtp_algorithm": True,
         "kv_split_size": kv_split,
         "cp_size": cp_size,
         "cp_rank": cp_size - 1,
@@ -2129,6 +2130,7 @@ def test_kv_transfer_uses_eager_and_preserves_step_inputs(prepared: bool, is_mtp
     config = {
         "model_type": "glm_moe_dsa_mtp" if is_mtp else "glm_moe_dsa",
         "is_draft_engine": is_mtp,
+        "is_mtp_algorithm": is_mtp,
     }
     backend = _PreparedStubAttentionBackend() if prepared else StubAttentionBackend()
     with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
@@ -2209,6 +2211,7 @@ def test_prepared_mtp_preserves_hidden_and_topk(dp_size: int, cp_size: int) -> N
     config = {
         "model_type": "glm_moe_dsa_mtp",
         "is_draft_engine": True,
+        "is_mtp_algorithm": True,
         "dp_size": dp_size,
         "cp_size": cp_size,
         "kv_split_size": 1,
@@ -2263,6 +2266,7 @@ def test_prepared_mtp_graph_receives_bound_hidden_and_topk(dp_size: int, cp_size
     config = {
         "model_type": "glm_moe_dsa_mtp",
         "is_draft_engine": True,
+        "is_mtp_algorithm": True,
         "dp_size": dp_size,
         "dp_rank": 0,
         "cp_size": cp_size,

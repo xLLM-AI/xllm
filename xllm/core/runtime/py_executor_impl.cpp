@@ -28,6 +28,7 @@ limitations under the License.
 
 #include "common/metrics.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/config/speculative_config.h"
 #include "core/framework/model/mtp_topk_state.h"
 #include "core/framework/multimodal/mm_batch_data.h"
 #include "core/framework/multimodal/mm_data.h"
@@ -173,8 +174,15 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
   executor_config["num_speculative_tokens"] = options_.num_speculative_tokens();
   executor_config["enable_unified_mtp_graph"] =
       ExecutionConfig::get_instance().enable_unified_mtp_graph();
-  executor_config["speculative_algorithm"] = options_.speculative_algorithm();
   executor_config["is_draft_engine"] = options_.is_draft_engine();
+  executor_config["is_mtp_algorithm"] =
+      SpeculativeConfig::is_mtp_algorithm(options_.speculative_algorithm());
+  executor_config["is_block_diffusion_algorithm"] =
+      SpeculativeConfig::is_block_diffusion_algorithm(
+          options_.speculative_algorithm());
+  executor_config["requires_aux_hidden_capture"] =
+      SpeculativeConfig::requires_aux_hidden_capture(
+          options_.speculative_algorithm());
   executor_config["enable_task_pipeline"] = options_.enable_task_pipeline();
   if (options_.enable_task_pipeline()) {
     executor_config["enable_graph"] = options_.enable_graph();
