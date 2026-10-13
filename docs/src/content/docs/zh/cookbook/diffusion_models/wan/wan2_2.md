@@ -13,11 +13,11 @@ sidebar:
 
 ```bash
 # A2 x86
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260801
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260911
 # A2 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-cann9-20260801
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-cann9-20260911
 # A3 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260801
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260911
 ```
 
 然后创建对应的容器
@@ -37,7 +37,7 @@ sudo docker run -it --ipc=host -u 0 --privileged --name mydocker --network=host 
  -v /export/home:/export/home \
  -v /home/:/home/  \
  -w /export/home \
- quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260801
+ quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260911
 ```
 
 ## 2.拉取源码并编译
@@ -47,7 +47,7 @@ sudo docker run -it --ipc=host -u 0 --privileged --name mydocker --network=host 
 ```bash
 git clone https://github.com/xLLM-AI/xllm.git
 cd xllm 
-git submodule update --init --update
+git submodule update --init --recursive
 ```
 
 下载安装依赖:
@@ -96,7 +96,7 @@ export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:$LD_LIBRARY_PATH
 
 # 1. 环境变量设置
 export PYTHON_INCLUDE_PATH="$(python3 -c 'from sysconfig import get_paths; print(get_paths()["include"])')"
-export PYTHON_LIB_PATH="$(python3 -c 'from sysconfig import get_paths; print(get_paths()["include"])')"
+export PYTHON_LIB_PATH="$(python3 -c 'from sysconfig import get_config_var; print(get_config_var("LIBDIR"))')"
 export PYTORCH_NPU_INSTALL_PATH=/usr/local/libtorch_npu/
 export PYTORCH_INSTALL_PATH="$(python3 -c 'import torch, os; print(os.path.dirname(os.path.abspath(torch.__file__)))')"
 export LIBTORCH_ROOT="$PYTORCH_INSTALL_PATH"
@@ -131,6 +131,7 @@ MASTER_NODE_ADDR="127.0.0.1:17372"
 START_PORT=18013
 START_DEVICE=8
 LOG_DIR="log"
+mkdir -p "$LOG_DIR"
 NNODES=8
 LAST_DEVICE=$((START_DEVICE + NNODES - 1))
 # 向每个 rank 暴露从 START_DEVICE 到 LAST_DEVICE 的设备。
@@ -164,7 +165,7 @@ do
     --dit_sparse_attention_enabled=false \
     --dit_sparse_attention_sparsity=0.8 \
     --dit_sparse_attention_sparse_start_step=15 \
-    --enable-shm=true \
+    --enable_shm=true \
     --node_rank=$i > $LOG_FILE 2>&1 &
 done
 
@@ -184,7 +185,7 @@ done
 | `--tp_size` | Tensor Parallel 并行度 | `1` | 正整数, 如 `2`、`4`,  建议不开启，使用动态权重加载|
 | `--enable_rolling_load` | 是否启动动态权重加载 | `false` | bool值, true 或者 false|
 | `--rolling_load_num_rolling_slots` | 动态权重加载分配槽数 | `2` | 正整数, , 如 `2`、`3`|
-| `--dit_laser_attention_enable` | 是否使能laser_attention | `false` | bool值, 如 true，false|
+| `--dit_laser_attention_enabled` | 是否使能laser_attention | `false` | bool值, 如 true，false|
 | `--dit_distill_enable` | 是否使能蒸馏模型| `false` | bool值, 如 true，false|
 | `--dit_sparse_attention_enabled` | 是否使能稀疏attention| `false` | bool值, 如 true，false；与laser_attention互斥|
 | `--dit_sparse_attention_sparsity` | 稀疏attention的稀疏度| `0.5` | float, 如 0.5，0.6；依赖dit_sparse_attention_enabled|

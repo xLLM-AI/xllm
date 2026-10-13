@@ -26,11 +26,11 @@ https://modelers.cn/models/Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp
 
 ```bash
 # A2 x86
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260801
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260911
 # A2 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-cann9-20260801
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-cann9-20260911
 # A3 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260801
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260911
 ```
 
 然后创建对应的容器
@@ -50,7 +50,7 @@ sudo docker run -it --ipc=host -u 0 --privileged --name mydocker --network=host 
  -v /export/home:/export/home \
  -v /home/:/home/  \
  -w /export/home \
- quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260801
+ quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260911
 ```
 
 ## 2. 拉取源码并编译
@@ -136,7 +136,7 @@ export ALLOW_INTERNAL_FORMAT=1
 ```bash
 BATCH_SIZE=256
 #推理最大batch数量
-XLLM_PATH="./myxllm/xllm/build/xllm/core/server/xllm"
+XLLM_PATH="./build/xllm/core/server/xllm"
 #推理入口文件路径（上一步中编译产物）
 MODEL_PATH=/path/to/dsv4
 #模型路径
@@ -148,13 +148,14 @@ LOCAL_HOST="11.87.49.110"
 # Service Port
 START_PORT=18994
 LOG_DIR="logs"
+mkdir -p "$LOG_DIR"
 NNODES=8
 
 for (( i=0; i<$NNODES; i++ ))
 do
   PORT=$((START_PORT + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
-  nohup $XLLM_PATH -model-id ds \
+  nohup $XLLM_PATH --model_id=ds \
     --model $MODEL_PATH \
     --host $LOCAL_HOST \
     --port $PORT \
@@ -263,6 +264,7 @@ MASTER_NODE_ADDR="11.87.49.110:19990"
 LOCAL_HOST="11.87.49.110"
 START_PORT=15890
 LOG_DIR="logs"
+mkdir -p "$LOG_DIR"
 NNODES=32
 LOCAL_NODES=16
 export HCCL_IF_BASE_PORT=48439
@@ -291,6 +293,7 @@ MASTER_NODE_ADDR="11.87.49.110:19990"
 LOCAL_HOST="11.87.49.111"
 START_PORT=15890
 LOG_DIR="logs"
+mkdir -p "$LOG_DIR"
 NNODES=32
 LOCAL_NODES=16
 export HCCL_IF_BASE_PORT=48439

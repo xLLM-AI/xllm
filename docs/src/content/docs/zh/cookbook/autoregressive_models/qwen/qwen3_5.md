@@ -16,7 +16,7 @@ sidebar:
 
 ```bash
 # A3 arm (CANN 9)
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260801
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260911
 ```
 
 然后创建对应的容器
@@ -49,7 +49,7 @@ docker run -it -d \
     -v /home/:/home/ \
     -v /runtime/:/runtime/ \
     -w /home \
-    quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260801
+    quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260911
 ```
 
 ## 2.拉取源码并编译
@@ -80,8 +80,8 @@ python setup.py build
 # 1. 配置依赖路径相关环境变量
 export ASDOPS_LOG_TO_STDOUT=0
 export ASDOPS_LOG_LEVEL=3
-export PYTHON_INCLUDE_PATH="$(python3 -c 'from sysconfig import get_paths; print(get_paths()["include"])' | tail -n 1)"
-export PYTHON_LIB_PATH="$(python3 -c 'from sysconfig import get_paths; print(get_paths()["include"])' | tail -n 1)"
+export PYTHON_INCLUDE_PATH="$(python3 -c 'from sysconfig import get_paths; print(get_paths()["include"])')"
+export PYTHON_LIB_PATH="$(python3 -c 'from sysconfig import get_config_var; print(get_config_var("LIBDIR"))')"
 export PYTORCH_NPU_INSTALL_PATH=/usr/local/libtorch_npu/
 export PYTORCH_INSTALL_PATH="$(python3 -c 'import site, os; print(os.path.join(site.getsitepackages()[0], "torch"))')"
 export LIBTORCH_ROOT="$PYTORCH_INSTALL_PATH"
@@ -128,7 +128,7 @@ for (( i=0; i<$NNODES; i++ ))
 do
   PORT=$((START_PORT + i))
   LOG_FILE="$LOG_DIR/node_$i.log"
-  ./xllm/build/xllm/core/server/xllm \
+  ./build/xllm/core/server/xllm \
     --model $MODEL_PATH \
     --port $PORT \
     --master_node_addr=$MASTER_NODE_ADDR \

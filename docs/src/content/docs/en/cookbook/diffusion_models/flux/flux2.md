@@ -21,18 +21,18 @@ First, download the image provided by xLLM:
 
 ```bash
 # A2 x86
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260801
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260911
 # A2 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-cann9-20260801
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-cann9-20260911
 # A3 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260801
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260911
 ```
 
 
 Then create the corresponding container:
 
 ```bash
-IMAGE=quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260801
+IMAGE=quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260911
 CONTAINER=mydocker
 
 docker run \
@@ -148,7 +148,7 @@ do
     --max_sequence_length=512 \
     --task="embed" \
     --enable_shm=true \
-    --node_rank=$i \ > $LOG_FILE 2>&1 &
+    --node_rank=$i > "$LOG_FILE" 2>&1 &
 done
 ```
 ### 2. Start the DiT component
@@ -157,7 +157,7 @@ done
 ```bash
 ##### 1. Configure dependency path environment variables
 export PYTHON_INCLUDE_PATH="$(python3 -c 'from sysconfig import get_paths; print(get_paths()["include"])')"
-export PYTHON_LIB_PATH="$(python3 -c 'from sysconfig import get_paths; print(get_paths()["include"])')"
+export PYTHON_LIB_PATH="$(python3 -c 'from sysconfig import get_config_var; print(get_config_var("LIBDIR"))')"
 export PYTORCH_NPU_INSTALL_PATH=/usr/local/libtorch_npu/  # NPU PyTorch path
 export PYTORCH_INSTALL_PATH="$(python3 -c 'import torch, os; print(os.path.dirname(os.path.abspath(torch.__file__)))')"  # PyTorch installation path
 export LIBTORCH_ROOT="$PYTORCH_INSTALL_PATH"  # LibTorch path
@@ -215,13 +215,13 @@ do
     --enable_schedule_overlap=false \
     --use_contiguous_input_buffer=false \
     --dit_debug_print=true \
-    --enable-shm=true \
+    --enable_shm=true \
     --node_rank=$i > $LOG_FILE 2>&1 &
 done
 ```
 ### 3. Run the Python embedding script
 
-```bash
+```python
 # -*- coding: utf-8 -*-
 import sys
 import json

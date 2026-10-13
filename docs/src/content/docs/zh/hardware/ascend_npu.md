@@ -13,11 +13,11 @@ sidebar:
 
 ```bash
 # A2 x86
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-20260306
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260911
 # A2 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-20260306
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-cann9-20260911
 # A3 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-20260306
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260911
 ```
 
 启动容器：

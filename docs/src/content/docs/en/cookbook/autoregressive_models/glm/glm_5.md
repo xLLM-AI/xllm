@@ -23,11 +23,11 @@ First, download the image provided by xLLM:
 
 ```bash
 # A2 x86
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260801
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260911
 # A2 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-cann9-20260801
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-cann9-20260911
 # A3 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260801
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260911
 ```
 
 **Note**: Performance stress testing has not been performed on A2 machines.
@@ -49,7 +49,7 @@ sudo docker run -it --ipc=host -u 0 --privileged --name mydocker --network=host 
  -v /export/home:/export/home \
  -v /home/:/home/  \
  -w /export/home \
- quay.io/jd_xllm/xllm-ai:xllm-dev-hb-rc2-x86
+ quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260911
 ```
 
 ## 2. Pull the Source Code and Build
@@ -110,7 +110,7 @@ rm -rf /root/ascend/log/
 ## Startup Command - A3 Single Node - GLM-5.2-W8A8
 
 ```bash
-XLLM_PATH="./myxllm/xllm/build/xllm/core/server/xllm"
+XLLM_PATH="./build/xllm/core/server/xllm"
 # Path to the xLLM executable
 MODEL_PATH=/path/to/GLM-5.2-W8A8/
 # Model path, using GLM-5.2-W8A8 as an example
@@ -123,6 +123,7 @@ LOCAL_HOST="11.87.49.110"
 START_PORT=18994
 START_DEVICE=0
 LOG_DIR="logs"
+mkdir -p "$LOG_DIR"
 NNODES=16
 
 for (( i=0; i<$NNODES; i++ ))
@@ -194,6 +195,7 @@ LOCAL_HOST="11.87.49.110"
 START_PORT=15890
 START_DEVICE=0
 LOG_DIR="logs"
+mkdir -p "$LOG_DIR"
 NNODES=32
 LOCAL_NODES=16
 export HCCL_IF_BASE_PORT=48439
@@ -239,6 +241,7 @@ LOCAL_HOST="11.87.49.111"
 START_PORT=15890
 START_DEVICE=0
 LOG_DIR="logs"
+mkdir -p "$LOG_DIR"
 NNODES=32
 LOCAL_NODES=16
 export HCCL_IF_BASE_PORT=48439
@@ -341,8 +344,7 @@ First, download and install `xllm service`, similar to installing and building `
 ```bash
 git clone https://github.com/xLLM-AI/xllm-service.git
 cd xllm-service
-git submodule init
-git submodule update
+git submodule update --init --recursive
 ```
 
 ##### Install etcd
@@ -412,7 +414,7 @@ ENABLE_DECODE_RESPONSE_TO_SERVICE=true ../xllm-service/build/xllm_service/xllm_m
 ```bash
   BATCH_SIZE=256
   # Maximum inference batch size
-  XLLM_PATH="./myxllm/xllm/build/xllm/core/server/xllm"
+  XLLM_PATH="./build/xllm/core/server/xllm"
   # Inference entry binary path, which is the build artifact from the previous step
   MODEL_PATH=/export/home/models/GLM-5-w8a8/
   # Model path, here using the int-quantized GLM-5
@@ -424,6 +426,7 @@ ENABLE_DECODE_RESPONSE_TO_SERVICE=true ../xllm-service/build/xllm_service/xllm_m
   START_PORT=18994
   START_DEVICE=0
   LOG_DIR="logs"
+  mkdir -p "$LOG_DIR"
   NNODES=16
   
   for (( i=0; i<$NNODES; i++ ))
@@ -466,7 +469,7 @@ ENABLE_DECODE_RESPONSE_TO_SERVICE=true ../xllm-service/build/xllm_service/xllm_m
   ```bash
     BATCH_SIZE=256
   # Maximum inference batch size
-  XLLM_PATH="./myxllm/xllm/build/xllm/core/server/xllm"
+  XLLM_PATH="./build/xllm/core/server/xllm"
   # Inference entry binary path, which is the build artifact from the previous step
   MODEL_PATH=/export/home/models/GLM-5-w8a8/
   # Model path, here using the int-quantized GLM-5
@@ -478,6 +481,7 @@ ENABLE_DECODE_RESPONSE_TO_SERVICE=true ../xllm-service/build/xllm_service/xllm_m
   START_PORT=18994
   START_DEVICE=0
   LOG_DIR="logs"
+  mkdir -p "$LOG_DIR"
   NNODES=16
   
   for (( i=0; i<$NNODES; i++ ))

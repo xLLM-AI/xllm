@@ -24,11 +24,11 @@ sidebar:
 
 ```bash
 # A2 x86
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260801
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260911
 # A2 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-cann9-20260801
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-cann9-20260911
 # A3 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260801
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260911
 ```
 
 **注意**: A2 机器性能未进行压测。
@@ -50,7 +50,7 @@ sudo docker run -it --ipc=host -u 0 --privileged --name mydocker --network=host 
  -v /export/home:/export/home \
  -v /home/:/home/  \
  -w /export/home \
- quay.io/jd_xllm/xllm-ai:xllm-dev-hb-rc2-x86
+ quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260911
 ```
 
 ## 2.拉取源码并编译
@@ -111,7 +111,7 @@ rm -rf /root/ascend/log/
 ## 启动命令 - A3单机 - GLM-5.2-W8A8
 
 ```bash
-XLLM_PATH="./myxllm/xllm/build/xllm/core/server/xllm"
+XLLM_PATH="./build/xllm/core/server/xllm"
 # xllm可执行文件路径
 MODEL_PATH=/path/to/GLM-5.2-W8A8/
 # 模型路径（以Glm-5.2-w8a8为例）
@@ -124,6 +124,7 @@ LOCAL_HOST="11.87.49.110"
 START_PORT=18994
 START_DEVICE=0
 LOG_DIR="logs"
+mkdir -p "$LOG_DIR"
 NNODES=16
 
 for (( i=0; i<$NNODES; i++ ))
@@ -195,12 +196,13 @@ LOCAL_HOST="11.87.49.110"
 START_PORT=15890
 START_DEVICE=0
 LOG_DIR="logs"
+mkdir -p "$LOG_DIR"
 NNODES=32
 LOCAL_NODES=16
 export HCCL_IF_BASE_PORT=48439
 unset HCCL_OP_EXPANSION_MODE
 
-for (( i=0; i<$LOCAL_NODES; i++ ))do
+for (( i=0; i<$LOCAL_NODES; i++ )); do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i));  LOG_FILE="$LOG_DIR/node_$i.log"
   nohup numactl -C $((DEVICE*40))-$((DEVICE*40+39)) $XLLM_PATH \
@@ -238,12 +240,13 @@ LOCAL_HOST="11.87.49.111"
 START_PORT=15890
 START_DEVICE=0
 LOG_DIR="logs"
+mkdir -p "$LOG_DIR"
 NNODES=32
 LOCAL_NODES=16
 export HCCL_IF_BASE_PORT=48439
 unset HCCL_OP_EXPANSION_MODE
 
-for (( i=0; i<$LOCAL_NODES; i++ ))do
+for (( i=0; i<$LOCAL_NODES; i++ )); do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i));  LOG_FILE="$LOG_DIR/node_$i.log"
   nohup numactl -C $((DEVICE*40))-$((DEVICE*40+39)) $XLLM_PATH \
@@ -334,8 +337,7 @@ msmodelslim quant \
 ```bash
 git clone https://github.com/xLLM-AI/xllm-service.git
 cd xllm-service
-git submodule init
-git submodule update
+git submodule update --init --recursive
 ```
 
 ##### etcd安装
@@ -402,7 +404,7 @@ ENABLE_DECODE_RESPONSE_TO_SERVICE=true ../xllm-service/build/xllm_service/xllm_m
 ```bash
   BATCH_SIZE=256
   #推理最大batch数量
-  XLLM_PATH="./myxllm/xllm/build/xllm/core/server/xllm"
+  XLLM_PATH="./build/xllm/core/server/xllm"
   #推理入口文件路径（上一步中编译产物）
   MODEL_PATH=/export/home/models/GLM-5-w8a8/
   #模型路径（此处为int量化的Glm-5）
@@ -414,6 +416,7 @@ ENABLE_DECODE_RESPONSE_TO_SERVICE=true ../xllm-service/build/xllm_service/xllm_m
   START_PORT=18994
   START_DEVICE=0
   LOG_DIR="logs"
+  mkdir -p "$LOG_DIR"
   NNODES=16
 
   for (( i=0; i<$NNODES; i++ ))
@@ -456,7 +459,7 @@ ENABLE_DECODE_RESPONSE_TO_SERVICE=true ../xllm-service/build/xllm_service/xllm_m
   ```bash
     BATCH_SIZE=256
   #推理最大batch数量
-  XLLM_PATH="./myxllm/xllm/build/xllm/core/server/xllm"
+  XLLM_PATH="./build/xllm/core/server/xllm"
   #推理入口文件路径（上一步中编译产物）
   MODEL_PATH=/export/home/models/GLM-5-w8a8/
   #模型路径（此处为int量化的Glm-5）
@@ -468,6 +471,7 @@ ENABLE_DECODE_RESPONSE_TO_SERVICE=true ../xllm-service/build/xllm_service/xllm_m
   START_PORT=18994
   START_DEVICE=0
   LOG_DIR="logs"
+  mkdir -p "$LOG_DIR"
   NNODES=16
 
   for (( i=0; i<$NNODES; i++ ))

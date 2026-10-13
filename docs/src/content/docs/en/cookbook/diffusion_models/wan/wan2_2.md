@@ -12,11 +12,11 @@ First, pull the xLLM-provided image:
 
 ```bash
 # A2 x86
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260801
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260911
 # A2 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-cann9-20260801
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-cann9-20260911
 # A3 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260801
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260911
 ```
 
 Then create the corresponding container:
@@ -36,7 +36,7 @@ sudo docker run -it --ipc=host -u 0 --privileged --name mydocker --network=host 
  -v /export/home:/export/home \
  -v /home/:/home/  \
  -w /export/home \
- quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260801
+ quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260911
 ```
 
 ## 2. Clone the Source Code and Build
@@ -46,7 +46,7 @@ Clone the official repository and module dependencies:
 ```bash
 git clone https://github.com/xLLM-AI/xllm.git
 cd xllm
-git submodule update --init --update
+git submodule update --init --recursive
 ```
 
 Install dependencies:
@@ -94,7 +94,7 @@ export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:$LD_LIBRARY_PATH
 
 # 1. Configure dependency path environment variables
 export PYTHON_INCLUDE_PATH="$(python3 -c 'from sysconfig import get_paths; print(get_paths()["include"])')"
-export PYTHON_LIB_PATH="$(python3 -c 'from sysconfig import get_paths; print(get_paths()["include"])')"
+export PYTHON_LIB_PATH="$(python3 -c 'from sysconfig import get_config_var; print(get_config_var("LIBDIR"))')"
 export PYTORCH_NPU_INSTALL_PATH=/usr/local/libtorch_npu/
 export PYTORCH_INSTALL_PATH="$(python3 -c 'import torch, os; print(os.path.dirname(os.path.abspath(torch.__file__)))')"
 export LIBTORCH_ROOT="$PYTORCH_INSTALL_PATH"
@@ -129,6 +129,7 @@ MASTER_NODE_ADDR="127.0.0.1:17372"
 START_PORT=18013
 START_DEVICE=8
 LOG_DIR="log"
+mkdir -p "$LOG_DIR"
 NNODES=8
 LAST_DEVICE=$((START_DEVICE + NNODES - 1))
 # Make START_DEVICE through LAST_DEVICE visible to every rank.
@@ -162,7 +163,7 @@ do
     --dit_sparse_attention_enabled=false \
     --dit_sparse_attention_sparsity=0.8 \
     --dit_sparse_attention_sparse_start_step=15 \
-    --enable-shm=true \
+    --enable_shm=true \
     --node_rank=$i > $LOG_FILE 2>&1 &
 done
 ```
@@ -179,7 +180,7 @@ When "Brpc Server Started" appears in the log, the service has started successfu
 | `--tp_size` | Tensor Parallel degree | `1` | Positive integer, e.g. `2`, `4`; it is recommended not to enable this and use dynamic weight loading instead |
 | `--enable_rolling_load` | Enable dynamic weight loading | `false` | Bool, `true` or `false` |
 | `--rolling_load_num_rolling_slots` | Number of slots for dynamic weight loading | `2` | Positive integer, e.g. `2`, `3` |
-| `--dit_laser_attention_enable` | Enable Laser Attention | `false` | Bool, `true` or `false` |
+| `--dit_laser_attention_enabled` | Enable Laser Attention | `false` | Bool, `true` or `false` |
 | `--dit_distill_enable` | Enable distilled model | `false` | Bool, `true` or `false` |
 | `--dit_sparse_attention_enabled` | Enable sparse attention | `false` | Bool, `true` or `false`; mutually exclusive with `laser_attention` |
 | `--dit_sparse_attention_sparsity` | Sparsity ratio for sparse attention | `0.5` | Float, e.g. `0.5`, `0.6`; depends on `dit_sparse_attention_enabled` |

@@ -27,7 +27,7 @@ modelscope download --model Eco-Tech/Kimi-K2.5-W8A8-xLLM
 
 ```bash
 # A3 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-20260429
+docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260911
 ```
 
 然后创建对应的容器
@@ -47,7 +47,7 @@ sudo docker run -it --ipc=host -u 0 --privileged --name xllm_kimi_k25 --network=
  -v /export/home:/export/home \
  -v /home/:/home/  \
  -w /export/home \
- quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-20260429
+ quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260911
 ```
 
 ## 2.拉取源码并编译
@@ -58,8 +58,7 @@ sudo docker run -it --ipc=host -u 0 --privileged --name xllm_kimi_k25 --network=
 git clone https://github.com/xLLM-AI/xllm.git
 cd xllm
 git checkout main
-git submodule init
-git submodule update
+git submodule update --init --recursive
 ```
 
 下载安装依赖:
@@ -93,7 +92,7 @@ for i in range(16):torch_npu.npu.set_device(i)"
 ```bash
 ##### 1. 配置依赖路径相关环境变量
 export PYTHON_INCLUDE_PATH="$(python3 -c 'from sysconfig import get_paths; print(get_paths()["include"])')"
-export PYTHON_LIB_PATH="$(python3 -c 'from sysconfig import get_paths; print(get_paths()["include"])')"
+export PYTHON_LIB_PATH="$(python3 -c 'from sysconfig import get_config_var; print(get_config_var("LIBDIR"))')"
 export PYTORCH_NPU_INSTALL_PATH=/usr/local/libtorch_npu/
 export PYTORCH_INSTALL_PATH="$(python3 -c 'import torch, os; print(os.path.dirname(os.path.abspath(torch.__file__)))')"
 export LIBTORCH_ROOT="$(python3 -c 'import torch, os; print(os.path.dirname(os.path.abspath(torch.__file__)))')"
@@ -145,12 +144,13 @@ LOCAL_HOST="11.87.49.110"
 START_PORT=15890
 START_DEVICE=0
 LOG_DIR="logs"
+mkdir -p "$LOG_DIR"
 NNODES=32
 LOCAL_NODES=16
 export HCCL_IF_BASE_PORT=48439
 unset HCCL_OP_EXPANSION_MODE
 
-for (( i=0; i<$LOCAL_NODES; i++ ))do
+for (( i=0; i<$LOCAL_NODES; i++ )); do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i));  LOG_FILE="$LOG_DIR/node_$i.log"
   nohup numactl -C $((DEVICE*40))-$((DEVICE*40+39)) $XLLM_PATH \
@@ -174,7 +174,7 @@ for (( i=0; i<$LOCAL_NODES; i++ ))do
     --dp_size=8 \
     --input_shm_size=4096 \
     --rank_tablefile=/yourPath/ranktable.json \
-    > $LOG_FILE 2>&1 &
+    > "$LOG_FILE" 2>&1 &
 done
 ```
 
@@ -186,12 +186,13 @@ LOCAL_HOST="11.87.49.111"
 START_PORT=15890
 START_DEVICE=0
 LOG_DIR="logs"
+mkdir -p "$LOG_DIR"
 NNODES=32
 LOCAL_NODES=16
 export HCCL_IF_BASE_PORT=48439
 unset HCCL_OP_EXPANSION_MODE
 
-for (( i=0; i<$LOCAL_NODES; i++ ))do
+for (( i=0; i<$LOCAL_NODES; i++ )); do
   PORT=$((START_PORT + i))
   DEVICE=$((START_DEVICE + i));  LOG_FILE="$LOG_DIR/node_$i.log"
   nohup numactl -C $((DEVICE*40))-$((DEVICE*40+39)) $XLLM_PATH \
@@ -215,6 +216,7 @@ for (( i=0; i<$LOCAL_NODES; i++ ))do
     --dp_size=8 \
     --input_shm_size=4096 \
     --rank_tablefile=/yourPath/ranktable.json \
+    > "$LOG_FILE" 2>&1 &
 done
 ```
 
