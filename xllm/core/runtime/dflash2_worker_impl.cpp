@@ -36,7 +36,7 @@ DFlash2WorkerImpl::DFlash2WorkerImpl(const ParallelArgs& parallel_args,
 DFlashWorkerImpl::DraftBlock DFlash2WorkerImpl::run_decode_draft(
     const LlmForwardInput& input,
     LlmForwardInput& validate_input) {
-  Timer timer;
+  Timer draft_timer;
   LlmForwardInput query_input;
   prepare_query_inputs(input, query_input);
   // The target's recurrent state must not leak into the pure full-attention
@@ -133,7 +133,7 @@ DFlashWorkerImpl::DraftBlock DFlash2WorkerImpl::run_decode_draft(
   }
   draft_block.retained_inputs = take_retained_inputs(*draft_output);
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
-              timer.elapsed_seconds());
+              draft_timer.elapsed_seconds());
   return draft_block;
 }
 

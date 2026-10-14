@@ -1285,7 +1285,7 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_prefill(
     const TargetInput& input) {
   flush_pending_target_context();
 
-  Timer timer;
+  Timer target_timer;
   TargetInput target_prepared;
   LlmForwardInput draft_prepared;
 
@@ -1293,7 +1293,7 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_prefill(
   ForwardOutput output =
       run_worker_no_sync(*impl_, input, target_prepared).value();
   COUNTER_ADD(speculative_execution_latency_seconds_target,
-              timer.elapsed_seconds());
+              target_timer.elapsed_seconds());
 
   // MTP path that depends on hidden states.
   LlmForwardInput prefill_input;
@@ -1329,7 +1329,7 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_prefill(
     }
   }
   // generate kv cache for draft model
-  timer.reset();
+  Timer draft_timer;
   ForwardOutput draft_output =
       run_worker_no_sync(*draft_impl_, prefill_input, draft_prepared).value();
   {
@@ -1337,7 +1337,7 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_prefill(
     process_draft_sample_output(draft_output.sample_output);
   }
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
-              timer.elapsed_seconds());
+              draft_timer.elapsed_seconds());
 
   if (input.sampling_params.selected_token_idxes.defined()) {
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
@@ -1491,7 +1491,8 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_decode(
   detail::JsonDraftValidationScratch json_scratch;
   const bool has_json_object_states = !input.json_object_states.empty();
   std::vector<uint8_t> json_invalid_suffix;
-  Timer timer;
+  // Records before the validate tail so its phases stay out of this window.
+  Timer draft_timer;
   CHECK(embedding_cache_ != nullptr) << "MTP embedding cache is not allocated";
 
   prepare_draft_input(input);
@@ -1806,7 +1807,7 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_decode(
     record_current_metadata_ready_event(current_draft_input, *compute_stream_);
   }
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
-              timer.elapsed_seconds());
+              draft_timer.elapsed_seconds());
   if (use_adaptive_speculative_decode) {
     return run_adaptive_validate(
         input, draft_outputs, validate_input, num_speculative_tokens);
@@ -2121,7 +2122,7 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
     const std::vector<int32_t>& per_seq_val_tokens,
     const std::vector<int32_t>* pruned_prefix_lengths,
     const detail::JsonDraftValidationScratch* json_scratch) {
-  Timer timer;
+  Timer target_timer;
   TargetInput target_prepared;
   fill_validate_input_from_draft_outputs(input,
                                          draft_outputs,
@@ -2140,6 +2141,7 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
   }
   sync_dp_global_token_nums_after_prune(validate_input.input_params,
                                         local_total_val_tokens);
+
   ForwardOutput target_output;
   if (uses_embedded_eagle3_draft()) {
     target_output =
@@ -2152,9 +2154,8 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
                                             target_prepared)
                         .value();
   }
-  const double target_latency_ms = timer.elapsed_milliseconds();
   COUNTER_ADD(speculative_execution_latency_seconds_target,
-              target_latency_ms / 1000.0);
+              target_timer.elapsed_seconds());
 
   const int32_t batch_size = static_cast<int32_t>(per_seq_val_tokens.size());
   const int32_t max_val_tokens = num_speculative_tokens + 1;
@@ -2211,9 +2212,9 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
   }
 
   // verify the proposals with target and update the batch
-  timer.reset();
   SampleOutput val_output;
   {
+    AUTO_COUNTER(speculative_execution_latency_seconds_validation);
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
     val_output = validate(input.sampling_params,
                           draft_outputs,
@@ -2224,8 +2225,6 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
                           validate_input.sampling_params.filter_bitmask,
                           validate_input.json_object_invalid_draft);
   }
-  COUNTER_ADD(speculative_execution_latency_seconds_validation,
-              timer.elapsed_seconds());
 
   if (pruned_prefix_lengths != nullptr || uses_embedded_eagle3_draft()) {
     // Adaptive pruning path: per-seq validate width is variable, which is

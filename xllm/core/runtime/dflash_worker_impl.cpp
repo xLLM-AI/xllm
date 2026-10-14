@@ -646,16 +646,17 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
 
 std::optional<ForwardOutput> DFlashWorkerImpl::step_prefill(
     const LlmForwardInput& input) {
-  Timer timer;
   LlmForwardInput processed_target_input;
-  ForwardOutput output = run_worker_no_sync_impl(*impl_,
-                                                 input,
-                                                 *prepare_stream_,
-                                                 *compute_stream_,
-                                                 &processed_target_input)
-                             .value();
-  COUNTER_ADD(speculative_execution_latency_seconds_target,
-              timer.elapsed_seconds());
+  ForwardOutput output;
+  {
+    AUTO_COUNTER(speculative_execution_latency_seconds_target);
+    output = run_worker_no_sync_impl(*impl_,
+                                     input,
+                                     *prepare_stream_,
+                                     *compute_stream_,
+                                     &processed_target_input)
+                 .value();
+  }
 
   const torch::Tensor& embeddings = output.sample_output.embeddings;
   if (embeddings.defined()) {
@@ -678,13 +679,11 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_prefill(
     CHECK_EQ(static_cast<size_t>(context_cache_slots.numel()), positions.size())
         << "DFlash prefill hidden/cache slot count mismatch.";
 
-    timer.reset();
+    AUTO_COUNTER(speculative_execution_latency_seconds_draft);
     write_context_kv(processed_target_input,
                      embeddings,
                      processed_target_input.positions,
                      context_cache_slots);
-    COUNTER_ADD(speculative_execution_latency_seconds_draft,
-                timer.elapsed_seconds());
   }
 
   if (input.sampling_params.selected_token_idxes.defined()) {
@@ -725,7 +724,7 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_decode(
 DFlashWorkerImpl::DraftBlock DFlashWorkerImpl::run_decode_draft(
     const LlmForwardInput& input,
     LlmForwardInput& validate_input) {
-  Timer timer;
+  Timer draft_timer;
 
   LlmForwardInput query_input;
   prepare_query_inputs(input, query_input);
@@ -744,7 +743,7 @@ DFlashWorkerImpl::DraftBlock DFlashWorkerImpl::run_decode_draft(
   maybe_broadcast_spec_tokens(draft_output.sample_output.next_tokens);
   process_draft_sample_output(draft_output.sample_output);
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
-              timer.elapsed_seconds());
+              draft_timer.elapsed_seconds());
 
   // Draft emits the whole block in one forward; reshape the flat outputs into
   // [batch, num_speculative_tokens] instead of splitting into per-step outputs.
@@ -882,7 +881,7 @@ std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
     const LlmForwardInput& input,
     const DraftBlock& draft_block_in,
     LlmForwardInput& validate_input) {
-  Timer timer;
+  Timer target_timer;
   // Adaptive-speculative per-seq varlen validate:
   // 1. controller decides per-seq prefix_lengths from confidence/proposal
   //    probs.
@@ -951,12 +950,13 @@ std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
   }
   sync_dp_global_token_nums_after_prune(validate_input.input_params,
                                         local_total_val_tokens);
+
   ForwardOutput target_output =
       run_worker_no_sync_impl(
           *impl_, validate_input, *prepare_stream_, *compute_stream_)
           .value();
   COUNTER_ADD(speculative_execution_latency_seconds_target,
-              timer.elapsed_seconds());
+              target_timer.elapsed_seconds());
 
   // Scatter varlen target output back to dense [B, max_val_tokens] layout so
   // the rejection sampler (dense API) can consume it. Pad next_tokens with -1
@@ -972,7 +972,7 @@ std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
         /*next_token_pad_value=*/-1);
   }
 
-  timer.reset();
+  Timer validation_timer;
   SampleOutput val_output =
       validate(input.sampling_params,
                draft_block,
@@ -1014,7 +1014,7 @@ std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
         masks);
   }
   COUNTER_ADD(speculative_execution_latency_seconds_validation,
-              timer.elapsed_seconds());
+              validation_timer.elapsed_seconds());
 
   // target forward and validate()'s reads share compute_stream_, so they
   // serialize without a cross-stream wait; the sync below only makes the

@@ -41,7 +41,7 @@ DSparkWorkerImpl::DSparkWorkerImpl(const ParallelArgs& parallel_args,
 DSparkWorkerImpl::DraftBlock DSparkWorkerImpl::run_decode_draft(
     const LlmForwardInput& input,
     LlmForwardInput& validate_input) {
-  Timer timer;
+  Timer draft_timer;
 
   // Same input build as DFlash, but sample_from_anchor()==true makes the query
   // block N-wide and every position predicts a draft token.
@@ -132,7 +132,7 @@ DSparkWorkerImpl::DraftBlock DSparkWorkerImpl::run_decode_draft(
   draft_block.retained_inputs = take_retained_inputs(*draft_output);
 
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
-              timer.elapsed_seconds());
+              draft_timer.elapsed_seconds());
   return draft_block;
 }
 

@@ -93,12 +93,12 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_empty(
 
 std::optional<ForwardOutput> SuffixWorkerImpl::step_prefill(
     const LlmForwardInput& input) {
-  Timer timer;
   // run the target model to get first token and hidden states
-  auto future = impl_->step_async(input);
-  ForwardOutput output = std::move(future).get().value();
-  COUNTER_ADD(speculative_execution_latency_seconds_target,
-              timer.elapsed_seconds());
+  ForwardOutput output;
+  {
+    AUTO_COUNTER(speculative_execution_latency_seconds_target);
+    output = impl_->step_async(input).get().value();
+  }
 
   const auto& input_params = input.input_params;
   const int32_t num_sequences = input_params.meta.num_sequences;
@@ -197,7 +197,8 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
   const torch::Tensor& input_token_ids = input.token_ids_host;
   Slice<int32_t> input_tokens_slice = tensor_slice(input_token_ids);
 
-  Timer timer;
+  // Records before the target forward so it stays out of this window.
+  Timer draft_timer;
 
   std::vector<int32_t> draft_tokens_flat;
   draft_tokens_flat.reserve(num_sequences * num_speculative_tokens);
@@ -258,7 +259,6 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
   LlmForwardInput validate_input;
   prepare_validate_inputs(input, validate_input);
   validate_input.skip_sampling_for_logits_only = true;
-
   auto& validate_token_ids = validate_input.token_ids;
   for (int32_t i = 0; i < num_speculative_tokens; ++i) {
     std::vector<int32_t> draft_col;
@@ -274,13 +274,13 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
   }
 
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
-              timer.elapsed_seconds());
+              draft_timer.elapsed_seconds());
 
-  timer.reset();
-  auto future = impl_->step_async(validate_input);
-  ForwardOutput target_output = std::move(future).get().value();
-  COUNTER_ADD(speculative_execution_latency_seconds_target,
-              timer.elapsed_seconds());
+  ForwardOutput target_output;
+  {
+    AUTO_COUNTER(speculative_execution_latency_seconds_target);
+    target_output = impl_->step_async(validate_input).get().value();
+  }
 
   torch::Tensor draft_token_ids =
       torch::tensor(draft_tokens_flat,
@@ -290,11 +290,11 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
 
   DraftProposal draft_proposal = DraftProposal(std::move(draft_token_ids));
 
-  timer.reset();
-  SampleOutput val_output =
-      validate(input.sampling_params, draft_proposal, target_output);
-  COUNTER_ADD(speculative_execution_latency_seconds_validation,
-              timer.elapsed_seconds());
+  SampleOutput val_output;
+  {
+    AUTO_COUNTER(speculative_execution_latency_seconds_validation);
+    val_output = validate(input.sampling_params, draft_proposal, target_output);
+  }
 
   if (suffix_cache_ != nullptr &&
       request_ids.size() == static_cast<size_t>(num_sequences)) {
