@@ -122,7 +122,6 @@ ModelContext ModelContext::with_quant_args(const QuantArgs& quant_args) const {
 
 void ModelContext::derive_optimization_config() {
   // default disable fused kernel
-  optimization_config_.enable_fused_spec_kernel = false;
   optimization_config_.enable_fused_mla_kernel = false;
   optimization_config_.enable_fused_indexer_qk = false;
   optimization_config_.enable_spec_token_broadcast = false;
@@ -132,13 +131,7 @@ void ModelContext::derive_optimization_config() {
     // Unify speculative sampling results across TP ranks to guard against
     // per-rank RNG divergence under enable_schedule_overlap.
     optimization_config_.enable_spec_token_broadcast = true;
-  } else if (Platform::is_dcu()) {
-    // DCU currently uses the unfused speculative sampling path.
-    optimization_config_.enable_fused_spec_kernel = false;
   } else if (Platform::is_mlu()) {
-    // TODO: enable fused spec kernel for mlu backend
-    // The current implementation of fused spec kernel is not stable.
-    optimization_config_.enable_fused_spec_kernel = false;
     // fused mla only support smoothquant mode
     optimization_config_.enable_fused_mla_kernel =
         quant_args_.quant_method() == kQuantMethodSmoothquant;

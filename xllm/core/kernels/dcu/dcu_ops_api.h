@@ -78,15 +78,6 @@ torch::Tensor gather_mla_latent_cache(const torch::Tensor& k_cache,
                                       int64_t max_seq_len);
 
 torch::Tensor random_sample(const torch::Tensor& probs);
-torch::Tensor rejection_sample(const torch::Tensor& draft_token_ids,
-                               const torch::Tensor& num_draft_tokens,
-                               const torch::Tensor& cu_num_draft_tokens,
-                               const std::optional<torch::Tensor>& draft_probs,
-                               const torch::Tensor& target_probs,
-                               const torch::Tensor& bonus_token_ids,
-                               const torch::Tensor& uniform_rand,
-                               const torch::Tensor& uniform_probs,
-                               int64_t max_spec_len);
 
 std::tuple<torch::Tensor, torch::Tensor> moe_grouped_topk(
     torch::Tensor& gating_output,

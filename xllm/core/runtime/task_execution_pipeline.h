@@ -92,7 +92,6 @@ struct SpeculativeTaskCapacity {
   uint32_t index_topk = 0;
   bool reuse_topk = false;
   DraftSamplingMode draft_sampling_mode = DraftSamplingMode::GREEDY;
-  bool fused_rejection = false;
   bool unified_graph = false;
 };
 

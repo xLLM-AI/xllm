@@ -338,15 +338,6 @@ torch::Tensor fused_moe_aot_bf16(const torch::Tensor& hidden_states,
 
 torch::Tensor random_sample(const torch::Tensor& probs);
 
-// Returns [B, 2] with rejected suffix positions masked to -1.
-torch::Tensor rejection_sample_target_only_k1(
-    const torch::Tensor& draft_token_ids,
-    const torch::Tensor& draft_probs,
-    const torch::Tensor& target_probs,
-    const torch::Tensor& uniform_rand,
-    const torch::Tensor& recovery_exponential,
-    const torch::Tensor& bonus_token_ids);
-
 torch::Tensor masked_moe_gemm_bf16(const torch::Tensor& input,
                                    const torch::Tensor& weights,
                                    const torch::Tensor& token_counts,

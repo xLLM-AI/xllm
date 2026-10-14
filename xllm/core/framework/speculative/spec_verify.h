@@ -65,8 +65,7 @@ SampleOutput run_rejection_sampling(const SamplerPolicy& policy,
                                     const DraftProposal& draft_proposal,
                                     const torch::Tensor& target_logits,
                                     const ForwardOutput& target_output,
-                                    const torch::Tensor& bonus_token_ids,
-                                    bool enable_fused_kernel);
+                                    const torch::Tensor& bonus_token_ids);
 
 }  // namespace spec_verify
 

@@ -85,7 +85,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   using DraftModelSpecWorkerImpl<TargetInput>::draft_sampling_mode_;
   using DraftModelSpecWorkerImpl<TargetInput>::dtype_;
   using DraftModelSpecWorkerImpl<TargetInput>::embedding_cache_;
-  using DraftModelSpecWorkerImpl<TargetInput>::enable_fused_kernel_;
   using DraftModelSpecWorkerImpl<TargetInput>::impl_;
   using DraftModelSpecWorkerImpl<TargetInput>::options_;
   using DraftModelSpecWorkerImpl<TargetInput>::parallel_args_;

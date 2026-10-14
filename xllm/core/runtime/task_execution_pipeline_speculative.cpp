@@ -246,8 +246,7 @@ Status TaskExecutionPipeline::create(
       capacity.num_speculative_tokens == 0 ||
       (capacity.draft_sampling_mode != DraftSamplingMode::GREEDY &&
        capacity.draft_sampling_mode != DraftSamplingMode::PROBABILISTIC) ||
-      capacity.fused_rejection || common.dp_size == 0 ||
-      common.dp_rank >= common.dp_size ||
+      common.dp_size == 0 || common.dp_rank >= common.dp_size ||
       rows > std::numeric_limits<int32_t>::max() ||
       (capacity.reuse_topk && capacity.index_topk == 0) ||
       target.model.device().type() != Platform::type_torch() ||
@@ -1193,13 +1192,11 @@ Status TaskExecutionPipeline::prepare_speculative(
     slot.target_sampling =
         Sampling{slot.validate_input->sampling_params(), target_output, {}};
     const auto& base = slot.target_prefill->sampling_params();
-    slot.rejection = std::make_unique<RejectionSampler>(
-        base.do_sample,
-        base.all_random_sample,
-        base.all_greedy_sample,
-        base.logprobs,
-        base.max_top_logprobs,
-        speculative_capacity_->fused_rejection);
+    slot.rejection = std::make_unique<RejectionSampler>(base.do_sample,
+                                                        base.all_random_sample,
+                                                        base.all_greedy_sample,
+                                                        base.logprobs,
+                                                        base.max_top_logprobs);
     for (uint32_t step = 0; step < slot.drafts.size(); ++step) {
       auto& invocation = *slot.drafts[step];
       status =

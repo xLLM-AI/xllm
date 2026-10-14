@@ -104,14 +104,12 @@ SampleOutput run_rejection_sampling(const SamplerPolicy& policy,
                                     const DraftProposal& draft_proposal,
                                     const torch::Tensor& target_logits,
                                     const ForwardOutput& target_output,
-                                    const torch::Tensor& bonus_token_ids,
-                                    bool enable_fused_kernel) {
+                                    const torch::Tensor& bonus_token_ids) {
   const RejectionSampler sampler(policy.do_sample,
                                  policy.all_random_sample,
                                  policy.all_greedy_sample,
                                  target_output.logprobs,
-                                 target_output.max_top_logprobs,
-                                 enable_fused_kernel);
+                                 target_output.max_top_logprobs);
 
   SampleOutput sample_output =
       sampler.forward(draft_proposal.coerce_to(bonus_token_ids),

@@ -395,8 +395,7 @@ SampleOutput SuffixWorkerImpl::validate(
                                              draft_proposal,
                                              target_logits,
                                              target_output,
-                                             bonus_token_ids,
-                                             enable_fused_kernel_);
+                                             bonus_token_ids);
 }
 
 }  // namespace xllm

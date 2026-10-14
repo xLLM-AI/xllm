@@ -139,8 +139,6 @@ bool SpeculativeWorkerImpl<TargetInput>::init_model(
       dtype_ = impl_->dtype();
     }
   }
-  enable_fused_kernel_ =
-      impl_->get_optimization_config().enable_fused_spec_kernel;
   return result;
 }
 

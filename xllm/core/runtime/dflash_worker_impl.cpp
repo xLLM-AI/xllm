@@ -410,7 +410,6 @@ DFlashWorkerImpl::DFlashWorkerImpl(const ParallelArgs& parallel_args,
   capacity.selector_top_k = draft_args.dflash2_selector_top_k();
   capacity.common.sampling_group = spec_broadcast_group(parallel_args_);
   capacity.draft_sampling_mode = draft_sampling_mode_;
-  capacity.fused_rejection = enable_fused_kernel_;
   capacity.unified_graph =
       Platform::is_npu() && options_.enable_graph() &&
       ExecutionConfig::get_instance().enable_unified_mtp_graph() &&
@@ -1106,8 +1105,7 @@ SampleOutput DFlashWorkerImpl::validate(
       draft_proposal,
       target_logits,
       target_output,
-      bonus_token_ids,
-      enable_fused_kernel_);
+      bonus_token_ids);
 }
 
 void DFlashWorkerImpl::process_draft_sample_output(

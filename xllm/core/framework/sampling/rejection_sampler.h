@@ -28,8 +28,7 @@ class RejectionSampler final {
                    bool all_random_sample,
                    bool all_greedy_sample,
                    bool logprobs,
-                   int64_t max_top_logprobs,
-                   bool enable_fused_kernel = false);
+                   int64_t max_top_logprobs);
 
   // operator() allows us to use the module as a function.
   template <typename... Args>
@@ -49,14 +48,6 @@ class RejectionSampler final {
 
   static std::tuple<torch::Tensor, torch::Tensor> random_sample(
       const DraftProposal& draft_proposal,
-      const torch::Tensor& target_probs,
-      const torch::Tensor& uniform_rand,
-      const torch::Tensor& bonus_token_ids,
-      bool mask_out_rejected_tokens);
-
-  static std::tuple<torch::Tensor, torch::Tensor> random_sample_fused(
-      const torch::Tensor& draft_token_ids,
-      const torch::Tensor& draft_probs,
       const torch::Tensor& target_probs,
       const torch::Tensor& uniform_rand,
       const torch::Tensor& bonus_token_ids,
@@ -90,9 +81,6 @@ class RejectionSampler final {
   torch::Tensor do_sample_;
   bool all_random_sample_ = true;
   bool all_greedy_sample_ = true;
-
-  // whether to use fused kernel
-  bool enable_fused_kernel_ = false;
 };
 
 }  // namespace xllm

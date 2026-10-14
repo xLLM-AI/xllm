@@ -162,7 +162,5 @@ class SpeculativeWorkerImpl : public WorkerImpl {
  protected:
   // Target model worker
   std::unique_ptr<WorkerImpl> impl_;
-
-  bool enable_fused_kernel_ = false;
 };
 }  // namespace xllm

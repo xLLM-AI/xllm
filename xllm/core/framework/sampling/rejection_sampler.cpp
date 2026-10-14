@@ -23,7 +23,6 @@ limitations under the License.
 
 #include <optional>
 
-#include "kernels/ops_api.h"
 #include "sampler.h"
 
 #if defined(USE_NPU)
@@ -100,13 +99,11 @@ RejectionSampler::RejectionSampler(const torch::Tensor& do_sample,
                                    bool all_random_sample,
                                    bool all_greedy_sample,
                                    bool logprobs,
-                                   int64_t max_top_logprobs,
-                                   bool enable_fused_kernel)
+                                   int64_t max_top_logprobs)
     : logprobs_(logprobs),
       max_top_logprobs_(max_top_logprobs),
       all_random_sample_(all_random_sample),
-      all_greedy_sample_(all_greedy_sample),
-      enable_fused_kernel_(enable_fused_kernel) {
+      all_greedy_sample_(all_greedy_sample) {
   CHECK(do_sample.defined());
   // Keep a private expanded view and do not mutate the caller-owned tensor.
   // The same SamplingParameters object is reused later by MTP draft extend.
@@ -136,11 +133,6 @@ SampleOutput RejectionSampler::forward(const DraftProposal& draft_proposal,
         target_draft_logits, /*dim=*/-1, /*dtype=*/torch::kFloat32);
   }
 
-  // The fused kernel needs dense draft_probs; greedy proposals carry none.
-  bool use_fused_kernel = draft_proposal.draft_probs().has_value() &&
-                          enable_fused_kernel_ &&
-                          (!logprobs_ && mask_out_rejected_tokens);
-
   torch::Tensor accepted_token_ids;
   torch::Tensor masked_accepted_token_ids;
 
@@ -148,14 +140,6 @@ SampleOutput RejectionSampler::forward(const DraftProposal& draft_proposal,
       [&]() -> std::tuple<torch::Tensor, torch::Tensor> {
     const torch::Tensor uniform_rand =
         torch::rand(draft_token_ids.sizes(), target_probs.options());
-    if (use_fused_kernel) {
-      return random_sample_fused(draft_token_ids,
-                                 draft_proposal.draft_probs().value(),
-                                 target_probs,
-                                 uniform_rand,
-                                 bonus_token_ids,
-                                 mask_out_rejected_tokens);
-    }
     return random_sample(draft_proposal,
                          target_probs,
                          uniform_rand,
@@ -266,85 +250,6 @@ std::tuple<torch::Tensor, torch::Tensor> RejectionSampler::random_sample(
                                 draft_token_ids,
                                 bonus_token_ids,
                                 mask_out_rejected_tokens);
-}
-
-std::tuple<torch::Tensor, torch::Tensor> RejectionSampler::random_sample_fused(
-    const torch::Tensor& draft_token_ids,
-    const torch::Tensor& draft_probs,
-    const torch::Tensor& target_probs,
-    const torch::Tensor& uniform_rand,
-    const torch::Tensor& bonus_token_ids,
-    bool mask_out_rejected_tokens) {
-  CHECK_EQ(draft_probs.dim(), 3)
-      << "Fused rejection sampler requires dense draft_probs [batch, n_spec, "
-         "vocab].";
-
-  const auto device = draft_token_ids.device();
-  const int64_t batch_size = draft_token_ids.size(0);
-  const int64_t n_spec = draft_token_ids.size(1);
-  const int64_t vocab_size = target_probs.size(2);
-
-  // Strictly check device consistency for bonus_token_ids and draft_token_ids
-  CHECK_EQ(bonus_token_ids.device().type(), device.type())
-      << "bonus_token_ids must be on the same device as draft_token_ids";
-
-  // Check that bonus_token_ids has at least batch_size elements
-  CHECK_GE(bonus_token_ids.numel(), batch_size)
-      << "bonus_token_ids numel (" << bonus_token_ids.numel()
-      << ") is smaller than batch_size (" << batch_size << ")";
-
-  // Prepare input Tensors and ensure they are contiguous where needed
-  // If draft_token_ids is already int32 and contiguous, no copy occurs
-  torch::Tensor draft_token_ids_int32 =
-      draft_token_ids.reshape({-1}).to(torch::kInt32).contiguous();
-  torch::Tensor bonus_token_ids_int32 =
-      bonus_token_ids.reshape({-1}).to(torch::kInt32).contiguous();
-
-  // Ensure large probability matrices are in the correct shape and contiguous
-  torch::Tensor draft_probs_flat =
-      draft_probs.reshape({-1, vocab_size}).contiguous();
-  torch::Tensor target_probs_flat =
-      target_probs.reshape({-1, vocab_size}).contiguous();
-  torch::Tensor uniform_rand_flat =
-      uniform_rand.to(torch::kFloat32).flatten().contiguous();
-
-  // Create auxiliary tensors directly on the target device to avoid unnecessary
-  // copies
-  torch::TensorOptions options_int32 =
-      torch::TensorOptions().dtype(torch::kInt32).device(device);
-  torch::Tensor num_draft_tokens =
-      torch::full({batch_size}, n_spec, options_int32);
-  torch::Tensor cu_num_draft_tokens =
-      torch::arange(n_spec, (batch_size + 1) * n_spec, n_spec, options_int32);
-
-  // Always create recovery probability matrix here, as kernel requires it
-  torch::Tensor uniform_probs =
-      torch::empty({batch_size * n_spec, vocab_size},
-                   target_probs.options().dtype(torch::kFloat32))
-          .exponential_();
-
-  // Call the fused kernel
-  kernel::RejectionSampleParams params;
-  params.draft_token_ids = draft_token_ids_int32;
-  params.num_draft_tokens = num_draft_tokens;
-  params.cu_num_draft_tokens = cu_num_draft_tokens;
-  params.draft_probs = draft_probs_flat;
-  params.target_probs = target_probs_flat;
-  params.bonus_token_ids = bonus_token_ids_int32;
-  params.uniform_rand = uniform_rand_flat;
-  params.uniform_probs = uniform_probs;
-  params.max_spec_len = n_spec;
-
-  // The result is flattened, and positions of rejected tokens are set to -1
-  torch::Tensor output_token_ids = kernel::rejection_sample(params);
-
-  // Reshape result to [batch, n_spec + 1]
-  torch::Tensor masked_result =
-      output_token_ids.reshape({batch_size, n_spec + 1}).to(torch::kInt64);
-
-  // When mask_out_rejected_tokens=true and logprobs_=false,
-  // we can safely return masked_result for both outputs.
-  return {masked_result, masked_result};
 }
 
 std::tuple<torch::Tensor, torch::Tensor> RejectionSampler::greedy_sample(

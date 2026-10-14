@@ -39,7 +39,6 @@ namespace xllm {
 // not set directly by users.
 struct OptimizationConfig {
   // Enable use of fused computation kernels.
-  bool enable_fused_spec_kernel = false;
   bool enable_fused_mla_kernel = false;
   bool enable_fused_indexer_qk = false;
 

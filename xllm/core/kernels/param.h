@@ -959,41 +959,6 @@ struct RandomSampleParams {
   torch::Tensor logits;
 };
 
-// Rejection sampling parameters for speculative decoding
-struct RejectionSampleParams {
-  // Candidate draft token indices to be verified.
-  // Shape: [total_draft_tokens]. Dtype: int32.
-  // total_draft_tokens equals cu_num_draft_tokens[batch_size - 1].
-  torch::Tensor draft_token_ids;
-  // Number of draft tokens for each sequence in the batch.
-  // Shape: [batch_size]. Dtype: int32.
-  torch::Tensor num_draft_tokens;
-  // Accumulated number of draft tokens in each batch.
-  // Shape: [batch_size]. Dtype: int32.
-  torch::Tensor cu_num_draft_tokens;
-  // Probability distributions of the draft model.
-  // Shape: [total_draft_tokens, vocab_size].
-  // Dtype: float32, float16, or bfloat16.
-  std::optional<torch::Tensor> draft_probs;
-  // Probability distributions of the target model.
-  // Shape: [total_draft_tokens, vocab_size].
-  // Dtype: float32, float16, or bfloat16.
-  torch::Tensor target_probs;
-  // Bonus token indices to be selected when all draft tokens are accepted.
-  // Shape: [batch_size]. Dtype: int32.
-  torch::Tensor bonus_token_ids;
-  // Random probabilities for acceptance threshold comparison.
-  // Shape: [total_draft_tokens]. Dtype: float32.
-  // Used to compare with selected_target_probs / selected_draft_probs.
-  torch::Tensor uniform_rand;
-  // Random probabilities for resampling (recovery) calculation.
-  // Shape: [total_draft_tokens, vocab_size]. Dtype: float32.
-  torch::Tensor uniform_probs;
-  // The maximum number of draft tokens in the batch (max value in
-  // num_draft_tokens).
-  int32_t max_spec_len;
-};
-
 // Masked indexer select paged KV cache parameters
 struct MaskedIndexerSelectPagedKVParams {
   // Query tensor. Must have same dtype as k_cache (bfloat16, half, or int8).

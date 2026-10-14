@@ -912,32 +912,6 @@ torch::Tensor random_sample(RandomSampleParams& params) {
 #endif
 }
 
-torch::Tensor rejection_sample(RejectionSampleParams& params) {
-#if defined(USE_MLU)
-  return mlu::rejection_sample(params.draft_token_ids,
-                               params.num_draft_tokens,
-                               params.cu_num_draft_tokens,
-                               params.draft_probs,
-                               params.target_probs,
-                               params.bonus_token_ids,
-                               params.uniform_rand,
-                               params.uniform_probs,
-                               params.max_spec_len);
-#elif defined(USE_DCU)
-  return dcu::rejection_sample(params.draft_token_ids,
-                               params.num_draft_tokens,
-                               params.cu_num_draft_tokens,
-                               params.draft_probs,
-                               params.target_probs,
-                               params.bonus_token_ids,
-                               params.uniform_rand,
-                               params.uniform_probs,
-                               params.max_spec_len);
-#else
-  NOT_IMPLEMENTED();
-#endif
-}
-
 void masked_indexer_select_paged_kv(MaskedIndexerSelectPagedKVParams& params) {
 #if defined(USE_MLU)
   mlu::masked_indexer_select_paged_kv(params.query,

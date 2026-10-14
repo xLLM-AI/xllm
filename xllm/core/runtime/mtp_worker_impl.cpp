@@ -865,7 +865,6 @@ template <typename TargetInput>
                                          : parallel_args_.process_group_;
   }
   capacity.draft_sampling_mode = draft_sampling_mode_;
-  capacity.fused_rejection = enable_fused_kernel_;
   status = TaskExecutionPipeline::create(threadpool_,
                                          impl_->task_model(),
                                          draft_impl_->task_model(),
@@ -4084,8 +4083,7 @@ SampleOutput MTPWorkerImpl<TargetInput>::validate(
         validation_proposal,
         target_logits,
         target_output,
-        bonus_token_ids,
-        enable_fused_kernel_);
+        bonus_token_ids);
 
     if (!invalid_draft.empty()) {
       torch::Tensor target_sampled_tokens =
