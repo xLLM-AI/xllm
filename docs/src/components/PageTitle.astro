@@ -1,13 +1,17 @@
 ---
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { expandQuickStartMarkdown } from '../data/quickStart';
 
 const { entry } = Astro.locals.starlightRoute;
 const title = entry.data.title;
 const sourcePath = entry.filePath ? join(process.cwd(), entry.filePath) : undefined;
 const sourceMarkdown =
 	sourcePath && existsSync(sourcePath) ? readFileSync(sourcePath, 'utf-8') : '';
-const bodyMarkdown = stripFrontmatter(sourceMarkdown).trim();
+let bodyMarkdown = stripFrontmatter(sourceMarkdown).trim();
+if (/^(en|zh)\/getting_started\/quick_start$/.test(entry.id)) {
+	bodyMarkdown = expandQuickStartMarkdown(bodyMarkdown, entry.id.startsWith('zh/') ? 'zh' : 'en');
+}
 const copyMarkdown = [`# ${title}`, bodyMarkdown].filter(Boolean).join('\n\n') + '\n';
 const copyPayload = JSON.stringify(copyMarkdown).replace(/</g, '\\u003c');
 
