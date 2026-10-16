@@ -72,6 +72,7 @@ class _ToyExecutor:
         self.eager_runner = SimpleNamespace(device=torch.device(device), layer_caches=[])
         self.cache = torch.full((128, 2), -50.0, device=device)
         self.last_slots = torch.zeros(6, dtype=torch.int32, device=device)
+        self._target_mismatch = torch.tensor([[0, 1, 0], [0, 0, 0]], device=device)
         if algorithm == "dflash2" and not target:
             self.dflash2_candidates = self._candidates
 
@@ -84,8 +85,7 @@ class _ToyExecutor:
         if self.target:
             tokens = ids.view(2, 3).to(torch.int64) + 1
             # First row accepts one draft token, second accepts both plus bonus.
-            mismatch = torch.tensor([[0, 1, 0], [0, 0, 0]], device=ids.device)
-            hidden = (tokens + mismatch).flatten()
+            hidden = (tokens + self._target_mismatch).flatten()
             context = torch.stack((positions.float(), ids.float()), dim=1)
             return hidden, context
         return positions.float().view(-1, 1)

@@ -24,6 +24,7 @@ import pytest
 import torch
 
 from xllm.python import kernels
+from xllm.python.layers import apply_rotary_half
 
 
 @pytest.fixture(scope="module")
@@ -205,9 +206,7 @@ def test_aclgraph_changed_positions_and_alternating_target_draft_buckets(
                 if interleaved:
                     value = indexer._apply_interleaved_rope(value, cos_sin)
                 else:
-                    value = torch.cat(
-                        (ds._apply_half_rope_with_cos_sin(value[..., :64], *cos_sin), value[..., 64:]), -1
-                    )
+                    value = torch.cat((apply_rotary_half(value[..., :64], *cos_sin), value[..., 64:]), -1)
                 indexer._update_index_cache(key, ctx, cos_sin)
             return (*coefficients, attention_q, value, ctx.index_cache.clone())
 

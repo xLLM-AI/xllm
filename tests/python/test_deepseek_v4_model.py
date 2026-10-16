@@ -477,6 +477,7 @@ def _capture_test_model(
 
     backend = SimpleNamespace(
         reset_forward=MagicMock(),
+        attach_rope_tables=MagicMock(),
         prepare_dsa_metadata_for_forward=MagicMock(),
         select_dsa_layer_rope=MagicMock(),
         localize_dsa_metadata_for_cp=MagicMock(),
@@ -511,8 +512,10 @@ def _capture_test_model(
     model.rotary = SimpleNamespace(cos_sin_cache=torch.empty(0))
     model.compress_rotary_c4 = SimpleNamespace(cos_sin_cache=torch.empty(0))
     model.compress_rotary_c128 = SimpleNamespace(cos_sin_cache=torch.empty(0))
-    model.aux_hidden_capture = deepseek_v4.AuxHiddenCapture(layers_to_capture)
-    model.attach_rope_tables_to_backend = MagicMock()
+    model.aux_hidden_capture = deepseek_v4.AuxHiddenCapture(
+        layers_to_capture,
+        transform=lambda hidden: hidden.mean(dim=1) if hidden.dim() == 3 else hidden,
+    )
     model._hc_head = MagicMock(side_effect=lambda hidden: hidden.mean(dim=1))
     model._test_metadata = metadata
     return model
@@ -559,13 +562,14 @@ def test_layer_capture_takes_precedence_over_mtp_target_hidden(
 
 
 @pytest.mark.parametrize(
-    ("token_count", "cp_rank"),
-    [(4, 0), (5, 1), (1, 1)],
+    ("token_count", "cp_rank", "cp_enabled"),
+    [(4, 0, True), (5, 1, True), (1, 1, False)],
 )
 def test_layer_capture_restores_global_rows_with_context_parallelism(
     monkeypatch: pytest.MonkeyPatch,
     token_count: int,
     cp_rank: int,
+    cp_enabled: bool,
 ) -> None:
     model = _capture_test_model(
         monkeypatch,
@@ -611,8 +615,9 @@ def test_layer_capture_restores_global_rows_with_context_parallelism(
     hidden, aux_hidden = output
     torch.testing.assert_close(hidden, expected_aux + 5.0)
     torch.testing.assert_close(aux_hidden, expected_aux)
-    assert len(collective_inputs) == 2
-    assert collective_inputs[0].shape[0] == collective_inputs[1].shape[0]
+    assert len(collective_inputs) == (2 if cp_enabled else 0)
+    if cp_enabled:
+        assert collective_inputs[0].shape[0] == collective_inputs[1].shape[0]
 
 
 @pytest.mark.parametrize(

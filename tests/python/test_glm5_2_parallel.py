@@ -496,9 +496,10 @@ def test_glm_indexer_projection_overlap_matches_serial(
     def _run(execution_state: AclGraphExecutionState | None = None) -> torch.Tensor:
         context = ForwardContext(MagicMock(), device, MagicMock(), [], execution_state=execution_state)
         with forward_context(context):
-            from xllm.python.models.deepseek_v32 import _gather_half_rope_cos_sin, _gather_interleave_cos_sin
+            from xllm.python.layers import gather_half_rope_cos_sin
+            from xllm.python.models.deepseek_v32 import _gather_interleave_cos_sin
 
-            gather = _gather_interleave_cos_sin if interleave else _gather_half_rope_cos_sin
+            gather = _gather_interleave_cos_sin if interleave else gather_half_rope_cos_sin
             rope = gather(cos_sin, positions)
             return indexer.select_qli(hidden, qr, ctx, rope, rope)
 
