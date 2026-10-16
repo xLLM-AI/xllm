@@ -35,6 +35,11 @@ class BuildDependenciesTest(unittest.TestCase):
             "/usr/lib/x86_64-linux-gnu/libzstd.so",
             dependencies["zstd-library"],
         )
+        self.assertIn("/usr/include/liburing.h", dependencies["liburing-header"])
+        self.assertIn(
+            "/usr/lib/x86_64-linux-gnu/liburing.so",
+            dependencies["liburing-library"],
+        )
 
     def test_dependency_requires_header_and_library(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
