@@ -2426,11 +2426,9 @@ class Glm5NextForCausalLM(PyModelBase):
             L.copy_in(mlp_pfx + "gate_up_proj.weight", L.pack_gate_up(mlp_pfx))
             L.copy_in(mlp_pfx + "down_proj.weight", L.load_shard(mlp_pfx + "down_proj.weight", 1))
 
-    def _load_experts_w8a8(self, L, mlp: str) -> None:
+    def _load_experts_w8a8(self, L, mlp: str, moe_mod: Glm5NextMoE) -> None:
         """Load local W8A8 experts with separate EP and MoE-TP sharding."""
         se = mlp + "experts."
-        layer_idx = int(mlp.split("layers.")[1].split(".")[0])
-        moe_mod = self.model.layers[layer_idx].mlp
         ref = moe_mod.gate.weight
         num_local = moe_mod.num_local_experts
         inter_local = moe_mod.inter_local
@@ -2476,10 +2474,8 @@ class Glm5NextForCausalLM(PyModelBase):
             w2s.data[local_index].copy_(scale.contiguous())
             w2o.data[local_index].copy_(L.get_tensor(prefix + "down_proj.weight_offset").contiguous())
 
-    def _load_experts_bf16(self, L, mlp: str) -> None:
+    def _load_experts_bf16(self, L, mlp: str, moe_mod: Glm5NextMoE) -> None:
         """Load local BF16 experts with separate EP and MoE-TP sharding."""
-        layer_idx = int(mlp.split("layers.")[1].split(".")[0])
-        moe_mod = self.model.layers[layer_idx].mlp
         start, end = moe_mod.local_expert_start, moe_mod.local_expert_end
         if moe_mod.experts is None:
             ref = moe_mod.shared_experts.gate_up_proj.weight
@@ -2524,9 +2520,9 @@ class Glm5NextForCausalLM(PyModelBase):
                 raise NotImplementedError("GLM-5.3-Flash ordinary EP/DP supports W8A8 expert weights only, not BF16")
             moe.use_w8a8 = is_w8a8
             if is_w8a8:
-                self._load_experts_w8a8(L, mlp)
+                self._load_experts_w8a8(L, mlp, moe)
             else:
-                self._load_experts_bf16(L, mlp)
+                self._load_experts_bf16(L, mlp, moe)
             self._load_mlp_fp_or_w8a8(L, mlp + "shared_experts.")
             moe.process_weights_after_loading()
         else:

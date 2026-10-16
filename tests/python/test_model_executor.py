@@ -1721,13 +1721,19 @@ class TestExecuteRouting:
         with pytest.raises(RuntimeError, match="KV caches are not bound"):
             executor.execute(torch.zeros(1), torch.zeros(1), metadata)
 
+    @pytest.mark.parametrize("dp_size", [1, 2])
     @patch(
         "xllm.python.model_executor.executor._create_attention_backend",
     )
-    def test_execute_routes_to_eager_runner(self, mock_create):
+    def test_execute_routes_to_eager_runner(self, mock_create: MagicMock, dp_size: int) -> None:
         mock_create.return_value = StubAttentionBackend()
         model = _FakeModel(num_layers=1)
-        executor = ModelExecutor(model, {}, max_seqs_per_batch=4)
+        executor = ModelExecutor(
+            model,
+            {"enable_graph": False, "python_graph_backend": "off", "dp_size": dp_size},
+            max_seqs_per_batch=4,
+        )
+        assert executor.decode_graph_runner is None
 
         kv = (torch.zeros(1), torch.zeros(1))
         executor.bind_kv_caches([kv])

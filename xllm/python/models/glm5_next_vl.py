@@ -780,6 +780,19 @@ class Glm5NextVLModel(Glm5NextForCausalLM):
             "torch_dtype": None,
             "device": config.get("device", "cuda"),
         }
+        for key in (
+            "dp_size",
+            "dp_rank",
+            "ep_size",
+            "ep_rank",
+            "moe_tp_size",
+            "moe_tp_rank",
+            "expert_parallel_degree",
+            "enable_mega_moe",
+            "enable_fused_mc2",
+        ):
+            if key in config:
+                text_config[key] = config[key]
         super().__init__(text_config, build_model=False)
         tcfg = self.cfg
         dtype = self.dtype
