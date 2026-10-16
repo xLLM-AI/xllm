@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include <atomic>
+
 #include "util/threadpool.h"
 
 namespace xllm {
@@ -32,43 +34,43 @@ TEST(BlockingCounterTest, TwoThreadTest) {
   ThreadPool threadpool(1);
   BlockingCounter counter(2);
 
-  int called = 0;
+  std::atomic<int> called{0};
   threadpool.schedule([&counter, &called]() {
-    counter.decrement_count();
     ++called;
+    counter.decrement_count();
   });
-  counter.decrement_count();
   ++called;
+  counter.decrement_count();
   counter.wait();
-  EXPECT_EQ(2, called);
+  EXPECT_EQ(2, called.load());
 }
 
 TEST(BlockingCounterTest, MultiThreadTest) {
   ThreadPool threadpool(4);
   BlockingCounter counter(5);
 
-  int called = 0;
+  std::atomic<int> called{0};
   threadpool.schedule([&counter, &called]() {
-    counter.decrement_count();
     ++called;
+    counter.decrement_count();
   });
   threadpool.schedule([&counter, &called]() {
-    counter.decrement_count();
     ++called;
+    counter.decrement_count();
   });
   threadpool.schedule([&counter, &called]() {
-    counter.decrement_count();
     ++called;
+    counter.decrement_count();
   });
   threadpool.schedule([&counter, &called]() {
-    counter.decrement_count();
     ++called;
+    counter.decrement_count();
   });
-  counter.decrement_count();
   ++called;
+  counter.decrement_count();
 
   counter.wait();
-  EXPECT_EQ(5, called);
+  EXPECT_EQ(5, called.load());
 }
 
 TEST(BlockingCounterTest, WaitTimeoutTest) {
