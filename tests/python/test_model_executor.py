@@ -1398,6 +1398,22 @@ def test_glm_non_mtp_cp_prefill_retains_sharded_kv_admission() -> None:
     )
 
 
+@pytest.mark.parametrize("model_type", ["glm5_next", "glm5_3_flash"])
+def test_glm5_next_cp_admission_matches_runtime_constraints(model_type: str) -> None:
+    config = {
+        "model_type": model_type,
+        "cp_size": 2,
+        "kv_split_size": 1,
+        "ep_size": 1,
+    }
+    _validate_npu_cp_model_config(config, 1)
+
+    with pytest.raises(NotImplementedError, match="ep_size == 1"):
+        _validate_npu_cp_model_config({**config, "ep_size": 2}, 1)
+    with pytest.raises(NotImplementedError, match="disaggregated PD"):
+        _validate_npu_cp_model_config({**config, "enable_disagg_pd": True}, 1)
+
+
 def _mtp_graph_metadata(lengths: list[int], expanded: bool, device: torch.device) -> SimpleNamespace:
     page_ids = [2, 5, 7, 9]
     page_counts = [(length + 3) // 4 for length in lengths]

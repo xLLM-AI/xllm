@@ -100,51 +100,28 @@ DecodeGraphWarmupPlan build_decode_graph_warmup_plan(
     return plan;
   }
 
-  const int32_t max_local_batch_size =
-      static_cast<int32_t>(npu::acl_graph_max_full_local_batch_size(
-          static_cast<uint32_t>(max_global_batch_size),
-          static_cast<uint32_t>(dp_size)));
-
   if (warmup_config.max_graph_batch_size > 0) {
     // The graph batch limit caps the DP-local decode batch: the executor
     // compares the largest DP-local batch against it before entering graph
     // mode, so the warmup sweep must apply the limit in local terms as well.
-    const int32_t max_graph_local_batch_size =
-        std::min(max_local_batch_size, warmup_config.max_graph_batch_size);
     const int32_t max_graph_global_batch_size =
-        max_graph_local_batch_size * dp_size;
-    std::vector<int32_t> graph_batch_sizes;
-    int64_t current_token_bucket = 0;
-    const int64_t max_graph_token_count =
-        static_cast<int64_t>(max_graph_local_batch_size) *
-        warmup_config.num_decoding_tokens;
-    for (int32_t local_batch_size = 1;
-         local_batch_size <= max_graph_local_batch_size;
-         ++local_batch_size) {
-      const int64_t num_tokens = static_cast<int64_t>(local_batch_size) *
-                                 warmup_config.num_decoding_tokens;
-      const int64_t token_bucket = runtime::get_decode_graph_token_bucket(
-          num_tokens, warmup_config.enable_graph_mode_decode_no_padding);
-      if (warmup_config.enable_graph_mode_decode_no_padding &&
-          !npu::is_acl_graph_compatibility_batch_size(
-              static_cast<uint64_t>(token_bucket),
-              static_cast<uint64_t>(max_graph_token_count))) {
-        continue;
-      }
-      const int32_t global_batch_size = local_batch_size * dp_size;
-      if (graph_batch_sizes.empty() || token_bucket != current_token_bucket) {
-        graph_batch_sizes.emplace_back(global_batch_size);
-        current_token_bucket = token_bucket;
-      } else {
-        graph_batch_sizes.back() = global_batch_size;
-      }
-    }
+        static_cast<int32_t>(npu::acl_graph_max_global_batch_size(
+            static_cast<uint32_t>(max_global_batch_size),
+            static_cast<uint32_t>(warmup_config.max_graph_batch_size),
+            static_cast<uint32_t>(dp_size)));
+    std::vector<int32_t> graph_batch_sizes =
+        npu::get_acl_graph_mtp_warmup_batch_sizes(
+            static_cast<uint32_t>(max_global_batch_size),
+            static_cast<uint32_t>(dp_size),
+            static_cast<uint32_t>(warmup_config.num_decoding_tokens),
+            warmup_config.enable_graph_mode_decode_no_padding,
+            static_cast<uint32_t>(warmup_config.max_graph_batch_size));
 
     std::vector<int32_t> batch_sizes;
     batch_sizes.reserve(plan.batch_sizes.size() + graph_batch_sizes.size());
     for (int32_t batch_size : plan.batch_sizes) {
       if (warmup_config.enable_graph_mode_decode_no_padding ||
-          batch_size > max_graph_global_batch_size) {
+          batch_size >= max_graph_global_batch_size) {
         batch_sizes.emplace_back(batch_size);
       }
     }
@@ -157,23 +134,18 @@ DecodeGraphWarmupPlan build_decode_graph_warmup_plan(
     return plan;
   }
 
-  std::vector<int32_t> batch_sizes;
-  batch_sizes.reserve(static_cast<size_t>(max_local_batch_size) + 1);
-  int64_t last_token_bucket = 0;
-  for (int32_t local_batch_size = 1; local_batch_size <= max_local_batch_size;
-       ++local_batch_size) {
-    const int64_t num_tokens = static_cast<int64_t>(local_batch_size) *
-                               warmup_config.num_decoding_tokens;
-    const int64_t token_bucket = runtime::get_decode_graph_token_bucket(
-        num_tokens, warmup_config.enable_graph_mode_decode_no_padding);
-    if (batch_sizes.empty() || token_bucket != last_token_bucket) {
-      batch_sizes.emplace_back(local_batch_size * dp_size);
-      last_token_bucket = token_bucket;
-    }
-  }
+  const int32_t max_local_batch_size =
+      static_cast<int32_t>(npu::acl_graph_max_full_local_batch_size(
+          static_cast<uint32_t>(max_global_batch_size),
+          static_cast<uint32_t>(dp_size)));
+  std::vector<int32_t> batch_sizes = npu::get_acl_graph_mtp_warmup_batch_sizes(
+      static_cast<uint32_t>(max_global_batch_size),
+      static_cast<uint32_t>(dp_size),
+      static_cast<uint32_t>(warmup_config.num_decoding_tokens),
+      warmup_config.enable_graph_mode_decode_no_padding,
+      0);
 
-  const int32_t max_full_global_batch_size = max_local_batch_size * dp_size;
-  if (max_full_global_batch_size < max_global_batch_size) {
+  if (max_local_batch_size * dp_size < max_global_batch_size) {
     batch_sizes.emplace_back(max_global_batch_size);
   }
   plan.batch_sizes = std::move(batch_sizes);

@@ -52,6 +52,13 @@ TEST(MtpAsyncStateTest, ClassifiesClosedTargetSpecVerifyPolicy) {
   }
 }
 
+TEST(MtpAsyncStateTest, ClassifiesUniformDraftRowCapability) {
+  EXPECT_TRUE(requires_uniform_draft_rows("glm5_next"));
+  EXPECT_TRUE(requires_uniform_draft_rows("glm5_3_flash"));
+  EXPECT_FALSE(requires_uniform_draft_rows("deepseek_v4"));
+  EXPECT_FALSE(requires_uniform_draft_rows("unknown_model"));
+}
+
 TEST(MtpAsyncStateTest, ClassifiesSupportedCombinedDraftExecutionPaths) {
   EXPECT_EQ(classify_combined_draft_execution_path("qwen3_5_mtp"),
             CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION);

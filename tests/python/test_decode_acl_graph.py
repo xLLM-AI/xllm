@@ -25,6 +25,7 @@ import torch.nn as nn
 from xllm.python.attention.backend import LayerCache
 from xllm.python.attention.csa_attention import DsaAttentionBackend
 from xllm.python.attention.dsa_metadata import DsaMetadataBuilder, build_cache_specs
+from xllm.python.attention.paged_kv_metadata import build_row_aligned_paged_kv_metadata
 from xllm.python.model_executor.runners.acl_graph import AclGraphEntry
 from xllm.python.model_executor.runners.block_draft_acl_graph import (
     BlockDraftAclGraphRunner,
@@ -46,8 +47,8 @@ def _runner(**kwargs) -> DecodeAclGraphRunner:
     )
 
 
-def _metadata(linear_state_indices: torch.Tensor) -> SimpleNamespace:
-    rows = linear_state_indices.numel()
+def _metadata(linear_state_indices: torch.Tensor, rows: int | None = None) -> SimpleNamespace:
+    rows = rows or linear_state_indices.numel()
     lengths = torch.arange(1, rows + 1, dtype=torch.int32)
     pages = lengths * 10
     return SimpleNamespace(
@@ -633,8 +634,8 @@ def test_linear_state_indices_use_stable_graph_buffer() -> None:
         8,
         True,
         None,
-        entry.static_metadata.kpool_query_lens,
-    ) != DecodeAclGraphRunner._graph_key(8, True, None, (2, 2, 2, 2))
+        kpool_query_lens=entry.static_metadata.kpool_query_lens,
+    ) != DecodeAclGraphRunner._graph_key(8, True, None, kpool_query_lens=(2, 2, 2, 2))
 
     with patch(
         "xllm.python.model_executor.runners.decode_acl_graph.kernels.update_decode_graph_metadata",
@@ -669,14 +670,9 @@ def test_linear_state_indices_use_stable_graph_buffer() -> None:
 
 def test_untyped_verify_reuses_row_aligned_paging_metadata() -> None:
     runner = _runner()
-    metadata = _metadata(torch.tensor([1, 2], dtype=torch.int32))
+    metadata = _metadata(torch.tensor([1, 2], dtype=torch.int32), rows=4)
 
-    with patch.object(
-        runner,
-        "_build_row_aligned_paged_kv_metadata",
-        side_effect=AssertionError("row-aligned paging must come from C++"),
-    ):
-        expanded = runner._expanded_verify_view(metadata)
+    expanded = runner._expanded_verify_view(metadata)
 
     assert expanded is not None
     assert expanded.paged_kv_indptr is metadata.paged_kv_indptr
@@ -732,9 +728,10 @@ def test_dsa_graph_tables_use_compressed_block_counts() -> None:
     assert all(torch.all(table == 0) for table in tables)
 
     block_table = torch.tensor([[10, 11], [20, 21]], dtype=torch.int32)
-    indptr, indices, last_page_len = runner._build_row_aligned_paged_kv_metadata(
+    indptr, indices, last_page_len = build_row_aligned_paged_kv_metadata(
         block_table,
         [129, 132],
+        attention_backend.page_size,
     )
     assert indptr.tolist() == [0, 2, 4]
     assert indices.tolist() == [10, 11, 20, 21]

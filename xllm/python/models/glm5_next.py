@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import functools
 import importlib.util
-import math
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -47,6 +46,10 @@ except ImportError:
 
 from xllm.python import distributed, kernels
 from xllm.python.attention.backend import MlaIndexContext
+from xllm.python.attention.mla_index_context import (
+    KPoolMlaIndexContext,
+    KPoolMlaIndexContextBuilder,
+)
 from xllm.python.model_executor.cp_utils import (
     cp_merge_rows,
     cp_shard_positions,
@@ -68,10 +71,10 @@ def _load_compact_kpool_update_op() -> Callable[..., None] | None:
     if torch_npu is None or importlib.util.find_spec("triton") is None:
         return None
     from xllm.python.kernels_npu.triton.kpool_compress import (
-        _launch_compact_kpool,
+        update_compact_kpool_fast,
     )
 
-    return _launch_compact_kpool
+    return update_compact_kpool_fast
 
 
 def _compact_kpool_triton_query_len(
@@ -213,6 +216,9 @@ class Glm5NextConfig:
     index_kpool: int = 1
     index_kpool_compress: bool = False
     index_kpool_always_select_tail: bool = False
+    # C++ resolves this cache-layout capability from the actual model args.
+    # None preserves standalone Python model construction compatibility.
+    requires_kpool_tail_cache: Optional[bool] = None
     # mHC (multi-stream hyper-connection residual) — always on, per reference
     hc_mult: int = 4
     hc_eps: float = 1e-6
@@ -317,6 +323,11 @@ class Glm5NextConfig:
             index_kpool=int(pick("index_kpool", default=1)),
             index_kpool_compress=bool(pick("index_kpool_compress", default=False)),
             index_kpool_always_select_tail=bool(pick("index_kpool_always_select_tail", default=False)),
+            requires_kpool_tail_cache=(
+                None
+                if pick("requires_kpool_tail_cache", default=None) is None
+                else bool(pick("requires_kpool_tail_cache"))
+            ),
             tp_size=int(pick("tp_size", default=1)),
             tp_rank=int(pick("tp_rank", default=0)),
             ep_size=int(pick("ep_size", default=1)),
@@ -546,17 +557,13 @@ class Glm5NextKdaAttention(Attention):
             )
         cp_context = getattr(ctx, "cp_context", None)
         if cp_context is not None:
-            mixed_qkv = cp_merge_rows(
-                mixed_qkv.transpose(1, 2).reshape(-1, self.conv_dim), cp_context
-            )
+            mixed_qkv = cp_merge_rows(mixed_qkv.transpose(1, 2).reshape(-1, self.conv_dim), cp_context)
             mixed_qkv = mixed_qkv.unsqueeze(0).transpose(1, 2).contiguous()
             g_raw = cp_merge_rows(
                 g_raw.reshape(-1, self.num_heads_local, self.head_dim),
                 cp_context,
             ).unsqueeze(0)
-            beta = cp_merge_rows(
-                beta.reshape(-1, self.num_heads_local), cp_context
-            ).unsqueeze(0)
+            beta = cp_merge_rows(beta.reshape(-1, self.num_heads_local), cp_context).unsqueeze(0)
 
         core_attn_out = backend.execute_linear(
             mixed_qkv,
@@ -607,10 +614,11 @@ def _current_q_seq_lens(num_seqs: int, num_tokens: int) -> list[int]:
     return [ends[0]] + [ends[i] - ends[i - 1] for i in range(1, len(ends))]
 
 
-def _kpool_update_query_lens(ctx: MlaIndexContext, num_tokens: int) -> list[int]:
+def _kpool_update_query_lens(ctx: KPoolMlaIndexContext, num_tokens: int) -> list[int]:
     """Resolve logical request spans for request-owned KPool tail updates."""
-    if ctx.kpool_query_lens:
-        query_lens = [int(length) for length in ctx.kpool_query_lens]
+    kpool = ctx.kpool
+    if kpool is not None and kpool.query_lens:
+        query_lens = [int(length) for length in kpool.query_lens]
         if any(length <= 0 for length in query_lens):
             raise RuntimeError(f"kPool query spans must be positive: spans={query_lens}")
         if sum(query_lens) != num_tokens:
@@ -727,8 +735,7 @@ def _kpool_valid_rows(attention_mask: torch.Tensor, slot_mapping: torch.Tensor) 
             "kPool slot mapping must contain one entry per token row: "
             f"slots={slot_mapping.numel()}, rows={attention_mask.numel()}"
         )
-    slot_valid = slot_mapping.reshape(attention_mask.shape) > 0
-    return attention_mask.to(torch.bool) & slot_valid
+    return attention_mask.to(torch.bool) & (slot_mapping.reshape(attention_mask.shape) > 0)
 
 
 # ---------------------------------------------------------------------------
@@ -747,10 +754,14 @@ class Glm5NextIndexer(nn.Module):
         self.index_kpool_compress = cfg.index_kpool_compress
         self.index_kpool_always_select_tail = cfg.index_kpool_always_select_tail
         self._uses_npu_compressed_tail = (
-            device.type in ("npu", "privateuseone")
-            and self.index_kpool > 1
-            and self.index_kpool_compress
-            and self.index_kpool_always_select_tail
+            cfg.requires_kpool_tail_cache
+            if cfg.requires_kpool_tail_cache is not None
+            else (
+                device.type in ("npu", "privateuseone")
+                and self.index_kpool > 1
+                and self.index_kpool_compress
+                and self.index_kpool_always_select_tail
+            )
         )
         self._update_compact_kpool = _load_compact_kpool_update_op() if self._uses_npu_compressed_tail else None
         self.softmax_scale = self.head_dim**-0.5
@@ -898,17 +909,15 @@ class Glm5NextIndexer(nn.Module):
                 )
         # PA_BBND addresses complete pooled keys and uses pool_tail_k for the
         # remaining tokens in the current tail pool.
-        pool_tail_k = torch.remainder(token_count, self.index_kpool).contiguous()
-        actual_seq_k = torch.div(token_count, self.index_kpool, rounding_mode="floor")
         indices, _ = kernels.pool_key_indexer(
             fused_query,
             pool_cache,
             fused_weights,
-            pool_tail_k,
+            torch.remainder(token_count, self.index_kpool).contiguous(),
             self.topk,
             self.index_kpool,
             return_value=False,
-            actual_seq_k=actual_seq_k,
+            actual_seq_k=torch.div(token_count, self.index_kpool, rounding_mode="floor"),
             block_table=fused_block_table.to(dtype=torch.int32).contiguous(),
             mask_mode=3,
             layout_k="PA_BBND",
@@ -1000,7 +1009,7 @@ class Glm5NextIndexer(nn.Module):
                 fused_indices = self._select_topk_fused_pa(
                     q,
                     scaled_weights,
-                    kv_seq_lens if kv_seq_lens is not None else key_valid.to(torch.int32).sum(-1),
+                    kv_seq_lens if kv_seq_lens is not None else key_valid.sum(-1, dtype=torch.int32),
                     attention_mask,
                     pool_cache,
                     pool_block_table,
@@ -1037,7 +1046,7 @@ class Glm5NextIndexer(nn.Module):
                 )
         if pool_data is None:
             if pool_cache is not None and pool_block_table is not None:
-                kv_lens = kv_seq_lens if kv_seq_lens is not None else key_valid.to(torch.int64).sum(-1)
+                kv_lens = kv_seq_lens if kv_seq_lens is not None else key_valid.sum(-1, dtype=torch.int64)
                 n_pools = (kv_len + self.index_kpool - 1) // self.index_kpool
                 pool_keys, pool_indices, pool_valid = read_pools(
                     pool_cache,
@@ -1062,7 +1071,7 @@ class Glm5NextIndexer(nn.Module):
                     pool_valid = key_valid
                 else:
                     pool_keys, pool_indices, pool_valid = self.get_pooled_states(packed_states, key_valid)
-        weights = weights.float()
+        weights = weights.float().mul_(self.n_heads**-0.5)
         # Query-dim sub-chunking: each query row's logits are
         # q[row] @ pool_keys.T and its pool score a head-weighted sum of those
         # logits — independent of every other row — so slicing the query dim
@@ -1086,7 +1095,7 @@ class Glm5NextIndexer(nn.Module):
             slab = torch.relu_(slab)
             slab *= self.softmax_scale
             pool_scores[:, start:end] = torch.einsum(
-                "bshp,bsh->bsp", slab, weights[:, start:end] * (self.n_heads**-0.5)
+                "bshp,bsh->bsp", slab, weights[:, start:end]
             )
             del slab
 
@@ -1095,12 +1104,12 @@ class Glm5NextIndexer(nn.Module):
             # appends the current incomplete pool separately. Existing packed
             # and non-tail layouts retain pool-start visibility.
             pool_anchor = pool_indices[..., -1 if append_unscored_tail else 0].clamp(0, kv_len - 1)
-            kv_ok = key_valid.gather(1, pool_anchor)  # [B, n_pools]
+            pool_key_valid = key_valid.gather(1, pool_anchor)  # [B, n_pools]
             pool_visible = (
-                (pool_anchor[:, None, :] <= q_pos[:, :, None]) & kv_ok[:, None, :] & attention_mask[:, :, None]
+                (pool_anchor[:, None, :] <= q_pos[:, :, None]) & pool_key_valid[:, None, :] & attention_mask[:, :, None]
             )  # [B, seq_len, n_pools]
             candidate_valid = (pool_visible & pool_valid[:, None]).to(torch.bool)
-            pool_scores = pool_scores.masked_fill(~candidate_valid, torch.finfo(pool_scores.dtype).min)
+            pool_scores.masked_fill_(~candidate_valid, torch.finfo(pool_scores.dtype).min)
         else:
             candidate_valid = pool_valid[:, None].expand(batch_size, seq_len, -1).to(torch.bool)
 
@@ -1124,7 +1133,7 @@ class Glm5NextIndexer(nn.Module):
                 pool_indices.reshape(batch_size, -1).gather(1, sel_flat).reshape(batch_size, seq_len, select_k, rate)
             )
             topk_indices = selected_indices.flatten(-2)
-            topk_indices = topk_indices.masked_fill(
+            topk_indices.masked_fill_(
                 ~selected_valid[..., None].expand_as(selected_indices).flatten(-2),
                 -1,
             )
@@ -1135,9 +1144,9 @@ class Glm5NextIndexer(nn.Module):
             # pool_visible above), evaluated directly at the selected kv
             # positions instead of gathering the dense [B, seq_len, kv_len] mask.
             flat = safe_pos.reshape(batch_size, -1)
-            kv_ok = key_valid.gather(1, flat).reshape_as(safe_pos)
-            pos_visible = (safe_pos <= q_pos[:, :, None]) & kv_ok & attention_mask[:, :, None]
-            topk_indices = topk_indices.masked_fill(~pos_visible, -1)
+            selected_key_valid = key_valid.gather(1, flat).reshape_as(safe_pos)
+            pos_visible = (safe_pos <= q_pos[:, :, None]) & selected_key_valid & attention_mask[:, :, None]
+            topk_indices.masked_fill_(~pos_visible, -1)
 
         if append_unscored_tail:
             topk_indices = append_causal_tail(topk_indices, q_pos, self.index_kpool)
@@ -1145,7 +1154,7 @@ class Glm5NextIndexer(nn.Module):
         if topk_indices.shape[-1] < output_width:
             topk_indices = F.pad(topk_indices, (0, output_width - topk_indices.shape[-1]), value=-1)
         topk_indices = topk_indices[..., :output_width]
-        topk_indices = topk_indices.masked_fill(~attention_mask[..., None], -1)
+        topk_indices.masked_fill_(~attention_mask[..., None], -1)
         return topk_indices.long()
 
     def select_qli(
@@ -1165,14 +1174,17 @@ class Glm5NextIndexer(nn.Module):
         if ctx.block_table is None:
             raise RuntimeError("GLM-5.3-Flash kPool requires a block table")
 
+        kpool = ctx.kpool if isinstance(ctx, KPoolMlaIndexContext) else None
+        if self._uses_npu_compressed_tail and kpool is None:
+            raise TypeError("compressed KPool requires KPoolMlaIndexContext from the attention backend")
         uses_compressed_tail = (
             self._uses_npu_compressed_tail
-            and ctx.kpool_tail is not None
-            and ctx.kpool_tail.ndim == 4
-            and ctx.kpool_tail.dtype == torch.bfloat16
+            and kpool is not None
+            and kpool.tail.ndim == 4
+            and kpool.tail.dtype == torch.bfloat16
         )
         kpool_query_lens = _kpool_update_query_lens(ctx, num_tokens) if uses_compressed_tail else None
-        query_lens_device = getattr(ctx, "kpool_query_lens_device", None)
+        query_lens_device = kpool.query_lens_device if kpool is not None else None
         if query_lens_device is not None and (
             query_lens_device.device != hidden_states.device
             or query_lens_device.dtype != torch.int32
@@ -1194,11 +1206,11 @@ class Glm5NextIndexer(nn.Module):
         if self.index_kpool_compress:
             raw_k, gate_scores = self.get_kpool_states(hidden_states, key)
             if uses_compressed_tail:
-                if ctx.kpool_tail_read_indices is None or ctx.kpool_tail_write_indices is None:
+                if kpool is None or kpool.tail_read_indices is None or kpool.tail_write_indices is None:
                     raise RuntimeError("compressed kPool requires linear-state read/write indices")
                 kpool_tail_read_indices, kpool_tail_write_indices = _kpool_logical_state_indices(
-                    ctx.kpool_tail_read_indices,
-                    ctx.kpool_tail_write_indices,
+                    kpool.tail_read_indices,
+                    kpool.tail_write_indices,
                     kpool_query_lens,
                     query_lens_device,
                 )
@@ -1209,10 +1221,10 @@ class Glm5NextIndexer(nn.Module):
                 # explicit old-tail snapshot and copy semantics.
                 use_triton_update = (
                     self._compact_kpool_model_compatible
-                    and ctx.kpool_cache_triton_compatible
+                    and kpool.triton_compatible
                     and triton_query_len is not None
                     and kpool_tail_read_indices is kpool_tail_write_indices
-                    and ctx.kpool_tail.shape[2] >= self.index_kpool + triton_query_len - 1
+                    and kpool.tail.shape[2] >= self.index_kpool + triton_query_len - 1
                 )
                 if use_triton_update:
                     self._update_compact_kpool(
@@ -1221,7 +1233,7 @@ class Glm5NextIndexer(nn.Module):
                         kpool_valid_rows.contiguous(),
                         positions.contiguous(),
                         ctx.index_cache,
-                        ctx.kpool_tail,
+                        kpool.tail,
                         kpool_tail_write_indices.contiguous(),
                         kpool_block_table.contiguous(),
                         triton_query_len,
@@ -1235,7 +1247,7 @@ class Glm5NextIndexer(nn.Module):
                         kpool_valid_rows,
                         positions,
                         ctx.index_cache,
-                        ctx.kpool_tail,
+                        kpool.tail,
                         kpool_tail_read_indices,
                         kpool_tail_write_indices,
                         kpool_block_table,
@@ -1266,11 +1278,11 @@ class Glm5NextIndexer(nn.Module):
             # kPool index cache is unquantized (no scale side-channel).
             ctx.update_index_cache(packed.reshape(num_tokens, -1), None)
 
+        packed_history = None
         if pool_cache is not None:
-            packed_history = None
             num_seqs = len(kpool_query_lens)
         else:
-            packed_history = backend.gather_index_history(layer, batch_size)
+            packed_history = backend.gather_index_history(layer)
             num_seqs = packed_history.shape[0]
         if kpool_query_lens is not None:
             q_lens = kpool_query_lens
@@ -1320,7 +1332,11 @@ class Glm5NextIndexer(nn.Module):
             )
             kv_len = min(ctx.block_table.shape[1] * token_page_size, max_kv_cap)
         elif pool_cache is not None:
-            kv_len = int(kpool_kv_lens.max().item())
+            kv_lens_host = ctx.actual_seq_kv_host
+            if kv_lens_host is not None and len(kv_lens_host) == kpool_kv_lens.numel():
+                kv_len = max(max(int(length) for length in kv_lens_host), self.index_kpool)
+            else:
+                kv_len = ctx.block_table.shape[1] * pool_cache.shape[1] * self.index_kpool
         else:
             kv_len = packed_history.shape[1]
         if pool_cache is not None:
@@ -1371,6 +1387,8 @@ class Glm5NextMlaAttention(Attention):
     # importing this module (the import would pull KDA kernel transitive deps
     # and fail on builds without them).
     is_glm_next_mla: bool = True
+    supports_cp_nope_prefill: bool = True
+    mla_index_context_builder = KPoolMlaIndexContextBuilder
 
     def __init__(self, cfg: Glm5NextConfig, layer_id: int, dtype: torch.dtype, device: torch.device) -> None:
         super().__init__(
@@ -1550,6 +1568,10 @@ class Glm5NextMlaAttention(Attention):
         topk = None
         if self.indexer is not None:
             ctx = backend.mla_index_context(self)
+            if getattr(self.indexer, "_uses_npu_compressed_tail", False) is True and not isinstance(
+                ctx, KPoolMlaIndexContext
+            ):
+                raise TypeError("KPool MLA layer requires KPoolMlaIndexContext from the attention backend")
             topk = self.indexer.select_qli(hidden_states, q_c, position_ids, attention_mask, ctx, self, backend)
         else:
             if prev_topk_indices is None:
@@ -1564,17 +1586,14 @@ class Glm5NextMlaAttention(Attention):
         k_latent = self.kv_a_layernorm(k_latent_raw)
         k_latent_3d = k_latent.view(num_tokens, 1, self.kv_lora_rank)
 
-        attn_out = backend.execute_mla(
-            q_latent, None, k_latent_3d, None, self, topk=topk
-        )
+        attn_out = backend.execute_mla(q_latent, None, k_latent_3d, None, self, topk=topk)
         if cp_context is not None:
             attn_out = cp_shard_rows(
                 attn_out.reshape(num_tokens, self.num_heads_local, self.kv_lora_rank),
                 cp_context,
             )
-        local_num_tokens = attn_out.shape[0]
         v_full = torch.bmm(attn_out.transpose(0, 1), self.W_UV).transpose(0, 1)
-        v_full = v_full.reshape(local_num_tokens, self.num_heads_local * self.v_head_dim)
+        v_full = v_full.reshape(attn_out.shape[0], self.num_heads_local * self.v_head_dim)
         o = self.o_proj(v_full)
         if self.cfg.tp_size > 1:
             distributed.all_reduce_(o)
@@ -2189,8 +2208,6 @@ class Glm5NextForCausalLM(PyModelBase):
     def __init__(self, config: dict, build_model: bool = True) -> None:
         super().__init__()
         self.cfg = Glm5NextConfig.from_dict(config)
-        self.cfg.tp_size = int(config.get("tp_size", 1))
-        self.cfg.tp_rank = int(config.get("tp_rank", 0))
         for name, val in (
             ("n_heads", self.cfg.n_heads),
             ("intermediate_size", self.cfg.intermediate_size),

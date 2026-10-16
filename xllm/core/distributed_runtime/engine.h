@@ -21,13 +21,13 @@ limitations under the License.
 
 #include "framework/block/block_manager_pool.h"
 #include "framework/model/model_args.h"
-#include "core/framework/speculative/speculative_profile_registry.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "framework/tokenizer/tokenizer_args.h"
-#include "runtime/options.h"
 #include "runtime/decode_graph_bucket.h"
+#include "runtime/options.h"
 
 namespace xllm {
+
 class Engine {
  public:
   virtual ~Engine() = default;
@@ -51,11 +51,8 @@ class Engine {
   // return the model args
   virtual const ModelArgs& model_args() const { return args_; }
 
-  virtual bool set_speculative_validate_time_predictor(
-      const SpeculativeProfileRegistry::ValidateTimePredictor&) {
-    return false;
-  }
-
+  // The engine owns the resolved warmup contract; profile scheduling only
+  // consumes it and must not reconstruct model-specific values.
   virtual runtime::DecodeGraphWarmupConfig decode_graph_warmup_config() const {
     return {};
   }

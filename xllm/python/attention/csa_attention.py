@@ -831,8 +831,7 @@ class DsaAttentionBackend(AttentionBackend):
             self.dspark_block_size,
             use_native_sas,
         )
-        metadata_ori_win_left = getattr(compressed_metadata, "sparse_metadata_ori_win_left", ori_win_left)
-        if metadata_ori_win_left != ori_win_left:
+        if getattr(compressed_metadata, "sparse_metadata_ori_win_left", ori_win_left) != ori_win_left:
             raise RuntimeError("DeepSeek-V4 sparse metadata belongs to incompatible model geometry")
         ori_sparse_indices = None
         if use_native_sas and compress_ratio == 1:
@@ -1206,14 +1205,13 @@ def _build_prefill_pa_nd_kv(
     next_block = 1
     for req in range(batch_size):
         q_start = cu[req]
-        src_len = cu[req + 1] - q_start
         q_len = dst_lens[req]
         blocks = (q_len + block_size - 1) // block_size
         if q_len <= 0 or blocks <= 0:
             continue
         for j in range(blocks):
             table_data[req * table_cols + j] = next_block + j
-        copy_len = min(q_len, src_len)
+        copy_len = min(q_len, cu[req + 1] - q_start)
         if copy_len > 0:
             target = packed_kv[next_block : next_block + blocks].view(blocks * block_size, kv.size(1), kv.size(2))
             target[q_len - copy_len : q_len].copy_(kv[q_start : q_start + copy_len])

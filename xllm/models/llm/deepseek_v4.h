@@ -180,7 +180,8 @@ inline void deepseek_v4_collect_cpu_metadata_tensors(
   deepseek_v4_add_packed_tensor(dsa.input_positions, runtime_device, specs);
   deepseek_v4_add_packed_tensor(dsa.c4_pad_positions, runtime_device, specs);
   deepseek_v4_add_packed_tensor(dsa.c128_pad_positions, runtime_device, specs);
-  deepseek_v4_add_packed_tensor(dsa.explicit_swa_indices, runtime_device, specs);
+  deepseek_v4_add_packed_tensor(
+      dsa.explicit_swa_indices, runtime_device, specs);
 
   for (auto& layer_block_tables : dsa.block_tables) {
     for (auto& block_table : layer_block_tables) {

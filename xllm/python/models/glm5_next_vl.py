@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -50,9 +50,7 @@ import torch.nn.functional as F
 
 from xllm.python.layers import ColumnParallelLinear, RowParallelLinear
 from xllm.python.model_loader import ModelWeightLoader
-from xllm.python.models.base import PyModelBase
 from xllm.python.models.glm5_next import (
-    Glm5NextConfig,
     Glm5NextForCausalLM,
     Glm5NextModel,
 )
