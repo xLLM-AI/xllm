@@ -25,6 +25,8 @@ limitations under the License.
 #include <optional>
 #include <shared_mutex>
 #include <stdexcept>
+#include <type_traits>
+#include <variant>
 
 #include "core/common/global_flags.h"
 #include "core/framework/config/eplb_config.h"
@@ -109,7 +111,7 @@ constexpr PackedInputDomain packed_input_domain() {
   return PackedInputDomain::LLM;
 }
 constexpr uint64_t kPackedInputMagic = 0x584c4c4d494e5032;
-constexpr uint16_t kPackedInputSchemaVersion = 5;
+constexpr uint16_t kPackedInputSchemaVersion = 6;
 constexpr uint32_t kPackedInputHeaderBytes = 40;
 
 struct RawInputLayoutHeader final {
@@ -218,6 +220,65 @@ inline size_t get_tensor_size(const torch::Tensor& tensor) {
   size += type_size<uint64_t>;                     // databytes
   size += tensor.numel() * tensor.element_size();  // data
   return size;
+}
+
+enum class RawTensorParameterType : uint8_t {
+  BOOL = 0,
+  INT64 = 1,
+  STRING = 2,
+  DOUBLE = 3,
+  UINT64 = 4,
+  INT64_VECTOR = 5,
+};
+
+template <typename ValueType>
+constexpr RawTensorParameterType raw_tensor_parameter_type() {
+  if constexpr (std::is_same_v<ValueType, bool>) {
+    return RawTensorParameterType::BOOL;
+  } else if constexpr (std::is_same_v<ValueType, int64_t>) {
+    return RawTensorParameterType::INT64;
+  } else if constexpr (std::is_same_v<ValueType, std::string>) {
+    return RawTensorParameterType::STRING;
+  } else if constexpr (std::is_same_v<ValueType, double>) {
+    return RawTensorParameterType::DOUBLE;
+  } else if constexpr (std::is_same_v<ValueType, uint64_t>) {
+    return RawTensorParameterType::UINT64;
+  } else {
+    static_assert(std::is_same_v<ValueType, std::vector<int64_t>>,
+                  "unsupported tensor parameter type");
+    return RawTensorParameterType::INT64_VECTOR;
+  }
+}
+
+template <typename WriteData, typename WriteString>
+void write_tensor_parameters_impl(const TensorParameters& parameters,
+                                  WriteData&& write_data,
+                                  WriteString&& write_string) {
+  const uint64_t parameter_count = parameters.size();
+  write_data(parameter_count);
+  for (const auto& [name, value] : parameters) {
+    write_string(name);
+    std::visit(
+        [&](const auto& typed_value) {
+          using ValueType = std::decay_t<decltype(typed_value)>;
+          const uint8_t type =
+              static_cast<uint8_t>(raw_tensor_parameter_type<ValueType>());
+          write_data(type);
+          if constexpr (std::is_same_v<ValueType, std::string>) {
+            write_string(typed_value);
+          } else if constexpr (std::is_same_v<ValueType,
+                                              std::vector<int64_t>>) {
+            const uint64_t value_count = typed_value.size();
+            write_data(value_count);
+            for (const int64_t item : typed_value) {
+              write_data(item);
+            }
+          } else {
+            write_data(typed_value);
+          }
+        },
+        value);
+  }
 }
 
 template <typename T>
@@ -422,62 +483,25 @@ inline size_t get_vector_tensor_size(
   return size;
 }
 
-// calculate dit input size
-inline size_t get_dit_generation_params_size(
-    const DiTGenerationParams& params) {
-  return type_size<int32_t> *
-             4  // width, height, num_inference_steps, max_sequence_length
-         + type_size<float> *
-               4  // true_cfg_scale, guidance_scale, strength, cfg_renorm_min
-         + type_size<uint32_t>  // num_images_per_prompt
-         + type_size<int64_t>   // seed
-         + type_size<bool>      // enable_cfg_renorm
-         + type_size<int32_t>   // num_frames
-         + type_size<double>    // video_fps
-         + type_size<float> *   // guidance_scale_2, boundary_ratio, flow_shift
-               3 +
-         type_size<int32_t>        // seconds
-         + type_size<uint32_t>     // num_videos_per_prompt
-         + type_size<int32_t> * 2  // max_new_tokens, diffusion_steps
-         + type_size<float> * 3    // temperature, top_p, repetition_penalty
-         + type_size<int32_t>      // top_k
-         + type_size<bool>         // seed_is_set
-         + type_size<int32_t> * 3  // audio_duration_frames, audio_steps,
-                                   // audio_sampling_rate
-         + get_string_size(params.audio_guidance_method);
+inline size_t get_embedding_output_metadata_size(
+    const EmbeddingOutputMetadata& metadata) {
+  size_t size = type_size<uint64_t>;
+  for (const auto& [name, tensor] : metadata) {
+    size += get_string_size(name) + get_tensor_size(tensor);
+  }
+  return size;
 }
 
-inline size_t get_dit_forward_input_size(const DiTForwardInput& input) {
-  size_t size = type_size<int>;  // batch_size
-
-  // Vector of strings
-  size += get_string_vector_size(input.prompts);
-  size += get_string_vector_size(input.prompts_2);
-  size += get_string_vector_size(input.negative_prompts);
-  size += get_string_vector_size(input.negative_prompts_2);
-
-  // Tensors
-  size += type_size<size_t>;
-  for (const NamedTensor& source : input.image_sources.entries()) {
-    size += get_string_size(source.name);
-    size += get_tensor_size(source.tensor);
-  }
-  size += type_size<size_t>;
-  for (const NamedTensor& tensor_input : input.tensor_sources.entries()) {
-    size += get_string_size(tensor_input.name);
-    size += get_tensor_size(tensor_input.tensor);
-  }
-  size += get_string_size(input.audio_prompt_text);
-
-  // Generation params
-  size += get_dit_generation_params_size(input.generation_params);
-
-  return size;
+inline bool has_dit_output(const RawForwardOutput& output) {
+  return !output.dit_forward_output.tensors.empty() ||
+         !output.dit_forward_output.audio_tensors.empty() ||
+         !output.dit_forward_output.text_output.empty();
 }
 
 inline size_t get_dit_forward_output_size(const DiTForwardOutput& output) {
   return get_vector_tensor_size(output.tensors) +
-         get_string_vector_size(output.text_output);
+         get_string_vector_size(output.text_output) +
+         get_vector_tensor_size(output.audio_tensors);
 }
 
 template <typename T>
@@ -969,6 +993,16 @@ inline void write_vector_tensor(char*& buffer,
   }
 }
 
+inline void write_embedding_output_metadata(
+    char*& buffer,
+    const EmbeddingOutputMetadata& metadata) {
+  write_data(buffer, static_cast<uint64_t>(metadata.size()));
+  for (const auto& [name, tensor] : metadata) {
+    write_string(buffer, name);
+    write_tensor(buffer, tensor);
+  }
+}
+
 inline void write_vector_tensor(RawInputSerializeContext& context,
                                 const std::vector<torch::Tensor>& tensor_vec) {
   int32_t tensor_num = tensor_vec.size();
@@ -1129,40 +1163,6 @@ inline void write_mm_batch_data(RawInputSerializeContext& context,
   }
 }
 
-// write dit data
-inline void write_dit_generation_params(char*& buffer,
-                                        const DiTGenerationParams& params) {
-  write_data(buffer, params.width);
-  write_data(buffer, params.height);
-  write_data(buffer, params.num_inference_steps);
-  write_data(buffer, params.true_cfg_scale);
-  write_data(buffer, params.guidance_scale);
-  write_data(buffer, params.num_images_per_prompt);
-  write_data(buffer, params.seed);
-  write_data(buffer, params.max_sequence_length);
-  write_data(buffer, params.strength);
-  write_data(buffer, params.enable_cfg_renorm);
-  write_data(buffer, params.cfg_renorm_min);
-  write_data(buffer, params.num_frames);
-  write_data(buffer, params.video_fps);
-  write_data(buffer, params.guidance_scale_2);
-  write_data(buffer, params.seconds);
-  write_data(buffer, params.boundary_ratio);
-  write_data(buffer, params.flow_shift);
-  write_data(buffer, params.num_videos_per_prompt);
-  write_data(buffer, params.max_new_tokens);
-  write_data(buffer, params.diffusion_steps);
-  write_data(buffer, params.temperature);
-  write_data(buffer, params.top_k);
-  write_data(buffer, params.top_p);
-  write_data(buffer, params.repetition_penalty);
-  write_data(buffer, params.seed_is_set);
-  write_data(buffer, params.audio_duration_frames);
-  write_data(buffer, params.audio_steps);
-  write_string(buffer, params.audio_guidance_method);
-  write_data(buffer, params.audio_sampling_rate);
-}
-
 inline void write_dit_generation_params(RawInputSerializeContext& context,
                                         const DiTGenerationParams& params) {
   write_data(context.descriptor, params.width);
@@ -1196,30 +1196,6 @@ inline void write_dit_generation_params(RawInputSerializeContext& context,
   write_data(context.descriptor, params.audio_sampling_rate);
 }
 
-inline void write_dit_forward_input(char*& buffer,
-                                    const DiTForwardInput& input) {
-  write_data(buffer, input.batch_size);
-
-  write_string_vector(buffer, input.prompts);
-  write_string_vector(buffer, input.prompts_2);
-  write_string_vector(buffer, input.negative_prompts);
-  write_string_vector(buffer, input.negative_prompts_2);
-
-  write_data(buffer, input.image_sources.size());
-  for (const NamedTensor& source : input.image_sources.entries()) {
-    write_string(buffer, source.name);
-    write_tensor(buffer, source.tensor);
-  }
-  write_data(buffer, input.tensor_sources.size());
-  for (const NamedTensor& tensor_input : input.tensor_sources.entries()) {
-    write_string(buffer, tensor_input.name);
-    write_tensor(buffer, tensor_input.tensor);
-  }
-  write_string(buffer, input.audio_prompt_text);
-
-  write_dit_generation_params(buffer, input.generation_params);
-}
-
 inline void write_dit_forward_input(RawInputSerializeContext& context,
                                     const DiTForwardInput& input) {
   write_data(context.descriptor, input.batch_size);
@@ -1230,16 +1206,29 @@ inline void write_dit_forward_input(RawInputSerializeContext& context,
   write_string_vector(context.descriptor, input.negative_prompts_2);
 
   write_data(context.descriptor,
-             static_cast<uint64_t>(input.image_sources.size()));
-  for (const NamedTensor& source : input.image_sources.entries()) {
+             static_cast<uint64_t>(input.media_sources.size()));
+  for (const MediaNamedTensor& source : input.media_sources.entries()) {
     write_string(context.descriptor, source.name);
+    write_string(context.descriptor, source.modality);
     write_tensor(context, source.tensor);
+    write_tensor_parameters_impl(
+        source.parameters,
+        [&](const auto& value) { write_data(context.descriptor, value); },
+        [&](const std::string& value) {
+          write_string(context.descriptor, value);
+        });
   }
   write_data(context.descriptor,
              static_cast<uint64_t>(input.tensor_sources.size()));
   for (const NamedTensor& tensor_input : input.tensor_sources.entries()) {
     write_string(context.descriptor, tensor_input.name);
     write_tensor(context, tensor_input.tensor);
+    write_tensor_parameters_impl(
+        tensor_input.parameters,
+        [&](const auto& value) { write_data(context.descriptor, value); },
+        [&](const std::string& value) {
+          write_string(context.descriptor, value);
+        });
   }
   write_string(context.descriptor, input.audio_prompt_text);
 
@@ -1250,6 +1239,7 @@ inline void write_dit_forward_output(char*& buffer,
                                      const DiTForwardOutput& output) {
   write_vector_tensor(buffer, output.tensors);
   write_string_vector(buffer, output.text_output);
+  write_vector_tensor(buffer, output.audio_tensors);
 }
 
 inline void safe_advance_buffer(const char*& buffer, size_t offset) {
@@ -1281,13 +1271,6 @@ struct ReadContext final {
   const char* tensor_cursor;
   DeviceBufferSession* device_session = nullptr;
 };
-
-inline uint64_t get_tensor_payload_bytes(const torch::Tensor& tensor) {
-  if (!tensor.defined()) {
-    return 0;
-  }
-  return tensor.numel() * tensor.element_size();
-}
 
 inline bool has_device_buffer(const ReadContext& context) {
   return context.device_session != nullptr && context.device_session->active;
@@ -1372,6 +1355,67 @@ inline void read_string(ReadContext& context, std::string& str) {
     advance_descriptor_cursor(context, len);
   } else {
     str.clear();
+  }
+}
+
+template <typename ReadData, typename ReadString>
+void read_tensor_parameters_impl(TensorParameters& parameters,
+                                 ReadData&& read_data,
+                                 ReadString&& read_string) {
+  uint64_t parameter_count = 0;
+  read_data(parameter_count);
+  parameters.reserve(static_cast<size_t>(parameter_count));
+  for (uint64_t index = 0; index < parameter_count; ++index) {
+    std::string name;
+    read_string(name);
+    uint8_t raw_type = 0;
+    read_data(raw_type);
+    switch (static_cast<RawTensorParameterType>(raw_type)) {
+      case RawTensorParameterType::BOOL: {
+        bool value = false;
+        read_data(value);
+        parameters.emplace(std::move(name), value);
+        break;
+      }
+      case RawTensorParameterType::INT64: {
+        int64_t value = 0;
+        read_data(value);
+        parameters.emplace(std::move(name), value);
+        break;
+      }
+      case RawTensorParameterType::STRING: {
+        std::string value;
+        read_string(value);
+        parameters.emplace(std::move(name), std::move(value));
+        break;
+      }
+      case RawTensorParameterType::DOUBLE: {
+        double value = 0.0;
+        read_data(value);
+        parameters.emplace(std::move(name), value);
+        break;
+      }
+      case RawTensorParameterType::UINT64: {
+        uint64_t value = 0;
+        read_data(value);
+        parameters.emplace(std::move(name), value);
+        break;
+      }
+      case RawTensorParameterType::INT64_VECTOR: {
+        uint64_t value_count = 0;
+        read_data(value_count);
+        std::vector<int64_t> value;
+        value.resize(static_cast<size_t>(value_count));
+        for (int64_t& item : value) {
+          read_data(item);
+        }
+        parameters.emplace(std::move(name), std::move(value));
+        break;
+      }
+      default:
+        LOG(FATAL) << "Unsupported raw tensor parameter type: "
+                   << static_cast<int32_t>(raw_type);
+    }
   }
 }
 
@@ -1935,6 +1979,21 @@ inline void read_vector_tensor(const char*& buffer,
   }
 }
 
+inline void read_embedding_output_metadata(const char*& buffer,
+                                           EmbeddingOutputMetadata& metadata) {
+  uint64_t metadata_size;
+  read_data(buffer, metadata_size);
+  metadata.clear();
+  metadata.reserve(metadata_size);
+  for (uint64_t index = 0; index < metadata_size; ++index) {
+    std::string name;
+    read_string(buffer, name);
+    torch::Tensor tensor;
+    read_tensor(buffer, tensor);
+    metadata.emplace(std::move(name), std::move(tensor));
+  }
+}
+
 inline void read_vector_tensor(ReadContext& context,
                                std::vector<torch::Tensor>& tensor_vec,
                                Stream* stream = nullptr,
@@ -2144,40 +2203,6 @@ inline void read_mm_batch_data(ReadContext& context,
   batch_mm_data.batch(std::move(vec));
 }
 
-// read dit data
-inline void read_dit_generation_params(const char*& buffer,
-                                       DiTGenerationParams& params) {
-  read_data(buffer, params.width);
-  read_data(buffer, params.height);
-  read_data(buffer, params.num_inference_steps);
-  read_data(buffer, params.true_cfg_scale);
-  read_data(buffer, params.guidance_scale);
-  read_data(buffer, params.num_images_per_prompt);
-  read_data(buffer, params.seed);
-  read_data(buffer, params.max_sequence_length);
-  read_data(buffer, params.strength);
-  read_data(buffer, params.enable_cfg_renorm);
-  read_data(buffer, params.cfg_renorm_min);
-  read_data(buffer, params.num_frames);
-  read_data(buffer, params.video_fps);
-  read_data(buffer, params.guidance_scale_2);
-  read_data(buffer, params.seconds);
-  read_data(buffer, params.boundary_ratio);
-  read_data(buffer, params.flow_shift);
-  read_data(buffer, params.num_videos_per_prompt);
-  read_data(buffer, params.max_new_tokens);
-  read_data(buffer, params.diffusion_steps);
-  read_data(buffer, params.temperature);
-  read_data(buffer, params.top_k);
-  read_data(buffer, params.top_p);
-  read_data(buffer, params.repetition_penalty);
-  read_data(buffer, params.seed_is_set);
-  read_data(buffer, params.audio_duration_frames);
-  read_data(buffer, params.audio_steps);
-  read_string(buffer, params.audio_guidance_method);
-  read_data(buffer, params.audio_sampling_rate);
-}
-
 inline void read_dit_generation_params(ReadContext& context,
                                        DiTGenerationParams& params) {
   read_data(context, params.width);
@@ -2218,47 +2243,11 @@ inline void clone_tensor_if_defined(torch::Tensor& tensor) {
 }
 
 inline void stabilize_dit_forward_input_tensors(DiTForwardInput& input) {
-  for (NamedTensor& source : input.image_sources.entries()) {
+  for (MediaNamedTensor& source : input.media_sources.entries()) {
     clone_tensor_if_defined(source.tensor);
   }
   for (NamedTensor& tensor_input : input.tensor_sources.entries()) {
     clone_tensor_if_defined(tensor_input.tensor);
-  }
-}
-
-inline void read_dit_forward_input(const char*& buffer,
-                                   DiTForwardInput& input,
-                                   bool stabilize_host_tensors = false) {
-  read_data(buffer, input.batch_size);
-
-  read_string_vector(buffer, input.prompts);
-  read_string_vector(buffer, input.prompts_2);
-  read_string_vector(buffer, input.negative_prompts);
-  read_string_vector(buffer, input.negative_prompts_2);
-
-  uint64_t image_source_count = 0;
-  read_data(buffer, image_source_count);
-  for (size_t index = 0; index < image_source_count; ++index) {
-    std::string name;
-    torch::Tensor tensor;
-    read_string(buffer, name);
-    read_tensor(buffer, tensor);
-    input.image_sources.add(std::move(name), std::move(tensor));
-  }
-  uint64_t tensor_input_count = 0;
-  read_data(buffer, tensor_input_count);
-  for (size_t index = 0; index < tensor_input_count; ++index) {
-    std::string name;
-    torch::Tensor tensor;
-    read_string(buffer, name);
-    read_tensor(buffer, tensor);
-    input.tensor_sources.add(std::move(name), std::move(tensor));
-  }
-  read_string(buffer, input.audio_prompt_text);
-
-  read_dit_generation_params(buffer, input.generation_params);
-  if (stabilize_host_tensors) {
-    stabilize_dit_forward_input_tensors(input);
   }
 }
 
@@ -2272,29 +2261,45 @@ inline void read_dit_forward_input(ReadContext& context,
   read_string_vector(context, input.negative_prompts);
   read_string_vector(context, input.negative_prompts_2);
 
-  uint64_t image_source_count = 0;
-  read_data(context, image_source_count);
-  for (size_t index = 0; index < image_source_count; ++index) {
+  uint64_t media_source_count = 0;
+  read_data(context, media_source_count);
+  for (size_t index = 0; index < media_source_count; ++index) {
     std::string name;
+    std::string modality;
     torch::Tensor tensor;
+    TensorParameters parameters;
     read_string(context, name);
+    read_string(context, modality);
     read_tensor(context,
                 tensor,
                 /*stream=*/nullptr,
                 /*force_host_materialize=*/true);
-    input.image_sources.add(std::move(name), std::move(tensor));
+    read_tensor_parameters_impl(
+        parameters,
+        [&](auto& value) { read_data(context, value); },
+        [&](std::string& value) { read_string(context, value); });
+    input.media_sources.add(std::move(name),
+                            std::move(modality),
+                            std::move(tensor),
+                            std::move(parameters));
   }
   uint64_t tensor_input_count = 0;
   read_data(context, tensor_input_count);
   for (size_t index = 0; index < tensor_input_count; ++index) {
     std::string name;
     torch::Tensor tensor;
+    TensorParameters parameters;
     read_string(context, name);
     read_tensor(context,
                 tensor,
                 /*stream=*/nullptr,
                 /*force_host_materialize=*/true);
-    input.tensor_sources.add(std::move(name), std::move(tensor));
+    read_tensor_parameters_impl(
+        parameters,
+        [&](auto& value) { read_data(context, value); },
+        [&](std::string& value) { read_string(context, value); });
+    input.tensor_sources.add(
+        std::move(name), std::move(tensor), std::move(parameters));
   }
   read_string(context, input.audio_prompt_text);
 
@@ -2325,7 +2330,8 @@ class DiTDescriptorValidator final {
         return false;
       }
     }
-    if (!skip_named_tensors() || !skip_named_tensors() || !skip_string()) {
+    if (!skip_named_tensors(/*has_modality=*/true) ||
+        !skip_named_tensors(/*has_modality=*/false) || !skip_string()) {
       return false;
     }
     return skip_generation_params() && remaining_ == 0 && arena_remaining_ == 0;
@@ -2393,13 +2399,14 @@ class DiTDescriptorValidator final {
            skip(2 * sizeof(int32_t)) && skip_string() && skip(sizeof(int32_t));
   }
 
-  bool skip_named_tensors() {
+  bool skip_named_tensors(bool has_modality) {
     uint64_t count = 0;
     if (!read(count) || count > remaining_ / (2 * sizeof(uint64_t))) {
       return false;
     }
     for (uint64_t index = 0; index < count; ++index) {
-      if (!skip_string() || !skip_tensor()) {
+      if (!skip_string() || (has_modality && !skip_string()) ||
+          !skip_tensor() || !skip_tensor_parameters()) {
         return false;
       }
     }
@@ -2454,6 +2461,54 @@ class DiTDescriptorValidator final {
     return true;
   }
 
+  bool skip_tensor_parameters() {
+    uint64_t parameter_count = 0;
+    if (!read(parameter_count) ||
+        parameter_count > remaining_ / (sizeof(uint64_t) + sizeof(uint8_t))) {
+      return false;
+    }
+    for (uint64_t index = 0; index < parameter_count; ++index) {
+      if (!skip_string()) {
+        return false;
+      }
+      uint8_t raw_type = 0;
+      if (!read(raw_type)) {
+        return false;
+      }
+      switch (static_cast<RawTensorParameterType>(raw_type)) {
+        case RawTensorParameterType::BOOL:
+          if (!skip_bool()) {
+            return false;
+          }
+          break;
+        case RawTensorParameterType::INT64:
+        case RawTensorParameterType::DOUBLE:
+        case RawTensorParameterType::UINT64:
+          if (!skip(sizeof(uint64_t))) {
+            return false;
+          }
+          break;
+        case RawTensorParameterType::STRING:
+          if (!skip_string()) {
+            return false;
+          }
+          break;
+        case RawTensorParameterType::INT64_VECTOR: {
+          uint64_t value_count = 0;
+          if (!read(value_count) ||
+              value_count > remaining_ / sizeof(int64_t) ||
+              !skip(value_count * sizeof(int64_t))) {
+            return false;
+          }
+          break;
+        }
+        default:
+          return false;
+      }
+    }
+    return true;
+  }
+
   const char* descriptor_;
   uint64_t remaining_;
   uint64_t arena_remaining_;
@@ -2482,15 +2537,23 @@ bool deserialize_dit_input_payload(const char* payload,
   return true;
 }
 
-inline void read_dit_forward_output(const char*& buffer,
-                                    DiTForwardOutput& output) {
-  read_vector_tensor(buffer, output.tensors);
-  for (auto& tensor : output.tensors) {
+// Reads a tensor vector and clones each entry so it owns storage
+// independent of the SHM segment.
+inline void read_vector_tensor_cloned(const char*& buffer,
+                                      std::vector<torch::Tensor>& tensors) {
+  read_vector_tensor(buffer, tensors);
+  for (auto& tensor : tensors) {
     if (tensor.defined()) {
       tensor = tensor.clone();
     }
   }
+}
+
+inline void read_dit_forward_output(const char*& buffer,
+                                    DiTForwardOutput& output) {
+  read_vector_tensor_cloned(buffer, output.tensors);
   read_string_vector(buffer, output.text_output);
+  read_vector_tensor_cloned(buffer, output.audio_tensors);
 }
 
 template <typename Input>
@@ -2883,6 +2946,7 @@ size_t calculate_raw_sample_output_size(const RawSampleOutput& sample) {
     size += calculate_raw_token_size(token);
   }
   size += get_vector_tensor_size(sample.mm_embeddings);
+  size += get_embedding_output_metadata_size(sample.mm_embeddings_metadata);
   size += type_size<int64_t>;  // accepted speculative tokens
   size += type_size<int64_t>;  // proposed speculative tokens
   return size;
@@ -2913,8 +2977,7 @@ size_t calculate_raw_forward_output_size(const RawForwardOutput& output) {
   size += get_vector_size(output.out_tokens);
   size += get_vector_size(output.out_logprobs);
   size += type_size<int64_t>;  // prepared_token
-  const bool has_dit_forward_output =
-      !output.dit_forward_output.tensors.empty();
+  const bool has_dit_forward_output = has_dit_output(output);
   size += type_size<bool>;
   if (has_dit_forward_output) {
     size += get_dit_forward_output_size(output.dit_forward_output);
@@ -2942,6 +3005,7 @@ void write_raw_sample_output(char*& buffer, const RawSampleOutput& sample) {
     write_raw_token(buffer, token);
   }
   write_vector_tensor(buffer, sample.mm_embeddings);
+  write_embedding_output_metadata(buffer, sample.mm_embeddings_metadata);
   write_data(buffer, sample.speculative_token_stats.accepted_tokens);
   write_data(buffer, sample.speculative_token_stats.proposed_tokens);
 }
@@ -2972,6 +3036,7 @@ void read_raw_sample_output(const char*& buffer, RawSampleOutput& sample) {
     read_raw_token(buffer, token);
   }
   read_vector_tensor(buffer, sample.mm_embeddings);
+  read_embedding_output_metadata(buffer, sample.mm_embeddings_metadata);
   read_data(buffer, sample.speculative_token_stats.accepted_tokens);
   read_data(buffer, sample.speculative_token_stats.proposed_tokens);
 }
@@ -3038,8 +3103,7 @@ void serialize_raw_forward_output(const RawForwardOutput& output,
 
   write_data(buffer, output.prepared_token);
 
-  const bool has_dit_forward_output =
-      !output.dit_forward_output.tensors.empty();
+  const bool has_dit_forward_output = has_dit_output(output);
   write_data(buffer, has_dit_forward_output);
   if (has_dit_forward_output) {
     write_dit_forward_output(buffer, output.dit_forward_output);
@@ -3342,6 +3406,7 @@ void convert_tensor_to_raw_output(
     const std::vector<std::vector<torch::Tensor>>& mm_embeddings,
     const std::vector<torch::Tensor>& dit_images,
     const std::vector<std::string>& dit_text_output,
+    const std::vector<torch::Tensor>& dit_audio,
     const torch::Tensor& expert_load_data,
     int64_t prepared_token,
     const torch::Tensor& src_seq_idxes,
@@ -3395,6 +3460,7 @@ void convert_tensor_to_raw_output(
   raw_output.outputs.reserve(num_seqs);
   raw_output.dit_forward_output.tensors = dit_images;
   raw_output.dit_forward_output.text_output = dit_text_output;
+  raw_output.dit_forward_output.audio_tensors = dit_audio;
   for (int32_t output_idx = 0; output_idx < num_seqs; ++output_idx) {
     RawSampleOutput raw_sample_output;
 
@@ -3879,6 +3945,7 @@ bool ForwardSharedMemoryManager::raw_output_write(
     const std::vector<SpeculativeTokenStats>& speculative_token_stats,
     const std::vector<torch::Tensor>& dit_images,
     const std::vector<std::string>& dit_text_output,
+    const std::vector<torch::Tensor>& dit_audio,
     const torch::Tensor& expert_load_data,
     int64_t prepared_token,
     const torch::Tensor& src_seq_idxes,
@@ -3894,6 +3961,7 @@ bool ForwardSharedMemoryManager::raw_output_write(
                                mm_embeddings,
                                dit_images,
                                dit_text_output,
+                               dit_audio,
                                expert_load_data,
                                prepared_token,
                                src_seq_idxes,

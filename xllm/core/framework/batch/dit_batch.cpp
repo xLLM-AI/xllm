@@ -46,10 +46,15 @@ void DiTBatch::process_forward_output(const DiTForwardOutput& output) {
     return;
   }
   CHECK(request_vec_.size() == output.tensors.size());
+  CHECK(output.audio_tensors.empty() ||
+        output.audio_tensors.size() == output.tensors.size());
   for (int32_t idx = 0; idx < static_cast<int32_t>(request_vec_.size());
        ++idx) {
     auto& request = request_vec_[idx];
-    request->handle_forward_output(output.tensors[idx]);
+    const torch::Tensor audio_output = output.audio_tensors.empty()
+                                           ? torch::Tensor()
+                                           : output.audio_tensors[idx];
+    request->handle_forward_output(output.tensors[idx], audio_output);
   }
 }
 

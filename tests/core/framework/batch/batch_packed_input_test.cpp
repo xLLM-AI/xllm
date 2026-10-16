@@ -181,11 +181,12 @@ void expect_dit_forward_input_eq(const DiTForwardInput& actual,
   EXPECT_EQ(actual.audio_prompt_text, expected.audio_prompt_text);
   EXPECT_EQ(actual.generation_params, expected.generation_params);
 
-  ASSERT_EQ(actual.image_sources.size(), expected.image_sources.size());
-  for (size_t index = 0; index < expected.image_sources.size(); ++index) {
-    const NamedTensor& actual_source = actual.image_sources.at(index);
-    const NamedTensor& expected_source = expected.image_sources.at(index);
+  ASSERT_EQ(actual.media_sources.size(), expected.media_sources.size());
+  for (size_t index = 0; index < expected.media_sources.size(); ++index) {
+    const MediaNamedTensor& actual_source = actual.media_sources.at(index);
+    const MediaNamedTensor& expected_source = expected.media_sources.at(index);
     EXPECT_EQ(actual_source.name, expected_source.name);
+    EXPECT_EQ(actual_source.modality, expected_source.modality);
     EXPECT_TRUE(actual_source.tensor.device().is_cpu());
     EXPECT_EQ(actual_source.tensor.scalar_type(),
               expected_source.tensor.scalar_type());
@@ -407,7 +408,7 @@ TEST(BatchPackedInputTest, MaterializedShmReadRebindsTaggedTensorArena) {
   proto::PackedForwardInput packed_input;
   ASSERT_TRUE(source.to_packed_proto(&packed_input));
   ASSERT_GE(packed_input.payload().size(), 40u);
-  EXPECT_EQ(static_cast<uint8_t>(packed_input.payload()[8]), 5u);
+  EXPECT_EQ(static_cast<uint8_t>(packed_input.payload()[8]), 6u);
   EXPECT_EQ(static_cast<uint8_t>(packed_input.payload()[10]), 1u);
   const uint64_t arena_offset =
       read_packed_uint64(packed_input.payload(), /*offset=*/24);
@@ -746,7 +747,7 @@ TEST(BatchPackedInputTest, NativeDomainsRejectUnsupportedPackedSchemas) {
       EXPECT_FALSE(llm_input.runtime.input_host_buffer.defined());
       EXPECT_FALSE(vlm_input.runtime.input_host_buffer.defined());
       EXPECT_FALSE(rec_input.runtime.input_host_buffer.defined());
-      EXPECT_TRUE(dit_input.tensor_sources.empty());
+      EXPECT_EQ(dit_input.tensor_sources.size(), 0u);
     }
   }
 }
@@ -1095,15 +1096,18 @@ TEST(BatchPackedInputTest,
   dit_input.negative_prompts_2 = {"first negative detail",
                                   "second negative detail"};
   dit_input.audio_prompt_text = "spoken prompt transcript";
-  dit_input.image_sources.add(
-      "unknown", torch::tensor({1, 2}, torch::dtype(torch::kUInt8)));
-  dit_input.image_sources.add(
-      "unknown", torch::tensor({3, 4}, torch::dtype(torch::kUInt8)));
-  dit_input.image_sources.add(
-      "mask_image", torch::tensor({5, 6}, torch::dtype(torch::kUInt8)));
+  dit_input.media_sources.add(
+      "unknown", "image", torch::tensor({1, 2}, torch::dtype(torch::kUInt8)));
+  dit_input.media_sources.add(
+      "unknown", "image", torch::tensor({3, 4}, torch::dtype(torch::kUInt8)));
+  dit_input.media_sources.add(
+      "mask_image",
+      "image",
+      torch::tensor({5, 6}, torch::dtype(torch::kUInt8)));
+  dit_input.media_sources.add(
+      "prompt_audio", "audio", torch::tensor({0.25f, 0.5f}));
   dit_input.tensor_sources.add("prompt_embed", torch::tensor({1.5f, 2.5f}));
   dit_input.tensor_sources.add("latent", torch::tensor({3.5f, 4.5f}));
-  dit_input.tensor_sources.add("prompt_audio", torch::tensor({0.25f, 0.5f}));
   DiTGenerationParams& params = dit_input.generation_params;
   params.width = 640;
   params.height = 480;
@@ -1163,10 +1167,11 @@ TEST(BatchPackedInputTest, NativeDiTPackedProtoOwnsSourcesAfterPayloadRelease) {
     DiTForwardInput source;
     source.batch_size = 1;
     source.prompts = {"retained prompt"};
-    source.image_sources.add(
-        "image", torch::tensor({1, 2}, torch::dtype(torch::kUInt8)));
+    source.media_sources.add(
+        "image", "image", torch::tensor({1, 2}, torch::dtype(torch::kUInt8)));
+    source.media_sources.add(
+        "prompt_audio", "audio", torch::tensor({0.25f, 0.5f}));
     source.tensor_sources.add("latent", torch::tensor({1.5f, 2.5f}));
-    source.tensor_sources.add("prompt_audio", torch::tensor({0.25f, 0.5f}));
     source.tensor_sources.add(
         "empty", torch::empty({0, 2}, torch::dtype(torch::kFloat32)));
     proto::PackedForwardInput packed_input;
@@ -1177,29 +1182,31 @@ TEST(BatchPackedInputTest, NativeDiTPackedProtoOwnsSourcesAfterPayloadRelease) {
 
   EXPECT_EQ(unpacked_input.prompts,
             std::vector<std::string>({"retained prompt"}));
-  ASSERT_EQ(unpacked_input.image_sources.size(), 1u);
-  EXPECT_TRUE(torch::equal(unpacked_input.image_sources.at(0).tensor,
+  ASSERT_EQ(unpacked_input.media_sources.size(), 2u);
+  EXPECT_TRUE(torch::equal(unpacked_input.media_sources.at(0).tensor,
                            torch::tensor({1, 2}, torch::dtype(torch::kUInt8))));
-  ASSERT_EQ(unpacked_input.tensor_sources.size(), 3u);
+  EXPECT_TRUE(torch::equal(unpacked_input.media_sources.at(1).tensor,
+                           torch::tensor({0.25f, 0.5f})));
+  ASSERT_EQ(unpacked_input.tensor_sources.size(), 2u);
   EXPECT_TRUE(torch::equal(unpacked_input.tensor_sources.entries()[0].tensor,
                            torch::tensor({1.5f, 2.5f})));
-  EXPECT_TRUE(torch::equal(unpacked_input.tensor_sources.entries()[1].tensor,
-                           torch::tensor({0.25f, 0.5f})));
-  EXPECT_TRUE(unpacked_input.tensor_sources.entries()[2].tensor.defined());
-  EXPECT_EQ(unpacked_input.tensor_sources.entries()[2].tensor.sizes().vec(),
+  EXPECT_TRUE(unpacked_input.tensor_sources.entries()[1].tensor.defined());
+  EXPECT_EQ(unpacked_input.tensor_sources.entries()[1].tensor.sizes().vec(),
             std::vector<int64_t>({0, 2}));
 
   const DiTForwardInput prepared_input =
       unpacked_input.to(torch::Device(torch::kCPU));
-  EXPECT_EQ(prepared_input.image_sources.at(0).tensor.scalar_type(),
+  EXPECT_EQ(prepared_input.media_sources.at(0).tensor.scalar_type(),
             torch::kUInt8);
+  EXPECT_EQ(prepared_input.media_sources.at(1).tensor.scalar_type(),
+            torch::kFloat32);
   EXPECT_EQ(prepared_input.tensor_sources.entries()[0].tensor.scalar_type(),
             torch::kBFloat16);
   EXPECT_EQ(prepared_input.tensor_sources.entries()[1].tensor.scalar_type(),
-            torch::kFloat32);
+            torch::kBFloat16);
   EXPECT_TRUE(torch::equal(prepared_input.tensor_sources.entries()[0].tensor,
                            torch::tensor({1.5f, 2.5f}, torch::kBFloat16)));
-  EXPECT_TRUE(torch::equal(prepared_input.tensor_sources.entries()[1].tensor,
+  EXPECT_TRUE(torch::equal(prepared_input.media_sources.at(1).tensor,
                            torch::tensor({0.25f, 0.5f})));
 }
 

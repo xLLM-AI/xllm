@@ -44,9 +44,17 @@ class DiagonalGaussianDistribution final {
   }
 
   torch::Tensor sample(int64_t seed) const {
-    torch::TensorOptions options = mean_.options();
+    torch::Generator generator =
+        torch::make_generator<torch::CPUGeneratorImpl>().clone();
+    generator.set_current_seed(seed);
+    return sample(generator, torch::kBFloat16);
+  }
+
+  torch::Tensor sample(torch::Generator& generator,
+                       torch::ScalarType noise_type = torch::kFloat32) const {
     std::vector<int64_t> shape(mean_.sizes().begin(), mean_.sizes().end());
-    return mean_ + std_ * randn_tensor(shape, seed, options);
+    return mean_ +
+           std_ * randn_tensor(shape, generator, mean_.options(), noise_type);
   }
 
   torch::Tensor kl(const std::optional<DiagonalGaussianDistribution>& other =

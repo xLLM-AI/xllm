@@ -339,6 +339,7 @@ bool ForwardOutput::to_proto(
                         out_logprobs_slice);
   }
   if ((!dit_forward_output.tensors.empty() ||
+       !dit_forward_output.audio_tensors.empty() ||
        !dit_forward_output.text_output.empty()) &&
       !dit_forward_output.to_proto(
           pb_forward_output->mutable_dit_forward_output())) {

@@ -192,10 +192,7 @@ class LongCatImageEditPipelineImpl : public torch::nn::Module {
     std::optional<torch::Tensor> negative_pooled_prompt_embeds =
         input.tensor_sources.get("negative_pooled_prompt_embed");
 
-    std::optional<torch::Tensor> image =
-        input.image_sources.empty()
-            ? std::nullopt
-            : std::make_optional(input.image_sources.at(0).tensor);
+    std::optional<torch::Tensor> image = input.media_sources.first_tensor();
 
     CHECK(image.has_value()) << "LongCat-Image-Edit requires an input image.";
 

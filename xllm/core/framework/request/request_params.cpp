@@ -567,6 +567,7 @@ RequestParams::RequestParams(const proto::EmbeddingRequest& request,
 RequestParams::RequestParams(const proto::MMEmbeddingRequest& request,
                              const std::string& x_rid,
                              const std::string& x_rtime) {
+  request_id = generate_embedding_request_id();
   if (request.has_service_request_id()) {
     service_request_id = request.service_request_id();
   }

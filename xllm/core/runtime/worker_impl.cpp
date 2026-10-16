@@ -2398,6 +2398,9 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   auto quant_args = model_loader->quant_args();
   const bool embedding_mode = options_.task_type() == "embed";
   args.embedding_mode(embedding_mode);
+  if (embedding_mode && !args.layers_to_capture().empty()) {
+    options_.enable_graph_aux_hidden_states(true);
+  }
   torch::ScalarType dtype = util::parse_dtype(args.dtype(), device_);
 
   // A draft engine is fed token ids and detokenized by the target, so it owns
@@ -2629,6 +2632,17 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
                             .contiguous();
   }
   return true;
+}
+
+torch::Tensor WorkerImpl::select_hidden_states_for_embedding(
+    const ModelOutput& model_output) const {
+  if (context_.get_model_args().layers_to_capture().empty()) {
+    return model_output.hidden_states;
+  }
+  CHECK(model_output.aux_hidden_states.defined())
+      << "Captured hidden states are required but the model did not return "
+         "aux_hidden_states";
+  return model_output.aux_hidden_states;
 }
 
 void WorkerImpl::load_model(std::unique_ptr<ModelLoader> loader) {

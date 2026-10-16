@@ -24,7 +24,6 @@ limitations under the License.
 
 #include <algorithm>
 #include <cstdint>
-#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -451,13 +450,15 @@ void Sequence::update_token(size_t index, const Token& token) {
 }
 
 void Sequence::update_mm_embeddings(
-    const std::vector<torch::Tensor>& mm_embeddings) {
+    const std::vector<torch::Tensor>& mm_embeddings,
+    EmbeddingOutputMetadata metadata) {
+  CHECK(sequence_params_.sampling_param->is_embeddings);
   // cannot update embeddings to a finished sequence
   if (finished_) {
     return;
   }
   output_mm_embeddings_ = mm_embeddings;
-  CHECK(sequence_params_.sampling_param->is_embeddings);
+  output_mm_embeddings_metadata_ = std::move(metadata);
   is_mm_embed_ = ModelConfig::get_instance().task() == "mm_embed";
   // invalidate the finish status once a new token is appended
   finish_status_invalidated_ = false;
@@ -657,6 +658,9 @@ void Sequence::generate_mm_embeddings_output(SequenceOutput& output) {
     embedding_output.embedding = output_mm_embedding;
     for (const auto& [key, value] : metadata) {
       embedding_output.metadata[key] = value[i];
+    }
+    for (const auto& [key, value] : output_mm_embeddings_metadata_) {
+      embedding_output.metadata[key] = value;
     }
     if (is_mm_embed_) {
       const XXH3Key& hash_key =

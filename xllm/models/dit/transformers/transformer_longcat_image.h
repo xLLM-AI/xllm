@@ -27,7 +27,7 @@ class LongCatImageTimestepEmbeddingsImpl : public torch::nn::Module {
  public:
   explicit LongCatImageTimestepEmbeddingsImpl(const ModelContext& context)
       : options_(context.get_tensor_options()) {
-    time_proj_ = Timesteps(context);
+    time_proj_ = dit::Timesteps(256, true, 0.0);
     timestep_embedder_ = TimestepEmbedding(context);
   }
 
@@ -47,7 +47,7 @@ class LongCatImageTimestepEmbeddingsImpl : public torch::nn::Module {
   }
 
  private:
-  Timesteps time_proj_{nullptr};
+  dit::Timesteps time_proj_{nullptr};
   TimestepEmbedding timestep_embedder_{nullptr};
   torch::TensorOptions options_;
 };

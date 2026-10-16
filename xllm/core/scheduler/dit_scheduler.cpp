@@ -41,8 +41,8 @@ constexpr size_t kRequestQueueSize = 100;
 
 bool prompt_audio_allows_batching(const DiTInputParams& lhs,
                                   const DiTInputParams& rhs) {
-  return !lhs.tensor_sources.contains("prompt_audio") &&
-         !rhs.tensor_sources.contains("prompt_audio") &&
+  return !lhs.media_sources.contains("prompt_audio") &&
+         !rhs.media_sources.contains("prompt_audio") &&
          lhs.audio_prompt_text.empty() && rhs.audio_prompt_text.empty();
 }
 
@@ -76,8 +76,8 @@ bool is_compatible_dit_batch_request(
   }
   const auto& batch_input = batch_state.input_params();
   const auto& candidate_input = candidate_state.input_params();
-  return batch_input.image_sources.batch_signature_matches(
-             candidate_input.image_sources) &&
+  return batch_input.media_sources.batch_signature_matches(
+             candidate_input.media_sources) &&
          batch_input.tensor_sources.batch_signature_matches(
              candidate_input.tensor_sources) &&
          prompt_audio_allows_batching(batch_input, candidate_input);

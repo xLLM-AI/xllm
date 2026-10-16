@@ -138,22 +138,26 @@ TEST(DiTRequestParamsTest, LegacyImagesMapToOrderedUnknownSources) {
   DiTRequestParams params(request, "rid", "rtime");
 
   ASSERT_TRUE(params.request_parse_status.ok());
-  ASSERT_EQ(params.input_params.image_sources.size(), 2u);
-  EXPECT_EQ(params.input_params.image_sources.at(0).name, "unknown");
-  EXPECT_EQ(params.input_params.image_sources.at(1).name, "unknown");
-  EXPECT_TRUE(torch::equal(params.input_params.image_sources.at(0).tensor,
-                           params.input_params.image_sources.at(1).tensor));
+  ASSERT_EQ(params.input_params.media_sources.size(), 2u);
+  EXPECT_EQ(params.input_params.media_sources.at(0).name, "unknown");
+  EXPECT_EQ(params.input_params.media_sources.at(1).name, "unknown");
+  EXPECT_EQ(params.input_params.media_sources.at(0).modality, "image");
+  EXPECT_TRUE(torch::equal(params.input_params.media_sources.at(0).tensor,
+                           params.input_params.media_sources.at(1).tensor));
 }
 
 TEST(DiTRequestParamsTest, ImageSourcesSupportBase64AndBinaryInOrder) {
   proto::ImageGenerationRequest request = MakeImageRequest();
   proto::Input* input = request.mutable_input();
-  proto::MediaSource* base64 = input->add_image_sources();
+  proto::MediaSource* base64 = input->add_media_sources();
   base64->set_type("base64");
+  base64->set_name("unknown");
+  base64->set_modality("image");
   base64->set_base64(kTinyPngBase64);
-  proto::MediaSource* binary = input->add_image_sources();
+  proto::MediaSource* binary = input->add_media_sources();
   binary->set_type("binary");
   binary->set_name("control_image");
+  binary->set_modality("image");
   binary->mutable_binary()->set_offset(2);
   binary->mutable_binary()->set_length(TinyPngBytes().size());
   const std::string payload = "xx" + TinyPngBytes() + "trailing bytes";
@@ -161,24 +165,26 @@ TEST(DiTRequestParamsTest, ImageSourcesSupportBase64AndBinaryInOrder) {
   DiTRequestParams params(request, "rid", "rtime", BinaryPayload(payload));
 
   ASSERT_TRUE(params.request_parse_status.ok());
-  ASSERT_EQ(params.input_params.image_sources.size(), 2u);
-  EXPECT_EQ(params.input_params.image_sources.at(0).name, "unknown");
-  EXPECT_EQ(params.input_params.image_sources.at(1).name, "control_image");
-  EXPECT_TRUE(torch::equal(params.input_params.image_sources.at(0).tensor,
-                           params.input_params.image_sources.at(1).tensor));
+  ASSERT_EQ(params.input_params.media_sources.size(), 2u);
+  EXPECT_EQ(params.input_params.media_sources.at(0).name, "unknown");
+  EXPECT_EQ(params.input_params.media_sources.at(1).name, "control_image");
+  EXPECT_TRUE(torch::equal(params.input_params.media_sources.at(0).tensor,
+                           params.input_params.media_sources.at(1).tensor));
 }
 
 TEST(DiTRequestParamsTest, VideoImageSourcesAreDecoded) {
   proto::VideoGenerationRequest request = MakeVideoRequest();
   proto::VideoInput* input = request.mutable_input();
   const size_t image_size = TinyPngBytes().size();
-  proto::MediaSource* first = input->add_image_sources();
+  proto::MediaSource* first = input->add_media_sources();
   first->set_type("binary");
   first->set_name("image");
+  first->set_modality("image");
   first->mutable_binary()->set_length(image_size);
-  proto::MediaSource* last = input->add_image_sources();
+  proto::MediaSource* last = input->add_media_sources();
   last->set_type("binary");
   last->set_name("last_image");
+  last->set_modality("image");
   last->mutable_binary()->set_offset(image_size);
   last->mutable_binary()->set_length(image_size);
   const std::string payload = TinyPngBytes() + TinyPngBytes();
@@ -187,20 +193,22 @@ TEST(DiTRequestParamsTest, VideoImageSourcesAreDecoded) {
 
   ASSERT_TRUE(params.request_parse_status.ok());
   std::vector<torch::Tensor> images =
-      params.input_params.image_sources.get({"image", "last_image"});
+      params.input_params.media_sources.get({"image", "last_image"});
   EXPECT_EQ(images.size(), 2u);
 }
 
 TEST(DiTRequestParamsTest, MixedImageSourcesAndLegacyImagesPreserveOrder) {
   proto::ImageGenerationRequest request = MakeImageRequest();
   proto::Input* input = request.mutable_input();
-  proto::MediaSource* base64 = input->add_image_sources();
+  proto::MediaSource* base64 = input->add_media_sources();
   base64->set_type("base64");
   base64->set_name("first");
+  base64->set_modality("image");
   base64->set_base64(kTinyPngBase64);
-  proto::MediaSource* binary = input->add_image_sources();
+  proto::MediaSource* binary = input->add_media_sources();
   binary->set_type("binary");
   binary->set_name("second");
+  binary->set_modality("image");
   binary->mutable_binary()->set_length(TinyPngBytes().size());
   input->add_images(kTinyPngBase64);
 
@@ -208,26 +216,28 @@ TEST(DiTRequestParamsTest, MixedImageSourcesAndLegacyImagesPreserveOrder) {
       request, "rid", "rtime", BinaryPayload(TinyPngBytes()));
 
   ASSERT_TRUE(params.request_parse_status.ok());
-  ASSERT_EQ(params.input_params.image_sources.size(), 3u);
-  EXPECT_EQ(params.input_params.image_sources.at(0).name, "first");
-  EXPECT_EQ(params.input_params.image_sources.at(1).name, "second");
-  EXPECT_EQ(params.input_params.image_sources.at(2).name, "unknown");
-  EXPECT_TRUE(torch::equal(params.input_params.image_sources.at(0).tensor,
-                           params.input_params.image_sources.at(1).tensor));
-  EXPECT_TRUE(torch::equal(params.input_params.image_sources.at(1).tensor,
-                           params.input_params.image_sources.at(2).tensor));
+  ASSERT_EQ(params.input_params.media_sources.size(), 3u);
+  EXPECT_EQ(params.input_params.media_sources.at(0).name, "first");
+  EXPECT_EQ(params.input_params.media_sources.at(1).name, "second");
+  EXPECT_EQ(params.input_params.media_sources.at(2).name, "unknown");
+  EXPECT_TRUE(torch::equal(params.input_params.media_sources.at(0).tensor,
+                           params.input_params.media_sources.at(1).tensor));
+  EXPECT_TRUE(torch::equal(params.input_params.media_sources.at(1).tensor,
+                           params.input_params.media_sources.at(2).tensor));
 }
 
 TEST(DiTRequestParamsTest, FailedParallelImageDecodeCommitsNoSources) {
   proto::ImageGenerationRequest request = MakeImageRequest();
   proto::Input* input = request.mutable_input();
-  proto::MediaSource* valid = input->add_image_sources();
+  proto::MediaSource* valid = input->add_media_sources();
   valid->set_type("base64");
   valid->set_name("valid");
+  valid->set_modality("image");
   valid->set_base64(kTinyPngBase64);
-  proto::MediaSource* invalid = input->add_image_sources();
+  proto::MediaSource* invalid = input->add_media_sources();
   invalid->set_type("base64");
   invalid->set_name("invalid");
+  invalid->set_modality("image");
   std::string invalid_base64;
   butil::Base64Encode("not an image", &invalid_base64);
   invalid->set_base64(invalid_base64);
@@ -235,30 +245,33 @@ TEST(DiTRequestParamsTest, FailedParallelImageDecodeCommitsNoSources) {
   DiTRequestParams params(request, "rid", "rtime");
 
   EXPECT_TRUE(VerifyFailsWithInvalidArgument(params));
-  EXPECT_TRUE(params.input_params.image_sources.empty());
+  EXPECT_EQ(params.input_params.media_sources.size(), 0u);
 }
 
 TEST(DiTRequestParamsTest, DuplicateImageSourceNamesArePreserved) {
   proto::ImageGenerationRequest request = MakeImageRequest();
   proto::Input* input = request.mutable_input();
   for (int32_t index = 0; index < 2; ++index) {
-    proto::MediaSource* source = input->add_image_sources();
+    proto::MediaSource* source = input->add_media_sources();
     source->set_type("base64");
     source->set_name("image");
+    source->set_modality("image");
     source->set_base64(kTinyPngBase64);
   }
 
   DiTRequestParams params(request, "rid", "rtime");
 
   ASSERT_TRUE(params.request_parse_status.ok());
-  EXPECT_EQ(params.input_params.image_sources.get({"image", "image"}).size(),
+  EXPECT_EQ(params.input_params.media_sources.get({"image", "image"}).size(),
             2u);
 }
 
 TEST(DiTRequestParamsTest, RejectsOutOfBoundsBinaryImage) {
   proto::ImageGenerationRequest request = MakeImageRequest();
-  proto::MediaSource* source = request.mutable_input()->add_image_sources();
+  proto::MediaSource* source = request.mutable_input()->add_media_sources();
   source->set_type("binary");
+  source->set_name("image");
+  source->set_modality("image");
   proto::BinaryRef* binary = source->mutable_binary();
   binary->set_offset(TinyPngBytes().size());
   binary->set_length(1);
@@ -271,8 +284,10 @@ TEST(DiTRequestParamsTest, RejectsOutOfBoundsBinaryImage) {
 
 TEST(DiTRequestParamsTest, RejectsOverflowingBinaryImageRange) {
   proto::ImageGenerationRequest request = MakeImageRequest();
-  proto::MediaSource* source = request.mutable_input()->add_image_sources();
+  proto::MediaSource* source = request.mutable_input()->add_media_sources();
   source->set_type("binary");
+  source->set_name("image");
+  source->set_modality("image");
   proto::BinaryRef* binary = source->mutable_binary();
   binary->set_offset(1);
   binary->set_length(std::numeric_limits<uint64_t>::max());
@@ -285,7 +300,7 @@ TEST(DiTRequestParamsTest, RejectsOverflowingBinaryImageRange) {
 
 TEST(DiTRequestParamsTest, RejectsEmptyImageSource) {
   proto::ImageGenerationRequest request = MakeImageRequest();
-  request.mutable_input()->add_image_sources();
+  request.mutable_input()->add_media_sources();
 
   DiTRequestParams params(request, "rid", "rtime");
 
@@ -354,6 +369,34 @@ TEST(DiTRequestParamsTest, VideoBinaryTensorInputMatchesContentsInput) {
       *contents_params.input_params.tensor_sources.get("prompt_embed")));
 }
 
+TEST(DiTRequestParamsTest, PromptTokenTagsDecodeFromPromptEmbedParameters) {
+  proto::VideoGenerationRequest request = MakeVideoRequest();
+  proto::VideoInput* input = request.mutable_input();
+  proto::Tensor* prompt_embed = input->mutable_prompt_embed();
+  prompt_embed->set_datatype("FP32");
+  prompt_embed->add_shape(2);
+  prompt_embed->add_shape(2);
+  for (int32_t index = 0; index < 4; ++index) {
+    prompt_embed->mutable_contents()->add_fp32_contents(
+        static_cast<float>(index));
+  }
+  proto::Parameter& prompt_token_tags =
+      (*prompt_embed->mutable_parameters())["prompt_token_tags"];
+  prompt_token_tags.add_int64_tensor_param(0);
+  prompt_token_tags.add_int64_tensor_param(1);
+
+  DiTRequestParams params(request, "rid", "rtime");
+
+  ASSERT_TRUE(params.request_parse_status.ok());
+  const std::optional<NamedTensorConstRef> parsed_prompt_embed =
+      params.input_params.tensor_sources.get_named_tensor("prompt_embed");
+  ASSERT_TRUE(parsed_prompt_embed.has_value());
+  const std::vector<int64_t>* tags = get_tensor_parameter<std::vector<int64_t>>(
+      parsed_prompt_embed->get().parameters, "prompt_token_tags");
+  ASSERT_NE(tags, nullptr);
+  EXPECT_EQ(*tags, std::vector<int64_t>({0, 1}));
+}
+
 TEST(DiTRequestParamsTest, ImageOutputTypeDefaultsAndValidates) {
   proto::ImageGenerationRequest default_request = MakeImageRequest();
   DiTRequestParams default_params(default_request, "rid", "rtime");
@@ -396,6 +439,7 @@ TEST(DiTRequestParamsTest, PromptAudioSupportsBase64AndBinary) {
   proto::MediaSource* base64_source =
       base64_request.mutable_input()->mutable_prompt_audio();
   base64_source->set_type("base64");
+  base64_source->set_name("prompt_audio");
   base64_source->set_base64(wav_base64);
   DiTRequestParams base64_params(base64_request, "rid", "rtime");
 
@@ -403,6 +447,8 @@ TEST(DiTRequestParamsTest, PromptAudioSupportsBase64AndBinary) {
   proto::MediaSource* binary_source =
       binary_request.mutable_input()->mutable_prompt_audio();
   binary_source->set_type("binary");
+  binary_source->set_name("prompt_audio");
+  binary_source->set_modality("audio");
   binary_source->mutable_binary()->set_offset(2);
   binary_source->mutable_binary()->set_length(TinyWavBytes().size());
   DiTRequestParams binary_params(
@@ -410,18 +456,21 @@ TEST(DiTRequestParamsTest, PromptAudioSupportsBase64AndBinary) {
 
   ASSERT_TRUE(base64_params.request_parse_status.ok());
   ASSERT_TRUE(binary_params.request_parse_status.ok());
+  EXPECT_EQ(base64_params.input_params.media_sources.at(0).modality, "audio");
+  EXPECT_EQ(binary_params.input_params.media_sources.at(0).modality, "audio");
   const torch::Tensor base64_audio =
-      *base64_params.input_params.tensor_sources.get("prompt_audio");
+      base64_params.input_params.media_sources.at(0).tensor;
   EXPECT_EQ(base64_audio.scalar_type(), torch::kFloat32);
   EXPECT_TRUE(torch::equal(
-      base64_audio,
-      *binary_params.input_params.tensor_sources.get("prompt_audio")));
+      base64_audio, binary_params.input_params.media_sources.at(0).tensor));
 }
 
 TEST(DiTRequestParamsTest, RejectsOutOfBoundsBinaryPromptAudio) {
   proto::AudioGenerationRequest request = MakeAudioRequest();
   proto::MediaSource* source = request.mutable_input()->mutable_prompt_audio();
   source->set_type("binary");
+  source->set_name("prompt_audio");
+  source->set_modality("audio");
   source->mutable_binary()->set_offset(1);
   source->mutable_binary()->set_length(std::numeric_limits<uint64_t>::max());
 
@@ -465,8 +514,10 @@ TEST(DiTRequestParamsTest, RejectsBinaryTensorLengthMismatch) {
 
 TEST(DiTRequestParamsTest, RejectsMissingOrInvalidBinaryImagePayload) {
   proto::ImageGenerationRequest request = MakeImageRequest();
-  proto::MediaSource* source = request.mutable_input()->add_image_sources();
+  proto::MediaSource* source = request.mutable_input()->add_media_sources();
   source->set_type("binary");
+  source->set_name("image");
+  source->set_modality("image");
   source->mutable_binary()->set_length(4);
 
   DiTRequestParams missing_params(request, "rid", "rtime");
@@ -752,6 +803,84 @@ TEST(DiTGenerationParamsEqualityTest, DifferentRepetitionPenaltyAreNotEqual) {
   b.repetition_penalty = 1.1f;
 
   EXPECT_NE(a, b);
+}
+
+// ===========================================================================
+// verify_params for MiniMax-H3 video boundary validation
+// ===========================================================================
+
+TEST(DiTRequestParamsVerifyTest, MiniMaxH3ValidVideoRequestPasses) {
+  proto::VideoGenerationRequest request = MakeVideoRequest();
+  request.set_model("MiniMax-H3");
+  request.mutable_parameters()->set_num_inference_steps(16);
+  request.mutable_parameters()->set_size("1280*720");
+  DiTRequestParams params(request, "rid", "rtime");
+
+  EXPECT_TRUE(params.verify_params(
+      [](DiTRequestOutput /*unused*/) -> bool { return true; }));
+}
+
+TEST(DiTRequestParamsVerifyTest, MiniMaxH3NumVideosPerPromptRejected) {
+  proto::VideoGenerationRequest request = MakeVideoRequest();
+  request.set_model("MiniMax-H3");
+  request.mutable_parameters()->set_num_videos_per_prompt(2);
+  DiTRequestParams params(request, "rid", "rtime");
+
+  EXPECT_TRUE(VerifyFailsWithInvalidArgument(params));
+}
+
+TEST(DiTRequestParamsVerifyTest, MiniMaxH3InvalidFrameCountRejected) {
+  proto::VideoGenerationRequest request = MakeVideoRequest();
+  request.set_model("MiniMax-H3");
+  request.mutable_parameters()->set_num_frames(0);
+  DiTRequestParams params(request, "rid", "rtime");
+
+  EXPECT_TRUE(VerifyFailsWithInvalidArgument(params));
+}
+
+TEST(DiTRequestParamsVerifyTest, MiniMaxH3InvalidFpsRejected) {
+  proto::VideoGenerationRequest request = MakeVideoRequest();
+  request.set_model("MiniMax-H3");
+  request.mutable_parameters()->set_fps(0.0);
+  DiTRequestParams params(request, "rid", "rtime");
+
+  EXPECT_TRUE(VerifyFailsWithInvalidArgument(params));
+}
+
+TEST(DiTRequestParamsVerifyTest, MiniMaxH3UnsupportedDurationRejected) {
+  proto::VideoGenerationRequest request = MakeVideoRequest();
+  request.set_model("MiniMax-H3");
+  request.mutable_parameters()->set_num_frames(32);
+  request.mutable_parameters()->set_fps(8.0);
+  DiTRequestParams params(request, "rid", "rtime");
+
+  EXPECT_TRUE(VerifyFailsWithInvalidArgument(params));
+}
+
+TEST(DiTRequestParamsVerifyTest, MiniMaxH3UnsupportedMediaNameRejected) {
+  proto::VideoGenerationRequest request = MakeVideoRequest();
+  request.set_model("MiniMaxH3ModularPipeline");
+  proto::MediaSource* source = request.mutable_input()->add_media_sources();
+  source->set_type("base64");
+  source->set_name("bogus_source");
+  source->set_modality("image");
+  source->set_base64(kTinyPngBase64);
+  DiTRequestParams params(request, "rid", "rtime");
+
+  ASSERT_TRUE(params.request_parse_status.ok());
+  EXPECT_TRUE(VerifyFailsWithInvalidArgument(params));
+}
+
+TEST(DiTRequestParamsVerifyTest, NonMiniMaxVideoRequestSkipsH3Validation) {
+  proto::VideoGenerationRequest request = MakeVideoRequest();
+  request.mutable_parameters()->set_num_videos_per_prompt(2);
+  request.mutable_parameters()->set_num_inference_steps(16);
+  request.mutable_parameters()->set_size("1280*720");
+  DiTRequestParams params(request, "rid", "rtime");
+
+  // WanI2V does not opt into the MiniMax-H3 boundary rules.
+  EXPECT_TRUE(params.verify_params(
+      [](DiTRequestOutput /*unused*/) -> bool { return true; }));
 }
 
 }  // namespace

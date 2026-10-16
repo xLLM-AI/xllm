@@ -22,8 +22,8 @@ limitations under the License.
 
 #include <cstdint>
 #include <cstring>
-#include <opencv2/opencv.hpp>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "api_service/call.h"
@@ -31,6 +31,29 @@ limitations under the License.
 
 namespace xllm {
 namespace {
+
+torch::Tensor to_audio_encoder_tensor(const torch::Tensor& tensor) {
+  torch::Tensor audio = tensor.cpu().to(torch::kFloat32).contiguous();
+  if (audio.dim() == 3 && audio.size(1) == 1) {
+    audio = audio.squeeze(1);
+  }
+  if (audio.dim() == 3 && audio.size(0) == 1) {
+    audio = audio.squeeze(0);
+  }
+  CHECK_EQ(audio.dim(), 2)
+      << "Audio output must have shape [channels, samples], got "
+      << audio.sizes();
+  return audio;
+}
+
+// Stamps per-candidate identity shared by every generate_*_outputs caller.
+void fill_output_identity(DiTGenerationOutput& output,
+                          int32_t index,
+                          const DiTGenerationParams& params) {
+  output.index = index;
+  output.seed = params.seed;
+  output.seed_is_set = params.seed_is_set;
+}
 
 // Write a minimal PCM WAV file into `out`.
 // samples: float32 mono, range [-1, 1], shape (N,) on CPU.
@@ -95,7 +118,7 @@ void encode_wav(const torch::Tensor& samples,
 DiTRequest::DiTRequest(const std::string& request_id,
                        const std::string& x_request_id,
                        const std::string& x_request_time,
-                       const DiTRequestState& state,
+                       DiTRequestState state,
                        const std::string& service_request_id,
                        const std::string& source_xservice_addr,
                        RateLimiter* rate_limiter)
@@ -105,7 +128,7 @@ DiTRequest::DiTRequest(const std::string& request_id,
                   service_request_id,
                   source_xservice_addr,
                   rate_limiter),
-      state_(state) {}
+      state_(std::move(state)) {}
 
 bool DiTRequest::finished() const { return true; }
 
@@ -127,7 +150,8 @@ void DiTRequest::update_connection_status() {
   set_cancel();
 }
 
-void DiTRequest::handle_forward_output(torch::Tensor output) {
+void DiTRequest::handle_forward_output(torch::Tensor output,
+                                       torch::Tensor audio_output) {
   uint32_t output_count = 1;
   switch (state_.request_kind()) {
     case DiTRequestKind::kImage:
@@ -142,6 +166,10 @@ void DiTRequest::handle_forward_output(torch::Tensor output) {
       LOG(FATAL) << "Text request must not contain tensor output";
   }
   output_.tensors = torch::chunk(output, static_cast<int32_t>(output_count));
+  if (audio_output.defined()) {
+    output_.audio_tensors = torch::chunk(
+        audio_output, static_cast<int32_t>(output_.tensors.size()));
+  }
 }
 
 void DiTRequest::handle_forward_text_output(const std::string& text) {
@@ -163,9 +191,7 @@ std::vector<DiTGenerationOutput> DiTRequest::generate_image_outputs() const {
                                .contiguous();
     CHECK_EQ(tensor.dim(), 3);
     DiTGenerationOutput output;
-    output.index = index;
-    output.seed = params.seed;
-    output.seed_is_set = params.seed_is_set;
+    fill_output_identity(output, index, params);
     output.height = params.height;
     output.width = params.width;
     CHECK(encoder.encode(tensor, output.image));
@@ -177,6 +203,8 @@ std::vector<DiTGenerationOutput> DiTRequest::generate_image_outputs() const {
 std::vector<DiTGenerationOutput> DiTRequest::generate_video_outputs() const {
   const DiTGenerationParams& params = state_.generation_params();
   CHECK_EQ(output_.tensors.size(), params.num_videos_per_prompt);
+  CHECK(output_.audio_tensors.empty() ||
+        output_.audio_tensors.size() == output_.tensors.size());
 
   std::vector<DiTGenerationOutput> outputs;
   outputs.reserve(output_.tensors.size());
@@ -188,15 +216,24 @@ std::vector<DiTGenerationOutput> DiTRequest::generate_video_outputs() const {
                                .contiguous();
     CHECK_EQ(tensor.dim(), 4);
     DiTGenerationOutput output;
-    output.index = index;
-    output.seed = params.seed;
-    output.seed_is_set = params.seed_is_set;
-    output.height = params.height;
-    output.width = params.width;
+    fill_output_identity(output, index, params);
+    output.height = static_cast<int32_t>(tensor.size(2));
+    output.width = static_cast<int32_t>(tensor.size(3));
     output.num_frames = static_cast<int32_t>(tensor.size(0));
     output.video_fps = params.video_fps;
     FFmpegVideoEncoder encoder;
-    CHECK(encoder.encode(tensor, params.video_fps, "mp4", output.video));
+    if (output_.audio_tensors.empty()) {
+      CHECK(encoder.encode(tensor, params.video_fps, "mp4", output.video));
+    } else {
+      torch::Tensor audio =
+          to_audio_encoder_tensor(output_.audio_tensors[index]);
+      CHECK(encoder.encode(tensor,
+                           audio,
+                           params.video_fps,
+                           params.audio_sampling_rate,
+                           "mp4",
+                           output.video));
+    }
     outputs.emplace_back(std::move(output));
   }
   return outputs;
@@ -209,12 +246,10 @@ std::vector<DiTGenerationOutput> DiTRequest::generate_audio_outputs() const {
                               .squeeze(0)
                               .cpu()
                               .to(torch::kFloat32)
-                              .flatten()
-                              .contiguous();
+                              .contiguous()
+                              .flatten();
   DiTGenerationOutput output;
-  output.index = 0;
-  output.seed = params.seed;
-  output.seed_is_set = params.seed_is_set;
+  fill_output_identity(output, 0, params);
   encode_wav(samples, params.audio_sampling_rate, output.audio);
   return {std::move(output)};
 }
@@ -225,9 +260,7 @@ std::vector<DiTGenerationOutput> DiTRequest::generate_text_outputs() const {
   outputs.reserve(output_.text_output.size());
   for (size_t index = 0; index < output_.text_output.size(); ++index) {
     DiTGenerationOutput output;
-    output.index = index;
-    output.seed = params.seed;
-    output.seed_is_set = params.seed_is_set;
+    fill_output_identity(output, index, params);
     output.text = output_.text_output[index];
     outputs.emplace_back(std::move(output));
   }

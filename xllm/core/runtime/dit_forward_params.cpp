@@ -17,8 +17,12 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <optional>
+#include <string>
+#include <string_view>
 #include <utility>
 
+#include "core/framework/request/dit_input_sources.h"
 #include "util/utils.h"
 #include "worker.pb.h"
 
@@ -26,36 +30,32 @@ namespace xllm {
 
 namespace {
 
-bool serialize_named_tensors(
-    const std::vector<NamedTensor>& sources,
-    google::protobuf::RepeatedPtrField<proto::NamedTensor>* proto_sources) {
-  proto_sources->Reserve(static_cast<int32_t>(sources.size()));
-  for (const NamedTensor& source : sources) {
-    proto::NamedTensor* proto_source = proto_sources->Add();
-    proto_source->set_name(source.name);
-    if (!source.tensor.defined() || !source.tensor.device().is_cpu() ||
-        !source.tensor.is_contiguous() ||
-        !util::torch_to_proto(source.tensor, proto_source->mutable_tensor())) {
-      LOG(ERROR) << "Failed to serialize named tensor: " << source.name;
-      return false;
-    }
+std::optional<std::pair<torch::Tensor, TensorParameters>> parse_named_tensor(
+    const proto::Tensor& proto_tensor,
+    std::string_view source_name) {
+  torch::Tensor tensor = util::proto_to_torch(proto_tensor);
+  if (!tensor.defined()) {
+    LOG(ERROR) << "Failed to deserialize named tensor: " << source_name;
+    return std::nullopt;
   }
-  return true;
+  std::optional<TensorParameters> parameters =
+      proto_to_tensor_parameters(proto_tensor);
+  if (!parameters.has_value()) {
+    return std::nullopt;
+  }
+  return std::make_pair(std::move(tensor), std::move(*parameters));
 }
 
-template <typename Sources>
-bool deserialize_named_tensors(
-    const google::protobuf::RepeatedPtrField<proto::NamedTensor>& proto_sources,
-    Sources& sources) {
-  sources.entries().reserve(proto_sources.size());
-  for (const proto::NamedTensor& proto_source : proto_sources) {
-    torch::Tensor tensor = util::proto_to_torch(proto_source.tensor());
-    if (!tensor.defined()) {
-      LOG(ERROR) << "Failed to deserialize named tensor: "
-                 << proto_source.name();
-      return false;
-    }
-    sources.add(proto_source.name(), std::move(tensor));
+template <typename Source, typename ProtoSource>
+bool serialize_named_tensor(const Source& source, ProtoSource* proto_source) {
+  proto_source->set_name(source.name);
+  if (!source.tensor.defined() || !source.tensor.device().is_cpu() ||
+      !source.tensor.is_contiguous() ||
+      !util::torch_to_proto(source.tensor, proto_source->mutable_tensor()) ||
+      !tensor_parameters_to_proto(source.parameters,
+                                  proto_source->mutable_tensor())) {
+    LOG(ERROR) << "Failed to serialize named tensor: " << source.name;
+    return false;
   }
   return true;
 }
@@ -75,11 +75,22 @@ bool DiTForwardInput::to_proto(proto::DiTForwardInput* proto_input) const {
                                                 negative_prompts.end());
   encoded_input.mutable_negative_prompts_2()->Add(negative_prompts_2.begin(),
                                                   negative_prompts_2.end());
-  if (!serialize_named_tensors(image_sources.entries(),
-                               encoded_input.mutable_image_sources()) ||
-      !serialize_named_tensors(tensor_sources.entries(),
-                               encoded_input.mutable_tensor_sources())) {
-    return false;
+  encoded_input.mutable_media_sources()->Reserve(
+      static_cast<int32_t>(media_sources.size()));
+  for (const MediaNamedTensor& source : media_sources.entries()) {
+    proto::MediaNamedTensor* proto_source =
+        encoded_input.mutable_media_sources()->Add();
+    proto_source->set_modality(source.modality);
+    if (!serialize_named_tensor(source, proto_source)) {
+      return false;
+    }
+  }
+  encoded_input.mutable_tensor_sources()->Reserve(
+      static_cast<int32_t>(tensor_sources.size()));
+  for (const NamedTensor& source : tensor_sources.entries()) {
+    if (!serialize_named_tensor(source, encoded_input.add_tensor_sources())) {
+      return false;
+    }
   }
   if (!audio_prompt_text.empty()) {
     encoded_input.set_audio_prompt_text(audio_prompt_text);
@@ -104,11 +115,36 @@ bool DiTForwardInput::from_proto(const proto::DiTForwardInput& proto_input) {
   decoded_input.negative_prompts_2.assign(
       proto_input.negative_prompts_2().begin(),
       proto_input.negative_prompts_2().end());
-  if (!deserialize_named_tensors(proto_input.image_sources(),
-                                 decoded_input.image_sources) ||
-      !deserialize_named_tensors(proto_input.tensor_sources(),
-                                 decoded_input.tensor_sources)) {
-    return false;
+  const auto append_media_source = [&decoded_input](const auto& proto_source,
+                                                    std::string modality) {
+    std::optional<std::pair<torch::Tensor, TensorParameters>> source =
+        parse_named_tensor(proto_source.tensor(), proto_source.name());
+    if (!source.has_value()) {
+      return false;
+    }
+    decoded_input.media_sources.add(proto_source.name(),
+                                    std::move(modality),
+                                    std::move(source->first),
+                                    std::move(source->second));
+    return true;
+  };
+  for (const proto::MediaNamedTensor& proto_source :
+       proto_input.media_sources()) {
+    if (!append_media_source(proto_source, proto_source.modality())) {
+      return false;
+    }
+  }
+  decoded_input.tensor_sources.entries().reserve(
+      proto_input.tensor_sources_size());
+  for (const proto::NamedTensor& proto_source : proto_input.tensor_sources()) {
+    std::optional<std::pair<torch::Tensor, TensorParameters>> source =
+        parse_named_tensor(proto_source.tensor(), proto_source.name());
+    if (!source.has_value()) {
+      return false;
+    }
+    decoded_input.tensor_sources.add(proto_source.name(),
+                                     std::move(source->first),
+                                     std::move(source->second));
   }
   if (!decoded_input.generation_params.from_proto(
           proto_input.generation_params())) {
@@ -138,6 +174,17 @@ bool DiTForwardOutput::to_proto(proto::DiTForwardOutput* proto_output) const {
       return false;
     }
   }
+  auto* proto_audio_tensors =
+      encoded_output.mutable_audio_tensors()->mutable_tensors();
+  proto_audio_tensors->Reserve(static_cast<int32_t>(audio_tensors.size()));
+  for (const torch::Tensor& tensor : audio_tensors) {
+    if (!tensor.defined() || !tensor.device().is_cpu() ||
+        !tensor.is_contiguous() ||
+        !util::torch_to_proto(tensor, proto_audio_tensors->Add())) {
+      LOG(ERROR) << "Failed to serialize DiT audio output tensor";
+      return false;
+    }
+  }
   encoded_output.mutable_text_output()->Add(text_output.begin(),
                                             text_output.end());
   proto_output->Swap(&encoded_output);
@@ -155,6 +202,16 @@ bool DiTForwardOutput::from_proto(const proto::DiTForwardOutput& proto_output) {
       return false;
     }
     decoded_output.tensors.emplace_back(std::move(tensor));
+  }
+  const auto& proto_audio_tensors = proto_output.audio_tensors().tensors();
+  decoded_output.audio_tensors.reserve(proto_audio_tensors.size());
+  for (const proto::Tensor& proto_tensor : proto_audio_tensors) {
+    torch::Tensor tensor = util::proto_to_torch(proto_tensor);
+    if (!tensor.defined()) {
+      LOG(ERROR) << "Failed to deserialize DiT audio output tensor";
+      return false;
+    }
+    decoded_output.audio_tensors.emplace_back(std::move(tensor));
   }
   decoded_output.text_output.assign(proto_output.text_output().begin(),
                                     proto_output.text_output().end());

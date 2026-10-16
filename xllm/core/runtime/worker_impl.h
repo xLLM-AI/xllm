@@ -370,6 +370,9 @@ class WorkerImpl {
   }
 
  protected:
+  torch::Tensor select_hidden_states_for_embedding(
+      const ModelOutput& model_output) const;
+
   struct HierarchyKVCacheTransferContext {
     KVCacheShape kv_cache_shape;
     KVCacheCreateOptions create_options;

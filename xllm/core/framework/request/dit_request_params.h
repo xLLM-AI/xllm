@@ -2,6 +2,7 @@
 #include <torch/types.h>
 
 #include <cstdint>
+#include <functional>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>

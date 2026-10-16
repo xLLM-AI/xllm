@@ -30,7 +30,7 @@ namespace xllm {
 class VAEImageProcessorImpl : public torch::nn::Module {
  public:
   explicit VAEImageProcessorImpl(
-      ModelContext context,
+      const ModelContext& context,
       bool do_resize = true,
       bool do_normalize = true,
       bool do_binarize = false,
@@ -170,37 +170,45 @@ class VAEImageProcessorImpl : public torch::nn::Module {
 
     torch::Tensor resized;
     if (resize_mode == "lanczos") {
-      std::vector<torch::Tensor> resized_images;
-      resized_images.reserve(image.size(0));
+      CHECK_EQ(image.scalar_type(), torch::kUInt8)
+          << "lanczos resize expects uint8 pixels";
+      const int64_t c = image.size(1);
+      resized = torch::empty({image.size(0), c, height, width}, torch::kUInt8);
+      // Lanczos operates on packed HWC data. Reuse one HWC scratch tensor and
+      // copy each result directly into the final BCHW batch to avoid creating
+      // one output tensor per frame followed by a second full-size stack.
+      torch::Tensor hwc_out = torch::empty({height, width, c}, torch::kUInt8);
       for (int64_t i = 0; i < image.size(0); ++i) {
         auto chw_image = image[i];
         auto hwc_image = chw_image.permute({1, 2, 0}).contiguous();
 
         int64_t h = hwc_image.size(0);
         int64_t w = hwc_image.size(1);
-        int64_t c = hwc_image.size(2);
-
-        torch::Tensor out = torch::empty({height, width, c}, torch::kUInt8);
         lanczos::resize_8bpc(hwc_image.data_ptr<uint8_t>(),
                              static_cast<int32_t>(w),
                              static_cast<int32_t>(h),
                              static_cast<int32_t>(c),
                              static_cast<int32_t>(width),
                              static_cast<int32_t>(height),
-                             out.data_ptr<uint8_t>());
-        resized_images.emplace_back(out.permute({2, 0, 1}));
+                             hwc_out.data_ptr<uint8_t>());
+        resized[i].copy_(hwc_out.permute({2, 0, 1}));
       }
-      resized = torch::stack(resized_images);
-    } else if (resize_mode == "bicubic") {
+    } else if (resize_mode == "bicubic" || resize_mode == "bilinear") {
+      const bool antialias = resize_mode == "bicubic";
       auto options = torch::nn::functional::InterpolateFuncOptions()
                          .size(std::vector<int64_t>{height, width})
                          .align_corners(false)
-                         .antialias(true)
-                         .mode(torch::kBicubic);
+                         .antialias(antialias);
+      if (antialias) {
+        options.mode(torch::kBicubic);
+      } else {
+        options.mode(torch::kBilinear);
+      }
       resized = torch::nn::functional::interpolate(image, options);
     } else {
-      LOG(FATAL) << "Currently only support 'lanczos' and 'bicubic'"
-                 << ", but got: " << resize_mode;
+      LOG(FATAL) << "Currently only support 'lanczos', 'bicubic' and "
+                    "'bilinear', but got: "
+                 << resize_mode;
     }
 
     if (squeeze_batch) {

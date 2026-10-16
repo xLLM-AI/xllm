@@ -79,7 +79,7 @@ class FluxFillPipelineImpl : public FluxPipelineBaseImpl {
                          : std::make_optional(input.prompts_2);
 
     std::vector<torch::Tensor> image_sources =
-        input.image_sources.get({"image", "mask_image"});
+        input.media_sources.get({"image", "mask_image"});
     std::optional<torch::Tensor> image =
         image_sources.empty() ? std::nullopt
                               : std::make_optional(image_sources[0]);

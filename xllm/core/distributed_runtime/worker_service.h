@@ -153,9 +153,7 @@ class WorkerService : public proto::DistributeWorker {
                    ::google::protobuf::Closure* done) override;
 
  private:
-  void step(const DiTForwardInput& input,
-            std::vector<torch::Tensor>& tensors,
-            std::vector<std::string>& text_output);
+  void step(const DiTForwardInput& input, DiTForwardOutput& output);
 
   template <typename Input>
   void step(Input& fwd_input,

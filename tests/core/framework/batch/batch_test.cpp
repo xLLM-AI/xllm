@@ -2143,7 +2143,7 @@ TEST(BatchTest, ForwardInputPackedRoundTripPreservesTransportFields) {
       torch::tensor({{3.0f, 4.0f}})));
 }
 
-TEST(BatchTest, NativeDiTShmRoundTripOwnsSourcesAcrossSegmentOverwrite) {
+TEST(BatchTest, NativeDiTShmRoundTripOwnsTensorSourcesAcrossSegmentOverwrite) {
   DiTForwardInput input;
   input.batch_size = 2;
   input.prompts = {"first prompt", "second prompt"};
@@ -2157,15 +2157,10 @@ TEST(BatchTest, NativeDiTShmRoundTripOwnsSourcesAcrossSegmentOverwrite) {
   input.generation_params.seed = 1234567;
   input.generation_params.seed_is_set = true;
   input.generation_params.audio_sampling_rate = 48000;
-  input.image_sources.add("unknown",
-                          torch::tensor({1, 2}, torch::dtype(torch::kUInt8)));
-  input.image_sources.add("unknown",
-                          torch::tensor({3, 4}, torch::dtype(torch::kUInt8)));
-  input.image_sources.add("mask_image",
-                          torch::tensor({5, 6}, torch::dtype(torch::kUInt8)));
   input.tensor_sources.add("latent", torch::tensor({1.5f, 2.5f}));
   input.tensor_sources.add("prompt_embed", torch::tensor({3.5f, 4.5f}));
-  input.tensor_sources.add("prompt_audio", torch::tensor({0.25f, 0.5f}));
+  input.media_sources.add(
+      "prompt_audio", "audio", torch::tensor({0.25f, 0.5f}));
 
   DiTForwardInput round_trip;
   {
@@ -2189,10 +2184,10 @@ TEST(BatchTest, NativeDiTShmRoundTripOwnsSourcesAcrossSegmentOverwrite) {
 
     DiTForwardInput overwrite_input = input;
     overwrite_input.batch_size = 9;
-    for (NamedTensor& source : overwrite_input.image_sources.entries()) {
+    for (NamedTensor& source : overwrite_input.tensor_sources.entries()) {
       source.tensor = torch::zeros_like(source.tensor);
     }
-    for (NamedTensor& source : overwrite_input.tensor_sources.entries()) {
+    for (MediaNamedTensor& source : overwrite_input.media_sources.entries()) {
       source.tensor = torch::zeros_like(source.tensor);
     }
     ASSERT_TRUE(writer_manager.input_write(overwrite_input));
@@ -2200,12 +2195,9 @@ TEST(BatchTest, NativeDiTShmRoundTripOwnsSourcesAcrossSegmentOverwrite) {
     DiTForwardInput overwritten_round_trip;
     reader_manager.input_read(overwritten_round_trip);
     EXPECT_EQ(overwritten_round_trip.batch_size, 9);
-    ASSERT_EQ(overwritten_round_trip.image_sources.size(), 3u);
-    EXPECT_TRUE(torch::equal(overwritten_round_trip.image_sources.at(0).tensor,
-                             torch::zeros({2}, torch::dtype(torch::kUInt8))));
-    ASSERT_EQ(overwritten_round_trip.tensor_sources.size(), 3u);
+    ASSERT_EQ(overwritten_round_trip.media_sources.size(), 1u);
     EXPECT_TRUE(
-        torch::equal(overwritten_round_trip.tensor_sources.entries()[0].tensor,
+        torch::equal(overwritten_round_trip.media_sources.entries()[0].tensor,
                      torch::zeros({2}, torch::dtype(torch::kFloat32))));
   }
 
@@ -2217,15 +2209,17 @@ TEST(BatchTest, NativeDiTShmRoundTripOwnsSourcesAcrossSegmentOverwrite) {
   EXPECT_EQ(round_trip.audio_prompt_text, input.audio_prompt_text);
   EXPECT_EQ(round_trip.generation_params, input.generation_params);
 
-  ASSERT_EQ(round_trip.image_sources.size(), input.image_sources.size());
-  for (size_t index = 0; index < input.image_sources.size(); ++index) {
-    const NamedTensor& actual_source = round_trip.image_sources.at(index);
-    const NamedTensor& expected_source = input.image_sources.at(index);
+  ASSERT_EQ(round_trip.media_sources.size(), input.media_sources.size());
+  for (size_t index = 0; index < input.media_sources.size(); ++index) {
+    const MediaNamedTensor& actual_source = round_trip.media_sources.at(index);
+    const MediaNamedTensor& expected_source = input.media_sources.at(index);
     EXPECT_EQ(actual_source.name, expected_source.name);
-    EXPECT_EQ(actual_source.tensor.scalar_type(), torch::kUInt8);
+    EXPECT_EQ(actual_source.modality, expected_source.modality);
+    EXPECT_EQ(actual_source.tensor.scalar_type(), torch::kFloat32);
     EXPECT_TRUE(actual_source.tensor.device().is_cpu());
     EXPECT_TRUE(torch::equal(actual_source.tensor, expected_source.tensor));
   }
+
   ASSERT_EQ(round_trip.tensor_sources.size(), input.tensor_sources.size());
   for (size_t index = 0; index < input.tensor_sources.size(); ++index) {
     const NamedTensor& actual_source =
@@ -2239,11 +2233,9 @@ TEST(BatchTest, NativeDiTShmRoundTripOwnsSourcesAcrossSegmentOverwrite) {
 
   const DiTForwardInput prepared_input =
       round_trip.to(torch::Device(torch::kCPU));
-  EXPECT_EQ(prepared_input.image_sources.at(0).tensor.scalar_type(),
-            torch::kUInt8);
   EXPECT_EQ(prepared_input.tensor_sources.entries()[0].tensor.scalar_type(),
             torch::kBFloat16);
-  EXPECT_EQ(prepared_input.tensor_sources.entries()[2].tensor.scalar_type(),
+  EXPECT_EQ(prepared_input.media_sources.entries()[0].tensor.scalar_type(),
             torch::kFloat32);
 }
 
@@ -2304,6 +2296,7 @@ TEST(BatchTest, ForwardOutputShmRoundTripPreservesJsonObjectErrors) {
                                               speculative_token_stats,
                                               /*dit_images=*/{},
                                               /*dit_text_output=*/{},
+                                              /*dit_audio=*/{},
                                               undefined,
                                               /*prepared_layer_id=*/-1,
                                               undefined,

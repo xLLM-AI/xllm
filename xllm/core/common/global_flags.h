@@ -45,6 +45,8 @@ DECLARE_string(python_model_path);
 
 DECLARE_string(task);
 
+DECLARE_bool(enable_return_embedding_modality_tags);
+
 DECLARE_int32(limit_image_per_prompt);
 
 DECLARE_string(mm_download_headers);
@@ -399,6 +401,8 @@ DECLARE_string(dit_sparse_attention_version);
 DECLARE_int64(dit_sparse_attention_mask_refresh_steps);
 
 DECLARE_bool(dit_laser_attention_enabled);
+
+DECLARE_string(dit_h3_task_type);
 
 DECLARE_bool(use_audio_in_video);
 

@@ -30,6 +30,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/types.h"
+#include "core/framework/multimodal/embedding_output.h"
 #include "core/framework/multimodal/mm_data.h"
 #include "core/framework/sampling/json_object_grammar.h"
 #include "core/framework/sampling/sampling_params.h"
@@ -239,7 +240,8 @@ class Sequence {
   }
 
   // update mm embeddings to the sequence
-  void update_mm_embeddings(const std::vector<torch::Tensor>& mm_embeddings);
+  void update_mm_embeddings(const std::vector<torch::Tensor>& mm_embeddings,
+                            EmbeddingOutputMetadata metadata = {});
   // update embeddings to the sequence
   void update_embeddings(const torch::Tensor& embedding);
   void update_mtp_bootstrap_embedding(const torch::Tensor& embedding);
@@ -624,6 +626,7 @@ class Sequence {
 
   // mm embedding of the sequence
   std::vector<torch::Tensor> output_mm_embeddings_;
+  EmbeddingOutputMetadata output_mm_embeddings_metadata_;
 
   // embeddings of the sequence
   torch::Tensor output_embedding_;

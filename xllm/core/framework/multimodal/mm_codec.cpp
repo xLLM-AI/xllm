@@ -23,14 +23,21 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/opt.h>
+#include <libavutil/rational.h>
 #include <libavutil/samplefmt.h>
 #include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
 }
 
+#include "core/util/scope_guard.h"
+
 namespace xllm {
 
 namespace {
+
+// Size of the AVIO buffer shared by all in-memory format contexts in this
+// file.
+constexpr int32_t kAvioBufferSize = 1 << 16;
 
 struct MemCtx {
   const uint8_t* mem_ptr;
@@ -170,15 +177,19 @@ class MemoryMediaReader {
     if (!fmt_ctx_) {
       return false;
     }
-    constexpr int32_t avio_buf_sz = 1 << 16;
     avio_buf_ =
-        static_cast<uint8_t*>(av_malloc(static_cast<size_t>(avio_buf_sz)));
+        static_cast<uint8_t*>(av_malloc(static_cast<size_t>(kAvioBufferSize)));
     if (!avio_buf_) {
       return false;
     }
 
-    avio_ctx_ = avio_alloc_context(
-        avio_buf_, avio_buf_sz, 0, &mc_, &Reader::read, nullptr, &Reader::seek);
+    avio_ctx_ = avio_alloc_context(avio_buf_,
+                                   kAvioBufferSize,
+                                   0,
+                                   &mc_,
+                                   &Reader::read,
+                                   nullptr,
+                                   &Reader::seek);
     if (!avio_ctx_) {
       return false;
     }
@@ -395,9 +406,13 @@ class MemoryVideoReader : public MemoryMediaReader {
 
 class MemoryAudioReader : public MemoryMediaReader {
  public:
-  MemoryAudioReader(const uint8_t* data, size_t size, int64_t target_sr = 16000)
+  MemoryAudioReader(const uint8_t* data,
+                    size_t size,
+                    int64_t target_sr = 16000,
+                    int32_t target_channels = 1)
       : MemoryMediaReader(data, size) {
     target_sr_ = target_sr;
+    target_ch_ = target_channels;
   }
 
   ~MemoryAudioReader() {
@@ -484,23 +499,23 @@ class MemoryAudioReader : public MemoryMediaReader {
       return false;
     }
 
-    // build output tensor and compute metadata
+    CHECK_EQ(pcm_.size() % static_cast<size_t>(target_ch_), 0);
+    const int64_t sample_count =
+        static_cast<int64_t>(pcm_.size() / static_cast<size_t>(target_ch_));
     if (target_ch_ == 1) {
       tensor = torch::from_blob(pcm_.data(),
-                                {static_cast<int32_t>(pcm_.size())},
+                                {sample_count},
                                 torch::TensorOptions().dtype(torch::kFloat32))
                    .clone();
-      metadata.duration = static_cast<double>(pcm_.size()) / target_sr_;
     } else {
-      int32_t T =
-          static_cast<int32_t>(pcm_.size() / static_cast<size_t>(target_ch_));
       tensor = torch::from_blob(pcm_.data(),
-                                {T, target_ch_},
+                                {sample_count, target_ch_},
                                 torch::TensorOptions().dtype(torch::kFloat32))
                    .permute({1, 0})
-                   .clone();
-      metadata.duration = static_cast<double>(T) / target_sr_;
+                   .clone()
+                   .contiguous();
     }
+    metadata.duration = static_cast<double>(sample_count) / target_sr_;
     metadata.sample_rate = target_sr_;
     metadata.num_channels = target_ch_;
     return true;
@@ -626,10 +641,12 @@ bool FFmpegVideoDecoder::decode(std::string_view raw_data,
 bool FFmpegAudioDecoder::decode(std::string_view raw_data,
                                 torch::Tensor& t,
                                 AudioMetadata& metadata,
-                                int64_t target_sr) {
+                                int64_t target_sr,
+                                int32_t target_channels) {
   MemoryAudioReader reader(reinterpret_cast<const uint8_t*>(raw_data.data()),
                            raw_data.size(),
-                           target_sr);
+                           target_sr,
+                           target_channels);
 
   if (!reader.init(metadata) || !reader.read(t, metadata)) {
     LOG(INFO) << "audio decode failed";
@@ -686,6 +703,40 @@ struct Writer {
   }
 };
 
+// Adds a stream carrying codec_ctx's parameters to the output format.
+AVStream* add_stream(AVFormatContext* out, AVCodecContext* codec_ctx) {
+  AVStream* stream = avformat_new_stream(out, nullptr);
+  if (!stream) {
+    return nullptr;
+  }
+  stream->time_base = codec_ctx->time_base;
+  if (avcodec_parameters_from_context(stream->codecpar, codec_ctx) < 0) {
+    return nullptr;
+  }
+  return stream;
+}
+
+// Both encoders hand packet ownership and stream interleaving to the muxer.
+int32_t write_encoded_packets(AVFormatContext* format,
+                              AVCodecContext* codec,
+                              AVStream* stream,
+                              AVPacket* packet) {
+  int32_t packet_count = 0;
+  int32_t result = 0;
+  while ((result = avcodec_receive_packet(codec, packet)) >= 0) {
+    av_packet_rescale_ts(packet, codec->time_base, stream->time_base);
+    packet->stream_index = stream->index;
+    result = av_interleaved_write_frame(format, packet);
+    av_packet_unref(packet);
+    if (result < 0) {
+      return result;
+    }
+    ++packet_count;
+  }
+  return result == AVERROR(EAGAIN) || result == AVERROR_EOF ? packet_count
+                                                            : result;
+}
+
 }  // namespace
 
 class MemoryMediaWriter {
@@ -700,7 +751,7 @@ class MemoryMediaWriter {
       avcodec_free_context(&codec_ctx_);
     }
     if (fmt_ctx_) {
-      if (!finished_) {
+      if (header_written_ && !finished_) {
         av_write_trailer(fmt_ctx_);
       }
       avformat_free_context(fmt_ctx_);
@@ -712,6 +763,43 @@ class MemoryMediaWriter {
   }
 
  protected:
+  bool init_memory_output_context(const char* format) {
+    uint8_t* avio_buffer =
+        static_cast<uint8_t*>(av_malloc(static_cast<size_t>(kAvioBufferSize)));
+    if (avio_buffer == nullptr) {
+      return false;
+    }
+
+    avio_ctx_ = avio_alloc_context(avio_buffer,
+                                   kAvioBufferSize,
+                                   1,
+                                   &write_ctx_,
+                                   nullptr,
+                                   &Writer::write,
+                                   &Writer::seek);
+    if (avio_ctx_ == nullptr) {
+      av_freep(reinterpret_cast<void**>(&avio_buffer));
+      return false;
+    }
+    avio_ctx_->seekable = AVIO_SEEKABLE_NORMAL;
+
+    const AVOutputFormat* output_format =
+        av_guess_format(format, nullptr, nullptr);
+    if (output_format == nullptr) {
+      LOG(ERROR) << "MemoryMediaWriter: no muxer for " << format;
+      return false;
+    }
+
+    if (avformat_alloc_output_context2(
+            &fmt_ctx_, output_format, nullptr, nullptr) < 0 ||
+        fmt_ctx_ == nullptr) {
+      return false;
+    }
+    fmt_ctx_->pb = avio_ctx_;
+    fmt_ctx_->flags |= AVFMT_FLAG_CUSTOM_IO;
+    return true;
+  }
+
   bool init(const char* format,
             AVCodecID codec_id,
             int32_t width,
@@ -726,38 +814,19 @@ class MemoryMediaWriter {
       return false;
     }
 
-    constexpr int32_t avio_buf_sz = 1 << 16;
-    uint8_t* avio_buf =
-        static_cast<uint8_t*>(av_malloc(static_cast<size_t>(avio_buf_sz)));
-    if (!avio_buf) {
+    if (!init_memory_output_context(format)) {
       return false;
     }
 
-    avio_ctx_ = avio_alloc_context(avio_buf,
-                                   avio_buf_sz,
-                                   1,
-                                   &write_ctx_,
-                                   nullptr,
-                                   &Writer::write,
-                                   &Writer::seek);
-    if (!avio_ctx_) {
-      av_freep(reinterpret_cast<void**>(&avio_buf));
+    if (!std::isfinite(fps) || fps <= 0.0) {
+      LOG(ERROR) << "MemoryMediaWriter: fps must be finite and positive";
       return false;
     }
-    avio_ctx_->seekable = AVIO_SEEKABLE_NORMAL;
-
-    const AVOutputFormat* fmt = av_guess_format(format, nullptr, nullptr);
-    if (!fmt) {
-      LOG(ERROR) << "MemoryMediaWriter: no muxer for " << format;
+    const AVRational frame_rate = av_d2q(fps, 1000000);
+    if (frame_rate.num <= 0 || frame_rate.den <= 0) {
+      LOG(ERROR) << "MemoryMediaWriter: invalid fps " << fps;
       return false;
     }
-
-    if (avformat_alloc_output_context2(&fmt_ctx_, fmt, nullptr, nullptr) < 0 ||
-        !fmt_ctx_) {
-      return false;
-    }
-    fmt_ctx_->pb = avio_ctx_;
-    fmt_ctx_->flags |= AVFMT_FLAG_CUSTOM_IO;
 
     codec_ctx_ = avcodec_alloc_context3(codec);
     if (!codec_ctx_) {
@@ -766,8 +835,8 @@ class MemoryMediaWriter {
 
     codec_ctx_->width = width;
     codec_ctx_->height = height;
-    codec_ctx_->time_base = {1, static_cast<int32_t>(std::llround(fps))};
-    codec_ctx_->framerate = {static_cast<int32_t>(std::llround(fps)), 1};
+    codec_ctx_->time_base = av_inv_q(frame_rate);
+    codec_ctx_->framerate = frame_rate;
     codec_ctx_->pix_fmt = pix_fmt;
 
     if (fmt_ctx_->oformat->flags & AVFMT_GLOBALHEADER) {
@@ -780,17 +849,8 @@ class MemoryMediaWriter {
       return false;
     }
 
-    stream_ = avformat_new_stream(fmt_ctx_, nullptr);
+    stream_ = xllm::add_stream(fmt_ctx_, codec_ctx_);
     if (!stream_) {
-      return false;
-    }
-    stream_->time_base = codec_ctx_->time_base;
-    if (avcodec_parameters_from_context(stream_->codecpar, codec_ctx_) < 0) {
-      return false;
-    }
-
-    if (avformat_write_header(fmt_ctx_, nullptr) < 0) {
-      LOG(ERROR) << "MemoryMediaWriter: avformat_write_header failed";
       return false;
     }
 
@@ -813,31 +873,28 @@ class MemoryMediaWriter {
   }
 
   bool finish() {
-    avcodec_send_frame(codec_ctx_, nullptr);
-    if (!drain_packets()) {
+    const int32_t result = av_write_trailer(fmt_ctx_);
+    finished_ = true;
+    avio_flush(avio_ctx_);
+    return result >= 0;
+  }
+
+  bool write_header() {
+    if (header_written_) {
+      return true;
+    }
+    if (avformat_write_header(fmt_ctx_, nullptr) < 0) {
+      LOG(ERROR) << "MemoryMediaWriter: avformat_write_header failed";
       return false;
     }
-    av_write_trailer(fmt_ctx_);
-    finished_ = true;
+    header_written_ = true;
     return true;
   }
 
   std::vector<uint8_t> take_output() { return std::move(out_buf_); }
 
-  AVCodecContext* codec_ctx() { return codec_ctx_; }
-  AVStream* stream() { return stream_; }
-
   bool drain_packets() {
-    while (avcodec_receive_packet(codec_ctx_, pkt_) == 0) {
-      av_packet_rescale_ts(pkt_, codec_ctx_->time_base, stream_->time_base);
-      pkt_->stream_index = stream_->index;
-      if (av_interleaved_write_frame(fmt_ctx_, pkt_) < 0) {
-        av_packet_unref(pkt_);
-        return false;
-      }
-      av_packet_unref(pkt_);
-    }
-    return true;
+    return write_encoded_packets(fmt_ctx_, codec_ctx_, stream_, pkt_) >= 0;
   }
 
   AVFormatContext* fmt_ctx_ = nullptr;
@@ -847,14 +904,190 @@ class MemoryMediaWriter {
   AVStream* stream_ = nullptr;
   MemWriteCtx write_ctx_{&out_buf_, 0};
   std::vector<uint8_t> out_buf_;
+  bool header_written_ = false;
   bool finished_ = false;
+};
+
+class MemoryAudioWriter final {
+ public:
+  MemoryAudioWriter() = default;
+
+  ~MemoryAudioWriter() {
+    av_packet_free(&packet_);
+    av_frame_free(&frame_);
+    swr_free(&swr_ctx_);
+    avcodec_free_context(&codec_ctx_);
+  }
+
+  // Set up the AAC encoder and a FLTP resampler for `channels` planar-float
+  // input at `sample_rate`.
+  bool open(int32_t sample_rate, int32_t channels, AVFormatContext* format) {
+    const AVCodec* codec = avcodec_find_encoder(AV_CODEC_ID_AAC);
+    if (!codec) {
+      LOG(ERROR) << "MemoryAudioWriter: AAC encoder not available";
+      return false;
+    }
+    codec_ctx_ = avcodec_alloc_context3(codec);
+    if (!codec_ctx_) {
+      return false;
+    }
+    codec_ctx_->bit_rate = 192000;
+    codec_ctx_->sample_rate = sample_rate;
+    codec_ctx_->time_base = {1, sample_rate};
+    codec_ctx_->sample_fmt = AV_SAMPLE_FMT_FLTP;
+    if (codec->sample_fmts) {
+      codec_ctx_->sample_fmt = codec->sample_fmts[0];
+      for (const AVSampleFormat* sample_fmt = codec->sample_fmts;
+           *sample_fmt != AV_SAMPLE_FMT_NONE;
+           ++sample_fmt) {
+        if (*sample_fmt == AV_SAMPLE_FMT_FLTP) {
+          codec_ctx_->sample_fmt = *sample_fmt;
+          break;
+        }
+      }
+    }
+    av_channel_layout_default(&codec_ctx_->ch_layout, channels);
+    if (format->oformat->flags & AVFMT_GLOBALHEADER) {
+      codec_ctx_->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+    }
+    if (avcodec_open2(codec_ctx_, codec, nullptr) < 0) {
+      LOG(ERROR) << "MemoryAudioWriter: failed to open AAC encoder";
+      return false;
+    }
+
+    AVChannelLayout input_layout;
+    av_channel_layout_default(&input_layout, channels);
+    const bool swr_ok = swr_alloc_set_opts2(&swr_ctx_,
+                                            &codec_ctx_->ch_layout,
+                                            codec_ctx_->sample_fmt,
+                                            sample_rate,
+                                            &input_layout,
+                                            AV_SAMPLE_FMT_FLTP,
+                                            sample_rate,
+                                            0,
+                                            nullptr) >= 0 &&
+                        swr_ctx_ && swr_init(swr_ctx_) >= 0;
+    av_channel_layout_uninit(&input_layout);
+    if (!swr_ok) {
+      LOG(ERROR) << "MemoryAudioWriter: failed to initialize audio resampler";
+      return false;
+    }
+
+    frame_size_ = codec_ctx_->frame_size > 0 ? codec_ctx_->frame_size : 1024;
+    frame_ = av_frame_alloc();
+    if (!frame_) {
+      return false;
+    }
+    frame_->format = codec_ctx_->sample_fmt;
+    frame_->sample_rate = sample_rate;
+    frame_->nb_samples = frame_size_;
+    if (av_channel_layout_copy(&frame_->ch_layout, &codec_ctx_->ch_layout) <
+            0 ||
+        av_frame_get_buffer(frame_, 0) < 0) {
+      return false;
+    }
+    packet_ = av_packet_alloc();
+    if (!packet_) {
+      return false;
+    }
+    stream_ = xllm::add_stream(format, codec_ctx_);
+    if (!stream_) {
+      return false;
+    }
+    format_ = format;
+    channels_ = channels;
+    return true;
+  }
+
+  bool write_frame(const float* audio_ptr,
+                   int64_t samples,
+                   int32_t valid_samples) {
+    if (av_frame_make_writable(frame_) < 0 ||
+        av_samples_set_silence(
+            frame_->data, 0, frame_size_, channels_, codec_ctx_->sample_fmt) <
+            0) {
+      return false;
+    }
+    const uint8_t* input_data[AV_NUM_DATA_POINTERS] = {};
+    for (int32_t channel = 0; channel < channels_; ++channel) {
+      input_data[channel] = reinterpret_cast<const uint8_t*>(
+          audio_ptr + channel * samples + sample_offset_);
+    }
+    const int32_t converted_samples = swr_convert(
+        swr_ctx_, frame_->data, frame_size_, input_data, valid_samples);
+    if (converted_samples != valid_samples) {
+      LOG(ERROR) << "MemoryAudioWriter: audio conversion failed";
+      return false;
+    }
+    frame_->nb_samples = frame_size_;
+    frame_->pts = audio_pts_;
+    if (!send_frame(frame_)) {
+      return false;
+    }
+    sample_offset_ += valid_samples;
+    audio_pts_ += frame_size_;
+    return true;
+  }
+
+  // Encode complete AAC frames through a video-frame boundary. A partial
+  // frame is retained until the next boundary and padded only during finish.
+  bool write_until(const torch::Tensor& audio,
+                   int64_t end_sample,
+                   bool pad_final = false) {
+    const int64_t samples = audio.size(1);
+    const float* audio_ptr = audio.data_ptr<float>();
+    const int64_t target_sample = std::min(end_sample, samples);
+    while (target_sample - sample_offset_ >= frame_size_) {
+      if (!write_frame(audio_ptr, samples, frame_size_)) {
+        return false;
+      }
+    }
+    if (pad_final && sample_offset_ < target_sample) {
+      return write_frame(audio_ptr,
+                         samples,
+                         static_cast<int32_t>(target_sample - sample_offset_));
+    }
+    return true;
+  }
+
+  bool finish(const torch::Tensor& audio) {
+    return write_until(audio, audio.size(1), /*pad_final=*/true) &&
+           send_frame(nullptr) && packet_count_ > 0;
+  }
+
+ private:
+  bool send_frame(AVFrame* frame) {
+    if (avcodec_send_frame(codec_ctx_, frame) < 0) {
+      return false;
+    }
+    const int32_t packets =
+        write_encoded_packets(format_, codec_ctx_, stream_, packet_);
+    if (packets < 0) {
+      return false;
+    }
+    packet_count_ += packets;
+    return true;
+  }
+
+  // The muxer owns the format and stream; this encoder only borrows them.
+  AVFormatContext* format_ = nullptr;
+  AVStream* stream_ = nullptr;
+  AVPacket* packet_ = nullptr;
+  int64_t sample_offset_ = 0;
+  int64_t audio_pts_ = 0;
+  int64_t packet_count_ = 0;
+  AVCodecContext* codec_ctx_ = nullptr;
+  SwrContext* swr_ctx_ = nullptr;
+  AVFrame* frame_ = nullptr;
+  int32_t frame_size_ = 1024;
+  int32_t channels_ = 0;
 };
 
 class MemoryVideoWriter final : public MemoryMediaWriter {
  public:
   MemoryVideoWriter() = default;
 
-  ~MemoryVideoWriter() {
+  ~MemoryVideoWriter() override {
     if (sws_ctx_) {
       sws_freeContext(sws_ctx_);
     }
@@ -867,6 +1100,29 @@ class MemoryVideoWriter final : public MemoryMediaWriter {
              double fps,
              const std::string& format,
              std::string& raw_data) {
+    return write(video, fps, format, raw_data, torch::Tensor(), 0);
+  }
+
+  bool write(const torch::Tensor& video,
+             double fps,
+             const std::string& format,
+             std::string& raw_data,
+             const torch::Tensor& audio_in,
+             int32_t sample_rate) {
+    torch::Tensor audio;
+    if (audio_in.defined()) {
+      audio = audio_in.cpu().to(torch::kFloat32).contiguous();
+      if (audio.dim() == 1) {
+        audio = audio.unsqueeze(0);
+      }
+      if (audio.dim() != 2 || audio.size(0) <= 0 ||
+          audio.size(0) > AV_NUM_DATA_POINTERS || audio.size(1) <= 0 ||
+          sample_rate <= 0) {
+        LOG(ERROR) << "MemoryVideoWriter: invalid audio tensor "
+                   << audio.sizes();
+        return false;
+      }
+    }
     if (video.dim() != 4 || video.size(1) != 3) {
       LOG(ERROR) << "MemoryVideoWriter: expects [T,C,H,W] with C=3, got "
                  << video.sizes();
@@ -889,6 +1145,7 @@ class MemoryVideoWriter final : public MemoryMediaWriter {
     AVCodecID codec_id;
     AVPixelFormat pix_fmt;
     AVDictionary* opts = nullptr;
+    ScopeGuard opts_guard([&opts] { av_dict_free(&opts); });
 
     if (format == "avi") {
       codec_id = AV_CODEC_ID_MJPEG;
@@ -919,10 +1176,19 @@ class MemoryVideoWriter final : public MemoryMediaWriter {
               fps,
               pix_fmt,
               &opts)) {
-      if (opts) av_dict_free(&opts);
       return false;
     }
-    if (opts) av_dict_free(&opts);
+
+    MemoryAudioWriter audio_writer;
+    if (audio.defined() && !audio_writer.open(
+                               /*sample_rate=*/sample_rate,
+                               /*channels=*/static_cast<int32_t>(audio.size(0)),
+                               fmt_ctx_)) {
+      return false;
+    }
+    if (!write_header()) {
+      return false;
+    }
 
     sws_ctx_ = sws_getContext(static_cast<int32_t>(W),
                               static_cast<int32_t>(H),
@@ -988,9 +1254,17 @@ class MemoryVideoWriter final : public MemoryMediaWriter {
       if (!send_frame(yuv_frame_)) {
         return false;
       }
+      if (audio.defined() &&
+          !audio_writer.write_until(
+              audio,
+              av_rescale_q(
+                  pts, codec_ctx_->time_base, AVRational{1, sample_rate}))) {
+        return false;
+      }
     }
 
-    if (!finish()) {
+    if (!send_frame(nullptr) ||
+        (audio.defined() && !audio_writer.finish(audio)) || !finish()) {
       return false;
     }
 
@@ -1014,6 +1288,24 @@ bool FFmpegVideoEncoder::encode(const torch::Tensor& video,
                                 std::string& raw_data) {
   MemoryVideoWriter writer;
   return writer.write(video, fps, format, raw_data);
+}
+
+bool FFmpegVideoEncoder::encode(const torch::Tensor& video,
+                                const torch::Tensor& audio,
+                                double fps,
+                                int32_t sample_rate,
+                                const std::string& format,
+                                std::string& raw_data) {
+  if (!audio.defined()) {
+    return false;
+  }
+  MemoryVideoWriter writer;
+  return writer.write(video,
+                      fps,
+                      format,
+                      raw_data,
+                      audio,
+                      /*sample_rate=*/sample_rate);
 }
 
 }  // namespace xllm

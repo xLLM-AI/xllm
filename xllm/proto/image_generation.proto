@@ -61,8 +61,7 @@ message Input {
   repeated string images = 14;
 
   // Unified ordered image inputs.
-  repeated MediaSource image_sources = 15;
-
+  repeated MediaSource media_sources = 15;
 }
 
 // Generation parameters container

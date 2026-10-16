@@ -60,7 +60,8 @@ class FFmpegAudioDecoder {
   bool decode(std::string_view raw_data,
               torch::Tensor& t,
               AudioMetadata& meta,
-              int64_t target_sr = 16000);
+              int64_t target_sr = 16000,
+              int32_t target_channels = 1);
 };
 
 class FFmpegVideoEncoder final {
@@ -72,6 +73,13 @@ class FFmpegVideoEncoder final {
   // container format ("mp4", "avi", etc.).
   bool encode(const torch::Tensor& video,
               double fps,
+              const std::string& format,
+              std::string& raw_data);
+
+  bool encode(const torch::Tensor& video,
+              const torch::Tensor& audio,
+              double fps,
+              int32_t sample_rate,
               const std::string& format,
               std::string& raw_data);
 };

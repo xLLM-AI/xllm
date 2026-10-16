@@ -129,6 +129,10 @@ message MediaSource {
 
   // Media container bytes in the binary attachment.
   optional BinaryRef binary = 4;
+
+  // Media modality. Supported values are "image", "video", and "audio".
+  // An empty value defaults to "image" for backward compatibility.
+  string modality = 5;
 }
 
 message AddressInfo {

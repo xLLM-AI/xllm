@@ -62,6 +62,7 @@ inline void fill_media_source(std::string_view data,
                               proto::MediaSource& source,
                               std::string& binary_payload) {
   source.set_name(name.data(), name.size());
+  source.set_modality(name.data(), name.size());
   if (use_binary) {
     source.set_type("binary");
     source.clear_base64();

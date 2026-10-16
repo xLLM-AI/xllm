@@ -32,8 +32,8 @@ std::shared_ptr<DiTRequest> make_request(const std::string& prompt,
                                          float tensor_value) {
   DiTRequestState state;
   state.input_params().prompt = prompt;
-  state.input_params().image_sources.add("image",
-                                         torch::full({3, 2, 2}, tensor_value));
+  state.input_params().media_sources.add(
+      "image", "image", torch::full({3, 2, 2}, tensor_value));
   state.input_params().tensor_sources.add("prompt_embed",
                                           torch::full({2, 4}, tensor_value));
   return std::make_shared<DiTRequest>(prompt, "", "", state);
@@ -51,14 +51,14 @@ TEST(DiTForwardInputFactoryTest, PreservesRequestOrderAndNamedInputs) {
   EXPECT_EQ(input.batch_size, 2);
   EXPECT_EQ(input.prompts, (std::vector<std::string>{"first", "second"}));
   EXPECT_TRUE(input.generation_params == first->state().generation_params());
-  ASSERT_EQ(input.image_sources.size(), 1u);
-  EXPECT_EQ(input.image_sources.at(0).name, "image");
+  ASSERT_EQ(input.media_sources.size(), 1u);
+  EXPECT_EQ(input.media_sources.at(0).name, "image");
   EXPECT_TRUE(
-      torch::equal(input.image_sources.at(0).tensor[0],
-                   first->state().input_params().image_sources.at(0).tensor));
+      torch::equal(input.media_sources.at(0).tensor[0],
+                   first->state().input_params().media_sources.at(0).tensor));
   EXPECT_TRUE(
-      torch::equal(input.image_sources.at(0).tensor[1],
-                   second->state().input_params().image_sources.at(0).tensor));
+      torch::equal(input.media_sources.at(0).tensor[1],
+                   second->state().input_params().media_sources.at(0).tensor));
   const auto prompt_embed = input.tensor_sources.get("prompt_embed");
   ASSERT_TRUE(prompt_embed.has_value());
   EXPECT_EQ(prompt_embed->sizes().vec(), (std::vector<int64_t>{2, 2, 4}));
@@ -77,11 +77,11 @@ TEST(DiTForwardInputFactoryTest, ReusesSingleRequestTensorStorage) {
   DiTForwardInputFactory factory;
   auto input = factory.create_input(batch);
 
-  const torch::Tensor& image = input.image_sources.at(0).tensor;
+  const torch::Tensor& image = input.media_sources.at(0).tensor;
   EXPECT_EQ(image.sizes(), torch::IntArrayRef({1, 3, 2, 2}));
   EXPECT_EQ(
       image.data_ptr(),
-      request->state().input_params().image_sources.at(0).tensor.data_ptr());
+      request->state().input_params().media_sources.at(0).tensor.data_ptr());
   const auto prompt_embed = input.tensor_sources.get("prompt_embed");
   ASSERT_TRUE(prompt_embed.has_value());
   EXPECT_EQ(prompt_embed->data_ptr(),

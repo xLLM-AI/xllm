@@ -114,9 +114,9 @@ target_link_options(llm_request_factory_test
 
 cc_test(
   NAME
-    dit_image_sources_test
+    dit_media_sources_test
   SRCS
-    dit_image_sources_test.cpp
+    dit_media_sources_test.cpp
   DEPS
     :request
     GTest::gtest_main

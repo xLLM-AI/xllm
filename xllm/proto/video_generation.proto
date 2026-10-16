@@ -37,8 +37,8 @@ message VideoInput {
 
   reserved 5, 6;
 
-  // Unified ordered image inputs.
-  repeated MediaSource image_sources = 7;
+  // Unified ordered image, video, and audio inputs.
+  repeated MediaSource media_sources = 7;
 }
 
 // Generation parameters container
@@ -84,6 +84,9 @@ message VideoParameters {
 
   // Output type, either "base64" (default) or "binary".
   optional string output_type = 14;
+
+  // Sample rate used for generated and reference audio.
+  optional int32 sampling_rate = 15;
 }
 
 // Request structure for video generation

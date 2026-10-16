@@ -1,4 +1,4 @@
-/* Copyright 2026 The xLLM Authors. All Rights Reserved.
+/* Copyright 2026 The xLLM Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,11 +20,11 @@ limitations under the License.
 namespace xllm {
 namespace {
 
-TEST(DiTImageSourcesTest, PreservesDuplicateNamesAndOrder) {
-  DiTImageSources sources;
-  sources.add("", torch::tensor({1}));
-  sources.add("unknown", torch::tensor({2}));
-  sources.add("mask_image", torch::tensor({3}));
+TEST(DiTMediaSourcesTest, PreservesDuplicateNamesAndOrder) {
+  DiTMediaSources sources;
+  sources.add("unknown", "image", torch::tensor({1}));
+  sources.add("unknown", "image", torch::tensor({2}));
+  sources.add("mask_image", "image", torch::tensor({3}));
 
   ASSERT_EQ(sources.size(), 3u);
   EXPECT_EQ(sources.at(0).name, "unknown");
@@ -34,41 +34,41 @@ TEST(DiTImageSourcesTest, PreservesDuplicateNamesAndOrder) {
   EXPECT_EQ(tensors[0].item<int64_t>(), 1);
 }
 
-TEST(DiTImageSourcesTest, GetFallsBackByIndexForRequestedCount) {
-  DiTImageSources sources;
-  sources.add("last_image", torch::tensor({2}));
-  sources.add("image", torch::tensor({1}));
+TEST(DiTMediaSourcesTest, GetFallsBackByIndexForRequestedCount) {
+  DiTMediaSources sources;
+  sources.add("last_image", "image", torch::tensor({2}));
+  sources.add("image", "image", torch::tensor({1}));
 
   std::vector<torch::Tensor> named = sources.get({"image", "last_image"});
   ASSERT_EQ(named.size(), 2u);
   EXPECT_EQ(named[0].item<int64_t>(), 1);
   EXPECT_EQ(named[1].item<int64_t>(), 2);
 
-  sources.add("extra", torch::tensor({3}));
+  sources.add("extra", "image", torch::tensor({3}));
   std::vector<torch::Tensor> fallback = sources.get({"image", "mask_image"});
   ASSERT_EQ(fallback.size(), 2u);
   EXPECT_EQ(fallback[0].item<int64_t>(), 2);
   EXPECT_EQ(fallback[1].item<int64_t>(), 1);
 }
 
-TEST(DiTImageSourcesTest, BatchSignatureChecksNameShapeAndDtypeByPosition) {
-  DiTImageSources reference;
-  reference.add("unknown", torch::zeros({3, 4, 4}, torch::kUInt8));
-  reference.add("mask_image", torch::zeros({1, 4, 4}, torch::kUInt8));
+TEST(DiTMediaSourcesTest, BatchSignatureChecksNameShapeAndDtypeByPosition) {
+  DiTMediaSources reference;
+  reference.add("unknown", "image", torch::zeros({3, 4, 4}, torch::kUInt8));
+  reference.add("mask_image", "image", torch::zeros({1, 4, 4}, torch::kUInt8));
 
-  DiTImageSources same;
-  same.add("unknown", torch::ones({3, 4, 4}, torch::kUInt8));
-  same.add("mask_image", torch::ones({1, 4, 4}, torch::kUInt8));
+  DiTMediaSources same;
+  same.add("unknown", "image", torch::ones({3, 4, 4}, torch::kUInt8));
+  same.add("mask_image", "image", torch::ones({1, 4, 4}, torch::kUInt8));
   EXPECT_TRUE(reference.batch_signature_matches(same));
 
-  DiTImageSources wrong_name;
-  wrong_name.add("image", torch::ones({3, 4, 4}, torch::kUInt8));
-  wrong_name.add("mask_image", torch::ones({1, 4, 4}, torch::kUInt8));
+  DiTMediaSources wrong_name;
+  wrong_name.add("image", "image", torch::ones({3, 4, 4}, torch::kUInt8));
+  wrong_name.add("mask_image", "image", torch::ones({1, 4, 4}, torch::kUInt8));
   EXPECT_FALSE(reference.batch_signature_matches(wrong_name));
 
-  DiTImageSources wrong_shape;
-  wrong_shape.add("unknown", torch::ones({3, 8, 8}, torch::kUInt8));
-  wrong_shape.add("mask_image", torch::ones({1, 4, 4}, torch::kUInt8));
+  DiTMediaSources wrong_shape;
+  wrong_shape.add("unknown", "image", torch::ones({3, 8, 8}, torch::kUInt8));
+  wrong_shape.add("mask_image", "image", torch::ones({1, 4, 4}, torch::kUInt8));
   EXPECT_FALSE(reference.batch_signature_matches(wrong_shape));
 }
 

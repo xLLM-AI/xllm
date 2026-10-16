@@ -27,14 +27,30 @@ limitations under the License.
 #include <source_location>
 #include <span>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "util/slice.h"
 
 namespace xllm {
+
+using TensorParameterValue = std::
+    variant<bool, int64_t, std::string, double, uint64_t, std::vector<int64_t>>;
+using TensorParameters = std::unordered_map<std::string, TensorParameterValue>;
+
+template <typename ValueType>
+const ValueType* get_tensor_parameter(const TensorParameters& parameters,
+                                      std::string_view name) {
+  const auto iterator = parameters.find(std::string(name));
+  if (iterator == parameters.end()) {
+    return nullptr;
+  }
+  return std::get_if<ValueType>(&iterator->second);
+}
 
 inline bool is_cpu_int_tensor(const torch::Tensor& tensor, int32_t dimensions) {
   return tensor.defined() && tensor.device().is_cpu() &&
@@ -97,7 +113,7 @@ inline torch::Tensor make_cpu_tensor_with_options(
 }  // namespace detail
 
 template <typename T>
-inline torch::Tensor create_2d_tensor(const std::vector<std::vector<T> >& vec,
+inline torch::Tensor create_2d_tensor(const std::vector<std::vector<T>>& vec,
                                       torch::ScalarType dtype) {
   if (vec.empty()) {
     return {};

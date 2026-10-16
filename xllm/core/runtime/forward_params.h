@@ -18,17 +18,16 @@ limitations under the License.
 
 #include <torch/types.h>
 
-#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <numeric>
-#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "common/types.h"
+#include "core/framework/multimodal/embedding_output.h"
 #include "core/framework/multimodal/mm_batch_data.h"
 #include "core/framework/multimodal/mm_data.h"
 #include "core/framework/speculative/verify_layout.h"
@@ -686,6 +685,7 @@ struct RawSampleOutput {
   std::vector<RawToken> tokens;  // num tokens
   // multimodal embedding output for this sequence
   std::vector<torch::Tensor> mm_embeddings;
+  EmbeddingOutputMetadata mm_embeddings_metadata;
   SpeculativeTokenStats speculative_token_stats;
 };
 

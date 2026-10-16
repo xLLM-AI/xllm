@@ -30,16 +30,15 @@ TEST(DiTTensorSourcesTest, GetsTensorStrictlyByName) {
   EXPECT_FALSE(inputs.get("pooled_prompt_embed").has_value());
 }
 
-TEST(DiTTensorSourcesTest, PromptAudioStaysFloat32OnTransfer) {
-  DiTTensorSources sources;
-  sources.add("prompt_audio", torch::ones({1, 4}, torch::kFloat32));
-  sources.add("prompt_embed", torch::ones({1, 4}, torch::kFloat32));
+TEST(DiTTensorSourcesTest, MediaAudioStaysFloat32OnTransfer) {
+  DiTMediaSources sources;
+  sources.add("prompt_audio", "audio", torch::ones({1, 4}, torch::kFloat32));
+  sources.add("image", "image", torch::ones({1, 4}, torch::kFloat32));
 
-  DiTTensorSources converted =
-      sources.to(torch::Device(torch::kCPU), torch::kBFloat16);
+  DiTMediaSources converted = sources.to(torch::Device(torch::kCPU));
 
-  EXPECT_EQ(converted.get("prompt_audio")->scalar_type(), torch::kFloat32);
-  EXPECT_EQ(converted.get("prompt_embed")->scalar_type(), torch::kBFloat16);
+  EXPECT_EQ(converted.at(0).tensor.scalar_type(), torch::kFloat32);
+  EXPECT_EQ(converted.at(1).tensor.scalar_type(), torch::kUInt8);
 }
 
 TEST(DiTTensorSourcesTest, BatchSignatureMatchesByName) {

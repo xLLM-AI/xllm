@@ -270,7 +270,7 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
     int64_t seed = gp.seed >= 0 ? gp.seed : 42;
 
     // Collect reference images (one sample per batch entry).
-    std::vector<torch::Tensor> raw_images = input.image_sources.get();
+    std::vector<torch::Tensor> raw_images = input.media_sources.get();
     if (raw_images.empty()) {
       LOG(FATAL) << "JoyImageEditPlus requires reference images";
     }

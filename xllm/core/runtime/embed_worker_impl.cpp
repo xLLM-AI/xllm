@@ -24,7 +24,6 @@ limitations under the License.
 
 #include <memory>
 #include <optional>
-#include <utility>
 
 #include "common/metrics.h"
 #include "core/kv_cache/storage/kv_cache.h"
@@ -70,13 +69,15 @@ std::optional<ForwardOutput> EmbedWorkerImpl::step(
   ModelInputParams execution_params(params);
   auto model_output = model_executor_->forward(
       flatten_tokens, flatten_positions, kv_caches_, execution_params);
-  auto hidden_states = model_output.hidden_states;
 
   COUNTER_ADD(execution_latency_seconds_model, timer.elapsed_seconds());
 
   if (!driver_) {
     return std::nullopt;
   }
+
+  torch::Tensor hidden_states =
+      select_hidden_states_for_embedding(model_output);
 
   // driver prepare model output
   ForwardOutput output;

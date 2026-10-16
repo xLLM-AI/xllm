@@ -34,6 +34,7 @@ limitations under the License.
 #include "core/distributed_runtime/master.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/model_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/model_loader/model_loader.h"
@@ -52,6 +53,55 @@ limitations under the License.
 #include "util/tensor_helper.h"
 #include "util/utils.h"
 namespace xllm {
+
+namespace {
+
+void attach_embedding_output_metadata(const ModelArgs& args,
+                                      const std::vector<Sequence*>& sequences,
+                                      RawForwardOutput& output) {
+  if (!ModelConfig::get_instance().enable_return_embedding_modality_tags()) {
+    return;
+  }
+  if (ModelConfig::get_instance().task() == "mm_embed" ||
+      !ModelConfig::get_instance().enable_return_mm_full_embeddings() ||
+      output.outputs.size() != sequences.size()) {
+    return;
+  }
+
+  for (size_t output_index = 0; output_index < output.outputs.size();
+       ++output_index) {
+    auto& sample_output = output.outputs[output_index];
+    const auto& embeddings = sample_output.mm_embeddings;
+    const auto& sequence = *sequences[output_index];
+    if (embeddings.empty() ||
+        !std::all_of(embeddings.begin(),
+                     embeddings.end(),
+                     [&sequence](const torch::Tensor& embedding) {
+                       return embedding.defined() && embedding.dim() > 0 &&
+                              embedding.size(0) ==
+                                  static_cast<int64_t>(
+                                      sequence.num_prompt_tokens());
+                     })) {
+      continue;
+    }
+
+    std::vector<int64_t> modality_tags;
+    modality_tags.reserve(sequence.num_prompt_tokens());
+    const auto tokens = sequence.tokens();
+    for (size_t index = 0; index < sequence.num_prompt_tokens(); ++index) {
+      const int32_t token_id = tokens[index];
+      const bool is_vision_token = token_id == args.vision_start_token_id() ||
+                                   token_id == args.vision_end_token_id() ||
+                                   token_id == args.image_token_id() ||
+                                   token_id == args.video_token_id();
+      modality_tags.emplace_back(is_vision_token ? 0 : 1);
+    }
+    sample_output.mm_embeddings_metadata["token_tags"] =
+        torch::tensor(modality_tags, torch::kInt64);
+  }
+}
+
+}  // namespace
 
 VLMEngine::VLMEngine(
     const runtime::Options& options,
@@ -344,11 +394,14 @@ ForwardOutput VLMEngine::step(BatchGroup& batch) {
       // if src_seq_idxes is not empty, skip sample output processing and
       // process beam search output instead
       if (result.value().src_seq_idxes.size() == 0) {
+        attach_embedding_output_metadata(
+            args_, batch[dp_rank].get_sequences(), result.value());
         // set second input param enable_schedule_overlap to false,
         // if it's not enabled, process_sample_output will append the real
         // token, if it's enabled, this false here will append the fake token in
         // process_sample_output
-        batch[dp_rank].process_sample_output(result.value(), false);
+        batch[dp_rank].process_sample_output(result.value(),
+                                             /*replace_fake_token=*/false);
       } else {
         batch[dp_rank].process_beam_search_output(result.value(), false);
       }
@@ -395,6 +448,8 @@ void VLMEngine::update_last_step_result(BatchGroup& last_batch) {
   }
 
   for (size_t i = 0; i < last_batch.size(); ++i) {
+    attach_embedding_output_metadata(
+        args_, last_batch[i].get_sequences(), raw_forward_outputs[i]);
     last_batch[i].process_sample_output(raw_forward_outputs[i],
                                         options_.enable_schedule_overlap());
     // Keep Batch::sequences_ aligned with SequencesGroup after beam updates.

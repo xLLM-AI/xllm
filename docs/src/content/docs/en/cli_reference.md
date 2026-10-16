@@ -39,6 +39,7 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | `model` | `string` | `""` | Hugging Face model name or model path. |
 | `backend` | `string` | `""` | Backend model type: `llm` for text-only models, `vlm` for multimodal models, or `dit` for diffusion models. |
 | `task` | `string` | `"generate"` | Model task, for example `generate`, `embed`, or `mm_embed`. |
+| `enable_return_embedding_modality_tags` | `bool` | `false` | Whether full sequence embeddings include per-token modality tags. |
 | `limit_image_per_prompt` | `int32` | `8` | Maximum number of images per prompt. Only applies to multimodal models. |
 | `max_encoder_cache_size` | `int64` | `0` | Maximum GPU/NPU memory size in MB for the encoder cache per worker. `0` disables the encoder cache. |
 | `reasoning_parser` | `string` | `""` | Reasoning parser, for example `auto`, `glm45`, `glm47`, `glm5`, `qwen3`, `qwen35`, or `deepseek-r1`. |
@@ -258,6 +259,7 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | `dit_sp_communication_overlap` | `bool` | `true` | Whether to overlap communication and computation for sequence parallelism. |
 | `dit_debug_print` | `bool` | `false` | Whether to print debug information for DiT models. |
 | `dit_generation_image_area_max` | `int64` | `0` | Maximum allowed image area (`width * height`) for image generation requests. `0` means no limit. |
+| `dit_h3_task_type` | `string` | `"fl2va"` | MiniMax-H3 task type: `fl2va` or `ref2va`. |
 | `dit_enable_vae_tiling` | `bool` | `false` | Whether to enable VAE tiling. Currently only supported for `qwen-image-edit-plus`. |
 | `dit_vae_image_size` | `int64` | `1048576` | Qwen-Image-Edit-Plus VAE image size used to calculate dimensions. |
 | `dit_sparse_attention_enabled` | `bool` | `false` | Whether to enable block-wise sparse attention / RainFusion for WAN. |

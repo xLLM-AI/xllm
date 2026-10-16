@@ -26,9 +26,8 @@ DiTRequest create_request(DiTRequestKind request_kind,
                           DiTGenerationParams generation_params = {}) {
   DiTInputParams input_params;
   DiTOutputFunc output_func;
-  DiTOutputsFunc outputs_func;
   DiTRequestState state(
-      input_params, generation_params, output_func, outputs_func, request_kind);
+      input_params, generation_params, output_func, request_kind);
   return DiTRequest("request", "x-request", "time", state);
 }
 

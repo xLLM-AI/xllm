@@ -35,6 +35,7 @@ limitations under the License.
 #include "core/layers/common/rms_norm.h"
 #include "framework/model_context/model_context.h"
 #include "models/dit/utils/dit_cache_mixin.h"
+#include "models/dit/utils/timestep_embedding.h"
 #include "models/model_registry.h"
 #if defined(USE_NPU)
 #include "torch_npu/csrc/aten/CustomFunctions.h"
@@ -579,67 +580,6 @@ class PixArtAlphaTextProjectionImpl : public torch::nn::Module {
 };
 TORCH_MODULE(PixArtAlphaTextProjection);
 
-inline torch::Tensor get_timestep_embedding(const torch::Tensor& timesteps,
-                                            int64_t embedding_dim,
-                                            bool flip_sin_to_cos = false,
-                                            float downscale_freq_shift = 1.0f,
-                                            float scale = 1.0f,
-                                            int64_t max_period = 10000) {
-  CHECK_EQ(timesteps.dim(), 1) << "Timesteps should be a 1d-array";
-  int64_t half_dim = embedding_dim / 2;
-  // -ln(max_period) * [0, 1, ..., half_dim-1] / (half_dim -
-  // downscale_freq_shift
-  torch::TensorOptions options = timesteps.options();
-  auto exponent = -std::log(static_cast<float>(max_period)) *
-                  torch::arange(/*start=*/0,
-                                /*end=*/half_dim,
-                                /*step=*/1,
-                                options);
-  exponent = exponent / (half_dim - downscale_freq_shift);
-
-  // timesteps[:, None] * exp(exponent)[None, :]
-  auto emb = torch::exp(exponent);                  // [half_dim]
-  emb = timesteps.unsqueeze(1) * emb.unsqueeze(0);  // [N, half_dim]
-  emb = scale * emb;
-
-  // [sin(emb), cos(emb)]
-  auto sin_emb = torch::sin(emb);
-  auto cos_emb = torch::cos(emb);
-  auto combined =
-      torch::cat({sin_emb, cos_emb}, /*dim=*/-1);  // [N, 2*half_dim]
-
-  if (flip_sin_to_cos) {
-    combined = torch::cat(
-        {combined.slice(
-             /*dim=*/-1, /*start=*/half_dim, /*end=*/2 * half_dim),   // cos
-         combined.slice(/*dim=*/-1, /*start=*/0, /*end=*/half_dim)},  // sin
-        /*dim=*/-1);
-  }
-
-  if (embedding_dim % 2 == 1) {
-    combined = torch::nn::functional::pad(
-        combined, torch::nn::functional::PadFuncOptions({0, 1, 0, 0}));
-  }
-
-  return combined;  // [N, embedding_dim]
-}
-
-class TimestepsImpl : public torch::nn::Module {
- public:
-  explicit TimestepsImpl(ModelContext context) {}
-
-  torch::Tensor forward(const torch::Tensor& timesteps) {
-    return get_timestep_embedding(timesteps,
-                                  256,  // embedding_dim
-                                  true,
-                                  0.0f,  // flip_sin_to_cos
-                                  1,
-                                  10000  // max_period
-    );
-  }
-};
-TORCH_MODULE(Timesteps);
-
 class TimestepEmbeddingImpl : public torch::nn::Module {
  public:
   explicit TimestepEmbeddingImpl(ModelContext context)
@@ -693,7 +633,7 @@ class CombinedTimestepTextProjEmbeddingsImpl : public torch::nn::Module {
  public:
   explicit CombinedTimestepTextProjEmbeddingsImpl(const ModelContext& context)
       : options_(context.get_tensor_options()) {
-    time_proj_ = Timesteps(context);
+    time_proj_ = dit::Timesteps(256, true, 0.0);
     timestep_embedder_ = TimestepEmbedding(context);
     text_embedder_ = PixArtAlphaTextProjection(context);
   }
@@ -722,7 +662,7 @@ class CombinedTimestepTextProjEmbeddingsImpl : public torch::nn::Module {
   }
 
  private:
-  Timesteps time_proj_{nullptr};
+  dit::Timesteps time_proj_{nullptr};
   TimestepEmbedding timestep_embedder_{nullptr};
   PixArtAlphaTextProjection text_embedder_{nullptr};
   torch::TensorOptions options_;
@@ -734,7 +674,7 @@ class CombinedTimestepGuidanceTextProjEmbeddingsImpl
  public:
   explicit CombinedTimestepGuidanceTextProjEmbeddingsImpl(
       const ModelContext& context)
-      : time_proj_(context) {
+      : time_proj_(256, true, 0.0) {
     text_embedder_ = PixArtAlphaTextProjection(context);
     timestep_embedder_ = TimestepEmbedding(
         context);  // in_channels=256, time_embed_dim=embedding_dim
@@ -777,7 +717,7 @@ class CombinedTimestepGuidanceTextProjEmbeddingsImpl
 
  private:
   TimestepEmbedding guidance_embedder_{nullptr};
-  Timesteps time_proj_{nullptr};
+  dit::Timesteps time_proj_{nullptr};
   TimestepEmbedding timestep_embedder_{nullptr};
   PixArtAlphaTextProjection text_embedder_{nullptr};
 };

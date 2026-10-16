@@ -273,6 +273,12 @@ message NamedTensor {
   Tensor tensor = 2;
 }
 
+message MediaNamedTensor {
+  string name = 1;
+  string modality = 2;
+  Tensor tensor = 3;
+}
+
 message DiTForwardInput {
   int32 batch_size = 1;
   
@@ -294,16 +300,17 @@ message DiTForwardInput {
 
   reserved 17;
 
-  reserved 19;
+  reserved 18, 19;
   optional string audio_prompt_text = 20;
 
-  repeated NamedTensor image_sources = 21;
+  repeated MediaNamedTensor media_sources = 21;
   repeated NamedTensor tensor_sources = 22;
 }
 
 message DiTForwardOutput {
   TensorList tensors = 1;
   repeated string text_output = 2;
+  TensorList audio_tensors = 3;
 }
 
 message DiTGenerationParams {
@@ -345,12 +352,13 @@ message DiTGenerationParams {
 }
 
 message PackedForwardInput {
-  // Schema 3 raw payload: [magic:uint64][version:uint16][domain:uint8]
+  // Versioned raw payload: [magic:uint64][version:uint16][domain:uint8]
   // [flags:uint8][header_bytes:uint32][descriptor_bytes:uint64]
   // [tensor_arena_offset:uint64][tensor_arena_bytes:uint64][descriptor][arena].
   // The arena is 16-byte aligned. Domain 1 is LLM, 2 is VLM, 3 is Rec,
-  // and 4 is DiT. Workers must use the same schema version. Readers reject
-  // unversioned payloads and unsupported versions before materializing tensors.
+  // and 4 is DiT. Workers must use the same runtime schema version. Readers
+  // reject unversioned payloads and unsupported versions before materializing
+  // tensors.
   bytes payload = 1;
 }
 

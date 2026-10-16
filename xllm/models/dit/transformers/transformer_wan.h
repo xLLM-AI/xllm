@@ -41,6 +41,7 @@ limitations under the License.
 #include "models/dit/utils/dit_cache_mixin.h"
 #include "models/dit/utils/dit_parallel_linear.h"
 #include "models/dit/utils/sparse_attention.h"
+#include "models/dit/utils/timestep_embedding.h"
 #include "models/dit/utils/util.h"
 
 #if defined(USE_NPU)
@@ -275,67 +276,6 @@ class WanTimestepEmbeddingImpl : public torch::nn::Module {
   layer::AddMatmul linear_2_{nullptr};
 };
 TORCH_MODULE(WanTimestepEmbedding);
-
-class WanTimestepsImpl : public torch::nn::Module {
- public:
-  explicit WanTimestepsImpl(int64_t num_channels,
-                            bool flip_sin_to_cos = true,
-                            float downscale_freq_shift = 0.0,
-                            int64_t scale = 1)
-      : num_channels_(num_channels),
-        flip_sin_to_cos_(flip_sin_to_cos),
-        downscale_freq_shift_(downscale_freq_shift),
-        scale_(scale) {}
-
-  torch::Tensor forward(const torch::Tensor& timesteps) {
-    return get_timestep_embedding(timesteps,
-                                  num_channels_,
-                                  flip_sin_to_cos_,
-                                  downscale_freq_shift_,
-                                  scale_);
-  }
-
- private:
-  int64_t num_channels_;
-  bool flip_sin_to_cos_;
-  float downscale_freq_shift_;
-  int64_t scale_;
-
-  torch::Tensor get_timestep_embedding(const torch::Tensor& timesteps,
-                                       int64_t embedding_dim,
-                                       bool flip_sin_to_cos = false,
-                                       float downscale_freq_shift = 1.0f,
-                                       float scale = 1.0f,
-                                       int64_t max_period = 10000) {
-    int64_t half_dim = embedding_dim / 2;
-    auto exponent = -std::log(static_cast<float>(max_period)) *
-                    torch::arange(0,
-                                  half_dim,
-                                  torch::TensorOptions()
-                                      .dtype(torch::kFloat32)
-                                      .device(timesteps.device()));
-    exponent = exponent / (half_dim - downscale_freq_shift);
-
-    auto emb = torch::exp(exponent);
-    emb = timesteps.unsqueeze(1).to(torch::kFloat32) * emb.unsqueeze(0);
-    emb = scale * emb;
-    emb = torch::cat({torch::sin(emb), torch::cos(emb)}, /*dim=*/-1);
-
-    if (flip_sin_to_cos) {
-      emb = torch::cat({emb.slice(/*dim=*/-1, /*start=*/half_dim),
-                        emb.slice(/*dim=*/-1, /*start=*/0, /*end=*/half_dim)},
-                       /*dim=*/-1);
-    }
-
-    if (embedding_dim % 2 == 1) {
-      emb = torch::nn::functional::pad(
-          emb, torch::nn::functional::PadFuncOptions({0, 1, 0, 0}));
-    }
-
-    return emb;
-  }
-};
-TORCH_MODULE(WanTimesteps);
 
 class WanGELUImpl : public torch::nn::Module {
  public:
@@ -1051,7 +991,7 @@ class WanTimeTextImageEmbeddingImpl : public torch::nn::Module {
 
     quant_args_ = context.get_quant_args();
     timesteps_proj_ = register_module(
-        "timesteps_proj", WanTimesteps(time_freq_dim_, true, 0.0f, 1));
+        "timesteps_proj", dit::Timesteps(time_freq_dim_, true, 0.0f));
     time_embedder_ = register_module(
         "time_embedder",
         WanTimestepEmbedding(context, time_freq_dim_, dim_, -1, true));
@@ -1135,7 +1075,7 @@ class WanTimeTextImageEmbeddingImpl : public torch::nn::Module {
   int64_t pos_embed_seq_len_;
 
   QuantArgs quant_args_;
-  WanTimesteps timesteps_proj_{nullptr};
+  dit::Timesteps timesteps_proj_{nullptr};
   WanTimestepEmbedding time_embedder_{nullptr};
   torch::nn::SiLU act_fn_{nullptr};
   layer::AddMatmul time_proj_{nullptr};

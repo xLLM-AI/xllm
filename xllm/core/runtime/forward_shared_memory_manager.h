@@ -140,6 +140,7 @@ class ForwardSharedMemoryManager : public SharedMemoryManager {
       const std::vector<SpeculativeTokenStats>& speculative_token_stats,
       const std::vector<torch::Tensor>& dit_images,
       const std::vector<std::string>& dit_text_output,
+      const std::vector<torch::Tensor>& dit_audio,
       const torch::Tensor& expert_load_data,
       int64_t prepared_token,
       const torch::Tensor& src_seq_idxes,

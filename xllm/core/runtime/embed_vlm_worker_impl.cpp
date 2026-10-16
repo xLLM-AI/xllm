@@ -21,7 +21,6 @@ limitations under the License.
 
 #include <memory>
 #include <optional>
-#include <utility>
 
 #include "common/metrics.h"
 #include "core/framework/config/model_config.h"
@@ -67,7 +66,6 @@ std::optional<ForwardOutput> EmbedVLMWorkerImpl::step(
   ModelInputParams execution_params(params);
   auto model_output = model_executor_->forward(
       flatten_tokens, flatten_positions, kv_caches_, execution_params);
-  auto hidden_states = model_output.hidden_states;
   ret = device_.synchronize_default_stream();
   COUNTER_ADD(execution_latency_seconds_model, timer.elapsed_seconds());
 
@@ -75,18 +73,19 @@ std::optional<ForwardOutput> EmbedVLMWorkerImpl::step(
     return std::nullopt;
   }
 
+  torch::Tensor hidden_states =
+      select_hidden_states_for_embedding(model_output);
   // driver prepare model output
   ForwardOutput output;
   SampleOutput sample_output;
   if (sampling_params.selected_token_idxes.defined() &&
       input.sampling_params.is_embeddings) {
-    auto embeddings =
-        model_->pooler(hidden_states, sampling_params.selected_token_idxes);
     // split full embeddings and add them to mm_embeddings
     // so that the user could receive embeddings of images and texts
     if (::xllm::ModelConfig::get_instance()
             .enable_return_mm_full_embeddings()) {
       const auto& q_seq_len_vec = input.input_params.attention.host.q_seq_lens;
+      torch::Tensor embeddings = hidden_states;
       sample_output.mm_embeddings.reserve(q_seq_len_vec.size());
       int32_t token_start_idx = 0;
       for (int32_t seq_len : q_seq_len_vec) {
@@ -97,7 +96,8 @@ std::optional<ForwardOutput> EmbedVLMWorkerImpl::step(
         token_start_idx += seq_len;
       }
     } else {
-      sample_output.embeddings = embeddings;
+      sample_output.embeddings =
+          model_->pooler(hidden_states, sampling_params.selected_token_idxes);
     }
     output.sample_output = sample_output;
   }

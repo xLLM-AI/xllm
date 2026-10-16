@@ -15,7 +15,10 @@ limitations under the License.
 
 #include "framework/request/dit_source_decoder.h"
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
+#include <string_view>
 #include <utility>
 
 #include "butil/base64.h"
@@ -33,13 +36,53 @@ ThreadPool& DiTSourceDecoder::thread_pool() {
   return thread_pool;
 }
 
+namespace {
+
+// Canonical name<->modality mapping: an unnamed source gets the canonical name
+// of its modality, and a canonical name requires its matching modality.
+struct CanonicalMediaName {
+  std::string_view modality;
+  std::string_view name;
+};
+constexpr std::array<CanonicalMediaName, 3> kCanonicalMediaNames{{
+    {"image", "image"},
+    {"video", "prompt_video"},
+    {"audio", "prompt_audio"},
+}};
+
+}  // namespace
+
 bool DiTSourceDecoder::add_source(const proto::MediaSource& source,
-                                  std::string default_name,
                                   Status& status) {
   Input input;
-  input.name = !source.has_name() || source.name().empty()
-                   ? std::move(default_name)
-                   : source.name();
+  input.modality = source.modality().empty() ? "image" : source.modality();
+  const auto* canonical =
+      std::find_if(kCanonicalMediaNames.begin(),
+                   kCanonicalMediaNames.end(),
+                   [&input](const CanonicalMediaName& entry) {
+                     return entry.modality == input.modality;
+                   });
+  if (canonical == kCanonicalMediaNames.end()) {
+    status = Status(StatusCode::INVALID_ARGUMENT,
+                    "modality must be image, video, or audio");
+    return false;
+  }
+  if (source.name().empty()) {
+    input.name = std::string(canonical->name);
+  } else {
+    input.name = source.name();
+    const auto* named = std::find_if(kCanonicalMediaNames.begin(),
+                                     kCanonicalMediaNames.end(),
+                                     [&input](const CanonicalMediaName& entry) {
+                                       return entry.name == input.name;
+                                     });
+    if (named != kCanonicalMediaNames.end() &&
+        input.modality != named->modality) {
+      status = Status(StatusCode::INVALID_ARGUMENT,
+                      "media source name and modality do not match");
+      return false;
+    }
+  }
   if (source.type() == "base64") {
     input.encoded_data = source.base64();
   } else if (source.type() == "binary" && source.has_binary()) {
@@ -63,11 +106,10 @@ bool DiTSourceDecoder::add_source(const proto::MediaSource& source,
 
 bool DiTSourceDecoder::add_sources(
     const google::protobuf::RepeatedPtrField<proto::MediaSource>& sources,
-    std::string_view default_name,
     Status& status) {
   inputs_.reserve(inputs_.size() + sources.size());
   for (const proto::MediaSource& source : sources) {
-    if (!add_source(source, std::string(default_name), status)) {
+    if (!add_source(source, status)) {
       return false;
     }
   }
@@ -79,41 +121,38 @@ void DiTSourceDecoder::add_sources(
     std::string_view default_name) {
   inputs_.reserve(inputs_.size() + sources.size());
   for (const std::string& source : sources) {
-    inputs_.emplace_back(
-        Input{.name = std::string(default_name), .encoded_data = source});
+    inputs_.emplace_back(Input{.name = std::string(default_name),
+                               .modality = "image",
+                               .encoded_data = source});
   }
 }
 
 bool DiTSourceDecoder::decode(const DecodeFn& decode_fn,
-                              std::vector<NamedTensor>& outputs,
+                              std::vector<MediaNamedTensor>& outputs,
                               Status& status) const {
   if (inputs_.empty()) {
     return true;
   }
 
-  std::vector<torch::Tensor> tensors(inputs_.size());
-  std::vector<uint8_t> decoded(inputs_.size(), 0);
+  std::vector<std::vector<MediaNamedTensor>> decoded(inputs_.size());
+  std::vector<uint8_t> is_decoded(inputs_.size(), false);
   const auto decode_one = [&](size_t index) {
     const Input& input = inputs_[index];
     std::string decoded_bytes;
-    std::string_view raw_bytes;
     if (input.encoding == Encoding::BASE64) {
       const butil::StringPiece encoded(input.encoded_data.data(),
                                        input.encoded_data.size());
       if (!butil::Base64Decode(encoded, &decoded_bytes)) {
         return;
       }
-      raw_bytes = decoded_bytes;
     } else {
       if (!request_payload_.copy_to(
               input.binary_offset, input.binary_length, decoded_bytes)) {
         return;
       }
-      raw_bytes = decoded_bytes;
     }
-    if (decode_fn(raw_bytes, tensors[index])) {
-      decoded[index] = 1;
-    }
+    is_decoded[index] =
+        decode_fn(input.name, input.modality, decoded_bytes, decoded[index]);
   };
 
   if (inputs_.size() == 1) {
@@ -128,17 +167,22 @@ bool DiTSourceDecoder::decode(const DecodeFn& decode_fn,
   }
 
   for (size_t index = 0; index < inputs_.size(); ++index) {
-    if (decoded[index] == 0) {
+    if (!is_decoded[index]) {
       status = Status(
           StatusCode::INVALID_ARGUMENT,
           "failed to decode media source at index " + std::to_string(index));
       return false;
     }
   }
-  outputs.reserve(outputs.size() + inputs_.size());
-  for (size_t index = 0; index < inputs_.size(); ++index) {
-    outputs.emplace_back(NamedTensor{.name = inputs_[index].name,
-                                     .tensor = std::move(tensors[index])});
+  size_t output_count = outputs.size();
+  for (const auto& source_outputs : decoded) {
+    output_count += source_outputs.size();
+  }
+  outputs.reserve(output_count);
+  for (std::vector<MediaNamedTensor>& source_outputs : decoded) {
+    outputs.insert(outputs.end(),
+                   std::make_move_iterator(source_outputs.begin()),
+                   std::make_move_iterator(source_outputs.end()));
   }
   return true;
 }

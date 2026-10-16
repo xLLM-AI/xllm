@@ -116,7 +116,7 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
 
     int64_t seed = generation_params.seed > 0 ? generation_params.seed : 42;
     std::vector<torch::Tensor> image_sources =
-        input.image_sources.get({"image", "last_image"});
+        input.media_sources.get({"image", "last_image"});
     std::optional<torch::Tensor> images =
         image_sources.empty() ? std::nullopt
                               : std::make_optional(image_sources[0]);

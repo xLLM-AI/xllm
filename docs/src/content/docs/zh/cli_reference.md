@@ -39,6 +39,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `model` | `string` | `""` | Hugging Face 模型名称或模型路径。 |
 | `backend` | `string` | `""` | 后端模型类型；`llm` 表示纯文本模型，`vlm` 表示多模态模型，`dit` 表示扩散模型。 |
 | `task` | `string` | `"generate"` | 模型任务类型，例如 `generate`、`embed`、`mm_embed`。 |
+| `enable_return_embedding_modality_tags` | `bool` | `false` | 是否在完整序列 embedding 中返回每个 token 的 modality tag。 |
 | `limit_image_per_prompt` | `int32` | `8` | 每个 prompt 允许的最大图片数量，仅用于多模态模型。 |
 | `max_encoder_cache_size` | `int64` | `0` | 每个 worker 的 encoder cache 最大显存大小，单位 MB；`0` 表示禁用 encoder cache。 |
 | `reasoning_parser` | `string` | `""` | reasoning 交互解析器，例如 `auto`、`glm45`、`glm47`、`glm5`、`qwen3`、`qwen35`、`deepseek-r1`。 |
@@ -258,6 +259,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `dit_sp_communication_overlap` | `bool` | `true` | 是否为 sequence parallel 启用通信与计算的 overlap。 |
 | `dit_debug_print` | `bool` | `false` | 是否打印 DiT 模型 debug 信息。 |
 | `dit_generation_image_area_max` | `int64` | `0` | 图像生成请求允许的最大图像面积（宽 * 高）；`0` 表示不限制。 |
+| `dit_h3_task_type` | `string` | `"fl2va"` | MiniMax-H3 任务类型：`fl2va` 或 `ref2va`。 |
 | `dit_enable_vae_tiling` | `bool` | `false` | 是否启用 VAE tiling，目前仅支持 `qwen-image-edit-plus`。 |
 | `dit_vae_image_size` | `int64` | `1048576` | Qwen-Image-Edit-Plus VAE 用于计算维度的 image size。 |
 | `dit_sparse_attention_enabled` | `bool` | `false` | 是否为 WAN 启用 block-wise sparse attention / RainFusion。 |

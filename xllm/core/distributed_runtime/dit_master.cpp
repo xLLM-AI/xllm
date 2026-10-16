@@ -134,12 +134,12 @@ void DiTMaster::handle_request(DiTRequestParams params,
     if (!params.verify_params(callback)) {
       return;
     }
-    DiTRequestState dit_state = DiTRequestState(params.input_params,
-                                                params.generation_params,
-                                                callback,
-                                                nullptr,
-                                                params.request_kind,
-                                                call);
+    DiTRequestState dit_state =
+        DiTRequestState(std::move(params.input_params),
+                        std::move(params.generation_params),
+                        callback,
+                        params.request_kind,
+                        call);
     rate_limit_guard.dismiss();
     auto request = std::make_shared<DiTRequest>(params.request_id,
                                                 params.x_request_id,

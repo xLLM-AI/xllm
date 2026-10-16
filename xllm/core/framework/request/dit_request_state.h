@@ -20,7 +20,7 @@ limitations under the License.
 #include <deque>
 #include <optional>
 #include <string>
-#include <vector>
+#include <utility>
 
 #include "dit_input_sources.h"
 #include "dit_request_output.h"
@@ -32,8 +32,6 @@ class DiTGenerationParams;
 }  // namespace proto
 
 using DiTOutputFunc = std::function<bool(const DiTRequestOutput& output)>;
-using DiTOutputsFunc = std::function<std::vector<bool>(
-    const std::vector<DiTRequestOutput>& outputs)>;
 
 class Call;
 
@@ -98,7 +96,6 @@ class DiTGenerationParams final {
   // behavior). Cola-DLM uses seed_is_set to distinguish explicit seed=0 from
   // unset (stochastic) requests.
   int64_t seed = 0;
-
   // True when the client explicitly set seed in the request (proto has_seed).
   bool seed_is_set = false;
 
@@ -113,13 +110,10 @@ class DiTGenerationParams final {
   // Audio generation params (for LongCat-AudioDiT)
   // Target duration in latent frames (prompt + gen). 0 means use max_duration.
   int32_t audio_duration_frames = 0;
-
   // Number of ODE Euler steps for audio generation
   int32_t audio_steps = 16;
-
   // Guidance method: "cfg" or "apg"
   std::string audio_guidance_method = "cfg";
-
   // Audio sample rate in Hz, read from model config.json (sampling_rate).
   int32_t audio_sampling_rate = 24000;
 
@@ -147,17 +141,14 @@ class DiTGenerationParams final {
 struct DiTInputParams {
   // Primary input text description for image generation
   std::string prompt;
-
   // Secondary prompt for additional details (e.g., color, lighting)
   std::string prompt_2;
-
   // Negative prompt to exclude low-quality features
   std::string negative_prompt;
-
   // Secondary negative prompt to exclude additional unwanted features
   std::string negative_prompt_2;
 
-  DiTImageSources image_sources;
+  DiTMediaSources media_sources;
 
   DiTTensorSources tensor_sources;
 
@@ -167,19 +158,17 @@ struct DiTInputParams {
 
 struct DiTRequestState {
  public:
-  DiTRequestState(DiTInputParams& input_params,
-                  DiTGenerationParams& generation_params,
+  DiTRequestState(DiTInputParams input_params,
+                  DiTGenerationParams generation_params,
                   DiTOutputFunc output_func,
-                  DiTOutputsFunc outputs_func,
                   DiTRequestKind request_kind,
                   std::optional<Call*> call = std::nullopt)
       : input_params_(std::move(input_params)),
         generation_params_(std::move(generation_params)),
         output_func_(std::move(output_func)),
-        outputs_func_(std::move(outputs_func)),
         request_kind_(request_kind),
         call_(call) {}
-  DiTRequestState() {}
+  DiTRequestState() = default;
   DiTInputParams& input_params() { return input_params_; }
   const DiTInputParams& input_params() const { return input_params_; }
   DiTGenerationParams& generation_params() { return generation_params_; }
@@ -187,7 +176,6 @@ struct DiTRequestState {
     return generation_params_;
   }
   DiTOutputFunc& output_func() { return output_func_; }
-  DiTOutputsFunc& outputs_func() { return outputs_func_; }
   DiTRequestKind request_kind() const { return request_kind_; }
   std::optional<Call*>& call() { return call_; }
 
@@ -195,7 +183,6 @@ struct DiTRequestState {
   DiTInputParams input_params_;
   DiTGenerationParams generation_params_;
   DiTOutputFunc output_func_;
-  DiTOutputsFunc outputs_func_;
   DiTRequestKind request_kind_ = DiTRequestKind::kImage;
   std::optional<Call*> call_;
 };

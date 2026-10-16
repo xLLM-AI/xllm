@@ -37,14 +37,15 @@ class DiTRequest : public RequestBase {
   DiTRequest(const std::string& request_id,
              const std::string& x_request_id,
              const std::string& x_request_time,
-             const DiTRequestState& state,
+             DiTRequestState state,
              const std::string& service_request_id = "",
              const std::string& source_xservice_addr = "",
              RateLimiter* rate_limiter = nullptr);
 
   bool finished() const;
 
-  void handle_forward_output(torch::Tensor output);
+  void handle_forward_output(torch::Tensor output,
+                             torch::Tensor audio_output = torch::Tensor());
 
   void handle_forward_text_output(const std::string& text);
 

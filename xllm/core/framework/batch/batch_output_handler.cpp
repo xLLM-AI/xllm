@@ -190,7 +190,9 @@ void BatchOutputHandler::process_sample_output(
       const auto& seq_mm_embeddings =
           raw_output.outputs[output_idx].mm_embeddings;
       if (!seq_mm_embeddings.empty()) {
-        seq->update_mm_embeddings(seq_mm_embeddings);
+        seq->update_mm_embeddings(
+            seq_mm_embeddings,
+            raw_output.outputs[output_idx].mm_embeddings_metadata);
       }
     }
 

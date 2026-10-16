@@ -369,19 +369,24 @@ void WorkerService::set_worker(std::unique_ptr<Worker> worker) {
 }
 
 void WorkerService::step(const DiTForwardInput& input,
-                         std::vector<torch::Tensor>& tensors,
-                         std::vector<std::string>& text_output) {
+                         DiTForwardOutput& output) {
   auto result = std::move(worker_->step_async(input)).get();
   if (!result.has_value()) {
     return;
   }
-  const DiTForwardOutput& output = result->dit_forward_output;
+  const DiTForwardOutput& forward_output = result->dit_forward_output;
   c10::StreamGuard stream_guard = stream_->set_stream_guard();
-  tensors.reserve(output.tensors.size());
-  for (const torch::Tensor& tensor : output.tensors) {
-    tensors.emplace_back(safe_to(tensor, torch::kCPU, /*non_blocking=*/true));
+  output.tensors.reserve(forward_output.tensors.size());
+  for (const torch::Tensor& tensor : forward_output.tensors) {
+    output.tensors.emplace_back(
+        safe_to(tensor, torch::kCPU, /*non_blocking=*/true));
   }
-  text_output = output.text_output;
+  output.audio_tensors.reserve(forward_output.audio_tensors.size());
+  for (const torch::Tensor& tensor : forward_output.audio_tensors) {
+    output.audio_tensors.emplace_back(
+        safe_to(tensor, torch::kCPU, /*non_blocking=*/true));
+  }
+  output.text_output = forward_output.text_output;
   stream_->synchronize();
 }
 
@@ -397,6 +402,7 @@ void WorkerService::step(
   auto& embeddings = cpu_output.sample_output.embeddings;
   auto& mm_embeddings = cpu_output.sample_output.mm_embeddings;
   auto& dit_images = cpu_output.dit_forward_output.tensors;
+  auto& dit_audio = cpu_output.dit_forward_output.audio_tensors;
   auto& dit_text_output = cpu_output.dit_forward_output.text_output;
   auto& expert_load_data = cpu_output.expert_load_data;
   int64_t& prepared_token = cpu_output.prepared_token;
@@ -465,6 +471,12 @@ void WorkerService::step(
           for (auto dit_image : dit_forward_output.tensors) {
             dit_images.emplace_back(
                 safe_to(dit_image, torch::kCPU, /*non_blocking=*/true));
+          }
+          dit_audio.clear();
+          dit_audio.reserve(dit_forward_output.audio_tensors.size());
+          for (auto dit_audio_tensor : dit_forward_output.audio_tensors) {
+            dit_audio.emplace_back(
+                safe_to(dit_audio_tensor, torch::kCPU, /*non_blocking=*/true));
           }
           dit_text_output = dit_forward_output.text_output;
 
@@ -604,9 +616,7 @@ void WorkerService::create_polling_shm_thread(
               [&](auto& typed_input) {
                 using Input = std::decay_t<decltype(typed_input)>;
                 if constexpr (std::is_same_v<Input, DiTForwardInput>) {
-                  step(typed_input,
-                       cpu_output.dit_forward_output.tensors,
-                       cpu_output.dit_forward_output.text_output);
+                  step(typed_input, cpu_output.dit_forward_output);
                 } else {
                   step(typed_input, cpu_output, speculative_token_stats);
                 }
@@ -623,6 +633,7 @@ void WorkerService::create_polling_shm_thread(
               speculative_token_stats,
               cpu_output.dit_forward_output.tensors,
               cpu_output.dit_forward_output.text_output,
+              cpu_output.dit_forward_output.audio_tensors,
               cpu_output.expert_load_data,
               cpu_output.prepared_token,
               cpu_output.beam_search_output.src_seq_idxes,
@@ -1023,9 +1034,7 @@ void WorkerService::ExecuteModel(::google::protobuf::RpcController* controller,
             [&](auto& typed_input) {
               using Input = std::decay_t<decltype(typed_input)>;
               if constexpr (std::is_same_v<Input, DiTForwardInput>) {
-                step(typed_input,
-                     cpu_output.dit_forward_output.tensors,
-                     cpu_output.dit_forward_output.text_output);
+                step(typed_input, cpu_output.dit_forward_output);
               } else {
                 step(typed_input, cpu_output, speculative_token_stats);
               }
@@ -1080,6 +1089,7 @@ void WorkerService::GetLastStepResult(
       auto& top_logprobs = cpu_output.sample_output.top_logprobs;
       auto& embeddings = cpu_output.sample_output.embeddings;
       auto& dit_images = cpu_output.dit_forward_output.tensors;
+      auto& dit_audio = cpu_output.dit_forward_output.audio_tensors;
       auto& dit_text_output = cpu_output.dit_forward_output.text_output;
       auto& expert_load_data = cpu_output.expert_load_data;
       auto& src_seq_idxes = cpu_output.beam_search_output.src_seq_idxes;
@@ -1102,6 +1112,12 @@ void WorkerService::GetLastStepResult(
         for (auto image : forward_output.dit_forward_output.tensors) {
           dit_images.emplace_back(
               safe_to(image, torch::kCPU, /*non_blocking=*/true));
+        }
+        dit_audio.reserve(
+            forward_output.dit_forward_output.audio_tensors.size());
+        for (auto audio : forward_output.dit_forward_output.audio_tensors) {
+          dit_audio.emplace_back(
+              safe_to(audio, torch::kCPU, /*non_blocking=*/true));
         }
         dit_text_output = forward_output.dit_forward_output.text_output;
 
@@ -1175,6 +1191,7 @@ void WorkerService::GetLastStepResult(
           record_speculative_metrics_from_output(forward_output);
 
       if (next_tokens.defined() || !dit_images.empty() ||
+          !cpu_output.dit_forward_output.audio_tensors.empty() ||
           !dit_text_output.empty() ||
           ::xllm::EPLBConfig::get_instance().enable_eplb() ||
           !forward_output.json_object_errors.empty()) {

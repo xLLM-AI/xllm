@@ -20,7 +20,6 @@ limitations under the License.
 
 #include <cstdint>
 #include <nlohmann/json.hpp>
-#include <optional>
 
 #include "framework/request/dit_request_state.h"
 
@@ -86,11 +85,11 @@ class DiTForwardInput final {
     // Print tensor shapes
     os << "\n--- Tensor Shapes ---" << std::endl;
 
-    os << "image_sources: [";
-    for (size_t index = 0; index < image_sources.size(); ++index) {
-      const NamedTensor& source = image_sources.at(index);
+    os << "media_sources: [";
+    for (size_t index = 0; index < media_sources.size(); ++index) {
+      const MediaNamedTensor& source = media_sources.at(index);
       os << source.name << ":" << source.tensor.sizes();
-      if (index + 1 < image_sources.size()) {
+      if (index + 1 < media_sources.size()) {
         os << ", ";
       }
     }
@@ -129,7 +128,7 @@ class DiTForwardInput final {
     DiTForwardInput input = *this;
 
     input.tensor_sources = tensor_sources.to(device, dtype);
-    input.image_sources = image_sources.to(device);
+    input.media_sources = media_sources.to(device);
     return input;
   }
 
@@ -147,7 +146,7 @@ class DiTForwardInput final {
   // Secondary negative prompt to exclude additional unwanted features
   std::vector<std::string> negative_prompts_2;
 
-  DiTImageSources image_sources;
+  DiTMediaSources media_sources;
 
   DiTTensorSources tensor_sources;
 
@@ -166,6 +165,8 @@ class DiTForwardOutput final {
 
   // generated tensor (for image/audio models)
   std::vector<torch::Tensor> tensors;
+  // Optional generated audio tensors for video+audio models.
+  std::vector<torch::Tensor> audio_tensors;
   // generated text (for text diffusion models like Cola-DLM)
   std::vector<std::string> text_output;
 };

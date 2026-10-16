@@ -117,6 +117,9 @@ class ProcessGroup {
   virtual void send(const torch::Tensor& tensor, int dst, int tag = 0);
   virtual void recv(torch::Tensor& tensor, int src, int tag = 0);
 
+  // barrier: block until every process in the group reaches this call.
+  virtual void barrier();
+
   virtual std::string hccl_comm_name(bool init_comm = true);
 
 #if defined(USE_NPU)

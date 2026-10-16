@@ -22,9 +22,11 @@ limitations under the License.
 
 namespace xllm {
 
+using EmbeddingOutputMetadata = std::unordered_map<std::string, torch::Tensor>;
+
 struct EmbeddingOutput {
   torch::Tensor embedding;
-  std::unordered_map<std::string, torch::Tensor> metadata;
+  EmbeddingOutputMetadata metadata;
   std::string hash_key;
 };
 

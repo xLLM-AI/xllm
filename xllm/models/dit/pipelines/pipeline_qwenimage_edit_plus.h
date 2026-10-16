@@ -871,7 +871,7 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
     }
     torch::Tensor negative_prompt_embeds_mask;
 
-    std::vector<torch::Tensor> raw_image_inputs = input.image_sources.get();
+    std::vector<torch::Tensor> raw_image_inputs = input.media_sources.get();
 
     std::vector<torch::Tensor> image_list;
     image_list.reserve(raw_image_inputs.size());

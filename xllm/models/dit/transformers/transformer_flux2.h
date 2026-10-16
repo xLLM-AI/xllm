@@ -43,6 +43,8 @@ limitations under the License.
 #include "models/dit/transformers/transformer_flux.h"
 #include "models/dit/utils/dit_cache_mixin.h"
 #include "models/dit/utils/dit_parallel_linear.h"
+#include "models/dit/utils/timestep_embedding.h"
+#include "models/dit/utils/util.h"
 #include "models/model_registry.h"
 #if defined(USE_NPU)
 #include "torch_npu/csrc/aten/CustomFunctions.h"
@@ -119,25 +121,11 @@ class Flux2FeedForwardImpl final : public torch::nn::Module {
     if (tp_size > 1) {
       int64_t tp_rank = parallel_args_.dit_tp_group_->rank();
 
-      // Manually reorder linear_in weight: split gate/up separately,
-      // take rank-th slice of each, then recombine so each rank has
-      // matching gate-up pairs for SwiGLU.
       auto linear_in_weight = state_dict.get_tensor("linear_in.weight");
       if (linear_in_weight.defined()) {
-        // Full weight shape: [inner_dim * 6, inner_dim]
-        // Rows [0, inner_dim*3) = gate projection
-        // Rows [inner_dim*3, inner_dim*6) = up projection
-        int64_t gate_up_dim = linear_in_weight.size(0) / 2;
-        auto gate_weight = linear_in_weight.slice(0, 0, gate_up_dim);
-        auto up_weight = linear_in_weight.slice(0, gate_up_dim);
-
-        auto gate_chunks = gate_weight.chunk(tp_size, 0);
-        auto up_chunks = up_weight.chunk(tp_size, 0);
-
-        auto gate_rank = gate_chunks[tp_rank];
-        auto up_rank = up_chunks[tp_rank];
-
-        auto rank_weight = torch::cat({gate_rank, up_rank}, 0).to(options_);
+        auto rank_weight =
+            dit::shard_swiglu_weight(linear_in_weight, tp_size, tp_rank)
+                .to(options_);
 
         {
           torch::NoGradGuard no_grad;
@@ -606,67 +594,6 @@ class Flux2TimestepEmbeddingImpl : public torch::nn::Module {
 };
 TORCH_MODULE(Flux2TimestepEmbedding);
 
-class Flux2TimestepsImpl : public torch::nn::Module {
- public:
-  explicit Flux2TimestepsImpl(int64_t num_channels,
-                              bool flip_sin_to_cos = true,
-                              float downscale_freq_shift = 0.0,
-                              int64_t scale = 1)
-      : num_channels_(num_channels),
-        flip_sin_to_cos_(flip_sin_to_cos),
-        downscale_freq_shift_(downscale_freq_shift),
-        scale_(scale) {}
-
-  torch::Tensor forward(const torch::Tensor& timesteps) {
-    return get_timestep_embedding(timesteps,
-                                  num_channels_,
-                                  flip_sin_to_cos_,
-                                  downscale_freq_shift_,
-                                  scale_);
-  }
-
- private:
-  int64_t num_channels_;
-  bool flip_sin_to_cos_;
-  float downscale_freq_shift_;
-  int64_t scale_;
-
-  torch::Tensor get_timestep_embedding(const torch::Tensor& timesteps,
-                                       int embedding_dim,
-                                       bool flip_sin_to_cos = false,
-                                       float downscale_freq_shift = 1.0f,
-                                       float scale = 1.0f,
-                                       int max_period = 10000) {
-    int half_dim = embedding_dim / 2;
-    auto exponent = -std::log(static_cast<float>(max_period)) *
-                    torch::arange(0,
-                                  half_dim,
-                                  torch::TensorOptions()
-                                      .dtype(torch::kFloat32)
-                                      .device(timesteps.device()));
-    exponent = exponent / (half_dim - downscale_freq_shift);
-
-    auto emb = torch::exp(exponent);
-    emb = timesteps.unsqueeze(1).to(torch::kFloat32) * emb.unsqueeze(0);
-    emb = scale * emb;
-    emb = torch::cat({torch::sin(emb), torch::cos(emb)}, /*dim=*/-1);
-
-    if (flip_sin_to_cos) {
-      emb = torch::cat({emb.slice(/*dim=*/-1, /*start=*/half_dim),
-                        emb.slice(/*dim=*/-1, /*start=*/0, /*end=*/half_dim)},
-                       /*dim=*/-1);
-    }
-
-    if (embedding_dim % 2 == 1) {
-      emb = torch::nn::functional::pad(
-          emb, torch::nn::functional::PadFuncOptions({0, 1, 0, 0}));
-    }
-
-    return emb;
-  }
-};
-TORCH_MODULE(Flux2Timesteps);
-
 class Flux2TimestepGuidanceEmbeddingsImpl : public torch::nn::Module {
  public:
   explicit Flux2TimestepGuidanceEmbeddingsImpl(const ModelContext& context,
@@ -680,7 +607,7 @@ class Flux2TimestepGuidanceEmbeddingsImpl : public torch::nn::Module {
     guidance_embeds_ = guidance_embeds;
 
     time_proj_ =
-        register_module("time_proj", Flux2Timesteps(in_channels_, true, 0.0));
+        register_module("time_proj", dit::Timesteps(in_channels_, true, 0.0));
     timestep_embedder_ = register_module(
         "timestep_embedder",
         Flux2TimestepEmbedding(in_channels_, embedding_dim_, -1, bias));
@@ -727,7 +654,7 @@ class Flux2TimestepGuidanceEmbeddingsImpl : public torch::nn::Module {
   int64_t in_channels_;
   int64_t embedding_dim_;
   bool guidance_embeds_;
-  Flux2Timesteps time_proj_{nullptr};
+  dit::Timesteps time_proj_{nullptr};
   Flux2TimestepEmbedding timestep_embedder_{nullptr};
   Flux2TimestepEmbedding guidance_embedder_{nullptr};
   torch::TensorOptions options_;

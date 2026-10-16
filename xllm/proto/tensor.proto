@@ -25,6 +25,7 @@ message Parameter
   optional string string_param = 3;
   optional double double_param = 4;
   optional uint64 uint64_param = 5;
+  repeated int64 int64_tensor_param = 6;
 }
 
 message TensorContents

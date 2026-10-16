@@ -594,7 +594,7 @@ DiTModelLoader::DiTModelLoader(const std::string& model_root_path)
   }
   // parse model_index.json & initialize model_loader
   for (const auto& [json_key, json_value] : root_json.items()) {
-    if (!json_value.is_array() || json_value.size() != 2) {
+    if (!json_value.is_array() || json_value.size() < 2) {
       continue;
     }
 

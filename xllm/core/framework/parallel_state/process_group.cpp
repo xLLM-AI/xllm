@@ -344,6 +344,11 @@ void ProcessGroup::recv(torch::Tensor& tensor, int src, int tag) {
   pg_->recv(tensors, src, tag)->wait();
 }
 
+void ProcessGroup::barrier() {
+  CHECK(pg_ != nullptr) << "Process group is not initialized.";
+  pg_->barrier()->wait();
+}
+
 std::string ProcessGroup::hccl_comm_name(bool init_comm) {
   (void)init_comm;
   CHECK(false) << "hccl_comm_name is only supported on NPU HCCL process group.";
