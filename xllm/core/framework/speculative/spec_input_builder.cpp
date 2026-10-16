@@ -23,6 +23,7 @@ limitations under the License.
 
 #include "framework/model/model_input_params.h"
 #include "framework/sampling/sampling_params.h"
+#include "layers/common/expanded_decode_metadata_builder.h"
 #include "runtime/vlm_forward_params.h"
 #include "util/tensor_helper.h"
 
@@ -135,6 +136,28 @@ void fill_multi_block_table_slices(DecodeRowContext& ctx) {
                                              static_cast<size_t>(row.numel()));
     }
   }
+}
+
+void append_paged_kv_row(const Slice<int32_t>& block_table,
+                         int32_t kv_seq_len,
+                         int32_t block_size,
+                         DecodeBuildBuffers& buf) {
+  CHECK_GT(block_size, 0) << "invalid block_size=" << block_size;
+  const int32_t page_count = layer::kv_page_count(kv_seq_len, block_size);
+  CHECK_LE(static_cast<size_t>(page_count), block_table.size())
+      << "row KV length exceeds block-table capacity, kv_seq_len=" << kv_seq_len
+      << ", page_count=" << page_count
+      << ", block_table_size=" << block_table.size();
+  if (buf.out_paged_kv_indptr.empty()) {
+    buf.out_paged_kv_indptr.emplace_back(0);
+  }
+  buf.out_paged_kv_indices.insert(buf.out_paged_kv_indices.end(),
+                                  block_table.begin(),
+                                  block_table.begin() + page_count);
+  buf.out_paged_kv_indptr.emplace_back(buf.out_paged_kv_indptr.back() +
+                                       page_count);
+  buf.out_paged_kv_last_page_len.emplace_back(
+      layer::kv_last_page_len(kv_seq_len, block_size));
 }
 
 }  // namespace
@@ -331,6 +354,15 @@ void append_decode_row(const DecodeRowContext& ctx,
   }
   buf.out_positions.emplace_back(model_position);
 
+  std::optional<int32_t> row_kv_seq_len;
+  if (row.append_kv_len) {
+    const int32_t kv_len_offset =
+        row.kv_len_offset.value_or(row.position_offset);
+    row_kv_seq_len = calc_kv_len(ctx.kv_seq_lens, row.seq_id, kv_len_offset);
+    update_kv_seq_lens_and_max(
+        buf.out_kv_seq_lens, *row_kv_seq_len, buf.meta.kv_max_seq_len);
+  }
+
   if (ctx.model_managed_multiblock) {
     CHECK(!ctx.multi_block_tables.empty())
         << "model-managed multiblock input requires an SWA manager";
@@ -370,17 +402,13 @@ void append_decode_row(const DecodeRowContext& ctx,
                                   block_table_slice.begin(),
                                   block_table_slice.end());
       ++buf.out_block_table_rows;
+      if (row_kv_seq_len.has_value()) {
+        append_paged_kv_row(
+            block_table_slice, *row_kv_seq_len, block_size, buf);
+      }
     }
   }
 
-  if (row.append_kv_len) {
-    const int32_t kv_len_offset =
-        row.kv_len_offset.value_or(row.position_offset);
-    const int32_t kv_len =
-        calc_kv_len(ctx.kv_seq_lens, row.seq_id, kv_len_offset);
-    update_kv_seq_lens_and_max(
-        buf.out_kv_seq_lens, kv_len, buf.meta.kv_max_seq_len);
-  }
   if (row.append_q_len_one) {
     append_q_seq_len(buf.out_q_seq_lens, buf.out_q_cu_seq_lens, 1);
   }
@@ -482,6 +510,24 @@ void update_input_params(Params& input_params,
                                 buf.out_block_table_rows,
                                 buf.out_block_table_stride);
       input_params.multi_block_tables.clear();
+      if (!buf.out_paged_kv_indptr.empty()) {
+        CHECK_EQ(buf.out_paged_kv_indptr.size(),
+                 static_cast<size_t>(buf.out_block_table_rows + 1));
+        CHECK_EQ(buf.out_paged_kv_last_page_len.size(),
+                 static_cast<size_t>(buf.out_block_table_rows));
+        CHECK_EQ(buf.out_paged_kv_indptr.back(),
+                 static_cast<int32_t>(buf.out_paged_kv_indices.size()));
+        input_params.attention.device.paged_kv_indptr =
+            make_cpu_int_tensor(buf.out_paged_kv_indptr);
+        input_params.attention.device.paged_kv_indices =
+            make_cpu_int_tensor(buf.out_paged_kv_indices);
+        input_params.attention.device.paged_kv_last_page_len =
+            make_cpu_int_tensor(buf.out_paged_kv_last_page_len);
+      } else {
+        input_params.attention.device.paged_kv_indptr = torch::Tensor();
+        input_params.attention.device.paged_kv_indices = torch::Tensor();
+        input_params.attention.device.paged_kv_last_page_len = torch::Tensor();
+      }
     }
   }
 }

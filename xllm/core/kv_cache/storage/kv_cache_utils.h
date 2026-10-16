@@ -19,6 +19,7 @@ limitations under the License.
 #include <torch/types.h>
 
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -243,6 +244,19 @@ void create_host_page_aligned_tensor(const std::vector<int64_t>& dims,
                                      torch::ScalarType dtype,
                                      torch::Tensor* tensor,
                                      HostPageAlignedRegion* region);
+
+// Allocation and slot-reset both mark the KPool tail's gate plane (dim 1,
+// index 1) with -inf so unwritten circular-tail rows read as invalid. Pool
+// completion treats any finite gate as an initialized slot. The sentinel is
+// an NPU-only layout contract; other platforms leave the tail zeroed.
+inline void fill_kpool_tail_gate_sentinel(const torch::Tensor& kpool_tail) {
+#if defined(USE_NPU)
+  kpool_tail.select(/*dim=*/1, /*index=*/1)
+      .fill_(-std::numeric_limits<float>::infinity());
+#else
+  (void)kpool_tail;
+#endif
+}
 
 #if defined(USE_NPU)
 aclFormat get_npu_kv_cache_format(const std::string& model_type);

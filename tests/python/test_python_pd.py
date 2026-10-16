@@ -31,62 +31,41 @@ from xllm.python.model_executor.forward_context import (
     AclGraphExecutionState,
     ForwardContext,
     forward_context,
-    in_acl_graph,
 )
 from xllm.python.models.deepseek_v32 import DeepseekV3Model
 from xllm.python.models.glm5_next import Glm5NextConfig, Glm5NextIndexer, Glm5NextModel
-from xllm.python.models.glm5_next_kpool import alloc_pool_cache, compress_completed_pools
+from xllm.python.models.glm5_next_kpool import update_compressed_kpool
 from xllm.python.models.glm5_next_mtp import Glm5NextMtpModel
 
 
 class _IndexHistory:
-    def __init__(self, cache: torch.Tensor, block_table: torch.Tensor) -> None:
+    def __init__(self, cache: torch.Tensor, tail: torch.Tensor, block_table: torch.Tensor) -> None:
         self.cache = cache
+        self.kpool_tail = tail
         self.block_table = block_table
-        self.graph_index_history_max_kv = block_table.shape[1] * cache.shape[1]
-        self.length = 0
-
-    def write(self, rows: torch.Tensor, positions: torch.Tensor) -> None:
-        page_size = self.cache.shape[1]
-        slots = self.block_table[0, positions // page_size] * page_size + positions % page_size
-        self.cache.flatten(0, 2).index_copy_(0, slots, rows)
-
-    def gather_index_history(self, layer: Attention | None) -> torch.Tensor:
-        del layer
-        history = self.cache[self.block_table[0]].reshape(1, -1, self.cache.shape[-1])
-        if in_acl_graph():
-            # Mirror fixed-capacity graph history and live-length masking;
-            # this fixture exercises tensor semantics, not hardware replay.
-            row_valid = torch.arange(history.shape[1]) < self.length
-            history = history * row_valid[None, :, None].to(history.dtype)
-        else:
-            history = history[:, : self.length]
-        return history
 
     def context(self, positions: torch.Tensor, length: int) -> MlaIndexContext:
-        self.length = length
-
-        def update(rows: torch.Tensor, scales: torch.Tensor | None) -> None:
-            assert scales is None
-            self.write(rows, positions)
-
         return MlaIndexContext(
             index_cache=self.cache,
             slot_mapping=positions,
             block_table=self.block_table,
-            actual_seq_q=torch.tensor([positions.numel()]),
-            actual_seq_kv=torch.tensor([length]),
+            actual_seq_q=torch.tensor([positions.numel()], device=positions.device),
+            actual_seq_kv=torch.tensor([length], device=positions.device),
             index_cache_scale=None,
             get_quant_indexer_metadata=MagicMock(),
-            update_index_cache=update,
+            update_index_cache=lambda rows, scales: None,
             materialize_index_cache=MagicMock(),
+            kpool_tail=self.kpool_tail,
+            kpool_tail_read_indices=torch.tensor([1], dtype=torch.int32, device=positions.device),
+            kpool_tail_write_indices=torch.tensor([1], dtype=torch.int32, device=positions.device),
+            kpool_query_lens=[1],
+            kpool_query_lens_device=torch.tensor([1], dtype=torch.int32, device=positions.device),
         )
 
 
 @pytest.mark.parametrize("prompt_length", [11, 12])
-@pytest.mark.parametrize("stale_pool", [False, True])
 @pytest.mark.parametrize("graph_mode", [False, True])
-def test_pd_kpool_decode_uses_transferred_history(prompt_length: int, stale_pool: bool, graph_mode: bool) -> None:
+def test_pd_kpool_decode_uses_transferred_history(prompt_length: int, graph_mode: bool) -> None:
     cfg = Glm5NextConfig(
         hidden_size=8,
         q_lora_rank=4,
@@ -95,6 +74,7 @@ def test_pd_kpool_decode_uses_transferred_history(prompt_length: int, stale_pool
         index_topk=4,
         index_kpool=2,
         index_kpool_compress=True,
+        requires_kpool_tail_cache=True,
     )
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(29)
@@ -104,28 +84,31 @@ def test_pd_kpool_decode_uses_transferred_history(prompt_length: int, stale_pool
         nn.init.normal_(indexer.index_kpool_compress_gate)
         hidden = torch.randn(1, prompt_length + 2, cfg.hidden_size, dtype=torch.bfloat16)
         queries = torch.randn(1, 2, cfg.q_lora_rank, dtype=torch.bfloat16)
-    shape = (5, 4, 1, 2 * cfg.index_head_dim + 1)
-    source = _IndexHistory(torch.zeros(shape, dtype=torch.bfloat16), torch.tensor([[3, 1, 4, 2]]))
-    # Reused blocks can retain keys, gates and valid=1 beyond the live prefix.
-    target = _IndexHistory(torch.ones(shape, dtype=torch.bfloat16), torch.tensor([[2, 4, 1, 3]]))
+    source = _IndexHistory(
+        torch.zeros(5, 4, 1, cfg.index_head_dim, dtype=torch.bfloat16),
+        torch.full((2, 2, 4, cfg.index_head_dim), float("-inf"), dtype=torch.bfloat16),
+        torch.tensor([[3, 1, 4, 2]]),
+    )
     prompt_positions = torch.arange(prompt_length)
     prompt_rows = indexer.get_packed_states(
         hidden[:, :prompt_length], torch.ones(1, prompt_length, dtype=torch.bool)
     ).reshape(prompt_length, -1)
-    source.write(prompt_rows, prompt_positions)
-    # Transfer only framework-owned raw rows, remapping physical block IDs.
-    source.length = prompt_length
-    target.write(source.gather_index_history(None).reshape(prompt_length, -1), prompt_positions)
-    local_pool = alloc_pool_cache(source.cache, cfg.index_kpool)
-    compress_completed_pools(
-        source.cache,
-        local_pool,
-        source.block_table,
+    raw_k, raw_gate, valid = torch.split(prompt_rows, [cfg.index_head_dim, cfg.index_head_dim, 1], dim=-1)
+    update_compressed_kpool(
+        raw_k,
+        raw_gate,
+        valid.reshape(-1).bool(),
         prompt_positions,
+        source.cache,
+        source.kpool_tail,
+        torch.tensor([1], dtype=torch.int32),
+        torch.tensor([1], dtype=torch.int32),
+        source.block_table,
+        [prompt_length],
         indexer.index_kpool_compress_ape,
-        cfg.index_head_dim,
         cfg.index_kpool,
     )
+    target = _IndexHistory(source.cache.clone(), source.kpool_tail.clone(), source.block_table)
     layer = Attention(2, 1, 4, 0.5, 0, 0)
 
     def _select(history: _IndexHistory, step: int) -> torch.Tensor:
@@ -149,13 +132,7 @@ def test_pd_kpool_decode_uses_transferred_history(prompt_length: int, stale_pool
             )
 
     for step in range(2):
-        layer.cache_transfer_enabled = False
-        indexer._pool_caches[0] = local_pool
         expected = _select(source, step)
-        layer.cache_transfer_enabled = True
-        indexer._pool_caches.clear()
-        if stale_pool:
-            indexer._pool_caches[0] = torch.full_like(local_pool, float("nan"))
         actual = _select(target, step)
         # Compare ordered indices: candidate width can change top-k tie ordering.
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)

@@ -78,20 +78,6 @@ int32_t warmup_decode_seq_len(bool fia_enabled, int32_t max_context_len) {
       max_context_len);
 }
 
-runtime::DecodeGraphExecutionShape build_decode_graph_execution_shape(
-    const runtime::Options& options) {
-  runtime::DecodeGraphExecutionShape execution_shape;
-  execution_shape.num_decoding_tokens = options.num_decoding_tokens();
-  execution_shape.num_speculative_tokens = options.num_speculative_tokens();
-  execution_shape.enable_graph_mode_decode_no_padding =
-      options.enable_graph_mode_decode_no_padding();
-  if (Platform::is_npu()) {
-    execution_shape.max_graph_batch_size =
-        ExecutionConfig::get_instance().acl_graph_decode_batch_size_limit();
-  }
-  return execution_shape;
-}
-
 namespace {
 
 int32_t decode_warmup_token_bucket(const DecodeGraphWarmupPlan& plan,
@@ -99,15 +85,14 @@ int32_t decode_warmup_token_bucket(const DecodeGraphWarmupPlan& plan,
                                    int32_t dp_size) {
   CHECK_GT(global_batch_size, 0);
   CHECK_GT(dp_size, 0);
-  CHECK_GT(plan.execution_shape.num_decoding_tokens, 0);
+  CHECK_GT(plan.warmup_config.num_decoding_tokens, 0);
   const int32_t local_sequence_batch_size =
       (global_batch_size + dp_size - 1) / dp_size;
   const int64_t num_token_rows =
       static_cast<int64_t>(local_sequence_batch_size) *
-      plan.execution_shape.num_decoding_tokens;
+      plan.warmup_config.num_decoding_tokens;
   return static_cast<int32_t>(runtime::get_decode_graph_token_bucket(
-      num_token_rows,
-      plan.execution_shape.enable_graph_mode_decode_no_padding));
+      num_token_rows, plan.warmup_config.enable_graph_mode_decode_no_padding));
 }
 
 }  // namespace
@@ -145,7 +130,7 @@ ProfileManager::ProfileManager(
             static_cast<uint32_t>(std::max<int32_t>(1, options_.dp_size()))));
   }
   decode_graph_warmup_plan_ =
-      build_decode_graph_warmup_plan(options_.decode_graph_execution_shape(),
+      build_decode_graph_warmup_plan(options_.decode_graph_warmup_config(),
                                      max_decode_batch_size,
                                      options_.dp_size());
   block_manager_pool_ = engine_->block_manager_pool();
@@ -967,9 +952,9 @@ std::shared_ptr<Request> ProfileManager::try_generate_single_decode_request(
   req_state.enable_schedule_overlap = options_.enable_schedule_overlap();
   req_state.is_graph_warmup = is_graph_warmup;
   const int32_t num_speculative_tokens =
-      decode_graph_warmup_plan_.execution_shape.num_speculative_tokens;
+      decode_graph_warmup_plan_.warmup_config.num_speculative_tokens;
   const int64_t num_decoding_tokens =
-      decode_graph_warmup_plan_.execution_shape.num_decoding_tokens;
+      decode_graph_warmup_plan_.warmup_config.num_decoding_tokens;
   CHECK_GT(num_decoding_tokens, 0);
   size_t seq_capacity = static_cast<size_t>(total_length) +
                         static_cast<size_t>(num_decoding_tokens);
@@ -1459,7 +1444,7 @@ void ProfileManager::warmup_decode_for_graph() {
   const int32_t warmup_capacity =
       std::min(max_decode_batch_size, allocatable_sequences);
   decode_graph_warmup_plan_ =
-      build_decode_graph_warmup_plan(options_.decode_graph_execution_shape(),
+      build_decode_graph_warmup_plan(options_.decode_graph_warmup_config(),
                                      warmup_capacity,
                                      options_.dp_size());
   const std::vector<int32_t>& decode_batch_sizes =

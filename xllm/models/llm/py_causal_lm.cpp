@@ -95,23 +95,6 @@ int64_t python_qwen3_5_mega_moe_max_num_tokens_per_rank(
 
 }  // namespace detail
 
-namespace {
-
-py::list build_python_kv_caches(std::vector<KVCache>& kv_caches) {
-  py::list python_caches;
-  for (KVCache& kv_cache : kv_caches) {
-    python_caches.append(
-        py::make_tuple(optional_tensor(kv_cache.get_k_cache()),
-                       optional_tensor(kv_cache.get_v_cache()),
-                       optional_tensor(kv_cache.get_index_cache()),
-                       optional_tensor(kv_cache.get_conv_cache()),
-                       optional_tensor(kv_cache.get_ssm_cache())));
-  }
-  return python_caches;
-}
-
-}  // namespace
-
 PyCausalLM::PyCausalLM(const ModelContext& context)
     : model_args_(context.get_model_args()),
       options_(context.get_tensor_options()),
@@ -368,6 +351,8 @@ py::dict PyCausalLM::build_config_dict(
   d["moe_tp_rank"] = moe_tp_rank_;
   d["ep_size"] = ep_size_;
   d["ep_rank"] = ep_rank_;
+  d["requires_framework_kpool_tail"] =
+      uses_npu_compressed_kpool_tail(model_args_);
   // cp_size is a reflected ParallelArgs PROPERTY (already in d), but cp_rank is
   // a derived member function, so pass it explicitly for the Python executor.
   d["cp_rank"] = cp_rank_;

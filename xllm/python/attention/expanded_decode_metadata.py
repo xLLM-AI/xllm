@@ -19,6 +19,14 @@ from typing import Protocol
 
 import torch
 
+from xllm.python.attention.paged_kv_metadata import (
+    build_row_aligned_paged_kv_metadata,
+    is_row_aligned_paged_kv,
+)
+
+if TYPE_CHECKING:
+    from xllm.python.attention.backend import AttentionMetadata
+
 
 class ExpandedDecodeMetadataLike(Protocol):
     enabled: bool
@@ -136,3 +144,72 @@ def _validate_expanded_decode_metadata(
             page_count = (max(kv_seq_len, 1) + block_size - 1) // block_size
             if page_count > block_table_capacity:
                 raise RuntimeError("expanded decode page count exceeds block-table capacity")
+
+
+def _is_untyped_spec_verify(metadata: object) -> bool:
+    """Shape-only detector for a GENERIC-flow MTP verify batch.
+
+    The untyped (GENERIC) spec-verify batch carries one row per token —
+    kv_seq_lens / q_cu_seq_lens / slot_mapping / block_table are all
+    per-row — while linear_state_indices stays per logical sequence with
+    a fixed verify width > 1 rows per sequence. Pure shape math — no
+    device->host sync.
+    """
+    kv = getattr(metadata, "kv_seq_lens", None)
+    bt = getattr(metadata, "block_table", None)
+    q_cu = getattr(metadata, "q_cu_seq_lens", None)
+    lsi = getattr(metadata, "linear_state_indices", None)
+    if kv is None or bt is None or bt.dim() != 2 or kv.dim() != 1:
+        return False
+    if lsi is None or lsi.dim() != 1:
+        return False
+    rows = kv.shape[0]
+    seqs = lsi.shape[0]
+    if bt.shape[0] != rows or seqs <= 0 or rows <= seqs or rows % seqs != 0:
+        return False
+    # q_cu_seq_lens is per-token-row: graph mode packs it WITHOUT a
+    # leading zero (numel == rows), eager/typed paths WITH one
+    # (numel == rows + 1). Both are valid per-row cumulative layouts;
+    # rejecting numel == rows wrongly classifies a GENERIC-flow MTP
+    # verify batch as non-untyped, skipping _build_row_aligned_paged_kv
+    # and crashing on the C++ builder's per-sequence paged_kv_last_page_len.
+    if q_cu is not None and q_cu.numel() not in (rows, rows + 1):
+        return False
+    return not (getattr(metadata, "is_prefill", False) or getattr(metadata, "is_chunked_prefill", False))
+
+
+def _resolve_untyped_spec_verify_metadata(metadata: object, *, block_size: int) -> ExpandedDecodeMetadata | None:
+    if not _is_untyped_spec_verify(metadata):
+        return None
+    metadata = cast("AttentionMetadata", metadata)
+    kv_rows = metadata.kv_seq_lens.to(torch.int32)
+    block_table_rows = metadata.block_table.to(torch.int32).contiguous()
+    host_values = getattr(metadata, "kv_seq_lens_host_values", None)
+    if host_values is not None and len(host_values) != kv_rows.numel():
+        raise RuntimeError("expanded decode host KV lengths must match token rows")
+    paged_kv_indptr = metadata.paged_kv_indptr
+    paged_kv_indices = metadata.paged_kv_indices
+    paged_kv_last_page_len = metadata.paged_kv_last_page_len
+    needs_row_aligned_paging = paged_kv_indices is None or not is_row_aligned_paged_kv(
+        paged_kv_indptr, paged_kv_last_page_len, block_table_rows.shape[0]
+    )
+    if needs_row_aligned_paging:
+        (
+            paged_kv_indptr,
+            paged_kv_indices,
+            paged_kv_last_page_len,
+        ) = build_row_aligned_paged_kv_metadata(
+            block_table_rows,
+            host_values,
+            block_size,
+        )
+    return ExpandedDecodeMetadata(
+        kv_seq_lens=kv_rows,
+        block_table=block_table_rows,
+        paged_kv_indptr=paged_kv_indptr,
+        paged_kv_indices=paged_kv_indices,
+        paged_kv_last_page_len=paged_kv_last_page_len,
+        paged_attention_tiling_data=None,
+        kv_seq_lens_host=None,
+        kv_seq_lens_host_values=host_values,
+    )

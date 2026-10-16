@@ -46,10 +46,6 @@ std::vector<int32_t> build_step_time_profile_batch_sizes(
 // default 16 to keep measured memory aligned with real captures.
 int32_t warmup_decode_seq_len(bool fia_enabled, int32_t max_context_len);
 
-// Build the graph warmup shape from the resolved target execution options.
-runtime::DecodeGraphExecutionShape build_decode_graph_execution_shape(
-    const runtime::Options& options);
-
 class ProfileManager {
  private:
   using StepCallback = std::function<ForwardOutput(BatchGroup&)>;
@@ -61,8 +57,7 @@ class ProfileManager {
 
     PROPERTY(int32_t, dp_size) = 1;
 
-    PROPERTY(runtime::DecodeGraphExecutionShape,
-             decode_graph_execution_shape) = {};
+    PROPERTY(DecodeGraphWarmupConfig, decode_graph_warmup_config) = {};
 
     // config for profile
     PROPERTY(bool, enable_profile_step_time) = false;

@@ -372,8 +372,8 @@ void SpeculativeWorkerImpl<TargetInput>::prepare_validate_inputs(
     buf.out_kv_seq_lens.reserve(total_num_val_tokens);
     buf.out_q_seq_lens.reserve(total_num_val_tokens);
     buf.out_q_cu_seq_lens.reserve(total_num_val_tokens);
-    buf.out_block_tables.reserve(static_cast<size_t>(total_num_val_tokens) *
-                                 row_ctx.block_table_stride);
+    buf.reserve_row_buffers(static_cast<size_t>(total_num_val_tokens),
+                            row_ctx.block_table_stride);
   }
 
   std::vector<int32_t> atb_kv_seq_lens_vec = {};
@@ -513,8 +513,8 @@ void SpeculativeWorkerImpl<TargetInput>::prepare_validate_inputs(
   buf.out_kv_seq_lens.reserve(total_num_val_tokens);
   buf.out_q_seq_lens.reserve(total_num_val_tokens);
   buf.out_q_cu_seq_lens.reserve(total_num_val_tokens);
-  buf.out_block_tables.reserve(static_cast<size_t>(total_num_val_tokens) *
-                               row_ctx.block_table_stride);
+  buf.reserve_row_buffers(static_cast<size_t>(total_num_val_tokens),
+                          row_ctx.block_table_stride);
 
   for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
     int32_t kv_len =

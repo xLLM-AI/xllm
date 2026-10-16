@@ -29,6 +29,7 @@ limitations under the License.
 #include "core/distributed_runtime/engine_dispatch.h"
 #include "core/distributed_runtime/kv_cache_transfer_coordinator.h"
 #include "core/distributed_runtime/model_residency_coordinator.h"
+#include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config_validation.h"
@@ -50,15 +51,6 @@ limitations under the License.
 #include "util/utils.h"
 
 namespace xllm {
-namespace {
-
-bool should_use_ssm_engine(const Options& options) {
-  return !options.draft_model_path().value_or("").empty() ||
-         (SpeculativeConfig::is_suffix_algorithm(
-              options.speculative_algorithm()) &&
-          options.num_speculative_tokens() > 0);
-}
-}  // namespace
 
 LLMMaster::LLMMaster(const Options& options)
     : Master(options), master_status_(options.master_status()) {
@@ -67,7 +59,10 @@ LLMMaster::LLMMaster(const Options& options)
 #if defined(USE_NPU)
   resolve_npu_kernel_backend(&options_);
 #endif
-  const bool use_ssm_engine = should_use_ssm_engine(options_);
+  const bool use_ssm_engine = SpeculativeConfig::uses_ssm_engine(
+      options_.draft_model_path().value_or(""),
+      options_.speculative_algorithm(),
+      options_.num_speculative_tokens());
   const EngineType engine_type =
       use_ssm_engine ? EngineType::SSM : EngineType::LLM;
   const std::string model_type =
@@ -272,6 +267,10 @@ LLMMaster::LLMMaster(const Options& options)
       .max_tokens_per_chunk_for_prefill(
           options_.max_tokens_per_chunk_for_prefill())
       .num_speculative_tokens(options_.num_speculative_tokens())
+      .decode_graph_warmup_config(
+          ExecutionConfig::get_instance().decode_graph_warmup_config(
+              options_.num_speculative_tokens(),
+              options_.enable_graph_mode_decode_no_padding()))
       .nnodes(options_.nnodes())
       .dp_size(options_.dp_size())
       .cp_size(options_.cp_size())
@@ -295,8 +294,6 @@ LLMMaster::LLMMaster(const Options& options)
       .server_idx(options_.server_idx())
       .rec_worker_max_concurrency(options_.rec_worker_max_concurrency());
   auto create_scheduler = [this, &scheduler_options](auto* engine) {
-    scheduler_options.decode_graph_execution_shape(
-        build_decode_graph_execution_shape(engine->options()));
     scheduler_ = create_continuous_scheduler(
         engine,
         scheduler_options,

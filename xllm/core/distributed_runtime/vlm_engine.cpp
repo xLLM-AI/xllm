@@ -44,7 +44,7 @@ limitations under the License.
 #include "framework/block/kv_cache_manager_factory.h"
 #include "framework/model/model_args.h"
 #include "framework/parallel_state/parallel_state.h"
-#include "models/model_registry.h"
+#include "platform/platform.h"
 #include "runtime/llm_worker_impl.h"
 #include "runtime/vlm_forward_params.h"
 #include "runtime/worker.h"

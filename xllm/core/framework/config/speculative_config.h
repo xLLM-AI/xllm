@@ -55,6 +55,13 @@ class SpeculativeConfig final {
     return boost::iequals(algorithm, "Suffix");
   }
 
+  static bool uses_ssm_engine(std::string_view draft_model_path,
+                              std::string_view algorithm,
+                              int32_t num_speculative_tokens) {
+    return !draft_model_path.empty() ||
+           (is_suffix_algorithm(algorithm) && num_speculative_tokens > 0);
+  }
+
   static bool is_mtp_algorithm(std::string_view algorithm) {
     return boost::iequals(algorithm, "MTP");
   }

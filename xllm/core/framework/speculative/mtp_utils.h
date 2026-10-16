@@ -32,7 +32,7 @@ inline bool configure_glm5_next_mtp_args(ModelArgs& model_args,
                                          bool is_draft_engine) {
   if (!is_draft_engine ||
       !SpeculativeConfig::is_mtp_algorithm(speculative_algorithm) ||
-      model_args.model_type() != "glm5_next") {
+      !is_glm5_next_target_model_type(model_args.model_type())) {
     return false;
   }
   CHECK_EQ(model_args.num_nextn_predict_layers(), 1)

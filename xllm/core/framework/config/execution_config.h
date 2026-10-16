@@ -26,6 +26,16 @@ namespace xllm {
 
 class JsonReader;
 
+// Resolved decode geometry shared by scheduler profiling and graph warmup.
+// For MTP, num_decoding_tokens is the number of token rows produced per
+// sequence in a decode step; it is normally num_speculative_tokens + 1.
+struct DecodeGraphWarmupConfig {
+  int64_t num_decoding_tokens = 1;
+  int32_t num_speculative_tokens = 0;
+  bool enable_graph_mode_decode_no_padding = false;
+  int32_t max_graph_batch_size = 0;
+};
+
 class ExecutionConfig final {
  public:
   ExecutionConfig() = default;
@@ -37,6 +47,10 @@ class ExecutionConfig final {
   void from_json(const JsonReader& json);
   void append_config_json(nlohmann::ordered_json& config_json) const;
   void initialize();
+
+  DecodeGraphWarmupConfig decode_graph_warmup_config(
+      int32_t num_speculative_tokens,
+      bool enable_no_padding) const;
 
   [[nodiscard]] static const OptionCategory& option_category() {
     static const OptionCategory kOptionCategory = {

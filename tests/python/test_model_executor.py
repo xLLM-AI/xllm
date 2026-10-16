@@ -457,16 +457,6 @@ class TestModelExecutorConstruction:
         else:
             mock_graph_runner.assert_not_called()
 
-    @pytest.mark.parametrize("enabled", [False, True])
-    def test_configures_cache_transfer_for_every_attention_layer(self, enabled: bool) -> None:
-        model = _FakeModel(num_layers=3)
-        with patch(
-            "xllm.python.model_executor.executor._create_attention_backend",
-            return_value=StubAttentionBackend(),
-        ):
-            ModelExecutor(model, {"enable_disagg_pd": enabled}, max_seqs_per_batch=4)
-        assert all(layer.cache_transfer_enabled is enabled for layer in model.layers)
-
     @patch(
         "xllm.python.model_executor.executor._create_attention_backend",
         return_value=StubAttentionBackend(),
@@ -610,7 +600,6 @@ class TestModelExecutorConstruction:
             128,
             1,
             0,
-            16,
             num_decoding_tokens=4,
             is_spec_draft=False,
             enable_mega_moe_token_mask=False,
@@ -920,12 +909,10 @@ class TestDecodeAclGraphSpeculativeMetadata:
             torch.device("cpu"),
             max_batch=64,
             max_model_len=8,
-            decode_batch_size_limit=16,
             num_decoding_tokens=4,
         )
         metadata = self._metadata()
         metadata.dp_execution_token_counts = (32, 64)
-        assert runner._decode_batch_sizes(torch.zeros(32, dtype=torch.int32), metadata) == (8, 16)
         assert runner._padded_batch_size(32, metadata) == 32
         assert runner._padded_batch_size(64, metadata) == 64
         with pytest.raises(ValueError, match="decode batch exceeds ACL graph capacity"):

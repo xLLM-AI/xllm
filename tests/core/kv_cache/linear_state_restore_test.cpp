@@ -383,7 +383,12 @@ TEST(LinearStateRestoreTest, KPoolTailFollowsCheckpointForkAndSlotReset) {
   reset.linear_state_id = 2;
   reset.reset_requested = true;
   restore_linear_state_slots(cache.kv_caches, {reset}, validity_mask);
+#if defined(USE_NPU)
+  EXPECT_EQ(tensors.kpool_tail[2][0].count_nonzero().item<int64_t>(), 0);
+  EXPECT_TRUE(torch::isneginf(tensors.kpool_tail[2][1]).all().item<bool>());
+#else
   EXPECT_EQ(tensors.kpool_tail[2].count_nonzero().item<int64_t>(), 0);
+#endif
   EXPECT_TRUE(torch::equal(tensors.kpool_tail[1], checkpoint));
 }
 

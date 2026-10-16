@@ -33,6 +33,8 @@ limitations under the License.
 #include "core/framework/config/model_config.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/kernels/xllm_torch_ops.h"
+#include "core/kv_cache/storage/kv_cache.h"
+#include "core/util/pybind_helper.h"
 
 namespace py = pybind11;
 
@@ -55,6 +57,26 @@ void prepend_sys_path(const std::string& dir) {
 }
 
 }  // namespace
+
+py::list build_python_kv_caches(const std::vector<KVCache>& kv_caches) {
+  py::list python_caches;
+  for (const auto& kv_cache : kv_caches) {
+    python_caches.append(py::make_tuple(
+        optional_tensor(kv_cache.get_k_cache()),
+        optional_tensor(kv_cache.get_v_cache()),
+        optional_tensor(kv_cache.get_index_cache()),
+        optional_tensor(kv_cache.get_conv_cache()),
+        optional_tensor(kv_cache.get_ssm_cache()),
+        optional_tensor(kv_cache.get_swa_cache()),
+        optional_tensor(kv_cache.get_compress_kv_state()),
+        optional_tensor(kv_cache.get_compress_score_state()),
+        optional_tensor(kv_cache.get_compress_index_kv_state()),
+        optional_tensor(kv_cache.get_compress_index_score_state()),
+        optional_tensor(kv_cache.get_indexer_cache_scale()),
+        optional_tensor(kv_cache.get_kpool_tail())));
+  }
+  return python_caches;
+}
 
 // ---------------------------------------------------------------------------
 // dtype_to_string

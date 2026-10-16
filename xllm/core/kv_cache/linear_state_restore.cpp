@@ -96,7 +96,13 @@ void zero_slots_across_layers(std::vector<KVCache>& kv_caches,
     const torch::Tensor ssm_cache = kv_cache.get_ssm_cache();
     if (kpool_tail.defined()) {
       for (const SlotRange& range : ranges) {
-        kpool_tail.narrow(0, range.start, range.length).zero_();
+        torch::Tensor tail_range =
+            kpool_tail.narrow(0, range.start, range.length);
+        // Clear the key plane and mark the gate plane with an explicit
+        // validity sentinel in one pass: a reset slot must not expose finite
+        // stale gates to a later circular-tail read.
+        tail_range.select(/*dim=*/1, /*index=*/0).zero_();
+        fill_kpool_tail_gate_sentinel(tail_range);
       }
     }
     if (!conv_cache.defined() && !ssm_cache.defined()) {

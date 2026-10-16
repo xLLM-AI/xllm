@@ -23,6 +23,8 @@ This module stays pure torch with no xllm dependency, so unit tests can load it 
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import torch
 import torch.nn.functional as F
 
@@ -68,148 +70,239 @@ def pooled_states(packed_states: torch.Tensor, key_valid: torch.Tensor, ape: tor
     return pool_keys, pool_indices, pool_valid
 
 
-# ---------------------------------------------------------------------------
-# Paged pool cache: write-time incremental compression + direct read.
-#
-# Physical blocks reuse the token block table: pool logical block L covers
-# pools [L*bs/kpool, (L+1)*bs/kpool) = tokens [L*bs, (L+1)*bs) = token logical
-# block L, so pool_slot(p) = bt[s, p//pool_bs] * pool_bs + p%pool_bs (where
-# pool_bs = bs//index_kpool) — linear addressing without engine-side
-# pool-granular allocation. The 257-wide token-granular index cache is kept
-# untouched: compression inputs are read from it, which also solves
-# chunked-prefill pools spanning chunk boundaries (vllm's dual-cache design).
-# ---------------------------------------------------------------------------
-
-
-def alloc_pool_cache(index_cache: torch.Tensor, index_kpool: int) -> torch.Tensor:
-    """Per-DSA-layer pool-granular cache: ``[num_blocks, bs//index_kpool, 1, head_dim]`` bf16 all-zeros.
-
-    ``index_kpool`` is the pool compression ratio (tokens per pool slot, from
-    ``text_config.index_kpool``); it must divide ``block_size`` evenly so the
-    paged addressing ``bt[p // pool_bs] * pool_bs + p % pool_bs`` stays aligned.
-    """
-    bs = index_cache.shape[1]
-    assert index_kpool > 0, "index_kpool must be > 0"
-    assert bs % index_kpool == 0, (
-        f"block_size {bs} is not a multiple of index_kpool {index_kpool}, pool addressing breaks"
-    )
-    head_dim = (index_cache.shape[-1] - 1) // 2
-    return torch.zeros(
-        index_cache.shape[0],
-        bs // index_kpool,
-        1,
-        head_dim,
-        dtype=torch.bfloat16,
-        device=index_cache.device,
-    )
-
-
-def compress_completed_pools(
-    index_cache: torch.Tensor,
-    pool_cache: torch.Tensor,
-    block_table: torch.Tensor,
+def update_compressed_kpool(
+    raw_k: torch.Tensor,
+    gate_scores: torch.Tensor,
+    valid_rows: torch.Tensor,
     positions: torch.Tensor,
+    compressed_cache: torch.Tensor,
+    tail_cache: torch.Tensor,
+    tail_read_ids: torch.Tensor,
+    tail_write_ids: torch.Tensor,
+    block_table: torch.Tensor,
+    query_lens: Sequence[int],
     ape: torch.Tensor,
-    head_dim: int,
     rate: int,
-    *,
-    batched: bool = False,
+    graph_mode: bool = False,
 ) -> None:
-    """Write the compressed k of pools completed this step into the pool cache.
+    """Complete compressed pools and then persist the current raw tail.
 
-    ``block_table`` is a **single-sequence** row ``[1, n_logical_blocks]``;
-    ``positions`` are the absolute positions of the tokens written this step
-    for that sequence. The math is fully order-consistent with
-    ``pooled_states()`` (fp32 softmax + bf16 per-product round), and the
-    written value == the per-step recomputed value of the old path
-    (bit-exact). Graph-safe: no data-dependent shapes; unfinished pools
-    retain their original value via the write mask.
-
-    ``batched`` accepts one token position per block-table row. Compression
-    is batched, while cache writes preserve sequence order for aliased slots.
+    ``raw_k``/``gate_scores``/``positions`` contain flattened, sequence-major
+    query rows. ``query_lens`` maps those rows back to logical requests; the
+    block table may either have one row per request or one repeated row per
+    query token (MTP verify). Read/write tail ids may differ for an out-of-place
+    prefix-cache restore. Pool completion always runs before tail writes so a
+    circular tail slot cannot overwrite a value still needed by this step.
     """
-    bs = index_cache.shape[1]
-    pool_bs = pool_cache.shape[1]
-    width = 2 * head_dim + 1
-    n_tok = positions.shape[0]
-    if (
-        batched
-        and n_tok > 0
-        and rate > 0
-        and bs % rate == 0
-        and pool_bs == bs // rate
-        and block_table.shape[0] == n_tok
-        and block_table.shape[1] > 0
-        and positions.ndim == 1
-        and positions.device.type in ("npu", "privateuseone")
-        and index_cache.shape[2:] == (1, width)
-        and pool_cache.shape[2:] == (1, head_dim)
-        and index_cache.dtype == pool_cache.dtype == torch.bfloat16
-        and index_cache.is_contiguous()
-        and pool_cache.is_contiguous()
-        and block_table.dtype in (torch.int32, torch.int64)
-        and positions.dtype in (torch.int32, torch.int64)
-        and ape.shape == (rate, head_dim)
-        and all(tensor.device == positions.device for tensor in (index_cache, pool_cache, block_table, ape))
-    ):
-        try:
-            from xllm.python.kernels_npu.triton.kpool_compress import compress_completed_pools_decode
-        except ImportError:
-            pass
-        else:
-            compress_completed_pools_decode(index_cache, pool_cache, block_table, positions, ape, head_dim, rate)
-            return
+    if rate <= 0:
+        raise ValueError("kPool compression rate must be positive")
+    if compressed_cache.ndim != 4 or compressed_cache.shape[2] != 1:
+        raise ValueError("compressed kPool cache must have shape [blocks, pools_per_block, 1, dim]")
+    if tail_cache.ndim != 4 or tail_cache.shape[1] != 2:
+        raise ValueError("kPool tail must have shape [slots, 2, capacity, dim]")
 
-    flat = index_cache.reshape(-1, width)
-    pool_flat = pool_cache.reshape(-1, head_dim)
-    rate_off = torch.arange(rate, device=positions.device)
-    # Each token is the last token of its pool: pool p = pos // rate
-    pos = positions.reshape(-1, 1)  # [N, 1]
-    member_pos = pos - (rate - 1) + rate_off[None, :]  # [N, rate]
-    done = ((pos + 1) % rate == 0) & (pos >= rate - 1)  # [N, 1]
-    member_valid = done & (member_pos >= 0)
-    # member token row: bt[t // bs] * bs + t % bs
-    batched = batched and n_tok > 1
-    if batched and block_table.shape[0] != n_tok:
-        raise ValueError("batched pool compression requires one position per block-table row")
-    bt = block_table if batched else block_table.reshape(-1)
-    member_pos = member_pos.clamp(min=0)
-    blk_idx = (member_pos // bs).clamp(max=bt.shape[-1] - 1)
-    slots = (bt.gather(1, blk_idx) if batched else bt[blk_idx]) * bs + member_pos % bs
-    rows = flat[slots.reshape(-1)].reshape(n_tok, rate, width)
-    gate = rows[..., head_dim : 2 * head_dim].float()
-    logits = gate + ape.float()[None]  # ape [rate, head_dim]
-    logits = logits.masked_fill(~member_valid[..., None], float("-inf"))
-    weights = torch.nan_to_num(logits.softmax(1)).to(torch.bfloat16)
-    keys = rows[..., :head_dim].float()
-    # mirrors pooled_states' (w * k).sum: per-product bf16 round + fp32 accumulation
-    prod = (weights.float() * keys).to(torch.bfloat16).float()
-    compressed = prod.sum(1).to(torch.bfloat16)  # [N, head_dim]
-    # write slot: bt[p // pool_bs] * pool_bs + p % pool_bs
-    pool_id = (pos // rate).reshape(-1)  # [N]
-    if batched:
-        pool_blk = (pool_id // pool_bs).clamp(min=0, max=block_table.shape[1] - 1)
-        pool_slots = block_table.gather(1, pool_blk[:, None]).reshape(-1) * pool_bs + pool_id % pool_bs
-    else:
-        pool_blk = (pool_id // pool_bs).clamp(max=bt.shape[0] - 1)
-        pool_slots = bt[pool_blk] * pool_bs + pool_id % pool_bs
-    pool_slots = pool_slots.clamp(0, pool_flat.shape[0] - 1)
-    write = done.reshape(-1)
-    if n_tok > 1 and not batched:
-        # Prefill chunk (eager): multiple tokens of the same pool all issue writes,
-        # so repeated in-place assignment is non-deterministic (the old value of a
-        # non-done slot written back would overwrite a done slot's compressed value);
-        # first filter down to only completed pools. decode graph takes the n_tok==1
-        # branch (no repeats, static shapes).
-        sel = write.nonzero().flatten()
-        pool_flat.index_copy_(0, pool_slots[sel].to(torch.int64), compressed[sel])
-    elif batched:
-        for row in range(n_tok):
-            slot = pool_slots[row : row + 1]
-            pool_flat[slot] = torch.where(write[row : row + 1, None], compressed[row : row + 1], pool_flat[slot])
-    else:
-        # masked in-place write (graph static shapes): unfinished pools retain their original value
-        pool_flat[pool_slots] = torch.where(write[:, None], compressed, pool_flat[pool_slots])
+    flat_k = raw_k.reshape(-1, raw_k.shape[-1])
+    flat_gate = gate_scores.reshape(-1, gate_scores.shape[-1])
+    flat_valid = valid_rows.reshape(-1).to(torch.bool)
+    flat_positions = positions.reshape(-1).to(torch.int64)
+    if flat_k.shape != flat_gate.shape:
+        raise ValueError("raw K and gate rows must have identical shapes")
+    if flat_k.shape[0] != flat_positions.numel() or flat_k.shape[0] != flat_valid.numel():
+        raise ValueError("kPool rows, positions, and validity must have equal lengths")
+    if len(query_lens) > tail_read_ids.numel() or len(query_lens) > tail_write_ids.numel():
+        raise ValueError("kPool query groups exceed available linear-state read/write ids")
+    if sum(query_lens) != flat_k.shape[0]:
+        raise ValueError("kPool query groups must cover every token row")
+
+    head_dim = flat_k.shape[-1]
+    if compressed_cache.shape[-1] != head_dim or tail_cache.shape[-1] != head_dim:
+        raise ValueError("kPool cache and tail dimensions must match projected K")
+    if tail_cache.shape[2] < rate:
+        raise ValueError("kPool tail capacity must cover one complete pool")
+
+    pool_block_size = compressed_cache.shape[1]
+    cache_flat = compressed_cache.reshape(-1, head_dim)
+    tail_capacity = tail_cache.shape[2]
+    rate_offsets = torch.arange(rate, dtype=torch.int64, device=flat_positions.device)
+    flat_tail_read_ids = tail_read_ids.reshape(-1)
+    flat_tail_write_ids = tail_write_ids.reshape(-1)
+    has_distinct_tail_io = tail_read_ids is not tail_write_ids
+    read_tail_snapshots = (
+        [
+            tail_cache.index_select(
+                0,
+                flat_tail_read_ids[request_idx].to(torch.int64).clamp(0, tail_cache.shape[0] - 1).reshape(1),
+            )
+            .squeeze(0)
+            .clone()
+            for request_idx in range(len(query_lens))
+        ]
+        if has_distinct_tail_io
+        else []
+    )
+    row_start = 0
+
+    # Phase 1: every completion reads the old tail before any row overwrites it.
+    for request_idx, query_len in enumerate(query_lens):
+        if query_len < 0:
+            raise ValueError("kPool query lengths must be non-negative")
+        row_end = row_start + query_len
+        if query_len == 0:
+            row_start = row_end
+            continue
+        request_positions = flat_positions[row_start:row_end]
+        request_k = flat_k[row_start:row_end]
+        request_gate = flat_gate[row_start:row_end]
+        request_valid = flat_valid[row_start:row_end]
+        tail_read_id = flat_tail_read_ids[request_idx].to(torch.int64)
+        table_row = request_idx if block_table.shape[0] == len(query_lens) else row_start
+        request_table = block_table[table_row].reshape(-1).to(torch.int64)
+        # Phase 2 is the first write to tail_cache, so the pre-loop snapshot
+        # is still current here: reuse it instead of re-reading tail_cache.
+        tail_read_state = read_tail_snapshots[request_idx] if has_distinct_tail_io else None
+        if tail_read_state is None:
+            safe_tail_read_id = tail_read_id.clamp(0, tail_cache.shape[0] - 1)
+            tail_read_state = tail_cache.index_select(0, safe_tail_read_id.reshape(1)).squeeze(0)
+
+        member_positions = request_positions[:, None] - rate + 1 + rate_offsets[None, :]
+        source_rows = member_positions - request_positions[0]
+        safe_source_rows = source_rows.clamp(0, query_len - 1)
+        source_positions = request_positions.index_select(0, safe_source_rows.reshape(-1)).view(query_len, rate)
+        from_current = (source_rows >= 0) & (source_rows < query_len) & (source_positions == member_positions)
+        current_keys = request_k.index_select(0, safe_source_rows.reshape(-1)).view(query_len, rate, head_dim)
+        current_gates = request_gate.index_select(0, safe_source_rows.reshape(-1)).view(
+            query_len,
+            rate,
+            head_dim,
+        )
+        current_valid = request_valid.index_select(0, safe_source_rows.reshape(-1)).view(query_len, rate)
+        tail_rows = torch.remainder(member_positions, tail_capacity)
+        old_keys = (
+            tail_read_state[0]
+            .index_select(0, tail_rows.reshape(-1))
+            .view(
+                query_len,
+                rate,
+                head_dim,
+            )
+        )
+        old_gates = (
+            tail_read_state[1]
+            .index_select(0, tail_rows.reshape(-1))
+            .view(
+                query_len,
+                rate,
+                head_dim,
+            )
+        )
+        keys = torch.where(from_current[..., None], current_keys, old_keys)
+        gates = torch.where(from_current[..., None], current_gates, old_gates)
+        old_valid = (member_positions >= 0) & torch.isfinite(old_gates[..., 0])
+        members_valid = torch.where(from_current, current_valid, old_valid)
+        complete = (
+            (tail_read_id > 0)
+            & (request_positions >= rate - 1)
+            & (torch.remainder(request_positions + 1, rate) == 0)
+            & members_valid.all(dim=1)
+        )
+
+        logits = gates.float() + ape.float()[None]
+        logits = logits.masked_fill(~members_valid[..., None], float("-inf"))
+        probabilities = torch.nan_to_num(torch.softmax(logits, dim=1)).to(keys.dtype)
+        products = (probabilities.float() * keys.float()).to(keys.dtype).float()
+        compressed = products.sum(1).to(compressed_cache.dtype)
+
+        pool_ids = torch.div(request_positions.clamp_min(0), rate, rounding_mode="floor")
+        logical_blocks = torch.div(pool_ids, pool_block_size, rounding_mode="floor")
+        table_in_range = logical_blocks < request_table.numel()
+        safe_logical_blocks = logical_blocks.clamp(0, request_table.numel() - 1)
+        physical_blocks = request_table.index_select(0, safe_logical_blocks)
+        cache_slots = (
+            physical_blocks.clamp_min(0) * pool_block_size + torch.remainder(pool_ids, pool_block_size)
+        ).clamp(0, cache_flat.shape[0] - 1)
+        writes = complete & table_in_range & (physical_blocks >= 0)
+        if graph_mode:
+            # Fixed masked writes avoid data-dependent nonzero output during
+            # graph capture. Speculative windows keep this loop small.
+            for local_row in range(query_len):
+                row_slice = slice(local_row, local_row + 1)
+                cache_slot = cache_slots[row_slice]
+                cache_flat.index_copy_(
+                    0,
+                    cache_slot,
+                    torch.where(
+                        writes[row_slice, None],
+                        compressed[row_slice],
+                        cache_flat.index_select(0, cache_slot),
+                    ),
+                )
+        else:
+            selected = writes.nonzero().flatten()
+            cache_flat.index_copy_(
+                0,
+                cache_slots.index_select(0, selected),
+                compressed.index_select(0, selected),
+            )
+        row_start = row_end
+
+    # Phase 2: persist current rows after every completion has consumed the old
+    # tail. Sequential writes make wraparound deterministic for long chunks.
+    row_start = 0
+    for request_idx, query_len in enumerate(query_lens):
+        row_end = row_start + query_len
+        if query_len == 0:
+            row_start = row_end
+            continue
+        tail_write_id = flat_tail_write_ids[request_idx].to(torch.int64)
+        safe_tail_write_id = tail_write_id.clamp(0, tail_cache.shape[0] - 1)
+        tail_write_index = safe_tail_write_id.reshape(1)
+        destination_tail = tail_cache.index_select(0, tail_write_index).squeeze(0)
+        if has_distinct_tail_io:
+            tail_read_id = flat_tail_read_ids[request_idx].to(torch.int64)
+            copy_state = (tail_read_id > 0) & (tail_write_id > 0)
+            destination_tail = torch.where(copy_state, read_tail_snapshots[request_idx], destination_tail)
+        stash_start = max(row_start, row_end - tail_capacity)
+        stash_positions = flat_positions[stash_start:row_end]
+        tail_rows = torch.remainder(stash_positions.clamp_min(0), tail_capacity)
+        active_rows = (tail_write_id > 0) & (stash_positions >= 0)
+        writes = active_rows & flat_valid[stash_start:row_end]
+        for channel, source, invalid in ((0, flat_k, 0.0), (1, flat_gate, float("-inf"))):
+            rows = source[stash_start:row_end]
+            old_values = destination_tail[channel].index_select(0, tail_rows)
+            destination_tail[channel].index_copy_(
+                0,
+                tail_rows,
+                torch.where(
+                    active_rows[:, None],
+                    torch.where(writes[:, None], rows.to(tail_cache.dtype), torch.full_like(rows, invalid)),
+                    old_values,
+                ),
+            )
+        tail_cache.index_copy_(0, tail_write_index, destination_tail.unsqueeze(0))
+        row_start = row_end
+
+
+def append_causal_tail(
+    selected_indices: torch.Tensor,
+    query_positions: torch.Tensor,
+    rate: int,
+) -> torch.Tensor:
+    """Append the query-visible incomplete pool and keep valid slots leading."""
+    tail_width = rate - 1
+    if tail_width <= 0:
+        return selected_indices
+    positions = query_positions.to(torch.int64)
+    offsets = torch.arange(tail_width, dtype=torch.int64, device=positions.device)
+    tail_start = torch.div(positions + 1, rate, rounding_mode="floor") * rate
+    tail = tail_start[..., None] + offsets
+    tail = tail.masked_fill((tail > positions[..., None]) | (positions[..., None] < 0), -1)
+    combined = torch.cat([selected_indices, tail], dim=-1)
+
+    # SFA stops consuming a row at its first -1. Causal filtering can leave
+    # holes in the scored pool prefix, so stably pack every valid slot before
+    # the invalid suffix after appending the unscored tail.
+    pack_order = torch.argsort((combined < 0).to(torch.int8), dim=-1, stable=True)
+    return torch.gather(combined, dim=-1, index=pack_order)
 
 
 def read_pools(pool_cache: torch.Tensor, block_table: torch.Tensor, kv_lens: torch.Tensor, n_pools: int, rate: int):

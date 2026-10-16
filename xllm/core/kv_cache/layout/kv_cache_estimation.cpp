@@ -100,9 +100,14 @@ int64_t index_slot_size(const ModelArgs& model_args,
   }
 
   const int64_t index_n_head = 1;
-  if (model_args.index_kpool_compress()) {
+  const bool uses_compressed_tail =
+      kpool_layout == KPoolCacheLayout::COMPRESSED_WITH_TAIL &&
+      model_args.index_kpool_compress();
+  const bool uses_kpool = model_args.index_kpool_compress();
+  // uses_compressed_tail implies uses_kpool, so this is simply the kPool gate.
+  if (uses_kpool) {
     CHECK(!enable_indexer_cache_quantization)
-        << "KPool requires BF16 compressed index cache.";
+        << "KPool cache layouts do not support indexer_cache_dtype=\"int8\".";
     CHECK_GT(model_args.index_kpool(), 0) << "KPool requires index_kpool > 0.";
   }
   int64_t split_factor = 1;
@@ -117,17 +122,15 @@ int64_t index_slot_size(const ModelArgs& model_args,
                                model_args.index_head_dim() +
                            static_cast<int64_t>(sizeof(float)));
   }
-  if (kpool_layout == KPoolCacheLayout::COMPRESSED_WITH_TAIL &&
-      model_args.index_kpool_compress()) {
+  if (uses_compressed_tail) {
     CHECK_EQ(model_args.index_head_dim() % model_args.index_kpool(), 0)
         << "KPool index head dim must be divisible by index_kpool.";
     return split_factor * dtype_size * index_n_head *
            model_args.index_head_dim() / model_args.index_kpool();
   }
-  return split_factor * dtype_size * index_n_head *
-         (model_args.index_kpool_compress()
-              ? 2 * model_args.index_head_dim() + 1
-              : model_args.index_head_dim());
+  const int64_t index_width = uses_kpool ? 2 * model_args.index_head_dim() + 1
+                                         : model_args.index_head_dim();
+  return split_factor * dtype_size * index_n_head * index_width;
 }
 
 int64_t scale_slot_size(const ModelArgs& model_args,
@@ -890,6 +893,15 @@ KVCacheCapacity estimate_kv_cache_capacity(
       kv_cache_dtype_size(options.kv_cache_dtype, dtype_size);
   const bool enable_indexer_cache_quantization =
       options.indexer_cache_dtype == "int8";
+  KPoolCacheLayout kpool_layout = options.kpool_layout;
+  if (Platform::is_npu()) {
+    kpool_layout = uses_npu_compressed_kpool_tail(model_args)
+                       ? KPoolCacheLayout::COMPRESSED_WITH_TAIL
+                       : KPoolCacheLayout::PACKED;
+  }
+  // Estimation is the only site that also honors the runtime enable_mla
+  // config bit (every other caller has already committed to MLA via model
+  // wiring), so AND it in here rather than pushing it into the helper.
   const bool enable_mla_kv_cache_quantization =
       model_args.enable_mla() &&
       util::enable_mla_packed_c8(options.kv_cache_dtype == "int8",
@@ -899,8 +911,8 @@ KVCacheCapacity estimate_kv_cache_capacity(
       .index_slot_size(index_slot_size(model_args,
                                        enable_indexer_cache_quantization,
                                        dtype_size,
-                                       options.kpool_layout))
-      .kpool_layout(options.kpool_layout)
+                                       kpool_layout))
+      .kpool_layout(kpool_layout)
       .enable_indexer_cache_quant(enable_indexer_cache_quantization)
       .enable_mla_kv_cache_quant(enable_mla_kv_cache_quantization)
       .scale_slot_size(scale_slot_size(model_args, options))
@@ -919,18 +931,25 @@ KVCacheCapacity estimate_kv_cache_capacity(
   }
 
   if (model_args.index_kpool_compress() &&
-      options.kpool_layout == KPoolCacheLayout::COMPRESSED_WITH_TAIL) {
+      kpool_layout == KPoolCacheLayout::COMPRESSED_WITH_TAIL) {
     CHECK_EQ(options.layerwise_split_size, 1)
         << "Compressed KPool requires owned layer caches.";
     CHECK_EQ(options.dtype, torch::kBFloat16);
     CHECK_EQ(options.block_size % model_args.index_kpool(), 0);
     CHECK_GE(options.num_speculative_tokens, 0);
-    // One verify window includes its base token. Reserve a second window for
-    // the asynchronous next-first-draft handoff before the commit is observed.
-    const int64_t window = options.num_speculative_tokens > 0
-                               ? 2 * (options.num_speculative_tokens + 1)
-                               : 0;
-    kv_cache_cap.kpool_tail_len(model_args.index_kpool() + window);
+    if (uses_npu_compressed_kpool_tail(model_args)) {
+      // Preserve one complete pool plus speculative rows that may be rejected.
+      // The verify base token advances the committed sequence and is already
+      // covered by the regular pool tail.
+      kv_cache_cap.kpool_tail_len(model_args.index_kpool() +
+                                  options.num_speculative_tokens);
+    } else {
+      // Preserve the MLU asynchronous handoff window.
+      const int64_t window = options.num_speculative_tokens > 0
+                                 ? 2 * (options.num_speculative_tokens + 1)
+                                 : 0;
+      kv_cache_cap.kpool_tail_len(model_args.index_kpool() + window);
+    }
     kv_cache_cap.kpool_tail_slot_size(kpool_tail_slot_size_bytes(
         kv_cache_cap.kpool_tail_len(), model_args.index_head_dim()));
   }

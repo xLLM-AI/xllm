@@ -311,7 +311,11 @@ void KVCacheShape::to_proto(proto::KVCacheShape* proto_shape) const {
 
 KVCacheShape KVCacheShape::from_proto(const proto::KVCacheShape& proto_shape) {
   KVCacheShape kv_cache_shape;
-  CHECK(proto_shape.kpool_layout() == 0 || proto_shape.kpool_layout() == 1);
+  CHECK(proto_shape.kpool_layout() ==
+            static_cast<int32_t>(KPoolCacheLayout::PACKED) ||
+        proto_shape.kpool_layout() ==
+            static_cast<int32_t>(KPoolCacheLayout::COMPRESSED_WITH_TAIL))
+      << "unknown kpool_layout=" << proto_shape.kpool_layout();
   kv_cache_shape.kpool_layout_ =
       static_cast<KPoolCacheLayout>(proto_shape.kpool_layout());
   if (proto_shape.kpool_tail_shape_size() > 0) {

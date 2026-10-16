@@ -26,6 +26,7 @@ cc_library(
     py_model_helper.cpp
   DEPS
     :model
+    :kv_cache
     :request
     :mposition
     :parallel_state

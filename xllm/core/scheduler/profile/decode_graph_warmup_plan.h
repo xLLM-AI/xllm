@@ -18,7 +18,7 @@ limitations under the License.
 #include <cstdint>
 #include <vector>
 
-#include "runtime/decode_graph_bucket.h"
+#include "core/framework/config/execution_config.h"
 
 namespace xllm {
 
@@ -27,7 +27,7 @@ namespace xllm {
 // when selecting them. The profile manager executes these entries to capture
 // the graph shapes an executor can later replay.
 struct DecodeGraphWarmupPlan {
-  runtime::DecodeGraphExecutionShape execution_shape;
+  DecodeGraphWarmupConfig warmup_config;
   std::vector<int32_t> batch_sizes;
 };
 
@@ -38,13 +38,13 @@ DecodeGraphWarmupPlan get_compatibility_decode_graph_warmup_plan(
     int32_t max_global_batch_size,
     int32_t dp_size);
 
-// Builds the decode graph warmup schedule from the effective runtime
-// shape. Backends that support MTP token-bucket warmup replace the legacy
-// schedule for padded multi-token decode. With no-padding and an explicit
-// graph limit, the plan also includes intermediate sequence counts needed to
-// warm compatible token-row buckets.
+// Builds the decode graph warmup schedule from the resolved execution
+// configuration. Backends that support MTP token-bucket warmup replace the
+// legacy schedule for padded multi-token decode. With no-padding and an
+// explicit graph limit, the plan also includes intermediate sequence counts
+// needed to warm compatible token-row buckets.
 DecodeGraphWarmupPlan build_decode_graph_warmup_plan(
-    const runtime::DecodeGraphExecutionShape& execution_shape,
+    const DecodeGraphWarmupConfig& warmup_config,
     int32_t max_global_batch_size,
     int32_t dp_size);
 

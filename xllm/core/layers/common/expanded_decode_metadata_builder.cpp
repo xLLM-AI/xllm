@@ -47,9 +47,7 @@ std::vector<int32_t> build_page_counts(const std::vector<int32_t>& kv_seq_lens,
   std::vector<int32_t> page_counts;
   page_counts.reserve(kv_seq_lens.size());
   for (int32_t kv_seq_len : kv_seq_lens) {
-    const int32_t effective_kv_seq_len = std::max(kv_seq_len, 1);
-    const int32_t page_count =
-        (effective_kv_seq_len + block_size - 1) / block_size;
+    const int32_t page_count = kv_page_count(kv_seq_len, block_size);
     CHECK_LE(page_count, block_table_capacity)
         << "Expanded KV length exceeds block-table capacity";
     page_counts.emplace_back(page_count);
@@ -74,8 +72,7 @@ std::vector<int32_t> build_last_page_lens(
   std::vector<int32_t> last_page_lens;
   last_page_lens.reserve(kv_seq_lens.size());
   for (int32_t kv_seq_len : kv_seq_lens) {
-    const int32_t effective_kv_seq_len = std::max(kv_seq_len, 1);
-    last_page_lens.emplace_back((effective_kv_seq_len - 1) % block_size + 1);
+    last_page_lens.emplace_back(kv_last_page_len(kv_seq_len, block_size));
   }
   return last_page_lens;
 }
@@ -281,10 +278,8 @@ void ExpandedDecodeMetadataBuilder::validate(
     for (int32_t kv_seq_len : metadata.kv_seq_lens_host_vec) {
       CHECK_GE(kv_seq_len, 0);
       if (block_size > 0) {
-        const int32_t effective_kv_seq_len = std::max(kv_seq_len, 1);
-        const int32_t page_count =
-            (effective_kv_seq_len + block_size - 1) / block_size;
-        CHECK_LE(page_count, metadata.block_table.size(1));
+        CHECK_LE(kv_page_count(kv_seq_len, block_size),
+                 metadata.block_table.size(1));
       }
     }
   }

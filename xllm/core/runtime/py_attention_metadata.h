@@ -95,6 +95,7 @@ class PyAttentionMetadataView final {
   pybind11::object linear_state_indices() const;
   pybind11::object linear_state_read_indices() const;
   pybind11::object linear_state_write_indices() const;
+  const std::vector<int32_t>& kpool_query_lens() const;
   pybind11::object has_initial_state() const;
   const std::vector<int32_t>& dp_execution_token_counts() const;
   const std::vector<int32_t>& raw_dp_execution_token_counts() const;

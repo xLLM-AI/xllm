@@ -48,9 +48,19 @@ struct DecodeBuildBuffers {
   std::vector<int32_t> out_q_cu_seq_lens;
   std::vector<int32_t> out_new_cache_slots;
   std::vector<int32_t> out_block_tables;
+  std::vector<int32_t> out_paged_kv_indptr;
+  std::vector<int32_t> out_paged_kv_indices;
+  std::vector<int32_t> out_paged_kv_last_page_len;
   std::vector<std::vector<std::vector<int32_t>>> out_multi_block_tables;
   int32_t out_block_table_rows = 0;
   int32_t out_block_table_stride = 0;
+
+  void reserve_row_buffers(size_t num_rows, size_t block_table_stride) {
+    out_block_tables.reserve(num_rows * block_table_stride);
+    out_paged_kv_indices.reserve(num_rows * block_table_stride);
+    out_paged_kv_indptr.reserve(num_rows + 1);
+    out_paged_kv_last_page_len.reserve(num_rows);
+  }
 };
 
 // CPU-side row context shared by decode row builders.

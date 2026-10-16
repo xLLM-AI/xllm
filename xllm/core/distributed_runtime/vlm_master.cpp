@@ -31,6 +31,7 @@ limitations under the License.
 #include "core/distributed_runtime/engine_dispatch.h"
 #include "core/distributed_runtime/kv_cache_transfer_coordinator.h"
 #include "core/distributed_runtime/model_residency_coordinator.h"
+#include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config_validation.h"
@@ -319,6 +320,10 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
       .max_tokens_per_chunk_for_prefill(
           options.max_tokens_per_chunk_for_prefill())
       .num_speculative_tokens(options_.num_speculative_tokens())
+      .decode_graph_warmup_config(
+          ExecutionConfig::get_instance().decode_graph_warmup_config(
+              options_.num_speculative_tokens(),
+              options_.enable_graph_mode_decode_no_padding()))
       .dp_size(options_.dp_size())
       .cp_size(options_.cp_size())
       .enable_disagg_pd(options_.enable_disagg_pd())

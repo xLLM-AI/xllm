@@ -34,6 +34,12 @@ void ensure_python_interpreter();
 // The caller must hold the Python GIL.
 void ensure_xllm_weight_loader_module();
 
+class KVCache;
+
+// Convert caches to Python LayerCache tuples. The caller must hold the GIL.
+// Tuple order must match LayerCache fields in python/attention/backend.py.
+pybind11::list build_python_kv_caches(const std::vector<KVCache>& kv_caches);
+
 // Convert torch dtype to the string form used by Python model config.
 std::string dtype_to_string(const torch::TensorOptions& options);
 

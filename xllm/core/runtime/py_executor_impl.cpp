@@ -41,6 +41,7 @@ limitations under the License.
 #include "core/runtime/slot_buffer.h"
 #include "core/util/pybind_helper.h"
 #include "models/llm/py_causal_lm.h"
+#include "models/py_model_helper.h"
 #include "models/vlm/utils/multimodal_utils.h"
 
 #if defined(USE_NPU)
@@ -332,26 +333,7 @@ void PyExecutorImpl::bind_kv_caches(std::vector<KVCache>& kv_caches) {
   // Lazy bind KV caches on first call.
   int64_t num_layers = static_cast<int64_t>(kv_caches.size());
   if (!kv_bound_) {
-    py::list kv_caches_py;
-    for (auto& kv : kv_caches) {
-      // Slot order must match ``LayerCache`` on the Python side.
-      // Keep this order synchronized with LayerCache/_LAYER_CACHE_SLOTS.
-      // Generic caches use the first five entries; DeepSeek-V4 uses the
-      // trailing six entries returned by KVCache's DSV4 getters.
-      kv_caches_py.append(
-          py::make_tuple(optional_tensor(kv.get_k_cache()),
-                         optional_tensor(kv.get_v_cache()),
-                         optional_tensor(kv.get_index_cache()),
-                         optional_tensor(kv.get_conv_cache()),
-                         optional_tensor(kv.get_ssm_cache()),
-                         optional_tensor(kv.get_swa_cache()),
-                         optional_tensor(kv.get_compress_kv_state()),
-                         optional_tensor(kv.get_compress_score_state()),
-                         optional_tensor(kv.get_compress_index_kv_state()),
-                         optional_tensor(kv.get_compress_index_score_state()),
-                         optional_tensor(kv.get_indexer_cache_scale())));
-    }
-    py_executor_.attr("bind_kv_caches")(kv_caches_py);
+    py_executor_.attr("bind_kv_caches")(build_python_kv_caches(kv_caches));
     kv_bound_ = true;
     kv_layer_count_ = num_layers;
     if (options_.enable_task_pipeline()) {

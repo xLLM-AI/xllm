@@ -268,6 +268,8 @@ class ModelExecutor:
         if current_platform.is_npu() and cp_size > 1:
             _validate_npu_cp_model_config(config, int(num_decoding_tokens))
 
+        self._requires_framework_kpool_tail = bool(config.get("requires_framework_kpool_tail", False))
+
         attention_layers = [module for module in model.modules() if isinstance(module, Attention)]
         if not attention_layers:
             raise ValueError("Python model does not contain an Attention layer")
@@ -461,7 +463,6 @@ class ModelExecutor:
                         int(config["max_position_embeddings"]),
                         dp_size,
                         dp_rank,
-                        decode_batch_size_limit,
                         num_decoding_tokens=num_decoding_tokens,
                         is_spec_draft=bool(config.get("is_draft_engine", False)),
                         enable_mega_moe_token_mask=bool(config.get("enable_mega_moe", False)),
@@ -772,6 +773,10 @@ class ModelExecutor:
             raise ValueError("cache layer count does not match the model layer layout")
         if self._kv_bound:
             return
+        if self._requires_framework_kpool_tail:
+            indexed_caches = [cache for cache in layer_caches if cache.index is not None]
+            if not indexed_caches or any(cache.kpool_tail is None for cache in indexed_caches):
+                raise ValueError("model requires a framework-managed kPool tail for every indexer layer")
         self.attention_backend.bind_kv_caches(layer_caches)
         self.eager_runner.bind_layer_caches(layer_caches)
         if self.decode_graph_runner is not None:

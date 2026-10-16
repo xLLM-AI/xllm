@@ -1384,12 +1384,14 @@ TEST_F(HostKVCacheConfigTest, AcceptsSupportedGroupedCacheLayout) {
 
 TEST(KVCacheTest, KPoolShapeRoundTripKeepsRequestTailSeparateFromPages) {
   ModelArgs args;
-  args.n_layers(1)
+  args.model_type("glm5_next")
+      .n_layers(1)
       .head_dim(16)
       .index_n_heads(1)
       .index_head_dim(16)
       .index_kpool(4)
-      .index_kpool_compress(true);
+      .index_kpool_compress(true)
+      .index_kpool_always_select_tail(true);
   KVCacheEstimateOptions options;
   options.kpool_layout = KPoolCacheLayout::COMPRESSED_WITH_TAIL;
   options.cache_size_in_bytes = 1024 * 1024;
@@ -1403,7 +1405,9 @@ TEST(KVCacheTest, KPoolShapeRoundTripKeepsRequestTailSeparateFromPages) {
   shape.to_proto(&proto_shape);
   const KVCacheShape restored = KVCacheShape::from_proto(proto_shape);
   EXPECT_EQ(restored.kpool_layout(), KPoolCacheLayout::COMPRESSED_WITH_TAIL);
-  EXPECT_EQ(restored.kpool_tail_shape(), (std::vector<int64_t>{5, 2, 16, 16}));
+  const int64_t expected_tail_len = Platform::is_npu() ? 9 : 16;
+  EXPECT_EQ(restored.kpool_tail_shape(),
+            (std::vector<int64_t>{5, 2, expected_tail_len, 16}));
 #if !defined(USE_NPU)
   KVCacheCreateOptions create_options;
   create_options.enable_lighting_indexer(true).dtype(torch::kBFloat16);
@@ -1423,6 +1427,7 @@ TEST(KVCacheTest, KPoolShapeRoundTripKeepsRequestTailSeparateFromPages) {
   EXPECT_EQ(cache.get_shapes().back(), restored.kpool_tail_shape());
 #endif
 
+  args.index_kpool_always_select_tail(false);
   options.kpool_layout = KPoolCacheLayout::PACKED;
   const KVCacheCapacity packed = estimate_kv_cache_capacity(args, options);
   const KVCacheShape packed_shape(packed, args, 1);
