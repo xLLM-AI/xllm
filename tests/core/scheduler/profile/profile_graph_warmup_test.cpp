@@ -61,10 +61,10 @@ class ScopedDecodeGraphConfigSnapshot final {
   int32_t decode_batch_limit_;
 };
 
-TEST(DecodeGraphExecutionShapeTest, DefaultProfileUsesCompatibilityShape) {
-  ProfileManager::Options options;
-  const runtime::DecodeGraphExecutionShape& execution_shape =
-      options.decode_graph_execution_shape();
+TEST(DecodeGraphWarmupConfigTest, DefaultWarmupUsesCompatibilityShape) {
+  runtime::Options options;
+  const runtime::DecodeGraphWarmupConfig execution_shape =
+      make_decode_graph_warmup_config(options);
 
   EXPECT_EQ(execution_shape.num_decoding_tokens, 1);
   EXPECT_EQ(execution_shape.num_speculative_tokens, 0);
@@ -72,13 +72,17 @@ TEST(DecodeGraphExecutionShapeTest, DefaultProfileUsesCompatibilityShape) {
   EXPECT_EQ(execution_shape.max_graph_batch_size, 0);
 }
 
-TEST(DecodeGraphExecutionShapeTest, OrdinaryTargetUsesSingleTokenShape) {
+TEST(DecodeGraphWarmupConfigTest, OrdinaryTargetUsesSingleTokenShape) {
   ScopedDecodeGraphConfigSnapshot snapshot;
   ExecutionConfig::get_instance().acl_graph_decode_batch_size_limit(7);
   runtime::Options options;
 
-  const runtime::DecodeGraphExecutionShape execution_shape =
-      build_decode_graph_execution_shape(options);
+  const runtime::DecodeGraphWarmupConfig execution_shape =
+      make_decode_graph_warmup_config(
+          options,
+          Platform::is_npu() ? ExecutionConfig::get_instance()
+                                   .acl_graph_decode_batch_size_limit()
+                             : 0);
 
   EXPECT_EQ(execution_shape.num_decoding_tokens, 1);
   EXPECT_EQ(execution_shape.num_speculative_tokens, 0);
@@ -86,14 +90,18 @@ TEST(DecodeGraphExecutionShapeTest, OrdinaryTargetUsesSingleTokenShape) {
   EXPECT_EQ(execution_shape.max_graph_batch_size, Platform::is_npu() ? 7 : 0);
 }
 
-TEST(DecodeGraphExecutionShapeTest, PreservesResolvedSpeculativeTargetWidth) {
+TEST(DecodeGraphWarmupConfigTest, PreservesResolvedSpeculativeTargetWidth) {
   ScopedDecodeGraphConfigSnapshot snapshot;
   ExecutionConfig::get_instance().acl_graph_decode_batch_size_limit(9);
   runtime::Options options;
   options.num_speculative_tokens(3).num_decoding_tokens(4);
 
-  const runtime::DecodeGraphExecutionShape execution_shape =
-      build_decode_graph_execution_shape(options);
+  const runtime::DecodeGraphWarmupConfig execution_shape =
+      make_decode_graph_warmup_config(
+          options,
+          Platform::is_npu() ? ExecutionConfig::get_instance()
+                                   .acl_graph_decode_batch_size_limit()
+                             : 0);
 
   EXPECT_EQ(execution_shape.num_decoding_tokens, 4);
   EXPECT_EQ(execution_shape.num_speculative_tokens, 3);
@@ -101,10 +109,10 @@ TEST(DecodeGraphExecutionShapeTest, PreservesResolvedSpeculativeTargetWidth) {
 
   // The resolved execution width can differ from the speculative depth.
   options.num_decoding_tokens(6);
-  EXPECT_EQ(build_decode_graph_execution_shape(options).num_decoding_tokens, 6);
+  EXPECT_EQ(make_decode_graph_warmup_config(options).num_decoding_tokens, 6);
 }
 
-TEST(DecodeGraphExecutionShapeTest, PaddingFollowsTargetOptions) {
+TEST(DecodeGraphWarmupConfigTest, PaddingFollowsTargetOptions) {
   ScopedDecodeGraphConfigSnapshot snapshot;
   for (bool enable_no_padding : {false, true}) {
     ExecutionConfig::get_instance().enable_graph_mode_decode_no_padding(
@@ -114,7 +122,7 @@ TEST(DecodeGraphExecutionShapeTest, PaddingFollowsTargetOptions) {
         .num_decoding_tokens(4)
         .enable_graph_mode_decode_no_padding(enable_no_padding);
 
-    EXPECT_EQ(build_decode_graph_execution_shape(options)
+    EXPECT_EQ(make_decode_graph_warmup_config(options)
                   .enable_graph_mode_decode_no_padding,
               enable_no_padding);
   }
@@ -254,6 +262,15 @@ class RecordingProfileEngine final : public Engine {
 
   const ModelArgs& model_args() const override { return model_args_; }
 
+  runtime::DecodeGraphWarmupConfig decode_graph_warmup_config() const override {
+    return warmup_config_;
+  }
+
+  void set_decode_graph_warmup_config(
+      runtime::DecodeGraphWarmupConfig warmup_config) {
+    warmup_config_ = warmup_config;
+  }
+
   void reset_profile_markers() { all_requests_marked_ = true; }
 
   bool all_requests_marked() const { return all_requests_marked_; }
@@ -271,6 +288,7 @@ class RecordingProfileEngine final : public Engine {
  private:
   std::unique_ptr<BlockManagerPool> block_manager_;
   ModelArgs model_args_;
+  runtime::DecodeGraphWarmupConfig warmup_config_;
   bool all_requests_marked_ = true;
   bool overlap_ = false;
   int32_t pending_steps_ = 0;
@@ -687,13 +705,13 @@ TEST(GraphWarmupTest, DecodeProfileUsesConfiguredSpeculativeGeometry) {
   RecordingProfileEngine engine;
   runtime::Options target_options;
   target_options.num_speculative_tokens(3).num_decoding_tokens(4);
+  engine.set_decode_graph_warmup_config(
+      make_decode_graph_warmup_config(target_options));
   ProfileManager::Options options;
   options.max_tokens_per_batch(5)
       .max_seqs_per_batch(1)
       .dp_size(1)
-      .instance_role(InstanceRole::DECODE)
-      .decode_graph_execution_shape(
-          build_decode_graph_execution_shape(target_options));
+      .instance_role(InstanceRole::DECODE);
   ProfileManager profile_manager(&engine, options);
 
   profile_manager.profile_decode_step_time(/*token_length=*/5,

@@ -112,7 +112,7 @@ py::list build_python_kv_caches(std::vector<KVCache>& kv_caches) {
 
 }  // namespace
 
-PyCausalLM::PyCausalLM(const ModelContext& context)
+PyCausalLM::PyCausalLM(const ModelContext& context, bool is_vlm)
     : model_args_(context.get_model_args()),
       options_(context.get_tensor_options()),
       device_(context.get_tensor_options().device()),
@@ -318,9 +318,13 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
                          layerwise_group_index);
     }
   }
-  const std::string module_name = context.get_model_args().model_type().empty()
-                                      ? std::string("Qwen3ForCausalLM")
-                                      : context.get_model_args().model_type();
+  std::string module_name = context.get_model_args().model_type().empty()
+                                ? std::string("Qwen3ForCausalLM")
+                                : context.get_model_args().model_type();
+  // Keep the internal Python class-resolution key behind this typed bridge.
+  if (is_vlm && module_name == "glm5_next") {
+    module_name = "glm5_next_vl";
+  }
 
   py::module_ registry = py::module_::import("xllm.python.registry");
   py::object model_cls = registry.attr("get_model_class")(py::str(module_name));

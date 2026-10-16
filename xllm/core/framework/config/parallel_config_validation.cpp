@@ -26,6 +26,7 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config.h"
+#include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/parallel_state/parallel_topology.h"
 #include "core/kv_cache/layout/layerwise_split_layout.h"
@@ -243,12 +244,14 @@ std::optional<std::string> validate_context_parallel_config(
           "qwen3",
           "glm_moe_dsa",
           "deepseek_v4",
+          "glm5_next",
       };
       if (kPythonCpCapableModels.find(model_type) ==
           kPythonCpCapableModels.end()) {
         return "Python model-side CP does not support model_type=" +
                model_type +
-               "; supported models are qwen3, glm_moe_dsa and deepseek_v4.";
+               "; supported models are qwen3, glm_moe_dsa, deepseek_v4, "
+               "and glm5_next.";
       }
       // On NPU, the Python executor resolves enable_graph=true with an
       // off-like backend to ACLGraph. ACLGraph handles Decode only, so Prefill
@@ -271,6 +274,36 @@ std::optional<std::string> validate_context_parallel_config(
       if (model_type == "deepseek_v4" && kv_split != 1) {
         return "Python DeepSeek-V4 CP requires replicated KV caches; use "
                "kv_split_size=1";
+      }
+      if (model_type == "glm5_next") {
+        if (engine_type == EngineType::SSM) {
+          return "Python GLM-5 Next CP does not support target-side "
+                 "speculative "
+                 "verification; run speculation on a cp_size=1 Decode instance";
+        }
+        if (options.ep_size() != 1) {
+          return "Python GLM-5 Next CP initially requires ep_size == 1";
+        }
+        if (kv_split != 1) {
+          return "Python GLM-5 Next CP initially requires kv_split_size == 1";
+        }
+        const SchedulerConfig& scheduler_config =
+            SchedulerConfig::get_instance();
+        if (scheduler_config.enable_chunked_prefill()) {
+          return "Python GLM-5 Next CP initially requires "
+                 "enable_chunked_prefill=false";
+        }
+        if (KVCacheConfig::get_instance().enable_prefix_cache()) {
+          return "Python GLM-5 Next CP initially requires "
+                 "enable_prefix_cache=false";
+        }
+        if (scheduler_config.enable_schedule_overlap()) {
+          return "Python GLM-5 Next CP initially requires "
+                 "enable_schedule_overlap=false";
+        }
+        if (options.enable_disagg_pd()) {
+          return "Python GLM-5 Next CP does not support disaggregated PD";
+        }
       }
       return std::nullopt;
     }

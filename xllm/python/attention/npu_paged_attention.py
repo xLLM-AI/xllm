@@ -961,11 +961,47 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             )
 
         cp_context = get_forward_context().cp_context
+        rope_dim = getattr(layer, "qk_rope_head_dim", None)
+        if cp_context is not None and rope_dim == 0:
+            # GLM-5 Next restores the fresh-Prefill rows before entering its
+            # NoPE DSA island, so the backend writes and attends the complete
+            # logical stream once, then the model reshards the output.
+            if cache_is_preprocessed:
+                raise RuntimeError("CP prefill does not support preprocessed MLA cache inputs")
+            if topk is None:
+                raise RuntimeError("CP prefill requires sparse MLA index output")
+            if k_latent_3d is None:
+                raise RuntimeError("CP prefill requires MLA cache inputs")
+            if c8_enabled:
+                raise RuntimeError("CP prefill does not support SFA C8 packed KV cache")
+            if metadata.slot_mapping is None:
+                raise RuntimeError("CP prefill requires a global MLA slot mapping")
+            torch.ops.xllm_ops.reshape_paged_cache(
+                metadata.slot_mapping,
+                k_latent_3d,
+                k_latent_3d,
+                nope_cache,
+                nope_cache,
+            )
+            # glm5_next currently requires kv_split_size=1, making this an
+            # identity while preserving the uniform metadata-driven boundary.
+            attention_nope, block_table = self._materialize_cp_cache(nope_cache, metadata, cp_context)
+            return self._mla_sparse(
+                q_latent,
+                None,
+                attention_nope,
+                None,
+                topk,
+                block_table,
+                self._mla_actual_seq_q,
+                self._mla_actual_seq_kv,
+                layer_id,
+            )
+
         if cp_context is None:
             # NoPE (qk_rope_head_dim==0): skip rope cache write + pass None to SFA.
             # The rope/value slot may be empty (a 0-dim tensor) or absent (None) in
             # NoPE models — it is never read, so do not require it.
-            rope_dim = getattr(layer, "qk_rope_head_dim", None)
             if rope_dim and rope_dim > 0:
                 # RoPE MLA (DeepSeek-V3/V4, GLM-5.2): latent + rotary.
                 if rope_cache is None:

@@ -150,9 +150,15 @@ def _register_builtin_models() -> None:
         "deepseek_v32_mtp",
     )
     _register_model_path(
+        "xllm.python.models.glm5_next",
+        "Glm5NextForCausalLM",
+        "glm5_next",
+    )
+    # Internal key selected by the typed C++ LLM/VLM bridge.
+    _register_model_path(
         "xllm.python.models.glm5_next_vl",
         "Glm5NextVLModel",
-        "glm5_next",
+        "glm5_next_vl",
     )
     _register_model_path(
         "xllm.python.models.glm5_next_mtp",

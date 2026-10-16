@@ -30,10 +30,6 @@ struct DecodeGraphWarmupConfig {
   int32_t max_graph_batch_size = 0;
 };
 
-// Kept for scheduler/profile source compatibility while callers migrate to
-// the engine-owned warmup configuration.
-using DecodeGraphExecutionShape = DecodeGraphWarmupConfig;
-
 // Returns the padded token-row bucket shared by decode graph executors. When
 // no-padding mode is enabled each exact token count is its own graph shape.
 int64_t get_decode_graph_token_bucket(int64_t num_tokens,

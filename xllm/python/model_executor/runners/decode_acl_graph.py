@@ -56,7 +56,6 @@ from xllm.python.model_executor.runners.decode_cuda_graph import (
     _decode_bucket,
 )
 
-
 _GraphKey = tuple[
     int,
     bool,
@@ -343,7 +342,6 @@ class DecodeAclGraphRunner(AclGraphRunner):
             if expanded is not None
             else getattr(metadata, "kv_seq_lens_host_values", None)
         )
-        paging_kv_seq_lens_host_values = kv_seq_lens_host_values
         if block_table is None or kv_seq_lens is None:
             raise RuntimeError("decode graph requires block and KV metadata")
         block_table = block_table.to(device=kv_seq_lens.device, dtype=torch.int32).contiguous()
@@ -388,7 +386,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 paged_kv_last_page_len,
             ) = self._build_row_aligned_paged_kv_metadata(
                 block_table,
-                paging_kv_seq_lens_host_values,
+                kv_seq_lens_host_values,
             )
         self._validate_decode_metadata_shapes(
             block_table,

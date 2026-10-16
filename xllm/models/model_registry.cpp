@@ -631,7 +631,7 @@ std::unique_ptr<CausalLM> create_llm_model(const ModelContext& context) {
   const auto& model_impl = context.get_model_impl();
 #if defined(USE_CUDA) || defined(USE_NPU)
   if (ModelConfig::is_python_model_impl(model_impl)) {
-    return std::make_unique<PyCausalLM>(context);
+    return std::make_unique<PyCausalLM>(context, /*is_vlm=*/false);
   }
 #else
   if (ModelConfig::is_python_model_impl(model_impl)) {
@@ -689,7 +689,7 @@ std::unique_ptr<CausalVLM> create_vlm_model(const ModelContext& context) {
   // the VLM worker does not populate context.model_impl, unlike the LLM worker.
   if (ModelConfig::is_python_model_impl(
           ModelConfig::get_instance().model_impl())) {
-    return std::make_unique<PyCausalLM>(context);
+    return std::make_unique<PyCausalLM>(context, /*is_vlm=*/true);
   }
 
   std::string resolved_name;

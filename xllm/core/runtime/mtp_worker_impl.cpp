@@ -3857,9 +3857,10 @@ bool MTPWorkerImpl<TargetInput>::should_use_uniform_two_draft_rows(
 }
 
 template <typename TargetInput>
-void MTPWorkerImpl<TargetInput>::prepare_draft_inputs(const TargetInput& input,
-                                                       LlmForwardInput& draft_input,
-                                                       int32_t position_offset) {
+void MTPWorkerImpl<TargetInput>::prepare_draft_inputs(
+    const TargetInput& input,
+    LlmForwardInput& draft_input,
+    int32_t position_offset) {
   c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
   draft_input = make_llm_draft_input(input);
   prepare_draft_sampling(draft_input.sampling_params);

@@ -21,13 +21,25 @@ limitations under the License.
 
 #include "framework/block/block_manager_pool.h"
 #include "framework/model/model_args.h"
-#include "core/framework/speculative/speculative_profile_registry.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "framework/tokenizer/tokenizer_args.h"
-#include "runtime/options.h"
 #include "runtime/decode_graph_bucket.h"
+#include "runtime/options.h"
 
 namespace xllm {
+
+inline runtime::DecodeGraphWarmupConfig make_decode_graph_warmup_config(
+    const runtime::Options& options,
+    int32_t max_graph_batch_size = 0) {
+  runtime::DecodeGraphWarmupConfig warmup_config;
+  warmup_config.num_decoding_tokens = options.num_decoding_tokens();
+  warmup_config.num_speculative_tokens = options.num_speculative_tokens();
+  warmup_config.enable_graph_mode_decode_no_padding =
+      options.enable_graph_mode_decode_no_padding();
+  warmup_config.max_graph_batch_size = max_graph_batch_size;
+  return warmup_config;
+}
+
 class Engine {
  public:
   virtual ~Engine() = default;
@@ -50,11 +62,6 @@ class Engine {
 
   // return the model args
   virtual const ModelArgs& model_args() const { return args_; }
-
-  virtual bool set_speculative_validate_time_predictor(
-      const SpeculativeProfileRegistry::ValidateTimePredictor&) {
-    return false;
-  }
 
   virtual runtime::DecodeGraphWarmupConfig decode_graph_warmup_config() const {
     return {};

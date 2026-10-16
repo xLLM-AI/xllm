@@ -60,7 +60,7 @@ int64_t python_qwen3_5_mega_moe_max_num_tokens_per_rank(
 // reached here).
 class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
  public:
-  explicit PyCausalLM(const ModelContext& context);
+  explicit PyCausalLM(const ModelContext& context, bool is_vlm);
   ~PyCausalLM() override;
 
   ModelOutput forward(const torch::Tensor& tokens,

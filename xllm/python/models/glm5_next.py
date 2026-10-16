@@ -546,17 +546,13 @@ class Glm5NextKdaAttention(Attention):
             )
         cp_context = getattr(ctx, "cp_context", None)
         if cp_context is not None:
-            mixed_qkv = cp_merge_rows(
-                mixed_qkv.transpose(1, 2).reshape(-1, self.conv_dim), cp_context
-            )
+            mixed_qkv = cp_merge_rows(mixed_qkv.transpose(1, 2).reshape(-1, self.conv_dim), cp_context)
             mixed_qkv = mixed_qkv.unsqueeze(0).transpose(1, 2).contiguous()
             g_raw = cp_merge_rows(
                 g_raw.reshape(-1, self.num_heads_local, self.head_dim),
                 cp_context,
             ).unsqueeze(0)
-            beta = cp_merge_rows(
-                beta.reshape(-1, self.num_heads_local), cp_context
-            ).unsqueeze(0)
+            beta = cp_merge_rows(beta.reshape(-1, self.num_heads_local), cp_context).unsqueeze(0)
 
         core_attn_out = backend.execute_linear(
             mixed_qkv,
@@ -1564,9 +1560,7 @@ class Glm5NextMlaAttention(Attention):
         k_latent = self.kv_a_layernorm(k_latent_raw)
         k_latent_3d = k_latent.view(num_tokens, 1, self.kv_lora_rank)
 
-        attn_out = backend.execute_mla(
-            q_latent, None, k_latent_3d, None, self, topk=topk
-        )
+        attn_out = backend.execute_mla(q_latent, None, k_latent_3d, None, self, topk=topk)
         if cp_context is not None:
             attn_out = cp_shard_rows(
                 attn_out.reshape(num_tokens, self.num_heads_local, self.kv_lora_rank),

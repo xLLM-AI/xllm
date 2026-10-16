@@ -295,8 +295,6 @@ LLMMaster::LLMMaster(const Options& options)
       .server_idx(options_.server_idx())
       .rec_worker_max_concurrency(options_.rec_worker_max_concurrency());
   auto create_scheduler = [this, &scheduler_options](auto* engine) {
-    scheduler_options.decode_graph_execution_shape(
-        build_decode_graph_execution_shape(engine->options()));
     scheduler_ = create_continuous_scheduler(
         engine,
         scheduler_options,
