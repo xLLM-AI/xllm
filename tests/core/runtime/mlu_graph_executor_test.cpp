@@ -84,6 +84,17 @@ TEST(DecodeGraphBucketTest, MapsTokenBucketsWithAndWithoutPadding) {
             17);
 }
 
+TEST(DecodeGraphWarmupConfigTest, DefaultEngineUsesSingleTokenDecodeConfig) {
+  CompatibilityShapeEngine engine;
+
+  const runtime::DecodeGraphWarmupConfig warmup_config =
+      engine.decode_graph_warmup_config();
+
+  EXPECT_EQ(warmup_config.num_decoding_tokens, 1);
+  EXPECT_EQ(warmup_config.num_speculative_tokens, 0);
+  EXPECT_FALSE(warmup_config.enable_graph_mode_decode_no_padding);
+}
+
 }  // namespace
 
 class MockCausalLM : public CausalLM {

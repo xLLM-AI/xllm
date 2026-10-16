@@ -18,6 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <limits>
 
 #include "core/common/constants.h"
 
@@ -96,7 +97,15 @@ void zero_slots_across_layers(std::vector<KVCache>& kv_caches,
     const torch::Tensor ssm_cache = kv_cache.get_ssm_cache();
     if (kpool_tail.defined()) {
       for (const SlotRange& range : ranges) {
-        kpool_tail.narrow(0, range.start, range.length).zero_();
+        torch::Tensor tail_range =
+            kpool_tail.narrow(0, range.start, range.length);
+        tail_range.zero_();
+#if defined(USE_NPU)
+        // Keep the gate plane as an explicit validity sentinel. A reset slot
+        // must not expose finite stale gates to a later circular-tail read.
+        tail_range.select(/*dim=*/1, /*index=*/1)
+            .fill_(-std::numeric_limits<float>::infinity());
+#endif
       }
     }
     if (!conv_cache.defined() && !ssm_cache.defined()) {

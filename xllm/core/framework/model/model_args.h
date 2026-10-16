@@ -746,6 +746,24 @@ inline bool is_qwen3_5_target_model_type(std::string_view model_type) {
          model_type == "qwen3_5_text" || model_type == "qwen3_5_moe_text";
 }
 
+inline bool is_glm5_next_target_model_type(std::string_view model_type) {
+  return model_type == "glm5_3_flash" || model_type == "glm5_next";
+}
+
+// Keep the NPU compressed KPool rollout on a closed model/configuration set.
+// Other indexer models and GLM5 configurations that do not compress multiple
+// rows while guaranteeing causal tail selection retain their packed layout.
+inline bool uses_npu_compressed_kpool_tail(const ModelArgs& args) {
+#if defined(USE_NPU)
+  return args.index_kpool() > 1 && args.index_kpool_compress() &&
+         args.index_kpool_always_select_tail() &&
+         is_glm5_next_target_model_type(args.model_type());
+#else
+  (void)args;
+  return false;
+#endif
+}
+
 inline std::ostream& operator<<(std::ostream& os, const ModelArgs& args) {
   os << "ModelArgs: [model_type: " << args.model_type();
   os << ", encoder_embedding_mode: " << args.encoder_embedding_mode();

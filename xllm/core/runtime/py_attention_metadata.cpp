@@ -122,6 +122,8 @@ void register_attention_metadata_views(py::module_& module) {
       .def_property_readonly(
           "linear_state_write_indices",
           &PyAttentionMetadataView::linear_state_write_indices)
+      .def_property_readonly("kpool_query_lens",
+                             &PyAttentionMetadataView::kpool_query_lens)
       .def_property_readonly("has_initial_state",
                              &PyAttentionMetadataView::has_initial_state)
       .def_property_readonly(
@@ -381,6 +383,9 @@ py::object PyAttentionMetadataView::linear_state_write_indices() const {
   return optional_tensor(linear_state_indices_);
 }
 
+const std::vector<int32_t>& PyAttentionMetadataView::kpool_query_lens() const {
+  return metadata_->kpool_query_lens;
+}
 py::object PyAttentionMetadataView::has_initial_state() const {
   return optional_tensor(metadata_->has_initial_states);
 }

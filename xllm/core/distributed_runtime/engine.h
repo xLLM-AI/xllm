@@ -21,9 +21,11 @@ limitations under the License.
 
 #include "framework/block/block_manager_pool.h"
 #include "framework/model/model_args.h"
+#include "core/framework/speculative/speculative_profile_registry.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "framework/tokenizer/tokenizer_args.h"
 #include "runtime/options.h"
+#include "runtime/decode_graph_bucket.h"
 
 namespace xllm {
 class Engine {
@@ -48,6 +50,15 @@ class Engine {
 
   // return the model args
   virtual const ModelArgs& model_args() const { return args_; }
+
+  virtual bool set_speculative_validate_time_predictor(
+      const SpeculativeProfileRegistry::ValidateTimePredictor&) {
+    return false;
+  }
+
+  virtual runtime::DecodeGraphWarmupConfig decode_graph_warmup_config() const {
+    return {};
+  }
 
   // return the tokenizer args
   virtual const TokenizerArgs& tokenizer_args() const {

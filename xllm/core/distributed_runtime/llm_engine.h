@@ -64,8 +64,8 @@ class LLMEngine : public Engine {
 
   const runtime::Options& options() const { return options_; }
 
-  // The caller must prepare any required external model resources before
-  // initializing without a preparation callback.
+  runtime::DecodeGraphWarmupConfig decode_graph_warmup_config() const override;
+
   bool init(MasterStatus master_status) override;
 
   bool init(MasterStatus master_status,

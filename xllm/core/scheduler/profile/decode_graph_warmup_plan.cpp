@@ -73,12 +73,12 @@ DecodeGraphWarmupPlan get_compatibility_decode_graph_warmup_plan(
 }
 
 DecodeGraphWarmupPlan build_decode_graph_warmup_plan(
-    const runtime::DecodeGraphExecutionShape& execution_shape,
+    const runtime::DecodeGraphWarmupConfig& warmup_config,
     int32_t max_global_batch_size,
     int32_t dp_size) {
   DecodeGraphWarmupPlan plan = get_compatibility_decode_graph_warmup_plan(
       max_global_batch_size, dp_size);
-  plan.execution_shape = execution_shape;
+  plan.warmup_config = warmup_config;
 
   // MTP emits num_decoding_tokens rows per sequence. On supporting backends,
   // the graph cache is keyed by the padded number of rows rather than the
@@ -92,10 +92,10 @@ DecodeGraphWarmupPlan build_decode_graph_warmup_plan(
   }
 
   const bool use_mtp_batches =
-      execution_shape.num_decoding_tokens > 1 &&
+      warmup_config.num_decoding_tokens > 1 &&
       max_global_batch_size >= dp_size && dp_size > 0 &&
-      (!execution_shape.enable_graph_mode_decode_no_padding ||
-       execution_shape.max_graph_batch_size > 0);
+      (!warmup_config.enable_graph_mode_decode_no_padding ||
+       warmup_config.max_graph_batch_size > 0);
   if (!use_mtp_batches) {
     return plan;
   }
@@ -105,27 +105,27 @@ DecodeGraphWarmupPlan build_decode_graph_warmup_plan(
           static_cast<uint32_t>(max_global_batch_size),
           static_cast<uint32_t>(dp_size)));
 
-  if (execution_shape.max_graph_batch_size > 0) {
+  if (warmup_config.max_graph_batch_size > 0) {
     // The graph batch limit caps the DP-local decode batch: the executor
     // compares the largest DP-local batch against it before entering graph
     // mode, so the warmup sweep must apply the limit in local terms as well.
     const int32_t max_graph_local_batch_size =
-        std::min(max_local_batch_size, execution_shape.max_graph_batch_size);
+        std::min(max_local_batch_size, warmup_config.max_graph_batch_size);
     const int32_t max_graph_global_batch_size =
         max_graph_local_batch_size * dp_size;
     std::vector<int32_t> graph_batch_sizes;
     int64_t current_token_bucket = 0;
     const int64_t max_graph_token_count =
         static_cast<int64_t>(max_graph_local_batch_size) *
-        execution_shape.num_decoding_tokens;
+        warmup_config.num_decoding_tokens;
     for (int32_t local_batch_size = 1;
          local_batch_size <= max_graph_local_batch_size;
          ++local_batch_size) {
       const int64_t num_tokens = static_cast<int64_t>(local_batch_size) *
-                                 execution_shape.num_decoding_tokens;
+                                 warmup_config.num_decoding_tokens;
       const int64_t token_bucket = runtime::get_decode_graph_token_bucket(
-          num_tokens, execution_shape.enable_graph_mode_decode_no_padding);
-      if (execution_shape.enable_graph_mode_decode_no_padding &&
+          num_tokens, warmup_config.enable_graph_mode_decode_no_padding);
+      if (warmup_config.enable_graph_mode_decode_no_padding &&
           !npu::is_acl_graph_compatibility_batch_size(
               static_cast<uint64_t>(token_bucket),
               static_cast<uint64_t>(max_graph_token_count))) {
@@ -143,7 +143,7 @@ DecodeGraphWarmupPlan build_decode_graph_warmup_plan(
     std::vector<int32_t> batch_sizes;
     batch_sizes.reserve(plan.batch_sizes.size() + graph_batch_sizes.size());
     for (int32_t batch_size : plan.batch_sizes) {
-      if (execution_shape.enable_graph_mode_decode_no_padding ||
+      if (warmup_config.enable_graph_mode_decode_no_padding ||
           batch_size > max_graph_global_batch_size) {
         batch_sizes.emplace_back(batch_size);
       }
@@ -163,9 +163,9 @@ DecodeGraphWarmupPlan build_decode_graph_warmup_plan(
   for (int32_t local_batch_size = 1; local_batch_size <= max_local_batch_size;
        ++local_batch_size) {
     const int64_t num_tokens = static_cast<int64_t>(local_batch_size) *
-                               execution_shape.num_decoding_tokens;
+                               warmup_config.num_decoding_tokens;
     const int64_t token_bucket = runtime::get_decode_graph_token_bucket(
-        num_tokens, execution_shape.enable_graph_mode_decode_no_padding);
+        num_tokens, warmup_config.enable_graph_mode_decode_no_padding);
     if (batch_sizes.empty() || token_bucket != last_token_bucket) {
       batch_sizes.emplace_back(local_batch_size * dp_size);
       last_token_bucket = token_bucket;

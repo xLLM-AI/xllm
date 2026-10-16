@@ -48,6 +48,9 @@ struct DecodeBuildBuffers {
   std::vector<int32_t> out_q_cu_seq_lens;
   std::vector<int32_t> out_new_cache_slots;
   std::vector<int32_t> out_block_tables;
+  std::vector<int32_t> out_paged_kv_indptr;
+  std::vector<int32_t> out_paged_kv_indices;
+  std::vector<int32_t> out_paged_kv_last_page_len;
   std::vector<std::vector<std::vector<int32_t>>> out_multi_block_tables;
   int32_t out_block_table_rows = 0;
   int32_t out_block_table_stride = 0;

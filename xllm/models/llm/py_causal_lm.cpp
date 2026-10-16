@@ -368,6 +368,8 @@ py::dict PyCausalLM::build_config_dict(
   d["moe_tp_rank"] = moe_tp_rank_;
   d["ep_size"] = ep_size_;
   d["ep_rank"] = ep_rank_;
+  d["requires_framework_kpool_tail"] =
+      uses_npu_compressed_kpool_tail(model_args_);
   // cp_size is a reflected ParallelArgs PROPERTY (already in d), but cp_rank is
   // a derived member function, so pass it explicitly for the Python executor.
   d["cp_rank"] = cp_rank_;

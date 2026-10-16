@@ -65,8 +65,10 @@ def test_mla_index_context_accepts_decode_graph_static_metadata() -> None:
         SimpleNamespace(
             index=torch.zeros(2, 1, 1),
             index_scale=None,
+            kpool_tail=None,
         )
     ]
+    backend._kpool_cache_triton_compatible = (False,)
 
     with patch(
         "xllm.python.attention.npu_paged_attention.get_forward_context",
