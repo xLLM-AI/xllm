@@ -323,12 +323,18 @@ def test_selected_expert_moe_matches_native_call_contract(
     assert all(call["group_list"].numel() == 4 for call in gemm_calls)
     assert all(call["group_list_type"] == 1 for call in gemm_calls)
 
+    # V2 provider: custom_xllm_math/op_api/lib/libcust_opapi.so.
     dequant = dict(calls)["dequant_swiglu_quant"]
     assert isinstance(dequant, dict)
     assert dequant["x"] is gemm1
     assert dequant["activation_scale"] is input_scale
     assert torch.equal(dequant["group_index"], expert_tokens[:4])
     assert dequant["clamp_limit"] == 7.0
+    assert dequant["swiglu_mode"] == 1
+    assert dequant["activate_left"] is True
+    assert dequant["glu_alpha"] == 1.0
+    assert dequant["glu_bias"] == 0.0
+    assert dequant["quant_mode"] == 1
 
     unpermute = dict(calls)["unpermute"]
     assert isinstance(unpermute, dict)
