@@ -104,6 +104,16 @@ torch::Tensor alloc_npu_huge_page_tensor(const std::vector<int64_t>& dims,
                                          aclFormat format) {
   void* buffer = nullptr;
   const size_t nbytes = get_tensor_nbytes(dims, dtype);
+  // aclrtMalloc rejects zero-byte buffers; preserve the requested empty shape.
+  if (nbytes == 0) {
+    auto empty_tensor = torch::empty(dims,
+                                     torch::dtype(dtype).device(torch::Device(
+                                         c10::DeviceType::PrivateUse1)));
+    auto* empty_storage = static_cast<torch_npu::NPUStorageImpl*>(
+        empty_tensor.storage().unsafeGetStorageImpl());
+    empty_storage->npu_desc_.npu_format_ = format;
+    return empty_tensor;
+  }
   auto acl_ret = aclrtMalloc(&buffer, nbytes, ACL_MEM_MALLOC_HUGE_ONLY);
   CHECK(acl_ret == ACL_SUCCESS)
       << "aclrtMalloc KV cache failed, ret=" << std::hex << acl_ret
@@ -233,10 +243,30 @@ IndexedKVCacheTensors create_indexed_kv_cache_tensors(
   if (kv_cache_shape.has_kpool_tail_shape()) {
     CHECK(!create_options.enable_indexer_cache_quant());
     CHECK_EQ(create_options.dtype(), torch::kBFloat16);
+#if defined(USE_NPU)
+    const aclFormat npu_format_type =
+        get_npu_kv_cache_format(create_options.model_type());
+    if (create_options.enable_kv_cache_huge_page_allocator()) {
+      tensors.kpool_tail = alloc_npu_huge_page_tensor(
+          kv_cache_shape.kpool_tail_shape(), torch::kBFloat16, npu_format_type);
+      tensors.kpool_tail.zero_();
+    } else {
+      tensors.kpool_tail = at_npu::native::npu_format_cast(
+          torch::zeros(
+              kv_cache_shape.kpool_tail_shape(),
+              torch::dtype(torch::kBFloat16).device(create_options.device())),
+          npu_format_type);
+    }
+    // A finite gate marks a circular-tail row as initialized. Invalid or
+    // unwritten rows stay at -inf so pool completion can reject stale slots.
+    tensors.kpool_tail.select(/*dim=*/1, /*index=*/1)
+        .fill_(-std::numeric_limits<float>::infinity());
+#else
     tensors.kpool_tail = alloc_cache_tensor(KVCacheTensorRole::KPOOL_TAIL,
                                             kv_cache_shape.kpool_tail_shape(),
                                             torch::kBFloat16,
                                             create_options);
+#endif
   }
   const bool mla_packed_c8 = create_options.mla_packed_c8();
   if (create_options.enable_kv_cache_quant() && !mla_packed_c8) {

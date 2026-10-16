@@ -271,6 +271,46 @@ TEST(KVCacheEstimationTest, UserIndexerCacheDtypeDirectlyControlsQuantization) {
       estimate_kv_cache_capacity(model_args, options);
   EXPECT_EQ(int8_capacity.index_slot_size(), 20);
   EXPECT_TRUE(int8_capacity.enable_indexer_cache_quant());
+
+#if defined(USE_NPU)
+  ModelArgs kpool_args = make_standard_args();
+  kpool_args.model_type("glm5_next")
+      .index_n_heads(32)
+      .index_head_dim(128)
+      .index_kpool(4)
+      .index_kpool_compress(true);
+  KVCacheEstimateOptions kpool_options = make_estimate_options();
+  kpool_options.block_size = 128;
+  kpool_options.dtype = torch::kBFloat16;
+
+  const KVCacheCapacity packed_capacity =
+      estimate_kv_cache_capacity(kpool_args, kpool_options);
+  EXPECT_EQ(packed_capacity.kpool_layout(), KPoolCacheLayout::PACKED);
+
+  kpool_args.index_kpool_always_select_tail(true);
+  kpool_options.num_speculative_tokens = 3;
+  const KVCacheCapacity compressed_capacity =
+      estimate_kv_cache_capacity(kpool_args, kpool_options);
+  EXPECT_EQ(compressed_capacity.kpool_layout(),
+            KPoolCacheLayout::COMPRESSED_WITH_TAIL);
+  EXPECT_EQ(compressed_capacity.kpool_tail_len(), 7);
+
+  kpool_args.model_type("deepseek_v32").index_n_heads(1).index_head_dim(16);
+  const KVCacheCapacity non_target_capacity =
+      estimate_kv_cache_capacity(kpool_args, kpool_options);
+  EXPECT_EQ(non_target_capacity.kpool_layout(), KPoolCacheLayout::PACKED);
+
+  kpool_args.model_type("glm5_next")
+      .index_n_heads(32)
+      .index_head_dim(128)
+      .index_kpool(4)
+      .index_kpool_compress(true)
+      .index_kpool_always_select_tail(true);
+  kpool_options.indexer_cache_dtype = "int8";
+
+  EXPECT_DEATH((void)estimate_kv_cache_capacity(kpool_args, kpool_options),
+               "KPool cache layouts do not support.*int8");
+#endif
 }
 
 TEST(KVCacheEstimationTest, IndexerScaleUsesLogicalCacheCapacity) {

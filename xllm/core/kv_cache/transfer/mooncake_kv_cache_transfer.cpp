@@ -213,6 +213,11 @@ void MooncakeKVCacheTransferBase::configure_cache_layout(
   fingerprint << model_args.model_type() << ":" << model_args.n_layers() << ":"
               << tensor_layout.kv_head_count << ":" << model_args.head_dim()
               << ":" << tensor_layout.index_head_count;
+  if (!is_spec_draft && uses_npu_compressed_kpool_tail(model_args)) {
+    fingerprint << "|compressed_kpool_tail:" << model_args.index_head_dim()
+                << ":" << model_args.index_kpool() << ":"
+                << block_token_capacity;
+  }
   context.fingerprint = fingerprint.str();
   context.cluster_id = cluster_id_;
   context.addr = addr_;

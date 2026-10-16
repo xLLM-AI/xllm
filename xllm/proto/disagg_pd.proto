@@ -145,6 +145,7 @@ message KVTransferGroup {
   // starts pushing at the first block that D actually needs. Zero when D
   // has no shared prefix (e.g. DECODE-side SWA prefix cache is off by role).
   uint32 remote_shared_num = 4;
+  reserved 5;  // was: repeated uint32 block_valid_token_counts
 }
 
 // Deprecated: Use DisaggGenerationsRequest instead

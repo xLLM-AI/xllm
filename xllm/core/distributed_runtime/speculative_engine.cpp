@@ -88,6 +88,12 @@ bool SpeculativeEngineBase<TargetEngine>::init(MasterStatus master_status) {
 }
 
 template <typename TargetEngine>
+runtime::DecodeGraphWarmupConfig
+SpeculativeEngineBase<TargetEngine>::decode_graph_warmup_config() const {
+  return engine_->decode_graph_warmup_config();
+}
+
+template <typename TargetEngine>
 bool SpeculativeEngineBase<TargetEngine>::init(
     MasterStatus master_status,
     const LLMEngine::ModelInitCallback& prepare_model,
