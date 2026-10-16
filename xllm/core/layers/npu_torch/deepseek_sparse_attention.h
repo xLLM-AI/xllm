@@ -52,6 +52,13 @@ inline int64_t deepseek_v4_ori_window_left(int64_t window_size,
   return std::max<int64_t>(window_size - 1, 0);
 }
 
+inline bool deepseek_v4_use_native_sas(int64_t dspark_block_size,
+                                       bool dspark_use_native_sas,
+                                       bool use_prefill_attention) {
+  return dspark_use_native_sas && dspark_block_size > 0 &&
+         !use_prefill_attention;
+}
+
 torch::Tensor build_dspark_swa_indices(const torch::Tensor& block_table,
                                        const torch::Tensor& query_cu_seq_lens,
                                        const torch::Tensor& seq_lens,

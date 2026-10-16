@@ -529,12 +529,39 @@ torch::Tensor build_dspark_swa_indices(const torch::Tensor& block_table,
       index_width, torch::TensorOptions().dtype(torch::kLong).device(device));
   torch::Tensor valid = columns.unsqueeze(0) < visible_lens.unsqueeze(1);
   torch::Tensor positions = start_pos.unsqueeze(1) + columns.unsqueeze(0);
-  torch::Tensor block_columns = torch::floor_divide(positions, cache_block_size)
-                                    .remainder(block_table.size(1));
-  torch::Tensor block_ids = block_table.gather(/*dim=*/1, block_columns);
+  torch::Tensor logical_block_columns =
+      torch::floor_divide(positions, cache_block_size);
+
+  // DSAMetadataBuilder expands an SWA ring into logical block-table columns
+  // and right-aligns the retained physical blocks. Positions just before the
+  // retained range still wrap into those blocks, so taking modulo by the
+  // expanded table width would incorrectly select its -1 padding.
+  torch::Tensor valid_block_counts =
+      block_table.ge(0).sum(/*dim=*/1).to(torch::kLong);
+  torch::Tensor safe_block_counts = valid_block_counts.clamp_min(1);
+  torch::Tensor logical_block_counts =
+      torch::floor_divide(kv_lens + cache_block_size - 1, cache_block_size);
+  torch::Tensor first_retained_columns =
+      (logical_block_counts - valid_block_counts).clamp_min(0);
+  torch::Tensor expanded_block_columns =
+      first_retained_columns.unsqueeze(1) +
+      (logical_block_columns - first_retained_columns.unsqueeze(1))
+          .remainder(safe_block_counts.unsqueeze(1));
+  torch::Tensor raw_block_columns =
+      logical_block_columns.remainder(safe_block_counts.unsqueeze(1));
+  torch::Tensor uses_expanded_layout =
+      logical_block_counts.le(block_table.size(1));
+  torch::Tensor block_columns =
+      torch::where(uses_expanded_layout.unsqueeze(1),
+                   expanded_block_columns,
+                   raw_block_columns)
+          .clamp(/*min=*/0, /*max=*/block_table.size(1) - 1);
+  torch::Tensor block_ids =
+      block_table.to(torch::kLong).gather(/*dim=*/1, block_columns);
   torch::Tensor slot_ids =
       block_ids * cache_block_size + positions.remainder(cache_block_size);
-  slot_ids = torch::where(valid, slot_ids, torch::full_like(slot_ids, -1));
+  slot_ids = torch::where(
+      valid & block_ids.ge(0), slot_ids, torch::full_like(slot_ids, -1));
   return torch::repeat_interleave(slot_ids, q_lens, /*dim=*/0)
       .to(torch::kInt32)
       .unsqueeze(1);
@@ -976,16 +1003,17 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
                    : as_optional(attn_metadata.actual_seq_lengths_query);
   }
 
+  const bool use_native_sas = deepseek_v4_use_native_sas(
+      dspark_block_size_, dspark_use_native_sas_, use_prefill_attn);
   std::optional<torch::Tensor> ori_sparse_indices = std::nullopt;
-  if (dspark_use_native_sas_ && dspark_block_size_ > 0 &&
-      compress_ratio_i == 1) {
+  if (use_native_sas && compress_ratio_i == 1) {
     CHECK(attn_metadata.explicit_swa_indices.defined())
         << "Native DeepSeek-V4 DSpark requires precomputed SWA indices.";
     ori_sparse_indices = as_optional(attn_metadata.explicit_swa_indices);
   }
 
   const int64_t ori_win_left = deepseek_v4_ori_window_left(
-      window_size_, dspark_block_size_, dspark_use_native_sas_);
+      window_size_, dspark_block_size_, use_native_sas);
   CHECK_EQ(attn_metadata.sparse_metadata_ori_win_left, ori_win_left)
       << "DSAttention sparse metadata belongs to incompatible model geometry; "
       << "rebuild attention metadata at the target/draft boundary.";

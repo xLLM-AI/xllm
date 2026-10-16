@@ -180,6 +180,7 @@ inline void deepseek_v4_collect_cpu_metadata_tensors(
   deepseek_v4_add_packed_tensor(dsa.input_positions, runtime_device, specs);
   deepseek_v4_add_packed_tensor(dsa.c4_pad_positions, runtime_device, specs);
   deepseek_v4_add_packed_tensor(dsa.c128_pad_positions, runtime_device, specs);
+  deepseek_v4_add_packed_tensor(dsa.explicit_swa_indices, runtime_device, specs);
 
   for (auto& layer_block_tables : dsa.block_tables) {
     for (auto& block_table : layer_block_tables) {
@@ -1695,11 +1696,6 @@ class DeepseekV4ModelImpl
       return;
     }
 
-    // Native DSpark's explicit SWA indices are request-level metadata. All
-    // draft layers share the same SWA manager, so build them once per model
-    // forward instead of once per decoder layer.
-    build_dspark_swa_metadata(dsa);
-
     const int64_t batch_size =
         std::max<int64_t>(dsa.actual_seq_lengths_kv.size(0), 1);
     const int64_t max_seqlen_q =
@@ -1708,20 +1704,29 @@ class DeepseekV4ModelImpl
     const int64_t max_seqlen_kv = std::max<int64_t>(
         params.meta.kv_max_seq_len,
         vector_max_or_zero(params.attention.host.kv_seq_lens));
+    // The batch type, not q_max_seq_len, is the authoritative metadata
+    // selector: native DSpark decode may use a gamma-wide query, while the
+    // compatibility fallback uses q_len=1 with CHUNKED_PREFILL semantics.
+    const bool is_prefill = params.meta.batch_forward_type.no_decode();
+    const bool use_native_sas =
+        layer::deepseek_v4_use_native_sas(model_args_.dspark_block_size(),
+                                          model_args_.dspark_use_native_sas(),
+                                          is_prefill);
+    // Explicit SWA indices use decode geometry and address the persistent ring
+    // buffer. Prefill needs per-query windows, and full prefill does not
+    // populate that buffer until after attention. All draft layers share the
+    // same SWA manager, so build the indices once for decode only.
+    if (use_native_sas) {
+      build_dspark_swa_metadata(dsa);
+    }
+
     // Keep the opaque tiling metadata identical to the arguments passed by
-    // DSAttentionImpl::forward. Native DSpark SAS expands the window and uses
-    // explicit indices; the compatibility fallback keeps the DSV4 window and
-    // expresses block non-causality through q_len=1 rows.
-    const int64_t ori_win_left =
-        layer::deepseek_v4_ori_window_left(window_size_,
-                                           model_args_.dspark_block_size(),
-                                           model_args_.dspark_use_native_sas());
+    // DSAttentionImpl::forward. Native DSpark decode expands the window; the
+    // prefill and compatibility paths keep the DSV4 window.
+    const int64_t ori_win_left = layer::deepseek_v4_ori_window_left(
+        window_size_, model_args_.dspark_block_size(), use_native_sas);
     dsa.sparse_metadata_ori_win_left = ori_win_left;
     const int64_t sparse_topk = std::max<int64_t>(index_topk_, 1);
-    // The compatibility fallback uses q_len=1 with CHUNKED_PREFILL semantics,
-    // whereas native DSpark uses a gamma-wide DECODE query. The batch type,
-    // not q_max_seq_len, is therefore the authoritative metadata selector.
-    const bool is_prefill = params.meta.batch_forward_type.no_decode();
 
     const char* layout_kv = "PA_ND";
     auto empty_int32_opt = as_empty_int32_tensor(dsa.actual_seq_lengths_query);

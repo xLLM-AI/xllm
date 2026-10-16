@@ -115,6 +115,8 @@ def _create_attention_backend(
             rope_head_dim=int(config.get("qk_rope_head_dim", 64)),
             device=device,
             dtype=dtype,
+            dspark_block_size=int(config.get("dspark_block_size", 0)),
+            dspark_use_native_sas=bool(config.get("dspark_use_native_sas", False)),
         )
     if current_platform.is_npu():
         dcp_group = distributed.dcp_group(device)
