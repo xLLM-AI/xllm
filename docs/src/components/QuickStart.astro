@@ -1,0 +1,342 @@
+---
+// Copyright 2026 The xLLM Authors. Licensed under the Apache License, Version 2.0.
+import { Code } from '@astrojs/starlight/components';
+
+interface Props {
+	locale: 'en' | 'zh';
+}
+
+const { locale } = Astro.props;
+const text = locale === 'zh' ? {
+	preferences: '安装选项', hardware: '硬件平台', cpu: 'CPU 架构', build: '镜像类型',
+	platforms: { a2: '昇腾 A2', a3: '昇腾 A3', cuda: 'NVIDIA GPU', mlu: '寒武纪 MLU', dcu: '海光 DCU', maca: '沐曦 MACA', musa: '摩尔线程 MUSA' },
+	commandTitle: '启动容器',
+	releaseBefore: '此镜像已包含编译好的 xllm 二进制文件。可跳过编译步骤，在容器内',
+	releaseLink: '启动 xLLM', releaseAfter: '。',
+	devBefore: '此镜像提供开发环境。请在容器内继续', devLink: '编译 xllm', devAfter: '。',
+	buildAnchor: '#编译xllm', guide: '配置指南', ready: 'Docker 命令已就绪', unavailable: '未列出公开镜像',
+	mluUnavailable: '暂不提供公开的寒武纪 MLU 镜像。请向厂商获取兼容的开发镜像，并按照硬件配置指南操作。',
+	noImage: (hardware: string, cpu: string, build: string) => `此处未列出适用于 ${hardware} / ${cpu} 的 ${build} 镜像。请选择其他 CPU 架构或镜像类型，或查看硬件配置指南。`,
+} : {
+	preferences: 'Installation preferences', hardware: 'Hardware', cpu: 'CPU', build: 'Build',
+	platforms: { a2: 'Ascend A2', a3: 'Ascend A3', cuda: 'NVIDIA GPU', mlu: 'Cambricon MLU', dcu: 'Hygon DCU', maca: 'MetaX MACA', musa: 'Mthreads MUSA' },
+	commandTitle: 'Start container',
+	releaseBefore: 'This image includes a pre-built xllm binary. Skip the build step and ',
+	releaseLink: 'launch xLLM', releaseAfter: ' inside the container.',
+	devBefore: 'This is a development environment. Continue with ', devLink: 'Build xllm', devAfter: ' inside the container.',
+	buildAnchor: '#build-xllm', guide: 'setup guide', ready: 'Docker commands ready', unavailable: 'No public image listed',
+	mluUnavailable: 'A public Cambricon MLU image is not provided. Obtain a compatible development image from your vendor and follow the hardware guide.',
+	noImage: (hardware: string, cpu: string, build: string) => `No ${build.toLowerCase()} image is listed here for ${hardware} / ${cpu}. Choose another CPU or build, or consult the hardware guide.`,
+};
+
+interface Hardware {
+	id: string;
+	label: string;
+	guide: string;
+	container: string;
+	options: string[];
+	images: Partial<Record<'x86' | 'arm', { release?: string; dev: string }>>;
+}
+
+const quay = 'quay.io/jd_xllm/xllm-ai:';
+const npuOptions = [
+	'--ipc=host', '-u 0', '--privileged', '--network=host',
+	'--device=/dev/davinci0', '--device=/dev/davinci_manager',
+	'--device=/dev/devmm_svm', '--device=/dev/hisi_hdc',
+	'-v /usr/local/Ascend/driver:/usr/local/Ascend/driver',
+	'-v /usr/local/Ascend/add-ons/:/usr/local/Ascend/add-ons/',
+	'-v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi',
+	'-v /usr/local/sbin/:/usr/local/sbin/',
+	'-v /var/log/npu/conf/slog/slog.conf:/var/log/npu/conf/slog/slog.conf',
+	'-v /var/log/npu/slog/:/var/log/npu/slog',
+	'-v /var/log/npu/profiling/:/var/log/npu/profiling',
+	'-v /var/log/npu/dump/:/var/log/npu/dump',
+];
+const hardware: Hardware[] = [
+	{
+		id: 'a2', label: text.platforms.a2, guide: 'ascend_npu', container: 'npu', options: npuOptions,
+		images: {
+			x86: {
+				release: `${quay}xllm-0.10.0-release-hb-rc2-x86`,
+				dev: `${quay}xllm-dev-a2-x86-cann9-20260911`,
+			},
+			arm: {
+				release: `${quay}xllm-0.10.0-release-hb-rc2-arm`,
+				dev: `${quay}xllm-dev-a2-arm-cann9-20260911`,
+			},
+		},
+	},
+	{
+		id: 'a3', label: text.platforms.a3, guide: 'ascend_npu', container: 'npu', options: npuOptions,
+		images: {
+			arm: {
+				release: `${quay}xllm-0.10.0-release-hc-rc2-arm`,
+				dev: `${quay}xllm-dev-a3-arm-cann9-20260911`,
+			},
+		},
+	},
+	{
+		id: 'cuda', label: text.platforms.cuda, guide: 'nvidia_gpu', container: 'cuda',
+		options: ['--gpus all', '--privileged', '--shm-size=128g', '--ipc=host', '--network=host', '--pid=host'],
+		images: {
+			x86: {
+				release: `${quay}xllm-0.8.0-release-cuda-x86`,
+				dev: `${quay}xllm-dev-cuda-x86`,
+			},
+		},
+	},
+	{
+		id: 'mlu', label: text.platforms.mlu, guide: 'cambricon_mlu', container: 'mlu',
+		options: [], images: {},
+	},
+	{
+		id: 'dcu', label: text.platforms.dcu, guide: 'dcu', container: 'dcu',
+		options: [
+			'--ipc=host', '-u 0', '--privileged', '--network=host', '--shm-size=256g',
+			'--device=/dev/kfd', '--device=/dev/dri', '--device=/dev/mkfd',
+			'--security-opt seccomp=unconfined', '--group-add video', '-v /opt/hyhal:/opt/hyhal',
+		],
+		images: { x86: { dev: 'harbor.sourcefind.cn:5443/dcu/admin/base/custom:xllm-dev-dcu-x86-20260617' } },
+	},
+	{
+		id: 'maca', label: text.platforms.maca, guide: 'metax_maca', container: 'maca',
+		options: [
+			'--ipc=host', '-u 0', '--network=host', '--privileged', '--shm-size=100g',
+			'--device=/dev/mxcd', '--device=/dev/dri', '--device=/dev/infiniband',
+			'--security-opt seccomp=unconfined', '--security-opt apparmor=unconfined',
+			'--group-add video', '--ulimit memlock=-1', '-v /opt/maca:/opt/maca',
+		],
+		images: { x86: { dev: 'pub-registry1.metax-tech.com/dev-m01421/xllm-maca3.7.1.9:v1' } },
+	},
+	{
+		id: 'musa', label: text.platforms.musa, guide: 'musa', container: 'musa',
+		options: [
+			'--ipc=host', '--network=host', '--privileged', '--shm-size=128g',
+			'--device=/dev/mtgpu0', '--device=/dev/dri', '--group-add video', '--ulimit memlock=-1',
+		],
+		images: { x86: { dev: 'registry.mthreads.com/presale/devtech/xllm:0710' } },
+	},
+];
+const cpus = [{ id: 'x86', label: 'x86_64' }, { id: 'arm', label: 'ARM64' }] as const;
+const builds = [{ id: 'release', label: 'Release' }, { id: 'dev', label: 'Dev' }] as const;
+const groups = [
+	{ name: 'hardware', label: text.hardware, options: hardware, selected: 'a2' },
+	{ name: 'cpu', label: text.cpu, options: cpus, selected: 'x86' },
+	{ name: 'build', label: text.build, options: builds, selected: 'release' },
+];
+const combinations = hardware.flatMap((platform) => cpus.flatMap((cpu) => builds.map((build) => {
+	const image = platform.images[cpu.id]?.[build.id];
+	const command = image ? [
+		'docker run -it', `--name xllm-${platform.container}`, ...platform.options,
+		'-v "$HOME:$HOME"', '-w "$HOME"', image, '/bin/bash',
+	].join(' \\\n  ') : '';
+	return { platform, cpu, build, image, command, key: `${platform.id}-${cpu.id}-${build.id}` };
+})));
+---
+
+<xllm-quick-start data-ready={text.ready} data-unavailable={text.unavailable}>
+	<slot />
+	<div class="quick-start not-content" data-quick-start-content hidden>
+		<form aria-label={text.preferences}>
+			{groups.map((group) => (
+				<fieldset>
+					<legend>{group.label}</legend>
+					<div class="quick-start-options" data-group={group.name}>
+						{group.options.map((option) => (
+							<label>
+								<input type="radio" name={group.name} value={option.id} checked={option.id === group.selected} />
+								<span>{option.label}</span>
+							</label>
+						))}
+					</div>
+				</fieldset>
+			))}
+		</form>
+		<div class="quick-start-summary" role="status" aria-live="polite" aria-atomic="true"></div>
+		{combinations.map(({ platform, cpu, build, image, command, key }) => (
+			<div data-installation={key} hidden>
+				{image ? (
+					<>
+						<Code code={command} lang="bash" title={text.commandTitle} locale={locale === 'zh' ? 'zh-CN' : 'en'} />
+						<p class="quick-start-next">
+							{build.id === 'release' ? (
+								<>{text.releaseBefore}<a href={`/${locale}/getting_started/launch_xllm/`}>{text.releaseLink}</a>{text.releaseAfter}</>
+							) : (
+								<>{text.devBefore}<a href={text.buildAnchor}>{text.devLink}</a>{text.devAfter}</>
+							)}
+						</p>
+					</>
+				) : (
+					<p class="quick-start-unavailable">
+						{platform.id === 'mlu'
+							? text.mluUnavailable
+							: text.noImage(platform.label, cpu.label, build.label)}
+					</p>
+				)}
+				<p class="quick-start-guide"><a href={`/${locale}/hardware/${platform.guide}/`}>{platform.label} {text.guide} →</a></p>
+			</div>
+		))}
+	</div>
+</xllm-quick-start>
+
+<script>
+	class QuickStart extends HTMLElement {
+		connectedCallback() {
+			if (this.dataset.initialized) {
+				return;
+			}
+			const target = this.querySelector('[data-quick-start]');
+			const content = this.querySelector<HTMLElement>('[data-quick-start-content]');
+			if (!target || !content) {
+				return;
+			}
+			this.dataset.initialized = 'true';
+			target.replaceChildren(content);
+			content.hidden = false;
+			const form = target.querySelector('form')!;
+			const summary = target.querySelector('.quick-start-summary')!;
+			const panels = target.querySelectorAll<HTMLElement>('[data-installation]');
+			const update = () => {
+				const selection = new FormData(form);
+				const key = ['hardware', 'cpu', 'build'].map((name) => selection.get(name)).join('-');
+				for (const panel of panels) {
+					panel.hidden = panel.dataset.installation !== key;
+				}
+				const labels = Array.from(form.querySelectorAll<HTMLInputElement>('input:checked'))
+					.map((input) => input.nextElementSibling!.textContent);
+				const active = target.querySelector<HTMLElement>('[data-installation]:not([hidden])')!;
+				summary.textContent = `${labels.join(' / ')} — ${active.querySelector('pre') ? this.dataset.ready : this.dataset.unavailable}`;
+			};
+			form.addEventListener('submit', (event) => event.preventDefault());
+			form.addEventListener('change', update);
+			update();
+		}
+	}
+	if (!customElements.get('xllm-quick-start')) {
+		customElements.define('xllm-quick-start', QuickStart);
+	}
+</script>
+
+<style is:global>
+	xllm-quick-start {
+		display: block;
+	}
+	.quick-start {
+		container: quick-start / inline-size;
+		margin-block: 1.5rem;
+		padding: 1.5rem;
+		border: 1px solid var(--sl-color-gray-5);
+		border-radius: .8rem;
+		background: var(--sl-color-bg);
+	}
+	.quick-start [hidden] {
+		display: none !important;
+	}
+	.quick-start form {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 1.25rem;
+	}
+	.quick-start fieldset:first-child {
+		grid-column: 1 / -1;
+	}
+	.quick-start fieldset {
+		min-width: 0;
+		margin: 0;
+		padding: 0;
+		border: 0;
+	}
+	.quick-start legend {
+		margin-bottom: .65rem;
+		padding: 0;
+		color: var(--sl-color-white);
+		font-size: .9rem;
+		font-weight: 600;
+	}
+	.quick-start-options {
+		display: flex;
+		flex-wrap: wrap;
+		gap: .5rem;
+	}
+	.quick-start-options label {
+		position: relative;
+		cursor: pointer;
+	}
+	.quick-start-options[data-group='hardware'] label {
+		flex: 1 1 calc(25% - .5rem);
+	}
+	.quick-start-options[data-group='hardware'] span {
+		text-align: center;
+		white-space: nowrap;
+	}
+	.quick-start-options input {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		opacity: 0;
+	}
+	.quick-start-options span {
+		display: block;
+		padding: .5rem .85rem;
+		border: 1px solid var(--sl-color-gray-5);
+		border-radius: .4rem;
+		color: var(--sl-color-gray-2);
+		font-size: .875rem;
+		line-height: 1.5;
+	}
+	.quick-start-options label:hover span {
+		border-color: var(--sl-color-gray-3);
+	}
+	.quick-start-options input:checked + span {
+		border-color: var(--sl-color-text-accent);
+		background: var(--sl-color-accent-low);
+		color: var(--sl-color-white);
+		font-weight: 600;
+	}
+	.quick-start-options input:focus-visible + span {
+		outline: 2px solid var(--sl-color-text-accent);
+		outline-offset: 3px;
+	}
+	.quick-start-summary {
+		margin-block: 1.5rem 1rem;
+		padding-top: 1.25rem;
+		border-top: 1px solid var(--sl-color-gray-5);
+		color: var(--sl-color-gray-2);
+		font-size: .85rem;
+	}
+	.quick-start a {
+		color: var(--sl-color-text-accent);
+		text-underline-offset: .2em;
+	}
+	.quick-start-next,
+	.quick-start-unavailable,
+	.quick-start-guide {
+		margin: 1rem 0 0;
+		font-size: .9rem;
+		line-height: 1.7;
+	}
+	.quick-start-unavailable {
+		padding: 1rem;
+		border: 1px dashed var(--sl-color-gray-4);
+		border-radius: .4rem;
+		background: var(--sl-color-gray-6);
+	}
+	@container quick-start (max-width: 38rem) {
+		.quick-start-options[data-group='hardware'] label {
+			flex-basis: calc(50% - .5rem);
+		}
+	}
+	@container quick-start (max-width: 24rem) {
+		.quick-start form {
+			grid-template-columns: minmax(0, 1fr);
+		}
+	}
+	@media (max-width: 40rem) {
+		.quick-start {
+			padding: 1rem;
+		}
+		.quick-start-options span {
+			padding-inline: .65rem;
+		}
+	}
+</style>

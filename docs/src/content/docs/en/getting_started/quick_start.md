@@ -5,175 +5,34 @@ sidebar:
 ---
 ## Environment Setup
 
-All images are stored [here](https://quay.io/repository/jd_xllm/xllm-ai?tab=tags). The docker startup command below uses the dev image as an example.
+Choose your **Hardware**, host **CPU** architecture, and **Release** or **Dev** image to get the Docker commands for your environment.
 
-### NPU
+<div data-quick-start>
 
-Below are our pre-built dev image.
-```bash
-# A2 x86
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260911
-# A2 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-cann9-20260911
-# A3 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260911
-```
+Enable JavaScript to use the installation selector, or follow the hardware-specific instructions below.
 
-Container startup command:
-```bash
-docker run -it \
---ipc=host \
--u 0 \
---name xllm-npu \
---privileged \
---network=host \
---device=/dev/davinci0 \
---device=/dev/davinci_manager \
---device=/dev/devmm_svm \
---device=/dev/hisi_hdc \
--v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
--v /usr/local/Ascend/add-ons/:/usr/local/Ascend/add-ons/ \
--v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
--v /usr/local/sbin/:/usr/local/sbin/ \
--v /var/log/npu/conf/slog/slog.conf:/var/log/npu/conf/slog/slog.conf \
--v /var/log/npu/slog/:/var/log/npu/slog \
--v /var/log/npu/profiling/:/var/log/npu/profiling \
--v /var/log/npu/dump/:/var/log/npu/dump \
--v $HOME:$HOME \
--w $HOME \
-<docker_image_name> \
-/bin/bash
-```
+</div>
 
-### NVIDIA GPU
+- **Release** images include a pre-built `xllm` binary, ready to run without compiling.
+- **Dev** images include the development environment; build xLLM from source inside the container.
+- **CPU** selects the host architecture (`x86_64` or `ARM64`), not a CPU-only inference backend. Run `uname -m` on your Linux host if you are unsure.
 
-We provide a [Dockerfile](https://github.com/xLLM-AI/xllm/blob/main/docker/Dockerfile.cuda) for NVIDIA GPU usage, which can be used to build custom image. Of course, you can also use dev image we built based on the default Dockerfile:
-```bash
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-cuda-x86
-```
+Install Docker and the appropriate accelerator drivers on the host first. NVIDIA GPU containers also require the NVIDIA Container Toolkit. The commands above mount your home directory and grant access to accelerator devices; use them only with trusted images on a suitable development host.
 
-Container startup command:
-```bash
-sudo docker run -it \
---privileged \
---shm-size '128gb' \
---ipc=host \
---net=host \
---pid=host \
---name=xllm-cuda \
--v $HOME:$HOME \
--w $HOME \
-<docker_image_name> \
-/bin/bash
-```
+Browse the [Ascend and NVIDIA image tags](https://quay.io/repository/jd_xllm/xllm-ai?tab=tags), or see the full setup instructions for your hardware:
 
-### MLU
+- [Ascend NPU (A2 / A3)](/en/hardware/ascend_npu/)
+- [NVIDIA GPU](/en/hardware/nvidia_gpu/)
+- [Cambricon MLU](/en/hardware/cambricon_mlu/)
+- [Hygon DCU](/en/hardware/dcu/)
+- [MetaX MACA](/en/hardware/metax_maca/)
+- [Mthreads MUSA](/en/hardware/musa/)
 
-We cannot provide MLU image. If you already have the dev image, you can start the container with the following command:
-```bash
-sudo docker run -it \
---privileged \
---shm-size '128gb' \
---ipc=host \
---net=host \
---pid=host \
---name xllm-mlu \
--v $HOME:$HOME \
--w $HOME \
-<docker_image_name> \
-/bin/bash
-```
-
-### Hygon DCU
-
-Below are our pre-built dev image.
-```bash
-docker pull harbor.sourcefind.cn:5443/dcu/admin/base/custom:xllm-dev-dcu-x86-20260617
-```
-
-Container startup command:
-```bash
-docker run -it \
---ipc=host \
--u 0 \
---name xllm-dcu \
---privileged \
---network=host \
---shm-size 256g \
---device=/dev/kfd \
---device=/dev/dri \
---device=/dev/mkfd \
---security-opt seccomp=unconfined \
---group-add video \
--v /opt/hyhal:/opt/hyhal \
--v $HOME:$HOME \
--w $HOME \
-<docker_image_name> \
-/bin/bash
-```
-
-### MetaX MACA
-
-Below are our pre-built dev image.
-```bash
-docker pull pub-registry1.metax-tech.com/dev-m01421/xllm-maca3.7.1.9:v1
-```
-
-Container startup command:
-```bash
-docker run -it \
---ipc=host \
--u 0 \
---name xllm-maca \
---network=host \
---privileged=true \
---shm-size 100gb \
---device=/dev/mxcd \
---device=/dev/dri \
---device=/dev/infiniband \
---security-opt seccomp=unconfined \
---security-opt apparmor=unconfined \
---group-add video \
---ulimit memlock=-1 \
--v /opt/maca:/opt/maca \
--v $HOME:$HOME \
--w $HOME \
-<docker_image_name> \
-/bin/bash
-```
-
-### Mthreads MUSA
-
-Image pull:
-
-```bash
-docker pull registry.mthreads.com/presale/devtech/xllm:0710
-```
-
-Container startup:
-
-```bash
-docker run -it \
-  --ipc=host \
-  --network=host \
-  --privileged \
-  --shm-size=128g \
-  --name xllm-musa \
-  --device=/dev/mtgpu0 \
-  --device=/dev/dri \
-  --group-add video \
-  --ulimit memlock=-1 \
-  -v $HOME:$HOME \
-  -w $HOME \
-  registry.mthreads.com/presale/devtech/xllm:0710 \
-  /bin/bash
-```
-
-See [Mthreads MUSA](/en/hardware/musa/) for full details.
+Image availability and release versions vary by platform. Combinations without a listed image show a notice instead of a Docker command. Cambricon MLU requires a vendor-provided image.
 
 ## Build xllm
 
-If you download a release image, i.e., an image with a version number in the tag, you can skip this step because the release image comes with a pre-compiled xllm binary, and call `xllm` directly.
+Skip this step when using a **Release** image: it includes a pre-built binary that you can invoke with `xllm`. For a **Dev** image, run the following commands **inside the container**.
 
 Download xllm and dependencies:
 ```bash
@@ -201,4 +60,3 @@ python setup.py install
 
 ## Launch xllm
 Please refer to [How to Launch xllm](/en/getting_started/launch_xllm/).
-

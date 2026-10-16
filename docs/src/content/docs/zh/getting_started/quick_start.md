@@ -5,199 +5,58 @@ sidebar:
 ---
 ## 环境设置
 
-所有的镜像都存放在[这里](https://quay.io/repository/jd_xllm/xllm-ai?tab=tags)，下面的docker启动命令以开发镜像为例。
+选择**硬件平台**、主机 **CPU 架构**以及 **Release** 或 **Dev** 镜像，获取适用于当前环境的 Docker 命令。
 
-### NPU
+<div data-quick-start>
 
-下面是我们构建好的开发镜像。
-```bash
-# A2 x86
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-x86-cann9-20260911
-# A2 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a2-arm-cann9-20260911
-# A3 arm
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-a3-arm-cann9-20260911
-```
+请启用 JavaScript 以使用安装选择器，或按照下方对应硬件的配置指南操作。
 
-容器启动命令如下：
-```bash
-docker run -it \
---ipc=host \
--u 0 \
---name xllm-npu \
---privileged \
---network=host \
---device=/dev/davinci0 \
---device=/dev/davinci_manager \
---device=/dev/devmm_svm \
---device=/dev/hisi_hdc \
--v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
--v /usr/local/Ascend/add-ons/:/usr/local/Ascend/add-ons/ \
--v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
--v /usr/local/sbin/:/usr/local/sbin/ \
--v /var/log/npu/conf/slog/slog.conf:/var/log/npu/conf/slog/slog.conf \
--v /var/log/npu/slog/:/var/log/npu/slog \
--v /var/log/npu/profiling/:/var/log/npu/profiling \
--v /var/log/npu/dump/:/var/log/npu/dump \
--v $HOME:$HOME \
--w $HOME \
-<docker_image_name> \
-/bin/bash
-```
+</div>
 
-### NVIDIA GPU
+- **Release** 镜像包含编译好的 `xllm` 二进制文件，无需编译即可运行。
+- **Dev** 镜像提供开发环境，需要在容器内从源码编译 xLLM。
+- **CPU 架构**指主机架构（`x86_64` 或 `ARM64`），并非纯 CPU 推理后端。不确定时，可在 Linux 主机上运行 `uname -m` 查看。
 
-我们提供了NVIDIA GPU使用的[Dockerfile](https://github.com/xLLM-AI/xllm/blob/main/docker/Dockerfile.cuda)，可以构建自定义镜像，当然也可以使用我们根据默认Dockerfile构建的开发镜像：
-```bash
-docker pull quay.io/jd_xllm/xllm-ai:xllm-dev-cuda-x86
-```
+请先在主机上安装 Docker 和对应的加速卡驱动。NVIDIA GPU 容器还需要 NVIDIA Container Toolkit。上述命令会挂载主目录并授予容器访问加速卡设备的权限，请仅在合适的开发主机上使用可信镜像。
 
-容器启动命令如下：
-```bash
-sudo docker run -it \
---privileged \
---shm-size '128gb' \
---ipc=host \
---net=host \
---pid=host \
---name=xllm-cuda \
--v $HOME:$HOME \
--w $HOME \
-<docker_image_name> \
-/bin/bash
-```
+可浏览 [昇腾和 NVIDIA 镜像标签](https://quay.io/repository/jd_xllm/xllm-ai?tab=tags)，或查看对应硬件的完整配置指南：
 
-### MLU
+- [昇腾 NPU（A2 / A3）](/zh/hardware/ascend_npu/)
+- [NVIDIA GPU](/zh/hardware/nvidia_gpu/)
+- [寒武纪 MLU](/zh/hardware/cambricon_mlu/)
+- [海光 DCU](/zh/hardware/dcu/)
+- [沐曦 MACA](/zh/hardware/metax_maca/)
+- [摩尔线程 MUSA](/zh/hardware/musa/)
 
-我们无法提供MLU镜像，如果您已经拥有了相应的开发镜像，那么可以根据下面的命令启动容器：
-```bash
-sudo docker run -it \
---privileged \
---shm-size '128gb' \
---ipc=host \
---net=host \
---pid=host \
---name xllm-mlu \
--v $HOME:$HOME \
--w $HOME \
-<docker_image_name> \
-/bin/bash
-```
-
-### 海光 DCU
-
-下面是我们构建好的开发镜像。
-```bash
-docker pull harbor.sourcefind.cn:5443/dcu/admin/base/custom:xllm-dev-dcu-x86-20260617
-```
-
-容器启动命令如下：
-```bash
-docker run -it \
---ipc=host \
--u 0 \
---name xllm-dcu \
---privileged \
---network=host \
---shm-size 256g \
---device=/dev/kfd \
---device=/dev/dri \
---device=/dev/mkfd \
---security-opt seccomp=unconfined \
---group-add video \
--v /opt/hyhal:/opt/hyhal \
--v $HOME:$HOME \
--w $HOME \
-<docker_image_name> \
-/bin/bash
-```
-
-### 沐曦 MACA
-
-下面是我们构建好的开发镜像。
-```bash
-docker pull pub-registry1.metax-tech.com/dev-m01421/xllm-maca3.7.1.9:v1
-```
-
-容器启动命令如下：
-```bash
-docker run -it \
---ipc=host \
--u 0 \
---name xllm-maca \
---network=host \
---privileged=true \
---shm-size 100gb \
---device=/dev/mxcd \
---device=/dev/dri \
---device=/dev/infiniband \
---security-opt seccomp=unconfined \
---security-opt apparmor=unconfined \
---group-add video \
---ulimit memlock=-1 \
--v /opt/maca:/opt/maca \
--v $HOME:$HOME \
--w $HOME \
-<docker_image_name> \
-/bin/bash
-```
-
-### 摩尔线程 MUSA
-
-镜像拉取命令：
-
-```bash
-docker pull registry.mthreads.com/presale/devtech/xllm:0710
-```
-
-容器启动命令：
-
-```bash
-docker run -it \
-  --ipc=host \
-  --network=host \
-  --privileged \
-  --shm-size=128g \
-  --name xllm-musa \
-  --device=/dev/mtgpu0 \
-  --device=/dev/dri \
-  --group-add video \
-  --ulimit memlock=-1 \
-  -v $HOME:$HOME \
-  -w $HOME \
-  registry.mthreads.com/presale/devtech/xllm:0710 \
-  /bin/bash
-```
-
-更多细节见 [摩尔线程 MUSA](/zh/hardware/musa/)。
+不同平台的镜像可用性和发布版本可能不同。未列出镜像的组合会显示说明，而非 Docker 命令。寒武纪 MLU 需要使用厂商提供的镜像。
 
 ## 编译xllm
 
-如果下载的是release镜像，即tag中带有版本号的镜像，可以跳过此步，因为release镜像自带编译好的xllm二进制文件，可以直接调用`xllm`。
+使用 **Release** 镜像时可跳过此步：镜像内已包含编译好的二进制文件，可以直接调用 `xllm`。使用 **Dev** 镜像时，请在**容器内**执行以下命令。
 
-下载xllm及依赖
+下载 xllm 及依赖：
 ```bash
 git clone https://github.com/xLLM-AI/xllm.git
 cd xllm
 
-# 第一次需要进行pre-commit安装
+# 第一次需要进行 pre-commit 安装
 pip install pre-commit
 pre-commit install
 
 git submodule update --init --recursive
 ```
 
-在新镜像中，第一次编译xllm耗时较长，因为需要编译vcpkg中的所有依赖，但是后续编译会很快。
+在新镜像中，第一次编译 xllm 耗时较长，因为需要编译 vcpkg 中的所有依赖，但是后续编译会很快。
 ```bash
-# 只编译cpp二进制文件
+# 只编译 cpp 二进制文件
 python setup.py build
 
-# 编译python wheel
+# 编译 python wheel
 python setup.py bdist_wheel
 
-# 编译python wheel并安装
+# 编译 python wheel 并安装
 python setup.py install
 ```
 
 ## 启动xllm
-请参考 [xllm启动方式](/zh/getting_started/launch_xllm/)。
+请参考 [xllm 启动方式](/zh/getting_started/launch_xllm/)。
