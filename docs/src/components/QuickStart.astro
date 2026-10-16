@@ -30,7 +30,7 @@ const { text, groups, combinations } = getQuickStart(locale);
 			))}
 		</form>
 		<div class="quick-start-summary" role="status" aria-live="polite" aria-atomic="true"></div>
-		{combinations.map(({ platform, cpu, build, image, command, key }) => (
+		{combinations.map(({ platform, build, image, command, notice, key }) => (
 			<div data-installation={key} hidden>
 				{image ? (
 					<>
@@ -44,11 +44,7 @@ const { text, groups, combinations } = getQuickStart(locale);
 						</p>
 					</>
 				) : (
-					<p class="quick-start-unavailable">
-						{platform.id === 'mlu'
-							? text.mluUnavailable
-							: text.noImage(platform.label, cpu.label, build.label)}
-					</p>
+					<p class="quick-start-unavailable">{notice}</p>
 				)}
 				<p class="quick-start-guide"><a href={`/${locale}/hardware/${platform.guide}/`}>{platform.label} {text.guide} →</a></p>
 			</div>
