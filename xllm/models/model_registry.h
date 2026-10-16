@@ -19,6 +19,7 @@ limitations under the License.
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
 #include "core/common/options.h"
@@ -83,6 +84,16 @@ struct ModelMeta {
   bool owns_mtp_shared_weights = false;
   bool supports_dcp = false;
 };
+
+// Model config names may be aliases, but registry lookups use one canonical
+// key across backend, args-loader, and multimodal registrations.
+inline std::string canonical_model_registration_name(
+    std::string_view model_type) {
+  if (model_type == "glm5_3_flash") {
+    return "glm5_next";
+  }
+  return std::string(model_type);
+}
 
 // Model registry is a singleton class that registers all models with the
 // ModelFactory, ModelArgParser to facilitate model loading.

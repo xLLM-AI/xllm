@@ -115,6 +115,7 @@ _EXPORTS = {
         "vision_rotary_mul",
     ),
     "sparse_attention": (
+        "POOL_KEY_INDEXER_MASK_MODE",
         "dynamic_block_quant",
         "kv_quant_sparse_flash_attention",
         "lightning_indexer",
@@ -147,6 +148,7 @@ __all__ = [
     "rms_norm_dynamic_quant",
     "l2_norm",
     "rms_norm_gated",
+    "POOL_KEY_INDEXER_MASK_MODE",
     "rms_norm_sigmoid_gated",
     "fused_eh_norm",
     "silu_and_mul",

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, Protocol, TypeGuard
 
 import torch
@@ -73,20 +73,7 @@ class LayerCache:
 
 
 #: Field order of the tuple form, which is what the C++ executor hands over.
-_LAYER_CACHE_SLOTS = (
-    "key",
-    "value",
-    "index",
-    "conv",
-    "ssm",
-    "swa",
-    "compress_kv_state",
-    "compress_score_state",
-    "compress_index_kv_state",
-    "compress_index_score_state",
-    "indexer_scale",
-    "kpool_tail",
-)
+_LAYER_CACHE_SLOTS = tuple(field.name for field in fields(LayerCache))
 
 LayerCacheInput = LayerCache | tuple[torch.Tensor | None, ...]
 
@@ -114,6 +101,7 @@ class AttentionMetadata(Protocol):
     paged_kv_last_page_len: torch.Tensor
     qo_indptr: torch.Tensor | None
     q_cu_seq_lens: torch.Tensor | None
+    q_cu_seq_lens_host_values: list[int] | None
     kv_cu_seq_lens: torch.Tensor | None
     kv_seq_lens_host: torch.Tensor | None
     kv_seq_lens_host_values: list[int] | None
@@ -210,13 +198,9 @@ class MlaIndexContext:
     ]
     # Optional model-side CP plan for packed local query segments.
     cp_context: CpContext | None = None
-    # Request-owned raw K/gate rows used to complete pools across forwards.
-    kpool_tail: torch.Tensor | None = None
-    kpool_tail_read_indices: torch.Tensor | None = None
-    kpool_tail_write_indices: torch.Tensor | None = None
-    kpool_query_lens: Sequence[int] = ()
-    kpool_query_lens_device: torch.Tensor | None = None
-    kpool_cache_triton_compatible: bool = False
+    # Host-planned KV lengths, when the model needs a shape bound without
+    # synchronizing the device sequence-length tensor.
+    actual_seq_kv_host: Sequence[int] | None = None
 
 
 @dataclass(frozen=True)

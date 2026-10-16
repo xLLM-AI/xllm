@@ -3601,11 +3601,16 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
       ::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel();
   CHECK_EQ(last_states.size(), static_cast<size_t>(num_sequences))
       << "draft extend state count mismatch";
-  const bool requires_uniform_rows =
-      Platform::is_npu() && is_glm5_next_target_model_type(
-                                impl_->context_.get_model_args().model_type());
-  const bool use_uniform_two_rows = should_use_uniform_two_draft_rows(
-      last_states, force_two_rows, dp_enabled, requires_uniform_rows);
+  const bool use_uniform_two_rows =
+      force_two_rows || dp_enabled ||
+      (Platform::is_npu() &&
+       mtp_async::requires_uniform_draft_rows(
+           impl_->context_.get_model_args().model_type()) &&
+       std::any_of(last_states.begin(),
+                   last_states.end(),
+                   [](const EmbeddingCache::DecodeState& state) {
+                     return state.all_draft_accepted;
+                   }));
 
   const int32_t logical_block_size = this->logical_block_size();
   specBuilder::DecodeRowContext row_ctx =
@@ -3831,26 +3836,10 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
 }
 
 template <typename TargetInput>
-bool MTPWorkerImpl<TargetInput>::should_use_uniform_two_draft_rows(
-    const std::vector<EmbeddingCache::DecodeState>& last_states,
-    bool force_two_rows,
-    bool dp_enabled,
-    bool requires_uniform_rows) {
-  if (force_two_rows || dp_enabled) {
-    return true;
-  }
-  return requires_uniform_rows &&
-         std::any_of(last_states.begin(),
-                     last_states.end(),
-                     [](const EmbeddingCache::DecodeState& state) {
-                       return state.all_draft_accepted;
-                     });
-}
-
-template <typename TargetInput>
-void MTPWorkerImpl<TargetInput>::prepare_draft_inputs(const TargetInput& input,
-                                                       LlmForwardInput& draft_input,
-                                                       int32_t position_offset) {
+void MTPWorkerImpl<TargetInput>::prepare_draft_inputs(
+    const TargetInput& input,
+    LlmForwardInput& draft_input,
+    int32_t position_offset) {
   c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
   draft_input = make_llm_draft_input(input);
   prepare_draft_sampling(draft_input.sampling_params);

@@ -325,6 +325,8 @@ def update_compact_kpool(
 
     if head_dim <= 0:
         raise ValueError("compact KPool head dimension must be positive")
+    if head_dim > 128:
+        raise ValueError("compact KPool Triton update supports head dimensions up to 128")
     if num_tokens == 0:
         return
     if query_len <= 0 or num_tokens % query_len != 0:
@@ -379,7 +381,7 @@ def update_compact_kpool(
     if any(tensor.device != flat_k.device for tensor in colocated_tensors):
         raise ValueError("compact KPool Triton inputs must be colocated")
 
-    _launch_compact_kpool(
+    update_compact_kpool_fast(
         raw_k,
         gate_scores,
         valid_rows,
@@ -394,7 +396,7 @@ def update_compact_kpool(
     )
 
 
-def _launch_compact_kpool(
+def update_compact_kpool_fast(
     raw_k: torch.Tensor,
     gate_scores: torch.Tensor,
     valid_rows: torch.Tensor,
@@ -407,7 +409,12 @@ def _launch_compact_kpool(
     ape: torch.Tensor,
     rate: int,
 ) -> None:
-    """Launch after the model/backend have validated invariant inputs."""
+    """Launch after the caller has validated all invariant inputs.
+
+    This fast path intentionally skips shape and dtype checks so validated
+    model hot paths can avoid repeating them. General callers should use
+    :func:`update_compact_kpool` instead.
+    """
     head_dim = raw_k.shape[-1]
     flat_k = raw_k.view(-1, head_dim)
     flat_gate = gate_scores.view(-1, head_dim)

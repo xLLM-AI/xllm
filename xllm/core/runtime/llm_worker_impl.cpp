@@ -117,7 +117,6 @@ bool LLMWorkerImpl::init_model(ModelContext& context) {
 #endif
 
   // Try to create a causal LM model
-  context.set_model_impl(model_config.model_impl());
   model_ = create_llm_model(context);
 
   // Dont find model in causal models

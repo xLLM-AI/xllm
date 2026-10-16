@@ -37,7 +37,6 @@ def test_glm_mtp_checkpoint_names_are_registered() -> None:
     assert registry._REGISTRY["glm_moe_dsa_mtp"] == expected
 
 
-
 def test_glm5_next_text_and_vl_registry_entries_are_distinct(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(registry.current_platform, "device_type", lambda: "npu")
 

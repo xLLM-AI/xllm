@@ -24,7 +24,7 @@ import sys
 import types
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import MagicMock, create_autospec, patch
+from unittest.mock import ANY, MagicMock, create_autospec, patch
 
 import pytest
 import torch
@@ -659,7 +659,6 @@ class TestModelExecutorConstruction:
             128,
             16,
             0,
-            None,
             num_decoding_tokens=4,
             is_spec_draft=False,
             enable_mega_moe_token_mask=True,
@@ -788,6 +787,7 @@ class TestDecodeAclGraphSpeculativeMetadata:
             block_table=torch.tensor([[10, 11], [20, 21]], dtype=torch.int32),
             kv_seq_lens=torch.tensor([4, 8], dtype=torch.int32),
             q_seq_lens=torch.tensor([2, 2], dtype=torch.int32),
+            q_seq_lens_host=torch.tensor([2, 2], dtype=torch.int32),
             expanded_decode_metadata=SimpleNamespace(
                 enabled=True,
                 kv_seq_lens=torch.tensor([3, 4, 7, 8], dtype=torch.int32),
@@ -829,6 +829,8 @@ class TestDecodeAclGraphSpeculativeMetadata:
 
     def test_expanded_metadata_selects_matching_paged_kv_rows(self) -> None:
         runner = self._runner()
+        metadata = self._metadata()
+        expanded = runner._expanded_verify_view(metadata)
         (
             block_table,
             kv_seq_lens,
@@ -836,7 +838,7 @@ class TestDecodeAclGraphSpeculativeMetadata:
             paged_kv_indptr,
             paged_kv_indices,
             paged_kv_last_page_len,
-        ) = runner._decode_metadata(self._metadata())
+        ) = runner._decode_metadata(metadata, expanded)
 
         assert block_table.tolist() == [
             [10, 11],
@@ -927,6 +929,7 @@ class TestDecodeAclGraphSpeculativeMetadata:
             padded_batch_size=4,
             is_expanded=True,
             input_embedding=None,
+            expanded_query_lens=(2, 2),
         )
 
         with patch.object(runner, "_prepare_graph_entry") as prepare:
@@ -936,9 +939,14 @@ class TestDecodeAclGraphSpeculativeMetadata:
                 positions,
                 metadata,
                 None,
+                None,
                 graph_key=graph_key,
                 eplb=None,
+                expanded=ANY,
             )
+            expanded = prepare.call_args.kwargs["expanded"]
+            assert expanded is not None
+            torch.testing.assert_close(expanded.block_table, metadata.expanded_decode_metadata.block_table)
 
             runner._graphs[graph_key] = object()
             runner.warmup(input_ids, positions, metadata)
@@ -1012,7 +1020,7 @@ class TestDecodeAclGraphSpeculativeMetadata:
         setattr(metadata.expanded_decode_metadata, field, value)
 
         with pytest.raises(RuntimeError, match=message):
-            self._runner()._decode_metadata(metadata)
+            self._runner()._expanded_verify_view(metadata)
 
     @pytest.mark.parametrize(
         ("field", "value", "message"),
@@ -1054,14 +1062,14 @@ class TestDecodeAclGraphSpeculativeMetadata:
         setattr(metadata.expanded_decode_metadata, field, value)
 
         with pytest.raises(RuntimeError, match=message):
-            self._runner()._decode_metadata(metadata)
+            self._runner()._expanded_verify_view(metadata)
 
     def test_expanded_page_count_exceeding_capacity_fails(self) -> None:
         metadata = self._metadata()
         metadata.expanded_decode_metadata.kv_seq_lens_host_values = [3, 4, 7, 9]
 
         with pytest.raises(RuntimeError, match="exceeds block-table capacity"):
-            self._runner()._decode_metadata(metadata)
+            self._runner()._expanded_verify_view(metadata)
 
     @pytest.mark.parametrize(
         ("input_ids", "slot_mapping", "message"),
@@ -1197,7 +1205,6 @@ class TestDecodeAclGraphSpeculativeMetadata:
         entry = runner._allocate_entry(
             4,
             torch.arange(4, dtype=torch.int32),
-            torch.arange(4, dtype=torch.int32),
             metadata,
         )
         mask = entry.static_metadata.mega_moe_token_mask
@@ -1216,7 +1223,6 @@ class TestDecodeAclGraphSpeculativeMetadata:
         metadata = self._decode_metadata(4)
         entry = runner._allocate_entry(
             4,
-            torch.arange(4, dtype=torch.int32),
             torch.arange(4, dtype=torch.int32),
             metadata,
         )
@@ -1250,7 +1256,6 @@ class TestDecodeAclGraphSpeculativeMetadata:
         metadata = self._decode_metadata(3, dp_execution_token_counts=(3, 1))
         entry = runner._allocate_entry(
             4,
-            torch.arange(3, dtype=torch.int32),
             torch.arange(3, dtype=torch.int32),
             metadata,
         )
@@ -1388,6 +1393,22 @@ def test_glm_non_mtp_cp_prefill_retains_sharded_kv_admission() -> None:
     )
 
 
+@pytest.mark.parametrize("model_type", ["glm5_next", "glm5_3_flash"])
+def test_glm5_next_cp_admission_matches_runtime_constraints(model_type: str) -> None:
+    config = {
+        "model_type": model_type,
+        "cp_size": 2,
+        "kv_split_size": 1,
+        "ep_size": 1,
+    }
+    _validate_npu_cp_model_config(config, 1)
+
+    with pytest.raises(NotImplementedError, match="ep_size == 1"):
+        _validate_npu_cp_model_config({**config, "ep_size": 2}, 1)
+    with pytest.raises(NotImplementedError, match="disaggregated PD"):
+        _validate_npu_cp_model_config({**config, "enable_disagg_pd": True}, 1)
+
+
 def _mtp_graph_metadata(lengths: list[int], expanded: bool, device: torch.device) -> SimpleNamespace:
     page_ids = [2, 5, 7, 9]
     page_counts = [(length + 3) // 4 for length in lengths]
@@ -1411,6 +1432,7 @@ def _mtp_graph_metadata(lengths: list[int], expanded: bool, device: torch.device
         ),
         q_cu_seq_lens=torch.arange(len(lengths) + 1, dtype=torch.int32, device=device),
         kv_cu_seq_lens=None,
+        q_cu_seq_lens_host_values=list(range(len(lengths) + 1)),
         kv_seq_lens_host_values=lengths,
         expanded_decode_metadata=None,
         is_prefill=False,
@@ -1430,7 +1452,7 @@ def _mtp_graph_metadata(lengths: list[int], expanded: bool, device: torch.device
         # the expanded per-token lengths and page rows for verification.
         metadata.block_table = metadata.block_table[-1:]
         metadata.kv_seq_lens = metadata.kv_seq_lens[-1:]
-        metadata.q_cu_seq_lens = torch.tensor([0, len(lengths)], dtype=torch.int32, device=device)
+        metadata.q_seq_lens_host = torch.tensor([len(lengths)], dtype=torch.int32)
     return metadata
 
 
@@ -1474,7 +1496,7 @@ def test_cp_mtp_decode_acl_replays_persistent_rows_and_detaches_outputs() -> Non
     # boundary and a new request reuses the same graph buckets. No per-replay
     # CPU synchronization is inserted between these invocations.
     for cycle in range(3):
-        for phase, rows in enumerate((3, 2, 1)):
+        for phase, rows in enumerate((4, 2, 1)):
             lengths = [cycle * 4 + 3 + row for row in range(rows)]
             metadata = _mtp_graph_metadata(lengths, phase == 0, device)
             tokens_cpu = torch.arange(rows, dtype=torch.int32) + cycle * 10 + phase + 1
@@ -1489,7 +1511,13 @@ def test_cp_mtp_decode_acl_replays_persistent_rows_and_detaches_outputs() -> Non
             with forward_context(ForwardContext(None, device, None, [], cp_context=object())):
                 output, auxiliary, indices = runner.execute(tokens, positions, metadata, hidden, topk)
             assert auxiliary is None
-            key = runner._graph_key(runner._padded_batch_size(rows, metadata), phase == 0, hidden, topk)
+            key = runner._graph_key(
+                runner._padded_batch_size(rows, metadata),
+                phase == 0,
+                hidden,
+                topk,
+                expanded_query_lens=(rows,) if phase == 0 else (),
+            )
             entry = runner._graphs[key]
             buffers = (
                 entry.static_input_ids,

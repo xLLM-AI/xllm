@@ -34,6 +34,12 @@ def supports_pool_key_indexer(head_dim: int, topk: int, pool_size: int) -> bool:
     )
 
 
+# Sparse mask mode for the fused pool-key indexer: per-batch right-down
+# causal masking over the paged pool blocks (same convention as C++'s
+# rightDownCausal = 3).
+POOL_KEY_INDEXER_MASK_MODE = 3
+
+
 def pool_key_indexer(
     query: torch.Tensor,
     pool_key: torch.Tensor,
@@ -50,7 +56,7 @@ def pool_key_indexer(
     block_table: torch.Tensor | None = None,
     layout_q: str = "BSND",
     layout_k: str = "BSND",
-    mask_mode: int = 3,
+    mask_mode: int = POOL_KEY_INDEXER_MASK_MODE,
     quant_mode: int = -1,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run CANN's fused pool-key indexer for supported layouts."""
@@ -689,6 +695,7 @@ def kv_quant_sparse_flash_attention(
 
 
 __all__ = [
+    "POOL_KEY_INDEXER_MASK_MODE",
     "dynamic_block_quant",
     "kv_quant_sparse_flash_attention",
     "lightning_indexer",

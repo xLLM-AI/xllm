@@ -55,7 +55,6 @@ message KVCacheShape {
   bool grouped_cache_layout = 7;
   int32 kpool_layout = 8;
   repeated int64 kpool_tail_shape = 9;
-  reserved 10;  // never assigned; kpool_cache_shape was field 8 on an unmerged branch
 }
 
 message AllocateKVCacheRequest {
@@ -186,7 +185,6 @@ message KVTransferMapping {
   reserved 2;
   repeated uint64 local_ids = 3;
   repeated uint64 remote_ids = 4;
-  reserved 5;  // was: repeated uint32 block_valid_token_counts
 }
 
 message EplbInfo {

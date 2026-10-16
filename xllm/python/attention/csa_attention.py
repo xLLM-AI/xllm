@@ -483,8 +483,8 @@ class DsaAttentionBackend(AttentionBackend):
                         cls._copy_graph_tensor(target, source, f"{name}[{index}]", pad_value=-1)
                         copied[target_id] = source_id
         cls._copy_graph_tensor(
-            getattr(persistent, "explicit_swa_indices", None),
-            getattr(refreshed, "explicit_swa_indices", None),
+            persistent.explicit_swa_indices,
+            refreshed.explicit_swa_indices,
             "explicit_swa_indices",
             pad_value=-1,
         )
@@ -498,7 +498,7 @@ class DsaAttentionBackend(AttentionBackend):
 
         persistent.max_query_len = refreshed.max_query_len
         persistent.max_seq_len = refreshed.max_seq_len
-        persistent.sparse_metadata_ori_win_left = getattr(refreshed, "sparse_metadata_ori_win_left", -1)
+        persistent.sparse_metadata_ori_win_left = refreshed.sparse_metadata_ori_win_left
         persistent.is_acl_graph = refreshed.is_acl_graph
         persistent.precomputed_metadata_inputs = refreshed.precomputed_metadata_inputs
 
@@ -812,7 +812,7 @@ class DsaAttentionBackend(AttentionBackend):
             raise RuntimeError("DeepSeek-V4 sparse metadata belongs to incompatible model geometry")
         ori_sparse_indices = None
         if use_native_sas and compress_ratio == 1:
-            ori_sparse_indices = getattr(compressed_metadata, "explicit_swa_indices", None)
+            ori_sparse_indices = compressed_metadata.explicit_swa_indices
             if ori_sparse_indices is None:
                 raise RuntimeError("Native DeepSeek-V4 DSpark requires precomputed SWA indices")
         out, _lse = _sparse_attn_sharedkv(
@@ -1178,14 +1178,13 @@ def _build_prefill_pa_nd_kv(
     next_block = 1
     for req in range(batch_size):
         q_start = cu[req]
-        src_len = cu[req + 1] - q_start
         q_len = dst_lens[req]
         blocks = (q_len + block_size - 1) // block_size
         if q_len <= 0 or blocks <= 0:
             continue
         for j in range(blocks):
             table_data[req * table_cols + j] = next_block + j
-        copy_len = min(q_len, src_len)
+        copy_len = min(q_len, cu[req + 1] - q_start)
         if copy_len > 0:
             target = packed_kv[next_block : next_block + blocks].view(blocks * block_size, kv.size(1), kv.size(2))
             target[q_len - copy_len : q_len].copy_(kv[q_start : q_start + copy_len])

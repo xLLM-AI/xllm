@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
 import torch
 
@@ -57,9 +57,17 @@ def resolve_expanded_decode_metadata(
     metadata: object,
     *,
     block_size: int = 0,
+    allow_untyped_spec_verify: bool = False,
 ) -> ExpandedDecodeMetadata | None:
+    """Resolve typed metadata, optionally adapting caller-admitted verify rows.
+
+    The untyped adapter preserves request grouping and host-only cache slots;
+    callers remain responsible for backend admission.
+    """
     expanded = getattr(metadata, "expanded_decode_metadata", None)
     if expanded is None or not bool(getattr(expanded, "enabled", True)):
+        if allow_untyped_spec_verify:
+            return _resolve_untyped_spec_verify_metadata(metadata, block_size=block_size)
         return None
 
     required = {

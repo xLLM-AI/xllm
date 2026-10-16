@@ -14,11 +14,11 @@
 
 import os
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 import torch
 
+from xllm.python.attention.mla_index_context import KPoolIndexContext
 from xllm.python.models import glm5_next
 from xllm.python.models.glm5_next_kpool import update_compressed_kpool
 
@@ -53,20 +53,13 @@ def test_compact_kpool_query_width_spans_multiple_pools(query_lens: list[int], r
     assert glm5_next._compact_kpool_triton_query_len(query_lens, rate) == expected
 
 
-def test_graph_kpool_prefix_drops_short_bucket_tail() -> None:
-    hidden = torch.arange(16, dtype=torch.float32).reshape(1, 8, 2)
-    flat = torch.arange(8, dtype=torch.float32)
-    ctx = SimpleNamespace(kpool_query_lens=(6,))
-
-    assert glm5_next._prefix_token_tensor(hidden, 8, 6).shape == (1, 6, 2)
-    assert glm5_next._prefix_token_tensor(flat, 8, 6).tolist() == list(range(6))
-    batched = torch.arange(16, dtype=torch.float32).reshape(2, 4, 2)
-    with pytest.raises(RuntimeError, match="cannot keep the first"):
-        glm5_next._prefix_token_tensor(batched, 8, 6)
+def test_kpool_query_spans_cover_all_token_rows() -> None:
+    ctx = SimpleNamespace(
+        kpool=KPoolIndexContext(tail=torch.empty(0), tail_read_indices=None, tail_write_indices=None, query_lens=(6,))
+    )
     with pytest.raises(RuntimeError, match="cover the current token rows"):
         glm5_next._kpool_update_query_lens(ctx, 8)
-    with patch("xllm.python.models.glm5_next.in_acl_graph", return_value=True):
-        assert glm5_next._kpool_update_query_lens(ctx, 8) == [6]
+    assert glm5_next._kpool_update_query_lens(ctx, 6) == [6]
 
 
 @pytest.mark.parametrize("num_tokens", [1, 4, 17])

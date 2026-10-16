@@ -262,13 +262,14 @@ TEST(SpecDecodeInputBuilderTest, ValidateInputsNonAtbExpansion) {
                       buf.meta.kv_max_seq_len,
                       std::move(buf.out_kv_seq_lens),
                       /*update_block_tables=*/true);
-  EXPECT_EQ(tensor_to_vec_int32(params.attention.device.paged_kv_indptr),
+  EXPECT_EQ(tensor_to_vector<int32_t>(params.attention.device.paged_kv_indptr),
             std::vector<int32_t>({0, 2, 4, 6, 9, 12, 15}));
   EXPECT_EQ(
-      tensor_to_vec_int32(params.attention.device.paged_kv_indices),
+      tensor_to_vector<int32_t>(params.attention.device.paged_kv_indices),
       std::vector<int32_t>({0, 1, 0, 1, 0, 1, 3, 4, 5, 3, 4, 5, 3, 4, 5}));
-  EXPECT_EQ(tensor_to_vec_int32(params.attention.device.paged_kv_last_page_len),
-            std::vector<int32_t>({2, 3, 4, 2, 3, 4}));
+  EXPECT_EQ(
+      tensor_to_vector<int32_t>(params.attention.device.paged_kv_last_page_len),
+      std::vector<int32_t>({2, 3, 4, 2, 3, 4}));
 }
 
 TEST(SpecDecodeInputBuilderTest, AppendDecodeRowTokenKinds) {

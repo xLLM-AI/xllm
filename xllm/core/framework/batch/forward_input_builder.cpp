@@ -206,7 +206,8 @@ bool should_read_linear_state_out_of_place(const ModelArgs* args,
 
   const bool is_python_model = ModelConfig::is_python_model_impl(
       ModelConfig::get_instance().model_impl());
-  return (is_python_model && args->model_type() == "glm5_next" &&
+  return (is_python_model &&
+          is_glm5_next_target_model_type(args->model_type()) &&
           forward_type.no_decode()) ||
          (!is_python_model && is_qwen3_5_target_model_type(args->model_type()));
 }

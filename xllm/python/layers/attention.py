@@ -20,14 +20,26 @@ and KV cache reside in the FlashInferBackend, accessed via ForwardContext.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import torch
 import torch.nn as nn
 
 from xllm.python.model_executor.forward_context import get_forward_context
 
+if TYPE_CHECKING:
+    from xllm.python.attention.mla_index_context import MlaIndexContextBuilder
+
 
 class Attention(nn.Module):
     """Thin attention layer that dispatches to the current backend."""
+
+    # Specialized graph backends must opt in explicitly; a tensor shape
+    # shared by unrelated models is not a model capability.
+    supports_cp_nope_prefill: bool = False
+    # A specialized MLA layer may opt into a typed context. The backend only
+    # invokes the builder and never imports that layer's type.
+    mla_index_context_builder: type[MlaIndexContextBuilder] | None = None
 
     def __init__(
         self,

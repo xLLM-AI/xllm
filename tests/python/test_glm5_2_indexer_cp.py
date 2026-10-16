@@ -202,7 +202,7 @@ def test_empty_query_rank_still_populates_index_cache(quantized: bool) -> None:
         output = indexer.select_qli(
             torch.empty(0, 2),
             torch.empty(0, 2),
-            backend.mla_index_context(SimpleNamespace(layer_id=0)),
+            backend.mla_index_context(SimpleNamespace(layer_id=0, supports_cp_nope_prefill=False)),
             (torch.empty(0, 1), torch.empty(0, 1)),
             (torch.ones(2, 1), torch.zeros(2, 1)),
             cache_hidden=torch.zeros(2, 2),
@@ -334,7 +334,7 @@ def test_cp_indexer_preserves_query_segments_and_cache_order(packed: bool, rank:
         output = indexer.select_qli(
             query_hidden,
             query_hidden,
-            backend.mla_index_context(SimpleNamespace(layer_id=0)),
+            backend.mla_index_context(SimpleNamespace(layer_id=0, supports_cp_nope_prefill=False)),
             query_cos_sin,
             key_cos_sin,
             cache_hidden=hidden,

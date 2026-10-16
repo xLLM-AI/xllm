@@ -21,6 +21,7 @@ limitations under the License.
 
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <torch/csrc/distributed/c10d/Work.hpp>
 #include <unordered_map>
 #include <utility>
@@ -60,7 +61,8 @@ int64_t python_qwen3_5_mega_moe_max_num_tokens_per_rank(
 // reached here).
 class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
  public:
-  explicit PyCausalLM(const ModelContext& context);
+  explicit PyCausalLM(const ModelContext& context,
+                      std::string python_model_name = {});
   ~PyCausalLM() override;
 
   ModelOutput forward(const torch::Tensor& tokens,
@@ -153,6 +155,7 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
       std::vector<KVCache>& kv_caches);
 
   ModelArgs model_args_;
+  std::string python_model_name_;
   torch::TensorOptions options_;
   torch::Device device_;
   bool enable_mla_ = false;

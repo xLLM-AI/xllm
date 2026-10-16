@@ -32,6 +32,7 @@ limitations under the License.
 #include "core/framework/parallel_state/parallel_state.h"
 #include "core/framework/parallel_state/process_group.h"
 #include "core/framework/state_dict/state_dict.h"
+#include "core/kv_cache/layout/kpool_cache_policy.h"
 #include "core/util/pybind_helper.h"
 #include "core/util/utils.h"
 #include "models/py_model_helper.h"
@@ -95,8 +96,10 @@ int64_t python_qwen3_5_mega_moe_max_num_tokens_per_rank(
 
 }  // namespace detail
 
-PyCausalLM::PyCausalLM(const ModelContext& context)
+PyCausalLM::PyCausalLM(const ModelContext& context,
+                       std::string python_model_name)
     : model_args_(context.get_model_args()),
+      python_model_name_(std::move(python_model_name)),
       options_(context.get_tensor_options()),
       device_(context.get_tensor_options().device()),
       enable_mla_(context.get_model_args().enable_mla()) {
@@ -301,10 +304,12 @@ PyCausalLM::PyCausalLM(const ModelContext& context)
                          layerwise_group_index);
     }
   }
-  const std::string module_name = context.get_model_args().model_type().empty()
-                                      ? std::string("Qwen3ForCausalLM")
-                                      : context.get_model_args().model_type();
-
+  const std::string module_name =
+      python_model_name_.empty()
+          ? (context.get_model_args().model_type().empty()
+                 ? std::string("Qwen3ForCausalLM")
+                 : context.get_model_args().model_type())
+          : python_model_name_;
   py::module_ registry = py::module_::import("xllm.python.registry");
   py::object model_cls = registry.attr("get_model_class")(py::str(module_name));
   config_dict_ = build_config_dict(parallel_args);
@@ -351,8 +356,8 @@ py::dict PyCausalLM::build_config_dict(
   d["moe_tp_rank"] = moe_tp_rank_;
   d["ep_size"] = ep_size_;
   d["ep_rank"] = ep_rank_;
-  d["requires_framework_kpool_tail"] =
-      uses_npu_compressed_kpool_tail(model_args_);
+  d["requires_kpool_tail_cache"] =
+      uses_compressed_kpool_tail_cache(model_args_);
   // cp_size is a reflected ParallelArgs PROPERTY (already in d), but cp_rank is
   // a derived member function, so pass it explicitly for the Python executor.
   d["cp_rank"] = cp_rank_;

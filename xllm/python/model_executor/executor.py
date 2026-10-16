@@ -67,15 +67,18 @@ def _resolve_graph_backend(config: dict) -> str:
 def _validate_npu_cp_model_config(config: dict, num_decoding_tokens: int) -> None:
     """Mirror model-side CP admission for callers without the C++ master."""
     model_type = config.get("model_type", "")
+    is_glm5_next = model_type in ("glm5_next", "glm5_3_flash")
     is_glm_mtp_draft = (
         model_type == "glm_moe_dsa_mtp"
         and config.get("is_draft_engine", False)
         and bool(config.get("is_mtp_algorithm", False))
     )
-    if model_type not in ("qwen3", "glm_moe_dsa", "deepseek_v4") and not is_glm_mtp_draft:
+    if model_type not in ("qwen3", "glm_moe_dsa", "deepseek_v4") and not is_glm5_next and not is_glm_mtp_draft:
         raise NotImplementedError(
             f"Python model-side CP does not support model_type={model_type!r}; "
-            "supported models are qwen3, glm_moe_dsa, deepseek_v4 and glm_moe_dsa_mtp draft engines"
+            "supported models are qwen3, glm_moe_dsa, deepseek_v4, glm5_next, "
+            "glm5_3_flash and "
+            "glm_moe_dsa_mtp draft engines"
         )
     if config.get("task_type", "generate") != "generate":
         raise NotImplementedError("Python model-side CP supports only the generate task")
@@ -88,6 +91,24 @@ def _validate_npu_cp_model_config(config: dict, num_decoding_tokens: int) -> Non
     kv_split = int(config.get("kv_split_size", 0)) or int(config["cp_size"])
     if model_type == "deepseek_v4" and kv_split != 1:
         raise NotImplementedError("Python DeepSeek-V4 CP requires replicated KV caches; use kv_split_size=1")
+    if is_glm5_next:
+        if config.get("engine_type", "LLM") == "SSM":
+            raise NotImplementedError(
+                "Python GLM-5 Next CP does not support target-side speculative verification; "
+                "run speculation on a cp_size=1 Decode instance"
+            )
+        if int(config.get("ep_size", 1)) != 1:
+            raise NotImplementedError("Python GLM-5 Next CP initially requires ep_size == 1")
+        if kv_split != 1:
+            raise NotImplementedError("Python GLM-5 Next CP initially requires kv_split_size == 1")
+        if bool(config.get("enable_disagg_pd", False)):
+            raise NotImplementedError("Python GLM-5 Next CP does not support disaggregated PD")
+        if bool(config.get("enable_chunked_prefill", False)):
+            raise NotImplementedError("Python GLM-5 Next CP initially requires enable_chunked_prefill=false")
+        if bool(config.get("enable_prefix_cache", False)):
+            raise NotImplementedError("Python GLM-5 Next CP initially requires enable_prefix_cache=false")
+        if bool(config.get("enable_schedule_overlap", False)):
+            raise NotImplementedError("Python GLM-5 Next CP initially requires enable_schedule_overlap=false")
 
 
 def _create_attention_backend(
@@ -268,7 +289,7 @@ class ModelExecutor:
         if current_platform.is_npu() and cp_size > 1:
             _validate_npu_cp_model_config(config, int(num_decoding_tokens))
 
-        self._requires_framework_kpool_tail = bool(config.get("requires_framework_kpool_tail", False))
+        self._requires_kpool_tail_cache = bool(config.get("requires_kpool_tail_cache", False))
 
         attention_layers = [module for module in model.modules() if isinstance(module, Attention)]
         if not attention_layers:
@@ -773,7 +794,7 @@ class ModelExecutor:
             raise ValueError("cache layer count does not match the model layer layout")
         if self._kv_bound:
             return
-        if self._requires_framework_kpool_tail:
+        if self._requires_kpool_tail_cache:
             indexed_caches = [cache for cache in layer_caches if cache.index is not None]
             if not indexed_caches or any(cache.kpool_tail is None for cache in indexed_caches):
                 raise ValueError("model requires a framework-managed kPool tail for every indexer layer")

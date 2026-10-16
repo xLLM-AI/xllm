@@ -397,7 +397,9 @@ TEST(MtpAsyncInputBuilderTest, PybindViewsPreserveGraphMetadataStorage) {
   EXPECT_EQ(py_metadata.attr("dp_execution_token_counts")
                 .cast<std::vector<int32_t>>(),
             (std::vector<int32_t>{6, 1}));
-  py::tuple selected = runner.attr("_decode_metadata")(py_metadata);
+  py::object expanded_view = runner.attr("_expanded_verify_view")(py_metadata);
+  py::tuple selected =
+      runner.attr("_decode_metadata")(py_metadata, expanded_view);
 
   EXPECT_TRUE(torch::equal(selected[0].cast<torch::Tensor>(),
                            metadata->expanded_decode.block_table));

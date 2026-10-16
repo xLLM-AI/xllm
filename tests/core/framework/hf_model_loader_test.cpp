@@ -350,6 +350,18 @@ TEST(HFModelLoaderTest, Glm5NextNativeMtpUsesAppendedLayer) {
   EXPECT_EQ(draft_args.index_topk_pattern(), "S");
 }
 
+TEST(HFModelLoaderTest, Glm5FlashAliasUsesMlaAndNativeMtpNormalization) {
+  ModelArgs args;
+  args.model_type("glm5_3_flash").n_layers(45).num_nextn_predict_layers(1);
+
+  EXPECT_TRUE(util::is_mla_model_type(args.model_type()));
+  ASSERT_TRUE(configure_glm5_next_mtp_args(
+      args, /*speculative_algorithm=*/"MTP", /*is_draft_engine=*/true));
+  EXPECT_EQ(args.model_type(), "glm5_next_mtp");
+  EXPECT_EQ(args.n_layers(), 1);
+  EXPECT_EQ(args.mtp_start_layer_idx(), 45);
+}
+
 TEST(HFModelLoaderTest, Glm5NextExportedMtpKeepsNativeKeys) {
   auto loader = ModelRegistry::get_model_args_loader("glm5_next_mtp");
   ASSERT_NE(loader, nullptr);

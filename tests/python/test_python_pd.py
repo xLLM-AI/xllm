@@ -25,7 +25,8 @@ import torch.nn as nn
 
 pytest.importorskip("torch_npu")
 
-from xllm.python.attention.backend import AttentionMetadata, MlaIndexContext
+from xllm.python.attention.backend import AttentionMetadata
+from xllm.python.attention.mla_index_context import KPoolIndexContext, KPoolMlaIndexContext
 from xllm.python.layers.attention import Attention
 from xllm.python.model_executor.forward_context import (
     AclGraphExecutionState,
@@ -44,8 +45,8 @@ class _IndexHistory:
         self.kpool_tail = tail
         self.block_table = block_table
 
-    def context(self, positions: torch.Tensor, length: int) -> MlaIndexContext:
-        return MlaIndexContext(
+    def context(self, positions: torch.Tensor, length: int) -> KPoolMlaIndexContext:
+        return KPoolMlaIndexContext(
             index_cache=self.cache,
             slot_mapping=positions,
             block_table=self.block_table,
@@ -55,11 +56,13 @@ class _IndexHistory:
             get_quant_indexer_metadata=MagicMock(),
             update_index_cache=lambda rows, scales: None,
             materialize_index_cache=MagicMock(),
-            kpool_tail=self.kpool_tail,
-            kpool_tail_read_indices=torch.tensor([1], dtype=torch.int32, device=positions.device),
-            kpool_tail_write_indices=torch.tensor([1], dtype=torch.int32, device=positions.device),
-            kpool_query_lens=[1],
-            kpool_query_lens_device=torch.tensor([1], dtype=torch.int32, device=positions.device),
+            kpool=KPoolIndexContext(
+                tail=self.kpool_tail,
+                tail_read_indices=torch.tensor([1], dtype=torch.int32, device=positions.device),
+                tail_write_indices=torch.tensor([1], dtype=torch.int32, device=positions.device),
+                query_lens=[1],
+                query_lens_device=torch.tensor([1], dtype=torch.int32, device=positions.device),
+            ),
         )
 
 

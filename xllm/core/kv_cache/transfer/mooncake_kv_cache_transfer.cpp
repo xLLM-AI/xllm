@@ -236,11 +236,6 @@ void MooncakeKVCacheTransferBase::configure_cache_layout(
   fingerprint << model_args.model_type() << ":" << model_args.n_layers() << ":"
               << tensor_layout.kv_head_count << ":" << model_args.head_dim()
               << ":" << tensor_layout.index_head_count;
-  if (!is_spec_draft && uses_npu_compressed_kpool_tail(model_args)) {
-    fingerprint << "|compressed_kpool_tail:" << model_args.index_head_dim()
-                << ":" << model_args.index_kpool() << ":"
-                << block_token_capacity;
-  }
   context.fingerprint = fingerprint.str();
   context.cluster_id = cluster_id_;
   context.addr = addr_;
@@ -341,6 +336,14 @@ void MooncakeKVCacheTransferDefault::register_kv_cache(
       const int64_t token_axis = tensor_layout.head_major_layout ? 2 : 1;
       tensor_layout.index_block_capacity =
           kv_cache_shape.index_cache_shape().at(token_axis);
+    }
+    if (!is_spec_draft && kv_cache_shape.has_kpool_tail_shape()) {
+      const auto& tail_shape = kv_cache_shape.kpool_tail_shape();
+      CHECK_GE(tail_shape.size(), 4U);
+      pending_registration_context_->fingerprint +=
+          "|compressed_kpool_tail:" + std::to_string(tail_shape.back()) + ":" +
+          std::to_string(tail_shape[2]) + ":" +
+          std::to_string(tensor_layout.block_token_capacity);
     }
   }
 

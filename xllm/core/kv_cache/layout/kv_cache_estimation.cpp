@@ -30,6 +30,7 @@ limitations under the License.
 #include "core/framework/config/speculative_config.h"
 #include "core/kv_cache/block/block_utils.h"
 #include "core/kv_cache/layout/deepseek_v4_cache_policy.h"
+#include "core/kv_cache/layout/kpool_cache_policy.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/layers/common/dsa_topk_share_plan.h"
 #include "core/platform/platform.h"
@@ -895,7 +896,7 @@ KVCacheCapacity estimate_kv_cache_capacity(
       options.indexer_cache_dtype == "int8";
   KPoolCacheLayout kpool_layout = options.kpool_layout;
   if (Platform::is_npu()) {
-    kpool_layout = uses_npu_compressed_kpool_tail(model_args)
+    kpool_layout = uses_compressed_kpool_tail_cache(model_args)
                        ? KPoolCacheLayout::COMPRESSED_WITH_TAIL
                        : KPoolCacheLayout::PACKED;
   }
@@ -937,7 +938,7 @@ KVCacheCapacity estimate_kv_cache_capacity(
     CHECK_EQ(options.dtype, torch::kBFloat16);
     CHECK_EQ(options.block_size % model_args.index_kpool(), 0);
     CHECK_GE(options.num_speculative_tokens, 0);
-    if (uses_npu_compressed_kpool_tail(model_args)) {
+    if (uses_compressed_kpool_tail_cache(model_args)) {
       // Preserve one complete pool plus speculative rows that may be rejected.
       // The verify base token advances the committed sequence and is already
       // covered by the regular pool tail.

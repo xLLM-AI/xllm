@@ -108,6 +108,9 @@ bool resolve_model_registration(const std::string& model_type,
     return false;
   }
 
+  const std::string canonical_model_type =
+      canonical_model_registration_name(model_type);
+
 #if defined(USE_NPU)
   const std::string backend = requested_npu_kernel_backend.empty()
                                   ? kAutoBackend
@@ -123,12 +126,13 @@ bool resolve_model_registration(const std::string& model_type,
 
   std::string effective_backend = backend;
   if (backend == kAutoBackend) {
-    effective_backend =
-        is_torch_only_model_type(model_type) ? kTorchBackend : kAtbBackend;
+    effective_backend = is_torch_only_model_type(canonical_model_type)
+                            ? kTorchBackend
+                            : kAtbBackend;
   } else if (backend == kXliteBackend) {
 #if defined(USE_XLITE)
     // Reject torch-only model types
-    if (is_torch_only_model_type(model_type)) {
+    if (is_torch_only_model_type(canonical_model_type)) {
       if (error_message != nullptr) {
         *error_message =
             "Model type " + model_type + " only supports TORCH, not XLITE.";
@@ -136,7 +140,7 @@ bool resolve_model_registration(const std::string& model_type,
       return false;
     }
     // Reject non-xlite model types
-    if (!xllm::xlite::is_xlite_model_type(model_type)) {
+    if (!xllm::xlite::is_xlite_model_type(canonical_model_type)) {
       if (error_message != nullptr) {
         *error_message = "Model type " + model_type +
                          " has no XLITE implementation; use ATB or TORCH"
@@ -151,16 +155,20 @@ bool resolve_model_registration(const std::string& model_type,
     }
     return false;
 #endif
-  } else if (model_type == "qwen3" || model_type == "qwen3_moe" ||
-             model_type == "deepseek_v32" || model_type == "glm_moe_dsa" ||
-             model_type == "glm_moe_dsa_mtp" || model_type == "qwen3_vl" ||
-             model_type == "deepseek_v32_mtp" || model_type == "glm5_next" ||
-             model_type == "joyai_asr") {
+  } else if (canonical_model_type == "qwen3" ||
+             canonical_model_type == "qwen3_moe" ||
+             canonical_model_type == "deepseek_v32" ||
+             canonical_model_type == "glm_moe_dsa" ||
+             canonical_model_type == "glm_moe_dsa_mtp" ||
+             canonical_model_type == "qwen3_vl" ||
+             canonical_model_type == "deepseek_v32_mtp" ||
+             is_glm5_next_target_model_type(canonical_model_type) ||
+             canonical_model_type == "joyai_asr") {
     // qwen3/qwen3_moe/deepseek_v32/glm_moe_dsa/glm_moe_dsa_mtp/qwen3_vl/
-    // deepseek_v32_mtp support both backends. qwen3_vl on TORCH is used by
-    // the Python model executor (--model_impl=python implements its own ViT
-    // + deepstack).
-  } else if (is_torch_only_model_type(model_type)) {
+    // deepseek_v32_mtp and GLM5 target aliases support both backends.
+    // qwen3_vl on TORCH is used by the Python model executor
+    // (--model_impl=python implements its own ViT + deepstack).
+  } else if (is_torch_only_model_type(canonical_model_type)) {
     if (backend != kTorchBackend) {
       if (error_message != nullptr) {
         *error_message = "Model type " + model_type +
@@ -180,23 +188,28 @@ bool resolve_model_registration(const std::string& model_type,
     *effective_npu_kernel_backend = effective_backend;
   }
   if (backend == kXliteBackend) {
-    *resolved_name = model_type + "_xlite";
-  } else if (model_type == "qwen3" && effective_backend == kAtbBackend) {
+    *resolved_name = canonical_model_type + "_xlite";
+  } else if (canonical_model_type == "qwen3" &&
+             effective_backend == kAtbBackend) {
     *resolved_name = "qwen3_atb";
-  } else if (model_type == "qwen3_moe" && effective_backend == kAtbBackend) {
+  } else if (canonical_model_type == "qwen3_moe" &&
+             effective_backend == kAtbBackend) {
     *resolved_name = "qwen3_moe_atb";
-  } else if (model_type == "qwen2" && effective_backend == kAtbBackend) {
+  } else if (canonical_model_type == "qwen2" &&
+             effective_backend == kAtbBackend) {
     *resolved_name = "qwen2_atb";
-  } else if (model_type == "qwen2_5_vl" && effective_backend == kAtbBackend) {
+  } else if (canonical_model_type == "qwen2_5_vl" &&
+             effective_backend == kAtbBackend) {
     *resolved_name = "qwen2_5_vl_atb";
-  } else if (model_type == "qwen3_vl" && effective_backend == kAtbBackend) {
+  } else if (canonical_model_type == "qwen3_vl" &&
+             effective_backend == kAtbBackend) {
     *resolved_name = "qwen3_vl_atb";
   } else {
-    *resolved_name = model_type;
+    *resolved_name = canonical_model_type;
   }
   return true;
 #else
-  *resolved_name = model_type;
+  *resolved_name = canonical_model_type;
   return true;
 #endif
 }
@@ -269,7 +282,9 @@ bool is_npu_model_cp_capable(const std::string& resolved_name) {
   // is not the same switch as the worker-side NpuCpPlan gate: deepseek_v4 and
   // deepseek_v4_mtp own their CP split inside the model (TORCH backend) and
   // deliberately keep model_supports_model_cp() false so the worker does not
-  // shard a second time.
+  // shard a second time. Python GLM5 models are admitted by the Python CP
+  // branch before this native capability check and likewise must not enable
+  // the ATB worker sharder.
   static const std::unordered_set<std::string> kCpCapableModels = {
       "deepseek_v32",
       "deepseek_v32_mtp",
@@ -596,7 +611,13 @@ bool ModelRegistry::owns_mtp_shared_weights(const std::string& name) {
 
 std::string ModelRegistry::get_model_backend(const std::string& name) {
   ModelRegistry* instance = get_instance();
-  return instance->model_backend_[name];
+  auto it = instance->model_backend_.find(name);
+  if (it != instance->model_backend_.end()) {
+    return it->second;
+  }
+  const std::string canonical_name = canonical_model_registration_name(name);
+  it = instance->model_backend_.find(canonical_name);
+  return it == instance->model_backend_.end() ? "" : it->second;
 }
 
 std::unique_ptr<MultimodalProcessorBase> create_multimodal_processor(
@@ -685,11 +706,13 @@ std::unique_ptr<CausalVLM> create_vlm_model(const ModelContext& context) {
   // Python model executor: build the graph in Python (e.g. GLM-5.3-Flash-VL via
   // xllm.python.models.glm5_next_vl.Glm5NextVLModel). PyCausalLM is-a
   // CausalVLM so it satisfies this factory's return type; PyExecutorImpl drives
-  // encode/get_input_embeddings via pybind. Read from the global ModelConfig:
-  // the VLM worker does not populate context.model_impl, unlike the LLM worker.
-  if (ModelConfig::is_python_model_impl(
-          ModelConfig::get_instance().model_impl())) {
-    return std::make_unique<PyCausalLM>(context);
+  // encode/get_input_embeddings via pybind.
+  if (ModelConfig::is_python_model_impl(context.get_model_impl())) {
+    std::string python_model_name = context.get_model_args().model_type();
+    if (is_glm5_next_target_model_type(python_model_name)) {
+      python_model_name = "glm5_next_vl";
+    }
+    return std::make_unique<PyCausalLM>(context, std::move(python_model_name));
   }
 
   std::string resolved_name;

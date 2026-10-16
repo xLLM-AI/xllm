@@ -246,10 +246,7 @@ class DsaMetadataBuilder:
     ) -> DsaMetadata:
         batch_size = len(kv_seq_lens)
         if q_seq_lens is None or len(q_seq_lens) != batch_size:
-            if is_prefill or is_chunked_prefill:
-                q_lens = list(kv_seq_lens)
-            else:
-                q_lens = [1] * batch_size
+            q_lens = list(kv_seq_lens) if is_prefill or is_chunked_prefill else [1] * batch_size
         else:
             q_lens = list(q_seq_lens)
 

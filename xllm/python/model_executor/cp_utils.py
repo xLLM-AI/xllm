@@ -185,6 +185,12 @@ def build_cp_context(
     )
 
 
+def _shard_valid_mask_view(x: torch.Tensor, ctx: CpContext, row_dim: int = 0) -> torch.Tensor:
+    """View the row-validity mask broadcastable to ``x``'s shape."""
+    mask_shape = [1 if dim != row_dim else ctx.shard_valid_mask.shape[0] for dim in range(x.dim())]
+    return ctx.shard_valid_mask.view(mask_shape)
+
+
 def cp_shard_rows(x: torch.Tensor, ctx: CpContext) -> torch.Tensor:
     """Select this rank's rows from a global packed tensor ``[T_global, ...]``.
 
@@ -195,8 +201,18 @@ def cp_shard_rows(x: torch.Tensor, ctx: CpContext) -> torch.Tensor:
     # ``bool(mask.all())`` would force a device->host sync on the prefill
     # critical path. Multiplication cannot clear a nonfinite gathered row:
     # NaN * 0 and Inf * 0 remain NaN on a rank owning only padding.
-    mask_shape = [ctx.shard_valid_mask.shape[0]] + [1] * (x.dim() - 1)
-    return local.masked_fill(~ctx.shard_valid_mask.view(mask_shape), 0)
+    return local.masked_fill(~_shard_valid_mask_view(x, ctx), 0)
+
+
+def cp_zero_fill_local_rows(x: torch.Tensor, ctx: CpContext, *, leading_seq_dim: bool) -> torch.Tensor:
+    """Zero rows that fall outside this rank's local query span.
+
+    Use after a sharded projection (o_proj) whose output still carries padding
+    rows: downstream CP consumers assume padding contributes exact zeros.
+    ``leading_seq_dim`` selects whether the row axis is dim 0 (packed) or 1
+    ([batch, local_seq, ...]).
+    """
+    return x.masked_fill(~_shard_valid_mask_view(x, ctx, row_dim=1 if leading_seq_dim else 0), 0)
 
 
 def cp_shard_positions(positions: torch.Tensor, ctx: CpContext) -> torch.Tensor:

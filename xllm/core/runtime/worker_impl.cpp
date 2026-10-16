@@ -59,6 +59,7 @@ limitations under the License.
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
+#include "core/framework/config/model_config.h"
 #include "core/framework/config/profile_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
@@ -2581,6 +2582,7 @@ bool WorkerImpl::init_model(const std::string& model_weights_path,
   dtype_ = dtype;
   auto tensor_options = torch::dtype(dtype_).device(device_);
   context_ = ModelContext(parallel_args_, args, quant_args, tensor_options);
+  context_.set_model_impl(ModelConfig::get_instance().model_impl());
   context_.set_model_id(options_.model_id());
   FlashComm1Options flash_comm1_options;
   flash_comm1_options.enable_flashcomm1 = options_.enable_flashcomm1();

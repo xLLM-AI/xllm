@@ -58,6 +58,10 @@ TargetSpecVerifyMode classify_target_spec_verify_mode(
   return TargetSpecVerifyMode::GENERIC;
 }
 
+bool requires_uniform_draft_rows(std::string_view model_type) {
+  return is_glm5_next_target_model_type(model_type);
+}
+
 CombinedDraftExecutionPath classify_combined_draft_execution_path(
     std::string_view model_type) {
   if (model_type == "qwen3_5_mtp" || model_type == "qwen3_5_moe_mtp") {

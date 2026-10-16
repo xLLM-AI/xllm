@@ -34,6 +34,11 @@ enum class TargetSpecVerifyMode {
 TargetSpecVerifyMode classify_target_spec_verify_mode(
     std::string_view model_type);
 
+// Whether the target's speculative decode path needs two uniform draft rows
+// after every fully accepted request. Keep model recognition in the policy
+// classifier; the worker only consumes this resolved capability.
+bool requires_uniform_draft_rows(std::string_view model_type);
+
 enum class CombinedDraftExecutionPath {
   UNSUPPORTED,
   QWEN3_5_PAGED_ATTENTION,

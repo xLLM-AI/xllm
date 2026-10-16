@@ -298,7 +298,9 @@ def test_merged_input_forward_preserves_backend_arguments_and_output(
         return core_output
 
     backend = SimpleNamespace(execute_linear=_execute_linear)
-    monkeypatch.setattr(glm5_next, "get_forward_context_or_none", lambda: SimpleNamespace(attention_backend=backend))
+    monkeypatch.setattr(
+        glm5_next, "get_forward_context_or_none", lambda: SimpleNamespace(attention_backend=backend, cp_context=None)
+    )
     monkeypatch.setattr(glm5_next.distributed, "all_reduce_", lambda output: reductions.append(output), raising=False)
     handle = attention.in_proj_qkvbfg_a.register_forward_hook(lambda *_args: calls.append(True))
     output = attention(hidden_states, torch.arange(seq_len))

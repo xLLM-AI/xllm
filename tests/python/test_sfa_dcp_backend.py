@@ -690,6 +690,7 @@ def test_cp_prefill_writes_global_rows_to_kv2_owners(
     query = local_key.repeat(1, 2, 1)
     query_rope = local_rope.repeat(1, 2, 1)
     topk = torch.zeros(cp.total_local, 1, 4, dtype=torch.int32)
+    layer = SimpleNamespace(layer_id=0, supports_cp_nope_prefill=False)
     context = ForwardContext(backend, torch.device("cpu"), metadata, [cache], cp_context=cp)
     with (
         forward_context(context),
@@ -700,7 +701,7 @@ def test_cp_prefill_writes_global_rows_to_kv2_owners(
             backend._impl, "_execute_sparse_flash_attention_process", side_effect=lambda q, *args, **kwargs: q + 10
         ) as attention,
     ):
-        index_context = backend.mla_index_context(SimpleNamespace(layer_id=0))
+        index_context = backend.mla_index_context(layer)
         assert index_context.slot_mapping is global_slots
         expected_index_pages = (table.unsqueeze(-1) * 2 + torch.arange(2, dtype=torch.int32)).flatten(1)
         torch.testing.assert_close(
@@ -708,7 +709,7 @@ def test_cp_prefill_writes_global_rows_to_kv2_owners(
             expected_index_pages.index_select(0, cp.segment_seq_indices),
         )
         assert index_context.materialize_index_cache()[0] is cache.index
-        output = backend.execute_mla(query, query_rope, local_key, local_rope, SimpleNamespace(layer_id=0), topk)
+        output = backend.execute_mla(query, query_rope, local_key, local_rope, layer, topk)
     slots, keys, ropes, *_ = write.call_args.args
     expected_slots = [s // 8 * 4 + s % 4 if s % 8 // 4 == owner else -1 for s in global_slots.tolist()]
     assert slots.tolist() == expected_slots
