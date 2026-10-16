@@ -184,6 +184,10 @@ TEST_F(DeepseekV4IndexerTest, DSparkSparseTilingUsesSupportedWindow) {
   params.meta.q_max_seq_len = 1;
 
   EXPECT_TRUE(params.meta.batch_forward_type.no_decode());
+  EXPECT_FALSE(deepseek_v4_use_native_sas(
+      /*dspark_block_size=*/5,
+      /*dspark_use_native_sas=*/true,
+      /*use_prefill_attention=*/params.meta.batch_forward_type.no_decode()));
   EXPECT_EQ(deepseek_v4_ori_window_left(/*window_size=*/128,
                                         /*dspark_block_size=*/5,
                                         /*use_native_dspark_sas=*/false),
@@ -199,6 +203,10 @@ TEST_F(DeepseekV4IndexerTest, DSparkSparseTilingUsesSupportedWindow) {
 
   params.meta.batch_forward_type = BatchForwardType::DECODE;
   EXPECT_FALSE(params.meta.batch_forward_type.no_decode());
+  EXPECT_TRUE(deepseek_v4_use_native_sas(
+      /*dspark_block_size=*/5,
+      /*dspark_use_native_sas=*/true,
+      /*use_prefill_attention=*/params.meta.batch_forward_type.no_decode()));
 }
 
 TEST_F(DeepseekV4IndexerTest, DSparkNativeSwaIndicesAreSharedByQueryRows) {
@@ -253,6 +261,31 @@ TEST_F(DeepseekV4IndexerTest, DSparkNativeSwaIndicesWrapAroundRingBuffer) {
   const torch::Tensor expected_prefix =
       torch::tensor({41, 42, 43, 40, 41}, torch::kInt32);
   EXPECT_TRUE(torch::equal(indices[0][0].slice(0, 0, 5), expected_prefix));
+}
+
+TEST_F(DeepseekV4IndexerTest, DSparkNativeSwaIndicesMapExpandedMetadataRing) {
+  // DSAMetadataBuilder right-aligns the two retained physical ring blocks in
+  // three logical columns for kv_len=9. Position 3 belongs to the older
+  // physical block even though logical column 0 is padding.
+  const torch::Tensor block_table =
+      torch::tensor({{-1, 21, 20}}, torch::kInt32);
+  const torch::Tensor query_cu_seq_lens = torch::tensor({0, 2}, torch::kInt32);
+  const torch::Tensor seq_lens = torch::tensor({9}, torch::kInt32);
+
+  const torch::Tensor indices =
+      build_dspark_swa_indices(block_table,
+                               query_cu_seq_lens,
+                               seq_lens,
+                               /*window_size=*/4,
+                               /*dspark_block_size=*/3,
+                               /*cache_block_size=*/4);
+
+  const torch::Tensor expected_prefix =
+      torch::tensor({83, 84, 85, 86, 87, 80}, torch::kInt32);
+  ASSERT_EQ(indices.size(0), 2);
+  for (int64_t row = 0; row < indices.size(0); ++row) {
+    EXPECT_TRUE(torch::equal(indices[row][0].slice(0, 0, 6), expected_prefix));
+  }
 }
 
 TEST_F(DeepseekV4IndexerTest, DsaDummyAttentionUsesPositionDevice) {
