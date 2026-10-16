@@ -210,6 +210,8 @@ library_exists() {
 system_dependencies_ready() {
     header_exists "zstd.h" && \
         library_exists "libzstd.so" && \
+        header_exists "liburing.h" && \
+        library_exists "liburing.so" && \
         header_exists "xxhash.h" && \
         library_exists "libxxhash.so" && \
         header_exists "msgpack.hpp"
@@ -224,29 +226,30 @@ install_system_dependencies() {
         run_or_die "Failed to install apt development packages" \
             env DEBIAN_FRONTEND=noninteractive apt-get install -y \
                 libzstd-dev \
+                liburing-dev \
                 libxxhash-dev \
                 libmsgpack-cxx-dev
         print_success \
-            "Installed apt packages: libzstd-dev libxxhash-dev libmsgpack-cxx-dev"
+            "Installed apt packages: libzstd-dev liburing-dev libxxhash-dev libmsgpack-cxx-dev"
         return
     fi
 
     if command -v dnf >/dev/null 2>&1; then
         run_or_die "Failed to install dnf development packages" \
-            dnf --disablerepo=update install -y zstd-devel xxhash-devel
-        print_success "Installed dnf packages: zstd-devel xxhash-devel"
+            dnf --disablerepo=update install -y zstd-devel liburing-devel xxhash-devel
+        print_success "Installed dnf packages: zstd-devel liburing-devel xxhash-devel"
         return
     fi
 
     if command -v yum >/dev/null 2>&1; then
         run_or_die "Failed to install yum development packages" \
-            yum install -y zstd-devel xxhash-devel
-        print_success "Installed yum packages: zstd-devel xxhash-devel"
+            yum install -y zstd-devel liburing-devel xxhash-devel
+        print_success "Installed yum packages: zstd-devel liburing-devel xxhash-devel"
         return
     fi
 
     print_error \
-        "Unsupported package manager. Install zstd, xxHash, and msgpack-cxx development packages manually."
+        "Unsupported package manager. Install zstd, liburing, xxHash, and msgpack-cxx development packages manually."
 }
 
 install_msgpack_cxx_headers() {
@@ -298,7 +301,7 @@ install_build_dependencies() {
 
     if ! system_dependencies_ready; then
         print_error \
-            "Mooncake dependencies are incomplete after installation. Check zstd, xxHash, and msgpack-cxx development files."
+            "Mooncake dependencies are incomplete after installation. Check liburing, zstd, xxHash, and msgpack-cxx development files."
     fi
 }
 

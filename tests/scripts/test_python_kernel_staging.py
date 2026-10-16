@@ -13,7 +13,6 @@
 
 """Staging of Python kernel packages and their compiler entry points."""
 
-import importlib.util
 import os
 import shutil
 import subprocess
@@ -24,15 +23,9 @@ import unittest
 from pathlib import Path
 from types import ModuleType
 
+from scripts.build_support.utils import load_setup_module as _load_setup_module
+
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-
-def _load_setup_module() -> ModuleType:
-    """Import ``setup.py`` as a module; its side effects sit under __main__."""
-    spec = importlib.util.spec_from_file_location("xllm_setup", os.path.join(_REPO_ROOT, "setup.py"))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 class PythonKernelStagingTest(unittest.TestCase):
