@@ -17,6 +17,23 @@ cc_test(
     pybind11::embed
 )
 
+cc_test(
+  NAME
+    glm5_next_moe_test
+  SRCS
+    glm5_next_moe_test.cpp
+  DEPS
+    ascendcl
+    torch
+    torch_npu
+    kernels
+    npu_kernels
+    GTest::gtest
+    glog::glog
+    unified_dlog
+    pybind11::embed
+)
+
 # Temporarily disabled: Dsv4ScatterCache tests are unstable in the current
 # NPU test environment.
 # cc_test(
