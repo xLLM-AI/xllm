@@ -18,6 +18,7 @@ limitations under the License.
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <cstdint>
 
 #include "util/threadpool.h"
 
@@ -34,7 +35,7 @@ TEST(BlockingCounterTest, TwoThreadTest) {
   ThreadPool threadpool(1);
   BlockingCounter counter(2);
 
-  std::atomic<int> called{0};
+  std::atomic<int32_t> called{0};
   threadpool.schedule([&counter, &called]() {
     ++called;
     counter.decrement_count();
@@ -49,7 +50,7 @@ TEST(BlockingCounterTest, MultiThreadTest) {
   ThreadPool threadpool(4);
   BlockingCounter counter(5);
 
-  std::atomic<int> called{0};
+  std::atomic<int32_t> called{0};
   threadpool.schedule([&counter, &called]() {
     ++called;
     counter.decrement_count();
@@ -77,18 +78,18 @@ TEST(BlockingCounterTest, WaitTimeoutTest) {
   ThreadPool threadpool(2);
   BlockingCounter counter(3);
 
-  int called = 0;
+  std::atomic<int32_t> called{0};
   threadpool.schedule([&counter, &called]() {
-    counter.decrement_count();
     ++called;
+    counter.decrement_count();
   });
 
-  counter.decrement_count();
   ++called;
+  counter.decrement_count();
 
   const std::chrono::milliseconds timeout(100);
   counter.wait_for(timeout);
-  EXPECT_EQ(2, called);
+  EXPECT_EQ(2, called.load());
 }
 
 }  // namespace xllm
