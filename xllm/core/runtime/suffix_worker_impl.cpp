@@ -258,7 +258,6 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
 
   LlmForwardInput validate_input;
   prepare_validate_inputs(input, validate_input);
-  validate_input.skip_sampling_for_logits_only = true;
   auto& validate_token_ids = validate_input.token_ids;
   for (int32_t i = 0; i < num_speculative_tokens; ++i) {
     std::vector<int32_t> draft_col;
@@ -380,13 +379,8 @@ SampleOutput SuffixWorkerImpl::validate(
            static_cast<int64_t>(batch_size) * num_val_tokens)
       << "suffix validate logits shape mismatch";
 
-  using ISlice = torch::indexing::Slice;
   auto target_logits =
       target_output.logits.view({batch_size, num_val_tokens, vocab_size});
-  // Use target greedy token as the bonus token, consistent with greedy verify.
-  auto bonus_token_ids =
-      target_logits.index({ISlice(), num_val_tokens - 1, ISlice()})
-          .argmax(/*dim=*/-1, /*keepdim=*/true);
 
   auto greedy_do_sample = torch::zeros({batch_size}, torch::kBool);
   return spec_verify::run_rejection_sampling({.do_sample = greedy_do_sample,
@@ -394,8 +388,7 @@ SampleOutput SuffixWorkerImpl::validate(
                                               .all_greedy_sample = true},
                                              draft_proposal,
                                              target_logits,
-                                             target_output,
-                                             bonus_token_ids);
+                                             target_output);
 }
 
 }  // namespace xllm

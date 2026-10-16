@@ -36,6 +36,14 @@ SpecMetrics calculate_from_widths(
                            make_verify_layouts(tokens, &num_draft_tokens, {}));
 }
 
+RejectionSampler make_greedy_rejection_sampler(int64_t batch_size) {
+  return RejectionSampler(torch::zeros({batch_size}, torch::kBool),
+                          /*all_random_sample=*/false,
+                          /*all_greedy_sample=*/true,
+                          /*logprobs=*/false,
+                          /*max_top_logprobs=*/0);
+}
+
 TEST(SpeculativeTokenStatsTest, CountsTokensPerSequence) {
   const torch::Tensor tokens = torch::tensor(
       {{10, 11, 12, -1, -1, -1}, {20, 21, 22, 23, 24, 25}}, torch::kInt32);
@@ -73,15 +81,25 @@ TEST(SpeculativeTokenStatsTest, GreedyExcludesTargetTokens) {
   const torch::Tensor num_draft_tokens = torch::tensor(
       {{1, 2, 3}, {1, 2, 3}, {1, 2, 3}, {1, 2, 3}}, torch::kInt64);
   // Reject at each possible position, then accept the entire final row.
+  // One-hot logits make the greedy target deterministic: draft columns force
+  // tokens 9/2/3, the bonus column always picks 8.
+  const int64_t vocab_size = 10;
   const torch::Tensor target_tokens = torch::tensor(
       {{9, 2, 3}, {1, 9, 3}, {1, 2, 9}, {1, 2, 3}}, torch::kInt64);
-  const torch::Tensor bonus_tokens = torch::full({4, 1}, 8, torch::kInt64);
-  const auto sampled = RejectionSampler::greedy_sample_from_token_ids(
-      num_draft_tokens,
-      target_tokens,
-      bonus_tokens,
-      /*mask_out_rejected_tokens=*/true);
-  const torch::Tensor& masked_tokens = std::get<1>(sampled);
+  torch::Tensor target_logits =
+      torch::zeros({4, 4, vocab_size}, torch::kFloat32);
+  target_logits.scatter_(
+      /*dim=*/-1,
+      torch::tensor({{9, 2, 3, 8}, {1, 9, 3, 8}, {1, 2, 9, 8}, {1, 2, 3, 8}},
+                    torch::kInt64)
+          .unsqueeze(/*dim=*/-1),
+      /*value=*/10.0f);
+  const RejectionSampler sampler = make_greedy_rejection_sampler(4);
+  const SampleOutput sampled =
+      sampler.forward(DraftProposal(num_draft_tokens),
+                      target_logits,
+                      /*mask_out_rejected_tokens=*/true);
+  const torch::Tensor& masked_tokens = sampled.next_tokens;
   ASSERT_TRUE(torch::equal(
       masked_tokens,
       torch::tensor(
@@ -141,13 +159,19 @@ TEST(SpeculativeTokenStatsTest, BlockHandlesSingleAndZeroDrafts) {
   const torch::Tensor num_draft_tokens =
       torch::tensor({{1}, {1}}, torch::kInt64);
   const torch::Tensor target_tokens = torch::tensor({{9}, {1}}, torch::kInt64);
-  const torch::Tensor bonus_tokens = torch::full({2, 1}, 8, torch::kInt64);
-  const auto sampled = RejectionSampler::greedy_sample_from_token_ids(
-      num_draft_tokens,
-      target_tokens,
-      bonus_tokens,
-      /*mask_out_rejected_tokens=*/true);
-  const torch::Tensor& single_tokens = std::get<1>(sampled);
+  const int64_t vocab_size = 10;
+  torch::Tensor target_logits =
+      torch::zeros({2, 2, vocab_size}, torch::kFloat32);
+  target_logits.scatter_(
+      /*dim=*/-1,
+      torch::tensor({{9, 8}, {1, 8}}, torch::kInt64).unsqueeze(/*dim=*/-1),
+      /*value=*/10.0f);
+  const RejectionSampler sampler = make_greedy_rejection_sampler(2);
+  const SampleOutput sampled =
+      sampler.forward(DraftProposal(num_draft_tokens),
+                      target_logits,
+                      /*mask_out_rejected_tokens=*/true);
+  const torch::Tensor& single_tokens = sampled.next_tokens;
   const auto stats =
       calculate_from_widths(single_tokens, {1, 1}).sequence_stats;
   ASSERT_EQ(stats.size(), 2);
@@ -158,13 +182,18 @@ TEST(SpeculativeTokenStatsTest, BlockHandlesSingleAndZeroDrafts) {
 
   // A fully pruned row emits only the target bonus and proposes no drafts.
   const torch::Tensor empty_drafts = torch::empty({2, 0}, torch::kInt64);
-  const auto bonus_only = RejectionSampler::greedy_sample_from_token_ids(
-      empty_drafts,
-      empty_drafts,
-      bonus_tokens,
-      /*mask_out_rejected_tokens=*/true);
-  ASSERT_TRUE(torch::equal(std::get<1>(bonus_only), bonus_tokens));
-  const torch::Tensor& bonus_only_tokens = std::get<1>(bonus_only);
+  torch::Tensor bonus_only_logits =
+      torch::zeros({2, 1, vocab_size}, torch::kFloat32);
+  bonus_only_logits.scatter_(/*dim=*/-1,
+                             torch::full({2, 1, 1}, 8, torch::kInt64),
+                             /*value=*/10.0f);
+  const SampleOutput bonus_only =
+      sampler.forward(DraftProposal(empty_drafts),
+                      bonus_only_logits,
+                      /*mask_out_rejected_tokens=*/true);
+  const torch::Tensor& bonus_only_tokens = bonus_only.next_tokens;
+  ASSERT_TRUE(
+      torch::equal(bonus_only_tokens, torch::full({2, 1}, 8, torch::kInt64)));
   const auto zero_stats =
       calculate_from_widths(bonus_only_tokens, {0, 0}).sequence_stats;
   ASSERT_EQ(zero_stats.size(), 2);

@@ -38,6 +38,15 @@ class Sampler final {
       const SamplingParameters& params,
       const torch::Tensor& filter_mask = torch::Tensor()) const;
 
+  // In-place sampling transforms on [batch_size, vocab_size] logits:
+  // logits bias, repetition/frequency/presence penalties, temperature,
+  // min-p, top-k/top-p, and the token filter mask/bitmask. Shared by normal
+  // decode and logits-only speculative verify so both consume the same
+  // distribution.
+  static torch::Tensor process_logits(torch::Tensor& logits,
+                                      const SamplingParameters& params,
+                                      const torch::Tensor& filter_mask = {});
+
   // helper functions
   // probs: [..., vocab_size]
   static torch::Tensor greedy_sample(const torch::Tensor& probs);

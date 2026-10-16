@@ -748,11 +748,6 @@ void TaskExecutionPipeline::launch(uint32_t slot_id) {
       params.selected_token_idxes.numel() != 0) {
     slot.logits = model_.logits(slot.model_output.hidden_states,
                                 params.selected_token_idxes);
-    // Native top-k/top-p consumes top-p in the logits dtype. Retain the
-    // conversion through Consume so asynchronous sampler reads stay valid.
-    if (params.top_k.defined() && params.top_p.defined()) {
-      params.top_p = params.top_p.to(slot.logits.scalar_type());
-    }
     slot.sample_output = sampler_.forward(slot.logits, params);
     const auto& result = slot.buffer->device_result();
     result.tokens.copy_(slot.sample_output.next_tokens);

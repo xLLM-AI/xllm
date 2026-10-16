@@ -131,11 +131,9 @@ struct TaskExecutionPipeline::SpeculativeSlot {
   torch::Tensor draft_block_indices;
   torch::Tensor draft_sample_indices;
   torch::Tensor greedy_do_sample;
-  torch::Tensor target_token_storage;
   torch::Tensor proposal_storage;
   torch::Tensor accepted_mask_storage;
   torch::Tensor host_hidden_storage;
-  torch::Tensor target_tokens;
   torch::Tensor proposal;
   torch::Tensor accepted_mask;
   torch::Tensor context_slots_storage;

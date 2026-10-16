@@ -180,17 +180,20 @@ std::optional<ForwardOutput> VLMWorkerImpl::step_internal(
 
   ForwardOutput output;
   if (sampling_params.selected_token_idxes.defined()) {
-    auto sample_output = sampler_->forward(logits, sampling_params);
-    output.logits = logits;
-    COUNTER_ADD(execution_latency_seconds_sampling, timer.elapsed_seconds());
-
-    // set sample output to output
-    output.sample_output = sample_output;
-
-    // carry over the sampling params
     output.do_sample = sampling_params.do_sample;
     output.logprobs = sampling_params.logprobs;
     output.max_top_logprobs = sampling_params.max_top_logprobs;
+    if (input.skip_sampling_for_logits_only) {
+      if (input.skip_process_logits) {
+        Sampler::process_logits(logits, sampling_params);
+      }
+    } else {
+      auto sample_output = sampler_->forward(logits, sampling_params);
+      COUNTER_ADD(execution_latency_seconds_sampling, timer.elapsed_seconds());
+
+      output.sample_output = sample_output;
+    }
+    output.logits = logits;
   }
 
   if (options_.enable_speculative_decode()) {

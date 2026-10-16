@@ -497,7 +497,6 @@ using adaptive_pruning::clamp_prefix_lengths;
 using adaptive_pruning::has_selected_probs_by_step;
 using adaptive_pruning::max_pruned_prefix_length;
 using adaptive_pruning::selected_probs_by_step;
-using adaptive_pruning::sync_pruned_boundary_outputs;
 using adaptive_pruning::truncate_draft_outputs;
 
 #if defined(USE_NPU)
@@ -1005,12 +1004,6 @@ bool MTPWorkerImpl<TargetInput>::positions_are_decoupled_from_kv_length()
   }
   const ModelArgs& target_args = impl_->context_.get_model_args();
   return !target_args.rope_scaling_mrope_section().empty();
-}
-
-template <typename TargetInput>
-bool MTPWorkerImpl<TargetInput>::requires_probability_based_validation() const {
-  // Keep validation independent of graph/eager sampled-token layouts.
-  return uses_embedded_eagle3_draft();
 }
 
 template <typename TargetInput>
@@ -2172,16 +2165,12 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
   const bool needs_padding =
       (total_tokens != static_cast<int32_t>(padded_total));
   if (needs_padding) {
-    // Slow path: per-seq variable-length, scatter into padded layout. Pad
-    // next_tokens with 0 (MTP's established padding); trailing pads are masked
-    // to -1 by apply_pruned_prefix_lengths downstream regardless.
     padded_target_output_slow.emplace(target_output);
     adaptive_pruning::scatter_varlen_target_output_to_dense(
         *padded_target_output_slow,
         per_seq_val_tokens,
         batch_size,
-        max_val_tokens,
-        /*next_token_pad_value=*/0);
+        max_val_tokens);
   }
   // Uniform fast path uses a scoped local ForwardOutput whose only diff is
   // logits viewed to [padded_total, vocab]; slow path uses the materialized
@@ -2220,8 +2209,6 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
                           target_output_for_validate,
                           num_speculative_tokens,
                           pruned_prefix_lengths,
-                          validate_input.sampling_params.filter_mask,
-                          validate_input.sampling_params.filter_bitmask,
                           validate_input.json_object_invalid_draft);
   }
 
@@ -2940,6 +2927,8 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
   validate_input = input.clone();
   clear_ready_events(validate_input);
   validate_input.runtime.device_tensors_ready = false;
+  validate_input.skip_sampling_for_logits_only = true;
+  validate_input.skip_process_logits = true;
   auto& input_params = validate_input.input_params;
   input_params.embedding.input_embedding = torch::Tensor();
   torch::TensorOptions token_options = validate_input.token_ids.options();
@@ -3390,6 +3379,8 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
   validate_input = input.clone();
   clear_ready_events(validate_input);
   validate_input.runtime.device_tensors_ready = false;
+  validate_input.skip_sampling_for_logits_only = true;
+  validate_input.skip_process_logits = true;
   auto& input_params = validate_input.input_params;
   input_params.embedding.input_embedding = torch::Tensor();
   torch::TensorOptions token_options = validate_input.token_ids.options();
@@ -3915,14 +3906,7 @@ SampleOutput MTPWorkerImpl<TargetInput>::validate(
     const ForwardOutput& target_output,
     int32_t num_speculative_tokens,
     const std::vector<int32_t>* pruned_prefix_lengths,
-    const torch::Tensor& target_filter_mask,
-    const torch::Tensor& target_filter_bitmask,
     const std::vector<uint8_t>& invalid_draft) {
-  const int32_t num_target_tokens =
-      target_output.sample_output.next_tokens.numel();
-  const int32_t num_val_tokens = num_speculative_tokens + 1;
-  CHECK_EQ(num_target_tokens % num_val_tokens, 0);
-
   std::vector<torch::Tensor> draft_token_ids_steps;
   std::vector<torch::Tensor> draft_probs_steps;
   draft_token_ids_steps.reserve(draft_outputs.size());
@@ -3943,8 +3927,6 @@ SampleOutput MTPWorkerImpl<TargetInput>::validate(
                   target_output,
                   num_speculative_tokens,
                   pruned_prefix_lengths,
-                  target_filter_mask,
-                  target_filter_bitmask,
                   invalid_draft);
 }
 
@@ -3955,34 +3937,21 @@ SampleOutput MTPWorkerImpl<TargetInput>::validate(
     const ForwardOutput& target_output,
     int32_t num_speculative_tokens,
     const std::vector<int32_t>* pruned_prefix_lengths,
-    const torch::Tensor& target_filter_mask,
-    const torch::Tensor& target_filter_bitmask,
     const std::vector<uint8_t>& invalid_draft) {
-  const int32_t num_target_tokens =
-      target_output.sample_output.next_tokens.numel();
   const int32_t num_val_tokens = num_speculative_tokens + 1;
-  CHECK_EQ(num_target_tokens % num_val_tokens, 0);
-  const int32_t batch_size = num_target_tokens / num_val_tokens;
+  const int32_t batch_size =
+      static_cast<int32_t>(draft_proposal.token_ids().size(0));
   const int32_t vocab_size = target_output.logits.size(/*dim=*/-1);
-  const bool use_greedy_token_ids = !requires_probability_based_validation() &&
-                                    sampling_params.all_greedy_sample &&
-                                    !target_output.logprobs;
 
-  using torch::indexing::None;
-  using ISlice = torch::indexing::Slice;
   const bool step_major_validate_layout = uses_step_major_validate_layout();
-  torch::Tensor target_next_tokens = target_output.sample_output.next_tokens;
   torch::Tensor target_logits;
-  torch::Tensor target_embeddings = target_output.sample_output.embeddings;
+  torch::Tensor target_embeddings;
   if (step_major_validate_layout) {
-    target_next_tokens = target_next_tokens.view({num_val_tokens, batch_size})
-                             .transpose(/*dim0=*/0, /*dim1=*/1)
-                             .contiguous()
-                             .view({num_target_tokens});
     target_logits =
         target_output.logits.view({num_val_tokens, batch_size, vocab_size})
             .permute({1, 0, 2})
             .contiguous();
+    target_embeddings = target_output.sample_output.embeddings;
     if (target_embeddings.defined()) {
       target_embeddings =
           target_embeddings
@@ -3993,150 +3962,44 @@ SampleOutput MTPWorkerImpl<TargetInput>::validate(
   } else {
     target_logits =
         target_output.logits.view({batch_size, num_val_tokens, vocab_size});
-    if (target_embeddings.defined()) {
-      target_embeddings = target_embeddings.view(
-          {batch_size, num_val_tokens, target_embeddings.size(-1)});
-    }
   }
-  torch::Tensor bonus_token_ids =
-      target_next_tokens
-          .index({"...", ISlice(num_val_tokens - 1, None, num_val_tokens)})
-          .view({-1, 1});
 
-  SampleOutput sample_output;
-  if (use_greedy_token_ids) {
-    torch::Tensor target_token_ids =
-        target_next_tokens.view({batch_size, num_val_tokens});
-    torch::Tensor target_draft_token_ids = target_token_ids.slice(
-        /*dim=*/1, /*start=*/0, /*end=*/num_val_tokens - 1);
-    torch::Tensor draft_token_ids = draft_proposal.token_ids();
-    // Keep the original target ID block and let the verifier convert IDs in UB.
-    // Target and bonus remain views of the same production storage.
-#if defined(USE_NPU)
-    if (target_draft_token_ids.device().type() !=
-        c10::DeviceType::PrivateUse1) {
-      draft_token_ids = draft_token_ids.to(target_draft_token_ids);
-    }
-#else
-    draft_token_ids = draft_token_ids.to(target_draft_token_ids);
-#endif
-    auto [accepted_token_ids, masked_accepted_token_ids] =
-        RejectionSampler::greedy_sample_from_token_ids(
-            draft_token_ids,
-            target_draft_token_ids,
-            bonus_token_ids,
-            /*mask_out_rejected_tokens=*/true);
-    (void)accepted_token_ids;
-
-    sample_output.next_tokens = masked_accepted_token_ids;
-    sample_output.embeddings = target_embeddings;
-  } else {
-    if (target_filter_bitmask.defined()) {
-      CHECK(target_output.filter_bitmask_applied_to_logits)
-          << "packed target logits must be filtered by the target sampler";
-      CHECK_EQ(target_filter_bitmask.dim(), 2)
-          << "MTP JSON filter bitmask must be 2-D";
-      CHECK_EQ(target_filter_bitmask.size(0), num_target_tokens)
-          << "MTP JSON filter bitmask row count mismatch";
-      CHECK_EQ(target_filter_bitmask.size(1), (vocab_size + 31) / 32)
-          << "MTP JSON filter bitmask vocabulary width mismatch";
-    } else if (target_filter_mask.defined()) {
-      CHECK_EQ(target_filter_mask.dim(), 2)
-          << "MTP JSON filter mask must be 2-D";
-      CHECK_EQ(target_filter_mask.size(0), num_target_tokens)
-          << "MTP JSON filter mask row count mismatch";
-      CHECK_EQ(target_filter_mask.size(1), vocab_size)
-          << "MTP JSON filter mask vocabulary mismatch";
-      target_logits =
-          target_logits +
-          target_filter_mask.view({batch_size, num_val_tokens, vocab_size});
-    }
-
-    const torch::Tensor& draft_token_ids = draft_proposal.token_ids();
-    torch::Tensor validation_draft_token_ids = draft_token_ids;
-    if (!invalid_draft.empty()) {
-      CHECK_EQ(invalid_draft.size(),
-               static_cast<size_t>(batch_size * (num_val_tokens - 1)))
-          << "MTP invalid draft mask shape mismatch";
-      torch::Tensor invalid_mask =
-          torch::tensor(
-              invalid_draft,
-              torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU))
-              .view({batch_size, num_val_tokens - 1})
-              .to(torch::kBool)
-              .to(draft_token_ids.device());
-      torch::Tensor target_sampled_tokens =
-          target_output.sample_output.next_tokens
-              .view({batch_size, num_val_tokens})
-              .slice(/*dim=*/1, /*start=*/0, /*end=*/num_val_tokens - 1);
-      validation_draft_token_ids =
-          torch::where(invalid_mask,
-                       target_sampled_tokens.to(draft_token_ids.device()),
-                       draft_token_ids);
-    }
-    DraftProposal validation_proposal(std::move(validation_draft_token_ids),
-                                      draft_proposal.draft_probs());
-    sample_output = spec_verify::run_rejection_sampling(
-        {.do_sample = sampling_params.do_sample,
-         .all_random_sample = sampling_params.all_random_sample,
-         .all_greedy_sample = sampling_params.all_greedy_sample},
-        validation_proposal,
-        target_logits,
-        target_output,
-        bonus_token_ids);
-
-    if (!invalid_draft.empty()) {
-      torch::Tensor target_sampled_tokens =
-          target_output.sample_output.next_tokens.view(
-              {batch_size, num_val_tokens});
-      for (int32_t seq_id = 0; seq_id < batch_size; ++seq_id) {
-        int32_t first_invalid = -1;
-        for (int32_t draft_idx = 0; draft_idx < num_val_tokens - 1;
-             ++draft_idx) {
-          if (invalid_draft[static_cast<size_t>(seq_id * (num_val_tokens - 1) +
-                                                draft_idx)] != 0) {
-            first_invalid = draft_idx;
-            break;
-          }
-        }
-        if (first_invalid < 0) {
-          continue;
-        }
-
-        torch::Tensor output_row = sample_output.next_tokens.select(0, seq_id);
-        output_row.select(0, first_invalid)
-            .copy_(target_sampled_tokens.index({seq_id, first_invalid}));
-        if (first_invalid + 1 < num_val_tokens) {
-          output_row
-              .narrow(/*dim=*/0,
-                      /*start=*/first_invalid + 1,
-                      /*length=*/num_val_tokens - first_invalid - 1)
-              .fill_(-1);
-        }
-      }
-    }
-    // process embedding
+  // Grammar-invalid draft positions carry the -1 sentinel directly in the
+  // proposal token ids; the rejection sampler rejects negative ids.
+  torch::Tensor validation_token_ids;
+  if (!invalid_draft.empty()) {
+    CHECK_EQ(invalid_draft.size(),
+             static_cast<size_t>(batch_size * (num_val_tokens - 1)))
+        << "MTP invalid draft mask shape mismatch";
+    torch::Tensor invalid_mask =
+        async_h2d_tensor(invalid_draft, draft_proposal.token_ids().device())
+            .view({batch_size, num_val_tokens - 1})
+            .to(torch::kBool);
+    validation_token_ids =
+        draft_proposal.token_ids().masked_fill(invalid_mask, /*sentinel=*/-1);
+  }
+  SampleOutput sample_output = spec_verify::run_rejection_sampling(
+      {.do_sample = sampling_params.do_sample,
+       .all_random_sample = sampling_params.all_random_sample,
+       .all_greedy_sample = sampling_params.all_greedy_sample},
+      DraftProposal(validation_token_ids.defined() ? validation_token_ids
+                                                   : draft_proposal.token_ids(),
+                    draft_proposal.draft_probs()),
+      target_logits,
+      target_output);
+  // Only the step-major layout needs the permuted embeddings copy.
+  if (step_major_validate_layout) {
     sample_output.embeddings = target_embeddings;
   }
 
   if (pruned_prefix_lengths != nullptr) {
-    // Build cut/keep masks once from pruned_prefix_lengths and reuse across
-    // both helpers below, so we avoid re-uploading prefix_lengths and
-    // rebuilding identical arange+eq+logical_and masks per call.
-    const adaptive_pruning::PrunedPrefixMasks pruning_masks =
+    const torch::Tensor pruning_masks =
         adaptive_pruning::build_pruned_prefix_masks(
             *pruned_prefix_lengths,
             num_speculative_tokens,
             sample_output.next_tokens.device());
-    sync_pruned_boundary_outputs(sample_output,
-                                 target_output,
-                                 batch_size,
-                                 num_val_tokens,
-                                 pruning_masks);
-    apply_pruned_prefix_lengths(sample_output,
-                                target_output.sample_output.next_tokens,
-                                num_speculative_tokens,
-                                pruning_masks);
+    apply_pruned_prefix_lengths(
+        sample_output, num_speculative_tokens, pruning_masks);
   }
 
   return sample_output;

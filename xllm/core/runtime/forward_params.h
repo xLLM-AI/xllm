@@ -522,6 +522,7 @@ class LlmForwardInput final {
     inputs.transfer_kv_infos = transfer_kv_infos;
     inputs.input_host_sample_count = input_host_sample_count;
     inputs.skip_sampling_for_logits_only = skip_sampling_for_logits_only;
+    inputs.skip_process_logits = skip_process_logits;
     inputs.return_selected_hidden = return_selected_hidden;
     inputs.sample_sequence_ids = sample_sequence_ids;
     inputs.sample_prior_output_rows = sample_prior_output_rows;
@@ -584,8 +585,14 @@ class LlmForwardInput final {
   // Errors detected while aligning prior overlap output with grammar rows.
   std::vector<JsonObjectOutputError> json_object_errors;
 
-  // If true, skip sampler forward and only keep logits.
+  // If true, skip sampler forward and only keep logits. Sampling transforms
+  // still run when `skip_process_logits` is set so speculative
+  // verify scores the request's real distribution.
   bool skip_sampling_for_logits_only = false;
+  // Run the in-place sampling transforms for a skip_sampling_for_logits_only
+  // forward. Set by speculative verify inputs; DSpark/DFlash2 draft queries
+  // need raw logits and leave it false.
+  bool skip_process_logits = false;
   // If true, populate ForwardOutput.selected_hidden with hidden states matching
   // the `logits` selection layout. Used by DSpark ConfidenceHead which needs
   // pre-lm_head hidden states of the draft tokens.
@@ -618,10 +625,6 @@ class ForwardOutput final {
   // the sole marker of a verify result (ordinary decode emits 1-D tokens);
   // consumed before proto/shared-memory serialization.
   std::vector<VerifyRowLayout> spec_verify_layouts;
-  // The target sampler applies packed token masks in-place before returning
-  // sampled tokens. MTP validation uses this local contract to avoid applying
-  // the same mask to target logits a second time.
-  bool filter_bitmask_applied_to_logits = false;
   std::vector<JsonObjectOutputError> json_object_errors;
   // Keep no-sync input tensor handles alive until downstream consumers finish
   // using outputs on the same compute stream. Composite workers append child

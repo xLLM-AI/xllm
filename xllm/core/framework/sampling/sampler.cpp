@@ -57,17 +57,11 @@ torch::Generator make_sampling_generator(const torch::Device& device) {
 
 }  // namespace
 
-SampleOutput Sampler::forward(torch::Tensor& logits,
-                              const SamplingParameters& params,
-                              const torch::Tensor& filter_mask) const {
+torch::Tensor Sampler::process_logits(torch::Tensor& logits,
+                                      const SamplingParameters& params,
+                                      const torch::Tensor& filter_mask) {
   const torch::Tensor& effective_filter_mask =
       filter_mask.defined() ? filter_mask : params.filter_mask;
-  SampleOutput output;
-  // vLLM reports probabilities from the unmodified model distribution.
-  const torch::Tensor raw_logprobs =
-      params.logprobs && !params.use_beam_search
-          ? torch::log_softmax(logits, /*dim=*/-1, torch::kFloat32)
-          : torch::Tensor();
   if (params.logits_bias.defined()) {
     logits.add_(params.logits_bias);
   }
@@ -115,6 +109,10 @@ SampleOutput Sampler::forward(torch::Tensor& logits,
           sample_filter_bitmask.index_select(/*dim=*/0, params.sample_idxes);
     }
   }
+  if (params.top_k.defined() && params.top_p.defined()) {
+    // Native top-k/top-p consumes top-p in the logits dtype.
+    sample_top_p = sample_top_p.to(sample_logits.scalar_type());
+  }
 
   if (sample_filter_bitmask.defined()) {
     apply_token_bitmask_inplace(sample_logits, sample_filter_bitmask);
@@ -129,8 +127,38 @@ SampleOutput Sampler::forward(torch::Tensor& logits,
         << "filter_mask vocab mismatch, filter_mask.size(1)="
         << effective_filter_mask.size(1)
         << ", sample_logits.size(1)=" << sample_logits.size(1);
-    sample_logits = sample_logits + effective_filter_mask;
+    sample_logits.add_(effective_filter_mask);
   }
+
+  if (sample_temperatures.defined()) {
+    apply_temperatures(sample_logits, sample_temperatures);
+  }
+  apply_min_p(sample_logits, sample_min_p);
+  apply_top_k_top_p(sample_logits, torch::Tensor(), sample_top_k, sample_top_p);
+  // apply_top_k_top_p may rebind sample_logits to a fresh tensor (MLU);
+  // always write the result back so the caller sees the processed logits.
+  if (use_sample_indices) {
+    logits.index_copy_(/*dim=*/0, params.sample_idxes, sample_logits);
+  } else {
+    logits = sample_logits;
+  }
+  return sample_logits;
+}
+
+SampleOutput Sampler::forward(torch::Tensor& logits,
+                              const SamplingParameters& params,
+                              const torch::Tensor& filter_mask) const {
+  SampleOutput output;
+  // vLLM reports probabilities from the unmodified model distribution.
+  const torch::Tensor raw_logprobs =
+      params.logprobs && !params.use_beam_search
+          ? torch::log_softmax(logits, /*dim=*/-1, torch::kFloat32)
+          : torch::Tensor();
+
+  const bool use_sample_indices =
+      params.selected_token_idxes.numel() != params.sample_idxes.numel();
+
+  torch::Tensor sample_logits = process_logits(logits, params, filter_mask);
 
   if (params.all_greedy_sample && !params.logprobs && !params.return_probs &&
       !use_sample_indices && !filter_mask.defined()) {
@@ -152,16 +180,6 @@ SampleOutput Sampler::forward(torch::Tensor& logits,
     output.next_tokens = sample_indices;
     output.probs = log_probs.exp().view({-1}).to(logits.dtype());
     return output;
-  }
-
-  // apply temperatures, top-k and top-p
-  if (sample_temperatures.defined()) {
-    apply_temperatures(sample_logits, sample_temperatures);
-  }
-  apply_min_p(sample_logits, sample_min_p);
-  apply_top_k_top_p(sample_logits, torch::Tensor(), sample_top_k, sample_top_p);
-  if (use_sample_indices) {
-    logits.index_copy_(/*dim=*/0, params.sample_idxes, sample_logits);
   }
 
   CHECK(params.do_sample.defined()) << "params.do_sample must be defined";

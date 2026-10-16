@@ -151,22 +151,15 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
                                             const DraftBlock& draft_block,
                                             LlmForwardInput& validate_input);
 
-  // `per_seq_val_tokens` (optional): when non-empty, the target output was
-  // scattered from a per-seq varlen batch and each seq's bonus lives at
-  // dense col (per_seq_val_tokens[i] - 1), not the fixed last column. Passing
-  // it lets validate() gather the bonus token per-seq. Empty = uniform
-  // batch-max width (bonus at col effective_val_tokens - 1 for every seq).
   SampleOutput validate(const SamplingParameters& sampling_params,
                         const DraftBlock& draft_block,
                         const ForwardOutput& target_output,
-                        int32_t effective_val_tokens,
-                        const std::vector<int32_t>& per_seq_val_tokens);
+                        int32_t effective_val_tokens);
 
   SampleOutput validate(const SamplingParameters& sampling_params,
                         const DraftProposal& draft_proposal,
                         const ForwardOutput& target_output,
-                        int32_t effective_val_tokens,
-                        const std::vector<int32_t>& per_seq_val_tokens);
+                        int32_t effective_val_tokens);
 
   // Adaptive-speculative helper: run controller on draft acceptance
   // probabilities (ConfidenceHead output if available, sampler-gathered probs

@@ -155,8 +155,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
       // default would silently diverge when called through a base reference.
       // Callers must pass nullptr explicitly for the static path.
       const std::vector<int32_t>* pruned_prefix_lengths,
-      const torch::Tensor& target_filter_mask,
-      const torch::Tensor& target_filter_bitmask,
       const std::vector<uint8_t>& invalid_draft);
 
   // Hook for algorithm-specific draft output post-processing during decode.
@@ -173,8 +171,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
       const ForwardOutput& target_output,
       int32_t num_speculative_tokens,
       const std::vector<int32_t>* pruned_prefix_lengths = nullptr,
-      const torch::Tensor& target_filter_mask = torch::Tensor(),
-      const torch::Tensor& target_filter_bitmask = torch::Tensor(),
       const std::vector<uint8_t>& invalid_draft = {});
 
   // PD separation: placeholder size for empty embedding slot. Default: 1x
@@ -212,7 +208,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   // Multiaxis RoPE positions can include a prompt-dependent offset and do not
   // identify the corresponding KV cache length.
   bool positions_are_decoupled_from_kv_length() const;
-  bool requires_probability_based_validation() const;
   bool uses_step_major_validate_layout() const;
   void synchronize_embedded_eagle3_forward();
   template <typename Input>

@@ -103,8 +103,7 @@ torch::Tensor materialize_graph_speculative_verify_tokens(
 SampleOutput run_rejection_sampling(const SamplerPolicy& policy,
                                     const DraftProposal& draft_proposal,
                                     const torch::Tensor& target_logits,
-                                    const ForwardOutput& target_output,
-                                    const torch::Tensor& bonus_token_ids) {
+                                    const ForwardOutput& target_output) {
   const RejectionSampler sampler(policy.do_sample,
                                  policy.all_random_sample,
                                  policy.all_greedy_sample,
@@ -112,9 +111,8 @@ SampleOutput run_rejection_sampling(const SamplerPolicy& policy,
                                  target_output.max_top_logprobs);
 
   SampleOutput sample_output =
-      sampler.forward(draft_proposal.coerce_to(bonus_token_ids),
+      sampler.forward(draft_proposal,
                       target_logits,
-                      bonus_token_ids,
                       /*mask_out_rejected_tokens=*/true);
 
   const torch::Tensor& embeddings = target_output.sample_output.embeddings;

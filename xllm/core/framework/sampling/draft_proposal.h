@@ -26,6 +26,8 @@ namespace xllm {
 
 // Rejection-sampling input: drafted tokens, plus the draft distribution q for
 // probabilistic drafts. Greedy drafts carry tokens only (accepted with q=1).
+// Grammar-invalid positions carry the -1 sentinel in token_ids; the verifier
+// force-rejects them and recovers from the target distribution.
 class DraftProposal final {
  public:
   DraftProposal() = default;
@@ -69,23 +71,12 @@ class DraftProposal final {
         << "draft_probs and target_probs must share the vocab dim";
   }
 
-  DraftProposal coerce_to(const torch::Tensor& reference_token_ids) const;
-
   DraftProposal slice_speculative(int64_t start, int64_t end) const;
 
  private:
   torch::Tensor token_ids_;
   std::optional<torch::Tensor> draft_probs_;
 };
-
-inline DraftProposal DraftProposal::coerce_to(
-    const torch::Tensor& reference_token_ids) const {
-  const auto device = reference_token_ids.device();
-  return DraftProposal(token_ids_.to(reference_token_ids),
-                       draft_probs_.has_value()
-                           ? std::make_optional(draft_probs_->to(device))
-                           : std::nullopt);
-}
 
 inline DraftProposal DraftProposal::slice_speculative(int64_t start,
                                                       int64_t end) const {

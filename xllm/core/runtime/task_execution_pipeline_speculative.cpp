@@ -363,8 +363,6 @@ Status TaskExecutionPipeline::initialize_speculative() {
     }
     slot->greedy_do_sample =
         torch::zeros({draft_samples}, options.dtype(torch::kBool));
-    slot->target_token_storage =
-        torch::empty({expanded}, options.dtype(torch::kInt64));
     slot->proposal_storage =
         torch::empty({count * (width - 1)}, options.dtype(torch::kInt64));
     slot->accepted_mask_storage =
@@ -1178,7 +1176,6 @@ Status TaskExecutionPipeline::prepare_speculative(
     status = slot.validate_input->prepare_sampling(
         slot.host_validate_sampling, slot.rows * width, prepare_stream_);
     CHECK(status.ok()) << status.message();
-    slot.target_tokens = prefix(slot.target_token_storage, slot.rows * width);
     slot.proposal = prefix(slot.proposal_storage, slot.rows * (width - 1))
                         .view({slot.rows, width - 1});
     slot.accepted_mask = prefix(slot.accepted_mask_storage, slot.rows * width)
@@ -1187,10 +1184,6 @@ Status TaskExecutionPipeline::prepare_speculative(
       slot.context_slots =
           prefix(slot.context_slots_storage, slot.rows * width);
     }
-    SampleOutput target_output;
-    target_output.next_tokens = slot.target_tokens;
-    slot.target_sampling =
-        Sampling{slot.validate_input->sampling_params(), target_output, {}};
     const auto& base = slot.target_prefill->sampling_params();
     slot.rejection = std::make_unique<RejectionSampler>(base.do_sample,
                                                         base.all_random_sample,
@@ -1513,36 +1506,26 @@ void TaskExecutionPipeline::launch_decode(SpeculativeSlot& slot) {
   slot.target_logits = model_.logits(
       slot.target_output.hidden_states,
       slot.validate_input->sampling_params().selected_token_idxes);
-  sample(*slot.target_sampling, slot.target_logits);
-  const auto target_tokens = slot.target_tokens.view({slot.rows, width});
-  const auto bonus = target_tokens.narrow(/*dim=*/1, width - 1, /*length=*/1);
+  // The executor returns raw logits; the rejection sampler must score the
+  // request's transformed distribution.
+  Sampler::process_logits(slot.target_logits,
+                          slot.validate_input->sampling_params());
   const auto& base = slot.target_prefill->sampling_params();
-  SampleOutput accepted;
-  if (base.all_greedy_sample && !base.logprobs) {
-    accepted.next_tokens =
-        std::get<1>(RejectionSampler::greedy_sample_from_token_ids(
-            slot.proposal,
-            target_tokens.narrow(/*dim=*/1, /*start=*/0, width - 1),
-            bonus,
-            /*mask_out_rejected_tokens=*/true));
-  } else {
-    std::optional<torch::Tensor> draft_probs;
-    if (slot.drafts.front()->sampled.probs.defined()) {
-      std::vector<torch::Tensor> probabilities;
-      probabilities.reserve(slot.drafts.size());
-      for (const auto& invocation : slot.drafts) {
-        probabilities.push_back(invocation->sampled.probs);
-      }
-      draft_probs = block_draft() ? slot.drafts.front()->sampled.probs
-                                  : torch::stack(probabilities, /*dim=*/1);
+  std::optional<torch::Tensor> draft_probs;
+  if (slot.drafts.front()->sampled.probs.defined()) {
+    std::vector<torch::Tensor> probabilities;
+    probabilities.reserve(slot.drafts.size());
+    for (const auto& invocation : slot.drafts) {
+      probabilities.push_back(invocation->sampled.probs);
     }
-    accepted = slot.rejection->forward(
-        DraftProposal(slot.proposal, draft_probs),
-        slot.target_logits.view(
-            {slot.rows, width, speculative_capacity_->common.vocab_size}),
-        bonus,
-        /*mask_out_rejected_tokens=*/true);
+    draft_probs = block_draft() ? slot.drafts.front()->sampled.probs
+                                : torch::stack(probabilities, /*dim=*/1);
   }
+  SampleOutput accepted = slot.rejection->forward(
+      DraftProposal(slot.proposal, draft_probs),
+      slot.target_logits.view(
+          {slot.rows, width, speculative_capacity_->common.vocab_size}),
+      /*mask_out_rejected_tokens=*/true);
   const auto& result = slot.target_prefill->device_result();
   result.tokens.copy_(accepted.next_tokens);
   if (result.logprobs.defined()) {
@@ -1859,17 +1842,16 @@ uint64_t TaskExecutionPipeline::speculative_device_bytes() const {
   uint64_t bytes = mtp_context_bytes(*context_);
   for (const auto& task_slot : slots_) {
     const auto& slot = *task_slot->speculative;
-    bytes +=
-        slot.target_prefill->device_bytes() +
-        slot.draft_prefill->device_bytes() +
-        slot.validate_input->device_bytes() +
-        slot.draft_sample_indices.nbytes() + slot.greedy_do_sample.nbytes() +
-        slot.target_token_storage.nbytes() + slot.proposal_storage.nbytes() +
-        slot.accepted_mask_storage.nbytes() +
-        context_device_bytes(*slot.state) +
-        slot.bootstrap.row_storage.nbytes() +
-        slot.bootstrap.token_storage.nbytes() +
-        state_bytes(slot.bootstrap.storage);
+    bytes += slot.target_prefill->device_bytes() +
+             slot.draft_prefill->device_bytes() +
+             slot.validate_input->device_bytes() +
+             slot.draft_sample_indices.nbytes() +
+             slot.greedy_do_sample.nbytes() + slot.proposal_storage.nbytes() +
+             slot.accepted_mask_storage.nbytes() +
+             context_device_bytes(*slot.state) +
+             slot.bootstrap.row_storage.nbytes() +
+             slot.bootstrap.token_storage.nbytes() +
+             state_bytes(slot.bootstrap.storage);
     for (const auto& invocation : slot.drafts) {
       bytes += invocation->input->device_bytes();
       bytes += invocation->token_storage.nbytes();
@@ -1898,9 +1880,6 @@ const SampleOutput& TaskExecutionPipeline::sample(Sampling& sampling,
   CHECK_EQ(logits.size(/*dim=*/1), speculative_capacity_->common.vocab_size);
   CHECK_EQ(logits.size(/*dim=*/0),
            sampling.params.selected_token_idxes.numel());
-  if (sampling.params.top_k.defined() && sampling.params.top_p.defined()) {
-    sampling.params.top_p = sampling.params.top_p.to(logits.scalar_type());
-  }
   sampling.sampled = sampler_.forward(logits, sampling.params);
   sampling.output.next_tokens.copy_(sampling.sampled.next_tokens);
   if (sampling.output.logprobs.defined()) {
