@@ -115,7 +115,9 @@ SampleOutput run_rejection_sampling(const SamplerPolicy& policy,
       sampler.forward(draft_proposal.coerce_to(bonus_token_ids),
                       target_logits,
                       bonus_token_ids,
-                      /*mask_out_rejected_tokens=*/true);
+                      /*mask_out_rejected_tokens=*/true,
+                      policy.seeds,
+                      policy.seed_offsets);
 
   const torch::Tensor& embeddings = target_output.sample_output.embeddings;
   sample_output.embeddings = embeddings.view(

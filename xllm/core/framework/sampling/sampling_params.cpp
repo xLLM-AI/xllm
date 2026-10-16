@@ -344,6 +344,9 @@ SamplingParameters SamplingParameters::to(const torch::Device& device,
   params.top_p = safe_to(top_p, options, true);
   params.min_p = safe_to(min_p, options, true);
   params.seed_offsets = safe_to(seed_offsets, device, true);
+  params.sampling_positions = safe_to(sampling_positions, device, true);
+  params.min_tokens_remaining = safe_to(min_tokens_remaining, device, true);
+  params.min_token_mask = safe_to(min_token_mask, device, true);
   params.seeds = safe_to(seeds, device, true);
   params.logits_bias = safe_to(logits_bias, device, true);
   params.top_k = safe_to(top_k, device, true);
@@ -383,7 +386,7 @@ void SamplingParameters::concat(const SamplingParameters& param) {
   const int64_t left_samples = sample_idxes.numel();
   const int64_t right_samples = param.sample_idxes.numel();
   for (const auto& [member, fill] :
-       std::array<std::pair<torch::Tensor SamplingParameters::*, double>, 14>{
+       std::array<std::pair<torch::Tensor SamplingParameters::*, double>, 17>{
            {{&SamplingParameters::frequency_penalties, 0},
             {&SamplingParameters::presence_penalties, 0},
             {&SamplingParameters::repetition_penalties, 1},
@@ -394,6 +397,9 @@ void SamplingParameters::concat(const SamplingParameters& param) {
             {&SamplingParameters::logits_bias, 0},
             {&SamplingParameters::seeds, -1},
             {&SamplingParameters::seed_offsets, 0},
+            {&SamplingParameters::sampling_positions, 0},
+            {&SamplingParameters::min_tokens_remaining, 0},
+            {&SamplingParameters::min_token_mask, 0},
             {&SamplingParameters::unique_token_ids, 0},
             {&SamplingParameters::unique_token_counts, 0},
             {&SamplingParameters::unique_token_ids_lens, 0},
@@ -420,6 +426,27 @@ void SamplingParameters::concat(const SamplingParameters& param) {
   max_top_logprobs = std::max(max_top_logprobs, param.max_top_logprobs);
   num_return_sequences =
       std::max(num_return_sequences, param.num_return_sequences);
+}
+
+SamplingParameters sampling_params_for_positions(
+    const SamplingParameters& params,
+    const torch::Tensor& positions) {
+  SamplingParameters result = params;
+  if (!params.sampling_positions.defined()) {
+    return result;
+  }
+  CHECK_EQ(positions.dim(), 1);
+  const torch::Tensor actual = positions.index_select(
+      0, params.selected_token_idxes.to(positions.device(), torch::kLong));
+  const torch::Tensor delta = actual - params.sampling_positions;
+  if (params.seed_offsets.defined()) {
+    result.seed_offsets = params.seed_offsets + delta;
+  }
+  if (params.min_tokens_remaining.defined()) {
+    result.min_tokens_remaining = params.min_tokens_remaining - delta;
+  }
+  result.sampling_positions = actual;
+  return result;
 }
 
 }  // namespace xllm

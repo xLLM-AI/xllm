@@ -361,7 +361,14 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     output.logprobs = sampling_params.logprobs;
     output.max_top_logprobs = sampling_params.max_top_logprobs;
     if (!input.skip_sampling_for_logits_only) {
-      auto sample_output = sampler_->forward(logits, sampling_params);
+      const SamplingParameters positioned_params =
+          sampling_params_for_positions(sampling_params, input.positions);
+      auto sample_output = sampler_->forward(
+          logits,
+          positioned_params,
+          /*filter_mask=*/torch::Tensor(),
+          options_.is_draft_engine() ? Sampler::RandomStream::DRAFT
+                                     : Sampler::RandomStream::TARGET);
       output.filter_bitmask_applied_to_logits =
           sampling_params.filter_bitmask.defined();
 

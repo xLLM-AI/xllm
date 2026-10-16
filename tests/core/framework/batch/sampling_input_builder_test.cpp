@@ -123,5 +123,25 @@ TEST(SamplingInputBuilderTest, PromptAffectsRepetitionButNotOutputCounts) {
   }
 }
 
+TEST(SamplingInputBuilderTest, MtpCarriesPositionDependentStopsSeparately) {
+  RequestSamplingParam params;
+  params.vocab_size = 8;
+  params.min_tokens = 2;
+  params.seed = 42;
+  params.use_speculative_sampling = true;
+  params.all_stop_token_ids = {7};
+  StoppingChecker stopping;
+  Sequence sequence = make_sequence(params, stopping, 1, {1, 2, 3});
+  sequence.kv_state().set_kv_cache_tokens_num(sequence.num_prompt_tokens());
+  sequence.append_token(Token(5));
+  const auto result = build_row(params, sequence);
+  EXPECT_FALSE(result.logits_bias.defined());
+  EXPECT_EQ(result.sampling_positions[0].item<int64_t>(), 3);
+  EXPECT_EQ(result.min_tokens_remaining[0].item<int64_t>(), 1);
+  EXPECT_TRUE(result.min_token_mask[0][7].item<bool>());
+  EXPECT_EQ(result.min_token_mask.sum().item<int64_t>(), 1);
+  EXPECT_EQ(result.seed_offsets[0].item<int64_t>(), (int64_t{1} << 32) + 1);
+}
+
 }  // namespace
 }  // namespace xllm

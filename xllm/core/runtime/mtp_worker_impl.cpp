@@ -3117,6 +3117,9 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
       !validate_sampling_params.top_p.defined() &&
       !validate_sampling_params.min_p.defined() &&
       !validate_sampling_params.seed_offsets.defined() &&
+      !validate_sampling_params.sampling_positions.defined() &&
+      !validate_sampling_params.min_tokens_remaining.defined() &&
+      !validate_sampling_params.min_token_mask.defined() &&
       !validate_sampling_params.seeds.defined() &&
       !validate_sampling_params.logits_bias.defined() &&
       !validate_sampling_params.top_k.defined() &&
@@ -4076,10 +4079,19 @@ SampleOutput MTPWorkerImpl<TargetInput>::validate(
     }
     DraftProposal validation_proposal(std::move(validation_draft_token_ids),
                                       draft_proposal.draft_probs());
+    torch::Tensor seed_offsets = target_output.sample_output.seed_offsets;
+    if (seed_offsets.defined()) {
+      seed_offsets =
+          step_major_validate_layout
+              ? seed_offsets.view({num_val_tokens, batch_size}).select(0, 0)
+              : seed_offsets.view({batch_size, num_val_tokens}).select(1, 0);
+    }
     sample_output = spec_verify::run_rejection_sampling(
         {.do_sample = sampling_params.do_sample,
          .all_random_sample = sampling_params.all_random_sample,
-         .all_greedy_sample = sampling_params.all_greedy_sample},
+         .all_greedy_sample = sampling_params.all_greedy_sample,
+         .seeds = sampling_params.seeds,
+         .seed_offsets = seed_offsets},
         validation_proposal,
         target_logits,
         target_output,

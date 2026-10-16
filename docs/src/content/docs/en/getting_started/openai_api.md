@@ -269,7 +269,7 @@ For xLLM's `beam_width` extension, see [Online Service](/en/getting_started/onli
 
 ## Compatibility limits and errors
 
-- `seed`, `min_tokens`, `logit_bias`, `allowed_token_ids`, `bad_words`, and full-vocabulary logprobs require `enable_task_pipeline=false`. `seed`, `min_tokens`, and `bad_words` also require `num_speculative_tokens=0`; `bad_words` requires `enable_schedule_overlap=false`. REC endpoints reject the new seed and token-constraint controls.
+- `seed`, `min_tokens`, `logit_bias`, `allowed_token_ids`, `bad_words`, and full-vocabulary logprobs require `enable_task_pipeline=false`. For speculative decoding, LLM `seed` and `min_tokens` are supported by native MTP with `cp_size=1`, including schedule overlap. Other speculative algorithms and VLM speculative decoding still reject these controls. `bad_words` requires `num_speculative_tokens=0` and `enable_schedule_overlap=false`. REC endpoints reject the new seed and token-constraint controls.
 - Non-null `prompt_logprobs`, `logprob_token_ids`, `structured_outputs`, and `prompt_embeds` remain unsupported and return HTTP 400.
 - Frequency and presence penalties count generated tokens only; repetition penalties include prompt tokens. Explicit `stop_token_ids` remain active when `ignore_eos=true`.
 - `response_format={"type": "json_schema"}` is unsupported. Chat `json_object` requires the server's JSON-output configuration; it is not JSON Schema support.

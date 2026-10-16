@@ -552,5 +552,54 @@ TEST_F(LLMRequestFactoryTest, MessageOverloadCreatesRequestOnSuccess) {
   EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 1);
 }
 
+TEST_F(LLMRequestFactoryTest, NativeMtpAcceptsSeedAndMinimumWithOverlap) {
+  options_.enable_task_pipeline(false)
+      .enable_schedule_overlap(true)
+      .num_speculative_tokens(4)
+      .cp_size(1)
+      .draft_model_path(std::string("/fake/draft"))
+      .speculative_algorithm("MTP");
+  ModelConfig::get_instance().model_impl("native");
+  auto factory = make_factory();
+  CallbackCapture capture;
+  RequestParams sp;
+  sp.seed = 42;
+  sp.min_tokens = 2;
+  sp.max_tokens = 4;
+  sp.temperature = 0.8;
+  auto request = factory->create("hello",
+                                 std::nullopt,
+                                 sp,
+                                 std::nullopt,
+                                 make_capture_callback(&capture),
+                                 ChatTemplateGenerationMode::UNKNOWN);
+  ASSERT_NE(request, nullptr);
+  EXPECT_FALSE(capture.called);
+}
+
+TEST_F(LLMRequestFactoryTest,
+       OtherSpeculativeAlgorithmsStillRejectSeedAndMinimum) {
+  options_.enable_task_pipeline(false)
+      .num_speculative_tokens(4)
+      .draft_model_path(std::string("/fake/draft"))
+      .speculative_algorithm("Eagle3");
+  ModelConfig::get_instance().model_impl("native");
+  auto factory = make_factory();
+  CallbackCapture capture;
+  RequestParams sp;
+  sp.seed = 42;
+  sp.min_tokens = 2;
+  sp.max_tokens = 4;
+  auto request = factory->create("hello",
+                                 std::nullopt,
+                                 sp,
+                                 std::nullopt,
+                                 make_capture_callback(&capture),
+                                 ChatTemplateGenerationMode::UNKNOWN);
+  EXPECT_EQ(request, nullptr);
+  ASSERT_TRUE(capture.status.has_value());
+  EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 0);
+}
+
 }  // namespace
 }  // namespace xllm

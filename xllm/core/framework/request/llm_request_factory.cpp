@@ -400,13 +400,24 @@ std::shared_ptr<Request> LLMRequestFactory::create(
         "The requested sampling controls require enable_task_pipeline=false");
     return nullptr;
   }
-  if (options_->num_speculative_tokens() > 0 &&
-      (sp.seed.has_value() || sp.min_tokens > 0 || !sp.bad_words.empty())) {
-    CALLBACK_WITH_ERROR(
-        StatusCode::INVALID_ARGUMENT,
-        "seed, min_tokens and bad_words require num_speculative_tokens=0");
+  const bool supports_mtp_sampling =
+      SpeculativeConfig::is_mtp_algorithm(options_->speculative_algorithm()) &&
+      ModelConfig::get_instance().model_impl() == "native" &&
+      options_->cp_size() == 1;
+  if (options_->num_speculative_tokens() > 0 && !sp.bad_words.empty()) {
+    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
+                        "bad_words requires num_speculative_tokens=0");
     return nullptr;
   }
+  if (options_->num_speculative_tokens() > 0 && !supports_mtp_sampling &&
+      (sp.seed.has_value() || sp.min_tokens > 0)) {
+    CALLBACK_WITH_ERROR(
+        StatusCode::INVALID_ARGUMENT,
+        "Speculative seed and min_tokens require native MTP with cp_size=1");
+    return nullptr;
+  }
+  sampling_param.use_speculative_sampling =
+      options_->num_speculative_tokens() > 0 && supports_mtp_sampling;
   if (options_->enable_schedule_overlap() && !sp.bad_words.empty()) {
     CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
                         "bad_words requires enable_schedule_overlap=false");

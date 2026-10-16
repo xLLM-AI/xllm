@@ -51,8 +51,8 @@ torch::Tensor normalize_recovered_probs(torch::Tensor recovered_probs) {
   return recovered_probs;
 }
 
-torch::Tensor sample_recovered_tokens(const DraftProposal& draft_proposal,
-                                      const torch::Tensor& target_probs) {
+torch::Tensor recovered_token_probs(const DraftProposal& draft_proposal,
+                                    const torch::Tensor& target_probs) {
   const torch::Tensor& draft_token_ids = draft_proposal.token_ids();
   const std::optional<torch::Tensor>& draft_probs =
       draft_proposal.draft_probs();
@@ -64,7 +64,7 @@ torch::Tensor sample_recovered_tokens(const DraftProposal& draft_proposal,
     recovered_probs.scatter_(
         /*dim=*/-1, draft_token_ids.unsqueeze(-1), /*value=*/0);
   }
-  return Sampler::random_sample(normalize_recovered_probs(recovered_probs));
+  return normalize_recovered_probs(recovered_probs);
 }
 
 torch::Tensor mask_out_after_first_reject(
@@ -93,6 +93,68 @@ std::tuple<torch::Tensor, torch::Tensor> finalize_random_sample(
   return {accepted_token_ids, masked_accepted_token_ids};
 }
 
+std::tuple<torch::Tensor, torch::Tensor> seeded_random_sample(
+    const DraftProposal& proposal,
+    const torch::Tensor& target_probs,
+    const torch::Tensor& bonus_token_ids,
+    const torch::Tensor& seeds,
+    const torch::Tensor& seed_offsets,
+    bool mask_out_rejected_tokens) {
+  const torch::Tensor& draft_ids = proposal.token_ids();
+  CHECK_EQ(seeds.numel(), draft_ids.size(0));
+  CHECK_EQ(seed_offsets.numel(), draft_ids.size(0));
+  const torch::Tensor host_seeds = seeds.to(torch::kCPU);
+  const torch::Tensor host_offsets = seed_offsets.to(torch::kCPU);
+  const torch::Tensor recovered_probs =
+      recovered_token_probs(proposal, target_probs);
+  std::vector<torch::Tensor> uniforms;
+  std::vector<torch::Tensor> recovered;
+  uniforms.reserve(draft_ids.size(0));
+  recovered.reserve(draft_ids.size(0));
+  for (int64_t row = 0; row < draft_ids.size(0); ++row) {
+    const int64_t seed = host_seeds[row].item<int64_t>();
+    if (seed == -1) {
+      uniforms.emplace_back(
+          torch::rand({draft_ids.size(1)}, target_probs.options()));
+      recovered.emplace_back(Sampler::random_sample(recovered_probs[row]));
+      continue;
+    }
+    const int64_t base_offset = host_offsets[row].item<int64_t>();
+    std::vector<torch::Tensor> row_uniforms;
+    std::vector<torch::Tensor> row_recovered;
+    row_uniforms.reserve(draft_ids.size(1));
+    row_recovered.reserve(draft_ids.size(1));
+    for (int64_t step = 0; step < draft_ids.size(1); ++step) {
+      auto acceptance_generator =
+          Sampler::make_generator(target_probs.device(),
+                                  seed,
+                                  base_offset + step,
+                                  Sampler::RandomStream::ACCEPTANCE);
+      row_uniforms.emplace_back(
+          torch::rand({1}, acceptance_generator, target_probs.options()));
+      auto recovery_generator =
+          Sampler::make_generator(target_probs.device(),
+                                  seed,
+                                  base_offset + step,
+                                  Sampler::RandomStream::RECOVERY);
+      row_recovered.emplace_back(recovered_probs[row][step].multinomial(
+          /*num_samples=*/1, /*replacement=*/false, recovery_generator));
+    }
+    uniforms.emplace_back(torch::cat(row_uniforms));
+    recovered.emplace_back(torch::cat(row_recovered));
+  }
+  torch::Tensor acceptance_probs = index_select_2d(target_probs, -1, draft_ids);
+  if (proposal.draft_probs().has_value()) {
+    acceptance_probs = acceptance_probs /
+                       index_select_2d(*proposal.draft_probs(), -1, draft_ids);
+  }
+  return finalize_random_sample(torch::stack(uniforms) < acceptance_probs,
+                                torch::stack(recovered),
+                                draft_ids,
+                                bonus_token_ids,
+                                mask_out_rejected_tokens);
+}
+
 }  // namespace
 
 RejectionSampler::RejectionSampler(const torch::Tensor& do_sample,
@@ -112,10 +174,13 @@ RejectionSampler::RejectionSampler(const torch::Tensor& do_sample,
   do_sample_ = do_sample.unsqueeze(/*dim=*/-1);
 }
 
-SampleOutput RejectionSampler::forward(const DraftProposal& draft_proposal,
-                                       const torch::Tensor& target_logits,
-                                       const torch::Tensor& bonus_token_ids,
-                                       bool mask_out_rejected_tokens) const {
+SampleOutput RejectionSampler::forward(
+    const DraftProposal& draft_proposal,
+    const torch::Tensor& target_logits,
+    const torch::Tensor& bonus_token_ids,
+    bool mask_out_rejected_tokens,
+    const torch::Tensor& seeds,
+    const torch::Tensor& seed_offsets) const {
   draft_proposal.validate(
       /*expected_batch_size=*/do_sample_.size(0),
       /*expected_vocab_size=*/target_logits.size(-1),
@@ -138,6 +203,14 @@ SampleOutput RejectionSampler::forward(const DraftProposal& draft_proposal,
 
   auto random_sample_dispatch =
       [&]() -> std::tuple<torch::Tensor, torch::Tensor> {
+    if (seeds.defined()) {
+      return seeded_random_sample(draft_proposal,
+                                  target_probs,
+                                  bonus_token_ids,
+                                  seeds,
+                                  seed_offsets,
+                                  mask_out_rejected_tokens);
+    }
     const torch::Tensor uniform_rand =
         torch::rand(draft_token_ids.sizes(), target_probs.options());
     return random_sample(draft_proposal,
@@ -242,8 +315,8 @@ std::tuple<torch::Tensor, torch::Tensor> RejectionSampler::random_sample(
           : selected_target_probs;
   auto accepted = (uniform_rand < acceptance_probs);
 
-  auto recovered_token_ids =
-      sample_recovered_tokens(draft_proposal, target_probs);
+  auto recovered_token_ids = Sampler::random_sample(
+      recovered_token_probs(draft_proposal, target_probs));
 
   return finalize_random_sample(accepted,
                                 recovered_token_ids,

@@ -269,7 +269,7 @@ xLLM 的 `beam_width` 扩展请参阅[在线服务](/zh/getting_started/online_s
 
 ## 兼容性限制与错误处理
 
-- `seed`、`min_tokens`、`logit_bias`、`allowed_token_ids`、`bad_words` 和全词表 logprobs 要求 `enable_task_pipeline=false`。`seed`、`min_tokens` 和 `bad_words` 还要求 `num_speculative_tokens=0`；`bad_words` 要求 `enable_schedule_overlap=false`。REC 接口会拒绝新增的随机种子和 token 约束参数。
+- `seed`、`min_tokens`、`logit_bias`、`allowed_token_ids`、`bad_words` 和全词表 logprobs 要求 `enable_task_pipeline=false`。推测解码下，LLM 的 `seed` 和 `min_tokens` 支持 `cp_size=1` 的 native MTP，包括异步调度；其他推测算法和 VLM 推测解码仍拒绝这两个参数。`bad_words` 要求 `num_speculative_tokens=0` 且 `enable_schedule_overlap=false`。REC 接口会拒绝新增的随机种子和 token 约束参数。
 - 非空的 `prompt_logprobs`、`logprob_token_ids`、`structured_outputs` 和 `prompt_embeds` 仍不受支持，会返回 HTTP 400。
 - 频率惩罚和存在惩罚仅统计生成 token，重复惩罚同时考虑提示词。`ignore_eos=true` 时显式指定的 `stop_token_ids` 仍然生效。
 - 不支持 `response_format={"type": "json_schema"}`。对话接口的 `json_object` 需要服务端 JSON 输出配置，不能视为支持 JSON Schema。

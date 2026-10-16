@@ -18,13 +18,25 @@ limitations under the License.
 #include <c10/core/TensorOptions.h>
 #include <torch/types.h>
 
-#include "sampling_params.h"
+#include "core/framework/sampling/sampling_params.h"
 
 namespace xllm {
 
 class Sampler final {
  public:
   Sampler() = default;
+
+  enum class RandomStream : uint64_t {
+    TARGET = 0,
+    DRAFT = 1,
+    ACCEPTANCE = 2,
+    RECOVERY = 3,
+  };
+
+  static torch::Generator make_generator(const torch::Device& device,
+                                         int64_t seed,
+                                         int64_t offset,
+                                         RandomStream stream);
 
   // operator() allows us to use the module as a function.
   template <typename... Args>
@@ -33,10 +45,10 @@ class Sampler final {
   }
 
   // logits: [batch_size, vocab_size]
-  SampleOutput forward(
-      torch::Tensor& logits,
-      const SamplingParameters& params,
-      const torch::Tensor& filter_mask = torch::Tensor()) const;
+  SampleOutput forward(torch::Tensor& logits,
+                       const SamplingParameters& params,
+                       const torch::Tensor& filter_mask = torch::Tensor(),
+                       RandomStream stream = RandomStream::TARGET) const;
 
   // helper functions
   // probs: [..., vocab_size]

@@ -59,6 +59,8 @@ struct SamplerPolicy {
   torch::Tensor do_sample;
   bool all_random_sample = false;
   bool all_greedy_sample = false;
+  torch::Tensor seeds;
+  torch::Tensor seed_offsets;
 };
 
 SampleOutput run_rejection_sampling(const SamplerPolicy& policy,

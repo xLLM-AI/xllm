@@ -400,6 +400,14 @@ void scatter_varlen_target_output_to_dense(
   padded_logits.index_copy_(/*dim=*/0, dst_indices, target_output.logits);
   target_output.logits = padded_logits;
 
+  if (target_output.sample_output.seed_offsets.defined()) {
+    torch::Tensor padded_offsets = torch::zeros(
+        {padded_total}, target_output.sample_output.seed_offsets.options());
+    padded_offsets.index_copy_(
+        0, dst_indices, target_output.sample_output.seed_offsets);
+    target_output.sample_output.seed_offsets = padded_offsets;
+  }
+
   if (target_output.sample_output.next_tokens.defined()) {
     torch::Tensor padded_next_tokens =
         torch::full({padded_total},

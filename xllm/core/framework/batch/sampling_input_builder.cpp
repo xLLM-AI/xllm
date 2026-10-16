@@ -115,13 +115,21 @@ SamplingParameters SamplingInputBuilder::build() {
               token_lengths_);
   bool need_constraints = false;
   bool need_seed = false;
+  bool need_positions = false;
+  bool need_min_tokens = false;
   int64_t vocab_size = 0;
   for (const auto* params : params_) {
-    need_constraints = need_constraints || !params->logit_bias.empty() ||
-                       params->allowed_token_ids.has_value() ||
-                       params->min_tokens > 0 ||
-                       !params->bad_words_token_ids.empty();
+    need_constraints =
+        need_constraints || !params->logit_bias.empty() ||
+        params->allowed_token_ids.has_value() ||
+        (params->min_tokens > 0 && !params->use_speculative_sampling) ||
+        !params->bad_words_token_ids.empty();
     need_seed = need_seed || params->seed.has_value();
+    need_positions = need_positions ||
+                     (params->use_speculative_sampling &&
+                      (params->seed.has_value() || params->min_tokens > 0));
+    need_min_tokens = need_min_tokens || (params->use_speculative_sampling &&
+                                          params->min_tokens > 0);
     vocab_size = std::max(vocab_size, params->vocab_size);
   }
   if (need_constraints) {
@@ -144,7 +152,7 @@ SamplingParameters SamplingInputBuilder::build() {
       }
       const size_t generated =
           sequence == nullptr ? 0 : sequence->num_generated_tokens();
-      if (generated < params.min_tokens) {
+      if (!params.use_speculative_sampling && generated < params.min_tokens) {
         for (int32_t token : params.all_stop_token_ids) {
           if (token >= 0 && token < vocab_size) {
             rows[row][token] = blocked;
@@ -165,6 +173,44 @@ SamplingParameters SamplingInputBuilder::build() {
           rows[row][word.back()] = blocked;
         }
       }
+    }
+  }
+  if (need_positions) {
+    std::vector<int64_t> positions;
+    std::vector<int64_t> remaining;
+    positions.reserve(size());
+    remaining.reserve(size());
+    if (need_min_tokens) {
+      CHECK_GT(vocab_size, 0);
+      result.min_token_mask = torch::zeros(
+          {static_cast<int64_t>(size()), vocab_size}, torch::kBool);
+    }
+    for (size_t row = 0; row < size(); ++row) {
+      const Sequence* sequence = sequences_[row];
+      const int64_t generated =
+          sequence == nullptr
+              ? 0
+              : static_cast<int64_t>(sequence->num_generated_tokens());
+      positions.emplace_back(
+          sequence == nullptr
+              ? 0
+              : static_cast<int64_t>(sequence->num_tokens()) - 1);
+      remaining.emplace_back(static_cast<int64_t>(params_[row]->min_tokens) -
+                             generated);
+      if (!need_min_tokens || !params_[row]->use_speculative_sampling ||
+          params_[row]->min_tokens == 0) {
+        continue;
+      }
+      bool* mask = result.min_token_mask[row].data_ptr<bool>();
+      for (int32_t token : params_[row]->all_stop_token_ids) {
+        if (token >= 0 && token < vocab_size) {
+          mask[token] = true;
+        }
+      }
+    }
+    result.sampling_positions = make_pinned_cpu_tensor(positions);
+    if (need_min_tokens) {
+      result.min_tokens_remaining = make_pinned_cpu_tensor(remaining);
     }
   }
   if (need_seed) {

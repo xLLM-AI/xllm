@@ -284,6 +284,11 @@ void SpeculativeWorkerImpl<TargetInput>::update_sampling_params(
   repeat_interleave_if_defined(sampling_params.logits_bias, num_val_tokens);
   repeat_interleave_if_defined(sampling_params.seeds, num_val_tokens);
   repeat_interleave_if_defined(sampling_params.seed_offsets, num_val_tokens);
+  repeat_interleave_if_defined(sampling_params.sampling_positions,
+                               num_val_tokens);
+  repeat_interleave_if_defined(sampling_params.min_tokens_remaining,
+                               num_val_tokens);
+  repeat_interleave_if_defined(sampling_params.min_token_mask, num_val_tokens);
   repeat_interleave_if_defined(sampling_params.top_k, num_val_tokens);
   repeat_interleave_if_defined(sampling_params.unique_token_ids,
                                num_val_tokens);
@@ -324,6 +329,11 @@ void SpeculativeWorkerImpl<TargetInput>::update_sampling_params(
   repeat_interleave_if_defined(sampling_params.logits_bias, repeats_tensor);
   repeat_interleave_if_defined(sampling_params.seeds, repeats_tensor);
   repeat_interleave_if_defined(sampling_params.seed_offsets, repeats_tensor);
+  repeat_interleave_if_defined(sampling_params.sampling_positions,
+                               repeats_tensor);
+  repeat_interleave_if_defined(sampling_params.min_tokens_remaining,
+                               repeats_tensor);
+  repeat_interleave_if_defined(sampling_params.min_token_mask, repeats_tensor);
   repeat_interleave_if_defined(sampling_params.top_k, repeats_tensor);
   repeat_interleave_if_defined(sampling_params.unique_token_ids,
                                repeats_tensor);

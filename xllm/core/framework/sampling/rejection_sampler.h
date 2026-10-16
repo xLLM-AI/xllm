@@ -18,7 +18,7 @@ limitations under the License.
 #include <torch/types.h>
 
 #include "core/framework/sampling/draft_proposal.h"
-#include "sampling_params.h"
+#include "core/framework/sampling/sampling_params.h"
 
 namespace xllm {
 
@@ -36,10 +36,13 @@ class RejectionSampler final {
     return this->forward(::std::forward<Args>(args)...);
   }
 
-  SampleOutput forward(const DraftProposal& draft_proposal,
-                       const torch::Tensor& target_logits,
-                       const torch::Tensor& bonus_token_ids,
-                       bool mask_out_rejected_tokens = false) const;
+  SampleOutput forward(
+      const DraftProposal& draft_proposal,
+      const torch::Tensor& target_logits,
+      const torch::Tensor& bonus_token_ids,
+      bool mask_out_rejected_tokens = false,
+      const torch::Tensor& seeds = torch::Tensor(),
+      const torch::Tensor& seed_offsets = torch::Tensor()) const;
 
   // build mask from accepted matrix
   // for example: [[1, 1, 0, 1],   ->   [[1, 1, 1, 0, 0],

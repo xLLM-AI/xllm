@@ -20,6 +20,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <algorithm>
+#include <limits>
 #include <mutex>
 
 #if defined(USE_NPU)
@@ -57,9 +58,21 @@ torch::Generator make_sampling_generator(const torch::Device& device) {
 
 }  // namespace
 
+torch::Generator Sampler::make_generator(const torch::Device& device,
+                                         int64_t seed,
+                                         int64_t offset,
+                                         RandomStream stream) {
+  auto generator = make_sampling_generator(device);
+  const uint64_t stream_key =
+      static_cast<uint64_t>(stream) * 0xd2b74407b1ce6e93ULL;
+  generator.set_current_seed(sampling_seed(seed, offset) ^ stream_key);
+  return generator;
+}
+
 SampleOutput Sampler::forward(torch::Tensor& logits,
                               const SamplingParameters& params,
-                              const torch::Tensor& filter_mask) const {
+                              const torch::Tensor& filter_mask,
+                              RandomStream stream) const {
   const torch::Tensor& effective_filter_mask =
       filter_mask.defined() ? filter_mask : params.filter_mask;
   SampleOutput output;
@@ -70,6 +83,12 @@ SampleOutput Sampler::forward(torch::Tensor& logits,
           : torch::Tensor();
   if (params.logits_bias.defined()) {
     logits.add_(params.logits_bias);
+  }
+  if (params.min_token_mask.defined()) {
+    CHECK(params.min_tokens_remaining.defined());
+    logits.masked_fill_(params.min_token_mask.logical_and(
+                            params.min_tokens_remaining.gt(0).unsqueeze(1)),
+                        -std::numeric_limits<float>::infinity());
   }
   // Apply repetition before frequency and presence penalties.
   if (params.repetition_penalties.defined()) {
@@ -95,6 +114,11 @@ SampleOutput Sampler::forward(torch::Tensor& logits,
   torch::Tensor sample_filter_bitmask = params.filter_bitmask;
   const bool use_sample_indices =
       params.selected_token_idxes.numel() != params.sample_idxes.numel();
+  if (params.seeds.defined() && !params.all_greedy_sample) {
+    output.seed_offsets = use_sample_indices ? params.seed_offsets.index_select(
+                                                   0, params.sample_idxes)
+                                             : params.seed_offsets;
+  }
   if (use_sample_indices) {
     sample_logits = logits.index_select(/*dim=*/0, params.sample_idxes);
     if (params.temperatures.defined()) {
@@ -198,9 +222,8 @@ SampleOutput Sampler::forward(torch::Tensor& logits,
         continue;
       }
       // A private generator keeps this request independent from the global RNG.
-      auto generator = make_sampling_generator(probs.device());
-      generator.set_current_seed(
-          sampling_seed(seed, offsets[row].item<int64_t>()));
+      auto generator = make_generator(
+          probs.device(), seed, offsets[row].item<int64_t>(), stream);
       rows.emplace_back(probabilities.multinomial(/*num_samples=*/1,
                                                   /*replacement=*/false,
                                                   generator));

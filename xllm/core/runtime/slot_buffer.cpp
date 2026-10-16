@@ -646,6 +646,8 @@ Status SlotBuffer::validate_model(const ModelInputHostView& input) const {
 Status SlotBuffer::validate_sampling(const SamplingParameters& input,
                                      uint32_t model_tokens) const {
   if (input.logits_bias.defined() || input.seeds.defined() ||
+      input.sampling_positions.defined() ||
+      input.min_tokens_remaining.defined() || input.min_token_mask.defined() ||
       input.seed_offsets.defined() || input.filter_mask.defined() ||
       input.filter_bitmask.defined() || input.acc_logprob.defined() ||
       input.is_embeddings || input.use_beam_search ||
