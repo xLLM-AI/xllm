@@ -144,10 +144,9 @@ find_json_accepted_token_mismatches(
     const size_t row_offset = sequence_index * row_width;
     for (size_t token_offset = 0; token_offset < row_width; ++token_offset) {
       const int64_t raw_token_id = accepted_tokens[row_offset + token_offset];
-      if (raw_token_id == -1) {
+      if (raw_token_id < 0) {
         break;
       }
-      CHECK_GE(raw_token_id, 0) << "MTP accepted output padding must use -1";
       CHECK_LE(raw_token_id,
                static_cast<int64_t>(std::numeric_limits<int32_t>::max()))
           << "JSON accepted output token id exceeds int32 range";

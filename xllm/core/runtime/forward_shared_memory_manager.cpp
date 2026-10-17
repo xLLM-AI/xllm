@@ -3589,6 +3589,20 @@ bool token_input_to_packed_proto(
   return true;
 }
 
+template <typename TokenIdAt>
+int64_t num_accepted_tokens(const TokenIdAt& token_id_at,
+                            int64_t row_index,
+                            int64_t token_columns,
+                            bool speculative) {
+  int64_t count = 0;
+  for (; count < token_columns; ++count) {
+    if (speculative && token_id_at(row_index * token_columns + count) < 0) {
+      break;
+    }
+  }
+  return count;
+}
+
 }  // namespace
 
 bool LlmForwardInput::to_packed_proto(
@@ -3979,13 +3993,8 @@ bool ForwardSharedMemoryManager::llm_output_write(
       embedding_count * sizeof(float);
   uint64_t payload_bytes = sizeof(uint64_t);
   for (int64_t row_index = 0; row_index < row_count; ++row_index) {
-    int64_t serialized_tokens = 0;
-    for (; serialized_tokens < token_columns; ++serialized_tokens) {
-      if (speculative &&
-          token_id_at(row_index * token_columns + serialized_tokens) == -1) {
-        break;
-      }
-    }
+    const int64_t serialized_tokens =
+        num_accepted_tokens(token_id_at, row_index, token_columns, speculative);
     payload_bytes += sizeof(uint64_t) +
                      static_cast<uint64_t>(serialized_tokens) * token_bytes;
     payload_bytes +=
@@ -4017,17 +4026,13 @@ bool ForwardSharedMemoryManager::llm_output_write(
   const char* payload_begin = cursor;
   write_data(cursor, static_cast<uint64_t>(row_count));
   for (int64_t row_index = 0; row_index < row_count; ++row_index) {
-    // Fill the row count after its sentinel-trimmed tokens, without a temporary
-    // vector or a third traversal of the token IDs.
-    char* row_count_cursor = cursor;
-    uint64_t serialized_tokens = 0;
-    write_data(cursor, serialized_tokens);
-    for (int64_t token_index = 0; token_index < token_columns; ++token_index) {
+    const int64_t accepted_tokens =
+        num_accepted_tokens(token_id_at, row_index, token_columns, speculative);
+    write_data(cursor, static_cast<uint64_t>(accepted_tokens));
+    for (int64_t token_index = 0; token_index < accepted_tokens;
+         ++token_index) {
       const int64_t offset = row_index * token_columns + token_index;
       const int64_t token_id = token_id_at(offset);
-      if (speculative && token_id == -1) {
-        break;
-      }
       write_data(cursor, token_id);
       write_data(cursor, has_logprobs);
       if (has_logprobs) {
@@ -4046,10 +4051,7 @@ bool ForwardSharedMemoryManager::llm_output_write(
                               ? embedding_values + offset * embedding_count
                               : nullptr,
                           embedding_count);
-      ++serialized_tokens;
     }
-    std::memcpy(
-        row_count_cursor, &serialized_tokens, sizeof(serialized_tokens));
     if (row_index < static_cast<int64_t>(sampled.mm_embeddings.size())) {
       write_vector_tensor(cursor, sampled.mm_embeddings[row_index]);
     } else {
@@ -4249,13 +4251,8 @@ bool ForwardSharedMemoryManager::vlm_output_write(
       embedding_count * sizeof(float);
   uint64_t payload_bytes = sizeof(uint64_t);
   for (int64_t row_index = 0; row_index < row_count; ++row_index) {
-    int64_t serialized_tokens = 0;
-    for (; serialized_tokens < token_columns; ++serialized_tokens) {
-      if (speculative &&
-          token_id_at(row_index * token_columns + serialized_tokens) == -1) {
-        break;
-      }
-    }
+    const int64_t serialized_tokens =
+        num_accepted_tokens(token_id_at, row_index, token_columns, speculative);
     payload_bytes += sizeof(uint64_t) +
                      static_cast<uint64_t>(serialized_tokens) * token_bytes;
     payload_bytes +=
@@ -4287,17 +4284,13 @@ bool ForwardSharedMemoryManager::vlm_output_write(
   const char* payload_begin = cursor;
   write_data(cursor, static_cast<uint64_t>(row_count));
   for (int64_t row_index = 0; row_index < row_count; ++row_index) {
-    // Fill the row count after its sentinel-trimmed tokens, without a temporary
-    // vector or a third traversal of the token IDs.
-    char* row_count_cursor = cursor;
-    uint64_t serialized_tokens = 0;
-    write_data(cursor, serialized_tokens);
-    for (int64_t token_index = 0; token_index < token_columns; ++token_index) {
+    const int64_t accepted_tokens =
+        num_accepted_tokens(token_id_at, row_index, token_columns, speculative);
+    write_data(cursor, static_cast<uint64_t>(accepted_tokens));
+    for (int64_t token_index = 0; token_index < accepted_tokens;
+         ++token_index) {
       const int64_t offset = row_index * token_columns + token_index;
       const int64_t token_id = token_id_at(offset);
-      if (speculative && token_id == -1) {
-        break;
-      }
       write_data(cursor, token_id);
       write_data(cursor, has_logprobs);
       if (has_logprobs) {
@@ -4316,10 +4309,7 @@ bool ForwardSharedMemoryManager::vlm_output_write(
                               ? embedding_values + offset * embedding_count
                               : nullptr,
                           embedding_count);
-      ++serialized_tokens;
     }
-    std::memcpy(
-        row_count_cursor, &serialized_tokens, sizeof(serialized_tokens));
     if (row_index < static_cast<int64_t>(sampled.mm_embeddings.size())) {
       write_vector_tensor(cursor, sampled.mm_embeddings[row_index]);
     } else {
@@ -4519,13 +4509,8 @@ bool ForwardSharedMemoryManager::rec_output_write(
       embedding_count * sizeof(float);
   uint64_t payload_bytes = sizeof(uint64_t);
   for (int64_t row_index = 0; row_index < row_count; ++row_index) {
-    int64_t serialized_tokens = 0;
-    for (; serialized_tokens < token_columns; ++serialized_tokens) {
-      if (speculative &&
-          token_id_at(row_index * token_columns + serialized_tokens) == -1) {
-        break;
-      }
-    }
+    const int64_t serialized_tokens =
+        num_accepted_tokens(token_id_at, row_index, token_columns, speculative);
     payload_bytes += sizeof(uint64_t) +
                      static_cast<uint64_t>(serialized_tokens) * token_bytes;
     payload_bytes +=
@@ -4557,17 +4542,13 @@ bool ForwardSharedMemoryManager::rec_output_write(
   const char* payload_begin = cursor;
   write_data(cursor, static_cast<uint64_t>(row_count));
   for (int64_t row_index = 0; row_index < row_count; ++row_index) {
-    // Fill the row count after its sentinel-trimmed tokens, without a temporary
-    // vector or a third traversal of the token IDs.
-    char* row_count_cursor = cursor;
-    uint64_t serialized_tokens = 0;
-    write_data(cursor, serialized_tokens);
-    for (int64_t token_index = 0; token_index < token_columns; ++token_index) {
+    const int64_t accepted_tokens =
+        num_accepted_tokens(token_id_at, row_index, token_columns, speculative);
+    write_data(cursor, static_cast<uint64_t>(accepted_tokens));
+    for (int64_t token_index = 0; token_index < accepted_tokens;
+         ++token_index) {
       const int64_t offset = row_index * token_columns + token_index;
       const int64_t token_id = token_id_at(offset);
-      if (speculative && token_id == -1) {
-        break;
-      }
       write_data(cursor, token_id);
       write_data(cursor, has_logprobs);
       if (has_logprobs) {
@@ -4586,10 +4567,7 @@ bool ForwardSharedMemoryManager::rec_output_write(
                               ? embedding_values + offset * embedding_count
                               : nullptr,
                           embedding_count);
-      ++serialized_tokens;
     }
-    std::memcpy(
-        row_count_cursor, &serialized_tokens, sizeof(serialized_tokens));
     if (row_index < static_cast<int64_t>(sampled.mm_embeddings.size())) {
       write_vector_tensor(cursor, sampled.mm_embeddings[row_index]);
     } else {

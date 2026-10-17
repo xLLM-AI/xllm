@@ -21,7 +21,6 @@ limitations under the License.
 #include <array>
 #include <cstdint>
 #include <limits>
-#include <tuple>
 
 #include "acl/acl.h"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
@@ -31,55 +30,37 @@ namespace {
 
 // Independent torch reference: append bonus, then retain the first rejected
 // target and replace every subsequent ID with -1. The bonus never rejects.
-std::tuple<torch::Tensor, torch::Tensor> torch_reference(
-    const torch::Tensor& draft,
-    const torch::Tensor& target,
-    const torch::Tensor& bonus,
-    bool mask) {
+torch::Tensor torch_reference(const torch::Tensor& draft,
+                              const torch::Tensor& target,
+                              const torch::Tensor& bonus) {
   const torch::Tensor full = torch::cat({target, bonus}, -1).to(torch::kInt32);
-  if (!mask) {
-    return {full, torch::Tensor()};
-  }
   const torch::Tensor rejected = torch::cat(
       {draft.ne(target), torch::ones({draft.size(0), 1}, torch::kBool)}, -1);
   const torch::Tensor first_reject =
       rejected.to(torch::kInt64).argmax(/*dim=*/1, /*keepdim=*/true);
   const torch::Tensor positions =
       torch::arange(draft.size(1) + 1, torch::kInt64).unsqueeze(0);
-  return {full, torch::where(positions <= first_reject, full, -1)};
+  return torch::where(positions <= first_reject, full, -1);
 }
 
 void expect_matches(const torch::Tensor& draft,
                     const torch::Tensor& target,
-                    const torch::Tensor& bonus,
-                    bool mask) {
-  SCOPED_TRACE(::testing::Message()
-               << "shape=" << draft.sizes() << " mask=" << mask);
+                    const torch::Tensor& bonus) {
+  SCOPED_TRACE(::testing::Message() << "shape=" << draft.sizes());
   const torch::Tensor draft_before = draft.cpu().clone();
   const torch::Tensor target_before = target.cpu().clone();
   const torch::Tensor bonus_before = bonus.cpu().clone();
-  const auto [expected_full, expected_masked] =
-      torch_reference(draft_before, target_before, bonus_before, mask);
-  const auto [full, masked] = greedy_prefix_verify(draft, target, bonus, mask);
+  const torch::Tensor expected_masked =
+      torch_reference(draft_before, target_before, bonus_before);
+  const torch::Tensor masked = greedy_prefix_verify(draft, target, bonus);
 
-  ASSERT_TRUE(full.defined());
-  EXPECT_EQ(full.scalar_type(), torch::kInt32);
-  EXPECT_EQ(full.device(), target.device());
-  EXPECT_EQ(full.sizes(),
+  EXPECT_TRUE(masked.defined());
+  EXPECT_EQ(masked.scalar_type(), torch::kInt32);
+  EXPECT_EQ(masked.device(), target.device());
+  EXPECT_EQ(masked.sizes(),
             torch::IntArrayRef({draft.size(0), draft.size(1) + 1}));
-  EXPECT_TRUE(full.is_contiguous());
-  EXPECT_TRUE(torch::equal(full.cpu(), expected_full));
-  ASSERT_EQ(masked.defined(), mask);
-  if (mask) {
-    EXPECT_EQ(masked.scalar_type(), torch::kInt32);
-    EXPECT_EQ(masked.device(), full.device());
-    EXPECT_EQ(masked.sizes(), full.sizes());
-    EXPECT_TRUE(masked.is_contiguous());
-    EXPECT_TRUE(torch::equal(masked.cpu(), expected_masked));
-    if (full.numel() != 0) {
-      EXPECT_NE(full.data_ptr(), masked.data_ptr());
-    }
-  }
+  EXPECT_TRUE(masked.is_contiguous());
+  EXPECT_TRUE(torch::equal(masked.cpu(), expected_masked));
   EXPECT_TRUE(torch::equal(draft.cpu(), draft_before));
   EXPECT_TRUE(torch::equal(target.cpu(), target_before));
   EXPECT_TRUE(torch::equal(bonus.cpu(), bonus_before));
@@ -93,29 +74,6 @@ class GreedyPrefixVerifyTest : public ::testing::Test {
       torch::TensorOptions().dtype(torch::kInt32).device(device_);
 };
 
-TEST_F(GreedyPrefixVerifyTest, PreservesFullOutputAcrossFirstRejection) {
-  const torch::Tensor draft = torch::tensor(
-      {{9, 22, 33}, {11, 22, 33}, {11, 25, 99}, {11, 25, 33}}, i32_);
-  const torch::Tensor target =
-      torch::tensor({{11, 25, 33}}, i32_).repeat({4, 1});
-  const torch::Tensor bonus = torch::full({4, 1}, 44, i32_);
-
-  for (const bool mask : {false, true}) {
-    expect_matches(draft, target, bonus, mask);
-  }
-  const auto [full, masked] =
-      greedy_prefix_verify(draft, target, bonus, /*mask=*/true);
-  EXPECT_TRUE(torch::equal(
-      full.cpu(),
-      torch::tensor({{11, 25, 33, 44}}, torch::kInt32).repeat({4, 1})));
-  EXPECT_TRUE(torch::equal(masked.cpu(),
-                           torch::tensor({{11, -1, -1, -1},
-                                          {11, 25, -1, -1},
-                                          {11, 25, 33, -1},
-                                          {11, 25, 33, 44}},
-                                         torch::kInt32)));
-}
-
 TEST_F(GreedyPrefixVerifyTest, VerifiesFiveDraftStepsAcrossBatchMatrix) {
   constexpr int64_t kDraftWidth = 5;
   constexpr int64_t kOutputWidth = kDraftWidth + 1;
@@ -128,8 +86,9 @@ TEST_F(GreedyPrefixVerifyTest, VerifiesFiveDraftStepsAcrossBatchMatrix) {
                                          -16777217,
                                          0,
                                          1};
-  const std::array<const char*, 6> patterns = {
-      "first", "middle", "last", "all", "rematch", "mixed"};
+  // pattern 0-4: reject at reject_positions[pattern] (pattern 3 lands past
+  // the draft, so that row is fully accepted); pattern 5: reject at
+  // row % kOutputWidth.
   const std::array<int64_t, 5> reject_positions = {0, 2, 4, 5, 2};
   for (const int64_t batch : {1, 2, 4, 8, 16, 24, 32}) {
     for (int64_t pattern = 0; pattern < 6; ++pattern) {
@@ -169,14 +128,8 @@ TEST_F(GreedyPrefixVerifyTest, VerifiesFiveDraftStepsAcrossBatchMatrix) {
       ASSERT_EQ(target.storage_offset(), kStorageOffset);
       ASSERT_EQ(bonus.stride(0), kOutputWidth);
       ASSERT_EQ(bonus.storage_offset(), kStorageOffset + kDraftWidth);
-      for (const bool mask : {false, true}) {
-        SCOPED_TRACE(::testing::Message()
-                     << "batch=" << batch
-                     << " pattern=" << patterns[static_cast<size_t>(pattern)]
-                     << " mask=" << mask);
-        expect_matches(draft, target, bonus, mask);
-        EXPECT_TRUE(torch::equal(storage.cpu(), storage_cpu));
-      }
+      expect_matches(draft, target, bonus);
+      EXPECT_TRUE(torch::equal(storage.cpu(), storage_cpu));
     }
   }
 }
@@ -211,9 +164,7 @@ TEST_F(GreedyPrefixVerifyTest, AcceptsIntegerDtypesInStridedViews) {
         ASSERT_EQ(target.stride(0), 4);
         ASSERT_EQ(bonus.stride(0), 4);
         ASSERT_EQ(bonus.storage_offset(), 3);
-        for (const bool mask : {false, true}) {
-          expect_matches(draft, target, bonus, mask);
-        }
+        expect_matches(draft, target, bonus);
       }
     }
   }
@@ -234,12 +185,8 @@ TEST_F(GreedyPrefixVerifyTest, HandlesEmptyAndIrregularShapes) {
       }
       const torch::Tensor full = full_cpu.to(device_);
       const torch::Tensor draft = draft_cpu.to(device_);
-      for (const bool mask : {false, true}) {
-        expect_matches(draft,
-                       full.slice(1, 0, width),
-                       full.slice(1, width, width + 1),
-                       mask);
-      }
+      expect_matches(
+          draft, full.slice(1, 0, width), full.slice(1, width, width + 1));
     }
   }
 }
@@ -272,9 +219,7 @@ TEST_F(GreedyPrefixVerifyTest, ReadsNoncontiguousAndAliasedInputs) {
   ASSERT_GT(draft.stride(1), 1);
   ASSERT_GT(target.storage_offset(), 0);
   ASSERT_GT(draft.storage_offset(), 0);
-  for (const bool mask : {false, true}) {
-    expect_matches(draft, target, bonus, mask);
-  }
+  expect_matches(draft, target, bonus);
   EXPECT_TRUE(torch::equal(target_storage.cpu(), target_storage_before));
   EXPECT_TRUE(torch::equal(draft_storage.cpu(), draft_storage_before));
 
@@ -284,18 +229,12 @@ TEST_F(GreedyPrefixVerifyTest, ReadsNoncontiguousAndAliasedInputs) {
   const torch::Tensor aliased_bonus = scalar.expand({9, 1});
   ASSERT_EQ(aliased_draft.stride(0), 0);
   ASSERT_EQ(aliased_draft.stride(1), 0);
-  for (const bool mask : {false, true}) {
-    expect_matches(aliased_draft, aliased_target, aliased_bonus, mask);
-  }
+  expect_matches(aliased_draft, aliased_target, aliased_bonus);
 
   const torch::Tensor target_row = torch::tensor({{11, 25, 33}}, i32_);
   const torch::Tensor draft_row = torch::tensor({{11, 22, 33}}, i32_);
-  for (const bool mask : {false, true}) {
-    expect_matches(draft_row.expand({9, 3}),
-                   target_row.expand({9, 3}),
-                   aliased_bonus,
-                   mask);
-  }
+  expect_matches(
+      draft_row.expand({9, 3}), target_row.expand({9, 3}), aliased_bonus);
 }
 
 TEST_F(GreedyPrefixVerifyTest, ReadsStridesLargerThanTheUbTile) {
@@ -320,9 +259,7 @@ TEST_F(GreedyPrefixVerifyTest, ReadsStridesLargerThanTheUbTile) {
   const torch::Tensor target_storage_before = target_storage.cpu();
   const torch::Tensor draft_storage_before = draft_storage.cpu();
 
-  for (const bool mask : {false, true}) {
-    expect_matches(draft, target, bonus, mask);
-  }
+  expect_matches(draft, target, bonus);
   EXPECT_TRUE(torch::equal(target_storage.cpu(), target_storage_before));
   EXPECT_TRUE(torch::equal(draft_storage.cpu(), draft_storage_before));
 }
@@ -355,24 +292,10 @@ TEST_F(GreedyPrefixVerifyTest, PreservesExtremeBitsAcrossDtypesAndTiles) {
         }
         const torch::Tensor full = full_cpu.to(i32_.dtype(dtype));
         const torch::Tensor draft = draft_cpu.to(i32_.dtype(dtype));
-        for (const bool mask : {false, true}) {
-          expect_matches(draft,
-                         full.slice(1, 0, width),
-                         full.slice(1, width, width + 1),
-                         mask);
-        }
+        expect_matches(
+            draft, full.slice(1, 0, width), full.slice(1, width, width + 1));
       }
     }
-  }
-}
-
-TEST_F(GreedyPrefixVerifyTest, RepeatedCallsDoNotReuseMaskedTail) {
-  const torch::Tensor target = torch::arange(33 * 3, i32_).view({33, 3}) + 100;
-  const torch::Tensor bonus = torch::arange(33, i32_).view({33, 1}) + 1000;
-  for (int64_t iteration = 0; iteration < 8; ++iteration) {
-    torch::Tensor draft = target.clone();
-    draft.index_put_({iteration, iteration % 3}, -123);
-    expect_matches(draft, target, bonus, iteration % 2 == 0);
   }
 }
 
@@ -383,7 +306,7 @@ TEST_F(GreedyPrefixVerifyTest, UsesTheInputDevicesCurrentStream) {
   const torch::Tensor target = torch::tensor({{11, 25, 33}}, i32_);
   const torch::Tensor draft = torch::tensor({{11, 22, 33}}, i32_);
   const torch::Tensor bonus = torch::tensor({{44}}, i32_);
-  expect_matches(draft, target, bonus, /*mask=*/true);
+  expect_matches(draft, target, bonus);
   EXPECT_EQ(aclrtSynchronizeStream(stream.stream()), ACL_SUCCESS);
 }
 
@@ -397,17 +320,17 @@ TEST_F(GreedyPrefixVerifyTest, RejectsMetadataOutsideInt32BeforeAllocation) {
   const torch::Tensor huge_output = scalar.expand({kTooLarge / 2, 1});
   const torch::Tensor huge_width = scalar.expand({1, kTooLarge - 1});
   EXPECT_DEATH_IF_SUPPORTED(
-      static_cast<void>(greedy_prefix_verify(huge_stride, ids, ids, true)),
+      static_cast<void>(greedy_prefix_verify(huge_stride, ids, ids)),
       "stride exceeds INT32");
   EXPECT_DEATH_IF_SUPPORTED(static_cast<void>(greedy_prefix_verify(
-                                huge_batch, huge_batch, huge_batch, true)),
+                                huge_batch, huge_batch, huge_batch)),
                             "shape exceeds INT32");
   EXPECT_DEATH_IF_SUPPORTED(static_cast<void>(greedy_prefix_verify(
-                                huge_output, huge_output, huge_output, true)),
+                                huge_output, huge_output, huge_output)),
                             "output element count exceeds INT32");
-  EXPECT_DEATH_IF_SUPPORTED(static_cast<void>(greedy_prefix_verify(
-                                huge_width, huge_width, ids, true)),
-                            "output width exceeds INT32");
+  EXPECT_DEATH_IF_SUPPORTED(
+      static_cast<void>(greedy_prefix_verify(huge_width, huge_width, ids)),
+      "output width exceeds INT32");
 }
 
 TEST_F(GreedyPrefixVerifyTest, RejectsInvalidMetadataBeforeLaunch) {
@@ -419,29 +342,26 @@ TEST_F(GreedyPrefixVerifyTest, RejectsInvalidMetadataBeforeLaunch) {
   const torch::Tensor cpu_target = target.cpu();
   const torch::Tensor wrong_rank = target.flatten();
   EXPECT_DEATH_IF_SUPPORTED(
-      static_cast<void>(greedy_prefix_verify(target, cpu_target, bonus, true)),
+      static_cast<void>(greedy_prefix_verify(target, cpu_target, bonus)),
       "must be on NPU");
+  EXPECT_DEATH_IF_SUPPORTED(
+      static_cast<void>(greedy_prefix_verify(wrong_rank, wrong_rank, bonus)),
+      "must be rank two");
+  EXPECT_DEATH_IF_SUPPORTED(
+      static_cast<void>(greedy_prefix_verify(target, target, invalid_bonus)),
+      "bonus.size\\(1\\) == 1");
+  EXPECT_DEATH_IF_SUPPORTED(
+      static_cast<void>(greedy_prefix_verify(wrong_dtype, target, bonus)),
+      "must contain int32 or int64 token IDs");
+  EXPECT_DEATH_IF_SUPPORTED(
+      static_cast<void>(greedy_prefix_verify(target, wrong_dtype, bonus)),
+      "must contain int32 or int64 token IDs");
   EXPECT_DEATH_IF_SUPPORTED(static_cast<void>(greedy_prefix_verify(
-                                wrong_rank, wrong_rank, bonus, true)),
-                            "must be rank two");
+                                target, target, wrong_bonus_dtype)),
+                            "must contain int32 or int64 token IDs");
   EXPECT_DEATH_IF_SUPPORTED(static_cast<void>(greedy_prefix_verify(
-                                target, target, invalid_bonus, true)),
-                            "bonus.size\\(1\\) == 1");
-  for (const bool mask : {false, true}) {
-    EXPECT_DEATH_IF_SUPPORTED(static_cast<void>(greedy_prefix_verify(
-                                  wrong_dtype, target, bonus, mask)),
-                              "must contain int32 or int64 token IDs");
-    EXPECT_DEATH_IF_SUPPORTED(static_cast<void>(greedy_prefix_verify(
-                                  target, wrong_dtype, bonus, mask)),
-                              "must contain int32 or int64 token IDs");
-    EXPECT_DEATH_IF_SUPPORTED(static_cast<void>(greedy_prefix_verify(
-                                  target, target, wrong_bonus_dtype, mask)),
-                              "must contain int32 or int64 token IDs");
-    EXPECT_DEATH_IF_SUPPORTED(
-        static_cast<void>(greedy_prefix_verify(
-            wrong_dtype, wrong_dtype, wrong_bonus_dtype, mask)),
-        "must contain int32 or int64 token IDs");
-  }
+                                wrong_dtype, wrong_dtype, wrong_bonus_dtype)),
+                            "must contain int32 or int64 token IDs");
 }
 
 }  // namespace

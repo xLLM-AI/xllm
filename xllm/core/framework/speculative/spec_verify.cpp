@@ -110,10 +110,7 @@ SampleOutput run_rejection_sampling(const SamplerPolicy& policy,
                                  target_output.logprobs,
                                  target_output.max_top_logprobs);
 
-  SampleOutput sample_output =
-      sampler.forward(draft_proposal,
-                      target_logits,
-                      /*mask_out_rejected_tokens=*/true);
+  SampleOutput sample_output = sampler.forward(draft_proposal, target_logits);
 
   const torch::Tensor& embeddings = target_output.sample_output.embeddings;
   sample_output.embeddings = embeddings.view(

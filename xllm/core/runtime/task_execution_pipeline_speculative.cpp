@@ -1524,8 +1524,7 @@ void TaskExecutionPipeline::launch_decode(SpeculativeSlot& slot) {
   SampleOutput accepted = slot.rejection->forward(
       DraftProposal(slot.proposal, draft_probs),
       slot.target_logits.view(
-          {slot.rows, width, speculative_capacity_->common.vocab_size}),
-      /*mask_out_rejected_tokens=*/true);
+          {slot.rows, width, speculative_capacity_->common.vocab_size}));
   const auto& result = slot.target_prefill->device_result();
   result.tokens.copy_(accepted.next_tokens);
   if (result.logprobs.defined()) {
@@ -1541,7 +1540,7 @@ void TaskExecutionPipeline::launch_decode(SpeculativeSlot& slot) {
     auto tokens = result.tokens;
     synchronize_tokens(tokens, base.all_greedy_sample);
   }
-  torch::ne_out(slot.accepted_mask, result.tokens, /*other=*/-1);
+  torch::ge_out(slot.accepted_mask, result.tokens, /*other=*/0);
   auto lengths = result.lengths;
   torch::sum_out(
       lengths, slot.accepted_mask, {1}, /*keepdim=*/false, torch::kInt32);

@@ -17,7 +17,6 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <cstdint>
-#include <tuple>
 #include <vector>
 
 #include "core/framework/sampling/json_object_grammar.h"
@@ -96,9 +95,7 @@ TEST(SpeculativeTokenStatsTest, GreedyExcludesTargetTokens) {
       /*value=*/10.0f);
   const RejectionSampler sampler = make_greedy_rejection_sampler(4);
   const SampleOutput sampled =
-      sampler.forward(DraftProposal(num_draft_tokens),
-                      target_logits,
-                      /*mask_out_rejected_tokens=*/true);
+      sampler.forward(DraftProposal(num_draft_tokens), target_logits);
   const torch::Tensor& masked_tokens = sampled.next_tokens;
   ASSERT_TRUE(torch::equal(
       masked_tokens,
@@ -133,13 +130,8 @@ TEST(SpeculativeTokenStatsTest, BlockRandomExcludesTargetTokens) {
                                                     {0.1f, 0.1f, 0.1f}});
   const torch::Tensor bonus_tokens = torch::ones({4, 1}, torch::kInt64);
   const DraftProposal proposal(num_draft_tokens, draft_probs);
-  const auto sampled =
-      RejectionSampler::random_sample(proposal,
-                                      target_probs,
-                                      uniform_rand,
-                                      bonus_tokens,
-                                      /*mask_out_rejected_tokens=*/true);
-  const torch::Tensor& masked_tokens = std::get<1>(sampled);
+  const torch::Tensor masked_tokens = RejectionSampler::random_sample(
+      proposal, target_probs, uniform_rand, bonus_tokens);
   ASSERT_TRUE(torch::equal(
       masked_tokens,
       torch::tensor(
@@ -168,12 +160,9 @@ TEST(SpeculativeTokenStatsTest, BlockHandlesSingleAndZeroDrafts) {
       /*value=*/10.0f);
   const RejectionSampler sampler = make_greedy_rejection_sampler(2);
   const SampleOutput sampled =
-      sampler.forward(DraftProposal(num_draft_tokens),
-                      target_logits,
-                      /*mask_out_rejected_tokens=*/true);
-  const torch::Tensor& single_tokens = sampled.next_tokens;
+      sampler.forward(DraftProposal(num_draft_tokens), target_logits);
   const auto stats =
-      calculate_from_widths(single_tokens, {1, 1}).sequence_stats;
+      calculate_from_widths(sampled.next_tokens, {1, 1}).sequence_stats;
   ASSERT_EQ(stats.size(), 2);
   EXPECT_EQ(stats[0].accepted_tokens, 0);
   EXPECT_EQ(stats[0].proposed_tokens, 1);
@@ -188,9 +177,7 @@ TEST(SpeculativeTokenStatsTest, BlockHandlesSingleAndZeroDrafts) {
                              torch::full({2, 1, 1}, 8, torch::kInt64),
                              /*value=*/10.0f);
   const SampleOutput bonus_only =
-      sampler.forward(DraftProposal(empty_drafts),
-                      bonus_only_logits,
-                      /*mask_out_rejected_tokens=*/true);
+      sampler.forward(DraftProposal(empty_drafts), bonus_only_logits);
   const torch::Tensor& bonus_only_tokens = bonus_only.next_tokens;
   ASSERT_TRUE(
       torch::equal(bonus_only_tokens, torch::full({2, 1}, 8, torch::kInt64)));
