@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import torch
 import torch_npu
+from xllm_kernel.ops import rms_norm
 
-rms_norm = torch.ops.xllm_ops.rms_norm
 fused_add_rms_norm = torch.ops.xllm_ops.fused_add_rms_norm
 fused_add_gemma_rms_norm = torch.ops.xllm_ops.fused_add_gemma_rms_norm
 _FUSED_ADD_RMS_NORM_DYNAMIC_QUANT = torch_npu.npu_add_rms_norm_dynamic_quant
