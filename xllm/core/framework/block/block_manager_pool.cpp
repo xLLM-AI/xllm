@@ -71,6 +71,7 @@ BlockManagerPool::BlockManagerPool(const Options& options,
       .enable_virtual_memory(options_.enable_virtual_memory())
       .num_layers(options_.num_layers())
       .slot_size(options_.slot_size())
+      .virtual_block_bytes(options_.virtual_block_bytes())
       .model_id(options_.model_id())
       .enable_linear_state(options_.enable_linear_state())
       .linear_state_num_slots(options_.linear_state_num_slots())
@@ -451,7 +452,7 @@ void BlockManagerPool::reserve_virtual_memory_padding_blocks() {
   }
   // Start preallocation after every DP manager has reserved its padding.
   CHECK(page_allocator_ != nullptr);
-  page_allocator_->start_prealloc_thread();
+  page_allocator_->start_prealloc_thread(options_.model_id());
 }
 
 }  // namespace xllm

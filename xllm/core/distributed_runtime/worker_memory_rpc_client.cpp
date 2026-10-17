@@ -210,18 +210,16 @@ folly::SemiFuture<bool> WorkerMemoryRpcClient::free_weight_pages_async(
   return future;
 }
 
-std::vector<std::pair<std::vector<uint64_t>, std::vector<uint64_t>>>
+std::vector<VirtualKVCacheLayerGlobalOffsets>
 WorkerMemoryRpcClient::get_virtual_kv_cache_offsets(
     const std::string& model_id,
-    const std::vector<int32_t>& block_ids,
-    uint64_t block_size_bytes) {
+    const std::vector<int32_t>& block_ids) {
   proto::GetVirtualKVCacheOffsetsRequest req;
   req.set_model_id(model_id);
   req.mutable_block_ids()->Reserve(static_cast<int32_t>(block_ids.size()));
   for (int32_t block_id : block_ids) {
     req.add_block_ids(block_id);
   }
-  req.set_block_size_bytes(block_size_bytes);
 
   proto::GetVirtualKVCacheOffsetsResponse resp;
   brpc::Controller cntl;
@@ -232,16 +230,26 @@ WorkerMemoryRpcClient::get_virtual_kv_cache_offsets(
     return {};
   }
 
-  std::vector<std::pair<std::vector<uint64_t>, std::vector<uint64_t>>>
-      layer_offsets;
+  std::vector<VirtualKVCacheLayerGlobalOffsets> layer_offsets;
   layer_offsets.reserve(resp.layer_offsets_size());
   for (int32_t i = 0; i < resp.layer_offsets_size(); ++i) {
     const auto& layer_proto = resp.layer_offsets(i);
-    std::vector<uint64_t> k_offsets(layer_proto.k_offsets().begin(),
-                                    layer_proto.k_offsets().end());
-    std::vector<uint64_t> v_offsets(layer_proto.v_offsets().begin(),
-                                    layer_proto.v_offsets().end());
-    layer_offsets.emplace_back(std::move(k_offsets), std::move(v_offsets));
+    const size_t num_blocks = block_ids.size();
+    if (static_cast<size_t>(layer_proto.k_offsets_size()) != num_blocks ||
+        static_cast<size_t>(layer_proto.v_offsets_size()) != num_blocks ||
+        (layer_proto.index_offsets_size() != 0 &&
+         static_cast<size_t>(layer_proto.index_offsets_size()) != num_blocks)) {
+      LOG(ERROR) << "Invalid virtual-memory offset count at layer " << i;
+      return {};
+    }
+    VirtualKVCacheLayerGlobalOffsets layer;
+    layer.k_offsets.assign(layer_proto.k_offsets().begin(),
+                           layer_proto.k_offsets().end());
+    layer.v_offsets.assign(layer_proto.v_offsets().begin(),
+                           layer_proto.v_offsets().end());
+    layer.index_offsets.assign(layer_proto.index_offsets().begin(),
+                               layer_proto.index_offsets().end());
+    layer_offsets.emplace_back(std::move(layer));
   }
   return layer_offsets;
 }

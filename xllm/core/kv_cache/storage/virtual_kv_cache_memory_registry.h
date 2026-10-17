@@ -44,10 +44,21 @@ class VirtualKVCacheMemoryRegistry final {
                                               const std::vector<int64_t>& dims,
                                               torch::ScalarType dtype,
                                               int64_t num_layers);
+  std::vector<torch::Tensor> create_index_tensors(
+      const std::string& model_id,
+      const std::vector<int64_t>& dims,
+      torch::ScalarType dtype,
+      int64_t num_layers,
+      const std::vector<bool>& layer_owned = {});
 
   bool map(const std::string& model_id, const std::vector<offset_t>& offsets);
   bool unmap(const std::string& model_id, const std::vector<offset_t>& offsets);
   std::optional<int64_t> num_layers(const std::string& model_id) const;
+
+  std::optional<VirtualKVCacheBlockGlobalOffsets> get_global_offsets_for_block(
+      const std::string& model_id,
+      int64_t layer_id,
+      int64_t block_id) const;
 
   // Returns offsets relative to the shared physical-page mapping, or
   // {UINT64_MAX, UINT64_MAX} when the model/block has no valid mapping.

@@ -153,7 +153,9 @@ class TestVirtualKVCachePageAllocator final
       : allocated_pages_(dp_size), next_page_ids_(dp_size, 0) {}
 
   bool is_initialized() const override { return true; }
-  void start_prealloc_thread() override { ++prealloc_starts; }
+  void start_prealloc_thread(const std::string& /*model_id*/) override {
+    ++prealloc_starts;
+  }
 
   std::unique_ptr<VirtualKVCachePageState> alloc_kv_cache_page(
       const std::string& model_id,
@@ -1161,7 +1163,8 @@ TEST(CompositeBlockManagerTest,
       .block_size(4)
       .enable_virtual_memory(true)
       .num_layers(2)
-      .slot_size(8)
+      .slot_size(36)  // Unequal K/V widths must not be averaged.
+      .virtual_block_bytes(16)
       .model_id("injected-cache");
   {
     BlockManagerPool pool(options, /*dp_size=*/2, &allocator);
@@ -1194,7 +1197,8 @@ TEST(CompositeBlockManagerTest, PagedShortageReturnsPagesToInjectedAllocator) {
       .block_size(4)
       .enable_virtual_memory(true)
       .num_layers(2)
-      .slot_size(8)
+      .slot_size(36)  // Unequal K/V widths must not be averaged.
+      .virtual_block_bytes(16)
       .model_id("injected-cache");
   auto leaves = build_composite_leaves(options, /*dp_rank=*/0, &allocator);
   BlockManager& leaf = *leaves.at(BlockType::KV).leaf;

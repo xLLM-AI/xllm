@@ -68,7 +68,8 @@ class KVCacheTransfer {
 
     // Destination byte offsets in the D-node's GlobalVirtualMemoryRegion
     // (per-layer). dst_virtual_kv_cache_layer_global_offsets[layer_id] =
-    // {k_offsets, v_offsets}
+    // {k_offsets, v_offsets, index_offsets}; INDEX is empty on non-owner
+    // layers.
     std::vector<VirtualKVCacheLayerGlobalOffsets>
         dst_virtual_kv_cache_layer_global_offsets;
   };

@@ -204,7 +204,6 @@ void WorkerMemoryRpcService::GetVirtualKVCacheOffsets(
     brpc::ClosureGuard done_guard(done);
 
     std::string model_id = request->model_id();
-    uint64_t block_size_bytes = request->block_size_bytes();
 
     // Convert proto block_ids to vector
     std::vector<int32_t> block_ids;
@@ -234,18 +233,21 @@ void WorkerMemoryRpcService::GetVirtualKVCacheOffsets(
       auto* layer_offsets_proto = response->add_layer_offsets();
 
       for (const auto& block_id : block_ids) {
-        auto [k_offset, v_offset] = resources.get_global_offsets_for_block(
-            model_id, layer_id, block_id, block_size_bytes);
+        const auto offsets = resources.get_global_offsets_for_block(
+            model_id, layer_id, block_id);
 
-        if (k_offset == UINT64_MAX || v_offset == UINT64_MAX) {
+        if (!offsets.has_value()) {
           LOG(ERROR) << "Failed to get offsets for block " << block_id
                      << " at layer " << layer_id << " for model " << model_id;
           response->clear_layer_offsets();
           return;
         }
 
-        layer_offsets_proto->add_k_offsets(k_offset);
-        layer_offsets_proto->add_v_offsets(v_offset);
+        layer_offsets_proto->add_k_offsets(offsets->k_offset);
+        layer_offsets_proto->add_v_offsets(offsets->v_offset);
+        if (offsets->index_offset.has_value()) {
+          layer_offsets_proto->add_index_offsets(offsets->index_offset.value());
+        }
       }
     }
 

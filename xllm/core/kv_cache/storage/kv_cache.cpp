@@ -23,16 +23,6 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#if defined(USE_NPU)
-#ifdef TORCH_HIGHER_THAN_PTA6
-#include <torch_npu/csrc/core/npu/NPUFormat.h>
-#include <torch_npu/csrc/framework/OpCommand.h>
-#else
-#include <torch_npu/csrc/aten/NPUNativeFunctions.h>
-#include <torch_npu/csrc/framework/utils/OpPreparation.h>
-#endif
-#endif
-
 #include "core/kv_cache/storage/deepseek_v4_kv_cache_impl.h"
 #include "core/kv_cache/storage/indexed_kv_cache_impl.h"
 #include "core/kv_cache/storage/kpool_kv_cache_impl.h"
@@ -351,8 +341,16 @@ void allocate_kv_caches(std::vector<KVCache>& kv_caches,
         << "key_cache_shape must be initialized for VirtualMemory mode.";
     CHECK(kv_cache_shape.has_value_cache_shape())
         << "value_cache_shape must be initialized for VirtualMemory mode.";
-    CHECK(!kv_cache_shape.has_index_cache_shape())
-        << "Only support key and value cache for VirtualMemory mode.";
+    CHECK(!create_options.enable_kv_cache_quant())
+        << "VirtualMemory does not support quantized main KV cache.";
+    CHECK(!create_options.enable_indexer_cache_quant() &&
+          !kv_cache_shape.has_index_cache_scale_shape())
+        << "VirtualMemory does not support quantized indexer cache.";
+    CHECK(!kv_cache_shape.has_kpool_tail_shape())
+        << "VirtualMemory does not support KPool cache.";
+    CHECK(!kv_cache_shape.has_index_cache_shape() ||
+          create_options.dtype() == torch::kBFloat16)
+        << "VirtualMemory indexer cache requires BF16.";
     CHECK(!kv_cache_shape.has_conv_cache_shape())
         << "Only support key and value cache for VirtualMemory mode.";
     CHECK(!kv_cache_shape.has_ssm_cache_shape())
@@ -364,26 +362,6 @@ void allocate_kv_caches(std::vector<KVCache>& kv_caches,
 
     CHECK(create_options.tensor_allocator() != nullptr)
         << "Virtual memory KV cache requires a tensor allocator.";
-    KVCacheTensorAllocator& allocator = *create_options.tensor_allocator();
-
-    for (int64_t layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
-      torch::Tensor k_tensor =
-          allocator.allocate(KVCacheTensorRole::KEY,
-                             kv_cache_shape.key_cache_shape(),
-                             create_options.dtype(),
-                             create_options.device());
-      torch::Tensor v_tensor =
-          allocator.allocate(KVCacheTensorRole::VALUE,
-                             kv_cache_shape.value_cache_shape(),
-                             create_options.dtype(),
-                             create_options.device());
-#if defined(USE_NPU)
-      k_tensor = at_npu::native::npu_format_cast(k_tensor, ACL_FORMAT_ND);
-      v_tensor = at_npu::native::npu_format_cast(v_tensor, ACL_FORMAT_ND);
-#endif
-      kv_caches.emplace_back(KVCacheTensors{k_tensor, v_tensor});
-    }
-    return;
   }
 
   if (layer_cache_owned.empty()) {

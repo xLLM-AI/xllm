@@ -461,6 +461,33 @@ TEST(ForwardInputBuilderTest, FlatRemoteSharedPrefixUsesTrimmedRemoteMapping) {
             (std::vector<uint64_t>{2002, 2003, 2004}));
 }
 
+TEST(ForwardInputBuilderTest, StepSlicePreservesSparseIndexOwners) {
+  BlockManager::Options options;
+  options.num_blocks(8).block_size(16);
+  BlockManagerImpl manager(options);
+  std::vector<Block> blocks = manager.allocate(5);
+  Sequence sequence = make_basic_sequence({1});
+  sequence.add_blocks(BlockType::KV, blocks);
+  sequence.kv_state().advance_transfer_block_idx(2);
+
+  TransferKVInfo full_info = make_info({100, 101, 102, 103, 104});
+  full_info.dst_virtual_kv_cache_layer_global_offsets = {
+      {{1000, 1001, 1002, 1003, 1004},
+       {2000, 2001, 2002, 2003, 2004},
+       {3000, 3001, 3002, 3003, 3004}},
+      {{4000, 4001, 4002, 4003, 4004}, {5000, 5001, 5002, 5003, 5004}, {}}};
+  const TransferKVInfo info =
+      ForwardInputBuilderTestPeer::build_step_transfer_info(
+          full_info, &sequence, /*seq_len=*/64);
+  ASSERT_EQ(info.dst_virtual_kv_cache_layer_global_offsets.size(), 2U);
+  const auto& owner = info.dst_virtual_kv_cache_layer_global_offsets[0];
+  EXPECT_EQ(owner.k_offsets, (std::vector<uint64_t>{1002, 1003}));
+  EXPECT_EQ(owner.v_offsets, (std::vector<uint64_t>{2002, 2003}));
+  EXPECT_EQ(owner.index_offsets, (std::vector<uint64_t>{3002, 3003}));
+  EXPECT_TRUE(
+      info.dst_virtual_kv_cache_layer_global_offsets[1].index_offsets.empty());
+}
+
 TEST(ForwardInputBuilderTest, GroupRemoteSharedPrefixKeepsFullRemoteMapping) {
   BlockManager::Options options;
   options.num_blocks(8).block_size(16);

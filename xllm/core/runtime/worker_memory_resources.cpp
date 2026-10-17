@@ -147,6 +147,19 @@ size_t WorkerMemoryResources::free_weight(const std::string& model_id) {
   return weight_memory_.free_weight(model_id);
 }
 
+std::optional<VirtualKVCacheBlockGlobalOffsets>
+WorkerMemoryResources::get_global_offsets_for_block(const std::string& model_id,
+                                                    int64_t layer_id,
+                                                    int64_t block_id) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!GlobalVirtualMemoryRegion::get_instance().is_initialized()) {
+    LOG(ERROR) << "GlobalVirtualMemoryRegion not initialized";
+    return std::nullopt;
+  }
+  return kv_cache_memory_.get_global_offsets_for_block(
+      model_id, layer_id, block_id);
+}
+
 std::pair<uint64_t, uint64_t>
 WorkerMemoryResources::get_global_offsets_for_block(const std::string& model_id,
                                                     int64_t layer_id,

@@ -24,6 +24,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/common/types.h"
 #include "core/distributed_runtime/worker_memory_rpc_options.h"
 #include "core/framework/allocator/worker_physical_page_budget.h"
 #include "core/kv_cache/storage/kv_cache_page_backend.h"
@@ -102,9 +103,7 @@ class DistributedVirtualMemoryCoordinator final : public KVCachePageBackend {
       int32_t dp_rank,
       const std::string& model_id,
       const std::vector<int32_t>& block_ids,
-      uint64_t block_size_bytes,
-      std::vector<std::pair<std::vector<uint64_t>, std::vector<uint64_t>>>&
-          layer_offsets);
+      std::vector<VirtualKVCacheLayerGlobalOffsets>& layer_offsets);
 
  private:
   friend class DistributedVirtualMemoryCoordinatorTestPeer;

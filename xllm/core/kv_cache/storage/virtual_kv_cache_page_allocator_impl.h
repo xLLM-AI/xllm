@@ -59,8 +59,13 @@ class VirtualKVCachePageAllocatorImpl final
             int32_t dp_size,
             bool enable_prealloc = true);
   bool is_initialized() const override;
-  bool register_model(const std::string& model_id, int64_t num_layers);
-  void start_prealloc_thread() override;
+  // Explicit geometry is supplied after cache shapes are known. Zero values
+  // retain the symmetric K/V geometry for callers without tensor metadata.
+  bool register_model(const std::string& model_id,
+                      int64_t num_layers,
+                      size_t physical_pages_per_virtual_page = 0,
+                      size_t max_virtual_pages = 0);
+  void start_prealloc_thread(const std::string& model_id) override;
 
   std::unique_ptr<VirtualKVCachePageState> alloc_kv_cache_page(
       const std::string& model_id,
@@ -115,6 +120,9 @@ class VirtualKVCachePageAllocatorImpl final
     int64_t num_layers = 0;
     size_t num_total_virt_pages = 0;
     size_t phy_pages_per_virt_page = 0;
+    size_t min_reserved_pages = kMinReservedPages;
+    size_t max_reserved_pages = kMaxReservedPages;
+    bool ready_for_preallocation = false;
     bool suspended = false;
     bool kv_cache_mapped = true;
     ModelTransition transition = ModelTransition::IDLE;

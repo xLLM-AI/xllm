@@ -38,10 +38,9 @@ namespace xllm {
 
 DisaggPDServiceImpl::DisaggPDServiceImpl(DisaggPDScheduler* scheduler,
                                          Engine* engine,
-                                         int32_t kv_cache_block_tokens)
+                                         int32_t /*kv_cache_block_tokens*/)
     : scheduler_(scheduler),
       engine_(engine),
-      kv_cache_block_tokens_(kv_cache_block_tokens),
       block_manager_(engine->block_manager_pool()) {
   xservice_client_ = XServiceClient::get_instance();
   if (!xservice_client_->initialize_done()) {
@@ -160,54 +159,52 @@ void DisaggPDServiceImpl::release_reservation(
                            : proto::ReleaseReservationResponse::NOT_WAITING);
 }
 
-void DisaggPDServiceImpl::append_virtual_kv_cache_offsets(
+bool DisaggPDServiceImpl::append_virtual_kv_cache_offsets(
     int32_t dp_rank,
     const std::string& request_id,
     const std::vector<int32_t>& block_ids,
     proto::DisaggResponse* response) {
   if (block_manager_ == nullptr ||
       !block_manager_->options().enable_virtual_memory() || block_ids.empty()) {
-    return;
+    return true;
   }
 
-  std::vector<std::pair<std::vector<uint64_t>, std::vector<uint64_t>>>
-      layer_offsets;
+  std::vector<VirtualKVCacheLayerGlobalOffsets> layer_offsets;
   const auto& block_options = block_manager_->options();
-  CHECK_GT(kv_cache_block_tokens_, 0);
-  // KV split enlarges the manager's logical block length; offsets use
-  // the physical cache block length configured by the engine.
-  const uint64_t block_size_bytes =
-      static_cast<uint64_t>(block_options.slot_size()) *
-      static_cast<uint64_t>(kv_cache_block_tokens_) / 2;
   const bool offsets_available =
       DistributedVirtualMemoryCoordinator::get_instance()
-          .get_virtual_kv_cache_offsets(dp_rank,
-                                        block_options.model_id(),
-                                        block_ids,
-                                        block_size_bytes,
-                                        layer_offsets);
+          .get_virtual_kv_cache_offsets(
+              dp_rank, block_options.model_id(), block_ids, layer_offsets);
   if (!offsets_available) {
-    LOG(WARNING) << "Failed to get VirtualMemory offsets for request "
-                 << request_id;
-    return;
+    LOG(ERROR) << "Failed to get VirtualMemory offsets for request "
+               << request_id;
+    return false;
   }
 
   auto* layers = response->mutable_virtual_kv_cache_layer_global_offsets();
   layers->Reserve(layers->size() + static_cast<int32_t>(layer_offsets.size()));
-  for (const auto& [k_offsets, v_offsets] : layer_offsets) {
+  for (const auto& offsets : layer_offsets) {
     auto* layer = layers->Add();
-    layer->mutable_k_offsets()->Reserve(static_cast<int32_t>(k_offsets.size()));
-    layer->mutable_v_offsets()->Reserve(static_cast<int32_t>(v_offsets.size()));
-    for (uint64_t offset : k_offsets) {
+    layer->mutable_k_offsets()->Reserve(
+        static_cast<int32_t>(offsets.k_offsets.size()));
+    layer->mutable_v_offsets()->Reserve(
+        static_cast<int32_t>(offsets.v_offsets.size()));
+    layer->mutable_index_offsets()->Reserve(
+        static_cast<int32_t>(offsets.index_offsets.size()));
+    for (uint64_t offset : offsets.k_offsets) {
       layer->add_k_offsets(offset);
     }
-    for (uint64_t offset : v_offsets) {
+    for (uint64_t offset : offsets.v_offsets) {
       layer->add_v_offsets(offset);
+    }
+    for (uint64_t offset : offsets.index_offsets) {
+      layer->add_index_offsets(offset);
     }
   }
   VLOG(5) << "VirtualMemory offsets added for request " << request_id
           << ", num_blocks=" << block_ids.size()
           << ", num_layers=" << layer_offsets.size();
+  return true;
 }
 
 void DisaggPDServiceImpl::decode_recv_new_requests(
@@ -239,15 +236,6 @@ void DisaggPDServiceImpl::decode_recv_new_requests(
       continue;
     }
 
-    // Push the request to the scheduler request buffer.
-    if (!scheduler_->decode_schedule(new_request, request->prefill_name())) {
-      LOG(ERROR) << "Failed to schedule new decode instance request: "
-                 << req.req_id();
-      // Request and blocks are released in scheduler.
-      resp->set_status_code(500);
-      continue;
-    }
-
     resp->set_dp_rank(sequence->dp_rank());
     std::vector<int32_t> virtual_memory_block_ids;
     append_disagg_kv_transfer_groups(
@@ -258,8 +246,27 @@ void DisaggPDServiceImpl::decode_recv_new_requests(
                 block_manager_->options().enable_virtual_memory()
             ? &virtual_memory_block_ids
             : nullptr);
-    append_virtual_kv_cache_offsets(
-        sequence->dp_rank(), req.req_id(), virtual_memory_block_ids, resp);
+    if (!append_virtual_kv_cache_offsets(sequence->dp_rank(),
+                                         req.req_id(),
+                                         virtual_memory_block_ids,
+                                         resp)) {
+      engine_->block_manager_pool()->deallocate_without_cache(sequence);
+      resp->clear_groups();
+      resp->clear_virtual_kv_cache_layer_global_offsets();
+      resp->set_status_code(500);
+      continue;
+    }
+
+    // Publish the reservation only after its transfer metadata is complete.
+    if (!scheduler_->decode_schedule(new_request, request->prefill_name())) {
+      LOG(ERROR) << "Failed to schedule new decode instance request: "
+                 << req.req_id();
+      // Request and blocks are released in scheduler.
+      resp->clear_groups();
+      resp->clear_virtual_kv_cache_layer_global_offsets();
+      resp->set_status_code(500);
+      continue;
+    }
     resp->set_status_code(200);
   }
 }

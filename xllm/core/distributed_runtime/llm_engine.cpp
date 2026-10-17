@@ -477,6 +477,7 @@ bool LLMEngine::allocate_kv_cache(
       KVCacheManagerFactory::create(kv_cache_cap,
                                     args_,
                                     dp_local_tp_size_,
+                                    dtype_,
                                     std::move(options),
                                     std::move(transfer_coordinator),
                                     dp_size_,

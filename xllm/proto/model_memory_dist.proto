@@ -58,18 +58,20 @@ message FreeWeightPagesRequest {
 message GetVirtualKVCacheOffsetsRequest {
   string model_id = 1;
   repeated int32 block_ids = 2;
-  uint64 block_size_bytes = 3;
+  uint64 block_size_bytes = 3 [deprecated = true];
 }
 
-// Per-layer K/V byte offsets in GlobalVirtualMemoryRegion's physical-page pool mapping.
+// Per-layer cache role byte offsets in GlobalVirtualMemoryRegion's physical-page pool mapping.
 message VirtualKVCacheLayerGlobalOffsetsProto {
   repeated uint64 k_offsets = 1;
   repeated uint64 v_offsets = 2;
+  // Empty for layers that do not own an INDEX cache.
+  repeated uint64 index_offsets = 3;
 }
 
 // Response with byte offsets in the shared physical-page pool mapping.
 message GetVirtualKVCacheOffsetsResponse {
-  // Per-layer offsets: layer_offsets[layer_id] contains K/V offsets for all blocks
+  // Per-layer offsets: layer_offsets[layer_id] contains cache role offsets for all blocks
   repeated VirtualKVCacheLayerGlobalOffsetsProto layer_offsets = 1;
 }
 

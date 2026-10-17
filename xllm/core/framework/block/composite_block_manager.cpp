@@ -136,9 +136,9 @@ std::unique_ptr<BlockManager> make_kv_leaf(
       << "Virtual memory KV cache requires a page allocator";
   const size_t page_size = page_allocator->page_size();
   CHECK_GT(page_size, 0u);
-  // K and V share block size; divide by 2.
-  const size_t block_mem_size =
-      static_cast<size_t>(kv_opts.block_size()) * kv_opts.slot_size() / 2;
+  const size_t block_mem_size = kv_opts.virtual_block_bytes();
+  CHECK_GT(block_mem_size, 0);
+  CHECK_EQ(page_size % block_mem_size, 0);
   return std::make_unique<VirtualMemoryKVCacheBlockManager>(
       kv_opts,
       *page_allocator,

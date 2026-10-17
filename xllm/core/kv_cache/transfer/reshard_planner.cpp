@@ -16,6 +16,7 @@ limitations under the License.
 #include "core/kv_cache/transfer/reshard_planner.h"
 
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <map>
 #include <optional>
@@ -25,6 +26,8 @@ limitations under the License.
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#include "core/kv_cache/layout/kv_cache_tensor_role.h"
 
 namespace xllm {
 
@@ -143,6 +146,56 @@ Status validate_compatibility(const WorkerCacheLayoutManifest& source,
   if (!supports_partition_pair(source.coordinates, destination.coordinates)) {
     return invalid(
         "source and destination CP/KV-split partitions are unsupported");
+  }
+  return Status();
+}
+
+bool same_logical_span(const LogicalSpan& lhs, const LogicalSpan& rhs) {
+  return lhs.logical_tensor == rhs.logical_tensor &&
+         lhs.logical_offset_bytes == rhs.logical_offset_bytes &&
+         lhs.physical_offset_bytes == rhs.physical_offset_bytes &&
+         lhs.bytes_per_region == rhs.bytes_per_region &&
+         lhs.repeat_count == rhs.repeat_count &&
+         lhs.logical_stride_bytes == rhs.logical_stride_bytes &&
+         lhs.physical_stride_bytes == rhs.physical_stride_bytes &&
+         lhs.owner_tp_rank == rhs.owner_tp_rank;
+}
+
+Status validate_native_pull_tensor(const CacheTensorManifest& tensor) {
+  const bool supported_role = tensor.role == KVCacheTensorRole::KEY ||
+                              tensor.role == KVCacheTensorRole::VALUE ||
+                              tensor.role == KVCacheTensorRole::INDEX;
+  if (tensor.cache_namespace != CacheNamespace::MAIN || !supported_role ||
+      !tensor.explicit_resource_offsets || !tensor.contiguous ||
+      tensor.physical_rows_per_resource != 1 ||
+      tensor.block_token_capacity == 0 ||
+      tensor.shard.resource_scope != CacheResourceScope::BLOCK) {
+    return invalid(
+        "native PULL requires explicit MAIN block tensors with K/V/INDEX "
+        "roles");
+  }
+  return Status();
+}
+
+Status validate_native_pull_tensor_pair(const CacheTensorManifest& local,
+                                        const CacheTensorManifest& remote) {
+  if (local.group_id != remote.group_id ||
+      local.scalar_type != remote.scalar_type ||
+      local.element_bytes != remote.element_bytes ||
+      local.block_token_capacity != remote.block_token_capacity ||
+      local.resource_stride_bytes != remote.resource_stride_bytes ||
+      local.stride != remote.stride ||
+      local.shape.size() != remote.shape.size() ||
+      !std::equal(local.shape.begin() + 1,
+                  local.shape.end(),
+                  remote.shape.begin() + 1) ||
+      local.shard.kind != remote.shard.kind ||
+      local.shard.spans.size() != remote.shard.spans.size() ||
+      !std::equal(local.shard.spans.begin(),
+                  local.shard.spans.end(),
+                  remote.shard.spans.begin(),
+                  same_logical_span)) {
+    return invalid("native PULL cache tensor geometry or shard differs");
   }
   return Status();
 }
@@ -982,6 +1035,110 @@ Status ReshardPlanner::build_outgoing_plan(
     }
   }
   compact_planned_regions(&candidates, &plan->regions);
+  return Status();
+}
+
+Status ReshardPlanner::build_native_pull_plan(
+    const WorkerCacheLayoutManifest& local_destination,
+    const WorkerCacheLayoutManifest& remote_source,
+    ReshardPlanTemplate* plan) const {
+  if (plan == nullptr) {
+    return invalid("native PULL plan output must not be null");
+  }
+  const Status compatibility =
+      validate_compatibility(remote_source, local_destination);
+  if (!compatibility.ok()) {
+    return compatibility;
+  }
+  const ParallelCoordinates& local = local_destination.coordinates;
+  const ParallelCoordinates& remote = remote_source.coordinates;
+  if (local.dp_size != remote.dp_size || local.tp_size != remote.tp_size ||
+      local.tp_rank != remote.tp_rank || !same_partition(local, remote)) {
+    return invalid(
+        "native PULL requires matching DP/TP sizes and TP/CP/KV-split "
+        "ranks");
+  }
+  if (local_destination.tensors.size() != remote_source.tensors.size()) {
+    return invalid("native PULL source and destination tensor roles differ");
+  }
+
+  std::unordered_map<int64_t, std::array<const CacheTensorManifest*, 3>>
+      remote_tensors;
+  remote_tensors.reserve(remote_source.tensors.size());
+  for (const CacheTensorManifest& tensor : remote_source.tensors) {
+    const Status tensor_status = validate_native_pull_tensor(tensor);
+    if (!tensor_status.ok()) {
+      return tensor_status;
+    }
+    const CacheTensorManifest*& slot =
+        remote_tensors[tensor.layer_id][static_cast<size_t>(tensor.role)];
+    if (slot != nullptr) {
+      return invalid(
+          "native PULL requires a single cache group per layer role");
+    }
+    slot = &tensor;
+  }
+  for (const auto& [layer_id, roles] : remote_tensors) {
+    static_cast<void>(layer_id);
+    if (roles[KVCacheTensorRole::KEY] == nullptr ||
+        roles[KVCacheTensorRole::VALUE] == nullptr) {
+      return invalid("native PULL requires both K and V tensors in each layer");
+    }
+  }
+
+  ReshardPlanTemplate candidate;
+  candidate.source_incarnation = remote_source.incarnation_id;
+  candidate.source_layout_generation = remote_source.layout_generation;
+  candidate.destination_incarnation = local_destination.incarnation_id;
+  candidate.destination_layout_generation = local_destination.layout_generation;
+  candidate.source_coordinates = remote;
+  candidate.destination_coordinates = local;
+  candidate.destination_addr = local_destination.addr;
+  candidate.regions.reserve(local_destination.tensors.size());
+  for (const CacheTensorManifest& local_tensor : local_destination.tensors) {
+    const Status tensor_status = validate_native_pull_tensor(local_tensor);
+    if (!tensor_status.ok()) {
+      return tensor_status;
+    }
+    const auto remote_it = remote_tensors.find(local_tensor.layer_id);
+    if (remote_it == remote_tensors.end() ||
+        remote_it->second[static_cast<size_t>(local_tensor.role)] == nullptr) {
+      return invalid("native PULL source and destination tensor roles differ");
+    }
+    const CacheTensorManifest& remote_tensor =
+        *remote_it->second[static_cast<size_t>(local_tensor.role)];
+    const Status pair_status =
+        validate_native_pull_tensor_pair(local_tensor, remote_tensor);
+    if (!pair_status.ok()) {
+      return pair_status;
+    }
+
+    StridedRegionTemplate region;
+    region.cache_namespace = local_tensor.cache_namespace;
+    region.layer_id = local_tensor.layer_id;
+    region.role = local_tensor.role;
+    region.group_id = local_tensor.group_id;
+    region.logical_tensor =
+        KVCacheTensorRole(static_cast<KVCacheTensorRole::Value>(region.role))
+            .to_string();
+    region.local_buffer_id =
+        static_cast<uint64_t>(local_tensor.mooncake_buffer_id);
+    region.remote_buffer_id =
+        static_cast<uint64_t>(remote_tensor.mooncake_buffer_id);
+    region.local_offset_in_resource = local_tensor.storage_offset_bytes;
+    region.remote_offset_in_resource = remote_tensor.storage_offset_bytes;
+    region.bytes_per_region = local_tensor.resource_stride_bytes;
+    region.local_resource_count = local_tensor.resource_count;
+    region.remote_resource_count = remote_tensor.resource_count;
+    region.local_resource_stride = local_tensor.resource_stride_bytes;
+    region.remote_resource_stride = remote_tensor.resource_stride_bytes;
+    region.local_buffer_bytes = local_tensor.buffer_bytes;
+    region.remote_buffer_bytes = remote_tensor.buffer_bytes;
+    region.local_explicit_resource_offsets = true;
+    region.remote_explicit_resource_offsets = true;
+    candidate.regions.emplace_back(std::move(region));
+  }
+  *plan = std::move(candidate);
   return Status();
 }
 

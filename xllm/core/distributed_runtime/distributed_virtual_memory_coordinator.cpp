@@ -443,9 +443,8 @@ bool DistributedVirtualMemoryCoordinator::get_virtual_kv_cache_offsets(
     int32_t dp_rank,
     const std::string& model_id,
     const std::vector<int32_t>& block_ids,
-    uint64_t block_size_bytes,
-    std::vector<std::pair<std::vector<uint64_t>, std::vector<uint64_t>>>&
-        layer_offsets) {
+    std::vector<VirtualKVCacheLayerGlobalOffsets>& layer_offsets) {
+  layer_offsets.clear();
   const auto [model_dp_size, model_tp_size] =
       get_model_parallel_strategy(model_id);
   if (dp_rank < 0 || dp_rank >= model_dp_size) {
@@ -463,28 +462,32 @@ bool DistributedVirtualMemoryCoordinator::get_virtual_kv_cache_offsets(
     }
 
     const int64_t num_layers = model_num_layers.value();
-    layer_offsets.resize(num_layers);
+    std::vector<VirtualKVCacheLayerGlobalOffsets> local_layer_offsets(
+        num_layers);
 
     for (int64_t layer_id = 0; layer_id < num_layers; ++layer_id) {
-      std::vector<uint64_t> k_offsets;
-      std::vector<uint64_t> v_offsets;
-      k_offsets.reserve(block_ids.size());
-      v_offsets.reserve(block_ids.size());
+      auto& layer = local_layer_offsets[layer_id];
+      layer.k_offsets.reserve(block_ids.size());
+      layer.v_offsets.reserve(block_ids.size());
+      layer.index_offsets.reserve(block_ids.size());
 
       for (int32_t block_id : block_ids) {
-        auto [k_offset, v_offset] =
+        const auto offsets =
             WorkerMemoryResources::get_instance().get_global_offsets_for_block(
-                model_id, layer_id, block_id, block_size_bytes);
-        if (k_offset == UINT64_MAX || v_offset == UINT64_MAX) {
+                model_id, layer_id, block_id);
+        if (!offsets.has_value()) {
           LOG(ERROR) << "Failed to get local offsets for block " << block_id
                      << " at layer " << layer_id;
           return false;
         }
-        k_offsets.emplace_back(k_offset);
-        v_offsets.emplace_back(v_offset);
+        layer.k_offsets.emplace_back(offsets->k_offset);
+        layer.v_offsets.emplace_back(offsets->v_offset);
+        if (offsets->index_offset.has_value()) {
+          layer.index_offsets.emplace_back(offsets->index_offset.value());
+        }
       }
-      layer_offsets[layer_id] = {std::move(k_offsets), std::move(v_offsets)};
     }
+    layer_offsets = std::move(local_layer_offsets);
 
     VLOG(1) << "get_virtual_kv_cache_offsets (local): model_id=" << model_id
             << ", num_blocks=" << block_ids.size()
@@ -501,8 +504,7 @@ bool DistributedVirtualMemoryCoordinator::get_virtual_kv_cache_offsets(
     return false;
   }
   const auto& client = clients_[worker_rank];
-  layer_offsets = client->get_virtual_kv_cache_offsets(
-      model_id, block_ids, block_size_bytes);
+  layer_offsets = client->get_virtual_kv_cache_offsets(model_id, block_ids);
   if (layer_offsets.empty()) {
     LOG(ERROR) << "get_virtual_kv_cache_offsets failed for dp_rank=" << dp_rank
                << ", model_id=" << model_id;

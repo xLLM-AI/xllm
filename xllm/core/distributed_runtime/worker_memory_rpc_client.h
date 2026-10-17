@@ -26,6 +26,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/macros.h"
+#include "core/common/types.h"
 #include "core/framework/allocator/virtual_memory/mapped_virtual_memory_region.h"  // For offset_t type definition
 #include "core/util/threadpool.h"
 #include "model_memory_dist.pb.h"
@@ -70,12 +71,11 @@ class WorkerMemoryRpcClient final {
 
   // Get virtual-memory KV block byte offsets in the shared physical-page pool
   // mapping for PD disaggregation. Returns an empty vector on error.
-  // Result: layer_offsets[layer_id] = {k_offsets, v_offsets}.
+  // Result vectors retain the requested block order within every layer.
   // Waits through brpc::Join so callers running in bthreads yield the worker.
-  std::vector<std::pair<std::vector<uint64_t>, std::vector<uint64_t>>>
-  get_virtual_kv_cache_offsets(const std::string& model_id,
-                               const std::vector<int32_t>& block_ids,
-                               uint64_t block_size_bytes);
+  std::vector<VirtualKVCacheLayerGlobalOffsets> get_virtual_kv_cache_offsets(
+      const std::string& model_id,
+      const std::vector<int32_t>& block_ids);
 
  private:
   DISALLOW_COPY_AND_ASSIGN(WorkerMemoryRpcClient);

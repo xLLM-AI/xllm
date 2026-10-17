@@ -462,7 +462,7 @@ TEST(BatchPackedInputTest, MaterializedShmReadRebindsTaggedTensorArena) {
   proto::PackedForwardInput packed_input;
   ASSERT_TRUE(source.to_packed_proto(&packed_input));
   ASSERT_GE(packed_input.payload().size(), 40u);
-  EXPECT_EQ(static_cast<uint8_t>(packed_input.payload()[8]), 6u);
+  EXPECT_EQ(static_cast<uint8_t>(packed_input.payload()[8]), 7u);
   EXPECT_EQ(static_cast<uint8_t>(packed_input.payload()[10]), 1u);
   const uint64_t arena_offset =
       read_packed_uint64(packed_input.payload(), /*offset=*/24);
@@ -937,7 +937,7 @@ TEST(BatchPackedInputTest, NativeDomainsRejectUnsupportedPackedSchemas) {
 
   for (const auto& packed_input : packed_inputs) {
     ASSERT_GE(packed_input.payload().size(), 40u);
-    for (int32_t version : {0, 2, 4, 127}) {
+    for (int32_t version : {0, 2, 4, 6, 127}) {
       SCOPED_TRACE(version);
       std::string payload = packed_input.payload();
       payload[8] = static_cast<char>(version);

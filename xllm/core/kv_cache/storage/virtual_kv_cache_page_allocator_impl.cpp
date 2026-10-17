@@ -64,12 +64,14 @@ bool VirtualKVCachePageAllocatorImpl::is_initialized() const {
 
 bool VirtualKVCachePageAllocatorImpl::register_model(
     const std::string& model_id,
-    int64_t num_layers) {
+    int64_t num_layers,
+    size_t physical_pages_per_virtual_page,
+    size_t max_virtual_pages) {
   std::lock_guard<std::mutex> lock(mtx_);
   CHECK(initialized_) << "VirtualKVCachePageAllocatorImpl not initialized";
   CHECK_GT(num_layers, 0);
   CHECK_LE(static_cast<uint64_t>(num_layers),
-           std::numeric_limits<size_t>::max() / 2);
+           std::numeric_limits<size_t>::max() / (2 * kMaxReservedPages));
   auto [it, inserted] = model_states_.try_emplace(model_id);
   if (!inserted) {
     LOG(WARNING) << "Model " << model_id << " already registered";
@@ -77,8 +79,21 @@ bool VirtualKVCachePageAllocatorImpl::register_model(
   }
   ModelState& state = it->second;
   state.num_layers = num_layers;
-  state.phy_pages_per_virt_page = 2 * static_cast<size_t>(num_layers);
+  const size_t symmetric_pages = 2 * static_cast<size_t>(num_layers);
+  state.phy_pages_per_virt_page = physical_pages_per_virtual_page == 0
+                                      ? symmetric_pages
+                                      : physical_pages_per_virtual_page;
   state.num_total_virt_pages = total_pages_ / state.phy_pages_per_virt_page;
+  if (max_virtual_pages > 0) {
+    state.num_total_virt_pages =
+        std::min(state.num_total_virt_pages, max_virtual_pages);
+  }
+  // Preserve the symmetric allocator's physical preallocation budget when
+  // one logical page expands into multiple hardware pages per tensor.
+  state.min_reserved_pages = std::max<size_t>(
+      1, kMinReservedPages * symmetric_pages / state.phy_pages_per_virt_page);
+  state.max_reserved_pages = std::max<size_t>(
+      1, kMaxReservedPages * symmetric_pages / state.phy_pages_per_virt_page);
   CHECK_LE(state.num_total_virt_pages,
            static_cast<size_t>(std::numeric_limits<int64_t>::max()));
   state.dp_group_pages.resize(dp_size_);
@@ -91,16 +106,20 @@ bool VirtualKVCachePageAllocatorImpl::register_model(
   return true;
 }
 
-void VirtualKVCachePageAllocatorImpl::start_prealloc_thread() {
+void VirtualKVCachePageAllocatorImpl::start_prealloc_thread(
+    const std::string& model_id) {
   std::lock_guard<std::mutex> lock(mtx_);
   CHECK(initialized_) << "VirtualKVCachePageAllocatorImpl not initialized";
-  if (!enable_prealloc_ || prealloc_thread_) {
+  get_model_state(model_id).ready_for_preallocation = true;
+  if (!enable_prealloc_) {
     return;
   }
-  prealloc_running_ = true;
   prealloc_needed_ = true;
-  prealloc_thread_ = std::make_unique<std::thread>(
-      &VirtualKVCachePageAllocatorImpl::prealloc_worker, this);
+  if (!prealloc_thread_) {
+    prealloc_running_ = true;
+    prealloc_thread_ = std::make_unique<std::thread>(
+        &VirtualKVCachePageAllocatorImpl::prealloc_worker, this);
+  }
   cond_.notify_all();
 }
 
@@ -122,7 +141,7 @@ VirtualKVCachePageAllocatorImpl::alloc_kv_cache_page(
     --pages.num_free_virt_pages;
     pages.allocated_virt_page_list.insert(page_id);
     if (enable_prealloc_ &&
-        pages.reserved_virt_page_list.size() < kMinReservedPages) {
+        pages.reserved_virt_page_list.size() < state.min_reserved_pages) {
       prealloc_needed_ = true;
       cond_.notify_all();
     }
@@ -169,8 +188,8 @@ void VirtualKVCachePageAllocatorImpl::free_kv_cache_pages(
     return;
   }
   size_t reserve_capacity =
-      kMaxReservedPages -
-      std::min(kMaxReservedPages, pages.reserved_virt_page_list.size());
+      state.max_reserved_pages -
+      std::min(state.max_reserved_pages, pages.reserved_virt_page_list.size());
   size_t num_to_reserve = std::min(reserve_capacity, virtual_page_ids.size());
   pages.reserved_virt_page_list.insert(
       pages.reserved_virt_page_list.end(),
@@ -477,14 +496,16 @@ void VirtualKVCachePageAllocatorImpl::prealloc_worker() {
       prealloc_needed_ = false;
       batches.reserve(model_states_.size() * static_cast<size_t>(dp_size_));
       for (auto& [model_id, state] : model_states_) {
-        if (state.suspended || state.transition != ModelTransition::IDLE) {
+        if (!state.ready_for_preallocation || state.suspended ||
+            state.transition != ModelTransition::IDLE) {
           continue;
         }
         for (int32_t dp_rank = 0; dp_rank < dp_size_; ++dp_rank) {
           auto& pages = state.dp_group_pages[dp_rank];
           size_t current_reserved = pages.reserved_virt_page_list.size();
           size_t to_reserve =
-              kMinReservedPages - std::min(kMinReservedPages, current_reserved);
+              state.min_reserved_pages -
+              std::min(state.min_reserved_pages, current_reserved);
           to_reserve = std::min(to_reserve, pages.free_virt_page_list.size());
           to_reserve = std::min(to_reserve,
                                 backend_.available_pages(model_id, dp_rank) /

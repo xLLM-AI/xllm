@@ -724,6 +724,8 @@ void DisaggPDScheduler::dispatch_requests() {
                                      layer_offsets.k_offsets().end());
               layer.v_offsets.assign(layer_offsets.v_offsets().begin(),
                                      layer_offsets.v_offsets().end());
+              layer.index_offsets.assign(layer_offsets.index_offsets().begin(),
+                                         layer_offsets.index_offsets().end());
               info.dst_virtual_kv_cache_layer_global_offsets.emplace_back(
                   std::move(layer));
             }

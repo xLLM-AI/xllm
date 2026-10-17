@@ -64,6 +64,10 @@ class WorkerMemoryResources final {
   bool allocate_weight(const std::string& model_id, void*& ptr, size_t size);
   size_t free_weight(const std::string& model_id);
 
+  std::optional<VirtualKVCacheBlockGlobalOffsets> get_global_offsets_for_block(
+      const std::string& model_id,
+      int64_t layer_id,
+      int64_t block_id);
   std::pair<uint64_t, uint64_t> get_global_offsets_for_block(
       const std::string& model_id,
       int64_t layer_id,

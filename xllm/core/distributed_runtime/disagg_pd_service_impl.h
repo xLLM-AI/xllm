@@ -66,15 +66,13 @@ class DisaggPDServiceImpl {
 
   DisaggPDScheduler* scheduler_;  // not owned
   Engine* engine_;                // not owned
-  // Token slots per physical KV cache block, before KV split expansion.
-  const int32_t kv_cache_block_tokens_;
   XServiceClient* xservice_client_ = nullptr;
   std::mutex json_object_grammar_mutex_;
   std::shared_ptr<const JsonObjectGrammar> json_object_grammar_;
   std::shared_ptr<const JsonObjectGrammar> json_reasoning_grammar_;
 
  private:
-  void append_virtual_kv_cache_offsets(int32_t dp_rank,
+  bool append_virtual_kv_cache_offsets(int32_t dp_rank,
                                        const std::string& request_id,
                                        const std::vector<int32_t>& block_ids,
                                        proto::DisaggResponse* response);

@@ -54,6 +54,7 @@ class KVCacheManagerFactory final {
       const KVCacheCapacity& kv_cache_capacity,
       const ModelArgs& model_args,
       int64_t world_size,
+      torch::ScalarType dtype,
       BlockManagerPool::Options options,
       std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator,
       int32_t dp_size = 1,

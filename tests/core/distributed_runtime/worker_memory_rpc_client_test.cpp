@@ -29,10 +29,16 @@ limitations under the License.
 namespace xllm {
 namespace {
 
-using LayerOffsets =
-    std::vector<std::pair<std::vector<uint64_t>, std::vector<uint64_t>>>;
+using LayerOffsets = std::vector<VirtualKVCacheLayerGlobalOffsets>;
 
-enum class ResponseMode { NORMAL, TRANSPORT_FAILURE, EMPTY_RESPONSE };
+enum class ResponseMode {
+  NORMAL,
+  TRANSPORT_FAILURE,
+  EMPTY_RESPONSE,
+  INVALID_K_OFFSETS,
+  INVALID_V_OFFSETS,
+  INVALID_INDEX_OFFSETS,
+};
 
 class OffsetTestService final : public proto::ModelMemoryDist {
  public:
@@ -66,16 +72,34 @@ class OffsetTestService final : public proto::ModelMemoryDist {
       return;
     }
 
-    const LayerOffsets offsets = {{{300, 0, 700}, {301, 1, 701}},
-                                  {{1300, 1000, 1700}, {1301, 1001, 1701}}};
-    for (const auto& [k_offsets, v_offsets] : offsets) {
+    const LayerOffsets offsets = {{{300, 0, 700}, {301, 1, 701}, {302, 2, 702}},
+                                  {{1300, 1000, 1700}, {1301, 1001, 1701}, {}}};
+    for (const auto& offsets_for_layer : offsets) {
       auto* layer = response->add_layer_offsets();
-      for (uint64_t offset : k_offsets) {
+      for (uint64_t offset : offsets_for_layer.k_offsets) {
         layer->add_k_offsets(offset);
       }
-      for (uint64_t offset : v_offsets) {
+      for (uint64_t offset : offsets_for_layer.v_offsets) {
         layer->add_v_offsets(offset);
       }
+      for (uint64_t offset : offsets_for_layer.index_offsets) {
+        layer->add_index_offsets(offset);
+      }
+    }
+    switch (mode_) {
+      case ResponseMode::INVALID_K_OFFSETS:
+        response->mutable_layer_offsets(0)->mutable_k_offsets()->RemoveLast();
+        break;
+      case ResponseMode::INVALID_V_OFFSETS:
+        response->mutable_layer_offsets(0)->mutable_v_offsets()->RemoveLast();
+        break;
+      case ResponseMode::INVALID_INDEX_OFFSETS:
+        response->mutable_layer_offsets(0)
+            ->mutable_index_offsets()
+            ->RemoveLast();
+        break;
+      default:
+        break;
     }
   }
 
@@ -142,26 +166,30 @@ TEST(WorkerMemoryRpcClientTest, PreservesBlockOrderAndLayerOffsets) {
 
   OffsetLookupState lookup{&client, &block_ids, {}};
   bthread_t lookup_thread;
-  ASSERT_EQ(
-      bthread_start_background(
-          &lookup_thread,
-          nullptr,
-          [](void* arg) -> void* {
-            auto* state = static_cast<OffsetLookupState*>(arg);
-            state->offsets = state->client->get_virtual_kv_cache_offsets(
-                "forked-model", *state->block_ids, /*block_size_bytes=*/4096);
-            return nullptr;
-          },
-          &lookup),
-      0);
+  ASSERT_EQ(bthread_start_background(
+                &lookup_thread,
+                nullptr,
+                [](void* arg) -> void* {
+                  auto* state = static_cast<OffsetLookupState*>(arg);
+                  state->offsets = state->client->get_virtual_kv_cache_offsets(
+                      "forked-model", *state->block_ids);
+                  return nullptr;
+                },
+                &lookup),
+            0);
   ASSERT_EQ(bthread_join(lookup_thread, nullptr), 0);
 
-  const LayerOffsets expected = {{{300, 0, 700}, {301, 1, 701}},
-                                 {{1300, 1000, 1700}, {1301, 1001, 1701}}};
-  EXPECT_EQ(lookup.offsets, expected);
+  const LayerOffsets expected = {{{300, 0, 700}, {301, 1, 701}, {302, 2, 702}},
+                                 {{1300, 1000, 1700}, {1301, 1001, 1701}, {}}};
+  ASSERT_EQ(lookup.offsets.size(), expected.size());
+  for (size_t layer_id = 0; layer_id < expected.size(); ++layer_id) {
+    EXPECT_EQ(lookup.offsets[layer_id].k_offsets, expected[layer_id].k_offsets);
+    EXPECT_EQ(lookup.offsets[layer_id].v_offsets, expected[layer_id].v_offsets);
+    EXPECT_EQ(lookup.offsets[layer_id].index_offsets,
+              expected[layer_id].index_offsets);
+  }
   const auto request = server.service().request();
   EXPECT_EQ(request.model_id(), "forked-model");
-  EXPECT_EQ(request.block_size_bytes(), 4096u);
   EXPECT_EQ(std::vector<int32_t>(request.block_ids().begin(),
                                  request.block_ids().end()),
             block_ids);
@@ -174,10 +202,22 @@ TEST(WorkerMemoryRpcClientTest, TransportFailureReturnsEmptyOffsets) {
   WorkerMemoryRpcClient client(
       /*global_rank=*/1, server.address(), torch::Device(torch::kCPU));
 
-  EXPECT_TRUE(client
-                  .get_virtual_kv_cache_offsets(
-                      "missing-model", {0}, /*block_size_bytes=*/4096)
-                  .empty());
+  EXPECT_TRUE(
+      client.get_virtual_kv_cache_offsets("missing-model", {0}).empty());
+}
+
+TEST(WorkerMemoryRpcClientTest, RejectsPartialRoleOffsetResponses) {
+  for (ResponseMode mode : {ResponseMode::INVALID_K_OFFSETS,
+                            ResponseMode::INVALID_V_OFFSETS,
+                            ResponseMode::INVALID_INDEX_OFFSETS}) {
+    SCOPED_TRACE(static_cast<int32_t>(mode));
+    OffsetTestServer server(mode);
+    ASSERT_EQ(server.start(), 0);
+    WorkerMemoryRpcClient client(
+        /*global_rank=*/1, server.address(), torch::Device(torch::kCPU));
+    EXPECT_TRUE(
+        client.get_virtual_kv_cache_offsets("model", {3, 0, 7}).empty());
+  }
 }
 
 TEST(WorkerMemoryRpcClientTest, EmptyWorkerResponseRemainsEmpty) {
@@ -186,10 +226,8 @@ TEST(WorkerMemoryRpcClientTest, EmptyWorkerResponseRemainsEmpty) {
   WorkerMemoryRpcClient client(
       /*global_rank=*/1, server.address(), torch::Device(torch::kCPU));
 
-  EXPECT_TRUE(client
-                  .get_virtual_kv_cache_offsets(
-                      "missing-model", {0}, /*block_size_bytes=*/4096)
-                  .empty());
+  EXPECT_TRUE(
+      client.get_virtual_kv_cache_offsets("missing-model", {0}).empty());
 }
 
 }  // namespace

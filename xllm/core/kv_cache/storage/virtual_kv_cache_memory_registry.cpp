@@ -57,6 +57,19 @@ std::vector<torch::Tensor> VirtualKVCacheMemoryRegistry::create_v_tensors(
       dims, dtype, num_layers, device_, page_size_);
 }
 
+std::vector<torch::Tensor> VirtualKVCacheMemoryRegistry::create_index_tensors(
+    const std::string& model_id,
+    const std::vector<int64_t>& dims,
+    torch::ScalarType dtype,
+    int64_t num_layers,
+    const std::vector<bool>& layer_owned) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  CHECK(initialized_) << "KV cache registry is not initialized";
+  CHECK(!model_id.empty());
+  return regions_[model_id].create_index_tensors(
+      dims, dtype, num_layers, device_, page_size_, layer_owned);
+}
+
 bool VirtualKVCacheMemoryRegistry::map(const std::string& model_id,
                                        const std::vector<offset_t>& offsets) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -87,6 +100,20 @@ std::optional<int64_t> VirtualKVCacheMemoryRegistry::num_layers(
     return std::nullopt;
   }
   return it->second.num_layers();
+}
+
+std::optional<VirtualKVCacheBlockGlobalOffsets>
+VirtualKVCacheMemoryRegistry::get_global_offsets_for_block(
+    const std::string& model_id,
+    int64_t layer_id,
+    int64_t block_id) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto it = regions_.find(model_id);
+  if (it == regions_.end()) {
+    LOG(ERROR) << "Model " << model_id << " has no KV cache regions";
+    return std::nullopt;
+  }
+  return it->second.get_global_offsets_for_block(layer_id, block_id);
 }
 
 std::pair<uint64_t, uint64_t>

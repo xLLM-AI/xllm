@@ -118,9 +118,7 @@ message DisaggResponse {
 
   // Virtual-memory-backed KV cache: byte offsets in the D-node's
   // GlobalVirtualMemoryRegion physical-page pool mapping for each block (per-layer).
-  // For each layer, there are K and V offsets for each block.
-  // Layout: [layer0_block0_k, layer0_block0_v, layer0_block1_k, layer0_block1_v, ...]
-  //         [layer1_block0_k, layer1_block0_v, ...]
+  // Each role vector follows the transferred block order for that layer.
   repeated VirtualKVCacheLayerGlobalOffsets virtual_kv_cache_layer_global_offsets = 5;
   // Group-aware block allocation. group_id is defined by the cache layout and
   // is opaque to the PD protocol.
@@ -134,6 +132,8 @@ message VirtualKVCacheLayerGlobalOffsets {
   repeated uint64 k_offsets = 1;
   // V cache offsets for each block in GlobalVirtualMemoryRegion
   repeated uint64 v_offsets = 2;
+  // Empty for layers that do not own an INDEX cache.
+  repeated uint64 index_offsets = 3;
 }
 
 message KVTransferGroup {

@@ -86,14 +86,22 @@ void append_virtual_kv_cache_global_offsets(
        full_info.dst_virtual_kv_cache_layer_global_offsets) {
     CHECK_EQ(full_layer.k_offsets.size(), remote_id_count);
     CHECK_EQ(full_layer.v_offsets.size(), remote_id_count);
+    CHECK(full_layer.index_offsets.empty() ||
+          full_layer.index_offsets.size() == remote_id_count);
     VirtualKVCacheLayerGlobalOffsets layer;
     layer.k_offsets.reserve(remote_idxs.size());
     layer.v_offsets.reserve(remote_idxs.size());
+    if (!full_layer.index_offsets.empty()) {
+      layer.index_offsets.reserve(remote_idxs.size());
+    }
     for (size_t remote_idx : remote_idxs) {
       CHECK_LT(remote_idx, full_layer.k_offsets.size());
       CHECK_LT(remote_idx, full_layer.v_offsets.size());
       layer.k_offsets.emplace_back(full_layer.k_offsets[remote_idx]);
       layer.v_offsets.emplace_back(full_layer.v_offsets[remote_idx]);
+      if (!full_layer.index_offsets.empty()) {
+        layer.index_offsets.emplace_back(full_layer.index_offsets[remote_idx]);
+      }
     }
     info->dst_virtual_kv_cache_layer_global_offsets.emplace_back(
         std::move(layer));

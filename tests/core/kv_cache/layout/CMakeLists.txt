@@ -34,3 +34,17 @@ target_link_libraries(kv_cache_estimation_test
                       $<$<BOOL:${USE_NPU}>:hccl>
                       $<$<BOOL:${USE_NPU}>:c_sec>
                       $<$<BOOL:${USE_NPU}>:nnopbase>)
+
+# Page geometry is pure host logic and must also run without an NPU runtime.
+cc_test(
+  NO_NPU_RUNTIME
+  NAME
+    virtual_kv_cache_page_layout_test
+  SRCS
+    virtual_kv_cache_page_layout_test.cpp
+  DEPS
+    :virtual_kv_cache_page_layout
+    :virtual_kv_cache_page_state
+    GTest::gtest_main
+    glog::glog
+)

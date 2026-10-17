@@ -184,11 +184,23 @@ KVCacheTensors create_kv_cache_tensors(
                                              create_options);
   }
 #elif defined(USE_NPU)
+  CHECK(!create_options.enable_virtual_memory() ||
+        !use_npu_nz_kv_cache_layout(create_options.model_type()))
+      << "Virtual memory does not support the NPU NZ KV cache layout.";
   const bool mla_packed_c8 = create_options.mla_packed_c8();
+  // The factory rejects NZ + virtual memory before any tensor is created.
+  // Keep the model-selected descriptor here so non-VM DeepSeek caches retain
+  // FRACTAL_NZ, while supported virtual-memory caches select ND naturally.
   const aclFormat npu_format_type =
       get_npu_kv_cache_format(create_options.model_type());
-  auto allocate = [&](const std::vector<int64_t>& shape,
+  auto allocate = [&](KVCacheTensorRole role,
+                      const std::vector<int64_t>& shape,
                       torch::ScalarType dtype) -> torch::Tensor {
+    if (create_options.tensor_allocator() != nullptr) {
+      return at_npu::native::npu_format_cast(
+          alloc_cache_tensor(role, shape, dtype, create_options),
+          npu_format_type);
+    }
     if (create_options.enable_kv_cache_huge_page_allocator()) {
       return alloc_npu_huge_page_tensor(shape, dtype, npu_format_type);
     }
@@ -198,14 +210,16 @@ KVCacheTensors create_kv_cache_tensors(
         npu_format_type);
   };
   tensors.key_cache =
-      allocate(kv_cache_shape.key_cache_shape(),
+      allocate(KVCacheTensorRole::KEY,
+               kv_cache_shape.key_cache_shape(),
                mla_packed_c8 ? torch::kChar : create_options.dtype());
   // Packed main KV stores NoPE, RoPE and scale bytes once; K and V alias.
   if (mla_packed_c8) {
     tensors.value_cache = tensors.key_cache;
   } else if (kv_cache_shape.has_value_cache_shape()) {
-    tensors.value_cache =
-        allocate(kv_cache_shape.value_cache_shape(), create_options.dtype());
+    tensors.value_cache = allocate(KVCacheTensorRole::VALUE,
+                                   kv_cache_shape.value_cache_shape(),
+                                   create_options.dtype());
   }
 #else
   tensors.key_cache = alloc_cache_tensor(KVCacheTensorRole::KEY,
@@ -263,9 +277,18 @@ IndexedKVCacheTensors create_indexed_kv_cache_tensors(
   const torch::ScalarType index_dtype =
       create_options.enable_indexer_cache_quant() ? torch::kChar
                                                   : create_options.dtype();
+  // Keep INDEX's descriptor consistent with the main KV tensors. NZ + virtual
+  // memory is rejected before reaching this allocation path.
   const aclFormat npu_format_type =
       get_npu_kv_cache_format(create_options.model_type());
-  if (create_options.enable_kv_cache_huge_page_allocator()) {
+  if (create_options.tensor_allocator() != nullptr) {
+    tensors.index_cache = at_npu::native::npu_format_cast(
+        alloc_cache_tensor(KVCacheTensorRole::INDEX,
+                           kv_cache_shape.index_cache_shape(),
+                           index_dtype,
+                           create_options),
+        npu_format_type);
+  } else if (create_options.enable_kv_cache_huge_page_allocator()) {
     tensors.index_cache = alloc_npu_huge_page_tensor(
         kv_cache_shape.index_cache_shape(), index_dtype, npu_format_type);
   } else {
@@ -291,9 +314,18 @@ IndexedKVCacheTensors create_indexed_kv_cache_tensors(
                              torch::kFloat32,
                              create_options);
 #elif defined(USE_NPU)
-      tensors.index_cache_scale = torch::zeros(
-          kv_cache_shape.index_cache_scale_shape(),
-          torch::dtype(torch::kFloat16).device(create_options.device()));
+      if (create_options.tensor_allocator() != nullptr) {
+        tensors.index_cache_scale =
+            alloc_cache_tensor(KVCacheTensorRole::INDEX_SCALE,
+                               kv_cache_shape.index_cache_scale_shape(),
+                               torch::kFloat16,
+                               create_options)
+                .zero_();
+      } else {
+        tensors.index_cache_scale = torch::zeros(
+            kv_cache_shape.index_cache_scale_shape(),
+            torch::dtype(torch::kFloat16).device(create_options.device()));
+      }
 #else
       tensors.index_cache_scale = torch::zeros(
           kv_cache_shape.index_cache_scale_shape(),

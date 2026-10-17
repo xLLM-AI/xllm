@@ -82,6 +82,7 @@ class BlockManager {
     PROPERTY(bool, enable_virtual_memory) = false;
     PROPERTY(int64_t, num_layers) = 0;
     PROPERTY(int64_t, slot_size) = 0;
+    PROPERTY(size_t, virtual_block_bytes) = 0;
     PROPERTY(std::string, model_id);
     PROPERTY(std::shared_ptr<KVCacheEventJournal>, event_journal);
     PROPERTY(KVCacheEventScope, event_scope);

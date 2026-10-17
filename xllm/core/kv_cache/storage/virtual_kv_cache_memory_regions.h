@@ -20,15 +20,19 @@ limitations under the License.
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
 #include "core/framework/allocator/virtual_memory/mapped_virtual_memory_region.h"
+#include "core/kv_cache/layout/virtual_kv_cache_offsets.h"
 
 namespace xllm {
 
 // Owns the layer-wise virtual memory regions of one model's KV cache.
 // The caller synchronizes access and supplies the device and page geometry.
+// Create every required tensor role before mapping any logical page, because
+// the roles jointly determine the logical page geometry.
 class VirtualKVCacheMemoryRegions final {
  public:
   VirtualKVCacheMemoryRegions() = default;
@@ -51,9 +55,24 @@ class VirtualKVCacheMemoryRegions final {
                                               int64_t num_layers,
                                               const torch::Device& device,
                                               size_t page_size);
+  // Shared-index layers retain their layer IDs as undefined tensor entries.
+  // An empty ownership mask allocates INDEX storage for every layer.
+  std::vector<torch::Tensor> create_index_tensors(
+      const std::vector<int64_t>& dims,
+      torch::ScalarType dtype,
+      int64_t num_layers,
+      const torch::Device& device,
+      size_t page_size,
+      const std::vector<bool>& layer_owned = {});
 
   bool map(const std::vector<offset_t>& offsets);
   bool unmap(const std::vector<offset_t>& offsets);
+
+  // Each role's block must fit one physical page and divide its page size.
+  // Returns nullopt if any required role is invalid or unmapped.
+  std::optional<VirtualKVCacheBlockGlobalOffsets> get_global_offsets_for_block(
+      int64_t layer_id,
+      int64_t block_id) const;
 
   // Returns pool-relative offsets, or {UINT64_MAX, UINT64_MAX} on failure.
   std::pair<uint64_t, uint64_t> get_global_offsets_for_block(
@@ -71,10 +90,21 @@ class VirtualKVCacheMemoryRegions final {
       const torch::Device& device,
       size_t page_size,
       const char* name,
-      std::vector<std::unique_ptr<MappedVirtualMemoryRegion>>& regions);
+      std::vector<std::unique_ptr<MappedVirtualMemoryRegion>>& regions,
+      const std::vector<bool>& layer_owned = {});
+
+  bool collect_page_targets(
+      const std::vector<offset_t>& offsets,
+      std::vector<std::pair<MappedVirtualMemoryRegion*, offset_t>>& targets)
+      const;
 
   std::vector<std::unique_ptr<MappedVirtualMemoryRegion>> k_regions_;
   std::vector<std::unique_ptr<MappedVirtualMemoryRegion>> v_regions_;
+  std::vector<std::unique_ptr<MappedVirtualMemoryRegion>> index_regions_;
+  size_t k_block_bytes_ = 0;
+  size_t v_block_bytes_ = 0;
+  size_t index_block_bytes_ = 0;
+  size_t num_blocks_ = 0;
   int64_t num_layers_ = 0;
 };
 

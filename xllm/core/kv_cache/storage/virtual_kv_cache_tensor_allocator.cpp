@@ -29,28 +29,46 @@ class VirtualKVCacheTensorAllocator final : public KVCacheTensorAllocator {
  public:
   VirtualKVCacheTensorAllocator(VirtualKVCacheMemoryRegistry& registry,
                                 std::string model_id,
-                                int64_t num_layers)
+                                int64_t num_layers,
+                                std::vector<bool> index_layer_owned)
       : registry_(registry),
         model_id_(std::move(model_id)),
-        num_layers_(num_layers) {
+        num_layers_(num_layers),
+        index_layer_owned_(std::move(index_layer_owned)) {
     CHECK(!model_id_.empty());
     CHECK_GT(num_layers_, 0);
+    CHECK(index_layer_owned_.empty() ||
+          index_layer_owned_.size() == static_cast<size_t>(num_layers_))
+        << "INDEX cache ownership mask must match num_layers";
   }
 
   torch::Tensor allocate(KVCacheTensorRole role,
                          const std::vector<int64_t>& shape,
                          torch::ScalarType dtype,
                          const torch::Device& device) override {
-    CHECK(role == KVCacheTensorRole::KEY || role == KVCacheTensorRole::VALUE)
-        << "Virtual memory KV cache supports only key and value tensors.";
-    const bool is_key = role == KVCacheTensorRole::KEY;
-    auto& tensors = is_key ? k_tensors_ : v_tensors_;
-    size_t& layer_id = is_key ? next_k_layer_ : next_v_layer_;
+    CHECK(role == KVCacheTensorRole::KEY || role == KVCacheTensorRole::VALUE ||
+          role == KVCacheTensorRole::INDEX)
+        << "Virtual memory KV cache supports only KEY, VALUE and INDEX tensors";
+    auto& tensors = role == KVCacheTensorRole::KEY     ? k_tensors_
+                    : role == KVCacheTensorRole::VALUE ? v_tensors_
+                                                       : index_tensors_;
+    size_t& layer_id = role == KVCacheTensorRole::KEY     ? next_k_layer_
+                       : role == KVCacheTensorRole::VALUE ? next_v_layer_
+                                                          : next_index_layer_;
     if (tensors.empty()) {
-      tensors = is_key ? registry_.create_k_tensors(
-                             model_id_, shape, dtype, num_layers_)
-                       : registry_.create_v_tensors(
-                             model_id_, shape, dtype, num_layers_);
+      if (role == KVCacheTensorRole::KEY) {
+        tensors =
+            registry_.create_k_tensors(model_id_, shape, dtype, num_layers_);
+      } else if (role == KVCacheTensorRole::VALUE) {
+        tensors =
+            registry_.create_v_tensors(model_id_, shape, dtype, num_layers_);
+      } else {
+        tensors = registry_.create_index_tensors(
+            model_id_, shape, dtype, num_layers_, index_layer_owned_);
+      }
+    }
+    while (layer_id < tensors.size() && !tensors[layer_id].defined()) {
+      ++layer_id;
     }
     CHECK_LT(layer_id, tensors.size())
         << "Virtual memory KV cache allocator cannot be reused across models.";
@@ -65,10 +83,13 @@ class VirtualKVCacheTensorAllocator final : public KVCacheTensorAllocator {
   VirtualKVCacheMemoryRegistry& registry_;
   std::string model_id_;
   int64_t num_layers_;
+  std::vector<bool> index_layer_owned_;
   size_t next_k_layer_ = 0;
   size_t next_v_layer_ = 0;
+  size_t next_index_layer_ = 0;
   std::vector<torch::Tensor> k_tensors_;
   std::vector<torch::Tensor> v_tensors_;
+  std::vector<torch::Tensor> index_tensors_;
 };
 
 }  // namespace
@@ -76,9 +97,10 @@ class VirtualKVCacheTensorAllocator final : public KVCacheTensorAllocator {
 std::shared_ptr<KVCacheTensorAllocator>
 create_virtual_kv_cache_tensor_allocator(VirtualKVCacheMemoryRegistry& registry,
                                          std::string model_id,
-                                         int64_t num_layers) {
+                                         int64_t num_layers,
+                                         std::vector<bool> index_layer_owned) {
   return std::make_shared<VirtualKVCacheTensorAllocator>(
-      registry, std::move(model_id), num_layers);
+      registry, std::move(model_id), num_layers, std::move(index_layer_owned));
 }
 
 }  // namespace xllm

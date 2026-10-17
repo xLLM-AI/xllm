@@ -40,22 +40,45 @@ std::string get_merge_key(const uint64_t dst_cluster_id,
   return std::to_string(dst_cluster_id) + "_" + dst_addr;
 }
 
+void validate_virtual_kv_cache_global_offsets(
+    const VirtualKVCacheLayerGlobalOffsets& offsets) {
+  CHECK_EQ(offsets.k_offsets.empty(), offsets.v_offsets.empty());
+  if (offsets.k_offsets.empty()) {
+    CHECK(offsets.index_offsets.empty());
+    return;
+  }
+  CHECK_EQ(offsets.k_offsets.size(), offsets.v_offsets.size());
+  CHECK(offsets.index_offsets.empty() ||
+        offsets.index_offsets.size() == offsets.k_offsets.size());
+}
+
 void merge_virtual_kv_cache_global_offsets(
     std::vector<VirtualKVCacheLayerGlobalOffsets>& merged_layer_offsets,
     const std::vector<VirtualKVCacheLayerGlobalOffsets>& layer_offsets) {
   if (layer_offsets.empty()) {
     return;
   }
+  for (const VirtualKVCacheLayerGlobalOffsets& offsets : layer_offsets) {
+    validate_virtual_kv_cache_global_offsets(offsets);
+  }
   if (merged_layer_offsets.empty()) {
     merged_layer_offsets = layer_offsets;
     return;
   }
 
-  for (size_t layer_id = 0; layer_id < layer_offsets.size() &&
-                            layer_id < merged_layer_offsets.size();
-       ++layer_id) {
-    std::vector<uint64_t>& k_target = merged_layer_offsets[layer_id].k_offsets;
-    const std::vector<uint64_t>& k_source = layer_offsets[layer_id].k_offsets;
+  CHECK_EQ(merged_layer_offsets.size(), layer_offsets.size());
+  for (size_t layer_id = 0; layer_id < layer_offsets.size(); ++layer_id) {
+    validate_virtual_kv_cache_global_offsets(merged_layer_offsets[layer_id]);
+    auto& index_target = merged_layer_offsets[layer_id].index_offsets;
+    const auto& index_source = layer_offsets[layer_id].index_offsets;
+    auto& k_target = merged_layer_offsets[layer_id].k_offsets;
+    const auto& k_source = layer_offsets[layer_id].k_offsets;
+    if (!k_target.empty() && !k_source.empty()) {
+      CHECK_EQ(index_target.empty(), index_source.empty());
+    }
+    index_target.reserve(index_target.size() + index_source.size());
+    index_target.insert(
+        index_target.end(), index_source.begin(), index_source.end());
     k_target.reserve(k_target.size() + k_source.size());
     k_target.insert(k_target.end(), k_source.begin(), k_source.end());
 
@@ -781,17 +804,19 @@ void MooncakeVirtualKVCacheTransfer::register_kv_cache(
   std::optional<CacheRegistrationContext> registration_context;
   if (pending_registration_context_.has_value()) {
     registration_context = *pending_registration_context_;
-    registration_context->layout_family.append("_virtual_memory");
+    registration_context->layout_family.append("_virtual_memory_v2");
     const VirtualKVCacheTransferMemoryRegion memory_region =
         memory_provider_->memory_region();
-    tensor_manifests.reserve(kv_caches.size() * 2);
+    tensor_manifests.reserve(kv_caches.size() * 3);
     for (int64_t layer_id = 0; layer_id < num_layers_; ++layer_id) {
       const std::vector<KVCacheTensor> transfer_tensors =
           get_mooncake_tensors(kv_caches[static_cast<size_t>(layer_id)]);
       for (const KVCacheTensor& cache_tensor : transfer_tensors) {
         CHECK(cache_tensor.role == KVCacheTensorRole::KEY ||
-              cache_tensor.role == KVCacheTensorRole::VALUE)
-            << "VirtualMemory MoonCake transfer supports only K/V tensors, "
+              cache_tensor.role == KVCacheTensorRole::VALUE ||
+              cache_tensor.role == KVCacheTensorRole::INDEX)
+            << "VirtualMemory MoonCake transfer supports only K/V/INDEX "
+               "tensors, "
                "role="
             << cache_tensor.role.to_string();
         const torch::Tensor& tensor = cache_tensor.tensor;
@@ -804,8 +829,11 @@ void MooncakeVirtualKVCacheTransfer::register_kv_cache(
         CHECK_EQ(tensor_bytes % static_cast<uint64_t>(resource_count), 0);
         const uint64_t resource_stride =
             tensor_bytes / static_cast<uint64_t>(resource_count);
-        CHECK_EQ(resource_stride, static_cast<uint64_t>(size_per_block_))
-            << "VirtualMemory K/V resources must use the allocator block size";
+        CHECK_GT(memory_region.page_size_bytes, 0);
+        CHECK_LE(resource_stride, memory_region.page_size_bytes)
+            << "VirtualMemory transfer tensor blocks must fit one page";
+        CHECK_EQ(memory_region.page_size_bytes % resource_stride, 0)
+            << "VirtualMemory transfer tensor blocks must divide the page size";
 
         KVCacheTensor described_tensor = cache_tensor;
         std::string descriptor_error;
@@ -844,6 +872,9 @@ void MooncakeVirtualKVCacheTransfer::register_kv_cache(
   register_kv_cache_impl();
   if (registration_context.has_value()) {
     publish_cache_layout(tensor_manifests, *registration_context);
+    const Status provider_status =
+        mooncake_te_->set_virtual_memory_provider(model_id_, memory_provider_);
+    CHECK(provider_status.ok()) << provider_status.message();
     pending_registration_context_.reset();
   }
 }
@@ -874,25 +905,97 @@ bool MooncakeVirtualKVCacheTransfer::pull_kv_blocks(
     const uint64_t src_cluster_id,
     const std::string& src_addr,
     const std::vector<KVTransferMapping>& mappings) {
-  (void)src_cluster_id;
-  const auto mapping_it = std::find_if(
-      mappings.begin(), mappings.end(), [](const KVTransferMapping& mapping) {
-        return mapping.group_id == cache_group_id(BlockType::KV);
-      });
-  if (mapping_it == mappings.end()) {
-    LOG(ERROR) << "Missing VirtualMemory KV transfer mapping.";
+  if (model_id_.empty()) {
+    LOG(ERROR) << "Invalid VirtualMemory PULL model or KV mapping";
     return false;
   }
-  if (mapping_it->local_ids.size() != mapping_it->remote_ids.size()) {
-    LOG(ERROR) << "VirtualMemory KV transfer mapping size mismatch, local="
-               << mapping_it->local_ids.size()
-               << ", remote=" << mapping_it->remote_ids.size();
+
+  const KVTransferMapping* kv_mapping = nullptr;
+  for (const KVTransferMapping& candidate : mappings) {
+    if (candidate.group_id == cache_group_id(BlockType::KV)) {
+      if (kv_mapping != nullptr ||
+          candidate.local_ids.size() != candidate.remote_ids.size()) {
+        LOG(ERROR) << "Invalid VirtualMemory PULL model or KV mapping";
+        return false;
+      }
+      kv_mapping = &candidate;
+      continue;
+    }
+    if (!candidate.local_ids.empty() || !candidate.remote_ids.empty()) {
+      LOG(ERROR) << "VirtualMemory PULL only supports empty auxiliary mappings";
+      return false;
+    }
+  }
+  if (kv_mapping == nullptr) {
+    LOG(ERROR) << "Invalid VirtualMemory PULL model or KV mapping";
     return false;
   }
-  if (!pull_kv_blocks_impl(
-          src_addr, mapping_it->remote_ids, mapping_it->local_ids)) {
+  const KVTransferMapping& mapping = *kv_mapping;
+  if (mapping.local_ids.empty()) {
+    return true;
+  }
+
+  // Each source worker resolves its own physical mapping. Matching logical
+  // block IDs on the two instances do not imply matching physical pages.
+  WorkerCacheLayoutManifest source_manifest;
+  std::vector<VirtualKVCacheLayerGlobalOffsets> source_offsets;
+  if (!mooncake_te_->get_remote_virtual_offsets(src_cluster_id,
+                                                src_addr,
+                                                mapping.remote_ids,
+                                                &source_manifest,
+                                                &source_offsets) ||
+      num_layers_ <= 0 ||
+      source_offsets.size() != static_cast<size_t>(num_layers_)) {
+    LOG(ERROR) << "Failed to resolve VirtualMemory PULL source offsets";
     return false;
   }
+
+  ReshardPlanTemplate plan;
+  const Status plan_status = ReshardPlanner().build_native_pull_plan(
+      local_cache_layout_, source_manifest, &plan);
+  if (!plan_status.ok()) {
+    LOG(ERROR) << "Invalid VirtualMemory PULL layout: "
+               << plan_status.message();
+    return false;
+  }
+
+  // Validate all layers before writing any destination cache data.
+  std::vector<std::vector<ByteRegion>> layer_regions;
+  layer_regions.resize(static_cast<size_t>(num_layers_));
+  RequestRegionBinder binder;
+  for (int64_t layer_id = 0; layer_id < num_layers_; ++layer_id) {
+    const size_t layer_index = static_cast<size_t>(layer_id);
+    std::vector<ExplicitResourceMapping> explicit_mappings;
+    if (!build_explicit_mappings(mapping,
+                                 source_offsets[layer_index],
+                                 layer_id,
+                                 &explicit_mappings)) {
+      return false;
+    }
+    const Status bind_status =
+        binder.bind_explicit(plan,
+                             explicit_mappings,
+                             CacheNamespace::MAIN,
+                             layer_id,
+                             &layer_regions[layer_index]);
+    if (!bind_status.ok() || layer_regions[layer_index].empty()) {
+      LOG(ERROR) << "Bind VirtualMemory PULL regions failed, layer=" << layer_id
+                 << ": " << bind_status.message();
+      return false;
+    }
+  }
+
+  for (const std::vector<ByteRegion>& regions : layer_regions) {
+    if (!mooncake_te_->move_memory_regions_with_session(
+            src_addr, regions, MooncakeTransferEngine::MoveOpcode::READ)) {
+      LOG(ERROR) << "VirtualMemory PULL transfer failed, source=" << src_addr;
+      return false;
+    }
+  }
+  VLOG(1) << "[Mooncake][PDTransfer] direction=pull, virtual_memory=true, "
+             "cluster_id="
+          << src_cluster_id << ", remote=" << src_addr
+          << ", blocks=" << mapping.local_ids.size() << ", success=true";
   return true;
 }
 
@@ -907,66 +1010,62 @@ bool MooncakeVirtualKVCacheTransfer::push_kv_blocks(
       merged_kv_infos, layer_synchronizer, kv_split_rank, kv_split_size);
 }
 
-bool MooncakeVirtualKVCacheTransfer::pull_kv_blocks_impl(
-    const std::string& src_addr,
-    const std::vector<uint64_t>& src_blocks,
-    const std::vector<uint64_t>& dst_blocks) {
-  if (model_id_.empty()) {
-    LOG(ERROR) << "model_id not set for VirtualMemory mode pull";
+bool MooncakeVirtualKVCacheTransfer::build_explicit_mappings(
+    const KVTransferMapping& mapping,
+    const VirtualKVCacheLayerGlobalOffsets& remote_offsets,
+    int64_t layer_id,
+    std::vector<ExplicitResourceMapping>* explicit_mappings) const {
+  if (remote_offsets.k_offsets.size() != mapping.local_ids.size() ||
+      remote_offsets.v_offsets.size() != mapping.local_ids.size() ||
+      (!remote_offsets.index_offsets.empty() &&
+       remote_offsets.index_offsets.size() != mapping.local_ids.size())) {
+    LOG(ERROR) << "VirtualMemory remote offset count mismatch, layer="
+               << layer_id;
     return false;
   }
 
-  // For each layer, convert block_ids to GlobalVirtualMemoryRegion offsets and
-  // transfer
-  for (int64_t layer_id = 0; layer_id < num_layers_; ++layer_id) {
-    std::vector<uint64_t> src_offsets;
-    std::vector<uint64_t> dst_offsets;
-    src_offsets.reserve(src_blocks.size() * 2);  // K and V
-    dst_offsets.reserve(dst_blocks.size() * 2);
-
-    for (size_t i = 0; i < src_blocks.size(); ++i) {
-      // Source block -> GlobalVirtualMemoryRegion offsets
-      auto [src_k_off, src_v_off] =
-          memory_provider_->get_global_offsets_for_block(
-              model_id_, layer_id, src_blocks[i], size_per_block_);
-      if (src_k_off == UINT64_MAX || src_v_off == UINT64_MAX) {
-        LOG(ERROR) << "Failed to get source offsets for block " << src_blocks[i]
-                   << " at layer " << layer_id;
-        return false;
-      }
-
-      // Destination block -> GlobalVirtualMemoryRegion offsets
-      auto [dst_k_off, dst_v_off] =
-          memory_provider_->get_global_offsets_for_block(
-              model_id_, layer_id, dst_blocks[i], size_per_block_);
-      if (dst_k_off == UINT64_MAX || dst_v_off == UINT64_MAX) {
-        LOG(ERROR) << "Failed to get dest offsets for block " << dst_blocks[i]
-                   << " at layer " << layer_id;
-        return false;
-      }
-
-      // K cache offsets
-      src_offsets.push_back(src_k_off);
-      dst_offsets.push_back(dst_k_off);
-      // V cache offsets
-      src_offsets.push_back(src_v_off);
-      dst_offsets.push_back(dst_v_off);
-    }
-
-    const bool ret = mooncake_te_->move_memory_by_global_offsets(
-        src_addr,
-        src_offsets,
-        dst_offsets,
-        size_per_block_,
-        MooncakeTransferEngine::MoveOpcode::READ);
-    if (!ret) {
-      LOG(ERROR) << "pull_kv_blocks_impl failed at layer " << layer_id;
+  if (explicit_mappings == nullptr ||
+      mapping.local_ids.size() != mapping.remote_ids.size()) {
+    return false;
+  }
+  explicit_mappings->clear();
+  explicit_mappings->reserve(3);
+  const auto append_mapping = [&](KVCacheTensorRole role,
+                                  const std::vector<uint64_t>& offsets) {
+    ExplicitResourceMapping explicit_mapping;
+    explicit_mapping.group_id = mapping.group_id;
+    explicit_mapping.role =
+        static_cast<int32_t>(static_cast<KVCacheTensorRole::Value>(role));
+    explicit_mapping.local_ids = mapping.local_ids;
+    explicit_mapping.remote_ids = mapping.remote_ids;
+    explicit_mapping.remote_offsets = offsets;
+    explicit_mapping.local_offsets.reserve(mapping.local_ids.size());
+    explicit_mappings->emplace_back(std::move(explicit_mapping));
+  };
+  append_mapping(KVCacheTensorRole::KEY, remote_offsets.k_offsets);
+  append_mapping(KVCacheTensorRole::VALUE, remote_offsets.v_offsets);
+  if (!remote_offsets.index_offsets.empty()) {
+    append_mapping(KVCacheTensorRole::INDEX, remote_offsets.index_offsets);
+  }
+  for (uint64_t block_id : mapping.local_ids) {
+    const auto local_offsets = memory_provider_->get_global_offsets_for_block(
+        model_id_, layer_id, block_id);
+    if (!local_offsets.has_value() ||
+        local_offsets->index_offset.has_value() !=
+            !remote_offsets.index_offsets.empty()) {
+      LOG(ERROR) << "Invalid VirtualMemory local mapping or INDEX ownership, "
+                    "layer="
+                 << layer_id << ", block=" << block_id;
       return false;
+    }
+    (*explicit_mappings)[0].local_offsets.emplace_back(local_offsets->k_offset);
+    (*explicit_mappings)[1].local_offsets.emplace_back(local_offsets->v_offset);
+    if (local_offsets->index_offset.has_value()) {
+      (*explicit_mappings)[2].local_offsets.emplace_back(
+          *local_offsets->index_offset);
     }
   }
 
-  VLOG(1) << "pull_kv_blocks_impl success, num_blocks=" << src_blocks.size()
-          << ", num_layers=" << num_layers_;
   return true;
 }
 
@@ -1021,88 +1120,28 @@ bool MooncakeVirtualKVCacheTransfer::push_kv_blocks_impl(
         continue;
       }
 
-      // Check if we have VirtualMemory offsets from D-node
-      bool has_dst_offsets =
-          !kv_info.dst_virtual_kv_cache_layer_global_offsets.empty() &&
-          static_cast<size_t>(layer_index) <
-              kv_info.dst_virtual_kv_cache_layer_global_offsets.size();
-
-      std::vector<uint64_t> src_offsets;
-      std::vector<uint64_t> dst_offsets;
-      src_offsets.reserve(src_blocks.size() * 2);
-      dst_offsets.reserve(src_blocks.size() * 2);
-
-      for (size_t i = 0; i < src_blocks.size(); ++i) {
-        // Source block -> GlobalVirtualMemoryRegion offsets (calculate locally
-        // on P-node)
-        auto [src_k_off, src_v_off] =
-            memory_provider_->get_global_offsets_for_block(
-                model_id_, layer_index, src_blocks[i], size_per_block_);
-        if (src_k_off == UINT64_MAX || src_v_off == UINT64_MAX) {
-          LOG(ERROR) << "Failed to get source offsets for block "
-                     << src_blocks[i] << " at layer " << layer_index;
-          return false;
-        }
-
-        // Destination offsets: use offsets from D-node if available
-        uint64_t dst_k_off, dst_v_off;
-        if (has_dst_offsets) {
-          const auto& layer_offsets =
-              kv_info.dst_virtual_kv_cache_layer_global_offsets[layer_index];
-          if (i < layer_offsets.k_offsets.size() &&
-              i < layer_offsets.v_offsets.size()) {
-            dst_k_off = layer_offsets.k_offsets[i];
-            dst_v_off = layer_offsets.v_offsets[i];
-          } else {
-            LOG(ERROR) << "VirtualMemory offset index out of range for block "
-                       << i << " at layer " << layer_index;
-            return false;
-          }
-        } else {
-          LOG(ERROR)
-              << "No VirtualMemory destination offsets from D-node for layer "
-              << layer_index;
-          return false;
-        }
-
-        // K cache offsets
-        src_offsets.push_back(src_k_off);
-        dst_offsets.push_back(dst_k_off);
-        // V cache offsets
-        src_offsets.push_back(src_v_off);
-        dst_offsets.push_back(dst_v_off);
+      if (static_cast<size_t>(layer_index) >=
+          kv_info.dst_virtual_kv_cache_layer_global_offsets.size()) {
+        LOG(ERROR) << "Missing VirtualMemory destination offsets, layer="
+                   << layer_index;
+        return false;
       }
-      ExplicitResourceMapping key_mapping;
-      key_mapping.group_id = mapping_it->group_id;
-      key_mapping.role = static_cast<int32_t>(KVCacheTensorRole::KEY);
-      key_mapping.local_ids = mapping_it->local_ids;
-      key_mapping.remote_ids = mapping_it->remote_ids;
-      key_mapping.local_offsets.reserve(src_blocks.size());
-      key_mapping.remote_offsets.reserve(src_blocks.size());
-
-      ExplicitResourceMapping value_mapping;
-      value_mapping.group_id = mapping_it->group_id;
-      value_mapping.role = static_cast<int32_t>(KVCacheTensorRole::VALUE);
-      value_mapping.local_ids = mapping_it->local_ids;
-      value_mapping.remote_ids = mapping_it->remote_ids;
-      value_mapping.local_offsets.reserve(src_blocks.size());
-      value_mapping.remote_offsets.reserve(src_blocks.size());
-      for (size_t offset_index = 0; offset_index < src_offsets.size();
-           offset_index += 2) {
-        key_mapping.local_offsets.emplace_back(src_offsets[offset_index]);
-        key_mapping.remote_offsets.emplace_back(dst_offsets[offset_index]);
-        value_mapping.local_offsets.emplace_back(src_offsets[offset_index + 1]);
-        value_mapping.remote_offsets.emplace_back(
-            dst_offsets[offset_index + 1]);
+      std::vector<ExplicitResourceMapping> explicit_mappings;
+      if (!build_explicit_mappings(
+              *mapping_it,
+              kv_info.dst_virtual_kv_cache_layer_global_offsets[layer_index],
+              layer_index,
+              &explicit_mappings)) {
+        return false;
       }
 
       std::vector<ByteRegion> regions;
-      const Status bind_status = mooncake_te_->bind_outgoing_regions_explicit(
-          kv_info.dst_addr,
-          {key_mapping, value_mapping},
-          CacheNamespace::MAIN,
-          layer_index,
-          &regions);
+      const Status bind_status =
+          mooncake_te_->bind_outgoing_regions_explicit(kv_info.dst_addr,
+                                                       explicit_mappings,
+                                                       CacheNamespace::MAIN,
+                                                       layer_index,
+                                                       &regions);
       if (!bind_status.ok()) {
         LOG(ERROR) << "Bind VirtualMemory KV byte regions failed, layer="
                    << layer_index << ", destination=" << kv_info.dst_addr

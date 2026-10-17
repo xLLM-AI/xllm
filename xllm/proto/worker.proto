@@ -175,7 +175,7 @@ message TransferKVInfo {
   int32 dp_rank = 4;
   InstanceInfo remote_instance_info = 5;
   // Destination byte offsets in the D-node's GlobalVirtualMemoryRegion (per-layer).
-  // Each VirtualKVCacheLayerGlobalOffsets contains K/V offsets for all blocks at one layer
+  // Each layer contains K/V offsets and optional INDEX offsets for all blocks.
   repeated VirtualKVCacheLayerGlobalOffsets dst_virtual_kv_cache_layer_global_offsets = 6;
   repeated KVTransferMapping mappings = 22;
 }

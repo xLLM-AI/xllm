@@ -118,6 +118,27 @@ message WorkerCacheLayoutManifest {
   repeated CacheTensorManifest tensors = 11;
 }
 
+message VirtualKVCacheOffsetsRequest {
+  string incarnation_id = 1;
+  uint64 layout_generation = 2;
+  repeated uint64 block_ids = 3;
+}
+
+message VirtualKVCacheLayerOffsets {
+  int64 layer_id = 1;
+  repeated uint64 k_offsets = 2;
+  repeated uint64 v_offsets = 3;
+  repeated uint64 index_offsets = 4;
+}
+
+message VirtualKVCacheOffsetsResponse {
+  bool ok = 1;
+  string incarnation_id = 2;
+  uint64 layout_generation = 3;
+  uint64 physical_page_size_bytes = 4;
+  repeated VirtualKVCacheLayerOffsets layer_offsets = 5;
+}
+
 // Keep the legacy service and method names for wire compatibility. The common
 // transport serves session RPCs; the KV adapter supplies the cache RPCs through
 // an extension on the same listener.
@@ -126,4 +147,6 @@ service MooncakeTransferEngineService {
   rpc CloseSession(SessionInfo) returns (Status) {}
   rpc SetCachePeer(CachePeerRequest) returns (Status) {}
   rpc GetCacheLayoutManifest(Empty) returns (WorkerCacheLayoutManifest) {}
+  rpc GetVirtualKVCacheOffsets(VirtualKVCacheOffsetsRequest)
+      returns (VirtualKVCacheOffsetsResponse) {}
 }

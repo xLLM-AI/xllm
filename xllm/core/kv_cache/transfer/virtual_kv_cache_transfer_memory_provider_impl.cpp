@@ -36,7 +36,27 @@ class VirtualKVCacheTransferMemoryProviderImpl final
 
   VirtualKVCacheTransferMemoryRegion memory_region() const override {
     auto lifetime = region_.acquire_mapping_lease();
-    return {region_.base_vaddr(), region_.total_size(), std::move(lifetime)};
+    return {region_.base_vaddr(),
+            region_.total_size(),
+            std::move(lifetime),
+            region_.page_size()};
+  }
+
+  std::optional<VirtualKVCacheBlockGlobalOffsets> get_global_offsets_for_block(
+      const std::string& model_id,
+      int64_t layer_id,
+      uint64_t block_id) const override {
+    if (block_id > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+      LOG(ERROR) << "KV cache transfer block id exceeds int64_t range: "
+                 << block_id;
+      return std::nullopt;
+    }
+    if (!region_.is_initialized()) {
+      LOG(ERROR) << "Global memory region is not initialized";
+      return std::nullopt;
+    }
+    return registry_.get_global_offsets_for_block(
+        model_id, layer_id, static_cast<int64_t>(block_id));
   }
 
   std::pair<uint64_t, uint64_t> get_global_offsets_for_block(

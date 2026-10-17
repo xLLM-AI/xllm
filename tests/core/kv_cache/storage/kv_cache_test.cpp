@@ -18,6 +18,7 @@ limitations under the License.
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -69,6 +70,22 @@ class IndexerCacheDtypeConfigGuard final {
   std::string old_indexer_cache_dtype_;
 };
 
+class PrefixCacheConfigGuard final {
+ public:
+  explicit PrefixCacheConfigGuard(bool enable)
+      : old_enable_prefix_cache_(
+            KVCacheConfig::get_instance().enable_prefix_cache()) {
+    KVCacheConfig::get_instance().enable_prefix_cache(enable);
+  }
+
+  ~PrefixCacheConfigGuard() {
+    KVCacheConfig::get_instance().enable_prefix_cache(old_enable_prefix_cache_);
+  }
+
+ private:
+  bool old_enable_prefix_cache_;
+};
+
 void ExpectTensorGroup(const KVCache& cache,
                        KVCacheTensorRole role,
                        BlockType expected_block_type) {
@@ -82,9 +99,13 @@ void ExpectTensorGroup(const KVCache& cache,
       << "role=" << role.to_string();
 }
 
-#if defined(USE_MLU)
+#if defined(USE_MLU) || defined(USE_NPU)
 class RecordingKVCacheTensorAllocator final : public KVCacheTensorAllocator {
  public:
+  explicit RecordingKVCacheTensorAllocator(
+      bool fill_index_scale_with_nonzero = false)
+      : fill_index_scale_with_nonzero_(fill_index_scale_with_nonzero) {}
+
   struct Request {
     KVCacheTensorRole role;
     std::vector<int64_t> shape;
@@ -97,12 +118,23 @@ class RecordingKVCacheTensorAllocator final : public KVCacheTensorAllocator {
                          torch::ScalarType dtype,
                          const torch::Device& device) override {
     requests.emplace_back(Request{role, shape, dtype, device});
-    return torch::zeros(shape, torch::dtype(dtype).device(device));
+    torch::Tensor tensor =
+        role == KVCacheTensorRole::INDEX_SCALE && fill_index_scale_with_nonzero_
+            ? torch::full(shape, 7.0, torch::dtype(dtype).device(device))
+            : torch::zeros(shape, torch::dtype(dtype).device(device));
+    tensors.emplace_back(tensor);
+    return tensor;
   }
 
   std::vector<Request> requests;
-};
+  std::vector<torch::Tensor> tensors;
 
+ private:
+  bool fill_index_scale_with_nonzero_;
+};
+#endif
+
+#if defined(USE_MLU)
 // MLU merges the per-block compressed split states into a single owning tensor
 // and exposes them through the COMPRESS_STATE / COMPRESS_INDEX_STATE transfer
 // roles. The common layout test delegates these platform-specific checks here
@@ -233,6 +265,203 @@ class HostKVCacheTest : public ::testing::Test {
 
   torch::Tensor context_tensor_;
 };
+
+#if defined(USE_NPU)
+class NpuKVCacheTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    if (Platform::device_count() < 1) {
+      GTEST_SKIP() << "NPU device is required for KV cache tests.";
+    }
+    Device device(/*device_index=*/0);
+    device.set_device();
+    device.init_device_context();
+  }
+
+  const torch::Device device_{"npu:0"};
+};
+
+TEST_F(NpuKVCacheTest, VirtualMemoryPreservesSharedIndexerOwnership) {
+  KVCacheCapacity capacity;
+  capacity.n_blocks(2).block_size(4);
+  ModelArgs model_args;
+  model_args.model_type("glm_moe_dsa")
+      .enable_mla(true)
+      .n_heads(8)
+      .n_kv_heads(2)
+      .head_dim(8)
+      .kv_lora_rank(8)
+      .qk_rope_head_dim(4)
+      .index_n_heads(1)
+      .index_head_dim(4);
+  const KVCacheShape shape(capacity, model_args, /*world_size=*/1);
+  auto allocator = std::make_shared<RecordingKVCacheTensorAllocator>();
+  KVCacheCreateOptions options;
+  options.device(device_)
+      .dtype(torch::kBFloat16)
+      .num_layers(4)
+      .model_id("virtual-shared-indexer")
+      .model_type("glm_moe_dsa")
+      .enable_virtual_memory(true)
+      .enable_lighting_indexer(true)
+      .indexer_cache_enabled_layers({true, false, true, false})
+      .tensor_allocator(allocator);
+
+  std::vector<KVCache> caches;
+  allocate_kv_caches(caches, shape, options);
+
+  const std::vector<KVCacheTensorRole> expected_roles = {
+      KVCacheTensorRole::KEY,
+      KVCacheTensorRole::VALUE,
+      KVCacheTensorRole::INDEX,
+      KVCacheTensorRole::KEY,
+      KVCacheTensorRole::VALUE,
+      KVCacheTensorRole::KEY,
+      KVCacheTensorRole::VALUE,
+      KVCacheTensorRole::INDEX,
+      KVCacheTensorRole::KEY,
+      KVCacheTensorRole::VALUE};
+  ASSERT_EQ(allocator->requests.size(), expected_roles.size());
+  for (size_t i = 0; i < expected_roles.size(); ++i) {
+    SCOPED_TRACE(i);
+    EXPECT_EQ(allocator->requests[i].role, expected_roles[i]);
+    EXPECT_EQ(allocator->requests[i].device, device_);
+    EXPECT_EQ(allocator->requests[i].dtype, torch::kBFloat16);
+  }
+  EXPECT_EQ(allocator->requests[0].shape, shape.key_cache_shape());
+  EXPECT_EQ(allocator->requests[1].shape, shape.value_cache_shape());
+  EXPECT_EQ(allocator->requests[2].shape, shape.index_cache_shape());
+  ASSERT_EQ(caches.size(), 4U);
+  EXPECT_EQ(caches[0].get_cache_tensors().size(), 3U);
+  EXPECT_EQ(caches[1].get_cache_tensors().size(), 2U);
+  EXPECT_EQ(caches[2].get_cache_tensors().size(), 3U);
+  EXPECT_EQ(caches[3].get_cache_tensors().size(), 2U);
+  EXPECT_EQ(caches[0].get_k_cache().data_ptr(),
+            allocator->tensors[0].data_ptr());
+  EXPECT_EQ(caches[0].get_v_cache().data_ptr(),
+            allocator->tensors[1].data_ptr());
+  EXPECT_EQ(caches[0].get_index_cache().data_ptr(),
+            allocator->tensors[2].data_ptr());
+  EXPECT_EQ(caches[2].get_index_cache().data_ptr(),
+            allocator->tensors[7].data_ptr());
+  EXPECT_FALSE(caches[1].get_index_cache().defined());
+  EXPECT_FALSE(caches[3].get_index_cache().defined());
+  for (size_t i = 0; i < caches.size(); ++i) {
+    caches[i].get_k_cache().fill_(static_cast<double>(i + 1));
+  }
+  for (size_t i = 0; i < caches.size(); ++i) {
+    SCOPED_TRACE(i);
+    EXPECT_EQ(caches[i].get_k_cache().sum().item<float>(),
+              static_cast<float>(caches[i].get_k_cache().numel() * (i + 1)));
+    EXPECT_FALSE(caches[i].get_indexer_cache_scale().has_value());
+    EXPECT_FALSE(caches[i].empty());
+  }
+}
+
+TEST_F(NpuKVCacheTest, VirtualMemoryRejectsNpuNzLayout) {
+  PrefixCacheConfigGuard prefix_cache_guard(/*enable=*/true);
+
+  KVCacheCapacity capacity;
+  capacity.n_blocks(2).block_size(4);
+  ModelArgs model_args;
+  model_args.model_type("deepseek_v3")
+      .enable_mla(true)
+      .kv_lora_rank(8)
+      .qk_rope_head_dim(4);
+  const KVCacheShape shape(capacity, model_args, /*world_size=*/1);
+
+  KVCacheCreateOptions options;
+  options.device(torch::Device(torch::kCPU))
+      .dtype(torch::kBFloat16)
+      .num_layers(1)
+      .model_type("deepseek_v3")
+      .enable_virtual_memory(true)
+      .tensor_allocator(std::make_shared<RecordingKVCacheTensorAllocator>());
+
+  EXPECT_DEATH(create_kv_cache_tensors(shape, options),
+               "Virtual memory does not support the NPU NZ KV cache layout");
+}
+
+TEST_F(NpuKVCacheTest, InjectedAllocatorOwnsInt8IndexerAndFp16Scale) {
+  KVCacheCapacity capacity;
+  capacity.n_blocks(2).block_size(4).enable_indexer_cache_quant(true);
+  ModelArgs model_args;
+  model_args.model_type("glm_moe_dsa")
+      .enable_mla(true)
+      .n_heads(8)
+      .n_kv_heads(2)
+      .head_dim(8)
+      .kv_lora_rank(8)
+      .qk_rope_head_dim(4)
+      .index_n_heads(1)
+      .index_head_dim(4);
+  const KVCacheShape shape(capacity, model_args, /*world_size=*/1);
+  auto allocator = std::make_shared<RecordingKVCacheTensorAllocator>(
+      /*fill_index_scale_with_nonzero=*/true);
+  KVCacheCreateOptions options;
+  options.device(device_)
+      .dtype(torch::kBFloat16)
+      .num_layers(2)
+      .model_type("glm_moe_dsa")
+      .enable_lighting_indexer(true)
+      .enable_indexer_cache_quant(true)
+      .indexer_cache_enabled_layers({false, true})
+      .tensor_allocator(allocator);
+
+  std::vector<KVCache> caches;
+  allocate_kv_caches(caches, shape, options);
+
+  ASSERT_EQ(allocator->requests.size(), 6U);
+  EXPECT_EQ(allocator->requests[4].role, KVCacheTensorRole::INDEX);
+  EXPECT_EQ(allocator->requests[4].dtype, torch::kChar);
+  EXPECT_EQ(allocator->requests[4].shape, shape.index_cache_shape());
+  EXPECT_EQ(allocator->requests[5].role, KVCacheTensorRole::INDEX_SCALE);
+  EXPECT_EQ(allocator->requests[5].dtype, torch::kFloat16);
+  EXPECT_EQ(allocator->requests[5].shape, shape.index_cache_scale_shape());
+  ASSERT_EQ(caches.size(), 2U);
+  EXPECT_FALSE(caches[0].get_index_cache().defined());
+  EXPECT_FALSE(caches[0].get_indexer_cache_scale().has_value());
+  EXPECT_EQ(caches[1].get_index_cache().data_ptr(),
+            allocator->tensors[4].data_ptr());
+  ASSERT_TRUE(caches[1].get_indexer_cache_scale().has_value());
+  EXPECT_EQ(caches[1].get_indexer_cache_scale()->data_ptr(),
+            allocator->tensors[5].data_ptr());
+  EXPECT_EQ(caches[1].get_indexer_cache_scale()->scalar_type(),
+            torch::kFloat16);
+  EXPECT_EQ(
+      caches[1].get_indexer_cache_scale()->count_nonzero().item<int64_t>(), 0);
+}
+
+TEST(KVCacheTest, VirtualMemoryRejectsQuantizedIndexerCache) {
+  KVCacheCapacity capacity;
+  capacity.n_blocks(2).block_size(4).enable_indexer_cache_quant(true);
+  ModelArgs model_args;
+  model_args.model_type("glm_moe_dsa")
+      .enable_mla(true)
+      .n_heads(8)
+      .n_kv_heads(2)
+      .head_dim(8)
+      .kv_lora_rank(8)
+      .qk_rope_head_dim(4)
+      .index_n_heads(1)
+      .index_head_dim(4);
+  const KVCacheShape shape(capacity, model_args, /*world_size=*/1);
+  KVCacheCreateOptions options;
+  options.device(torch::Device(torch::kCPU))
+      .dtype(torch::kBFloat16)
+      .num_layers(1)
+      .model_id("virtual-quantized-indexer")
+      .model_type("glm_moe_dsa")
+      .enable_virtual_memory(true)
+      .enable_lighting_indexer(true)
+      .enable_indexer_cache_quant(true)
+      .tensor_allocator(std::make_shared<RecordingKVCacheTensorAllocator>());
+
+  std::vector<KVCache> caches;
+  EXPECT_DEATH(allocate_kv_caches(caches, shape, options),
+               "VirtualMemory does not support quantized indexer cache");
+}
+#endif
 
 class HostKVCacheConfigTest : public ::testing::Test {
  protected:

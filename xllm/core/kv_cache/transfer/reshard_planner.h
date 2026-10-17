@@ -87,6 +87,14 @@ class ReshardPlanner final {
   Status build_outgoing_plan(const WorkerCacheLayoutManifest& source,
                              const WorkerCacheLayoutManifest& destination,
                              ReshardPlanTemplate* plan) const;
+
+  // Native PULL uses the matching source TP rank, including replicated bytes
+  // whose static PUSH writer is another rank. Bound local regions are Decode
+  // destinations and remote regions are Prefill sources for READ transfers.
+  Status build_native_pull_plan(
+      const WorkerCacheLayoutManifest& local_destination,
+      const WorkerCacheLayoutManifest& remote_source,
+      ReshardPlanTemplate* plan) const;
 };
 
 class RequestRegionBinder final {

@@ -132,8 +132,6 @@ bool ModelResidencyCoordinator::initialize_model(
 
   const std::string& model_id = options_.model_id;
   coordinator.set_model_parallel_strategy(model_id, dp_size, tp_size);
-  coordinator.virtual_kv_cache_page_allocator().register_model(model_id,
-                                                               num_layers);
 
   const int64_t total_weight_size =
       get_effective_weight_size(model_loader, num_layers);

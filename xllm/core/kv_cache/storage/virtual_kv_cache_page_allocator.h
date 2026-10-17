@@ -33,7 +33,7 @@ class VirtualKVCachePageAllocator {
   virtual ~VirtualKVCachePageAllocator() = default;
 
   virtual bool is_initialized() const = 0;
-  virtual void start_prealloc_thread() = 0;
+  virtual void start_prealloc_thread(const std::string& model_id) = 0;
 
   virtual std::unique_ptr<VirtualKVCachePageState> alloc_kv_cache_page(
       const std::string& model_id,

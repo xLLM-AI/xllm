@@ -61,6 +61,7 @@ class BlockManagerPool : public KVCacheManager {
              num_layers) = 0;  // Required when enable_virtual_memory is true
     PROPERTY(int64_t,
              slot_size) = 0;  // Memory size per slot (for virtual memory)
+    PROPERTY(size_t, virtual_block_bytes) = 0;
     PROPERTY(std::string, model_id);  // Model ID for multi-model support
     // Token-level sliding window size for CompositeBlockManager.
     PROPERTY(uint32_t, sliding_window_size) = 0;

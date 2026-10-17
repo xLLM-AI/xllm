@@ -111,7 +111,7 @@ constexpr PackedInputDomain packed_input_domain() {
   return PackedInputDomain::LLM;
 }
 constexpr uint64_t kPackedInputMagic = 0x584c4c4d494e5032;
-constexpr uint16_t kPackedInputSchemaVersion = 6;
+constexpr uint16_t kPackedInputSchemaVersion = 7;
 constexpr uint32_t kPackedInputHeaderBytes = 40;
 
 struct RawInputLayoutHeader final {
@@ -342,8 +342,9 @@ inline size_t get_virtual_kv_cache_layer_global_offsets_size(
     const std::vector<VirtualKVCacheLayerGlobalOffsets>& offsets) {
   size_t total = type_size<uint64_t>;  // num_layers
   for (const auto& layer : offsets) {
-    total +=
-        get_vector_size(layer.k_offsets) + get_vector_size(layer.v_offsets);
+    total += get_vector_size(layer.k_offsets) +
+             get_vector_size(layer.v_offsets) +
+             get_vector_size(layer.index_offsets);
   }
   return total;
 }
@@ -877,6 +878,7 @@ inline void write_virtual_kv_cache_layer_global_offsets(
   for (const auto& layer : offsets) {
     write_vector(buffer, layer.k_offsets);
     write_vector(buffer, layer.v_offsets);
+    write_vector(buffer, layer.index_offsets);
   }
 }
 
@@ -909,6 +911,7 @@ inline void write_virtual_kv_cache_layer_global_offsets(
   for (const auto& layer : offsets) {
     write_vector(context.descriptor, layer.k_offsets);
     write_vector(context.descriptor, layer.v_offsets);
+    write_vector(context.descriptor, layer.index_offsets);
   }
 }
 
@@ -1836,6 +1839,7 @@ inline void read_virtual_kv_cache_layer_global_offsets(
   for (auto& layer : offsets) {
     read_vector(buffer, layer.k_offsets);
     read_vector(buffer, layer.v_offsets);
+    read_vector(buffer, layer.index_offsets);
   }
 }
 
@@ -1874,6 +1878,7 @@ inline void read_virtual_kv_cache_layer_global_offsets(
   for (auto& layer : offsets) {
     read_vector(context, layer.k_offsets);
     read_vector(context, layer.v_offsets);
+    read_vector(context, layer.index_offsets);
   }
 }
 

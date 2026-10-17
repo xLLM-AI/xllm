@@ -327,6 +327,7 @@ bool VLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
       KVCacheManagerFactory::create(kv_cache_cap,
                                     args_,
                                     dp_local_tp_size_,
+                                    dtype_,
                                     std::move(options),
                                     /*transfer_coordinator=*/nullptr,
                                     dp_size_);

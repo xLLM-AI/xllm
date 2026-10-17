@@ -303,6 +303,8 @@ struct VirtualKVCacheLayerGlobalOffsets {
       k_offsets;  // K cache offsets in GlobalVirtualMemoryRegion
   std::vector<uint64_t>
       v_offsets;  // V cache offsets in GlobalVirtualMemoryRegion
+  // Empty for layers that do not own an INDEX cache.
+  std::vector<uint64_t> index_offsets;
 };
 
 // Transfer mapping for one cache group. group_id is an opaque, stable
