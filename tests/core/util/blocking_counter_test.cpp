@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "blocking_counter.h"
+#include "util/blocking_counter.h"
 
 #include <gtest/gtest.h>
 
@@ -79,16 +79,19 @@ TEST(BlockingCounterTest, WaitTimeoutTest) {
   BlockingCounter counter(3);
 
   std::atomic<int32_t> called{0};
-  threadpool.schedule([&counter, &called]() {
+  BlockingCounter task_completed(1);
+  threadpool.schedule([&counter, &called, &task_completed]() {
     ++called;
     counter.decrement_count();
+    task_completed.decrement_count();
   });
 
   ++called;
   counter.decrement_count();
+  task_completed.wait();
 
   const std::chrono::milliseconds timeout(100);
-  counter.wait_for(timeout);
+  EXPECT_FALSE(counter.wait_for(timeout));
   EXPECT_EQ(2, called.load());
 }
 

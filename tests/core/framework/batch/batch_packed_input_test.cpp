@@ -17,6 +17,10 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include <unistd.h>
 
+#if defined(USE_CUDA)
+#include <torch/cuda.h>
+#endif
+
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -329,6 +333,83 @@ void expect_vlm_transport_input(const VlmForwardInput& input) {
                            torch::tensor({{3.5F, 4.5F}})));
   EXPECT_TRUE(torch::equal(input.input_params.multimodal.deep_stacks[1],
                            torch::tensor({{5.5F, 6.5F}})));
+}
+
+template <typename Input>
+class NoncontiguousSharedMemoryInputTest : public ::testing::Test {};
+
+using TokenInputTypes =
+    ::testing::Types<LlmForwardInput, RecForwardInput, VlmForwardInput>;
+TYPED_TEST_SUITE(NoncontiguousSharedMemoryInputTest, TokenInputTypes);
+
+TYPED_TEST(NoncontiguousSharedMemoryInputTest,
+           RetainsTensorsAfterOverwriteAndUnmapping) {
+  ScopedContiguousInputBuffer contiguous_input_buffer(/*enabled=*/false);
+  std::vector<torch::Device> devices{torch::Device(torch::kCPU)};
+  devices.reserve(2);
+#if defined(USE_CUDA)
+  if (torch::cuda::is_available()) {
+    devices.emplace_back(torch::kCUDA, 0);
+  }
+#elif defined(USE_NPU)
+  devices.emplace_back(torch::kPrivateUse1, 0);
+#endif
+  for (const auto& device : devices) {
+    SCOPED_TRACE(device.str());
+    for (const InputDeviceMaterializationPolicy policy :
+         {InputDeviceMaterializationPolicy::MATERIALIZE_ON_READ,
+          InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE}) {
+      SCOPED_TRACE(static_cast<int32_t>(policy));
+      TypeParam source;
+      source.token_ids = torch::tensor({11, 23}, torch::kInt32);
+      source.positions = torch::tensor({0, 1}, torch::kInt32);
+      source.input_params.meta.num_sequences = 1;
+      source.input_params.attention.host.q_seq_lens = {2};
+      source.input_params.attention.host.q_cu_seq_lens = {0, 2};
+      source.input_params.attention.host.kv_seq_lens = {2};
+      source.sampling_params.selected_token_idxes =
+          torch::tensor({1}, torch::kInt32);
+      TypeParam retained;
+      {
+        const std::string shm_name =
+            ForwardSharedMemoryManager::create_unique_name(
+                "batch_test_noncontiguous_input",
+                /*dp_group=*/0,
+                ForwardType::RAW_INPUT,
+                /*rank=*/0);
+        bool is_creator = false;
+        ForwardSharedMemoryManager writer(
+            shm_name, /*size=*/1 << 20, is_creator, ForwardType::RAW_INPUT);
+        bool is_reader_creator = false;
+        ForwardSharedMemoryManager reader(shm_name,
+                                          /*size=*/1 << 20,
+                                          is_reader_creator,
+                                          ForwardType::RAW_INPUT);
+        ASSERT_TRUE(writer.input_write(source));
+        ASSERT_TRUE(reader.input_read(retained, device, policy));
+        // Check ownership before unmapping so a regression fails safely.
+        ASSERT_TRUE(retained.runtime.input_host_buffer.defined());
+        EXPECT_FALSE(retained.runtime.device_input_buffer.defined());
+
+        auto overwrite = source.clone();
+        overwrite.token_ids = torch::tensor({91, 92}, torch::kInt32);
+        overwrite.positions = torch::tensor({4, 5}, torch::kInt32);
+        overwrite.sampling_params.selected_token_idxes =
+            torch::tensor({0}, torch::kInt32);
+        ASSERT_TRUE(writer.input_write(overwrite));
+        ASSERT_TRUE(torch::equal(retained.token_ids, source.token_ids));
+        ASSERT_TRUE(torch::equal(retained.positions, source.positions));
+        ASSERT_TRUE(torch::equal(retained.sampling_params.selected_token_idxes,
+                                 source.sampling_params.selected_token_idxes));
+      }
+      EXPECT_TRUE(torch::equal(retained.token_ids_host, source.token_ids));
+      EXPECT_TRUE(torch::equal(retained.positions_host, source.positions));
+      EXPECT_TRUE(torch::equal(retained.token_ids, source.token_ids));
+      EXPECT_TRUE(torch::equal(retained.positions, source.positions));
+      EXPECT_TRUE(torch::equal(retained.sampling_params.selected_token_idxes,
+                               source.sampling_params.selected_token_idxes));
+    }
+  }
 }
 
 }  // namespace

@@ -150,13 +150,16 @@ class FakeAttnCausalLM final : public CausalLM {
     // Move modules to target device before initializing weights.
     this->to(device_);
 
-    // Initialize projections with random bf16 weights/bias.
+    // Keep projection variance independent of head count so BF16 rounding
+    // between padded graph GEMMs and eager GEMMs is not amplified by attention.
     q_proj_->to(torch::kBFloat16);
     k_proj_->to(torch::kBFloat16);
     v_proj_->to(torch::kBFloat16);
-    q_proj_->weight.data().normal_();
-    k_proj_->weight.data().normal_();
-    v_proj_->weight.data().normal_();
+    const double projection_std =
+        1.0 / std::sqrt(static_cast<double>(q_hidden_size));
+    q_proj_->weight.data().normal_(/*mean=*/0.0, /*std=*/projection_std);
+    k_proj_->weight.data().normal_(/*mean=*/0.0, /*std=*/projection_std);
+    v_proj_->weight.data().normal_(/*mean=*/0.0, /*std=*/projection_std);
     if (q_proj_->bias.defined()) {
       q_proj_->bias.data().normal_();
     }

@@ -103,12 +103,14 @@ class MooncakeKVCacheTransferDefault final
                       const std::string& src_addr,
                       const std::vector<KVTransferMapping>& mappings) override;
 
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
   bool push_kv_blocks(
       std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
       std::shared_ptr<KVPushSynchronizerImpl>& layer_synchronizer,
       bool is_spec_draft,
       int32_t kv_split_rank,
       int32_t kv_split_size) override;
+#endif
 
  private:
   struct RegisteredBufferDesc {
@@ -174,12 +176,14 @@ class MooncakeVirtualKVCacheTransfer final
                       const std::string& src_addr,
                       const std::vector<KVTransferMapping>& mappings) override;
 
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
   bool push_kv_blocks(
       std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
       std::shared_ptr<KVPushSynchronizerImpl>& layer_synchronizer,
       bool is_spec_draft,
       int32_t kv_split_rank,
       int32_t kv_split_size) override;
+#endif
 
  private:
   // Register the shared memory region supplied by the runtime.
@@ -189,11 +193,13 @@ class MooncakeVirtualKVCacheTransfer final
                            const std::vector<uint64_t>& src_blocks,
                            const std::vector<uint64_t>& dst_blocks);
 
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
   bool push_kv_blocks_impl(
       std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
       std::shared_ptr<KVPushSynchronizerImpl>& layer_synchronizer,
       int32_t kv_split_rank,
       int32_t kv_split_size);
+#endif
 
   std::string model_id_;
   std::unique_ptr<VirtualKVCacheTransferMemoryProvider> memory_provider_;

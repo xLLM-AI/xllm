@@ -9,6 +9,7 @@ cc_test(
     composite_block_manager_test.cpp
     hierarchy_block_manager_pool_test.cpp
   DEPS
+    :batch
     :block
     :config
     :request

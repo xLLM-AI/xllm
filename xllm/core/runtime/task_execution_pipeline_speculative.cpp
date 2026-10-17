@@ -1064,8 +1064,10 @@ Status TaskExecutionPipeline::prepare_speculative(
     return invalid("Invalid MTP SpeculativeSlot index.");
   }
   SpeculativeSlot& slot = *slots_[slot_id]->speculative;
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
   slot.target_prefill->model_params().parallel.layer_synchronizer.reset();
   slot.draft_prefill->model_params().parallel.layer_synchronizer.reset();
+#endif
   Status status = validate_input(slot, input);
   if (!status.ok()) {
     return status;
@@ -1818,8 +1820,10 @@ void TaskExecutionPipeline::discard_speculative(uint32_t slot_id) {
 }
 
 void TaskExecutionPipeline::release_outputs(SpeculativeSlot& slot) {
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
   slot.target_prefill->model_params().parallel.layer_synchronizer.reset();
   slot.draft_prefill->model_params().parallel.layer_synchronizer.reset();
+#endif
   context_release(*slot.state);
   slot.draft_prefill->model_params().embedding.input_embedding =
       torch::Tensor();

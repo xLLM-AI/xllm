@@ -18,11 +18,13 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -183,8 +185,12 @@ class FastTokenizerTest : public ::testing::Test {
  protected:
   void SetUp() override {
     // Create a temporary directory for test files
-    test_dir_ = std::filesystem::temp_directory_path() / "fast_tokenizer_test";
-    std::filesystem::create_directories(test_dir_);
+    std::string directory_template =
+        (std::filesystem::temp_directory_path() / "fast_tokenizer_test-XXXXXX")
+            .string();
+    const char* directory = mkdtemp(directory_template.data());
+    ASSERT_NE(directory, nullptr);
+    test_dir_ = directory;
 
     // Create test tokenizer.json file
     tokenizer_json_path_ = test_dir_ / "tokenizer.json";
@@ -193,9 +199,17 @@ class FastTokenizerTest : public ::testing::Test {
 
   void TearDown() override {
     // Clean up test files
-    if (std::filesystem::exists(test_dir_)) {
-      std::filesystem::remove_all(test_dir_);
+    if (test_dir_.empty()) {
+      return;
     }
+    for (const auto& entry : std::filesystem::directory_iterator(test_dir_)) {
+      std::error_code error;
+      std::filesystem::remove(entry.path(), error);
+      EXPECT_FALSE(error) << entry.path() << ": " << error.message();
+    }
+    std::error_code error;
+    std::filesystem::remove(test_dir_, error);
+    EXPECT_FALSE(error) << test_dir_ << ": " << error.message();
   }
 
   std::filesystem::path test_dir_;

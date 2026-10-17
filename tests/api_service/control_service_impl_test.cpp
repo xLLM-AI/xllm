@@ -21,6 +21,7 @@ limitations under the License.
 #include <cstdlib>
 #include <filesystem>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include "core/common/options.h"
@@ -51,8 +52,15 @@ class ControlServiceImplTest : public testing::Test {
   }
 
   void TearDown() override {
-    if (!temp_directory_.empty()) {
-      std::filesystem::remove_all(temp_directory_);
+    if (temp_directory_.empty()) {
+      return;
+    }
+    for (const auto& path : {temp_directory_ / "model",
+                             temp_directory_ / "sibling",
+                             temp_directory_}) {
+      std::error_code error;
+      std::filesystem::remove(path, error);
+      EXPECT_FALSE(error) << path << ": " << error.message();
     }
   }
 

@@ -17,9 +17,11 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include "framework/tokenizer/tokenizer_args.h"
@@ -56,17 +58,26 @@ TokenizerArgs MakeRwkvArgs() {
 class RwkvTokenizerTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    test_dir_ = std::filesystem::temp_directory_path() / "rwkv_tokenizer_test";
-    std::filesystem::create_directories(test_dir_);
+    std::string directory_template =
+        (std::filesystem::temp_directory_path() / "rwkv_tokenizer_test-XXXXXX")
+            .string();
+    const char* directory = mkdtemp(directory_template.data());
+    ASSERT_NE(directory, nullptr);
+    test_dir_ = directory;
 
     vocab_path_ = test_dir_ / kRwkvVocabFile;
     ASSERT_TRUE(WriteTestRwkvVocab(vocab_path_));
   }
 
   void TearDown() override {
-    if (std::filesystem::exists(test_dir_)) {
-      std::filesystem::remove_all(test_dir_);
+    if (test_dir_.empty()) {
+      return;
     }
+    std::error_code error;
+    std::filesystem::remove(vocab_path_, error);
+    EXPECT_FALSE(error) << vocab_path_ << ": " << error.message();
+    std::filesystem::remove(test_dir_, error);
+    EXPECT_FALSE(error) << test_dir_ << ": " << error.message();
   }
 
   std::filesystem::path test_dir_;

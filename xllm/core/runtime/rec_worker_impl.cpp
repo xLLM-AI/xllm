@@ -2513,7 +2513,8 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::prepare_two_stage_round_input(
   // so qo_indptr is the prefix sum of per-beam query lengths rather than a
   // paged-kv layout descriptor. Both descriptors take the same identity
   // indices, so one build serves both copies.
-  const torch::Tensor qo_indptr_values = arange_indices(total_beam + 1, device);
+  const torch::Tensor qo_indptr_values =
+      arange_indices(total_beam + 1, runtime_.worker.device());
   llm_rec_params.two_stage_qo_indptr_expanded.copy_(qo_indptr_values,
                                                     /*non_blocking=*/true);
   llm_rec_params.two_stage_paged_kv_indptr_expanded.copy_(
@@ -2527,7 +2528,8 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::prepare_two_stage_round_input(
             0, 0, total_beam),
         /*non_blocking=*/true);
   } else {
-    auto paged_kv_indices_values = arange_indices(total_beam, device);
+    auto paged_kv_indices_values =
+        arange_indices(total_beam, runtime_.worker.device());
     llm_rec_params.two_stage_paged_kv_indices_expanded.copy_(
         paged_kv_indices_values, /*non_blocking=*/true);
   }

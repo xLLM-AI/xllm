@@ -17,27 +17,40 @@
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 
+#include <cstdint>
+
 #include "cuda_ops_api.h"
 #include "cutlass_extensions/common.hpp"
 
-class CutlassScaledMMTest : public ::testing::Test {
+class CutlassScaledMMValidationTest : public ::testing::Test {
  protected:
   void SetUp() override {
     if (!torch::cuda::is_available()) {
       GTEST_SKIP() << "CUDA not available, skipping test.";
     }
     device_ = torch::Device(torch::kCUDA);
-
-    // Check if FP8 is supported
-    int compute_capability = xllm::kernel::cuda::get_sm_version_num();
-    if (compute_capability < 89) {
-      GTEST_SKIP() << "FP8 requires compute capability >= 8.9 (Ada Lovelace or "
-                      "Hopper), current: "
-                   << compute_capability;
-    }
   }
 
   torch::Device device_ = torch::kCPU;
+};
+
+class CutlassScaledMMTest : public CutlassScaledMMValidationTest {
+ protected:
+  void SetUp() override {
+    CutlassScaledMMValidationTest::SetUp();
+    if (IsSkipped()) {
+      return;
+    }
+
+    // This CUTLASS implementation requires SM90 or later, including on
+    // devices that support FP8 conversion on older architectures.
+    const int32_t compute_capability = xllm::kernel::cuda::get_sm_version_num();
+    if (compute_capability < 90) {
+      GTEST_SKIP() << "CUTLASS scaled MM requires compute capability >= 9.0, "
+                      "current: "
+                   << compute_capability;
+    }
+  }
 };
 
 // Test basic FP8 W8A8 matrix multiplication
@@ -249,7 +262,7 @@ TEST_F(CutlassScaledMMTest, DifferentSizesTest) {
 }
 
 // Test error handling for invalid inputs
-TEST_F(CutlassScaledMMTest, InvalidInputTest) {
+TEST_F(CutlassScaledMMValidationTest, InvalidInputTest) {
   const int64_t M = 64;
   const int64_t N = 128;
   const int64_t K = 256;

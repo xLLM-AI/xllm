@@ -677,6 +677,7 @@ void MooncakeKVCacheTransferBase::merge_kv_blocks(
   }
 }
 
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
 bool MooncakeKVCacheTransferDefault::push_kv_blocks(
     std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
     std::shared_ptr<KVPushSynchronizerImpl>& layer_synchronizer,
@@ -737,6 +738,7 @@ bool MooncakeKVCacheTransferDefault::push_kv_blocks(
           << keys.size() << ", layers=" << num_layers << ", success=" << result;
   return result;
 }
+#endif
 
 // ============================================================================
 // MooncakeVirtualKVCacheTransfer
@@ -896,6 +898,7 @@ bool MooncakeVirtualKVCacheTransfer::pull_kv_blocks(
   return true;
 }
 
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
 bool MooncakeVirtualKVCacheTransfer::push_kv_blocks(
     std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
     std::shared_ptr<KVPushSynchronizerImpl>& layer_synchronizer,
@@ -906,6 +909,7 @@ bool MooncakeVirtualKVCacheTransfer::push_kv_blocks(
   return push_kv_blocks_impl(
       merged_kv_infos, layer_synchronizer, kv_split_rank, kv_split_size);
 }
+#endif
 
 bool MooncakeVirtualKVCacheTransfer::pull_kv_blocks_impl(
     const std::string& src_addr,
@@ -970,6 +974,7 @@ bool MooncakeVirtualKVCacheTransfer::pull_kv_blocks_impl(
   return true;
 }
 
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
 bool MooncakeVirtualKVCacheTransfer::push_kv_blocks_impl(
     std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
     std::shared_ptr<KVPushSynchronizerImpl>& layer_synchronizer,
@@ -1125,5 +1130,6 @@ bool MooncakeVirtualKVCacheTransfer::push_kv_blocks_impl(
   VLOG(1) << "push_kv_blocks_impl success, num_layers=" << num_layers_;
   return result;
 }
+#endif
 
 }  // namespace xllm

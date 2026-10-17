@@ -66,6 +66,7 @@ void prepend_python_model_path() {
   const std::string python_model_path = repo_root.string();
   py::list sys_path = py::module_::import("sys").attr("path");
   sys_path.attr("insert")(0, python_model_path);
+  py::module_::import("xllm.python").attr("initialize_runtime")();
 }
 
 class XllmOpsTest : public ::testing::Test {
@@ -131,6 +132,10 @@ TEST_F(XllmOpsTest, EmbeddedInterpreterSeesOps) {
 }
 
 TEST_F(XllmOpsTest, EmbeddedInterpreterMoeOpsMatchTorchReference) {
+  if (!Platform::is_support_sm90a() && !Platform::is_support_sm100a() &&
+      !Platform::is_support_sm100f() && !Platform::is_support_sm120a()) {
+    GTEST_SKIP() << "CUTLASS fused MoE requires SM90, SM100, or SM120.";
+  }
   if (!Py_IsInitialized()) {
     Py_InitializeEx(0);
   }
@@ -260,10 +265,10 @@ metadata = SimpleNamespace(
 input_ids = torch.zeros(2, dtype=torch.int32, device=device)
 positions = torch.zeros(2, dtype=torch.int64, device=device)
 
-small_entry = runner._allocate_entry(2, input_ids, positions, metadata)
+small_entry = runner._allocate_entry(2, input_ids, positions, metadata, (2,))
 runner._fill_entry(small_entry, input_ids, positions, metadata, batch_size=2)
 assert small_entry.static_positions.dtype == torch.int32
-large_entry = runner._allocate_entry(4, input_ids, positions, metadata)
+large_entry = runner._allocate_entry(4, input_ids, positions, metadata, (4,))
 
 # Four sequences with at most six model blocks each.
 expected_capacity = 4 * 6
@@ -294,6 +299,8 @@ from xllm.python.model_executor import executor as executor_module
 
 
 class FakeBackend:
+    supports_prepared_metadata = False
+
     def __init__(self, **kwargs):
         pass
 

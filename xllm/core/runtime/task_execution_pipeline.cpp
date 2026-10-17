@@ -262,6 +262,12 @@ Status TaskExecutionPipeline::validate_input(const LlmForwardInput& source,
         !meta.batch_forward_type.is_mixed()))) {
     return invalid("KV PUSH requires a nonempty PD Prefill task.");
   }
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
+  const bool has_layer_synchronizer =
+      params.parallel.layer_synchronizer != nullptr;
+#else
+  const bool has_layer_synchronizer = false;
+#endif
   const auto& slots = params.attention.device.new_cache_slots;
   if (source.runtime.input_host_buffer_has_layout ||
       (tokens.defined() && !is_cpu_int_tensor(tokens, /*dimensions=*/1)) ||
@@ -274,7 +280,7 @@ Status TaskExecutionPipeline::validate_input(const LlmForwardInput& source,
       params.graph.tiling_data.defined() ||
       params.graph.input_tokens_override.defined() ||
       params.graph.use_expanded_decode_for_spec_verify_attention ||
-      params.parallel.layer_synchronizer != nullptr) {
+      has_layer_synchronizer) {
     return Status(
         StatusCode::INVALID_ARGUMENT,
         "Task pipeline requires unpacked CPU input and no graph overrides.");
@@ -664,7 +670,9 @@ Status TaskExecutionPipeline::prepare(uint32_t slot_id,
     }
   }
   slot.buffer->prepare(input, prepare_stream_, padded_batch_size);
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
   slot.buffer->model_params().parallel.layer_synchronizer.reset();
+#endif
   slot.transfer_kv_infos = input.transfer_kv_infos;
   if (slot.buffer->tokens().numel() != 0) {
     executor_.prepare_attention_metadata(kv_caches_,
@@ -845,7 +853,9 @@ void TaskExecutionPipeline::discard(uint32_t slot_id) {
 }
 
 void TaskExecutionPipeline::release_outputs(Slot& slot) {
+#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
   slot.buffer->model_params().parallel.layer_synchronizer.reset();
+#endif
   slot.transfer_kv_infos.clear();
   slot.logits = torch::Tensor();
   slot.model_output = ModelOutput();

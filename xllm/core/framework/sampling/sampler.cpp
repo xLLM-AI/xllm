@@ -270,9 +270,11 @@ torch::Tensor Sampler::greedy_sample(const torch::Tensor& probs) {
 
 torch::Tensor Sampler::random_sample(const torch::Tensor& probs) {
 #if defined(USE_MLU) || defined(USE_CUDA) || defined(USE_DCU)
-  xllm::kernel::RandomSampleParams params;
-  params.logits = probs;
-  return xllm::kernel::random_sample(params);
+  if (!probs.device().is_cpu()) {
+    xllm::kernel::RandomSampleParams params;
+    params.logits = probs;
+    return xllm::kernel::random_sample(params);
+  }
 #endif
   if (probs.dim() == 3) {
     auto batch_size = probs.size(0);

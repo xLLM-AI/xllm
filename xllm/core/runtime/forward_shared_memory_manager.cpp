@@ -3800,20 +3800,24 @@ bool ForwardSharedMemoryManager::read_token_input(
 #elif defined(USE_MLU)
   materialize_device_buffer = device.type() == torch::kPrivateUse1;
 #endif
-#if defined(USE_NPU)
   if (policy == InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE) {
+    materialize_device_buffer = false;
+  }
+  if (!materialize_device_buffer ||
+      !ExecutionConfig::get_instance().use_contiguous_input_buffer()) {
+    // Without a device-buffer session, tensor views need owned host storage
+    // to outlive SHM reuse and unmapping.
     input.runtime.input_host_buffer =
         torch::empty({static_cast<int64_t>(total_size)},
                      torch::TensorOptions()
                          .dtype(torch::kUInt8)
                          .device(torch::kCPU)
-                         .pinned_memory(/*pinned_memory=*/true));
+                         .pinned_memory(/*pinned_memory=*/!device.is_cpu()));
     std::memcpy(
         input.runtime.input_host_buffer.data_ptr(), data_ptr, total_size);
     data_ptr =
         static_cast<const char*>(input.runtime.input_host_buffer.data_ptr());
   }
-#endif
   deserialize_forward_input_payload(data_ptr,
                                     total_size,
                                     input,
