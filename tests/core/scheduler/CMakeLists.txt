@@ -2,6 +2,17 @@ include(cc_test)
 
 add_subdirectory(profile)
 
+# Keep notifier synchronization tests independent of device initialization.
+cc_test(
+  NAME
+    scheduler_notifier_test
+  NO_NPU_RUNTIME
+  SRCS
+    scheduler_notifier_test.cpp
+  DEPS
+    GTest::gtest_main
+)
+
 cc_test(
   NAME
     scheduler_test

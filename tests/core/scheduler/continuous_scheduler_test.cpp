@@ -3,8 +3,12 @@
 #include <absl/time/clock.h>
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <future>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <thread>
 #include <unordered_set>
@@ -16,6 +20,7 @@
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
+#include "core/scheduler/scheduler_notifier_test_peer.h"
 #include "distributed_runtime/engine.h"
 #include "scheduler_factory.h"
 #include "util/utils.h"
@@ -171,6 +176,27 @@ class TestableContinuousScheduler final : public ContinuousScheduler<> {
 
   BatchGroup prepare_batch_test() { return prepare_batch(); }
 
+  BatchGroup schedule_request_test(const absl::Duration& timeout) {
+    return schedule_request(timeout);
+  }
+
+  uint64_t wakeup_generation() const {
+    return notifier_->snapshot().generation;
+  }
+
+  bool wait_for_wakeup(uint64_t observed_generation) {
+    notifier_->wait_for(observed_generation, std::chrono::seconds(5));
+    return notifier_->snapshot().generation != observed_generation;
+  }
+
+  bool wait_until_armed() const {
+    return SchedulerNotifierTestPeer::wait_until_armed(*notifier_);
+  }
+
+  void notify_after_next_prepare_batch(std::promise<void>& notification) {
+    prepared_notification_ = &notification;
+  }
+
   void process_batch_output_test(bool enable_schedule_overlap) {
     process_batch_output(enable_schedule_overlap);
   }
@@ -202,6 +228,20 @@ class TestableContinuousScheduler final : public ContinuousScheduler<> {
     last_batch_.front().add(sequence);
     is_first_step_ = false;
   }
+
+ protected:
+  BatchGroup prepare_batch() override {
+    BatchGroup batch = ContinuousSchedulerBase::prepare_batch();
+    std::promise<void>* notification =
+        std::exchange(prepared_notification_, nullptr);
+    if (notification != nullptr) {
+      notification->set_value();
+    }
+    return batch;
+  }
+
+ private:
+  std::promise<void>* prepared_notification_ = nullptr;
 };
 
 class RejectingReadyScheduler final : public ContinuousScheduler<> {
@@ -664,6 +704,123 @@ TEST(ContinuousSchedulerTest, PrefetchCompletesBeforeSchedulerQueueAdmission) {
   EXPECT_EQ(scheduler->get_waiting_requests_num(), 0u);
   EXPECT_FALSE(scheduler->has_pending_prefetch());
   EXPECT_EQ(scheduler->scheduler_queue_size(), 0u);
+}
+
+TEST(ContinuousSchedulerTest, RequestAdmissionPreservesNotificationBeforeWait) {
+  for (bool storage_prefetch : {false, true}) {
+    SCOPED_TRACE(storage_prefetch);
+    SchedulerOptions options = create_scheduler_options(64, 4, 0, 64, 1);
+    FakeEngine engine(/*num_blocks=*/64, /*block_size=*/32);
+    engine.set_storage_prefetch_enabled(storage_prefetch);
+    TestableContinuousScheduler scheduler(&engine, options);
+    const uint64_t observed_generation = scheduler.wakeup_generation();
+
+    auto request = generate_request_with_prompt_tokens({1, 2}, 4, 30000);
+    ASSERT_TRUE(scheduler.add_request(request));
+
+    // A busy scheduler skips notify_one(), but generation preserves the event
+    // across the transition into waiting. No timeout polling runs here.
+    EXPECT_TRUE(scheduler.wait_for_wakeup(observed_generation));
+    EXPECT_EQ(scheduler.has_pending_prefetch(), storage_prefetch);
+    EXPECT_EQ(scheduler.scheduler_queue_size(), storage_prefetch ? 0u : 1u);
+  }
+}
+
+TEST(ContinuousSchedulerTest, RequestAdmissionWakesBlockedWaiter) {
+  for (bool storage_prefetch : {false, true}) {
+    SCOPED_TRACE(storage_prefetch);
+    SchedulerOptions options = create_scheduler_options(64, 4, 0, 64, 1);
+    FakeEngine engine(/*num_blocks=*/64, /*block_size=*/32);
+    engine.set_storage_prefetch_enabled(storage_prefetch);
+    TestableContinuousScheduler scheduler(&engine, options);
+    const uint64_t observed_generation = scheduler.wakeup_generation();
+    auto awakened =
+        std::async(std::launch::async, [&scheduler, observed_generation] {
+          return scheduler.wait_for_wakeup(observed_generation);
+        });
+    ASSERT_TRUE(scheduler.wait_until_armed());
+
+    auto request = generate_request_with_prompt_tokens({1, 2}, 4, 30000);
+    ASSERT_TRUE(scheduler.add_request(request));
+    EXPECT_EQ(awakened.wait_for(std::chrono::seconds(1)),
+              std::future_status::ready);
+    EXPECT_TRUE(awakened.get());
+  }
+}
+
+TEST(ContinuousSchedulerTest, RejectedAdmissionDoesNotNotifyScheduler) {
+  for (bool storage_prefetch : {false, true}) {
+    SCOPED_TRACE(storage_prefetch);
+    SchedulerOptions options = create_scheduler_options(64, 4, 0, 64, 1);
+    options.request_queue_size(1);
+    FakeEngine engine(/*num_blocks=*/64, /*block_size=*/32);
+    engine.set_storage_prefetch_enabled(storage_prefetch);
+    TestableContinuousScheduler scheduler(&engine, options);
+    auto admitted = generate_request_with_prompt_tokens({1, 2}, 4, 30000);
+    ASSERT_TRUE(scheduler.add_request(admitted));
+    const uint64_t observed_generation = scheduler.wakeup_generation();
+
+    auto rejected = generate_request_with_prompt_tokens({3, 4}, 4, 30000);
+    EXPECT_FALSE(scheduler.add_request(rejected));
+    EXPECT_EQ(scheduler.wakeup_generation(), observed_generation);
+  }
+}
+
+TEST(ContinuousSchedulerTest, RejectedStreamWakesBlockedWaiter) {
+  SchedulerOptions options = create_scheduler_options(64, 4, 0, 64, 1);
+  FakeEngine engine(/*num_blocks=*/64, /*block_size=*/32);
+  TestableContinuousScheduler scheduler(&engine, options);
+  auto request = generate_request_with_prompt_tokens({1, 2}, 4, 30000);
+  request->state().stream = true;
+  request->state().output_func = [](const RequestOutput&) { return false; };
+  make_request_decode_ready(request);
+  const uint64_t observed_generation = scheduler.wakeup_generation();
+  auto awakened =
+      std::async(std::launch::async, [&scheduler, observed_generation] {
+        return scheduler.wait_for_wakeup(observed_generation);
+      });
+  ASSERT_TRUE(scheduler.wait_until_armed());
+
+  scheduler.reject_stream(request);
+
+  EXPECT_EQ(awakened.wait_for(std::chrono::seconds(1)),
+            std::future_status::ready);
+  EXPECT_TRUE(awakened.get());
+  EXPECT_FALSE(request->cancelled());
+  (void)scheduler.schedule_request_test(absl::ZeroDuration());
+  EXPECT_TRUE(request->cancelled());
+}
+
+TEST(ContinuousSchedulerTest,
+     PrefetchCompletionIsFoundBySchedulerTimeoutFallback) {
+  SchedulerOptions options = create_scheduler_options(64, 4, 0, 64, 1);
+  auto engine = std::make_unique<FakeEngine>(64, 32);
+  engine->set_prefetch_ready(false);
+  TestableContinuousScheduler scheduler(engine.get(), options);
+
+  auto request = generate_request_with_prompt_tokens({1, 2}, 4, 30000);
+  ASSERT_TRUE(scheduler.add_request(request));
+  BatchGroup initial_batch = scheduler.prepare_batch_test();
+  ASSERT_EQ(initial_batch.size(), 1u);
+  ASSERT_TRUE(initial_batch.front().empty());
+  ASSERT_EQ(engine->prefetch_calls(), 1u);
+
+  std::promise<void> prepared;
+  auto preparation_finished = prepared.get_future();
+  scheduler.notify_after_next_prepare_batch(prepared);
+  auto scheduled = std::async(std::launch::async, [&scheduler] {
+    return scheduler.schedule_request_test(absl::Seconds(1));
+  });
+  ASSERT_EQ(preparation_finished.wait_for(std::chrono::seconds(1)),
+            std::future_status::ready);
+  engine->set_prefetch_ready(true);
+
+  ASSERT_EQ(scheduled.wait_for(std::chrono::milliseconds(100)),
+            std::future_status::ready);
+  BatchGroup batch = scheduled.get();
+  ASSERT_EQ(batch.size(), 1u);
+  ASSERT_EQ(batch.front().size(), 1u);
+  EXPECT_EQ(batch.front()[0], request->sequences().front().get());
 }
 
 TEST(ContinuousSchedulerTest,

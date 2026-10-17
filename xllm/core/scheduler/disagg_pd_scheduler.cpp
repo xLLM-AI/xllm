@@ -1307,6 +1307,7 @@ bool DisaggPDScheduler::decode_recv_first_generation(
     LOG(ERROR) << "Failed to enqueue decode request, request_id: " << req_id;
     return false;
   }
+  notifier_->notify();
   release_unqueued_blocks.dismiss();
   VLOG(1) << "Decode first-generation request_id=" << req_id
           << ", prepare_ms=" << prepare_seconds * 1000.0

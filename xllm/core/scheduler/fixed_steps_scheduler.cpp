@@ -21,7 +21,6 @@ limitations under the License.
 
 #include <algorithm>
 #include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -49,11 +48,14 @@ FixedStepsScheduler::FixedStepsScheduler(RecEngine* engine,
     : options_(options),
       engine_(engine),
       request_queue_(options.request_queue_size()),
+      notifier_(std::make_shared<SchedulerNotifier>()),
       step_semaphore_(
           static_cast<std::ptrdiff_t>(options.rec_worker_max_concurrency())) {
   CHECK(engine_ != nullptr);
   kv_cache_manager_ = engine_->block_manager_pool();
   CHECK(kv_cache_manager_ != nullptr);
+  kv_cache_manager_->set_prefetch_completion_callback(
+      [notifier = notifier_]() { notifier->notify(); });
 
   enable_prefix_cache_ =
       ::xllm::KVCacheConfig::get_instance().enable_prefix_cache();
@@ -63,9 +65,10 @@ FixedStepsScheduler::FixedStepsScheduler(RecEngine* engine,
       engine_->tokenizer(),
       options_.enable_service_routing(),
       options_.disable_log_stats(),
-      [cancel_request_queue =
-           cancel_request_queue_](std::shared_ptr<Request> request) {
+      [cancel_request_queue = cancel_request_queue_,
+       notifier = notifier_](std::shared_ptr<Request> request) {
         cancel_request_queue->submit(std::move(request));
+        notifier->notify();
       });
 
   if (options_.priority_strategy() == "multi_slo_and_prio" ||
@@ -90,6 +93,9 @@ FixedStepsScheduler::FixedStepsScheduler(RecEngine* engine,
 }
 
 FixedStepsScheduler::~FixedStepsScheduler() {
+  notifier_->request_stop();
+  kv_cache_manager_->set_prefetch_completion_callback({});
+
   // Tasks capture scheduler state and must finish before it is destroyed.
   step_threadpool_.reset();
 
@@ -129,11 +135,16 @@ bool FixedStepsScheduler::add_request(std::shared_ptr<Request>& request) {
   }
 
   if (!kv_cache_manager_->has_storage_prefetch()) {
-    return request_queue_.write(request);
+    const bool accepted = request_queue_.write(request);
+    if (accepted) {
+      notifier_->notify();
+    }
+    return accepted;
   }
 
   prefetching_requests_.fetch_add(1, std::memory_order_relaxed);
   prefetch_admissions_.emplace_back(request);
+  notifier_->notify();
   VLOG(1) << "[Mooncake][AdmissionPending] request=" << request->request_id();
   return true;
 }
@@ -349,12 +360,6 @@ RecBatchGroup FixedStepsScheduler::prepare_rec_batch() {
     }
   };
 
-  // Drain the request prefetched by the blocking wait in schedule_request().
-  if (prefetched_request_) {
-    propagate_request(prefetched_request_);
-    prefetched_request_.reset();
-  }
-
   std::shared_ptr<Request> request;
   // read from request queue then push to waiting priority queue
   while (request_queue_.read(request)) {
@@ -477,6 +482,11 @@ ScheduleResult FixedStepsScheduler::schedule_request(
   const auto deadline = absl::Now() + timeout;
   ScheduleResult result;
   while (true) {
+    const SchedulerNotifier::Snapshot snapshot = notifier_->snapshot();
+    if (snapshot.stop_requested) {
+      return result;
+    }
+
     result.batches = prepare_rec_batch();
     bool all_empty = std::all_of(
         result.batches.begin(),
@@ -492,20 +502,18 @@ ScheduleResult FixedStepsScheduler::schedule_request(
     if (now >= deadline) {
       break;
     }
-    // Event-driven wait instead of fixed-interval busy polling: block on the
-    // request queue until a new request arrives or the deadline is reached.
-    // This wakes up immediately on arrival, avoiding the extra latency and CPU
-    // spinning of a fixed sleep under high concurrency. The prefetched request
-    // is consumed by the next prepare_rec_batch() call.
-    std::shared_ptr<Request> request;
-    const auto remaining = absl::ToChronoNanoseconds(deadline - now);
-    const auto wait_duration =
-        prefetching_requests_.load(std::memory_order_relaxed) > 0
-            ? std::min(remaining, std::chrono::nanoseconds(50'000'000))
-            : remaining;
-    const auto wait_deadline = std::chrono::steady_clock::now() + wait_duration;
-    if (request_queue_.tryReadUntil(wait_deadline, request)) {
-      prefetched_request_ = std::move(request);
+    const absl::Duration remaining = deadline - now;
+    // Idle schedulers wait until the deadline or the next notification. Keep
+    // short retries while prefetches or local admissions still need progress.
+    const bool has_pending_work =
+        prefetching_requests_.load(std::memory_order_relaxed) > 0 ||
+        !prefill_queue_->empty();
+    const absl::Duration wait_duration =
+        has_pending_work ? std::min(absl::Milliseconds(1), remaining)
+                         : remaining;
+    if (notifier_->wait_for(snapshot.generation,
+                            absl::ToChronoNanoseconds(wait_duration))) {
+      break;
     }
   }
   // return empty result

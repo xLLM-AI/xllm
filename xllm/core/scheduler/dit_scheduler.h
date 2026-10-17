@@ -19,6 +19,7 @@ limitations under the License.
 #include <folly/MPMCQueue.h>
 #include <folly/futures/Future.h>
 
+#include <cstdint>
 #include <deque>
 #include <limits>
 #include <memory>
@@ -33,6 +34,7 @@ limitations under the License.
 #include "core/framework/batch/dit_batch_factory.h"
 #include "core/framework/request/dit_request.h"
 #include "core/scheduler/scheduler.h"
+#include "core/scheduler/scheduler_notifier.h"
 #include "core/util/threadpool.h"
 
 namespace xllm {
@@ -114,6 +116,7 @@ class DiTDynamicBatchScheduler : public DiTScheduler {
   // a thread safe queue of requests, bounded by kRequestQueueSize
   // the schedule owns the requests and manages their lifetimes.
   folly::MPMCQueue<std::shared_ptr<DiTRequest>> request_queue_;
+  std::shared_ptr<SchedulerNotifier> notifier_;
 
   // a batch of requests in running state
   std::vector<std::shared_ptr<DiTRequest>> running_requests_;

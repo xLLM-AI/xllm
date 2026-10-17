@@ -76,6 +76,8 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
   }
   void prefetch_from_storage(std::shared_ptr<Request> request,
                              PrefetchDoneCallback done) override;
+  void set_prefetch_completion_callback(
+      PrefetchCompletionCallback callback) override;
   void drain_prefetch_completions() override;
 
  private:
@@ -110,6 +112,7 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
   std::atomic<size_t> prefetching_requests_{0};
 
   std::mutex prefetch_completion_mutex_;
+  PrefetchCompletionCallback prefetch_completion_callback_;
   std::deque<std::function<void()>> prefetch_completions_;
 
   // Declared last so destruction waits for callbacks before any manager or

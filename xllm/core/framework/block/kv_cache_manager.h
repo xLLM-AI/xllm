@@ -35,6 +35,7 @@ struct HostCacheRestorePoint {
 class KVCacheManager {
  public:
   using PrefetchDoneCallback = std::function<void(std::shared_ptr<Request>)>;
+  using PrefetchCompletionCallback = std::function<void()>;
 
   virtual ~KVCacheManager() = default;
 
@@ -54,6 +55,11 @@ class KVCacheManager {
                                      PrefetchDoneCallback done) {
     done(std::move(request));
   }
+
+  // Notify the scheduler when an asynchronous prefetch completion is ready
+  // to be drained on the scheduler thread.
+  virtual void set_prefetch_completion_callback(
+      PrefetchCompletionCallback callback) {}
 
   // Apply completed prefetches on the scheduler thread before cache admission.
   virtual void drain_prefetch_completions() {}

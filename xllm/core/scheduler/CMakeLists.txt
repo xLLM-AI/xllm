@@ -18,6 +18,7 @@ cc_library(
     request_priority_queue.h
     fixed_steps_scheduler.h
     scheduler_metrics.h
+    scheduler_notifier.h
   SRCS
     scheduler_policy.cpp
     prefill_first_policy.cpp

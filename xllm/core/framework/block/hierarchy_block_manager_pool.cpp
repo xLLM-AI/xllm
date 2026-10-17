@@ -695,6 +695,23 @@ HierarchyBlockManagerPool::~HierarchyBlockManagerPool() {
       << "HierarchyBlockManagerPool destroyed with pending prefetch callbacks";
 }
 
+void HierarchyBlockManagerPool::set_prefetch_completion_callback(
+    PrefetchCompletionCallback callback) {
+  bool has_pending_completion = false;
+  PrefetchCompletionCallback callback_to_notify;
+  {
+    std::lock_guard<std::mutex> lock(prefetch_completion_mutex_);
+    prefetch_completion_callback_ = std::move(callback);
+    has_pending_completion = !prefetch_completions_.empty();
+    if (has_pending_completion) {
+      callback_to_notify = prefetch_completion_callback_;
+    }
+  }
+  if (has_pending_completion && callback_to_notify) {
+    callback_to_notify();
+  }
+}
+
 void HierarchyBlockManagerPool::trim_host_cache(
     Sequence* sequence,
     const HostCacheRestorePoint& selected_restore) {
@@ -1129,27 +1146,34 @@ void HierarchyBlockManagerPool::prefetch_from_storage(
                      finish_sequence](size_t hit_units,
                                       bool workers_quiescent) mutable {
       CHECK_LE(hit_units, store_units);
-      std::lock_guard<std::mutex> lock(prefetch_completion_mutex_);
-      prefetch_completions_.emplace_back([this,
-                                          request,
-                                          sequence,
-                                          dp_rank,
-                                          base_tokens,
-                                          unit_size,
-                                          hit_units,
-                                          workers_quiescent,
-                                          finish_sequence]() mutable {
-        if (!workers_quiescent) {
-          quarantine_prefetch(sequence, dp_rank);
+      PrefetchCompletionCallback completion_callback;
+      {
+        std::lock_guard<std::mutex> lock(prefetch_completion_mutex_);
+        prefetch_completions_.emplace_back([this,
+                                            request,
+                                            sequence,
+                                            dp_rank,
+                                            base_tokens,
+                                            unit_size,
+                                            hit_units,
+                                            workers_quiescent,
+                                            finish_sequence]() mutable {
+          if (!workers_quiescent) {
+            quarantine_prefetch(sequence, dp_rank);
+            finish_sequence();
+            return;
+          }
+          const bool publish = !request->finished() && !request->cancelled();
+          const size_t final_tokens = base_tokens + hit_units * unit_size;
+          finalize_prefetch(
+              sequence, host_block_managers_[dp_rank], final_tokens, publish);
           finish_sequence();
-          return;
-        }
-        const bool publish = !request->finished() && !request->cancelled();
-        const size_t final_tokens = base_tokens + hit_units * unit_size;
-        finalize_prefetch(
-            sequence, host_block_managers_[dp_rank], final_tokens, publish);
-        finish_sequence();
-      });
+        });
+        completion_callback = prefetch_completion_callback_;
+      }
+      if (completion_callback) {
+        completion_callback();
+      }
     };
 
     if (storage_request.transfer_infos.empty()) {

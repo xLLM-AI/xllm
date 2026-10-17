@@ -38,6 +38,7 @@ limitations under the License.
 #include "core/scheduler/request_output_dispatcher.h"
 #include "core/scheduler/request_priority_queue.h"
 #include "core/scheduler/scheduler.h"
+#include "core/scheduler/scheduler_notifier.h"
 #include "core/util/threadpool.h"
 
 namespace xllm {
@@ -198,10 +199,7 @@ class FixedStepsScheduler : public Scheduler {
   std::unique_ptr<SchedulerPipeline> scheduler_pipeline_;
   std::unique_ptr<RecBatchFactory> rec_batch_factory_;
 
-  // Holds a request consumed by the blocking wait in schedule_request() while
-  // the queue was empty. prepare_rec_batch() drains it first, through the same
-  // path as request_queue_, so the blocking wait does not lose requests.
-  std::shared_ptr<Request> prefetched_request_;
+  std::shared_ptr<SchedulerNotifier> notifier_;
 
   // Scheduler thread pool for parallel execution of step()
   std::unique_ptr<ThreadPool> step_threadpool_;

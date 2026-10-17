@@ -21,6 +21,7 @@ limitations under the License.
 
 #include <atomic>
 #include <concepts>
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <list>
@@ -44,6 +45,7 @@ limitations under the License.
 #include "core/scheduler/request_priority_queue.h"
 #include "core/scheduler/scheduler.h"
 #include "core/scheduler/scheduler_metrics.h"
+#include "core/scheduler/scheduler_notifier.h"
 
 namespace xllm {
 class DistributedWorkerManager;
@@ -174,6 +176,8 @@ class ContinuousSchedulerBase : public Scheduler {
   ResultCallback result_callback_;
 
   KVCacheManager* kv_cache_manager_;
+
+  std::shared_ptr<SchedulerNotifier> notifier_;
 
   // a thread safe queue of requests, bounded by options_.request_queue_size()
   // the schedule owns the requests and manages their lifetimes.

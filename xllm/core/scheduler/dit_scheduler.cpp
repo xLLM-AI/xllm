@@ -22,6 +22,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -38,6 +39,7 @@ namespace xllm {
 
 namespace {
 constexpr size_t kRequestQueueSize = 100;
+constexpr absl::Duration kSchedulerWakeupInterval = absl::Milliseconds(10);
 
 bool prompt_audio_allows_batching(const DiTInputParams& lhs,
                                   const DiTInputParams& rhs) {
@@ -144,7 +146,10 @@ void DiTAsyncResponseProcessor::process_failed_request(
 
 DiTDynamicBatchScheduler::DiTDynamicBatchScheduler(DiTEngine* engine,
                                                    const Options& options)
-    : options_(options), engine_(engine), request_queue_(kRequestQueueSize) {
+    : options_(options),
+      engine_(engine),
+      request_queue_(kRequestQueueSize),
+      notifier_(std::make_shared<SchedulerNotifier>()) {
   CHECK(engine_ != nullptr);
 
   response_handler_ =
@@ -152,6 +157,7 @@ DiTDynamicBatchScheduler::DiTDynamicBatchScheduler(DiTEngine* engine,
 }
 
 DiTDynamicBatchScheduler::~DiTDynamicBatchScheduler() {
+  notifier_->request_stop();
   abort_all_requests();
   response_handler_->wait_completion();
 }
@@ -161,6 +167,7 @@ bool DiTDynamicBatchScheduler::add_request(
   CHECK(request != nullptr);
 
   if (request_queue_.write(request)) {
+    notifier_->notify();
     return true;
   }
 
@@ -246,6 +253,11 @@ std::vector<DiTBatch> DiTDynamicBatchScheduler::schedule_request(
   std::vector<DiTBatch> batches;
 
   while (true) {
+    const SchedulerNotifier::Snapshot snapshot = notifier_->snapshot();
+    if (snapshot.stop_requested) {
+      return batches;
+    }
+
     batches = prepare_batch();
     bool all_empty =
         std::all_of(batches.begin(), batches.end(), [](const DiTBatch& batch) {
@@ -260,11 +272,14 @@ std::vector<DiTBatch> DiTDynamicBatchScheduler::schedule_request(
     if (now > deadline) {
       break;
     }
-    // wait for new requests to arrive
-    constexpr uint64_t kStepSleepTimeMs = 10;
-    const auto time_to_sleep =
-        std::min(absl::Milliseconds(kStepSleepTimeMs), deadline - now);
-    absl::SleepFor(time_to_sleep);
+    // Wait for a request notification, while retaining a short timeout as a
+    // fallback for state changes that do not have a direct notifier.
+    const auto wait_duration =
+        std::min(kSchedulerWakeupInterval, deadline - now);
+    if (notifier_->wait_for(snapshot.generation,
+                            absl::ToChronoNanoseconds(wait_duration))) {
+      break;
+    }
   }
 
   // return an empty batch

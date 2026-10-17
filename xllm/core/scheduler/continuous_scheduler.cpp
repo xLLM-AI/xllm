@@ -21,6 +21,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <iterator>
 #include <limits>
@@ -48,6 +49,7 @@ namespace xllm {
 namespace {
 
 constexpr absl::Duration kDecodeRestoreTimeout = absl::Seconds(60);
+constexpr absl::Duration kSchedulerWakeupInterval = absl::Milliseconds(1);
 constexpr char kDecodeRestoreTimeoutMessage[] =
     "Decode request could not reacquire device KV cache within 60 seconds";
 
@@ -69,6 +71,7 @@ ContinuousSchedulerBase::ContinuousSchedulerBase(
       model_residency_coordinator_(std::move(model_residency_coordinator)),
       step_callback_(std::move(step_callback)),
       result_callback_(std::move(result_callback)),
+      notifier_(std::make_shared<SchedulerNotifier>()),
       request_queue_(options.request_queue_size()) {
   CHECK(resource_engine_ != nullptr);
   CHECK(step_callback_);
@@ -76,6 +79,8 @@ ContinuousSchedulerBase::ContinuousSchedulerBase(
 
   kv_cache_manager_ = resource_engine_->block_manager_pool();
   CHECK(kv_cache_manager_ != nullptr);
+  kv_cache_manager_->set_prefetch_completion_callback(
+      [notifier = notifier_]() { notifier->notify(); });
   scheduler_metrics_ =
       std::make_unique<SchedulerMetrics>(distributed_worker_manager_,
                                          kv_cache_manager_,
@@ -120,9 +125,10 @@ ContinuousSchedulerBase::ContinuousSchedulerBase(
       resource_engine_->tokenizer(),
       options_.enable_service_routing(),
       options_.disable_log_stats(),
-      [cancel_request_queue =
-           cancel_request_queue_](std::shared_ptr<Request> request) {
+      [cancel_request_queue = cancel_request_queue_,
+       notifier = notifier_](std::shared_ptr<Request> request) {
         cancel_request_queue->submit(std::move(request));
+        notifier->notify();
       });
   create_queues(options);
   if (options_.enable_service_routing()) {
@@ -203,6 +209,9 @@ void ContinuousSchedulerBase::populate_heartbeat_request(
 }
 
 ContinuousSchedulerBase::~ContinuousSchedulerBase() {
+  notifier_->request_stop();
+  kv_cache_manager_->set_prefetch_completion_callback({});
+
   if (xservice_client_ != nullptr) {
     xservice_client_->clear_heartbeat_callback(
         heartbeat_callback_registration_);
@@ -247,6 +256,7 @@ bool ContinuousSchedulerBase::add_request(std::shared_ptr<Request>& request) {
 
   prefetching_requests_.fetch_add(1, std::memory_order_relaxed);
   prefetch_admissions_.emplace_back(request);
+  notifier_->notify();
   VLOG(1) << "[Mooncake][AdmissionPending] request=" << request->request_id();
   return true;
 }
@@ -307,7 +317,11 @@ size_t ContinuousSchedulerBase::num_queued_requests() const {
 
 bool ContinuousSchedulerBase::enqueue_ready_request(
     std::shared_ptr<Request> request) {
-  return request_queue_.write(std::move(request));
+  const bool queued = request_queue_.write(std::move(request));
+  if (queued) {
+    notifier_->notify();
+  }
+  return queued;
 }
 
 void ContinuousSchedulerBase::create_queues(const Options& options) {
@@ -484,6 +498,11 @@ BatchGroup ContinuousSchedulerBase::schedule_request(
   const auto deadline = absl::Now() + timeout;
   BatchGroup batch;
   while (true) {
+    const SchedulerNotifier::Snapshot wakeup = notifier_->snapshot();
+    if (wakeup.stop_requested) {
+      return batch;
+    }
+
     apply_cancel_requests();
     batch = prepare_batch();
     bool all_empty =
@@ -502,11 +521,14 @@ BatchGroup ContinuousSchedulerBase::schedule_request(
     if (now > deadline) {
       break;
     }
-    // wait for new requests to arrive
-    constexpr uint64_t kStepSleepTimeMs = 1;
-    const auto time_to_sleep =
-        std::min(absl::Milliseconds(kStepSleepTimeMs), deadline - now);
-    absl::SleepFor(time_to_sleep);
+    // Wait for a request notification, while retaining a short timeout as a
+    // fallback for completion sources that do not have a direct notifier.
+    const auto wait_duration =
+        std::min(kSchedulerWakeupInterval, deadline - now);
+    if (notifier_->wait_for(wakeup.generation,
+                            absl::ToChronoNanoseconds(wait_duration))) {
+      break;
+    }
   }
   // return an empty batch
   return batch;

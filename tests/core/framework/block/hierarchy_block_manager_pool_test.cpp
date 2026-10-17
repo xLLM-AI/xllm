@@ -1649,6 +1649,9 @@ TEST(HierarchyBlockManagerPoolTest,
   std::shared_ptr<Request> request = make_test_request(tokens);
   Sequence* sequence = request->sequences().front().get();
   bool completed = false;
+  int32_t completion_notifications = 0;
+  pool.set_prefetch_completion_callback(
+      [&completion_notifications] { ++completion_notifications; });
 
   pool.prefetch_from_storage(
       request,
@@ -1670,6 +1673,7 @@ TEST(HierarchyBlockManagerPoolTest,
   coordinator->result()->mark_worker_ended(
       /*worker_index=*/0, /*worker_ok=*/true, /*worker_quiescent=*/true);
   EXPECT_FALSE(completed);
+  EXPECT_EQ(completion_notifications, 0);
   control = coordinator->result()->record_batch_result(/*worker_index=*/1,
                                                        /*prefix_hit_units=*/2);
   ASSERT_TRUE(control.has_value());
@@ -1678,6 +1682,7 @@ TEST(HierarchyBlockManagerPoolTest,
       /*worker_index=*/1, /*worker_ok=*/true, /*worker_quiescent=*/true);
 
   EXPECT_FALSE(completed);
+  EXPECT_EQ(completion_notifications, 1);
   pool.drain_prefetch_completions();
   EXPECT_TRUE(completed);
   EXPECT_EQ(sequence->host_kv_state().num_blocks(BlockType::KV), 2u);
