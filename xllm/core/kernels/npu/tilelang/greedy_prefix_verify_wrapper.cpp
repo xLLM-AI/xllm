@@ -21,7 +21,6 @@ limitations under the License.
 #include <algorithm>
 #include <cstdint>
 #include <limits>
-#include <tuple>
 
 #include "core/kernels/npu/tilelang/dispatch_registry.h"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
@@ -90,11 +89,9 @@ void check_input_metadata(const torch::Tensor& input, const char* name) {
 
 }  // namespace
 
-std::tuple<torch::Tensor, torch::Tensor> greedy_prefix_verify(
-    const torch::Tensor& draft,
-    const torch::Tensor& target,
-    const torch::Tensor& bonus,
-    bool mask_out_rejected_tokens) {
+torch::Tensor greedy_prefix_verify(const torch::Tensor& draft,
+                                   const torch::Tensor& target,
+                                   const torch::Tensor& bonus) {
   check_input_metadata(draft, "draft");
   check_input_metadata(target, "target");
   check_input_metadata(bonus, "bonus");
@@ -110,14 +107,11 @@ std::tuple<torch::Tensor, torch::Tensor> greedy_prefix_verify(
   CHECK_LE(batch, kInt32Max / (width + 1))
       << "output element count exceeds INT32";
 
-  torch::Tensor full =
-      torch::empty({batch, width + 1}, target.options().dtype(torch::kInt32));
-  torch::Tensor masked;
-  if (mask_out_rejected_tokens) {
-    masked = torch::empty_like(full);
-  }
+  // Pre-fill -1: the kernel writes only tiles before the first rejection.
+  torch::Tensor masked = torch::full(
+      {batch, width + 1}, -1, target.options().dtype(torch::kInt32));
   if (batch == 0) {
-    return {full, masked};
+    return masked;
   }
 
   const auto stream = c10_npu::getCurrentNPUStream(target.device().index());
@@ -153,14 +147,10 @@ std::tuple<torch::Tensor, torch::Tensor> greedy_prefix_verify(
       << specialization.target_bits << "/" << specialization.bonus_bits << ": "
       << available_greedy_prefix_verify_variant_keys();
 
-  // The generated ABI has no restrict promise; mask=false never accesses this
-  // slot. Reuse full instead of allocating a second output or a dummy buffer.
-  torch::Tensor& masked_buffer = mask_out_rejected_tokens ? masked : full;
   entry->fn(reinterpret_cast<uint8_t*>(draft.data_ptr()),
             reinterpret_cast<uint8_t*>(target.data_ptr()),
             reinterpret_cast<uint8_t*>(bonus.data_ptr()),
-            reinterpret_cast<uint8_t*>(full.data_ptr()),
-            reinterpret_cast<uint8_t*>(masked_buffer.data_ptr()),
+            reinterpret_cast<uint8_t*>(masked.data_ptr()),
             static_cast<int32_t>(batch),
             static_cast<int32_t>(width),
             static_cast<int32_t>(draft.stride(0)),
@@ -168,9 +158,8 @@ std::tuple<torch::Tensor, torch::Tensor> greedy_prefix_verify(
             static_cast<int32_t>(target.stride(0)),
             static_cast<int32_t>(target.stride(1)),
             static_cast<int32_t>(bonus.stride(0)),
-            static_cast<int32_t>(mask_out_rejected_tokens),
             stream.stream());
-  return {full, masked};
+  return masked;
 }
 
 }  // namespace xllm::kernel::npu::tilelang

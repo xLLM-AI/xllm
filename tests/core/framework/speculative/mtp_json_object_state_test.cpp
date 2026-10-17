@@ -242,16 +242,16 @@ TEST(MtpJsonObjectStateTest, ReportsFirstAcceptedOutputMismatchPerSequence) {
   EXPECT_EQ(mismatches[0].committed_tokens, 2u);
 }
 
-TEST(MtpJsonObjectStateTest, AcceptedOutputOnlyUsesMinusOneAsPadding) {
+TEST(MtpJsonObjectStateTest, AcceptedOutputStopsAtAnyNegativePadding) {
   JsonObjectGrammar grammar = make_mtp_grammar();
   const std::vector<JsonObjectGrammarState> initial_states = {
       grammar.initial_state()};
   const int64_t accepted_tokens[] = {0, -2};
 
-  EXPECT_DEATH(
+  const std::vector<detail::JsonAcceptedTokenMismatch> mismatches =
       detail::find_json_accepted_token_mismatches(
-          initial_states, accepted_tokens, /*num_rows=*/1, /*row_width=*/2),
-      "padding must use -1");
+          initial_states, accepted_tokens, /*num_rows=*/1, /*row_width=*/2);
+  EXPECT_TRUE(mismatches.empty());
 }
 
 TEST(MtpJsonObjectStateTest, CopiesContiguousHostDraftTokensInBulk) {

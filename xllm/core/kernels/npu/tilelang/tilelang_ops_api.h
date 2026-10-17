@@ -30,17 +30,13 @@ namespace xllm::kernel::npu::tilelang {
 
 // Verify greedy token IDs without changing input layouts. Each input is int32
 // or int64 with values representable as int32. The device kernel converts int64
-// IDs in UB; full and masked are int32. Inputs are on the same NPU:
+// IDs in UB; the output is int32. Inputs are on the same NPU:
 // draft/target [batch, width], bonus [batch, 1].
-// full contains every target ID followed by bonus. masked keeps the first
-// rejected target as the replacement and fills the remaining positions with -1.
-// When masking is disabled, the second output is undefined and is not
-// allocated.
-std::tuple<torch::Tensor, torch::Tensor> greedy_prefix_verify(
-    const torch::Tensor& draft,
-    const torch::Tensor& target,
-    const torch::Tensor& bonus,
-    bool mask_out_rejected_tokens);
+// The first rejected position holds the target token as its replacement;
+// every later position (including the bonus slot) is -1.
+torch::Tensor greedy_prefix_verify(const torch::Tensor& draft,
+                                   const torch::Tensor& target,
+                                   const torch::Tensor& bonus);
 
 // One byte arena: contiguous int64 [B,K+1] IDs followed by int32 [B] counts.
 // Both views share the same snapshot/Host lease; no pack copy is required.

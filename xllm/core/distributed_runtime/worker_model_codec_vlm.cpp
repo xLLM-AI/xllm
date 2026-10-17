@@ -262,7 +262,7 @@ bool encode_vlm_output(
       pb_seq_out->mutable_tokens()->Reserve(num_tokens);
       for (int32_t i = 0; i < num_tokens; ++i) {
         const Token token = output.sample_output.token_at(output_idx, i);
-        if (token.id == -1) {
+        if (token.id < 0) {
           break;
         }
         const auto token_embeddings =

@@ -1764,8 +1764,8 @@ TEST(BatchTest, ReorderedMtpAcceptedRowsCommitToOwningSequences) {
                                      /*logprobs=*/false,
                                      /*max_top_logprobs=*/0);
   DraftProposal draft_proposal = DraftProposal(draft_token_ids);
-  const SampleOutput accepted_output = rejection_sampler.forward(
-      draft_proposal, target_logits, /*mask_out_rejected_tokens=*/true);
+  const SampleOutput accepted_output =
+      rejection_sampler.forward(draft_proposal, target_logits);
   EXPECT_TRUE(torch::equal(
       accepted_output.next_tokens,
       torch::tensor({{10, 11, 12, 13, 14, 15}, {0, 1, 2, -1, -1, -1}},

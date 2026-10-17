@@ -188,7 +188,7 @@ class UnifiedBlockAclGraph:
         self.tokens.copy_(target_tokens.masked_fill(self.offsets > matched[:, None], -1))
         # Match block task consensus before publishing accepted context on any rank.
         self.synchronize_tokens(self.tokens)
-        accepted = self.tokens != -1
+        accepted = self.tokens >= 0
         self.lengths.copy_(accepted.sum(dim=1, dtype=torch.int32))
         slots = self.target_metadata.slot_mapping[: batch * width].masked_fill(~accepted.flatten(), -1)
         self.activate_draft()

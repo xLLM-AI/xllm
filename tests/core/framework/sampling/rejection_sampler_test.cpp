@@ -90,16 +90,8 @@ TEST(RejectionSamplerTest, Basic) {
   auto bonus_token_ids = torch::tensor({{5}}, options.dtype(torch::kInt64));
   DraftProposal draft_proposal = DraftProposal(draft_token_ids, draft_probs);
 
-  auto [output, masked_output] =
-      RejectionSampler::random_sample(draft_proposal,
-                                      target_probs,
-                                      uniform_rand,
-                                      bonus_token_ids,
-                                      /*mask_out_rejected_tokens=*/true);
-  auto desired_output =
-      torch::tensor({{1, 2, 2, 5}}, options.dtype(torch::kInt64));
-  EXPECT_TRUE(torch::allclose(output, desired_output));
-
+  auto masked_output = RejectionSampler::random_sample(
+      draft_proposal, target_probs, uniform_rand, bonus_token_ids);
   auto desired_masked_output =
       torch::tensor({{1, 2, 2, -1}}, options.dtype(torch::kInt64));
   EXPECT_TRUE(torch::allclose(masked_output, desired_masked_output));
@@ -121,16 +113,8 @@ TEST(RejectionSamplerTest, GreedyDraftUsesDeltaProposalDistribution) {
       torch::tensor({{2}}, options.dtype(torch::kInt64));
   DraftProposal draft_proposal = DraftProposal(draft_token_ids);
 
-  auto [output, masked_output] =
-      RejectionSampler::random_sample(draft_proposal,
-                                      target_probs,
-                                      uniform_rand,
-                                      bonus_token_ids,
-                                      /*mask_out_rejected_tokens=*/true);
-  auto desired_output =
-      torch::tensor({{0, 2, 0, 1, 2}}, options.dtype(torch::kInt64));
-  EXPECT_TRUE(torch::allclose(output, desired_output));
-
+  auto masked_output = RejectionSampler::random_sample(
+      draft_proposal, target_probs, uniform_rand, bonus_token_ids);
   auto desired_masked_output =
       torch::tensor({{0, 2, -1, -1, -1}}, options.dtype(torch::kInt64));
   EXPECT_TRUE(torch::allclose(masked_output, desired_masked_output));
@@ -160,42 +144,25 @@ TEST(RejectionSamplerTest, Mask) {
 
 TEST(RejectionSamplerTest, Greedy) {
   const auto options = get_test_options(torch::kFloat32);
-  const auto device = get_test_device();
 
   int64_t batch_size = 2;
   int64_t n_speculative_tokens = 3;
   int64_t vocab_size = 4;
   int64_t n_bonus_tokens = 1;
 
-  const auto draft_token_ids =
-      torch::randint(0,
-                     vocab_size,
-                     {batch_size, n_speculative_tokens},
-                     torch::dtype(torch::kInt64).device(device));
-
-  // Greedy forward derives the bonus from the last logits column, so the
-  // expectations compare draft columns against argmax and the bonus column
-  // against that same column's argmax.
-  const RejectionSampler sampler =
-      make_greedy_rejection_sampler(batch_size, torch::kCPU);
   torch::Tensor full_logits = torch::randn(
       {batch_size, n_speculative_tokens + n_bonus_tokens, vocab_size}, options);
-  SampleOutput output = sampler.forward(DraftProposal(draft_token_ids),
-                                        full_logits,
-                                        /*mask_out_rejected_tokens=*/false);
+  const auto draft_token_ids =
+      full_logits.argmax(/*dim=*/-1)
+          .slice(/*dim=*/-1, /*start=*/0, /*end=*/n_speculative_tokens);
 
-  const auto desired_output = full_logits.argmax(/*dim=*/-1);
+  const RejectionSampler sampler =
+      make_greedy_rejection_sampler(batch_size, torch::kCPU);
+  SampleOutput output =
+      sampler.forward(DraftProposal(draft_token_ids), full_logits);
 
-  // check target tokens
-  EXPECT_TRUE(torch::allclose(
-      output.next_tokens.slice(
-          /*dim=*/-1, /*start=*/0, /*end=*/n_speculative_tokens),
-      desired_output.slice(
-          /*dim=*/-1, /*start=*/0, /*end=*/n_speculative_tokens)));
-  // check bonus tokens
-  EXPECT_TRUE(torch::allclose(
-      output.next_tokens.slice(/*dim=*/-1, /*start=*/n_speculative_tokens),
-      desired_output.slice(/*dim=*/-1, /*start=*/n_speculative_tokens)));
+  EXPECT_TRUE(
+      torch::allclose(output.next_tokens, full_logits.argmax(/*dim=*/-1)));
 }
 
 TEST(RejectionSamplerTest, GreedyFromTokenIds) {
@@ -216,9 +183,8 @@ TEST(RejectionSamplerTest, GreedyFromTokenIds) {
     target_logits.index_put_({row, 3, bonus_token_ids.index({row, 0})}, 10.0f);
   }
   const RejectionSampler sampler = make_greedy_rejection_sampler(2, device);
-  SampleOutput output = sampler.forward(DraftProposal(draft_token_ids),
-                                        target_logits,
-                                        /*mask_out_rejected_tokens=*/true);
+  SampleOutput output =
+      sampler.forward(DraftProposal(draft_token_ids), target_logits);
 
   EXPECT_TRUE(
       torch::equal(output.next_tokens,
@@ -238,8 +204,7 @@ TEST(RejectionSamplerTest, GreedyForwardAllowsUndefinedDraftProbs) {
                                              {0.0f, 4.0f, 1.0f, 2.0f, 3.0f}}},
                                            options);
   DraftProposal draft_proposal = DraftProposal(draft_token_ids);
-  SampleOutput output = sampler.forward(
-      draft_proposal, target_logits, /*mask_out_rejected_tokens=*/true);
+  SampleOutput output = sampler.forward(draft_proposal, target_logits);
 
   EXPECT_TRUE(torch::equal(output.next_tokens,
                            torch::tensor({{1, 3, -1}, {3, 4, 1}}, device)));
@@ -256,9 +221,8 @@ TEST(RejectionSamplerTest, GreedyRejectsGrammarMaskedDraftToken) {
       torch::tensor({{{0.0F, 1.0F, 0.0F}, {0.0F, 0.0F, 2.0F}}}, options);
   const RejectionSampler sampler =
       make_greedy_rejection_sampler(1, torch::kCPU);
-  SampleOutput output = sampler.forward(DraftProposal(draft_token_ids),
-                                        target_logits,
-                                        /*mask_out_rejected_tokens=*/true);
+  SampleOutput output =
+      sampler.forward(DraftProposal(draft_token_ids), target_logits);
 
   const auto expected_masked_output =
       torch::tensor({{1, -1}}, options.dtype(torch::kInt64));
@@ -278,18 +242,11 @@ TEST(RejectionSamplerTest, RandomRejectsGrammarMaskedDraftToken) {
       torch::tensor({{2}}, options.dtype(torch::kInt64));
 
   DraftProposal draft_proposal = DraftProposal(draft_token_ids, draft_probs);
-  auto [output, masked_output] =
-      RejectionSampler::random_sample(draft_proposal,
-                                      target_probs,
-                                      uniform_rand,
-                                      bonus_token_ids,
-                                      /*mask_out_rejected_tokens=*/true);
+  auto masked_output = RejectionSampler::random_sample(
+      draft_proposal, target_probs, uniform_rand, bonus_token_ids);
 
-  const auto expected_output =
-      torch::tensor({{1, 2}}, options.dtype(torch::kInt64));
   const auto expected_masked_output =
       torch::tensor({{1, -1}}, options.dtype(torch::kInt64));
-  EXPECT_TRUE(torch::equal(output, expected_output));
   EXPECT_TRUE(torch::equal(masked_output, expected_masked_output));
 }
 
@@ -308,8 +265,7 @@ TEST(RejectionSamplerTest, RandomForwardUsesGreedyDraftWithoutDraftProbs) {
                                              {-1000.0f, -1000.0f, 1000.0f},
                                              {1000.0f, -1000.0f, -1000.0f}}},
                                            options);
-  auto output = sampler.forward(
-      draft_proposal, target_logits, /*mask_out_rejected_tokens=*/true);
+  auto output = sampler.forward(draft_proposal, target_logits);
 
   EXPECT_TRUE(
       torch::equal(output.next_tokens, torch::tensor({{1, 2, 0}}, device)));
@@ -326,17 +282,12 @@ TEST(RejectionSamplerTest, RandomFallsBackToUniformOnDegenerateResidual) {
   const auto uniform_rand = torch::tensor({{1.0f}}, options);
   DraftProposal draft_proposal = DraftProposal(draft_token_ids, draft_probs);
   const auto bonus_token_ids = torch::tensor({{5}}, device);
-  auto [output, masked_output] =
-      RejectionSampler::random_sample(draft_proposal,
-                                      target_probs,
-                                      uniform_rand,
-                                      bonus_token_ids,
-                                      /*mask_out_rejected_tokens=*/true);
+  auto masked_output = RejectionSampler::random_sample(
+      draft_proposal, target_probs, uniform_rand, bonus_token_ids);
 
-  const auto resampled = output.index({0, 0}).item<int64_t>();
+  const auto resampled = masked_output.index({0, 0}).item<int64_t>();
   EXPECT_GE(resampled, 0);
   EXPECT_LT(resampled, vocab_size);
-  EXPECT_EQ(masked_output.index({0, 0}).item<int64_t>(), resampled);
   EXPECT_EQ(masked_output.index({0, 1}).item<int64_t>(), -1);
 }
 
@@ -373,17 +324,19 @@ TEST(RejectionSamplerTest, LogProbs) {
                      torch::dtype(torch::kInt64).device(device));
 
   DraftProposal draft_proposal = DraftProposal(draft_token_ids, draft_probs);
-  auto output = sampler.forward(
-      draft_proposal, target_logits, /*mask_out_rejected_tokens=*/false);
+  auto output = sampler.forward(draft_proposal, target_logits);
 
   const auto logprobs =
       torch::log_softmax(target_logits, /*dim=*/-1, /*dtype=*/torch::kFloat32);
   const auto selected_tokens = output.next_tokens;
 
-  const auto selected_logprobs =
-      logprobs.gather(/*dim=*/-1, selected_tokens.unsqueeze(/*dim=*/-1))
+  auto expected_logprobs =
+      logprobs
+          .gather(/*dim=*/-1,
+                  selected_tokens.clamp_min(0).unsqueeze(/*dim=*/-1))
           .squeeze(/*dim=*/-1);
-  EXPECT_TRUE(torch::equal(output.logprobs, selected_logprobs));
+  expected_logprobs.masked_fill_(selected_tokens.lt(0), 0);
+  EXPECT_TRUE(torch::equal(output.logprobs, expected_logprobs));
 
   auto [top_k_values, top_k_indices] = logprobs.topk(
       max_top_logprobs, /*dim=*/-1, /*largest=*/true, /*sorted=*/true);
@@ -463,20 +416,15 @@ TEST(RejectionSamplerTest, Random) {
 
   auto uniform_rand = torch::rand(draft_token_ids.sizes(), options);
   DraftProposal draft_proposal = DraftProposal(draft_token_ids, draft_probs);
-  auto [output, masked_output] = RejectionSampler::random_sample(
-      draft_proposal, target_probs, uniform_rand, bonus_token_ids, false);
-  EXPECT_FALSE(masked_output.defined());
+  auto output = RejectionSampler::random_sample(
+      draft_proposal, target_probs, uniform_rand, bonus_token_ids);
 
-  // remove bonus token
-  auto token_ids = output
-                       .slice(/*dim=*/-1,
-                              /*start=*/0,
-                              /*end=*/-1)
-                       .flatten();
+  auto accepted_ids = output.slice(/*dim=*/-1, /*start=*/0, /*end=*/-1);
+  accepted_ids = accepted_ids.masked_select(accepted_ids.ge(0));
 
   // calculate the probability of each sampled token
-  auto bincount = token_ids.bincount(/*weights=*/torch::nullopt,
-                                     /*minlength=*/vocab_size);
+  auto bincount = accepted_ids.bincount(/*weights=*/torch::nullopt,
+                                        /*minlength=*/vocab_size);
   auto sample_prob = bincount.to(torch::kFloat) / num_samples;
 
   EXPECT_TRUE(torch::allclose(target_prob,
