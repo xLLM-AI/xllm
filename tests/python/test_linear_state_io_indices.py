@@ -97,13 +97,22 @@ def test_chunked_prefill_accepts_distinct_read_and_write_indices() -> None:
 
 def test_decode_rejects_distinct_read_and_write_indices() -> None:
     read_indices = torch.tensor([2], dtype=torch.int32)
-    write_indices = torch.tensor([3], dtype=torch.int32)
+    write_indices = read_indices.clone()
+
+    resolved_read_indices, resolved_write_indices = _resolve_linear_state_io_indices(
+        _metadata(write_indices, read_indices, is_prefill=False)
+    )
+
+    assert resolved_read_indices is write_indices
+    assert resolved_write_indices is write_indices
 
     with pytest.raises(
         RuntimeError,
         match="read/write separation is only supported for non-speculative prefill",
     ):
-        _resolve_linear_state_io_indices(_metadata(write_indices, read_indices, is_prefill=False))
+        _resolve_linear_state_io_indices(
+            _metadata(torch.tensor([3], dtype=torch.int32), read_indices, is_prefill=False)
+        )
 
 
 def test_spec_verify_rejects_distinct_read_and_write_indices() -> None:

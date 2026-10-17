@@ -50,6 +50,8 @@ class VLMEngine : public Engine {
     return distributed_worker_manager_;
   }
 
+  runtime::DecodeGraphWarmupConfig decode_graph_warmup_config() const override;
+
   bool init(MasterStatus master_status) override;
 
   void update_last_step_result(BatchGroup& batch);

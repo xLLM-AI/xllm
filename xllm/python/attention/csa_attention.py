@@ -64,6 +64,88 @@ HEAVILY_COMPRESSED_ATTENTION = "heavily_compressed_attention"
 # Sparse mask modes used by C++ DSAttentionImpl (rightDownCausal variants).
 _MASK_MODE_RIGHT_DOWN_CAUSAL = 3
 _MASK_MODE_COMPRESS = 4
+_DSPARK_SWA_INDEX_ALIGNMENT = 128
+
+
+def _uses_prefill_attention(metadata: AttentionMetadata) -> bool:
+    """Match the runtime's full/chunked prefill contract on dummy ranks."""
+    is_prefill = bool(getattr(metadata, "is_prefill", False))
+    is_chunked_prefill = bool(getattr(metadata, "is_chunked_prefill", False))
+    is_dummy = bool(getattr(metadata, "is_dummy", False))
+    return is_chunked_prefill or (is_prefill and not is_dummy)
+
+
+def _deepseek_v4_ori_window_left(
+    window_size: int,
+    dspark_block_size: int,
+    use_native_dspark_sas: bool,
+) -> int:
+    if use_native_dspark_sas and dspark_block_size > 0:
+        return max(window_size + dspark_block_size - 1, 0)
+    return max(window_size - 1, 0)
+
+
+def _build_dspark_swa_indices(
+    block_table: torch.Tensor,
+    query_cu_seq_lens: torch.Tensor,
+    seq_lens: torch.Tensor,
+    window_size: int,
+    dspark_block_size: int,
+    cache_block_size: int,
+) -> torch.Tensor:
+    """Build the explicit ring-buffer slots consumed by native DSpark SAS."""
+    if block_table.dim() != 2 or block_table.size(1) <= 0:
+        raise ValueError("Native DSpark SAS requires a non-empty two-dimensional block table")
+    if query_cu_seq_lens.dim() != 1 or query_cu_seq_lens.numel() < 2:
+        raise ValueError("Native DSpark SAS requires cumulative query lengths")
+    if cache_block_size <= 0:
+        raise ValueError("Native DSpark SAS requires cache_block_size > 0")
+
+    device = block_table.device
+    query_cu_seq_lens = query_cu_seq_lens.to(device=device, dtype=torch.int64)
+    seq_lens = seq_lens.to(device=device, dtype=torch.int64)
+    query_lens = query_cu_seq_lens[1:] - query_cu_seq_lens[:-1]
+    if query_lens.numel() != block_table.size(0) or seq_lens.numel() != block_table.size(0):
+        raise ValueError("Native DSpark SAS sequence metadata batch size mismatch")
+
+    prefix_lens = seq_lens - query_lens
+    start_positions = (prefix_lens - window_size).clamp_min(0)
+    visible_lens = seq_lens - start_positions
+    minimum_width = window_size + dspark_block_size
+    index_width = (minimum_width + _DSPARK_SWA_INDEX_ALIGNMENT - 1) // _DSPARK_SWA_INDEX_ALIGNMENT
+    index_width *= _DSPARK_SWA_INDEX_ALIGNMENT
+
+    columns = torch.arange(index_width, dtype=torch.int64, device=device)
+    valid = columns.unsqueeze(0) < visible_lens.unsqueeze(1)
+    positions = start_positions.unsqueeze(1) + columns.unsqueeze(0)
+    logical_block_columns = torch.div(positions, cache_block_size, rounding_mode="floor")
+
+    # DsaMetadataBuilder expands an SWA ring into logical block-table columns
+    # and right-aligns the retained physical blocks. Positions just before the
+    # retained range still wrap into those blocks, so taking modulo by the
+    # expanded table width would incorrectly select its -1 padding.
+    valid_block_counts = block_table.ge(0).sum(dim=1, dtype=torch.int64)
+    safe_block_counts = valid_block_counts.clamp_min(1)
+    logical_block_counts = torch.div(
+        seq_lens + cache_block_size - 1,
+        cache_block_size,
+        rounding_mode="floor",
+    )
+    first_retained_columns = (logical_block_counts - valid_block_counts).clamp_min(0)
+    expanded_block_columns = first_retained_columns.unsqueeze(1) + (
+        logical_block_columns - first_retained_columns.unsqueeze(1)
+    ).remainder(safe_block_counts.unsqueeze(1))
+    raw_block_columns = logical_block_columns.remainder(safe_block_counts.unsqueeze(1))
+    uses_expanded_layout = logical_block_counts <= block_table.size(1)
+    block_columns = torch.where(
+        uses_expanded_layout.unsqueeze(1),
+        expanded_block_columns,
+        raw_block_columns,
+    ).clamp(max=block_table.size(1) - 1)
+    block_ids = block_table.to(torch.int64).gather(1, block_columns)
+    slot_ids = block_ids * cache_block_size + positions.remainder(cache_block_size)
+    slot_ids = torch.where(valid & block_ids.ge(0), slot_ids, torch.full_like(slot_ids, -1))
+    return torch.repeat_interleave(slot_ids, query_lens, dim=0).to(torch.int32).unsqueeze(1)
 
 
 def _attention_type_for_compress_ratio(compress_ratio: int) -> str:
@@ -112,6 +194,8 @@ class DsaAttentionBackend(AttentionBackend):
         rope_head_dim: int,
         device: torch.device,
         dtype: torch.dtype,
+        dspark_block_size: int = 0,
+        dspark_use_native_sas: bool = False,
     ) -> None:
         self.caches_info, self.group_infos = build_cache_specs(compress_ratios, window_size, n_layers)
         self._builder = DsaMetadataBuilder(self.caches_info, self.group_infos)
@@ -125,9 +209,22 @@ class DsaAttentionBackend(AttentionBackend):
         self.device = device
         self.dtype = dtype
         self.scale = attn_head_dim**-0.5
+        self.dspark_block_size = dspark_block_size
+        self.dspark_use_native_sas = dspark_use_native_sas
+        self._dspark_swa_location: tuple[int, int, int] | None = None
+        for layer_id, layer_caches in enumerate(self.caches_info):
+            for cache_id, cache_info in enumerate(layer_caches):
+                if cache_info.cache_type == DSA_CACHE_SLIDING_WINDOW:
+                    self._dspark_swa_location = (layer_id, cache_id, cache_info.block_size)
+                    break
+            if self._dspark_swa_location is not None:
+                break
 
         self._kv_caches: list[LayerCache] = []
         self._metadata: AttentionMetadata | None = None
+
+    def _use_native_sas(self, use_prefill: bool) -> bool:
+        return self.dspark_use_native_sas and self.dspark_block_size > 0 and not use_prefill
 
     # -- AttentionBackend interface -----------------------------------------
 
@@ -271,7 +368,7 @@ class DsaAttentionBackend(AttentionBackend):
             kv_seq_lens=kv_seq_lens,
             q_seq_lens=q_seq_lens,
             positions=positions,
-            is_prefill=metadata.is_prefill and not is_dummy,
+            is_prefill=_uses_prefill_attention(metadata),
             is_chunked_prefill=metadata.is_chunked_prefill,
             new_cache_slots=new_cache_slots,
             enable_graph=enable_graph,
@@ -285,7 +382,7 @@ class DsaAttentionBackend(AttentionBackend):
         else:
             self._populate_compressed_attention_rope(compressed_metadata, metadata)
         self._move_metadata_to_device(compressed_metadata)
-        self._build_precomputed_metadata(compressed_metadata)
+        self._build_precomputed_metadata(compressed_metadata, metadata)
         return compressed_metadata
 
     def _build_empty_dp_block_tables(
@@ -388,7 +485,6 @@ class DsaAttentionBackend(AttentionBackend):
             if copied_fields.get(target_id) != source_id:
                 cls._copy_graph_tensor(target, source, field_name)
                 copied_fields[target_id] = source_id
-
         if len(persistent.block_tables) != len(refreshed.block_tables):
             raise RuntimeError("ACL graph DSA block-table layer count changed")
         if len(persistent.slot_mappings) != len(refreshed.slot_mappings):
@@ -406,6 +502,12 @@ class DsaAttentionBackend(AttentionBackend):
                     if copied.get(target_id) != source_id:
                         cls._copy_graph_tensor(target, source, f"{name}[{index}]", pad_value=-1)
                         copied[target_id] = source_id
+        cls._copy_graph_tensor(
+            getattr(persistent, "explicit_swa_indices", None),
+            getattr(refreshed, "explicit_swa_indices", None),
+            "explicit_swa_indices",
+            pad_value=-1,
+        )
 
         if persistent.input_rope_by_ratio.keys() != refreshed.input_rope_by_ratio.keys():
             raise RuntimeError("ACL graph DSA RoPE ratio set changed")
@@ -416,6 +518,7 @@ class DsaAttentionBackend(AttentionBackend):
 
         persistent.max_query_len = refreshed.max_query_len
         persistent.max_seq_len = refreshed.max_seq_len
+        persistent.sparse_metadata_ori_win_left = getattr(refreshed, "sparse_metadata_ori_win_left", -1)
         persistent.is_acl_graph = refreshed.is_acl_graph
         persistent.precomputed_metadata_inputs = refreshed.precomputed_metadata_inputs
 
@@ -494,7 +597,13 @@ class DsaAttentionBackend(AttentionBackend):
         # The CP context retains global RoPE pairs before this map is rebuilt for local queries.
         dsa.input_rope_by_ratio = self._build_dsa_rope_metadata(dsa, metadata)
 
-        self._build_precomputed_metadata(dsa)
+        self._build_precomputed_metadata(
+            dsa,
+            metadata,
+            cu_seqlens_ori_kv_override=cp_context.local_kv_cu_seq_lens.to(device),
+            max_query_len_override=local_q_max,
+            max_seq_len_override=local_kv_max,
+        )
 
     def prepare_csa_metadata_for_forward(
         self,
@@ -641,8 +750,7 @@ class DsaAttentionBackend(AttentionBackend):
         attention_type = _attention_type_for_compress_ratio(compress_ratio)
         mapping = self._resolve_cache_mapping(layer_id, compress_ratio)
         layer_cache = self._kv_caches[layer_id]
-        is_dummy = bool(getattr(metadata, "is_dummy", False))
-        is_prefill = metadata.is_prefill and not is_dummy
+        is_prefill = _uses_prefill_attention(metadata)
         is_chunked_prefill = metadata.is_chunked_prefill
         use_temporary_prefill_kv = is_prefill and not is_chunked_prefill
         # 1) Prepare ori_kv for attention (mirrors C++ :790-816).
@@ -706,7 +814,7 @@ class DsaAttentionBackend(AttentionBackend):
         # chunked prefill pass query cu-seqlens, while decode leaves
         # cu_seqlens_ori_kv as std::nullopt. A defined empty tensor selects a
         # different ACL optional-input path and causes small decode drift.
-        use_prefill_attn = is_prefill or is_chunked_prefill
+        use_prefill_attn = is_prefill
         if use_prefill_attn:
             # C++ uses the local KV window cumsum under prefill CP, and the
             # query cumsum otherwise. This must match the value baked into the
@@ -717,11 +825,24 @@ class DsaAttentionBackend(AttentionBackend):
         sinks = getattr(layer, "attn_sink", None) if getattr(layer, "attn_sink_loaded", False) else None
         if sinks is not None:
             sinks = sinks.to(q.device, dtype=torch.float32).contiguous()
+        use_native_sas = self._use_native_sas(use_prefill_attn)
+        ori_win_left = _deepseek_v4_ori_window_left(
+            self.window_size,
+            self.dspark_block_size,
+            use_native_sas,
+        )
+        if getattr(compressed_metadata, "sparse_metadata_ori_win_left", ori_win_left) != ori_win_left:
+            raise RuntimeError("DeepSeek-V4 sparse metadata belongs to incompatible model geometry")
+        ori_sparse_indices = None
+        if use_native_sas and compress_ratio == 1:
+            ori_sparse_indices = getattr(compressed_metadata, "explicit_swa_indices", None)
+            if ori_sparse_indices is None:
+                raise RuntimeError("Native DeepSeek-V4 DSpark requires precomputed SWA indices")
         out, _lse = _sparse_attn_sharedkv(
             q=q,
             ori_kv=ori_kv_for_attn,
             cmp_kv=cmp_kv if compress_ratio > 1 else None,
-            ori_sparse_indices=None,
+            ori_sparse_indices=ori_sparse_indices,
             cmp_sparse_indices=compress_topk_idxs,
             ori_block_table=ori_block_table_for_attn,
             cmp_block_table=cmp_block_table if compress_ratio > 1 else None,
@@ -740,7 +861,7 @@ class DsaAttentionBackend(AttentionBackend):
             cmp_ratio=compress_ratio,
             ori_mask_mode=_MASK_MODE_COMPRESS,
             cmp_mask_mode=_MASK_MODE_RIGHT_DOWN_CAUSAL,
-            ori_win_left=self.window_size - 1,
+            ori_win_left=ori_win_left,
             ori_win_right=0,
             layout_q="TND",
             layout_kv="PA_ND",
@@ -866,7 +987,38 @@ class DsaAttentionBackend(AttentionBackend):
             mapping.index_score_state_cache_idx = swa_indices[4]
         return mapping
 
-    def _build_precomputed_metadata(self, compressed_metadata: DsaMetadata) -> None:
+    def _build_dspark_swa_metadata(self, compressed_metadata: DsaMetadata) -> None:
+        compressed_metadata.explicit_swa_indices = None
+        if not self._use_native_sas(use_prefill=False):
+            return
+        if self._dspark_swa_location is None:
+            raise RuntimeError("Native DeepSeek-V4 DSpark requires an SWA block table")
+        layer_id, cache_id, cache_block_size = self._dspark_swa_location
+        if layer_id >= len(compressed_metadata.block_tables):
+            return
+        layer_block_tables = compressed_metadata.block_tables[layer_id]
+        if cache_id >= len(layer_block_tables):
+            return
+        block_table = layer_block_tables[cache_id]
+        if block_table is None or block_table.numel() == 0:
+            return
+        compressed_metadata.explicit_swa_indices = _build_dspark_swa_indices(
+            block_table,
+            compressed_metadata.actual_seq_lengths_query,
+            compressed_metadata.actual_seq_lengths_kv,
+            self.window_size,
+            self.dspark_block_size,
+            cache_block_size,
+        )
+
+    def _build_precomputed_metadata(
+        self,
+        compressed_metadata: DsaMetadata,
+        metadata: AttentionMetadata | None = None,
+        cu_seqlens_ori_kv_override: torch.Tensor | None = None,
+        max_query_len_override: int | None = None,
+        max_seq_len_override: int | None = None,
+    ) -> None:
         """Build the AICPU tiling metadata for each compress ratio present.
 
         Mirrors the C++ ``build_precomputed_metadata`` step: one
@@ -877,17 +1029,25 @@ class DsaAttentionBackend(AttentionBackend):
 
         seq_q = compressed_metadata.actual_seq_lengths_query
         seq_kv = compressed_metadata.actual_seq_lengths_kv
-        batch_size = max(seq_kv.numel(), 1)
-        max_q = compressed_metadata.max_query_len
-        max_kv = compressed_metadata.max_seq_len
-        is_prefill = max_q > 1
+        batch_size = int(max(compressed_metadata.actual_seq_lengths_kv.numel(), 1))
+        max_q = compressed_metadata.max_query_len if max_query_len_override is None else max_query_len_override
+        max_kv = compressed_metadata.max_seq_len if max_seq_len_override is None else max_seq_len_override
+        is_prefill = _uses_prefill_attention(metadata) if metadata is not None else False
+        if is_prefill:
+            compressed_metadata.explicit_swa_indices = None
+        else:
+            self._build_dspark_swa_metadata(compressed_metadata)
         empty_int32 = torch.empty(0, dtype=torch.int32, device=self.device)
         cu_seqlens_ori_kv = empty_int32
         if is_prefill:
             cu_seqlens_ori_kv = (
-                compressed_metadata.kv_cu_seq_lens
-                if getattr(compressed_metadata, "v4_cp_context", None) is not None
-                else seq_q
+                cu_seqlens_ori_kv_override
+                if cu_seqlens_ori_kv_override is not None
+                else (
+                    compressed_metadata.kv_cu_seq_lens
+                    if getattr(compressed_metadata, "v4_cp_context", None) is not None
+                    else seq_q
+                )
             )
         # Metadata kernels enqueue asynchronously. Retain their tensor inputs
         # on the current forward's DsaMetadata, as C++ DSAMetadata does.
@@ -897,6 +1057,12 @@ class DsaAttentionBackend(AttentionBackend):
             cu_seqlens_ori_kv,
             empty_int32,
         )
+        ori_win_left = _deepseek_v4_ori_window_left(
+            self.window_size,
+            self.dspark_block_size,
+            self._use_native_sas(is_prefill),
+        )
+        compressed_metadata.sparse_metadata_ori_win_left = ori_win_left
         for ratio in (1, 4, 128):
             sparse_metadata = kernels.sparse_attn_sharedkv_metadata(
                 num_heads_q=self.num_heads,
@@ -915,7 +1081,7 @@ class DsaAttentionBackend(AttentionBackend):
                 cmp_ratio=ratio,
                 ori_mask_mode=_MASK_MODE_COMPRESS,
                 cmp_mask_mode=_MASK_MODE_RIGHT_DOWN_CAUSAL,
-                ori_win_left=max(self.window_size - 1, 0),
+                ori_win_left=ori_win_left,
                 ori_win_right=0,
                 layout_q="TND",
                 layout_kv="PA_ND",
@@ -1039,14 +1205,13 @@ def _build_prefill_pa_nd_kv(
     next_block = 1
     for req in range(batch_size):
         q_start = cu[req]
-        src_len = cu[req + 1] - q_start
         q_len = dst_lens[req]
         blocks = (q_len + block_size - 1) // block_size
         if q_len <= 0 or blocks <= 0:
             continue
         for j in range(blocks):
             table_data[req * table_cols + j] = next_block + j
-        copy_len = min(q_len, src_len)
+        copy_len = min(q_len, cu[req + 1] - q_start)
         if copy_len > 0:
             target = packed_kv[next_block : next_block + blocks].view(blocks * block_size, kv.size(1), kv.size(2))
             target[q_len - copy_len : q_len].copy_(kv[q_start : q_start + copy_len])

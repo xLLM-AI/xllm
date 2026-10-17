@@ -45,9 +45,10 @@ class LayerCache:
     """Every cache a layer may own, named rather than positional.
 
     A layer holds a subset: full attention uses ``key``/``value``, the MLA
-    sparse indexer adds ``index``, and a linear-attention layer uses
-    ``conv``/``ssm`` instead of K/V. An absent slot is ``None`` rather than an
-    empty tensor, so a layer that reads the wrong slot fails loudly.
+    sparse indexer adds ``index`` and optionally ``kpool_tail``, and a
+    linear-attention layer uses ``conv``/``ssm`` instead of K/V. An absent
+    slot is ``None`` rather than an empty tensor, so a layer that reads the
+    wrong slot fails loudly.
     """
 
     key: torch.Tensor | None
@@ -63,6 +64,7 @@ class LayerCache:
     compress_index_kv_state: torch.Tensor | None = None
     compress_index_score_state: torch.Tensor | None = None
     indexer_scale: torch.Tensor | None = None
+    kpool_tail: torch.Tensor | None = None
 
     @property
     def index_scale(self) -> torch.Tensor | None:
@@ -83,6 +85,7 @@ _LAYER_CACHE_SLOTS = (
     "compress_index_kv_state",
     "compress_index_score_state",
     "indexer_scale",
+    "kpool_tail",
 )
 
 LayerCacheInput = LayerCache | tuple[torch.Tensor | None, ...]
@@ -111,6 +114,7 @@ class AttentionMetadata(Protocol):
     paged_kv_last_page_len: torch.Tensor
     qo_indptr: torch.Tensor | None
     q_cu_seq_lens: torch.Tensor | None
+    q_cu_seq_lens_host_values: list[int] | None
     kv_cu_seq_lens: torch.Tensor | None
     kv_seq_lens_host: torch.Tensor | None
     kv_seq_lens_host_values: list[int] | None
@@ -134,6 +138,7 @@ class AttentionMetadata(Protocol):
     linear_state_indices: torch.Tensor | None
     linear_state_read_indices: torch.Tensor | None
     linear_state_write_indices: torch.Tensor | None
+    kpool_query_lens: Sequence[int]
     has_initial_state: torch.Tensor | None
     dp_execution_token_counts: Sequence[int]
     raw_dp_execution_token_counts: Sequence[int]
@@ -172,8 +177,12 @@ def resolve_linear_state_io_indices(
             f"read={tuple(read_indices.shape)}, write={tuple(write_indices.shape)}"
         )
     is_prefill = metadata.is_prefill or metadata.is_chunked_prefill
-    if (not is_prefill or getattr(metadata, "is_spec_verify", False)) and not torch.equal(read_indices, write_indices):
-        raise RuntimeError("linear-state read/write separation is only supported for non-speculative prefill")
+    if not is_prefill or getattr(metadata, "is_spec_verify", False):
+        if not torch.equal(read_indices, write_indices):
+            raise RuntimeError("linear-state read/write separation is only supported for non-speculative prefill")
+        # Canonicalize equal metadata to one object. Hot-path state users can
+        # then skip an otherwise redundant snapshot and self-copy.
+        return write_indices, write_indices
     return read_indices, write_indices
 
 
@@ -202,6 +211,9 @@ class MlaIndexContext:
     ]
     # Optional model-side CP plan for packed local query segments.
     cp_context: CpContext | None = None
+    # Host-planned KV lengths, when the model needs a shape bound without
+    # synchronizing the device sequence-length tensor.
+    actual_seq_kv_host: Sequence[int] | None = None
 
 
 @dataclass(frozen=True)

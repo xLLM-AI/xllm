@@ -20,15 +20,21 @@ limitations under the License.
 
 namespace xllm::runtime {
 
-// Effective decode graph shape used to plan graph warmup. For MTP,
+// Decode graph warmup fields supplied by the owning Engine. For MTP,
 // num_decoding_tokens is the number of token rows produced per sequence in a
 // decode step; it is normally num_speculative_tokens + 1.
-struct DecodeGraphExecutionShape {
+struct DecodeGraphWarmupConfig {
   int64_t num_decoding_tokens = 1;
   int32_t num_speculative_tokens = 0;
   bool enable_graph_mode_decode_no_padding = false;
   int32_t max_graph_batch_size = 0;
 };
+
+struct Options;
+
+DecodeGraphWarmupConfig make_decode_graph_warmup_config(
+    const Options& options,
+    int32_t max_graph_batch_size = 0);
 
 // Returns the padded token-row bucket shared by decode graph executors. When
 // no-padding mode is enabled each exact token count is its own graph shape.

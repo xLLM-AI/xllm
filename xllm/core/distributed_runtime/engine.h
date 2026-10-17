@@ -23,9 +23,11 @@ limitations under the License.
 #include "framework/model/model_args.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "framework/tokenizer/tokenizer_args.h"
+#include "runtime/decode_graph_bucket.h"
 #include "runtime/options.h"
 
 namespace xllm {
+
 class Engine {
  public:
   virtual ~Engine() = default;
@@ -48,6 +50,12 @@ class Engine {
 
   // return the model args
   virtual const ModelArgs& model_args() const { return args_; }
+
+  // The engine owns the resolved warmup contract; profile scheduling only
+  // consumes it and must not reconstruct model-specific values.
+  virtual runtime::DecodeGraphWarmupConfig decode_graph_warmup_config() const {
+    return {};
+  }
 
   // return the tokenizer args
   virtual const TokenizerArgs& tokenizer_args() const {

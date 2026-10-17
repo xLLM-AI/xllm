@@ -65,8 +65,10 @@ def test_mla_index_context_accepts_decode_graph_static_metadata() -> None:
         SimpleNamespace(
             index=torch.zeros(2, 1, 1),
             index_scale=None,
+            kpool_tail=None,
         )
     ]
+    backend._kpool_cache_triton_compatible = (False,)
 
     with patch(
         "xllm.python.attention.npu_paged_attention.get_forward_context",
@@ -314,6 +316,52 @@ def test_materialization_rejects_incomplete_owner_distribution() -> None:
         pytest.raises(RuntimeError, match="KV owner distribution"),
     ):
         backend._prepare_kv_shard_materialization(metadata)
+
+
+def test_mla_nope_cp_uses_global_rows_and_skips_rope_cache() -> None:
+    backend = object.__new__(NpuPagedAttentionBackend)
+    backend._metadata = SimpleNamespace(
+        has_kv_shard=False,
+        kv_split_size=1,
+        slot_mapping=torch.arange(4, dtype=torch.int64),
+    )
+    backend._block_table_i32 = torch.tensor([[0]], dtype=torch.int32)
+    nope_cache = torch.zeros(1, 8, 2)
+    backend._kv_caches = [SimpleNamespace(key=nope_cache, value=None)]
+    actual_seq_q = torch.tensor([4], dtype=torch.int32)
+    actual_seq_kv = torch.tensor([4], dtype=torch.int32)
+    backend._mla_actual_seq_q = actual_seq_q
+    backend._mla_actual_seq_kv = actual_seq_kv
+    cp_context = SimpleNamespace()
+    q_latent = torch.zeros(4, 1, 2)
+    k_latent = torch.ones(4, 1, 2)
+    topk = torch.arange(4, dtype=torch.int32).view(4, 1)
+    layer = SimpleNamespace(layer_id=0, qk_rope_head_dim=0, supports_cp_nope_prefill=True)
+
+    with (
+        patch(
+            "xllm.python.attention.npu_paged_attention.get_forward_context",
+            return_value=SimpleNamespace(cp_context=cp_context),
+        ),
+        patch.object(torch.ops.xllm_ops, "reshape_paged_cache", create=True) as reshape,
+        patch.object(backend, "_mla_sparse", return_value=torch.ones_like(q_latent)) as sparse,
+    ):
+        output = backend.execute_mla(q_latent, None, k_latent, None, layer, topk)
+
+    reshape.assert_called_once_with(
+        backend._metadata.slot_mapping,
+        k_latent,
+        k_latent,
+        nope_cache,
+        nope_cache,
+    )
+    sparse_args = sparse.call_args.args
+    assert sparse_args[1] is None
+    assert sparse_args[3] is None
+    assert sparse_args[5] is backend._block_table_i32
+    assert sparse_args[6] is actual_seq_q
+    assert sparse_args[7] is actual_seq_kv
+    torch.testing.assert_close(output, torch.ones_like(q_latent))
 
 
 @pytest.mark.parametrize("has_kv_shard", [False, True])

@@ -105,6 +105,30 @@ def _mla_graph_max_seqlen_k(
     return max_seqlen_k
 
 
+def _is_compact_kpool_cache_compatible(cache: LayerCache) -> bool:
+    """Validate cache-only Triton invariants once when caches are bound."""
+    index_cache = cache.index
+    tail_cache = cache.kpool_tail
+    if index_cache is None or tail_cache is None:
+        return False
+    return (
+        index_cache.ndim == 4
+        and index_cache.shape[0] > 0
+        and index_cache.shape[1] > 0
+        and index_cache.shape[2] == 1
+        and index_cache.dtype == torch.bfloat16
+        and index_cache.is_contiguous()
+        and tail_cache.ndim == 4
+        and tail_cache.shape[0] > 1
+        and tail_cache.shape[1] == 2
+        and tail_cache.shape[3] == index_cache.shape[3]
+        and tail_cache.dtype == torch.bfloat16
+        and tail_cache.device == index_cache.device
+        and tail_cache.is_contiguous()
+        and index_cache.device.type in ("npu", "privateuseone")
+    )
+
+
 def _build_stable_sfa_page_layout(
     materialized_block_table: torch.Tensor,
 ) -> _SfaPageLayout:
@@ -233,6 +257,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         self._kda_verify_width = num_decoding_tokens
 
         self._kv_caches: list[LayerCache] = []
+        self._kpool_cache_triton_compatible: tuple[bool, ...] = ()
         self._num_kv_blocks: int | None = None
         self._page_size: int | None = None
         self._metadata: AttentionMetadata | _PreparedMlaAttention | None = None
@@ -340,6 +365,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             raise RuntimeError("full-attention layers use inconsistent KV block counts")
 
         self._kv_caches = kv_caches
+        self._kpool_cache_triton_compatible = tuple(_is_compact_kpool_cache_compatible(cache) for cache in kv_caches)
         self._page_size = page_sizes.pop()
         self._num_kv_blocks = num_kv_blocks.pop()
         has_sparse_index = any(cache.index is not None for cache in kv_caches)
@@ -934,11 +960,47 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             )
 
         cp_context = get_forward_context().cp_context
+        rope_dim = getattr(layer, "qk_rope_head_dim", None)
+        if cp_context is not None and getattr(layer, "supports_cp_nope_prefill", False):
+            # GLM-5 Next restores the fresh-Prefill rows before entering its
+            # NoPE DSA island, so the backend writes and attends the complete
+            # logical stream once, then the model reshards the output.
+            if cache_is_preprocessed:
+                raise RuntimeError("CP prefill does not support preprocessed MLA cache inputs")
+            if topk is None:
+                raise RuntimeError("CP prefill requires sparse MLA index output")
+            if k_latent_3d is None:
+                raise RuntimeError("CP prefill requires MLA cache inputs")
+            if c8_enabled:
+                raise RuntimeError("CP prefill does not support SFA C8 packed KV cache")
+            if metadata.slot_mapping is None:
+                raise RuntimeError("CP prefill requires a global MLA slot mapping")
+            torch.ops.xllm_ops.reshape_paged_cache(
+                metadata.slot_mapping,
+                k_latent_3d,
+                k_latent_3d,
+                nope_cache,
+                nope_cache,
+            )
+            # glm5_next currently requires kv_split_size=1, making this an
+            # identity while preserving the uniform metadata-driven boundary.
+            attention_nope, block_table = self._materialize_cp_cache(nope_cache, metadata, cp_context)
+            return self._mla_sparse(
+                q_latent,
+                None,
+                attention_nope,
+                None,
+                topk,
+                block_table,
+                self._mla_actual_seq_q,
+                self._mla_actual_seq_kv,
+                layer_id,
+            )
+
         if cp_context is None:
             # NoPE (qk_rope_head_dim==0): skip rope cache write + pass None to SFA.
             # The rope/value slot may be empty (a 0-dim tensor) or absent (None) in
             # NoPE models — it is never read, so do not require it.
-            rope_dim = getattr(layer, "qk_rope_head_dim", None)
             if rope_dim and rope_dim > 0:
                 # RoPE MLA (DeepSeek-V3/V4, GLM-5.2): latent + rotary.
                 if rope_cache is None:
@@ -1158,7 +1220,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         block_table = self._block_table_i32
         if cp_context is not None:
             block_table = self._segment_block_table(block_table, cp_context)
-        return MlaIndexContext(
+        context = MlaIndexContext(
             index_cache=index_cache,
             slot_mapping=slot_mapping,
             block_table=block_table,
@@ -1189,6 +1251,18 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 cp_context,
             ),
             cp_context=cp_context,
+            actual_seq_kv_host=getattr(metadata, "kv_seq_lens_host_values", None),
+        )
+        context_builder = getattr(layer, "mla_index_context_builder", None)
+        if context_builder is None:
+            return context
+        return context_builder.build(
+            context,
+            context_builder.specialized(
+                layer_cache=layer_cache,
+                metadata=metadata,
+                triton_compatible=self._kpool_cache_triton_compatible[layer.layer_id],
+            ),
         )
 
     def _segment_block_table(
@@ -1765,8 +1839,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         layer: Attention,
     ) -> torch.Tensor:
         actual_seq = self._cumulative_seq_lens(metadata, num_tokens)
-        use_attention_mask = layer.causal or layer.fia_use_attention_mask
-        atten_mask = self._get_causal_mask() if use_attention_mask else None
+        atten_mask = self._get_causal_mask() if (layer.causal or layer.fia_use_attention_mask) else None
         sparse_mode = layer.fia_sparse_mode
         if sparse_mode is None:
             sparse_mode = _SPARSE_MODE_RIGHT_DOWN_CAUSAL if layer.causal else _SPARSE_MODE_NONE

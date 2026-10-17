@@ -242,33 +242,47 @@ def _stage_triton_compiler_package(base_dir: str, extdir: str) -> None:
     logger.info(f"Staged Triton compiler package into {dest_dir}")
 
 
+def _get_cmake_library(cmake_dir: str, variable: str) -> str:
+    cache_path = os.path.join(cmake_dir, "CMakeCache.txt")
+    try:
+        with open(cache_path, encoding="utf-8") as cache_file:
+            prefix = f"{variable}:FILEPATH="
+            for line in cache_file:
+                if line.startswith(prefix):
+                    library = line[len(prefix) :].strip()
+                    if library and not library.endswith("-NOTFOUND"):
+                        return library
+                    break
+    except OSError as error:
+        raise RuntimeError(f"Failed to read CMake cache {cache_path}: {error}") from error
+
+    raise RuntimeError(f"CMake did not resolve {variable} in {cache_path}")
+
+
 def _stage_mooncake_runtime_binaries(cmake_dir: str, extdir: str) -> None:
-    """Stage Mooncake runtime libraries beside the binaries for their $ORIGIN rpath."""
+    """Stage Mooncake's non-system runtime libraries into the wheel.
+
+    Mooncake Store links liburing when it is available during configuration.
+    The dependency installer makes it available in wheel builds, so the wheel
+    must carry its soname for deployment on images without liburing installed.
+    The binaries' ``$ORIGIN`` rpath resolves these copies beside them.
+    """
+    uring_library = _get_cmake_library(cmake_dir, "URING_LIB")
+    resolved_uring_library = os.path.realpath(uring_library)
+    if not os.path.basename(resolved_uring_library).startswith("liburing.so.2"):
+        raise RuntimeError(
+            f"Mooncake requires liburing.so.2, but CMake resolved an incompatible library: {uring_library}"
+        )
+
     libraries = {
         "libasio.so": os.path.join(cmake_dir, "mooncake-common", "libasio.so"),
+        "liburing.so.2": resolved_uring_library,
     }
-    with open(os.path.join(cmake_dir, "CMakeCache.txt"), encoding="utf-8") as cache_file:
-        cache = dict(
-            line.strip().split("=", 1)
-            for line in cache_file
-            if line.startswith(("URING_LIB:FILEPATH=", "URING_INCLUDE:PATH="))
-        )
-    uring_library = cache.get("URING_LIB:FILEPATH", "")
-    uring_include = cache.get("URING_INCLUDE:PATH", "")
-    if all(
-        value and not value.endswith("-NOTFOUND") for value in (uring_library, uring_include)
-    ) and not uring_library.endswith(".a"):
-        dynamic_section = subprocess.check_output(["readelf", "-d", uring_library], text=True)
-        soname = re.search(r"\(SONAME\).*?\[([^\]]+)\]", dynamic_section)
-        if soname is None:
-            raise RuntimeError(f"Mooncake runtime library has no SONAME: {uring_library}")
-        libraries[soname.group(1)] = uring_library
-
-    for name, source in libraries.items():
+    for soname, source in libraries.items():
         if not os.path.isfile(source):
             raise RuntimeError(f"Mooncake runtime library was not found: {source}")
-        shutil.copy2(source, os.path.join(extdir, name))
-        logger.info(f"Staged Mooncake runtime library {name} into extdir")
+        shutil.copy2(source, os.path.join(extdir, soname))
+        logger.info(f"Staged Mooncake runtime library {soname} into extdir")
 
 
 def _stage_auto_tuning_config(base_dir: str, extdir: str) -> None:
@@ -716,6 +730,8 @@ class BuildDistWheel(bdist_wheel):
             name += f"_torch{torch_version}"
 
         self.distribution.metadata.name = name
+        # build may have already finalized or generated metadata under the base name.
+        self.reinitialize_command("egg_info")
         super().finalize_options()
 
     def run(self) -> None:

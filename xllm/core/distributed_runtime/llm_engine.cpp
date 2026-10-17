@@ -128,6 +128,14 @@ LLMEngine::LLMEngine(
 
 LLMEngine::~LLMEngine() = default;
 
+runtime::DecodeGraphWarmupConfig LLMEngine::decode_graph_warmup_config() const {
+  return runtime::make_decode_graph_warmup_config(
+      options_,
+      Platform::is_npu()
+          ? ExecutionConfig::get_instance().acl_graph_decode_batch_size_limit()
+          : 0);
+}
+
 void LLMEngine::process_group_test() {
 #if !defined(USE_NPU)
   // In multi-node serving mode, only driver engine

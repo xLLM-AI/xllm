@@ -26,6 +26,7 @@ limitations under the License.
 #include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/kv_cache/layout/cache_layout_builder.h"
+#include "core/kv_cache/layout/kpool_cache_policy.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
 #include "core/kv_cache/transfer/push_route.h"
 #include "util/net.h"
@@ -313,6 +314,14 @@ void MooncakeKVCacheTransferDefault::register_kv_cache(
       const int64_t token_axis = tensor_layout.head_major_layout ? 2 : 1;
       tensor_layout.index_block_capacity =
           kv_cache_shape.index_cache_shape().at(token_axis);
+    }
+    if (!is_spec_draft && kv_cache_shape.has_kpool_tail_shape()) {
+      const auto& tail_shape = kv_cache_shape.kpool_tail_shape();
+      CHECK_GE(tail_shape.size(), 4U);
+      pending_registration_context_->fingerprint +=
+          "|compressed_kpool_tail:" + std::to_string(tail_shape.back()) + ":" +
+          std::to_string(tail_shape[2]) + ":" +
+          std::to_string(tensor_layout.block_token_capacity);
     }
   }
 

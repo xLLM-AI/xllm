@@ -469,6 +469,11 @@ def _get_required_dependency_files() -> dict[str, list[str]]:
             "/usr/local/include/zstd.h",
         ],
         "zstd-library": [os.path.join(path, "libzstd.so") for path in library_dirs],
+        "liburing-header": [
+            "/usr/include/liburing.h",
+            "/usr/local/include/liburing.h",
+        ],
+        "liburing-library": [os.path.join(path, "liburing.so") for path in library_dirs],
         "xxhash-header": [
             "/usr/include/xxhash.h",
             "/usr/local/include/xxhash.h",

@@ -303,6 +303,8 @@ class TestCreateAttentionBackend:
 
         assert isinstance(backend, StubAttentionBackend)
         assert backend.init_kwargs["attn_head_dim"] == 512
+        assert backend.init_kwargs["dspark_block_size"] == 0
+        assert backend.init_kwargs["dspark_use_native_sas"] is False
         assert backend.init_kwargs["n_layers"] == 3
         assert backend.init_kwargs["compress_ratios"] == [1, 4, 128]
 
@@ -608,7 +610,6 @@ class TestModelExecutorConstruction:
             128,
             1,
             0,
-            16,
             num_decoding_tokens=4,
             is_spec_draft=False,
             enable_mega_moe_token_mask=False,
@@ -918,12 +919,10 @@ class TestDecodeAclGraphSpeculativeMetadata:
             torch.device("cpu"),
             max_batch=64,
             max_model_len=8,
-            decode_batch_size_limit=16,
             num_decoding_tokens=4,
         )
         metadata = self._metadata()
         metadata.dp_execution_token_counts = (32, 64)
-        assert runner._decode_batch_sizes(torch.zeros(32, dtype=torch.int32), metadata) == (8, 16)
         assert runner._padded_batch_size(32, metadata) == 32
         assert runner._padded_batch_size(64, metadata) == 64
         with pytest.raises(ValueError, match="decode batch exceeds ACL graph capacity"):
@@ -1399,6 +1398,22 @@ def test_glm_non_mtp_cp_prefill_retains_sharded_kv_admission() -> None:
     )
 
 
+@pytest.mark.parametrize("model_type", ["glm5_next", "glm5_3_flash"])
+def test_glm5_next_cp_admission_matches_runtime_constraints(model_type: str) -> None:
+    config = {
+        "model_type": model_type,
+        "cp_size": 2,
+        "kv_split_size": 1,
+        "ep_size": 1,
+    }
+    _validate_npu_cp_model_config(config, 1)
+
+    with pytest.raises(NotImplementedError, match="ep_size == 1"):
+        _validate_npu_cp_model_config({**config, "ep_size": 2}, 1)
+    with pytest.raises(NotImplementedError, match="disaggregated PD"):
+        _validate_npu_cp_model_config({**config, "enable_disagg_pd": True}, 1)
+
+
 def _mtp_graph_metadata(lengths: list[int], expanded: bool, device: torch.device) -> SimpleNamespace:
     page_ids = [2, 5, 7, 9]
     page_counts = [(length + 3) // 4 for length in lengths]
@@ -1732,13 +1747,19 @@ class TestExecuteRouting:
         with pytest.raises(RuntimeError, match="KV caches are not bound"):
             executor.execute(torch.zeros(1), torch.zeros(1), metadata)
 
+    @pytest.mark.parametrize("dp_size", [1, 2])
     @patch(
         "xllm.python.model_executor.executor._create_attention_backend",
     )
-    def test_execute_routes_to_eager_runner(self, mock_create):
+    def test_execute_routes_to_eager_runner(self, mock_create: MagicMock, dp_size: int) -> None:
         mock_create.return_value = StubAttentionBackend()
         model = _FakeModel(num_layers=1)
-        executor = ModelExecutor(model, {}, max_seqs_per_batch=4)
+        executor = ModelExecutor(
+            model,
+            {"enable_graph": False, "python_graph_backend": "off", "dp_size": dp_size},
+            max_seqs_per_batch=4,
+        )
+        assert executor.decode_graph_runner is None
 
         kv = (torch.zeros(1), torch.zeros(1))
         executor.bind_kv_caches([kv])

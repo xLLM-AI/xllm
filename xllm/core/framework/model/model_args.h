@@ -746,6 +746,10 @@ inline bool is_qwen3_5_target_model_type(std::string_view model_type) {
          model_type == "qwen3_5_text" || model_type == "qwen3_5_moe_text";
 }
 
+inline bool is_glm5_next_target_model_type(std::string_view model_type) {
+  return model_type == "glm5_3_flash" || model_type == "glm5_next";
+}
+
 inline std::ostream& operator<<(std::ostream& os, const ModelArgs& args) {
   os << "ModelArgs: [model_type: " << args.model_type();
   os << ", encoder_embedding_mode: " << args.encoder_embedding_mode();

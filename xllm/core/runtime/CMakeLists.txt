@@ -27,6 +27,7 @@ cc_library(
     $<$<BOOL:${USE_CUDA}>:cuda_graph_executor_impl.h>
     $<$<BOOL:${USE_MUSA}>:musa_graph_executor_impl.h>
     py_executor_impl.h
+    py_kv_cache.h
     mtp_py_executor_pair.h
     unified_mtp_executor.h
     py_attention_metadata.h
@@ -70,6 +71,7 @@ cc_library(
     $<$<BOOL:${USE_CUDA}>:cuda_graph_executor_impl.cpp>
     $<$<BOOL:${USE_MUSA}>:musa_graph_executor_impl.cpp>
     py_executor_impl.cpp
+    py_kv_cache.cpp
     mtp_py_executor_pair.cpp
     unified_mtp_executor.cpp
     py_attention_metadata.cpp

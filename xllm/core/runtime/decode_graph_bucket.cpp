@@ -15,12 +15,26 @@ limitations under the License.
 
 #include "runtime/decode_graph_bucket.h"
 
+#include "runtime/options.h"
+
 namespace xllm::runtime {
 namespace {
 
 constexpr int64_t kGraphTokenStep = 16;
 
 }  // namespace
+
+DecodeGraphWarmupConfig make_decode_graph_warmup_config(
+    const Options& options,
+    int32_t max_graph_batch_size) {
+  DecodeGraphWarmupConfig warmup_config;
+  warmup_config.num_decoding_tokens = options.num_decoding_tokens();
+  warmup_config.num_speculative_tokens = options.num_speculative_tokens();
+  warmup_config.enable_graph_mode_decode_no_padding =
+      options.enable_graph_mode_decode_no_padding();
+  warmup_config.max_graph_batch_size = max_graph_batch_size;
+  return warmup_config;
+}
 
 int64_t get_decode_graph_token_bucket(int64_t num_tokens,
                                       bool enable_no_padding) {

@@ -44,7 +44,7 @@ limitations under the License.
 #include "framework/block/kv_cache_manager_factory.h"
 #include "framework/model/model_args.h"
 #include "framework/parallel_state/parallel_state.h"
-#include "models/model_registry.h"
+#include "platform/platform.h"
 #include "runtime/llm_worker_impl.h"
 #include "runtime/vlm_forward_params.h"
 #include "runtime/worker.h"
@@ -140,6 +140,14 @@ VLMEngine::VLMEngine(
           .enable_dp_global_json_object_active =
               dp_size_ > 1 && !options_.is_draft_engine() &&
               options_.num_speculative_tokens() > 0});
+}
+
+runtime::DecodeGraphWarmupConfig VLMEngine::decode_graph_warmup_config() const {
+  return runtime::make_decode_graph_warmup_config(
+      options_,
+      Platform::is_npu()
+          ? ExecutionConfig::get_instance().acl_graph_decode_batch_size_limit()
+          : 0);
 }
 
 void VLMEngine::process_group_test() {
