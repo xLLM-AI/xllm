@@ -1,0 +1,4 @@
+# Copyright 2026 The xLLM Authors. Licensed under Apache-2.0.
+/python/xllm_kernel/_npu*.so
+/python/xllm_kernel/_xlite*.so
+/python/xllm_kernel/_xlite_build.json

@@ -231,6 +231,12 @@ Run the NPU Python suite with `python setup.py test --test-name python_tests`;
 its per-file targets depend on `xllm_export`. CTest runs each file in a separate
 pytest process, using the same `conftest.py`.
 
+The independent kernel package owns its tests in `xllm-kernel/test/`.
+Run them separately with pytest; they are not included in the host's
+CMake/CTest targets. See
+[`xllm-kernel/README.md`](../../xllm-kernel/README.md#independent-validation-tools)
+for common tests and the native/xlite NPU test commands.
+
 ### Python offline inference API
 
 This mode uses public Python APIs such as `xllm.LLM` to call the C++ engine:
@@ -266,6 +272,16 @@ does not replace the loaded code; start a new process to use the new build.
 With `--python_model_path` pointing to the checkout root, a service restart
 picks up Python model and layer edits. Changes to C++ or Python DSL kernels
 compiled into native AOT artifacts require rebuilding those artifacts.
+
+NPU runtime initialization in a source checkout adds that checkout's
+`xllm-kernel/python` directory to the package search path before loading
+`xllm_kernel`. This applies to CTest, direct pytest, and embedded Python workers;
+no separate kernel-package installation or extra `PYTHONPATH` entry is required.
+Ordinary `xllm.python` imports do not change the search path or load kernels.
+The regular xLLM wheel includes `xllm_kernel` and uses normal package lookup.
+Standalone kernel CLIs still require installing `xllm-kernel` as described in its
+README. Plain RMSNorm uses the prepared kernel binding; fused and quantized
+normalization retain their current paths.
 
 ## Adding an operator
 
