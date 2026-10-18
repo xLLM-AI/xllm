@@ -129,9 +129,15 @@ TEST(SpeculativeTokenStatsTest, BlockRandomExcludesTargetTokens) {
                                                     {0.1f, 0.1f, 0.95f},
                                                     {0.1f, 0.1f, 0.1f}});
   const torch::Tensor bonus_tokens = torch::ones({4, 1}, torch::kInt64);
-  const DraftProposal proposal(num_draft_tokens, draft_probs);
+  const DraftProposal proposal(num_draft_tokens, draft_probs.log());
+  const torch::Tensor target_log_probs = target_probs.log();
   const torch::Tensor masked_tokens = RejectionSampler::random_sample(
-      proposal, target_probs, uniform_rand, bonus_tokens);
+      proposal,
+      target_log_probs,
+      torch::logsumexp(
+          target_log_probs.to(torch::kFloat32), /*dim=*/-1, /*keepdim=*/false),
+      uniform_rand,
+      bonus_tokens);
   ASSERT_TRUE(torch::equal(
       masked_tokens,
       torch::tensor(

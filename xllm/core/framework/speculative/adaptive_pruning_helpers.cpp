@@ -18,8 +18,9 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <optional>
 
-#include "core/util/tensor_helper.h"
+#include "core/framework/sampling/logits_utils.h"
 
 namespace xllm {
 namespace adaptive_pruning {
@@ -39,58 +40,30 @@ torch::Tensor build_pruned_prefix_masks(
   return positions.unsqueeze(/*dim=*/0).gt(prefix_lengths.unsqueeze(/*dim=*/1));
 }
 
-torch::Tensor selected_probs_by_step(
+std::optional<torch::Tensor> selected_probs_by_step(
     const std::vector<ForwardOutput>& draft_outputs) {
-  CHECK(!draft_outputs.empty()) << "draft outputs must not be empty";
+  if (draft_outputs.empty()) {
+    return std::nullopt;
+  }
   std::vector<torch::Tensor> probs_steps;
   probs_steps.reserve(draft_outputs.size());
   int64_t batch_size = -1;
-  const auto gather_selected = [](const torch::Tensor& values,
-                                  const torch::Tensor& index) {
-    return values.gather(/*dim=*/-1, index.view({-1, 1}).to(torch::kLong))
-        .squeeze(/*dim=*/-1);
-  };
   for (const ForwardOutput& draft_output : draft_outputs) {
-    torch::Tensor probs = draft_output.sample_output.probs;
-    if (!probs.defined()) {
-      // Fallback: compute selected probs from logits+next_tokens on the fly.
-      // This bypasses the sampler's greedy fast-path which skips probs
-      // assignment. Avoids triggering model-side kernel paths (e.g. Qwen3.5
-      // CausalConv1d) that a sampler-side return_probs=true would touch.
-      const torch::Tensor& logits = draft_output.logits;
-      const torch::Tensor& next_tokens = draft_output.sample_output.next_tokens;
-      CHECK(logits.defined() && next_tokens.defined())
-          << "adaptive pruning fallback needs draft logits and next_tokens";
-      CHECK_EQ(logits.dim(), 2)
-          << "adaptive pruning expects draft logits [batch,vocab], got "
-          << logits.sizes();
-      // Compute p_selected = exp(logit_selected - logsumexp(logits)) without
-      // materializing the dense [batch, vocab] softmax. logsumexp is a
-      // reduction to [batch]; the gather picks one column of logits. This
-      // saves batch*vocab fp32 (≈39 MiB at batch=64, vocab=152k) per draft
-      // step, executed on every adaptive decode.
-      const torch::Tensor logits_f32 = logits.to(torch::kFloat32);
-      const torch::Tensor logsumexp = torch::logsumexp(logits_f32, /*dim=*/-1);
-      const torch::Tensor selected_logits =
-          gather_selected(logits_f32, next_tokens);
-      probs = torch::exp(selected_logits - logsumexp).to(logits.dtype());
-    } else if (probs.dim() == 2 && probs.size(1) != 1) {
-      const torch::Tensor& next_tokens = draft_output.sample_output.next_tokens;
-      CHECK(next_tokens.defined())
-          << "adaptive pruning dense draft probs need next_tokens";
-      CHECK_EQ(probs.size(0), next_tokens.numel())
-          << "adaptive pruning dense draft prob batch mismatch";
-      probs = gather_selected(probs, next_tokens);
+    if (!draft_output.sample_output.next_tokens.defined()) {
+      return std::nullopt;
     }
-    CHECK(probs.dim() == 1 || probs.dim() == 2)
-        << "adaptive pruning expects draft probs [batch] or [batch,1], got "
-        << probs.sizes();
-    if (probs.dim() == 2) {
-      CHECK_EQ(probs.size(1), 1)
-          << "adaptive pruning expects draft probs [batch,1], got "
-          << probs.sizes();
-      probs = probs.squeeze(/*dim=*/1);
+    // Prefer the sampler's own export: Eagle3's d2t remap rebinds
+    // draft_logits (and next_tokens) to the target vocabulary, while
+    // ForwardOutput::logits stays in the draft's reduced vocabulary.
+    const torch::Tensor& logits =
+        draft_output.sample_output.draft_logits.defined()
+            ? draft_output.sample_output.draft_logits
+            : draft_output.logits;
+    if (!logits.defined()) {
+      return std::nullopt;
     }
+    torch::Tensor probs = gather_probs_from_logits(
+        logits, draft_output.sample_output.next_tokens);
     if (batch_size < 0) {
       batch_size = probs.size(0);
     }
@@ -99,26 +72,6 @@ torch::Tensor selected_probs_by_step(
     probs_steps.emplace_back(probs.view({-1, 1}));
   }
   return torch::cat(probs_steps, /*dim=*/1);
-}
-
-bool has_selected_probs_by_step(
-    const std::vector<ForwardOutput>& draft_outputs) {
-  if (draft_outputs.empty()) {
-    return false;
-  }
-  for (const ForwardOutput& draft_output : draft_outputs) {
-    const torch::Tensor& probs = draft_output.sample_output.probs;
-    if (probs.defined()) {
-      continue;  // ok
-    }
-    // Fallback: selected_probs_by_step will compute from logits+next_tokens.
-    const torch::Tensor& logits = draft_output.logits;
-    const torch::Tensor& next_tokens = draft_output.sample_output.next_tokens;
-    if (!logits.defined() || !next_tokens.defined()) {
-      return false;
-    }
-  }
-  return true;
 }
 
 void clamp_prefix_lengths(std::vector<int32_t>& prefix_lengths,

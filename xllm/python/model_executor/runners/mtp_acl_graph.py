@@ -66,7 +66,6 @@ ActivateFn = Callable[[], None]
 @dataclass(frozen=True)
 class MtpSamplingPlan:
     batch_size: int
-    return_probs: bool = True
     logprobs: bool = False
     max_top_logprobs: int = 0
 
@@ -464,12 +463,7 @@ class MtpGraphRecipe(nn.Module):
         if target_hidden.ndim != 2 or target_hidden.shape[0] != self.batch_size * (self.speculative_tokens + 1):
             raise ValueError("target hidden must have one row per target verification token")
         use_target_greedy = self.target_greedy is not None and (
-            self.target_sampling is None
-            or not (
-                self.target_sampling.return_probs
-                or self.target_sampling.logprobs
-                or self.target_sampling.max_top_logprobs
-            )
+            self.target_sampling is None or not (self.target_sampling.logprobs or self.target_sampling.max_top_logprobs)
         )
         target_logits = None if use_target_greedy else self.target_logits(target_hidden)
         if target_logits is not None and target_logits.shape != (
@@ -477,16 +471,11 @@ class MtpGraphRecipe(nn.Module):
             self.vocab_size,
         ):
             raise ValueError("target logits must have shape [batch*(K+1), vocab]")
-        target_probs = None
         target_log_normalizer = None
         if use_target_greedy:
             target_tokens = self.target_greedy(target_hidden).reshape(self.batch_size, self.speculative_tokens + 1)
         else:
             target_tokens = target_logits.argmax(dim=-1).reshape(self.batch_size, self.speculative_tokens + 1)
-            if self.target_sampling is not None and self.target_sampling.return_probs:
-                target_probs = torch.softmax(target_logits.float(), dim=-1).reshape(
-                    self.batch_size, self.speculative_tokens + 1, self.vocab_size
-                )
             if self.target_sampling is not None and (
                 self.target_sampling.logprobs or self.target_sampling.max_top_logprobs
             ):
@@ -525,7 +514,6 @@ class MtpGraphRecipe(nn.Module):
             logprobs=committed_log_probs,
             top_logprobs=target_top_log_probs,
             top_tokens=target_top_tokens,
-            target_probs=target_probs,
         )
 
 
@@ -670,7 +658,6 @@ class MtpAclGraphRunner:
             logprobs=clone(output.logprobs),
             top_logprobs=clone(output.top_logprobs),
             top_tokens=clone(output.top_tokens),
-            target_probs=clone(output.target_probs),
         )
 
     def capture(
@@ -843,7 +830,6 @@ class MtpGraphVariantRegistry:
         vocab_size: int,
         block_size: int,
         target_step_major_layout: bool = False,
-        return_probs: bool = False,
         logprobs: bool = False,
         max_top_logprobs: int = 0,
     ) -> SpeculativeRuntimeOutput:
@@ -866,7 +852,6 @@ class MtpGraphVariantRegistry:
             draft_input_embedding.shape,
             draft_input_embedding.dtype,
             draft_input_embedding.device,
-            return_probs,
             logprobs,
             max_top_logprobs,
         )
@@ -883,9 +868,7 @@ class MtpGraphVariantRegistry:
             target_factory = self._target_metadata_factory
             if draft_factory is None or target_factory is None:
                 raise RuntimeError("sparse MTP registry requires native metadata factories")
-            target_plan = MtpSamplingPlan(
-                batch_size=batch_size, return_probs=return_probs, logprobs=logprobs, max_top_logprobs=max_top_logprobs
-            )
+            target_plan = MtpSamplingPlan(batch_size=batch_size, logprobs=logprobs, max_top_logprobs=max_top_logprobs)
 
             draft_storage = MtpSparseMetadataStorage(
                 draft_factory,

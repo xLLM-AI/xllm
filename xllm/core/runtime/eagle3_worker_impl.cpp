@@ -19,6 +19,7 @@ limitations under the License.
 
 #include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model_loader/model_loader.h"
+#include "core/framework/sampling/logits_utils.h"
 #include "runtime/llm_worker_impl.h"
 
 namespace xllm {
@@ -119,9 +120,6 @@ int64_t Eagle3WorkerImpl<TargetInput>::get_embedding_placeholder_size() const {
 template <typename TargetInput>
 void Eagle3WorkerImpl<TargetInput>::process_draft_sample_output(
     SampleOutput& sample_output) {
-  // Keep probability compression behavior fully aligned with MTP.
-  MTPWorkerImpl<TargetInput>::process_draft_sample_output(sample_output);
-
   // EAGLE-3 specific: map draft token IDs to target token IDs.
   if (!use_draft_token_mapping_ || !hot_token_id_.defined() ||
       !sample_output.next_tokens.defined() ||
@@ -129,16 +127,14 @@ void Eagle3WorkerImpl<TargetInput>::process_draft_sample_output(
     return;
   }
 
-  // Scatter q so the (p-q)+ residual keeps full target mass where the draft
-  // cannot propose (q=0), letting rejection sampling align q with p.
-  if (sample_output.probs.defined()) {
-    const int64_t target_vocab_size = context_.get_model_args().vocab_size();
-    torch::Tensor full_vocab_probs =
-        torch::zeros({sample_output.probs.size(0), target_vocab_size},
-                     sample_output.probs.options());
-    full_vocab_probs.index_put_({torch::indexing::Slice(), hot_token_id_},
-                                sample_output.probs);
-    sample_output.probs = full_vocab_probs;
+  // Scatter q over the target vocab so the (p-q)+ residual keeps full
+  // target mass where the draft cannot propose (q=0).
+  if (sample_output.draft_logits.defined()) {
+    sample_output.draft_logits = embed_sparse_logits(
+        hot_token_id_.view({1, -1}).expand(
+            {sample_output.draft_logits.size(0), hot_token_id_.size(0)}),
+        sample_output.draft_logits,
+        context_.get_model_args().vocab_size());
   }
 
   sample_output.next_tokens =

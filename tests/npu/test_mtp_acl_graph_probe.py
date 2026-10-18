@@ -207,7 +207,7 @@ def test_sparse_binding_reaches_prepared_position_runtime_runner(
             vocab_size=vocab_size,
             device=npu_device,
             kv_seq_lens=kv_seq_lens,
-            target_sampling=MtpSamplingPlan(batch_size=batch_size, return_probs=False),
+            target_sampling=MtpSamplingPlan(batch_size=batch_size),
             position_storage=position_storage,
         )
         return MtpAclGraphRunner(recipe)
@@ -327,15 +327,15 @@ def test_mtp_greedy_bfloat16_scores_match_probability_reference(
     npu_device: torch.device, steps: int, logprobs: bool
 ) -> None:
     rejects = torch.arange(steps + 1, device=npu_device)
+    plan = MtpSamplingPlan(
+        batch_size=steps + 1,
+        logprobs=logprobs,
+        max_top_logprobs=3 if logprobs else 0,
+    )
     fast = make_recipe(rejects, steps, logits_dtype=torch.bfloat16)
     reference = make_recipe(rejects, steps, logits_dtype=torch.bfloat16)
-    for recipe, probabilities in ((fast, False), (reference, True)):
-        recipe.target_sampling = MtpSamplingPlan(
-            batch_size=steps + 1,
-            return_probs=probabilities,
-            logprobs=logprobs,
-            max_top_logprobs=3 if logprobs else 0,
-        )
+    fast.target_sampling = plan
+    reference.target_sampling = plan
     inputs = (
         torch.arange(steps + 1, device=npu_device),
         torch.arange(steps + 1, device=npu_device) + 127,
@@ -361,7 +361,6 @@ def test_mtp_greedy_bfloat16_scores_match_probability_reference(
                 assert value is expected_value
             else:
                 torch.testing.assert_close(value.cpu(), expected_value.cpu(), rtol=1e-5, atol=1e-5)
-        assert actual.target_probs is None
     runner.close()
 
 

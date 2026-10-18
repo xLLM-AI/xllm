@@ -543,22 +543,6 @@ void set_token_position_tensors(Input& input,
   input.runtime.device_tensors_ready = true;
 }
 
-DraftProposal build_validate_proposal(
-    const std::vector<torch::Tensor>& draft_token_ids_steps,
-    const std::vector<torch::Tensor>& draft_probs_steps,
-    bool draft_probs_required) {
-  CHECK(!draft_token_ids_steps.empty()) << "draft steps must not be empty";
-
-  auto draft_token_ids =
-      torch::stack(draft_token_ids_steps, /*dim=*/1).to(torch::kLong);
-  if (!draft_probs_required) {
-    return DraftProposal(std::move(draft_token_ids));
-  }
-
-  return DraftProposal(std::move(draft_token_ids),
-                       torch::stack(draft_probs_steps, /*dim=*/1));
-}
-
 template DecodeRowContext make_decode_row_context(const LlmForwardInput&);
 template std::vector<int32_t> build_grouped_prefill_swa_slots(
     const LlmForwardInput&,

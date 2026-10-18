@@ -33,7 +33,6 @@ struct MtpPyGraphOutput {
   torch::Tensor token_state;
   torch::Tensor committed_tokens;
   torch::Tensor target_embeddings;
-  torch::Tensor target_probs;
   torch::Tensor committed_log_probs;
   torch::Tensor target_top_log_probs;
   torch::Tensor target_top_tokens;
@@ -61,7 +60,6 @@ class __attribute__((visibility("hidden"))) MtpPyGraphVariantRegistry final {
                                   int64_t vocab_size,
                                   int32_t block_size,
                                   bool target_step_major_layout,
-                                  bool return_probs,
                                   bool logprobs,
                                   int32_t max_top_logprobs);
 

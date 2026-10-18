@@ -100,8 +100,6 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
 
   void prepare_draft_input(const TargetInput& input);
 
-  static void force_greedy_draft_sampling(SamplingParameters& sampling_params);
-
   // All DP ranks, including unpruned ranks, must join this collective each
   // validation step so MoE padding uses matching post-pruning token counts.
   void sync_dp_global_token_nums_after_prune(TargetModelParams& input_params,
@@ -109,6 +107,8 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
 
   // Idle ranks join the same collective using their prepared dummy width.
   void sync_dp_global_token_nums_for_idle_rank(TargetModelParams& input_params);
+
+  bool adaptive_enabled() const;
 
   std::unique_ptr<LLMWorkerImpl> draft_impl_;
   std::unique_ptr<EmbeddingCache> embedding_cache_;

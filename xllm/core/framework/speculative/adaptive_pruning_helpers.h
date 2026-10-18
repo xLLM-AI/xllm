@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 #include "runtime/forward_params.h"
@@ -27,13 +28,9 @@ limitations under the License.
 namespace xllm {
 namespace adaptive_pruning {
 
-// Extract per-step selected token probabilities from draft outputs into
-// a [batch, num_speculative_tokens] matrix for the pruning controller.
-torch::Tensor selected_probs_by_step(
-    const std::vector<ForwardOutput>& draft_outputs);
-
-// Check whether all draft outputs have defined probs (required for pruning).
-bool has_selected_probs_by_step(
+// Per-step drafted-token probabilities as [batch, n_spec] for the pruning
+// controller; nullopt when any step lacks logits or next_tokens.
+std::optional<torch::Tensor> selected_probs_by_step(
     const std::vector<ForwardOutput>& draft_outputs);
 
 // Clamp pruning prefix lengths to valid range [0, num_speculative_tokens].

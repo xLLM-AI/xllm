@@ -65,7 +65,12 @@ def test_sparse_registry_owns_final_destinations_and_reuses_capacity(
         def close(self) -> None:
             self.closed = True
 
-    def create(_executor: object, draft: tuple[object, ...], target: object, **kwargs: object) -> Runner:
+    def create(
+        _executor: object,
+        _draft: tuple[object, ...],
+        _target: object,
+        **kwargs: object,
+    ) -> Runner:
         assert kwargs["target_step_major_layout"] == step_major
         runner = Runner(kwargs["draft_metadata_storage"], kwargs["target_metadata_storage"])
         runners.append(runner)
@@ -124,14 +129,11 @@ def test_sparse_registry_owns_final_destinations_and_reuses_capacity(
     assert len(runners) == 3
     assert factory.call_count == 12
     assert all(runner.capture.call_count == 1 for runner in runners)
-    assert not plans[-1].return_probs
     execute(1, logprobs=True, max_top_logprobs=3)
     assert len(runners) == 4
     assert plans[-1].logprobs and plans[-1].max_top_logprobs == 3
     execute(1)
     assert len(runners) == 4  # Plain greedy reuses its distinct output contract.
-    execute(1, return_probs=True)
-    assert len(runners) == 5 and plans[-1].return_probs
 
 
 def test_sparse_role_adopts_final_storage_and_rejects_foreign_views() -> None:

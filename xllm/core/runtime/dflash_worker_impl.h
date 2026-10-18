@@ -97,7 +97,8 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
   // per-step outputs an autoregressive drafter (e.g. MTP) yields.
   struct DraftBlock {
     DraftProposal proposal;
-    // DSpark ConfidenceHead output for adaptive pruning; empty otherwise.
+    // Adaptive controller signal: the DSpark ConfidenceHead output when
+    // present, the drafted token's prob under q otherwise.
     torch::Tensor confidence_probs;
     // No-sync draft inputs must outlive validation's stream sync.
     std::vector<std::shared_ptr<const void>> retained_inputs;
@@ -162,15 +163,13 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
                         int32_t effective_val_tokens);
 
   // Adaptive-speculative helper: run controller on draft acceptance
-  // probabilities (ConfidenceHead output if available, sampler-gathered probs
-  // otherwise) and return per-seq prefix_len vector (each entry in
+  // probabilities and return per-seq prefix_len vector (each entry in
   // [0, num_speculative_tokens]). Returns empty vector when adaptive is off,
   // in which case the caller keeps the full draft block.
   std::vector<int32_t> compute_adaptive_prefix_lengths(
       const DraftBlock& draft_block,
       const LlmForwardInput& input);
 
-  // Zero out draft probs beyond each sequence's prefix_len so the rejection
   // Per-seq varlen prune: rebuild validate_input as a true varlen
   // [Σ per_seq_val_tokens[i], ...] batch so target forward only spends
   // compute on tokens each seq's prefix_len actually needs. Reuses the base
@@ -179,8 +178,6 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
       const LlmForwardInput& input,
       LlmForwardInput& validate_input,
       const std::vector<int32_t>& per_seq_val_tokens);
-
-  void process_draft_sample_output(SampleOutput& sample_output);
 
   // Mirrors sampled tokens to rank 0 under schedule-overlap so every rank
   // commits the same prefix. No-op for a single rank.

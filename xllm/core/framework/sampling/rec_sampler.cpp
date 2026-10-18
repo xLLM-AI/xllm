@@ -278,7 +278,6 @@ SampleOutput RecSampler::OneRecConstrainedSamplingStrategy::forward(
   SampleOutput output;
   auto probs =
       torch::softmax(sample_logits, /*dim=*/-1, /*dtype=*/torch::kFloat32);
-  output.probs = probs.to(logits.dtype());
   auto logprobs =
       torch::log_softmax(sample_logits, /*dim=*/-1, /*dtype=*/torch::kFloat32);
 

@@ -18,7 +18,6 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 
-#include "core/framework/sampling/draft_sampling_mode.h"
 #include "core/framework/sampling/sampling_params.h"
 
 namespace xllm {
@@ -54,15 +53,6 @@ TEST(GumbelSamplingTest, MasksGreedyRowsInMixedBatch) {
   EXPECT_TRUE(noise.select(/*dim=*/0, /*index=*/0).eq(0).all().item<bool>());
   EXPECT_TRUE(torch::isfinite(noise).all().item<bool>());
   EXPECT_TRUE(noise.select(/*dim=*/0, /*index=*/1).ne(0).any().item<bool>());
-}
-
-TEST(DraftSamplingModeTest, RequiresProbabilitiesOnlyForRandomDrafts) {
-  EXPECT_FALSE(draft_probs_required(DraftSamplingMode::GREEDY,
-                                    /*all_greedy_sample=*/false));
-  EXPECT_FALSE(draft_probs_required(DraftSamplingMode::PROBABILISTIC,
-                                    /*all_greedy_sample=*/true));
-  EXPECT_TRUE(draft_probs_required(DraftSamplingMode::PROBABILISTIC,
-                                   /*all_greedy_sample=*/false));
 }
 
 }  // namespace xllm

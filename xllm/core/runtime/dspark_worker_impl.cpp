@@ -68,9 +68,8 @@ DSparkWorkerImpl::DraftBlock DSparkWorkerImpl::run_decode_draft(
   // sampling doesn't consume confidence, and asking for selected_hidden
   // triggers a target-side gather and a downstream linear+sigmoid every
   // step.
-  const bool want_confidence = draft_impl_->has_dspark_confidence_head() &&
-                               adaptive_spec_controller_ != nullptr &&
-                               adaptive_spec_controller_->enabled();
+  const bool want_confidence =
+      draft_impl_->has_dspark_confidence_head() && adaptive_enabled();
   logits_input.return_selected_hidden = want_confidence;
 
   LlmForwardInput processed_input;
@@ -106,29 +105,21 @@ DSparkWorkerImpl::DraftBlock DSparkWorkerImpl::run_decode_draft(
            num_speculative_tokens,
            draft_output->selected_hidden.size(-1)});
     } else {
-      // The current lm_head backend did not surface selected_hidden. Fall
-      // back to sampler-gathered probs as the adaptive signal — ConfidenceHead
-      // stays a nice-to-have; adaptive pruning still works (a little coarser).
       LOG_FIRST_N(WARNING, 1)
           << "DSpark: draft did not expose selected_hidden; ConfidenceHead "
-          << "disabled for adaptive pruning, using proposal probs.";
+          << "disabled for adaptive pruning, using logits-derived probs.";
     }
   }
 
-  BlockSample sampled = [&]() {
+  DraftBlock draft_block = [&]() {
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
     SamplingParameters sampling_params_on_device = input.sampling_params.to(
         base_logits.device(), base_logits.scalar_type());
-    if (draft_sampling_mode_ == DraftSamplingMode::GREEDY) {
-      force_greedy_draft_sampling(sampling_params_on_device);
-    }
+    prepare_draft_sampling(draft_sampling_mode_, sampling_params_on_device);
     return sample_block(
         base_logits, last_hidden, anchor_token_ids, sampling_params_on_device);
   }();
 
-  DraftBlock draft_block;
-  draft_block.proposal = std::move(sampled.proposal);
-  draft_block.confidence_probs = std::move(sampled.confidence_probs);
   draft_block.retained_inputs = take_retained_inputs(*draft_output);
 
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
@@ -136,7 +127,7 @@ DSparkWorkerImpl::DraftBlock DSparkWorkerImpl::run_decode_draft(
   return draft_block;
 }
 
-DSparkWorkerImpl::BlockSample DSparkWorkerImpl::sample_block(
+DSparkWorkerImpl::DraftBlock DSparkWorkerImpl::sample_block(
     const torch::Tensor& base_logits,
     const torch::Tensor& last_hidden,
     const torch::Tensor& anchor_token_ids,
@@ -154,21 +145,19 @@ DSparkWorkerImpl::BlockSample DSparkWorkerImpl::sample_block(
     CHECK_EQ(last_hidden.size(1), num_speculative_tokens)
         << "DSpark last_hidden n_spec mismatch.";
   }
-  const bool need_draft_probs = draft_probs_required(
-      draft_sampling_mode_, sampling_params.all_greedy_sample);
-  auto proposal = sample_dspark_block(
+  DraftBlock draft_block;
+  draft_block.proposal = sample_dspark_block(
       base_logits,
       anchor_token_ids,
       sampling_params,
-      need_draft_probs,
       [this](const torch::Tensor& previous) {
         return draft_impl_->dspark_markov_bias(previous);
       },
       [this, &sampling_params](torch::Tensor& tokens) {
-        synchronize_sampled_token_ids(tokens, sampling_params);
+        synchronize_sampled_token_ids(tokens,
+                                      sampling_params.all_greedy_sample);
       });
-  const auto& token_ids = proposal.token_ids();
-  torch::Tensor confidence_probs;
+  const auto& token_ids = draft_block.proposal.token_ids();
 
   // ConfidenceHead over the whole block, batched. Equivalent to computing it
   // per step inside the loop on (last_hidden[:, k], prev_k) — prev_k is the
@@ -180,23 +169,23 @@ DSparkWorkerImpl::BlockSample DSparkWorkerImpl::sample_block(
         {anchor_token_ids.view({num_reqs, 1}),
          token_ids.slice(/*dim=*/1, /*start=*/0, num_speculative_tokens - 1)},
         /*dim=*/1);  // [num_reqs, num_spec]
-    confidence_probs =
+    draft_block.confidence_probs =
         draft_impl_->dspark_confidence_probs(last_hidden, prev_matrix);
-    CHECK_EQ(confidence_probs.dim(), 2)
+    CHECK_EQ(draft_block.confidence_probs.dim(), 2)
         << "batched confidence probs must be [num_reqs, num_spec]";
-    CHECK_EQ(confidence_probs.size(0), num_reqs)
+    CHECK_EQ(draft_block.confidence_probs.size(0), num_reqs)
         << "batched confidence probs batch mismatch";
-    CHECK_EQ(confidence_probs.size(1), num_speculative_tokens)
+    CHECK_EQ(draft_block.confidence_probs.size(1), num_speculative_tokens)
         << "batched confidence probs n_spec mismatch";
   }
 
-  return {std::move(proposal), std::move(confidence_probs)};
+  return draft_block;
 }
 
 void DSparkWorkerImpl::synchronize_sampled_token_ids(
     torch::Tensor& sampled_token_ids,
-    const SamplingParameters& sampling_params) const {
-  if (sampling_params.all_greedy_sample || sampling_process_group_ == nullptr ||
+    bool all_greedy_sample) const {
+  if (all_greedy_sample || sampling_process_group_ == nullptr ||
       sampling_process_group_->world_size() <= 1) {
     return;
   }

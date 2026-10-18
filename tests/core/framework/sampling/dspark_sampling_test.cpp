@@ -37,7 +37,6 @@ TEST(DSparkSamplingTest, BatchedMarkovChainUsesConsensusBeforeNextStep) {
       logits,
       anchors,
       params,
-      /*need_draft_probs=*/false,
       [&predecessors](const torch::Tensor& previous) {
         predecessors.emplace_back(previous.clone());
         auto bias = torch::zeros({2, 8});
@@ -59,7 +58,7 @@ TEST(DSparkSamplingTest, BatchedMarkovChainUsesConsensusBeforeNextStep) {
       torch::equal(predecessors.at(1), torch::tensor({2, 5}, torch::kInt64)));
   EXPECT_TRUE(
       torch::equal(predecessors.at(2), torch::tensor({3, 6}, torch::kInt64)));
-  EXPECT_FALSE(result.draft_probs().has_value());
+  EXPECT_FALSE(result.logits().has_value());
   EXPECT_EQ(broadcasts, 3);
 }
 
@@ -73,26 +72,21 @@ TEST(DSparkSamplingTest, ProbabilisticProposalKeepsConditionalDistributions) {
   params.all_greedy_sample = false;
   params.all_random_sample = true;
   params.do_sample = torch::ones({2}, torch::kBool);
+  params.return_logits = true;
   const auto bias = [](const torch::Tensor& previous) {
     return torch::arange(4, torch::kFloat32).view({1, 4}) *
            (previous + 1).view({2, 1});
   };
-  const auto result =
-      sample_dspark_block(logits,
-                          anchors,
-                          params,
-                          /*need_draft_probs=*/true,
-                          bias,
-                          [](torch::Tensor& tokens) {
-                            tokens.copy_(torch::tensor({1, 3}, torch::kInt64));
-                          });
-  ASSERT_TRUE(result.draft_probs().has_value());
-  EXPECT_TRUE(torch::allclose(result.draft_probs()->select(1, 0),
+  const auto result = sample_dspark_block(
+      logits, anchors, params, bias, [](torch::Tensor& tokens) {
+        tokens.copy_(torch::tensor({1, 3}, torch::kInt64));
+      });
+  ASSERT_TRUE(result.logits().has_value());
+  EXPECT_TRUE(torch::allclose(torch::softmax(result.logits()->select(1, 0), -1),
                               torch::softmax(bias(anchors), -1)));
   EXPECT_TRUE(torch::allclose(
-      result.draft_probs()->select(1, 1),
+      torch::softmax(result.logits()->select(1, 1), -1),
       torch::softmax(bias(torch::tensor({1, 3}, torch::kInt64)), -1)));
-  EXPECT_FALSE(params.return_probs);
 }
 #endif
 

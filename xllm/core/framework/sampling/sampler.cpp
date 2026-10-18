@@ -160,39 +160,42 @@ SampleOutput Sampler::forward(torch::Tensor& logits,
 
   torch::Tensor sample_logits = process_logits(logits, params, filter_mask);
 
-  if (params.all_greedy_sample && !params.logprobs && !params.return_probs &&
-      !use_sample_indices && !filter_mask.defined()) {
+  // Keep the model dtype; consumers upcast where the reduction needs fp32.
+  if (params.return_logits) {
+    output.draft_logits = sample_logits;
+  }
+
+  if (params.all_greedy_sample && !params.logprobs && !use_sample_indices &&
+      !filter_mask.defined()) {
     output.next_tokens = greedy_sample(sample_logits).to(torch::kLong);
     return output;
   }
 
-  if (params.all_greedy_sample && !params.logprobs && params.return_probs &&
-      !use_sample_indices && !filter_mask.defined()) {
-    torch::Tensor sample_indices =
-        greedy_sample(sample_logits).to(torch::kLong);
-    torch::Tensor selected_logits =
-        sample_logits.gather(/*dim=*/-1, sample_indices.view({-1, 1}))
-            .to(torch::kFloat32);
-    torch::Tensor log_probs =
-        selected_logits - torch::logsumexp(sample_logits,
-                                           /*dim=*/-1,
-                                           /*keepdim=*/true);
-    output.next_tokens = sample_indices;
-    output.probs = log_probs.exp().view({-1}).to(logits.dtype());
-    return output;
+  // The do_sample rows only distinguish random vs greedy sampling; an
+  // all-greedy batch carries no per-row choice, so callers may leave
+  // do_sample undefined there.
+  if (params.do_sample.defined()) {
+    CHECK_EQ(params.do_sample.dim(), 1)
+        << "params.do_sample must be 1D [num_seqs], got "
+        << params.do_sample.sizes();
+    // same batch size
+    CHECK_EQ(sample_logits.size(0), params.do_sample.size(0));
   }
 
-  CHECK(params.do_sample.defined()) << "params.do_sample must be defined";
-  CHECK_EQ(params.do_sample.dim(), 1)
-      << "params.do_sample must be 1D [num_seqs], got "
-      << params.do_sample.sizes();
-  // same batch size
-  CHECK_EQ(sample_logits.size(0), params.do_sample.size(0));
-
-  auto probs =
-      torch::softmax(sample_logits, /*dim=*/-1, /*dtype=*/torch::kFloat32);
+  // The greedy legs argmax the logits directly; softmax feeds only the
+  // random legs (argmax(softmax(x)) == argmax(x)).
+  const bool seed_sampling =
+      params.seeds.defined() && !params.all_greedy_sample;
+  const bool need_probs =
+      seed_sampling || params.all_random_sample ||
+      (!params.all_greedy_sample && params.do_sample.defined());
+  torch::Tensor probs;
+  if (need_probs) {
+    probs =
+        torch::softmax(sample_logits, /*dim=*/-1, /*dtype=*/torch::kFloat32);
+  }
   torch::Tensor samples;
-  if (params.seeds.defined() && !params.all_greedy_sample) {
+  if (seed_sampling) {
     torch::Tensor seeds = params.seeds;
     torch::Tensor offsets = params.seed_offsets;
     if (use_sample_indices) {
@@ -227,15 +230,13 @@ SampleOutput Sampler::forward(torch::Tensor& logits,
   } else if (params.all_random_sample) {
     samples = random_sample(probs);
   } else if (params.all_greedy_sample) {
-    samples = greedy_sample(probs);
+    samples = greedy_sample(sample_logits);
   } else {
-    // mixed sample, sample both then choose based on do_sample
     auto random = random_sample(probs);
-    auto greedy = greedy_sample(probs);
+    auto greedy = greedy_sample(sample_logits);
     samples = torch::where(params.do_sample, random, greedy);
   }
   auto sample_indices = samples.to(torch::kLong);
-  output.probs = probs.to(logits.dtype());
   output.next_tokens = sample_indices;
 
   if (params.logprobs) {

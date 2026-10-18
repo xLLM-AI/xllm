@@ -162,7 +162,6 @@ UnifiedMtpExecutionResult UnifiedMtpExecutor::execute(
       vocab_size,
       block_size,
       target_step_major_layout,
-      input.sampling_params.return_probs,
       input.sampling_params.logprobs,
       input.sampling_params.max_top_logprobs);
 

@@ -43,11 +43,10 @@ TEST(DFlash2SamplingTest, GreedyFollowsPreviouslySelectedCandidate) {
   const auto result = sample_dflash2_path(candidates,
                                           params,
                                           torch::zeros({1, 2, 2}),
-                                          /*vocab_size=*/8,
-                                          /*need_dense_probs=*/false);
+                                          /*vocab_size=*/8);
   EXPECT_TRUE(torch::equal(result.token_ids,
                            torch::tensor({5, 3}, torch::kInt64).view({1, 2})));
-  EXPECT_FALSE(result.dense_probs.defined());
+  EXPECT_FALSE(result.draft_logits.defined());
 }
 
 TEST(DFlash2SamplingTest, MixedRowsPreserveExactProposalDistribution) {
@@ -63,11 +62,11 @@ TEST(DFlash2SamplingTest, MixedRowsPreserveExactProposalDistribution) {
   const auto noise =
       torch::tensor({0.0f, 0.0f, 0.0f, 0.0f, 5.0f, 0.0f, 0.0f, 0.0f})
           .view({2, 2, 2});
+  params.return_logits = true;
   const auto result = sample_dflash2_path(candidates,
                                           params,
                                           noise,
-                                          /*vocab_size=*/8,
-                                          /*need_dense_probs=*/true);
+                                          /*vocab_size=*/8);
   EXPECT_TRUE(
       torch::equal(result.token_ids,
                    torch::tensor({5, 3, 2, 7}, torch::kInt64).view({2, 2})));
@@ -80,8 +79,9 @@ TEST(DFlash2SamplingTest, MixedRowsPreserveExactProposalDistribution) {
   expected.index_put_({1, 0, 5}, first[1]);
   expected.index_put_({1, 1, 3}, second[0]);
   expected.index_put_({1, 1, 7}, second[1]);
-  EXPECT_TRUE(torch::allclose(result.dense_probs, expected));
-  EXPECT_TRUE(torch::allclose(result.dense_probs.sum(-1), torch::ones({2, 2})));
+  const auto dense_probs = torch::softmax(result.draft_logits, /*dim=*/-1);
+  EXPECT_TRUE(torch::allclose(dense_probs, expected));
+  EXPECT_TRUE(torch::allclose(dense_probs.sum(-1), torch::ones({2, 2})));
 }
 
 TEST(DFlash2SamplingTest, RandomRowsReturnConditionalSoftmaxForRejection) {
@@ -90,17 +90,16 @@ TEST(DFlash2SamplingTest, RandomRowsReturnConditionalSoftmaxForRejection) {
   params.all_greedy_sample = false;
   params.all_random_sample = true;
   params.do_sample = torch::ones({1}, torch::kBool);
-  const auto result = sample_dflash2_path(candidates,
-                                          params,
-                                          torch::zeros({1, 2, 2}),
-                                          /*vocab_size=*/8,
-                                          /*need_dense_probs=*/true);
+  params.return_logits = true;
+  const auto result = sample_dflash2_path(
+      candidates, params, torch::zeros({1, 2, 2}), /*vocab_size=*/8);
   const auto probabilities = torch::softmax(torch::tensor({4.0f, 0.0f}), 0);
-  EXPECT_FLOAT_EQ(result.dense_probs.index({0, 1, 3}).item<float>(),
+  const auto dense_probs = torch::softmax(result.draft_logits, /*dim=*/-1);
+  EXPECT_FLOAT_EQ(dense_probs.index({0, 1, 3}).item<float>(),
                   probabilities[0].item<float>());
-  EXPECT_FLOAT_EQ(result.dense_probs.index({0, 1, 7}).item<float>(),
+  EXPECT_FLOAT_EQ(dense_probs.index({0, 1, 7}).item<float>(),
                   probabilities[1].item<float>());
-  EXPECT_TRUE(torch::allclose(result.dense_probs.sum(-1), torch::ones({1, 2})));
+  EXPECT_TRUE(torch::allclose(dense_probs.sum(-1), torch::ones({1, 2})));
 }
 }  // namespace
 }  // namespace xllm

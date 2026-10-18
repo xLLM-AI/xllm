@@ -360,7 +360,7 @@ SamplingParameters SamplingParameters::to(const torch::Device& device,
   params.all_random_sample = all_random_sample;
   params.all_greedy_sample = all_greedy_sample;
   params.logprobs = logprobs;
-  params.return_probs = return_probs;
+  params.return_logits = return_logits;
   params.max_top_logprobs = max_top_logprobs;
   params.is_embeddings = is_embeddings;
   params.num_return_sequences = num_return_sequences;
@@ -414,12 +414,27 @@ void SamplingParameters::concat(const SamplingParameters& param) {
   all_random_sample = all_random_sample && param.all_random_sample;
   all_greedy_sample = all_greedy_sample && param.all_greedy_sample;
   logprobs = logprobs || param.logprobs;
-  return_probs = return_probs || param.return_probs;
+  return_logits = return_logits || param.return_logits;
   is_embeddings = is_embeddings || param.is_embeddings;
   use_beam_search = use_beam_search || param.use_beam_search;
   max_top_logprobs = std::max(max_top_logprobs, param.max_top_logprobs);
   num_return_sequences =
       std::max(num_return_sequences, param.num_return_sequences);
+}
+
+void prepare_draft_sampling(DraftSamplingMode mode,
+                            SamplingParameters& sampling_params) {
+  // In GREEDY mode the sampler never reads do_sample, so callers keep
+  // whatever do_sample they carried.
+  sampling_params.logprobs = false;
+  sampling_params.max_top_logprobs = 0;
+  sampling_params.use_beam_search = false;
+  if (mode == DraftSamplingMode::GREEDY) {
+    sampling_params.all_greedy_sample = true;
+    sampling_params.all_random_sample = false;
+  }
+  // The verifier needs q exactly when the draft actually samples.
+  sampling_params.return_logits = !sampling_params.all_greedy_sample;
 }
 
 }  // namespace xllm

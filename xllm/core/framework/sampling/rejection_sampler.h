@@ -18,7 +18,7 @@ limitations under the License.
 #include <torch/types.h>
 
 #include "core/framework/sampling/draft_proposal.h"
-#include "sampling_params.h"
+#include "core/framework/sampling/sampling_params.h"
 
 namespace xllm {
 
@@ -41,17 +41,28 @@ class RejectionSampler final {
   SampleOutput forward(const DraftProposal& draft_proposal,
                        const torch::Tensor& target_logits) const;
 
-  // build mask from accepted matrix
-  // for example: [[1, 1, 0, 1],   ->   [[1, 1, 1, 0, 0],
-  //               [1, 0, 0, 0]]         [1, 1, 0, 0, 0]]
-  static torch::Tensor build_accepted_mask(const torch::Tensor& accepted);
-
+  // `uniform_rand` is consumed in place (log'ed); `target_lse` is the
+  // caller-computed row logsumexp of `target_logits`.
   static torch::Tensor random_sample(const DraftProposal& draft_proposal,
-                                     const torch::Tensor& target_probs,
-                                     const torch::Tensor& uniform_rand,
+                                     const torch::Tensor& target_logits,
+                                     const torch::Tensor& target_lse,
+                                     torch::Tensor uniform_rand,
                                      const torch::Tensor& bonus_token_ids);
 
  private:
+  // Greedy / random / mixed verification for a nonzero draft width.
+  // `target_lse` matches the narrowed draft-row view of `target_logits`;
+  // `target_greedy_token_ids` spans all rows including the bonus row.
+  torch::Tensor verify(const DraftProposal& draft_proposal,
+                       const torch::Tensor& target_logits,
+                       const torch::Tensor& target_lse,
+                       const torch::Tensor& bonus_token_ids,
+                       const torch::Tensor& target_greedy_token_ids) const;
+
+  // Fills logprobs/top-k outputs from the sampled next_tokens.
+  SampleOutput fill_logprob_outputs(SampleOutput output,
+                                    const torch::Tensor& target_logits) const;
+
   // whether to return logprobs
   bool logprobs_ = false;
 

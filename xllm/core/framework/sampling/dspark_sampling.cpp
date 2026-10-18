@@ -25,7 +25,6 @@ DraftProposal sample_dspark_block(
     const torch::Tensor& base_logits,
     const torch::Tensor& anchor_token_ids,
     SamplingParameters sampling,
-    bool need_draft_probs,
     const std::function<torch::Tensor(const torch::Tensor&)>& markov_bias,
     const std::function<void(torch::Tensor&)>& synchronize_tokens,
     torch::Tensor tokens) {
@@ -41,10 +40,6 @@ DraftProposal sample_dspark_block(
   sampling.selected_token_idxes =
       torch::empty({0}, anchor_token_ids.options().dtype(torch::kInt32));
   sampling.sample_idxes = sampling.selected_token_idxes;
-  sampling.return_probs = need_draft_probs;
-  sampling.logprobs = false;
-  sampling.max_top_logprobs = 0;
-  sampling.use_beam_search = false;
   if (!tokens.defined()) {
     tokens = torch::empty({rows, steps}, anchor_token_ids.options());
   } else {
@@ -52,8 +47,8 @@ DraftProposal sample_dspark_block(
     CHECK_EQ(tokens.scalar_type(), torch::kInt64);
     CHECK_EQ(tokens.device(), base_logits.device());
   }
-  std::vector<torch::Tensor> probabilities;
-  probabilities.reserve(need_draft_probs ? steps : 0);
+  std::vector<torch::Tensor> draft_logits_steps;
+  draft_logits_steps.reserve(steps);
   Sampler sampler;
   auto previous = anchor_token_ids;
   for (int64_t step = 0; step < steps; ++step) {
@@ -65,13 +60,12 @@ DraftProposal sample_dspark_block(
     synchronize_tokens(sampled.next_tokens);
     tokens.select(1, step).copy_(sampled.next_tokens);
     previous = sampled.next_tokens;
-    if (need_draft_probs) {
-      probabilities.emplace_back(std::move(sampled.probs));
+    if (sampling.return_logits) {
+      draft_logits_steps.emplace_back(std::move(sampled.draft_logits));
     }
   }
-  return need_draft_probs
-             ? DraftProposal(std::move(tokens), torch::stack(probabilities, 1))
-             : DraftProposal(std::move(tokens));
+  return DraftProposal(std::move(tokens),
+                       stack_draft_logits(draft_logits_steps));
 }
 
 }  // namespace xllm

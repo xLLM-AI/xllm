@@ -1058,7 +1058,7 @@ void SlotBuffer::prepare_sampling(const SamplingParameters& input) {
     prepared.all_greedy_sample =
         all_values<bool>(input.do_sample, [](bool value) { return !value; });
     prepared.logprobs = input.logprobs;
-    prepared.return_probs = input.return_probs;
+    prepared.return_logits = input.return_logits;
     prepared.max_top_logprobs = input.max_top_logprobs;
   }
   cpu_do_sample_ = input.do_sample.defined()

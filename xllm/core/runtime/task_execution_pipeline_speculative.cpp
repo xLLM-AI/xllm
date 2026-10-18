@@ -107,6 +107,22 @@ torch::Tensor prefix(const torch::Tensor& storage, int64_t count) {
   return storage.narrow(/*dim=*/0, /*start=*/0, count);
 }
 
+// Greedy draft sampling keeps do_sample because gumbel noise and the
+// sampling-group synchronize still branch on it; it also slots into the
+// kRepeatedRows repeat_interleave.
+SamplingParameters make_slot_draft_sampling(
+    DraftSamplingMode mode,
+    const SamplingParameters& base,
+    const torch::Tensor& greedy_do_sample,
+    int64_t num_rows) {
+  SamplingParameters params = base;
+  prepare_draft_sampling(mode, params);
+  if (mode == DraftSamplingMode::GREEDY) {
+    params.do_sample = prefix(greedy_do_sample, num_rows);
+  }
+  return params;
+}
+
 std::vector<int64_t> decode_graph_batch_sizes(int64_t maximum) {
   std::vector<int64_t> sizes;
   sizes.reserve(maximum / 16 + 5);
@@ -194,10 +210,9 @@ bool supports_unified_block_graph(const SpeculativeTaskCapacity& capacity,
          input.json_object_states.empty() &&
          input.input_params.multi_block_tables.empty() &&
          sampling.all_greedy_sample && !sampling.use_beam_search &&
-         !sampling.logprobs && !sampling.return_probs &&
-         !sampling.temperatures.defined() && !sampling.top_k.defined() &&
-         !sampling.top_p.defined() && !sampling.min_p.defined() &&
-         !sampling.logits_bias.defined() &&
+         !sampling.logprobs && !sampling.temperatures.defined() &&
+         !sampling.top_k.defined() && !sampling.top_p.defined() &&
+         !sampling.min_p.defined() && !sampling.logits_bias.defined() &&
          !sampling.frequency_penalties.defined() &&
          !sampling.presence_penalties.defined() &&
          !sampling.repetition_penalties.defined() &&
@@ -573,7 +588,7 @@ Status TaskExecutionPipeline::validate_input(SpeculativeSlot& slot,
       input.input_params.embedding.embedding_ids.size() > count ||
       input.input_params.embedding.request_ids.size() !=
           input.input_params.embedding.embedding_ids.size() ||
-      batch.is_graph_warmup || input.sampling_params.return_probs ||
+      batch.is_graph_warmup ||
       (!input.sampling_params.logprobs &&
        input.sampling_params.max_top_logprobs != 0) ||
       (!batch.forward_type.is_decode() && !batch.forward_type.is_prefill() &&
@@ -1211,10 +1226,12 @@ Status TaskExecutionPipeline::prepare_speculative(
       } else {
         prepare_draft_state(slot, step, /*warmup=*/false);
       }
-      SamplingParameters params = base;
-      params.logprobs = false;
-      params.max_top_logprobs = 0;
       const uint32_t draft_rows = slot.rows * (block_draft() ? width - 1 : 1);
+      SamplingParameters params = make_slot_draft_sampling(
+          speculative_capacity_->draft_sampling_mode,
+          base,
+          slot.greedy_do_sample,
+          /*num_rows=*/static_cast<int64_t>(draft_rows));
       if (block_draft()) {
         auto stream_guard = prepare_stream_.set_stream_guard();
         if (speculative_capacity_->kind != SpeculativeTaskKind::DSPARK) {
@@ -1231,13 +1248,6 @@ Status TaskExecutionPipeline::prepare_speculative(
         params.selected_token_idxes =
             prefix(slot.draft_first_indices, slot.rows);
       }
-      if (speculative_capacity_->draft_sampling_mode ==
-          DraftSamplingMode::GREEDY) {
-        params.do_sample = prefix(slot.greedy_do_sample, draft_rows);
-        params.all_greedy_sample = true;
-        params.all_random_sample = false;
-      }
-      params.return_probs = !params.all_greedy_sample;
       SampleOutput draft_output;
       draft_output.next_tokens = prefix(invocation.token_storage, draft_rows);
       invocation.sampling = Sampling{std::move(params), draft_output, {}};
@@ -1513,18 +1523,19 @@ void TaskExecutionPipeline::launch_decode(SpeculativeSlot& slot) {
   Sampler::process_logits(slot.target_logits,
                           slot.validate_input->sampling_params());
   const auto& base = slot.target_prefill->sampling_params();
-  std::optional<torch::Tensor> draft_probs;
-  if (slot.drafts.front()->sampled.probs.defined()) {
-    std::vector<torch::Tensor> probabilities;
-    probabilities.reserve(slot.drafts.size());
+  std::optional<torch::Tensor> draft_logits;
+  if (block_draft()) {
+    draft_logits = slot.drafts.front()->sampled.draft_logits;
+  } else {
+    std::vector<torch::Tensor> draft_logits_steps;
+    draft_logits_steps.reserve(slot.drafts.size());
     for (const auto& invocation : slot.drafts) {
-      probabilities.push_back(invocation->sampled.probs);
+      draft_logits_steps.emplace_back(invocation->sampled.draft_logits);
     }
-    draft_probs = block_draft() ? slot.drafts.front()->sampled.probs
-                                : torch::stack(probabilities, /*dim=*/1);
+    draft_logits = stack_draft_logits(draft_logits_steps);
   }
   SampleOutput accepted = slot.rejection->forward(
-      DraftProposal(slot.proposal, draft_probs),
+      DraftProposal(slot.proposal, draft_logits),
       slot.target_logits.view(
           {slot.rows, width, speculative_capacity_->common.vocab_size}));
   const auto& result = slot.target_prefill->device_result();
@@ -1592,12 +1603,11 @@ void TaskExecutionPipeline::launch_block_draft(SpeculativeSlot& slot) {
   auto& input = *invocation.input;
   const int64_t steps = speculative_capacity_->num_speculative_tokens;
   const auto& selected = invocation.sampling->params.selected_token_idxes;
-  SamplingParameters selector_sampling = slot.target_prefill->sampling_params();
-  if (speculative_capacity_->draft_sampling_mode == DraftSamplingMode::GREEDY) {
-    selector_sampling.all_greedy_sample = true;
-    selector_sampling.all_random_sample = false;
-    selector_sampling.do_sample = prefix(slot.greedy_do_sample, slot.rows);
-  }
+  SamplingParameters selector_sampling =
+      make_slot_draft_sampling(speculative_capacity_->draft_sampling_mode,
+                               slot.target_prefill->sampling_params(),
+                               slot.greedy_do_sample,
+                               /*num_rows=*/slot.rows);
   if (speculative_capacity_->kind == SpeculativeTaskKind::DFLASH2) {
     slot.block_gumbel =
         sample_gumbel_noise(slot.rows,
@@ -1629,21 +1639,15 @@ void TaskExecutionPipeline::launch_block_draft(SpeculativeSlot& slot) {
         sample_dflash2_path(candidates,
                             selector_sampling,
                             slot.block_gumbel,
-                            speculative_capacity_->common.vocab_size,
-                            speculative_capacity_->draft_sampling_mode ==
-                                    DraftSamplingMode::PROBABILISTIC &&
-                                !selector_sampling.all_greedy_sample);
+                            speculative_capacity_->common.vocab_size);
     slot.proposal.copy_(sampled.token_ids);
-    invocation.sampled.probs = std::move(sampled.dense_probs);
+    invocation.sampled.draft_logits = std::move(sampled.draft_logits);
   } else if (speculative_capacity_->kind == SpeculativeTaskKind::DSPARK) {
     auto sampled = sample_dspark_block(
         invocation.logits.view(
             {slot.rows, steps, speculative_capacity_->common.vocab_size}),
         slot.state->tokens_.to(torch::kInt64),
         selector_sampling,
-        /*need_draft_probs=*/speculative_capacity_->draft_sampling_mode ==
-                DraftSamplingMode::PROBABILISTIC &&
-            !selector_sampling.all_greedy_sample,
         [this](const torch::Tensor& previous) {
           return draft_->model.dspark_markov_bias(previous);
         },
@@ -1651,7 +1655,8 @@ void TaskExecutionPipeline::launch_block_draft(SpeculativeSlot& slot) {
           synchronize_tokens(tokens, selector_sampling.all_greedy_sample);
         },
         slot.proposal);
-    invocation.sampled.probs = sampled.draft_probs().value_or(torch::Tensor());
+    invocation.sampled.draft_logits =
+        sampled.logits().value_or(torch::Tensor());
   } else {
     invocation.sampled = sample(*invocation.sampling, invocation.logits);
     slot.proposal.copy_(
@@ -1892,7 +1897,7 @@ const SampleOutput& TaskExecutionPipeline::sample(Sampling& sampling,
     sampling.output.top_tokens.copy_(sampling.sampled.top_tokens);
     sampling.output.top_logprobs.copy_(sampling.sampled.top_logprobs);
   }
-  sampling.output.probs = sampling.sampled.probs;
+  sampling.output.draft_logits = sampling.sampled.draft_logits;
   return sampling.output;
 }
 

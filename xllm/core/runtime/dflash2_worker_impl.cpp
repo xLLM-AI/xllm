@@ -62,11 +62,7 @@ DFlashWorkerImpl::DraftBlock DFlash2WorkerImpl::run_decode_draft(
   c10::StreamGuard noise_guard = compute_stream_->set_stream_guard();
   SamplingParameters draft_sampling_params =
       input.sampling_params.to(draft_impl_->device(), torch::kFloat32);
-  if (draft_sampling_mode_ == DraftSamplingMode::GREEDY) {
-    force_greedy_draft_sampling(draft_sampling_params);
-  }
-  const bool need_dense_probs = draft_probs_required(
-      draft_sampling_mode_, draft_sampling_params.all_greedy_sample);
+  prepare_draft_sampling(draft_sampling_mode_, draft_sampling_params);
   torch::Tensor gumbel_noise = sample_gumbel_noise(batch_size,
                                                    num_speculative_tokens,
                                                    selector_top_k,
@@ -117,20 +113,13 @@ DFlashWorkerImpl::DraftBlock DFlash2WorkerImpl::run_decode_draft(
     sampled = sample_dflash2_path(candidates,
                                   draft_sampling_params,
                                   gumbel_noise,
-                                  unary_logits.size(/*dim=*/-1),
-                                  need_dense_probs);
+                                  unary_logits.size(/*dim=*/-1));
   }
 
   DraftBlock draft_block;
-  if (sampled.dense_probs.defined()) {
-    // Probabilistic DFlash2 paths retain the dense proposal distribution so
-    // rejection recovery stays exact.
-    draft_block.proposal = DraftProposal(std::move(sampled.token_ids),
-                                         std::move(sampled.dense_probs));
-  } else {
-    // Greedy proposals are delta distributions and need no [B, N, V] tensor.
-    draft_block.proposal = DraftProposal(std::move(sampled.token_ids));
-  }
+  draft_block.proposal = DraftProposal(std::move(sampled.token_ids),
+                                       std::move(sampled.draft_logits));
+  draft_block.confidence_probs = std::move(sampled.confidence_probs);
   draft_block.retained_inputs = take_retained_inputs(*draft_output);
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
               draft_timer.elapsed_seconds());

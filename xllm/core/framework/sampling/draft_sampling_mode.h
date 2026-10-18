@@ -45,9 +45,4 @@ inline DraftSamplingMode parse_draft_sampling_mode(std::string_view mode) {
   return DraftSamplingMode::GREEDY;
 }
 
-inline bool draft_probs_required(DraftSamplingMode mode,
-                                 bool all_greedy_sample) {
-  return mode == DraftSamplingMode::PROBABILISTIC && !all_greedy_sample;
-}
-
 }  // namespace xllm

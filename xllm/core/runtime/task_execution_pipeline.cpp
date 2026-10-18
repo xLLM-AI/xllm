@@ -587,8 +587,7 @@ Status TaskExecutionPipeline::validate(const Slot& slot,
     return status;
   }
   const auto& sampling = input.sampling_params;
-  if (sampling.return_probs ||
-      (!sampling.logprobs && sampling.max_top_logprobs != 0)) {
+  if (!sampling.logprobs && sampling.max_top_logprobs != 0) {
     return invalid("Ordinary LLM requires consistent token result options.");
   }
   if (input.input_params.meta.batch_forward_type.is_empty()) {

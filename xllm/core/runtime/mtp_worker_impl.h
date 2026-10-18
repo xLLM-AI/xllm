@@ -77,6 +77,7 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
 
  protected:
   using typename DraftModelSpecWorkerImpl<TargetInput>::TargetModelParams;
+  using DraftModelSpecWorkerImpl<TargetInput>::adaptive_enabled;
   using DraftModelSpecWorkerImpl<TargetInput>::adaptive_spec_controller_;
   using DraftModelSpecWorkerImpl<TargetInput>::compute_stream_;
   using DraftModelSpecWorkerImpl<TargetInput>::context_;
@@ -94,7 +95,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   using DraftModelSpecWorkerImpl<TargetInput>::enable_schedule_overlap;
   using DraftModelSpecWorkerImpl<
       TargetInput>::estimate_kv_cache_capacity_with_draft;
-  using DraftModelSpecWorkerImpl<TargetInput>::force_greedy_draft_sampling;
   using DraftModelSpecWorkerImpl<TargetInput>::get_optimization_config;
   using DraftModelSpecWorkerImpl<
       TargetInput>::sync_dp_global_token_nums_after_prune;
@@ -158,7 +158,7 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
       const std::vector<uint8_t>& invalid_draft);
 
   // Hook for algorithm-specific draft output post-processing during decode.
-  virtual void process_draft_sample_output(SampleOutput& sample_output);
+  virtual void process_draft_sample_output(SampleOutput& /*sample_output*/) {}
 
   virtual void check_draft_input_embedding(const torch::Tensor& /*embedding*/,
                                            const std::string& /*phase*/) const {
@@ -182,7 +182,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   // prepare inputs for draft model at Prefill phase.
   void prepare_prefill_inputs(const TargetInput& inputs,
                               LlmForwardInput& prefill_inputs);
-  void prepare_draft_sampling(SamplingParameters& sampling_params) const;
   bool supports_explicit_spec_verify_replay_update() const;
   bool should_use_explicit_spec_verify_replay_update(
       const TargetInput& input) const;
@@ -307,7 +306,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   void write_target_context_to_cache(const TargetInput& input,
                                      const SampleOutput& validate_output,
                                      int32_t num_speculative_tokens);
-  bool adaptive_enabled() const;
 
  protected:
   // Rejection sampling produces accepted state on the compute stream.  Keep

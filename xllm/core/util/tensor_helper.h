@@ -76,6 +76,13 @@ inline std::span<const int32_t> int_span(const torch::Tensor& tensor) {
           static_cast<uint64_t>(tensor.numel())};
 }
 
+// Gather one column along `dim` and drop the gathered dim.
+inline torch::Tensor index_select_2d(const torch::Tensor& input,
+                                     int64_t dim,
+                                     const torch::Tensor& index) {
+  return input.gather(dim, index.unsqueeze(dim)).squeeze(dim);
+}
+
 namespace detail {
 
 // H2D-source options; the caching host allocator recycles pinned blocks.

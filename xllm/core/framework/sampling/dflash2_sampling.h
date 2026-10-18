@@ -22,16 +22,16 @@ namespace xllm {
 
 struct DFlash2SampleOutput {
   torch::Tensor token_ids;
-  torch::Tensor dense_probs;
+  // [batch, num_steps, vocab] draft logits when return_logits.
+  torch::Tensor draft_logits;
+  // [batch, num_steps] prob of the selected candidate under q, the adaptive
+  // controller's signal; always filled, independent of return_logits.
+  torch::Tensor confidence_probs;
 };
-
-// Walk the trained selector path. Dense proposal probabilities preserve exact
-// rejection recovery for random rows; greedy rows remain delta proposals.
 DFlash2SampleOutput sample_dflash2_path(
     const DFlash2CandidateOutput& candidates,
     const SamplingParameters& sampling_params,
     const torch::Tensor& gumbel_noise,
-    int64_t vocab_size,
-    bool need_dense_probs);
+    int64_t vocab_size);
 
 }  // namespace xllm

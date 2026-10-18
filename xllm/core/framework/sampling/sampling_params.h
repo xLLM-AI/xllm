@@ -24,6 +24,8 @@ limitations under the License.
 #include <unordered_map>
 #include <vector>
 
+#include "core/framework/sampling/draft_sampling_mode.h"
+
 namespace xllm {
 
 struct Token;
@@ -185,9 +187,8 @@ struct SamplingParameters {
   // whether to output logprobs for each generated token.
   bool logprobs = false;
 
-  // whether downstream validation needs sampled probabilities even when the
-  // request itself does not ask for logprobs.
-  bool return_probs = false;
+  // whether to expose post-temperature sampling logits on SampleOutput.
+  bool return_logits = false;
 
   // whether to get the embeddings of the tokens. used by embeddings model.
   bool is_embeddings = false;
@@ -202,6 +203,12 @@ struct SamplingParameters {
   // for beam search
   bool use_beam_search = false;
 };
+
+// Mode-aware draft sampling policy: clears logprob outputs and, in GREEDY
+// mode, flips the batch to greedy; PROBABILISTIC exposes draft logits
+// exactly when the verifier needs q.
+void prepare_draft_sampling(DraftSamplingMode mode,
+                            SamplingParameters& sampling_params);
 
 // Draft proposals and acceptances executed by the verifier, before output
 // truncation. Accepted drafts exclude the target replacement/bonus token.
@@ -224,8 +231,8 @@ class SampleOutput final {
   // [num_seq, ...] LongTensor
   torch::Tensor next_tokens;
 
-  // [num_seq, ...] FloatTensor
-  torch::Tensor probs;
+  // [num_seq, ..., vocab] post-temperature logits when return_logits.
+  torch::Tensor draft_logits;
 
   // [num_seq, ...] FloatTensor
   torch::Tensor logprobs;

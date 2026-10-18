@@ -34,7 +34,6 @@ MtpPyGraphOutput parse_graph_output(const py::object& output) {
       output.attr("committed_tokens").cast<torch::Tensor>();
   result.target_embeddings =
       tensor_from_python(output.attr("target_embeddings"));
-  result.target_probs = tensor_from_python(output.attr("target_probs"));
   result.committed_log_probs = tensor_from_python(output.attr("logprobs"));
   result.target_top_log_probs = tensor_from_python(output.attr("top_logprobs"));
   result.target_top_tokens = tensor_from_python(output.attr("top_tokens"));
@@ -77,7 +76,6 @@ MtpPyGraphOutput MtpPyGraphVariantRegistry::execute_sparse(
     int64_t vocab_size,
     int32_t block_size,
     bool target_step_major_layout,
-    bool return_probs,
     bool logprobs,
     int32_t max_top_logprobs) {
   py::gil_scoped_acquire gil;
@@ -94,7 +92,6 @@ MtpPyGraphOutput MtpPyGraphVariantRegistry::execute_sparse(
                                       vocab_size,
                                       block_size,
                                       target_step_major_layout,
-                                      return_probs,
                                       logprobs,
                                       max_top_logprobs);
   MtpPyGraphOutput parsed = parse_graph_output(output);

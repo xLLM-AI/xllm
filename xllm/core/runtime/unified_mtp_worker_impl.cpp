@@ -335,7 +335,6 @@ std::optional<ForwardOutput> UnifiedMtpWorkerImpl::run_unified_python_mtp_graph(
   target_output.sample_output.embeddings = graph_output.target_embeddings;
   // Preserve the rejection sampler's [batch, K+1, ...] output layout.
   // Worker serialization indexes the request first, then the committed row.
-  target_output.sample_output.probs = graph_output.target_probs;
   target_output.sample_output.logprobs = graph_output.committed_log_probs;
   target_output.sample_output.top_logprobs = graph_output.target_top_log_probs;
   target_output.sample_output.top_tokens = graph_output.target_top_tokens;

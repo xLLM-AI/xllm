@@ -31,6 +31,7 @@ limitations under the License.
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/framework/sampling/logits_utils.h"
 #include "core/framework/speculative/adaptive_pruning_helpers.h"
 #include "core/framework/speculative/adaptive_speculative_controller.h"
 #include "core/framework/speculative/speculative_profile_registry.h"
@@ -740,7 +741,6 @@ DFlashWorkerImpl::DraftBlock DFlashWorkerImpl::run_decode_draft(
   prepare_validate_inputs(input, validate_input);
   // Keep draft tokens consistent across tensor-parallel ranks.
   maybe_broadcast_spec_tokens(draft_output.sample_output.next_tokens);
-  process_draft_sample_output(draft_output.sample_output);
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
               draft_timer.elapsed_seconds());
 
@@ -905,7 +905,7 @@ std::optional<ForwardOutput> DFlashWorkerImpl::run_validate(
   bool did_prune = false;
   int32_t max_val_tokens = default_val_tokens;
   if (!prefix_lengths.empty()) {
-    // Pruned outputs are overwritten later, so draft_probs stay untouched.
+    // Pruned outputs are overwritten later, so the proposal stays untouched.
     per_seq_val_tokens.resize(batch_size);
     max_val_tokens = 0;
     for (int32_t i = 0; i < batch_size; ++i) {
@@ -1046,11 +1046,6 @@ SampleOutput DFlashWorkerImpl::validate(
       draft_proposal,
       target_logits,
       target_output);
-}
-
-void DFlashWorkerImpl::process_draft_sample_output(
-    SampleOutput& sample_output) {
-  sample_output.probs = torch::Tensor();
 }
 
 void DFlashWorkerImpl::maybe_broadcast_spec_tokens(torch::Tensor& tokens) {
@@ -1232,7 +1227,8 @@ void DFlashWorkerImpl::prepare_query_inputs(const LlmForwardInput& input,
       async_h2d_tensor(selected_idxes, device_.unwrap());
   query_input.sampling_params.sample_idxes = arange_indices(
       static_cast<int64_t>(selected_idxes.size()), device_.unwrap());
-  force_greedy_draft_sampling(query_input.sampling_params);
+  prepare_draft_sampling(DraftSamplingMode::GREEDY,
+                         query_input.sampling_params);
   repeat_sampling_params(query_input.sampling_params,
                          options_.num_speculative_tokens());
   query_input.runtime.device_tensors_ready = true;
@@ -1387,32 +1383,17 @@ std::vector<int32_t> DFlashWorkerImpl::compute_adaptive_prefix_lengths(
     return {};
   }
   const int32_t num_speculative_tokens = options_.num_speculative_tokens();
-  if (adaptive_spec_controller_ == nullptr ||
-      !adaptive_spec_controller_->enabled()) {
+  if (!adaptive_enabled()) {
     return {};
   }
-  // Prefer the trained ConfidenceHead output when present (DSpark); otherwise
-  // fall back to sampler-gathered proposal probs (DFlash / DSpark without a
-  // confidence head).
-  //
-  // Both signals are per-step conditional accept probabilities: c_k =
-  // P(step k accepted | prefix accepted). ConfidenceHead simply replaces
-  // proposal probs as a better-trained estimator of the same quantity. The
-  // controller chain-rule multiplies them to obtain path probs
-  // a_{r,j} = ∏ c_i (paper Section 3.2.2 Algorithm 1). Same code path for
-  // both signal sources.
-  //
-  // Note (DSpark v1): the ConfidenceHead is loaded from the released
-  // checkpoint but is *not* STS-calibrated yet (paper Section 3.2.1 "Post-hoc
-  // Calibration"). Raw sigmoid confidence is overconfident, so the cumulative
-  // product decays incorrectly at longer block sizes and can over-prune.
-  // DSPARK_CONFIDENCE_TEMPERATURE (see qwen3_dspark.h) offers a single
-  // temperature knob to approximate STS until we ship a proper offline
-  // per-position calibration table.
-  torch::Tensor probs_for_controller =
-      draft_block.confidence_probs.defined()
-          ? draft_block.confidence_probs
-          : draft_block.proposal.draft_probs().value_or(torch::Tensor());
+  // The ConfidenceHead is not STS-calibrated yet (DSpark v1) and can
+  // over-prune — DSPARK_CONFIDENCE_TEMPERATURE approximates STS for now.
+  torch::Tensor probs_for_controller = draft_block.confidence_probs;
+  if (!probs_for_controller.defined() &&
+      draft_block.proposal.logits().has_value()) {
+    probs_for_controller = gather_probs_from_logits(
+        *draft_block.proposal.logits(), draft_block.proposal.token_ids());
+  }
   if (!probs_for_controller.defined()) {
     return {};
   }

@@ -377,64 +377,9 @@ def test_role_adapter_b1_uses_a_single_row_view(monkeypatch: pytest.MonkeyPatch)
     assert output.storage_offset() == 1
 
 
-@pytest.mark.parametrize("steps", [3, 5])
-@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize("logprobs,top_width", [(False, 0), (True, 0), (True, 2), (False, 2)])
-def test_greedy_recipe_fast_path_matches_full_probability_recipe(
-    steps: int, logits_dtype: torch.dtype, logprobs: bool, top_width: int
-) -> None:
-    rejects = torch.arange(steps + 1)
-    fast = make_recipe(rejects, steps, logits_dtype=logits_dtype)
-    reference = make_recipe(rejects, steps, logits_dtype=logits_dtype)
-    for recipe, probabilities in ((fast, False), (reference, True)):
-        recipe.target_sampling = MtpSamplingPlan(
-            batch_size=steps + 1,
-            return_probs=probabilities,
-            logprobs=logprobs,
-            max_top_logprobs=top_width,
-        )
-    inputs = (torch.arange(steps + 1), torch.arange(steps + 1) + 127, torch.arange(steps + 1, dtype=torch.int32) + 128)
-    expected = MtpAclGraphRunner(reference, backend="eager").execute(*inputs)
-    actual = MtpAclGraphRunner(fast, backend="eager").execute(*inputs)
-    for name, tensor in output_tensors(actual).items():
-        torch.testing.assert_close(tensor, output_tensors(expected)[name])
-    for name in ("logprobs", "top_logprobs", "top_tokens"):
-        torch.testing.assert_close(getattr(actual, name), getattr(expected, name))
-    assert actual.target_probs is None
-
-    if logprobs or top_width:
-        oracle = scalar_reference(inputs[0].tolist(), inputs[1].tolist(), rejects.tolist(), steps)
-        target_ids = torch.cat((inputs[0].unsqueeze(1), oracle["draft_tokens"]), dim=1).reshape(-1)
-        target_positions = (inputs[1].unsqueeze(1) + torch.arange(steps + 1, dtype=inputs[1].dtype)).reshape(-1)
-        target_hidden = reference.target_forward(target_ids, target_positions, -1, None, None)
-        target_logits = reference.target_logits(target_hidden).reshape(steps + 1, steps + 1, reference.vocab_size)
-        independent_log_probs = torch.log_softmax(target_logits.float(), dim=-1)
-        committed_indices = expected.committed_tokens.clamp_min(0).unsqueeze(-1)
-        independent_committed = independent_log_probs.gather(-1, committed_indices).squeeze(-1)
-        independent_committed = torch.where(
-            expected.committed_tokens.ge(0),
-            independent_committed,
-            torch.zeros_like(independent_committed),
-        )
-        if logprobs:
-            torch.testing.assert_close(actual.logprobs, independent_committed, rtol=1e-5, atol=1e-5)
-        if top_width:
-            independent_top_values, independent_top_tokens = independent_log_probs.topk(top_width, dim=-1)
-            torch.testing.assert_close(
-                actual.top_logprobs,
-                independent_top_values,
-                rtol=1e-5,
-                atol=1e-5,
-            )
-            torch.testing.assert_close(actual.top_tokens, independent_top_tokens)
-    arena_address = fast._position_arena.data_ptr()
-    MtpAclGraphRunner(fast, backend="eager").execute(inputs[0], inputs[1] + 4, inputs[2] + 4)
-    assert fast._position_arena.data_ptr() == arena_address
-
-
 def test_draft_temporaries_live_only_as_long_as_their_consumers(monkeypatch: pytest.MonkeyPatch) -> None:
     recipe = make_recipe(torch.tensor([1]), 3)
-    recipe.target_sampling = MtpSamplingPlan(batch_size=1, return_probs=False)
+    recipe.target_sampling = MtpSamplingPlan(batch_size=1)
     draft_forward, draft_head, target_forward = recipe.draft_forward, recipe.draft_logits, recipe.target_forward
     logits_refs: list[weakref.ReferenceType[torch.Tensor]] = []
     hidden_refs: list[weakref.ReferenceType[torch.Tensor]] = []
@@ -499,7 +444,7 @@ def test_runtime_output_uses_only_consumed_snapshots_and_greedy_heads(steps: int
     rejects = torch.arange(steps + 1)
     fast, reference = make_recipe(rejects, steps), make_recipe(rejects, steps)
     for recipe in (fast, reference):
-        recipe.target_sampling = MtpSamplingPlan(batch_size=steps + 1, return_probs=False, logprobs=logprobs)
+        recipe.target_sampling = MtpSamplingPlan(batch_size=steps + 1, logprobs=logprobs)
     draft_head, target_head = fast.draft_logits, fast.target_logits
     fast.draft_greedy = lambda hidden: draft_head(hidden).argmax(-1)
     fast.target_greedy = lambda hidden: target_head(hidden).argmax(-1)

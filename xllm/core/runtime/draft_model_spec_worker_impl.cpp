@@ -403,16 +403,9 @@ bool DraftModelSpecWorkerImpl<TargetInput>::allocate_kv_cache_with_transfer(
 #endif
 
 template <typename TargetInput>
-void DraftModelSpecWorkerImpl<TargetInput>::force_greedy_draft_sampling(
-    SamplingParameters& sampling_params) {
-  if (sampling_params.do_sample.defined()) {
-    sampling_params.do_sample = torch::zeros_like(sampling_params.do_sample);
-  }
-  sampling_params.all_random_sample = false;
-  sampling_params.all_greedy_sample = true;
-  sampling_params.logprobs = false;
-  sampling_params.max_top_logprobs = 0;
-  sampling_params.return_probs = false;
+bool DraftModelSpecWorkerImpl<TargetInput>::adaptive_enabled() const {
+  return adaptive_spec_controller_ != nullptr &&
+         adaptive_spec_controller_->enabled();
 }
 
 template <typename TargetInput>
@@ -462,8 +455,7 @@ void DraftModelSpecWorkerImpl<TargetInput>::
     sync_dp_global_token_nums_after_prune(TargetModelParams& input_params,
                                           int32_t local_total_val_tokens) {
   // Static speculative width already keeps the DP counts consistent.
-  if (adaptive_spec_controller_ == nullptr ||
-      !adaptive_spec_controller_->enabled()) {
+  if (!adaptive_enabled()) {
     return;
   }
   ProcessGroup* dp_group = parallel_args_.dp_local_process_group_;
@@ -493,8 +485,7 @@ void DraftModelSpecWorkerImpl<TargetInput>::
 template <typename TargetInput>
 void DraftModelSpecWorkerImpl<TargetInput>::
     sync_dp_global_token_nums_for_idle_rank(TargetModelParams& input_params) {
-  if (adaptive_spec_controller_ == nullptr ||
-      !adaptive_spec_controller_->enabled()) {
+  if (!adaptive_enabled()) {
     return;
   }
   ProcessGroup* dp_group = parallel_args_.dp_local_process_group_;

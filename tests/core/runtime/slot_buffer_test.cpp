@@ -846,7 +846,8 @@ class SlotSamplingInputTest
     EXPECT_EQ(reference.all_random_sample,
               binding_->sampling_params().all_random_sample);
     EXPECT_EQ(reference.logprobs, binding_->sampling_params().logprobs);
-    EXPECT_EQ(reference.return_probs, binding_->sampling_params().return_probs);
+    EXPECT_EQ(reference.return_logits,
+              binding_->sampling_params().return_logits);
     EXPECT_EQ(reference.max_top_logprobs,
               binding_->sampling_params().max_top_logprobs);
     ASSERT_EQ(aclrtSynchronizeStream(launch_->get_stream()->stream()),
@@ -1030,7 +1031,7 @@ TEST_P(SlotSamplingInputTest, EmptyClearsBindingAndTransfersNothing) {
     EXPECT_FALSE((binding_->sampling_params().*member).defined());
   }
   EXPECT_FALSE(binding_->sampling_params().logprobs);
-  EXPECT_FALSE(binding_->sampling_params().return_probs);
+  EXPECT_FALSE(binding_->sampling_params().return_logits);
   EXPECT_EQ(binding_->sampling_params().max_top_logprobs, 0);
 }
 
@@ -1082,7 +1083,7 @@ TEST_P(SlotSamplingInputTest,
       input.selected_token_idxes = torch::arange(/*end=*/4, torch::kInt32);
       input.sample_idxes = torch::arange(/*end=*/4, torch::kInt32);
       input.do_sample = torch::zeros({4}, torch::kBool);
-      input.return_probs = mode == 5;
+      input.return_logits = mode == 5;
     } else if (mode == 1) {
       input.do_sample.zero_();
     } else if (mode == 6) {
@@ -1129,7 +1130,7 @@ TEST_P(SlotSamplingInputTest,
     EXPECT_TRUE(torch::equal(end_rng, rng_state()));
     expect_equal(old_logits, new_logits);
     expect_equal(expected.next_tokens, actual.next_tokens);
-    expect_equal(expected.probs, actual.probs);
+    expect_equal(expected.draft_logits, actual.draft_logits);
     expect_equal(expected.logprobs, actual.logprobs);
     expect_equal(expected.top_logprobs, actual.top_logprobs);
     expect_equal(expected.top_tokens, actual.top_tokens);

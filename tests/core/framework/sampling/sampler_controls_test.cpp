@@ -108,12 +108,14 @@ TEST(SamplerControlsTest, MinPRemovesLowProbabilityCandidates) {
   params.seeds = torch::tensor({42}, torch::kLong);
   params.seed_offsets = torch::tensor({0}, torch::kLong);
   params.min_p = torch::tensor({0.5F});
+  params.return_logits = true;
   torch::Tensor logits = torch::tensor({{2.0F, 1.0F, 0.0F}});
   Sampler sampler;
   const auto result = sampler.forward(logits, params);
   EXPECT_EQ(result.next_tokens[0].item<int64_t>(), 0);
-  EXPECT_EQ(result.probs[0][1].item<float>(), 0);
-  EXPECT_EQ(result.probs[0][2].item<float>(), 0);
+  const auto probs = torch::softmax(result.draft_logits, -1);
+  EXPECT_EQ(probs[0][1].item<float>(), 0);
+  EXPECT_EQ(probs[0][2].item<float>(), 0);
 }
 
 }  // namespace

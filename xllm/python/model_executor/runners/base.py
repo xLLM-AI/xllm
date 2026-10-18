@@ -46,7 +46,6 @@ class SpeculativeRuntimeOutput:
     logprobs: torch.Tensor | None = None
     top_logprobs: torch.Tensor | None = None
     top_tokens: torch.Tensor | None = None
-    target_probs: torch.Tensor | None = None
 
 
 class BaseRunner(ABC):
