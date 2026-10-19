@@ -1,0 +1,48 @@
+# Copyright 2026 The xLLM Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://github.com/xLLM-AI/xllm/blob/main/LICENSE
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Netlify native continuous deployment for documentation pull request previews.
+#
+# The production docs site is built from docs/ and deployed to
+# https://docs.xllm-ai.com by GitHub Pages. Netlify is only used for per-PR
+# Deploy Previews, including PRs opened from forks.
+#
+# Netlify reads this file from the PR head. GitHub Pages does not read it.
+#
+# Dashboard setup (one-time, by a maintainer):
+#   1. Link xLLM-AI/xllm to a Netlify site through the Netlify GitHub App.
+#   2. Ensure Deploy Previews for pull requests are enabled.
+#   3. For automatic fork previews, set the sensitive variable policy to
+#      "Deploy without sensitive variables". The docs build needs no secrets.
+
+[build]
+  base = "docs"
+  command = "npm ci && npm run build"
+  publish = "dist"
+
+  # Production docs remain on GitHub Pages. Skip Netlify production builds so
+  # merges to main do not create an unused production deploy (15 credits each
+  # on credit-based plans). Pull request previews use
+  # CONTEXT=deploy-preview, so they still build.
+  ignore = 'test "$CONTEXT" = "production"'
+
+[build.environment]
+  NODE_VERSION = "22"
+
+# Keep the preview-only Netlify docs site out of search indexes. This file is
+# not part of the docs build output, so GitHub Pages production is unaffected.
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Robots-Tag = "noindex"

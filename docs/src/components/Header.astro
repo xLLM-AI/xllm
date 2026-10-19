@@ -11,6 +11,8 @@ type SidebarEntry = StarlightRouteData['sidebar'][number];
 
 const { sidebar } = Astro.locals.starlightRoute;
 const currentLocale = Astro.locals.starlightRoute.locale;
+const isNetlifyPreview = process.env.CONTEXT === 'deploy-preview';
+const previewLabel = currentLocale?.startsWith('zh') ? 'PR 预览' : 'PR preview';
 
 const shouldRenderSearch =
 	config.pagefind || config.components.Search !== '@astrojs/starlight/components/Search.astro';
@@ -67,6 +69,7 @@ function getLocalizedPathname(locale: string): string {
 <div class="header">
 	<div class="title-wrapper sl-flex">
 		<SiteTitle />
+		{isNetlifyPreview && <span class="preview-badge" title="This documentation is a Netlify PR preview">{previewLabel}</span>}
 	</div>
 	<nav class="top-tabs print:hidden" aria-label="主导航">
 		{
@@ -160,6 +163,22 @@ function getLocalizedPathname(locale: string): string {
 			padding: 0.25rem;
 			margin: -0.25rem;
 			min-width: 0;
+		}
+
+		.preview-badge {
+			align-self: center;
+			background: var(--docs-red);
+			border-radius: 999px;
+			color: #fff;
+			flex: none;
+			font-size: 0.65rem;
+			font-weight: 700;
+			letter-spacing: 0.02em;
+			line-height: 1;
+			margin-inline-start: 0.5rem;
+			padding: 0.3rem 0.5rem;
+			text-transform: uppercase;
+			white-space: nowrap;
 		}
 
 		.title-wrapper :global(.site-title) {
