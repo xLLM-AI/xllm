@@ -2657,6 +2657,11 @@ bool WorkerImpl::init_model_impl(const std::string& model_weights_path,
   context_.set_model_impl(ModelConfig::get_instance().model_impl());
   context_.set_extension_impl(options_.extension_impl());
   context_.set_model_id(options_.model_id());
+  SpeculativeRuntimeConfig speculative_runtime_config;
+  speculative_runtime_config.is_draft_engine = options_.is_draft_engine();
+  speculative_runtime_config.adaptive_enabled =
+      options_.enable_adaptive_spec_prune();
+  context_.set_speculative_runtime_config(speculative_runtime_config);
   FlashComm1Options flash_comm1_options;
   flash_comm1_options.enable_flashcomm1 = options_.enable_flashcomm1();
   flash_comm1_options.min_prefill_tokens =

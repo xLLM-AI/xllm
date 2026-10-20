@@ -43,8 +43,13 @@ def test_checkpoint_key_resolution_preserves_candidate_order() -> None:
 
 
 def test_required_checkpoint_key_reports_all_supported_names() -> None:
-    with pytest.raises(KeyError, match=r"lm_head\.weight, head\.weight"):
-        _require_checkpoint_key(_KeySet(), ("lm_head.weight", "head.weight"), "output head")
+    candidates = (
+        "lm_head.weight",
+        "model.head.weight",
+        "head.weight",
+    )
+    with pytest.raises(KeyError, match=r"lm_head\.weight, model\.head\.weight, head\.weight"):
+        _require_checkpoint_key(_KeySet(), candidates, "output head")
 
 
 def test_dsv4_loader_uses_shared_model_prefix_resolution(monkeypatch: pytest.MonkeyPatch) -> None:

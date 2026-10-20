@@ -13,8 +13,8 @@
 # limitations under the License.
 
 import tilelang
-from compiler.tilelang.common.spec import DispatchField, TilelangKernel, register_kernel
 
+from xllm.compiler.tilelang.common.spec import DispatchField, TilelangKernel, register_kernel
 from xllm.python.kernels_npu.tilelang import dspark_pack_verify_inputs as kernel_impl
 
 DEPENDENCY_MODULES = (kernel_impl,)

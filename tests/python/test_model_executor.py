@@ -317,6 +317,33 @@ class TestCreateAttentionBackend:
         "xllm.python.model_executor.executor.current_platform.is_npu",
         return_value=True,
     )
+    def test_deepseek_v4_dspark_passes_native_sas_config(self, _mock_is_npu: MagicMock) -> None:
+        attn = _make_attention_layer(head_dim=512)
+        module = types.ModuleType("xllm.python.attention.dsa_attention")
+        module.DsaAttentionBackend = StubAttentionBackend
+        config = {
+            "model_type": "deepseek_v4_dspark",
+            "compress_ratios": [1, 1, 1],
+            "n_layers": 3,
+            "window_size": 128,
+            "dspark_block_size": 5,
+            "dspark_use_native_sas": True,
+        }
+
+        with patch.dict(sys.modules, {module.__name__: module}):
+            backend = _create_attention_backend(attn, torch.device("npu"), torch.bfloat16, config)
+
+        assert backend.init_kwargs["dspark_block_size"] == 5
+        assert backend.init_kwargs["dspark_use_native_sas"] is True
+
+    @patch(
+        "xllm.python.model_executor.executor.current_platform.is_npu",
+        return_value=True,
+    )
+    @patch(
+        "xllm.python.attention.npu_paged_attention.NpuPagedAttentionBackend",
+        StubAttentionBackend,
+    )
     @pytest.mark.parametrize("num_decoding_tokens", [1, 4])
     def test_npu_platform_creates_npu_backend(self, _mock_is_npu: MagicMock, num_decoding_tokens: int) -> None:
         attn = _make_attention_layer(num_kv_heads=1, head_dim=256)
