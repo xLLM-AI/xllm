@@ -27,7 +27,7 @@ TEST(DSparkSamplingTest, BatchedMarkovChainUsesConsensusBeforeNextStep) {
   const auto logits = torch::zeros({2, 3, 8});
   const auto anchors = torch::tensor({0, 4}, torch::kInt64);
   SamplingParameters params;
-  params.all_greedy_sample = true;
+  params.sampling_mode = SamplingMode::GREEDY;
   params.do_sample = torch::zeros({2}, torch::kBool);
   std::vector<torch::Tensor> predecessors;
   predecessors.reserve(3);
@@ -69,8 +69,7 @@ TEST(DSparkSamplingTest, ProbabilisticProposalKeepsConditionalDistributions) {
   const auto logits = torch::zeros({2, 2, 4});
   const auto anchors = torch::tensor({0, 2}, torch::kInt64);
   SamplingParameters params;
-  params.all_greedy_sample = false;
-  params.all_random_sample = true;
+  params.sampling_mode = SamplingMode::RANDOM;
   params.do_sample = torch::ones({2}, torch::kBool);
   params.return_logits = true;
   const auto bias = [](const torch::Tensor& previous) {

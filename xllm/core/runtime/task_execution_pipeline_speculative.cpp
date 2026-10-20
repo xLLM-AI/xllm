@@ -107,22 +107,6 @@ torch::Tensor prefix(const torch::Tensor& storage, int64_t count) {
   return storage.narrow(/*dim=*/0, /*start=*/0, count);
 }
 
-// Greedy draft sampling keeps do_sample because gumbel noise and the
-// sampling-group synchronize still branch on it; it also slots into the
-// kRepeatedRows repeat_interleave.
-SamplingParameters make_slot_draft_sampling(
-    DraftSamplingMode mode,
-    const SamplingParameters& base,
-    const torch::Tensor& greedy_do_sample,
-    int64_t num_rows) {
-  SamplingParameters params = base;
-  prepare_draft_sampling(mode, params);
-  if (mode == DraftSamplingMode::GREEDY) {
-    params.do_sample = prefix(greedy_do_sample, num_rows);
-  }
-  return params;
-}
-
 std::vector<int64_t> decode_graph_batch_sizes(int64_t maximum) {
   std::vector<int64_t> sizes;
   sizes.reserve(maximum / 16 + 5);
@@ -164,22 +148,6 @@ SampleOutput sample_views(const TokenResultTensors& result) {
   return output;
 }
 
-constexpr std::array<torch::Tensor SamplingParameters::*, 14> kRepeatedRows = {
-    &SamplingParameters::frequency_penalties,
-    &SamplingParameters::presence_penalties,
-    &SamplingParameters::repetition_penalties,
-    &SamplingParameters::temperatures,
-    &SamplingParameters::top_p,
-    &SamplingParameters::min_p,
-    &SamplingParameters::seed_offsets,
-    &SamplingParameters::seeds,
-    &SamplingParameters::logits_bias,
-    &SamplingParameters::top_k,
-    &SamplingParameters::unique_token_ids,
-    &SamplingParameters::unique_token_counts,
-    &SamplingParameters::unique_token_ids_lens,
-    &SamplingParameters::do_sample};
-
 uint64_t state_bytes(const MtpContextTensors& state) {
   uint64_t bytes = 0;
   for (const auto* tensor : {&state.previous_tokens,
@@ -209,14 +177,9 @@ bool supports_unified_block_graph(const SpeculativeTaskCapacity& capacity,
          !input.input_params.meta.is_graph_warmup &&
          input.json_object_states.empty() &&
          input.input_params.multi_block_tables.empty() &&
-         sampling.all_greedy_sample && !sampling.use_beam_search &&
-         !sampling.logprobs && !sampling.temperatures.defined() &&
-         !sampling.top_k.defined() && !sampling.top_p.defined() &&
-         !sampling.min_p.defined() && !sampling.logits_bias.defined() &&
-         !sampling.frequency_penalties.defined() &&
-         !sampling.presence_penalties.defined() &&
-         !sampling.repetition_penalties.defined() &&
-         !sampling.filter_mask.defined() && !sampling.filter_bitmask.defined();
+         sampling.sampling_mode == SamplingMode::GREEDY &&
+         !sampling.use_beam_search && !sampling.logprobs &&
+         !sampling.has_sampling_fields();
 }
 
 Status TaskExecutionPipeline::create(
@@ -321,7 +284,6 @@ Status TaskExecutionPipeline::initialize_speculative() {
                                    c.enable_mla};
   base_capacity.max_result_width = width;
   SlotBufferCapacity target_capacity = base_capacity;
-  target_capacity.max_selected_rows = expanded;
   target_capacity.max_sample_rows = expanded;
   target_capacity.max_result_width = 0;
   slots_.reserve(c.slot_count);
@@ -364,7 +326,6 @@ Status TaskExecutionPipeline::initialize_speculative() {
       return status;
     }
     const auto indices = options.dtype(torch::kInt32);
-    slot->draft_sample_indices = torch::arange(draft_samples, indices);
     if (block_draft()) {
       slot->draft_block_indices =
           speculative_capacity_->kind == SpeculativeTaskKind::DSPARK
@@ -376,8 +337,6 @@ Status TaskExecutionPipeline::initialize_speculative() {
     } else {
       slot->draft_first_indices = torch::arange(count, indices).mul(2).add(1);
     }
-    slot->greedy_do_sample =
-        torch::zeros({draft_samples}, options.dtype(torch::kBool));
     slot->proposal_storage =
         torch::empty({count * (width - 1)}, options.dtype(torch::kInt64));
     slot->accepted_mask_storage =
@@ -767,36 +726,25 @@ Status TaskExecutionPipeline::validate_input(SpeculativeSlot& slot,
 Status TaskExecutionPipeline::plan_sampling(SpeculativeSlot& slot,
                                             const LlmForwardInput& input) {
   const auto& base = input.sampling_params;
-  slot.samples = base.sample_idxes.defined() ? base.sample_idxes.numel() : 0;
+  slot.samples = static_cast<uint32_t>(base.num_sample_seqs());
   if (slot.rows == 0 || !slot.decode) {
     return Status();
   }
-  if (slot.samples != slot.rows || !base.selected_token_idxes.defined() ||
-      base.selected_token_idxes.numel() != slot.rows) {
+  if (slot.samples != slot.rows) {
     return invalid("MTP Decode must sample every base row.");
   }
   const auto* selected = base.selected_token_idxes.const_data_ptr<int32_t>();
-  const auto* samples = base.sample_idxes.const_data_ptr<int32_t>();
   for (uint32_t row = 0; row < slot.rows; ++row) {
-    if (selected[row] != static_cast<int32_t>(row) ||
-        samples[row] != static_cast<int32_t>(row)) {
+    if (selected[row] != static_cast<int32_t>(row)) {
       return invalid("MTP Decode sampling rows must be in sequence order.");
     }
   }
   const int64_t width = speculative_capacity_->num_speculative_tokens + 1;
   slot.host_validate_sampling = base;
-  for (const auto member : kRepeatedRows) {
-    if ((base.*member).defined()) {
-      slot.host_validate_sampling.*member =
-          (base.*member).repeat_interleave(width, 0);
-    }
-  }
-  const auto indices =
-      torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
-  slot.host_validate_sampling.selected_token_idxes =
-      torch::arange(slot.rows * width, indices);
-  slot.host_validate_sampling.sample_idxes =
-      slot.host_validate_sampling.selected_token_idxes;
+  expand_sampling_params_for_verify(slot.host_validate_sampling,
+                                    width,
+                                    static_cast<int64_t>(slot.rows) * width,
+                                    torch::Device(torch::kCPU));
   // Rejection sampling produces the final log probabilities once.
   slot.host_validate_sampling.logprobs = false;
   slot.host_validate_sampling.max_top_logprobs = 0;
@@ -1202,11 +1150,8 @@ Status TaskExecutionPipeline::prepare_speculative(
           prefix(slot.context_slots_storage, slot.rows * width);
     }
     const auto& base = slot.target_prefill->sampling_params();
-    slot.rejection = std::make_unique<RejectionSampler>(base.do_sample,
-                                                        base.all_random_sample,
-                                                        base.all_greedy_sample,
-                                                        base.logprobs,
-                                                        base.max_top_logprobs);
+    slot.rejection = std::make_unique<RejectionSampler>(
+        base, base.logprobs, base.max_top_logprobs);
     for (uint32_t step = 0; step < slot.drafts.size(); ++step) {
       auto& invocation = *slot.drafts[step];
       status =
@@ -1227,23 +1172,16 @@ Status TaskExecutionPipeline::prepare_speculative(
         prepare_draft_state(slot, step, /*warmup=*/false);
       }
       const uint32_t draft_rows = slot.rows * (block_draft() ? width - 1 : 1);
-      SamplingParameters params = make_slot_draft_sampling(
-          speculative_capacity_->draft_sampling_mode,
-          base,
-          slot.greedy_do_sample,
-          /*num_rows=*/static_cast<int64_t>(draft_rows));
+      SamplingParameters params = base;
+      prepare_draft_sampling(speculative_capacity_->draft_sampling_mode,
+                             params);
       if (block_draft()) {
         auto stream_guard = prepare_stream_.set_stream_guard();
         if (speculative_capacity_->kind != SpeculativeTaskKind::DSPARK) {
-          for (const auto member : kRepeatedRows) {
-            if ((base.*member).defined()) {
-              params.*member = (base.*member).repeat_interleave(width - 1, 0);
-            }
-          }
+          repeat_sampling_params(params, width - 1);
         }
         params.selected_token_idxes =
             prefix(slot.draft_block_indices, draft_rows);
-        params.sample_idxes = prefix(slot.draft_sample_indices, draft_rows);
       } else if (step == 0) {
         params.selected_token_idxes =
             prefix(slot.draft_first_indices, slot.rows);
@@ -1412,8 +1350,9 @@ void TaskExecutionPipeline::launch_prefill(SpeculativeSlot& slot) {
       synchronize_samples(slot.target_prefill->device_result());
     } else {
       auto tokens = slot.target_prefill->device_result().tokens;
-      synchronize_tokens(
-          tokens, slot.target_prefill->sampling_params().all_greedy_sample);
+      synchronize_tokens(tokens,
+                         slot.target_prefill->sampling_params().sampling_mode ==
+                             SamplingMode::GREEDY);
     }
   }
   if (block_draft()) {
@@ -1491,8 +1430,9 @@ void TaskExecutionPipeline::launch_decode(SpeculativeSlot& slot) {
           invocation.output.hidden_states,
           invocation.sampling->params.selected_token_idxes);
       invocation.sampled = sample(*invocation.sampling, invocation.logits);
-      synchronize_tokens(invocation.sampled.next_tokens,
-                         invocation.sampling->params.all_greedy_sample);
+      synchronize_tokens(
+          invocation.sampled.next_tokens,
+          invocation.sampling->params.sampling_mode == SamplingMode::GREEDY);
       slot.proposal.select(/*dim=*/1, step)
           .copy_(invocation.sampled.next_tokens);
     }
@@ -1551,7 +1491,7 @@ void TaskExecutionPipeline::launch_decode(SpeculativeSlot& slot) {
     synchronize_samples(result);
   } else {
     auto tokens = result.tokens;
-    synchronize_tokens(tokens, base.all_greedy_sample);
+    synchronize_tokens(tokens, base.sampling_mode == SamplingMode::GREEDY);
   }
   torch::ge_out(slot.accepted_mask, result.tokens, /*other=*/0);
   auto lengths = result.lengths;
@@ -1603,11 +1543,9 @@ void TaskExecutionPipeline::launch_block_draft(SpeculativeSlot& slot) {
   auto& input = *invocation.input;
   const int64_t steps = speculative_capacity_->num_speculative_tokens;
   const auto& selected = invocation.sampling->params.selected_token_idxes;
-  SamplingParameters selector_sampling =
-      make_slot_draft_sampling(speculative_capacity_->draft_sampling_mode,
-                               slot.target_prefill->sampling_params(),
-                               slot.greedy_do_sample,
-                               /*num_rows=*/slot.rows);
+  SamplingParameters selector_sampling = slot.target_prefill->sampling_params();
+  prepare_draft_sampling(speculative_capacity_->draft_sampling_mode,
+                         selector_sampling);
   if (speculative_capacity_->kind == SpeculativeTaskKind::DFLASH2) {
     slot.block_gumbel =
         sample_gumbel_noise(slot.rows,
@@ -1652,7 +1590,8 @@ void TaskExecutionPipeline::launch_block_draft(SpeculativeSlot& slot) {
           return draft_->model.dspark_markov_bias(previous);
         },
         [this, &selector_sampling](torch::Tensor& tokens) {
-          synchronize_tokens(tokens, selector_sampling.all_greedy_sample);
+          synchronize_tokens(
+              tokens, selector_sampling.sampling_mode == SamplingMode::GREEDY);
         },
         slot.proposal);
     invocation.sampled.draft_logits =
@@ -1764,7 +1703,6 @@ ForwardOutput TaskExecutionPipeline::consume_speculative(uint32_t slot_id) {
   c10::DeviceGuard guard(device_.unwrap());
   auto tokens = slot.target_prefill->take_result();
   ForwardOutput output;
-  output.do_sample = slot.target_prefill->copy_cpu_do_sample();
   output.is_graph_warmup = slot.is_warmup;
   const bool prefill = !slot.decode;
   if (tokens.tokens.defined()) {
@@ -1853,8 +1791,7 @@ uint64_t TaskExecutionPipeline::speculative_device_bytes() const {
     bytes += slot.target_prefill->device_bytes() +
              slot.draft_prefill->device_bytes() +
              slot.validate_input->device_bytes() +
-             slot.draft_sample_indices.nbytes() +
-             slot.greedy_do_sample.nbytes() + slot.proposal_storage.nbytes() +
+             slot.proposal_storage.nbytes() +
              slot.accepted_mask_storage.nbytes() +
              context_device_bytes(*slot.state) +
              slot.bootstrap.row_storage.nbytes() +
@@ -1880,14 +1817,12 @@ uint64_t TaskExecutionPipeline::speculative_device_bytes() const {
 
 const SampleOutput& TaskExecutionPipeline::sample(Sampling& sampling,
                                                   torch::Tensor& logits) {
-  if (!sampling.params.sample_idxes.defined() ||
-      sampling.params.sample_idxes.numel() == 0) {
+  if (sampling.params.num_sample_seqs() == 0) {
     return sampling.output;
   }
   CHECK_EQ(logits.dim(), 2);
   CHECK_EQ(logits.size(/*dim=*/1), speculative_capacity_->common.vocab_size);
-  CHECK_EQ(logits.size(/*dim=*/0),
-           sampling.params.selected_token_idxes.numel());
+  CHECK_EQ(logits.size(/*dim=*/0), sampling.params.num_sample_seqs());
   sampling.sampled = sampler_.forward(logits, sampling.params);
   sampling.output.next_tokens.copy_(sampling.sampled.next_tokens);
   if (sampling.output.logprobs.defined()) {

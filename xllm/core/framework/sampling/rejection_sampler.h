@@ -24,9 +24,7 @@ namespace xllm {
 
 class RejectionSampler final {
  public:
-  RejectionSampler(const torch::Tensor& do_sample,
-                   bool all_random_sample,
-                   bool all_greedy_sample,
+  RejectionSampler(const SamplingParameters& sampling_params,
                    bool logprobs,
                    int64_t max_top_logprobs);
 
@@ -69,10 +67,9 @@ class RejectionSampler final {
   // max number of top logprobs in the batch
   int64_t max_top_logprobs_ = 0;
 
-  // [batch_size]
+  // [batch_size, 1]
   torch::Tensor do_sample_;
-  bool all_random_sample_ = true;
-  bool all_greedy_sample_ = true;
+  SamplingMode sampling_mode_ = SamplingMode::GREEDY;
 };
 
 }  // namespace xllm

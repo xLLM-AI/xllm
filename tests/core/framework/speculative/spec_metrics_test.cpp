@@ -35,12 +35,9 @@ SpecMetrics calculate_from_widths(
                            make_verify_layouts(tokens, &num_draft_tokens, {}));
 }
 
-RejectionSampler make_greedy_rejection_sampler(int64_t batch_size) {
-  return RejectionSampler(torch::zeros({batch_size}, torch::kBool),
-                          /*all_random_sample=*/false,
-                          /*all_greedy_sample=*/true,
-                          /*logprobs=*/false,
-                          /*max_top_logprobs=*/0);
+RejectionSampler make_greedy_rejection_sampler() {
+  const SamplingParameters params;  // all-greedy by default
+  return RejectionSampler(params, /*logprobs=*/false, /*max_top_logprobs=*/0);
 }
 
 TEST(SpeculativeTokenStatsTest, CountsTokensPerSequence) {
@@ -93,7 +90,7 @@ TEST(SpeculativeTokenStatsTest, GreedyExcludesTargetTokens) {
                     torch::kInt64)
           .unsqueeze(/*dim=*/-1),
       /*value=*/10.0f);
-  const RejectionSampler sampler = make_greedy_rejection_sampler(4);
+  const RejectionSampler sampler = make_greedy_rejection_sampler();
   const SampleOutput sampled =
       sampler.forward(DraftProposal(num_draft_tokens), target_logits);
   const torch::Tensor& masked_tokens = sampled.next_tokens;
@@ -164,7 +161,7 @@ TEST(SpeculativeTokenStatsTest, BlockHandlesSingleAndZeroDrafts) {
       /*dim=*/-1,
       torch::tensor({{9, 8}, {1, 8}}, torch::kInt64).unsqueeze(/*dim=*/-1),
       /*value=*/10.0f);
-  const RejectionSampler sampler = make_greedy_rejection_sampler(2);
+  const RejectionSampler sampler = make_greedy_rejection_sampler();
   const SampleOutput sampled =
       sampler.forward(DraftProposal(num_draft_tokens), target_logits);
   const auto stats =

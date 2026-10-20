@@ -21,7 +21,6 @@ limitations under the License.
 #include <torch/types.h>
 
 #include <algorithm>
-#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -91,39 +90,6 @@ Token token_at_offset(const SampleOutput& output, int64_t offset) {
   return token;
 }
 
-torch::Tensor concat_rows(const torch::Tensor& left,
-                          const torch::Tensor& right,
-                          int64_t left_rows,
-                          int64_t right_rows,
-                          double fill) {
-  if (!left.defined() && !right.defined()) {
-    return {};
-  }
-  const torch::Tensor& reference = left.defined() ? left : right;
-  if (reference.dim() == 1) {
-    return torch::cat(
-        {left.defined() ? left
-                        : torch::full({left_rows}, fill, reference.options()),
-         right.defined()
-             ? right
-             : torch::full({right_rows}, fill, reference.options())},
-        0);
-  }
-  const int64_t width = std::max(left.defined() ? left.size(1) : 0,
-                                 right.defined() ? right.size(1) : 0);
-  torch::Tensor joined =
-      torch::full({left_rows + right_rows, width}, fill, reference.options());
-  if (left.defined()) {
-    joined.narrow(0, 0, left_rows).narrow(1, 0, left.size(1)).copy_(left);
-  }
-  if (right.defined()) {
-    joined.narrow(0, left_rows, right_rows)
-        .narrow(1, 0, right.size(1))
-        .copy_(right);
-  }
-  return joined;
-}
-
 }  // namespace
 
 Token SampleOutput::token_at(int64_t output_idx) const {
@@ -145,14 +111,12 @@ Token SampleOutput::token_at(int64_t output_idx, int64_t token_idx) const {
 void SamplingParameters::init(
     const std::vector<const RequestSamplingParam*>& req_sampling_params,
     const std::vector<int32_t>& selected_token_idxes,
-    const std::vector<int32_t>& sample_idxes,
     const std::vector<std::vector<int64_t>>& unique_token_ids_vec,
     const std::vector<std::vector<int32_t>>& unique_token_counts_vec,
     const std::vector<int32_t>& unique_token_lens_vec,
     const std::vector<torch::Tensor>& filter_mask_rows) {
   *this = SamplingParameters();
   CHECK_EQ(req_sampling_params.size(), selected_token_idxes.size());
-  CHECK_GE(req_sampling_params.size(), sample_idxes.size());
 
   std::vector<float> frequency_penalties;
   std::vector<float> presence_penalties;
@@ -261,10 +225,6 @@ void SamplingParameters::init(
     this->filter_mask =
         torch::cat(rows, /*dim=*/0)
             .view({static_cast<int64_t>(rows.size()), vocab_size});
-    if (sample_idxes.size() != filter_mask_rows.size()) {
-      this->filter_mask = this->filter_mask.index_select(
-          0, torch::tensor(sample_idxes, torch::kLong));
-    }
     HISTOGRAM_OBSERVE(
         json_object_mask_batch_build_latency_microseconds,
         static_cast<int64_t>(mask_batch_timer.elapsed_microseconds()));
@@ -280,34 +240,41 @@ void SamplingParameters::init(
     this->unique_token_ids_lens = make_pinned_cpu_tensor(unique_token_lens_vec);
   }
 
-  // construct do sample tensor
-  std::vector<bool> do_sample;
-  do_sample.reserve(sample_idxes.size());
-  for (const auto idx : sample_idxes) {
-    const auto* p = req_sampling_params[idx];
-    const bool sample = p->temperature != 0.0;
-    do_sample.push_back(sample);
+  // Only a mixed batch dispatches per sequence; uniform batches (greedy or
+  // random, seeded or not) carry no do_sample tensor. The temperatures
+  // vector above normalizes temperature: 0.0F is greedy.
+  const size_t num_random_seqs = std::count_if(
+      temperatures.begin(), temperatures.end(), [](const float temperature) {
+        return temperature != 0.0F;
+      });
+  const bool any_random = num_random_seqs > 0;
+  const bool all_random =
+      !temperatures.empty() && num_random_seqs == temperatures.size();
+  if (any_random && !all_random) {
+    // The rejection sampler's torch::where requires a bool condition tensor.
+    std::vector<bool> do_sample;
+    do_sample.reserve(temperatures.size());
+    for (const float temperature : temperatures) {
+      do_sample.push_back(temperature != 0.0F);
+    }
+    this->do_sample = make_pinned_cpu_tensor(do_sample);
   }
-  this->sample_idxes = make_pinned_cpu_tensor(sample_idxes);
-  // The rejection sampler's torch::where requires a bool condition tensor.
-  this->do_sample = make_pinned_cpu_tensor(do_sample);
+  this->sampling_mode =
+      all_random ? SamplingMode::RANDOM
+                 : (any_random ? SamplingMode::MIXED : SamplingMode::GREEDY);
   this->logprobs = logprobs;
   this->max_top_logprobs = max_top_logprobs;
   this->is_embeddings = is_embeddings;
   this->num_return_sequences = num_return_sequences;
-  if (this->do_sample.defined()) {
-    this->all_random_sample = this->do_sample.all().item<bool>();
-    this->all_greedy_sample = !this->do_sample.any().item<bool>();
-  }
 }
 
 SamplingParameters SamplingParameters::to(const torch::Device& device,
                                           torch::ScalarType dtype) const {
   SamplingParameters params;
 
-  // selected/sample indices are tiny control tensors and
-  // correctness-critical. Use blocking H2D copies to avoid consuming
-  // partially transferred index buffers on NPU runtime paths.
+  // selected indices are tiny control tensors and correctness-critical. Use
+  // blocking H2D copies to avoid consuming partially transferred index
+  // buffers on NPU runtime paths.
   params.selected_token_idxes =
       selected_token_idxes.defined()
           ? safe_to(selected_token_idxes, device).contiguous()
@@ -352,13 +319,9 @@ SamplingParameters SamplingParameters::to(const torch::Device& device,
   params.unique_token_counts = safe_to(unique_token_counts, device, true);
   params.unique_token_ids_lens = safe_to(unique_token_ids_lens, device, true);
 
-  params.sample_idxes = sample_idxes.defined()
-                            ? safe_to(sample_idxes, device).contiguous()
-                            : sample_idxes;
   params.do_sample = safe_to(do_sample, device, true);
   params.acc_logprob = safe_to(acc_logprob, device, true);
-  params.all_random_sample = all_random_sample;
-  params.all_greedy_sample = all_greedy_sample;
+  params.sampling_mode = sampling_mode;
   params.logprobs = logprobs;
   params.return_logits = return_logits;
   params.max_top_logprobs = max_top_logprobs;
@@ -369,72 +332,19 @@ SamplingParameters SamplingParameters::to(const torch::Device& device,
   return params;
 }
 
-void SamplingParameters::concat(const SamplingParameters& param) {
-  if (!param.selected_token_idxes.defined() ||
-      param.selected_token_idxes.numel() == 0) {
-    return;
-  }
-  if (!selected_token_idxes.defined() || selected_token_idxes.numel() == 0) {
-    *this = param;
-    return;
-  }
-  const int64_t left_rows = selected_token_idxes.numel();
-  const int64_t right_rows = param.selected_token_idxes.numel();
-  const int64_t left_samples = sample_idxes.numel();
-  const int64_t right_samples = param.sample_idxes.numel();
-  for (const auto& [member, fill] :
-       std::array<std::pair<torch::Tensor SamplingParameters::*, double>, 14>{
-           {{&SamplingParameters::frequency_penalties, 0},
-            {&SamplingParameters::presence_penalties, 0},
-            {&SamplingParameters::repetition_penalties, 1},
-            {&SamplingParameters::temperatures, 1},
-            {&SamplingParameters::top_p, 1},
-            {&SamplingParameters::top_k, 0},
-            {&SamplingParameters::min_p, 0},
-            {&SamplingParameters::logits_bias, 0},
-            {&SamplingParameters::seeds, -1},
-            {&SamplingParameters::seed_offsets, 0},
-            {&SamplingParameters::unique_token_ids, 0},
-            {&SamplingParameters::unique_token_counts, 0},
-            {&SamplingParameters::unique_token_ids_lens, 0},
-            {&SamplingParameters::filter_bitmask, -1}}}) {
-    this->*member =
-        concat_rows(this->*member, param.*member, left_rows, right_rows, fill);
-  }
-  filter_mask = concat_rows(
-      filter_mask, param.filter_mask, left_samples, right_samples, 0);
-  acc_logprob = concat_rows(
-      acc_logprob, param.acc_logprob, left_samples, right_samples, 0);
-  selected_token_idxes =
-      torch::cat({selected_token_idxes,
-                  param.selected_token_idxes + selected_token_idxes[-1] + 1},
-                 0);
-  sample_idxes = torch::cat({sample_idxes, param.sample_idxes + left_rows}, 0);
-  do_sample = torch::cat({do_sample, param.do_sample}, 0);
-  all_random_sample = all_random_sample && param.all_random_sample;
-  all_greedy_sample = all_greedy_sample && param.all_greedy_sample;
-  logprobs = logprobs || param.logprobs;
-  return_logits = return_logits || param.return_logits;
-  is_embeddings = is_embeddings || param.is_embeddings;
-  use_beam_search = use_beam_search || param.use_beam_search;
-  max_top_logprobs = std::max(max_top_logprobs, param.max_top_logprobs);
-  num_return_sequences =
-      std::max(num_return_sequences, param.num_return_sequences);
-}
-
 void prepare_draft_sampling(DraftSamplingMode mode,
                             SamplingParameters& sampling_params) {
-  // In GREEDY mode the sampler never reads do_sample, so callers keep
-  // whatever do_sample they carried.
   sampling_params.logprobs = false;
   sampling_params.max_top_logprobs = 0;
   sampling_params.use_beam_search = false;
   if (mode == DraftSamplingMode::GREEDY) {
-    sampling_params.all_greedy_sample = true;
-    sampling_params.all_random_sample = false;
+    sampling_params.sampling_mode = SamplingMode::GREEDY;
+    sampling_params.do_sample = torch::Tensor();
+    clear_sampling_transforms(sampling_params);
   }
   // The verifier needs q exactly when the draft actually samples.
-  sampling_params.return_logits = !sampling_params.all_greedy_sample;
+  sampling_params.return_logits =
+      sampling_params.sampling_mode != SamplingMode::GREEDY;
 }
 
 }  // namespace xllm

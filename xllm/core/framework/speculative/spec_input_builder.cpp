@@ -165,14 +165,14 @@ void append_paged_kv_row(const Slice<int32_t>& block_table,
 MtpTopkStatePtr select_mtp_topk_state_for_next_step(
     const MtpTopkStatePtr& state,
     const SamplingParameters& sampling_params) {
-  if (state == nullptr || !sampling_params.selected_token_idxes.defined()) {
+  if (state == nullptr) {
+    return state;
+  }
+  const int64_t num_seqs = sampling_params.num_sample_seqs();
+  if (num_seqs == 0 || state->num_rows() == num_seqs) {
     return state;
   }
   const torch::Tensor& selected_idxes = sampling_params.selected_token_idxes;
-  if (selected_idxes.numel() == 0 ||
-      state->num_rows() == selected_idxes.numel()) {
-    return state;
-  }
   if (selected_idxes.device().is_cpu()) {
     CHECK_GT(state->num_rows(), selected_idxes.max().item<int64_t>())
         << "MTP selected top-k index exceeds top-k rows.";

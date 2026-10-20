@@ -43,9 +43,15 @@ class Sampler final {
   // min-p, top-k/top-p, and the token filter mask/bitmask. Shared by normal
   // decode and logits-only speculative verify so both consume the same
   // distribution.
-  static torch::Tensor process_logits(torch::Tensor& logits,
-                                      const SamplingParameters& params,
-                                      const torch::Tensor& filter_mask = {});
+  static void process_logits(torch::Tensor& logits,
+                             const SamplingParameters& params,
+                             const torch::Tensor& filter_mask = {});
+
+  // In-place logits bias and repetition/frequency/presence penalties. The
+  // first stage of process_logits, shared by paths that skip the later
+  // transforms (e.g. the RecSampler fast path).
+  static void apply_sampling_penalties(torch::Tensor& logits,
+                                       const SamplingParameters& params);
 
   // helper functions
   // probs: [..., vocab_size]

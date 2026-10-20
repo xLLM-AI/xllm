@@ -24,10 +24,7 @@ namespace {
 SamplingParameters make_sampling_params(int64_t rows, bool random) {
   SamplingParameters params;
   params.selected_token_idxes = torch::arange(rows, torch::kInt);
-  params.sample_idxes = torch::arange(rows, torch::kInt);
-  params.do_sample = torch::full({rows}, random, torch::kBool);
-  params.all_greedy_sample = !random;
-  params.all_random_sample = random;
+  params.sampling_mode = random ? SamplingMode::RANDOM : SamplingMode::GREEDY;
   return params;
 }
 

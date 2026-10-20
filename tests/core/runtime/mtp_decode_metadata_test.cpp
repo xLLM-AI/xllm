@@ -66,15 +66,15 @@ TEST(MtpWorkerSelectionTest, UnifiedFlagSelectsPythonMtpWorker) {
 
 TEST(MtpWorkerSelectionTest, RequestRoutingDoesNotRejectUnsupportedSampling) {
   LlmForwardInput input;
-  input.sampling_params.all_greedy_sample = true;
+  input.sampling_params.sampling_mode = SamplingMode::GREEDY;
   EXPECT_TRUE(supports_unified_mtp_request(input, false));
   input.sampling_params.logprobs = true;
   input.sampling_params.max_top_logprobs = 5;
   EXPECT_TRUE(supports_unified_mtp_request(input, false));
   EXPECT_FALSE(supports_unified_mtp_request(input, true));
-  input.sampling_params.all_greedy_sample = false;
+  input.sampling_params.sampling_mode = SamplingMode::MIXED;
   EXPECT_FALSE(supports_unified_mtp_request(input, false));
-  input.sampling_params.all_greedy_sample = true;
+  input.sampling_params.sampling_mode = SamplingMode::GREEDY;
   input.sampling_params.use_beam_search = true;
   EXPECT_FALSE(supports_unified_mtp_request(input, false));
   input.sampling_params.use_beam_search = false;

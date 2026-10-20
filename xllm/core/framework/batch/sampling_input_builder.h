@@ -37,14 +37,12 @@ class SamplingInputBuilder final {
               int32_t token_index,
               const TokenCounts* counts = nullptr,
               const TokenCounts* excluded_counts = nullptr,
-              bool sample = true,
               const Sequence* sequence = nullptr);
   void merge(SamplingInputBuilder other, int32_t token_offset);
   SamplingParameters build();
 
   size_t size() const { return selected_token_indices_.size(); }
   bool empty() const { return selected_token_indices_.empty(); }
-  const std::vector<int32_t>& sample_indices() const { return sample_indices_; }
   const std::vector<int32_t>& selected_token_indices() const {
     return selected_token_indices_;
   }
@@ -53,7 +51,6 @@ class SamplingInputBuilder final {
   std::vector<const RequestSamplingParam*> params_;
   std::vector<const Sequence*> sequences_;
   std::vector<int32_t> selected_token_indices_;
-  std::vector<int32_t> sample_indices_;
   std::vector<std::vector<int64_t>> token_ids_;
   std::vector<std::vector<int32_t>> token_counts_;
   std::vector<int32_t> token_lengths_;

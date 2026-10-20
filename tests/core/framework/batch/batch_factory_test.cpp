@@ -108,17 +108,15 @@ MMData make_decoder_context_data() {
   return mm_data;
 }
 
-TEST(SamplingInputBuilderTest,
-     MergeOffsetsSelectedRowsAndSampleRowsSeparately) {
+TEST(SamplingInputBuilderTest, MergeOffsetsSelectedRows) {
   RequestSamplingParam params;
   SamplingInputBuilder first;
-  first.append(&params, 1, nullptr, nullptr, /*sample=*/false);
+  first.append(&params, 1);
   first.append(&params, 3);
   SamplingInputBuilder second;
   second.append(&params, 0);
   first.merge(std::move(second), /*token_offset=*/4);
   EXPECT_EQ(first.selected_token_indices(), (std::vector<int32_t>{1, 3, 4}));
-  EXPECT_EQ(first.sample_indices(), (std::vector<int32_t>{1, 2}));
   const auto sampling = first.build();
   EXPECT_TRUE(torch::equal(sampling.selected_token_idxes,
                            torch::tensor({1, 3, 4}, torch::kInt)));

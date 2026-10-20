@@ -261,80 +261,6 @@ ForwardOutput finalize_verify_output(
 }
 
 template <typename TargetInput>
-void SpeculativeWorkerImpl<TargetInput>::update_sampling_params(
-    SamplingParameters& sampling_params,
-    const int32_t num_val_tokens,
-    const int32_t total_num_val_tokens) {
-  const torch::Tensor selected_token_idxes =
-      arange_indices(total_num_val_tokens, device_);
-
-  // sample_idxes equals to selected_token_idxes since only process decode batch
-  sampling_params.selected_token_idxes = selected_token_idxes;
-  sampling_params.sample_idxes = selected_token_idxes;
-
-  repeat_interleave_if_defined(sampling_params.frequency_penalties,
-                               num_val_tokens);
-  repeat_interleave_if_defined(sampling_params.presence_penalties,
-                               num_val_tokens);
-  repeat_interleave_if_defined(sampling_params.repetition_penalties,
-                               num_val_tokens);
-  repeat_interleave_if_defined(sampling_params.temperatures, num_val_tokens);
-  repeat_interleave_if_defined(sampling_params.top_p, num_val_tokens);
-  repeat_interleave_if_defined(sampling_params.min_p, num_val_tokens);
-  repeat_interleave_if_defined(sampling_params.logits_bias, num_val_tokens);
-  repeat_interleave_if_defined(sampling_params.seeds, num_val_tokens);
-  repeat_interleave_if_defined(sampling_params.seed_offsets, num_val_tokens);
-  repeat_interleave_if_defined(sampling_params.top_k, num_val_tokens);
-  repeat_interleave_if_defined(sampling_params.unique_token_ids,
-                               num_val_tokens);
-  repeat_interleave_if_defined(sampling_params.unique_token_counts,
-                               num_val_tokens);
-  repeat_interleave_if_defined(sampling_params.unique_token_ids_lens,
-                               num_val_tokens);
-  repeat_interleave_if_defined(sampling_params.do_sample, num_val_tokens);
-  repeat_interleave_if_defined(sampling_params.filter_mask, num_val_tokens);
-  repeat_interleave_if_defined(sampling_params.filter_bitmask, num_val_tokens);
-}
-
-template <typename TargetInput>
-void SpeculativeWorkerImpl<TargetInput>::update_sampling_params(
-    SamplingParameters& sampling_params,
-    const std::vector<int32_t>& per_seq_val_tokens,
-    const int32_t total_num_val_tokens) {
-  const torch::Tensor selected_token_idxes =
-      arange_indices(total_num_val_tokens, device_);
-  sampling_params.selected_token_idxes = selected_token_idxes;
-  // Alias sample_idxes to selected_token_idxes rather than issuing a second
-  // identical arange.
-  sampling_params.sample_idxes = sampling_params.selected_token_idxes;
-
-  torch::Tensor repeats_tensor =
-      async_h2d_tensor(std::vector<int64_t>(per_seq_val_tokens.begin(),
-                                            per_seq_val_tokens.end()),
-                       device_);
-  repeat_interleave_if_defined(sampling_params.frequency_penalties,
-                               repeats_tensor);
-  repeat_interleave_if_defined(sampling_params.presence_penalties,
-                               repeats_tensor);
-  repeat_interleave_if_defined(sampling_params.repetition_penalties,
-                               repeats_tensor);
-  repeat_interleave_if_defined(sampling_params.temperatures, repeats_tensor);
-  repeat_interleave_if_defined(sampling_params.top_p, repeats_tensor);
-  repeat_interleave_if_defined(sampling_params.min_p, repeats_tensor);
-  repeat_interleave_if_defined(sampling_params.logits_bias, repeats_tensor);
-  repeat_interleave_if_defined(sampling_params.seeds, repeats_tensor);
-  repeat_interleave_if_defined(sampling_params.seed_offsets, repeats_tensor);
-  repeat_interleave_if_defined(sampling_params.top_k, repeats_tensor);
-  repeat_interleave_if_defined(sampling_params.unique_token_ids,
-                               repeats_tensor);
-  repeat_interleave_if_defined(sampling_params.unique_token_counts,
-                               repeats_tensor);
-  repeat_interleave_if_defined(sampling_params.unique_token_ids_lens,
-                               repeats_tensor);
-  repeat_interleave_if_defined(sampling_params.do_sample, repeats_tensor);
-}
-
-template <typename TargetInput>
 void SpeculativeWorkerImpl<TargetInput>::prepare_validate_inputs(
     const TargetInput& input,
     TargetInput& validate_input) {
@@ -446,9 +372,10 @@ void SpeculativeWorkerImpl<TargetInput>::prepare_validate_inputs(
   }
   input_params.attention.rebuild_device_buffer(device_);
 
-  // update the sampling_params
-  update_sampling_params(
-      validate_input.sampling_params, num_val_tokens, total_num_val_tokens);
+  expand_sampling_params_for_verify(validate_input.sampling_params,
+                                    num_val_tokens,
+                                    total_num_val_tokens,
+                                    device_);
 
   scale_speculative_parallel_token_counts(input_params, num_val_tokens);
   validate_input.runtime.device_tensors_ready = true;
@@ -570,9 +497,10 @@ void SpeculativeWorkerImpl<TargetInput>::prepare_validate_inputs(
                                    /*update_block_tables=*/true);
   input_params.attention.rebuild_device_buffer(device_);
 
-  // update sampling params using the per-seq width.
-  update_sampling_params(
-      validate_input.sampling_params, per_seq_val_tokens, total_num_val_tokens);
+  expand_sampling_params_for_verify(validate_input.sampling_params,
+                                    per_seq_val_tokens,
+                                    total_num_val_tokens,
+                                    device_);
 
   // Note: dp_global_token_nums is NOT scaled here. Under adaptive pruning each
   // DP rank's validate token count is data-dependent, so a rank-local estimate

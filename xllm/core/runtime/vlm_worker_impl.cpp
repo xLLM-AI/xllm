@@ -148,7 +148,7 @@ std::optional<ForwardOutput> VLMWorkerImpl::step_internal(
     ModelInputParams params(input.input_params);
     model_output = model_executor_->forward(
         input.token_ids, input.positions, kv_caches_, params);
-    if (sampling_params.selected_token_idxes.defined()) {
+    if (sampling_params.num_sample_seqs() > 0) {
       lm_head_selected_token_idxes = remap_selected_token_idxes_for_lm_head(
           sampling_params.selected_token_idxes,
           params.parallel,
@@ -156,7 +156,7 @@ std::optional<ForwardOutput> VLMWorkerImpl::step_internal(
     }
   }
 
-  if (sampling_params.selected_token_idxes.defined()) {
+  if (sampling_params.num_sample_seqs() > 0) {
     if (options_.enable_speculative_decode()) {
       logits = model_->logits(model_output.hidden_states,
                               lm_head_selected_token_idxes,
@@ -179,8 +179,7 @@ std::optional<ForwardOutput> VLMWorkerImpl::step_internal(
   }
 
   ForwardOutput output;
-  if (sampling_params.selected_token_idxes.defined()) {
-    output.do_sample = sampling_params.do_sample;
+  if (sampling_params.num_sample_seqs() > 0) {
     output.logprobs = sampling_params.logprobs;
     output.max_top_logprobs = sampling_params.max_top_logprobs;
     if (input.skip_sampling_for_logits_only) {

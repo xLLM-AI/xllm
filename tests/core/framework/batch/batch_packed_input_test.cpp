@@ -248,7 +248,6 @@ RecForwardInput make_rec_transport_input() {
              {"MULTI_MODAL_INDICES", torch::tensor({1}, torch::kInt64)}})});
   input.sampling_params.selected_token_idxes =
       torch::tensor({1}, torch::kInt32);
-  input.sampling_params.sample_idxes = torch::tensor({0}, torch::kInt32);
   input.sample_sequence_ids = {"rec#0"};
   input.sample_prior_output_rows = {-1};
   return input;
@@ -264,8 +263,6 @@ void expect_rec_transport_input(const RecForwardInput& input) {
             (std::vector<int32_t>{2}));
   EXPECT_TRUE(torch::equal(input.sampling_params.selected_token_idxes,
                            torch::tensor({1}, torch::kInt32)));
-  EXPECT_TRUE(torch::equal(input.sampling_params.sample_idxes,
-                           torch::tensor({0}, torch::kInt32)));
   EXPECT_EQ(input.sample_sequence_ids, (std::vector<std::string>{"rec#0"}));
   EXPECT_EQ(input.sample_prior_output_rows, (std::vector<int32_t>{-1}));
   const auto values = input.input_params.features.mm_data.get<torch::Tensor>(
@@ -303,7 +300,6 @@ VlmForwardInput make_vlm_transport_input() {
                                                torch::tensor({{5.5F, 6.5F}})};
   input.sampling_params.selected_token_idxes =
       torch::tensor({1}, torch::kInt32);
-  input.sampling_params.sample_idxes = torch::tensor({0}, torch::kInt32);
   input.sample_sequence_ids = {"vlm#0"};
   input.sample_prior_output_rows = {-1};
   return input;
@@ -791,7 +787,7 @@ void expect_packed_sample_count_hint() {
   Input source;
   source.sampling_params.selected_token_idxes =
       torch::tensor({0, 1}, torch::kInt32);
-  source.sampling_params.sample_idxes = torch::tensor({0, 1}, torch::kInt32);
+  source.sampling_params.do_sample = torch::tensor({true, false}, torch::kBool);
   proto::PackedForwardInput packed;
   ASSERT_TRUE(source.to_packed_proto(&packed));
   ASSERT_TRUE(packed.has_sample_count());
@@ -800,7 +796,7 @@ void expect_packed_sample_count_hint() {
   ASSERT_TRUE(lazy.from_packed_proto(packed));
   EXPECT_EQ(lazy.input_host_sample_count, 2);
   EXPECT_EQ(lazy.clone().input_host_sample_count, 2);
-  EXPECT_FALSE(lazy.sampling_params.sample_idxes.defined());
+  EXPECT_FALSE(lazy.sampling_params.do_sample.defined());
   EXPECT_FALSE(lazy.sampling_params.selected_token_idxes.defined());
 
   const void* retained_data = lazy.runtime.input_host_buffer.data_ptr();
@@ -815,8 +811,8 @@ void expect_packed_sample_count_hint() {
   EXPECT_FALSE(lazy.from_packed_proto(packed));
 
   const std::string retained_proto = packed.SerializeAsString();
-  source.sampling_params.sample_idxes =
-      source.sampling_params.sample_idxes.reshape({1, 2});
+  source.sampling_params.do_sample =
+      source.sampling_params.do_sample.reshape({1, 2});
   EXPECT_FALSE(source.to_packed_proto(&packed));
   EXPECT_EQ(packed.SerializeAsString(), retained_proto);
 
@@ -847,7 +843,7 @@ void expect_packed_sample_count_mismatch_rejected() {
   Input source;
   source.sampling_params.selected_token_idxes =
       torch::tensor({0, 1}, torch::kInt32);
-  source.sampling_params.sample_idxes = torch::tensor({0, 1}, torch::kInt32);
+  source.sampling_params.do_sample = torch::tensor({true, false}, torch::kBool);
   proto::PackedForwardInput packed;
   ASSERT_TRUE(source.to_packed_proto(&packed));
   packed.set_sample_count(1);
@@ -863,7 +859,7 @@ void expect_packed_sample_count_mismatch_rejected() {
             unpacked,
             /*materialize_device_buffer=*/false);
       },
-      "Packed sample count does not match sample_idxes");
+      "Packed sample count does not match sampling rows");
 }
 
 }  // namespace
@@ -886,7 +882,7 @@ TEST(BatchPackedInputDeathTest, VlmPackedSampleCountMustMatchPayload) {
   expect_packed_sample_count_mismatch_rejected<VlmForwardInput>();
 }
 
-TEST(BatchPackedInputTest, PackedProtoLazyUnpackRestoresSampleIdxes) {
+TEST(BatchPackedInputTest, PackedProtoLazyUnpackRestoresDoSample) {
   RequestSamplingParam sampling_param;
   sampling_param.logprobs = true;
 
@@ -932,7 +928,7 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackRestoresSampleIdxes) {
   LlmForwardInput input =
       builder.build_forward_input(/*num_decoding_tokens=*/1,
                                   /*min_decoding_batch_size=*/0);
-  ASSERT_TRUE(input.sampling_params.sample_idxes.defined());
+  ASSERT_TRUE(input.sampling_params.do_sample.defined());
   input.sampling_params.min_p = torch::tensor({0.1F});
   input.sampling_params.logits_bias = torch::tensor({{0.0F, -INFINITY, 2.0F}});
   input.sampling_params.seeds = torch::tensor({42}, torch::kLong);
@@ -946,7 +942,7 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackRestoresSampleIdxes) {
 
   LlmForwardInput lazy_input;
   ASSERT_TRUE(lazy_input.from_packed_proto(packed_input));
-  EXPECT_FALSE(lazy_input.sampling_params.sample_idxes.defined());
+  EXPECT_FALSE(lazy_input.sampling_params.do_sample.defined());
   EXPECT_TRUE(lazy_input.runtime.input_host_buffer_has_layout);
 
   LlmForwardInput unpacked_input;
@@ -955,10 +951,8 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackRestoresSampleIdxes) {
                                                     torch::kFloat32,
                                                     unpacked_input,
                                                     false));
-  ASSERT_TRUE(unpacked_input.sampling_params.sample_idxes.defined());
+  ASSERT_TRUE(unpacked_input.sampling_params.do_sample.defined());
   EXPECT_EQ(unpacked_input.input_host_sample_count, 1);
-  EXPECT_TRUE(tensor_equals_vector<int32_t>(
-      unpacked_input.sampling_params.sample_idxes, {0}));
   EXPECT_TRUE(torch::equal(unpacked_input.sampling_params.min_p,
                            input.sampling_params.min_p));
   EXPECT_TRUE(torch::equal(unpacked_input.sampling_params.logits_bias,

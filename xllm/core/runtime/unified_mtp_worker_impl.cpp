@@ -53,12 +53,8 @@ bool supports_unified_mtp_request(const LlmForwardInput& input, bool adaptive) {
   const SamplingParameters& sampling = input.sampling_params;
   return !adaptive && input.json_object_states.empty() &&
          input.input_params.multi_block_tables.empty() &&
-         sampling.all_greedy_sample && !sampling.use_beam_search &&
-         !sampling.temperatures.defined() && !sampling.top_k.defined() &&
-         !sampling.top_p.defined() && !sampling.frequency_penalties.defined() &&
-         !sampling.presence_penalties.defined() &&
-         !sampling.repetition_penalties.defined() &&
-         !sampling.filter_mask.defined() && !sampling.filter_bitmask.defined();
+         sampling.sampling_mode == SamplingMode::GREEDY &&
+         !sampling.use_beam_search && !sampling.has_sampling_fields();
 }
 
 UnifiedMtpWorkerImpl::UnifiedMtpWorkerImpl(const ParallelArgs& parallel_args,
@@ -328,7 +324,6 @@ std::optional<ForwardOutput> UnifiedMtpWorkerImpl::run_unified_python_mtp_graph(
   c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
 
   ForwardOutput target_output;
-  target_output.do_sample = input.sampling_params.do_sample;
   target_output.logprobs = input.sampling_params.logprobs;
   target_output.max_top_logprobs = input.sampling_params.max_top_logprobs;
   target_output.sample_output.next_tokens = graph_output.committed_tokens;

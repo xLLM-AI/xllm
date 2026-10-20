@@ -24,7 +24,7 @@ namespace xllm {
 DraftProposal sample_dspark_block(
     const torch::Tensor& base_logits,
     const torch::Tensor& anchor_token_ids,
-    SamplingParameters sampling,
+    const SamplingParameters& sampling,
     const std::function<torch::Tensor(const torch::Tensor&)>& markov_bias,
     const std::function<void(torch::Tensor&)>& synchronize_tokens,
     torch::Tensor tokens) {
@@ -37,9 +37,6 @@ DraftProposal sample_dspark_block(
   const int64_t steps = base_logits.size(1);
   const int64_t vocab = base_logits.size(2);
   CHECK_GT(steps, 0);
-  sampling.selected_token_idxes =
-      torch::empty({0}, anchor_token_ids.options().dtype(torch::kInt32));
-  sampling.sample_idxes = sampling.selected_token_idxes;
   if (!tokens.defined()) {
     tokens = torch::empty({rows, steps}, anchor_token_ids.options());
   } else {

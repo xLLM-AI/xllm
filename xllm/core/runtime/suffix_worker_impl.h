@@ -44,8 +44,7 @@ class SuffixWorkerImpl : public SpeculativeWorkerImpl<LlmForwardInput> {
       const LlmForwardInput& inputs) override;
 
  private:
-  SampleOutput validate(const SamplingParameters& sampling_params,
-                        const DraftProposal& draft_proposal,
+  SampleOutput validate(const DraftProposal& draft_proposal,
                         const ForwardOutput& target_output);
 
  private:

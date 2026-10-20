@@ -18,6 +18,7 @@ limitations under the License.
 #include <torch/types.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -25,8 +26,13 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/sampling/draft_sampling_mode.h"
+#include "core/util/tensor_helper.h"
 
 namespace xllm {
+
+// How a batch's sequences are sampled. MIXED is the only mode that carries a
+// do_sample tensor for the per-row choice.
+enum class SamplingMode : int8_t { GREEDY, RANDOM, MIXED };
 
 struct Token;
 
@@ -47,7 +53,6 @@ struct RequestSamplingParam {
   std::vector<int32_t> all_stop_token_ids;
   bool logprobs = false;
   int64_t top_logprobs = 0;
-  bool do_sample = false;
   bool is_embeddings = false;
   bool json_object = false;
   int32_t beam_width = 0;
@@ -107,7 +112,6 @@ struct SamplingParameters {
  public:
   void init(const std::vector<const RequestSamplingParam*>& req_sampling_params,
             const std::vector<int32_t>& selected_token_idxes,
-            const std::vector<int32_t>& sample_idxes,
             const std::vector<std::vector<int64_t>>& unique_token_ids_vec,
             const std::vector<std::vector<int32_t>>& unique_token_counts_vec,
             const std::vector<int32_t>& unique_token_lens_vec,
@@ -115,9 +119,6 @@ struct SamplingParameters {
 
   SamplingParameters to(const torch::Device& device,
                         torch::ScalarType dtype) const;
-
-  // concat two SamplingParameters into one
-  void concat(const SamplingParameters& param);
 
   // selected tokens are tokens for sampling the next token,
   // including the generated tokens and the last prompt token
@@ -169,20 +170,18 @@ struct SamplingParameters {
   // [num_tokens] IntTensor
   torch::Tensor unique_token_ids_lens;
 
-  // the last index of the selected tokens for sampling.
-  // [num_seqs] IntTensor
-  torch::Tensor sample_idxes;
-
   // whether to sample for each sequence.
   // [num_seqs] BoolTensor
+  // Defined only for mixed batches (see init); use require_do_sample() for
+  // per-row dispatch. Per-sequence row domain.
   torch::Tensor do_sample;
 
   // Beam search accumulated log probability.
   // [num_seq, 1] FloatTensor
   torch::Tensor acc_logprob;
 
-  bool all_random_sample = false;
-  bool all_greedy_sample = true;
+  // How this batch's sequences are sampled (see SamplingMode).
+  SamplingMode sampling_mode = SamplingMode::GREEDY;
 
   // whether to output logprobs for each generated token.
   bool logprobs = false;
@@ -202,7 +201,136 @@ struct SamplingParameters {
 
   // for beam search
   bool use_beam_search = false;
+
+  int64_t num_sample_seqs() const {
+    return selected_token_idxes.defined() ? selected_token_idxes.numel() : 0;
+  }
+
+  // Whether any post-penalty transform in Sampler::process_logits (top-k,
+  // top-p, min-p, or the token filter masks) is active for this batch; fast
+  // paths that only apply penalties consult this instead of restating the
+  // list.
+  bool has_post_penalty_transforms() const;
+
+  // Whether any per-row sampling field (penalties, transforms, seeds, token
+  // filters) is defined; a fully greedy batch with no per-row state has none.
+  bool has_sampling_fields() const;
+
+  // Fails fast unless the batch is mixed (see do_sample).
+  const torch::Tensor& require_do_sample() const {
+    CHECK(do_sample.defined())
+        << "mixed sampling requires do_sample to be defined";
+    return do_sample;
+  }
 };
+
+// The single registry of SamplingParameters' tensor members that carry
+// per-row (per-validate-row) sampling state, each tagged with the roles it
+// plays. The derived lists below (repeat/clear/post-penalty) all iterate this
+// registry — a new per-row member is added exactly once here, with the roles
+// it participates in.
+//
+// Roles:
+// - clear_on_greedy_draft: dead on a greedy draft leg and therefore cleared
+//   by clear_sampling_transforms.
+// - post_penalty_transform: a transform in Sampler::process_logits applied
+//   after the penalties (top-k, top-p, min-p, or the token filter masks).
+//
+// Per-sequence members (selected_token_idxes, do_sample) are handled by
+// their call sites; slot_buffer.cpp's kFields is a separate staging-side
+// list.
+struct SamplingFieldDesc {
+  torch::Tensor SamplingParameters::* member;
+  bool clear_on_greedy_draft;
+  bool post_penalty_transform;
+};
+
+inline constexpr std::array<SamplingFieldDesc, 15> kSamplingFields = {
+    {{&SamplingParameters::frequency_penalties, false, false},
+     {&SamplingParameters::presence_penalties, false, false},
+     {&SamplingParameters::repetition_penalties, false, false},
+     {&SamplingParameters::temperatures, true, false},
+     {&SamplingParameters::top_p, true, true},
+     {&SamplingParameters::min_p, true, true},
+     {&SamplingParameters::seed_offsets, true, false},
+     {&SamplingParameters::seeds, true, false},
+     {&SamplingParameters::logits_bias, false, false},
+     {&SamplingParameters::top_k, true, true},
+     {&SamplingParameters::unique_token_ids, false, false},
+     {&SamplingParameters::unique_token_counts, false, false},
+     {&SamplingParameters::unique_token_ids_lens, false, false},
+     {&SamplingParameters::filter_mask, false, true},
+     {&SamplingParameters::filter_bitmask, false, true}}};
+
+// Out-of-line because it derives from kSamplingFields (below the struct).
+inline bool SamplingParameters::has_post_penalty_transforms() const {
+  for (const auto& field : kSamplingFields) {
+    if (field.post_penalty_transform && (this->*field.member).defined()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Out-of-line because it derives from kSamplingFields (below the struct).
+inline bool SamplingParameters::has_sampling_fields() const {
+  return std::any_of(kSamplingFields.begin(),
+                     kSamplingFields.end(),
+                     [this](const SamplingFieldDesc& field) {
+                       return (this->*field.member).defined();
+                     });
+}
+
+// Repeats every per-row sampling field across speculative rows while
+// preserving undefined optional fields. Repeats can be a scalar count or a
+// tensor of per-row counts.
+template <typename Repeats>
+inline void repeat_sampling_params(SamplingParameters& sampling_params,
+                                   const Repeats& repeats) {
+  for (const auto& field : kSamplingFields) {
+    repeat_interleave_if_defined(sampling_params.*field.member, repeats);
+  }
+}
+
+// Clears the per-row transform and seed fields that are dead on a greedy
+// draft leg (see clear_on_greedy_draft above).
+inline void clear_sampling_transforms(SamplingParameters& sampling_params) {
+  for (const auto& field : kSamplingFields) {
+    if (field.clear_on_greedy_draft) {
+      sampling_params.*field.member = torch::Tensor();
+    }
+  }
+}
+
+// Expands per-sequence sampling state onto the validate row domain (one row
+// per speculative token), so RejectionSampler and SlotBuffer see one tensor
+// per validate row.
+template <typename Repeats>
+inline void expand_sampling_params_for_verify(
+    SamplingParameters& sampling_params,
+    const Repeats& repeats,
+    int64_t total_num_val_tokens,
+    const torch::Device& device) {
+  sampling_params.selected_token_idxes =
+      arange_indices(total_num_val_tokens, device);
+  repeat_sampling_params(sampling_params, repeats);
+  repeat_interleave_if_defined(sampling_params.do_sample, repeats);
+}
+
+// Per-sequence variant: uploads the row counts as an int64 device tensor and
+// delegates to the tensor overload above.
+inline void expand_sampling_params_for_verify(
+    SamplingParameters& sampling_params,
+    const std::vector<int32_t>& per_seq_val_tokens,
+    int64_t total_num_val_tokens,
+    const torch::Device& device) {
+  torch::Tensor repeats_tensor =
+      async_h2d_tensor(std::vector<int64_t>(per_seq_val_tokens.begin(),
+                                            per_seq_val_tokens.end()),
+                       device);
+  expand_sampling_params_for_verify(
+      sampling_params, repeats_tensor, total_num_val_tokens, device);
+}
 
 // Mode-aware draft sampling policy: clears logprob outputs and, in GREEDY
 // mode, flips the batch to greedy; PROBABILISTIC exposes draft logits

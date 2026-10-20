@@ -26,7 +26,6 @@ limitations under the License.
 #include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/rec_config.h"
-#include "core/framework/sampling/logits_utils.h"
 #include "core/framework/sampling/sampler.h"
 #if defined(USE_CUDA)
 #include "kernels/cuda/cuda_ops_api.h"
@@ -51,8 +50,7 @@ static inline bool use_air_log_softmax_env() {
 static inline bool can_use_fast_path(const SamplingParameters& params) {
   return params.use_beam_search && params.logprobs &&
          ::xllm::RecConfig::get_instance().enable_rec_fast_sampler() &&
-         params.max_top_logprobs > 0 && !params.top_p.defined() &&
-         !params.min_p.defined() &&
+         params.max_top_logprobs > 0 && !params.has_post_penalty_transforms() &&
          !::xllm::ModelConfig::get_instance().enable_qwen3_reranker() &&
          ::xllm::RecConfig::get_instance().max_decode_rounds() > 0;
 }
@@ -202,84 +200,20 @@ SampleOutput RecSampler::OneRecConstrainedSamplingStrategy::forward(
     }
   }
 
-  if (!(params.use_beam_search && params.all_random_sample && params.logprobs &&
+  if (!(params.use_beam_search &&
+        params.sampling_mode == SamplingMode::RANDOM && params.logprobs &&
         params.max_top_logprobs > 0)) {
     return sampler_.forward(logits, params, filter_mask);
   }
 
-  if (params.repetition_penalties.defined()) {
-    apply_repetition_penalties(logits,
-                               params.unique_token_ids,
-                               params.repetition_penalties,
-                               params.unique_token_ids_lens);
-  }
+  Sampler::process_logits(logits, params, filter_mask);
 
-  if (params.frequency_penalties.defined()) {
-    apply_frequency_presence_penalties(logits,
-                                       params.unique_token_ids,
-                                       params.unique_token_counts,
-                                       params.frequency_penalties,
-                                       params.presence_penalties);
-  }
-
-  torch::Tensor sample_logits = logits;
-  torch::Tensor sample_temperatures = params.temperatures;
-  torch::Tensor sample_top_k = params.top_k;
-  torch::Tensor sample_top_p = params.top_p;
-  torch::Tensor sample_min_p = params.min_p;
-  const bool use_sample_indices =
-      params.selected_token_idxes.numel() != params.sample_idxes.numel();
-  if (use_sample_indices) {
-    sample_logits = logits.index_select(/*dim=*/0, params.sample_idxes);
-    if (params.temperatures.defined()) {
-      sample_temperatures =
-          params.temperatures.index_select(/*dim=*/0, params.sample_idxes);
-    }
-    if (params.top_k.defined()) {
-      sample_top_k = params.top_k.index_select(/*dim=*/0, params.sample_idxes);
-    }
-    if (params.min_p.defined()) {
-      sample_min_p = params.min_p.index_select(/*dim=*/0, params.sample_idxes);
-    }
-    if (params.top_p.defined()) {
-      sample_top_p = params.top_p.index_select(/*dim=*/0, params.sample_idxes);
-    }
-  }
-
-  if (filter_mask.defined()) {
-    CHECK_EQ(filter_mask.dim(), 2)
-        << "filter_mask must be 2-D, dim=" << filter_mask.dim();
-    CHECK_EQ(filter_mask.size(0), sample_logits.size(0))
-        << "filter_mask batch mismatch, filter_mask.size(0)="
-        << filter_mask.size(0)
-        << ", sample_logits.size(0)=" << sample_logits.size(0);
-    CHECK_EQ(filter_mask.size(1), sample_logits.size(1))
-        << "filter_mask vocab mismatch, filter_mask.size(1)="
-        << filter_mask.size(1)
-        << ", sample_logits.size(1)=" << sample_logits.size(1);
-    sample_logits = sample_logits + filter_mask;
-  }
-
-  if (sample_temperatures.defined()) {
-    apply_temperatures(sample_logits, sample_temperatures);
-  }
-  apply_min_p(sample_logits, sample_min_p);
-  apply_top_k_top_p(sample_logits, torch::Tensor(), sample_top_k, sample_top_p);
-  if (use_sample_indices) {
-    logits.index_copy_(/*dim=*/0, params.sample_idxes, sample_logits);
-  }
-
-  CHECK(params.do_sample.defined()) << "params.do_sample must be defined";
-  CHECK_EQ(params.do_sample.dim(), 1)
-      << "params.do_sample must be 1D [num_seqs], got "
-      << params.do_sample.sizes();
-  CHECK_EQ(sample_logits.size(0), params.do_sample.size(0));
+  CHECK_EQ(logits.size(0), params.num_sample_seqs());
 
   SampleOutput output;
-  auto probs =
-      torch::softmax(sample_logits, /*dim=*/-1, /*dtype=*/torch::kFloat32);
   auto logprobs =
-      torch::log_softmax(sample_logits, /*dim=*/-1, /*dtype=*/torch::kFloat32);
+      torch::log_softmax(logits, /*dim=*/-1, /*dtype=*/torch::kFloat32);
+  auto probs = logprobs.exp();
 
   const int64_t vocab_size = probs.size(-1);
   const int64_t top_count = std::min<int64_t>(params.max_top_logprobs,
@@ -316,29 +250,11 @@ SampleOutput RecSampler::MultiRoundFastPathSamplingStrategy::forward(
 
   SampleOutput output;
 
-  if (params.repetition_penalties.defined()) {
-    apply_repetition_penalties(logits,
-                               params.unique_token_ids,
-                               params.repetition_penalties,
-                               params.unique_token_ids_lens);
-  }
+  Sampler::apply_sampling_penalties(logits, params);
 
-  if (params.frequency_penalties.defined()) {
-    apply_frequency_presence_penalties(logits,
-                                       params.unique_token_ids,
-                                       params.unique_token_counts,
-                                       params.frequency_penalties,
-                                       params.presence_penalties);
-  }
+  CHECK_EQ(logits.size(0), params.num_sample_seqs());
 
-  torch::Tensor sample_logits = logits;
-  if (params.selected_token_idxes.numel() != params.sample_idxes.numel()) {
-    sample_logits = logits.index_select(/*dim=*/0, params.sample_idxes);
-  }
-
-  CHECK_EQ(sample_logits.size(0), params.do_sample.size(0));
-
-  auto [topk_values, topk_indices] = sample_logits.topk(
+  auto [topk_values, topk_indices] = logits.topk(
       params.max_top_logprobs,
       /*dim=*/-1,
       /*largest=*/true,
@@ -349,11 +265,7 @@ SampleOutput RecSampler::MultiRoundFastPathSamplingStrategy::forward(
 
   torch::Tensor temperatures;
   if (params.temperatures.defined()) {
-    temperatures = params.temperatures;
-    if (params.selected_token_idxes.numel() != params.sample_idxes.numel()) {
-      temperatures = temperatures.index_select(/*dim=*/0, params.sample_idxes);
-    }
-    temperatures = temperatures.to(torch::kFloat32);
+    temperatures = params.temperatures.to(torch::kFloat32);
   }
 
   output.top_logprobs = log_softmax_last_dim(topk_values, temperatures);

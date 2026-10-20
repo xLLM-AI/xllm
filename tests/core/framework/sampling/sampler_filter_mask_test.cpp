@@ -22,14 +22,9 @@ namespace xllm {
 namespace {
 
 SamplingParameters make_greedy_params(int64_t batch_size) {
-  SamplingParameters params;
+  SamplingParameters params;  // all-greedy by default
   params.selected_token_idxes =
       torch::arange(batch_size, torch::TensorOptions().dtype(torch::kInt));
-  params.sample_idxes =
-      torch::arange(batch_size, torch::TensorOptions().dtype(torch::kInt));
-  params.do_sample = torch::zeros({batch_size}, torch::kBool);
-  params.all_greedy_sample = true;
-  params.all_random_sample = false;
   return params;
 }
 
@@ -65,8 +60,7 @@ TEST(SamplerFilterMaskTest, RandomSamplingCannotSelectDisallowedToken) {
 
   SamplingParameters params = make_greedy_params(/*batch_size=*/1);
   params.do_sample = torch::ones({1}, torch::kBool);
-  params.all_greedy_sample = false;
-  params.all_random_sample = true;
+  params.sampling_mode = SamplingMode::RANDOM;
   params.filter_mask = torch::tensor({{-1.0e9F, 0.0F, -1.0e9F}});
   torch::Tensor logits = torch::tensor({{100.0F, 1.0F, 100.0F}});
 

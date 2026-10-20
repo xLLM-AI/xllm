@@ -48,7 +48,7 @@ limitations under the License.
 namespace xllm {
 namespace {
 
-std::vector<SpeculativeTokenStats> record_llm_speculative_metrics(
+std::vector<SpeculativeTokenStats> record_speculative_metrics(
     const ForwardOutput& output,
     const torch::Tensor& cpu_next_tokens,
     bool speculative_decode) {
@@ -67,9 +67,11 @@ std::vector<SpeculativeTokenStats> record_llm_speculative_metrics(
   return std::move(metrics.sequence_stats);
 }
 
-int32_t get_llm_decode_sequence_count(const LlmForwardInput& input) {
-  if (input.sampling_params.sample_idxes.defined()) {
-    return static_cast<int32_t>(input.sampling_params.sample_idxes.size(0));
+template <typename Input>
+int32_t get_decode_sequence_count(const Input& input) {
+  const int64_t num_seqs = input.sampling_params.num_sample_seqs();
+  if (num_seqs > 0) {
+    return static_cast<int32_t>(num_seqs);
   }
   if (input.input_host_sample_count != kUnknownPackedSampleCount) {
     return input.input_host_sample_count;
@@ -77,33 +79,24 @@ int32_t get_llm_decode_sequence_count(const LlmForwardInput& input) {
   if (!input.runtime.input_host_buffer_has_layout) {
     return 0;
   }
-  LlmForwardInput unpacked_input;
+  Input unpacked_input;
   const bool unpacked = detail::unpack_from_input_host_buffer(
       input,
       torch::Device(torch::kCPU),
       torch::kFloat32,
       unpacked_input,
       /*materialize_device_buffer=*/false);
-  if (!unpacked || !unpacked_input.sampling_params.sample_idxes.defined()) {
-    return 0;
-  }
-  return static_cast<int32_t>(
-      unpacked_input.sampling_params.sample_idxes.size(0));
+  return unpacked ? static_cast<int32_t>(
+                        unpacked_input.sampling_params.num_sample_seqs())
+                  : 0;
 }
 
-torch::Tensor clone_llm_cpu_view(const torch::Tensor& tensor) {
-  if (!tensor.defined()) {
-    return tensor;
-  }
-  CHECK(tensor.device().is_cpu()) << "expected a CPU tensor view";
-  return tensor.contiguous().clone();
-}
-
-void stabilize_llm_host_views(LlmForwardInput& input) {
-  input.token_ids_host = clone_llm_cpu_view(input.token_ids_host);
-  input.positions_host = clone_llm_cpu_view(input.positions_host);
+template <typename Input>
+void stabilize_host_views(Input& input) {
+  input.token_ids_host = materialize_cpu_tensor(input.token_ids_host);
+  input.positions_host = materialize_cpu_tensor(input.positions_host);
   input.input_params.attention.host.block_tables =
-      clone_llm_cpu_view(input.input_params.attention.host.block_tables);
+      materialize_cpu_tensor(input.input_params.attention.host.block_tables);
 }
 
 bool has_cpu_llm_output(const ForwardOutput& output) {
@@ -126,83 +119,6 @@ bool has_cpu_llm_output(const ForwardOutput& output) {
                        return std::all_of(
                            sequence.begin(), sequence.end(), on_cpu);
                      });
-}
-
-std::vector<SpeculativeTokenStats> record_vlm_speculative_metrics(
-    const ForwardOutput& output,
-    const torch::Tensor& cpu_next_tokens,
-    bool speculative_decode) {
-  if (output.is_graph_warmup || !speculative_decode) {
-    return {};
-  }
-  if (output.spec_verify_layouts.empty()) {
-    CHECK(!cpu_next_tokens.defined() || cpu_next_tokens.dim() != 2)
-        << "speculative verify output is missing row metadata";
-    return {};
-  }
-  // Reuse the completed output copy instead of issuing another D2H for metrics.
-  SpecMetrics metrics =
-      make_spec_metrics(cpu_next_tokens, output.spec_verify_layouts);
-  record_spec_metrics(metrics);
-  return std::move(metrics.sequence_stats);
-}
-
-int32_t get_vlm_decode_sequence_count(const VlmForwardInput& input) {
-  if (input.sampling_params.sample_idxes.defined()) {
-    return static_cast<int32_t>(input.sampling_params.sample_idxes.size(0));
-  }
-  if (input.input_host_sample_count != kUnknownPackedSampleCount) {
-    return input.input_host_sample_count;
-  }
-  if (!input.runtime.input_host_buffer_has_layout) {
-    return 0;
-  }
-  VlmForwardInput unpacked_input;
-  const bool unpacked = detail::unpack_from_input_host_buffer(
-      input,
-      torch::Device(torch::kCPU),
-      torch::kFloat32,
-      unpacked_input,
-      /*materialize_device_buffer=*/false);
-  if (!unpacked || !unpacked_input.sampling_params.sample_idxes.defined()) {
-    return 0;
-  }
-  return static_cast<int32_t>(
-      unpacked_input.sampling_params.sample_idxes.size(0));
-}
-
-torch::Tensor clone_vlm_cpu_view(const torch::Tensor& tensor) {
-  if (!tensor.defined()) {
-    return tensor;
-  }
-  CHECK(tensor.device().is_cpu()) << "expected a CPU tensor view";
-  return tensor.contiguous().clone();
-}
-
-void stabilize_vlm_host_views(VlmForwardInput& input) {
-  input.token_ids_host = clone_vlm_cpu_view(input.token_ids_host);
-  input.positions_host = clone_vlm_cpu_view(input.positions_host);
-  input.input_params.attention.host.block_tables =
-      clone_vlm_cpu_view(input.input_params.attention.host.block_tables);
-}
-
-std::vector<SpeculativeTokenStats> record_rec_speculative_metrics(
-    const ForwardOutput& output,
-    const torch::Tensor& cpu_next_tokens,
-    bool speculative_decode) {
-  if (output.is_graph_warmup || !speculative_decode) {
-    return {};
-  }
-  if (output.spec_verify_layouts.empty()) {
-    CHECK(!cpu_next_tokens.defined() || cpu_next_tokens.dim() != 2)
-        << "speculative verify output is missing row metadata";
-    return {};
-  }
-  // Reuse the completed output copy instead of issuing another D2H for metrics.
-  SpecMetrics metrics =
-      make_spec_metrics(cpu_next_tokens, output.spec_verify_layouts);
-  record_spec_metrics(metrics);
-  return std::move(metrics.sequence_stats);
 }
 
 class WorkerPrefetchSession final
@@ -589,7 +505,7 @@ void WorkerService::step_llm_model(
       (!task_pipeline || worker_prepare)) {
     // Packed preparation rebuilds views from its retained owner. Device-ready
     // inputs reuse their existing views, which can still borrow shared memory.
-    stabilize_llm_host_views(input);
+    stabilize_host_views(input);
   }
   auto future = worker_->step_async(input);
   if (!options_.enable_schedule_overlap()) {
@@ -601,9 +517,9 @@ void WorkerService::step_llm_model(
         task_pipeline && (!worker_prepare || has_cpu_llm_output(*output));
     collect_llm_output(*output, cpu_output, cpu_ready_result);
     speculative_token_stats =
-        record_llm_speculative_metrics(*output,
-                                       cpu_output.sample_output.next_tokens,
-                                       options_.enable_speculative_decode());
+        record_speculative_metrics(*output,
+                                   cpu_output.sample_output.next_tokens,
+                                   options_.enable_speculative_decode());
     return;
   }
   if (task_pipeline) {
@@ -613,7 +529,7 @@ void WorkerService::step_llm_model(
   }
   const auto int_options = torch::TensorOptions().device(torch::kCPU);
   if (worker_->is_driver()) {
-    const int32_t sequence_count = get_llm_decode_sequence_count(input);
+    const int32_t sequence_count = get_decode_sequence_count(input);
     cpu_output.sample_output.next_tokens = torch::arange(
         -1, -(sequence_count + 1), -1, int_options.dtype(torch::kInt32));
     if (!task_pipeline) {
@@ -713,9 +629,9 @@ void WorkerService::GetLastLLMStepResult(
           task_pipeline && (!worker_prepare || has_cpu_llm_output(*output));
       collect_llm_output(*output, cpu_output, cpu_ready_result);
       speculative_token_stats =
-          record_llm_speculative_metrics(*output,
-                                         cpu_output.sample_output.next_tokens,
-                                         options_.enable_speculative_decode());
+          record_speculative_metrics(*output,
+                                     cpu_output.sample_output.next_tokens,
+                                     options_.enable_speculative_decode());
     }
     // Embedding-only and beam-only results are valid completed outputs.
     if (!encode_llm_output(cpu_output, speculative_token_stats, response)) {
@@ -809,7 +725,7 @@ void WorkerService::step_vlm_model(
       !input.runtime.device_tensors_ready;
   if (options_.enable_schedule_overlap() && !worker_rebuilds_host_views) {
     // Device-ready inputs can still borrow host views from shared memory.
-    stabilize_vlm_host_views(input);
+    stabilize_host_views(input);
   }
   auto future = worker_->step_async(input);
   if (!options_.enable_schedule_overlap()) {
@@ -817,15 +733,15 @@ void WorkerService::step_vlm_model(
     if (output.has_value()) {
       collect_vlm_output(*output, cpu_output);
       speculative_token_stats =
-          record_vlm_speculative_metrics(*output,
-                                         cpu_output.sample_output.next_tokens,
-                                         options_.enable_speculative_decode());
+          record_speculative_metrics(*output,
+                                     cpu_output.sample_output.next_tokens,
+                                     options_.enable_speculative_decode());
     }
     return;
   }
   const auto int_options = torch::TensorOptions().device(torch::kCPU);
   if (worker_->is_driver()) {
-    const int32_t sequence_count = get_vlm_decode_sequence_count(input);
+    const int32_t sequence_count = get_decode_sequence_count(input);
     cpu_output.sample_output.next_tokens = torch::arange(
         -1, -(sequence_count + 1), -1, int_options.dtype(torch::kInt32));
     std::move(future).deferValue([](auto&&) {});
@@ -916,9 +832,9 @@ void WorkerService::GetLastVLMStepResult(
     if (output.has_value()) {
       collect_vlm_output(*output, cpu_output);
       speculative_token_stats =
-          record_vlm_speculative_metrics(*output,
-                                         cpu_output.sample_output.next_tokens,
-                                         options_.enable_speculative_decode());
+          record_speculative_metrics(*output,
+                                     cpu_output.sample_output.next_tokens,
+                                     options_.enable_speculative_decode());
     }
     // Embedding-only and beam-only results are valid completed outputs.
     if (!encode_vlm_output(cpu_output, speculative_token_stats, response)) {
@@ -1003,9 +919,9 @@ void WorkerService::step_rec_model(
   copy_output_to_host();
   stream_->synchronize();
   speculative_token_stats =
-      record_rec_speculative_metrics(output,
-                                     cpu_output.sample_output.next_tokens,
-                                     options_.enable_speculative_decode());
+      record_speculative_metrics(output,
+                                 cpu_output.sample_output.next_tokens,
+                                 options_.enable_speculative_decode());
 }
 
 void WorkerService::poll_rec_shm(

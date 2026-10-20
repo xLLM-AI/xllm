@@ -206,7 +206,6 @@ inline bool add_sampling_to_plan(const SamplingParameters& source,
          plan.add(source.unique_token_counts, &target.unique_token_counts) &&
          plan.add(source.unique_token_ids_lens,
                   &target.unique_token_ids_lens) &&
-         plan.add(source.sample_idxes, &target.sample_idxes) &&
          plan.add(source.do_sample, &target.do_sample) &&
          plan.add(source.filter_mask, &target.filter_mask) &&
          plan.add(source.filter_bitmask, &target.filter_bitmask) &&
@@ -563,7 +562,6 @@ class LlmForwardInput final {
     ModelInputParams(input_params).print();
     LOG(INFO) << " params.selected_token_idxes "
               << sampling_params.selected_token_idxes;
-    LOG(INFO) << " params.sample_idxes " << sampling_params.sample_idxes;
     LOG(INFO) << " params.do_sample " << sampling_params.do_sample;
   }
 
@@ -610,8 +608,6 @@ class ForwardOutput final {
  public:
   // Local runtime handle, not in proto/shm; metrics recording skips warmup.
   bool is_graph_warmup = false;
-  // sample parameters for speculative decoding
-  torch::Tensor do_sample;
   // whether to return logprobs
   bool logprobs = false;
   // max number of top logprobs in the batch
@@ -702,11 +698,6 @@ class RawForwardOutput final {
   std::vector<int32_t> beam_sequence_group;  // flattened 2D
   // dit output data
   DiTForwardOutput dit_forward_output;
-};
-
-struct BatchedForwardInputs {
-  std::vector<LlmForwardInput> micro_inputs;
-  SamplingParameters concated_sampling_params;
 };
 
 }  // namespace xllm

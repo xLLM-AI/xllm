@@ -292,7 +292,7 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
   SampleOutput val_output;
   {
     AUTO_COUNTER(speculative_execution_latency_seconds_validation);
-    val_output = validate(input.sampling_params, draft_proposal, target_output);
+    val_output = validate(draft_proposal, target_output);
   }
 
   if (suffix_cache_ != nullptr &&
@@ -365,11 +365,10 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
                                 input.json_object_states);
 }
 
-SampleOutput SuffixWorkerImpl::validate(
-    const SamplingParameters& sampling_params,
-    const DraftProposal& draft_proposal,
-    const ForwardOutput& target_output) {
-  (void)sampling_params;
+SampleOutput SuffixWorkerImpl::validate(const DraftProposal& draft_proposal,
+                                        const ForwardOutput& target_output) {
+  // The suffix draft path is always greedy.
+  const SamplingParameters sampling_params;  // all-greedy by default
   const int32_t num_val_tokens = options_.num_speculative_tokens() + 1;
   const int32_t batch_size =
       static_cast<int32_t>(draft_proposal.token_ids().size(/*dim=*/0));
@@ -382,13 +381,8 @@ SampleOutput SuffixWorkerImpl::validate(
   auto target_logits =
       target_output.logits.view({batch_size, num_val_tokens, vocab_size});
 
-  auto greedy_do_sample = torch::zeros({batch_size}, torch::kBool);
-  return spec_verify::run_rejection_sampling({.do_sample = greedy_do_sample,
-                                              .all_random_sample = false,
-                                              .all_greedy_sample = true},
-                                             draft_proposal,
-                                             target_logits,
-                                             target_output);
+  return spec_verify::run_rejection_sampling(
+      sampling_params, draft_proposal, target_logits, target_output);
 }
 
 }  // namespace xllm

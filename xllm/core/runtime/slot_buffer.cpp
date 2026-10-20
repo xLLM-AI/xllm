@@ -114,41 +114,35 @@ TokenResultTensors bind_result_views(const TokenResultTensors& storage,
   return view;
 }
 
-enum class RowDomain : uint8_t { SELECTED, SAMPLE, HISTORY };
-
 struct InputField {
   torch::Tensor SamplingParameters::* member;
   torch::ScalarType dtype;
-  RowDomain domain;
+  // History fields are 2-D [rows, unique_tokens]; all other fields are 1-D
+  // per-row tensors sized by max_sample_rows.
+  bool history;
 };
 
-constexpr std::array<InputField, 13> kFields = {{
-    {&SamplingParameters::selected_token_idxes,
-     torch::kInt32,
-     RowDomain::SELECTED},
-    {&SamplingParameters::frequency_penalties,
-     torch::kFloat32,
-     RowDomain::SELECTED},
-    {&SamplingParameters::presence_penalties,
-     torch::kFloat32,
-     RowDomain::SELECTED},
-    {&SamplingParameters::repetition_penalties,
-     torch::kFloat32,
-     RowDomain::SELECTED},
-    {&SamplingParameters::temperatures, torch::kFloat32, RowDomain::SELECTED},
-    {&SamplingParameters::top_p, torch::kFloat32, RowDomain::SELECTED},
-    {&SamplingParameters::min_p, torch::kFloat32, RowDomain::SELECTED},
-    {&SamplingParameters::top_k, torch::kInt64, RowDomain::SELECTED},
-    {&SamplingParameters::unique_token_ids, torch::kInt64, RowDomain::HISTORY},
-    {&SamplingParameters::unique_token_counts,
-     torch::kInt32,
-     RowDomain::HISTORY},
-    {&SamplingParameters::unique_token_ids_lens,
-     torch::kInt32,
-     RowDomain::SELECTED},
-    {&SamplingParameters::sample_idxes, torch::kInt32, RowDomain::SAMPLE},
-    {&SamplingParameters::do_sample, torch::kBool, RowDomain::SAMPLE},
+}  // namespace
+
+// Staging-side registry of SamplingParameters' tensor members (adds the
+// per-sequence tensors; carries no seeds/seed_offsets/logits_bias — see
+// kSamplingFields in sampling_params.h for the roles each member plays).
+constexpr std::array<InputField, 12> kFields = {{
+    {&SamplingParameters::selected_token_idxes, torch::kInt32, false},
+    {&SamplingParameters::frequency_penalties, torch::kFloat32, false},
+    {&SamplingParameters::presence_penalties, torch::kFloat32, false},
+    {&SamplingParameters::repetition_penalties, torch::kFloat32, false},
+    {&SamplingParameters::temperatures, torch::kFloat32, false},
+    {&SamplingParameters::top_p, torch::kFloat32, false},
+    {&SamplingParameters::min_p, torch::kFloat32, false},
+    {&SamplingParameters::top_k, torch::kInt64, false},
+    {&SamplingParameters::unique_token_ids, torch::kInt64, true},
+    {&SamplingParameters::unique_token_counts, torch::kInt32, true},
+    {&SamplingParameters::unique_token_ids_lens, torch::kInt32, false},
+    {&SamplingParameters::do_sample, torch::kBool, false},
 }};
+
+namespace {
 
 bool parameter_type(torch::ScalarType dtype) {
   return dtype == torch::kFloat32 || dtype == torch::kFloat16 ||
@@ -157,17 +151,9 @@ bool parameter_type(torch::ScalarType dtype) {
 
 uint64_t capacity_elements(const InputField& field,
                            const SlotBufferCapacity& capacity) {
-  switch (field.domain) {
-    case RowDomain::SELECTED:
-      return capacity.max_selected_rows;
-    case RowDomain::SAMPLE:
-      return capacity.max_sample_rows;
-    case RowDomain::HISTORY:
-      return static_cast<uint64_t>(capacity.max_selected_rows) *
-             capacity.max_unique_tokens;
-  }
-  LOG(FATAL) << "Unknown sampling row domain.";
-  return 0;
+  return field.history ? static_cast<uint64_t>(capacity.max_sample_rows) *
+                             capacity.max_unique_tokens
+                       : capacity.max_sample_rows;
 }
 
 torch::ScalarType storage_dtype(const InputField& field,
@@ -225,9 +211,6 @@ Status invalid_input() {
 
 Status validate_sampling_capacity(SlotBufferCapacity& capacity,
                                   uint64_t& bytes) {
-  if (capacity.max_selected_rows == 0) {
-    capacity.max_selected_rows = capacity.model.max_sequences;
-  }
   if (capacity.max_sample_rows == 0) {
     capacity.max_sample_rows = capacity.model.max_sequences;
   }
@@ -237,8 +220,7 @@ Status validate_sampling_capacity(SlotBufferCapacity& capacity,
       capacity.max_unique_tokens > kMaxElements || capacity.vocab_size == 0 ||
       capacity.vocab_size > kMaxElements ||
       capacity.max_top_logprobs > capacity.vocab_size ||
-      capacity.max_selected_rows > kMaxElements ||
-      capacity.max_sample_rows > capacity.max_selected_rows ||
+      capacity.max_sample_rows > kMaxElements ||
       capacity.max_result_width > kMaxElements) {
     return invalid_input();
   }
@@ -319,12 +301,6 @@ BatchInputMeta batch_meta(const ModelInputBatch& batch) {
   meta.batch_id = batch.batch_id;
   meta.is_graph_warmup = batch.is_graph_warmup;
   return meta;
-}
-
-bool cpu_indices(const torch::Tensor& tensor) {
-  return tensor.defined() && tensor.device().is_cpu() &&
-         tensor.scalar_type() == torch::kInt32 && tensor.dim() == 1 &&
-         tensor.is_contiguous();
 }
 
 void copy_to_device(const torch::Tensor& destination,
@@ -656,15 +632,9 @@ Status SlotBuffer::validate_sampling(const SamplingParameters& input,
           capacity_.max_top_logprobs) {
     return invalid_input();
   }
-  const int64_t rows = input.selected_token_idxes.defined()
-                           ? input.selected_token_idxes.numel()
-                           : 0;
-  const int64_t samples =
-      input.sample_idxes.defined() ? input.sample_idxes.numel() : 0;
+  const int64_t rows = input.num_sample_seqs();
   if (!sampling_host_.selected_token_idxes.defined() ||
-      rows > capacity_.max_selected_rows ||
-      samples > capacity_.max_sample_rows || samples > rows ||
-      (rows > 0 && (samples == 0 || model_tokens == 0))) {
+      rows > capacity_.max_sample_rows || (rows > 0 && model_tokens == 0)) {
     return invalid_input();
   }
   int64_t width = 0;
@@ -676,12 +646,10 @@ Status SlotBuffer::validate_sampling(const SamplingParameters& input,
     const bool dtype_matches = field.dtype == torch::kFloat32
                                    ? parameter_type(tensor.scalar_type())
                                    : tensor.scalar_type() == field.dtype;
-    const int64_t expected_rows =
-        field.domain == RowDomain::SAMPLE ? samples : rows;
-    const bool history = field.domain == RowDomain::HISTORY;
+    const bool history = field.history;
     if (!tensor.device().is_cpu() || !tensor.is_contiguous() ||
         !dtype_matches || tensor.dim() != (history ? 2 : 1) ||
-        tensor.size(0) != expected_rows) {
+        tensor.size(0) != rows) {
       return invalid_input();
     }
     if (history) {
@@ -701,22 +669,14 @@ Status SlotBuffer::validate_sampling(const SamplingParameters& input,
       ((input.frequency_penalties.defined() ||
         input.repetition_penalties.defined()) &&
        !history) ||
-      (samples > 0 && !input.do_sample.defined())) {
+      (rows > 0 && input.sampling_mode == SamplingMode::MIXED &&
+       !input.do_sample.defined())) {
     return invalid_input();
   }
   if (rows > 0) {
     if (!all_values<int32_t>(
             input.selected_token_idxes, [model_tokens](int32_t value) {
               return value >= 0 && static_cast<uint32_t>(value) < model_tokens;
-            })) {
-      return invalid_input();
-    }
-    int32_t previous = -1;
-    if (!all_values<int32_t>(
-            input.sample_idxes, [rows, &previous](int32_t value) {
-              const bool valid = value > previous && value < rows;
-              previous = value;
-              return valid;
             })) {
       return invalid_input();
     }
@@ -1036,8 +996,7 @@ Status SlotBuffer::prepare_sampling(const SamplingParameters& input,
 
 void SlotBuffer::prepare_sampling(const SamplingParameters& input) {
   SamplingParameters prepared;
-  const bool empty = !input.selected_token_idxes.defined() ||
-                     input.selected_token_idxes.numel() == 0;
+  const bool empty = input.num_sample_seqs() == 0;
   if (!empty) {
     for (const auto& field : kFields) {
       const torch::Tensor& source = input.*field.member;
@@ -1053,18 +1012,11 @@ void SlotBuffer::prepare_sampling(const SamplingParameters& input) {
       device.copy_(host, /*non_blocking=*/true);
       prepared.*field.member = device.view(source.sizes());
     }
-    prepared.all_random_sample =
-        all_values<bool>(input.do_sample, [](bool value) { return value; });
-    prepared.all_greedy_sample =
-        all_values<bool>(input.do_sample, [](bool value) { return !value; });
+    prepared.sampling_mode = input.sampling_mode;
     prepared.logprobs = input.logprobs;
     prepared.return_logits = input.return_logits;
     prepared.max_top_logprobs = input.max_top_logprobs;
   }
-  cpu_do_sample_ = input.do_sample.defined()
-                       ? sampling_host_.do_sample.narrow(
-                             /*dim=*/0, /*start=*/0, input.do_sample.numel())
-                       : torch::Tensor();
   sampling_params_ = std::move(prepared);
 }
 
@@ -1120,19 +1072,6 @@ void SlotBuffer::patch_previous_tokens(const torch::Tensor& previous_tokens) {
   model_tokens.index_copy_(/*dim=*/0, gather_offsets_, gather_output_int32_);
 }
 
-torch::Tensor SlotBuffer::copy_cpu_do_sample() const {
-  if (!cpu_do_sample_.defined()) {
-    return {};
-  }
-  auto output = torch::empty(cpu_do_sample_.sizes(),
-                             torch::TensorOptions()
-                                 .dtype(torch::kBool)
-                                 .device(torch::kCPU)
-                                 .pinned_memory(/*pinned_memory=*/false));
-  output.copy_(cpu_do_sample_);
-  return output;
-}
-
 SlotBuffer::~SlotBuffer() {
   c10::DeviceGuard guard(device_);
   discard_result();
@@ -1141,9 +1080,7 @@ SlotBuffer::~SlotBuffer() {
 
 void SlotBuffer::prepare_result() {
   const uint32_t rows =
-      sampling_params_.sample_idxes.defined()
-          ? static_cast<uint32_t>(sampling_params_.sample_idxes.numel())
-          : 0;
+      static_cast<uint32_t>(sampling_params_.num_sample_seqs());
   const uint32_t top_logprobs =
       sampling_params_.logprobs ? sampling_params_.max_top_logprobs : 0;
   result_host_ = bind_result_views(result_host_storage_,
@@ -1777,19 +1714,11 @@ Status SlotBuffer::plan_mtp_prefill(SlotBuffer& input,
     return invalid(
         "MTP Prefill requires known query tokens and one extra token per row.");
   }
-  const bool selected = sampling.selected_token_idxes.defined();
-  const bool samples = sampling.sample_idxes.defined();
-  if (selected != samples ||
-      (selected && (!cpu_indices(sampling.selected_token_idxes) ||
-                    !cpu_indices(sampling.sample_idxes)))) {
+  const int64_t sample_count = sampling.num_sample_seqs();
+  if (sample_count > 0 &&
+      !is_cpu_int_tensor(sampling.selected_token_idxes, /*dimensions=*/1)) {
     return invalid(
         "MTP Prefill sampling indices must be contiguous CPU int32.");
-  }
-  const int64_t sample_count = samples ? sampling.sample_idxes.numel() : 0;
-  const int64_t selected_count =
-      selected ? sampling.selected_token_idxes.numel() : 0;
-  if (sample_count > static_cast<int64_t>(rows)) {
-    return invalid("MTP Prefill samples exceed model rows.");
   }
   view.token_to_sequence_.assign(base.token_ids.size(), -1);
   int64_t end = 0;
@@ -1803,24 +1732,20 @@ Status SlotBuffer::plan_mtp_prefill(SlotBuffer& input,
     view.token_to_sequence_[end - 1] = static_cast<int32_t>(row);
     complete += extra_token_ids[row] == -1 ? 1U : 0U;
   }
-  if (sample_count != complete) {
+  if (sample_count != static_cast<int64_t>(complete)) {
     return invalid("MTP Prefill needs one sample for each completed chunk.");
   }
   std::fill(
       view.published_mask_.begin(), view.published_mask_.end(), uint8_t{0});
   view.planned_rows_.clear();
   view.sampled_token_rows_.clear();
-  const int32_t* sample_data =
-      samples ? sampling.sample_idxes.const_data_ptr<int32_t>() : nullptr;
   const int32_t* selected_data =
-      selected ? sampling.selected_token_idxes.const_data_ptr<int32_t>()
-               : nullptr;
+      sample_count > 0 ? sampling.selected_token_idxes.const_data_ptr<int32_t>()
+                       : nullptr;
+  // One sample per completed chunk: a row is completed iff its extra token is
+  // -1, and its selected tail token is the last query position of that row.
   for (int64_t index = 0; index < sample_count; ++index) {
-    const int32_t sample = sample_data[index];
-    if (sample < 0 || sample >= selected_count) {
-      return invalid("MTP Prefill sample index is outside selected rows.");
-    }
-    const int32_t token = selected_data[sample];
+    const int32_t token = selected_data[index];
     if (token < 0 || static_cast<uint64_t>(token) >= base.token_ids.size()) {
       return invalid("MTP Prefill selected token is outside the query.");
     }

@@ -31,22 +31,20 @@ torch::Tensor sample_gumbel_noise(int64_t batch_size,
   CHECK_GT(num_classes, 0);
   const torch::TensorOptions float_options =
       torch::TensorOptions().dtype(torch::kFloat32).device(device);
-  if (sampling_params.all_greedy_sample) {
+  if (sampling_params.sampling_mode == SamplingMode::GREEDY) {
     return torch::zeros({batch_size, num_steps, num_classes}, float_options);
   }
-  CHECK(sampling_params.do_sample.defined())
-      << "Gumbel sampling requires do_sample to be defined";
 
   // Gumbel(0, 1) = -log(-log(U)), U ~ Uniform(0, 1).
   torch::Tensor uniform =
       torch::rand({batch_size, num_steps, num_classes}, float_options);
   uniform.clamp_min_(std::numeric_limits<float>::min());
   torch::Tensor gumbel = uniform.log().neg().log().neg();
-  if (!sampling_params.all_random_sample) {
-    torch::Tensor greedy_mask =
-        sampling_params.do_sample.to(device, torch::kBool)
-            .logical_not()
-            .view({batch_size, 1, 1});
+  if (sampling_params.sampling_mode != SamplingMode::RANDOM) {
+    torch::Tensor greedy_mask = sampling_params.require_do_sample()
+                                    .to(device, torch::kBool)
+                                    .logical_not()
+                                    .view({batch_size, 1, 1});
     gumbel.masked_fill_(greedy_mask, 0.0);
   }
   return gumbel;

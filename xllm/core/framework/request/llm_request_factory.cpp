@@ -237,7 +237,6 @@ RequestSamplingParam LLMRequestFactory::build_sampling_param(
   // Enforces the beam-search logprob requirements; see
   // RequestSamplingParam::enable_beam_search.
   sampling_param.enable_beam_search(sp.beam_width);
-  // sampling_param.do_sample = sp.do_sample;
   return sampling_param;
 }
 

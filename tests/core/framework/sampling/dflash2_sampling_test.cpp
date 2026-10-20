@@ -36,8 +36,7 @@ DFlash2CandidateOutput make_candidates() {
 TEST(DFlash2SamplingTest, GreedyFollowsPreviouslySelectedCandidate) {
   const auto candidates = make_candidates();
   SamplingParameters params;
-  params.all_greedy_sample = true;
-  params.all_random_sample = false;
+  params.sampling_mode = SamplingMode::GREEDY;
   params.do_sample = torch::zeros({1}, torch::kBool);
   params.temperatures = torch::zeros({1});
   const auto result = sample_dflash2_path(candidates,
@@ -54,8 +53,7 @@ TEST(DFlash2SamplingTest, MixedRowsPreserveExactProposalDistribution) {
   candidates.candidate_ids = candidates.candidate_ids.repeat({2, 1, 1});
   candidates.edge_logits = candidates.edge_logits.repeat({2, 1, 1, 1});
   SamplingParameters params;
-  params.all_greedy_sample = false;
-  params.all_random_sample = false;
+  params.sampling_mode = SamplingMode::MIXED;
   params.do_sample = torch::tensor({false, true}, torch::kBool);
   params.temperatures = torch::tensor({0.0f, 2.0f});
   // Fixed noise forces the random row down candidate 0 then candidate 1.
@@ -87,8 +85,7 @@ TEST(DFlash2SamplingTest, MixedRowsPreserveExactProposalDistribution) {
 TEST(DFlash2SamplingTest, RandomRowsReturnConditionalSoftmaxForRejection) {
   const auto candidates = make_candidates();
   SamplingParameters params;
-  params.all_greedy_sample = false;
-  params.all_random_sample = true;
+  params.sampling_mode = SamplingMode::RANDOM;
   params.do_sample = torch::ones({1}, torch::kBool);
   params.return_logits = true;
   const auto result = sample_dflash2_path(

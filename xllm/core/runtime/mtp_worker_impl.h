@@ -101,7 +101,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   using DraftModelSpecWorkerImpl<
       TargetInput>::sync_dp_global_token_nums_for_idle_rank;
   using DraftModelSpecWorkerImpl<TargetInput>::update_input_by_last_step_output;
-  using DraftModelSpecWorkerImpl<TargetInput>::update_sampling_params;
   using DraftModelSpecWorkerImpl<
       TargetInput>::update_json_object_states_by_last_step_output;
   using DraftModelSpecWorkerImpl<
@@ -353,7 +352,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   // path.  Their values depend on speculative width, not tensor-parallel
   // topology, and are rebuilt only when that width changes.
   torch::Tensor mtp_validate_greedy_indices_;
-  torch::Tensor mtp_validate_greedy_do_sample_;
   std::unique_ptr<detail::NpuJsonDraftTokenHandoff> json_draft_token_handoff_;
 #endif
 };

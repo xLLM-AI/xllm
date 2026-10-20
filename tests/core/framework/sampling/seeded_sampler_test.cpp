@@ -27,10 +27,7 @@ SamplingParameters make_seeded_params(const torch::Tensor& seeds,
   const int64_t rows = seeds.numel();
   SamplingParameters params;
   params.selected_token_idxes = torch::arange(rows, torch::kInt);
-  params.sample_idxes = torch::arange(rows, torch::kInt);
-  params.do_sample = torch::ones({rows}, torch::kBool);
-  params.all_greedy_sample = false;
-  params.all_random_sample = true;
+  params.sampling_mode = SamplingMode::RANDOM;
   params.seeds = seeds;
   params.seed_offsets = offsets;
   return params.to(torch::Device(torch::kPrivateUse1, 0), torch::kFloat32);

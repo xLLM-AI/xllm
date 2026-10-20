@@ -78,7 +78,7 @@ std::optional<ForwardOutput> EmbedVLMWorkerImpl::step(
   // driver prepare model output
   ForwardOutput output;
   SampleOutput sample_output;
-  if (sampling_params.selected_token_idxes.defined() &&
+  if (sampling_params.num_sample_seqs() > 0 &&
       input.sampling_params.is_embeddings) {
     // split full embeddings and add them to mm_embeddings
     // so that the user could receive embeddings of images and texts

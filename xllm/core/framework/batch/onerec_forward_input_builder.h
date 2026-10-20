@@ -82,6 +82,10 @@ class OneRecForwardInputBuilder : public RecForwardInputBuilder {
     torch::Tensor fixed_positions_tensor;
     torch::Tensor fixed_encoder_positions_tensor;
     torch::Tensor empty_tensor;
+    // All-zero cross-attention placeholders, shared read-only.
+    torch::Tensor fixed_cross_attn_kv_cu_seq_lens;
+    torch::Tensor fixed_cross_attn_block_tables;
+    torch::Tensor fixed_cross_attn_new_cache_slots;
     bool tensors_initialized = false;
 
     MemoryPool memory_pool;
@@ -94,6 +98,9 @@ class OneRecForwardInputBuilder : public RecForwardInputBuilder {
         fixed_positions_tensor = torch::tensor({0}, torch::kInt);
         fixed_encoder_positions_tensor = torch::tensor({0}, torch::kInt);
         empty_tensor = torch::tensor(std::vector<int32_t>{}, torch::kInt);
+        fixed_cross_attn_kv_cu_seq_lens = torch::zeros({1}, torch::kInt);
+        fixed_cross_attn_block_tables = torch::zeros({1, 1}, torch::kInt);
+        fixed_cross_attn_new_cache_slots = torch::zeros({1}, torch::kInt);
         tensors_initialized = true;
       }
     }

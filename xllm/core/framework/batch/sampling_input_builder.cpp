@@ -30,7 +30,6 @@ void SamplingInputBuilder::reserve(size_t rows) {
   params_.reserve(rows);
   sequences_.reserve(rows);
   selected_token_indices_.reserve(rows);
-  sample_indices_.reserve(rows);
   token_ids_.reserve(rows);
   token_counts_.reserve(rows);
   token_lengths_.reserve(rows);
@@ -40,14 +39,10 @@ void SamplingInputBuilder::append(const RequestSamplingParam* params,
                                   int32_t token_index,
                                   const TokenCounts* counts,
                                   const TokenCounts* excluded_counts,
-                                  bool sample,
                                   const Sequence* sequence) {
   CHECK(params != nullptr);
   CHECK_GE(token_index, 0);
   CHECK_LT(size(), std::numeric_limits<int32_t>::max());
-  if (sample) {
-    sample_indices_.emplace_back(static_cast<int32_t>(size()));
-  }
   params_.emplace_back(params);
   sequences_.emplace_back(sequence);
   selected_token_indices_.emplace_back(token_index);
@@ -77,14 +72,10 @@ void SamplingInputBuilder::merge(SamplingInputBuilder other,
                                  int32_t token_offset) {
   CHECK_GE(token_offset, 0);
   CHECK_LE(size() + other.size(), std::numeric_limits<int32_t>::max());
-  const int32_t row_offset = static_cast<int32_t>(size());
   reserve(size() + other.size());
   for (int32_t index : other.selected_token_indices_) {
     CHECK_LE(index, std::numeric_limits<int32_t>::max() - token_offset);
     selected_token_indices_.emplace_back(index + token_offset);
-  }
-  for (int32_t index : other.sample_indices_) {
-    sample_indices_.emplace_back(index + row_offset);
   }
   params_.insert(params_.end(), other.params_.begin(), other.params_.end());
   sequences_.insert(
@@ -109,7 +100,6 @@ SamplingParameters SamplingInputBuilder::build() {
   util::pad_2d_vector(token_counts_, /*pad_value=*/0);
   result.init(params_,
               selected_token_indices_,
-              sample_indices_,
               token_ids_,
               token_counts_,
               token_lengths_);

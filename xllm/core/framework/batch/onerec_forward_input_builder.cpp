@@ -190,7 +190,6 @@ RecForwardInput OneRecForwardInputBuilder::build_rec_forward_input(
     return cache_data.encoder_tokens;
   };
 
-  LOG(INFO) << "=== build_decoder_data_optimized";
   // ========== High-performance decoder data construction ==========
   auto build_decoder_data_optimized = [&]() {
     // Pre-allocate all containers to avoid dynamic expansion
@@ -201,8 +200,6 @@ RecForwardInput OneRecForwardInputBuilder::build_rec_forward_input(
     sampling_params.reserve(num_sequences);
     std::vector<int32_t> selected_token_idxes;
     selected_token_idxes.reserve(num_sequences);
-    std::vector<int32_t> sample_idxes;
-    sample_idxes.reserve(num_sequences);
     std::vector<std::vector<int32_t>> generated_tokens;
     generated_tokens.reserve(num_sequences);
 
@@ -214,7 +211,6 @@ RecForwardInput OneRecForwardInputBuilder::build_rec_forward_input(
       std::vector<std::vector<int32_t>> thread_flatten_tokens(num_sequences);
       std::vector<const RequestSamplingParam*> thread_sampling_params(
           num_sequences);
-      std::vector<int32_t> thread_sample_idxes(num_sequences);
       std::vector<std::vector<int32_t>> thread_generated_tokens(num_sequences);
 
       // Parallel processing function. Concurrency, chunking and the fast
@@ -257,7 +253,6 @@ RecForwardInput OneRecForwardInputBuilder::build_rec_forward_input(
 
           // Set sampling parameters
           thread_sampling_params[i] = sequence->sampling_param();
-          thread_sample_idxes[i] = static_cast<int32_t>(i);
         }
       };
 
@@ -278,14 +273,12 @@ RecForwardInput OneRecForwardInputBuilder::build_rec_forward_input(
             static_cast<int32_t>(start_idx + total_tokens - 1));
         start_idx += total_tokens;
         sampling_params.push_back(thread_sampling_params[i]);
-        sample_idxes.push_back(thread_sample_idxes[i]);
         generated_tokens.push_back(std::move(thread_generated_tokens[i]));
       }
     } else {
       // Original single-thread processing logic
       size_t start_idx = 0;
       size_t total_tokens = seq_len + num_decoder_embeddings;
-      size_t seq_idx = 0;
       for (const auto& group : sequence_groups_) {
         for (const auto& sequence : group->sequences()) {
           const auto& token_ids = sequence->tokens();
@@ -306,8 +299,6 @@ RecForwardInput OneRecForwardInputBuilder::build_rec_forward_input(
               static_cast<int32_t>(start_idx + total_tokens - 1));
           start_idx += total_tokens;
           sampling_params.push_back(sequence->sampling_param());
-          sample_idxes.push_back(seq_idx);
-          seq_idx++;
         }
       }
     }
@@ -315,60 +306,14 @@ RecForwardInput OneRecForwardInputBuilder::build_rec_forward_input(
     return std::make_tuple(std::move(flatten_tokens_vec),
                            std::move(sampling_params),
                            std::move(selected_token_idxes),
-                           std::move(sample_idxes),
                            std::move(generated_tokens));
   };
 
-  // ========== Comprehensive parallel execution of optimized data construction
-  // ========== Use thread pool to execute all independent data construction
-  // tasks in parallel
-  std::future<const std::vector<int32_t>&> encoder_future;
-  std::future<std::tuple<std::vector<int32_t>,
-                         std::vector<const RequestSamplingParam*>,
-                         std::vector<int32_t>,
-                         std::vector<int32_t>,
-                         std::vector<std::vector<int32_t>>>>
-      decoder_future;
-
-  // Declare variables to store results
-  const std::vector<int32_t>* encoder_tokens_ptr = nullptr;
-  std::vector<int32_t> flatten_tokens_vec;
-  std::vector<const RequestSamplingParam*> sampling_params;
-  std::vector<int32_t> selected_token_idxes;
-  std::vector<int32_t> sample_idxes;
-  std::vector<std::vector<int32_t>> generated_tokens;
-  if (thread_pool_ && num_sequences >= kSequenceParallelGrain) {
-    // Use ThreadPool's schedule method to execute independent tasks in parallel
-    // build_decoder_data_optimized handles multi-threading internally, no
-    // external parallel calls
-
-    // Task 1: build_encoder_tokens_optimized
-    std::promise<const std::vector<int32_t>*> encoder_promise;
-    auto encoder_future = encoder_promise.get_future();
-    thread_pool_->schedule([&, promise = std::move(encoder_promise)]() mutable {
-      const auto& result = build_encoder_tokens_optimized();
-      promise.set_value(&result);
-    });
-    // Wait for encoder to complete
-    encoder_tokens_ptr = encoder_future.get();
-    // Task 2: build_decoder_data_optimized executes directly, handles
-    // multi-threading internally
-    std::tie(flatten_tokens_vec,
-             sampling_params,
-             selected_token_idxes,
-             sample_idxes,
-             generated_tokens) = build_decoder_data_optimized();
-  } else {
-    // Single-thread execution (original logic)
-    encoder_tokens_ptr = &build_encoder_tokens_optimized();
-    std::tie(flatten_tokens_vec,
-             sampling_params,
-             selected_token_idxes,
-             sample_idxes,
-             generated_tokens) = build_decoder_data_optimized();
-  }
-
-  const auto& encoder_tokens = *encoder_tokens_ptr;
+  const auto& encoder_tokens = build_encoder_tokens_optimized();
+  auto [flatten_tokens_vec,
+        sampling_params,
+        selected_token_idxes,
+        generated_tokens] = build_decoder_data_optimized();
 
   // ========== High-performance RecForwardInput construction ==========
   RecForwardInput forward_input;
@@ -503,11 +448,6 @@ RecForwardInput OneRecForwardInputBuilder::build_rec_forward_input(
           (group_width_size + kGroupParallelGrain - 1) / kGroupParallelGrain;
       if (pool_size > 0) {
         num_tasks = std::min(num_tasks, pool_size);
-      }
-      if (num_tasks == 0) {
-        // Either `group_width == 0` (nothing to copy) or no workers.
-        // Skip dispatch entirely; case-3 wait below sees a null group.
-        num_tasks = 0;
       }
       const size_t groups_per_task =
           num_tasks == 0 ? 0 : (group_width_size + num_tasks - 1) / num_tasks;
@@ -754,87 +694,40 @@ RecForwardInput OneRecForwardInputBuilder::build_rec_forward_input(
     }
   }
 
-  // ========== Parallel processing of independent code blocks ==========
-  if (thread_pool_ && num_sequences >= kSequenceParallelGrain) {
-    // Define promise/future for parallel tasks
-    std::promise<void> block_tables_promise;
-    auto block_tables_future = block_tables_promise.get_future();
-
-    // Task 1: Empty block tables processing - use thread pool (relatively
-    // time-consuming)
-    thread_pool_->schedule(
-        [&input_params, num_sequences, &block_tables_promise]() mutable {
-          try {
-            std::vector<std::vector<int32_t>> empty_block_tables(num_sequences);
-            util::pad_2d_vector(empty_block_tables, 0);
-            // Optimization: Use create_2d_tensor_optimized, has special
-            // optimization for all-zero matrices
-            input_params.attention.device.block_tables =
-                create_2d_tensor(empty_block_tables, torch::kInt);
-            input_params.attention.host.block_tables =
-                input_params.attention.device.block_tables;
-
-            std::vector<int32_t> paged_kv_indptr(num_sequences + 1, 0);
-            // Optimization: Use torch::empty+std::memcpy instead of
-            // torch::from_blob().clone()
-            input_params.attention.device.new_cache_slots =
-                torch::empty({static_cast<int64_t>(paged_kv_indptr.size())},
-                             torch::TensorOptions()
-                                 .dtype(torch::kInt)
-                                 .device(torch::kCPU)
-                                 .pinned_memory(true));
-            std::memcpy(
-                input_params.attention.device.new_cache_slots.data_ptr<int>(),
-                paged_kv_indptr.data(),
-                paged_kv_indptr.size() * sizeof(int));
-
-            block_tables_promise.set_value();
-          } catch (...) {
-            block_tables_promise.set_exception(std::current_exception());
-          }
-        });
-
-    // Optimization: Merge small tasks into sequential execution to reduce
-    // thread switching overhead Cross-attention parameter construction - use
-    // placeholder
-    onerec_params.cross_attn_kv_cu_seq_lens = torch::zeros({1}, torch::kInt);
-    onerec_params.cross_attn_kv_cu_seq_lens_vec = {0};
-    onerec_params.cross_attn_block_tables = torch::zeros({1, 1}, torch::kInt);
-
-    // Sampling parameter processing
+  auto init_sampling_params = [&]() {
     if (!selected_token_idxes.empty()) {
       forward_input.sampling_params.init(sampling_params,
                                          selected_token_idxes,
-                                         sample_idxes,
                                          std::vector<std::vector<int64_t>>{},
                                          std::vector<std::vector<int32_t>>{},
                                          std::vector<int32_t>{});
     }
+  };
 
-    // First prefill processing - use placeholder
-    if (is_first_prefill) {
-      // Use placeholder instead of complex cross_attn_new_cache_slots
-      // construction
-      onerec_params.cross_attn_new_cache_slots = torch::zeros({1}, torch::kInt);
-    }
+  // Placeholder tensors are borrowed read-only from the perf cache.
+  auto init_cross_attn_placeholders =
+      [&perf_cache, &onerec_params, is_first_prefill]() {
+        onerec_params.cross_attn_kv_cu_seq_lens =
+            perf_cache.fixed_cross_attn_kv_cu_seq_lens;
+        onerec_params.cross_attn_kv_cu_seq_lens_vec = {0};
+        onerec_params.cross_attn_block_tables =
+            perf_cache.fixed_cross_attn_block_tables;
 
-    // Wait for parallel tasks to complete (only block_tables uses thread pool)
-    block_tables_future.wait();
-  } else {
-    // ========== Non-parallel case: sequential processing ==========
-    // Optimize empty block tables processing
+        if (is_first_prefill) {
+          onerec_params.cross_attn_new_cache_slots =
+              perf_cache.fixed_cross_attn_new_cache_slots;
+        }
+      };
+
+  auto build_block_tables = [&input_params, num_sequences]() {
     std::vector<std::vector<int32_t>> empty_block_tables(num_sequences);
     util::pad_2d_vector(empty_block_tables, 0);
-    // Optimization: Use create_2d_tensor_optimized, has special optimization
-    // for all-zero matrices
     input_params.attention.device.block_tables =
         create_2d_tensor(empty_block_tables, torch::kInt);
     input_params.attention.host.block_tables =
         input_params.attention.device.block_tables;
 
     std::vector<int32_t> paged_kv_indptr(num_sequences + 1, 0);
-    // Optimization: Use torch::empty+std::memcpy instead of
-    // torch::from_blob().clone()
     input_params.attention.device.new_cache_slots =
         torch::empty({static_cast<int64_t>(paged_kv_indptr.size())},
                      torch::TensorOptions()
@@ -844,30 +737,18 @@ RecForwardInput OneRecForwardInputBuilder::build_rec_forward_input(
     std::memcpy(input_params.attention.device.new_cache_slots.data_ptr<int>(),
                 paged_kv_indptr.data(),
                 paged_kv_indptr.size() * sizeof(int));
+  };
 
-    // ========== Cross-attention parameter construction (using placeholder)
-    // ========== Use placeholder tensor instead of actual data
-    onerec_params.cross_attn_kv_cu_seq_lens = torch::zeros({1}, torch::kInt);
-    onerec_params.cross_attn_kv_cu_seq_lens_vec = {0};
-
-    // Use placeholder tensor instead of actual data
-    onerec_params.cross_attn_block_tables = torch::zeros({1, 1}, torch::kInt);
-
-    // ========== Optimize sampling parameter processing ==========
-    if (!selected_token_idxes.empty()) {
-      forward_input.sampling_params.init(sampling_params,
-                                         selected_token_idxes,
-                                         sample_idxes,
-                                         std::vector<std::vector<int64_t>>{},
-                                         std::vector<std::vector<int32_t>>{},
-                                         std::vector<int32_t>{});
-    }
-
-    // ========== First prefill processing (using placeholder) ==========
-    if (is_first_prefill) {
-      // Use placeholder tensor instead of actual data
-      onerec_params.cross_attn_new_cache_slots = torch::zeros({1}, torch::kInt);
-    }
+  if (thread_pool_ && num_sequences >= kSequenceParallelGrain) {
+    TaskGroup block_tables_group(/*count=*/1);
+    thread_pool_->schedule(block_tables_group.wrap(build_block_tables));
+    init_cross_attn_placeholders();
+    init_sampling_params();
+    block_tables_group.wait();
+  } else {
+    build_block_tables();
+    init_cross_attn_placeholders();
+    init_sampling_params();
   }
 
   // ========== Common parameter settings ==========
@@ -956,9 +837,7 @@ RecForwardInput OneRecForwardInputBuilder::build_rec_forward_input(
       onerec_params.decoder_context_embedding = combined_embedding;
     } else {
       if (decoder_embedding_group) {
-        LOG(INFO) << "=== decoder_embedding_group->wait()";
         decoder_embedding_group->wait();
-        LOG(INFO) << "=== decoder_embedding_group->wait() done";
       }
       onerec_params.decoder_context_embedding = std::move(result_embedding);
     }

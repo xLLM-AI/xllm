@@ -82,7 +82,7 @@ std::optional<ForwardOutput> EmbedWorkerImpl::step(
   // driver prepare model output
   ForwardOutput output;
   SampleOutput sample_output;
-  if (sampling_params.selected_token_idxes.defined() &&
+  if (sampling_params.num_sample_seqs() > 0 &&
       input.sampling_params.is_embeddings) {
     // create embeddings
     timer.reset();
@@ -95,7 +95,6 @@ std::optional<ForwardOutput> EmbedWorkerImpl::step(
     output.sample_output = sample_output;
 
     // carry over the sampling params
-    output.do_sample = sampling_params.do_sample;
     output.logprobs = sampling_params.logprobs;
     output.max_top_logprobs = sampling_params.max_top_logprobs;
   }

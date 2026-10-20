@@ -154,8 +154,8 @@ DSparkWorkerImpl::DraftBlock DSparkWorkerImpl::sample_block(
         return draft_impl_->dspark_markov_bias(previous);
       },
       [this, &sampling_params](torch::Tensor& tokens) {
-        synchronize_sampled_token_ids(tokens,
-                                      sampling_params.all_greedy_sample);
+        synchronize_sampled_token_ids(
+            tokens, sampling_params.sampling_mode == SamplingMode::GREEDY);
       });
   const auto& token_ids = draft_block.proposal.token_ids();
 

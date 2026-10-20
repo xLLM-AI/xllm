@@ -67,14 +67,6 @@ namespace {
 template <typename T>
 constexpr size_t type_size = sizeof(T);
 
-constexpr size_t sampling_param_fixed_size() {
-  return 6 * type_size<float>  // frequency_penalty, presence_penalty,
-                               // repetition_penalty, temperature, top_p, min_p
-         + 2 * type_size<int64_t>   // top_k, top_logprobs
-         + 3 * type_size<bool>      // logprobs, do_sample, is_embeddings
-         + 2 * type_size<int32_t>;  // beam_width, num_return_sequences
-}
-
 constexpr size_t swap_block_info_fixed_size() {
   return type_size<int32_t> * 2;  // src_block_id + dst_block_id
 }
@@ -419,35 +411,6 @@ inline size_t get_mm_item_size(const MMDataItem& mm_item) {
   return total;
 }
 
-size_t get_sampling_params_size(const SamplingParameters& params) {
-  size_t total = 0;
-
-  total += get_tensor_size(params.selected_token_idxes);
-  total += get_tensor_size(params.filter_mask);
-  total += get_tensor_size(params.filter_bitmask);
-  total += get_tensor_size(params.frequency_penalties);
-  total += get_tensor_size(params.presence_penalties);
-  total += get_tensor_size(params.repetition_penalties);
-  total += get_tensor_size(params.temperatures);
-  total += get_tensor_size(params.top_p);
-  total += get_tensor_size(params.min_p);
-  total += get_tensor_size(params.logits_bias);
-  total += get_tensor_size(params.seeds);
-  total += get_tensor_size(params.seed_offsets);
-  total += get_tensor_size(params.top_k);
-  total += get_tensor_size(params.unique_token_ids);
-  total += get_tensor_size(params.unique_token_counts);
-  total += get_tensor_size(params.unique_token_ids_lens);
-  total += get_tensor_size(params.sample_idxes);
-  total += get_tensor_size(params.do_sample);
-  total += get_tensor_size(params.acc_logprob);
-  total += type_size<bool> * 5    // all_random_sample + all_greedy_sample +
-                                  // logprobs + is_embeddings + use_beam_search
-           + type_size<int64_t>   // max_top_logprobs
-           + type_size<int32_t>;  // num_return_sequences
-  return total;
-}
-
 inline size_t get_mm_data_size(const MMData& mm_data) {
   size_t total = 0;
   total += type_size<uint32_t>;  //  mm_type
@@ -663,8 +626,6 @@ inline void write_sampling_param(char*& buffer,
   ptr += type_size<bool>;
   *reinterpret_cast<int64_t*>(ptr) = param.top_logprobs;
   ptr += type_size<int64_t>;
-  *reinterpret_cast<bool*>(ptr) = param.do_sample;
-  ptr += type_size<bool>;
   *reinterpret_cast<bool*>(ptr) = param.is_embeddings;
   ptr += type_size<bool>;
   *reinterpret_cast<int32_t*>(ptr) = param.beam_width;
@@ -1762,8 +1723,6 @@ inline void read_sampling_param(const char*& buffer,
   ptr += type_size<bool>;
   param.top_logprobs = *reinterpret_cast<const int64_t*>(ptr);
   ptr += type_size<int64_t>;
-  param.do_sample = *reinterpret_cast<const bool*>(ptr);
-  ptr += type_size<bool>;
   param.is_embeddings = *reinterpret_cast<const bool*>(ptr);
   ptr += type_size<bool>;
   param.beam_width = *reinterpret_cast<const int32_t*>(ptr);
@@ -2764,10 +2723,8 @@ inline void deserialize_forward_input_payload(
     read_tensor(context, sampling_params.unique_token_ids, stream);
     read_tensor(context, sampling_params.unique_token_counts, stream);
     read_tensor(context, sampling_params.unique_token_ids_lens, stream);
-    read_tensor(context, sampling_params.sample_idxes, stream);
     read_tensor(context, sampling_params.do_sample, stream);
-    read_data(context, sampling_params.all_random_sample);
-    read_data(context, sampling_params.all_greedy_sample);
+    read_data(context, sampling_params.sampling_mode);
     read_data(context, sampling_params.logprobs);
     read_data(context, sampling_params.is_embeddings);
     read_data(context, sampling_params.max_top_logprobs);
@@ -2775,10 +2732,7 @@ inline void deserialize_forward_input_payload(
     read_data(context, sampling_params.use_beam_search);
   }
   forward_input.input_host_sample_count =
-      forward_input.sampling_params.sample_idxes.defined()
-          ? static_cast<int32_t>(
-                forward_input.sampling_params.sample_idxes.numel())
-          : 0;
+      static_cast<int32_t>(forward_input.sampling_params.num_sample_seqs());
   // acc_logprob
   read_tensor(context, forward_input.sampling_params.acc_logprob, stream);
   read_string_vector(context, forward_input.sample_sequence_ids);
@@ -2854,7 +2808,7 @@ bool input_layout_fits(const RawInputLayoutHeader& layout,
 }
 
 bool supports_rec_shm_input(const RecForwardInput& input) {
-  return !input.decoder_sampling_params.selected_token_idxes.defined() &&
+  return input.decoder_sampling_params.num_sample_seqs() == 0 &&
          std::holds_alternative<std::monostate>(
              input.input_params.rec_params) &&
          !input.step_decode.has_value();
@@ -3078,9 +3032,7 @@ inline void serialize_forward_input_sections(
 
   const SamplingParameters& sampling_params = input.sampling_params;
   const uint64_t selected_token_idxes_size =
-      sampling_params.selected_token_idxes.defined()
-          ? static_cast<uint64_t>(sampling_params.selected_token_idxes.numel())
-          : 0;
+      static_cast<uint64_t>(sampling_params.num_sample_seqs());
   write_data(context.descriptor, selected_token_idxes_size);
   if (selected_token_idxes_size > 0) {
     write_tensor(context, sampling_params.selected_token_idxes);
@@ -3099,10 +3051,8 @@ inline void serialize_forward_input_sections(
     write_tensor(context, sampling_params.unique_token_ids);
     write_tensor(context, sampling_params.unique_token_counts);
     write_tensor(context, sampling_params.unique_token_ids_lens);
-    write_tensor(context, sampling_params.sample_idxes);
     write_tensor(context, sampling_params.do_sample);
-    write_data(context.descriptor, sampling_params.all_random_sample);
-    write_data(context.descriptor, sampling_params.all_greedy_sample);
+    write_data(context.descriptor, sampling_params.sampling_mode);
     write_data(context.descriptor, sampling_params.logprobs);
     write_data(context.descriptor, sampling_params.is_embeddings);
     write_data(context.descriptor, sampling_params.max_top_logprobs);
@@ -3473,7 +3423,7 @@ bool unpack_native_input_host_buffer(const Input& input,
       materialize_device_buffer);
   CHECK(input.input_host_sample_count == kUnknownPackedSampleCount ||
         input.input_host_sample_count == output.input_host_sample_count)
-      << "Packed sample count does not match sample_idxes";
+      << "Packed sample count does not match the sampling sequence count";
   auto normalize_float_param = [&](torch::Tensor& tensor) {
     if (tensor.defined() && tensor.scalar_type() != dtype) {
       tensor = tensor.to(torch::TensorOptions().device(device).dtype(dtype));
@@ -3575,18 +3525,13 @@ bool token_input_to_packed_proto(
       return false;
     }
   }
-  int32_t sample_count = 0;
   const auto& sampling = input.sampling_params;
-  if (sampling.selected_token_idxes.defined() &&
-      sampling.selected_token_idxes.numel() > 0 &&
-      sampling.sample_idxes.defined()) {
-    if (sampling.sample_idxes.dim() != 1 ||
-        sampling.sample_idxes.numel() > std::numeric_limits<int32_t>::max()) {
-      LOG(ERROR) << "Packed sample indices must be a bounded vector";
-      return false;
-    }
-    sample_count = static_cast<int32_t>(sampling.sample_idxes.size(0));
+  const int64_t num_seqs = sampling.num_sample_seqs();
+  if (num_seqs > std::numeric_limits<int32_t>::max()) {
+    LOG(ERROR) << "Packed sample count exceeds int32 bounds";
+    return false;
   }
+  const int32_t sample_count = static_cast<int32_t>(num_seqs);
   const RawInputLayoutHeader layout = calculate_forward_input_layout(input);
   const uint64_t payload_size = get_input_layout_size(layout);
   std::string payload;
@@ -3625,7 +3570,7 @@ bool LlmForwardInput::to_packed_proto(
 
 bool RecForwardInput::to_packed_proto(
     proto::PackedForwardInput* packed_forward_input) const {
-  if (decoder_sampling_params.selected_token_idxes.defined()) {
+  if (decoder_sampling_params.num_sample_seqs() > 0) {
     LOG(ERROR) << "Decoder sampling requires local Rec execution";
     return false;
   }

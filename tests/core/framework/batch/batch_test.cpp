@@ -1358,7 +1358,6 @@ TEST(BatchTest, NativeVlmEmptyBatchAndShardProduceEmptyInputs) {
   EXPECT_FALSE(input.token_ids.defined());
   EXPECT_FALSE(input.positions.defined());
   EXPECT_FALSE(input.input_params.multimodal.mm_data.valid());
-  EXPECT_FALSE(input.sampling_params.sample_idxes.defined());
 
   VlmForwardInput shard_input = batch.prepare_vlm_forward_input(
       ModelArgs(), /*thread_pool=*/nullptr, /*cp_size=*/1);
@@ -1366,7 +1365,6 @@ TEST(BatchTest, NativeVlmEmptyBatchAndShardProduceEmptyInputs) {
   EXPECT_FALSE(shard_input.token_ids.defined());
   EXPECT_FALSE(shard_input.positions.defined());
   EXPECT_FALSE(shard_input.input_params.multimodal.mm_data.valid());
-  EXPECT_FALSE(shard_input.sampling_params.sample_idxes.defined());
 }
 
 TEST(BatchTest, Basic) {
@@ -1539,14 +1537,12 @@ TEST(BatchTest, Basic) {
 
   // The model's output hidden_states shape is [num_tokens, hidden_size].
   // selected_token_idxes is used to select the required corresponding token's hidden_state from it, perform logits calculation, and obtain the probability that the token belongs to each class.
-  // The logits_processor's output logits shape is [num_selected_tokens, vocab_size]. sample_idxes is used to select the required token's corresponding logits from it.
+  // The logits_processor's output logits shape is [num_selected_tokens, vocab_size].
   // Generally, num_selected_tokens equals num_sample_tokens.
   const std::vector<int32_t> expected_selected_token_idxes = {8,9,10};
   // seq4 has no sampling parameters
   EXPECT_EQ(sampling_params.selected_token_idxes.size(0), batch.size()-1);
   EXPECT_TRUE(equal(sampling_params.selected_token_idxes, expected_selected_token_idxes));
-  const std::vector<int32_t> expected_sample_idxes = {0,1,2};
-  EXPECT_TRUE(equal(sampling_params.sample_idxes, expected_sample_idxes));
 
   // clang-format on
 }
@@ -1604,10 +1600,8 @@ TEST(BatchTest, SampleRequestInjectsAllMatchedSlots) {
 
   const auto& sampling_params_out = forward_input.sampling_params;
   const std::vector<int32_t> expected_selected_token_idxes = {1, 4};
-  const std::vector<int32_t> expected_sample_idxes = {0, 1};
   EXPECT_TRUE(equal(sampling_params_out.selected_token_idxes,
                     expected_selected_token_idxes));
-  EXPECT_TRUE(equal(sampling_params_out.sample_idxes, expected_sample_idxes));
   EXPECT_EQ(sampling_params_out.selected_token_idxes.size(0), 2);
 }
 
@@ -1784,12 +1778,10 @@ TEST(BatchTest, ReorderedMtpAcceptedRowsCommitToOwningSequences) {
     target_logits.index_put_(
         {row, 5, bonus_token_ids.index({row, 0}).item<int64_t>()}, 20.0F);
   }
-  const torch::Tensor do_sample = torch::tensor({false, false}, torch::kBool);
-  RejectionSampler rejection_sampler(do_sample,
-                                     /*all_random_sample=*/false,
-                                     /*all_greedy_sample=*/true,
-                                     /*logprobs=*/false,
-                                     /*max_top_logprobs=*/0);
+  SamplingParameters params;
+  params.do_sample = torch::tensor({false, false}, torch::kBool);
+  RejectionSampler rejection_sampler(
+      params, /*logprobs=*/false, /*max_top_logprobs=*/0);
   DraftProposal draft_proposal = DraftProposal(draft_token_ids);
   const SampleOutput accepted_output =
       rejection_sampler.forward(draft_proposal, target_logits);
@@ -2516,11 +2508,8 @@ TEST(BatchTest, SampleRequestKeepsThreadedForwardBuilderOffsetsStable) {
                                   /*min_decoding_batch_size=*/0);
 
   const std::vector<int32_t> expected_selected_token_idxes = {1, 3, 4, 6};
-  const std::vector<int32_t> expected_sample_idxes = {0, 1, 2, 3};
   EXPECT_TRUE(equal(forward_input.sampling_params.selected_token_idxes,
                     expected_selected_token_idxes));
-  EXPECT_TRUE(
-      equal(forward_input.sampling_params.sample_idxes, expected_sample_idxes));
   ASSERT_EQ(forward_input.input_params.embedding.embedding_ids.size(),
             sequences.size());
   ASSERT_EQ(forward_input.input_params.embedding.linear_state_ids.size(),
@@ -3330,8 +3319,6 @@ TEST(BatchTest, ThreadedPrefillPreservesChunkSlicesAndFinalSamplingOffset) {
               std::vector<int32_t>({32871, -1}));
     EXPECT_TRUE(torch::equal(forward_input.sampling_params.selected_token_idxes,
                              make_cpu_tensor(std::vector<int32_t>({65535}))));
-    EXPECT_TRUE(torch::equal(forward_input.sampling_params.sample_idxes,
-                             make_cpu_tensor(std::vector<int32_t>({0}))));
   };
 
   verify(/*thread_pool=*/nullptr);

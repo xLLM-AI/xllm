@@ -86,21 +86,18 @@ torch::Tensor sample_recovered_tokens(torch::Tensor target_probs,
 
 }  // namespace
 
-RejectionSampler::RejectionSampler(const torch::Tensor& do_sample,
-                                   bool all_random_sample,
-                                   bool all_greedy_sample,
+RejectionSampler::RejectionSampler(const SamplingParameters& sampling_params,
                                    bool logprobs,
                                    int64_t max_top_logprobs)
     : logprobs_(logprobs),
       max_top_logprobs_(max_top_logprobs),
-      all_random_sample_(all_random_sample),
-      all_greedy_sample_(all_greedy_sample) {
-  CHECK(do_sample.defined());
-  // Keep a private expanded view and do not mutate the caller-owned tensor.
-  // The same SamplingParameters object is reused later by MTP draft extend.
-  // An in-place unsqueeze here corrupts Sampler::forward() mixed-mode shape
-  // assumptions and can broadcast sampled token ids into 2D.
-  do_sample_ = do_sample.unsqueeze(/*dim=*/-1);
+      sampling_mode_(sampling_params.sampling_mode) {
+  if (sampling_params.sampling_mode == SamplingMode::MIXED) {
+    // Keep a private expanded view: unsqueezing the caller-owned tensor in
+    // place would corrupt the SamplingParameters object reused by MTP draft
+    // extend (Sampler::forward() mixed-mode shape assumptions).
+    do_sample_ = sampling_params.require_do_sample().unsqueeze(/*dim=*/-1);
+  }
 }
 
 SampleOutput RejectionSampler::forward(
@@ -114,7 +111,7 @@ SampleOutput RejectionSampler::forward(
 
   torch::Tensor bonus_token_ids;
   torch::Tensor full_greedy_token_ids;
-  if (all_greedy_sample_) {
+  if (sampling_mode_ == SamplingMode::GREEDY) {
     full_greedy_token_ids = Sampler::greedy_sample(target_logits);
     bonus_token_ids =
         full_greedy_token_ids.select(/*dim=*/1, -1).unsqueeze(/*dim=*/-1);
@@ -128,7 +125,7 @@ SampleOutput RejectionSampler::forward(
     bonus_token_ids = Sampler::random_sample(bonus_probs)
                           .to(torch::kLong)
                           .view({target_logits.size(0), 1});
-    if (!all_random_sample_) {
+    if (sampling_mode_ != SamplingMode::RANDOM) {
       full_greedy_token_ids = Sampler::greedy_sample(target_logits);
       const torch::Tensor greedy_bonus =
           full_greedy_token_ids.select(/*dim=*/1, -1).unsqueeze(/*dim=*/-1);
@@ -144,7 +141,7 @@ SampleOutput RejectionSampler::forward(
   // Only the random/mixed verification legs read the lse; greedy batches
   // (the default draft mode) skip the [B, K, V] fp32 reduction entirely.
   const torch::Tensor target_lse =
-      all_greedy_sample_
+      sampling_mode_ == SamplingMode::GREEDY
           ? torch::Tensor()
           : torch::logsumexp(
                 target_logits
@@ -195,7 +192,7 @@ torch::Tensor RejectionSampler::verify(
   const torch::Tensor& draft_token_ids = draft_proposal.token_ids();
   const int64_t num_draft_tokens = draft_token_ids.size(1);
   draft_proposal.validate(
-      /*expected_batch_size=*/do_sample_.size(0),
+      /*expected_batch_size=*/target_logits.size(0),
       /*expected_vocab_size=*/target_logits.size(-1),
       /*expected_num_speculative_tokens=*/target_logits.size(1) - 1);
   const torch::Tensor greedy_target_token_ids =
@@ -234,10 +231,10 @@ torch::Tensor RejectionSampler::verify(
                                        greedy_accepted);
   };
 
-  if (all_greedy_sample_) {
+  if (sampling_mode_ == SamplingMode::GREEDY) {
     return greedy_sample_dispatch();
   }
-  if (all_random_sample_) {
+  if (sampling_mode_ == SamplingMode::RANDOM) {
     return random_sample_dispatch();
   }
   // mixed sample: dispatch both legs and select per row.

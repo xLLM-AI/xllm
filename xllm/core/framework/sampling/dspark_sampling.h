@@ -26,7 +26,7 @@ namespace xllm {
 DraftProposal sample_dspark_block(
     const torch::Tensor& base_logits,
     const torch::Tensor& anchor_token_ids,
-    SamplingParameters sampling,
+    const SamplingParameters& sampling,
     const std::function<torch::Tensor(const torch::Tensor&)>& markov_bias,
     const std::function<void(torch::Tensor&)>& synchronize_tokens,
     torch::Tensor tokens = {});

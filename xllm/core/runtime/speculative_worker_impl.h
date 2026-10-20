@@ -140,14 +140,6 @@ class SpeculativeWorkerImpl : public WorkerImpl {
   virtual std::optional<ForwardOutput> step_empty(
       const TargetInput& inputs) = 0;
 
-  // Common helper: update sampling params for validation
-  void update_sampling_params(SamplingParameters& sampling_params,
-                              const int32_t num_val_tokens,
-                              const int32_t total_num_val_tokens);
-  void update_sampling_params(SamplingParameters& sampling_params,
-                              const std::vector<int32_t>& per_seq_val_tokens,
-                              const int32_t total_num_val_tokens);
-
   // prepare inputs for target model at Decode phase (validation).
   void prepare_validate_inputs(const TargetInput& inputs,
                                TargetInput& validate_inputs);

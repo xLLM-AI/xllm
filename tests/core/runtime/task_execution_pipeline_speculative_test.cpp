@@ -81,9 +81,9 @@ TEST(UnifiedBlockAdmissionTest, RejectsNonGreedyAndTransformedRequests) {
   input.sampling_params.logprobs = true;
   EXPECT_FALSE(supports_unified_block_graph(capacity, 1, input));
   input.sampling_params.logprobs = false;
-  input.sampling_params.all_greedy_sample = false;
+  input.sampling_params.sampling_mode = SamplingMode::MIXED;
   EXPECT_FALSE(supports_unified_block_graph(capacity, 1, input));
-  input.sampling_params.all_greedy_sample = true;
+  input.sampling_params.sampling_mode = SamplingMode::GREEDY;
   for (auto* transform : {&input.sampling_params.top_k,
                           &input.sampling_params.min_p,
                           &input.sampling_params.logits_bias}) {
@@ -482,7 +482,6 @@ class SpeculativePipelineTest : public ::testing::Test {
     }
     input.sampling_params.selected_token_idxes =
         torch::tensor({query - 1}, torch::kInt32);
-    input.sampling_params.sample_idxes = torch::tensor({0}, torch::kInt32);
     input.sampling_params.do_sample = torch::tensor({false}, torch::kBool);
     return input;
   }
@@ -1079,15 +1078,13 @@ TEST_F(SpeculativePipelineTest,
   ASSERT_NE(pipeline_, nullptr);
   auto prefill = input(false);
   prefill.sampling_params.do_sample.fill_(true);
-  prefill.sampling_params.all_greedy_sample = false;
-  prefill.sampling_params.all_random_sample = true;
+  prefill.sampling_params.sampling_mode = SamplingMode::RANDOM;
   const auto first = execute(prefill);
   ASSERT_TRUE(first.sample_output.next_tokens.defined());
   EXPECT_EQ(first.sample_output.next_tokens.item<int64_t>(), 7);
   auto decode = input(true, 7, 2);
   decode.sampling_params.do_sample.fill_(true);
-  decode.sampling_params.all_greedy_sample = false;
-  decode.sampling_params.all_random_sample = true;
+  decode.sampling_params.sampling_mode = SamplingMode::RANDOM;
   const auto accepted = execute(decode);
   ASSERT_TRUE(accepted.sample_output.next_tokens.defined());
   EXPECT_TRUE(torch::equal(accepted.sample_output.next_tokens,
@@ -1125,15 +1122,13 @@ TEST_P(CpSpeculativePipelineTest,
   ASSERT_NE(pipeline_, nullptr);
   auto prefill = input(false);
   prefill.sampling_params.do_sample.fill_(true);
-  prefill.sampling_params.all_greedy_sample = false;
-  prefill.sampling_params.all_random_sample = true;
+  prefill.sampling_params.sampling_mode = SamplingMode::RANDOM;
   const auto first = execute(prefill);
   ASSERT_TRUE(first.sample_output.next_tokens.defined());
   EXPECT_EQ(first.sample_output.next_tokens.item<int64_t>(), 7);
   auto decode = input(true, /*token=*/7, /*position=*/2);
   decode.sampling_params.do_sample.fill_(true);
-  decode.sampling_params.all_greedy_sample = false;
-  decode.sampling_params.all_random_sample = true;
+  decode.sampling_params.sampling_mode = SamplingMode::RANDOM;
   const auto accepted = execute(decode);
   ASSERT_TRUE(accepted.sample_output.next_tokens.defined());
   EXPECT_TRUE(torch::equal(accepted.sample_output.next_tokens,
@@ -1500,7 +1495,6 @@ TEST_F(SpeculativePipelineTest,
   parallel.dp_is_decode = {0, 1};
   const auto decode = execute(idle);
   EXPECT_FALSE(decode.sample_output.next_tokens.defined());
-  EXPECT_FALSE(decode.do_sample.defined());
   ASSERT_EQ(target_->forward_inputs.size(), 2U);
   ASSERT_EQ(draft_->forward_inputs.size(), 3U);
   EXPECT_EQ(target_->forward_counts.back(), (std::vector<int32_t>{0, 3}));

@@ -85,7 +85,6 @@ struct SlotBufferCapacity {
   bool enable_mla = false;
   // Zero row capacities use model.max_sequences. Zero result width disables
   // result storage for sampling-only invocations.
-  uint32_t max_selected_rows = 0;
   uint32_t max_sample_rows = 0;
   uint32_t max_result_width = 1;
 };
@@ -165,7 +164,6 @@ class SlotBuffer final {
                      uint32_t top_logprobs,
                      bool logprobs);
   const SamplingParameters& sampling_params() const { return sampling_params_; }
-  torch::Tensor copy_cpu_do_sample() const;
   // Prepared from the sampling parameters together with the input views.
   const TokenResultTensors& device_result() const { return result_device_; }
   // The producer event follows all device writes. An empty result still
@@ -347,7 +345,6 @@ class SlotBuffer final {
   SamplingParameters sampling_host_;
   SamplingParameters sampling_device_;
   SamplingParameters sampling_params_;
-  torch::Tensor cpu_do_sample_;
   torch::Tensor host_indices_;
   torch::Tensor device_indices_;
   torch::Tensor gathered_int64_;

@@ -456,7 +456,9 @@ inline torch::Tensor view_as_dtype(const torch::Tensor& src,
 
 // Contiguous CPU copy with the requested scalar type; the trailing
 // contiguous() covers the same-device/dtype no-op path, where Tensor::to()
-// returns a non-contiguous input as-is.
+// returns a non-contiguous input as-is. An input already on CPU in
+// contiguous storage is returned as-is — use materialize_cpu_tensor when
+// the copy must be independent of any shared buffer.
 inline torch::Tensor to_cpu_contiguous(
     const torch::Tensor& tensor,
     std::optional<torch::ScalarType> dtype = std::nullopt) {
@@ -465,6 +467,17 @@ inline torch::Tensor to_cpu_contiguous(
                      .device(torch::kCPU)
                      .dtype(dtype.value_or(tensor.scalar_type())))
       .contiguous();
+}
+
+// Always yields independent contiguous CPU storage, copying even when the
+// input is already on CPU (unlike to_cpu_contiguous). For host views into
+// shared buffers that must outlive the buffer.
+inline torch::Tensor materialize_cpu_tensor(const torch::Tensor& tensor) {
+  if (!tensor.defined()) {
+    return tensor;
+  }
+  CHECK(tensor.device().is_cpu()) << "expected a CPU tensor";
+  return tensor.contiguous().clone();
 }
 
 // Reads a tensor into a host vector, converting to T's scalar type if needed.

@@ -310,7 +310,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   torch::Tensor logits;
   torch::Tensor lm_head_selected_token_idxes;
   torch::Tensor selected_hidden;
-  if (sampling_params.selected_token_idxes.defined()) {
+  if (sampling_params.num_sample_seqs() > 0) {
     torch::Tensor selected_token_idxes = remap_selected_token_idxes_for_lm_head(
         sampling_params.selected_token_idxes,
         execution_params.parallel,
@@ -375,9 +375,8 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   }
 
   // driver prepare model output
-  if (sampling_params.selected_token_idxes.defined()) {
+  if (sampling_params.num_sample_seqs() > 0) {
     output.selected_hidden = selected_hidden;
-    output.do_sample = sampling_params.do_sample;
     output.logprobs = sampling_params.logprobs;
     output.max_top_logprobs = sampling_params.max_top_logprobs;
     if (input.skip_sampling_for_logits_only) {

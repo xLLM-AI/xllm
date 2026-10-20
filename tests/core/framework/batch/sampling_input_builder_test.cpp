@@ -47,7 +47,6 @@ SamplingParameters build_row(const RequestSamplingParam& params,
                  /*token_index=*/0,
                  &sequence.token_to_count_map(),
                  /*excluded_counts=*/nullptr,
-                 /*sample=*/true,
                  &sequence);
   return builder.build();
 }
@@ -93,7 +92,6 @@ TEST(SamplingInputBuilderTest, MergesConstraintsAndIndependentSeedOffsets) {
                 /*token_index=*/0,
                 /*counts=*/nullptr,
                 /*excluded_counts=*/nullptr,
-                /*sample=*/true,
                 &sequence);
   first.merge(std::move(second), /*token_offset=*/1);
   auto result = first.build();

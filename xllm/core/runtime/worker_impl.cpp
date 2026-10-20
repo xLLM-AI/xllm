@@ -217,12 +217,9 @@ void ensure_forward_input_device_tensors(Input& input,
       input.input_params.embedding.mtp_shifted_token_ids, device);
   move_tensor_to_device_if_needed(input.sampling_params.selected_token_idxes,
                                   device);
-  move_tensor_to_device_if_needed(input.sampling_params.sample_idxes, device);
   if constexpr (std::is_same_v<Input, RecForwardInput>) {
     move_tensor_to_device_if_needed(
         input.decoder_sampling_params.selected_token_idxes, device);
-    move_tensor_to_device_if_needed(input.decoder_sampling_params.sample_idxes,
-                                    device);
   }
 }
 

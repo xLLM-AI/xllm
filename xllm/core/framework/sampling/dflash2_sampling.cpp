@@ -71,9 +71,10 @@ DFlash2SampleOutput sample_dflash2_path(
 
   torch::Tensor greedy_row_mask;
   torch::Tensor zero_log_probs;
-  if (sampling_params.return_logits && !sampling_params.all_random_sample) {
+  if (sampling_params.return_logits &&
+      sampling_params.sampling_mode == SamplingMode::MIXED) {
     greedy_row_mask =
-        sampling_params.do_sample.view({batch_size, 1}).logical_not();
+        sampling_params.require_do_sample().view({batch_size, 1}).logical_not();
     zero_log_probs = torch::zeros({batch_size, 1}, float_options);
   }
 
@@ -94,7 +95,7 @@ DFlash2SampleOutput sample_dflash2_path(
       // Greedy rows embed a log-space one-hot (q = 1); random rows keep
       // their sampled row log prob.
       torch::Tensor step_log_probs = row_log_probs;
-      if (!sampling_params.all_random_sample) {
+      if (sampling_params.sampling_mode == SamplingMode::MIXED) {
         step_log_probs = torch::where(
             greedy_row_mask,
             embed_sparse_logits(

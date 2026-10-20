@@ -480,7 +480,7 @@ std::optional<ForwardOutput> RecWorkerImpl::RecWorkPipeline::step(
   }
 
   torch::Tensor logits;
-  if (sampling_params.selected_token_idxes.defined()) {
+  if (sampling_params.num_sample_seqs() > 0) {
     logits = runtime_.model->logits(model_output.hidden_states,
                                     sampling_params.selected_token_idxes);
   }
@@ -508,7 +508,7 @@ std::optional<ForwardOutput> RecWorkerImpl::RecWorkPipeline::step(
 
   // driver prepare model output
   SampleOutput sample_output;
-  if (sampling_params.selected_token_idxes.defined()) {
+  if (sampling_params.num_sample_seqs() > 0) {
     sample_output = runtime_.worker.sampler_->forward(logits, sampling_params);
     output.logits = logits;
 
@@ -526,7 +526,6 @@ std::optional<ForwardOutput> RecWorkerImpl::RecWorkPipeline::step(
     // set sample output to output
     output.sample_output = sample_output;
     // carry over the sampling params
-    output.do_sample = sampling_params.do_sample;
     output.logprobs = sampling_params.logprobs;
     output.max_top_logprobs = sampling_params.max_top_logprobs;
     // set beam search output to output
@@ -537,7 +536,7 @@ std::optional<ForwardOutput> RecWorkerImpl::RecWorkPipeline::step(
     if (!input_params.meta.batch_forward_type.is_decode() &&
         !runtime_.worker.is_spec_draft_) {
       output.sample_output.embeddings = model_output.hidden_states;
-    } else if (sampling_params.selected_token_idxes.defined()) {
+    } else if (sampling_params.num_sample_seqs() > 0) {
       auto embeddings = model_output.hidden_states.index_select(
           /*dim=*/0, sampling_params.selected_token_idxes);
       output.sample_output.embeddings = embeddings;
@@ -696,7 +695,7 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecWorkPipeline::step(
   if ((runtime_.worker.driver_ || runtime_.worker.dp_driver_) &&
       ::xllm::RecConfig::get_instance().enable_constrained_decoding() &&
       constrained_decoding_ != nullptr &&
-      sampling_params.selected_token_idxes.defined()) {
+      sampling_params.num_sample_seqs() > 0) {
     filter_mask_future = prepare_filter_mask_async(rec_params.generated_tokens);
   }
 
@@ -778,14 +777,14 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecWorkPipeline::step(
   }
 
   torch::Tensor logits;
-  if (sampling_params.selected_token_idxes.defined()) {
+  if (sampling_params.num_sample_seqs() > 0) {
     logits = runtime_.model->logits(hidden_states,
                                     sampling_params.selected_token_idxes);
   }
 
   ForwardOutput output;
 
-  if (sampling_params.selected_token_idxes.defined()) {
+  if (sampling_params.num_sample_seqs() > 0) {
     torch::Tensor filter_mask;
     if (filter_mask_future.has_value()) {
       filter_mask = std::move(filter_mask_future.value()).get();
@@ -794,7 +793,6 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecWorkPipeline::step(
         rec_sampler_->forward(logits, sampling_params, filter_mask);
     output.logits = logits;
     output.sample_output = sample_output;
-    output.do_sample = sampling_params.do_sample;
     output.logprobs = sampling_params.logprobs;
     output.max_top_logprobs = sampling_params.max_top_logprobs;
   }
@@ -894,13 +892,8 @@ bool RecWorkerImpl::OneRecXAttentionWorkPipeline::can_use_device_constraints(
   return ::xllm::RecConfig::get_instance().enable_constrained_decoding() &&
          constraint_device_tensors_.initialized && current_step >= 0 &&
          current_step < REC_TOKEN_SIZE && beam_width > 0 &&
-         sampling_params.selected_token_idxes.defined() &&
-         sampling_params.sample_idxes.defined() &&
-         sampling_params.selected_token_idxes.numel() ==
-             sampling_params.sample_idxes.numel() &&
-         sampling_params.do_sample.defined() &&
-         sampling_params.all_greedy_sample &&
-         !sampling_params.all_random_sample &&
+         sampling_params.num_sample_seqs() > 0 &&
+         sampling_params.sampling_mode == SamplingMode::GREEDY &&
          sampling_params.use_beam_search && sampling_params.logprobs &&
          sampling_params.max_top_logprobs > 0 &&
          sampling_params.max_top_logprobs == beam_width &&
@@ -1198,7 +1191,7 @@ void RecWorkerImpl::OneRecXAttentionWorkPipeline::prepare_work_before_execute(
   onerec_params.current_round_tensor =
       torch::tensor({get_onerec_decode_round(onerec_params)}, int_options);
   if (enable_onerec_selected_token_cpu_check() &&
-      processed_inputs.sampling_params.selected_token_idxes.defined()) {
+      processed_inputs.sampling_params.num_sample_seqs() > 0) {
     onerec_params.debug_selected_token_idxes =
         processed_inputs.sampling_params.selected_token_idxes;
     onerec_params.debug_selected_token_idxes_expected =
@@ -1336,8 +1329,7 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecXAttentionWorkPipeline::step(
         sampling_params, current_step, request_beam_width);
 #if defined(USE_NPU)
     if (::xllm::RecConfig::get_instance().enable_constrained_decoding() &&
-        sampling_params.selected_token_idxes.defined() &&
-        !use_device_constraints) {
+        sampling_params.num_sample_seqs() > 0 && !use_device_constraints) {
       LOG_FIRST_N(WARNING, 8)
           << "Unsupported OneRec xattention constrained decoding request for "
              "device constraints, falling back to CPU mask generation. "
@@ -1347,17 +1339,10 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecXAttentionWorkPipeline::step(
           << ", use_beam_search=" << sampling_params.use_beam_search
           << ", logprobs=" << sampling_params.logprobs
           << ", selected_token_idxes_numel="
-          << (sampling_params.selected_token_idxes.defined()
-                  ? sampling_params.selected_token_idxes.numel()
-                  : 0)
-          << ", sample_idxes_defined=" << sampling_params.sample_idxes.defined()
-          << ", sample_idxes_numel="
-          << (sampling_params.sample_idxes.defined()
-                  ? sampling_params.sample_idxes.numel()
-                  : 0)
+          << sampling_params.num_sample_seqs()
           << ", do_sample_defined=" << sampling_params.do_sample.defined()
-          << ", all_greedy_sample=" << sampling_params.all_greedy_sample
-          << ", all_random_sample=" << sampling_params.all_random_sample
+          << ", sampling_mode="
+          << static_cast<int32_t>(sampling_params.sampling_mode)
           << ", has_frequency_penalties="
           << sampling_params.frequency_penalties.defined()
           << ", has_presence_penalties="
@@ -1375,15 +1360,14 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecXAttentionWorkPipeline::step(
     if ((runtime_.worker.driver_ || runtime_.worker.dp_driver_) &&
         ::xllm::RecConfig::get_instance().enable_constrained_decoding() &&
         constrained_decoding_ != nullptr &&
-        sampling_params.selected_token_idxes.defined() &&
-        !use_device_constraints) {
+        sampling_params.num_sample_seqs() > 0 && !use_device_constraints) {
       filter_mask_future =
           prepare_filter_mask_async(round_params->generated_tokens);
     }
 
     torch::Tensor selected_token_idxes_for_logits;
     torch::Tensor selected_token_idxes_before_cpu;
-    if (sampling_params.selected_token_idxes.defined()) {
+    if (sampling_params.num_sample_seqs() > 0) {
 #if defined(USE_NPU)
       selected_token_idxes_for_logits =
           sampling_params.selected_token_idxes.to(torch::kInt64).contiguous();
@@ -1410,8 +1394,7 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecXAttentionWorkPipeline::step(
 
 #if defined(USE_NPU)
     auto validate_selected_token_idxes_stage = [&](const char* stage_name) {
-      if (!selected_token_cpu_check ||
-          !sampling_params.selected_token_idxes.defined()) {
+      if (!selected_token_cpu_check || sampling_params.num_sample_seqs() == 0) {
         return;
       }
       auto selected_token_idxes_stage_cpu = to_cpu_contiguous(
@@ -1508,7 +1491,7 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecXAttentionWorkPipeline::step(
 
     RoundResult result;
     result.sampling_params = sampling_params;
-    if (sampling_params.selected_token_idxes.defined()) {
+    if (sampling_params.num_sample_seqs() > 0) {
       torch::Tensor selected_token_idxes = selected_token_idxes_for_logits;
 #if defined(USE_NPU)
       if (selected_token_cpu_check) {
@@ -1646,7 +1629,7 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecXAttentionWorkPipeline::step(
   const bool use_multi_round =
       step_meta != nullptr && step_meta->total_round > 1 &&
       step_meta->beam_width > 1 &&
-      mutable_input.decoder_sampling_params.selected_token_idxes.defined();
+      mutable_input.decoder_sampling_params.num_sample_seqs() > 0;
 
   if (!use_multi_round) {
     const int32_t request_beam_width =
@@ -1673,7 +1656,6 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecXAttentionWorkPipeline::step(
     ForwardOutput output;
     output.logits = result->logits;
     output.sample_output = result->sample_output;
-    output.do_sample = result->sampling_params.do_sample;
     output.logprobs = result->sampling_params.logprobs;
     output.max_top_logprobs = result->sampling_params.max_top_logprobs;
 
@@ -1744,7 +1726,6 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecXAttentionWorkPipeline::step(
     }
     if (!result->sample_output.top_tokens.defined() ||
         !result->sample_output.top_logprobs.defined()) {
-      output.do_sample = result->sampling_params.do_sample;
       output.logprobs = result->sampling_params.logprobs;
       output.max_top_logprobs = result->sampling_params.max_top_logprobs;
       continue;
@@ -1842,7 +1823,6 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecXAttentionWorkPipeline::step(
     }
 
     if (round == total_rounds - 1) {
-      output.do_sample = result->sampling_params.do_sample;
       output.logprobs = output_logprobs;
       output.max_top_logprobs = output_max_top_logprobs;
       output.beam_search_output.src_seq_idxes =
@@ -2182,7 +2162,7 @@ std::optional<ForwardOutput> RecWorkerImpl::LlmRecMultiRoundPipeline::step(
     }
     torch::Tensor hidden_states = model_output.hidden_states;
 
-    if (sampling_params.selected_token_idxes.defined()) {
+    if (sampling_params.num_sample_seqs() > 0) {
       logits = runtime_.model->logits(hidden_states,
                                       sampling_params.selected_token_idxes);
       sample_output = rec_sampler_->forward(logits, round_sampling_params);
@@ -2397,7 +2377,6 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::build_final_output(
     ForwardOutput& output) {
   output.logits = logits;
   output.sample_output = sample_output;
-  output.do_sample = sampling_params.do_sample;
   output.logprobs = sampling_params.logprobs;
   output.max_top_logprobs = sampling_params.max_top_logprobs;
   output.beam_search_output.src_seq_idxes =

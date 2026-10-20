@@ -24,9 +24,7 @@ namespace xllm {
 
 TEST(GumbelSamplingTest, ReturnsZeroNoiseForGreedyBatch) {
   SamplingParameters sampling_params;
-  sampling_params.all_greedy_sample = true;
-  sampling_params.all_random_sample = false;
-
+  sampling_params.sampling_mode = SamplingMode::GREEDY;
   torch::Tensor noise = sample_gumbel_noise(/*batch_size=*/2,
                                             /*num_steps=*/3,
                                             /*num_classes=*/4,
@@ -40,8 +38,7 @@ TEST(GumbelSamplingTest, ReturnsZeroNoiseForGreedyBatch) {
 TEST(GumbelSamplingTest, MasksGreedyRowsInMixedBatch) {
   SamplingParameters sampling_params;
   sampling_params.do_sample = torch::tensor({false, true}, torch::kBool);
-  sampling_params.all_greedy_sample = false;
-  sampling_params.all_random_sample = false;
+  sampling_params.sampling_mode = SamplingMode::MIXED;
   torch::manual_seed(2026);
 
   torch::Tensor noise = sample_gumbel_noise(/*batch_size=*/2,

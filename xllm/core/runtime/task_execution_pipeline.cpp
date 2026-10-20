@@ -699,8 +699,7 @@ Status TaskExecutionPipeline::prepare(uint32_t slot_id,
                                          slot.buffer->model_params());
   }
   const auto& params = slot.buffer->sampling_params();
-  const uint32_t samples =
-      params.sample_idxes.defined() ? params.sample_idxes.numel() : 0;
+  const uint32_t samples = static_cast<uint32_t>(params.num_sample_seqs());
   slot.sampling = params;
   VLOG(1) << "Task pipeline DP input: rank=" << capacity_.dp_rank
           << " batch_id=" << meta.batch_id << " local_tokens=" << local_tokens
@@ -770,8 +769,7 @@ void TaskExecutionPipeline::launch(uint32_t slot_id) {
                                           slot.buffer->model_params());
   }
   auto& params = slot.sampling;
-  if (params.selected_token_idxes.defined() &&
-      params.selected_token_idxes.numel() != 0) {
+  if (params.num_sample_seqs() > 0) {
     slot.logits = model_.logits(slot.model_output.hidden_states,
                                 params.selected_token_idxes);
     slot.sample_output = sampler_.forward(slot.logits, params);
@@ -835,7 +833,6 @@ ForwardOutput TaskExecutionPipeline::consume(uint32_t slot_id) {
   c10::DeviceGuard guard(device_.unwrap());
   TokenResultTensors tokens = slot.buffer->take_result();
   ForwardOutput result;
-  result.do_sample = slot.buffer->copy_cpu_do_sample();
   result.is_graph_warmup = slot.is_warmup;
   result.logprobs = tokens.logprobs.defined();
   result.max_top_logprobs =

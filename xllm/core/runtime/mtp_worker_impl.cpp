@@ -47,6 +47,7 @@ limitations under the License.
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 #include "core/layers/common/expanded_decode_metadata_builder.h"
 #endif
+#include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/adaptive_pruning_helpers.h"
 #include "core/framework/speculative/adaptive_speculative_controller.h"
 #include "core/framework/speculative/draft_extend_input.h"
@@ -1304,7 +1305,7 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_prefill(
     if (should_broadcast_spec_tokens(
             parallel_args_,
             get_optimization_config().enable_spec_token_broadcast,
-            input.sampling_params.all_greedy_sample)) {
+            input.sampling_params.sampling_mode == SamplingMode::GREEDY)) {
       broadcast_spec_tokens(output.sample_output.next_tokens, parallel_args_);
     }
     if (embeddings.defined()) {
@@ -1331,7 +1332,7 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_prefill(
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
               draft_timer.elapsed_seconds());
 
-  if (input.sampling_params.selected_token_idxes.defined()) {
+  if (input.sampling_params.num_sample_seqs() > 0) {
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
     prepare_first_draft_inputs(*embedding_cache_, input, output);
   } else {
@@ -1692,7 +1693,7 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_decode(
       if (should_broadcast_spec_tokens(
               parallel_args_,
               get_optimization_config().enable_spec_token_broadcast,
-              draft_sampling_params.all_greedy_sample)) {
+              draft_sampling_params.sampling_mode == SamplingMode::GREEDY)) {
         broadcast_spec_tokens(draft_outputs.back().sample_output.next_tokens,
                               parallel_args_);
       }
@@ -2205,7 +2206,7 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
     if (should_broadcast_spec_tokens(
             parallel_args_,
             get_optimization_config().enable_spec_token_broadcast,
-            input.sampling_params.all_greedy_sample)) {
+            input.sampling_params.sampling_mode == SamplingMode::GREEDY)) {
       c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
       broadcast_spec_tokens(val_output.next_tokens, parallel_args_);
     }
@@ -2248,7 +2249,7 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
     if (should_broadcast_spec_tokens(
             parallel_args_,
             get_optimization_config().enable_spec_token_broadcast,
-            input.sampling_params.all_greedy_sample)) {
+            input.sampling_params.sampling_mode == SamplingMode::GREEDY)) {
       broadcast_spec_tokens(val_output.next_tokens, parallel_args_);
     }
 
@@ -3057,55 +3058,31 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
   }
   auto& validate_sampling_params = validate_input.sampling_params;
 #if defined(USE_NPU)
-  // update_sampling_params() uses repeat_interleave on device tensors.  For a
-  // single greedy sequence that work only expands [0] and [false] into fixed
-  // validation controls, yet it lands on the final-draft -> target dependency
-  // chain.  Reuse stable controls after warmup and retain the generic builder
-  // for sampling, penalties, multi-sequence batches and other backends.
+  // A single greedy sequence with no per-row state needs only the cached
+  // arange as selected_token_idxes; the generic builder's registry walk is
+  // pure overhead on the final-draft -> target dependency chain.
   const bool use_stable_greedy_validate_sampling =
       use_explicit_spec_verify_replay_update &&
-      validate_sampling_params.all_greedy_sample &&
-      validate_sampling_params.selected_token_idxes.defined() &&
-      validate_sampling_params.selected_token_idxes.numel() == 1 &&
-      validate_sampling_params.sample_idxes.defined() &&
-      validate_sampling_params.sample_idxes.numel() == 1 &&
-      validate_sampling_params.do_sample.defined() &&
-      validate_sampling_params.do_sample.numel() == 1 &&
-      !validate_sampling_params.frequency_penalties.defined() &&
-      !validate_sampling_params.presence_penalties.defined() &&
-      !validate_sampling_params.repetition_penalties.defined() &&
-      !validate_sampling_params.temperatures.defined() &&
-      !validate_sampling_params.top_p.defined() &&
-      !validate_sampling_params.min_p.defined() &&
-      !validate_sampling_params.seed_offsets.defined() &&
-      !validate_sampling_params.seeds.defined() &&
-      !validate_sampling_params.logits_bias.defined() &&
-      !validate_sampling_params.top_k.defined() &&
-      !validate_sampling_params.unique_token_ids.defined() &&
-      !validate_sampling_params.unique_token_counts.defined() &&
-      !validate_sampling_params.unique_token_ids_lens.defined();
+      validate_sampling_params.sampling_mode == SamplingMode::GREEDY &&
+      validate_sampling_params.num_sample_seqs() == 1 &&
+      !validate_sampling_params.has_sampling_fields();
   if (use_stable_greedy_validate_sampling) {
     if (!mtp_validate_greedy_indices_.defined() ||
         mtp_validate_greedy_indices_.numel() != total_num_val_tokens) {
       mtp_validate_greedy_indices_ =
           arange_indices(total_num_val_tokens, device_);
-      mtp_validate_greedy_do_sample_ = torch::zeros(
-          {total_num_val_tokens},
-          torch::TensorOptions().dtype(torch::kBool).device(device_));
     }
     validate_sampling_params.selected_token_idxes =
         mtp_validate_greedy_indices_;
-    validate_sampling_params.sample_idxes = mtp_validate_greedy_indices_;
-    validate_sampling_params.do_sample = mtp_validate_greedy_do_sample_;
-    validate_sampling_params.all_random_sample = false;
-    validate_sampling_params.all_greedy_sample = true;
   } else {
-    update_sampling_params(
-        validate_sampling_params, num_val_tokens, total_num_val_tokens);
+    expand_sampling_params_for_verify(validate_sampling_params,
+                                      num_val_tokens,
+                                      total_num_val_tokens,
+                                      device_);
   }
 #else
-  update_sampling_params(
-      validate_sampling_params, num_val_tokens, total_num_val_tokens);
+  expand_sampling_params_for_verify(
+      validate_sampling_params, num_val_tokens, total_num_val_tokens, device_);
 #endif
 
   scale_speculative_parallel_token_counts(input_params, num_val_tokens);
@@ -3467,8 +3444,10 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
                                      /*update_block_tables=*/true);
   }
 
-  update_sampling_params(
-      validate_input.sampling_params, per_seq_val_tokens, total_num_val_tokens);
+  expand_sampling_params_for_verify(validate_input.sampling_params,
+                                    per_seq_val_tokens,
+                                    total_num_val_tokens,
+                                    device_);
 
   for (int32_t& token_num : input_params.parallel.dp_global_token_nums) {
     token_num = total_num_val_tokens;
@@ -3796,12 +3775,6 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
     params.selected_token_idxes =
         async_h2d_tensor(selected_row_idx, idx_options);
   }
-  if (!params.sample_idxes.defined()) {
-    // This control tensor is always the identity mapping. Generate it directly
-    // on device instead of allocating a short-lived pinned H2D source.
-    params.sample_idxes = torch::arange(
-        /*start=*/0, /*end=*/num_sequences, idx_options);
-  }
   extend_input.runtime.device_tensors_ready = true;
   finish_metadata_prepare(*prepare_stream_, extend_input);
 }
@@ -3953,9 +3926,7 @@ SampleOutput MTPWorkerImpl<TargetInput>::validate(
         draft_proposal.token_ids().masked_fill(invalid_mask, /*sentinel=*/-1);
   }
   SampleOutput sample_output = spec_verify::run_rejection_sampling(
-      {.do_sample = sampling_params.do_sample,
-       .all_random_sample = sampling_params.all_random_sample,
-       .all_greedy_sample = sampling_params.all_greedy_sample},
+      sampling_params,
       DraftProposal(validation_token_ids.defined() ? validation_token_ids
                                                    : draft_proposal.token_ids(),
                     draft_proposal.logits()),

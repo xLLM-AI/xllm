@@ -115,24 +115,6 @@ void expand_block_parallel_sequence_rows(LlmModelParams& input_params,
   }
 }
 
-void repeat_sampling_params(SamplingParameters& sampling_params,
-                            int32_t repeats) {
-  repeat_interleave_if_defined(sampling_params.frequency_penalties, repeats);
-  repeat_interleave_if_defined(sampling_params.presence_penalties, repeats);
-  repeat_interleave_if_defined(sampling_params.repetition_penalties, repeats);
-  repeat_interleave_if_defined(sampling_params.temperatures, repeats);
-  repeat_interleave_if_defined(sampling_params.top_p, repeats);
-  repeat_interleave_if_defined(sampling_params.min_p, repeats);
-  repeat_interleave_if_defined(sampling_params.logits_bias, repeats);
-  repeat_interleave_if_defined(sampling_params.seeds, repeats);
-  repeat_interleave_if_defined(sampling_params.seed_offsets, repeats);
-  repeat_interleave_if_defined(sampling_params.top_k, repeats);
-  repeat_interleave_if_defined(sampling_params.unique_token_ids, repeats);
-  repeat_interleave_if_defined(sampling_params.unique_token_counts, repeats);
-  repeat_interleave_if_defined(sampling_params.unique_token_ids_lens, repeats);
-  repeat_interleave_if_defined(sampling_params.do_sample, repeats);
-}
-
 void record_metadata_ready_event(Stream& stream, LlmForwardInput& input) {
   input.runtime.metadata_ready_event = stream.record_event_or_sync();
 }
@@ -686,7 +668,7 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_prefill(
                      context_cache_slots);
   }
 
-  if (input.sampling_params.selected_token_idxes.defined()) {
+  if (input.sampling_params.num_sample_seqs() > 0) {
     prepare_first_draft_inputs(*embedding_cache_, input, output);
   } else {
     clear_all_output_embeddings(output);
@@ -1040,12 +1022,7 @@ SampleOutput DFlashWorkerImpl::validate(
   torch::Tensor target_logits = target_output.logits.view(
       {batch_size, num_val_tokens, target_output.logits.size(/*dim=*/-1)});
   return spec_verify::run_rejection_sampling(
-      {.do_sample = sampling_params.do_sample,
-       .all_random_sample = sampling_params.all_random_sample,
-       .all_greedy_sample = sampling_params.all_greedy_sample},
-      draft_proposal,
-      target_logits,
-      target_output);
+      sampling_params, draft_proposal, target_logits, target_output);
 }
 
 void DFlashWorkerImpl::maybe_broadcast_spec_tokens(torch::Tensor& tokens) {
@@ -1225,8 +1202,6 @@ void DFlashWorkerImpl::prepare_query_inputs(const LlmForwardInput& input,
 
   query_input.sampling_params.selected_token_idxes =
       async_h2d_tensor(selected_idxes, device_.unwrap());
-  query_input.sampling_params.sample_idxes = arange_indices(
-      static_cast<int64_t>(selected_idxes.size()), device_.unwrap());
   prepare_draft_sampling(DraftSamplingMode::GREEDY,
                          query_input.sampling_params);
   repeat_sampling_params(query_input.sampling_params,
