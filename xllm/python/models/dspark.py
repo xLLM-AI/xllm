@@ -49,11 +49,12 @@ class DSparkConfidenceHead(nn.Module):
         markov_rank: int,
         with_markov: bool,
         device: torch.device,
+        bias: bool = True,
     ) -> None:
         super().__init__()
         self.with_markov = with_markov
         input_size = hidden_size + markov_rank if with_markov else hidden_size
-        self.proj = nn.Linear(input_size, 1, bias=True, dtype=torch.float32, device=device)
+        self.proj = nn.Linear(input_size, 1, bias=bias, dtype=torch.float32, device=device)
 
     def forward(self, hidden: torch.Tensor, markov_embedding: torch.Tensor | None) -> torch.Tensor:
         if self.with_markov:
@@ -77,6 +78,7 @@ class DSparkForCausalLMBase(PyModelBase):
         confidence_head_with_markov: bool,
         dtype: torch.dtype,
         device: torch.device,
+        confidence_head_bias: bool = True,
     ) -> None:
         super().__init__()
         self.markov_head = DSparkMarkovHead(
@@ -92,6 +94,7 @@ class DSparkForCausalLMBase(PyModelBase):
                 markov_rank,
                 confidence_head_with_markov,
                 device,
+                bias=confidence_head_bias,
             )
             if enable_confidence_head
             else None

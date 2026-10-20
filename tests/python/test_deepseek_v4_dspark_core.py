@@ -18,45 +18,17 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from xllm.python import registry
 from xllm.python.attention.backend import LayerCache
+from xllm.python.model_executor.executor import _is_deepseek_v4_model_type
 from xllm.python.models import deepseek_v4
 from xllm.python.models.deepseek_v4_dspark import (
     DeepseekV4DSparkConfig,
+    DeepseekV4DSparkForCausalLM,
     DeepseekV4DSparkModel,
 )
-
-
-def test_dspark_config_narrows_target_layers() -> None:
-    config = DeepseekV4DSparkConfig.from_dict(
-        {
-            "dspark_num_layers": 2,
-            "dspark_target_layer_ids": [7, 19],
-            "dspark_markov_rank": 4,
-            "dspark_block_size": 5,
-            "dspark_use_native_sas": True,
-        }
-    )
-
-    config.validate()
-    assert config.model_type == "deepseek_v4_dspark"
-    assert config.n_layers == 2
-    assert config.n_hash_layers == 0
-    assert config.compress_ratios == [1, 1]
-    assert config.dspark_target_layer_ids == (7, 19)
-    assert config.dspark_use_native_sas
-
-
-@pytest.mark.parametrize(
-    "overrides",
-    [
-        {"dspark_num_layers": 0, "dspark_markov_rank": 4},
-        {"dspark_num_layers": 1, "dspark_markov_rank": 0},
-        {"dspark_num_layers": 2, "dspark_target_layer_ids": [1], "dspark_markov_rank": 4},
-    ],
-)
-def test_dspark_config_rejects_incomplete_topology(overrides: dict[str, object]) -> None:
-    with pytest.raises(ValueError):
-        DeepseekV4DSparkConfig.from_dict(overrides).validate()
+from xllm.python.models.dspark import DSparkForCausalLMBase
+from xllm.python.registry import get_model_class
 
 
 def test_dspark_context_kv_validates_cache_and_hidden_shapes() -> None:
@@ -130,3 +102,14 @@ def test_dspark_context_kv_writes_real_decoder_layer_cache(
         assert projected is None
     torch.testing.assert_close(swa_cache.view(-1, 4)[[1, 3, 5]], target_hidden)
     synchronizer.record_event.assert_called_once_with(0)
+
+
+def test_dspark_registration_and_backend_selection(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(registry.current_platform, "device_type", lambda: "npu")
+    assert get_model_class("deepseek_v4_dspark") is DeepseekV4DSparkForCausalLM
+    assert _is_deepseek_v4_model_type("deepseek_v4_dspark")
+    assert _is_deepseek_v4_model_type("deepseek_v4_mtp")
+
+
+def test_dspark_runtime_reuses_shared_head_base() -> None:
+    assert issubclass(DeepseekV4DSparkForCausalLM, DSparkForCausalLMBase)

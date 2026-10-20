@@ -60,6 +60,14 @@ from xllm.python.model_executor.runners.mtp_sparse_metadata import (
 from xllm.python.platform import current_platform
 
 
+def _is_deepseek_v4_model_type(model_type: str) -> bool:
+    # Mirror core/util/utils.h is_deepseek_v4_model_type: exact target and
+    # DSpark names, plus target-prefixed names carrying the MTP marker.
+    return model_type in ("deepseek_v4", "deepseek_v4_dspark") or (
+        model_type.startswith("deepseek_v4") and "mtp" in model_type
+    )
+
+
 def _resolve_graph_backend(config: dict) -> str:
     graph_backend = str(config.get("python_graph_backend", "off")).lower()
     graph_disabled = graph_backend in ("", "off", "none", "0")
@@ -126,7 +134,7 @@ def _create_attention_backend(
 ) -> AttentionBackend:
     config = config or {}
     model_type = config.get("model_type", "")
-    if model_type == "deepseek_v4" and current_platform.is_npu():
+    if _is_deepseek_v4_model_type(model_type) and current_platform.is_npu():
         from xllm.python.attention.dsa_attention import DsaAttentionBackend
 
         return DsaAttentionBackend(
@@ -168,6 +176,7 @@ def _create_attention_backend(
                 dcp_group=dcp_group,
                 index_topk=index_topk,
                 max_num_reqs=max(max_num_reqs, 1),
+                num_decoding_tokens=max(num_decoding_tokens, 1),
             )
         from xllm.python.attention.npu_paged_attention import (
             NpuPagedAttentionBackend,
@@ -316,6 +325,13 @@ class ModelExecutor:
         # import glm5_next (that import pulls KDA kernel transitive deps and
         # fails on builds without them).
         dsa_layers = [layer for layer in attention_layers if getattr(layer, "is_glm_next_mla", False)]
+        has_kda_layers = any(getattr(layer, "is_glm_next_kda", False) for layer in attention_layers)
+        is_draft_engine = bool(config.get("is_draft_engine", False))
+        adaptive_speculative_decode_enabled = bool(config.get("runtime_adaptive_speculative_decode_enabled", False))
+        if has_kda_layers and not is_draft_engine and adaptive_speculative_decode_enabled:
+            raise ValueError(
+                "GLM5 KDA does not support adaptive speculative decode; disable adaptive speculative decoding."
+            )
         if dsa_layers:
             first_attention = dsa_layers[0]
         else:
@@ -843,6 +859,35 @@ class ModelExecutor:
             self.context_kv_graph_runner.bind_kv_caches(layer_caches)
         self._kv_bound = True
 
+    def _reset_kda_spec_state_on_pd_handoff(self, metadata: AttentionMetadata) -> None:
+        """Reset process-local KDA speculative state on first PD decode."""
+        reset_mask = getattr(metadata, "pd_handoff_reset_mask", None)
+        if not isinstance(reset_mask, torch.Tensor) or reset_mask.numel() == 0:
+            return
+
+        slots = getattr(metadata, "linear_state_indices", None)
+        if not isinstance(slots, torch.Tensor) or slots.numel() == 0:
+            raise RuntimeError("PD handoff reset requires linear-state indices")
+        row_mask = reset_mask.reshape(-1)
+        if row_mask.numel() != slots.numel():
+            # Spec-verify steps expand linear_state_indices per row (one slot
+            # id repeated num_val_tokens times per sequence) while the reset
+            # mask stays per sequence. Expand the mask the same way so each
+            # row is filtered by its owning sequence's flag.
+            if slots.numel() % row_mask.numel() != 0:
+                raise RuntimeError(
+                    "PD handoff reset mask is not aligned with linear-state "
+                    f"slots: mask={row_mask.numel()}, slots={slots.numel()}"
+                )
+            row_mask = row_mask.repeat_interleave(slots.numel() // row_mask.numel())
+
+        reset_fn = getattr(self.attention_backend, "reset_kda_spec_slots", None)
+        if reset_fn is None:
+            raise RuntimeError("PD handoff reset requires KDA speculative-state support")
+        reset_slots = slots.reshape(-1)[row_mask.to(device=slots.device, dtype=torch.bool)]
+        if reset_slots.numel() > 0:
+            reset_fn(reset_slots)
+
     @torch.inference_mode()
     def execute(
         self,
@@ -877,6 +922,8 @@ class ModelExecutor:
             self.context_kv_graph_runner.warmup(sequences * (width + 1))
         if self.layerwise_split_size > 1 and (metadata.is_prefill or metadata.is_chunked_prefill):
             raise NotImplementedError("Python GLM5.2 layerwise split is decode-only")
+
+        self._reset_kda_spec_state_on_pd_handoff(metadata)
 
         eplb = None
         if expert_load_data is not None:

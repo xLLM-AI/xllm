@@ -39,8 +39,10 @@ if(USE_NPU)
     DEPS
       models
       GTest::gtest_main
+    ENVIRONMENT
+      "PYTHONPATH=${PROJECT_SOURCE_DIR}:$ENV{PYTHONPATH}"
   )
-  target_link_libraries(py_causal_lm_test PUBLIC Python::Python ${npu_model_test_libs})
+  target_link_libraries(py_causal_lm_test PUBLIC Python::Python ${npu_model_test_libs} model_context npu_layers)
 endif()
 
 cc_test(
