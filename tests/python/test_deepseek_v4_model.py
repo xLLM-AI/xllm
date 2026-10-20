@@ -723,6 +723,7 @@ def test_moe_loader_prepares_down_scales_for_each_quantization(
     layer.mlp = moe
     owner.model.layers = torch.nn.ModuleList([layer])
 
+    owner._load_dsv4_moe_routing = DeepseekV4ForCausalLM._load_dsv4_moe_routing
     packed_divisor = 2 if quantization == "w4a8" else 1
     tensors = {
         "layers.0.ffn.gate.weight": torch.zeros_like(moe.gate.weight),
@@ -748,7 +749,7 @@ def test_moe_loader_prepares_down_scales_for_each_quantization(
     monkeypatch.setattr(moe.shared_experts.down_proj, "process_weights_after_loading", MagicMock())
     monkeypatch.setitem(sys.modules, "torch_npu", SimpleNamespace(npu_format_cast=lambda value, _format: value))
 
-    DeepseekV4ForCausalLM._load_dsv4_moe(owner, loader, "layers.0.", "model.layers.0.", 0)
+    DeepseekV4ForCausalLM._load_dsv4_moe(owner, loader, "layers.0.", "model.layers.0.", 0, "layers.0.ffn.")
 
     assert moe.experts_w2_scale.dtype == (torch.float32 if quantization == "w4a8" else torch.bfloat16)
     moe.process_weights_after_loading()

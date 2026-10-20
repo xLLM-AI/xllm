@@ -138,6 +138,25 @@ def _require_checkpoint_key(
     return key
 
 
+def _require_tensor(
+    loader: W8A8WeightLoader,
+    key: str,
+    description: str,
+) -> torch.Tensor:
+    """Return the tensor at a mandatory single checkpoint key."""
+    return loader.get_tensor(_require_checkpoint_key(loader, (key,), description))
+
+
+def _require_shape(
+    tensor: torch.Tensor,
+    expected_shape: tuple[int, ...],
+    tensor_name: str,
+) -> None:
+    actual_shape = tuple(tensor.shape)
+    if actual_shape != expected_shape:
+        raise ValueError(f"DeepSeek-V4 tensor {tensor_name} has shape {actual_shape}, expected {expected_shape}")
+
+
 def _find_checkpoint_prefix(
     loader: W8A8WeightLoader,
     candidates: Sequence[str],
@@ -154,6 +173,24 @@ _DSV4_MLP_NAME_SCHEMES = (
     ("gate_proj", "up_proj", "down_proj"),
     ("w1", "w3", "w2"),
 )
+
+_DSV4_MOE_PREFIX_PROBES = ("experts.0.gate_proj.weight", "experts.0.w1.weight")
+
+
+def _resolve_dsv4_moe_prefix(
+    loader: W8A8WeightLoader,
+    checkpoint_prefix: str,
+    label: str,
+) -> str:
+    """Resolve the ffn./mlp. module prefix holding MoE expert weights."""
+    moe_prefix = _find_checkpoint_prefix(
+        loader,
+        (checkpoint_prefix + "ffn.", checkpoint_prefix + "mlp."),
+        _DSV4_MOE_PREFIX_PROBES,
+    )
+    if moe_prefix is None:
+        raise KeyError(f"{label} MoE weights not found under {checkpoint_prefix}")
+    return moe_prefix
 
 
 def _resolve_mlp_projection_names(loader: W8A8WeightLoader, checkpoint_prefix: str) -> tuple[str, str, str]:
@@ -563,8 +600,6 @@ class DeepseekV4HyperConnection(nn.Module):
         hc_base: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Call the registered hc_pre kernel: x [T, hc_mult, hidden] -> (attn_input, post, comb)."""
-        from xllm.python import kernels
-
         return kernels.hc_pre(
             x,
             hc_fn,
@@ -589,8 +624,6 @@ class DeepseekV4HyperConnection(nn.Module):
         post=2D, comb=3D, unsqueeze(0) all inputs (kernel expects 3D/4D/3D/4D),
         then squeeze(0) the output.
         """
-        from xllm.python import kernels
-
         if sub_out.dim() == 2 and residual.dim() == 3 and post.dim() == 2 and comb.dim() == 3:
             out = kernels.hc_post(
                 sub_out.unsqueeze(0),
@@ -755,6 +788,40 @@ class DeepseekV4Attention(Attention):
             self._cmp_wgate_bf16 = self.cmp_wgate.weight.to(torch.bfloat16).contiguous()
             self._cmp_norm_bf16 = self.cmp_norm.weight.to(torch.bfloat16).contiguous()
 
+    def write_context_kv(
+        self,
+        hidden: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        swa_cache: torch.Tensor,
+    ) -> None:
+        """Project target hidden states and write DSpark context KV."""
+        if hidden.dim() != 2:
+            raise ValueError("DeepSeek-V4 DSpark context hidden states must be two-dimensional")
+        if slot_mapping.numel() != hidden.shape[0]:
+            raise ValueError("DeepSeek-V4 DSpark context slot count mismatch")
+        kv = self._project_context_kv(hidden, cos, sin)
+        _scatter_by_slot(swa_cache, slot_mapping, kv)
+
+    def _project_context_kv(
+        self,
+        hidden: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ) -> torch.Tensor:
+        """Project, normalize, and rotate context KV rows."""
+        kv = self.kv_a_layernorm(self.kv_proj(hidden))
+        kv = kv.view(-1, 1, self.head_dim)
+        kernels.npu_inplace_partial_rotary_mul(
+            kv,
+            cos,
+            sin,
+            self.nope_head_dim,
+            self.rope_head_dim,
+        )
+        return kv
+
     def forward(
         self,
         hidden: torch.Tensor,
@@ -780,35 +847,22 @@ class DeepseekV4Attention(Attention):
         # re-quant). The indexer reuses the same qr + qr_pertoken_scale in
         # build_query, so stash them on the backend for _run_indexer.
         q_a = self.q_a_proj(hidden)
-        from xllm.python import kernels as _k
-
-        qr, qr_pertoken_scale = _k.rms_norm_dynamic_quant(q_a, self.q_a_layernorm.weight, self.cfg.rms_norm_eps)
+        qr, qr_pertoken_scale = kernels.rms_norm_dynamic_quant(q_a, self.q_a_layernorm.weight, self.cfg.rms_norm_eps)
         q = self.q_b_proj.forward_quantized(qr, qr_pertoken_scale).view(num_tokens, self.num_heads_local, self.head_dim)
-        q = _k.rms_norm(q, self.q_rms_gamma, self.cfg.rms_norm_eps)
+        q = kernels.rms_norm(q, self.q_rms_gamma, self.cfg.rms_norm_eps)
 
         # The compact Python cache stores half-width per-token cos/sin; expand
         # it to the C++ interleaved [M, rope_head_dim] kernel layout.
         cos, sin = _expand_half_rope_cos_sin(cos_sin_cache.index_select(0, positions.long()))
-        _k.npu_inplace_partial_rotary_mul(q, cos, sin, self.nope_head_dim, self.rope_head_dim)
+        kernels.npu_inplace_partial_rotary_mul(q, cos, sin, self.nope_head_dim, self.rope_head_dim)
 
-        kv = self.kv_proj(kv_hidden)
-        # kv_proj outputs head_dim = nope_head_dim + rope_head_dim; layernorm
-        # the whole thing then split for RoPE (matches C++ run_dsv4_preprocess).
-        kv = self.kv_a_layernorm(kv)
-        kv_tensor = kv.view(kv_hidden.shape[0], 1, self.head_dim)
         if cp_ctx is not None and cp_ctx.enabled():
             kv_cos, kv_sin = cp_ctx.global_rope(self.cfg.compress_ratios[self.layer_id])
             if kv_cos is None or kv_sin is None:
                 raise RuntimeError("DeepSeek-V4 prefill CP requires global KV RoPE tables")
         else:
             kv_cos, kv_sin = cos, sin
-        _k.npu_inplace_partial_rotary_mul(
-            kv_tensor,
-            kv_cos,
-            kv_sin,
-            self.nope_head_dim,
-            self.rope_head_dim,
-        )
+        kv_tensor = self._project_context_kv(kv_hidden, kv_cos, kv_sin)
 
         # Attach the compressor/indexer callbacks so the backend can invoke them.
         if self.indexer is not None and hasattr(backend, "attach_indexer"):
@@ -825,7 +879,7 @@ class DeepseekV4Attention(Attention):
         backend._current_qr_pertoken_scale = qr_pertoken_scale
         attn_out = backend.execute(q, kv_tensor, kv_tensor, self)
         # Native DSA rotates the attention output back before o_a/o_b.
-        _k.npu_inplace_partial_rotary_mul(
+        kernels.npu_inplace_partial_rotary_mul(
             attn_out,
             cos,
             sin,
@@ -1025,9 +1079,7 @@ class DeepseekV4Indexer(nn.Module):
                 raise RuntimeError(f"QRoPE cos/sin dim mismatch: cos={cos_sel.shape}, rope_dim={self.rope_dim}")
             # In-place partial RoPE: modifies q_idx[...rope_start_dim:rope_dim]
             # via aclnnInplacePartialRotaryMul (interleave mode).
-            from xllm.python import kernels as _pk
-
-            _pk.npu_inplace_partial_rotary_mul(q_idx, cos_sel, sin_sel, rope_start_dim, self.rope_dim)
+            kernels.npu_inplace_partial_rotary_mul(q_idx, cos_sel, sin_sel, rope_start_dim, self.rope_dim)
         # --- Hadamard rotation on q (C++ 423-424). ---
         hadamard = self._get_hadamard(device)
         q_idx = _rotate_hadamard(q_idx, hadamard, self.hadamard_scale)
@@ -1323,8 +1375,6 @@ class DeepseekV4MoE(nn.Module):
         self.shared_experts.down_proj.process_weights_after_loading()
 
     def forward(self, hidden: torch.Tensor, input_ids: torch.Tensor | None = None) -> torch.Tensor:
-        from xllm.python import kernels
-
         local_tokens = hidden.shape[0]
         hidden, scatter_state = dp_gather_tokens(hidden, self.dp_size, self.dp_rank)
 
@@ -1572,6 +1622,22 @@ class DeepseekV4DecoderLayer(nn.Module):
             )
         else:
             self.mlp = DeepseekV4MoE(cfg, layer_id, dtype, device)
+
+    def write_context_kv(
+        self,
+        hidden: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        swa_cache: torch.Tensor,
+    ) -> None:
+        self.self_attn.write_context_kv(
+            hidden,
+            cos,
+            sin,
+            slot_mapping,
+            swa_cache,
+        )
 
     def forward(
         self,
