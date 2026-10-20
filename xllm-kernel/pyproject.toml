@@ -1,0 +1,17 @@
+# Copyright 2026 The xLLM Authors. Licensed under Apache-2.0.
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xllm-kernel"
+version = "0.1.0"
+description = "Python kernel contracts and native NPU adapters for xLLM"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+
+# Torch, torch_npu and native xllm_ops are provided by the matching xLLM host.
+# Do not install a generic Torch wheel over a vendor-specific deployment.
+[tool.setuptools.packages.find]
+where = ["python"]
