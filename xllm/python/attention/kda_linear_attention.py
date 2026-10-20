@@ -35,6 +35,8 @@ if TYPE_CHECKING:
 class KdaLinearAttentionMixin:
     """KDA linear-attention + speculative verify state I/O, mixed into NpuPagedAttentionBackend."""
 
+    _kda_validated_query_shape: tuple[int, int] | None = None
+
     _metadata: AttentionMetadata | None
     _kv_caches: list[LayerCache]
     _kda_verify_width: int
@@ -73,7 +75,7 @@ class KdaLinearAttentionMixin:
 
     def snapshot_linear_state(self, indices: torch.Tensor) -> tuple[torch.Tensor, list[tuple]]:
         """Snapshot combined-pool rows the graph warmup/capture mutates."""
-        idx64 = indices if indices.dtype == torch.int64 else indices.to(torch.int64)
+        idx64 = torch.unique(indices.to(torch.int64))
         snap = []
         for st in self.__dict__.get("_kda_state", {}).values():
             if "armed_buf" not in st:
@@ -154,6 +156,9 @@ class KdaLinearAttentionMixin:
         gate_lb = forget_gate.safe_gate_lower_bound
         read_idx, idx = resolve_linear_state_io_indices(metadata)
         is_prefill = metadata.is_prefill or metadata.is_chunked_prefill
+        is_spec_verify = getattr(metadata, "is_spec_verify", False)
+        if is_spec_verify and idx is None:
+            raise RuntimeError("KDA spec-verify requires linear-state slots")
         num_seqs = idx.shape[0] if idx is not None else batch_size
         # ACL-graph decode with a flattened batch: the model forward unsqueezes
         # the 1-D ``[num_seqs]`` decode input into ``[1, num_seqs]``, so
@@ -288,7 +293,7 @@ class KdaLinearAttentionMixin:
                     raise RuntimeError("KDA verify requires uniform rows per sequence")
                 idx = torch.tensor(merged_slots, dtype=torch.int64, device=idx.device)
             if per_row_idx is not None or (
-                not is_prefill
+                (not is_prefill or is_spec_verify)
                 and self._kda_verify_width > 1
                 and idx.numel() > 0
                 and mixed_qkv.dim() == 3
@@ -308,8 +313,10 @@ class KdaLinearAttentionMixin:
                     ssm_cache,
                     recurrent_kda,
                 )
-            if is_prefill:
+            if is_prefill and not is_spec_verify:
                 self._disarm_slots(idx)
+            elif is_spec_verify:
+                raise RuntimeError("KDA spec-verify requires a non-empty uniform token block within the decoding width")
             state_read_idx = read_idx if is_prefill else idx
             conv_i = conv_cache.index_select(0, state_read_idx)
             ssm_i = ssm_cache.index_select(0, state_read_idx)
@@ -554,11 +561,25 @@ class KdaLinearAttentionMixin:
         """
         device = mixed_qkv.device
         num_seqs = idx.shape[0]
+        if num_seqs == 0 or mixed_qkv.ndim != 3 or mixed_qkv.shape[0] != 1 or mixed_qkv.shape[2] % num_seqs:
+            raise ValueError("KDA spec-verify requires flattened, equal-width sequence blocks")
         rows_per_seq = mixed_qkv.shape[2] // num_seqs  # 2 verify, 1 plain
         if not 1 <= rows_per_seq <= self._kda_verify_width:
             raise ValueError(
                 f"KDA verify width {rows_per_seq} exceeds configured decoding width {self._kda_verify_width}"
             )
+        if (
+            not in_acl_graph()
+            and getattr(metadata, "is_spec_verify", False)
+            and self._kda_validated_query_shape != (num_seqs, rows_per_seq)
+        ):
+            host_lengths = getattr(metadata, "q_seq_lens_host", None)
+            if host_lengths is not None:
+                query_lengths = host_lengths.tolist()
+                if len(query_lengths) == num_seqs:
+                    if any(length != rows_per_seq for length in query_lengths):
+                        raise ValueError("KDA spec-verify requires uniform query lengths")
+                    self._kda_validated_query_shape = (num_seqs, rows_per_seq)
         head_dim = gate.shape[-1]
         nh = gate.shape[-2]
         qkv_dim = nh * head_dim
@@ -598,6 +619,10 @@ class KdaLinearAttentionMixin:
             raise RuntimeError("KDA verify requires per-row KV sequence lengths")
         kv_rows = kv_src.to(device=device, dtype=torch.int64)
         base_now = kv_rows.view(num_seqs, -1)[:, 0].contiguous()
+        # Sequence-scoped KV lengths include the entire query block.
+        # Normalize to the first token so width changes preserve KV growth.
+        if expanded is None and kv_rows.numel() == num_seqs and rows_per_seq > 1:
+            base_now = base_now - (rows_per_seq - 1)
         armed_h = armed_buf.index_select(0, idx)
         kv_prev_h = kv_prev.index_select(0, idx)
         accepted_counts = torch.where(

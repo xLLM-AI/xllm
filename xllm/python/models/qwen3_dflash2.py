@@ -46,21 +46,26 @@ class DFlash2Qwen3Config(DFlashQwen3Config):
         nested = d.get("dflash_config")
         dflash_config = nested if isinstance(nested, dict) else {}
 
-        def pick(reflected_name: str, nested_name: str) -> int:
-            value = d.get(reflected_name)
-            if value is None:
-                value = d.get(nested_name)
-            if value is None:
-                value = dflash_config.get(nested_name, 0)
-            return int(value)
+        def pick(field_name: str) -> int:
+            # Key fallback order: "dflash_config.*" container first, then
+            # the flat top-level field, then the legacy "dflash2_*" spelling.
+            # Non-positive candidates are treated as unset: the C++ config
+            # dict reflects every ModelArgs field, so the flat top level
+            # always carries e.g. block_size=0 (the cola-dlm DiT field)
+            # alongside the real dflash2_* value, and falling back through a
+            # zero would silently shadow the legacy key.
+            for source in (dflash_config.get(field_name), d.get(field_name), d.get(f"dflash2_{field_name}")):
+                if source is not None and source > 0:
+                    return int(source)
+            return 0
 
         return cls(
             **base.__dict__,
-            block_size=pick("dflash2_block_size", "block_size"),
-            conv_group_size=pick("dflash2_conv_group_size", "conv_group_size"),
-            conv_kernel_size=pick("dflash2_conv_kernel_size", "conv_kernel_size"),
-            selector_rank=pick("dflash2_selector_rank", "selector_rank"),
-            selector_top_k=pick("dflash2_selector_top_k", "selector_top_k"),
+            block_size=pick("block_size"),
+            conv_group_size=pick("conv_group_size"),
+            conv_kernel_size=pick("conv_kernel_size"),
+            selector_rank=pick("selector_rank"),
+            selector_top_k=pick("selector_top_k"),
         )
 
     def validate(self) -> None:

@@ -221,22 +221,6 @@ class DecodeCudaGraphRunner(BaseRunner):
         torch.cuda.current_stream().wait_stream(self._stream)
         return output
 
-    @staticmethod
-    def _slice_output(output: ModelExecutionOutput, batch_size: int) -> ModelExecutionOutput:
-        """Return owned active rows; replay overwrites every captured output tensor."""
-        if not isinstance(output, tuple):
-            return output[:batch_size].clone()
-        hidden, aux_hidden = output[:2]
-        hidden = hidden[:batch_size].clone()
-        if aux_hidden is not None:
-            aux_hidden = aux_hidden[:batch_size].clone()
-        if len(output) == 2:
-            return hidden, aux_hidden
-        topk = output[2]
-        if topk is not None:
-            topk = topk[:batch_size].clone()
-        return hidden, aux_hidden, topk
-
     def _graph_key(
         self,
         input_ids: torch.Tensor,

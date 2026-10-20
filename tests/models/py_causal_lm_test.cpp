@@ -23,12 +23,13 @@ limitations under the License.
 
 #include "core/framework/model/llm_model_params.h"
 #include "core/framework/model/model_args.h"
-#include "core/framework/model/model_input_params.h"
+#include "core/framework/model/model_params_view.h"
 #include "core/framework/model_context/model_context.h"
 #include "core/framework/parallel_state/parallel_args.h"
 #include "core/framework/parallel_state/process_group.h"
 #include "core/framework/quantization/quant_args.h"
 #include "core/kv_cache/storage/kv_cache.h"
+#include "core/util/utils.h"
 
 namespace py = pybind11;
 
@@ -118,15 +119,28 @@ TEST(PyCausalLMMegaMoeCapacityTest,
             2560);
 }
 
-TEST(PyCausalLMContextKVBridgeTest, PassesSwaCacheAsSixthPythonSlot) {
+// Shared scaffolding for tests that construct a PyCausalLM: registers the
+// dependency-free BridgeTestModel and returns a CPU ModelContext carrying the
+// given model_type (the Python side instantiates BridgeTestModel regardless —
+// real model classes such as deepseek_v4 require full vocab/layer configs).
+ModelContext make_bridge_model_context(const char* model_type) {
   {
     py::gil_scoped_acquire gil;
-    register_bridge_test_model();
+    // Idempotent, but run the py::exec/registry writes only once across the
+    // truth table's per-case calls.
+    static const bool registered = [] {
+      register_bridge_test_model();
+      return true;
+    }();
+    (void)registered;
   }
-
-  ProcessGroup process_group(/*rank=*/0,
-                             /*world_size=*/1,
-                             torch::Device(torch::kCPU));
+  // The context only copies ParallelArgs' raw group pointers, so the group
+  // must outlive every PyCausalLM built from the context. Keep it in
+  // function-local static storage: the tests are CPU-only and never
+  // communicate, and a stack-local would dangle after this helper returns.
+  static ProcessGroup process_group(/*rank=*/0,
+                                    /*world_size=*/1,
+                                    torch::Device(torch::kCPU));
   ParallelArgs parallel_args(/*rank=*/0,
                              /*world_size=*/1,
                              &process_group);
@@ -136,13 +150,17 @@ TEST(PyCausalLMContextKVBridgeTest, PassesSwaCacheAsSixthPythonSlot) {
   parallel_args.python_rendezvous_port_ = 1;
 
   ModelArgs model_args;
-  model_args.model_type(kBridgeTestModelType);
-  ModelContext context(
+  model_args.model_type(model_type);
+  return ModelContext(
       parallel_args,
       model_args,
       QuantArgs(),
       torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32),
       /*context=*/nullptr);
+}
+
+TEST(PyCausalLMContextKVBridgeTest, PassesSwaCacheAsSixthPythonSlot) {
+  ModelContext context = make_bridge_model_context(kBridgeTestModelType);
   PyCausalLM model(context);
 
   DeepSeekV4KVCacheTensors cache_tensors;
@@ -172,6 +190,47 @@ TEST(PyCausalLMContextKVBridgeTest, PassesSwaCacheAsSixthPythonSlot) {
   EXPECT_EQ(
       bridged_swa.attr("data_ptr")().cast<std::uintptr_t>(),
       reinterpret_cast<std::uintptr_t>(cache_tensors.swa_cache.data_ptr()));
+}
+
+// End-to-end guard for the model-type classification the Python executor
+// performs: the truth table of (is_deepseek_v4_model, is_block_draft_model,
+// is_dspark_draft_model) must match the naming predicates the Python side
+// mirrors in model_platform_support. The cases below are sampled points, not
+// the full sets: when adding a new DSpark or DFlash family member, add a case
+// here AND to the Python twin test_classification_matches_cpp_truth_table in
+// tests/python/test_model_executor.py — forgetting both sides leaves every
+// test green while the classification drifts.
+TEST(ModelTypeClassificationTest, ClassificationMatchesPredicates) {
+  struct Expected {
+    const char* model_type;
+    bool is_deepseek_v4_model;
+    bool is_block_draft_model;
+    bool is_dspark_draft_model;
+  };
+  const Expected cases[] = {
+      {"deepseek_v4", true, false, false},
+      // MTP marker branch: starts_with("deepseek_v4") && contains("mtp").
+      {"deepseek_v4_mtp", true, false, false},
+      {"deepseek_v4_dspark", true, true, true},
+      {"DFlashDraftModel", false, true, false},
+      {"DFlash2DraftModel", false, true, false},
+      {"DSparkDraftModel", false, true, true},
+      {"glm5_dspark", false, true, true},
+      {"glm_moe_dsa", false, false, false},
+  };
+
+  for (const Expected& expected : cases) {
+    const std::string_view model_type = expected.model_type;
+    EXPECT_EQ(util::is_deepseek_v4_model_type(model_type),
+              expected.is_deepseek_v4_model)
+        << "model_type=" << expected.model_type;
+    EXPECT_EQ(is_block_draft_model_type(model_type),
+              expected.is_block_draft_model)
+        << "model_type=" << expected.model_type;
+    EXPECT_EQ(is_dspark_draft_model_type(model_type),
+              expected.is_dspark_draft_model)
+        << "model_type=" << expected.model_type;
+  }
 }
 
 }  // namespace

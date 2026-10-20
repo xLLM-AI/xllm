@@ -763,6 +763,31 @@ TEST(HFModelLoaderTest, Qwen3DFlash2AcceptsArrayEosTokenIds) {
   }
 }
 
+TEST(HFModelLoaderTest, Qwen3DFlash2ReadsFlatBlockGeometry) {
+  auto loader = ModelRegistry::get_model_args_loader("qwen3");
+  ASSERT_NE(loader, nullptr);
+
+  JsonReader reader;
+  ASSERT_TRUE(reader.parse_text(R"json(
+    {
+      "model_type": "qwen3",
+      "block_size": 5,
+      "conv_group_size": 2,
+      "conv_kernel_size": 3,
+      "selector_rank": 128,
+      "selector_top_k": 7
+    }
+  )json"));
+
+  ModelArgs args;
+  ASSERT_TRUE(loader(reader, &args));
+  EXPECT_EQ(args.dflash2_block_size(), 5);
+  EXPECT_EQ(args.dflash2_conv_group_size(), 2);
+  EXPECT_EQ(args.dflash2_conv_kernel_size(), 3);
+  EXPECT_EQ(args.dflash2_selector_rank(), 128);
+  EXPECT_EQ(args.dflash2_selector_top_k(), 7);
+}
+
 TEST(HFModelLoaderTest, GlmMoeDsaMtpPreservesLayerTypeMetadata) {
   auto loader = ModelRegistry::get_model_args_loader("glm_moe_dsa_mtp");
   ASSERT_NE(loader, nullptr);

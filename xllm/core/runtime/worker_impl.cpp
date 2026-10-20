@@ -405,6 +405,27 @@ void disable_layerwise_split_for_draft(ParallelArgs* parallel_args) {
   // for the models served here.
 }
 
+// Negative cache slots keep the dummy prefill from writing real KV;
+// token_ids/positions come from the shared empty-shard path above.
+template <typename ModelParams>
+void apply_idle_block_dummy_input(ModelParams& input_params,
+                                  int32_t dummy_token_count,
+                                  const torch::Device& device) {
+  input_params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
+  input_params.meta.q_max_seq_len = dummy_token_count;
+  input_params.meta.kv_max_seq_len = dummy_token_count;
+  input_params.embedding.input_embedding = torch::Tensor();
+  input_params.attn_metadata.reset();
+  input_params.attention = {};
+  input_params.attention.host.q_seq_lens = {dummy_token_count};
+  input_params.attention.host.q_cu_seq_lens = {0, dummy_token_count};
+  input_params.attention.host.kv_seq_lens = {dummy_token_count};
+  input_params.attention.host.kv_cache_tokens_nums = {0};
+  input_params.attention.host.new_cache_slots.assign(dummy_token_count,
+                                                     /*value=*/-1);
+  input_params.attention.rebuild_device_buffer(device);
+}
+
 }  // namespace
 
 WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
@@ -1536,21 +1557,21 @@ void WorkerImpl::prepare_work_before_execute_on_stream_impl(
     bool empty_shard = input_params.meta.num_sequences == 0 &&
                        (!processed_input.token_ids.defined() ||
                         processed_input.token_ids.numel() == 0);
+    const ModelArgs& model_args = context_.get_model_args();
+    // Speculative decoding extends decode from one token to
+    // num_speculative_tokens + 1 rows per sequence; an idle shard's dummy
+    // forward must mirror that width to keep DP collectives row-aligned.
+    const int32_t dummy_tokens = xllm::dummy_token_count(model_args);
+    CHECK_GT(dummy_tokens, 0);
+    const bool idle_block_input = input_params.meta.num_sequences == 0 &&
+                                  model_args.num_speculative_tokens() > 0;
     const bool need_fake_input_for_empty_shard =
-        empty_shard && !input_params.meta.batch_forward_type.is_empty() &&
+        (empty_shard || idle_block_input) &&
+        !input_params.meta.batch_forward_type.is_empty() &&
         ((context_.get_parallel_args().dp_size() > 1 ||
           context_.get_parallel_args().ep_size() > 1 ||
           !context_.get_parallel_args().mapping_data().empty()));
     if (need_fake_input_for_empty_shard) {
-      int64_t num_fake_tokens = 1;
-      const ModelArgs& model_args = context_.get_model_args();
-      if (is_dflash2_draft_model_type(model_args.model_type())) {
-        // DFlash2 grouped convolution resets on fixed-width block boundaries
-        // and rejects partial blocks, including the generic one-row dummy.
-        num_fake_tokens = model_args.dflash2_block_size();
-        CHECK_GT(num_fake_tokens, 0)
-            << "DFlash2 empty-shard input requires a positive block size";
-      }
       auto token_options = processed_input.token_ids.defined()
                                ? processed_input.token_ids.options()
                                : torch::TensorOptions().dtype(torch::kInt32);
@@ -1558,12 +1579,15 @@ void WorkerImpl::prepare_work_before_execute_on_stream_impl(
                                   ? processed_input.positions.options()
                                   : torch::TensorOptions().dtype(torch::kInt32);
       processed_input.token_ids =
-          torch::ones({num_fake_tokens}, token_options.device(device_));
+          torch::ones({dummy_tokens}, token_options.device(device_));
       processed_input.positions =
-          torch::arange(num_fake_tokens, position_options.device(device_));
+          torch::arange(dummy_tokens, position_options.device(device_));
       processed_input.input_params.embedding.linear_state_indices =
-          torch::zeros({num_fake_tokens},
+          torch::zeros({dummy_tokens},
                        token_options.dtype(torch::kInt32).device(device_));
+      if (idle_block_input) {
+        apply_idle_block_dummy_input(input_params, dummy_tokens, device_);
+      }
       empty_shard = false;
     }
     if (empty_shard) {
@@ -2541,20 +2565,24 @@ bool WorkerImpl::init_model_impl(const std::string& model_weights_path,
           is_dspark && util::is_deepseek_v4_model_type(args.model_type());
       std::string draft_model_type = "DFlashDraftModel";
       if (is_dspark) {
-        draft_model_type = args.model_type() == "glm5_dspark"
-                               ? "glm5_dspark"
+        draft_model_type = args.model_type() == kDSparkGLM5DraftModelType
+                               ? std::string(kDSparkGLM5DraftModelType)
                                : "DSparkDraftModel";
       } else if (SpeculativeConfig::is_dflash2_algorithm(
                      speculative_algorithm)) {
         draft_model_type = std::string(kDFlash2DraftModelType);
+        CHECK_GT(args.dflash2_block_size(), 0);
       }
       if (is_deepseek_v4_dspark) {
-        draft_model_type = std::string(util::kDeepseekV4DSparkModelType);
+        draft_model_type = std::string(kDeepseekV4DSparkModelType);
       }
       LOG(INFO) << "Overriding draft model_type from " << args.model_type()
                 << " to " << draft_model_type
                 << " for block-diffusion speculative decoding";
       args.model_type(draft_model_type);
+      // The draft's decode step is num_speculative_tokens + 1 rows wide;
+      // record it on ModelArgs so dummy inputs derive the same width.
+      args.num_speculative_tokens(options_.num_speculative_tokens());
       if (is_deepseek_v4_dspark) {
         configure_deepseek_v4_dspark_args(args, options_);
       }
@@ -2657,11 +2685,6 @@ bool WorkerImpl::init_model_impl(const std::string& model_weights_path,
   context_.set_model_impl(ModelConfig::get_instance().model_impl());
   context_.set_extension_impl(options_.extension_impl());
   context_.set_model_id(options_.model_id());
-  SpeculativeRuntimeConfig speculative_runtime_config;
-  speculative_runtime_config.is_draft_engine = options_.is_draft_engine();
-  speculative_runtime_config.adaptive_enabled =
-      options_.enable_adaptive_spec_prune();
-  context_.set_speculative_runtime_config(speculative_runtime_config);
   FlashComm1Options flash_comm1_options;
   flash_comm1_options.enable_flashcomm1 = options_.enable_flashcomm1();
   flash_comm1_options.min_prefill_tokens =
