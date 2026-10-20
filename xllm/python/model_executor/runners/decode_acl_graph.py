@@ -791,43 +791,6 @@ class DecodeAclGraphRunner(AclGraphRunner):
             current_stream.wait_event(self._update_done_event)
         return output
 
-    @staticmethod
-    def _slice_output(
-        output: ModelExecutionOutput,
-        batch_size: int,
-        detach: bool = True,
-    ) -> ModelExecutionOutput:
-        """Slice graph outputs and detach them when replay can overlap.
-
-        Graph replay writes the same persistent output allocation on every
-        step. The MTP schedule-overlap path can retain both hidden states and
-        top-k indices until a later step, so it needs detached copies. Without
-        MTP, the caller stream is ordered after replay before the next graph
-        launch, so a view avoids an extra device copy.
-
-        A non-detached view is borrowed until this entry executes again. The
-        caller must consume it on the ordered stream or clone it if retained.
-        """
-        if not isinstance(output, tuple):
-            result = output[:batch_size]
-            return result.clone() if detach else result
-        hidden, aux_hidden = output[:2]
-        hidden = hidden[:batch_size]
-        if detach:
-            hidden = hidden.clone()
-        if aux_hidden is not None:
-            aux_hidden = aux_hidden[:batch_size]
-            if detach:
-                aux_hidden = aux_hidden.clone()
-        if len(output) == 2:
-            return hidden, aux_hidden
-        topk = output[2]
-        if topk is not None:
-            topk = topk[:batch_size]
-            if detach:
-                topk = topk.clone()
-        return hidden, aux_hidden, topk
-
     def _capture(self, entry: AclGraphEntry, stream: torch.npu.Stream) -> None:
         # Graph warmup and capture execute the model before the first replay.
         # Linear attention advances recurrent state on each forward,

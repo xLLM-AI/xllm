@@ -258,6 +258,11 @@ TEST_F(SlotBufferTest, DpMetadataStaysPrivateAcrossSlotPreparationAndReuse) {
   expect_device_input(active);
   auto& first_params = binding_->model_params();
   PyAttentionMetadataView first_view(first_params.attn_metadata, first_params);
+  PyAttentionMetadataView block_view(first_params.attn_metadata,
+                                     first_params,
+                                     /*dummy_token_count=*/5);
+  EXPECT_EQ(block_view.dp_execution_token_counts(),
+            (std::vector<int32_t>{3, 5}));
   const int32_t* counts = first_params.parallel.dp_global_token_nums.data();
   const int32_t* phases = first_params.parallel.dp_is_decode.data();
   EXPECT_TRUE(first_params.parallel.raw_dp_global_token_nums.empty());

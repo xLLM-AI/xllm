@@ -57,29 +57,29 @@ from xllm.python.model_executor.runners.mtp_sparse_metadata import (
     MtpSparsePositionStorage,
     SparseMetadataFactory,
 )
+from xllm.python.model_platform_support import (
+    is_block_draft_model,
+    is_deepseek_v4_model,
+    is_dspark_draft_model,
+    uses_context_kv_projection,
+)
 from xllm.python.platform import current_platform
 
-
-def _is_deepseek_v4_model_type(model_type: str) -> bool:
-    # Mirror core/util/utils.h is_deepseek_v4_model_type: exact target and
-    # DSpark names, plus target-prefixed names carrying the MTP marker.
-    return model_type in ("deepseek_v4", "deepseek_v4_dspark") or (
-        model_type.startswith("deepseek_v4") and "mtp" in model_type
-    )
+# Backend strings that mean "no graph execution" (matched case-insensitively).
+_DISABLED_GRAPH_BACKENDS = ("", "off", "none", "0")
 
 
 def _resolve_graph_backend(config: dict) -> str:
     graph_backend = str(config.get("python_graph_backend", "off")).lower()
-    graph_disabled = graph_backend in ("", "off", "none", "0")
-    if graph_disabled and config.get("enable_graph", False):
-        if current_platform.is_npu():
-            return "aclgraph"
+    if graph_backend in _DISABLED_GRAPH_BACKENDS and config.get("enable_graph", False) and current_platform.is_npu():
+        return "aclgraph"
     return graph_backend
 
 
 def _validate_npu_cp_model_config(config: dict, num_decoding_tokens: int) -> None:
     """Mirror model-side CP admission for callers without the C++ master."""
     model_type = config.get("model_type", "")
+    # DSpark drafts do not run Python CP admission; only the dense target.
     is_glm5_next = model_type in ("glm5_next", "glm5_3_flash")
     is_glm_mtp_draft = (
         model_type == "glm_moe_dsa_mtp"
@@ -102,6 +102,7 @@ def _validate_npu_cp_model_config(config: dict, num_decoding_tokens: int) -> Non
     if speculative and bool(config.get("requires_aux_hidden_capture", False)):
         raise NotImplementedError("Python model-side CP does not support aux-hidden-capture speculative algorithms")
     kv_split = int(config.get("kv_split_size", 0)) or int(config["cp_size"])
+    # Only the dense target requires replicated KV under Python CP.
     if model_type == "deepseek_v4" and kv_split != 1:
         raise NotImplementedError("Python DeepSeek-V4 CP requires replicated KV caches; use kv_split_size=1")
     if is_glm5_next:
@@ -134,7 +135,7 @@ def _create_attention_backend(
 ) -> AttentionBackend:
     config = config or {}
     model_type = config.get("model_type", "")
-    if _is_deepseek_v4_model_type(model_type) and current_platform.is_npu():
+    if is_deepseek_v4_model(config) and current_platform.is_npu():
         from xllm.python.attention.dsa_attention import DsaAttentionBackend
 
         return DsaAttentionBackend(
@@ -192,6 +193,8 @@ def _create_attention_backend(
             device=device,
             dtype=dtype,
             num_decoding_tokens=num_decoding_tokens,
+            # Only the GLM5 DSpark draft carries the dense MLA block-draft
+            # attention shape.
             mla_block_draft=model_type == "glm5_dspark",
         )
     if current_platform.is_cuda():
@@ -220,25 +223,30 @@ def _configure_unified_mtp_graph(model: nn.Module, enabled: bool) -> None:
 def _unified_mtp_graph_enabled(config: dict) -> bool:
     """Select GLM roles participating in a Unified speculative graph.
 
-    The draft executor deliberately keeps ``num_speculative_tokens == 0``;
-    that is its existing runtime contract, so executor width alone cannot be
-    used to decide whether the MTP model should receive the Unified setting.
-    DFlash/DFlash2/DSpark use GLM only on the target side and require native task Slots.
+    The MTP draft (``glm_moe_dsa_mtp``) and the speculative target
+    (``glm_moe_dsa`` with a draft width) participate. Unified graphs are an
+    MTP-algorithm feature: running an MTP checkpoint under another algorithm
+    must not switch GLM's MoE reduction path, matching the C++ worker's
+    is_mtp_algorithm gate. Block-diffusion targets additionally require the
+    task pipeline and graph execution; block-diffusion drafts
+    (DFlash/DFlash2/DSpark model types) never participate and use native task
+    slots instead.
     """
     if not bool(config.get("enable_unified_mtp_graph", False)):
         return False
-    is_mtp = bool(config.get("is_mtp_algorithm", False))
-    is_block_draft = bool(config.get("is_block_diffusion_algorithm", False))
-    if not is_mtp and not is_block_draft:
+    if not bool(config.get("is_mtp_algorithm", False)):
         return False
-    if is_block_draft and not (config.get("enable_task_pipeline", False) and config.get("enable_graph", False)):
-        return False
-
     model_type = config.get("model_type")
-    is_draft_engine = bool(config.get("is_draft_engine", False))
     if model_type == "glm_moe_dsa_mtp":
-        return is_draft_engine and is_mtp
-    return model_type == "glm_moe_dsa" and not is_draft_engine and int(config.get("num_speculative_tokens", 0)) > 0
+        return True
+    if model_type != "glm_moe_dsa":
+        return False
+    if int(config.get("num_speculative_tokens", 0)) <= 0:
+        return False
+    is_block_draft = bool(config.get("is_block_diffusion_algorithm", False))
+    return not is_block_draft or (
+        bool(config.get("enable_task_pipeline", False)) and bool(config.get("enable_graph", False))
+    )
 
 
 class ModelExecutor:
@@ -293,12 +301,12 @@ class ModelExecutor:
         if (
             current_platform.is_npu()
             and config.get("model_type") == "glm_moe_dsa_mtp"
-            and graph_backend not in ("", "off", "none", "0", "aclgraph")
+            and graph_backend not in (*_DISABLED_GRAPH_BACKENDS, "aclgraph")
         ):
             # Cross-draft top-k and repair rows require the ACL runner's
             # persistent inputs. Other graph runners cannot retain that state.
             raise NotImplementedError(f"Python NPU GLM MTP requires graph_backend=off/aclgraph; got '{graph_backend}'")
-        if cp_size > 1 and graph_backend not in ("", "off", "none", "0", "aclgraph"):
+        if cp_size > 1 and graph_backend not in (*_DISABLED_GRAPH_BACKENDS, "aclgraph"):
             # Only decode-only ACL graphs preserve CP prefill on EagerRunner.
             # Match the C++ admission gate before allocating backend state.
             raise NotImplementedError(
@@ -325,13 +333,6 @@ class ModelExecutor:
         # import glm5_next (that import pulls KDA kernel transitive deps and
         # fails on builds without them).
         dsa_layers = [layer for layer in attention_layers if getattr(layer, "is_glm_next_mla", False)]
-        has_kda_layers = any(getattr(layer, "is_glm_next_kda", False) for layer in attention_layers)
-        is_draft_engine = bool(config.get("is_draft_engine", False))
-        adaptive_speculative_decode_enabled = bool(config.get("runtime_adaptive_speculative_decode_enabled", False))
-        if has_kda_layers and not is_draft_engine and adaptive_speculative_decode_enabled:
-            raise ValueError(
-                "GLM5 KDA does not support adaptive speculative decode; disable adaptive speculative decoding."
-            )
         if dsa_layers:
             first_attention = dsa_layers[0]
         else:
@@ -382,7 +383,7 @@ class ModelExecutor:
         self.context_kv_graph_runner = None
         self.inductor_runner = None
 
-        if self.layerwise_split_size > 1 and graph_backend not in ("", "off", "none", "0"):
+        if self.layerwise_split_size > 1 and graph_backend not in _DISABLED_GRAPH_BACKENDS:
             raise NotImplementedError(
                 "Python GLM5.2 layerwise split requires eager execution; "
                 f"graph backend '{graph_backend}' is not supported."
@@ -390,12 +391,12 @@ class ModelExecutor:
         dp_rank = int(config.get("dp_rank", 0))
         self.dp_size = dp_size
         self._prepared_mtp = config.get("model_type") == "glm_moe_dsa_mtp"
-        self._prepared_dspark = config.get("model_type") in ("DSparkDraftModel", "glm5_dspark")
-        self._independent_block_draft = self._prepared_dspark or config.get("model_type") == "DFlash2DraftModel"
-        self._prepared_block_draft = self._prepared_dspark or config.get("model_type") in (
-            "DFlashDraftModel",
-            "DFlash2DraftModel",
-        )
+        self._prepared_block_draft = is_block_draft_model(config)
+        self._prepared_dspark = is_dspark_draft_model(config)
+        # DSpark drafts and DFlash2 write their own context-KV via the shared
+        # context_projection_weight (see uses_context_kv_projection); DFlash
+        # and DeepSeek-V4 DSpark do not.
+        self._independent_block_draft = uses_context_kv_projection(config)
         prepared_kv_split = int(config.get("kv_split_size", 0)) or cp_size
         dcp_group = distributed.dcp_group(device) if current_platform.is_npu() else None
         dcp_size = dcp_group.size() if dcp_group is not None else 1
@@ -412,24 +413,17 @@ class ModelExecutor:
             self.attention_backend.supports_prepared_metadata
             and (
                 config.get("model_type") in ("qwen3", "glm_moe_dsa", "glm_moe_dsa_mtp")
-                or (self._prepared_block_draft and graph_backend in ("", "off", "none", "0"))
+                or (self._prepared_block_draft and graph_backend in _DISABLED_GRAPH_BACKENDS)
                 or (self._prepared_dspark and config.get("enable_task_pipeline", False) and graph_backend == "aclgraph")
             )
             and prepared_kv
-            and graph_backend in ("", "off", "none", "0", "aclgraph")
+            and graph_backend in (*_DISABLED_GRAPH_BACKENDS, "aclgraph")
             and (cp_size == 1 or prepared_glm_parallel)
             and self.layerwise_split_size == 1
         )
-        if dp_size > 1 and graph_backend not in (
-            "",
-            "off",
-            "none",
-            "0",
-            "cudagraphs",
-            "aclgraph",
-        ):
+        if dp_size > 1 and graph_backend not in (*_DISABLED_GRAPH_BACKENDS, "cudagraphs", "aclgraph"):
             raise NotImplementedError("Python data parallel graph execution supports cudagraphs and aclgraph only")
-        if graph_backend in ("", "off", "none", "0"):
+        if graph_backend in _DISABLED_GRAPH_BACKENDS:
             pass
         elif graph_backend == "cudagraphs":
             self.decode_graph_runner = DecodeCudaGraphRunner(
@@ -485,7 +479,7 @@ class ModelExecutor:
                     self.attention_backend,
                     device,
                     local_graph_sequence_capacity * self._context_kv_draft_width * dp_size
-                    if self._prepared_dspark
+                    if self.context_kv_graph_runner is not None
                     else max_graph_tokens,
                     dp_size,
                     dp_rank,
@@ -859,35 +853,6 @@ class ModelExecutor:
             self.context_kv_graph_runner.bind_kv_caches(layer_caches)
         self._kv_bound = True
 
-    def _reset_kda_spec_state_on_pd_handoff(self, metadata: AttentionMetadata) -> None:
-        """Reset process-local KDA speculative state on first PD decode."""
-        reset_mask = getattr(metadata, "pd_handoff_reset_mask", None)
-        if not isinstance(reset_mask, torch.Tensor) or reset_mask.numel() == 0:
-            return
-
-        slots = getattr(metadata, "linear_state_indices", None)
-        if not isinstance(slots, torch.Tensor) or slots.numel() == 0:
-            raise RuntimeError("PD handoff reset requires linear-state indices")
-        row_mask = reset_mask.reshape(-1)
-        if row_mask.numel() != slots.numel():
-            # Spec-verify steps expand linear_state_indices per row (one slot
-            # id repeated num_val_tokens times per sequence) while the reset
-            # mask stays per sequence. Expand the mask the same way so each
-            # row is filtered by its owning sequence's flag.
-            if slots.numel() % row_mask.numel() != 0:
-                raise RuntimeError(
-                    "PD handoff reset mask is not aligned with linear-state "
-                    f"slots: mask={row_mask.numel()}, slots={slots.numel()}"
-                )
-            row_mask = row_mask.repeat_interleave(slots.numel() // row_mask.numel())
-
-        reset_fn = getattr(self.attention_backend, "reset_kda_spec_slots", None)
-        if reset_fn is None:
-            raise RuntimeError("PD handoff reset requires KDA speculative-state support")
-        reset_slots = slots.reshape(-1)[row_mask.to(device=slots.device, dtype=torch.bool)]
-        if reset_slots.numel() > 0:
-            reset_fn(reset_slots)
-
     @torch.inference_mode()
     def execute(
         self,
@@ -922,8 +887,6 @@ class ModelExecutor:
             self.context_kv_graph_runner.warmup(sequences * (width + 1))
         if self.layerwise_split_size > 1 and (metadata.is_prefill or metadata.is_chunked_prefill):
             raise NotImplementedError("Python GLM5.2 layerwise split is decode-only")
-
-        self._reset_kda_spec_state_on_pd_handoff(metadata)
 
         eplb = None
         if expert_load_data is not None:

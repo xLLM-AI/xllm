@@ -28,6 +28,9 @@ from xllm.python.models.glm5_dspark import Glm5DSparkConfig, Glm5DSparkForCausal
 
 def _config(**overrides: object) -> dict:
     values = dict(
+        # The executor classifies glm5_dspark via the model_type predicate in
+        # model_platform_support, so this matches what production sees.
+        model_type="glm5_dspark",
         hidden_size=8,
         num_hidden_layers=2,
         num_attention_heads=2,

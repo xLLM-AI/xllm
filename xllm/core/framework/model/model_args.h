@@ -31,9 +31,26 @@ limitations under the License.
 namespace xllm {
 
 inline constexpr std::string_view kDFlash2DraftModelType = "DFlash2DraftModel";
+inline constexpr std::string_view kDSparkGLM5DraftModelType = "glm5_dspark";
+inline constexpr std::string_view kDeepseekV4DSparkModelType =
+    "deepseek_v4_dspark";
 
 inline constexpr bool is_dflash2_draft_model_type(std::string_view model_type) {
   return model_type == kDFlash2DraftModelType;
+}
+
+// DSpark draft model types (Qwen/DSparkDraftModel, GLM5, DeepSeek-V4).
+inline constexpr bool is_dspark_draft_model_type(std::string_view model_type) {
+  return model_type == "DSparkDraftModel" ||
+         model_type == kDSparkGLM5DraftModelType ||
+         model_type == kDeepseekV4DSparkModelType;
+}
+
+// All block-diffusion draft model families (DFlash/DFlash2/DSpark).
+inline constexpr bool is_block_draft_model_type(std::string_view model_type) {
+  return model_type == "DFlashDraftModel" ||
+         is_dflash2_draft_model_type(model_type) ||
+         is_dspark_draft_model_type(model_type);
 }
 
 struct ModelArgs {
@@ -975,6 +992,13 @@ inline std::ostream& operator<<(std::ostream& os, const ModelArgs& args) {
   os << ", max_image_seq_len: " << args.max_image_seq_len();
   os << "]";
   return os;
+}
+
+// Speculative decoding extends decode from one token to
+// num_speculative_tokens + 1 rows per sequence; the dummy forward of an idle
+// shard must mirror that width to keep DP collectives row-aligned.
+inline int32_t dummy_token_count(const ModelArgs& args) {
+  return args.num_speculative_tokens() + 1;
 }
 
 }  // namespace xllm

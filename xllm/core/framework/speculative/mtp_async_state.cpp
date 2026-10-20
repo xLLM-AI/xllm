@@ -49,7 +49,7 @@ TargetSpecVerifyMode classify_target_spec_verify_mode(
   }
   // GLM and DeepSeek use the same DSA expanded target-verify layout.
   if (model_type == "deepseek_v32" || model_type == "glm_moe_dsa" ||
-      model_type == "deepseek_v4" || model_type == "deepseek_v4_dspark") {
+      model_type == "deepseek_v4" || model_type == kDeepseekV4DSparkModelType) {
     return TargetSpecVerifyMode::DEEPSEEK_V32_EXPANDED_VERIFY;
   }
   if (model_type == "mimo") {

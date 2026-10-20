@@ -75,6 +75,41 @@ class BaseRunner(ABC):
             raise ValueError("execution metadata must contain one slot per input token")
         return {builder.metadata_type: builder.build(metadata) for builder in self.execution_metadata_builders}
 
+    @staticmethod
+    def _slice_output(
+        output: ModelExecutionOutput,
+        batch_size: int,
+        *,
+        detach: bool = True,
+    ) -> ModelExecutionOutput:
+        """Slice graph outputs to the active rows, optionally copying out of graph storage.
+
+        Graph replay writes the same persistent output allocation on every
+        step, so callers that retain the output past the next replay need a
+        detached copy; an ordered-stream view avoids the extra device copy.
+        """
+
+        def _trim(tensor: torch.Tensor) -> torch.Tensor:
+            tensor = tensor[:batch_size]
+            return tensor.clone() if detach else tensor
+
+        if not isinstance(output, tuple):
+            return _trim(output)
+        hidden, aux_hidden = output[:2]
+        hidden = _trim(hidden)
+        if aux_hidden is not None:
+            aux_hidden = aux_hidden[:batch_size]
+            if detach:
+                aux_hidden = aux_hidden.clone()
+        if len(output) == 2:
+            return hidden, aux_hidden
+        topk = output[2]
+        if topk is not None:
+            topk = topk[:batch_size]
+            if detach:
+                topk = topk.clone()
+        return hidden, aux_hidden, topk
+
     @abstractmethod
     def execute(
         self,

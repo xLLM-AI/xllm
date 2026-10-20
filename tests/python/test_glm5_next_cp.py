@@ -22,6 +22,7 @@ import torch
 import torch.nn as nn
 
 from xllm.python.models import glm5_next
+from xllm.python.models.aux_hidden_capture import AuxHiddenCapture
 
 
 class _Embedding(nn.Module):
@@ -83,6 +84,7 @@ def _make_model(events: list[str]) -> tuple[glm5_next.Glm5NextModel, list[_Decod
     model.layers = nn.ModuleList(layers)
     model.norm = _Norm(events)
     model.hc_head = _HyperHead()
+    model.aux_hidden_capture = AuxHiddenCapture(())
     model._inputs_embeds = None
     return model, layers
 
@@ -557,3 +559,17 @@ def test_cp_one_preserves_full_rows_without_shard_or_merge() -> None:
     assert events == ["embedding", "layer_0", "layer_1", "norm"]
     torch.testing.assert_close(layers[0].positions, torch.tensor([[0, 1, 2, 3]], dtype=torch.int32))
     torch.testing.assert_close(output, torch.tensor([[13.0], [23.0], [33.0], [43.0]]))
+
+
+def test_model_captures_selected_layer_streams_before_final_normalization() -> None:
+    events: list[str] = []
+    model, _ = _make_model(events)
+    collapses: list[torch.Tensor] = []
+    model.hc_head.register_forward_hook(lambda _module, _args, output: collapses.append(output))
+    model.aux_hidden_capture = AuxHiddenCapture((1,), transform=lambda hidden: model.hc_head(hidden).reshape(-1, 1))
+    with patch.object(glm5_next, "get_forward_context", return_value=SimpleNamespace(cp_context=None)):
+        hidden, captured = model(torch.tensor([2, 4]), torch.tensor([0, 1]))
+    torch.testing.assert_close(hidden, torch.tensor([[5.0], [7.0]]))
+    torch.testing.assert_close(captured, torch.tensor([[5.0], [7.0]]))
+    assert len(collapses) == 2
+    assert glm5_next.Glm5NextConfig.from_dict({"layers_to_capture": [1]}).layers_to_capture == (1,)

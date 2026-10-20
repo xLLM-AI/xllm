@@ -71,7 +71,8 @@ class PyAttentionMetadataView final {
   explicit PyAttentionMetadataView(
       std::shared_ptr<layer::AttentionMetadata> metadata);
   PyAttentionMetadataView(std::shared_ptr<layer::AttentionMetadata> metadata,
-                          const ModelParamsView& params);
+                          const ModelParamsView& params,
+                          int32_t dummy_token_count = 1);
 
   const torch::Tensor& slot_mapping() const;
   pybind11::object local_slot_mapping() const;

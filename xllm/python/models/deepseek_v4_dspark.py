@@ -80,10 +80,14 @@ class DeepseekV4DSparkConfig(DeepseekV4Config):
             dspark_noise_token_id=int(d.get("dspark_noise_token_id", 0)),
             markov_rank=int(d.get("markov_rank", d.get("dspark_markov_rank", 0))),
             enable_confidence_head=bool(d.get("enable_confidence_head", False)),
-            # Plumb-through of ModelArgs.confidence_head_with_markov (the C++
-            # worker sets it): the checkpoint confidence head is always markov
-            # (no bias).
-            confidence_head_with_markov=bool(d.get("confidence_head_with_markov", True)),
+            # DeepSeek-V4 DSpark checkpoints always carry a markov (no-bias)
+            # confidence head: the C++ side initializes it with
+            # with_markov=true unconditionally (deepseek_v4_dspark.h). The
+            # reflected confidence_head_with_markov key is NOT consulted —
+            # ModelArgs defaults it to false and no worker sets it, so a
+            # plumb-through would build a [1, hidden] module for a
+            # [1, hidden + markov_rank] checkpoint.
+            confidence_head_with_markov=True,
             dspark_use_native_sas=bool(d.get("dspark_use_native_sas", False)),
         )
         return cls(**values)
