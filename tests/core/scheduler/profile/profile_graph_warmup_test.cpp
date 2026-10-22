@@ -351,7 +351,7 @@ class RecordingProfileEngine final : public Engine {
         // Follow the real request-to-sampler conversion rather than assuming
         // the presence of a per-row sampling tensor implies greedy admission.
         SamplingParameters sampling;
-        sampling.init({sequence->sampling_param()}, {0}, {0}, {}, {}, {});
+        sampling.init({sequence->sampling_param()}, {0}, {}, {}, {});
         observed_greedy_samples_.emplace_back(sampling.sampling_mode ==
                                                   SamplingMode::GREEDY &&
                                               !sampling.do_sample.defined());

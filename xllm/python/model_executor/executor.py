@@ -194,6 +194,7 @@ def _create_attention_backend(
             device=device,
             dtype=dtype,
             kv_cache_storage_head_dim=int(config.get("kv_cache_storage_head_dim", 0)),
+            use_tensor_core_decode=first_attention.use_tensor_core_decode,
         )
     raise NotImplementedError(f"No attention backend available for device type '{device.type}'")
 
@@ -736,7 +737,7 @@ class ModelExecutor:
     @staticmethod
     def _attention_config(
         layer: Attention,
-    ) -> tuple[int, int, int, float, int, bool, int | None, int, int, bool]:
+    ) -> tuple[int, int, int, float, int, bool, int | None, int, int, bool, bool | None]:
         return (
             layer.num_heads,
             layer.num_kv_heads,
@@ -748,6 +749,7 @@ class ModelExecutor:
             layer.fia_pre_tokens,
             layer.fia_next_tokens,
             layer.fia_use_attention_mask,
+            layer.use_tensor_core_decode,
         )
 
     @property

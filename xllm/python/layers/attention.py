@@ -54,6 +54,7 @@ class Attention(nn.Module):
         fia_pre_tokens: int = 2147483647,
         fia_next_tokens: int = 2147483647,
         fia_use_attention_mask: bool = False,
+        use_tensor_core_decode: bool | None = None,
     ) -> None:
         super().__init__()
         self.num_heads = num_heads
@@ -67,6 +68,7 @@ class Attention(nn.Module):
         self.fia_pre_tokens = fia_pre_tokens
         self.fia_next_tokens = fia_next_tokens
         self.fia_use_attention_mask = fia_use_attention_mask
+        self.use_tensor_core_decode = use_tensor_core_decode
         # External transfers update framework-owned caches only. Derived
         # model-local caches must be reconstructed from those tensors.
         self.cache_transfer_enabled = False

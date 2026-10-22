@@ -98,11 +98,14 @@ void zero_slots_across_layers(std::vector<KVCache>& kv_caches,
       for (const SlotRange& range : ranges) {
         torch::Tensor tail_range =
             kpool_tail.narrow(0, range.start, range.length);
-        // Clear the key plane and mark the gate plane with an explicit
-        // validity sentinel in one pass: a reset slot must not expose finite
-        // stale gates to a later circular-tail read.
+#if defined(USE_NPU)
+        // Clear keys and invalidate gates for NPU circular-tail reads.
         tail_range.select(/*dim=*/1, /*index=*/0).zero_();
         fill_kpool_tail_gate_sentinel(tail_range);
+#else
+        // Other platforms require both planes to be cleared on slot reuse.
+        tail_range.zero_();
+#endif
       }
     }
     if (!conv_cache.defined() && !ssm_cache.defined()) {

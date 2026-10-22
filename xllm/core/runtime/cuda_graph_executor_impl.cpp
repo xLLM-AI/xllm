@@ -1567,6 +1567,7 @@ ModelOutput CudaGraphExecutorImpl::run_typed(Model* model,
     }
 
     // Check if piecewise graph exists for this bucket
+    std::unique_ptr<CudaGraph> retired_graph;
     auto it = prefill_graphs_.find(bucket_num_tokens);
     if constexpr (std::is_same_v<Params, RecModelParams>) {
       if (it != prefill_graphs_.end() &&
@@ -1574,6 +1575,8 @@ ModelOutput CudaGraphExecutorImpl::run_typed(Model* model,
         // Previous replay must finish before its graph-owned KV bindings
         // expire.
         c10::cuda::getCurrentCUDAStream(device_.index()).synchronize();
+        // Keep the shared allocator pool alive until recapture acquires it.
+        retired_graph = std::move(it->second);
         prefill_graphs_.erase(it);
         it = prefill_graphs_.end();
       }
@@ -1664,12 +1667,15 @@ ModelOutput CudaGraphExecutorImpl::run_typed(Model* model,
     }
 
     // Check if captured graph exists for this bucket num_tokens
+    std::unique_ptr<CudaGraph> retired_graph;
     auto it = graphs_.find(bucket_num_tokens);
     if constexpr (std::is_same_v<Params, RecModelParams>) {
       if (it != graphs_.end() && !it->second->rec_bindings_match(params)) {
         // Previous replay must finish before its graph-owned KV bindings
         // expire.
         c10::cuda::getCurrentCUDAStream(device_.index()).synchronize();
+        // Keep the shared allocator pool alive until recapture acquires it.
+        retired_graph = std::move(it->second);
         graphs_.erase(it);
         it = graphs_.end();
       }

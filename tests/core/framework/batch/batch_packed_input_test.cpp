@@ -800,7 +800,7 @@ void expect_packed_sample_count_hint() {
   Input source;
   source.sampling_params.selected_token_idxes =
       torch::tensor({0, 1}, torch::kInt32);
-  source.sampling_params.do_sample = torch::tensor({true, false}, torch::kBool);
+  EXPECT_FALSE(source.sampling_params.do_sample.defined());
   proto::PackedForwardInput packed;
   ASSERT_TRUE(source.to_packed_proto(&packed));
   ASSERT_TRUE(packed.has_sample_count());
@@ -824,8 +824,12 @@ void expect_packed_sample_count_hint() {
   EXPECT_FALSE(lazy.from_packed_proto(packed));
 
   const std::string retained_proto = packed.SerializeAsString();
-  source.sampling_params.do_sample =
-      source.sampling_params.do_sample.reshape({1, 2});
+  // Selected tokens define the wire count, including for greedy batches.
+  // Expand a one-element view to exercise the int32 limit without allocating.
+  const int64_t oversized_sample_count =
+      static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1;
+  source.sampling_params.selected_token_idxes =
+      torch::zeros({1}, torch::kInt32).expand({oversized_sample_count});
   EXPECT_FALSE(source.to_packed_proto(&packed));
   EXPECT_EQ(packed.SerializeAsString(), retained_proto);
 
@@ -856,7 +860,6 @@ void expect_packed_sample_count_mismatch_rejected() {
   Input source;
   source.sampling_params.selected_token_idxes =
       torch::tensor({0, 1}, torch::kInt32);
-  source.sampling_params.do_sample = torch::tensor({true, false}, torch::kBool);
   proto::PackedForwardInput packed;
   ASSERT_TRUE(source.to_packed_proto(&packed));
   packed.set_sample_count(1);
@@ -872,7 +875,7 @@ void expect_packed_sample_count_mismatch_rejected() {
             unpacked,
             /*materialize_device_buffer=*/false);
       },
-      "Packed sample count does not match sampling rows");
+      "Packed sample count does not match the sampling sequence count");
 }
 
 }  // namespace
@@ -898,6 +901,8 @@ TEST(BatchPackedInputDeathTest, VlmPackedSampleCountMustMatchPayload) {
 TEST(BatchPackedInputTest, PackedProtoLazyUnpackRestoresDoSample) {
   RequestSamplingParam sampling_param;
   sampling_param.logprobs = true;
+  RequestSamplingParam greedy_sampling_param = sampling_param;
+  greedy_sampling_param.temperature = 0.0;
 
   StoppingChecker stopping_checker;
   stopping_checker.set_max_generated_tokens(4);
@@ -914,7 +919,7 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackRestoresDoSample) {
   torch::Tensor input_embedding;
   MMData mm_data;
   BlockManager::Options options;
-  options.num_blocks(2).block_size(4);
+  options.num_blocks(4).block_size(4);
   BlockManagerImpl manager(options);
 
   IncrementalDecoder decoder("", 1, false, false);
@@ -927,8 +932,20 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackRestoresDoSample) {
 
   seq.add_blocks(BlockType::KV, manager.allocate(1));
 
-  std::vector<Sequence*> sequences = {&seq};
-  std::vector<uint32_t> budgets = {4};
+  // do_sample is present only when random and greedy rows share a batch.
+  SequenceParams greedy_seq_params = seq_params;
+  greedy_seq_params.sampling_param = &greedy_sampling_param;
+  IncrementalDecoder greedy_decoder("", 1, false, false);
+  Sequence greedy_seq(/*index=*/1,
+                      /*token_ids=*/{5, 6, 7, 8},
+                      input_embedding,
+                      mm_data,
+                      std::move(greedy_decoder),
+                      greedy_seq_params);
+  greedy_seq.add_blocks(BlockType::KV, manager.allocate(1));
+
+  std::vector<Sequence*> sequences = {&seq, &greedy_seq};
+  std::vector<uint32_t> budgets = {4, 4};
   ForwardInputBuilder builder(sequences,
                               budgets,
                               {},
@@ -942,12 +959,14 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackRestoresDoSample) {
       builder.build_forward_input(/*num_decoding_tokens=*/1,
                                   /*min_decoding_batch_size=*/0);
   ASSERT_TRUE(input.sampling_params.do_sample.defined());
-  input.sampling_params.min_p = torch::tensor({0.1F});
-  input.sampling_params.logits_bias = torch::tensor({{0.0F, -INFINITY, 2.0F}});
-  input.sampling_params.seeds = torch::tensor({42}, torch::kLong);
-  input.sampling_params.seed_offsets = torch::tensor({7}, torch::kLong);
+  ASSERT_EQ(input.sampling_params.sampling_mode, SamplingMode::MIXED);
+  input.sampling_params.min_p = torch::tensor({0.1F, 0.0F});
+  input.sampling_params.logits_bias =
+      torch::tensor({{0.0F, -INFINITY, 2.0F}, {0.0F, 0.0F, 0.0F}});
+  input.sampling_params.seeds = torch::tensor({42, 43}, torch::kLong);
+  input.sampling_params.seed_offsets = torch::tensor({7, 0}, torch::kLong);
   input.sampling_params.filter_bitmask =
-      torch::tensor({{static_cast<int32_t>(0x5)}},
+      torch::tensor({{static_cast<int32_t>(0x5)}, {static_cast<int32_t>(0x7)}},
                     torch::TensorOptions().dtype(torch::kInt32));
 
   proto::PackedForwardInput packed_input;
@@ -965,7 +984,10 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackRestoresDoSample) {
                                                     unpacked_input,
                                                     false));
   ASSERT_TRUE(unpacked_input.sampling_params.do_sample.defined());
-  EXPECT_EQ(unpacked_input.input_host_sample_count, 1);
+  EXPECT_EQ(unpacked_input.sampling_params.sampling_mode, SamplingMode::MIXED);
+  EXPECT_TRUE(torch::equal(unpacked_input.sampling_params.do_sample,
+                           torch::tensor({true, false}, torch::kBool)));
+  EXPECT_EQ(unpacked_input.input_host_sample_count, 2);
   EXPECT_TRUE(torch::equal(unpacked_input.sampling_params.min_p,
                            input.sampling_params.min_p));
   EXPECT_TRUE(torch::equal(unpacked_input.sampling_params.logits_bias,

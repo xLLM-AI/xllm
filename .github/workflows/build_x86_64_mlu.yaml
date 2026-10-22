@@ -108,6 +108,26 @@ jobs:
       needs.check-sensitive.outputs.do_build == 'true'
     runs-on: [xllm-cpu-only-cicd]
     steps:
+    - name: Repair incomplete Mooncake submodule checkout
+      timeout-minutes: 5
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        submodule_parent=third_party/Mooncake
+        submodule_path=extern/yalantinglibs
+        submodule_dir="$submodule_parent/$submodule_path"
+
+        # A previous interrupted checkout can leave this nested cache without a HEAD.
+        if [[ -f "$submodule_dir/.git" ]] &&
+           ! git -C "$submodule_dir" rev-parse --verify --quiet 'HEAD^{commit}' >/dev/null; then
+          pinned_revision=$(git -C "$submodule_parent" rev-parse --verify "HEAD:$submodule_path")
+          if ! git -C "$submodule_dir" cat-file -e "$pinned_revision^{commit}"; then
+            git -C "$submodule_dir" fetch --no-tags --depth=1 origin "$pinned_revision"
+          fi
+          git -C "$submodule_dir" checkout --force --detach "$pinned_revision"
+        fi
+
     - name: Checkout Code
       timeout-minutes: 5
       uses: actions/checkout@v4

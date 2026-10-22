@@ -887,13 +887,11 @@ class SpeculativePipelineTest : public ::testing::Test {
     std::vector<int32_t> slots;
     std::vector<int32_t> block_tables;
     std::vector<int32_t> selected;
-    std::vector<int32_t> sampled;
     tokens.reserve(batch_size * query);
     positions.reserve(batch_size * query);
     slots.reserve(batch_size * query);
     block_tables.reserve(batch_size * 2);
     selected.reserve(batch_size);
-    sampled.reserve(batch_size);
     LlmForwardInput value;
     auto& params = value.input_params;
     params.meta.batch_forward_type =
@@ -927,7 +925,6 @@ class SpeculativePipelineTest : public ::testing::Test {
         slots.push_back(first_page * 16 + token_position);
       }
       selected.push_back(static_cast<int32_t>((row + 1) * query - 1));
-      sampled.push_back(static_cast<int32_t>(row));
       if (!decode) {
         params.embedding.extra_token_ids.push_back(-1);
       }
@@ -939,7 +936,6 @@ class SpeculativePipelineTest : public ::testing::Test {
         torch::tensor(block_tables, torch::kInt32).view({batch_size, 2});
     value.sampling_params.selected_token_idxes =
         torch::tensor(selected, torch::kInt32);
-    value.sampling_params.sample_idxes = torch::tensor(sampled, torch::kInt32);
     value.sampling_params.sampling_mode = SamplingMode::GREEDY;
     return value;
   }

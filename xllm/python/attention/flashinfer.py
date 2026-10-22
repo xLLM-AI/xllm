@@ -69,6 +69,7 @@ class FlashInferBackend(AttentionBackend):
         device: torch.device,
         dtype: torch.dtype,
         kv_cache_storage_head_dim: int = 0,
+        use_tensor_core_decode: bool | None = None,
     ) -> None:
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
@@ -80,7 +81,13 @@ class FlashInferBackend(AttentionBackend):
         self.scale = scale
         self.sliding_window = sliding_window
         self.dtype = dtype
-        self._decode_use_tensor_cores = _should_use_tensor_core_decode(dtype, num_heads, num_kv_heads)
+        if use_tensor_core_decode and dtype not in (torch.float16, torch.bfloat16):
+            raise ValueError("tensor-core decode requires float16 or bfloat16")
+        self._decode_use_tensor_cores = (
+            _should_use_tensor_core_decode(dtype, num_heads, num_kv_heads)
+            if use_tensor_core_decode is None
+            else use_tensor_core_decode
+        )
 
         self._decode_workspace = torch.empty(_WORKSPACE_SIZE, dtype=torch.uint8, device=device)
         self._decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
