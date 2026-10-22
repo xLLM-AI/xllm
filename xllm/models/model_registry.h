@@ -298,6 +298,14 @@ ModelContext create_model_context(const ResolvedModelDescriptor& descriptor,
                                   const QuantArgs& quant_args,
                                   const torch::TensorOptions& tensor_options);
 
+DiTModelContext create_dit_model_context(
+    const ResolvedModelDescriptor& descriptor,
+    const ParallelArgs& parallel_args,
+    std::unordered_map<std::string, ModelArgs> model_args,
+    std::unordered_map<std::string, QuantArgs> quant_args,
+    const torch::TensorOptions& tensor_options,
+    const DiTCacheConfig& dit_config);
+
 std::unique_ptr<CausalLM> create_llm_model(const ModelContext& context);
 
 std::unique_ptr<RecModel> create_rec_model(const ModelContext& context);

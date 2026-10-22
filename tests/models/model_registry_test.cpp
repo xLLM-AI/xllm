@@ -724,7 +724,70 @@ TEST(ModelRegistryTest, CreatesModelFromContextRegistration) {
   create_llm_model(context);
   EXPECT_EQ(factory_calls, 1);
 }
+
+TEST(ModelRegistryTest, CreatesDiTPipelineContextFromRegisteredContract) {
+  const std::string name = "context_registered_dit_pipeline_test";
+  static int32_t factory_calls = 0;
+  factory_calls = 0;
+  ModelRegistry::register_dit_model_factory(
+      name, [](const DiTModelContext& /*context*/) {
+        ++factory_calls;
+        return std::unique_ptr<DiTModel>();
+      });
+  ResolvedModelDescriptor descriptor;
+  ASSERT_TRUE(
+      ModelRegistry::get_registered_model_descriptor(name, &descriptor));
+
+  ModelArgs component_args{};
+  component_args.in_channels() = 16;
+  const DiTModelContext context = create_dit_model_context(
+      descriptor,
+      ParallelArgs(/*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr),
+      {{"transformer", component_args}},
+      {{"transformer", QuantArgs()}},
+      torch::TensorOptions().device(torch::kCPU),
+      DiTCacheConfig());
+
+  EXPECT_EQ(context.get_model_family(), ModelFamily::DIT);
+  EXPECT_EQ(context.get_registration_name(), name);
+  EXPECT_EQ(context.model_type(), name);
+  EXPECT_EQ(
+      context.get_dit_model_args("transformer").transformer().in_channels(),
+      16);
+  create_dit_model(context);
+  EXPECT_EQ(factory_calls, 1);
+
+  // Legacy direct contexts may retain a checkpoint alias while selecting the
+  // execution registration independently.
+  const DiTModelContext alias_context(context.get_parallel_args(),
+                                      {},
+                                      {},
+                                      context.get_tensor_options(),
+                                      DiTCacheConfig(),
+                                      "checkpoint_pipeline_alias",
+                                      name);
+  create_dit_model(alias_context);
+  EXPECT_EQ(factory_calls, 2);
+}
 #endif
+
+TEST(ModelRegistryDeathTest, RejectsNonDiTPipelineContextContract) {
+  const std::string name = "context_non_dit_pipeline_test";
+  ModelRegistry::register_model_backend(name, "llm");
+  ResolvedModelDescriptor descriptor;
+  ASSERT_TRUE(
+      ModelRegistry::get_registered_model_descriptor(name, &descriptor));
+
+  EXPECT_DEATH(
+      create_dit_model_context(
+          descriptor,
+          ParallelArgs(/*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr),
+          {},
+          {},
+          torch::TensorOptions().device(torch::kCPU),
+          DiTCacheConfig()),
+      "does not support DiT pipelines");
+}
 
 TEST(ModelRegistryDeathTest, RejectsMissingNativeContextContract) {
   const std::string name = "context_missing_native_contract_test";

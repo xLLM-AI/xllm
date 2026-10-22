@@ -38,7 +38,8 @@ class DiTModelContext {
                   std::unordered_map<std::string, QuantArgs> quant_args,
                   const torch::TensorOptions& tensor_options,
                   const DiTCacheConfig& dit_config,
-                  const std::string& model_type);
+                  std::string model_type,
+                  std::string registration_name = "");
 
   const ModelArgs& get_model_args(const std::string& component) const;
 
@@ -67,6 +68,10 @@ class DiTModelContext {
 
   const std::string& model_type() const { return model_type_; }
 
+  const std::string& get_registration_name() const {
+    return registration_name_;
+  }
+
   const DiTCacheConfig& get_dit_config() const { return dit_config_; }
 
 #if defined(USE_NPU)
@@ -80,6 +85,7 @@ class DiTModelContext {
   torch::TensorOptions tensor_options_;
   DiTCacheConfig dit_config_;
   std::string model_type_;
+  std::string registration_name_;
 
 #if defined(USE_NPU)
   // used for npu atb

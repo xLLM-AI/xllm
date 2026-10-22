@@ -109,26 +109,23 @@ bool DiTWorkerImpl::init_model(const std::string& model_weights_path,
   // set same random seed for all worker
   device_.set_seed(random_seed);
 
-  auto loader = std::make_unique<DiTModelLoader>(model_weights_path);
+  auto loader = DiTModelLoader::create(model_weights_path, options_.model_id());
   dtype_ = util::parse_dtype(loader->get_torch_dtype(), device_);
 
   auto tensor_options = torch::dtype(dtype_).device(device_);
   DiTCacheConfig cache_config = parse_dit_cache_from_flags();
 
-  auto model_type = loader->get_model_type();
-
-  if (!ModelRegistry::has_dit_model_factory(model_type)) {
-    LOG(WARNING) << "could not find model_type: " << model_type
-                 << ", using model_id: " << options_.model_id() << " instead.";
-    model_type = options_.model_id();
-  }
-
-  dit_context_ = DiTModelContext(parallel_args_,
-                                 loader->get_model_args(),
-                                 loader->get_quant_args(),
-                                 tensor_options,
-                                 cache_config,
-                                 model_type);
+  ResolvedModelDescriptor descriptor;
+  std::string error_message;
+  CHECK(ModelRegistry::get_registered_model_descriptor(
+      loader->get_registration_name(), &descriptor, &error_message))
+      << error_message;
+  dit_context_ = create_dit_model_context(descriptor,
+                                          parallel_args_,
+                                          loader->get_model_args(),
+                                          loader->get_quant_args(),
+                                          tensor_options,
+                                          cache_config);
 
   dit_model_ = create_dit_model(dit_context_);
   CHECK(dit_model_ != nullptr) << "Failed to create model.";

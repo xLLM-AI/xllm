@@ -31,6 +31,17 @@ cc_test(
 
 cc_test(
   NAME
+    dit_model_loader_test
+  SRCS
+    dit_model_loader_test.cpp
+  DEPS
+    :model_loader
+    :xllm_server
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     causal_lm_test
   SRCS
     causal_lm_test.cpp

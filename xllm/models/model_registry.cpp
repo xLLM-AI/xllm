@@ -988,6 +988,28 @@ ModelContext create_model_context(const ResolvedModelDescriptor& descriptor,
   return context;
 }
 
+DiTModelContext create_dit_model_context(
+    const ResolvedModelDescriptor& descriptor,
+    const ParallelArgs& parallel_args,
+    std::unordered_map<std::string, ModelArgs> model_args,
+    std::unordered_map<std::string, QuantArgs> quant_args,
+    const torch::TensorOptions& tensor_options,
+    const DiTCacheConfig& dit_config) {
+  CHECK(!descriptor.registration_name.empty())
+      << "DiT context requires a resolved registration";
+  CHECK(descriptor.family == ModelFamily::DIT &&
+        descriptor.meta.dit_model_factory)
+      << "Model registration " << descriptor.registration_name
+      << " does not support DiT pipelines";
+  return DiTModelContext(parallel_args,
+                         std::move(model_args),
+                         std::move(quant_args),
+                         tensor_options,
+                         dit_config,
+                         descriptor.registration_name,
+                         descriptor.registration_name);
+}
+
 std::unique_ptr<MultimodalProcessorBase> create_multimodal_processor(
     const ModelArgs& model_args,
     std::shared_ptr<Tokenizer> tokenizer,
@@ -1149,8 +1171,10 @@ std::unique_ptr<CausalVLM> create_vlm_model(const ModelContext& context) {
 }
 
 std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context) {
-  // get the factory function for the model type from model registry
-  auto factory = ModelRegistry::get_dit_model_factory(context.model_type());
+  const std::string& registration_name = context.get_registration_name().empty()
+                                             ? context.model_type()
+                                             : context.get_registration_name();
+  auto factory = ModelRegistry::get_dit_model_factory(registration_name);
   if (factory) {
     return factory(context);
   }

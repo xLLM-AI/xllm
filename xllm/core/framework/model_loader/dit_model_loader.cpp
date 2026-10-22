@@ -527,6 +527,30 @@ bool DiTFolderLoader::load_quant_args(const std::string& model_weights_path) {
   return true;
 }
 
+std::unique_ptr<DiTModelLoader> DiTModelLoader::create(
+    const std::string& model_root_path,
+    const std::string& fallback_model_type) {
+  auto loader = std::make_unique<DiTModelLoader>(model_root_path);
+  std::string registration_name = loader->get_model_type();
+  if (!ModelRegistry::has_dit_model_factory(registration_name)) {
+    LOG(WARNING) << "could not find model_type: " << registration_name
+                 << ", using model_id: " << fallback_model_type << " instead.";
+    registration_name = fallback_model_type;
+  }
+
+  ResolvedModelDescriptor descriptor;
+  std::string error_message;
+  CHECK(ModelRegistry::get_registered_model_descriptor(
+      registration_name, &descriptor, &error_message))
+      << error_message;
+  CHECK(descriptor.family == ModelFamily::DIT &&
+        descriptor.meta.dit_model_factory)
+      << "Model registration " << registration_name
+      << " does not support DiT pipelines";
+  loader->registration_name_ = descriptor.registration_name;
+  return loader;
+}
+
 DiTModelLoader::DiTModelLoader(const std::string& model_root_path)
     : model_root_path_(model_root_path) {
   if (!std::filesystem::exists(model_root_path_)) {
