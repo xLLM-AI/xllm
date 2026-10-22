@@ -3547,8 +3547,16 @@ bool token_input_to_packed_proto(
   }
   const auto& sampling = input.sampling_params;
   const int64_t num_seqs = sampling.num_sample_seqs();
-  if (num_seqs > std::numeric_limits<int32_t>::max()) {
-    LOG(ERROR) << "Packed sample count exceeds int32 bounds";
+  if ((sampling.selected_token_idxes.defined() &&
+       sampling.selected_token_idxes.dim() != 1) ||
+      num_seqs > std::numeric_limits<int32_t>::max()) {
+    LOG(ERROR) << "Packed selected token indices must be a bounded vector";
+    return false;
+  }
+  if (sampling.do_sample.defined() &&
+      (sampling.do_sample.dim() != 1 ||
+       sampling.do_sample.numel() != num_seqs)) {
+    LOG(ERROR) << "Packed sampling mask must have one entry per sequence";
     return false;
   }
   const int32_t sample_count = static_cast<int32_t>(num_seqs);
