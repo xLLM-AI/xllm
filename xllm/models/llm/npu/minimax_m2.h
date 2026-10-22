@@ -27,6 +27,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/config/scheduler_config.h"
+#include "core/framework/model/model_args_view.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/model_context/model_context.h"
@@ -196,15 +197,16 @@ class MiniMaxM2ModelImpl : public torch::nn::Module {
  public:
   explicit MiniMaxM2ModelImpl(const ModelContext& context) {
     const auto& options = context.get_tensor_options();
-    const auto& model_args = context.get_model_args();
+    const LlmModelArgsView model_args = context.get_llm_model_args();
+    const TransformerModelArgsView transformer_args = model_args.transformer();
     const auto& parallel_args = context.get_parallel_args();
 
     enable_mla_ = model_args.enable_mla();
 
     embed_tokens_ =
         register_module("embed_tokens",
-                        layer::WordEmbedding(model_args.vocab_size(),
-                                             model_args.hidden_size(),
+                        layer::WordEmbedding(transformer_args.vocab_size(),
+                                             transformer_args.hidden_size(),
                                              parallel_args,
                                              options));
     norm_ = register_module("norm", layer::RMSNorm(context));
@@ -215,8 +217,8 @@ class MiniMaxM2ModelImpl : public torch::nn::Module {
     attn_mask_ = layer::AttentionMask(
         options.device(), options.dtype().toScalarType(), mask_value);
 
-    layers_.reserve(model_args.n_layers());
-    for (int32_t i = 0; i < model_args.n_layers(); ++i) {
+    layers_.reserve(transformer_args.n_layers());
+    for (int32_t i = 0; i < transformer_args.n_layers(); ++i) {
       layers_.push_back(register_module(std::to_string(i),
                                         MiniMaxM2MoeDecoderLayer(context, i)));
     }

@@ -25,6 +25,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/model/generic_rec.h"
+#include "core/framework/model/model_args_view.h"
 #include "models/model_registry.h"
 #include "models/rec/rec_model_base.h"
 
@@ -33,7 +34,9 @@ namespace xllm {
 class OneRecModelImpl : public torch::nn::Module {
  public:
   explicit OneRecModelImpl(const ModelContext& context) {
-    hidden_size_ = context.get_model_args().hidden_size();
+    const TransformerModelArgsView model_args =
+        context.get_rec_model_args().transformer();
+    hidden_size_ = model_args.hidden_size();
     options_ = context.get_tensor_options();
     shared_ = register_module("shared", layer::WordEmbedding(context));
   }

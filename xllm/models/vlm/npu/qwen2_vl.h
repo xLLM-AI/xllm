@@ -22,6 +22,7 @@ limitations under the License.
 #include <unordered_map>
 
 #include "core/common/global_flags.h"
+#include "core/framework/model/model_args_view.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/kv_cache/storage/kv_cache.h"
@@ -75,7 +76,8 @@ TORCH_MODULE(Qwen2_VisionBlock);
 class Qwen2_VisionPatchEmbedImpl : public torch::nn::Module {
  public:
   Qwen2_VisionPatchEmbedImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const VlmVisionModelArgsView model_args =
+        context.get_vlm_model_args().vision();
     auto options = context.get_tensor_options();
 
     auto in_features = model_args.mm_num_channels() *
@@ -119,7 +121,8 @@ TORCH_MODULE(Qwen2_VisionPatchEmbed);
 class Qwen2_VisionRotaryEmbeddingImpl : public torch::nn::Module {
  public:
   Qwen2_VisionRotaryEmbeddingImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const VlmVisionModelArgsView model_args =
+        context.get_vlm_model_args().vision();
     auto options = context.get_tensor_options();
 
     dim_ = model_args.mm_head_dim() / 2;
@@ -164,7 +167,8 @@ TORCH_MODULE(Qwen2_VisionRotaryEmbedding);
 class Qwen2_VisionPatchMergerImpl : public torch::nn::Module {
  public:
   Qwen2_VisionPatchMergerImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const VlmVisionModelArgsView model_args =
+        context.get_vlm_model_args().vision();
     auto options = context.get_tensor_options();
     auto quant_args = context.get_quant_args();
     auto parallel_args = context.get_parallel_args();
@@ -284,7 +288,8 @@ TORCH_MODULE(Qwen2_VisionPatchMerger);
 class Qwen2_VisionTransformerImpl : public torch::nn::Module {
  public:
   Qwen2_VisionTransformerImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const VlmVisionModelArgsView model_args =
+        context.get_vlm_model_args().vision();
     auto options = context.get_tensor_options();
 
     hidden_size_ = model_args.mm_hidden_size();

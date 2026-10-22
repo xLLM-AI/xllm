@@ -17,6 +17,7 @@ limitations under the License.
 #include "core/framework/dit_cache/dit_cache.h"
 #include "core/framework/model/dit_model_output.h"
 #include "core/framework/model/dit_model_params.h"
+#include "core/framework/model/model_args_view.h"
 #include "models/dit/pipelines/pipeline_flux_base.h"
 #include "models/dit/transformers/transformer_flux.h"
 // pipeline_flux compatible with huggingface weights
@@ -28,14 +29,16 @@ namespace xllm {
 class FluxPipelineImpl : public FluxPipelineBaseImpl {
  public:
   FluxPipelineImpl(const DiTModelContext& context) {
-    const auto& model_args = context.get_model_args("vae");
+    const DiTVaeModelArgsView model_args =
+        context.get_dit_model_args("vae").vae();
     options_ = context.get_tensor_options();
     vae_scale_factor_ = 1 << (model_args.block_out_channels().size() - 1);
 
     vae_shift_factor_ = model_args.shift_factor();
     vae_scaling_factor_ = model_args.scale_factor();
-    tokenizer_max_length_ =
-        context.get_model_args("text_encoder").max_position_embeddings();
+    const DiTTextEncoderModelArgsView text_encoder_args =
+        context.get_dit_model_args("text_encoder").text_encoder();
+    tokenizer_max_length_ = text_encoder_args.max_position_embeddings();
     LOG(INFO) << "Initializing Flux pipeline...";
     vae_image_processor_ = VAEImageProcessor(context.get_model_context("vae"),
                                              true,
@@ -45,14 +48,14 @@ class FluxPipelineImpl : public FluxPipelineBaseImpl {
                                              false,
                                              model_args.latent_channels());
     vae_ = VAE(context.get_model_context("vae"));
+    const DiTTransformerModelArgsView transformer_args =
+        context.get_dit_model_args("transformer").transformer();
     pos_embed_ = register_module(
         "pos_embed",
-        FluxPosEmbed(ROPE_SCALE_BASE,
-                     context.get_model_args("transformer").axes_dims_rope()));
+        FluxPosEmbed(ROPE_SCALE_BASE, transformer_args.axes_dims_rope()));
     transformer_ = FluxDiTModel(context.get_model_context("transformer"));
-    num_layers_ = context.get_model_args("transformer").num_layers();
-    num_single_layers_ =
-        context.get_model_args("transformer").num_single_layers();
+    num_layers_ = transformer_args.num_layers();
+    num_single_layers_ = transformer_args.num_single_layers();
     t5_ = T5EncoderModel(context.get_model_context("text_encoder_2"));
     clip_text_model_ = CLIPTextModel(context.get_model_context("text_encoder"));
     scheduler_ =
