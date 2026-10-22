@@ -17,13 +17,19 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <type_traits>
+#include <vector>
 
+#include "core/framework/config/kernel_config.h"
+#include "core/framework/config/model_config.h"
 #include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model/causal_lm.h"
 #include "core/framework/model/causal_rec.h"
@@ -38,6 +44,7 @@ limitations under the License.
 #include "core/platform/platform.h"
 #include "core/runtime/options.h"
 #include "core/util/json_reader.h"
+#include "core/util/scope_guard.h"
 #include "core/util/utils.h"
 #include "models/model_registry.h"
 
@@ -148,6 +155,124 @@ nlohmann::json speculators_eagle3_config() {
 }
 
 }  // namespace
+
+TEST(HFModelLoaderTest, ReusesRegisteredTokenizerLoaderAfterModelTypeChanges) {
+  auto& model_config = ModelConfig::get_instance();
+  const std::string saved_backend = model_config.backend();
+  const std::string saved_model_impl = model_config.model_impl();
+  ScopeGuard restore_model_config([&]() {
+    model_config.backend() = saved_backend;
+    model_config.model_impl() = saved_model_impl;
+  });
+  model_config.backend() = "llm";
+  model_config.model_impl() = "native";
+
+#if defined(USE_NPU)
+  auto& kernel_config = KernelConfig::get_instance();
+  const std::string saved_npu_backend = kernel_config.npu_kernel_backend();
+  ScopeGuard restore_kernel_config(
+      [&]() { kernel_config.npu_kernel_backend() = saved_npu_backend; });
+  kernel_config.npu_kernel_backend() = "AUTO";
+#endif
+
+  const std::string registration_name = "hf_loader_descriptor_test";
+  ModelRegistry::register_model_backend(registration_name, "llm");
+  ModelRegistry::register_model_args_loader(
+      registration_name, [](const JsonReader& /*reader*/, ModelArgs* args) {
+        args->model_type() = "hf_loader_descriptor_changed_type";
+        args->hidden_size() = 17;
+        args->mm_image_min_pixels() = 7;
+        return true;
+      });
+  ModelRegistry::register_tokenizer_args_loader(
+      registration_name, [](const JsonReader& /*reader*/, TokenizerArgs* args) {
+        args->tokenizer_class() = "DescriptorTokenizer";
+        return true;
+      });
+
+  std::string directory_template =
+      (std::filesystem::temp_directory_path() / "hf_model_loader_test-XXXXXX")
+          .string();
+  const char* directory = mkdtemp(directory_template.data());
+  ASSERT_NE(directory, nullptr);
+  const std::filesystem::path model_path(directory);
+  ScopeGuard remove_model_directory([&]() {
+    std::error_code error;
+    std::filesystem::remove_all(model_path, error);
+    EXPECT_FALSE(error) << model_path << ": " << error.message();
+  });
+  {
+    std::ofstream config_file(model_path / "config.json");
+    config_file << nlohmann::json{{"model_type", registration_name}};
+    ASSERT_TRUE(config_file.good());
+  }
+  {
+    std::ofstream tokenizer_config_file(model_path / "tokenizer_config.json");
+    tokenizer_config_file << "{}";
+    ASSERT_TRUE(tokenizer_config_file.good());
+  }
+  {
+    std::ofstream preprocessor_file(model_path / "preprocessor_config.json");
+    preprocessor_file << nlohmann::json{{"min_pixels", 97}};
+    ASSERT_TRUE(preprocessor_file.good());
+  }
+  {
+    // Weight contents are read only when state dicts are requested.
+    std::ofstream weights_file(model_path / "model.safetensors");
+    ASSERT_TRUE(weights_file.good());
+  }
+
+  HFModelLoader loader(model_path.string());
+  EXPECT_EQ(loader.model_args().hidden_size(), 17);
+  EXPECT_EQ(loader.model_args().model_type(),
+            "hf_loader_descriptor_changed_type");
+  EXPECT_EQ(loader.tokenizer_args().tokenizer_class(), "DescriptorTokenizer");
+  EXPECT_EQ(loader.profile().family, ModelFamily::LLM);
+  EXPECT_EQ(loader.model_args().mm_image_min_pixels(), 7);
+
+  // A Python VLM may reuse a text registration without a native VLM factory.
+  // The explicit execution contract selects media loading independently of the
+  // parser's visible model_type or the process-wide backend.
+  HFModelLoader vlm_loader(model_path.string(), "vlm");
+  EXPECT_EQ(vlm_loader.profile().family, ModelFamily::VLM);
+  EXPECT_EQ(vlm_loader.model_args().mm_image_min_pixels(), 97);
+  EXPECT_EQ(vlm_loader.tokenizer_args().tokenizer_class(),
+            "DescriptorTokenizer");
+}
+
+#if defined(USE_NPU) && defined(USE_XLITE)
+TEST(HFModelLoaderTest, Glm5XliteDescriptorPreservesVisibleParserTokens) {
+  ResolvedModelDescriptor xlite_descriptor;
+  std::string error_message;
+  ASSERT_TRUE(ModelRegistry::resolve_model_descriptor(
+      "glm_moe_dsa", "XLITE", &xlite_descriptor, &error_message))
+      << error_message;
+  EXPECT_EQ(xlite_descriptor.registration_name, "glm_moe_dsa_xlite");
+  ASSERT_NE(xlite_descriptor.meta.tokenizer_args_loader, nullptr);
+
+  TokenizerArgsLoader canonical_loader =
+      ModelRegistry::get_tokenizer_args_loader("glm_moe_dsa");
+  ASSERT_NE(canonical_loader, nullptr);
+  JsonReader reader;
+  ASSERT_TRUE(reader.parse_text("{}"));
+  TokenizerArgs canonical_args;
+  ASSERT_TRUE(canonical_loader(reader, &canonical_args));
+  TokenizerArgs xlite_args;
+  ASSERT_TRUE(xlite_descriptor.meta.tokenizer_args_loader(reader, &xlite_args));
+
+  const std::vector<std::string> expected_tokens = {"<tool_call>",
+                                                    "</tool_call>",
+                                                    "<arg_key>",
+                                                    "</arg_key>",
+                                                    "<arg_value>",
+                                                    "</arg_value>",
+                                                    "<think>",
+                                                    "</think>"};
+  EXPECT_EQ(xlite_args.visible_special_tokens(), expected_tokens);
+  EXPECT_EQ(xlite_args.visible_special_tokens(),
+            canonical_args.visible_special_tokens());
+}
+#endif
 
 TEST(HFModelLoaderTest, Qwen35DenseBackendAwareModelTypeSelection) {
   JsonReader reader;

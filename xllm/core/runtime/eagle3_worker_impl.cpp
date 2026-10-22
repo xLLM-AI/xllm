@@ -93,7 +93,8 @@ bool Eagle3WorkerImpl<TargetInput>::init_model(
 
     // d2t stores diffs between draft id and target id
     // hot_token_id = d2t + arange(d2t.size(0))
-    auto model_loader = ModelLoader::create(model_weights_path);
+    auto model_loader =
+        ModelLoader::create(model_weights_path, /*requested_family=*/"llm");
     auto& state_dicts = model_loader->get_state_dicts();
     for (const auto& state_dict : state_dicts) {
       torch::Tensor d2t_tensor = state_dict->get_tensor("d2t");

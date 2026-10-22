@@ -2938,7 +2938,8 @@ void RecWorkerImpl::load_model(std::unique_ptr<ModelLoader> loader) {
 
   // Create new loaders and load weights for other model instances
   for (size_t i = 1; i < work_pipelines_.size(); ++i) {
-    auto model_loader = ModelLoader::create(model_weights_path);
+    auto model_loader = ModelLoader::create(model_weights_path,
+                                            /*requested_family=*/"rec");
     CHECK(model_loader != nullptr)
         << "Failed to create ModelLoader for model instance " << i;
     work_pipelines_[i]->runtime().model->load_model(std::move(model_loader));

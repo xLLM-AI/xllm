@@ -185,7 +185,8 @@ bool VLMEngine::init(MasterStatus master_status) {
 
 bool VLMEngine::init_model(MasterStatus master_status) {
   const std::string& model_path = options_.model_path();
-  auto model_loader = ModelLoader::create(model_path);
+  auto model_loader =
+      ModelLoader::create(model_path, /*requested_family=*/"vlm");
   LOG(INFO) << "Initializing model from: " << model_path;
 
   tokenizer_ = model_loader->tokenizer();

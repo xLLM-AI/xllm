@@ -24,6 +24,7 @@ namespace xllm {
 class ModelArgs;
 class QuantArgs;
 class JsonReader;
+struct ResolvedModelDescriptor;
 
 // Normalize speculators-format Eagle3 draft configs for the qwen3_eagle3
 // loader.
@@ -35,7 +36,8 @@ bool load_quant_cfg(const JsonReader& reader, QuantArgs& quant_args);
 
 bool load_hf_model_args(const std::filesystem::path& model_weights_path,
                         const std::string& backend,
-                        ModelArgs* args);
+                        ModelArgs* args,
+                        ResolvedModelDescriptor* descriptor = nullptr);
 
 bool load_hf_audio_preprocessor_args(
     const std::filesystem::path& model_weights_path,

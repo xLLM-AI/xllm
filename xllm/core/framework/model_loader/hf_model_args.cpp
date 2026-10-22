@@ -21,8 +21,10 @@ limitations under the License.
 #include <cmath>
 #include <optional>
 #include <regex>
+#include <utility>
 #include <vector>
 
+#include "core/framework/config/kernel_config.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model_loader/hf_model_config.h"
 #include "core/framework/quantization/quant_args.h"
@@ -416,7 +418,8 @@ bool load_quant_cfg(const JsonReader& reader, QuantArgs& quant_args) {
 
 bool load_hf_model_args(const std::filesystem::path& model_weights_path,
                         const std::string& backend,
-                        ModelArgs* args) {
+                        ModelArgs* args,
+                        ResolvedModelDescriptor* descriptor) {
   JsonReader reader;
   const std::filesystem::path args_file_path =
       model_weights_path / "config.json";
@@ -430,28 +433,33 @@ bool load_hf_model_args(const std::filesystem::path& model_weights_path,
   const std::string model_type =
       get_model_type(reader, model_weights_path, backend);
 
-  std::string resolved_model_type;
+  std::string npu_kernel_backend;
+#if defined(USE_NPU)
+  npu_kernel_backend = KernelConfig::get_instance().npu_kernel_backend();
+#endif
+  ResolvedModelDescriptor resolved;
   std::string error_message;
-  if (!resolve_model_registration_name(
-          model_type, &resolved_model_type, &error_message)) {
+  if (!ModelRegistry::resolve_model_descriptor(
+          model_type, npu_kernel_backend, &resolved, &error_message)) {
     LOG(ERROR) << error_message;
     return false;
   }
 
-  const auto model_args_loader =
-      ModelRegistry::get_model_args_loader(resolved_model_type);
-  if (model_args_loader == nullptr) {
+  if (resolved.meta.model_args_loader == nullptr) {
     LOG(ERROR) << "Failed to find model args loader for model type "
-               << resolved_model_type;
+               << resolved.registration_name;
     return false;
   }
   normalize_config_torch_dtype(reader);
-  if (!model_args_loader(reader, args)) {
+  if (!resolved.meta.model_args_loader(reader, args)) {
     LOG(ERROR) << "Failed to load model args for model type "
-               << resolved_model_type;
+               << resolved.registration_name;
     return false;
   }
   args->enable_mla(should_enable_mla(model_weights_path, backend));
+  if (descriptor != nullptr) {
+    *descriptor = std::move(resolved);
+  }
 
   return true;
 }

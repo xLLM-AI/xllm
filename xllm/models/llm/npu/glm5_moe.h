@@ -21,6 +21,7 @@ limitations under the License.
 
 #include "core/layers/npu/npu_deepseek_v32_decoder_layer_impl.h"
 #include "deepseek_v32.h"
+#include "models/llm/glm_moe_dsa_tokenizer_args.h"
 #include "models/llm/npu/glm_shared_expert_stream.h"
 
 namespace xllm::npu::model {
@@ -409,15 +410,5 @@ REGISTER_MODEL_ARGS(
                                           args->eos_token_id_vec().end()));
     }));
 
-REGISTER_TOKENIZER_ARGS(glm_moe_dsa, [&] {
-  const std::vector<std::string> parser_visible_special_tokens({"<tool_call>",
-                                                                "</tool_call>",
-                                                                "<arg_key>",
-                                                                "</arg_key>",
-                                                                "<arg_value>",
-                                                                "</arg_value>",
-                                                                "<think>",
-                                                                "</think>"});
-  SET_ARG(visible_special_tokens, parser_visible_special_tokens);
-});
+REGISTER_TOKENIZER_ARGS_LOADER(glm_moe_dsa, load_glm_moe_dsa_tokenizer_args);
 }  // namespace xllm::npu::model

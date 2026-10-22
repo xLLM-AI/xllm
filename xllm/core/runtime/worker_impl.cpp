@@ -2053,7 +2053,8 @@ bool WorkerImpl::virtual_memory_sleep(MasterStatus master_status) {
   // virtual memory manager;
   if (master_status == MasterStatus::LIGHT_SLEEP) {
     // only load model weights to host memory.
-    auto model_loader = ModelLoader::create(model_weights_path_);
+    auto model_loader =
+        ModelLoader::create(model_weights_path_, options_.backend());
     model()->lazy_load_model(std::move(model_loader));
   } else if (master_status == MasterStatus::DEEP_SLEEP) {
     // only release model weights from host memory.
@@ -2202,7 +2203,8 @@ bool WorkerImpl::wakeup_local(const WakeupOptions& options) {
     model()->reload_model_weights();
 #endif
   } else if (options.master_status == MasterStatus::DEEP_SLEEP) {
-    auto model_loader = ModelLoader::create(model_weights_path_);
+    auto model_loader =
+        ModelLoader::create(model_weights_path_, options_.backend());
     this->load_model(std::move(model_loader));
   }
   return true;
@@ -2474,7 +2476,8 @@ bool WorkerImpl::init_model_impl(const std::string& model_weights_path,
   ::xllm::ExecutionConfig::get_instance().random_seed(random_seed);
   device_.set_seed(random_seed);
 
-  auto model_loader = ModelLoader::create(model_weights_path);
+  auto model_loader =
+      ModelLoader::create(model_weights_path, options_.backend());
   if (options_.is_draft_engine() && !options_.model_path().empty() &&
       options_.model_path() != model_weights_path) {
     model_loader->set_reference_model_weights_path(options_.model_path());

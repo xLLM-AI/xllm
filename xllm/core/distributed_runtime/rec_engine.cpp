@@ -125,7 +125,8 @@ bool RecEngine::init() {
 
 bool RecEngine::init_model() {
   const std::string& model_path = options_.model_path();
-  auto model_loader = ModelLoader::create(model_path);
+  auto model_loader =
+      ModelLoader::create(model_path, /*requested_family=*/"rec");
 
   tokenizer_ = model_loader->tokenizer();
   CHECK(tokenizer_ != nullptr);

@@ -21,6 +21,7 @@ limitations under the License.
 #include <unordered_set>
 
 #include "core/layers/xlite/xlite_register_macros.h"
+#include "models/llm/glm_moe_dsa_tokenizer_args.h"
 #include "models/llm/xlite/adapters/deepseek_v3_adapter.h"
 #include "models/llm/xlite/adapters/glm4_moe_adapter.h"
 #include "models/llm/xlite/adapters/glm5_moe_adapter.h"
@@ -212,6 +213,9 @@ XLITE_REGISTER_MODEL(glm_moe_dsa, Glm5MoeAdapter, [&] {
           std::unordered_set<int32_t>(args->eos_token_id_vec().begin(),
                                       args->eos_token_id_vec().end()));
 });
+
+REGISTER_TOKENIZER_ARGS_LOADER(glm_moe_dsa_xlite,
+                               load_glm_moe_dsa_tokenizer_args);
 
 // Qwen3-MoE. xlite-specific fields appended for
 // XliteConfigBuilder::FromQwen3Moe.

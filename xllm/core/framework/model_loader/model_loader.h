@@ -73,6 +73,9 @@ class ModelLoader {
   // create a model loader from the given path
   static std::unique_ptr<ModelLoader> create(
       const std::string& model_weights_path);
+  static std::unique_ptr<ModelLoader> create(
+      const std::string& model_weights_path,
+      const std::string& requested_family);
 };
 
 }  // namespace xllm

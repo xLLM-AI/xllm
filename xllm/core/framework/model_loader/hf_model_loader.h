@@ -18,9 +18,11 @@ limitations under the License.
 
 #include <torch/types.h>
 
+#include <string>
 #include <vector>
 
 #include "core/framework/model_loader/hf_model_args.h"
+#include "core/framework/model_loader/hf_model_loader_profile.h"
 #include "core/framework/model_loader/model_loader.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/util/json_reader.h"
@@ -28,9 +30,13 @@ limitations under the License.
 
 namespace xllm {
 
-class HFModelLoader : public ModelLoader {
+class HFModelLoader final : public ModelLoader {
  public:
-  HFModelLoader(const std::string& model_weights_path);
+  explicit HFModelLoader(std::string model_weights_path);
+  HFModelLoader(std::string model_weights_path,
+                const std::string& requested_family);
+
+  const HFModelLoaderProfile& profile() const { return profile_; }
 
   std::unique_ptr<Tokenizer> tokenizer() const override;
 
@@ -43,14 +49,17 @@ class HFModelLoader : public ModelLoader {
   int64_t get_max_decoder_layer_weight_size() const override;
 
  private:
-  bool load_args(const std::string& model_weights_path);
+  bool load_args(const std::string& model_weights_path,
+                 const std::string& requested_family);
   bool load_rec_vocab(const std::string& model_weights_path);
   bool load_quant_args(const std::string& model_weights_path);
-  bool load_tokenizer_args(const std::string& model_weights_path);
+  bool load_tokenizer_args(const std::string& model_weights_path,
+                           const ResolvedModelDescriptor& descriptor);
   std::string model_weights_path() const override {
     return model_weights_path_;
   }
   std::string model_weights_path_;
+  HFModelLoaderProfile profile_;
 
   // sorted model weights files
   std::vector<std::string> model_weights_files_;
