@@ -298,6 +298,15 @@ ModelContext create_model_context(const ResolvedModelDescriptor& descriptor,
                                   const QuantArgs& quant_args,
                                   const torch::TensorOptions& tensor_options);
 
+// Recreate a runtime context from an already typed source context. This keeps
+// the selected family arguments owned by the source context instead of
+// rebuilding a legacy ModelArgs DTO at runtime.
+ModelContext create_model_context(const ResolvedModelDescriptor& descriptor,
+                                  const std::string& execution_family,
+                                  const std::string& model_impl,
+                                  const ModelContext& source_context,
+                                  const ParallelArgs& parallel_args);
+
 DiTModelContext create_dit_model_context(
     const ResolvedModelDescriptor& descriptor,
     const ParallelArgs& parallel_args,

@@ -666,6 +666,28 @@ TEST(ModelRegistryTest, CreatesVlmContextFromRegisteredContract) {
   EXPECT_EQ(context.get_vlm_model_args().vision().mm_patch_size(), 14);
 }
 
+TEST(ModelRegistryTest, SelectsRegisteredFamilyWhenExecutionFamilyIsOmitted) {
+  const std::string name = "context_default_family_test";
+  ModelRegistry::register_causallm_factory(name,
+                                           [](const ModelContext& /*context*/) {
+                                             return std::unique_ptr<CausalLM>();
+                                           });
+  ResolvedModelDescriptor descriptor;
+  ASSERT_TRUE(
+      ModelRegistry::resolve_model_descriptor(name, "", &descriptor, nullptr));
+  ASSERT_EQ(descriptor.family, ModelFamily::LLM);
+
+  const ModelContext context = create_model_context(
+      descriptor,
+      /*execution_family=*/"",
+      /*model_impl=*/"native",
+      ParallelArgs(/*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr),
+      ModelArgs(),
+      QuantArgs(),
+      torch::TensorOptions().device(torch::kCPU));
+  EXPECT_EQ(context.get_model_family(), ModelFamily::LLM);
+}
+
 TEST(ModelRegistryTest, AllowsPythonContextWithoutNativeFactory) {
   const std::string name = "context_python_contract_test";
   ModelRegistry::register_model_backend(name, "llm");

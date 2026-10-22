@@ -1,0 +1,1429 @@
+/* Copyright 2026 The xLLM Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+#pragma once
+
+#include <glog/logging.h>
+
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+#include <unordered_set>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include "core/common/macros.h"
+#include "core/framework/model/model_args.h"
+#include "core/framework/model/model_family.h"
+
+namespace xllm {
+
+namespace model_family_args_detail {
+
+inline const ModelArgs& default_model_args() {
+  static const ModelArgs args{};
+  return args;
+}
+
+}  // namespace model_family_args_detail
+
+class TransformerModelArgs final {
+ public:
+  TransformerModelArgs()
+      : TransformerModelArgs(model_family_args_detail::default_model_args()) {}
+  explicit TransformerModelArgs(const ModelArgs& args)
+      : model_type_(args.model_type()),
+        dtype_(args.dtype()),
+        hidden_size_(args.hidden_size()),
+        hidden_act_(args.hidden_act()),
+        intermediate_size_(args.intermediate_size()),
+        n_layers_(args.n_layers()),
+        n_encoder_layers_(args.n_encoder_layers()),
+        head_dim_(args.head_dim()),
+        kv_cache_storage_head_dim_(args.kv_cache_storage_head_dim()),
+        decoder_head_dim_(args.decoder_head_dim()),
+        n_heads_(args.n_heads()),
+        decoder_n_heads_(args.decoder_n_heads()),
+        actual_n_heads_(args.actual_n_heads()),
+        n_kv_heads_(args.n_kv_heads()),
+        decoder_n_kv_heads_(args.decoder_n_kv_heads()),
+        vocab_size_(args.vocab_size()),
+        qk_nope_head_dim_(args.qk_nope_head_dim()),
+        qk_rope_head_dim_(args.qk_rope_head_dim()),
+        v_head_dim_(args.v_head_dim()),
+        q_lora_rank_(args.q_lora_rank()),
+        kv_lora_rank_(args.kv_lora_rank()),
+        num_nextn_predict_layers_(args.num_nextn_predict_layers()),
+        enable_mla_(args.enable_mla()),
+        num_experts_per_tok_(args.num_experts_per_tok()),
+        use_qk_norm_(args.use_qk_norm()),
+        rms_norm_eps_(args.rms_norm_eps()),
+        layer_norm_eps_(args.layer_norm_eps()),
+        rotary_dim_(args.rotary_dim()),
+        rope_theta_(args.rope_theta()),
+        rope_scaling_rope_type_(args.rope_scaling_rope_type()),
+        rope_scaling_factor_(args.rope_scaling_factor()),
+        rope_scaling_low_freq_factor_(args.rope_scaling_low_freq_factor()),
+        rope_scaling_high_freq_factor_(args.rope_scaling_high_freq_factor()),
+        rope_extrapolation_factor_(args.rope_extrapolation_factor()),
+        rope_scaling_original_max_position_embeddings_(
+            args.rope_scaling_original_max_position_embeddings()),
+        rope_scaling_beta_fast_(args.rope_scaling_beta_fast()),
+        rope_scaling_beta_slow_(args.rope_scaling_beta_slow()),
+        rope_scaling_attn_factor_(args.rope_scaling_attn_factor()),
+        rope_scaling_mscale_(args.rope_scaling_mscale()),
+        rope_scaling_mscale_all_dim_(args.rope_scaling_mscale_all_dim()),
+        rope_scaling_mrope_section_(args.rope_scaling_mrope_section()),
+        rope_scaling_mrope_interleaved_(args.rope_scaling_mrope_interleaved()),
+        max_position_embeddings_(args.max_position_embeddings()),
+        use_sliding_window_(args.use_sliding_window()),
+        sliding_window_(args.sliding_window()),
+        index_head_dim_(args.index_head_dim()),
+        index_n_heads_(args.index_n_heads()),
+        index_topk_(args.index_topk()),
+        index_kpool_(args.index_kpool()),
+        index_kpool_compress_(args.index_kpool_compress()),
+        index_kpool_always_select_tail_(args.index_kpool_always_select_tail()),
+        indexer_rope_interleave_(args.indexer_rope_interleave()),
+        index_topk_freq_(args.index_topk_freq()),
+        index_topk_pattern_(args.index_topk_pattern()),
+        index_skip_topk_offset_(args.index_skip_topk_offset()),
+        index_share_for_mtp_iteration_(args.index_share_for_mtp_iteration()),
+        indexer_types_(args.indexer_types()),
+        mlp_layer_types_(args.mlp_layer_types()),
+        rope_head_dim_(args.rope_head_dim()),
+        o_lora_rank_(args.o_lora_rank()),
+        o_groups_(args.o_groups()),
+        compress_ratios_(args.compress_ratios()),
+        compress_rope_theta_(args.compress_rope_theta()),
+        window_size_(args.window_size()),
+        n_activated_experts_(args.n_activated_experts()),
+        n_hash_layers_(args.n_hash_layers()),
+        factor_(args.factor()),
+        beta_fast_(args.beta_fast()),
+        beta_slow_(args.beta_slow()),
+        scale_fmt_(args.scale_fmt()),
+        hc_mult_(args.hc_mult()),
+        hc_sinkhorn_iters_(args.hc_sinkhorn_iters()),
+        hc_eps_(args.hc_eps()),
+        max_batch_size_(args.max_batch_size()),
+        max_seq_len_(args.max_seq_len()),
+        use_absolute_position_embedding_(
+            args.use_absolute_position_embedding()),
+        bos_token_id_(args.bos_token_id()),
+        eos_token_id_(args.eos_token_id()),
+        eos_token_id_vec_(args.eos_token_id_vec()),
+        pad_token_id_(args.pad_token_id()),
+        attn_scalar_(args.attn_scalar()),
+        no_bias_(args.no_bias()),
+        qkv_bias_(args.qkv_bias()),
+        stop_token_ids_(args.stop_token_ids()),
+        tie_word_embeddings_(args.tie_word_embeddings()),
+        attention_bias_(args.attention_bias()),
+        attention_dropout_(args.attention_dropout()),
+        decoder_sparse_step_(args.decoder_sparse_step()),
+        initializer_range_(args.initializer_range()),
+        mlp_only_layers_(args.mlp_only_layers()),
+        num_attention_heads_(args.num_attention_heads()),
+        num_experts_(args.num_experts()),
+        output_router_logits_(args.output_router_logits()),
+        rope_scaling_(args.rope_scaling()),
+        router_aux_loss_coef_(args.router_aux_loss_coef()),
+        attn_output_gate_(args.attn_output_gate()),
+        full_attention_interval_(args.full_attention_interval()),
+        full_attn_layers_(args.full_attn_layers()),
+        linear_conv_kernel_dim_(args.linear_conv_kernel_dim()),
+        linear_key_head_dim_(args.linear_key_head_dim()),
+        linear_value_head_dim_(args.linear_value_head_dim()),
+        linear_num_key_heads_(args.linear_num_key_heads()),
+        linear_num_value_heads_(args.linear_num_value_heads()),
+        linear_lower_bound_(args.linear_lower_bound()),
+        mamba_ssm_dtype_(args.mamba_ssm_dtype()),
+        shared_expert_intermediate_size_(
+            args.shared_expert_intermediate_size()),
+        partial_rotary_factor_(args.partial_rotary_factor()),
+        layer_types_(args.layer_types()) {}
+
+  explicit TransformerModelArgs(ModelArgs&&) = delete;
+  explicit TransformerModelArgs(const ModelArgs&&) = delete;
+
+  PROPERTY(std::string, model_type) = {};
+  PROPERTY(std::string, dtype) = {};
+  PROPERTY(int64_t, hidden_size) = 0;
+  PROPERTY(std::string, hidden_act) = {};
+  PROPERTY(int64_t, intermediate_size) = 0;
+  PROPERTY(int64_t, n_layers) = 0;
+  PROPERTY(int64_t, n_encoder_layers) = 0;
+  PROPERTY(int64_t, head_dim) = 0;
+  PROPERTY(int64_t, kv_cache_storage_head_dim) = 0;
+  PROPERTY(int64_t, decoder_head_dim) = 0;
+  PROPERTY(int64_t, n_heads) = 0;
+  PROPERTY(int64_t, decoder_n_heads) = 0;
+  PROPERTY(int64_t, actual_n_heads) = 0;
+  PROPERTY(std::optional<int64_t>, n_kv_heads) = {};
+  PROPERTY(std::optional<int64_t>, decoder_n_kv_heads) = {};
+  PROPERTY(int64_t, vocab_size) = -1;
+  PROPERTY(int32_t, qk_nope_head_dim) = 0;
+  PROPERTY(int32_t, qk_rope_head_dim) = 0;
+  PROPERTY(int32_t, v_head_dim) = 0;
+  PROPERTY(int32_t, q_lora_rank) = 0;
+  PROPERTY(int32_t, kv_lora_rank) = 0;
+  PROPERTY(int32_t, num_nextn_predict_layers) = 0;
+  PROPERTY(bool, enable_mla) = false;
+  PROPERTY(int32_t, num_experts_per_tok) = 0;
+  PROPERTY(bool, use_qk_norm) = false;
+  PROPERTY(float, rms_norm_eps) = 0.0f;
+  PROPERTY(float, layer_norm_eps) = 0.0f;
+  PROPERTY(int64_t, rotary_dim) = 0;
+  PROPERTY(float, rope_theta) = 10000.0f;
+  PROPERTY(std::string, rope_scaling_rope_type) = {};
+  PROPERTY(float, rope_scaling_factor) = 0.0f;
+  PROPERTY(float, rope_scaling_low_freq_factor) = 0.0f;
+  PROPERTY(float, rope_scaling_high_freq_factor) = 0.0f;
+  PROPERTY(float, rope_extrapolation_factor) = 0.0f;
+  PROPERTY(int64_t, rope_scaling_original_max_position_embeddings) = 0;
+  PROPERTY(int64_t, rope_scaling_beta_fast) = 0;
+  PROPERTY(int64_t, rope_scaling_beta_slow) = 0;
+  PROPERTY(float, rope_scaling_attn_factor) = 0.0f;
+  PROPERTY(float, rope_scaling_mscale) = 0.0f;
+  PROPERTY(float, rope_scaling_mscale_all_dim) = 0.0f;
+  PROPERTY(std::vector<int64_t>, rope_scaling_mrope_section) = {};
+  PROPERTY(bool, rope_scaling_mrope_interleaved) = false;
+  PROPERTY(int64_t, max_position_embeddings) = 0;
+  PROPERTY(bool, use_sliding_window) = false;
+  PROPERTY(int32_t, sliding_window) = -1;
+  PROPERTY(int32_t, index_head_dim) = 0;
+  PROPERTY(int32_t, index_n_heads) = 0;
+  PROPERTY(int32_t, index_topk) = 0;
+  PROPERTY(int32_t, index_kpool) = 1;
+  PROPERTY(bool, index_kpool_compress) = false;
+  PROPERTY(bool, index_kpool_always_select_tail) = false;
+  PROPERTY(bool, indexer_rope_interleave) = false;
+  PROPERTY(int32_t, index_topk_freq) = 1;
+  PROPERTY(std::string, index_topk_pattern) = {};
+  PROPERTY(int32_t, index_skip_topk_offset) = 0;
+  PROPERTY(bool, index_share_for_mtp_iteration) = false;
+  PROPERTY(std::vector<std::string>, indexer_types) = {};
+  PROPERTY(std::vector<std::string>, mlp_layer_types) = {};
+  PROPERTY(int32_t, rope_head_dim) = 0;
+  PROPERTY(int32_t, o_lora_rank) = 0;
+  PROPERTY(int32_t, o_groups) = 0;
+  PROPERTY(std::vector<int32_t>, compress_ratios) = {};
+  PROPERTY(float, compress_rope_theta) = 0.0f;
+  PROPERTY(int32_t, window_size) = 0;
+  PROPERTY(int32_t, n_activated_experts) = 0;
+  PROPERTY(int32_t, n_hash_layers) = 0;
+  PROPERTY(float, factor) = 0.0f;
+  PROPERTY(float, beta_fast) = 0.0f;
+  PROPERTY(float, beta_slow) = 0.0f;
+  PROPERTY(std::string, scale_fmt) = {};
+  PROPERTY(int32_t, hc_mult) = 0;
+  PROPERTY(int32_t, hc_sinkhorn_iters) = 0;
+  PROPERTY(float, hc_eps) = 1e-6f;
+  PROPERTY(int64_t, max_batch_size) = 0;
+  PROPERTY(int64_t, max_seq_len) = 0;
+  PROPERTY(bool, use_absolute_position_embedding) = false;
+  PROPERTY(int32_t, bos_token_id) = 0;
+  PROPERTY(int32_t, eos_token_id) = -1;
+  PROPERTY(std::vector<int32_t>, eos_token_id_vec) = {};
+  PROPERTY(int32_t, pad_token_id) = 0;
+  PROPERTY(std::optional<float>, attn_scalar) = {};
+  PROPERTY(bool, no_bias) = false;
+  PROPERTY(bool, qkv_bias) = false;
+  PROPERTY(std::unordered_set<int32_t>, stop_token_ids) = {};
+  PROPERTY(bool, tie_word_embeddings) = false;
+  PROPERTY(bool, attention_bias) = false;
+  PROPERTY(float, attention_dropout) = 0.0f;
+  PROPERTY(int32_t, decoder_sparse_step) = 1;
+  PROPERTY(float, initializer_range) = 0.02f;
+  PROPERTY(std::vector<int32_t>, mlp_only_layers) = {};
+  PROPERTY(int64_t, num_attention_heads) = 32;
+  PROPERTY(int32_t, num_experts) = 128;
+  PROPERTY(bool, output_router_logits) = false;
+  PROPERTY(int32_t, rope_scaling) = -1;
+  PROPERTY(float, router_aux_loss_coef) = 0.001f;
+  PROPERTY(bool, attn_output_gate) = false;
+  PROPERTY(int32_t, full_attention_interval) = 0;
+  PROPERTY(std::vector<int32_t>, full_attn_layers) = {};
+  PROPERTY(int32_t, linear_conv_kernel_dim) = 0;
+  PROPERTY(int32_t, linear_key_head_dim) = 0;
+  PROPERTY(int32_t, linear_value_head_dim) = 0;
+  PROPERTY(int64_t, linear_num_key_heads) = 0;
+  PROPERTY(int32_t, linear_num_value_heads) = 0;
+  PROPERTY(float, linear_lower_bound) = -5.0f;
+  PROPERTY(std::string, mamba_ssm_dtype) = {};
+  PROPERTY(int32_t, shared_expert_intermediate_size) = 0;
+  PROPERTY(float, partial_rotary_factor) = 0.0f;
+  PROPERTY(std::vector<std::string>, layer_types) = {};
+};
+
+class LlmModelArgs final {
+ private:
+  TransformerModelArgs transformer_;
+
+ public:
+  LlmModelArgs()
+      : LlmModelArgs(model_family_args_detail::default_model_args()) {}
+  explicit LlmModelArgs(const ModelArgs& args)
+      : transformer_(args),
+        first_k_dense_replace_(args.first_k_dense_replace()),
+        moe_layer_freq_(args.moe_layer_freq()),
+        draft_vocab_size_(args.draft_vocab_size()),
+        markov_rank_(args.markov_rank()),
+        dspark_num_layers_(args.dspark_num_layers()),
+        dspark_block_size_(args.dspark_block_size()),
+        dspark_use_native_sas_(args.dspark_use_native_sas()),
+        enable_confidence_head_(args.enable_confidence_head()),
+        confidence_head_with_markov_(args.confidence_head_with_markov()),
+        dflash2_block_size_(args.dflash2_block_size()),
+        dflash2_conv_group_size_(args.dflash2_conv_group_size()),
+        dflash2_conv_kernel_size_(args.dflash2_conv_kernel_size()),
+        dflash2_selector_rank_(args.dflash2_selector_rank()),
+        dflash2_selector_top_k_(args.dflash2_selector_top_k()),
+        use_moe_(args.use_moe()),
+        moe_score_func_(args.moe_score_func()),
+        moe_route_scale_(args.moe_route_scale()),
+        moe_use_shared_experts_(args.moe_use_shared_experts()),
+        topk_method_(args.topk_method()),
+        n_routed_experts_(args.n_routed_experts()),
+        n_shared_experts_(args.n_shared_experts()),
+        num_experts_per_tok_(args.num_experts_per_tok()),
+        moe_intermediate_size_(args.moe_intermediate_size()),
+        routed_scaling_factor_(args.routed_scaling_factor()),
+        norm_topk_prob_(args.norm_topk_prob()),
+        n_group_(args.n_group()),
+        topk_group_(args.topk_group()),
+        scoring_func_(args.scoring_func()),
+        swiglu_limit_(args.swiglu_limit()),
+        enable_mla_(args.enable_mla()),
+        qk_nope_head_dim_(args.qk_nope_head_dim()),
+        qk_rope_head_dim_(args.qk_rope_head_dim()),
+        v_head_dim_(args.v_head_dim()),
+        q_lora_rank_(args.q_lora_rank()),
+        kv_lora_rank_(args.kv_lora_rank()),
+        num_nextn_predict_layers_(args.num_nextn_predict_layers()),
+        mtp_start_layer_idx_(args.mtp_start_layer_idx()),
+        mtp_mlp_type_(args.mtp_mlp_type()),
+        use_sliding_window_(args.use_sliding_window()),
+        sliding_window_(args.sliding_window()),
+        max_window_layers_(args.max_window_layers()),
+        num_speculative_tokens_(args.num_speculative_tokens()),
+        enable_embedded_eagle3_draft_(args.enable_embedded_eagle3_draft()),
+        max_concurrent_prefills_per_dp_(args.max_concurrent_prefills_per_dp()),
+        layers_to_capture_(args.layers_to_capture()),
+        index_head_dim_(args.index_head_dim()),
+        index_n_heads_(args.index_n_heads()),
+        index_topk_(args.index_topk()),
+        index_kpool_(args.index_kpool()),
+        index_kpool_compress_(args.index_kpool_compress()),
+        index_kpool_always_select_tail_(args.index_kpool_always_select_tail()),
+        indexer_rope_interleave_(args.indexer_rope_interleave()),
+        index_topk_freq_(args.index_topk_freq()),
+        index_topk_pattern_(args.index_topk_pattern()),
+        index_skip_topk_offset_(args.index_skip_topk_offset()),
+        index_share_for_mtp_iteration_(args.index_share_for_mtp_iteration()),
+        indexer_types_(args.indexer_types()),
+        mlp_layer_types_(args.mlp_layer_types()),
+        rope_head_dim_(args.rope_head_dim()),
+        o_lora_rank_(args.o_lora_rank()),
+        o_groups_(args.o_groups()),
+        compress_ratios_(args.compress_ratios()),
+        compress_rope_theta_(args.compress_rope_theta()),
+        window_size_(args.window_size()),
+        n_activated_experts_(args.n_activated_experts()),
+        n_hash_layers_(args.n_hash_layers()),
+        factor_(args.factor()),
+        beta_fast_(args.beta_fast()),
+        beta_slow_(args.beta_slow()),
+        scale_fmt_(args.scale_fmt()),
+        hc_mult_(args.hc_mult()),
+        hc_sinkhorn_iters_(args.hc_sinkhorn_iters()),
+        hc_eps_(args.hc_eps()),
+        max_batch_size_(args.max_batch_size()),
+        max_seq_len_(args.max_seq_len()),
+        norm_before_fc_(args.norm_before_fc()),
+        norm_before_residual_(args.norm_before_residual()),
+        norm_output_(args.norm_output()),
+        fc_norm_(args.fc_norm()),
+        embedding_mode_(args.embedding_mode()) {}
+
+  explicit LlmModelArgs(ModelArgs&&) = delete;
+  explicit LlmModelArgs(const ModelArgs&&) = delete;
+
+  const TransformerModelArgs& transformer() const noexcept {
+    return transformer_;
+  }
+
+  TransformerModelArgs& mutable_transformer() noexcept { return transformer_; }
+
+  PROPERTY(int32_t, first_k_dense_replace) = 0;
+  PROPERTY(int32_t, moe_layer_freq) = 0;
+  PROPERTY(int64_t, draft_vocab_size) = 0;
+  PROPERTY(int64_t, markov_rank) = 0;
+  PROPERTY(int32_t, dspark_num_layers) = 0;
+  PROPERTY(int32_t, dspark_block_size) = 0;
+  PROPERTY(bool, dspark_use_native_sas) = false;
+  PROPERTY(bool, enable_confidence_head) = false;
+  PROPERTY(bool, confidence_head_with_markov) = false;
+  PROPERTY(int32_t, dflash2_block_size) = 0;
+  PROPERTY(int32_t, dflash2_conv_group_size) = 0;
+  PROPERTY(int32_t, dflash2_conv_kernel_size) = 0;
+  PROPERTY(int32_t, dflash2_selector_rank) = 0;
+  PROPERTY(int32_t, dflash2_selector_top_k) = 0;
+  PROPERTY(bool, use_moe) = false;
+  PROPERTY(std::string, moe_score_func) = {};
+  PROPERTY(float, moe_route_scale) = 1.0f;
+  PROPERTY(bool, moe_use_shared_experts) = false;
+  PROPERTY(std::string, topk_method) = {};
+  PROPERTY(int32_t, n_routed_experts) = 0;
+  PROPERTY(int32_t, n_shared_experts) = 0;
+  PROPERTY(int32_t, num_experts_per_tok) = 0;
+  PROPERTY(int32_t, moe_intermediate_size) = 0;
+  PROPERTY(float, routed_scaling_factor) = 0.0f;
+  PROPERTY(bool, norm_topk_prob) = false;
+  PROPERTY(int32_t, n_group) = 0;
+  PROPERTY(int32_t, topk_group) = 0;
+  PROPERTY(std::string, scoring_func) = {};
+  PROPERTY(float, swiglu_limit) = 0.0f;
+  PROPERTY(bool, enable_mla) = false;
+  PROPERTY(int32_t, qk_nope_head_dim) = 0;
+  PROPERTY(int32_t, qk_rope_head_dim) = 0;
+  PROPERTY(int32_t, v_head_dim) = 0;
+  PROPERTY(int32_t, q_lora_rank) = 0;
+  PROPERTY(int32_t, kv_lora_rank) = 0;
+  PROPERTY(int32_t, num_nextn_predict_layers) = 0;
+  PROPERTY(int64_t, mtp_start_layer_idx) = -1;
+  PROPERTY(std::string, mtp_mlp_type) = "moe";
+  PROPERTY(bool, use_sliding_window) = false;
+  PROPERTY(int32_t, sliding_window) = -1;
+  PROPERTY(int32_t, max_window_layers) = 0;
+  PROPERTY(int64_t, num_speculative_tokens) = 0;
+  PROPERTY(bool, enable_embedded_eagle3_draft) = false;
+  PROPERTY(int32_t, max_concurrent_prefills_per_dp) = 0;
+  PROPERTY(std::vector<int32_t>, layers_to_capture) = {};
+  PROPERTY(int32_t, index_head_dim) = 0;
+  PROPERTY(int32_t, index_n_heads) = 0;
+  PROPERTY(int32_t, index_topk) = 0;
+  PROPERTY(int32_t, index_kpool) = 1;
+  PROPERTY(bool, index_kpool_compress) = false;
+  PROPERTY(bool, index_kpool_always_select_tail) = false;
+  PROPERTY(bool, indexer_rope_interleave) = false;
+  PROPERTY(int32_t, index_topk_freq) = 1;
+  PROPERTY(std::string, index_topk_pattern) = {};
+  PROPERTY(int32_t, index_skip_topk_offset) = 0;
+  PROPERTY(bool, index_share_for_mtp_iteration) = false;
+  PROPERTY(std::vector<std::string>, indexer_types) = {};
+  PROPERTY(std::vector<std::string>, mlp_layer_types) = {};
+  PROPERTY(int32_t, rope_head_dim) = 0;
+  PROPERTY(int32_t, o_lora_rank) = 0;
+  PROPERTY(int32_t, o_groups) = 0;
+  PROPERTY(std::vector<int32_t>, compress_ratios) = {};
+  PROPERTY(float, compress_rope_theta) = 0.0f;
+  PROPERTY(int32_t, window_size) = 0;
+  PROPERTY(int32_t, n_activated_experts) = 0;
+  PROPERTY(int32_t, n_hash_layers) = 0;
+  PROPERTY(float, factor) = 0.0f;
+  PROPERTY(float, beta_fast) = 0.0f;
+  PROPERTY(float, beta_slow) = 0.0f;
+  PROPERTY(std::string, scale_fmt) = {};
+  PROPERTY(int32_t, hc_mult) = 0;
+  PROPERTY(int32_t, hc_sinkhorn_iters) = 0;
+  PROPERTY(float, hc_eps) = 1e-6f;
+  PROPERTY(int64_t, max_batch_size) = 0;
+  PROPERTY(int64_t, max_seq_len) = 0;
+  PROPERTY(bool, norm_before_fc) = false;
+  PROPERTY(bool, norm_before_residual) = false;
+  PROPERTY(bool, norm_output) = false;
+  PROPERTY(bool, fc_norm) = false;
+  PROPERTY(bool, embedding_mode) = false;
+};
+
+class VlmVisionModelArgs final {
+ public:
+  VlmVisionModelArgs()
+      : VlmVisionModelArgs(model_family_args_detail::default_model_args()) {}
+  explicit VlmVisionModelArgs(const ModelArgs& args)
+      : dtype_(args.dtype()),
+        rms_norm_eps_(args.rms_norm_eps()),
+        vision_start_token_id_(args.vision_start_token_id()),
+        vision_end_token_id_(args.vision_end_token_id()),
+        vision_token_id_(args.vision_token_id()),
+        image_token_id_(args.image_token_id()),
+        video_token_id_(args.video_token_id()),
+        audio_token_id_(args.audio_token_id()),
+        image_start_token_id_(args.image_start_token_id()),
+        image_end_token_id_(args.image_end_token_id()),
+        video_start_token_id_(args.video_start_token_id()),
+        video_end_token_id_(args.video_end_token_id()),
+        vision_custom_adapter_(args.vision_custom_adapter()),
+        vision_max_slice_nums_(args.vision_max_slice_nums()),
+        mm_dropout_(args.mm_dropout()),
+        mm_hidden_act_(args.mm_hidden_act()),
+        mm_hidden_size_(args.mm_hidden_size()),
+        mm_image_size_(args.mm_image_size()),
+        mm_intermediate_size_(args.mm_intermediate_size()),
+        mm_num_channels_(args.mm_num_channels()),
+        mm_initializer_range_(args.mm_initializer_range()),
+        mm_layer_norm_eps_(args.mm_layer_norm_eps()),
+        mm_num_attention_heads_(args.mm_num_attention_heads()),
+        mm_num_beam_groups_(args.mm_num_beam_groups()),
+        mm_num_beams_(args.mm_num_beams()),
+        mm_num_hidden_layers_(args.mm_num_hidden_layers()),
+        mm_num_return_sequences_(args.mm_num_return_sequences()),
+        mm_output_attentions_(args.mm_output_attentions()),
+        mm_output_hidden_states_(args.mm_output_hidden_states()),
+        mm_output_scores_(args.mm_output_scores()),
+        mm_patch_size_(args.mm_patch_size()),
+        mm_projection_dim_(args.mm_projection_dim()),
+        mm_projector_hidden_size_(args.mm_projector_hidden_size()),
+        mm_spatial_merge_size_(args.mm_spatial_merge_size()),
+        mm_spatial_patch_size_(args.mm_spatial_patch_size()),
+        mm_remove_invalid_values_(args.mm_remove_invalid_values()),
+        mm_repetition_penalty_(args.mm_repetition_penalty()),
+        mm_return_dict_(args.mm_return_dict()),
+        mm_return_dict_in_generate_(args.mm_return_dict_in_generate()),
+        mm_temperature_(args.mm_temperature()),
+        mm_tie_encoder_decoder_(args.mm_tie_encoder_decoder()),
+        mm_tie_word_embeddings_(args.mm_tie_word_embeddings()),
+        mm_top_k_(args.mm_top_k()),
+        mm_top_p_(args.mm_top_p()),
+        mm_torchscript_(args.mm_torchscript()),
+        mm_use_bfloat16_(args.mm_use_bfloat16()),
+        mm_head_dim_(args.mm_head_dim()),
+        mm_vocab_size_(args.mm_vocab_size()),
+        mm_window_size_(args.mm_window_size()),
+        mm_fullatt_block_indexes_(args.mm_fullatt_block_indexes()),
+        mm_deepstack_visual_indexes_(args.mm_deepstack_visual_indexes()),
+        mm_tokens_per_second_(args.mm_tokens_per_second()),
+        mm_temporal_patch_size_(args.mm_temporal_patch_size()),
+        mm_projector_type_(args.mm_projector_type()),
+        mm_num_position_embeddings_(args.mm_num_position_embeddings()),
+        mm_projector_hidden_act_(args.mm_projector_hidden_act()),
+        mm_projector_n_layers_(args.mm_projector_n_layers()),
+        mm_vision_feature_layer_(args.mm_vision_feature_layer()),
+        mm_vision_feature_select_strategy_(
+            args.mm_vision_feature_select_strategy()),
+        mm_image_do_center_crop_(args.mm_image_do_center_crop()),
+        mm_image_crop_height_size_(args.mm_image_crop_height_size()),
+        mm_image_crop_width_size_(args.mm_image_crop_width_size()),
+        mm_image_do_resize_(args.mm_image_do_resize()),
+        mm_image_resize_shortest_edge_(args.mm_image_resize_shortest_edge()),
+        mm_image_resample_(args.mm_image_resample()),
+        mm_image_do_rescale_(args.mm_image_do_rescale()),
+        mm_video_do_rescale_(args.mm_video_do_rescale()),
+        mm_image_rescale_factor_(args.mm_image_rescale_factor()),
+        mm_image_do_normalize_(args.mm_image_do_normalize()),
+        mm_image_normalize_mean_(args.mm_image_normalize_mean()),
+        mm_image_normalize_std_(args.mm_image_normalize_std()),
+        mm_init_pos_emb_width_(args.mm_init_pos_emb_width()),
+        mm_init_pos_emb_height_(args.mm_init_pos_emb_height()),
+        mm_init_pos_emb_time_(args.mm_init_pos_emb_time()),
+        mm_km_in_patch_limit_(args.mm_km_in_patch_limit()),
+        mm_km_patch_size_(args.mm_km_patch_size()),
+        mm_km_image_mean_(args.mm_km_image_mean()),
+        mm_km_image_std_(args.mm_km_image_std()),
+        mm_km_merge_kernel_size_(args.mm_km_merge_kernel_size()),
+        mm_km_fixed_output_tokens_(args.mm_km_fixed_output_tokens()),
+        mm_km_patch_limit_on_one_side_(args.mm_km_patch_limit_on_one_side()),
+        mm_km_in_patch_limit_each_frame_(
+            args.mm_km_in_patch_limit_each_frame()),
+        mm_km_in_patch_limit_video_(args.mm_km_in_patch_limit_video()),
+        mm_km_sample_fps_(args.mm_km_sample_fps()),
+        mm_km_max_num_frames_each_video_(
+            args.mm_km_max_num_frames_each_video()),
+        mm_km_temporal_merge_kernel_size_(
+            args.mm_km_temporal_merge_kernel_size()),
+        mm_km_timestamp_mode_(args.mm_km_timestamp_mode()),
+        mm_video_normalize_mean_(args.mm_video_normalize_mean()),
+        mm_video_normalize_std_(args.mm_video_normalize_std()),
+        mm_image_min_pixels_(args.mm_image_min_pixels()),
+        mm_image_max_pixels_(args.mm_image_max_pixels()),
+        mm_image_shortest_edge_(args.mm_image_shortest_edge()),
+        mm_image_longest_edge_(args.mm_image_longest_edge()),
+        mm_video_shortest_edge_(args.mm_video_shortest_edge()),
+        mm_video_longest_edge_(args.mm_video_longest_edge()),
+        mm_image_patch_size_(args.mm_image_patch_size()),
+        mm_image_temporal_patch_size_(args.mm_image_temporal_patch_size()),
+        mm_image_merge_size_(args.mm_image_merge_size()),
+        mm_image_min_tokens_(args.mm_image_min_tokens()),
+        mm_image_max_tokens_(args.mm_image_max_tokens()),
+        mm_video_patch_size_(args.mm_video_patch_size()),
+        mm_video_temporal_patch_size_(args.mm_video_temporal_patch_size()),
+        mm_video_merge_size_(args.mm_video_merge_size()),
+        mm_video_min_tokens_(args.mm_video_min_tokens()),
+        mm_video_max_tokens_(args.mm_video_max_tokens()),
+        mm_image_feature_size_(args.mm_image_feature_size()),
+        mm_scale_resolution_(args.mm_scale_resolution()),
+        mm_slice_mode_(args.mm_slice_mode()),
+        mm_use_image_id_(args.mm_use_image_id()),
+        mm_image_token_index_(args.mm_image_token_index()),
+        mm_pad_token_id_(args.mm_pad_token_id()),
+        mm_audio_sampling_rate_(args.mm_audio_sampling_rate()),
+        mm_audio_num_mel_bins_(args.mm_audio_num_mel_bins()),
+        mm_audio_frame_length_(args.mm_audio_frame_length()),
+        mm_audio_frame_shift_(args.mm_audio_frame_shift()),
+        mm_audio_max_frames_(args.mm_audio_max_frames()),
+        mm_audio_downsample_rate_(args.mm_audio_downsample_rate()),
+        mm_audio_cmvn_means_(args.mm_audio_cmvn_means()),
+        mm_audio_cmvn_inverse_std_(args.mm_audio_cmvn_inverse_std()),
+        mm_audio_idim_(args.mm_audio_idim()),
+        mm_audio_d_model_(args.mm_audio_d_model()),
+        mm_audio_n_layers_(args.mm_audio_n_layers()),
+        mm_audio_n_head_(args.mm_audio_n_head()),
+        mm_audio_kernel_size_(args.mm_audio_kernel_size()),
+        mm_audio_pe_maxlen_(args.mm_audio_pe_maxlen()),
+        mm_audio_ctc_pad_token_id_(args.mm_audio_ctc_pad_token_id()) {}
+
+  explicit VlmVisionModelArgs(ModelArgs&&) = delete;
+  explicit VlmVisionModelArgs(const ModelArgs&&) = delete;
+
+  PROPERTY(std::string, dtype) = {};
+  PROPERTY(float, rms_norm_eps) = 0.0f;
+  PROPERTY(int32_t, vision_start_token_id) = 0;
+  PROPERTY(int32_t, vision_end_token_id) = 0;
+  PROPERTY(int32_t, vision_token_id) = 0;
+  PROPERTY(int32_t, image_token_id) = 0;
+  PROPERTY(int32_t, video_token_id) = 0;
+  PROPERTY(int32_t, audio_token_id) = 0;
+  PROPERTY(int32_t, image_start_token_id) = 0;
+  PROPERTY(int32_t, image_end_token_id) = 0;
+  PROPERTY(int32_t, video_start_token_id) = 0;
+  PROPERTY(int32_t, video_end_token_id) = 0;
+  PROPERTY(std::string, vision_custom_adapter) = {};
+  PROPERTY(int32_t, vision_max_slice_nums) = 0;
+  PROPERTY(float, mm_dropout) = 0.0f;
+  PROPERTY(std::string, mm_hidden_act) = {};
+  PROPERTY(int64_t, mm_hidden_size) = 0;
+  PROPERTY(int64_t, mm_image_size) = 0;
+  PROPERTY(int64_t, mm_intermediate_size) = 0;
+  PROPERTY(int64_t, mm_num_channels) = 0;
+  PROPERTY(float, mm_initializer_range) = 0.0f;
+  PROPERTY(float, mm_layer_norm_eps) = 0;
+  PROPERTY(int64_t, mm_num_attention_heads) = 0;
+  PROPERTY(int64_t, mm_num_beam_groups) = 0;
+  PROPERTY(int64_t, mm_num_beams) = 0;
+  PROPERTY(int64_t, mm_num_hidden_layers) = 0;
+  PROPERTY(int64_t, mm_num_return_sequences) = 0;
+  PROPERTY(bool, mm_output_attentions) = false;
+  PROPERTY(bool, mm_output_hidden_states) = false;
+  PROPERTY(bool, mm_output_scores) = false;
+  PROPERTY(int64_t, mm_patch_size) = 0;
+  PROPERTY(int64_t, mm_projection_dim) = 0;
+  PROPERTY(int64_t, mm_projector_hidden_size) = 0;
+  PROPERTY(int64_t, mm_spatial_merge_size) = 0;
+  PROPERTY(int64_t, mm_spatial_patch_size) = 0;
+  PROPERTY(bool, mm_remove_invalid_values) = false;
+  PROPERTY(float, mm_repetition_penalty) = 0.0f;
+  PROPERTY(bool, mm_return_dict) = false;
+  PROPERTY(bool, mm_return_dict_in_generate) = false;
+  PROPERTY(float, mm_temperature) = 0.0f;
+  PROPERTY(bool, mm_tie_encoder_decoder) = false;
+  PROPERTY(bool, mm_tie_word_embeddings) = false;
+  PROPERTY(int64_t, mm_top_k) = 0;
+  PROPERTY(float, mm_top_p) = 0.0f;
+  PROPERTY(bool, mm_torchscript) = false;
+  PROPERTY(bool, mm_use_bfloat16) = false;
+  PROPERTY(int64_t, mm_head_dim) = 0;
+  PROPERTY(int64_t, mm_vocab_size) = 0;
+  PROPERTY(int32_t, mm_window_size) = 0;
+  PROPERTY(std::vector<int64_t>, mm_fullatt_block_indexes) = {};
+  PROPERTY(std::vector<int64_t>, mm_deepstack_visual_indexes) = {};
+  PROPERTY(int32_t, mm_tokens_per_second) = 0;
+  PROPERTY(int32_t, mm_temporal_patch_size) = 0;
+  PROPERTY(std::string, mm_projector_type) = {};
+  PROPERTY(int64_t, mm_num_position_embeddings) = {};
+  PROPERTY(std::string, mm_projector_hidden_act) = {};
+  PROPERTY(int64_t, mm_projector_n_layers) = 0;
+  PROPERTY(int64_t, mm_vision_feature_layer) = 0;
+  PROPERTY(std::string, mm_vision_feature_select_strategy) = {};
+  PROPERTY(bool, mm_image_do_center_crop) = false;
+  PROPERTY(int32_t, mm_image_crop_height_size) = 336;
+  PROPERTY(int32_t, mm_image_crop_width_size) = 336;
+  PROPERTY(bool, mm_image_do_resize) = false;
+  PROPERTY(int32_t, mm_image_resize_shortest_edge) = 336;
+  PROPERTY(int32_t, mm_image_resample) = 0;
+  PROPERTY(bool, mm_image_do_rescale) = false;
+  PROPERTY(bool, mm_video_do_rescale) = false;
+  PROPERTY(double, mm_image_rescale_factor) = 0;
+  PROPERTY(bool, mm_image_do_normalize) = false;
+  PROPERTY(std::vector<double>, mm_image_normalize_mean) = {};
+  PROPERTY(std::vector<double>, mm_image_normalize_std) = {};
+  PROPERTY(int64_t, mm_init_pos_emb_width) = 64;
+  PROPERTY(int64_t, mm_init_pos_emb_height) = 64;
+  PROPERTY(int64_t, mm_init_pos_emb_time) = 4;
+  PROPERTY(int64_t, mm_km_in_patch_limit) = 16384;
+  PROPERTY(int64_t, mm_km_patch_size) = 14;
+  PROPERTY(std::vector<int64_t>, mm_km_image_mean) = {};
+  PROPERTY(std::vector<int64_t>, mm_km_image_std) = {};
+  PROPERTY(int64_t, mm_km_merge_kernel_size) = 2;
+  PROPERTY(int64_t, mm_km_fixed_output_tokens) = -1;
+  PROPERTY(int64_t, mm_km_patch_limit_on_one_side) = 512;
+  PROPERTY(int64_t, mm_km_in_patch_limit_each_frame) = 4096;
+  PROPERTY(int64_t, mm_km_in_patch_limit_video) = 200;
+  PROPERTY(float, mm_km_sample_fps) = 2.0;
+  PROPERTY(int64_t, mm_km_max_num_frames_each_video) = 2;
+  PROPERTY(int64_t, mm_km_temporal_merge_kernel_size) = 4;
+  PROPERTY(std::string, mm_km_timestamp_mode) = "hh:mm:ss.fff";
+  PROPERTY(std::vector<double>, mm_video_normalize_mean) = {};
+  PROPERTY(std::vector<double>, mm_video_normalize_std) = {};
+  PROPERTY(int32_t, mm_image_min_pixels) = 0;
+  PROPERTY(int32_t, mm_image_max_pixels) = 0;
+  PROPERTY(int64_t, mm_image_shortest_edge) = 0;
+  PROPERTY(int64_t, mm_image_longest_edge) = 0;
+  PROPERTY(int64_t, mm_video_shortest_edge) = 0;
+  PROPERTY(int64_t, mm_video_longest_edge) = 0;
+  PROPERTY(int32_t, mm_image_patch_size) = 0;
+  PROPERTY(int32_t, mm_image_temporal_patch_size) = 0;
+  PROPERTY(int32_t, mm_image_merge_size) = 0;
+  PROPERTY(int32_t, mm_image_min_tokens) = 0;
+  PROPERTY(int32_t, mm_image_max_tokens) = 0;
+  PROPERTY(int32_t, mm_video_patch_size) = 0;
+  PROPERTY(int32_t, mm_video_temporal_patch_size) = 0;
+  PROPERTY(int32_t, mm_video_merge_size) = 0;
+  PROPERTY(int32_t, mm_video_min_tokens) = 0;
+  PROPERTY(int32_t, mm_video_max_tokens) = 0;
+  PROPERTY(int32_t, mm_image_feature_size) = 0;
+  PROPERTY(int32_t, mm_scale_resolution) = 0;
+  PROPERTY(bool, mm_slice_mode) = false;
+  PROPERTY(bool, mm_use_image_id) = false;
+  PROPERTY(int64_t, mm_image_token_index) = 0;
+  PROPERTY(int64_t, mm_pad_token_id) = 0;
+  PROPERTY(int64_t, mm_audio_sampling_rate) = 16000;
+  PROPERTY(int64_t, mm_audio_num_mel_bins) = 80;
+  PROPERTY(int64_t, mm_audio_frame_length) = 400;
+  PROPERTY(int64_t, mm_audio_frame_shift) = 160;
+  PROPERTY(int64_t, mm_audio_max_frames) = 3000;
+  PROPERTY(int64_t, mm_audio_downsample_rate) = 2;
+  PROPERTY(std::vector<double>, mm_audio_cmvn_means) = {};
+  PROPERTY(std::vector<double>, mm_audio_cmvn_inverse_std) = {};
+  PROPERTY(int64_t, mm_audio_idim) = 80;
+  PROPERTY(int64_t, mm_audio_d_model) = 1280;
+  PROPERTY(int64_t, mm_audio_n_layers) = 16;
+  PROPERTY(int64_t, mm_audio_n_head) = 20;
+  PROPERTY(int64_t, mm_audio_kernel_size) = 33;
+  PROPERTY(int64_t, mm_audio_pe_maxlen) = 5000;
+  PROPERTY(int64_t, mm_audio_ctc_pad_token_id) = 151643;
+};
+
+class RecModelArgs final {
+ private:
+  TransformerModelArgs transformer_;
+
+ public:
+  RecModelArgs()
+      : RecModelArgs(model_family_args_detail::default_model_args()) {}
+  explicit RecModelArgs(const ModelArgs& args)
+      : transformer_(args),
+        query_num_(args.query_num()),
+        encoder_embedding_mode_(args.encoder_embedding_mode()),
+        embedding_mode_(args.embedding_mode()),
+        use_moe_(args.use_moe()),
+        moe_route_scale_(args.moe_route_scale()),
+        moe_use_shared_experts_(args.moe_use_shared_experts()),
+        n_routed_experts_(args.n_routed_experts()),
+        n_shared_experts_(args.n_shared_experts()),
+        moe_intermediate_size_(args.moe_intermediate_size()),
+        enable_mla_(args.enable_mla()),
+        num_experts_per_tok_(args.num_experts_per_tok()),
+        relative_attention_num_buckets_(args.relative_attention_num_buckets()),
+        relative_attention_max_distance_(
+            args.relative_attention_max_distance()) {}
+
+  explicit RecModelArgs(ModelArgs&&) = delete;
+  explicit RecModelArgs(const ModelArgs&&) = delete;
+
+  const TransformerModelArgs& transformer() const noexcept {
+    return transformer_;
+  }
+
+  TransformerModelArgs& mutable_transformer() noexcept { return transformer_; }
+
+  PROPERTY(int32_t, query_num) = 0;
+  PROPERTY(bool, encoder_embedding_mode) = false;
+  PROPERTY(bool, embedding_mode) = false;
+  PROPERTY(bool, use_moe) = false;
+  PROPERTY(float, moe_route_scale) = 1.0f;
+  PROPERTY(bool, moe_use_shared_experts) = false;
+  PROPERTY(int32_t, n_routed_experts) = 0;
+  PROPERTY(int32_t, n_shared_experts) = 0;
+  PROPERTY(int32_t, moe_intermediate_size) = 0;
+  PROPERTY(bool, enable_mla) = false;
+
+  PROPERTY(int32_t, num_experts_per_tok) = 0;
+  PROPERTY(int64_t, relative_attention_num_buckets) = 0;
+  PROPERTY(int64_t, relative_attention_max_distance) = 0;
+};
+
+class VlmModelArgs final {
+ private:
+  TransformerModelArgs transformer_;
+  VlmVisionModelArgs vision_;
+
+ public:
+  VlmModelArgs()
+      : VlmModelArgs(model_family_args_detail::default_model_args()) {}
+  explicit VlmModelArgs(const ModelArgs& args)
+      : transformer_(args),
+        vision_(args),
+        query_num_(args.query_num()),
+        encoder_embedding_mode_(args.encoder_embedding_mode()),
+        embedding_mode_(args.embedding_mode()),
+        num_speculative_tokens_(args.num_speculative_tokens()) {}
+
+  explicit VlmModelArgs(ModelArgs&&) = delete;
+  explicit VlmModelArgs(const ModelArgs&&) = delete;
+
+  const TransformerModelArgs& transformer() const noexcept {
+    return transformer_;
+  }
+  TransformerModelArgs& mutable_transformer() noexcept { return transformer_; }
+  const VlmVisionModelArgs& vision() const noexcept { return vision_; }
+  VlmVisionModelArgs& mutable_vision() noexcept { return vision_; }
+
+  PROPERTY(int32_t, query_num) = 0;
+  PROPERTY(bool, encoder_embedding_mode) = false;
+  PROPERTY(bool, embedding_mode) = false;
+  PROPERTY(int64_t, num_speculative_tokens) = 0;
+};
+
+class DiTTransformerModelArgs final {
+ private:
+  TransformerModelArgs transformer_;
+
+ public:
+  DiTTransformerModelArgs()
+      : DiTTransformerModelArgs(
+            model_family_args_detail::default_model_args()) {}
+  explicit DiTTransformerModelArgs(const ModelArgs& args)
+      : transformer_(args),
+        in_channels_(args.in_channels()),
+        out_channels_(args.out_channels()),
+        latent_channels_(args.latent_channels()),
+        joint_attention_dim_(args.joint_attention_dim()),
+        pooled_projection_dim_(args.pooled_projection_dim()),
+        guidance_embeds_(args.guidance_embeds()),
+        axes_dims_rope_(args.axes_dims_rope()),
+        num_layers_(args.num_layers()),
+        num_single_layers_(args.num_single_layers()),
+        mlp_ratio_(args.mlp_ratio()),
+        timestep_guidance_channels_(args.timestep_guidance_channels()),
+        mm_patch_size_(args.mm_patch_size()),
+        patch_size_(args.patch_size()),
+        wan_patch_size_(args.wan_patch_size()),
+        cross_attn_norm_(args.cross_attn_norm()),
+        ffn_dim_(args.ffn_dim()),
+        time_freq_dim_(args.time_freq_dim()),
+        dit_in_channels_(args.dit_in_channels()),
+        dit_out_channels_(args.dit_out_channels()),
+        qk_norm_(args.qk_norm()),
+        rope_max_seq_len_(args.rope_max_seq_len()),
+        text_embed_dim_(args.text_embed_dim()),
+        image_embed_dim_(args.image_embed_dim()),
+        added_kv_proj_dim_(args.added_kv_proj_dim()),
+        pos_embed_seq_len_(args.pos_embed_seq_len()),
+        num_refiner_layers_(args.num_refiner_layers()),
+        audio_in_channels_(args.audio_in_channels()),
+        time_embed_hidden_dim_(args.time_embed_hidden_dim()),
+        time_embed_dim_(args.time_embed_dim()),
+        rope_freq_dim_(args.rope_freq_dim()),
+        qk_norm_eps_(args.qk_norm_eps()),
+        final_norm_eps_(args.final_norm_eps()),
+        mlp_width_ratio_(args.mlp_width_ratio()),
+        text_dim_(args.text_dim()),
+        rope_dim_list_(args.rope_dim_list()),
+        rope_theta_dit_(args.rope_theta_dit()),
+        eps_(args.eps()),
+        txt_dim_(args.txt_dim()),
+        txt_in_channels_(args.txt_in_channels()),
+        txt_out_channels_(args.txt_out_channels()),
+        emb_dim_(args.emb_dim()),
+        heads_(args.heads()),
+        rope_dim_(args.rope_dim()),
+        expand_ratio_(args.expand_ratio()),
+        block_size_(args.block_size()),
+        latent_dim_(args.latent_dim()),
+        qk_bias_(args.qk_bias()),
+        norm_eps_(args.norm_eps()),
+        zero_cond_t_(args.zero_cond_t()),
+        use_additional_t_cond_(args.use_additional_t_cond()),
+        use_layer3d_rope_(args.use_layer3d_rope()) {}
+
+  explicit DiTTransformerModelArgs(ModelArgs&&) = delete;
+  explicit DiTTransformerModelArgs(const ModelArgs&&) = delete;
+
+  const TransformerModelArgs& transformer() const noexcept {
+    return transformer_;
+  }
+
+  TransformerModelArgs& mutable_transformer() noexcept { return transformer_; }
+
+  PROPERTY(int64_t, in_channels) = -1;
+  PROPERTY(int64_t, out_channels) = -1;
+  PROPERTY(int64_t, latent_channels) = -1;
+  PROPERTY(int64_t, joint_attention_dim) = 0;
+  PROPERTY(int64_t, pooled_projection_dim) = 0;
+  PROPERTY(bool, guidance_embeds) = true;
+  PROPERTY(std::vector<int64_t>, axes_dims_rope) = {};
+  PROPERTY(int64_t, num_layers) = 0;
+  PROPERTY(int64_t, num_single_layers) = 0;
+  PROPERTY(float, mlp_ratio) = 3.0f;
+  PROPERTY(int32_t, timestep_guidance_channels) = 256;
+  PROPERTY(int64_t, mm_patch_size) = 0;
+  PROPERTY(int64_t, patch_size) = 1;
+  PROPERTY(std::vector<int64_t>, wan_patch_size) = { 1, 2, 2 };
+  PROPERTY(bool, cross_attn_norm) = true;
+  PROPERTY(int64_t, ffn_dim) = 13824;
+  PROPERTY(int64_t, time_freq_dim) = 256;
+  PROPERTY(int64_t, dit_in_channels) = 36;
+  PROPERTY(int64_t, dit_out_channels) = 16;
+  PROPERTY(std::string, qk_norm) = "rms_norm_across_heads";
+  PROPERTY(int64_t, rope_max_seq_len) = 1024;
+  PROPERTY(int64_t, text_embed_dim) = 4096;
+  PROPERTY(int64_t, image_embed_dim) = -1;
+  PROPERTY(int64_t, added_kv_proj_dim) = -1;
+  PROPERTY(int64_t, pos_embed_seq_len) = -1;
+  PROPERTY(int64_t, num_refiner_layers) = 0;
+  PROPERTY(int64_t, audio_in_channels) = 0;
+  PROPERTY(int64_t, time_embed_hidden_dim) = 0;
+  PROPERTY(int64_t, time_embed_dim) = 0;
+  PROPERTY(int64_t, rope_freq_dim) = 0;
+  PROPERTY(float, qk_norm_eps) = 1e-5f;
+  PROPERTY(float, final_norm_eps) = 1e-5f;
+  PROPERTY(double, mlp_width_ratio) = 4.0;
+  PROPERTY(int64_t, text_dim) = 4096;
+  PROPERTY(std::vector<int64_t>, rope_dim_list) = { 16, 56, 56 };
+  PROPERTY(int64_t, rope_theta_dit) = 10000;
+  PROPERTY(double, eps) = 1e-6;
+  PROPERTY(int64_t, txt_dim) = 0;
+  PROPERTY(int64_t, txt_in_channels) = 0;
+  PROPERTY(int64_t, txt_out_channels) = 0;
+  PROPERTY(int64_t, emb_dim) = 0;
+  PROPERTY(int64_t, heads) = 0;
+  PROPERTY(int64_t, rope_dim) = 0;
+  PROPERTY(int64_t, expand_ratio) = 0;
+  PROPERTY(int64_t, block_size) = 0;
+  PROPERTY(int64_t, latent_dim) = 0;
+  PROPERTY(bool, qk_bias) = false;
+  PROPERTY(float, norm_eps) = 1e-5f;
+  PROPERTY(bool, zero_cond_t) = false;
+  PROPERTY(bool, use_additional_t_cond) = false;
+  PROPERTY(bool, use_layer3d_rope) = false;
+};
+
+class DiTVaeModelArgs final {
+ public:
+  DiTVaeModelArgs()
+      : DiTVaeModelArgs(model_family_args_detail::default_model_args()) {}
+  explicit DiTVaeModelArgs(const ModelArgs& args)
+      : in_channels_(args.in_channels()),
+        out_channels_(args.out_channels()),
+        down_block_types_(args.down_block_types()),
+        up_block_types_(args.up_block_types()),
+        block_out_channels_(args.block_out_channels()),
+        layers_per_block_(args.layers_per_block()),
+        latent_channels_(args.latent_channels()),
+        norm_num_groups_(args.norm_num_groups()),
+        sample_size_(args.sample_size()),
+        scale_factor_(args.scale_factor()),
+        shift_factor_(args.shift_factor()),
+        mid_block_add_attention_(args.mid_block_add_attention()),
+        force_upcast_(args.force_upcast()),
+        use_quant_conv_(args.use_quant_conv()),
+        use_post_quant_conv_(args.use_post_quant_conv()),
+        vae_scale_factor_temporal_(args.vae_scale_factor_temporal()),
+        vae_scale_factor_spatial_(args.vae_scale_factor_spatial()),
+        vae_is_residual_(args.vae_is_residual()),
+        batch_norm_eps_(args.batch_norm_eps()),
+        batch_norm_momentum_(args.batch_norm_momentum()),
+        ae_patch_size_(args.ae_patch_size()),
+        base_dim_(args.base_dim()),
+        z_dim_(args.z_dim()),
+        dim_mult_(args.dim_mult()),
+        latents_mean_(args.latents_mean()),
+        latents_std_(args.latents_std()),
+        attn_scales_(args.attn_scales()),
+        temperal_downsample_(args.temperal_downsample()),
+        num_res_blocks_(args.num_res_blocks()),
+        dropout_(args.dropout()),
+        spatial_downsample_factors_(args.spatial_downsample_factors()),
+        temporal_downsample_factors_(args.temporal_downsample_factors()),
+        spatial_padding_mode_(args.spatial_padding_mode()),
+        decoder_num_register_tokens_(args.decoder_num_register_tokens()),
+        decoder_ffn_mult_(args.decoder_ffn_mult()),
+        decoder_head_dim_(args.decoder_head_dim()),
+        decoder_n_heads_(args.decoder_n_heads()),
+        decoder_rope_theta_(args.decoder_rope_theta()),
+        decoder_rope_dim_ratio_(args.decoder_rope_dim_ratio()),
+        decoder_norm_eps_(args.decoder_norm_eps()),
+        encoder_dim_(args.encoder_dim()),
+        encoder_rates_(args.encoder_rates()),
+        decoder_dim_(args.decoder_dim()),
+        decoder_rates_(args.decoder_rates()),
+        decoder_kernel_sizes_(args.decoder_kernel_sizes()),
+        resblock_kernel_sizes_(args.resblock_kernel_sizes()),
+        sampling_rate_(args.sampling_rate()),
+        clip_length_(args.clip_length()),
+        token_drop_(args.token_drop()),
+        vae_dim_(args.vae_dim()),
+        vae_num_heads_(args.vae_num_heads()),
+        encoder_num_blocks_(args.encoder_num_blocks()),
+        decoder_num_blocks_(args.decoder_num_blocks()),
+        shared_heads_kv_(args.shared_heads_kv()),
+        vae_rope_theta_(args.vae_rope_theta()),
+        vae_block_size_(args.vae_block_size()),
+        vae_patch_size_(args.vae_patch_size()),
+        encoder_last_ln_(args.encoder_last_ln()),
+        shifting_factor_(args.shifting_factor()),
+        scaling_factor_(args.scaling_factor()),
+        use_variation_(args.use_variation()),
+        num_attention_heads_(args.num_attention_heads()),
+        ffn_dim_(args.ffn_dim()),
+        vocab_size_(args.vocab_size()),
+        qk_bias_(args.qk_bias()),
+        norm_eps_(args.norm_eps()) {}
+
+  explicit DiTVaeModelArgs(ModelArgs&&) = delete;
+  explicit DiTVaeModelArgs(const ModelArgs&&) = delete;
+
+  PROPERTY(int64_t, in_channels) = -1;
+  PROPERTY(int64_t, out_channels) = -1;
+  PROPERTY(std::vector<std::string>, down_block_types) = {};
+  PROPERTY(std::vector<std::string>, up_block_types) = {};
+  PROPERTY(std::vector<int64_t>, block_out_channels) = {};
+  PROPERTY(int64_t, layers_per_block) = 1;
+  PROPERTY(int64_t, latent_channels) = -1;
+  PROPERTY(int64_t, norm_num_groups) = -1;
+  PROPERTY(int64_t, sample_size) = -1;
+  PROPERTY(float, scale_factor) = 0.0f;
+  PROPERTY(float, shift_factor) = 0.0f;
+  PROPERTY(bool, mid_block_add_attention) = true;
+  PROPERTY(bool, force_upcast) = true;
+  PROPERTY(bool, use_quant_conv) = false;
+  PROPERTY(bool, use_post_quant_conv) = false;
+  PROPERTY(int64_t, vae_scale_factor_temporal) = 0;
+  PROPERTY(int64_t, vae_scale_factor_spatial) = 0;
+  PROPERTY(bool, vae_is_residual) = false;
+  PROPERTY(float, batch_norm_eps) = 1e-04f;
+  PROPERTY(float, batch_norm_momentum) = 0.1f;
+  PROPERTY(std::vector<int64_t>, ae_patch_size) = {};
+  PROPERTY(int64_t, base_dim) = 0;
+  PROPERTY(int64_t, z_dim) = 0;
+  PROPERTY(std::vector<int64_t>, dim_mult) = {};
+  PROPERTY(std::vector<double>, latents_mean) = {};
+  PROPERTY(std::vector<double>, latents_std) = {};
+  PROPERTY(std::vector<double>, attn_scales) = {};
+  PROPERTY(std::vector<bool>, temperal_downsample) = {};
+  PROPERTY(int64_t, num_res_blocks) = 0;
+  PROPERTY(double, dropout) = 0;
+  PROPERTY(std::vector<int64_t>, spatial_downsample_factors) = {};
+  PROPERTY(std::vector<int64_t>, temporal_downsample_factors) = {};
+  PROPERTY(std::string, spatial_padding_mode) = "reflect";
+  PROPERTY(int64_t, decoder_num_register_tokens) = 0;
+  PROPERTY(int64_t, decoder_ffn_mult) = 0;
+  PROPERTY(int64_t, decoder_head_dim) = 0;
+  PROPERTY(int64_t, decoder_n_heads) = 0;
+  PROPERTY(float, decoder_rope_theta) = 0.0f;
+  PROPERTY(float, decoder_rope_dim_ratio) = 0.0f;
+  PROPERTY(float, decoder_norm_eps) = 1e-5f;
+  PROPERTY(int64_t, encoder_dim) = 0;
+  PROPERTY(std::vector<int64_t>, encoder_rates) = {};
+  PROPERTY(int64_t, decoder_dim) = 0;
+  PROPERTY(std::vector<int64_t>, decoder_rates) = {};
+  PROPERTY(std::vector<int64_t>, decoder_kernel_sizes) = {};
+  PROPERTY(std::vector<int64_t>, resblock_kernel_sizes) = {};
+  PROPERTY(int64_t, sampling_rate) = 32000;
+  PROPERTY(int64_t, clip_length) = 0;
+  PROPERTY(int64_t, token_drop) = 0;
+  PROPERTY(int64_t, vae_dim) = 0;
+  PROPERTY(int64_t, vae_num_heads) = 0;
+  PROPERTY(int64_t, encoder_num_blocks) = 0;
+  PROPERTY(int64_t, decoder_num_blocks) = 0;
+  PROPERTY(int64_t, shared_heads_kv) = 0;
+  PROPERTY(int64_t, vae_rope_theta) = 0;
+  PROPERTY(int64_t, vae_block_size) = 0;
+  PROPERTY(int64_t, vae_patch_size) = 0;
+  PROPERTY(bool, encoder_last_ln) = true;
+  PROPERTY(float, shifting_factor) = 0.0f;
+  PROPERTY(float, scaling_factor) = 0.0f;
+  PROPERTY(bool, use_variation) = true;
+  PROPERTY(int64_t, num_attention_heads) = 32;
+  PROPERTY(int64_t, ffn_dim) = 13824;
+  PROPERTY(int64_t, vocab_size) = -1;
+  PROPERTY(bool, qk_bias) = false;
+  PROPERTY(float, norm_eps) = 1e-5f;
+};
+
+class DiTTextEncoderModelArgs final {
+ public:
+  DiTTextEncoderModelArgs()
+      : DiTTextEncoderModelArgs(
+            model_family_args_detail::default_model_args()) {}
+  explicit DiTTextEncoderModelArgs(const ModelArgs& args)
+      : n_heads_(args.n_heads()),
+        vocab_size_(args.vocab_size()),
+        layer_norm_eps_(args.layer_norm_eps()),
+        eos_token_id_(args.eos_token_id()),
+        mm_head_dim_(args.mm_head_dim()),
+        mm_hidden_size_(args.mm_hidden_size()),
+        mm_intermediate_size_(args.mm_intermediate_size()),
+        mm_layer_norm_eps_(args.mm_layer_norm_eps()),
+        mm_num_attention_heads_(args.mm_num_attention_heads()),
+        mm_num_hidden_layers_(args.mm_num_hidden_layers()),
+        d_model_(args.d_model()),
+        max_position_embeddings_(args.max_position_embeddings()),
+        num_layers_(args.num_layers()),
+        d_kv_(args.d_kv()),
+        d_ff_(args.d_ff()),
+        act_fn_(args.act_fn()),
+        is_gated_act_(args.is_gated_act()),
+        relative_attention_num_buckets_(args.relative_attention_num_buckets()),
+        relative_attention_max_distance_(
+            args.relative_attention_max_distance()) {}
+
+  explicit DiTTextEncoderModelArgs(ModelArgs&&) = delete;
+  explicit DiTTextEncoderModelArgs(const ModelArgs&&) = delete;
+
+  PROPERTY(int64_t, n_heads) = 0;
+  PROPERTY(int64_t, vocab_size) = -1;
+  PROPERTY(float, layer_norm_eps) = 0.0f;
+  PROPERTY(int32_t, eos_token_id) = -1;
+  PROPERTY(int64_t, mm_head_dim) = 0;
+  PROPERTY(int64_t, mm_hidden_size) = 0;
+  PROPERTY(int64_t, mm_intermediate_size) = 0;
+  PROPERTY(float, mm_layer_norm_eps) = 0.0f;
+  PROPERTY(int64_t, mm_num_attention_heads) = 0;
+  PROPERTY(int64_t, mm_num_hidden_layers) = 0;
+  PROPERTY(int64_t, d_model) = 0;
+  PROPERTY(int64_t, max_position_embeddings) = 0;
+  PROPERTY(int64_t, num_layers) = 0;
+  PROPERTY(int64_t, d_kv) = 0;
+  PROPERTY(int64_t, d_ff) = 0;
+  PROPERTY(std::string, act_fn) = "";
+  PROPERTY(bool, is_gated_act) = true;
+  PROPERTY(int64_t, relative_attention_num_buckets) = 0;
+  PROPERTY(int64_t, relative_attention_max_distance) = 0;
+};
+
+class DiTSchedulerModelArgs final {
+ public:
+  DiTSchedulerModelArgs()
+      : DiTSchedulerModelArgs(model_family_args_detail::default_model_args()) {}
+  explicit DiTSchedulerModelArgs(const ModelArgs& args)
+      : num_train_timesteps_(args.num_train_timesteps()),
+        shift_(args.shift()),
+        use_dynamic_shifting_(args.use_dynamic_shifting()),
+        base_shift_(args.base_shift()),
+        max_shift_(args.max_shift()),
+        base_image_seq_len_(args.base_image_seq_len()),
+        max_image_seq_len_(args.max_image_seq_len()),
+        shift_terminal_(args.shift_terminal()),
+        beta_start_(args.beta_start()),
+        beta_end_(args.beta_end()),
+        beta_schedule_(args.beta_schedule()),
+        trained_betas_(args.trained_betas()),
+        solver_order_(args.solver_order()),
+        prediction_type_(args.prediction_type()),
+        thresholding_(args.thresholding()),
+        dynamic_thresholding_ratio_(args.dynamic_thresholding_ratio()),
+        sample_max_value_(args.sample_max_value()),
+        predict_x0_(args.predict_x0()),
+        solver_type_(args.solver_type()),
+        lower_order_final_(args.lower_order_final()),
+        disable_corrector_(args.disable_corrector()),
+        use_karras_sigmas_(args.use_karras_sigmas()),
+        use_exponential_sigmas_(args.use_exponential_sigmas()),
+        use_beta_sigmas_(args.use_beta_sigmas()),
+        use_flow_sigmas_(args.use_flow_sigmas()),
+        flow_shift_(args.flow_shift()),
+        timestep_spacing_(args.timestep_spacing()),
+        steps_offset_(args.steps_offset()),
+        final_sigmas_type_(args.final_sigmas_type()),
+        rescale_betas_zero_snr_(args.rescale_betas_zero_snr()),
+        time_shift_type_(args.time_shift_type()) {}
+
+  explicit DiTSchedulerModelArgs(ModelArgs&&) = delete;
+  explicit DiTSchedulerModelArgs(const ModelArgs&&) = delete;
+
+  PROPERTY(int64_t, num_train_timesteps) = 0;
+  PROPERTY(int64_t, shift) = 0;
+  PROPERTY(bool, use_dynamic_shifting) = false;
+  PROPERTY(float, base_shift) = 0;
+  PROPERTY(float, max_shift) = 0;
+  PROPERTY(int64_t, base_image_seq_len) = 0;
+  PROPERTY(int64_t, max_image_seq_len) = 0;
+  PROPERTY(float, shift_terminal) = 0;
+  PROPERTY(float, beta_start) = 0.0001f;
+  PROPERTY(float, beta_end) = 0.02f;
+  PROPERTY(std::string, beta_schedule) = "linear";
+  PROPERTY(std::vector<float>, trained_betas) = {};
+  PROPERTY(int64_t, solver_order) = 2;
+  PROPERTY(std::string, prediction_type) = "flow_prediction";
+  PROPERTY(bool, thresholding) = false;
+  PROPERTY(float, dynamic_thresholding_ratio) = 0.995f;
+  PROPERTY(float, sample_max_value) = 1.0f;
+  PROPERTY(bool, predict_x0) = true;
+  PROPERTY(std::string, solver_type) = "bh2";
+  PROPERTY(bool, lower_order_final) = true;
+  PROPERTY(std::vector<int64_t>, disable_corrector) = {};
+  PROPERTY(bool, use_karras_sigmas) = false;
+  PROPERTY(bool, use_exponential_sigmas) = false;
+  PROPERTY(bool, use_beta_sigmas) = false;
+  PROPERTY(bool, use_flow_sigmas) = true;
+  PROPERTY(float, flow_shift) = 3.0f;
+  PROPERTY(std::string, timestep_spacing) = "linspace";
+  PROPERTY(int64_t, steps_offset) = 0;
+  PROPERTY(std::string, final_sigmas_type) = "zero";
+  PROPERTY(bool, rescale_betas_zero_snr) = false;
+  PROPERTY(std::string, time_shift_type) = "exponential";
+};
+
+enum class DiTComponentType : uint8_t {
+  UNKNOWN = 0,
+  TRANSFORMER = 1,
+  VAE = 2,
+  TEXT_ENCODER = 3,
+  SCHEDULER = 4,
+};
+
+using DiTComponentModelArgsVariant = std::variant<DiTTransformerModelArgs,
+                                                  DiTVaeModelArgs,
+                                                  DiTTextEncoderModelArgs,
+                                                  DiTSchedulerModelArgs,
+                                                  VlmModelArgs>;
+
+class DiTComponentModelArgs final {
+ public:
+  explicit DiTComponentModelArgs(
+      const ModelArgs& args,
+      DiTComponentType component_type = DiTComponentType::TRANSFORMER,
+      ModelFamily family = ModelFamily::DIT)
+      : component_type_(component_type),
+        family_(family),
+        args_(make_args(args, component_type, family)) {
+    CHECK(family_ == ModelFamily::DIT || family_ == ModelFamily::VLM)
+        << "Unsupported DiT component model family: "
+        << static_cast<int>(family_);
+    CHECK(component_type_ != DiTComponentType::UNKNOWN)
+        << "Cannot construct arguments for an unknown DiT component type";
+  }
+
+  DiTComponentType component_type() const noexcept { return component_type_; }
+  ModelFamily family() const noexcept { return family_; }
+
+  const DiTTransformerModelArgs& transformer() const {
+    CHECK(component_type_ == DiTComponentType::TRANSFORMER)
+        << "DiT component does not contain transformer arguments";
+    return std::get<DiTTransformerModelArgs>(args_);
+  }
+
+  const DiTVaeModelArgs& vae() const {
+    CHECK(component_type_ == DiTComponentType::VAE)
+        << "DiT component does not contain VAE arguments";
+    return std::get<DiTVaeModelArgs>(args_);
+  }
+
+  const DiTTextEncoderModelArgs& text_encoder() const {
+    CHECK(component_type_ == DiTComponentType::TEXT_ENCODER)
+        << "DiT component does not contain text encoder arguments";
+    return std::get<DiTTextEncoderModelArgs>(args_);
+  }
+
+  const DiTSchedulerModelArgs& scheduler() const {
+    CHECK(component_type_ == DiTComponentType::SCHEDULER)
+        << "DiT component does not contain scheduler arguments";
+    return std::get<DiTSchedulerModelArgs>(args_);
+  }
+
+  VlmModelArgs& vlm() {
+    CHECK(family_ == ModelFamily::VLM)
+        << "DiT component does not contain VLM arguments";
+    return std::get<VlmModelArgs>(args_);
+  }
+
+  const VlmModelArgs& vlm() const {
+    CHECK(family_ == ModelFamily::VLM)
+        << "DiT component does not contain VLM arguments";
+    return std::get<VlmModelArgs>(args_);
+  }
+
+ private:
+  static DiTComponentModelArgsVariant make_args(const ModelArgs& args,
+                                                DiTComponentType component_type,
+                                                ModelFamily family) {
+    if (family == ModelFamily::VLM) {
+      return VlmModelArgs(args);
+    }
+    switch (component_type) {
+      case DiTComponentType::TRANSFORMER:
+        return DiTTransformerModelArgs(args);
+      case DiTComponentType::VAE:
+        return DiTVaeModelArgs(args);
+      case DiTComponentType::TEXT_ENCODER:
+        return DiTTextEncoderModelArgs(args);
+      case DiTComponentType::SCHEDULER:
+        return DiTSchedulerModelArgs(args);
+      case DiTComponentType::UNKNOWN:
+        break;
+    }
+    LOG(FATAL) << "Unknown DiT model component kind";
+    return DiTTransformerModelArgs();
+  }
+
+  DiTComponentType component_type_;
+  ModelFamily family_;
+  DiTComponentModelArgsVariant args_;
+};
+
+// ModelArgsBundle owns the typed parameter aggregate selected for one model
+// family or DiT component. Context copies share this view so model
+// implementations observe the same typed parameters without constructing a
+// view for every access.
+class ModelArgsBundle final {
+ public:
+  ModelArgsBundle() = default;
+
+  // Construct a bundle for a regular model context. DiT components use the
+  // component-specific overload below so a VLM text encoder remains wrapped
+  // in a DiTComponentModelArgs while retaining its VlmModelArgs payload.
+  ModelArgsBundle(const ModelArgs& model_args, ModelFamily family)
+      : family_(family) {
+    initialize(model_args, family, DiTComponentType::UNKNOWN);
+  }
+
+  ModelArgsBundle(const ModelArgs& model_args,
+                  ModelFamily family,
+                  DiTComponentType dit_component_type)
+      : family_(family) {
+    initialize(model_args, family, dit_component_type);
+  }
+
+  ModelFamily family() const noexcept { return family_; }
+
+  const LlmModelArgs& llm_model_args() const {
+    CHECK(llm_model_args_.has_value())
+        << "Model arguments do not contain LLM arguments";
+    return *llm_model_args_;
+  }
+
+  const VlmModelArgs& vlm_model_args() const {
+    if (vlm_model_args_.has_value()) {
+      return *vlm_model_args_;
+    }
+    CHECK(dit_model_args_.has_value())
+        << "Model arguments do not contain VLM arguments";
+    return dit_model_args_->vlm();
+  }
+
+  const RecModelArgs& rec_model_args() const {
+    CHECK(rec_model_args_.has_value())
+        << "Model arguments do not contain Rec arguments";
+    return *rec_model_args_;
+  }
+
+  const DiTComponentModelArgs& dit_model_args() const {
+    CHECK(dit_model_args_.has_value())
+        << "Model arguments do not contain DiT arguments";
+    return *dit_model_args_;
+  }
+
+  void set_encoder_embedding_mode(bool encoder_embedding_mode) {
+    if (llm_model_args_.has_value()) {
+      return;
+    }
+    if (vlm_model_args_.has_value()) {
+      vlm_model_args_->encoder_embedding_mode() = encoder_embedding_mode;
+      return;
+    }
+    if (rec_model_args_.has_value()) {
+      rec_model_args_->encoder_embedding_mode() = encoder_embedding_mode;
+      return;
+    }
+    if (dit_model_args_.has_value() &&
+        dit_model_args_->family() == ModelFamily::VLM) {
+      dit_model_args_->vlm().encoder_embedding_mode() = encoder_embedding_mode;
+    }
+  }
+
+ private:
+  void initialize(const ModelArgs& model_args,
+                  ModelFamily family,
+                  DiTComponentType dit_component_type) {
+    switch (family) {
+      case ModelFamily::LLM:
+        llm_model_args_.emplace(model_args);
+        return;
+      case ModelFamily::VLM:
+        if (dit_component_type != DiTComponentType::UNKNOWN) {
+          dit_model_args_.emplace(
+              model_args, dit_component_type, ModelFamily::VLM);
+          return;
+        }
+        vlm_model_args_.emplace(model_args);
+        return;
+      case ModelFamily::REC:
+        rec_model_args_.emplace(model_args);
+        return;
+      case ModelFamily::DIT:
+        dit_model_args_.emplace(model_args,
+                                dit_component_type == DiTComponentType::UNKNOWN
+                                    ? DiTComponentType::TRANSFORMER
+                                    : dit_component_type);
+        return;
+      case ModelFamily::UNKNOWN:
+        return;
+    }
+  }
+
+  ModelFamily family_ = ModelFamily::UNKNOWN;
+  std::optional<LlmModelArgs> llm_model_args_;
+  std::optional<VlmModelArgs> vlm_model_args_;
+  std::optional<RecModelArgs> rec_model_args_;
+  std::optional<DiTComponentModelArgs> dit_model_args_;
+};
+
+inline bool has_linear_attention_layers(const TransformerModelArgs& args) {
+  const auto& hybrid_layer_types = args.layer_types();
+  if (!hybrid_layer_types.empty()) {
+    return std::any_of(hybrid_layer_types.begin(),
+                       hybrid_layer_types.end(),
+                       [](const std::string& layer_type) {
+                         return layer_type != "full_attention" &&
+                                layer_type != "attention" &&
+                                layer_type != "deepseek_sparse_attention";
+                       });
+  }
+  return args.full_attention_interval() > 1;
+}
+
+inline bool is_full_attention_layer(const TransformerModelArgs& args,
+                                    int64_t layer_id) {
+  const auto& hybrid_layer_types = args.layer_types();
+  if (layer_id >= 0 &&
+      layer_id < static_cast<int64_t>(hybrid_layer_types.size())) {
+    const auto& layer_type = hybrid_layer_types[layer_id];
+    return layer_type == "full_attention" || layer_type == "attention" ||
+           layer_type == "deepseek_sparse_attention";
+  }
+
+  const int32_t attention_interval = args.full_attention_interval();
+  if (attention_interval <= 1) {
+    return true;
+  }
+  return (layer_id + 1) % attention_interval == 0;
+}
+
+}  // namespace xllm

@@ -111,7 +111,9 @@ bool resolve_context_registration_name(const ModelContext& context,
     return true;
   }
   return resolve_model_registration_name(
-      context.get_model_args().model_type(), resolved_name, error_message);
+      context.get_transformer_model_args().model_type(),
+      resolved_name,
+      error_message);
 }
 
 #if defined(USE_NPU)
@@ -954,9 +956,13 @@ ModelContext create_model_context(const ResolvedModelDescriptor& descriptor,
   CHECK(descriptor.family != ModelFamily::DIT)
       << "DiT models require a DiTModelContext";
 
-  const ModelFamily family = model_family_from_name(execution_family);
+  const std::string& requested_family =
+      execution_family.empty() ? descriptor.family_name : execution_family;
+  const ModelFamily family = execution_family.empty()
+                                 ? descriptor.family
+                                 : model_family_from_name(execution_family);
   CHECK(family != ModelFamily::UNKNOWN && family != ModelFamily::DIT)
-      << "Unsupported model context family: " << execution_family;
+      << "Unsupported model context family: " << requested_family;
 
   const bool python_contract =
       ModelConfig::is_python_model_impl(model_impl) &&
@@ -977,13 +983,38 @@ ModelContext create_model_context(const ResolvedModelDescriptor& descriptor,
   }
   CHECK(native_contract || python_contract)
       << "Model registration " << descriptor.registration_name
-      << " does not support execution family: " << execution_family;
+      << " does not support execution family: " << requested_family;
 
   ModelContext context(parallel_args,
                        model_args,
                        quant_args,
                        tensor_options,
                        {family, descriptor.registration_name});
+  context.set_model_impl(model_impl);
+  return context;
+}
+
+ModelContext create_model_context(const ResolvedModelDescriptor& descriptor,
+                                  const std::string& execution_family,
+                                  const std::string& model_impl,
+                                  const ModelContext& source_context,
+                                  const ParallelArgs& parallel_args) {
+  CHECK(!descriptor.registration_name.empty())
+      << "Model context requires a resolved registration";
+  CHECK(descriptor.family != ModelFamily::DIT)
+      << "DiT models require a DiTModelContext";
+
+  const std::string& requested_family =
+      execution_family.empty() ? descriptor.family_name : execution_family;
+  const ModelFamily family = execution_family.empty()
+                                 ? descriptor.family
+                                 : model_family_from_name(execution_family);
+  CHECK(family != ModelFamily::UNKNOWN && family != ModelFamily::DIT)
+      << "Unsupported model context family: " << requested_family;
+  CHECK(source_context.get_model_family() == family)
+      << "Source model context family does not match requested family";
+
+  ModelContext context = source_context.with_parallel_args(parallel_args);
   context.set_model_impl(model_impl);
   return context;
 }
@@ -1088,7 +1119,7 @@ std::unique_ptr<CausalLM> create_llm_model(const ModelContext& context) {
 #endif
 
   LOG(ERROR) << "Unsupported model type: "
-             << context.get_model_args().model_type()
+             << context.get_transformer_model_args().model_type()
              << " for model_impl=" << canonical_model_impl(model_impl);
 
   return nullptr;
@@ -1109,7 +1140,7 @@ std::unique_ptr<RecModel> create_rec_model(const ModelContext& context) {
   }
 
   LOG(ERROR) << "Unsupported rec model type: "
-             << context.get_model_args().model_type();
+             << context.get_transformer_model_args().model_type();
 
   return nullptr;
 }
@@ -1156,7 +1187,8 @@ std::unique_ptr<CausalVLM> create_vlm_model(const ModelContext& context) {
   }
 
   if (ModelConfig::is_python_model_impl(model_impl)) {
-    std::string python_model_name = context.get_model_args().model_type();
+    std::string python_model_name =
+        context.get_transformer_model_args().model_type();
     if (is_glm5_next_target_model_type(python_model_name)) {
       python_model_name = "glm5_next_vl";
     }
@@ -1164,7 +1196,7 @@ std::unique_ptr<CausalVLM> create_vlm_model(const ModelContext& context) {
   }
 
   LOG(ERROR) << "Unsupported model type: "
-             << context.get_model_args().model_type()
+             << context.get_transformer_model_args().model_type()
              << " for model_impl=" << canonical_model_impl(model_impl);
 
   return nullptr;

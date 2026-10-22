@@ -83,11 +83,10 @@ TEST(ModelContextTest, KeepsLegacyContextsUnclassified) {
   const ModelContext context = make_context(args);
   EXPECT_EQ(context.get_model_family(), ModelFamily::UNKNOWN);
   EXPECT_TRUE(context.get_registration_name().empty());
-  EXPECT_EQ(context.get_model_args().hidden_size(), 128);
   EXPECT_DEATH(context.get_llm_model_args(), "require an LLM model context");
 }
 
-TEST(ModelContextTest, ExposesEachRegisteredFamilyThroughItsView) {
+TEST(ModelContextTest, ExposesEachRegisteredFamilyThroughOwnedArguments) {
   ModelArgs args{};
   args.model_type() = "parser_model_type";
   args.hidden_size() = 128;
@@ -100,21 +99,24 @@ TEST(ModelContextTest, ExposesEachRegisteredFamilyThroughItsView) {
       make_context(args, {ModelFamily::LLM, "registered_llm"});
   EXPECT_EQ(llm.get_registration_name(), "registered_llm");
   EXPECT_TRUE(llm.get_llm_model_args().use_moe());
-  EXPECT_EQ(&llm.get_llm_model_args().transformer().hidden_size(),
-            &llm.get_model_args().hidden_size());
+  EXPECT_EQ(&llm.get_llm_model_args(), &llm.get_llm_model_args());
+  EXPECT_EQ(llm.get_llm_model_args().transformer().hidden_size(), 128);
 
   const ModelContext vlm =
       make_context(args, {ModelFamily::VLM, "registered_vlm"});
   EXPECT_EQ(vlm.get_vlm_model_args().vision().mm_patch_size(), 14);
   EXPECT_EQ(vlm.get_vlm_model_args().transformer().hidden_size(), 128);
+  EXPECT_EQ(&vlm.get_vlm_model_args(), &vlm.get_vlm_model_args());
 
   const ModelContext rec =
       make_context(args, {ModelFamily::REC, "registered_rec"});
   EXPECT_EQ(rec.get_rec_model_args().query_num(), 64);
+  EXPECT_EQ(&rec.get_rec_model_args(), &rec.get_rec_model_args());
 
   const ModelContext dit =
       make_context(args, {ModelFamily::DIT, "registered_dit"});
   EXPECT_EQ(dit.get_dit_model_args().transformer().in_channels(), 16);
+  EXPECT_EQ(&dit.get_dit_model_args(), &dit.get_dit_model_args());
 }
 
 TEST(ModelContextTest, RejectsViewsFromOtherFamilies) {
@@ -128,7 +130,7 @@ TEST(ModelContextTest, RejectsViewsFromOtherFamilies) {
   EXPECT_DEATH(vlm.get_llm_model_args(), "require an LLM model context");
 }
 
-TEST(ModelContextTest, CopiedContextsBorrowTheirOwnArguments) {
+TEST(ModelContextTest, CopiedContextsShareArgumentStorage) {
   ModelArgs args{};
   args.hidden_size() = 128;
   const ModelContext context = make_context(args, {ModelFamily::LLM, "llm"});
@@ -137,15 +139,41 @@ TEST(ModelContextTest, CopiedContextsBorrowTheirOwnArguments) {
 
   EXPECT_EQ(copied_context.get_llm_model_args().transformer().hidden_size(),
             128);
+  EXPECT_EQ(&copied_context.get_llm_model_args(),
+            &context.get_llm_model_args());
   EXPECT_EQ(&copied_context.get_llm_model_args().transformer().hidden_size(),
-            &copied_context.get_model_args().hidden_size());
-  EXPECT_NE(&copied_context.get_llm_model_args().transformer().hidden_size(),
             &context.get_llm_model_args().transformer().hidden_size());
   EXPECT_EQ(copied_context.get_model_family(), ModelFamily::LLM);
   EXPECT_EQ(copied_context.get_registration_name(), "llm");
 }
 
-TEST(ModelContextTest, DerivedContextsKeepRegistrationAndOwnArguments) {
+TEST(ModelContextTest, KeepsArgumentsAfterSourceConfigIsDestroyed) {
+  const ModelContext context = [] {
+    ModelArgs args{};
+    args.hidden_size() = 128;
+    args.use_moe() = true;
+    return make_context(args, {ModelFamily::LLM, "llm"});
+  }();
+
+  EXPECT_EQ(context.get_llm_model_args().transformer().hidden_size(), 128);
+  EXPECT_TRUE(context.get_llm_model_args().use_moe());
+}
+
+TEST(ModelContextTest, MutatingCopiedContextDetachesArgumentStorage) {
+  ModelArgs args{};
+  args.hidden_size() = 128;
+  const ModelContext context = make_context(args, {ModelFamily::VLM, "vlm"});
+  ModelContext copied_context = context;
+
+  copied_context.set_encoder_embedding_mode(true);
+
+  EXPECT_TRUE(copied_context.get_vlm_model_args().encoder_embedding_mode());
+  EXPECT_FALSE(context.get_vlm_model_args().encoder_embedding_mode());
+  EXPECT_NE(&copied_context.get_vlm_model_args(),
+            &context.get_vlm_model_args());
+}
+
+TEST(ModelContextTest, DerivedContextsShareArgumentStorage) {
   ModelArgs args{};
   args.hidden_size() = 128;
   const ModelContext context =
@@ -157,8 +185,10 @@ TEST(ModelContextTest, DerivedContextsKeepRegistrationAndOwnArguments) {
   EXPECT_EQ(parallel_context.get_parallel_args().world_size(), 2);
   EXPECT_EQ(parallel_context.get_model_family(), ModelFamily::VLM);
   EXPECT_EQ(parallel_context.get_registration_name(), "registered_vlm");
+  EXPECT_EQ(&parallel_context.get_vlm_model_args(),
+            &context.get_vlm_model_args());
   EXPECT_EQ(&parallel_context.get_vlm_model_args().transformer().hidden_size(),
-            &parallel_context.get_model_args().hidden_size());
+            &context.get_vlm_model_args().transformer().hidden_size());
 
   QuantArgs quant_args;
   quant_args.bits() = 8;
@@ -166,8 +196,9 @@ TEST(ModelContextTest, DerivedContextsKeepRegistrationAndOwnArguments) {
   EXPECT_EQ(quant_context.get_quant_args().bits(), 8);
   EXPECT_EQ(quant_context.get_model_family(), ModelFamily::VLM);
   EXPECT_EQ(quant_context.get_registration_name(), "registered_vlm");
+  EXPECT_EQ(&quant_context.get_vlm_model_args(), &context.get_vlm_model_args());
   EXPECT_EQ(&quant_context.get_vlm_model_args().transformer().hidden_size(),
-            &quant_context.get_model_args().hidden_size());
+            &context.get_vlm_model_args().transformer().hidden_size());
 }
 
 TEST(DiTModelContextTest, IdentifiesItsFamilyWithoutADevice) {
@@ -176,7 +207,7 @@ TEST(DiTModelContextTest, IdentifiesItsFamilyWithoutADevice) {
 }
 
 #if !defined(USE_NPU)
-TEST(DiTModelContextTest, ViewsBorrowTheSelectedComponentArguments) {
+TEST(DiTModelContextTest, OwnsTheSelectedComponentArguments) {
   ModelArgs transformer_args{};
   transformer_args.model_type() = "unregistered_transformer_component";
   transformer_args.in_channels() = 16;
@@ -196,10 +227,11 @@ TEST(DiTModelContextTest, ViewsBorrowTheSelectedComponentArguments) {
   EXPECT_EQ(
       context.get_dit_model_args("transformer").transformer().in_channels(),
       16);
-  EXPECT_EQ(context.get_dit_model_args("vae").transformer().in_channels(), 4);
   EXPECT_EQ(context.get_dit_model_args("vae").vae().vae_dim(), 128);
-  EXPECT_EQ(&context.get_dit_model_args("vae").vae().vae_dim(),
-            &context.get_model_args("vae").vae_dim());
+  EXPECT_DEATH(context.get_dit_model_args("vae").transformer(),
+               "does not contain transformer");
+  EXPECT_EQ(&context.get_dit_model_args("vae"),
+            &context.get_dit_model_args("vae"));
   EXPECT_DEATH(context.get_dit_model_args("missing"), "model args not found");
 
 #if defined(USE_CUDA) || defined(USE_MLU) || defined(USE_DCU)

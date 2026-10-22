@@ -56,7 +56,13 @@ ModelContext::ModelContext(const ParallelArgs& input_parallel_args,
                            const torch::TensorOptions& tensor_options,
                            ModelContextIdentity identity)
     : identity_(std::move(identity)),
-      model_args_(model_args),
+      model_args_bundle_(
+          identity_.family == ModelFamily::DIT
+              ? std::make_shared<ModelArgsBundle>(model_args,
+                                                  identity_.family,
+                                                  identity_.dit_component_type)
+              : std::make_shared<ModelArgsBundle>(model_args,
+                                                  identity_.family)),
       quant_args_(quant_args),
       parallel_args_(input_parallel_args),
       tensor_options_(tensor_options),
@@ -76,6 +82,22 @@ ModelContext::ModelContext(const ParallelArgs& input_parallel_args,
   derive_optimization_config();
 }
 
+ModelContext::ModelContext(const ParallelArgs& input_parallel_args,
+                           std::shared_ptr<ModelArgsBundle> model_args_bundle,
+                           const QuantArgs& quant_args,
+                           const torch::TensorOptions& tensor_options,
+                           ModelContextIdentity identity)
+    : identity_(std::move(identity)),
+      model_args_bundle_(std::move(model_args_bundle)),
+      quant_args_(quant_args),
+      parallel_args_(input_parallel_args),
+      tensor_options_(tensor_options),
+      stream_registry_(
+          std::make_shared<ModelStreamRegistry>(tensor_options.device())) {
+  CHECK(model_args_bundle_ != nullptr);
+  derive_optimization_config();
+}
+
 #if defined(USE_NPU)
 ModelContext::ModelContext(const ParallelArgs& input_parallel_args,
                            const ModelArgs& model_args,
@@ -84,52 +106,96 @@ ModelContext::ModelContext(const ParallelArgs& input_parallel_args,
                            atb::Context* context,
                            ModelContextIdentity identity)
     : identity_(std::move(identity)),
-      model_args_(model_args),
+      model_args_bundle_(
+          identity_.family == ModelFamily::DIT
+              ? std::make_shared<ModelArgsBundle>(model_args,
+                                                  identity_.family,
+                                                  identity_.dit_component_type)
+              : std::make_shared<ModelArgsBundle>(model_args,
+                                                  identity_.family)),
       quant_args_(quant_args),
       parallel_args_(input_parallel_args),
       tensor_options_(tensor_options),
       stream_registry_(
           std::make_shared<ModelStreamRegistry>(tensor_options.device())),
       context_(context) {}
+
+ModelContext::ModelContext(const ParallelArgs& input_parallel_args,
+                           std::shared_ptr<ModelArgsBundle> model_args_bundle,
+                           const QuantArgs& quant_args,
+                           const torch::TensorOptions& tensor_options,
+                           atb::Context* context,
+                           ModelContextIdentity identity)
+    : identity_(std::move(identity)),
+      model_args_bundle_(std::move(model_args_bundle)),
+      quant_args_(quant_args),
+      parallel_args_(input_parallel_args),
+      tensor_options_(tensor_options),
+      stream_registry_(
+          std::make_shared<ModelStreamRegistry>(tensor_options.device())),
+      context_(context) {
+  CHECK(model_args_bundle_ != nullptr);
+}
 #endif
 
-LlmModelArgsView ModelContext::get_llm_model_args() const& {
+const LlmModelArgs& ModelContext::get_llm_model_args() const& {
   CHECK(identity_.family == ModelFamily::LLM)
       << "LLM arguments require an LLM model context";
-  return make_llm_model_args_view(model_args_);
+  return model_args_bundle_->llm_model_args();
 }
 
-VlmModelArgsView ModelContext::get_vlm_model_args() const& {
+const VlmModelArgs& ModelContext::get_vlm_model_args() const& {
   CHECK(identity_.family == ModelFamily::VLM)
       << "VLM arguments require a VLM model context";
-  return make_vlm_model_args_view(model_args_);
+  return model_args_bundle_->vlm_model_args();
 }
 
-RecModelArgsView ModelContext::get_rec_model_args() const& {
+const RecModelArgs& ModelContext::get_rec_model_args() const& {
   CHECK(identity_.family == ModelFamily::REC)
       << "Rec arguments require a Rec model context";
-  return make_rec_model_args_view(model_args_);
+  return model_args_bundle_->rec_model_args();
 }
 
-DiTModelArgsView ModelContext::get_dit_model_args() const& {
+const DiTComponentModelArgs& ModelContext::get_dit_model_args() const& {
   CHECK(identity_.family == ModelFamily::DIT)
       << "DiT arguments require a DiT model context";
-  return make_dit_model_args_view(model_args_);
+  return model_args_bundle_->dit_model_args();
+}
+
+const TransformerModelArgs& ModelContext::get_transformer_model_args() const& {
+  switch (identity_.family) {
+    case ModelFamily::LLM:
+      return get_llm_model_args().transformer();
+    case ModelFamily::VLM:
+      return get_vlm_model_args().transformer();
+    case ModelFamily::REC:
+      return get_rec_model_args().transformer();
+    case ModelFamily::DIT:
+    case ModelFamily::UNKNOWN:
+      break;
+  }
+  LOG(FATAL) << "Transformer arguments require an LLM, VLM, or Rec model "
+                "context";
+  static const TransformerModelArgs empty_args;
+  return empty_args;
 }
 
 ModelContext ModelContext::with_parallel_args(
     const ParallelArgs& parallel_args) const {
 #if defined(USE_NPU)
   ModelContext derived(parallel_args,
-                       model_args_,
+                       model_args_bundle_,
                        quant_args_,
                        tensor_options_,
                        context_,
                        identity_);
   derived.atb_workspace_ = atb_workspace_;
 #else
-  ModelContext derived(
-      parallel_args, model_args_, quant_args_, tensor_options_, identity_);
+  ModelContext derived(parallel_args,
+                       model_args_bundle_,
+                       quant_args_,
+                       tensor_options_,
+                       identity_);
 #endif
   derived.model_id_ = model_id_;
   derived.model_impl_ = model_impl_;
@@ -143,15 +209,18 @@ ModelContext ModelContext::with_parallel_args(
 ModelContext ModelContext::with_quant_args(const QuantArgs& quant_args) const {
 #if defined(USE_NPU)
   ModelContext derived(parallel_args_,
-                       model_args_,
+                       model_args_bundle_,
                        quant_args,
                        tensor_options_,
                        context_,
                        identity_);
   derived.atb_workspace_ = atb_workspace_;
 #else
-  ModelContext derived(
-      parallel_args_, model_args_, quant_args, tensor_options_, identity_);
+  ModelContext derived(parallel_args_,
+                       model_args_bundle_,
+                       quant_args,
+                       tensor_options_,
+                       identity_);
 #endif
   derived.model_id_ = model_id_;
   derived.model_impl_ = model_impl_;
@@ -159,6 +228,32 @@ ModelContext ModelContext::with_quant_args(const QuantArgs& quant_args) const {
   derived.flash_comm1_options_ = flash_comm1_options_;
   derived.stream_registry_ = stream_registry_;
   derived.derive_optimization_config();
+  return derived;
+}
+
+ModelContext ModelContext::with_tensor_options(
+    const torch::TensorOptions& tensor_options) const {
+#if defined(USE_NPU)
+  ModelContext derived(parallel_args_,
+                       model_args_bundle_,
+                       quant_args_,
+                       tensor_options,
+                       context_,
+                       identity_);
+  derived.atb_workspace_ = atb_workspace_;
+#else
+  ModelContext derived(parallel_args_,
+                       model_args_bundle_,
+                       quant_args_,
+                       tensor_options,
+                       identity_);
+#endif
+  derived.model_id_ = model_id_;
+  derived.model_impl_ = model_impl_;
+  derived.extension_impl_ = extension_impl_;
+  derived.optimization_config_ = optimization_config_;
+  derived.flash_comm1_options_ = flash_comm1_options_;
+  derived.stream_registry_ = stream_registry_;
   return derived;
 }
 

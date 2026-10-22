@@ -20,9 +20,11 @@ limitations under the License.
 #endif
 
 #include <memory>
+#include <unordered_map>
 
 #include "core/framework/dit_cache/dit_cache_config.h"
 #include "core/framework/model/model_args.h"
+#include "core/framework/model/model_family_args.h"
 #include "core/framework/model_context/model_context.h"
 #include "core/framework/quantization/quant_args.h"
 #include "framework/parallel_state/parallel_args.h"
@@ -41,10 +43,13 @@ class DiTModelContext {
                   std::string model_type,
                   std::string registration_name = "");
 
-  const ModelArgs& get_model_args(const std::string& component) const;
+  const DiTComponentModelArgs& get_dit_model_args(
+      const std::string& component) const&;
+  const DiTComponentModelArgs& get_dit_model_args(
+      const std::string& component) const&& = delete;
 
-  DiTModelArgsView get_dit_model_args(const std::string& component) const&;
-  DiTModelArgsView get_dit_model_args(const std::string& component) const&& =
+  const VlmModelArgs& get_vlm_model_args(const std::string& component) const&;
+  const VlmModelArgs& get_vlm_model_args(const std::string& component) const&& =
       delete;
 
   ModelFamily get_model_family() const noexcept { return ModelFamily::DIT; }
@@ -52,13 +57,12 @@ class DiTModelContext {
   const QuantArgs& get_quant_args(const std::string& component) const;
 
   bool has_component(const std::string& component) const {
-    return model_args_.count(component) > 0;
+    return model_args_bundles_.count(component) > 0;
   }
 
-#if defined(USE_NPU) || defined(USE_CUDA) || defined(USE_MLU) || \
-    defined(USE_DCU)
-  ModelContext get_model_context(const std::string& component) const;
-#endif
+  ModelContext get_model_context(
+      const std::string& component,
+      ModelFamily expected_family = ModelFamily::UNKNOWN) const;
 
   const ParallelArgs& get_parallel_args() const { return parallel_args_; }
 
@@ -79,7 +83,8 @@ class DiTModelContext {
 #endif
 
  private:
-  std::unordered_map<std::string, ModelArgs> model_args_;
+  std::unordered_map<std::string, std::shared_ptr<ModelArgsBundle>>
+      model_args_bundles_;
   std::unordered_map<std::string, QuantArgs> quant_args_;
   ParallelArgs parallel_args_;
   torch::TensorOptions tensor_options_;
