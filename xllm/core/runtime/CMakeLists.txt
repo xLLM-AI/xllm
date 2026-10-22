@@ -52,6 +52,7 @@ cc_library(
     speculative_worker_impl.h
     mtp_worker_impl.h
     mtp_runtime_helpers.h
+    mtp_worker_options.h
     unified_mtp_worker_impl.h
     suffix_worker_impl.h
     eagle3_worker_impl.h

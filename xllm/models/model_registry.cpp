@@ -97,6 +97,23 @@ ModelFamily model_family_from_name(std::string_view family_name) {
   return ModelFamily::UNKNOWN;
 }
 
+bool resolve_context_registration_name(const ModelContext& context,
+                                       std::string* resolved_name,
+                                       std::string* error_message) {
+  if (resolved_name == nullptr) {
+    if (error_message != nullptr) {
+      *error_message = "resolved_name must not be null";
+    }
+    return false;
+  }
+  if (!context.get_registration_name().empty()) {
+    *resolved_name = context.get_registration_name();
+    return true;
+  }
+  return resolve_model_registration_name(
+      context.get_model_args().model_type(), resolved_name, error_message);
+}
+
 #if defined(USE_NPU)
 constexpr char kAutoBackend[] = "AUTO";
 constexpr char kAtbBackend[] = "ATB";
@@ -375,6 +392,43 @@ bool ModelRegistry::resolve_model_descriptor(
   resolved_descriptor.meta = model_it->second;
 
   const auto family_it = instance->model_backend_.find(resolved_name);
+  if (family_it != instance->model_backend_.end()) {
+    resolved_descriptor.family_name = family_it->second;
+  }
+
+  *descriptor = std::move(resolved_descriptor);
+  return true;
+}
+
+bool ModelRegistry::get_registered_model_descriptor(
+    const std::string& registration_name,
+    ResolvedModelDescriptor* descriptor,
+    std::string* error_message) {
+  if (descriptor == nullptr) {
+    if (error_message != nullptr) {
+      *error_message = "descriptor must not be null";
+    }
+    return false;
+  }
+
+  const ModelRegistry* instance = get_instance();
+  const auto model_it = instance->model_registry_.find(registration_name);
+  if (model_it == instance->model_registry_.end()) {
+    if (error_message != nullptr) {
+      *error_message =
+          "No model registration found for resolved name: " + registration_name;
+    }
+    return false;
+  }
+
+  ResolvedModelDescriptor resolved_descriptor;
+  resolved_descriptor.requested_name = registration_name;
+  resolved_descriptor.canonical_name = registration_name;
+  resolved_descriptor.registration_name = registration_name;
+  resolved_descriptor.family = model_it->second.family;
+  resolved_descriptor.meta = model_it->second;
+
+  const auto family_it = instance->model_backend_.find(registration_name);
   if (family_it != instance->model_backend_.end()) {
     resolved_descriptor.family_name = family_it->second;
   }
@@ -888,6 +942,52 @@ ModelFamily ModelRegistry::get_model_family(const std::string& name) {
              : canonical_it->second.family;
 }
 
+ModelContext create_model_context(const ResolvedModelDescriptor& descriptor,
+                                  const std::string& execution_family,
+                                  const std::string& model_impl,
+                                  const ParallelArgs& parallel_args,
+                                  const ModelArgs& model_args,
+                                  const QuantArgs& quant_args,
+                                  const torch::TensorOptions& tensor_options) {
+  CHECK(!descriptor.registration_name.empty())
+      << "Model context requires a resolved registration";
+  CHECK(descriptor.family != ModelFamily::DIT)
+      << "DiT models require a DiTModelContext";
+
+  const ModelFamily family = model_family_from_name(execution_family);
+  CHECK(family != ModelFamily::UNKNOWN && family != ModelFamily::DIT)
+      << "Unsupported model context family: " << execution_family;
+
+  const bool python_contract =
+      ModelConfig::is_python_model_impl(model_impl) &&
+      (family == ModelFamily::LLM || family == ModelFamily::VLM);
+  bool native_contract = false;
+  switch (family) {
+    case ModelFamily::LLM:
+      native_contract = !descriptor.meta.causal_lm_factories.empty();
+      break;
+    case ModelFamily::VLM:
+      native_contract = !descriptor.meta.causal_vlm_factories.empty();
+      break;
+    case ModelFamily::REC:
+      native_contract = descriptor.meta.rec_model_factory != nullptr;
+      break;
+    default:
+      break;
+  }
+  CHECK(native_contract || python_contract)
+      << "Model registration " << descriptor.registration_name
+      << " does not support execution family: " << execution_family;
+
+  ModelContext context(parallel_args,
+                       model_args,
+                       quant_args,
+                       tensor_options,
+                       {family, descriptor.registration_name});
+  context.set_model_impl(model_impl);
+  return context;
+}
+
 std::unique_ptr<MultimodalProcessorBase> create_multimodal_processor(
     const ModelArgs& model_args,
     std::shared_ptr<Tokenizer> tokenizer,
@@ -927,8 +1027,11 @@ std::unique_ptr<CausalLM> create_llm_model(const ModelContext& context) {
       LOG(ERROR) << "Native model extensions require model_impl=native";
       return nullptr;
     }
-    const std::string direct_name = canonical_model_registration_name(
-        context.get_model_args().model_type());
+    std::string direct_name;
+    if (!resolve_context_registration_name(
+            context, &direct_name, /*error_message=*/nullptr)) {
+      return nullptr;
+    }
     auto direct_factory =
         ModelRegistry::get_causallm_factory(direct_name, extension_impl);
     if (!direct_factory) {
@@ -940,13 +1043,8 @@ std::unique_ptr<CausalLM> create_llm_model(const ModelContext& context) {
   }
   std::string resolved_name;
   std::string error_message;
-  if (ModelConfig::is_python_model_impl(model_impl)) {
-    resolved_name = canonical_model_registration_name(
-        context.get_model_args().model_type());
-  } else if (!resolve_model_registration_name(
-                 context.get_model_args().model_type(),
-                 &resolved_name,
-                 &error_message)) {
+  if (!resolve_context_registration_name(
+          context, &resolved_name, &error_message)) {
     LOG(ERROR) << error_message;
     return nullptr;
   }
@@ -977,9 +1075,8 @@ std::unique_ptr<CausalLM> create_llm_model(const ModelContext& context) {
 std::unique_ptr<RecModel> create_rec_model(const ModelContext& context) {
   std::string resolved_name;
   std::string error_message;
-  if (!resolve_model_registration_name(context.get_model_args().model_type(),
-                                       &resolved_name,
-                                       &error_message)) {
+  if (!resolve_context_registration_name(
+          context, &resolved_name, &error_message)) {
     LOG(ERROR) << error_message;
     return nullptr;
   }
@@ -1008,8 +1105,11 @@ std::unique_ptr<CausalVLM> create_vlm_model(const ModelContext& context) {
       LOG(ERROR) << "Native model extensions require model_impl=native";
       return nullptr;
     }
-    const std::string direct_name = canonical_model_registration_name(
-        context.get_model_args().model_type());
+    std::string direct_name;
+    if (!resolve_context_registration_name(
+            context, &direct_name, /*error_message=*/nullptr)) {
+      return nullptr;
+    }
     auto direct_factory =
         ModelRegistry::get_causalvlm_factory(direct_name, extension_impl);
     if (!direct_factory) {
@@ -1021,13 +1121,8 @@ std::unique_ptr<CausalVLM> create_vlm_model(const ModelContext& context) {
   }
   std::string resolved_name;
   std::string error_message;
-  if (ModelConfig::is_python_model_impl(model_impl)) {
-    resolved_name = canonical_model_registration_name(
-        context.get_model_args().model_type());
-  } else if (!resolve_model_registration_name(
-                 context.get_model_args().model_type(),
-                 &resolved_name,
-                 &error_message)) {
+  if (!resolve_context_registration_name(
+          context, &resolved_name, &error_message)) {
     LOG(ERROR) << error_message;
     return nullptr;
   }

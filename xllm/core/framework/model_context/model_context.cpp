@@ -17,9 +17,10 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <utility>
+
 #include "common/global_flags.h"
 #include "core/framework/config/execution_config.h"
-#include "platform/device.h"
 #include "platform/platform.h"
 #include "util/env_var.h"
 #if defined(USE_NPU)
@@ -52,10 +53,12 @@ bool should_enable_async_tiling_copy_stream() {
 ModelContext::ModelContext(const ParallelArgs& input_parallel_args,
                            const ModelArgs& model_args,
                            const QuantArgs& quant_args,
-                           const torch::TensorOptions& tensor_options)
-    : parallel_args_(input_parallel_args),
+                           const torch::TensorOptions& tensor_options,
+                           ModelContextIdentity identity)
+    : identity_(std::move(identity)),
       model_args_(model_args),
       quant_args_(quant_args),
+      parallel_args_(input_parallel_args),
       tensor_options_(tensor_options),
       stream_registry_(
           std::make_shared<ModelStreamRegistry>(tensor_options.device())) {
@@ -78,25 +81,55 @@ ModelContext::ModelContext(const ParallelArgs& input_parallel_args,
                            const ModelArgs& model_args,
                            const QuantArgs& quant_args,
                            const torch::TensorOptions& tensor_options,
-                           atb::Context* context)
-    : parallel_args_(input_parallel_args),
+                           atb::Context* context,
+                           ModelContextIdentity identity)
+    : identity_(std::move(identity)),
       model_args_(model_args),
       quant_args_(quant_args),
+      parallel_args_(input_parallel_args),
       tensor_options_(tensor_options),
       stream_registry_(
           std::make_shared<ModelStreamRegistry>(tensor_options.device())),
       context_(context) {}
 #endif
 
+LlmModelArgsView ModelContext::get_llm_model_args() const& {
+  CHECK(identity_.family == ModelFamily::LLM)
+      << "LLM arguments require an LLM model context";
+  return make_llm_model_args_view(model_args_);
+}
+
+VlmModelArgsView ModelContext::get_vlm_model_args() const& {
+  CHECK(identity_.family == ModelFamily::VLM)
+      << "VLM arguments require a VLM model context";
+  return make_vlm_model_args_view(model_args_);
+}
+
+RecModelArgsView ModelContext::get_rec_model_args() const& {
+  CHECK(identity_.family == ModelFamily::REC)
+      << "Rec arguments require a Rec model context";
+  return make_rec_model_args_view(model_args_);
+}
+
+DiTModelArgsView ModelContext::get_dit_model_args() const& {
+  CHECK(identity_.family == ModelFamily::DIT)
+      << "DiT arguments require a DiT model context";
+  return make_dit_model_args_view(model_args_);
+}
+
 ModelContext ModelContext::with_parallel_args(
     const ParallelArgs& parallel_args) const {
 #if defined(USE_NPU)
-  ModelContext derived(
-      parallel_args, model_args_, quant_args_, tensor_options_, context_);
+  ModelContext derived(parallel_args,
+                       model_args_,
+                       quant_args_,
+                       tensor_options_,
+                       context_,
+                       identity_);
   derived.atb_workspace_ = atb_workspace_;
 #else
   ModelContext derived(
-      parallel_args, model_args_, quant_args_, tensor_options_);
+      parallel_args, model_args_, quant_args_, tensor_options_, identity_);
 #endif
   derived.model_id_ = model_id_;
   derived.model_impl_ = model_impl_;
@@ -109,12 +142,16 @@ ModelContext ModelContext::with_parallel_args(
 
 ModelContext ModelContext::with_quant_args(const QuantArgs& quant_args) const {
 #if defined(USE_NPU)
-  ModelContext derived(
-      parallel_args_, model_args_, quant_args, tensor_options_, context_);
+  ModelContext derived(parallel_args_,
+                       model_args_,
+                       quant_args,
+                       tensor_options_,
+                       context_,
+                       identity_);
   derived.atb_workspace_ = atb_workspace_;
 #else
   ModelContext derived(
-      parallel_args_, model_args_, quant_args, tensor_options_);
+      parallel_args_, model_args_, quant_args, tensor_options_, identity_);
 #endif
   derived.model_id_ = model_id_;
   derived.model_impl_ = model_impl_;

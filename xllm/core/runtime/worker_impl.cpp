@@ -2653,8 +2653,24 @@ bool WorkerImpl::init_model_impl(const std::string& model_weights_path,
   // create model context
   dtype_ = dtype;
   auto tensor_options = torch::dtype(dtype_).device(device_);
-  context_ = ModelContext(parallel_args_, args, quant_args, tensor_options);
-  context_.set_model_impl(ModelConfig::get_instance().model_impl());
+  std::string npu_kernel_backend;
+#if defined(USE_NPU)
+  npu_kernel_backend = KernelConfig::get_instance().npu_kernel_backend();
+#endif
+  // Speculative draft setup can replace model_type, so resolve the runtime
+  // registration only after all model argument overrides are complete.
+  ResolvedModelDescriptor descriptor;
+  std::string error_message;
+  CHECK(ModelRegistry::resolve_model_descriptor(
+      args.model_type(), npu_kernel_backend, &descriptor, &error_message))
+      << error_message;
+  context_ = create_model_context(descriptor,
+                                  options_.backend(),
+                                  ModelConfig::get_instance().model_impl(),
+                                  parallel_args_,
+                                  args,
+                                  quant_args,
+                                  tensor_options);
   context_.set_extension_impl(options_.extension_impl());
   context_.set_model_id(options_.model_id());
   FlashComm1Options flash_comm1_options;

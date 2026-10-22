@@ -27,12 +27,21 @@ limitations under the License.
 
 #include "core/common/flash_comm1_context.h"
 #include "core/framework/model/model_args.h"
+#include "core/framework/model/model_args_view.h"
+#include "core/framework/model/model_family.h"
 #include "core/framework/parallel_state/parallel_args.h"
 #include "core/framework/quantization/quant_args.h"
 #include "core/platform/model_stream_registry.h"
 #include "framework/parallel_state/parallel_args.h"
 
 namespace xllm {
+
+// Identity supplied by the model registration selected at the creation site.
+// Legacy and unregistered component contexts leave the identity unspecified.
+struct ModelContextIdentity {
+  ModelFamily family = ModelFamily::UNKNOWN;
+  std::string registration_name;
+};
 
 // Internal optimization configuration.
 // This struct holds all optimization techniques that are automatically
@@ -59,17 +68,37 @@ class ModelContext {
   ModelContext(const ParallelArgs& input_parallel_args,
                const ModelArgs& model_args,
                const QuantArgs& quant_args,
-               const torch::TensorOptions& tensor_options);
+               const torch::TensorOptions& tensor_options,
+               ModelContextIdentity identity = {});
 
 #if defined(USE_NPU)
   ModelContext(const ParallelArgs& input_parallel_args,
                const ModelArgs& model_args,
                const QuantArgs& quant_args,
                const torch::TensorOptions& tensor_options,
-               atb::Context* context);
+               atb::Context* context,
+               ModelContextIdentity identity = {});
 #endif
 
   const ModelArgs& get_model_args() const { return model_args_; }
+
+  ModelFamily get_model_family() const noexcept { return identity_.family; }
+
+  const std::string& get_registration_name() const noexcept {
+    return identity_.registration_name;
+  }
+
+  LlmModelArgsView get_llm_model_args() const&;
+  LlmModelArgsView get_llm_model_args() const&& = delete;
+
+  VlmModelArgsView get_vlm_model_args() const&;
+  VlmModelArgsView get_vlm_model_args() const&& = delete;
+
+  RecModelArgsView get_rec_model_args() const&;
+  RecModelArgsView get_rec_model_args() const&& = delete;
+
+  DiTModelArgsView get_dit_model_args() const&;
+  DiTModelArgsView get_dit_model_args() const&& = delete;
 
   const QuantArgs& get_quant_args() const { return quant_args_; }
 
@@ -132,6 +161,7 @@ class ModelContext {
       model_id_;  // Model identifier for VirtualMemory multi-model support
   std::string model_impl_;
   std::string extension_impl_;
+  ModelContextIdentity identity_;
   ModelArgs model_args_;
   QuantArgs quant_args_;
   ParallelArgs parallel_args_;

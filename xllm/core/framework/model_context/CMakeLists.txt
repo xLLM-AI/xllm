@@ -13,5 +13,6 @@ cc_library(
     :platform
     :quantization
     torch
+    $<$<BOOL:${USE_NPU}>:atb_workspace>
     $<$<BOOL:${USE_NPU}>:torch_npu>
 )

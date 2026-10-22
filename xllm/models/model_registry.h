@@ -230,6 +230,13 @@ class ModelRegistry {
       ResolvedModelDescriptor* descriptor,
       std::string* error_message = nullptr);
 
+  // Snapshot an already selected registration key without resolving aliases or
+  // consulting the current kernel backend.
+  static bool get_registered_model_descriptor(
+      const std::string& registration_name,
+      ResolvedModelDescriptor* descriptor,
+      std::string* error_message = nullptr);
+
  private:
   std::unordered_map<std::string, ModelMeta> model_registry_;
   std::unordered_map<std::string, std::string> model_backend_;
@@ -279,6 +286,17 @@ bool resolve_model_registration(const std::string& model_type,
 void resolve_npu_kernel_backend(Options* options,
                                 std::string_view model_component = "");
 #endif
+
+// Select the requested execution contract from a resolved registration. A model
+// can provide more than one contract, such as both LLM and Rec execution.
+// DiT pipelines keep their separate DiTModelContext lifecycle.
+ModelContext create_model_context(const ResolvedModelDescriptor& descriptor,
+                                  const std::string& execution_family,
+                                  const std::string& model_impl,
+                                  const ParallelArgs& parallel_args,
+                                  const ModelArgs& model_args,
+                                  const QuantArgs& quant_args,
+                                  const torch::TensorOptions& tensor_options);
 
 std::unique_ptr<CausalLM> create_llm_model(const ModelContext& context);
 

@@ -2,6 +2,18 @@ include(cc_test)
 
 cc_test(
   NO_NPU_RUNTIME
+  NAME mtp_worker_options_test
+  SRCS mtp_worker_options_test.cpp
+  DEPS
+    torch
+    proto::xllm_proto
+    glog::glog
+    nlohmann_json::nlohmann_json
+    GTest::gtest_main
+)
+
+cc_test(
+  NO_NPU_RUNTIME
   NAME executor_impl_factory_test
   SRCS executor_impl_factory_test.cpp
   DEPS :runtime GTest::gtest_main

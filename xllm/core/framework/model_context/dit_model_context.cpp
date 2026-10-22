@@ -74,6 +74,11 @@ const QuantArgs& DiTModelContext::get_quant_args(
   }
 }
 
+DiTModelArgsView DiTModelContext::get_dit_model_args(
+    const std::string& component) const& {
+  return make_dit_model_args_view(get_model_args(component));
+}
+
 #if defined(USE_NPU) || defined(USE_CUDA) || defined(USE_MLU) || \
     defined(USE_DCU)
 ModelContext DiTModelContext::get_model_context(
@@ -83,12 +88,14 @@ ModelContext DiTModelContext::get_model_context(
                       get_model_args(component),
                       get_quant_args(component),
                       tensor_options_,
-                      context_);
+                      context_,
+                      {ModelFamily::DIT, {}});
 #else
   return ModelContext(parallel_args_,
                       get_model_args(component),
                       get_quant_args(component),
-                      tensor_options_);
+                      tensor_options_,
+                      {ModelFamily::DIT, {}});
 #endif
 }
 #endif

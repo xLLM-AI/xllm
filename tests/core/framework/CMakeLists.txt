@@ -49,3 +49,13 @@ cc_test(
     :model
     GTest::gtest_main
 )
+
+cc_test(
+  NAME
+    model_context_test
+  SRCS
+    model_context_test.cpp
+  DEPS
+    :model_context
+    GTest::gtest_main
+)

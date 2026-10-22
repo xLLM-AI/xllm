@@ -29,6 +29,7 @@ limitations under the License.
 #include "common/types.h"
 #include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/config/kernel_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/rec_config.h"
 #include "util/rec_model_utils.h"
@@ -2859,6 +2860,22 @@ bool RecWorkerImpl::init_model(ModelContext& context) {
   CHECK(expected_model_kind != RecModelKind::kNone)
       << "Unsupported rec model_type: " << model_type;
 
+  ResolvedModelDescriptor descriptor;
+  std::string error_message;
+  if (!context.get_registration_name().empty()) {
+    CHECK(ModelRegistry::get_registered_model_descriptor(
+        context.get_registration_name(), &descriptor, &error_message))
+        << error_message;
+  } else {
+    std::string npu_kernel_backend;
+#if defined(USE_NPU)
+    npu_kernel_backend = KernelConfig::get_instance().npu_kernel_backend();
+#endif
+    CHECK(ModelRegistry::resolve_model_descriptor(
+        model_type, npu_kernel_backend, &descriptor, &error_message))
+        << error_message;
+  }
+
   // Reserve space for model instances
   work_pipelines_.reserve(options_.rec_worker_max_concurrency());
   for (size_t i = 0; i < options_.rec_worker_max_concurrency(); ++i) {
@@ -2867,11 +2884,16 @@ bool RecWorkerImpl::init_model(ModelContext& context) {
     runtime.stream = std::move(stream);
     auto stream_guard = runtime.stream->set_stream_guard();
 
-    runtime.context =
-        std::make_unique<ModelContext>(context.get_parallel_args(),
-                                       context.get_model_args(),
-                                       context.get_quant_args(),
-                                       context.get_tensor_options());
+    // Construct under each pipeline's stream guard so ATB contexts and stream
+    // registries remain independent for concurrent execution.
+    runtime.context = std::make_unique<ModelContext>(
+        create_model_context(descriptor,
+                             /*execution_family=*/"rec",
+                             context.get_model_impl(),
+                             context.get_parallel_args(),
+                             context.get_model_args(),
+                             context.get_quant_args(),
+                             context.get_tensor_options()));
     runtime.context->set_model_id(context.get_model_id());
     runtime.context->set_model_impl(context.get_model_impl());
     runtime.context->set_extension_impl(context.get_extension_impl());

@@ -42,6 +42,12 @@ class DiTModelContext {
 
   const ModelArgs& get_model_args(const std::string& component) const;
 
+  DiTModelArgsView get_dit_model_args(const std::string& component) const&;
+  DiTModelArgsView get_dit_model_args(const std::string& component) const&& =
+      delete;
+
+  ModelFamily get_model_family() const noexcept { return ModelFamily::DIT; }
+
   const QuantArgs& get_quant_args(const std::string& component) const;
 
   bool has_component(const std::string& component) const {
