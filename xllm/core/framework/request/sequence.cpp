@@ -600,12 +600,7 @@ std::optional<SequenceOutput> Sequence::generate_streaming_output(
     const Tokenizer& tokenizer) {
   // figure out the valid generated token
   // because there might be fake token -1 if enable_schedule_overlap
-  for (auto i = num_tokens_ - 1; i >= 0; --i) {
-    if (tokens_[i] >= 0) {
-      size = i + 1;
-      break;
-    }
-  }
+  size = num_valid_tokens();
   CHECK_LE(size, num_tokens_);
   AUTO_COUNTER(detokenization_latency_seconds_stream);
   const auto ids = Slice<int32_t>(tokens_, size);
@@ -774,13 +769,7 @@ SequenceOutput Sequence::generate_output(const Tokenizer& tokenizer) {
   // NOTE: enable_schedule_overlap will generate an extra '-1' token.
   // we need to ignore these '-1' tokens.
   const auto ids = tokens();
-  size_t size;
-  for (auto i = num_tokens_ - 1; i >= 0; --i) {
-    if (tokens_[i] >= 0) {
-      size = i + 1;
-      break;
-    }
-  }
+  const size_t size = num_valid_tokens();
 
   // 3. generate onerec output
   if (is_onerec_model()) {

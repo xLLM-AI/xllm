@@ -104,13 +104,7 @@ void Request::log_statistic(double total_latency) {
   int idx = 0;
   for (const auto& seq : sequences()) {
     double ttft = seq->time_to_first_token_latency_seconds();
-    size_t gen_tokens = seq->num_generated_tokens();
-    // NOTE: Avoid counting the extra execution step in overlap scenario.
-    // Guard against size_t underflow: a cancelled request may generate 0
-    // tokens, and 0 - 1 would wrap to SIZE_MAX in the log output.
-    if (state_.enable_schedule_overlap && gen_tokens > 0) {
-      --gen_tokens;
-    }
+    const size_t gen_tokens = seq->num_committed_generated_tokens();
     double tpot = 0.0;
     double gen_speed = 0.0;
     if (gen_tokens > 1 && total_latency > ttft && ttft > 0) {
@@ -186,12 +180,7 @@ RequestOutput Request::generate_output(const Tokenizer& tokenizer,
   Usage usage;
   usage.num_prompt_tokens = state_.prompt_tokens.size();
   for (const auto& seq : sequences()) {
-    size_t num_generated_tokens = seq->num_generated_tokens();
-    // NOTE: Avoid counting the extra execution step in overlap scenario.
-    if (state_.enable_schedule_overlap && num_generated_tokens > 0) {
-      --num_generated_tokens;
-    }
-    usage.num_generated_tokens += num_generated_tokens;
+    usage.num_generated_tokens += seq->num_committed_generated_tokens();
   }
   CHECK_LE(num_prefix_cache_tokens_,
            static_cast<size_t>(std::numeric_limits<int32_t>::max()));

@@ -169,6 +169,7 @@ class AclGraph {
   std::optional<c10_npu::NPUStream> update_stream_;
   std::atomic<bool> replay_inputs_prepared_{false};
   std::optional<StaticGraphTaskSignature> static_graph_task_signature_;
+  std::mutex graph_task_mutex_;
   std::optional<std::array<const void*, 11>>
       spec_verify_input_addresses_at_capture_;
   torch::Tensor graph_paged_attention_tiling_data_;
@@ -226,7 +227,7 @@ class AclGraphExecutorImpl : public ExecutorImpl {
   struct GraphSlot {
     std::unique_ptr<GraphPersistentParam> persistent_param;
     absl::flat_hash_map<uint64_t, std::shared_ptr<AclGraph>> graphs;
-    std::deque<uint64_t> static_mtp_graph_keys;
+    std::deque<uint64_t> spec_verify_graph_keys;
     bool is_prepared = false;
   };
   std::array<GraphSlot, 2> graph_slots_;

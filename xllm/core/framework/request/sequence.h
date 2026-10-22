@@ -173,6 +173,17 @@ class Sequence final {
   size_t num_generated_tokens() const {
     return num_tokens_ - num_prompt_tokens_;
   }
+  // Overlap may leave zero, one, or more uncommitted placeholders at the end.
+  size_t num_valid_tokens() const {
+    size_t size = num_tokens_;
+    while (size > num_prompt_tokens_ && tokens_[size - 1] < 0) {
+      --size;
+    }
+    return size;
+  }
+  size_t num_committed_generated_tokens() const {
+    return num_valid_tokens() - num_prompt_tokens_;
+  }
   Slice<int32_t> tokens() const { return {tokens_, num_tokens_}; }
   // get tokens in kv cache
   Slice<int32_t> cached_tokens() const {
