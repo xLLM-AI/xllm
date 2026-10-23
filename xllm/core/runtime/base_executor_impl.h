@@ -21,6 +21,7 @@ limitations under the License.
 #include <memory>
 
 #include "common/macros.h"
+#include "core/framework/model/model_family_args.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "executor_impl_factory.h"
 #include "framework/model/causal_lm.h"
@@ -33,7 +34,7 @@ namespace xllm {
 class BaseExecutorImpl : public ExecutorImpl {
  public:
   BaseExecutorImpl(CausalLM* model,
-                   const ModelArgs& args,
+                   const TransformerModelArgs& args,
                    const torch::Device& device,
                    const runtime::Options& options);
 
@@ -48,7 +49,7 @@ class BaseExecutorImpl : public ExecutorImpl {
   // not own
   CausalLM* model_;
 
-  ModelArgs args_;
+  TransformerModelArgs args_;
   torch::Device device_;
   runtime::Options options_;
 };

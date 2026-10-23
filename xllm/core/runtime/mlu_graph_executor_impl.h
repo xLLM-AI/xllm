@@ -23,6 +23,7 @@ limitations under the License.
 #include <type_traits>
 
 #include "core/framework/model/causal_lm.h"
+#include "core/framework/model/model_family_args.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/runtime/executor_impl.h"
@@ -36,7 +37,7 @@ namespace xllm::mlu {
 // Multiple MluGraph instances can share the same GraphPersistentParam object
 class GraphPersistentParam final {
  public:
-  GraphPersistentParam(const ModelArgs& args,
+  GraphPersistentParam(const TransformerModelArgs& args,
                        const torch::Device& device,
                        const runtime::Options& options);
 
@@ -164,12 +165,12 @@ class MluGraphExecutorImpl final : public ExecutorImpl,
                                    public RecExecutorBackend {
  public:
   MluGraphExecutorImpl(CausalLM* model,
-                       const ModelArgs& args,
+                       const TransformerModelArgs& args,
                        const torch::Device& device,
                        const runtime::Options& options);
 
   MluGraphExecutorImpl(RecModel* model,
-                       const ModelArgs& args,
+                       const TransformerModelArgs& args,
                        const torch::Device& device,
                        const runtime::Options& options);
 
@@ -205,7 +206,7 @@ class MluGraphExecutorImpl final : public ExecutorImpl,
 
   CausalLM* model_;                // not owned
   RecModel* rec_model_ = nullptr;  // not owned
-  ModelArgs args_;
+  TransformerModelArgs args_;
   torch::Device device_;
   runtime::Options options_;
   torch_mlu::MempoolId_t graph_pool_;

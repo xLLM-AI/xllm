@@ -31,6 +31,7 @@ limitations under the License.
 #include "common/metrics.h"
 #include "core/common/constants.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/model/model_family_args.h"
 #include "core/runtime/graph_input_snapshot.h"
 #include "core/runtime/rec_graph_input.h"
 #include "runtime/decode_graph_bucket.h"
@@ -268,7 +269,7 @@ const std::vector<torch::Tensor>& graph_multi_block_tables(
 
 namespace xllm::mlu {
 
-GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
+GraphPersistentParam::GraphPersistentParam(const TransformerModelArgs& args,
                                            const torch::Device& device,
                                            const runtime::Options& options)
     : num_decoding_tokens_(options.num_decoding_tokens()) {
@@ -576,7 +577,7 @@ void MluGraph::update_input_buffer(ModelType* model,
 }
 
 MluGraphExecutorImpl::MluGraphExecutorImpl(CausalLM* model,
-                                           const ModelArgs& args,
+                                           const TransformerModelArgs& args,
                                            const torch::Device& device,
                                            const runtime::Options& options)
     : model_(model),
@@ -592,7 +593,7 @@ MluGraphExecutorImpl::MluGraphExecutorImpl(CausalLM* model,
 }
 
 MluGraphExecutorImpl::MluGraphExecutorImpl(RecModel* model,
-                                           const ModelArgs& args,
+                                           const TransformerModelArgs& args,
                                            const torch::Device& device,
                                            const runtime::Options& options)
     : MluGraphExecutorImpl(static_cast<CausalLM*>(nullptr),

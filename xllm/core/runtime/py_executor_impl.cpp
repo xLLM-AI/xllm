@@ -30,6 +30,7 @@ limitations under the License.
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/framework/model/model_family_args.h"
 #include "core/framework/model/mtp_topk_state.h"
 #include "core/framework/multimodal/mm_batch_data.h"
 #include "core/framework/multimodal/mm_data.h"
@@ -181,7 +182,7 @@ void ensure_xllm_runtime_module() {
 }  // namespace
 
 PyExecutorImpl::PyExecutorImpl(CausalLM* model,
-                               const ModelArgs& args,
+                               const TransformerModelArgs& args,
                                const torch::Device& device,
                                const runtime::Options& options)
     : py_causal_lm_(dynamic_cast<PyCausalLM*>(model)),

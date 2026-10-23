@@ -30,8 +30,10 @@ TEST(RecExecutorTest, RejectsIluGraphBeforeExecutorLookup) {
   EXPECT_DEATH(
       {
         ModelConfig::get_instance().model_impl("auto");
-        RecExecutor executor(
-            nullptr, model_args, torch::Device(torch::kCPU), options);
+        RecExecutor executor(nullptr,
+                             TransformerModelArgs(model_args),
+                             torch::Device(torch::kCPU),
+                             options);
       },
       "ILU does not support native Rec graph execution");
 }

@@ -114,7 +114,7 @@ bool Eagle3WorkerImpl<TargetInput>::init_model(
 
 template <typename TargetInput>
 int64_t Eagle3WorkerImpl<TargetInput>::get_embedding_placeholder_size() const {
-  return AuxHiddenCapture::aux_hidden_dim(context_.get_model_args());
+  return AuxHiddenCapture::aux_hidden_dim(context_.get_llm_model_args());
 }
 
 template <typename TargetInput>
@@ -134,7 +134,7 @@ void Eagle3WorkerImpl<TargetInput>::process_draft_sample_output(
         hot_token_id_.view({1, -1}).expand(
             {sample_output.draft_logits.size(0), hot_token_id_.size(0)}),
         sample_output.draft_logits,
-        context_.get_model_args().vocab_size());
+        context_.get_transformer_model_args().vocab_size());
   }
 
   sample_output.next_tokens =

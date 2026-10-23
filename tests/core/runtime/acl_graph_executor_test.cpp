@@ -945,8 +945,11 @@ TEST(DeepseekV4ModelTest, ReturnsPreHcHiddenStatesForMtp) {
   ParallelArgs parallel_args(
       /*rank=*/0, /*world_size=*/1, &process_group);
   parallel_args.tp_group_ = &process_group;
-  const ModelContext context(
-      parallel_args, model_args, QuantArgs(), tensor_options);
+  const ModelContext context(parallel_args,
+                             model_args,
+                             QuantArgs(),
+                             tensor_options,
+                             {ModelFamily::LLM});
   const CausalLMFactory factory =
       ModelRegistry::get_causallm_factory("deepseek_v4");
   ASSERT_TRUE(static_cast<bool>(factory));

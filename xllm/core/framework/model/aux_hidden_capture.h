@@ -24,6 +24,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/model/model_args.h"
+#include "core/framework/model/model_family_args.h"
 #include "core/framework/model/model_output.h"
 
 namespace xllm {
@@ -57,6 +58,30 @@ class AuxHiddenCapture final {
   // the draft consumes.
   static int64_t aux_hidden_dim(const ModelArgs& model_args) {
     return num_aux_layers(model_args) * model_args.hidden_size();
+  }
+
+  static int64_t num_aux_layers(const LlmModelArgs& model_args) {
+    const auto& capture_ids = model_args.layers_to_capture();
+    return capture_ids.empty()
+               ? static_cast<int64_t>(legacy_default_capture_layer_ids(
+                                          model_args.transformer().n_layers())
+                                          .size())
+               : static_cast<int64_t>(capture_ids.size());
+  }
+
+  static int64_t aux_hidden_dim(const LlmModelArgs& model_args) {
+    return num_aux_layers(model_args) * model_args.transformer().hidden_size();
+  }
+
+  AuxHiddenCapture(const LlmModelArgs& model_args,
+                   const torch::TensorOptions& options,
+                   int64_t max_tokens_per_batch) {
+    if (model_args.layers_to_capture().empty()) {
+      return;
+    }
+    layers_to_capture_ = model_args.layers_to_capture();
+    buffer_ = torch::empty({max_tokens_per_batch, aux_hidden_dim(model_args)},
+                           options);
   }
 
   AuxHiddenCapture(const ModelArgs& model_args,

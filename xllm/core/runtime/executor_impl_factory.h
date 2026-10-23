@@ -25,6 +25,7 @@ limitations under the License.
 
 #include "core/common/macros.h"
 #include "core/framework/model/causal_lm.h"
+#include "core/framework/model/model_family_args.h"
 #include "core/runtime/executor_impl.h"
 #include "core/runtime/options.h"
 
@@ -34,7 +35,7 @@ class ExecutorImplFactory {
  public:
   using Creator =
       std::function<std::unique_ptr<ExecutorImpl>(CausalLM*,
-                                                  const ModelArgs&,
+                                                  const TransformerModelArgs&,
                                                   const torch::Device&,
                                                   const runtime::Options&)>;
 
@@ -51,7 +52,7 @@ class ExecutorImplFactory {
 
   std::unique_ptr<ExecutorImpl> create_executor_impl(
       CausalLM* model,
-      const ModelArgs& args,
+      const TransformerModelArgs& args,
       const torch::Device& device,
       const runtime::Options& options,
       const std::string& executor_type);
@@ -87,7 +88,7 @@ class ExecutorImplFactory {
         executor_type,                                                       \
         extension_impl,                                                      \
         [](::xllm::CausalLM* model,                                          \
-           const ::xllm::ModelArgs& args,                                    \
+           const ::xllm::TransformerModelArgs& args,                                    \
            const torch::Device& device,                                      \
            const ::xllm::runtime::Options& options)                          \
             -> std::unique_ptr<::xllm::ExecutorImpl> {                       \

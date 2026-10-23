@@ -33,6 +33,7 @@ limitations under the License.
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/framework/model/model_family_args.h"
 #include "core/framework/speculative/spec_verify.h"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 #include "core/layers/common/expanded_decode_metadata_builder.h"
@@ -123,7 +124,7 @@ float get_dp_ep_all2all_buffer_factor(int64_t length) {
   return 8.0f;
 }
 
-int64_t get_dp_ep_padding_buffer_capacity(const ModelArgs& args,
+int64_t get_dp_ep_padding_buffer_capacity(const TransformerModelArgs& args,
                                           const runtime::Options& options) {
   const int64_t dp_size = std::max<int64_t>(options.dp_size(), 1);
   const int64_t graph_capacity = get_decode_graph_token_capacity(options);
@@ -224,7 +225,7 @@ int32_t get_mla_capture_kv_seq_len_bucket(const ModelParamsView& params,
 }
 
 // GraphPersistentParam implementation
-GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
+GraphPersistentParam::GraphPersistentParam(const TransformerModelArgs& args,
                                            const torch::Device& device,
                                            const runtime::Options& options,
                                            bool need_update_attn_mask,

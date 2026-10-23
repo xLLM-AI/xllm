@@ -311,7 +311,7 @@ class WorkerImpl {
   torch::ScalarType dtype() const { return dtype_; }
 
   int32_t hidden_size() const {
-    return context_.get_model_args().hidden_size();
+    return context_.get_transformer_model_args().hidden_size();
   }
 
 #if defined(USE_NPU)

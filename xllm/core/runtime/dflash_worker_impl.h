@@ -25,6 +25,7 @@ limitations under the License.
 #include "core/framework/speculative/embedding_cache.h"
 #include "core/kv_cache/transfer/kv_cache_transfer.h"
 #include "framework/model/model_args.h"
+#include "framework/model/model_family_args.h"
 #include "framework/sampling/draft_proposal.h"
 #include "runtime/draft_model_spec_worker_impl.h"
 #include "runtime/llm_worker_impl.h"
@@ -56,10 +57,10 @@ enum class DSparkSasMode : uint8_t {
   NATIVE,
 };
 
-inline DSparkSasMode classify_dspark_sas_mode(const ModelArgs& draft_args,
+inline DSparkSasMode classify_dspark_sas_mode(const LlmModelArgs& draft_args,
                                               bool sample_from_anchor) {
-  if (!sample_from_anchor ||
-      !util::is_deepseek_v4_dspark_model_type(draft_args.model_type())) {
+  if (!sample_from_anchor || !util::is_deepseek_v4_dspark_model_type(
+                                 draft_args.transformer().model_type())) {
     return DSparkSasMode::NOT_DSPARK;
   }
   return draft_args.dspark_use_native_sas() ? DSparkSasMode::NATIVE

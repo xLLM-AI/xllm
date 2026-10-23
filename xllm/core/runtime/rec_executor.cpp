@@ -18,6 +18,7 @@ limitations under the License.
 #include <string>
 
 #include "core/framework/config/model_config.h"
+#include "core/framework/model/model_family_args.h"
 #include "core/framework/model/rec_model_params.h"
 #include "platform/platform.h"
 #include "runtime/rec_executor_impl_factory.h"
@@ -25,7 +26,7 @@ limitations under the License.
 namespace xllm {
 
 RecExecutor::RecExecutor(RecModel* model,
-                         const ModelArgs& args,
+                         const TransformerModelArgs& args,
                          const torch::Device& device,
                          const runtime::Options& options) {
   const auto& model_config = ModelConfig::get_instance();

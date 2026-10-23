@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "core/runtime/rec_executor_impl_factory.h"
 
+#include "core/framework/model/model_family_args.h"
 #include "core/runtime/rec_executor_impl.h"
 #if defined(USE_NPU)
 #include "core/runtime/acl_graph_executor_impl.h"
@@ -42,7 +43,7 @@ bool RecExecutorImplFactory::register_creator(const std::string& name,
 
 std::unique_ptr<RecExecutorBackend>
 RecExecutorImplFactory::create_executor_impl(RecModel* model,
-                                             const ModelArgs& args,
+                                             const TransformerModelArgs& args,
                                              const torch::Device& device,
                                              const runtime::Options& options,
                                              const std::string& backend) {

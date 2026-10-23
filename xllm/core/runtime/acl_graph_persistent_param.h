@@ -23,7 +23,7 @@ limitations under the License.
 #include <optional>
 #include <vector>
 
-#include "core/framework/model/model_args.h"
+#include "core/framework/model/model_family_args.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/model/rec_model_params.h"
 #include "core/kernels/npu/paged_attention_tiling_layout.h"
@@ -64,7 +64,7 @@ enum class SpecVerifyInputUpdateScope : uint8_t {
 // Multiple AclGraph instances can share the same GraphPersistentParam object
 class GraphPersistentParam final {
  public:
-  GraphPersistentParam(const ModelArgs& args,
+  GraphPersistentParam(const TransformerModelArgs& args,
                        const torch::Device& device,
                        const runtime::Options& options,
                        bool need_update_attn_mask = false,
@@ -271,7 +271,7 @@ class GraphPersistentParam final {
       uint32_t actual_num_tokens,
       uint32_t padded_num_tokens);
 
-  const ModelArgs& args_;
+  const TransformerModelArgs& args_;
   const torch::Device& device_;
   const runtime::Options& options_;
 

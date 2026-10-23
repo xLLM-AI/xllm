@@ -21,6 +21,7 @@ limitations under the License.
 #include "common/global_flags.h"
 #include "common/metrics.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/model/model_family_args.h"
 #include "core/framework/multimodal/mm_visitor.h"
 #include "platform/device.h"
 #include "platform/platform.h"
@@ -28,7 +29,7 @@ limitations under the License.
 namespace xllm {
 
 VlmExecutorImpl::VlmExecutorImpl(CausalLM* model,
-                                 const ModelArgs& args,
+                                 const TransformerModelArgs& args,
                                  const torch::Device& device,
                                  const runtime::Options& options)
     : model_(dynamic_cast<CausalVLM*>(model)),

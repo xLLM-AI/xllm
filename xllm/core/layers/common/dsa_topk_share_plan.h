@@ -24,7 +24,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 
-#include "core/framework/model/model_args.h"
+#include "core/framework/model/model_family_args.h"
 
 namespace xllm::layer {
 
@@ -38,9 +38,29 @@ inline bool has_dsa_indexer(const ModelArgs& args) {
          args.index_topk() > 0;
 }
 
+inline bool has_dsa_indexer(const LlmModelArgs& args) {
+  return args.index_n_heads() > 0 && args.index_head_dim() > 0 &&
+         args.index_topk() > 0;
+}
+
+inline bool has_dsa_indexer(const TransformerModelArgs& args) {
+  return args.index_n_heads() > 0 && args.index_head_dim() > 0 &&
+         args.index_topk() > 0;
+}
+
 // Cross-step MTP reuse is a backend-independent DSA policy. Backends own the
 // carrier representation used to transport their top-k state between steps.
 inline bool is_mtp_dsa_topk_reuse_enabled(const ModelArgs& args) {
+  return args.model_type().ends_with("_mtp") &&
+         args.index_share_for_mtp_iteration() && has_dsa_indexer(args);
+}
+
+inline bool is_mtp_dsa_topk_reuse_enabled(const LlmModelArgs& args) {
+  return args.transformer().model_type().ends_with("_mtp") &&
+         args.index_share_for_mtp_iteration() && has_dsa_indexer(args);
+}
+
+inline bool is_mtp_dsa_topk_reuse_enabled(const TransformerModelArgs& args) {
   return args.model_type().ends_with("_mtp") &&
          args.index_share_for_mtp_iteration() && has_dsa_indexer(args);
 }
@@ -49,58 +69,14 @@ inline bool is_mtp_dsa_topk_reuse_enabled(const ModelArgs& args) {
 // resolved decisions instead of independently interpreting the raw config.
 class DsaTopkSharePlan final {
  public:
-  explicit DsaTopkSharePlan(const ModelArgs& args) {
-    const int64_t num_layers = args.n_layers();
-    decisions_.resize(static_cast<size_t>(num_layers));
-    has_indexer_ = has_dsa_indexer(args);
+  explicit DsaTopkSharePlan(const ModelArgs& args) { initialize(args, args); }
 
-    if (!has_indexer_ ||
-        (args.indexer_types().empty() && args.index_topk_pattern().empty() &&
-         args.index_topk_freq() <= 1)) {
-      return;
-    }
+  explicit DsaTopkSharePlan(const LlmModelArgs& args) {
+    initialize(args.transformer(), args);
+  }
 
-    if (!args.indexer_types().empty()) {
-      const auto& types = args.indexer_types();
-      for (int32_t layer_id = 0; layer_id < num_layers; ++layer_id) {
-        if (static_cast<size_t>(layer_id) >= types.size()) {
-          break;
-        }
-        const std::string& type = types[static_cast<size_t>(layer_id)];
-        CHECK(type == "full" || type == "shared")
-            << "DSA indexer type must be full or shared, got " << type;
-        decisions_[static_cast<size_t>(layer_id)].reuse_topk = type == "shared";
-      }
-    } else if (!args.index_topk_pattern().empty()) {
-      const std::string& pattern = args.index_topk_pattern();
-      CHECK_EQ(static_cast<int64_t>(pattern.size()), num_layers)
-          << "DSA top-k sharing pattern length must equal num_hidden_layers.";
-      for (int32_t layer_id = 0; layer_id < num_layers; ++layer_id) {
-        decisions_[static_cast<size_t>(layer_id)].reuse_topk =
-            should_reuse_from_pattern(pattern, layer_id);
-      }
-    } else {
-      const int32_t freq = args.index_topk_freq();
-      const int32_t offset = args.index_skip_topk_offset();
-      CHECK_GT(freq, 1) << "DSA top-k sharing freq must be greater than 1.";
-      CHECK_GE(offset, 0) << "DSA top-k sharing offset must be non-negative.";
-      for (int32_t layer_id = 0; layer_id < num_layers; ++layer_id) {
-        decisions_[static_cast<size_t>(layer_id)].reuse_topk =
-            should_reuse_from_freq(freq, offset, layer_id);
-      }
-    }
-
-    bool next_dsa_reuses = false;
-    for (int64_t layer_id = num_layers; layer_id-- > 0;) {
-      if (!is_full_attention_layer(args, layer_id)) {
-        continue;
-      }
-      DsaTopkShareDecision& decision =
-          decisions_[static_cast<size_t>(layer_id)];
-      has_reuse_ = has_reuse_ || decision.reuse_topk;
-      decision.output_topk = !decision.reuse_topk && next_dsa_reuses;
-      next_dsa_reuses = decision.reuse_topk;
-    }
+  explicit DsaTopkSharePlan(const TransformerModelArgs& args) {
+    initialize(args, args);
   }
 
   const DsaTopkShareDecision& decision_for(int32_t layer_id) const {
@@ -129,6 +105,62 @@ class DsaTopkSharePlan final {
   }
 
  private:
+  template <typename TransformerArgs, typename FamilyArgs>
+  void initialize(const TransformerArgs& transformer_args,
+                  const FamilyArgs& family_args) {
+    const int64_t num_layers = transformer_args.n_layers();
+    decisions_.resize(static_cast<size_t>(num_layers));
+    has_indexer_ = has_dsa_indexer(family_args);
+
+    if (!has_indexer_ || (family_args.indexer_types().empty() &&
+                          family_args.index_topk_pattern().empty() &&
+                          family_args.index_topk_freq() <= 1)) {
+      return;
+    }
+
+    if (!family_args.indexer_types().empty()) {
+      const auto& types = family_args.indexer_types();
+      for (int32_t layer_id = 0; layer_id < num_layers; ++layer_id) {
+        if (static_cast<size_t>(layer_id) >= types.size()) {
+          break;
+        }
+        const std::string& type = types[static_cast<size_t>(layer_id)];
+        CHECK(type == "full" || type == "shared")
+            << "DSA indexer type must be full or shared, got " << type;
+        decisions_[static_cast<size_t>(layer_id)].reuse_topk = type == "shared";
+      }
+    } else if (!family_args.index_topk_pattern().empty()) {
+      const std::string& pattern = family_args.index_topk_pattern();
+      CHECK_EQ(static_cast<int64_t>(pattern.size()), num_layers)
+          << "DSA top-k sharing pattern length must equal num_hidden_layers.";
+      for (int32_t layer_id = 0; layer_id < num_layers; ++layer_id) {
+        decisions_[static_cast<size_t>(layer_id)].reuse_topk =
+            should_reuse_from_pattern(pattern, layer_id);
+      }
+    } else {
+      const int32_t freq = family_args.index_topk_freq();
+      const int32_t offset = family_args.index_skip_topk_offset();
+      CHECK_GT(freq, 1) << "DSA top-k sharing freq must be greater than 1.";
+      CHECK_GE(offset, 0) << "DSA top-k sharing offset must be non-negative.";
+      for (int32_t layer_id = 0; layer_id < num_layers; ++layer_id) {
+        decisions_[static_cast<size_t>(layer_id)].reuse_topk =
+            should_reuse_from_freq(freq, offset, layer_id);
+      }
+    }
+
+    bool next_dsa_reuses = false;
+    for (int64_t layer_id = num_layers; layer_id-- > 0;) {
+      if (!is_full_attention_layer(transformer_args, layer_id)) {
+        continue;
+      }
+      DsaTopkShareDecision& decision =
+          decisions_[static_cast<size_t>(layer_id)];
+      has_reuse_ = has_reuse_ || decision.reuse_topk;
+      decision.output_topk = !decision.reuse_topk && next_dsa_reuses;
+      next_dsa_reuses = decision.reuse_topk;
+    }
+  }
+
   static bool should_reuse_from_pattern(const std::string& pattern,
                                         int32_t layer_id) {
     const char symbol = static_cast<char>(std::toupper(
@@ -191,8 +223,75 @@ inline std::vector<bool> get_dsa_indexer_layer_mask(const ModelArgs& args,
   return layer_mask;
 }
 
+inline std::vector<bool> get_dsa_indexer_layer_mask(
+    const TransformerModelArgs& args,
+    int64_t num_cache_layers) {
+  CHECK_GE(num_cache_layers, 0);
+  CHECK_LE(num_cache_layers, std::numeric_limits<int32_t>::max());
+  if (!has_dsa_indexer(args)) {
+    return {};
+  }
+  std::vector<bool> layer_mask(static_cast<size_t>(num_cache_layers), true);
+  if (args.model_type().ends_with("_mtp")) {
+    for (int32_t layer_id = 0; layer_id < num_cache_layers; ++layer_id) {
+      layer_mask[static_cast<size_t>(layer_id)] =
+          is_full_attention_layer(args, layer_id);
+    }
+    return layer_mask;
+  }
+  const DsaTopkSharePlan topk_share_plan(args);
+  for (int32_t layer_id = 0; layer_id < num_cache_layers; ++layer_id) {
+    layer_mask[static_cast<size_t>(layer_id)] =
+        is_full_attention_layer(args, layer_id) &&
+        topk_share_plan.layer_uses_indexer(layer_id);
+  }
+  return layer_mask;
+}
+
+inline std::vector<bool> get_dsa_indexer_layer_mask(const LlmModelArgs& args,
+                                                    int64_t num_cache_layers) {
+  CHECK_GE(num_cache_layers, 0)
+      << "DSA indexer cache layer count must be non-negative.";
+  CHECK_LE(num_cache_layers, std::numeric_limits<int32_t>::max())
+      << "DSA indexer cache layer count exceeds int32 range.";
+  if (!has_dsa_indexer(args)) {
+    return {};
+  }
+
+  std::vector<bool> layer_mask(static_cast<size_t>(num_cache_layers), true);
+  if (args.transformer().model_type().ends_with("_mtp")) {
+    for (int32_t layer_id = 0; layer_id < num_cache_layers; ++layer_id) {
+      layer_mask[static_cast<size_t>(layer_id)] =
+          is_full_attention_layer(args.transformer(), layer_id);
+    }
+    return layer_mask;
+  }
+
+  const DsaTopkSharePlan topk_share_plan(args);
+  for (int32_t layer_id = 0; layer_id < num_cache_layers; ++layer_id) {
+    layer_mask[static_cast<size_t>(layer_id)] =
+        is_full_attention_layer(args.transformer(), layer_id) &&
+        topk_share_plan.layer_uses_indexer(layer_id);
+  }
+  return layer_mask;
+}
+
 inline DsaTopkShareDecision get_dsa_topk_share_decision(const ModelArgs& args,
                                                         int32_t layer_id) {
+  const DsaTopkSharePlan topk_share_plan(args);
+  return topk_share_plan.decision_for(layer_id);
+}
+
+inline DsaTopkShareDecision get_dsa_topk_share_decision(
+    const TransformerModelArgs& args,
+    int32_t layer_id) {
+  const DsaTopkSharePlan topk_share_plan(args);
+  return topk_share_plan.decision_for(layer_id);
+}
+
+inline DsaTopkShareDecision get_dsa_topk_share_decision(
+    const LlmModelArgs& args,
+    int32_t layer_id) {
   const DsaTopkSharePlan topk_share_plan(args);
   return topk_share_plan.decision_for(layer_id);
 }

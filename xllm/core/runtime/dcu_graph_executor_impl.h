@@ -32,7 +32,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/model/causal_lm.h"
-#include "core/framework/model/model_args.h"
+#include "core/framework/model/model_family_args.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/runtime/executor_impl.h"
@@ -48,7 +48,7 @@ using DcuStream = c10::hip::HIPStream;
 
 class DcuGraphPersistentParam final {
  public:
-  DcuGraphPersistentParam(const ModelArgs& args,
+  DcuGraphPersistentParam(const TransformerModelArgs& args,
                           const torch::Device& device,
                           const runtime::Options& options);
 
@@ -157,7 +157,7 @@ class DcuGraphPersistentParam final {
   }
 
  private:
-  ModelArgs args_;
+  TransformerModelArgs args_;
   torch::Device device_;
   runtime::Options options_;
 
@@ -240,12 +240,12 @@ class DcuGraphExecutorImpl final : public ExecutorImpl,
                                    public RecExecutorBackend {
  public:
   DcuGraphExecutorImpl(CausalLM* model,
-                       const ModelArgs& args,
+                       const TransformerModelArgs& args,
                        const torch::Device& device,
                        const runtime::Options& options);
 
   DcuGraphExecutorImpl(RecModel* model,
-                       const ModelArgs& args,
+                       const TransformerModelArgs& args,
                        const torch::Device& device,
                        const runtime::Options& options);
 
@@ -286,7 +286,7 @@ class DcuGraphExecutorImpl final : public ExecutorImpl,
   CausalLM* model_;                // not owned
   RecModel* rec_model_ = nullptr;  // not owned
 
-  ModelArgs args_;
+  TransformerModelArgs args_;
   torch::Device device_;
   runtime::Options options_;
 

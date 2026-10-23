@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <vector>
 
+#include "core/framework/model/model_family_args.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "framework/model/model_output.h"
 #include "framework/model/rec_model.h"
@@ -32,7 +33,7 @@ namespace xllm {
 class RecExecutorImpl final : public RecExecutorBackend {
  public:
   RecExecutorImpl(RecModel* model,
-                  const ModelArgs& args,
+                  const TransformerModelArgs& args,
                   const torch::Device& device,
                   const runtime::Options& options);
 
