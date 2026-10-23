@@ -45,11 +45,52 @@ concept HasRvalueDitComponentModelArgs = requires(Context&& context) {
   std::move(context).get_dit_model_args("transformer");
 };
 
+template <typename Context>
+concept HasRvalueAttentionModelParams = requires(Context&& context) {
+  std::move(context).get_attention_model_params();
+};
+
+template <typename Context>
+concept HasRvalueLinearAttentionModelParams = requires(Context&& context) {
+  std::move(context).get_linear_attention_model_params();
+};
+
+template <typename Context>
+concept HasRvalueKVCacheModelParams = requires(Context&& context) {
+  std::move(context).get_kv_cache_model_params();
+};
+
+template <typename Context>
+concept HasRvalueMoEModelParams =
+    requires(Context&& context) { std::move(context).get_moe_model_params(); };
+
+template <typename Context>
+concept HasRvalueSpeculativeModelParams = requires(Context&& context) {
+  std::move(context).get_speculative_model_params();
+};
+
+template <typename Context>
+concept HasRvalueEmbeddingModelParams = requires(Context&& context) {
+  std::move(context).get_embedding_model_params();
+};
+
+template <typename Context>
+concept HasRvalueExecutionModelParams = requires(Context&& context) {
+  std::move(context).get_execution_model_params();
+};
+
 static_assert(!HasRvalueLlmModelArgs<ModelContext>);
 static_assert(!HasRvalueVlmModelArgs<ModelContext>);
 static_assert(!HasRvalueRecModelArgs<ModelContext>);
 static_assert(!HasRvalueDitModelArgs<ModelContext>);
 static_assert(!HasRvalueDitComponentModelArgs<DiTModelContext>);
+static_assert(!HasRvalueAttentionModelParams<ModelContext>);
+static_assert(!HasRvalueLinearAttentionModelParams<ModelContext>);
+static_assert(!HasRvalueKVCacheModelParams<ModelContext>);
+static_assert(!HasRvalueMoEModelParams<ModelContext>);
+static_assert(!HasRvalueSpeculativeModelParams<ModelContext>);
+static_assert(!HasRvalueEmbeddingModelParams<ModelContext>);
+static_assert(!HasRvalueExecutionModelParams<ModelContext>);
 
 ModelContext make_context(const ModelArgs& args,
                           ModelContextIdentity identity = {}) {
@@ -70,6 +111,20 @@ ModelContext make_context(const ModelArgs& args,
   return ModelContext(
       parallel_args, args, quant_args, options, std::move(identity));
 #endif
+}
+
+template <typename FamilyArgs>
+void expect_capability_storage(const ModelContext& context,
+                               const FamilyArgs& args) {
+  EXPECT_EQ(&context.get_attention_model_params(), &args.attention_params());
+  EXPECT_EQ(&context.get_linear_attention_model_params(),
+            &args.linear_attention_params());
+  EXPECT_EQ(&context.get_kv_cache_model_params(), &args.kv_cache_params());
+  EXPECT_EQ(&context.get_moe_model_params(), &args.moe_params());
+  EXPECT_EQ(&context.get_speculative_model_params(),
+            &args.speculative_params());
+  EXPECT_EQ(&context.get_embedding_model_params(), &args.embedding_params());
+  EXPECT_EQ(&context.get_execution_model_params(), &args.execution_params());
 }
 
 TEST(ModelContextTest, KeepsLegacyContextsUnclassified) {
@@ -119,6 +174,97 @@ TEST(ModelContextTest, ExposesEachRegisteredFamilyThroughOwnedArguments) {
   EXPECT_EQ(&dit.get_dit_model_args(), &dit.get_dit_model_args());
 }
 
+TEST(ModelContextTest, ExposesStableCapabilityParametersForEachFamily) {
+  ModelArgs args{};
+  args.head_dim() = 128;
+  args.n_heads() = 16;
+  args.full_attention_interval() = 2;
+  args.max_seq_len() = 4096;
+  args.use_moe() = true;
+  args.n_routed_experts() = 32;
+  args.query_num() = 64;
+
+  const ModelContext llm =
+      make_context(args, {ModelFamily::LLM, "registered_llm"});
+  EXPECT_EQ(llm.get_attention_model_params().head_dim(), 128);
+  EXPECT_EQ(llm.get_moe_model_params().n_routed_experts(), 32);
+  EXPECT_EQ(llm.get_kv_cache_model_params().max_seq_len(), 4096);
+  EXPECT_TRUE(llm.get_moe_model_params().use_moe());
+  EXPECT_FALSE(llm.get_linear_attention_model_params().is_full_attention_layer(
+      /*layer_id=*/0));
+  EXPECT_TRUE(llm.get_linear_attention_model_params().is_full_attention_layer(
+      /*layer_id=*/1));
+  EXPECT_EQ(&llm.get_attention_model_params(),
+            &llm.get_attention_model_params());
+  expect_capability_storage(llm, llm.get_llm_model_args());
+
+  const ModelContext vlm =
+      make_context(args, {ModelFamily::VLM, "registered_vlm"});
+  expect_capability_storage(vlm, vlm.get_vlm_model_args());
+
+  const ModelContext rec =
+      make_context(args, {ModelFamily::REC, "registered_rec"});
+  EXPECT_EQ(rec.get_attention_model_params().head_dim(), 128);
+  EXPECT_EQ(rec.get_embedding_model_params().query_num(), 64);
+  EXPECT_EQ(rec.get_moe_model_params().n_routed_experts(), 32);
+  EXPECT_EQ(&rec.get_kv_cache_model_params(), &rec.get_kv_cache_model_params());
+  expect_capability_storage(rec, rec.get_rec_model_args());
+
+  const ModelContext dit =
+      make_context(args, {ModelFamily::DIT, "registered_dit"});
+  expect_capability_storage(dit, dit.get_dit_model_args().transformer());
+}
+
+TEST(ModelContextTest, SynchronizesEmbeddingCapabilityOnMutation) {
+  const ModelContext context =
+      make_context(ModelArgs{}, {ModelFamily::VLM, "registered_vlm"});
+  EXPECT_FALSE(context.get_embedding_model_params().encoder_embedding_mode());
+  const EmbeddingModelParams& original_params =
+      context.get_embedding_model_params();
+
+  ModelContext updated = context;
+  EXPECT_EQ(&updated.get_embedding_model_params(), &original_params);
+  updated.set_encoder_embedding_mode(true);
+
+  EXPECT_TRUE(updated.get_embedding_model_params().encoder_embedding_mode());
+  EXPECT_TRUE(updated.get_vlm_model_args().encoder_embedding_mode());
+  EXPECT_TRUE(updated.get_vlm_model_args()
+                  .transformer()
+                  .embedding_params()
+                  .encoder_embedding_mode());
+  EXPECT_FALSE(context.get_embedding_model_params().encoder_embedding_mode());
+  EXPECT_FALSE(original_params.encoder_embedding_mode());
+  EXPECT_EQ(&updated.get_embedding_model_params(),
+            &updated.get_vlm_model_args().embedding_params());
+  EXPECT_NE(&updated.get_embedding_model_params(),
+            &context.get_embedding_model_params());
+}
+
+TEST(ModelContextTest, KeepsCapabilityReferencesOnUniqueContextMutation) {
+  ModelContext context =
+      make_context(ModelArgs{}, {ModelFamily::REC, "registered_rec"});
+  const EmbeddingModelParams& embedding_params =
+      context.get_embedding_model_params();
+  const AttentionModelParams& attention_params =
+      context.get_attention_model_params();
+
+  context.set_encoder_embedding_mode(true);
+
+  EXPECT_EQ(&context.get_embedding_model_params(), &embedding_params);
+  EXPECT_TRUE(embedding_params.encoder_embedding_mode());
+  EXPECT_TRUE(context.get_rec_model_args().encoder_embedding_mode());
+  EXPECT_EQ(&context.get_attention_model_params(), &attention_params);
+  expect_capability_storage(context, context.get_rec_model_args());
+}
+
+TEST(ModelContextTest, RejectsCapabilitiesForNonTransformerDitComponents) {
+  ModelArgs args{};
+  const ModelContext vae = make_context(
+      args, {ModelFamily::DIT, "registered_vae", DiTComponentType::VAE});
+  EXPECT_DEATH(vae.get_attention_model_params(),
+               "require a DiT transformer component");
+}
+
 TEST(ModelContextTest, RejectsViewsFromOtherFamilies) {
   const ModelArgs args{};
   const ModelContext llm = make_context(args, {ModelFamily::LLM, "llm"});
@@ -143,6 +289,10 @@ TEST(ModelContextTest, CopiedContextsShareArgumentStorage) {
             &context.get_llm_model_args());
   EXPECT_EQ(&copied_context.get_llm_model_args().transformer().hidden_size(),
             &context.get_llm_model_args().transformer().hidden_size());
+  EXPECT_EQ(&copied_context.get_attention_model_params(),
+            &context.get_attention_model_params());
+  EXPECT_EQ(&copied_context.get_moe_model_params(),
+            &context.get_moe_model_params());
   EXPECT_EQ(copied_context.get_model_family(), ModelFamily::LLM);
   EXPECT_EQ(copied_context.get_registration_name(), "llm");
 }
@@ -157,6 +307,9 @@ TEST(ModelContextTest, KeepsArgumentsAfterSourceConfigIsDestroyed) {
 
   EXPECT_EQ(context.get_llm_model_args().transformer().hidden_size(), 128);
   EXPECT_TRUE(context.get_llm_model_args().use_moe());
+  EXPECT_EQ(context.get_execution_model_params().hidden_size(), 128);
+  EXPECT_TRUE(context.get_moe_model_params().use_moe());
+  expect_capability_storage(context, context.get_llm_model_args());
 }
 
 TEST(ModelContextTest, MutatingCopiedContextDetachesArgumentStorage) {

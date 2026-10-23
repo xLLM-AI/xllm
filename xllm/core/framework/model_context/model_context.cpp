@@ -180,6 +180,36 @@ const TransformerModelArgs& ModelContext::get_transformer_model_args() const& {
   return empty_args;
 }
 
+const AttentionModelParams& ModelContext::get_attention_model_params() const& {
+  return model_args_bundle_->attention_params();
+}
+
+const LinearAttentionModelParams&
+ModelContext::get_linear_attention_model_params() const& {
+  return model_args_bundle_->linear_attention_params();
+}
+
+const KVCacheModelParams& ModelContext::get_kv_cache_model_params() const& {
+  return model_args_bundle_->kv_cache_params();
+}
+
+const MoEModelParams& ModelContext::get_moe_model_params() const& {
+  return model_args_bundle_->moe_params();
+}
+
+const SpeculativeModelParams& ModelContext::get_speculative_model_params()
+    const& {
+  return model_args_bundle_->speculative_params();
+}
+
+const EmbeddingModelParams& ModelContext::get_embedding_model_params() const& {
+  return model_args_bundle_->embedding_params();
+}
+
+const ExecutionModelParams& ModelContext::get_execution_model_params() const& {
+  return model_args_bundle_->execution_params();
+}
+
 ModelContext ModelContext::with_parallel_args(
     const ParallelArgs& parallel_args) const {
 #if defined(USE_NPU)

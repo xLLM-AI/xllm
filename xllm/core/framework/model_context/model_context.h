@@ -103,11 +103,33 @@ class ModelContext {
   const DiTComponentModelArgs& get_dit_model_args() const&;
   const DiTComponentModelArgs& get_dit_model_args() const&& = delete;
 
+  const ModelArgsBundle& get_model_args_bundle() const& {
+    CHECK(model_args_bundle_ != nullptr);
+    return *model_args_bundle_;
+  }
+  const ModelArgsBundle& get_model_args_bundle() const&& = delete;
+
   // Return the transformer parameters embedded in the active family-specific
   // argument object. This is the common interface for model implementations
   // shared by LLM, VLM, and Rec registrations.
   const TransformerModelArgs& get_transformer_model_args() const&;
   const TransformerModelArgs& get_transformer_model_args() const&& = delete;
+
+  const AttentionModelParams& get_attention_model_params() const&;
+  const AttentionModelParams& get_attention_model_params() const&& = delete;
+  const LinearAttentionModelParams& get_linear_attention_model_params() const&;
+  const LinearAttentionModelParams& get_linear_attention_model_params()
+      const&& = delete;
+  const KVCacheModelParams& get_kv_cache_model_params() const&;
+  const KVCacheModelParams& get_kv_cache_model_params() const&& = delete;
+  const MoEModelParams& get_moe_model_params() const&;
+  const MoEModelParams& get_moe_model_params() const&& = delete;
+  const SpeculativeModelParams& get_speculative_model_params() const&;
+  const SpeculativeModelParams& get_speculative_model_params() const&& = delete;
+  const EmbeddingModelParams& get_embedding_model_params() const&;
+  const EmbeddingModelParams& get_embedding_model_params() const&& = delete;
+  const ExecutionModelParams& get_execution_model_params() const&;
+  const ExecutionModelParams& get_execution_model_params() const&& = delete;
 
   const QuantArgs& get_quant_args() const { return quant_args_; }
 

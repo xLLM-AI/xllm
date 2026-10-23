@@ -19,6 +19,7 @@ cc_library(
     model_args.h
     model_args_view.h
     model_family_args.h
+    model_params.h
     model_params_view.h
     mtp_topk_state.h
   SRCS
