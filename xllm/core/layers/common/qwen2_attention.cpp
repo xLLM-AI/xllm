@@ -41,7 +41,7 @@ namespace xllm {
 namespace layer {
 
 Qwen2AttentionImpl::Qwen2AttentionImpl(const ModelContext& context) {
-  const auto& args = context.get_transformer_model_args();
+  const auto& args = context.get_model_args_bundle();
   const auto& quant_args = context.get_quant_args();
   const auto& parallel_args = context.get_parallel_args();
   const auto& options = context.get_tensor_options();

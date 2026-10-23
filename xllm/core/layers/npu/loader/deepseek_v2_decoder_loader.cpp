@@ -199,7 +199,7 @@ DeekseekV2DecoderLoader::DeekseekV2DecoderLoader(
       v_head_dim_(v_head_dim),
       prefill_isBF16_(prefill_isBF16),
       decode_isBF16_(decode_isBF16) {
-  auto model_args = context.get_transformer_model_args();
+  const auto& model_args = context.get_model_args_bundle();
   auto quant_args = context.get_quant_args();
   auto options = context.get_tensor_options();
   enable_kimi_k25_moe_scale_dtype_fix_ = model_args.model_type() == "kimi_k25";

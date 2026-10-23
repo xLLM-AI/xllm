@@ -48,7 +48,7 @@ Glm5NextDecoderLayerImpl::Glm5NextDecoderLayerImpl(
     int32_t layer_id,
     const DsaTopkSharePlan& topk_share_plan)
     : topk_share_decision_(topk_share_plan.decision_for(layer_id)) {
-  const auto& args = context.get_transformer_model_args();
+  const auto& args = context.get_model_args_bundle();
   const std::string attention_type =
       layer_type_at(args.layer_types(), layer_id, "deepseek_sparse_attention");
   CHECK(attention_type == "linear_attention" ||

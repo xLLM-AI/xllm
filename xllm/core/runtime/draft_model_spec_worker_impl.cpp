@@ -401,7 +401,7 @@ bool DraftModelSpecWorkerImpl<TargetInput>::allocate_kv_cache_with_transfer(
         device_.index(),
         options_.transfer_listen_port(),
         device_,
-        context_.get_transformer_model_args().model_type());
+        context_.get_model_args_bundle().model_type());
     kv_cache_transfer_->initialize(device_.index());
   }
   return allocate_pools(kv_cache_shape,

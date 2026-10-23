@@ -31,7 +31,7 @@ TEST(RecExecutorTest, RejectsIluGraphBeforeExecutorLookup) {
       {
         ModelConfig::get_instance().model_impl("auto");
         RecExecutor executor(nullptr,
-                             TransformerModelArgs(model_args),
+                             ModelArgsBundle(model_args, ModelFamily::REC),
                              torch::Device(torch::kCPU),
                              options);
       },

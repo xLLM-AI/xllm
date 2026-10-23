@@ -37,7 +37,7 @@ namespace xllm::mlu {
 // Multiple MluGraph instances can share the same GraphPersistentParam object
 class GraphPersistentParam final {
  public:
-  GraphPersistentParam(const TransformerModelArgs& args,
+  GraphPersistentParam(const ModelArgsBundle& args,
                        const torch::Device& device,
                        const runtime::Options& options);
 
@@ -165,12 +165,12 @@ class MluGraphExecutorImpl final : public ExecutorImpl,
                                    public RecExecutorBackend {
  public:
   MluGraphExecutorImpl(CausalLM* model,
-                       const TransformerModelArgs& args,
+                       const ModelArgsBundle& args,
                        const torch::Device& device,
                        const runtime::Options& options);
 
   MluGraphExecutorImpl(RecModel* model,
-                       const TransformerModelArgs& args,
+                       const ModelArgsBundle& args,
                        const torch::Device& device,
                        const runtime::Options& options);
 
@@ -206,7 +206,7 @@ class MluGraphExecutorImpl final : public ExecutorImpl,
 
   CausalLM* model_;                // not owned
   RecModel* rec_model_ = nullptr;  // not owned
-  TransformerModelArgs args_;
+  ModelArgsBundle args_;
   torch::Device device_;
   runtime::Options options_;
   torch_mlu::MempoolId_t graph_pool_;

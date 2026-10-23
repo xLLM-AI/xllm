@@ -37,7 +37,7 @@ class Qwen3_5ModelImpl : public Qwen3NextModelImpl {
  public:
   explicit Qwen3_5ModelImpl(const ModelContext& context)
       : Qwen3NextModelImpl(context, /*init_decoder_layers=*/false) {
-    const int32_t n_layers = context.get_transformer_model_args().n_layers();
+    const int32_t n_layers = context.get_model_args_bundle().n_layers();
     for (int32_t layer_id = 0; layer_id < n_layers; ++layer_id) {
       add_decoder_layer(
           std::make_shared<layer::Qwen3_5DecoderLayerImpl>(context, layer_id));

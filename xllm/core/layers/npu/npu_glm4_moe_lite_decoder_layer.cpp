@@ -37,7 +37,7 @@ NpuGlm4MoeDecoderLiteImpl::NpuGlm4MoeDecoderLiteImpl(
       layer_id_(layer_id),
       num_speculative_tokens_(
           context.get_llm_model_args().num_speculative_tokens()) {
-  const auto& model_args = context.get_transformer_model_args();
+  const auto& model_args = context.get_model_args_bundle();
 
   if (boost::iequals(model_args.rope_scaling_rope_type(), "deepseek_yarn")) {
     const float attn_scale =

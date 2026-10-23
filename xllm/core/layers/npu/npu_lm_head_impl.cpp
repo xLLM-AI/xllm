@@ -86,7 +86,7 @@ void NpuLmHeadImpl::param_from_args(atb_speed::common::LmHeadParam& param,
 }
 
 NpuLmHeadImpl::NpuLmHeadImpl(const ModelContext& context) : BaseLayer(context) {
-  vocab_size_ = context.get_transformer_model_args().vocab_size();
+  vocab_size_ = context.get_model_args_bundle().vocab_size();
   // Pad vocab to dp-local TP width (world/dp_size).
   const int32_t cp_unaware_tp_size = parallel_args_.world_size() / dp_size_;
   if (vocab_size_ > 0 && cp_unaware_tp_size > 1 &&
@@ -99,12 +99,12 @@ NpuLmHeadImpl::NpuLmHeadImpl(const ModelContext& context) : BaseLayer(context) {
   }
 
   param_from_args(lm_head_param_prefill_,
-                  context.get_transformer_model_args(),
+                  context.get_model_args_bundle(),
                   context.get_parallel_args(),
                   true);
 
   param_from_args(lm_head_param_decode_,
-                  context.get_transformer_model_args(),
+                  context.get_model_args_bundle(),
                   context.get_parallel_args(),
                   false);
 

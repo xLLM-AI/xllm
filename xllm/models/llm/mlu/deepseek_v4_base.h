@@ -232,29 +232,27 @@ class DeepseekV4Base {
 
   void init_rope(const LlmModelArgs& model_args,
                  const torch::TensorOptions& options) {
-    const int64_t rope_head_dim = model_args.transformer().rope_head_dim();
-    const int64_t max_pos = model_args.transformer().max_position_embeddings();
+    const int64_t rope_head_dim = model_args.rope_head_dim();
+    const int64_t max_pos = model_args.max_position_embeddings();
     if (rope_head_dim <= 0 || max_pos <= 0) {
       return;
     }
     const int64_t original_max_pos =
-        model_args.transformer()
-                    .rope_scaling_original_max_position_embeddings() > 0
-            ? model_args.transformer()
-                  .rope_scaling_original_max_position_embeddings()
+        model_args.rope_scaling_original_max_position_embeddings() > 0
+            ? model_args.rope_scaling_original_max_position_embeddings()
             : max_pos;
     auto dsa_rotary_embedding =
         std::make_shared<layer::DeepseekV4RotaryEmbedding>(
             /*rotary_dim=*/rope_head_dim,
             /*max_position_embeddings=*/max_pos,
             /*interleaved=*/true,
-            /*rope_theta=*/model_args.transformer().rope_theta(),
+            /*rope_theta=*/model_args.rope_theta(),
             /*compress_rope_theta=*/model_args.compress_rope_theta(),
             /*scaling_factor=*/model_args.factor(),
             /*extrapolation_factor=*/1.0f,
             /*beta_fast=*/model_args.beta_fast(),
             /*beta_slow=*/model_args.beta_slow(),
-            /*attn_factor=*/model_args.transformer().rope_scaling_attn_factor(),
+            /*attn_factor=*/model_args.rope_scaling_attn_factor(),
             /*mscale=*/1.0f,
             /*mscale_all_dim=*/1.0f,
             /*original_max_position_embeddings=*/original_max_pos,
@@ -275,11 +273,10 @@ class DeepseekV4Base {
 
   void init_hadamard(const LlmModelArgs& model_args,
                      const torch::TensorOptions& options) {
-    if (model_args.transformer().index_head_dim() <= 0) {
+    if (model_args.index_head_dim() <= 0) {
       return;
     }
-    const int64_t hadamard_dim =
-        next_power_of_two(model_args.transformer().index_head_dim());
+    const int64_t hadamard_dim = next_power_of_two(model_args.index_head_dim());
     dsa_hadamard_ = create_hadamard_matrix(
         hadamard_dim, options.dtype().toScalarType(), options.device());
   }
@@ -314,12 +311,9 @@ class DeepseekV4Base {
       }
     }
 
-    caches_info_.resize(
-        static_cast<size_t>(model_args.transformer().n_layers()));
-    cache_mappings_.resize(
-        static_cast<size_t>(model_args.transformer().n_layers()));
-    for (int32_t layer_id = 0; layer_id < model_args.transformer().n_layers();
-         ++layer_id) {
+    caches_info_.resize(static_cast<size_t>(model_args.n_layers()));
+    cache_mappings_.resize(static_cast<size_t>(model_args.n_layers()));
+    for (int32_t layer_id = 0; layer_id < model_args.n_layers(); ++layer_id) {
       const int32_t raw_ratio =
           layer_id < static_cast<int32_t>(compress_ratios.size())
               ? compress_ratios[static_cast<size_t>(layer_id)]

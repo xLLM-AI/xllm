@@ -406,7 +406,7 @@ void RecWorkerImpl::RecWorkPipeline::prepare_work_before_execute(
   runtime_.worker.apply_kv_block_swaps(input_params);
 
 #if defined(USE_NPU)
-  if (runtime_.context->get_rec_model_args().transformer().enable_mla() &&
+  if (runtime_.context->get_rec_model_args().enable_mla() &&
       input_params.meta.batch_forward_type.is_chunked_prefill()) {
     runtime_.worker.prepare_mla_prefixcache_inputs(input_params);
   }
@@ -428,9 +428,7 @@ void RecWorkerImpl::RecWorkPipeline::prepare_work_before_execute(
     DpEpPadding dp_ep_padding(
         token_size_per_dp_group,
         raw_token_size_per_dp_group,
-        runtime_.context->get_rec_model_args()
-            .transformer()
-            .num_experts_per_tok(),
+        runtime_.context->get_rec_model_args().num_experts_per_tok(),
         runtime_.context->get_parallel_args().mapping_data(),
         runtime_.worker.device(),
         runtime_.worker.dtype(),
@@ -454,11 +452,11 @@ std::optional<ForwardOutput> RecWorkerImpl::RecWorkPipeline::step(
 #if defined(USE_NPU)
     std::shared_ptr<NPULayerSynchronizerImpl> layer_synchronizer =
         std::make_shared<NPULayerSynchronizerImpl>(
-            runtime_.context->get_rec_model_args().transformer().n_layers());
+            runtime_.context->get_rec_model_args().n_layers());
 #elif defined(USE_MLU)
     std::shared_ptr<MLULayerSynchronizerImpl> layer_synchronizer =
         std::make_shared<MLULayerSynchronizerImpl>(
-            runtime_.context->get_rec_model_args().transformer().n_layers());
+            runtime_.context->get_rec_model_args().n_layers());
 #endif
 #if defined(USE_NPU) || defined(USE_MLU)
     input_params.parallel.layer_synchronizer = layer_synchronizer;
@@ -594,8 +592,8 @@ RecWorkerImpl::OneRecWorkPipeline::OneRecWorkPipeline(
       << "Failed to get RecVocabDict for OneRec constrained decoding, "
       << "model_path=" << runtime_.worker.model_weights_path_;
 
-  const int32_t vocab_size = static_cast<int32_t>(
-      runtime_.context->get_rec_model_args().transformer().vocab_size());
+  const int32_t vocab_size =
+      static_cast<int32_t>(runtime_.context->get_rec_model_args().vocab_size());
   constrained_decoding_ =
       std::make_unique<RecConstrainedDecoding>(vocab_dict,
                                                vocab_size,
@@ -832,8 +830,8 @@ RecWorkerImpl::OneRecXAttentionWorkPipeline::OneRecXAttentionWorkPipeline(
          "decoding, model_path="
       << runtime_.worker.model_weights_path_;
 
-  const int32_t vocab_size = static_cast<int32_t>(
-      runtime_.context->get_rec_model_args().transformer().vocab_size());
+  const int32_t vocab_size =
+      static_cast<int32_t>(runtime_.context->get_rec_model_args().vocab_size());
 #if defined(USE_NPU)
   initialize_constraint_device_tensors(
       vocab_dict->build_constraint_tables(vocab_size));
@@ -956,7 +954,7 @@ void RecWorkerImpl::OneRecXAttentionWorkPipeline::
     return;
   }
 
-  const auto& args = runtime_.context->get_rec_model_args().transformer();
+  const auto& args = runtime_.context->get_rec_model_args();
   const auto& parallel_args = runtime_.context->get_parallel_args();
   const int32_t num_layers = static_cast<int32_t>(args.n_layers());
   const int64_t decoder_kv_heads = args.decoder_n_kv_heads().value_or(
@@ -1132,7 +1130,7 @@ void RecWorkerImpl::OneRecXAttentionWorkPipeline::prepare_work_before_execute(
 
   auto& onerec_params =
       processed_inputs.input_params.mutable_onerec_xattention_params();
-  const auto& args = runtime_.context->get_rec_model_args().transformer();
+  const auto& args = runtime_.context->get_rec_model_args();
   const auto& parallel_args = runtime_.context->get_parallel_args();
   const int64_t decoder_kv_heads = args.decoder_n_kv_heads().value_or(
       args.n_kv_heads().value_or(args.decoder_n_heads()));
@@ -1823,7 +1821,7 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecXAttentionWorkPipeline::step(
           batch_size,
           beam_width,
           static_cast<int32_t>(
-              runtime_.context->get_rec_model_args().transformer().n_layers()));
+              runtime_.context->get_rec_model_args().n_layers()));
     }
 
     if (round == total_rounds - 1) {
@@ -1884,20 +1882,15 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::allocate_kv_caches_related() {
   auto kv_cache_options = torch::TensorOptions().dtype(dtype).device(device);
   const auto int_options =
       torch::TensorOptions().dtype(torch::kInt32).device(device);
-  int32_t num_layers =
-      runtime_.context->get_rec_model_args().transformer().n_layers();
+  int32_t num_layers = runtime_.context->get_rec_model_args().n_layers();
 
   int32_t full_kv_len =
       max_tokens_per_batch_ + max_seqs_per_batch_ * beam_width_ *
                                   (get_rec_multi_round_decode_rounds() - 1);
   int64_t num_kv_heads =
-      runtime_.context->get_rec_model_args()
-          .transformer()
-          .n_kv_heads()
-          .value_or(
-              runtime_.context->get_rec_model_args().transformer().n_heads());
-  int64_t head_dim =
-      runtime_.context->get_rec_model_args().transformer().head_dim();
+      runtime_.context->get_rec_model_args().n_kv_heads().value_or(
+          runtime_.context->get_rec_model_args().n_heads());
+  int64_t head_dim = runtime_.context->get_rec_model_args().head_dim();
 
   cached_full_k_caches_.resize(num_layers);
   cached_full_v_caches_.resize(num_layers);
@@ -1934,8 +1927,7 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::allocate_kv_caches_related() {
     return;
   }
 
-  const int64_t num_heads =
-      runtime_.context->get_rec_model_args().transformer().n_heads();
+  const int64_t num_heads = runtime_.context->get_rec_model_args().n_heads();
   const int64_t max_total_beam =
       static_cast<int64_t>(max_seqs_per_batch_) * beam_width_;
   auto fp32_options =
@@ -1981,8 +1973,7 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::
   int32_t full_kv_len = shape[0];
   int64_t num_kv_heads = shape[1];
   int64_t head_dim = shape[2];
-  int32_t num_layers =
-      runtime_.context->get_rec_model_args().transformer().n_layers();
+  int32_t num_layers = runtime_.context->get_rec_model_args().n_layers();
   int32_t max_decode_step = total_round - 1;
   int32_t unshared_offset = max_tokens_per_batch_;
 
@@ -2116,8 +2107,8 @@ std::optional<ForwardOutput> RecWorkerImpl::LlmRecMultiRoundPipeline::step(
   int32_t max_decode_step = total_rounds - 1;
   int32_t batch_size = step_meta->batch_size;
   int32_t beam_width = step_meta->beam_width;
-  int32_t num_layers = static_cast<int32_t>(
-      runtime_.context->get_rec_model_args().transformer().n_layers());
+  int32_t num_layers =
+      static_cast<int32_t>(runtime_.context->get_rec_model_args().n_layers());
 
   CHECK_GT(runtime_.worker.kv_caches_.size(), 0)
       << "KV caches are not initialized.";
@@ -2865,8 +2856,7 @@ bool RecWorkerImpl::init_model(ModelContext& context) {
   CHECK(work_pipelines_.empty()) << "Model is already initialized.";
 
   // Validate the requested model type before creating concurrent pipelines.
-  const auto& model_type =
-      context.get_rec_model_args().transformer().model_type();
+  const auto& model_type = context.get_rec_model_args().model_type();
   const RecModelKind expected_model_kind = get_rec_model_kind(model_type);
   CHECK(expected_model_kind != RecModelKind::kNone)
       << "Unsupported rec model_type: " << model_type;
@@ -2915,11 +2905,11 @@ bool RecWorkerImpl::init_model(ModelContext& context) {
         << "Rec model kind does not match model_type: " << model_type;
     const RecPipelineType pipeline_type = get_rec_pipeline_type(model_kind);
 
-    runtime.executor = std::make_unique<RecExecutor>(
-        runtime.model.get(),
-        runtime.context->get_transformer_model_args(),
-        runtime.worker.device(),
-        runtime.worker.options_);
+    runtime.executor =
+        std::make_unique<RecExecutor>(runtime.model.get(),
+                                      runtime.context->get_model_args_bundle(),
+                                      runtime.worker.device(),
+                                      runtime.worker.options_);
 
     work_pipelines_.emplace_back(create_pipeline(pipeline_type, runtime));
     index_queue_.enqueue(i);

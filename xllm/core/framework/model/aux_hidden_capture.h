@@ -63,14 +63,14 @@ class AuxHiddenCapture final {
   static int64_t num_aux_layers(const LlmModelArgs& model_args) {
     const auto& capture_ids = model_args.layers_to_capture();
     return capture_ids.empty()
-               ? static_cast<int64_t>(legacy_default_capture_layer_ids(
-                                          model_args.transformer().n_layers())
-                                          .size())
+               ? static_cast<int64_t>(
+                     legacy_default_capture_layer_ids(model_args.n_layers())
+                         .size())
                : static_cast<int64_t>(capture_ids.size());
   }
 
   static int64_t aux_hidden_dim(const LlmModelArgs& model_args) {
-    return num_aux_layers(model_args) * model_args.transformer().hidden_size();
+    return num_aux_layers(model_args) * model_args.hidden_size();
   }
 
   AuxHiddenCapture(const LlmModelArgs& model_args,

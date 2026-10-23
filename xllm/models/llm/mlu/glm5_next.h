@@ -48,8 +48,8 @@ class Glm5NextModelImpl final
   explicit Glm5NextModelImpl(const ModelContext& context)
       : LlmModelImplBase<layer::Glm5NextDecoderLayer>(
             "glm5_next",
-            context.get_transformer_model_args(),
-            context.get_transformer_model_args().enable_mla()),
+            context.get_model_args_bundle(),
+            context.get_model_args_bundle().enable_mla()),
         device_(context.get_tensor_options().device()),
         hc_mult_(context.get_llm_model_args().hc_mult()) {
     const auto& args = context.get_llm_model_args();
@@ -61,17 +61,16 @@ class Glm5NextModelImpl final
     CHECK_GT(hc_mult_, 0) << "GLM5-Next requires hc_mult > 0.";
 
     const int64_t tp_size = std::max<int64_t>(parallel_args.tp_size(), 1);
-    CHECK_EQ(args.transformer().linear_num_key_heads() % tp_size, 0)
+    CHECK_EQ(args.linear_num_key_heads() % tp_size, 0)
         << "GLM5-Next KDA head count must be divisible by TP size.";
 
     auto blocks = register_module("layers", torch::nn::ModuleList());
-    layers_.reserve(static_cast<size_t>(args.transformer().n_layers()));
+    layers_.reserve(static_cast<size_t>(args.n_layers()));
     embed_tokens_ =
         register_module("embed_tokens", layer::WordEmbedding(context));
     norm_ = register_module("norm", layer::RMSNorm(context));
     const layer::DsaTopkSharePlan topk_share_plan(context.get_llm_model_args());
-    for (int32_t layer_id = 0; layer_id < args.transformer().n_layers();
-         ++layer_id) {
+    for (int32_t layer_id = 0; layer_id < args.n_layers(); ++layer_id) {
       layer::Glm5NextDecoderLayer decoder_layer(
           context, layer_id, topk_share_plan);
       layers_.emplace_back(decoder_layer);

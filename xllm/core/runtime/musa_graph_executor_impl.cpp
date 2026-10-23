@@ -242,7 +242,7 @@ void restore_linear_attention_state(
 
 // MusaGraphPersistentParam implementation
 MusaGraphPersistentParam::MusaGraphPersistentParam(
-    const TransformerModelArgs& args,
+    const ModelArgsBundle& args,
     const torch::Device& device,
     const runtime::Options& options)
     : args_(args), device_(device), options_(options) {
@@ -1248,7 +1248,7 @@ void MusaGraph::refresh_persistent_paged_kv_host_mirrors(
 // MusaGraph implementation
 template <typename Params, typename Model>
 bool MusaGraph::capture_typed(Model* model,
-                              const TransformerModelArgs& args,
+                              const ModelArgsBundle& args,
                               const runtime::Options& options,
                               const torch::Tensor& tokens,
                               const torch::Tensor& positions,
@@ -1493,7 +1493,7 @@ bool MusaGraph::capture_typed(Model* model,
 }
 
 bool MusaGraph::capture(CausalLM* model,
-                        const TransformerModelArgs& args,
+                        const ModelArgsBundle& args,
                         const runtime::Options& options,
                         const torch::Tensor& tokens,
                         const torch::Tensor& positions,
@@ -1515,7 +1515,7 @@ bool MusaGraph::capture(CausalLM* model,
 }
 
 bool MusaGraph::capture(RecModel* model,
-                        const TransformerModelArgs& args,
+                        const ModelArgsBundle& args,
                         const runtime::Options& options,
                         const torch::Tensor& tokens,
                         const torch::Tensor& positions,
@@ -1667,7 +1667,7 @@ ModelOutput MusaGraph::replay(const torch::Tensor& tokens,
 }
 
 MusaGraphExecutorImpl::MusaGraphExecutorImpl(CausalLM* model,
-                                             const TransformerModelArgs& args,
+                                             const ModelArgsBundle& args,
                                              const torch::Device& device,
                                              const runtime::Options& options)
     : model_(model), args_(args), device_(device), options_(options) {
@@ -1692,7 +1692,7 @@ MusaGraphExecutorImpl::MusaGraphExecutorImpl(CausalLM* model,
 }
 
 MusaGraphExecutorImpl::MusaGraphExecutorImpl(RecModel* model,
-                                             const TransformerModelArgs& args,
+                                             const ModelArgsBundle& args,
                                              const torch::Device& device,
                                              const runtime::Options& options)
     : MusaGraphExecutorImpl(static_cast<CausalLM*>(nullptr),

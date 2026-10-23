@@ -26,7 +26,7 @@ namespace layer {
 
 DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(const ModelContext& context,
                                                  bool enable_indexer)
-    : DeepseekV2AttentionImpl(context.get_transformer_model_args(),
+    : DeepseekV2AttentionImpl(context.get_model_args_bundle(),
                               context.get_quant_args(),
                               context.get_parallel_args(),
                               context.get_tensor_options(),

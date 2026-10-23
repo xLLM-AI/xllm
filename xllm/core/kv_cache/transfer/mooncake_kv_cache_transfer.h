@@ -39,7 +39,7 @@ class MooncakeKVCacheTransferBase : public KVCacheTransfer {
   using KVCacheTransfer::configure_cache_layout;
 
   void configure_cache_layout(const ParallelArgs& parallel_args,
-                              const TransformerModelArgs& model_args,
+                              const ModelArgsBundle& model_args,
                               int32_t block_token_capacity,
                               bool is_spec_draft) override;
 

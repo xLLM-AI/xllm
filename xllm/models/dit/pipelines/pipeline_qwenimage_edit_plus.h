@@ -560,7 +560,7 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
       batch_tokens.resize(static_cast<size_t>(batch_size));
     }
 
-    int32_t pad_token_id = text_encoder_args.transformer().pad_token_id();
+    int32_t pad_token_id = text_encoder_args.pad_token_id();
     if (pad_token_id == 0) {
       auto pad_id = tokenizer_->token_to_id("<|endoftext|>");
       pad_token_id = pad_id.value_or(151643);
@@ -632,7 +632,7 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
 
     MMBatchData mm_batch(std::move(mm_data_list));
 
-    std::vector<KVCache> kv_caches(text_encoder_args.transformer().n_layers());
+    std::vector<KVCache> kv_caches(text_encoder_args.n_layers());
     VlmModelParams input_params = build_qwen_vl_input_params(
         tokens_flat, attention_mask, std::move(mm_batch));
 #if defined(USE_DCU)

@@ -21,7 +21,7 @@ namespace layer {
 Qwen2DecoderLayerImpl::Qwen2DecoderLayerImpl(const ModelContext& context,
                                              int32_t layer_id)
     : parallel_args_(context.get_parallel_args()) {
-  const auto& model_args = context.get_transformer_model_args();
+  const auto& model_args = context.get_model_args_bundle();
   const auto& quant_args = context.get_quant_args();
   const auto& options = context.get_tensor_options();
   const std::string mlp_module_prefix =

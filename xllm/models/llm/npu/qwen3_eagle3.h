@@ -106,7 +106,7 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
                        const ModelContext& context)
       : model_type_(model_type), options_(context.get_tensor_options()) {
     const auto& llm_args = context.get_llm_model_args();
-    const auto& model_args = llm_args.transformer();
+    const auto& model_args = llm_args;
     auto parallel_args = context.get_parallel_args();
     mrope_section_ = model_args.rope_scaling_mrope_section();
     norm_before_fc_ = llm_args.norm_before_fc();
@@ -433,7 +433,7 @@ class QWen3Eagle3ForCausalLMImpl : public torch::nn::Module {
       : device_(context.get_tensor_options().device()),
         dtype_(context.get_tensor_options().dtype().toScalarType()) {
     const auto& llm_args = context.get_llm_model_args();
-    const auto& model_args = llm_args.transformer();
+    const auto& model_args = llm_args;
     tie_word_embeddings_ = model_args.tie_word_embeddings();
 
     // register submodules

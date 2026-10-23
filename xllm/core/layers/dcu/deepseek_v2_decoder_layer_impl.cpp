@@ -40,13 +40,13 @@ DeepseekV2DecoderLayerImpl::DeepseekV2DecoderLayerImpl(
     : parallel_args_(context.get_parallel_args()),
       is_moe_layer_(is_moe_layer(context.get_llm_model_args(), layer_id)) {
   const auto& model_args = context.get_llm_model_args();
-  const auto& transformer_args = model_args.transformer();
+  const auto& transformer_args = model_args;
   const auto& quant_args = context.get_quant_args();
   const auto& options = context.get_tensor_options();
 
   attention_ =
       register_module("self_attn",
-                      DeepseekV2Attention(context.get_transformer_model_args(),
+                      DeepseekV2Attention(context.get_model_args_bundle(),
                                           quant_args,
                                           parallel_args_,
                                           options));

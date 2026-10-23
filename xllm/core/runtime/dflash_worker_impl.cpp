@@ -430,8 +430,8 @@ DFlashWorkerImpl::~DFlashWorkerImpl() {
                           "DP DSpark task pipeline requires split ACL graphs; "
                           "disable unified graphs.");
   }
-  if (draft_args.transformer().hidden_size() != capacity.common.hidden_size ||
-      draft_args.transformer().vocab_size() != capacity.common.vocab_size ||
+  if (draft_args.hidden_size() != capacity.common.hidden_size ||
+      draft_args.vocab_size() != capacity.common.vocab_size ||
       expected_context_hidden_size_ <= 0 ||
       expected_context_hidden_size_ > std::numeric_limits<int32_t>::max()) {
     return ::xllm::Status(StatusCode::INVALID_ARGUMENT,
@@ -455,11 +455,10 @@ DFlashWorkerImpl::~DFlashWorkerImpl() {
   capacity.unified_graph =
       Platform::is_npu() && options_.enable_graph() &&
       ExecutionConfig::get_instance().enable_unified_mtp_graph() &&
-      impl_->context_.get_transformer_model_args().model_type() ==
-          "glm_moe_dsa" &&
-      (draft_args.transformer().model_type() == "DFlashDraftModel" ||
-       is_dflash2_draft_model_type(draft_args.transformer().model_type()) ||
-       draft_args.transformer().model_type() == "DSparkDraftModel") &&
+      impl_->context_.get_model_args_bundle().model_type() == "glm_moe_dsa" &&
+      (draft_args.model_type() == "DFlashDraftModel" ||
+       is_dflash2_draft_model_type(draft_args.model_type()) ||
+       draft_args.model_type() == "DSparkDraftModel") &&
       parallel_args_.dp_size() == 1 && parallel_args_.cp_size() == 1 &&
       parallel_args_.kv_split_size_effective() == 1;
   capacity.adaptive_dspark = options_.enable_adaptive_target_verify();
@@ -477,9 +476,9 @@ DFlashWorkerImpl::~DFlashWorkerImpl() {
         "and at most one calibration-config or saved-table input.");
   }
   const auto& target_args = impl_->context_.get_llm_model_args();
-  capacity.sparse_dsa_target =
-      target_args.transformer().model_type() == "glm_moe_dsa" &&
-      target_args.enable_mla() && target_args.index_topk() > 0;
+  capacity.sparse_dsa_target = target_args.model_type() == "glm_moe_dsa" &&
+                               target_args.enable_mla() &&
+                               target_args.index_topk() > 0;
   status = TaskExecutionPipeline::create(threadpool_,
                                          impl_->task_model(),
                                          draft_impl_->task_model(),
@@ -572,8 +571,8 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
       model_weights_path, random_seed, master_status);
 
   if (impl_->get_status() == WorkerImpl::Status::LOADED) {
-    target_is_hybrid_recurrent_ = has_linear_attention_layers(
-        impl_->context_.get_transformer_model_args());
+    target_is_hybrid_recurrent_ =
+        has_linear_attention_layers(impl_->context_.get_model_args_bundle());
   }
 
   if (draft_impl_->get_status() == WorkerImpl::Status::LOADED) {
@@ -582,8 +581,7 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
     // mtp.<last>.head tensors (with the draft-side QuaRot transform); replacing
     // them after load destroys proposal quality.
     const bool uses_own_head_and_embedding =
-        util::is_deepseek_v4_dspark_model_type(
-            draft_args.transformer().model_type());
+        util::is_deepseek_v4_dspark_model_type(draft_args.model_type());
     if (uses_own_head_and_embedding) {
       LOG(INFO) << "Configured DeepSeek-V4 DSpark draft block size: "
                 << draft_args.dspark_block_size();
@@ -641,7 +639,7 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
         << "Block-diffusion draft config requires mask_token_id, "
            "dflash_config.mask_token_id, or dspark_noise_token_id.";
 
-    const int64_t draft_vocab_size = draft_args.transformer().vocab_size();
+    const int64_t draft_vocab_size = draft_args.vocab_size();
     CHECK_GT(draft_vocab_size, 0)
         << "Block-diffusion draft vocab_size must be set.";
     CHECK_LT(mask_token_id_, draft_vocab_size)
@@ -665,7 +663,7 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
 
     // Probabilistic rejection requires aligned vocabularies.
     if (draft_sampling_mode_ == DraftSamplingMode::PROBABILISTIC) {
-      const int64_t target_vocab_size = target_args.transformer().vocab_size();
+      const int64_t target_vocab_size = target_args.vocab_size();
       CHECK_EQ(draft_vocab_size, target_vocab_size)
           << "draft_sampling_mode=probabilistic requires the draft vocab ("
           << draft_vocab_size << ") to equal the target vocab ("
@@ -678,8 +676,7 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
            "target_layer_ids, dflash_config.target_layer_ids, or "
            "aux_hidden_state_layer_ids.";
     expected_context_hidden_size_ =
-        static_cast<int64_t>(target_args.transformer().hidden_size()) *
-        num_target_layers;
+        static_cast<int64_t>(target_args.hidden_size()) * num_target_layers;
     draft_sas_mode_ = dflash_detail::classify_dspark_sas_mode(
         draft_args, sample_from_anchor());
   }
@@ -1187,7 +1184,7 @@ void DFlashWorkerImpl::write_context_kv(
       !input.transfer_kv_infos.empty()) {
     std::shared_ptr<NPULayerSynchronizerImpl> layer_synchronizer =
         std::make_shared<NPULayerSynchronizerImpl>(
-            draft_impl_->context_.get_transformer_model_args().n_layers());
+            draft_impl_->context_.get_model_args_bundle().n_layers());
     input.input_params.parallel.layer_synchronizer = layer_synchronizer;
     kv_transfers.add(kv_cache_transfer_->push_kv_blocks_async(
         input.transfer_kv_infos,

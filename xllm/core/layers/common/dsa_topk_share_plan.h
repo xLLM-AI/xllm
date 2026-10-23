@@ -43,11 +43,6 @@ inline bool has_dsa_indexer(const LlmModelArgs& args) {
          args.index_topk() > 0;
 }
 
-inline bool has_dsa_indexer(const TransformerModelArgs& args) {
-  return args.index_n_heads() > 0 && args.index_head_dim() > 0 &&
-         args.index_topk() > 0;
-}
-
 inline bool has_dsa_indexer(const ModelArgsBundle& args) {
   return args.index_n_heads() > 0 && args.index_head_dim() > 0 &&
          args.index_topk() > 0;
@@ -61,11 +56,11 @@ inline bool is_mtp_dsa_topk_reuse_enabled(const ModelArgs& args) {
 }
 
 inline bool is_mtp_dsa_topk_reuse_enabled(const LlmModelArgs& args) {
-  return args.transformer().model_type().ends_with("_mtp") &&
+  return args.model_type().ends_with("_mtp") &&
          args.index_share_for_mtp_iteration() && has_dsa_indexer(args);
 }
 
-inline bool is_mtp_dsa_topk_reuse_enabled(const TransformerModelArgs& args) {
+inline bool is_mtp_dsa_topk_reuse_enabled(const ModelArgsBundle& args) {
   return args.model_type().ends_with("_mtp") &&
          args.index_share_for_mtp_iteration() && has_dsa_indexer(args);
 }
@@ -77,10 +72,6 @@ class DsaTopkSharePlan final {
   explicit DsaTopkSharePlan(const ModelArgs& args) { initialize(args, args); }
 
   explicit DsaTopkSharePlan(const LlmModelArgs& args) {
-    initialize(args.transformer(), args);
-  }
-
-  explicit DsaTopkSharePlan(const TransformerModelArgs& args) {
     initialize(args, args);
   }
 
@@ -232,31 +223,6 @@ inline std::vector<bool> get_dsa_indexer_layer_mask(const ModelArgs& args,
   return layer_mask;
 }
 
-inline std::vector<bool> get_dsa_indexer_layer_mask(
-    const TransformerModelArgs& args,
-    int64_t num_cache_layers) {
-  CHECK_GE(num_cache_layers, 0);
-  CHECK_LE(num_cache_layers, std::numeric_limits<int32_t>::max());
-  if (!has_dsa_indexer(args)) {
-    return {};
-  }
-  std::vector<bool> layer_mask(static_cast<size_t>(num_cache_layers), true);
-  if (args.model_type().ends_with("_mtp")) {
-    for (int32_t layer_id = 0; layer_id < num_cache_layers; ++layer_id) {
-      layer_mask[static_cast<size_t>(layer_id)] =
-          is_full_attention_layer(args, layer_id);
-    }
-    return layer_mask;
-  }
-  const DsaTopkSharePlan topk_share_plan(args);
-  for (int32_t layer_id = 0; layer_id < num_cache_layers; ++layer_id) {
-    layer_mask[static_cast<size_t>(layer_id)] =
-        is_full_attention_layer(args, layer_id) &&
-        topk_share_plan.layer_uses_indexer(layer_id);
-  }
-  return layer_mask;
-}
-
 inline std::vector<bool> get_dsa_indexer_layer_mask(const ModelArgsBundle& args,
                                                     int64_t num_cache_layers) {
   CHECK_GE(num_cache_layers, 0);
@@ -292,10 +258,10 @@ inline std::vector<bool> get_dsa_indexer_layer_mask(const LlmModelArgs& args,
   }
 
   std::vector<bool> layer_mask(static_cast<size_t>(num_cache_layers), true);
-  if (args.transformer().model_type().ends_with("_mtp")) {
+  if (args.model_type().ends_with("_mtp")) {
     for (int32_t layer_id = 0; layer_id < num_cache_layers; ++layer_id) {
       layer_mask[static_cast<size_t>(layer_id)] =
-          is_full_attention_layer(args.transformer(), layer_id);
+          is_full_attention_layer(args, layer_id);
     }
     return layer_mask;
   }
@@ -303,7 +269,7 @@ inline std::vector<bool> get_dsa_indexer_layer_mask(const LlmModelArgs& args,
   const DsaTopkSharePlan topk_share_plan(args);
   for (int32_t layer_id = 0; layer_id < num_cache_layers; ++layer_id) {
     layer_mask[static_cast<size_t>(layer_id)] =
-        is_full_attention_layer(args.transformer(), layer_id) &&
+        is_full_attention_layer(args, layer_id) &&
         topk_share_plan.layer_uses_indexer(layer_id);
   }
   return layer_mask;
@@ -316,7 +282,7 @@ inline DsaTopkShareDecision get_dsa_topk_share_decision(const ModelArgs& args,
 }
 
 inline DsaTopkShareDecision get_dsa_topk_share_decision(
-    const TransformerModelArgs& args,
+    const ModelArgsBundle& args,
     int32_t layer_id) {
   const DsaTopkSharePlan topk_share_plan(args);
   return topk_share_plan.decision_for(layer_id);

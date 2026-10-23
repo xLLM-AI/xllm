@@ -21,7 +21,7 @@ namespace xllm {
 namespace layer {
 namespace {
 
-bool is_full_attention_layer(const TransformerModelArgs& model_args,
+bool is_full_attention_layer(const ModelArgsBundle& model_args,
                              int32_t layer_id) {
   auto layer_types = model_args.layer_types();
   if (layer_types.empty()) {
@@ -35,7 +35,7 @@ bool is_full_attention_layer(const TransformerModelArgs& model_args,
 }
 
 bool is_moe_layer(const LlmModelArgs& model_args, int32_t layer_id) {
-  const auto& transformer_args = model_args.transformer();
+  const auto& transformer_args = model_args;
   const auto& mlp_only_layers = transformer_args.mlp_only_layers();
   return std::count(mlp_only_layers.begin(), mlp_only_layers.end(), layer_id) ==
              0 &&
@@ -49,7 +49,7 @@ Qwen3_5DecoderLayerImpl::Qwen3_5DecoderLayerImpl(const ModelContext& context,
                                                  int32_t layer_id)
     : parallel_args_(context.get_parallel_args()) {
   const auto& llm_args = context.get_llm_model_args();
-  const auto& transformer_args = llm_args.transformer();
+  const auto& transformer_args = llm_args;
   const auto& quant_args = context.get_quant_args();
   const auto& options = context.get_tensor_options();
 
@@ -128,12 +128,12 @@ Qwen3_5DecoderLayerImpl::Qwen3_5DecoderLayerImpl(const ModelContext& context,
                          transformer_args.rope_scaling_mrope_section(),
                          options));
   } else {
-    linear_attn_ = register_module(
-        "linear_attn",
-        Qwen3_5GatedDeltaNet(context.get_transformer_model_args(),
-                             quant_args,
-                             parallel_args_,
-                             options));
+    linear_attn_ =
+        register_module("linear_attn",
+                        Qwen3_5GatedDeltaNet(context.get_model_args_bundle(),
+                                             quant_args,
+                                             parallel_args_,
+                                             options));
   }
 
   // ---- Layer Norms ----

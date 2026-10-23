@@ -24,7 +24,7 @@ TEST(ModelFamilyArgsTest,
      SharesFieldsBetweenCapabilitiesAndCompatibilityAccess) {
   ModelArgs config{};
   LlmModelArgs llm(config);
-  TransformerModelArgs& transformer = llm.mutable_transformer();
+  LlmModelArgs& transformer = llm;
 
   EXPECT_EQ(&llm.enable_mla(), &llm.attention_params().enable_mla());
   EXPECT_EQ(&llm.enable_mla(), &transformer.enable_mla());
@@ -57,8 +57,8 @@ TEST(ModelFamilyArgsTest,
   EXPECT_EQ(&vlm.encoder_embedding_mode(),
             &vlm.embedding_params().encoder_embedding_mode());
   EXPECT_EQ(&vlm.encoder_embedding_mode(),
-            &vlm.transformer().embedding_params().encoder_embedding_mode());
-  vlm.mutable_transformer().embedding_params().encoder_embedding_mode() = true;
+            &vlm.embedding_params().encoder_embedding_mode());
+  vlm.embedding_params().encoder_embedding_mode() = true;
   EXPECT_TRUE(vlm.encoder_embedding_mode());
   vlm.encoder_embedding_mode() = false;
   EXPECT_FALSE(vlm.embedding_params().encoder_embedding_mode());
@@ -73,7 +73,7 @@ TEST(ModelFamilyArgsTest, CopiesOwnIndependentCapabilityStorage) {
 
   copied.draft_vocab_size() = 512;
   copied.speculative_params().layers_to_capture().front() = 2;
-  copied.mutable_transformer().enable_mla() = true;
+  copied.enable_mla() = true;
 
   EXPECT_EQ(original.draft_vocab_size(), 256);
   EXPECT_EQ(original.speculative_params().layers_to_capture().front(), 1);
@@ -83,7 +83,7 @@ TEST(ModelFamilyArgsTest, CopiesOwnIndependentCapabilityStorage) {
   EXPECT_TRUE(copied.attention_params().enable_mla());
   EXPECT_NE(&original.attention_params(), &copied.attention_params());
   EXPECT_EQ(&copied.draft_vocab_size(),
-            &copied.transformer().speculative_params().draft_vocab_size());
+            &copied.speculative_params().draft_vocab_size());
 }
 
 TEST(ModelArgsBundleTest, KeepsVlmComponentCapabilitiesWithItsOwnedArguments) {

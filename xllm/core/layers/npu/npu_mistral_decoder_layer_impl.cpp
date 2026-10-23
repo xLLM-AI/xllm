@@ -35,11 +35,11 @@ NpuMistralDecoderLayerImpl::NpuMistralDecoderLayerImpl(
     const ModelContext& context)
     : BaseLayer(context) {
   param_from_args(prefill_param_,
-                  context.get_transformer_model_args(),
+                  context.get_model_args_bundle(),
                   context.get_parallel_args(),
                   true);
   param_from_args(decode_param_,
-                  context.get_transformer_model_args(),
+                  context.get_model_args_bundle(),
                   context.get_parallel_args(),
                   false);
 

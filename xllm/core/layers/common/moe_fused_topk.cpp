@@ -32,7 +32,7 @@ MoEFusedTopkImpl::MoEFusedTopkImpl(const LlmModelArgs& model_args,
       num_expert_group_(model_args.n_group()),
       topk_group_(model_args.topk_group()),
       route_scale_(model_args.routed_scaling_factor()),
-      hidden_size_(model_args.transformer().hidden_size()),
+      hidden_size_(model_args.hidden_size()),
       renormalize_(model_args.norm_topk_prob()),
       scoring_func_(model_args.scoring_func()) {
   const std::string& topk_method = model_args.topk_method();

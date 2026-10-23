@@ -32,7 +32,7 @@ class RecExecutorImplFactory final {
  public:
   using Creator = std::function<std::unique_ptr<RecExecutorBackend>(
       RecModel*,
-      const TransformerModelArgs&,
+      const ModelArgsBundle&,
       const torch::Device&,
       const runtime::Options&)>;
 
@@ -40,7 +40,7 @@ class RecExecutorImplFactory final {
   bool register_creator(const std::string& name, Creator creator);
   std::unique_ptr<RecExecutorBackend> create_executor_impl(
       RecModel* model,
-      const TransformerModelArgs& args,
+      const ModelArgsBundle& args,
       const torch::Device& device,
       const runtime::Options& options,
       const std::string& backend);
@@ -58,7 +58,7 @@ class RecExecutorImplFactory final {
     return RecExecutorImplFactory::get_instance().register_creator(          \
         backend,                                                             \
         [](RecModel* model,                                                  \
-           const TransformerModelArgs& args,                                 \
+           const ModelArgsBundle& args,                                      \
            const torch::Device& device,                                      \
            const runtime::Options& options)                                  \
             -> std::unique_ptr<RecExecutorBackend> {                         \

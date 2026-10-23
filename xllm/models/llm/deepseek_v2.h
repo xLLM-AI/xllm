@@ -59,22 +59,21 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
     auto parallel_args = context.get_parallel_args();
 
     blocks_ = register_module("layers", torch::nn::ModuleList());
-    layers_.reserve(model_args_.transformer().n_layers());
+    layers_.reserve(model_args_.n_layers());
 
-    embed_tokens_ = register_module(
-        "embed_tokens",
-        layer::WordEmbedding(model_args_.transformer().vocab_size(),
-                             model_args_.transformer().hidden_size(),
-                             context.get_parallel_args(),
-                             options));
-    norm_ =
-        register_module("norm",
-                        layer::RMSNorm(model_args_.transformer().hidden_size(),
-                                       model_args_.transformer().rms_norm_eps(),
-                                       options));
+    embed_tokens_ =
+        register_module("embed_tokens",
+                        layer::WordEmbedding(model_args_.vocab_size(),
+                                             model_args_.hidden_size(),
+                                             context.get_parallel_args(),
+                                             options));
+    norm_ = register_module(
+        "norm",
+        layer::RMSNorm(
+            model_args_.hidden_size(), model_args_.rms_norm_eps(), options));
 
     // create decoder layers
-    for (int32_t i = 0; i < model_args_.transformer().n_layers(); ++i) {
+    for (int32_t i = 0; i < model_args_.n_layers(); ++i) {
       auto block = decoder_layer_factory(context, i);
       layers_.push_back(block);
       blocks_->push_back(block);

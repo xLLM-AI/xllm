@@ -65,7 +65,7 @@ class DeepseekV4DSparkModelImpl final : public DeepseekV4ModelImpl {
         markov_head_(context.get_tensor_options(),
                      context.get_llm_model_args().markov_rank()) {
     const auto& llm_args = context.get_llm_model_args();
-    const auto& args = llm_args.transformer();
+    const auto& args = llm_args;
     const int64_t capture_count = llm_args.dspark_num_layers();
     CHECK_GT(capture_count, 0)
         << "DeepSeek-V4 DSpark requires dspark_num_layers > 0.";

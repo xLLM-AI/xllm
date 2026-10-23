@@ -530,7 +530,7 @@ class LongCatImagePipelineImpl : public torch::nn::Module {
 
     // Prepare kv_caches for forward pass
     const auto& text_encoder_args = context_.get_vlm_model_args("text_encoder");
-    std::vector<KVCache> kv_caches(text_encoder_args.transformer().n_layers());
+    std::vector<KVCache> kv_caches(text_encoder_args.n_layers());
 
     VlmModelParams input_params =
         build_longcat_input_params(tokens_flat, positions_2d, attention_mask);

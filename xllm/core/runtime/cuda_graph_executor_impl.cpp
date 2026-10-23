@@ -132,7 +132,7 @@ int64_t get_graph_bucket_num_tokens(int64_t num_tokens, bool is_prefill) {
 
 // CudaGraphPersistentParam implementation
 CudaGraphPersistentParam::CudaGraphPersistentParam(
-    const TransformerModelArgs& args,
+    const ModelArgsBundle& args,
     const torch::Device& device,
     const runtime::Options& options)
     : args_(args), device_(device), options_(options) {
@@ -920,7 +920,7 @@ std::optional<Params> CudaGraphPersistentParam::update(
 
 // CudaGraph implementation
 bool CudaGraph::capture(CausalLM* model,
-                        const TransformerModelArgs& args,
+                        const ModelArgsBundle& args,
                         const runtime::Options& options,
                         const torch::Tensor& tokens,
                         const torch::Tensor& positions,
@@ -942,7 +942,7 @@ bool CudaGraph::capture(CausalLM* model,
 }
 
 bool CudaGraph::capture(RecModel* model,
-                        const TransformerModelArgs& args,
+                        const ModelArgsBundle& args,
                         const runtime::Options& options,
                         const torch::Tensor& tokens,
                         const torch::Tensor& positions,
@@ -965,7 +965,7 @@ bool CudaGraph::capture(RecModel* model,
 
 template <typename Model, typename Params>
 bool CudaGraph::capture_typed(Model* model,
-                              const TransformerModelArgs& args,
+                              const ModelArgsBundle& args,
                               const runtime::Options& options,
                               const torch::Tensor& tokens,
                               const torch::Tensor& positions,
@@ -1228,7 +1228,7 @@ ModelOutput CudaGraph::replay(const torch::Tensor& tokens,
 
 // CudaGraphExecutorImpl implementation
 CudaGraphExecutorImpl::CudaGraphExecutorImpl(CausalLM* model,
-                                             const TransformerModelArgs& args,
+                                             const ModelArgsBundle& args,
                                              const torch::Device& device,
                                              const runtime::Options& options)
     : model_(model), args_(args), device_(device), options_(options) {
@@ -1236,7 +1236,7 @@ CudaGraphExecutorImpl::CudaGraphExecutorImpl(CausalLM* model,
 }
 
 CudaGraphExecutorImpl::CudaGraphExecutorImpl(RecModel* model,
-                                             const TransformerModelArgs& args,
+                                             const ModelArgsBundle& args,
                                              const torch::Device& device,
                                              const runtime::Options& options)
     : rec_model_(model), args_(args), device_(device), options_(options) {

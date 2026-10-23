@@ -29,7 +29,7 @@ DeepseekV4DecoderLayerImpl::DeepseekV4DecoderLayerImpl(
     int32_t layer_id)
     : layer_id_(layer_id) {
   const auto& args = context.get_llm_model_args();
-  const auto& transformer_args = args.transformer();
+  const auto& transformer_args = args;
   const auto& quant_args = context.get_quant_args();
   const auto& parallel_args = context.get_parallel_args();
   const auto& options = context.get_tensor_options();

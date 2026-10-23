@@ -162,24 +162,6 @@ const DiTComponentModelArgs& ModelContext::get_dit_model_args() const& {
   return model_args_bundle_->dit_model_args();
 }
 
-const TransformerModelArgs& ModelContext::get_transformer_model_args() const& {
-  switch (identity_.family) {
-    case ModelFamily::LLM:
-      return get_llm_model_args().transformer();
-    case ModelFamily::VLM:
-      return get_vlm_model_args().transformer();
-    case ModelFamily::REC:
-      return get_rec_model_args().transformer();
-    case ModelFamily::DIT:
-    case ModelFamily::UNKNOWN:
-      break;
-  }
-  LOG(FATAL) << "Transformer arguments require an LLM, VLM, or Rec model "
-                "context";
-  static const TransformerModelArgs empty_args;
-  return empty_args;
-}
-
 const AttentionModelParams& ModelContext::get_attention_model_params() const& {
   return model_args_bundle_->attention_params();
 }

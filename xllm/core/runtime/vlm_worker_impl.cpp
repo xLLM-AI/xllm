@@ -58,7 +58,7 @@ bool VLMWorkerImpl::init_model(ModelContext& context) {
   model_ = create_vlm_model(context);
   CHECK(model_ != nullptr) << "Failed to create model.";
   model_executor_ = std::make_unique<Executor>(
-      model_.get(), context.get_transformer_model_args(), device_, options_);
+      model_.get(), context.get_model_args_bundle(), device_, options_);
   return true;
 }
 
@@ -226,7 +226,7 @@ std::optional<ForwardOutput> VLMWorkerImpl::step_for_schedule_overlap(
     const VlmForwardInput& input) {
   // Linear-attention VLMs need the same compute-stream restore ordering as
   // LLMs.
-  if (has_linear_attention_layers(context_.get_transformer_model_args())) {
+  if (has_linear_attention_layers(context_.get_model_args_bundle())) {
     c10::StreamGuard restore_guard = compute_stream_->set_stream_guard();
     try_restore_linear_state_slots(ModelParamsView(input.input_params));
   }

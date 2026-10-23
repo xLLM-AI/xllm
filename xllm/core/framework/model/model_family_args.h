@@ -62,13 +62,169 @@ inline const ModelArgs& default_model_args() {
   void property(const T& value) && = delete;                           \
   void property(T&& value) && = delete
 
-// Transformer parameters are composed once; the compatibility accessors below
-// refer directly to the capability that owns each value.
-class TransformerModelArgs final {
+// Model-family arguments compose capability parameter objects directly.
+#define XLLM_FORWARD_COMMON_MODEL_PARAMS                                       \
+  XLLM_FORWARD_MODEL_PARAM(std::string, model_type, execution_params_);        \
+  XLLM_FORWARD_MODEL_PARAM(std::string, dtype, execution_params_);             \
+  XLLM_FORWARD_MODEL_PARAM(int64_t, hidden_size, execution_params_);           \
+  XLLM_FORWARD_MODEL_PARAM(std::string, hidden_act, execution_params_);        \
+  XLLM_FORWARD_MODEL_PARAM(int64_t, intermediate_size, execution_params_);     \
+  XLLM_FORWARD_MODEL_PARAM(int64_t, n_layers, execution_params_);              \
+  XLLM_FORWARD_MODEL_PARAM(int64_t, n_encoder_layers, execution_params_);      \
+  XLLM_FORWARD_MODEL_PARAM(int64_t, head_dim, attention_params_);              \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      int64_t, kv_cache_storage_head_dim, kv_cache_params_);                   \
+  XLLM_FORWARD_MODEL_PARAM(int64_t, decoder_head_dim, attention_params_);      \
+  XLLM_FORWARD_MODEL_PARAM(int64_t, n_heads, attention_params_);               \
+  XLLM_FORWARD_MODEL_PARAM(int64_t, decoder_n_heads, attention_params_);       \
+  XLLM_FORWARD_MODEL_PARAM(int64_t, actual_n_heads, attention_params_);        \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      std::optional<int64_t>, n_kv_heads, attention_params_);                  \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      std::optional<int64_t>, decoder_n_kv_heads, attention_params_);          \
+  XLLM_FORWARD_MODEL_PARAM(int64_t, vocab_size, execution_params_);            \
+  XLLM_FORWARD_MODEL_PARAM(int32_t, qk_nope_head_dim, attention_params_);      \
+  XLLM_FORWARD_MODEL_PARAM(int32_t, qk_rope_head_dim, attention_params_);      \
+  XLLM_FORWARD_MODEL_PARAM(int32_t, v_head_dim, attention_params_);            \
+  XLLM_FORWARD_MODEL_PARAM(int32_t, q_lora_rank, attention_params_);           \
+  XLLM_FORWARD_MODEL_PARAM(int32_t, kv_lora_rank, attention_params_);          \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      int32_t, num_nextn_predict_layers, speculative_params_);                 \
+  XLLM_FORWARD_MODEL_PARAM(bool, enable_mla, attention_params_);               \
+  XLLM_FORWARD_MODEL_PARAM(int32_t, num_experts_per_tok, moe_params_);         \
+  XLLM_FORWARD_MODEL_PARAM(bool, use_qk_norm, attention_params_);              \
+  XLLM_FORWARD_MODEL_PARAM(float, rms_norm_eps, attention_params_);            \
+  XLLM_FORWARD_MODEL_PARAM(float, layer_norm_eps, attention_params_);          \
+  XLLM_FORWARD_MODEL_PARAM(int64_t, rotary_dim, attention_params_);            \
+  XLLM_FORWARD_MODEL_PARAM(float, rope_theta, attention_params_);              \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      std::string, rope_scaling_rope_type, attention_params_);                 \
+  XLLM_FORWARD_MODEL_PARAM(float, rope_scaling_factor, attention_params_);     \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      float, rope_scaling_low_freq_factor, attention_params_);                 \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      float, rope_scaling_high_freq_factor, attention_params_);                \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      float, rope_extrapolation_factor, attention_params_);                    \
+  XLLM_FORWARD_MODEL_PARAM(int64_t,                                            \
+                           rope_scaling_original_max_position_embeddings,      \
+                           attention_params_);                                 \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      int64_t, rope_scaling_beta_fast, attention_params_);                     \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      int64_t, rope_scaling_beta_slow, attention_params_);                     \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      float, rope_scaling_attn_factor, attention_params_);                     \
+  XLLM_FORWARD_MODEL_PARAM(float, rope_scaling_mscale, attention_params_);     \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      float, rope_scaling_mscale_all_dim, attention_params_);                  \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      std::vector<int64_t>, rope_scaling_mrope_section, attention_params_);    \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      bool, rope_scaling_mrope_interleaved, attention_params_);                \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      int64_t, max_position_embeddings, execution_params_);                    \
+  XLLM_FORWARD_MODEL_PARAM(bool, use_sliding_window, attention_params_);       \
+  XLLM_FORWARD_MODEL_PARAM(int32_t, sliding_window, attention_params_);        \
+  XLLM_FORWARD_MODEL_PARAM(int32_t, index_head_dim, kv_cache_params_);         \
+  XLLM_FORWARD_MODEL_PARAM(int32_t, index_n_heads, kv_cache_params_);          \
+  XLLM_FORWARD_MODEL_PARAM(int32_t, index_topk, kv_cache_params_);             \
+  XLLM_FORWARD_MODEL_PARAM(int32_t, index_kpool, kv_cache_params_);            \
+  XLLM_FORWARD_MODEL_PARAM(bool, index_kpool_compress, kv_cache_params_);      \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      bool, index_kpool_always_select_tail, kv_cache_params_);                 \
+  XLLM_FORWARD_MODEL_PARAM(bool, indexer_rope_interleave, kv_cache_params_);   \
+  XLLM_FORWARD_MODEL_PARAM(int32_t, index_topk_freq, kv_cache_params_);        \
+  XLLM_FORWARD_MODEL_PARAM(std::string, index_topk_pattern, kv_cache_params_); \
+  XLLM_FORWARD_MODEL_PARAM(int32_t, index_skip_topk_offset, kv_cache_params_); \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      bool, index_share_for_mtp_iteration, kv_cache_params_);                  \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      std::vector<std::string>, indexer_types, kv_cache_params_);              \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      std::vector<std::string>, mlp_layer_types, moe_params_);                 \
+  XLLM_FORWARD_MODEL_PARAM(int32_t, rope_head_dim, kv_cache_params_);          \
+  XLLM_FORWARD_MODEL_PARAM(int32_t, o_lora_rank, kv_cache_params_);            \
+  XLLM_FORWARD_MODEL_PARAM(int32_t, o_groups, kv_cache_params_);               \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      std::vector<int32_t>, compress_ratios, kv_cache_params_);                \
+  XLLM_FORWARD_MODEL_PARAM(float, compress_rope_theta, kv_cache_params_);      \
+  XLLM_FORWARD_MODEL_PARAM(int32_t, window_size, kv_cache_params_);            \
+  XLLM_FORWARD_MODEL_PARAM(int32_t, n_activated_experts, moe_params_);         \
+  XLLM_FORWARD_MODEL_PARAM(int32_t, n_hash_layers, moe_params_);               \
+  XLLM_FORWARD_MODEL_PARAM(float, factor, kv_cache_params_);                   \
+  XLLM_FORWARD_MODEL_PARAM(float, beta_fast, kv_cache_params_);                \
+  XLLM_FORWARD_MODEL_PARAM(float, beta_slow, kv_cache_params_);                \
+  XLLM_FORWARD_MODEL_PARAM(std::string, scale_fmt, kv_cache_params_);          \
+  XLLM_FORWARD_MODEL_PARAM(int32_t, hc_mult, kv_cache_params_);                \
+  XLLM_FORWARD_MODEL_PARAM(int32_t, hc_sinkhorn_iters, kv_cache_params_);      \
+  XLLM_FORWARD_MODEL_PARAM(float, hc_eps, kv_cache_params_);                   \
+  XLLM_FORWARD_MODEL_PARAM(int64_t, max_batch_size, kv_cache_params_);         \
+  XLLM_FORWARD_MODEL_PARAM(int64_t, max_seq_len, kv_cache_params_);            \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      bool, use_absolute_position_embedding, attention_params_);               \
+  XLLM_FORWARD_MODEL_PARAM(int32_t, bos_token_id, execution_params_);          \
+  XLLM_FORWARD_MODEL_PARAM(int32_t, eos_token_id, execution_params_);          \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      std::vector<int32_t>, eos_token_id_vec, execution_params_);              \
+  XLLM_FORWARD_MODEL_PARAM(int32_t, pad_token_id, execution_params_);          \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      std::optional<float>, attn_scalar, attention_params_);                   \
+  XLLM_FORWARD_MODEL_PARAM(bool, no_bias, execution_params_);                  \
+  XLLM_FORWARD_MODEL_PARAM(bool, qkv_bias, attention_params_);                 \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      std::unordered_set<int32_t>, stop_token_ids, execution_params_);         \
+  XLLM_FORWARD_MODEL_PARAM(bool, tie_word_embeddings, execution_params_);      \
+  XLLM_FORWARD_MODEL_PARAM(bool, attention_bias, attention_params_);           \
+  XLLM_FORWARD_MODEL_PARAM(float, attention_dropout, attention_params_);       \
+  XLLM_FORWARD_MODEL_PARAM(int32_t, decoder_sparse_step, moe_params_);         \
+  XLLM_FORWARD_MODEL_PARAM(float, initializer_range, execution_params_);       \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      std::vector<int32_t>, mlp_only_layers, moe_params_);                     \
+  XLLM_FORWARD_MODEL_PARAM(int64_t, num_attention_heads, attention_params_);   \
+  XLLM_FORWARD_MODEL_PARAM(int32_t, num_experts, moe_params_);                 \
+  XLLM_FORWARD_MODEL_PARAM(bool, output_router_logits, moe_params_);           \
+  XLLM_FORWARD_MODEL_PARAM(int32_t, rope_scaling, execution_params_);          \
+  XLLM_FORWARD_MODEL_PARAM(float, router_aux_loss_coef, moe_params_);          \
+  XLLM_FORWARD_MODEL_PARAM(bool, attn_output_gate, attention_params_);         \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      int32_t, full_attention_interval, linear_attention_params_);             \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      std::vector<int32_t>, full_attn_layers, linear_attention_params_);       \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      int32_t, linear_conv_kernel_dim, linear_attention_params_);              \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      int32_t, linear_key_head_dim, linear_attention_params_);                 \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      int32_t, linear_value_head_dim, linear_attention_params_);               \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      int64_t, linear_num_key_heads, linear_attention_params_);                \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      int32_t, linear_num_value_heads, linear_attention_params_);              \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      float, linear_lower_bound, linear_attention_params_);                    \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      std::string, mamba_ssm_dtype, linear_attention_params_);                 \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      int32_t, shared_expert_intermediate_size, moe_params_);                  \
+  XLLM_FORWARD_MODEL_PARAM(float, partial_rotary_factor, attention_params_);   \
+  XLLM_FORWARD_MODEL_PARAM(                                                    \
+      std::vector<std::string>, layer_types, linear_attention_params_);
+
+class LlmModelArgs final {
+ private:
+  AttentionModelParams attention_params_;
+  LinearAttentionModelParams linear_attention_params_;
+  KVCacheModelParams kv_cache_params_;
+  MoEModelParams moe_params_;
+  SpeculativeModelParams speculative_params_;
+  EmbeddingModelParams embedding_params_;
+  ExecutionModelParams execution_params_;
+
  public:
-  TransformerModelArgs()
-      : TransformerModelArgs(model_family_args_detail::default_model_args()) {}
-  explicit TransformerModelArgs(const ModelArgs& args)
+  LlmModelArgs()
+      : LlmModelArgs(model_family_args_detail::default_model_args()) {}
+  explicit LlmModelArgs(const ModelArgs& args)
       : attention_params_(args),
         linear_attention_params_(args),
         kv_cache_params_(args),
@@ -77,8 +233,8 @@ class TransformerModelArgs final {
         embedding_params_(args),
         execution_params_(args) {}
 
-  explicit TransformerModelArgs(ModelArgs&&) = delete;
-  explicit TransformerModelArgs(const ModelArgs&&) = delete;
+  explicit LlmModelArgs(ModelArgs&&) = delete;
+  explicit LlmModelArgs(const ModelArgs&&) = delete;
 
   const AttentionModelParams& attention_params() const noexcept {
     return attention_params_;
@@ -120,450 +276,68 @@ class TransformerModelArgs final {
     return embedding_params();
   }
 
-  XLLM_FORWARD_MODEL_PARAM(std::string, model_type, execution_params_);
-  XLLM_FORWARD_MODEL_PARAM(std::string, dtype, execution_params_);
-  XLLM_FORWARD_MODEL_PARAM(int64_t, hidden_size, execution_params_);
-  XLLM_FORWARD_MODEL_PARAM(std::string, hidden_act, execution_params_);
-  XLLM_FORWARD_MODEL_PARAM(int64_t, intermediate_size, execution_params_);
-  XLLM_FORWARD_MODEL_PARAM(int64_t, n_layers, execution_params_);
-  XLLM_FORWARD_MODEL_PARAM(int64_t, n_encoder_layers, execution_params_);
-  XLLM_FORWARD_MODEL_PARAM(int64_t, head_dim, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(int64_t,
-                           kv_cache_storage_head_dim,
-                           kv_cache_params_);
-  XLLM_FORWARD_MODEL_PARAM(int64_t, decoder_head_dim, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(int64_t, n_heads, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(int64_t, decoder_n_heads, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(int64_t, actual_n_heads, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(std::optional<int64_t>,
-                           n_kv_heads,
-                           attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(std::optional<int64_t>,
-                           decoder_n_kv_heads,
-                           attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(int64_t, vocab_size, execution_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, qk_nope_head_dim, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, qk_rope_head_dim, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, v_head_dim, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, q_lora_rank, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, kv_lora_rank, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           num_nextn_predict_layers,
-                           speculative_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool, enable_mla, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, num_experts_per_tok, moe_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool, use_qk_norm, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(float, rms_norm_eps, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(float, layer_norm_eps, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(int64_t, rotary_dim, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(float, rope_theta, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(std::string,
-                           rope_scaling_rope_type,
-                           attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(float, rope_scaling_factor, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(float,
-                           rope_scaling_low_freq_factor,
-                           attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(float,
-                           rope_scaling_high_freq_factor,
-                           attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(float, rope_extrapolation_factor, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(int64_t,
-                           rope_scaling_original_max_position_embeddings,
-                           attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(int64_t, rope_scaling_beta_fast, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(int64_t, rope_scaling_beta_slow, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(float, rope_scaling_attn_factor, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(float, rope_scaling_mscale, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(float,
-                           rope_scaling_mscale_all_dim,
-                           attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(std::vector<int64_t>,
-                           rope_scaling_mrope_section,
-                           attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool,
-                           rope_scaling_mrope_interleaved,
-                           attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(int64_t, max_position_embeddings, execution_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool, use_sliding_window, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, sliding_window, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, index_head_dim, kv_cache_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, index_n_heads, kv_cache_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, index_topk, kv_cache_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, index_kpool, kv_cache_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool, index_kpool_compress, kv_cache_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool,
-                           index_kpool_always_select_tail,
-                           kv_cache_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool, indexer_rope_interleave, kv_cache_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, index_topk_freq, kv_cache_params_);
-  XLLM_FORWARD_MODEL_PARAM(std::string, index_topk_pattern, kv_cache_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, index_skip_topk_offset, kv_cache_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool,
-                           index_share_for_mtp_iteration,
-                           kv_cache_params_);
-  XLLM_FORWARD_MODEL_PARAM(std::vector<std::string>,
-                           indexer_types,
-                           kv_cache_params_);
-  XLLM_FORWARD_MODEL_PARAM(std::vector<std::string>,
-                           mlp_layer_types,
-                           moe_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, rope_head_dim, kv_cache_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, o_lora_rank, kv_cache_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, o_groups, kv_cache_params_);
-  XLLM_FORWARD_MODEL_PARAM(std::vector<int32_t>,
-                           compress_ratios,
-                           kv_cache_params_);
-  XLLM_FORWARD_MODEL_PARAM(float, compress_rope_theta, kv_cache_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, window_size, kv_cache_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, n_activated_experts, moe_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, n_hash_layers, moe_params_);
-  XLLM_FORWARD_MODEL_PARAM(float, factor, kv_cache_params_);
-  XLLM_FORWARD_MODEL_PARAM(float, beta_fast, kv_cache_params_);
-  XLLM_FORWARD_MODEL_PARAM(float, beta_slow, kv_cache_params_);
-  XLLM_FORWARD_MODEL_PARAM(std::string, scale_fmt, kv_cache_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, hc_mult, kv_cache_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, hc_sinkhorn_iters, kv_cache_params_);
-  XLLM_FORWARD_MODEL_PARAM(float, hc_eps, kv_cache_params_);
-  XLLM_FORWARD_MODEL_PARAM(int64_t, max_batch_size, kv_cache_params_);
-  XLLM_FORWARD_MODEL_PARAM(int64_t, max_seq_len, kv_cache_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool,
-                           use_absolute_position_embedding,
-                           attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, bos_token_id, execution_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, eos_token_id, execution_params_);
-  XLLM_FORWARD_MODEL_PARAM(std::vector<int32_t>,
-                           eos_token_id_vec,
-                           execution_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, pad_token_id, execution_params_);
-  XLLM_FORWARD_MODEL_PARAM(std::optional<float>,
-                           attn_scalar,
-                           attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool, no_bias, execution_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool, qkv_bias, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(std::unordered_set<int32_t>,
-                           stop_token_ids,
-                           execution_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool, tie_word_embeddings, execution_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool, attention_bias, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(float, attention_dropout, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, decoder_sparse_step, moe_params_);
-  XLLM_FORWARD_MODEL_PARAM(float, initializer_range, execution_params_);
-  XLLM_FORWARD_MODEL_PARAM(std::vector<int32_t>, mlp_only_layers, moe_params_);
-  XLLM_FORWARD_MODEL_PARAM(int64_t, num_attention_heads, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, num_experts, moe_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool, output_router_logits, moe_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, rope_scaling, execution_params_);
-  XLLM_FORWARD_MODEL_PARAM(float, router_aux_loss_coef, moe_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool, attn_output_gate, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           full_attention_interval,
-                           linear_attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(std::vector<int32_t>,
-                           full_attn_layers,
-                           linear_attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           linear_conv_kernel_dim,
-                           linear_attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           linear_key_head_dim,
-                           linear_attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           linear_value_head_dim,
-                           linear_attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(int64_t,
-                           linear_num_key_heads,
-                           linear_attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           linear_num_value_heads,
-                           linear_attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(float, linear_lower_bound, linear_attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(std::string,
-                           mamba_ssm_dtype,
-                           linear_attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           shared_expert_intermediate_size,
-                           moe_params_);
-  XLLM_FORWARD_MODEL_PARAM(float, partial_rotary_factor, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(std::vector<std::string>,
-                           layer_types,
-                           linear_attention_params_);
+  XLLM_FORWARD_COMMON_MODEL_PARAMS
 
- private:
-  AttentionModelParams attention_params_;
-  LinearAttentionModelParams linear_attention_params_;
-  KVCacheModelParams kv_cache_params_;
-  MoEModelParams moe_params_;
-  SpeculativeModelParams speculative_params_;
-  EmbeddingModelParams embedding_params_;
-  ExecutionModelParams execution_params_;
-};
-
-class LlmModelArgs final {
- private:
-  TransformerModelArgs transformer_;
-
- public:
-  LlmModelArgs()
-      : LlmModelArgs(model_family_args_detail::default_model_args()) {}
-  explicit LlmModelArgs(const ModelArgs& args) : transformer_(args) {}
-
-  explicit LlmModelArgs(ModelArgs&&) = delete;
-  explicit LlmModelArgs(const ModelArgs&&) = delete;
-
-  const TransformerModelArgs& transformer() const noexcept {
-    return transformer_;
-  }
-  TransformerModelArgs& mutable_transformer() noexcept { return transformer_; }
-
-  const AttentionModelParams& attention_params() const noexcept {
-    return transformer_.attention_params();
-  }
-  AttentionModelParams& attention_params() noexcept {
-    return transformer_.attention_params();
-  }
-  const LinearAttentionModelParams& linear_attention_params() const noexcept {
-    return transformer_.linear_attention_params();
-  }
-  LinearAttentionModelParams& linear_attention_params() noexcept {
-    return transformer_.linear_attention_params();
-  }
-  const KVCacheModelParams& kv_cache_params() const noexcept {
-    return transformer_.kv_cache_params();
-  }
-  KVCacheModelParams& kv_cache_params() noexcept {
-    return transformer_.kv_cache_params();
-  }
-  const MoEModelParams& moe_params() const noexcept {
-    return transformer_.moe_params();
-  }
-  MoEModelParams& moe_params() noexcept { return transformer_.moe_params(); }
-  const SpeculativeModelParams& speculative_params() const noexcept {
-    return transformer_.speculative_params();
-  }
-  SpeculativeModelParams& speculative_params() noexcept {
-    return transformer_.speculative_params();
-  }
-  const EmbeddingModelParams& embedding_params() const noexcept {
-    return transformer_.embedding_params();
-  }
-  EmbeddingModelParams& embedding_params() noexcept {
-    return transformer_.embedding_params();
-  }
-  const ExecutionModelParams& execution_params() const noexcept {
-    return transformer_.execution_params();
-  }
-  ExecutionModelParams& execution_params() noexcept {
-    return transformer_.execution_params();
-  }
-  EmbeddingModelParams& mutable_embedding_params() noexcept {
-    return embedding_params();
-  }
-
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           first_k_dense_replace,
-                           transformer_.moe_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t, moe_layer_freq, transformer_.moe_params());
-  XLLM_FORWARD_MODEL_PARAM(int64_t,
-                           draft_vocab_size,
-                           transformer_.speculative_params());
-  XLLM_FORWARD_MODEL_PARAM(int64_t,
-                           markov_rank,
-                           transformer_.speculative_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           dspark_num_layers,
-                           transformer_.speculative_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           dspark_block_size,
-                           transformer_.speculative_params());
-  XLLM_FORWARD_MODEL_PARAM(bool,
-                           dspark_use_native_sas,
-                           transformer_.speculative_params());
-  XLLM_FORWARD_MODEL_PARAM(bool,
-                           enable_confidence_head,
-                           transformer_.speculative_params());
+  XLLM_FORWARD_MODEL_PARAM(int32_t, first_k_dense_replace, moe_params_);
+  XLLM_FORWARD_MODEL_PARAM(int32_t, moe_layer_freq, moe_params_);
+  XLLM_FORWARD_MODEL_PARAM(int64_t, draft_vocab_size, speculative_params_);
+  XLLM_FORWARD_MODEL_PARAM(int64_t, markov_rank, speculative_params_);
+  XLLM_FORWARD_MODEL_PARAM(int32_t, dspark_num_layers, speculative_params_);
+  XLLM_FORWARD_MODEL_PARAM(int32_t, dspark_block_size, speculative_params_);
+  XLLM_FORWARD_MODEL_PARAM(bool, dspark_use_native_sas, speculative_params_);
+  XLLM_FORWARD_MODEL_PARAM(bool, enable_confidence_head, speculative_params_);
   XLLM_FORWARD_MODEL_PARAM(bool,
                            confidence_head_with_markov,
-                           transformer_.speculative_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           dflash2_block_size,
-                           transformer_.speculative_params());
+                           speculative_params_);
+  XLLM_FORWARD_MODEL_PARAM(int32_t, dflash2_block_size, speculative_params_);
   XLLM_FORWARD_MODEL_PARAM(int32_t,
                            dflash2_conv_group_size,
-                           transformer_.speculative_params());
+                           speculative_params_);
   XLLM_FORWARD_MODEL_PARAM(int32_t,
                            dflash2_conv_kernel_size,
-                           transformer_.speculative_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           dflash2_selector_rank,
-                           transformer_.speculative_params());
+                           speculative_params_);
+  XLLM_FORWARD_MODEL_PARAM(int32_t, dflash2_selector_rank, speculative_params_);
   XLLM_FORWARD_MODEL_PARAM(int32_t,
                            dflash2_selector_top_k,
-                           transformer_.speculative_params());
-  XLLM_FORWARD_MODEL_PARAM(bool, use_moe, transformer_.moe_params());
-  XLLM_FORWARD_MODEL_PARAM(std::string,
-                           moe_score_func,
-                           transformer_.moe_params());
-  XLLM_FORWARD_MODEL_PARAM(float, moe_route_scale, transformer_.moe_params());
-  XLLM_FORWARD_MODEL_PARAM(bool,
-                           moe_use_shared_experts,
-                           transformer_.moe_params());
-  XLLM_FORWARD_MODEL_PARAM(std::string, topk_method, transformer_.moe_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           n_routed_experts,
-                           transformer_.moe_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           n_shared_experts,
-                           transformer_.moe_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           num_experts_per_tok,
-                           transformer_.moe_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           moe_intermediate_size,
-                           transformer_.moe_params());
-  XLLM_FORWARD_MODEL_PARAM(float,
-                           routed_scaling_factor,
-                           transformer_.moe_params());
-  XLLM_FORWARD_MODEL_PARAM(bool, norm_topk_prob, transformer_.moe_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t, n_group, transformer_.moe_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t, topk_group, transformer_.moe_params());
-  XLLM_FORWARD_MODEL_PARAM(std::string,
-                           scoring_func,
-                           transformer_.moe_params());
-  XLLM_FORWARD_MODEL_PARAM(float, swiglu_limit, transformer_.moe_params());
-  XLLM_FORWARD_MODEL_PARAM(bool, enable_mla, transformer_.attention_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           qk_nope_head_dim,
-                           transformer_.attention_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           qk_rope_head_dim,
-                           transformer_.attention_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           v_head_dim,
-                           transformer_.attention_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           q_lora_rank,
-                           transformer_.attention_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           kv_lora_rank,
-                           transformer_.attention_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           num_nextn_predict_layers,
-                           transformer_.speculative_params());
-  XLLM_FORWARD_MODEL_PARAM(int64_t,
-                           mtp_start_layer_idx,
-                           transformer_.speculative_params());
-  XLLM_FORWARD_MODEL_PARAM(std::string,
-                           mtp_mlp_type,
-                           transformer_.speculative_params());
-  XLLM_FORWARD_MODEL_PARAM(bool,
-                           use_sliding_window,
-                           transformer_.attention_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           sliding_window,
-                           transformer_.attention_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           max_window_layers,
-                           transformer_.attention_params());
+                           speculative_params_);
+  XLLM_FORWARD_MODEL_PARAM(bool, use_moe, moe_params_);
+  XLLM_FORWARD_MODEL_PARAM(std::string, moe_score_func, moe_params_);
+  XLLM_FORWARD_MODEL_PARAM(float, moe_route_scale, moe_params_);
+  XLLM_FORWARD_MODEL_PARAM(bool, moe_use_shared_experts, moe_params_);
+  XLLM_FORWARD_MODEL_PARAM(std::string, topk_method, moe_params_);
+  XLLM_FORWARD_MODEL_PARAM(int32_t, n_routed_experts, moe_params_);
+  XLLM_FORWARD_MODEL_PARAM(int32_t, n_shared_experts, moe_params_);
+
+  XLLM_FORWARD_MODEL_PARAM(int32_t, moe_intermediate_size, moe_params_);
+  XLLM_FORWARD_MODEL_PARAM(float, routed_scaling_factor, moe_params_);
+  XLLM_FORWARD_MODEL_PARAM(bool, norm_topk_prob, moe_params_);
+  XLLM_FORWARD_MODEL_PARAM(int32_t, n_group, moe_params_);
+  XLLM_FORWARD_MODEL_PARAM(int32_t, topk_group, moe_params_);
+  XLLM_FORWARD_MODEL_PARAM(std::string, scoring_func, moe_params_);
+  XLLM_FORWARD_MODEL_PARAM(float, swiglu_limit, moe_params_);
+
+  XLLM_FORWARD_MODEL_PARAM(int64_t, mtp_start_layer_idx, speculative_params_);
+  XLLM_FORWARD_MODEL_PARAM(std::string, mtp_mlp_type, speculative_params_);
+
+  XLLM_FORWARD_MODEL_PARAM(int32_t, max_window_layers, attention_params_);
   XLLM_FORWARD_MODEL_PARAM(int64_t,
                            num_speculative_tokens,
-                           transformer_.speculative_params());
+                           speculative_params_);
   XLLM_FORWARD_MODEL_PARAM(bool,
                            enable_embedded_eagle3_draft,
-                           transformer_.speculative_params());
+                           speculative_params_);
   XLLM_FORWARD_MODEL_PARAM(int32_t,
                            max_concurrent_prefills_per_dp,
-                           transformer_.execution_params());
+                           execution_params_);
   XLLM_FORWARD_MODEL_PARAM(std::vector<int32_t>,
                            layers_to_capture,
-                           transformer_.speculative_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           index_head_dim,
-                           transformer_.kv_cache_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           index_n_heads,
-                           transformer_.kv_cache_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t, index_topk, transformer_.kv_cache_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           index_kpool,
-                           transformer_.kv_cache_params());
-  XLLM_FORWARD_MODEL_PARAM(bool,
-                           index_kpool_compress,
-                           transformer_.kv_cache_params());
-  XLLM_FORWARD_MODEL_PARAM(bool,
-                           index_kpool_always_select_tail,
-                           transformer_.kv_cache_params());
-  XLLM_FORWARD_MODEL_PARAM(bool,
-                           indexer_rope_interleave,
-                           transformer_.kv_cache_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           index_topk_freq,
-                           transformer_.kv_cache_params());
-  XLLM_FORWARD_MODEL_PARAM(std::string,
-                           index_topk_pattern,
-                           transformer_.kv_cache_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           index_skip_topk_offset,
-                           transformer_.kv_cache_params());
-  XLLM_FORWARD_MODEL_PARAM(bool,
-                           index_share_for_mtp_iteration,
-                           transformer_.kv_cache_params());
-  XLLM_FORWARD_MODEL_PARAM(std::vector<std::string>,
-                           indexer_types,
-                           transformer_.kv_cache_params());
-  XLLM_FORWARD_MODEL_PARAM(std::vector<std::string>,
-                           mlp_layer_types,
-                           transformer_.moe_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           rope_head_dim,
-                           transformer_.kv_cache_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           o_lora_rank,
-                           transformer_.kv_cache_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t, o_groups, transformer_.kv_cache_params());
-  XLLM_FORWARD_MODEL_PARAM(std::vector<int32_t>,
-                           compress_ratios,
-                           transformer_.kv_cache_params());
-  XLLM_FORWARD_MODEL_PARAM(float,
-                           compress_rope_theta,
-                           transformer_.kv_cache_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           window_size,
-                           transformer_.kv_cache_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           n_activated_experts,
-                           transformer_.moe_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t, n_hash_layers, transformer_.moe_params());
-  XLLM_FORWARD_MODEL_PARAM(float, factor, transformer_.kv_cache_params());
-  XLLM_FORWARD_MODEL_PARAM(float, beta_fast, transformer_.kv_cache_params());
-  XLLM_FORWARD_MODEL_PARAM(float, beta_slow, transformer_.kv_cache_params());
-  XLLM_FORWARD_MODEL_PARAM(std::string,
-                           scale_fmt,
-                           transformer_.kv_cache_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t, hc_mult, transformer_.kv_cache_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           hc_sinkhorn_iters,
-                           transformer_.kv_cache_params());
-  XLLM_FORWARD_MODEL_PARAM(float, hc_eps, transformer_.kv_cache_params());
-  XLLM_FORWARD_MODEL_PARAM(int64_t,
-                           max_batch_size,
-                           transformer_.kv_cache_params());
-  XLLM_FORWARD_MODEL_PARAM(int64_t,
-                           max_seq_len,
-                           transformer_.kv_cache_params());
-  XLLM_FORWARD_MODEL_PARAM(bool,
-                           norm_before_fc,
-                           transformer_.speculative_params());
-  XLLM_FORWARD_MODEL_PARAM(bool,
-                           norm_before_residual,
-                           transformer_.speculative_params());
-  XLLM_FORWARD_MODEL_PARAM(bool,
-                           norm_output,
-                           transformer_.speculative_params());
-  XLLM_FORWARD_MODEL_PARAM(bool, fc_norm, transformer_.speculative_params());
-  XLLM_FORWARD_MODEL_PARAM(bool,
-                           embedding_mode,
-                           transformer_.embedding_params());
+                           speculative_params_);
+
+  XLLM_FORWARD_MODEL_PARAM(bool, norm_before_fc, speculative_params_);
+  XLLM_FORWARD_MODEL_PARAM(bool, norm_before_residual, speculative_params_);
+  XLLM_FORWARD_MODEL_PARAM(bool, norm_output, speculative_params_);
+  XLLM_FORWARD_MODEL_PARAM(bool, fc_norm, speculative_params_);
+  XLLM_FORWARD_MODEL_PARAM(bool, embedding_mode, embedding_params_);
 };
 
 class VlmVisionModelArgs final {
@@ -835,156 +609,151 @@ class VlmVisionModelArgs final {
 
 class RecModelArgs final {
  private:
-  TransformerModelArgs transformer_;
+  AttentionModelParams attention_params_;
+  LinearAttentionModelParams linear_attention_params_;
+  KVCacheModelParams kv_cache_params_;
+  MoEModelParams moe_params_;
+  SpeculativeModelParams speculative_params_;
+  EmbeddingModelParams embedding_params_;
+  ExecutionModelParams execution_params_;
 
  public:
   RecModelArgs()
       : RecModelArgs(model_family_args_detail::default_model_args()) {}
-  explicit RecModelArgs(const ModelArgs& args) : transformer_(args) {}
+  explicit RecModelArgs(const ModelArgs& args)
+      : attention_params_(args),
+        linear_attention_params_(args),
+        kv_cache_params_(args),
+        moe_params_(args),
+        speculative_params_(args),
+        embedding_params_(args),
+        execution_params_(args) {}
 
   explicit RecModelArgs(ModelArgs&&) = delete;
   explicit RecModelArgs(const ModelArgs&&) = delete;
 
-  const TransformerModelArgs& transformer() const noexcept {
-    return transformer_;
-  }
-  TransformerModelArgs& mutable_transformer() noexcept { return transformer_; }
-
   const AttentionModelParams& attention_params() const noexcept {
-    return transformer_.attention_params();
+    return attention_params_;
   }
   AttentionModelParams& attention_params() noexcept {
-    return transformer_.attention_params();
+    return attention_params_;
   }
   const LinearAttentionModelParams& linear_attention_params() const noexcept {
-    return transformer_.linear_attention_params();
+    return linear_attention_params_;
   }
   LinearAttentionModelParams& linear_attention_params() noexcept {
-    return transformer_.linear_attention_params();
+    return linear_attention_params_;
   }
   const KVCacheModelParams& kv_cache_params() const noexcept {
-    return transformer_.kv_cache_params();
+    return kv_cache_params_;
   }
-  KVCacheModelParams& kv_cache_params() noexcept {
-    return transformer_.kv_cache_params();
-  }
-  const MoEModelParams& moe_params() const noexcept {
-    return transformer_.moe_params();
-  }
-  MoEModelParams& moe_params() noexcept { return transformer_.moe_params(); }
+  KVCacheModelParams& kv_cache_params() noexcept { return kv_cache_params_; }
+  const MoEModelParams& moe_params() const noexcept { return moe_params_; }
+  MoEModelParams& moe_params() noexcept { return moe_params_; }
   const SpeculativeModelParams& speculative_params() const noexcept {
-    return transformer_.speculative_params();
+    return speculative_params_;
   }
   SpeculativeModelParams& speculative_params() noexcept {
-    return transformer_.speculative_params();
+    return speculative_params_;
   }
   const EmbeddingModelParams& embedding_params() const noexcept {
-    return transformer_.embedding_params();
+    return embedding_params_;
   }
   EmbeddingModelParams& embedding_params() noexcept {
-    return transformer_.embedding_params();
+    return embedding_params_;
   }
   const ExecutionModelParams& execution_params() const noexcept {
-    return transformer_.execution_params();
+    return execution_params_;
   }
   ExecutionModelParams& execution_params() noexcept {
-    return transformer_.execution_params();
+    return execution_params_;
   }
   EmbeddingModelParams& mutable_embedding_params() noexcept {
     return embedding_params();
   }
 
-  XLLM_FORWARD_MODEL_PARAM(int32_t, query_num, transformer_.embedding_params());
-  XLLM_FORWARD_MODEL_PARAM(bool,
-                           encoder_embedding_mode,
-                           transformer_.embedding_params());
-  XLLM_FORWARD_MODEL_PARAM(bool,
-                           embedding_mode,
-                           transformer_.embedding_params());
-  XLLM_FORWARD_MODEL_PARAM(bool, use_moe, transformer_.moe_params());
-  XLLM_FORWARD_MODEL_PARAM(float, moe_route_scale, transformer_.moe_params());
-  XLLM_FORWARD_MODEL_PARAM(bool,
-                           moe_use_shared_experts,
-                           transformer_.moe_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           n_routed_experts,
-                           transformer_.moe_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           n_shared_experts,
-                           transformer_.moe_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           moe_intermediate_size,
-                           transformer_.moe_params());
-  XLLM_FORWARD_MODEL_PARAM(bool, enable_mla, transformer_.attention_params());
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           num_experts_per_tok,
-                           transformer_.moe_params());
+  XLLM_FORWARD_COMMON_MODEL_PARAMS
+
+  XLLM_FORWARD_MODEL_PARAM(int32_t, query_num, embedding_params_);
+  XLLM_FORWARD_MODEL_PARAM(bool, encoder_embedding_mode, embedding_params_);
+  XLLM_FORWARD_MODEL_PARAM(bool, embedding_mode, embedding_params_);
+  XLLM_FORWARD_MODEL_PARAM(bool, use_moe, moe_params_);
+  XLLM_FORWARD_MODEL_PARAM(float, moe_route_scale, moe_params_);
+  XLLM_FORWARD_MODEL_PARAM(bool, moe_use_shared_experts, moe_params_);
+  XLLM_FORWARD_MODEL_PARAM(int32_t, n_routed_experts, moe_params_);
+  XLLM_FORWARD_MODEL_PARAM(int32_t, n_shared_experts, moe_params_);
+  XLLM_FORWARD_MODEL_PARAM(int32_t, moe_intermediate_size, moe_params_);
+
   XLLM_FORWARD_MODEL_PARAM(int64_t,
                            relative_attention_num_buckets,
-                           transformer_.attention_params());
+                           attention_params_);
   XLLM_FORWARD_MODEL_PARAM(int64_t,
                            relative_attention_max_distance,
-                           transformer_.attention_params());
+                           attention_params_);
 };
 
 class VlmModelArgs final {
  private:
-  TransformerModelArgs transformer_;
+  AttentionModelParams attention_params_;
+  LinearAttentionModelParams linear_attention_params_;
+  KVCacheModelParams kv_cache_params_;
+  MoEModelParams moe_params_;
+  SpeculativeModelParams speculative_params_;
+  EmbeddingModelParams embedding_params_;
+  ExecutionModelParams execution_params_;
   VlmVisionModelArgs vision_;
 
  public:
   VlmModelArgs()
       : VlmModelArgs(model_family_args_detail::default_model_args()) {}
   explicit VlmModelArgs(const ModelArgs& args)
-      : transformer_(args), vision_(args) {}
+      : attention_params_(args),
+        linear_attention_params_(args),
+        kv_cache_params_(args),
+        moe_params_(args),
+        speculative_params_(args),
+        embedding_params_(args),
+        execution_params_(args),
+        vision_(args) {}
 
   explicit VlmModelArgs(ModelArgs&&) = delete;
   explicit VlmModelArgs(const ModelArgs&&) = delete;
 
-  const TransformerModelArgs& transformer() const noexcept {
-    return transformer_;
-  }
-  TransformerModelArgs& mutable_transformer() noexcept { return transformer_; }
-
   const AttentionModelParams& attention_params() const noexcept {
-    return transformer_.attention_params();
+    return attention_params_;
   }
   AttentionModelParams& attention_params() noexcept {
-    return transformer_.attention_params();
+    return attention_params_;
   }
   const LinearAttentionModelParams& linear_attention_params() const noexcept {
-    return transformer_.linear_attention_params();
+    return linear_attention_params_;
   }
   LinearAttentionModelParams& linear_attention_params() noexcept {
-    return transformer_.linear_attention_params();
+    return linear_attention_params_;
   }
   const KVCacheModelParams& kv_cache_params() const noexcept {
-    return transformer_.kv_cache_params();
+    return kv_cache_params_;
   }
-  KVCacheModelParams& kv_cache_params() noexcept {
-    return transformer_.kv_cache_params();
-  }
-  const MoEModelParams& moe_params() const noexcept {
-    return transformer_.moe_params();
-  }
-  MoEModelParams& moe_params() noexcept { return transformer_.moe_params(); }
+  KVCacheModelParams& kv_cache_params() noexcept { return kv_cache_params_; }
+  const MoEModelParams& moe_params() const noexcept { return moe_params_; }
+  MoEModelParams& moe_params() noexcept { return moe_params_; }
   const SpeculativeModelParams& speculative_params() const noexcept {
-    return transformer_.speculative_params();
+    return speculative_params_;
   }
   SpeculativeModelParams& speculative_params() noexcept {
-    return transformer_.speculative_params();
+    return speculative_params_;
   }
   const EmbeddingModelParams& embedding_params() const noexcept {
-    return transformer_.embedding_params();
+    return embedding_params_;
   }
   EmbeddingModelParams& embedding_params() noexcept {
-    return transformer_.embedding_params();
+    return embedding_params_;
   }
   const ExecutionModelParams& execution_params() const noexcept {
-    return transformer_.execution_params();
+    return execution_params_;
   }
   ExecutionModelParams& execution_params() noexcept {
-    return transformer_.execution_params();
+    return execution_params_;
   }
   EmbeddingModelParams& mutable_embedding_params() noexcept {
     return embedding_params();
@@ -993,28 +762,38 @@ class VlmModelArgs final {
   const VlmVisionModelArgs& vision() const noexcept { return vision_; }
   VlmVisionModelArgs& mutable_vision() noexcept { return vision_; }
 
-  XLLM_FORWARD_MODEL_PARAM(int32_t, query_num, transformer_.embedding_params());
-  XLLM_FORWARD_MODEL_PARAM(bool,
-                           encoder_embedding_mode,
-                           transformer_.embedding_params());
-  XLLM_FORWARD_MODEL_PARAM(bool,
-                           embedding_mode,
-                           transformer_.embedding_params());
+  XLLM_FORWARD_COMMON_MODEL_PARAMS
+
+  XLLM_FORWARD_MODEL_PARAM(int32_t, query_num, embedding_params_);
+  XLLM_FORWARD_MODEL_PARAM(bool, encoder_embedding_mode, embedding_params_);
+  XLLM_FORWARD_MODEL_PARAM(bool, embedding_mode, embedding_params_);
   XLLM_FORWARD_MODEL_PARAM(int64_t,
                            num_speculative_tokens,
-                           transformer_.speculative_params());
+                           speculative_params_);
 };
 
 class DiTTransformerModelArgs final {
  private:
-  TransformerModelArgs transformer_;
+  AttentionModelParams attention_params_;
+  LinearAttentionModelParams linear_attention_params_;
+  KVCacheModelParams kv_cache_params_;
+  MoEModelParams moe_params_;
+  SpeculativeModelParams speculative_params_;
+  EmbeddingModelParams embedding_params_;
+  ExecutionModelParams execution_params_;
 
  public:
   DiTTransformerModelArgs()
       : DiTTransformerModelArgs(
             model_family_args_detail::default_model_args()) {}
   explicit DiTTransformerModelArgs(const ModelArgs& args)
-      : transformer_(args),
+      : attention_params_(args),
+        linear_attention_params_(args),
+        kv_cache_params_(args),
+        moe_params_(args),
+        speculative_params_(args),
+        embedding_params_(args),
+        execution_params_(args),
         in_channels_(args.in_channels()),
         out_channels_(args.out_channels()),
         latent_channels_(args.latent_channels()),
@@ -1070,54 +849,47 @@ class DiTTransformerModelArgs final {
   explicit DiTTransformerModelArgs(ModelArgs&&) = delete;
   explicit DiTTransformerModelArgs(const ModelArgs&&) = delete;
 
-  const TransformerModelArgs& transformer() const noexcept {
-    return transformer_;
-  }
-  TransformerModelArgs& mutable_transformer() noexcept { return transformer_; }
-
   const AttentionModelParams& attention_params() const noexcept {
-    return transformer_.attention_params();
+    return attention_params_;
   }
   AttentionModelParams& attention_params() noexcept {
-    return transformer_.attention_params();
+    return attention_params_;
   }
   const LinearAttentionModelParams& linear_attention_params() const noexcept {
-    return transformer_.linear_attention_params();
+    return linear_attention_params_;
   }
   LinearAttentionModelParams& linear_attention_params() noexcept {
-    return transformer_.linear_attention_params();
+    return linear_attention_params_;
   }
   const KVCacheModelParams& kv_cache_params() const noexcept {
-    return transformer_.kv_cache_params();
+    return kv_cache_params_;
   }
-  KVCacheModelParams& kv_cache_params() noexcept {
-    return transformer_.kv_cache_params();
-  }
-  const MoEModelParams& moe_params() const noexcept {
-    return transformer_.moe_params();
-  }
-  MoEModelParams& moe_params() noexcept { return transformer_.moe_params(); }
+  KVCacheModelParams& kv_cache_params() noexcept { return kv_cache_params_; }
+  const MoEModelParams& moe_params() const noexcept { return moe_params_; }
+  MoEModelParams& moe_params() noexcept { return moe_params_; }
   const SpeculativeModelParams& speculative_params() const noexcept {
-    return transformer_.speculative_params();
+    return speculative_params_;
   }
   SpeculativeModelParams& speculative_params() noexcept {
-    return transformer_.speculative_params();
+    return speculative_params_;
   }
   const EmbeddingModelParams& embedding_params() const noexcept {
-    return transformer_.embedding_params();
+    return embedding_params_;
   }
   EmbeddingModelParams& embedding_params() noexcept {
-    return transformer_.embedding_params();
+    return embedding_params_;
   }
   const ExecutionModelParams& execution_params() const noexcept {
-    return transformer_.execution_params();
+    return execution_params_;
   }
   ExecutionModelParams& execution_params() noexcept {
-    return transformer_.execution_params();
+    return execution_params_;
   }
   EmbeddingModelParams& mutable_embedding_params() noexcept {
     return embedding_params();
   }
+
+  XLLM_FORWARD_COMMON_MODEL_PARAMS
 
   PROPERTY(int64_t, in_channels) = -1;
   PROPERTY(int64_t, out_channels) = -1;
@@ -1439,6 +1211,7 @@ class DiTSchedulerModelArgs final {
   PROPERTY(std::string, time_shift_type) = "exponential";
 };
 
+#undef XLLM_FORWARD_COMMON_MODEL_PARAMS
 #undef XLLM_FORWARD_MODEL_PARAM
 
 enum class DiTComponentType : uint8_t {
@@ -1711,17 +1484,147 @@ class ModelArgsBundle final {
   const std::string& model_type() const {
     return execution_params().model_type();
   }
+  const std::string& dtype() const { return execution_params().dtype(); }
   int64_t n_layers() const { return execution_params().n_layers(); }
+  int64_t n_encoder_layers() const {
+    return execution_params().n_encoder_layers();
+  }
   int64_t hidden_size() const { return execution_params().hidden_size(); }
+  const std::string& hidden_act() const {
+    return execution_params().hidden_act();
+  }
+  int64_t intermediate_size() const {
+    return execution_params().intermediate_size();
+  }
+  int64_t max_position_embeddings() const {
+    return execution_params().max_position_embeddings();
+  }
+  int64_t vocab_size() const { return execution_params().vocab_size(); }
+  int32_t bos_token_id() const { return execution_params().bos_token_id(); }
+  int32_t eos_token_id() const { return execution_params().eos_token_id(); }
+  const std::vector<int32_t>& eos_token_id_vec() const {
+    return execution_params().eos_token_id_vec();
+  }
+  int32_t pad_token_id() const { return execution_params().pad_token_id(); }
+  const std::unordered_set<int32_t>& stop_token_ids() const {
+    return execution_params().stop_token_ids();
+  }
+  bool tie_word_embeddings() const {
+    return execution_params().tie_word_embeddings();
+  }
+  bool no_bias() const { return execution_params().no_bias(); }
+  float initializer_range() const {
+    return execution_params().initializer_range();
+  }
+  int32_t rope_scaling() const { return execution_params().rope_scaling(); }
+  int32_t max_concurrent_prefills_per_dp() const {
+    return execution_params().max_concurrent_prefills_per_dp();
+  }
   int64_t head_dim() const { return attention_params().head_dim(); }
   int64_t n_heads() const { return attention_params().n_heads(); }
   std::optional<int64_t> n_kv_heads() const {
     return attention_params().n_kv_heads();
   }
   bool enable_mla() const { return attention_params().enable_mla(); }
+  int64_t decoder_head_dim() const {
+    return attention_params().decoder_head_dim();
+  }
+  int64_t decoder_n_heads() const {
+    return attention_params().decoder_n_heads();
+  }
+  std::optional<int64_t> decoder_n_kv_heads() const {
+    return attention_params().decoder_n_kv_heads();
+  }
+  int64_t actual_n_heads() const {
+    return attention_params().actual_n_heads();
+  }
+  int64_t rotary_dim() const { return attention_params().rotary_dim(); }
+  float partial_rotary_factor() const {
+    return attention_params().partial_rotary_factor();
+  }
+  bool use_qk_norm() const { return attention_params().use_qk_norm(); }
+  float rms_norm_eps() const { return attention_params().rms_norm_eps(); }
+  float layer_norm_eps() const { return attention_params().layer_norm_eps(); }
+  bool attention_bias() const { return attention_params().attention_bias(); }
+  bool qkv_bias() const { return attention_params().qkv_bias(); }
+  std::optional<float> attn_scalar() const {
+    return attention_params().attn_scalar();
+  }
+  bool use_sliding_window() const {
+    return attention_params().use_sliding_window();
+  }
+  int32_t sliding_window() const {
+    return attention_params().sliding_window();
+  }
+  int32_t max_window_layers() const {
+    return attention_params().max_window_layers();
+  }
   int32_t kv_lora_rank() const { return attention_params().kv_lora_rank(); }
+  int32_t q_lora_rank() const { return attention_params().q_lora_rank(); }
+  int32_t qk_nope_head_dim() const {
+    return attention_params().qk_nope_head_dim();
+  }
   int32_t qk_rope_head_dim() const {
     return attention_params().qk_rope_head_dim();
+  }
+  int32_t v_head_dim() const { return attention_params().v_head_dim(); }
+  int64_t num_attention_heads() const {
+    return attention_params().num_attention_heads();
+  }
+  float rope_theta() const { return attention_params().rope_theta(); }
+  const std::string& rope_scaling_rope_type() const {
+    return attention_params().rope_scaling_rope_type();
+  }
+  float rope_scaling_factor() const {
+    return attention_params().rope_scaling_factor();
+  }
+  float rope_scaling_low_freq_factor() const {
+    return attention_params().rope_scaling_low_freq_factor();
+  }
+  float rope_scaling_high_freq_factor() const {
+    return attention_params().rope_scaling_high_freq_factor();
+  }
+  float rope_extrapolation_factor() const {
+    return attention_params().rope_extrapolation_factor();
+  }
+  int64_t rope_scaling_original_max_position_embeddings() const {
+    return attention_params().rope_scaling_original_max_position_embeddings();
+  }
+  int64_t rope_scaling_beta_fast() const {
+    return attention_params().rope_scaling_beta_fast();
+  }
+  int64_t rope_scaling_beta_slow() const {
+    return attention_params().rope_scaling_beta_slow();
+  }
+  float rope_scaling_attn_factor() const {
+    return attention_params().rope_scaling_attn_factor();
+  }
+  float rope_scaling_mscale() const {
+    return attention_params().rope_scaling_mscale();
+  }
+  float rope_scaling_mscale_all_dim() const {
+    return attention_params().rope_scaling_mscale_all_dim();
+  }
+  const std::vector<int64_t>& rope_scaling_mrope_section() const {
+    return attention_params().rope_scaling_mrope_section();
+  }
+  bool rope_scaling_mrope_interleaved() const {
+    return attention_params().rope_scaling_mrope_interleaved();
+  }
+  float attention_dropout() const {
+    return attention_params().attention_dropout();
+  }
+  bool attn_output_gate() const {
+    return attention_params().attn_output_gate();
+  }
+  bool use_absolute_position_embedding() const {
+    return attention_params().use_absolute_position_embedding();
+  }
+  int64_t relative_attention_num_buckets() const {
+    return attention_params().relative_attention_num_buckets();
+  }
+  int64_t relative_attention_max_distance() const {
+    return attention_params().relative_attention_max_distance();
   }
   int64_t kv_cache_storage_head_dim() const {
     return kv_cache_params().kv_cache_storage_head_dim();
@@ -1775,6 +1678,9 @@ class ModelArgsBundle final {
   int32_t linear_num_value_heads() const {
     return linear_attention_params().linear_num_value_heads();
   }
+  float linear_lower_bound() const {
+    return linear_attention_params().linear_lower_bound();
+  }
   const std::string& mamba_ssm_dtype() const {
     return linear_attention_params().mamba_ssm_dtype();
   }
@@ -1785,9 +1691,142 @@ class ModelArgsBundle final {
     return kv_cache_params().compress_ratios();
   }
   int32_t window_size() const { return kv_cache_params().window_size(); }
+  int64_t max_batch_size() const { return kv_cache_params().max_batch_size(); }
+  int64_t max_seq_len() const { return kv_cache_params().max_seq_len(); }
+  const std::string& scale_fmt() const { return kv_cache_params().scale_fmt(); }
+  int32_t hc_mult() const { return kv_cache_params().hc_mult(); }
+  int32_t hc_sinkhorn_iters() const {
+    return kv_cache_params().hc_sinkhorn_iters();
+  }
+  float hc_eps() const { return kv_cache_params().hc_eps(); }
+  int32_t rope_head_dim() const { return kv_cache_params().rope_head_dim(); }
+  int32_t o_lora_rank() const { return kv_cache_params().o_lora_rank(); }
+  int32_t o_groups() const { return kv_cache_params().o_groups(); }
+  float compress_rope_theta() const {
+    return kv_cache_params().compress_rope_theta();
+  }
   int32_t num_nextn_predict_layers() const {
     return speculative_params().num_nextn_predict_layers();
   }
+  int64_t draft_vocab_size() const {
+    return speculative_params().draft_vocab_size();
+  }
+  int64_t num_speculative_tokens() const {
+    return speculative_params().num_speculative_tokens();
+  }
+  bool enable_embedded_eagle3_draft() const {
+    return speculative_params().enable_embedded_eagle3_draft();
+  }
+  const std::vector<int32_t>& layers_to_capture() const {
+    return speculative_params().layers_to_capture();
+  }
+  int64_t mtp_start_layer_idx() const {
+    return speculative_params().mtp_start_layer_idx();
+  }
+  const std::string& mtp_mlp_type() const {
+    return speculative_params().mtp_mlp_type();
+  }
+  int64_t markov_rank() const { return speculative_params().markov_rank(); }
+  int32_t dspark_num_layers() const {
+    return speculative_params().dspark_num_layers();
+  }
+  int32_t dspark_block_size() const {
+    return speculative_params().dspark_block_size();
+  }
+  bool dspark_use_native_sas() const {
+    return speculative_params().dspark_use_native_sas();
+  }
+  bool enable_confidence_head() const {
+    return speculative_params().enable_confidence_head();
+  }
+  bool confidence_head_with_markov() const {
+    return speculative_params().confidence_head_with_markov();
+  }
+  int32_t dflash2_block_size() const {
+    return speculative_params().dflash2_block_size();
+  }
+  int32_t dflash2_conv_group_size() const {
+    return speculative_params().dflash2_conv_group_size();
+  }
+  int32_t dflash2_conv_kernel_size() const {
+    return speculative_params().dflash2_conv_kernel_size();
+  }
+  int32_t dflash2_selector_rank() const {
+    return speculative_params().dflash2_selector_rank();
+  }
+  int32_t dflash2_selector_top_k() const {
+    return speculative_params().dflash2_selector_top_k();
+  }
+  bool norm_before_fc() const { return speculative_params().norm_before_fc(); }
+  bool norm_before_residual() const {
+    return speculative_params().norm_before_residual();
+  }
+  bool norm_output() const { return speculative_params().norm_output(); }
+  bool fc_norm() const { return speculative_params().fc_norm(); }
+
+  bool use_moe() const { return moe_params().use_moe(); }
+  int32_t first_k_dense_replace() const {
+    return moe_params().first_k_dense_replace();
+  }
+  int32_t moe_layer_freq() const { return moe_params().moe_layer_freq(); }
+  const std::string& moe_score_func() const {
+    return moe_params().moe_score_func();
+  }
+  float moe_route_scale() const { return moe_params().moe_route_scale(); }
+  bool moe_use_shared_experts() const {
+    return moe_params().moe_use_shared_experts();
+  }
+  const std::string& topk_method() const { return moe_params().topk_method(); }
+  int32_t n_routed_experts() const {
+    return moe_params().n_routed_experts();
+  }
+  int32_t n_shared_experts() const {
+    return moe_params().n_shared_experts();
+  }
+  int32_t num_experts_per_tok() const {
+    return moe_params().num_experts_per_tok();
+  }
+  int32_t moe_intermediate_size() const {
+    return moe_params().moe_intermediate_size();
+  }
+  float routed_scaling_factor() const {
+    return moe_params().routed_scaling_factor();
+  }
+  bool norm_topk_prob() const { return moe_params().norm_topk_prob(); }
+  int32_t n_group() const { return moe_params().n_group(); }
+  int32_t topk_group() const { return moe_params().topk_group(); }
+  const std::string& scoring_func() const {
+    return moe_params().scoring_func();
+  }
+  float swiglu_limit() const { return moe_params().swiglu_limit(); }
+  int32_t num_experts() const { return moe_params().num_experts(); }
+  int32_t n_activated_experts() const {
+    return moe_params().n_activated_experts();
+  }
+  int32_t shared_expert_intermediate_size() const {
+    return moe_params().shared_expert_intermediate_size();
+  }
+  bool output_router_logits() const {
+    return moe_params().output_router_logits();
+  }
+  float router_aux_loss_coef() const {
+    return moe_params().router_aux_loss_coef();
+  }
+  const std::vector<int32_t>& mlp_only_layers() const {
+    return moe_params().mlp_only_layers();
+  }
+  int32_t n_hash_layers() const { return moe_params().n_hash_layers(); }
+  const std::vector<std::string>& mlp_layer_types() const {
+    return moe_params().mlp_layer_types();
+  }
+  int32_t decoder_sparse_step() const {
+    return moe_params().decoder_sparse_step();
+  }
+  int32_t query_num() const { return embedding_params().query_num(); }
+  bool encoder_embedding_mode() const {
+    return embedding_params().encoder_embedding_mode();
+  }
+  bool embedding_mode() const { return embedding_params().embedding_mode(); }
 
   void set_encoder_embedding_mode(bool encoder_embedding_mode) {
     if (auto* args = std::get_if<VlmModelArgs>(&args_)) {
@@ -1850,15 +1889,6 @@ class ModelArgsBundle final {
                DiTComponentModelArgs>
       args_;
 };
-
-inline bool has_linear_attention_layers(const TransformerModelArgs& args) {
-  return args.linear_attention_params().has_linear_attention_layers();
-}
-
-inline bool is_full_attention_layer(const TransformerModelArgs& args,
-                                    int64_t layer_id) {
-  return args.linear_attention_params().is_full_attention_layer(layer_id);
-}
 
 inline bool has_linear_attention_layers(const ModelArgsBundle& args) {
   return args.linear_attention_params().has_linear_attention_layers();

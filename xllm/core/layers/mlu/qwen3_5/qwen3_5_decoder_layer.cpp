@@ -29,7 +29,7 @@ bool use_moe_all2all(bool enable_deep_ep, const ModelParamsView& input_params) {
 }
 
 bool is_moe_layer(const LlmModelArgs& model_args, int32_t layer_id) {
-  const auto& transformer_args = model_args.transformer();
+  const auto& transformer_args = model_args;
   const auto& mlp_only_layers = transformer_args.mlp_only_layers();
   return std::count(mlp_only_layers.begin(), mlp_only_layers.end(), layer_id) ==
              0 &&
@@ -41,9 +41,9 @@ bool is_moe_layer(const LlmModelArgs& model_args, int32_t layer_id) {
 Qwen3_5DecoderLayerImpl::Qwen3_5DecoderLayerImpl(const ModelContext& context,
                                                  int32_t layer_id)
     : parallel_args_(context.get_parallel_args()) {
-  const auto& model_args = context.get_transformer_model_args();
+  const auto& model_args = context.get_model_args_bundle();
   const auto& llm_args = context.get_llm_model_args();
-  const auto& transformer_args = llm_args.transformer();
+  const auto& transformer_args = llm_args;
   const auto& quant_args = context.get_quant_args();
   const auto& options = context.get_tensor_options();
 

@@ -34,7 +34,7 @@ NpuGlm4MoeDecoderImpl::NpuGlm4MoeDecoderImpl(const ModelContext& context,
       layer_id_(layer_id),
       num_speculative_tokens_(
           context.get_llm_model_args().num_speculative_tokens()) {
-  const auto& model_args = context.get_transformer_model_args();
+  const auto& model_args = context.get_model_args_bundle();
   auto parallel_args = context.get_parallel_args();
   auto options = context.get_tensor_options();
 

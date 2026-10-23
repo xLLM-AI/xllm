@@ -39,8 +39,8 @@ class BaseResamplerImpl : public torch::nn::Module {
  public:
   BaseResamplerImpl(const ModelContext& context)
       : num_queries_(context.get_vlm_model_args().query_num()),
-        embed_dim_(context.get_vlm_model_args().transformer().hidden_size()),
-        num_heads_(context.get_vlm_model_args().transformer().n_heads()),
+        embed_dim_(context.get_vlm_model_args().hidden_size()),
+        num_heads_(context.get_vlm_model_args().n_heads()),
         kv_dim_(context.get_vlm_model_args().vision().mm_hidden_size()) {
     auto options = context.get_tensor_options();
     // Initialize learnable query parameter
@@ -611,7 +611,7 @@ class VisionAdapterMLPImpl : public torch::nn::Module {
   VisionAdapterMLPImpl(const ModelContext& context) {
     auto options = context.get_tensor_options();
 
-    auto embed_dim = context.get_vlm_model_args().transformer().hidden_size();
+    auto embed_dim = context.get_vlm_model_args().hidden_size();
     int num_layers = 3;
     layers_ = register_module("layers", torch::nn::ModuleList());
     for (int idx = 0; idx < num_layers; ++idx) {

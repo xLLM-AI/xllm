@@ -80,8 +80,7 @@ bool LLMWorkerImpl::init_model(ModelContext& context) {
 #if defined(USE_MUSA)
   static const bool use_pool_compute_stream = util::get_bool_env(
       "XLLM_MUSA_POOL_COMPUTE_STREAM", /*default_value=*/true);
-  const bool is_qwen3 =
-      context.get_transformer_model_args().model_type() == "qwen3";
+  const bool is_qwen3 = context.get_model_args_bundle().model_type() == "qwen3";
   if (use_pool_compute_stream && !is_qwen3) {
     compute_stream_ = device_.get_stream_from_pool();
   } else if (use_pool_compute_stream) {
@@ -90,7 +89,7 @@ bool LLMWorkerImpl::init_model(ModelContext& context) {
   }
 
   const auto& beam_search_config = BeamSearchConfig::get_instance();
-  CHECK(!has_linear_attention_layers(context.get_transformer_model_args()) ||
+  CHECK(!has_linear_attention_layers(context.get_model_args_bundle()) ||
         (!beam_search_config.enable_beam_search_kernel() &&
          beam_search_config.beam_width() <= 1))
       << "MUSA beam search is not supported for models with linear-attention "
@@ -124,13 +123,12 @@ bool LLMWorkerImpl::init_model(ModelContext& context) {
   // Dont find model in causal models
   CHECK(model_ != nullptr) << "Failed to create model.";
   model_executor_ = std::make_unique<Executor>(
-      model_.get(), context.get_transformer_model_args(), device_, options_);
+      model_.get(), context.get_model_args_bundle(), device_, options_);
 
   if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
     const auto& args = context.get_llm_model_args();
     const auto& parallel_args = context.get_parallel_args();
-    const int32_t num_layers =
-        args.transformer().n_layers() - args.first_k_dense_replace();
+    const int32_t num_layers = args.n_layers() - args.first_k_dense_replace();
     const int32_t eplb_device_num = eplb::effective_device_num(
         parallel_args.world_size(), parallel_args.ep_size());
     const int32_t num_device_experts = eplb::local_physical_experts_num(

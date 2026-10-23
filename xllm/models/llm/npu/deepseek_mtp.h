@@ -33,7 +33,7 @@ class DeepseekMtpModelImpl
             "deepseek_v3_mtp",
             context) {
     const auto& llm_args = context.get_llm_model_args();
-    const auto& model_args = llm_args.transformer();
+    const auto& model_args = llm_args;
     auto options = context.get_tensor_options();
 
     int32_t mask_value = model_args.dtype() == "bfloat16" ? 1 : -9984;

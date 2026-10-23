@@ -52,7 +52,7 @@ class MtpModelImplBase : public torch::nn::Module {
       : model_type_(model_type),
         device_(context.get_tensor_options().device()) {
     const auto& llm_args = context.get_llm_model_args();
-    const auto& model_args = llm_args.transformer();
+    const auto& model_args = llm_args;
     auto parallel_args = context.get_parallel_args();
 
     dp_size_ = parallel_args.dp_size();

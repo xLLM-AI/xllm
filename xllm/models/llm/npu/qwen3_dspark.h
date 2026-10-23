@@ -52,7 +52,7 @@ class DSparkQwen3ForCausalLMImpl final
         markov_head_(context.get_tensor_options(),
                      context.get_llm_model_args().markov_rank()) {
     const auto& llm_args = context.get_llm_model_args();
-    const auto& model_args = llm_args.transformer();
+    const auto& model_args = llm_args;
     // Only stand up the ConfidenceHead when adaptive speculative decode is on:
     // it is consumed solely by the adaptive pruning controller, so under static
     // decoding its weights would occupy device memory and never be read.

@@ -120,7 +120,7 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
       vlm_parallel_args.tp_size(tp_group->world_size());
       vlm_parallel_args.tp_group_ = tp_group;
       text_encoder_empty_kv_caches_.resize(
-          static_cast<size_t>(text_encoder_args.transformer().n_layers()));
+          static_cast<size_t>(text_encoder_args.n_layers()));
       const ModelContext& source_vlm_context =
           context.get_model_context("text_encoder");
       ModelContext vlm_context =

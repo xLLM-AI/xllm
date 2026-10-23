@@ -109,14 +109,14 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module,
     auto parallel_args = context.get_parallel_args();
     device_ = options.device();
 
-    const int32_t mtp_n_layers = model_args_.transformer().n_layers();
+    const int32_t mtp_n_layers = model_args_.n_layers();
     CHECK_GT(mtp_n_layers, 0)
         << "[DeepseekV4Mtp] deepseek_v4_mtp requires n_layers > 0";
     CHECK_GE(model_args_.num_nextn_predict_layers(), 0)
         << "[DeepseekV4Mtp] deepseek_v4_mtp requires "
            "num_nextn_predict_layers >= 0";
 
-    const int32_t n_heads = model_args_.transformer().n_heads();
+    const int32_t n_heads = model_args_.n_heads();
     const int64_t head_dim =
         model_args_.o_lora_rank() + model_args_.qk_rope_head_dim();
     const int64_t dp_local_tp_size =
@@ -132,8 +132,7 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module,
 
     init_rope(model_args_, options);
     init_hadamard(model_args_, options);
-    max_position_embeddings_ =
-        model_args_.transformer().max_position_embeddings();
+    max_position_embeddings_ = model_args_.max_position_embeddings();
 
     mtp_layers_.reserve(mtp_n_layers);
     for (int32_t i = 0; i < mtp_n_layers; ++i) {

@@ -157,11 +157,11 @@ FusedMoEImpl::FusedMoEImpl(const LlmModelArgs& model_args,
                            const std::shared_ptr<Stream>& shared_compute_stream)
     : num_total_experts_(model_args.n_routed_experts()),
       topk_(model_args.num_experts_per_tok()),
-      hidden_size_(model_args.transformer().hidden_size()),
+      hidden_size_(model_args.hidden_size()),
       n_shared_experts_(model_args.n_shared_experts()),
       is_gated_(moe_args.is_gated),
       enable_result_reduction_(moe_args.enable_result_reduction),
-      hidden_act_(model_args.transformer().hidden_act()),
+      hidden_act_(model_args.hidden_act()),
       swiglu_limit_(model_args.swiglu_limit() > 0.0f
                         ? std::make_optional(model_args.swiglu_limit())
                         : std::nullopt),

@@ -449,7 +449,7 @@ class LongCatImageEditPipelineImpl : public torch::nn::Module {
       batch_all_tokens.push_back(all_tokens);
     }
 
-    int32_t pad_token_id = text_encoder_args.transformer().pad_token_id();
+    int32_t pad_token_id = text_encoder_args.pad_token_id();
     if (pad_token_id == 0) {
       auto pad_id = tokenizer_->token_to_id("<|endoftext|>");
       if (pad_id.has_value()) {
@@ -518,7 +518,7 @@ class LongCatImageEditPipelineImpl : public torch::nn::Module {
     torch::Tensor positions_3d =
         positions_2d.view({3, batch_size, total_seq_len}).to(torch::kLong);
 
-    std::vector<KVCache> kv_caches(text_encoder_args.transformer().n_layers());
+    std::vector<KVCache> kv_caches(text_encoder_args.n_layers());
     MMData mm_data;
     mm_data.set(MMType::IMAGE, std::move(mm_items));
     std::vector<MMData> mm_data_list(static_cast<size_t>(batch_size), mm_data);

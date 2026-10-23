@@ -52,16 +52,6 @@ cc_test(
 )
 
 cc_test(
-  NAME
-    model_args_view_test
-  SRCS
-    model_args_view_test.cpp
-  DEPS
-    :model
-    GTest::gtest_main
-)
-
-cc_test(
   NO_NPU_RUNTIME
   NAME
     model_family_args_test

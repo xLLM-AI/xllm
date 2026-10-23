@@ -155,7 +155,7 @@ class OneRecStackImpl : public torch::nn::Module {
                   bool is_decode,
                   layer::WordEmbedding& embed_tokens) {
     const auto& rec_args = context.get_rec_model_args();
-    const auto& transformer_args = rec_args.transformer();
+    const auto& transformer_args = rec_args;
     const auto& options = context.get_tensor_options();
 
     hidden_size_ = transformer_args.hidden_size();

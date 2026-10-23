@@ -158,7 +158,7 @@ NpuDeepseekV2DecoderLayerImpl::NpuDeepseekV2DecoderLayerImpl(
           context.get_llm_model_args().num_speculative_tokens()) {
   // compute sm_scale
   // TODO: refactor this code
-  const auto& args = context.get_transformer_model_args();
+  const auto& args = context.get_model_args_bundle();
   if (boost::iequals(args.rope_scaling_rope_type(), "deepseek_yarn")) {
     const float attn_scale = args.attn_scalar().value_or(
         static_cast<float>(args.qk_nope_head_dim() + args.qk_rope_head_dim()));
@@ -175,7 +175,7 @@ NpuDeepseekV2DecoderLayerImpl::NpuDeepseekV2DecoderLayerImpl(
   }
 
   auto parallel_args = context.get_parallel_args();
-  const auto& model_args = context.get_transformer_model_args();
+  const auto& model_args = context.get_model_args_bundle();
   auto quant_args = context.get_quant_args();
   auto options = context.get_tensor_options();
   uses_deepseek_v2_mla_graph_ = uses_deepseek_v2_mla_graph(model_args);

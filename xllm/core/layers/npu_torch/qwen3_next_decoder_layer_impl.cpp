@@ -24,7 +24,7 @@ Qwen3NextDecoderLayerImpl::Qwen3NextDecoderLayerImpl(
     : Qwen3NextDecoderLayerImpl(context,
                                 layer_id,
                                 std::make_shared<Qwen3NextGatedDeltaNetImpl>(
-                                    context.get_transformer_model_args(),
+                                    context.get_model_args_bundle(),
                                     context.get_quant_args(),
                                     context.get_parallel_args(),
                                     context.get_tensor_options())) {}

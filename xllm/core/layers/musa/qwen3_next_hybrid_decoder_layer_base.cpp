@@ -26,9 +26,9 @@ Qwen3HybridDecoderLayerImplBase::Qwen3HybridDecoderLayerImplBase(
     const ModelContext& context,
     int32_t layer_id,
     std::shared_ptr<Qwen3GatedDeltaNetBaseImpl> linear_attention_module) {
-  const auto& model_args = context.get_transformer_model_args();
+  const auto& model_args = context.get_model_args_bundle();
   const auto& llm_args = context.get_llm_model_args();
-  const auto& transformer_args = llm_args.transformer();
+  const auto& transformer_args = llm_args;
   const auto& quant_args = context.get_quant_args();
   const auto& parallel_args = context.get_parallel_args();
   const auto& options = context.get_tensor_options();

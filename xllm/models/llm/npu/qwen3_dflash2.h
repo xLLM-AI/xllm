@@ -39,8 +39,8 @@ class DFlash2CandidateSelector final {
   DFlash2CandidateSelector(const LlmModelArgs& args,
                            const torch::TensorOptions& options)
       : options_(options),
-        hidden_size_(args.transformer().hidden_size()),
-        vocab_size_(args.transformer().vocab_size()),
+        hidden_size_(args.hidden_size()),
+        vocab_size_(args.vocab_size()),
         rank_(args.dflash2_selector_rank()),
         top_k_(args.dflash2_selector_top_k()) {
     CHECK_GT(rank_, 0) << "DFlash2 selector_rank must be positive.";
@@ -133,7 +133,7 @@ class DFlash2Qwen3ModelImpl final : public ::xllm::QWen3ModelImpl {
       : ::xllm::QWen3ModelImpl(context),
         selector_(context.get_llm_model_args(), context.get_tensor_options()) {
     const auto& llm_args = context.get_llm_model_args();
-    const auto& args = llm_args.transformer();
+    const auto& args = llm_args;
     const ParallelArgs& parallel_args = context.get_parallel_args();
     tensor_options_ = context.get_tensor_options();
     head_dim_ = args.head_dim();

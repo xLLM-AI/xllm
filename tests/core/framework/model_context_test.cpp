@@ -155,12 +155,12 @@ TEST(ModelContextTest, ExposesEachRegisteredFamilyThroughOwnedArguments) {
   EXPECT_EQ(llm.get_registration_name(), "registered_llm");
   EXPECT_TRUE(llm.get_llm_model_args().use_moe());
   EXPECT_EQ(&llm.get_llm_model_args(), &llm.get_llm_model_args());
-  EXPECT_EQ(llm.get_llm_model_args().transformer().hidden_size(), 128);
+  EXPECT_EQ(llm.get_llm_model_args().hidden_size(), 128);
 
   const ModelContext vlm =
       make_context(args, {ModelFamily::VLM, "registered_vlm"});
   EXPECT_EQ(vlm.get_vlm_model_args().vision().mm_patch_size(), 14);
-  EXPECT_EQ(vlm.get_vlm_model_args().transformer().hidden_size(), 128);
+  EXPECT_EQ(vlm.get_vlm_model_args().hidden_size(), 128);
   EXPECT_EQ(&vlm.get_vlm_model_args(), &vlm.get_vlm_model_args());
 
   const ModelContext rec =
@@ -228,10 +228,8 @@ TEST(ModelContextTest, SynchronizesEmbeddingCapabilityOnMutation) {
 
   EXPECT_TRUE(updated.get_embedding_model_params().encoder_embedding_mode());
   EXPECT_TRUE(updated.get_vlm_model_args().encoder_embedding_mode());
-  EXPECT_TRUE(updated.get_vlm_model_args()
-                  .transformer()
-                  .embedding_params()
-                  .encoder_embedding_mode());
+  EXPECT_TRUE(
+      updated.get_vlm_model_args().embedding_params().encoder_embedding_mode());
   EXPECT_FALSE(context.get_embedding_model_params().encoder_embedding_mode());
   EXPECT_FALSE(original_params.encoder_embedding_mode());
   EXPECT_EQ(&updated.get_embedding_model_params(),
@@ -283,12 +281,11 @@ TEST(ModelContextTest, CopiedContextsShareArgumentStorage) {
   const ModelContext copied_context = context;
   args.hidden_size() = 256;
 
-  EXPECT_EQ(copied_context.get_llm_model_args().transformer().hidden_size(),
-            128);
+  EXPECT_EQ(copied_context.get_llm_model_args().hidden_size(), 128);
   EXPECT_EQ(&copied_context.get_llm_model_args(),
             &context.get_llm_model_args());
-  EXPECT_EQ(&copied_context.get_llm_model_args().transformer().hidden_size(),
-            &context.get_llm_model_args().transformer().hidden_size());
+  EXPECT_EQ(&copied_context.get_llm_model_args().hidden_size(),
+            &context.get_llm_model_args().hidden_size());
   EXPECT_EQ(&copied_context.get_attention_model_params(),
             &context.get_attention_model_params());
   EXPECT_EQ(&copied_context.get_moe_model_params(),
@@ -305,7 +302,7 @@ TEST(ModelContextTest, KeepsArgumentsAfterSourceConfigIsDestroyed) {
     return make_context(args, {ModelFamily::LLM, "llm"});
   }();
 
-  EXPECT_EQ(context.get_llm_model_args().transformer().hidden_size(), 128);
+  EXPECT_EQ(context.get_llm_model_args().hidden_size(), 128);
   EXPECT_TRUE(context.get_llm_model_args().use_moe());
   EXPECT_EQ(context.get_execution_model_params().hidden_size(), 128);
   EXPECT_TRUE(context.get_moe_model_params().use_moe());
@@ -340,8 +337,8 @@ TEST(ModelContextTest, DerivedContextsShareArgumentStorage) {
   EXPECT_EQ(parallel_context.get_registration_name(), "registered_vlm");
   EXPECT_EQ(&parallel_context.get_vlm_model_args(),
             &context.get_vlm_model_args());
-  EXPECT_EQ(&parallel_context.get_vlm_model_args().transformer().hidden_size(),
-            &context.get_vlm_model_args().transformer().hidden_size());
+  EXPECT_EQ(&parallel_context.get_vlm_model_args().hidden_size(),
+            &context.get_vlm_model_args().hidden_size());
 
   QuantArgs quant_args;
   quant_args.bits() = 8;
@@ -350,8 +347,8 @@ TEST(ModelContextTest, DerivedContextsShareArgumentStorage) {
   EXPECT_EQ(quant_context.get_model_family(), ModelFamily::VLM);
   EXPECT_EQ(quant_context.get_registration_name(), "registered_vlm");
   EXPECT_EQ(&quant_context.get_vlm_model_args(), &context.get_vlm_model_args());
-  EXPECT_EQ(&quant_context.get_vlm_model_args().transformer().hidden_size(),
-            &context.get_vlm_model_args().transformer().hidden_size());
+  EXPECT_EQ(&quant_context.get_vlm_model_args().hidden_size(),
+            &context.get_vlm_model_args().hidden_size());
 }
 
 TEST(DiTModelContextTest, IdentifiesItsFamilyWithoutADevice) {

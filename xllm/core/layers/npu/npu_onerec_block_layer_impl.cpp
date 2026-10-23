@@ -666,7 +666,7 @@ NpuOneRecBlockLayerImpl::NpuOneRecBlockLayerImpl(const ModelContext& context,
                                                  int32_t layer_id)
     : BaseLayer(context), is_decoder_(is_decoder), layer_id_(layer_id) {
   const auto& rec_args = context.get_rec_model_args();
-  const auto& args = rec_args.transformer();
+  const auto& args = rec_args;
   const auto& parallel_args = context.get_parallel_args();
   param_from_args(prefill_param_, rec_args, parallel_args, /*is_prefill=*/true);
   param_from_args(prefill_param_atb_,
@@ -722,7 +722,7 @@ void NpuOneRecBlockLayerImpl::param_from_args(
     const RecModelArgs& rec_args,
     const ParallelArgs& parallel_args,
     bool is_prefill) {
-  const auto& args = rec_args.transformer();
+  const auto& args = rec_args;
   param.isFA = false;
   param.isPrefill = is_prefill;
   param.isBF16 = args.dtype() == "bfloat16";

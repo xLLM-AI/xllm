@@ -688,11 +688,10 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
                                  std::move(tensor_allocator))) {
     return false;
   }
-  kv_cache_transfer_->configure_cache_layout(
-      parallel_args_,
-      context_.get_transformer_model_args(),
-      options_.block_size(),
-      /*is_spec_draft=*/false);
+  kv_cache_transfer_->configure_cache_layout(parallel_args_,
+                                             context_.get_model_args_bundle(),
+                                             options_.block_size(),
+                                             /*is_spec_draft=*/false);
   kv_cache_transfer_->register_kv_cache(kv_caches_, kv_cache_shape, dtype_);
 
   status_ = Status::READY;
@@ -715,19 +714,17 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
   }
 
   if (is_spec_draft_) {
-    kv_cache_transfer_->configure_cache_layout(
-        parallel_args_,
-        context_.get_transformer_model_args(),
-        options_.block_size(),
-        /*is_spec_draft=*/true);
+    kv_cache_transfer_->configure_cache_layout(parallel_args_,
+                                               context_.get_model_args_bundle(),
+                                               options_.block_size(),
+                                               /*is_spec_draft=*/true);
     kv_cache_transfer_->register_kv_cache_spec(
         kv_caches_, kv_cache_shape, dtype_);
   } else {
-    kv_cache_transfer_->configure_cache_layout(
-        parallel_args_,
-        context_.get_transformer_model_args(),
-        options_.block_size(),
-        /*is_spec_draft=*/false);
+    kv_cache_transfer_->configure_cache_layout(parallel_args_,
+                                               context_.get_model_args_bundle(),
+                                               options_.block_size(),
+                                               /*is_spec_draft=*/false);
     kv_cache_transfer_->register_kv_cache(kv_caches_, kv_cache_shape, dtype_);
   }
 
@@ -1257,7 +1254,7 @@ bool WorkerImpl::model_supports_model_cp() const {
   std::string resolved_name;
   std::string error_message;
   if (!resolve_model_registration_name(
-          context_.get_transformer_model_args().model_type(),
+          context_.get_model_args_bundle().model_type(),
           &resolved_name,
           &error_message)) {
     model_cp_capable_ = false;
@@ -1305,7 +1302,7 @@ const CpPlanRuntimeConfig& WorkerImpl::npu_cp_plan_runtime_config() const {
     plan_config.expert_parallel_degree =
         EPLBConfig::get_instance().expert_parallel_degree();
     plan_config.num_experts_per_token =
-        context_.get_transformer_model_args().num_experts_per_tok();
+        context_.get_model_args_bundle().num_experts_per_tok();
     // CP only runs on prefill (decode is filtered in prepare()).
     plan_config.is_prefill = true;
     plan_config.device = device_;
@@ -1390,7 +1387,7 @@ void WorkerImpl::prepare_dp_ep_padding_impl(Params& input_params) {
   DpEpPadding dp_ep_padding(
       token_size_per_dp_group,
       raw_token_size_per_dp_group,
-      context_.get_transformer_model_args().num_experts_per_tok(),
+      context_.get_model_args_bundle().num_experts_per_tok(),
       context_.get_parallel_args().mapping_data(),
       device_,
       dtype_,
@@ -1578,7 +1575,7 @@ void WorkerImpl::prepare_work_before_execute_on_stream_impl(
     apply_kv_block_swaps(input_params);
 
 #if defined(USE_NPU)
-    if (context_.get_transformer_model_args().enable_mla() &&
+    if (context_.get_model_args_bundle().enable_mla() &&
         input_params.meta.batch_forward_type.is_chunked_prefill()) {
       prepare_mla_prefixcache_inputs(input_params);
     }
@@ -1676,9 +1673,9 @@ std::shared_ptr<const JsonObjectGrammar> WorkerImpl::ensure_json_object_grammar(
   std::string error;
   *grammar = JsonObjectGrammar::create_from_tokenizer(
       *tokenizer_,
-      context_.get_transformer_model_args().eos_token_id(),
-      context_.get_transformer_model_args().stop_token_ids(),
-      context_.get_transformer_model_args().vocab_size(),
+      context_.get_model_args_bundle().eos_token_id(),
+      context_.get_model_args_bundle().stop_token_ids(),
+      context_.get_model_args_bundle().vocab_size(),
       reasoning_enabled,
       &error);
   if (*grammar == nullptr) {
@@ -2295,7 +2292,7 @@ bool WorkerImpl::wakeup_from_remote_weights(const WakeupOptions& options) {
     return ::xllm::Status(StatusCode::INVALID_ARGUMENT,
                           "Task pipeline requires loaded model weights.");
   }
-  const auto& args = context_.get_transformer_model_args();
+  const auto& args = context_.get_model_args_bundle();
   const int64_t positions = args.max_position_embeddings();
   const int64_t vocab = args.vocab_size();
   const int32_t kv_split_size = parallel_args_.kv_split_size_effective();

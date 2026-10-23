@@ -29,7 +29,7 @@ limitations under the License.
 namespace xllm {
 
 VlmExecutorImpl::VlmExecutorImpl(CausalLM* model,
-                                 const TransformerModelArgs& args,
+                                 const ModelArgsBundle& args,
                                  const torch::Device& device,
                                  const runtime::Options& options)
     : model_(dynamic_cast<CausalVLM*>(model)),

@@ -54,7 +54,7 @@ namespace xllm {
 class RWKV7ModelImpl : public torch::nn::Module {
  public:
   explicit RWKV7ModelImpl(const ModelContext& context) {
-    const auto& args = context.get_transformer_model_args();
+    const auto& args = context.get_model_args_bundle();
     const int32_t n_layers = static_cast<int32_t>(args.n_layers());
     const int64_t hidden_size = args.hidden_size();
     const int64_t vocab_size = args.vocab_size();
@@ -153,7 +153,7 @@ TORCH_MODULE(RWKV7Model);
 class RWKV7ForCausalLMImpl : public torch::nn::Module {
  public:
   explicit RWKV7ForCausalLMImpl(const ModelContext& context) {
-    const auto& args = context.get_transformer_model_args();
+    const auto& args = context.get_model_args_bundle();
     const int64_t hidden_size = args.hidden_size();
     const int64_t vocab_size = args.vocab_size();
     const torch::TensorOptions opts = context.get_tensor_options();

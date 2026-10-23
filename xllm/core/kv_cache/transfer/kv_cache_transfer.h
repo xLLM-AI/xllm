@@ -93,7 +93,7 @@ class KVCacheTransfer {
   virtual void free_kv_cache() {};
 
   virtual void configure_cache_layout(const ParallelArgs& parallel_args,
-                                      const TransformerModelArgs& model_args,
+                                      const ModelArgsBundle& model_args,
                                       int32_t block_token_capacity,
                                       bool is_spec_draft) {}
 
@@ -102,7 +102,7 @@ class KVCacheTransfer {
                               int32_t block_token_capacity,
                               bool is_spec_draft) {
     configure_cache_layout(parallel_args,
-                           TransformerModelArgs(model_args),
+                           ModelArgsBundle(model_args, ModelFamily::LLM),
                            block_token_capacity,
                            is_spec_draft);
   }

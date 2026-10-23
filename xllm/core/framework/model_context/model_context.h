@@ -109,12 +109,9 @@ class ModelContext {
   }
   const ModelArgsBundle& get_model_args_bundle() const&& = delete;
 
-  // Return the transformer parameters embedded in the active family-specific
-  // argument object. This is the common interface for model implementations
-  // shared by LLM, VLM, and Rec registrations.
-  const TransformerModelArgs& get_transformer_model_args() const&;
-  const TransformerModelArgs& get_transformer_model_args() const&& = delete;
-
+  // Return capability parameters embedded in the active family-specific
+  // argument object. These accessors provide the common interface for model
+  // implementations shared by LLM, VLM, and Rec registrations.
   const AttentionModelParams& get_attention_model_params() const&;
   const AttentionModelParams& get_attention_model_params() const&& = delete;
   const LinearAttentionModelParams& get_linear_attention_model_params() const&;

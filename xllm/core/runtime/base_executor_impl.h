@@ -34,7 +34,7 @@ namespace xllm {
 class BaseExecutorImpl : public ExecutorImpl {
  public:
   BaseExecutorImpl(CausalLM* model,
-                   const TransformerModelArgs& args,
+                   const ModelArgsBundle& args,
                    const torch::Device& device,
                    const runtime::Options& options);
 
@@ -49,7 +49,7 @@ class BaseExecutorImpl : public ExecutorImpl {
   // not own
   CausalLM* model_;
 
-  TransformerModelArgs args_;
+  ModelArgsBundle args_;
   torch::Device device_;
   runtime::Options options_;
 };

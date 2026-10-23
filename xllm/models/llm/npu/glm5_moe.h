@@ -37,7 +37,7 @@ class GlmMoeDsaModelImpl : private GlmSharedExpertStreamOwner,
         device_(context.get_tensor_options().device()) {
     auto options = context.get_tensor_options();
     const auto& llm_args = context.get_llm_model_args();
-    const auto& model_args = llm_args.transformer();
+    const auto& model_args = llm_args;
     auto parallel_args = context.get_parallel_args();
 
     blocks_ = register_module("layers", torch::nn::ModuleList());

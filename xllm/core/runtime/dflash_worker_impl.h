@@ -59,8 +59,8 @@ enum class DSparkSasMode : uint8_t {
 
 inline DSparkSasMode classify_dspark_sas_mode(const LlmModelArgs& draft_args,
                                               bool sample_from_anchor) {
-  if (!sample_from_anchor || !util::is_deepseek_v4_dspark_model_type(
-                                 draft_args.transformer().model_type())) {
+  if (!sample_from_anchor ||
+      !util::is_deepseek_v4_dspark_model_type(draft_args.model_type())) {
     return DSparkSasMode::NOT_DSPARK;
   }
   return draft_args.dspark_use_native_sas() ? DSparkSasMode::NATIVE

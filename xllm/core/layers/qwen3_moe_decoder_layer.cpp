@@ -36,7 +36,7 @@ MoEModule create_fused_moe_from_context(const ModelContext& context,
                                         const FusedMoEArgs&>) {
     return MoEModule(context, moe_args);
   } else {
-    return MoEModule(context.get_transformer_model_args(),
+    return MoEModule(context.get_model_args_bundle(),
                      moe_args,
                      context.get_quant_args(),
                      context.get_parallel_args(),
@@ -51,7 +51,7 @@ bool use_moe_all2all(bool enable_deep_ep,
 }
 #endif
 bool is_moe_layer(const LlmModelArgs& model_args, int32_t layer_id) {
-  const auto& transformer_args = model_args.transformer();
+  const auto& transformer_args = model_args;
   const auto& mlp_only_layers = transformer_args.mlp_only_layers();
   return std::count(mlp_only_layers.begin(), mlp_only_layers.end(), layer_id) ==
              0 &&
@@ -65,7 +65,7 @@ Qwen3MoeDecoderLayerImpl::Qwen3MoeDecoderLayerImpl(const ModelContext& context,
                                                    int32_t layer_id)
     : parallel_args_(context.get_parallel_args()) {
   const auto& model_args = context.get_llm_model_args();
-  const auto& transformer_args = model_args.transformer();
+  const auto& transformer_args = model_args;
   const auto& quant_args = context.get_quant_args();
   const auto& options = context.get_tensor_options();
   const bool use_moe = is_moe_layer(model_args, layer_id);
