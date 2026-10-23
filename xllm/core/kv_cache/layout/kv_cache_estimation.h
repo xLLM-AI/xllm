@@ -20,6 +20,7 @@ limitations under the License.
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "common/types.h"
@@ -32,7 +33,6 @@ limitations under the License.
 namespace xllm {
 
 class ModelArgs;
-class TransformerModelArgs;
 namespace runtime {
 struct Options;
 }
@@ -86,7 +86,7 @@ struct KVCacheEstimateOptions {
   int64_t dp_size = 1;
   bool enable_dp_fair_token_budget = false;
   const ModelArgs* draft_model_args = nullptr;
-  const TransformerModelArgs* draft_transformer_model_args = nullptr;
+  const ModelArgsBundle* draft_model_args_bundle = nullptr;
   const KVCacheEstimateOptions* draft_options = nullptr;
 };
 
@@ -95,10 +95,10 @@ struct KVCacheEstimateOptions {
 // the effective tensor-parallel width and user/runtime options.
 class KVCacheEstimator final {
  public:
-  explicit KVCacheEstimator(const TransformerModelArgs& model_args)
-      : model_args_(model_args) {}
+  explicit KVCacheEstimator(ModelArgsBundle model_args)
+      : model_args_(std::move(model_args)) {}
   explicit KVCacheEstimator(const ModelArgs& model_args)
-      : model_args_(model_args) {}
+      : model_args_(model_args, ModelFamily::LLM) {}
 
   KVCacheCapacity estimate(KVCacheEstimateOptions options) const;
 
@@ -109,7 +109,7 @@ class KVCacheEstimator final {
   int64_t estimate_memory_budget(const runtime::Options& options,
                                  const KVCacheEstimateContext& context) const;
 
-  TransformerModelArgs model_args_;
+  ModelArgsBundle model_args_;
 };
 
 struct Dsv4KVCacheEstimateCost {
@@ -123,41 +123,40 @@ struct Dsv4KVCacheEstimateCost {
 };
 
 std::vector<bool> resolve_indexer_cache_enabled_layers(
-    const TransformerModelArgs& model_args,
+    const ModelArgsBundle& model_args,
     int64_t num_cache_layers);
 
 // Linear-attention layers stay owned on every rank. Full-attention layers
 // follow LayerwiseSplitLayout.
-std::vector<bool> build_layer_cache_owned(
-    const TransformerModelArgs& model_args,
-    const LayerwiseSplitLayout& layout,
-    int64_t num_layers);
+std::vector<bool> build_layer_cache_owned(const ModelArgsBundle& model_args,
+                                          const LayerwiseSplitLayout& layout,
+                                          int64_t num_layers);
 
 // Common block count across a layerwise split group. Each rank pays for the
 // layers it owns plus one shared scratch layer of the same per-block cost, so
 // the group settles on the smallest count any rank can afford.
 int64_t estimate_layerwise_split_block_count(
-    const TransformerModelArgs& model_args,
+    const ModelArgsBundle& model_args,
     int32_t layerwise_split_size,
     const KVCacheCapacity& kv_cache_cap,
     int64_t available_bytes,
     int64_t additional_block_bytes);
 
 KVCacheCapacity estimate_kv_cache_capacity(
-    const TransformerModelArgs& model_args,
+    const ModelArgsBundle& model_args,
     const KVCacheEstimateOptions& options);
 
 // Full-attention KPool drafts inherit the target's request-state slots/window.
 // Both capacities retain their own model's layer counts and page costs.
 int64_t estimate_shared_kpool_blocks(const KVCacheCapacity& target_cap,
                                      const KVCacheCapacity& draft_cap,
-                                     const TransformerModelArgs& draft_args);
+                                     const ModelArgsBundle& draft_args);
 
 inline std::vector<bool> resolve_indexer_cache_enabled_layers(
     const ModelArgs& model_args,
     int64_t num_cache_layers) {
-  return resolve_indexer_cache_enabled_layers(TransformerModelArgs(model_args),
-                                              num_cache_layers);
+  return resolve_indexer_cache_enabled_layers(
+      ModelArgsBundle(model_args, ModelFamily::LLM), num_cache_layers);
 }
 
 inline std::vector<bool> build_layer_cache_owned(
@@ -165,7 +164,7 @@ inline std::vector<bool> build_layer_cache_owned(
     const LayerwiseSplitLayout& layout,
     int64_t num_layers) {
   return build_layer_cache_owned(
-      TransformerModelArgs(model_args), layout, num_layers);
+      ModelArgsBundle(model_args, ModelFamily::LLM), layout, num_layers);
 }
 
 inline int64_t estimate_layerwise_split_block_count(
@@ -174,24 +173,26 @@ inline int64_t estimate_layerwise_split_block_count(
     const KVCacheCapacity& kv_cache_cap,
     int64_t available_bytes,
     int64_t additional_block_bytes) {
-  return estimate_layerwise_split_block_count(TransformerModelArgs(model_args),
-                                              layerwise_split_size,
-                                              kv_cache_cap,
-                                              available_bytes,
-                                              additional_block_bytes);
+  return estimate_layerwise_split_block_count(
+      ModelArgsBundle(model_args, ModelFamily::LLM),
+      layerwise_split_size,
+      kv_cache_cap,
+      available_bytes,
+      additional_block_bytes);
 }
 
 inline KVCacheCapacity estimate_kv_cache_capacity(
     const ModelArgs& model_args,
     const KVCacheEstimateOptions& options) {
-  return estimate_kv_cache_capacity(TransformerModelArgs(model_args), options);
+  return estimate_kv_cache_capacity(
+      ModelArgsBundle(model_args, ModelFamily::LLM), options);
 }
 
 inline int64_t estimate_shared_kpool_blocks(const KVCacheCapacity& target_cap,
                                             const KVCacheCapacity& draft_cap,
                                             const ModelArgs& draft_args) {
   return estimate_shared_kpool_blocks(
-      target_cap, draft_cap, TransformerModelArgs(draft_args));
+      target_cap, draft_cap, ModelArgsBundle(draft_args, ModelFamily::LLM));
 }
 
 }  // namespace xllm

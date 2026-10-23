@@ -98,7 +98,7 @@ std::string draft_store_key_component(const runtime::Options& options) {
 }
 
 KVCacheEstimateOptions make_kv_cache_estimate_options(
-    const TransformerModelArgs& model_args,
+    const ModelArgsBundle& model_args,
     const runtime::Options& options,
     const ParallelArgs& parallel_args,
     torch::ScalarType dtype,
@@ -237,7 +237,7 @@ KVCacheShape DraftModelSpecWorkerImpl<TargetInput>::build_draft_kv_cache_shape(
   return build_speculative_draft_kv_cache_shape(
       target_kv_cache_shape,
       draft_capacity,
-      draft_impl_->context_.get_transformer_model_args(),
+      draft_impl_->context_.get_model_args_bundle(),
       options_.block_size(),
       draft_world_size,
       options_.kv_cache_dtype());
@@ -256,13 +256,12 @@ DraftModelSpecWorkerImpl<TargetInput>::estimate_kv_cache_capacity_with_draft(
       std::min(target_cache_bytes, draft_cache_bytes);
   const int64_t total_memory = std::min(target_total_bytes, draft_total_bytes);
 
-  const auto& target_model_args = impl_->context_.get_transformer_model_args();
+  const auto& target_model_args = impl_->context_.get_model_args_bundle();
   if (!util::is_deepseek_v4_model_type(target_model_args.model_type())) {
     return {cache_size_in_bytes, total_memory};
   }
 
-  const auto& draft_model_args =
-      draft_impl_->context_.get_transformer_model_args();
+  const auto& draft_model_args = draft_impl_->context_.get_model_args_bundle();
   KVCacheEstimateOptions target_estimate_options =
       make_kv_cache_estimate_options(target_model_args,
                                      target_options,
@@ -275,7 +274,7 @@ DraftModelSpecWorkerImpl<TargetInput>::estimate_kv_cache_capacity_with_draft(
                                      parallel_args_,
                                      dtype_,
                                      cache_size_in_bytes);
-  target_estimate_options.draft_transformer_model_args = &draft_model_args;
+  target_estimate_options.draft_model_args_bundle = &draft_model_args;
   target_estimate_options.draft_options = &draft_estimate_options;
 
   const KVCacheCapacity capacity = ::xllm::estimate_kv_cache_capacity(

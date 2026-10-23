@@ -270,15 +270,15 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
 #if defined(USE_NPU)
     std::shared_ptr<NPULayerSynchronizerImpl> layer_synchronizer =
         std::make_shared<NPULayerSynchronizerImpl>(
-            context_.get_transformer_model_args().n_layers());
+            context_.get_model_args_bundle().n_layers());
 #elif defined(USE_MLU)
     std::shared_ptr<MLULayerSynchronizerImpl> layer_synchronizer =
         std::make_shared<MLULayerSynchronizerImpl>(
-            context_.get_transformer_model_args().n_layers());
+            context_.get_model_args_bundle().n_layers());
 #elif defined(USE_DCU)
     std::shared_ptr<DCULayerSynchronizerImpl> layer_synchronizer =
         std::make_shared<DCULayerSynchronizerImpl>(
-            context_.get_transformer_model_args().n_layers());
+            context_.get_model_args_bundle().n_layers());
 #endif
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
     input.input_params.parallel.layer_synchronizer = layer_synchronizer;

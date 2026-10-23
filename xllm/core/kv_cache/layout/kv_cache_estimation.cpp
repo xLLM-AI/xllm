@@ -65,7 +65,7 @@ int64_t kv_cache_dtype_size(const std::string& kv_cache_dtype,
   return model_dtype_size;
 }
 
-int64_t kv_slot_size(const TransformerModelArgs& model_args,
+int64_t kv_slot_size(const ModelArgsBundle& model_args,
                      const KVCacheEstimateOptions& options,
                      int64_t cache_dtype_size) {
   if (model_args.enable_mla()) {
@@ -93,7 +93,7 @@ int64_t kv_slot_size(const TransformerModelArgs& model_args,
          options.n_local_kv_heads;
 }
 
-int64_t index_slot_size(const TransformerModelArgs& model_args,
+int64_t index_slot_size(const ModelArgsBundle& model_args,
                         bool enable_indexer_cache_quantization,
                         int64_t dtype_size,
                         KPoolCacheLayout kpool_layout) {
@@ -135,7 +135,7 @@ int64_t index_slot_size(const TransformerModelArgs& model_args,
   return split_factor * dtype_size * index_n_head * index_width;
 }
 
-int64_t scale_slot_size(const TransformerModelArgs& model_args,
+int64_t scale_slot_size(const ModelArgsBundle& model_args,
                         const KVCacheEstimateOptions& options) {
   if (options.kv_cache_dtype == "auto") {
     return 0;
@@ -168,7 +168,7 @@ int64_t standard_full_cache_block_size_in_bytes(
   return logical_block_bytes;
 }
 
-int64_t layerwise_split_block_count(const TransformerModelArgs& model_args,
+int64_t layerwise_split_block_count(const ModelArgsBundle& model_args,
                                     int32_t layerwise_split_size,
                                     const KVCacheCapacity& kv_cache_cap,
                                     int64_t available_bytes,
@@ -230,13 +230,13 @@ int64_t layerwise_split_block_count(const TransformerModelArgs& model_args,
   return common_block_count;
 }
 
-bool enable_qwen3_5_spec_verify(const TransformerModelArgs& model_args,
+bool enable_qwen3_5_spec_verify(const ModelArgsBundle& model_args,
                                 const KVCacheEstimateOptions& options) {
   return options.num_speculative_tokens > 0 && !options.is_draft_engine &&
          is_qwen3_5_target_model_type(model_args.model_type());
 }
 
-int64_t linear_slot_size(const TransformerModelArgs& model_args,
+int64_t linear_slot_size(const ModelArgsBundle& model_args,
                          const KVCacheEstimateOptions& options,
                          int64_t dtype_size) {
   if (model_args.linear_num_value_heads() <= 0) {
@@ -363,7 +363,7 @@ void set_dsv4_compressed_counts(const Dsv4KVCacheEstimateCost& cache_cost,
 }
 
 Dsv4KVCacheEstimateCost estimate_dsv4_kv_cache_cost(
-    const TransformerModelArgs& model_args,
+    const ModelArgsBundle& model_args,
     const KVCacheEstimateOptions& options) {
   const int64_t block_size = options.block_size;
   const int64_t head_dim = model_args.head_dim();
@@ -470,7 +470,7 @@ Dsv4KVCacheEstimateCost estimate_dsv4_kv_cache_cost(
   return cache_cost;
 }
 
-void init_dsv4_counts(const TransformerModelArgs& model_args,
+void init_dsv4_counts(const ModelArgsBundle& model_args,
                       const KVCacheEstimateOptions& options,
                       KVCacheCapacity* kv_cache_cap) {
   CHECK(kv_cache_cap != nullptr);
@@ -482,15 +482,15 @@ void init_dsv4_counts(const TransformerModelArgs& model_args,
       << ", available=" << readable_size(kv_cache_cap->cache_size_in_bytes());
   int64_t token_mem =
       kv_cache_cap->cache_size_in_bytes() - cache_cost.constant_swa_bytes;
-  if (options.draft_transformer_model_args != nullptr) {
+  if (options.draft_model_args_bundle != nullptr) {
     CHECK(options.draft_options != nullptr)
         << "DSV4 draft options must be provided with draft model args";
     CHECK(util::is_deepseek_v4_model_type(
-        options.draft_transformer_model_args->model_type()))
+        options.draft_model_args_bundle->model_type()))
         << "DSV4 speculative kv cache estimation only supports DeepSeek V4 "
            "draft";
     const Dsv4KVCacheEstimateCost draft_cost = estimate_dsv4_kv_cache_cost(
-        *options.draft_transformer_model_args, *options.draft_options);
+        *options.draft_model_args_bundle, *options.draft_options);
     const int64_t constant_bytes =
         cache_cost.constant_swa_bytes + draft_cost.constant_swa_bytes;
     CHECK_GE(kv_cache_cap->cache_size_in_bytes(), constant_bytes)
@@ -582,7 +582,7 @@ void init_dsv4_counts(const TransformerModelArgs& model_args,
   kv_cache_cap->n_blocks(std::max<int64_t>(manager_base_blocks, 1));
 }
 
-void init_standard_counts(const TransformerModelArgs& model_args,
+void init_standard_counts(const ModelArgsBundle& model_args,
                           const KVCacheEstimateOptions& options,
                           KVCacheCapacity* kv_cache_cap) {
   for (int64_t layer_id = 0; layer_id < kv_cache_cap->n_layers(); ++layer_id) {
@@ -675,7 +675,7 @@ KPoolCacheLayout default_kpool_layout() {
 
 int64_t estimate_shared_kpool_blocks(const KVCacheCapacity& target_cap,
                                      const KVCacheCapacity& draft_cap,
-                                     const TransformerModelArgs& draft_args) {
+                                     const ModelArgsBundle& draft_args) {
   CHECK_EQ(target_cap.block_size(), draft_cap.block_size());
   CHECK_GT(target_cap.kpool_tail_slot_size(), 0);
   CHECK_GT(draft_cap.kpool_tail_slot_size(), 0);
@@ -702,7 +702,7 @@ int64_t estimate_shared_kpool_blocks(const KVCacheCapacity& target_cap,
 }
 
 std::vector<bool> resolve_indexer_cache_enabled_layers(
-    const TransformerModelArgs& model_args,
+    const ModelArgsBundle& model_args,
     int64_t num_cache_layers) {
   if (!Platform::supports_dsa_indexer_cache_elision()) {
     return {};
@@ -710,10 +710,9 @@ std::vector<bool> resolve_indexer_cache_enabled_layers(
   return layer::get_dsa_indexer_layer_mask(model_args, num_cache_layers);
 }
 
-std::vector<bool> build_layer_cache_owned(
-    const TransformerModelArgs& model_args,
-    const LayerwiseSplitLayout& layout,
-    int64_t num_layers) {
+std::vector<bool> build_layer_cache_owned(const ModelArgsBundle& model_args,
+                                          const LayerwiseSplitLayout& layout,
+                                          int64_t num_layers) {
   std::vector<bool> layer_cache_owned;
   layer_cache_owned.reserve(static_cast<size_t>(num_layers));
   for (int64_t layer_id = 0; layer_id < num_layers; ++layer_id) {
@@ -725,7 +724,7 @@ std::vector<bool> build_layer_cache_owned(
 }
 
 int64_t estimate_layerwise_split_block_count(
-    const TransformerModelArgs& model_args,
+    const ModelArgsBundle& model_args,
     int32_t layerwise_split_size,
     const KVCacheCapacity& kv_cache_cap,
     int64_t available_bytes,
@@ -873,15 +872,15 @@ KVCacheCapacity KVCacheEstimator::estimate(
 }
 
 KVCacheCapacity estimate_kv_cache_capacity(
-    const TransformerModelArgs& model_args,
+    const ModelArgsBundle& model_args,
     const KVCacheEstimateOptions& options) {
   KVCacheEstimateOptions normalized_options = options;
-  TransformerModelArgs draft_model_args_storage;
-  if (normalized_options.draft_transformer_model_args == nullptr &&
+  ModelArgsBundle draft_model_args_storage;
+  if (normalized_options.draft_model_args_bundle == nullptr &&
       normalized_options.draft_model_args != nullptr) {
     draft_model_args_storage =
-        TransformerModelArgs(*normalized_options.draft_model_args);
-    normalized_options.draft_transformer_model_args = &draft_model_args_storage;
+        ModelArgsBundle(*normalized_options.draft_model_args, ModelFamily::LLM);
+    normalized_options.draft_model_args_bundle = &draft_model_args_storage;
   }
   const KVCacheEstimateOptions& normalized = normalized_options;
   KVCacheCapacity kv_cache_cap;
@@ -893,7 +892,7 @@ KVCacheCapacity estimate_kv_cache_capacity(
       << "Available kv cache size must be greater than 0";
   const bool enable_dsv4_estimation =
       util::is_deepseek_v4_model_type(model_args.model_type());
-  if (normalized.draft_transformer_model_args != nullptr) {
+  if (normalized.draft_model_args_bundle != nullptr) {
     CHECK(enable_dsv4_estimation)
         << "DSV4 speculative kv cache estimation only supports DeepSeek V4 "
            "target";

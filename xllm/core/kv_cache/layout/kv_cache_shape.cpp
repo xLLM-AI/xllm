@@ -29,7 +29,7 @@ limitations under the License.
 namespace xllm {
 
 KVCacheCreateOptions get_kv_cache_create_options(
-    const TransformerModelArgs& model_args,
+    const ModelArgsBundle& model_args,
     const KVCacheShape& shape,
     bool is_spec_draft) {
   KVCacheCreateOptions options;
@@ -81,11 +81,12 @@ void transpose_dim_1_and_2(std::vector<int64_t>* shape) {
 KVCacheShape::KVCacheShape(const KVCacheCapacity& kv_cache_cap,
                            const ModelArgs& model_args,
                            int64_t world_size)
-    : KVCacheShape(kv_cache_cap, TransformerModelArgs(model_args), world_size) {
-}
+    : KVCacheShape(kv_cache_cap,
+                   ModelArgsBundle(model_args, ModelFamily::LLM),
+                   world_size) {}
 
 KVCacheShape::KVCacheShape(const KVCacheCapacity& kv_cache_cap,
-                           const TransformerModelArgs& model_args,
+                           const ModelArgsBundle& model_args,
                            int64_t world_size) {
   CHECK_GT(world_size, 0) << "world_size must be positive.";
   CHECK_GT(kv_cache_cap.block_size(), 0) << "block_size must be positive.";
@@ -359,7 +360,7 @@ KVCacheShape KVCacheShape::from_proto(const proto::KVCacheShape& proto_shape) {
 }
 
 void KVCacheShape::init_key_cache_shape(const KVCacheCapacity& kv_cache_cap,
-                                        const TransformerModelArgs& model_args,
+                                        const ModelArgsBundle& model_args,
                                         int64_t world_size) {
   if (model_args.enable_mla()) {
 #if defined(USE_NPU)
@@ -390,10 +391,9 @@ void KVCacheShape::init_key_cache_shape(const KVCacheCapacity& kv_cache_cap,
                            get_kv_cache_storage_head_dim(model_args)};
 }
 
-void KVCacheShape::init_value_cache_shape(
-    const KVCacheCapacity& kv_cache_cap,
-    const TransformerModelArgs& model_args,
-    int64_t world_size) {
+void KVCacheShape::init_value_cache_shape(const KVCacheCapacity& kv_cache_cap,
+                                          const ModelArgsBundle& model_args,
+                                          int64_t world_size) {
   if (model_args.enable_mla()) {
     if (model_args.qk_rope_head_dim() == 0) {
       value_cache_shape_.reset();
@@ -427,9 +427,8 @@ void KVCacheShape::init_value_cache_shape(
                            get_kv_cache_storage_head_dim(model_args)};
 }
 
-void KVCacheShape::init_mla_packed_c8_shape(
-    const KVCacheCapacity& kv_cache_cap,
-    const TransformerModelArgs& model_args) {
+void KVCacheShape::init_mla_packed_c8_shape(const KVCacheCapacity& kv_cache_cap,
+                                            const ModelArgsBundle& model_args) {
   const int64_t packed_head_dim = mla_packed_c8_row_bytes(
       model_args.kv_lora_rank(), model_args.qk_rope_head_dim());
   key_cache_shape_ = std::vector<int64_t>{
@@ -437,9 +436,8 @@ void KVCacheShape::init_mla_packed_c8_shape(
   value_cache_shape_ = *key_cache_shape_;
 }
 
-void KVCacheShape::init_index_cache_shape(
-    const KVCacheCapacity& kv_cache_cap,
-    const TransformerModelArgs& model_args) {
+void KVCacheShape::init_index_cache_shape(const KVCacheCapacity& kv_cache_cap,
+                                          const ModelArgsBundle& model_args) {
   int64_t index_block_count = kv_cache_cap.n_blocks();
   if (Platform::supports_dsa_indexer_cache_sharding() &&
       util::kv_split_size_effective() > 1) {
@@ -479,7 +477,7 @@ void KVCacheShape::init_index_cache_scale_shape() {
 }
 
 void KVCacheShape::init_conv_cache_shape(const KVCacheCapacity& kv_cache_cap,
-                                         const TransformerModelArgs& model_args,
+                                         const ModelArgsBundle& model_args,
                                          int64_t world_size) {
   const int64_t local_linear_k_head_count =
       get_local_head_count(model_args.linear_num_key_heads(), world_size);
@@ -507,7 +505,7 @@ void KVCacheShape::init_conv_cache_shape(const KVCacheCapacity& kv_cache_cap,
 }
 
 void KVCacheShape::init_ssm_cache_shape(const KVCacheCapacity& kv_cache_cap,
-                                        const TransformerModelArgs& model_args,
+                                        const ModelArgsBundle& model_args,
                                         int64_t world_size) {
   const int64_t local_linear_v_head_count =
       get_local_head_count(model_args.linear_num_value_heads(), world_size);
@@ -529,7 +527,7 @@ void KVCacheShape::init_ssm_cache_shape(const KVCacheCapacity& kv_cache_cap,
 #endif
 }
 
-void KVCacheShape::apply_device_layout(const TransformerModelArgs& model_args) {
+void KVCacheShape::apply_device_layout(const ModelArgsBundle& model_args) {
   // default k/v cache layout: [n_blocks, block_size, n_head, head_dim]
   // => mlu/ilu k/v cache layout: [n_blocks, n_head, block_size, head_dim]
 #if defined(USE_MLU) || defined(USE_ILU)
@@ -566,7 +564,7 @@ const std::vector<int64_t>& KVCacheShape::empty_shape() {
 KVCacheShape build_speculative_draft_kv_cache_shape(
     const KVCacheShape& target_kv_cache_shape,
     KVCacheCapacity draft_capacity,
-    const TransformerModelArgs& draft_model_args,
+    const ModelArgsBundle& draft_model_args,
     int64_t block_size,
     int64_t draft_world_size,
     const std::string& kv_cache_dtype) {

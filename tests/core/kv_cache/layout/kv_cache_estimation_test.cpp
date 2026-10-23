@@ -22,6 +22,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/kv_cache/layout/deepseek_v4_cache_policy.h"
+#include "core/kv_cache/layout/kv_cache_shape.h"
 #include "framework/model/model_args.h"
 #include "runtime/options.h"
 
@@ -227,6 +228,31 @@ TEST(KVCacheEstimationTest, EstimatesStandardAttentionBlocks) {
   EXPECT_EQ(capacity.num_full_attention_layers(), 4);
   EXPECT_EQ(capacity.num_linear_attention_layers(), 0);
   EXPECT_EQ(capacity.n_blocks(), 128);
+}
+
+TEST(KVCacheEstimationTest, UsesFamilyFacadeForSharedCacheGeometry) {
+  const ModelArgs model_args = make_standard_args();
+  KVCacheEstimateOptions options = make_estimate_options();
+  options.world_size = 2;
+
+  for (ModelFamily family :
+       {ModelFamily::LLM, ModelFamily::VLM, ModelFamily::REC}) {
+    SCOPED_TRACE(static_cast<int32_t>(family));
+    const ModelArgsBundle args(model_args, family);
+    const KVCacheCapacity capacity = KVCacheEstimator(args).estimate(options);
+    EXPECT_EQ(capacity.slot_size(), 128);
+    EXPECT_EQ(capacity.n_layers(), 4);
+    EXPECT_EQ(capacity.n_blocks(), 128);
+
+    const KVCacheShape shape(capacity, args, options.world_size);
+#if defined(USE_MLU) || defined(USE_ILU)
+    const std::vector<int64_t> expected_shape = {128, 2, 16, 16};
+#else
+    const std::vector<int64_t> expected_shape = {128, 16, 2, 16};
+#endif
+    EXPECT_EQ(shape.key_cache_shape(), expected_shape);
+    EXPECT_EQ(shape.value_cache_shape(), expected_shape);
+  }
 }
 
 TEST(KVCacheEstimationTest, EmbeddingContextSharesTheAvailableMemoryBudget) {

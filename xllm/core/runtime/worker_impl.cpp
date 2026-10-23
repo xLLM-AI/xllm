@@ -528,7 +528,7 @@ bool WorkerImpl::allocate_kv_cache_storage(
     CHECK(!::xllm::KVCacheConfig::get_instance().enable_virtual_memory())
         << "Grouped KV cache layout does not support VirtualMemory cache.";
   }
-  const auto& args = context_.get_transformer_model_args();
+  const auto& args = context_.get_model_args_bundle();
   KVCacheCreateOptions layout_options =
       get_kv_cache_create_options(args, kv_cache_shape, is_spec_draft_);
   const bool enable_linear_attention = layout_options.enable_linear_attention();
@@ -657,7 +657,7 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
   CHECK(model() != nullptr) << "Model is not initialized.";
   CHECK(kv_caches_.empty()) << "KV caches are already initialized.";
 
-  const auto& model_args = context_.get_transformer_model_args();
+  const auto& model_args = context_.get_model_args_bundle();
   std::unique_ptr<VirtualKVCacheTransferMemoryProvider> memory_provider;
 #if defined(USE_NPU)
   if (::xllm::KVCacheConfig::get_instance().enable_virtual_memory()) {
@@ -2429,7 +2429,7 @@ TaskModel WorkerImpl::task_model() {
       CHECK(kv_cache_transfer_ != nullptr) << "PD KV cache is not allocated.";
       std::shared_ptr<KVPushSynchronizerImpl> layer_synchronizer =
           std::make_shared<KVPushSynchronizerImpl>(
-              context_.get_transformer_model_args().n_layers());
+              context_.get_model_args_bundle().n_layers());
       params.parallel.layer_synchronizer = layer_synchronizer;
       return kv_cache_transfer_->push_kv_blocks_async(
           transfer_kv_infos,
@@ -2905,7 +2905,7 @@ WorkerImpl::create_hierarchy_kv_cache_transfer(
   HierarchyKVCacheTransfer::Options transfer_options;
   transfer_options.tp_rank(worker_id % tp_size)
       .tp_size(tp_size)
-      .layers(context_.get_transformer_model_args().n_layers())
+      .layers(context_.get_model_args_bundle().n_layers())
       .host_blocks_factor(options_.host_blocks_factor())
       .layers_wise_copy_batchs(options_.layers_wise_copy_batchs())
       .enable_mla(options_.enable_mla())
@@ -3111,7 +3111,7 @@ void WorkerImpl::prepare_mla_prefixcache_inputs(RecModelParams& input_params) {
 }
 
 int64_t WorkerImpl::get_num_layers() const {
-  int64_t num_layers = context_.get_transformer_model_args().n_layers();
+  int64_t num_layers = context_.get_model_args_bundle().n_layers();
 #if !defined(USE_NPU)
   if (is_spec_draft_) {
     // for MTP draft models, the number of layers is the number of nextn

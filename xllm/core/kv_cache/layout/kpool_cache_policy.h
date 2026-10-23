@@ -45,4 +45,15 @@ inline bool uses_compressed_kpool_tail_cache(const TransformerModelArgs& args) {
 #endif
 }
 
+inline bool uses_compressed_kpool_tail_cache(const ModelArgsBundle& args) {
+#if defined(USE_NPU)
+  return args.index_kpool() > 1 && args.index_kpool_compress() &&
+         args.index_kpool_always_select_tail() &&
+         is_glm5_next_target_model_type(args.model_type());
+#else
+  (void)args;
+  return false;
+#endif
+}
+
 }  // namespace xllm

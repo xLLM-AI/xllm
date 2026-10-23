@@ -48,6 +48,11 @@ inline bool has_dsa_indexer(const TransformerModelArgs& args) {
          args.index_topk() > 0;
 }
 
+inline bool has_dsa_indexer(const ModelArgsBundle& args) {
+  return args.index_n_heads() > 0 && args.index_head_dim() > 0 &&
+         args.index_topk() > 0;
+}
+
 // Cross-step MTP reuse is a backend-independent DSA policy. Backends own the
 // carrier representation used to transport their top-k state between steps.
 inline bool is_mtp_dsa_topk_reuse_enabled(const ModelArgs& args) {
@@ -76,6 +81,10 @@ class DsaTopkSharePlan final {
   }
 
   explicit DsaTopkSharePlan(const TransformerModelArgs& args) {
+    initialize(args, args);
+  }
+
+  explicit DsaTopkSharePlan(const ModelArgsBundle& args) {
     initialize(args, args);
   }
 
@@ -226,6 +235,30 @@ inline std::vector<bool> get_dsa_indexer_layer_mask(const ModelArgs& args,
 inline std::vector<bool> get_dsa_indexer_layer_mask(
     const TransformerModelArgs& args,
     int64_t num_cache_layers) {
+  CHECK_GE(num_cache_layers, 0);
+  CHECK_LE(num_cache_layers, std::numeric_limits<int32_t>::max());
+  if (!has_dsa_indexer(args)) {
+    return {};
+  }
+  std::vector<bool> layer_mask(static_cast<size_t>(num_cache_layers), true);
+  if (args.model_type().ends_with("_mtp")) {
+    for (int32_t layer_id = 0; layer_id < num_cache_layers; ++layer_id) {
+      layer_mask[static_cast<size_t>(layer_id)] =
+          is_full_attention_layer(args, layer_id);
+    }
+    return layer_mask;
+  }
+  const DsaTopkSharePlan topk_share_plan(args);
+  for (int32_t layer_id = 0; layer_id < num_cache_layers; ++layer_id) {
+    layer_mask[static_cast<size_t>(layer_id)] =
+        is_full_attention_layer(args, layer_id) &&
+        topk_share_plan.layer_uses_indexer(layer_id);
+  }
+  return layer_mask;
+}
+
+inline std::vector<bool> get_dsa_indexer_layer_mask(const ModelArgsBundle& args,
+                                                    int64_t num_cache_layers) {
   CHECK_GE(num_cache_layers, 0);
   CHECK_LE(num_cache_layers, std::numeric_limits<int32_t>::max());
   if (!has_dsa_indexer(args)) {
