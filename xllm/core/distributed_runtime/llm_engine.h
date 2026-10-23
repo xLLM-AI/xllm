@@ -41,6 +41,8 @@ limitations under the License.
 #include "runtime/worker_client.h"
 namespace xllm {
 
+class PipelineDispatcher;
+
 class EplbController;
 class KVCacheTransferCoordinatorBase;
 class ModelLoader;
@@ -87,6 +89,9 @@ class LLMEngine : public Engine {
  private:
   bool profile_workers(bool is_start);
   std::mutex profile_mutex_;
+
+  ForwardOutput step_pipeline(BatchGroup& batch);
+  std::unique_ptr<PipelineDispatcher> pipeline_dispatcher_;
 
   template <typename TargetEngine>
   friend class SpeculativeEngineBase;

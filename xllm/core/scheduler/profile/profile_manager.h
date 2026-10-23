@@ -33,6 +33,7 @@ limitations under the License.
 #include "core/framework/speculative/dspark/dspark_startup_calibration.h"
 #include "core/runtime/options.h"
 #include "core/scheduler/profile/decode_graph_warmup_plan.h"
+#include "core/scheduler/profile/dynamic_chunk_predictor.h"
 #include "core/scheduler/profile/time_predictor.h"
 
 namespace xllm {
@@ -115,6 +116,13 @@ class ProfileManager {
               engine->update_last_step_result(batch);
             },
             std::move(distributed_worker_manager)) {}
+
+  std::unique_ptr<DynamicChunkPredictor> profile_dynamic_chunking(
+      int32_t base_chunk,
+      int32_t min_chunk,
+      double smooth_factor,
+      int32_t alignment,
+      int32_t sample_count);
 
   int32_t get_token_budget();
 

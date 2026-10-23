@@ -13,3 +13,13 @@ cc_test(
     :request
     GTest::gtest_main
 )
+cc_test(
+  NAME
+    dynamic_chunk_predictor_test
+  SRCS
+    dynamic_chunk_predictor_test.cpp
+    ${PROJECT_SOURCE_DIR}/xllm/core/scheduler/profile/dynamic_chunk_predictor.cpp
+  DEPS
+    glog::glog
+    GTest::gtest_main
+)

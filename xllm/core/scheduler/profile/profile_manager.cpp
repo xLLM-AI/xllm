@@ -35,6 +35,7 @@ limitations under the License.
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
+#include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/config/speculative_config.h"
@@ -201,6 +202,63 @@ ProfileManager::ProfileManager(
       !options_.adaptive_dspark_cost_table().empty()) {
     calibrate_dspark_startup();
   }
+}
+
+std::unique_ptr<DynamicChunkPredictor> ProfileManager::profile_dynamic_chunking(
+    int32_t base_chunk,
+    int32_t min_chunk,
+    double smooth_factor,
+    int32_t alignment,
+    int32_t sample_count) {
+  CHECK_GE(sample_count, 8);
+  CHECK_LE(sample_count, 64);
+  CHECK_LE(base_chunk, options_.max_tokens_per_batch());
+  const int64_t context_limit = engine_->model_args().max_position_embeddings();
+  CHECK(context_limit <= 0 || base_chunk <= context_limit)
+      << "Dynamic chunk profiling length exceeds model context limit";
+  auto predictor = std::make_unique<DynamicChunkPredictor>(
+      base_chunk,
+      min_chunk,
+      smooth_factor,
+      alignment,
+      ParallelConfig::get_instance().pp_size());
+  const int32_t aligned_lengths = base_chunk / alignment;
+  const int32_t count = std::min(sample_count, aligned_lengths);
+  if (count < 8) {
+    LOG(WARNING) << "Dynamic chunk profiling needs at least 8 aligned lengths; "
+                    "using static chunks. base_chunk="
+                 << base_chunk << ", alignment=" << alignment;
+    return predictor;
+  }
+  constexpr int32_t kTimingRepeats = 3;
+  std::vector<std::pair<int32_t, double>> samples;
+  samples.reserve(count);
+  for (int32_t i = 1; i <= count; ++i) {
+    const int32_t length =
+        static_cast<int32_t>(static_cast<int64_t>(aligned_lengths) * i /
+                             count) *
+        alignment;
+    // Warm each shape, then take a median. run_request waits for output and
+    // frees its synthetic KV without populating the prefix cache.
+    run_request(length, /*prefix_length=*/0);
+    std::vector<double> timings;
+    timings.reserve(kTimingRepeats);
+    for (int32_t repeat = 0; repeat < kTimingRepeats; ++repeat) {
+      timings.emplace_back(run_request(length, /*prefix_length=*/0));
+    }
+    std::sort(timings.begin(), timings.end());
+    samples.emplace_back(length, timings[kTimingRepeats / 2]);
+    LOG(INFO) << "Dynamic chunk profile: tokens=" << length
+              << ", latency_ms=" << samples.back().second;
+  }
+  if (!predictor->fit(samples)) {
+    LOG(WARNING)
+        << "Dynamic chunk profile is uninformative; using static chunks";
+    return predictor;
+  }
+  LOG(INFO) << "Dynamic chunk predictor ready: base_chunk=" << base_chunk
+            << ", target_latency_ms=" << predictor->target_latency_ms();
+  return predictor;
 }
 
 // --------------------- for test only ---------------------------

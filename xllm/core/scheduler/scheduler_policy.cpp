@@ -249,6 +249,7 @@ void SchedulerPolicy::schedule_prefill_from_queue(
   // Reuse scratch capacity across requests within this scheduling round.
   std::vector<Sequence*> prefill_sequences;
   std::vector<size_t> prefill_sequences_budget;
+  bool defer_for_alignment = false;
 
   while (!queue->empty() && budget.remaining_seq_budget > 0 &&
          budget.remaining_token_budget > 0 &&
@@ -365,7 +366,17 @@ void SchedulerPolicy::schedule_prefill_from_queue(
                                        budget.dp_group_token_used[dp_rank];
         num_tokens = std::min(num_tokens, group_remaining);
       }
+      if (state.dynamic_chunk_predictor != nullptr) {
+        const size_t history = prefill_sequence->kv_cache_tokens_num();
+        num_tokens = state.dynamic_chunk_predictor->predict_budget(
+            history, prefill_sequence->num_tokens() - history, num_tokens);
+      }
       if (num_tokens == 0) {
+        if (state.dynamic_chunk_predictor != nullptr) {
+          can_schedule = false;
+          defer_for_alignment = true;
+          break;
+        }
         continue;
       }
 
@@ -455,6 +466,10 @@ void SchedulerPolicy::schedule_prefill_from_queue(
     }
   }
 
+  // An aligned chunk may fit next round even if this round has no room.
+  if (defer_for_alignment) {
+    return;
+  }
   // Handle unschedulable head request.
   handle_unschedulable_head(
       queue, state, finished, budget_exhausted, blocks_exhausted);
@@ -462,10 +477,25 @@ void SchedulerPolicy::schedule_prefill_from_queue(
 
 size_t SchedulerPolicy::compute_prefill_tokens(Sequence* seq,
                                                size_t remaining_budget,
-                                               const SchedulerState& state) {
+                                               SchedulerState& state) {
   if (!batch_mode_.enable_chunked_prefill) {
     // Full prefill: compute all remaining tokens.
     return seq->num_need_compute_tokens();
+  }
+
+  if (state.dynamic_chunk_predictor != nullptr) {
+    allocate_shared_blocks_for(seq, state);
+    const size_t history = seq->kv_cache_tokens_num();
+    const size_t remaining =
+        seq->num_tokens() > history ? seq->num_tokens() - history : 0;
+    const size_t predicted = state.dynamic_chunk_predictor->predict_budget(
+        history, remaining, remaining_budget);
+    VLOG(1) << "Dynamic chunk: history=" << history << ", tokens=" << predicted;
+    return maybe_align_cp_chunk_tokens(
+        predicted,
+        ParallelConfig::get_instance().kv_split_size_effective(),
+        state.kv_cache_manager->block_size(),
+        remaining);
   }
 
   // Chunked prefill: compute min(remaining, max_chunk, budget).
@@ -509,11 +539,21 @@ bool SchedulerPolicy::allocate_for_prefill(Sequence* seq,
 
   // Chunked prefill: allocate shared blocks first (skip during redistribution
   // to avoid matching a sequence's own in-batch-published blocks).
-  if (!skip_shared) {
+  if (!skip_shared && state.dynamic_chunk_predictor == nullptr) {
     allocate_shared_blocks_for(seq, state);
   }
 
   const size_t kv_cache_tokens_num = seq->kv_cache_tokens_num();
+  if (state.dynamic_chunk_predictor != nullptr) {
+    token_budget = state.dynamic_chunk_predictor->predict_budget(
+        kv_cache_tokens_num,
+        seq->num_tokens() - kv_cache_tokens_num,
+        token_budget);
+    if (token_budget == 0) {
+      *actual_tokens = 0;
+      return false;
+    }
+  }
   size_t max_handle_num_tokens =
       std::min(kv_cache_tokens_num + token_budget, seq->num_tokens());
 

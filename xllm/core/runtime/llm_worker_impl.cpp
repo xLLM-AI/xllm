@@ -307,6 +307,13 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     return std::nullopt;
   }
 
+  if (parallel_args_.pp_rank() + 1 < parallel_args_.pp_size()) {
+    MULTI_MODEL_STEP_UNLOCK();
+    CHECK_EQ(device_.synchronize_default_stream(), 0);
+    wait_kv_push();
+    return std::nullopt;
+  }
+
   torch::Tensor logits;
   torch::Tensor lm_head_selected_token_idxes;
   torch::Tensor selected_hidden;

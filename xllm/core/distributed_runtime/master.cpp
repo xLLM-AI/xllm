@@ -178,6 +178,13 @@ Master::Master(const Options& options) : options_(options) {
 
   ParallelConfig::get_instance().enable_multi_stream_parallel(
       options.enable_multi_stream_parallel() && (options.nnodes() > 1));
+  const ParallelConfig& pp_config = ParallelConfig::get_instance();
+  CHECK_GE(pp_config.pp_size(), 1);
+  CHECK_EQ(options_.nnodes() % pp_config.pp_size(), 0)
+      << "pp_size must divide world_size";
+  if (pp_config.pp_size() > 1) {
+    CHECK_EQ(options_.backend(), "llm") << "PP currently supports only LLM";
+  }
   if (ParallelConfig::get_instance().enable_multi_stream_parallel()) {
     LOG(FATAL)
         << "Multi-stream parallel is refactoring now, will be supported later.";

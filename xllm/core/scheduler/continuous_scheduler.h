@@ -209,6 +209,7 @@ class ContinuousSchedulerBase : public Scheduler {
 
   std::unique_ptr<ProfileManager> profile_manager_;
   std::unique_ptr<SchedulerMetrics> scheduler_metrics_;
+  std::unique_ptr<DynamicChunkPredictor> dynamic_chunk_predictor_;
 
   bool enable_prefix_cache_ = false;
   bool has_linear_attention_layers_ = false;

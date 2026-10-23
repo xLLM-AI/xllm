@@ -154,6 +154,10 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `prefill_scheduling_memory_usage_threshold` | `double` | `0.95` | prefill 调度时的内存使用阈值。 |
 | `enable_chunked_prefill` | `bool` | `true` | 是否启用 chunked prefill。 |
 | `max_tokens_per_chunk_for_prefill` | `int32` | `-1` | prefill 阶段每个 chunk 的最大 token 数；`-1` 表示使用默认策略。 |
+| `enable_dynamic_chunking` | `bool` | `false` | 启动时采样 prefill 耗时，并按已缓存的上下文长度调整分块大小；要求启用 chunked prefill。详见[动态分块预填充](/zh/features/dynamic_chunked_prefill/)。 |
+| `dynamic_chunk_min_tokens` | `int32` | `256` | 对齐和调度预算限制之前的最小预测分块 token 数。 |
+| `dynamic_chunk_smooth_factor` | `double` | `1.0` | 动态分块插值权重，取值范围为 `(0, 1]`。 |
+| `dynamic_chunk_profile_samples` | `int32` | `16` | 启动采样使用的输入长度数量，范围为 `8` 到 `64`。 |
 | `chunked_match_frequency` | `int32` | `2` | sequence prefix cache 匹配频率。 |
 | `use_zero_evict` | `bool` | `false` | 是否使用 ZeroEvictionScheduler；详见 [Zero Evict Scheduler](/zh/features/zero_evict_scheduler/)。 |
 | `max_decode_token_per_sequence` | `int32` | `256` | ZeroEvictionScheduler 中每个 sequence 的最大 decode token 数。 |
@@ -171,6 +175,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 |:---------|:-----|:-------|:---------|
 | `dp_size` | `int32` | `1` | MLA attention 的 data parallel 规模。 |
 | `ep_size` | `int32` | `1` | MoE 模型的 expert parallel 规模。 |
+| `pp_size` | `int32` | `1` | Python GLM 模型的流水线并行规模；`1` 表示禁用流水线并行。详见[流水线并行](/zh/features/pipeline_parallel/)。 |
 | `cp_size` | `int32` | `1` | Context parallel 规模，需要后端和模型支持；设为 `1` 表示禁用 context parallel。|
 | `kv_split_size` | `int32` | `1` | KV Cache split 宽度；`0` 表示沿用 `cp_size`（旧行为），`1` 表示不切分 KV（每个 CP rank 存储完整 KV 并跳过 prefix AllGather），其他可整除 `cp_size` 的 K 表示 KV 在 K 个 rank 间分片，而 token-CP 仍使用 `cp_size`。 |
 | `tp_size` | `int64` | `1` | Tensor parallel 规模，仅 DiT 模型使用。 |

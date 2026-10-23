@@ -154,6 +154,10 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | `prefill_scheduling_memory_usage_threshold` | `double` | `0.95` | Memory usage threshold during prefill scheduling. |
 | `enable_chunked_prefill` | `bool` | `true` | Whether to enable chunked prefill. |
 | `max_tokens_per_chunk_for_prefill` | `int32` | `-1` | Maximum number of tokens per chunk in the prefill stage. `-1` uses the default policy. |
+| `enable_dynamic_chunking` | `bool` | `false` | Profile prefill at startup and adapt chunk size to cached history. Requires chunked prefill. See [Dynamic Chunked Prefill](/en/features/dynamic_chunked_prefill/). |
+| `dynamic_chunk_min_tokens` | `int32` | `256` | Minimum predicted chunk size before alignment and scheduling budget limits. |
+| `dynamic_chunk_smooth_factor` | `double` | `1.0` | Dynamic chunk interpolation weight in `(0, 1]`. |
+| `dynamic_chunk_profile_samples` | `int32` | `16` | Number of startup profiling lengths, from `8` to `64`. |
 | `chunked_match_frequency` | `int32` | `2` | Sequence prefix-cache match frequency. |
 | `use_zero_evict` | `bool` | `false` | Whether to use ZeroEvictionScheduler. See [Zero Evict Scheduler](/en/features/zero_evict_scheduler/). |
 | `max_decode_token_per_sequence` | `int32` | `256` | Maximum decode tokens per sequence for ZeroEvictionScheduler. |
@@ -171,6 +175,7 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 |:----------|:-----|:--------|:------------|
 | `dp_size` | `int32` | `1` | Data parallel size for MLA attention. |
 | `ep_size` | `int32` | `1` | Expert parallel size for MoE models. |
+| `pp_size` | `int32` | `1` | Pipeline parallel size for Python GLM models. `1` disables pipeline parallelism. See [Pipeline Parallelism](/en/features/pipeline_parallel/). |
 | `cp_size` | `int32` | `1` | Context parallel size. Backend and model support is required; `1` disables context parallelism. |
 | `kv_split_size` | `int32` | `1` | KV Cache split width. `0` falls back to `cp_size` (legacy). `1` disables KV split: each CP rank stores the full KV and skips the prefix AllGather. Other K values (K divides `cp_size`) shard KV across K ranks while token-CP still uses `cp_size`. |
 | `tp_size` | `int64` | `1` | Tensor parallelism size. Only used for DiT models. |

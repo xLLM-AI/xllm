@@ -559,3 +559,72 @@ def test_attn_dp_rejects_a_partial_world_before_rendezvous() -> None:
         pytest.raises(ValueError, match="full process world"),
     ):
         collectives.init_process_group("attn_dp", "127.0.0.1", 46004, 0, 2, "cuda:0", 0, 4, 0)
+
+
+def test_pipeline_groups_connect_matching_tp_lanes() -> None:
+    assert collectives._group_memberships("pp", 2, 16) == [[rank, rank + 8] for rank in range(8)]
+    assert collectives._group_memberships("tp", 8, 16) == [list(range(8)), list(range(8, 16))]
+
+
+def test_pipeline_transport_translates_stage_to_global_rank(monkeypatch: pytest.MonkeyPatch) -> None:
+    tensor = torch.empty(3, 4)
+    group = _FakeGroup(0, 2)
+    collectives._groups[("pp", "cpu")] = group
+    collectives._group_ranks[("pp", "cpu")] = [3, 11]
+    send = MagicMock()
+    recv = MagicMock()
+    monkeypatch.setattr(collectives.dist, "send", send)
+    monkeypatch.setattr(collectives.dist, "recv", recv)
+    collectives.pipeline_send(tensor, 1)
+    collectives.pipeline_recv(tensor, 0)
+    send.assert_called_once_with(tensor, dst=11, group=group)
+    recv.assert_called_once_with(tensor, src=3, group=group)
+    with pytest.raises(ValueError):
+        collectives.pipeline_send(tensor, 2)
+
+
+def _run_pipeline_transport(rank: int, rendezvous: str) -> None:
+    dist.init_process_group(
+        "gloo", init_method="file://" + rendezvous, rank=rank, world_size=4, timeout=timedelta(seconds=20)
+    )
+    for lane in range(2):
+        ranks = [lane, lane + 2]
+        group = dist.new_group(ranks=ranks, backend="gloo")
+        if rank in ranks:
+            collectives._groups[("pp", "cpu")] = group
+            collectives._group_ranks[("pp", "cpu")] = ranks
+    for microbatch in range(3):
+        expected = torch.full((microbatch + 1, 4), rank % 2 + 10 * microbatch, dtype=torch.float32)
+        tensor = expected.clone() if rank < 2 else torch.empty_like(expected)
+        if rank < 2:
+            collectives.pipeline_send(tensor, 1)
+            collectives.pipeline_recv(tensor, 1)
+            torch.testing.assert_close(tensor, expected + 1)
+        else:
+            collectives.pipeline_recv(tensor, 0)
+            torch.testing.assert_close(tensor, expected)
+            tensor.add_(1)
+            collectives.pipeline_send(tensor, 0)
+    dist.destroy_process_group()
+
+
+@pytest.mark.skipif(not dist.is_gloo_available(), reason="Gloo backend is unavailable")
+def test_pipeline_real_transport_preserves_lane_and_microbatch_order(tmp_path: Path) -> None:
+    context = torch.multiprocessing.start_processes(
+        _run_pipeline_transport,
+        args=(str(tmp_path / "pipeline-gloo"),),
+        nprocs=4,
+        join=False,
+        start_method="fork",
+    )
+    deadline = time.monotonic() + 30
+    try:
+        while not context.join(timeout=1, grace_period=5):
+            if time.monotonic() > deadline:
+                pytest.fail("pipeline Gloo transport timed out")
+    finally:
+        for process in context.processes:
+            if process.is_alive():
+                process.terminate()
+        for process in context.processes:
+            process.join(timeout=5)

@@ -19,3 +19,8 @@ xLLM支持chunked prefill调度策略。Chunked prefill是一种优化大语言�
 ## 性能效果
 开启chunked_prefill之后，在Qwen3-8B模型上，限制TPOT 50ms，TTFT时延 **下降46%**。
 
+
+## 动态 chunk 大小
+
+可通过 `--enable_dynamic_chunking=true` 启用基于启动 profiling 的动态 chunk。
+配置、支持边界和 PP 后续规划见[动态 Chunked Prefill](./dynamic_chunked_prefill.md)。

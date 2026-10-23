@@ -23,6 +23,7 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/common/instance_name.h"
 #include "core/framework/config/model_config.h"
+#include "core/framework/config/parallel_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/request/request.h"
 #include "core/framework/tokenizer/tokenizer.h"
@@ -779,6 +780,15 @@ bool RequestParams::verify_params(OutputCallback callback) const {
                         "bad_words must not contain empty strings",
                         service_request_id,
                         source_xservice_addr);
+    return false;
+  }
+
+  if (beam_width > 1 && ParallelConfig::get_instance().pp_size() > 1) {
+    CALLBACK_WITH_ERROR(
+        StatusCode::INVALID_ARGUMENT,
+        "Beam search is not supported with pipeline parallelism",
+        service_request_id,
+        source_xservice_addr);
     return false;
   }
 

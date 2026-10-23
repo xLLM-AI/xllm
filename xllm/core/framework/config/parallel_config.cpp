@@ -22,6 +22,8 @@ limitations under the License.
 
 DEFINE_int32(dp_size, 1, "Data parallel size for MLA attention.");
 
+DEFINE_int32(pp_size, 1, "Pipeline parallel size for Python GLM models.");
+
 DEFINE_int32(ep_size, 1, "Expert parallel size for MoE model.");
 
 DEFINE_int32(cp_size, 1, "Context parallel size for DSA attention.");
@@ -88,6 +90,7 @@ namespace xllm {
 void ParallelConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dp_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(ep_size);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(pp_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(cp_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_split_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(layerwise_split_size);
@@ -106,6 +109,7 @@ void ParallelConfig::from_flags() {
 void ParallelConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(dp_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(ep_size);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(pp_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(cp_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(kv_split_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(layerwise_split_size);
@@ -126,6 +130,7 @@ void ParallelConfig::append_config_json(
   const ParallelConfig default_config;
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, dp_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, ep_size);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, pp_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(config_json, default_config, cp_size);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, kv_split_size);

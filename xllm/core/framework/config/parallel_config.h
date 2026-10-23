@@ -43,6 +43,7 @@ class ParallelConfig final {
         "PARALLEL OPTIONS",
         {"dp_size",
          "ep_size",
+         "pp_size",
          "cp_size",
          "kv_split_size",
          "layerwise_split_size",
@@ -62,6 +63,8 @@ class ParallelConfig final {
   PROPERTY(int32_t, dp_size) = 1;
 
   PROPERTY(int32_t, ep_size) = 1;
+
+  PROPERTY(int32_t, pp_size) = 1;
 
   PROPERTY(int32_t, cp_size) = 1;
 

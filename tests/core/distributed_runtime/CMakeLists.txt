@@ -213,3 +213,13 @@ cc_test(
     brpc
     glog::glog
 )
+
+cc_test(
+  NAME
+    pipeline_dispatcher_test
+  SRCS
+    pipeline_dispatcher_test.cpp
+  DEPS
+    :util
+    GTest::gtest_main
+)

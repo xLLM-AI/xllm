@@ -38,6 +38,47 @@ limitations under the License.
 
 namespace xllm {
 namespace {
+TEST(DynamicChunkConfigTest, JsonRoundTripAndHelp) {
+  SchedulerConfig options;
+  EXPECT_FALSE(options.enable_dynamic_chunking());
+  auto json = config::parse_json_string(R"json({
+    "enable_dynamic_chunking": true,
+    "dynamic_chunk_min_tokens": 512,
+    "dynamic_chunk_smooth_factor": 0.5,
+    "dynamic_chunk_profile_samples": 32
+  })json");
+  options.from_json(json);
+  options.validate_dynamic_chunking();
+  EXPECT_TRUE(options.enable_dynamic_chunking());
+  EXPECT_EQ(options.dynamic_chunk_min_tokens(), 512);
+  EXPECT_DOUBLE_EQ(options.dynamic_chunk_smooth_factor(), 0.5);
+  EXPECT_EQ(options.dynamic_chunk_profile_samples(), 32);
+  nlohmann::ordered_json dumped;
+  options.append_config_json(dumped);
+  EXPECT_EQ(dumped["enable_dynamic_chunking"], true);
+  EXPECT_EQ(dumped["dynamic_chunk_min_tokens"], 512);
+  EXPECT_EQ(dumped["dynamic_chunk_smooth_factor"], 0.5);
+  EXPECT_EQ(dumped["dynamic_chunk_profile_samples"], 32);
+  const auto& names = SchedulerConfig::option_category().option_names;
+  for (const std::string& name : {"enable_dynamic_chunking",
+                                  "dynamic_chunk_min_tokens",
+                                  "dynamic_chunk_smooth_factor",
+                                  "dynamic_chunk_profile_samples"}) {
+    EXPECT_NE(std::find(names.begin(), names.end(), name), names.end());
+  }
+}
+
+TEST(DynamicChunkConfigTest, RejectsInvalidSettings) {
+  SchedulerConfig options;
+  options.enable_dynamic_chunking(true).dynamic_chunk_profile_samples(2);
+  EXPECT_DEATH(options.validate_dynamic_chunking(),
+               "dynamic_chunk_profile_samples");
+  options.dynamic_chunk_profile_samples(16).dynamic_chunk_smooth_factor(1.5);
+  EXPECT_DEATH(options.validate_dynamic_chunking(),
+               "dynamic_chunk_smooth_factor");
+  options.dynamic_chunk_smooth_factor(1.0).enable_chunked_prefill(false);
+  EXPECT_DEATH(options.validate_dynamic_chunking(), "requires chunked prefill");
+}
 
 TEST(SpeculativeConfigTest, AdaptiveRequiresDsparkDraftFiveOrSeven) {
   SpeculativeConfig config;
@@ -771,6 +812,17 @@ TEST(KVCacheConfigValidationTest, RejectsUnsupportedIndexerCacheDtypes) {
         config.validate();
       },
       "indexer_cache_dtype.*auto.*int8");
+}
+
+TEST(ConfigJsonTest, PipelineParallelSizeRoundTrips) {
+  ParallelConfig parallel_config;
+  EXPECT_EQ(parallel_config.pp_size(), 1);
+  const auto json = config::parse_json_string(R"json({"pp_size": 2})json");
+  parallel_config.from_json(json);
+  EXPECT_EQ(parallel_config.pp_size(), 2);
+  nlohmann::ordered_json serialized;
+  parallel_config.append_config_json(serialized);
+  EXPECT_EQ(serialized["pp_size"], 2);
 }
 
 TEST(ConfigJsonTest, ParallelConfigHandlesKvSplitSize) {

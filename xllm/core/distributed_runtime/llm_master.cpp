@@ -31,9 +31,13 @@ limitations under the License.
 #include "core/distributed_runtime/engine_dispatch.h"
 #include "core/distributed_runtime/kv_cache_transfer_coordinator.h"
 #include "core/distributed_runtime/model_residency_coordinator.h"
+#include "core/framework/config/beam_search_config.h"
+#include "core/framework/config/eplb_config.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
+#include "core/framework/config/parallel_config.h"
 #include "core/framework/config/parallel_config_validation.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/model_loader/hf_model_config.h"
@@ -43,6 +47,7 @@ limitations under the License.
 #include "models/model_registry.h"
 #endif
 #include "distributed_runtime/xservice_client.h"
+#include "platform/platform.h"
 #include "runtime/options.h"
 #include "scheduler/profile/profile_manager.h"
 #include "scheduler/scheduler_factory.h"
@@ -69,6 +74,40 @@ LLMMaster::LLMMaster(const Options& options)
       use_ssm_engine ? EngineType::SSM : EngineType::LLM;
   const std::string model_type =
       get_model_type(options_.model_path(), options_.backend());
+  // Validate the resolved backend and parallel options before workers start.
+  const ParallelConfig& pp_config = ParallelConfig::get_instance();
+  if (pp_config.pp_size() > 1) {
+    CHECK(Platform::is_npu());
+    CHECK(ModelConfig::is_python_model_impl(
+        ModelConfig::get_instance().model_impl()));
+    CHECK_EQ(KernelConfig::get_instance().npu_kernel_backend(), "TORCH");
+    CHECK_EQ(model_type, "glm_moe_dsa");
+    CHECK(engine_type == EngineType::LLM);
+    CHECK_EQ(options_.dp_size(), 1);
+    CHECK_EQ(options_.cp_size(), 1);
+    CHECK_EQ(options_.ep_size(), 1);
+    CHECK_EQ(pp_config.kv_split_size_effective(), 1);
+    CHECK_EQ(pp_config.layerwise_split_size(), 1);
+    CHECK(!options_.enable_graph()) << "PP currently requires eager execution";
+    CHECK(!options_.enable_schedule_overlap());
+    CHECK(options_.enable_chunked_prefill()) << "PP requires chunked prefill";
+    CHECK(!ExecutionConfig::get_instance().enable_task_pipeline())
+        << "PP uses stage dispatch instead of the worker task pipeline";
+    CHECK(!options_.enable_shm())
+        << "PP requires independent stage inputs over RPC";
+    CHECK_EQ(options_.num_speculative_tokens(), 0);
+    CHECK(!options_.enable_disagg_pd());
+    CHECK(!options_.enable_offline_inference())
+        << "PP currently requires online workers";
+    CHECK(!KVCacheConfig::get_instance().enable_virtual_memory());
+    CHECK(!options_.enable_kvcache_store());
+    CHECK(!KVCacheConfig::get_instance().enable_in_batch_prefix_cache())
+        << "PP requires completed prefix-cache entries";
+    CHECK(!BeamSearchConfig::get_instance().enable_beam_search_kernel());
+    CHECK_LE(options_.host_blocks_factor(), 1.0);
+    CHECK(!EPLBConfig::get_instance().enable_eplb());
+    CHECK(!pp_config.enable_multi_stream_parallel());
+  }
   const std::optional<std::string> cp_error = validate_context_parallel_config(
       options_, engine_type, model_type, options_.nnodes());
   CHECK(!cp_error.has_value()) << cp_error.value();

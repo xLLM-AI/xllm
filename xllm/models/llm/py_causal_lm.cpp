@@ -211,6 +211,26 @@ PyCausalLM::PyCausalLM(const ModelContext& context,
     CHECK_GT(parallel_args.python_rendezvous_port_, 0);
     const int32_t global_rank = parallel_args.rank();
     const int32_t global_world_size = parallel_args.world_size();
+    if (parallel_args.pp_size() > 1) {
+      CHECK_EQ(model_args_.model_type(), "glm_moe_dsa");
+      CHECK_LE(parallel_args.pp_size(), model_args_.n_layers());
+      LOG(INFO) << "Pipeline stage " << parallel_args.pp_rank() << "/"
+                << parallel_args.pp_size() << " owns layers ["
+                << parallel_args.pipeline_layer_begin(model_args_.n_layers())
+                << ", "
+                << parallel_args.pipeline_layer_end(model_args_.n_layers())
+                << "), tp_size=" << tp_size_;
+
+      init_process_group("pp",
+                         parallel_args.python_rendezvous_host_,
+                         parallel_args.python_rendezvous_port_,
+                         parallel_args.pp_rank(),
+                         parallel_args.pp_size(),
+                         c10::str(device_),
+                         global_rank,
+                         global_world_size,
+                         global_rank % tp_size_);
+    }
     if (!is_deepseek_v4 && tp_size_ > 1) {
       init_process_group("tp",
                          parallel_args.python_rendezvous_host_,
@@ -350,6 +370,7 @@ py::dict PyCausalLM::build_config_dict(
   d["model_path"] = ModelConfig::get_instance().model();
   d["tp_size"] = tp_size_;
   d["tp_rank"] = tp_rank_;
+  d["pp_rank"] = parallel_args.pp_rank();
   d["dp_size"] = dp_size_;
   d["dp_rank"] = dp_rank_;
   d["moe_tp_size"] = moe_tp_size_;

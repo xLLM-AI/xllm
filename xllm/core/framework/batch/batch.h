@@ -132,6 +132,11 @@ class Batch final {
     return state_.sequence_plan().budgets();
   }
 
+  // Ordered chunks share one scheduler reservation. Input preparation
+  // advances KV positions in this order before stage dispatch.
+  void set_pipeline_chunks(std::vector<std::vector<uint32_t>> chunks);
+  std::vector<Batch> split_for_pipeline(int32_t stages) const;
+
   std::unordered_map<uint32_t, uint32_t> cal_seq_exchange_index_test(
       std::vector<uint32_t>& kv_cache_tokens_num) {
     return BatchState::cal_seq_exchange_index(kv_cache_tokens_num);
@@ -144,6 +149,7 @@ class Batch final {
  private:
   BatchState state_;
   BatchOutputHandler output_handler_;
+  std::vector<std::vector<uint32_t>> pipeline_chunks_;
 };
 
 }  // namespace xllm

@@ -29,6 +29,7 @@ from xllm.python.model_executor.forward_context import AclGraphExecutionState, F
 from xllm.python.model_loader import W8A8WeightLoader
 from xllm.python.models import deepseek_v32, glm5_2
 from xllm.python.models.glm5_2 import Glm52Config, Glm52ForCausalLM, Glm52MoE
+from xllm.python.models.glm5_2_mtp import Glm52MtpForCausalLM
 
 
 def _config(**overrides) -> dict:
@@ -963,6 +964,99 @@ def test_attn_dp_switch_preserves_backend_heads(enabled: bool, tp_size: int, dp_
     assert attention.o_proj.in_features == (4 if enabled else owner_heads) * cfg.v_head_dim
 
 
+@pytest.mark.parametrize("pp_size", [2, 3, 5])
+def test_pipeline_stage_owns_only_its_layers(pp_size: int) -> None:
+    seen: list[int] = []
+    for stage in range(pp_size):
+        model = Glm52ForCausalLM(
+            _config(
+                num_hidden_layers=5,
+                tp_size=1,
+                dp_size=1,
+                ep_size=1,
+                world_size=pp_size,
+                pp_size=pp_size,
+                pp_rank=stage,
+                indexer_types=["full", "shared", "full", "shared", "full"],
+            )
+        )
+        body = model.model
+        assert body._prepare_mla_slots() is None
+        owned = list(range(5 * stage // pp_size, 5 * (stage + 1) // pp_size))
+        seen.extend(owned)
+        assert (body.embed_tokens is not None) == (stage == 0)
+        assert (body.norm is not None) == (stage + 1 == pp_size)
+        assert (model.lm_head is not None) == (stage + 1 == pp_size)
+        for layer_id in range(5):
+            if layer_id in owned:
+                assert body.layers[layer_id].self_attn.layer_id == layer_id - owned[0]
+            else:
+                assert not list(body.layers[layer_id].parameters())
+    assert seen == list(range(5))
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        ["full", "full", "full", "full"],
+        ["full", "shared", "shared", "full"],
+    ],
+)
+def test_pipeline_carries_residual_and_shared_topk(monkeypatch: pytest.MonkeyPatch, pattern: list[str]) -> None:
+    queued: list[torch.Tensor] = []
+
+    def send(x: torch.Tensor, stage: int) -> None:
+        assert stage == 1
+        queued.append(x.clone())
+
+    def recv(x: torch.Tensor, stage: int) -> None:
+        assert stage == 0
+        x.copy_(queued.pop(0))
+
+    def embed(self: torch.nn.Module, ids: torch.Tensor) -> torch.Tensor:
+        return ids.float().unsqueeze(1).expand(-1, 16).contiguous()
+
+    def layer_forward(
+        self: torch.nn.Module,
+        hidden: torch.Tensor,
+        residual: torch.Tensor | None,
+        half_cos: torch.Tensor,
+        half_sin: torch.Tensor,
+        rope_cos: torch.Tensor,
+        rope_sin: torch.Tensor,
+        query_cos_sin: tuple[torch.Tensor, torch.Tensor],
+        previous: torch.Tensor | None,
+        slot_mapping_int64: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if pattern[self.layer_id] == "shared":
+            assert previous is not None
+            topk = previous
+        else:
+            topk = torch.full((hidden.shape[0], 1, 4), self.layer_id, dtype=torch.int32)
+        residual = hidden.clone() if residual is None else residual + hidden
+        return hidden + residual + topk[:, 0, :1], residual, topk
+
+    def norm(self: torch.nn.Module, hidden: torch.Tensor, residual: torch.Tensor) -> tuple[torch.Tensor, None]:
+        return hidden + residual, None
+
+    monkeypatch.setattr(glm5_2.distributed, "pipeline_send", send, raising=False)
+    monkeypatch.setattr(glm5_2.distributed, "pipeline_recv", recv, raising=False)
+    monkeypatch.setattr(deepseek_v32.HiddenParallelEmbedding, "forward", embed)
+    monkeypatch.setattr(glm5_2.Glm52DecoderLayer, "forward", layer_forward)
+    monkeypatch.setattr(deepseek_v32.RMSNorm, "forward", norm)
+    monkeypatch.setattr(glm5_2, "get_forward_context", lambda: SimpleNamespace(cp_context=None))
+    monkeypatch.setattr(glm5_2, "record_layer_event", lambda _: None)
+    values = _config(num_hidden_layers=4, tp_size=1, dp_size=1, ep_size=1, world_size=1, indexer_types=pattern)
+    ids = torch.tensor([1, 2, 3])
+    positions = torch.arange(3)
+    reference = Glm52ForCausalLM(values).model(ids, positions)
+    for stage in range(2):
+        model = Glm52ForCausalLM(dict(values, pp_size=2, pp_rank=stage, world_size=2))
+        output = model.model(ids, positions)
+    torch.testing.assert_close(output, reference, rtol=0, atol=0)
+    assert not queued
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
@@ -1434,3 +1528,61 @@ def test_greedy_head_matches_full_vocabulary_argmax(dtype: torch.dtype, tp_size:
             actual = head.greedy_tokens(torch.zeros(6, 1, dtype=dtype))
         assert torch.equal(actual, expected)
         assert collective.call_count == int(tp_size > 1)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"pp_rank": 2},
+        {"pp_size": 5, "world_size": 5},
+        {"dp_size": 2, "world_size": 4},
+        {"moe_tp_size": 2},
+    ],
+)
+def test_pipeline_rejects_invalid_layout(overrides: dict[str, int]) -> None:
+    values = _config(num_hidden_layers=4, tp_size=1, dp_size=1, ep_size=1, pp_size=2, pp_rank=0, world_size=2)
+    values.update(overrides)
+    with pytest.raises(ValueError):
+        Glm52Config.from_dict(values).validate()
+
+
+@pytest.mark.parametrize("stage", [0, 1])
+@pytest.mark.parametrize("load_endpoints", [False, True])
+def test_pipeline_weight_loading_with_deferred_construction(stage: int, load_endpoints: bool) -> None:
+    model = Glm52ForCausalLM(
+        _config(num_hidden_layers=2, tp_size=1, dp_size=1, ep_size=1, world_size=2, pp_size=2, pp_rank=stage),
+        build_model=False,
+    )
+    assert model.model is None and model.lm_head is None
+    model._build_model()
+    layer = model.model.layers[stage]
+    layer.self_attn.process_weights_after_loading = MagicMock()
+    layer.mlp.process_experts_w13_after_loading = MagicMock()
+    layer.mlp.process_experts_w2_after_loading = MagicMock()
+    layer.mlp.shared_experts.process_weights_after_loading = MagicMock()
+    loader = _RecordingLoader(model, [], 1, 0)
+
+    model.load_weights([], 0, 1, load_embedding=load_endpoints, load_lm_head=load_endpoints, loader=loader)
+
+    assert ("model.embed_tokens.weight" in loader.loaded) == (load_endpoints and stage == 0)
+    assert ("lm_head.weight" in loader.loaded) == (load_endpoints and stage == 1)
+    assert ("model.norm.weight" in loader.loaded) == (stage == 1)
+    assert any(name.startswith(f"model.layers.{stage}.") for name in loader.loaded)
+    assert not any(name.startswith(f"model.layers.{1 - stage}.") for name in loader.loaded)
+
+
+def test_mtp_body_uses_base_weight_loader_without_pipeline_metadata() -> None:
+    model = Glm52MtpForCausalLM(_config(tp_size=1, dp_size=1, ep_size=1, world_size=1))
+    layer = model.model.layers[0]
+    layer.self_attn.process_weights_after_loading = MagicMock()
+    layer.mlp.process_experts_w13_after_loading = MagicMock()
+    layer.mlp.process_experts_w2_after_loading = MagicMock()
+    layer.mlp.shared_experts.process_weights_after_loading = MagicMock()
+    loader = _RecordingLoader(model, [], 1, 0)
+
+    Glm52ForCausalLM.load_weights(model, [], 0, 1, load_embedding=False, load_lm_head=False, loader=loader)
+
+    assert "model.layers.0.input_layernorm.weight" in loader.loaded
+    assert "model.norm.weight" in loader.loaded
+    assert "model.embed_tokens.weight" not in loader.loaded
+    assert "lm_head.weight" not in loader.loaded

@@ -16,6 +16,9 @@ limitations under the License.
 
 #include "core/framework/batch/batch.h"
 
+#include <algorithm>
+#include <numeric>
+
 namespace xllm {
 
 Batch::Batch(Sequence* sequence) { add(sequence); }
@@ -87,6 +90,57 @@ LlmForwardInput Batch::prepare_forward_input(const ModelArgs& args,
   const auto data = state_.prepare_distributed_input_data();
   output_handler_.prepare(data);
   return state_.build_distributed_input(data, args, thread_pool, cp_size);
+}
+
+void Batch::set_pipeline_chunks(std::vector<std::vector<uint32_t>> chunks) {
+  CHECK_EQ(chunks.size(), sequence_plan().size());
+  for (size_t index = 0; index < chunks.size(); ++index) {
+    CHECK(!chunks[index].empty());
+    CHECK(std::all_of(chunks[index].begin(),
+                      chunks[index].end(),
+                      [](uint32_t tokens) { return tokens > 0; }));
+    CHECK_EQ(std::accumulate(
+                 chunks[index].begin(), chunks[index].end(), uint64_t{0}),
+             sequence_plan()[index].token_budget);
+  }
+  pipeline_chunks_ = std::move(chunks);
+}
+
+std::vector<Batch> Batch::split_for_pipeline(int32_t stages) const {
+  CHECK_GT(stages, 0);
+  std::vector<Batch> microbatches;
+  if (pipeline_chunks_.empty()) {
+    const size_t count = std::min(static_cast<size_t>(stages), size());
+    microbatches.resize(count);
+    for (size_t slot = 0; slot < count; ++slot) {
+      const size_t begin = size() * slot / count;
+      const size_t end = size() * (slot + 1) / count;
+      for (size_t index = begin; index < end; ++index) {
+        microbatches[slot].add(sequence_plan()[index].sequence,
+                               sequence_plan()[index].token_budget);
+      }
+    }
+    return microbatches;
+  }
+  size_t rounds = 0;
+  size_t count = 0;
+  for (const auto& chunks : pipeline_chunks_) {
+    rounds = std::max(rounds, chunks.size());
+    count += chunks.size();
+  }
+  microbatches.reserve(count);
+  // Interleave requests while preserving every sequence's causal KV order.
+  for (size_t slot = 0; slot < rounds; ++slot) {
+    for (size_t index = 0; index < size(); ++index) {
+      if (slot >= pipeline_chunks_[index].size()) {
+        continue;
+      }
+      microbatches.emplace_back();
+      microbatches.back().add(sequence_plan()[index].sequence,
+                              pipeline_chunks_[index][slot]);
+    }
+  }
+  return microbatches;
 }
 
 void Batch::process_sample_output(const RawForwardOutput& output,

@@ -531,6 +531,28 @@ TEST(BatchFactoryTest, IndependentFactoriesKeepTheirOwnDpSize) {
   EXPECT_EQ(multiple.create_batches({}, {}, {}).size(), 3);
 }
 
+TEST(BatchFactoryTest,
+     PipelineInterleavesCausalChunksAndPreservesReservations) {
+  auto first = make_request(/*rank=*/0);
+  auto second = make_request(/*rank=*/0);
+  auto* first_seq = first->sequences().front().get();
+  auto* second_seq = second->sequences().front().get();
+  Batch batch;
+  batch.add(first_seq, /*allowed_max_tokens=*/3);
+  batch.add(second_seq, /*allowed_max_tokens=*/2);
+  batch.set_pipeline_chunks({{2, 1}, {2}});
+  auto chunks = batch.split_for_pipeline(/*stages=*/2);
+  ASSERT_EQ(chunks.size(), 3);
+  EXPECT_EQ(chunks[0][0], first_seq);
+  EXPECT_EQ(chunks[1][0], second_seq);
+  EXPECT_EQ(chunks[2][0], first_seq);
+  EXPECT_EQ(chunks[0].get_allowed_max_tokens(), (std::vector<uint32_t>{2}));
+  EXPECT_EQ(chunks[2].get_allowed_max_tokens(), (std::vector<uint32_t>{1}));
+  EXPECT_EQ(first_seq->kv_state().kv_cache_tokens_num(), 0);
+  EXPECT_DEATH(batch.set_pipeline_chunks({{2}, {2}}), "token_budget");
+  EXPECT_DEATH(batch.set_pipeline_chunks({{0, 3}, {2}}), "all_of");
+}
+
 TEST(BatchFactoryTest, PreservesRankLocalSequenceOrderAndBudgets) {
   BatchFactory factory(/*dp_size=*/9);
   auto first = make_request(/*rank=*/8);

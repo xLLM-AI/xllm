@@ -73,6 +73,7 @@ struct KVCacheEstimateOptions {
   bool is_draft_engine = false;
   bool enable_prefix_cache = false;
   int32_t layerwise_split_size = 1;
+  int32_t pp_size = 1;
   bool enable_chunked_prefill = true;
   bool enable_schedule_overlap = true;
   bool enable_disagg_pd = false;

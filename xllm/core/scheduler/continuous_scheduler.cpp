@@ -26,6 +26,7 @@ limitations under the License.
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <numeric>
 #include <vector>
 
 #include "core/distributed_runtime/distributed_worker_manager.h"
@@ -97,6 +98,14 @@ ContinuousSchedulerBase::ContinuousSchedulerBase(
 
   last_batch_ = BatchGroup(static_cast<size_t>(options_.dp_size()));
 
+  if (scheduler_config_.enable_dynamic_chunking()) {
+    scheduler_config_.validate_dynamic_chunking();
+    CHECK(batch_mode_.enable_chunked_prefill)
+        << "Dynamic chunking requires chunked prefill";
+    CHECK(!(has_linear_attention_layers_ && enable_prefix_cache_))
+        << "Dynamic chunking cannot change linear-attention prefix checkpoints";
+  }
+
   ProfileManager::Options profile_manager_options;
   profile_manager_options.dp_size(options.dp_size())
       .decode_graph_warmup_config(options.decode_graph_warmup_config())
@@ -124,6 +133,38 @@ ContinuousSchedulerBase::ContinuousSchedulerBase(
                          step_callback_,
                          result_callback_,
                          distributed_worker_manager_));
+
+  if (scheduler_config_.enable_dynamic_chunking()) {
+    if (options_.instance_role().value_or(InstanceRole::DEFAULT) !=
+        InstanceRole::DECODE) {
+      constexpr int32_t kMinAlignment = 64;
+      const int32_t kv_split =
+          ParallelConfig::get_instance().kv_split_size_effective();
+      const int32_t alignment =
+          std::lcm(kMinAlignment,
+                   kv_cache_manager_->block_size() * std::max(1, kv_split));
+      dynamic_chunk_predictor_ = profile_manager_->profile_dynamic_chunking(
+          std::min(options_.max_tokens_per_chunk_for_prefill(),
+                   options_.max_tokens_per_batch()),
+          scheduler_config_.dynamic_chunk_min_tokens(),
+          scheduler_config_.dynamic_chunk_smooth_factor(),
+          alignment,
+          scheduler_config_.dynamic_chunk_profile_samples());
+    }
+  } else if (ParallelConfig::get_instance().pp_size() > 1) {
+    // Fixed-chunk PP uses the same in-flight execution plan as DCPP, without
+    // startup fitting. This also gives DCPP a comparable PP control path.
+    const int32_t base_chunk =
+        std::min(options_.max_tokens_per_chunk_for_prefill(),
+                 options_.max_tokens_per_batch());
+    const int32_t alignment = std::lcm(64, kv_cache_manager_->block_size());
+    dynamic_chunk_predictor_ = std::make_unique<DynamicChunkPredictor>(
+        base_chunk,
+        /*min_chunk=*/base_chunk,
+        /*smooth_factor=*/1.0,
+        alignment,
+        ParallelConfig::get_instance().pp_size());
+  }
 
   // Construct the scheduling policy from the resolved BatchMode.
   policy_ = create_scheduler_policy(batch_mode_, options_);
@@ -461,6 +502,34 @@ BatchGroup ContinuousSchedulerBase::prepare_batch() {
       running_sequences_budgets_,
       kv_cache_manager_->get_swap_block_transfer_infos());
 
+  if (dynamic_chunk_predictor_ != nullptr &&
+      dynamic_chunk_predictor_->pipeline_depth() > 1) {
+    for (Batch& batch : batches) {
+      const auto& sequences = batch.get_sequences();
+      const bool has_prefill = std::any_of(
+          sequences.begin(), sequences.end(), [](const Sequence* sequence) {
+            return sequence->is_prefill_stage();
+          });
+      if (!has_prefill) {
+        continue;
+      }
+      std::vector<std::vector<uint32_t>> chunks;
+      chunks.reserve(batch.size());
+      const auto& budgets = batch.get_allowed_max_tokens();
+      for (size_t index = 0; index < batch.size(); ++index) {
+        const Sequence* sequence = batch[index];
+        if (!sequence->is_prefill_stage()) {
+          chunks.emplace_back(1, budgets[index]);
+          continue;
+        }
+        const size_t history = sequence->kv_cache_tokens_num();
+        chunks.emplace_back(dynamic_chunk_predictor_->plan(
+            history, sequence->num_tokens() - history, budgets[index]));
+      }
+      batch.set_pipeline_chunks(std::move(chunks));
+    }
+  }
+
   bool is_batches_empty = std::all_of(
       batches.begin(), batches.end(), [](const Batch& b) { return b.empty(); });
   if (!is_batches_empty) {
@@ -498,6 +567,7 @@ SchedulerState ContinuousSchedulerBase::make_state() {
           [this](const std::shared_ptr<Request>& request) {
             release_failed_request(request);
           },
+      .dynamic_chunk_predictor = dynamic_chunk_predictor_.get(),
   };
 }
 

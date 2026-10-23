@@ -56,7 +56,7 @@ else:
     _cuda_collectives = None
     _all_reduce = dist.all_reduce
 
-_GROUP_NAMES = frozenset(("tp", "dp", "moe_tp", "moe_ep", "cp", "layerwise", "dcp", "attn_dp"))
+_GROUP_NAMES = frozenset(("tp", "dp", "moe_tp", "moe_ep", "cp", "layerwise", "dcp", "attn_dp", "pp"))
 # ``tp`` and ``moe_tp`` own a contiguous block of global ranks, while ``dp``,
 # ``moe_ep``, ``cp`` and ``dcp`` stride across those blocks. Both layouts follow
 # from how the caller derives a rank within each group, so a group's full
@@ -384,6 +384,24 @@ def broadcast_(x: torch.Tensor, src: int, group_name: str = "tp") -> None:
     if ranks is None:
         raise RuntimeError(f"{group_name} group rank map is unavailable")
     dist.broadcast(x, src=ranks[src], group=group)
+
+
+def pipeline_send(x: torch.Tensor, stage: int) -> None:
+    """Send one contiguous activation to the next stage in this TP lane."""
+    group = _require_group(x, "pp")
+    ranks = _group_ranks[("pp", str(x.device))]
+    if not 0 <= stage < len(ranks):
+        raise ValueError(f"invalid pipeline destination stage {stage}")
+    dist.send(x.contiguous(), dst=ranks[stage], group=group)
+
+
+def pipeline_recv(x: torch.Tensor, stage: int) -> None:
+    """Receive an activation into a caller-owned buffer."""
+    group = _require_group(x, "pp")
+    ranks = _group_ranks[("pp", str(x.device))]
+    if not 0 <= stage < len(ranks):
+        raise ValueError(f"invalid pipeline source stage {stage}")
+    dist.recv(x, src=ranks[stage], group=group)
 
 
 @broadcast_.register_fake

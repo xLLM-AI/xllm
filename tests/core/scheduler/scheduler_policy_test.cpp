@@ -1971,4 +1971,105 @@ TEST(SchedulerPolicyTest, StaticCapacityRejectsPromptWithoutReservation) {
   }
 }
 
+TEST(SchedulerPolicyTest, DynamicChunksRespectPolicyBudgets) {
+  for (int32_t pipeline_depth : {1, 2}) {
+    for (int32_t policy_kind : {0, 1, 2}) {
+      const bool mixed = policy_kind != 0;
+      const std::string priority =
+          policy_kind == 2 ? "multi_slo_and_prio" : "fcfs";
+      for (size_t available_tokens : {63u, 8192u}) {
+        auto options = create_scheduler_options(
+            /*max_tokens_per_batch=*/8192,
+            /*max_seqs_per_batch=*/16,
+            /*num_speculative_tokens=*/0,
+            /*max_tokens_per_chunk_for_prefill=*/4096,
+            /*dp_size=*/1,
+            priority);
+        BatchMode mode{.enable_mix_batch = mixed,
+                       .enable_chunked_prefill = true,
+                       .priority_strategy = priority};
+        auto policy = create_scheduler_policy(mode, options);
+        FakeEngine engine(/*num_blocks=*/512, /*block_size=*/128);
+        DynamicChunkPredictor predictor(/*base_chunk=*/4096,
+                                        /*min_chunk=*/256,
+                                        /*smooth_factor=*/1.0,
+                                        /*alignment=*/128,
+                                        pipeline_depth);
+        std::vector<std::pair<int32_t, double>> samples;
+        samples.reserve(16);
+        for (int32_t length = 256; length <= 4096; length += 256) {
+          samples.emplace_back(length,
+                               0.00001 * length * length + 0.01 * length + 12);
+        }
+        ASSERT_TRUE(predictor.fit(samples));
+        auto requests = generate_request({32799},
+                                         {1},
+                                         std::nullopt,
+                                         std::nullopt,
+                                         /*max_context_len=*/40000);
+        auto* sequence = requests[0]->sequences()[0].get();
+        ASSERT_TRUE(engine.block_manager_pool()->allocate(sequence, 16384));
+        sequence->kv_state().incr_kv_cache_tokens_num(16384);
+        DequeQueue prefill_queue;
+        DequeQueue chunk_queue;
+        DequeQueue decode_queue;
+        std::list<std::shared_ptr<Request>> unified_queue;
+        std::unique_ptr<ProfileManager> profile;
+        if (policy_kind == 2) {
+          unified_queue.emplace_back(requests[0]);
+          profile = std::make_unique<ProfileManager>(&engine,
+                                                     ProfileManager::Options{});
+        } else {
+          chunk_queue.push(requests[0]);
+        }
+        std::deque<DecodeRestoreEntry> restore_waiting;
+        std::vector<std::shared_ptr<Request>> running_requests;
+        std::vector<Sequence*> running_sequences;
+        std::vector<size_t> token_budgets;
+        bool last_prefill = true;
+        SchedulerState state{
+            .prefill_queue = prefill_queue,
+            .chunk_queue = chunk_queue,
+            .decode_queue = decode_queue,
+            .unified_queue = unified_queue,
+            .decode_restore_waiting = restore_waiting,
+            .running_requests = running_requests,
+            .running_sequences = running_sequences,
+            .running_sequences_budgets = token_budgets,
+            .kv_cache_manager = engine.block_manager_pool(),
+            .profile_manager = profile.get(),
+            .output_dispatcher = nullptr,
+            .model_args = engine.model_args(),
+            .last_step_prefill = last_prefill,
+            .options = options,
+            .min_speculative_tokens_required = 0,
+            .enable_prefix_cache = false,
+            .has_linear_attention_layers = false,
+            .dynamic_chunk_predictor = &predictor,
+        };
+        ScheduleBudget budget{.remaining_token_budget = available_tokens,
+                              .remaining_seq_budget = 16,
+                              .latency_budget = 1e9,
+                              .estimate_latency = 0,
+                              .num_preempted_requests = 0};
+        std::vector<std::shared_ptr<Request>> finished;
+        policy->schedule(state, budget, finished);
+        if (available_tokens < 128) {
+          EXPECT_TRUE(token_budgets.empty());
+          EXPECT_EQ(chunk_queue.size() + unified_queue.size(), 1u);
+          EXPECT_EQ(budget.remaining_token_budget, available_tokens);
+          engine.block_manager_pool()->deallocate_without_cache(sequence);
+          continue;
+        }
+        ASSERT_EQ(token_budgets.size(), 1u);
+        EXPECT_EQ(token_budgets[0],
+                  predictor.predict_budget(16384, 32799 - 16384, 8192));
+        EXPECT_LT(token_budgets[0], 4096u);
+        EXPECT_EQ(token_budgets[0] + budget.remaining_token_budget, 8192u);
+        engine.block_manager_pool()->deallocate_without_cache(sequence);
+      }
+    }
+  }
+}
+
 }  // namespace xllm

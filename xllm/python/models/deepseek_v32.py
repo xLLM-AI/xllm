@@ -2215,15 +2215,26 @@ class DeepseekV3Model(nn.Module):
         tp = cfg.tp_size
         assert cfg.hidden_size % tp == 0
         self.cfg = cfg
-        self.embed_tokens = HiddenParallelEmbedding(
-            cfg.vocab_size,
-            cfg.hidden_size // tp,
-            tp,
-            dtype=dtype,
-            device=device,
+        self.dtype = dtype
+        self.layer_begin, self.layer_end = self._layer_range()
+        self.embed_tokens = (
+            HiddenParallelEmbedding(cfg.vocab_size, cfg.hidden_size // tp, tp, dtype=dtype, device=device)
+            if self.layer_begin == 0
+            else None
         )
-        self.layers = nn.ModuleList([self._make_decoder(cfg, i, dtype, device) for i in range(cfg.n_layers)])
-        self.norm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
+        self.layers = nn.ModuleList(
+            [
+                self._make_decoder(cfg, i, dtype, device) if self.layer_begin <= i < self.layer_end else nn.Identity()
+                for i in range(cfg.n_layers)
+            ]
+        )
+        for i in range(self.layer_begin, self.layer_end):
+            self.layers[i].self_attn.layer_id = i - self.layer_begin
+        self.norm = (
+            RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype=dtype, device=device)
+            if self.layer_end == cfg.n_layers
+            else None
+        )
         self.rotary = DeepseekYarnRotaryEmbedding(
             cfg.qk_rope_head_dim,
             cfg.original_max_position_embeddings,
@@ -2238,6 +2249,25 @@ class DeepseekV3Model(nn.Module):
         )
 
         self.aux_hidden_capture = AuxHiddenCapture(())
+
+    def _layer_range(self) -> tuple[int, int]:
+        return 0, self.cfg.n_layers
+
+    def _embed(self, input_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        return self.embed_tokens(input_ids), None, None
+
+    def _finalize_output(
+        self,
+        hidden: torch.Tensor,
+        residual: torch.Tensor | None,
+        topk: torch.Tensor | None,
+        cp_context: CpContext | None,
+        aux: torch.Tensor | None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        hidden, _ = self.norm(hidden, residual)
+        if cp_context is not None:
+            hidden = cp_merge_rows(hidden, cp_context)
+        return self.aux_hidden_capture.finalize(hidden, aux)
 
     def _make_decoder(
         self, cfg: DeepseekV3Config, layer_id: int, dtype: torch.dtype, device: torch.device
@@ -2270,23 +2300,19 @@ class DeepseekV3Model(nn.Module):
     def forward(
         self, input_ids: torch.Tensor, positions: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        hidden = self.embed_tokens(input_ids)
+        hidden, residual, topk = self._embed(input_ids)
         cp_context = self._cp_context()
         hidden, rope, query_cos_sin = self._prepare_layer_inputs(hidden, positions, cp_context)
         slot_mapping_int64 = self._prepare_mla_slots()
-        residual: torch.Tensor | None = None
-        topk: torch.Tensor | None = None
         aux = self.aux_hidden_capture.create_buffer(hidden)
-        for layer_id, layer in enumerate(self.layers):
+        for layer_id in range(self.layer_begin, self.layer_end):
+            layer = self.layers[layer_id]
             hidden, residual, topk = layer(
                 hidden, residual, *rope, query_cos_sin, topk, slot_mapping_int64=slot_mapping_int64
             )
             self.aux_hidden_capture.capture_layer(layer_id, hidden, residual, aux)
-            self._record_layer_event(layer_id)
-        hidden, _ = self.norm(hidden, residual)
-        if cp_context is not None:
-            hidden = cp_merge_rows(hidden, cp_context)
-        return self.aux_hidden_capture.finalize(hidden, aux)
+            self._record_layer_event(layer_id - self.layer_begin)
+        return self._finalize_output(hidden, residual, topk, cp_context, aux)
 
 
 class DeepseekV3ForCausalLM(PyModelBase):

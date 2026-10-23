@@ -18,3 +18,9 @@ The aforementioned strategy has been implemented in xLLM and is exposed through 
 
 ## Performance Impact
 After enabling chunked prefill, on the Qwen3-8B model with a TPOT constraint of 50ms, the TTFT latency **decreased by 46%**.
+
+## Dynamic chunk sizes
+
+Use `--enable_dynamic_chunking=true` for startup-profiled dynamic chunks.
+See [Dynamic Chunked Prefill](./dynamic_chunked_prefill.md) for configuration,
+support boundaries, and the future PP integration plan.

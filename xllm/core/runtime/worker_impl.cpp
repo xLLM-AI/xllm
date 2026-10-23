@@ -417,7 +417,9 @@ WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
   }
 
   // first worker is the driver
-  driver_ = parallel_args.rank() == 0;
+  driver_ = parallel_args.rank() ==
+            (parallel_args.pp_size() - 1) *
+                (parallel_args.world_size() / parallel_args.pp_size());
   int32_t tp_size = parallel_args.world_size() /
                     (parallel_args.dp_size() * parallel_args.cp_size());
   dp_driver_ = parallel_args.dp_size() > 1 &&
@@ -549,7 +551,15 @@ bool WorkerImpl::allocate_kv_cache_storage(
     layer_cache_owned = build_layer_cache_owned(args, layout, num_layers);
   }
   std::vector<bool> indexer_cache_enabled_layers =
-      resolve_indexer_cache_enabled_layers(args, num_layers);
+      resolve_indexer_cache_enabled_layers(
+          args, parallel_args_.pp_size() > 1 ? args.n_layers() : num_layers);
+  if (parallel_args_.pp_size() > 1 && !indexer_cache_enabled_layers.empty()) {
+    const int64_t begin = parallel_args_.pipeline_layer_begin(args.n_layers());
+    const int64_t end = parallel_args_.pipeline_layer_end(args.n_layers());
+    indexer_cache_enabled_layers =
+        std::vector<bool>(indexer_cache_enabled_layers.begin() + begin,
+                          indexer_cache_enabled_layers.begin() + end);
+  }
 
   if (kv_cache_shape.has_kpool_tail_shape() && is_spec_draft_) {
     // GLM Next MTP layers are full indexers, independent of the target's
@@ -3066,6 +3076,10 @@ void WorkerImpl::prepare_mla_prefixcache_inputs(RecModelParams& input_params) {
 
 int64_t WorkerImpl::get_num_layers() const {
   int64_t num_layers = context_.get_model_args().n_layers();
+  if (parallel_args_.pp_size() > 1) {
+    return parallel_args_.pipeline_layer_end(num_layers) -
+           parallel_args_.pipeline_layer_begin(num_layers);
+  }
 #if !defined(USE_NPU)
   if (is_spec_draft_) {
     // for MTP draft models, the number of layers is the number of nextn

@@ -23,11 +23,25 @@ limitations under the License.
 #include "anthropic.pb.h"
 #include "chat.pb.h"
 #include "completion.pb.h"
+#include "core/framework/config/parallel_config.h"
 #include "core/framework/config/service_config.h"
 #include "multimodal.pb.h"
 
 namespace xllm {
 namespace {
+
+class ScopedPipelineSize final {
+ public:
+  explicit ScopedPipelineSize(int32_t size)
+      : previous_(ParallelConfig::get_instance().pp_size()) {
+    ParallelConfig::get_instance().pp_size(size);
+  }
+
+  ~ScopedPipelineSize() { ParallelConfig::get_instance().pp_size(previous_); }
+
+ private:
+  int32_t previous_;
+};
 
 class ScopedJsonObjectOutput final {
  public:
@@ -253,6 +267,25 @@ std::optional<Status> verify(const RequestParams& params) {
 }
 
 }  // namespace
+
+TEST(RequestParamsTest, PipelineRejectsBeamSearchBeforeScheduling) {
+  RequestParams params;
+  params.beam_width = 2;
+  {
+    ScopedPipelineSize pipeline(/*size=*/1);
+    EXPECT_FALSE(verify(params).has_value());
+  }
+  {
+    ScopedPipelineSize pipeline(/*size=*/2);
+    const auto status = verify(params);
+    ASSERT_TRUE(status.has_value());
+    EXPECT_EQ(status->code(), StatusCode::INVALID_ARGUMENT);
+    EXPECT_NE(status->message().find("pipeline parallelism"),
+              std::string::npos);
+    params.beam_width = 1;
+    EXPECT_FALSE(verify(params).has_value());
+  }
+}
 
 // Beam search forces logprobs on downstream, so top_logprobs must be validated
 // even when the client explicitly disabled logprobs; otherwise an invalid count

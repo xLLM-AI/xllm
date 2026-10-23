@@ -651,7 +651,35 @@ void init_standard_counts(const ModelArgs& model_args,
   CHECK_GT(available_full_cache_size_in_bytes, 0)
       << "no memory left for full-attention kv cache after reserving linear "
          "state cache";
-  if (options.layerwise_split_size > 1) {
+  CHECK_GT(options.pp_size, 0);
+  if (options.pp_size > 1) {
+    CHECK_EQ(kv_cache_cap->num_linear_attention_layers(), 0);
+    CHECK_EQ(options.layerwise_split_size, 1);
+    CHECK_LE(options.pp_size, kv_cache_cap->n_layers());
+    const int64_t layers = kv_cache_cap->n_layers();
+    const std::vector<bool> indexer_mask =
+        resolve_indexer_cache_enabled_layers(model_args, layers);
+    int64_t largest_stage_block_bytes = 0;
+    for (int32_t stage = 0; stage < options.pp_size; ++stage) {
+      const int64_t begin = layers * stage / options.pp_size;
+      const int64_t end = layers * (stage + 1) / options.pp_size;
+      const int64_t index_layers =
+          indexer_mask.empty() ? end - begin
+                               : std::count(indexer_mask.begin() + begin,
+                                            indexer_mask.begin() + end,
+                                            true);
+      const int64_t stage_bytes =
+          kv_cache_cap->block_size() *
+          ((end - begin) *
+               (kv_cache_cap->slot_size() + kv_cache_cap->scale_slot_size()) +
+           index_layers * kv_cache_cap->index_slot_size());
+      largest_stage_block_bytes =
+          std::max(largest_stage_block_bytes, stage_bytes);
+    }
+    CHECK_GT(largest_stage_block_bytes, 0);
+    kv_cache_cap->n_blocks(available_full_cache_size_in_bytes /
+                           largest_stage_block_bytes);
+  } else if (options.layerwise_split_size > 1) {
     kv_cache_cap->n_blocks(
         layerwise_split_block_count(model_args,
                                     options.layerwise_split_size,
@@ -785,6 +813,7 @@ KVCacheCapacity KVCacheEstimator::estimate(
     const runtime::Options& options,
     const KVCacheEstimateContext& context) const {
   KVCacheEstimateOptions estimate_options;
+  estimate_options.pp_size = ParallelConfig::get_instance().pp_size();
   estimate_options.dtype = context.dtype;
   estimate_options.kv_cache_dtype = options.kv_cache_dtype();
   estimate_options.indexer_cache_dtype =

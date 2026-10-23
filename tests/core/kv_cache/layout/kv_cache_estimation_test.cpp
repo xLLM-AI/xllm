@@ -241,6 +241,16 @@ TEST(KVCacheEstimationTest, EmbeddingContextSharesTheAvailableMemoryBudget) {
             options.cache_size_in_bytes);
 }
 
+TEST(KVCacheEstimationTest, PipelineUsesLargestStageForCommonBlockBudget) {
+  ModelArgs args = make_standard_args();
+  args.n_layers(5);
+  KVCacheEstimateOptions options = make_estimate_options();
+  options.pp_size = 2;
+  const KVCacheCapacity capacity = estimate_kv_cache_capacity(args, options);
+  EXPECT_EQ(capacity.n_blocks(), options.cache_size_in_bytes / (3 * 16 * 128));
+  EXPECT_EQ(capacity.n_layers(), 5);
+}
+
 TEST(KVCacheEstimationTest, IgnoresLinearStateSlotsWithoutLinearAttention) {
   ModelArgs model_args = make_standard_args();
   KVCacheEstimateOptions options = make_estimate_options();
@@ -358,6 +368,28 @@ TEST(KVCacheEstimationTest, GlmSharedIndexerFreqAllocatesOnlyFullLayers) {
       estimate_kv_cache_capacity(model_args, make_estimate_options());
 
   EXPECT_EQ(capacity.num_full_attention_layers(), 78);
+  EXPECT_EQ(capacity.num_indexer_layers(), 21);
+}
+
+TEST(KVCacheEstimationTest, GlmPipelineUsesActualIndexerOwnershipPerStage) {
+  ModelArgs args = make_standard_args();
+  args.model_type("glm_moe_dsa")
+      .n_layers(78)
+      .index_n_heads(1)
+      .index_head_dim(16)
+      .index_topk(8)
+      .index_topk_freq(4)
+      .index_skip_topk_offset(3);
+  KVCacheEstimateOptions options = make_estimate_options();
+  options.pp_size = 2;
+  const KVCacheCapacity capacity = estimate_kv_cache_capacity(args, options);
+  // Stage 0 owns 12 full indexer layers; stage 1 owns 9. Stage 1 starts
+  // at shared layer 39 and receives top-k without allocating an index cache.
+  const int64_t bytes_per_block =
+      options.block_size *
+      (39 * (capacity.slot_size() + capacity.scale_slot_size()) +
+       12 * capacity.index_slot_size());
+  EXPECT_EQ(capacity.n_blocks(), options.cache_size_in_bytes / bytes_per_block);
   EXPECT_EQ(capacity.num_indexer_layers(), 21);
 }
 

@@ -212,7 +212,10 @@ void UnifiedPolicy::schedule_from_unified_queue(
         if (sequence->is_prefill_stage()) {
           size_t remaining = num_tokens - kv_cache_tokens_num;
           size_t max_chunk =
-              static_cast<size_t>(options_.max_tokens_per_chunk_for_prefill());
+              static_cast<size_t>(options_.max_tokens_per_chunk_for_prefill()) *
+              (state.dynamic_chunk_predictor != nullptr
+                   ? state.dynamic_chunk_predictor->pipeline_depth()
+                   : 1);
           num_tokens_to_handle =
               std::min({assume_max_tokens, max_chunk, remaining});
         } else {
@@ -226,13 +229,29 @@ void UnifiedPolicy::schedule_from_unified_queue(
         }
       }
 
+      if (sequence->is_prefill_stage() &&
+          state.dynamic_chunk_predictor != nullptr) {
+        assume_max_tokens = state.dynamic_chunk_predictor->predict_budget(
+            kv_cache_tokens_num,
+            num_tokens - kv_cache_tokens_num,
+            std::min(assume_max_tokens,
+                     budget.remaining_token_budget - allocated_tokens));
+        if (assume_max_tokens == 0) {
+          // A later batch can provide a full aligned block. Keep the request.
+          return;
+        }
+      }
+
       // Allocate blocks after committing the scheduler-selected Host restore
       // boundary. The allocator only executes the resulting restore plan.
       size_t max_handle_num_tokens =
           std::min(kv_cache_tokens_num + assume_max_tokens, num_tokens);
       if (sequence->is_prefill_stage()) {
         size_t max_chunk =
-            static_cast<size_t>(options_.max_tokens_per_chunk_for_prefill());
+            static_cast<size_t>(options_.max_tokens_per_chunk_for_prefill()) *
+            (state.dynamic_chunk_predictor != nullptr
+                 ? state.dynamic_chunk_predictor->pipeline_depth()
+                 : 1);
         max_handle_num_tokens =
             std::min(max_handle_num_tokens, kv_cache_tokens_num + max_chunk);
       }

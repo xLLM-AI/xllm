@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "llm_engine.h"
+#include "core/distributed_runtime/llm_engine.h"
 
 #include <absl/strings/str_format.h>
 #include <absl/time/clock.h>
@@ -35,6 +35,7 @@ limitations under the License.
 #include "common/metrics.h"
 #include "common/options.h"
 #include "core/common/global_flags.h"
+#include "core/distributed_runtime/pipeline_dispatcher.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/parallel_config.h"
@@ -125,7 +126,13 @@ LLMEngine::LLMEngine(
   dp_local_size_ = worker_clients_num_ / dp_size_;
   // MLU and NPU model-side CP both use orthogonal CP x attention-TP, so the
   // DP-local TP width is divided by CP.
-  dp_local_tp_size_ = dp_local_size_ / cp_size;
+  dp_local_tp_size_ =
+      dp_local_size_ / cp_size / ParallelConfig::get_instance().pp_size();
+
+  if (ParallelConfig::get_instance().pp_size() > 1) {
+    pipeline_dispatcher_ = std::make_unique<PipelineDispatcher>(
+        ParallelConfig::get_instance().pp_size());
+  }
 
   process_group_test();
 }
@@ -514,12 +521,78 @@ bool LLMEngine::allocate_kv_cache(
   return true;
 }
 
+ForwardOutput LLMEngine::step_pipeline(BatchGroup& batch) {
+  CHECK_EQ(batch.size(), 1);
+  const int32_t stages = ParallelConfig::get_instance().pp_size();
+  auto split_batches = batch.front().split_for_pipeline(stages);
+  const int32_t microbatch_count = static_cast<int32_t>(split_batches.size());
+  CHECK_GT(microbatch_count, 0);
+  std::vector<BatchGroup> microbatches;
+  microbatches.reserve(microbatch_count);
+  std::vector<LlmForwardInput> inputs;
+  inputs.reserve(microbatch_count);
+  for (Batch& microbatch : split_batches) {
+    // Earlier chunks advance the same sequence while inputs are prepared.
+    // Recompute its forward type before capturing this chunk's metadata.
+    microbatch.refresh_forward_type();
+    microbatches.emplace_back(/*dp_size=*/1);
+    microbatches.back().front() = std::move(microbatch);
+    std::vector<LlmForwardInput> microbatch_inputs;
+    bool is_graph_warmup = false;
+    forward_input_factory_->create_inputs(
+        microbatches.back(), args_, microbatch_inputs, is_graph_warmup);
+    CHECK_EQ(microbatch_inputs.size(), 1);
+    inputs.emplace_back(std::move(microbatch_inputs.front()));
+    const auto& params = inputs.back().input_params;
+    VLOG(1) << "Pipeline microbatch " << inputs.size() - 1
+            << ": sequences=" << params.meta.num_sequences
+            << ", query_tokens=" << params.meta.q_max_seq_len
+            << ", kv_tokens=" << params.meta.kv_max_seq_len;
+  }
+  VLOG(1) << "Pipeline dispatch: stages=" << stages
+          << ", microbatches=" << microbatch_count;
+  std::vector<RawForwardOutput> outputs(microbatch_count);
+  pipeline_dispatcher_->run(
+      microbatch_count, [&](int32_t stage, int32_t microbatch) {
+        std::vector<folly::SemiFuture<std::optional<RawForwardOutput>>> futures;
+        futures.reserve(dp_local_tp_size_);
+        for (uint32_t lane = 0; lane < dp_local_tp_size_; ++lane) {
+          const uint32_t rank = stage * dp_local_tp_size_ + lane;
+          futures.emplace_back(
+              worker_clients_[rank]->step_remote_async(inputs[microbatch]));
+        }
+        auto results = folly::collectAll(futures).get();
+        for (const auto& result : results) {
+          CHECK(result.hasValue() && result.value().has_value())
+              << "Pipeline stage " << stage << " failed at microbatch "
+              << microbatch;
+        }
+        if (stage + 1 == stages) {
+          outputs[microbatch] = std::move(results.front().value().value());
+        }
+      });
+  for (int32_t microbatch = 0; microbatch < microbatch_count; ++microbatch) {
+    CHECK(outputs[microbatch].src_seq_idxes.empty())
+        << "PP does not support beam search";
+    microbatches[microbatch].front().process_sample_output(
+        outputs[microbatch],
+        /*replace_fake_token=*/false);
+  }
+  return {};
+}
+
 ForwardOutput LLMEngine::step(BatchGroup& batch) {
   if (worker_clients_.empty()) {
     // empty worker, return
     return {};
   }
   Timer timer;
+  if (pipeline_dispatcher_ != nullptr && batch.size() == 1 &&
+      batch.front().size() > 0) {
+    ForwardOutput output = step_pipeline(batch);
+    COUNTER_ADD(engine_latency_seconds, timer.elapsed_seconds());
+    return output;
+  }
   DCHECK(dp_size_ == batch.size())
       << "Split DP batch failed with dp_size as " << dp_size_
       << " and actual batch size as " << batch.size() << ".";
@@ -558,6 +631,8 @@ ForwardOutput LLMEngine::step(BatchGroup& batch) {
       LOG(FATAL) << "Failed to execute model, result has no value";
     }
   }
+  const uint32_t pipeline_output_offset =
+      (ParallelConfig::get_instance().pp_size() - 1) * dp_local_tp_size_;
 
   if (eplb_controller_ != nullptr && !options_.enable_schedule_overlap() &&
       !is_graph_warmup) {
@@ -567,7 +642,7 @@ ForwardOutput LLMEngine::step(BatchGroup& batch) {
   size_t dp_rank = 0;
   for (auto worker_rank = 0; worker_rank < worker_clients_num_;
        worker_rank += dp_local_size_) {
-    auto result = results[worker_rank].value();
+    auto result = results[worker_rank + pipeline_output_offset].value();
     // if src_seq_idxes is not empty, skip sample output processing and
     // process beam search output instead
     if (result.value().src_seq_idxes.size() == 0) {

@@ -719,6 +719,42 @@ TEST(BatchTest, ProcessSampleOutputStoresMtpBootstrapEmbedding) {
                            torch::tensor({3.0f, 4.0f})));
 }
 
+TEST(BatchTest, PipelineChunksAdvanceKvBeforeDispatchAndSampleOnlyAtPromptEnd) {
+  BlockManager::Options options;
+  options.num_blocks(8).block_size(4);
+  BlockManagerImpl manager(options);
+  Sequence sequence = make_basic_sequence({1, 2, 3, 4, 5, 6, 7});
+  sequence.add_blocks(BlockType::KV, manager.allocate(2));
+  Batch batch;
+  batch.add(&sequence, /*allowed_max_tokens=*/7);
+  batch.set_pipeline_chunks({{4, 3}});
+  auto chunks = batch.split_for_pipeline(/*stages=*/2);
+  ASSERT_EQ(chunks.size(), 2);
+  chunks[0].refresh_forward_type();
+  auto first = chunks[0].prepare_forward_input(
+      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
+  chunks[1].refresh_forward_type();
+  auto last = chunks[1].prepare_forward_input(
+      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
+  EXPECT_TRUE(first.input_params.meta.batch_forward_type.is_prefill());
+  EXPECT_TRUE(last.input_params.meta.batch_forward_type.is_chunked_prefill());
+  EXPECT_TRUE(equal(first.positions, std::vector<int32_t>{0, 1, 2, 3}));
+  EXPECT_TRUE(equal(last.positions, std::vector<int32_t>{4, 5, 6}));
+  EXPECT_EQ(sequence.kv_state().kv_cache_tokens_num(), 7);
+  EXPECT_EQ(first.input_params.attention.host.kv_cache_tokens_nums[0], 0);
+  EXPECT_EQ(last.input_params.attention.host.kv_cache_tokens_nums[0], 4);
+  // Apply outputs only after all in-flight chunks retire. Even though the
+  // sequence now owns the full prefix, the first chunk has no sample target.
+  chunks[0].process_sample_output(RawForwardOutput{},
+                                  /*replace_fake_token=*/false);
+  EXPECT_EQ(sequence.num_generated_tokens(), 0);
+  RawForwardOutput output;
+  output.outputs = {make_raw_sample_output(/*token_id=*/42, std::nullopt)};
+  chunks[1].process_sample_output(output, /*replace_fake_token=*/false);
+  EXPECT_EQ(sequence.num_generated_tokens(), 1);
+  EXPECT_EQ(sequence.tokens().back(), 42);
+}
+
 TEST(BatchTest, ProcessRawOutputStoresMtpBootstrapEmbedding) {
   BlockManager::Options options;
   options.num_blocks(8).block_size(4);

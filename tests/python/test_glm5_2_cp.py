@@ -110,9 +110,11 @@ def _make_model(events: list[str]) -> tuple[glm5_2.Glm52Model, list[_DecoderLaye
     model = glm5_2.Glm52Model.__new__(glm5_2.Glm52Model)
     nn.Module.__init__(model)
     layers = [_DecoderLayer(layer_id, events) for layer_id in range(2)]
-    model.cfg = glm5_2.Glm52Config()
     model.embed_tokens = _Embedding(events)
     model.layers = nn.ModuleList(layers)
+    model.cfg = glm5_2.Glm52Config(n_layers=2, indexer_rope_interleave=True)
+    model.layer_begin = 0
+    model.layer_end = 2
     model.norm = _Norm(events)
     model.rotary = _Rotary()
     model.aux_hidden_capture = glm5_2.AuxHiddenCapture(())

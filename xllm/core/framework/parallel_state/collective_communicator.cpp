@@ -238,6 +238,10 @@ CollectiveCommunicator::CollectiveCommunicator(int32_t global_rank,
   parallel_args_->layerwise_split_size(config.layerwise_split_size());
 #if defined(USE_NPU)
   if (KernelConfig::get_instance().npu_kernel_backend() == "TORCH") {
+    const int32_t pp_size = config.pp_size();
+    CHECK_GT(pp_size, 0);
+    CHECK_EQ(world_size % pp_size, 0);
+    parallel_args_->pp_size(pp_size);
     return;
   }
 
@@ -392,6 +396,9 @@ void CollectiveCommunicator::create_process_groups(
   // make ranks r and r + tp_size hold the same heads and double-accumulate in
   // the all-reduce, which is a silent numerical error rather than a crash.
   const int32_t normalized_cp_size = cp_size > 0 ? cp_size : 1;
+  const int32_t pp_size = parallel_args_->pp_size();
+  // Pipeline stages partition the attention-TP rank domains. The actual DP
+  // group construction below still uses the configured data-parallel size.
   const int32_t kv_split_size = parallel_args_->kv_split_size_effective();
   const bool native_npu_dcp = Platform::is_npu() &&
                               !ModelConfig::is_python_model_impl(
@@ -401,7 +408,7 @@ void CollectiveCommunicator::create_process_groups(
   const parallel_state::ParallelTopology topology(
       global_rank,
       world_size,
-      dp_size,
+      dp_size * pp_size,
       ep_size,
       normalized_cp_size,
       normalized_cp_size > 1 || native_npu_dcp ? kv_split_size : 1);
@@ -548,9 +555,10 @@ void CollectiveCommunicator::create_process_groups(
   const int32_t moe_tp_size = topology.moe_tp_size();
   if (ep_size == 1) {
     // Reuse TP only when it spans the same rank set as the MoE world group.
-    parallel_args_->moe_tp_group_ = dp_size == 1 && tp_size == moe_tp_size
-                                        ? tp_group_.get()
-                                        : process_group_.get();
+    parallel_args_->moe_tp_group_ =
+        pp_size > 1 || (dp_size == 1 && tp_size == moe_tp_size)
+            ? tp_group_.get()
+            : process_group_.get();
     parallel_args_->eplb_group_ = process_group_.get();
   } else {
     port_offset = topology.moe_tp().index + 1;

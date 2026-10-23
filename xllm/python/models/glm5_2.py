@@ -170,6 +170,8 @@ class Glm52Config:
     ep_rank: int = 0
     dp_size: int = 1
     dp_rank: int = 0
+    pp_size: int = 1
+    pp_rank: int = 0
     cp_size: int = 1
     cp_rank: int = 0
     layerwise_split_size: int = 1
@@ -231,8 +233,9 @@ class Glm52Config:
         max_pe = int(pick("max_position_embeddings", default=202752))
         tp_size = int(pick("tp_size", default=1))
         dp_size = int(pick("dp_size", default=1))
+        pp_size = int(pick("pp_size", default=1))
         cp_size = int(pick("cp_size", default=1))
-        world_size = int(pick("world_size", default=tp_size * dp_size * cp_size))
+        world_size = int(pick("world_size", default=tp_size * dp_size * cp_size * pp_size))
         rope_scaling_factor = float(rpick_nz("factor", "rope_scaling_factor", default=1.0))
         original_max = int(rpick_nz("original_max_position_embeddings", default=max_pe))
 
@@ -280,6 +283,8 @@ class Glm52Config:
             ep_rank=int(pick("ep_rank", default=0)),
             dp_size=dp_size,
             dp_rank=int(pick("dp_rank", default=0)),
+            pp_size=pp_size,
+            pp_rank=int(pick("pp_rank", default=0)),
             cp_size=cp_size,
             cp_rank=int(pick("cp_rank", default=0)),
             layerwise_split_size=int(pick("layerwise_split_size", default=1)),
@@ -310,10 +315,19 @@ class Glm52Config:
 
     def validate(self) -> None:
         """Validate the orthogonal attention/DP and MoE EP topology."""
-        if min(self.tp_size, self.ep_size, self.dp_size, self.cp_size, self.moe_tp_size) <= 0:
+        if min(self.tp_size, self.ep_size, self.dp_size, self.cp_size, self.pp_size, self.moe_tp_size) <= 0:
             raise ValueError("parallel sizes must be positive")
-        if self.tp_size * self.dp_size * self.cp_size != self.world_size:
-            raise ValueError("world_size must equal tp_size * dp_size * cp_size")
+        if self.tp_size * self.dp_size * self.cp_size * self.pp_size != self.world_size:
+            raise ValueError("world_size must equal tp_size * dp_size * cp_size * pp_size")
+        if not 0 <= self.pp_rank < self.pp_size or self.pp_size > self.n_layers:
+            raise ValueError("pipeline stages must have valid ranks and at least one layer")
+        if self.pp_size > 1:
+            if (self.dp_size, self.ep_size, self.cp_size, self.layerwise_split_size) != (1, 1, 1, 1):
+                raise ValueError("PP currently requires DP=EP=CP=layerwise_split_size=1")
+            if self.moe_tp_size != self.tp_size:
+                raise ValueError("PP requires stage-local MoE tensor parallelism")
+            if self.layers_to_capture:
+                raise ValueError("PP does not support auxiliary hidden-state capture")
         if self.world_size % self.ep_size:
             raise ValueError(f"ep_size must divide world_size: ep_size={self.ep_size}, world_size={self.world_size}")
         if self.ep_size > 1:
@@ -1026,6 +1040,55 @@ class Glm52Model(DeepseekV3Model):
         super().__init__(cfg, dtype, device)
         self.aux_hidden_capture = AuxHiddenCapture(cfg.layers_to_capture)
 
+    def _layer_range(self) -> tuple[int, int]:
+        return (
+            self.cfg.n_layers * self.cfg.pp_rank // self.cfg.pp_size,
+            self.cfg.n_layers * (self.cfg.pp_rank + 1) // self.cfg.pp_size,
+        )
+
+    def _embed(self, input_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        if self.cfg.pp_rank == 0:
+            return super()._embed(input_ids)
+        hidden = torch.empty((input_ids.numel(), self.cfg.hidden_size), dtype=self.dtype, device=input_ids.device)
+        residual = torch.empty_like(hidden)
+        distributed.pipeline_recv(hidden, self.cfg.pp_rank - 1)
+        distributed.pipeline_recv(residual, self.cfg.pp_rank - 1)
+        topk = None
+        if self.cfg.indexer_types[self.layer_begin] == "shared":
+            topk = torch.empty((input_ids.numel(), 1, self.cfg.index_topk), dtype=torch.int32, device=input_ids.device)
+            distributed.pipeline_recv(topk, self.cfg.pp_rank - 1)
+        return hidden, residual, topk
+
+    def _finalize_output(
+        self,
+        hidden: torch.Tensor,
+        residual: torch.Tensor | None,
+        topk: torch.Tensor | None,
+        cp_context: CpContext | None,
+        aux: torch.Tensor | None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if self.cfg.pp_rank + 1 == self.cfg.pp_size:
+            return super()._finalize_output(hidden, residual, topk, cp_context, aux)
+        expected_shape = (hidden.shape[0], self.cfg.hidden_size)
+        if (
+            residual is None
+            or tuple(hidden.shape) != expected_shape
+            or tuple(residual.shape) != expected_shape
+            or hidden.dtype != self.dtype
+            or residual.dtype != self.dtype
+        ):
+            raise ValueError("invalid pipeline hidden/residual layout or dtype")
+        share_topk = self.cfg.indexer_types[self.layer_end] == "shared"
+        if share_topk and (
+            topk is None or topk.dtype != torch.int32 or tuple(topk.shape) != (hidden.shape[0], 1, self.cfg.index_topk)
+        ):
+            raise ValueError("invalid cross-stage shared indexer state")
+        distributed.pipeline_send(hidden, self.cfg.pp_rank + 1)
+        distributed.pipeline_send(residual, self.cfg.pp_rank + 1)
+        if share_topk:
+            distributed.pipeline_send(topk, self.cfg.pp_rank + 1)
+        return hidden
+
     def _make_decoder(
         self, cfg: Glm52Config, layer_id: int, dtype: torch.dtype, device: torch.device
     ) -> Glm52DecoderLayer:
@@ -1041,9 +1104,9 @@ class Glm52Model(DeepseekV3Model):
         return self.cfg.indexer_rope_interleave
 
     def _prepare_mla_slots(self) -> torch.Tensor | None:
-        if len(self.layers) <= 1 or self.cfg.model_type.endswith("_mtp"):
+        if self.layer_end - self.layer_begin <= 1 or self.cfg.model_type.endswith("_mtp"):
             return None
-        attention = self.layers[0].self_attn
+        attention = self.layers[self.layer_begin].self_attn
         if not attention._dynamic_mla_ready or not attention._can_fuse_decode():
             return None
         context = get_forward_context().attention_backend.mla_preprocess_context(attention)
@@ -1090,7 +1153,9 @@ class Glm52ForCausalLM(PyModelBase):
         self.cfg.layerwise_split_rank = int(config.get("layerwise_split_rank", 0))
         self.cfg.moe_tp_size = int(config.get("moe_tp_size", 1))
         self.cfg.moe_tp_rank = int(config.get("moe_tp_rank", 0))
-        self.cfg.world_size = int(config.get("world_size", self.cfg.tp_size * self.cfg.dp_size * self.cfg.cp_size))
+        self.cfg.world_size = int(
+            config.get("world_size", self.cfg.tp_size * self.cfg.dp_size * self.cfg.cp_size * self.cfg.pp_size)
+        )
         self.cfg.validate()
         dtype = self.resolve_dtype(config.get("dtype") or config.get("torch_dtype"))
         device = torch.device(config.get("device", "cuda"))
@@ -1106,13 +1171,17 @@ class Glm52ForCausalLM(PyModelBase):
     def _build_model(self) -> None:
         tp = self.cfg.tp_size
         self.model = Glm52Model(self.cfg, self.dtype, self.device)
-        self.lm_head = ColumnParallelLinear(
-            self.cfg.hidden_size,
-            self.cfg.vocab_size // tp,
-            tp,
-            gather_output=True,
-            dtype=self.dtype,
-            device=self.device,
+        self.lm_head = (
+            ColumnParallelLinear(
+                self.cfg.hidden_size,
+                self.cfg.vocab_size // tp,
+                tp,
+                gather_output=True,
+                dtype=self.dtype,
+                device=self.device,
+            )
+            if self.cfg.pp_rank + 1 == self.cfg.pp_size
+            else None
         )
 
     def compute_greedy_tokens(self, hidden: torch.Tensor) -> torch.Tensor:
@@ -1134,10 +1203,12 @@ class Glm52ForCausalLM(PyModelBase):
         if self.model is None:
             raise RuntimeError("GLM model body must be built before loading weights")
 
-        if load_embedding:
+        if load_embedding and cfg.pp_rank == 0:
             loader.copy_shard("model.embed_tokens.weight", dim=1)
 
-        for i in range(cfg.n_layers):
+        layer_begin = cfg.n_layers * cfg.pp_rank // cfg.pp_size
+        layer_end = cfg.n_layers * (cfg.pp_rank + 1) // cfg.pp_size
+        for i in range(layer_begin, layer_end):
             p = f"model.layers.{i}."
             loader.copy_replicated(p + "input_layernorm.weight")
             loader.copy_replicated(p + "post_attention_layernorm.weight")
@@ -1194,6 +1265,7 @@ class Glm52ForCausalLM(PyModelBase):
 
             self.model.layers[i].mlp.load_from_checkpoint(loader, p + "mlp.")
 
-        loader.copy_replicated("model.norm.weight")
-        if load_lm_head:
-            loader.copy_shard("lm_head.weight", dim=0)
+        if cfg.pp_rank + 1 == cfg.pp_size:
+            loader.copy_replicated("model.norm.weight")
+            if load_lm_head:
+                loader.copy_shard("lm_head.weight", dim=0)
