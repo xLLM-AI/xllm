@@ -38,7 +38,7 @@ struct OxygenVideoInputs {
 class OxygenVisionPatchEmbedImpl : public torch::nn::Module {
  public:
   OxygenVisionPatchEmbedImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_vlm_model_args().vision();
     auto options = context.get_tensor_options();
 
     auto in_features = model_args.mm_num_channels() *
@@ -94,7 +94,7 @@ TORCH_MODULE(OxygenVisionPatchEmbed);
 class OxygenVisionEmbeddingsImpl : public torch::nn::Module {
  public:
   OxygenVisionEmbeddingsImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_vlm_model_args().vision();
     auto options = context.get_tensor_options();
     embed_dim_ = model_args.mm_hidden_size();
     image_size_ = model_args.mm_image_size();
@@ -198,7 +198,7 @@ TORCH_MODULE(OxygenVisionEmbeddings);
 class OxygenVisionPatchMergerImpl : public torch::nn::Module {
  public:
   OxygenVisionPatchMergerImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_vlm_model_args().vision();
     options_ = context.get_tensor_options();
     auto parallel_args = context.get_parallel_args();
     int64_t dim = model_args.mm_projection_dim();
@@ -324,7 +324,7 @@ class OxygenVisionTransformerImpl : public torch::nn::Module {
  public:
   OxygenVisionTransformerImpl(const ModelContext& context)
       : options_(context.get_tensor_options()) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_vlm_model_args().vision();
     spatial_merge_size_ = model_args.mm_spatial_merge_size();
     hidden_size_ = model_args.mm_hidden_size();
     out_hidden_size_ = model_args.mm_projection_dim();
@@ -553,7 +553,7 @@ TORCH_MODULE(OxygenVisionTransformer);
 class OxygenvlmForConditionalGenerationImpl : public torch::nn::Module {
  public:
   OxygenvlmForConditionalGenerationImpl(const ModelContext& context)
-      : model_args_(context.get_model_args()),
+      : model_args_(context.get_vlm_model_args()),
         options_(context.get_tensor_options()) {
     visual_ = register_module("visual", OxygenVisionTransformer(context));
 
@@ -593,7 +593,7 @@ class OxygenvlmForConditionalGenerationImpl : public torch::nn::Module {
     std::optional<OxygenVideoInputs> video_input;
     prepare_encoder_input(input_params, image_input, video_input);
 
-    auto merge_size = model_args_.mm_image_merge_size();
+    auto merge_size = model_args_.vision().mm_image_merge_size();
     MMDict multimodal_embeds;
     if (image_input) {
       // visual
@@ -702,7 +702,7 @@ class OxygenvlmForConditionalGenerationImpl : public torch::nn::Module {
   }
 
  private:
-  ModelArgs model_args_;
+  VlmModelArgs model_args_;
   torch::TensorOptions options_;
   OxygenVisionTransformer visual_{nullptr};
   OxygenForCausalLM language_model_{nullptr};

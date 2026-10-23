@@ -31,8 +31,19 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
                            const QuantArgs& quant_args,
                            const ParallelArgs& parallel_args,
                            const torch::TensorOptions& options)
+    : FusedMoEImpl(LlmModelArgs(model_args),
+                   moe_args,
+                   quant_args,
+                   parallel_args,
+                   options) {}
+
+FusedMoEImpl::FusedMoEImpl(const LlmModelArgs& model_args,
+                           const FusedMoEArgs& moe_args,
+                           const QuantArgs& quant_args,
+                           const ParallelArgs& parallel_args,
+                           const torch::TensorOptions& options)
     : num_total_experts_(model_args.n_routed_experts()),
-      hidden_size_(model_args.hidden_size()),
+      hidden_size_(model_args.transformer().hidden_size()),
       options_(options),
       tp_pg_(parallel_args.tp_group_) {
   CHECK(moe_args.is_gated) << "CUDA FusedMoE only supports gated experts.";

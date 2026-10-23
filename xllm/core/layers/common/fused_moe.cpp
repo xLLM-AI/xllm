@@ -20,7 +20,18 @@ limitations under the License.
 namespace xllm {
 namespace layer {
 
-FusedMoEImpl::FusedMoEImpl(const ModelArgs& /*model_args*/,
+FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
+                           const FusedMoEArgs& moe_args,
+                           const QuantArgs& quant_args,
+                           const ParallelArgs& parallel_args,
+                           const torch::TensorOptions& options)
+    : FusedMoEImpl(LlmModelArgs(model_args),
+                   moe_args,
+                   quant_args,
+                   parallel_args,
+                   options) {}
+
+FusedMoEImpl::FusedMoEImpl(const LlmModelArgs& /*model_args*/,
                            const FusedMoEArgs& /*moe_args*/,
                            const QuantArgs& /*quant_args*/,
                            const ParallelArgs& /*parallel_args*/,

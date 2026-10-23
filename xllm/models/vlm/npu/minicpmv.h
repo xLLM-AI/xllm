@@ -38,10 +38,10 @@ namespace xllm::npu::model {
 class BaseResamplerImpl : public torch::nn::Module {
  public:
   BaseResamplerImpl(const ModelContext& context)
-      : num_queries_(context.get_model_args().query_num()),
-        embed_dim_(context.get_model_args().hidden_size()),
-        num_heads_(context.get_model_args().n_heads()),
-        kv_dim_(context.get_model_args().mm_hidden_size()) {
+      : num_queries_(context.get_vlm_model_args().query_num()),
+        embed_dim_(context.get_vlm_model_args().transformer().hidden_size()),
+        num_heads_(context.get_vlm_model_args().transformer().n_heads()),
+        kv_dim_(context.get_vlm_model_args().vision().mm_hidden_size()) {
     auto options = context.get_tensor_options();
     // Initialize learnable query parameter
     query_ =
@@ -112,7 +112,7 @@ TORCH_MODULE(BaseResampler);
 class KVProjectorLinearImpl : public torch::nn::Module {
  public:
   KVProjectorLinearImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_vlm_model_args().vision();
 
     linear_ = register_module(
         "linear",
@@ -410,7 +410,7 @@ TORCH_MODULE(Resampler2_5);
 class Idefics2VisionEmbeddingsImpl : public torch::nn::Module {
  public:
   Idefics2VisionEmbeddingsImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_vlm_model_args().vision();
     auto options = context.get_tensor_options();
 
     embed_dim_ = model_args.mm_hidden_size();
@@ -555,7 +555,7 @@ TORCH_MODULE(Idefics2VisionEmbeddings);
 class Idefics2EncoderImpl : public torch::nn::Module {
  public:
   Idefics2EncoderImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_vlm_model_args().vision();
 
     layers_.reserve(model_args.mm_num_hidden_layers());
     blocks_ = register_module("blocks", torch::nn::ModuleList());
@@ -611,7 +611,7 @@ class VisionAdapterMLPImpl : public torch::nn::Module {
   VisionAdapterMLPImpl(const ModelContext& context) {
     auto options = context.get_tensor_options();
 
-    auto embed_dim = context.get_model_args().hidden_size();
+    auto embed_dim = context.get_vlm_model_args().transformer().hidden_size();
     int num_layers = 3;
     layers_ = register_module("layers", torch::nn::ModuleList());
     for (int idx = 0; idx < num_layers; ++idx) {
@@ -738,7 +738,7 @@ TORCH_MODULE(VisionAdapterMLP);
 class Idefics2VisionTransformerImpl : public torch::nn::Module {
  public:
   Idefics2VisionTransformerImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_vlm_model_args().vision();
     auto options = context.get_tensor_options();
 
     embeddings_ =
@@ -806,10 +806,10 @@ struct MiniCPMVImageInputs {
 class MiniCPMV2_6Impl : public torch::nn::Module {
  public:
   MiniCPMV2_6Impl(const ModelContext& context)
-      : model_args_(context.get_model_args()),
+      : model_args_(context.get_vlm_model_args()),
         options_(context.get_tensor_options()) {
     use_vision_adapter_ =
-        context.get_model_args().vision_custom_adapter() == "mlp3";
+        context.get_vlm_model_args().vision().vision_custom_adapter() == "mlp3";
 
     vpm_ = register_module("visual_", Idefics2VisionTransformer(context));
 
@@ -1082,7 +1082,7 @@ class MiniCPMV2_6Impl : public torch::nn::Module {
 
  private:
   QWen2ForCausalLM language_model_{nullptr};
-  ModelArgs model_args_;
+  VlmModelArgs model_args_;
   int64_t im_start_id_val_ = 151646;
   int64_t im_end_id_val_ = 151647;
   int64_t slice_start_id_val_ = 151656;

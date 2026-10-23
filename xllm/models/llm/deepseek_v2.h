@@ -53,27 +53,28 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
  protected:
   DeepseekV2ModelImpl(const ModelContext& context,
                       const DecoderLayerFactory& decoder_layer_factory)
-      : model_args_(context.get_model_args()),
+      : model_args_(context.get_llm_model_args()),
         device_(context.get_tensor_options().device()) {
     auto options = context.get_tensor_options();
     auto parallel_args = context.get_parallel_args();
 
     blocks_ = register_module("layers", torch::nn::ModuleList());
-    layers_.reserve(model_args_.n_layers());
+    layers_.reserve(model_args_.transformer().n_layers());
 
-    embed_tokens_ =
-        register_module("embed_tokens",
-                        layer::WordEmbedding(model_args_.vocab_size(),
-                                             model_args_.hidden_size(),
-                                             context.get_parallel_args(),
-                                             options));
-    norm_ = register_module(
-        "norm",
-        layer::RMSNorm(
-            model_args_.hidden_size(), model_args_.rms_norm_eps(), options));
+    embed_tokens_ = register_module(
+        "embed_tokens",
+        layer::WordEmbedding(model_args_.transformer().vocab_size(),
+                             model_args_.transformer().hidden_size(),
+                             context.get_parallel_args(),
+                             options));
+    norm_ =
+        register_module("norm",
+                        layer::RMSNorm(model_args_.transformer().hidden_size(),
+                                       model_args_.transformer().rms_norm_eps(),
+                                       options));
 
     // create decoder layers
-    for (int32_t i = 0; i < model_args_.n_layers(); ++i) {
+    for (int32_t i = 0; i < model_args_.transformer().n_layers(); ++i) {
       auto block = decoder_layer_factory(context, i);
       layers_.push_back(block);
       blocks_->push_back(block);
@@ -230,7 +231,7 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
 
   layer::RMSNorm& norm_mod() { return norm_; }
 
-  ModelArgs model_args_;
+  LlmModelArgs model_args_;
 
  private:
   torch::nn::ModuleList blocks_{nullptr};

@@ -33,7 +33,7 @@ namespace xllm {
 class Qwen3_VisionPatchEmbedImpl : public torch::nn::Module {
  public:
   Qwen3_VisionPatchEmbedImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_vlm_model_args().vision();
     auto options = context.get_tensor_options();
 
     auto in_features = model_args.mm_num_channels() *
@@ -89,7 +89,7 @@ TORCH_MODULE(Qwen3_VisionPatchEmbed);
 class Qwen3_VisionRotaryEmbeddingImpl : public torch::nn::Module {
  public:
   Qwen3_VisionRotaryEmbeddingImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_vlm_model_args().vision();
     auto options = context.get_tensor_options();
 
     dim_ = model_args.mm_head_dim() / 2;
@@ -135,7 +135,7 @@ class Qwen3_VisionPatchMergerImpl : public torch::nn::Module {
  public:
   Qwen3_VisionPatchMergerImpl(const ModelContext& context,
                               bool use_postshuffle_norm = false) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_vlm_model_args().vision();
     auto options = context.get_tensor_options();
     auto quant_args = context.get_quant_args();
     auto parallel_args = context.get_parallel_args();
@@ -320,7 +320,7 @@ class Qwen3_VisionTransformerImpl : public torch::nn::Module {
  public:
   Qwen3_VisionTransformerImpl(const ModelContext& context)
       : options_(context.get_tensor_options()) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_vlm_model_args().vision();
     hidden_size_ = model_args.mm_hidden_size();
     num_heads_ = model_args.mm_num_attention_heads();
     window_size_ = model_args.mm_window_size();

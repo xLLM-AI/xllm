@@ -37,7 +37,7 @@ class DFlashQwen3ModelImpl : public QWen3ModelImpl {
  public:
   explicit DFlashQwen3ModelImpl(const ModelContext& context)
       : QWen3ModelImpl(context) {
-    const ModelArgs& model_args = context.get_model_args();
+    const auto& model_args = context.get_transformer_model_args();
     const ParallelArgs& parallel_args = context.get_parallel_args();
     const int32_t dp_size = parallel_args.dp_size();
     const int32_t cp_size = parallel_args.cp_size();

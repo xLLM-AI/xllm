@@ -333,11 +333,12 @@ Glm5NextKDAImpl::Glm5NextKDAImpl(const ModelArgs& args,
 }
 
 Glm5NextKDAImpl::Glm5NextKDAImpl(const ModelContext& context)
-    : Glm5NextKDAImpl(context.get_model_args(),
-                      context.get_quant_args(),
-                      context.get_parallel_args(),
-                      context.get_tensor_options(),
-                      context.get_model_args().linear_lower_bound()) {}
+    : Glm5NextKDAImpl(
+          context.get_transformer_model_args(),
+          context.get_quant_args(),
+          context.get_parallel_args(),
+          context.get_tensor_options(),
+          context.get_transformer_model_args().linear_lower_bound()) {}
 
 void Glm5NextKDAImpl::load_state_dict(const StateDict& state_dict) {
   load_column_linear(q_proj_, state_dict, "q_proj.");

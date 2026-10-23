@@ -65,7 +65,7 @@ torch::Tensor _create_4d_causal_attention_mask(torch::IntArrayRef input_shape,
 class CLIPTextEmbeddingImpl : public torch::nn::Module {
  public:
   explicit CLIPTextEmbeddingImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().text_encoder();
     auto options = context.get_tensor_options();
     token_embedding_ = register_module(
         "token_embedding",
@@ -128,7 +128,7 @@ TORCH_MODULE(CLIPTextEmbedding);
 class CLIPMLPImpl : public torch::nn::Module {
  public:
   explicit CLIPMLPImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().text_encoder();
     auto options = context.get_tensor_options();
     act_ = register_module("act", torch::nn::Functional(quick_gelu));
 
@@ -169,7 +169,7 @@ TORCH_MODULE(CLIPMLP);
 class CLIPAttentionImpl : public torch::nn::Module {
  public:
   explicit CLIPAttentionImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().text_encoder();
     auto options = context.get_tensor_options();
     CHECK(model_args.mm_hidden_size() % model_args.mm_num_attention_heads() ==
           0);
@@ -272,7 +272,7 @@ TORCH_MODULE(CLIPAttention);
 class CLIPEncoderLayerImpl : public torch::nn::Module {
  public:
   explicit CLIPEncoderLayerImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().text_encoder();
     auto options = context.get_tensor_options();
     self_attn_ = register_module("self_attn", CLIPAttention(context));
     layer_norm1_ = register_module(
@@ -357,7 +357,7 @@ TORCH_MODULE(CLIPEncoderLayer);
 class CLIPEncoderImpl : public torch::nn::Module {
  public:
   explicit CLIPEncoderImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().text_encoder();
     auto options = context.get_tensor_options();
     blocks_ = register_module("layers", torch::nn::ModuleList());
     layers_.reserve(model_args.mm_num_hidden_layers());
@@ -420,7 +420,7 @@ TORCH_MODULE(CLIPEncoder);
 class CLIPTextTransformerImpl : public torch::nn::Module {
  public:
   explicit CLIPTextTransformerImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().text_encoder();
     auto options = context.get_tensor_options();
     embeddings_ = register_module("embeddings", CLIPTextEmbedding(context));
     final_layer_norm_ = register_module(
@@ -488,7 +488,7 @@ TORCH_MODULE(CLIPTextTransformer);
 class CLIPTextModelImpl : public torch::nn::Module {
  public:
   explicit CLIPTextModelImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().text_encoder();
     auto options = context.get_tensor_options();
     eos_token_id = model_args.eos_token_id();
     transformer_ = register_module("transformer", CLIPTextTransformer(context));

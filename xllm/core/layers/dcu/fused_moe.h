@@ -21,6 +21,7 @@ limitations under the License.
 
 #include "core/framework/model/moe_execution_input.h"
 #include "framework/model/model_args.h"
+#include "framework/model/model_family_args.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/quantization/quant_args.h"
 #include "framework/state_dict/state_dict.h"
@@ -36,6 +37,11 @@ namespace layer {
 class FusedMoEImpl final : public torch::nn::Module {
  public:
   FusedMoEImpl() = default;
+  FusedMoEImpl(const LlmModelArgs& model_args,
+               const FusedMoEArgs& moe_args,
+               const QuantArgs& quant_args,
+               const ParallelArgs& parallel_args,
+               const torch::TensorOptions& options);
   FusedMoEImpl(const ModelArgs& model_args,
                const FusedMoEArgs& moe_args,
                const QuantArgs& quant_args,

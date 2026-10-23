@@ -409,7 +409,7 @@ TORCH_MODULE(TextVAEBlock);
 class ColaTextVAEEncoderImpl final : public torch::nn::Module {
  public:
   ColaTextVAEEncoderImpl(const ModelContext& ctx) {
-    const auto& args = ctx.get_model_args();
+    const auto& args = ctx.get_dit_model_args().vae();
     int64_t vae_dim = args.vae_dim();
     dim_ = vae_dim;
     int64_t vae_num_heads = args.vae_num_heads();
@@ -556,7 +556,7 @@ TORCH_MODULE(ColaTextVAEEncoder);
 class ColaTextVAEDecoderImpl final : public torch::nn::Module {
  public:
   ColaTextVAEDecoderImpl(const ModelContext& ctx) {
-    const auto& args = ctx.get_model_args();
+    const auto& args = ctx.get_dit_model_args().vae();
     int64_t vae_dim = args.vae_dim();
     int64_t vae_num_heads = args.vae_num_heads();
     int64_t ffn_dim = args.ffn_dim();
@@ -666,7 +666,7 @@ class ColaTextVAEModelImpl final : public torch::nn::Module {
     encoder_ = register_module("encoder", ColaTextVAEEncoder(ctx));
     decoder_ = register_module("decoder", ColaTextVAEDecoder(ctx));
 
-    const auto& args = ctx.get_model_args();
+    const auto& args = ctx.get_dit_model_args().vae();
     scaling_factor_ = args.scaling_factor();
     shifting_factor_ = args.shifting_factor();
     use_variation_ = args.use_variation();

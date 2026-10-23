@@ -87,8 +87,9 @@ class LongCatImageEditPipelineImpl : public torch::nn::Module {
  public:
   explicit LongCatImageEditPipelineImpl(const DiTModelContext& context)
       : context_(context),
-        vl_image_processor_(context.get_model_args("text_encoder")) {
-    const auto& model_args = context.get_model_args("vae");
+        vl_image_processor_(
+            context.get_vlm_model_args("text_encoder").vision()) {
+    const auto& model_args = context.get_dit_model_args("vae").vae();
     options_ = context.get_tensor_options();
 
     // Initialize FlashinferWorkspace for attention operations
@@ -101,32 +102,23 @@ class LongCatImageEditPipelineImpl : public torch::nn::Module {
 
     LOG(INFO) << "Initializing LongCat-Image-Edit pipeline...";
 
-    vae_image_processor_ =
-        VAEImageProcessor(ModelContext(context.get_parallel_args(),
-                                       context.get_model_args("vae"),
-                                       context.get_quant_args("vae"),
-                                       context.get_tensor_options()),
-                          /*do_resize=*/true,
-                          /*do_normalize=*/true,
-                          /*do_binarize=*/false,
-                          /*do_convert_rgb=*/false,
-                          /*do_convert_grayscale=*/false,
-                          model_args.latent_channels());
-    vae_ = VAE(ModelContext(context.get_parallel_args(),
-                            context.get_model_args("vae"),
-                            context.get_quant_args("vae"),
-                            context.get_tensor_options()));
+    vae_image_processor_ = VAEImageProcessor(context.get_model_context("vae"),
+                                             /*do_resize=*/true,
+                                             /*do_normalize=*/true,
+                                             /*do_binarize=*/false,
+                                             /*do_convert_rgb=*/false,
+                                             /*do_convert_grayscale=*/false,
+                                             model_args.latent_channels());
+    vae_ = VAE(context.get_model_context("vae"));
 
     pos_embed_ = register_module(
         "pos_embed",
-        LongCatImagePosEmbed(
-            kLongCatRopeScaleBase,
-            context.get_model_args("transformer").axes_dims_rope()));
+        LongCatImagePosEmbed(kLongCatRopeScaleBase,
+                             context.get_dit_model_args("transformer")
+                                 .transformer()
+                                 .axes_dims_rope()));
     transformer_ = LongCatImageTransformer2DModel(
-        ModelContext(context.get_parallel_args(),
-                     context.get_model_args("transformer"),
-                     context.get_quant_args("transformer"),
-                     context.get_tensor_options()));
+        context.get_model_context("transformer"));
 
     const auto& original_parallel_args = context.get_parallel_args();
     ParallelArgs vlm_parallel_args = original_parallel_args;
@@ -147,16 +139,11 @@ class LongCatImageEditPipelineImpl : public torch::nn::Module {
     LOG(INFO)
         << "LongCat-Image-Edit uses Qwen2_5_VL as text encoder (edit mode)";
     text_encoder_ = Qwen2_5_VLForConditionalGeneration(
-        ModelContext(vlm_parallel_args,
-                     context.get_model_args("text_encoder"),
-                     context.get_quant_args("text_encoder"),
-                     context.get_tensor_options()));
+        context.get_model_context("text_encoder", ModelFamily::VLM)
+            .with_parallel_args(vlm_parallel_args));
 
-    scheduler_ = FlowMatchEulerDiscreteScheduler(
-        ModelContext(context.get_parallel_args(),
-                     context.get_model_args("scheduler"),
-                     context.get_quant_args("scheduler"),
-                     context.get_tensor_options()));
+    scheduler_ =
+        FlowMatchEulerDiscreteScheduler(context.get_model_context("scheduler"));
 
     prompt_template_encode_prefix_ = PROMPT_TEMPLATE_ENCODE_PREFIX_EDIT;
     prompt_template_encode_suffix_ = PROMPT_TEMPLATE_ENCODE_SUFFIX_EDIT;
@@ -374,8 +361,8 @@ class LongCatImageEditPipelineImpl : public torch::nn::Module {
     CHECK(image.has_value())
         << "LongCat-Image-Edit encode_prompt requires an input image.";
 
-    const auto& text_encoder_args = context_.get_model_args("text_encoder");
-    int32_t merge_size = text_encoder_args.mm_image_merge_size();
+    const auto& text_encoder_args = context_.get_vlm_model_args("text_encoder");
+    int32_t merge_size = text_encoder_args.vision().mm_image_merge_size();
     int64_t merge_length = static_cast<int64_t>(merge_size) * merge_size;
 
     // 1. Process input image with VL image processor -> pixel_values,
@@ -430,7 +417,8 @@ class LongCatImageEditPipelineImpl : public torch::nn::Module {
         prompt_template_encode_suffix_, &suffix_tokens, false));
     int64_t suffix_len = suffix_tokens.size();
 
-    int32_t vision_start_token_id = text_encoder_args.vision_start_token_id();
+    int32_t vision_start_token_id =
+        text_encoder_args.vision().vision_start_token_id();
     int64_t prefix_len = 0;
     for (size_t i = 0; i < prefix_tokens.size(); ++i) {
       if (prefix_tokens[i] == vision_start_token_id) {
@@ -461,7 +449,7 @@ class LongCatImageEditPipelineImpl : public torch::nn::Module {
       batch_all_tokens.push_back(all_tokens);
     }
 
-    int32_t pad_token_id = text_encoder_args.pad_token_id();
+    int32_t pad_token_id = text_encoder_args.transformer().pad_token_id();
     if (pad_token_id == 0) {
       auto pad_id = tokenizer_->token_to_id("<|endoftext|>");
       if (pad_id.has_value()) {
@@ -530,7 +518,7 @@ class LongCatImageEditPipelineImpl : public torch::nn::Module {
     torch::Tensor positions_3d =
         positions_2d.view({3, batch_size, total_seq_len}).to(torch::kLong);
 
-    std::vector<KVCache> kv_caches(text_encoder_args.n_layers());
+    std::vector<KVCache> kv_caches(text_encoder_args.transformer().n_layers());
     MMData mm_data;
     mm_data.set(MMType::IMAGE, std::move(mm_items));
     std::vector<MMData> mm_data_list(static_cast<size_t>(batch_size), mm_data);
@@ -679,10 +667,12 @@ class LongCatImageEditPipelineImpl : public torch::nn::Module {
     torch::Tensor position_ids =
         torch::ones({3, input_ids.size(0), input_ids.size(1)}, long_opts);
 
-    const auto& text_encoder_args = context_.get_model_args("text_encoder");
-    int64_t spatial_merge_size = text_encoder_args.mm_image_merge_size();
-    int64_t image_token_id = text_encoder_args.image_token_id();
-    int64_t vision_start_token_id = text_encoder_args.vision_start_token_id();
+    const auto& text_encoder_args = context_.get_vlm_model_args("text_encoder");
+    int64_t spatial_merge_size =
+        text_encoder_args.vision().mm_image_merge_size();
+    int64_t image_token_id = text_encoder_args.vision().image_token_id();
+    int64_t vision_start_token_id =
+        text_encoder_args.vision().vision_start_token_id();
 
     int64_t global_image_index = 0;
     int64_t num_image_grids =
@@ -824,7 +814,9 @@ class LongCatImageEditPipelineImpl : public torch::nn::Module {
     params.attn_metadata = std::make_shared<layer::AttentionMetadata>(
         layer::AttentionMetadataBuilder::build(
             ModelParamsView(params),
-            context_.get_model_args("text_encoder").enable_mla()));
+            context_.get_vlm_model_args("text_encoder")
+                .transformer()
+                .enable_mla()));
     params.attn_metadata->is_causal = true;
     params.embedding.input_embedding =
         text_encoder_->get_input_embeddings(tokens, ModelParamsView(params));

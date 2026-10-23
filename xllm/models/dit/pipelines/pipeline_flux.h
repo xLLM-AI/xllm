@@ -17,7 +17,7 @@ limitations under the License.
 #include "core/framework/dit_cache/dit_cache.h"
 #include "core/framework/model/dit_model_output.h"
 #include "core/framework/model/dit_model_params.h"
-#include "core/framework/model/model_args_view.h"
+#include "core/framework/model/model_family_args.h"
 #include "models/dit/pipelines/pipeline_flux_base.h"
 #include "models/dit/transformers/transformer_flux.h"
 // pipeline_flux compatible with huggingface weights
@@ -29,14 +29,13 @@ namespace xllm {
 class FluxPipelineImpl : public FluxPipelineBaseImpl {
  public:
   FluxPipelineImpl(const DiTModelContext& context) {
-    const DiTVaeModelArgsView model_args =
-        context.get_dit_model_args("vae").vae();
+    const DiTVaeModelArgs& model_args = context.get_dit_model_args("vae").vae();
     options_ = context.get_tensor_options();
     vae_scale_factor_ = 1 << (model_args.block_out_channels().size() - 1);
 
     vae_shift_factor_ = model_args.shift_factor();
     vae_scaling_factor_ = model_args.scale_factor();
-    const DiTTextEncoderModelArgsView text_encoder_args =
+    const DiTTextEncoderModelArgs& text_encoder_args =
         context.get_dit_model_args("text_encoder").text_encoder();
     tokenizer_max_length_ = text_encoder_args.max_position_embeddings();
     LOG(INFO) << "Initializing Flux pipeline...";
@@ -48,7 +47,7 @@ class FluxPipelineImpl : public FluxPipelineBaseImpl {
                                              false,
                                              model_args.latent_channels());
     vae_ = VAE(context.get_model_context("vae"));
-    const DiTTransformerModelArgsView transformer_args =
+    const DiTTransformerModelArgs& transformer_args =
         context.get_dit_model_args("transformer").transformer();
     pos_embed_ = register_module(
         "pos_embed",

@@ -105,12 +105,13 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
   QWen3Eagle3ModelImpl(const std::string& model_type,
                        const ModelContext& context)
       : model_type_(model_type), options_(context.get_tensor_options()) {
-    auto model_args = context.get_model_args();
+    const auto& llm_args = context.get_llm_model_args();
+    const auto& model_args = llm_args.transformer();
     auto parallel_args = context.get_parallel_args();
     mrope_section_ = model_args.rope_scaling_mrope_section();
-    norm_before_fc_ = model_args.norm_before_fc();
-    norm_output_ = model_args.norm_output();
-    CHECK(!(model_args.fc_norm() && norm_before_fc_))
+    norm_before_fc_ = llm_args.norm_before_fc();
+    norm_output_ = llm_args.norm_output();
+    CHECK(!(llm_args.fc_norm() && norm_before_fc_))
         << "Eagle3 fc_norm and norm_before_fc are mutually exclusive";
 
     dp_size_ = parallel_args.dp_size();
@@ -148,9 +149,9 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
     // Eagle3.1 fc_norm variant: one RMSNorm per aux hidden state chunk before
     // the fc projection (mutually exclusive with norm_before_fc_). EAGLE-3
     // drafts consume three target aux hidden states (low/mid/high).
-    if (model_args.fc_norm()) {
+    if (llm_args.fc_norm()) {
       const int64_t num_aux_layers =
-          AuxHiddenCapture::num_aux_layers(model_args);
+          AuxHiddenCapture::num_aux_layers(context.get_llm_model_args());
       fc_norm_.reserve(static_cast<size_t>(num_aux_layers));
       for (int64_t i = 0; i < num_aux_layers; ++i) {
         fc_norm_.emplace_back(register_module("fc_norm_" + std::to_string(i),
@@ -431,7 +432,8 @@ class QWen3Eagle3ForCausalLMImpl : public torch::nn::Module {
   QWen3Eagle3ForCausalLMImpl(const ModelContext& context)
       : device_(context.get_tensor_options().device()),
         dtype_(context.get_tensor_options().dtype().toScalarType()) {
-    auto model_args = context.get_model_args();
+    const auto& llm_args = context.get_llm_model_args();
+    const auto& model_args = llm_args.transformer();
     tie_word_embeddings_ = model_args.tie_word_embeddings();
 
     // register submodules

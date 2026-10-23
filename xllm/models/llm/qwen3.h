@@ -32,10 +32,12 @@ namespace xllm {
 class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
  public:
   QWen3ModelImpl(const ModelContext& context)
-      : LlmModelImplBase<layer::Qwen3DecoderLayer>("qwen3",
-                                                   context.get_model_args()) {
+      : LlmModelImplBase<layer::Qwen3DecoderLayer>(
+            "qwen3",
+            context.get_transformer_model_args(),
+            context.get_transformer_model_args().enable_mla()) {
     // register submodules
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_transformer_model_args();
     auto options = context.get_tensor_options();
 
     if (!mrope_section_.empty()) {
@@ -216,7 +218,7 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
 #if defined(USE_NPU)
     if (params.graph.attn_mask.defined()) {
       return layer::AttentionMetadataBuilder::build(
-          params, model_args_.enable_mla(), params.graph.attn_mask);
+          params, enable_mla_, params.graph.attn_mask);
     }
     max_seq_len_ = std::max(params.meta.kv_max_seq_len, max_seq_len_);
     bool is_spec_verify = false;
@@ -229,7 +231,7 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
     if (!use_append_mask) {
       return layer::AttentionMetadataBuilder::build(
           params,
-          model_args_.enable_mla(),
+          enable_mla_,
           dense_attn_mask_.get_attn_mask(
               max_seq_len_, h.dtype().toScalarType(), h.device()));
     }
@@ -237,7 +239,7 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
     if (num_sequences <= 0) {
       return layer::AttentionMetadataBuilder::build(
           params,
-          model_args_.enable_mla(),
+          enable_mla_,
           dense_attn_mask_.get_attn_mask(
               max_seq_len_, h.dtype().toScalarType(), h.device()));
     }
@@ -252,10 +254,9 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
           q_len, kv_len, max_kv_seq, h.dtype().toScalarType(), h.device()));
     }
     return layer::AttentionMetadataBuilder::build(
-        params, model_args_.enable_mla(), torch::cat(req_mask_vec, 0));
+        params, enable_mla_, torch::cat(req_mask_vec, 0));
 #else
-    return layer::AttentionMetadataBuilder::build(params,
-                                                  model_args_.enable_mla());
+    return layer::AttentionMetadataBuilder::build(params, enable_mla_);
 #endif
   }
 

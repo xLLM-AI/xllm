@@ -1531,7 +1531,7 @@ class UMT5TextEncoderImpl : public torch::nn::Module {
   explicit UMT5TextEncoderImpl(const ModelContext& context)
       : context_(context) {
     umt5_ = register_module("umt5", UMT5EncoderModel(context));
-    d_model_ = context.get_model_args().d_model();
+    d_model_ = context.get_dit_model_args().text_encoder().d_model();
   }
 
   // Encode text tokens to embeddings.

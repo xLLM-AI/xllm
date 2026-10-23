@@ -28,23 +28,26 @@ DeepseekV4DecoderLayerImpl::DeepseekV4DecoderLayerImpl(
     const ModelContext& context,
     int32_t layer_id)
     : layer_id_(layer_id) {
-  const auto& args = context.get_model_args();
+  const auto& args = context.get_llm_model_args();
+  const auto& transformer_args = args.transformer();
   const auto& quant_args = context.get_quant_args();
   const auto& parallel_args = context.get_parallel_args();
   const auto& options = context.get_tensor_options();
 
-  int64_t hidden_size = args.hidden_size();
+  int64_t hidden_size = transformer_args.hidden_size();
 
   hc_mult_ = args.hc_mult();
   hc_sinkhorn_iters_ = args.hc_sinkhorn_iters();
   hc_eps_ = static_cast<double>(args.hc_eps());
-  norm_eps_ = static_cast<double>(args.rms_norm_eps());
+  norm_eps_ = static_cast<double>(transformer_args.rms_norm_eps());
 
   attention_ = register_module("attn", DSAttention(context, layer_id));
   attn_norm_ = register_module(
-      "attn_norm", RMSNorm(hidden_size, args.rms_norm_eps(), options));
+      "attn_norm",
+      RMSNorm(hidden_size, transformer_args.rms_norm_eps(), options));
   ffn_norm_ = register_module(
-      "ffn_norm", RMSNorm(hidden_size, args.rms_norm_eps(), options));
+      "ffn_norm",
+      RMSNorm(hidden_size, transformer_args.rms_norm_eps(), options));
   FusedMoEArgs moe_args;
   moe_args.is_gated = true;
   // DeepseekV4 drives expert routing through its own DeepseekV4Gate and only
@@ -52,8 +55,12 @@ DeepseekV4DecoderLayerImpl::DeepseekV4DecoderLayerImpl(
   // therefore never used; skip loading its weights to avoid redundant memory
   // allocation and a duplicate copy of the router weight matrix.
   moe_args.skip_gate_load = true;
-  moe_mlp_ = register_module(
-      "ffn", FusedMoE(args, moe_args, quant_args, parallel_args, options));
+  moe_mlp_ = register_module("ffn",
+                             FusedMoE(context.get_llm_model_args(),
+                                      moe_args,
+                                      quant_args,
+                                      parallel_args,
+                                      options));
   moe_mlp_->set_eplb_layer_id(layer_id_ - args.first_k_dense_replace());
   // Register as "gate" to match Python's mlp.gate module path.
   gate_ = register_module("gate", DeepseekV4Gate(context, layer_id));

@@ -28,7 +28,8 @@ class DeepseekV32MtpModelImpl
       : xllm::npu::model::MtpModelImplBase<DeepseekV32DecoderLayer>(
             "deepseek_v32_mtp",
             context) {
-    auto model_args = context.get_model_args();
+    const auto& llm_args = context.get_llm_model_args();
+    const auto& model_args = llm_args.transformer();
     auto options = context.get_tensor_options();
 
     int32_t mask_value = model_args.dtype() == "bfloat16" ? 1 : -9984;
@@ -37,8 +38,8 @@ class DeepseekV32MtpModelImpl
                                       /*mask_value=*/mask_value);
 
     cos_sin_ = layer::rotary::get_deepseek_rotary_embedding(
-        model_args.qk_rope_head_dim(),
-        model_args.qk_rope_head_dim(),
+        llm_args.qk_rope_head_dim(),
+        llm_args.qk_rope_head_dim(),
         model_args.max_position_embeddings(),
         model_args.rope_scaling_original_max_position_embeddings(),
         model_args.rope_theta(),

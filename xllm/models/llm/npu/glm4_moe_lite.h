@@ -91,7 +91,8 @@ class Glm4MoeLiteModelImpl : public torch::nn::Module {
   Glm4MoeLiteModelImpl(const ModelContext& context)
       : device_(context.get_tensor_options().device()) {
     auto options = context.get_tensor_options();
-    auto model_args = context.get_model_args();
+    const auto& llm_args = context.get_llm_model_args();
+    const auto& model_args = llm_args.transformer();
     auto parallel_args = context.get_parallel_args();
 
     blocks_ = register_module("layers", torch::nn::ModuleList());
@@ -99,15 +100,15 @@ class Glm4MoeLiteModelImpl : public torch::nn::Module {
     // register submodules
     device_ = options.device();
     dtype_ = options.dtype().toScalarType();
-    num_speculative_tokens_ = model_args.num_speculative_tokens();
+    num_speculative_tokens_ = llm_args.num_speculative_tokens();
     npu_embed_tokens_ =
         register_module("npu_embed_tokens", layer::NpuWordEmbedding(context));
 
     atb_pos_emb_ = layer::NpuPosEmbedding(context);
 
     // cos_sin_ = layer::rotary::get_deepseek_rotary_embedding(
-    //     model_args.qk_rope_head_dim(),
-    //     model_args.qk_rope_head_dim(),
+    //     llm_args.qk_rope_head_dim(),
+    //     llm_args.qk_rope_head_dim(),
     //     model_args.max_position_embeddings(),
     //     model_args.rope_scaling_original_max_position_embeddings(),
     //     model_args.rope_theta(),
@@ -121,7 +122,7 @@ class Glm4MoeLiteModelImpl : public torch::nn::Module {
     //     model_args.rope_scaling_mscale_all_dim(),
     //     options);
     cos_sin_ = layer::rotary::get_concat_rotary_embedding(
-        model_args.qk_rope_head_dim(),
+        llm_args.qk_rope_head_dim(),
         model_args.max_position_embeddings(),
         model_args.rope_theta(),
         options);
@@ -149,7 +150,7 @@ class Glm4MoeLiteModelImpl : public torch::nn::Module {
     dp_rank_ = parallel_args.rank() / dp_local_tp_size_;
     rank_ = parallel_args.rank();
     mapping_data_ = parallel_args.mapping_data();
-    num_experts_per_tok_ = model_args.num_experts_per_tok();
+    num_experts_per_tok_ = llm_args.num_experts_per_tok();
     for (int i = 0; i < parallel_args.world_size(); i += dp_local_tp_size_) {
       indices.push_back(i);
     }

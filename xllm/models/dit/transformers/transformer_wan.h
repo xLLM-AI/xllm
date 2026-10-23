@@ -496,7 +496,7 @@ class WanAttentionImpl : public torch::nn::Module {
       : options_(context.get_tensor_options()),
         parallel_args_(parallel_args),
         sparse_attn_config_(sparse_attn_config) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
     quant_args_ = context.get_quant_args();
     dim_ = model_args.head_dim() * model_args.n_heads();
     heads_ = model_args.n_heads();
@@ -899,7 +899,7 @@ class WanImageEmbeddingImpl : public torch::nn::Module {
  public:
   explicit WanImageEmbeddingImpl(const ModelContext& context)
       : options_(context.get_tensor_options()) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
     auto parallel_args = context.get_parallel_args();
     in_features_ = model_args.image_embed_dim();
     out_features_ = model_args.head_dim() * model_args.n_heads();
@@ -980,7 +980,7 @@ class WanTimeTextImageEmbeddingImpl : public torch::nn::Module {
  public:
   explicit WanTimeTextImageEmbeddingImpl(const ModelContext& context)
       : options_(context.get_tensor_options()) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
     dim_ = model_args.head_dim() * model_args.n_heads();
     time_freq_dim_ = model_args.time_freq_dim();
     time_proj_dim_ = dim_ * 6;
@@ -1089,7 +1089,7 @@ class WanRotaryPosEmbedImpl : public torch::nn::Module {
  public:
   explicit WanRotaryPosEmbedImpl(const ModelContext& context)
       : options_(context.get_tensor_options()) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
     attention_head_dim_ = model_args.head_dim();
     patch_size_ = model_args.wan_patch_size();
     max_seq_len_ = model_args.rope_max_seq_len();
@@ -1238,7 +1238,7 @@ class WanTransformerBlockImpl : public torch::nn::Module {
       : options_(context.get_tensor_options()),
         parallel_args_(parallel_args),
         block_idx_(block_idx) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
     quant_args_ = context.get_quant_args();
     dim_ = model_args.head_dim() * model_args.n_heads();
     ffn_dim_ = model_args.ffn_dim();
@@ -1420,7 +1420,7 @@ class WanTransformer3DModelImpl : public torch::nn::Module,
       const ModelContext& context,
       const xllm::dit::SparseAttnConfig& sparse_attn_config = {})
       : options_(context.get_tensor_options()) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
     auto parallel_args = context.get_parallel_args();
     sp_group_ = parallel_args.dit_sp_group_;
     patch_size_ = model_args.wan_patch_size();

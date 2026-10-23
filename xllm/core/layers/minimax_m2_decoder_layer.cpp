@@ -61,7 +61,7 @@ StateDict get_minimax_moe_state_dict(const StateDict& state_dict) {
 MiniMaxM2DecoderLayerImpl::MiniMaxM2DecoderLayerImpl(
     const ModelContext& context,
     int32_t /*layer_id*/) {
-  const auto& model_args = context.get_model_args();
+  const auto& model_args = context.get_transformer_model_args();
   const auto& quant_args = context.get_quant_args();
   const auto& parallel_args = context.get_parallel_args();
   const auto& options = context.get_tensor_options();
@@ -75,7 +75,7 @@ MiniMaxM2DecoderLayerImpl::MiniMaxM2DecoderLayerImpl(
       RMSNorm(model_args.hidden_size(), model_args.rms_norm_eps(), options));
 
   moe_ = register_module("mlp",
-                         FusedMoE(model_args,
+                         FusedMoE(context.get_llm_model_args(),
                                   FusedMoEArgs{.is_gated = true},
                                   quant_args,
                                   parallel_args,

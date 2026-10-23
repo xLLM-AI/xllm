@@ -36,11 +36,11 @@ namespace xllm::npu::model {
 
 class DFlash2CandidateSelector final {
  public:
-  DFlash2CandidateSelector(const ModelArgs& args,
+  DFlash2CandidateSelector(const LlmModelArgs& args,
                            const torch::TensorOptions& options)
       : options_(options),
-        hidden_size_(args.hidden_size()),
-        vocab_size_(args.vocab_size()),
+        hidden_size_(args.transformer().hidden_size()),
+        vocab_size_(args.transformer().vocab_size()),
         rank_(args.dflash2_selector_rank()),
         top_k_(args.dflash2_selector_top_k()) {
     CHECK_GT(rank_, 0) << "DFlash2 selector_rank must be positive.";
@@ -131,14 +131,15 @@ class DFlash2Qwen3ModelImpl final : public ::xllm::QWen3ModelImpl {
  public:
   explicit DFlash2Qwen3ModelImpl(const ModelContext& context)
       : ::xllm::QWen3ModelImpl(context),
-        selector_(context.get_model_args(), context.get_tensor_options()) {
-    const ModelArgs& args = context.get_model_args();
+        selector_(context.get_llm_model_args(), context.get_tensor_options()) {
+    const auto& llm_args = context.get_llm_model_args();
+    const auto& args = llm_args.transformer();
     const ParallelArgs& parallel_args = context.get_parallel_args();
     tensor_options_ = context.get_tensor_options();
     head_dim_ = args.head_dim();
     rms_norm_eps_ = args.rms_norm_eps();
     sliding_window_ = args.sliding_window();
-    block_size_ = args.dflash2_block_size();
+    block_size_ = llm_args.dflash2_block_size();
     CHECK_GT(sliding_window_, 0);
     CHECK_GT(block_size_, 0);
 

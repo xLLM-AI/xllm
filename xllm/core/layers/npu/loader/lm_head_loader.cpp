@@ -28,7 +28,7 @@ LmHeadLoader::LmHeadLoader(uint64_t weight_count,
   } else {
     working_tensors()[0] = torch::zeros({1}).to(options);
   }
-  vocab_size_ = context.get_model_args().vocab_size();
+  vocab_size_ = context.get_transformer_model_args().vocab_size();
   padded_vocab_size_ = get_padded_vocab_size(context);
 }
 

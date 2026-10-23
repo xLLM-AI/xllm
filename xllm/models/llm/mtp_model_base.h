@@ -33,11 +33,13 @@ namespace xllm {
 
 enum class MtpProjectionType { CONCAT_EH_PROJ, ADD_EH_PROJ };
 
-inline bool is_deepseek_v4_mtp_model(const ModelArgs& model_args) {
-  return util::is_target_mtp_model_type(model_args.model_type(), "deepseek_v4");
+inline bool is_deepseek_v4_mtp_model(const LlmModelArgs& model_args) {
+  return util::is_target_mtp_model_type(model_args.transformer().model_type(),
+                                        "deepseek_v4");
 }
 
-inline MtpProjectionType get_mtp_projection_type(const ModelArgs& model_args) {
+inline MtpProjectionType get_mtp_projection_type(
+    const LlmModelArgs& model_args) {
   if (is_deepseek_v4_mtp_model(model_args)) {
     return MtpProjectionType::ADD_EH_PROJ;
   }
@@ -49,7 +51,7 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
  public:
   MtpDecoderLayerImplBase(const ModelContext& context,
                           const int32_t layer_index)
-      : model_args_(context.get_model_args()) {
+      : model_args_(context.get_llm_model_args()) {
     auto options = context.get_tensor_options();
 
     projection_type_ = get_mtp_projection_type(model_args_);
@@ -58,40 +60,41 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
     enorm_ = register_module("enorm", layer::RMSNorm(context));
     hnorm_ = register_module("hnorm", layer::RMSNorm(context));
     if (projection_type_ == MtpProjectionType::ADD_EH_PROJ) {
-      e_proj_ =
-          register_module("e_proj",
-                          layer::ReplicatedLinear(model_args_.hidden_size(),
-                                                  model_args_.hidden_size(),
-                                                  /*bias=*/false,
-                                                  /*QuantArgs=*/QuantArgs(),
-                                                  options));
-      h_proj_ =
-          register_module("h_proj",
-                          layer::ReplicatedLinear(model_args_.hidden_size(),
-                                                  model_args_.hidden_size(),
-                                                  /*bias=*/false,
-                                                  /*QuantArgs=*/QuantArgs(),
-                                                  options));
+      e_proj_ = register_module(
+          "e_proj",
+          layer::ReplicatedLinear(model_args_.transformer().hidden_size(),
+                                  model_args_.transformer().hidden_size(),
+                                  /*bias=*/false,
+                                  /*QuantArgs=*/QuantArgs(),
+                                  options));
+      h_proj_ = register_module(
+          "h_proj",
+          layer::ReplicatedLinear(model_args_.transformer().hidden_size(),
+                                  model_args_.transformer().hidden_size(),
+                                  /*bias=*/false,
+                                  /*QuantArgs=*/QuantArgs(),
+                                  options));
     } else {
       // no quantization for eh_proj
-      eh_proj_ =
-          register_module("eh_proj",
-                          layer::ReplicatedLinear(model_args_.hidden_size() * 2,
-                                                  model_args_.hidden_size(),
-                                                  /*bias=*/false,
-                                                  /*QuantArgs=*/QuantArgs(),
-                                                  options));
+      eh_proj_ = register_module(
+          "eh_proj",
+          layer::ReplicatedLinear(model_args_.transformer().hidden_size() * 2,
+                                  model_args_.transformer().hidden_size(),
+                                  /*bias=*/false,
+                                  /*QuantArgs=*/QuantArgs(),
+                                  options));
     }
     const int32_t decoder_layer_index =
         is_deepseek_v4_mtp_model(model_args_)
-            ? std::min<int32_t>(layer_index, model_args_.n_layers() - 1)
+            ? std::min<int32_t>(layer_index,
+                                model_args_.transformer().n_layers() - 1)
             : layer_index;
     mtp_block_ = register_module(
         "mtp_block", DecoderLayerType(context, decoder_layer_index));
 
     if (is_deepseek_v4_mtp_model(model_args_)) {
       const int64_t hc_mult = model_args_.hc_mult();
-      const int64_t hc_dim = hc_mult * model_args_.hidden_size();
+      const int64_t hc_dim = hc_mult * model_args_.transformer().hidden_size();
       auto hc_options = options.dtype(torch::kFloat32);
       hc_head_fn_ = register_parameter(
           "hc_head_fn", torch::empty({hc_mult, hc_dim}, hc_options), false);
@@ -172,7 +175,11 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
     torch::Tensor embedding_data = input_params.embedding.input_embedding;
     // for dummy data parallel run, we set a empty embedding
     if (attn_metadata.is_dummy) {
-      const int64_t embed_cols = mtp_hidden_state_width(model_args_);
+      const int64_t embed_cols =
+          util::is_deepseek_v4_model_type(
+              model_args_.transformer().model_type())
+              ? model_args_.hc_mult() * model_args_.transformer().hidden_size()
+              : model_args_.transformer().hidden_size();
       embedding_data =
           torch::zeros({embed.size(0), embed_cols}, embed.options());
     }
@@ -181,7 +188,7 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
     torch::Tensor previous_hidden_states = embedding_data;
     torch::Tensor hidden_states;
     if (is_deepseek_v4_mtp_model(model_args_)) {
-      const int64_t hidden = model_args_.hidden_size();
+      const int64_t hidden = model_args_.transformer().hidden_size();
       const int64_t hc_mult = model_args_.hc_mult();
       const int64_t aux_hidden = hc_mult * hidden;
       const int64_t input_hidden = previous_hidden_states.size(-1);
@@ -233,7 +240,7 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
       auto x_float = hidden_states.to(torch::kFloat32);
       auto x_flatten = x_float.flatten(-2, -1);
       auto rsqrt = torch::rsqrt(x_flatten.pow(2).mean(-1, true) +
-                                model_args_.rms_norm_eps());
+                                model_args_.transformer().rms_norm_eps());
       auto mixes = torch::matmul(x_flatten, hc_head_fn_.transpose(0, 1));
       mixes = mixes * rsqrt;
       auto pre = torch::sigmoid(mixes * hc_head_scale_ + hc_head_base_) +
@@ -301,7 +308,7 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
   DEFINE_WEIGHT(hc_head_scale);
 
   MtpProjectionType projection_type_ = MtpProjectionType::CONCAT_EH_PROJ;
-  ModelArgs model_args_;
+  LlmModelArgs model_args_;
 };
 
 template <typename DecoderLayerType>
@@ -341,7 +348,7 @@ template <typename DecoderLayerType,
 class MtpModelImplBase : public torch::nn::Module {
  public:
   MtpModelImplBase(const ModelContext& context)
-      : model_args_(context.get_model_args()),
+      : model_args_(context.get_llm_model_args()),
         device_(context.get_tensor_options().device()) {
     auto options = context.get_tensor_options();
     auto parallel_args = context.get_parallel_args();
@@ -352,7 +359,7 @@ class MtpModelImplBase : public torch::nn::Module {
     }
 
     // get mtp start and end layer index
-    mtp_start_layer_idx_ = model_args_.n_layers();
+    mtp_start_layer_idx_ = model_args_.transformer().n_layers();
     mtp_end_layer_idx_ = mtp_start_layer_idx_ + mtp_num_layers;
     mtp_layers_.reserve(mtp_num_layers);
 
@@ -361,12 +368,12 @@ class MtpModelImplBase : public torch::nn::Module {
       auto mtp_layer = DecoderLayerType(context, i);
       mtp_layers_.push_back(mtp_layer);
     }
-    embed_tokens_ =
-        register_module("embed_tokens",
-                        layer::WordEmbedding(model_args_.vocab_size(),
-                                             model_args_.hidden_size(),
-                                             context.get_parallel_args(),
-                                             options));
+    embed_tokens_ = register_module(
+        "embed_tokens",
+        layer::WordEmbedding(model_args_.transformer().vocab_size(),
+                             model_args_.transformer().hidden_size(),
+                             context.get_parallel_args(),
+                             options));
     norm_ = register_module("norm", layer::RMSNorm(context));
 
     // get dp size and rank
@@ -477,7 +484,7 @@ class MtpModelImplBase : public torch::nn::Module {
   }
 
  private:
-  ModelArgs model_args_;
+  LlmModelArgs model_args_;
   std::vector<DecoderLayerType> mtp_layers_;
   int32_t mtp_start_layer_idx_;
   int32_t mtp_end_layer_idx_;

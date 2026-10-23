@@ -20,7 +20,8 @@ namespace layer {
 
 Qwen2_5_VisionLayerImpl::Qwen2_5_VisionLayerImpl(const ModelContext& context,
                                                  bool is_qwen3_style) {
-  const auto& args = context.get_model_args();
+  const auto& args = context.get_vlm_model_args().vision();
+  const auto& transformer_args = context.get_transformer_model_args();
   const auto& quant_config = context.get_quant_args();
   const auto& parallel_args = context.get_parallel_args();
   const auto& options = context.get_tensor_options();
@@ -28,8 +29,10 @@ Qwen2_5_VisionLayerImpl::Qwen2_5_VisionLayerImpl(const ModelContext& context,
   int64_t mlp_intermediate_size = args.mm_intermediate_size();
   bool is_gated = true;
   attention_ = register_module("self_attn", Qwen2VisionAttention(context));
-  norm1_ = register_module("norm1", RMSNorm(dim, args.rms_norm_eps(), options));
-  norm2_ = register_module("norm2", RMSNorm(dim, args.rms_norm_eps(), options));
+  norm1_ = register_module(
+      "norm1", RMSNorm(dim, transformer_args.rms_norm_eps(), options));
+  norm2_ = register_module(
+      "norm2", RMSNorm(dim, transformer_args.rms_norm_eps(), options));
 
   if (is_qwen3_style) {
     norm1_->set_layernorm_mode();

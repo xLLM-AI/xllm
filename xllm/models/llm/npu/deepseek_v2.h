@@ -100,12 +100,13 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
  public:
   DeepseekV2ModelImpl(const ModelContext& context)
       : aux_capture_(
-            context.get_model_args(),
+            context.get_llm_model_args(),
             context.get_tensor_options(),
             ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch()),
         device_(context.get_tensor_options().device()) {
     auto options = context.get_tensor_options();
-    auto model_args = context.get_model_args();
+    const auto& llm_args = context.get_llm_model_args();
+    const auto& model_args = llm_args.transformer();
     auto parallel_args = context.get_parallel_args();
 
     blocks_ = register_module("layers", torch::nn::ModuleList());
@@ -113,7 +114,7 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
     // register submodules
     device_ = options.device();
     dtype_ = options.dtype().toScalarType();
-    num_speculative_tokens_ = model_args.num_speculative_tokens();
+    num_speculative_tokens_ = llm_args.num_speculative_tokens();
 
     npu_embed_tokens_ =
         register_module("npu_embed_tokens", layer::NpuWordEmbedding(context));
@@ -153,7 +154,7 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
     dp_local_tp_size_ = parallel_args.world_size() / dp_size_;
     dp_rank_ = parallel_args.rank() / dp_local_tp_size_;
     rank_ = parallel_args.rank();
-    num_experts_per_tok_ = model_args.num_experts_per_tok();
+    num_experts_per_tok_ = llm_args.num_experts_per_tok();
   }
 
   ModelOutput forward(torch::Tensor tokens,
@@ -347,7 +348,7 @@ class DeepseekV2ForCausalLMImpl
   DeepseekV2ForCausalLMImpl(const ModelContext& context)
       : xllm::npu::model::LlmForCausalLMImplBase<DeepseekV2Model>(context),
         first_k_dense_replace_(
-            context.get_model_args().first_k_dense_replace()) {}
+            context.get_llm_model_args().first_k_dense_replace()) {}
 
   void prepare_expert_weight(int32_t layer_id,
                              const std::vector<int32_t>& expert_ids) override {

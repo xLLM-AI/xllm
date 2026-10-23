@@ -621,7 +621,7 @@ TORCH_MODULE(PatchOut1D);
 class ColaDiTTransformerImpl final : public torch::nn::Module {
  public:
   explicit ColaDiTTransformerImpl(const ModelContext& ctx) {
-    const auto& args = ctx.get_model_args();
+    const auto& args = ctx.get_dit_model_args().transformer();
     int64_t txt_dim = args.txt_dim();
     int64_t emb_dim = args.emb_dim();
     int64_t heads = args.heads();

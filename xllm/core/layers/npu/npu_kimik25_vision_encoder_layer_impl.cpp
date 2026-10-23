@@ -42,7 +42,7 @@ void NpuKimik25VisionEncoderLayerImpl::initialize_quantization_parameters(
 
 void NpuKimik25VisionEncoderLayerImpl::param_from_args(
     atb_speed::kimi::VisionEncoderLayerParam& param,
-    const ModelArgs& args,
+    const VlmVisionModelArgs& args,
     const ParallelArgs& parallel_args) {
   const int32_t dp_size =
       parallel_args.dp_size() > 0 ? parallel_args.dp_size() : 1;
@@ -71,7 +71,7 @@ void NpuKimik25VisionEncoderLayerImpl::param_from_args(
 NpuKimik25VisionEncoderLayerImpl::NpuKimik25VisionEncoderLayerImpl(
     const ModelContext& context)
     : BaseLayer(context) {
-  auto model_args = context.get_model_args();
+  const auto& model_args = context.get_vlm_model_args().vision();
   auto parallel_args = context.get_parallel_args();
   auto options = context.get_tensor_options();
   param_from_args(encode_param_, model_args, parallel_args);

@@ -22,6 +22,7 @@ limitations under the License.
 #include <vector>
 
 #include "framework/model/model_args.h"
+#include "framework/model/model_family_args.h"
 #include "framework/model/model_params_view.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/quantization/quant_args.h"
@@ -40,6 +41,12 @@ namespace layer {
 class Qwen3_5FusedMoEImpl final : public torch::nn::Module {
  public:
   Qwen3_5FusedMoEImpl() = default;
+  Qwen3_5FusedMoEImpl(const LlmModelArgs& model_args,
+                      const FusedMoEArgs& moe_args,
+                      const QuantArgs& quant_args,
+                      const ParallelArgs& parallel_args,
+                      const torch::TensorOptions& options);
+
   Qwen3_5FusedMoEImpl(const ModelArgs& model_args,
                       const FusedMoEArgs& moe_args,
                       const QuantArgs& quant_args,

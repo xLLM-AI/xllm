@@ -81,19 +81,19 @@ TORCH_MODULE(DeepseekV4MultiTokenPredictorLayer);
 class DeepseekV4MtpModelImpl final : public torch::nn::Module {
  public:
   explicit DeepseekV4MtpModelImpl(const ModelContext& context)
-      : model_args_(context.get_model_args()) {
+      : model_args_(context.get_llm_model_args()) {
     auto options = context.get_tensor_options();
     auto parallel_args = context.get_parallel_args();
     device_ = options.device();
 
-    CHECK_GT(model_args_.n_layers(), 0)
+    CHECK_GT(model_args_.transformer().n_layers(), 0)
         << "deepseek_v4_mtp requires n_layers > 0";
     CHECK_GE(model_args_.num_nextn_predict_layers(), 0)
         << "deepseek_v4_mtp requires num_nextn_predict_layers >= 0";
 
-    const int32_t mtp_n_layers = model_args_.n_layers();
+    const int32_t mtp_n_layers = model_args_.transformer().n_layers();
 
-    num_heads_ = model_args_.n_heads();
+    num_heads_ = model_args_.transformer().n_heads();
     head_dim_ = model_args_.o_lora_rank() + model_args_.qk_rope_head_dim();
     // Attention TP width under the orthogonal dp * cp * attn_tp == world
     // layout, matching the narrowed tp_group_ the draft's DSAttention shards
@@ -113,31 +113,33 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
     index_n_heads_ = model_args_.index_n_heads();
     index_head_dim_ = model_args_.index_head_dim();
     index_topk_ = model_args_.index_topk();
-    norm_eps_ = static_cast<double>(model_args_.rms_norm_eps());
+    norm_eps_ = static_cast<double>(model_args_.transformer().rms_norm_eps());
 
     const int64_t rope_head_dim = model_args_.rope_head_dim();
-    const int64_t max_pos = model_args_.max_position_embeddings();
+    const int64_t max_pos = model_args_.transformer().max_position_embeddings();
     if (rope_head_dim > 0 && max_pos > 0) {
       const int64_t original_max_pos =
-          model_args_.rope_scaling_original_max_position_embeddings() > 0
-              ? model_args_.rope_scaling_original_max_position_embeddings()
+          model_args_.transformer()
+                      .rope_scaling_original_max_position_embeddings() > 0
+              ? model_args_.transformer()
+                    .rope_scaling_original_max_position_embeddings()
               : max_pos;
-      dsa_rotary_embedding_ =
-          std::make_shared<layer::DeepseekV4RotaryEmbedding>(
-              /*rotary_dim=*/rope_head_dim,
-              /*max_position_embeddings=*/max_pos,
-              /*interleaved=*/true,
-              /*rope_theta=*/model_args_.rope_theta(),
-              /*compress_rope_theta=*/model_args_.compress_rope_theta(),
-              /*scaling_factor=*/model_args_.factor(),
-              /*extrapolation_factor=*/1.0f,
-              /*beta_fast=*/model_args_.beta_fast(),
-              /*beta_slow=*/model_args_.beta_slow(),
-              /*attn_factor=*/model_args_.rope_scaling_attn_factor(),
-              /*mscale=*/1.0f,
-              /*mscale_all_dim=*/1.0f,
-              /*original_max_position_embeddings=*/original_max_pos,
-              options);
+      dsa_rotary_embedding_ = std::make_shared<
+          layer::DeepseekV4RotaryEmbedding>(
+          /*rotary_dim=*/rope_head_dim,
+          /*max_position_embeddings=*/max_pos,
+          /*interleaved=*/true,
+          /*rope_theta=*/model_args_.transformer().rope_theta(),
+          /*compress_rope_theta=*/model_args_.compress_rope_theta(),
+          /*scaling_factor=*/model_args_.factor(),
+          /*extrapolation_factor=*/1.0f,
+          /*beta_fast=*/model_args_.beta_fast(),
+          /*beta_slow=*/model_args_.beta_slow(),
+          /*attn_factor=*/model_args_.transformer().rope_scaling_attn_factor(),
+          /*mscale=*/1.0f,
+          /*mscale_all_dim=*/1.0f,
+          /*original_max_position_embeddings=*/original_max_pos,
+          options);
       dsa_cos_sin_ = dsa_rotary_embedding_->get_cos_sin_cache("default");
     }
 
@@ -463,8 +465,10 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
     group_infos_ = {{DSACacheType::SLIDING_WINDOW, 1, window_size},
                     {DSACacheType::TOKEN, 4, kBaseBlockSize},
                     {DSACacheType::TOKEN, 128, kBaseBlockSize}};
-    caches_info_.assign(static_cast<size_t>(model_args_.n_layers()), {});
-    for (int32_t layer_id = 0; layer_id < model_args_.n_layers(); ++layer_id) {
+    caches_info_.assign(
+        static_cast<size_t>(model_args_.transformer().n_layers()), {});
+    for (int32_t layer_id = 0; layer_id < model_args_.transformer().n_layers();
+         ++layer_id) {
       const int32_t cr = deepseek_v4_normalize_compress_ratio(
           layer_id < static_cast<int32_t>(model_args_.compress_ratios().size())
               ? model_args_.compress_ratios()[static_cast<size_t>(layer_id)]
@@ -1121,7 +1125,7 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
   int64_t index_topk_ = 512;
   double norm_eps_ = 1e-6;
 
-  ModelArgs model_args_;
+  LlmModelArgs model_args_;
   torch::Device device_{torch::kCPU};
 
   layer::RMSNorm final_norm_{nullptr};

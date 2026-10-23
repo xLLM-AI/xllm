@@ -665,20 +665,24 @@ NpuOneRecBlockLayerImpl::NpuOneRecBlockLayerImpl(const ModelContext& context,
                                                  bool is_decoder,
                                                  int32_t layer_id)
     : BaseLayer(context), is_decoder_(is_decoder), layer_id_(layer_id) {
-  const auto& args = context.get_model_args();
+  const auto& rec_args = context.get_rec_model_args();
+  const auto& args = rec_args.transformer();
   const auto& parallel_args = context.get_parallel_args();
-  param_from_args(prefill_param_, args, parallel_args, /*is_prefill=*/true);
-  param_from_args(prefill_param_atb_, args, parallel_args, /*is_prefill=*/true);
+  param_from_args(prefill_param_, rec_args, parallel_args, /*is_prefill=*/true);
+  param_from_args(prefill_param_atb_,
+                  rec_args,
+                  parallel_args,
+                  /*is_prefill=*/true);
   prefill_param_atb_.matmulBackend = atb_speed::common::OpBackend::ATB;
-  param_from_args(decode_param_, args, parallel_args, /*is_prefill=*/false);
+  param_from_args(decode_param_, rec_args, parallel_args, /*is_prefill=*/false);
   if (use_legacy_onerec_prefill_only_contract() && is_decoder_) {
     param_from_args(decoder_prefill_only_decode_param_,
-                    args,
+                    rec_args,
                     parallel_args,
                     /*is_prefill=*/true);
     decoder_prefill_only_decode_param_.emptyCrossAttn = false;
     param_from_args(decoder_prefill_only_decode_param_atb_,
-                    args,
+                    rec_args,
                     parallel_args,
                     /*is_prefill=*/true);
     decoder_prefill_only_decode_param_atb_.emptyCrossAttn = false;
@@ -715,9 +719,10 @@ NpuOneRecBlockLayerImpl::NpuOneRecBlockLayerImpl(const ModelContext& context,
 
 void NpuOneRecBlockLayerImpl::param_from_args(
     atb_speed::onerec::BlockLayerParam& param,
-    const ModelArgs& args,
+    const RecModelArgs& rec_args,
     const ParallelArgs& parallel_args,
     bool is_prefill) {
+  const auto& args = rec_args.transformer();
   param.isFA = false;
   param.isPrefill = is_prefill;
   param.isBF16 = args.dtype() == "bfloat16";
@@ -759,8 +764,8 @@ void NpuOneRecBlockLayerImpl::param_from_args(
   param.numAttentionHeadsPerRank = args_n_heads / param.worldSize;
   param.hiddenSizePerAttentionHead = args_head_dim;
   // Existing OneRec configs use moe_use_shared_experts to identify the path
-  // that needs attention scaling; do not add a generic ModelArgs field for it.
-  param.useAttentionScaling = args.moe_use_shared_experts();
+  // that needs attention scaling.
+  param.useAttentionScaling = rec_args.moe_use_shared_experts();
 
   const auto general_kv_heads = args.n_kv_heads();
   const auto decoder_kv_heads = args.decoder_n_kv_heads().has_value()
@@ -794,7 +799,7 @@ void NpuOneRecBlockLayerImpl::param_from_args(
         static_cast<int>(atb_speed::common::LinearDesc::FLOAT16_DESC)};
   }
 
-  param.use_moe = args.use_moe() && is_decoder_;
+  param.use_moe = rec_args.use_moe() && is_decoder_;
   if (param.use_moe) {
     ep_size_ = 1;
     const int32_t ep_rank = 0;
@@ -802,22 +807,23 @@ void NpuOneRecBlockLayerImpl::param_from_args(
     CHECK_EQ(parallel_args.world_size(), ep_size_ * ep_local_tp_size_);
     ep_local_tp_rank_ = parallel_args.rank() % ep_local_tp_size_;
 
-    num_experts_per_partition_ = args.n_routed_experts() / ep_size_;
+    num_experts_per_partition_ = rec_args.n_routed_experts() / ep_size_;
     start_expert_id_ = ep_rank * num_experts_per_partition_;
     end_expert_id_ = start_expert_id_ + num_experts_per_partition_ - 1;
 
     resize_experts_weights(num_experts_per_partition_);
 
     param.moe_config = std::make_unique<atb_speed::onerec::OneRecMoEConfig>();
-    param.moe_config->moe_topk = args.num_experts_per_tok();
-    param.moe_config->moe_num_experts = args.n_routed_experts();
+    param.moe_config->moe_topk = rec_args.num_experts_per_tok();
+    param.moe_config->moe_num_experts = rec_args.n_routed_experts();
     param.moe_config->moe_score_func = "softmax";
-    param.moe_config->moe_route_scale = args.moe_route_scale();
-    param.moe_config->moe_inter_dim = args.moe_intermediate_size();
+    param.moe_config->moe_route_scale = rec_args.moe_route_scale();
+    param.moe_config->moe_inter_dim = rec_args.moe_intermediate_size();
     param.moe_config->use_bf16 = param.isBF16;
     param.moe_config->hasSharedExpertGate = false;
-    param.moe_config->moe_use_shared_experts = args.moe_use_shared_experts();
-    param.moe_config->moe_num_shared_experts = args.n_shared_experts();
+    param.moe_config->moe_use_shared_experts =
+        rec_args.moe_use_shared_experts();
+    param.moe_config->moe_num_shared_experts = rec_args.n_shared_experts();
     param.moe_config->enable_integrated_softmax_topk = true;
 
     param.moeLinearQuantType = {atb_speed::common::LinearType::FP,

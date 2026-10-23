@@ -31,7 +31,7 @@ limitations under the License.
 #include "atb_speed/base/model.h"
 #include "atb_speed/log.h"
 #include "atb_speed/utils/model_factory.h"
-#include "core/framework/model/model_args.h"
+#include "core/framework/model/model_family_args.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "loader/qwen2_vision_encoder_loader.h"
 #include "nlohmann/json.hpp"
@@ -77,7 +77,7 @@ class NpuQwen2VisionEncoderLayerImpl : public BaseLayer {
   void get_weights_col_packed_qkv();
 
   void param_from_args(atb_speed::qwen::VisionEncoderLayerParam& param,
-                       const ModelArgs& args,
+                       const VlmVisionModelArgs& args,
                        const ParallelArgs& parallel_args);
 
   int64_t init_node(atb_speed::Model::Node& node,

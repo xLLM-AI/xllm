@@ -69,7 +69,7 @@ torch::Tensor renormalize_topk_weights(const torch::Tensor& topk_weights) {
 
 DeepseekV4GateImpl::DeepseekV4GateImpl(const ModelContext& context,
                                        int32_t layer_id)
-    : DeepseekV4GateImpl(context.get_model_args(),
+    : DeepseekV4GateImpl(context.get_transformer_model_args(),
                          layer_id,
                          context.get_tensor_options()) {}
 

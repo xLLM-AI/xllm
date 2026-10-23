@@ -65,8 +65,10 @@ template <typename DecoderLayerType>
 class LlmModelImplBase : public torch::nn::Module {
  public:
   // mode type: qwen2, qwen3 .etc
-  LlmModelImplBase(const std::string& model_type, const ModelArgs& args)
-      : model_args_(args), model_type_(model_type) {
+  LlmModelImplBase(const std::string& model_type,
+                   const TransformerModelArgs& args,
+                   bool enable_mla = false)
+      : model_args_(args), enable_mla_(enable_mla), model_type_(model_type) {
     mrope_section_ = args.rope_scaling_mrope_section();
   }
 
@@ -122,7 +124,7 @@ class LlmModelImplBase : public torch::nn::Module {
       modified_input_params.attn_metadata =
           std::make_shared<layer::AttentionMetadata>(
               layer::AttentionMetadataBuilder::build(modified_input_params,
-                                                     model_args_.enable_mla()));
+                                                     enable_mla_));
     }
     auto& attn_metadata = *(modified_input_params.attn_metadata);
     if (positions.dim() == 2) {
@@ -179,7 +181,8 @@ class LlmModelImplBase : public torch::nn::Module {
   torch::Tensor cos_sin_;
   int32_t max_seq_len_ = 0;
   std::vector<int64_t> mrope_section_;
-  ModelArgs model_args_;
+  TransformerModelArgs model_args_;
+  bool enable_mla_ = false;
   layer::WordEmbedding embed_tokens_{nullptr};
   layer::RMSNorm norm_{nullptr};
 
@@ -194,8 +197,32 @@ template <typename LlmModelType>
 class LlmForCausalLMImplBase : public torch::nn::Module {
  public:
   LlmForCausalLMImplBase(const ModelContext& context) {
-    tie_word_embeddings = context.get_model_args().tie_word_embeddings();
-    embedding_mode_ = context.get_model_args().embedding_mode();
+    const TransformerModelArgs* transformer_args = nullptr;
+    switch (context.get_model_family()) {
+      case ModelFamily::VLM: {
+        const auto& model_args = context.get_vlm_model_args();
+        transformer_args = &model_args.transformer();
+        embedding_mode_ = model_args.embedding_mode();
+        break;
+      }
+      case ModelFamily::REC: {
+        const auto& model_args = context.get_rec_model_args();
+        transformer_args = &model_args.transformer();
+        embedding_mode_ = model_args.embedding_mode();
+        break;
+      }
+      case ModelFamily::LLM: {
+        const auto& model_args = context.get_llm_model_args();
+        transformer_args = &model_args.transformer();
+        embedding_mode_ = model_args.embedding_mode();
+        break;
+      }
+      case ModelFamily::DIT:
+      case ModelFamily::UNKNOWN:
+        LOG(FATAL) << "Causal language model requires an LLM, VLM, or Rec "
+                      "model context";
+    }
+    tie_word_embeddings = transformer_args->tie_word_embeddings();
     // register submodules
     model_ = register_module("model", LlmModelType(context));
     // DFlash2 shares the target lm-head after loading.  Avoid registering a
@@ -203,7 +230,7 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
     // registered module, so the unused vocabulary projection would otherwise
     // remain resident on the device.
     const bool shares_target_lm_head =
-        is_dflash2_draft_model_type(context.get_model_args().model_type());
+        is_dflash2_draft_model_type(transformer_args->model_type());
     if (!embedding_mode_ && !shares_target_lm_head) {
       lm_head_ = register_module("lm_head", layer::LmHead(context));
     } else if (embedding_mode_) {

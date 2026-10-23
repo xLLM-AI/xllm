@@ -55,7 +55,7 @@ class XliteConfigBuilder {
   // Qwen3 dense (MHA); also the base for Qwen3-MoE (nDenseLayers overridden).
   static XModelConfig FromQwen3(const ModelContext& context) {
     ValidateQuantMethod(context);
-    const ModelArgs& a = context.get_model_args();
+    const auto& a = context.get_transformer_model_args();
     const ParallelArgs& p = context.get_parallel_args();
     XModelConfig c{};
 
@@ -128,7 +128,7 @@ class XliteConfigBuilder {
   // Qwen3-MoE: overrides MoE fields on top of FromQwen3.
   static XModelConfig FromQwen3Moe(const ModelContext& context) {
     XModelConfig c = FromQwen3(context);
-    const ModelArgs& a = context.get_model_args();
+    const auto& a = context.get_transformer_model_args();
     const ParallelArgs& p = context.get_parallel_args();
 
     // The xlite layout is "dense prefix + all-MoE tail" (nDenseLayers); the
@@ -160,7 +160,7 @@ class XliteConfigBuilder {
   // DeepSeek-V3/R1 (MLA + sigmoid MoE + shared expert, no DSA).
   static XModelConfig FromDeepseekV3(const ModelContext& context) {
     XModelConfig c = FromQwen3(context);
-    const ModelArgs& a = context.get_model_args();
+    const auto& a = context.get_transformer_model_args();
     const ParallelArgs& p = context.get_parallel_args();
 
     // MLA dims (V3: nope=128/rope=64/v=128/q_lora=1536/kv_lora=512).
@@ -223,7 +223,7 @@ class XliteConfigBuilder {
   // YaRN/mscale skipped.
   static XModelConfig FromGlm5(const ModelContext& context) {
     XModelConfig c = FromDeepseekV3(context);
-    const ModelArgs& a = context.get_model_args();
+    const auto& a = context.get_transformer_model_args();
 
     // DSA: attnType=DSA triggers ForwardAttnIndexer -> topkIndices for sparse
     // MLA attention.
@@ -259,7 +259,7 @@ class XliteConfigBuilder {
   // unaffected.
   static XModelConfig FromGlm4Moe(const ModelContext& context) {
     XModelConfig c = FromQwen3Moe(context);
-    const ModelArgs& a = context.get_model_args();
+    const auto& a = context.get_transformer_model_args();
 
     // partial rotary: ropeHeadDim = headDim * partial_rotary_factor (front dims
     // get RoPE).

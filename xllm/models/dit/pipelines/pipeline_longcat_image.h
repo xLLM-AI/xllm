@@ -94,7 +94,7 @@ inline std::pair<torch::Tensor, int64_t> retrieve_longcat_timesteps(
 class LongCatImagePipelineImpl : public torch::nn::Module {
  public:
   LongCatImagePipelineImpl(const DiTModelContext& context) : context_(context) {
-    const auto& model_args = context.get_model_args("vae");
+    const auto& model_args = context.get_dit_model_args("vae").vae();
     options_ = context.get_tensor_options();
 
 #if defined(USE_CUDA)
@@ -107,31 +107,22 @@ class LongCatImagePipelineImpl : public torch::nn::Module {
     vae_shift_factor_ = model_args.shift_factor();
     vae_scaling_factor_ = model_args.scale_factor();
     LOG(INFO) << "Initializing LongCat-Image pipeline...";
-    vae_image_processor_ =
-        VAEImageProcessor(ModelContext(context.get_parallel_args(),
-                                       context.get_model_args("vae"),
-                                       context.get_quant_args("vae"),
-                                       context.get_tensor_options()),
-                          /*do_resize=*/true,
-                          /*do_normalize=*/true,
-                          /*do_center_crop=*/false,
-                          /*do_convert_rgb=*/false,
-                          /*do_resize_latents=*/false,
-                          model_args.latent_channels());
-    vae_ = VAE(ModelContext(context.get_parallel_args(),
-                            context.get_model_args("vae"),
-                            context.get_quant_args("vae"),
-                            context.get_tensor_options()));
+    vae_image_processor_ = VAEImageProcessor(context.get_model_context("vae"),
+                                             /*do_resize=*/true,
+                                             /*do_normalize=*/true,
+                                             /*do_center_crop=*/false,
+                                             /*do_convert_rgb=*/false,
+                                             /*do_resize_latents=*/false,
+                                             model_args.latent_channels());
+    vae_ = VAE(context.get_model_context("vae"));
     pos_embed_ = register_module(
         "pos_embed",
-        LongCatImagePosEmbed(
-            kLongCatRopeScaleBase,
-            context.get_model_args("transformer").axes_dims_rope()));
+        LongCatImagePosEmbed(kLongCatRopeScaleBase,
+                             context.get_dit_model_args("transformer")
+                                 .transformer()
+                                 .axes_dims_rope()));
     transformer_ = LongCatImageTransformer2DModel(
-        ModelContext(context.get_parallel_args(),
-                     context.get_model_args("transformer"),
-                     context.get_quant_args("transformer"),
-                     context.get_tensor_options()));
+        context.get_model_context("transformer"));
 
     const auto& original_parallel_args = context.get_parallel_args();
     ParallelArgs vlm_parallel_args = original_parallel_args;
@@ -152,16 +143,11 @@ class LongCatImagePipelineImpl : public torch::nn::Module {
     // LongCat-Image uses Qwen2_5_VL as text encoder, not CLIP+T5
     LOG(INFO) << "LongCat-Image uses Qwen2_5_VL as text encoder";
     text_encoder_ = Qwen2_5_VLForConditionalGeneration(
-        ModelContext(vlm_parallel_args,
-                     context.get_model_args("text_encoder"),
-                     context.get_quant_args("text_encoder"),
-                     context.get_tensor_options()));
+        context.get_model_context("text_encoder", ModelFamily::VLM)
+            .with_parallel_args(vlm_parallel_args));
 
-    scheduler_ = FlowMatchEulerDiscreteScheduler(
-        ModelContext(context.get_parallel_args(),
-                     context.get_model_args("scheduler"),
-                     context.get_quant_args("scheduler"),
-                     context.get_tensor_options()));
+    scheduler_ =
+        FlowMatchEulerDiscreteScheduler(context.get_model_context("scheduler"));
     prompt_template_encode_prefix_ = PROMPT_TEMPLATE_ENCODE_PREFIX;
     prompt_template_encode_suffix_ = PROMPT_TEMPLATE_ENCODE_SUFFIX;
 
@@ -438,8 +424,9 @@ class LongCatImagePipelineImpl : public torch::nn::Module {
     // Step 2: Pad tokens to max_sequence_length
     // Use pad_token_id from text_encoder model config (151643 for Qwen2) to
     // match diffusers. Fallback: tokenizer "<|endoftext|>", then 151643.
-    int32_t pad_token_id =
-        context_.get_model_args("text_encoder").pad_token_id();
+    int32_t pad_token_id = context_.get_vlm_model_args("text_encoder")
+                               .transformer()
+                               .pad_token_id();
     if (pad_token_id == 0) {
       auto pad_id = tokenizer_->token_to_id("<|endoftext|>");
       if (pad_id.has_value()) {
@@ -542,8 +529,8 @@ class LongCatImagePipelineImpl : public torch::nn::Module {
         positions_1d.unsqueeze(0).expand({3, -1}).contiguous();
 
     // Prepare kv_caches for forward pass
-    const auto& text_encoder_args = context_.get_model_args("text_encoder");
-    std::vector<KVCache> kv_caches(text_encoder_args.n_layers());
+    const auto& text_encoder_args = context_.get_vlm_model_args("text_encoder");
+    std::vector<KVCache> kv_caches(text_encoder_args.transformer().n_layers());
 
     VlmModelParams input_params =
         build_longcat_input_params(tokens_flat, positions_2d, attention_mask);

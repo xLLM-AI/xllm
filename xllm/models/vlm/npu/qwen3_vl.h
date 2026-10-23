@@ -43,7 +43,7 @@ namespace xllm::npu::model {
 class Qwen3_VisionPatchEmbedImpl : public torch::nn::Module {
  public:
   Qwen3_VisionPatchEmbedImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_vlm_model_args().vision();
     auto options = context.get_tensor_options();
 
     auto in_features = model_args.mm_num_channels() *
@@ -133,7 +133,7 @@ TORCH_MODULE(Qwen3_VisionBlock);
 class Qwen3_VisionRotaryEmbeddingImpl : public torch::nn::Module {
  public:
   Qwen3_VisionRotaryEmbeddingImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_vlm_model_args().vision();
     auto options = context.get_tensor_options();
 
     dim_ = model_args.mm_head_dim() / 2;
@@ -179,7 +179,7 @@ class Qwen3_VisionPatchMergerImpl : public torch::nn::Module {
  public:
   Qwen3_VisionPatchMergerImpl(const ModelContext& context,
                               bool use_postshuffle_norm = false) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_vlm_model_args().vision();
     auto options = context.get_tensor_options();
     auto quant_args = context.get_quant_args();
     auto parallel_args = context.get_parallel_args();
@@ -313,7 +313,7 @@ class Qwen3_VisionTransformerImpl : public torch::nn::Module {
  public:
   Qwen3_VisionTransformerImpl(const ModelContext& context)
       : options_(context.get_tensor_options()) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_vlm_model_args().vision();
     hidden_size_ = model_args.mm_hidden_size();
     num_heads_ = model_args.mm_num_attention_heads();
     window_size_ = model_args.mm_window_size();
@@ -631,7 +631,7 @@ struct Qwen3_VLVideoInputs {
 class Qwen3_VLForConditionalGenerationImpl : public torch::nn::Module {
  public:
   Qwen3_VLForConditionalGenerationImpl(const ModelContext& context)
-      : model_args_(context.get_model_args()),
+      : model_args_(context.get_vlm_model_args()),
         options_(context.get_tensor_options()) {
     encoder_dp_group_ = context.get_parallel_args().encoder_dp_group_;
     use_encoder_dp_ =
@@ -693,9 +693,9 @@ class Qwen3_VLForConditionalGenerationImpl : public torch::nn::Module {
             split_by_token_nums(image_embeds, image_token_nums);
       } else {
         const int32_t image_feature_dim =
-            model_args_.mm_projection_dim() *
+            model_args_.vision().mm_projection_dim() *
             static_cast<int32_t>(
-                model_args_.mm_deepstack_visual_indexes().size() + 1);
+                model_args_.vision().mm_deepstack_visual_indexes().size() + 1);
         multimodal_embeds["image|embedding"] =
             run_dp_encoder(visual_,
                            image_pixels,
@@ -722,7 +722,7 @@ class Qwen3_VLForConditionalGenerationImpl : public torch::nn::Module {
   std::pair<torch::Tensor, std::vector<torch::Tensor>>
   split_multimodal_embedding(const torch::Tensor& embedding) const {
     const size_t num_deepstacks =
-        model_args_.mm_deepstack_visual_indexes().size();
+        model_args_.vision().mm_deepstack_visual_indexes().size();
     CHECK(embedding.defined()) << "Multimodal embedding is not defined.";
     CHECK_GT(num_deepstacks, 0)
         << "There should be at least one deepstack when splitting multimodal "
@@ -753,7 +753,7 @@ class Qwen3_VLForConditionalGenerationImpl : public torch::nn::Module {
       return inputs_embeds;
     }
     const size_t num_deepstacks =
-        model_args_.mm_deepstack_visual_indexes().size();
+        model_args_.vision().mm_deepstack_visual_indexes().size();
     std::vector<torch::Tensor> deepstack_input_embeds;
     deepstack_input_embeds.resize(num_deepstacks);
     for (auto& deepstack : deepstack_input_embeds) {
@@ -828,7 +828,7 @@ class Qwen3_VLForConditionalGenerationImpl : public torch::nn::Module {
   }
 
  private:
-  ModelArgs model_args_;
+  VlmModelArgs model_args_;
   torch::TensorOptions options_;
   ProcessGroup* encoder_dp_group_ = nullptr;
   bool use_encoder_dp_ = false;

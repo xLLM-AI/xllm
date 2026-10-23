@@ -62,6 +62,24 @@ DeepseekV4SparseMoEBlockImpl::DeepseekV4SparseMoEBlockImpl(
     const std::shared_ptr<Stream>& routed_comm_stream,
     const std::shared_ptr<Stream>& shared_compute_stream,
     const std::string& module_prefix)
+    : DeepseekV4SparseMoEBlockImpl(LlmModelArgs(model_args),
+                                   quant_args,
+                                   parallel_args,
+                                   options,
+                                   use_hash,
+                                   routed_comm_stream,
+                                   shared_compute_stream,
+                                   module_prefix) {}
+
+DeepseekV4SparseMoEBlockImpl::DeepseekV4SparseMoEBlockImpl(
+    const LlmModelArgs& model_args,
+    const QuantArgs& quant_args,
+    const ParallelArgs& parallel_args,
+    const torch::TensorOptions& options,
+    bool use_hash,
+    const std::shared_ptr<Stream>& routed_comm_stream,
+    const std::shared_ptr<Stream>& shared_compute_stream,
+    const std::string& module_prefix)
     : parallel_args_(parallel_args) {
   enable_deep_ep_ =
       ::xllm::EPLBConfig::get_instance().expert_parallel_degree() == 2 &&

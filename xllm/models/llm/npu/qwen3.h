@@ -48,13 +48,15 @@ TORCH_MODULE(QWen3DecoderLayer);
 class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
  public:
   QWen3ModelImpl(const ModelContext& context)
-      : LlmModelImplBase<QWen3DecoderLayer>("qwen3", context.get_model_args()),
+      : LlmModelImplBase<QWen3DecoderLayer>(
+            "qwen3",
+            context.get_transformer_model_args()),
         aux_capture_(
-            context.get_model_args(),
+            context.get_llm_model_args(),
             context.get_tensor_options(),
             ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch()) {
     // register submodules
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_transformer_model_args();
     auto options = context.get_tensor_options();
     auto parallel_args = context.get_parallel_args();
     auto dp_local_tp_size =

@@ -111,10 +111,10 @@ class LlamaModelImpl : public torch::nn::Module {
  public:
   LlamaModelImpl(const ModelContext& context) {
     auto options = context.get_tensor_options();
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_transformer_model_args();
     // register submodules
     blocks_ = register_module("layers", torch::nn::ModuleList());
-    layers_.reserve(context.get_model_args().n_layers());
+    layers_.reserve(context.get_transformer_model_args().n_layers());
     npu_embed_tokens_ =
         register_module("npu_embed_tokens", layer::NpuWordEmbedding(context));
     norm_ = register_module("norm", layer::NpuRMSNorm(context));

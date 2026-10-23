@@ -27,7 +27,7 @@ namespace layer {
 namespace {
 
 // DeepSeek: layers [0, first_k_dense_replace) are dense MLP; the rest are MoE.
-bool is_moe_layer(const ModelArgs& model_args, int32_t layer_id) {
+bool is_moe_layer(const LlmModelArgs& model_args, int32_t layer_id) {
   return model_args.n_routed_experts() > 0 &&
          layer_id >= model_args.first_k_dense_replace();
 }
@@ -38,25 +38,31 @@ DeepseekV2DecoderLayerImpl::DeepseekV2DecoderLayerImpl(
     const ModelContext& context,
     int32_t layer_id)
     : parallel_args_(context.get_parallel_args()),
-      is_moe_layer_(is_moe_layer(context.get_model_args(), layer_id)) {
-  const auto& model_args = context.get_model_args();
+      is_moe_layer_(is_moe_layer(context.get_llm_model_args(), layer_id)) {
+  const auto& model_args = context.get_llm_model_args();
+  const auto& transformer_args = model_args.transformer();
   const auto& quant_args = context.get_quant_args();
   const auto& options = context.get_tensor_options();
 
-  attention_ = register_module(
-      "self_attn",
-      DeepseekV2Attention(model_args, quant_args, parallel_args_, options));
+  attention_ =
+      register_module("self_attn",
+                      DeepseekV2Attention(context.get_transformer_model_args(),
+                                          quant_args,
+                                          parallel_args_,
+                                          options));
 
-  input_norm_ = register_module(
-      "input_layernorm",
-      RMSNorm(model_args.hidden_size(), model_args.rms_norm_eps(), options));
-  post_norm_ = register_module(
-      "post_attention_layernorm",
-      RMSNorm(model_args.hidden_size(), model_args.rms_norm_eps(), options));
+  input_norm_ = register_module("input_layernorm",
+                                RMSNorm(transformer_args.hidden_size(),
+                                        transformer_args.rms_norm_eps(),
+                                        options));
+  post_norm_ = register_module("post_attention_layernorm",
+                               RMSNorm(transformer_args.hidden_size(),
+                                       transformer_args.rms_norm_eps(),
+                                       options));
 
   if (is_moe_layer_) {
     moe_mlp_ = register_module("mlp",
-                               FusedMoE(model_args,
+                               FusedMoE(context.get_llm_model_args(),
                                         FusedMoEArgs{.is_gated = true},
                                         quant_args,
                                         parallel_args_,
@@ -65,11 +71,11 @@ DeepseekV2DecoderLayerImpl::DeepseekV2DecoderLayerImpl(
     const std::string mlp_module_prefix =
         "model.layers." + std::to_string(layer_id) + ".mlp";
     mlp_ = register_module("mlp",
-                           DenseMLP(model_args.hidden_size(),
-                                    model_args.intermediate_size(),
+                           DenseMLP(transformer_args.hidden_size(),
+                                    transformer_args.intermediate_size(),
                                     /*is_gated=*/true,
                                     /*has_bias=*/false,
-                                    model_args.hidden_act(),
+                                    transformer_args.hidden_act(),
                                     /*enable_result_reduction=*/true,
                                     quant_args,
                                     parallel_args_.tp_group_,

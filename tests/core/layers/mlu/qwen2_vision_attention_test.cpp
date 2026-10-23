@@ -47,7 +47,8 @@ class Qwen2VisionAttentionTest : public ::testing::Test {
         0, 1, 1, 3332, false, "localhost", "tp_group", device);
     parallel_args_.tp_group_ = process_group_.get();
 
-    context_ = ModelContext(parallel_args_, model_args_, QuantArgs(), options_);
+    context_ = ModelContext(
+        parallel_args_, model_args_, QuantArgs(), options_, {ModelFamily::VLM});
     InitTestWeights();
   }
 

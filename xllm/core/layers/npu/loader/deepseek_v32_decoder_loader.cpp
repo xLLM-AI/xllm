@@ -211,7 +211,7 @@ DeekseekV32DecoderLoader::DeekseekV32DecoderLoader(
       skip_topk_(skip_topk),
       indexer_rope_interleave_(false),
       attn_linear_quant_types_(attn_linear_quant_types) {
-  auto model_args = context.get_model_args();
+  auto model_args = context.get_transformer_model_args();
   auto quant_args = context.get_quant_args();
   auto options = context.get_tensor_options();
 

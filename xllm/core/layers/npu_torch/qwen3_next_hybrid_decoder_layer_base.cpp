@@ -28,7 +28,7 @@ Qwen3HybridDecoderLayerImplBase::Qwen3HybridDecoderLayerImplBase(
     const ModelContext& context,
     int32_t layer_id,
     std::shared_ptr<Qwen3GatedDeltaNetBaseImpl> linear_attention_module) {
-  const auto& model_args = context.get_model_args();
+  const auto& model_args = context.get_transformer_model_args();
   const auto& quant_args = context.get_quant_args();
   const auto& parallel_args = context.get_parallel_args();
   const auto& options = context.get_tensor_options();
@@ -63,7 +63,7 @@ Qwen3HybridDecoderLayerImplBase::Qwen3HybridDecoderLayerImplBase(
       model_args.n_routed_experts() > 0 &&
       (layer_id + 1) % model_args.decoder_sparse_step() == 0) {
     moe_mlp_ = register_module("mlp",
-                               FusedMoE(model_args,
+                               FusedMoE(context.get_llm_model_args(),
                                         FusedMoEArgs{.is_gated = true},
                                         quant_args,
                                         parallel_args,

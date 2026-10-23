@@ -27,7 +27,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/config/scheduler_config.h"
-#include "core/framework/model/model_args_view.h"
+#include "core/framework/model/model_family_args.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/model_context/model_context.h"
@@ -197,8 +197,8 @@ class MiniMaxM2ModelImpl : public torch::nn::Module {
  public:
   explicit MiniMaxM2ModelImpl(const ModelContext& context) {
     const auto& options = context.get_tensor_options();
-    const LlmModelArgsView model_args = context.get_llm_model_args();
-    const TransformerModelArgsView transformer_args = model_args.transformer();
+    const LlmModelArgs& model_args = context.get_llm_model_args();
+    const TransformerModelArgs& transformer_args = model_args.transformer();
     const auto& parallel_args = context.get_parallel_args();
 
     enable_mla_ = model_args.enable_mla();
@@ -334,7 +334,8 @@ TORCH_MODULE(MiniMaxM2Model);
 class MiniMaxM2ForCausalLMImpl : public torch::nn::Module {
  public:
   explicit MiniMaxM2ForCausalLMImpl(const ModelContext& context) {
-    tie_word_embeddings_ = context.get_model_args().tie_word_embeddings();
+    tie_word_embeddings_ =
+        context.get_transformer_model_args().tie_word_embeddings();
     model_ = register_module("model", MiniMaxM2Model(context));
     lm_head_ = register_module("lm_head", layer::LmHead(context));
   }

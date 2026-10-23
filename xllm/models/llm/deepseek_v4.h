@@ -345,10 +345,11 @@ inline int32_t deepseek_v4_normalize_compress_ratio(int32_t ratio) {
 }
 
 inline void deepseek_v4_build_cache_specs(
-    const ModelArgs& model_args,
+    const LlmModelArgs& model_args,
     std::vector<std::vector<DSACacheInfo>>& caches_info,
     std::vector<DSAGroupInfo>& group_infos) {
   const auto& compress_ratios = model_args.compress_ratios();
+  const auto& transformer_args = model_args.transformer();
   const int32_t window_size = model_args.window_size();
   const int32_t base_block_size = 128;
   CHECK_EQ(KVCacheConfig::get_instance().block_size(), base_block_size)
@@ -376,8 +377,9 @@ inline void deepseek_v4_build_cache_specs(
     }
   }
 
-  caches_info.resize(model_args.n_layers());
-  for (int32_t layer_id = 0; layer_id < model_args.n_layers(); ++layer_id) {
+  caches_info.resize(transformer_args.n_layers());
+  for (int32_t layer_id = 0; layer_id < transformer_args.n_layers();
+       ++layer_id) {
     int32_t cr = (layer_id < static_cast<int32_t>(compress_ratios.size()))
                      ? compress_ratios[layer_id]
                      : 1;
@@ -421,28 +423,29 @@ class DeepseekV4ModelImpl
   explicit DeepseekV4ModelImpl(const ModelContext& context)
       : LlmModelImplBase<layer::DeepseekV4DecoderLayer>(
             "deepseek_v4",
-            context.get_model_args()),
+            context.get_transformer_model_args(),
+            context.get_transformer_model_args().enable_mla()),
         parallel_args_(context.get_parallel_args()),
         flash_comm1_options_(context.get_flash_comm1_options()),
         aux_capture_(
-            context.get_model_args(),
+            context.get_llm_model_args(),
             context.get_tensor_options(),
             ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch()) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_llm_model_args();
     auto options = context.get_tensor_options();
     auto parallel_args = context.get_parallel_args();
     device_ = options.device();
 
-    layers_.reserve(model_args.n_layers());
+    layers_.reserve(model_args.transformer().n_layers());
     norm_ = register_module("norm", layer::RMSNorm(context));
     embed_tokens_ =
         register_module("embed_tokens", layer::WordEmbedding(context));
 
     hc_mult_ = model_args.hc_mult();
     hc_eps_ = static_cast<double>(model_args.hc_eps());
-    norm_eps_ = static_cast<double>(model_args.rms_norm_eps());
+    norm_eps_ = static_cast<double>(model_args.transformer().rms_norm_eps());
 
-    num_heads_ = model_args.n_heads();
+    num_heads_ = model_args.transformer().n_heads();
     head_dim_ = model_args.o_lora_rank() + model_args.qk_rope_head_dim();
     // Attention TP width under the orthogonal dp * cp * attn_tp == world
     // layout. This must match the width DSAttention actually shards heads by
@@ -464,10 +467,10 @@ class DeepseekV4ModelImpl
     tp_num_heads_ = num_heads_ / dp_local_tp_size_;
     window_size_ = model_args.window_size();
     index_n_heads_ = model_args.index_n_heads();
-    index_head_dim_ = model_args.index_head_dim();
+    index_head_dim_ = model_args.transformer().index_head_dim();
     index_topk_ = model_args.index_topk();
 
-    const int64_t hc_dim = hc_mult_ * model_args.hidden_size();
+    const int64_t hc_dim = hc_mult_ * model_args.transformer().hidden_size();
     auto hc_options = options.dtype(torch::kFloat32);
     hc_head_fn_ =
         register_parameter("hc_head_fn",
@@ -480,44 +483,46 @@ class DeepseekV4ModelImpl
                                         torch::empty({1}, hc_options),
                                         /*requires_grad=*/false);
 
-    const int64_t rope_head_dim = model_args.rope_head_dim();
-    const int64_t max_pos = model_args.max_position_embeddings();
+    const int64_t rope_head_dim = model_args.transformer().rope_head_dim();
+    const int64_t max_pos = model_args.transformer().max_position_embeddings();
     if (rope_head_dim > 0 && max_pos > 0) {
       const int64_t original_max_pos =
-          model_args.rope_scaling_original_max_position_embeddings() > 0
-              ? model_args.rope_scaling_original_max_position_embeddings()
+          model_args.transformer()
+                      .rope_scaling_original_max_position_embeddings() > 0
+              ? model_args.transformer()
+                    .rope_scaling_original_max_position_embeddings()
               : max_pos;
       // DeepSeek V4 DSA rotary only uses YaRN to derive inv_freq.  Keep the
       // generic cache builder's extrapolation/mscale inputs at unit values.
-      dsa_rotary_embedding_ =
-          std::make_shared<layer::DeepseekV4RotaryEmbedding>(
-              /*rotary_dim=*/rope_head_dim,
-              /*max_position_embeddings=*/max_pos,
-              /*interleaved=*/true,
-              /*rope_theta=*/model_args.rope_theta(),
-              /*compress_rope_theta=*/model_args.compress_rope_theta(),
-              /*scaling_factor=*/model_args.factor(),
-              /*extrapolation_factor=*/1.0f,
-              /*beta_fast=*/model_args.beta_fast(),
-              /*beta_slow=*/model_args.beta_slow(),
-              /*attn_factor=*/model_args.rope_scaling_attn_factor(),
-              /*mscale=*/1.0f,
-              /*mscale_all_dim=*/1.0f,
-              /*original_max_position_embeddings=*/original_max_pos,
-              options);
+      dsa_rotary_embedding_ = std::make_shared<
+          layer::DeepseekV4RotaryEmbedding>(
+          /*rotary_dim=*/rope_head_dim,
+          /*max_position_embeddings=*/max_pos,
+          /*interleaved=*/true,
+          /*rope_theta=*/model_args.transformer().rope_theta(),
+          /*compress_rope_theta=*/model_args.compress_rope_theta(),
+          /*scaling_factor=*/model_args.factor(),
+          /*extrapolation_factor=*/1.0f,
+          /*beta_fast=*/model_args.beta_fast(),
+          /*beta_slow=*/model_args.beta_slow(),
+          /*attn_factor=*/model_args.transformer().rope_scaling_attn_factor(),
+          /*mscale=*/1.0f,
+          /*mscale_all_dim=*/1.0f,
+          /*original_max_position_embeddings=*/original_max_pos,
+          options);
       dsa_cos_sin_ = dsa_rotary_embedding_->get_cos_sin_cache("default");
     }
 
-    if (model_args.index_head_dim() > 0) {
-      auto hadamard_dim_padded =
-          deepseek_v4_next_power_of_two(model_args.index_head_dim());
+    if (model_args.transformer().index_head_dim() > 0) {
+      auto hadamard_dim_padded = deepseek_v4_next_power_of_two(
+          model_args.transformer().index_head_dim());
       dsa_hadamard_ =
           deepseek_v4_create_hadamard_matrix(hadamard_dim_padded,
                                              options.dtype().toScalarType(),
                                              options.device());
     }
 
-    for (int32_t i = 0; i < model_args.n_layers(); ++i) {
+    for (int32_t i = 0; i < model_args.transformer().n_layers(); ++i) {
       auto layer = layer::DeepseekV4DecoderLayer(context, i);
       layers_.push_back(layer);
     }
@@ -556,9 +561,10 @@ class DeepseekV4ModelImpl
       }
     }
 
-    caches_info_.resize(model_args.n_layers());
+    caches_info_.resize(model_args.transformer().n_layers());
 
-    for (int32_t layer_id = 0; layer_id < model_args.n_layers(); ++layer_id) {
+    for (int32_t layer_id = 0; layer_id < model_args.transformer().n_layers();
+         ++layer_id) {
       int32_t cr = (layer_id < static_cast<int32_t>(compress_ratios.size()))
                        ? compress_ratios[layer_id]
                        : 1;
@@ -1938,7 +1944,7 @@ class DeepseekV4ForCausalLMImpl
   explicit DeepseekV4ForCausalLMImpl(const ModelContext& context)
       : LlmForCausalLMImplBase<DeepseekV4Model>(context),
         first_k_dense_replace_(
-            context.get_model_args().first_k_dense_replace()) {}
+            context.get_llm_model_args().first_k_dense_replace()) {}
 
   void load_model(std::unique_ptr<ModelLoader> loader,
                   std::string prefix = "model.") override {

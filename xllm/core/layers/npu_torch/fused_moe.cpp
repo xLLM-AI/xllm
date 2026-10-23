@@ -562,18 +562,30 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
                            const QuantArgs& quant_args,
                            const ParallelArgs& parallel_args,
                            const torch::TensorOptions& options)
+    : FusedMoEImpl(LlmModelArgs(model_args),
+                   moe_args,
+                   quant_args,
+                   parallel_args,
+                   options) {}
+
+FusedMoEImpl::FusedMoEImpl(const LlmModelArgs& model_args,
+                           const FusedMoEArgs& moe_args,
+                           const QuantArgs& quant_args,
+                           const ParallelArgs& parallel_args,
+                           const torch::TensorOptions& options)
     : num_total_experts_(model_args.n_routed_experts()),
       topk_(model_args.num_experts_per_tok()),
       num_expert_group_(model_args.n_group()),
       topk_group_(model_args.topk_group()),
-      hidden_size_(model_args.hidden_size()),
+      hidden_size_(model_args.transformer().hidden_size()),
       n_shared_experts_(model_args.n_shared_experts()),
       is_gated_(moe_args.is_gated),
       skip_gate_load_(moe_args.skip_gate_load),
-      is_deepseek_v4_(util::is_deepseek_v4_model_type(model_args.model_type())),
+      is_deepseek_v4_(util::is_deepseek_v4_model_type(
+          model_args.transformer().model_type())),
       renormalize_(model_args.norm_topk_prob() ? 1 : 0),
       swiglu_limit_(static_cast<double>(model_args.swiglu_limit())),
-      hidden_act_(model_args.hidden_act()),
+      hidden_act_(model_args.transformer().hidden_act()),
       scoring_func_(model_args.scoring_func().empty()
                         ? std::string("softmax")
                         : model_args.scoring_func()),
@@ -611,7 +623,7 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
                  ::xllm::EPLBConfig::get_instance().enable_eplb() &&
                  ep_size > 1;
   reserve_eplb_staging_buffers_ = dsv4_eplb::should_reserve_staging_buffers(
-      enable_eplb_, model_args.model_type());
+      enable_eplb_, model_args.transformer().model_type());
   device_experts_num_ =
       num_experts_per_rank_ + (enable_eplb_ ? redundant_experts_num_ : 0);
   enable_ep2_dispatch_combine_ =

@@ -29,12 +29,13 @@ class Qwen3_5MtpModelImpl final : public Qwen3_5MtpModelImplBase {
  public:
   explicit Qwen3_5MtpModelImpl(const ModelContext& context)
       : Qwen3_5MtpModelImplBase(context),
-        mrope_section_(context.get_model_args().rope_scaling_mrope_section()) {
+        mrope_section_(
+            context.get_transformer_model_args().rope_scaling_mrope_section()) {
     if (mrope_section_.empty()) {
       return;
     }
 
-    const ModelArgs& args = context.get_model_args();
+    const auto& args = context.get_transformer_model_args();
     const int64_t rotary_dim =
         static_cast<int64_t>(args.head_dim() * args.partial_rotary_factor());
     cos_sin_ = layer::rotary::get_concat_rotary_embedding(

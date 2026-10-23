@@ -30,7 +30,7 @@ void NpuRMSNormImpl::param_from_args(atb::infer::RmsNormParam& param,
 
 NpuRMSNormImpl::NpuRMSNormImpl(const ModelContext& context)
     : BaseLayer(context) {
-  param_from_args(norm_param_, context.get_model_args());
+  param_from_args(norm_param_, context.get_transformer_model_args());
 
   atb_weight_tensors_.resize(1);
 

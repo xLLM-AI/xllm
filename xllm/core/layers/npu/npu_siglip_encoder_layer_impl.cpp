@@ -26,7 +26,7 @@ NpuSiglipEncoderLayerUpImpl::NpuSiglipEncoderLayerUpImpl(
     const std::string& prefix)
     : BaseLayer(context),
       graph_("siglip_encoder_layer_up"),
-      model_args_(context.get_model_args()),
+      model_args_(context.get_vlm_model_args().vision()),
       options_(context.get_tensor_options()),
       prefix_(prefix) {
   loader_ = std::make_unique<SiglipEncoderUpLoader>(context);
@@ -173,7 +173,7 @@ NpuSiglipEncoderLayerDownImpl::NpuSiglipEncoderLayerDownImpl(
     const std::string& prefix)
     : BaseLayer(context),
       graph_("siglip_encoder_layer_down"),
-      model_args_(context.get_model_args()),
+      model_args_(context.get_vlm_model_args().vision()),
       options_(context.get_tensor_options()),
       prefix_(prefix) {
   loader_ = std::make_unique<SiglipEncoderDownLoader>(context);
@@ -309,7 +309,7 @@ NpuSiglipEncoderLayerImpl::NpuSiglipEncoderLayerImpl(
     const ModelContext& context,
     const std::string& prefix)
     : BaseLayer(context),
-      model_args_(context.get_model_args()),
+      model_args_(context.get_vlm_model_args().vision()),
       options_(context.get_tensor_options()),
       prefix_(prefix) {
   up_ = NpuSiglipEncoderLayerUp(context, prefix);

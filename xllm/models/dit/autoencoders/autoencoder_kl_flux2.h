@@ -22,7 +22,7 @@ namespace xllm {
 class AutoencoderKLFlux2Impl final : public torch::nn::Module {
  public:
   explicit AutoencoderKLFlux2Impl(const ModelContext& context)
-      : args_(context.get_model_args()) {
+      : args_(context.get_dit_model_args().vae()) {
     encoder_ = register_module("encoder", VAEEncoder(context));
     decoder_ = register_module("decoder", VAEDecoder(context));
     if (args_.use_quant_conv()) {
@@ -173,7 +173,7 @@ class AutoencoderKLFlux2Impl final : public torch::nn::Module {
   bool is_bn_running_mean_ = false;
   bool is_bn_running_var_ = false;
   /*bool is_bn_num_batches_tracked_ = false;*/
-  ModelArgs args_;
+  DiTVaeModelArgs args_;
 };
 TORCH_MODULE(AutoencoderKLFlux2);
 

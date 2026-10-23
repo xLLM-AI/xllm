@@ -66,13 +66,14 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
  public:
   explicit Qwen3HybridModelImplBase(const ModelContext& context)
       : device_(context.get_tensor_options().device()),
-        model_args_(context.get_model_args()),
+        model_args_(context.get_transformer_model_args()),
+        enable_mla_(context.get_transformer_model_args().enable_mla()),
         parallel_args_(context.get_parallel_args()),
         flash_comm1_options_(context.get_flash_comm1_options()),
-        aux_capture_(context.get_model_args(),
+        aux_capture_(context.get_llm_model_args(),
                      context.get_tensor_options(),
                      SchedulerConfig::get_instance().max_tokens_per_batch()) {
-    if (model_args_.n_routed_experts() > 0) {
+    if (context.get_llm_model_args().n_routed_experts() > 0) {
       flash_comm1_options_.enable_flashcomm1 = false;
       flash_comm1_options_.enable_mmrs_fusion = false;
     }
@@ -141,7 +142,7 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
 #if defined(USE_MUSA)
     layer::AttentionMetadata attn_metadata =
         layer::AttentionMetadataBuilder::build(input_params,
-                                               model_args_.enable_mla(),
+                                               enable_mla_,
                                                /*attn_mask=*/std::nullopt,
                                                /*device=*/device_,
                                                metadata_build_options);
@@ -150,7 +151,7 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
     layer::AttentionMetadata attn_metadata =
         layer::AttentionMetadataBuilder::build(
             input_params,
-            model_args_.enable_mla(),
+            enable_mla_,
             build_attention_mask(input_params),
             /*device=*/device_,
             metadata_build_options);
@@ -306,7 +307,8 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
 #endif
   }
 
-  ModelArgs model_args_;
+  TransformerModelArgs model_args_;
+  bool enable_mla_ = false;
   torch::nn::ModuleList blocks_{nullptr};
   std::vector<layer::Qwen3HybridDecoderLayerModulePtr> layers_;
   int32_t max_seq_len_ = 0;
@@ -325,7 +327,8 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
 class Qwen3HybridForCausalLMImplBase : public torch::nn::Module {
  public:
   explicit Qwen3HybridForCausalLMImplBase(const ModelContext& context) {
-    tie_word_embeddings_ = context.get_model_args().tie_word_embeddings();
+    tie_word_embeddings_ =
+        context.get_transformer_model_args().tie_word_embeddings();
     lm_head_ = register_module("lm_head", layer::LmHead(context));
   }
 

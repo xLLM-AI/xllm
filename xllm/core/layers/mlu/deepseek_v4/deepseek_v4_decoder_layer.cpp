@@ -27,8 +27,9 @@ DeepseekV4DecoderLayerImpl::DeepseekV4DecoderLayerImpl(
     const ModelContext& context,
     int32_t layer_id)
     : layer_id_(layer_id),
-      use_hash_(layer_id < context.get_model_args().n_hash_layers()) {
-  const ModelArgs& model_args = context.get_model_args();
+      use_hash_(layer_id <
+                context.get_transformer_model_args().n_hash_layers()) {
+  const auto& model_args = context.get_transformer_model_args();
   const QuantArgs& quant_args = context.get_quant_args();
   const ParallelArgs& parallel_args = context.get_parallel_args();
   const torch::TensorOptions& options = context.get_tensor_options();

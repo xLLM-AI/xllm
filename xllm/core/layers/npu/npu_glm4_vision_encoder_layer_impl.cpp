@@ -30,7 +30,7 @@ const uint64_t WEIGHT_COUNT_PER_LAYER = 8;
 
 void NpuGlm4VisionEncoderLayerImpl::param_from_args(
     atb_speed::glm::VisionEncoderLayerParam& param,
-    const ModelArgs& args,
+    const VlmVisionModelArgs& args,
     const ParallelArgs& parallel_args) {
   param.isBF16 = args.dtype() == "bfloat16";
   param.supportLcoc = false;
@@ -58,7 +58,7 @@ void NpuGlm4VisionEncoderLayerImpl::param_from_args(
 NpuGlm4VisionEncoderLayerImpl::NpuGlm4VisionEncoderLayerImpl(
     const ModelContext& context)
     : BaseLayer(context) {
-  auto model_args = context.get_model_args();
+  const auto& model_args = context.get_vlm_model_args().vision();
   auto parallel_args = context.get_parallel_args();
   auto options = context.get_tensor_options();
   param_from_args(encode_param_, model_args, parallel_args);

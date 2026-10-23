@@ -26,7 +26,9 @@ Qwen3HybridDecoderLayerImplBase::Qwen3HybridDecoderLayerImplBase(
     const ModelContext& context,
     int32_t layer_id,
     std::shared_ptr<Qwen3GatedDeltaNetBaseImpl> linear_attention_module) {
-  const auto& model_args = context.get_model_args();
+  const auto& model_args = context.get_transformer_model_args();
+  const auto& llm_args = context.get_llm_model_args();
+  const auto& transformer_args = llm_args.transformer();
   const auto& quant_args = context.get_quant_args();
   const auto& parallel_args = context.get_parallel_args();
   const auto& options = context.get_tensor_options();
@@ -44,40 +46,41 @@ Qwen3HybridDecoderLayerImplBase::Qwen3HybridDecoderLayerImplBase(
   }
 
   // Initialize norm layers
-  input_norm_ = register_module(
-      "input_layernorm",
-      Qwen3NextRMSNorm(
-          model_args.hidden_size(), model_args.rms_norm_eps(), options));
+  input_norm_ =
+      register_module("input_layernorm",
+                      Qwen3NextRMSNorm(transformer_args.hidden_size(),
+                                       transformer_args.rms_norm_eps(),
+                                       options));
 
-  post_norm_ = register_module(
-      "post_attention_layernorm",
-      Qwen3NextRMSNorm(
-          model_args.hidden_size(), model_args.rms_norm_eps(), options));
+  post_norm_ = register_module("post_attention_layernorm",
+                               Qwen3NextRMSNorm(transformer_args.hidden_size(),
+                                                transformer_args.rms_norm_eps(),
+                                                options));
 
   // Initialize the feed-forward block. Qwen3.5 uses a routed block; select the
   // MUSA MoE path only for qwen3_5_moe_text (generic Qwen3-Next MoE differs).
-  auto mlp_only_layers = model_args.mlp_only_layers();
+  auto mlp_only_layers = transformer_args.mlp_only_layers();
   const bool is_moe_layer =
       std::count(mlp_only_layers.begin(), mlp_only_layers.end(), layer_id) ==
           0 &&
       model_args.n_routed_experts() > 0 &&
-      (layer_id + 1) % model_args.decoder_sparse_step() == 0;
+      (layer_id + 1) % transformer_args.decoder_sparse_step() == 0;
   const bool use_qwen35_moe =
-      is_moe_layer && model_args.model_type() == "qwen3_5_moe_text";
+      is_moe_layer && transformer_args.model_type() == "qwen3_5_moe_text";
   if (use_qwen35_moe) {
     moe_mlp_ = register_module("mlp",
-                               Qwen3_5FusedMoE(model_args,
+                               Qwen3_5FusedMoE(context.get_llm_model_args(),
                                                FusedMoEArgs{.is_gated = true},
                                                quant_args,
                                                parallel_args,
                                                options));
   } else {
     mlp_ = register_module("mlp",
-                           DenseMLP(model_args.hidden_size(),
-                                    model_args.intermediate_size(),
+                           DenseMLP(transformer_args.hidden_size(),
+                                    transformer_args.intermediate_size(),
                                     /*is_gated=*/true,
                                     /*has_bias=*/false,
-                                    model_args.hidden_act(),
+                                    transformer_args.hidden_act(),
                                     /*enable_result_reduction=*/true,
                                     quant_args,
                                     parallel_args.tp_group_,

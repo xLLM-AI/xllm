@@ -55,11 +55,12 @@ class WanImageToVideoPipelineImpl : public torch::nn::Module,
       : parallel_args_(context.get_parallel_args()),
         dit::CFGParallelMixin(context) {
     options_ = context.get_tensor_options();
-    const auto& vae_args = context.get_model_args("vae");
+    const auto& vae_args = context.get_dit_model_args("vae").vae();
     zdim_ = vae_args.z_dim();
     latents_mean_ = vae_args.latents_mean();
     latents_std_ = vae_args.latents_std();
-    const auto& scheduler_args = context.get_model_args("scheduler");
+    const auto& scheduler_args =
+        context.get_dit_model_args("scheduler").scheduler();
     num_train_timesteps_ = scheduler_args.num_train_timesteps();
 
     // RainFusion config is static (derived from flags) — build it once here

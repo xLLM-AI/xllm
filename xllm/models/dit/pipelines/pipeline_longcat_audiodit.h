@@ -105,10 +105,8 @@ class LongCatAudioDiTPipelineImpl final : public torch::nn::Module {
         context.get_tensor_options().dtype(torch::kFloat32);
     ModelContext t5_ctx;
     if (context.has_component("text_encoder")) {
-      t5_ctx = ModelContext(context.get_parallel_args(),
-                            context.get_model_args("text_encoder"),
-                            context.get_quant_args("text_encoder"),
-                            t5_opts);
+      t5_ctx = context.get_model_context("text_encoder")
+                   .with_tensor_options(t5_opts);
     } else {
       ModelArgs t5_args;
       t5_args.vocab_size() = 256384;
@@ -122,8 +120,13 @@ class LongCatAudioDiTPipelineImpl final : public torch::nn::Module {
       t5_args.relative_attention_num_buckets() = 32;
       t5_args.relative_attention_max_distance() = 128;
       t5_args.layer_norm_eps() = 1e-6f;
-      t5_ctx = ModelContext(
-          context.get_parallel_args(), t5_args, QuantArgs(), t5_opts);
+      t5_ctx = ModelContext(context.get_parallel_args(),
+                            t5_args,
+                            QuantArgs(),
+                            t5_opts,
+                            {ModelFamily::DIT,
+                             context.get_registration_name(),
+                             DiTComponentType::TEXT_ENCODER});
     }
     text_encoder_ = register_module("text_encoder", UMT5TextEncoder(t5_ctx));
   }

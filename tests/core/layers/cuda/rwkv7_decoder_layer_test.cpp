@@ -179,8 +179,11 @@ class RWKV7DecoderLayerTest : public ::testing::Test {
     device_ = torch::Device(torch::kCUDA, 0);
     options_ = torch::TensorOptions().dtype(torch::kFloat16).device(device_);
     parallel_args_ = ParallelArgs(1, 1, nullptr);
-    context_ =
-        ModelContext(parallel_args_, make_model_args(), QuantArgs(), options_);
+    context_ = ModelContext(parallel_args_,
+                            make_model_args(),
+                            QuantArgs(),
+                            options_,
+                            {ModelFamily::LLM});
     layer_ = RWKV7DecoderLayer(context_, /*layer_id=*/0);
     layer_->load_state_dict(make_layer0_state_dict(options_));
     kv_cache_ = make_kv_cache(device_);
@@ -192,7 +195,8 @@ class RWKV7DecoderLayerTest : public ::testing::Test {
   ModelContext context_{parallel_args_,
                         make_model_args(),
                         QuantArgs(),
-                        torch::TensorOptions()};
+                        torch::TensorOptions(),
+                        {ModelFamily::LLM}};
   RWKV7DecoderLayer layer_{nullptr};
   KVCache kv_cache_;
 };

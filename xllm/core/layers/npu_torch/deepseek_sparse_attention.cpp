@@ -568,7 +568,7 @@ torch::Tensor build_dspark_swa_indices(const torch::Tensor& block_table,
 }
 
 DSAttentionImpl::DSAttentionImpl(const ModelContext& context, int32_t layer_id)
-    : DSAttentionImpl(context.get_model_args(),
+    : DSAttentionImpl(context.get_transformer_model_args(),
                       context.get_quant_args(),
                       context.get_parallel_args(),
                       context.get_tensor_options(),

@@ -21,7 +21,7 @@ namespace xllm {
 namespace layer {
 
 MiniMaxM2AttentionImpl::MiniMaxM2AttentionImpl(const ModelContext& context) {
-  const auto& args = context.get_model_args();
+  const auto& args = context.get_transformer_model_args();
   auto quant_args = context.get_quant_args();
   if (quant_args.quant_method() == "fp8") {
     quant_args.quant_method("");

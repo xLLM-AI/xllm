@@ -85,15 +85,16 @@ class DeepseekV4ModelImpl final
   explicit DeepseekV4ModelImpl(const ModelContext& context)
       : LlmModelImplBase<layer::DeepseekV4DecoderLayer>(
             "deepseek_v4",
-            context.get_model_args()) {
-    const ModelArgs& model_args = context.get_model_args();
+            context.get_transformer_model_args(),
+            context.get_transformer_model_args().enable_mla()) {
+    const auto& model_args = context.get_llm_model_args();
     const torch::TensorOptions options = context.get_tensor_options();
     const ParallelArgs& parallel_args = context.get_parallel_args();
     cp_size_ = parallel_args.cp_size();
     cp_rank_ = parallel_args.cp_rank();
     cp_group_ = parallel_args.cp_group_;
 
-    layers_.reserve(model_args.n_layers());
+    layers_.reserve(model_args.transformer().n_layers());
     norm_ = register_module("norm", layer::RMSNorm(context));
     embed_tokens_ =
         register_module("embed_tokens", layer::WordEmbedding(context));
@@ -101,7 +102,7 @@ class DeepseekV4ModelImpl final
     hc_mult_ = model_args.hc_mult();
     window_size_ = model_args.window_size();
 
-    num_heads_ = model_args.n_heads();
+    num_heads_ = model_args.transformer().n_heads();
     dp_local_tp_size_ = std::max<int64_t>(parallel_args.tp_size(), 1);
     CHECK_EQ(num_heads_ % dp_local_tp_size_, 0)
         << "[DSV4][Init] n_heads must be divisible by local tp size. n_heads="
@@ -109,23 +110,27 @@ class DeepseekV4ModelImpl final
 
     hc_head_ = register_module(
         "hc_head",
-        layer::MHCHead(hc_mult_,
-                       model_args.hidden_size(),
-                       static_cast<double>(model_args.hc_eps()),
-                       static_cast<double>(model_args.rms_norm_eps()),
-                       options));
+        layer::MHCHead(
+            hc_mult_,
+            model_args.transformer().hidden_size(),
+            static_cast<double>(model_args.hc_eps()),
+            static_cast<double>(model_args.transformer().rms_norm_eps()),
+            options));
 
     init_rope(model_args, options);
     init_hadamard(model_args, options);
-    max_position_embeddings_ = model_args.max_position_embeddings();
+    max_position_embeddings_ =
+        model_args.transformer().max_position_embeddings();
 
-    for (int32_t layer_id = 0; layer_id < model_args.n_layers(); ++layer_id) {
+    for (int32_t layer_id = 0; layer_id < model_args.transformer().n_layers();
+         ++layer_id) {
       layers_.emplace_back(layer::DeepseekV4DecoderLayer(context, layer_id));
     }
 
     build_dsa_cache_info(model_args);
 
-    for (int32_t layer_id = 0; layer_id < model_args.n_layers(); ++layer_id) {
+    for (int32_t layer_id = 0; layer_id < model_args.transformer().n_layers();
+         ++layer_id) {
       layers_[static_cast<size_t>(layer_id)]->set_cache_mapping(
           cache_mappings_[static_cast<size_t>(layer_id)]);
     }

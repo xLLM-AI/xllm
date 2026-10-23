@@ -58,7 +58,7 @@ struct DecoderOutput {
 class AttentionImpl : public torch::nn::Module {
  public:
   explicit AttentionImpl(ModelContext context) {
-    ModelArgs model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().vae();
     int64_t query_dim = model_args.block_out_channels().back();
     int64_t head_dim = model_args.block_out_channels().back();
     int64_t num_heads = query_dim / head_dim;
@@ -303,7 +303,7 @@ class ResnetBlock2DImpl : public torch::nn::Module {
       : in_channels_(in_channels),
         out_channels_(out_channels),
         time_embedding_norm_(time_embedding_norm) {
-    ModelArgs model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().vae();
     int64_t groups_out_val = model_args.norm_num_groups();
 
     norm1_ =
@@ -477,7 +477,7 @@ TORCH_MODULE(ResnetBlock2D);
 class UNetMidBlock2DImpl : public torch::nn::Module {
  public:
   explicit UNetMidBlock2DImpl(ModelContext context) {
-    ModelArgs model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().vae();
     resnets_ = register_module("resnets", torch::nn::ModuleList());
     attentions_ = register_module("attentions", torch::nn::ModuleList());
     int64_t in_channels = model_args.block_out_channels().back();
@@ -558,7 +558,7 @@ class DownEncoderBlock2DImpl : public torch::nn::Module {
                          int64_t in_channels,
                          int64_t out_channels,
                          bool add_downsample = true) {
-    ModelArgs model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().vae();
     int64_t num_layers = model_args.layers_per_block();
     resnets_ = register_module("resnets", torch::nn::ModuleList());
     downsamplers_ = register_module("downsamplers", torch::nn::ModuleList());
@@ -643,7 +643,7 @@ class UpDecoderBlock2DImpl : public torch::nn::Module {
                        int64_t in_channels,
                        int64_t out_channels,
                        bool add_upsample = true) {
-    ModelArgs model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().vae();
     int64_t num_layers = model_args.layers_per_block() + 1;
     resnets_ = register_module("resnets", torch::nn::ModuleList());
     resnet_layers_.reserve(num_layers);
@@ -724,7 +724,7 @@ TORCH_MODULE(UpDecoderBlock2D);
 class VAEEncoderImpl : public torch::nn::Module {
  public:
   explicit VAEEncoderImpl(const ModelContext& context) {
-    ModelArgs args = context.get_model_args();
+    const auto& args = context.get_dit_model_args().vae();
     down_blocks_ = register_module("down_blocks", torch::nn::ModuleList());
     auto options = context.get_tensor_options();
     conv_in_ = register_module(
@@ -852,7 +852,7 @@ TORCH_MODULE(VAEEncoder);
 class VAEDecoderImpl : public torch::nn::Module {
  public:
   explicit VAEDecoderImpl(const ModelContext& context) {
-    ModelArgs args = context.get_model_args();
+    const auto& args = context.get_dit_model_args().vae();
     auto options = context.get_tensor_options();
     up_blocks_ = register_module("up_blocks", torch::nn::ModuleList());
     conv_in_ = register_module(
@@ -987,7 +987,7 @@ TORCH_MODULE(VAEDecoder);
 class VAEImpl : public torch::nn::Module {
  public:
   explicit VAEImpl(const ModelContext& context)
-      : args_(context.get_model_args()) {
+      : args_(context.get_dit_model_args().vae()) {
     encoder_ = register_module("encoder", VAEEncoder(context));
     decoder_ = register_module("decoder", VAEDecoder(context));
     if (args_.use_quant_conv()) {
@@ -1093,7 +1093,7 @@ class VAEImpl : public torch::nn::Module {
   bool is_quant_conv_bias_ = false;
   bool is_post_quant_conv_weight_ = false;
   bool is_post_quant_conv_bias_ = false;
-  ModelArgs args_;
+  DiTVaeModelArgs args_;
 };
 TORCH_MODULE(VAE);
 

@@ -21,6 +21,7 @@ limitations under the License.
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -70,13 +71,13 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
       : dit::CFGParallelMixin(context),
         context_(context),
         parallel_args_(context.get_parallel_args()),
-        vae_model_args_(context.get_model_args("vae")) {
+        vae_model_args_(context.get_dit_model_args("vae").vae()) {
     options_ = context.get_tensor_options();
     dtype_ = options_.dtype().toScalarType();
     device_ = options_.device();
 
-    const ModelArgs& transformer_model_args =
-        context.get_model_args("transformer");
+    const auto& transformer_model_args =
+        context.get_dit_model_args("transformer").transformer();
     in_channels_ = transformer_model_args.in_channels();
     num_layers_ = transformer_model_args.num_layers();
     const int64_t hidden_size = transformer_model_args.hidden_size();
@@ -104,7 +105,8 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
         FlowMatchEulerDiscreteScheduler(context.get_model_context("scheduler"));
 
     if (context.has_component("text_encoder")) {
-      text_encoder_model_args_ = context.get_model_args("text_encoder");
+      const auto& text_encoder_args =
+          context.get_vlm_model_args("text_encoder");
 #if defined(USE_NPU)
       CHECK_EQ(KernelConfig::get_instance().npu_kernel_backend(), "TORCH")
           << "JoyImageEditPlus in-process Qwen3-VL text encoding requires "
@@ -118,13 +120,11 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
       vlm_parallel_args.tp_size(tp_group->world_size());
       vlm_parallel_args.tp_group_ = tp_group;
       text_encoder_empty_kv_caches_.resize(
-          static_cast<size_t>(text_encoder_model_args_.n_layers()));
+          static_cast<size_t>(text_encoder_args.transformer().n_layers()));
       const ModelContext& source_vlm_context =
           context.get_model_context("text_encoder");
-      ModelContext vlm_context(vlm_parallel_args,
-                               source_vlm_context.get_model_args(),
-                               source_vlm_context.get_quant_args(),
-                               source_vlm_context.get_tensor_options());
+      ModelContext vlm_context =
+          source_vlm_context.with_parallel_args(vlm_parallel_args);
       text_encoder_ = JoyImageEditTextEncoder(vlm_context);
       CHECK(!text_encoder_.is_empty())
           << "Failed to create JoyImageEditPlus Qwen3-VL text encoder";
@@ -480,12 +480,13 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
     std::unique_ptr<DiTFolderLoader> text_encoder_loader;
     if (!text_encoder_.is_empty()) {
       text_encoder_loader = loader->take_component_loader("text_encoder");
+      text_encoder_model_args_ = text_encoder_loader->model_args();
       std::unique_ptr<Tokenizer> tokenizer = text_encoder_loader->tokenizer();
       CHECK(tokenizer != nullptr)
           << "Failed to load JoyImageEditPlus Qwen3-VL tokenizer";
       tokenizer_ = std::shared_ptr<Tokenizer>(std::move(tokenizer));
       multimodal_processor_ =
-          create_multimodal_processor(text_encoder_model_args_,
+          create_multimodal_processor(*text_encoder_model_args_,
                                       tokenizer_,
                                       /*max_cache_items=*/0,
                                       text_encoder_loader->tokenizer_args());
@@ -654,7 +655,7 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
     CHECK(mm_data.foreach (schedule_visitor))
         << "JoyImageEditPlus failed to schedule Qwen3-VL multimodal inputs";
     auto [positions, mrope_position_delta] = mposition_generator_->generate(
-        token_ids, mm_data, text_encoder_model_args_);
+        token_ids, mm_data, *text_encoder_model_args_);
     static_cast<void>(mrope_position_delta);
 
     torch::Tensor tokens =
@@ -894,7 +895,7 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
 
   DiTModelContext context_;
   const ParallelArgs parallel_args_;
-  const ModelArgs& vae_model_args_;
+  const DiTVaeModelArgs& vae_model_args_;
   torch::Device device_ = torch::kCPU;
   torch::ScalarType dtype_;
   torch::TensorOptions options_;
@@ -907,7 +908,7 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
   std::shared_ptr<Tokenizer> tokenizer_;
   std::unique_ptr<MultimodalProcessorBase> multimodal_processor_;
   std::unique_ptr<MPositionGenerator> mposition_generator_;
-  ModelArgs text_encoder_model_args_;
+  std::optional<ModelArgs> text_encoder_model_args_;
   std::vector<KVCache> text_encoder_empty_kv_caches_;
 
   int64_t in_channels_;

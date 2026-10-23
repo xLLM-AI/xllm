@@ -30,6 +30,7 @@ limitations under the License.
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/model/causal_lm.h"
+#include "core/framework/model/model_family_args.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/deepseek_v4_rotary_embedding.h"
 #include "core/layers/common/dsa_metadata.h"
@@ -229,29 +230,31 @@ class DeepseekV4Base {
   // Initialization helpers — called from derived class constructors
   // ==========================================================================
 
-  void init_rope(const ModelArgs& model_args,
+  void init_rope(const LlmModelArgs& model_args,
                  const torch::TensorOptions& options) {
-    const int64_t rope_head_dim = model_args.rope_head_dim();
-    const int64_t max_pos = model_args.max_position_embeddings();
+    const int64_t rope_head_dim = model_args.transformer().rope_head_dim();
+    const int64_t max_pos = model_args.transformer().max_position_embeddings();
     if (rope_head_dim <= 0 || max_pos <= 0) {
       return;
     }
     const int64_t original_max_pos =
-        model_args.rope_scaling_original_max_position_embeddings() > 0
-            ? model_args.rope_scaling_original_max_position_embeddings()
+        model_args.transformer()
+                    .rope_scaling_original_max_position_embeddings() > 0
+            ? model_args.transformer()
+                  .rope_scaling_original_max_position_embeddings()
             : max_pos;
     auto dsa_rotary_embedding =
         std::make_shared<layer::DeepseekV4RotaryEmbedding>(
             /*rotary_dim=*/rope_head_dim,
             /*max_position_embeddings=*/max_pos,
             /*interleaved=*/true,
-            /*rope_theta=*/model_args.rope_theta(),
+            /*rope_theta=*/model_args.transformer().rope_theta(),
             /*compress_rope_theta=*/model_args.compress_rope_theta(),
             /*scaling_factor=*/model_args.factor(),
             /*extrapolation_factor=*/1.0f,
             /*beta_fast=*/model_args.beta_fast(),
             /*beta_slow=*/model_args.beta_slow(),
-            /*attn_factor=*/model_args.rope_scaling_attn_factor(),
+            /*attn_factor=*/model_args.transformer().rope_scaling_attn_factor(),
             /*mscale=*/1.0f,
             /*mscale_all_dim=*/1.0f,
             /*original_max_position_embeddings=*/original_max_pos,
@@ -270,17 +273,18 @@ class DeepseekV4Base {
     compressed_inverse_sin_ = -dsa_compressed_sin_;
   }
 
-  void init_hadamard(const ModelArgs& model_args,
+  void init_hadamard(const LlmModelArgs& model_args,
                      const torch::TensorOptions& options) {
-    if (model_args.index_head_dim() <= 0) {
+    if (model_args.transformer().index_head_dim() <= 0) {
       return;
     }
-    const int64_t hadamard_dim = next_power_of_two(model_args.index_head_dim());
+    const int64_t hadamard_dim =
+        next_power_of_two(model_args.transformer().index_head_dim());
     dsa_hadamard_ = create_hadamard_matrix(
         hadamard_dim, options.dtype().toScalarType(), options.device());
   }
 
-  void build_dsa_cache_info(const ModelArgs& model_args) {
+  void build_dsa_cache_info(const LlmModelArgs& model_args) {
     const std::vector<int32_t>& compress_ratios = model_args.compress_ratios();
     const int32_t base_block_size = KVCacheConfig::get_instance().block_size();
     CHECK_GT(base_block_size, 0) << "DeepSeek V4 block_size must be positive.";
@@ -310,9 +314,12 @@ class DeepseekV4Base {
       }
     }
 
-    caches_info_.resize(static_cast<size_t>(model_args.n_layers()));
-    cache_mappings_.resize(static_cast<size_t>(model_args.n_layers()));
-    for (int32_t layer_id = 0; layer_id < model_args.n_layers(); ++layer_id) {
+    caches_info_.resize(
+        static_cast<size_t>(model_args.transformer().n_layers()));
+    cache_mappings_.resize(
+        static_cast<size_t>(model_args.transformer().n_layers()));
+    for (int32_t layer_id = 0; layer_id < model_args.transformer().n_layers();
+         ++layer_id) {
       const int32_t raw_ratio =
           layer_id < static_cast<int32_t>(compress_ratios.size())
               ? compress_ratios[static_cast<size_t>(layer_id)]

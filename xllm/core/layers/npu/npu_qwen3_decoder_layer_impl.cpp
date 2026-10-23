@@ -221,7 +221,7 @@ void NpuQwen3DecoderLayerImpl::initialize_quantization_parameters(
 
 NpuQwen3DecoderLayerImpl::NpuQwen3DecoderLayerImpl(const ModelContext& context)
     : BaseLayer(context) {
-  auto model_args = context.get_model_args();
+  const auto& model_args = context.get_transformer_model_args();
   auto parallel_args = context.get_parallel_args();
   auto options = context.get_tensor_options();
 

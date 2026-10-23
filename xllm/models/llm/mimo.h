@@ -27,10 +27,12 @@ namespace xllm {
 class MiMoModelImpl final : public LlmModelImplBase<layer::Qwen2DecoderLayer> {
  public:
   explicit MiMoModelImpl(const ModelContext& context)
-      : LlmModelImplBase<layer::Qwen2DecoderLayer>(/*model_type=*/"mimo",
-                                                   context.get_model_args()) {
+      : LlmModelImplBase<layer::Qwen2DecoderLayer>(
+            /*model_type=*/"mimo",
+            context.get_transformer_model_args(),
+            context.get_transformer_model_args().enable_mla()) {
     // register submodules
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_transformer_model_args();
     auto options = context.get_tensor_options();
     if (!mrope_section_.empty()) {
       cos_sin_ = layer::rotary::get_concat_rotary_embedding(

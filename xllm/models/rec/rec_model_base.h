@@ -36,10 +36,10 @@ template <typename ModelType>
 class GenericRecImplBase : public torch::nn::Module {
  public:
   explicit GenericRecImplBase(const ModelContext& context) {
-    const auto& args = context.get_model_args();
-    tie_word_embeddings_ = args.tie_word_embeddings();
-    const float denom =
-        std::sqrt(static_cast<float>(std::max<int64_t>(1, args.hidden_size())));
+    const auto& args = context.get_rec_model_args();
+    tie_word_embeddings_ = args.transformer().tie_word_embeddings();
+    const float denom = std::sqrt(static_cast<float>(
+        std::max<int64_t>(1, args.transformer().hidden_size())));
     scale_factor_ = denom > 0.0f ? (1.0f / denom) : 1.0f;
 
     model_ = register_module("model", ModelType(context));

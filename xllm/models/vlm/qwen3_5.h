@@ -49,9 +49,11 @@ class Qwen3_5ModelImpl final
     : public LlmModelImplBase<layer::Qwen3_5DecoderLayer> {
  public:
   Qwen3_5ModelImpl(const ModelContext& context)
-      : LlmModelImplBase<layer::Qwen3_5DecoderLayer>("qwen3_5",
-                                                     context.get_model_args()) {
-    auto model_args = context.get_model_args();
+      : LlmModelImplBase<layer::Qwen3_5DecoderLayer>(
+            "qwen3_5",
+            context.get_transformer_model_args(),
+            context.get_transformer_model_args().enable_mla()) {
+    const auto& model_args = context.get_transformer_model_args();
     auto options = context.get_tensor_options();
     auto parallel_args = context.get_parallel_args();
     dp_size_ = parallel_args.dp_size();

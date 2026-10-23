@@ -41,7 +41,7 @@ class T5LayerNormImpl : public torch::nn::Module {
  public:
   explicit T5LayerNormImpl(ModelContext context)
       : device_(context.get_tensor_options().device()) {
-    ModelArgs model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().text_encoder();
     int64_t hidden_size = model_args.d_model();
     variance_epsilon_ = model_args.layer_norm_eps();
     auto dtype = context.get_tensor_options().dtype().toScalarType();
@@ -92,7 +92,7 @@ class T5DenseInterface : public torch::nn::Module {
 class T5DenseActDenseImpl : public T5DenseInterface {
  public:
   explicit T5DenseActDenseImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().text_encoder();
     auto options = context.get_tensor_options();
     wi_ = register_module("wi",
                           layer::AddMatmul(model_args.d_model(),
@@ -142,7 +142,7 @@ class T5DenseActDenseImpl : public T5DenseInterface {
 class T5DenseGatedActDenseImpl : public T5DenseInterface {
  public:
   explicit T5DenseGatedActDenseImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().text_encoder();
     auto options = context.get_tensor_options();
     wi_0_ = register_module("wi_0",
                             layer::AddMatmul(model_args.d_model(),
@@ -202,7 +202,7 @@ class T5DenseGatedActDenseImpl : public T5DenseInterface {
 class T5LayerFFNImpl : public torch::nn::Module {
  public:
   explicit T5LayerFFNImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().text_encoder();
     auto options = context.get_tensor_options();
     layer_norm_ = register_module("layer_norm", T5LayerNorm(context));
     if (model_args.is_gated_act()) {
@@ -274,7 +274,7 @@ class T5AttentionImpl : public torch::nn::Module {
  public:
   T5AttentionImpl(const ModelContext& context,
                   bool has_relative_attention_bias) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().text_encoder();
     auto options = context.get_tensor_options();
     has_relative_attention_bias_ = has_relative_attention_bias;
     inner_dim_ = model_args.n_heads() * model_args.d_kv();
@@ -497,7 +497,7 @@ class T5LayerSelfAttentionImpl : public torch::nn::Module {
  public:
   T5LayerSelfAttentionImpl(const ModelContext& context,
                            bool has_relative_attention_bias) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().text_encoder();
     auto options = context.get_tensor_options();
     self_attention_ = register_module(
         "SelfAttention", T5Attention(context, has_relative_attention_bias));
@@ -543,7 +543,7 @@ TORCH_MODULE(T5LayerSelfAttention);
 class T5BlockImpl : public torch::nn::Module {
  public:
   T5BlockImpl(const ModelContext& context, bool has_relative_attention_bias) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().text_encoder();
     auto options = context.get_tensor_options();
     self_attention_ = register_module(
         "SelfAttention",
@@ -616,7 +616,7 @@ TORCH_MODULE(T5Block);
 class T5EncoderModelImpl : public torch::nn::Module {
  public:
   explicit T5EncoderModelImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().text_encoder();
     auto options = context.get_tensor_options();
     embed_tokens_ = register_module(
         "embed_tokens",

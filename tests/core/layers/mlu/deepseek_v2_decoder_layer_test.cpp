@@ -240,7 +240,8 @@ class DeepseekV2DecoderLayerTest : public ::testing::Test {
     model_args_.enable_mla() = true;
 
     // Build a ModelContext that the decoder requires
-    context_ = ModelContext(parallel_args_, model_args_, quant_args_, options_);
+    context_ = ModelContext(
+        parallel_args_, model_args_, quant_args_, options_, {ModelFamily::LLM});
   }
 
   // Collect registered child module names to verify module wiring
@@ -671,7 +672,8 @@ class DeepseekV2DecoderLayerTest : public ::testing::Test {
   }
 
   void refresh_ctx() {
-    context_ = ModelContext(parallel_args_, model_args_, quant_args_, options_);
+    context_ = ModelContext(
+        parallel_args_, model_args_, quant_args_, options_, {ModelFamily::LLM});
   }
 
   void set_tp_dp_ctx(int64_t world_size,

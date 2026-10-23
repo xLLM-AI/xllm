@@ -74,7 +74,7 @@ class Flux2FeedForwardImpl final : public torch::nn::Module {
   explicit Flux2FeedForwardImpl(const ModelContext& context,
                                 const ParallelArgs& parallel_args)
       : options_(context.get_tensor_options()), parallel_args_(parallel_args) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
     quant_args_ = context.get_quant_args();
     float eps = model_args.mlp_ratio();
     int64_t num_attention_heads = model_args.n_heads();
@@ -177,7 +177,7 @@ class Flux2AttentionImpl : public torch::nn::Module {
   explicit Flux2AttentionImpl(const ModelContext& context,
                               const ParallelArgs& parallel_args)
       : options_(context.get_tensor_options()), parallel_args_(parallel_args) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
     quant_args_ = context.get_quant_args();
     heads_ = model_args.n_heads();
     head_dim_ = model_args.head_dim();
@@ -489,7 +489,7 @@ class Flux2ModulationImpl : public torch::nn::Module {
                                int64_t mod_param_sets,
                                bool bias = false)
       : options_(context.get_tensor_options()) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
 
     linear_ = register_module(
         "linear",
@@ -600,7 +600,7 @@ class Flux2TimestepGuidanceEmbeddingsImpl : public torch::nn::Module {
                                                bool bias = false,
                                                bool guidance_embeds = true)
       : options_(context.get_tensor_options()) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
     in_channels_ = model_args.timestep_guidance_channels();
     embedding_dim_ = embedding_dim;
     guidance_embeds_ = guidance_embeds;
@@ -666,7 +666,7 @@ class Flux2TransformerBlockImpl : public torch::nn::Module {
                                      int64_t dim,
                                      const ParallelArgs& parallel_args)
       : options_(context.get_tensor_options()), parallel_args_(parallel_args) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
     double eps = model_args.eps();
 
     norm1_ = register_module(
@@ -788,7 +788,7 @@ class Flux2ParallelSelfAttentionImpl : public torch::nn::Module {
   explicit Flux2ParallelSelfAttentionImpl(const ModelContext& context,
                                           const ParallelArgs& parallel_args)
       : options_(context.get_tensor_options()), parallel_args_(parallel_args) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
     quant_args_ = context.get_quant_args();
     heads_ = model_args.n_heads();
     head_dim_ = model_args.head_dim();
@@ -1070,7 +1070,7 @@ class Flux2SingleTransformerBlockImpl : public torch::nn::Module {
                                            int64_t inner_dim,
                                            const ParallelArgs& parallel_args)
       : options_(context.get_tensor_options()), parallel_args_(parallel_args) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
 
     norm_ = register_module(
         "norm",
@@ -1125,7 +1125,7 @@ class Flux2Transformer2DModelImpl : public torch::nn::Module,
   explicit Flux2Transformer2DModelImpl(const ModelContext& context,
                                        const ParallelArgs& parallel_args)
       : options_(context.get_tensor_options()), parallel_args_(parallel_args) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
     int64_t num_attention_heads = model_args.n_heads();
     int64_t attention_head_dim = model_args.head_dim();
     int64_t joint_attention_dim = model_args.joint_attention_dim();
