@@ -520,6 +520,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         # Device KV lengths can change between forwards while the prepared
         # Slot binding stays the same. Masks are shared only within a forward.
         self._block_attention_masks.clear()
+        self._kda_validated_query_shape = None
         self._graph_metadata_updated_in_place = False
         prepared = getattr(metadata, "prepared_attention_state", None)
         if isinstance(prepared, _PreparedMlaAttention):

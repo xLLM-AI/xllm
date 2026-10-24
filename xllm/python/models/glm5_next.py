@@ -34,7 +34,7 @@ import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from itertools import accumulate
-from typing import Optional, cast
+from typing import Any, Optional, cast
 
 import torch
 import torch.nn as nn
@@ -104,6 +104,7 @@ from xllm.python.layers.layernorm import RMSNorm
 from xllm.python.layers.linear import ColumnParallelLinear
 from xllm.python.layers.moe_dp import dp_gather_tokens, reduce_and_scatter
 from xllm.python.layers.qlinear import QLinear
+from xllm.python.models.aux_hidden_capture import AuxHiddenCapture
 from xllm.python.models.base import PyModelBase
 from xllm.python.models.glm5_next_kpool import (
     append_causal_tail,
@@ -237,6 +238,9 @@ class Glm5NextConfig:
     expert_parallel_degree: int = 0
     enable_mega_moe: bool = False
     enable_fused_mc2: bool = False
+    # 0-based post-layer indices threaded from the draft's target_layer_ids
+    # (via ModelArgs). Empty => capture disabled (non-speculative serving).
+    layers_to_capture: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         # Native EP callers supply the MoE group axes.
@@ -255,7 +259,7 @@ class Glm5NextConfig:
         if isinstance(tc, dict):
             d = {**tc, **d}
 
-        def pick(*keys, default=None):
+        def pick(*keys: str, default: Any = None) -> Any:
             for k in keys:
                 if k in d and d[k] is not None:
                     return d[k]
@@ -334,6 +338,7 @@ class Glm5NextConfig:
             expert_parallel_degree=int(pick("expert_parallel_degree", default=0)),
             enable_mega_moe=bool(pick("enable_mega_moe", default=False)),
             enable_fused_mc2=bool(pick("enable_fused_mc2", default=False)),
+            layers_to_capture=tuple(int(layer_id) for layer_id in pick("layers_to_capture", default=[])),
             # mHC fields: ModelArgs may emit a 0 default (un-plumbed); treat 0
             # /None as unset and fall back to the real 300B defaults.
             hc_mult=(int(pick("hc_mult", default=4)) or 4),
@@ -2024,7 +2029,7 @@ class Glm5NextHyperHead(nn.Module):
 class Glm5NextDecoderLayer(nn.Module):
     def __init__(self, cfg: Glm5NextConfig, layer_id: int, dtype: torch.dtype, device: torch.device) -> None:
         super().__init__()
-        self.layer_id = layer_id
+        self.layer_id: int = layer_id
         self.input_layernorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
         if cfg.is_dsa(layer_id):
             self.self_attn = Glm5NextMlaAttention(cfg, layer_id, dtype, device)
@@ -2081,6 +2086,14 @@ class Glm5NextModel(nn.Module):
         self.layers = nn.ModuleList([Glm5NextDecoderLayer(cfg, i, dtype, device) for i in range(cfg.n_layers)])
         self.norm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
         self.hc_head = Glm5NextHyperHead()
+        # Collapse each captured layer's mHC streams to the single residual stream
+        # the draft consumes; capture_layer applies this only on captured layers.
+        hc_head = self.hc_head
+        hidden_size = cfg.hidden_size
+        self.aux_hidden_capture = AuxHiddenCapture(
+            cfg.layers_to_capture,
+            transform=lambda streams: hc_head(streams).reshape(-1, hidden_size),
+        )
         # Set externally by the VL composer (get_input_embeddings) before the
         # runner drives forward(); when set, it replaces embed_tokens(input_ids)
         # so image/video embeddings merged into the sequence are used as-is. The
@@ -2092,7 +2105,7 @@ class Glm5NextModel(nn.Module):
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         # The C++ EagerRunner passes the flattened token tensor, which is 1-D
         # ``[num_tokens]`` for a single sequence; normalise to ``[B, S]``.
         if input_ids.dim() == 1:
@@ -2116,6 +2129,9 @@ class Glm5NextModel(nn.Module):
             attention_mask = cp_context.shard_valid_mask.unsqueeze(0)
             batch_size, seq_len = hidden.shape[:2]
 
+        # 2-D [num_tokens, hidden_size * k] to match the C++ context-hidden
+        # contract; capture CP-local rows and restore global order at the end.
+        aux_hidden_buffer = self.aux_hidden_capture.create_buffer(hidden.reshape(-1, self.cfg.hidden_size))
         # Expand embedding to hc_mult residual streams (all streams start
         # identical — reference model forward, modeling line 1521). NoPE: no
         # position embeddings are computed or threaded (reference passes None).
@@ -2123,6 +2139,7 @@ class Glm5NextModel(nn.Module):
         prev_topk: Optional[torch.Tensor] = None
         for i, layer in enumerate(self.layers):
             hidden, prev_topk = layer(hidden, position_ids, attention_mask, prev_topk)
+            self.aux_hidden_capture.capture_layer(i, hidden, None, aux_hidden_buffer)
             record_layer_event(i)
         # Final collapse: unweighted mean over the streams, then RMSNorm
         # (reference `self.norm(self.hc_head(hidden_states))`, line 1537).
@@ -2133,7 +2150,9 @@ class Glm5NextModel(nn.Module):
         h = self.norm(self.hc_head(hidden)).view(-1, self.cfg.hidden_size)
         if cp_context is not None:
             h = cp_merge_rows(h, cp_context)
-        return h
+            if aux_hidden_buffer is not None:
+                aux_hidden_buffer = cp_merge_rows(aux_hidden_buffer, cp_context)
+        return self.aux_hidden_capture.finalize(h, aux_hidden_buffer)
 
 
 def _w8a8_shard_dims(fp_dim: Optional[int]) -> Optional[dict]:
@@ -2222,6 +2241,11 @@ class Glm5NextForCausalLM(PyModelBase):
         self, input_ids: torch.Tensor, position_ids: torch.Tensor, attention_mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         hidden = self.model(input_ids, position_ids, attention_mask)
+        # With layers_to_capture the body returns (hidden, aux_hidden) for the
+        # draft's context projection; the CausalLM wrapper itself consumes only
+        # the logits hidden state.
+        if isinstance(hidden, tuple):
+            hidden = hidden[0]
         return self.lm_head(hidden)
 
     # -- weight loading ---------------------------------------------------

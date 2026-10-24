@@ -45,6 +45,18 @@ class _LinearModule(_WeightModule, Protocol):
     def bias(self) -> torch.nn.Parameter | None: ...
 
 
+class _DynamicW8A8WeightLoader(Protocol):
+    """Loader operations needed by :func:`load_w8a8_dynamic_projection`."""
+
+    def has(self, name: str, /) -> bool: ...
+
+    def get_tensor(self, name: str, /) -> torch.Tensor: ...
+
+    def shard(self, tensor: torch.Tensor, /, dim: int) -> torch.Tensor: ...
+
+    def copy_in(self, param_name: str, tensor: torch.Tensor) -> None: ...
+
+
 class _GqaAttentionModule(Protocol):
     """Shared QKV and output projections."""
 
@@ -61,6 +73,45 @@ class _GqaNorms(_GqaAttentionModule, Protocol):
     def q_norm(self) -> _WeightModule: ...
     @property
     def k_norm(self) -> _WeightModule: ...
+
+
+def load_w8a8_dynamic_projection(
+    loader: _DynamicW8A8WeightLoader,
+    checkpoint_module: str,
+    parameter_module: str,
+    shard_dims: dict[str, int] | None = None,
+    *,
+    require_weight_and_scale: bool = False,
+    fill_missing_offset: bool = False,
+    description: str = "dynamic W8A8 projection",
+) -> None:
+    """Load a dynamic-W8A8 projection while preserving caller key policy."""
+    loaded_scale: torch.Tensor | None = None
+    for suffix in ("weight", "weight_scale"):
+        checkpoint_key = checkpoint_module + "." + suffix
+        if not loader.has(checkpoint_key):
+            if require_weight_and_scale:
+                raise KeyError(f"{description} {suffix} not found; expected one of: {checkpoint_key}")
+            continue
+        tensor = loader.get_tensor(checkpoint_key)
+        shard_dim = (shard_dims or {}).get(suffix)
+        if shard_dim is not None:
+            tensor = loader.shard(tensor, dim=shard_dim)
+        loader.copy_in(parameter_module + "." + suffix, tensor)
+        if suffix == "weight_scale":
+            loaded_scale = tensor
+
+    offset_key = checkpoint_module + ".weight_offset"
+    if loader.has(offset_key):
+        offset = loader.get_tensor(offset_key)
+        shard_dim = (shard_dims or {}).get("weight_offset")
+        if shard_dim is not None:
+            offset = loader.shard(offset, dim=shard_dim)
+        loader.copy_in(parameter_module + ".weight_offset", offset)
+    elif fill_missing_offset:
+        if loaded_scale is None:
+            raise KeyError(f"{description} weight_scale is required to initialize a missing weight_offset")
+        loader.copy_in(parameter_module + ".weight_offset", torch.zeros_like(loaded_scale))
 
 
 class _BackboneLayer(Protocol):

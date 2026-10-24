@@ -80,6 +80,7 @@ class SfaDcpAttentionBackend(NpuPagedAttentionBackend):
         *,
         index_topk: int,
         max_num_reqs: int,
+        num_decoding_tokens: int = 1,
     ) -> None:
         super().__init__(
             num_heads=num_heads,
@@ -90,6 +91,7 @@ class SfaDcpAttentionBackend(NpuPagedAttentionBackend):
             is_mla=True,
             device=device,
             dtype=dtype,
+            num_decoding_tokens=num_decoding_tokens,
         )
         self._dcp_group = dcp_group
         self._index_topk = index_topk

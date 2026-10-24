@@ -186,10 +186,18 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
                                const runtime::Options& options)
     : py_causal_lm_(dynamic_cast<PyCausalLM*>(model)),
       args_(args),
+      dummy_token_count_(dummy_token_count(args)),
       device_(device),
       options_(options),
       enable_mla_(args.enable_mla()) {
   CHECK(py_causal_lm_ != nullptr) << "PyExecutorImpl requires PyCausalLM";
+  CHECK_GT(dummy_token_count_, 0);
+  // GLM5 KDA targets need fixed-width speculative decoding; adaptive pruning
+  // resizes per-step draft widths, which the KDA handoff cannot follow.
+  CHECK(!(is_glm5_next_target_model_type(args.model_type()) &&
+          options.enable_adaptive_spec_prune()))
+      << "GLM5 KDA does not support adaptive speculative decode; disable "
+         "--enable_adaptive_spec_prune.";
 
   py::gil_scoped_acquire gil;
   ensure_xllm_runtime_module();
@@ -383,7 +391,8 @@ py::object PyExecutorImpl::mtp_sparse_attention_metadata_view(
   params.parallel.dp_global_token_nums = {rows};
   params.parallel.dp_global_sequence_nums = {rows};
   params.parallel.dp_is_decode = {true};
-  return py::cast(PyAttentionMetadataView(std::move(metadata), params));
+  return py::cast(
+      PyAttentionMetadataView(std::move(metadata), params, dummy_token_count_));
 }
 
 py::object PyExecutorImpl::create_mtp_graph_variant_registry(
@@ -537,8 +546,8 @@ void PyExecutorImpl::prepare_attention_metadata(std::vector<KVCache>& kv_caches,
   CHECK(params.attn_metadata != nullptr);
   py::gil_scoped_acquire gil;
   bind_kv_caches(kv_caches);
-  py::object metadata =
-      py::cast(PyAttentionMetadataView(params.attn_metadata, params));
+  py::object metadata = py::cast(PyAttentionMetadataView(
+      params.attn_metadata, params, dummy_token_count_));
   py_executor_.attr("prepare_metadata")(metadata);
   params.python_attention_metadata =
       std::make_shared<PythonAttentionMetadata>(std::move(metadata));
@@ -617,7 +626,8 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
   py::object py_metadata =
       params.python_attention_metadata
           ? params.python_attention_metadata->value()
-          : py::cast(PyAttentionMetadataView(attn_metadata, params));
+          : py::cast(PyAttentionMetadataView(
+                attn_metadata, params, dummy_token_count_));
   if (params.python_attention_metadata) {
     VLOG(1) << "Task pipeline model path="
             << (prepared_graph ? "aclgraph" : "eager")

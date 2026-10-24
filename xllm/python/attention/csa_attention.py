@@ -48,7 +48,10 @@ from xllm.python.attention.dsa_metadata import (
     DsaMetadataBuilder,
     build_cache_specs,
 )
-from xllm.python.model_executor.forward_context import get_forward_context
+from xllm.python.model_executor.forward_context import (
+    get_forward_context,
+    get_forward_context_or_none,
+)
 
 if TYPE_CHECKING:
     from xllm.python.attention.backend import AttentionMetadata
@@ -1241,7 +1244,8 @@ def _scatter_by_slot(
         slots_slice = slots[:update_rows]
         safe_slots = slots_slice.clamp_min(0)
         updates = value_2d[:update_rows].to(cache.dtype)
-        if get_forward_context().acl_graph is not None:
+        context = get_forward_context_or_none()
+        if context is not None and context.acl_graph is not None:
             # Graph padding maps to reserved block 0. Avoid IndexSelect in the
             # captured path; it is not reliably capturable on NPU.
             safe_values = updates

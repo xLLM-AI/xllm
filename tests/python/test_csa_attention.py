@@ -225,6 +225,31 @@ def test_scatter_by_slot_ignores_all_padded_rows() -> None:
     assert torch.equal(cache, original)
 
 
+def test_scatter_by_slot_npu_works_without_forward_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    from torch._subclasses.fake_tensor import FakeTensorMode
+
+    from xllm.python import kernels
+
+    calls: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+    monkeypatch.setattr(csa_attention_module, "get_forward_context_or_none", lambda: None)
+    monkeypatch.setattr(
+        kernels,
+        "scatter_nd_update",
+        lambda cache, indices, updates: calls.append((cache, indices, updates)),
+        raising=False,
+    )
+
+    with FakeTensorMode():
+        cache = torch.zeros(4, 3, dtype=torch.float32, device="npu")
+        slots = torch.tensor([0, -1, 2], dtype=torch.int32, device="npu")
+        values = torch.ones(3, 3, dtype=torch.float32, device="npu")
+        _scatter_by_slot(cache, slots, values)
+
+    assert len(calls) == 1
+    assert calls[0][1].shape == (3, 1)
+    assert calls[0][2].shape == (3, 3)
+
+
 def test_default_mapping_is_empty() -> None:
     m = _CompressedAttentionCacheMapping()
     assert m.cmp_cache_idx == -1

@@ -137,6 +137,46 @@ def test_config_rejects_invalid_dflash2_geometry(
         _config(**overrides)
 
 
+def test_config_reads_flat_block_geometry() -> None:
+    # Flat top-level field names take precedence over the legacy "dflash2_*"
+    # spellings.
+    config = DFlash2Qwen3Config.from_dict(
+        _config_dict(
+            dflash2_block_size=None,
+            block_size=5,
+            conv_group_size=4,
+            conv_kernel_size=3,
+            selector_rank=6,
+            selector_top_k=7,
+        )
+    )
+    assert config.block_size == 5
+    assert config.conv_group_size == 4
+    assert config.conv_kernel_size == 3
+    assert config.selector_rank == 6
+    assert config.selector_top_k == 7
+
+
+def test_config_legacy_keys_still_accepted() -> None:
+    # Legacy flat "dflash2_*" keys keep working (backward compatibility).
+    config = _config()
+    assert config.block_size == 4
+    assert config.conv_group_size == 2
+    assert config.conv_kernel_size == 2
+    assert config.selector_rank == 2
+    assert config.selector_top_k == 2
+
+
+def test_config_zero_reflected_field_does_not_shadow_legacy_key() -> None:
+    # The C++ config dict reflects every ModelArgs field, so the flat dict
+    # always carries block_size=0 (the cola-dlm DiT field). A zero value must
+    # not shadow the real dflash2_* value parsed from the checkpoint.
+    config = _config(block_size=0)
+    assert config.block_size == 4
+    assert config.conv_group_size == 2
+    assert config.conv_kernel_size == 2
+
+
 def test_grouped_convolution_resets_history_at_block_boundaries() -> None:
     convolution = DFlash2GroupedConv(
         hidden_size=4,
