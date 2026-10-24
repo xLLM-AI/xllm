@@ -1482,6 +1482,64 @@ TEST(HFModelLoaderTest, NumAuxLayersFallsBackToThreeWhenListOmitted) {
   EXPECT_EQ(AuxHiddenCapture::num_aux_layers(args), 4);
 }
 
+TEST(HFModelLoaderTest, LlmAndVlmBundlesPreserveAuxiliaryCaptureWidths) {
+  for (const ModelFamily family : {ModelFamily::LLM, ModelFamily::VLM}) {
+    SCOPED_TRACE(static_cast<int32_t>(family));
+    ModelArgs args;
+    args.n_layers() = 16;
+    args.hidden_size() = 8;
+    const ModelArgsBundle default_bundle(args, family);
+    EXPECT_EQ(AuxHiddenCapture::num_aux_layers(default_bundle), 3);
+    EXPECT_EQ(AuxHiddenCapture::aux_hidden_dim(default_bundle), 24);
+
+    args.layers_to_capture() = {1, 3, 7, 12};
+    const ModelArgsBundle explicit_bundle(args, family);
+    EXPECT_EQ(AuxHiddenCapture::num_aux_layers(explicit_bundle), 4);
+    EXPECT_EQ(AuxHiddenCapture::aux_hidden_dim(explicit_bundle), 32);
+  }
+}
+
+TEST(HFModelLoaderTest, LlmAndVlmBundlesPreserveMtpHiddenWidths) {
+  ModelArgs args;
+  args.model_type() = "qwen3";
+  args.hidden_size() = 8;
+  args.hc_mult() = 4;
+  for (const ModelFamily family : {ModelFamily::LLM, ModelFamily::VLM}) {
+    SCOPED_TRACE(static_cast<int32_t>(family));
+    const ModelArgsBundle bundle(args, family);
+    EXPECT_EQ(mtp_hidden_state_width(bundle), 8);
+  }
+}
+
+TEST(HFModelLoaderTest, LlmBundlePreservesDeepseekV4MtpHiddenWidth) {
+  ModelArgs args;
+  args.model_type() = "deepseek_v4";
+  args.hidden_size() = 8;
+  args.hc_mult() = 4;
+  const ModelArgsBundle bundle(args, /*family=*/ModelFamily::LLM);
+  EXPECT_EQ(mtp_hidden_state_width(bundle), 32);
+}
+
+TEST(HFModelLoaderTest, LlmAndVlmBundlesGateEmbeddedEagle3Drafts) {
+  for (const ModelFamily family : {ModelFamily::LLM, ModelFamily::VLM}) {
+    SCOPED_TRACE(static_cast<int32_t>(family));
+    ModelArgs args;
+    args.enable_embedded_eagle3_draft() = true;
+    const ModelArgsBundle enabled_bundle(args, family);
+    EXPECT_TRUE(
+        uses_embedded_eagle3_draft(/*algorithm=*/"Eagle3", enabled_bundle));
+    EXPECT_TRUE(
+        uses_embedded_eagle3_draft(/*algorithm=*/"eagle3", enabled_bundle));
+    EXPECT_FALSE(
+        uses_embedded_eagle3_draft(/*algorithm=*/"MTP", enabled_bundle));
+
+    args.enable_embedded_eagle3_draft() = false;
+    const ModelArgsBundle disabled_bundle(args, family);
+    EXPECT_FALSE(
+        uses_embedded_eagle3_draft(/*algorithm=*/"Eagle3", disabled_bundle));
+  }
+}
+
 namespace {
 nlohmann::json mixed_quant_config() {
   return nlohmann::json::parse(R"json(

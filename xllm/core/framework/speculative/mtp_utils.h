@@ -69,6 +69,13 @@ inline int64_t mtp_hidden_state_width(const LlmModelArgs& model_args) {
   return model_args.hidden_size();
 }
 
+inline int64_t mtp_hidden_state_width(const ModelArgsBundle& model_args) {
+  if (util::is_deepseek_v4_model_type(model_args.model_type())) {
+    return model_args.hc_mult() * model_args.hidden_size();
+  }
+  return model_args.hidden_size();
+}
+
 inline bool uses_embedded_eagle3_draft(std::string_view algorithm,
                                        const ModelArgs& target_model_args) {
   return SpeculativeConfig::is_eagle3_algorithm(algorithm) &&
@@ -77,6 +84,13 @@ inline bool uses_embedded_eagle3_draft(std::string_view algorithm,
 
 inline bool uses_embedded_eagle3_draft(std::string_view algorithm,
                                        const LlmModelArgs& target_model_args) {
+  return SpeculativeConfig::is_eagle3_algorithm(algorithm) &&
+         target_model_args.enable_embedded_eagle3_draft();
+}
+
+inline bool uses_embedded_eagle3_draft(
+    std::string_view algorithm,
+    const ModelArgsBundle& target_model_args) {
   return SpeculativeConfig::is_eagle3_algorithm(algorithm) &&
          target_model_args.enable_embedded_eagle3_draft();
 }

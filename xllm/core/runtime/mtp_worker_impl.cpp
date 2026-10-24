@@ -927,7 +927,7 @@ int64_t MTPWorkerImpl<TargetInput>::get_embedding_placeholder_size() const {
   // DeepSeek-V4 MTP stashes the pre-hc_head 3D hidden flattened to
   // [num_tokens, hc_mult*hidden], so the cache placeholder must cover
   // hc_mult*hidden per row.
-  return mtp_hidden_state_width(impl_->context_.get_llm_model_args());
+  return mtp_hidden_state_width(impl_->context_.get_model_args_bundle());
 }
 
 template <typename TargetInput>
@@ -951,7 +951,8 @@ bool MTPWorkerImpl<TargetInput>::uses_embedded_eagle3_draft() const {
     return false;
   }
   return ::xllm::uses_embedded_eagle3_draft(
-      options_.speculative_algorithm(), impl_->context_.get_llm_model_args());
+      options_.speculative_algorithm(),
+      impl_->context_.get_model_args_bundle());
 }
 
 template <typename TargetInput>

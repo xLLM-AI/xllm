@@ -73,6 +73,19 @@ class AuxHiddenCapture final {
     return num_aux_layers(model_args) * model_args.hidden_size();
   }
 
+  static int64_t num_aux_layers(const ModelArgsBundle& model_args) {
+    const auto& capture_ids = model_args.layers_to_capture();
+    return capture_ids.empty()
+               ? static_cast<int64_t>(
+                     legacy_default_capture_layer_ids(model_args.n_layers())
+                         .size())
+               : static_cast<int64_t>(capture_ids.size());
+  }
+
+  static int64_t aux_hidden_dim(const ModelArgsBundle& model_args) {
+    return num_aux_layers(model_args) * model_args.hidden_size();
+  }
+
   AuxHiddenCapture(const LlmModelArgs& model_args,
                    const torch::TensorOptions& options,
                    int64_t max_tokens_per_batch) {

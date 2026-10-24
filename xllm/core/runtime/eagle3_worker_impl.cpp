@@ -114,7 +114,7 @@ bool Eagle3WorkerImpl<TargetInput>::init_model(
 
 template <typename TargetInput>
 int64_t Eagle3WorkerImpl<TargetInput>::get_embedding_placeholder_size() const {
-  return AuxHiddenCapture::aux_hidden_dim(context_.get_llm_model_args());
+  return AuxHiddenCapture::aux_hidden_dim(context_.get_model_args_bundle());
 }
 
 template <typename TargetInput>
