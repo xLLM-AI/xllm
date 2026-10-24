@@ -80,7 +80,7 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   using DraftModelSpecWorkerImpl<TargetInput>::context_;
   using DraftModelSpecWorkerImpl<TargetInput>::device_;
   using DraftModelSpecWorkerImpl<TargetInput>::draft_impl_;
-  using DraftModelSpecWorkerImpl<TargetInput>::draft_sampling_mode_;
+  using DraftModelSpecWorkerImpl<TargetInput>::is_probabilistic_draft_;
   using DraftModelSpecWorkerImpl<TargetInput>::dtype_;
   using DraftModelSpecWorkerImpl<TargetInput>::embedding_cache_;
   using DraftModelSpecWorkerImpl<TargetInput>::impl_;
@@ -121,7 +121,10 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
       int32_t num_speculative_tokens,
       const detail::JsonDraftValidationScratch* json_scratch);
 
-  virtual SampleOutput validate(const SamplingParameters& sampling_params,
+  // Takes the sampling params by value: run_validate owns its copy (JSON
+  // bitmask lift) and moves it down the chain to run_rejection_sampling's
+  // sink, so the params are copied once per verify step, not per hop.
+  virtual SampleOutput validate(SamplingParameters sampling_params,
                                 const std::vector<ForwardOutput>& draft_outputs,
                                 const ForwardOutput& target_output,
                                 int32_t num_speculative_tokens,
@@ -135,7 +138,7 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   }
   virtual bool share_target_lm_head_with_draft() const { return true; }
 
-  SampleOutput validate(const SamplingParameters& sampling_params,
+  SampleOutput validate(SamplingParameters sampling_params,
                         const DraftProposal& draft_proposal,
                         const ForwardOutput& target_output,
                         int32_t num_speculative_tokens,

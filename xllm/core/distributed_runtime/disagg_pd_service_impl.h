@@ -22,7 +22,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/distributed_runtime/xservice_client.h"
-#include "core/framework/sampling/json_object_grammar.h"
+#include "core/framework/constrained/json_object_grammar.h"
 #include "disagg_pd.pb.h"
 
 namespace xllm {

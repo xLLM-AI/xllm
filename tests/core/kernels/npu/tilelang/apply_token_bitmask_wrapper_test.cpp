@@ -26,13 +26,12 @@ limitations under the License.
 #include <vector>
 
 #include "acl/acl.h"
-#include "core/framework/sampling/json_object_grammar.h"
+#include "core/framework/sampling/logits_processor.h"
+#include "core/framework/sampling/sampling_params.h"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 
 namespace xllm::kernel::npu::tilelang {
 namespace {
-
-constexpr float kDisallowedTokenMask = -1.0e9F;
 
 class ApplyTokenBitmaskWrapperTest : public ::testing::Test {
  protected:
@@ -206,7 +205,11 @@ TEST_F(ApplyTokenBitmaskWrapperTest, RejectsInputsThatRequireFallback) {
 
     const torch::Tensor expected = apply_cpu_reference(logits, bitmask);
     torch::Tensor actual = logits.clone();
-    ::xllm::apply_token_bitmask_inplace(actual, bitmask);
+    // The fallback lives in LogitsProcessor: an empty params batch runs only
+    // the bitmask stage of process_logits.
+    SamplingParameters params;
+    params.filter_bitmask = bitmask;
+    LogitsProcessor::process_logits(actual, params);
     ASSERT_EQ(aclrtSynchronizeStream(
                   c10_npu::getCurrentNPUStream(device.index()).stream()),
               ACL_SUCCESS);

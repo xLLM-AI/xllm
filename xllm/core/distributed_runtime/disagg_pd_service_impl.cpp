@@ -30,8 +30,8 @@ limitations under the License.
 #include "core/distributed_runtime/engine.h"
 #include "core/framework/block/block_manager_pool.h"
 #include "core/framework/config/kv_cache_config.h"
-#include "core/framework/sampling/json_object_grammar.h"
-#include "framework/request/request_output.h"
+#include "core/framework/constrained/json_object_grammar.h"
+#include "core/framework/request/request_output.h"
 #include "scheduler/disagg_pd_scheduler.h"
 #include "util/utils.h"
 

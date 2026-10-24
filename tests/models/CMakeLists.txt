@@ -4,6 +4,12 @@ add_library(native_library_registry_fixture SHARED
   native_library_registry_fixture.cpp)
 target_link_libraries(native_library_registry_fixture PRIVATE
   XLLM::native_extension)
+# Plain add_library (outside cc_library): supply the spdlog include that the
+# parallel_args.h -> atb_speed/log.h chain needs (other targets add it
+# explicitly; it does not propagate from xllm_atb_layers, which keeps it
+# PRIVATE).
+target_include_directories(native_library_registry_fixture PRIVATE
+  ${CMAKE_SOURCE_DIR}/third_party/spdlog/include)
 add_dependencies(native_library_registry_fixture xllm_proto)
 set_target_properties(native_library_registry_fixture PROPERTIES
   CXX_VISIBILITY_PRESET default

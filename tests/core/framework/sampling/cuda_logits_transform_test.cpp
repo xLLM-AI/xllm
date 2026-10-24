@@ -23,7 +23,7 @@ limitations under the License.
 #include <tuple>
 #include <vector>
 
-#include "core/framework/sampling/logits_utils.h"
+#include "core/framework/sampling/logits_processor.h"
 #include "core/framework/sampling/sampler.h"
 #include "core/kernels/cuda/fused_logits_transform.h"
 #include "core/kernels/ops_api.h"
@@ -47,17 +47,66 @@ torch::Tensor effective_top_p(const SamplingParameters& params,
   return params.top_k.defined() ? params.top_p.to(dtype) : params.top_p;
 }
 
+// Independent reference implementations of the now-private transform
+// primitives: the reference must recompute, not reuse, the code under test.
+void apply_min_p_reference(torch::Tensor& logits, const torch::Tensor& min_p) {
+  if (!min_p.defined()) {
+    return;
+  }
+  const torch::Tensor max_logits =
+      std::get<0>(logits.max(/*dim=*/-1, /*keepdim=*/true));
+  const torch::Tensor threshold =
+      max_logits + min_p.to(torch::kFloat32).log().unsqueeze(-1);
+  logits.masked_fill_(logits < threshold,
+                      -std::numeric_limits<float>::infinity());
+}
+
+void apply_top_k_top_p_reference(torch::Tensor& logits,
+                                 const torch::Tensor& top_k,
+                                 const torch::Tensor& top_p) {
+  if (!top_k.defined() && !top_p.defined()) {
+    return;
+  }
+  const int64_t vocab_size = logits.size(-1);
+  const float filter_value = -std::numeric_limits<float>::infinity();
+  auto [sorted_logits, indices] = logits.sort(/*dim=*/-1, /*descending=*/false);
+  if (top_k.defined()) {
+    const torch::Tensor k = torch::where(top_k <= 0, vocab_size, top_k)
+                                .clamp(1, vocab_size)
+                                .to(torch::kLong);
+    // Per-row threshold on every leading dim (k is [rows, 1] flat or
+    // [batch, 1] grouped): expand the gather index so each row selects its
+    // own kth-largest position.
+    torch::Tensor threshold_index = (vocab_size - k).unsqueeze(-1);
+    if (logits.dim() > 2) {
+      threshold_index = threshold_index.expand(
+          {logits.size(0), logits.size(1), threshold_index.size(-1)});
+    }
+    const torch::Tensor threshold =
+        sorted_logits.gather(/*dim=*/-1, threshold_index);
+    sorted_logits.masked_fill_(sorted_logits < threshold, filter_value);
+  }
+  if (top_p.defined()) {
+    const torch::Tensor probabilities =
+        sorted_logits.softmax(-1, torch::kFloat32);
+    torch::Tensor mask = probabilities.cumsum(-1) <= (1 - top_p.unsqueeze(-1));
+    mask.select(/*dim=*/-1, /*index=*/vocab_size - 1).fill_(false);
+    sorted_logits.masked_fill_(mask, filter_value);
+  }
+  logits.scatter_(/*dim=*/-1, indices, sorted_logits);
+}
+
 torch::Tensor reference_transform(torch::Tensor logits,
                                   const SamplingParameters& params) {
   if (params.temperatures.defined()) {
-    apply_temperatures(logits, params.temperatures);
+    LogitsProcessor::apply_temperatures(logits, params.temperatures);
   }
-  apply_min_p(logits, params.min_p);
+  apply_min_p_reference(logits, params.min_p);
   const auto top_p = params.top_k.defined() && params.top_p.defined()
                          ? params.top_p.to(logits.scalar_type())
                          : params.top_p;
   if (params.top_k.defined() || top_p.defined()) {
-    apply_top_k_top_p(logits, {}, params.top_k, top_p);
+    apply_top_k_top_p_reference(logits, params.top_k, top_p);
   }
   return logits;
 }
@@ -71,23 +120,17 @@ void expect_transform(const torch::Tensor& input,
       params.temperatures,
       params.min_p,
       params.top_k,
-      effective_top_p(params, input.scalar_type()),
-      /*return_probs=*/true};
+      effective_top_p(params, input.scalar_type())};
   ASSERT_TRUE(kernel::supports_fused_logits_transform(transform_params));
-  const auto probabilities = kernel::fused_logits_transform(transform_params);
+  kernel::fused_logits_transform(transform_params);
   ASSERT_TRUE(torch::equal(torch::isfinite(actual), torch::isfinite(expected)));
   EXPECT_TRUE(torch::allclose(actual, expected, 1e-5, 1e-6));
-  EXPECT_TRUE(torch::allclose(probabilities,
+  EXPECT_TRUE(torch::allclose(torch::softmax(actual, -1, torch::kFloat32),
                               torch::softmax(expected, -1, torch::kFloat32),
                               3e-5,
                               1e-6));
-  EXPECT_TRUE(
-      torch::allclose(probabilities.sum(-1),
-                      torch::ones({input.size(0)}, probabilities.options()),
-                      1e-5,
-                      1e-6));
   auto logits_only = input.clone();
-  Sampler::process_logits(logits_only, params);
+  LogitsProcessor::process_logits(logits_only, params);
   EXPECT_TRUE(
       torch::equal(torch::isfinite(logits_only), torch::isfinite(expected)));
   EXPECT_TRUE(torch::allclose(logits_only, expected, 1e-5, 1e-6));
@@ -214,6 +257,24 @@ TEST(CudaLogitsTransformTest, SelectsExactTopKWithMixedRanksAndTies) {
   }
 }
 
+TEST(CudaLogitsTransformTest, SelectsExactTopKOnVerifyRows) {
+  torch::manual_seed(84);
+  auto params = make_transform_params(/*batch=*/30);
+  const auto fp = params.selected_token_idxes.options().dtype(torch::kFloat32);
+  // Verify consumes the flat [batch * width, vocab] domain with per-row k
+  // (the rejection sampler expands the per-sequence k before the call);
+  // every row must keep exactly k tokens of its own — a broadcast of row
+  // zero's threshold would keep the wrong count.
+  params.top_k = torch::tensor(std::vector<int64_t>{1, 7, 64, 512, 0, 1024},
+                               fp.dtype(torch::kLong))
+                     .repeat_interleave(/*repeats=*/5);
+  for (const int64_t width : {1024, 8192}) {
+    SCOPED_TRACE(width);
+    const torch::Tensor logits = torch::randn({30, width}, fp);
+    expect_transform(logits, params);
+  }
+}
+
 TEST(CudaLogitsTransformTest, PreservesMinPBoundaryAndAdjacentValues) {
   auto params = make_transform_params(3);
   const auto fp = params.selected_token_idxes.options().dtype(torch::kFloat32);
@@ -296,7 +357,7 @@ TEST(CudaLogitsTransformTest, PreservesTopKTiesAndTopPEqualityBoundary) {
   auto tied = torch::tensor(
       {{3.0F, 3.0F, 1.0F, -INFINITY}, {1.0F, 2.0F, 3.0F, 4.0F}}, fp);
   expect_transform(tied, params);
-  Sampler::process_logits(tied, params);
+  LogitsProcessor::process_logits(tied, params);
   EXPECT_EQ(tied[0].isfinite().sum().item<int64_t>(), 2);
   params.top_k = torch::Tensor();
   params.top_p = torch::full({2}, 0.5F, fp);
@@ -304,7 +365,7 @@ TEST(CudaLogitsTransformTest, PreservesTopKTiesAndTopPEqualityBoundary) {
     const auto input = torch::zeros({2, width}, fp);
     expect_transform(input, params);
     auto actual = input.clone();
-    Sampler::process_logits(actual, params);
+    LogitsProcessor::process_logits(actual, params);
     EXPECT_EQ(actual[0].isfinite().sum().item<int64_t>(), width / 2);
   }
 }
@@ -331,16 +392,14 @@ TEST(CudaLogitsTransformTest, NoncontiguousRowsAndEmptyBatches) {
   params.top_k = torch::full({3}, 40, fp.dtype(torch::kLong));
   params.top_p = torch::full({3}, 0.9F, fp);
   const auto expected = reference_transform(input.clone(), params);
-  const auto probs = kernel::cuda::fused_logits_transform(
-      input, {}, {}, params.top_k, params.top_p, /*return_probs=*/true);
+  kernel::cuda::fused_logits_transform(
+      input, {}, {}, params.top_k, params.top_p);
   EXPECT_TRUE(torch::allclose(input, expected, 1e-5, 1e-6));
   EXPECT_TRUE(torch::equal(storage.slice(0, 1, 6, 2), untouched));
-  EXPECT_TRUE(torch::allclose(probs, expected.softmax(-1), 3e-5, 1e-6));
+  EXPECT_TRUE(
+      torch::allclose(input.softmax(-1), expected.softmax(-1), 3e-5, 1e-6));
   auto empty = torch::empty({0, 17}, fp);
-  const auto empty_probs = kernel::cuda::fused_logits_transform(
-      empty, {}, {}, {}, {}, /*return_probs=*/true);
-  EXPECT_EQ(empty_probs.size(0), 0);
-  EXPECT_EQ(empty_probs.size(1), 17);
+  kernel::cuda::fused_logits_transform(empty, {}, {}, {}, {});
 }
 
 TEST(CudaLogitsTransformTest,
@@ -359,23 +418,14 @@ TEST(CudaLogitsTransformTest,
       const auto source =
           torch::arange(width, fp).unsqueeze(0).repeat({rows, 1}) / 100;
       auto input = source.clone();
-      kernel::cuda::fused_logits_transform(input,
-                                           params.temperatures,
-                                           params.min_p,
-                                           params.top_k,
-                                           params.top_p,
-                                           /*return_probs=*/true);
+      kernel::cuda::fused_logits_transform(
+          input, params.temperatures, params.min_p, params.top_k, params.top_p);
       stream.synchronize();
       at::cuda::CUDAGraph graph;
       graph.capture_begin();
       input.copy_(source);
-      const auto probs =
-          kernel::cuda::fused_logits_transform(input,
-                                               params.temperatures,
-                                               params.min_p,
-                                               params.top_k,
-                                               params.top_p,
-                                               /*return_probs=*/true);
+      kernel::cuda::fused_logits_transform(
+          input, params.temperatures, params.min_p, params.top_k, params.top_p);
       graph.capture_end();
       for (const float p : {0.9F, 0.5F, 1.0F}) {
         params.top_k.fill_(p == 1.0F ? 0 : p == 0.5F ? 8192 : 40);
@@ -385,7 +435,8 @@ TEST(CudaLogitsTransformTest,
         graph.replay();
         const auto expected = reference_transform(source.clone(), params);
         EXPECT_TRUE(torch::allclose(input, expected, 1e-5, 1e-6));
-        EXPECT_TRUE(torch::allclose(probs, expected.softmax(-1), 3e-5, 1e-6));
+        EXPECT_TRUE(torch::allclose(
+            input.softmax(-1), expected.softmax(-1), 3e-5, 1e-6));
       }
     }
   }
@@ -403,18 +454,13 @@ TEST(CudaLogitsTransformTest, LargeStridedRowsPreservePaddingAndParameters) {
     auto input = storage.slice(0, 0, 128, 2);
     const auto padding = storage.slice(0, 1, 128, 2).clone();
     const auto expected = reference_transform(input.clone(), params);
-    const auto probabilities =
-        kernel::cuda::fused_logits_transform(input,
-                                             {},
-                                             {},
-                                             params.top_k,
-                                             effective_top_p(params, dtype),
-                                             /*return_probs=*/true);
+    kernel::cuda::fused_logits_transform(
+        input, {}, {}, params.top_k, effective_top_p(params, dtype));
     EXPECT_TRUE(
         torch::equal(torch::isfinite(input), torch::isfinite(expected)));
     EXPECT_TRUE(torch::allclose(input, expected, 1e-5, 1e-6));
     EXPECT_TRUE(torch::allclose(
-        probabilities, expected.softmax(-1, torch::kFloat32), 3e-5, 1e-6));
+        input.softmax(-1), expected.softmax(-1, torch::kFloat32), 3e-5, 1e-6));
     EXPECT_TRUE(torch::equal(storage.slice(0, 1, 128, 2), padding));
   }
 }
@@ -439,8 +485,9 @@ TEST(CudaLogitsTransformTest, MatchesNativeSamplingAndGlobalRngConsumption) {
       const auto expected = reference_transform(input.clone(), params);
       auto generator = torch::globalContext().defaultGenerator(input.device());
       const auto initial = generator.get_state();
-      const auto random =
-          Sampler::random_sample(expected.softmax(-1, torch::kFloat32));
+      // forward()'s MIXED leg consumes the same gumbel_sample primitive on
+      // the same global generator.
+      const auto random = gumbel_sample(expected);
       const auto tokens =
           torch::where(params.do_sample, random, expected.argmax(-1));
       const auto final = generator.get_state();
@@ -476,7 +523,7 @@ TEST(CudaLogitsTransformTest, SamplerPreservesRawLogprobsPenaltiesAndMasks) {
   const auto input =
       torch::tensor({{4.0F, 3.0F, 2.0F, 1.0F}}, fp).repeat({2, 1});
   auto penalized = input.clone();
-  Sampler::apply_sampling_penalties(penalized, params);
+  LogitsProcessor::apply_sampling_penalties(penalized, params);
   const auto expected = reference_transform(penalized, params);
   const auto raw = input.log_softmax(-1);
   const auto& generator =
@@ -544,7 +591,7 @@ TEST(CudaLogitsTransformTest,
   params.sampling_mode = SamplingMode::RANDOM;
   input = source.clone().slice(1, 0, 8, 2);
   const auto expected = reference_transform(input.clone(), params);
-  Sampler::process_logits(input, params);
+  LogitsProcessor::process_logits(input, params);
   EXPECT_TRUE(torch::allclose(input, expected, 1e-5, 1e-6));
 }
 
@@ -559,7 +606,7 @@ TEST(CudaLogitsTransformTest, UnsupportedParameterLayoutsAndDtypesUseTorch) {
       torch::tensor({40, 0, 8, 0}, fp.dtype(torch::kLong)).slice(0, 0, 4, 2);
   params.top_p = torch::tensor({0.9F, 1.0F, 0.8F, 1.0F}, fp).slice(0, 0, 4, 2);
   auto actual = source.clone();
-  Sampler::process_logits(actual, params);
+  LogitsProcessor::process_logits(actual, params);
   EXPECT_TRUE(
       torch::equal(actual, reference_transform(source.clone(), params)));
 
@@ -568,7 +615,7 @@ TEST(CudaLogitsTransformTest, UnsupportedParameterLayoutsAndDtypesUseTorch) {
   params.top_k = torch::Tensor();
   params.top_p = params.top_p.to(torch::kFloat64);
   actual = source.clone();
-  Sampler::process_logits(actual, params);
+  LogitsProcessor::process_logits(actual, params);
   EXPECT_TRUE(
       torch::equal(actual, reference_transform(source.clone(), params)));
 
@@ -576,7 +623,7 @@ TEST(CudaLogitsTransformTest, UnsupportedParameterLayoutsAndDtypesUseTorch) {
   params.top_p = torch::Tensor();
   params.min_p = torch::full({}, 0.1F, fp);
   actual = source.clone();
-  Sampler::process_logits(actual, params);
+  LogitsProcessor::process_logits(actual, params);
   EXPECT_TRUE(
       torch::equal(actual, reference_transform(source.clone(), params)));
 }

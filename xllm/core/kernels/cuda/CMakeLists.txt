@@ -140,7 +140,6 @@ set(CUDA_SOURCE_FILES
   rec_beam_search.cu
   reshape_paged_cache.cu
   rope.cu
-  random_sample.cpp
   utils.cpp
   cuda_ops_library.cpp
   xattention/beam_search.cpp

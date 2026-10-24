@@ -133,6 +133,7 @@ cc_library(
     :kv_transfer_completion
     :models
     :sampler
+    :rec_constrained_decoding
     :tokenizer
     :model_loader
     :util

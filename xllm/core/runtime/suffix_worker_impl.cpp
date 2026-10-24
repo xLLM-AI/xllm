@@ -18,8 +18,8 @@ limitations under the License.
 #include <algorithm>
 
 #include "common/metrics.h"
+#include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/spec_verify.h"
-#include "framework/sampling/sampling_params.h"
 #include "util/slice.h"
 #include "util/tensor_helper.h"
 #include "util/timer.h"
@@ -292,7 +292,7 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
   SampleOutput val_output;
   {
     AUTO_COUNTER(speculative_execution_latency_seconds_validation);
-    val_output = validate(draft_proposal, target_output);
+    val_output = validate(input.sampling_params, draft_proposal, target_output);
   }
 
   if (suffix_cache_ != nullptr &&
@@ -364,24 +364,23 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
                                 input.json_object_states);
 }
 
-SampleOutput SuffixWorkerImpl::validate(const DraftProposal& draft_proposal,
+SampleOutput SuffixWorkerImpl::validate(SamplingParameters sampling_params,
+                                        const DraftProposal& draft_proposal,
                                         const ForwardOutput& target_output) {
-  // The suffix draft path is always greedy.
-  const SamplingParameters sampling_params;  // all-greedy by default
   const int32_t num_val_tokens = options_.num_speculative_tokens() + 1;
   const int32_t batch_size =
       static_cast<int32_t>(draft_proposal.token_ids().size(/*dim=*/0));
-  const int32_t vocab_size =
-      static_cast<int32_t>(target_output.logits.size(/*dim=*/-1));
   CHECK_EQ(target_output.logits.size(/*dim=*/0),
            static_cast<int64_t>(batch_size) * num_val_tokens)
       << "suffix validate logits shape mismatch";
 
-  auto target_logits =
-      target_output.logits.view({batch_size, num_val_tokens, vocab_size});
-
+  // The suffix draft carries no model distribution (q = 1 deterministic
+  // suggestion), so the rejection sampler's no-logits path applies.
   return spec_verify::run_rejection_sampling(
-      sampling_params, draft_proposal, target_logits, target_output);
+      std::move(sampling_params),
+      draft_proposal,
+      target_output.logits,
+      target_output.sample_output.embeddings);
 }
 
 }  // namespace xllm

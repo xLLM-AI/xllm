@@ -18,7 +18,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 
-#include "core/framework/sampling/json_object_grammar.h"
+#include "core/framework/constrained/json_object_grammar.h"
 #include "core/runtime/json_object_output_rows.h"
 
 namespace xllm {

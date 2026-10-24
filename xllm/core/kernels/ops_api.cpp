@@ -943,26 +943,13 @@ bool supports_fused_logits_transform(const FusedLogitsTransformParams& params) {
 #endif
 }
 
-torch::Tensor fused_logits_transform(FusedLogitsTransformParams& params) {
+void fused_logits_transform(FusedLogitsTransformParams& params) {
 #if defined(USE_CUDA) && !defined(USE_MACA)
-  return cuda::fused_logits_transform(params.logits,
-                                      params.temperatures,
-                                      params.min_p,
-                                      params.top_k,
-                                      params.top_p,
-                                      params.return_probs);
-#else
-  NOT_IMPLEMENTED();
-#endif
-}
-
-torch::Tensor random_sample(RandomSampleParams& params) {
-#if defined(USE_MLU)
-  return mlu::random_sample(params.logits);
-#elif defined(USE_CUDA) || defined(USE_MUSA)
-  return cuda::random_sample(params.logits);
-#elif defined(USE_DCU)
-  return dcu::random_sample(params.logits);
+  cuda::fused_logits_transform(params.logits,
+                               params.temperatures,
+                               params.min_p,
+                               params.top_k,
+                               params.top_p);
 #else
   NOT_IMPLEMENTED();
 #endif

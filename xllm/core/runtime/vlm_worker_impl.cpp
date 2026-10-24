@@ -25,9 +25,9 @@ limitations under the License.
 #include "common/macros.h"
 #include "common/metrics.h"
 #include "core/framework/config/load_config.h"
+#include "core/framework/model/model_params_view.h"
 #include "core/framework/speculative/draft_extend_input.h"
 #include "core/kv_cache/storage/kv_cache.h"
-#include "framework/model/model_params_view.h"
 #include "models/model_registry.h"
 #include "util/timer.h"
 
@@ -182,11 +182,7 @@ std::optional<ForwardOutput> VLMWorkerImpl::step_internal(
   if (sampling_params.num_sample_seqs() > 0) {
     output.logprobs = sampling_params.logprobs;
     output.max_top_logprobs = sampling_params.max_top_logprobs;
-    if (input.skip_sampling_for_logits_only) {
-      if (input.skip_process_logits) {
-        Sampler::process_logits(logits, sampling_params);
-      }
-    } else {
+    if (!input.skip_sampling_for_logits_only) {
       auto sample_output = sampler_->forward(logits, sampling_params);
       COUNTER_ADD(execution_latency_seconds_sampling, timer.elapsed_seconds());
 

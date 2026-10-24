@@ -870,7 +870,7 @@ void TaskExecutionPipeline::launch(uint32_t slot_id) {
       result.top_logprobs.copy_(slot.sample_output.top_logprobs);
     }
     if (capacity_.cp_sampling_group != nullptr) {
-      synchronize_samples(result);
+      synchronize_samples(result, params.sampling_mode);
     }
   }
   // The independent buffer survives Consume and immediate Slot reuse. Copy

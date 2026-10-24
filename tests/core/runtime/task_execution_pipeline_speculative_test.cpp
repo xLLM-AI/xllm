@@ -1812,7 +1812,7 @@ TEST_F(SpeculativePipelineTest,
        LeaderSamplesDriveLaterDraftsAndAcceptedContext) {
   LeaderSamples leader(device_);
   capacity_.common.sampling_group = &leader;
-  capacity_.draft_sampling_mode = DraftSamplingMode::PROBABILISTIC;
+  capacity_.is_probabilistic_draft = true;
   create();
   ASSERT_NE(pipeline_, nullptr);
   auto prefill = input(false);
@@ -1856,7 +1856,7 @@ TEST_P(CpSpeculativePipelineTest,
   LeaderSamples cp_leader(device_);
   capacity_.common.sampling_group = &tp_leader;
   capacity_.common.cp_sampling_group = &cp_leader;
-  capacity_.draft_sampling_mode = DraftSamplingMode::PROBABILISTIC;
+  capacity_.is_probabilistic_draft = true;
   create();
   ASSERT_NE(pipeline_, nullptr);
   auto prefill = input(false);
@@ -2372,7 +2372,7 @@ TEST_F(SpeculativePipelineTest,
 TEST_F(SpeculativePipelineTest,
        DSparkMixedTargetsKeepLeaderConsensusWithGreedyDraft) {
   configure_dspark_batch_graphs();
-  capacity_.draft_sampling_mode = DraftSamplingMode::GREEDY;
+  capacity_.is_probabilistic_draft = false;
   const auto first_tokens = torch::tensor(
       {{8, -1, -1, -1, -1, -1, -1, -1}, {10, -1, -1, -1, -1, -1, -1, -1}},
       torch::kInt64);

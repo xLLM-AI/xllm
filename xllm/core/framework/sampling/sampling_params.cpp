@@ -335,23 +335,4 @@ SamplingParameters SamplingParameters::to(const torch::Device& device,
   return params;
 }
 
-void prepare_draft_sampling(DraftSamplingMode mode,
-                            SamplingParameters& sampling_params) {
-  sampling_params.logprobs = false;
-  sampling_params.max_top_logprobs = 0;
-  sampling_params.use_beam_search = false;
-  // vLLM applies minimum length to target sampling, not draft proposals.
-  sampling_params.min_token_positions = torch::Tensor();
-  sampling_params.min_tokens_remaining = torch::Tensor();
-  sampling_params.min_token_ids = torch::Tensor();
-  if (mode == DraftSamplingMode::GREEDY) {
-    sampling_params.sampling_mode = SamplingMode::GREEDY;
-    sampling_params.do_sample = torch::Tensor();
-    clear_sampling_transforms(sampling_params);
-  }
-  // The verifier needs q exactly when the draft actually samples.
-  sampling_params.return_logits =
-      sampling_params.sampling_mode != SamplingMode::GREEDY;
-}
-
 }  // namespace xllm

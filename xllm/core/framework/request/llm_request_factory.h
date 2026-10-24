@@ -26,14 +26,14 @@ limitations under the License.
 #include "common/message.h"
 #include "common/options.h"
 #include "common/rate_limiter.h"
-#include "framework/chat_template/chat_template.h"
-#include "framework/model/model_args.h"
-#include "framework/request/request.h"
-#include "framework/request/request_output.h"
-#include "framework/request/request_params.h"
-#include "framework/request/request_state.h"
-#include "framework/request/stopping_checker.h"
-#include "framework/sampling/json_object_grammar.h"
+#include "core/framework/chat_template/chat_template.h"
+#include "core/framework/constrained/json_object_grammar.h"
+#include "core/framework/model/model_args.h"
+#include "core/framework/request/request.h"
+#include "core/framework/request/request_output.h"
+#include "core/framework/request/request_params.h"
+#include "core/framework/request/request_state.h"
+#include "core/framework/request/stopping_checker.h"
 
 namespace xllm {
 

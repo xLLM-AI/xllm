@@ -48,10 +48,10 @@ limitations under the License.
 #include "platform/npu/device_capture_lock.h"
 #endif
 #include "common/version_singleton.h"
+#include "core/framework/constrained/rec_constrained_decoding.h"
 #include "core/framework/model_loader/model_loader.h"
-#include "framework/sampling/rec_constrained_decoding.h"
-#include "framework/sampling/rec_sampler.h"
-#include "framework/state_dict/rec_vocab_dict.h"
+#include "core/framework/sampling/rec_sampler.h"
+#include "core/framework/state_dict/rec_vocab_dict.h"
 #include "models/model_registry.h"
 #include "util/env_var.h"
 #include "util/timer.h"
@@ -597,11 +597,8 @@ RecWorkerImpl::OneRecWorkPipeline::OneRecWorkPipeline(
       std::make_unique<RecConstrainedDecoding>(vocab_dict,
                                                vocab_size,
                                                runtime_.worker.dtype(),
-                                               runtime_.worker.device(),
-                                               /*use_gen_threadpool=*/false);
-  CHECK(constrained_decoding_->build_mask_cache())
-      << "Failed to build OneRec constrained decoding cache, vocab_size="
-      << vocab_size;
+                                               runtime_.worker.device());
+  constrained_decoding_->build_mask_cache();
 }
 
 void RecWorkerImpl::OneRecWorkPipeline::prepare_work_before_execute(
@@ -839,11 +836,8 @@ RecWorkerImpl::OneRecXAttentionWorkPipeline::OneRecXAttentionWorkPipeline(
       std::make_unique<RecConstrainedDecoding>(vocab_dict,
                                                vocab_size,
                                                runtime_.worker.dtype(),
-                                               runtime_.worker.device(),
-                                               /*use_gen_threadpool=*/false);
-  CHECK(constrained_decoding_->build_mask_cache())
-      << "Failed to build OneRec xattention constrained decoding cache, "
-      << "vocab_size=" << vocab_size;
+                                               runtime_.worker.device());
+  constrained_decoding_->build_mask_cache();
 }
 
 void RecWorkerImpl::OneRecXAttentionWorkPipeline::

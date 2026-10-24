@@ -106,11 +106,8 @@ torch::Tensor apply_top_k_top_p(TopKPParams& params);
 // Capability check only; does not mutate tensors or synchronize the device.
 bool supports_fused_logits_transform(const FusedLogitsTransformParams& params);
 
-// Requires supports_fused_logits_transform(params). Returns an undefined
-// tensor when return_probs is false.
-torch::Tensor fused_logits_transform(FusedLogitsTransformParams& params);
-
-torch::Tensor random_sample(RandomSampleParams& params);
+// Requires supports_fused_logits_transform(params). Updates logits in place.
+void fused_logits_transform(FusedLogitsTransformParams& params);
 
 void masked_indexer_select_paged_kv(MaskedIndexerSelectPagedKVParams& params);
 

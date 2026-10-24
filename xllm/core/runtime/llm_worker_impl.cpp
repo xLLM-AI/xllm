@@ -30,11 +30,11 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/model_config.h"
+#include "core/framework/eplb/eplb_utils.h"
+#include "core/framework/model/model_args.h"
+#include "core/framework/model/model_params_view.h"
 #include "core/kv_cache/linear_state_restore.h"
 #include "core/kv_cache/transfer/kv_transfer_completion.h"
-#include "framework/eplb/eplb_utils.h"
-#include "framework/model/model_args.h"
-#include "framework/model/model_params_view.h"
 #if defined(USE_CUDA) || defined(USE_ILU) || defined(USE_MUSA)
 #include "layers/cuda/flashinfer_workspace.h"
 #endif
@@ -379,11 +379,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     output.selected_hidden = selected_hidden;
     output.logprobs = sampling_params.logprobs;
     output.max_top_logprobs = sampling_params.max_top_logprobs;
-    if (input.skip_sampling_for_logits_only) {
-      if (input.skip_process_logits) {
-        Sampler::process_logits(logits, sampling_params);
-      }
-    } else {
+    if (!input.skip_sampling_for_logits_only) {
       auto sample_output = sampler_->forward(logits, sampling_params);
       // beam search kernel
       BeamSearchOutput beam_search_output;

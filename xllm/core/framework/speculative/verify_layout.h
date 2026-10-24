@@ -22,8 +22,6 @@ limitations under the License.
 
 namespace xllm {
 
-class JsonObjectGrammarState;
-
 // The verify layout of one request row in a speculative verify output: how
 // many draft slots the row was verified over, and whether it decoded under a
 // JSON constraint.
@@ -34,13 +32,15 @@ struct VerifyRowLayout {
   bool json_constrained = false;
 };
 
-// Builds the per-row verify layout for one [batch, width] verify output.
-// Rows default to the full width-1 drafts; per_seq_draft_counts carries the
-// pruned per-row widths when adaptive pruning shrank individual rows.
+// Builds the per-sequence verify layout for one [batch, width] verify
+// output. Sequences default to the full width-1 drafts; per_seq_draft_counts
+// carries the pruned per-sequence widths when adaptive pruning shrank
+// individual sequences. constrained_mask marks which sequences decoded under
+// a JSON constraint.
 std::vector<VerifyRowLayout> make_verify_layouts(
     const torch::Tensor& next_tokens,
     const std::vector<int32_t>* per_seq_draft_counts,
-    const std::vector<JsonObjectGrammarState>& json_object_states);
+    const std::vector<bool>& constrained_mask);
 
 std::vector<VerifyRowLayout> make_verify_layouts(
     const torch::Tensor& next_tokens);

@@ -65,7 +65,7 @@ class SpawnWorkerServer final {
                              int32_t text_encoder_tp_size,
                              const InstanceRole& instance_role,
                              bool enable_mtp_draft_body_tp1,
-                             const std::string& draft_sampling_mode,
+                             bool enable_probabilistic_draft,
                              const std::string& model_impl,
                              const std::string& extension_impl);
 

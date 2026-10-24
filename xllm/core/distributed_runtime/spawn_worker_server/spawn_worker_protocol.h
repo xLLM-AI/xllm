@@ -26,12 +26,11 @@ inline constexpr int32_t kMinimumArgumentCount = 34;
 inline constexpr int32_t kIndexerCacheDtypeArgumentIndex = 34;
 inline constexpr int32_t kEnableMtpDraftBodyTp1ArgumentIndex = 35;
 inline constexpr int32_t kTextEncoderTpSizeArgumentIndex = 36;
-inline constexpr int32_t kDraftSamplingModeArgumentIndex = 37;
+inline constexpr int32_t kEnableProbabilisticDraftArgumentIndex = 37;
 inline constexpr int32_t kKvSplitSizeArgumentIndex = 38;
 inline constexpr int32_t kModelImplArgumentIndex = 39;
 inline constexpr int32_t kExtensionImplArgumentIndex = 40;
 inline constexpr char kDefaultIndexerCacheDtype[] = "auto";
-inline constexpr char kDefaultDraftSamplingMode[] = "greedy";
 
 inline std::optional<std::string> parse_indexer_cache_dtype(
     int32_t argc,
@@ -48,14 +47,6 @@ inline std::optional<std::string> parse_indexer_cache_dtype(
     return std::nullopt;
   }
   return std::string(argv[kIndexerCacheDtypeArgumentIndex]);
-}
-
-inline std::string parse_draft_sampling_mode(int32_t argc, char* const argv[]) {
-  if (argv == nullptr || argc <= kDraftSamplingModeArgumentIndex ||
-      argv[kDraftSamplingModeArgumentIndex] == nullptr) {
-    return std::string(kDefaultDraftSamplingMode);
-  }
-  return std::string(argv[kDraftSamplingModeArgumentIndex]);
 }
 
 inline std::string parse_model_impl(int32_t argc, char* const argv[]) {

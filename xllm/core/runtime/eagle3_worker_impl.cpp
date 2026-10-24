@@ -19,7 +19,8 @@ limitations under the License.
 
 #include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model_loader/model_loader.h"
-#include "core/framework/sampling/logits_utils.h"
+#include "core/framework/sampling/logits_processor.h"
+#include "core/util/tensor_helper.h"
 #include "runtime/llm_worker_impl.h"
 
 namespace xllm {
@@ -129,11 +130,17 @@ void Eagle3WorkerImpl<TargetInput>::process_draft_sample_output(
   // Scatter q over the target vocab so the (p-q)+ residual keeps full
   // target mass where the draft cannot propose (q=0).
   if (sample_output.draft_logits.defined()) {
-    sample_output.draft_logits = embed_sparse_logits(
+    const int64_t num_draft_rows = sample_output.draft_logits.size(0);
+    torch::Tensor dense =
+        torch::full({num_draft_rows, context_.get_model_args().vocab_size()},
+                    -std::numeric_limits<float>::infinity(),
+                    sample_output.draft_logits.options());
+    dense.scatter_(
+        /*dim=*/1,
         hot_token_id_.view({1, -1}).expand(
-            {sample_output.draft_logits.size(0), hot_token_id_.size(0)}),
-        sample_output.draft_logits,
-        context_.get_model_args().vocab_size());
+            {num_draft_rows, hot_token_id_.size(0)}),
+        sample_output.draft_logits);
+    sample_output.draft_logits = dense;
   }
 
   sample_output.next_tokens =

@@ -44,10 +44,12 @@ class SuffixWorkerImpl : public SpeculativeWorkerImpl<LlmForwardInput> {
       const LlmForwardInput& inputs) override;
 
  private:
-  SampleOutput validate(const DraftProposal& draft_proposal,
+  // By value so callers that own their params can move through to
+  // run_rejection_sampling's sink.
+  SampleOutput validate(SamplingParameters sampling_params,
+                        const DraftProposal& draft_proposal,
                         const ForwardOutput& target_output);
 
- private:
   std::unique_ptr<SuffixDecodingCache> suffix_cache_;
   std::unordered_map<std::string, std::vector<int32_t>> suffix_recent_tokens_;
   std::unordered_set<std::string> suffix_active_decode_req_ids_;

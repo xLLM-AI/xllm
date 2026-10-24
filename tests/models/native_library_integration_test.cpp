@@ -38,11 +38,11 @@ TEST(NativeLibraryIntegrationTest, CreatesTheRegisteredExecutorSubclass) {
   runtime::Options options;
   options.extension_impl("custom");
   auto executor = ExecutorImplFactory::get_instance().create_executor_impl(
-      /*model=*/nullptr,
-      /*args=*/ModelArgs{},
-      /*device=*/torch::Device(torch::kCPU),
+      nullptr,
+      ModelArgs{},
+      torch::Device(torch::kCPU),
       options,
-      /*executor_type=*/"native_library_executor");
+      "native_library_executor");
   ASSERT_NE(executor, nullptr);
   EXPECT_TRUE(executor->supports_prepared_attention_metadata());
   EXPECT_TRUE(ExtensionRegistry::get_instance().has_implementation("custom",

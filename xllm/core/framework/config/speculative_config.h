@@ -119,7 +119,7 @@ class SpeculativeConfig final {
          "speculative_suffix_min_token_prob",
          "speculative_suffix_max_cached_requests",
          "speculative_suffix_use_tree_spec",
-         "draft_sampling_mode",
+         "enable_probabilistic_draft",
          "enable_mtp_draft_body_tp1",
          "enable_atb_spec_kernel",
          "enable_adaptive_target_verify",
@@ -150,7 +150,7 @@ class SpeculativeConfig final {
 
   PROPERTY(bool, speculative_suffix_use_tree_spec) = false;
 
-  PROPERTY(std::string, draft_sampling_mode) = "greedy";
+  PROPERTY(bool, enable_probabilistic_draft) = false;
 
   PROPERTY(bool, enable_mtp_draft_body_tp1) = false;
 

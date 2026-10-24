@@ -232,7 +232,7 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
     engine_options.draft_model_path(draft_model_path)
         .num_speculative_tokens(options_.num_speculative_tokens())
         .speculative_algorithm(options_.speculative_algorithm())
-        .draft_sampling_mode(options_.draft_sampling_mode())
+        .enable_probabilistic_draft(options_.enable_probabilistic_draft())
         .enable_mtp_draft_body_tp1(options_.enable_mtp_draft_body_tp1())
         .speculative_suffix_cache_max_depth(
             options_.speculative_suffix_cache_max_depth())

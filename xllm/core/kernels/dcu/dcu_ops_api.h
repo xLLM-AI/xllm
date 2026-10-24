@@ -77,8 +77,6 @@ torch::Tensor gather_mla_latent_cache(const torch::Tensor& k_cache,
                                       int64_t total_kv_len,
                                       int64_t max_seq_len);
 
-torch::Tensor random_sample(const torch::Tensor& probs);
-
 std::tuple<torch::Tensor, torch::Tensor> moe_grouped_topk(
     torch::Tensor& gating_output,
     int64_t topk,

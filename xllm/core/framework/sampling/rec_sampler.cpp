@@ -26,6 +26,7 @@ limitations under the License.
 #include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/rec_config.h"
+#include "core/framework/sampling/logits_processor.h"
 #include "core/framework/sampling/sampler.h"
 #if defined(USE_CUDA)
 #include "kernels/cuda/cuda_ops_api.h"
@@ -206,7 +207,7 @@ SampleOutput RecSampler::OneRecConstrainedSamplingStrategy::forward(
     return sampler_.forward(logits, params, filter_mask);
   }
 
-  Sampler::process_logits(logits, params, filter_mask);
+  LogitsProcessor::process_logits(logits, params, filter_mask);
 
   CHECK_EQ(logits.size(0), params.num_sample_seqs());
 
@@ -250,7 +251,7 @@ SampleOutput RecSampler::MultiRoundFastPathSamplingStrategy::forward(
 
   SampleOutput output;
 
-  Sampler::apply_sampling_penalties(logits, params);
+  LogitsProcessor::apply_sampling_penalties(logits, params);
 
   CHECK_EQ(logits.size(0), params.num_sample_seqs());
 
