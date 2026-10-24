@@ -26,7 +26,7 @@ namespace layer {
 
 DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(const ModelContext& context,
                                                  bool enable_indexer)
-    : DeepseekV2AttentionImpl(context.get_model_args_bundle(),
+    : DeepseekV2AttentionImpl(context.get_model_args(),
                               context.get_quant_args(),
                               context.get_parallel_args(),
                               context.get_tensor_options(),
@@ -37,7 +37,7 @@ DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(const ModelContext& context,
 }
 
 DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(
-    const ModelArgs& args,
+    const RawModelArgs& args,
     const QuantArgs& quant_args,
     const ParallelArgs& parallel_args,
     const torch::TensorOptions& options,

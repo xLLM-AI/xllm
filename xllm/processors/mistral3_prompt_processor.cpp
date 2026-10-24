@@ -22,7 +22,7 @@ limitations under the License.
 
 namespace xllm {
 
-Mistral3PromptProcessor::Mistral3PromptProcessor(const ModelArgs& args) {
+Mistral3PromptProcessor::Mistral3PromptProcessor(const RawModelArgs& args) {
   merge_size_ = args.mm_spatial_merge_size();
   image_token_id_ = args.image_token_id();
 }

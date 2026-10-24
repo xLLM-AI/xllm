@@ -94,7 +94,7 @@ std::optional<std::string> join_message_texts(
 VLMRequestFactory::VLMRequestFactory(MultimodalProcessorBase* processor,
                                      JinjaChatTemplate* chat_template,
                                      const Tokenizer* tokenizer,
-                                     const ModelArgs* model_args,
+                                     const RawModelArgs* model_args,
                                      const Options* options,
                                      RateLimiter* rate_limiter)
     : processor_(processor),

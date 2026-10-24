@@ -68,14 +68,14 @@ class RecBatchState final {
 
   RecForwardInput prepare_forward_input(uint32_t num_decoding_tokens,
                                         uint32_t min_decoding_batch_size,
-                                        const ModelArgs& args,
+                                        const RawModelArgs& args,
                                         int32_t cp_size);
-  RecForwardInput prepare_forward_input(const ModelArgs& args,
+  RecForwardInput prepare_forward_input(const RawModelArgs& args,
                                         ThreadPool* thread_pool,
                                         int32_t cp_size);
   RecForwardInput prepare_rec_forward_input(uint32_t num_decoding_tokens,
                                             uint32_t min_decoding_batch_size,
-                                            const ModelArgs& args,
+                                            const RawModelArgs& args,
                                             MPMCThreadPool* thread_pool);
 
   void process_sample_output(const RawForwardOutput& output,

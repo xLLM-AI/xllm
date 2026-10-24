@@ -37,12 +37,12 @@ limitations under the License.
 namespace xllm {
 
 class ForwardInputBuilderTestPeer;
-struct ModelArgs;
+struct RawModelArgs;
 
 class ForwardInputBuilder final {
  public:
   ForwardInputBuilder(const BatchInputData& data,
-                      const ModelArgs* args,
+                      const RawModelArgs* args,
                       int32_t cp_size = 1,
                       ThreadPool* thread_pool = nullptr);
 
@@ -54,7 +54,7 @@ class ForwardInputBuilder final {
       // for beam-search
       std::vector<BlockTransferInfo>* swap_block_transfer_infos,
       const uint64_t batch_id,
-      const ModelArgs* args,
+      const RawModelArgs* args,
       BatchForwardType batch_forward_type,
       int32_t cp_size = 1,
       ThreadPool* thread_pool = nullptr);
@@ -189,7 +189,7 @@ class ForwardInputBuilder final {
   const std::vector<uint32_t>& allowed_max_tokens_;
   const std::vector<torch::Tensor>& input_embeddings_vec_;
   std::vector<MMData> mm_data_vec_;
-  const ModelArgs* args_;
+  const RawModelArgs* args_;
 
   // Builder state
   BuilderState state_;

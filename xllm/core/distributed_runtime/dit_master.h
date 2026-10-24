@@ -37,7 +37,7 @@ class DiTMaster : public Master {
   explicit DiTMaster(const Options& options);
   ~DiTMaster();
 
-  const ModelArgs* model_args() const override {
+  const RawModelArgs* model_args() const override {
     return dit_engine_ != nullptr ? &dit_engine_->model_args() : nullptr;
   }
 

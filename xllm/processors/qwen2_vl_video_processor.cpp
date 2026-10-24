@@ -65,7 +65,7 @@ std::optional<Size> smart_resize(int32_t height,
 
 }  // namespace
 
-Qwen2VLVideoProcessor::Qwen2VLVideoProcessor(const ModelArgs& args) {
+Qwen2VLVideoProcessor::Qwen2VLVideoProcessor(const RawModelArgs& args) {
   image_mean_ = torch::tensor(args.mm_image_normalize_mean(),
                               torch::dtype(torch::kFloat32));
   image_std_ = torch::tensor(args.mm_image_normalize_std(),

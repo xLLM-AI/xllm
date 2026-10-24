@@ -97,7 +97,7 @@ std::size_t tensor_bytes(const torch::Tensor& tensor) {
 }  // namespace
 
 DcuGraphPersistentParam::DcuGraphPersistentParam(
-    const ModelArgsBundle& args,
+    const ModelArgs& args,
     const torch::Device& device,
     const runtime::Options& options)
     : args_(args),
@@ -822,7 +822,7 @@ ModelOutput DcuGraph::replay(const torch::Tensor& tokens,
 }
 
 DcuGraphExecutorImpl::DcuGraphExecutorImpl(CausalLM* model,
-                                           const ModelArgsBundle& args,
+                                           const ModelArgs& args,
                                            const torch::Device& device,
                                            const runtime::Options& options)
     : model_(model),
@@ -847,7 +847,7 @@ DcuGraphExecutorImpl::DcuGraphExecutorImpl(CausalLM* model,
 }
 
 DcuGraphExecutorImpl::DcuGraphExecutorImpl(RecModel* model,
-                                           const ModelArgsBundle& args,
+                                           const ModelArgs& args,
                                            const torch::Device& device,
                                            const runtime::Options& options)
     : DcuGraphExecutorImpl(static_cast<CausalLM*>(nullptr),

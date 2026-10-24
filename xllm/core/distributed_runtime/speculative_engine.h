@@ -52,7 +52,7 @@ class SpeculativeEngineBase : public Engine {
     return engine_->block_manager_pool();
   }
 
-  const ModelArgs& model_args() const override { return model_args_; }
+  const RawModelArgs& model_args() const override { return model_args_; }
 
   // Return the options used by the target engine.
   const runtime::Options& options() const { return engine_->options(); }
@@ -107,7 +107,7 @@ class SpeculativeEngineBase : public Engine {
   // whether this speculative engine uses an external draft engine
   const bool use_draft_engine_;
 
-  ModelArgs model_args_;
+  RawModelArgs model_args_;
 
   std::shared_ptr<DistributedWorkerManager> distributed_worker_manager_ =
       nullptr;

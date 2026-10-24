@@ -383,9 +383,9 @@ void check_attn_out_close(const torch::Tensor& sharded_output,
                       label);
 }
 
-ModelArgs create_attention_model_args(int64_t q_lora_rank = 0,
-                                      bool enable_indexer = false) {
-  ModelArgs args;
+RawModelArgs create_attention_model_args(int64_t q_lora_rank = 0,
+                                         bool enable_indexer = false) {
+  RawModelArgs args;
   args.model_type() = "deepseek_v32";
   args.hidden_size() = 256;
   args.n_heads() = 4;
@@ -414,8 +414,8 @@ ModelArgs create_attention_model_args(int64_t q_lora_rank = 0,
   return args;
 }
 
-ModelArgs create_glm5_attention_model_args() {
-  ModelArgs args =
+RawModelArgs create_glm5_attention_model_args() {
+  RawModelArgs args =
       create_attention_model_args(/*q_lora_rank=*/64, /*enable_indexer=*/true);
   args.model_type() = "glm_moe_dsa";
   args.qk_nope_head_dim() = 192;
@@ -427,7 +427,7 @@ ModelArgs create_glm5_attention_model_args() {
   return args;
 }
 
-StateDict create_attention_state_dict(const ModelArgs& args,
+StateDict create_attention_state_dict(const RawModelArgs& args,
                                       const torch::TensorOptions& options) {
   const int64_t hidden_size = args.hidden_size();
   const int64_t num_heads = args.n_heads();
@@ -656,7 +656,7 @@ AttentionMetadata create_chunked_metadata(const torch::TensorOptions& options,
   return metadata;
 }
 
-KVCache create_decode_kv_cache(const ModelArgs& args,
+KVCache create_decode_kv_cache(const RawModelArgs& args,
                                const torch::TensorOptions& options) {
   const int64_t cache_width = args.qk_rope_head_dim() + args.kv_lora_rank();
   torch::Tensor k_cache = seeded_tensor(
@@ -751,7 +751,7 @@ void check_tensor_same_across_ranks(const torch::Tensor& tensor,
   }
 }
 
-torch::Tensor run_attention_decode_once(const ModelArgs& args,
+torch::Tensor run_attention_decode_once(const RawModelArgs& args,
                                         const QuantArgs& quant_args,
                                         const ParallelArgs& parallel_args,
                                         const torch::TensorOptions& options,
@@ -776,7 +776,7 @@ torch::Tensor run_attention_decode_once(const ModelArgs& args,
 }
 
 AttentionRunResult run_attention_prefill_once(
-    const ModelArgs& args,
+    const RawModelArgs& args,
     const QuantArgs& quant_args,
     const ParallelArgs& parallel_args,
     const torch::TensorOptions& options,
@@ -877,7 +877,7 @@ int32_t run_attention_test_child(int32_t rank,
         const torch::Device& device = context.device();
         ParallelArgs& parallel_args = context.parallel_args();
         const torch::TensorOptions& options = context.options();
-        ModelArgs model_args = create_attention_model_args(q_lora_rank);
+        RawModelArgs model_args = create_attention_model_args(q_lora_rank);
         QuantArgs quant_args = create_default_quant_args();
         StateDict state_dict = create_attention_state_dict(model_args, options);
 
@@ -931,7 +931,7 @@ int32_t run_attention_prefill_repl_test_child(int32_t rank,
         const torch::Device& device = context.device();
         ParallelArgs& parallel_args = context.parallel_args();
         const torch::TensorOptions& options = context.options();
-        ModelArgs model_args = create_attention_model_args();
+        RawModelArgs model_args = create_attention_model_args();
         QuantArgs quant_args = create_default_quant_args();
         StateDict state_dict = create_attention_state_dict(model_args, options);
 
@@ -989,7 +989,7 @@ int32_t run_attention_prefill_fallback_test_child(int32_t rank,
         const torch::Device& device = context.device();
         ParallelArgs& parallel_args = context.parallel_args();
         const torch::TensorOptions& options = context.options();
-        ModelArgs model_args =
+        RawModelArgs model_args =
             create_attention_model_args(/*q_lora_rank=*/64,
                                         /*enable_indexer=*/true);
         QuantArgs quant_args = create_default_quant_args();
@@ -1050,7 +1050,7 @@ int32_t run_attention_prefill_sp_test_child(int32_t rank,
         const torch::Device& device = context.device();
         ParallelArgs& parallel_args = context.parallel_args();
         const torch::TensorOptions& options = context.options();
-        ModelArgs model_args =
+        RawModelArgs model_args =
             use_glm5_args ? create_glm5_attention_model_args()
                           : create_attention_model_args(/*q_lora_rank=*/64,
                                                         /*enable_indexer=*/
@@ -1108,7 +1108,7 @@ int32_t run_attention_prefill_sp_test_child(int32_t rank,
 // the full sequence runs through the TP-sharded forward_normal_tp path and is
 // used as the reference.
 AttentionRunResult run_cptp_attention_prefill_once(
-    const ModelArgs& args,
+    const RawModelArgs& args,
     const QuantArgs& quant_args,
     const ParallelArgs& parallel_args,
     const torch::TensorOptions& options,
@@ -1246,7 +1246,7 @@ int32_t run_attention_prefill_cp_tp_test_child(int32_t rank,
     parallel_args.dcp_group_ = self_group.get();
     parallel_args.cp_size() = kCpSize;
 
-    ModelArgs model_args = create_glm5_attention_model_args();
+    RawModelArgs model_args = create_glm5_attention_model_args();
     QuantArgs quant_args = create_default_quant_args();
     StateDict state_dict = create_attention_state_dict(model_args, options);
 
@@ -1373,7 +1373,7 @@ int32_t run_attention_prefill_sp_topk_share_test_child(
                        .dtype(torch::kBFloat16)
                        .device(device)
                        .requires_grad(false);
-    ModelArgs model_args = create_glm5_attention_model_args();
+    RawModelArgs model_args = create_glm5_attention_model_args();
     QuantArgs quant_args = create_default_quant_args();
     StateDict state_dict = create_attention_state_dict(model_args, options);
 
@@ -1484,7 +1484,7 @@ int32_t run_attention_prefill_sp_baseline_test_child(int32_t rank,
         const torch::Device& device = context.device();
         ParallelArgs& parallel_args = context.parallel_args();
         const torch::TensorOptions& options = context.options();
-        ModelArgs model_args =
+        RawModelArgs model_args =
             create_attention_model_args(/*q_lora_rank=*/64,
                                         /*enable_indexer=*/true);
         QuantArgs quant_args = create_default_quant_args();
@@ -1566,7 +1566,7 @@ int32_t run_attention_chunked_test_child(int32_t rank,
         const torch::Device& device = context.device();
         ParallelArgs& parallel_args = context.parallel_args();
         const torch::TensorOptions& options = context.options();
-        ModelArgs model_args =
+        RawModelArgs model_args =
             create_attention_model_args(/*q_lora_rank=*/64,
                                         /*enable_indexer=*/true);
         QuantArgs quant_args = create_default_quant_args();
@@ -1706,7 +1706,7 @@ int32_t run_attention_topk_share_test_child(int32_t rank,
         const torch::Device& device = context.device();
         ParallelArgs& parallel_args = context.parallel_args();
         const torch::TensorOptions& options = context.options();
-        ModelArgs model_args =
+        RawModelArgs model_args =
             create_attention_model_args(/*q_lora_rank=*/64,
                                         /*enable_indexer=*/true);
         QuantArgs quant_args = create_default_quant_args();
@@ -1840,7 +1840,7 @@ int32_t run_attention_topk_share_dummy_run_test_child(int32_t rank,
         const torch::Device& device = context.device();
         ParallelArgs& parallel_args = context.parallel_args();
         const torch::TensorOptions& options = context.options();
-        ModelArgs model_args =
+        RawModelArgs model_args =
             create_attention_model_args(/*q_lora_rank=*/64,
                                         /*enable_indexer=*/true);
         QuantArgs quant_args = create_default_quant_args();
@@ -1913,7 +1913,7 @@ int32_t run_attention_topk_share_bucket_test_child(int32_t rank,
         const torch::Device& device = context.device();
         ParallelArgs& parallel_args = context.parallel_args();
         const torch::TensorOptions& options = context.options();
-        ModelArgs model_args =
+        RawModelArgs model_args =
             create_attention_model_args(/*q_lora_rank=*/64,
                                         /*enable_indexer=*/true);
         QuantArgs quant_args = create_default_quant_args();

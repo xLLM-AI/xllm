@@ -20,7 +20,7 @@ limitations under the License.
 #include <cstdint>
 #include <vector>
 
-#include "core/framework/model/model_args.h"
+#include "core/framework/model/raw_model_args.h"
 #include "core/framework/multimodal/mm_input.h"
 #include "processors/video_processor.h"
 
@@ -28,7 +28,7 @@ namespace xllm {
 
 class Glm4VVideoProcessor final : public VideoProcessor {
  public:
-  explicit Glm4VVideoProcessor(const ModelArgs& args);
+  explicit Glm4VVideoProcessor(const RawModelArgs& args);
 
   bool process(const torch::Tensor& origin_video,
                const VideoMetadata& metadata,

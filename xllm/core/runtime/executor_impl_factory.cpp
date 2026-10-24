@@ -81,7 +81,7 @@ bool ExecutorImplFactory::register_creator(std::string executor_type,
 
 std::unique_ptr<ExecutorImpl> ExecutorImplFactory::create_executor_impl(
     CausalLM* model,
-    const ModelArgsBundle& args,
+    const ModelArgs& args,
     const torch::Device& device,
     const runtime::Options& options,
     const std::string& executor_type) {

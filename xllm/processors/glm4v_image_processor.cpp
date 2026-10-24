@@ -174,7 +174,7 @@ std::optional<Size> smart_resize_tokens(int32_t num_frames,
 
 }  // namespace
 
-Glm4VImageProcessor::Glm4VImageProcessor(const ModelArgs& args) {
+Glm4VImageProcessor::Glm4VImageProcessor(const RawModelArgs& args) {
   image_mean_ = torch::tensor(args.mm_image_normalize_mean(),
                               torch::dtype(torch::kFloat32));
   image_std_ = torch::tensor(args.mm_image_normalize_std(),

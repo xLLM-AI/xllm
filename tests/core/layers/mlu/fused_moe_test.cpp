@@ -266,7 +266,7 @@ class FusedMoETest : public ::testing::Test {
                             const std::string& hidden_act = "silu",
                             const std::string& scoring_func = "sigmoid",
                             const std::string& topk_method = "noaux_tc") {
-    ModelArgs args = model_args_;
+    RawModelArgs args = model_args_;
     args.n_routed_experts() = static_cast<int32_t>(num_experts);
     args.num_experts_per_tok() = static_cast<int32_t>(top_k);
     args.n_group() = static_cast<int32_t>(num_expert_group);
@@ -349,7 +349,7 @@ class FusedMoETest : public ::testing::Test {
     test::verify_precision(actual_output, expected_output_, rtol, atol);
   }
 
-  ModelArgs model_args_;
+  RawModelArgs model_args_;
   QuantArgs quant_args_;
   ParallelArgs parallel_args_{0, 1, nullptr};
   torch::TensorOptions options_;
@@ -841,7 +841,7 @@ TEST_F(FusedMoETest, DeepSeekV4MoETest) {
   const double route_scale = 1.0;
   const float swiglu_limit = 10.0f;
 
-  ModelArgs args = model_args_;
+  RawModelArgs args = model_args_;
   args.n_routed_experts() = static_cast<int32_t>(num_experts);
   args.num_experts_per_tok() = static_cast<int32_t>(top_k);
   args.n_group() = static_cast<int32_t>(num_expert_group);
@@ -906,7 +906,7 @@ TEST_F(FusedMoETest, DeepSeekV4HashMoETest) {
   const double route_scale = 1.0;
   const float swiglu_limit = 10.0f;
 
-  ModelArgs args = model_args_;
+  RawModelArgs args = model_args_;
   args.n_routed_experts() = static_cast<int32_t>(num_experts);
   args.num_experts_per_tok() = static_cast<int32_t>(top_k);
   args.n_group() = static_cast<int32_t>(num_expert_group);

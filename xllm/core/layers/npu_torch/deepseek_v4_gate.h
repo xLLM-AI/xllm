@@ -32,7 +32,7 @@ class DeepseekV4GateImpl : public torch::nn::Module {
  public:
   DeepseekV4GateImpl() = default;
   DeepseekV4GateImpl(const ModelContext& context, int32_t layer_id);
-  DeepseekV4GateImpl(const ModelArgs& args,
+  DeepseekV4GateImpl(const RawModelArgs& args,
                      int32_t layer_id,
                      const torch::TensorOptions& options);
 

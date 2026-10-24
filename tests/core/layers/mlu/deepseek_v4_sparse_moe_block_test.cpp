@@ -242,7 +242,7 @@ class DeepseekV4SparseMoEBlockTest : public ::testing::Test {
     xllm::Device(options_.device()).synchronize_default_stream();
   }
 
-  ModelArgs model_args_;
+  RawModelArgs model_args_;
   QuantArgs quant_args_;
   ParallelArgs parallel_args_{0, 1, nullptr};
   torch::TensorOptions options_;

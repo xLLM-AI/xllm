@@ -53,7 +53,7 @@ class DeepseekV4IndexerImpl : public torch::nn::Module {
       double norm_eps,
       const torch::TensorOptions& options =
           torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCPU),
-      const ModelArgs& args = ModelArgs{},
+      const RawModelArgs& args = RawModelArgs{},
       const QuantArgs& quant_args = QuantArgs{});
 
   std::tuple<torch::Tensor, torch::Tensor> forward(

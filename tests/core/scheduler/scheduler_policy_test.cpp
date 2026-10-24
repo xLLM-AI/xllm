@@ -92,14 +92,14 @@ class FakeEngine : public Engine {
   BlockManagerPool* block_manager_pool() const {
     return fake_block_manager_.get();
   }
-  const ModelArgs& model_args() const override { return model_args_; }
+  const RawModelArgs& model_args() const override { return model_args_; }
   const TokenizerArgs& tokenizer_args() const { NOT_IMPLEMENTED(); }
   bool init() override { return true; }
 
  private:
   std::unique_ptr<Tokenizer> fake_tokenizer_;
   std::unique_ptr<BlockManagerPool> fake_block_manager_;
-  ModelArgs model_args_;
+  RawModelArgs model_args_;
 };
 
 class StaleCapacityBlockManagerPool final : public BlockManagerPool {
@@ -699,7 +699,7 @@ TEST(SchedulerPolicyTest, KvlessCompositeReprobesAfterPartialAllocation) {
   std::vector<Sequence*> running_sequences;
   std::vector<size_t> running_sequence_budgets;
   bool last_step_prefill = false;
-  ModelArgs model_args;
+  RawModelArgs model_args;
   SchedulerState state{
       .prefill_queue = prefill_queue,
       .chunk_queue = chunk_queue,
@@ -764,7 +764,7 @@ TEST(SchedulerPolicyTest, UnifiedRetryRefreshesHostRestoreBeforeChunkSizing) {
   std::vector<Sequence*> running_sequences;
   std::vector<size_t> running_sequence_budgets;
   bool last_step_prefill = false;
-  ModelArgs model_args;
+  RawModelArgs model_args;
   SchedulerState state{
       .prefill_queue = prefill_queue,
       .chunk_queue = chunk_queue,
@@ -850,7 +850,7 @@ TEST(SchedulerPolicyTest, DecodeRestoreRetrySizesChunkAfterHostMatch) {
   std::vector<Sequence*> running_sequences;
   std::vector<size_t> running_sequence_budgets;
   bool last_step_prefill = false;
-  ModelArgs model_args;
+  RawModelArgs model_args;
   SchedulerState state{
       .prefill_queue = prefill_queue,
       .chunk_queue = chunk_queue,
@@ -932,7 +932,7 @@ TEST(SchedulerPolicyTest, DefersWhileAsyncBlockReleaseIsPending) {
   std::vector<Sequence*> running_sequences;
   std::vector<size_t> running_sequence_budgets;
   bool last_step_prefill = false;
-  ModelArgs model_args;
+  RawModelArgs model_args;
   SchedulerState state{
       .prefill_queue = prefill_queue,
       .chunk_queue = chunk_queue,
@@ -1030,7 +1030,7 @@ TEST(SchedulerPolicyTest,
   std::vector<Sequence*> running_sequences;
   std::vector<size_t> running_sequence_budgets;
   bool last_step_prefill = false;
-  ModelArgs model_args;
+  RawModelArgs model_args;
   SchedulerState state{
       .prefill_queue = prefill_queue,
       .chunk_queue = chunk_queue,
@@ -1123,7 +1123,7 @@ TEST(SchedulerPolicyTest, PendingDecodeReleaseStopsFurtherPreemption) {
   std::vector<Sequence*> running_sequences;
   std::vector<size_t> running_sequence_budgets;
   bool last_step_prefill = false;
-  ModelArgs model_args;
+  RawModelArgs model_args;
   SchedulerState state{
       .prefill_queue = prefill_queue,
       .chunk_queue = chunk_queue,
@@ -1246,7 +1246,7 @@ TEST(SchedulerPolicyTest, RetriesBlockedDecodeBeforeRestoringVictim) {
   std::vector<Sequence*> running_sequences;
   std::vector<size_t> running_sequence_budgets;
   bool last_step_prefill = false;
-  ModelArgs model_args;
+  RawModelArgs model_args;
   SchedulerState state{
       .prefill_queue = prefill_queue,
       .chunk_queue = chunk_queue,
@@ -1348,7 +1348,7 @@ TEST(SchedulerPolicyTest,
   std::vector<Sequence*> running_sequences;
   std::vector<size_t> running_sequence_budgets;
   bool last_step_prefill = false;
-  ModelArgs model_args;
+  RawModelArgs model_args;
   SchedulerState state{
       .prefill_queue = prefill_queue,
       .chunk_queue = chunk_queue,

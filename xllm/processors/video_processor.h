@@ -18,7 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/types.h>
 
-#include "core/framework/model/model_args.h"
+#include "core/framework/model/raw_model_args.h"
 #include "core/framework/multimodal/mm_data.h"
 #include "core/framework/multimodal/mm_input.h"
 
@@ -36,7 +36,7 @@ class VideoProcessor {
 class VideoNoneProcessor final : public VideoProcessor {
  public:
   VideoNoneProcessor() = default;
-  explicit VideoNoneProcessor(const ModelArgs&) {}
+  explicit VideoNoneProcessor(const RawModelArgs&) {}
 
   bool process(const torch::Tensor& origin_video,
                const VideoMetadata& metadata,

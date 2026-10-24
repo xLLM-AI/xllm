@@ -37,7 +37,7 @@ namespace xllm {
 class VlmExecutorImpl : public ExecutorImpl {
  public:
   VlmExecutorImpl(CausalLM* model,
-                  const ModelArgsBundle& args,
+                  const ModelArgs& args,
                   const torch::Device& device,
                   const runtime::Options& options);
 
@@ -57,7 +57,7 @@ class VlmExecutorImpl : public ExecutorImpl {
 
   // not own
   CausalVLM* model_;
-  ModelArgsBundle args_;
+  ModelArgs args_;
   torch::Device device_;
   runtime::Options options_;
   std::unique_ptr<ExecutorImpl> llm_executor_;

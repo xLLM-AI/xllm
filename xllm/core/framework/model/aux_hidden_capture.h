@@ -23,9 +23,9 @@ limitations under the License.
 #include <optional>
 #include <vector>
 
-#include "core/framework/model/model_args.h"
 #include "core/framework/model/model_family_args.h"
 #include "core/framework/model/model_output.h"
+#include "core/framework/model/raw_model_args.h"
 
 namespace xllm {
 
@@ -46,7 +46,7 @@ class AuxHiddenCapture final {
   // consumes. An omitted capture list falls back to the EAGLE-3
   // low/mid/high default (three layers), matching the speculators None->3
   // fallback and legacy_default_capture_layer_ids.
-  static int64_t num_aux_layers(const ModelArgs& model_args) {
+  static int64_t num_aux_layers(const RawModelArgs& model_args) {
     const auto& capture_ids = model_args.layers_to_capture();
     return capture_ids.empty()
                ? static_cast<int64_t>(
@@ -56,7 +56,7 @@ class AuxHiddenCapture final {
   }
   // Width of the concatenated aux hidden-state tensor the target produces and
   // the draft consumes.
-  static int64_t aux_hidden_dim(const ModelArgs& model_args) {
+  static int64_t aux_hidden_dim(const RawModelArgs& model_args) {
     return num_aux_layers(model_args) * model_args.hidden_size();
   }
 
@@ -84,7 +84,7 @@ class AuxHiddenCapture final {
                            options);
   }
 
-  AuxHiddenCapture(const ModelArgs& model_args,
+  AuxHiddenCapture(const RawModelArgs& model_args,
                    const torch::TensorOptions& options,
                    int64_t max_tokens_per_batch) {
     if (model_args.layers_to_capture().empty()) {

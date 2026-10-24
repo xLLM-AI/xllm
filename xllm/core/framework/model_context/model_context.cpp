@@ -51,18 +51,17 @@ bool should_enable_async_tiling_copy_stream() {
 }  // namespace
 
 ModelContext::ModelContext(const ParallelArgs& input_parallel_args,
-                           const ModelArgs& model_args,
+                           const RawModelArgs& model_args,
                            const QuantArgs& quant_args,
                            const torch::TensorOptions& tensor_options,
                            ModelContextIdentity identity)
     : identity_(std::move(identity)),
-      model_args_bundle_(
+      model_args_(
           identity_.family == ModelFamily::DIT
-              ? std::make_shared<ModelArgsBundle>(model_args,
-                                                  identity_.family,
-                                                  identity_.dit_component_type)
-              : std::make_shared<ModelArgsBundle>(model_args,
-                                                  identity_.family)),
+              ? std::make_shared<ModelArgs>(model_args,
+                                            identity_.family,
+                                            identity_.dit_component_type)
+              : std::make_shared<ModelArgs>(model_args, identity_.family)),
       quant_args_(quant_args),
       parallel_args_(input_parallel_args),
       tensor_options_(tensor_options),
@@ -83,36 +82,35 @@ ModelContext::ModelContext(const ParallelArgs& input_parallel_args,
 }
 
 ModelContext::ModelContext(const ParallelArgs& input_parallel_args,
-                           std::shared_ptr<ModelArgsBundle> model_args_bundle,
+                           std::shared_ptr<ModelArgs> all_model_args,
                            const QuantArgs& quant_args,
                            const torch::TensorOptions& tensor_options,
                            ModelContextIdentity identity)
     : identity_(std::move(identity)),
-      model_args_bundle_(std::move(model_args_bundle)),
+      model_args_(std::move(all_model_args)),
       quant_args_(quant_args),
       parallel_args_(input_parallel_args),
       tensor_options_(tensor_options),
       stream_registry_(
           std::make_shared<ModelStreamRegistry>(tensor_options.device())) {
-  CHECK(model_args_bundle_ != nullptr);
+  CHECK(model_args_ != nullptr);
   derive_optimization_config();
 }
 
 #if defined(USE_NPU)
 ModelContext::ModelContext(const ParallelArgs& input_parallel_args,
-                           const ModelArgs& model_args,
+                           const RawModelArgs& model_args,
                            const QuantArgs& quant_args,
                            const torch::TensorOptions& tensor_options,
                            atb::Context* context,
                            ModelContextIdentity identity)
     : identity_(std::move(identity)),
-      model_args_bundle_(
+      model_args_(
           identity_.family == ModelFamily::DIT
-              ? std::make_shared<ModelArgsBundle>(model_args,
-                                                  identity_.family,
-                                                  identity_.dit_component_type)
-              : std::make_shared<ModelArgsBundle>(model_args,
-                                                  identity_.family)),
+              ? std::make_shared<ModelArgs>(model_args,
+                                            identity_.family,
+                                            identity_.dit_component_type)
+              : std::make_shared<ModelArgs>(model_args, identity_.family)),
       quant_args_(quant_args),
       parallel_args_(input_parallel_args),
       tensor_options_(tensor_options),
@@ -121,93 +119,90 @@ ModelContext::ModelContext(const ParallelArgs& input_parallel_args,
       context_(context) {}
 
 ModelContext::ModelContext(const ParallelArgs& input_parallel_args,
-                           std::shared_ptr<ModelArgsBundle> model_args_bundle,
+                           std::shared_ptr<ModelArgs> all_model_args,
                            const QuantArgs& quant_args,
                            const torch::TensorOptions& tensor_options,
                            atb::Context* context,
                            ModelContextIdentity identity)
     : identity_(std::move(identity)),
-      model_args_bundle_(std::move(model_args_bundle)),
+      model_args_(std::move(all_model_args)),
       quant_args_(quant_args),
       parallel_args_(input_parallel_args),
       tensor_options_(tensor_options),
       stream_registry_(
           std::make_shared<ModelStreamRegistry>(tensor_options.device())),
       context_(context) {
-  CHECK(model_args_bundle_ != nullptr);
+  CHECK(model_args_ != nullptr);
 }
 #endif
 
 const LlmModelArgs& ModelContext::get_llm_model_args() const& {
   CHECK(identity_.family == ModelFamily::LLM)
       << "LLM arguments require an LLM model context";
-  return model_args_bundle_->llm_model_args();
+  return model_args_->llm_model_args();
 }
 
 const VlmModelArgs& ModelContext::get_vlm_model_args() const& {
   CHECK(identity_.family == ModelFamily::VLM)
       << "VLM arguments require a VLM model context";
-  return model_args_bundle_->vlm_model_args();
+  return model_args_->vlm_model_args();
 }
 
 const RecModelArgs& ModelContext::get_rec_model_args() const& {
   CHECK(identity_.family == ModelFamily::REC)
       << "Rec arguments require a Rec model context";
-  return model_args_bundle_->rec_model_args();
+  return model_args_->rec_model_args();
 }
 
 const DiTComponentModelArgs& ModelContext::get_dit_model_args() const& {
   CHECK(identity_.family == ModelFamily::DIT)
       << "DiT arguments require a DiT model context";
-  return model_args_bundle_->dit_model_args();
+  return model_args_->dit_model_args();
 }
 
 const AttentionModelParams& ModelContext::get_attention_model_params() const& {
-  return model_args_bundle_->attention_params();
+  return model_args_->attention_params();
 }
 
 const LinearAttentionModelParams&
 ModelContext::get_linear_attention_model_params() const& {
-  return model_args_bundle_->linear_attention_params();
+  return model_args_->linear_attention_params();
 }
 
 const KVCacheModelParams& ModelContext::get_kv_cache_model_params() const& {
-  return model_args_bundle_->kv_cache_params();
+  return model_args_->kv_cache_params();
 }
 
 const MoEModelParams& ModelContext::get_moe_model_params() const& {
-  return model_args_bundle_->moe_params();
+  return model_args_->moe_params();
 }
 
 const SpeculativeModelParams& ModelContext::get_speculative_model_params()
     const& {
-  return model_args_bundle_->speculative_params();
+  return model_args_->speculative_params();
 }
 
 const EmbeddingModelParams& ModelContext::get_embedding_model_params() const& {
-  return model_args_bundle_->embedding_params();
+  return model_args_->embedding_params();
 }
 
 const ExecutionModelParams& ModelContext::get_execution_model_params() const& {
-  return model_args_bundle_->execution_params();
+  return model_args_->execution_params();
 }
 
 ModelContext ModelContext::with_parallel_args(
     const ParallelArgs& parallel_args) const {
 #if defined(USE_NPU)
   ModelContext derived(parallel_args,
-                       model_args_bundle_,
+                       model_args_,
                        quant_args_,
                        tensor_options_,
                        context_,
                        identity_);
   derived.atb_workspace_ = atb_workspace_;
 #else
-  ModelContext derived(parallel_args,
-                       model_args_bundle_,
-                       quant_args_,
-                       tensor_options_,
-                       identity_);
+  ModelContext derived(
+      parallel_args, model_args_, quant_args_, tensor_options_, identity_);
 #endif
   derived.model_id_ = model_id_;
   derived.model_impl_ = model_impl_;
@@ -221,18 +216,15 @@ ModelContext ModelContext::with_parallel_args(
 ModelContext ModelContext::with_quant_args(const QuantArgs& quant_args) const {
 #if defined(USE_NPU)
   ModelContext derived(parallel_args_,
-                       model_args_bundle_,
+                       model_args_,
                        quant_args,
                        tensor_options_,
                        context_,
                        identity_);
   derived.atb_workspace_ = atb_workspace_;
 #else
-  ModelContext derived(parallel_args_,
-                       model_args_bundle_,
-                       quant_args,
-                       tensor_options_,
-                       identity_);
+  ModelContext derived(
+      parallel_args_, model_args_, quant_args, tensor_options_, identity_);
 #endif
   derived.model_id_ = model_id_;
   derived.model_impl_ = model_impl_;
@@ -247,18 +239,15 @@ ModelContext ModelContext::with_tensor_options(
     const torch::TensorOptions& tensor_options) const {
 #if defined(USE_NPU)
   ModelContext derived(parallel_args_,
-                       model_args_bundle_,
+                       model_args_,
                        quant_args_,
                        tensor_options,
                        context_,
                        identity_);
   derived.atb_workspace_ = atb_workspace_;
 #else
-  ModelContext derived(parallel_args_,
-                       model_args_bundle_,
-                       quant_args_,
-                       tensor_options,
-                       identity_);
+  ModelContext derived(
+      parallel_args_, model_args_, quant_args_, tensor_options, identity_);
 #endif
   derived.model_id_ = model_id_;
   derived.model_impl_ = model_impl_;

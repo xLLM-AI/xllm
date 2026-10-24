@@ -61,7 +61,7 @@ torch::Tensor glm5_next_kda_apply_output_gate(const torch::Tensor& normalized,
 class Glm5NextKDAImpl final : public torch::nn::Module {
  public:
   Glm5NextKDAImpl() = default;
-  Glm5NextKDAImpl(const ModelArgs& args,
+  Glm5NextKDAImpl(const RawModelArgs& args,
                   const QuantArgs& quant_args,
                   const ParallelArgs& parallel_args,
                   const torch::TensorOptions& options,

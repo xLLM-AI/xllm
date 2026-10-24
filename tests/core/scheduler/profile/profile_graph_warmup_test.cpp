@@ -300,7 +300,7 @@ class RecordingProfileEngine final : public Engine {
     return block_manager_.get();
   }
 
-  const ModelArgs& model_args() const override { return model_args_; }
+  const RawModelArgs& model_args() const override { return model_args_; }
 
   void reset_profile_markers() { all_requests_marked_ = true; }
 
@@ -324,7 +324,7 @@ class RecordingProfileEngine final : public Engine {
 
  private:
   std::unique_ptr<BlockManagerPool> block_manager_;
-  ModelArgs model_args_;
+  RawModelArgs model_args_;
   bool all_requests_marked_ = true;
   bool overlap_ = false;
   int32_t pending_steps_ = 0;
@@ -803,7 +803,7 @@ TEST(GraphWarmupTest, FormatsCompletedWarmupProgress) {
 TEST(GraphWarmupTest, InjectsBootstrapEmbeddingWhenSpeculativeEnabled) {
   Sequence sequence = make_sequence(/*index=*/0, /*tokens=*/{1, 2, 3});
 
-  ModelArgs model_args;
+  RawModelArgs model_args;
   model_args.hidden_size(128);
   prepare_warmup_decode_sequence(&sequence,
                                  model_args,
@@ -818,7 +818,7 @@ TEST(GraphWarmupTest, InjectsBootstrapEmbeddingWhenSpeculativeEnabled) {
 
 TEST(GraphWarmupTest, BlockDraftBootstrapIncludesEveryCapturedTargetLayer) {
   Sequence sequence = make_sequence(/*index=*/0, /*tokens=*/{1, 2, 3});
-  ModelArgs model_args;
+  RawModelArgs model_args;
   model_args.hidden_size(6144).layers_to_capture({5, 19, 33, 47, 61, 75});
 
   prepare_warmup_decode_sequence(&sequence,
@@ -833,7 +833,7 @@ TEST(GraphWarmupTest, BlockDraftBootstrapIncludesEveryCapturedTargetLayer) {
 }
 
 TEST(GraphWarmupTest, DeepseekV4MtpUsesFlattenedHyperConnectionWidth) {
-  ModelArgs model_args;
+  RawModelArgs model_args;
   model_args.model_type() = "deepseek_v4_mtp";
   model_args.hidden_size() = 128;
   model_args.hc_mult() = 4;
@@ -842,7 +842,7 @@ TEST(GraphWarmupTest, DeepseekV4MtpUsesFlattenedHyperConnectionWidth) {
 }
 
 TEST(GraphWarmupTest, OtherMtpModelsUseDenseHiddenWidth) {
-  ModelArgs model_args;
+  RawModelArgs model_args;
   model_args.model_type() = "deepseek_v32_mtp";
   model_args.hidden_size() = 128;
   model_args.hc_mult() = 4;
@@ -853,7 +853,7 @@ TEST(GraphWarmupTest, OtherMtpModelsUseDenseHiddenWidth) {
 TEST(GraphWarmupTest, SkipsBootstrapEmbeddingWhenSpeculativeDisabled) {
   Sequence sequence = make_sequence(/*index=*/0, /*tokens=*/{1, 2, 3});
 
-  ModelArgs model_args;
+  RawModelArgs model_args;
   model_args.hidden_size(128);
   prepare_warmup_decode_sequence(&sequence,
                                  model_args,

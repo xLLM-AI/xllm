@@ -61,7 +61,7 @@ using TorchMemPool = c10::cuda::MemPool;
 // object
 class CudaGraphPersistentParam {
  public:
-  CudaGraphPersistentParam(const ModelArgsBundle& args,
+  CudaGraphPersistentParam(const ModelArgs& args,
                            const torch::Device& device,
                            const runtime::Options& options);
 
@@ -217,7 +217,7 @@ class CudaGraphPersistentParam {
                                             int64_t actual_batch_size,
                                             int64_t actual_num_tokens);
 
-  const ModelArgsBundle& args_;
+  const ModelArgs& args_;
   const torch::Device& device_;
   const runtime::Options& options_;
 
@@ -260,7 +260,7 @@ class CudaGraph {
 
   // Capture computation graph for given bucket num_tokens
   bool capture(CausalLM* model,
-               const ModelArgsBundle& args,
+               const ModelArgs& args,
                const runtime::Options& options,
                const torch::Tensor& tokens,
                const torch::Tensor& positions,
@@ -270,7 +270,7 @@ class CudaGraph {
                const at::cuda::MempoolId_t& pool,
                TorchMemPool* pool_ptr = nullptr);
   bool capture(RecModel* model,
-               const ModelArgsBundle& args,
+               const ModelArgs& args,
                const runtime::Options& options,
                const torch::Tensor& tokens,
                const torch::Tensor& positions,
@@ -300,7 +300,7 @@ class CudaGraph {
  private:
   template <typename Model, typename Params>
   bool capture_typed(Model* model,
-                     const ModelArgsBundle& args,
+                     const ModelArgs& args,
                      const runtime::Options& options,
                      const torch::Tensor& tokens,
                      const torch::Tensor& positions,
@@ -339,12 +339,12 @@ class CudaGraphExecutorImpl final : public ExecutorImpl,
                                     public RecExecutorBackend {
  public:
   CudaGraphExecutorImpl(CausalLM* model,
-                        const ModelArgsBundle& args,
+                        const ModelArgs& args,
                         const torch::Device& device,
                         const runtime::Options& options);
 
   CudaGraphExecutorImpl(RecModel* model,
-                        const ModelArgsBundle& args,
+                        const ModelArgs& args,
                         const torch::Device& device,
                         const runtime::Options& options);
 
@@ -381,7 +381,7 @@ class CudaGraphExecutorImpl final : public ExecutorImpl,
                         const Params& params);
   void initialize();
 
-  ModelArgsBundle args_;
+  ModelArgs args_;
   torch::Device device_;
   runtime::Options options_;
 

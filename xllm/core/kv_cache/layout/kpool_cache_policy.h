@@ -23,7 +23,7 @@ namespace xllm {
 // This is a cache-layout policy, not a model configuration property. Keep the
 // platform/model rollout gate beside the cache layout consumers so Python
 // model setup, capacity estimation and KV transfer use one decision.
-inline bool uses_compressed_kpool_tail_cache(const ModelArgs& args) {
+inline bool uses_compressed_kpool_tail_cache(const RawModelArgs& args) {
 #if defined(USE_NPU)
   return args.index_kpool() > 1 && args.index_kpool_compress() &&
          args.index_kpool_always_select_tail() &&
@@ -34,7 +34,7 @@ inline bool uses_compressed_kpool_tail_cache(const ModelArgs& args) {
 #endif
 }
 
-inline bool uses_compressed_kpool_tail_cache(const ModelArgsBundle& args) {
+inline bool uses_compressed_kpool_tail_cache(const ModelArgs& args) {
 #if defined(USE_NPU)
   return args.index_kpool() > 1 && args.index_kpool_compress() &&
          args.index_kpool_always_select_tail() &&

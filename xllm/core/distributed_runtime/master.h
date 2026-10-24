@@ -26,7 +26,7 @@ limitations under the License.
 
 namespace xllm {
 
-class ModelArgs;
+class RawModelArgs;
 
 class Master {
  public:
@@ -41,7 +41,7 @@ class Master {
   void wait();
   const Options& options() const { return options_; }
 
-  virtual const ModelArgs* model_args() const = 0;
+  virtual const RawModelArgs* model_args() const = 0;
 
   RateLimiter* get_rate_limiter() { return &rate_limiter_; }
 

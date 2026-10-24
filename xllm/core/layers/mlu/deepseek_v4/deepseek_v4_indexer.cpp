@@ -95,7 +95,7 @@ DeepseekV4IndexerImpl::DeepseekV4IndexerImpl(
     int64_t q_lora_rank,
     double norm_eps,
     const torch::TensorOptions& options,
-    const ModelArgs& args,
+    const RawModelArgs& args,
     const QuantArgs& quant_args)
     : dim_(dim),
       n_heads_(index_n_heads),

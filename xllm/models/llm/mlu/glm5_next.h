@@ -48,8 +48,8 @@ class Glm5NextModelImpl final
   explicit Glm5NextModelImpl(const ModelContext& context)
       : LlmModelImplBase<layer::Glm5NextDecoderLayer>(
             "glm5_next",
-            context.get_model_args_bundle(),
-            context.get_model_args_bundle().enable_mla()),
+            context.get_model_args(),
+            context.get_model_args().enable_mla()),
         device_(context.get_tensor_options().device()),
         hc_mult_(context.get_llm_model_args().hc_mult()) {
     const auto& args = context.get_llm_model_args();

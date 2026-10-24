@@ -97,7 +97,7 @@ const uint64_t WEIGHT_COUNT_PER_LAYER = 50;
 
 void NpuQwen2DecoderLayerImpl::param_from_args(
     atb_speed::qwen::DecoderLayerParam& param,
-    const ModelArgs& args,
+    const RawModelArgs& args,
     const ParallelArgs& parallel_args,
     bool isPrefill) {
   param.isFA = false;
@@ -142,7 +142,7 @@ void NpuQwen2DecoderLayerImpl::param_from_args(
 
 NpuQwen2DecoderLayerImpl::NpuQwen2DecoderLayerImpl(const ModelContext& context)
     : BaseLayer(context) {
-  const auto& model_args = context.get_model_args_bundle();
+  const auto& model_args = context.get_model_args();
   auto parallel_args = context.get_parallel_args();
   auto options = context.get_tensor_options();
 

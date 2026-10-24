@@ -32,7 +32,7 @@ limitations under the License.
 
 namespace xllm {
 
-struct ModelArgs;
+struct RawModelArgs;
 
 // LLM/VLM engine-facing batch. Rec uses RecBatch directly.
 class Batch final {
@@ -89,18 +89,18 @@ class Batch final {
   // prepare forward inputs
   LlmForwardInput prepare_forward_input(uint32_t num_decoding_tokens,
                                         uint32_t min_decoding_bach_size,
-                                        const ModelArgs& args,
+                                        const RawModelArgs& args,
                                         int32_t cp_size = 1);
 
   // Prepare LlmForwardInput for distributed transport.
-  LlmForwardInput prepare_forward_input(const ModelArgs& args,
+  LlmForwardInput prepare_forward_input(const RawModelArgs& args,
                                         ThreadPool* thread_pool,
                                         int32_t cp_size = 1);
   VlmForwardInput prepare_vlm_forward_input(uint32_t num_decoding_tokens,
                                             uint32_t min_decoding_batch_size,
-                                            const ModelArgs& args,
+                                            const RawModelArgs& args,
                                             int32_t cp_size = 1);
-  VlmForwardInput prepare_vlm_forward_input(const ModelArgs& args,
+  VlmForwardInput prepare_vlm_forward_input(const RawModelArgs& args,
                                             ThreadPool* thread_pool,
                                             int32_t cp_size = 1);
 

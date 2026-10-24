@@ -29,13 +29,12 @@ class Qwen3_5MtpModelImpl final : public Qwen3_5MtpModelImplBase {
  public:
   explicit Qwen3_5MtpModelImpl(const ModelContext& context)
       : Qwen3_5MtpModelImplBase(context),
-        mrope_section_(
-            context.get_model_args_bundle().rope_scaling_mrope_section()) {
+        mrope_section_(context.get_model_args().rope_scaling_mrope_section()) {
     if (mrope_section_.empty()) {
       return;
     }
 
-    const auto& args = context.get_model_args_bundle();
+    const auto& args = context.get_model_args();
     const int64_t rotary_dim =
         static_cast<int64_t>(args.head_dim() * args.partial_rotary_factor());
     cos_sin_ = layer::rotary::get_concat_rotary_embedding(
@@ -74,13 +73,13 @@ REGISTER_CAUSAL_MODEL(qwen3_5_mtp, Qwen3_5MtpForCausalLM);
 REGISTER_CAUSAL_MODEL(qwen3_5_moe_mtp, Qwen3_5MtpForCausalLM);
 
 REGISTER_MODEL_ARGS_LOADER(qwen3_5_mtp,
-                           [](const JsonReader& json, ModelArgs* args) {
+                           [](const JsonReader& json, RawModelArgs* args) {
                              return qwen3_5_mtp::load_model_args(
                                  json, args, "qwen3_5_text", "qwen3_5_mtp");
                            });
 
 REGISTER_MODEL_ARGS_LOADER(qwen3_5_moe_mtp,
-                           [](const JsonReader& json, ModelArgs* args) {
+                           [](const JsonReader& json, RawModelArgs* args) {
                              return qwen3_5_mtp::load_model_args(
                                  json,
                                  args,

@@ -34,10 +34,10 @@ class QWen3ModelImpl : public LlmModelImplBase<layer::Qwen3DecoderLayer> {
   QWen3ModelImpl(const ModelContext& context)
       : LlmModelImplBase<layer::Qwen3DecoderLayer>(
             "qwen3",
-            context.get_model_args_bundle(),
-            context.get_model_args_bundle().enable_mla()) {
+            context.get_model_args(),
+            context.get_model_args().enable_mla()) {
     // register submodules
-    const auto& model_args = context.get_model_args_bundle();
+    const auto& model_args = context.get_model_args();
     auto options = context.get_tensor_options();
 
     if (!mrope_section_.empty()) {

@@ -169,7 +169,7 @@ std::optional<Size> smart_resize_tokens(int32_t num_frames,
 
 }  // namespace
 
-Glm4VVideoProcessor::Glm4VVideoProcessor(const ModelArgs& args) {
+Glm4VVideoProcessor::Glm4VVideoProcessor(const RawModelArgs& args) {
   video_mean_ = torch::tensor(args.mm_video_normalize_mean(),
                               torch::dtype(torch::kFloat32));
   video_std_ = torch::tensor(args.mm_video_normalize_std(),

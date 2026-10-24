@@ -19,7 +19,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 
-#include "core/framework/model/model_args.h"
+#include "core/framework/model/raw_model_args.h"
 #include "core/framework/multimodal/mm_data.h"
 #include "core/framework/multimodal/mm_input.h"
 #include "processors/prompt_processor.h"
@@ -33,7 +33,7 @@ namespace xllm {
 // find_mm_spans() validate and reject bad layouts.
 class JoyaiASRPromptProcessor final : public PromptProcessor {
  public:
-  explicit JoyaiASRPromptProcessor(const ModelArgs& args);
+  explicit JoyaiASRPromptProcessor(const RawModelArgs& args);
 
   bool process(std::string& prompt, const MMData& mm_data) override;
   bool find_mm_spans(const std::vector<int32_t>& token_ids,

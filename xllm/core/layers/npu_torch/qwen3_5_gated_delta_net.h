@@ -43,7 +43,7 @@ const MegaGdnPrefillIndicesCache& get_or_build_prefill_indices(
 class Qwen3_5GatedDeltaNetImpl : public Qwen3NextGatedDeltaNetImpl {
  public:
   Qwen3_5GatedDeltaNetImpl() = default;
-  Qwen3_5GatedDeltaNetImpl(const ModelArgs& args,
+  Qwen3_5GatedDeltaNetImpl(const RawModelArgs& args,
                            const QuantArgs& quant_args,
                            const ParallelArgs& parallel_args,
                            const torch::TensorOptions& options);

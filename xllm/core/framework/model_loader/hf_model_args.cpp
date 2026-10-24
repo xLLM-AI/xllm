@@ -25,7 +25,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/config/kernel_config.h"
-#include "core/framework/model/model_args.h"
+#include "core/framework/model/raw_model_args.h"
 #include "core/framework/model_loader/hf_model_config.h"
 #include "core/framework/quantization/quant_args.h"
 #include "core/platform/platform.h"
@@ -418,7 +418,7 @@ bool load_quant_cfg(const JsonReader& reader, QuantArgs& quant_args) {
 
 bool load_hf_model_args(const std::filesystem::path& model_weights_path,
                         const std::string& backend,
-                        ModelArgs* args,
+                        RawModelArgs* args,
                         ResolvedModelDescriptor* descriptor) {
   JsonReader reader;
   const std::filesystem::path args_file_path =
@@ -466,7 +466,7 @@ bool load_hf_model_args(const std::filesystem::path& model_weights_path,
 
 bool load_hf_audio_preprocessor_args(
     const std::filesystem::path& model_weights_path,
-    ModelArgs& args) {
+    RawModelArgs& args) {
   JsonReader reader;
   std::filesystem::path config_path =
       model_weights_path / "audio_preprocessor_config.json";
@@ -521,7 +521,7 @@ bool load_hf_audio_preprocessor_args(
 
 bool load_hf_image_preprocessor_args(
     const std::filesystem::path& model_weights_path,
-    ModelArgs& args) {
+    RawModelArgs& args) {
   // image preprocessor args
   JsonReader image_reader;
   const std::filesystem::path flat_file_path =
@@ -638,7 +638,7 @@ bool load_hf_image_preprocessor_args(
 
 bool load_hf_video_preprocessor_args(
     const std::filesystem::path& model_weights_path,
-    ModelArgs& args) {
+    RawModelArgs& args) {
   // video preprocessor args
   JsonReader video_reader;
   const std::filesystem::path flat_file_path =

@@ -136,7 +136,7 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
     // The Qwen3 MoE language block is shared by the standalone LLM and the
     // Qwen3-VL MoE model.  Use the common transformer arguments so creating
     // the VLM context does not attempt to access an LLM-only argument bundle.
-    const auto& model_args = context.get_model_args_bundle();
+    const auto& model_args = context.get_model_args();
     auto parallel_args = context.get_parallel_args();
     mrope_section_ = model_args.rope_scaling_mrope_section();
     blocks_ = register_module("layers", torch::nn::ModuleList());

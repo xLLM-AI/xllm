@@ -818,7 +818,7 @@ template <typename TargetInput>
   if (impl_ == nullptr || draft_impl_ == nullptr ||
       options_.enable_adaptive_target_verify() ||
       options_.num_speculative_tokens() <= 0 ||
-      draft_impl_->context_.get_model_args_bundle().model_type() !=
+      draft_impl_->context_.get_model_args().model_type() !=
           "glm_moe_dsa_mtp") {
     return ::xllm::Status(
         StatusCode::INVALID_ARGUMENT,
@@ -867,7 +867,7 @@ bool MTPWorkerImpl<TargetInput>::init_model(
 
   if (impl_ != nullptr && impl_->get_status() == WorkerImpl::Status::LOADED) {
     target_spec_verify_mode_ = mtp_async::classify_target_spec_verify_mode(
-        context_.get_model_args_bundle().model_type());
+        context_.get_model_args().model_type());
     if (target_spec_verify_mode_ ==
         mtp_async::TargetSpecVerifyMode::QWEN3_5_EXPANDED_VERIFY) {
       adaptive_spec_controller_.reset();
@@ -877,7 +877,7 @@ bool MTPWorkerImpl<TargetInput>::init_model(
   if (draft_impl_ != nullptr &&
       draft_impl_->get_status() == WorkerImpl::Status::LOADED) {
     const std::string& draft_model_type =
-        draft_impl_->context_.get_model_args_bundle().model_type();
+        draft_impl_->context_.get_model_args().model_type();
     combined_draft_execution_path_ =
         mtp_async::classify_combined_draft_execution_path(draft_model_type);
     const bool draft_owns_shared_weights =
@@ -980,7 +980,7 @@ bool MTPWorkerImpl<TargetInput>::positions_are_decoupled_from_kv_length()
   if (impl_ == nullptr) {
     return false;
   }
-  const auto& target_args = impl_->context_.get_model_args_bundle();
+  const auto& target_args = impl_->context_.get_model_args();
   return !target_args.rope_scaling_mrope_section().empty();
 }
 
@@ -1064,8 +1064,7 @@ bool MTPWorkerImpl<TargetInput>::should_use_explicit_spec_verify_replay_update(
       block_tables.defined()
           ? spec_verify_block_table_width(block_tables)
           : spec_verify::speculative_verify_block_table_capacity(
-                impl_->context_.get_model_args_bundle()
-                    .max_position_embeddings(),
+                impl_->context_.get_model_args().max_position_embeddings(),
                 logical_block_size());
   if (block_table_width <= 0 ||
       block_table_width > kMaxSpecVerifyGraphUpdateBlockTableWidth) {
@@ -1090,7 +1089,7 @@ int64_t MTPWorkerImpl<TargetInput>::spec_verify_block_table_width(
   if (impl_ != nullptr) {
     const int64_t declared_capacity =
         spec_verify::speculative_verify_block_table_capacity(
-            impl_->context_.get_model_args_bundle().max_position_embeddings(),
+            impl_->context_.get_model_args().max_position_embeddings(),
             logical_block_size());
     CHECK_LE(required_width, declared_capacity)
         << "block table width exceeds the model position capacity";
@@ -1112,7 +1111,7 @@ void MTPWorkerImpl<TargetInput>::ensure_spec_verify_control_block_table(
   CHECK(impl_ != nullptr) << "target model must be initialized";
   const int64_t block_table_capacity =
       spec_verify::speculative_verify_block_table_capacity(
-          impl_->context_.get_model_args_bundle().max_position_embeddings(),
+          impl_->context_.get_model_args().max_position_embeddings(),
           logical_block_size());
   CHECK_GT(num_sequences, 0);
   CHECK_GT(block_table_capacity, 0);
@@ -3533,7 +3532,7 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
       force_two_rows || dp_enabled ||
       (Platform::is_npu() &&
        mtp_async::requires_uniform_draft_rows(
-           impl_->context_.get_model_args_bundle().model_type()) &&
+           impl_->context_.get_model_args().model_type()) &&
        std::any_of(last_states.begin(),
                    last_states.end(),
                    [](const EmbeddingCache::DecodeState& state) {

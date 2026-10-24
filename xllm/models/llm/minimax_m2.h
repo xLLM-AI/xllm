@@ -30,9 +30,9 @@ class MiniMaxM2ModelImpl
   explicit MiniMaxM2ModelImpl(const ModelContext& context)
       : LlmModelImplBase<layer::MiniMaxM2DecoderLayer>(
             "minimax_m2",
-            context.get_model_args_bundle(),
-            context.get_model_args_bundle().enable_mla()) {
-    const ModelArgsBundle& model_args = context.get_model_args_bundle();
+            context.get_model_args(),
+            context.get_model_args().enable_mla()) {
+    const ModelArgs& model_args = context.get_model_args();
 
     layers_.reserve(model_args.n_layers());
     embed_tokens_ =

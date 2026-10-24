@@ -93,7 +93,7 @@ class MoEGateTest : public ::testing::Test {
     return weight_dict;
   }
 
-  ModelArgs model_args_;
+  RawModelArgs model_args_;
   // Run forward, assert shapes, and verify min/max/sum against expected values.
   void run_forward_and_expect(MoEGateImpl* moe_gate,
                               int64_t num_tokens,

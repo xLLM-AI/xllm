@@ -39,7 +39,7 @@ Qwen3MoeDecoderLoader::Qwen3MoeDecoderLoader(uint64_t weight_count,
                                              const ModelContext& context,
                                              LoadMode mode)
     : BaseLoader(weight_count, context, mode) {
-  const auto& model_args = context.get_model_args_bundle();
+  const auto& model_args = context.get_model_args();
   auto options = context.get_tensor_options();
 
   auto& t = working_tensors();

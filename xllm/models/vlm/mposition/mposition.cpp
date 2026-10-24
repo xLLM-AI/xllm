@@ -81,7 +81,7 @@ MPositionGeneratorFactory::create_mposition_generator(const std::string& name) {
 std::tuple<torch::Tensor, int32_t> Glm4VMPositionGenerator::generate(
     Slice<int32_t> input_tokens,
     const MMData& mm_data,
-    const ModelArgs& model_args) const {
+    const RawModelArgs& model_args) const {
   torch::Tensor image_grid_thw = get_mm_tensor(mm_data, "image_grid_thw");
   torch::Tensor video_grid_thw = get_mm_tensor(mm_data, "video_grid_thw");
   int32_t spatial_merge_size = model_args.mm_spatial_merge_size();
@@ -195,7 +195,7 @@ std::tuple<torch::Tensor, int32_t> Glm4VMPositionGenerator::generate(
 std::tuple<torch::Tensor, int32_t> QwenVLMPositionGenerator::generate(
     Slice<int32_t> input_tokens,
     const MMData& mm_data,
-    const ModelArgs& model_args) const {
+    const RawModelArgs& model_args) const {
   torch::Tensor image_grid_thw = get_mm_tensor(mm_data, "image_grid_thw");
   torch::Tensor video_grid_thw = get_mm_tensor(mm_data, "video_grid_thw");
   torch::Tensor second_per_grid_ts =
@@ -335,7 +335,7 @@ std::tuple<torch::Tensor, int32_t> QwenVLMPositionGenerator::generate(
 std::tuple<torch::Tensor, int32_t> Qwen3VLMPositionGenerator::generate(
     Slice<int32_t> input_tokens,
     const MMData& mm_data,
-    const ModelArgs& model_args) const {
+    const RawModelArgs& model_args) const {
   torch::Tensor image_grid_thw = get_mm_tensor(mm_data, "image_grid_thw");
   torch::Tensor video_grid_thw = get_mm_tensor(mm_data, "video_grid_thw");
   int32_t image_token_id = model_args.image_token_id();

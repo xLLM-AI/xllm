@@ -24,7 +24,7 @@ constexpr int64_t kPersistentMergeMaxRows = 256;
 }  // namespace
 
 Qwen3NextGatedDeltaNetImpl::Qwen3NextGatedDeltaNetImpl(
-    const ModelArgs& args,
+    const RawModelArgs& args,
     const QuantArgs& quant_args,
     const ParallelArgs& parallel_args,
     const torch::TensorOptions& options)
@@ -35,7 +35,7 @@ Qwen3NextGatedDeltaNetImpl::Qwen3NextGatedDeltaNetImpl(
                                  /*init_projections=*/true) {}
 
 Qwen3NextGatedDeltaNetImpl::Qwen3NextGatedDeltaNetImpl(
-    const ModelArgs& args,
+    const RawModelArgs& args,
     const QuantArgs& quant_args,
     const ParallelArgs& parallel_args,
     const torch::TensorOptions& options,
@@ -47,7 +47,7 @@ Qwen3NextGatedDeltaNetImpl::Qwen3NextGatedDeltaNetImpl(
 }
 
 void Qwen3NextGatedDeltaNetImpl::init_next_projections(
-    const ModelArgs& args,
+    const RawModelArgs& args,
     const QuantArgs& quant_args,
     const ParallelArgs& parallel_args,
     const torch::TensorOptions& options) {
@@ -121,7 +121,7 @@ void Qwen3NextGatedDeltaNetImpl::verify_projection_weights(
 }
 
 Qwen3_5GatedDeltaNetImpl::Qwen3_5GatedDeltaNetImpl(
-    const ModelArgs& args,
+    const RawModelArgs& args,
     const QuantArgs& quant_args,
     const ParallelArgs& parallel_args,
     const torch::TensorOptions& options)

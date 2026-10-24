@@ -323,7 +323,7 @@ class DeepseekV4Config:
             default: float | int,
             *legacy_keys: str,
         ) -> float | int:
-            # PyCausalLM reflects ModelArgs into this dict. DSV4 uses factor,
+            # PyCausalLM reflects RawModelArgs into this dict. DSV4 uses factor,
             # beta_fast/beta_slow and rope_scaling_attn_factor directly; older
             # generic aliases may also be present with their zero defaults.
             for key in (model_arg, *legacy_keys):
@@ -371,7 +371,7 @@ class DeepseekV4Config:
                 int(v) if (v := _pick(d, "window_size", "sliding_window", default=128)) not in (None, -1, 0) else 128
             ),
             n_activated_experts=int(_pick(d, "n_activated_experts", "num_experts_per_tok", default=6)),
-            # PyCausalLM reflects the native ModelArgs field as n_hash_layers;
+            # PyCausalLM reflects the native RawModelArgs field as n_hash_layers;
             # direct Hugging Face config dictionaries use num_hash_layers.
             n_hash_layers=int(_pick(d, "n_hash_layers", "num_hash_layers", default=3)),
             hc_mult=int(_pick(d, "hc_mult", default=4)),

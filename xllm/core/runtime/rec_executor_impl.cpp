@@ -21,7 +21,7 @@ limitations under the License.
 namespace xllm {
 
 RecExecutorImpl::RecExecutorImpl(RecModel* model,
-                                 const ModelArgsBundle& /*args*/,
+                                 const ModelArgs& /*args*/,
                                  const torch::Device& /*device*/,
                                  const runtime::Options& /*options*/)
     : model_(model) {}

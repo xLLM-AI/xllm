@@ -56,7 +56,7 @@ namespace xllm {
 
 namespace {
 
-void attach_embedding_output_metadata(const ModelArgs& args,
+void attach_embedding_output_metadata(const RawModelArgs& args,
                                       const std::vector<Sequence*>& sequences,
                                       RawForwardOutput& output) {
   if (!ModelConfig::get_instance().enable_return_embedding_modality_tags()) {

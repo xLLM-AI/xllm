@@ -72,7 +72,7 @@ class Qwen2VisionAttentionTest : public ::testing::Test {
     }
   }
 
-  ModelArgs model_args_;
+  RawModelArgs model_args_;
   ModelContext context_;
   ParallelArgs parallel_args_{0, 1, nullptr};
   torch::TensorOptions options_;

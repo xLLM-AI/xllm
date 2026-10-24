@@ -48,7 +48,7 @@ using DcuStream = c10::hip::HIPStream;
 
 class DcuGraphPersistentParam final {
  public:
-  DcuGraphPersistentParam(const ModelArgsBundle& args,
+  DcuGraphPersistentParam(const ModelArgs& args,
                           const torch::Device& device,
                           const runtime::Options& options);
 
@@ -157,7 +157,7 @@ class DcuGraphPersistentParam final {
   }
 
  private:
-  ModelArgsBundle args_;
+  ModelArgs args_;
   torch::Device device_;
   runtime::Options options_;
 
@@ -240,12 +240,12 @@ class DcuGraphExecutorImpl final : public ExecutorImpl,
                                    public RecExecutorBackend {
  public:
   DcuGraphExecutorImpl(CausalLM* model,
-                       const ModelArgsBundle& args,
+                       const ModelArgs& args,
                        const torch::Device& device,
                        const runtime::Options& options);
 
   DcuGraphExecutorImpl(RecModel* model,
-                       const ModelArgsBundle& args,
+                       const ModelArgs& args,
                        const torch::Device& device,
                        const runtime::Options& options);
 
@@ -286,7 +286,7 @@ class DcuGraphExecutorImpl final : public ExecutorImpl,
   CausalLM* model_;                // not owned
   RecModel* rec_model_ = nullptr;  // not owned
 
-  ModelArgsBundle args_;
+  ModelArgs args_;
   torch::Device device_;
   runtime::Options options_;
 

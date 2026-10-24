@@ -195,8 +195,8 @@ class FakeEngine final : public RecEngine {
   BlockManagerPool* block_manager_pool() const override {
     return fake_block_manager_.get();
   }
-  const ModelArgs& model_args() const override {
-    static ModelArgs args;
+  const RawModelArgs& model_args() const override {
+    static RawModelArgs args;
     return args;
   }
   const TokenizerArgs& tokenizer_args() const override {

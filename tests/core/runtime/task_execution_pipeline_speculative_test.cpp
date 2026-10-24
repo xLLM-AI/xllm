@@ -795,7 +795,7 @@ class SpeculativePipelineTest : public ::testing::Test {
         ExecutorImplFactory::get_instance().register_creator(
             "speculative_pipeline_test",
             [](CausalLM* model,
-               const ModelArgsBundle& /*args*/,
+               const ModelArgs& /*args*/,
                const torch::Device& /*device*/,
                const runtime::Options& /*options*/) {
               return std::make_unique<PreparedTestExecutor>(model);
@@ -808,9 +808,9 @@ class SpeculativePipelineTest : public ::testing::Test {
     target_ = std::make_unique<CountingModel>(device_);
     draft_ = std::make_unique<CountingModel>(device_);
     target_executor_ = std::make_unique<Executor>(
-        target_.get(), ModelArgsBundle{}, device_, options);
-    draft_executor_ = std::make_unique<Executor>(
-        draft_.get(), ModelArgsBundle{}, device_, options);
+        target_.get(), ModelArgs{}, device_, options);
+    draft_executor_ =
+        std::make_unique<Executor>(draft_.get(), ModelArgs{}, device_, options);
     const auto cache_options = target_->options();
     for (auto* caches : {&target_cache_, &draft_cache_}) {
       caches->emplace_back(

@@ -163,7 +163,7 @@ class Glm5NextVisionConfig:
                     return d[k]
             return default
 
-        # The C++ ModelArgs default (``PROPERTY(float, swiglu_limit) = 0.0f``,
+        # The C++ RawModelArgs default (``PROPERTY(float, swiglu_limit) = 0.0f``,
         # model_args.h) leaks into the flat config dict because the C++ side
         # does not carry the nested ``vision_config.swiglu_limit``. A picked
         # 0/0.0 is therefore the unset default, not a real limit — and a limit
@@ -180,7 +180,7 @@ class Glm5NextVisionConfig:
             hidden_act=str(pick("mm_hidden_act", "hidden_act", default="silu")),
             # NOTE: only the ``mm_``-prefixed key is honored. The C++ flat
             # config dict carries the TEXT model's ``attention_bias = false``
-            # (ModelArgs default), which would silently disable every vision
+            # (RawModelArgs default), which would silently disable every vision
             # bias (qkv/proj/mlp) even though the checkpoint ships them —
             # shape checks can't catch a missing bias.
             attention_bias=bool(pick("mm_attention_bias", default=True)),
@@ -201,7 +201,7 @@ class Glm5NextVisionConfig:
                 "mm_projection_intermediate_size",
                 # GLM-5.3-Flash vision projector (config.json
                 # vision_config.projection_intermediate_size = 10240). The C++
-                # ModelArgs loader should expose it as mm_projection_intermediate_size;
+                # RawModelArgs loader should expose it as mm_projection_intermediate_size;
                 # 10240 is the fallback so the merger matches the checkpoint when the
                 # C++ side hasn't been extended yet.
                 default=10240,
@@ -752,7 +752,7 @@ class Glm5NextVLModel(Glm5NextForCausalLM):
     """
 
     def __init__(self, config: dict) -> None:
-        # PyCausalLM hands us a FLAT ModelArgs dict (built by build_config_dict
+        # PyCausalLM hands us a FLAT RawModelArgs dict (built by build_config_dict
         # via visit_properties): text fields are top-level (hidden_size,
         # n_layers, n_heads, tie_word_embeddings, tp_size, ...), vision fields
         # are "mm_"-prefixed. Both Glm5NextTextConfig.from_dict and
@@ -959,7 +959,7 @@ class Glm5NextVLModel(Glm5NextForCausalLM):
           - ``lm_head.*``           → lm_head (or tied to embed_tokens)
         """
         # 1. Vision tower — TP-sharded per rank (reads self.cfg.tp_size /
-        #    tp_rank set in __init__ from the flat ModelArgs). Conv + norms +
+        #    tp_rank set in __init__ from the flat RawModelArgs). Conv + norms +
         #    merger.proj stay replicated; qkv/proj/gate/up/down shard per the
         #    vLLM Qwen2-VL ViT map (see Glm5NextVisionModel.load_weights).
         self.vision_model.load_weights(state_dicts, prefix="model.visual.")

@@ -499,8 +499,8 @@ torch::Tensor scaled_w8a8_linear(
 
 ColumnParallelLinearImpl::ColumnParallelLinearImpl(const ModelContext& context)
     : ColumnParallelLinearImpl(
-          context.get_model_args_bundle().hidden_size(),
-          context.get_model_args_bundle().vocab_size(),
+          context.get_model_args().hidden_size(),
+          context.get_model_args().vocab_size(),
           /*bias=*/false,
           /*gather_output=*/true,
           QuantArgs{},  // do not use quantization for lm_head

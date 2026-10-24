@@ -96,8 +96,8 @@ struct All2AllTestParams {
 };
 
 // Helper to create model args
-ModelArgs create_model_args(const All2AllTestParams& params) {
-  ModelArgs args;
+RawModelArgs create_model_args(const All2AllTestParams& params) {
+  RawModelArgs args;
   args.n_routed_experts() = static_cast<int32_t>(params.num_experts);
   args.num_experts_per_tok() = static_cast<int32_t>(params.top_k);
   args.n_group() = 1;
@@ -285,7 +285,7 @@ int32_t run_all2all_basic_test_child(All2AllTestParams params) {
                        .requires_grad(false);
 
     // 6. Create model args and quant args
-    ModelArgs model_args = create_model_args(params);
+    RawModelArgs model_args = create_model_args(params);
     QuantArgs quant_args = create_quant_args(params);
     ModelStreamRegistry stream_registry(device);
 
@@ -406,7 +406,7 @@ int32_t run_all2all_selected_route_test_child(All2AllTestParams params) {
                        .device(device)
                        .requires_grad(false);
 
-    ModelArgs model_args = create_model_args(params);
+    RawModelArgs model_args = create_model_args(params);
     QuantArgs quant_args = create_quant_args(params);
     ModelStreamRegistry stream_registry(device);
     FusedMoE fused_moe(FusedMoEImpl(

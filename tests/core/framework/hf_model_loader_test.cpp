@@ -178,7 +178,7 @@ TEST(HFModelLoaderTest, ReusesRegisteredTokenizerLoaderAfterModelTypeChanges) {
   const std::string registration_name = "hf_loader_descriptor_test";
   ModelRegistry::register_model_backend(registration_name, "llm");
   ModelRegistry::register_model_args_loader(
-      registration_name, [](const JsonReader& /*reader*/, ModelArgs* args) {
+      registration_name, [](const JsonReader& /*reader*/, RawModelArgs* args) {
         args->model_type() = "hf_loader_descriptor_changed_type";
         args->hidden_size() = 17;
         args->mm_image_min_pixels() = 7;
@@ -349,7 +349,7 @@ TEST(HFModelLoaderTest, Glm5NextRootArgsLoadNativeMluFields) {
     }
   )json"));
 
-  ModelArgs args;
+  RawModelArgs args;
   ASSERT_TRUE(loader(reader, &args));
   EXPECT_EQ(args.index_kpool(), 4);
   EXPECT_TRUE(args.index_kpool_compress());
@@ -533,14 +533,14 @@ TEST(HFModelLoaderTest, Glm5NextNativeMtpUsesAppendedLayer) {
       "index_topk_freq": 1
     }
   })json"));
-  ModelArgs target_args;
+  RawModelArgs target_args;
   ASSERT_TRUE(loader(reader, &target_args));
   EXPECT_EQ(target_args.num_nextn_predict_layers(), 1);
   EXPECT_EQ(target_args.mtp_start_layer_idx(), -1);
   EXPECT_FALSE(configure_glm5_next_mtp_args(target_args,
                                             /*speculative_algorithm=*/"MTP",
                                             /*is_draft_engine=*/false));
-  ModelArgs draft_args = target_args;
+  RawModelArgs draft_args = target_args;
   ASSERT_TRUE(configure_glm5_next_mtp_args(draft_args,
                                            /*speculative_algorithm=*/"MTP",
                                            /*is_draft_engine=*/true));
@@ -561,7 +561,7 @@ TEST(HFModelLoaderTest, Glm5NextNativeMtpUsesAppendedLayer) {
 }
 
 TEST(HFModelLoaderTest, Glm5FlashAliasUsesMlaAndNativeMtpNormalization) {
-  ModelArgs args;
+  RawModelArgs args;
   args.model_type("glm5_3_flash").n_layers(45).num_nextn_predict_layers(1);
 
   EXPECT_TRUE(util::is_mla_model_type(args.model_type()));
@@ -587,7 +587,7 @@ TEST(HFModelLoaderTest, Glm5NextExportedMtpKeepsNativeKeys) {
       "indexer_types": ["full"]
     }
   })json"));
-  ModelArgs args;
+  RawModelArgs args;
   ASSERT_TRUE(loader(reader, &args));
   EXPECT_FALSE(configure_glm5_next_mtp_args(args,
                                             /*speculative_algorithm=*/"MTP",
@@ -598,7 +598,7 @@ TEST(HFModelLoaderTest, Glm5NextExportedMtpKeepsNativeKeys) {
 }
 
 TEST(HFModelLoaderTest, Glm5NextMtpNormalizationIsIdempotent) {
-  ModelArgs args;
+  RawModelArgs args;
   args.model_type("glm5_next").n_layers(45).num_nextn_predict_layers(1);
   ASSERT_TRUE(configure_glm5_next_mtp_args(args,
                                            /*speculative_algorithm=*/"MTP",
@@ -614,7 +614,7 @@ TEST(HFModelLoaderTest, Glm5NextMtpNormalizationIsIdempotent) {
 TEST(HFModelLoaderTest, Glm5NextMtpNormalizationIgnoresOtherAlgorithms) {
   for (const std::string_view algorithm : {"", "Eagle3", "DFlash", "DSpark"}) {
     SCOPED_TRACE(algorithm);
-    ModelArgs args;
+    RawModelArgs args;
     args.model_type("glm5_next").n_layers(45).num_nextn_predict_layers(1);
     EXPECT_FALSE(configure_glm5_next_mtp_args(
         args, algorithm, /*is_draft_engine=*/true));
@@ -627,7 +627,7 @@ TEST(HFModelLoaderTest, Glm5NextMtpNormalizationIgnoresOtherAlgorithms) {
 TEST(HFModelLoaderTest, Glm5NextMtpNormalizationIgnoresOtherModels) {
   for (const std::string model_type : {"deepseek_v3", "qwen3_5_text"}) {
     SCOPED_TRACE(model_type);
-    ModelArgs args;
+    RawModelArgs args;
     args.model_type(model_type).n_layers(45).num_nextn_predict_layers(1);
     EXPECT_FALSE(configure_glm5_next_mtp_args(args,
                                               /*speculative_algorithm=*/"MTP",
@@ -656,11 +656,11 @@ TEST(HFModelLoaderTest, Glm5NextMtpEngineAndWorkerMatchExportedCacheLayout) {
       }
     }
   })json"));
-  ModelArgs engine_args;
+  RawModelArgs engine_args;
   ASSERT_TRUE(loader(reader, &engine_args));
   ASSERT_TRUE(has_linear_attention_layers(engine_args));
   engine_args.enable_mla(true);
-  ModelArgs worker_args = engine_args;
+  RawModelArgs worker_args = engine_args;
   runtime::Options engine_options;
   engine_options.is_draft_engine(true)
       .speculative_algorithm("mTp")
@@ -694,7 +694,7 @@ TEST(HFModelLoaderTest, Glm5NextMtpEngineAndWorkerMatchExportedCacheLayout) {
       }
     }
   })json"));
-  ModelArgs exported_args;
+  RawModelArgs exported_args;
   ASSERT_TRUE(loader(exported_reader, &exported_args));
   exported_args.enable_mla(true);
   EXPECT_FALSE(
@@ -713,7 +713,7 @@ TEST(HFModelLoaderTest, Glm5NextMtpEngineAndWorkerMatchExportedCacheLayout) {
       estimate_kv_cache_capacity(exported_args, cache_options);
   const KVCacheShape exported_shape(
       exported_capacity, exported_args, cache_options.world_size);
-  for (const ModelArgs* model_args : {&engine_args, &worker_args}) {
+  for (const RawModelArgs* model_args : {&engine_args, &worker_args}) {
     EXPECT_FALSE(has_linear_attention_layers(*model_args));
     EXPECT_EQ(model_args->mtp_start_layer_idx(), 45);
     const KVCacheCapacity capacity =
@@ -737,7 +737,7 @@ TEST(HFModelLoaderTest, Glm5NextMtpEngineAndWorkerMatchExportedCacheLayout) {
 }
 
 TEST(HFModelLoaderTest, Glm5NextNativeMtpRejectsUnsupportedLayerCounts) {
-  ModelArgs args;
+  RawModelArgs args;
   args.model_type("glm5_next").n_layers(45);
   EXPECT_DEATH(configure_glm5_next_mtp_args(args,
                                             /*speculative_algorithm=*/"MTP",
@@ -783,7 +783,7 @@ TEST(HFModelLoaderTest, Glm5DSparkSpeculatorsArgsPreserveMlaGeometry) {
     }
   })json"));
   normalize_config_torch_dtype(reader);
-  ModelArgs args;
+  RawModelArgs args;
   ASSERT_TRUE(loader(reader, &args));
   EXPECT_EQ(args.model_type(), "glm5_dspark");
   EXPECT_EQ(args.dtype(), "bfloat16");
@@ -815,7 +815,7 @@ TEST(HFModelLoaderTest, Qwen3DSparkFieldsFromTorchConfig) {
     }
   )json"));
 
-  ModelArgs args;
+  RawModelArgs args;
   ASSERT_TRUE(loader(reader, &args));
   EXPECT_EQ(args.markov_rank(), 256);
   EXPECT_TRUE(args.enable_confidence_head());
@@ -874,7 +874,7 @@ TEST(HFModelLoaderTest, Qwen3DFlash2AcceptsArrayEosTokenIds) {
       }
     )json"));
 
-    ModelArgs args;
+    RawModelArgs args;
     ASSERT_TRUE(loader(reader, &args));
     EXPECT_EQ(args.eos_token_id(), 154820);
     EXPECT_EQ(args.eos_token_id_vec(),
@@ -904,7 +904,7 @@ TEST(HFModelLoaderTest, GlmMoeDsaMtpPreservesLayerTypeMetadata) {
     }
   )json"));
 
-  ModelArgs args;
+  RawModelArgs args;
   ASSERT_TRUE(loader(reader, &args));
   EXPECT_EQ(args.indexer_types(), std::vector<std::string>({"full"}));
   EXPECT_EQ(args.mlp_layer_types(), std::vector<std::string>({"dense"}));
@@ -930,7 +930,7 @@ TEST(HFModelLoaderTest, DeepseekV4DSparkModelArgsFrom0731Config) {
     }
   )json"));
 
-  ModelArgs args;
+  RawModelArgs args;
   ASSERT_TRUE(loader(reader, &args));
   EXPECT_EQ(args.model_type(), "deepseek_v4");
   EXPECT_EQ(args.dspark_num_layers(), 3);
@@ -957,7 +957,7 @@ TEST(HFModelLoaderTest, Qwen35MtpModelArgsFromDenseConfig) {
     }
   )json"));
 
-  ModelArgs args;
+  RawModelArgs args;
   ASSERT_TRUE(loader(reader, &args));
   EXPECT_EQ(args.model_type(), "qwen3_5_mtp");
   EXPECT_EQ(args.num_nextn_predict_layers(), 1);
@@ -981,7 +981,7 @@ TEST(HFModelLoaderTest, Qwen35MtpModelArgsFromMoeConfig) {
     }
   )json"));
 
-  ModelArgs args;
+  RawModelArgs args;
   ASSERT_TRUE(loader(reader, &args));
   EXPECT_EQ(args.model_type(), "qwen3_5_moe_mtp");
   EXPECT_EQ(args.num_nextn_predict_layers(), 2);
@@ -1019,7 +1019,7 @@ TEST(HFModelLoaderTest, Phi3Mini4KConfigPreservesLogicalDimensions) {
     }
   )json"));
 
-  ModelArgs args;
+  RawModelArgs args;
   ASSERT_TRUE(loader(reader, &args));
   EXPECT_EQ(args.model_type(), "phi3");
   EXPECT_EQ(args.dtype(), "bfloat16");
@@ -1058,7 +1058,7 @@ TEST(HFModelLoaderTest, Phi3DerivesAbsentKvHeadsAndDisablesNullWindow) {
     }
   )json"));
 
-  ModelArgs args;
+  RawModelArgs args;
   ASSERT_TRUE(loader(reader, &args));
   EXPECT_EQ(args.n_kv_heads(), std::optional<int64_t>(8));
   EXPECT_EQ(args.head_dim(), 64);
@@ -1087,7 +1087,7 @@ TEST(HFModelLoaderTest, Phi3RejectsInvalidDimensionsAndUnsupportedSemantics) {
     SCOPED_TRACE(config);
     JsonReader reader;
     ASSERT_TRUE(reader.parse_text(config));
-    ModelArgs args;
+    RawModelArgs args;
     EXPECT_FALSE(loader(reader, &args));
   }
 }
@@ -1112,7 +1112,7 @@ TEST(HFModelLoaderTest, MiMoMtpModelArgsFromExportedConfig) {
     }
   )json"));
 
-  ModelArgs args;
+  RawModelArgs args;
   ASSERT_TRUE(loader(reader, &args));
   EXPECT_EQ(args.model_type(), "mimo_mtp");
   EXPECT_EQ(args.n_layers(), 1);
@@ -1136,7 +1136,7 @@ TEST(HFModelLoaderTest, MiMoMtpModelArgsDefaults) {
   JsonReader reader;
   ASSERT_TRUE(reader.parse_text(R"json({ "model_type": "mimo_mtp" })json"));
 
-  ModelArgs args;
+  RawModelArgs args;
   ASSERT_TRUE(loader(reader, &args));
   EXPECT_EQ(args.model_type(), "mimo_mtp");
   EXPECT_EQ(args.n_layers(), 36);
@@ -1172,7 +1172,7 @@ TEST(HFModelLoaderTest, Rwkv7ModelArgsFromConvertedConfig) {
     }
   )json"));
 
-  ModelArgs args;
+  RawModelArgs args;
   ASSERT_TRUE(loader(reader, &args));
   EXPECT_EQ(args.model_type(), "rwkv7");
   EXPECT_EQ(args.vocab_size(), 65536);
@@ -1442,7 +1442,7 @@ TEST(HFModelLoaderTest, Qwen3Eagle3LayersToCaptureFromAuxList) {
     }
   )json"));
 
-  ModelArgs args;
+  RawModelArgs args;
   ASSERT_TRUE(loader(reader, &args));
   // The draft sizes num_aux_layers off this list's element count; only the
   // count is used, so the speculators boundary indices are stored as-is.
@@ -1460,7 +1460,7 @@ TEST(HFModelLoaderTest, Qwen3Eagle3LayersToCaptureDefaultsEmpty) {
     }
   )json"));
 
-  ModelArgs args;
+  RawModelArgs args;
   ASSERT_TRUE(loader(reader, &args));
   // Absent list leaves layers_to_capture empty; the draft falls back to the
   // EAGLE-3 low/mid/high default count via num_aux_layers.
@@ -1469,7 +1469,7 @@ TEST(HFModelLoaderTest, Qwen3Eagle3LayersToCaptureDefaultsEmpty) {
 #endif
 
 TEST(HFModelLoaderTest, NumAuxLayersFallsBackToThreeWhenListOmitted) {
-  ModelArgs args;
+  RawModelArgs args;
   // Omitted capture list: EAGLE-3 low/mid/high default count, matching the
   // speculators None->3 fallback (fc_norm drafts without an aux list must
   // still build three per-chunk norms).

@@ -614,7 +614,7 @@ REGISTER_CAUSAL_VLM_MODEL(qwen3_vl, Qwen3_VLForConditionalGeneration);
 REGISTER_MPOSITION_GENERATOR(qwen3_vl, Qwen3VLMPositionGenerator);
 
 const ModelArgsLoader kQwen3VLModelArgsLoader = [](const JsonReader& json,
-                                                   ModelArgs* args) {
+                                                   RawModelArgs* args) {
   // text config
   // LOAD_ARG_OR(attention_dropout, "attention_dropout", 0.0);
   LOAD_ARG_OR(model_type, "model_type", "qwen3_vl");

@@ -164,7 +164,7 @@ template <typename DecoderLayerType>
 class LlmModelImplBase : public torch::nn::Module {
  public:
   // mode type: qwen2, qwen3 .etc
-  LlmModelImplBase(const std::string& model_type, const ModelArgsBundle& args)
+  LlmModelImplBase(const std::string& model_type, const ModelArgs& args)
       : model_type_(model_type) {
     mrope_section_ = args.rope_scaling_mrope_section();
   }
@@ -439,7 +439,7 @@ template <typename LlmModelType>
 class LlmForCausalLMImplBase : public torch::nn::Module {
  public:
   LlmForCausalLMImplBase(const ModelContext& context) {
-    const ModelArgsBundle& model_args_bundle = context.get_model_args_bundle();
+    const ModelArgs& all_model_args = context.get_model_args();
     switch (context.get_model_family()) {
       case ModelFamily::VLM: {
         const auto& model_args = context.get_vlm_model_args();
@@ -461,7 +461,7 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
         LOG(FATAL) << "Causal language model requires an LLM, VLM, or Rec "
                       "model context";
     }
-    tie_word_embeddings = model_args_bundle.tie_word_embeddings();
+    tie_word_embeddings = all_model_args.tie_word_embeddings();
     // register submodules
     model_ = register_module("model", LlmModelType(context));
 

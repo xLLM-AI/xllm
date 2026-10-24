@@ -35,7 +35,7 @@ class ExecutorImplFactory {
  public:
   using Creator =
       std::function<std::unique_ptr<ExecutorImpl>(CausalLM*,
-                                                  const ModelArgsBundle&,
+                                                  const ModelArgs&,
                                                   const torch::Device&,
                                                   const runtime::Options&)>;
 
@@ -52,7 +52,7 @@ class ExecutorImplFactory {
 
   std::unique_ptr<ExecutorImpl> create_executor_impl(
       CausalLM* model,
-      const ModelArgsBundle& args,
+      const ModelArgs& args,
       const torch::Device& device,
       const runtime::Options& options,
       const std::string& executor_type);
@@ -88,7 +88,7 @@ class ExecutorImplFactory {
         executor_type,                                                       \
         extension_impl,                                                      \
         [](::xllm::CausalLM* model,                                          \
-           const ::xllm::ModelArgsBundle& args,                              \
+           const ::xllm::ModelArgs& args,                                    \
            const torch::Device& device,                                      \
            const ::xllm::runtime::Options& options)                          \
             -> std::unique_ptr<::xllm::ExecutorImpl> {                       \

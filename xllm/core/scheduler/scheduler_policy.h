@@ -34,7 +34,7 @@ limitations under the License.
 namespace xllm {
 
 class RequestOutputDispatcher;
-class ModelArgs;
+class RawModelArgs;
 
 // SchedulerState provides explicit access to the scheduler's internal state.
 // The SchedulerPolicy operates solely through this boundary -- it never
@@ -60,7 +60,7 @@ struct SchedulerState {
   KVCacheManager* kv_cache_manager;
   ProfileManager* profile_manager;
   RequestOutputDispatcher* output_dispatcher;
-  const ModelArgs& model_args;
+  const RawModelArgs& model_args;
 
   // Flags.
   bool& last_step_prefill;

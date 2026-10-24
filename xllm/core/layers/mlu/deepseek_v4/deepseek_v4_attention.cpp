@@ -133,7 +133,7 @@ void run_decode(torch::Tensor& q,
 }  // namespace
 
 DeepseekV4AttentionImpl::DeepseekV4AttentionImpl(
-    const ModelArgs& args,
+    const RawModelArgs& args,
     const QuantArgs& quant_args,
     const ParallelArgs& parallel_args,
     const torch::TensorOptions& options,

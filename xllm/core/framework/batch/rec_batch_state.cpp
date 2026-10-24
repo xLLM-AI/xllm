@@ -71,7 +71,7 @@ void RecBatchState::refresh_sequences_from_groups() {
 RecForwardInput RecBatchState::prepare_forward_input(
     uint32_t num_decoding_tokens,
     uint32_t min_decoding_batch_size,
-    const ModelArgs& args,
+    const RawModelArgs& args,
     int32_t cp_size) {
   if (input_type_ == BatchInputType::SEQUENCE) {
     const auto data = sequence_state_.prepare_sequence_input_data();
@@ -85,7 +85,7 @@ RecForwardInput RecBatchState::prepare_forward_input(
                                    /*thread_pool=*/nullptr);
 }
 
-RecForwardInput RecBatchState::prepare_forward_input(const ModelArgs& args,
+RecForwardInput RecBatchState::prepare_forward_input(const RawModelArgs& args,
                                                      ThreadPool* thread_pool,
                                                      int32_t cp_size) {
   CHECK(input_type_ == BatchInputType::SEQUENCE)
@@ -99,7 +99,7 @@ RecForwardInput RecBatchState::prepare_forward_input(const ModelArgs& args,
 RecForwardInput RecBatchState::prepare_rec_forward_input(
     uint32_t num_decoding_tokens,
     uint32_t min_decoding_batch_size,
-    const ModelArgs& args,
+    const RawModelArgs& args,
     MPMCThreadPool* thread_pool) {
   CHECK(input_type_ != BatchInputType::SEQUENCE)
       << "Rec input requires an explicit Rec batch input type";

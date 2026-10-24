@@ -26,7 +26,7 @@ limitations under the License.
 namespace xllm {
 
 Executor::Executor(CausalLM* model,
-                   const ModelArgsBundle& args,
+                   const ModelArgs& args,
                    const torch::Device& device,
                    const runtime::Options& options) {
   const auto& model_config = ModelConfig::get_instance();

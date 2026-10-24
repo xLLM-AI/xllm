@@ -15,14 +15,14 @@ limitations under the License.
 
 #pragma once
 
-#include "core/framework/model/model_args.h"
+#include "core/framework/model/raw_model_args.h"
 
 namespace xllm {
 
 // Apply only when selecting the Python CUDA FlashInfer backend, before cache
-// estimation/allocation and exporting ModelArgs to Python. Model parsers retain
-// logical dimensions; other backends must not apply this policy.
-inline void configure_flashinfer_kv_cache_layout(ModelArgs& model_args) {
+// estimation/allocation and exporting RawModelArgs to Python. Model parsers
+// retain logical dimensions; other backends must not apply this policy.
+inline void configure_flashinfer_kv_cache_layout(RawModelArgs& model_args) {
   // The validated FA2 path requires D=96 padded to 128. Projection, RoPE and
   // attention scale retain the logical width. MLA owns a different geometry;
   // already supported widths do not require additional storage.

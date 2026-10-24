@@ -68,9 +68,9 @@ class DeepseekMLATest : public ::testing::Test {
     init_test_weights();
   }
 
-  ModelArgs create_mla_model_args(
+  RawModelArgs create_mla_model_args(
       const std::string& rope_type = "deepseek_yarn") {
-    ModelArgs model_args;
+    RawModelArgs model_args;
     model_args.q_lora_rank() = 1536;
     model_args.kv_lora_rank() = 512;
     model_args.qk_nope_head_dim() = 128;
@@ -270,7 +270,7 @@ class DeepseekMLATest : public ::testing::Test {
     return output;
   }
 
-  ModelArgs model_args_;
+  RawModelArgs model_args_;
   QuantArgs quant_args_;
   ParallelArgs parallel_args_{0, 1, nullptr};
   torch::TensorOptions options_;

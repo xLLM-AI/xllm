@@ -42,7 +42,7 @@ class FusedMoEImpl : public torch::nn::Module {
                const QuantArgs& quant_args,
                const ParallelArgs& parallel_args,
                const torch::TensorOptions& options);
-  FusedMoEImpl(const ModelArgs& model_args,
+  FusedMoEImpl(const RawModelArgs& model_args,
                const FusedMoEArgs& moe_args,
                const QuantArgs& quant_args,
                const ParallelArgs& parallel_args,

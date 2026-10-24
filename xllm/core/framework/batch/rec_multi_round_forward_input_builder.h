@@ -32,13 +32,13 @@ limitations under the License.
 
 namespace xllm {
 
-struct ModelArgs;
+struct RawModelArgs;
 
 class RecMultiRoundForwardInputBuilder final : public RecForwardInputBuilder {
  public:
   explicit RecMultiRoundForwardInputBuilder(
       const BatchInputData& data,
-      const ModelArgs* args,
+      const RawModelArgs* args,
       MPMCThreadPool* thread_pool = nullptr);
 
   ~RecMultiRoundForwardInputBuilder() override = default;
@@ -151,7 +151,7 @@ class RecMultiRoundForwardInputBuilder final : public RecForwardInputBuilder {
   const std::vector<uint32_t>& allowed_max_tokens_;
   const std::vector<torch::Tensor>& input_embeddings_vec_;
   const std::vector<MMData>& mm_data_vec_;
-  const ModelArgs* args_;
+  const RawModelArgs* args_;
   BatchForwardType batch_forward_type_;
 
   // Configuration/state

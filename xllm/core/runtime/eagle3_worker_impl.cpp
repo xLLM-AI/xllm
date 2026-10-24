@@ -134,7 +134,7 @@ void Eagle3WorkerImpl<TargetInput>::process_draft_sample_output(
         hot_token_id_.view({1, -1}).expand(
             {sample_output.draft_logits.size(0), hot_token_id_.size(0)}),
         sample_output.draft_logits,
-        context_.get_model_args_bundle().vocab_size());
+        context_.get_model_args().vocab_size());
   }
 
   sample_output.next_tokens =

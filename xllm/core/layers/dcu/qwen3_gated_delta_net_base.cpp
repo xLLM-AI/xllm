@@ -210,7 +210,7 @@ std::vector<int64_t> extract_cu_seqlens(
 // =========================================================================
 
 Qwen3GatedDeltaNetBaseImpl::Qwen3GatedDeltaNetBaseImpl(
-    const ModelArgs& args,
+    const RawModelArgs& args,
     const QuantArgs& quant_args,
     const ParallelArgs& parallel_args,
     const torch::TensorOptions& options) {

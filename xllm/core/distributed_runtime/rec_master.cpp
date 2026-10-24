@@ -47,7 +47,7 @@ namespace xllm {
 
 namespace {
 
-RecType get_rec_type(const ModelArgs& model_args) {
+RecType get_rec_type(const RawModelArgs& model_args) {
   const auto kind = get_rec_model_kind(model_args.model_type());
   switch (kind) {
     case RecModelKind::kOneRec:

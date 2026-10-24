@@ -37,7 +37,7 @@ RecForwardInputFactory::~RecForwardInputFactory() = default;
 
 void RecForwardInputFactory::create_inputs(
     RecBatchGroup& batches,
-    const ModelArgs& model_args,
+    const RawModelArgs& model_args,
     std::vector<RecForwardInput>& inputs) {
   CHECK_EQ(batches.size(), options_.dp_size);
   std::call_once(threadpool_once_, [this] {
@@ -58,7 +58,7 @@ void RecForwardInputFactory::create_inputs(
 
 RecForwardInput RecForwardInputFactory::create_input(
     RecBatch& batch,
-    const ModelArgs& model_args) {
+    const RawModelArgs& model_args) {
   std::call_once(input_builder_threadpool_once_, [this] {
     const int64_t num_threads = std::max<int64_t>(
         1, util::get_int_env("XLLM_REC_INPUT_BUILDER_THREADS", 16));
@@ -72,7 +72,7 @@ RecForwardInput RecForwardInputFactory::create_input(
 }
 
 void RecForwardInputFactory::prepare_rank_inputs(RecBatchGroup& batches,
-                                                 const ModelArgs& model_args,
+                                                 const RawModelArgs& model_args,
                                                  PreparationState& state) {
   for (uint32_t dp_rank = 0; dp_rank < options_.dp_size; ++dp_rank) {
     batches[dp_rank].refresh_forward_type();

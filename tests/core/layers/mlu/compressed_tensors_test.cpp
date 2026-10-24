@@ -83,7 +83,7 @@ void expect_close(const torch::Tensor& actual, const torch::Tensor& expected) {
              .item<float>();
 }
 
-ModelArgs moe_model_args() {
+RawModelArgs moe_model_args() {
   auto model = test::create_default_model_args();
   model.hidden_size() = 256;
   model.moe_intermediate_size() = 256;
@@ -98,8 +98,8 @@ ModelArgs moe_model_args() {
   return model;
 }
 
-ModelArgs attention_args(bool nope) {
-  ModelArgs args;
+RawModelArgs attention_args(bool nope) {
+  RawModelArgs args;
   args.hidden_size() = 128;
   args.n_heads() = 2;
   args.q_lora_rank() = 128;
@@ -130,7 +130,7 @@ QuantArgs attention_quant(bool compressed) {
   return quant;
 }
 
-Weights attention_weights(const ModelArgs& args, bool compressed) {
+Weights attention_weights(const RawModelArgs& args, bool compressed) {
   Weights weights;
   auto add =
       [&](const std::string& name, int64_t out, int64_t in, bool quantized) {

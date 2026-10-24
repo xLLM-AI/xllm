@@ -25,7 +25,7 @@ limitations under the License.
 #include <unordered_map>
 
 #include "common/macros.h"
-#include "core/framework/model/model_args.h"
+#include "core/framework/model/raw_model_args.h"
 #include "core/framework/multimodal/mm_data.h"
 #include "core/util/slice.h"
 
@@ -38,7 +38,7 @@ class MPositionGenerator {
   virtual std::tuple<torch::Tensor, int32_t> generate(
       Slice<int32_t> tokens,
       const MMData& mm_data,
-      const ModelArgs& model_args) const = 0;
+      const RawModelArgs& model_args) const = 0;
 };
 
 class MPositionGeneratorFactory {
@@ -67,7 +67,7 @@ class QwenVLMPositionGenerator final : public MPositionGenerator {
   std::tuple<torch::Tensor, int32_t> generate(
       Slice<int32_t> tokens,
       const MMData& mm_data,
-      const ModelArgs& model_args) const override;
+      const RawModelArgs& model_args) const override;
 };
 
 class Qwen3VLMPositionGenerator final : public MPositionGenerator {
@@ -75,7 +75,7 @@ class Qwen3VLMPositionGenerator final : public MPositionGenerator {
   std::tuple<torch::Tensor, int32_t> generate(
       Slice<int32_t> tokens,
       const MMData& mm_data,
-      const ModelArgs& model_args) const override;
+      const RawModelArgs& model_args) const override;
 };
 
 class Glm4VMPositionGenerator final : public MPositionGenerator {
@@ -83,7 +83,7 @@ class Glm4VMPositionGenerator final : public MPositionGenerator {
   std::tuple<torch::Tensor, int32_t> generate(
       Slice<int32_t> tokens,
       const MMData& mm_data,
-      const ModelArgs& model_args) const override;
+      const RawModelArgs& model_args) const override;
 };
 
 #define REGISTER_MPOSITION_GENERATOR(ModelType, MPositionGeneratorClass)       \

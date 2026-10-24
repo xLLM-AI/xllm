@@ -25,7 +25,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 
-#include "core/framework/model/model_args.h"
+#include "core/framework/model/raw_model_args.h"
 #include "core/framework/parallel_state/parallel_args.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/layers/xlite/xlite_init_utils.h"
@@ -93,7 +93,7 @@ class XliteWeightUtils {
   static void LoadAttnAndEmbed(const StateDict& sd,
                                XModel& m,
                                const XModelConfig& cfg,
-                               const ModelArgs& args,
+                               const RawModelArgs& args,
                                const ParallelArgs& pa,
                                const torch::Device& device,
                                std::vector<torch::Tensor>& storages) {
@@ -744,7 +744,7 @@ class XliteWeightUtils {
   static void LoadMHA(const StateDict& sd,
                       XModel& m,
                       const XModelConfig& cfg,
-                      const ModelArgs& args,
+                      const RawModelArgs& args,
                       const ParallelArgs& pa,
                       const torch::Device& device,
                       std::vector<torch::Tensor>& storages) {
@@ -774,7 +774,7 @@ class XliteWeightUtils {
   static void LoadMoE(const StateDict& sd,
                       XModel& m,
                       const XModelConfig& cfg,
-                      const ModelArgs& args,
+                      const RawModelArgs& args,
                       const ParallelArgs& pa,
                       const torch::Device& device,
                       std::vector<torch::Tensor>& storages) {
@@ -794,7 +794,7 @@ class XliteWeightUtils {
   static void LoadMLAAttn(const StateDict& sd,
                           XModel& m,
                           const XModelConfig& cfg,
-                          const ModelArgs& args,
+                          const RawModelArgs& args,
                           const ParallelArgs& pa,
                           const torch::Device& device,
                           std::vector<torch::Tensor>& storages) {
@@ -1211,7 +1211,7 @@ class XliteWeightUtils {
   static void LoadMLA(const StateDict& sd,
                       XModel& m,
                       const XModelConfig& cfg,
-                      const ModelArgs& args,
+                      const RawModelArgs& args,
                       const ParallelArgs& pa,
                       const torch::Device& device,
                       std::vector<torch::Tensor>& storages) {

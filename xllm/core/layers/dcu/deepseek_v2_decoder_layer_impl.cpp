@@ -44,12 +44,10 @@ DeepseekV2DecoderLayerImpl::DeepseekV2DecoderLayerImpl(
   const auto& quant_args = context.get_quant_args();
   const auto& options = context.get_tensor_options();
 
-  attention_ =
-      register_module("self_attn",
-                      DeepseekV2Attention(context.get_model_args_bundle(),
-                                          quant_args,
-                                          parallel_args_,
-                                          options));
+  attention_ = register_module(
+      "self_attn",
+      DeepseekV2Attention(
+          context.get_model_args(), quant_args, parallel_args_, options));
 
   input_norm_ = register_module("input_layernorm",
                                 RMSNorm(transformer_args.hidden_size(),

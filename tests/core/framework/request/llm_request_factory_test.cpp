@@ -179,7 +179,7 @@ class LLMRequestFactoryTest : public ::testing::Test {
 
   std::unique_ptr<StopSequenceTokenizer> tokenizer_;
   std::unique_ptr<FakeChatTemplate> chat_template_;
-  ModelArgs model_args_;
+  RawModelArgs model_args_;
   Options options_;
   RateLimiter rate_limiter_;
   bool previous_json_object_output_ = true;

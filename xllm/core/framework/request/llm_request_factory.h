@@ -61,7 +61,7 @@ class LLMRequestFactory final {
 
   LLMRequestFactory(const Tokenizer* tokenizer,
                     const ChatTemplate* chat_template,
-                    const ModelArgs* model_args,
+                    const RawModelArgs* model_args,
                     const Options* options,
                     RateLimiter* rate_limiter,
                     const std::string& task_type,
@@ -126,11 +126,11 @@ class LLMRequestFactory final {
 
   const Tokenizer* tokenizer_ = nullptr;
   const ChatTemplate* chat_template_ = nullptr;
-  const ModelArgs* model_args_ = nullptr;
+  const RawModelArgs* model_args_ = nullptr;
   const Options* options_ = nullptr;
   RateLimiter* rate_limiter_ = nullptr;
 
-  // Derived from Options / ModelArgs / task_type at construction. These fold
+  // Derived from Options / RawModelArgs / task_type at construction. These fold
   // the process-start branches (chunked prefill, speculative tokens, overlap,
   // embed tasks, service routing) so create() only applies the numbers.
   int32_t prompt_token_limit_ = 0;

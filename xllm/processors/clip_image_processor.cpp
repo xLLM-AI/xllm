@@ -19,7 +19,7 @@ limitations under the License.
 
 namespace xllm {
 
-CLIPImageProcessor::CLIPImageProcessor(const ModelArgs& args) {
+CLIPImageProcessor::CLIPImageProcessor(const RawModelArgs& args) {
   do_resize_ = args.mm_image_do_resize();
   do_center_crop_ = args.mm_image_do_center_crop();
   do_rescale_ = args.mm_image_do_rescale();

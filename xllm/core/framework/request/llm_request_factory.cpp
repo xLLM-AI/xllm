@@ -99,7 +99,7 @@ void append_stop_sequence_variant(const Tokenizer& tokenizer,
 
 LLMRequestFactory::LLMRequestFactory(const Tokenizer* tokenizer,
                                      const ChatTemplate* chat_template,
-                                     const ModelArgs* model_args,
+                                     const RawModelArgs* model_args,
                                      const Options* options,
                                      RateLimiter* rate_limiter,
                                      const std::string& task_type,

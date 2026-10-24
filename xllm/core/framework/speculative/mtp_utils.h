@@ -22,13 +22,13 @@ limitations under the License.
 #include <string_view>
 
 #include "core/framework/config/speculative_config.h"
-#include "core/framework/model/model_args.h"
 #include "core/framework/model/model_family_args.h"
+#include "core/framework/model/raw_model_args.h"
 #include "core/util/utils.h"
 
 namespace xllm {
 
-inline bool configure_glm5_next_mtp_args(ModelArgs& model_args,
+inline bool configure_glm5_next_mtp_args(RawModelArgs& model_args,
                                          std::string_view speculative_algorithm,
                                          bool is_draft_engine) {
   if (!is_draft_engine ||
@@ -55,7 +55,7 @@ inline bool configure_glm5_next_mtp_args(ModelArgs& model_args,
   return true;
 }
 
-inline int64_t mtp_hidden_state_width(const ModelArgs& model_args) {
+inline int64_t mtp_hidden_state_width(const RawModelArgs& model_args) {
   if (util::is_deepseek_v4_model_type(model_args.model_type())) {
     return model_args.hc_mult() * model_args.hidden_size();
   }
@@ -70,7 +70,7 @@ inline int64_t mtp_hidden_state_width(const LlmModelArgs& model_args) {
 }
 
 inline bool uses_embedded_eagle3_draft(std::string_view algorithm,
-                                       const ModelArgs& target_model_args) {
+                                       const RawModelArgs& target_model_args) {
   return SpeculativeConfig::is_eagle3_algorithm(algorithm) &&
          target_model_args.enable_embedded_eagle3_draft();
 }

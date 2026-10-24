@@ -31,7 +31,7 @@ constexpr int64_t kConformerSubsampling = 4;
 
 }  // namespace
 
-JoyaiASRAudioProcessor::JoyaiASRAudioProcessor(const ModelArgs& args) {
+JoyaiASRAudioProcessor::JoyaiASRAudioProcessor(const RawModelArgs& args) {
   sampling_rate_ = args.mm_audio_sampling_rate();
   CHECK_EQ(sampling_rate_, 16000)
       << "JoyaiASRAudioProcessor requires sampling_rate=16000 (preprocessor "

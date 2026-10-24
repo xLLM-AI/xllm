@@ -24,10 +24,10 @@ namespace xllm {
 
 namespace glm5_next_args {
 
-// Shared config.json -> ModelArgs loader for glm5_next and the
+// Shared config.json -> RawModelArgs loader for glm5_next and the
 // glm5_next_mtp draft (same field set; the draft config.json only differs in
 // num_hidden_layers / layer schedules / model_type).
-inline bool load_model_args(const JsonReader& json, ModelArgs* args) {
+inline bool load_model_args(const JsonReader& json, RawModelArgs* args) {
   LOAD_ARG_OR(model_type, "model_type", "glm5_next");
   // The export tool writes "glm5_next" / "glm5_next_mtp" as model_type for
   // every GLM-5.3-Flash checkpoint (verified across GLM-5.3-Flash-W8A8,
@@ -165,7 +165,7 @@ inline bool load_model_args(const JsonReader& json, ModelArgs* args) {
   // VLM (vision) config + multimodal token ids. Plumbed so that
   // --backend=vlm --model_impl=python forwards the real GlmOcr vision
   // dims to the Python ViT (xllm.python.models.glm5_next_vl) via the flat
-  // mm_-prefixed ModelArgs dict, and so the C++ multimodal processor
+  // mm_-prefixed RawModelArgs dict, and so the C++ multimodal processor
   // (GLM4VPromptProcessor, registered in vlm/glm5_next_vlm.h) resolves the
   // GLM-family image token ids and merge size. Defaults match the real
   // GLM-5.3-Flash-VL config so the ViT computes correct dims even if a field

@@ -132,7 +132,7 @@ int64_t get_graph_bucket_num_tokens(int64_t num_tokens, bool is_prefill) {
 
 // CudaGraphPersistentParam implementation
 CudaGraphPersistentParam::CudaGraphPersistentParam(
-    const ModelArgsBundle& args,
+    const ModelArgs& args,
     const torch::Device& device,
     const runtime::Options& options)
     : args_(args), device_(device), options_(options) {
@@ -572,8 +572,8 @@ std::optional<Params> CudaGraphPersistentParam::update(
           : 1;
   const int64_t block_size = options_.block_size();
 
-  // Get sliding_window from ModelArgs (default to -1 if not available)
-  // Note: sliding_window in ModelArgs is the actual window size, but in
+  // Get sliding_window from RawModelArgs (default to -1 if not available)
+  // Note: sliding_window in RawModelArgs is the actual window size, but in
   // attention it's used as window_size_left which is typically sliding_window
   // - 1. This matches the behavior in attention.cpp where sliding_window_ is
   // initialized as sliding_window - 1 regardless of the value.
@@ -920,7 +920,7 @@ std::optional<Params> CudaGraphPersistentParam::update(
 
 // CudaGraph implementation
 bool CudaGraph::capture(CausalLM* model,
-                        const ModelArgsBundle& args,
+                        const ModelArgs& args,
                         const runtime::Options& options,
                         const torch::Tensor& tokens,
                         const torch::Tensor& positions,
@@ -942,7 +942,7 @@ bool CudaGraph::capture(CausalLM* model,
 }
 
 bool CudaGraph::capture(RecModel* model,
-                        const ModelArgsBundle& args,
+                        const ModelArgs& args,
                         const runtime::Options& options,
                         const torch::Tensor& tokens,
                         const torch::Tensor& positions,
@@ -965,7 +965,7 @@ bool CudaGraph::capture(RecModel* model,
 
 template <typename Model, typename Params>
 bool CudaGraph::capture_typed(Model* model,
-                              const ModelArgsBundle& args,
+                              const ModelArgs& args,
                               const runtime::Options& options,
                               const torch::Tensor& tokens,
                               const torch::Tensor& positions,
@@ -1228,7 +1228,7 @@ ModelOutput CudaGraph::replay(const torch::Tensor& tokens,
 
 // CudaGraphExecutorImpl implementation
 CudaGraphExecutorImpl::CudaGraphExecutorImpl(CausalLM* model,
-                                             const ModelArgsBundle& args,
+                                             const ModelArgs& args,
                                              const torch::Device& device,
                                              const runtime::Options& options)
     : model_(model), args_(args), device_(device), options_(options) {
@@ -1236,7 +1236,7 @@ CudaGraphExecutorImpl::CudaGraphExecutorImpl(CausalLM* model,
 }
 
 CudaGraphExecutorImpl::CudaGraphExecutorImpl(RecModel* model,
-                                             const ModelArgsBundle& args,
+                                             const ModelArgs& args,
                                              const torch::Device& device,
                                              const runtime::Options& options)
     : rec_model_(model), args_(args), device_(device), options_(options) {

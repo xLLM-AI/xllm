@@ -71,7 +71,7 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
   DeepseekV2AttentionImpl() = default;
   explicit DeepseekV2AttentionImpl(const ModelContext& context,
                                    bool enable_indexer = true);
-  DeepseekV2AttentionImpl(const ModelArgs& args,
+  DeepseekV2AttentionImpl(const RawModelArgs& args,
                           const QuantArgs& quant_args,
                           const ParallelArgs& parallel_args,
                           const torch::TensorOptions& options,

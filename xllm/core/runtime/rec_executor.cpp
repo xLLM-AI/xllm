@@ -26,7 +26,7 @@ limitations under the License.
 namespace xllm {
 
 RecExecutor::RecExecutor(RecModel* model,
-                         const ModelArgsBundle& args,
+                         const ModelArgs& args,
                          const torch::Device& device,
                          const runtime::Options& options) {
   const auto& model_config = ModelConfig::get_instance();

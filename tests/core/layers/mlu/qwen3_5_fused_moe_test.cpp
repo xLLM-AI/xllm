@@ -50,7 +50,7 @@ class Qwen3_5FusedMoETest : public ::testing::Test {
     constexpr int64_t kHiddenSize = 8;
     constexpr int64_t kIntermediateSize = 4;
 
-    ModelArgs model_args = test::create_default_model_args();
+    RawModelArgs model_args = test::create_default_model_args();
     model_args.n_routed_experts() = kNumExperts;
     model_args.num_experts_per_tok() = 2;
     model_args.n_group() = 1;

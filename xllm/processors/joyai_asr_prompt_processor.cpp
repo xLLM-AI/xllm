@@ -27,7 +27,7 @@ namespace {
 const std::string kAudioPlaceholder = "<|AUDIO|>";
 }  // namespace
 
-JoyaiASRPromptProcessor::JoyaiASRPromptProcessor(const ModelArgs& args)
+JoyaiASRPromptProcessor::JoyaiASRPromptProcessor(const RawModelArgs& args)
     : audio_token_(kAudioPlaceholder) {
   audio_token_id_ = args.audio_token_id();
   CHECK_NE(audio_token_id_, 0)

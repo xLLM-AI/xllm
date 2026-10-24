@@ -54,7 +54,7 @@ DeepseekV4SparseMoEBlockImpl::DeepseekV4SparseMoEBlockImpl(ModelContext context,
       parallel_args_(context_->get_parallel_args()) {}
 
 DeepseekV4SparseMoEBlockImpl::DeepseekV4SparseMoEBlockImpl(
-    const ModelArgs& model_args,
+    const RawModelArgs& model_args,
     const QuantArgs& quant_args,
     const ParallelArgs& parallel_args,
     const torch::TensorOptions& options,

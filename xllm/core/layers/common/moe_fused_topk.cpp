@@ -20,7 +20,7 @@ limitations under the License.
 namespace xllm {
 namespace layer {
 
-MoEFusedTopkImpl::MoEFusedTopkImpl(const ModelArgs& model_args,
+MoEFusedTopkImpl::MoEFusedTopkImpl(const RawModelArgs& model_args,
                                    const QuantArgs& quant_args,
                                    const torch::TensorOptions& options)
     : MoEFusedTopkImpl(LlmModelArgs(model_args), quant_args, options) {}

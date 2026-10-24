@@ -17,7 +17,7 @@ you may not use this file except in compliance with the License.
 namespace xllm {
 namespace {
 
-KimiK25MediaConfig make_kimi_k25_media_config(const ModelArgs& args) {
+KimiK25MediaConfig make_kimi_k25_media_config(const RawModelArgs& args) {
   KimiK25MediaConfig config;
   config.patch_size =
       args.mm_km_patch_size() > 0 ? args.mm_km_patch_size() : 14;
@@ -109,10 +109,10 @@ torch::Tensor km_normalize(const torch::Tensor& image,
 
 }  // namespace
 
-KimiK25ImageProcessor::KimiK25ImageProcessor(const ModelArgs& args)
+KimiK25ImageProcessor::KimiK25ImageProcessor(const RawModelArgs& args)
     : config_(make_kimi_k25_media_config(args)) {}
 
-KimiK25VideoProcessor::KimiK25VideoProcessor(const ModelArgs& args)
+KimiK25VideoProcessor::KimiK25VideoProcessor(const RawModelArgs& args)
     : config_(make_kimi_k25_media_config(args)) {}
 
 bool KimiK25ImageProcessor::process_image(
@@ -607,7 +607,7 @@ bool KimiK25VideoProcessor::process_video_chunk(torch::Tensor video_chunk,
   return true;
 }
 
-KimiK25PromptProcessor::KimiK25PromptProcessor(const ModelArgs& args) {
+KimiK25PromptProcessor::KimiK25PromptProcessor(const RawModelArgs& args) {
   merge_size_ = args.mm_image_merge_size() > 0
                     ? args.mm_image_merge_size()
                     : std::max<int32_t>(args.mm_spatial_merge_size(), 2);

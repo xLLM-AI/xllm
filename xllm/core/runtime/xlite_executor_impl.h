@@ -39,7 +39,7 @@ namespace xllm {
 class XliteExecutorImpl : public BaseExecutorImpl {
  public:
   XliteExecutorImpl(CausalLM* model,
-                    const ModelArgsBundle& args,
+                    const ModelArgs& args,
                     const torch::Device& device,
                     const runtime::Options& options)
       : BaseExecutorImpl(model, args, device, options),

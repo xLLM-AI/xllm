@@ -83,7 +83,7 @@ class Qwen3VLVisionConfig:
                     return d[k]
             return default
 
-        # PyCausalLM passes a flat ModelArgs dict (per REGISTER_MODEL_ARGS in
+        # PyCausalLM passes a flat RawModelArgs dict (per REGISTER_MODEL_ARGS in
         # models/vlm/qwen3_vl.h): vision fields carry the ``mm_`` prefix. Fall
         # back to the nested HF ``vision_config.*`` layout for standalone tests.
         return cls(
@@ -850,7 +850,7 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
     def __init__(self, config: dict) -> None:
         super().__init__()
 
-        # Parse configs. PyCausalLM hands us a FLAT ModelArgs dict (built by
+        # Parse configs. PyCausalLM hands us a FLAT RawModelArgs dict (built by
         # build_config_dict via visit_properties): text fields are top-level
         # (hidden_size, n_layers, n_heads, tie_word_embeddings, tp_size, ...),
         # vision fields are "mm_"-prefixed, and mrope_section is

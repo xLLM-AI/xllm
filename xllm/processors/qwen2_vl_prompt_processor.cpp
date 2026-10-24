@@ -21,7 +21,7 @@ limitations under the License.
 
 namespace xllm {
 
-Qwen2VLPromptProcessor::Qwen2VLPromptProcessor(const ModelArgs& args) {
+Qwen2VLPromptProcessor::Qwen2VLPromptProcessor(const RawModelArgs& args) {
   merge_size_ = args.mm_image_merge_size();
   vision_start_token_id_ = args.vision_start_token_id();
   vision_end_token_id_ = args.vision_end_token_id();

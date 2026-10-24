@@ -26,7 +26,7 @@ REGISTER_MODEL_BACKEND(native_library_fixture, "shared_object");
 class NativeLibraryExecutor final : public ExecutorImpl {
  public:
   NativeLibraryExecutor(CausalLM* /*model*/,
-                        const ModelArgs& /*args*/,
+                        const RawModelArgs& /*args*/,
                         const torch::Device& /*device*/,
                         const runtime::Options& /*options*/) {}
 

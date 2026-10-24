@@ -423,8 +423,8 @@ class DeepseekV4ModelImpl
   explicit DeepseekV4ModelImpl(const ModelContext& context)
       : LlmModelImplBase<layer::DeepseekV4DecoderLayer>(
             "deepseek_v4",
-            context.get_model_args_bundle(),
-            context.get_model_args_bundle().enable_mla()),
+            context.get_model_args(),
+            context.get_model_args().enable_mla()),
         parallel_args_(context.get_parallel_args()),
         flash_comm1_options_(context.get_flash_comm1_options()),
         aux_capture_(
@@ -1991,7 +1991,7 @@ class DeepseekV4ForCausalLMImpl
 TORCH_MODULE(DeepseekV4ForCausalLM);
 
 inline void load_deepseek_v4_model_args(const JsonReader& json,
-                                        ModelArgs* args) {
+                                        RawModelArgs* args) {
   // --------------------------------------------------------------------------
   // Base args (shared/common HF CausalLM args).
   // NOTE: These are intentionally kept here even if they are not DSv4-specific.
@@ -2133,7 +2133,7 @@ inline DeepseekV4ArgsPolicy build_deepseek_v4_args_policy(
   return policy;
 }
 
-inline void process_deepseek_v4_args(ModelArgs* args,
+inline void process_deepseek_v4_args(RawModelArgs* args,
                                      const DeepseekV4ArgsPolicy& policy) {
   // Keep alias fields consistent after loading.
   SET_ARG(n_activated_experts, args->num_experts_per_tok());
@@ -2149,7 +2149,7 @@ inline void process_deepseek_v4_args(ModelArgs* args,
   SET_ARG(stop_token_ids, std::unordered_set<int32_t>({args->eos_token_id()}));
 }
 
-inline void normalize_deepseek_v4_args(ModelArgs* args) {
+inline void normalize_deepseek_v4_args(RawModelArgs* args) {
   // Align with vLLM branch semantics: only ratios > 1 use compressed path.
   // Treat non-positive/one ratios as non-compressed (ratio=1).
   if (args->n_layers() > 0) {
@@ -2161,7 +2161,7 @@ inline void normalize_deepseek_v4_args(ModelArgs* args) {
   }
 }
 
-inline void validate_deepseek_v4_args(const ModelArgs& args,
+inline void validate_deepseek_v4_args(const RawModelArgs& args,
                                       const DeepseekV4ArgsPolicy& policy) {
   CHECK(!policy.supported_compress_ratios.empty())
       << "deepseek_v4 internal supported_compress_ratios must not be empty";

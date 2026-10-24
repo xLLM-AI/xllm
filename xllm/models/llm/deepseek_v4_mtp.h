@@ -1165,7 +1165,7 @@ class DeepseekV4MtpForCausalLMImpl final
 TORCH_MODULE(DeepseekV4MtpForCausalLM);
 
 inline void load_deepseek_v4_mtp_model_args(const JsonReader& json,
-                                            ModelArgs* args) {
+                                            RawModelArgs* args) {
   load_deepseek_v4_model_args(json, args);
   LOAD_ARG_OR(model_type, "model_type", "deepseek_v4_mtp");
   LOAD_ARG_OR(num_nextn_predict_layers, "num_nextn_predict_layers", 1);

@@ -21,7 +21,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/batch/rec_forward_input_builder.h"
-#include "core/framework/model/model_args.h"
+#include "core/framework/model/raw_model_args.h"
 #include "core/framework/model/rec_model_params.h"
 #include "core/framework/multimodal/mm_data.h"
 #include "core/framework/request/sequence.h"
@@ -34,7 +34,7 @@ namespace xllm {
 class OneRecForwardInputBuilder : public RecForwardInputBuilder {
  public:
   explicit OneRecForwardInputBuilder(const BatchInputData& data,
-                                     const ModelArgs* args,
+                                     const RawModelArgs* args,
                                      MPMCThreadPool* thread_pool = nullptr);
 
  public:
@@ -49,7 +49,7 @@ class OneRecForwardInputBuilder : public RecForwardInputBuilder {
   const std::vector<MMData>& mm_data_vec_;
   std::vector<BlockTransferInfo>* swap_block_transfer_infos_ = nullptr;
   const uint64_t batch_id_;
-  const ModelArgs* args_ = nullptr;
+  const RawModelArgs* args_ = nullptr;
   MPMCThreadPool* thread_pool_ = nullptr;
   BatchForwardType batch_forward_type_;
   struct HighPerformanceCache {

@@ -28,7 +28,7 @@ class MPMCThreadPool;
 class RecBatch;
 class RecBatchGroup;
 class ThreadPool;
-struct ModelArgs;
+struct RawModelArgs;
 
 struct RecForwardInputFactoryOptions {
   uint32_t dp_size = 1;
@@ -43,9 +43,9 @@ class RecForwardInputFactory final {
   ~RecForwardInputFactory();
 
   void create_inputs(RecBatchGroup& batches,
-                     const ModelArgs& model_args,
+                     const RawModelArgs& model_args,
                      std::vector<RecForwardInput>& inputs);
-  RecForwardInput create_input(RecBatch& batch, const ModelArgs& model_args);
+  RecForwardInput create_input(RecBatch& batch, const RawModelArgs& model_args);
 
  private:
   struct PreparationState {
@@ -57,7 +57,7 @@ class RecForwardInputFactory final {
   };
 
   void prepare_rank_inputs(RecBatchGroup& batches,
-                           const ModelArgs& model_args,
+                           const RawModelArgs& model_args,
                            PreparationState& state);
   void finalize_inputs(PreparationState& state);
 

@@ -2907,7 +2907,7 @@ bool RecWorkerImpl::init_model(ModelContext& context) {
 
     runtime.executor =
         std::make_unique<RecExecutor>(runtime.model.get(),
-                                      runtime.context->get_model_args_bundle(),
+                                      runtime.context->get_model_args(),
                                       runtime.worker.device(),
                                       runtime.worker.options_);
 

@@ -191,7 +191,7 @@ class FakeEngine final : public Engine {
     return block_manager_.get();
   }
 
-  const ModelArgs& model_args() const override { return model_args_; }
+  const RawModelArgs& model_args() const override { return model_args_; }
 
   const TokenizerArgs& tokenizer_args() const override { NOT_IMPLEMENTED(); }
 
@@ -208,7 +208,7 @@ class FakeEngine final : public Engine {
  private:
   std::unique_ptr<Tokenizer> tokenizer_;
   std::unique_ptr<PrefetchBlockManagerPool> block_manager_;
-  ModelArgs model_args_;
+  RawModelArgs model_args_;
 };
 
 class TestDisaggPDServiceImpl final : public DisaggPDServiceImpl {

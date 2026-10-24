@@ -92,7 +92,7 @@ CompressorImpl::CompressorImpl(int64_t compress_ratio,
                                bool rotate,
                                double norm_eps,
                                const torch::TensorOptions& options,
-                               const ModelArgs& args,
+                               const RawModelArgs& args,
                                const QuantArgs& quant_args)
     : compress_ratio_(compress_ratio),
       hidden_dim_(hidden_dim),

@@ -28,7 +28,7 @@ limitations under the License.
 
 namespace xllm {
 class Options;
-class ModelArgs;
+class RawModelArgs;
 }  // namespace xllm
 
 namespace xllm::api_service {
@@ -49,7 +49,7 @@ nlohmann::json openai_usage_json(const proto::Usage& usage, bool stream = true);
 nlohmann::json openai_models_json(const proto::ModelListResponse& response);
 std::string openai_system_fingerprint(const std::string& configuration);
 std::string openai_system_fingerprint(const Options& options,
-                                      const ModelArgs* model_args);
+                                      const RawModelArgs* model_args);
 void set_openai_system_fingerprint(nlohmann::json& response,
                                    const std::string& fingerprint,
                                    bool stream,

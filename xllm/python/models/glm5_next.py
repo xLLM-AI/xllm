@@ -334,7 +334,7 @@ class Glm5NextConfig:
             expert_parallel_degree=int(pick("expert_parallel_degree", default=0)),
             enable_mega_moe=bool(pick("enable_mega_moe", default=False)),
             enable_fused_mc2=bool(pick("enable_fused_mc2", default=False)),
-            # mHC fields: ModelArgs may emit a 0 default (un-plumbed); treat 0
+            # mHC fields: RawModelArgs may emit a 0 default (un-plumbed); treat 0
             # /None as unset and fall back to the real 300B defaults.
             hc_mult=(int(pick("hc_mult", default=4)) or 4),
             hc_eps=(float(pick("hc_eps", default=1e-6)) or 1e-6),

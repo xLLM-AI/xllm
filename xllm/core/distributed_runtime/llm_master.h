@@ -48,7 +48,7 @@ class LLMMaster : public Master {
   explicit LLMMaster(const Options& options);
   ~LLMMaster() override;
 
-  const ModelArgs* model_args() const override { return &model_args_; }
+  const RawModelArgs* model_args() const override { return &model_args_; }
 
   // handle a request, the engine will execute the request asynchronously
   // completion/encode
@@ -150,7 +150,7 @@ class LLMMaster : public Master {
   std::unique_ptr<Scheduler> scheduler_;
 
   // model args
-  ModelArgs model_args_;
+  RawModelArgs model_args_;
 
   // thread pool for handling requests
   std::unique_ptr<ThreadPool> threadpool_;

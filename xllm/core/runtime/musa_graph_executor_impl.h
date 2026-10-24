@@ -65,7 +65,7 @@ using MusaMemPool = c10::musa::MemPool;
 // object
 class MusaGraphPersistentParam final {
  public:
-  MusaGraphPersistentParam(const ModelArgsBundle& args,
+  MusaGraphPersistentParam(const ModelArgs& args,
                            const torch::Device& device,
                            const runtime::Options& options);
 
@@ -253,7 +253,7 @@ class MusaGraphPersistentParam final {
                                             int64_t actual_batch_size,
                                             int64_t actual_num_tokens);
 
-  const ModelArgsBundle& args_;
+  const ModelArgs& args_;
   const torch::Device& device_;
   const runtime::Options& options_;
 
@@ -293,7 +293,7 @@ class MusaGraph final {
   // Capture computation graph for given bucket num_tokens
 
   bool capture(CausalLM* model,
-               const ModelArgsBundle& args,
+               const ModelArgs& args,
                const runtime::Options& options,
                const torch::Tensor& tokens,
                const torch::Tensor& positions,
@@ -304,7 +304,7 @@ class MusaGraph final {
                MusaMemPool* pool_ptr = nullptr);
 
   bool capture(RecModel* model,
-               const ModelArgsBundle& args,
+               const ModelArgs& args,
                const runtime::Options& options,
                const torch::Tensor& tokens,
                const torch::Tensor& positions,
@@ -336,7 +336,7 @@ class MusaGraph final {
  private:
   template <typename Params, typename Model>
   bool capture_typed(Model* model,
-                     const ModelArgsBundle& args,
+                     const ModelArgs& args,
                      const runtime::Options& options,
                      const torch::Tensor& tokens,
                      const torch::Tensor& positions,
@@ -448,11 +448,11 @@ class MusaGraphExecutorImpl final : public ExecutorImpl,
                                     public RecExecutorBackend {
  public:
   MusaGraphExecutorImpl(CausalLM* model,
-                        const ModelArgsBundle& args,
+                        const ModelArgs& args,
                         const torch::Device& device,
                         const runtime::Options& options);
   MusaGraphExecutorImpl(RecModel* model,
-                        const ModelArgsBundle& args,
+                        const ModelArgs& args,
                         const torch::Device& device,
                         const runtime::Options& options);
 
@@ -487,7 +487,7 @@ class MusaGraphExecutorImpl final : public ExecutorImpl,
                         std::vector<KVCache>& kv_caches,
                         const Params& params);
 
-  ModelArgsBundle args_;
+  ModelArgs args_;
   torch::Device device_;
   runtime::Options options_;
 

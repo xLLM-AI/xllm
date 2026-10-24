@@ -205,7 +205,7 @@ TEST(KVCacheManagerFactoryTest,
   options.enable_virtual_memory(true).enable_host_offload(true);
 
   EXPECT_DEATH(KVCacheManagerFactory::create(KVCacheCapacity{},
-                                             ModelArgs{},
+                                             RawModelArgs{},
                                              /*world_size=*/1,
                                              torch::kBFloat16,
                                              options,
@@ -221,7 +221,7 @@ TEST(KVCacheManagerFactoryTest,
   host_options.host_blocks_factor = 2.0;
 
   EXPECT_DEATH(KVCacheManagerFactory::create(KVCacheCapacity{},
-                                             ModelArgs{},
+                                             RawModelArgs{},
                                              /*world_size=*/1,
                                              torch::kBFloat16,
                                              options,

@@ -50,8 +50,8 @@ torch::Tensor seeded_tensor(const std::string& name,
   return (torch::randn(shape, options) * 0.02f) + static_cast<float>(seed % 7);
 }
 
-ModelArgs make_model_args() {
-  ModelArgs args;
+RawModelArgs make_model_args() {
+  RawModelArgs args;
   args.model_type() = "rwkv7";
   args.hidden_size() = kHiddenSize;
   args.head_dim() = kHeadSize;

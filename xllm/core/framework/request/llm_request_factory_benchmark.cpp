@@ -57,7 +57,7 @@ limitations under the License.
 #include "core/common/options.h"
 #include "core/common/rate_limiter.h"
 #include "core/framework/chat_template/chat_template.h"
-#include "core/framework/model/model_args.h"
+#include "core/framework/model/raw_model_args.h"
 #include "core/framework/request/llm_request_factory.h"
 #include "core/framework/request/request.h"
 #include "core/framework/request/request_output.h"
@@ -155,7 +155,7 @@ class FactoryFixture final {
  private:
   FakeTokenizer tokenizer_;
   FakeChatTemplate chat_template_;
-  ModelArgs model_args_;
+  RawModelArgs model_args_;
   Options options_;
   RateLimiter rate_limiter_;
   std::unique_ptr<LLMRequestFactory> factory_;

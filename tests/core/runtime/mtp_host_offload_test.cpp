@@ -44,10 +44,10 @@ namespace {
 constexpr int64_t kBlockCount = 2;
 constexpr int64_t kBlockSize = 4;
 
-ModelArgs make_model_args(const std::string& model_type,
-                          int64_t layer_count,
-                          int64_t head_dim) {
-  ModelArgs model_args;
+RawModelArgs make_model_args(const std::string& model_type,
+                             int64_t layer_count,
+                             int64_t head_dim) {
+  RawModelArgs model_args;
   model_args.model_type(model_type)
       .n_layers(layer_count)
       .n_heads(2)
@@ -56,13 +56,13 @@ ModelArgs make_model_args(const std::string& model_type,
   return model_args;
 }
 
-KVCacheShape make_cache_shape(const ModelArgs& model_args) {
+KVCacheShape make_cache_shape(const RawModelArgs& model_args) {
   KVCacheCapacity capacity;
   capacity.n_blocks(kBlockCount).block_size(kBlockSize);
   return KVCacheShape(capacity, model_args, /*world_size=*/1);
 }
 
-KVCacheShape make_dsv4_cache_shape(const ModelArgs& model_args,
+KVCacheShape make_dsv4_cache_shape(const RawModelArgs& model_args,
                                    int64_t c4_count,
                                    int64_t c128_count) {
   KVCacheCapacity capacity;
@@ -75,7 +75,7 @@ KVCacheShape make_dsv4_cache_shape(const ModelArgs& model_args,
 }
 
 KVCacheCreateOptions make_create_options(const torch::Device& device,
-                                         const ModelArgsBundle& model_args) {
+                                         const ModelArgs& model_args) {
   KVCacheCreateOptions create_options;
   create_options.device(device)
       .dtype(torch::kFloat32)
@@ -147,7 +147,7 @@ class HierarchyTransferTestWorker : public LLMWorkerImpl {
   HierarchyTransferTestWorker(const ParallelArgs& parallel_args,
                               const torch::Device& device,
                               const runtime::Options& options,
-                              const ModelArgs& model_args)
+                              const RawModelArgs& model_args)
       : LLMWorkerImpl(parallel_args, device, options) {
     dtype_ = torch::kFloat32;
     context_ = ModelContext(parallel_args,
@@ -158,7 +158,7 @@ class HierarchyTransferTestWorker : public LLMWorkerImpl {
   }
 
   void initialize_hierarchy_cache(const KVCacheShape& cache_shape) {
-    const auto& model_args = context_.get_model_args_bundle();
+    const auto& model_args = context_.get_model_args();
     const KVCacheCreateOptions create_options =
         make_create_options(device_.unwrap(), model_args);
     allocate_kv_caches(kv_caches_, cache_shape, create_options);
@@ -243,7 +243,7 @@ class ImmediateHierarchyTransferTestWorker final
   ImmediateHierarchyTransferTestWorker(const ParallelArgs& parallel_args,
                                        const torch::Device& device,
                                        const runtime::Options& options,
-                                       const ModelArgs& model_args)
+                                       const RawModelArgs& model_args)
       : HierarchyTransferTestWorker(parallel_args,
                                     device,
                                     options,
@@ -342,10 +342,10 @@ class MTPHostOffloadTest : public ::testing::Test {
 };
 
 TEST(SpeculativeDraftKVCacheShapeTest, ReusesGroupedTargetPoolCounts) {
-  ModelArgs target_model_args =
+  RawModelArgs target_model_args =
       make_model_args("deepseek_v4", /*layer_count=*/3, /*head_dim=*/8);
   target_model_args.compress_ratios({1, 4, 128});
-  ModelArgs draft_model_args =
+  RawModelArgs draft_model_args =
       make_model_args("deepseek_v4_mtp", /*layer_count=*/3, /*head_dim=*/8);
   draft_model_args.compress_ratios({1, 4, 128});
 
@@ -458,9 +458,9 @@ TEST_F(MTPHostOffloadTest, BindsAndReleasesUnifiedTransferOwner) {
   const ParallelArgs parallel_args(
       /*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr);
   const runtime::Options options = make_runtime_options(2.0);
-  const ModelArgs target_model_args =
+  const RawModelArgs target_model_args =
       make_model_args("test_target", /*layer_count=*/2, /*head_dim=*/8);
-  const ModelArgs draft_model_args =
+  const RawModelArgs draft_model_args =
       make_model_args("test_draft", /*layer_count=*/1, /*head_dim=*/4);
   const KVCacheShape target_shape = make_cache_shape(target_model_args);
   const KVCacheShape draft_shape = make_cache_shape(draft_model_args);
@@ -524,7 +524,7 @@ TEST_F(MTPHostOffloadTest, DFlashUsesSpeculativeHierarchyTransferLifecycle) {
       /*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr);
   runtime::Options options = make_runtime_options(2.0);
   options.speculative_algorithm("DFlash");
-  const ModelArgs model_args =
+  const RawModelArgs model_args =
       make_model_args("test_dflash", /*layer_count=*/2, /*head_dim=*/8);
   const KVCacheShape cache_shape = make_cache_shape(model_args);
   std::weak_ptr<HierarchyKVCacheTransfer> transfer_lifetime;
@@ -567,9 +567,9 @@ TEST_F(MTPHostOffloadTest, UnifiedTransferRoundTripUsesSharedSynchronizer) {
   const ParallelArgs parallel_args(
       /*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr);
   const runtime::Options options = make_runtime_options(2.0);
-  const ModelArgs target_model_args =
+  const RawModelArgs target_model_args =
       make_model_args("test_target", /*layer_count=*/2, /*head_dim=*/8);
-  const ModelArgs draft_model_args =
+  const RawModelArgs draft_model_args =
       make_model_args("test_draft", /*layer_count=*/1, /*head_dim=*/4);
   const KVCacheShape target_shape = make_cache_shape(target_model_args);
   const KVCacheShape draft_shape = make_cache_shape(draft_model_args);
@@ -637,9 +637,9 @@ TEST_F(MTPHostOffloadTest, D2HUsesSpeculativeWorkerExecutor) {
       /*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr);
   runtime::Options options = make_runtime_options(2.0);
   options.enable_schedule_overlap(true);
-  const ModelArgs target_model_args =
+  const RawModelArgs target_model_args =
       make_model_args("test_target", /*layer_count=*/2, /*head_dim=*/8);
-  const ModelArgs draft_model_args =
+  const RawModelArgs draft_model_args =
       make_model_args("test_draft", /*layer_count=*/1, /*head_dim=*/4);
   const KVCacheShape target_shape = make_cache_shape(target_model_args);
   const KVCacheShape draft_shape = make_cache_shape(draft_model_args);
@@ -689,12 +689,12 @@ TEST_F(MTPHostOffloadTest, Dsv4DraftSkipsUnsupportedCompressedBlockTypes) {
       /*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr);
   const runtime::Options options = make_runtime_options(2.0);
 
-  ModelArgs target_model_args =
+  RawModelArgs target_model_args =
       make_model_args("deepseek_v4", /*layer_count=*/3, /*head_dim=*/8);
   target_model_args.index_head_dim(4)
       .window_size(kBlockSize)
       .compress_ratios({1, 4, 128});
-  ModelArgs draft_model_args =
+  RawModelArgs draft_model_args =
       make_model_args("deepseek_v4_mtp", /*layer_count=*/1, /*head_dim=*/8);
   draft_model_args.index_head_dim(4)
       .window_size(kBlockSize)
@@ -785,8 +785,8 @@ constexpr int64_t kMtpTestExpectedPackedHeadDim =
     kMtpTestKvLoraRank + 2 * kMtpTestQkRopeHeadDim +
     4 * (kMtpTestKvLoraRank / 128);
 
-ModelArgs make_glm_dsa_target_args() {
-  ModelArgs args;
+RawModelArgs make_glm_dsa_target_args() {
+  RawModelArgs args;
   args.model_type("glm_moe_dsa")
       .enable_mla(true)
       .n_heads(64)
@@ -809,7 +809,7 @@ KVCacheCapacity make_glm_dsa_target_capacity(bool enable_packed_c8) {
 
 TEST(SpeculativeDraftKVCacheShapeTest,
      PropagatesPackedC8LayoutOnGlmMoeDsaMtpDraft) {
-  const ModelArgs target_args = make_glm_dsa_target_args();
+  const RawModelArgs target_args = make_glm_dsa_target_args();
   const KVCacheCapacity target_capacity =
       make_glm_dsa_target_capacity(/*enable_packed_c8=*/true);
   const KVCacheShape target_shape(
@@ -818,7 +818,7 @@ TEST(SpeculativeDraftKVCacheShapeTest,
   ASSERT_EQ(target_shape.key_cache_shape().back(),
             kMtpTestExpectedPackedHeadDim);
 
-  ModelArgs draft_args = target_args;
+  RawModelArgs draft_args = target_args;
   draft_args.model_type("glm_moe_dsa_mtp");
 
   const KVCacheShape draft_shape =
@@ -837,7 +837,7 @@ TEST(SpeculativeDraftKVCacheShapeTest,
 }
 
 TEST(SpeculativeDraftKVCacheShapeTest, KeepsBf16LayoutWhenKvCacheDtypeIsAuto) {
-  const ModelArgs target_args = make_glm_dsa_target_args();
+  const RawModelArgs target_args = make_glm_dsa_target_args();
   // enable_mla_kv_cache_quant defaults to false; kv_cache_dtype auto keeps
   // the legacy BF16 [nope][rope] split (trailing dim is kv_lora, not the
   // 656B packed row).
@@ -848,7 +848,7 @@ TEST(SpeculativeDraftKVCacheShapeTest, KeepsBf16LayoutWhenKvCacheDtypeIsAuto) {
   ASSERT_TRUE(target_shape.has_key_cache_shape());
   EXPECT_EQ(target_shape.key_cache_shape().back(), kMtpTestKvLoraRank);
 
-  ModelArgs draft_args = target_args;
+  RawModelArgs draft_args = target_args;
   draft_args.model_type("glm_moe_dsa_mtp");
 
   const KVCacheShape draft_shape =

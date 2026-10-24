@@ -59,7 +59,8 @@ class NpuRMSNormImpl : public BaseLayer {
 
   void build_node_variant_pack(atb_speed::Model::Node& node, torch::Tensor& x);
 
-  void param_from_args(atb::infer::RmsNormParam& param, const ModelArgs& args);
+  void param_from_args(atb::infer::RmsNormParam& param,
+                       const RawModelArgs& args);
 
   atb_speed::Model::Node norm_node_;
   std::string model_name_;

@@ -30,8 +30,8 @@ limitations under the License.
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/model/causal_lm.h"
-#include "core/framework/model/model_args.h"
 #include "core/framework/model/model_params_view.h"
+#include "core/framework/model/raw_model_args.h"
 #include "core/framework/model/rec_model.h"
 #include "core/layers/cuda/attention.h"
 #include "core/layers/cuda/flashinfer_workspace.h"
@@ -124,7 +124,7 @@ torch::Device InitXllmCudaDeviceForTest(int32_t device_index = 0) {
 // same inputs.
 class FakeAttnCausalLM final : public CausalLM {
  public:
-  FakeAttnCausalLM(const ModelArgs& args, const torch::Device& device)
+  FakeAttnCausalLM(const RawModelArgs& args, const torch::Device& device)
       : args_(args),
         device_(device),
         options_(
@@ -233,7 +233,7 @@ class FakeAttnCausalLM final : public CausalLM {
   void update_expert_weight(int32_t) override {}
 
  private:
-  ModelArgs args_;
+  RawModelArgs args_;
   torch::Device device_;
   torch::TensorOptions options_;
   torch::nn::Embedding embedding_{nullptr};
@@ -423,8 +423,8 @@ std::vector<KVCache> MakeHybridKvCaches(const torch::Device& device,
   return kv_caches;
 }
 
-ModelArgs make_test_model_args() {
-  ModelArgs args;
+RawModelArgs make_test_model_args() {
+  RawModelArgs args;
   args.model_type("fake_attn");
   args.dtype("bfloat16");
   args.hidden_size(256);
@@ -475,7 +475,7 @@ TEST(CudaGraphExecutorTest,
   ExecutionConfig::get_instance().enable_graph_vmm_pool(false);
   const torch::Device device = InitXllmCudaDeviceForTest();
   layer::flashinfer::FlashinferWorkspace::get_instance().initialize(device);
-  ModelArgs args = make_test_model_args();
+  RawModelArgs args = make_test_model_args();
   args.dtype("float32");
   runtime::Options options = make_test_runtime_options(4);
   NativeRecGraphModel model(args.hidden_size(), device);
@@ -531,7 +531,7 @@ TEST(CudaGraphExecutorTest, DecodeMetadataFastPathUpdatesPersistentBuffers) {
   const torch::Device device = InitXllmCudaDeviceForTest(/*device_index=*/0);
   xllm::layer::flashinfer::FlashinferWorkspace::get_instance().initialize(
       device);
-  ModelArgs args = make_test_model_args();
+  RawModelArgs args = make_test_model_args();
   runtime::Options options =
       make_test_runtime_options(/*max_seqs_per_batch=*/4);
   runtime::cuda::CudaGraphPersistentParam persistent(args, device, options);
@@ -616,7 +616,7 @@ TEST(CudaGraphExecutorTest, DecodeMetadataFastPathUpdatesLinearStateIndices) {
   const torch::Device device = InitXllmCudaDeviceForTest(/*device_index=*/0);
   xllm::layer::flashinfer::FlashinferWorkspace::get_instance().initialize(
       device);
-  ModelArgs args = make_test_model_args();
+  RawModelArgs args = make_test_model_args();
   runtime::Options options =
       make_test_runtime_options(/*max_seqs_per_batch=*/4);
   runtime::cuda::CudaGraphPersistentParam persistent(args, device, options);
@@ -659,7 +659,7 @@ TEST(CudaGraphExecutorTest, DecodeMetadataFastPathFallbackMatchesLegacyPath) {
   const torch::Device device = InitXllmCudaDeviceForTest(/*device_index=*/0);
   xllm::layer::flashinfer::FlashinferWorkspace::get_instance().initialize(
       device);
-  ModelArgs args = make_test_model_args();
+  RawModelArgs args = make_test_model_args();
   runtime::Options options =
       make_test_runtime_options(/*max_seqs_per_batch=*/4);
   runtime::cuda::CudaGraphPersistentParam fast_path_persistent(
@@ -766,7 +766,7 @@ TEST(CudaGraphExecutorTest, BatchDecodeCaptureAndReplay) {
   xllm::layer::flashinfer::FlashinferWorkspace::get_instance().initialize(
       device);
 
-  ModelArgs args;
+  RawModelArgs args;
   args.model_type("fake_attn");
   args.dtype("bfloat16");
   args.hidden_size(256);
@@ -830,7 +830,7 @@ TEST(CudaGraphExecutorTest, BatchDecodePaddedBucket100CaptureAndReplay) {
   xllm::layer::flashinfer::FlashinferWorkspace::get_instance().initialize(
       device);
 
-  ModelArgs args = make_test_model_args();
+  RawModelArgs args = make_test_model_args();
   args.max_position_embeddings(16);
   runtime::Options options =
       make_test_runtime_options(/*max_seqs_per_batch=*/100);
@@ -905,7 +905,7 @@ TEST(CudaGraphExecutorTest, BatchDecodeNoPaddingBucket100CaptureAndReplay) {
   xllm::layer::flashinfer::FlashinferWorkspace::get_instance().initialize(
       device);
 
-  ModelArgs args = make_test_model_args();
+  RawModelArgs args = make_test_model_args();
   args.max_position_embeddings(16);
   runtime::Options options =
       make_test_runtime_options(/*max_seqs_per_batch=*/100);
@@ -978,7 +978,7 @@ TEST(CudaGraphExecutorTest,
   xllm::layer::flashinfer::FlashinferWorkspace::get_instance().initialize(
       device);
 
-  ModelArgs args;
+  RawModelArgs args;
   args.model_type("fake_attn");
   args.dtype("bfloat16");
   args.hidden_size(256);
@@ -1039,7 +1039,7 @@ TEST(CudaGraphExecutorTest, PrefillPiecewiseCaptureAndReplay) {
   xllm::layer::flashinfer::FlashinferWorkspace::get_instance().initialize(
       device);
 
-  ModelArgs args;
+  RawModelArgs args;
   args.model_type("fake_attn");
   args.dtype("bfloat16");
   args.hidden_size(256);
@@ -1138,7 +1138,7 @@ TEST(CudaGraphExecutorTest, CompareMqa2v1AndMqa8v1) {
   };
 
   auto run_mqa_prefill = [&](int64_t n_heads, int64_t n_kv_heads) {
-    ModelArgs args;
+    RawModelArgs args;
     args.model_type("fake_attn");
     args.dtype("bfloat16");
     args.hidden_size(n_heads * 128);
@@ -1234,7 +1234,7 @@ TEST(CudaGraphExecutorTest, GraphVmmPoolMemoryReuseAcrossMultiShape) {
   xllm::layer::flashinfer::FlashinferWorkspace::get_instance().initialize(
       device);
 
-  ModelArgs args;
+  RawModelArgs args;
   args.model_type("fake_attn");
   args.dtype("bfloat16");
   args.hidden_size(256);
@@ -1333,7 +1333,7 @@ TEST(CudaGraphExecutorTest, GraphVmmPoolEnabledPrefillCorrectness) {
   xllm::layer::flashinfer::FlashinferWorkspace::get_instance().initialize(
       device);
 
-  ModelArgs args;
+  RawModelArgs args;
   args.model_type("fake_attn");
   args.dtype("bfloat16");
   args.hidden_size(256);

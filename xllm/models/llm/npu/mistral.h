@@ -17,8 +17,8 @@ limitations under the License.
 
 #include <torch/torch.h>
 
-#include "core/framework/model/model_args.h"
 #include "core/framework/model/model_output.h"
+#include "core/framework/model/raw_model_args.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/layers/common/activation.h"
 #include "core/layers/common/attention.h"
@@ -144,12 +144,12 @@ inline std::tuple<torch::Tensor, torch::Tensor> get_mistral_rotary_embedding(
 class MistralModelImpl : public torch::nn::Module {
  public:
   MistralModelImpl(const ModelContext& context) {
-    const auto& model_args = context.get_model_args_bundle();
+    const auto& model_args = context.get_model_args();
     auto options = context.get_tensor_options();
     auto parallel_args = context.get_parallel_args();
 
     blocks_ = register_module("layers", torch::nn::ModuleList());
-    layers_.reserve(context.get_model_args_bundle().n_layers());
+    layers_.reserve(context.get_model_args().n_layers());
     npu_embed_tokens_ =
         register_module("npu_embed_tokens", layer::NpuWordEmbedding(context));
     norm_ = register_module("norm", layer::NpuRMSNorm(context));
@@ -434,7 +434,7 @@ TORCH_MODULE(MistralModel);
 class MistralForCausalLMImpl : public torch::nn::Module {
  public:
   MistralForCausalLMImpl(const ModelContext& context) {
-    const auto& model_args = context.get_model_args_bundle();
+    const auto& model_args = context.get_model_args();
     auto options = context.get_tensor_options();
     auto parallel_args = context.get_parallel_args();
 

@@ -33,7 +33,7 @@ struct DsaTopkShareDecision {
   bool output_topk = false;
 };
 
-inline bool has_dsa_indexer(const ModelArgs& args) {
+inline bool has_dsa_indexer(const RawModelArgs& args) {
   return args.index_n_heads() > 0 && args.index_head_dim() > 0 &&
          args.index_topk() > 0;
 }
@@ -43,14 +43,14 @@ inline bool has_dsa_indexer(const LlmModelArgs& args) {
          args.index_topk() > 0;
 }
 
-inline bool has_dsa_indexer(const ModelArgsBundle& args) {
+inline bool has_dsa_indexer(const ModelArgs& args) {
   return args.index_n_heads() > 0 && args.index_head_dim() > 0 &&
          args.index_topk() > 0;
 }
 
 // Cross-step MTP reuse is a backend-independent DSA policy. Backends own the
 // carrier representation used to transport their top-k state between steps.
-inline bool is_mtp_dsa_topk_reuse_enabled(const ModelArgs& args) {
+inline bool is_mtp_dsa_topk_reuse_enabled(const RawModelArgs& args) {
   return args.model_type().ends_with("_mtp") &&
          args.index_share_for_mtp_iteration() && has_dsa_indexer(args);
 }
@@ -60,7 +60,7 @@ inline bool is_mtp_dsa_topk_reuse_enabled(const LlmModelArgs& args) {
          args.index_share_for_mtp_iteration() && has_dsa_indexer(args);
 }
 
-inline bool is_mtp_dsa_topk_reuse_enabled(const ModelArgsBundle& args) {
+inline bool is_mtp_dsa_topk_reuse_enabled(const ModelArgs& args) {
   return args.model_type().ends_with("_mtp") &&
          args.index_share_for_mtp_iteration() && has_dsa_indexer(args);
 }
@@ -69,15 +69,15 @@ inline bool is_mtp_dsa_topk_reuse_enabled(const ModelArgsBundle& args) {
 // resolved decisions instead of independently interpreting the raw config.
 class DsaTopkSharePlan final {
  public:
-  explicit DsaTopkSharePlan(const ModelArgs& args) { initialize(args, args); }
+  explicit DsaTopkSharePlan(const RawModelArgs& args) {
+    initialize(args, args);
+  }
 
   explicit DsaTopkSharePlan(const LlmModelArgs& args) {
     initialize(args, args);
   }
 
-  explicit DsaTopkSharePlan(const ModelArgsBundle& args) {
-    initialize(args, args);
-  }
+  explicit DsaTopkSharePlan(const ModelArgs& args) { initialize(args, args); }
 
   const DsaTopkShareDecision& decision_for(int32_t layer_id) const {
     CHECK_GE(layer_id, 0) << "DSA top-k sharing layer id must be non-negative.";
@@ -184,7 +184,7 @@ class DsaTopkSharePlan final {
   bool has_reuse_ = false;
 };
 
-inline std::vector<bool> get_dsa_indexer_layer_mask(const ModelArgs& args,
+inline std::vector<bool> get_dsa_indexer_layer_mask(const RawModelArgs& args,
                                                     int64_t num_cache_layers) {
   CHECK_GE(num_cache_layers, 0)
       << "DSA indexer cache layer count must be non-negative.";
@@ -223,7 +223,7 @@ inline std::vector<bool> get_dsa_indexer_layer_mask(const ModelArgs& args,
   return layer_mask;
 }
 
-inline std::vector<bool> get_dsa_indexer_layer_mask(const ModelArgsBundle& args,
+inline std::vector<bool> get_dsa_indexer_layer_mask(const ModelArgs& args,
                                                     int64_t num_cache_layers) {
   CHECK_GE(num_cache_layers, 0);
   CHECK_LE(num_cache_layers, std::numeric_limits<int32_t>::max());
@@ -275,15 +275,15 @@ inline std::vector<bool> get_dsa_indexer_layer_mask(const LlmModelArgs& args,
   return layer_mask;
 }
 
-inline DsaTopkShareDecision get_dsa_topk_share_decision(const ModelArgs& args,
-                                                        int32_t layer_id) {
+inline DsaTopkShareDecision get_dsa_topk_share_decision(
+    const RawModelArgs& args,
+    int32_t layer_id) {
   const DsaTopkSharePlan topk_share_plan(args);
   return topk_share_plan.decision_for(layer_id);
 }
 
-inline DsaTopkShareDecision get_dsa_topk_share_decision(
-    const ModelArgsBundle& args,
-    int32_t layer_id) {
+inline DsaTopkShareDecision get_dsa_topk_share_decision(const ModelArgs& args,
+                                                        int32_t layer_id) {
   const DsaTopkSharePlan topk_share_plan(args);
   return topk_share_plan.decision_for(layer_id);
 }

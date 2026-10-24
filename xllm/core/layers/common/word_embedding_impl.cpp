@@ -19,8 +19,8 @@ namespace xllm {
 namespace layer {
 
 WordEmbeddingImpl::WordEmbeddingImpl(const ModelContext& context)
-    : WordEmbeddingImpl(context.get_model_args_bundle().vocab_size(),
-                        context.get_model_args_bundle().hidden_size(),
+    : WordEmbeddingImpl(context.get_model_args().vocab_size(),
+                        context.get_model_args().hidden_size(),
                         context.get_parallel_args(),
                         context.get_tensor_options()) {}
 

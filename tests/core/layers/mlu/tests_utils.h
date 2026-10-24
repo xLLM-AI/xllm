@@ -254,7 +254,7 @@ void expect_tensor_stats(const torch::Tensor& t,
                          double atol = 1e-5);
 
 // Helper function to create default model arguments for testing
-ModelArgs create_default_model_args();
+RawModelArgs create_default_model_args();
 
 // Helper function to create default quantization arguments for testing
 QuantArgs create_default_quant_args();

@@ -56,7 +56,7 @@ std::string format_tensor_shape(const proto::InferInputTensor& tensor) {
 bool process_onerec_inputs(
     const std::optional<std::vector<int>>& prompt_tokens,
     const std::optional<std::vector<proto::InferInputTensor>>& input_tensors,
-    const ModelArgs& model_args,
+    const RawModelArgs& model_args,
     std::vector<int32_t>* local_prompt_tokens,
     MMData* processed_mm_data,
     OutputCallback callback) {
@@ -293,7 +293,7 @@ bool process_llmrec_with_mm_data_inputs(
 
 }  // namespace
 
-RecRequestFactory::RecRequestFactory(const ModelArgs* model_args,
+RecRequestFactory::RecRequestFactory(const RawModelArgs* model_args,
                                      Tokenizer* tokenizer,
                                      const Options* options,
                                      RateLimiter* rate_limiter,

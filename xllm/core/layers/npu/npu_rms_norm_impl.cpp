@@ -23,14 +23,14 @@ namespace xllm {
 namespace layer {
 
 void NpuRMSNormImpl::param_from_args(atb::infer::RmsNormParam& param,
-                                     const ModelArgs& args) {
+                                     const RawModelArgs& args) {
   param.layerType = atb::infer::RmsNormParam::RmsNormType::RMS_NORM_NORM;
   param.normParam.epsilon = args.rms_norm_eps();
 }
 
 NpuRMSNormImpl::NpuRMSNormImpl(const ModelContext& context)
     : BaseLayer(context) {
-  param_from_args(norm_param_, context.get_model_args_bundle());
+  param_from_args(norm_param_, context.get_model_args());
 
   atb_weight_tensors_.resize(1);
 

@@ -52,7 +52,7 @@ class Tokenizer;
 // outlive the factory. The tokenizer may be null for OneRec models.
 class RecRequestFactory final {
  public:
-  RecRequestFactory(const ModelArgs* model_args,
+  RecRequestFactory(const RawModelArgs* model_args,
                     Tokenizer* tokenizer,
                     const Options* options,
                     RateLimiter* rate_limiter,
@@ -175,7 +175,7 @@ class RecRequestFactory final {
       OutputCallback callback,
       bool build_stop_checker);
 
-  const ModelArgs* model_args_ = nullptr;
+  const RawModelArgs* model_args_ = nullptr;
   Tokenizer* tokenizer_ = nullptr;
   const Options* options_ = nullptr;
   RateLimiter* rate_limiter_ = nullptr;

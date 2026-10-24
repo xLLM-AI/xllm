@@ -34,7 +34,7 @@ class FactoryTestExecutorImpl final : public ExecutorImpl {
   FactoryTestExecutorImpl() = default;
 
   FactoryTestExecutorImpl(CausalLM* /*model*/,
-                          const ModelArgsBundle& /*args*/,
+                          const ModelArgs& /*args*/,
                           const torch::Device& /*device*/,
                           const runtime::Options& /*options*/) {}
 
@@ -53,7 +53,7 @@ using EqualPriorityFactoryTestExecutorImpl = FactoryTestExecutorImpl<5>;
 template <int32_t Priority>
 ExecutorImplFactory::Creator create_test_creator() {
   return [](CausalLM* /*model*/,
-            const ModelArgsBundle& /*args*/,
+            const ModelArgs& /*args*/,
             const torch::Device& /*device*/,
             const runtime::Options& /*options*/) {
     return std::make_unique<FactoryTestExecutorImpl<Priority>>();
@@ -67,7 +67,7 @@ std::unique_ptr<ExecutorImpl> create_executor(
   options.extension_impl(extension_impl);
   return ExecutorImplFactory::get_instance().create_executor_impl(
       /*model=*/nullptr,
-      /*args=*/ModelArgsBundle{},
+      /*args=*/ModelArgs{},
       /*device=*/torch::Device(torch::kCPU),
       options,
       /*executor_type=*/executor_type);
@@ -80,7 +80,7 @@ namespace executor_factory_test {
 class NamespacedExecutorImpl final : public ExecutorImpl {
  public:
   NamespacedExecutorImpl(CausalLM* /*model*/,
-                         const ModelArgs& /*args*/,
+                         const RawModelArgs& /*args*/,
                          const torch::Device& /*device*/,
                          const runtime::Options& /*options*/) {}
 

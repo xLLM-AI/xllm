@@ -245,8 +245,9 @@ class DeepseekV4AttentionTest : public ::testing::Test {
     return config;
   }
 
-  ModelArgs make_model_args(const test::Dsv4AttentionRefConfig& config) const {
-    ModelArgs args;
+  RawModelArgs make_model_args(
+      const test::Dsv4AttentionRefConfig& config) const {
+    RawModelArgs args;
     args.hidden_size() = config.hidden_dim;
     args.head_dim() = config.head_dim;
     args.n_heads() = config.n_heads;
@@ -947,7 +948,7 @@ class DeepseekV4AttentionTest : public ::testing::Test {
       const std::shared_ptr<DSAMetadata>& dsa,
       bool is_prefill,
       bool is_chunked_prefill) {
-    ModelArgs args = make_model_args(config);
+    RawModelArgs args = make_model_args(config);
     QuantArgs quant_args;
     torch::Tensor cos_sin =
         default_cos_sin_table(config, cpu_options_).to(device_);
@@ -1074,7 +1075,7 @@ TEST_F(DeepseekV4AttentionTest, RawRatio0PrefillMatchesReference) {
       run_ref(config, weights, hidden, start_pos, q_lens);
   std::shared_ptr<DSAMetadata> dsa = make_metadata(config, start_pos, q_lens);
 
-  ModelArgs args = make_model_args(config);
+  RawModelArgs args = make_model_args(config);
   args.compress_ratios() = {0};
   QuantArgs quant_args;
   torch::Tensor cos_sin =

@@ -36,7 +36,7 @@ class DiTModelContext {
   DiTModelContext() : parallel_args_(1, 1, nullptr) {};
 
   DiTModelContext(const ParallelArgs& input_parallel_args,
-                  std::unordered_map<std::string, ModelArgs> model_args,
+                  std::unordered_map<std::string, RawModelArgs> model_args,
                   std::unordered_map<std::string, QuantArgs> quant_args,
                   const torch::TensorOptions& tensor_options,
                   const DiTCacheConfig& dit_config,
@@ -57,7 +57,7 @@ class DiTModelContext {
   const QuantArgs& get_quant_args(const std::string& component) const;
 
   bool has_component(const std::string& component) const {
-    return model_args_bundles_.count(component) > 0;
+    return model_args_.count(component) > 0;
   }
 
   ModelContext get_model_context(
@@ -83,8 +83,7 @@ class DiTModelContext {
 #endif
 
  private:
-  std::unordered_map<std::string, std::shared_ptr<ModelArgsBundle>>
-      model_args_bundles_;
+  std::unordered_map<std::string, std::shared_ptr<ModelArgs>> model_args_;
   std::unordered_map<std::string, QuantArgs> quant_args_;
   ParallelArgs parallel_args_;
   torch::TensorOptions tensor_options_;

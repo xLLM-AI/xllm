@@ -42,7 +42,7 @@ class LinearStateRestoreWorker final : public WorkerImpl {
   LinearStateRestoreWorker(const ParallelArgs& parallel_args,
                            const torch::Device& device,
                            const runtime::Options& options,
-                           const ModelArgs& model_args)
+                           const RawModelArgs& model_args)
       : WorkerImpl(parallel_args, device, options) {
     dtype_ = torch::kBFloat16;
     context_ =
@@ -127,7 +127,7 @@ class OverlapLinearStateRestoreWorker final : public LLMWorkerImpl {
   OverlapLinearStateRestoreWorker(const ParallelArgs& parallel_args,
                                   const torch::Device& device,
                                   const runtime::Options& options,
-                                  const ModelArgs& model_args)
+                                  const RawModelArgs& model_args)
       : LLMWorkerImpl(parallel_args, device, options) {
     dtype_ = torch::kBFloat16;
     context_ =
@@ -192,7 +192,7 @@ TEST(MluLinearStateRestoreWorkerTest,
   const torch::Device device("mlu:0");
   ParallelArgs parallel_args(
       /*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr);
-  ModelArgs model_args;
+  RawModelArgs model_args;
   model_args.layer_types({"linear_attention", "linear_attention"});
   runtime::Options runtime_options;
   runtime_options.enable_schedule_overlap(false);
@@ -299,7 +299,7 @@ TEST(MluLinearStateRestoreWorkerTest,
   const torch::Device device("mlu:0");
   ParallelArgs parallel_args(
       /*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr);
-  ModelArgs model_args;
+  RawModelArgs model_args;
   model_args.layer_types({"linear_attention"});
   runtime::Options runtime_options;
   runtime_options.enable_schedule_overlap(false);
@@ -341,7 +341,7 @@ TEST(MluLinearStateRestoreWorkerTest,
   const torch::Device device("mlu:0");
   ParallelArgs parallel_args(
       /*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr);
-  ModelArgs model_args;
+  RawModelArgs model_args;
   model_args.layer_types({"linear_attention", "linear_attention"});
   runtime::Options runtime_options;
   runtime_options.enable_schedule_overlap(true);

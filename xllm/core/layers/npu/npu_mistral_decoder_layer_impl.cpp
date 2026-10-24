@@ -35,11 +35,11 @@ NpuMistralDecoderLayerImpl::NpuMistralDecoderLayerImpl(
     const ModelContext& context)
     : BaseLayer(context) {
   param_from_args(prefill_param_,
-                  context.get_model_args_bundle(),
+                  context.get_model_args(),
                   context.get_parallel_args(),
                   true);
   param_from_args(decode_param_,
-                  context.get_model_args_bundle(),
+                  context.get_model_args(),
                   context.get_parallel_args(),
                   false);
 
@@ -60,7 +60,7 @@ NpuMistralDecoderLayerImpl::NpuMistralDecoderLayerImpl(
 // fix param
 void NpuMistralDecoderLayerImpl::param_from_args(
     atb_speed::mistral::MistralLayerParam& param,
-    const ModelArgs& args,
+    const RawModelArgs& args,
     const ParallelArgs& parallel_args,
     bool is_prefill) {
   // Basic settings

@@ -25,7 +25,7 @@ namespace xllm {
 namespace layer {
 
 Qwen3_5GatedDeltaNetImpl::Qwen3_5GatedDeltaNetImpl(
-    const ModelArgs& args,
+    const RawModelArgs& args,
     const QuantArgs& quant_args,
     const ParallelArgs& parallel_args,
     const torch::TensorOptions& options) {

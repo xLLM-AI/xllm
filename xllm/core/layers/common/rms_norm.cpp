@@ -37,8 +37,8 @@ RMSNormImpl::RMSNormImpl(int64_t dim,
 }
 
 RMSNormImpl::RMSNormImpl(const ModelContext& context)
-    : RMSNormImpl(context.get_model_args_bundle().hidden_size(),
-                  context.get_model_args_bundle().rms_norm_eps(),
+    : RMSNormImpl(context.get_model_args().hidden_size(),
+                  context.get_model_args().rms_norm_eps(),
                   context.get_tensor_options()) {}
 
 std::tuple<torch::Tensor, std::optional<torch::Tensor>> RMSNormImpl::forward(

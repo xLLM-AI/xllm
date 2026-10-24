@@ -176,7 +176,7 @@ void MooncakeKVCacheTransferBase::initialize(int32_t device_id) {
 
 void MooncakeKVCacheTransferBase::configure_cache_layout(
     const ParallelArgs& parallel_args,
-    const ModelArgsBundle& model_args,
+    const ModelArgs& model_args,
     int32_t block_token_capacity,
     bool is_spec_draft) {
   CHECK_GT(parallel_args.dp_size(), 0);

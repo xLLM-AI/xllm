@@ -33,7 +33,7 @@ class Qwen3_5FusedMoEImpl final : public FusedMoEImpl {
                       const std::shared_ptr<Stream>& routed_comm_stream,
                       const std::shared_ptr<Stream>& shared_compute_stream);
 
-  Qwen3_5FusedMoEImpl(const ModelArgs& model_args,
+  Qwen3_5FusedMoEImpl(const RawModelArgs& model_args,
                       const FusedMoEArgs& moe_args,
                       const QuantArgs& quant_args,
                       const ParallelArgs& parallel_args,

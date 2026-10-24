@@ -20,7 +20,7 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/kv_cache_store_config.h"
 #include "core/framework/config/model_config.h"
-#include "core/framework/model/model_args.h"
+#include "core/framework/model/raw_model_args.h"
 #include "core/framework/model_loader/hf_model_args.h"
 
 namespace xllm {
@@ -30,7 +30,7 @@ void validate_kv_cache_store_config(const std::string& model_type,
                                     const KVCacheConfig& kv_cache_config,
                                     const KVCacheStoreConfig& store_config) {
   if (!model_type.empty()) {
-    ModelArgs model_args;
+    RawModelArgs model_args;
     CHECK(load_hf_model_args(
         model_config.model(), model_config.backend(), &model_args))
         << "Failed to load model args from " << model_config.model();

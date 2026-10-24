@@ -27,8 +27,8 @@ limitations under the License.
 
 #include "core/framework/batch/batch.h"
 #include "core/framework/config/execution_config.h"
-#include "core/framework/model/model_args.h"
 #include "core/framework/model/model_output.h"
+#include "core/framework/model/raw_model_args.h"
 #include "core/framework/model_loader/model_loader.h"
 #include "core/framework/parallel_state/process_group.h"
 #include "core/framework/request/sequence.h"
@@ -122,7 +122,7 @@ class MirroredDcpProcessGroup final : public ProcessGroup {
 
 class HybridConv1dMockLM final : public CausalLM {
  public:
-  HybridConv1dMockLM(const ModelArgs& /*args*/,
+  HybridConv1dMockLM(const RawModelArgs& /*args*/,
                      const torch::Device& device,
                      bool enable_fia_decode = true,
                      int32_t attention_repetitions = 1,
@@ -733,7 +733,7 @@ class AclGraphTaskUpdateTest : public ::testing::Test {
     fi.input_params.attention.rebuild_device_buffer(*device_);
   }
 
-  ModelArgs model_args_;
+  RawModelArgs model_args_;
   std::unique_ptr<torch::Device> device_;
   runtime::Options options_;
   std::unique_ptr<HybridConv1dMockLM> model_;
@@ -968,7 +968,7 @@ TEST_F(AclGraphTaskUpdateTest,
 
 TEST_F(AclGraphTaskUpdateTest,
        NonQwenDefaultAttentionKeepsPagedAttentionInEagerAndGraph) {
-  ModelArgs non_qwen_args = model_args_;
+  RawModelArgs non_qwen_args = model_args_;
   non_qwen_args.model_type("minimax_m2");
   non_qwen_args.dtype("bfloat16");
   auto non_qwen_model = std::make_unique<HybridConv1dMockLM>(

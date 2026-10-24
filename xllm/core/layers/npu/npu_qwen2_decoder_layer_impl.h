@@ -98,7 +98,7 @@ class NpuQwen2DecoderLayerImpl : public BaseLayer {
                                bool is_prefill);
 
   void param_from_args(atb_speed::qwen::DecoderLayerParam& param,
-                       const ModelArgs& args,
+                       const RawModelArgs& args,
                        const ParallelArgs& parallel_args,
                        bool isPrefill);
 

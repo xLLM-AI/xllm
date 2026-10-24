@@ -116,8 +116,8 @@ void expect_tensor_stats(const torch::Tensor& t,
       << "sum mismatch: actual=" << actual_sum << ", expected=" << expected_sum;
 }
 
-ModelArgs create_default_model_args() {
-  ModelArgs model_args;
+RawModelArgs create_default_model_args() {
+  RawModelArgs model_args;
   model_args.hidden_size() = 7168;
   model_args.intermediate_size() = 18432;
   model_args.hidden_act() = "silu";

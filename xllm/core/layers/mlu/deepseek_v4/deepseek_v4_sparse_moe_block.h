@@ -52,7 +52,7 @@ class DeepseekV4SparseMoEBlockImpl final : public torch::nn::Module {
       const std::string& module_prefix = "");
 
   DeepseekV4SparseMoEBlockImpl(
-      const ModelArgs& model_args,
+      const RawModelArgs& model_args,
       const QuantArgs& quant_args,
       const ParallelArgs& parallel_args,
       const torch::TensorOptions& options,

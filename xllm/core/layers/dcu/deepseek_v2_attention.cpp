@@ -103,7 +103,7 @@ void check_context_prefill_metadata(const AttentionMetadata& attn_metadata) {
 }  // namespace
 
 DeepseekV2AttentionImpl::DeepseekV2AttentionImpl(
-    const ModelArgs& args,
+    const RawModelArgs& args,
     const QuantArgs& quant_args,
     const ParallelArgs& parallel_args,
     const torch::TensorOptions& options)

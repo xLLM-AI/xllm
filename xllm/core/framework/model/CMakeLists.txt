@@ -17,6 +17,7 @@ cc_library(
     dit_model_params.h
     aux_hidden_capture.h
     model_args.h
+    raw_model_args.h
     model_family_args.h
     model_params.h
     model_params_view.h

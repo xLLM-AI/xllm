@@ -64,7 +64,7 @@ enum class SpecVerifyInputUpdateScope : uint8_t {
 // Multiple AclGraph instances can share the same GraphPersistentParam object
 class GraphPersistentParam final {
  public:
-  GraphPersistentParam(const ModelArgsBundle& args,
+  GraphPersistentParam(const ModelArgs& args,
                        const torch::Device& device,
                        const runtime::Options& options,
                        bool need_update_attn_mask = false,
@@ -271,7 +271,7 @@ class GraphPersistentParam final {
       uint32_t actual_num_tokens,
       uint32_t padded_num_tokens);
 
-  const ModelArgsBundle& args_;
+  const ModelArgs& args_;
   const torch::Device& device_;
   const runtime::Options& options_;
 

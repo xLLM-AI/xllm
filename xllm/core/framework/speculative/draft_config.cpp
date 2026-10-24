@@ -49,7 +49,7 @@ std::vector<int32_t> read_capture_layer_ids(
   }
 
   // Legacy xLLM/vLLM draft configs already use 0-based post-layer output
-  // indices, which match ModelArgs::layers_to_capture directly.
+  // indices, which match RawModelArgs::layers_to_capture directly.
   std::vector<int32_t> capture_layer_ids =
       reader.value_or<std::vector<int32_t>>(
           std::vector<std::string>{"dspark_target_layer_ids",

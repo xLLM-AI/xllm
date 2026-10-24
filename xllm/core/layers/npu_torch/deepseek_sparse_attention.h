@@ -79,7 +79,7 @@ class DSAttentionImpl : public torch::nn::Module {
  public:
   DSAttentionImpl() = default;
   explicit DSAttentionImpl(const ModelContext& context, int32_t layer_id = -1);
-  DSAttentionImpl(const ModelArgs& args,
+  DSAttentionImpl(const RawModelArgs& args,
                   const QuantArgs& quant_args,
                   const ParallelArgs& parallel_args,
                   const torch::TensorOptions& options,

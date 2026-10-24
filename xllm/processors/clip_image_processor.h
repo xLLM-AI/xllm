@@ -20,12 +20,12 @@ limitations under the License.
 #include <cstdint>
 #include <vector>
 
-#include "core/framework/model/model_args.h"
+#include "core/framework/model/raw_model_args.h"
 namespace xllm {
 
 class CLIPImageProcessor {
  public:
-  explicit CLIPImageProcessor(const ModelArgs& args);
+  explicit CLIPImageProcessor(const RawModelArgs& args);
 
   torch::Tensor process_images(const torch::Tensor& images) const;
 

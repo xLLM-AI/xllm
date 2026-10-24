@@ -30,7 +30,7 @@ class Glm4MoeAdapter : public XliteModelAdapter {
   void Load(const StateDict& sd,
             XModel& m,
             const XModelConfig& cfg,
-            const ModelArgs& args,
+            const RawModelArgs& args,
             const ParallelArgs& pa,
             const torch::Device& device,
             std::vector<torch::Tensor>& storages) override {

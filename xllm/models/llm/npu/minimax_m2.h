@@ -198,15 +198,15 @@ class MiniMaxM2ModelImpl : public torch::nn::Module {
   explicit MiniMaxM2ModelImpl(const ModelContext& context) {
     const auto& options = context.get_tensor_options();
     const LlmModelArgs& model_args = context.get_llm_model_args();
-    const ModelArgsBundle& model_args_bundle = context.get_model_args_bundle();
+    const ModelArgs& all_model_args = context.get_model_args();
     const auto& parallel_args = context.get_parallel_args();
 
     enable_mla_ = model_args.enable_mla();
 
     embed_tokens_ =
         register_module("embed_tokens",
-                        layer::WordEmbedding(model_args_bundle.vocab_size(),
-                                             model_args_bundle.hidden_size(),
+                        layer::WordEmbedding(all_model_args.vocab_size(),
+                                             all_model_args.hidden_size(),
                                              parallel_args,
                                              options));
     norm_ = register_module("norm", layer::RMSNorm(context));
@@ -217,8 +217,8 @@ class MiniMaxM2ModelImpl : public torch::nn::Module {
     attn_mask_ = layer::AttentionMask(
         options.device(), options.dtype().toScalarType(), mask_value);
 
-    layers_.reserve(model_args_bundle.n_layers());
-    for (int32_t i = 0; i < model_args_bundle.n_layers(); ++i) {
+    layers_.reserve(all_model_args.n_layers());
+    for (int32_t i = 0; i < all_model_args.n_layers(); ++i) {
       layers_.push_back(register_module(std::to_string(i),
                                         MiniMaxM2MoeDecoderLayer(context, i)));
     }
@@ -334,8 +334,7 @@ TORCH_MODULE(MiniMaxM2Model);
 class MiniMaxM2ForCausalLMImpl : public torch::nn::Module {
  public:
   explicit MiniMaxM2ForCausalLMImpl(const ModelContext& context) {
-    tie_word_embeddings_ =
-        context.get_model_args_bundle().tie_word_embeddings();
+    tie_word_embeddings_ = context.get_model_args().tie_word_embeddings();
     model_ = register_module("model", MiniMaxM2Model(context));
     lm_head_ = register_module("lm_head", layer::LmHead(context));
   }

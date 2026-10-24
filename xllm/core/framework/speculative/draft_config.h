@@ -24,7 +24,7 @@ namespace xllm {
 
 // Converts Speculators hidden-state boundary indices (0 = embedding output, v =
 // output of layer v-1) into the 0-based post-layer capture indices consumed by
-// ModelArgs::layers_to_capture.
+// RawModelArgs::layers_to_capture.
 std::vector<int32_t> boundary_to_post_layer_ids(
     std::vector<int32_t> boundary_ids);
 

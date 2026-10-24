@@ -41,7 +41,7 @@ class DeepseekV4AttentionImpl final : public torch::nn::Module {
  public:
   DeepseekV4AttentionImpl() = default;
 
-  DeepseekV4AttentionImpl(const ModelArgs& args,
+  DeepseekV4AttentionImpl(const RawModelArgs& args,
                           const QuantArgs& quant_args,
                           const ParallelArgs& parallel_args,
                           const torch::TensorOptions& options,

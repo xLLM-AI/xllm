@@ -182,7 +182,7 @@ void ensure_xllm_runtime_module() {
 }  // namespace
 
 PyExecutorImpl::PyExecutorImpl(CausalLM* model,
-                               const ModelArgsBundle& args,
+                               const ModelArgs& args,
                                const torch::Device& device,
                                const runtime::Options& options)
     : py_causal_lm_(dynamic_cast<PyCausalLM*>(model)),

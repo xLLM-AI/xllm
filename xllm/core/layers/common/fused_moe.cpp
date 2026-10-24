@@ -20,7 +20,7 @@ limitations under the License.
 namespace xllm {
 namespace layer {
 
-FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
+FusedMoEImpl::FusedMoEImpl(const RawModelArgs& model_args,
                            const FusedMoEArgs& moe_args,
                            const QuantArgs& quant_args,
                            const ParallelArgs& parallel_args,

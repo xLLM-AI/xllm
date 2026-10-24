@@ -28,7 +28,7 @@ limitations under the License.
 namespace xllm {
 
 class EplbOptions;
-struct ModelArgs;
+struct RawModelArgs;
 
 // Owns the EPLB lifecycle at the engine boundary. The controller keeps
 // topology, input annotation, worker-result decoding, and overlap bookkeeping
@@ -36,7 +36,7 @@ struct ModelArgs;
 class EplbController final {
  public:
   // Returns nullptr when EPLB is disabled in the process configuration.
-  static std::unique_ptr<EplbController> create(const ModelArgs& model_args,
+  static std::unique_ptr<EplbController> create(const RawModelArgs& model_args,
                                                 int32_t worker_num,
                                                 int32_t ep_size);
 

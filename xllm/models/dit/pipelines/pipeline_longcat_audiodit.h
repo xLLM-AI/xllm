@@ -99,8 +99,8 @@ class LongCatAudioDiTPipelineImpl final : public torch::nn::Module {
     transformer_ = register_module("transformer", AudioDiTTransformer(tr_cfg));
 
     // UMT5 text encoder.
-    // In the flat layout the context has no per-component args; build ModelArgs
-    // from the known UMT5 config embedded in config.json.
+    // In the flat layout the context has no per-component args; build
+    // RawModelArgs from the known UMT5 config embedded in config.json.
     torch::TensorOptions t5_opts =
         context.get_tensor_options().dtype(torch::kFloat32);
     ModelContext t5_ctx;
@@ -108,7 +108,7 @@ class LongCatAudioDiTPipelineImpl final : public torch::nn::Module {
       t5_ctx = context.get_model_context("text_encoder")
                    .with_tensor_options(t5_opts);
     } else {
-      ModelArgs t5_args;
+      RawModelArgs t5_args;
       t5_args.vocab_size() = 256384;
       t5_args.d_model() = 768;
       t5_args.num_layers() = 12;

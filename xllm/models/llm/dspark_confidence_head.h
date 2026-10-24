@@ -186,7 +186,8 @@ class DSparkConfidenceHead final {
   // aligned with the empirical acceptance rate, which higher T approximates by
   // flattening confidence toward 0.5. The scaling path is kept for that future
   // calibration, but T is fixed at 1.0 (no scaling) here; when it becomes
-  // tunable it should arrive as a ModelArgs field, not a process-global knob.
+  // tunable it should arrive as a RawModelArgs field, not a process-global
+  // knob.
   static constexpr double confidence_temperature() { return 1.0; }
 
   torch::Tensor proj_weight_;  // [1, hidden_size (+ markov_rank)]

@@ -24,7 +24,7 @@ limitations under the License.
 
 namespace xllm::npu::model {
 
-MiniCPMPromptProcessor::MiniCPMPromptProcessor(const ModelArgs& args) {
+MiniCPMPromptProcessor::MiniCPMPromptProcessor(const RawModelArgs& args) {
   image_feature_size_ = args.mm_image_feature_size();
   max_slice_nums_ = args.vision_max_slice_nums();
   slice_mode_ = args.mm_slice_mode();

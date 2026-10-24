@@ -43,7 +43,7 @@ bool RecExecutorImplFactory::register_creator(const std::string& name,
 
 std::unique_ptr<RecExecutorBackend>
 RecExecutorImplFactory::create_executor_impl(RecModel* model,
-                                             const ModelArgsBundle& args,
+                                             const ModelArgs& args,
                                              const torch::Device& device,
                                              const runtime::Options& options,
                                              const std::string& backend) {

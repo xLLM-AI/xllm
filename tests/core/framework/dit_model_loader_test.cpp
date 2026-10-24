@@ -89,7 +89,7 @@ TEST_F(DiTModelLoaderTest, PreservesParserOnlyComponentRegistrations) {
   const std::string component = "dit_loader_parser_only_component_test";
   register_pipeline(pipeline);
   ModelRegistry::register_model_args_loader(
-      component, [](const JsonReader& reader, ModelArgs* args) {
+      component, [](const JsonReader& reader, RawModelArgs* args) {
         args->shift() = reader.value<int64_t>("shift").value();
         return true;
       });

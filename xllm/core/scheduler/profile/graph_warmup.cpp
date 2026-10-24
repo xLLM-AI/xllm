@@ -81,7 +81,7 @@ std::string next_warmup_request_id() {
 }
 
 void prepare_warmup_decode_sequence(Sequence* sequence,
-                                    const ModelArgs& model_args,
+                                    const RawModelArgs& model_args,
                                     int32_t num_speculative_tokens) {
   CHECK(sequence != nullptr);
   if (num_speculative_tokens <= 0) {
