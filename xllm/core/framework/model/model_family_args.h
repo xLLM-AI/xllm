@@ -42,7 +42,7 @@ inline const ModelArgs& default_model_args() {
 }  // namespace model_family_args_detail
 
 // Preserve the property interface while each field lives in its capability.
-#define XLLM_FORWARD_MODEL_PARAM(T, property, params)                  \
+#define MODEL_PARAM(T, property, params)                               \
  public:                                                               \
   [[nodiscard]] const T& property() const& noexcept {                  \
     return params.property();                                          \
@@ -64,152 +64,118 @@ inline const ModelArgs& default_model_args() {
 
 // Model-family arguments compose capability parameter objects directly.
 #define XLLM_FORWARD_COMMON_MODEL_PARAMS                                       \
-  XLLM_FORWARD_MODEL_PARAM(std::string, model_type, execution_params_);        \
-  XLLM_FORWARD_MODEL_PARAM(std::string, dtype, execution_params_);             \
-  XLLM_FORWARD_MODEL_PARAM(int64_t, hidden_size, execution_params_);           \
-  XLLM_FORWARD_MODEL_PARAM(std::string, hidden_act, execution_params_);        \
-  XLLM_FORWARD_MODEL_PARAM(int64_t, intermediate_size, execution_params_);     \
-  XLLM_FORWARD_MODEL_PARAM(int64_t, n_layers, execution_params_);              \
-  XLLM_FORWARD_MODEL_PARAM(int64_t, n_encoder_layers, execution_params_);      \
-  XLLM_FORWARD_MODEL_PARAM(int64_t, head_dim, attention_params_);              \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      int64_t, kv_cache_storage_head_dim, kv_cache_params_);                   \
-  XLLM_FORWARD_MODEL_PARAM(int64_t, decoder_head_dim, attention_params_);      \
-  XLLM_FORWARD_MODEL_PARAM(int64_t, n_heads, attention_params_);               \
-  XLLM_FORWARD_MODEL_PARAM(int64_t, decoder_n_heads, attention_params_);       \
-  XLLM_FORWARD_MODEL_PARAM(int64_t, actual_n_heads, attention_params_);        \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      std::optional<int64_t>, n_kv_heads, attention_params_);                  \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      std::optional<int64_t>, decoder_n_kv_heads, attention_params_);          \
-  XLLM_FORWARD_MODEL_PARAM(int64_t, vocab_size, execution_params_);            \
-  XLLM_FORWARD_MODEL_PARAM(int32_t, qk_nope_head_dim, attention_params_);      \
-  XLLM_FORWARD_MODEL_PARAM(int32_t, qk_rope_head_dim, attention_params_);      \
-  XLLM_FORWARD_MODEL_PARAM(int32_t, v_head_dim, attention_params_);            \
-  XLLM_FORWARD_MODEL_PARAM(int32_t, q_lora_rank, attention_params_);           \
-  XLLM_FORWARD_MODEL_PARAM(int32_t, kv_lora_rank, attention_params_);          \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      int32_t, num_nextn_predict_layers, speculative_params_);                 \
-  XLLM_FORWARD_MODEL_PARAM(bool, enable_mla, attention_params_);               \
-  XLLM_FORWARD_MODEL_PARAM(int32_t, num_experts_per_tok, moe_params_);         \
-  XLLM_FORWARD_MODEL_PARAM(bool, use_qk_norm, attention_params_);              \
-  XLLM_FORWARD_MODEL_PARAM(float, rms_norm_eps, attention_params_);            \
-  XLLM_FORWARD_MODEL_PARAM(float, layer_norm_eps, attention_params_);          \
-  XLLM_FORWARD_MODEL_PARAM(int64_t, rotary_dim, attention_params_);            \
-  XLLM_FORWARD_MODEL_PARAM(float, rope_theta, attention_params_);              \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      std::string, rope_scaling_rope_type, attention_params_);                 \
-  XLLM_FORWARD_MODEL_PARAM(float, rope_scaling_factor, attention_params_);     \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      float, rope_scaling_low_freq_factor, attention_params_);                 \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      float, rope_scaling_high_freq_factor, attention_params_);                \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      float, rope_extrapolation_factor, attention_params_);                    \
-  XLLM_FORWARD_MODEL_PARAM(int64_t,                                            \
-                           rope_scaling_original_max_position_embeddings,      \
-                           attention_params_);                                 \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      int64_t, rope_scaling_beta_fast, attention_params_);                     \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      int64_t, rope_scaling_beta_slow, attention_params_);                     \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      float, rope_scaling_attn_factor, attention_params_);                     \
-  XLLM_FORWARD_MODEL_PARAM(float, rope_scaling_mscale, attention_params_);     \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      float, rope_scaling_mscale_all_dim, attention_params_);                  \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
+  MODEL_PARAM(std::string, model_type, execution_params_);                     \
+  MODEL_PARAM(std::string, dtype, execution_params_);                          \
+  MODEL_PARAM(int64_t, hidden_size, execution_params_);                        \
+  MODEL_PARAM(std::string, hidden_act, execution_params_);                     \
+  MODEL_PARAM(int64_t, intermediate_size, execution_params_);                  \
+  MODEL_PARAM(int64_t, n_layers, execution_params_);                           \
+  MODEL_PARAM(int64_t, n_encoder_layers, execution_params_);                   \
+  MODEL_PARAM(int64_t, head_dim, attention_params_);                           \
+  MODEL_PARAM(int64_t, kv_cache_storage_head_dim, kv_cache_params_);           \
+  MODEL_PARAM(int64_t, decoder_head_dim, attention_params_);                   \
+  MODEL_PARAM(int64_t, n_heads, attention_params_);                            \
+  MODEL_PARAM(int64_t, decoder_n_heads, attention_params_);                    \
+  MODEL_PARAM(int64_t, actual_n_heads, attention_params_);                     \
+  MODEL_PARAM(std::optional<int64_t>, n_kv_heads, attention_params_);          \
+  MODEL_PARAM(std::optional<int64_t>, decoder_n_kv_heads, attention_params_);  \
+  MODEL_PARAM(int64_t, vocab_size, execution_params_);                         \
+  MODEL_PARAM(int32_t, qk_nope_head_dim, attention_params_);                   \
+  MODEL_PARAM(int32_t, qk_rope_head_dim, attention_params_);                   \
+  MODEL_PARAM(int32_t, v_head_dim, attention_params_);                         \
+  MODEL_PARAM(int32_t, q_lora_rank, attention_params_);                        \
+  MODEL_PARAM(int32_t, kv_lora_rank, attention_params_);                       \
+  MODEL_PARAM(int32_t, num_nextn_predict_layers, speculative_params_);         \
+  MODEL_PARAM(bool, enable_mla, attention_params_);                            \
+  MODEL_PARAM(int32_t, num_experts_per_tok, moe_params_);                      \
+  MODEL_PARAM(bool, use_qk_norm, attention_params_);                           \
+  MODEL_PARAM(float, rms_norm_eps, attention_params_);                         \
+  MODEL_PARAM(float, layer_norm_eps, attention_params_);                       \
+  MODEL_PARAM(int64_t, rotary_dim, attention_params_);                         \
+  MODEL_PARAM(float, rope_theta, attention_params_);                           \
+  MODEL_PARAM(std::string, rope_scaling_rope_type, attention_params_);         \
+  MODEL_PARAM(float, rope_scaling_factor, attention_params_);                  \
+  MODEL_PARAM(float, rope_scaling_low_freq_factor, attention_params_);         \
+  MODEL_PARAM(float, rope_scaling_high_freq_factor, attention_params_);        \
+  MODEL_PARAM(float, rope_extrapolation_factor, attention_params_);            \
+  MODEL_PARAM(int64_t,                                                         \
+              rope_scaling_original_max_position_embeddings,                   \
+              attention_params_);                                              \
+  MODEL_PARAM(int64_t, rope_scaling_beta_fast, attention_params_);             \
+  MODEL_PARAM(int64_t, rope_scaling_beta_slow, attention_params_);             \
+  MODEL_PARAM(float, rope_scaling_attn_factor, attention_params_);             \
+  MODEL_PARAM(float, rope_scaling_mscale, attention_params_);                  \
+  MODEL_PARAM(float, rope_scaling_mscale_all_dim, attention_params_);          \
+  MODEL_PARAM(                                                                 \
       std::vector<int64_t>, rope_scaling_mrope_section, attention_params_);    \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      bool, rope_scaling_mrope_interleaved, attention_params_);                \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      int64_t, max_position_embeddings, execution_params_);                    \
-  XLLM_FORWARD_MODEL_PARAM(bool, use_sliding_window, attention_params_);       \
-  XLLM_FORWARD_MODEL_PARAM(int32_t, sliding_window, attention_params_);        \
-  XLLM_FORWARD_MODEL_PARAM(int32_t, index_head_dim, kv_cache_params_);         \
-  XLLM_FORWARD_MODEL_PARAM(int32_t, index_n_heads, kv_cache_params_);          \
-  XLLM_FORWARD_MODEL_PARAM(int32_t, index_topk, kv_cache_params_);             \
-  XLLM_FORWARD_MODEL_PARAM(int32_t, index_kpool, kv_cache_params_);            \
-  XLLM_FORWARD_MODEL_PARAM(bool, index_kpool_compress, kv_cache_params_);      \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      bool, index_kpool_always_select_tail, kv_cache_params_);                 \
-  XLLM_FORWARD_MODEL_PARAM(bool, indexer_rope_interleave, kv_cache_params_);   \
-  XLLM_FORWARD_MODEL_PARAM(int32_t, index_topk_freq, kv_cache_params_);        \
-  XLLM_FORWARD_MODEL_PARAM(std::string, index_topk_pattern, kv_cache_params_); \
-  XLLM_FORWARD_MODEL_PARAM(int32_t, index_skip_topk_offset, kv_cache_params_); \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      bool, index_share_for_mtp_iteration, kv_cache_params_);                  \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      std::vector<std::string>, indexer_types, kv_cache_params_);              \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      std::vector<std::string>, mlp_layer_types, moe_params_);                 \
-  XLLM_FORWARD_MODEL_PARAM(int32_t, rope_head_dim, kv_cache_params_);          \
-  XLLM_FORWARD_MODEL_PARAM(int32_t, o_lora_rank, kv_cache_params_);            \
-  XLLM_FORWARD_MODEL_PARAM(int32_t, o_groups, kv_cache_params_);               \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      std::vector<int32_t>, compress_ratios, kv_cache_params_);                \
-  XLLM_FORWARD_MODEL_PARAM(float, compress_rope_theta, kv_cache_params_);      \
-  XLLM_FORWARD_MODEL_PARAM(int32_t, window_size, kv_cache_params_);            \
-  XLLM_FORWARD_MODEL_PARAM(int32_t, n_activated_experts, moe_params_);         \
-  XLLM_FORWARD_MODEL_PARAM(int32_t, n_hash_layers, moe_params_);               \
-  XLLM_FORWARD_MODEL_PARAM(float, factor, kv_cache_params_);                   \
-  XLLM_FORWARD_MODEL_PARAM(float, beta_fast, kv_cache_params_);                \
-  XLLM_FORWARD_MODEL_PARAM(float, beta_slow, kv_cache_params_);                \
-  XLLM_FORWARD_MODEL_PARAM(std::string, scale_fmt, kv_cache_params_);          \
-  XLLM_FORWARD_MODEL_PARAM(int32_t, hc_mult, kv_cache_params_);                \
-  XLLM_FORWARD_MODEL_PARAM(int32_t, hc_sinkhorn_iters, kv_cache_params_);      \
-  XLLM_FORWARD_MODEL_PARAM(float, hc_eps, kv_cache_params_);                   \
-  XLLM_FORWARD_MODEL_PARAM(int64_t, max_batch_size, kv_cache_params_);         \
-  XLLM_FORWARD_MODEL_PARAM(int64_t, max_seq_len, kv_cache_params_);            \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      bool, use_absolute_position_embedding, attention_params_);               \
-  XLLM_FORWARD_MODEL_PARAM(int32_t, bos_token_id, execution_params_);          \
-  XLLM_FORWARD_MODEL_PARAM(int32_t, eos_token_id, execution_params_);          \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      std::vector<int32_t>, eos_token_id_vec, execution_params_);              \
-  XLLM_FORWARD_MODEL_PARAM(int32_t, pad_token_id, execution_params_);          \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      std::optional<float>, attn_scalar, attention_params_);                   \
-  XLLM_FORWARD_MODEL_PARAM(bool, no_bias, execution_params_);                  \
-  XLLM_FORWARD_MODEL_PARAM(bool, qkv_bias, attention_params_);                 \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      std::unordered_set<int32_t>, stop_token_ids, execution_params_);         \
-  XLLM_FORWARD_MODEL_PARAM(bool, tie_word_embeddings, execution_params_);      \
-  XLLM_FORWARD_MODEL_PARAM(bool, attention_bias, attention_params_);           \
-  XLLM_FORWARD_MODEL_PARAM(float, attention_dropout, attention_params_);       \
-  XLLM_FORWARD_MODEL_PARAM(int32_t, decoder_sparse_step, moe_params_);         \
-  XLLM_FORWARD_MODEL_PARAM(float, initializer_range, execution_params_);       \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      std::vector<int32_t>, mlp_only_layers, moe_params_);                     \
-  XLLM_FORWARD_MODEL_PARAM(int64_t, num_attention_heads, attention_params_);   \
-  XLLM_FORWARD_MODEL_PARAM(int32_t, num_experts, moe_params_);                 \
-  XLLM_FORWARD_MODEL_PARAM(bool, output_router_logits, moe_params_);           \
-  XLLM_FORWARD_MODEL_PARAM(int32_t, rope_scaling, execution_params_);          \
-  XLLM_FORWARD_MODEL_PARAM(float, router_aux_loss_coef, moe_params_);          \
-  XLLM_FORWARD_MODEL_PARAM(bool, attn_output_gate, attention_params_);         \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      int32_t, full_attention_interval, linear_attention_params_);             \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
+  MODEL_PARAM(bool, rope_scaling_mrope_interleaved, attention_params_);        \
+  MODEL_PARAM(int64_t, max_position_embeddings, execution_params_);            \
+  MODEL_PARAM(bool, use_sliding_window, attention_params_);                    \
+  MODEL_PARAM(int32_t, sliding_window, attention_params_);                     \
+  MODEL_PARAM(int32_t, index_head_dim, kv_cache_params_);                      \
+  MODEL_PARAM(int32_t, index_n_heads, kv_cache_params_);                       \
+  MODEL_PARAM(int32_t, index_topk, kv_cache_params_);                          \
+  MODEL_PARAM(int32_t, index_kpool, kv_cache_params_);                         \
+  MODEL_PARAM(bool, index_kpool_compress, kv_cache_params_);                   \
+  MODEL_PARAM(bool, index_kpool_always_select_tail, kv_cache_params_);         \
+  MODEL_PARAM(bool, indexer_rope_interleave, kv_cache_params_);                \
+  MODEL_PARAM(int32_t, index_topk_freq, kv_cache_params_);                     \
+  MODEL_PARAM(std::string, index_topk_pattern, kv_cache_params_);              \
+  MODEL_PARAM(int32_t, index_skip_topk_offset, kv_cache_params_);              \
+  MODEL_PARAM(bool, index_share_for_mtp_iteration, kv_cache_params_);          \
+  MODEL_PARAM(std::vector<std::string>, indexer_types, kv_cache_params_);      \
+  MODEL_PARAM(std::vector<std::string>, mlp_layer_types, moe_params_);         \
+  MODEL_PARAM(int32_t, rope_head_dim, kv_cache_params_);                       \
+  MODEL_PARAM(int32_t, o_lora_rank, kv_cache_params_);                         \
+  MODEL_PARAM(int32_t, o_groups, kv_cache_params_);                            \
+  MODEL_PARAM(std::vector<int32_t>, compress_ratios, kv_cache_params_);        \
+  MODEL_PARAM(float, compress_rope_theta, kv_cache_params_);                   \
+  MODEL_PARAM(int32_t, window_size, kv_cache_params_);                         \
+  MODEL_PARAM(int32_t, n_activated_experts, moe_params_);                      \
+  MODEL_PARAM(int32_t, n_hash_layers, moe_params_);                            \
+  MODEL_PARAM(float, factor, kv_cache_params_);                                \
+  MODEL_PARAM(float, beta_fast, kv_cache_params_);                             \
+  MODEL_PARAM(float, beta_slow, kv_cache_params_);                             \
+  MODEL_PARAM(std::string, scale_fmt, kv_cache_params_);                       \
+  MODEL_PARAM(int32_t, hc_mult, kv_cache_params_);                             \
+  MODEL_PARAM(int32_t, hc_sinkhorn_iters, kv_cache_params_);                   \
+  MODEL_PARAM(float, hc_eps, kv_cache_params_);                                \
+  MODEL_PARAM(int64_t, max_batch_size, kv_cache_params_);                      \
+  MODEL_PARAM(int64_t, max_seq_len, kv_cache_params_);                         \
+  MODEL_PARAM(bool, use_absolute_position_embedding, attention_params_);       \
+  MODEL_PARAM(int32_t, bos_token_id, execution_params_);                       \
+  MODEL_PARAM(int32_t, eos_token_id, execution_params_);                       \
+  MODEL_PARAM(std::vector<int32_t>, eos_token_id_vec, execution_params_);      \
+  MODEL_PARAM(int32_t, pad_token_id, execution_params_);                       \
+  MODEL_PARAM(std::optional<float>, attn_scalar, attention_params_);           \
+  MODEL_PARAM(bool, no_bias, execution_params_);                               \
+  MODEL_PARAM(bool, qkv_bias, attention_params_);                              \
+  MODEL_PARAM(std::unordered_set<int32_t>, stop_token_ids, execution_params_); \
+  MODEL_PARAM(bool, tie_word_embeddings, execution_params_);                   \
+  MODEL_PARAM(bool, attention_bias, attention_params_);                        \
+  MODEL_PARAM(float, attention_dropout, attention_params_);                    \
+  MODEL_PARAM(int32_t, decoder_sparse_step, moe_params_);                      \
+  MODEL_PARAM(float, initializer_range, execution_params_);                    \
+  MODEL_PARAM(std::vector<int32_t>, mlp_only_layers, moe_params_);             \
+  MODEL_PARAM(int64_t, num_attention_heads, attention_params_);                \
+  MODEL_PARAM(int32_t, num_experts, moe_params_);                              \
+  MODEL_PARAM(bool, output_router_logits, moe_params_);                        \
+  MODEL_PARAM(int32_t, rope_scaling, execution_params_);                       \
+  MODEL_PARAM(float, router_aux_loss_coef, moe_params_);                       \
+  MODEL_PARAM(bool, attn_output_gate, attention_params_);                      \
+  MODEL_PARAM(int32_t, full_attention_interval, linear_attention_params_);     \
+  MODEL_PARAM(                                                                 \
       std::vector<int32_t>, full_attn_layers, linear_attention_params_);       \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      int32_t, linear_conv_kernel_dim, linear_attention_params_);              \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      int32_t, linear_key_head_dim, linear_attention_params_);                 \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      int32_t, linear_value_head_dim, linear_attention_params_);               \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      int64_t, linear_num_key_heads, linear_attention_params_);                \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      int32_t, linear_num_value_heads, linear_attention_params_);              \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      float, linear_lower_bound, linear_attention_params_);                    \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      std::string, mamba_ssm_dtype, linear_attention_params_);                 \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      int32_t, shared_expert_intermediate_size, moe_params_);                  \
-  XLLM_FORWARD_MODEL_PARAM(float, partial_rotary_factor, attention_params_);   \
-  XLLM_FORWARD_MODEL_PARAM(                                                    \
-      std::vector<std::string>, layer_types, linear_attention_params_);
+  MODEL_PARAM(int32_t, linear_conv_kernel_dim, linear_attention_params_);      \
+  MODEL_PARAM(int32_t, linear_key_head_dim, linear_attention_params_);         \
+  MODEL_PARAM(int32_t, linear_value_head_dim, linear_attention_params_);       \
+  MODEL_PARAM(int64_t, linear_num_key_heads, linear_attention_params_);        \
+  MODEL_PARAM(int32_t, linear_num_value_heads, linear_attention_params_);      \
+  MODEL_PARAM(float, linear_lower_bound, linear_attention_params_);            \
+  MODEL_PARAM(std::string, mamba_ssm_dtype, linear_attention_params_);         \
+  MODEL_PARAM(int32_t, shared_expert_intermediate_size, moe_params_);          \
+  MODEL_PARAM(float, partial_rotary_factor, attention_params_);                \
+  MODEL_PARAM(std::vector<std::string>, layer_types, linear_attention_params_);
 
 class LlmModelArgs final {
  private:
@@ -278,66 +244,50 @@ class LlmModelArgs final {
 
   XLLM_FORWARD_COMMON_MODEL_PARAMS
 
-  XLLM_FORWARD_MODEL_PARAM(int32_t, first_k_dense_replace, moe_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, moe_layer_freq, moe_params_);
-  XLLM_FORWARD_MODEL_PARAM(int64_t, draft_vocab_size, speculative_params_);
-  XLLM_FORWARD_MODEL_PARAM(int64_t, markov_rank, speculative_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, dspark_num_layers, speculative_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, dspark_block_size, speculative_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool, dspark_use_native_sas, speculative_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool, enable_confidence_head, speculative_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool,
-                           confidence_head_with_markov,
-                           speculative_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, dflash2_block_size, speculative_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           dflash2_conv_group_size,
-                           speculative_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           dflash2_conv_kernel_size,
-                           speculative_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, dflash2_selector_rank, speculative_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           dflash2_selector_top_k,
-                           speculative_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool, use_moe, moe_params_);
-  XLLM_FORWARD_MODEL_PARAM(std::string, moe_score_func, moe_params_);
-  XLLM_FORWARD_MODEL_PARAM(float, moe_route_scale, moe_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool, moe_use_shared_experts, moe_params_);
-  XLLM_FORWARD_MODEL_PARAM(std::string, topk_method, moe_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, n_routed_experts, moe_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, n_shared_experts, moe_params_);
+  MODEL_PARAM(int32_t, first_k_dense_replace, moe_params_);
+  MODEL_PARAM(int32_t, moe_layer_freq, moe_params_);
+  MODEL_PARAM(int64_t, draft_vocab_size, speculative_params_);
+  MODEL_PARAM(int64_t, markov_rank, speculative_params_);
+  MODEL_PARAM(int32_t, dspark_num_layers, speculative_params_);
+  MODEL_PARAM(int32_t, dspark_block_size, speculative_params_);
+  MODEL_PARAM(bool, dspark_use_native_sas, speculative_params_);
+  MODEL_PARAM(bool, enable_confidence_head, speculative_params_);
+  MODEL_PARAM(bool, confidence_head_with_markov, speculative_params_);
+  MODEL_PARAM(int32_t, dflash2_block_size, speculative_params_);
+  MODEL_PARAM(int32_t, dflash2_conv_group_size, speculative_params_);
+  MODEL_PARAM(int32_t, dflash2_conv_kernel_size, speculative_params_);
+  MODEL_PARAM(int32_t, dflash2_selector_rank, speculative_params_);
+  MODEL_PARAM(int32_t, dflash2_selector_top_k, speculative_params_);
+  MODEL_PARAM(bool, use_moe, moe_params_);
+  MODEL_PARAM(std::string, moe_score_func, moe_params_);
+  MODEL_PARAM(float, moe_route_scale, moe_params_);
+  MODEL_PARAM(bool, moe_use_shared_experts, moe_params_);
+  MODEL_PARAM(std::string, topk_method, moe_params_);
+  MODEL_PARAM(int32_t, n_routed_experts, moe_params_);
+  MODEL_PARAM(int32_t, n_shared_experts, moe_params_);
 
-  XLLM_FORWARD_MODEL_PARAM(int32_t, moe_intermediate_size, moe_params_);
-  XLLM_FORWARD_MODEL_PARAM(float, routed_scaling_factor, moe_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool, norm_topk_prob, moe_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, n_group, moe_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, topk_group, moe_params_);
-  XLLM_FORWARD_MODEL_PARAM(std::string, scoring_func, moe_params_);
-  XLLM_FORWARD_MODEL_PARAM(float, swiglu_limit, moe_params_);
+  MODEL_PARAM(int32_t, moe_intermediate_size, moe_params_);
+  MODEL_PARAM(float, routed_scaling_factor, moe_params_);
+  MODEL_PARAM(bool, norm_topk_prob, moe_params_);
+  MODEL_PARAM(int32_t, n_group, moe_params_);
+  MODEL_PARAM(int32_t, topk_group, moe_params_);
+  MODEL_PARAM(std::string, scoring_func, moe_params_);
+  MODEL_PARAM(float, swiglu_limit, moe_params_);
 
-  XLLM_FORWARD_MODEL_PARAM(int64_t, mtp_start_layer_idx, speculative_params_);
-  XLLM_FORWARD_MODEL_PARAM(std::string, mtp_mlp_type, speculative_params_);
+  MODEL_PARAM(int64_t, mtp_start_layer_idx, speculative_params_);
+  MODEL_PARAM(std::string, mtp_mlp_type, speculative_params_);
 
-  XLLM_FORWARD_MODEL_PARAM(int32_t, max_window_layers, attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(int64_t,
-                           num_speculative_tokens,
-                           speculative_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool,
-                           enable_embedded_eagle3_draft,
-                           speculative_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t,
-                           max_concurrent_prefills_per_dp,
-                           execution_params_);
-  XLLM_FORWARD_MODEL_PARAM(std::vector<int32_t>,
-                           layers_to_capture,
-                           speculative_params_);
+  MODEL_PARAM(int32_t, max_window_layers, attention_params_);
+  MODEL_PARAM(int64_t, num_speculative_tokens, speculative_params_);
+  MODEL_PARAM(bool, enable_embedded_eagle3_draft, speculative_params_);
+  MODEL_PARAM(int32_t, max_concurrent_prefills_per_dp, execution_params_);
+  MODEL_PARAM(std::vector<int32_t>, layers_to_capture, speculative_params_);
 
-  XLLM_FORWARD_MODEL_PARAM(bool, norm_before_fc, speculative_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool, norm_before_residual, speculative_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool, norm_output, speculative_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool, fc_norm, speculative_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool, embedding_mode, embedding_params_);
+  MODEL_PARAM(bool, norm_before_fc, speculative_params_);
+  MODEL_PARAM(bool, norm_before_residual, speculative_params_);
+  MODEL_PARAM(bool, norm_output, speculative_params_);
+  MODEL_PARAM(bool, fc_norm, speculative_params_);
+  MODEL_PARAM(bool, embedding_mode, embedding_params_);
 };
 
 class VlmVisionModelArgs final {
@@ -674,22 +624,18 @@ class RecModelArgs final {
 
   XLLM_FORWARD_COMMON_MODEL_PARAMS
 
-  XLLM_FORWARD_MODEL_PARAM(int32_t, query_num, embedding_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool, encoder_embedding_mode, embedding_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool, embedding_mode, embedding_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool, use_moe, moe_params_);
-  XLLM_FORWARD_MODEL_PARAM(float, moe_route_scale, moe_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool, moe_use_shared_experts, moe_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, n_routed_experts, moe_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, n_shared_experts, moe_params_);
-  XLLM_FORWARD_MODEL_PARAM(int32_t, moe_intermediate_size, moe_params_);
+  MODEL_PARAM(int32_t, query_num, embedding_params_);
+  MODEL_PARAM(bool, encoder_embedding_mode, embedding_params_);
+  MODEL_PARAM(bool, embedding_mode, embedding_params_);
+  MODEL_PARAM(bool, use_moe, moe_params_);
+  MODEL_PARAM(float, moe_route_scale, moe_params_);
+  MODEL_PARAM(bool, moe_use_shared_experts, moe_params_);
+  MODEL_PARAM(int32_t, n_routed_experts, moe_params_);
+  MODEL_PARAM(int32_t, n_shared_experts, moe_params_);
+  MODEL_PARAM(int32_t, moe_intermediate_size, moe_params_);
 
-  XLLM_FORWARD_MODEL_PARAM(int64_t,
-                           relative_attention_num_buckets,
-                           attention_params_);
-  XLLM_FORWARD_MODEL_PARAM(int64_t,
-                           relative_attention_max_distance,
-                           attention_params_);
+  MODEL_PARAM(int64_t, relative_attention_num_buckets, attention_params_);
+  MODEL_PARAM(int64_t, relative_attention_max_distance, attention_params_);
 };
 
 class VlmModelArgs final {
@@ -764,12 +710,10 @@ class VlmModelArgs final {
 
   XLLM_FORWARD_COMMON_MODEL_PARAMS
 
-  XLLM_FORWARD_MODEL_PARAM(int32_t, query_num, embedding_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool, encoder_embedding_mode, embedding_params_);
-  XLLM_FORWARD_MODEL_PARAM(bool, embedding_mode, embedding_params_);
-  XLLM_FORWARD_MODEL_PARAM(int64_t,
-                           num_speculative_tokens,
-                           speculative_params_);
+  MODEL_PARAM(int32_t, query_num, embedding_params_);
+  MODEL_PARAM(bool, encoder_embedding_mode, embedding_params_);
+  MODEL_PARAM(bool, embedding_mode, embedding_params_);
+  MODEL_PARAM(int64_t, num_speculative_tokens, speculative_params_);
 };
 
 class DiTTransformerModelArgs final {
@@ -1212,7 +1156,7 @@ class DiTSchedulerModelArgs final {
 };
 
 #undef XLLM_FORWARD_COMMON_MODEL_PARAMS
-#undef XLLM_FORWARD_MODEL_PARAM
+#undef MODEL_PARAM
 
 enum class DiTComponentType : uint8_t {
   UNKNOWN = 0,
