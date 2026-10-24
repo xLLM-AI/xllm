@@ -114,6 +114,10 @@ TYPED_TEST(ForwardSharedMemoryInputTest,
   TypeParam lazy_input;
   {
     TypeParam source = make_input<TypeParam>(expected);
+    RequestSamplingParam greedy;
+    greedy.temperature = 0;
+    RequestSamplingParam random;
+    source.sampling_params.init({&greedy, &random}, {0, 1}, {}, {}, {});
     proto::PackedForwardInput packed_input;
     ASSERT_TRUE(source.to_packed_proto(&packed_input));
     ASSERT_TRUE(lazy_input.from_packed_proto(packed_input));
@@ -123,6 +127,9 @@ TYPED_TEST(ForwardSharedMemoryInputTest,
 
   TypeParam decoded =
       lazy_input.to(torch::Device(torch::kCPU), torch::kFloat32);
+  EXPECT_EQ(decoded.sampling_params.num_random_sample_rows, 1);
+  EXPECT_TRUE(torch::equal(decoded.sampling_params.do_sample,
+                           torch::tensor({false, true})));
   ASSERT_EQ(decoded.transfer_kv_infos.size(), 1);
   const auto& transfer = decoded.transfer_kv_infos.front();
   EXPECT_EQ(transfer.request_id, "sparse-index");
@@ -151,6 +158,10 @@ TYPED_TEST(ForwardSharedMemoryInputTest,
   ASSERT_FALSE(is_creator);
   const LayerOffsets expected = make_sparse_role_offsets();
   TypeParam source = make_input<TypeParam>(expected);
+  RequestSamplingParam greedy;
+  greedy.temperature = 0;
+  RequestSamplingParam random;
+  source.sampling_params.init({&random, &greedy}, {0, 1}, {}, {}, {});
   ASSERT_TRUE(
       ForwardSharedMemoryManager::can_write_input(source, kSegmentBytes));
   ASSERT_TRUE(writer.input_write(source));
@@ -161,6 +172,7 @@ TYPED_TEST(ForwardSharedMemoryInputTest,
       decoded,
       torch::Device(torch::kCPU),
       InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE));
+  EXPECT_EQ(decoded.sampling_params.num_random_sample_rows, 1);
   ASSERT_EQ(decoded.transfer_kv_infos.size(), 1);
   expect_role_offsets(decoded.transfer_kv_infos.front()
                           .dst_virtual_kv_cache_layer_global_offsets,
@@ -177,6 +189,10 @@ TYPED_TEST(ForwardSharedMemoryInputTest,
   expect_role_offsets(decoded.transfer_kv_infos.front()
                           .dst_virtual_kv_cache_layer_global_offsets,
                       shorter);
+  EXPECT_EQ(decoded.sampling_params.num_random_sample_rows, -1);
+  EXPECT_EQ(decoded.input_host_sample_count, 0);
+  EXPECT_FALSE(decoded.sampling_params.selected_token_idxes.defined());
+  EXPECT_FALSE(decoded.sampling_params.do_sample.defined());
 }
 
 }  // namespace

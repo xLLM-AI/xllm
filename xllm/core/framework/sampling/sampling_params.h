@@ -191,6 +191,11 @@ struct SamplingParameters {
   // How this batch's sequences are sampled (see SamplingMode).
   SamplingMode sampling_mode = SamplingMode::GREEDY;
 
+  // Host-derived count for mixed-row filtering. Known counts require the
+  // normalized greedy parameters produced by init(). -1 disables compaction
+  // for manually constructed or expanded sampling row domains.
+  int64_t num_random_sample_rows = -1;
+
   // whether to output logprobs for each generated token.
   bool logprobs = false;
 
@@ -298,6 +303,7 @@ inline bool SamplingParameters::has_sampling_fields() const {
 template <typename Repeats>
 inline void repeat_sampling_params(SamplingParameters& sampling_params,
                                    const Repeats& repeats) {
+  sampling_params.num_random_sample_rows = -1;
   for (const auto& field : kSamplingFields) {
     repeat_interleave_if_defined(sampling_params.*field.member, repeats);
   }

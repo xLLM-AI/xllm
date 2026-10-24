@@ -43,7 +43,7 @@ endif()
 cc_test(
   NAME sampler_controls_test
   NO_NPU_RUNTIME
-  SRCS logits_utils_test.cpp sampler_controls_test.cpp ${SAMPLER_CONTROLS_DEVICE_TEST_SRCS}
+  SRCS logits_utils_test.cpp sampler_controls_test.cpp mixed_sampler_test.cpp ${SAMPLER_CONTROLS_DEVICE_TEST_SRCS}
   DEPS absl::strings GTest::gtest_main :config :sampler glog::glog :state_dict
 )
 target_link_libraries(sampler_controls_test PRIVATE

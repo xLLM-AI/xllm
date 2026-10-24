@@ -98,10 +98,76 @@ void Sampler::apply_sampling_penalties(torch::Tensor& logits,
 
 namespace {
 
+torch::Tensor apply_logits_transforms(torch::Tensor& logits,
+                                      const torch::Tensor& temperatures,
+                                      const torch::Tensor& min_p,
+                                      const torch::Tensor& top_k,
+                                      const torch::Tensor& top_p,
+                                      bool return_probs) {
+  const bool has_transforms = temperatures.defined() || min_p.defined() ||
+                              top_k.defined() || top_p.defined();
+  if (has_transforms) {
+    kernel::FusedLogitsTransformParams transform_params{
+        logits, temperatures, min_p, top_k, top_p, return_probs};
+    if (kernel::supports_fused_logits_transform(transform_params)) {
+      return kernel::fused_logits_transform(transform_params);
+    }
+  }
+  if (temperatures.defined()) {
+    apply_temperatures(logits, temperatures);
+  }
+  apply_min_p(logits, min_p);
+  apply_top_k_top_p(logits, torch::Tensor(), top_k, top_p);
+  return {};
+}
+
+bool supports_row_selection(const torch::Tensor& parameter,
+                            const torch::Tensor& logits) {
+  return !parameter.defined() ||
+         (parameter.dim() == 1 && parameter.size(0) == logits.size(0) &&
+          parameter.device() == logits.device());
+}
+
+torch::Tensor select_rows(const torch::Tensor& parameter,
+                          const torch::Tensor& indices) {
+  return parameter.defined() ? parameter.index_select(/*dim=*/0, indices)
+                             : parameter;
+}
+
+bool supports_random_row_compaction(const torch::Tensor& logits,
+                                    const SamplingParameters& params,
+                                    const torch::Tensor& top_p) {
+  // Row gathering pays off when enough expensive vocabulary filtering is
+  // avoided. Small batches, small vocabularies, and mostly-random batches
+  // retain the regular path to avoid extra indexing launches and copies.
+  constexpr int64_t kMinCompactRows = 64;
+  constexpr int64_t kMinCompactVocabulary = 65536;
+  constexpr int64_t kMinCompactElements = 8 * 1024 * 1024;
+  // The transforms and row mapping are shared Torch operations. Enable other
+  // devices after validating their indexing cost and sampling semantics.
+  bool compact_device = logits.device().is_cpu();
+#if defined(USE_CUDA) && !defined(USE_MACA)
+  compact_device = compact_device || logits.device().is_cuda();
+#endif
+  return compact_device && logits.dim() == 2 &&
+         logits.size(0) >= kMinCompactRows &&
+         logits.size(1) >= kMinCompactVocabulary &&
+         logits.numel() >= kMinCompactElements &&
+         params.sampling_mode == SamplingMode::MIXED &&
+         params.num_random_sample_rows > 0 &&
+         params.num_random_sample_rows <= logits.size(0) / 2 &&
+         supports_row_selection(params.temperatures, logits) &&
+         supports_row_selection(params.min_p, logits) &&
+         supports_row_selection(params.top_k, logits) &&
+         supports_row_selection(top_p, logits) &&
+         (params.top_k.defined() || top_p.defined());
+}
+
 torch::Tensor process_logits_impl(torch::Tensor& logits,
                                   const SamplingParameters& params,
                                   const torch::Tensor& filter_mask,
-                                  bool return_probs) {
+                                  bool return_probs,
+                                  bool compact_random_rows) {
   const torch::Tensor& effective_filter_mask =
       filter_mask.defined() ? filter_mask : params.filter_mask;
   Sampler::apply_sampling_penalties(logits, params);
@@ -135,26 +201,33 @@ torch::Tensor process_logits_impl(torch::Tensor& logits,
     // Native top-k/top-p consumes top-p in the logits dtype.
     top_p = top_p.to(logits.scalar_type());
   }
-  const bool has_transforms = params.temperatures.defined() ||
-                              params.min_p.defined() ||
-                              params.top_k.defined() || top_p.defined();
-  if (has_transforms) {
-    kernel::FusedLogitsTransformParams transform_params{logits,
-                                                        params.temperatures,
-                                                        params.min_p,
-                                                        params.top_k,
-                                                        top_p,
-                                                        return_probs};
-    if (kernel::supports_fused_logits_transform(transform_params)) {
-      return kernel::fused_logits_transform(transform_params);
-    }
+  if (compact_random_rows &&
+      supports_random_row_compaction(logits, params, top_p)) {
+    // The host count fixes the selected shape without a device-to-host read.
+    // Keep the full probability/draw row domain below, preserving global RNG
+    // consumption and row-dependent random streams.
+    const auto sorted =
+        torch::sort(params.require_do_sample().to(torch::kInt32),
+                    /*dim=*/0,
+                    /*descending=*/true);
+    const auto indices = std::get<1>(sorted).narrow(
+        /*dim=*/0, /*start=*/0, params.num_random_sample_rows);
+    auto selected_logits = logits.index_select(/*dim=*/0, indices);
+    apply_logits_transforms(selected_logits,
+                            select_rows(params.temperatures, indices),
+                            select_rows(params.min_p, indices),
+                            select_rows(params.top_k, indices),
+                            select_rows(top_p, indices),
+                            /*return_probs=*/false);
+    logits.index_copy_(/*dim=*/0, indices, selected_logits);
+    return {};
   }
-  if (params.temperatures.defined()) {
-    apply_temperatures(logits, params.temperatures);
-  }
-  apply_min_p(logits, params.min_p);
-  apply_top_k_top_p(logits, torch::Tensor(), params.top_k, top_p);
-  return {};
+  return apply_logits_transforms(logits,
+                                 params.temperatures,
+                                 params.min_p,
+                                 params.top_k,
+                                 top_p,
+                                 return_probs);
 }
 
 }  // namespace
@@ -162,7 +235,11 @@ torch::Tensor process_logits_impl(torch::Tensor& logits,
 void Sampler::process_logits(torch::Tensor& logits,
                              const SamplingParameters& params,
                              const torch::Tensor& filter_mask) {
-  process_logits_impl(logits, params, filter_mask, /*return_probs=*/false);
+  process_logits_impl(logits,
+                      params,
+                      filter_mask,
+                      /*return_probs=*/false,
+                      /*compact_random_rows=*/false);
 }
 
 SampleOutput Sampler::forward(torch::Tensor& logits,
@@ -179,7 +256,9 @@ SampleOutput Sampler::forward(torch::Tensor& logits,
       logits,
       params,
       filter_mask,
-      /*return_probs=*/params.sampling_mode != SamplingMode::GREEDY);
+      /*return_probs=*/params.sampling_mode != SamplingMode::GREEDY,
+      /*compact_random_rows=*/!params.logprobs && !params.return_logits &&
+          !params.use_beam_search);
 
   // Keep the model dtype; consumers upcast where the reduction needs fp32.
   if (params.return_logits) {

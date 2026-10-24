@@ -639,6 +639,10 @@ Status SlotBuffer::validate_sampling(const SamplingParameters& input,
     return invalid_input();
   }
   const int64_t rows = input.num_sample_seqs();
+  if (input.num_random_sample_rows < -1 ||
+      input.num_random_sample_rows > rows) {
+    return invalid_input();
+  }
   if (!sampling_host_.selected_token_idxes.defined() ||
       rows > capacity_.max_sample_rows || (rows > 0 && model_tokens == 0)) {
     return invalid_input();
@@ -700,6 +704,18 @@ Status SlotBuffer::validate_sampling(const SamplingParameters& input,
       (rows > 0 && input.sampling_mode == SamplingMode::MIXED &&
        !input.do_sample.defined())) {
     return invalid_input();
+  }
+  if (input.num_random_sample_rows >= 0) {
+    int64_t random_rows = 0;
+    if (input.sampling_mode == SamplingMode::RANDOM) {
+      random_rows = rows;
+    } else if (input.sampling_mode == SamplingMode::MIXED && rows > 0) {
+      const bool* begin = input.do_sample.const_data_ptr<bool>();
+      random_rows = std::count(begin, begin + rows, true);
+    }
+    if (input.num_random_sample_rows != random_rows) {
+      return invalid_input();
+    }
   }
   if (rows > 0) {
     if (!all_values<int32_t>(
@@ -1049,6 +1065,7 @@ void SlotBuffer::prepare_sampling(const SamplingParameters& input) {
       prepared.*field.member = device.view(source.sizes());
     }
     prepared.sampling_mode = input.sampling_mode;
+    prepared.num_random_sample_rows = input.num_random_sample_rows;
     prepared.logprobs = input.logprobs;
     prepared.return_logits = input.return_logits;
     prepared.max_top_logprobs = input.max_top_logprobs;

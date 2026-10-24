@@ -863,6 +863,8 @@ class SlotSamplingInputTest
     }
     EXPECT_EQ(reference.sampling_mode,
               binding_->sampling_params().sampling_mode);
+    EXPECT_EQ(reference.num_random_sample_rows,
+              binding_->sampling_params().num_random_sample_rows);
     EXPECT_EQ(reference.logprobs, binding_->sampling_params().logprobs);
     EXPECT_EQ(reference.return_logits,
               binding_->sampling_params().return_logits);
@@ -955,6 +957,29 @@ TEST_P(SlotSamplingInputTest, DoSampleBindingSurvivesInvalidReprepare) {
   EXPECT_FALSE(binding_->sampling_params().do_sample.defined());
   EXPECT_EQ(binding_->pinned_bytes(), pinned_bytes);
   EXPECT_EQ(binding_->device_bytes(), device_bytes);
+}
+
+TEST_P(SlotSamplingInputTest, MixedRowCountSurvivesStagingAndRejectsMismatch) {
+  RequestSamplingParam greedy;
+  greedy.temperature = 0;
+  RequestSamplingParam random;
+  random.top_k = 16;
+  random.top_p = 0.9F;
+  SamplingParameters input;
+  input.init({&greedy, &random, &greedy, &random}, {0, 1, 2, 3}, {}, {}, {});
+  ASSERT_TRUE(prepare_sampling(input, 4, *prepare_).ok());
+  handoff();
+  EXPECT_EQ(binding_->sampling_params().num_random_sample_rows, 2);
+  SamplingParameters invalid = input;
+  invalid.num_random_sample_rows = 1;
+  expect_rejected(invalid, 4);
+  invalid.num_random_sample_rows = -2;
+  expect_rejected(invalid, 4);
+  EXPECT_EQ(binding_->sampling_params().num_random_sample_rows, 2);
+  input.init({&greedy}, {0}, {}, {}, {});
+  ASSERT_TRUE(prepare_sampling(input, 1, *prepare_).ok());
+  handoff();
+  EXPECT_EQ(binding_->sampling_params().num_random_sample_rows, 0);
 }
 
 TEST_P(SlotSamplingInputTest, FixedAddressesSurviveShapeAndFeatureChanges) {

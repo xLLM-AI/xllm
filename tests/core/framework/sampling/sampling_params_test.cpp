@@ -41,6 +41,27 @@ TEST(SamplingParamsTest, NormalizesGreedyAndSmallTemperatureRows) {
   EXPECT_FALSE(params.top_p.defined());
   EXPECT_FALSE(params.sampling_mode == SamplingMode::RANDOM);
   EXPECT_FALSE(params.sampling_mode == SamplingMode::GREEDY);
+  EXPECT_EQ(params.num_random_sample_rows, 1);
+  EXPECT_EQ(params.to(torch::Device(torch::kCPU), torch::kFloat32)
+                .num_random_sample_rows,
+            1);
+
+  expand_sampling_params_for_verify(params,
+                                    /*repeats=*/2,
+                                    /*total_num_val_tokens=*/4,
+                                    torch::Device(torch::kCPU));
+  EXPECT_EQ(params.num_random_sample_rows, -1);
+  prepare_draft_sampling(DraftSamplingMode::GREEDY, params);
+  EXPECT_EQ(params.num_random_sample_rows, 0);
+
+  params.init({&random, &random}, {0, 1}, {}, {}, {});
+  EXPECT_EQ(params.num_random_sample_rows, 2);
+  repeat_sampling_params(params, /*repeats=*/2);
+  EXPECT_EQ(params.num_random_sample_rows, -1);
+  params.init({&greedy, &greedy}, {0, 1}, {}, {}, {});
+  EXPECT_EQ(params.num_random_sample_rows, 0);
+  params.init({}, {}, {}, {}, {});
+  EXPECT_EQ(params.num_random_sample_rows, 0);
 }
 
 TEST(SamplingParamsTest, MinimumConstraintsExpandForVerifyAndStayOffDrafts) {

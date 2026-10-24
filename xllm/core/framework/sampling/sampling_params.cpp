@@ -262,6 +262,7 @@ void SamplingParameters::init(
   this->sampling_mode =
       all_random ? SamplingMode::RANDOM
                  : (any_random ? SamplingMode::MIXED : SamplingMode::GREEDY);
+  this->num_random_sample_rows = static_cast<int64_t>(num_random_seqs);
   this->logprobs = logprobs;
   this->max_top_logprobs = max_top_logprobs;
   this->is_embeddings = is_embeddings;
@@ -325,6 +326,7 @@ SamplingParameters SamplingParameters::to(const torch::Device& device,
   params.do_sample = safe_to(do_sample, device, true);
   params.acc_logprob = safe_to(acc_logprob, device, true);
   params.sampling_mode = sampling_mode;
+  params.num_random_sample_rows = num_random_sample_rows;
   params.logprobs = logprobs;
   params.return_logits = return_logits;
   params.max_top_logprobs = max_top_logprobs;
@@ -346,6 +348,7 @@ void prepare_draft_sampling(DraftSamplingMode mode,
   sampling_params.min_token_ids = torch::Tensor();
   if (mode == DraftSamplingMode::GREEDY) {
     sampling_params.sampling_mode = SamplingMode::GREEDY;
+    sampling_params.num_random_sample_rows = 0;
     sampling_params.do_sample = torch::Tensor();
     clear_sampling_transforms(sampling_params);
   }
