@@ -16,44 +16,38 @@ limitations under the License.
 #pragma once
 #include <torch/types.h>
 
-#include "constrained_decoding.h"
-#include "util/threadpool.h"
-
 namespace xllm {
 
 class RecVocabDict;
 
-class RecConstrainedDecoding : public ConstrainedDecoding {
+// OneRec vocab whitelist: a mask cache is precomputed for fixed constraints
+// and a dynamic [sequence_num, vocab_size] additive mask (0.0f allowed,
+// large negative forbidden) is generated from already-generated tokens.
+class RecConstrainedDecoding final {
  public:
   RecConstrainedDecoding(RecVocabDict* vocab_dict,
                          const int32_t vocab_size,
                          torch::ScalarType dtype,
-                         torch::Device device,
-                         bool use_gen_threadpool_ = true);
-  virtual ~RecConstrainedDecoding() = default;
+                         torch::Device device);
+  ~RecConstrainedDecoding() = default;
 
-  bool build_mask_cache() override;
+  void build_mask_cache();
 
   torch::Tensor generate_mask(
-      const std::vector<std::vector<int32_t>>& generated_token_list) override;
+      const std::vector<std::vector<int32_t>>& generated_token_list);
 
  private:
   torch::Tensor generate_decode_mask(
       const std::vector<std::vector<int32_t>>& generated_token_list);
 
- private:
-  constexpr static float PRE_MASK_FACTOR = -10000.0f;
-  constexpr static int GEN_MASK_THREAD_NUM = 16;
+  static constexpr float kPreMaskFactor = -10000.0f;
 
- private:
-  bool build_mask_cache_;
-  bool use_gen_threadpool_;
+  bool build_mask_cache_ = false;
   int32_t vocab_size_;
   RecVocabDict* vocab_dict_ = nullptr;
   torch::Device device_;
   torch::ScalarType dtype_;
   torch::Tensor first_token_mask_;
-  std::unique_ptr<ThreadPool> gen_threadpool_;
 };
 
 }  // namespace xllm

@@ -19,10 +19,10 @@ limitations under the License.
 #include <unordered_map>
 #include <unordered_set>
 
-#include "core/framework/sampling/rejection_sampler.h"
 #include "core/framework/speculative/adaptive/spec_cost_profile_store.h"
 #include "core/framework/speculative/adaptive/spec_startup_calibration.h"
 #include "core/framework/speculative/adaptive/verify_budget_planner.h"
+#include "core/framework/speculative/rejection_sampler.h"
 #include "core/runtime/task_execution_pipeline.h"
 
 namespace xllm {

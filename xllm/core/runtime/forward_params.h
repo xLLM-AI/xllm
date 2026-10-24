@@ -27,17 +27,17 @@ limitations under the License.
 #include <vector>
 
 #include "common/types.h"
+#include "core/framework/config/execution_config.h"
+#include "core/framework/constrained/json_object_grammar.h"
+#include "core/framework/model/llm_model_params.h"
+#include "core/framework/model/model_params_view.h"
 #include "core/framework/multimodal/embedding_output.h"
 #include "core/framework/multimodal/mm_batch_data.h"
 #include "core/framework/multimodal/mm_data.h"
+#include "core/framework/sampling/beam_searcher.h"
+#include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/adaptive/dspark_dp_coordinator.h"
 #include "core/framework/speculative/verify_layout.h"
-#include "framework/config/execution_config.h"
-#include "framework/model/llm_model_params.h"
-#include "framework/model/model_params_view.h"
-#include "framework/sampling/beam_searcher.h"
-#include "framework/sampling/json_object_grammar.h"
-#include "framework/sampling/sampling_params.h"
 #include "platform/device.h"
 #include "platform/platform.h"
 #include "runtime/dit_forward_params.h"
@@ -525,7 +525,6 @@ class LlmForwardInput final {
     inputs.transfer_kv_infos = transfer_kv_infos;
     inputs.input_host_sample_count = input_host_sample_count;
     inputs.skip_sampling_for_logits_only = skip_sampling_for_logits_only;
-    inputs.skip_process_logits = skip_process_logits;
     inputs.return_selected_hidden = return_selected_hidden;
     inputs.sample_sequence_ids = sample_sequence_ids;
     inputs.sample_prior_output_rows = sample_prior_output_rows;
@@ -587,14 +586,9 @@ class LlmForwardInput final {
   // Errors detected while aligning prior overlap output with grammar rows.
   std::vector<JsonObjectOutputError> json_object_errors;
 
-  // If true, skip sampler forward and only keep logits. Sampling transforms
-  // still run when `skip_process_logits` is set so speculative
-  // verify scores the request's real distribution.
+  // If true, skip sampler forward and keep raw logits; the speculative
+  // consumer applies the sampling transforms itself.
   bool skip_sampling_for_logits_only = false;
-  // Run the in-place sampling transforms for a skip_sampling_for_logits_only
-  // forward. Set by speculative verify inputs; DSpark/DFlash2 draft queries
-  // need raw logits and leave it false.
-  bool skip_process_logits = false;
   // If true, populate ForwardOutput.selected_hidden with hidden states matching
   // the `logits` selection layout. Used by DSpark ConfidenceHead which needs
   // pre-lm_head hidden states of the draft tokens.

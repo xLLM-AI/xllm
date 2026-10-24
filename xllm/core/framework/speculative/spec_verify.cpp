@@ -19,9 +19,10 @@ limitations under the License.
 
 #include <algorithm>
 
-#include "framework/model/model_params_view.h"
-#include "framework/sampling/rejection_sampler.h"
-#include "runtime/forward_params.h"
+#include "core/framework/model/model_params_view.h"
+#include "core/framework/sampling/sampler.h"
+#include "core/framework/speculative/rejection_sampler.h"
+#include "core/util/tensor_helper.h"
 
 namespace xllm {
 
@@ -100,19 +101,73 @@ torch::Tensor materialize_graph_speculative_verify_tokens(
       verify_tokens, graph_input.spec_verify_draft_token_sources);
 }
 
-SampleOutput run_rejection_sampling(const SamplingParameters& sampling_params,
+SampleOutput run_rejection_sampling(SamplingParameters sampling_params,
                                     const DraftProposal& draft_proposal,
                                     const torch::Tensor& target_logits,
-                                    const ForwardOutput& target_output) {
-  const RejectionSampler sampler(
-      sampling_params, target_output.logprobs, target_output.max_top_logprobs);
+                                    const torch::Tensor& target_hidden_states) {
+  // The flat-logits shape contract and the validation width are owned by
+  // RejectionSampler::forward (it derives the width from the proposal).
+  const RejectionSampler sampler(std::move(sampling_params));
 
   SampleOutput sample_output = sampler.forward(draft_proposal, target_logits);
 
-  const torch::Tensor& embeddings = target_output.sample_output.embeddings;
-  sample_output.embeddings = embeddings.view(
-      {target_logits.size(0), target_logits.size(1), embeddings.size(-1)});
+  if (target_hidden_states.defined()) {
+    // next_tokens is [batch, num_val_tokens] — reuse its shape instead of
+    // re-deriving the width/batch pair forward() owns.
+    const torch::Tensor& next_tokens = sample_output.next_tokens;
+    sample_output.embeddings =
+        target_hidden_states.view({next_tokens.size(0),
+                                   next_tokens.size(1),
+                                   target_hidden_states.size(-1)});
+  }
   return sample_output;
+}
+
+torch::Tensor rejection_sample_ragged(
+    torch::Tensor& target_logits,
+    const SamplingParameters& request_sampling,
+    const torch::Tensor& owners,
+    const torch::Tensor& packed_indices) {
+  CHECK_EQ(target_logits.dim(), 2);
+  CHECK_EQ(owners.dim(), 1);
+  CHECK_EQ(owners.numel(), target_logits.size(0));
+  CHECK_EQ(owners.device(), target_logits.device());
+  CHECK(owners.scalar_type() == torch::kInt32 ||
+        owners.scalar_type() == torch::kInt64);
+  CHECK_EQ(packed_indices.dim(), 1);
+  CHECK_EQ(packed_indices.numel(), owners.numel());
+  CHECK_EQ(packed_indices.device(), owners.device());
+  CHECK(request_sampling.selected_token_idxes.defined());
+  CHECK_GT(request_sampling.num_sample_seqs(), 0);
+  if (request_sampling.sampling_mode == SamplingMode::MIXED) {
+    CHECK(request_sampling.do_sample.defined());
+  }
+
+  // Padding rows borrow another request's logits; give them a valid
+  // distribution without touching real request rows.
+  target_logits.masked_fill_(owners.lt(0).unsqueeze(1), 0);
+  const torch::Tensor request_rows = owners.clamp_min(0).to(torch::kInt64);
+  SamplingParameters packed;
+  packed.selected_token_idxes = packed_indices;
+  packed.sampling_mode = request_sampling.sampling_mode;
+  constexpr std::array<torch::Tensor SamplingParameters::*, 5> kRequestFields =
+      {&SamplingParameters::temperatures,
+       &SamplingParameters::top_k,
+       &SamplingParameters::top_p,
+       &SamplingParameters::min_p,
+       &SamplingParameters::do_sample};
+  for (const auto member : kRequestFields) {
+    const auto& values = request_sampling.*member;
+    if (values.defined()) {
+      CHECK_EQ(values.device(), owners.device());
+      CHECK_EQ(values.dim(), 1);
+      CHECK_EQ(values.numel(), request_sampling.num_sample_seqs());
+      packed.*member = values.index_select(/*dim=*/0, request_rows);
+    }
+  }
+  // Residual X|X!=d ~ p/(1-p(d)); the caller establishes TP consensus
+  // before committing KV.
+  return Sampler().forward(target_logits, packed).next_tokens;
 }
 
 }  // namespace spec_verify

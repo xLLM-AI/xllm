@@ -336,8 +336,6 @@ torch::Tensor fused_moe_aot_bf16(const torch::Tensor& hidden_states,
                                  const torch::Tensor& topk_weights,
                                  const torch::Tensor& topk_ids);
 
-torch::Tensor random_sample(const torch::Tensor& probs);
-
 torch::Tensor masked_moe_gemm_bf16(const torch::Tensor& input,
                                    const torch::Tensor& weights,
                                    const torch::Tensor& token_counts,

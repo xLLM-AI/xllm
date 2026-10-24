@@ -26,9 +26,11 @@ limitations under the License.
 
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/framework/config/speculative_config.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/sampling/sampling_params.h"
+#include "core/framework/speculative/draft_proposal.h"
 #include "core/framework/speculative/embedding_cache.h"
 #include "core/kv_cache/layout/kv_cache_capacity.h"
 #include "core/kv_cache/layout/kv_cache_estimation.h"
@@ -164,8 +166,7 @@ DraftModelSpecWorkerImpl<TargetInput>::DraftModelSpecWorkerImpl(
                                          options,
                                          target_options,
                                          worker_type),
-      draft_sampling_mode_(
-          parse_draft_sampling_mode(options.draft_sampling_mode())) {
+      is_probabilistic_draft_(options.enable_probabilistic_draft()) {
   CHECK(draft_factory) << "Draft worker factory must not be empty.";
   draft_impl_ = draft_factory();
   CHECK(draft_impl_ != nullptr) << "Draft worker factory must return a worker.";

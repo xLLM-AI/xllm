@@ -19,7 +19,6 @@ limitations under the License.
 
 #include "core/common/global_flags.h"
 #include "core/framework/config/config_utils.h"
-#include "core/framework/sampling/draft_sampling_mode.h"
 
 DEFINE_string(draft_model, "", "draft hf model path to the model file.");
 
@@ -56,9 +55,10 @@ DEFINE_bool(speculative_suffix_use_tree_spec,
             "Whether to use tree-based suffix speculation instead of path "
             "speculation.");
 
-DEFINE_string(draft_sampling_mode,
-              "greedy",
-              "Draft proposal sampling mode: greedy or probabilistic.");
+DEFINE_bool(enable_probabilistic_draft,
+            false,
+            "Drafts sample from their distribution (emitting q for rejection "
+            "sampling); the default is greedy argmax.");
 
 DEFINE_bool(enable_mtp_draft_body_tp1,
             false,
@@ -134,7 +134,7 @@ void SpeculativeConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(speculative_suffix_min_token_prob);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(speculative_suffix_max_cached_requests);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(speculative_suffix_use_tree_spec);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(draft_sampling_mode);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_probabilistic_draft);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_mtp_draft_body_tp1);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_atb_spec_kernel);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_adaptive_target_verify);
@@ -181,7 +181,7 @@ void SpeculativeConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(speculative_suffix_min_token_prob);
   XLLM_CONFIG_ASSIGN_FROM_JSON(speculative_suffix_max_cached_requests);
   XLLM_CONFIG_ASSIGN_FROM_JSON(speculative_suffix_use_tree_spec);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(draft_sampling_mode);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_probabilistic_draft);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_mtp_draft_body_tp1);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_atb_spec_kernel);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_adaptive_target_verify);
@@ -215,7 +215,7 @@ void SpeculativeConfig::append_config_json(
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, speculative_suffix_use_tree_spec);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, draft_sampling_mode);
+      config_json, default_config, enable_probabilistic_draft);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_mtp_draft_body_tp1);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
@@ -283,14 +283,11 @@ void SpeculativeConfig::validate() const {
          (num_speculative_tokens() == 5 || num_speculative_tokens() == 7)))
       << "Adaptive target verification supports only DSpark Draft5/7; "
          "MTP, DFlash and DFlash2 do not support target verification pruning.";
-  const DraftSamplingMode mode =
-      parse_draft_sampling_mode(draft_sampling_mode());
-  const std::string& algorithm = speculative_algorithm();
-  if (mode == DraftSamplingMode::PROBABILISTIC) {
-    CHECK(is_probabilistic_draft_sampling_supported(algorithm))
-        << algorithm << " does not support draft_sampling_mode="
-        << kDraftSamplingModeProbabilistic
-        << ". Supported: MTP, DSpark, DFlash2, Eagle3.";
+  if (enable_probabilistic_draft()) {
+    CHECK(is_probabilistic_draft_sampling_supported(speculative_algorithm()))
+        << speculative_algorithm()
+        << " does not support enable_probabilistic_draft. Supported: MTP, "
+           "DSpark, DFlash2, Eagle3.";
   }
 }
 

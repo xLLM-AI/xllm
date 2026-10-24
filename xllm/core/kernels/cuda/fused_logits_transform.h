@@ -19,16 +19,15 @@ limitations under the License.
 
 namespace xllm::kernel::cuda {
 
-// In-place temperature, min-p, top-k and top-p transforms with optional FP32
-// softmax output. Row parameters may be undefined; otherwise they are
-// contiguous device vectors with one entry per row. Logits have contiguous
-// columns and nonoverlapping rows. Top-k is int64;
-// temperature/min-p/top-p are FP32, FP16 or BF16, independently of logits.
-torch::Tensor fused_logits_transform(torch::Tensor& logits,
-                                     const torch::Tensor& temperatures,
-                                     const torch::Tensor& min_p,
-                                     const torch::Tensor& top_k,
-                                     const torch::Tensor& top_p,
-                                     bool return_probs);
+// In-place temperature, min-p, top-k and top-p transforms. Row parameters
+// may be undefined; otherwise they are contiguous device vectors with one
+// entry per row. Logits have contiguous columns and nonoverlapping rows.
+// Top-k is int64; temperature/min-p/top-p are FP32, FP16 or BF16,
+// independently of logits.
+void fused_logits_transform(torch::Tensor& logits,
+                            const torch::Tensor& temperatures,
+                            const torch::Tensor& min_p,
+                            const torch::Tensor& top_k,
+                            const torch::Tensor& top_p);
 
 }  // namespace xllm::kernel::cuda

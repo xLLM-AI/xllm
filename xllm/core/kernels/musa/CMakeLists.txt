@@ -29,7 +29,6 @@ set(_TORCH_MUSA_KERNEL_SRCS
   ../cuda/norm.cu
   ../cuda/reshape_paged_cache.cu
   ../cuda/moe/moe_fused_topk.cu
-  random_sample.cpp
   replace_token.cu
   fused_qknorm_rope.cu
   # Native block-wise FP8 GEMM (mate/muDNN groupwise)

@@ -21,7 +21,7 @@ limitations under the License.
 #include <string>
 #include <tuple>
 
-#include "framework/sampling/draft_sampling_mode.h"
+#include "core/framework/speculative/draft_proposal.h"
 #include "runtime/speculative_worker_impl.h"
 
 namespace xllm {
@@ -104,7 +104,7 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
   std::unique_ptr<LLMWorkerImpl> draft_impl_;
   std::unique_ptr<EmbeddingCache> embedding_cache_;
 
-  DraftSamplingMode draft_sampling_mode_ = DraftSamplingMode::GREEDY;
+  bool is_probabilistic_draft_ = false;
 };
 
 }  // namespace xllm

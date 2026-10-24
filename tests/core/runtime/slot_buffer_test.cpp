@@ -27,6 +27,7 @@ limitations under the License.
 #include "core/layers/common/attention_metadata.h"
 #include "core/runtime/forward_params.h"
 #include "core/runtime/py_attention_metadata.h"
+#include "tests/core/framework/sampling/sampling_test_utils.h"
 #include "tests/core/runtime/task_pipeline_test_peer.h"
 
 namespace xllm {
@@ -760,19 +761,12 @@ constexpr std::array<torch::Tensor SamplingParameters::*, 12> kInputs = {
     &SamplingParameters::unique_token_ids_lens,
     &SamplingParameters::do_sample};
 
-SamplingMode sampling_mode_from_do_sample(const torch::Tensor& do_sample) {
-  return do_sample.all().item<bool>()
-             ? SamplingMode::RANDOM
-             : (do_sample.any().item<bool>() ? SamplingMode::MIXED
-                                             : SamplingMode::GREEDY);
-}
-
 SamplingParameters make_input(int32_t rows, int32_t width) {
   SamplingParameters input;
   input.selected_token_idxes = torch::arange(rows, torch::kInt32);
   input.do_sample =
       torch::arange(rows, torch::kInt32).remainder(/*other=*/2) == 0;
-  input.sampling_mode = sampling_mode_from_do_sample(input.do_sample);
+  input.sampling_mode = testutil::sampling_mode_from_do_sample(input.do_sample);
   input.frequency_penalties = torch::full({rows}, /*fill_value=*/0.15f);
   input.presence_penalties = torch::full({rows}, /*fill_value=*/0.2f);
   input.repetition_penalties = torch::full({rows}, /*fill_value=*/1.15f);
@@ -1138,7 +1132,8 @@ TEST_P(SlotSamplingInputTest,
         input.top_p = torch::Tensor();
       }
     }
-    input.sampling_mode = sampling_mode_from_do_sample(input.do_sample);
+    input.sampling_mode =
+        testutil::sampling_mode_from_do_sample(input.do_sample);
     const SamplingParameters legacy = input.to(device_, GetParam());
     // One logits row per sampling row (SamplingParameters::num_sample_seqs):
     // gather hidden rows with selected_token_idxes before projection.

@@ -329,8 +329,6 @@ torch::Tensor apply_top_k_top_p(const torch::Tensor& logits,
                                 const torch::Tensor& topk_list,
                                 const torch::Tensor& topp_list);
 
-torch::Tensor random_sample(const torch::Tensor& probs);
-
 void gather_split(const torch::Tensor& input,
                   const torch::Tensor& gather_index,
                   const torch::Tensor& valid_token_num,

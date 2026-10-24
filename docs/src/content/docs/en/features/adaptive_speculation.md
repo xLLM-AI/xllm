@@ -161,7 +161,7 @@ xllm --model=/models/target --draft_model=/models/dspark \
   --nnodes=16 --node_rank=0 --host=127.0.0.1 --port=8000 \
   --master_node_addr=127.0.0.1:27000 \
   --speculative_algorithm=DSpark --num_speculative_tokens=7 \
-  --draft_sampling_mode=greedy --enable_adaptive_target_verify=true \
+  --enable_adaptive_target_verify=true \
   --enable_graph=true --python_graph_backend=aclgraph \
   --disable_graph_warmup=false --enable_schedule_overlap=true \
   --enable_task_pipeline=true --enable_unified_mtp_graph=false \
@@ -174,7 +174,7 @@ Send requests with an explicit temperature: `temperature=0` selects greedy
 target decoding; a positive value such as `temperature=0.5` selects random
 target sampling. Different temperatures can share a batch. Target top-k, top-p
 and min-p filtering use the ordinary sampler's semantics. The draft remains
-greedy (`--draft_sampling_mode=greedy`); probabilistic drafts are not admitted.
+greedy by default; probabilistic drafts are not admitted.
 
 For random targets, the rejection sampler maps request parameters through the
 device-side packed-row owners and draws one target token per verification row.

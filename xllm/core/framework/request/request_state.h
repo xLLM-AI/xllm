@@ -26,8 +26,8 @@ limitations under the License.
 #include <vector>
 
 #include "common.pb.h"
+#include "core/framework/constrained/json_object_grammar.h"
 #include "core/framework/multimodal/mm_data.h"
-#include "core/framework/sampling/json_object_grammar.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "rec_type.h"
 #include "request_output.h"

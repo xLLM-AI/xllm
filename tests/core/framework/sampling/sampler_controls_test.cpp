@@ -16,17 +16,17 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 
-#include "core/framework/sampling/rejection_sampler.h"
 #include "core/framework/sampling/sampler.h"
+#include "core/framework/speculative/rejection_sampler.h"
+#include "core/framework/speculative/spec_verify.h"
+#include "tests/core/framework/sampling/sampling_test_utils.h"
 
 namespace xllm {
 namespace {
 
 SamplingParameters make_sampling_params(int64_t rows, bool random) {
-  SamplingParameters params;
-  params.selected_token_idxes = torch::arange(rows, torch::kInt);
-  params.sampling_mode = random ? SamplingMode::RANDOM : SamplingMode::GREEDY;
-  return params;
+  return testutil::make_sampling_params(
+      rows, random ? SamplingMode::RANDOM : SamplingMode::GREEDY);
 }
 
 TEST(SamplerControlsTest, GreedyHonorsBiasAndAllowedTokenMask) {
@@ -134,8 +134,8 @@ TEST(RaggedRejectionSamplerTest, MapsMixedRequestParametersOnPackedRows) {
   torch::manual_seed(681);
   const auto expected = Sampler().forward(reference, expanded).next_tokens;
   torch::manual_seed(681);
-  const auto actual = RejectionSampler::sample_ragged_greedy_draft_target(
-      logits, requests, owners, indices);
+  const auto actual =
+      spec_verify::rejection_sample_ragged(logits, requests, owners, indices);
   EXPECT_TRUE(torch::equal(actual, expected));
   EXPECT_TRUE(torch::equal(logits, reference));
   EXPECT_EQ(actual[2].item<int64_t>(), 2);
@@ -161,7 +161,7 @@ TEST(RaggedRejectionSamplerTest, ReusesNormalTopKTopPAndMinPTransforms) {
   torch::manual_seed(91);
   const auto expected = Sampler().forward(reference, expanded).next_tokens;
   torch::manual_seed(91);
-  const auto actual = RejectionSampler::sample_ragged_greedy_draft_target(
+  const auto actual = spec_verify::rejection_sample_ragged(
       logits, requests, owners, torch::arange(4, torch::kInt));
   EXPECT_TRUE(torch::equal(actual, expected));
   EXPECT_TRUE(torch::equal(logits, reference));
@@ -175,11 +175,11 @@ TEST(RaggedRejectionSamplerTest, PreservesTargetAndResidualDistributions) {
   // At temperature .5 these logits yield p=(.2,.3,.5), not raw softmax.
   const torch::Tensor probabilities = torch::tensor({0.2F, 0.3F, 0.5F});
   torch::Tensor logits = (probabilities.log() * 0.5F).repeat({kTrials, 1});
-  const auto sampled = RejectionSampler::sample_ragged_greedy_draft_target(
-      logits,
-      requests,
-      torch::zeros({kTrials}, torch::kInt),
-      torch::arange(kTrials, torch::kInt));
+  const auto sampled =
+      spec_verify::rejection_sample_ragged(logits,
+                                           requests,
+                                           torch::zeros({kTrials}, torch::kInt),
+                                           torch::arange(kTrials, torch::kInt));
   for (int64_t token = 0; token < 3; ++token) {
     EXPECT_NEAR(sampled.eq(token).to(torch::kFloat32).mean().item<float>(),
                 probabilities[token].item<float>(),
@@ -201,9 +201,9 @@ TEST(RaggedRejectionSamplerTest, DrawsFreshRandomValuesOnEveryInvocation) {
   const auto owners = torch::zeros({256}, torch::kInt);
   const auto indices = torch::arange(256, torch::kInt);
   torch::manual_seed(593);
-  const auto first = RejectionSampler::sample_ragged_greedy_draft_target(
+  const auto first = spec_verify::rejection_sample_ragged(
       first_logits, requests, owners, indices);
-  const auto second = RejectionSampler::sample_ragged_greedy_draft_target(
+  const auto second = spec_verify::rejection_sample_ragged(
       second_logits, requests, owners, indices);
   EXPECT_FALSE(torch::equal(first, second));
 }
@@ -213,11 +213,11 @@ TEST(RaggedRejectionSamplerTest, IgnoresNonfiniteUncommittedPaddingLogits) {
   requests.temperatures = torch::tensor({0.5F});
   torch::Tensor logits =
       torch::tensor({{0.0F, 20.0F, 0.0F}, {NAN, INFINITY, -INFINITY}});
-  const auto sampled = RejectionSampler::sample_ragged_greedy_draft_target(
-      logits,
-      requests,
-      torch::tensor({0, -1}, torch::kInt),
-      torch::arange(2, torch::kInt));
+  const auto sampled =
+      spec_verify::rejection_sample_ragged(logits,
+                                           requests,
+                                           torch::tensor({0, -1}, torch::kInt),
+                                           torch::arange(2, torch::kInt));
   EXPECT_EQ(sampled[0].item<int64_t>(), 1);
   EXPECT_TRUE(torch::isfinite(logits[1]).all().item<bool>());
   EXPECT_TRUE(logits[1].eq(0).all().item<bool>());
@@ -243,7 +243,7 @@ TEST(RaggedRejectionSamplerTest, ClippingPreservesTwoTokenJointDistribution) {
       logits.select(1, 0).copy_(first_probs.log() * 0.5F);
       logits = logits.view({-1, 3});
       const auto sampled =
-          RejectionSampler::sample_ragged_greedy_draft_target(
+          spec_verify::rejection_sample_ragged(
               logits,
               request,
               torch::zeros({kTrials * (budget + 1)}, torch::kInt),

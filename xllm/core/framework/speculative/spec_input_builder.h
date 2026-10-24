@@ -22,7 +22,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/model/mtp_topk_state.h"
-#include "core/framework/sampling/draft_proposal.h"
+#include "core/framework/speculative/draft_proposal.h"
 #include "util/slice.h"
 
 namespace xllm {

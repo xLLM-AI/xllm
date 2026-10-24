@@ -25,7 +25,6 @@ limitations under the License.
 #include <unordered_map>
 #include <vector>
 
-#include "core/framework/sampling/draft_sampling_mode.h"
 #include "core/util/tensor_helper.h"
 
 namespace xllm {
@@ -214,14 +213,19 @@ struct SamplingParameters {
     return selected_token_idxes.defined() ? selected_token_idxes.numel() : 0;
   }
 
-  // Whether any post-penalty transform in Sampler::process_logits (top-k,
-  // top-p, min-p, or the token filter masks) is active for this batch; fast
-  // paths that only apply penalties consult this instead of restating the
+  // Whether any post-penalty transform (top-k, top-p, min-p, filter masks)
+  // is active; penalty-only fast paths consult this instead of restating the
   // list.
   bool has_post_penalty_transforms() const;
 
-  // Whether any per-row sampling field (penalties, transforms, seeds, token
-  // filters) is defined; a fully greedy batch with no per-row state has none.
+  // Whether a greedy leg reporting no distribution values can skip the
+  // argmax-preserving transforms; a new distribution-value output flag must
+  // join this predicate in both LogitsProcessor domain functions.
+  bool skips_argmax_preserving_transforms() const {
+    return sampling_mode == SamplingMode::GREEDY && !logprobs && !return_logits;
+  }
+
+  // Whether any per-token sampling field is defined.
   bool has_sampling_fields() const;
 
   // Fails fast unless the batch is mixed (see do_sample).
@@ -232,46 +236,60 @@ struct SamplingParameters {
   }
 };
 
-// The single registry of SamplingParameters' tensor members that carry
-// per-row (per-validate-row) sampling state, each tagged with the roles it
-// plays. The derived lists below (repeat/clear/post-penalty) all iterate this
-// registry — a new per-row member is added exactly once here, with the roles
-// it participates in.
-//
-// Roles:
-// - clear_on_greedy_draft: dead on a greedy draft leg and therefore cleared
-//   by clear_sampling_transforms.
-// - post_penalty_transform: a transform in Sampler::process_logits applied
-//   after the penalties (top-k, top-p, min-p, or the token filter masks).
-//
-// Per-sequence members (selected_token_idxes, do_sample) are handled by
-// their call sites; slot_buffer.cpp's kFields is a separate staging-side
-// list.
+// The [num_seqs, 1] BoolTensor picking the greedy rows of a mixed batch.
+inline torch::Tensor greedy_mask(const SamplingParameters& params,
+                                 const torch::Device& device) {
+  return params.require_do_sample().to(device).logical_not().unsqueeze(
+      /*dim=*/-1);
+}
+
+// Registry of the per-token sampling fields. Roles: per_request (the seeds
+// — never expand to verify width), clear_on_greedy_draft, post_penalty_
+// transform. selected_token_idxes/do_sample are handled by their call sites.
 struct SamplingFieldDesc {
   torch::Tensor SamplingParameters::* member;
-  bool clear_on_greedy_draft;
-  bool post_penalty_transform;
+  bool per_request = false;
+  bool clear_on_greedy_draft = false;
+  bool post_penalty_transform = false;
 };
 
+// Omitted flags default to false; a plain token-indexed field is a bare
+// {.member=...}.
 inline constexpr std::array<SamplingFieldDesc, 18> kSamplingFields = {
-    {{&SamplingParameters::frequency_penalties, false, false},
-     {&SamplingParameters::presence_penalties, false, false},
-     {&SamplingParameters::repetition_penalties, false, false},
-     {&SamplingParameters::temperatures, true, false},
-     {&SamplingParameters::top_p, true, true},
-     {&SamplingParameters::min_p, true, true},
-     {&SamplingParameters::seed_offsets, true, false},
-     {&SamplingParameters::seeds, true, false},
-     {&SamplingParameters::logits_bias, false, false},
-     {&SamplingParameters::min_token_positions, true, false},
-     {&SamplingParameters::min_tokens_remaining, true, false},
-     {&SamplingParameters::min_token_ids, true, false},
-     {&SamplingParameters::top_k, true, true},
-     {&SamplingParameters::unique_token_ids, false, false},
-     {&SamplingParameters::unique_token_counts, false, false},
-     {&SamplingParameters::unique_token_ids_lens, false, false},
-     {&SamplingParameters::filter_mask, false, true},
-     {&SamplingParameters::filter_bitmask, false, true}}};
+    {{.member = &SamplingParameters::frequency_penalties},
+     {.member = &SamplingParameters::presence_penalties},
+     {.member = &SamplingParameters::repetition_penalties},
+     {.member = &SamplingParameters::temperatures,
+      .clear_on_greedy_draft = true},
+     {.member = &SamplingParameters::top_p,
+      .clear_on_greedy_draft = true,
+      .post_penalty_transform = true},
+     {.member = &SamplingParameters::min_p,
+      .clear_on_greedy_draft = true,
+      .post_penalty_transform = true},
+     {.member = &SamplingParameters::logits_bias},
+     {.member = &SamplingParameters::min_token_positions,
+      .clear_on_greedy_draft = true},
+     {.member = &SamplingParameters::min_tokens_remaining,
+      .clear_on_greedy_draft = true},
+     {.member = &SamplingParameters::min_token_ids,
+      .clear_on_greedy_draft = true},
+     {.member = &SamplingParameters::top_k,
+      .clear_on_greedy_draft = true,
+      .post_penalty_transform = true},
+     {.member = &SamplingParameters::unique_token_ids},
+     {.member = &SamplingParameters::unique_token_counts},
+     {.member = &SamplingParameters::unique_token_ids_lens},
+     {.member = &SamplingParameters::filter_mask,
+      .post_penalty_transform = true},
+     {.member = &SamplingParameters::filter_bitmask,
+      .post_penalty_transform = true},
+     {.member = &SamplingParameters::seeds,
+      .per_request = true,
+      .clear_on_greedy_draft = true},
+     {.member = &SamplingParameters::seed_offsets,
+      .per_request = true,
+      .clear_on_greedy_draft = true}}};
 
 // Out-of-line because it derives from kSamplingFields (below the struct).
 inline bool SamplingParameters::has_post_penalty_transforms() const {
@@ -288,23 +306,11 @@ inline bool SamplingParameters::has_sampling_fields() const {
   return std::any_of(kSamplingFields.begin(),
                      kSamplingFields.end(),
                      [this](const SamplingFieldDesc& field) {
-                       return (this->*field.member).defined();
+                       return !field.per_request &&
+                              (this->*field.member).defined();
                      });
 }
 
-// Repeats every per-row sampling field across speculative rows while
-// preserving undefined optional fields. Repeats can be a scalar count or a
-// tensor of per-row counts.
-template <typename Repeats>
-inline void repeat_sampling_params(SamplingParameters& sampling_params,
-                                   const Repeats& repeats) {
-  for (const auto& field : kSamplingFields) {
-    repeat_interleave_if_defined(sampling_params.*field.member, repeats);
-  }
-}
-
-// Clears the per-row transform and seed fields that are dead on a greedy
-// draft leg (see clear_on_greedy_draft above).
 inline void clear_sampling_transforms(SamplingParameters& sampling_params) {
   for (const auto& field : kSamplingFields) {
     if (field.clear_on_greedy_draft) {
@@ -313,26 +319,13 @@ inline void clear_sampling_transforms(SamplingParameters& sampling_params) {
   }
 }
 
-// Expands per-sequence sampling state onto the validate row domain (one row
-// per speculative token), so RejectionSampler and SlotBuffer see one tensor
-// per validate row.
-template <typename Repeats>
-inline void expand_sampling_params_for_verify(
-    SamplingParameters& sampling_params,
-    const Repeats& repeats,
-    int64_t total_num_val_tokens,
-    const torch::Device& device) {
-  sampling_params.selected_token_idxes =
-      arange_indices(total_num_val_tokens, device);
-  repeat_sampling_params(sampling_params, repeats);
-  repeat_interleave_if_defined(sampling_params.do_sample, repeats);
+// Clears every sampling field for a logits-only forward; the RejectionSampler
+// applies the transforms itself from the per-sequence source.
+inline void make_logits_only(SamplingParameters& sampling_params) {
+  for (const auto& field : kSamplingFields) {
+    sampling_params.*field.member = torch::Tensor();
+  }
 }
-
-// Mode-aware draft sampling policy: clears logprob outputs and, in GREEDY
-// mode, flips the batch to greedy; PROBABILISTIC exposes draft logits
-// exactly when the verifier needs q.
-void prepare_draft_sampling(DraftSamplingMode mode,
-                            SamplingParameters& sampling_params);
 
 // Draft proposals and acceptances executed by the verifier, before output
 // truncation. Accepted drafts exclude the target replacement/bonus token.

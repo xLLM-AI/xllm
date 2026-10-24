@@ -75,7 +75,7 @@ struct Options {
 
   PROPERTY(std::string, speculative_algorithm) = "mtp";
 
-  PROPERTY(std::string, draft_sampling_mode) = "greedy";
+  PROPERTY(bool, enable_probabilistic_draft) = false;
 
   PROPERTY(int32_t, speculative_suffix_cache_max_depth) = 64;
 
