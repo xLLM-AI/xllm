@@ -23,6 +23,11 @@ namespace layer {
 MoEFusedTopkImpl::MoEFusedTopkImpl(const ModelArgs& model_args,
                                    const QuantArgs& quant_args,
                                    const torch::TensorOptions& options)
+    : MoEFusedTopkImpl(LlmModelArgs(model_args), quant_args, options) {}
+
+MoEFusedTopkImpl::MoEFusedTopkImpl(const LlmModelArgs& model_args,
+                                   const QuantArgs& quant_args,
+                                   const torch::TensorOptions& options)
     : topk_(model_args.num_experts_per_tok()),
       num_expert_group_(model_args.n_group()),
       topk_group_(model_args.topk_group()),

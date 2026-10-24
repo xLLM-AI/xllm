@@ -53,7 +53,7 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
  protected:
   DeepseekV2ModelImpl(const ModelContext& context,
                       const DecoderLayerFactory& decoder_layer_factory)
-      : model_args_(context.get_model_args()),
+      : model_args_(context.get_llm_model_args()),
         device_(context.get_tensor_options().device()) {
     auto options = context.get_tensor_options();
     auto parallel_args = context.get_parallel_args();
@@ -230,7 +230,7 @@ class DeepseekV2ModelImpl : public torch::nn::Module {
 
   layer::RMSNorm& norm_mod() { return norm_; }
 
-  ModelArgs model_args_;
+  LlmModelArgs model_args_;
 
  private:
   torch::nn::ModuleList blocks_{nullptr};

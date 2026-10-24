@@ -42,7 +42,7 @@ Glm4MoeDecoderLoader::Glm4MoeDecoderLoader(
     : BaseLoader(weight_count, context, mode),
       layer_id_(layer_id),
       prefill_param_firstKDenseReplace_(prefill_param_firstKDenseReplace) {
-  auto model_args = context.get_model_args();
+  const auto& model_args = context.get_model_args_bundle();
   auto parallel_args = context.get_parallel_args();
   auto options = context.get_tensor_options();
 

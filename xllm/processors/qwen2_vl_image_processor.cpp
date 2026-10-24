@@ -244,7 +244,7 @@ std::optional<Size> smart_resize_tokens(int32_t num_frames,
 
 }  // namespace
 
-Qwen2VLImageProcessor::Qwen2VLImageProcessor(const ModelArgs& args) {
+Qwen2VLImageProcessor::Qwen2VLImageProcessor(const VlmVisionModelArgs& args) {
   image_mean_ = torch::tensor(args.mm_image_normalize_mean(),
                               torch::dtype(torch::kFloat32));
   image_std_ = torch::tensor(args.mm_image_normalize_std(),

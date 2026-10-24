@@ -88,16 +88,18 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
       : context_(context),
         parallel_args_(context.get_parallel_args()),
 #if defined(USE_DCU)
-        vl_image_processor_(context.get_model_args("processor")),
+        vl_image_processor_(context.get_vlm_model_args("processor").vision()),
 #endif
-        vae_model_args_(context.get_model_args("vae")) {
+        vae_model_args_(context.get_dit_model_args("vae").vae()) {
     options_ = context.get_tensor_options();
     dtype_ = options_.dtype().toScalarType();
     device_ = options_.device();
     LOG(INFO) << "model info " << dtype_ << " ; " << options_.device();
 
-    in_channels_ = context.get_model_args("transformer").in_channels();
-    num_layers_ = context.get_model_args("transformer").num_layers();
+    const auto& transformer_model_args =
+        context.get_dit_model_args("transformer").transformer();
+    in_channels_ = transformer_model_args.in_channels();
+    num_layers_ = transformer_model_args.num_layers();
 
     vae_scale_factor_ = static_cast<int64_t>(
         std::pow(2, vae_model_args_.temperal_downsample().size()));
@@ -148,10 +150,8 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
       }
     }
     text_encoder_ = QwenImageEditTextEncoder(
-        ModelContext(vlm_parallel_args,
-                     context.get_model_args("text_encoder"),
-                     context.get_quant_args("text_encoder"),
-                     context.get_tensor_options()));
+        context.get_model_context("text_encoder", ModelFamily::VLM)
+            .with_parallel_args(vlm_parallel_args));
 #endif
 
     vae_image_processor_ =
@@ -172,13 +172,13 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
 #endif
     register_module("vae_image_processor", vae_image_processor_);
 
-    use_layer3d_rope_ = context.get_model_context("transformer")
-                            .get_model_args()
+    const ModelContext& transformer_context =
+        context.get_model_context("transformer");
+    use_layer3d_rope_ = transformer_context.get_dit_model_args()
+                            .transformer()
                             .use_layer3d_rope();
     std::vector<int64_t> axes_dims_rope =
-        context.get_model_context("transformer")
-            .get_model_args()
-            .axes_dims_rope();
+        transformer_context.get_dit_model_args().transformer().axes_dims_rope();
     if (use_layer3d_rope_) {
       pos_embed_3d_rope_ = register_module(
           "pos_embed",
@@ -209,12 +209,14 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
     torch::Tensor position_ids =
         torch::ones({3, input_ids.size(0), input_ids.size(1)}, long_opts);
 
-    const auto& text_encoder_args = context_.get_model_args("text_encoder");
-    int64_t spatial_merge_size = text_encoder_args.mm_spatial_merge_size();
+    const auto& text_encoder_args = context_.get_vlm_model_args("text_encoder");
+    int64_t spatial_merge_size =
+        text_encoder_args.vision().mm_spatial_merge_size();
     CHECK_GT(spatial_merge_size, 0)
         << "QwenImageEditPlus text_encoder mm_spatial_merge_size must be > 0";
-    int64_t image_token_id = text_encoder_args.image_token_id();
-    int64_t vision_start_token_id = text_encoder_args.vision_start_token_id();
+    int64_t image_token_id = text_encoder_args.vision().image_token_id();
+    int64_t vision_start_token_id =
+        text_encoder_args.vision().vision_start_token_id();
 
     int64_t global_image_index = 0;
     int64_t num_image_grids =
@@ -359,8 +361,8 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
       params.meta.batch_forward_type = BatchForwardType::PREFILL;
     }
 
-    torch::Tensor image_mask =
-        tokens.eq(context_.get_model_args("text_encoder").image_token_id());
+    torch::Tensor image_mask = tokens.eq(
+        context_.get_vlm_model_args("text_encoder").vision().image_token_id());
     if (image_mask.sum().item<int64_t>() == 0) {
       params.embedding.input_embedding =
           text_encoder_->get_input_embeddings(tokens, ModelParamsView(params));
@@ -407,9 +409,9 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
     CHECK(tokenizer_ != nullptr) << "Tokenizer not loaded";
     CHECK(!text_encoder_.is_empty()) << "Text encoder not loaded";
 
-    const auto& text_encoder_args = context_.get_model_args("text_encoder");
-    const auto& processor_args = context_.get_model_args("processor");
-    int64_t merge_size = processor_args.mm_image_merge_size();
+    const auto& text_encoder_args = context_.get_vlm_model_args("text_encoder");
+    const auto& processor_args = context_.get_vlm_model_args("processor");
+    int64_t merge_size = processor_args.vision().mm_image_merge_size();
     CHECK_GT(merge_size, 0)
         << "QwenImageEditPlus processor mm_image_merge_size must be > 0";
     int64_t merge_length = merge_size * merge_size;
@@ -1244,7 +1246,7 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
   const ParallelArgs parallel_args_;
   torch::Tensor current_timestep_;
   std::string prompt_template_encode_;
-  const ModelArgs& vae_model_args_;
+  const DiTVaeModelArgs& vae_model_args_;
   bool use_layer3d_rope_;
   QwenEmbedRope pos_embed_{nullptr};
   QwenEmbedLayer3DRope pos_embed_3d_rope_{nullptr};

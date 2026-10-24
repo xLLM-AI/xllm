@@ -21,7 +21,9 @@ limitations under the License.
 #include <utility>
 
 #include "core/framework/model/model_params_view.h"
+#include "core/framework/sampling/draft_proposal.h"
 #include "core/framework/speculative/spec_verify.h"
+#include "core/runtime/forward_params.h"
 
 namespace xllm::mtp_async {
 namespace {
@@ -218,6 +220,39 @@ TEST(MtpAsyncStateTest, SelectsGraphVerifyTokenOverrideForEagerExecution) {
             graph_input.input_tokens_override.data_ptr());
   EXPECT_TRUE(torch::equal(
       materialized, torch::tensor({10, 11, 12, 20, 21, 22}, torch::kInt)));
+}
+
+TEST(MtpAsyncStateTest, RejectsInvalidDraftsWithFixedWidthAndSharedEmbeddings) {
+  const DraftProposal draft_proposal(
+      torch::tensor({{0, -1, -1}, {1, 2, 0}}, torch::kLong));
+  const torch::Tensor original_draft_tokens =
+      draft_proposal.token_ids().clone();
+  const torch::Tensor target_logits = torch::tensor(
+      {{{3.0, 0.0, 0.0}, {0.0, 3.0, 0.0}, {0.0, 0.0, 3.0}, {3.0, 0.0, 0.0}},
+       {{0.0, 3.0, 0.0}, {0.0, 0.0, 3.0}, {3.0, 0.0, 0.0}, {0.0, 3.0, 0.0}}},
+      torch::kFloat);
+  ForwardOutput target_output;
+  target_output.sample_output.embeddings =
+      torch::arange(16, torch::kFloat).reshape({8, 2});
+
+  const SampleOutput output = spec_verify::run_rejection_sampling(
+      SamplingParameters(), draft_proposal, target_logits, target_output);
+
+  ASSERT_EQ(output.next_tokens.dim(), 2);
+  EXPECT_EQ(output.next_tokens.size(0), 2);
+  EXPECT_EQ(output.next_tokens.size(1), 4);
+  EXPECT_TRUE(torch::equal(
+      output.next_tokens,
+      torch::tensor({{0, 1, -1, -1}, {1, 2, 0, 1}}, torch::kLong)));
+  EXPECT_TRUE(torch::equal(draft_proposal.token_ids(), original_draft_tokens));
+  ASSERT_EQ(output.embeddings.dim(), 3);
+  EXPECT_EQ(output.embeddings.size(0), 2);
+  EXPECT_EQ(output.embeddings.size(1), 4);
+  EXPECT_EQ(output.embeddings.size(2), 2);
+  EXPECT_EQ(output.embeddings.data_ptr(),
+            target_output.sample_output.embeddings.data_ptr());
+  EXPECT_TRUE(torch::equal(output.embeddings.view({8, 2}),
+                           target_output.sample_output.embeddings));
 }
 
 TEST(MtpAsyncStateTest, BuildsMixedAcceptanceStateWithoutHostRoundTrip) {

@@ -21,6 +21,7 @@ limitations under the License.
 
 #include "deepseek_v2_attention.h"
 #include "framework/model/model_args.h"
+#include "framework/model/model_family_args.h"
 #include "framework/model/model_params_view.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/parallel_state/parallel_state.h"
@@ -65,6 +66,14 @@ class DeepseekV2SparseMoEBlockImpl : public torch::nn::Module {
   };
 
   DeepseekV2SparseMoEBlockImpl() = default;
+  DeepseekV2SparseMoEBlockImpl(
+      const LlmModelArgs& model_args,
+      const QuantArgs& quant_args,
+      const ParallelArgs& parallel_args,
+      const torch::TensorOptions& options,
+      const std::shared_ptr<Stream>& routed_comm_stream,
+      const std::shared_ptr<Stream>& shared_compute_stream);
+
   DeepseekV2SparseMoEBlockImpl(
       const ModelArgs& model_args,
       const QuantArgs& quant_args,

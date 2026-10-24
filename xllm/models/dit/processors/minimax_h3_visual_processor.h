@@ -41,7 +41,7 @@ class MiniMaxH3VisualProcessorImpl final : public torch::nn::Module {
                                               /*do_normalize=*/false))),
         canvas_multiple_(canvas_multiple) {
     CHECK_GT(canvas_multiple_, 0);
-    const ModelArgs& model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().vae();
     clip_length_ = model_args.clip_length();
     token_drop_ = model_args.token_drop();
     const int64_t temporal_ratio =

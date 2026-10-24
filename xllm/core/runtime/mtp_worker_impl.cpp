@@ -56,6 +56,7 @@ limitations under the License.
 #include "core/layers/common/dsa_topk_share_plan.h"
 #include "core/platform/platform.h"
 #include "core/runtime/mtp_runtime_helpers.h"
+#include "core/runtime/mtp_worker_options.h"
 #include "core/runtime/task_execution_pipeline.h"
 #include "models/model_registry.h"
 #include "runtime/llm_worker_impl.h"
@@ -445,28 +446,6 @@ void set_positions_tensor(Input& input,
   input.runtime.device_tensors_ready = true;
 }
 
-runtime::Options mtp_target_options(const runtime::Options& options) {
-  auto opts = options;
-  opts.enable_schedule_overlap(false)
-      .is_draft_engine(false)
-      .enable_graph_aux_hidden_states(true);
-  return opts;
-}
-
-runtime::Options mtp_draft_options(const runtime::Options& options) {
-  runtime::Options draft_options = options;
-  draft_options.enable_schedule_overlap(false)
-      .is_draft_engine(true)
-      // The task path also restores the verifier prefix (K+1 rows).
-      .num_decoding_tokens(
-          options.enable_task_pipeline()
-              ? std::max(2, options.num_speculative_tokens() + 1)
-              : 1)
-      .num_speculative_tokens(0)
-      .enable_graph_aux_hidden_states(true);
-  return draft_options;
-}
-
 ParallelArgs mtp_draft_parallel_args(const ParallelArgs& parallel_args,
                                      const runtime::Options& options) {
   if (!options.enable_mtp_draft_body_tp1()) {
@@ -770,8 +749,8 @@ MTPWorkerImpl<TargetInput>::MTPWorkerImpl(const ParallelArgs& parallel_args,
     : MTPWorkerImpl<TargetInput>(parallel_args,
                                  device,
                                  options,
-                                 mtp_target_options(options),
-                                 mtp_draft_options(options),
+                                 mtp_detail::target_options(options),
+                                 mtp_detail::draft_options(options),
                                  worker_type) {}
 
 template <typename TargetInput>
@@ -823,7 +802,7 @@ template <typename TargetInput>
   if (impl_ == nullptr || draft_impl_ == nullptr ||
       options_.enable_adaptive_target_verify() ||
       options_.num_speculative_tokens() <= 0 ||
-      draft_impl_->context_.get_model_args().model_type() !=
+      draft_impl_->context_.get_model_args_bundle().model_type() !=
           "glm_moe_dsa_mtp") {
     return ::xllm::Status(
         StatusCode::INVALID_ARGUMENT,
@@ -834,7 +813,7 @@ template <typename TargetInput>
   if (!status.ok()) {
     return status;
   }
-  const auto& args = draft_impl_->context_.get_model_args();
+  const auto& args = draft_impl_->context_.get_llm_model_args();
   capacity.num_speculative_tokens = options_.num_speculative_tokens();
   capacity.adaptive_draft_step = options_.enable_adaptive_draft_step();
   capacity.index_topk = args.index_topk();
@@ -872,13 +851,13 @@ bool MTPWorkerImpl<TargetInput>::init_model(
 
   if (impl_ != nullptr && impl_->get_status() == WorkerImpl::Status::LOADED) {
     target_spec_verify_mode_ = mtp_async::classify_target_spec_verify_mode(
-        context_.get_model_args().model_type());
+        context_.get_model_args_bundle().model_type());
   }
 
   if (draft_impl_ != nullptr &&
       draft_impl_->get_status() == WorkerImpl::Status::LOADED) {
     const std::string& draft_model_type =
-        draft_impl_->context_.get_model_args().model_type();
+        draft_impl_->context_.get_model_args_bundle().model_type();
     combined_draft_execution_path_ =
         mtp_async::classify_combined_draft_execution_path(draft_model_type);
     const bool draft_owns_shared_weights =
@@ -938,8 +917,9 @@ template <typename TargetInput>
 std::tuple<int64_t, int64_t>
 MTPWorkerImpl<TargetInput>::estimate_kv_cache_capacity() {
   CHECK(impl_ != nullptr);
-  return estimate_kv_cache_capacity_with_draft(mtp_target_options(options_),
-                                               mtp_draft_options(options_));
+  return estimate_kv_cache_capacity_with_draft(
+      mtp_detail::target_options(options_),
+      mtp_detail::draft_options(options_));
 }
 
 template <typename TargetInput>
@@ -947,7 +927,7 @@ int64_t MTPWorkerImpl<TargetInput>::get_embedding_placeholder_size() const {
   // DeepSeek-V4 MTP stashes the pre-hc_head 3D hidden flattened to
   // [num_tokens, hc_mult*hidden], so the cache placeholder must cover
   // hc_mult*hidden per row.
-  return mtp_hidden_state_width(impl_->context_.get_model_args());
+  return mtp_hidden_state_width(impl_->context_.get_model_args_bundle());
 }
 
 template <typename TargetInput>
@@ -970,8 +950,9 @@ bool MTPWorkerImpl<TargetInput>::uses_embedded_eagle3_draft() const {
       draft_impl_->get_status() == WorkerImpl::Status::UNINITIALIZED) {
     return false;
   }
-  return ::xllm::uses_embedded_eagle3_draft(options_.speculative_algorithm(),
-                                            impl_->context_.get_model_args());
+  return ::xllm::uses_embedded_eagle3_draft(
+      options_.speculative_algorithm(),
+      impl_->context_.get_model_args_bundle());
 }
 
 template <typename TargetInput>
@@ -980,7 +961,7 @@ bool MTPWorkerImpl<TargetInput>::positions_are_decoupled_from_kv_length()
   if (impl_ == nullptr) {
     return false;
   }
-  const ModelArgs& target_args = impl_->context_.get_model_args();
+  const auto& target_args = impl_->context_.get_model_args_bundle();
   return !target_args.rope_scaling_mrope_section().empty();
 }
 
@@ -1053,7 +1034,8 @@ bool MTPWorkerImpl<TargetInput>::should_use_explicit_spec_verify_replay_update(
       block_tables.defined()
           ? spec_verify_block_table_width(block_tables)
           : spec_verify::speculative_verify_block_table_capacity(
-                impl_->context_.get_model_args().max_position_embeddings(),
+                impl_->context_.get_model_args_bundle()
+                    .max_position_embeddings(),
                 logical_block_size());
   if (block_table_width <= 0 ||
       block_table_width > kMaxSpecVerifyGraphUpdateBlockTableWidth) {
@@ -1078,7 +1060,7 @@ int64_t MTPWorkerImpl<TargetInput>::spec_verify_block_table_width(
   if (impl_ != nullptr) {
     const int64_t declared_capacity =
         spec_verify::speculative_verify_block_table_capacity(
-            impl_->context_.get_model_args().max_position_embeddings(),
+            impl_->context_.get_model_args_bundle().max_position_embeddings(),
             logical_block_size());
     CHECK_LE(required_width, declared_capacity)
         << "block table width exceeds the model position capacity";
@@ -1100,7 +1082,7 @@ void MTPWorkerImpl<TargetInput>::ensure_spec_verify_control_block_table(
   CHECK(impl_ != nullptr) << "target model must be initialized";
   const int64_t block_table_capacity =
       spec_verify::speculative_verify_block_table_capacity(
-          impl_->context_.get_model_args().max_position_embeddings(),
+          impl_->context_.get_model_args_bundle().max_position_embeddings(),
           logical_block_size());
   CHECK_GT(num_sequences, 0);
   CHECK_GT(block_table_capacity, 0);
@@ -1542,7 +1524,7 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_decode(
   }
   draft_outputs.reserve(num_speculative_tokens);
   const bool reuse_mtp_topk_state = layer::is_mtp_dsa_topk_reuse_enabled(
-      draft_impl_->context_.get_model_args());
+      draft_impl_->context_.get_llm_model_args());
   MtpTopkStatePtr mtp_topk_state;
   for (int32_t draft_idx = 0; draft_idx < num_speculative_tokens; ++draft_idx) {
     const bool is_final_draft = draft_idx == num_speculative_tokens - 1;
@@ -3049,7 +3031,7 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
       force_two_rows || dp_enabled ||
       (Platform::is_npu() &&
        mtp_async::requires_uniform_draft_rows(
-           impl_->context_.get_model_args().model_type()) &&
+           impl_->context_.get_model_args_bundle().model_type()) &&
        std::any_of(last_states.begin(),
                    last_states.end(),
                    [](const EmbeddingCache::DecodeState& state) {

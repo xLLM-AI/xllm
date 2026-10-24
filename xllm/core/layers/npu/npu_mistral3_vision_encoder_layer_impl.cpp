@@ -39,7 +39,7 @@ const uint64_t WEIGHT_COUNT_PER_LAYER =
 
 void NpuMistral3VisionEncoderLayerImpl::param_from_args(
     atb_speed::mistral::MistralVisionEncoderLayerParam& param,
-    const ModelArgs& args,
+    const VlmVisionModelArgs& args,
     const ParallelArgs& parallel_args) {
   param.isBF16 = args.dtype() == "bfloat16";
   param.rmsNormEps = args.rms_norm_eps();
@@ -57,7 +57,7 @@ void NpuMistral3VisionEncoderLayerImpl::param_from_args(
 NpuMistral3VisionEncoderLayerImpl::NpuMistral3VisionEncoderLayerImpl(
     const ModelContext& context)
     : BaseLayer(context) {
-  auto model_args = context.get_model_args();
+  const auto& model_args = context.get_vlm_model_args().vision();
   auto parallel_args = context.get_parallel_args();
   auto options = context.get_tensor_options();
   param_from_args(encode_param_, model_args, parallel_args);

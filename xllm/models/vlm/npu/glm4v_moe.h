@@ -23,6 +23,7 @@ limitations under the License.
 #include <boost/algorithm/string.hpp>
 #include <unordered_map>
 
+#include "core/framework/model/model_family_args.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/model_context/model_context.h"
@@ -42,7 +43,7 @@ namespace xllm::npu::model {
 class Glm4vMoeForConditionalGenerationImpl : public torch::nn::Module {
  public:
   Glm4vMoeForConditionalGenerationImpl(const ModelContext& context)
-      : model_args_(context.get_model_args()),
+      : model_args_(context.get_vlm_model_args()),
         options_(context.get_tensor_options()) {
     encoder_dp_group_ = context.get_parallel_args().encoder_dp_group_;
     use_encoder_dp_ =
@@ -104,7 +105,7 @@ class Glm4vMoeForConditionalGenerationImpl : public torch::nn::Module {
                            image_pixels,
                            image_grid,
                            image_token_nums,
-                           model_args_.mm_projection_dim(),
+                           model_args_.vision().mm_projection_dim(),
                            encoder_dp_group_);
       }
     }
@@ -201,7 +202,7 @@ class Glm4vMoeForConditionalGenerationImpl : public torch::nn::Module {
   }
 
  private:
-  ModelArgs model_args_;
+  VlmModelArgs model_args_;
   torch::TensorOptions options_;
   ProcessGroup* encoder_dp_group_ = nullptr;
   bool use_encoder_dp_ = false;

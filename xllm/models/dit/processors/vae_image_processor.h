@@ -38,7 +38,7 @@ class VAEImageProcessorImpl : public torch::nn::Module {
       bool do_convert_grayscale = false,
       int64_t latent_channels = 4,
       std::optional<int64_t> scale_factor = std::nullopt) {
-    const auto& model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().vae();
     options_ = context.get_tensor_options();
     scale_factor_ = scale_factor.has_value()
                         ? scale_factor.value()

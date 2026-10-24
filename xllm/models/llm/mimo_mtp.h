@@ -33,7 +33,7 @@ class MiMoMtpDecoderLayerImpl final : public torch::nn::Module {
  public:
   MiMoMtpDecoderLayerImpl(const ModelContext& context,
                           const int32_t layer_index)
-      : model_args_(context.get_model_args()) {
+      : model_args_(context.get_model_args_bundle()) {
     auto options = context.get_tensor_options();
 
     token_layernorm_ =
@@ -116,14 +116,15 @@ class MiMoMtpDecoderLayerImpl final : public torch::nn::Module {
   layer::ReplicatedLinear input_proj_{nullptr};
   layer::Qwen2DecoderLayer mtp_block_{nullptr};
 
-  ModelArgs model_args_;
+  ModelArgsBundle model_args_;
 };
 TORCH_MODULE(MiMoMtpDecoderLayer);
 
 class MiMoMtpModelImpl final : public torch::nn::Module {
  public:
   explicit MiMoMtpModelImpl(const ModelContext& context)
-      : model_args_(context.get_model_args()),
+      : model_args_(context.get_model_args_bundle()),
+        enable_mla_(context.get_model_args_bundle().enable_mla()),
         device_(context.get_tensor_options().device()) {
     auto options = context.get_tensor_options();
     auto parallel_args = context.get_parallel_args();
@@ -166,7 +167,7 @@ class MiMoMtpModelImpl final : public torch::nn::Module {
       modified_input_params.attn_metadata =
           std::make_shared<layer::AttentionMetadata>(
               layer::AttentionMetadataBuilder::build(modified_input_params,
-                                                     model_args_.enable_mla(),
+                                                     enable_mla_,
                                                      /*attn_mask=*/std::nullopt,
                                                      /*device=*/device_));
     }
@@ -224,7 +225,8 @@ class MiMoMtpModelImpl final : public torch::nn::Module {
   }
 
  private:
-  ModelArgs model_args_;
+  ModelArgsBundle model_args_;
+  bool enable_mla_ = false;
   std::vector<MiMoMtpDecoderLayer> mtp_layers_;
   int32_t dp_rank_;
   int32_t rank_;

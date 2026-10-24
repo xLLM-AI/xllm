@@ -39,7 +39,8 @@ class FlowMatchEulerDiscreteSchedulerImpl : public xllm::dit::Scheduler {
   // passes true.
   explicit FlowMatchEulerDiscreteSchedulerImpl(const ModelContext& context,
                                                bool raw_sigmas = false)
-      : args_(context.get_model_args()), raw_sigmas_(raw_sigmas) {
+      : args_(context.get_dit_model_args().scheduler()),
+        raw_sigmas_(raw_sigmas) {
     num_train_timesteps_ = args_.num_train_timesteps();
     shift_ = args_.shift();
     use_dynamic_shifting_ = args_.use_dynamic_shifting();
@@ -393,7 +394,7 @@ class FlowMatchEulerDiscreteSchedulerImpl : public xllm::dit::Scheduler {
   std::optional<int> begin_index_;
 
   int64_t order_ = 1;  // default value is 1
-  ModelArgs args_;
+  DiTSchedulerModelArgs args_;
 };
 
 TORCH_MODULE(FlowMatchEulerDiscreteScheduler);

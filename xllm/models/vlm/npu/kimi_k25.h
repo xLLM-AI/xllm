@@ -196,7 +196,7 @@ TORCH_MODULE(KimiK2_5_VisionBlock);
 class KimiK2_5_VisionPosEmbDividedImpl : public torch::nn::Module {
  public:
   KimiK2_5_VisionPosEmbDividedImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_vlm_model_args().vision();
     auto options = context.get_tensor_options();
 
     pos_emb_height_ = model_args.mm_init_pos_emb_height();
@@ -303,7 +303,7 @@ TORCH_MODULE(KimiK2_5_VisionPosEmbDivided);
 class KimiK2_5_VisionPatchEmbedImpl : public torch::nn::Module {
  public:
   KimiK2_5_VisionPatchEmbedImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_vlm_model_args().vision();
     auto options = context.get_tensor_options();
 
     auto in_features = model_args.mm_num_channels() *
@@ -368,7 +368,7 @@ TORCH_MODULE(KimiK2_5_VisionPatchEmbed);
 class KimiK2_5_VisionRotaryEmbeddingImpl : public torch::nn::Module {
  public:
   KimiK2_5_VisionRotaryEmbeddingImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_vlm_model_args().vision();
     dim_ = model_args.mm_head_dim();
     if (dim_ <= 0 && model_args.mm_num_attention_heads() > 0) {
       dim_ = model_args.mm_hidden_size() / model_args.mm_num_attention_heads();
@@ -444,7 +444,7 @@ TORCH_MODULE(KimiK2_5_VisionRotaryEmbedding);
 class KimiK2_5_VisionPatchMergerImpl : public torch::nn::Module {
  public:
   KimiK2_5_VisionPatchMergerImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_vlm_model_args().vision();
     auto options = context.get_tensor_options();
 
     int64_t d_model = model_args.mm_projection_dim();  // out_hidden_size
@@ -555,7 +555,7 @@ TORCH_MODULE(KimiK2_5_VisionPatchMerger);
 class KimiK2_5_VisionEncoderImpl : public torch::nn::Module {
  public:
   KimiK2_5_VisionEncoderImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_vlm_model_args().vision();
     auto options = context.get_tensor_options();
 
     hidden_size_ = model_args.mm_hidden_size();
@@ -681,7 +681,7 @@ TORCH_MODULE(KimiK2_5_VisionEncoder);
 class KimiK2_5_VisionTransformerImpl : public torch::nn::Module {
  public:
   KimiK2_5_VisionTransformerImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_vlm_model_args().vision();
 
     spatial_merge_size_ = model_args.mm_spatial_merge_size();
     spatial_merge_unit_ = static_cast<int>(std::pow(spatial_merge_size_, 2));
@@ -786,7 +786,7 @@ struct KimiK2_5_VLVideoInputs {
 class KimiK2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
  public:
   KimiK2_5_VLForConditionalGenerationImpl(const ModelContext& context)
-      : model_args_(context.get_model_args()),
+      : model_args_(context.get_vlm_model_args()),
         options_(context.get_tensor_options()) {
     auto parallel_args = context.get_parallel_args();
     const int32_t dp_size =
@@ -803,7 +803,7 @@ class KimiK2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
     auto vision_context = make_kimi_k25_vision_context(context);
     visual_ = register_module("vision_tower",
                               KimiK2_5_VisionTransformer(vision_context));
-    auto mm_ptype = model_args_.mm_projector_type();
+    auto mm_ptype = model_args_.vision().mm_projector_type();
     if (mm_ptype == "patchmerger") {
       mm_projector_ =
           register_module("mm_projector", KimiK2_5_VisionPatchMerger(context));
@@ -907,9 +907,9 @@ class KimiK2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
     std::optional<KimiK2_5_VLVideoInputs> video_input;
     prepare_encoder_input(input_params, image_input, video_input);
     auto merge_size =
-        model_args_.mm_image_merge_size() > 0
-            ? model_args_.mm_image_merge_size()
-            : std::max<int64_t>(model_args_.mm_spatial_merge_size(),
+        model_args_.vision().mm_image_merge_size() > 0
+            ? model_args_.vision().mm_image_merge_size()
+            : std::max<int64_t>(model_args_.vision().mm_spatial_merge_size(),
                                 int64_t(2));
     MMDict multimodal_embeds;
     if (image_input) {
@@ -940,9 +940,10 @@ class KimiK2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
   }
 
   torch::Tensor generate_multimodal_mask(torch::Tensor input_ids) {
-    auto special_token_ids = torch::tensor(
-        {model_args_.image_token_id(), model_args_.video_token_id()},
-        input_ids.options().dtype(torch::kInt64));
+    auto special_token_ids =
+        torch::tensor({model_args_.vision().image_token_id(),
+                       model_args_.vision().video_token_id()},
+                      input_ids.options().dtype(torch::kInt64));
     auto is_multimodal = torch::isin(input_ids, special_token_ids);
     return is_multimodal;
   }
@@ -1052,7 +1053,7 @@ class KimiK2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
   }
 
  private:
-  ModelArgs model_args_;
+  VlmModelArgs model_args_;
   torch::TensorOptions options_;
 
   KimiK2_5_VisionTransformer visual_{nullptr};

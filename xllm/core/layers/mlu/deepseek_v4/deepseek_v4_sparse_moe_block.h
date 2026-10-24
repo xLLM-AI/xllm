@@ -23,6 +23,7 @@ limitations under the License.
 #include <vector>
 
 #include "framework/model/model_args.h"
+#include "framework/model/model_family_args.h"
 #include "framework/model/model_params_view.h"
 #include "framework/model_context/model_context.h"
 #include "framework/parallel_state/parallel_args.h"
@@ -40,6 +41,16 @@ class DeepseekV4SparseMoEBlockImpl final : public torch::nn::Module {
  public:
   DeepseekV4SparseMoEBlockImpl() = default;
   DeepseekV4SparseMoEBlockImpl(ModelContext context, bool use_hash);
+  DeepseekV4SparseMoEBlockImpl(
+      const LlmModelArgs& model_args,
+      const QuantArgs& quant_args,
+      const ParallelArgs& parallel_args,
+      const torch::TensorOptions& options,
+      bool use_hash,
+      const std::shared_ptr<Stream>& routed_comm_stream,
+      const std::shared_ptr<Stream>& shared_compute_stream,
+      const std::string& module_prefix = "");
+
   DeepseekV4SparseMoEBlockImpl(
       const ModelArgs& model_args,
       const QuantArgs& quant_args,

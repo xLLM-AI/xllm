@@ -28,23 +28,26 @@ bool use_moe_all2all(bool enable_deep_ep, const ModelParamsView& input_params) {
   return enable_deep_ep && all_dp_ranks_are_decode(input_params);
 }
 
-bool is_moe_layer(const ModelArgs& model_args, int32_t layer_id) {
-  const auto& mlp_only_layers = model_args.mlp_only_layers();
+bool is_moe_layer(const LlmModelArgs& model_args, int32_t layer_id) {
+  const auto& transformer_args = model_args;
+  const auto& mlp_only_layers = transformer_args.mlp_only_layers();
   return std::count(mlp_only_layers.begin(), mlp_only_layers.end(), layer_id) ==
              0 &&
          model_args.n_routed_experts() > 0 &&
-         (layer_id + 1) % model_args.decoder_sparse_step() == 0;
+         (layer_id + 1) % transformer_args.decoder_sparse_step() == 0;
 }
 }  // namespace
 
 Qwen3_5DecoderLayerImpl::Qwen3_5DecoderLayerImpl(const ModelContext& context,
                                                  int32_t layer_id)
     : parallel_args_(context.get_parallel_args()) {
-  const auto& model_args = context.get_model_args();
+  const auto& model_args = context.get_model_args_bundle();
+  const auto& llm_args = context.get_llm_model_args();
+  const auto& transformer_args = llm_args;
   const auto& quant_args = context.get_quant_args();
   const auto& options = context.get_tensor_options();
 
-  const bool use_moe = is_moe_layer(model_args, layer_id);
+  const bool use_moe = is_moe_layer(llm_args, layer_id);
 
   enable_deep_ep_ =
       use_moe &&
@@ -57,10 +60,10 @@ Qwen3_5DecoderLayerImpl::Qwen3_5DecoderLayerImpl(const ModelContext& context,
         << "Qwen3.5 MoE only support deep ep all2all when dp_size == ep_size";
   }
 
-  auto layer_types = model_args.layer_types();
+  auto layer_types = transformer_args.layer_types();
   if (layer_types.empty()) {
-    int32_t interval = model_args.full_attention_interval();
-    for (int32_t i = 0; i < model_args.n_layers(); i++) {
+    int32_t interval = transformer_args.full_attention_interval();
+    for (int32_t i = 0; i < transformer_args.n_layers(); i++) {
       layer_types.push_back((i + 1) % interval == 0 ? "full_attention"
                                                     : "linear_attention");
     }
@@ -83,15 +86,17 @@ Qwen3_5DecoderLayerImpl::Qwen3_5DecoderLayerImpl(const ModelContext& context,
             model_args, quant_args, parallel_args_, options, layer_id));
   }
 
-  input_norm_ = register_module(
-      "input_layernorm",
-      Qwen3NextRMSNormMlu(
-          model_args.hidden_size(), model_args.rms_norm_eps(), options));
+  input_norm_ =
+      register_module("input_layernorm",
+                      Qwen3NextRMSNormMlu(transformer_args.hidden_size(),
+                                          transformer_args.rms_norm_eps(),
+                                          options));
 
-  post_norm_ = register_module(
-      "post_attention_layernorm",
-      Qwen3NextRMSNormMlu(
-          model_args.hidden_size(), model_args.rms_norm_eps(), options));
+  post_norm_ =
+      register_module("post_attention_layernorm",
+                      Qwen3NextRMSNormMlu(transformer_args.hidden_size(),
+                                          transformer_args.rms_norm_eps(),
+                                          options));
 
   if (use_moe) {
     const std::shared_ptr<ModelStreamRegistry>& stream_registry =
@@ -99,7 +104,7 @@ Qwen3_5DecoderLayerImpl::Qwen3_5DecoderLayerImpl(const ModelContext& context,
     moe_mlp_ = register_module(
         "mlp",
         Qwen3_5FusedMoE(
-            model_args,
+            context.get_llm_model_args(),
             FusedMoEArgs{.is_gated = true},
             quant_args,
             parallel_args_,
@@ -108,11 +113,11 @@ Qwen3_5DecoderLayerImpl::Qwen3_5DecoderLayerImpl(const ModelContext& context,
             stream_registry->get(ExecutionStreamRole::AUXILIARY_COMPUTE)));
   } else {
     mlp_ = register_module("mlp",
-                           DenseMLP(model_args.hidden_size(),
-                                    model_args.intermediate_size(),
+                           DenseMLP(transformer_args.hidden_size(),
+                                    transformer_args.intermediate_size(),
                                     true,
                                     false,
-                                    model_args.hidden_act(),
+                                    transformer_args.hidden_act(),
                                     /*enable_result_reduction=*/true,
                                     quant_args,
                                     parallel_args_.tp_group_,

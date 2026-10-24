@@ -44,6 +44,17 @@ FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
                            const QuantArgs& quant_args,
                            const ParallelArgs& parallel_args,
                            const torch::TensorOptions& options)
+    : FusedMoEImpl(LlmModelArgs(model_args),
+                   moe_args,
+                   quant_args,
+                   parallel_args,
+                   options) {}
+
+FusedMoEImpl::FusedMoEImpl(const LlmModelArgs& model_args,
+                           const FusedMoEArgs& moe_args,
+                           const QuantArgs& quant_args,
+                           const ParallelArgs& parallel_args,
+                           const torch::TensorOptions& options)
     : num_total_experts_(static_cast<int64_t>(model_args.n_routed_experts())),
       topk_(model_args.num_experts_per_tok()),
       num_expert_group_(model_args.n_group()),

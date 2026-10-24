@@ -95,7 +95,7 @@ void NpuGlm4DecoderLayerImpl::initialize_quantization_parameters(
 
 NpuGlm4DecoderLayerImpl::NpuGlm4DecoderLayerImpl(const ModelContext& context)
     : BaseLayer(context) {
-  auto model_args = context.get_model_args();
+  const auto& model_args = context.get_model_args_bundle();
   auto parallel_args = context.get_parallel_args();
   auto options = context.get_tensor_options();
 

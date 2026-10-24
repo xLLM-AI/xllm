@@ -63,14 +63,15 @@ class DeepseekV4DSparkModelImpl final : public DeepseekV4ModelImpl {
   explicit DeepseekV4DSparkModelImpl(const ModelContext& context)
       : DeepseekV4ModelImpl(context),
         markov_head_(context.get_tensor_options(),
-                     context.get_model_args().markov_rank()) {
-    const ModelArgs& args = context.get_model_args();
-    const int64_t capture_count = args.dspark_num_layers();
+                     context.get_llm_model_args().markov_rank()) {
+    const auto& llm_args = context.get_llm_model_args();
+    const auto& args = llm_args;
+    const int64_t capture_count = llm_args.dspark_num_layers();
     CHECK_GT(capture_count, 0)
         << "DeepSeek-V4 DSpark requires dspark_num_layers > 0.";
-    CHECK_EQ(args.n_layers(), args.dspark_num_layers())
+    CHECK_EQ(args.n_layers(), llm_args.dspark_num_layers())
         << "DeepSeek-V4 DSpark draft layer count mismatch.";
-    CHECK_GT(args.markov_rank(), 0)
+    CHECK_GT(llm_args.markov_rank(), 0)
         << "DeepSeek-V4 DSpark requires dspark_markov_rank > 0.";
 
     // DeepSeek-V4 DSpark checkpoints carry a confidence head (with_markov, no
@@ -81,7 +82,7 @@ class DeepseekV4DSparkModelImpl final : public DeepseekV4ModelImpl {
     if (SpeculativeConfig::get_instance().enable_adaptive_target_verify()) {
       confidence_head_.initialize(context.get_tensor_options(),
                                   args.hidden_size(),
-                                  args.markov_rank(),
+                                  llm_args.markov_rank(),
                                   /*with_markov=*/true);
     }
 

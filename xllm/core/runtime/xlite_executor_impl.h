@@ -24,6 +24,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/model/causal_lm.h"
+#include "core/framework/model/model_family_args.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/kv_cache/storage/kv_cache.h"
@@ -38,7 +39,7 @@ namespace xllm {
 class XliteExecutorImpl : public BaseExecutorImpl {
  public:
   XliteExecutorImpl(CausalLM* model,
-                    const ModelArgs& args,
+                    const ModelArgsBundle& args,
                     const torch::Device& device,
                     const runtime::Options& options)
       : BaseExecutorImpl(model, args, device, options),

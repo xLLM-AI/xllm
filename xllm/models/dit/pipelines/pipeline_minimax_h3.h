@@ -69,8 +69,9 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
         task_type_(DiTConfig::get_instance().dit_h3_task_type()) {
     CHECK(task_type_ == "fl2va" || task_type_ == "ref2va")
         << "MiniMax-H3 dit_h3_task_type must be fl2va or ref2va";
-    const ModelArgs& transformer_args = context.get_model_args("transformer");
-    const ModelArgs& vae_args = context.get_model_args("vae");
+    const auto& transformer_args =
+        context.get_dit_model_args("transformer").transformer();
+    const auto& vae_args = context.get_dit_model_args("vae").vae();
     const int32_t vae_size = context.get_parallel_args().vae_size();
     CHECK_GT(vae_size, 0);
     CHECK(vae_size == 1 || vae_group_ != nullptr)

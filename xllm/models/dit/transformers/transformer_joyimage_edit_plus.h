@@ -714,7 +714,7 @@ class JoyImageEditPlusTransformer3DModelImpl final
       : xllm::dit::SequenceParallelMixin(
             /*process_group=*/parallel_args.dit_sp_group_),
         options_(context.get_tensor_options()) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
     hidden_size_ = model_args.hidden_size();
     num_heads_ = model_args.num_attention_heads();
     int64_t num_layers = model_args.num_layers();

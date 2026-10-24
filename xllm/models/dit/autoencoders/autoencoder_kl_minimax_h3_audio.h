@@ -1067,7 +1067,7 @@ TORCH_MODULE(BigVGANDecoder);
 class AutoencoderKLMiniMaxH3AudioImpl final : public torch::nn::Module {
  public:
   explicit AutoencoderKLMiniMaxH3AudioImpl(const ModelContext& context) {
-    const ModelArgs& args = context.get_model_args();
+    const auto& args = context.get_dit_model_args().vae();
     encoder_dim_ = args.encoder_dim();
     latent_dim_ = args.latent_dim();
     latent_channels_ = args.latent_channels();

@@ -205,7 +205,8 @@ bool LLMEngine::init(
 bool LLMEngine::init_model(MasterStatus master_status,
                            const ModelInitCallback& prepare_model) {
   const std::string& model_path = options_.model_path();
-  auto model_loader = ModelLoader::create(model_path);
+  auto model_loader =
+      ModelLoader::create(model_path, /*requested_family=*/"llm");
   LOG(INFO) << "Initializing model from: " << model_path;
 
   args_ = model_loader->model_args();

@@ -34,7 +34,7 @@ bool is_sp_alias_pg(ProcessGroup* pg, const ParallelArgs& parallel_args) {
          pg == parallel_args.moe_ep_group_;
 }
 
-bool is_mtp_layer(const ModelArgs& model_args) {
+bool is_mtp_layer(const LlmModelArgs& model_args) {
   return model_args.model_type().ends_with("_mtp");
 }
 
@@ -42,7 +42,7 @@ DsaTopkShareDecision resolve_topk_share_decision(
     const ModelContext& context,
     int32_t layer_id,
     const DsaTopkSharePlan& topk_share_plan) {
-  if (is_mtp_layer(context.get_model_args())) {
+  if (is_mtp_layer(context.get_llm_model_args())) {
     return DsaTopkShareDecision();
   }
   return topk_share_plan.decision_for(layer_id);
@@ -70,12 +70,14 @@ DeepseekV2DecoderLayerImpl::DeepseekV2DecoderLayerImpl(
     : parallel_args_(context.get_parallel_args()),
       layer_id_(layer_id),
       topk_share_decision_(topk_share_decision) {
-  const auto& model_args = context.get_model_args();
+  const auto& model_args = context.get_model_args_bundle();
+  const auto& llm_args = context.get_llm_model_args();
+  const auto& transformer_args = llm_args;
   const auto& quant_args = context.get_quant_args();
   const auto& options = context.get_tensor_options();
-  const bool mtp_layer = is_mtp_layer(model_args);
-  is_moe_layer_ = mtp_layer ? model_args.mtp_mlp_type() != "dense"
-                            : layer_id >= model_args.first_k_dense_replace();
+  const bool mtp_layer = is_mtp_layer(llm_args);
+  is_moe_layer_ = mtp_layer ? llm_args.mtp_mlp_type() != "dense"
+                            : layer_id >= llm_args.first_k_dense_replace();
 
   mtp_topk_reuse_ = is_mtp_dsa_topk_reuse_enabled(model_args);
 
@@ -93,13 +95,15 @@ DeepseekV2DecoderLayerImpl::DeepseekV2DecoderLayerImpl(
           /*enable_indexer=*/mtp_layer || !topk_share_decision_.reuse_topk));
 
   // Initialize norm layers
-  input_norm_ = register_module(
-      "input_layernorm",
-      RMSNorm(model_args.hidden_size(), model_args.rms_norm_eps(), options));
+  input_norm_ = register_module("input_layernorm",
+                                RMSNorm(transformer_args.hidden_size(),
+                                        transformer_args.rms_norm_eps(),
+                                        options));
 
-  post_norm_ = register_module(
-      "post_attention_layernorm",
-      RMSNorm(model_args.hidden_size(), model_args.rms_norm_eps(), options));
+  post_norm_ = register_module("post_attention_layernorm",
+                               RMSNorm(transformer_args.hidden_size(),
+                                       transformer_args.rms_norm_eps(),
+                                       options));
 
   // Initialize mlp
   if (is_moe_layer_) {
@@ -108,7 +112,7 @@ DeepseekV2DecoderLayerImpl::DeepseekV2DecoderLayerImpl(
     sparse_moe_ = register_module(
         "mlp",
         DeepseekV2SparseMoEBlock(
-            model_args,
+            llm_args,
             quant_args,
             parallel_args_,
             options,
@@ -116,11 +120,11 @@ DeepseekV2DecoderLayerImpl::DeepseekV2DecoderLayerImpl(
             stream_registry->get(ExecutionStreamRole::AUXILIARY_COMPUTE)));
   } else {
     mlp_ = register_module("mlp",
-                           DenseMLP(model_args.hidden_size(),
-                                    model_args.intermediate_size(),
+                           DenseMLP(transformer_args.hidden_size(),
+                                    transformer_args.intermediate_size(),
                                     /*is_gated=*/true,
                                     /*has_bias=*/false,
-                                    model_args.hidden_act(),
+                                    transformer_args.hidden_act(),
                                     /*enable_result_reduction=*/false,
                                     quant_args,
                                     parallel_args_.tp_group_,

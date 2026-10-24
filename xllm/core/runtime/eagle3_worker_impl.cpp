@@ -93,7 +93,8 @@ bool Eagle3WorkerImpl<TargetInput>::init_model(
 
     // d2t stores diffs between draft id and target id
     // hot_token_id = d2t + arange(d2t.size(0))
-    auto model_loader = ModelLoader::create(model_weights_path);
+    auto model_loader =
+        ModelLoader::create(model_weights_path, /*requested_family=*/"llm");
     auto& state_dicts = model_loader->get_state_dicts();
     for (const auto& state_dict : state_dicts) {
       torch::Tensor d2t_tensor = state_dict->get_tensor("d2t");
@@ -113,7 +114,7 @@ bool Eagle3WorkerImpl<TargetInput>::init_model(
 
 template <typename TargetInput>
 int64_t Eagle3WorkerImpl<TargetInput>::get_embedding_placeholder_size() const {
-  return AuxHiddenCapture::aux_hidden_dim(context_.get_model_args());
+  return AuxHiddenCapture::aux_hidden_dim(context_.get_model_args_bundle());
 }
 
 template <typename TargetInput>
@@ -133,7 +134,7 @@ void Eagle3WorkerImpl<TargetInput>::process_draft_sample_output(
         hot_token_id_.view({1, -1}).expand(
             {sample_output.draft_logits.size(0), hot_token_id_.size(0)}),
         sample_output.draft_logits,
-        context_.get_model_args().vocab_size());
+        context_.get_model_args_bundle().vocab_size());
   }
 
   sample_output.next_tokens =

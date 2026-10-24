@@ -10,8 +10,10 @@ cc_library(
     model_context.cpp
     dit_model_context.cpp
   DEPS
+    :model
     :platform
     :quantization
     torch
+    $<$<BOOL:${USE_NPU}>:atb_workspace>
     $<$<BOOL:${USE_NPU}>:torch_npu>
 )

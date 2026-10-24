@@ -345,10 +345,11 @@ inline int32_t deepseek_v4_normalize_compress_ratio(int32_t ratio) {
 }
 
 inline void deepseek_v4_build_cache_specs(
-    const ModelArgs& model_args,
+    const LlmModelArgs& model_args,
     std::vector<std::vector<DSACacheInfo>>& caches_info,
     std::vector<DSAGroupInfo>& group_infos) {
   const auto& compress_ratios = model_args.compress_ratios();
+  const auto& transformer_args = model_args;
   const int32_t window_size = model_args.window_size();
   const int32_t base_block_size = 128;
   CHECK_EQ(KVCacheConfig::get_instance().block_size(), base_block_size)
@@ -376,8 +377,9 @@ inline void deepseek_v4_build_cache_specs(
     }
   }
 
-  caches_info.resize(model_args.n_layers());
-  for (int32_t layer_id = 0; layer_id < model_args.n_layers(); ++layer_id) {
+  caches_info.resize(transformer_args.n_layers());
+  for (int32_t layer_id = 0; layer_id < transformer_args.n_layers();
+       ++layer_id) {
     int32_t cr = (layer_id < static_cast<int32_t>(compress_ratios.size()))
                      ? compress_ratios[layer_id]
                      : 1;
@@ -421,14 +423,15 @@ class DeepseekV4ModelImpl
   explicit DeepseekV4ModelImpl(const ModelContext& context)
       : LlmModelImplBase<layer::DeepseekV4DecoderLayer>(
             "deepseek_v4",
-            context.get_model_args()),
+            context.get_model_args_bundle(),
+            context.get_model_args_bundle().enable_mla()),
         parallel_args_(context.get_parallel_args()),
         flash_comm1_options_(context.get_flash_comm1_options()),
         aux_capture_(
-            context.get_model_args(),
+            context.get_llm_model_args(),
             context.get_tensor_options(),
             ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch()) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_llm_model_args();
     auto options = context.get_tensor_options();
     auto parallel_args = context.get_parallel_args();
     device_ = options.device();
@@ -1938,7 +1941,7 @@ class DeepseekV4ForCausalLMImpl
   explicit DeepseekV4ForCausalLMImpl(const ModelContext& context)
       : LlmForCausalLMImplBase<DeepseekV4Model>(context),
         first_k_dense_replace_(
-            context.get_model_args().first_k_dense_replace()) {}
+            context.get_llm_model_args().first_k_dense_replace()) {}
 
   void load_model(std::unique_ptr<ModelLoader> loader,
                   std::string prefix = "model.") override {

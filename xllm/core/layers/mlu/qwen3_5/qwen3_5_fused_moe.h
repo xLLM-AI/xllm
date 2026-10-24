@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include "framework/model/model_family_args.h"
 #include "layers/mlu/fused_moe.h"
 
 namespace xllm {
@@ -23,6 +24,14 @@ namespace layer {
 class Qwen3_5FusedMoEImpl final : public FusedMoEImpl {
  public:
   Qwen3_5FusedMoEImpl() = default;
+
+  Qwen3_5FusedMoEImpl(const LlmModelArgs& model_args,
+                      const FusedMoEArgs& moe_args,
+                      const QuantArgs& quant_args,
+                      const ParallelArgs& parallel_args,
+                      const torch::TensorOptions& options,
+                      const std::shared_ptr<Stream>& routed_comm_stream,
+                      const std::shared_ptr<Stream>& shared_compute_stream);
 
   Qwen3_5FusedMoEImpl(const ModelArgs& model_args,
                       const FusedMoEArgs& moe_args,

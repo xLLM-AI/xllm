@@ -33,6 +33,7 @@ limitations under the License.
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "core/common/version_singleton.h"
@@ -50,7 +51,6 @@ limitations under the License.
 #include "core/platform/device.h"
 #include "core/util/blocking_counter.h"
 #include "core/util/json_reader.h"
-#include "core/util/rec_model_utils.h"
 #include "core/util/scope_guard.h"
 #include "core/util/tensor_helper.h"
 #include "core/util/utils.h"
@@ -214,20 +214,25 @@ void check_safetensors_cleanup(::Status status,
 
 }  // namespace
 
-HFModelLoader::HFModelLoader(const std::string& model_weights_path)
-    : model_weights_path_(model_weights_path) {
-  CHECK(load_args(model_weights_path))
-      << "Failed to load model args from " << model_weights_path;
+HFModelLoader::HFModelLoader(std::string model_weights_path)
+    : HFModelLoader(std::move(model_weights_path),
+                    ModelConfig::get_instance().backend()) {}
+
+HFModelLoader::HFModelLoader(std::string model_weights_path,
+                             const std::string& requested_family)
+    : model_weights_path_(std::move(model_weights_path)) {
+  CHECK(load_args(model_weights_path_, requested_family))
+      << "Failed to load model args from " << model_weights_path_;
   // try to load safetensors first
   for (const auto& entry :
-       std::filesystem::directory_iterator(model_weights_path)) {
+       std::filesystem::directory_iterator(model_weights_path_)) {
     // load bin or safe tensors
     if (entry.path().extension() == ".safetensors") {
       model_weights_files_.push_back(entry.path().string());
     }
   }
   CHECK(!model_weights_files_.empty())
-      << "Failed to find model weights files in " << model_weights_path;
+      << "Failed to find model weights files in " << model_weights_path_;
   // sort the model weights files by name
   std::sort(model_weights_files_.begin(), model_weights_files_.end());
 
@@ -235,10 +240,9 @@ HFModelLoader::HFModelLoader(const std::string& model_weights_path)
       /*num_threads=*/32,
       /*cpu_binding=*/false,
       /*pool_name=*/"HFModelLoader.load_weights");
-  if (::xllm::ModelConfig::get_instance().backend() == "rec" &&
-      is_onerec_model_type(args_.model_type())) {
-    CHECK(load_rec_vocab(model_weights_path))
-        << "Failed to load rec content from " << model_weights_path;
+  if (profile_.load_rec_vocab) {
+    CHECK(load_rec_vocab(model_weights_path_))
+        << "Failed to load rec content from " << model_weights_path_;
   }
 }
 
@@ -502,10 +506,19 @@ bool HFModelLoader::load_rec_vocab(const std::string& model_weights_path) {
   return true;
 }
 
-bool HFModelLoader::load_args(const std::string& model_weights_path) {
+bool HFModelLoader::load_args(const std::string& model_weights_path,
+                              const std::string& requested_family) {
+  ResolvedModelDescriptor descriptor;
   if (!load_hf_model_args(
-          model_weights_path, ModelConfig::get_instance().backend(), &args_)) {
+          model_weights_path, requested_family, &args_, &descriptor)) {
     LOG(ERROR) << "Failed to load model args from " << model_weights_path;
+    return false;
+  }
+
+  std::string profile_error;
+  if (!select_hf_model_loader_profile(
+          descriptor, requested_family, &profile_, &profile_error)) {
+    LOG(ERROR) << profile_error;
     return false;
   }
 
@@ -521,27 +534,29 @@ bool HFModelLoader::load_args(const std::string& model_weights_path) {
     return false;
   }
 
-  if (!load_tokenizer_args(model_weights_path)) {
+  if (!load_tokenizer_args(model_weights_path, descriptor)) {
     LOG(ERROR) << "Failed to load tokenizer args from " << model_weights_path;
     return false;
   }
 
-  if (!load_hf_image_preprocessor_args(model_weights_path, args_)) {
-    LOG(ERROR) << "Failed to load image preprocess args from "
-               << model_weights_path;
-    return false;
-  }
+  if (profile_.load_media_preprocessor_args) {
+    if (!load_hf_image_preprocessor_args(model_weights_path, args_)) {
+      LOG(ERROR) << "Failed to load image preprocess args from "
+                 << model_weights_path;
+      return false;
+    }
 
-  if (!load_hf_video_preprocessor_args(model_weights_path, args_)) {
-    LOG(ERROR) << "Failed to load video preprocess args from "
-               << model_weights_path;
-    return false;
-  }
+    if (!load_hf_video_preprocessor_args(model_weights_path, args_)) {
+      LOG(ERROR) << "Failed to load video preprocess args from "
+                 << model_weights_path;
+      return false;
+    }
 
-  if (!load_hf_audio_preprocessor_args(model_weights_path, args_)) {
-    LOG(ERROR) << "Failed to load audio preprocess args from "
-               << model_weights_path;
-    return false;
+    if (!load_hf_audio_preprocessor_args(model_weights_path, args_)) {
+      LOG(ERROR) << "Failed to load audio preprocess args from "
+                 << model_weights_path;
+      return false;
+    }
   }
 
   // Some hacky logics to support loading of old models
@@ -780,7 +795,9 @@ std::optional<std::string> load_chat_template_file(const std::string& dir) {
 }
 }  // namespace
 
-bool HFModelLoader::load_tokenizer_args(const std::string& model_weights_path) {
+bool HFModelLoader::load_tokenizer_args(
+    const std::string& model_weights_path,
+    const ResolvedModelDescriptor& descriptor) {
   // tokenizer args from tokenizer_config.json
   JsonReader tokenizer_reader;
   const std::string tokenizer_args_file_path =
@@ -830,8 +847,7 @@ bool HFModelLoader::load_tokenizer_args(const std::string& model_weights_path) {
     }
   }
 
-  auto tokenizer_args_loader =
-      ModelRegistry::get_tokenizer_args_loader(args_.model_type());
+  const auto& tokenizer_args_loader = descriptor.meta.tokenizer_args_loader;
   if (tokenizer_args_loader != nullptr) {
     if (!tokenizer_args_loader(tokenizer_reader, &tokenizer_args_)) {
       LOG(ERROR) << "Failed to load tokenizer args from "

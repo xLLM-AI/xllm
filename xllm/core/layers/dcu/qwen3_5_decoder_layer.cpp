@@ -21,7 +21,8 @@ namespace xllm {
 namespace layer {
 namespace {
 
-bool is_full_attention_layer(const ModelArgs& model_args, int32_t layer_id) {
+bool is_full_attention_layer(const ModelArgsBundle& model_args,
+                             int32_t layer_id) {
   auto layer_types = model_args.layer_types();
   if (layer_types.empty()) {
     int32_t interval = model_args.full_attention_interval();
@@ -33,12 +34,13 @@ bool is_full_attention_layer(const ModelArgs& model_args, int32_t layer_id) {
   return true;
 }
 
-bool is_moe_layer(const ModelArgs& model_args, int32_t layer_id) {
-  const auto& mlp_only_layers = model_args.mlp_only_layers();
+bool is_moe_layer(const LlmModelArgs& model_args, int32_t layer_id) {
+  const auto& transformer_args = model_args;
+  const auto& mlp_only_layers = transformer_args.mlp_only_layers();
   return std::count(mlp_only_layers.begin(), mlp_only_layers.end(), layer_id) ==
              0 &&
          model_args.n_routed_experts() > 0 &&
-         (layer_id + 1) % model_args.decoder_sparse_step() == 0;
+         (layer_id + 1) % transformer_args.decoder_sparse_step() == 0;
 }
 
 }  // namespace
@@ -46,19 +48,20 @@ bool is_moe_layer(const ModelArgs& model_args, int32_t layer_id) {
 Qwen3_5DecoderLayerImpl::Qwen3_5DecoderLayerImpl(const ModelContext& context,
                                                  int32_t layer_id)
     : parallel_args_(context.get_parallel_args()) {
-  const auto& model_args = context.get_model_args();
+  const auto& llm_args = context.get_llm_model_args();
+  const auto& transformer_args = llm_args;
   const auto& quant_args = context.get_quant_args();
   const auto& options = context.get_tensor_options();
 
-  is_full_attention_ = is_full_attention_layer(model_args, layer_id);
-  const bool use_moe = is_moe_layer(model_args, layer_id);
+  is_full_attention_ = is_full_attention_layer(transformer_args, layer_id);
+  const bool use_moe = is_moe_layer(llm_args, layer_id);
 
   // ---- Attention ----
   if (is_full_attention_) {
     const int64_t tp_size = parallel_args_.tp_group_->world_size();
-    const int64_t total_num_heads = model_args.n_heads();
+    const int64_t total_num_heads = transformer_args.n_heads();
     const int64_t total_num_kv_heads =
-        model_args.n_kv_heads().value_or(model_args.n_heads());
+        transformer_args.n_kv_heads().value_or(transformer_args.n_heads());
     CHECK(total_num_heads % tp_size == 0);
     num_heads_ = total_num_heads / tp_size;
 
@@ -72,27 +75,27 @@ Qwen3_5DecoderLayerImpl::Qwen3_5DecoderLayerImpl(const ModelContext& context,
       num_kv_head_replicas_ = tp_size / total_num_kv_heads;
     }
 
-    head_dim_ = model_args.head_dim();
+    head_dim_ = transformer_args.head_dim();
     q_size_ = num_heads_ * head_dim_;
     kv_size_ = num_kv_heads_ * head_dim_;
     scaling_ = 1.0f / std::sqrt(static_cast<float>(head_dim_));
-    attn_output_gate_ = model_args.attn_output_gate();
+    attn_output_gate_ = transformer_args.attn_output_gate();
 
     qkv_proj_ = register_module(
         "qkv_proj",
-        QKVParallelLinear(model_args.hidden_size(),
+        QKVParallelLinear(transformer_args.hidden_size(),
                           attn_output_gate_ ? num_heads_ * 2 : num_heads_,
                           num_kv_heads_,
-                          model_args.head_dim(),
+                          transformer_args.head_dim(),
                           num_kv_head_replicas_,
-                          /*bias=*/model_args.attention_bias(),
+                          /*bias=*/transformer_args.attention_bias(),
                           /*gather_output=*/false,
                           parallel_args_,
                           options));
 
     o_proj_ = register_module("o_proj",
                               RowParallelLinear(total_num_heads * head_dim_,
-                                                model_args.hidden_size(),
+                                                transformer_args.hidden_size(),
                                                 /*bias=*/false,
                                                 /*input_is_parallelized=*/true,
                                                 /*if_reduce_results=*/true,
@@ -102,59 +105,63 @@ Qwen3_5DecoderLayerImpl::Qwen3_5DecoderLayerImpl(const ModelContext& context,
 
     q_norm_ = register_module(
         "q_norm",
-        Qwen3NextRMSNorm(head_dim_, model_args.rms_norm_eps(), options));
+        Qwen3NextRMSNorm(head_dim_, transformer_args.rms_norm_eps(), options));
     k_norm_ = register_module(
         "k_norm",
-        Qwen3NextRMSNorm(head_dim_, model_args.rms_norm_eps(), options));
+        Qwen3NextRMSNorm(head_dim_, transformer_args.rms_norm_eps(), options));
 
     attn_ = register_module("attn",
                             Attention(num_heads_,
                                       head_dim_,
                                       scaling_,
                                       num_kv_heads_,
-                                      model_args.sliding_window()));
+                                      transformer_args.sliding_window()));
 
-    const int32_t rotary_dim =
-        static_cast<int32_t>(head_dim_ * model_args.partial_rotary_factor());
+    const int32_t rotary_dim = static_cast<int32_t>(
+        head_dim_ * transformer_args.partial_rotary_factor());
     rotary_emb_ = register_module(
         "rope",
         MRotaryEmbedding(rotary_dim,
-                         model_args.max_position_embeddings(),
-                         model_args.rope_theta(),
+                         transformer_args.max_position_embeddings(),
+                         transformer_args.rope_theta(),
                          /*interleaved=*/false,
-                         model_args.rope_scaling_mrope_section(),
+                         transformer_args.rope_scaling_mrope_section(),
                          options));
   } else {
-    linear_attn_ = register_module(
-        "linear_attn",
-        Qwen3_5GatedDeltaNet(model_args, quant_args, parallel_args_, options));
+    linear_attn_ =
+        register_module("linear_attn",
+                        Qwen3_5GatedDeltaNet(context.get_model_args_bundle(),
+                                             quant_args,
+                                             parallel_args_,
+                                             options));
   }
 
   // ---- Layer Norms ----
-  input_norm_ = register_module(
-      "input_layernorm",
-      Qwen3NextRMSNorm(
-          model_args.hidden_size(), model_args.rms_norm_eps(), options));
-  post_norm_ = register_module(
-      "post_attention_layernorm",
-      Qwen3NextRMSNorm(
-          model_args.hidden_size(), model_args.rms_norm_eps(), options));
+  input_norm_ =
+      register_module("input_layernorm",
+                      Qwen3NextRMSNorm(transformer_args.hidden_size(),
+                                       transformer_args.rms_norm_eps(),
+                                       options));
+  post_norm_ = register_module("post_attention_layernorm",
+                               Qwen3NextRMSNorm(transformer_args.hidden_size(),
+                                                transformer_args.rms_norm_eps(),
+                                                options));
 
   // ---- MLP / MoE ----
   if (use_moe) {
     moe_mlp_ = register_module("mlp",
-                               FusedMoE(model_args,
+                               FusedMoE(context.get_llm_model_args(),
                                         FusedMoEArgs{.is_gated = true},
                                         quant_args,
                                         parallel_args_,
                                         options));
   } else {
     mlp_ = register_module("mlp",
-                           DenseMLP(model_args.hidden_size(),
-                                    model_args.intermediate_size(),
+                           DenseMLP(transformer_args.hidden_size(),
+                                    transformer_args.intermediate_size(),
                                     true,
                                     false,
-                                    model_args.hidden_act(),
+                                    transformer_args.hidden_act(),
                                     /*enable_result_reduction=*/true,
                                     quant_args,
                                     parallel_args_.tp_group_,

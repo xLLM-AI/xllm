@@ -70,7 +70,8 @@ class Qwen2AttentionTest : public ::testing::Test {
                              0.01f);
     kv_cache_ = CreateKvCache(k_cache, v_cache);
 
-    context_ = ModelContext(parallel_args_, model_args_, QuantArgs(), options_);
+    context_ = ModelContext(
+        parallel_args_, model_args_, QuantArgs(), options_, {ModelFamily::LLM});
     InitTestWeights();
   }
 

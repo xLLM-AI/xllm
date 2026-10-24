@@ -21,6 +21,7 @@ limitations under the License.
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/kv_cache/transfer/virtual_kv_cache_transfer_memory_provider.h"
 #include "framework/model/model_args.h"
+#include "framework/model/model_family_args.h"
 #if defined(USE_NPU)
 #include "platform/npu/npu_layer_synchronizer.h"
 #endif
@@ -92,9 +93,19 @@ class KVCacheTransfer {
   virtual void free_kv_cache() {};
 
   virtual void configure_cache_layout(const ParallelArgs& parallel_args,
-                                      const ModelArgs& model_args,
+                                      const ModelArgsBundle& model_args,
                                       int32_t block_token_capacity,
                                       bool is_spec_draft) {}
+
+  void configure_cache_layout(const ParallelArgs& parallel_args,
+                              const ModelArgs& model_args,
+                              int32_t block_token_capacity,
+                              bool is_spec_draft) {
+    configure_cache_layout(parallel_args,
+                           ModelArgsBundle(model_args, ModelFamily::LLM),
+                           block_token_capacity,
+                           is_spec_draft);
+  }
 
   virtual void register_kv_cache(std::vector<xllm::KVCache>& kv_caches,
                                  const KVCacheShape& kv_cache_shape,

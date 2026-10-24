@@ -18,6 +18,7 @@ limitations under the License.
 #include <atb/atb_infer.h>
 
 #include "core/common/global_flags.h"
+#include "core/framework/model/model_family_args.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/model_context/model_context.h"
@@ -42,7 +43,7 @@ using ISlice = torch::indexing::Slice;
 class Qwen3_VLMoeForConditionalGenerationImpl : public torch::nn::Module {
  public:
   Qwen3_VLMoeForConditionalGenerationImpl(const ModelContext& context)
-      : model_args_(context.get_model_args()),
+      : model_args_(context.get_vlm_model_args()),
         options_(context.get_tensor_options()) {
     encoder_dp_group_ = context.get_parallel_args().encoder_dp_group_;
     use_encoder_dp_ =
@@ -105,9 +106,9 @@ class Qwen3_VLMoeForConditionalGenerationImpl : public torch::nn::Module {
             split_by_token_nums(image_embeds, image_token_nums);
       } else {
         const int32_t image_feature_dim =
-            model_args_.mm_projection_dim() *
+            model_args_.vision().mm_projection_dim() *
             static_cast<int32_t>(
-                model_args_.mm_deepstack_visual_indexes().size() + 1);
+                model_args_.vision().mm_deepstack_visual_indexes().size() + 1);
         multimodal_embeds["image|embedding"] =
             run_dp_encoder(visual_,
                            image_pixels,
@@ -134,7 +135,7 @@ class Qwen3_VLMoeForConditionalGenerationImpl : public torch::nn::Module {
   std::pair<torch::Tensor, std::vector<torch::Tensor>>
   split_multimodal_embedding(const torch::Tensor& embedding) const {
     const size_t num_deepstacks =
-        model_args_.mm_deepstack_visual_indexes().size();
+        model_args_.vision().mm_deepstack_visual_indexes().size();
     CHECK(embedding.defined()) << "Multimodal embedding is not defined.";
     CHECK_GT(num_deepstacks, 0)
         << "There should be at least one deepstack when splitting multimodal "
@@ -165,7 +166,7 @@ class Qwen3_VLMoeForConditionalGenerationImpl : public torch::nn::Module {
       return inputs_embeds;
     }
     const size_t num_deepstacks =
-        model_args_.mm_deepstack_visual_indexes().size();
+        model_args_.vision().mm_deepstack_visual_indexes().size();
     std::vector<torch::Tensor> deepstack_input_embeds;
     deepstack_input_embeds.resize(num_deepstacks);
     for (auto& deepstack : deepstack_input_embeds) {
@@ -235,7 +236,7 @@ class Qwen3_VLMoeForConditionalGenerationImpl : public torch::nn::Module {
   }
 
  private:
-  ModelArgs model_args_;
+  VlmModelArgs model_args_;
   torch::TensorOptions options_;
   ProcessGroup* encoder_dp_group_ = nullptr;
   bool use_encoder_dp_ = false;

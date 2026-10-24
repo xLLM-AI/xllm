@@ -259,7 +259,7 @@ class AdaLayerNormContinuousImpl final : public torch::nn::Module {
                                       double eps = 1e-5,
                                       bool bias = true)
       : options_(context.get_tensor_options()) {
-    ModelArgs model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
     quant_args_ = context.get_quant_args();
     silu_ = register_module("silu", torch::nn::SiLU());
     linear_ = register_module(
@@ -806,7 +806,7 @@ class FeedForwardImpl final : public torch::nn::Module {
                            int64_t mult = 4,
                            double dropout = 0.0)
       : options_(context.get_tensor_options()) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
     quant_args_ = context.get_quant_args();
     int64_t inner_dim = dim * 4;
 
@@ -2205,7 +2205,7 @@ class QwenImageTransformer2DModelImpl : public torch::nn::Module,
                                   const ParallelArgs& parallel_args)
       : options_(context.get_tensor_options()), parallel_args_(parallel_args) {
     quant_args_ = context.get_quant_args();
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
     int64_t num_attention_heads = model_args.n_heads();
     int64_t attention_head_dim = model_args.head_dim();
     int64_t joint_attention_dim = model_args.joint_attention_dim();

@@ -31,7 +31,7 @@ namespace xllm {
 class Flux2PipelineImpl final : public Flux2PipelineBaseImpl {
  public:
   explicit Flux2PipelineImpl(const DiTModelContext& context) {
-    const auto& model_args = context.get_model_args("vae");
+    const auto& model_args = context.get_dit_model_args("vae").vae();
     options_ = context.get_tensor_options();
     vae_scale_factor_ = 1 << (model_args.block_out_channels().size() - 1);
 
@@ -43,16 +43,22 @@ class Flux2PipelineImpl final : public Flux2PipelineBaseImpl {
     flux2_image_processor_ = Flux2ImageProcessor(
         context.get_model_context("vae"), vae_scale_factor_ * 2);
     vae_ = AutoencoderKLFlux2(context.get_model_context("vae"));
-    pos_embed_ = register_module(
-        "pos_embed",
-        Flux2PosEmbed(context.get_model_args("transformer").rope_theta(),
-                      context.get_model_args("transformer").axes_dims_rope()));
+    pos_embed_ =
+        register_module("pos_embed",
+                        Flux2PosEmbed(context.get_dit_model_args("transformer")
+                                          .transformer()
+                                          .rope_theta(),
+                                      context.get_dit_model_args("transformer")
+                                          .transformer()
+                                          .axes_dims_rope()));
 
     transformer_ = Flux2DiTModel(context.get_model_context("transformer"),
                                  context.get_parallel_args());
-    num_layers_ = context.get_model_args("transformer").num_layers();
-    num_single_layers_ =
-        context.get_model_args("transformer").num_single_layers();
+    num_layers_ =
+        context.get_dit_model_args("transformer").transformer().num_layers();
+    num_single_layers_ = context.get_dit_model_args("transformer")
+                             .transformer()
+                             .num_single_layers();
     scheduler_ =
         FlowMatchEulerDiscreteScheduler(context.get_model_context("scheduler"));
     register_module("vae", vae_);

@@ -207,6 +207,17 @@ Qwen3_5FusedMoEImpl::Qwen3_5FusedMoEImpl(const ModelArgs& model_args,
                                          const QuantArgs& quant_args,
                                          const ParallelArgs& parallel_args,
                                          const torch::TensorOptions& options)
+    : Qwen3_5FusedMoEImpl(LlmModelArgs(model_args),
+                          moe_args,
+                          quant_args,
+                          parallel_args,
+                          options) {}
+
+Qwen3_5FusedMoEImpl::Qwen3_5FusedMoEImpl(const LlmModelArgs& model_args,
+                                         const FusedMoEArgs& moe_args,
+                                         const QuantArgs& quant_args,
+                                         const ParallelArgs& parallel_args,
+                                         const torch::TensorOptions& options)
     : num_experts_(model_args.n_routed_experts()),
       topk_(model_args.num_experts_per_tok()),
       hidden_size_(model_args.hidden_size()),

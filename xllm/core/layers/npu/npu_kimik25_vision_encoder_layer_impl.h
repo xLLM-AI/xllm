@@ -33,7 +33,7 @@ limitations under the License.
 #include "atb_speed/base/model.h"
 #include "atb_speed/log.h"
 #include "atb_speed/utils/model_factory.h"
-#include "core/framework/model/model_args.h"
+#include "core/framework/model/model_family_args.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "loader/kimik25_vision_encoder_loader.h"
 #include "nlohmann/json.hpp"
@@ -79,7 +79,7 @@ class NpuKimik25VisionEncoderLayerImpl : public BaseLayer {
   void get_weights_col_packed_qkv();
 
   void param_from_args(atb_speed::kimi::VisionEncoderLayerParam& param,
-                       const ModelArgs& args,
+                       const VlmVisionModelArgs& args,
                        const ParallelArgs& parallel_args);
 
   void initialize_quantization_parameters(

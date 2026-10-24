@@ -39,9 +39,9 @@ class Glm4ModelImpl
   Glm4ModelImpl(const ModelContext& context)
       : xllm::npu::model::LlmModelImplBase<Glm4DecoderLayer>(
             "glm4",
-            context.get_model_args()) {
+            context.get_model_args_bundle()) {
     // register submodules
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_model_args_bundle();
     auto options = context.get_tensor_options();
     auto parallel_args = context.get_parallel_args();
     auto dp_local_tp_size =

@@ -24,10 +24,12 @@ namespace xllm {
 class QWen2ModelImpl : public LlmModelImplBase<layer::Qwen2DecoderLayer> {
  public:
   QWen2ModelImpl(const ModelContext& context)
-      : LlmModelImplBase<layer::Qwen2DecoderLayer>("qwen2",
-                                                   context.get_model_args()) {
+      : LlmModelImplBase<layer::Qwen2DecoderLayer>(
+            "qwen2",
+            context.get_model_args_bundle(),
+            context.get_model_args_bundle().enable_mla()) {
     // register submodules
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_model_args_bundle();
     auto options = context.get_tensor_options();
     if (!mrope_section_.empty()) {
       cos_sin_ = layer::rotary::get_concat_rotary_embedding(

@@ -21,6 +21,8 @@ limitations under the License.
 #include <utility>
 
 #include "core/common/extension_registry.h"
+#include "core/framework/model/model_family_args.h"
+#include "platform/device.h"
 #include "runtime/base_executor_impl.h"
 #include "runtime/py_executor_impl.h"
 #include "runtime/vlm_executor_impl.h"
@@ -79,7 +81,7 @@ bool ExecutorImplFactory::register_creator(std::string executor_type,
 
 std::unique_ptr<ExecutorImpl> ExecutorImplFactory::create_executor_impl(
     CausalLM* model,
-    const ModelArgs& args,
+    const ModelArgsBundle& args,
     const torch::Device& device,
     const runtime::Options& options,
     const std::string& executor_type) {

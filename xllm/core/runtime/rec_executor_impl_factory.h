@@ -21,6 +21,7 @@ limitations under the License.
 #include <unordered_map>
 
 #include "core/common/macros.h"
+#include "core/framework/model/model_family_args.h"
 #include "core/framework/model/rec_model.h"
 #include "core/runtime/options.h"
 #include "core/runtime/rec_executor_backend.h"
@@ -31,7 +32,7 @@ class RecExecutorImplFactory final {
  public:
   using Creator = std::function<std::unique_ptr<RecExecutorBackend>(
       RecModel*,
-      const ModelArgs&,
+      const ModelArgsBundle&,
       const torch::Device&,
       const runtime::Options&)>;
 
@@ -39,7 +40,7 @@ class RecExecutorImplFactory final {
   bool register_creator(const std::string& name, Creator creator);
   std::unique_ptr<RecExecutorBackend> create_executor_impl(
       RecModel* model,
-      const ModelArgs& args,
+      const ModelArgsBundle& args,
       const torch::Device& device,
       const runtime::Options& options,
       const std::string& backend);
@@ -57,7 +58,7 @@ class RecExecutorImplFactory final {
     return RecExecutorImplFactory::get_instance().register_creator(          \
         backend,                                                             \
         [](RecModel* model,                                                  \
-           const ModelArgs& args,                                            \
+           const ModelArgsBundle& args,                                      \
            const torch::Device& device,                                      \
            const runtime::Options& options)                                  \
             -> std::unique_ptr<RecExecutorBackend> {                         \

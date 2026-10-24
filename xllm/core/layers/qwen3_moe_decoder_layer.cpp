@@ -36,7 +36,7 @@ MoEModule create_fused_moe_from_context(const ModelContext& context,
                                         const FusedMoEArgs&>) {
     return MoEModule(context, moe_args);
   } else {
-    return MoEModule(context.get_model_args(),
+    return MoEModule(context.get_model_args_bundle(),
                      moe_args,
                      context.get_quant_args(),
                      context.get_parallel_args(),
@@ -50,12 +50,13 @@ bool use_moe_all2all(bool enable_deep_ep,
   return enable_deep_ep && all_dp_ranks_are_decode(input_params);
 }
 #endif
-bool is_moe_layer(const ModelArgs& model_args, int32_t layer_id) {
-  const auto& mlp_only_layers = model_args.mlp_only_layers();
+bool is_moe_layer(const LlmModelArgs& model_args, int32_t layer_id) {
+  const auto& transformer_args = model_args;
+  const auto& mlp_only_layers = transformer_args.mlp_only_layers();
   return std::count(mlp_only_layers.begin(), mlp_only_layers.end(), layer_id) ==
              0 &&
          model_args.n_routed_experts() > 0 &&
-         (layer_id + 1) % model_args.decoder_sparse_step() == 0;
+         (layer_id + 1) % transformer_args.decoder_sparse_step() == 0;
 }
 
 }  // namespace
@@ -63,7 +64,8 @@ bool is_moe_layer(const ModelArgs& model_args, int32_t layer_id) {
 Qwen3MoeDecoderLayerImpl::Qwen3MoeDecoderLayerImpl(const ModelContext& context,
                                                    int32_t layer_id)
     : parallel_args_(context.get_parallel_args()) {
-  const auto& model_args = context.get_model_args();
+  const auto& model_args = context.get_llm_model_args();
+  const auto& transformer_args = model_args;
   const auto& quant_args = context.get_quant_args();
   const auto& options = context.get_tensor_options();
   const bool use_moe = is_moe_layer(model_args, layer_id);
@@ -84,13 +86,15 @@ Qwen3MoeDecoderLayerImpl::Qwen3MoeDecoderLayerImpl(const ModelContext& context,
   attention_ = register_module("self_attn", Qwen2Attention(context));
 
   // Initialize norm layers
-  input_norm_ = register_module(
-      "input_layernorm",
-      RMSNorm(model_args.hidden_size(), model_args.rms_norm_eps(), options));
+  input_norm_ = register_module("input_layernorm",
+                                RMSNorm(transformer_args.hidden_size(),
+                                        transformer_args.rms_norm_eps(),
+                                        options));
 
-  post_norm_ = register_module(
-      "post_attention_layernorm",
-      RMSNorm(model_args.hidden_size(), model_args.rms_norm_eps(), options));
+  post_norm_ = register_module("post_attention_layernorm",
+                               RMSNorm(transformer_args.hidden_size(),
+                                       transformer_args.rms_norm_eps(),
+                                       options));
 
   // Initialize mlp
   if (use_moe) {
@@ -102,11 +106,11 @@ Qwen3MoeDecoderLayerImpl::Qwen3MoeDecoderLayerImpl(const ModelContext& context,
     const std::string mlp_module_prefix =
         "model.layers." + std::to_string(layer_id) + ".mlp";
     mlp_ = register_module("mlp",
-                           DenseMLP(model_args.hidden_size(),
-                                    model_args.intermediate_size(),
+                           DenseMLP(transformer_args.hidden_size(),
+                                    transformer_args.intermediate_size(),
                                     true,
                                     false,
-                                    model_args.hidden_act(),
+                                    transformer_args.hidden_act(),
                                     /*enable_result_reduction=*/true,
                                     quant_args,
                                     parallel_args_.tp_group_,

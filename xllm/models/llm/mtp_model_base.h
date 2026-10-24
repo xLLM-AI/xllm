@@ -33,11 +33,12 @@ namespace xllm {
 
 enum class MtpProjectionType { CONCAT_EH_PROJ, ADD_EH_PROJ };
 
-inline bool is_deepseek_v4_mtp_model(const ModelArgs& model_args) {
+inline bool is_deepseek_v4_mtp_model(const LlmModelArgs& model_args) {
   return util::is_target_mtp_model_type(model_args.model_type(), "deepseek_v4");
 }
 
-inline MtpProjectionType get_mtp_projection_type(const ModelArgs& model_args) {
+inline MtpProjectionType get_mtp_projection_type(
+    const LlmModelArgs& model_args) {
   if (is_deepseek_v4_mtp_model(model_args)) {
     return MtpProjectionType::ADD_EH_PROJ;
   }
@@ -49,7 +50,7 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
  public:
   MtpDecoderLayerImplBase(const ModelContext& context,
                           const int32_t layer_index)
-      : model_args_(context.get_model_args()) {
+      : model_args_(context.get_llm_model_args()) {
     auto options = context.get_tensor_options();
 
     projection_type_ = get_mtp_projection_type(model_args_);
@@ -172,7 +173,10 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
     torch::Tensor embedding_data = input_params.embedding.input_embedding;
     // for dummy data parallel run, we set a empty embedding
     if (attn_metadata.is_dummy) {
-      const int64_t embed_cols = mtp_hidden_state_width(model_args_);
+      const int64_t embed_cols =
+          util::is_deepseek_v4_model_type(model_args_.model_type())
+              ? model_args_.hc_mult() * model_args_.hidden_size()
+              : model_args_.hidden_size();
       embedding_data =
           torch::zeros({embed.size(0), embed_cols}, embed.options());
     }
@@ -301,7 +305,7 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
   DEFINE_WEIGHT(hc_head_scale);
 
   MtpProjectionType projection_type_ = MtpProjectionType::CONCAT_EH_PROJ;
-  ModelArgs model_args_;
+  LlmModelArgs model_args_;
 };
 
 template <typename DecoderLayerType>
@@ -341,7 +345,7 @@ template <typename DecoderLayerType,
 class MtpModelImplBase : public torch::nn::Module {
  public:
   MtpModelImplBase(const ModelContext& context)
-      : model_args_(context.get_model_args()),
+      : model_args_(context.get_llm_model_args()),
         device_(context.get_tensor_options().device()) {
     auto options = context.get_tensor_options();
     auto parallel_args = context.get_parallel_args();
@@ -477,7 +481,7 @@ class MtpModelImplBase : public torch::nn::Module {
   }
 
  private:
-  ModelArgs model_args_;
+  LlmModelArgs model_args_;
   std::vector<DecoderLayerType> mtp_layers_;
   int32_t mtp_start_layer_idx_;
   int32_t mtp_end_layer_idx_;

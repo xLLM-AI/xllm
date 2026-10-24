@@ -78,7 +78,7 @@ TORCH_MODULE(Qwen2_5_VisionBlock);
 class Qwen2_5_VisionPatchEmbedImpl : public torch::nn::Module {
  public:
   Qwen2_5_VisionPatchEmbedImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_vlm_model_args().vision();
     auto options = context.get_tensor_options();
 
     auto in_features = model_args.mm_num_channels() *
@@ -122,7 +122,7 @@ TORCH_MODULE(Qwen2_5_VisionPatchEmbed);
 class Qwen2_5_VisionRotaryEmbeddingImpl : public torch::nn::Module {
  public:
   Qwen2_5_VisionRotaryEmbeddingImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_vlm_model_args().vision();
     auto options = context.get_tensor_options();
 
     dim_ = model_args.mm_head_dim() / 2;
@@ -167,7 +167,7 @@ TORCH_MODULE(Qwen2_5_VisionRotaryEmbedding);
 class Qwen2_5_VisionPatchMergerImpl : public torch::nn::Module {
  public:
   Qwen2_5_VisionPatchMergerImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_vlm_model_args().vision();
     auto options = context.get_tensor_options();
     auto quant_args = context.get_quant_args();
     auto parallel_args = context.get_parallel_args();
@@ -269,7 +269,7 @@ TORCH_MODULE(Qwen2_5_VisionPatchMerger);
 class Qwen2_5_VisionTransformerImpl : public torch::nn::Module {
  public:
   Qwen2_5_VisionTransformerImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_vlm_model_args().vision();
     auto options = context.get_tensor_options();
 
     hidden_size_ = model_args.mm_hidden_size();
@@ -562,7 +562,7 @@ struct Qwen2_5_VLVideoInputs {
 class Qwen2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
  public:
   Qwen2_5_VLForConditionalGenerationImpl(const ModelContext& context)
-      : model_args_(context.get_model_args()),
+      : model_args_(context.get_vlm_model_args()),
         options_(context.get_tensor_options()) {
     encoder_dp_group_ = context.get_parallel_args().encoder_dp_group_;
     use_encoder_dp_ =
@@ -635,7 +635,7 @@ class Qwen2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
                            image_pixels,
                            image_grid,
                            image_token_nums,
-                           model_args_.mm_projection_dim(),
+                           model_args_.vision().mm_projection_dim(),
                            encoder_dp_group_);
       }
     }
@@ -733,7 +733,7 @@ class Qwen2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
   }
 
  private:
-  ModelArgs model_args_;
+  VlmModelArgs model_args_;
   torch::TensorOptions options_;
   ProcessGroup* encoder_dp_group_ = nullptr;
   bool use_encoder_dp_ = false;

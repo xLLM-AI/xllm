@@ -400,5 +400,475 @@ TEST(ModelRegistryTest, UnknownExtensionFamilyCannotBypassBackendRules) {
   EXPECT_EQ(error_message, "Unknown extension_impl=npu_backend_unknown_custom");
 }
 
+#if defined(USE_NPU) || defined(USE_MLU)
+TEST(ModelRegistryTest, ResolvesDescriptorForCanonicalAlias) {
+  ResolvedModelDescriptor descriptor;
+  std::string error_message;
+
+  ASSERT_TRUE(ModelRegistry::resolve_model_descriptor(
+      "glm5_3_flash", "", &descriptor, &error_message))
+      << error_message;
+  EXPECT_EQ(descriptor.requested_name, "glm5_3_flash");
+  EXPECT_EQ(descriptor.canonical_name, "glm5_next");
+  EXPECT_EQ(descriptor.registration_name, "glm5_next");
+  EXPECT_EQ(descriptor.family, ModelFamily::LLM);
+  EXPECT_EQ(descriptor.family_name, "llm");
+  EXPECT_TRUE(static_cast<bool>(descriptor.meta.model_args_loader));
+}
+#endif
+
+TEST(ModelRegistryTest, ExposesPartialRegistrationWithoutInferringFamily) {
+  const std::string name = "descriptor_partial_registration_test";
+  ModelRegistry::register_model_args_loader(
+      name,
+      [](const JsonReader& /*json*/, ModelArgs* /*args*/) { return true; });
+
+  ResolvedModelDescriptor descriptor;
+  std::string error_message;
+  ASSERT_TRUE(ModelRegistry::resolve_model_descriptor(
+      name, "", &descriptor, &error_message))
+      << error_message;
+  EXPECT_EQ(descriptor.registration_name, name);
+  EXPECT_EQ(descriptor.family, ModelFamily::UNKNOWN);
+  EXPECT_TRUE(descriptor.family_name.empty());
+  EXPECT_TRUE(static_cast<bool>(descriptor.meta.model_args_loader));
+  EXPECT_TRUE(descriptor.meta.causal_lm_factories.empty());
+}
+
+TEST(ModelRegistryTest, SnapshotsAllRegisteredModelMetadata) {
+  const std::string name = "descriptor_complete_registration_test";
+  ModelRegistry::register_causallm_factory(name,
+                                           [](const ModelContext& /*context*/) {
+                                             return std::unique_ptr<CausalLM>();
+                                           });
+  ModelRegistry::register_rec_model_factory(
+      name, [](const ModelContext& /*context*/) {
+        return std::unique_ptr<RecModel>();
+      });
+  ModelRegistry::register_model_args_loader(
+      name,
+      [](const JsonReader& /*json*/, ModelArgs* /*args*/) { return true; });
+  ModelRegistry::register_quant_args_loader(
+      name,
+      [](const JsonReader& /*json*/, QuantArgs* /*args*/) { return true; });
+  ModelRegistry::register_tokenizer_args_loader(
+      name,
+      [](const JsonReader& /*json*/, TokenizerArgs* /*args*/) { return true; });
+  ModelRegistry::register_multimodal_processor_factory(
+      name,
+      [](const ModelArgs& /*model_args*/,
+         std::shared_ptr<Tokenizer> /*tokenizer*/,
+         const TokenizerArgs& /*tokenizer_args*/) {
+        return std::unique_ptr<MultimodalProcessorBase>();
+      });
+  ModelRegistry::register_cp_sharding_mode(name, CpShardingMode::MODEL);
+  ModelRegistry::register_dcp_capability(name);
+  ModelRegistry::register_mtp_shared_weight_owner(name);
+
+  ResolvedModelDescriptor descriptor;
+  ASSERT_TRUE(
+      ModelRegistry::resolve_model_descriptor(name, "", &descriptor, nullptr));
+  EXPECT_EQ(descriptor.family, ModelFamily::LLM);
+  EXPECT_EQ(descriptor.family_name, "llm");
+  EXPECT_TRUE(descriptor.meta.causal_lm_factories.contains("native"));
+  EXPECT_TRUE(static_cast<bool>(descriptor.meta.rec_model_factory));
+  EXPECT_TRUE(static_cast<bool>(descriptor.meta.model_args_loader));
+  EXPECT_TRUE(static_cast<bool>(descriptor.meta.quant_args_loader));
+  EXPECT_TRUE(static_cast<bool>(descriptor.meta.tokenizer_args_loader));
+  EXPECT_TRUE(static_cast<bool>(descriptor.meta.multimodal_processor_factory));
+  EXPECT_EQ(descriptor.meta.cp_sharding_mode, CpShardingMode::MODEL);
+  EXPECT_TRUE(descriptor.meta.supports_dcp);
+  EXPECT_TRUE(descriptor.meta.owns_mtp_shared_weights);
+}
+
+TEST(ModelRegistryTest, RejectsUnknownDescriptorWithoutMutatingRegistry) {
+  const std::string name = "descriptor_unknown_registration_test";
+  ResolvedModelDescriptor descriptor;
+  std::string error_message;
+
+  EXPECT_FALSE(ModelRegistry::resolve_model_descriptor(
+      name, "", &descriptor, &error_message));
+  EXPECT_NE(error_message.find(name), std::string::npos);
+  EXPECT_EQ(ModelRegistry::get_model_family(name), ModelFamily::UNKNOWN);
+  EXPECT_TRUE(ModelRegistry::get_model_backend(name).empty());
+}
+
+TEST(ModelRegistryTest, PreservesDescriptorWhenExactRegistrationIsUnknown) {
+  const std::string name = "descriptor_unknown_exact_registration_test";
+  ResolvedModelDescriptor descriptor;
+  descriptor.registration_name = "selected_registration";
+  std::string error_message;
+
+  EXPECT_FALSE(ModelRegistry::get_registered_model_descriptor(
+      name, &descriptor, &error_message));
+  EXPECT_NE(error_message.find(name), std::string::npos);
+  EXPECT_EQ(descriptor.registration_name, "selected_registration");
+  EXPECT_EQ(ModelRegistry::get_model_family(name), ModelFamily::UNKNOWN);
+}
+
+TEST(ModelRegistryTest, ResolvesDiTDescriptorWithoutNpuBackendResolution) {
+  const std::string name = "descriptor_dit_pipeline_test";
+  ModelRegistry::register_dit_model_factory(
+      name, [](const DiTModelContext& /*context*/) {
+        return std::unique_ptr<DiTModel>();
+      });
+
+  ResolvedModelDescriptor descriptor;
+  std::string error_message;
+  ASSERT_TRUE(ModelRegistry::resolve_model_descriptor(
+      name, "INVALID", &descriptor, &error_message))
+      << error_message;
+  EXPECT_EQ(descriptor.registration_name, name);
+  EXPECT_EQ(descriptor.family, ModelFamily::DIT);
+  EXPECT_EQ(descriptor.family_name, "dit");
+  EXPECT_TRUE(descriptor.npu_kernel_backend.empty());
+  EXPECT_TRUE(static_cast<bool>(descriptor.meta.dit_model_factory));
+}
+
+#if defined(USE_NPU)
+TEST(ModelRegistryTest, ResolvesDescriptorForNpuBackendSpecificKey) {
+  ResolvedModelDescriptor descriptor;
+  std::string error_message;
+
+  ASSERT_TRUE(ModelRegistry::resolve_model_descriptor(
+      "qwen3", "AUTO", &descriptor, &error_message))
+      << error_message;
+  EXPECT_EQ(descriptor.registration_name, "qwen3_atb");
+  EXPECT_EQ(descriptor.family, ModelFamily::LLM);
+  EXPECT_EQ(descriptor.family_name, "llm");
+  EXPECT_EQ(descriptor.npu_kernel_backend, "ATB");
+  EXPECT_TRUE(descriptor.meta.causal_lm_factories.contains("native"));
+
+  ASSERT_TRUE(ModelRegistry::resolve_model_descriptor(
+      "qwen3", "TORCH", &descriptor, &error_message))
+      << error_message;
+  EXPECT_EQ(descriptor.registration_name, "qwen3");
+  EXPECT_EQ(descriptor.npu_kernel_backend, "TORCH");
+}
+
+TEST(ModelRegistryTest, ReusesSelectedRegistrationWithoutBackendResolution) {
+  ResolvedModelDescriptor selected_descriptor;
+  ASSERT_TRUE(ModelRegistry::resolve_model_descriptor(
+      "qwen3", "TORCH", &selected_descriptor));
+
+  ResolvedModelDescriptor auto_descriptor;
+  ASSERT_TRUE(ModelRegistry::resolve_model_descriptor(
+      "qwen3", "AUTO", &auto_descriptor));
+  ASSERT_EQ(auto_descriptor.registration_name, "qwen3_atb");
+
+  ResolvedModelDescriptor reused_descriptor;
+  ASSERT_TRUE(ModelRegistry::get_registered_model_descriptor(
+      selected_descriptor.registration_name, &reused_descriptor));
+  EXPECT_EQ(reused_descriptor.registration_name, "qwen3");
+  EXPECT_EQ(reused_descriptor.family, selected_descriptor.family);
+  EXPECT_TRUE(static_cast<bool>(reused_descriptor.meta.causal_lm_factory));
+  EXPECT_TRUE(reused_descriptor.npu_kernel_backend.empty());
+}
+#endif
+
+TEST(ModelRegistryTest, ExposesRegisteredModelFamily) {
+  ModelRegistry::register_model_backend("model_family_llm_test", "llm");
+  ModelRegistry::register_model_backend("model_family_vlm_test", "vlm");
+  ModelRegistry::register_model_backend("model_family_rec_test", "rec");
+  ModelRegistry::register_model_backend("model_family_dit_test", "dit");
+
+  EXPECT_EQ(ModelRegistry::get_model_family("model_family_llm_test"),
+            ModelFamily::LLM);
+  EXPECT_EQ(ModelRegistry::get_model_family("model_family_vlm_test"),
+            ModelFamily::VLM);
+  EXPECT_EQ(ModelRegistry::get_model_family("model_family_rec_test"),
+            ModelFamily::REC);
+  EXPECT_EQ(ModelRegistry::get_model_family("model_family_dit_test"),
+            ModelFamily::DIT);
+  EXPECT_EQ(ModelRegistry::get_model_family("unknown_model_family"),
+            ModelFamily::UNKNOWN);
+}
+
+TEST(ModelRegistryTest, PreservesFamilyForConflictingBackendRegistration) {
+  const std::string name = "model_family_conflict_test";
+  ModelRegistry::register_model_backend(name, "llm");
+  ModelRegistry::register_model_backend(name, "vlm");
+
+  EXPECT_EQ(ModelRegistry::get_model_backend(name), "llm");
+  EXPECT_EQ(ModelRegistry::get_model_family(name), ModelFamily::LLM);
+}
+
+#if !defined(USE_NPU)
+TEST(ModelRegistryTest, CreatesLlmAndRecContextsFromOneRegistration) {
+  const std::string name = "context_llm_rec_contract_test";
+  ModelRegistry::register_causallm_factory(name,
+                                           [](const ModelContext& /*context*/) {
+                                             return std::unique_ptr<CausalLM>();
+                                           });
+  ModelRegistry::register_rec_model_factory(
+      name, [](const ModelContext& /*context*/) {
+        return std::unique_ptr<RecModel>();
+      });
+  ResolvedModelDescriptor descriptor;
+  ASSERT_TRUE(
+      ModelRegistry::resolve_model_descriptor(name, "", &descriptor, nullptr));
+  ASSERT_EQ(descriptor.family, ModelFamily::LLM);
+
+  ModelArgs args{};
+  args.model_type() = name;
+  args.query_num() = 64;
+  const ParallelArgs parallel_args(
+      /*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr);
+  const QuantArgs quant_args;
+  const torch::TensorOptions tensor_options =
+      torch::TensorOptions().device(torch::kCPU);
+  const ModelContext llm = create_model_context(descriptor,
+                                                /*execution_family=*/"llm",
+                                                /*model_impl=*/"native",
+                                                parallel_args,
+                                                args,
+                                                quant_args,
+                                                tensor_options);
+  const ModelContext rec = create_model_context(descriptor,
+                                                /*execution_family=*/"rec",
+                                                /*model_impl=*/"native",
+                                                parallel_args,
+                                                args,
+                                                quant_args,
+                                                tensor_options);
+  EXPECT_EQ(llm.get_model_family(), ModelFamily::LLM);
+  EXPECT_EQ(rec.get_model_family(), ModelFamily::REC);
+  EXPECT_EQ(llm.get_registration_name(), name);
+  EXPECT_EQ(rec.get_registration_name(), name);
+  EXPECT_EQ(rec.get_model_impl(), "native");
+  EXPECT_EQ(rec.get_rec_model_args().query_num(), 64);
+  EXPECT_NE(llm.stream_registry(), rec.stream_registry());
+}
+
+TEST(ModelRegistryTest, CreatesVlmContextFromRegisteredContract) {
+  const std::string name = "context_vlm_contract_test";
+  ModelRegistry::register_causalvlm_factory(
+      name, [](const ModelContext& /*context*/) {
+        return std::unique_ptr<CausalVLM>();
+      });
+  ResolvedModelDescriptor descriptor;
+  ASSERT_TRUE(
+      ModelRegistry::resolve_model_descriptor(name, "", &descriptor, nullptr));
+
+  ModelArgs args{};
+  args.model_type() = name;
+  args.mm_patch_size() = 14;
+  const ModelContext context = create_model_context(
+      descriptor,
+      /*execution_family=*/"vlm",
+      /*model_impl=*/"native",
+      ParallelArgs(/*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr),
+      args,
+      QuantArgs(),
+      torch::TensorOptions().device(torch::kCPU));
+  EXPECT_EQ(context.get_model_family(), ModelFamily::VLM);
+  EXPECT_EQ(context.get_registration_name(), name);
+  EXPECT_EQ(context.get_vlm_model_args().vision().mm_patch_size(), 14);
+}
+
+TEST(ModelRegistryTest, SelectsRegisteredFamilyWhenExecutionFamilyIsOmitted) {
+  const std::string name = "context_default_family_test";
+  ModelRegistry::register_causallm_factory(name,
+                                           [](const ModelContext& /*context*/) {
+                                             return std::unique_ptr<CausalLM>();
+                                           });
+  ResolvedModelDescriptor descriptor;
+  ASSERT_TRUE(
+      ModelRegistry::resolve_model_descriptor(name, "", &descriptor, nullptr));
+  ASSERT_EQ(descriptor.family, ModelFamily::LLM);
+
+  const ModelContext context = create_model_context(
+      descriptor,
+      /*execution_family=*/"",
+      /*model_impl=*/"native",
+      ParallelArgs(/*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr),
+      ModelArgs(),
+      QuantArgs(),
+      torch::TensorOptions().device(torch::kCPU));
+  EXPECT_EQ(context.get_model_family(), ModelFamily::LLM);
+}
+
+TEST(ModelRegistryTest, AllowsPythonContextWithoutNativeFactory) {
+  const std::string name = "context_python_contract_test";
+  ModelRegistry::register_model_backend(name, "llm");
+  ResolvedModelDescriptor descriptor;
+  ASSERT_TRUE(
+      ModelRegistry::resolve_model_descriptor(name, "", &descriptor, nullptr));
+  ASSERT_EQ(descriptor.family, ModelFamily::LLM);
+  ASSERT_FALSE(descriptor.meta.causal_lm_factory);
+  ASSERT_FALSE(descriptor.meta.causal_vlm_factory);
+
+  const ParallelArgs parallel_args(
+      /*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr);
+  const ModelArgs args{};
+  const QuantArgs quant_args;
+  const torch::TensorOptions tensor_options =
+      torch::TensorOptions().device(torch::kCPU);
+  const ModelContext llm = create_model_context(descriptor,
+                                                /*execution_family=*/"llm",
+                                                /*model_impl=*/"python",
+                                                parallel_args,
+                                                args,
+                                                quant_args,
+                                                tensor_options);
+  const ModelContext vlm = create_model_context(descriptor,
+                                                /*execution_family=*/"vlm",
+                                                /*model_impl=*/"py",
+                                                parallel_args,
+                                                args,
+                                                quant_args,
+                                                tensor_options);
+  EXPECT_EQ(llm.get_model_family(), ModelFamily::LLM);
+  EXPECT_EQ(llm.get_model_impl(), "python");
+  EXPECT_EQ(vlm.get_model_family(), ModelFamily::VLM);
+  EXPECT_EQ(vlm.get_model_impl(), "py");
+  EXPECT_EQ(vlm.get_registration_name(), name);
+}
+
+TEST(ModelRegistryTest, CreatesModelFromContextRegistration) {
+  const std::string name = "context_selected_factory_test";
+  static int32_t factory_calls = 0;
+  factory_calls = 0;
+  ModelRegistry::register_causallm_factory(name,
+                                           [](const ModelContext& /*context*/) {
+                                             ++factory_calls;
+                                             return std::unique_ptr<CausalLM>();
+                                           });
+
+  ModelArgs args{};
+  args.model_type() = "checkpoint_alias_with_selected_registration";
+  const ModelContext context(
+      ParallelArgs(/*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr),
+      args,
+      QuantArgs(),
+      torch::TensorOptions().device(torch::kCPU),
+      {ModelFamily::LLM, name});
+  create_llm_model(context);
+  EXPECT_EQ(factory_calls, 1);
+}
+
+TEST(ModelRegistryTest, CreatesDiTPipelineContextFromRegisteredContract) {
+  const std::string name = "context_registered_dit_pipeline_test";
+  static int32_t factory_calls = 0;
+  factory_calls = 0;
+  ModelRegistry::register_dit_model_factory(
+      name, [](const DiTModelContext& /*context*/) {
+        ++factory_calls;
+        return std::unique_ptr<DiTModel>();
+      });
+  ResolvedModelDescriptor descriptor;
+  ASSERT_TRUE(
+      ModelRegistry::get_registered_model_descriptor(name, &descriptor));
+
+  ModelArgs component_args{};
+  component_args.in_channels() = 16;
+  const DiTModelContext context = create_dit_model_context(
+      descriptor,
+      ParallelArgs(/*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr),
+      {{"transformer", component_args}},
+      {{"transformer", QuantArgs()}},
+      torch::TensorOptions().device(torch::kCPU),
+      DiTCacheConfig());
+
+  EXPECT_EQ(context.get_model_family(), ModelFamily::DIT);
+  EXPECT_EQ(context.get_registration_name(), name);
+  EXPECT_EQ(context.model_type(), name);
+  EXPECT_EQ(
+      context.get_dit_model_args("transformer").transformer().in_channels(),
+      16);
+  create_dit_model(context);
+  EXPECT_EQ(factory_calls, 1);
+
+  // Legacy direct contexts may retain a checkpoint alias while selecting the
+  // execution registration independently.
+  const DiTModelContext alias_context(context.get_parallel_args(),
+                                      {},
+                                      {},
+                                      context.get_tensor_options(),
+                                      DiTCacheConfig(),
+                                      "checkpoint_pipeline_alias",
+                                      name);
+  create_dit_model(alias_context);
+  EXPECT_EQ(factory_calls, 2);
+}
+#endif
+
+TEST(ModelRegistryDeathTest, RejectsNonDiTPipelineContextContract) {
+  const std::string name = "context_non_dit_pipeline_test";
+  ModelRegistry::register_model_backend(name, "llm");
+  ResolvedModelDescriptor descriptor;
+  ASSERT_TRUE(
+      ModelRegistry::get_registered_model_descriptor(name, &descriptor));
+
+  EXPECT_DEATH(
+      create_dit_model_context(
+          descriptor,
+          ParallelArgs(/*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr),
+          {},
+          {},
+          torch::TensorOptions().device(torch::kCPU),
+          DiTCacheConfig()),
+      "does not support DiT pipelines");
+}
+
+TEST(ModelRegistryDeathTest, RejectsMissingNativeContextContract) {
+  const std::string name = "context_missing_native_contract_test";
+  ModelRegistry::register_model_backend(name, "llm");
+  ResolvedModelDescriptor descriptor;
+  ASSERT_TRUE(
+      ModelRegistry::resolve_model_descriptor(name, "", &descriptor, nullptr));
+  const ParallelArgs parallel_args(
+      /*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr);
+  const ModelArgs args{};
+  const QuantArgs quant_args;
+  const torch::TensorOptions tensor_options =
+      torch::TensorOptions().device(torch::kCPU);
+  EXPECT_DEATH(create_model_context(descriptor,
+                                    /*execution_family=*/"llm",
+                                    /*model_impl=*/"native",
+                                    parallel_args,
+                                    args,
+                                    quant_args,
+                                    tensor_options),
+               "does not support execution family: llm");
+  EXPECT_DEATH(create_model_context(descriptor,
+                                    /*execution_family=*/"rec",
+                                    /*model_impl=*/"python",
+                                    parallel_args,
+                                    args,
+                                    quant_args,
+                                    tensor_options),
+               "does not support execution family: rec");
+  EXPECT_DEATH(create_model_context(descriptor,
+                                    /*execution_family=*/"unknown",
+                                    /*model_impl=*/"native",
+                                    parallel_args,
+                                    args,
+                                    quant_args,
+                                    tensor_options),
+               "Unsupported model context family: unknown");
+}
+
+TEST(ModelRegistryDeathTest, KeepsDiTPipelineContextIndependent) {
+  const std::string name = "context_dit_pipeline_test";
+  ModelRegistry::register_dit_model_factory(
+      name, [](const DiTModelContext& /*context*/) {
+        return std::unique_ptr<DiTModel>();
+      });
+  ResolvedModelDescriptor descriptor;
+  ASSERT_TRUE(
+      ModelRegistry::resolve_model_descriptor(name, "", &descriptor, nullptr));
+  EXPECT_DEATH(
+      create_model_context(
+          descriptor,
+          /*execution_family=*/"llm",
+          /*model_impl=*/"python",
+          ParallelArgs(/*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr),
+          ModelArgs(),
+          QuantArgs(),
+          torch::TensorOptions().device(torch::kCPU)),
+      "DiT models require a DiTModelContext");
+}
+
 }  // namespace
 }  // namespace xllm

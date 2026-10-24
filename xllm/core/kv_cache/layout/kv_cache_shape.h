@@ -20,10 +20,12 @@ limitations under the License.
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "core/kv_cache/storage/kv_cache_utils.h"
 #include "framework/model/model_args.h"
+#include "framework/model/model_family_args.h"
 
 namespace xllm {
 
@@ -54,7 +56,8 @@ inline int64_t mla_packed_c8_row_bytes(int64_t kv_lora_rank,
 }
 
 // Keep cache allocation and budget estimation on the same physical geometry.
-inline int64_t get_kv_cache_storage_head_dim(const ModelArgs& model_args) {
+inline int64_t get_kv_cache_storage_head_dim(
+    const ModelArgsBundle& model_args) {
   const int64_t physical_dim = model_args.kv_cache_storage_head_dim();
   CHECK_GE(physical_dim, 0);
   CHECK(physical_dim == 0 || physical_dim >= model_args.head_dim());
@@ -65,6 +68,9 @@ class KVCacheShape final {
  public:
   KVCacheShape() = default;
 
+  KVCacheShape(const KVCacheCapacity& kv_cache_cap,
+               const ModelArgsBundle& model_args,
+               int64_t world_size);
   KVCacheShape(const KVCacheCapacity& kv_cache_cap,
                const ModelArgs& model_args,
                int64_t world_size);
@@ -105,23 +111,23 @@ class KVCacheShape final {
 
   void init_dsv4_pool_shape(const KVCacheCapacity& kv_cache_cap);
   void init_key_cache_shape(const KVCacheCapacity& kv_cache_cap,
-                            const ModelArgs& model_args,
+                            const ModelArgsBundle& model_args,
                             int64_t world_size);
   void init_value_cache_shape(const KVCacheCapacity& kv_cache_cap,
-                              const ModelArgs& model_args,
+                              const ModelArgsBundle& model_args,
                               int64_t world_size);
   void init_index_cache_shape(const KVCacheCapacity& kv_cache_cap,
-                              const ModelArgs& model_args);
+                              const ModelArgsBundle& model_args);
   void init_mla_packed_c8_shape(const KVCacheCapacity& kv_cache_cap,
-                                const ModelArgs& model_args);
+                                const ModelArgsBundle& model_args);
   void init_index_cache_scale_shape();
   void init_conv_cache_shape(const KVCacheCapacity& kv_cache_cap,
-                             const ModelArgs& model_args,
+                             const ModelArgsBundle& model_args,
                              int64_t world_size);
   void init_ssm_cache_shape(const KVCacheCapacity& kv_cache_cap,
-                            const ModelArgs& model_args,
+                            const ModelArgsBundle& model_args,
                             int64_t world_size);
-  void apply_device_layout(const ModelArgs& model_args);
+  void apply_device_layout(const ModelArgsBundle& model_args);
   void print_dsv4_pool_shape() const;
 
   static const std::vector<int64_t>& empty_shape();
@@ -147,7 +153,7 @@ class KVCacheShape final {
 KVCacheShape build_speculative_draft_kv_cache_shape(
     const KVCacheShape& target_kv_cache_shape,
     KVCacheCapacity draft_capacity,
-    const ModelArgs& draft_model_args,
+    const ModelArgsBundle& draft_model_args,
     int64_t block_size,
     int64_t draft_world_size,
     const std::string& kv_cache_dtype);
@@ -155,8 +161,38 @@ KVCacheShape build_speculative_draft_kv_cache_shape(
 // Returns the cache layout requested by the model, including draft-specific
 // layouts. Keeping this decision with cache geometry prevents workers from
 // interpreting model attention semantics.
-KVCacheCreateOptions get_kv_cache_create_options(const ModelArgs& model_args,
-                                                 const KVCacheShape& shape,
-                                                 bool is_spec_draft);
+KVCacheCreateOptions get_kv_cache_create_options(
+    const ModelArgsBundle& model_args,
+    const KVCacheShape& shape,
+    bool is_spec_draft);
+
+inline int64_t get_kv_cache_storage_head_dim(const ModelArgs& model_args) {
+  return get_kv_cache_storage_head_dim(
+      ModelArgsBundle(model_args, ModelFamily::LLM));
+}
+
+inline KVCacheShape build_speculative_draft_kv_cache_shape(
+    const KVCacheShape& target_kv_cache_shape,
+    KVCacheCapacity draft_capacity,
+    const ModelArgs& draft_model_args,
+    int64_t block_size,
+    int64_t draft_world_size,
+    const std::string& kv_cache_dtype) {
+  return build_speculative_draft_kv_cache_shape(
+      target_kv_cache_shape,
+      std::move(draft_capacity),
+      ModelArgsBundle(draft_model_args, ModelFamily::LLM),
+      block_size,
+      draft_world_size,
+      kv_cache_dtype);
+}
+
+inline KVCacheCreateOptions get_kv_cache_create_options(
+    const ModelArgs& model_args,
+    const KVCacheShape& shape,
+    bool is_spec_draft) {
+  return get_kv_cache_create_options(
+      ModelArgsBundle(model_args, ModelFamily::LLM), shape, is_spec_draft);
+}
 
 }  // namespace xllm

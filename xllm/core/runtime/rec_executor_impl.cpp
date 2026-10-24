@@ -16,11 +16,12 @@ limitations under the License.
 #include "runtime/rec_executor_impl.h"
 
 #include "common/metrics.h"
+#include "core/framework/model/model_family_args.h"
 
 namespace xllm {
 
 RecExecutorImpl::RecExecutorImpl(RecModel* model,
-                                 const ModelArgs& /*args*/,
+                                 const ModelArgsBundle& /*args*/,
                                  const torch::Device& /*device*/,
                                  const runtime::Options& /*options*/)
     : model_(model) {}

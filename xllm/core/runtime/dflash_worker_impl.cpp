@@ -421,7 +421,7 @@ DFlashWorkerImpl::~DFlashWorkerImpl() {
         "Block task pipeline currently requires a GLM DSA target; "
         "dense target attention needs a device-length prepared contract.");
   }
-  const auto& draft_args = draft_impl_->context_.get_model_args();
+  const auto& draft_args = draft_impl_->context_.get_llm_model_args();
   if (SpeculativeConfig::is_dspark_algorithm(
           options_.speculative_algorithm()) &&
       parallel_args_.dp_size() > 1 &&
@@ -455,7 +455,7 @@ DFlashWorkerImpl::~DFlashWorkerImpl() {
   capacity.unified_graph =
       Platform::is_npu() && options_.enable_graph() &&
       ExecutionConfig::get_instance().enable_unified_mtp_graph() &&
-      impl_->context_.get_model_args().model_type() == "glm_moe_dsa" &&
+      impl_->context_.get_model_args_bundle().model_type() == "glm_moe_dsa" &&
       (draft_args.model_type() == "DFlashDraftModel" ||
        is_dflash2_draft_model_type(draft_args.model_type()) ||
        draft_args.model_type() == "DSparkDraftModel") &&
@@ -475,7 +475,7 @@ DFlashWorkerImpl::~DFlashWorkerImpl() {
         "Adaptive DSpark calibration requires graph warmup, schedule overlap "
         "and at most one calibration-config or saved-table input.");
   }
-  const auto& target_args = impl_->context_.get_model_args();
+  const auto& target_args = impl_->context_.get_llm_model_args();
   capacity.sparse_dsa_target = target_args.model_type() == "glm_moe_dsa" &&
                                target_args.enable_mla() &&
                                target_args.index_topk() > 0;
@@ -572,11 +572,11 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
 
   if (impl_->get_status() == WorkerImpl::Status::LOADED) {
     target_is_hybrid_recurrent_ =
-        has_linear_attention_layers(impl_->context_.get_model_args());
+        has_linear_attention_layers(impl_->context_.get_model_args_bundle());
   }
 
   if (draft_impl_->get_status() == WorkerImpl::Status::LOADED) {
-    const ModelArgs& draft_args = draft_impl_->context_.get_model_args();
+    const auto& draft_args = draft_impl_->context_.get_llm_model_args();
     // DeepSeek-V4 DSpark checkpoints carry trained mtp.0.embed /
     // mtp.<last>.head tensors (with the draft-side QuaRot transform); replacing
     // them after load destroys proposal quality.
@@ -659,7 +659,7 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
              "checkpoint, while eager validation is not lossless.";
     }
     // Context hidden comes from the target.
-    const ModelArgs& target_args = impl_->context_.get_model_args();
+    const auto& target_args = impl_->context_.get_llm_model_args();
 
     // Probabilistic rejection requires aligned vocabularies.
     if (draft_sampling_mode_ == DraftSamplingMode::PROBABILISTIC) {
@@ -1184,7 +1184,7 @@ void DFlashWorkerImpl::write_context_kv(
       !input.transfer_kv_infos.empty()) {
     std::shared_ptr<NPULayerSynchronizerImpl> layer_synchronizer =
         std::make_shared<NPULayerSynchronizerImpl>(
-            draft_impl_->context_.get_model_args().n_layers());
+            draft_impl_->context_.get_model_args_bundle().n_layers());
     input.input_params.parallel.layer_synchronizer = layer_synchronizer;
     kv_transfers.add(kv_cache_transfer_->push_kv_blocks_async(
         input.transfer_kv_infos,

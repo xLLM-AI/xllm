@@ -66,7 +66,7 @@ class NpuOneRecBlockLayerImpl final : public BaseLayer {
 
  private:
   void param_from_args(atb_speed::onerec::BlockLayerParam& param,
-                       const ModelArgs& args,
+                       const RecModelArgs& args,
                        const ParallelArgs& parallel_args,
                        bool is_prefill);
 

@@ -215,7 +215,7 @@ class FluxSingleAttentionImpl : public torch::nn::Module {
  public:
   explicit FluxSingleAttentionImpl(const ModelContext& context)
       : options_(context.get_tensor_options()) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
     heads_ = model_args.n_heads();
     auto head_dim = model_args.head_dim();
     auto query_dim = heads_ * head_dim;
@@ -326,7 +326,7 @@ class FluxAttentionImpl : public torch::nn::Module {
  public:
   explicit FluxAttentionImpl(const ModelContext& context)
       : options_(context.get_tensor_options()) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
     heads_ = model_args.n_heads();
     auto head_dim = model_args.head_dim();
     auto query_dim = heads_ * head_dim;
@@ -536,7 +536,7 @@ class PixArtAlphaTextProjectionImpl : public torch::nn::Module {
  public:
   explicit PixArtAlphaTextProjectionImpl(const ModelContext& context)
       : options_(context.get_tensor_options()) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
     int64_t hidden_size = model_args.head_dim() * model_args.n_heads();
     int64_t in_features = model_args.pooled_projection_dim();
     int64_t out_dim =
@@ -583,7 +583,7 @@ class TimestepEmbeddingImpl : public torch::nn::Module {
  public:
   explicit TimestepEmbeddingImpl(ModelContext context)
       : options_(context.get_tensor_options()) {
-    const auto& model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
     int64_t time_embed_dim = model_args.head_dim() * model_args.n_heads();
     linear_1_ = register_module(
         "linear_1",
@@ -726,7 +726,7 @@ class AdaLayerNormZeroImpl : public torch::nn::Module {
  public:
   explicit AdaLayerNormZeroImpl(ModelContext context)
       : options_(context.get_tensor_options()) {
-    ModelArgs model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
     auto num_attention_heads = model_args.n_heads();
     auto attention_head_dim = model_args.head_dim();
     int64_t embedding_dim =
@@ -790,7 +790,7 @@ class AdaLayerNormZeroSingleImpl : public torch::nn::Module {
  public:
   explicit AdaLayerNormZeroSingleImpl(ModelContext context)
       : options_(context.get_tensor_options()) {
-    ModelArgs model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
     auto num_attention_heads = model_args.n_heads();
     auto attention_head_dim = model_args.head_dim();
     int64_t embedding_dim =
@@ -845,7 +845,7 @@ class AdaLayerNormContinuousImpl : public torch::nn::Module {
   explicit AdaLayerNormContinuousImpl(ModelContext context,
                                       bool with_bias = true)
       : options_(context.get_tensor_options()) {
-    ModelArgs model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
     auto num_attention_heads = model_args.n_heads();
     auto attention_head_dim = model_args.head_dim();
     auto embedding_dim = num_attention_heads * attention_head_dim;
@@ -903,7 +903,7 @@ class FeedForwardImpl : public torch::nn::Module {
  public:
   explicit FeedForwardImpl(const ModelContext& context)
       : options_(context.get_tensor_options()) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
     auto num_attention_heads = model_args.n_heads();
     auto attention_head_dim = model_args.head_dim();
     auto dim = num_attention_heads * attention_head_dim;
@@ -961,7 +961,7 @@ class FluxSingleTransformerBlockImpl : public torch::nn::Module {
  public:
   explicit FluxSingleTransformerBlockImpl(const ModelContext& context)
       : options_(context.get_tensor_options()) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
     auto num_attention_heads = model_args.n_heads();
     auto attention_head_dim = model_args.head_dim();
     auto dim = num_attention_heads * attention_head_dim;
@@ -1039,7 +1039,7 @@ class FluxTransformerBlockImpl : public torch::nn::Module {
  public:
   explicit FluxTransformerBlockImpl(const ModelContext& context)
       : options_(context.get_tensor_options()) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
     auto num_attention_heads = model_args.n_heads();
     auto attention_head_dim = model_args.head_dim();
 
@@ -1148,7 +1148,7 @@ class FluxTransformer2DModelImpl : public torch::nn::Module,
  public:
   explicit FluxTransformer2DModelImpl(const ModelContext& context)
       : options_(context.get_tensor_options()) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
     auto num_attention_heads = model_args.n_heads();
     auto attention_head_dim = model_args.head_dim();
     auto inner_dim = num_attention_heads * attention_head_dim;

@@ -31,11 +31,44 @@ cc_test(
 
 cc_test(
   NAME
+    dit_model_loader_test
+  SRCS
+    dit_model_loader_test.cpp
+  DEPS
+    :model_loader
+    :xllm_server
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     causal_lm_test
   SRCS
     causal_lm_test.cpp
   DEPS
     :model_loader
     :xllm_server
+    GTest::gtest_main
+)
+
+cc_test(
+  NO_NPU_RUNTIME
+  NAME
+    model_family_args_test
+  SRCS
+    model_family_args_test.cpp
+  DEPS
+    :model
+    glog::glog
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
+    model_context_test
+  SRCS
+    model_context_test.cpp
+  DEPS
+    :model_context
     GTest::gtest_main
 )

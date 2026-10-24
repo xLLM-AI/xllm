@@ -30,6 +30,7 @@ limitations under the License.
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/model/causal_lm.h"
+#include "core/framework/model/model_family_args.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/deepseek_v4_rotary_embedding.h"
 #include "core/layers/common/dsa_metadata.h"
@@ -229,7 +230,7 @@ class DeepseekV4Base {
   // Initialization helpers — called from derived class constructors
   // ==========================================================================
 
-  void init_rope(const ModelArgs& model_args,
+  void init_rope(const LlmModelArgs& model_args,
                  const torch::TensorOptions& options) {
     const int64_t rope_head_dim = model_args.rope_head_dim();
     const int64_t max_pos = model_args.max_position_embeddings();
@@ -270,7 +271,7 @@ class DeepseekV4Base {
     compressed_inverse_sin_ = -dsa_compressed_sin_;
   }
 
-  void init_hadamard(const ModelArgs& model_args,
+  void init_hadamard(const LlmModelArgs& model_args,
                      const torch::TensorOptions& options) {
     if (model_args.index_head_dim() <= 0) {
       return;
@@ -280,7 +281,7 @@ class DeepseekV4Base {
         hadamard_dim, options.dtype().toScalarType(), options.device());
   }
 
-  void build_dsa_cache_info(const ModelArgs& model_args) {
+  void build_dsa_cache_info(const LlmModelArgs& model_args) {
     const std::vector<int32_t>& compress_ratios = model_args.compress_ratios();
     const int32_t base_block_size = KVCacheConfig::get_instance().block_size();
     CHECK_GT(base_block_size, 0) << "DeepSeek V4 block_size must be positive.";

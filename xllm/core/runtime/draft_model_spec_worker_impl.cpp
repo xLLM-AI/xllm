@@ -27,6 +27,7 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/model/model_args.h"
+#include "core/framework/model/model_family_args.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/embedding_cache.h"
@@ -97,7 +98,7 @@ std::string draft_store_key_component(const runtime::Options& options) {
 }
 
 KVCacheEstimateOptions make_kv_cache_estimate_options(
-    const ModelArgs& model_args,
+    const ModelArgsBundle& model_args,
     const runtime::Options& options,
     const ParallelArgs& parallel_args,
     torch::ScalarType dtype,
@@ -236,7 +237,7 @@ KVCacheShape DraftModelSpecWorkerImpl<TargetInput>::build_draft_kv_cache_shape(
   return build_speculative_draft_kv_cache_shape(
       target_kv_cache_shape,
       draft_capacity,
-      draft_impl_->context_.get_model_args(),
+      draft_impl_->context_.get_model_args_bundle(),
       options_.block_size(),
       draft_world_size,
       options_.kv_cache_dtype());
@@ -255,12 +256,12 @@ DraftModelSpecWorkerImpl<TargetInput>::estimate_kv_cache_capacity_with_draft(
       std::min(target_cache_bytes, draft_cache_bytes);
   const int64_t total_memory = std::min(target_total_bytes, draft_total_bytes);
 
-  const ModelArgs& target_model_args = impl_->context_.get_model_args();
+  const auto& target_model_args = impl_->context_.get_model_args_bundle();
   if (!util::is_deepseek_v4_model_type(target_model_args.model_type())) {
     return {cache_size_in_bytes, total_memory};
   }
 
-  const ModelArgs& draft_model_args = draft_impl_->context_.get_model_args();
+  const auto& draft_model_args = draft_impl_->context_.get_model_args_bundle();
   KVCacheEstimateOptions target_estimate_options =
       make_kv_cache_estimate_options(target_model_args,
                                      target_options,
@@ -273,7 +274,7 @@ DraftModelSpecWorkerImpl<TargetInput>::estimate_kv_cache_capacity_with_draft(
                                      parallel_args_,
                                      dtype_,
                                      cache_size_in_bytes);
-  target_estimate_options.draft_model_args = &draft_model_args;
+  target_estimate_options.draft_model_args_bundle = &draft_model_args;
   target_estimate_options.draft_options = &draft_estimate_options;
 
   const KVCacheCapacity capacity = ::xllm::estimate_kv_cache_capacity(
@@ -400,7 +401,7 @@ bool DraftModelSpecWorkerImpl<TargetInput>::allocate_kv_cache_with_transfer(
         device_.index(),
         options_.transfer_listen_port(),
         device_,
-        context_.get_model_args().model_type());
+        context_.get_model_args_bundle().model_type());
     kv_cache_transfer_->initialize(device_.index());
   }
   return allocate_pools(kv_cache_shape,

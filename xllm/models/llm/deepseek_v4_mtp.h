@@ -81,7 +81,7 @@ TORCH_MODULE(DeepseekV4MultiTokenPredictorLayer);
 class DeepseekV4MtpModelImpl final : public torch::nn::Module {
  public:
   explicit DeepseekV4MtpModelImpl(const ModelContext& context)
-      : model_args_(context.get_model_args()) {
+      : model_args_(context.get_llm_model_args()) {
     auto options = context.get_tensor_options();
     auto parallel_args = context.get_parallel_args();
     device_ = options.device();
@@ -1121,7 +1121,7 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
   int64_t index_topk_ = 512;
   double norm_eps_ = 1e-6;
 
-  ModelArgs model_args_;
+  LlmModelArgs model_args_;
   torch::Device device_{torch::kCPU};
 
   layer::RMSNorm final_norm_{nullptr};

@@ -743,29 +743,28 @@ class MiniMaxH3Transformer3DModelImpl final
           parallel_args.dit_sp_group_ != nullptr)
         << "MiniMax-H3 SP requires a DiT SP process group";
     use_rolling_load_ = dit_rolling_load_enabled(parallel_args);
-    ModelContext transformer_context(parallel_args,
-                                     context.get_model_args("transformer"),
-                                     context.get_quant_args("transformer"),
-                                     options_);
-    const ModelArgs& model_args = transformer_context.get_model_args();
+    const auto& component_args = context.get_dit_model_args("transformer");
+    ModelContext transformer_context = context.get_model_context("transformer");
+    const auto& model_args = component_args.transformer();
     const int64_t heads = model_args.n_heads();
     const int64_t head_dim = model_args.head_dim();
     hidden_size_ = model_args.hidden_size();
-    const int64_t num_layers = model_args.num_layers();
-    const int64_t num_refiner_layers = model_args.num_refiner_layers();
-    const int64_t ffn_dim = model_args.ffn_dim();
-    const int64_t in_channels = model_args.in_channels();
-    audio_in_channels_ = model_args.audio_in_channels();
-    const std::vector<int64_t> patch_size = model_args.wan_patch_size();
-    const int64_t text_dim = model_args.text_dim();
-    freq_dim_ = model_args.time_freq_dim();
-    const int64_t time_embed_hidden_dim = model_args.time_embed_hidden_dim();
-    const int64_t time_embed_dim = model_args.time_embed_dim();
-    const int64_t rope_freq_dim = model_args.rope_freq_dim();
+    const int64_t num_layers = component_args.num_layers();
+    const int64_t num_refiner_layers = component_args.num_refiner_layers();
+    const int64_t ffn_dim = component_args.ffn_dim();
+    const int64_t in_channels = component_args.in_channels();
+    audio_in_channels_ = component_args.audio_in_channels();
+    const std::vector<int64_t> patch_size = component_args.wan_patch_size();
+    const int64_t text_dim = component_args.text_dim();
+    freq_dim_ = component_args.time_freq_dim();
+    const int64_t time_embed_hidden_dim =
+        component_args.time_embed_hidden_dim();
+    const int64_t time_embed_dim = component_args.time_embed_dim();
+    const int64_t rope_freq_dim = component_args.rope_freq_dim();
     const double rope_theta = model_args.rope_theta();
-    const double norm_eps = model_args.norm_eps();
-    const double qk_norm_eps = model_args.qk_norm_eps();
-    const double final_norm_eps = model_args.final_norm_eps();
+    const double norm_eps = component_args.norm_eps();
+    const double qk_norm_eps = component_args.qk_norm_eps();
+    const double final_norm_eps = component_args.final_norm_eps();
     CHECK_EQ(patch_size.size(), static_cast<size_t>(3))
         << "MiniMax-H3 transformer patch_size must have 3 dimensions";
     CHECK_GT(heads, 0);

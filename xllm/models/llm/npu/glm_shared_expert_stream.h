@@ -35,11 +35,12 @@ class GlmSharedExpertStreamOwner {
  public:
   explicit GlmSharedExpertStreamOwner(const ModelContext& context) {
     const ParallelArgs& parallel_args = context.get_parallel_args();
-    const ModelArgs& model_args = context.get_model_args();
+    const auto& llm_args = context.get_llm_model_args();
+    const auto& model_args = llm_args;
     const int32_t expert_parallel_degree =
         EPLBConfig::get_instance().expert_parallel_degree();
     if (parallel_args.ep_size() <= 1 || expert_parallel_degree != 2 ||
-        model_args.n_shared_experts() <= 0) {
+        llm_args.n_shared_experts() <= 0) {
       return;
     }
 

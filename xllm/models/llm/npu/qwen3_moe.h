@@ -129,11 +129,14 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
   Qwen3MoeModelImpl(const ModelContext& context)
       : device_(context.get_tensor_options().device()),
         aux_capture_(
-            context.get_model_args(),
+            context.get_llm_model_args(),
             context.get_tensor_options(),
             ::xllm::SchedulerConfig::get_instance().max_tokens_per_batch()) {
     auto options = context.get_tensor_options();
-    auto model_args = context.get_model_args();
+    // The Qwen3 MoE language block is shared by the standalone LLM and the
+    // Qwen3-VL MoE model.  Use the common transformer arguments so creating
+    // the VLM context does not attempt to access an LLM-only argument bundle.
+    const auto& model_args = context.get_model_args_bundle();
     auto parallel_args = context.get_parallel_args();
     mrope_section_ = model_args.rope_scaling_mrope_section();
     blocks_ = register_module("layers", torch::nn::ModuleList());
@@ -141,7 +144,16 @@ class Qwen3MoeModelImpl : public torch::nn::Module {
     // register submodules
     device_ = options.device();
     dtype_ = options.dtype().toScalarType();
-    num_speculative_tokens_ = model_args.num_speculative_tokens();
+    if (context.get_model_family() == ModelFamily::VLM) {
+      num_speculative_tokens_ =
+          context.get_vlm_model_args().num_speculative_tokens();
+    } else if (context.get_model_family() == ModelFamily::LLM) {
+      num_speculative_tokens_ =
+          context.get_llm_model_args().num_speculative_tokens();
+    } else {
+      CHECK_EQ(context.get_model_family(), ModelFamily::REC)
+          << "Qwen3 MoE requires an LLM, VLM, or Rec model context";
+    }
     npu_embed_tokens_ =
         register_module("npu_embed_tokens", layer::NpuWordEmbedding(context));
     cos_sin_ = layer::rotary::get_concat_rotary_embedding(

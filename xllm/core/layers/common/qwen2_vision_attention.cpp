@@ -31,7 +31,7 @@ namespace layer {
 
 Qwen2VisionAttentionImpl::Qwen2VisionAttentionImpl(const ModelContext& context,
                                                    bool has_bias) {
-  const auto& args = context.get_model_args();
+  const auto& args = context.get_vlm_model_args().vision();
   const auto& quant_args = context.get_quant_args();
   const auto& parallel_args = context.get_parallel_args();
   const auto& options = context.get_tensor_options();

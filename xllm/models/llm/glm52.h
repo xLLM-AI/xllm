@@ -182,7 +182,7 @@ class Glm52ModelImpl : public Glm5ModelImpl {
 
   static DecoderLayerFactory create_decoder_layer_factory(
       const ModelContext& context) {
-    const layer::DsaTopkSharePlan topk_share_plan(context.get_model_args());
+    const layer::DsaTopkSharePlan topk_share_plan(context.get_llm_model_args());
     return
         [topk_share_plan](const ModelContext& layer_context, int32_t layer_id) {
           return layer::DeepseekV2DecoderLayer(

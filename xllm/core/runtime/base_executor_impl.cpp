@@ -18,11 +18,12 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include "common/metrics.h"
+#include "core/framework/model/model_family_args.h"
 
 namespace xllm {
 
 BaseExecutorImpl::BaseExecutorImpl(CausalLM* model,
-                                   const ModelArgs& args,
+                                   const ModelArgsBundle& args,
                                    const torch::Device& device,
                                    const runtime::Options& options)
     : model_(model), args_(args), device_(device), options_(options) {}

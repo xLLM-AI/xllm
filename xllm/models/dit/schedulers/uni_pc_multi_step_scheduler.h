@@ -34,7 +34,7 @@ namespace xllm {
 class UniPCMultistepSchedulerImpl final : public xllm::dit::Scheduler {
  public:
   explicit UniPCMultistepSchedulerImpl(const ModelContext& context)
-      : args_(context.get_model_args()) {
+      : args_(context.get_dit_model_args().scheduler()) {
     num_train_timesteps_ = args_.num_train_timesteps();
     beta_start_ = args_.beta_start();
     beta_end_ = args_.beta_end();
@@ -795,7 +795,7 @@ class UniPCMultistepSchedulerImpl final : public xllm::dit::Scheduler {
   std::optional<int64_t> begin_index_;
 
   int64_t order_ = 1;
-  ModelArgs args_;
+  DiTSchedulerModelArgs args_;
 };
 
 TORCH_MODULE(UniPCMultistepScheduler);

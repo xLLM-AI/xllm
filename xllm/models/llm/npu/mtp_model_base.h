@@ -51,7 +51,8 @@ class MtpModelImplBase : public torch::nn::Module {
   MtpModelImplBase(const std::string& model_type, const ModelContext& context)
       : model_type_(model_type),
         device_(context.get_tensor_options().device()) {
-    auto model_args = context.get_model_args();
+    const auto& llm_args = context.get_llm_model_args();
+    const auto& model_args = llm_args;
     auto parallel_args = context.get_parallel_args();
 
     dp_size_ = parallel_args.dp_size();
@@ -61,8 +62,8 @@ class MtpModelImplBase : public torch::nn::Module {
     dp_rank_ =
         parallel_args.rank() / (dp_local_tp_size_ * parallel_args.cp_size());
     rank_ = parallel_args.rank();
-    num_experts_per_tok_ = model_args.num_experts_per_tok();
-    index_topk_ = model_args.index_topk();
+    num_experts_per_tok_ = llm_args.num_experts_per_tok();
+    index_topk_ = llm_args.index_topk();
 
     embed_tokens_ =
         register_module("embed_tokens", layer::NpuWordEmbedding(context));

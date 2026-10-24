@@ -28,7 +28,7 @@ class Glm4MoeMtpModelImpl
   Glm4MoeMtpModelImpl(const ModelContext& context)
       : xllm::npu::model::MtpModelImplBase<Glm4MoeDecoderLayer>("glm4_moe_mtp",
                                                                 context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_model_args_bundle();
     auto options = context.get_tensor_options();
 
     int32_t mask_value =

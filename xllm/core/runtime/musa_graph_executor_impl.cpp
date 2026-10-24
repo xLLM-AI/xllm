@@ -31,6 +31,7 @@ limitations under the License.
 #include "core/common/metrics.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/rec_config.h"
+#include "core/framework/model/model_family_args.h"
 #include "core/kernels/musa/musa_ops_api.h"
 #include "core/kernels/musa/musa_tvmffi_stream.h"
 #include "core/layers/common/attention_metadata.h"
@@ -241,7 +242,7 @@ void restore_linear_attention_state(
 
 // MusaGraphPersistentParam implementation
 MusaGraphPersistentParam::MusaGraphPersistentParam(
-    const ModelArgs& args,
+    const ModelArgsBundle& args,
     const torch::Device& device,
     const runtime::Options& options)
     : args_(args), device_(device), options_(options) {
@@ -1247,7 +1248,7 @@ void MusaGraph::refresh_persistent_paged_kv_host_mirrors(
 // MusaGraph implementation
 template <typename Params, typename Model>
 bool MusaGraph::capture_typed(Model* model,
-                              const ModelArgs& args,
+                              const ModelArgsBundle& args,
                               const runtime::Options& options,
                               const torch::Tensor& tokens,
                               const torch::Tensor& positions,
@@ -1492,7 +1493,7 @@ bool MusaGraph::capture_typed(Model* model,
 }
 
 bool MusaGraph::capture(CausalLM* model,
-                        const ModelArgs& args,
+                        const ModelArgsBundle& args,
                         const runtime::Options& options,
                         const torch::Tensor& tokens,
                         const torch::Tensor& positions,
@@ -1514,7 +1515,7 @@ bool MusaGraph::capture(CausalLM* model,
 }
 
 bool MusaGraph::capture(RecModel* model,
-                        const ModelArgs& args,
+                        const ModelArgsBundle& args,
                         const runtime::Options& options,
                         const torch::Tensor& tokens,
                         const torch::Tensor& positions,
@@ -1666,7 +1667,7 @@ ModelOutput MusaGraph::replay(const torch::Tensor& tokens,
 }
 
 MusaGraphExecutorImpl::MusaGraphExecutorImpl(CausalLM* model,
-                                             const ModelArgs& args,
+                                             const ModelArgsBundle& args,
                                              const torch::Device& device,
                                              const runtime::Options& options)
     : model_(model), args_(args), device_(device), options_(options) {
@@ -1691,7 +1692,7 @@ MusaGraphExecutorImpl::MusaGraphExecutorImpl(CausalLM* model,
 }
 
 MusaGraphExecutorImpl::MusaGraphExecutorImpl(RecModel* model,
-                                             const ModelArgs& args,
+                                             const ModelArgsBundle& args,
                                              const torch::Device& device,
                                              const runtime::Options& options)
     : MusaGraphExecutorImpl(static_cast<CausalLM*>(nullptr),

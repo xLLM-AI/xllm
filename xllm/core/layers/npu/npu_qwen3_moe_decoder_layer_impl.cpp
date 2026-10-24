@@ -38,8 +38,8 @@ NpuQwen3MoeDecoderLayerImpl::NpuQwen3MoeDecoderLayerImpl(
       device_id_(context.get_tensor_options().device().index()),
       layer_id_(layer_id),
       num_speculative_tokens_(
-          context.get_model_args().num_speculative_tokens()) {
-  auto model_args = context.get_model_args();
+          context.get_llm_model_args().num_speculative_tokens()) {
+  const auto& model_args = context.get_model_args_bundle();
   auto parallel_args = context.get_parallel_args();
   auto options = context.get_tensor_options();
 

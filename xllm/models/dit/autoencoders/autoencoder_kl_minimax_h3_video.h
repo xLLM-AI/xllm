@@ -945,7 +945,7 @@ class AutoencoderKLMiniMaxH3Impl final : public torch::nn::Module {
  public:
   explicit AutoencoderKLMiniMaxH3Impl(const ModelContext& context)
       : vae_group_(context.get_parallel_args().dit_vae_group_) {
-    const ModelArgs& args = context.get_model_args();
+    const auto& args = context.get_dit_model_args().vae();
     const int32_t vae_size = context.get_parallel_args().vae_size();
     CHECK_GT(vae_size, 0);
     CHECK(vae_size == 1 || vae_group_ != nullptr)

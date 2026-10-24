@@ -29,6 +29,7 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/framework/model/model_family_args.h"
 #ifdef TORCH_HIGHER_THAN_PTA6
 #include <torch_npu/csrc/framework/OpCommand.h>
 #else
@@ -79,7 +80,7 @@ void reset_capture_linear_state_to_padding(ModelParamsView& params) {
 }
 
 template <typename Params>
-bool is_qwen3_5_dp_graph_step_supported(const ModelArgs& args,
+bool is_qwen3_5_dp_graph_step_supported(const ModelArgsBundle& args,
                                         const runtime::Options& options,
                                         const Params& params) {
   const std::vector<int32_t>& dp_token_nums =
@@ -1136,7 +1137,7 @@ bool AclGraph::prepare_static_mtp_graph_tasks(
 }
 
 AclGraphExecutorImpl::AclGraphExecutorImpl(CausalLM* model,
-                                           const ModelArgs& args,
+                                           const ModelArgsBundle& args,
                                            const torch::Device& device,
                                            const runtime::Options& options)
     : model_(model), args_(args), device_(device), options_(options) {
@@ -1146,7 +1147,7 @@ AclGraphExecutorImpl::AclGraphExecutorImpl(CausalLM* model,
 }
 
 AclGraphExecutorImpl::AclGraphExecutorImpl(RecModel* model,
-                                           const ModelArgs& args,
+                                           const ModelArgsBundle& args,
                                            const torch::Device& device,
                                            const runtime::Options& options)
     : rec_model_(model), args_(args), device_(device), options_(options) {

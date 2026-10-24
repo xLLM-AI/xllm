@@ -53,7 +53,7 @@ DFlashWorkerImpl::DraftBlock DFlash2WorkerImpl::run_decode_draft(
   // host-blocking broadcast here replaces the seven per-step index
   // broadcasts inside the previous path walk, so the loop below runs
   // device-side end to end and never blocks the host mid-loop.
-  const ModelArgs& draft_args = draft_impl_->context_.get_model_args();
+  const auto& draft_args = draft_impl_->context_.get_llm_model_args();
   const int64_t selector_top_k = draft_args.dflash2_selector_top_k();
   c10::StreamGuard noise_guard = compute_stream_->set_stream_guard();
   SamplingParameters draft_sampling_params =

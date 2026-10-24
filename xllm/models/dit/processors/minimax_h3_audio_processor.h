@@ -32,12 +32,12 @@ class MiniMaxH3AudioProcessorImpl final : public torch::nn::Module {
  public:
   MiniMaxH3AudioProcessorImpl(const ModelContext& context,
                               int64_t channel_count)
-      : sampling_rate_(context.get_model_args().sampling_rate()),
+      : sampling_rate_(context.get_dit_model_args().vae().sampling_rate()),
         channel_count_(channel_count) {
     CHECK_GT(sampling_rate_, 0);
     CHECK_GT(channel_count_, 0);
     const std::vector<int64_t>& encoder_rates =
-        context.get_model_args().encoder_rates();
+        context.get_dit_model_args().vae().encoder_rates();
     CHECK(!encoder_rates.empty())
         << "MiniMax-H3 audio VAE encoder_rates must not be empty";
     hop_length_ = dit::product_checked(encoder_rates);

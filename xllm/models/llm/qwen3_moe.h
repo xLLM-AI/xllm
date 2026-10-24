@@ -33,8 +33,9 @@ class Qwen3MoeModelImpl : public LlmModelImplBase<layer::Qwen3MoeDecoderLayer> {
   Qwen3MoeModelImpl(const ModelContext& context)
       : LlmModelImplBase<layer::Qwen3MoeDecoderLayer>(
             "qwen3_moe",
-            context.get_model_args()) {
-    auto model_args = context.get_model_args();
+            context.get_model_args_bundle(),
+            context.get_model_args_bundle().enable_mla()) {
+    const auto& model_args = context.get_model_args_bundle();
     auto options = context.get_tensor_options();
     layers_.reserve(model_args.n_layers());
     if (!mrope_section_.empty()) {
@@ -270,10 +271,10 @@ class Qwen3MoeModelImpl : public LlmModelImplBase<layer::Qwen3MoeDecoderLayer> {
           max_seq_len_, h.dtype().toScalarType(), h.device());
     }
     return layer::AttentionMetadataBuilder::build(
-        params, model_args_.enable_mla(), attn_mask);
+        params, enable_mla_, attn_mask);
 #else
     return layer::AttentionMetadataBuilder::build(params,
-                                                  model_args_.enable_mla(),
+                                                  enable_mla_,
                                                   /*attn_mask=*/std::nullopt,
                                                   h.device());
 #endif

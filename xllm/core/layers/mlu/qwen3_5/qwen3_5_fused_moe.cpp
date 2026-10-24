@@ -94,6 +94,22 @@ Qwen3_5FusedMoEImpl::Qwen3_5FusedMoEImpl(
     const torch::TensorOptions& options,
     const std::shared_ptr<Stream>& routed_comm_stream,
     const std::shared_ptr<Stream>& shared_compute_stream)
+    : Qwen3_5FusedMoEImpl(LlmModelArgs(model_args),
+                          moe_args,
+                          quant_args,
+                          parallel_args,
+                          options,
+                          routed_comm_stream,
+                          shared_compute_stream) {}
+
+Qwen3_5FusedMoEImpl::Qwen3_5FusedMoEImpl(
+    const LlmModelArgs& model_args,
+    const FusedMoEArgs& moe_args,
+    const QuantArgs& quant_args,
+    const ParallelArgs& parallel_args,
+    const torch::TensorOptions& options,
+    const std::shared_ptr<Stream>& routed_comm_stream,
+    const std::shared_ptr<Stream>& shared_compute_stream)
     : FusedMoEImpl(model_args,
                    moe_args,
                    quant_args,

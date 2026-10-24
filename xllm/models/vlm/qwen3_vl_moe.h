@@ -35,7 +35,7 @@ using ISlice = torch::indexing::Slice;
 class Qwen3_VLMoeForConditionalGenerationImpl : public torch::nn::Module {
  public:
   Qwen3_VLMoeForConditionalGenerationImpl(const ModelContext& context)
-      : model_args_(context.get_model_args()),
+      : model_args_(context.get_vlm_model_args()),
         options_(context.get_tensor_options()) {
     visual_ = register_module("visual", Qwen3_VisionTransformer(context));
 
@@ -76,7 +76,7 @@ class Qwen3_VLMoeForConditionalGenerationImpl : public torch::nn::Module {
     prepare_encoder_input(input_params, image_input, video_input);
 
     MMDict multimodal_embeds;
-    auto merge_size = model_args_.mm_image_merge_size();
+    auto merge_size = model_args_.vision().mm_image_merge_size();
     if (image_input) {
       auto image_embeds =
           visual_(image_input->pixel_values.to(options_),
@@ -117,7 +117,7 @@ class Qwen3_VLMoeForConditionalGenerationImpl : public torch::nn::Module {
   std::pair<torch::Tensor, std::vector<torch::Tensor>>
   split_multimodal_embedding(const torch::Tensor& embedding) const {
     const size_t num_deepstacks =
-        model_args_.mm_deepstack_visual_indexes().size();
+        model_args_.vision().mm_deepstack_visual_indexes().size();
     CHECK(embedding.defined()) << "Multimodal embedding is not defined.";
     CHECK_GT(num_deepstacks, 0)
         << "There should be at least one deepstack when splitting multimodal "
@@ -145,7 +145,7 @@ class Qwen3_VLMoeForConditionalGenerationImpl : public torch::nn::Module {
     const auto& mm_data = input_params.multimodal().mm_data;
     auto inputs_embeds = language_model_->get_input_embeddings(input_ids);
     const size_t num_deepstacks =
-        model_args_.mm_deepstack_visual_indexes().size();
+        model_args_.vision().mm_deepstack_visual_indexes().size();
     std::vector<torch::Tensor> deepstack_input_embeds;
     deepstack_input_embeds.resize(num_deepstacks);
     for (auto& deepstack : deepstack_input_embeds) {
@@ -207,7 +207,7 @@ class Qwen3_VLMoeForConditionalGenerationImpl : public torch::nn::Module {
   }
 
  private:
-  ModelArgs model_args_;
+  VlmModelArgs model_args_;
   torch::TensorOptions options_;
   Qwen3_VisionTransformer visual_{nullptr};
   Qwen3MoeForCausalLM language_model_{nullptr};

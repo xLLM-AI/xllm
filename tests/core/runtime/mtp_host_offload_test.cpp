@@ -75,7 +75,7 @@ KVCacheShape make_dsv4_cache_shape(const ModelArgs& model_args,
 }
 
 KVCacheCreateOptions make_create_options(const torch::Device& device,
-                                         const ModelArgs& model_args) {
+                                         const ModelArgsBundle& model_args) {
   KVCacheCreateOptions create_options;
   create_options.device(device)
       .dtype(torch::kFloat32)
@@ -150,15 +150,15 @@ class HierarchyTransferTestWorker : public LLMWorkerImpl {
                               const ModelArgs& model_args)
       : LLMWorkerImpl(parallel_args, device, options) {
     dtype_ = torch::kFloat32;
-    context_ =
-        ModelContext(parallel_args,
-                     model_args,
-                     QuantArgs(),
-                     torch::TensorOptions().dtype(dtype_).device(device));
+    context_ = ModelContext(parallel_args,
+                            model_args,
+                            QuantArgs(),
+                            torch::TensorOptions().dtype(dtype_).device(device),
+                            {ModelFamily::LLM, "mtp_host_offload_test"});
   }
 
   void initialize_hierarchy_cache(const KVCacheShape& cache_shape) {
-    const ModelArgs& model_args = context_.get_model_args();
+    const auto& model_args = context_.get_model_args_bundle();
     const KVCacheCreateOptions create_options =
         make_create_options(device_.unwrap(), model_args);
     allocate_kv_caches(kv_caches_, cache_shape, create_options);

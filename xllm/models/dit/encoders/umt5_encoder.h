@@ -166,7 +166,7 @@ TORCH_MODULE(UMT5Block);
 class UMT5EncoderModelImpl final : public torch::nn::Module {
  public:
   explicit UMT5EncoderModelImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().text_encoder();
     auto options = context.get_tensor_options();
 
     embed_tokens_ = register_module(

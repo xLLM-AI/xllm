@@ -57,7 +57,7 @@ class LongCatImageSingleTransformerBlockImpl : public torch::nn::Module {
  public:
   explicit LongCatImageSingleTransformerBlockImpl(const ModelContext& context)
       : options_(context.get_tensor_options()) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
     auto num_attention_heads = model_args.n_heads();
     auto attention_head_dim = model_args.head_dim();
     auto dim = num_attention_heads * attention_head_dim;
@@ -205,7 +205,7 @@ class LongCatImageTransformer2DModelImpl : public torch::nn::Module {
  public:
   explicit LongCatImageTransformer2DModelImpl(const ModelContext& context)
       : options_(context.get_tensor_options()) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_dit_model_args().transformer();
     auto num_attention_heads = model_args.n_heads();
     auto attention_head_dim = model_args.head_dim();
     auto inner_dim = num_attention_heads * attention_head_dim;

@@ -82,7 +82,7 @@ TORCH_MODULE(Mistral3_VisionBlock);
 class Mistral3_VisionPatchEmbedImpl : public torch::nn::Module {
  public:
   explicit Mistral3_VisionPatchEmbedImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_vlm_model_args().vision();
     auto options = context.get_tensor_options();
 
     int64_t in_channels = model_args.mm_num_channels();
@@ -126,7 +126,7 @@ TORCH_MODULE(Mistral3_VisionPatchEmbed);
 class Mistral3_VisionRotaryEmbeddingImpl : public torch::nn::Module {
  public:
   explicit Mistral3_VisionRotaryEmbeddingImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_vlm_model_args().vision();
     auto options = context.get_tensor_options();
 
     dim_ = model_args.mm_hidden_size() / model_args.mm_num_attention_heads();
@@ -185,7 +185,7 @@ TORCH_MODULE(Mistral3_VisionRotaryEmbedding);
 class Mistral3_VisionPatchMergerImpl : public torch::nn::Module {
  public:
   explicit Mistral3_VisionPatchMergerImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_vlm_model_args().vision();
     auto options = context.get_tensor_options();
 
     int64_t vision_hidden_size = model_args.mm_hidden_size();
@@ -323,7 +323,7 @@ TORCH_MODULE(Mistral3_VisionPatchMerger);
 class Mistral3_VisionTransformerImpl : public torch::nn::Module {
  public:
   explicit Mistral3_VisionTransformerImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
+    const auto& model_args = context.get_vlm_model_args().vision();
     auto options = context.get_tensor_options();
 
     hidden_size_ = model_args.mm_hidden_size();
@@ -505,7 +505,7 @@ struct Mistral3_VLImageInputs {
 class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
  public:
   explicit Mistral3ForConditionalGenerationImpl(const ModelContext& context)
-      : model_args_(context.get_model_args()),
+      : model_args_(context.get_vlm_model_args()),
         options_(context.get_tensor_options()) {
     visual_ = register_module("visual", Mistral3_VisionTransformer(context));
     language_model_ = register_module("language_model", MistralModel(context));
@@ -546,7 +546,7 @@ class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
                                   image_input->image_grid_thw,
                                   input_params);
 
-      int64_t spatial_merge_size = model_args_.mm_spatial_merge_size();
+      int64_t spatial_merge_size = model_args_.vision().mm_spatial_merge_size();
       auto image_tokens = (image_input->image_grid_thw.prod(-1) /
                            spatial_merge_size / spatial_merge_size)
                               .cpu()
@@ -563,7 +563,7 @@ class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
 
   torch::Tensor generate_multimodal_mask(torch::Tensor input_ids) {
     auto special_token_ids =
-        torch::tensor({model_args_.image_token_id()},
+        torch::tensor({model_args_.vision().image_token_id()},
                       input_ids.options().dtype(torch::kInt64));
     return torch::isin(input_ids, special_token_ids);
   }
@@ -759,7 +759,7 @@ class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
   }
 
  private:
-  ModelArgs model_args_;
+  VlmModelArgs model_args_;
   torch::TensorOptions options_;
 
   Mistral3_VisionTransformer visual_{nullptr};

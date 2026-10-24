@@ -122,7 +122,7 @@ class Qwen3_5MtpModelImplBase : public Qwen3HybridModelImplBase {
     layer::AttentionMetadata attn_metadata =
         layer::AttentionMetadataBuilder::build(
             input_params,
-            model_args_.enable_mla(),
+            enable_mla_,
             build_attention_mask(input_params),
             /*device=*/device_,
             metadata_build_options);

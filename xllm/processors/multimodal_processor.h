@@ -25,6 +25,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/message.h"
+#include "core/framework/model/model_family_args.h"
 #include "core/framework/multimodal/mm_data.h"
 #include "core/framework/multimodal/mm_input.h"
 #include "core/framework/multimodal/mm_visitor.h"
@@ -84,7 +85,7 @@ class MultimodalProcessor final : public MultimodalProcessorBase {
                       std::shared_ptr<Tokenizer> tokenizer,
                       const TokenizerArgs& tokenizer_args)
       : MultimodalProcessorBase(std::move(tokenizer), tokenizer_args),
-        image_processor_(std::make_unique<ImageProcessor>(model_args)),
+        image_processor_(make_image_processor(model_args)),
         video_processor_(std::make_unique<VideoProcessor>(model_args)),
         audio_processor_(std::make_unique<AudioProcessor>(model_args)),
         prompt_processor_(std::make_unique<PromptProcessor>(model_args)) {}
@@ -137,6 +138,17 @@ class MultimodalProcessor final : public MultimodalProcessorBase {
   }
 
  private:
+  static std::unique_ptr<ImageProcessor> make_image_processor(
+      const ModelArgs& model_args) {
+    if constexpr (std::is_constructible_v<ImageProcessor,
+                                          const VlmVisionModelArgs&>) {
+      const VlmModelArgs vlm_args(model_args);
+      return std::make_unique<ImageProcessor>(vlm_args.vision());
+    } else {
+      return std::make_unique<ImageProcessor>(model_args);
+    }
+  }
+
   bool process_images(const std::vector<torch::Tensor>& images,
                       std::vector<MMDataItem>& output_items) const {
     output_items.clear();

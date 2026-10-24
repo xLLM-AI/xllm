@@ -24,7 +24,7 @@ namespace layer {
 
 NpuRopeLayerImpl::NpuRopeLayerImpl(const ModelContext& context)
     : BaseLayer(context) {
-  const auto& args = context.get_model_args();
+  const auto& args = context.get_vlm_model_args().vision();
   head_dim_ = args.mm_head_dim();
   if (head_dim_ <= 0) {
     head_dim_ = args.mm_hidden_size() / args.mm_num_attention_heads();

@@ -24,15 +24,27 @@ limitations under the License.
 #include <memory>
 #include <string>
 #include <utility>
+#include <variant>
 
 #include "core/common/flash_comm1_context.h"
 #include "core/framework/model/model_args.h"
+#include "core/framework/model/model_family.h"
+#include "core/framework/model/model_family_args.h"
 #include "core/framework/parallel_state/parallel_args.h"
 #include "core/framework/quantization/quant_args.h"
 #include "core/platform/model_stream_registry.h"
-#include "framework/parallel_state/parallel_args.h"
 
 namespace xllm {
+
+class DiTModelContext;
+
+// Identity supplied by the model registration selected at the creation site.
+// Legacy and unregistered component contexts leave the identity unspecified.
+struct ModelContextIdentity {
+  ModelFamily family = ModelFamily::UNKNOWN;
+  std::string registration_name;
+  DiTComponentType dit_component_type = DiTComponentType::TRANSFORMER;
+};
 
 // Internal optimization configuration.
 // This struct holds all optimization techniques that are automatically
@@ -54,22 +66,67 @@ struct OptimizationConfig {
 
 class ModelContext {
  public:
-  ModelContext() : parallel_args_(1, 1, nullptr) {};
+  ModelContext()
+      : model_args_bundle_(std::make_shared<ModelArgsBundle>()),
+        parallel_args_(1, 1, nullptr) {};
 
   ModelContext(const ParallelArgs& input_parallel_args,
                const ModelArgs& model_args,
                const QuantArgs& quant_args,
-               const torch::TensorOptions& tensor_options);
+               const torch::TensorOptions& tensor_options,
+               ModelContextIdentity identity = {});
 
 #if defined(USE_NPU)
   ModelContext(const ParallelArgs& input_parallel_args,
                const ModelArgs& model_args,
                const QuantArgs& quant_args,
                const torch::TensorOptions& tensor_options,
-               atb::Context* context);
+               atb::Context* context,
+               ModelContextIdentity identity = {});
 #endif
 
-  const ModelArgs& get_model_args() const { return model_args_; }
+  ModelFamily get_model_family() const noexcept { return identity_.family; }
+
+  const std::string& get_registration_name() const noexcept {
+    return identity_.registration_name;
+  }
+
+  const LlmModelArgs& get_llm_model_args() const&;
+  const LlmModelArgs& get_llm_model_args() const&& = delete;
+
+  const VlmModelArgs& get_vlm_model_args() const&;
+  const VlmModelArgs& get_vlm_model_args() const&& = delete;
+
+  const RecModelArgs& get_rec_model_args() const&;
+  const RecModelArgs& get_rec_model_args() const&& = delete;
+
+  const DiTComponentModelArgs& get_dit_model_args() const&;
+  const DiTComponentModelArgs& get_dit_model_args() const&& = delete;
+
+  const ModelArgsBundle& get_model_args_bundle() const& {
+    CHECK(model_args_bundle_ != nullptr);
+    return *model_args_bundle_;
+  }
+  const ModelArgsBundle& get_model_args_bundle() const&& = delete;
+
+  // Return capability parameters embedded in the active family-specific
+  // argument object. These accessors provide the common interface for model
+  // implementations shared by LLM, VLM, and Rec registrations.
+  const AttentionModelParams& get_attention_model_params() const&;
+  const AttentionModelParams& get_attention_model_params() const&& = delete;
+  const LinearAttentionModelParams& get_linear_attention_model_params() const&;
+  const LinearAttentionModelParams& get_linear_attention_model_params()
+      const&& = delete;
+  const KVCacheModelParams& get_kv_cache_model_params() const&;
+  const KVCacheModelParams& get_kv_cache_model_params() const&& = delete;
+  const MoEModelParams& get_moe_model_params() const&;
+  const MoEModelParams& get_moe_model_params() const&& = delete;
+  const SpeculativeModelParams& get_speculative_model_params() const&;
+  const SpeculativeModelParams& get_speculative_model_params() const&& = delete;
+  const EmbeddingModelParams& get_embedding_model_params() const&;
+  const EmbeddingModelParams& get_embedding_model_params() const&& = delete;
+  const ExecutionModelParams& get_execution_model_params() const&;
+  const ExecutionModelParams& get_execution_model_params() const&& = delete;
 
   const QuantArgs& get_quant_args() const { return quant_args_; }
 
@@ -99,6 +156,9 @@ class ModelContext {
 
   ModelContext with_quant_args(const QuantArgs& quant_args) const;
 
+  ModelContext with_tensor_options(
+      const torch::TensorOptions& tensor_options) const;
+
 #if defined(USE_NPU)
   const atb::Context* get_atb_context() const { return context_; }
   std::shared_ptr<AtbWorkspace> get_atb_workspace() const {
@@ -107,7 +167,11 @@ class ModelContext {
 #endif
 
   void set_encoder_embedding_mode(bool encoder_embedding_mode) {
-    model_args_.encoder_embedding_mode() = encoder_embedding_mode;
+    if (!model_args_bundle_.unique()) {
+      model_args_bundle_ =
+          std::make_shared<ModelArgsBundle>(*model_args_bundle_);
+    }
+    model_args_bundle_->set_encoder_embedding_mode(encoder_embedding_mode);
   }
 
   const std::string& get_model_id() const { return model_id_; }
@@ -124,6 +188,23 @@ class ModelContext {
   }
 
  private:
+  friend class DiTModelContext;
+
+  ModelContext(const ParallelArgs& input_parallel_args,
+               std::shared_ptr<ModelArgsBundle> model_args_bundle,
+               const QuantArgs& quant_args,
+               const torch::TensorOptions& tensor_options,
+               ModelContextIdentity identity);
+
+#if defined(USE_NPU)
+  ModelContext(const ParallelArgs& input_parallel_args,
+               std::shared_ptr<ModelArgsBundle> model_args_bundle,
+               const QuantArgs& quant_args,
+               const torch::TensorOptions& tensor_options,
+               atb::Context* context,
+               ModelContextIdentity identity);
+#endif
+
   // derive optimization config based on model args, quant args and other
   // factors
   void derive_optimization_config();
@@ -132,7 +213,8 @@ class ModelContext {
       model_id_;  // Model identifier for VirtualMemory multi-model support
   std::string model_impl_;
   std::string extension_impl_;
-  ModelArgs model_args_;
+  ModelContextIdentity identity_;
+  std::shared_ptr<ModelArgsBundle> model_args_bundle_;
   QuantArgs quant_args_;
   ParallelArgs parallel_args_;
   torch::TensorOptions tensor_options_;

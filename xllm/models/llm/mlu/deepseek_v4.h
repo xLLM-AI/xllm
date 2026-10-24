@@ -85,8 +85,9 @@ class DeepseekV4ModelImpl final
   explicit DeepseekV4ModelImpl(const ModelContext& context)
       : LlmModelImplBase<layer::DeepseekV4DecoderLayer>(
             "deepseek_v4",
-            context.get_model_args()) {
-    const ModelArgs& model_args = context.get_model_args();
+            context.get_model_args_bundle(),
+            context.get_model_args_bundle().enable_mla()) {
+    const auto& model_args = context.get_llm_model_args();
     const torch::TensorOptions options = context.get_tensor_options();
     const ParallelArgs& parallel_args = context.get_parallel_args();
     cp_size_ = parallel_args.cp_size();

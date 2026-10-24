@@ -205,7 +205,8 @@ class DeepseekV32ModelImpl : public torch::nn::Module {
   DeepseekV32ModelImpl(const ModelContext& context)
       : device_(context.get_tensor_options().device()) {
     auto options = context.get_tensor_options();
-    auto model_args = context.get_model_args();
+    const auto& llm_args = context.get_llm_model_args();
+    const auto& model_args = llm_args;
     auto parallel_args = context.get_parallel_args();
 
     blocks_ = register_module("layers", torch::nn::ModuleList());
@@ -213,15 +214,15 @@ class DeepseekV32ModelImpl : public torch::nn::Module {
     // register submodules
     device_ = options.device();
     dtype_ = options.dtype().toScalarType();
-    num_speculative_tokens_ = model_args.num_speculative_tokens();
-    index_topk_ = model_args.index_topk();
+    num_speculative_tokens_ = llm_args.num_speculative_tokens();
+    index_topk_ = llm_args.index_topk();
 
     npu_embed_tokens_ =
         register_module("npu_embed_tokens", layer::NpuWordEmbedding(context));
     atb_pos_emb_ = layer::NpuPosEmbedding(context);
     cos_sin_ = layer::rotary::get_deepseek_rotary_embedding(
-        model_args.qk_rope_head_dim(),
-        model_args.qk_rope_head_dim(),
+        llm_args.qk_rope_head_dim(),
+        llm_args.qk_rope_head_dim(),
         model_args.max_position_embeddings(),
         model_args.rope_scaling_original_max_position_embeddings(),
         model_args.rope_theta(),
@@ -258,7 +259,7 @@ class DeepseekV32ModelImpl : public torch::nn::Module {
         parallel_args.rank() / (dp_local_tp_size_ * parallel_args.cp_size());
     rank_ = parallel_args.rank();
     mapping_data_ = parallel_args.mapping_data();
-    num_experts_per_tok_ = model_args.num_experts_per_tok();
+    num_experts_per_tok_ = llm_args.num_experts_per_tok();
     const int32_t dp_stride = dp_local_tp_size_ * parallel_args.cp_size();
     for (int i = 0; i < parallel_args.world_size(); i += dp_stride) {
       indices.push_back(i);
@@ -498,7 +499,7 @@ class DeepseekV32ForCausalLMImpl
   DeepseekV32ForCausalLMImpl(const ModelContext& context)
       : xllm::npu::model::LlmForCausalLMImplBase<DeepseekV32Model>(context),
         first_k_dense_replace_(
-            context.get_model_args().first_k_dense_replace()) {}
+            context.get_llm_model_args().first_k_dense_replace()) {}
 
   void prepare_expert_weight(int32_t layer_id,
                              const std::vector<int32_t>& expert_ids) override {

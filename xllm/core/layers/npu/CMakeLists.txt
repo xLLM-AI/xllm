@@ -7,6 +7,24 @@ include_directories(
 
 cc_library(
   NAME
+    atb_workspace
+  HDRS
+    buffer/atb_buffer.h
+    buffer/atb_workspace.h
+  SRCS
+    buffer/atb_buffer.cpp
+    buffer/atb_workspace.cpp
+  DEPS
+    :common
+    glog::glog
+    torch
+    torch_npu
+    xllm_atb_layers
+    ascendcl
+)
+
+cc_library(
+  NAME
     npu_layers 
   HDRS
     multi_head_attention.h
@@ -21,8 +39,6 @@ cc_library(
     npu_qwen3_moe_decoder_layer_impl.h
     # atb_parallel_linear.h
     npu_block_copy_impl.h
-    buffer/atb_buffer.h
-    buffer/atb_workspace.h
     npu_base_layer.h
     npu_column_parallel_linear_impl.h
     npu_glm4_moe_decoder_layer.h
@@ -80,8 +96,6 @@ cc_library(
     npu_qwen3_moe_decoder_layer_impl.cpp
     # atb_parallel_linear.cpp
     npu_block_copy_impl.cpp
-    buffer/atb_buffer.cpp
-    buffer/atb_workspace.cpp
     npu_base_layer.cpp
     npu_column_parallel_linear_impl.cpp
     npu_glm4_moe_decoder_layer.cpp
@@ -130,6 +144,7 @@ cc_library(
   DEPS
     "-Wl,--whole-archive"
     "-Wl,--no-whole-archive"
+    :atb_workspace
     :attention_mask
     :kv_cache
     :prefix_cache

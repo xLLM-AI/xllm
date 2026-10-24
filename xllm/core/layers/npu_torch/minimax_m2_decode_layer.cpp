@@ -21,7 +21,7 @@ namespace layer {
 MiniMaxM2DecoderLayerImpl::MiniMaxM2DecoderLayerImpl(
     const ModelContext& context,
     int32_t layer_id) {
-  const auto& model_args = context.get_model_args();
+  const auto& model_args = context.get_model_args_bundle();
   auto quant_args = context.get_quant_args();
   if (quant_args.quant_method() == "fp8") {
     quant_args.quant_method("");
@@ -40,10 +40,12 @@ MiniMaxM2DecoderLayerImpl::MiniMaxM2DecoderLayerImpl(
           model_args.hidden_size(), model_args.rms_norm_eps(), options));
 
   layer::FusedMoEArgs moe_args;
-  moe_ = register_module(
-      "mlp",
-      layer::FusedMoE(
-          model_args, moe_args, quant_args, parallel_args, options));
+  moe_ = register_module("mlp",
+                         layer::FusedMoE(context.get_llm_model_args(),
+                                         moe_args,
+                                         quant_args,
+                                         parallel_args,
+                                         options));
 }
 
 torch::Tensor MiniMaxM2DecoderLayerImpl::forward(

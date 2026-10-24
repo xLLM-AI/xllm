@@ -96,7 +96,7 @@ void load_group_norm(torch::nn::GroupNorm& gn, const StateDict& state_dict) {
 
 RWKV7TimeMixImpl::RWKV7TimeMixImpl(const ModelContext& context,
                                    int32_t /*layer_id*/) {
-  const ModelArgs& args = context.get_model_args();
+  const auto& args = context.get_model_args_bundle();
   hidden_size_ = args.hidden_size();
   head_size_ = args.head_dim();  // RWKV-7 head_size_a
   n_heads_ = hidden_size_ / head_size_;
@@ -392,7 +392,7 @@ std::pair<torch::Tensor, torch::Tensor> RWKV7TimeMixImpl::forward(
 
 RWKV7ChannelMixImpl::RWKV7ChannelMixImpl(const ModelContext& context,
                                          int32_t /*layer_id*/) {
-  const ModelArgs& args = context.get_model_args();
+  const auto& args = context.get_model_args_bundle();
   const int64_t hidden_size = args.hidden_size();
   const int64_t intermediate_size = args.intermediate_size();
   const torch::TensorOptions opts = context.get_tensor_options();
@@ -467,7 +467,7 @@ std::pair<torch::Tensor, torch::Tensor> RWKV7ChannelMixImpl::forward(
 RWKV7DecoderLayerImpl::RWKV7DecoderLayerImpl(const ModelContext& context,
                                              int32_t layer_id)
     : layer_id_(layer_id), has_ln0_(layer_id == 0) {
-  const ModelArgs& args = context.get_model_args();
+  const auto& args = context.get_model_args_bundle();
   hidden_size_ = args.hidden_size();
   head_size_ = args.head_dim();
   n_heads_ = hidden_size_ / head_size_;

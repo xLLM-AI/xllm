@@ -20,14 +20,14 @@ limitations under the License.
 #include <cstdint>
 #include <vector>
 
-#include "core/framework/model/model_args.h"
+#include "core/framework/model/model_family_args.h"
 #include "processors/image_processor.h"
 
 namespace xllm {
 
 class Qwen2VLImageProcessor final : public ImageProcessor {
  public:
-  explicit Qwen2VLImageProcessor(const ModelArgs& args);
+  explicit Qwen2VLImageProcessor(const VlmVisionModelArgs& args);
 
   bool process(const std::vector<torch::Tensor>& images,
                std::vector<MMDataItem>& output_items) const override;

@@ -50,17 +50,18 @@ class DSparkQwen3ForCausalLMImpl final
   explicit DSparkQwen3ForCausalLMImpl(const ModelContext& context)
       : LlmForCausalLMImplBase<DSparkQwen3Model>(context),
         markov_head_(context.get_tensor_options(),
-                     context.get_model_args().markov_rank()) {
-    const ModelArgs& model_args = context.get_model_args();
+                     context.get_llm_model_args().markov_rank()) {
+    const auto& llm_args = context.get_llm_model_args();
+    const auto& model_args = llm_args;
     // Only stand up the ConfidenceHead when adaptive speculative decode is on:
     // it is consumed solely by the adaptive pruning controller, so under static
     // decoding its weights would occupy device memory and never be read.
-    if (model_args.enable_confidence_head() &&
+    if (llm_args.enable_confidence_head() &&
         SpeculativeConfig::get_instance().enable_adaptive_target_verify()) {
       confidence_head_.initialize(context.get_tensor_options(),
                                   model_args.hidden_size(),
-                                  model_args.markov_rank(),
-                                  model_args.confidence_head_with_markov());
+                                  llm_args.markov_rank(),
+                                  llm_args.confidence_head_with_markov());
     }
   }
 

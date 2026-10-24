@@ -38,7 +38,7 @@ template <typename VisionTransformer, typename LanguageModel>
 class Qwen3VLForConditionalGenerationBase : public torch::nn::Module {
  public:
   Qwen3VLForConditionalGenerationBase(const ModelContext& context)
-      : model_args_(context.get_model_args()),
+      : model_args_(context.get_vlm_model_args()),
         options_(context.get_tensor_options()) {
     visual_ = register_module("visual", VisionTransformer(context));
     language_model_ = register_module("language_model", LanguageModel(context));
@@ -79,7 +79,8 @@ class Qwen3VLForConditionalGenerationBase : public torch::nn::Module {
     prepare_encoder_input(input_params, image_input, video_input);
 
     MMDict multimodal_embeds;
-    auto merge_size = model_args_.mm_image_merge_size();
+    const auto& vision_args = model_args_.vision();
+    auto merge_size = vision_args.mm_image_merge_size();
     if (image_input) {
       auto image_embeds =
           visual_(image_input->pixel_values.to(options_),
@@ -120,7 +121,7 @@ class Qwen3VLForConditionalGenerationBase : public torch::nn::Module {
   std::pair<torch::Tensor, std::vector<torch::Tensor>>
   split_multimodal_embedding(const torch::Tensor& embedding) const {
     const size_t num_deepstacks =
-        model_args_.mm_deepstack_visual_indexes().size();
+        model_args_.vision().mm_deepstack_visual_indexes().size();
     CHECK(embedding.defined()) << "Multimodal embedding is not defined.";
     const int64_t num_chunks = static_cast<int64_t>(num_deepstacks + 1);
     auto chunks = embedding.chunk(/*chunks=*/num_chunks, /*dim=*/1);
@@ -148,7 +149,7 @@ class Qwen3VLForConditionalGenerationBase : public torch::nn::Module {
       return inputs_embeds;
     }
     const size_t num_deepstacks =
-        model_args_.mm_deepstack_visual_indexes().size();
+        model_args_.vision().mm_deepstack_visual_indexes().size();
     std::vector<torch::Tensor> deepstack_input_embeds;
     deepstack_input_embeds.resize(num_deepstacks);
     for (auto& deepstack : deepstack_input_embeds) {
@@ -233,7 +234,7 @@ class Qwen3VLForConditionalGenerationBase : public torch::nn::Module {
   }
 
  protected:
-  ModelArgs model_args_;
+  VlmModelArgs model_args_;
   torch::TensorOptions options_;
   VisionTransformer visual_{nullptr};
   LanguageModel language_model_{nullptr};

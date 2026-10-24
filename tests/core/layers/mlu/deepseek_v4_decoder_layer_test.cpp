@@ -372,7 +372,8 @@ class DeepseekV4DecoderLayerTest : public ::testing::Test {
   void run_case(int32_t layer_id, bool pass_input_ids, bool use_ffn_alias) {
     ModelArgs args = make_args();
     QuantArgs quant_args;
-    ModelContext context(parallel_args_, args, quant_args, options_);
+    ModelContext context(
+        parallel_args_, args, quant_args, options_, {ModelFamily::LLM});
     torch::Tensor cos_sin =
         torch::cat({torch::ones({16, args.rope_head_dim()}, options_),
                     torch::zeros({16, args.rope_head_dim()}, options_)},

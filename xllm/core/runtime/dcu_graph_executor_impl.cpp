@@ -26,6 +26,7 @@ limitations under the License.
 #include "core/common/metrics.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/framework/model/model_family_args.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/attention_metadata_builder.h"
 #include "core/runtime/graph_input_snapshot.h"
@@ -96,7 +97,7 @@ std::size_t tensor_bytes(const torch::Tensor& tensor) {
 }  // namespace
 
 DcuGraphPersistentParam::DcuGraphPersistentParam(
-    const ModelArgs& args,
+    const ModelArgsBundle& args,
     const torch::Device& device,
     const runtime::Options& options)
     : args_(args),
@@ -821,7 +822,7 @@ ModelOutput DcuGraph::replay(const torch::Tensor& tokens,
 }
 
 DcuGraphExecutorImpl::DcuGraphExecutorImpl(CausalLM* model,
-                                           const ModelArgs& args,
+                                           const ModelArgsBundle& args,
                                            const torch::Device& device,
                                            const runtime::Options& options)
     : model_(model),
@@ -846,7 +847,7 @@ DcuGraphExecutorImpl::DcuGraphExecutorImpl(CausalLM* model,
 }
 
 DcuGraphExecutorImpl::DcuGraphExecutorImpl(RecModel* model,
-                                           const ModelArgs& args,
+                                           const ModelArgsBundle& args,
                                            const torch::Device& device,
                                            const runtime::Options& options)
     : DcuGraphExecutorImpl(static_cast<CausalLM*>(nullptr),

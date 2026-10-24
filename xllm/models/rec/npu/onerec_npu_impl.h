@@ -154,17 +154,21 @@ class OneRecStackImpl : public torch::nn::Module {
   OneRecStackImpl(const ModelContext& context,
                   bool is_decode,
                   layer::WordEmbedding& embed_tokens) {
-    const auto& args = context.get_model_args();
+    const auto& rec_args = context.get_rec_model_args();
+    const auto& transformer_args = rec_args;
     const auto& options = context.get_tensor_options();
 
-    hidden_size_ = args.hidden_size();
+    hidden_size_ = transformer_args.hidden_size();
     is_decoder_ = is_decode;
-    use_absolute_position_embedding_ = args.use_absolute_position_embedding();
-    use_moe_ = args.use_moe() && is_decoder_;
-    num_experts_per_tok_ = args.num_experts_per_tok();
-    relative_attention_num_buckets_ = args.relative_attention_num_buckets();
-    relative_attention_max_distance_ = args.relative_attention_max_distance();
-    num_heads_ = is_decode ? args.decoder_n_heads() : args.n_heads();
+    use_absolute_position_embedding_ =
+        transformer_args.use_absolute_position_embedding();
+    use_moe_ = rec_args.use_moe() && is_decoder_;
+    num_experts_per_tok_ = rec_args.num_experts_per_tok();
+    relative_attention_num_buckets_ = rec_args.relative_attention_num_buckets();
+    relative_attention_max_distance_ =
+        rec_args.relative_attention_max_distance();
+    num_heads_ = is_decode ? transformer_args.decoder_n_heads()
+                           : transformer_args.n_heads();
 
     embed_tokens_ = embed_tokens;
     if (!use_absolute_position_embedding_) {
@@ -175,8 +179,8 @@ class OneRecStackImpl : public torch::nn::Module {
     norm_ = register_module("final_layer_norm", layer::RMSNorm(context));
 
     blocks_ = register_module("block", torch::nn::ModuleList());
-    const uint32_t num_layers =
-        is_decode ? args.n_layers() : args.n_encoder_layers();
+    const uint32_t num_layers = is_decode ? transformer_args.n_layers()
+                                          : transformer_args.n_encoder_layers();
     layers_.reserve(num_layers);
     for (uint32_t i = 0; i < num_layers; ++i) {
       auto block = layer::NpuOneRecBlockLayer(context, is_decode, i);

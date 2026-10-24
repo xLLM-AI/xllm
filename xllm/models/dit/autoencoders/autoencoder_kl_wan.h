@@ -1592,7 +1592,7 @@ class AutoencoderKLWanImpl : public torch::nn::Module,
  public:
   AutoencoderKLWanImpl(const ModelContext& context)
       : dit::VaeParallelMixin(context),
-        args_(context.get_model_args()),
+        args_(context.get_dit_model_args().vae()),
         device_(context.get_tensor_options().device()),
         dtype_(context.get_tensor_options().dtype().toScalarType()) {
     encoder_ = register_module("encoder",
@@ -1784,7 +1784,7 @@ class AutoencoderKLWanImpl : public torch::nn::Module,
   WanVAEDecoder3D decoder_{nullptr};
   WanCausalConv3D quant_conv_{nullptr};
   WanCausalConv3D post_quant_conv_{nullptr};
-  ModelArgs args_;
+  DiTVaeModelArgs args_;
   torch::Device device_;
   torch::ScalarType dtype_;
   int64_t tile_sample_min_height_ = 256;
