@@ -22,6 +22,8 @@ list(FILTER DCU_CUDA_KERNEL_SOURCES EXCLUDE REGEX ".*/.*_test\\.cu$")
 set(DCU_HIPIFY_EXCLUDED_CUDA_SOURCES
   ${CUDA_KERNEL_DIR}/fused_logits_transform.cu
   ${CUDA_KERNEL_DIR}/rec_beam_search.cu
+  # Request-seeded batching is currently implemented and dispatched on CUDA only.
+  ${CUDA_KERNEL_DIR}/seeded_sample.cu
 #  ${CUDA_KERNEL_DIR}/fp8_quant.cu
 )
 

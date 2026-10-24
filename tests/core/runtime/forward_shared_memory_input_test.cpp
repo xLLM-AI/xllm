@@ -18,6 +18,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <utility>
 #include <vector>
@@ -56,6 +57,12 @@ void expect_role_offsets(const LayerOffsets& actual,
 template <typename Input>
 Input make_input(const LayerOffsets& offsets) {
   Input input;
+  input.sampling_params.has_unseeded_sample = true;
+  input.sampling_params.selected_token_idxes =
+      torch::tensor({1}, torch::kInt32);
+  input.sampling_params.seeds = torch::tensor({-1}, torch::kInt64);
+  input.sampling_params.seed_offsets = torch::tensor({7}, torch::kInt64);
+  input.sampling_params.sampling_mode = SamplingMode::RANDOM;
   input.token_ids = torch::tensor({11, 23}, torch::kInt32);
   input.positions = torch::tensor({0, 1}, torch::kInt32);
   input.input_params.meta.num_sequences = 1;
@@ -123,6 +130,10 @@ TYPED_TEST(ForwardSharedMemoryInputTest,
 
   TypeParam decoded =
       lazy_input.to(torch::Device(torch::kCPU), torch::kFloat32);
+  EXPECT_TRUE(decoded.sampling_params.has_unseeded_sample);
+  EXPECT_EQ(decoded.sampling_params.seeds[0].template item<int64_t>(), -1);
+  EXPECT_EQ(decoded.sampling_params.seed_offsets[0].template item<int64_t>(),
+            7);
   ASSERT_EQ(decoded.transfer_kv_infos.size(), 1);
   const auto& transfer = decoded.transfer_kv_infos.front();
   EXPECT_EQ(transfer.request_id, "sparse-index");
@@ -161,6 +172,7 @@ TYPED_TEST(ForwardSharedMemoryInputTest,
       decoded,
       torch::Device(torch::kCPU),
       InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE));
+  EXPECT_TRUE(decoded.sampling_params.has_unseeded_sample);
   ASSERT_EQ(decoded.transfer_kv_infos.size(), 1);
   expect_role_offsets(decoded.transfer_kv_infos.front()
                           .dst_virtual_kv_cache_layer_global_offsets,
@@ -168,15 +180,32 @@ TYPED_TEST(ForwardSharedMemoryInputTest,
 
   const LayerOffsets shorter = {{{4096}, {8192}, {}}};
   source = make_input<TypeParam>(shorter);
+  source.sampling_params.has_unseeded_sample = false;
+  source.sampling_params.seeds.fill_(42);
   ASSERT_TRUE(writer.input_write(source));
   ASSERT_TRUE(reader.input_read(
       decoded,
       torch::Device(torch::kCPU),
       InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE));
+  EXPECT_FALSE(decoded.sampling_params.has_unseeded_sample);
   ASSERT_EQ(decoded.transfer_kv_infos.size(), 1);
   expect_role_offsets(decoded.transfer_kv_infos.front()
                           .dst_virtual_kv_cache_layer_global_offsets,
                       shorter);
+}
+
+TYPED_TEST(ForwardSharedMemoryInputTest,
+           PackedProtoRejectsPreviousSamplingSchema) {
+  TypeParam source = make_input<TypeParam>(make_sparse_role_offsets());
+  proto::PackedForwardInput packed_input;
+  ASSERT_TRUE(source.to_packed_proto(&packed_input));
+  // The uint16 schema version follows the uint64 magic in the wire header.
+  constexpr uint16_t kPreviousSchemaVersion = 7;
+  std::memcpy(packed_input.mutable_payload()->data() + sizeof(uint64_t),
+              &kPreviousSchemaVersion,
+              sizeof(kPreviousSchemaVersion));
+  TypeParam decoded;
+  EXPECT_FALSE(decoded.from_packed_proto(packed_input));
 }
 
 }  // namespace

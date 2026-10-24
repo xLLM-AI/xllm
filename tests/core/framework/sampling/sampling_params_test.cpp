@@ -75,4 +75,30 @@ TEST(SamplingParamsTest, MinimumConstraintsExpandForVerifyAndStayOffDrafts) {
   EXPECT_TRUE(params.min_token_ids.defined());
 }
 
+TEST(SamplingParamsTest, UnseededRandomFlagTracksInitializationAndCopy) {
+  RequestSamplingParam seeded;
+  seeded.seed = 42;
+  RequestSamplingParam unseeded;
+  RequestSamplingParam greedy;
+  greedy.temperature = 0.0F;
+  RequestSamplingParam sentinel;
+  sentinel.seed = -1;
+
+  SamplingParameters params;
+  params.init({&seeded, &greedy}, {0, 1}, {}, {}, {});
+  EXPECT_FALSE(params.has_unseeded_sample);
+  EXPECT_FALSE(params.to(torch::Device(torch::kCPU), torch::kFloat32)
+                   .has_unseeded_sample);
+  params.init({&seeded, &unseeded, &greedy}, {0, 1, 2}, {}, {}, {});
+  EXPECT_TRUE(params.has_unseeded_sample);
+  EXPECT_TRUE(params.to(torch::Device(torch::kCPU), torch::kFloat32)
+                  .has_unseeded_sample);
+  params.init({&sentinel}, {0}, {}, {}, {});
+  EXPECT_TRUE(params.has_unseeded_sample);
+  EXPECT_EQ(params.sampling_mode, SamplingMode::RANDOM);
+  EXPECT_FALSE(params.do_sample.defined());
+  params.init({&seeded}, {0}, {}, {}, {});
+  EXPECT_FALSE(params.has_unseeded_sample);
+}
+
 }  // namespace xllm

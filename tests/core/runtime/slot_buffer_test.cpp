@@ -861,6 +861,8 @@ class SlotSamplingInputTest
     for (const auto member : kInputs) {
       expect_equal(reference.*member, binding_->sampling_params().*member);
     }
+    EXPECT_EQ(reference.has_unseeded_sample,
+              binding_->sampling_params().has_unseeded_sample);
     EXPECT_EQ(reference.sampling_mode,
               binding_->sampling_params().sampling_mode);
     EXPECT_EQ(reference.logprobs, binding_->sampling_params().logprobs);
@@ -962,6 +964,7 @@ TEST_P(SlotSamplingInputTest, FixedAddressesSurviveShapeAndFeatureChanges) {
   for (int32_t round = 0; round < 16; ++round) {
     SCOPED_TRACE(round);
     SamplingParameters input = make_input(1 + round % 4, 1 + round % 7);
+    input.has_unseeded_sample = round % 2 == 0;
     if (round == 15) {
       input.top_k.fill_(/*value=*/-7);
     }

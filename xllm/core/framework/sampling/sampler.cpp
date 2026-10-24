@@ -23,6 +23,10 @@ limitations under the License.
 #include <limits>
 #include <mutex>
 
+#if defined(USE_CUDA)
+#include "core/kernels/cuda/seeded_sample.h"
+#endif
+
 #if defined(USE_NPU)
 #include <torch_npu/csrc/aten/NPUGeneratorImpl.h>
 #endif
@@ -207,7 +211,19 @@ SampleOutput Sampler::forward(torch::Tensor& logits,
     probs = torch::softmax(logits, /*dim=*/-1, /*dtype=*/torch::kFloat32);
   }
   torch::Tensor samples;
-  if (seed_sampling) {
+#if defined(USE_CUDA)
+  if (seed_sampling && probs.is_cuda()) {
+    samples =
+        kernel::cuda::seeded_sample(probs,
+                                    params.seeds,
+                                    params.seed_offsets,
+                                    params.sampling_mode == SamplingMode::RANDOM
+                                        ? torch::Tensor()
+                                        : params.require_do_sample(),
+                                    params.has_unseeded_sample);
+  } else
+#endif
+      if (seed_sampling) {
     const torch::Tensor seeds = params.seeds.to(torch::kCPU);
     const torch::Tensor offsets = params.seed_offsets.to(torch::kCPU);
     const torch::Tensor do_sample =

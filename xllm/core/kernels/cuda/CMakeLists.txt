@@ -26,6 +26,7 @@ set(CUDA_HEADER_FILES
   global_capture_instance.h
   llm_decode_metadata_update.h
   piecewise_graphs.h
+  seeded_sample.h
   topk_last_dim.cuh
   type_convert.cuh
   utils.h
@@ -140,6 +141,7 @@ set(CUDA_SOURCE_FILES
   rec_beam_search.cu
   reshape_paged_cache.cu
   rope.cu
+  seeded_sample.cu
   random_sample.cpp
   utils.cpp
   cuda_ops_library.cpp

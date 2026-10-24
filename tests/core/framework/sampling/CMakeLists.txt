@@ -4,6 +4,9 @@ set(SAMPLER_DEVICE_TEST_SRCS)
 if(USE_NPU)
   list(APPEND SAMPLER_DEVICE_TEST_SRCS seeded_sampler_test.cpp)
 endif()
+if(USE_CUDA)
+  list(APPEND SAMPLER_DEVICE_TEST_SRCS cuda_seeded_sampler_test.cpp)
+endif()
 
 cc_test(
   NAME

@@ -188,6 +188,10 @@ struct SamplingParameters {
   // [num_seq, 1] FloatTensor
   torch::Tensor acc_logprob;
 
+  // Host-derived: a random output row has no request seed. Fully seeded
+  // device sampling must not consume the default generator.
+  bool has_unseeded_sample = false;
+
   // How this batch's sequences are sampled (see SamplingMode).
   SamplingMode sampling_mode = SamplingMode::GREEDY;
 

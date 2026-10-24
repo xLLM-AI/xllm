@@ -145,6 +145,7 @@ void SamplingParameters::init(
     top_p.emplace_back(p->temperature == 0 ? 1.0F : p->top_p);
     top_k.emplace_back(p->temperature == 0 ? 0 : p->top_k);
     min_p.emplace_back(p->temperature == 0 ? 0.0F : p->min_p);
+    has_unseeded_sample |= p->temperature != 0.0F && p->seed.value_or(-1) == -1;
     logprobs = logprobs || p->logprobs;
     is_embeddings = is_embeddings || p->is_embeddings;
     max_top_logprobs = std::max(max_top_logprobs, p->top_logprobs);
@@ -324,6 +325,7 @@ SamplingParameters SamplingParameters::to(const torch::Device& device,
 
   params.do_sample = safe_to(do_sample, device, true);
   params.acc_logprob = safe_to(acc_logprob, device, true);
+  params.has_unseeded_sample = has_unseeded_sample;
   params.sampling_mode = sampling_mode;
   params.logprobs = logprobs;
   params.return_logits = return_logits;
