@@ -18,6 +18,23 @@ cc_test(
   DEPS models GTest::gtest_main
 )
 
+# OLMo2 configuration loading is host-only and available on every backend.
+cc_test(
+  NAME
+    olmo2_args_test
+  NO_NPU_RUNTIME
+  SRCS
+    olmo2_args_test.cpp
+  DEPS
+    :model_loader
+    GTest::gtest_main
+  DATA
+    fixtures/olmo2/config.json
+)
+target_compile_definitions(olmo2_args_test PRIVATE
+  OLMO2_CONFIG_PATH="${CMAKE_CURRENT_BINARY_DIR}/fixtures/olmo2/config.json"
+)
+
 if(USE_NPU)
   cc_test(
     NAME
