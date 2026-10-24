@@ -48,14 +48,11 @@ limitations under the License.
 #include "core/layers/common/expanded_decode_metadata_builder.h"
 #endif
 #include "core/framework/sampling/sampling_params.h"
-#include "core/framework/speculative/adaptive_pruning_helpers.h"
-#include "core/framework/speculative/adaptive_speculative_controller.h"
 #include "core/framework/speculative/draft_extend_input.h"
 #include "core/framework/speculative/mtp_async_input_builder.h"
 #include "core/framework/speculative/mtp_async_state.h"
 #include "core/framework/speculative/spec_input_builder.h"
 #include "core/framework/speculative/spec_verify.h"
-#include "core/framework/speculative/speculative_profile_registry.h"
 #include "core/layers/common/dsa_topk_share_plan.h"
 #include "core/platform/platform.h"
 #include "core/runtime/mtp_runtime_helpers.h"
@@ -477,12 +474,6 @@ ParallelArgs mtp_draft_parallel_args(const ParallelArgs& parallel_args,
 
 }  // namespace
 
-using adaptive_pruning::apply_pruned_prefix_lengths;
-using adaptive_pruning::clamp_prefix_lengths;
-using adaptive_pruning::max_pruned_prefix_length;
-using adaptive_pruning::selected_probs_by_step;
-using adaptive_pruning::truncate_draft_outputs;
-
 #if defined(USE_NPU)
 namespace detail {
 
@@ -760,8 +751,7 @@ MTPWorkerImpl<TargetInput>::MTPWorkerImpl(const ParallelArgs& parallel_args,
                                  options,
                                  mtp_detail::target_options(options),
                                  mtp_detail::draft_options(options),
-                                 worker_type,
-                                 /*enable_adaptive_speculative_decode=*/true) {}
+                                 worker_type) {}
 
 template <typename TargetInput>
 MTPWorkerImpl<TargetInput>::MTPWorkerImpl(
@@ -770,8 +760,7 @@ MTPWorkerImpl<TargetInput>::MTPWorkerImpl(
     const runtime::Options& options,
     const runtime::Options& target_options,
     const runtime::Options& draft_options,
-    WorkerType worker_type,
-    bool enable_adaptive_speculative_decode)
+    WorkerType worker_type)
     : DraftModelSpecWorkerImpl<TargetInput>(
           parallel_args,
           device,
@@ -783,12 +772,7 @@ MTPWorkerImpl<TargetInput>::MTPWorkerImpl(
                 mtp_draft_parallel_args(parallel_args, options),
                 device,
                 draft_options);
-          }) {
-  if (enable_adaptive_speculative_decode) {
-    adaptive_spec_controller_ =
-        std::make_unique<AdaptiveSpeculativeController>(options);
-  }
-}
+          }) {}
 
 template <typename TargetInput>
 MTPWorkerImpl<TargetInput>::~MTPWorkerImpl() {
@@ -868,10 +852,6 @@ bool MTPWorkerImpl<TargetInput>::init_model(
   if (impl_ != nullptr && impl_->get_status() == WorkerImpl::Status::LOADED) {
     target_spec_verify_mode_ = mtp_async::classify_target_spec_verify_mode(
         context_.get_model_args_bundle().model_type());
-    if (target_spec_verify_mode_ ==
-        mtp_async::TargetSpecVerifyMode::QWEN3_5_EXPANDED_VERIFY) {
-      adaptive_spec_controller_.reset();
-    }
   }
 
   if (draft_impl_ != nullptr &&
@@ -1031,17 +1011,6 @@ bool MTPWorkerImpl<TargetInput>::supports_explicit_spec_verify_replay_update()
   return target_spec_verify_mode_ ==
              mtp_async::TargetSpecVerifyMode::DEEPSEEK_V32_EXPANDED_VERIFY &&
          ModelConfig::is_python_model_impl(context_.get_model_impl());
-}
-
-template <typename TargetInput>
-bool MTPWorkerImpl<TargetInput>::requires_uniform_validate_width() const {
-  // Currently only Qwen3.5's GDN spec-verify kernel requires uniform width;
-  // this happens to coincide with the QWEN3_5_EXPANDED_VERIFY mode used by
-  // supports_explicit_spec_verify_replay_update, but the two are semantically
-  // distinct capabilities (graph-update capability vs. per-seq varlen kernel
-  // support).
-  return target_spec_verify_mode_ ==
-         mtp_async::TargetSpecVerifyMode::QWEN3_5_EXPANDED_VERIFY;
 }
 
 template <typename TargetInput>
@@ -1228,11 +1197,6 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_empty(
     TargetInput new_input = input.clone();
     scale_speculative_parallel_token_counts(
         new_input.input_params, options_.num_speculative_tokens() + 1);
-    // Deadlock-safety under DP: this rank's shard is empty but all peers
-    // decode, so busy peers allgather their pruned validate counts before the
-    // target forward. Join that allgather in lockstep with this rank's uniform
-    // count.
-    sync_dp_global_token_nums_for_idle_rank(new_input.input_params);
     ForwardOutput output =
         run_worker_no_sync(*impl_, new_input, target_prepared).value();
     for (ForwardOutput& draft_output : draft_outputs) {
@@ -1432,14 +1396,6 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_decode(
       device_context_ready_request_ids_.clear();
     }
   }
-  // Adaptive is enabled only after profile completes (registry has predictor),
-  // ensuring profiling warmup never triggers the adaptive HCCL broadcast.
-  const bool use_adaptive_speculative_decode =
-      adaptive_enabled() &&
-      SpeculativeProfileRegistry::get_instance()
-          .has_validate_time_predictor() &&
-      input.json_object_states.empty();
-
   std::vector<ForwardOutput> draft_outputs;
   LlmForwardInput current_draft_input, next_step_input;
   TargetInput validate_input;
@@ -1764,15 +1720,10 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_decode(
   }
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
               draft_timer.elapsed_seconds());
-  if (use_adaptive_speculative_decode) {
-    return run_adaptive_validate(
-        input, draft_outputs, validate_input, num_speculative_tokens);
-  }
   return run_validate(input,
                       draft_outputs,
                       validate_input,
                       num_speculative_tokens,
-                      /*pruned_prefix_lengths=*/nullptr,
                       has_json_object_states ? &json_scratch : nullptr);
 }
 
@@ -1781,18 +1732,19 @@ void MTPWorkerImpl<TargetInput>::fill_validate_input_from_draft_outputs(
     const TargetInput& input,
     const std::vector<ForwardOutput>& draft_outputs,
     TargetInput& validate_input,
-    const std::vector<int32_t>& per_seq_val_tokens,
+    int32_t num_val_tokens,
     const detail::JsonDraftValidationScratch* json_scratch,
     Stream& compute_stream) {
-  CHECK(!per_seq_val_tokens.empty()) << "per_seq_val_tokens must not be empty";
-  const int32_t num_sequences = static_cast<int32_t>(per_seq_val_tokens.size());
-  const int32_t max_val_tokens =
-      *std::max_element(per_seq_val_tokens.begin(), per_seq_val_tokens.end());
+  const int32_t num_sequences = input.input_params.meta.num_sequences;
+  CHECK_GT(num_val_tokens, 0);
   CHECK(validate_input.token_ids.defined())
       << "validate token_ids must be prepared before draft token fill";
   CHECK_EQ(validate_input.token_ids.dim(), 1)
       << "validate token_ids must be flat";
 
+  CHECK_EQ(validate_input.token_ids.numel(),
+           static_cast<int64_t>(num_sequences) * num_val_tokens)
+      << "MTP validation requires fixed-width rows";
   const torch::TensorOptions token_options = validate_input.token_ids.options();
   c10::StreamGuard stream_guard = compute_stream.set_stream_guard();
   wait_metadata_ready_event(validate_input, compute_stream);
@@ -1801,10 +1753,7 @@ void MTPWorkerImpl<TargetInput>::fill_validate_input_from_draft_outputs(
     CHECK_EQ(input.json_object_states.size(),
              static_cast<size_t>(num_sequences))
         << "JSON grammar state rows must match validation sequences";
-    CHECK_EQ(validate_input.token_ids.numel(),
-             static_cast<int64_t>(num_sequences) * max_val_tokens)
-        << "adaptive MTP validation is not supported for JSON grammar rows";
-    const int32_t num_speculative_tokens = max_val_tokens - 1;
+    const int32_t num_speculative_tokens = num_val_tokens - 1;
     CHECK_EQ(json_scratch->states_after.size(),
              static_cast<size_t>(num_speculative_tokens));
     validate_input.json_object_states = detail::build_json_validation_states(
@@ -1828,7 +1777,7 @@ void MTPWorkerImpl<TargetInput>::fill_validate_input_from_draft_outputs(
       validate_input.input_params.graph.input_tokens_override.defined() &&
       supports_explicit_spec_verify_replay_update() &&
       kernel::npu::tilelang::has_spec_verify_graph_update_specialization(
-          max_val_tokens, options_.block_size());
+          num_val_tokens, options_.block_size());
   if (use_fused_verify_token_update) {
     fused_draft_tokens.reserve(draft_outputs.size());
     for (const ForwardOutput& draft_output : draft_outputs) {
@@ -1845,95 +1794,34 @@ void MTPWorkerImpl<TargetInput>::fill_validate_input_from_draft_outputs(
     return;
   }
 #endif
-  const int32_t total_val_tokens =
-      static_cast<int32_t>(validate_input.token_ids.numel());
-  const bool is_uniform = (total_val_tokens == num_sequences * max_val_tokens);
-
-  if (is_uniform) {
-    // Fast path: all seqs share the same val_tokens. Stack the draft-token
-    // columns once into a contiguous [batch, num_draft_tokens] tensor and
-    // issue a single strided slice-copy, instead of one device kernel per
-    // draft step. This is the static (non-adaptive) MTP baseline and runs
-    // every decode step; launch-bound NPU decode is measurably faster with
-    // one op than num_speculative_tokens ops writing the same bytes.
-    const int32_t num_draft_tokens = max_val_tokens - 1;
-    const bool step_major_validate_layout = uses_step_major_validate_layout();
-    torch::Tensor validate_token_rows =
-        step_major_validate_layout
-            ? validate_input.token_ids.view({max_val_tokens, num_sequences})
-            : validate_input.token_ids.view({num_sequences, max_val_tokens});
-    if (num_draft_tokens > 0) {
-      std::vector<torch::Tensor> draft_token_columns;
-      draft_token_columns.reserve(static_cast<size_t>(num_draft_tokens));
-      for (int32_t i = 0; i < num_draft_tokens; ++i) {
-        CHECK(static_cast<size_t>(i) < draft_outputs.size())
-            << "draft_outputs index out of range for step " << i;
-        const torch::Tensor& next_tokens =
-            draft_outputs[static_cast<size_t>(i)].sample_output.next_tokens;
-        CHECK(next_tokens.defined())
-            << "draft next_tokens must be defined for validate token fill";
-        draft_token_columns.push_back(safe_to(
-            next_tokens.flatten(), token_options, /*non_blocking=*/true));
-      }
-      torch::Tensor packed_drafts =
-          torch::stack(draft_token_columns, /*dim=*/1);
-      if (step_major_validate_layout) {
-        validate_token_rows
-            .slice(/*dim=*/0, /*start=*/1, /*end=*/max_val_tokens)
-            .copy_(packed_drafts.transpose(/*dim0=*/0, /*dim1=*/1),
-                   /*non_blocking=*/true);
-      } else {
-        validate_token_rows
-            .slice(/*dim=*/1, /*start=*/1, /*end=*/max_val_tokens)
-            .copy_(packed_drafts, /*non_blocking=*/true);
-      }
+  // Stack the draft columns once and copy into the fixed-width rows.
+  const int32_t num_draft_tokens = num_val_tokens - 1;
+  const bool step_major_validate_layout = uses_step_major_validate_layout();
+  torch::Tensor validate_token_rows =
+      step_major_validate_layout
+          ? validate_input.token_ids.view({num_val_tokens, num_sequences})
+          : validate_input.token_ids.view({num_sequences, num_val_tokens});
+  if (num_draft_tokens > 0) {
+    std::vector<torch::Tensor> draft_token_columns;
+    draft_token_columns.reserve(static_cast<size_t>(num_draft_tokens));
+    for (int32_t i = 0; i < num_draft_tokens; ++i) {
+      CHECK(static_cast<size_t>(i) < draft_outputs.size())
+          << "draft_outputs index out of range for step " << i;
+      const torch::Tensor& next_tokens =
+          draft_outputs[static_cast<size_t>(i)].sample_output.next_tokens;
+      CHECK(next_tokens.defined())
+          << "draft next_tokens must be defined for validate token fill";
+      draft_token_columns.push_back(
+          safe_to(next_tokens.flatten(), token_options, /*non_blocking=*/true));
     }
-  } else {
-    // Slow path: per-seq variable-length, group by draft step.
-    std::vector<int64_t> dst_idx_vec;
-    std::vector<int64_t> src_idx_vec;
-    std::vector<int64_t> step_vec;
-    int32_t offset = 0;
-    int32_t max_draft_step = -1;
-    for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
-      const int32_t seq_val_tokens =
-          per_seq_val_tokens[static_cast<size_t>(seq_id)];
-      const int32_t seq_draft_tokens = seq_val_tokens - 1;
-      for (int32_t draft_idx = 0; draft_idx < seq_draft_tokens; ++draft_idx) {
-        dst_idx_vec.push_back(offset + draft_idx + 1);
-        src_idx_vec.push_back(seq_id);
-        step_vec.push_back(draft_idx);
-        max_draft_step = std::max(max_draft_step, draft_idx);
-      }
-      offset += seq_val_tokens;
-    }
-
-    if (!dst_idx_vec.empty()) {
-      // Move all indices to device once (instead of a per-step H2D copy) and
-      // select each step's entries on-device via a boolean mask.
-      const torch::Device& device = validate_input.token_ids.device();
-      torch::Tensor dst_idx_all = async_h2d_tensor(dst_idx_vec, device);
-      torch::Tensor src_idx_all = async_h2d_tensor(src_idx_vec, device);
-      torch::Tensor step_all = async_h2d_tensor(step_vec, device);
-      for (int32_t step = 0; step <= max_draft_step; ++step) {
-        CHECK(static_cast<size_t>(step) < draft_outputs.size())
-            << "draft_outputs index out of range for step " << step;
-        const torch::Tensor& next_tokens =
-            draft_outputs[static_cast<size_t>(step)].sample_output.next_tokens;
-        CHECK(next_tokens.defined())
-            << "draft next_tokens must be defined for validate token fill";
-        torch::Tensor flat_tokens = safe_to(
-            next_tokens.flatten(), token_options, /*non_blocking=*/true);
-
-        torch::Tensor step_mask = step_all.eq(step);
-        torch::Tensor step_dst = dst_idx_all.masked_select(step_mask);
-        if (step_dst.numel() == 0) {
-          continue;
-        }
-        torch::Tensor step_src = src_idx_all.masked_select(step_mask);
-        torch::Tensor gathered = flat_tokens.index_select(/*dim=*/0, step_src);
-        validate_input.token_ids.index_copy_(/*dim=*/0, step_dst, gathered);
-      }
+    torch::Tensor packed_drafts = torch::stack(draft_token_columns, /*dim=*/1);
+    if (step_major_validate_layout) {
+      validate_token_rows.slice(/*dim=*/0, /*start=*/1, /*end=*/num_val_tokens)
+          .copy_(packed_drafts.transpose(/*dim0=*/0, /*dim1=*/1),
+                 /*non_blocking=*/true);
+    } else {
+      validate_token_rows.slice(/*dim=*/1, /*start=*/1, /*end=*/num_val_tokens)
+          .copy_(packed_drafts, /*non_blocking=*/true);
     }
   }
   validate_input.runtime.device_tensors_ready = true;
@@ -1941,164 +1829,20 @@ void MTPWorkerImpl<TargetInput>::fill_validate_input_from_draft_outputs(
 }
 
 template <typename TargetInput>
-std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_adaptive_validate(
-    const TargetInput& input,
-    const std::vector<ForwardOutput>& draft_outputs,
-    TargetInput& validate_input,
-    int32_t num_speculative_tokens) {
-  const int32_t batch_size = input.input_params.meta.num_sequences;
-  std::vector<double> per_seq_kv_lens(static_cast<size_t>(batch_size), 0.0);
-  const Slice<int32_t> kv_seq_lens =
-      input.input_params.attention.host.kv_seq_lens;
-  for (int32_t i = 0; i < batch_size; ++i) {
-    if (static_cast<size_t>(i) < kv_seq_lens.size()) {
-      per_seq_kv_lens[static_cast<size_t>(i)] = static_cast<double>(
-          specBuilder::calc_kv_len(kv_seq_lens, i, /*offset=*/0));
-    }
-  }
-
-  // All ranks compute pruning independently. Inputs must be deterministic
-  // across ranks so every rank derives the same effective validate width.
-  // The per-rank measured draft latency is NOT deterministic, so pruning is
-  // driven purely by validate-time marginal cost (full_draft_time_ms = 0).
-  std::vector<int32_t> prefix_lengths;
-  const std::optional<torch::Tensor> draft_probs =
-      selected_probs_by_step(draft_outputs);
-  if (draft_probs.has_value()) {
-    prefix_lengths = adaptive_spec_controller_->select_pruned_prefix_lengths(
-        *draft_probs,
-        /*full_draft_time_ms=*/0.0,
-        per_seq_kv_lens);
-  } else {
-    LOG_FIRST_N(WARNING, 1)
-        << "Adaptive speculative pruning disabled: draft exposed neither "
-           "sampling logits nor forward logits for selected-prob "
-           "computation. Falling back to full speculative width.";
-    prefix_lengths.assign(static_cast<size_t>(batch_size),
-                          num_speculative_tokens);
-  }
-  clamp_prefix_lengths(prefix_lengths, batch_size, num_speculative_tokens);
-  int32_t effective_speculative_tokens =
-      max_pruned_prefix_length(prefix_lengths, num_speculative_tokens);
-  if (effective_speculative_tokens <= 0) {
-    effective_speculative_tokens = 1;
-  }
-
-  // Qwen3.5 GDN spec-verify commits the recurrent/conv checkpoint selected by
-  // the previous step's num_accepted_tokens (nat): the GDN kernel indexes
-  // ssm_state as nat - 1 and requires nat <= this step's validate width. Floor
-  // effective_speculative_tokens by the batch's max nat so uniform_val_tokens
-  // >= max(nat) + 1. nat itself must stay the true accepted count (never
-  // clamped) so the committed checkpoint matches the last accepted token;
-  // clamping it would commit a stale checkpoint (see issue #2247). Read from
-  // embedding_cache directly since input.num_accepted_tokens_host is populated
-  // by prepare_validate_inputs which hasn't run yet here.
-  if (supports_explicit_spec_verify_replay_update() &&
-      embedding_cache_ != nullptr &&
-      !input.input_params.embedding.embedding_ids.empty()) {
-    std::vector<int32_t> nat = embedding_cache_->read_accepted_prefix_lengths(
-        input.input_params.embedding.embedding_ids,
-        input.input_params.embedding.request_ids);
-    int32_t max_nat = 0;
-    for (int32_t v : nat) {
-      max_nat = std::max(max_nat, v);
-    }
-    effective_speculative_tokens =
-        std::max(effective_speculative_tokens, max_nat);
-    effective_speculative_tokens =
-        std::min(effective_speculative_tokens, num_speculative_tokens);
-  }
-
-  std::vector<int32_t> per_seq_val_tokens(static_cast<size_t>(batch_size));
-  // Qwen3.5 GatedDeltaNet spec-verify path requires dense same-length validate
-  // tokens across sequences (see qwen3_gated_delta_net_base.cpp:405-408). On
-  // Qwen3.5 we still take the batch-max pruning benefit (effective_sl < max_sl
-  // when the controller decides to shrink), but every seq gets the same
-  // validate width. On non-Qwen3.5 models we keep per-seq variable-length
-  // tokens for maximum pruning benefit.
-  const bool require_uniform_val_tokens = requires_uniform_validate_width();
-  const int32_t uniform_val_tokens = effective_speculative_tokens + 1;
-  for (int32_t i = 0; i < batch_size; ++i) {
-    per_seq_val_tokens[static_cast<size_t>(i)] =
-        require_uniform_val_tokens
-            ? uniform_val_tokens
-            : std::max(prefix_lengths[static_cast<size_t>(i)], 1) + 1;
-  }
-  std::vector<ForwardOutput> pruned_draft_outputs =
-      truncate_draft_outputs(draft_outputs, effective_speculative_tokens);
-  // If the controller did not actually prune any sequence, treat this as the
-  // static path: pass nullptr so run_validate takes the async handoff tail
-  // and skips the no-op pruned post-processing.
-  const bool has_actual_prune =
-      std::any_of(prefix_lengths.begin(),
-                  prefix_lengths.end(),
-                  [num_speculative_tokens](int32_t p) {
-                    return p < num_speculative_tokens;
-                  });
-  prepare_validate_inputs(input, validate_input, per_seq_val_tokens);
-  return run_validate(input,
-                      pruned_draft_outputs,
-                      validate_input,
-                      effective_speculative_tokens,
-                      per_seq_val_tokens,
-                      has_actual_prune ? &prefix_lengths : nullptr,
-                      /*json_scratch=*/nullptr);
-}
-
-template <typename TargetInput>
 std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
     const TargetInput& input,
     const std::vector<ForwardOutput>& draft_outputs,
     TargetInput& validate_input,
     int32_t num_speculative_tokens,
-    const std::vector<int32_t>* pruned_prefix_lengths,
-    const detail::JsonDraftValidationScratch* json_scratch) {
-  const int32_t batch_size = input.input_params.meta.num_sequences;
-  const int32_t val_tokens = num_speculative_tokens + 1;
-  std::vector<int32_t> per_seq_val_tokens(static_cast<size_t>(batch_size),
-                                          val_tokens);
-  return run_validate(input,
-                      draft_outputs,
-                      validate_input,
-                      num_speculative_tokens,
-                      per_seq_val_tokens,
-                      pruned_prefix_lengths,
-                      json_scratch);
-}
-
-// Run target model validate with per-seq variable-length support.
-// When all seqs have the same val_tokens (uniform case), uses zero-copy view.
-// When variable-length, pads logits to [batch * max_val_tokens, vocab] for
-// RejectionSampler compatibility, with -inf at padding positions.
-template <typename TargetInput>
-std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
-    const TargetInput& input,
-    const std::vector<ForwardOutput>& draft_outputs,
-    TargetInput& validate_input,
-    int32_t num_speculative_tokens,
-    const std::vector<int32_t>& per_seq_val_tokens,
-    const std::vector<int32_t>* pruned_prefix_lengths,
     const detail::JsonDraftValidationScratch* json_scratch) {
   Timer target_timer;
   TargetInput target_prepared;
   fill_validate_input_from_draft_outputs(input,
                                          draft_outputs,
                                          validate_input,
-                                         per_seq_val_tokens,
+                                         num_speculative_tokens + 1,
                                          json_scratch,
                                          *compute_stream_);
-  // Under DP, publish this rank's true validate token count to all DP peers so
-  // DpEpPadding computes matching MoE all-to-all pads. per_seq_val_tokens is
-  // uniform (N+1) on the static path and varlen on the adaptive path; both
-  // funnel through here, so every DP rank runs the collective in lockstep.
-  // No-op when the DP group spans a single rank.
-  int32_t local_total_val_tokens = 0;
-  for (int32_t v : per_seq_val_tokens) {
-    local_total_val_tokens += v;
-  }
-  sync_dp_global_token_nums_after_prune(validate_input.input_params,
-                                        local_total_val_tokens);
-
   ForwardOutput target_output;
   if (uses_embedded_eagle3_draft()) {
     target_output =
@@ -2114,43 +1858,11 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
   COUNTER_ADD(speculative_execution_latency_seconds_target,
               target_timer.elapsed_seconds());
 
-  const int32_t batch_size = static_cast<int32_t>(per_seq_val_tokens.size());
-  const int32_t max_val_tokens = num_speculative_tokens + 1;
-  const int32_t total_tokens =
-      static_cast<int32_t>(target_output.logits.size(0));
-  const int32_t vocab_size =
-      static_cast<int32_t>(target_output.logits.size(-1));
-  const int64_t padded_total =
-      static_cast<int64_t>(batch_size) * max_val_tokens;
+  const int32_t batch_size = input.input_params.meta.num_sequences;
+  CHECK_EQ(target_output.logits.size(0),
+           static_cast<int64_t>(batch_size) * (num_speculative_tokens + 1));
 
-  // For the uniform fast path we only need to reinterpret target_output.logits
-  // as `[padded_total, vocab]` — no ForwardOutput copy required. Only the
-  // variable-length slow path materializes a separate padded output.
-  std::optional<ForwardOutput> padded_target_output_slow;
-  const bool needs_padding =
-      (total_tokens != static_cast<int32_t>(padded_total));
-  if (needs_padding) {
-    padded_target_output_slow.emplace(target_output);
-    adaptive_pruning::scatter_varlen_target_output_to_dense(
-        *padded_target_output_slow,
-        per_seq_val_tokens,
-        batch_size,
-        max_val_tokens);
-  }
-  // Uniform fast path uses a scoped local ForwardOutput whose only diff is
-  // logits viewed to [padded_total, vocab]; slow path uses the materialized
-  // padded copy above. Both are const-ref'd into validate() below.
-  ForwardOutput uniform_target_view;
-  if (!needs_padding) {
-    uniform_target_view = target_output;
-    uniform_target_view.logits =
-        target_output.logits.view({padded_total, vocab_size});
-  }
-  const ForwardOutput& target_output_for_validate =
-      needs_padding ? *padded_target_output_slow : uniform_target_view;
-
-  const bool prelaunch_next_first_draft =
-      pruned_prefix_lengths == nullptr && can_prelaunch_next_first_draft(input);
+  const bool prelaunch_next_first_draft = can_prelaunch_next_first_draft(input);
   LlmForwardInput next_first_draft_input;
   if (prelaunch_next_first_draft) {
     // This input is independent of the accepted token.  Prepare it on the
@@ -2171,16 +1883,13 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
     val_output = validate(input.sampling_params,
                           draft_outputs,
-                          target_output_for_validate,
+                          target_output,
                           num_speculative_tokens,
-                          pruned_prefix_lengths,
                           validate_input.json_object_invalid_draft);
   }
 
-  if (pruned_prefix_lengths != nullptr || uses_embedded_eagle3_draft()) {
-    // Adaptive pruning path: per-seq validate width is variable, which is
-    // incompatible with the async handoff's fixed-width base-state derivation.
-    // Use the synchronous tail: unify tokens, then write target context inline.
+  if (uses_embedded_eagle3_draft()) {
+    // Embedded Eagle3 publishes target context synchronously before reuse.
     if (should_broadcast_spec_tokens(
             parallel_args_,
             get_optimization_config().enable_spec_token_broadcast,
@@ -2201,7 +1910,6 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
     }
     return finalize_verify_output(std::move(target_output),
                                   std::move(val_output),
-                                  pruned_prefix_lengths,
                                   input.json_object_states);
   }
 
@@ -2362,7 +2070,6 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
   }
   return finalize_verify_output(std::move(target_output),
                                 std::move(val_output),
-                                /*pruned_prefix_lengths=*/nullptr,
                                 input.json_object_states);
 }
 
@@ -3294,216 +3001,6 @@ bool MTPWorkerImpl<TargetInput>::
 #endif
 }
 
-// Per-seq variable-length validate input construction.
-// Each seq gets per_seq_val_tokens[i] tokens in the ATB kernel input,
-// reducing attention/FFN computation for seqs with fewer speculative tokens.
-template <typename TargetInput>
-void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
-    const TargetInput& input,
-    TargetInput& validate_input,
-    const std::vector<int32_t>& per_seq_val_tokens) {
-  c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
-  validate_input = input.clone();
-  clear_ready_events(validate_input);
-  validate_input.runtime.device_tensors_ready = false;
-  validate_input.skip_sampling_for_logits_only = true;
-  validate_input.skip_process_logits = true;
-  auto& input_params = validate_input.input_params;
-  input_params.embedding.input_embedding = torch::Tensor();
-  torch::TensorOptions token_options = validate_input.token_ids.options();
-  torch::TensorOptions position_options = validate_input.positions.options();
-
-  const int32_t num_sequences = input_params.meta.num_sequences;
-  CHECK_EQ(per_seq_val_tokens.size(), static_cast<size_t>(num_sequences))
-      << "per_seq_val_tokens size mismatch with num_sequences";
-  int32_t total_num_val_tokens = 0;
-  int32_t max_val_tokens = 0;
-  for (int32_t i = 0; i < num_sequences; ++i) {
-    total_num_val_tokens += per_seq_val_tokens[static_cast<size_t>(i)];
-    max_val_tokens =
-        std::max(max_val_tokens, per_seq_val_tokens[static_cast<size_t>(i)]);
-  }
-  const int32_t logical_block_size = this->logical_block_size();
-  const bool positions_decoupled = positions_are_decoupled_from_kv_length();
-  specBuilder::DecodeRowContext row_ctx =
-      specBuilder::make_decode_row_context(input);
-  Slice<int32_t> token_ids = tensor_slice(input.token_ids_host);
-  Slice<int32_t> positions = tensor_slice(input.positions_host);
-  Slice<int32_t> kv_seq_lens = input.input_params.attention.host.kv_seq_lens;
-  const bool use_atb_spec_kernel =
-      ::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel() ||
-      use_chunked_prefill_spec_verify_path();
-  specBuilder::DecodeBuildBuffers buf;
-  buf.out_token_ids.reserve(total_num_val_tokens);
-  buf.out_positions.reserve(total_num_val_tokens);
-  buf.out_new_cache_slots.reserve(total_num_val_tokens);
-  if (!use_atb_spec_kernel) {
-    buf.out_kv_seq_lens.reserve(total_num_val_tokens);
-    buf.out_q_seq_lens.reserve(total_num_val_tokens);
-    buf.out_q_cu_seq_lens.reserve(total_num_val_tokens);
-    buf.reserve_row_buffers(static_cast<size_t>(total_num_val_tokens),
-                            row_ctx.block_table_stride);
-  }
-
-  std::vector<int32_t> atb_kv_seq_lens_vec;
-  std::vector<int32_t> atb_q_seq_lens_vec;
-  std::vector<int32_t> atb_q_cu_seq_lens_vec;
-  int32_t atb_kv_max_seq_len = 0;
-  for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
-    const int32_t seq_val_tokens =
-        per_seq_val_tokens[static_cast<size_t>(seq_id)];
-    const int32_t start_position = positions[seq_id];
-    const int32_t kv_len =
-        specBuilder::calc_kv_len(kv_seq_lens, seq_id, /*offset=*/0);
-    if (!positions_decoupled) {
-      CHECK_EQ(start_position + 1, kv_len)
-          << "validate position/kv_len mismatch, seq_id=" << seq_id
-          << ", start_position=" << start_position << ", kv_len=" << kv_len;
-    }
-
-    for (int32_t val_idx = 0; val_idx < seq_val_tokens; ++val_idx) {
-      specBuilder::RowSpec row;
-      row.seq_id = seq_id;
-      row.token_id = val_idx == 0 ? token_ids[seq_id] : -val_idx;
-      row.position_offset = val_idx;
-      row.append_kv_len = !use_atb_spec_kernel;
-      row.append_q_len_one = !use_atb_spec_kernel;
-      row.append_block_table = !use_atb_spec_kernel;
-      specBuilder::append_decode_row(row_ctx, row, logical_block_size, buf);
-    }
-
-    if (use_atb_spec_kernel) {
-      const int32_t kv_len_after_validation = kv_len + seq_val_tokens - 1;
-      specBuilder::update_kv_seq_lens_and_max(
-          atb_kv_seq_lens_vec, kv_len_after_validation, atb_kv_max_seq_len);
-      specBuilder::append_q_seq_len(
-          atb_q_seq_lens_vec, atb_q_cu_seq_lens_vec, seq_val_tokens);
-    }
-  }
-
-  if (impl_->has_request_state_cache()) {
-    input_params.attention.host.kpool_query_lens =
-        std::vector<int32_t>(per_seq_val_tokens);
-    input_params.is_spec_verify = true;
-  }
-
-  CHECK_EQ(buf.out_new_cache_slots.size(), buf.out_token_ids.size())
-      << "validate kv slots/tokens mismatch";
-  CHECK_EQ(buf.out_positions.size(), buf.out_token_ids.size())
-      << "validate positions/tokens mismatch";
-
-  specBuilder::set_token_position_tensors(validate_input,
-                                          buf.out_token_ids,
-                                          buf.out_positions,
-                                          token_options,
-                                          position_options);
-  if (!use_atb_spec_kernel) {
-    input_params.meta.num_sequences = total_num_val_tokens;
-    input_params.meta.batch_forward_type = BatchForwardType::DECODE;
-  } else {
-    input_params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
-  }
-  if (use_atb_spec_kernel) {
-    specBuilder::update_input_params(input_params,
-                                     buf,
-                                     max_val_tokens,
-                                     std::move(atb_q_seq_lens_vec),
-                                     std::move(atb_q_cu_seq_lens_vec),
-                                     atb_kv_max_seq_len,
-                                     std::move(atb_kv_seq_lens_vec));
-  } else {
-    specBuilder::update_input_params(input_params,
-                                     buf,
-                                     1,
-                                     std::move(buf.out_q_seq_lens),
-                                     std::move(buf.out_q_cu_seq_lens),
-                                     buf.meta.kv_max_seq_len,
-                                     std::move(buf.out_kv_seq_lens),
-                                     /*update_block_tables=*/true);
-  }
-
-  expand_sampling_params_for_verify(validate_input.sampling_params,
-                                    per_seq_val_tokens,
-                                    total_num_val_tokens,
-                                    device_);
-
-  for (int32_t& token_num : input_params.parallel.dp_global_token_nums) {
-    token_num = total_num_val_tokens;
-  }
-
-#if defined(USE_NPU)
-  const bool expand_python_mtp_linear_state_ids =
-      ModelConfig::is_python_model_impl(context_.get_model_impl()) &&
-      !input_params.embedding.linear_state_ids.empty();
-  std::vector<int32_t> expanded_linear_state_ids;
-  if (expand_python_mtp_linear_state_ids) {
-    CHECK_EQ(input_params.embedding.linear_state_ids.size(),
-             static_cast<size_t>(num_sequences));
-    expanded_linear_state_ids.reserve(
-        static_cast<size_t>(total_num_val_tokens));
-    for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
-      expanded_linear_state_ids.insert(
-          expanded_linear_state_ids.end(),
-          per_seq_val_tokens[static_cast<size_t>(seq_id)],
-          input_params.embedding.linear_state_ids[static_cast<size_t>(seq_id)]);
-    }
-  }
-#endif
-
-  if (use_chunked_prefill_spec_verify_path()) {
-    input_params.embedding.input_embedding = torch::Tensor();
-    input_params.is_spec_verify = true;
-    if (!input_params.attention.host.q_seq_lens.empty()) {
-      std::vector<int32_t> q_cu_seq_lens_vec;
-      q_cu_seq_lens_vec.reserve(num_sequences + 1);
-      q_cu_seq_lens_vec.emplace_back(0);
-      for (int32_t q_len : input_params.attention.host.q_seq_lens) {
-        q_cu_seq_lens_vec.emplace_back(q_cu_seq_lens_vec.back() + q_len);
-      }
-      input_params.attention.host.q_cu_seq_lens = std::move(q_cu_seq_lens_vec);
-    }
-    std::vector<int32_t> accepted_prefix_lengths(num_sequences, 1);
-    if (embedding_cache_ != nullptr &&
-        !input.input_params.embedding.embedding_ids.empty()) {
-      accepted_prefix_lengths = embedding_cache_->read_accepted_prefix_lengths(
-          input.input_params.embedding.embedding_ids,
-          input.input_params.embedding.request_ids);
-    }
-    // num_accepted_tokens must stay the true accepted count: the Qwen3.5 GDN
-    // spec-verify kernel commits the recurrent/conv checkpoint at index
-    // nat - 1, so clamping it would commit a stale state whenever 4+ tokens
-    // were accepted (see issue #2247). The conv1d kernel already clamps its
-    // own physical conv_state read offset internally, and the tiling check
-    // no longer rejects nat > segment length, so no host-side clamp is needed.
-    input_params.num_accepted_tokens =
-        torch::tensor(accepted_prefix_lengths, token_options);
-    input_params.num_accepted_tokens_host.assign(
-        accepted_prefix_lengths.begin(), accepted_prefix_lengths.end());
-  }
-
-#if defined(USE_NPU)
-  if (supports_explicit_spec_verify_replay_update()) {
-    ensure_spec_verify_control_block_table(input_params, num_sequences);
-  }
-  std::vector<PackedAttentionIntInput> extra_int_inputs;
-  if (!expanded_linear_state_ids.empty()) {
-    extra_int_inputs.push_back({&expanded_linear_state_ids,
-                                nullptr,
-                                &input_params.embedding.linear_state_indices});
-  }
-  AttentionInputView(input_params.attention)
-      .rebuild_device_buffer(device_, extra_int_inputs);
-  if (supports_explicit_spec_verify_replay_update()) {
-    build_expanded_spec_verify_graph_input(
-        input_params, device_, logical_block_size);
-  }
-#else
-  input_params.attention.rebuild_device_buffer(device_);
-#endif
-  validate_input.runtime.device_tensors_ready = true;
-  finish_metadata_prepare(*prepare_stream_, validate_input);
-}
-
 template <typename TargetInput>
 void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
     const TargetInput& base_input,
@@ -3835,7 +3332,6 @@ SampleOutput MTPWorkerImpl<TargetInput>::validate(
     const std::vector<ForwardOutput>& draft_outputs,
     const ForwardOutput& target_output,
     int32_t num_speculative_tokens,
-    const std::vector<int32_t>* pruned_prefix_lengths,
     const std::vector<uint8_t>& invalid_draft) {
   std::vector<torch::Tensor> draft_token_ids_steps;
   std::vector<torch::Tensor> draft_logits_steps;
@@ -3851,7 +3347,6 @@ SampleOutput MTPWorkerImpl<TargetInput>::validate(
       stack_draft_proposal(draft_token_ids_steps, draft_logits_steps),
       target_output,
       num_speculative_tokens,
-      pruned_prefix_lengths,
       invalid_draft);
 }
 
@@ -3861,7 +3356,6 @@ SampleOutput MTPWorkerImpl<TargetInput>::validate(
     const DraftProposal& draft_proposal,
     const ForwardOutput& target_output,
     int32_t num_speculative_tokens,
-    const std::vector<int32_t>* pruned_prefix_lengths,
     const std::vector<uint8_t>& invalid_draft) {
   const int32_t num_val_tokens = num_speculative_tokens + 1;
   const int32_t batch_size =
@@ -3913,16 +3407,6 @@ SampleOutput MTPWorkerImpl<TargetInput>::validate(
   // Only the step-major layout needs the permuted embeddings copy.
   if (step_major_validate_layout) {
     sample_output.embeddings = target_embeddings;
-  }
-
-  if (pruned_prefix_lengths != nullptr) {
-    const torch::Tensor pruning_masks =
-        adaptive_pruning::build_pruned_prefix_masks(
-            *pruned_prefix_lengths,
-            num_speculative_tokens,
-            sample_output.next_tokens.device());
-    apply_pruned_prefix_lengths(
-        sample_output, num_speculative_tokens, pruning_masks);
   }
 
   return sample_output;

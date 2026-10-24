@@ -59,8 +59,7 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
                 const runtime::Options& options,
                 const runtime::Options& target_options,
                 const runtime::Options& draft_options,
-                WorkerType worker_type,
-                bool enable_adaptive_speculative_decode = false);
+                WorkerType worker_type);
 
  public:
   bool init_model(const std::string& model_weights_path,
@@ -77,8 +76,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
 
  protected:
   using typename DraftModelSpecWorkerImpl<TargetInput>::TargetModelParams;
-  using DraftModelSpecWorkerImpl<TargetInput>::adaptive_enabled;
-  using DraftModelSpecWorkerImpl<TargetInput>::adaptive_spec_controller_;
   using DraftModelSpecWorkerImpl<TargetInput>::compute_stream_;
   using DraftModelSpecWorkerImpl<TargetInput>::context_;
   using DraftModelSpecWorkerImpl<TargetInput>::device_;
@@ -96,10 +93,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   using DraftModelSpecWorkerImpl<
       TargetInput>::estimate_kv_cache_capacity_with_draft;
   using DraftModelSpecWorkerImpl<TargetInput>::get_optimization_config;
-  using DraftModelSpecWorkerImpl<
-      TargetInput>::sync_dp_global_token_nums_after_prune;
-  using DraftModelSpecWorkerImpl<
-      TargetInput>::sync_dp_global_token_nums_for_idle_rank;
   using DraftModelSpecWorkerImpl<TargetInput>::update_input_by_last_step_output;
   using DraftModelSpecWorkerImpl<
       TargetInput>::update_json_object_states_by_last_step_output;
@@ -118,43 +111,21 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
       const TargetInput& input,
       const std::vector<ForwardOutput>& draft_outputs,
       TargetInput& validate_input,
-      const std::vector<int32_t>& per_seq_val_tokens,
+      int32_t num_val_tokens,
       const detail::JsonDraftValidationScratch* json_scratch,
       Stream& compute_stream);
-  // Adaptive pruning path: compute per-seq prefix lengths, truncate draft
-  // outputs, and run variable-length validate.
-  std::optional<ForwardOutput> run_adaptive_validate(
-      const TargetInput& input,
-      const std::vector<ForwardOutput>& draft_outputs,
-      TargetInput& validate_input,
-      int32_t num_speculative_tokens);
   std::optional<ForwardOutput> run_validate(
       const TargetInput& input,
       const std::vector<ForwardOutput>& draft_outputs,
       TargetInput& validate_input,
       int32_t num_speculative_tokens,
-      const std::vector<int32_t>* pruned_prefix_lengths,
-      const detail::JsonDraftValidationScratch* json_scratch);
-  std::optional<ForwardOutput> run_validate(
-      const TargetInput& input,
-      const std::vector<ForwardOutput>& draft_outputs,
-      TargetInput& validate_input,
-      int32_t num_speculative_tokens,
-      const std::vector<int32_t>& per_seq_val_tokens,
-      const std::vector<int32_t>* pruned_prefix_lengths,
       const detail::JsonDraftValidationScratch* json_scratch);
 
-  virtual SampleOutput validate(
-      const SamplingParameters& sampling_params,
-      const std::vector<ForwardOutput>& draft_outputs,
-      const ForwardOutput& target_output,
-      int32_t num_speculative_tokens,
-      // No default: Google Style bans default args on virtuals — they resolve
-      // statically from the declared base type, so an override changing the
-      // default would silently diverge when called through a base reference.
-      // Callers must pass nullptr explicitly for the static path.
-      const std::vector<int32_t>* pruned_prefix_lengths,
-      const std::vector<uint8_t>& invalid_draft);
+  virtual SampleOutput validate(const SamplingParameters& sampling_params,
+                                const std::vector<ForwardOutput>& draft_outputs,
+                                const ForwardOutput& target_output,
+                                int32_t num_speculative_tokens,
+                                const std::vector<uint8_t>& invalid_draft);
 
   // Hook for algorithm-specific draft output post-processing during decode.
   virtual void process_draft_sample_output(SampleOutput& /*sample_output*/) {}
@@ -164,13 +135,11 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   }
   virtual bool share_target_lm_head_with_draft() const { return true; }
 
-  SampleOutput validate(
-      const SamplingParameters& sampling_params,
-      const DraftProposal& draft_proposal,
-      const ForwardOutput& target_output,
-      int32_t num_speculative_tokens,
-      const std::vector<int32_t>* pruned_prefix_lengths = nullptr,
-      const std::vector<uint8_t>& invalid_draft = {});
+  SampleOutput validate(const SamplingParameters& sampling_params,
+                        const DraftProposal& draft_proposal,
+                        const ForwardOutput& target_output,
+                        int32_t num_speculative_tokens,
+                        const std::vector<uint8_t>& invalid_draft = {});
 
   // PD separation: placeholder size for empty embedding slot. Default: 1x
   // hidden_size. Eagle3 overrides to 3 * target_hidden_size.
@@ -184,13 +153,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   bool supports_explicit_spec_verify_replay_update() const;
   bool should_use_explicit_spec_verify_replay_update(
       const TargetInput& input) const;
-  // Returns true when the target model's spec-verify kernel requires the
-  // validate width (val_tokens) to be identical across every sequence in the
-  // batch. Currently Qwen3.5 GDN's FusedRecurrentGatedDeltaRule spec-verify
-  // path has this constraint; other paths accept per-seq variable widths.
-  // Kept separate from supports_explicit_spec_verify_replay_update() so the
-  // two capabilities can diverge for future targets.
-  bool requires_uniform_validate_width() const;
   // A DCP block-table entry covers one logical KV page per KV split. All
   // speculative cache-slot and expanded-attention metadata must use this
   // logical size rather than the per-rank physical allocator block size.
@@ -217,9 +179,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
                                TargetInput& validate_inputs,
                                bool static_graph_tasks_prepared = false,
                                bool record_ready_event = true);
-  void prepare_validate_inputs(const TargetInput& inputs,
-                               TargetInput& validate_inputs,
-                               const std::vector<int32_t>& per_seq_val_tokens);
   bool prepare_static_mtp_graph_tasks_before_final_draft(
       const TargetInput& input);
 
