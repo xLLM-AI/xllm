@@ -43,14 +43,11 @@ bool select_hf_model_loader_profile(const ResolvedModelDescriptor& descriptor,
   ModelFamily family = descriptor.family;
   const std::string& family_name =
       requested_family.empty() ? descriptor.family_name : requested_family;
-  if (family_name == "llm") {
-    family = ModelFamily::LLM;
-  } else if (family_name == "vlm") {
-    family = ModelFamily::VLM;
-  } else if (family_name == "rec") {
-    family = ModelFamily::REC;
-  } else if (!family_name.empty()) {
-    return fail("Unsupported HF loader model family: " + family_name);
+  if (!family_name.empty()) {
+    family = ModelFamily(family_name);
+    if (family == ModelFamily::UNKNOWN || family == ModelFamily::DIT) {
+      return fail("Unsupported HF loader model family: " + family_name);
+    }
   }
 
   // Parser-only registrations have no execution factory or default family.

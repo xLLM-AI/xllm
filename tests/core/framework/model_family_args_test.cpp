@@ -23,6 +23,60 @@ limitations under the License.
 namespace xllm {
 namespace {
 
+TEST(ModelFamilyTest, ParsesAndNamesSupportedFamilies) {
+  const std::pair<std::string_view, ModelFamily::Value> cases[] = {
+      {"llm", ModelFamily::LLM},
+      {"vlm", ModelFamily::VLM},
+      {"rec", ModelFamily::REC},
+      {"dit", ModelFamily::DIT},
+  };
+
+  for (const auto& [name, expected] : cases) {
+    SCOPED_TRACE(name);
+    const ModelFamily family(name);
+    EXPECT_EQ(family, expected);
+    EXPECT_EQ(std::string_view(family.to_string()), name);
+    EXPECT_EQ(ModelFamily(family.to_string()), family);
+  }
+}
+
+TEST(ModelFamilyTest, PreservesUnknownFamilyHandling) {
+  const ModelFamily default_family;
+  EXPECT_EQ(default_family, ModelFamily::UNKNOWN);
+  EXPECT_STREQ(default_family.to_string(), "unknown");
+
+  for (const std::string_view name :
+       {"", "unknown", "LLM", "VLM", "REC", "DIT", "llm_extra"}) {
+    SCOPED_TRACE(name);
+    const ModelFamily family(name);
+    EXPECT_EQ(family, ModelFamily::UNKNOWN);
+    EXPECT_STREQ(family.to_string(), "unknown");
+  }
+}
+
+TEST(ModelFamilyTest, SupportsEnumStyleOperations) {
+  constexpr ModelFamily llm = ModelFamily::LLM;
+  constexpr ModelFamily vlm("vlm");
+  static_assert(llm == ModelFamily::LLM);
+  static_assert(vlm == ModelFamily::VLM);
+  static_assert(llm != vlm);
+
+  EXPECT_EQ(ModelFamily::LLM, llm);
+  EXPECT_NE(ModelFamily::VLM, llm);
+  EXPECT_EQ(ModelFamily("llm"), llm);
+  EXPECT_NE(ModelFamily("rec"), llm);
+
+  ModelFamily family = ModelFamily::UNKNOWN;
+  family = ModelFamily::VLM;
+  EXPECT_EQ(family, vlm);
+  switch (family) {
+    case ModelFamily::VLM:
+      break;
+    default:
+      FAIL() << "Enum-style switch did not select the VLM family";
+  }
+}
+
 TEST(DiTComponentTypeTest, ParsesSupportedComponentAliases) {
   const std::pair<std::string_view, DiTComponentType::Value> cases[] = {
       {"transformer", DiTComponentType::TRANSFORMER},
@@ -160,6 +214,27 @@ TEST(ModelArgsBundleTest, KeepsVlmComponentCapabilitiesWithItsOwnedArguments) {
   EXPECT_FALSE(original.embedding_params().encoder_embedding_mode());
   EXPECT_NE(&copied.attention_params(), &original.attention_params());
   EXPECT_EQ(copied.attention_params().head_dim(), 128);
+}
+
+TEST(ModelArgsBundleTest, SelectsArgumentsFromParsedModelFamilies) {
+  ModelArgs config{};
+  config.hidden_size() = 256;
+
+  const ModelArgsBundle llm(config, ModelFamily("llm"));
+  EXPECT_EQ(llm.family(), ModelFamily::LLM);
+  EXPECT_EQ(llm.llm_model_args().hidden_size(), 256);
+
+  const ModelArgsBundle vlm(config, ModelFamily("vlm"));
+  EXPECT_EQ(vlm.family(), ModelFamily::VLM);
+  EXPECT_EQ(vlm.vlm_model_args().hidden_size(), 256);
+
+  const ModelArgsBundle rec(config, ModelFamily("rec"));
+  EXPECT_EQ(rec.family(), ModelFamily::REC);
+  EXPECT_EQ(rec.rec_model_args().hidden_size(), 256);
+
+  const ModelArgsBundle dit(config, ModelFamily("dit"));
+  EXPECT_EQ(dit.family(), ModelFamily::DIT);
+  EXPECT_EQ(dit.dit_model_args().transformer().hidden_size(), 256);
 }
 
 TEST(ModelArgsBundleTest, SelectsArgumentsFromParsedDitComponentTypes) {

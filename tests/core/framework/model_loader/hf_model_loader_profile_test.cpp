@@ -106,6 +106,54 @@ TEST(HFModelLoaderProfileTest, ParserOnlyRegistrationKeepsSharedTextLoading) {
   EXPECT_TRUE(profile.load_media_preprocessor_args);
 }
 
+TEST(HFModelLoaderProfileTest, RequestedLlmOverridesRegisteredVlm) {
+  ResolvedModelDescriptor descriptor;
+  descriptor.registration_name = "vlm_profile_test";
+  descriptor.family = ModelFamily::VLM;
+  descriptor.family_name = "vlm";
+
+  HFModelLoaderProfile profile;
+  std::string error = "previous error";
+  ASSERT_TRUE(
+      select_hf_model_loader_profile(descriptor, "llm", &profile, &error))
+      << error;
+  EXPECT_EQ(profile.family, ModelFamily::LLM);
+  EXPECT_FALSE(profile.load_media_preprocessor_args);
+  EXPECT_FALSE(profile.load_rec_vocab);
+  EXPECT_TRUE(error.empty());
+}
+
+TEST(HFModelLoaderProfileTest, RejectsUnsupportedNamesWithoutChangingProfile) {
+  ResolvedModelDescriptor descriptor;
+  descriptor.registration_name = "family_profile_test";
+  descriptor.family = ModelFamily::LLM;
+  descriptor.family_name = "llm";
+
+  for (const std::string family_name : {"dit", "unknown", "LLM", "invalid"}) {
+    SCOPED_TRACE(family_name);
+    HFModelLoaderProfile profile;
+    profile.family = ModelFamily::VLM;
+    profile.load_media_preprocessor_args = true;
+    profile.load_rec_vocab = true;
+    std::string error;
+
+    EXPECT_FALSE(select_hf_model_loader_profile(
+        descriptor, family_name, &profile, &error));
+    EXPECT_EQ(error, "Unsupported HF loader model family: " + family_name);
+    EXPECT_EQ(profile.family, ModelFamily::VLM);
+    EXPECT_TRUE(profile.load_media_preprocessor_args);
+    EXPECT_TRUE(profile.load_rec_vocab);
+
+    descriptor.family_name = family_name;
+    EXPECT_FALSE(
+        select_hf_model_loader_profile(descriptor, "", &profile, &error));
+    EXPECT_EQ(error, "Unsupported HF loader model family: " + family_name);
+    EXPECT_EQ(profile.family, ModelFamily::VLM);
+    EXPECT_TRUE(profile.load_media_preprocessor_args);
+    EXPECT_TRUE(profile.load_rec_vocab);
+  }
+}
+
 TEST(HFModelLoaderProfileTest, RejectsPipelineAndInvalidRequests) {
   ResolvedModelDescriptor descriptor;
   descriptor.registration_name = "pipeline_profile_test";

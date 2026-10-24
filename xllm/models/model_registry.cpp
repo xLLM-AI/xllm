@@ -81,22 +81,6 @@ std::string canonical_model_impl(std::string model_impl) {
   return model_impl;
 }
 
-ModelFamily model_family_from_name(std::string_view family_name) {
-  if (family_name == "llm") {
-    return ModelFamily::LLM;
-  }
-  if (family_name == "vlm") {
-    return ModelFamily::VLM;
-  }
-  if (family_name == "rec") {
-    return ModelFamily::REC;
-  }
-  if (family_name == "dit") {
-    return ModelFamily::DIT;
-  }
-  return ModelFamily::UNKNOWN;
-}
-
 bool resolve_context_registration_name(const ModelContext& context,
                                        std::string* resolved_name,
                                        std::string* error_message) {
@@ -663,7 +647,7 @@ void ModelRegistry::register_model_backend(const std::string& name,
   ModelRegistry* instance = get_instance();
   auto [it, inserted] = instance->model_backend_.emplace(name, backend);
   if (inserted || it->second == backend) {
-    instance->model_registry_[name].family = model_family_from_name(it->second);
+    instance->model_registry_[name].family = ModelFamily(it->second);
   } else {
     SAFE_LOG_WARNING("model backend for "
                      << name << " already registered as " << it->second
@@ -939,9 +923,10 @@ ModelFamily ModelRegistry::get_model_family(const std::string& name) {
 
   const std::string canonical_name = canonical_model_registration_name(name);
   const auto canonical_it = instance->model_registry_.find(canonical_name);
-  return canonical_it == instance->model_registry_.end()
-             ? ModelFamily::UNKNOWN
-             : canonical_it->second.family;
+  if (canonical_it == instance->model_registry_.end()) {
+    return ModelFamily::UNKNOWN;
+  }
+  return canonical_it->second.family;
 }
 
 ModelContext create_model_context(const ResolvedModelDescriptor& descriptor,
@@ -960,7 +945,7 @@ ModelContext create_model_context(const ResolvedModelDescriptor& descriptor,
       execution_family.empty() ? descriptor.family_name : execution_family;
   const ModelFamily family = execution_family.empty()
                                  ? descriptor.family
-                                 : model_family_from_name(execution_family);
+                                 : ModelFamily(execution_family);
   CHECK(family != ModelFamily::UNKNOWN && family != ModelFamily::DIT)
       << "Unsupported model context family: " << requested_family;
 
@@ -1008,7 +993,7 @@ ModelContext create_model_context(const ResolvedModelDescriptor& descriptor,
       execution_family.empty() ? descriptor.family_name : execution_family;
   const ModelFamily family = execution_family.empty()
                                  ? descriptor.family
-                                 : model_family_from_name(execution_family);
+                                 : ModelFamily(execution_family);
   CHECK(family != ModelFamily::UNKNOWN && family != ModelFamily::DIT)
       << "Unsupported model context family: " << requested_family;
   CHECK(source_context.get_model_family() == family)
