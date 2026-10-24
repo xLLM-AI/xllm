@@ -34,25 +34,6 @@ namespace xllm {
 
 namespace {
 
-DiTComponentType get_dit_component_type(const std::string& component) {
-  if (component == "transformer" || component == "transformer_2" ||
-      component == "cola_dit") {
-    return DiTComponentType::TRANSFORMER;
-  }
-  if (component == "vae" || component == "audio_vae" ||
-      component == "cola_vae") {
-    return DiTComponentType::VAE;
-  }
-  if (component == "text_encoder" || component == "text_encoder_2" ||
-      component == "processor" || component == "image_processor") {
-    return DiTComponentType::TEXT_ENCODER;
-  }
-  if (component == "scheduler" || component == "audio_scheduler") {
-    return DiTComponentType::SCHEDULER;
-  }
-  return DiTComponentType::UNKNOWN;
-}
-
 bool is_vlm_component(const std::string& component, const ModelArgs& args) {
   // Image processors are represented by the vision half of VLM arguments.
   // This keeps processor configuration in the same typed component bundle as
@@ -79,7 +60,7 @@ make_model_args_bundles(
   std::unordered_map<std::string, std::shared_ptr<ModelArgsBundle>> views;
   views.reserve(model_args.size());
   for (const auto& [component, args] : model_args) {
-    const DiTComponentType component_type = get_dit_component_type(component);
+    const DiTComponentType component_type(component);
     if (component_type == DiTComponentType::UNKNOWN) {
       continue;
     }
@@ -172,14 +153,14 @@ ModelContext DiTModelContext::get_model_context(
       get_quant_args(component),
       tensor_options_,
       context_,
-      {family, registration_name_, get_dit_component_type(component)});
+      {family, registration_name_, DiTComponentType(component)});
 #else
   return ModelContext(
       parallel_args_,
       storage->second,
       get_quant_args(component),
       tensor_options_,
-      {family, registration_name_, get_dit_component_type(component)});
+      {family, registration_name_, DiTComponentType(component)});
 #endif
 }
 

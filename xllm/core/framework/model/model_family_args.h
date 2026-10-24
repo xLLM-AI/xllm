@@ -20,6 +20,7 @@ limitations under the License.
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <utility>
 #include <variant>
@@ -1158,12 +1159,48 @@ class DiTSchedulerModelArgs final {
 #undef COMMON_MODEL_PARAMS
 #undef MODEL_PARAM
 
-enum class DiTComponentType : uint8_t {
-  UNKNOWN = 0,
-  TRANSFORMER = 1,
-  VAE = 2,
-  TEXT_ENCODER = 3,
-  SCHEDULER = 4,
+class DiTComponentType final {
+ public:
+  enum Value : uint8_t {
+    UNKNOWN = 0,
+    TRANSFORMER = 1,
+    VAE = 2,
+    TEXT_ENCODER = 3,
+    SCHEDULER = 4,
+  };
+
+  // Keep enum-style initialization consistent with EngineType and MMType.
+  constexpr DiTComponentType(Value value) noexcept : value_(value) {}
+
+  explicit DiTComponentType(std::string_view component) noexcept {
+    if (component == "transformer" || component == "transformer_2" ||
+        component == "cola_dit") {
+      value_ = TRANSFORMER;
+    } else if (component == "vae" || component == "audio_vae" ||
+               component == "cola_vae") {
+      value_ = VAE;
+    } else if (component == "text_encoder" || component == "text_encoder_2" ||
+               component == "processor" || component == "image_processor") {
+      value_ = TEXT_ENCODER;
+    } else if (component == "scheduler" || component == "audio_scheduler") {
+      value_ = SCHEDULER;
+    }
+  }
+
+  constexpr operator Value() const noexcept { return value_; }
+  explicit operator bool() const = delete;
+
+  constexpr bool operator==(DiTComponentType rhs) const noexcept {
+    return value_ == rhs.value_;
+  }
+  constexpr bool operator!=(DiTComponentType rhs) const noexcept {
+    return value_ != rhs.value_;
+  }
+  constexpr bool operator==(Value rhs) const noexcept { return value_ == rhs; }
+  constexpr bool operator!=(Value rhs) const noexcept { return value_ != rhs; }
+
+ private:
+  Value value_ = UNKNOWN;
 };
 
 using DiTComponentModelArgsVariant = std::variant<DiTTransformerModelArgs,
@@ -1806,11 +1843,10 @@ class ModelArgsBundle final {
         args_.emplace<RecModelArgs>(model_args);
         return;
       case ModelFamily::DIT:
-        args_.emplace<DiTComponentModelArgs>(
-            model_args,
-            dit_component_type == DiTComponentType::UNKNOWN
-                ? DiTComponentType::TRANSFORMER
-                : dit_component_type);
+        if (dit_component_type == DiTComponentType::UNKNOWN) {
+          dit_component_type = DiTComponentType::TRANSFORMER;
+        }
+        args_.emplace<DiTComponentModelArgs>(model_args, dit_component_type);
         return;
       case ModelFamily::UNKNOWN:
         return;
