@@ -27,11 +27,14 @@ limitations under the License.
 
 #include "core/common/metrics.h"
 #include "core/framework/parallel_state/process_group.h"
-#include "core/framework/sampling/dflash2_sampling.h"
-#include "core/framework/sampling/dspark_sampling.h"
-#include "core/framework/sampling/gumbel_sampling.h"
+#include "core/framework/sampling/sampler.h"
+#include "core/framework/sampling/sampling_params.h"
+#include "core/framework/speculative/draft_proposal.h"
+#include "core/framework/speculative/spec_verify.h"
 #include "core/framework/speculative/verify_layout.h"
 #include "core/kv_cache/transfer/kv_transfer_completion.h"
+#include "core/runtime/dflash2_worker_impl.h"
+#include "runtime/dspark_worker_impl.h"
 #if defined(USE_NPU)
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 #endif
@@ -319,7 +322,7 @@ Status TaskExecutionPipeline::create(
         capacity.num_speculative_tokens != 7) ||
        !capacity.sparse_dsa_target || !common.enable_mla ||
        common.max_graph_batch_size == 0 || common.model.max_sequences > 128 ||
-       capacity.draft_sampling_mode != DraftSamplingMode::GREEDY ||
+       capacity.is_probabilistic_draft ||
        !std::isfinite(capacity.adaptive_min_gain) ||
        capacity.adaptive_min_gain < 0.0 ||
        !draft.model.has_dspark_confidence_head())) {
@@ -372,13 +375,11 @@ Status TaskExecutionPipeline::create(
        (capacity.context_hidden_size == 0 || capacity.mask_token_id < 0 ||
         static_cast<uint32_t>(capacity.mask_token_id) >= common.vocab_size)) ||
       (capacity.kind == SpeculativeTaskKind::DFLASH &&
-       capacity.draft_sampling_mode != DraftSamplingMode::GREEDY) ||
+       capacity.is_probabilistic_draft) ||
       (capacity.kind == SpeculativeTaskKind::DFLASH2 &&
        capacity.selector_top_k == 0) ||
-      capacity.num_speculative_tokens == 0 ||
-      (capacity.draft_sampling_mode != DraftSamplingMode::GREEDY &&
-       capacity.draft_sampling_mode != DraftSamplingMode::PROBABILISTIC) ||
-      common.dp_size == 0 || common.dp_rank >= common.dp_size ||
+      capacity.num_speculative_tokens == 0 || common.dp_size == 0 ||
+      common.dp_rank >= common.dp_size ||
       rows > std::numeric_limits<int32_t>::max() ||
       (capacity.reuse_topk && capacity.index_topk == 0) ||
       target.model.device().type() != Platform::type_torch() ||
@@ -1415,6 +1416,15 @@ Status TaskExecutionPipeline::plan_sampling(SpeculativeSlot& slot,
   if (slot.rows == 0 || !slot.decode) {
     return Status();
   }
+  // The verify pipeline carries no per-token grammar masks into the
+  // rejection sampling; JSON-constrained decode runs through the MTP worker
+  // path, which installs full-width masks. Reject here instead of silently
+  // verifying unconstrained.
+  if (base.filter_bitmask.defined() || base.filter_mask.defined()) {
+    return invalid(
+        "Task pipeline speculative decode does not support JSON grammar "
+        "constraints.");
+  }
   if (slot.samples != slot.rows) {
     return invalid("MTP Decode must sample every base row.");
   }
@@ -1438,7 +1448,7 @@ Status TaskExecutionPipeline::plan_sampling(SpeculativeSlot& slot,
   slot.host_validate_sampling = base;
   expand_sampling_params_for_verify(slot.host_validate_sampling,
                                     width,
-                                    static_cast<int64_t>(slot.rows) * width,
+                                    slot.rows * width,
                                     torch::Device(torch::kCPU));
   // Rejection sampling produces the final log probabilities once.
   slot.host_validate_sampling.logprobs = false;
@@ -2396,11 +2406,11 @@ Status TaskExecutionPipeline::prepare_speculative(
                      ? slot.validate_input->tokens().numel()
                      : slot.rows * width);
     }
+    // Refresh before the by-value snapshot: min_tokens_remaining must
+    // reflect the device-side positions after the last accepted block, not
+    // the batch-build-time estimate.
+    slot.target_prefill->refresh_min_tokens();
     const auto& base = slot.target_prefill->sampling_params();
-    if (!slot.adaptive) {
-      slot.rejection = std::make_unique<RejectionSampler>(
-          base, base.logprobs, base.max_top_logprobs);
-    }
     for (uint32_t step = 0; step < draft_calls(slot); ++step) {
       auto& invocation = *slot.drafts[step];
       status =
@@ -2422,12 +2432,16 @@ Status TaskExecutionPipeline::prepare_speculative(
       }
       const uint32_t draft_rows = slot.rows * (block_draft() ? width - 1 : 1);
       SamplingParameters params = base;
-      prepare_draft_sampling(speculative_capacity_->draft_sampling_mode,
+      prepare_draft_sampling(speculative_capacity_->is_probabilistic_draft,
                              params);
       if (block_draft()) {
         auto stream_guard = prepare_stream_.set_stream_guard();
-        if (speculative_capacity_->kind != SpeculativeTaskKind::DSPARK) {
-          repeat_sampling_params(params, width - 1);
+        if (speculative_capacity_->kind == SpeculativeTaskKind::DFLASH) {
+          for (const auto& field : kSamplingFields) {
+            if (!field.per_request) {
+              repeat_interleave_if_defined(params.*field.member, width - 1);
+            }
+          }
         }
         params.selected_token_idxes =
             prefix(slot.draft_block_indices, draft_rows);
@@ -2670,16 +2684,12 @@ void TaskExecutionPipeline::launch_prefill(SpeculativeSlot& slot) {
     sample(*slot.target_sampling, slot.target_logits);
     slot.target_prefill->device_result().lengths.fill_(1);
     if (block_draft() || capacity_.cp_sampling_group != nullptr) {
-      synchronize_samples(
-          slot.target_prefill->device_result(),
-          speculative_capacity_->kind == SpeculativeTaskKind::DSPARK &&
-              slot.target_prefill->sampling_params().sampling_mode ==
-                  SamplingMode::GREEDY);
+      synchronize_samples(slot.target_prefill->device_result(),
+                          slot.target_prefill->sampling_params().sampling_mode);
     } else {
       auto tokens = slot.target_prefill->device_result().tokens;
       synchronize_tokens(tokens,
-                         slot.target_prefill->sampling_params().sampling_mode ==
-                             SamplingMode::GREEDY);
+                         slot.target_prefill->sampling_params().sampling_mode);
     }
   }
   if (block_draft()) {
@@ -2770,9 +2780,8 @@ void TaskExecutionPipeline::launch_decode(SpeculativeSlot& slot) {
           invocation.output.hidden_states,
           invocation.sampling->params.selected_token_idxes);
       invocation.sampled = sample(*invocation.sampling, invocation.logits);
-      synchronize_tokens(
-          invocation.sampled.next_tokens,
-          invocation.sampling->params.sampling_mode == SamplingMode::GREEDY);
+      synchronize_tokens(invocation.sampled.next_tokens,
+                         invocation.sampling->params.sampling_mode);
       slot.proposal.select(/*dim=*/1, step)
           .copy_(invocation.sampled.next_tokens);
     }
@@ -2800,28 +2809,32 @@ void TaskExecutionPipeline::launch_decode(SpeculativeSlot& slot) {
   slot.target_logits = model_.logits(
       slot.target_output.hidden_states,
       slot.validate_input->sampling_params().selected_token_idxes);
-  // The executor returns raw logits; the rejection sampler must score the
-  // request's transformed distribution.
-  slot.validate_input->refresh_min_tokens();
-  Sampler::process_logits(slot.target_logits,
-                          slot.validate_input->sampling_params());
   const auto& base = slot.target_prefill->sampling_params();
-  std::optional<torch::Tensor> draft_logits;
+  // AR drafts merge their per-step logits into the proposal's
+  // [batch, n_spec, vocab] buffer; block drafts already wrote one during
+  // drafting (prepare_draft_sampling decided logits per mode). Greedy AR
+  // drafts carry tokens only; the other legs wrap the slot's preallocated
+  // buffer.
+  DraftProposal proposal = DraftProposal(slot.proposal);
   if (block_draft()) {
-    draft_logits = slot.drafts.front()->sampled.draft_logits;
-  } else {
-    std::vector<torch::Tensor> draft_logits_steps;
-    draft_logits_steps.reserve(draft_calls(slot));
+    proposal =
+        DraftProposal(slot.proposal, slot.drafts.front()->sampled.draft_logits);
+  } else if (speculative_capacity_->is_probabilistic_draft &&
+             base.sampling_mode != SamplingMode::GREEDY) {
+    const torch::Tensor& first_step_logits =
+        slot.drafts.front()->sampled.draft_logits;
+    proposal = DraftProposal::from_token_buffer(slot.proposal,
+                                                first_step_logits.size(-1),
+                                                /*is_probabilistic_draft=*/true,
+                                                first_step_logits.options());
+    int64_t step = 0;
     for (const auto& invocation :
          std::span(slot.drafts).first(draft_calls(slot))) {
-      draft_logits_steps.emplace_back(invocation->sampled.draft_logits);
+      proposal.logits_at(step).copy_(invocation->sampled.draft_logits);
+      ++step;
     }
-    draft_logits = stack_draft_logits(draft_logits_steps);
   }
-  SampleOutput accepted = slot.rejection->forward(
-      DraftProposal(slot.proposal, draft_logits),
-      slot.target_logits.view(
-          {slot.rows, width, speculative_capacity_->common.vocab_size}));
+  SampleOutput accepted = rejection_sample(base, proposal, slot.target_logits);
   const auto& result = slot.target_prefill->device_result();
   result.tokens.copy_(accepted.next_tokens);
   if (result.logprobs.defined()) {
@@ -2832,13 +2845,10 @@ void TaskExecutionPipeline::launch_decode(SpeculativeSlot& slot) {
     result.top_logprobs.copy_(accepted.top_logprobs);
   }
   if (block_draft() || capacity_.cp_sampling_group != nullptr) {
-    synchronize_samples(
-        result,
-        speculative_capacity_->kind == SpeculativeTaskKind::DSPARK &&
-            base.sampling_mode == SamplingMode::GREEDY);
+    synchronize_samples(result, base.sampling_mode);
   } else {
     auto tokens = result.tokens;
-    synchronize_tokens(tokens, base.sampling_mode == SamplingMode::GREEDY);
+    synchronize_tokens(tokens, base.sampling_mode);
   }
   torch::ge_out(slot.accepted_mask, result.tokens, /*other=*/0);
   auto lengths = result.lengths;
@@ -2905,19 +2915,16 @@ void TaskExecutionPipeline::launch_block_draft(SpeculativeSlot& slot) {
   const int64_t steps = speculative_capacity_->num_speculative_tokens;
   const auto& selected = invocation.sampling->params.selected_token_idxes;
   SamplingParameters selector_sampling = slot.target_prefill->sampling_params();
-  prepare_draft_sampling(speculative_capacity_->draft_sampling_mode,
+  prepare_draft_sampling(speculative_capacity_->is_probabilistic_draft,
                          selector_sampling);
   if (speculative_capacity_->kind == SpeculativeTaskKind::DFLASH2) {
     slot.block_gumbel =
-        sample_gumbel_noise(slot.rows,
-                            steps,
-                            speculative_capacity_->selector_top_k,
-                            selector_sampling,
-                            device_.unwrap());
-    if (capacity_.sampling_group != nullptr &&
-        capacity_.sampling_group->world_size() > 1) {
-      capacity_.sampling_group->broadcast(slot.block_gumbel, /*root_rank=*/0);
-    }
+        broadcast_gumbel_noise(slot.rows,
+                               selector_sampling,
+                               steps,
+                               speculative_capacity_->selector_top_k,
+                               device_.unwrap(),
+                               capacity_.sampling_group);
   }
   invocation.output = draft_->executor.forward(input.tokens(),
                                                input.positions(),
@@ -2934,33 +2941,36 @@ void TaskExecutionPipeline::launch_block_draft(SpeculativeSlot& slot) {
         invocation.logits.view(
             {slot.rows, steps, speculative_capacity_->common.vocab_size}),
         slot.state->tokens_);
-    auto sampled =
+    invocation.sampled.draft_logits =
         sample_dflash2_path(candidates,
                             selector_sampling,
                             slot.block_gumbel,
-                            speculative_capacity_->common.vocab_size);
-    slot.proposal.copy_(sampled.token_ids);
-    invocation.sampled.draft_logits = std::move(sampled.draft_logits);
+                            speculative_capacity_->common.vocab_size,
+                            slot.proposal)
+            .logits()
+            .value_or(torch::Tensor());
   } else if (speculative_capacity_->kind == SpeculativeTaskKind::DSPARK) {
     if (slot.adaptive) {
       generate_adaptive_dspark_proposals(slot, slot.state->tokens_);
       return;
     }
-    auto sampled = sample_dspark_block(
-        invocation.logits.view(
-            {slot.rows, steps, speculative_capacity_->common.vocab_size}),
-        slot.state->tokens_.to(torch::kInt64),
-        selector_sampling,
-        [this](const torch::Tensor& previous) {
-          return draft_->model.dspark_markov_bias(previous);
-        },
-        [this, &selector_sampling](torch::Tensor& tokens) {
-          synchronize_tokens(
-              tokens, selector_sampling.sampling_mode == SamplingMode::GREEDY);
-        },
-        slot.proposal);
+    const auto base_logits = invocation.logits.view(
+        {slot.rows, steps, speculative_capacity_->common.vocab_size});
     invocation.sampled.draft_logits =
-        sampled.logits().value_or(torch::Tensor());
+        sample_dspark_markov_block(
+            [this](const torch::Tensor& tokens) {
+              return draft_->model.dspark_markov_bias(tokens);
+            },
+            base_logits,
+            slot.state->tokens_,
+            selector_sampling,
+            [this, &selector_sampling](torch::Tensor& tokens) {
+              synchronize_tokens(tokens, selector_sampling.sampling_mode);
+            },
+            speculative_capacity_->is_probabilistic_draft,
+            /*token_ids_out=*/slot.proposal)
+            .logits()
+            .value_or(torch::Tensor());
   } else {
     invocation.sampled = sample(*invocation.sampling, invocation.logits);
     slot.proposal.copy_(
@@ -2980,14 +2990,16 @@ void TaskExecutionPipeline::generate_adaptive_dspark_proposals(
   SamplingParameters sampling;
   const auto base_logits =
       invocation.logits.view({slot.rows, draft_width, capacity_.vocab_size});
-  auto previous_tokens = anchors;
-  for (uint32_t column = 0; column < draft_width; ++column) {
-    auto logits = base_logits.select(/*dim=*/1, column) +
-                  draft_->model.dspark_markov_bias(previous_tokens);
-    const auto sampled = sampler_.forward(logits, sampling);
-    slot.proposal.select(/*dim=*/1, column).copy_(sampled.next_tokens);
-    previous_tokens = sampled.next_tokens;
-  }
+  sample_dspark_markov_block(
+      [this](const torch::Tensor& tokens) {
+        return draft_->model.dspark_markov_bias(tokens);
+      },
+      base_logits,
+      anchors,
+      sampling,
+      [](torch::Tensor& /*sampled_tokens*/) {},
+      /*is_probabilistic_draft=*/false,
+      /*token_ids_out=*/slot.proposal);
   invocation.sampled.draft_logits = torch::Tensor();
   adaptive.previous_tokens.select(/*dim=*/1, /*index=*/0).copy_(anchors);
   adaptive.previous_tokens
@@ -3009,7 +3021,8 @@ void TaskExecutionPipeline::generate_adaptive_dspark_proposals(
   // confidence until cross-rank bitwise parity is verified, even for greedy
   // sampling.
   adaptive.confidence.copy_(confidence);
-  synchronize_tokens(adaptive.consensus, /*all_greedy=*/false);
+  sync_sampling_tensor(adaptive.consensus, capacity_.sampling_group);
+  sync_sampling_tensor(adaptive.consensus, capacity_.cp_sampling_group);
 }
 
 void TaskExecutionPipeline::launch_adaptive_dspark(SpeculativeSlot& slot) {
@@ -3057,17 +3070,12 @@ void TaskExecutionPipeline::launch_adaptive_dspark(SpeculativeSlot& slot) {
                       /*dim=*/-1,
                       /*keepdim=*/false);
   } else {
-    slot.target_tokens.copy_(
-        RejectionSampler::sample_ragged_greedy_draft_target(
-            slot.target_logits,
-            sampling,
-            adaptive.owners,
-            validate.sampling_params().selected_token_idxes));
+    slot.target_tokens.copy_(spec_verify::rejection_sample_ragged(
+        slot.target_logits, sampling, adaptive.owners));
   }
   // A sampled target must agree across TP ranks before prefix acceptance and
   // context-KV writes, not merely synchronize the final returned tokens.
-  synchronize_tokens(slot.target_tokens,
-                     sampling.sampling_mode == SamplingMode::GREEDY);
+  synchronize_tokens(slot.target_tokens, sampling.sampling_mode);
   const auto& result = slot.target_prefill->device_result();
   auto result_tokens = result.tokens;
   auto result_lengths = result.lengths;
@@ -3090,30 +3098,31 @@ void TaskExecutionPipeline::launch_adaptive_dspark(SpeculativeSlot& slot) {
 }
 
 void TaskExecutionPipeline::synchronize_tokens(torch::Tensor& tokens,
-                                               bool all_greedy) {
-  if (all_greedy && capacity_.cp_sampling_group == nullptr) {
-    return;
+                                               SamplingMode sampling_mode,
+                                               bool already_broadcast) {
+  const bool skip_sampling_group =
+      already_broadcast || sampling_mode == SamplingMode::GREEDY;
+  if (!skip_sampling_group) {
+    sync_sampling_tensor(tokens, capacity_.sampling_group);
   }
-  for (ProcessGroup* group :
-       {capacity_.sampling_group, capacity_.cp_sampling_group}) {
-    if (group == nullptr || group->world_size() <= 1) {
-      continue;
-    }
-    CHECK(tokens.is_contiguous());
-    group->broadcast(tokens, /*root_rank=*/0);
-  }
+  sync_sampling_tensor(tokens, capacity_.cp_sampling_group);
 }
 
 void TaskExecutionPipeline::synchronize_samples(
     const TokenResultTensors& result,
-    bool all_greedy) {
+    SamplingMode sampling_mode) {
+  // Greedy DSpark's commit kernel already broadcast the tokens.
+  const bool already_broadcast =
+      speculative_capacity_ != nullptr &&
+      speculative_capacity_->kind == SpeculativeTaskKind::DSPARK &&
+      sampling_mode == SamplingMode::GREEDY;
   for (const auto* tensor : {&result.tokens,
                              &result.logprobs,
                              &result.top_tokens,
                              &result.top_logprobs}) {
     if (tensor->defined()) {
       auto view = *tensor;
-      synchronize_tokens(view, all_greedy);
+      synchronize_tokens(view, sampling_mode, already_broadcast);
     }
   }
 }
@@ -3372,7 +3381,6 @@ void TaskExecutionPipeline::release_outputs(SpeculativeSlot& slot) {
   slot.target_output = ModelOutput();
   slot.target_logits = torch::Tensor();
   slot.target_sampling.reset();
-  slot.rejection.reset();
   for (auto& invocation : slot.drafts) {
     invocation->output = ModelOutput();
     invocation->logits = torch::Tensor();
@@ -3466,7 +3474,7 @@ const SampleOutput& TaskExecutionPipeline::sample(Sampling& sampling,
   CHECK_EQ(logits.dim(), 2);
   CHECK_EQ(logits.size(/*dim=*/1), speculative_capacity_->common.vocab_size);
   CHECK_EQ(logits.size(/*dim=*/0), sampling.params.num_sample_seqs());
-  sampling.sampled = sampler_.forward(logits, sampling.params);
+  sampling.sampled = ::xllm::sample(logits, sampling.params);
   sampling.output.next_tokens.copy_(sampling.sampled.next_tokens);
   if (sampling.output.logprobs.defined()) {
     sampling.output.logprobs.copy_(sampling.sampled.logprobs);

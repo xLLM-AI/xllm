@@ -102,7 +102,6 @@ class ProcessGroup {
   // copy held by root_rank. Used to unify per-rank sampling results to a single
   // source of truth across the consensus group.
   virtual void broadcast(torch::Tensor& input, int32_t root_rank = 0);
-
   virtual void all_to_all_single(
       torch::Tensor output,
       torch::Tensor input,
@@ -188,6 +187,17 @@ class ProcessGroup {
   MegaMoeCommResourceSlot mega_moe_comm_slot_;
 #endif
 };
+
+inline void sync_sampling_tensor(torch::Tensor& tensor,
+                                 ProcessGroup* process_group,
+                                 int32_t root_rank = 0) {
+  if (process_group == nullptr || process_group->world_size() <= 1 ||
+      !tensor.defined()) {
+    return;
+  }
+  tensor = tensor.contiguous();
+  process_group->broadcast(tensor, root_rank);
+}
 
 std::unique_ptr<xllm::ProcessGroup> create_process_group(
     int32_t rank,

@@ -6,7 +6,7 @@ cc_test(
   SRCS
     apply_token_bitmask_wrapper_test.cpp
   DEPS
-    :json_object_grammar
+    :sampler
     :tilelang_kernels
     torch
     GTest::gtest_main

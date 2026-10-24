@@ -38,7 +38,6 @@ struct RecSamplingContext {
   int32_t beam_width = 1;
   DeviceConstrainedSampler device_constrained_sampler;
 };
-class Sampler;
 
 class RecSampler {
  public:
@@ -63,45 +62,31 @@ class RecSampler {
 
   class DefaultSamplingStrategy final : public SamplingStrategy {
    public:
-    explicit DefaultSamplingStrategy(const Sampler& sampler);
     SampleOutput forward(torch::Tensor& logits,
                          const SamplingParameters& params,
                          const torch::Tensor& filter_mask,
                          const RecSamplingContext* context) const override;
-
-   private:
-    const Sampler& sampler_;
   };
 
   class OneRecConstrainedSamplingStrategy final : public SamplingStrategy {
    public:
-    explicit OneRecConstrainedSamplingStrategy(const Sampler& sampler);
     SampleOutput forward(torch::Tensor& logits,
                          const SamplingParameters& params,
                          const torch::Tensor& filter_mask,
                          const RecSamplingContext* context) const override;
-
-   private:
-    const Sampler& sampler_;
   };
 
   class MultiRoundFastPathSamplingStrategy final : public SamplingStrategy {
    public:
-    explicit MultiRoundFastPathSamplingStrategy(const Sampler& sampler);
     SampleOutput forward(torch::Tensor& logits,
                          const SamplingParameters& params,
                          const torch::Tensor& filter_mask,
                          const RecSamplingContext* context) const override;
-
-   private:
-    const Sampler& sampler_;
   };
 
   static std::unique_ptr<SamplingStrategy> create_sampling_strategy(
-      RecPipelineType type,
-      const Sampler& sampler);
+      RecPipelineType type);
 
-  std::unique_ptr<Sampler> sampler_;
   std::unique_ptr<SamplingStrategy> strategy_;
 };
 

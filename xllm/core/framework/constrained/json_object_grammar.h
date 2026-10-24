@@ -143,6 +143,18 @@ class JsonObjectGrammarState final {
   std::vector<int32_t> committed_token_ids_;
 };
 
+// Per-sequence "decoded under a JSON constraint" flags for verify-layout
+// builders.
+inline std::vector<bool> constrained_mask(
+    const std::vector<JsonObjectGrammarState>& states) {
+  std::vector<bool> per_seq_constrained;
+  per_seq_constrained.reserve(states.size());
+  for (const auto& state : states) {
+    per_seq_constrained.push_back(state.initialized());
+  }
+  return per_seq_constrained;
+}
+
 class JsonObjectGrammar final {
  public:
   JsonObjectGrammar(std::vector<std::string> token_pieces,
@@ -255,10 +267,5 @@ torch::Tensor build_json_object_filter_bitmask(
 std::vector<JsonObjectGrammarState> advance_json_object_states(
     const std::vector<JsonObjectGrammarState>& states,
     const std::vector<int32_t>& token_ids);
-
-// Apply a [batch, ceil(vocab/32)] int32 bitmask in-place on logits [batch,
-// vocab].
-void apply_token_bitmask_inplace(torch::Tensor& logits,
-                                 const torch::Tensor& bitmask);
 
 }  // namespace xllm

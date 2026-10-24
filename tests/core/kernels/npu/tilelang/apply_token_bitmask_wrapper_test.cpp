@@ -22,17 +22,17 @@ limitations under the License.
 #include <cstdint>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
 #include "acl/acl.h"
-#include "core/framework/sampling/json_object_grammar.h"
+#include "core/framework/sampling/logits_processor.h"
+#include "core/framework/sampling/sampling_params.h"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 
 namespace xllm::kernel::npu::tilelang {
 namespace {
-
-constexpr float kDisallowedTokenMask = -1.0e9F;
 
 class ApplyTokenBitmaskWrapperTest : public ::testing::Test {
  protected:
@@ -56,10 +56,10 @@ torch::Tensor apply_reference_on_device(torch::Tensor logits,
       torch::bitwise_and(torch::bitwise_right_shift(words, bit_indices), 1);
   const auto mask_options =
       torch::TensorOptions().dtype(logits.dtype()).device(logits.device());
-  const torch::Tensor additive =
-      torch::where(allowed.to(torch::kBool),
-                   torch::zeros({1}, mask_options),
-                   torch::full({1}, kDisallowedTokenMask, mask_options));
+  const torch::Tensor additive = torch::where(
+      allowed.to(torch::kBool),
+      torch::zeros({1}, mask_options),
+      torch::full({1}, -std::numeric_limits<float>::infinity(), mask_options));
   logits.add_(additive);
   return logits;
 }
@@ -204,12 +204,16 @@ TEST_F(ApplyTokenBitmaskWrapperTest, RejectsInputsThatRequireFallback) {
     torch::Tensor bitmask = make_mask(1, vocab_size, "boundaries").to(device);
     EXPECT_FALSE(can_apply_token_bitmask_inplace(logits, bitmask));
 
-    const torch::Tensor expected = apply_cpu_reference(logits, bitmask);
+    // The LogitsProcessor fallback and the reference both mask with -inf.
     torch::Tensor actual = logits.clone();
-    ::xllm::apply_token_bitmask_inplace(actual, bitmask);
+    SamplingParameters params;
+    params.filter_bitmask = bitmask;
+    process_logits(actual, params);
     ASSERT_EQ(aclrtSynchronizeStream(
                   c10_npu::getCurrentNPUStream(device.index()).stream()),
               ACL_SUCCESS);
+
+    const torch::Tensor expected = apply_cpu_reference(logits, bitmask);
     EXPECT_TRUE(torch::equal(actual, expected));
   }
 

@@ -233,7 +233,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `speculative_suffix_min_token_prob` | `double` | `0.1` | Suffix speculation 使用的最小 token 概率。 |
 | `speculative_suffix_max_cached_requests` | `int32` | `-1` | Suffix speculation 全局最大缓存请求数；`-1` 表示不限，`0` 表示禁用。 |
 | `speculative_suffix_use_tree_spec` | `bool` | `false` | 是否使用 tree-based suffix speculation，而不是 path speculation。 |
-| `draft_sampling_mode` | `string` | `"greedy"` | draft 模型生成 proposal token 的采样方式：`greedy`、`probabilistic`。仅 `MTP`、`DSpark`、`Eagle3` 支持 `probabilistic`。 |
+| `enable_probabilistic_draft` | `bool` | false | draft 从自身分布采样 proposal（携带 q 供拒绝采样）。默认为 greedy argmax。仅 `MTP`、`DSpark`、`DFlash2`、`Eagle3` 支持。 |
 | `enable_atb_spec_kernel` | `bool` | `false` | 是否使用 ATB speculative kernel。 |
 | `enable_adaptive_target_verify` | `bool` | `false` | 根据历史 confidence 和完整轮成本，调整已经生成的 draft 候选中交给 target 验证的数量，不改变 draft 生成宽度。适合块式并行生成候选的路径，当前接入 Python ACL graph、task pipeline 下的 DSpark greedy Draft5/7。普通 graph 支持 greedy 或随机 target，unified graph 要求 greedy target。见[自适应投机推理](/zh/features/adaptive_speculation/)。 |
 | `enable_adaptive_draft_step` | `bool` | `false` | 调整一次 target 验证前实际执行的顺序 draft forward 步数，以最大化预测的完整轮吞吐。适合自回归生成候选的路径，当前接入 MTP；`num_speculative_tokens` 是最大步数（1–64），而非当前实际步数。要求 Python GLM DSA、普通预热 ACL graph、异步 task pipeline、DP=CP=1；不支持 unified MTP 和 PD 分离。见[自适应投机推理](/zh/features/adaptive_speculation/)。 |

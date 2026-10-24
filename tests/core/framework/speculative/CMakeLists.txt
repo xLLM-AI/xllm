@@ -72,6 +72,7 @@ cc_test(
     "${PROJECT_SOURCE_DIR}/xllm/core/framework/speculative/spec_verify.cpp"
   DEPS
     :sampler
+    :speculative
     torch
     proto::xllm_proto
     glog::glog

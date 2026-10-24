@@ -49,14 +49,15 @@ limitations under the License.
 #include "framework/config/service_config.h"
 #include "framework/model/model_args.h"
 #include "framework/request/stopping_checker.h"
-#include "framework/sampling/draft_proposal.h"
-#include "framework/sampling/rejection_sampler.h"
 #include "framework/sampling/sampling_params.h"
+#include "framework/speculative/draft_proposal.h"
+#include "framework/speculative/rejection_sampler.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "platform/device.h"
 #include "platform/platform.h"
 #include "runtime/dit_forward_params.h"
 #include "runtime/forward_shared_memory_manager.h"
+#include "tests/core/framework/sampling/sampling_test_utils.h"
 #include "util/tensor_helper.h"
 #include "worker.pb.h"
 
@@ -1892,13 +1893,10 @@ TEST(BatchTest, ReorderedMtpAcceptedRowsCommitToOwningSequences) {
     target_logits.index_put_(
         {row, 5, bonus_token_ids.index({row, 0}).item<int64_t>()}, 20.0F);
   }
-  SamplingParameters params;
-  params.do_sample = torch::tensor({false, false}, torch::kBool);
-  RejectionSampler rejection_sampler(
-      params, /*logprobs=*/false, /*max_top_logprobs=*/0);
+  const SamplingParameters rejection_params = testutil::make_rejection_params();
   DraftProposal draft_proposal = DraftProposal(draft_token_ids);
-  const SampleOutput accepted_output =
-      rejection_sampler.forward(draft_proposal, target_logits);
+  const SampleOutput accepted_output = rejection_sample(
+      rejection_params, draft_proposal, testutil::flatten_rows(target_logits));
   EXPECT_TRUE(torch::equal(
       accepted_output.next_tokens,
       torch::tensor({{10, 11, 12, 13, 14, 15}, {0, 1, 2, -1, -1, -1}},

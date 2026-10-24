@@ -3,7 +3,8 @@ include(cc_test)
 add_library(native_library_registry_fixture SHARED
   native_library_registry_fixture.cpp)
 target_link_libraries(native_library_registry_fixture PRIVATE
-  XLLM::native_extension)
+  XLLM::native_extension
+  spdlog::spdlog)
 add_dependencies(native_library_registry_fixture xllm_proto)
 set_target_properties(native_library_registry_fixture PROPERTIES
   CXX_VISIBILITY_PRESET default

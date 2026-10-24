@@ -15,10 +15,8 @@ limitations under the License.
 
 #pragma once
 
-#include <glog/logging.h>
 #include <torch/types.h>
 
-#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <utility>
@@ -43,8 +41,11 @@ class DraftProposal final {
 
   const std::optional<torch::Tensor>& logits() const { return logits_; }
 
+  // Lifetime owner for no-sync draft inputs that must outlive the verify
+  // step's stream sync; never read by the rejection sampler.
+  std::vector<std::shared_ptr<const void>>& keep_alive() { return keep_alive_; }
+
   void validate(int64_t expected_batch_size,
-                int64_t expected_vocab_size,
                 int64_t expected_num_speculative_tokens) const {
     CHECK(token_ids_.defined()) << "draft proposal token_ids must be defined";
     CHECK_EQ(token_ids_.dim(), 2)
@@ -57,55 +58,45 @@ class DraftProposal final {
     if (!logits_.has_value()) {
       return;
     }
+    // The logits' vocab is the DRAFT model's own (an EAGLE3-style small head
+    // differs from the target's), so it is intentionally NOT compared to the
+    // target vocab: the rejection sampler only gathers at draft_token_ids,
+    // which index the draft domain.
     CHECK_EQ(logits_->dim(), 3)
-        << "proposal logits must be [batch, n_spec, vocab]";
+        << "proposal logits must be [batch, n_spec, draft_vocab]";
     CHECK_EQ(logits_->size(0), token_ids_.size(0))
         << "logits and token_ids must share the batch dim";
     CHECK_EQ(logits_->size(1), token_ids_.size(1))
         << "logits and token_ids must share the speculative length";
-    CHECK_EQ(logits_->size(-1), expected_vocab_size)
-        << "proposal logits and target logits must share the vocab dim";
   }
 
-  DraftProposal slice_speculative(int64_t start, int64_t end) const;
+  // Preallocates token_ids [batch, n_spec] plus the q buffer when
+  // probabilistic; write via tokens_at()/logits_at().
+  static DraftProposal preallocate(int64_t batch,
+                                   int64_t num_speculative_tokens,
+                                   int64_t vocab_size,
+                                   bool is_probabilistic_draft,
+                                   const torch::TensorOptions& token_options,
+                                   const torch::TensorOptions& logits_options);
+
+  static DraftProposal from_token_buffer(
+      torch::Tensor token_ids,
+      int64_t vocab_size,
+      bool is_probabilistic_draft,
+      const torch::TensorOptions& logits_options);
+
+  torch::Tensor tokens_at(int64_t step) {
+    return token_ids_.select(/*dim=*/1, /*index=*/step);
+  }
+  torch::Tensor logits_at(int64_t step) {
+    CHECK(logits_.has_value()) << "greedy proposal carries no logits buffer";
+    return logits_->select(/*dim=*/1, /*index=*/step);
+  }
 
  private:
   torch::Tensor token_ids_;
   std::optional<torch::Tensor> logits_;
+  std::vector<std::shared_ptr<const void>> keep_alive_;
 };
-
-inline DraftProposal DraftProposal::slice_speculative(int64_t start,
-                                                      int64_t end) const {
-  using ISlice = torch::indexing::Slice;
-  const auto slice_dim1 = [&](const torch::Tensor& tensor) {
-    return tensor.index({ISlice(), ISlice(start, end)}).contiguous();
-  };
-  return DraftProposal(slice_dim1(token_ids_),
-                       logits_.has_value()
-                           ? std::make_optional(slice_dim1(*logits_))
-                           : std::nullopt);
-}
-
-// Stacks per-step draft logits; nullopt when no step carried logits.
-inline std::optional<torch::Tensor> stack_draft_logits(
-    const std::vector<torch::Tensor>& draft_logits_steps) {
-  if (draft_logits_steps.empty() || !draft_logits_steps.front().defined()) {
-    return std::nullopt;
-  }
-  CHECK(std::all_of(draft_logits_steps.begin(),
-                    draft_logits_steps.end(),
-                    [](const torch::Tensor& step) { return step.defined(); }))
-      << "draft logits must be defined for every step";
-  return torch::stack(draft_logits_steps, /*dim=*/1);
-}
-
-inline DraftProposal stack_draft_proposal(
-    const std::vector<torch::Tensor>& draft_token_ids_steps,
-    const std::vector<torch::Tensor>& draft_logits_steps) {
-  CHECK(!draft_token_ids_steps.empty()) << "draft steps must not be empty";
-  return DraftProposal(
-      torch::stack(draft_token_ids_steps, /*dim=*/1).to(torch::kLong),
-      stack_draft_logits(draft_logits_steps));
-}
 
 }  // namespace xllm

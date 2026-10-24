@@ -19,6 +19,7 @@ limitations under the License.
 #include <unordered_set>
 #include <vector>
 
+#include "core/framework/speculative/draft_proposal.h"
 #include "runtime/speculative_worker_impl.h"
 #include "util/suffix_decoding_cache.h"
 
@@ -44,10 +45,10 @@ class SuffixWorkerImpl : public SpeculativeWorkerImpl<LlmForwardInput> {
       const LlmForwardInput& inputs) override;
 
  private:
-  SampleOutput validate(const DraftProposal& draft_proposal,
+  SampleOutput validate(SamplingParameters sampling_params,
+                        const DraftProposal& draft_proposal,
                         const ForwardOutput& target_output);
 
- private:
   std::unique_ptr<SuffixDecodingCache> suffix_cache_;
   std::unordered_map<std::string, std::vector<int32_t>> suffix_recent_tokens_;
   std::unordered_set<std::string> suffix_active_decode_req_ids_;

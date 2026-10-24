@@ -27,6 +27,7 @@ limitations under the License.
 #include "core/layers/common/attention_metadata.h"
 #include "core/runtime/forward_params.h"
 #include "core/runtime/py_attention_metadata.h"
+#include "tests/core/framework/sampling/sampling_test_utils.h"
 #include "tests/core/runtime/task_pipeline_test_peer.h"
 
 namespace xllm {
@@ -765,19 +766,12 @@ constexpr std::array<torch::Tensor SamplingParameters::*, 12> kInputs = {
     &SamplingParameters::unique_token_ids_lens,
     &SamplingParameters::do_sample};
 
-SamplingMode sampling_mode_from_do_sample(const torch::Tensor& do_sample) {
-  return do_sample.all().item<bool>()
-             ? SamplingMode::RANDOM
-             : (do_sample.any().item<bool>() ? SamplingMode::MIXED
-                                             : SamplingMode::GREEDY);
-}
-
 SamplingParameters make_input(int32_t rows, int32_t width) {
   SamplingParameters input;
   input.selected_token_idxes = torch::arange(rows, torch::kInt32);
   input.do_sample =
       torch::arange(rows, torch::kInt32).remainder(/*other=*/2) == 0;
-  input.sampling_mode = sampling_mode_from_do_sample(input.do_sample);
+  input.sampling_mode = testutil::sampling_mode_from_do_sample(input.do_sample);
   input.frequency_penalties = torch::full({rows}, /*fill_value=*/0.15f);
   input.presence_penalties = torch::full({rows}, /*fill_value=*/0.2f);
   input.repetition_penalties = torch::full({rows}, /*fill_value=*/1.15f);
@@ -928,7 +922,7 @@ TEST_P(SlotSamplingInputTest, MinimumUsesDevicePositionsAndOwnsStopStorage) {
     logits.select(1, 0).fill_(10);
     logits.select(1, 7).fill_(9);
     logits.select(1, 3).fill_(8);
-    const auto output = Sampler().forward(logits, binding_->sampling_params());
+    const auto output = sample(logits, binding_->sampling_params());
     EXPECT_TRUE(torch::equal(output.next_tokens.cpu(),
                              torch::tensor({3, 3, 0, 0}, torch::kInt64)));
   }
@@ -1143,7 +1137,8 @@ TEST_P(SlotSamplingInputTest,
         input.top_p = torch::Tensor();
       }
     }
-    input.sampling_mode = sampling_mode_from_do_sample(input.do_sample);
+    input.sampling_mode =
+        testutil::sampling_mode_from_do_sample(input.do_sample);
     const SamplingParameters legacy = input.to(device_, GetParam());
     // One logits row per sampling row (SamplingParameters::num_sample_seqs):
     // gather hidden rows with selected_token_idxes before projection.
@@ -1160,7 +1155,7 @@ TEST_P(SlotSamplingInputTest,
     auto guard = launch_->set_stream_guard();
     torch::Tensor old_logits = initial_logits.clone();
     const torch::Tensor start_rng = rng_state();
-    const SampleOutput expected = Sampler().forward(old_logits, legacy);
+    const SampleOutput expected = sample(old_logits, legacy);
     ASSERT_EQ(aclrtSynchronizeStream(launch_->get_stream()->stream()),
               ACL_SUCCESS);
     const torch::Tensor end_rng = rng_state();
@@ -1169,8 +1164,7 @@ TEST_P(SlotSamplingInputTest,
     EXPECT_TRUE(torch::equal(start_rng, rng_state()));
     handoff();
     torch::Tensor new_logits = initial_logits.clone();
-    const SampleOutput actual =
-        Sampler().forward(new_logits, binding_->sampling_params());
+    const SampleOutput actual = sample(new_logits, binding_->sampling_params());
     ASSERT_EQ(aclrtSynchronizeStream(launch_->get_stream()->stream()),
               ACL_SUCCESS);
     EXPECT_TRUE(torch::equal(end_rng, rng_state()));

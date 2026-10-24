@@ -22,10 +22,10 @@ limitations under the License.
 #include <tuple>
 #include <vector>
 
+#include "core/framework/speculative/draft_proposal.h"
 #include "core/framework/speculative/embedding_cache.h"
 #include "core/kv_cache/transfer/kv_cache_transfer.h"
 #include "framework/model/model_args.h"
-#include "framework/sampling/draft_proposal.h"
 #include "runtime/draft_model_spec_worker_impl.h"
 #include "runtime/llm_worker_impl.h"
 #include "util/utils.h"
@@ -104,17 +104,13 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
 
   // Draft produces all speculative tokens of a block in one forward, so its
   // output is a single [batch, num_speculative_tokens] block rather than the
-  // per-step outputs an autoregressive drafter (e.g. MTP) yields.
-  struct DraftBlock {
-    DraftProposal proposal;
-    // No-sync draft inputs must outlive validation's stream sync.
-    std::vector<std::shared_ptr<const void>> retained_inputs;
-  };
-
+  // per-step outputs an autoregressive drafter (e.g. MTP) yields; the
+  // proposal carries the draft forward's retained no-sync handles.
+  //
   // virtual: DSpark overrides the draft sampling (parallel block sample ->
   // one forward + sequential Markov-head sampling loop).
-  virtual DraftBlock run_decode_draft(const LlmForwardInput& input,
-                                      LlmForwardInput& validate_input);
+  virtual DraftProposal run_decode_draft(const LlmForwardInput& input,
+                                         LlmForwardInput& validate_input);
 
   // Block layout hook: false (DFlash) -> query_width N+1, slot 0 is the
   // un-selected anchor; true (DSpark) -> query_width N, every position predicts
@@ -142,18 +138,14 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
                : BatchForwardType::CHUNKED_PREFILL;
   }
 
-  void fill_validate_input_from_draft_outputs(const DraftBlock& draft_block,
-                                              LlmForwardInput& validate_input,
-                                              Stream& compute_stream);
+  void fill_validate_input_from_draft_outputs(
+      const DraftProposal& draft_proposal,
+      LlmForwardInput& validate_input,
+      Stream& compute_stream);
 
   std::optional<ForwardOutput> run_validate(const LlmForwardInput& input,
-                                            const DraftBlock& draft_block,
+                                            const DraftProposal& draft_proposal,
                                             LlmForwardInput& validate_input);
-
-  SampleOutput validate(const SamplingParameters& sampling_params,
-                        const DraftProposal& draft_proposal,
-                        const ForwardOutput& target_output,
-                        int32_t num_val_tokens);
 
   // Mirrors sampled tokens to rank 0 under schedule-overlap so every rank
   // commits the same prefix. No-op for a single rank.
@@ -172,6 +164,12 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
                                      const SampleOutput& validate_output);
 
  protected:
+  // Shared by the DSpark/DFlash2 sampling sites.
+  ProcessGroup* sampling_process_group_ = nullptr;
+
+  // Block drafts (DFlash2/DSpark) condition their first step on the decode
+  // batch's first tokens.
+  torch::Tensor anchor_token_ids(const LlmForwardInput& input) const;
   int32_t mask_token_id_ = -1;
   int64_t expected_context_hidden_size_ = 0;
   // Whether the target model owns recurrent (linear attention) layers.

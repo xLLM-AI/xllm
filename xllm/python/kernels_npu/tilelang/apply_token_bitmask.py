@@ -31,7 +31,7 @@ TENSOR_DTYPES = {
     "float32": "float32",
 }
 VEC_NUM = 2
-DISALLOWED_TOKEN_MASK = -1.0e9
+DISALLOWED_TOKEN_MASK = float("-inf")
 
 
 def build_apply_token_bitmask_kernel(*, dtype: str, vec_core_num: int):

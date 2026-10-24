@@ -259,8 +259,8 @@ ForwardOutput finalize_verify_output(
     ForwardOutput target_output,
     SampleOutput val_output,
     const std::vector<JsonObjectGrammarState>& json_object_states) {
-  target_output.spec_verify_layouts =
-      make_verify_layouts(val_output.next_tokens, nullptr, json_object_states);
+  target_output.spec_verify_layouts = make_verify_layouts(
+      val_output.next_tokens, nullptr, constrained_mask(json_object_states));
   // The verify output replaces sample_output wholesale, so only its own
   // embeddings need clearing.
   val_output.embeddings = torch::Tensor();
@@ -272,9 +272,21 @@ template <typename TargetInput>
 void SpeculativeWorkerImpl<TargetInput>::prepare_validate_inputs(
     const TargetInput& input,
     TargetInput& validate_input) {
-  validate_input = input.to(device_, dtype_);
+  // Clear the transform fields on the host copy first so .to() skips them;
+  // expand_sampling_params_for_verify later installs the validate-row idxes.
+  // The JSON grammar states are not consumed by the logits-only validate
+  // forward (the verify layouts are built from the original input), so they
+  // are moved aside instead of deep-copied through clone() and .to().
+  TargetInput host_input = input.clone();
+  std::vector<JsonObjectGrammarState> json_states =
+      std::move(host_input.json_object_states);
+  std::vector<JsonObjectGrammarSnapshot> json_snapshots =
+      std::move(host_input.json_object_state_snapshots);
+  clear_all_sampling_fields(host_input.sampling_params);
+  validate_input = host_input.to(device_, dtype_);
+  validate_input.json_object_states = std::move(json_states);
+  validate_input.json_object_state_snapshots = std::move(json_snapshots);
   validate_input.skip_sampling_for_logits_only = true;
-  validate_input.skip_process_logits = true;
   validate_input.runtime.device_tensors_ready = false;
   auto& input_params = validate_input.input_params;
   torch::TensorOptions token_options = validate_input.token_ids.options();
@@ -380,6 +392,7 @@ void SpeculativeWorkerImpl<TargetInput>::prepare_validate_inputs(
   }
   input_params.attention.rebuild_device_buffer(device_);
 
+  // Clearing here drops the ~15 dead per-token tensors the clone carried in.
   expand_sampling_params_for_verify(validate_input.sampling_params,
                                     num_val_tokens,
                                     total_num_val_tokens,

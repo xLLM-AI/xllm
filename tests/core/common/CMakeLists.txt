@@ -19,6 +19,10 @@ target_compile_definitions(native_library_host_dependent_fixture PRIVATE
 
 add_library(native_library_host_fixture SHARED native_library_host_fixture.cpp)
 target_link_libraries(native_library_host_fixture PRIVATE :native_library)
+# Plain add_library (outside cc_library) has no COMMON_INCLUDE_DIRS; the
+# fixture includes xllm headers through the linked native_library target.
+target_include_directories(native_library_host_fixture PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../../xllm)
 xllm_export_native_host(native_library_host_fixture)
 
 cc_test(

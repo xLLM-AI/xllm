@@ -145,7 +145,7 @@ xllm --model=/models/target --draft_model=/models/dspark \
   --nnodes=16 --node_rank=0 --host=127.0.0.1 --port=8000 \
   --master_node_addr=127.0.0.1:27000 \
   --speculative_algorithm=DSpark --num_speculative_tokens=7 \
-  --draft_sampling_mode=greedy --enable_adaptive_target_verify=true \
+  --enable_adaptive_target_verify=true \
   --enable_graph=true --python_graph_backend=aclgraph \
   --disable_graph_warmup=false --enable_schedule_overlap=true \
   --enable_task_pipeline=true --enable_unified_mtp_graph=false \
@@ -157,7 +157,7 @@ xllm --model=/models/target --draft_model=/models/dspark \
 客户端显式传入 temperature：`temperature=0` 使用 greedy target；
 `temperature=0.5` 等正值使用随机 target 采样。不同 temperature 可以混合成批，
 target 的 top-k、top-p 和 min-p 过滤复用普通采样器的语义。
-draft 仍须使用 `--draft_sampling_mode=greedy`，暂不支持 probabilistic draft。
+draft 默认为 greedy；暂不支持 probabilistic draft。
 
 随机 target 路径由 rejection sampler 按 Device 上的 packed-row owners 映射
 每请求参数，对每个验证行采样。由于 draft 是确定性的，这与点质量提议分布的

@@ -85,13 +85,16 @@ def _accepted_prefix_lengths(proposal: torch.Tensor, target_tokens: torch.Tensor
 
 
 def _greedy_dflash2_path(candidate_ids: torch.Tensor, edge_logits: torch.Tensor) -> torch.Tensor:
-    # Match sample_dflash2_path's FP32 normalization and predecessor ordering.
+    # Structurally match the C++ greedy selector walk (sample_dflash2_path
+    # in runtime/dflash2_worker_impl): argmax the raw FP32 edge logits
+    # directly — log_softmax is strictly monotone per row, so normalizing
+    # first would draw the same path at extra cost.
     batch, steps, top_k = candidate_ids.shape
-    edge_log_probs = edge_logits.float().log_softmax(dim=-1)
+    edge_scores = edge_logits.float()
     previous = torch.zeros((batch, 1), dtype=torch.int64, device=candidate_ids.device)
     proposals = []
     for step in range(steps):
-        row = edge_log_probs[:, step].gather(1, previous.unsqueeze(-1).expand(-1, 1, top_k)).squeeze(1)
+        row = edge_scores[:, step].gather(1, previous.unsqueeze(-1).expand(-1, 1, top_k)).squeeze(1)
         previous = row.argmax(dim=-1, keepdim=True)
         proposals.append(candidate_ids[:, step].gather(1, previous).squeeze(1))
     return torch.stack(proposals, dim=1)

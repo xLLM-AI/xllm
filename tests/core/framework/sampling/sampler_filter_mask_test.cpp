@@ -16,73 +16,47 @@ limitations under the License.
 #include <gtest/gtest.h>
 
 #include "core/framework/sampling/sampler.h"
-#include "platform/platform.h"
+#include "tests/core/framework/sampling/sampling_test_utils.h"
 
 namespace xllm {
 namespace {
 
-SamplingParameters make_greedy_params(int64_t batch_size) {
-  SamplingParameters params;  // all-greedy by default
-  params.selected_token_idxes =
-      torch::arange(batch_size, torch::TensorOptions().dtype(torch::kInt));
-  return params;
-}
-
-bool uses_device_random_sample() {
-  return Platform::is_mlu() || Platform::is_cuda() || Platform::is_dcu();
-}
-
-torch::Device get_random_sample_device() {
-  if (uses_device_random_sample()) {
-    return torch::Device(Platform::type_torch(), 0);
-  }
-  return torch::Device(torch::kCPU);
-}
+using testutil::get_test_device;
+using testutil::make_sampling_params;
 
 TEST(SamplerFilterMaskTest, GreedySamplingHonorsMixedRows) {
-  SamplingParameters params = make_greedy_params(/*batch_size=*/2);
+  SamplingParameters params = make_sampling_params(/*batch_size=*/2);
   params.filter_mask =
       torch::tensor({{0.0F, -1.0e9F, 0.0F}, {0.0F, 0.0F, -1.0e9F}});
   torch::Tensor logits =
       torch::tensor({{1.0F, 100.0F, 2.0F}, {1.0F, 2.0F, 100.0F}});
-
-  Sampler sampler;
-  SampleOutput output = sampler.forward(logits, params);
+  SampleOutput output = sample(logits, params);
 
   EXPECT_EQ(output.next_tokens.index({0}).item<int64_t>(), 2);
   EXPECT_EQ(output.next_tokens.index({1}).item<int64_t>(), 1);
 }
 
 TEST(SamplerFilterMaskTest, RandomSamplingCannotSelectDisallowedToken) {
-  if (uses_device_random_sample() && Platform::device_count() == 0) {
-    GTEST_SKIP() << "Random sampling backend device is unavailable";
-  }
-
-  SamplingParameters params = make_greedy_params(/*batch_size=*/1);
-  params.do_sample = torch::ones({1}, torch::kBool);
-  params.sampling_mode = SamplingMode::RANDOM;
+  SamplingParameters params =
+      make_sampling_params(torch::ones({1}, torch::kBool));
   params.filter_mask = torch::tensor({{-1.0e9F, 0.0F, -1.0e9F}});
   torch::Tensor logits = torch::tensor({{100.0F, 1.0F, 100.0F}});
 
-  const torch::Device device = get_random_sample_device();
+  const torch::Device device = get_test_device();
   params = params.to(device, torch::kFloat32);
   logits = logits.to(device);
-
-  Sampler sampler;
-  SampleOutput output = sampler.forward(logits, params);
+  SampleOutput output = sample(logits, params);
 
   EXPECT_EQ(output.next_tokens.index({0}).item<int64_t>(), 1);
 }
 
 TEST(SamplerFilterMaskTest, PackedMaskFiltersCallerLogitsInPlace) {
-  SamplingParameters params = make_greedy_params(/*batch_size=*/1);
+  SamplingParameters params = make_sampling_params(/*batch_size=*/1);
   params.filter_bitmask =
       torch::tensor({{static_cast<int32_t>(0b0101)}},
                     torch::TensorOptions().dtype(torch::kInt32));
   torch::Tensor logits = torch::tensor({{1.0F, 100.0F, 2.0F, 100.0F}});
-
-  Sampler sampler;
-  SampleOutput output = sampler.forward(logits, params);
+  SampleOutput output = sample(logits, params);
 
   EXPECT_EQ(output.next_tokens.index({0}).item<int64_t>(), 2);
   EXPECT_EQ(logits.index({0, 0}).item<float>(), 1.0F);

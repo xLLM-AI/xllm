@@ -26,6 +26,7 @@ limitations under the License.
 #include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/rec_config.h"
+#include "core/framework/sampling/logits_processor.h"
 #include "core/framework/sampling/sampler.h"
 #if defined(USE_CUDA)
 #include "kernels/cuda/cuda_ops_api.h"
@@ -130,9 +131,8 @@ static inline void sample_top_candidates(const torch::Tensor& probs,
 }  // namespace
 
 RecSampler::RecSampler(RecPipelineType pipeline_type)
-    : sampler_(std::make_unique<Sampler>()),
-      strategy_(create_sampling_strategy(pipeline_type, *sampler_)) {
-  LOG(INFO) << "RecSampler initialized with Sampler delegate.";
+    : strategy_(create_sampling_strategy(pipeline_type)) {
+  LOG(INFO) << "RecSampler initialized.";
 }
 
 SampleOutput RecSampler::forward(torch::Tensor& logits,
@@ -145,17 +145,16 @@ SampleOutput RecSampler::forward(torch::Tensor& logits,
 // --- SamplingStrategy factory ---
 
 std::unique_ptr<RecSampler::SamplingStrategy>
-RecSampler::create_sampling_strategy(RecPipelineType type,
-                                     const Sampler& sampler) {
+RecSampler::create_sampling_strategy(RecPipelineType type) {
   switch (type) {
     case RecPipelineType::kLlmRecMultiRoundPipeline:
-      return std::make_unique<MultiRoundFastPathSamplingStrategy>(sampler);
+      return std::make_unique<MultiRoundFastPathSamplingStrategy>();
     case RecPipelineType::kLlmRecDefault:
     case RecPipelineType::kLlmRecWithMmData:
-      return std::make_unique<DefaultSamplingStrategy>(sampler);
+      return std::make_unique<DefaultSamplingStrategy>();
     case RecPipelineType::kOneRecDefault:
     case RecPipelineType::kOneRecXAttentionPipeline:
-      return std::make_unique<OneRecConstrainedSamplingStrategy>(sampler);
+      return std::make_unique<OneRecConstrainedSamplingStrategy>();
     default:
       LOG(FATAL) << "Unknown RecPipelineType: " << static_cast<int32_t>(type);
       __builtin_unreachable();
@@ -164,24 +163,16 @@ RecSampler::create_sampling_strategy(RecPipelineType type,
 
 // --- DefaultSamplingStrategy ---
 
-RecSampler::DefaultSamplingStrategy::DefaultSamplingStrategy(
-    const Sampler& sampler)
-    : sampler_(sampler) {}
-
 SampleOutput RecSampler::DefaultSamplingStrategy::forward(
     torch::Tensor& logits,
     const SamplingParameters& params,
     const torch::Tensor& filter_mask,
     const RecSamplingContext* context) const {
   UNUSED_PARAMETER(context);
-  return sampler_.forward(logits, params, filter_mask);
+  return sample(logits, params, filter_mask);
 }
 
 // --- OneRecConstrainedSamplingStrategy ---
-
-RecSampler::OneRecConstrainedSamplingStrategy::
-    OneRecConstrainedSamplingStrategy(const Sampler& sampler)
-    : sampler_(sampler) {}
 
 SampleOutput RecSampler::OneRecConstrainedSamplingStrategy::forward(
     torch::Tensor& logits,
@@ -203,10 +194,10 @@ SampleOutput RecSampler::OneRecConstrainedSamplingStrategy::forward(
   if (!(params.use_beam_search &&
         params.sampling_mode == SamplingMode::RANDOM && params.logprobs &&
         params.max_top_logprobs > 0)) {
-    return sampler_.forward(logits, params, filter_mask);
+    return sample(logits, params, filter_mask);
   }
 
-  Sampler::process_logits(logits, params, filter_mask);
+  process_logits(logits, params, filter_mask);
 
   CHECK_EQ(logits.size(0), params.num_sample_seqs());
 
@@ -229,10 +220,6 @@ SampleOutput RecSampler::OneRecConstrainedSamplingStrategy::forward(
 
 // --- MultiRoundFastPathSamplingStrategy ---
 
-RecSampler::MultiRoundFastPathSamplingStrategy::
-    MultiRoundFastPathSamplingStrategy(const Sampler& sampler)
-    : sampler_(sampler) {}
-
 SampleOutput RecSampler::MultiRoundFastPathSamplingStrategy::forward(
     torch::Tensor& logits,
     const SamplingParameters& params,
@@ -243,14 +230,14 @@ SampleOutput RecSampler::MultiRoundFastPathSamplingStrategy::forward(
   const bool use_fast_path = can_use_fast_path(params);
 
   if (!use_fast_path) {
-    return sampler_.forward(logits, params);
+    return sample(logits, params);
   }
 
   LOG_FIRST_N(INFO, 1) << "RecSampler fast path activated.";
 
   SampleOutput output;
 
-  Sampler::apply_sampling_penalties(logits, params);
+  apply_sampling_penalties(logits, params);
 
   CHECK_EQ(logits.size(0), params.num_sample_seqs());
 

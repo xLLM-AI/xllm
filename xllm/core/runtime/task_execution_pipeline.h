@@ -26,8 +26,8 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/model/causal_lm.h"
-#include "core/framework/sampling/draft_sampling_mode.h"
-#include "core/framework/sampling/sampler.h"
+#include "core/framework/sampling/sampling_params.h"
+#include "core/framework/speculative/draft_proposal.h"
 #include "core/kv_cache/transfer/host_transfer/transfer.h"
 #include "core/platform/device.h"
 #include "core/runtime/executor.h"
@@ -104,7 +104,7 @@ struct SpeculativeTaskCapacity {
   bool reuse_topk = false;
   // Restore committed draft KV from verifier hidden states before reuse.
   bool refresh_target_prefix = false;
-  DraftSamplingMode draft_sampling_mode = DraftSamplingMode::GREEDY;
+  bool is_probabilistic_draft = false;
   bool unified_graph = false;
   bool adaptive_dspark = false;
   bool adaptive_draft_step = false;
@@ -353,9 +353,16 @@ class TaskExecutionPipeline final {
   std::optional<std::string> draft_step_calibration_capabilities() const;
   void consume_adaptive_dspark(SpeculativeSlot& slot);
   void write_block_context(SpeculativeSlot& slot, bool prefill);
+  // Broadcasts the sample result tensors across the TP/CP sampling groups.
   void synchronize_samples(const TokenResultTensors& result,
-                           bool all_greedy = false);
-  void synchronize_tokens(torch::Tensor& tokens, bool all_greedy);
+                           SamplingMode sampling_mode);
+  // Broadcasts a sampled tensor across the TP/CP sampling groups. Greedy
+  // batches skip the sampling group (argmax is rank-local); the CP group is
+  // always synchronized. `already_broadcast` marks producers that broadcast
+  // inside the sampling group themselves (e.g. the DSpark commit kernel).
+  void synchronize_tokens(torch::Tensor& tokens,
+                          SamplingMode sampling_mode,
+                          bool already_broadcast = false);
   static Status plan_parallel(const ParallelInput& input,
                               uint32_t dp_size,
                               uint32_t dp_rank,
@@ -386,7 +393,6 @@ class TaskExecutionPipeline final {
   Stream prepare_stream_;
   Stream task_stream_;
   Stream result_stream_;
-  Sampler sampler_;
   // Device reads/writes use only task_stream_. Consume never changes this.
   torch::Tensor previous_tokens_;
   // Prepare and Launch have separate thread-owned descriptors. IDs advance

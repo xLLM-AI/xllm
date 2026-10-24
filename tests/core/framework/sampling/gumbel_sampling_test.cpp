@@ -13,39 +13,23 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/framework/sampling/gumbel_sampling.h"
-
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 
-#include "core/framework/sampling/sampling_params.h"
+#include "core/framework/sampling/sampler.h"
+#include "tests/core/framework/sampling/sampling_test_utils.h"
 
 namespace xllm {
 
-TEST(GumbelSamplingTest, ReturnsZeroNoiseForGreedyBatch) {
-  SamplingParameters sampling_params;
-  sampling_params.sampling_mode = SamplingMode::GREEDY;
-  torch::Tensor noise = sample_gumbel_noise(/*batch_size=*/2,
-                                            /*num_steps=*/3,
-                                            /*num_classes=*/4,
-                                            sampling_params,
-                                            torch::Device(torch::kCPU));
-
-  EXPECT_EQ(noise.sizes(), torch::IntArrayRef({2, 3, 4}));
-  EXPECT_TRUE(noise.eq(0).all().item<bool>());
-}
+using testutil::make_sampling_params;
 
 TEST(GumbelSamplingTest, MasksGreedyRowsInMixedBatch) {
-  SamplingParameters sampling_params;
-  sampling_params.do_sample = torch::tensor({false, true}, torch::kBool);
-  sampling_params.sampling_mode = SamplingMode::MIXED;
   torch::manual_seed(2026);
 
-  torch::Tensor noise = sample_gumbel_noise(/*batch_size=*/2,
-                                            /*num_steps=*/3,
-                                            /*num_classes=*/4,
-                                            sampling_params,
-                                            torch::Device(torch::kCPU));
+  torch::Tensor noise = gumbel_noise(
+      make_sampling_params(torch::tensor({false, true}, torch::kBool)),
+      {2, 3, 4},
+      torch::Device(torch::kCPU));
 
   EXPECT_TRUE(noise.select(/*dim=*/0, /*index=*/0).eq(0).all().item<bool>());
   EXPECT_TRUE(torch::isfinite(noise).all().item<bool>());

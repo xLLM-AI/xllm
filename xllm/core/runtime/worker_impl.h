@@ -38,7 +38,6 @@ limitations under the License.
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "framework/sampling/beam_searcher.h"
-#include "framework/sampling/sampler.h"
 #include "framework/state_dict/state_dict.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "options.h"
@@ -605,8 +604,6 @@ class WorkerImpl {
   mutable std::mutex json_object_grammar_mutex_;
 
   std::unique_ptr<Executor> model_executor_;
-
-  std::unique_ptr<Sampler> sampler_;
 
   // params for enable_schedule_overlap case
   // an output to store the result of last step

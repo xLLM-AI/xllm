@@ -19,10 +19,10 @@ limitations under the License.
 #include <unordered_map>
 #include <unordered_set>
 
-#include "core/framework/sampling/rejection_sampler.h"
 #include "core/framework/speculative/adaptive/spec_cost_profile_store.h"
 #include "core/framework/speculative/adaptive/spec_startup_calibration.h"
 #include "core/framework/speculative/adaptive/verify_budget_planner.h"
+#include "core/framework/speculative/rejection_sampler.h"
 #include "core/runtime/task_execution_pipeline.h"
 
 namespace xllm {
@@ -171,7 +171,6 @@ struct TaskExecutionPipeline::SpeculativeSlot {
   std::unique_ptr<SlotBuffer> validate_input;
   std::unique_ptr<MtpContextView> state;
   std::optional<Sampling> target_sampling;
-  std::unique_ptr<RejectionSampler> rejection;
   std::vector<std::unique_ptr<Draft>> drafts;
   std::unique_ptr<Draft> prefix_refresh;
   std::vector<int32_t> upper_positions;

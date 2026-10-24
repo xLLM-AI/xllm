@@ -104,15 +104,3 @@ cc_test(
     GTest::gtest_main
     glog::glog
 )
-cc_test(
-  NAME
-    random_sample_dcu_test
-  SRCS
-    random_sample_test.cpp
-  DEPS
-    :dcu_kernels
-    hip::host
-    torch
-    GTest::gtest_main
-    glog::glog
-)

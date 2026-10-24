@@ -96,7 +96,6 @@ limitations under the License.
 #include "framework/model/aux_hidden_capture.h"
 #include "framework/model/model_params_view.h"
 #include "framework/parallel_state/npu_cp_plan.h"
-#include "framework/sampling/sampler.h"
 #include "framework/state_dict/state_dict.h"
 #include "models/model_registry.h"
 #include "runtime/forward_params.h"
@@ -449,7 +448,6 @@ WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
   threadpool_.schedule([this]() mutable { device_.set_device(); });
   prepare_stream_ = device_.get_stream_from_pool();
   compute_stream_ = device_.current_stream();
-  sampler_ = std::make_unique<Sampler>();
 
 #if !defined(USE_NPU) && !defined(USE_CUDA) && !defined(USE_MUSA) && \
     !defined(USE_DCU)

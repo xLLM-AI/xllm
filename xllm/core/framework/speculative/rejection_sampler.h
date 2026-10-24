@@ -1,4 +1,5 @@
-/* Copyright 2026 The xLLM Authors. All Rights Reserved.
+/* Copyright 2025-2026 The xLLM Authors.
+Copyright 2024 The ScaleLLM Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,21 +15,17 @@ limitations under the License.
 ==============================================================================*/
 
 #pragma once
+#include <torch/types.h>
 
-#include <functional>
-
-#include "core/framework/sampling/draft_proposal.h"
 #include "core/framework/sampling/sampling_params.h"
+#include "core/framework/speculative/draft_proposal.h"
 
 namespace xllm {
 
-// Consensus must complete before feeding a sampled token to the next step.
-DraftProposal sample_dspark_block(
-    const torch::Tensor& base_logits,
-    const torch::Tensor& anchor_token_ids,
-    const SamplingParameters& sampling,
-    const std::function<torch::Tensor(const torch::Tensor&)>& markov_bias,
-    const std::function<void(torch::Tensor&)>& synchronize_tokens,
-    torch::Tensor tokens = {});
+// The single sampling owner for speculative verification; the
+// general-purpose sample() never runs for verify steps.
+SampleOutput rejection_sample(const SamplingParameters& params,
+                              const DraftProposal& draft_proposal,
+                              torch::Tensor target_logits);
 
 }  // namespace xllm

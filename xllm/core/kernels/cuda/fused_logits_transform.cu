@@ -687,19 +687,9 @@ __global__ void filter_mask_kernel(uint8_t* mask,
                                    int32_t width) {
   const int32_t row = blockIdx.x;
   const int64_t offset = static_cast<int64_t>(row) * width;
-  float cutoff = -1.0F;
-  if (top_p) {
-    cutoff = 1.0F - parameter_value(top_p, top_p_dtype, row);
-    // The original tensor subtraction rounds in the parameter dtype.
-    if (top_p_dtype == torch::kFloat16) {
-      cutoff = static_cast<float>(static_cast<c10::Half>(cutoff));
-    } else if (top_p_dtype == torch::kBFloat16) {
-      cutoff = static_cast<float>(static_cast<c10::BFloat16>(cutoff));
-    }
-  }
+  const float cutoff = probability_cutoff(top_p, top_p_dtype, row);
   const auto keep_token = [&](int64_t col) {
-    return !cumulative || col == width - 1 ||
-           !(cumulative[offset + col] <= cutoff);
+    return col == width - 1 || !(cumulative[offset + col] <= cutoff);
   };
   for (int64_t col = threadIdx.x + static_cast<int64_t>(blockIdx.y) * kThreads;
        col < width;
@@ -743,12 +733,11 @@ void check_parameter(const torch::Tensor& parameter,
 
 }  // namespace
 
-torch::Tensor fused_logits_transform(torch::Tensor& logits,
-                                     const torch::Tensor& temperatures,
-                                     const torch::Tensor& min_p,
-                                     const torch::Tensor& top_k,
-                                     const torch::Tensor& top_p,
-                                     bool return_probs) {
+void fused_logits_transform(torch::Tensor& logits,
+                            const torch::Tensor& temperatures,
+                            const torch::Tensor& min_p,
+                            const torch::Tensor& top_k,
+                            const torch::Tensor& top_p) {
   CHECK(logits.is_cuda());
   CHECK_EQ(logits.dim(), 2);
   CHECK_EQ(logits.stride(1), 1);
@@ -773,9 +762,7 @@ torch::Tensor fused_logits_transform(torch::Tensor& logits,
   const int32_t rows = static_cast<int32_t>(logits.size(0));
   const int32_t width = static_cast<int32_t>(logits.size(1));
   if (rows == 0) {
-    return return_probs ? torch::empty(logits.sizes(),
-                                       logits.options().dtype(torch::kFloat32))
-                        : torch::Tensor();
+    return;
   }
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   const int64_t blocks_per_row =
@@ -814,7 +801,7 @@ torch::Tensor fused_logits_transform(torch::Tensor& logits,
     }
   });
   if (!top_k.defined() && !top_p.defined()) {
-    return return_probs ? logits.softmax(-1, torch::kFloat32) : torch::Tensor();
+    return;
   }
   // Small framework sorts have a distinct tie order. Large sorts are stable,
   // so their boundary ties can be reconstructed without sorting token indices.
@@ -842,8 +829,7 @@ torch::Tensor fused_logits_transform(torch::Tensor& logits,
     });
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     if (!top_p.defined()) {
-      return return_probs ? logits.softmax(-1, torch::kFloat32)
-                          : torch::Tensor();
+      return;
     }
   }
   if (small_sort) {
@@ -880,7 +866,7 @@ torch::Tensor fused_logits_transform(torch::Tensor& logits,
     }
   });
   if (!top_p.defined()) {
-    return return_probs ? logits.softmax(-1, torch::kFloat32) : torch::Tensor();
+    return;
   }
   // Preserve the full-width framework reductions: compact softmax/cumsum
   // would round differently and can change the token at the top-p boundary.
@@ -911,25 +897,21 @@ torch::Tensor fused_logits_transform(torch::Tensor& logits,
                                           logits.stride(0));
     });
     C10_CUDA_KERNEL_LAUNCH_CHECK();
-    if (return_probs) {
-      torch::softmax_out(cumulative, logits, -1, torch::kFloat32);
-      return cumulative;
-    }
-    return {};
+    return;
   }
   // Scatter byte masks so the working set stays small; write the wider
   // logits in token order to avoid costly random stores on large batches.
   const auto mask =
       torch::empty(logits.sizes(), logits.options().dtype(torch::kUInt8));
   DISPATCH_FLOATING_TYPES(logits.scalar_type(), "filter_mask", [&] {
-    filter_mask_kernel<scalar_t><<<grid, kThreads, 0, stream>>>(
-        mask.data_ptr<uint8_t>(),
-        sorted.data_ptr<scalar_t>(),
-        indices.data_ptr<int64_t>(),
-        cumulative.defined() ? cumulative.data_ptr<float>() : nullptr,
-        top_p.defined() ? top_p.data_ptr() : nullptr,
-        top_p.defined() ? top_p.scalar_type() : torch::kFloat32,
-        width);
+    filter_mask_kernel<scalar_t>
+        <<<grid, kThreads, 0, stream>>>(mask.data_ptr<uint8_t>(),
+                                        sorted.data_ptr<scalar_t>(),
+                                        indices.data_ptr<int64_t>(),
+                                        cumulative.data_ptr<float>(),
+                                        top_p.data_ptr(),
+                                        top_p.scalar_type(),
+                                        width);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     apply_filter_mask_kernel<scalar_t>
         <<<grid, kThreads, 0, stream>>>(logits.data_ptr<scalar_t>(),
@@ -938,11 +920,6 @@ torch::Tensor fused_logits_transform(torch::Tensor& logits,
                                         logits.stride(0));
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  if (return_probs && cumulative.defined()) {
-    torch::softmax_out(cumulative, logits, -1, torch::kFloat32);
-    return cumulative;
-  }
-  return return_probs ? logits.softmax(-1, torch::kFloat32) : torch::Tensor();
 }
 
 }  // namespace xllm::kernel::cuda

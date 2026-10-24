@@ -199,6 +199,20 @@ inline torch::Tensor arange_indices(int64_t count,
       count, torch::TensorOptions().dtype(torch::kInt).device(device));
 }
 
+inline std::vector<int64_t> batch_broadcast_shape(int64_t batch, int64_t ndim) {
+  std::vector<int64_t> shape{batch};
+  shape.insert(shape.end(), ndim - 1, 1);
+  return shape;
+}
+
+// [batch, X, ...] -> [batch, width, X, ...] stride-0 grouped view.
+inline torch::Tensor expand_batch_to_tokens(const torch::Tensor& tensor,
+                                            int64_t width) {
+  std::vector<int64_t> sizes = tensor.sizes().vec();
+  sizes.insert(sizes.begin() + 1, width);
+  return tensor.unsqueeze(/*dim=*/1).expand(sizes);
+}
+
 // Stages a host vector onto the device with an async H2D copy from a pinned
 // CPU tensor, issued on the caller's current stream: the caller must keep
 // that stream active (e.g. via its stream guard) until the copy is ordered

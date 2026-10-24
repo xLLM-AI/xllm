@@ -1,51 +1,22 @@
 include(cc_library)
 
 cc_library(
-  NAME
-    json_object_grammar
-  HDRS
-    json_object_grammar.h
-  SRCS
-    json_object_grammar.cpp
-  DEPS
-    :tokenizer
-    :common
-    glog::glog
-    torch
-    $<$<BOOL:${USE_NPU}>:tilelang_kernels>
-    $<$<BOOL:${USE_NPU}>:unified_dlog>
-)
-
-cc_library(
   NAME 
     sampler
   HDRS
-    dspark_sampling.h
-    dflash2_sampling.h
-    draft_proposal.h
-    draft_sampling_mode.h
     sampling_params.h
-    logits_utils.h
-    gumbel_sampling.h
-    rejection_sampler.h
+    logits_processor.h
     sampler.h
     rec_sampler.h
     beam_searcher.h
-    rec_constrained_decoding.h
   SRCS
-    dspark_sampling.cpp
-    dflash2_sampling.cpp
     sampling_params.cpp
-    logits_utils.cpp
-    gumbel_sampling.cpp
-    rejection_sampler.cpp
+    logits_processor.cpp
     sampler.cpp
     rec_sampler.cpp
     beam_searcher.cpp
-    rec_constrained_decoding.cpp
   DEPS
-    :json_object_grammar
-    :state_dict
+    util
     :common
     glog::glog
     torch

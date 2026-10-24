@@ -964,15 +964,6 @@ struct FusedLogitsTransformParams {
   // Optional int64 device vector with one entry per row.
   torch::Tensor top_k;
   torch::Tensor top_p;
-  // Return FP32 softmax probabilities in addition to updating logits.
-  bool return_probs = false;
-};
-
-// Random sample parameters
-struct RandomSampleParams {
-  // Input tensor of probabilities for sampling.
-  // Must be 2-dimensional: [batch_size, vocab_size]
-  torch::Tensor logits;
 };
 
 // Masked indexer select paged KV cache parameters

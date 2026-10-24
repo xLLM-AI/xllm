@@ -30,9 +30,9 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/types.h"
+#include "core/framework/constrained/json_object_grammar.h"
 #include "core/framework/multimodal/embedding_output.h"
 #include "core/framework/multimodal/mm_data.h"
-#include "core/framework/sampling/json_object_grammar.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/tokenizer/tokenizer.h"
 #include "core/kv_cache/block/block.h"

@@ -23,7 +23,7 @@ limitations under the License.
 #include <vector>
 
 #include "common/macros.h"
-#include "framework/sampling/rejection_sampler.h"
+#include "framework/sampling/sampling_params.h"
 #include "runtime/options.h"
 #include "runtime/worker_impl.h"
 

@@ -15,50 +15,33 @@ limitations under the License.
 ==============================================================================*/
 
 #pragma once
-#include <c10/core/TensorOptions.h>
 #include <torch/types.h>
 
-#include "sampling_params.h"
+#include "core/framework/sampling/sampling_params.h"
 
 namespace xllm {
 
-class Sampler final {
- public:
-  Sampler() = default;
+SampleOutput sample(torch::Tensor& logits,
+                    const SamplingParameters& params,
+                    const torch::Tensor& filter_mask = torch::Tensor());
 
-  // operator() allows us to use the module as a function.
-  template <typename... Args>
-  auto operator()(Args&&... args) const {
-    return this->forward(::std::forward<Args>(args)...);
-  }
+// Gumbel primitives: argmax(logits + g), g ~ Gumbel(0, 1), samples exactly
+// categorical(softmax(logits)) without materializing probs. Noise buffers
+// carry log(Exp(1)) draws; greedy rows carry the 0.0 sentinel (log(0) = -inf,
+// so the raw buffer stays zero-free).
 
-  // logits: [batch_size, vocab_size]
-  SampleOutput forward(
-      torch::Tensor& logits,
-      const SamplingParameters& params,
-      const torch::Tensor& filter_mask = torch::Tensor()) const;
+torch::Tensor gumbel_sample(const torch::Tensor& logits);
 
-  // In-place sampling transforms on [batch_size, vocab_size] logits:
-  // logits bias, repetition/frequency/presence penalties, temperature,
-  // min-p, top-k/top-p, and the token filter mask/bitmask. Shared by normal
-  // decode and logits-only speculative verify so both consume the same
-  // distribution.
-  static void process_logits(torch::Tensor& logits,
-                             const SamplingParameters& params,
-                             const torch::Tensor& filter_mask = {});
+// The 0.0 greedy-row sentinel is already placed on mixed batches.
+torch::Tensor gumbel_noise(const SamplingParameters& params,
+                           torch::IntArrayRef sizes,
+                           const torch::Device& device);
 
-  // In-place logits bias and repetition/frequency/presence penalties. The
-  // first stage of process_logits, shared by paths that skip the later
-  // transforms (e.g. the RecSampler fast path).
-  static void apply_sampling_penalties(torch::Tensor& logits,
-                                       const SamplingParameters& params);
+// Zero-noise argmax over the last dim; accepts -inf masks.
+torch::Tensor greedy_sample(const torch::Tensor& logits);
 
-  // helper functions
-  // probs: [..., vocab_size]
-  static torch::Tensor greedy_sample(const torch::Tensor& probs);
-
-  // probs: [..., vocab_size]
-  static torch::Tensor random_sample(const torch::Tensor& probs);
-};
+// Argmax over pre-materialized noise, consuming the buffer as scratch.
+torch::Tensor gumbel_argmax(const torch::Tensor& logits,
+                            torch::Tensor gumbel_noise);
 
 }  // namespace xllm

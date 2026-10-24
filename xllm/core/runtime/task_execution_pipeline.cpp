@@ -22,6 +22,7 @@ limitations under the License.
 
 #include "core/framework/allocator/virtual_memory/physical_page_pool.h"
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/sampling/sampler.h"
 #include "core/kv_cache/transfer/kv_transfer_completion.h"
 #include "core/platform/platform.h"
 #include "core/runtime/decode_graph_bucket.h"
@@ -859,7 +860,7 @@ void TaskExecutionPipeline::launch(uint32_t slot_id) {
     slot.logits = model_.logits(slot.model_output.hidden_states,
                                 params.selected_token_idxes);
     slot.buffer->refresh_min_tokens();
-    slot.sample_output = sampler_.forward(slot.logits, params);
+    slot.sample_output = ::xllm::sample(slot.logits, params);
     const auto& result = slot.buffer->device_result();
     result.tokens.copy_(slot.sample_output.next_tokens);
     if (result.logprobs.defined()) {
@@ -870,7 +871,7 @@ void TaskExecutionPipeline::launch(uint32_t slot_id) {
       result.top_logprobs.copy_(slot.sample_output.top_logprobs);
     }
     if (capacity_.cp_sampling_group != nullptr) {
-      synchronize_samples(result);
+      synchronize_samples(result, params.sampling_mode);
     }
   }
   // The independent buffer survives Consume and immediate Slot reuse. Copy

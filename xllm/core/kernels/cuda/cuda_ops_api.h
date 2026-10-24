@@ -255,8 +255,6 @@ std::tuple<torch::Tensor, torch::Tensor> moe_fused_topk(
     const std::optional<torch::Tensor>& correction_bias,
     const std::string& scoring_func);
 
-torch::Tensor random_sample(const torch::Tensor& probs);
-
 torch::Tensor cutlass_fused_moe(
     const torch::Tensor& input,                   // [num_tokens, hidden]
     const torch::Tensor& token_selected_experts,  // [num_tokens, top_k]

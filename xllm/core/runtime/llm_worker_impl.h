@@ -72,6 +72,8 @@ class LLMWorkerImpl : public WorkerImpl {
                                       const Stream& signal_stream);
 #endif
 
+  // The DSpark Markov head on the private model; block drafting goes through
+  // this narrow delegate instead of a full CausalLM& escape hatch.
   torch::Tensor dspark_markov_bias(const torch::Tensor& previous_token_ids) {
     return model_->dspark_markov_bias(previous_token_ids);
   }

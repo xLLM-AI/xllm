@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/framework/sampling/json_object_grammar.h"
+#include "core/framework/constrained/json_object_grammar.h"
 
 #include <glog/logging.h>
 
@@ -21,15 +21,10 @@ limitations under the License.
 #include <cstring>
 
 #include "core/common/metrics.h"
-#include "core/util/slice.h"
-#if defined(USE_NPU)
-#include "core/kernels/npu/tilelang/tilelang_ops_api.h"
-#endif
 
 namespace xllm {
 namespace {
 
-constexpr float kDisallowedTokenMask = -1.0e9F;
 constexpr uint64_t kFnvOffsetBasis = 14695981039346656037ULL;
 constexpr uint64_t kFnvPrime = 1099511628211ULL;
 constexpr size_t kMaxFilterMaskCacheEntries = 64;
@@ -770,7 +765,7 @@ torch::Tensor JsonObjectGrammar::float_mask_from_bitmask(
     size_t vocab_size) {
   auto mask = torch::full(
       {static_cast<int64_t>(vocab_size)},
-      kDisallowedTokenMask,
+      -std::numeric_limits<float>::infinity(),
       torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
   auto accessor = mask.accessor<float, 1>();
   for (size_t token_id = 0; token_id < vocab_size; ++token_id) {
@@ -1027,53 +1022,6 @@ torch::Tensor build_json_object_filter_bitmask(
         static_cast<int64_t>(transfer_timer.elapsed_microseconds()));
   }
   return mask;
-}
-
-void apply_token_bitmask_inplace(torch::Tensor& logits,
-                                 const torch::Tensor& bitmask) {
-  CHECK(logits.defined()) << "logits must be defined";
-  CHECK(bitmask.defined()) << "bitmask must be defined";
-  CHECK_EQ(logits.dim(), 2) << "logits must be 2-D [batch, vocab]";
-  CHECK_EQ(bitmask.dim(), 2) << "bitmask must be 2-D [batch, words]";
-  CHECK_EQ(logits.size(0), bitmask.size(0))
-      << "bitmask batch mismatch, logits.size(0)=" << logits.size(0)
-      << ", bitmask.size(0)=" << bitmask.size(0);
-
-  const int64_t vocab_size = logits.size(1);
-  const int64_t expected_words = (vocab_size + 31) / 32;
-  CHECK_EQ(bitmask.size(1), expected_words)
-      << "bitmask word count mismatch, bitmask.size(1)=" << bitmask.size(1)
-      << ", expected=" << expected_words;
-  CHECK(bitmask.scalar_type() == torch::kInt32 ||
-        bitmask.scalar_type() == torch::kInt64)
-      << "bitmask must be int32/int64";
-
-#if defined(USE_NPU)
-  if (kernel::npu::tilelang::can_apply_token_bitmask_inplace(logits, bitmask)) {
-    kernel::npu::tilelang::apply_token_bitmask_inplace(logits, bitmask);
-    return;
-  }
-#endif
-
-  const auto options =
-      torch::TensorOptions().dtype(torch::kInt64).device(logits.device());
-  const torch::Tensor token_ids = torch::arange(vocab_size, options);
-  const torch::Tensor word_indices =
-      torch::floor_divide(token_ids, /*other=*/32);
-  const torch::Tensor bit_indices = torch::remainder(token_ids, /*other=*/32);
-  torch::Tensor words = bitmask.to(torch::kInt64)
-                            .bitwise_and(/*other=*/0xffffffffLL)
-                            .index_select(/*dim=*/1, word_indices);
-  const torch::Tensor allowed =
-      torch::bitwise_and(torch::bitwise_right_shift(words, bit_indices),
-                         /*other=*/1);
-  const auto mask_options =
-      torch::TensorOptions().dtype(logits.dtype()).device(logits.device());
-  const torch::Tensor additive =
-      torch::where(allowed.to(torch::kBool),
-                   torch::zeros({1}, mask_options),
-                   torch::full({1}, kDisallowedTokenMask, mask_options));
-  logits.add_(additive);
 }
 
 std::vector<JsonObjectGrammarState> advance_json_object_states(

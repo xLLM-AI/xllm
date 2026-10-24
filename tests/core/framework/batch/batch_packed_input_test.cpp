@@ -35,10 +35,10 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/batch/forward_input_builder.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/constrained/json_object_grammar.h"
 #include "core/framework/model/dit_model_params.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/request/stopping_checker.h"
-#include "core/framework/sampling/json_object_grammar.h"
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/runtime/dit_forward_params.h"
 #include "core/runtime/forward_params.h"
@@ -872,7 +872,7 @@ void expect_packed_sample_count_mismatch_rejected() {
             unpacked,
             /*materialize_device_buffer=*/false);
       },
-      "Packed sample count does not match sampling rows");
+      "Packed sample count does not match the sampling sequence count");
 }
 
 }  // namespace
@@ -941,7 +941,11 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackRestoresDoSample) {
   LlmForwardInput input =
       builder.build_forward_input(/*num_decoding_tokens=*/1,
                                   /*min_decoding_batch_size=*/0);
-  ASSERT_TRUE(input.sampling_params.do_sample.defined());
+  // A single temperature=1.0 sequence builds a uniform RANDOM batch, which
+  // carries no do_sample (only mixed batches do); the packed roundtrip must
+  // still restore the sampling mode and the per-sequence fields below.
+  ASSERT_EQ(input.sampling_params.sampling_mode, SamplingMode::RANDOM);
+  ASSERT_TRUE(input.sampling_params.selected_token_idxes.defined());
   input.sampling_params.min_p = torch::tensor({0.1F});
   input.sampling_params.logits_bias = torch::tensor({{0.0F, -INFINITY, 2.0F}});
   input.sampling_params.seeds = torch::tensor({42}, torch::kLong);
@@ -955,7 +959,7 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackRestoresDoSample) {
 
   LlmForwardInput lazy_input;
   ASSERT_TRUE(lazy_input.from_packed_proto(packed_input));
-  EXPECT_FALSE(lazy_input.sampling_params.do_sample.defined());
+  EXPECT_FALSE(lazy_input.sampling_params.selected_token_idxes.defined());
   EXPECT_TRUE(lazy_input.runtime.input_host_buffer_has_layout);
 
   LlmForwardInput unpacked_input;
@@ -964,7 +968,8 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackRestoresDoSample) {
                                                     torch::kFloat32,
                                                     unpacked_input,
                                                     false));
-  ASSERT_TRUE(unpacked_input.sampling_params.do_sample.defined());
+  EXPECT_EQ(unpacked_input.sampling_params.sampling_mode, SamplingMode::RANDOM);
+  ASSERT_TRUE(unpacked_input.sampling_params.selected_token_idxes.defined());
   EXPECT_EQ(unpacked_input.input_host_sample_count, 1);
   EXPECT_TRUE(torch::equal(unpacked_input.sampling_params.min_p,
                            input.sampling_params.min_p));

@@ -19,9 +19,9 @@ limitations under the License.
 
 #include <algorithm>
 
-#include "framework/model/model_params_view.h"
-#include "framework/sampling/rejection_sampler.h"
-#include "runtime/forward_params.h"
+#include "core/framework/model/model_params_view.h"
+#include "core/framework/sampling/sampler.h"
+#include "core/framework/speculative/rejection_sampler.h"
 
 namespace xllm {
 
@@ -100,19 +100,80 @@ torch::Tensor materialize_graph_speculative_verify_tokens(
       verify_tokens, graph_input.spec_verify_draft_token_sources);
 }
 
-SampleOutput run_rejection_sampling(const SamplingParameters& sampling_params,
+SampleOutput run_rejection_sampling(SamplingParameters sampling_params,
                                     const DraftProposal& draft_proposal,
                                     const torch::Tensor& target_logits,
-                                    const ForwardOutput& target_output) {
-  const RejectionSampler sampler(
-      sampling_params, target_output.logprobs, target_output.max_top_logprobs);
+                                    const torch::Tensor& target_hidden_states) {
+  SampleOutput sample_output =
+      rejection_sample(sampling_params, draft_proposal, target_logits);
 
-  SampleOutput sample_output = sampler.forward(draft_proposal, target_logits);
-
-  const torch::Tensor& embeddings = target_output.sample_output.embeddings;
-  sample_output.embeddings = embeddings.view(
-      {target_logits.size(0), target_logits.size(1), embeddings.size(-1)});
+  if (target_hidden_states.defined()) {
+    // Reuse next_tokens' [batch, num_val_tokens] shape instead of
+    // re-deriving the width.
+    const torch::Tensor& next_tokens = sample_output.next_tokens;
+    sample_output.embeddings =
+        target_hidden_states.view({next_tokens.size(0),
+                                   next_tokens.size(1),
+                                   target_hidden_states.size(-1)});
+  }
   return sample_output;
+}
+
+torch::Tensor rejection_sample_ragged(
+    torch::Tensor& target_logits,
+    const SamplingParameters& request_sampling,
+    const torch::Tensor& owners) {
+  CHECK_EQ(target_logits.dim(), 2);
+  CHECK_EQ(owners.dim(), 1);
+  CHECK_EQ(owners.numel(), target_logits.size(0));
+  CHECK_EQ(owners.device(), target_logits.device());
+  CHECK(owners.scalar_type() == torch::kInt32 ||
+        owners.scalar_type() == torch::kInt64);
+  CHECK(request_sampling.selected_token_idxes.defined());
+  CHECK_GT(request_sampling.num_sample_seqs(), 0);
+  if (request_sampling.sampling_mode == SamplingMode::MIXED) {
+    CHECK(request_sampling.do_sample.defined());
+  }
+  CHECK(!request_sampling.logprobs) << "logprobs unsupported";
+  // Only the per-request transform fields (kRequestFields below) and
+  // do_sample are supported; every other registry field — penalties, seed
+  // sources, constraints — has no ragged mapping and must stay undefined.
+  constexpr std::array<torch::Tensor SamplingParameters::*, 4> kRequestFields =
+      {&SamplingParameters::temperatures,
+       &SamplingParameters::top_k,
+       &SamplingParameters::top_p,
+       &SamplingParameters::min_p};
+  for (const auto& field : kSamplingFields) {
+    const torch::Tensor& values = request_sampling.*field.member;
+    const bool packed_field =
+        std::find(kRequestFields.begin(), kRequestFields.end(), field.member) !=
+        kRequestFields.end();
+    CHECK(packed_field || !values.defined())
+        << "unsupported sampling field for ragged sampling";
+  }
+
+  // Padding rows borrow another request's logits; give them a valid
+  // distribution without touching real request rows.
+  target_logits.masked_fill_(owners.lt(0).unsqueeze(1), 0);
+  const torch::Tensor request_rows = owners.clamp_min(0).to(torch::kInt64);
+  SamplingParameters packed;
+  packed.sampling_mode = request_sampling.sampling_mode;
+  for (const auto member : kRequestFields) {
+    const auto& values = request_sampling.*member;
+    if (values.defined()) {
+      CHECK_EQ(values.device(), owners.device());
+      CHECK_EQ(values.dim(), 1);
+      CHECK_EQ(values.numel(), request_sampling.num_sample_seqs());
+      packed.*member = values.index_select(/*dim=*/0, request_rows);
+    }
+  }
+  if (request_sampling.sampling_mode == SamplingMode::MIXED) {
+    packed.do_sample =
+        request_sampling.do_sample.index_select(/*dim=*/0, request_rows);
+  }
+  // Residual X|X!=d ~ p/(1-p(d)); the caller establishes TP consensus
+  // before committing KV.
+  return sample(target_logits, packed).next_tokens;
 }
 
 }  // namespace spec_verify

@@ -9,11 +9,8 @@ cc_test(
   NAME
     sampler_test
   SRCS
-    dspark_sampling_test.cpp
-    dflash2_sampling_test.cpp
     gumbel_sampling_test.cpp
     rejection_sampler_test.cpp
-    "${PROJECT_SOURCE_DIR}/xllm/core/framework/sampling/rejection_sampler.cpp"
     sampling_params_test.cpp
     ${SAMPLER_DEVICE_TEST_SRCS}
   DEPS
@@ -21,6 +18,7 @@ cc_test(
     GTest::gtest_main
     :config
     :sampler
+    :speculative
     glog::glog
     :state_dict
 )
@@ -43,8 +41,8 @@ endif()
 cc_test(
   NAME sampler_controls_test
   NO_NPU_RUNTIME
-  SRCS logits_utils_test.cpp sampler_controls_test.cpp ${SAMPLER_CONTROLS_DEVICE_TEST_SRCS}
-  DEPS absl::strings GTest::gtest_main :config :sampler glog::glog :state_dict
+  SRCS logits_processor_test.cpp sampler_controls_test.cpp ${SAMPLER_CONTROLS_DEVICE_TEST_SRCS}
+  DEPS absl::strings GTest::gtest_main :config :sampler :speculative glog::glog :state_dict
 )
 target_link_libraries(sampler_controls_test PRIVATE
   brpc OpenSSL::SSL OpenSSL::Crypto leveldb::leveldb protobuf::libprotobuf
@@ -56,16 +54,6 @@ target_link_libraries(sampler_controls_test PRIVATE
   $<$<BOOL:${USE_NPU}>:c_sec>
   $<$<BOOL:${USE_NPU}>:nnopbase>)
 add_dependencies(sampler_controls_test brpc-static)
-
-cc_test(
-  NAME
-    json_object_grammar_test
-  SRCS
-    json_object_grammar_test.cpp
-  DEPS
-    :json_object_grammar
-    GTest::gtest_main
-)
 
 cc_test(
   NAME

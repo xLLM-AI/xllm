@@ -19,25 +19,22 @@ limitations under the License.
 #include <cstdint>
 #include <vector>
 
-#include "core/framework/sampling/json_object_grammar.h"
-#include "core/framework/sampling/rejection_sampler.h"
 #include "core/framework/speculative/metrics.h"
 #include "core/framework/speculative/verify_layout.h"
+#include "tests/core/framework/sampling/sampling_test_utils.h"
 
 namespace xllm {
 
 namespace {
+
+using testutil::make_rejection_params;
+using testutil::random_sample_from_probs;
 
 SpecMetrics calculate_from_widths(
     const torch::Tensor& tokens,
     const std::vector<int32_t>& num_draft_tokens) {
   return make_spec_metrics(tokens,
                            make_verify_layouts(tokens, &num_draft_tokens, {}));
-}
-
-RejectionSampler make_greedy_rejection_sampler() {
-  const SamplingParameters params;  // all-greedy by default
-  return RejectionSampler(params, /*logprobs=*/false, /*max_top_logprobs=*/0);
 }
 
 TEST(SpeculativeTokenStatsTest, CountsTokensPerSequence) {
@@ -119,9 +116,11 @@ TEST(SpeculativeTokenStatsTest, GreedyExcludesTargetTokens) {
                     torch::kInt64)
           .unsqueeze(/*dim=*/-1),
       /*value=*/10.0f);
-  const RejectionSampler sampler = make_greedy_rejection_sampler();
+  SamplingParameters rejection_params = make_rejection_params();
   const SampleOutput sampled =
-      sampler.forward(DraftProposal(num_draft_tokens), target_logits);
+      rejection_sample(rejection_params,
+                       DraftProposal(num_draft_tokens),
+                       testutil::flatten_rows(target_logits));
   const torch::Tensor& masked_tokens = sampled.next_tokens;
   ASSERT_TRUE(torch::equal(
       masked_tokens,
@@ -144,27 +143,25 @@ TEST(SpeculativeTokenStatsTest, GreedyExcludesTargetTokens) {
 
 TEST(SpeculativeTokenStatsTest, BlockRandomExcludesTargetTokens) {
   const torch::Tensor num_draft_tokens = torch::zeros({4, 3}, torch::kInt64);
-  const torch::Tensor draft_probs =
-      torch::tensor({0.9f, 0.1f}).view({1, 1, 2}).repeat({4, 3, 1});
+  // The draft is token 0 everywhere with a delta q; the target agrees
+  // (p/q = 1, always accepted) on row r's first r positions and gives zero
+  // mass (always rejected) from position r on, so row r rejects exactly at
+  // position r. The residual is one-hot on token 1, making recovery
+  // deterministic for any draw.
+  const torch::Tensor agrees = torch::arange(3).unsqueeze(/*dim=*/0).lt(
+      torch::arange(4).unsqueeze(/*dim=*/1));
   const torch::Tensor target_probs =
-      torch::tensor({0.8f, 0.2f}).view({1, 1, 2}).repeat({4, 3, 1});
-  // The fixed draws reject at positions 0, 1, 2, then accept all drafts.
-  // Residual probability exists only for token 1, so recovery is
+      torch::stack({agrees, agrees.logical_not()}, /*dim=*/-1)
+          .to(torch::kFloat32);
+  const DraftProposal proposal(
+      num_draft_tokens,
+      torch::tensor({1.0f, 0.0f}).view({1, 1, 2}).repeat({4, 3, 1}).log());
+  // An explicit one-hot-on-token-1 bonus row makes the committed bonus token
   // deterministic.
-  const torch::Tensor uniform_rand = torch::tensor({{0.95f, 0.1f, 0.1f},
-                                                    {0.1f, 0.95f, 0.1f},
-                                                    {0.1f, 0.1f, 0.95f},
-                                                    {0.1f, 0.1f, 0.1f}});
-  const torch::Tensor bonus_tokens = torch::ones({4, 1}, torch::kInt64);
-  const DraftProposal proposal(num_draft_tokens, draft_probs.log());
-  const torch::Tensor target_log_probs = target_probs.log();
-  const torch::Tensor masked_tokens = RejectionSampler::random_sample(
-      proposal,
-      target_log_probs,
-      torch::logsumexp(
-          target_log_probs.to(torch::kFloat32), /*dim=*/-1, /*keepdim=*/false),
-      uniform_rand,
-      bonus_tokens);
+  const torch::Tensor bonus_row =
+      torch::tensor({0.0f, 1.0f}).view({1, 1, 2}).repeat({4, 1, 1}).log();
+  const torch::Tensor masked_tokens = random_sample_from_probs(
+      proposal, target_probs, /*uniform_seed=*/0, bonus_row);
   ASSERT_TRUE(torch::equal(
       masked_tokens,
       torch::tensor(
@@ -192,9 +189,11 @@ TEST(SpeculativeTokenStatsTest, BlockHandlesSingleAndZeroDrafts) {
       /*dim=*/-1,
       torch::tensor({{9, 8}, {1, 8}}, torch::kInt64).unsqueeze(/*dim=*/-1),
       /*value=*/10.0f);
-  const RejectionSampler sampler = make_greedy_rejection_sampler();
+  SamplingParameters rejection_params = make_rejection_params();
   const SampleOutput sampled =
-      sampler.forward(DraftProposal(num_draft_tokens), target_logits);
+      rejection_sample(rejection_params,
+                       DraftProposal(num_draft_tokens),
+                       testutil::flatten_rows(target_logits));
   const auto stats =
       calculate_from_widths(sampled.next_tokens, {1, 1}).sequence_stats;
   ASSERT_EQ(stats.size(), 2);
@@ -211,7 +210,9 @@ TEST(SpeculativeTokenStatsTest, BlockHandlesSingleAndZeroDrafts) {
                              torch::full({2, 1, 1}, 8, torch::kInt64),
                              /*value=*/10.0f);
   const SampleOutput bonus_only =
-      sampler.forward(DraftProposal(empty_drafts), bonus_only_logits);
+      rejection_sample(rejection_params,
+                       DraftProposal(empty_drafts),
+                       testutil::flatten_rows(bonus_only_logits));
   const torch::Tensor& bonus_only_tokens = bonus_only.next_tokens;
   ASSERT_TRUE(
       torch::equal(bonus_only_tokens, torch::full({2, 1}, 8, torch::kInt64)));

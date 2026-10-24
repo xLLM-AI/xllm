@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/framework/sampling/json_object_grammar.h"
+#include "core/framework/constrained/json_object_grammar.h"
 
 #include <gtest/gtest.h>
 
@@ -23,6 +23,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/metrics.h"
+#include "core/framework/sampling/logits_processor.h"
 #include "core/framework/tokenizer/tokenizer.h"
 
 namespace xllm {
@@ -297,7 +298,9 @@ TEST(JsonObjectGrammarTest, BitmaskMatchesFloatMaskAndCaches) {
 
   torch::Tensor logits =
       torch::zeros({1, static_cast<int64_t>(grammar.vocab_size())});
-  apply_token_bitmask_inplace(logits, packed.unsqueeze(0));
+  SamplingParameters params;
+  params.filter_bitmask = packed.unsqueeze(0);
+  process_logits(logits, params);
   for (int64_t token_id = 0;
        token_id < static_cast<int64_t>(grammar.vocab_size());
        ++token_id) {
@@ -383,7 +386,9 @@ TEST(JsonObjectGrammarTest, BuildsMaskWithMixedReasoningDefinitions) {
   const torch::Tensor bitmask = build_json_object_filter_bitmask(states);
   ASSERT_EQ(bitmask.sizes(), torch::IntArrayRef({5, 1}));
   torch::Tensor masked_logits = torch::zeros({5, 5});
-  apply_token_bitmask_inplace(masked_logits, bitmask);
+  SamplingParameters params;
+  params.filter_bitmask = bitmask;
+  process_logits(masked_logits, params);
   EXPECT_TRUE(torch::equal(masked_logits, mask));
 }
 

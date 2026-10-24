@@ -22,8 +22,9 @@ limitations under the License.
 #include <utility>
 
 #include "common/metrics.h"
-#include "core/framework/sampling/dspark_sampling.h"
-#include "framework/parallel_state/process_group.h"
+#include "core/framework/parallel_state/process_group.h"
+#include "core/framework/sampling/sampler.h"
+#include "core/framework/speculative/draft_proposal.h"
 #include "runtime/llm_worker_impl.h"
 #include "util/timer.h"
 
@@ -32,29 +33,20 @@ namespace xllm {
 DSparkWorkerImpl::DSparkWorkerImpl(const ParallelArgs& parallel_args,
                                    const torch::Device& device,
                                    const runtime::Options& options)
-    : DFlashWorkerImpl(parallel_args, device, options),
-      sampling_process_group_(parallel_args.tp_group_ != nullptr
-                                  ? parallel_args.tp_group_
-                                  : parallel_args.process_group_) {}
+    : DFlashWorkerImpl(parallel_args, device, options) {}
 
-DSparkWorkerImpl::DraftBlock DSparkWorkerImpl::run_decode_draft(
+DraftProposal DSparkWorkerImpl::run_decode_draft(
     const LlmForwardInput& input,
     LlmForwardInput& validate_input) {
   Timer draft_timer;
 
-  // Same input build as DFlash, but sample_from_anchor()==true makes the query
-  // block N-wide and every position predicts a draft token.
+  // Same input build as DFlash, but sample_from_anchor()==true makes the
+  // query block N-wide and every position predicts a draft token.
   LlmForwardInput query_input;
   prepare_query_inputs(input, query_input);
 
-  CHECK(input.token_ids_host.defined())
-      << "DSpark requires host token ids for the anchor.";
+  const torch::Tensor anchors = anchor_token_ids(input);
   const int32_t batch_size = input.input_params.meta.num_sequences;
-  CHECK_GE(input.token_ids_host.numel(), batch_size)
-      << "DSpark anchor token count must cover the decode batch.";
-  torch::Tensor anchor_token_ids =
-      input.token_ids_host.slice(/*dim=*/0, /*start=*/0, /*end=*/batch_size)
-          .to(draft_impl_->device(), torch::kLong);
   const int32_t num_speculative_tokens = options_.num_speculative_tokens();
 
   CHECK_GT(num_speculative_tokens, 0)
@@ -73,9 +65,6 @@ DSparkWorkerImpl::DraftBlock DSparkWorkerImpl::run_decode_draft(
       << "DSpark draft forward must return an output.";
   CHECK(draft_output->logits.defined())
       << "DSpark draft forward must return logits.";
-  // Match DFlash's host/device overlap: validation input construction only
-  // reads the original input, so prepare it after the asynchronous draft
-  // launch instead of delaying that launch.
   prepare_validate_inputs(input, validate_input);
 
   const int64_t num_rows = draft_output->logits.size(/*dim=*/0);
@@ -86,51 +75,92 @@ DSparkWorkerImpl::DraftBlock DSparkWorkerImpl::run_decode_draft(
       << "DSpark draft logits batch must match the decode batch.";
   torch::Tensor base_logits = draft_output->logits.view(
       {batch_size, num_speculative_tokens, draft_output->logits.size(-1)});
-  DraftBlock draft_block = [&]() {
+  DraftProposal draft_proposal;
+  {
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
-    SamplingParameters sampling_params_on_device = input.sampling_params.to(
+    SamplingParameters sampling_params_on_device = input.sampling_params;
+    prepare_draft_sampling(is_probabilistic_draft_, sampling_params_on_device);
+    sampling_params_on_device = sampling_params_on_device.to(
         base_logits.device(), base_logits.scalar_type());
-    prepare_draft_sampling(draft_sampling_mode_, sampling_params_on_device);
-    return sample_block(
-        base_logits, anchor_token_ids, sampling_params_on_device);
-  }();
+    draft_proposal = sample_dspark_markov_block(
+        [this](const torch::Tensor& tokens) {
+          return draft_impl_->dspark_markov_bias(tokens);
+        },
+        base_logits,
+        anchors,
+        sampling_params_on_device,
+        [this](torch::Tensor& tokens) {
+          sync_sampling_tensor(tokens, sampling_process_group_);
+        },
+        is_probabilistic_draft_);
+  }
 
-  draft_block.retained_inputs = take_retained_inputs(*draft_output);
+  draft_proposal.keep_alive() = take_retained_inputs(*draft_output);
 
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
               draft_timer.elapsed_seconds());
-  return draft_block;
+  return draft_proposal;
 }
 
-DSparkWorkerImpl::DraftBlock DSparkWorkerImpl::sample_block(
-    const torch::Tensor& base_logits,
-    const torch::Tensor& anchor_token_ids,
-    const SamplingParameters& sampling_params) const {
-  CHECK_EQ(base_logits.dim(), 3);
-  DraftBlock draft_block;
-  draft_block.proposal = sample_dspark_block(
-      base_logits,
-      anchor_token_ids,
-      sampling_params,
-      [this](const torch::Tensor& previous) {
-        return draft_impl_->dspark_markov_bias(previous);
-      },
-      [this, &sampling_params](torch::Tensor& tokens) {
-        synchronize_sampled_token_ids(
-            tokens, sampling_params.sampling_mode == SamplingMode::GREEDY);
-      });
-  return draft_block;
-}
-
-void DSparkWorkerImpl::synchronize_sampled_token_ids(
-    torch::Tensor& sampled_token_ids,
-    bool all_greedy_sample) const {
-  if (all_greedy_sample || sampling_process_group_ == nullptr ||
-      sampling_process_group_->world_size() <= 1) {
-    return;
+DraftProposal sample_dspark_markov_block(const DSparkMarkovBias& markov_bias,
+                                         const torch::Tensor& base_logits,
+                                         const torch::Tensor& anchors,
+                                         const SamplingParameters& sampling,
+                                         const SyncSampledTokens& sync_tokens,
+                                         bool is_probabilistic_draft,
+                                         torch::Tensor token_ids_out) {
+  const int64_t rows = base_logits.size(0);
+  const int64_t steps = base_logits.size(1);
+  const int64_t vocab = base_logits.size(2);
+  CHECK_EQ(anchors.size(0), rows);
+  // markov_bias embeds anchors and rejects other dtypes with an opaque
+  // kernel error; enforce the contract here.
+  CHECK_EQ(anchors.scalar_type(), torch::kInt64);
+  CHECK_EQ(anchors.device(), base_logits.device());
+  DraftProposal proposal =
+      token_ids_out.defined()
+          ? DraftProposal::from_token_buffer(
+                std::move(token_ids_out),
+                vocab,
+                is_probabilistic_draft,
+                base_logits.options().dtype(torch::kFloat32))
+          : DraftProposal::preallocate(
+                rows,
+                steps,
+                vocab,
+                is_probabilistic_draft,
+                anchors.options(),
+                base_logits.options().dtype(torch::kFloat32));
+  auto previous = anchors;
+  torch::Tensor scratch;
+  const bool needs_sync = sampling.sampling_mode != SamplingMode::GREEDY;
+  for (int64_t step = 0; step < steps; ++step) {
+    auto bias = markov_bias(previous);
+    CHECK_EQ(bias.sizes(), torch::IntArrayRef({rows, vocab}))
+        << "DSpark reduced vocabulary requires draft-to-target remapping.";
+    torch::Tensor step_logits;
+    if (proposal.logits().has_value()) {
+      // add_out into the logits page lets the sampler mutate it in place;
+      // draft_logits aliases the page directly.
+      torch::Tensor page = proposal.logits_at(step);
+      torch::add_out(page, base_logits.select(1, step), bias);
+      step_logits = page;
+    } else {
+      if (!scratch.defined()) {
+        scratch = torch::empty(base_logits.select(1, step).sizes(),
+                               base_logits.options());
+      }
+      torch::add_out(scratch, base_logits.select(1, step), bias);
+      step_logits = scratch;
+    }
+    auto sampled = sample(step_logits, sampling);
+    if (needs_sync) {
+      sync_tokens(sampled.next_tokens);
+    }
+    proposal.tokens_at(step).copy_(sampled.next_tokens);
+    previous = sampled.next_tokens;
   }
-  sampled_token_ids = sampled_token_ids.contiguous();
-  sampling_process_group_->broadcast(sampled_token_ids, /*root_rank=*/0);
+  return proposal;
 }
 
 }  // namespace xllm

@@ -31,6 +31,7 @@ limitations under the License.
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/rec_config.h"
+#include "core/framework/sampling/sampler.h"
 #include "util/rec_model_utils.h"
 #include "util/tensor_helper.h"
 #if defined(USE_CUDA)
@@ -48,10 +49,10 @@ limitations under the License.
 #include "platform/npu/device_capture_lock.h"
 #endif
 #include "common/version_singleton.h"
+#include "core/framework/constrained/rec_constrained_decoding.h"
 #include "core/framework/model_loader/model_loader.h"
-#include "framework/sampling/rec_constrained_decoding.h"
-#include "framework/sampling/rec_sampler.h"
-#include "framework/state_dict/rec_vocab_dict.h"
+#include "core/framework/sampling/rec_sampler.h"
+#include "core/framework/state_dict/rec_vocab_dict.h"
 #include "models/model_registry.h"
 #include "util/env_var.h"
 #include "util/timer.h"
@@ -509,7 +510,7 @@ std::optional<ForwardOutput> RecWorkerImpl::RecWorkPipeline::step(
   // driver prepare model output
   SampleOutput sample_output;
   if (sampling_params.num_sample_seqs() > 0) {
-    sample_output = runtime_.worker.sampler_->forward(logits, sampling_params);
+    sample_output = ::xllm::sample(logits, sampling_params);
     output.logits = logits;
 
     // beam search kernel
@@ -597,11 +598,8 @@ RecWorkerImpl::OneRecWorkPipeline::OneRecWorkPipeline(
       std::make_unique<RecConstrainedDecoding>(vocab_dict,
                                                vocab_size,
                                                runtime_.worker.dtype(),
-                                               runtime_.worker.device(),
-                                               /*use_gen_threadpool=*/false);
-  CHECK(constrained_decoding_->build_mask_cache())
-      << "Failed to build OneRec constrained decoding cache, vocab_size="
-      << vocab_size;
+                                               runtime_.worker.device());
+  constrained_decoding_->build_mask_cache();
 }
 
 void RecWorkerImpl::OneRecWorkPipeline::prepare_work_before_execute(
@@ -839,11 +837,8 @@ RecWorkerImpl::OneRecXAttentionWorkPipeline::OneRecXAttentionWorkPipeline(
       std::make_unique<RecConstrainedDecoding>(vocab_dict,
                                                vocab_size,
                                                runtime_.worker.dtype(),
-                                               runtime_.worker.device(),
-                                               /*use_gen_threadpool=*/false);
-  CHECK(constrained_decoding_->build_mask_cache())
-      << "Failed to build OneRec xattention constrained decoding cache, "
-      << "vocab_size=" << vocab_size;
+                                               runtime_.worker.device());
+  constrained_decoding_->build_mask_cache();
 }
 
 void RecWorkerImpl::OneRecXAttentionWorkPipeline::

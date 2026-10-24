@@ -50,10 +50,12 @@ TEST(SamplingParamsTest, MinimumConstraintsExpandForVerifyAndStayOffDrafts) {
   params.min_tokens_remaining = torch::tensor({3, 4}, torch::kInt64);
   params.min_token_ids = torch::tensor({{7, -1}, {8, 9}}, torch::kInt64);
   EXPECT_TRUE(params.has_sampling_fields());
-  expand_sampling_params_for_verify(params,
-                                    /*repeats=*/3,
-                                    /*total_num_val_tokens=*/6,
-                                    torch::Device(torch::kCPU));
+  for (const auto& field : kSamplingFields) {
+    if (!field.per_request) {
+      repeat_interleave_if_defined(params.*field.member, /*repeats=*/3);
+    }
+  }
+  params.selected_token_idxes = torch::arange(6, torch::kInt32);
   EXPECT_TRUE(torch::equal(
       params.min_token_positions,
       torch::tensor({100, 100, 100, 200, 200, 200}, torch::kInt64)));
@@ -63,10 +65,9 @@ TEST(SamplingParamsTest, MinimumConstraintsExpandForVerifyAndStayOffDrafts) {
       params.min_token_ids,
       torch::tensor({{7, -1}, {7, -1}, {7, -1}, {8, 9}, {8, 9}, {8, 9}},
                     torch::kInt64)));
-  for (const DraftSamplingMode mode :
-       {DraftSamplingMode::GREEDY, DraftSamplingMode::PROBABILISTIC}) {
+  for (const bool probabilistic : {false, true}) {
     SamplingParameters draft = params;
-    prepare_draft_sampling(mode, draft);
+    prepare_draft_sampling(probabilistic, draft);
     EXPECT_FALSE(draft.min_token_positions.defined());
     EXPECT_FALSE(draft.min_tokens_remaining.defined());
     EXPECT_FALSE(draft.min_token_ids.defined());

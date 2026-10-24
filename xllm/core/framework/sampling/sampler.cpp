@@ -27,12 +27,9 @@ limitations under the License.
 #include <torch_npu/csrc/aten/NPUGeneratorImpl.h>
 #endif
 
-#include "common/global_flags.h"
 #include "core/framework/config/model_config.h"
-#include "core/framework/sampling/json_object_grammar.h"
-#include "core/framework/sampling/logits_utils.h"
+#include "core/framework/sampling/logits_processor.h"
 #include "core/framework/sampling/sampling_params.h"
-#include "core/kernels/ops_api.h"
 
 namespace xllm {
 namespace {
@@ -59,115 +56,51 @@ torch::Generator make_sampling_generator(const torch::Device& device) {
 
 }  // namespace
 
-void Sampler::apply_sampling_penalties(torch::Tensor& logits,
-                                       const SamplingParameters& params) {
-  if (params.logits_bias.defined()) {
-    logits.add_(params.logits_bias);
+torch::Tensor gumbel_noise(const SamplingParameters& params,
+                           torch::IntArrayRef sizes,
+                           const torch::Device& device) {
+  torch::Tensor noise =
+      torch::empty(sizes,
+                   torch::TensorOptions().dtype(torch::kFloat32).device(device))
+          .exponential_(/*lambd=*/1.0)
+          .clamp_min_(std::numeric_limits<float>::min())
+          .log_();
+  // Fill after the log_: masking first would turn the sentinel into
+  // log(0) = -inf.
+  if (params.sampling_mode == SamplingMode::MIXED) {
+    noise.masked_fill_(
+        greedy_mask(params, device)
+            .view(batch_broadcast_shape(noise.size(0), noise.dim())),
+        0.0);
   }
-  if (params.min_token_ids.defined()) {
-    CHECK(params.min_tokens_remaining.defined());
-    CHECK_EQ(params.min_token_ids.dim(), 2);
-    CHECK_EQ(params.min_token_ids.size(0), logits.size(0));
-    CHECK_EQ(params.min_tokens_remaining.numel(), logits.size(0));
-    const auto& ids = params.min_token_ids;
-    const auto active = torch::logical_and(
-        ids.ge(0), params.min_tokens_remaining.gt(0).unsqueeze(1));
-    const auto bias =
-        torch::zeros(ids.sizes(), logits.options())
-            .masked_fill(active, -std::numeric_limits<float>::infinity());
-    // Additive scatter keeps a real stop id 0 blocked even when padding also
-    // maps to index 0. Scatter assignment would race and could restore EOS.
-    logits.scatter_add_(/*dim=*/1, ids.clamp_min(0), bias);
-  }
-  // Apply repetition before frequency and presence penalties.
-  if (params.repetition_penalties.defined()) {
-    apply_repetition_penalties(logits,
-                               params.unique_token_ids,
-                               params.repetition_penalties,
-                               params.unique_token_ids_lens);
-  }
-
-  if (params.frequency_penalties.defined()) {
-    apply_frequency_presence_penalties(logits,
-                                       params.unique_token_ids,
-                                       params.unique_token_counts,
-                                       params.frequency_penalties,
-                                       params.presence_penalties);
-  }
+  return noise;
 }
 
-namespace {
-
-torch::Tensor process_logits_impl(torch::Tensor& logits,
-                                  const SamplingParameters& params,
-                                  const torch::Tensor& filter_mask,
-                                  bool return_probs) {
-  const torch::Tensor& effective_filter_mask =
-      filter_mask.defined() ? filter_mask : params.filter_mask;
-  Sampler::apply_sampling_penalties(logits, params);
-
-  // Penalties, logits_bias, and the filter masks can move the argmax, so
-  // they always run. Temperature, min-p, top-k, and top-p are argmax
-  // preserving (positive scaling and masking that keeps each row's max), so
-  // a greedy leg that reports no distribution values skips them entirely.
-  if (params.filter_bitmask.defined()) {
-    apply_token_bitmask_inplace(logits, params.filter_bitmask);
-  } else if (effective_filter_mask.defined()) {
-    CHECK_EQ(effective_filter_mask.dim(), 2)
-        << "filter_mask must be 2-D, dim=" << effective_filter_mask.dim();
-    CHECK_EQ(effective_filter_mask.size(0), logits.size(0))
-        << "filter_mask batch mismatch, filter_mask.size(0)="
-        << effective_filter_mask.size(0)
-        << ", logits.size(0)=" << logits.size(0);
-    CHECK_EQ(effective_filter_mask.size(1), logits.size(1))
-        << "filter_mask vocab mismatch, filter_mask.size(1)="
-        << effective_filter_mask.size(1)
-        << ", logits.size(1)=" << logits.size(1);
-    logits.add_(effective_filter_mask);
-  }
-  if (params.sampling_mode == SamplingMode::GREEDY && !params.logprobs &&
-      !params.return_logits) {
-    return {};
-  }
-
-  torch::Tensor top_p = params.top_p;
-  if (params.top_k.defined() && params.top_p.defined()) {
-    // Native top-k/top-p consumes top-p in the logits dtype.
-    top_p = top_p.to(logits.scalar_type());
-  }
-  const bool has_transforms = params.temperatures.defined() ||
-                              params.min_p.defined() ||
-                              params.top_k.defined() || top_p.defined();
-  if (has_transforms) {
-    kernel::FusedLogitsTransformParams transform_params{logits,
-                                                        params.temperatures,
-                                                        params.min_p,
-                                                        params.top_k,
-                                                        top_p,
-                                                        return_probs};
-    if (kernel::supports_fused_logits_transform(transform_params)) {
-      return kernel::fused_logits_transform(transform_params);
-    }
-  }
-  if (params.temperatures.defined()) {
-    apply_temperatures(logits, params.temperatures);
-  }
-  apply_min_p(logits, params.min_p);
-  apply_top_k_top_p(logits, torch::Tensor(), params.top_k, top_p);
-  return {};
+torch::Tensor gumbel_sample(const torch::Tensor& logits) {
+  // clamp_min_ before log_: an exact 0.0 Exp draw would become -inf noise.
+  return gumbel_argmax(
+      logits,
+      torch::empty(
+          logits.sizes(),
+          torch::TensorOptions().dtype(torch::kFloat32).device(logits.device()))
+          .exponential_(/*lambd=*/1.0)
+          .clamp_min_(std::numeric_limits<float>::min())
+          .log_());
 }
 
-}  // namespace
-
-void Sampler::process_logits(torch::Tensor& logits,
-                             const SamplingParameters& params,
-                             const torch::Tensor& filter_mask) {
-  process_logits_impl(logits, params, filter_mask, /*return_probs=*/false);
+torch::Tensor gumbel_argmax(const torch::Tensor& logits,
+                            torch::Tensor gumbel_noise) {
+  CHECK(gumbel_noise.defined())
+      << "gumbel_argmax requires noise; greedy callers use greedy_sample";
+  CHECK_EQ(gumbel_noise.sizes(), logits.sizes());
+  // Elementwise, so the noise buffer doubles as the output.
+  torch::sub_out(gumbel_noise, logits, gumbel_noise);
+  return gumbel_noise.argmax(/*dim=*/-1);
 }
 
-SampleOutput Sampler::forward(torch::Tensor& logits,
-                              const SamplingParameters& params,
-                              const torch::Tensor& filter_mask) const {
+SampleOutput sample(torch::Tensor& logits,
+                    const SamplingParameters& params,
+                    const torch::Tensor& filter_mask) {
   SampleOutput output;
   // vLLM reports probabilities from the unmodified model distribution.
   const torch::Tensor raw_logprobs =
@@ -175,37 +108,22 @@ SampleOutput Sampler::forward(torch::Tensor& logits,
           ? torch::log_softmax(logits, /*dim=*/-1, torch::kFloat32)
           : torch::Tensor();
 
-  torch::Tensor probs = process_logits_impl(
-      logits,
-      params,
-      filter_mask,
-      /*return_probs=*/params.sampling_mode != SamplingMode::GREEDY);
+  process_logits(logits, params, filter_mask);
 
   // Keep the model dtype; consumers upcast where the reduction needs fp32.
   if (params.return_logits) {
     output.draft_logits = logits;
   }
 
-  // do_sample is defined only for mixed batches (see
-  // SamplingParameters::init); undefined batches never reach the per-row
-  // branches below.
   if (params.sampling_mode == SamplingMode::MIXED) {
     const torch::Tensor& do_sample = params.require_do_sample();
     CHECK_EQ(do_sample.dim(), 1)
         << "params.do_sample must be 1D [num_seqs], got " << do_sample.sizes();
-    // same batch size
     CHECK_EQ(logits.size(0), do_sample.size(0));
   }
 
-  // The greedy legs argmax the logits directly; softmax feeds only the
-  // random legs (argmax(softmax(x)) == argmax(x)).
   const bool seed_sampling =
       params.seeds.defined() && params.sampling_mode != SamplingMode::GREEDY;
-  const bool need_probs = params.sampling_mode == SamplingMode::RANDOM ||
-                          params.sampling_mode == SamplingMode::MIXED;
-  if (need_probs && !probs.defined()) {
-    probs = torch::softmax(logits, /*dim=*/-1, /*dtype=*/torch::kFloat32);
-  }
   torch::Tensor samples;
   if (seed_sampling) {
     const torch::Tensor seeds = params.seeds.to(torch::kCPU);
@@ -214,39 +132,43 @@ SampleOutput Sampler::forward(torch::Tensor& logits,
         params.sampling_mode == SamplingMode::RANDOM
             ? torch::Tensor()
             : params.require_do_sample().to(torch::kCPU);
-    std::vector<torch::Tensor> rows;
-    rows.reserve(probs.size(0));
-    for (int64_t row = 0; row < probs.size(0); ++row) {
-      const torch::Tensor probabilities = probs.select(0, row);
+    // Seed -1 rows keep the global RNG.
+    torch::Generator generator = make_sampling_generator(logits.device());
+    // Skipped greedy rows hold garbage; clamp_min_/log_ maps any finite
+    // garbage to a finite value and the greedy-row masked_fill_ below
+    // overwrites them with the 0.0 sentinel, so no zero init is needed.
+    torch::Tensor noise =
+        torch::empty(logits.sizes(), logits.options().dtype(torch::kFloat32));
+    for (int64_t row = 0; row < logits.size(0); ++row) {
       if (do_sample.defined() && !do_sample[row].item<bool>()) {
-        rows.emplace_back(probabilities.argmax(-1).view({1}));
         continue;
       }
       const int64_t seed = seeds[row].item<int64_t>();
-      if (seed == -1) {
-        rows.emplace_back(random_sample(probabilities.unsqueeze(0)).view({1}));
-        continue;
+      std::optional<torch::Generator> row_generator;
+      if (seed != -1) {
+        generator.set_current_seed(
+            sampling_seed(seed, offsets[row].item<int64_t>()));
+        row_generator = generator;
       }
-      // A private generator keeps this request independent from the global RNG.
-      auto generator = make_sampling_generator(probs.device());
-      generator.set_current_seed(
-          sampling_seed(seed, offsets[row].item<int64_t>()));
-      rows.emplace_back(probabilities.multinomial(/*num_samples=*/1,
-                                                  /*replacement=*/false,
-                                                  generator));
+      noise.select(0, row).exponential_(/*lambd=*/1.0, row_generator);
     }
-    samples = torch::cat(rows, /*dim=*/0);
+    noise.clamp_min_(std::numeric_limits<float>::min()).log_();
+    if (params.sampling_mode == SamplingMode::MIXED) {
+      noise.masked_fill_(
+          greedy_mask(params, logits.device())
+              .view(batch_broadcast_shape(noise.size(0), noise.dim())),
+          0.0);
+    }
+    samples = gumbel_argmax(logits, noise);
   } else if (params.sampling_mode == SamplingMode::RANDOM) {
-    samples = random_sample(probs);
+    samples = gumbel_sample(logits);
   } else if (params.sampling_mode == SamplingMode::GREEDY) {
     samples = greedy_sample(logits);
   } else {
-    auto random = random_sample(probs);
-    auto greedy = greedy_sample(logits);
-    samples = torch::where(params.require_do_sample(), random, greedy);
+    torch::Tensor noise = gumbel_noise(params, logits.sizes(), logits.device());
+    samples = gumbel_argmax(logits, noise);
   }
-  auto sample_indices = samples.to(torch::kLong);
-  output.next_tokens = sample_indices;
+  output.next_tokens = samples;
 
   if (params.logprobs) {
     if (::xllm::ModelConfig::get_instance().enable_qwen3_reranker()) {
@@ -266,19 +188,14 @@ SampleOutput Sampler::forward(torch::Tensor& logits,
         raw_logprobs.defined()
             ? raw_logprobs
             : torch::log_softmax(logits, /*dim=*/-1, torch::kFloat32);
-    // select the logprobs for each sequence
-    auto selected_logprobs =
-        logprobs.gather(/*dim=*/-1, sample_indices.view({-1, 1}));
+    auto selected_logprobs = logprobs.gather(/*dim=*/-1, samples.view({-1, 1}));
     output.logprobs = selected_logprobs.view({-1});
 
     if (params.max_top_logprobs > 0) {
-      // max_top_logprobs is the batch-wide max, so one request asking for more
-      // than the vocabulary would make topk throw and fail every request in the
-      // batch. The factories reject such requests up front
-      // (RequestSamplingParam::top_logprobs_vocab_error); clamp here as the
-      // last line of defense so the sampler can never be the failure point.
-      // Every consumer sizes by the returned row width, so a shorter row is
-      // safe.
+      // max_top_logprobs is the batch-wide max, so one request asking for
+      // more than the vocabulary would fail every request in the batch. The
+      // factories reject this up front; clamp as a last line of defense —
+      // every consumer sizes by the returned row width.
       const int64_t k =
           std::min<int64_t>(params.max_top_logprobs, logprobs.size(-1));
       auto [values, indices] = logprobs.topk(k, /*dim=*/-1);
@@ -290,30 +207,8 @@ SampleOutput Sampler::forward(torch::Tensor& logits,
   return output;
 }
 
-torch::Tensor Sampler::greedy_sample(const torch::Tensor& probs) {
-  return probs.argmax(/*dim=*/-1);
-}
-
-torch::Tensor Sampler::random_sample(const torch::Tensor& probs) {
-#if defined(USE_MLU) || defined(USE_CUDA) || defined(USE_DCU)
-  if (!probs.device().is_cpu()) {
-    xllm::kernel::RandomSampleParams params;
-    params.logits = probs;
-    return xllm::kernel::random_sample(params);
-  }
-#endif
-  if (probs.dim() == 3) {
-    auto batch_size = probs.size(0);
-    auto seq_len = probs.size(1);
-    auto vocab_size = probs.size(2);
-    auto flat_probs = probs.reshape({-1, vocab_size});
-    auto sampled =
-        flat_probs.multinomial(/*num_samples=*/1, /*replacement=*/false);
-    return sampled.reshape({batch_size, seq_len});
-  } else {
-    return probs.multinomial(/*num_samples=*/1, /*replacement=*/false)
-        .flatten();
-  }
+torch::Tensor greedy_sample(const torch::Tensor& logits) {
+  return logits.argmax(/*dim=*/-1);
 }
 
 }  // namespace xllm

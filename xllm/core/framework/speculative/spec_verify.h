@@ -24,7 +24,6 @@ namespace xllm {
 class DraftProposal;
 class GraphInputView;
 class SampleOutput;
-class ForwardOutput;
 
 namespace spec_verify {
 
@@ -57,10 +56,29 @@ torch::Tensor materialize_graph_speculative_verify_tokens(
     const torch::Tensor& tokens,
     const GraphInputView& graph_input);
 
-SampleOutput run_rejection_sampling(const SamplingParameters& sampling_params,
+// Scores the RAW target logits (sampling transforms are applied inside the
+// rejection_sample exactly once); `target_logits` arrives flat as
+// [batch * val_tokens, vocab] — callers never pre-shape, and the validation
+// width is derived from the draft proposal. Takes the sampling params by
+// value so the rejection sampler owns them: params-owning callers (MTP's
+// verify_params chain, suffix via validate) std::move through the
+// forwarding layers for one copy per verify step; callers reading a const
+// input (DFlash's run_validate) copy once at this boundary.
+// `target_hidden_states`, when defined, is attached to the output as the
+// [batch, val_tokens, hidden] view.
+SampleOutput run_rejection_sampling(SamplingParameters sampling_params,
                                     const DraftProposal& draft_proposal,
                                     const torch::Tensor& target_logits,
-                                    const ForwardOutput& target_output);
+                                    const torch::Tensor& target_hidden_states);
+// Packed verification for a deterministic (point-mass) draft: sample each
+// target row, then let the caller commit the prefix matching its proposals.
+// owners maps packed rows to requests; -1 padding borrows request zero's
+// parameters and must never be committed. Penalties, constraints, seeded
+// sampling and logprobs are not supported.
+torch::Tensor rejection_sample_ragged(
+    torch::Tensor& target_logits,
+    const SamplingParameters& request_sampling,
+    const torch::Tensor& owners);
 
 }  // namespace spec_verify
 

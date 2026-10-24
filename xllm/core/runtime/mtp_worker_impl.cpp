@@ -16,6 +16,7 @@ limitations under the License.
 #include "core/runtime/mtp_worker_impl.h"
 
 #include <glog/logging.h>
+
 #if defined(USE_NPU)
 #include <acl/acl.h>
 #include <c10/core/DeviceType.h>
@@ -51,6 +52,7 @@ limitations under the License.
 #include "core/framework/speculative/draft_extend_input.h"
 #include "core/framework/speculative/mtp_async_input_builder.h"
 #include "core/framework/speculative/mtp_async_state.h"
+#include "core/framework/speculative/rejection_sampler.h"
 #include "core/framework/speculative/spec_input_builder.h"
 #include "core/framework/speculative/spec_verify.h"
 #include "core/layers/common/dsa_topk_share_plan.h"
@@ -118,17 +120,6 @@ bool has_active_dp_tokens(const Input& input) {
   });
 }
 
-void broadcast_tokens_in_group(torch::Tensor& tokens,
-                               ProcessGroup* process_group,
-                               int32_t root_rank = 0) {
-  if (process_group == nullptr || process_group->world_size() <= 1 ||
-      !tokens.defined()) {
-    return;
-  }
-  tokens = tokens.contiguous();
-  process_group->broadcast(tokens, root_rank);
-}
-
 bool should_broadcast_spec_tokens(const ParallelArgs& parallel_args,
                                   bool enable_spec_token_broadcast,
                                   bool all_greedy_sample) {
@@ -159,13 +150,13 @@ void broadcast_spec_tokens(torch::Tensor& tokens,
       parallel_args.cp_group_ != nullptr &&
       parallel_args.cp_group_ != parallel_args.tp_group_;
   if (!use_orthogonal_cp_consensus) {
-    broadcast_tokens_in_group(tokens, tp_group);
+    sync_sampling_tensor(tokens, tp_group);
     return;
   }
 
-  broadcast_tokens_in_group(tokens, parallel_args.tp_group_);
+  sync_sampling_tensor(tokens, parallel_args.tp_group_);
   if (parallel_args.cp_group_ != parallel_args.tp_group_) {
-    broadcast_tokens_in_group(tokens, parallel_args.cp_group_);
+    sync_sampling_tensor(tokens, parallel_args.cp_group_);
   }
 }
 
@@ -845,7 +836,7 @@ template <typename TargetInput>
                                          ? parallel_args_.tp_group_
                                          : parallel_args_.process_group_;
   }
-  capacity.draft_sampling_mode = draft_sampling_mode_;
+  capacity.is_probabilistic_draft = is_probabilistic_draft_;
   status = TaskExecutionPipeline::create(threadpool_,
                                          impl_->task_model(),
                                          draft_impl_->task_model(),
@@ -1316,8 +1307,10 @@ void MTPWorkerImpl<TargetInput>::prepare_prefill_inputs(
     const TargetInput& input,
     LlmForwardInput& prefill_input) {
   c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
-  prefill_input = make_llm_draft_input(input).to(device_, dtype_);
-  prepare_draft_sampling(draft_sampling_mode_, prefill_input.sampling_params);
+  prefill_input = make_llm_draft_input(input);
+  prepare_draft_sampling(is_probabilistic_draft_,
+                         prefill_input.sampling_params);
+  prefill_input = prefill_input.to(device_, dtype_);
   clear_ready_events(prefill_input);
   // Draft prefill consumes target hidden states, not vision inputs.
   auto& input_params = prefill_input.input_params;
@@ -1900,7 +1893,17 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
   {
     AUTO_COUNTER(speculative_execution_latency_seconds_validation);
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
-    val_output = validate(input.sampling_params,
+    // Lift the JSON grammar masks (installed at full validate width) onto
+    // the request params: the mask is the one per-token verify field (see
+    // the verify transforms in rejection_sample), because its
+    // per-sequence grammar state advances with each speculative token.
+    SamplingParameters verify_params = input.sampling_params;
+    if (validate_input.sampling_params.filter_bitmask.defined()) {
+      verify_params.filter_bitmask =
+          validate_input.sampling_params.filter_bitmask;
+      verify_params.filter_mask = torch::Tensor();
+    }
+    val_output = validate(std::move(verify_params),
                           draft_outputs,
                           target_output,
                           num_speculative_tokens,
@@ -2605,7 +2608,6 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
   clear_ready_events(validate_input);
   validate_input.runtime.device_tensors_ready = false;
   validate_input.skip_sampling_for_logits_only = true;
-  validate_input.skip_process_logits = true;
   auto& input_params = validate_input.input_params;
   input_params.embedding.input_embedding = torch::Tensor();
   torch::TensorOptions token_options = validate_input.token_ids.options();
@@ -2760,30 +2762,31 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
     validate_input.sampling_params.filter_mask = torch::Tensor();
     validate_input.sampling_params.filter_bitmask = torch::Tensor();
   }
+  // The validate forward is logits-only (see
+  // expand_sampling_params_for_verify); the JSON bitmask installs later, from
+  // fill_validate_input_from_draft_outputs.
   auto& validate_sampling_params = validate_input.sampling_params;
 #if defined(USE_NPU)
-  // A single greedy sequence with no per-row state needs only the cached
-  // arange as selected_token_idxes; the generic builder's registry walk is
-  // pure overhead on the final-draft -> target dependency chain.
+  // A single greedy sequence needs only the cached arange as
+  // selected_token_idxes; the generic builder's registry walk is pure
+  // overhead on the final-draft -> target dependency chain.
   const bool use_stable_greedy_validate_sampling =
       use_explicit_spec_verify_replay_update &&
       validate_sampling_params.sampling_mode == SamplingMode::GREEDY &&
-      validate_sampling_params.num_sample_seqs() == 1 &&
-      !validate_sampling_params.has_sampling_fields();
-  if (use_stable_greedy_validate_sampling) {
-    if (!mtp_validate_greedy_indices_.defined() ||
-        mtp_validate_greedy_indices_.numel() != total_num_val_tokens) {
-      mtp_validate_greedy_indices_ =
-          arange_indices(total_num_val_tokens, device_);
-    }
-    validate_sampling_params.selected_token_idxes =
-        mtp_validate_greedy_indices_;
-  } else {
-    expand_sampling_params_for_verify(validate_sampling_params,
-                                      num_val_tokens,
-                                      total_num_val_tokens,
-                                      device_);
+      validate_sampling_params.num_sample_seqs() == 1;
+  if (use_stable_greedy_validate_sampling &&
+      (!mtp_validate_greedy_indices_.defined() ||
+       mtp_validate_greedy_indices_.numel() != total_num_val_tokens)) {
+    mtp_validate_greedy_indices_ =
+        arange_indices(total_num_val_tokens, device_);
   }
+  expand_sampling_params_for_verify(validate_sampling_params,
+                                    num_val_tokens,
+                                    total_num_val_tokens,
+                                    device_,
+                                    use_stable_greedy_validate_sampling
+                                        ? mtp_validate_greedy_indices_
+                                        : torch::Tensor());
 #else
   expand_sampling_params_for_verify(
       validate_sampling_params, num_val_tokens, total_num_val_tokens, device_);
@@ -3034,7 +3037,7 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
     prepare_stream_->wait_stream(*compute_stream_);
   }
   extend_input = make_llm_draft_input(base_input);
-  prepare_draft_sampling(draft_sampling_mode_, extend_input.sampling_params);
+  prepare_draft_sampling(is_probabilistic_draft_, extend_input.sampling_params);
   clear_ready_events(extend_input);
   extend_input.runtime.device_tensors_ready = false;
   auto& input_params = extend_input.input_params;
@@ -3280,7 +3283,7 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_inputs(
     int32_t position_offset) {
   c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
   draft_input = make_llm_draft_input(input);
-  prepare_draft_sampling(draft_sampling_mode_, draft_input.sampling_params);
+  prepare_draft_sampling(is_probabilistic_draft_, draft_input.sampling_params);
   clear_ready_events(draft_input);
   draft_input.runtime.device_tensors_ready = false;
 
@@ -3347,31 +3350,48 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_inputs(
 
 template <typename TargetInput>
 SampleOutput MTPWorkerImpl<TargetInput>::validate(
-    const SamplingParameters& sampling_params,
+    SamplingParameters sampling_params,
     const std::vector<ForwardOutput>& draft_outputs,
     const ForwardOutput& target_output,
     int32_t num_speculative_tokens,
     const std::vector<uint8_t>& invalid_draft) {
-  std::vector<torch::Tensor> draft_token_ids_steps;
-  std::vector<torch::Tensor> draft_logits_steps;
-  draft_token_ids_steps.reserve(draft_outputs.size());
-  draft_logits_steps.reserve(draft_outputs.size());
+  CHECK(!draft_outputs.empty())
+      << "MTP validate requires at least one draft step";
+  // An all-greedy batch under probabilistic mode carries no draft logits.
+  // The draft logits carry the DRAFT model's own vocabulary; size the buffer
+  // from their last dim, never from the target logits.
+  const torch::Tensor& first_step_logits =
+      draft_outputs.front().sample_output.draft_logits;
+  const torch::Tensor& first_tokens =
+      draft_outputs.front().sample_output.next_tokens;
+  const bool is_probabilistic_draft = first_step_logits.defined();
+  DraftProposal proposal = DraftProposal::preallocate(
+      first_tokens.size(0),
+      static_cast<int64_t>(num_speculative_tokens),
+      is_probabilistic_draft ? first_step_logits.size(-1) : 0,
+      /*is_probabilistic_draft=*/is_probabilistic_draft,
+      first_tokens.options(),
+      is_probabilistic_draft ? first_step_logits.options()
+                             : first_tokens.options());
+  int64_t step = 0;
   for (const auto& draft_output : draft_outputs) {
-    draft_token_ids_steps.emplace_back(draft_output.sample_output.next_tokens);
-    draft_logits_steps.emplace_back(draft_output.sample_output.draft_logits);
+    proposal.tokens_at(step).copy_(draft_output.sample_output.next_tokens);
+    if (is_probabilistic_draft) {
+      proposal.logits_at(step).copy_(draft_output.sample_output.draft_logits);
+    }
+    ++step;
   }
 
-  return validate(
-      sampling_params,
-      stack_draft_proposal(draft_token_ids_steps, draft_logits_steps),
-      target_output,
-      num_speculative_tokens,
-      invalid_draft);
+  return validate(std::move(sampling_params),
+                  proposal,
+                  target_output,
+                  num_speculative_tokens,
+                  invalid_draft);
 }
 
 template <typename TargetInput>
 SampleOutput MTPWorkerImpl<TargetInput>::validate(
-    const SamplingParameters& sampling_params,
+    SamplingParameters sampling_params,
     const DraftProposal& draft_proposal,
     const ForwardOutput& target_output,
     int32_t num_speculative_tokens,
@@ -3382,24 +3402,21 @@ SampleOutput MTPWorkerImpl<TargetInput>::validate(
   const int32_t vocab_size = target_output.logits.size(/*dim=*/-1);
 
   const bool step_major_validate_layout = uses_step_major_validate_layout();
-  torch::Tensor target_logits;
-  torch::Tensor target_embeddings;
+  // Last target hidden states for the committed verify rows; step-major
+  // graphs emit them transposed, so permute into [batch, val_tokens, hidden].
+  torch::Tensor target_hidden_states = target_output.sample_output.embeddings;
+  const auto to_batch_major = [&](torch::Tensor tensor) {
+    return tensor.view({num_val_tokens, batch_size, tensor.size(-1)})
+        .permute({1, 0, 2})
+        .contiguous();
+  };
+  torch::Tensor target_logits = target_output.logits;
   if (step_major_validate_layout) {
-    target_logits =
-        target_output.logits.view({num_val_tokens, batch_size, vocab_size})
-            .permute({1, 0, 2})
-            .contiguous();
-    target_embeddings = target_output.sample_output.embeddings;
-    if (target_embeddings.defined()) {
-      target_embeddings =
-          target_embeddings
-              .view({num_val_tokens, batch_size, target_embeddings.size(-1)})
-              .permute({1, 0, 2})
-              .contiguous();
+    target_logits = to_batch_major(target_output.logits)
+                        .view({batch_size * num_val_tokens, vocab_size});
+    if (target_hidden_states.defined()) {
+      target_hidden_states = to_batch_major(target_hidden_states);
     }
-  } else {
-    target_logits =
-        target_output.logits.view({batch_size, num_val_tokens, vocab_size});
   }
 
   // Grammar-invalid draft positions carry the -1 sentinel directly in the
@@ -3417,16 +3434,12 @@ SampleOutput MTPWorkerImpl<TargetInput>::validate(
         draft_proposal.token_ids().masked_fill(invalid_mask, /*sentinel=*/-1);
   }
   SampleOutput sample_output = spec_verify::run_rejection_sampling(
-      sampling_params,
+      std::move(sampling_params),
       DraftProposal(validation_token_ids.defined() ? validation_token_ids
                                                    : draft_proposal.token_ids(),
                     draft_proposal.logits()),
       target_logits,
-      target_output);
-  // Only the step-major layout needs the permuted embeddings copy.
-  if (step_major_validate_layout) {
-    sample_output.embeddings = target_embeddings;
-  }
+      target_hidden_states);
 
   return sample_output;
 }

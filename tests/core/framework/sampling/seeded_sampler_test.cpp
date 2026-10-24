@@ -37,7 +37,6 @@ TEST(SeededSamplerTest, NpuRequestsAreReproducibleAndIsolated) {
   const torch::Device device(torch::kPrivateUse1, 0);
   const auto& global_generator = at_npu::detail::getDefaultNPUGenerator(0);
   const torch::Tensor before = global_generator.get_state().clone();
-  Sampler sampler;
   for (int64_t offset = 0; offset < 8; ++offset) {
     const auto single =
         make_seeded_params(torch::tensor({42}, torch::kLong),
@@ -48,9 +47,9 @@ TEST(SeededSamplerTest, NpuRequestsAreReproducibleAndIsolated) {
     torch::Tensor logits =
         torch::zeros({1, 64}, torch::TensorOptions().device(device));
     torch::Tensor batch_logits = torch::zeros({2, 64}, logits.options());
-    const auto first = sampler.forward(logits, single);
-    const auto repeated = sampler.forward(logits, single);
-    const auto batched = sampler.forward(batch_logits, batch);
+    const auto first = sample(logits, single);
+    const auto repeated = sample(logits, single);
+    const auto batched = sample(batch_logits, batch);
     EXPECT_EQ(first.next_tokens[0].item<int64_t>(),
               repeated.next_tokens[0].item<int64_t>());
     EXPECT_EQ(first.next_tokens[0].item<int64_t>(),
