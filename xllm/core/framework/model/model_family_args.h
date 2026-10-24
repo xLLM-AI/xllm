@@ -63,7 +63,7 @@ inline const ModelArgs& default_model_args() {
   void property(T&& value) && = delete
 
 // Model-family arguments compose capability parameter objects directly.
-#define XLLM_FORWARD_COMMON_MODEL_PARAMS                                       \
+#define COMMON_MODEL_PARAMS                                                    \
   MODEL_PARAM(std::string, model_type, execution_params_);                     \
   MODEL_PARAM(std::string, dtype, execution_params_);                          \
   MODEL_PARAM(int64_t, hidden_size, execution_params_);                        \
@@ -242,7 +242,7 @@ class LlmModelArgs final {
     return embedding_params();
   }
 
-  XLLM_FORWARD_COMMON_MODEL_PARAMS
+  COMMON_MODEL_PARAMS
 
   MODEL_PARAM(int32_t, first_k_dense_replace, moe_params_);
   MODEL_PARAM(int32_t, moe_layer_freq, moe_params_);
@@ -622,7 +622,7 @@ class RecModelArgs final {
     return embedding_params();
   }
 
-  XLLM_FORWARD_COMMON_MODEL_PARAMS
+  COMMON_MODEL_PARAMS
 
   MODEL_PARAM(int32_t, query_num, embedding_params_);
   MODEL_PARAM(bool, encoder_embedding_mode, embedding_params_);
@@ -708,7 +708,7 @@ class VlmModelArgs final {
   const VlmVisionModelArgs& vision() const noexcept { return vision_; }
   VlmVisionModelArgs& mutable_vision() noexcept { return vision_; }
 
-  XLLM_FORWARD_COMMON_MODEL_PARAMS
+  COMMON_MODEL_PARAMS
 
   MODEL_PARAM(int32_t, query_num, embedding_params_);
   MODEL_PARAM(bool, encoder_embedding_mode, embedding_params_);
@@ -833,7 +833,7 @@ class DiTTransformerModelArgs final {
     return embedding_params();
   }
 
-  XLLM_FORWARD_COMMON_MODEL_PARAMS
+  COMMON_MODEL_PARAMS
 
   PROPERTY(int64_t, in_channels) = -1;
   PROPERTY(int64_t, out_channels) = -1;
@@ -1155,7 +1155,7 @@ class DiTSchedulerModelArgs final {
   PROPERTY(std::string, time_shift_type) = "exponential";
 };
 
-#undef XLLM_FORWARD_COMMON_MODEL_PARAMS
+#undef COMMON_MODEL_PARAMS
 #undef MODEL_PARAM
 
 enum class DiTComponentType : uint8_t {
