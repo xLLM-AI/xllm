@@ -38,13 +38,13 @@ void RecBatch::refresh_sequences_from_groups() {
 RecForwardInput RecBatch::prepare_forward_input(
     uint32_t num_decoding_tokens,
     uint32_t min_decoding_batch_size,
-    const RawModelArgs& args,
+    const ModelArgs& args,
     int32_t cp_size) {
   return state_.prepare_forward_input(
       num_decoding_tokens, min_decoding_batch_size, args, cp_size);
 }
 
-RecForwardInput RecBatch::prepare_forward_input(const RawModelArgs& args,
+RecForwardInput RecBatch::prepare_forward_input(const ModelArgs& args,
                                                 ThreadPool* thread_pool,
                                                 int32_t cp_size) {
   return state_.prepare_forward_input(args, thread_pool, cp_size);
@@ -53,7 +53,7 @@ RecForwardInput RecBatch::prepare_forward_input(const RawModelArgs& args,
 RecForwardInput RecBatch::prepare_rec_forward_input(
     uint32_t num_decoding_tokens,
     uint32_t min_decoding_batch_size,
-    const RawModelArgs& args,
+    const ModelArgs& args,
     MPMCThreadPool* thread_pool) {
   return state_.prepare_rec_forward_input(
       num_decoding_tokens, min_decoding_batch_size, args, thread_pool);

@@ -19,7 +19,7 @@ limitations under the License.
 
 namespace xllm {
 
-MiniCPMVImageProcessor::MiniCPMVImageProcessor(const RawModelArgs& args) {
+MiniCPMVImageProcessor::MiniCPMVImageProcessor(const ModelArgs& args) {
   max_slice_nums_ = args.vision_max_slice_nums();
   scale_resolution_ = args.mm_scale_resolution();
   patch_size_ = args.mm_patch_size();

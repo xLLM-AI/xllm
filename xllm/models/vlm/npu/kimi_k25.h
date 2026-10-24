@@ -1236,12 +1236,12 @@ REGISTER_MODEL_ARGS(kimi_k25, [&] {
   LOAD_ARG_OR(mm_init_pos_emb_width, "vision_config.init_pos_emb_width", 64);
   LOAD_ARG_OR(mm_init_pos_emb_height, "vision_config.init_pos_emb_height", 64);
 
-  // New Kimi-K2.5 vision_config keys currently not mapped to RawModelArgs:
+  // New Kimi-K2.5 vision_config keys currently not mapped to ModelArgs:
   // - _attn_implementation
   // - merge_type
   // - pos_emb_type
   // - video_attn_type
-  // New Kimi-K2.5 config keys not registered in RawModelArgs:
+  // New Kimi-K2.5 config keys not registered in ModelArgs:
   // - architectures
   // - aux_loss_alpha
   // - seq_aux

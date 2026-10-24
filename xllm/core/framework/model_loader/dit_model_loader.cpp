@@ -680,9 +680,9 @@ bool DiTModelLoader::has_component(const std::string& name) const {
   }
 }
 
-std::unordered_map<std::string, RawModelArgs> DiTModelLoader::get_model_args()
+std::unordered_map<std::string, ModelArgs> DiTModelLoader::get_model_args()
     const {
-  std::unordered_map<std::string, RawModelArgs> map;
+  std::unordered_map<std::string, ModelArgs> map;
   for (const auto& pair : name_to_loader_) {
     map.insert({pair.first, pair.second->model_args()});
   }

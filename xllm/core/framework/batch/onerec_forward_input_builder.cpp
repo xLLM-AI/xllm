@@ -75,7 +75,7 @@ OneRecForwardInputBuilder::get_perf_cache() {
 
 OneRecForwardInputBuilder::OneRecForwardInputBuilder(
     const BatchInputData& data,
-    const RawModelArgs* args,
+    const ModelArgs* args,
     MPMCThreadPool* thread_pool)
     : sequence_groups_(data.sequence_groups),
       allowed_max_tokens_(data.allowed_max_tokens),

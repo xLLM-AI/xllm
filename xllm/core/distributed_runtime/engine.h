@@ -51,7 +51,7 @@ class Engine {
   }
 
   // return the model args
-  virtual const RawModelArgs& model_args() const { return args_; }
+  virtual const ModelArgs& model_args() const { return args_; }
 
   // return the tokenizer args
   virtual const TokenizerArgs& tokenizer_args() const {
@@ -71,7 +71,7 @@ class Engine {
 
  protected:
   // model args
-  RawModelArgs args_;
+  ModelArgs args_;
 
   // Tokenizer args
   TokenizerArgs tokenizer_args_;

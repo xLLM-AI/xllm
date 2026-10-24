@@ -39,7 +39,7 @@ TEST(NativeLibraryIntegrationTest, CreatesTheRegisteredExecutorSubclass) {
   options.extension_impl("custom");
   auto executor = ExecutorImplFactory::get_instance().create_executor_impl(
       /*model=*/nullptr,
-      /*args=*/RawModelArgs{},
+      /*args=*/ModelArgs{},
       /*device=*/torch::Device(torch::kCPU),
       options,
       /*executor_type=*/"native_library_executor");

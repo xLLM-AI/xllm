@@ -269,7 +269,7 @@ const std::vector<torch::Tensor>& graph_multi_block_tables(
 
 namespace xllm::mlu {
 
-GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
+GraphPersistentParam::GraphPersistentParam(const ModelArgsBundle& args,
                                            const torch::Device& device,
                                            const runtime::Options& options)
     : num_decoding_tokens_(options.num_decoding_tokens()) {
@@ -577,7 +577,7 @@ void MluGraph::update_input_buffer(ModelType* model,
 }
 
 MluGraphExecutorImpl::MluGraphExecutorImpl(CausalLM* model,
-                                           const ModelArgs& args,
+                                           const ModelArgsBundle& args,
                                            const torch::Device& device,
                                            const runtime::Options& options)
     : model_(model),
@@ -593,7 +593,7 @@ MluGraphExecutorImpl::MluGraphExecutorImpl(CausalLM* model,
 }
 
 MluGraphExecutorImpl::MluGraphExecutorImpl(RecModel* model,
-                                           const ModelArgs& args,
+                                           const ModelArgsBundle& args,
                                            const torch::Device& device,
                                            const runtime::Options& options)
     : MluGraphExecutorImpl(static_cast<CausalLM*>(nullptr),

@@ -32,8 +32,8 @@ limitations under the License.
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/model/aux_hidden_capture.h"
+#include "core/framework/model/model_args.h"
 #include "core/framework/model/model_output.h"
-#include "core/framework/model/raw_model_args.h"
 #include "core/framework/model/rec_model.h"
 #include "core/framework/model_context/model_context.h"
 #include "core/framework/model_loader/model_loader.h"
@@ -315,7 +315,7 @@ class AclGraphExecutorRecTest : public ::testing::Test {
   }
 
   const torch::Device device_{"npu:0"};
-  RawModelArgs args_;
+  ModelArgs args_;
   runtime::Options options_;
 
  private:
@@ -445,7 +445,7 @@ INSTANTIATE_TEST_SUITE_P(DefaultAndPoolProducerStreams,
 // Uses basic operations to verify graph capture and replay functionality
 class SimpleCausalLM : public CausalLM {
  public:
-  SimpleCausalLM(const RawModelArgs& args, const torch::Device& device)
+  SimpleCausalLM(const ModelArgs& args, const torch::Device& device)
       : args_(args), device_(device) {
     // Initialize a simple linear layer for testing
     linear_ = register_module("linear",
@@ -587,7 +587,7 @@ class SimpleCausalLM : public CausalLM {
     return opts;
   }
 
-  const RawModelArgs& args() const { return args_; }
+  const ModelArgs& args() const { return args_; }
 
   bool last_forward_enabled_graph() const {
     return last_forward_enabled_graph_;
@@ -640,7 +640,7 @@ class SimpleCausalLM : public CausalLM {
   }
 
  private:
-  RawModelArgs args_;
+  ModelArgs args_;
   torch::Device device_;
   torch::nn::Linear linear_{nullptr};
   torch::Tensor token_embedding_table_;
@@ -750,7 +750,7 @@ class AclGraphExecutorTest : public ::testing::Test {
     return batch;
   }
   bool initialized_ = false;
-  RawModelArgs model_args_;
+  ModelArgs model_args_;
   std::unique_ptr<torch::Device> device_;
   runtime::Options options_;
   std::unique_ptr<CausalLM> model_;
@@ -920,7 +920,7 @@ TEST_F(AclGraphExecutorTest, PreservesAuxHiddenStatesAcrossGraphReplay) {
 }
 
 TEST(DeepseekV4ModelTest, ReturnsPreHcHiddenStatesForMtp) {
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("deepseek_v4");
   model_args.dtype("float32");
   model_args.vocab_size(8);
@@ -1450,7 +1450,7 @@ TEST(AclGraphPersistentParamTest, SpecVerifyMetadataUsesTokenCapacity) {
       speculative_config.enable_atb_spec_kernel();
   speculative_config.enable_atb_spec_kernel(false);
 
-  RawModelArgs args;
+  ModelArgs args;
   args.model_type("deepseek_v4");
   args.dtype("float32");
   args.hidden_size(8);
@@ -1539,7 +1539,7 @@ TEST(AclGraphPersistentParamTest, HybridSpecVerifyMetadataCoversBucketPadding) {
       speculative_config.enable_atb_spec_kernel();
   speculative_config.enable_atb_spec_kernel(false);
 
-  RawModelArgs args;
+  ModelArgs args;
   args.model_type("qwen3_5_text");
   args.dtype("float32");
   args.hidden_size(8);
@@ -1638,7 +1638,7 @@ TEST(AclGraphPersistentParamTest,
      GenericSpecVerifyCaptureKeepsPersistentBlockTableWidth) {
   constexpr int32_t kSpecWidth = 6;
   constexpr int64_t kActiveBlockTableWidth = 5;
-  RawModelArgs args;
+  ModelArgs args;
   args.model_type("deepseek_v4");
   args.dtype("float32");
   args.hidden_size(8);
@@ -1717,7 +1717,7 @@ TEST(AclGraphPersistentParamTest, AuxHiddenStatesUseGraphTokenCapacity) {
       speculative_config.enable_atb_spec_kernel();
   speculative_config.enable_atb_spec_kernel(false);
 
-  RawModelArgs args;
+  ModelArgs args;
   args.model_type("deepseek_v4");
   args.dtype("float32");
   args.hidden_size(8);
@@ -1759,7 +1759,7 @@ TEST(AclGraphPersistentParamTest, AuxHiddenStatesUseGraphTokenCapacity) {
 }
 
 TEST(AuxHiddenCaptureTest, PreservesConfiguredLayerOrderAndResidual) {
-  RawModelArgs args;
+  ModelArgs args;
   args.hidden_size(2).layers_to_capture({0, 2});
   AuxHiddenCapture capture(
       args, torch::TensorOptions().dtype(torch::kFloat32), 3);
@@ -1812,7 +1812,7 @@ TEST(DSparkWorkerInputTest, ScalesPaddedAndRawDpTokenCountsTogether) {
 }
 
 TEST(DSparkSasFallbackTest, ChoosesCompatibleRowsUnlessNativeIsEnabled) {
-  RawModelArgs draft_args;
+  ModelArgs draft_args;
   draft_args.model_type("deepseek_v4_dspark");
   EXPECT_EQ(dflash_detail::classify_dspark_sas_mode(
                 draft_args, /*sample_from_anchor=*/true),
@@ -1882,7 +1882,7 @@ TEST(AclGraphPersistentParamTest, SpecVerifyGraphUpdateSupportsRuntimeBatch) {
   constexpr int32_t kSpecWidth = 4;
   constexpr int32_t kBatchSize = 2;
   constexpr int32_t kNumTokens = kBatchSize * kSpecWidth;
-  RawModelArgs args;
+  ModelArgs args;
   args.model_type("deepseek_v4");
   args.dtype("float32");
   args.hidden_size(8);
@@ -2034,7 +2034,7 @@ TEST(AclGraphExecutorHybridTest, KvCacheSupportsLinearOnlyLayers) {
 }
 
 TEST(AclGraphExecutorHybridTest, ModelArgsCountsHybridLayerTypes) {
-  RawModelArgs args;
+  ModelArgs args;
   args.n_layers(4);
   args.layer_types(
       {"linear_attention", "full_attention", "linear_attention", "attention"});
@@ -2047,7 +2047,7 @@ TEST(AclGraphExecutorHybridTest, ModelArgsCountsHybridLayerTypes) {
 }
 
 TEST(AclGraphPersistentParamTest, DecodeUpdatesEplbMaskWithoutSpecAttention) {
-  RawModelArgs args;
+  ModelArgs args;
   args.model_type("deepseek_v4")
       .dtype("float32")
       .hidden_size(4)
@@ -2107,7 +2107,7 @@ TEST(AclGraphPersistentParamTest, DecodeUpdatesEplbMaskWithoutSpecAttention) {
 }
 
 TEST(AclGraphPersistentParamTest, DecodePadsEachDpRankEplbMaskIndependently) {
-  RawModelArgs args;
+  ModelArgs args;
   args.model_type("deepseek_v4")
       .dtype("float32")
       .hidden_size(4)

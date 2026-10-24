@@ -20,8 +20,8 @@ limitations under the License.
 namespace xllm::layer {
 namespace {
 
-RawModelArgs make_dsa_mtp_args() {
-  RawModelArgs args;
+ModelArgs make_dsa_mtp_args() {
+  ModelArgs args;
   args.model_type() = "glm_moe_dsa_mtp";
   args.index_share_for_mtp_iteration() = true;
   args.index_head_dim() = 128;
@@ -35,13 +35,13 @@ TEST(DsaTopkSharePlanTest, EnablesCrossStepReuseForMtpModelWithIndexer) {
 }
 
 TEST(DsaTopkSharePlanTest, DisablesCrossStepReuseWhenConfigFlagIsOff) {
-  RawModelArgs args = make_dsa_mtp_args();
+  ModelArgs args = make_dsa_mtp_args();
   args.index_share_for_mtp_iteration() = false;
   EXPECT_FALSE(is_mtp_dsa_topk_reuse_enabled(args));
 }
 
 TEST(DsaTopkSharePlanTest, DisablesCrossStepReuseWithoutCompleteIndexer) {
-  RawModelArgs args = make_dsa_mtp_args();
+  ModelArgs args = make_dsa_mtp_args();
   args.index_head_dim() = 0;
   EXPECT_FALSE(is_mtp_dsa_topk_reuse_enabled(args));
 
@@ -55,7 +55,7 @@ TEST(DsaTopkSharePlanTest, DisablesCrossStepReuseWithoutCompleteIndexer) {
 }
 
 TEST(DsaTopkSharePlanTest, DisablesCrossStepReuseForTargetModel) {
-  RawModelArgs args = make_dsa_mtp_args();
+  ModelArgs args = make_dsa_mtp_args();
   args.model_type() = "glm_moe_dsa";
   EXPECT_FALSE(is_mtp_dsa_topk_reuse_enabled(args));
 }

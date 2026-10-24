@@ -557,7 +557,7 @@ void update_dispatch_scale_slots(const torch::Tensor& source,
 
 }  // namespace dsv4_eplb
 
-FusedMoEImpl::FusedMoEImpl(const RawModelArgs& model_args,
+FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
                            const FusedMoEArgs& moe_args,
                            const QuantArgs& quant_args,
                            const ParallelArgs& parallel_args,

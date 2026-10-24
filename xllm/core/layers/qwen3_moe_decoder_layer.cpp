@@ -36,7 +36,7 @@ MoEModule create_fused_moe_from_context(const ModelContext& context,
                                         const FusedMoEArgs&>) {
     return MoEModule(context, moe_args);
   } else {
-    return MoEModule(context.get_model_args(),
+    return MoEModule(context.get_model_args_bundle(),
                      moe_args,
                      context.get_quant_args(),
                      context.get_parallel_args(),

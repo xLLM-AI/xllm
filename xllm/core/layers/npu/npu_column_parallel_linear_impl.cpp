@@ -22,7 +22,7 @@ namespace layer {
 
 void NpuColumnParallelLinearImpl::param_from_args(
     atb_speed::common::LinearParallelParam& param,
-    const RawModelArgs& args,
+    const ModelArgs& args,
     const ParallelArgs& parallel_args) {
   param.fusionLinearParam.isBF16 = args.dtype() == "bfloat16";
   param.unpadInputs = true;
@@ -73,8 +73,9 @@ void NpuColumnParallelLinearImpl::param_from_args(
 NpuColumnParallelLinearImpl::NpuColumnParallelLinearImpl(
     const ModelContext& context)
     : BaseLayer(context) {
-  param_from_args(
-      linear_param_, context.get_model_args(), context.get_parallel_args());
+  param_from_args(linear_param_,
+                  context.get_model_args_bundle(),
+                  context.get_parallel_args());
   atb_weight_tensors_.resize(1);
   at_out_tensors_.resize(1);
 

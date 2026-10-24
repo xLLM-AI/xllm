@@ -28,7 +28,7 @@ limitations under the License.
 #include "core/framework/eplb/eplb_manager.h"
 #include "core/framework/eplb/eplb_options.h"
 #include "core/framework/eplb/eplb_utils.h"
-#include "core/framework/model/raw_model_args.h"
+#include "core/framework/model/model_args.h"
 
 namespace xllm {
 
@@ -166,7 +166,7 @@ class EplbController::Impl final {
 };
 
 std::unique_ptr<EplbController> EplbController::create(
-    const RawModelArgs& model_args,
+    const ModelArgs& model_args,
     int32_t worker_num,
     int32_t ep_size) {
   if (!EPLBConfig::get_instance().enable_eplb()) {

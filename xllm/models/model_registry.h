@@ -54,12 +54,12 @@ using DiTModelFactory =
 
 using MultimodalProcessorFactory =
     std::function<std::unique_ptr<MultimodalProcessorBase>(
-        const RawModelArgs& model_args,
+        const ModelArgs& model_args,
         std::shared_ptr<Tokenizer> tokenizer,
         const TokenizerArgs& tokenizer_args)>;
 
 using ModelArgsLoader =
-    std::function<bool(const JsonReader& json, RawModelArgs* args)>;
+    std::function<bool(const JsonReader& json, ModelArgs* args)>;
 
 using QuantArgsLoader =
     std::function<bool(const JsonReader& json, QuantArgs* args)>;
@@ -294,13 +294,13 @@ ModelContext create_model_context(const ResolvedModelDescriptor& descriptor,
                                   const std::string& execution_family,
                                   const std::string& model_impl,
                                   const ParallelArgs& parallel_args,
-                                  const RawModelArgs& model_args,
+                                  const ModelArgs& model_args,
                                   const QuantArgs& quant_args,
                                   const torch::TensorOptions& tensor_options);
 
 // Recreate a runtime context from an already typed source context. This keeps
 // the selected family arguments owned by the source context instead of
-// rebuilding a legacy RawModelArgs DTO at runtime.
+// rebuilding a legacy ModelArgs DTO at runtime.
 ModelContext create_model_context(const ResolvedModelDescriptor& descriptor,
                                   const std::string& execution_family,
                                   const std::string& model_impl,
@@ -310,7 +310,7 @@ ModelContext create_model_context(const ResolvedModelDescriptor& descriptor,
 DiTModelContext create_dit_model_context(
     const ResolvedModelDescriptor& descriptor,
     const ParallelArgs& parallel_args,
-    std::unordered_map<std::string, RawModelArgs> model_args,
+    std::unordered_map<std::string, ModelArgs> model_args,
     std::unordered_map<std::string, QuantArgs> quant_args,
     const torch::TensorOptions& tensor_options,
     const DiTCacheConfig& dit_config);
@@ -466,7 +466,7 @@ std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context);
   const bool VarName##_multimodal_processor_registered = []() {  \
     ModelRegistry::register_multimodal_processor_factory(        \
         #ModelType,                                              \
-        [](const RawModelArgs& model_args,                       \
+        [](const ModelArgs& model_args,                          \
            std::shared_ptr<Tokenizer> tokenizer,                 \
            const TokenizerArgs& tokenizer_args) {                \
           return std::make_unique<ProcessorClass>(               \
@@ -489,13 +489,13 @@ std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context);
 #define REGISTER_MODEL_ARGS_LOADER(ModelType, Loader) \
   REGISTER_MODEL_ARGS_LOADER_WITH_VARNAME(ModelType, ModelType, Loader)
 
-#define REGISTER_MODEL_ARGS_WITH_VARNAME(VarName, ModelType, ...)          \
-  REGISTER_MODEL_ARGS_LOADER_WITH_VARNAME(                                 \
-      VarName, ModelType, [](const JsonReader& json, RawModelArgs* args) { \
-        UNUSED_PARAMETER(json);                                            \
-        UNUSED_PARAMETER(args);                                            \
-        __VA_ARGS__();                                                     \
-        return true;                                                       \
+#define REGISTER_MODEL_ARGS_WITH_VARNAME(VarName, ModelType, ...)       \
+  REGISTER_MODEL_ARGS_LOADER_WITH_VARNAME(                              \
+      VarName, ModelType, [](const JsonReader& json, ModelArgs* args) { \
+        UNUSED_PARAMETER(json);                                         \
+        UNUSED_PARAMETER(args);                                         \
+        __VA_ARGS__();                                                  \
+        return true;                                                    \
       })
 
 #define REGISTER_MODEL_ARGS(ModelType, ...) \

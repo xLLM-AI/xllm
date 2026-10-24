@@ -193,7 +193,7 @@ TEST_F(MMEmbeddingRoundtripTest, RoundTripsPreserveImageKeysAndPrefixHashes) {
                        /*block_size=*/4,
                        tokens.size() / 4,
                        expected_hashes);
-  RawModelArgs args;
+  ModelArgs args;
   args.vision_start_token_id(kVisionStart)
       .vision_end_token_id(kVisionEnd)
       .image_token_id(kImageToken);
@@ -329,7 +329,7 @@ TEST_F(MMEmbeddingRoundtripTest,
 
   MMInput inputs;
   inputs.insert(std::vector<MMInputItem>{original_input, binary_input});
-  RawModelArgs args;
+  ModelArgs args;
   args.vision_start_token_id(kVisionStart)
       .vision_end_token_id(kVisionEnd)
       .image_token_id(kImageToken);

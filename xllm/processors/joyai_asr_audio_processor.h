@@ -19,7 +19,7 @@ limitations under the License.
 
 #include <cstdint>
 
-#include "core/framework/model/raw_model_args.h"
+#include "core/framework/model/model_args.h"
 #include "core/framework/multimodal/mm_data.h"
 #include "core/framework/multimodal/mm_input.h"
 #include "processors/audio_processor.h"
@@ -31,7 +31,7 @@ namespace xllm {
 // extractor.
 class JoyaiASRAudioProcessor final : public AudioProcessor {
  public:
-  explicit JoyaiASRAudioProcessor(const RawModelArgs& args);
+  explicit JoyaiASRAudioProcessor(const ModelArgs& args);
 
   bool process(const torch::Tensor& origin_audio,
                const AudioMetadata& metadata,

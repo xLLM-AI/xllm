@@ -111,8 +111,8 @@ class DeepseekV4DecoderLayerTest : public ::testing::Test {
     parallel_args_ = test::create_default_parallel_args(process_group_);
   }
 
-  RawModelArgs make_args() const {
-    RawModelArgs args;
+  ModelArgs make_args() const {
+    ModelArgs args;
     args.model_type() = "deepseek_v4";
     args.hidden_size() = 256;
     args.head_dim() = 16;
@@ -148,7 +148,7 @@ class DeepseekV4DecoderLayerTest : public ::testing::Test {
     return args;
   }
 
-  StateDict make_state_dict(const RawModelArgs& args) const {
+  StateDict make_state_dict(const ModelArgs& args) const {
     std::unordered_map<std::string, torch::Tensor> tensors;
     const int64_t hidden_size = args.hidden_size();
     const int64_t q_lora_rank = args.q_lora_rank();
@@ -241,7 +241,7 @@ class DeepseekV4DecoderLayerTest : public ::testing::Test {
     return StateDict(tensors);
   }
 
-  StateDict make_ffn_alias_state_dict(const RawModelArgs& args) const {
+  StateDict make_ffn_alias_state_dict(const ModelArgs& args) const {
     std::unordered_map<std::string, torch::Tensor> tensors;
     StateDict state_dict = make_state_dict(args);
     for (const auto& item : state_dict) {
@@ -255,14 +255,14 @@ class DeepseekV4DecoderLayerTest : public ::testing::Test {
     return StateDict(tensors);
   }
 
-  KVCache make_kv_cache(const RawModelArgs& args, int64_t batch_size) const {
+  KVCache make_kv_cache(const ModelArgs& args, int64_t batch_size) const {
     DeepSeekV4KVCacheTensors tensors;
     tensors.swa_cache =
         torch::zeros({batch_size, 1, kBlockSize, args.head_dim()}, options_);
     return KVCache(tensors);
   }
 
-  AttentionMetadata make_metadata(const RawModelArgs& args,
+  AttentionMetadata make_metadata(const ModelArgs& args,
                                   int32_t layer_id,
                                   const std::vector<int64_t>& start_pos,
                                   const std::vector<int64_t>& q_lens) {
@@ -370,7 +370,7 @@ class DeepseekV4DecoderLayerTest : public ::testing::Test {
   }
 
   void run_case(int32_t layer_id, bool pass_input_ids, bool use_ffn_alias) {
-    RawModelArgs args = make_args();
+    ModelArgs args = make_args();
     QuantArgs quant_args;
     ModelContext context(
         parallel_args_, args, quant_args, options_, {ModelFamily::LLM});

@@ -20,7 +20,7 @@ limitations under the License.
 #include <optional>
 #include <vector>
 
-#include "core/framework/model/raw_model_args.h"
+#include "core/framework/model/model_args.h"
 #include "core/framework/parallel_state/parallel_args.h"
 #include "core/kv_cache/layout/kv_cache_capacity.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
@@ -37,8 +37,8 @@ constexpr int64_t kBlockCount = 2;
 constexpr int64_t kBlockSize = 4;
 constexpr int64_t kLayerCount = 1;
 
-RawModelArgs make_model_args() {
-  RawModelArgs model_args;
+ModelArgs make_model_args() {
+  ModelArgs model_args;
   model_args.model_type("test_model")
       .n_layers(kLayerCount)
       .n_heads(2)
@@ -47,7 +47,7 @@ RawModelArgs make_model_args() {
   return model_args;
 }
 
-KVCacheShape make_cache_shape(const RawModelArgs& model_args) {
+KVCacheShape make_cache_shape(const ModelArgs& model_args) {
   KVCacheCapacity capacity;
   capacity.n_blocks(kBlockCount).block_size(kBlockSize);
   return KVCacheShape(capacity, model_args, /*world_size=*/1);
@@ -77,7 +77,7 @@ class TestHierarchyWorker final : public LLMWorkerImpl {
   TestHierarchyWorker(const ParallelArgs& parallel_args,
                       const torch::Device& device,
                       const runtime::Options& options,
-                      const RawModelArgs& model_args)
+                      const ModelArgs& model_args)
       : LLMWorkerImpl(parallel_args, device, options) {
     dtype_ = torch::kFloat32;
     context_ =
@@ -123,7 +123,7 @@ class WorkerHierarchyKVCacheTransferTest : public ::testing::Test {
 
 TEST_F(WorkerHierarchyKVCacheTransferTest,
        DisabledHostCacheKeepsTransferUnbound) {
-  const RawModelArgs model_args = make_model_args();
+  const ModelArgs model_args = make_model_args();
   const KVCacheShape cache_shape = make_cache_shape(model_args);
   const KVCacheCreateOptions create_options =
       make_create_options(device_->unwrap());
@@ -147,7 +147,7 @@ TEST_F(WorkerHierarchyKVCacheTransferTest,
 
 TEST_F(WorkerHierarchyKVCacheTransferTest,
        SharedTransferCanBeClearedAndRecreatedFromSavedContext) {
-  const RawModelArgs model_args = make_model_args();
+  const ModelArgs model_args = make_model_args();
   const KVCacheShape cache_shape = make_cache_shape(model_args);
   const KVCacheCreateOptions create_options =
       make_create_options(device_->unwrap());
@@ -186,7 +186,7 @@ TEST_F(WorkerHierarchyKVCacheTransferTest,
 
 TEST_F(WorkerHierarchyKVCacheTransferTest,
        WorkerDestructionReleasesOwnedTransfer) {
-  const RawModelArgs model_args = make_model_args();
+  const ModelArgs model_args = make_model_args();
   const KVCacheShape cache_shape = make_cache_shape(model_args);
   const KVCacheCreateOptions create_options =
       make_create_options(device_->unwrap());
@@ -214,7 +214,7 @@ TEST_F(WorkerHierarchyKVCacheTransferTest,
 
 TEST_F(WorkerHierarchyKVCacheTransferTest,
        CompositePipelineModeOverridesLeafExecutorOptions) {
-  const RawModelArgs model_args = make_model_args();
+  const ModelArgs model_args = make_model_args();
   const KVCacheShape cache_shape = make_cache_shape(model_args);
   const KVCacheCreateOptions create_options =
       make_create_options(device_->unwrap());

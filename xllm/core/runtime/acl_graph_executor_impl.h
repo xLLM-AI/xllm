@@ -217,12 +217,12 @@ class AclGraphExecutorImpl final : public ExecutorImpl,
                                    public RecExecutorBackend {
  public:
   AclGraphExecutorImpl(CausalLM* model,
-                       const ModelArgs& args,
+                       const ModelArgsBundle& args,
                        const torch::Device& device,
                        const runtime::Options& options);
 
   AclGraphExecutorImpl(RecModel* model,
-                       const ModelArgs& args,
+                       const ModelArgsBundle& args,
                        const torch::Device& device,
                        const runtime::Options& options);
 
@@ -278,7 +278,7 @@ class AclGraphExecutorImpl final : public ExecutorImpl,
                         std::vector<KVCache>& kv_caches,
                         const Params& params);
 
-  ModelArgs args_;
+  ModelArgsBundle args_;
   torch::Device device_;
   runtime::Options options_;
 

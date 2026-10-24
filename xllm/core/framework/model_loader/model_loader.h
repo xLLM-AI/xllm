@@ -20,7 +20,7 @@ limitations under the License.
 
 #include <vector>
 
-#include "core/framework/model/raw_model_args.h"
+#include "core/framework/model/model_args.h"
 #include "core/framework/quantization/quant_args.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/framework/tokenizer/tokenizer.h"
@@ -34,7 +34,7 @@ class ModelLoader {
 
   virtual ~ModelLoader() = default;
 
-  virtual const RawModelArgs& model_args() const { return args_; }
+  virtual const ModelArgs& model_args() const { return args_; }
   virtual const QuantArgs& quant_args() const { return quant_args_; }
   virtual const TokenizerArgs& tokenizer_args() const {
     return tokenizer_args_;
@@ -62,7 +62,7 @@ class ModelLoader {
 
  protected:
   // model args
-  RawModelArgs args_;
+  ModelArgs args_;
   // quantization args
   QuantArgs quant_args_;
   // tokenizer args

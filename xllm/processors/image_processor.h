@@ -20,7 +20,7 @@ limitations under the License.
 
 #include <vector>
 
-#include "core/framework/model/raw_model_args.h"
+#include "core/framework/model/model_args.h"
 #include "core/framework/multimodal/mm_data.h"
 
 namespace xllm {
@@ -36,7 +36,7 @@ class ImageProcessor {
 class ImageNoneProcessor final : public ImageProcessor {
  public:
   ImageNoneProcessor() = default;
-  explicit ImageNoneProcessor(const RawModelArgs&) {}
+  explicit ImageNoneProcessor(const ModelArgs&) {}
 
   bool process(const std::vector<torch::Tensor>& images,
                std::vector<MMDataItem>& output_items) const override {

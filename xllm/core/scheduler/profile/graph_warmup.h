@@ -23,7 +23,7 @@ limitations under the License.
 namespace xllm {
 
 class Sequence;
-struct RawModelArgs;
+struct ModelArgs;
 
 enum class GraphWarmupPlan : int8_t {
   UNIFIED = 0,
@@ -49,7 +49,7 @@ std::string next_warmup_request_id();
 // The zero values are synthetic, but the shape must obey the worker contract.
 // Does nothing when speculative decoding is disabled.
 void prepare_warmup_decode_sequence(Sequence* sequence,
-                                    const RawModelArgs& model_args,
+                                    const ModelArgs& model_args,
                                     int32_t num_speculative_tokens);
 
 }  // namespace xllm

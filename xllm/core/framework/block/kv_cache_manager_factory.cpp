@@ -39,7 +39,7 @@ limitations under the License.
 namespace xllm {
 
 KVCacheCapacity KVCacheManagerFactory::estimate_capacity(
-    const RawModelArgs& model_args,
+    const ModelArgs& model_args,
     const runtime::Options& options,
     torch::ScalarType dtype,
     int64_t world_size,
@@ -90,7 +90,7 @@ KVCacheCapacity KVCacheManagerFactory::estimate_capacity(
 
 KVCacheManagerFactoryResult KVCacheManagerFactory::create(
     const KVCacheCapacity& kv_cache_capacity,
-    const RawModelArgs& model_args,
+    const ModelArgs& model_args,
     int64_t world_size,
     torch::ScalarType dtype,
     BlockManagerPool::Options options,

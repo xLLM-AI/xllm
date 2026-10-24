@@ -20,7 +20,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "core/framework/model/raw_model_args.h"
+#include "core/framework/model/model_args.h"
 #include "processors/prompt_processor.h"
 
 namespace xllm {
@@ -33,7 +33,7 @@ class CLIPVLPromptProcessor final : public PromptProcessor {
   };
 
  public:
-  explicit CLIPVLPromptProcessor(const RawModelArgs& args);
+  explicit CLIPVLPromptProcessor(const ModelArgs& args);
 
   bool process(std::string& prompt, const MMData& mm_data) override;
   bool find_mm_spans(const std::vector<int32_t>& token_ids,

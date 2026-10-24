@@ -122,7 +122,7 @@ class MRotaryEmbedding : public NpuRotaryEmbedding {
 };
 
 std::shared_ptr<NpuRotaryEmbedding> create_rotary_embedding(
-    const RawModelArgs& model_args,
+    const ModelArgs& model_args,
     int64_t rotary_dim,
     bool interleaved,
     const torch::TensorOptions& options);

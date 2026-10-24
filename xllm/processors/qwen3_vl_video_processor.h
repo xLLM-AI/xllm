@@ -22,7 +22,7 @@ limitations under the License.
 #include <unordered_map>
 #include <vector>
 
-#include "core/framework/model/raw_model_args.h"
+#include "core/framework/model/model_args.h"
 #include "core/framework/multimodal/mm_input.h"
 #include "processors/video_processor.h"
 
@@ -30,7 +30,7 @@ namespace xllm {
 
 class Qwen3VLVideoProcessor final : public VideoProcessor {
  public:
-  explicit Qwen3VLVideoProcessor(const RawModelArgs& args);
+  explicit Qwen3VLVideoProcessor(const ModelArgs& args);
 
   bool process(const torch::Tensor& origin_video,
                const VideoMetadata& metadata,

@@ -207,7 +207,7 @@ class FakeEngine : public Engine {
   BlockManagerPool* block_manager_pool() const {
     return fake_block_manager_.get();
   }
-  const RawModelArgs& model_args() const { return model_args_; }
+  const ModelArgs& model_args() const { return model_args_; }
   const TokenizerArgs& tokenizer_args() const { NOT_IMPLEMENTED(); }
   bool init() override { return true; }
 
@@ -226,7 +226,7 @@ class FakeEngine : public Engine {
  private:
   std::unique_ptr<Tokenizer> fake_tokenizer_;
   std::unique_ptr<ControllablePrefetchBlockManagerPool> fake_block_manager_;
-  RawModelArgs model_args_;
+  ModelArgs model_args_;
 };
 
 class PipelinePhaseEngine final : public FakeEngine {
@@ -1160,7 +1160,7 @@ TEST(ContinuousSchedulerFactoryTest,
   ASSERT_EQ(batches[0].size(), 1);
 
   const auto forward_input =
-      batches[0].prepare_forward_input(1, 0, RawModelArgs());
+      batches[0].prepare_forward_input(1, 0, ModelArgs());
   EXPECT_TRUE(
       forward_input.input_params.meta.batch_forward_type.is_chunked_prefill());
   EXPECT_FALSE(forward_input.input_params.meta.batch_forward_type.is_mixed());

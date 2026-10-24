@@ -908,7 +908,7 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
   std::shared_ptr<Tokenizer> tokenizer_;
   std::unique_ptr<MultimodalProcessorBase> multimodal_processor_;
   std::unique_ptr<MPositionGenerator> mposition_generator_;
-  std::optional<RawModelArgs> text_encoder_model_args_;
+  std::optional<ModelArgs> text_encoder_model_args_;
   std::vector<KVCache> text_encoder_empty_kv_caches_;
 
   int64_t in_channels_;

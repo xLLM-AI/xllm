@@ -20,7 +20,7 @@ limitations under the License.
 namespace xllm {
 namespace layer {
 
-MoEGateImpl::MoEGateImpl(const RawModelArgs& model_args,
+MoEGateImpl::MoEGateImpl(const ModelArgs& model_args,
                          const QuantArgs& quant_args,
                          const torch::TensorOptions& options,
                          bool use_hash)

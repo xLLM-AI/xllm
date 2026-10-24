@@ -40,7 +40,7 @@ bool should_enable_qwen3_5_fia_decode(const std::string& model_type);
 class Qwen3NextAttentionImpl : public torch::nn::Module {
  public:
   Qwen3NextAttentionImpl() = default;
-  Qwen3NextAttentionImpl(const RawModelArgs& args,
+  Qwen3NextAttentionImpl(const ModelArgs& args,
                          const QuantArgs& quant_args,
                          const ParallelArgs& parallel_args,
                          const torch::TensorOptions& options,

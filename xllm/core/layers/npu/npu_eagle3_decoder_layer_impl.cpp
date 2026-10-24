@@ -39,7 +39,7 @@ const int32_t IN_MLP_W2_WEIGHT = 32;
 
 void NpuEagle3DecoderLayerImpl::param_from_args(
     atb_speed::eagle3::DecoderLayerParam& param,
-    const RawModelArgs& args,
+    const ModelArgs& args,
     const ParallelArgs& parallel_args,
     bool isPrefill) {
   param.isFA = false;
@@ -121,7 +121,7 @@ void NpuEagle3DecoderLayerImpl::param_from_args(
 NpuEagle3DecoderLayerImpl::NpuEagle3DecoderLayerImpl(
     const ModelContext& context)
     : BaseLayer(context) {
-  const auto& model_args = context.get_model_args();
+  const auto& model_args = context.get_model_args_bundle();
   auto parallel_args = context.get_parallel_args();
   auto options = context.get_tensor_options();
 

@@ -38,7 +38,7 @@ limitations under the License.
 
 namespace xllm {
 
-class RawModelArgs;
+class ModelArgs;
 class Tokenizer;
 
 class MultimodalProcessorBase {
@@ -70,7 +70,7 @@ class MultimodalProcessorBase {
 };
 
 std::unique_ptr<MultimodalProcessorBase> create_multimodal_processor(
-    const RawModelArgs& model_args,
+    const ModelArgs& model_args,
     std::shared_ptr<Tokenizer> tokenizer,
     int64_t max_cache_items,
     const TokenizerArgs& tokenizer_args);
@@ -81,7 +81,7 @@ template <typename PromptProcessor,
           typename AudioProcessor = AudioNoneProcessor>
 class MultimodalProcessor final : public MultimodalProcessorBase {
  public:
-  MultimodalProcessor(const RawModelArgs& model_args,
+  MultimodalProcessor(const ModelArgs& model_args,
                       std::shared_ptr<Tokenizer> tokenizer,
                       const TokenizerArgs& tokenizer_args)
       : MultimodalProcessorBase(std::move(tokenizer), tokenizer_args),
@@ -139,7 +139,7 @@ class MultimodalProcessor final : public MultimodalProcessorBase {
 
  private:
   static std::unique_ptr<ImageProcessor> make_image_processor(
-      const RawModelArgs& model_args) {
+      const ModelArgs& model_args) {
     if constexpr (std::is_constructible_v<ImageProcessor,
                                           const VlmVisionModelArgs&>) {
       const VlmModelArgs vlm_args(model_args);

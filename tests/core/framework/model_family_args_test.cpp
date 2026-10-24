@@ -22,7 +22,7 @@ namespace {
 
 TEST(ModelFamilyArgsTest,
      SharesFieldsBetweenCapabilitiesAndCompatibilityAccess) {
-  RawModelArgs config{};
+  ModelArgs config{};
   LlmModelArgs llm(config);
   LlmModelArgs& transformer = llm;
 
@@ -65,7 +65,7 @@ TEST(ModelFamilyArgsTest,
 }
 
 TEST(ModelFamilyArgsTest, CopiesOwnIndependentCapabilityStorage) {
-  RawModelArgs config{};
+  ModelArgs config{};
   config.draft_vocab_size() = 256;
   config.layers_to_capture() = {1, 3};
   const LlmModelArgs original(config);
@@ -86,17 +86,17 @@ TEST(ModelFamilyArgsTest, CopiesOwnIndependentCapabilityStorage) {
             &copied.speculative_params().draft_vocab_size());
 }
 
-TEST(ModelArgsTest, KeepsVlmComponentCapabilitiesWithItsOwnedArguments) {
-  RawModelArgs config{};
+TEST(ModelArgsBundleTest, KeepsVlmComponentCapabilitiesWithItsOwnedArguments) {
+  ModelArgs config{};
   config.head_dim() = 128;
-  const ModelArgs original(
+  const ModelArgsBundle original(
       config, ModelFamily::VLM, DiTComponentType::TEXT_ENCODER);
   EXPECT_EQ(&original.attention_params(),
             &original.dit_model_args().vlm().attention_params());
   EXPECT_EQ(&original.embedding_params(),
             &original.vlm_model_args().embedding_params());
 
-  ModelArgs copied = original;
+  ModelArgsBundle copied = original;
   copied.set_encoder_embedding_mode(true);
 
   EXPECT_TRUE(copied.embedding_params().encoder_embedding_mode());

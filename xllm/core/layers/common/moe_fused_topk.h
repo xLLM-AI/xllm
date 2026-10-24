@@ -27,7 +27,7 @@ namespace layer {
 
 class MoEFusedTopkImpl : public torch::nn::Module {
  public:
-  MoEFusedTopkImpl(const RawModelArgs& model_args,
+  MoEFusedTopkImpl(const ModelArgs& model_args,
                    const QuantArgs& quant_args,
                    const torch::TensorOptions& options);
   MoEFusedTopkImpl(const LlmModelArgs& model_args,

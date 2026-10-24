@@ -18,7 +18,7 @@ namespace xllm {
 namespace layer {
 
 Qwen3NextGatedDeltaNetImpl::Qwen3NextGatedDeltaNetImpl(
-    const RawModelArgs& args,
+    const ModelArgs& args,
     const QuantArgs& quant_args,
     const ParallelArgs& parallel_args,
     const torch::TensorOptions& options)
@@ -29,7 +29,7 @@ Qwen3NextGatedDeltaNetImpl::Qwen3NextGatedDeltaNetImpl(
                                  /*init_projections=*/true) {}
 
 Qwen3NextGatedDeltaNetImpl::Qwen3NextGatedDeltaNetImpl(
-    const RawModelArgs& args,
+    const ModelArgs& args,
     const QuantArgs& quant_args,
     const ParallelArgs& parallel_args,
     const torch::TensorOptions& options,
@@ -41,7 +41,7 @@ Qwen3NextGatedDeltaNetImpl::Qwen3NextGatedDeltaNetImpl(
 }
 
 void Qwen3NextGatedDeltaNetImpl::init_next_projections(
-    const RawModelArgs& args,
+    const ModelArgs& args,
     const QuantArgs& quant_args,
     const ParallelArgs& parallel_args,
     const torch::TensorOptions& options) {

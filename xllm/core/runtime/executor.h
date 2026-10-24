@@ -32,7 +32,7 @@ class PyExecutorImpl;
 class Executor final {
  public:
   Executor(CausalLM* model,
-           const ModelArgs& args,
+           const ModelArgsBundle& args,
            const torch::Device& device,
            const runtime::Options& options);
 

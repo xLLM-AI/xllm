@@ -48,7 +48,7 @@ class NpuWordEmbeddingImpl : public BaseLayer {
   ~NpuWordEmbeddingImpl() override = default;
 
   void param_from_args(atb_speed::common::WordEmbeddingParam& param,
-                       const xllm::RawModelArgs& args,
+                       const xllm::ModelArgs& args,
                        const xllm::ParallelArgs& parallel_args);
 
   int64_t init_layer();

@@ -38,7 +38,7 @@ namespace layer {
 class Qwen3GatedDeltaNetBaseImpl : public torch::nn::Module {
  public:
   Qwen3GatedDeltaNetBaseImpl() = default;
-  Qwen3GatedDeltaNetBaseImpl(const RawModelArgs& args,
+  Qwen3GatedDeltaNetBaseImpl(const ModelArgs& args,
                              const QuantArgs& quant_args,
                              const ParallelArgs& parallel_args,
                              const torch::TensorOptions& options);

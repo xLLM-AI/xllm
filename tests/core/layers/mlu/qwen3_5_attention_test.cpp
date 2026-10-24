@@ -92,8 +92,8 @@ class Qwen3_5AttentionTest : public ::testing::Test {
 
   // Configure model args for either the gated (attn_output_gate=true) or the
   // plain attention variant.
-  RawModelArgs MakeModelArgs(bool attn_output_gate) {
-    RawModelArgs args;
+  ModelArgs MakeModelArgs(bool attn_output_gate) {
+    ModelArgs args;
     args.model_type() = "qwen3_5";
     args.hidden_size() = kHiddenSize;
     args.head_dim() = kHeadDim;

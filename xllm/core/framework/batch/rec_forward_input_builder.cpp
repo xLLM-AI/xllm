@@ -29,7 +29,7 @@ namespace xllm {
 std::unique_ptr<RecForwardInputBuilder> RecForwardInputBuilder::create(
     BatchInputType input_type,
     const BatchInputData& data,
-    const RawModelArgs* args,
+    const ModelArgs* args,
     MPMCThreadPool* thread_pool) {
   switch (input_type) {
     case BatchInputType::ONEREC:

@@ -25,7 +25,7 @@ limitations under the License.
 #include "core/framework/batch/rec_batch_factory.h"
 #include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/rec_config.h"
-#include "core/framework/model/raw_model_args.h"
+#include "core/framework/model/model_args.h"
 #include "core/framework/request/request.h"
 #include "core/framework/request/stopping_checker.h"
 #include "core/framework/sampling/sampling_params.h"
@@ -90,7 +90,7 @@ TEST(RecForwardInputFactoryTest, RefreshesForwardTypeAfterSequenceAdvance) {
   options.dp_size = 2;
   RecForwardInputFactory factory(options);
   std::vector<RecForwardInput> inputs;
-  factory.create_inputs(batches, RawModelArgs(), inputs);
+  factory.create_inputs(batches, ModelArgs(), inputs);
 
   ASSERT_EQ(inputs.size(), 2u);
   EXPECT_TRUE(inputs[0].input_params.meta.batch_forward_type.is_prefill());
@@ -98,7 +98,7 @@ TEST(RecForwardInputFactoryTest, RefreshesForwardTypeAfterSequenceAdvance) {
             (std::vector<int32_t>{3, 0}));
   EXPECT_EQ(sequence->kv_state().kv_cache_tokens_num(), 3u);
   sequence->append_token(Token(4));
-  factory.create_inputs(batches, RawModelArgs(), inputs);
+  factory.create_inputs(batches, ModelArgs(), inputs);
 
   ASSERT_EQ(inputs.size(), 2u);
   EXPECT_TRUE(torch::equal(inputs[0].host_token_ids(),
@@ -136,7 +136,7 @@ TEST(RecForwardInputFactoryTest, AggregatesDifferentRankSequenceCounts) {
   options.dp_size = 2;
   RecForwardInputFactory factory(options);
   std::vector<RecForwardInput> inputs;
-  factory.create_inputs(batches, RawModelArgs(), inputs);
+  factory.create_inputs(batches, ModelArgs(), inputs);
 
   ASSERT_EQ(inputs.size(), 2u);
   for (const auto& input : inputs) {
@@ -165,7 +165,7 @@ TEST(RecForwardInputFactoryTest, MultiRoundInputKeepsScheduledTokenBudgets) {
       {first->sequences()[0].get(), second->sequences()[0].get()},
       {1, 2});
   RecForwardInputFactory factory(RecForwardInputFactoryOptions{});
-  auto input = factory.create_input(batches[0], RawModelArgs());
+  auto input = factory.create_input(batches[0], ModelArgs());
 
   EXPECT_TRUE(torch::equal(input.host_token_ids(),
                            torch::tensor({1, 4, 5}, torch::kInt32)));
@@ -187,7 +187,7 @@ TEST(RecForwardInputFactoryTest, MultiRoundInputKeepsScheduledTokenBudgets) {
 TEST(RecForwardInputFactoryTest, EmptySingleBatchReturnsEmptyInput) {
   RecForwardInputFactory factory(RecForwardInputFactoryOptions{});
   RecBatch batch(BatchInputType::REC_MULTI_ROUND);
-  auto input = factory.create_input(batch, RawModelArgs());
+  auto input = factory.create_input(batch, ModelArgs());
 
   EXPECT_FALSE(input.token_ids.defined());
   EXPECT_FALSE(input.has_step_meta());

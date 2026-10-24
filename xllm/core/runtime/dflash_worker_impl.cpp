@@ -455,7 +455,7 @@ DFlashWorkerImpl::~DFlashWorkerImpl() {
   capacity.unified_graph =
       Platform::is_npu() && options_.enable_graph() &&
       ExecutionConfig::get_instance().enable_unified_mtp_graph() &&
-      impl_->context_.get_model_args().model_type() == "glm_moe_dsa" &&
+      impl_->context_.get_model_args_bundle().model_type() == "glm_moe_dsa" &&
       (draft_args.model_type() == "DFlashDraftModel" ||
        is_dflash2_draft_model_type(draft_args.model_type()) ||
        draft_args.model_type() == "DSparkDraftModel") &&
@@ -572,7 +572,7 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
 
   if (impl_->get_status() == WorkerImpl::Status::LOADED) {
     target_is_hybrid_recurrent_ =
-        has_linear_attention_layers(impl_->context_.get_model_args());
+        has_linear_attention_layers(impl_->context_.get_model_args_bundle());
   }
 
   if (draft_impl_->get_status() == WorkerImpl::Status::LOADED) {
@@ -1184,7 +1184,7 @@ void DFlashWorkerImpl::write_context_kv(
       !input.transfer_kv_infos.empty()) {
     std::shared_ptr<NPULayerSynchronizerImpl> layer_synchronizer =
         std::make_shared<NPULayerSynchronizerImpl>(
-            draft_impl_->context_.get_model_args().n_layers());
+            draft_impl_->context_.get_model_args_bundle().n_layers());
     input.input_params.parallel.layer_synchronizer = layer_synchronizer;
     kv_transfers.add(kv_cache_transfer_->push_kv_blocks_async(
         input.transfer_kv_infos,

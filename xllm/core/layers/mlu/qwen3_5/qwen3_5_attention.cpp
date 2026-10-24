@@ -23,7 +23,7 @@ limitations under the License.
 namespace xllm {
 namespace layer {
 
-Qwen3_5AttentionImpl::Qwen3_5AttentionImpl(const RawModelArgs& args,
+Qwen3_5AttentionImpl::Qwen3_5AttentionImpl(const ModelArgs& args,
                                            const QuantArgs& quant_args,
                                            const ParallelArgs& parallel_args,
                                            const torch::TensorOptions& options,

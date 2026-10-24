@@ -66,10 +66,9 @@ namespace xllm {
   T property##_
 
 // Opt a PROPERTY-bearing struct into field reflection. Place once at the top of
-// the struct body, e.g. `REFLECT_PROPERTIES(RawModelArgs);`. It names the
-// owning type so PROPERTY registers each field into
-// reflect::PropertyTable<OwnerType>; without it the struct keeps the `void`
-// owner and registers nothing.
+// the struct body, e.g. `REFLECT_PROPERTIES(ModelArgs);`. It names the owning
+// type so PROPERTY registers each field into reflect::PropertyTable<OwnerType>;
+// without it the struct keeps the `void` owner and registers nothing.
 #define REFLECT_PROPERTIES(OwnerType) using xllm_property_owner_t = OwnerType
 
 #define SAFE_CONCAT(a, b) (a##b)

@@ -24,7 +24,7 @@ limitations under the License.
 #include "core/kv_cache/layout/kv_shard_layout.h"
 
 namespace xllm {
-struct RawModelArgs;
+struct ModelArgs;
 class ModelParamsView;
 class RecModelParams;
 

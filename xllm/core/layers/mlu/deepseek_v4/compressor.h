@@ -46,7 +46,7 @@ class CompressorImpl : public torch::nn::Module {
       double norm_eps,
       const torch::TensorOptions& options =
           torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCPU),
-      const RawModelArgs& args = RawModelArgs{},
+      const ModelArgs& args = ModelArgs{},
       const QuantArgs& quant_args = QuantArgs{});
 
   torch::Tensor forward(

@@ -25,7 +25,7 @@ namespace xllm {
 
 class BatchGroup;
 class ThreadPool;
-struct RawModelArgs;
+struct ModelArgs;
 
 struct VlmForwardInputFactoryOptions {
   uint32_t dp_size = 1;
@@ -39,7 +39,7 @@ class VlmForwardInputFactory final {
   ~VlmForwardInputFactory();
 
   void create_inputs(BatchGroup& batches,
-                     const RawModelArgs& model_args,
+                     const ModelArgs& model_args,
                      std::vector<VlmForwardInput>& inputs);
 
  private:
@@ -54,7 +54,7 @@ class VlmForwardInputFactory final {
   };
 
   void prepare_rank_inputs(BatchGroup& batches,
-                           const RawModelArgs& model_args,
+                           const ModelArgs& model_args,
                            PreparationState& state);
   void finalize_inputs(PreparationState& state);
 

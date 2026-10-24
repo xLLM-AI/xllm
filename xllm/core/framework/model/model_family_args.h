@@ -26,16 +26,16 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/macros.h"
+#include "core/framework/model/model_args.h"
 #include "core/framework/model/model_family.h"
 #include "core/framework/model/model_params.h"
-#include "core/framework/model/raw_model_args.h"
 
 namespace xllm {
 
 namespace model_family_args_detail {
 
-inline const RawModelArgs& default_model_args() {
-  static const RawModelArgs args{};
+inline const ModelArgs& default_model_args() {
+  static const ModelArgs args{};
   return args;
 }
 
@@ -224,7 +224,7 @@ class LlmModelArgs final {
  public:
   LlmModelArgs()
       : LlmModelArgs(model_family_args_detail::default_model_args()) {}
-  explicit LlmModelArgs(const RawModelArgs& args)
+  explicit LlmModelArgs(const ModelArgs& args)
       : attention_params_(args),
         linear_attention_params_(args),
         kv_cache_params_(args),
@@ -233,8 +233,8 @@ class LlmModelArgs final {
         embedding_params_(args),
         execution_params_(args) {}
 
-  explicit LlmModelArgs(RawModelArgs&&) = delete;
-  explicit LlmModelArgs(const RawModelArgs&&) = delete;
+  explicit LlmModelArgs(ModelArgs&&) = delete;
+  explicit LlmModelArgs(const ModelArgs&&) = delete;
 
   const AttentionModelParams& attention_params() const noexcept {
     return attention_params_;
@@ -344,7 +344,7 @@ class VlmVisionModelArgs final {
  public:
   VlmVisionModelArgs()
       : VlmVisionModelArgs(model_family_args_detail::default_model_args()) {}
-  explicit VlmVisionModelArgs(const RawModelArgs& args)
+  explicit VlmVisionModelArgs(const ModelArgs& args)
       : dtype_(args.dtype()),
         rms_norm_eps_(args.rms_norm_eps()),
         vision_start_token_id_(args.vision_start_token_id()),
@@ -476,8 +476,8 @@ class VlmVisionModelArgs final {
         mm_audio_pe_maxlen_(args.mm_audio_pe_maxlen()),
         mm_audio_ctc_pad_token_id_(args.mm_audio_ctc_pad_token_id()) {}
 
-  explicit VlmVisionModelArgs(RawModelArgs&&) = delete;
-  explicit VlmVisionModelArgs(const RawModelArgs&&) = delete;
+  explicit VlmVisionModelArgs(ModelArgs&&) = delete;
+  explicit VlmVisionModelArgs(const ModelArgs&&) = delete;
 
   PROPERTY(std::string, dtype) = {};
   PROPERTY(float, rms_norm_eps) = 0.0f;
@@ -620,7 +620,7 @@ class RecModelArgs final {
  public:
   RecModelArgs()
       : RecModelArgs(model_family_args_detail::default_model_args()) {}
-  explicit RecModelArgs(const RawModelArgs& args)
+  explicit RecModelArgs(const ModelArgs& args)
       : attention_params_(args),
         linear_attention_params_(args),
         kv_cache_params_(args),
@@ -629,8 +629,8 @@ class RecModelArgs final {
         embedding_params_(args),
         execution_params_(args) {}
 
-  explicit RecModelArgs(RawModelArgs&&) = delete;
-  explicit RecModelArgs(const RawModelArgs&&) = delete;
+  explicit RecModelArgs(ModelArgs&&) = delete;
+  explicit RecModelArgs(const ModelArgs&&) = delete;
 
   const AttentionModelParams& attention_params() const noexcept {
     return attention_params_;
@@ -706,7 +706,7 @@ class VlmModelArgs final {
  public:
   VlmModelArgs()
       : VlmModelArgs(model_family_args_detail::default_model_args()) {}
-  explicit VlmModelArgs(const RawModelArgs& args)
+  explicit VlmModelArgs(const ModelArgs& args)
       : attention_params_(args),
         linear_attention_params_(args),
         kv_cache_params_(args),
@@ -716,8 +716,8 @@ class VlmModelArgs final {
         execution_params_(args),
         vision_(args) {}
 
-  explicit VlmModelArgs(RawModelArgs&&) = delete;
-  explicit VlmModelArgs(const RawModelArgs&&) = delete;
+  explicit VlmModelArgs(ModelArgs&&) = delete;
+  explicit VlmModelArgs(const ModelArgs&&) = delete;
 
   const AttentionModelParams& attention_params() const noexcept {
     return attention_params_;
@@ -786,7 +786,7 @@ class DiTTransformerModelArgs final {
   DiTTransformerModelArgs()
       : DiTTransformerModelArgs(
             model_family_args_detail::default_model_args()) {}
-  explicit DiTTransformerModelArgs(const RawModelArgs& args)
+  explicit DiTTransformerModelArgs(const ModelArgs& args)
       : attention_params_(args),
         linear_attention_params_(args),
         kv_cache_params_(args),
@@ -846,8 +846,8 @@ class DiTTransformerModelArgs final {
         use_additional_t_cond_(args.use_additional_t_cond()),
         use_layer3d_rope_(args.use_layer3d_rope()) {}
 
-  explicit DiTTransformerModelArgs(RawModelArgs&&) = delete;
-  explicit DiTTransformerModelArgs(const RawModelArgs&&) = delete;
+  explicit DiTTransformerModelArgs(ModelArgs&&) = delete;
+  explicit DiTTransformerModelArgs(const ModelArgs&&) = delete;
 
   const AttentionModelParams& attention_params() const noexcept {
     return attention_params_;
@@ -948,7 +948,7 @@ class DiTVaeModelArgs final {
  public:
   DiTVaeModelArgs()
       : DiTVaeModelArgs(model_family_args_detail::default_model_args()) {}
-  explicit DiTVaeModelArgs(const RawModelArgs& args)
+  explicit DiTVaeModelArgs(const ModelArgs& args)
       : in_channels_(args.in_channels()),
         out_channels_(args.out_channels()),
         down_block_types_(args.down_block_types()),
@@ -1016,8 +1016,8 @@ class DiTVaeModelArgs final {
         qk_bias_(args.qk_bias()),
         norm_eps_(args.norm_eps()) {}
 
-  explicit DiTVaeModelArgs(RawModelArgs&&) = delete;
-  explicit DiTVaeModelArgs(const RawModelArgs&&) = delete;
+  explicit DiTVaeModelArgs(ModelArgs&&) = delete;
+  explicit DiTVaeModelArgs(const ModelArgs&&) = delete;
 
   PROPERTY(int64_t, in_channels) = -1;
   PROPERTY(int64_t, out_channels) = -1;
@@ -1092,7 +1092,7 @@ class DiTTextEncoderModelArgs final {
   DiTTextEncoderModelArgs()
       : DiTTextEncoderModelArgs(
             model_family_args_detail::default_model_args()) {}
-  explicit DiTTextEncoderModelArgs(const RawModelArgs& args)
+  explicit DiTTextEncoderModelArgs(const ModelArgs& args)
       : n_heads_(args.n_heads()),
         vocab_size_(args.vocab_size()),
         layer_norm_eps_(args.layer_norm_eps()),
@@ -1114,8 +1114,8 @@ class DiTTextEncoderModelArgs final {
         relative_attention_max_distance_(
             args.relative_attention_max_distance()) {}
 
-  explicit DiTTextEncoderModelArgs(RawModelArgs&&) = delete;
-  explicit DiTTextEncoderModelArgs(const RawModelArgs&&) = delete;
+  explicit DiTTextEncoderModelArgs(ModelArgs&&) = delete;
+  explicit DiTTextEncoderModelArgs(const ModelArgs&&) = delete;
 
   PROPERTY(int64_t, n_heads) = 0;
   PROPERTY(int64_t, vocab_size) = -1;
@@ -1142,7 +1142,7 @@ class DiTSchedulerModelArgs final {
  public:
   DiTSchedulerModelArgs()
       : DiTSchedulerModelArgs(model_family_args_detail::default_model_args()) {}
-  explicit DiTSchedulerModelArgs(const RawModelArgs& args)
+  explicit DiTSchedulerModelArgs(const ModelArgs& args)
       : num_train_timesteps_(args.num_train_timesteps()),
         shift_(args.shift()),
         use_dynamic_shifting_(args.use_dynamic_shifting()),
@@ -1175,8 +1175,8 @@ class DiTSchedulerModelArgs final {
         rescale_betas_zero_snr_(args.rescale_betas_zero_snr()),
         time_shift_type_(args.time_shift_type()) {}
 
-  explicit DiTSchedulerModelArgs(RawModelArgs&&) = delete;
-  explicit DiTSchedulerModelArgs(const RawModelArgs&&) = delete;
+  explicit DiTSchedulerModelArgs(ModelArgs&&) = delete;
+  explicit DiTSchedulerModelArgs(const ModelArgs&&) = delete;
 
   PROPERTY(int64_t, num_train_timesteps) = 0;
   PROPERTY(int64_t, shift) = 0;
@@ -1231,7 +1231,7 @@ using DiTComponentModelArgsVariant = std::variant<DiTTransformerModelArgs,
 class DiTComponentModelArgs final {
  public:
   explicit DiTComponentModelArgs(
-      const RawModelArgs& args,
+      const ModelArgs& args,
       DiTComponentType component_type = DiTComponentType::TRANSFORMER,
       ModelFamily family = ModelFamily::DIT)
       : component_type_(component_type),
@@ -1284,7 +1284,7 @@ class DiTComponentModelArgs final {
   }
 
  private:
-  static DiTComponentModelArgsVariant make_args(const RawModelArgs& args,
+  static DiTComponentModelArgsVariant make_args(const ModelArgs& args,
                                                 DiTComponentType component_type,
                                                 ModelFamily family) {
     if (family == ModelFamily::VLM) {
@@ -1311,23 +1311,23 @@ class DiTComponentModelArgs final {
   DiTComponentModelArgsVariant args_;
 };
 
-// ModelArgs owns the active family or DiT component. ModelContext shares
+// ModelArgsBundle owns the active family or DiT component. ModelContext shares
 // the aggregate so capability access returns references to existing objects.
-class ModelArgs final {
+class ModelArgsBundle final {
  public:
-  ModelArgs() = default;
+  ModelArgsBundle() = default;
 
   // Construct a bundle for a regular model context. DiT components use the
   // component-specific overload below so a VLM text encoder remains wrapped
   // in a DiTComponentModelArgs while retaining its VlmModelArgs payload.
-  ModelArgs(const RawModelArgs& model_args, ModelFamily family)
+  ModelArgsBundle(const ModelArgs& model_args, ModelFamily family)
       : family_(family) {
     initialize(model_args, family, DiTComponentType::UNKNOWN);
   }
 
-  ModelArgs(const RawModelArgs& model_args,
-            ModelFamily family,
-            DiTComponentType dit_component_type)
+  ModelArgsBundle(const ModelArgs& model_args,
+                  ModelFamily family,
+                  DiTComponentType dit_component_type)
       : family_(family) {
     initialize(model_args, family, dit_component_type);
   }
@@ -1843,7 +1843,7 @@ class ModelArgs final {
     return component_args.transformer();
   }
 
-  void initialize(const RawModelArgs& model_args,
+  void initialize(const ModelArgs& model_args,
                   ModelFamily family,
                   DiTComponentType dit_component_type) {
     switch (family) {
@@ -1882,11 +1882,12 @@ class ModelArgs final {
       args_;
 };
 
-inline bool has_linear_attention_layers(const ModelArgs& args) {
+inline bool has_linear_attention_layers(const ModelArgsBundle& args) {
   return args.linear_attention_params().has_linear_attention_layers();
 }
 
-inline bool is_full_attention_layer(const ModelArgs& args, int64_t layer_id) {
+inline bool is_full_attention_layer(const ModelArgsBundle& args,
+                                    int64_t layer_id) {
   return args.linear_attention_params().is_full_attention_layer(layer_id);
 }
 

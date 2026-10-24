@@ -56,7 +56,7 @@ class FusedMoEImpl : public torch::nn::Module {
                const torch::TensorOptions& options,
                const std::shared_ptr<Stream>& routed_comm_stream,
                const std::shared_ptr<Stream>& shared_compute_stream);
-  FusedMoEImpl(const RawModelArgs& model_args,
+  FusedMoEImpl(const ModelArgs& model_args,
                const FusedMoEArgs& moe_args,
                const QuantArgs& quant_args,
                const ParallelArgs& parallel_args,

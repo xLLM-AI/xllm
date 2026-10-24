@@ -784,7 +784,7 @@ TEST(BatchTest, ProcessSampleOutputStoresMtpBootstrapEmbedding) {
 
   Batch batch(&sequence);
   (void)batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, RawModelArgs());
+      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
 
   SampleOutput output;
   output.next_tokens = torch::tensor({42}, torch::kInt);
@@ -811,7 +811,7 @@ TEST(BatchTest, ProcessRawOutputStoresMtpBootstrapEmbedding) {
 
   Batch batch(&sequence);
   (void)batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, RawModelArgs());
+      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
 
   RawForwardOutput raw_output;
   raw_output.outputs.push_back(make_raw_sample_output(
@@ -854,7 +854,7 @@ TEST(BatchTest, ProcessRawOutputAccumulatesRequestSpeculativeStats) {
 
   Batch batch({&first, &second});
   (void)batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, RawModelArgs());
+      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
 
   RawForwardOutput raw_output;
   raw_output.outputs.push_back(make_raw_sample_output(101, std::nullopt));
@@ -873,7 +873,7 @@ TEST_F(BatchSpeculativeStatsTest, OverlapCountsOnlyRealValidationOutput) {
   sequence.add_blocks(BlockType::KV, manager_->allocate(1));
   Batch batch(&sequence);
   (void)batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, RawModelArgs());
+      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
 
   RawForwardOutput fake_output;
   fake_output.outputs.emplace_back(make_raw_sample_output(-1, std::nullopt));
@@ -893,7 +893,7 @@ TEST_F(BatchSpeculativeStatsTest, OverlapCountsOnlyRealValidationOutput) {
   EXPECT_EQ(request_stats_->verified_rounds, 0);
 
   (void)batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, RawModelArgs());
+      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
   batch.process_sample_output(fake_output, /*replace_fake_token=*/false);
   EXPECT_EQ(sequence.tokens()[sequence.num_prompt_tokens() + 1], -1);
   EXPECT_EQ(request_stats_->accepted_tokens, 0);
@@ -926,9 +926,7 @@ TEST_F(BatchSpeculativeStatsTest, TruncationPreservesExecutedValidationStats) {
     sequence.add_blocks(BlockType::KV, manager_->allocate(1));
     Batch batch(&sequence);
     (void)batch.prepare_forward_input(
-        /*num_decoding_tokens=*/1,
-        /*min_decoding_batch_size=*/0,
-        RawModelArgs());
+        /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
 
     RawForwardOutput prefill_output;
     prefill_output.outputs.emplace_back(
@@ -940,9 +938,7 @@ TEST_F(BatchSpeculativeStatsTest, TruncationPreservesExecutedValidationStats) {
     EXPECT_EQ(request_stats_->verified_rounds, 0);
 
     (void)batch.prepare_forward_input(
-        /*num_decoding_tokens=*/1,
-        /*min_decoding_batch_size=*/0,
-        RawModelArgs());
+        /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
     RawSampleOutput sample_output;
     sample_output.tokens = {RawToken{.id = stop_at_eos ? 100 : 201},
                             RawToken{.id = 202},
@@ -969,7 +965,7 @@ TEST_F(BatchSpeculativeStatsTest, ZeroDraftValidationStillCountsOneRound) {
   sequence.add_blocks(BlockType::KV, manager_->allocate(1));
   Batch batch(&sequence);
   (void)batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, RawModelArgs());
+      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
 
   RawForwardOutput prefill_output;
   prefill_output.outputs.emplace_back(
@@ -978,7 +974,7 @@ TEST_F(BatchSpeculativeStatsTest, ZeroDraftValidationStillCountsOneRound) {
   EXPECT_EQ(request_stats_->verified_rounds, 0);
 
   (void)batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, RawModelArgs());
+      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
   RawForwardOutput verify_output;
   verify_output.outputs.emplace_back(make_raw_sample_output(201, std::nullopt));
   verify_output.outputs.back().speculative_token_stats = {0, 0, 1};
@@ -1232,7 +1228,7 @@ TEST(BatchTest, JsonObjectCommitMismatchSkipsRemainingSampleSlotsAndEmbedding) {
   sequence.add_blocks(BlockType::KV, manager.allocate(1));
   Batch batch(&sequence);
   (void)batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, RawModelArgs());
+      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
   const size_t original_num_tokens = sequence.num_tokens();
 
   RawForwardOutput raw_output;
@@ -1286,7 +1282,7 @@ TEST(BatchTest, JsonObjectErrorDiscardsFailedMmEmbeddingWithoutRowShift) {
   healthy.add_blocks(BlockType::KV, manager.allocate(1));
   Batch batch({&failed, &healthy});
   (void)batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, RawModelArgs());
+      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
 
   RawForwardOutput raw_output;
   raw_output.outputs = {make_raw_sample_output(/*token_id=*/0, std::nullopt),
@@ -1326,7 +1322,7 @@ TEST(BatchTest, DecodeForwardInputConsumesMtpBootstrap) {
 
   Batch batch(&sequence);
   LlmForwardInput forward_input = batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, RawModelArgs());
+      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
 
   const auto& embed_params = forward_input.input_params.embedding;
   EXPECT_EQ(embed_params.mtp_bootstrap_row_idxes, std::vector<int32_t>{0});
@@ -1359,7 +1355,7 @@ TEST(BatchTest, DecodeForwardInputMapsSparseMtpBootstrapRows) {
 
   Batch batch({&first, &second});
   LlmForwardInput forward_input = batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, RawModelArgs());
+      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
 
   const auto& embed_params = forward_input.input_params.embedding;
   EXPECT_EQ(embed_params.mtp_bootstrap_row_idxes, std::vector<int32_t>{1});
@@ -1389,7 +1385,7 @@ TEST(BatchTest, NativeVlmPrefillSchedulesOnlyVisibleVisionItems) {
   batch.add(&sequence, /*allowed_max_token=*/3);
 
   VlmForwardInput input = batch.prepare_vlm_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, RawModelArgs());
+      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
 
   EXPECT_TRUE(input.input_params.meta.batch_forward_type.is_prefill());
   EXPECT_EQ(input.input_params.meta.num_sequences, 1);
@@ -1426,7 +1422,7 @@ TEST(BatchTest, NativeVlmDecodeKeepsDomainWithoutVisionPayload) {
   Batch batch({&sequence});
 
   VlmForwardInput input = batch.prepare_vlm_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, RawModelArgs());
+      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
 
   EXPECT_TRUE(input.input_params.meta.batch_forward_type.is_decode());
   EXPECT_EQ(input.input_params.meta.num_sequences, 1);
@@ -1448,7 +1444,7 @@ TEST(BatchTest, NativeVlmChunkRetainsAllMropePositionAxes) {
       {{0, 1, 2, 3, 4}, {10, 11, 12, 13, 14}, {20, 21, 22, 23, 24}},
       torch::kInt);
   sequence.set_mrope_positions(cached_positions);
-  RawModelArgs args;
+  ModelArgs args;
   args.rope_scaling_rope_type("mrope");
   VlmForwardInput input;
   {
@@ -1471,14 +1467,14 @@ TEST(BatchTest, NativeVlmChunkRetainsAllMropePositionAxes) {
 TEST(BatchTest, NativeVlmEmptyBatchAndShardProduceEmptyInputs) {
   Batch batch;
   VlmForwardInput input = batch.prepare_vlm_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, RawModelArgs());
+      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
   EXPECT_EQ(input.input_params.meta.num_sequences, 0);
   EXPECT_FALSE(input.token_ids.defined());
   EXPECT_FALSE(input.positions.defined());
   EXPECT_FALSE(input.input_params.multimodal.mm_data.valid());
 
   VlmForwardInput shard_input = batch.prepare_vlm_forward_input(
-      RawModelArgs(), /*thread_pool=*/nullptr, /*cp_size=*/1);
+      ModelArgs(), /*thread_pool=*/nullptr, /*cp_size=*/1);
   EXPECT_EQ(shard_input.input_params.meta.num_sequences, 0);
   EXPECT_FALSE(shard_input.token_ids.defined());
   EXPECT_FALSE(shard_input.positions.defined());
@@ -1565,7 +1561,7 @@ TEST(BatchTest, Basic) {
   // allowed chunk size 4
   batch.add(&seq4, 4);
   LlmForwardInput forward_input = batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, RawModelArgs());
+      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, ModelArgs());
 
   // check num tokens in kv cache
   EXPECT_EQ(seq1.kv_state().kv_cache_tokens_num(), 9);
@@ -1714,7 +1710,7 @@ TEST(BatchTest, SampleRequestInjectsAllMatchedSlots) {
 
   Batch batch({&seq});
   LlmForwardInput forward_input = batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, RawModelArgs());
+      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, ModelArgs());
 
   const auto& sampling_params_out = forward_input.sampling_params;
   const std::vector<int32_t> expected_selected_token_idxes = {1, 4};
@@ -1769,7 +1765,7 @@ TEST(BatchTest, JsonObjectSampleSequenceIdsFollowSamplingRows) {
 
   Batch batch({&second, &first});
   LlmForwardInput forward_input = batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, RawModelArgs());
+      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, ModelArgs());
 
   EXPECT_EQ(forward_input.sample_sequence_ids,
             std::vector<std::string>({"req-shared#1", "req-shared#0"}));
@@ -1792,7 +1788,7 @@ TEST(BatchTest, JsonObjectSampleSequenceIdsFollowSamplingRows) {
                          make_raw_sample_output(-2, std::nullopt)};
   batch.process_sample_output(fake_output, /*replace_fake_token=*/false);
   LlmForwardInput next_input = batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, RawModelArgs());
+      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, ModelArgs());
   EXPECT_EQ(next_input.sample_prior_output_rows, std::vector<int32_t>({0, 1}));
 }
 
@@ -1858,7 +1854,7 @@ TEST(BatchTest, ReorderedMtpAcceptedRowsCommitToOwningSequences) {
 
   Batch batch({&plain, &constrained});
   LlmForwardInput first_input = batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, RawModelArgs());
+      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
   EXPECT_EQ(
       first_input.sample_sequence_ids,
       std::vector<std::string>({"req-plain-chain#1", "req-json-chain#0"}));
@@ -1873,7 +1869,7 @@ TEST(BatchTest, ReorderedMtpAcceptedRowsCommitToOwningSequences) {
                          make_raw_sample_output(-2, std::nullopt)};
   batch.process_sample_output(fake_output, /*replace_fake_token=*/false);
   LlmForwardInput commit_input = batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, RawModelArgs());
+      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
   EXPECT_EQ(
       commit_input.sample_sequence_ids,
       std::vector<std::string>({"req-plain-chain#1", "req-json-chain#0"}));
@@ -1977,7 +1973,7 @@ TEST(BatchTest, JsonObjectMetadataIsSkippedWhenDisabled) {
 
   Batch batch({&sequence});
   LlmForwardInput forward_input = batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, RawModelArgs());
+      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, ModelArgs());
 
   EXPECT_TRUE(forward_input.json_object_states.empty());
   EXPECT_TRUE(forward_input.json_object_state_snapshots.empty());
@@ -2623,7 +2619,7 @@ TEST(BatchTest, SampleRequestKeepsThreadedForwardBuilderOffsetsStable) {
   std::vector<torch::Tensor> input_embeddings_vec;
   std::vector<MMData> mm_data_vec;
   ThreadPool thread_pool(2);
-  RawModelArgs args;
+  ModelArgs args;
   ForwardInputBuilder builder(sequences,
                               allowed_max_tokens,
                               input_embeddings_vec,
@@ -2680,7 +2676,7 @@ TEST(BatchTest, ThreadedMropeIgnoresEmptyTailPartitions) {
                                                  kTokensPerSequence);
   const std::vector<torch::Tensor> input_embeddings;
   const std::vector<MMData> mm_data;
-  RawModelArgs args;
+  ModelArgs args;
   args.rope_scaling_rope_type("mrope");
   ThreadPool thread_pool(kThreadCount);
   ForwardInputBuilder builder(sequences,
@@ -2740,7 +2736,7 @@ TEST(BatchTest, DecodeMinBatchSizeDoesNotPadTransportState) {
   std::vector<uint32_t> allowed_max_tokens = {1};
   std::vector<torch::Tensor> input_embeddings_vec;
   std::vector<MMData> mm_data_vec;
-  RawModelArgs args;
+  ModelArgs args;
   ForwardInputBuilder builder(sequences,
                               allowed_max_tokens,
                               input_embeddings_vec,
@@ -2807,7 +2803,7 @@ TEST(BatchTest, DecodeEmbeddingAndLinearStateIdsAreIndependentSlots) {
   std::vector<uint32_t> allowed_max_tokens = {1};
   std::vector<torch::Tensor> input_embeddings_vec;
   std::vector<MMData> mm_data_vec;
-  RawModelArgs args;
+  ModelArgs args;
   args.layer_types({"linear_attention"});
   ForwardInputBuilder builder(sequences,
                               allowed_max_tokens,
@@ -2923,7 +2919,7 @@ TEST(BatchTest, LinearRestoreSourceStaysPinnedForBatchLifetime) {
   batch->add(&off_boundary_seq, /*allowed_max_token=*/15);
   batch->add(&decode_seq, /*allowed_max_token=*/1);
 
-  RawModelArgs args;
+  ModelArgs args;
   args.model_type("qwen3_5").layer_types({"linear_attention"});
   LlmForwardInput forward_input = batch->prepare_forward_input(
       /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, args);
@@ -2990,7 +2986,7 @@ TEST(BatchTest, Glm53PrefillUsesCheckpointAsDirectReadSource) {
   std::optional<Batch> batch;
   batch.emplace();
   batch->add(&sequence, /*allowed_max_token=*/4);
-  RawModelArgs args;
+  ModelArgs args;
   args.model_type("glm5_next");
   args.layer_types({"linear_attention"});
   auto forward_input = batch->prepare_forward_input(
@@ -3031,7 +3027,7 @@ TEST(BatchTest, Glm53PrefillKeepsCheckpointRestoreD2DWhenDisabled) {
 
   Batch batch;
   batch.add(&sequence, /*allowed_max_token=*/4);
-  RawModelArgs args;
+  ModelArgs args;
   args.model_type("glm5_next");
   args.layer_types({"linear_attention"});
   auto forward_input = batch.prepare_forward_input(
@@ -3071,7 +3067,7 @@ TEST(BatchTest, Glm53MixedBatchKeepsPrefillCheckpointRestoreD2D) {
   Batch batch;
   batch.add(&prefill, /*allowed_max_token=*/4);
   batch.add(&decode, /*allowed_max_token=*/1);
-  RawModelArgs args;
+  ModelArgs args;
   args.model_type("glm5_next");
   args.layer_types({"linear_attention"});
   auto forward_input = batch.prepare_forward_input(
@@ -3104,7 +3100,7 @@ TEST(BatchTest, Glm53NativeExecutorKeepsCheckpointRestoreD2D) {
 
   Batch batch;
   batch.add(&sequence, /*allowed_max_token=*/4);
-  RawModelArgs args;
+  ModelArgs args;
   args.model_type("glm5_next");
   args.layer_types({"linear_attention"});
   auto forward_input = batch.prepare_forward_input(
@@ -3135,7 +3131,7 @@ TEST(BatchTest, OtherLinearModelKeepsCheckpointRestoreD2D) {
   std::optional<Batch> batch;
   batch.emplace();
   batch->add(&sequence, /*allowed_max_token=*/4);
-  RawModelArgs args;
+  ModelArgs args;
   args.model_type("qwen3_5");
   args.layer_types({"linear_attention"});
   auto forward_input = batch->prepare_forward_input(
@@ -3181,7 +3177,7 @@ TEST(BatchTest, Glm53DecodeKeepsCheckpointRestoreD2D) {
   std::optional<Batch> batch;
   batch.emplace();
   batch->add(&sequence, /*allowed_max_token=*/1);
-  RawModelArgs args;
+  ModelArgs args;
   args.model_type("glm5_next");
   args.layer_types({"linear_attention"});
   auto forward_input = batch->prepare_forward_input(
@@ -3211,7 +3207,7 @@ TEST(BatchTest, Glm53PrefillKeepsCheckpointRestoreD2DOutsideNpu) {
 
   Batch batch;
   batch.add(&sequence, /*allowed_max_token=*/4);
-  RawModelArgs args;
+  ModelArgs args;
   args.model_type("glm5_next");
   args.layer_types({"linear_attention"});
   auto forward_input = batch.prepare_forward_input(
@@ -3254,7 +3250,7 @@ TEST(BatchTest, UnusedLinearRestoreSourceIsReleasedDuringBuild) {
   std::optional<Batch> batch;
   batch.emplace();
   batch->add(&sequence, /*allowed_max_token=*/1);
-  RawModelArgs args;
+  ModelArgs args;
   args.layer_types({"linear_attention"});
   LlmForwardInput forward_input = batch->prepare_forward_input(
       /*num_decoding_tokens=*/0, /*min_decoding_bach_size=*/0, args);
@@ -3300,7 +3296,7 @@ TEST(BatchTest, DecodeConsumesRestoreSourceWithD2DCopy) {
   std::optional<Batch> batch;
   batch.emplace();
   batch->add(&sequence, /*allowed_max_token=*/1);
-  RawModelArgs args;
+  ModelArgs args;
   args.model_type("qwen3_5").layer_types({"linear_attention"});
   auto forward_input = batch->prepare_forward_input(
       /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, args);
@@ -3399,7 +3395,7 @@ TEST(BatchTest, ThreadedPrefillPreservesChunkSlicesAndFinalSamplingOffset) {
     batch.add(&first_sequence, kQueryTokens);
     batch.add(&second_sequence, kQueryTokens);
     LlmForwardInput forward_input =
-        batch.prepare_forward_input(RawModelArgs(), thread_pool);
+        batch.prepare_forward_input(ModelArgs(), thread_pool);
     EXPECT_TRUE(torch::equal(forward_input.token_ids,
                              make_cpu_tensor(expected_tokens)));
     EXPECT_TRUE(torch::equal(forward_input.positions,
@@ -3515,7 +3511,7 @@ TEST(BatchTest, ThreadedBatchPinsEveryLinearRestoreSourceUntilRelease) {
   batch->add(&first_sequence);
   batch->add(&second_sequence);
   ThreadPool thread_pool(/*num_threads=*/2);
-  RawModelArgs args;
+  ModelArgs args;
   args.layer_types({"linear_attention"});
   LlmForwardInput forward_input =
       batch->prepare_forward_input(args, &thread_pool);
@@ -3711,7 +3707,7 @@ TEST(BatchTest, SampleRequestProcessesAllMatchedRawOutputs) {
 
   Batch batch({&seq});
   batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, RawModelArgs());
+      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, ModelArgs());
 
   RawForwardOutput raw_output;
   raw_output.outputs.push_back(
@@ -3802,7 +3798,7 @@ TEST(BatchTest, SampleRequestDistributesRawOutputsAcrossSequences) {
 
   Batch batch({&seq1, &seq2});
   batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, RawModelArgs());
+      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, ModelArgs());
 
   RawForwardOutput raw_output;
   raw_output.outputs.push_back(make_raw_sample_output(111, -0.11f));
@@ -3867,7 +3863,7 @@ TEST(BatchTest, SampleRequestFallsBackToEmptyPlaceholderOnPartialRawOutputs) {
 
   Batch batch({&seq});
   batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, RawModelArgs());
+      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, ModelArgs());
 
   RawForwardOutput raw_output;
   raw_output.outputs.push_back(make_raw_sample_output(301, -0.30f));
@@ -3922,7 +3918,7 @@ TEST(BatchTest, KeepTargetsForOverlapReplacement) {
 
   Batch batch({&seq});
   batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, RawModelArgs());
+      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, ModelArgs());
 
   RawForwardOutput fake_output;
   fake_output.outputs.push_back(make_raw_sample_output(-1, std::nullopt));
@@ -3980,7 +3976,7 @@ TEST(BatchTest, JsonObjectErrorFailsOnlyOwningRequestWithoutTokenCommit) {
 
   Batch batch({&failed, &failed_peer, &healthy});
   (void)batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, RawModelArgs());
+      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, ModelArgs());
 
   RawForwardOutput fake_output;
   fake_output.outputs = {make_raw_sample_output(-1, std::nullopt),
@@ -4025,7 +4021,7 @@ TEST(BatchTest, JsonObjectErrorForUnknownSequenceDies) {
   sequence.add_blocks(BlockType::KV, manager.allocate(1));
   Batch batch(&sequence);
   (void)batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, RawModelArgs());
+      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, ModelArgs());
 
   RawForwardOutput raw_output;
   raw_output.json_object_errors = {
@@ -4070,7 +4066,7 @@ TEST(BatchTest, JsonObjectErrorFailsUnscheduledSiblingSequence) {
   Sequence* scheduled_sequence = request.sequences()[0].get();
   Batch batch(scheduled_sequence);
   (void)batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, RawModelArgs());
+      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, ModelArgs());
   RawForwardOutput raw_output;
   raw_output.json_object_errors = {{scheduled_sequence->sample_sequence_id(),
                                     "missing prior sampled output row"}};
@@ -4127,7 +4123,7 @@ TEST(BatchTest, OverlapMTPReplacementSkipsPreemptedSequenceWithoutKVBlocks) {
 
   Batch batch({&seq});
   batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, RawModelArgs());
+      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, ModelArgs());
 
   RawForwardOutput fake_output;
   fake_output.outputs.push_back(make_raw_sample_output(-1, std::nullopt));
@@ -4194,7 +4190,7 @@ TEST(BatchTest, OverlapMTPReplacementKeepsCompositeKvBlocks) {
 
   Batch batch({&seq});
   batch.prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, RawModelArgs());
+      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, ModelArgs());
 
   RawForwardOutput fake_output;
   RawSampleOutput fake_sample_output;

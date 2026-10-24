@@ -92,7 +92,7 @@ static_assert(!HasRvalueSpeculativeModelParams<ModelContext>);
 static_assert(!HasRvalueEmbeddingModelParams<ModelContext>);
 static_assert(!HasRvalueExecutionModelParams<ModelContext>);
 
-ModelContext make_context(const RawModelArgs& args,
+ModelContext make_context(const ModelArgs& args,
                           ModelContextIdentity identity = {}) {
   const ParallelArgs parallel_args(
       /*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr);
@@ -132,7 +132,7 @@ TEST(ModelContextTest, KeepsLegacyContextsUnclassified) {
   EXPECT_EQ(empty_context.get_model_family(), ModelFamily::UNKNOWN);
   EXPECT_TRUE(empty_context.get_registration_name().empty());
 
-  RawModelArgs args{};
+  ModelArgs args{};
   args.model_type() = "parser_model_type";
   args.hidden_size() = 128;
   const ModelContext context = make_context(args);
@@ -142,7 +142,7 @@ TEST(ModelContextTest, KeepsLegacyContextsUnclassified) {
 }
 
 TEST(ModelContextTest, ExposesEachRegisteredFamilyThroughOwnedArguments) {
-  RawModelArgs args{};
+  ModelArgs args{};
   args.model_type() = "parser_model_type";
   args.hidden_size() = 128;
   args.use_moe() = true;
@@ -175,7 +175,7 @@ TEST(ModelContextTest, ExposesEachRegisteredFamilyThroughOwnedArguments) {
 }
 
 TEST(ModelContextTest, ExposesStableCapabilityParametersForEachFamily) {
-  RawModelArgs args{};
+  ModelArgs args{};
   args.head_dim() = 128;
   args.n_heads() = 16;
   args.full_attention_interval() = 2;
@@ -217,7 +217,7 @@ TEST(ModelContextTest, ExposesStableCapabilityParametersForEachFamily) {
 
 TEST(ModelContextTest, SynchronizesEmbeddingCapabilityOnMutation) {
   const ModelContext context =
-      make_context(RawModelArgs{}, {ModelFamily::VLM, "registered_vlm"});
+      make_context(ModelArgs{}, {ModelFamily::VLM, "registered_vlm"});
   EXPECT_FALSE(context.get_embedding_model_params().encoder_embedding_mode());
   const EmbeddingModelParams& original_params =
       context.get_embedding_model_params();
@@ -240,7 +240,7 @@ TEST(ModelContextTest, SynchronizesEmbeddingCapabilityOnMutation) {
 
 TEST(ModelContextTest, KeepsCapabilityReferencesOnUniqueContextMutation) {
   ModelContext context =
-      make_context(RawModelArgs{}, {ModelFamily::REC, "registered_rec"});
+      make_context(ModelArgs{}, {ModelFamily::REC, "registered_rec"});
   const EmbeddingModelParams& embedding_params =
       context.get_embedding_model_params();
   const AttentionModelParams& attention_params =
@@ -256,7 +256,7 @@ TEST(ModelContextTest, KeepsCapabilityReferencesOnUniqueContextMutation) {
 }
 
 TEST(ModelContextTest, RejectsCapabilitiesForNonTransformerDitComponents) {
-  RawModelArgs args{};
+  ModelArgs args{};
   const ModelContext vae = make_context(
       args, {ModelFamily::DIT, "registered_vae", DiTComponentType::VAE});
   EXPECT_DEATH(vae.get_attention_model_params(),
@@ -264,7 +264,7 @@ TEST(ModelContextTest, RejectsCapabilitiesForNonTransformerDitComponents) {
 }
 
 TEST(ModelContextTest, RejectsViewsFromOtherFamilies) {
-  const RawModelArgs args{};
+  const ModelArgs args{};
   const ModelContext llm = make_context(args, {ModelFamily::LLM, "llm"});
   EXPECT_DEATH(llm.get_vlm_model_args(), "require a VLM model context");
   EXPECT_DEATH(llm.get_rec_model_args(), "require a Rec model context");
@@ -275,7 +275,7 @@ TEST(ModelContextTest, RejectsViewsFromOtherFamilies) {
 }
 
 TEST(ModelContextTest, CopiedContextsShareArgumentStorage) {
-  RawModelArgs args{};
+  ModelArgs args{};
   args.hidden_size() = 128;
   const ModelContext context = make_context(args, {ModelFamily::LLM, "llm"});
   const ModelContext copied_context = context;
@@ -296,7 +296,7 @@ TEST(ModelContextTest, CopiedContextsShareArgumentStorage) {
 
 TEST(ModelContextTest, KeepsArgumentsAfterSourceConfigIsDestroyed) {
   const ModelContext context = [] {
-    RawModelArgs args{};
+    ModelArgs args{};
     args.hidden_size() = 128;
     args.use_moe() = true;
     return make_context(args, {ModelFamily::LLM, "llm"});
@@ -310,7 +310,7 @@ TEST(ModelContextTest, KeepsArgumentsAfterSourceConfigIsDestroyed) {
 }
 
 TEST(ModelContextTest, MutatingCopiedContextDetachesArgumentStorage) {
-  RawModelArgs args{};
+  ModelArgs args{};
   args.hidden_size() = 128;
   const ModelContext context = make_context(args, {ModelFamily::VLM, "vlm"});
   ModelContext copied_context = context;
@@ -324,7 +324,7 @@ TEST(ModelContextTest, MutatingCopiedContextDetachesArgumentStorage) {
 }
 
 TEST(ModelContextTest, DerivedContextsShareArgumentStorage) {
-  RawModelArgs args{};
+  ModelArgs args{};
   args.hidden_size() = 128;
   const ModelContext context =
       make_context(args, {ModelFamily::VLM, "registered_vlm"});
@@ -358,10 +358,10 @@ TEST(DiTModelContextTest, IdentifiesItsFamilyWithoutADevice) {
 
 #if !defined(USE_NPU)
 TEST(DiTModelContextTest, OwnsTheSelectedComponentArguments) {
-  RawModelArgs transformer_args{};
+  ModelArgs transformer_args{};
   transformer_args.model_type() = "unregistered_transformer_component";
   transformer_args.in_channels() = 16;
-  RawModelArgs vae_args{};
+  ModelArgs vae_args{};
   vae_args.in_channels() = 4;
   vae_args.vae_dim() = 128;
   const ParallelArgs parallel_args(

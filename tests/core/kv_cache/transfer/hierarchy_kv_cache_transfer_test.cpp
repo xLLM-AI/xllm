@@ -50,7 +50,7 @@ TEST(HierarchyKVCacheTransferTest,
 
   KVCacheCapacity capacity;
   capacity.n_blocks(kBlockCount).block_size(kBlockSize);
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("test_model")
       .n_layers(kLayerCount)
       .n_heads(2)
@@ -127,7 +127,7 @@ TEST(HierarchyKVCacheTransferTest, RejectsMixedOffloadBatchBeforeSubmission) {
   device.init_device_context();
   KVCacheCapacity capacity;
   capacity.n_blocks(2).block_size(4);
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("test_model")
       .n_layers(1)
       .n_heads(2)

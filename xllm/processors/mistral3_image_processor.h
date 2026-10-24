@@ -26,7 +26,7 @@ namespace xllm {
 
 class Mistral3ImageProcessor : public ImageProcessor {
  public:
-  explicit Mistral3ImageProcessor(const RawModelArgs& args);
+  explicit Mistral3ImageProcessor(const ModelArgs& args);
   ~Mistral3ImageProcessor() override = default;
 
   bool process(const std::vector<torch::Tensor>& images,

@@ -53,7 +53,7 @@ class VLMRequestFactory final {
   VLMRequestFactory(MultimodalProcessorBase* processor,
                     JinjaChatTemplate* chat_template,
                     const Tokenizer* tokenizer,
-                    const RawModelArgs* model_args,
+                    const ModelArgs* model_args,
                     const Options* options,
                     RateLimiter* rate_limiter);
 
@@ -90,7 +90,7 @@ class VLMRequestFactory final {
   MultimodalProcessorBase* processor_ = nullptr;
   JinjaChatTemplate* chat_template_ = nullptr;
   const Tokenizer* tokenizer_ = nullptr;
-  const RawModelArgs* model_args_ = nullptr;
+  const ModelArgs* model_args_ = nullptr;
   const Options* options_ = nullptr;
   RateLimiter* rate_limiter_ = nullptr;
 };

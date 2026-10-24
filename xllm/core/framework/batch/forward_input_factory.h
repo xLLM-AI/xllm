@@ -27,7 +27,7 @@ namespace xllm {
 class BatchGroup;
 class EplbController;
 class ThreadPool;
-struct RawModelArgs;
+struct ModelArgs;
 
 struct ForwardInputFactoryOptions {
   uint32_t dp_size = 1;
@@ -49,7 +49,7 @@ class ForwardInputFactory final {
 
   // Advances Batch/Sequence preparation state; prepare each group only once.
   void create_inputs(BatchGroup& batches,
-                     const RawModelArgs& model_args,
+                     const ModelArgs& model_args,
                      std::vector<LlmForwardInput>& inputs,
                      bool& is_graph_warmup);
 
@@ -71,7 +71,7 @@ class ForwardInputFactory final {
   };
 
   void prepare_rank_inputs(BatchGroup& batches,
-                           const RawModelArgs& model_args,
+                           const ModelArgs& model_args,
                            PreparationState& state);
   void finalize_inputs(PreparationState& state);
   void annotate_eplb_inputs(PreparationState& state);

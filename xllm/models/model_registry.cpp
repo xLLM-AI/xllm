@@ -27,7 +27,7 @@ limitations under the License.
 #include "core/common/options.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/model_config.h"
-#include "core/framework/model/raw_model_args.h"
+#include "core/framework/model/model_args.h"
 #include "core/framework/model_loader/hf_model_config.h"
 #include "core/util/dit_model_discovery.h"
 #include "llm/py_causal_lm.h"
@@ -111,7 +111,9 @@ bool resolve_context_registration_name(const ModelContext& context,
     return true;
   }
   return resolve_model_registration_name(
-      context.get_model_args().model_type(), resolved_name, error_message);
+      context.get_model_args_bundle().model_type(),
+      resolved_name,
+      error_message);
 }
 
 #if defined(USE_NPU)
@@ -946,7 +948,7 @@ ModelContext create_model_context(const ResolvedModelDescriptor& descriptor,
                                   const std::string& execution_family,
                                   const std::string& model_impl,
                                   const ParallelArgs& parallel_args,
-                                  const RawModelArgs& model_args,
+                                  const ModelArgs& model_args,
                                   const QuantArgs& quant_args,
                                   const torch::TensorOptions& tensor_options) {
   CHECK(!descriptor.registration_name.empty())
@@ -1020,7 +1022,7 @@ ModelContext create_model_context(const ResolvedModelDescriptor& descriptor,
 DiTModelContext create_dit_model_context(
     const ResolvedModelDescriptor& descriptor,
     const ParallelArgs& parallel_args,
-    std::unordered_map<std::string, RawModelArgs> model_args,
+    std::unordered_map<std::string, ModelArgs> model_args,
     std::unordered_map<std::string, QuantArgs> quant_args,
     const torch::TensorOptions& tensor_options,
     const DiTCacheConfig& dit_config) {
@@ -1040,7 +1042,7 @@ DiTModelContext create_dit_model_context(
 }
 
 std::unique_ptr<MultimodalProcessorBase> create_multimodal_processor(
-    const RawModelArgs& model_args,
+    const ModelArgs& model_args,
     std::shared_ptr<Tokenizer> tokenizer,
     int64_t max_cache_items,
     const TokenizerArgs& tokenizer_args) {
@@ -1117,7 +1119,7 @@ std::unique_ptr<CausalLM> create_llm_model(const ModelContext& context) {
 #endif
 
   LOG(ERROR) << "Unsupported model type: "
-             << context.get_model_args().model_type()
+             << context.get_model_args_bundle().model_type()
              << " for model_impl=" << canonical_model_impl(model_impl);
 
   return nullptr;
@@ -1138,7 +1140,7 @@ std::unique_ptr<RecModel> create_rec_model(const ModelContext& context) {
   }
 
   LOG(ERROR) << "Unsupported rec model type: "
-             << context.get_model_args().model_type();
+             << context.get_model_args_bundle().model_type();
 
   return nullptr;
 }
@@ -1185,7 +1187,8 @@ std::unique_ptr<CausalVLM> create_vlm_model(const ModelContext& context) {
   }
 
   if (ModelConfig::is_python_model_impl(model_impl)) {
-    std::string python_model_name = context.get_model_args().model_type();
+    std::string python_model_name =
+        context.get_model_args_bundle().model_type();
     if (is_glm5_next_target_model_type(python_model_name)) {
       python_model_name = "glm5_next_vl";
     }
@@ -1193,7 +1196,7 @@ std::unique_ptr<CausalVLM> create_vlm_model(const ModelContext& context) {
   }
 
   LOG(ERROR) << "Unsupported model type: "
-             << context.get_model_args().model_type()
+             << context.get_model_args_bundle().model_type()
              << " for model_impl=" << canonical_model_impl(model_impl);
 
   return nullptr;

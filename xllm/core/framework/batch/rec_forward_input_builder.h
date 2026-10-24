@@ -19,7 +19,7 @@ limitations under the License.
 #include <memory>
 
 #include "core/framework/batch/batch_input_data.h"
-#include "core/framework/model/raw_model_args.h"
+#include "core/framework/model/model_args.h"
 #include "core/runtime/rec_forward_params.h"
 #include "core/util/threadpool.h"
 
@@ -36,7 +36,7 @@ class RecForwardInputBuilder {
   static std::unique_ptr<RecForwardInputBuilder> create(
       BatchInputType input_type,
       const BatchInputData& data,
-      const RawModelArgs* args,
+      const ModelArgs* args,
       MPMCThreadPool* thread_pool = nullptr);
 };
 

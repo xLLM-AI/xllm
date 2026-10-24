@@ -98,7 +98,7 @@ Glm5NextKPoolSelection glm5_next_kpool_expand_to_physical_slots(
 
 class Glm5NextKPoolIndexerImpl final : public torch::nn::Module {
  public:
-  Glm5NextKPoolIndexerImpl(const RawModelArgs& args,
+  Glm5NextKPoolIndexerImpl(const ModelArgs& args,
                            const QuantArgs& quant_args,
                            const ParallelArgs& parallel_args,
                            std::shared_ptr<RotaryEmbeddingBase> rotary_emb,

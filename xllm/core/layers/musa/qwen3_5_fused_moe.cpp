@@ -202,7 +202,7 @@ bool use_fused_shared_expert_gate(const torch::Tensor& shared_output,
 
 }  // namespace
 
-Qwen3_5FusedMoEImpl::Qwen3_5FusedMoEImpl(const RawModelArgs& model_args,
+Qwen3_5FusedMoEImpl::Qwen3_5FusedMoEImpl(const ModelArgs& model_args,
                                          const FusedMoEArgs& moe_args,
                                          const QuantArgs& quant_args,
                                          const ParallelArgs& parallel_args,

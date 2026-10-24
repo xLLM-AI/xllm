@@ -37,8 +37,8 @@ limitations under the License.
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
+#include "core/framework/model/model_args.h"
 #include "core/framework/model/model_params_view.h"
-#include "core/framework/model/raw_model_args.h"
 #include "core/framework/multimodal/mm_visitor.h"
 #include "core/framework/request/sequence.h"
 #include "core/framework/sampling/sampling_params.h"
@@ -195,7 +195,7 @@ BlockCopyKernelInputData build_block_copy_kernel_input_data(
 // enabled. Native Qwen3.5 kernels support per-row selection in mixed batches;
 // Python glm5_next requires the whole batch to contain no decode rows, matching
 // the batch-level invariant enforced while building Python attention metadata.
-bool should_read_linear_state_out_of_place(const RawModelArgs* args,
+bool should_read_linear_state_out_of_place(const ModelArgs* args,
                                            const BatchForwardType& forward_type,
                                            const Sequence* sequence) {
   if (args == nullptr || sequence == nullptr || !sequence->is_prefill_stage() ||
@@ -223,7 +223,7 @@ bool is_linear_checkpoint_boundary(uint32_t boundary_tokens,
 }  // namespace
 
 ForwardInputBuilder::ForwardInputBuilder(const BatchInputData& data,
-                                         const RawModelArgs* args,
+                                         const ModelArgs* args,
                                          int32_t cp_size,
                                          ThreadPool* thread_pool)
     : ForwardInputBuilder(data.sequences,
@@ -244,7 +244,7 @@ ForwardInputBuilder::ForwardInputBuilder(
     const std::vector<MMData>& mm_data_vec,
     std::vector<BlockTransferInfo>* swap_block_transfer_infos,
     const uint64_t batch_id,
-    const RawModelArgs* args,
+    const ModelArgs* args,
     BatchForwardType batch_forward_type,
     int32_t cp_size,
     ThreadPool* thread_pool)

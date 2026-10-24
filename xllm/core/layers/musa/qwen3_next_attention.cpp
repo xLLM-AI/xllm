@@ -36,7 +36,7 @@ bool fused_qk_norm_rope_enabled() {
 }  // namespace
 
 Qwen3NextAttentionImpl::Qwen3NextAttentionImpl(
-    const RawModelArgs& args,
+    const ModelArgs& args,
     const QuantArgs& quant_args,
     const ParallelArgs& parallel_args,
     const torch::TensorOptions& options,

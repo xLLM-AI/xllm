@@ -31,8 +31,8 @@ limitations under the License.
 #include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/rec_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/framework/model/model_args.h"
 #include "core/framework/model/model_params_view.h"
-#include "core/framework/model/raw_model_args.h"
 #include "core/framework/model/rec_model_params.h"
 #include "core/framework/multimodal/mm_batch_data.h"
 #include "core/framework/multimodal/mm_data.h"
@@ -154,7 +154,7 @@ TEST(BatchFactoryTest, FactoriesKeepDomainsSeparateForTheSameInputContract) {
   EXPECT_EQ(rec_batches[0].size(), 0);
   EXPECT_EQ(sequence_batches[0].input_type(), BatchInputType::SEQUENCE);
   EXPECT_EQ(rec_batches[0].input_type(), BatchInputType::SEQUENCE);
-  RawModelArgs args;
+  ModelArgs args;
   const auto input =
       rec_batches[0].prepare_forward_input(args, /*thread_pool=*/nullptr);
   static_assert(std::is_same_v<std::decay_t<decltype(input)>, RecForwardInput>);
@@ -336,7 +336,7 @@ TEST(BatchFactoryTest, RecOutputsRefreshSamplingTargetsAcrossForwards) {
       {first, second}, {first_sequence, second_sequence}, {2, 3});
   auto& batch = batches[0];
   const uint64_t batch_id = batch.batch_id();
-  RawModelArgs args;
+  ModelArgs args;
 
   // Only the second sequence completes prefill and owns an output row.
   const auto prefill_input = batch.prepare_forward_input(
@@ -643,7 +643,7 @@ TEST(BatchFactoryTest, MixedEmbeddingInputsKeepRankLocalOrderAcrossCalls) {
   }
   auto batches = factory.create_batches(requests, sequences, {3, 3, 3, 3});
   ASSERT_EQ(batches.size(), 9);
-  RawModelArgs args{};
+  ModelArgs args{};
   const auto input = batches[8].prepare_forward_input(
       /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, args);
   EXPECT_TRUE(torch::equal(input.input_params.embedding.input_embedding,
@@ -772,7 +772,7 @@ TEST(BatchFactoryTest, RecMultiRoundBuilderUsesScheduledSequencesAndBudgets) {
   auto batches = factory.create_batches(
       {first, second}, {first_sequence, second_sequence}, {1, 2});
   ASSERT_EQ(batches[0].sequence_groups().size(), 2);
-  RawModelArgs args;
+  ModelArgs args;
   auto input = batches[0].prepare_forward_input(/*num_decoding_tokens=*/1,
                                                 /*min_decoding_batch_size=*/0,
                                                 args);
@@ -812,7 +812,7 @@ TEST(BatchFactoryTest, OneRecBuildersPreserveEncoderAndDecoderContracts) {
     auto* sequence = request->sequences()[0].get();
     sequence->add_blocks(BlockType::KV, manager.allocate(/*num_blocks=*/1));
     auto batches = factory.create_batches({request}, {sequence}, {1});
-    RawModelArgs args;
+    ModelArgs args;
     const auto input = batches[0].prepare_forward_input(
         /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, args);
     static_assert(
@@ -959,7 +959,7 @@ TEST(BatchSequencePlanDeathTest, RejectsInvalidPermutation) {
 }
 
 TEST(BatchFactoryTest, EmptyRecRanksPrepareEmptyInputs) {
-  RawModelArgs args;
+  ModelArgs args;
   for (BatchInputType type : {BatchInputType::SEQUENCE,
                               BatchInputType::ONEREC,
                               BatchInputType::ONEREC_XATTENTION,
@@ -1022,7 +1022,7 @@ TEST(BatchFactoryDeathTest, RejectsGroupOnlySequenceInput) {
   auto request = make_request(/*rank=*/0, RecType::kOneRec);
   Batch batch;
   batch.add(request->sequence_group());
-  RawModelArgs args;
+  ModelArgs args;
   EXPECT_DEATH(batch.prepare_forward_input(/*num_decoding_tokens=*/1,
                                            /*min_decoding_batch_size=*/0,
                                            args),
@@ -1035,7 +1035,7 @@ TEST(BatchFactoryDeathTest, RejectsOneRecInputWithoutRequestGroups) {
   auto request = make_request(/*rank=*/0, RecType::kOneRec);
   RecBatch batch(BatchInputType::ONEREC);
   batch.add(request->sequences()[0].get());
-  RawModelArgs args;
+  ModelArgs args;
   EXPECT_DEATH(batch.prepare_forward_input(/*num_decoding_tokens=*/1,
                                            /*min_decoding_batch_size=*/0,
                                            args),

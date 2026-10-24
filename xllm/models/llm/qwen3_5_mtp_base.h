@@ -49,7 +49,7 @@ inline StateDict get_lm_head_dict(const StateDict& state_dict) {
 }
 
 inline bool load_model_args(const JsonReader& json,
-                            RawModelArgs* args,
+                            ModelArgs* args,
                             const std::string& base_type,
                             const std::string& mtp_type) {
   ModelArgsLoader base_loader = ModelRegistry::get_model_args_loader(base_type);

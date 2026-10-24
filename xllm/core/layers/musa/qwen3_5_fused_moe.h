@@ -47,7 +47,7 @@ class Qwen3_5FusedMoEImpl final : public torch::nn::Module {
                       const ParallelArgs& parallel_args,
                       const torch::TensorOptions& options);
 
-  Qwen3_5FusedMoEImpl(const RawModelArgs& model_args,
+  Qwen3_5FusedMoEImpl(const ModelArgs& model_args,
                       const FusedMoEArgs& moe_args,
                       const QuantArgs& quant_args,
                       const ParallelArgs& parallel_args,

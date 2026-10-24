@@ -29,7 +29,7 @@ limitations under the License.
 #include "core/common/metrics.h"
 #include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/scheduler_config.h"
-#include "core/framework/model/raw_model_args.h"
+#include "core/framework/model/model_args.h"
 #include "core/framework/model/rec_model_params.h"
 #include "core/framework/request/sequence.h"
 #include "core/framework/request/sequences_group.h"
@@ -69,7 +69,7 @@ std::vector<int32_t> build_q_cu_seq_lens_vec(
 
 RecMultiRoundForwardInputBuilder::RecMultiRoundForwardInputBuilder(
     const BatchInputData& data,
-    const RawModelArgs* args,
+    const ModelArgs* args,
     MPMCThreadPool* thread_pool)
     : sequences_(data.sequences),
       allowed_max_tokens_(data.allowed_max_tokens),

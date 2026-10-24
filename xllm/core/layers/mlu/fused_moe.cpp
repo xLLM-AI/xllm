@@ -133,7 +133,7 @@ FusedMoEImpl::FusedMoEImpl(const ModelContext& context,
           context.stream_registry()->get(
               ExecutionStreamRole::AUXILIARY_COMPUTE)) {}
 
-FusedMoEImpl::FusedMoEImpl(const RawModelArgs& model_args,
+FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
                            const FusedMoEArgs& moe_args,
                            const QuantArgs& quant_args,
                            const ParallelArgs& parallel_args,

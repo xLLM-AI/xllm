@@ -29,8 +29,8 @@ limitations under the License.
 namespace xllm {
 namespace {
 
-RawModelArgs make_standard_args() {
-  RawModelArgs model_args;
+ModelArgs make_standard_args() {
+  ModelArgs model_args;
   model_args.n_layers(4).head_dim(16).n_heads(4).n_kv_heads(4);
   return model_args;
 }
@@ -50,7 +50,7 @@ KVCacheEstimateOptions make_estimate_options() {
 }  // namespace
 
 TEST(KVCacheEstimationTest, RuntimeBudgetUsesMinimumAcrossWorkers) {
-  RawModelArgs model_args = make_standard_args();
+  ModelArgs model_args = make_standard_args();
   runtime::Options runtime_options;
   runtime_options.max_memory_utilization(0.8).block_size(16);
 
@@ -68,7 +68,7 @@ TEST(KVCacheEstimationTest, RuntimeBudgetUsesMinimumAcrossWorkers) {
 }
 
 TEST(KVCacheEstimationTest, RuntimeBudgetCapsBeforeVlmEncoderReservation) {
-  RawModelArgs model_args = make_standard_args();
+  ModelArgs model_args = make_standard_args();
   runtime::Options runtime_options;
   runtime_options.max_memory_utilization(0.8)
       .max_cache_size(5 * 1024 * 1024)
@@ -90,7 +90,7 @@ TEST(KVCacheEstimationTest, RuntimeBudgetCapsBeforeVlmEncoderReservation) {
 }
 
 TEST(KVCacheEstimationTest, VirtualMemoryBudgetBypassesWorkerAndRuntimeCaps) {
-  RawModelArgs model_args = make_standard_args();
+  ModelArgs model_args = make_standard_args();
   runtime::Options runtime_options;
   runtime_options.max_memory_utilization(0.1).max_cache_size(1024).block_size(
       16);
@@ -106,7 +106,7 @@ TEST(KVCacheEstimationTest, VirtualMemoryBudgetBypassesWorkerAndRuntimeCaps) {
 }
 
 TEST(KVCacheEstimationTest, RuntimeEstimatorDerivesTensorParallelHeads) {
-  RawModelArgs model_args = make_standard_args();
+  ModelArgs model_args = make_standard_args();
   model_args.n_heads(8).n_kv_heads(4);
   runtime::Options runtime_options;
   runtime_options.block_size(16);
@@ -124,7 +124,7 @@ TEST(KVCacheEstimationTest, RuntimeEstimatorDerivesTensorParallelHeads) {
 }
 
 TEST(KVCacheEstimationTest, DraftTp1OverridesTensorParallelHeadDerivation) {
-  RawModelArgs model_args = make_standard_args();
+  ModelArgs model_args = make_standard_args();
   model_args.n_heads(8).n_kv_heads(4);
   runtime::Options runtime_options;
   runtime_options.block_size(16)
@@ -144,7 +144,7 @@ TEST(KVCacheEstimationTest, DraftTp1OverridesTensorParallelHeadDerivation) {
 }
 
 TEST(KVCacheEstimationTest, SpeculativeEmbeddingCostDependsOnAlgorithm) {
-  RawModelArgs model_args = make_standard_args();
+  ModelArgs model_args = make_standard_args();
   // Large enough that the MTP hidden-state rows change the block count.
   model_args.hidden_size(512);
   runtime::Options runtime_options;
@@ -170,7 +170,7 @@ TEST(KVCacheEstimationTest, SpeculativeEmbeddingCostDependsOnAlgorithm) {
 }
 
 TEST(KVCacheEstimationTest, RuntimeEstimatorRejectsMissingWorkerBudget) {
-  RawModelArgs model_args = make_standard_args();
+  ModelArgs model_args = make_standard_args();
   runtime::Options runtime_options;
   KVCacheEstimateContext context;
 
@@ -180,7 +180,7 @@ TEST(KVCacheEstimationTest, RuntimeEstimatorRejectsMissingWorkerBudget) {
 }
 
 TEST(KVCacheEstimationTest, RuntimeEstimatorRejectsNonPositiveWorkerBudget) {
-  RawModelArgs model_args = make_standard_args();
+  ModelArgs model_args = make_standard_args();
   runtime::Options runtime_options;
   KVCacheEstimateContext context;
   context.worker_memory = {{0, 0}};
@@ -191,7 +191,7 @@ TEST(KVCacheEstimationTest, RuntimeEstimatorRejectsNonPositiveWorkerBudget) {
 }
 
 TEST(KVCacheEstimationTest, RuntimeEstimatorDerivesLinearHeadCounts) {
-  RawModelArgs model_args = make_standard_args();
+  ModelArgs model_args = make_standard_args();
   model_args.full_attention_interval(2)
       .linear_num_key_heads(2)
       .linear_num_value_heads(2)
@@ -216,7 +216,7 @@ TEST(KVCacheEstimationTest, RuntimeEstimatorDerivesLinearHeadCounts) {
 }
 
 TEST(KVCacheEstimationTest, EstimatesStandardAttentionBlocks) {
-  RawModelArgs model_args = make_standard_args();
+  ModelArgs model_args = make_standard_args();
   KVCacheEstimateOptions options = make_estimate_options();
 
   KVCacheCapacity capacity = estimate_kv_cache_capacity(model_args, options);
@@ -231,14 +231,14 @@ TEST(KVCacheEstimationTest, EstimatesStandardAttentionBlocks) {
 }
 
 TEST(KVCacheEstimationTest, UsesFamilyFacadeForSharedCacheGeometry) {
-  const RawModelArgs model_args = make_standard_args();
+  const ModelArgs model_args = make_standard_args();
   KVCacheEstimateOptions options = make_estimate_options();
   options.world_size = 2;
 
   for (ModelFamily family :
        {ModelFamily::LLM, ModelFamily::VLM, ModelFamily::REC}) {
     SCOPED_TRACE(static_cast<int32_t>(family));
-    const ModelArgs args(model_args, family);
+    const ModelArgsBundle args(model_args, family);
     const KVCacheCapacity capacity = KVCacheEstimator(args).estimate(options);
     EXPECT_EQ(capacity.slot_size(), 128);
     EXPECT_EQ(capacity.n_layers(), 4);
@@ -256,7 +256,7 @@ TEST(KVCacheEstimationTest, UsesFamilyFacadeForSharedCacheGeometry) {
 }
 
 TEST(KVCacheEstimationTest, EmbeddingContextSharesTheAvailableMemoryBudget) {
-  RawModelArgs model_args = make_standard_args();
+  ModelArgs model_args = make_standard_args();
   KVCacheEstimateOptions options = make_estimate_options();
   options.embedding_context_bytes_per_block = 2048;
   const KVCacheCapacity capacity =
@@ -268,7 +268,7 @@ TEST(KVCacheEstimationTest, EmbeddingContextSharesTheAvailableMemoryBudget) {
 }
 
 TEST(KVCacheEstimationTest, IgnoresLinearStateSlotsWithoutLinearAttention) {
-  RawModelArgs model_args = make_standard_args();
+  ModelArgs model_args = make_standard_args();
   KVCacheEstimateOptions options = make_estimate_options();
   options.max_linear_state_cache_slots = 32;
 
@@ -280,7 +280,7 @@ TEST(KVCacheEstimationTest, IgnoresLinearStateSlotsWithoutLinearAttention) {
 }
 
 TEST(KVCacheEstimationTest, UserIndexerCacheDtypeDirectlyControlsQuantization) {
-  RawModelArgs model_args = make_standard_args();
+  ModelArgs model_args = make_standard_args();
   model_args.model_type("unsupported_model")
       .index_n_heads(1)
       .index_head_dim(16);
@@ -299,7 +299,7 @@ TEST(KVCacheEstimationTest, UserIndexerCacheDtypeDirectlyControlsQuantization) {
   EXPECT_TRUE(int8_capacity.enable_indexer_cache_quant());
 
 #if defined(USE_NPU)
-  RawModelArgs kpool_args = make_standard_args();
+  ModelArgs kpool_args = make_standard_args();
   kpool_args.model_type("glm5_next")
       .index_n_heads(32)
       .index_head_dim(128)
@@ -340,7 +340,7 @@ TEST(KVCacheEstimationTest, UserIndexerCacheDtypeDirectlyControlsQuantization) {
 }
 
 TEST(KVCacheEstimationTest, IndexerScaleUsesLogicalCacheCapacity) {
-  RawModelArgs model_args = make_standard_args();
+  ModelArgs model_args = make_standard_args();
   model_args.model_type("deepseek_v32").index_n_heads(1).index_head_dim(16);
   KVCacheEstimateOptions options = make_estimate_options();
   options.indexer_cache_dtype = "int8";
@@ -354,7 +354,7 @@ TEST(KVCacheEstimationTest, IndexerScaleUsesLogicalCacheCapacity) {
 
 #if defined(USE_MLU) || defined(USE_NPU)
 TEST(KVCacheEstimationTest, SharedDsaLayersDoNotConsumeIndexerCacheBudget) {
-  RawModelArgs model_args = make_standard_args();
+  ModelArgs model_args = make_standard_args();
   model_args.model_type("glm_moe_dsa")
       .index_n_heads(1)
       .index_head_dim(16)
@@ -371,7 +371,7 @@ TEST(KVCacheEstimationTest, SharedDsaLayersDoNotConsumeIndexerCacheBudget) {
 }
 
 TEST(KVCacheEstimationTest, GlmSharedIndexerFreqAllocatesOnlyFullLayers) {
-  RawModelArgs model_args = make_standard_args();
+  ModelArgs model_args = make_standard_args();
   model_args.model_type("glm_moe_dsa")
       .n_layers(78)
       .index_n_heads(1)
@@ -391,8 +391,8 @@ TEST(KVCacheEstimationTest, GlmSharedIndexerFreqAllocatesOnlyFullLayers) {
 
 namespace {
 
-RawModelArgs make_linear_attention_args(int64_t head_dim = 16) {
-  RawModelArgs model_args = make_standard_args();
+ModelArgs make_linear_attention_args(int64_t head_dim = 16) {
+  ModelArgs model_args = make_standard_args();
   model_args.head_dim(head_dim)
       .full_attention_interval(2)
       .linear_num_key_heads(2)
@@ -413,7 +413,7 @@ KVCacheEstimateOptions make_linear_attention_options() {
 }  // namespace
 
 TEST(KVCacheEstimationTest, ReservesLinearAttentionState) {
-  RawModelArgs model_args = make_linear_attention_args();
+  ModelArgs model_args = make_linear_attention_args();
   KVCacheEstimateOptions options = make_linear_attention_options();
 
   KVCacheCapacity capacity = estimate_kv_cache_capacity(model_args, options);
@@ -428,7 +428,7 @@ TEST(KVCacheEstimationTest, ReservesLinearAttentionState) {
 
 #if defined(USE_MLU)
 TEST(KVCacheEstimationTest, KPoolReservesSpeculativeTailWithRequestState) {
-  RawModelArgs args = make_linear_attention_args();
+  ModelArgs args = make_linear_attention_args();
   args.index_n_heads(1).index_head_dim(16).index_kpool(4).index_kpool_compress(
       true);
   KVCacheEstimateOptions options = make_linear_attention_options();
@@ -527,7 +527,7 @@ TEST(KVCacheEstimationTest, LinearStateCapacityVariants) {
 
   for (const TestCase& test_case : test_cases) {
     SCOPED_TRACE(test_case.name);
-    RawModelArgs model_args = make_linear_attention_args(test_case.head_dim);
+    ModelArgs model_args = make_linear_attention_args(test_case.head_dim);
     KVCacheEstimateOptions options = make_linear_attention_options();
     options.cache_size_in_bytes = test_case.cache_size_in_bytes;
     options.block_size = test_case.block_size;
@@ -551,7 +551,7 @@ TEST(KVCacheEstimationTest, LinearStateCapacityVariants) {
 }
 
 TEST(KVCacheEstimationTest, CapsPhysicalLinearStateSlotsForSelectedBackend) {
-  RawModelArgs model_args = make_linear_attention_args(/*head_dim=*/1);
+  ModelArgs model_args = make_linear_attention_args(/*head_dim=*/1);
   model_args.model_type("qwen3_5");
   KVCacheEstimateOptions options = make_linear_attention_options();
   options.cache_size_in_bytes = 64LL << 30;
@@ -566,7 +566,7 @@ TEST(KVCacheEstimationTest, CapsPhysicalLinearStateSlotsForSelectedBackend) {
 }
 
 TEST(KVCacheEstimationTest, RejectsExplicitSlotsBeyondSelectedBackendLimit) {
-  RawModelArgs model_args = make_linear_attention_args(/*head_dim=*/1);
+  ModelArgs model_args = make_linear_attention_args(/*head_dim=*/1);
   model_args.model_type("qwen3_5");
   KVCacheEstimateOptions options = make_linear_attention_options();
   options.cache_size_in_bytes = 64LL << 30;
@@ -580,7 +580,7 @@ TEST(KVCacheEstimationTest, RejectsExplicitSlotsBeyondSelectedBackendLimit) {
 }
 
 TEST(KVCacheEstimationTest, Qwen35MtpExpandsConvStateLen) {
-  RawModelArgs model_args = make_standard_args();
+  ModelArgs model_args = make_standard_args();
   model_args.model_type("qwen3_5")
       .full_attention_interval(2)
       .linear_num_key_heads(2)
@@ -602,7 +602,7 @@ TEST(KVCacheEstimationTest, Qwen35MtpExpandsConvStateLen) {
 }
 
 TEST(KVCacheEstimationTest, Qwen35TextMtpUsesSsmCheckpointStride) {
-  RawModelArgs model_args = make_standard_args();
+  ModelArgs model_args = make_standard_args();
   model_args.model_type("qwen3_5_text")
       .full_attention_interval(2)
       .linear_num_key_heads(2)
@@ -624,7 +624,7 @@ TEST(KVCacheEstimationTest, Qwen35TextMtpUsesSsmCheckpointStride) {
 }
 
 TEST(KVCacheEstimationTest, EstimatesDeepSeekV4Pools) {
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("deepseek_v4")
       .n_layers(3)
       .head_dim(16)
@@ -656,7 +656,7 @@ TEST(KVCacheEstimationTest, EstimatesDeepSeekV4Pools) {
 }
 
 TEST(KVCacheEstimationTest, DeepSeekV4RejectsBudgetWithoutCompressedCacheUnit) {
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("deepseek_v4")
       .n_layers(3)
       .head_dim(16)
@@ -686,7 +686,7 @@ TEST(KVCacheEstimationTest, DeepSeekV4RejectsBudgetWithoutCompressedCacheUnit) {
 }
 
 TEST(KVCacheEstimationTest, DeepSeekV4PdPrefillUsesBatchTokenCapacity) {
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("deepseek_v4")
       .n_layers(3)
       .head_dim(16)
@@ -714,7 +714,7 @@ TEST(KVCacheEstimationTest, DeepSeekV4PdPrefillUsesBatchTokenCapacity) {
 }
 
 TEST(KVCacheEstimationTest, DeepSeekV4MixUsesBatchTokenCapacity) {
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("deepseek_v4")
       .n_layers(3)
       .head_dim(16)
@@ -740,7 +740,7 @@ TEST(KVCacheEstimationTest, DeepSeekV4MixUsesBatchTokenCapacity) {
 
 TEST(KVCacheEstimationTest,
      DeepSeekV4PdPrefillWithoutChunkingUsesBatchCapacity) {
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("deepseek_v4")
       .n_layers(3)
       .head_dim(16)
@@ -768,7 +768,7 @@ TEST(KVCacheEstimationTest,
 }
 
 TEST(KVCacheEstimationTest, DeepSeekV4PdDecodeUsesBatchTokenCapacity) {
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("deepseek_v4")
       .n_layers(3)
       .head_dim(16)
@@ -793,7 +793,7 @@ TEST(KVCacheEstimationTest, DeepSeekV4PdDecodeUsesBatchTokenCapacity) {
 
 TEST(KVCacheEstimationTest,
      DeepSeekV4PdDecodeSwaCapacityIgnoresScheduleOverlap) {
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("deepseek_v4")
       .n_layers(3)
       .head_dim(16)
@@ -824,7 +824,7 @@ TEST(KVCacheEstimationTest,
 }
 
 TEST(KVCacheEstimationTest, DeepSeekV4PrefixCacheKeepsOperationalSwaPool) {
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("deepseek_v4")
       .n_layers(3)
       .head_dim(16)
@@ -860,7 +860,7 @@ TEST(KVCacheEstimationTest,
     compress_ratios.emplace_back(layer_id % 2 == 0 ? 4 : 128);
   }
 
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("deepseek_v4")
       .n_layers(43)
       .head_dim(512)
@@ -891,7 +891,7 @@ TEST(KVCacheEstimationTest,
 
 TEST(KVCacheEstimationTest,
      DeepSeekV4PdPrefillFairBudgetKeepsPrefixCachePublishUnit) {
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("deepseek_v4")
       .n_layers(3)
       .head_dim(16)
@@ -927,7 +927,7 @@ TEST(KVCacheEstimationTest,
 }
 
 TEST(KVCacheEstimationTest, DeepSeekV4DecodeKeepsOperationalSwaPool) {
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("deepseek_v4")
       .n_layers(3)
       .head_dim(16)
@@ -954,7 +954,7 @@ TEST(KVCacheEstimationTest, DeepSeekV4DecodeKeepsOperationalSwaPool) {
 }
 
 TEST(KVCacheEstimationTest, DeepSeekV4SwaOnlyPrefixKeepsOperationalSwaPool) {
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("deepseek_v4_dspark")
       .n_layers(3)
       .head_dim(16)
@@ -984,7 +984,7 @@ TEST(KVCacheEstimationTest, DeepSeekV4SwaOnlyPrefixKeepsOperationalSwaPool) {
 }
 
 TEST(KVCacheEstimationTest, EstimatesDeepSeekV4DSparkSwaPool) {
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("deepseek_v4_dspark")
       .n_layers(3)
       .head_dim(16)
@@ -1011,14 +1011,14 @@ TEST(KVCacheEstimationTest, EstimatesDeepSeekV4DSparkSwaPool) {
 
 TEST(KVCacheEstimationTest,
      DeepSeekV4SpeculativeBudgetIncludesDSparkDraftSwaPool) {
-  RawModelArgs target_args;
+  ModelArgs target_args;
   target_args.model_type("deepseek_v4")
       .n_layers(3)
       .head_dim(16)
       .index_head_dim(8)
       .window_size(257)
       .compress_ratios({1, 4, 128});
-  RawModelArgs draft_args;
+  ModelArgs draft_args;
   draft_args.model_type("deepseek_v4_dspark")
       .n_layers(3)
       .head_dim(16)
@@ -1054,7 +1054,7 @@ TEST(KVCacheEstimationTest,
   const KVCacheCapacity target_only_capacity =
       estimate_kv_cache_capacity(target_args, target_options);
 
-  target_options.draft_raw_model_args = &draft_args;
+  target_options.draft_model_args = &draft_args;
   target_options.draft_options = &draft_options;
 
   const KVCacheCapacity capacity =
@@ -1072,7 +1072,7 @@ TEST(KVCacheEstimationTest,
 }
 
 TEST(KVCacheEstimationTest, PhysicalHeadWidthControlsCacheBudget) {
-  RawModelArgs model_args = make_standard_args();
+  ModelArgs model_args = make_standard_args();
   model_args.head_dim(96).kv_cache_storage_head_dim(128).n_heads(8).n_kv_heads(
       4);
   runtime::Options runtime_options;

@@ -25,7 +25,7 @@ limitations under the License.
 // Lightweight, dependency-free reflection for PROPERTY-based config structs.
 //
 // The (global) PROPERTY macro registers each field into a per-struct table so a
-// consumer can iterate every plain-data field of a struct (e.g. RawModelArgs,
+// consumer can iterate every plain-data field of a struct (e.g. ModelArgs,
 // ParallelArgs) without hand-enumerating them. The reflection layer itself
 // depends only on <type_traits> and std containers -- no nlohmann/json, no
 // pybind11 -- so it can live in core config headers. The conversion to a

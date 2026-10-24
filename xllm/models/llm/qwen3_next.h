@@ -40,7 +40,7 @@ class Qwen3NextModelImpl : public Qwen3HybridModelImplBase {
       : Qwen3HybridModelImplBase(context) {
     if (init_decoder_layers) {
       const int32_t n_layers =
-          static_cast<int32_t>(context.get_model_args().n_layers());
+          static_cast<int32_t>(context.get_model_args_bundle().n_layers());
       for (int32_t layer_id = 0; layer_id < n_layers; ++layer_id) {
         add_decoder_layer(std::make_shared<layer::Qwen3NextDecoderLayerImpl>(
             context, layer_id));

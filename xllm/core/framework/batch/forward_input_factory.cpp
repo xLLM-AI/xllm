@@ -24,7 +24,7 @@ limitations under the License.
 #include "core/framework/batch/batch_group.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/eplb/eplb_controller.h"
-#include "core/framework/model/raw_model_args.h"
+#include "core/framework/model/model_args.h"
 #include "core/util/threadpool.h"
 #include "core/util/utils.h"
 
@@ -47,7 +47,7 @@ ForwardInputFactory::ForwardInputFactory(ForwardInputFactoryOptions options)
 ForwardInputFactory::~ForwardInputFactory() = default;
 
 void ForwardInputFactory::create_inputs(BatchGroup& batches,
-                                        const RawModelArgs& model_args,
+                                        const ModelArgs& model_args,
                                         std::vector<LlmForwardInput>& inputs,
                                         bool& is_graph_warmup) {
   CHECK_EQ(batches.size(), options_.dp_size)
@@ -77,7 +77,7 @@ void ForwardInputFactory::set_eplb_controller(EplbController* controller) {
 }
 
 void ForwardInputFactory::prepare_rank_inputs(BatchGroup& batches,
-                                              const RawModelArgs& model_args,
+                                              const ModelArgs& model_args,
                                               PreparationState& state) {
   for (uint32_t dp_rank = 0; dp_rank < options_.dp_size; ++dp_rank) {
     state.inputs.emplace_back(batches[dp_rank].prepare_forward_input(

@@ -28,7 +28,7 @@ namespace xllm {
 namespace layer {
 
 DeepseekV2SparseMoEBlockImpl::DeepseekV2SparseMoEBlockImpl(
-    const RawModelArgs& model_args,
+    const ModelArgs& model_args,
     const QuantArgs& quant_args,
     const ParallelArgs& parallel_args,
     const torch::TensorOptions& options,

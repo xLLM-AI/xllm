@@ -85,8 +85,8 @@ class DeepseekV4ModelImpl final
   explicit DeepseekV4ModelImpl(const ModelContext& context)
       : LlmModelImplBase<layer::DeepseekV4DecoderLayer>(
             "deepseek_v4",
-            context.get_model_args(),
-            context.get_model_args().enable_mla()) {
+            context.get_model_args_bundle(),
+            context.get_model_args_bundle().enable_mla()) {
     const auto& model_args = context.get_llm_model_args();
     const torch::TensorOptions options = context.get_tensor_options();
     const ParallelArgs& parallel_args = context.get_parallel_args();
@@ -381,7 +381,7 @@ class DeepseekV4ForCausalLMImpl final
 TORCH_MODULE(DeepseekV4ForCausalLM);
 
 inline void load_deepseek_v4_model_args(const JsonReader& json,
-                                        RawModelArgs* args) {
+                                        ModelArgs* args) {
   LOAD_ARG_OR(model_type, "model_type", "deepseek_v4");
   LOAD_ARG_OR(dtype, "torch_dtype", "");
   LOAD_ARG_OR_FUNC(hidden_size, "dim", [&] { return args->hidden_size(); });
@@ -484,7 +484,7 @@ inline DeepseekV4ArgsPolicy build_deepseek_v4_args_policy() {
   return policy;
 }
 
-inline void process_deepseek_v4_args(RawModelArgs* args,
+inline void process_deepseek_v4_args(ModelArgs* args,
                                      const DeepseekV4ArgsPolicy& policy) {
   SET_ARG(n_activated_experts, args->num_experts_per_tok());
   if (args->n_layers() > 0 &&
@@ -495,7 +495,7 @@ inline void process_deepseek_v4_args(RawModelArgs* args,
   SET_ARG(stop_token_ids, std::unordered_set<int32_t>({args->eos_token_id()}));
 }
 
-inline void validate_deepseek_v4_args(const RawModelArgs& args,
+inline void validate_deepseek_v4_args(const ModelArgs& args,
                                       const DeepseekV4ArgsPolicy& policy) {
   CHECK_GT(args.n_layers(), 0)
       << "deepseek_v4 config n_layers/num_hidden_layers must be > 0, got "

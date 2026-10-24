@@ -21,7 +21,7 @@ limitations under the License.
 
 namespace xllm {
 
-class RawModelArgs;
+class ModelArgs;
 class QuantArgs;
 class JsonReader;
 struct ResolvedModelDescriptor;
@@ -36,19 +36,19 @@ bool load_quant_cfg(const JsonReader& reader, QuantArgs& quant_args);
 
 bool load_hf_model_args(const std::filesystem::path& model_weights_path,
                         const std::string& backend,
-                        RawModelArgs* args,
+                        ModelArgs* args,
                         ResolvedModelDescriptor* descriptor = nullptr);
 
 bool load_hf_audio_preprocessor_args(
     const std::filesystem::path& model_weights_path,
-    RawModelArgs& args);
+    ModelArgs& args);
 
 bool load_hf_image_preprocessor_args(
     const std::filesystem::path& model_weights_path,
-    RawModelArgs& args);
+    ModelArgs& args);
 
 bool load_hf_video_preprocessor_args(
     const std::filesystem::path& model_weights_path,
-    RawModelArgs& args);
+    ModelArgs& args);
 
 }  // namespace xllm

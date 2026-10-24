@@ -19,7 +19,7 @@ limitations under the License.
 
 namespace xllm {
 
-CLIPVLPromptProcessor::CLIPVLPromptProcessor(const RawModelArgs& args) {
+CLIPVLPromptProcessor::CLIPVLPromptProcessor(const ModelArgs& args) {
   merge_size_ = args.mm_image_merge_size();
 }
 

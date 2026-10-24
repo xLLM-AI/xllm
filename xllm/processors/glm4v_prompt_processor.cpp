@@ -20,7 +20,7 @@ limitations under the License.
 
 namespace xllm {
 
-GLM4VPromptProcessor::GLM4VPromptProcessor(const RawModelArgs& args) {
+GLM4VPromptProcessor::GLM4VPromptProcessor(const ModelArgs& args) {
   merge_size_ = args.mm_image_merge_size();
   image_start_token_id_ = args.image_start_token_id();
   image_end_token_id_ = args.image_end_token_id();

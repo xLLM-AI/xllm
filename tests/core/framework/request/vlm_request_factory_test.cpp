@@ -138,7 +138,7 @@ class VLMRequestFactoryTest : public ::testing::Test {
   std::unique_ptr<FakeProcessor> processor_;
   std::unique_ptr<FakeJinjaChatTemplate> chat_template_;
   std::unique_ptr<FakeTokenizer> tokenizer_;
-  RawModelArgs model_args_;
+  ModelArgs model_args_;
   Options options_;
   RateLimiter rate_limiter_;
 };

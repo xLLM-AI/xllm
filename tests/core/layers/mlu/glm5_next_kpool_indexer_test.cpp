@@ -211,7 +211,7 @@ void check_forward_after_short_prefill(bool graph_decode,
       torch::TensorOptions().dtype(torch::kBFloat16).device(device);
   const int64_t saved_block_size = KVCacheConfig::get_instance().block_size();
   KVCacheConfig::get_instance().block_size(16);
-  RawModelArgs args;
+  ModelArgs args;
   args.model_type("glm5_next");
   args.hidden_size(4096);
   args.q_lora_rank(128);
@@ -945,7 +945,7 @@ TEST(Glm5NextKPoolIndexerTest, VerifyGraphRejectsAndResumesFromRestoredTail) {
   const auto ints = options.dtype(torch::kInt32);
   const int64_t old_block_size = KVCacheConfig::get_instance().block_size();
   KVCacheConfig::get_instance().block_size(16);
-  RawModelArgs args;
+  ModelArgs args;
   args.model_type("glm5_next")
       .hidden_size(128)
       .q_lora_rank(128)
@@ -1131,7 +1131,7 @@ TEST(Glm5NextKPoolIndexerTest, GraphReplaysRaggedRequestsAndMasksPaddingState) {
   const auto ints = options.dtype(torch::kInt32);
   const int64_t old_block_size = KVCacheConfig::get_instance().block_size();
   KVCacheConfig::get_instance().block_size(16);
-  RawModelArgs args;
+  ModelArgs args;
   args.model_type("glm5_next")
       .hidden_size(128)
       .q_lora_rank(128)

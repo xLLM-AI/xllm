@@ -45,7 +45,7 @@ class VLMMaster : public Master {
   explicit VLMMaster(const Options& options);
   ~VLMMaster() override;
 
-  const RawModelArgs* model_args() const override { return &model_args_; }
+  const ModelArgs* model_args() const override { return &model_args_; }
 
   // completion
   void handle_request(std::string prompt,
@@ -104,7 +104,7 @@ class VLMMaster : public Master {
   std::unique_ptr<Scheduler> scheduler_;
 
   // model args
-  RawModelArgs model_args_;
+  ModelArgs model_args_;
 
   // thread pool for handling requests. Its worker lambdas dereference
   // request_factory_ and scheduler_, so the pool is explicitly reset

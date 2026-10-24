@@ -22,7 +22,7 @@ limitations under the License.
 
 namespace xllm {
 
-Mistral3ImageProcessor::Mistral3ImageProcessor(const RawModelArgs& args) {
+Mistral3ImageProcessor::Mistral3ImageProcessor(const ModelArgs& args) {
   image_mean_ =
       torch::tensor(std::vector<double>{0.48145466, 0.4578275, 0.40821073},
                     torch::dtype(torch::kFloat32));

@@ -66,8 +66,8 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
  public:
   explicit Qwen3HybridModelImplBase(const ModelContext& context)
       : device_(context.get_tensor_options().device()),
-        model_args_(context.get_model_args()),
-        enable_mla_(context.get_model_args().enable_mla()),
+        model_args_(context.get_model_args_bundle()),
+        enable_mla_(context.get_model_args_bundle().enable_mla()),
         parallel_args_(context.get_parallel_args()),
         flash_comm1_options_(context.get_flash_comm1_options()),
         aux_capture_(context.get_llm_model_args(),
@@ -307,7 +307,7 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
 #endif
   }
 
-  ModelArgs model_args_;
+  ModelArgsBundle model_args_;
   bool enable_mla_ = false;
   torch::nn::ModuleList blocks_{nullptr};
   std::vector<layer::Qwen3HybridDecoderLayerModulePtr> layers_;
@@ -327,7 +327,8 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
 class Qwen3HybridForCausalLMImplBase : public torch::nn::Module {
  public:
   explicit Qwen3HybridForCausalLMImplBase(const ModelContext& context) {
-    tie_word_embeddings_ = context.get_model_args().tie_word_embeddings();
+    tie_word_embeddings_ =
+        context.get_model_args_bundle().tie_word_embeddings();
     lm_head_ = register_module("lm_head", layer::LmHead(context));
   }
 

@@ -67,23 +67,23 @@ class NpuGlm4MoeDecoderLiteImpl : public BaseLayer {
   void initialize_weight_tensors(const torch::TensorOptions& options);
 
   void param_from_args(atb_speed::glm::MoeLayerParam& param,
-                       const RawModelArgs& args,
+                       const ModelArgs& args,
                        const ParallelArgs& parallel_args,
                        bool is_prefill,
                        bool is_prefixcache);
 
   void initialize_basic_parameters(atb_speed::glm::MoeLayerParam& param,
-                                   const RawModelArgs& args,
+                                   const ModelArgs& args,
                                    const ParallelArgs& parallel_args,
                                    bool is_prefill,
                                    bool is_prefixcache);
 
   void initialize_attention_parameters(atb_speed::glm::MoeLayerParam& param,
-                                       const RawModelArgs& args,
+                                       const ModelArgs& args,
                                        const ParallelArgs& parallel_args);
 
   void initialize_mlp_parameters(atb_speed::glm::MoeLayerParam& param,
-                                 const RawModelArgs& args,
+                                 const ModelArgs& args,
                                  const ParallelArgs& parallel_args);
 
   void initialize_parallel_parameters(atb_speed::glm::MoeLayerParam& param,

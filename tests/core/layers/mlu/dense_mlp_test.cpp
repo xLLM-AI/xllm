@@ -218,7 +218,7 @@ class DenseMLPTest : public ::testing::Test {
     test::verify_precision(actual_output, expected_output_, rtol, atol);
   }
 
-  RawModelArgs model_args_;
+  ModelArgs model_args_;
   QuantArgs quant_args_;
   ParallelArgs parallel_args_{0, 1, nullptr};
   torch::TensorOptions options_;

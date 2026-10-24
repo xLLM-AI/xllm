@@ -29,7 +29,7 @@ limitations under the License.
 
 #include "core/framework/model/causal_lm.h"
 #include "core/framework/model/causal_vlm.h"
-#include "core/framework/model/raw_model_args.h"
+#include "core/framework/model/model_args.h"
 #include "core/framework/model_context/model_context.h"
 
 namespace xllm {
@@ -154,7 +154,7 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
   const pybind11::object& get_or_build_python_kv_caches(
       std::vector<KVCache>& kv_caches);
 
-  RawModelArgs model_args_;
+  ModelArgs model_args_;
   std::string python_model_name_;
   torch::TensorOptions options_;
   torch::Device device_;

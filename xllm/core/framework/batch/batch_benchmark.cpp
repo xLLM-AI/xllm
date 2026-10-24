@@ -72,7 +72,7 @@ limitations under the License.
 #include "core/distributed_runtime/worker_model_codec.h"
 #include "core/framework/batch/batch.h"
 #include "core/framework/block/block_manager_pool.h"
-#include "core/framework/model/raw_model_args.h"
+#include "core/framework/model/model_args.h"
 #include "core/framework/multimodal/mm_data.h"
 #include "core/framework/request/incremental_decoder.h"
 #include "core/framework/request/sequence.h"
@@ -244,7 +244,7 @@ LlmForwardInput build_decode_forward_input(size_t batch_size) {
   BlockManagerPool& pool = shared_block_manager_pool();
   DecodeBatchFixture fixture(sequence_fixture, &pool, batch_size);
   ThreadPool thread_pool(kForwardInputThreads);
-  return fixture.batch().prepare_forward_input(RawModelArgs(), &thread_pool);
+  return fixture.batch().prepare_forward_input(ModelArgs(), &thread_pool);
 }
 
 RawForwardOutput make_raw_output(size_t batch_size, bool logprobs) {
@@ -302,7 +302,7 @@ void BM_Batch_PrepareForwardInput_Prefill(benchmark::State& state) {
       sequence_fixture.make_sequence(/*index=*/0, num_prompt_tokens);
   allocate_prefill(pool, *sequence);
   ThreadPool thread_pool(kForwardInputThreads);
-  const RawModelArgs args{};
+  const ModelArgs args{};
 
   for (auto _ : state) {
     // The builder advances kv_cache_tokens_num past the prompt; rewind so every
@@ -325,7 +325,7 @@ void BM_Batch_PrepareForwardInput_Decode(benchmark::State& state) {
   BlockManagerPool& pool = shared_block_manager_pool();
   DecodeBatchFixture fixture(sequence_fixture, &pool, batch_size);
   ThreadPool thread_pool(kForwardInputThreads);
-  const RawModelArgs args{};
+  const ModelArgs args{};
 
   for (auto _ : state) {
     fixture.rewind_kv_cache();
@@ -446,7 +446,7 @@ void BM_Batch_ProcessSampleOutput(benchmark::State& state) {
   SequenceFixture sequence_fixture(logprobs);
   BlockManagerPool& pool = shared_block_manager_pool();
   ThreadPool thread_pool(kForwardInputThreads);
-  const RawModelArgs args{};
+  const ModelArgs args{};
 
   for (auto _ : state) {
     // process_sample_output appends to the sequences and consumes the output

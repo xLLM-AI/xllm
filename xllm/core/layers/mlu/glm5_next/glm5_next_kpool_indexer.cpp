@@ -544,7 +544,7 @@ Glm5NextKPoolSelection glm5_next_kpool_expand_to_physical_slots(
 }
 
 Glm5NextKPoolIndexerImpl::Glm5NextKPoolIndexerImpl(
-    const RawModelArgs& args,
+    const ModelArgs& args,
     const QuantArgs& quant_args,
     const ParallelArgs& parallel_args,
     std::shared_ptr<RotaryEmbeddingBase> rotary_emb,

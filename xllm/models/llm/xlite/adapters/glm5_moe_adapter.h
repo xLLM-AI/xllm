@@ -29,7 +29,7 @@ class Glm5MoeAdapter : public XliteModelAdapter {
   void Load(const StateDict& sd,
             XModel& m,
             const XModelConfig& cfg,
-            const RawModelArgs& args,
+            const ModelArgs& args,
             const ParallelArgs& pa,
             const torch::Device& device,
             std::vector<torch::Tensor>& storages) override {

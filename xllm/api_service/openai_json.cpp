@@ -26,7 +26,7 @@ limitations under the License.
 
 #include "core/common/options.h"
 #include "core/common/xllm_build_info.h"
-#include "core/framework/model/raw_model_args.h"
+#include "core/framework/model/model_args.h"
 #include "core/util/uuid.h"
 
 namespace xllm::api_service {
@@ -351,7 +351,7 @@ std::string openai_system_fingerprint(const std::string& configuration) {
 }
 
 std::string openai_system_fingerprint(const Options& options,
-                                      const RawModelArgs* model_args) {
+                                      const ModelArgs* model_args) {
   std::ostringstream configuration;
   configuration << options.to_string();
   if (model_args != nullptr) {

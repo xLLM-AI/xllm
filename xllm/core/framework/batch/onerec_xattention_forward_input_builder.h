@@ -24,7 +24,7 @@ class OneRecXAttentionForwardInputBuilder final
     : public OneRecForwardInputBuilder {
  public:
   OneRecXAttentionForwardInputBuilder(const BatchInputData& data,
-                                      const RawModelArgs* args,
+                                      const ModelArgs* args,
                                       MPMCThreadPool* thread_pool = nullptr)
       : OneRecForwardInputBuilder(data, args, thread_pool),
         sequence_groups_(data.sequence_groups),
@@ -36,7 +36,7 @@ class OneRecXAttentionForwardInputBuilder final
 
  private:
   const std::vector<SequencesGroup*>& sequence_groups_;
-  const RawModelArgs* args_ = nullptr;
+  const ModelArgs* args_ = nullptr;
 };
 
 }  // namespace xllm

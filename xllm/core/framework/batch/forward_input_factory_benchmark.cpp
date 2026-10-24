@@ -43,7 +43,7 @@ limitations under the License.
 #include "core/common/types.h"
 #include "core/framework/batch/batch_group.h"
 #include "core/framework/batch/forward_input_factory.h"
-#include "core/framework/model/raw_model_args.h"
+#include "core/framework/model/model_args.h"
 #include "core/framework/multimodal/mm_data.h"
 #include "core/framework/request/incremental_decoder.h"
 #include "core/framework/request/sequence.h"
@@ -266,7 +266,7 @@ void benchmark_create_inputs(benchmark::State& state, Workload workload) {
   ForwardInputFactory factory(options);
   BatchGroupFixture fixture(
       dp_size, sequences_per_rank, prompt_tokens, workload);
-  const RawModelArgs model_args{};
+  const ModelArgs model_args{};
   std::vector<LlmForwardInput> inputs;
   bool is_graph_warmup = false;
 

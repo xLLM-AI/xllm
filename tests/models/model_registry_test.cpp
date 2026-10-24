@@ -421,7 +421,7 @@ TEST(ModelRegistryTest, ExposesPartialRegistrationWithoutInferringFamily) {
   const std::string name = "descriptor_partial_registration_test";
   ModelRegistry::register_model_args_loader(
       name,
-      [](const JsonReader& /*json*/, RawModelArgs* /*args*/) { return true; });
+      [](const JsonReader& /*json*/, ModelArgs* /*args*/) { return true; });
 
   ResolvedModelDescriptor descriptor;
   std::string error_message;
@@ -447,7 +447,7 @@ TEST(ModelRegistryTest, SnapshotsAllRegisteredModelMetadata) {
       });
   ModelRegistry::register_model_args_loader(
       name,
-      [](const JsonReader& /*json*/, RawModelArgs* /*args*/) { return true; });
+      [](const JsonReader& /*json*/, ModelArgs* /*args*/) { return true; });
   ModelRegistry::register_quant_args_loader(
       name,
       [](const JsonReader& /*json*/, QuantArgs* /*args*/) { return true; });
@@ -456,7 +456,7 @@ TEST(ModelRegistryTest, SnapshotsAllRegisteredModelMetadata) {
       [](const JsonReader& /*json*/, TokenizerArgs* /*args*/) { return true; });
   ModelRegistry::register_multimodal_processor_factory(
       name,
-      [](const RawModelArgs& /*model_args*/,
+      [](const ModelArgs& /*model_args*/,
          std::shared_ptr<Tokenizer> /*tokenizer*/,
          const TokenizerArgs& /*tokenizer_args*/) {
         return std::unique_ptr<MultimodalProcessorBase>();
@@ -609,7 +609,7 @@ TEST(ModelRegistryTest, CreatesLlmAndRecContextsFromOneRegistration) {
       ModelRegistry::resolve_model_descriptor(name, "", &descriptor, nullptr));
   ASSERT_EQ(descriptor.family, ModelFamily::LLM);
 
-  RawModelArgs args{};
+  ModelArgs args{};
   args.model_type() = name;
   args.query_num() = 64;
   const ParallelArgs parallel_args(
@@ -650,7 +650,7 @@ TEST(ModelRegistryTest, CreatesVlmContextFromRegisteredContract) {
   ASSERT_TRUE(
       ModelRegistry::resolve_model_descriptor(name, "", &descriptor, nullptr));
 
-  RawModelArgs args{};
+  ModelArgs args{};
   args.model_type() = name;
   args.mm_patch_size() = 14;
   const ModelContext context = create_model_context(
@@ -682,7 +682,7 @@ TEST(ModelRegistryTest, SelectsRegisteredFamilyWhenExecutionFamilyIsOmitted) {
       /*execution_family=*/"",
       /*model_impl=*/"native",
       ParallelArgs(/*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr),
-      RawModelArgs(),
+      ModelArgs(),
       QuantArgs(),
       torch::TensorOptions().device(torch::kCPU));
   EXPECT_EQ(context.get_model_family(), ModelFamily::LLM);
@@ -700,7 +700,7 @@ TEST(ModelRegistryTest, AllowsPythonContextWithoutNativeFactory) {
 
   const ParallelArgs parallel_args(
       /*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr);
-  const RawModelArgs args{};
+  const ModelArgs args{};
   const QuantArgs quant_args;
   const torch::TensorOptions tensor_options =
       torch::TensorOptions().device(torch::kCPU);
@@ -735,7 +735,7 @@ TEST(ModelRegistryTest, CreatesModelFromContextRegistration) {
                                              return std::unique_ptr<CausalLM>();
                                            });
 
-  RawModelArgs args{};
+  ModelArgs args{};
   args.model_type() = "checkpoint_alias_with_selected_registration";
   const ModelContext context(
       ParallelArgs(/*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr),
@@ -760,7 +760,7 @@ TEST(ModelRegistryTest, CreatesDiTPipelineContextFromRegisteredContract) {
   ASSERT_TRUE(
       ModelRegistry::get_registered_model_descriptor(name, &descriptor));
 
-  RawModelArgs component_args{};
+  ModelArgs component_args{};
   component_args.in_channels() = 16;
   const DiTModelContext context = create_dit_model_context(
       descriptor,
@@ -819,7 +819,7 @@ TEST(ModelRegistryDeathTest, RejectsMissingNativeContextContract) {
       ModelRegistry::resolve_model_descriptor(name, "", &descriptor, nullptr));
   const ParallelArgs parallel_args(
       /*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr);
-  const RawModelArgs args{};
+  const ModelArgs args{};
   const QuantArgs quant_args;
   const torch::TensorOptions tensor_options =
       torch::TensorOptions().device(torch::kCPU);
@@ -864,7 +864,7 @@ TEST(ModelRegistryDeathTest, KeepsDiTPipelineContextIndependent) {
           /*execution_family=*/"llm",
           /*model_impl=*/"python",
           ParallelArgs(/*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr),
-          RawModelArgs(),
+          ModelArgs(),
           QuantArgs(),
           torch::TensorOptions().device(torch::kCPU)),
       "DiT models require a DiTModelContext");

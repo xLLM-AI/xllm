@@ -33,7 +33,7 @@ namespace xllm {
 class RecExecutorImpl final : public RecExecutorBackend {
  public:
   RecExecutorImpl(RecModel* model,
-                  const ModelArgs& args,
+                  const ModelArgsBundle& args,
                   const torch::Device& device,
                   const runtime::Options& options);
 

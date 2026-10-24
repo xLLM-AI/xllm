@@ -21,7 +21,8 @@ namespace xllm {
 namespace layer {
 namespace {
 
-bool is_full_attention_layer(const ModelArgs& model_args, int32_t layer_id) {
+bool is_full_attention_layer(const ModelArgsBundle& model_args,
+                             int32_t layer_id) {
   auto layer_types = model_args.layer_types();
   if (layer_types.empty()) {
     int32_t interval = model_args.full_attention_interval();
@@ -127,10 +128,12 @@ Qwen3_5DecoderLayerImpl::Qwen3_5DecoderLayerImpl(const ModelContext& context,
                          transformer_args.rope_scaling_mrope_section(),
                          options));
   } else {
-    linear_attn_ = register_module(
-        "linear_attn",
-        Qwen3_5GatedDeltaNet(
-            context.get_model_args(), quant_args, parallel_args_, options));
+    linear_attn_ =
+        register_module("linear_attn",
+                        Qwen3_5GatedDeltaNet(context.get_model_args_bundle(),
+                                             quant_args,
+                                             parallel_args_,
+                                             options));
   }
 
   // ---- Layer Norms ----

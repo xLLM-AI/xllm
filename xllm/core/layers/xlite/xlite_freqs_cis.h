@@ -25,7 +25,7 @@ limitations under the License.
 
 namespace xllm::xlite {
 
-// DeepSeek YaRN params (from RawModelArgs rope_scaling_*, MLA only).
+// DeepSeek YaRN params (from ModelArgs rope_scaling_*, MLA only).
 struct YarnConfig {
   float rope_factor = 0.0f;
   float beta_fast = 0.0f;

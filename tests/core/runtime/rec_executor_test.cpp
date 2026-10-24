@@ -25,13 +25,13 @@ namespace {
 TEST(RecExecutorTest, RejectsIluGraphBeforeExecutorLookup) {
   runtime::Options options;
   options.backend("rec").enable_graph(true);
-  const RawModelArgs model_args;
+  const ModelArgs model_args;
 
   EXPECT_DEATH(
       {
         ModelConfig::get_instance().model_impl("auto");
         RecExecutor executor(nullptr,
-                             ModelArgs(model_args, ModelFamily::REC),
+                             ModelArgsBundle(model_args, ModelFamily::REC),
                              torch::Device(torch::kCPU),
                              options);
       },

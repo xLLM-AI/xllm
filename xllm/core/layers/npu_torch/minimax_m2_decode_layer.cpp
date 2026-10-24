@@ -21,7 +21,7 @@ namespace layer {
 MiniMaxM2DecoderLayerImpl::MiniMaxM2DecoderLayerImpl(
     const ModelContext& context,
     int32_t layer_id) {
-  const auto& model_args = context.get_model_args();
+  const auto& model_args = context.get_model_args_bundle();
   auto quant_args = context.get_quant_args();
   if (quant_args.quant_method() == "fp8") {
     quant_args.quant_method("");

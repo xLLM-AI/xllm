@@ -30,8 +30,8 @@ limitations under the License.
 #include "core/framework/batch/batch_forward_type.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/model/causal_lm.h"
+#include "core/framework/model/model_args.h"
 #include "core/framework/model/model_params_view.h"
-#include "core/framework/model/raw_model_args.h"
 #include "core/framework/model/rec_model.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/platform/device.h"
@@ -87,7 +87,7 @@ torch::Device InitXllmDcuDeviceForTest(int32_t device_index = 0) {
 // It intentionally avoids CUDA Attention / FlashInfer / PlanInfo.
 class FakeSimpleCausalLM final : public CausalLM {
  public:
-  FakeSimpleCausalLM(const RawModelArgs& args, const torch::Device& device)
+  FakeSimpleCausalLM(const ModelArgs& args, const torch::Device& device)
       : args_(args),
         device_(device),
         options_(
@@ -158,7 +158,7 @@ class FakeSimpleCausalLM final : public CausalLM {
   void update_expert_weight(int32_t expert_id) override { (void)expert_id; }
 
  private:
-  RawModelArgs args_;
+  ModelArgs args_;
   torch::Device device_;
   torch::TensorOptions options_;
 
@@ -199,8 +199,8 @@ class CountingRecModel final : public RecModel {
   int32_t forward_count_ = 0;
 };
 
-RawModelArgs MakeFakeModelArgs(int64_t hidden_size = 64) {
-  RawModelArgs args;
+ModelArgs MakeFakeModelArgs(int64_t hidden_size = 64) {
+  ModelArgs args;
 
   args.model_type("fake_simple");
   args.dtype("bfloat16");
@@ -378,7 +378,7 @@ TEST(DcuGraphExecutorTest, NativeRecReplaysAndRecapturesChangedKvStorage) {
   const auto tensor_options =
       torch::TensorOptions().dtype(torch::kBFloat16).device(device);
   const auto int_options = tensor_options.dtype(torch::kInt32);
-  const RawModelArgs args = MakeFakeModelArgs(64);
+  const ModelArgs args = MakeFakeModelArgs(64);
   const runtime::Options options = MakeRuntimeOptions(8);
   CountingRecModel model(tensor_options);
   runtime::dcu::DcuGraphExecutorImpl executor(&model, args, device, options);
@@ -426,7 +426,7 @@ TEST(DcuGraphExecutorTest, DecodeCaptureAndReplay) {
 
   const torch::Device device = InitXllmDcuDeviceForTest(0);
 
-  RawModelArgs args = MakeFakeModelArgs(64);
+  ModelArgs args = MakeFakeModelArgs(64);
   runtime::Options options = MakeRuntimeOptions(8);
 
   auto model = std::make_unique<FakeSimpleCausalLM>(args, device);
@@ -481,7 +481,7 @@ TEST(DcuGraphExecutorTest, PrefillFallsBackToEager) {
 
   const torch::Device device = InitXllmDcuDeviceForTest(0);
 
-  RawModelArgs args = MakeFakeModelArgs(64);
+  ModelArgs args = MakeFakeModelArgs(64);
   runtime::Options options = MakeRuntimeOptions(8);
 
   auto model = std::make_unique<FakeSimpleCausalLM>(args, device);

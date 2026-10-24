@@ -241,7 +241,7 @@ bool UnifiedMtpWorkerImpl::supports_unified_configuration() const {
       !moe_topology_valid || parallel_args_.dp_size() != 1 ||
       parallel_args_.cp_size() != 1 ||
       parallel_args_.kv_split_size_effective() != 1 ||
-      context_.get_model_args().model_type() != "glm_moe_dsa" ||
+      context_.get_model_args_bundle().model_type() != "glm_moe_dsa" ||
       combined_draft_execution_path_ !=
           mtp_async::CombinedDraftExecutionPath::GLM_MOE_DSA_SPARSE_ATTENTION ||
       !ModelConfig::is_python_model_impl(context_.get_model_impl()) ||
@@ -308,7 +308,7 @@ std::optional<ForwardOutput> UnifiedMtpWorkerImpl::run_unified_python_mtp_graph(
                                  input,
                                  current_draft_input,
                                  num_speculative_tokens,
-                                 context_.get_model_args().vocab_size(),
+                                 context_.get_model_args_bundle().vocab_size(),
                                  logical_block_size(),
                                  uses_step_major_validate_layout());
   const int32_t batch_size = input.input_params.meta.num_sequences;

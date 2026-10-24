@@ -316,7 +316,7 @@ class Qwen3_5GatedDeltaNetTest : public ::testing::Test {
     return (raw - 0.5f) * (std::sqrt(12.0f) * 0.02f);
   }
 
-  RawModelArgs model_args_;
+  ModelArgs model_args_;
   ParallelArgs parallel_args_{0, 1, nullptr};
   torch::TensorOptions options_;
   torch::Device device_ = torch::kCPU;

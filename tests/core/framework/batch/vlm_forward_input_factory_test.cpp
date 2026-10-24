@@ -24,7 +24,7 @@ limitations under the License.
 
 #include "core/framework/batch/batch_group.h"
 #include "core/framework/config/execution_config.h"
-#include "core/framework/model/raw_model_args.h"
+#include "core/framework/model/model_args.h"
 #include "core/framework/request/sequence.h"
 #include "core/framework/request/stopping_checker.h"
 #include "core/framework/sampling/sampling_params.h"
@@ -99,7 +99,7 @@ TEST_F(VlmForwardInputFactoryTest, PreservesMixedRankTypesAndDpMetadata) {
   options.enable_dp_global_json_object_active = true;
   VlmForwardInputFactory factory(options);
   std::vector<VlmForwardInput> inputs;
-  factory.create_inputs(batches, RawModelArgs(), inputs);
+  factory.create_inputs(batches, ModelArgs(), inputs);
 
   ASSERT_EQ(inputs.size(), 2u);
   EXPECT_TRUE(inputs[0].input_params.meta.batch_forward_type.is_prefill());
@@ -135,7 +135,7 @@ TEST_F(VlmForwardInputFactoryTest, EmptyRankParticipatesInGraphDecode) {
   options.dp_size = 2;
   VlmForwardInputFactory factory(options);
   std::vector<VlmForwardInput> inputs;
-  factory.create_inputs(batches, RawModelArgs(), inputs);
+  factory.create_inputs(batches, ModelArgs(), inputs);
 
   ASSERT_EQ(inputs.size(), 2u);
   EXPECT_FALSE(inputs[0].token_ids.defined());
@@ -161,7 +161,7 @@ TEST_F(VlmForwardInputFactoryTest, AllEmptyGroupClearsPreviousInputs) {
   std::vector<VlmForwardInput> inputs(1);
   inputs[0].token_ids = torch::tensor({42}, torch::kInt32);
   BatchGroup batches(2);
-  factory.create_inputs(batches, RawModelArgs(), inputs);
+  factory.create_inputs(batches, ModelArgs(), inputs);
 
   ASSERT_EQ(inputs.size(), 2u);
   for (const auto& input : inputs) {

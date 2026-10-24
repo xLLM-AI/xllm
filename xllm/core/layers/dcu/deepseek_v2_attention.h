@@ -37,7 +37,7 @@ namespace layer {
 
 class DeepseekV2AttentionImpl final : public torch::nn::Module {
  public:
-  DeepseekV2AttentionImpl(const RawModelArgs& args,
+  DeepseekV2AttentionImpl(const ModelArgs& args,
                           const QuantArgs& quant_args,
                           const ParallelArgs& parallel_args,
                           const torch::TensorOptions& options);

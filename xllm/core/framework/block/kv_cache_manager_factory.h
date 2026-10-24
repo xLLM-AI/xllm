@@ -29,7 +29,7 @@ limitations under the License.
 namespace xllm {
 
 class KVCacheTransferCoordinatorBase;
-class RawModelArgs;
+class ModelArgs;
 class WorkerClient;
 namespace runtime {
 struct Options;
@@ -43,7 +43,7 @@ struct KVCacheManagerFactoryResult final {
 class KVCacheManagerFactory final {
  public:
   static KVCacheCapacity estimate_capacity(
-      const RawModelArgs& model_args,
+      const ModelArgs& model_args,
       const runtime::Options& options,
       torch::ScalarType dtype,
       int64_t world_size,
@@ -52,7 +52,7 @@ class KVCacheManagerFactory final {
 
   static KVCacheManagerFactoryResult create(
       const KVCacheCapacity& kv_cache_capacity,
-      const RawModelArgs& model_args,
+      const ModelArgs& model_args,
       int64_t world_size,
       torch::ScalarType dtype,
       BlockManagerPool::Options options,

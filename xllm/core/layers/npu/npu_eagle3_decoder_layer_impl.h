@@ -87,7 +87,7 @@ class NpuEagle3DecoderLayerImpl : public BaseLayer {
                                bool is_prefill);
 
   void param_from_args(atb_speed::eagle3::DecoderLayerParam& param,
-                       const RawModelArgs& args,
+                       const ModelArgs& args,
                        const ParallelArgs& parallel_args,
                        bool isPrefill);
 

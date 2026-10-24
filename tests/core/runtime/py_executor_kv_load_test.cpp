@@ -121,7 +121,7 @@ patch.__enter__()
     ProcessGroup group(/*rank=*/0, /*world_size=*/1, device);
     ParallelArgs parallel(/*rank=*/0, /*world_size=*/1, &group);
     parallel.moe_tp_group_ = &group;
-    RawModelArgs args;
+    ModelArgs args;
     args.model_type("deepseek_v4")
         .dtype("float32")
         .n_heads(1)

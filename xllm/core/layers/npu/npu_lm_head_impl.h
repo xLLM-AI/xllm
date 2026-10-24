@@ -59,7 +59,7 @@ class NpuLmHeadImpl : public BaseLayer {
 
  private:
   void param_from_args(atb_speed::common::LmHeadParam& param,
-                       const RawModelArgs& args,
+                       const ModelArgs& args,
                        const ParallelArgs& parallel_args,
                        bool isPrefill);
 

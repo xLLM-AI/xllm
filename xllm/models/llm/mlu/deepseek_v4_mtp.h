@@ -52,6 +52,7 @@ using ::xllm::DSAGroupInfo;
 using ::xllm::JsonReader;
 using ::xllm::KVCache;
 using ::xllm::LlmForCausalLMImplBase;
+using ::xllm::ModelArgs;
 using ::xllm::ModelContext;
 using ::xllm::ModelGraphMetadataState;
 using ::xllm::ModelLoader;
@@ -59,7 +60,6 @@ using ::xllm::ModelOutput;
 using ::xllm::ModelParamsView;
 using ::xllm::MtpDecoderLayerImplBase;
 using ::xllm::ParallelArgs;
-using ::xllm::RawModelArgs;
 using ::xllm::StateDict;
 using ::xllm::layer::AttentionMetadata;
 using ::xllm::layer::DeepseekV4DecoderLayer;
@@ -347,7 +347,7 @@ class DeepseekV4MtpForCausalLMImpl final
 TORCH_MODULE(DeepseekV4MtpForCausalLM);
 
 inline void load_deepseek_v4_mtp_model_args(const JsonReader& json,
-                                            RawModelArgs* args) {
+                                            ModelArgs* args) {
   load_deepseek_v4_model_args(json, args);
   LOAD_ARG_OR(model_type, "model_type", "deepseek_v4_mtp");
   LOAD_ARG_OR(num_nextn_predict_layers, "num_nextn_predict_layers", 1);

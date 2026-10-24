@@ -39,7 +39,7 @@ int32_t get_dtype_size(torch::ScalarType dtype) {
 namespace xllm {
 namespace layer {
 
-FusedMoEImpl::FusedMoEImpl(const RawModelArgs& model_args,
+FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
                            const FusedMoEArgs& moe_args,
                            const QuantArgs& quant_args,
                            const ParallelArgs& parallel_args,

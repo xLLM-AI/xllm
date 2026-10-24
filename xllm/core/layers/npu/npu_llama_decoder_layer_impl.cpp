@@ -36,11 +36,11 @@ const uint64_t WEIGHT_COUNT_PER_LAYER = 50;
 NpuLlamaDecoderLayerImpl::NpuLlamaDecoderLayerImpl(const ModelContext& context)
     : BaseLayer(context) {
   param_from_args(prefill_param_,
-                  context.get_model_args(),
+                  context.get_model_args_bundle(),
                   context.get_parallel_args(),
                   true);
   param_from_args(decode_param_,
-                  context.get_model_args(),
+                  context.get_model_args_bundle(),
                   context.get_parallel_args(),
                   false);
 
@@ -65,7 +65,7 @@ NpuLlamaDecoderLayerImpl::NpuLlamaDecoderLayerImpl(const ModelContext& context)
 // fix param
 void NpuLlamaDecoderLayerImpl::param_from_args(
     atb_speed::llama::LlamaLayerParam& param,
-    const RawModelArgs& args,
+    const ModelArgs& args,
     const ParallelArgs& parallel_args,
     bool isPrefill) {
   param.isFA = false;

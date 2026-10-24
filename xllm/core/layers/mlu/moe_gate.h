@@ -37,7 +37,7 @@ class MoEGateImpl : public torch::nn::Module {
   // Reads MoE gate config from model_args (n_routed_experts,
   // num_experts_per_tok, n_group, topk_group, routed_scaling_factor,
   // hidden_size, norm_topk_prob, scoring_func, topk_method).
-  MoEGateImpl(const RawModelArgs& model_args,
+  MoEGateImpl(const ModelArgs& model_args,
               const QuantArgs& quant_args,
               const torch::TensorOptions& options,
               bool use_hash = false);

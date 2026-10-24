@@ -68,7 +68,7 @@ class NpuColumnParallelLinearImpl : public BaseLayer {
                     atb_speed::common::LinearParallelParam& linearParam);
 
   void param_from_args(atb_speed::common::LinearParallelParam& param,
-                       const RawModelArgs& args,
+                       const ModelArgs& args,
                        const ParallelArgs& parallel_args);
 
   atb_speed::Model::Node linear_node_;

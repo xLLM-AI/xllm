@@ -53,7 +53,7 @@ DiTComponentType get_dit_component_type(const std::string& component) {
   return DiTComponentType::UNKNOWN;
 }
 
-bool is_vlm_component(const std::string& component, const RawModelArgs& args) {
+bool is_vlm_component(const std::string& component, const ModelArgs& args) {
   // Image processors are represented by the vision half of VLM arguments.
   // This keeps processor configuration in the same typed component bundle as
   // the VLM text encoder that consumes it.
@@ -73,9 +73,10 @@ bool is_vlm_component(const std::string& component, const RawModelArgs& args) {
   return model_type.find("vl") != std::string::npos;
 }
 
-std::unordered_map<std::string, std::shared_ptr<ModelArgs>> make_model_args(
-    const std::unordered_map<std::string, RawModelArgs>& model_args) {
-  std::unordered_map<std::string, std::shared_ptr<ModelArgs>> views;
+std::unordered_map<std::string, std::shared_ptr<ModelArgsBundle>>
+make_model_args_bundles(
+    const std::unordered_map<std::string, ModelArgs>& model_args) {
+  std::unordered_map<std::string, std::shared_ptr<ModelArgsBundle>> views;
   views.reserve(model_args.size());
   for (const auto& [component, args] : model_args) {
     const DiTComponentType component_type = get_dit_component_type(component);
@@ -84,8 +85,9 @@ std::unordered_map<std::string, std::shared_ptr<ModelArgs>> make_model_args(
     }
     const ModelFamily family =
         is_vlm_component(component, args) ? ModelFamily::VLM : ModelFamily::DIT;
-    views.emplace(component,
-                  std::make_shared<ModelArgs>(args, family, component_type));
+    views.emplace(
+        component,
+        std::make_shared<ModelArgsBundle>(args, family, component_type));
   }
   return views;
 }
@@ -94,14 +96,14 @@ std::unordered_map<std::string, std::shared_ptr<ModelArgs>> make_model_args(
 
 DiTModelContext::DiTModelContext(
     const ParallelArgs& input_parallel_args,
-    std::unordered_map<std::string, RawModelArgs> model_args,
+    std::unordered_map<std::string, ModelArgs> model_args,
     std::unordered_map<std::string, QuantArgs> quant_args,
     const torch::TensorOptions& tensor_options,
     const DiTCacheConfig& dit_config,
     std::string model_type,
     std::string registration_name)
     : parallel_args_(input_parallel_args),
-      model_args_(make_model_args(model_args)),
+      model_args_bundles_(make_model_args_bundles(model_args)),
       quant_args_(std::move(quant_args)),
       tensor_options_(tensor_options),
       dit_config_(dit_config),
@@ -130,19 +132,19 @@ const QuantArgs& DiTModelContext::get_quant_args(
 
 const DiTComponentModelArgs& DiTModelContext::get_dit_model_args(
     const std::string& component) const& {
-  const auto& iterator = model_args_.find(component);
-  if (iterator != model_args_.end()) {
+  const auto& iterator = model_args_bundles_.find(component);
+  if (iterator != model_args_bundles_.end()) {
     return iterator->second->dit_model_args();
   }
   LOG(FATAL) << "DiT model args not found, component: " << component;
-  static const DiTComponentModelArgs args{RawModelArgs()};
+  static const DiTComponentModelArgs args{ModelArgs()};
   return args;
 }
 
 const VlmModelArgs& DiTModelContext::get_vlm_model_args(
     const std::string& component) const& {
-  const auto iterator = model_args_.find(component);
-  if (iterator != model_args_.end()) {
+  const auto iterator = model_args_bundles_.find(component);
+  if (iterator != model_args_bundles_.end()) {
     CHECK(iterator->second->family() == ModelFamily::VLM)
         << "Component does not contain VLM arguments: " << component;
     return iterator->second->vlm_model_args();
@@ -155,8 +157,8 @@ const VlmModelArgs& DiTModelContext::get_vlm_model_args(
 ModelContext DiTModelContext::get_model_context(
     const std::string& component,
     ModelFamily expected_family) const {
-  const auto storage = model_args_.find(component);
-  CHECK(storage != model_args_.end())
+  const auto storage = model_args_bundles_.find(component);
+  CHECK(storage != model_args_bundles_.end())
       << "DiT model args storage not found, component: " << component;
   const ModelFamily family = storage->second->family();
   CHECK(expected_family == ModelFamily::UNKNOWN || expected_family == family)

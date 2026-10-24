@@ -502,7 +502,7 @@ TEST(MooncakeVirtualKVCacheTransferTest,
   transfer.addr_ = "virtual-mla";
   transfer.set_model_id("glm-test");
 
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("glm_moe_dsa")
       .n_layers(3)
       .n_heads(64)
@@ -641,7 +641,7 @@ class MooncakeVirtualKVCachePullTest : public testing::Test {
     transfer_->set_model_id("glm-pull");
     transfer_->addr_ = "destination";
 
-    RawModelArgs model_args;
+    ModelArgs model_args;
     model_args.model_type("glm_moe_dsa")
         .n_layers(3)
         .n_heads(64)
@@ -2208,7 +2208,7 @@ NpuMixedTransferCaches register_npu_mixed_transfer_caches(
       IndexedKVCacheTensors{KVCacheTensors{tensors.key, tensors.value},
                             tensors.index,
                             tensors.index_scale});
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("test").n_layers(2).n_heads(1).head_dim(512);
   transfer.configure_cache_layout(make_args(0, 1, 1), model_args, 1024, false);
   transfer.register_kv_cache(tensors.caches, KVCacheShape(), torch::kBFloat16);
@@ -2577,7 +2577,7 @@ TEST(MooncakeKVCacheTransferDefaultTest,
                                           /*model_type=*/"qwen3_5",
                                           std::move(engine));
   transfer.addr_ = "local";
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("qwen3_5")
       .n_layers(1)
       .n_heads(4)
@@ -2639,7 +2639,7 @@ TEST(MooncakeKVCacheTransferDefaultTest, RegistersCompressedIndexAndKpoolTail) {
                                             /*model_type=*/"glm5",
                                             std::move(engine));
     transfer.addr_ = "local";
-    RawModelArgs args;
+    ModelArgs args;
     args.n_layers(1)
         .n_heads(1)
         .n_kv_heads(1)
@@ -2724,7 +2724,7 @@ TEST(MooncakeKVCacheTransferDefaultTest,
                                           /*model_type=*/"qwen3_5",
                                           std::move(engine));
   transfer.addr_ = "local-draft-body-tp1";
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("qwen3_5")
       .n_layers(1)
       .n_heads(4)

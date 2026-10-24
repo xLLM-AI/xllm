@@ -26,7 +26,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/config/eplb_config.h"
-#include "core/framework/model/raw_model_args.h"
+#include "core/framework/model/model_args.h"
 
 namespace xllm {
 namespace {
@@ -44,8 +44,8 @@ class ScopedEplbEnabled final {
   const bool previous_;
 };
 
-RawModelArgs make_model_args() {
-  RawModelArgs args;
+ModelArgs make_model_args() {
+  ModelArgs args;
   args.n_layers(1).n_routed_experts(2);
   return args;
 }

@@ -64,7 +64,7 @@ class NpuGlm4DecoderLayerImpl : public BaseLayer {
 
  private:
   void param_from_args(atb_speed::chatglm::ChatglmLayerParam& param,
-                       const RawModelArgs& args,
+                       const ModelArgs& args,
                        const ParallelArgs& parallel_args,
                        bool isPrefill);
 

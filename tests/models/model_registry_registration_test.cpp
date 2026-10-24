@@ -88,7 +88,7 @@ CausalVLMFactory make_vlm_factory() {
 ModelContext make_context(const std::string& model_name,
                           const std::string& model_impl,
                           const std::string& extension_impl = "") {
-  RawModelArgs args;
+  ModelArgs args;
   args.model_type(model_name);
   const torch::TensorOptions options =
       torch::TensorOptions().device(torch::kCPU);

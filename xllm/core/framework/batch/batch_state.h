@@ -31,7 +31,7 @@ limitations under the License.
 
 namespace xllm {
 
-struct RawModelArgs;
+struct ModelArgs;
 constexpr uint64_t UNINITIALIZED_BATCH_ID = 0x0;
 
 // Shared sequence execution state, composed by Batch and RecBatchState. It
@@ -77,28 +77,28 @@ class BatchState final {
   LlmForwardInput build_sequence_input(const BatchInputData& data,
                                        uint32_t num_decoding_tokens,
                                        uint32_t min_decoding_batch_size,
-                                       const RawModelArgs& args,
+                                       const ModelArgs& args,
                                        int32_t cp_size);
   LlmForwardInput build_distributed_input(const BatchInputData& data,
-                                          const RawModelArgs& args,
+                                          const ModelArgs& args,
                                           ThreadPool* thread_pool,
                                           int32_t cp_size);
   RecForwardInput build_rec_sequence_input(const BatchInputData& data,
                                            uint32_t num_decoding_tokens,
                                            uint32_t min_decoding_batch_size,
-                                           const RawModelArgs& args,
+                                           const ModelArgs& args,
                                            int32_t cp_size);
   RecForwardInput build_rec_sequence_input(const BatchInputData& data,
-                                           const RawModelArgs& args,
+                                           const ModelArgs& args,
                                            ThreadPool* thread_pool,
                                            int32_t cp_size);
   VlmForwardInput build_vlm_sequence_input(const BatchInputData& data,
                                            uint32_t num_decoding_tokens,
                                            uint32_t min_decoding_batch_size,
-                                           const RawModelArgs& args,
+                                           const ModelArgs& args,
                                            int32_t cp_size);
   VlmForwardInput build_vlm_distributed_input(const BatchInputData& data,
-                                              const RawModelArgs& args,
+                                              const ModelArgs& args,
                                               ThreadPool* thread_pool,
                                               int32_t cp_size);
   static std::unordered_map<uint32_t, uint32_t> cal_seq_exchange_index(

@@ -18,7 +18,7 @@ limitations under the License.
 #include <torch/types.h>
 
 #include "core/common/macros.h"
-#include "core/framework/model/raw_model_args.h"
+#include "core/framework/model/model_args.h"
 #include "core/framework/multimodal/mm_data.h"
 #include "core/framework/multimodal/mm_input.h"
 
@@ -36,7 +36,7 @@ class AudioProcessor {
 class AudioNoneProcessor final : public AudioProcessor {
  public:
   AudioNoneProcessor() = default;
-  explicit AudioNoneProcessor(const RawModelArgs&) {};
+  explicit AudioNoneProcessor(const ModelArgs&) {};
   bool process(const torch::Tensor& origin_audio,
                const AudioMetadata& metadata,
                MMDataItem& output_item) const override {

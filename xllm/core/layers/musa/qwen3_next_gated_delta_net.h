@@ -29,7 +29,7 @@ namespace layer {
 class Qwen3NextGatedDeltaNetImpl : public Qwen3GatedDeltaNetBaseImpl {
  public:
   Qwen3NextGatedDeltaNetImpl() = default;
-  Qwen3NextGatedDeltaNetImpl(const RawModelArgs& args,
+  Qwen3NextGatedDeltaNetImpl(const ModelArgs& args,
                              const QuantArgs& quant_args,
                              const ParallelArgs& parallel_args,
                              const torch::TensorOptions& options);
@@ -38,7 +38,7 @@ class Qwen3NextGatedDeltaNetImpl : public Qwen3GatedDeltaNetBaseImpl {
   void verify_loaded_weights(const std::string& prefix) const override;
 
  protected:
-  Qwen3NextGatedDeltaNetImpl(const RawModelArgs& args,
+  Qwen3NextGatedDeltaNetImpl(const ModelArgs& args,
                              const QuantArgs& quant_args,
                              const ParallelArgs& parallel_args,
                              const torch::TensorOptions& options,
@@ -52,7 +52,7 @@ class Qwen3NextGatedDeltaNetImpl : public Qwen3GatedDeltaNetBaseImpl {
   virtual void load_projection_state_dict(const StateDict& state_dict);
   virtual void verify_projection_weights(const std::string& prefix) const;
 
-  void init_next_projections(const RawModelArgs& args,
+  void init_next_projections(const ModelArgs& args,
                              const QuantArgs& quant_args,
                              const ParallelArgs& parallel_args,
                              const torch::TensorOptions& options);
@@ -66,7 +66,7 @@ TORCH_MODULE(Qwen3NextGatedDeltaNet);
 class Qwen3_5GatedDeltaNetImpl final : public Qwen3NextGatedDeltaNetImpl {
  public:
   Qwen3_5GatedDeltaNetImpl() = default;
-  Qwen3_5GatedDeltaNetImpl(const RawModelArgs& args,
+  Qwen3_5GatedDeltaNetImpl(const ModelArgs& args,
                            const QuantArgs& quant_args,
                            const ParallelArgs& parallel_args,
                            const torch::TensorOptions& options);

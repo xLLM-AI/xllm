@@ -85,7 +85,7 @@ class RecRequestFactoryTest : public ::testing::Test {
   }
 
   std::unique_ptr<FakeTokenizer> tokenizer_;
-  RawModelArgs model_args_;
+  ModelArgs model_args_;
   Options options_;
   RateLimiter rate_limiter_;
 };

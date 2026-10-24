@@ -73,7 +73,7 @@ void Batch::refresh_sequences_from_groups() {
 
 LlmForwardInput Batch::prepare_forward_input(uint32_t num_decoding_tokens,
                                              uint32_t min_decoding_batch_size,
-                                             const RawModelArgs& args,
+                                             const ModelArgs& args,
                                              int32_t cp_size) {
   const auto data = state_.prepare_sequence_input_data();
   output_handler_.prepare(data);
@@ -81,7 +81,7 @@ LlmForwardInput Batch::prepare_forward_input(uint32_t num_decoding_tokens,
       data, num_decoding_tokens, min_decoding_batch_size, args, cp_size);
 }
 
-LlmForwardInput Batch::prepare_forward_input(const RawModelArgs& args,
+LlmForwardInput Batch::prepare_forward_input(const ModelArgs& args,
                                              ThreadPool* thread_pool,
                                              int32_t cp_size) {
   const auto data = state_.prepare_distributed_input_data();
@@ -99,7 +99,7 @@ void Batch::process_sample_output(const RawForwardOutput& output,
 VlmForwardInput Batch::prepare_vlm_forward_input(
     uint32_t num_decoding_tokens,
     uint32_t min_decoding_batch_size,
-    const RawModelArgs& args,
+    const ModelArgs& args,
     int32_t cp_size) {
   const auto data = state_.prepare_sequence_input_data();
   output_handler_.prepare(data);
@@ -107,7 +107,7 @@ VlmForwardInput Batch::prepare_vlm_forward_input(
       data, num_decoding_tokens, min_decoding_batch_size, args, cp_size);
 }
 
-VlmForwardInput Batch::prepare_vlm_forward_input(const RawModelArgs& args,
+VlmForwardInput Batch::prepare_vlm_forward_input(const ModelArgs& args,
                                                  ThreadPool* thread_pool,
                                                  int32_t cp_size) {
   const auto data = state_.prepare_distributed_input_data();

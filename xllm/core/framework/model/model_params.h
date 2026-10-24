@@ -24,16 +24,16 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/macros.h"
-#include "core/framework/model/raw_model_args.h"
+#include "core/framework/model/model_args.h"
 
 namespace xllm {
 
 // Each capability owns its fields. Family arguments compose these values and
-// expose references to them; RawModelArgs remains the loading configuration.
+// expose references to them; ModelArgs remains the loading configuration.
 class AttentionModelParams final {
  public:
   AttentionModelParams() = default;
-  explicit AttentionModelParams(const RawModelArgs& args)
+  explicit AttentionModelParams(const ModelArgs& args)
       : head_dim_(args.head_dim()),
         n_heads_(args.n_heads()),
         n_kv_heads_(args.n_kv_heads()),
@@ -131,7 +131,7 @@ class AttentionModelParams final {
 class LinearAttentionModelParams final {
  public:
   LinearAttentionModelParams() = default;
-  explicit LinearAttentionModelParams(const RawModelArgs& args)
+  explicit LinearAttentionModelParams(const ModelArgs& args)
       : full_attention_interval_(args.full_attention_interval()),
         full_attn_layers_(args.full_attn_layers()),
         layer_types_(args.layer_types()),
@@ -183,7 +183,7 @@ class LinearAttentionModelParams final {
 class KVCacheModelParams final {
  public:
   KVCacheModelParams() = default;
-  explicit KVCacheModelParams(const RawModelArgs& args)
+  explicit KVCacheModelParams(const ModelArgs& args)
       : kv_cache_storage_head_dim_(args.kv_cache_storage_head_dim()),
         window_size_(args.window_size()),
         max_batch_size_(args.max_batch_size()),
@@ -246,7 +246,7 @@ class KVCacheModelParams final {
 class MoEModelParams final {
  public:
   MoEModelParams() = default;
-  explicit MoEModelParams(const RawModelArgs& args)
+  explicit MoEModelParams(const ModelArgs& args)
       : use_moe_(args.use_moe()),
         first_k_dense_replace_(args.first_k_dense_replace()),
         moe_layer_freq_(args.moe_layer_freq()),
@@ -306,7 +306,7 @@ class MoEModelParams final {
 class SpeculativeModelParams final {
  public:
   SpeculativeModelParams() = default;
-  explicit SpeculativeModelParams(const RawModelArgs& args)
+  explicit SpeculativeModelParams(const ModelArgs& args)
       : draft_vocab_size_(args.draft_vocab_size()),
         num_speculative_tokens_(args.num_speculative_tokens()),
         enable_embedded_eagle3_draft_(args.enable_embedded_eagle3_draft()),
@@ -357,7 +357,7 @@ class SpeculativeModelParams final {
 class EmbeddingModelParams final {
  public:
   EmbeddingModelParams() = default;
-  explicit EmbeddingModelParams(const RawModelArgs& args)
+  explicit EmbeddingModelParams(const ModelArgs& args)
       : query_num_(args.query_num()),
         encoder_embedding_mode_(args.encoder_embedding_mode()),
         embedding_mode_(args.embedding_mode()) {}
@@ -370,7 +370,7 @@ class EmbeddingModelParams final {
 class ExecutionModelParams final {
  public:
   ExecutionModelParams() = default;
-  explicit ExecutionModelParams(const RawModelArgs& args)
+  explicit ExecutionModelParams(const ModelArgs& args)
       : model_type_(args.model_type()),
         dtype_(args.dtype()),
         hidden_size_(args.hidden_size()),

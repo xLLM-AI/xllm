@@ -77,7 +77,7 @@ class NpuMistralDecoderLayerImpl final : public BaseLayer {
   int64_t init_attn_mask();
 
   void param_from_args(atb_speed::mistral::MistralLayerParam& param,
-                       const RawModelArgs& args,
+                       const ModelArgs& args,
                        const ParallelArgs& parallel_args,
                        bool isPrefill);
 

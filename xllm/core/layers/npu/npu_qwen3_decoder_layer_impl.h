@@ -134,7 +134,7 @@ class NpuQwen3DecoderLayerImpl : public BaseLayer {
                              int node_id,
                              const LlmRecMultiRoundParams* llmrec);
   void param_from_args(atb_speed::qwen::QwenLayerParam& param,
-                       const RawModelArgs& args,
+                       const ModelArgs& args,
                        const ParallelArgs& parallel_args,
                        bool isPrefill);
 

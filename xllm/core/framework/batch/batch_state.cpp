@@ -26,7 +26,7 @@ limitations under the License.
 #include "core/framework/batch/forward_input_builder.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/parallel_config.h"
-#include "core/framework/model/raw_model_args.h"
+#include "core/framework/model/model_args.h"
 
 namespace xllm {
 
@@ -308,7 +308,7 @@ LlmForwardInput BatchState::build_sequence_input(
     const BatchInputData& data,
     uint32_t num_decoding_tokens,
     uint32_t min_decoding_batch_size,
-    const RawModelArgs& args,
+    const ModelArgs& args,
     int32_t cp_size) {
   ForwardInputBuilder builder(data, &args, cp_size);
   auto input =
@@ -318,7 +318,7 @@ LlmForwardInput BatchState::build_sequence_input(
 }
 
 LlmForwardInput BatchState::build_distributed_input(const BatchInputData& data,
-                                                    const RawModelArgs& args,
+                                                    const ModelArgs& args,
                                                     ThreadPool* thread_pool,
                                                     int32_t cp_size) {
   ForwardInputBuilder builder(data, &args, cp_size, thread_pool);
@@ -335,7 +335,7 @@ RecForwardInput BatchState::build_rec_sequence_input(
     const BatchInputData& data,
     uint32_t num_decoding_tokens,
     uint32_t min_decoding_batch_size,
-    const RawModelArgs& args,
+    const ModelArgs& args,
     int32_t cp_size) {
   ForwardInputBuilder builder(data, &args, cp_size);
   auto input = builder.build_rec_forward_input(num_decoding_tokens,
@@ -348,7 +348,7 @@ VlmForwardInput BatchState::build_vlm_sequence_input(
     const BatchInputData& data,
     uint32_t num_decoding_tokens,
     uint32_t min_decoding_batch_size,
-    const RawModelArgs& args,
+    const ModelArgs& args,
     int32_t cp_size) {
   ForwardInputBuilder builder(data, &args, cp_size);
   auto input = builder.build_vlm_forward_input(num_decoding_tokens,
@@ -359,7 +359,7 @@ VlmForwardInput BatchState::build_vlm_sequence_input(
 
 VlmForwardInput BatchState::build_vlm_distributed_input(
     const BatchInputData& data,
-    const RawModelArgs& args,
+    const ModelArgs& args,
     ThreadPool* thread_pool,
     int32_t cp_size) {
   ForwardInputBuilder builder(data, &args, cp_size, thread_pool);
@@ -372,7 +372,7 @@ VlmForwardInput BatchState::build_vlm_distributed_input(
 }
 
 RecForwardInput BatchState::build_rec_sequence_input(const BatchInputData& data,
-                                                     const RawModelArgs& args,
+                                                     const ModelArgs& args,
                                                      ThreadPool* thread_pool,
                                                      int32_t cp_size) {
   ForwardInputBuilder builder(data, &args, cp_size, thread_pool);

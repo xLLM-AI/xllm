@@ -35,11 +35,11 @@ namespace layer {
 
 namespace {
 
-bool is_kimi_text_model(const RawModelArgs& args) {
+bool is_kimi_text_model(const ModelArgs& args) {
   return args.model_type() == "kimi_k2" || args.model_type() == "kimi_k25";
 }
 
-bool uses_deepseek_v2_mla_graph(const RawModelArgs& args) {
+bool uses_deepseek_v2_mla_graph(const ModelArgs& args) {
   return args.enable_mla() && args.model_type() == "kimi_k25";
 }
 
@@ -158,7 +158,7 @@ NpuDeepseekV2DecoderLayerImpl::NpuDeepseekV2DecoderLayerImpl(
           context.get_llm_model_args().num_speculative_tokens()) {
   // compute sm_scale
   // TODO: refactor this code
-  const auto& args = context.get_model_args();
+  const auto& args = context.get_model_args_bundle();
   if (boost::iequals(args.rope_scaling_rope_type(), "deepseek_yarn")) {
     const float attn_scale = args.attn_scalar().value_or(
         static_cast<float>(args.qk_nope_head_dim() + args.qk_rope_head_dim()));
@@ -175,7 +175,7 @@ NpuDeepseekV2DecoderLayerImpl::NpuDeepseekV2DecoderLayerImpl(
   }
 
   auto parallel_args = context.get_parallel_args();
-  const auto& model_args = context.get_model_args();
+  const auto& model_args = context.get_model_args_bundle();
   auto quant_args = context.get_quant_args();
   auto options = context.get_tensor_options();
   uses_deepseek_v2_mla_graph_ = uses_deepseek_v2_mla_graph(model_args);
@@ -279,7 +279,7 @@ void NpuDeepseekV2DecoderLayerImpl::initialize_tensors(
 
 void NpuDeepseekV2DecoderLayerImpl::param_from_args(
     atb_speed::deepseekV2::DecoderLayerParam& param,
-    const RawModelArgs& args,
+    const ModelArgs& args,
     const ParallelArgs& parallel_args,
     bool is_prefill,
     bool is_prefixcache) {
@@ -294,7 +294,7 @@ void NpuDeepseekV2DecoderLayerImpl::param_from_args(
 
 void NpuDeepseekV2DecoderLayerImpl::initialize_basic_parameters(
     atb_speed::deepseekV2::DecoderLayerParam& param,
-    const RawModelArgs& args,
+    const ModelArgs& args,
     const ParallelArgs& parallel_args,
     bool is_prefill,
     bool is_prefixcache) {
@@ -357,7 +357,7 @@ void NpuDeepseekV2DecoderLayerImpl::initialize_basic_parameters(
 
 void NpuDeepseekV2DecoderLayerImpl::initialize_attention_parameters(
     atb_speed::deepseekV2::DecoderLayerParam& param,
-    const RawModelArgs& args,
+    const ModelArgs& args,
     const ParallelArgs& parallel_args) {
   param.qLoraRank = args.q_lora_rank();
   // NOTE: The operation in this conditional is theoretically compatible with
@@ -382,7 +382,7 @@ void NpuDeepseekV2DecoderLayerImpl::initialize_attention_parameters(
 
 void NpuDeepseekV2DecoderLayerImpl::initialize_mlp_parameters(
     atb_speed::deepseekV2::DecoderLayerParam& param,
-    const RawModelArgs& args,
+    const ModelArgs& args,
     const ParallelArgs& parallel_args) {
   param.hasSharedExpert = (args.n_shared_experts() > 0);
   param.hasSharedExpertGate = false;
@@ -457,7 +457,7 @@ void NpuDeepseekV2DecoderLayerImpl::initialize_mlp_parameters(
 
 void NpuDeepseekV2DecoderLayerImpl::initialize_kimi_k2_parameters(
     atb_speed::deepseekV2::DecoderLayerParam& param,
-    const RawModelArgs& args,
+    const ModelArgs& args,
     bool is_prefill) {
   if (!is_kimi_text_model(args)) {
     return;

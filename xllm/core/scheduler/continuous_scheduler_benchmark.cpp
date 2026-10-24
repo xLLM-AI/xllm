@@ -58,7 +58,7 @@ limitations under the License.
 #include "core/common/types.h"
 #include "core/distributed_runtime/engine.h"
 #include "core/framework/block/block_manager_pool.h"
-#include "core/framework/model/raw_model_args.h"
+#include "core/framework/model/model_args.h"
 #include "core/framework/request/request.h"
 #include "core/framework/request/request_output.h"
 #include "core/framework/request/request_state.h"
@@ -112,12 +112,12 @@ class FakeEngine final : public Engine {
   BlockManagerPool* block_manager_pool() const override {
     return block_manager_pool_.get();
   }
-  const RawModelArgs& model_args() const override { return model_args_; }
+  const ModelArgs& model_args() const override { return model_args_; }
 
  private:
   FakeTokenizer fake_tokenizer_;
   std::unique_ptr<BlockManagerPool> block_manager_pool_;
-  RawModelArgs model_args_;
+  ModelArgs model_args_;
 };
 
 // Exposes the response processor so each iteration can drain the async

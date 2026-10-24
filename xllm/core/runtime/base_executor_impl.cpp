@@ -23,7 +23,7 @@ limitations under the License.
 namespace xllm {
 
 BaseExecutorImpl::BaseExecutorImpl(CausalLM* model,
-                                   const ModelArgs& args,
+                                   const ModelArgsBundle& args,
                                    const torch::Device& device,
                                    const runtime::Options& options)
     : model_(model), args_(args), device_(device), options_(options) {}

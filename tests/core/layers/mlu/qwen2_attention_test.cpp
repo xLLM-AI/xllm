@@ -243,7 +243,7 @@ class Qwen2AttentionTest : public ::testing::Test {
     return metadata;
   }
 
-  RawModelArgs model_args_;
+  ModelArgs model_args_;
   ModelContext context_;
   ParallelArgs parallel_args_{0, 1, nullptr};
   torch::TensorOptions options_;

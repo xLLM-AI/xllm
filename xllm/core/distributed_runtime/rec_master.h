@@ -37,7 +37,7 @@ class RecMaster : public Master {
   explicit RecMaster(const Options& options);
   ~RecMaster();
 
-  const RawModelArgs* model_args() const override { return &model_args_; }
+  const ModelArgs* model_args() const override { return &model_args_; }
 
   // handle a request, the engine will execute the request asynchronously
   // completion/encode
@@ -80,7 +80,7 @@ class RecMaster : public Master {
   // Scheduler must be destroyed before the engine it references.
   std::unique_ptr<FixedStepsScheduler> scheduler_;
   // model args
-  RawModelArgs model_args_;
+  ModelArgs model_args_;
   RecType rec_type_ = RecType::kNone;
   // Scheduled request closures dereference request_factory_ and scheduler_, so
   // the pool is explicitly reset (drained/joined) in ~RecMaster before those

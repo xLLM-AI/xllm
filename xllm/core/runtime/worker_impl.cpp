@@ -170,7 +170,7 @@ int32_t read_block_size(const std::string& model_weights_path) {
   return reader.value_or<int32_t>("dspark_block_size", 0);
 }
 
-void configure_deepseek_v4_dspark_args(RawModelArgs& args,
+void configure_deepseek_v4_dspark_args(ModelArgs& args,
                                        const runtime::Options& options) {
   CHECK_GT(args.dspark_num_layers(), 0)
       << "DeepSeek-V4 DSpark requires at least one draft layer.";
@@ -528,7 +528,7 @@ bool WorkerImpl::allocate_kv_cache_storage(
     CHECK(!::xllm::KVCacheConfig::get_instance().enable_virtual_memory())
         << "Grouped KV cache layout does not support VirtualMemory cache.";
   }
-  const auto& args = context_.get_model_args();
+  const auto& args = context_.get_model_args_bundle();
   KVCacheCreateOptions layout_options =
       get_kv_cache_create_options(args, kv_cache_shape, is_spec_draft_);
   const bool enable_linear_attention = layout_options.enable_linear_attention();
@@ -657,7 +657,7 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
   CHECK(model() != nullptr) << "Model is not initialized.";
   CHECK(kv_caches_.empty()) << "KV caches are already initialized.";
 
-  const auto& model_args = context_.get_model_args();
+  const auto& model_args = context_.get_model_args_bundle();
   std::unique_ptr<VirtualKVCacheTransferMemoryProvider> memory_provider;
 #if defined(USE_NPU)
   if (::xllm::KVCacheConfig::get_instance().enable_virtual_memory()) {
@@ -689,7 +689,7 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
     return false;
   }
   kv_cache_transfer_->configure_cache_layout(parallel_args_,
-                                             context_.get_model_args(),
+                                             context_.get_model_args_bundle(),
                                              options_.block_size(),
                                              /*is_spec_draft=*/false);
   kv_cache_transfer_->register_kv_cache(kv_caches_, kv_cache_shape, dtype_);
@@ -715,14 +715,14 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
 
   if (is_spec_draft_) {
     kv_cache_transfer_->configure_cache_layout(parallel_args_,
-                                               context_.get_model_args(),
+                                               context_.get_model_args_bundle(),
                                                options_.block_size(),
                                                /*is_spec_draft=*/true);
     kv_cache_transfer_->register_kv_cache_spec(
         kv_caches_, kv_cache_shape, dtype_);
   } else {
     kv_cache_transfer_->configure_cache_layout(parallel_args_,
-                                               context_.get_model_args(),
+                                               context_.get_model_args_bundle(),
                                                options_.block_size(),
                                                /*is_spec_draft=*/false);
     kv_cache_transfer_->register_kv_cache(kv_caches_, kv_cache_shape, dtype_);
@@ -1253,9 +1253,10 @@ bool WorkerImpl::model_supports_model_cp() const {
   model_cp_capable_computed_ = true;
   std::string resolved_name;
   std::string error_message;
-  if (!resolve_model_registration_name(context_.get_model_args().model_type(),
-                                       &resolved_name,
-                                       &error_message)) {
+  if (!resolve_model_registration_name(
+          context_.get_model_args_bundle().model_type(),
+          &resolved_name,
+          &error_message)) {
     model_cp_capable_ = false;
     return false;
   }
@@ -1301,7 +1302,7 @@ const CpPlanRuntimeConfig& WorkerImpl::npu_cp_plan_runtime_config() const {
     plan_config.expert_parallel_degree =
         EPLBConfig::get_instance().expert_parallel_degree();
     plan_config.num_experts_per_token =
-        context_.get_model_args().num_experts_per_tok();
+        context_.get_model_args_bundle().num_experts_per_tok();
     // CP only runs on prefill (decode is filtered in prepare()).
     plan_config.is_prefill = true;
     plan_config.device = device_;
@@ -1383,13 +1384,14 @@ void WorkerImpl::prepare_dp_ep_padding_impl(Params& input_params) {
       raw_token_sizes.empty() && !use_graph_padding
           ? torch::Tensor()
           : make_cpu_tensor(effective_raw_token_sizes);
-  DpEpPadding dp_ep_padding(token_size_per_dp_group,
-                            raw_token_size_per_dp_group,
-                            context_.get_model_args().num_experts_per_tok(),
-                            context_.get_parallel_args().mapping_data(),
-                            device_,
-                            dtype_,
-                            is_prefill);
+  DpEpPadding dp_ep_padding(
+      token_size_per_dp_group,
+      raw_token_size_per_dp_group,
+      context_.get_model_args_bundle().num_experts_per_tok(),
+      context_.get_parallel_args().mapping_data(),
+      device_,
+      dtype_,
+      is_prefill);
   DpEpPaddingData data = dp_ep_padding.build();
   input_params.parallel.dp_ep_padding_data = data;
   if (use_draft_decode_cache) {
@@ -1573,7 +1575,7 @@ void WorkerImpl::prepare_work_before_execute_on_stream_impl(
     apply_kv_block_swaps(input_params);
 
 #if defined(USE_NPU)
-    if (context_.get_model_args().enable_mla() &&
+    if (context_.get_model_args_bundle().enable_mla() &&
         input_params.meta.batch_forward_type.is_chunked_prefill()) {
       prepare_mla_prefixcache_inputs(input_params);
     }
@@ -1671,9 +1673,9 @@ std::shared_ptr<const JsonObjectGrammar> WorkerImpl::ensure_json_object_grammar(
   std::string error;
   *grammar = JsonObjectGrammar::create_from_tokenizer(
       *tokenizer_,
-      context_.get_model_args().eos_token_id(),
-      context_.get_model_args().stop_token_ids(),
-      context_.get_model_args().vocab_size(),
+      context_.get_model_args_bundle().eos_token_id(),
+      context_.get_model_args_bundle().stop_token_ids(),
+      context_.get_model_args_bundle().vocab_size(),
       reasoning_enabled,
       &error);
   if (*grammar == nullptr) {
@@ -2290,7 +2292,7 @@ bool WorkerImpl::wakeup_from_remote_weights(const WakeupOptions& options) {
     return ::xllm::Status(StatusCode::INVALID_ARGUMENT,
                           "Task pipeline requires loaded model weights.");
   }
-  const auto& args = context_.get_model_args();
+  const auto& args = context_.get_model_args_bundle();
   const int64_t positions = args.max_position_embeddings();
   const int64_t vocab = args.vocab_size();
   const int32_t kv_split_size = parallel_args_.kv_split_size_effective();
@@ -2424,7 +2426,7 @@ TaskModel WorkerImpl::task_model() {
       CHECK(kv_cache_transfer_ != nullptr) << "PD KV cache is not allocated.";
       std::shared_ptr<KVPushSynchronizerImpl> layer_synchronizer =
           std::make_shared<KVPushSynchronizerImpl>(
-              context_.get_model_args().n_layers());
+              context_.get_model_args_bundle().n_layers());
       params.parallel.layer_synchronizer = layer_synchronizer;
       return kv_cache_transfer_->push_kv_blocks_async(
           transfer_kv_infos,
@@ -2900,7 +2902,7 @@ WorkerImpl::create_hierarchy_kv_cache_transfer(
   HierarchyKVCacheTransfer::Options transfer_options;
   transfer_options.tp_rank(worker_id % tp_size)
       .tp_size(tp_size)
-      .layers(context_.get_model_args().n_layers())
+      .layers(context_.get_model_args_bundle().n_layers())
       .host_blocks_factor(options_.host_blocks_factor())
       .layers_wise_copy_batchs(options_.layers_wise_copy_batchs())
       .enable_mla(options_.enable_mla())
@@ -3106,7 +3108,7 @@ void WorkerImpl::prepare_mla_prefixcache_inputs(RecModelParams& input_params) {
 }
 
 int64_t WorkerImpl::get_num_layers() const {
-  int64_t num_layers = context_.get_model_args().n_layers();
+  int64_t num_layers = context_.get_model_args_bundle().n_layers();
 #if !defined(USE_NPU)
   if (is_spec_draft_) {
     // for MTP draft models, the number of layers is the number of nextn

@@ -20,14 +20,14 @@ limitations under the License.
 #include <cstdint>
 #include <vector>
 
-#include "core/framework/model/raw_model_args.h"
+#include "core/framework/model/model_args.h"
 #include "processors/image_processor.h"
 
 namespace xllm {
 
 class Glm4VImageProcessor final : public ImageProcessor {
  public:
-  explicit Glm4VImageProcessor(const RawModelArgs& args);
+  explicit Glm4VImageProcessor(const ModelArgs& args);
 
   bool process(const std::vector<torch::Tensor>& images,
                std::vector<MMDataItem>& output_items) const override;

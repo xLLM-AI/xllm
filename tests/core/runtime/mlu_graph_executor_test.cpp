@@ -28,8 +28,8 @@ limitations under the License.
 #include "core/common/constants.h"
 #include "core/framework/batch/batch.h"
 #include "core/framework/config/execution_config.h"
+#include "core/framework/model/model_args.h"
 #include "core/framework/model/model_output.h"
-#include "core/framework/model/raw_model_args.h"
 #include "core/framework/model/rec_model.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "mlu_graph_executor_impl.h"
@@ -261,7 +261,7 @@ class MluGraphExecutorTest : public ::testing::Test {
         model_.get(), model_args_, device, options_);
   }
 
-  RawModelArgs model_args_;
+  ModelArgs model_args_;
   torch::TensorOptions tensor_options_;
   runtime::Options options_;
   std::unique_ptr<MockCausalLM> model_;

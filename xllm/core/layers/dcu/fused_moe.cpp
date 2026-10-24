@@ -101,7 +101,7 @@ LocalFp8ExpertRouting select_local_fp8_experts(
 
 }  // namespace
 
-FusedMoEImpl::FusedMoEImpl(const RawModelArgs& model_args,
+FusedMoEImpl::FusedMoEImpl(const ModelArgs& model_args,
                            const FusedMoEArgs& moe_args,
                            const QuantArgs& quant_args,
                            const ParallelArgs& parallel_args,

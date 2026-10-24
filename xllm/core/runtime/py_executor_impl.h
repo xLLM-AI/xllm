@@ -41,7 +41,7 @@ class __attribute__((visibility("hidden"))) PyExecutorImpl final
     : public ExecutorImpl {
  public:
   PyExecutorImpl(CausalLM* model,
-                 const ModelArgs& args,
+                 const ModelArgsBundle& args,
                  const torch::Device& device,
                  const runtime::Options& options);
 
@@ -97,7 +97,7 @@ class __attribute__((visibility("hidden"))) PyExecutorImpl final
   void bind_kv_caches(std::vector<KVCache>& kv_caches);
 
   PyCausalLM* py_causal_lm_;
-  ModelArgs args_;
+  ModelArgsBundle args_;
   torch::Device device_;
   runtime::Options options_;
   bool enable_mla_ = false;

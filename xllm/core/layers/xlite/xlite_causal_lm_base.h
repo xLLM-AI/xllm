@@ -93,7 +93,7 @@ class XliteCausalLMBase : public CausalLM, public XliteModelHolder {
                     std::unique_ptr<XliteModelAdapter> adapter)
       : options_(context.get_tensor_options()),
         device_(options_.device()),
-        args_(context.get_model_args()),
+        args_(context.get_model_args_bundle()),
         parallel_(context.get_parallel_args()),
         adapter_(std::move(adapter)),
         ready_(false) {
@@ -116,8 +116,8 @@ class XliteCausalLMBase : public CausalLM, public XliteModelHolder {
                                    cfg_.moeTPSize,
                                    static_cast<uint32_t>(parallel_.ep_size()));
     model_ = std::make_unique<XModel>(cfg_, rank);
-    // MLA freqs_cis needs YaRN params from RawModelArgs (XModelConfig has no
-    // such fields).
+    // MLA freqs_cis needs YaRN params from ModelArgs (XModelConfig has no such
+    // fields).
     YarnConfig yarn;
     yarn.rope_factor = args_.rope_scaling_factor();
     yarn.beta_fast = static_cast<float>(args_.rope_scaling_beta_fast());
@@ -291,7 +291,7 @@ class XliteCausalLMBase : public CausalLM, public XliteModelHolder {
  protected:
   torch::TensorOptions options_;
   torch::Device device_;
-  RawModelArgs args_;
+  ModelArgs args_;
   ParallelArgs parallel_;
   XModelConfig cfg_{};
   std::unique_ptr<XRuntime> rt_;

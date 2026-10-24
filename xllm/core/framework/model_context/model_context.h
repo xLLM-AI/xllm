@@ -67,18 +67,18 @@ struct OptimizationConfig {
 class ModelContext {
  public:
   ModelContext()
-      : model_args_(std::make_shared<ModelArgs>()),
+      : model_args_bundle_(std::make_shared<ModelArgsBundle>()),
         parallel_args_(1, 1, nullptr) {};
 
   ModelContext(const ParallelArgs& input_parallel_args,
-               const RawModelArgs& model_args,
+               const ModelArgs& model_args,
                const QuantArgs& quant_args,
                const torch::TensorOptions& tensor_options,
                ModelContextIdentity identity = {});
 
 #if defined(USE_NPU)
   ModelContext(const ParallelArgs& input_parallel_args,
-               const RawModelArgs& model_args,
+               const ModelArgs& model_args,
                const QuantArgs& quant_args,
                const torch::TensorOptions& tensor_options,
                atb::Context* context,
@@ -103,11 +103,11 @@ class ModelContext {
   const DiTComponentModelArgs& get_dit_model_args() const&;
   const DiTComponentModelArgs& get_dit_model_args() const&& = delete;
 
-  const ModelArgs& get_model_args() const& {
-    CHECK(model_args_ != nullptr);
-    return *model_args_;
+  const ModelArgsBundle& get_model_args_bundle() const& {
+    CHECK(model_args_bundle_ != nullptr);
+    return *model_args_bundle_;
   }
-  const ModelArgs& get_model_args() const&& = delete;
+  const ModelArgsBundle& get_model_args_bundle() const&& = delete;
 
   // Return capability parameters embedded in the active family-specific
   // argument object. These accessors provide the common interface for model
@@ -167,10 +167,11 @@ class ModelContext {
 #endif
 
   void set_encoder_embedding_mode(bool encoder_embedding_mode) {
-    if (!model_args_.unique()) {
-      model_args_ = std::make_shared<ModelArgs>(*model_args_);
+    if (!model_args_bundle_.unique()) {
+      model_args_bundle_ =
+          std::make_shared<ModelArgsBundle>(*model_args_bundle_);
     }
-    model_args_->set_encoder_embedding_mode(encoder_embedding_mode);
+    model_args_bundle_->set_encoder_embedding_mode(encoder_embedding_mode);
   }
 
   const std::string& get_model_id() const { return model_id_; }
@@ -190,14 +191,14 @@ class ModelContext {
   friend class DiTModelContext;
 
   ModelContext(const ParallelArgs& input_parallel_args,
-               std::shared_ptr<ModelArgs> all_model_args,
+               std::shared_ptr<ModelArgsBundle> model_args_bundle,
                const QuantArgs& quant_args,
                const torch::TensorOptions& tensor_options,
                ModelContextIdentity identity);
 
 #if defined(USE_NPU)
   ModelContext(const ParallelArgs& input_parallel_args,
-               std::shared_ptr<ModelArgs> all_model_args,
+               std::shared_ptr<ModelArgsBundle> model_args_bundle,
                const QuantArgs& quant_args,
                const torch::TensorOptions& tensor_options,
                atb::Context* context,
@@ -213,7 +214,7 @@ class ModelContext {
   std::string model_impl_;
   std::string extension_impl_;
   ModelContextIdentity identity_;
-  std::shared_ptr<ModelArgs> model_args_;
+  std::shared_ptr<ModelArgsBundle> model_args_bundle_;
   QuantArgs quant_args_;
   ParallelArgs parallel_args_;
   torch::TensorOptions tensor_options_;

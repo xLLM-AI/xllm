@@ -376,7 +376,7 @@ TORCH_MODULE(DownBlock3d);
 
 class Encoder3dImpl final : public torch::nn::Module {
  public:
-  explicit Encoder3dImpl(const RawModelArgs& args) {
+  explicit Encoder3dImpl(const ModelArgs& args) {
     const std::vector<int64_t>& channels = args.block_out_channels();
     const std::vector<int64_t>& spatial = args.spatial_downsample_factors();
     const std::vector<int64_t>& temporal = args.temporal_downsample_factors();
@@ -750,7 +750,7 @@ TORCH_MODULE(TransformerBlock);
 
 class ViTDecoder3dImpl final : public torch::nn::Module {
  public:
-  explicit ViTDecoder3dImpl(const RawModelArgs& args) {
+  explicit ViTDecoder3dImpl(const ModelArgs& args) {
     latent_channels_ = args.latent_channels();
     output_channels_ = args.out_channels();
     patch_t_ = product_checked(args.temporal_downsample_factors());

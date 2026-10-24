@@ -34,7 +34,7 @@ const uint64_t WEIGHT_COUNT_PER_LAYER = 52;
 
 void NpuGlm4DecoderLayerImpl::param_from_args(
     atb_speed::chatglm::ChatglmLayerParam& param,
-    const RawModelArgs& args,
+    const ModelArgs& args,
     const ParallelArgs& parallel_args,
     bool isPrefill) {
   param.isFA = false;
@@ -95,7 +95,7 @@ void NpuGlm4DecoderLayerImpl::initialize_quantization_parameters(
 
 NpuGlm4DecoderLayerImpl::NpuGlm4DecoderLayerImpl(const ModelContext& context)
     : BaseLayer(context) {
-  const auto& model_args = context.get_model_args();
+  const auto& model_args = context.get_model_args_bundle();
   auto parallel_args = context.get_parallel_args();
   auto options = context.get_tensor_options();
 

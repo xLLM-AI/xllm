@@ -87,7 +87,7 @@ bool load_fused_down_fallback(const StateDict& state_dict,
 }  // namespace
 
 Qwen3_5FusedMoEImpl::Qwen3_5FusedMoEImpl(
-    const RawModelArgs& model_args,
+    const ModelArgs& model_args,
     const FusedMoEArgs& moe_args,
     const QuantArgs& quant_args,
     const ParallelArgs& parallel_args,

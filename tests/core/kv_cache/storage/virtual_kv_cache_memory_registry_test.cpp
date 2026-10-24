@@ -819,7 +819,7 @@ TEST_F(VirtualIndexedKVCacheMemoryRegistryTest,
 
   KVCacheCapacity capacity;
   capacity.n_blocks(2 * blocks_per_group).block_size(kBlockSize);
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("glm_moe_dsa")
       .enable_mla(true)
       .n_heads(8)

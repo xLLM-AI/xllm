@@ -256,7 +256,7 @@ class GenericIndexerAllocationTest : public ::testing::Test {
   void SetUp() override {
     KVCacheCapacity capacity;
     capacity.n_blocks(2).block_size(4);
-    RawModelArgs model_args;
+    ModelArgs model_args;
     model_args.model_type("glm_moe_dsa")
         .enable_mla(true)
         .n_heads(8)
@@ -370,7 +370,7 @@ class NpuKVCacheTest : public ::testing::Test {
 TEST_F(NpuKVCacheTest, VirtualMemoryPreservesSharedIndexerOwnership) {
   KVCacheCapacity capacity;
   capacity.n_blocks(2).block_size(4);
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("glm_moe_dsa")
       .enable_mla(true)
       .n_heads(8)
@@ -449,7 +449,7 @@ TEST_F(NpuKVCacheTest, VirtualMemoryRejectsNpuNzLayout) {
 
   KVCacheCapacity capacity;
   capacity.n_blocks(2).block_size(4);
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("deepseek_v3")
       .enable_mla(true)
       .kv_lora_rank(8)
@@ -471,7 +471,7 @@ TEST_F(NpuKVCacheTest, VirtualMemoryRejectsNpuNzLayout) {
 TEST_F(NpuKVCacheTest, InjectedAllocatorOwnsInt8IndexerAndFp16Scale) {
   KVCacheCapacity capacity;
   capacity.n_blocks(2).block_size(4).enable_indexer_cache_quant(true);
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("glm_moe_dsa")
       .enable_mla(true)
       .n_heads(8)
@@ -521,7 +521,7 @@ TEST_F(NpuKVCacheTest, InjectedAllocatorOwnsInt8IndexerAndFp16Scale) {
 TEST(KVCacheTest, VirtualMemoryRejectsQuantizedIndexerCache) {
   KVCacheCapacity capacity;
   capacity.n_blocks(2).block_size(4).enable_indexer_cache_quant(true);
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("glm_moe_dsa")
       .enable_mla(true)
       .n_heads(8)
@@ -568,7 +568,7 @@ TEST(KVCacheTest, DeepSeekV4FourDimCachesUseDeviceLayout) {
       .c4_count(kC4Count)
       .c128_count(kC128Count);
 
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("deepseek_v4");
   KVCacheShape shape(capacity, model_args, /*world_size=*/1);
 
@@ -646,7 +646,7 @@ TEST(KVCacheTest, DeepSeekV4DSparkUsesGroupedSwaCaches) {
       .c4_count(32)
       .c128_count(1);
 
-  RawModelArgs dspark_args;
+  ModelArgs dspark_args;
   dspark_args.model_type("deepseek_v4_dspark");
   const KVCacheShape dspark_shape(capacity, dspark_args, /*world_size=*/1);
   ASSERT_TRUE(dspark_shape.has_grouped_cache_layout());
@@ -680,7 +680,7 @@ TEST(KVCacheTest, DeepSeekV4MtpKeepsGroupedCacheClassification) {
   KVCacheCapacity capacity;
   capacity.block_size(128).swa_count(10).c4_count(32).c128_count(1);
 
-  RawModelArgs mtp_args;
+  ModelArgs mtp_args;
   mtp_args.model_type("deepseek_v4_mtp");
   const KVCacheShape mtp_shape(capacity, mtp_args, /*world_size=*/1);
 
@@ -693,7 +693,7 @@ TEST(KVCacheTest, GroupedCacheCapabilitySurvivesProtoRoundTrip) {
   KVCacheCapacity capacity;
   capacity.block_size(128).swa_count(10).c4_count(32).c128_count(1);
 
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("deepseek_v4");
   const KVCacheShape original(capacity, model_args, /*world_size=*/1);
   ASSERT_TRUE(original.has_grouped_cache_layout());
@@ -776,7 +776,7 @@ TEST(KVCacheTest, IndexerInt8WithoutIndexerDoesNotCreateScaleShape) {
   KVCacheCapacity capacity;
   capacity.n_blocks(8).block_size(16).enable_indexer_cache_quant(true);
 
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.n_heads(8).n_kv_heads(2).head_dim(64).index_n_heads(0);
 
   const KVCacheShape shape(capacity, model_args, /*world_size=*/1);
@@ -847,7 +847,7 @@ TEST(KVCacheTest, DeepSeekV4UsesInjectedAllocatorForTransferableOwners) {
   KVCacheCapacity capacity;
   capacity.block_size(2).swa_count(3).c4_count(4).c128_count(1);
 
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("deepseek_v4");
   const KVCacheShape shape(capacity, model_args, /*world_size=*/1);
 
@@ -895,7 +895,7 @@ TEST(KVCacheTest,
   KVCacheCapacity capacity;
   capacity.n_blocks(kBlockCount).block_size(kBlockSize);
 
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("deepseek_v32")
       .n_heads(8)
       .n_kv_heads(kKvHeadCount)
@@ -946,7 +946,7 @@ TEST(KVCacheTest, MluIndexerInt8ScaleShapeMatchesQuantPagedCacheContract) {
       .block_size(kBlockSize)
       .enable_indexer_cache_quant(true);
 
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("deepseek_v32")
       .n_heads(8)
       .n_kv_heads(kKvHeadCount)
@@ -966,7 +966,7 @@ TEST(KVCacheTest, MluIndexerInt8ScaleShapeMatchesQuantPagedCacheContract) {
 TEST(KVCacheTest, IndexerInt8ShapeUsesCapacityDecisionWhenGlobalIsAuto) {
   IndexerCacheDtypeConfigGuard config_guard(
       /*indexer_cache_dtype=*/"auto");
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("deepseek_v32")
       .n_layers(1)
       .n_heads(8)
@@ -993,7 +993,7 @@ TEST(KVCacheTest, IndexerInt8ShapeUsesCapacityDecisionWhenGlobalIsAuto) {
 TEST(KVCacheTest, IndexerAutoShapeUsesCapacityDecisionWhenGlobalIsInt8) {
   IndexerCacheDtypeConfigGuard config_guard(
       /*indexer_cache_dtype=*/"int8");
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("deepseek_v32")
       .n_layers(1)
       .n_heads(8)
@@ -1029,7 +1029,7 @@ TEST(KVCacheTest, MluIndexerAutoUsesDefaultCacheShapeWithoutScale) {
   KVCacheCapacity capacity;
   capacity.n_blocks(kBlockCount).block_size(kBlockSize);
 
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("deepseek_v32")
       .n_heads(8)
       .n_kv_heads(kKvHeadCount)
@@ -1065,7 +1065,7 @@ TEST(KVCacheTest, MluSharedDsaLayersAllocateOnlyMlaCache) {
   KVCacheCapacity capacity;
   capacity.n_blocks(kBlockCount).block_size(kBlockSize);
 
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("glm_moe_dsa")
       .enable_mla(true)
       .n_heads(8)
@@ -1117,7 +1117,7 @@ TEST(KVCacheTest, MluMixedDsaLayersUseInjectedAllocatorForActualRoles) {
       .block_size(kBlockSize)
       .enable_indexer_cache_quant(true);
 
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("glm_moe_dsa")
       .enable_mla(true)
       .n_heads(8)
@@ -1183,7 +1183,7 @@ TEST_F(HostKVCacheTest, HostKVCacheNormalLayoutAddsLayerDim) {
   KVCacheCapacity capacity;
   capacity.n_blocks(kNumBlocks).block_size(kBlockSize);
 
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("qwen");
   model_args.n_kv_heads(kNumHeads);
   model_args.head_dim(kHeadDim);
@@ -1232,7 +1232,7 @@ TEST_F(HostKVCacheTest, HostKVCacheDeepSeekV4PerBlockType) {
       .c4_count(kC4Count)
       .c128_count(kC128Count);
 
-  RawModelArgs model_args;
+  ModelArgs model_args;
   model_args.model_type("deepseek_v4");
   KVCacheShape shape(capacity, model_args, /*world_size=*/1);
 
@@ -1383,7 +1383,7 @@ TEST_F(HostKVCacheConfigTest, AcceptsSupportedGroupedCacheLayout) {
 }
 
 TEST(KVCacheTest, KPoolShapeRoundTripKeepsRequestTailSeparateFromPages) {
-  RawModelArgs args;
+  ModelArgs args;
   args.model_type("glm5_next")
       .n_layers(1)
       .head_dim(16)
@@ -1438,7 +1438,7 @@ TEST(KVCacheTest, KPoolShapeRoundTripKeepsRequestTailSeparateFromPages) {
 
 #if defined(USE_MLU)
 TEST(KVCacheTest, SharedKPoolBudgetCoversBothModelsWithoutDoubleCounting) {
-  RawModelArgs target_args;
+  ModelArgs target_args;
   target_args.n_layers(2)
       .head_dim(16)
       .index_n_heads(1)
@@ -1462,7 +1462,7 @@ TEST(KVCacheTest, SharedKPoolBudgetCoversBothModelsWithoutDoubleCounting) {
       SCOPED_TRACE(::testing::Message() << "nextn_layers=" << nextn_layers
                                         << ", draft_kpool=" << draft_kpool);
       target_args.num_nextn_predict_layers(nextn_layers);
-      RawModelArgs draft_args = target_args;
+      ModelArgs draft_args = target_args;
       draft_args.n_layers(1).index_kpool(draft_kpool);
       KVCacheCapacity target_cap =
           estimate_kv_cache_capacity(target_args, options);
@@ -1506,7 +1506,7 @@ TEST(KVCacheTest, SharedKPoolBudgetCoversBothModelsWithoutDoubleCounting) {
 }
 
 TEST(KVCacheTest, SharedKPoolBudgetRejectsInsufficientMemory) {
-  RawModelArgs draft_args;
+  ModelArgs draft_args;
   draft_args.index_kpool(4).index_head_dim(16);
   KVCacheCapacity capacity;
   capacity.block_size(16)

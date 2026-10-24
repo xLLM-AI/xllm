@@ -39,7 +39,7 @@ VlmForwardInputFactory::~VlmForwardInputFactory() = default;
 
 void VlmForwardInputFactory::create_inputs(
     BatchGroup& batches,
-    const RawModelArgs& model_args,
+    const ModelArgs& model_args,
     std::vector<VlmForwardInput>& inputs) {
   CHECK_EQ(batches.size(), options_.dp_size);
   PreparationState state;
@@ -57,7 +57,7 @@ void VlmForwardInputFactory::create_inputs(
 }
 
 void VlmForwardInputFactory::prepare_rank_inputs(BatchGroup& batches,
-                                                 const RawModelArgs& model_args,
+                                                 const ModelArgs& model_args,
                                                  PreparationState& state) {
   for (uint32_t dp_rank = 0; dp_rank < options_.dp_size; ++dp_rank) {
     if (batches[dp_rank].empty()) {
