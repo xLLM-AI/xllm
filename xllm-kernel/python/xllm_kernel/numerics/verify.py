@@ -8,11 +8,12 @@ import platform
 import subprocess
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from xllm_kernel.numerics.distributed import agree, session
 from xllm_kernel.numerics.suite import KernelCase, OperationSuite, PreparedCase
 from xllm_kernel.registry import PreparedKernel
 
@@ -27,16 +28,18 @@ def validation_session(
     revision: str,
     output: Path,
     report_writer: Callable[[Path, dict[str, Any]], None],
+    distributed: bool = False,
 ) -> Iterator[tuple[PreparedKernel, dict[str, Any]]]:
     """Prepare one implementation and preserve failures in the final report."""
     report: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "operation": suite.operation,
         "status": "not_run",
         "cases": [],
         "revision": revision,
         "mode": mode,
     }
+    contexts = ExitStack()
     try:
         import torch
         import torch_npu
@@ -46,6 +49,7 @@ def validation_session(
             "torch_npu": torch_npu.__version__,
             "platform": platform.platform(),
         }
+        report["distributed"] = contexts.enter_context(session(distributed))
         prepare_start = time.perf_counter()
         plan = suite.prepare(device, mode, implementation)
         if plan.spec.contract.operation != suite.operation:
@@ -75,7 +79,10 @@ def validation_session(
             report["cases"][-1].update(status="error", error=report["error"])
         raise
     finally:
-        report_writer(output, report)
+        try:
+            report_writer(output, report)
+        finally:
+            contexts.close()
     if report["status"] != "passed":
         raise SystemExit(1)
 
@@ -90,6 +97,9 @@ def verify_case(
         "case_id": case.case_id,
         "operation": plan.spec.contract.operation,
         "implementation": plan.spec.name,
+        "solution": plan.spec.solution,
+        "variant": plan.spec.variant,
+        "binding": plan.spec.binding,
         "case": case.parameters,
         "status": "not_run",
     }
@@ -100,5 +110,9 @@ def verify_case(
         return row, None
     prepared = case.prepare(plan)
     row.update(prepared.metadata)
+    if prepared.reset is not None:
+        prepared.reset()
     row.update(prepared.validate(prepared.function))
+    if not agree(row["status"] == "passed"):
+        row.update(status="failed", rank_consensus="at least one rank failed numerical validation")
     return row, prepared

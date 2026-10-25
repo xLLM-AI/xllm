@@ -23,7 +23,7 @@ from xllm_kernel.numerics.suite import OperationSuite, PreparedCase
 from xllm_kernel.ops.rms_norm import RMS_NORM_CONTRACT
 from xllm_kernel.registry import KernelRegistry, KernelSpec, OpContract, PreparedKernel, register_kernel
 
-_XLITE_IMPLEMENTATION = "npu.xlite.rms_norm"
+_IMPLEMENTATION = "npu.torch.rms_norm"
 
 
 @pytest.fixture
@@ -35,16 +35,17 @@ def cpu_runtime(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     monkeypatch.setattr(kernel_runtime, "_prepared", None)
     monkeypatch.setattr(kernel_runtime, "_configuration", None)
     monkeypatch.setattr(operation.OPERATION, "prepared", None)
-    module_name = "xllm_kernel.ops.rms_norm.xlite"
+    module_name = "test_rms_norm_backend"
     monkeypatch.setitem(sys.modules, module_name, ModuleType(module_name))
     monkeypatch.setattr(operation.OPERATION, "backends", (BackendModule(module_name, "npu", ()),))
     register_kernel(
-        name=_XLITE_IMPLEMENTATION,
+        name=_IMPLEMENTATION,
         contract=RMS_NORM_CONTRACT,
         device="npu",
         execution_modes=("eager", "aclgraph"),
         input_domain="CPU test double",
-        solution="xlite",
+        solution="torch",
+        binding="torch_npu",
     )(lambda *args: runtime.function(*args))
 
     def inputs(case: rms_norm.NumericsCase) -> tuple[torch.Tensor, torch.Tensor]:
@@ -85,7 +86,7 @@ def _invoke(module: str, output: Path, monkeypatch: pytest.MonkeyPatch, *extra: 
             "--mode",
             "eager",
             "--implementation",
-            _XLITE_IMPLEMENTATION,
+            _IMPLEMENTATION,
             "--rows",
             "1",
             "--widths",
@@ -141,21 +142,24 @@ def test_successful_validation_and_optional_timing(
 
 
 @pytest.mark.parametrize("module", ["numerics", "benchmark"])
+@pytest.mark.parametrize("status", ["failed", "not_applicable"])
 def test_failed_accuracy_or_empty_coverage_cannot_pass(
     module: str,
+    status: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     cpu_runtime: SimpleNamespace,
 ) -> None:
     cpu_runtime.function = lambda value, *_: torch.zeros_like(value)
-    for name, extra, status in [("wrong", (), "failed"), ("unsupported", ("--dtypes", "float32"), "not_applicable")]:
-        output = tmp_path / f"{name}.json"
-        with pytest.raises(SystemExit, match="1"):
-            _invoke(module, output, monkeypatch, *extra)
-        report = json.loads(output.read_text())
-        assert report["status"] == "failed"
-        assert report["cases"][0]["status"] == status
-        assert "timing" not in report["cases"][0]
+    if status == "not_applicable":
+        monkeypatch.setattr(rms_norm.NumericsCase, "unsupported_reason", lambda self, plan: "outside test domain")
+    output = tmp_path / f"{status}.json"
+    with pytest.raises(SystemExit, match="1"):
+        _invoke(module, output, monkeypatch)
+    report = json.loads(output.read_text())
+    assert report["status"] == "failed"
+    assert report["cases"][0]["status"] == status
+    assert "timing" not in report["cases"][0]
     assert not cpu_runtime.measurements
 
 
@@ -216,6 +220,73 @@ def test_graph_output_is_validated_before_timing(
         assert cpu_runtime.measurements[0]["divisor"] == 64
     else:
         assert not cpu_runtime.measurements
+
+
+def test_mutating_graph_resets_inputs_and_captures_one_call(
+    monkeypatch: pytest.MonkeyPatch, cpu_runtime: SimpleNamespace
+) -> None:
+    from xllm_kernel.benchmark.npu import measure_graph
+
+    value = torch.zeros(1)
+    output = torch.zeros(1)
+    calls = []
+    resets = []
+
+    def run() -> torch.Tensor:
+        calls.append(1)
+        value.add_(1)
+        output.copy_(value)
+        return output
+
+    def reset() -> None:
+        resets.append(1)
+        value.zero_()
+
+    prepared = PreparedCase(
+        run,
+        lambda function: {"status": "passed" if function().item() == 1 else "failed"},
+        {},
+        reset,
+    )
+    monkeypatch.setattr(torch.npu, "NPUGraph", lambda: SimpleNamespace(replay=run), raising=False)
+    monkeypatch.setattr(torch.npu, "graph", lambda graph: nullcontext(), raising=False)
+    row = {}
+    measure_graph(prepared, row, iterations=2, repeats=1)
+    assert row["status"] == "passed"
+    assert len(calls) == 3  # Capture, validation replay, and the timing double.
+    assert len(resets) == 2
+    assert cpu_runtime.measurements == [{"iterations": 2, "repeats": 1, "divisor": 1, "reset": reset}]
+
+
+def test_mutating_wall_time_excludes_event_readback(monkeypatch: pytest.MonkeyPatch) -> None:
+    from xllm_kernel.benchmark import npu
+
+    clock = SimpleNamespace(now=0)
+
+    def reset() -> None:
+        clock.now += 1000
+
+    def run() -> None:
+        clock.now += 2000
+
+    def elapsed_time(other: object) -> float:
+        clock.now += 1_000_000
+        return 0.002
+
+    monkeypatch.setattr(npu, "time", SimpleNamespace(perf_counter_ns=lambda: clock.now))
+    monkeypatch.setattr(
+        torch,
+        "npu",
+        SimpleNamespace(
+            Event=lambda **kwargs: SimpleNamespace(
+                record=lambda: None, synchronize=lambda: None, elapsed_time=elapsed_time
+            ),
+            synchronize=lambda: None,
+        ),
+        raising=False,
+    )
+    timing = npu.measure(run, iterations=2, repeats=1, reset=reset)
+    assert timing["samples"][0] == pytest.approx({"device_interval_us": 2.0, "host_enqueue_us": 2.0, "wall_us": 3.0})
 
 
 @dataclass(frozen=True)
@@ -352,8 +423,24 @@ def test_reports_render_multiple_operations_without_loading_them(module: str, tm
     report = {
         "status": "passed",
         "cases": [
-            {"case_id": "add/1", "operation": "add", "implementation": "test.add", "status": "passed"},
-            {"case_id": "matmul/2", "operation": "matmul", "implementation": "test.matmul", "status": "passed"},
+            {
+                "case_id": "add/1",
+                "operation": "add",
+                "implementation": "test.add",
+                "solution": "torch",
+                "variant": "",
+                "binding": "torch",
+                "status": "passed",
+            },
+            {
+                "case_id": "matmul/2",
+                "operation": "matmul",
+                "implementation": "test.matmul",
+                "solution": "torch",
+                "variant": "",
+                "binding": "torch",
+                "status": "passed",
+            },
         ],
     }
     output = tmp_path / "mixed.json"
@@ -362,3 +449,61 @@ def test_reports_render_multiple_operations_without_loading_them(module: str, tm
     markdown = output.with_suffix(".md").read_text()
     assert "add/1 | add |" in markdown and "matmul/2 | matmul |" in markdown
     assert "RMSNorm" not in markdown
+
+
+@pytest.mark.parametrize("module", ["numerics", "benchmark"])
+@pytest.mark.parametrize("filename", ["report", "report.json"])
+def test_distributed_reports_preserve_rank_in_both_formats(
+    module: str, filename: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from xllm_kernel.numerics.arguments import parse_arguments
+
+    writer = importlib.import_module(f"xllm_kernel.{module}.report").write_report
+    outputs = []
+    for rank in range(2):
+        monkeypatch.setenv("RANK", str(rank))
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                module,
+                "--device",
+                "npu",
+                "--mode",
+                "eager",
+                "--implementation",
+                _IMPLEMENTATION,
+                "--revision",
+                "cpu-test",
+                "--output",
+                str(tmp_path / filename),
+                "--distributed",
+            ],
+        )
+        args, _, _ = parse_arguments(argparse.ArgumentParser())
+        report = {
+            "status": "passed",
+            "rank": rank,
+            "cases": [
+                {
+                    "case_id": f"rank{rank}",
+                    "operation": "rms_norm",
+                    "implementation": _IMPLEMENTATION,
+                    "solution": "torch",
+                    "variant": "",
+                    "binding": "torch_npu",
+                    "status": "passed",
+                }
+            ],
+        }
+        writer(args.output, report)
+        outputs.append(args.output)
+    assert len(set(outputs)) == 2
+    for rank, path in enumerate(outputs):
+        assert json.loads(path.read_text())["rank"] == rank
+    markdown = list(tmp_path.glob("*.md"))
+    assert len(markdown) == 2
+    for rank in range(2):
+        matching = [path for path in markdown if f"rank{rank}" in path.name]
+        assert len(matching) == 1
+        assert f"rank{rank}" in matching[0].read_text()
