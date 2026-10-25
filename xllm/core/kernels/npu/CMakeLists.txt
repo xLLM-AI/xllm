@@ -5,7 +5,10 @@ add_subdirectory(tilelang)
 add_subdirectory(xllm_ops)
 
 # Keep this adapter's cache separate from torch_npu's incompatible TLS cache.
-set_source_files_properties(atb_matmul_ein_sum.cpp PROPERTIES
+set(XLLM_KERNEL_ATB_EINSUM_SOURCE
+  "${PROJECT_SOURCE_DIR}/xllm-kernel/csrc/atb/atb_matmul_ein_sum.cpp"
+)
+set_source_files_properties(${XLLM_KERNEL_ATB_EINSUM_SOURCE} PROPERTIES
   COMPILE_OPTIONS "-fvisibility=hidden"
 )
 
@@ -23,7 +26,7 @@ cc_library(
     npu_adalayernorm.cpp
     matmul.cpp
     matmul_reduce_scatter.cpp
-    atb_matmul_ein_sum.cpp
+    ${XLLM_KERNEL_ATB_EINSUM_SOURCE}
     npu_causal_conv1d.cpp
     npu_fused_infer_attention.cpp
     npu_gemma_rms_norm.cpp

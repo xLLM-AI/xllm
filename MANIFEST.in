@@ -5,6 +5,7 @@ include .gitmodules
 recursive-include src *.*
 recursive-include xllm *.py
 recursive-include xllm-kernel *.py *.toml *.md
+recursive-include xllm-kernel/csrc *.cpp *.h
 recursive-include xllm/auto_config *.json
 recursive-include examples *.py
 recursive-include third_party *

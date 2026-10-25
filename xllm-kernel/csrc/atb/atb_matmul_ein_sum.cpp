@@ -15,8 +15,9 @@ limitations under the License.
 
 #include <c10/core/DeviceGuard.h>
 #include <glog/logging.h>
+#include <torch/types.h>
 
-#include "core/kernels/npu/npu_ops_api.h"
+#include "custom_functions_npu/atb_common.h"
 
 namespace xllm::kernel::npu {
 namespace {

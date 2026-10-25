@@ -25,6 +25,25 @@ See the development guide
 [简体中文](../docs/src/content/docs/zh/dev_guide/xllm_kernel_dev.md))
 for architecture, public APIs, operator development, and validation.
 
+GEMM APIs live in `xllm_kernel.ops.gemm` and are also exported by
+`xllm_kernel.ops`. Like normalization and activation, the group publishes
+`OPERATIONS`; backend modules register only on their matching platform.
+
+| Operation | Input and output | Implementations |
+| --- | --- | --- |
+| `einsum` | BF16 `[T,H,D] x [H,D,O] -> [T,H,O]` | `npu.atb.einsum` |
+| `einsum_out` | Same contraction into caller-owned contiguous BF16 output | `npu.atb.einsum_out` |
+
+Only `einsum_out` mutates an argument and returns its output buffer; that
+buffer must not alias either operand. `einsum` allocates a fresh output.
+ATB bindings require the matching xLLM native library to be loaded before
+`initialize()`. Selection stays fixed before graph capture; overrides
+cannot bypass platform or contract compatibility.
+
+The native implementation lives in `csrc/atb/atb_matmul_ein_sum.cpp`.
+The xLLM NPU build compiles this source and registers its existing
+`torch.ops.xllm_ops` entry points; the bindings use the matching xLLM native library.
+
 ## Installation
 
 ### Install the standalone package

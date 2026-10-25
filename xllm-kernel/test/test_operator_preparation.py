@@ -27,6 +27,8 @@ def test_all_backend_modules_register_unique_variants_and_execute_public_binding
     registry = KernelRegistry()
     monkeypatch.setattr(KernelRegistry, "_instance", registry)
     monkeypatch.setitem(sys.modules, "torch_npu", _Vendor())
+    monkeypatch.setitem(sys.modules, "xllm_export", SimpleNamespace())
+    monkeypatch.setattr(torch.ops, "xllm_ops", _Vendor())
     monkeypatch.setattr(torch, "npu", SimpleNamespace(get_device_name=lambda: "Ascend910B2"), raising=False)
     operations = load_operations()
     for operation in operations:
@@ -39,7 +41,7 @@ def test_all_backend_modules_register_unique_variants_and_execute_public_binding
                 assert importlib.import_module(backend.module) is module
         specs = registry.specs()
         assert len(specs) == len({spec.name for spec in specs})
-        assert {spec.solution for spec in specs} == {"torch"}
+        assert {spec.solution for spec in specs} == {"atb", "torch"}
         registry.freeze()
         for operation in operations:
             assert {spec.name for spec in specs if spec.contract == operation.contract} == set(
@@ -67,15 +69,20 @@ def test_torch_modules_do_not_import_or_register_npu_on_other_platforms(
 
     class _BlockNpuImports(importlib.abc.MetaPathFinder):
         def find_spec(self, fullname: str, path: Any = None, target: Any = None) -> None:
-            if fullname == "torch_npu" or fullname.startswith("torch_npu."):
+            if fullname.split(".")[0] in {"torch_npu", "xllm_export"}:
                 raise AssertionError(f"unexpected NPU import on {platform.value}: {fullname}")
 
     registry = KernelRegistry()
     monkeypatch.setattr(KernelRegistry, "_instance", registry)
     monkeypatch.setattr(Platform, "enum", classmethod(lambda cls: platform))
     monkeypatch.delitem(sys.modules, "torch_npu", raising=False)
+    monkeypatch.delitem(sys.modules, "xllm_export", raising=False)
     monkeypatch.setattr(sys, "meta_path", [_BlockNpuImports(), *sys.meta_path])
-    modules = ("xllm_kernel.ops.activation.torch", "xllm_kernel.ops.normalization.torch")
+    modules = (
+        "xllm_kernel.ops.activation.torch",
+        "xllm_kernel.ops.normalization.torch",
+        "xllm_kernel.ops.gemm.atb",
+    )
     for name in modules:
         monkeypatch.delitem(sys.modules, name, raising=False)
     try:
@@ -83,6 +90,7 @@ def test_torch_modules_do_not_import_or_register_npu_on_other_platforms(
             importlib.import_module(name)
         assert not registry.specs()
         assert "torch_npu" not in sys.modules
+        assert "xllm_export" not in sys.modules
     finally:
         for name in modules:
             sys.modules.pop(name, None)
