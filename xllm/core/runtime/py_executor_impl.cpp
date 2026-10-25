@@ -234,6 +234,8 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
       SpeculativeConfig::requires_aux_hidden_capture(
           options_.speculative_algorithm());
   executor_config["enable_task_pipeline"] = options_.enable_task_pipeline();
+  executor_config["enable_graph_mode_decode_no_padding"] =
+      ExecutionConfig::get_instance().enable_graph_mode_decode_no_padding();
   // DFlash2 defaults to eager in the model config. Hybrid worker pipelines
   // explicitly enable its independent full-block ACL runner on the leaf.
   const bool independent_block_graph =

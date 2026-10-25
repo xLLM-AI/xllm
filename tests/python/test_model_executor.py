@@ -739,6 +739,7 @@ class TestModelExecutorConstruction:
             num_decoding_tokens=4,
             is_spec_draft=False,
             enable_mega_moe_token_mask=False,
+            enable_graph_mode_decode_no_padding=False,
         )
 
     @patch("xllm.python.model_executor.runners.decode_acl_graph.DecodeAclGraphRunner")
@@ -798,6 +799,7 @@ class TestModelExecutorConstruction:
             num_decoding_tokens=4,
             is_spec_draft=False,
             enable_mega_moe_token_mask=True,
+            enable_graph_mode_decode_no_padding=False,
         )
 
 
@@ -2625,6 +2627,30 @@ def test_executor_selects_acl_graph_input_owner(model_type: str, dp_size: int, p
     executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
     runner = executor.prepared_graph_runner if pipeline else executor.decode_graph_runner
     assert len(runner.layer_caches) == 2
+
+
+@pytest.mark.parametrize("no_padding,expected", [(False, 32), (True, 24)])
+@pytest.mark.parametrize("model_type", ["qwen3_5_text", "qwen3_5_mtp"])
+def test_executor_passes_no_padding_policy_to_ordinary_acl_runner(
+    no_padding: bool, expected: int, model_type: str
+) -> None:
+    config = {
+        "model_type": model_type,
+        "is_draft_engine": model_type == "qwen3_5_mtp",
+        "is_mtp_algorithm": True,
+        "python_graph_backend": "aclgraph",
+        "max_position_embeddings": 4096,
+        "enable_graph_mode_decode_no_padding": no_padding,
+    }
+    with patch(
+        "xllm.python.model_executor.executor._create_attention_backend", return_value=_PreparedStubAttentionBackend()
+    ):
+        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=32)
+
+    runner = executor.decode_graph_runner
+    assert runner is not None
+    assert runner._padded_batch_size(24, SimpleNamespace(is_spec_verify=False)) == expected
+    assert runner._capture_error_mode == ("thread_local" if no_padding else "global")
 
 
 @pytest.mark.parametrize("dp_size", [1, 2, 4])

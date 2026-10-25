@@ -126,6 +126,7 @@ class AclGraphRunner(BaseRunner):
         super().__init__(model, attention_backend, device)
         self._update_stream: torch.npu.Stream | None = None
         self._replay_done_event: torch.npu.Event | None = None
+        self._capture_error_mode = "global"
 
     @staticmethod
     def _fill_mega_moe_token_mask(entry: AclGraphEntry, token_counts: Sequence[int]) -> None:
@@ -321,7 +322,15 @@ class AclGraphRunner(BaseRunner):
         entry.graph = torch.npu.NPUGraph()
         capture_context = AclGraphCaptureContext(stream, [])
         context = replace(context, acl_graph=capture_context, layer_shared_cache=entry.layer_shared_cache)
-        with forward_context(context), torch.npu.graph(entry.graph, pool=_get_graph_pool(), stream=stream):
+        with (
+            forward_context(context),
+            torch.npu.graph(
+                entry.graph,
+                pool=_get_graph_pool(),
+                stream=stream,
+                capture_error_mode=self._capture_error_mode,
+            ),
+        ):
             entry.static_output = self._forward_static(entry)
         entry.graph_tasks = capture_context.tasks
         logger.info(

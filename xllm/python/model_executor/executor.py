@@ -509,6 +509,9 @@ class ModelExecutor:
                         num_decoding_tokens=num_decoding_tokens,
                         is_spec_draft=bool(config.get("is_draft_engine", False)),
                         enable_mega_moe_token_mask=bool(config.get("enable_mega_moe", False)),
+                        enable_graph_mode_decode_no_padding=bool(
+                            config.get("enable_graph_mode_decode_no_padding", False)
+                        ),
                     )
         else:
             if self.layerwise_split_size > 1:

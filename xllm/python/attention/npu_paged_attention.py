@@ -45,6 +45,7 @@ from xllm.python.model_executor.cp_utils import cp_gather_kv
 from xllm.python.model_executor.forward_context import (
     AclGraphTask,
     get_execution_buffer,
+    get_execution_workspace,
     get_forward_context,
     in_acl_graph,
 )
@@ -752,14 +753,13 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             if workspace_kv_length is not None:
                 workspace_actual_seq_kv = [workspace_kv_length] * graph_batch_size
             state = PagedAttentionGraphState(
-                workspace=get_execution_buffer(
+                workspace=get_execution_workspace(
                     ("FIA_WORKSPACE", graph_batch_size, tuple(self._actual_seq_q), tuple(workspace_actual_seq_kv)),
                     lambda: self._allocate_graph_workspace(
                         graph_batch_size,
                         self._block_table_i32,
                         actual_seq_kv=workspace_actual_seq_kv,
                     ),
-                    shared=True,
                 ),
                 output=get_execution_buffer(
                     ("FIA_OUTPUT", graph_batch_size),

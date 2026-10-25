@@ -116,6 +116,9 @@ class AclGraphExecutionState:
     # role-owned pool.  The pool is only used on the single graph stream, so a
     # later step cannot overwrite a live workspace from an earlier step.
     shared_persistent_buffers: dict[tuple[object, ...], object] | None = None
+    # Only runners that serialize graph replay may supply this pool. Growing
+    # it never replaces an allocation already referenced by a captured graph.
+    serial_workspace_pool: list[torch.Tensor] | None = None
 
 
 @dataclass(slots=True)
@@ -232,6 +235,30 @@ def get_execution_buffer(
     if not isinstance(buffer, torch.Tensor):
         raise TypeError("execution buffer must be a torch.Tensor")
     return buffer
+
+
+def get_execution_workspace(key: tuple[object, ...], factory: Callable[[], torch.Tensor]) -> torch.Tensor:
+    """Reuse scratch storage across explicitly serialized graph entries."""
+    state = get_forward_context().execution_state
+    pool = None if state is None else state.serial_workspace_pool
+    if pool is None:
+        return get_execution_buffer(key, factory, shared=True)
+
+    def allocate() -> torch.Tensor:
+        requested = factory()
+        if requested.ndim != 1 or not requested.is_contiguous():
+            raise ValueError("shared graph workspaces must be contiguous one-dimensional tensors")
+        for buffer in pool:
+            if (
+                buffer.device == requested.device
+                and buffer.dtype == requested.dtype
+                and buffer.numel() >= requested.numel()
+            ):
+                return buffer[: requested.numel()]
+        pool.append(requested)
+        return requested
+
+    return get_execution_buffer(key, allocate, shared=True)
 
 
 def copy_into_execution_buffer(key: tuple[object, ...], source: torch.Tensor) -> torch.Tensor:

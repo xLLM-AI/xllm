@@ -24,7 +24,7 @@ import torch.nn as nn
 
 from xllm.python.attention.paged_kv_metadata import build_row_aligned_paged_kv_metadata
 from xllm.python.model_executor.executor import ModelExecutor
-from xllm.python.model_executor.runners.acl_graph import AclGraphEntry
+from xllm.python.model_executor.runners.acl_graph import AclGraphEntry, AclGraphRunner
 from xllm.python.model_executor.runners.decode_acl_graph import DecodeAclGraphRunner
 
 
@@ -89,6 +89,132 @@ def executor(runner: DecodeAclGraphRunner) -> ModelExecutor:
     executor.inductor_runner = None
     executor.eager_runner = Mock()
     return executor
+
+
+@pytest.mark.parametrize("no_padding", [False, True])
+@pytest.mark.parametrize("requests", [3, 23, 24, 27, 32])
+@pytest.mark.parametrize("width", [3, 5])
+def test_linear_verify_bucketing_preserves_complete_requests(
+    runner: DecodeAclGraphRunner, no_padding: bool, requests: int, width: int
+) -> None:
+    runner.max_batch = 32 * width
+    runner.num_decoding_tokens = width
+    runner._model_owns_linear_spec_verify = True
+    runner._enable_decode_no_padding = no_padding
+    metadata = SimpleNamespace(is_spec_verify=True)
+
+    bucket = runner._padded_batch_size(requests * width, metadata)
+
+    expected_requests = requests if no_padding else (4 if requests == 3 else 32)
+    assert bucket == expected_requests * width
+    assert bucket % width == 0
+
+
+def test_no_padding_retains_mtp_width_and_capacity_validation(runner: DecodeAclGraphRunner) -> None:
+    runner.max_batch = 160
+    runner.num_decoding_tokens = 5
+    runner._model_owns_linear_spec_verify = True
+    runner._enable_decode_no_padding = True
+    metadata = SimpleNamespace(is_spec_verify=True)
+
+    with pytest.raises(ValueError, match="complete fixed-width requests"):
+        runner._padded_batch_size(119, metadata)
+    with pytest.raises(ValueError, match="exceeds ACL graph capacity"):
+        runner._padded_batch_size(165, metadata)
+
+
+@pytest.mark.parametrize("no_padding,expected", [(False, 160), (True, 120)])
+def test_no_padding_keeps_dp_ranks_on_a_shared_token_shape(
+    runner: DecodeAclGraphRunner, no_padding: bool, expected: int
+) -> None:
+    runner.dp_size = 2
+    runner.max_batch = 160
+    runner.num_decoding_tokens = 5
+    runner._model_owns_linear_spec_verify = True
+    runner._enable_decode_no_padding = no_padding
+    metadata = SimpleNamespace(is_spec_verify=True, dp_execution_token_counts=(115, 120))
+
+    assert runner._padded_batch_size(115, metadata) == expected
+    assert runner._padded_batch_size(120, metadata) == expected
+
+
+def test_no_padding_graph_entries_use_exact_rows_and_reuse_matching_shapes(runner: DecodeAclGraphRunner) -> None:
+    runner._enable_decode_no_padding = True
+    for rows in (3, 5, 3):
+        input_ids = torch.arange(rows, dtype=torch.int32)
+        metadata = _metadata()
+        metadata.block_table = torch.full((rows, 2), 11, dtype=torch.int64)
+        metadata.kv_seq_lens = torch.full((rows,), 2, dtype=torch.int64)
+        metadata.kv_seq_lens_host_values = [2] * rows
+        metadata.slot_mapping = torch.arange(rows, dtype=torch.int32)
+        metadata.linear_state_indices = torch.arange(rows, dtype=torch.int32)
+        decoded = runner.prepare_execution(input_ids, metadata)
+        assert decoded is not None
+        key = runner.warmup(input_ids, input_ids, metadata, decode_metadata=decoded)
+        output = runner.execute(input_ids, input_ids, metadata, graph_key=key, decode_metadata=decoded)
+        entry = runner._graphs[key]
+        assert entry.batch_size == rows
+        assert entry.static_input_ids.numel() == rows
+        assert output.shape == (rows, 2)
+
+    assert runner._capture.call_count == 2
+    assert len(runner._graphs) == 2
+
+
+@pytest.mark.parametrize("no_padding", [False, True])
+@pytest.mark.parametrize("capture_fails", [False, True])
+def test_capture_restores_all_recurrent_checkpoints(
+    runner: DecodeAclGraphRunner, no_padding: bool, capture_fails: bool
+) -> None:
+    runner._enable_decode_no_padding = no_padding
+    indices = torch.tensor([1, 3], dtype=torch.int64)
+    conv = torch.arange(24, dtype=torch.float32).reshape(4, 3, 2)
+    ssm = torch.arange(80, dtype=torch.float32).reshape(20, 2, 2)
+    original_conv, original_ssm = conv.clone(), ssm.clone()
+    runner.layer_caches = [SimpleNamespace(conv=conv, ssm=ssm)]
+    runner.attention_backend.snapshot_linear_state = Mock(return_value=None)
+    entry = AclGraphEntry()
+    entry.static_metadata = SimpleNamespace(linear_state_indices=indices)
+
+    def capture(*args: object) -> None:
+        conv.index_fill_(0, indices, -1)
+        checkpoint_indices = (indices[:, None] * 5 + torch.arange(5)).reshape(-1)
+        ssm.index_fill_(0, checkpoint_indices, -2)
+        if capture_fails:
+            raise RuntimeError("capture failed")
+
+    expected = pytest.raises(RuntimeError, match="capture failed") if capture_fails else nullcontext()
+    with (
+        patch("xllm.python.model_executor.runners.acl_graph.AclGraphRunner._capture", side_effect=capture),
+        expected,
+    ):
+        DecodeAclGraphRunner._capture(runner, entry, Mock())
+
+    torch.testing.assert_close(conv, original_conv)
+    torch.testing.assert_close(ssm, original_ssm)
+
+
+@pytest.mark.parametrize("mode", ["global", "thread_local"])
+def test_capture_passes_runner_error_mode_to_npu_graph(
+    runner: DecodeAclGraphRunner, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    runner._capture_error_mode = mode
+    entry = AclGraphEntry()
+    entry.batch_size = 3
+    entry.static_metadata = _metadata()
+    entry.static_input_ids = torch.arange(3)
+    entry.static_mtp_topk_indices = None
+    entry.execution_state = None
+    stream = Mock()
+    graph_context = Mock(return_value=nullcontext())
+    monkeypatch.setattr(torch.npu, "NPUGraph", Mock(), raising=False)
+    monkeypatch.setattr(torch.npu, "graph", graph_context, raising=False)
+    monkeypatch.setattr(torch.npu, "synchronize", Mock(), raising=False)
+    monkeypatch.setattr(runner, "_forward_static", Mock(return_value=torch.ones(3, 2)))
+    with patch("xllm.python.model_executor.runners.acl_graph._get_graph_pool", return_value=(1, 2)):
+        AclGraphRunner._capture(runner, entry, stream)
+    assert graph_context.call_args.kwargs["capture_error_mode"] == mode
+    assert graph_context.call_args.kwargs["stream"] is stream
 
 
 def test_metadata_is_decoded_once_for_new_and_cached_graph_steps(runner: DecodeAclGraphRunner) -> None:

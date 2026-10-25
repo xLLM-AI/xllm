@@ -125,6 +125,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         enable_mega_moe_token_mask: bool = False,
         *,
         is_spec_draft: bool = False,
+        enable_graph_mode_decode_no_padding: bool = False,
     ) -> None:
         super().__init__(model, attention_backend, device)
         self.dp_size = dp_size
@@ -133,6 +134,13 @@ class DecodeAclGraphRunner(AclGraphRunner):
         self.max_model_len = max_model_len
         self.num_decoding_tokens = max(1, int(num_decoding_tokens))
         self._is_spec_draft = is_spec_draft
+        self._enable_decode_no_padding = enable_graph_mode_decode_no_padding
+        # New exact shapes can arrive while native input preparation copies
+        # the next batch on another thread. Only this thread captures the
+        # runner's owned static buffers, as in the unified MTP graph runner.
+        if enable_graph_mode_decode_no_padding:
+            self._capture_error_mode = "thread_local"
+        self._serial_workspace_pool: list[torch.Tensor] | None = [] if enable_graph_mode_decode_no_padding else None
         self._has_index_cache = False
         self._has_linear_cache = False
         self._model_owns_linear_spec_verify = any(
@@ -362,7 +370,11 @@ class DecodeAclGraphRunner(AclGraphRunner):
             width = self.num_decoding_tokens
             if batch_size % width:
                 raise ValueError("linear verify graph requires complete fixed-width requests")
+            if self._enable_decode_no_padding:
+                return batch_size
             return min(_decode_bucket(batch_size // width), self.max_batch // width) * width
+        if self._enable_decode_no_padding:
+            return batch_size
         # Keep a final partial bucket instead of falling back to eager or
         # padding beyond the backend's declared row capacity.
         return min(_decode_bucket(batch_size), self.max_batch)
@@ -807,9 +819,13 @@ class DecodeAclGraphRunner(AclGraphRunner):
                     # every checkpoint, not just the row at the logical ID.
                     stride = ssm.shape[0] // conv.shape[0]
                     ssm_idx = (idx[:, None] * stride + torch.arange(stride, device=idx.device)).reshape(-1)
-                    linear_snapshot.append(
-                        (conv, ssm, ssm_idx, conv.index_select(0, idx), ssm.index_select(0, ssm_idx))
-                    )
+                    ssm_rows = ssm.index_select(0, ssm_idx)
+                    if self._enable_decode_no_padding:
+                        # Exact shapes retain more graphs. Keep capture-only
+                        # checkpoints on the host so their peak device memory
+                        # does not grow with the number of recurrent layers.
+                        ssm_rows = ssm_rows.cpu()
+                    linear_snapshot.append((conv, ssm, ssm_idx, conv.index_select(0, idx), ssm_rows))
             backend_snapshot = self.attention_backend.snapshot_linear_state(idx)
 
         try:
@@ -821,7 +837,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             if idx is not None:
                 for conv, ssm, ssm_idx, conv_rows, ssm_rows in linear_snapshot:
                     conv.index_copy_(0, idx, conv_rows)
-                    ssm.index_copy_(0, ssm_idx, ssm_rows)
+                    ssm.index_copy_(0, ssm_idx, ssm_rows.to(device=ssm.device))
             if backend_snapshot is not None:
                 self.attention_backend.restore_linear_state(backend_snapshot)
 
@@ -1013,7 +1029,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         entry.graph = None
         entry.static_output = None
         entry.graph_tasks = []
-        entry.execution_state = AclGraphExecutionState({})
+        entry.execution_state = AclGraphExecutionState({}, serial_workspace_pool=self._serial_workspace_pool)
         entry.replay_logged = False
         entry.static_input_ids = torch.zeros(padded_batch_size, dtype=input_ids.dtype, device=device)
         entry.static_positions = torch.zeros(padded_batch_size, dtype=torch.int32, device=device)
