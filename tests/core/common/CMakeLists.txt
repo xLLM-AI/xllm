@@ -3,8 +3,12 @@ include(cc_test)
 foreach(_fixture valid mismatch backend_mismatch missing_descriptor host_dependent)
   add_library(native_library_${_fixture}_fixture SHARED
     native_library_fixture.cpp)
-  target_link_libraries(native_library_${_fixture}_fixture PRIVATE
-    XLLM::native_extension)
+  # native_extension's static deps pull a second glog into the dlopen'd
+  # fixture; headers only — the host resolves glog via export_host_symbols.
+  target_link_libraries(native_library_${_fixture}_fixture PRIVATE torch)
+  target_include_directories(native_library_${_fixture}_fixture PRIVATE
+    ${PROJECT_SOURCE_DIR}/xllm
+    ${PROJECT_BINARY_DIR}/xllm)
 endforeach()
 target_compile_definitions(native_library_mismatch_fixture PRIVATE
   TEST_NATIVE_MISMATCH)

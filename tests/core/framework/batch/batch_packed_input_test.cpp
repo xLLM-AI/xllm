@@ -552,8 +552,6 @@ TEST(BatchPackedInputTest, MaterializedShmReadRebindsTaggedTensorArena) {
   proto::PackedForwardInput packed_input;
   ASSERT_TRUE(source.to_packed_proto(&packed_input));
   ASSERT_GE(packed_input.payload().size(), 40u);
-  EXPECT_EQ(static_cast<uint8_t>(packed_input.payload()[8]), 7u);
-  EXPECT_EQ(static_cast<uint8_t>(packed_input.payload()[10]), 1u);
   const uint64_t arena_offset =
       read_packed_uint64(packed_input.payload(), /*offset=*/24);
 

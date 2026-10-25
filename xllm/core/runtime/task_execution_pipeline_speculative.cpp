@@ -2711,7 +2711,8 @@ void TaskExecutionPipeline::launch_prefill(SpeculativeSlot& slot) {
     } else {
       auto tokens = slot.target_prefill->device_result().tokens;
       synchronize_tokens(tokens,
-                         slot.target_prefill->sampling_params().sampling_mode);
+                         slot.target_prefill->sampling_params().sampling_mode ==
+                             SamplingMode::GREEDY);
     }
   }
   if (block_draft()) {
@@ -2802,8 +2803,10 @@ void TaskExecutionPipeline::launch_decode(SpeculativeSlot& slot) {
           invocation.output.hidden_states,
           invocation.sampling->params.selected_token_idxes);
       invocation.sampled = sample(*invocation.sampling, invocation.logits);
-      synchronize_tokens(invocation.sampled.next_tokens,
-                         invocation.sampling->params.sampling_mode);
+      synchronize_tokens(
+          invocation.sampled.next_tokens,
+          invocation.sampling->params.sampling_mode == SamplingMode::GREEDY &&
+              capacity_.cp_sampling_group == nullptr);
       slot.proposal.select(/*dim=*/1, step)
           .copy_(invocation.sampled.next_tokens);
       if (slot.adaptive) {
@@ -2885,7 +2888,7 @@ void TaskExecutionPipeline::launch_decode(SpeculativeSlot& slot) {
     synchronize_samples(result, base.sampling_mode);
   } else {
     auto tokens = result.tokens;
-    synchronize_tokens(tokens, base.sampling_mode);
+    synchronize_tokens(tokens, base.sampling_mode == SamplingMode::GREEDY);
   }
   torch::ge_out(slot.accepted_mask, result.tokens, /*other=*/0);
   auto lengths = result.lengths;
@@ -3001,8 +3004,8 @@ void TaskExecutionPipeline::launch_block_draft(SpeculativeSlot& slot) {
             base_logits,
             slot.state->tokens_,
             selector_sampling,
-            [this, &selector_sampling](torch::Tensor& tokens) {
-              synchronize_tokens(tokens, selector_sampling.sampling_mode);
+            [this](torch::Tensor& tokens) {
+              synchronize_tokens(tokens, /*skip_sampling_group=*/false);
             },
             speculative_capacity_->is_probabilistic_draft,
             /*token_ids_out=*/slot.proposal)
@@ -3114,7 +3117,11 @@ void TaskExecutionPipeline::launch_adaptive_verify(SpeculativeSlot& slot) {
   }
   // A sampled target must agree across TP ranks before prefix acceptance and
   // context-KV writes, not merely synchronize the final returned tokens.
-  synchronize_tokens(slot.target_tokens, sampling.sampling_mode);
+  synchronize_tokens(
+      slot.target_tokens,
+      sampling.sampling_mode == SamplingMode::GREEDY &&
+          (speculative_capacity_->kind == SpeculativeTaskKind::DSPARK ||
+           capacity_.cp_sampling_group == nullptr));
   const auto& result = slot.target_prefill->device_result();
   auto result_tokens = result.tokens;
   auto result_lengths = result.lengths;
@@ -3171,10 +3178,7 @@ void TaskExecutionPipeline::launch_adaptive_verify(SpeculativeSlot& slot) {
 }
 
 void TaskExecutionPipeline::synchronize_tokens(torch::Tensor& tokens,
-                                               SamplingMode sampling_mode,
-                                               bool already_broadcast) {
-  const bool skip_sampling_group =
-      already_broadcast || sampling_mode == SamplingMode::GREEDY;
+                                               bool skip_sampling_group) {
   if (!skip_sampling_group) {
     sync_sampling_tensor(tokens, capacity_.sampling_group);
   }
@@ -3195,7 +3199,7 @@ void TaskExecutionPipeline::synchronize_samples(
                              &result.top_logprobs}) {
     if (tensor->defined()) {
       auto view = *tensor;
-      synchronize_tokens(view, sampling_mode, already_broadcast);
+      synchronize_tokens(view, already_broadcast);
     }
   }
 }

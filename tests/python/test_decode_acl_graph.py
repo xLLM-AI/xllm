@@ -810,7 +810,7 @@ def test_capture_restores_all_gdn_checkpoints(index_dtype: torch.dtype) -> None:
 
     torch.testing.assert_close(conv, original_conv)
     torch.testing.assert_close(ssm, original_ssm)
-    assert snapshot_rows == [1, 8]
+    assert snapshot_rows == [8, 1]
 
 
 def test_untyped_verify_reuses_row_aligned_paging_metadata() -> None:

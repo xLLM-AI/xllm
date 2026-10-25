@@ -2,9 +2,15 @@ include(cc_test)
 
 add_library(native_library_registry_fixture SHARED
   native_library_registry_fixture.cpp)
+# Same rationale as the core/common fixtures: avoid the second glog.
 target_link_libraries(native_library_registry_fixture PRIVATE
-  XLLM::native_extension
+  torch
   spdlog::spdlog)
+target_include_directories(native_library_registry_fixture PRIVATE
+  ${PROJECT_SOURCE_DIR}/xllm
+  ${PROJECT_SOURCE_DIR}/xllm/core
+  ${PROJECT_BINARY_DIR}/xllm
+  ${PROJECT_BINARY_DIR}/xllm/proto)
 add_dependencies(native_library_registry_fixture xllm_proto)
 set_target_properties(native_library_registry_fixture PROPERTIES
   CXX_VISIBILITY_PRESET default

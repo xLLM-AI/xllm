@@ -33,6 +33,7 @@ from xllm.python.model_executor.forward_context import (
     ForwardContext,
     forward_context,
 )
+from xllm.python.models.aux_hidden_capture import AuxHiddenCapture
 from xllm.python.models.deepseek_v32 import DeepseekV3Model
 from xllm.python.models.glm5_next import Glm5NextConfig, Glm5NextIndexer, Glm5NextModel
 from xllm.python.models.glm5_next_kpool import update_compressed_kpool
@@ -188,6 +189,7 @@ def test_model_records_each_event_after_its_layer(model_type: str, monkeypatch: 
     model.norm = nn.Identity()
     model.hc_head = _HyperHead()
     model._inputs_embeds = None
+    model.aux_hidden_capture = AuxHiddenCapture(())
     model.enorm = SimpleNamespace(weight=torch.ones(4), eps=1e-6)
     model.hnorm = SimpleNamespace(weight=torch.ones(4), eps=1e-6)
     model.eh_proj = nn.Linear(8, 4)

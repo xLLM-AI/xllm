@@ -32,6 +32,23 @@ class NativeLibraryExecutor final : public ExecutorImpl {
 
   bool supports_prepared_attention_metadata() const override { return true; }
 
+  // The LOG(FATAL) defaults reference glog symbols the host does not
+  // export; overriding keeps the fixture dlopen-resolvable.
+  void warmup_adaptive_unified_graph(ExecutorImpl&,
+                                     const AdaptiveDSparkGraphTask&,
+                                     ProcessGroup*) override {}
+  torch::Tensor run_adaptive_unified_graph(ExecutorImpl&,
+                                           const AdaptiveDSparkGraphTask&,
+                                           ProcessGroup*) override {
+    return {};
+  }
+  void prepare_attention_metadata(std::vector<KVCache>&,
+                                  ModelParamsView&) override {}
+  void warmup_prepared_graph(const torch::Tensor&,
+                             const torch::Tensor&,
+                             std::vector<KVCache>&,
+                             const ModelParamsView&) override {}
+
   ModelOutput run(const torch::Tensor& /*tokens*/,
                   const torch::Tensor& /*positions*/,
                   std::vector<KVCache>& /*kv_caches*/,

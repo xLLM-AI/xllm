@@ -353,16 +353,11 @@ class TaskExecutionPipeline final {
   std::optional<std::string> draft_step_calibration_capabilities() const;
   void consume_adaptive_verify(SpeculativeSlot& slot);
   void write_block_context(SpeculativeSlot& slot, bool prefill);
+  // skip_sampling_group: rank-local argmax or a prior in-group broadcast.
+  void synchronize_tokens(torch::Tensor& tokens, bool skip_sampling_group);
   // Broadcasts the sample result tensors across the TP/CP sampling groups.
   void synchronize_samples(const TokenResultTensors& result,
                            SamplingMode sampling_mode);
-  // Broadcasts a sampled tensor across the TP/CP sampling groups. Greedy
-  // batches skip the sampling group (argmax is rank-local); the CP group is
-  // always synchronized. `already_broadcast` marks producers that broadcast
-  // inside the sampling group themselves (e.g. the DSpark commit kernel).
-  void synchronize_tokens(torch::Tensor& tokens,
-                          SamplingMode sampling_mode,
-                          bool already_broadcast = false);
   static Status plan_parallel(const ParallelInput& input,
                               uint32_t dp_size,
                               uint32_t dp_rank,

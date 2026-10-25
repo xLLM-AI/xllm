@@ -28,6 +28,7 @@ from xllm.python.layers.npu.qwen3_5.attention import NpuQwen3_5Attention
 from xllm.python.layers.qwen3_5.attention import Qwen3_5Attention
 from xllm.python.layers.qwen3_5.common import PartialRotaryEmbedding
 from xllm.python.model_loader import ScopedWeightLoader
+from xllm.python.models.aux_hidden_capture import AuxHiddenCapture
 from xllm.python.models.qwen3_5 import Qwen3_5ForCausalLM, Qwen3_5Model
 from xllm.python.models.qwen3_5_vl import Qwen3_5ForConditionalGeneration
 from xllm.python.models.qwen3_vl import Qwen3VLVisionConfig, Qwen3VLVisionTransformer
@@ -144,6 +145,7 @@ def _model() -> Qwen3_5ForConditionalGeneration:
     decoder.layers = nn.ModuleList()
     decoder.norm = _IdentityNorm()
     decoder._inputs_embeds = None
+    decoder.aux_hidden_capture = AuxHiddenCapture(())
     model.model = decoder
     return model
 

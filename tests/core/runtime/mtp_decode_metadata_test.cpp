@@ -74,16 +74,16 @@ TEST(MtpWorkerSelectionTest, RejectsLegacyAdaptiveExecutionBeforeModelSetup) {
       .speculative_algorithm("DSpark")
       .num_speculative_tokens(7);
   EXPECT_DEATH(Worker(parallel_args, device, options, WorkerType::LLM),
-               "requires DSpark Draft5/7 with task pipeline");
+               "requires (MTP/)?DSpark Draft5/7 with task pipeline");
   options.enable_task_pipeline(true).speculative_algorithm("MTP");
   EXPECT_DEATH(Worker(parallel_args, device, options, WorkerType::LLM),
-               "requires DSpark Draft5/7 with task pipeline");
+               "requires (MTP/)?DSpark Draft5/7 with task pipeline");
   options.speculative_algorithm("DSpark").num_speculative_tokens(6);
   EXPECT_DEATH(Worker(parallel_args, device, options, WorkerType::LLM),
-               "requires DSpark Draft5/7 with task pipeline");
+               "requires (MTP/)?DSpark Draft5/7 with task pipeline");
   options.num_speculative_tokens(5).enable_speculative_decode(false);
   EXPECT_DEATH(Worker(parallel_args, device, options, WorkerType::LLM),
-               "requires DSpark Draft5/7 with task pipeline");
+               "requires (MTP/)?DSpark Draft5/7 with task pipeline");
 }
 
 TEST(MtpWorkerSelectionTest, RejectsDsparkDpUnifiedGraphsBeforeModelSetup) {

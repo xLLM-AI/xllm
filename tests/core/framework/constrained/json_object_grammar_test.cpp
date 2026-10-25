@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <string>
 #include <thread>
 #include <utility>
@@ -304,9 +305,14 @@ TEST(JsonObjectGrammarTest, BitmaskMatchesFloatMaskAndCaches) {
   for (int64_t token_id = 0;
        token_id < static_cast<int64_t>(grammar.vocab_size());
        ++token_id) {
-    EXPECT_NEAR(logits.index({0, token_id}).item<float>(),
-                float_mask.index({token_id}).item<float>(),
-                1.0e-3F);
+    const float actual = logits.index({0, token_id}).item<float>();
+    const float expected = float_mask.index({token_id}).item<float>();
+    // EXPECT_NEAR on -inf pairs yields a nan delta; compare exactly.
+    if (std::isinf(expected)) {
+      EXPECT_EQ(actual, expected);
+    } else {
+      EXPECT_NEAR(actual, expected, 1.0e-3F);
+    }
   }
 }
 
