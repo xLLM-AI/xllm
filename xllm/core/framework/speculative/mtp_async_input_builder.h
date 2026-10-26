@@ -29,6 +29,19 @@ struct MtpPrepareNextDraftWorkspace;
 
 namespace mtp_async {
 
+// Refresh the verifier-conditioned draft prefix and select its last accepted
+// row for proposal 0 in the same forward. The caller prepares B*S independent
+// decode rows, with each request's block table repeated S times. Positions and
+// KV lengths name the first verifier row, not the next target decode anchor.
+// Negative token suffixes are padding; their writes stay beyond the live
+// prefix and cannot contribute to the selected row's causal attention.
+void prepare_draft_prefix_from_target(LlmForwardInput& draft_input,
+                                      const torch::Tensor& accepted_tokens,
+                                      const torch::Tensor& target_hidden,
+                                      const torch::Tensor& base_positions,
+                                      const torch::Tensor& base_kv_seq_lens,
+                                      int32_t block_size);
+
 // Applies accepted target state to the fixed [repair, current] draft layout.
 // The NPU path uses one fused preparation kernel when possible and otherwise
 // falls back to equivalent Torch tensor operations.

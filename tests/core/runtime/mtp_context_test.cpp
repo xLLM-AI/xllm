@@ -17,6 +17,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <array>
+#include <cstdint>
 #include <limits>
 
 #include "core/runtime/task_execution_pipeline.h"
@@ -86,11 +87,14 @@ TEST_F(MtpContextTest, CapacityAndSchemaRejectWithoutReplacingOutput) {
                    context_)
                    .ok());
   EXPECT_EQ(context_.get(), original);
+  // Shared context and each Slot snapshot retain int32 accepted_lengths for
+  // the previous committed prefix, including its bonus token.
   EXPECT_EQ(TaskPipelineTestPeer::mtp_context_bytes(*context_),
-            4U * (8 + 8 + 2 * 3 * 4 + 4 + 4 + 1));
+            4U * (8 + 8 + 2 * 3 * 4 + 4 + 4 + sizeof(int32_t) + 1));
   EXPECT_EQ((first_->host_rows_.nbytes()), 2U * 8);
-  EXPECT_EQ(TaskPipelineTestPeer::context_device_bytes(*first_),
-            2U * (8 + 8 + 8 + 2 * 3 * 4 + 4 + 4 + 1 + 16 + 1));
+  EXPECT_EQ(
+      TaskPipelineTestPeer::context_device_bytes(*first_),
+      2U * (8 + 8 + 8 + 2 * 3 * 4 + 4 + 4 + sizeof(int32_t) + 1 + 16 + 1));
   const MtpContextView* binding = first_.get();
   EXPECT_FALSE(
       TaskPipelineTestPeer::context_create(*context_, /*capacity=*/0, first_)
@@ -103,8 +107,10 @@ TEST_F(MtpContextTest, BlockDraftAdvancesTokensWithoutAllocatingHiddenState) {
   ASSERT_TRUE(TaskPipelineTestPeer::create_mtp_context(
                   4, 0, torch::kFloat32, device_, storage)
                   .ok());
+  // Block drafts omit hidden history but share the int32 accepted_lengths
+  // field that context_advance publishes for every speculative algorithm.
   EXPECT_EQ(TaskPipelineTestPeer::mtp_context_bytes(*storage),
-            4U * (8 + 4 + 4));
+            4U * (8 + 4 + 4 + sizeof(int32_t)));
   EXPECT_FALSE(storage->mtp_state_.hidden.defined());
   EXPECT_FALSE(storage->mtp_state_.previous_tokens.defined());
   EXPECT_FALSE(storage->mtp_state_.repair_required.defined());
@@ -113,7 +119,8 @@ TEST_F(MtpContextTest, BlockDraftAdvancesTokensWithoutAllocatingHiddenState) {
   EXPECT_FALSE(view->storage_.hidden.defined());
   EXPECT_FALSE(view->storage_.previous_tokens.defined());
   EXPECT_FALSE(view->storage_.repair_required.defined());
-  EXPECT_EQ(TaskPipelineTestPeer::context_device_bytes(*view), 2U * 32);
+  EXPECT_EQ(TaskPipelineTestPeer::context_device_bytes(*view),
+            2U * (32 + sizeof(int32_t)));
   Stream prepare(device_);
   ASSERT_TRUE(TaskPipelineTestPeer::context_prepare(
                   *view, keys_, requests_, false, prepare)

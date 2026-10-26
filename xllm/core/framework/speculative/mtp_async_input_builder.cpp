@@ -180,6 +180,66 @@ void apply_mtp_prepare_output(
 #endif
 
 }  // namespace
+
+void prepare_draft_prefix_from_target(LlmForwardInput& draft_input,
+                                      const torch::Tensor& accepted_tokens,
+                                      const torch::Tensor& target_hidden,
+                                      const torch::Tensor& base_positions,
+                                      const torch::Tensor& base_kv_seq_lens,
+                                      int32_t block_size) {
+  CHECK_EQ(accepted_tokens.dim(), 2);
+  CHECK_EQ(target_hidden.dim(), 3);
+  const int64_t batch_size = accepted_tokens.size(0);
+  const int64_t width = accepted_tokens.size(1);
+  CHECK_GT(batch_size, 0);
+  CHECK_GE(width, 2);
+  CHECK_LE(width, 17);
+  CHECK_EQ(target_hidden.size(0), batch_size);
+  CHECK_EQ(target_hidden.size(1), width);
+  CHECK_EQ(base_positions.numel(), batch_size);
+  CHECK_EQ(base_kv_seq_lens.numel(), batch_size);
+  CHECK_EQ(draft_input.positions.numel(), batch_size * width);
+  CHECK_EQ(draft_input.token_ids.numel(), batch_size * width);
+  auto& attention = draft_input.input_params.attention.device;
+  CHECK(attention.block_tables.defined());
+  CHECK_EQ(attention.block_tables.size(0), batch_size * width);
+  CHECK_EQ(attention.kv_seq_lens.numel(), batch_size * width);
+  CHECK(accepted_tokens.device() == target_hidden.device());
+  CHECK(accepted_tokens.device() == base_positions.device());
+  CHECK(accepted_tokens.device() == base_kv_seq_lens.device());
+  CHECK(draft_input.sampling_params.selected_token_idxes.defined());
+  CHECK_EQ(draft_input.sampling_params.selected_token_idxes.numel(),
+           batch_size);
+
+  const torch::Tensor offsets =
+      torch::arange(width, accepted_tokens.options().dtype(torch::kLong));
+  const torch::Tensor positions =
+      base_positions.to(torch::kLong).view({batch_size, 1}) + offsets;
+  const torch::Tensor kv_lengths =
+      base_kv_seq_lens.to(torch::kLong).view({batch_size, 1}) + offsets;
+  const torch::Tensor sequence_tables =
+      attention.block_tables
+          .view({batch_size, width, attention.block_tables.size(1)})
+          .select(1, 0);
+  attention.new_cache_slots =
+      map_positions_to_cache_slots(sequence_tables, kv_lengths - 1, block_size);
+  attention.kv_seq_lens =
+      kv_lengths.flatten().to(attention.kv_seq_lens.options());
+  draft_input.positions =
+      positions.flatten().to(draft_input.positions.options());
+  draft_input.token_ids = accepted_tokens.clamp_min(0).flatten().to(
+      draft_input.token_ids.options());
+  draft_input.input_params.embedding.input_embedding =
+      target_hidden.flatten(/*start_dim=*/0, /*end_dim=*/1);
+  const torch::Tensor lengths =
+      accepted_tokens.ge(0).sum(/*dim=*/1, /*keepdim=*/false, torch::kLong);
+  draft_input.sampling_params.selected_token_idxes =
+      (torch::arange(batch_size, lengths.options()) * width + lengths - 1)
+          .to(draft_input.sampling_params.selected_token_idxes.options().device(
+              accepted_tokens.device()));
+  draft_input.runtime.device_tensors_ready = true;
+}
+
 template <typename Source>
 void prepare_next_draft_from_accepted_state(
     LlmForwardInput& draft_input,
@@ -283,7 +343,7 @@ void prepare_later_draft_from_device_base(LlmForwardInput& draft_input,
   CHECK_EQ(base_positions.dim(), 1);
   CHECK_EQ(base_kv_seq_lens.dim(), 1);
   CHECK_EQ(base_positions.numel(), base_kv_seq_lens.numel());
-  CHECK_GT(position_offset, 0);
+  CHECK_GE(position_offset, 0);
 
   torch::Tensor row_positions =
       (base_positions + position_offset).unsqueeze(/*dim=*/1);

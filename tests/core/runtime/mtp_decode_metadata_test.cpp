@@ -17,6 +17,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 #include "core/framework/config/execution_config.h"
@@ -160,6 +161,34 @@ class DecodeMetadataTestWorker final : public UnifiedMtpWorkerImpl {
 
   void initialize_target_cache() {
     embedding_cache_ = std::make_unique<EmbeddingCache>(8);
+  }
+
+  void use_qwen_hybrid_verify() {
+    target_spec_verify_mode_ =
+        mtp_async::TargetSpecVerifyMode::QWEN3_5_EXPANDED_VERIFY;
+  }
+
+  void retain_prefix(const LlmForwardInput& input, int32_t accepted_count) {
+    const int64_t batch_size =
+        input.input_params.embedding.embedding_ids.size();
+    const int64_t width = options_.num_speculative_tokens() + 1;
+    SampleOutput output;
+    output.next_tokens = torch::full({batch_size, width}, -1, torch::kLong);
+    output.next_tokens.narrow(/*dim=*/1, /*start=*/0, accepted_count).fill_(42);
+    output.embeddings = torch::zeros({batch_size, width, 4});
+    retain_draft_prefix(input,
+                        output,
+                        torch::zeros({batch_size}, torch::kInt),
+                        torch::ones({batch_size}, torch::kInt));
+  }
+
+  int32_t prefix_upper(int32_t embedding_id,
+                       const std::string& request_id,
+                       int32_t raw_kv_seq_len,
+                       int32_t row_offset,
+                       int64_t kv_capacity) const {
+    return draft_prefix_kv_upper_bound(
+        embedding_id, request_id, raw_kv_seq_len, row_offset, kv_capacity);
   }
 
   void stage_tokens(const LlmForwardInput& input, int64_t token) {
@@ -428,6 +457,42 @@ TEST_P(MtpDecodeMetadataTest, ExpandsFixedVerifyLinearStateRows) {
   check_linear_state_rows();
 }
 
+TEST_F(MtpDecodeMetadataTest, QwenVerifyKeepsLogicalStateRowsAtEveryWidth) {
+  for (const int32_t draft_width : {1, 2, 3, 4, 16}) {
+    SCOPED_TRACE(draft_width);
+    auto configuration = options();
+    configuration.num_speculative_tokens(draft_width);
+    DecodeMetadataTestWorker worker(
+        parallel_args(1), torch::Device("npu:0"), configuration);
+    worker.use_qwen_hybrid_verify();
+    LlmForwardInput input;
+    input.token_ids_host = torch::tensor({42, 43}, torch::kInt32);
+    input.positions_host = torch::tensor({5, 9}, torch::kInt32);
+    input.token_ids = input.token_ids_host.to(torch::Device("npu:0"));
+    input.positions = input.positions_host.to(torch::Device("npu:0"));
+    auto& params = input.input_params;
+    params.meta.num_sequences = 2;
+    params.meta.batch_forward_type = BatchForwardType::DECODE;
+    params.attention.host.q_seq_lens = {1, 1};
+    params.attention.host.kv_seq_lens = {6, 10};
+    params.attention.host.block_tables =
+        torch::tensor({{10, 11}, {20, 21}}, torch::kInt32);
+    params.embedding.linear_state_ids = {7, 9};
+    params.embedding.linear_state_indices =
+        torch::tensor({7, 9}, torch::kInt32).to(torch::Device("npu:0"));
+    const auto verified = worker.build_verify(input);
+    EXPECT_TRUE(verified.input_params.is_spec_verify);
+    EXPECT_EQ(verified.token_ids.numel(), 2 * (draft_width + 1));
+    EXPECT_EQ(verified.input_params.attention.host.q_seq_lens,
+              (std::vector<int32_t>{draft_width + 1, draft_width + 1}));
+    EXPECT_TRUE(
+        torch::equal(verified.input_params.embedding.linear_state_indices.cpu(),
+                     torch::tensor({7, 9}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(verified.input_params.num_accepted_tokens.cpu(),
+                             torch::tensor({1, 1}, torch::kInt32)));
+  }
+}
+
 TEST_F(MtpDecodeMetadataTest,
        SnapshotsCompletedD2HAndBoundsPendingGenerations) {
   DecodeMetadataTestWorker worker(
@@ -475,6 +540,102 @@ TEST_F(MtpDecodeMetadataTest, RejectsPendingStateAfterBatchResizeOrReorder) {
   EXPECT_FALSE(worker.matches_pending(shrunk));
   EXPECT_TRUE(torch::equal(worker.snapshot_tokens(),
                            torch::full({2, 2}, 42, torch::kLong)));
+}
+
+TEST_F(MtpDecodeMetadataTest, PrefixCapacityCoversRejectedPaddingAfterReorder) {
+  for (const int32_t speculative_tokens : {1, 2, 3, 4, 16}) {
+    runtime::Options worker_options = options();
+    worker_options.num_speculative_tokens(speculative_tokens);
+    DecodeMetadataTestWorker worker(parallel_args(/*kv_split_size=*/1),
+                                    torch::Device("npu:0"),
+                                    worker_options);
+    LlmForwardInput verifier;
+    verifier.input_params.embedding.embedding_ids = {3, 7};
+    verifier.input_params.embedding.request_ids = {"request-a", "request-b"};
+    verifier.input_params.attention.host.kv_seq_lens = {127, 255};
+    verifier.input_params.attention.host.block_tables =
+        torch::zeros({2, 8}, torch::kInt);
+    for (int32_t accepted_count = 1; accepted_count <= speculative_tokens + 1;
+         ++accepted_count) {
+      SCOPED_TRACE(::testing::Message() << "K=" << speculative_tokens
+                                        << " accepted=" << accepted_count);
+      worker.retain_prefix(verifier, accepted_count);
+      // Reordered requests retain their own full S-row prefix bound even
+      // when the scheduler Host placeholder is older and only one row was
+      // accepted. Rejected padding is still executed by the fixed graph.
+      for (int32_t row = 0; row <= speculative_tokens; ++row) {
+        const int32_t b_upper = worker.prefix_upper(
+            7, "request-b", /*raw_kv_seq_len=*/201, row, /*kv_capacity=*/1024);
+        const int32_t a_upper = worker.prefix_upper(
+            3, "request-a", /*raw_kv_seq_len=*/101, row, /*kv_capacity=*/1024);
+        EXPECT_EQ(b_upper, 255 + speculative_tokens);
+        EXPECT_EQ(a_upper, 127 + speculative_tokens);
+        EXPECT_GE(b_upper, 255 + row);
+        EXPECT_GE(a_upper, 127 + row);
+      }
+    }
+    EXPECT_EQ(worker.prefix_upper(3,
+                                  "request-a",
+                                  /*raw_kv_seq_len=*/511,
+                                  speculative_tokens,
+                                  /*kv_capacity=*/1024),
+              511 + speculative_tokens);
+    // Embedding ID reuse must not carry the old request's capacity into a
+    // fresh request, nor may a different embedding inherit another prefix.
+    EXPECT_EQ(worker.prefix_upper(7,
+                                  "replacement",
+                                  /*raw_kv_seq_len=*/5,
+                                  speculative_tokens,
+                                  /*kv_capacity=*/128),
+              5 + speculative_tokens);
+    EXPECT_EQ(worker.prefix_upper(9,
+                                  "request-a",
+                                  /*raw_kv_seq_len=*/5,
+                                  speculative_tokens,
+                                  /*kv_capacity=*/128),
+              5 + speculative_tokens);
+  }
+}
+
+TEST_F(MtpDecodeMetadataTest,
+       PrefixCapacityRejectsOverflowAndInsufficientTable) {
+  DecodeMetadataTestWorker worker(
+      parallel_args(/*kv_split_size=*/1), torch::Device("npu:0"), options());
+  const int64_t wide_capacity = std::numeric_limits<int64_t>::max();
+  EXPECT_DEATH(worker.prefix_upper(0,
+                                   "request",
+                                   std::numeric_limits<int32_t>::max(),
+                                   /*row_offset=*/1,
+                                   wide_capacity),
+               "upper.*std::numeric_limits<int32_t>::max");
+  EXPECT_EQ(worker.prefix_upper(0,
+                                "request",
+                                /*raw_kv_seq_len=*/127,
+                                /*row_offset=*/1,
+                                /*kv_capacity=*/128),
+            128);
+  EXPECT_DEATH(worker.prefix_upper(0,
+                                   "request",
+                                   /*raw_kv_seq_len=*/128,
+                                   /*row_offset=*/1,
+                                   /*kv_capacity=*/128),
+               "reserved KV capacity");
+  LlmForwardInput verifier;
+  verifier.input_params.embedding.embedding_ids = {0};
+  verifier.input_params.embedding.request_ids = {"request"};
+  verifier.input_params.attention.host.kv_seq_lens = {255};
+  verifier.input_params.attention.host.block_tables =
+      torch::zeros({1, 2}, torch::kInt);
+  worker.retain_prefix(verifier, /*accepted_count=*/1);
+  EXPECT_DEATH(worker.prefix_upper(0,
+                                   "request",
+                                   /*raw_kv_seq_len=*/1,
+                                   /*row_offset=*/0,
+                                   /*kv_capacity=*/128),
+               "reserved KV capacity");
+  verifier.input_params.attention.host.kv_seq_lens = {256};
+  EXPECT_DEATH(worker.retain_prefix(verifier, /*accepted_count=*/1),
+               "Verifier prefix exceeds the reserved KV capacity");
 }
 
 TEST_F(MtpDecodeMetadataTest, NextDraftWorkspaceDoesNotFollowTableCapacity) {

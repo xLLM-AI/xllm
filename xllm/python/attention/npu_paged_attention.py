@@ -409,19 +409,30 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
     def prepare_metadata(
         self, metadata: AttentionMetadata, *, device_kv_lengths: bool = False
     ) -> _PreparedPagedAttention | _PreparedMlaAttention:
-        """Prepare one ordinary Slot without Device work or active-state writes."""
+        """Prepare one Slot without Device work or active-state writes."""
         expanded = getattr(metadata, "expanded_decode_metadata", None)
+        spec_verify = getattr(metadata, "is_spec_verify", False)
+        use_expanded = expanded is not None and expanded.enabled
         if (
-            getattr(metadata, "is_spec_verify", False)
-            or getattr(metadata, "has_kv_shard", False)
-            or (expanded is not None and expanded.enabled)
+            getattr(metadata, "has_kv_shard", False)
+            or (use_expanded and not spec_verify)
+            or (spec_verify and self._is_mla)
         ):
-            raise ValueError("prepared paged metadata requires ordinary unsharded attention")
+            raise ValueError("prepared paged metadata requires supported unsharded attention")
         q_lens = metadata.q_seq_lens
         if q_lens is None:
             raise ValueError("prepared paged metadata requires query lengths")
         batch_size = q_lens.numel()
         query_ends = getattr(metadata, "q_cu_seq_lens_host_values", None)
+        block_table = metadata.block_table
+        kv_lengths = getattr(metadata, "kv_seq_lens_host_values", None)
+        device_lengths = getattr(metadata, "kv_seq_lens", None)
+        if spec_verify and use_expanded:
+            batch_size = metadata.slot_mapping.numel()
+            query_ends = list(range(1, batch_size + 1))
+            block_table = expanded.block_table
+            kv_lengths = expanded.kv_seq_lens_host_values
+            device_lengths = expanded.kv_seq_lens
         if query_ends is None:
             raise ValueError("prepared paged metadata requires Host query ends")
         has_leading_zero = len(query_ends) == batch_size + 1 and query_ends[0] == 0
@@ -429,7 +440,24 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             query_ends = query_ends[1:]
         if len(query_ends) != batch_size:
             raise ValueError("prepared Host query ends must match the batch")
-        block_table = metadata.block_table
+        if spec_verify:
+            indices = getattr(metadata, "linear_state_indices", None)
+            accepted = getattr(metadata, "num_accepted_tokens", None)
+            if (
+                metadata.is_prefill
+                or (metadata.is_chunked_prefill and not use_expanded)
+                or getattr(metadata, "is_mixed", False)
+                or indices is None
+                or indices.numel() == 0
+                or accepted is None
+                or accepted.numel() != indices.numel()
+                or batch_size % indices.numel()
+                or not 2 <= batch_size // indices.numel() <= 17
+                or query_ends != list(range(1, batch_size + 1))
+            ):
+                raise ValueError("prepared Qwen MTP requires expanded one-token attention rows and logical state slots")
+            if block_table is None:
+                raise ValueError("prepared Qwen MTP requires a paged block table")
         actual_seq_q: list[int] = []
         actual_seq_kv: list[int] = []
         if block_table is not None:
@@ -437,7 +465,6 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 raise ValueError("prepared block table must already be contiguous int32")
             if block_table.shape[0] != batch_size:
                 raise ValueError("prepared block table must match the batch")
-            kv_lengths = metadata.kv_seq_lens_host_values
             if kv_lengths is None or len(kv_lengths) != batch_size:
                 raise ValueError("prepared Host KV lengths must match the batch")
             if not self._is_mla:
@@ -486,7 +513,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 is_chunked_prefill=metadata.is_chunked_prefill,
             )
         if device_kv_lengths:
-            lengths = metadata.kv_seq_lens
+            lengths = device_lengths
             if (
                 block_table is None
                 or lengths is None
@@ -500,7 +527,12 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             widths = [end - start for start, end in zip([0, *query_ends[:-1]], query_ends)]
             if not widths or widths[0] <= 0 or any(width != widths[0] for width in widths):
                 raise ValueError("block draft queries must have a fixed positive width")
-            kv_capacity = ((max(actual_seq_kv, default=0) + self.page_size - 1) // self.page_size) * self.page_size
+            decode = spec_verify or not (metadata.is_prefill or metadata.is_chunked_prefill)
+            kv_capacity = (
+                block_table.shape[1] * self.page_size
+                if decode
+                else ((max(actual_seq_kv, default=0) + self.page_size - 1) // self.page_size) * self.page_size
+            )
             if kv_capacity == 0 or kv_capacity > block_table.shape[1] * self.page_size:
                 raise ValueError("prepared block attention exceeds block-table capacity")
             return _PreparedPagedAttention(
@@ -575,11 +607,13 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             self._actual_seq_lens = None if graph_mode else prepared.query_ends
             self._actual_seq_q = prepared.actual_seq_q
             self._actual_seq_kv = prepared.actual_seq_kv
-            if graph_mode:
-                workspace_kv_length = None
-                if prepared.device_kv_lengths is not None:
-                    workspace_kv_length = prepared.block_table.shape[1] * self.page_size
-                self._prepare_paged_graph(workspace_kv_length=workspace_kv_length)
+            if graph_mode and prepared.device_kv_lengths is None:
+                self._prepare_paged_graph()
+            else:
+                # Device-length attention captures the BNSD operator directly.
+                # It never consumes the TND .out buffers or task-update state;
+                # retaining that unused workspace for every tier wastes HBM.
+                self._paged_graph_state = None
             return
         self._metadata = metadata
         expanded = resolve_expanded_decode_metadata(metadata, block_size=self.logical_page_size)
@@ -925,6 +959,13 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
 
         kernels.reshape_paged_cache(metadata.slot_mapping, k_3d, v_3d, k_cache, v_cache)
 
+        prepared = getattr(metadata, "prepared_attention_state", None)
+        if (
+            getattr(metadata, "is_spec_verify", False)
+            and isinstance(prepared, _PreparedPagedAttention)
+            and prepared.device_kv_lengths is not None
+        ):
+            return self._decode(q_3d, k_cache, v_cache, metadata, num_tokens)
         if metadata.is_prefill or metadata.is_chunked_prefill:
             if self._use_expanded_decode:
                 return self._decode(q_3d, k_cache, v_cache, metadata, num_tokens)
@@ -2106,6 +2147,37 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         block_size = k_cache.size(1)
         k_flat = k_cache.view(k_cache.size(0), block_size, -1)
         v_flat = v_cache.view(v_cache.size(0), block_size, -1)
+
+        prepared = getattr(metadata, "prepared_attention_state", None)
+        if isinstance(prepared, _PreparedPagedAttention) and prepared.device_kv_lengths is not None:
+            if any(width != 1 for width in prepared.query_lengths) or len(prepared.query_lengths) != num_tokens:
+                raise ValueError("device-length decode requires one query per expanded attention row")
+            # The speculative prefix is committed on Device after Host
+            # preparation. Capture fixed Host capacities and mask their tail
+            # from the live Slot lengths, including inside ACL graph replay.
+            lengths = prepared.device_kv_lengths.view(-1, 1, 1, 1)
+            keys = torch.arange(prepared.kv_capacity, device=q_3d.device).view(1, 1, 1, -1)
+            mask = (keys >= lengths).contiguous()
+            query = q_3d.view(num_tokens, 1, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
+            output, _ = torch.ops.npu.npu_fused_infer_attention_score(
+                query,
+                k_flat,
+                v_flat,
+                atten_mask=mask,
+                block_table=self._block_table_i32,
+                actual_seq_lengths=[1] * num_tokens,
+                actual_seq_lengths_kv=[prepared.kv_capacity] * num_tokens,
+                num_heads=self.num_heads,
+                num_key_value_heads=self.num_kv_heads,
+                scale=self.scale,
+                input_layout="BNSD",
+                block_size=block_size,
+                sparse_mode=_SPARSE_MODE_NONE,
+                pre_tokens=2147483647,
+                next_tokens=2147483647,
+                softmax_lse_flag=False,
+            )
+            return output.transpose(1, 2).reshape(num_tokens, self.num_heads * self.head_dim)
 
         graph_context = get_forward_context().acl_graph
         if graph_context is not None:

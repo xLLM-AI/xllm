@@ -25,6 +25,7 @@ from xllm.python.model_executor.dspark_graph_input import DSparkAdaptiveGraphInp
 from xllm.python.model_executor.forward_context import AclGraphExecutionState, EplbRuntimeState, LayerSynchronizer
 from xllm.python.model_executor.runners.acl_graph import AclGraphEntry, AclGraphRunner, StaticGraphAttentionMetadata
 from xllm.python.model_executor.runners.base import ModelExecutionOutput
+from xllm.python.model_executor.runners.kv_capacity import kv_capacity_bucket, kv_capacity_buckets
 
 
 class _PreparedBlockGraphEntry(AclGraphEntry):
@@ -82,12 +83,20 @@ class PreparedAclGraphRunner(AclGraphRunner):
         dp_rank: int = 0,
         enable_mega_moe_token_mask: bool = False,
         block_draft: bool = False,
+        spec_verify_width: int = 1,
+        device_kv_lengths: bool = False,
     ) -> None:
         super().__init__(model, attention_backend, device)
         self.dp_size = dp_size
         self.dp_rank = dp_rank
         self._enable_mega_moe_token_mask = enable_mega_moe_token_mask
         self._block_draft = block_draft
+        if not 1 <= spec_verify_width <= 17 or (block_draft and spec_verify_width != 1):
+            raise ValueError("Speculative verify graph width must be in [1, 17], with width one for block drafts")
+        self._spec_verify_width = spec_verify_width
+        if device_kv_lengths and dp_size != 1:
+            raise ValueError("Device-length ACL graphs require DP size one")
+        self._device_kv_lengths = device_kv_lengths
         self.max_batch = (max_batch + dp_size - 1) // dp_size
         self._prepared_graphs: dict[tuple[object, ...], AclGraphEntry] = {}
         self.prepared_replays = 0
@@ -110,6 +119,11 @@ class PreparedAclGraphRunner(AclGraphRunner):
             metadata.q_seq_lens,
             getattr(metadata, "q_cu_seq_lens", None),
             metadata.kv_seq_lens,
+            getattr(metadata, "linear_state_indices", None),
+            getattr(metadata, "linear_state_read_indices", None),
+            getattr(metadata, "linear_state_write_indices", None),
+            getattr(metadata, "has_initial_state", None),
+            getattr(metadata, "num_accepted_tokens", None),
             input_embedding,
             mtp_topk_indices,
         )
@@ -239,6 +253,11 @@ class PreparedAclGraphRunner(AclGraphRunner):
                 raise ValueError("prepared block graph requires non-causal chunked-prefill queries")
             if input_embedding is not None or mtp_topk_indices is not None:
                 raise ValueError("prepared block graph requires ordinary token inputs")
+        elif self._spec_verify_width > 1:
+            if metadata.is_prefill or metadata.is_chunked_prefill or not metadata.is_spec_verify:
+                raise ValueError("prepared speculative verify graph requires speculative verify metadata")
+            if batch_size % self._spec_verify_width:
+                raise ValueError("prepared speculative verify graph requires complete fixed-width sequences")
         elif metadata.is_prefill or metadata.is_chunked_prefill or metadata.is_spec_verify:
             raise ValueError("prepared ACL graph requires ordinary decode")
         if getattr(metadata, "prepared_attention_state", None) is None:
@@ -289,6 +308,40 @@ class PreparedAclGraphRunner(AclGraphRunner):
         expected_rows = block_table.shape[0] if self._block_draft else batch_size
         if metadata.q_seq_lens.numel() != expected_rows or metadata.kv_seq_lens.numel() != expected_rows:
             raise ValueError("prepared ACL graph requires query and KV lengths per metadata row")
+        state_rows = batch_size // self._spec_verify_width
+        for name in ("linear_state_indices", "linear_state_read_indices", "linear_state_write_indices"):
+            indices = getattr(metadata, name, None)
+            if indices is not None and (
+                indices.ndim != 1
+                or indices.numel() != state_rows
+                or indices.dtype != torch.int32
+                or indices.device != input_ids.device
+                or not indices.is_contiguous()
+            ):
+                raise ValueError(
+                    f"prepared ACL graph requires contiguous int32 {name} with one state slot per sequence"
+                )
+        if self._spec_verify_width > 1:
+            accepted = getattr(metadata, "num_accepted_tokens", None)
+            state_indices = getattr(metadata, "linear_state_write_indices", None)
+            if state_indices is None:
+                state_indices = getattr(metadata, "linear_state_indices", None)
+            if (
+                state_indices is None
+                or accepted is None
+                or accepted.ndim != 1
+                or accepted.numel() != state_rows
+                or accepted.dtype != torch.int32
+                or accepted.device != input_ids.device
+                or not accepted.is_contiguous()
+            ):
+                raise ValueError("prepared speculative verify graph requires final int32 accepted counts per sequence")
+        read_indices = getattr(metadata, "linear_state_read_indices", None)
+        write_indices = getattr(metadata, "linear_state_write_indices", None)
+        if write_indices is None:
+            write_indices = getattr(metadata, "linear_state_indices", None)
+        if read_indices is not None and (write_indices is None or read_indices.data_ptr() != write_indices.data_ptr()):
+            raise ValueError("prepared ACL decode requires one shared linear-state read/write view")
         for name, tensor in (("hidden state", input_embedding), ("MTP top-k", mtp_topk_indices)):
             if tensor is not None and (
                 tensor.dim() < 2 or tensor.shape[0] != batch_size or tensor.device != input_ids.device
@@ -317,6 +370,45 @@ class PreparedAclGraphRunner(AclGraphRunner):
         binding = self._prepared_binding(
             input_ids, positions, metadata, input_embedding, mtp_topk_indices, dspark_adaptive=dspark_adaptive
         )
+        capacity_pages = kv_capacity_buckets(metadata.block_table.shape[1]) if self._device_kv_lengths else (0,)
+        previous_count = len(self._prepared_graphs)
+        for pages in capacity_pages:
+            self._warmup_prepared_entry(
+                input_ids,
+                positions,
+                metadata,
+                input_embedding,
+                mtp_topk_indices,
+                binding=(*binding, pages) if self._device_kv_lengths else binding,
+                capacity_pages=pages,
+                eplb=eplb,
+                dspark_adaptive=dspark_adaptive,
+            )
+        if self._device_kv_lengths and len(self._prepared_graphs) != previous_count:
+            logger.info(
+                "Python KV capacity warmup: runner=prepared model=%s rows=%d capacity_pages=%s "
+                "capacity_tokens=%s binding_graphs=%d total_graphs=%d",
+                type(self.model).__name__,
+                input_ids.numel(),
+                capacity_pages,
+                tuple(pages * self.attention_backend.page_size for pages in capacity_pages),
+                len(capacity_pages),
+                len(self._prepared_graphs),
+            )
+
+    def _warmup_prepared_entry(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        metadata: AttentionMetadata,
+        input_embedding: torch.Tensor | None,
+        mtp_topk_indices: torch.Tensor | None,
+        *,
+        binding: tuple[object, ...],
+        capacity_pages: int,
+        eplb: EplbRuntimeState | None,
+        dspark_adaptive: DSparkAdaptiveGraphInputs | None,
+    ) -> None:
         if binding in self._prepared_graphs:
             return
         self._initialize_task_updates()
@@ -324,7 +416,8 @@ class PreparedAclGraphRunner(AclGraphRunner):
             entry = _PreparedDSparkGraphEntry()
             entry.dspark_adaptive = dspark_adaptive
         else:
-            entry = _PreparedBlockGraphEntry() if self._block_draft else AclGraphEntry()
+            entry = _PreparedBlockGraphEntry() if self._block_draft or self._device_kv_lengths else AclGraphEntry()
+        entry.kv_capacity_pages = capacity_pages
         entry.batch_size = input_ids.numel()
         entry.graph = None
         entry.static_output = None
@@ -352,36 +445,57 @@ class PreparedAclGraphRunner(AclGraphRunner):
             q_seq_lens=metadata.q_seq_lens,
             q_cu_seq_lens=metadata.q_cu_seq_lens,
             kv_seq_lens=metadata.kv_seq_lens,
+            linear_state_indices=getattr(metadata, "linear_state_indices", None),
+            linear_state_read_indices=getattr(metadata, "linear_state_read_indices", None),
+            linear_state_write_indices=getattr(metadata, "linear_state_write_indices", None),
+            has_initial_state=getattr(metadata, "has_initial_state", None),
+            num_accepted_tokens=getattr(metadata, "num_accepted_tokens", None),
+            is_spec_verify=self._spec_verify_width > 1,
             kv_seq_lens_host_values=list(metadata.kv_seq_lens_host_values),
             dp_execution_token_counts=tuple(getattr(metadata, "dp_execution_token_counts", ())),
             dp_is_decode=tuple(getattr(metadata, "dp_is_decode", ())),
             mega_moe_token_mask=mega_moe_token_mask,
             prepared_attention_state=(
                 metadata.prepared_attention_state
-                if getattr(self.attention_backend, "is_mla", False) or self._block_draft
+                if getattr(self.attention_backend, "is_mla", False) or self._block_draft or self._device_kv_lengths
                 else None
             ),
         )
-        if self._block_draft:
-            # Like the legacy DSpark runner, capture at least the startup
-            # 16-page context plus the query. Keep the FIA bound constant;
-            # live device lengths, not captured Host lists, mask the prefix.
+        if entry.static_metadata.linear_state_read_indices is not None:
+            # Decode reads and writes the same state. Keep one Python object
+            # so metadata builders do not compare Device values on the Host.
+            entry.static_metadata.linear_state_read_indices = (
+                entry.static_metadata.linear_state_write_indices
+                if entry.static_metadata.linear_state_write_indices is not None
+                else entry.static_metadata.linear_state_indices
+            )
+        if self._block_draft or self._device_kv_lengths:
+            # Device-length graphs capture every declared capacity tier. DSpark retains its
+            # startup context bound. Live device lengths mask the valid prefix
+            # within each graph's fixed FIA capacity.
             page_size = self.attention_backend.page_size
             request_count = metadata.block_table.shape[0]
             query_width = entry.batch_size // request_count
-            required_pages = (max(metadata.kv_seq_lens_host_values) + page_size - 1) // page_size
-            minimum_pages = 16 + (query_width + page_size - 1) // page_size
-            pages = min(1 << (max(required_pages, minimum_pages) - 1).bit_length(), metadata.block_table.shape[1])
+            if self._device_kv_lengths:
+                pages = capacity_pages
+            else:
+                required_pages = (max(metadata.kv_seq_lens_host_values) + page_size - 1) // page_size
+                minimum_pages = 16 + (query_width + page_size - 1) // page_size
+                pages = min(1 << (max(required_pages, minimum_pages) - 1).bit_length(), metadata.block_table.shape[1])
             static = entry.static_metadata
             # Multiple narrowed rows are strided. Allocate only this small
             # metadata table at warmup; refresh it inside the captured forward
             # so replay has no extra Host launch and never scans full-context
             # padding just to preserve contiguity.
             entry.source_block_table = metadata.block_table[:, :pages]
-            static.block_table = entry.source_block_table.contiguous()
+            static.block_table = (
+                entry.source_block_table.clone(memory_format=torch.contiguous_format)
+                if self._device_kv_lengths
+                else entry.source_block_table.contiguous()
+            )
             static.q_cu_seq_lens_host_values = list(metadata.q_cu_seq_lens_host_values)
             static.kv_seq_lens_host_values = [pages * page_size] * request_count
-            static.is_chunked_prefill = True
+            static.is_chunked_prefill = self._block_draft
             static.prepared_attention_state = self.attention_backend.prepare_metadata(static, device_kv_lengths=True)
         if mega_moe_token_mask is not None:
             self._fill_mega_moe_token_mask(entry, metadata.raw_dp_execution_token_counts)
@@ -403,11 +517,17 @@ class PreparedAclGraphRunner(AclGraphRunner):
         self._validate_prepared_input(
             input_ids, positions, metadata, input_embedding, mtp_topk_indices, dspark_adaptive=dspark_adaptive
         )
-        entry = self._prepared_graphs.get(
-            self._prepared_binding(
-                input_ids, positions, metadata, input_embedding, mtp_topk_indices, dspark_adaptive=dspark_adaptive
-            )
+        binding = self._prepared_binding(
+            input_ids, positions, metadata, input_embedding, mtp_topk_indices, dspark_adaptive=dspark_adaptive
         )
+        if self._device_kv_lengths:
+            pages = kv_capacity_bucket(
+                metadata.kv_seq_lens_host_values,
+                self.attention_backend.page_size,
+                metadata.block_table.shape[1],
+            )
+            binding = (*binding, pages)
+        entry = self._prepared_graphs.get(binding)
         if entry is None:
             # Native admission already selected a captured bucket for every
             # rank. A missing Slot binding is an error, never a local fallback.
@@ -500,7 +620,9 @@ class PreparedAclGraphRunner(AclGraphRunner):
             # Counts precede native Slot padding; execution counts are physical.
             self._fill_mega_moe_token_mask(entry, metadata.raw_dp_execution_token_counts)
         self._prepare_graph_eplb_state(entry, eplb, metadata, first_capture=False)
-        self._prepare_attention(entry, entry.static_metadata if self._block_draft else metadata, replay=True)
+        self._prepare_attention(
+            entry, entry.static_metadata if self._block_draft or self._device_kv_lengths else metadata, replay=True
+        )
         stream = torch.npu.current_stream(self.device)
         entry.graph.replay()
         self._update_after_replay(entry, stream)
@@ -508,7 +630,7 @@ class PreparedAclGraphRunner(AclGraphRunner):
         if not entry.replay_logged:
             logger.info(
                 "Python prepared ACL graph first replay: model=%s bucket=%d physical_rows=%d "
-                "mtp_topk=%s hidden_shape=%s topk_shape=%s adaptive_dspark=%s",
+                "mtp_topk=%s hidden_shape=%s topk_shape=%s adaptive_dspark=%s capacity_pages=%d capacity_tokens=%d",
                 type(self.model).__name__,
                 entry.batch_size,
                 input_ids.numel(),
@@ -516,6 +638,8 @@ class PreparedAclGraphRunner(AclGraphRunner):
                 None if input_embedding is None else tuple(input_embedding.shape),
                 None if mtp_topk_indices is None else tuple(mtp_topk_indices.shape),
                 isinstance(entry, _PreparedDSparkGraphEntry),
+                entry.kv_capacity_pages,
+                entry.kv_capacity_pages * self.attention_backend.page_size if entry.kv_capacity_pages else 0,
             )
             entry.replay_logged = True
         return entry.static_output

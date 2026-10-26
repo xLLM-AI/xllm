@@ -21,6 +21,7 @@ limitations under the License.
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "core/framework/speculative/embedding_cache.h"
@@ -255,6 +256,21 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
                                   LlmForwardInput draft_input);
   bool pending_draft_context_matches(const TargetInput& input) const;
 
+  bool uses_verifier_conditioned_draft_prefix() const;
+  int32_t draft_prefix_kv_upper_bound(int32_t embedding_id,
+                                      const std::string& request_id,
+                                      int32_t raw_kv_seq_len,
+                                      int32_t row_offset,
+                                      int64_t kv_capacity) const;
+  void prepare_draft_prefix(
+      const TargetInput& input,
+      const std::vector<EmbeddingCache::DecodeState>& bootstrap_states,
+      LlmForwardInput& draft_input);
+  void retain_draft_prefix(const TargetInput& input,
+                           const SampleOutput& validate_output,
+                           const torch::Tensor& base_positions,
+                           const torch::Tensor& base_kv_seq_lens);
+
   void write_target_context_to_cache(const TargetInput& input,
                                      const SampleOutput& validate_output,
                                      int32_t num_speculative_tokens);
@@ -284,12 +300,28 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   // consumes this output and only submits draft steps 1..N-1.
   PendingDraftContext pending_draft_context_;
 
+  struct DraftPrefixContext {
+    std::string request_id;
+    torch::Tensor tokens;
+    torch::Tensor hidden;
+    torch::Tensor base_position;
+    torch::Tensor base_kv_seq_len;
+    // Host-only capacity bound for all S verifier rows, independent of how
+    // many tokens were accepted. Device lengths remain exact and separate.
+    int32_t host_kv_upper_bound = 0;
+  };
+  // Own the complete verifier prefix across Host cache flushes and scheduler
+  // reorder/retire transitions. A reused embedding slot must match request_id.
+  std::unordered_map<int32_t, DraftPrefixContext> draft_prefix_contexts_;
+
   // Classified once when the corresponding models are loaded. Decode-path
   // decisions only read these closed policies.
   mtp_async::TargetSpecVerifyMode target_spec_verify_mode_ =
       mtp_async::TargetSpecVerifyMode::GENERIC;
   mtp_async::CombinedDraftExecutionPath combined_draft_execution_path_ =
       mtp_async::CombinedDraftExecutionPath::UNSUPPORTED;
+  mtp_async::DraftPrefixPolicy draft_prefix_policy_ =
+      mtp_async::DraftPrefixPolicy::TAIL_REPAIR;
 
 #if defined(USE_NPU)
   // Stable-address sources consumed by the target ACL graph's leading input

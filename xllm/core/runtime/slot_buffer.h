@@ -32,6 +32,7 @@ struct ModelInputCapacity {
   uint32_t max_tokens = 0;
   uint32_t max_sequences = 0;
   uint32_t max_blocks_per_sequence = 0;
+  bool enable_linear_attention = false;
 };
 
 // Borrowed CPU model data used by ordinary Slots and speculative invocations.
@@ -219,6 +220,10 @@ class SlotBuffer final {
                                         const Stream& stream);
   static void patch_mtp_decode(SlotBuffer& input,
                                const MtpContextView& binding);
+  static void patch_mtp_decode_metadata(SlotBuffer& input,
+                                        const MtpContextView& binding);
+  static void patch_mtp_decode_tokens(SlotBuffer& input,
+                                      const MtpContextView& binding);
 
   static Status plan_mtp_prefill(SlotBuffer& input,
                                  const ModelInputHostView& base,
@@ -311,6 +316,10 @@ class SlotBuffer final {
     Region kv_seq_lens;
     Region q_cu_seq_lens;
     Region block_tables;
+    Region linear_state_indices;
+    Region linear_state_read_indices;
+    Region num_accepted_tokens;
+    Region query_start_loc;
     uint64_t block_table_row_stride_bytes = 0;
     uint64_t total_bytes = 0;
   };
@@ -322,6 +331,10 @@ class SlotBuffer final {
     torch::Tensor kv_seq_lens;
     torch::Tensor q_cu_seq_lens;
     torch::Tensor block_tables;
+    torch::Tensor linear_state_indices;
+    torch::Tensor linear_state_read_indices;
+    torch::Tensor num_accepted_tokens;
+    torch::Tensor query_start_loc;
   };
 
   SlotBuffer(SlotBufferCapacity capacity,
@@ -340,6 +353,9 @@ class SlotBuffer final {
   static Status validate_batch(const ModelInputHostView& model,
                                const BatchInputMeta& batch);
   Status validate_model(const ModelInputHostView& model) const;
+  Status validate_model_state(const LlmForwardInput& input) const;
+  void prepare_model_state(const LlmForwardInput& input,
+                           uint32_t verify_width = 1);
   Status validate_previous_tokens(const ModelInputHostView& model,
                                   uint32_t previous_rows) const;
   void prepare_model(const ModelInputHostView& model,
@@ -356,6 +372,8 @@ class SlotBuffer final {
   torch::Tensor device_buffer_;
   ModelTensors model_host_;
   ModelTensors model_device_;
+  torch::Tensor initial_states_host_;
+  torch::Tensor initial_states_device_;
   LlmModelParams native_model_params_;
   ModelParamsView model_params_{native_model_params_};
   torch::Tensor tokens_;

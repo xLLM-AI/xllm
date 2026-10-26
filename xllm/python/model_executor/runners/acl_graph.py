@@ -66,6 +66,8 @@ class StaticGraphAttentionMetadata:
     linear_state_indices: torch.Tensor | None = None
     num_accepted_tokens: torch.Tensor | None = None
     num_accepted_tokens_host_values: tuple[int, ...] = ()
+    linear_state_read_indices: torch.Tensor | None = None
+    linear_state_write_indices: torch.Tensor | None = None
     has_initial_state: torch.Tensor | None = None
     dp_execution_token_counts: tuple[int, ...] = ()
     dp_global_sequence_nums: tuple[int, ...] = ()
@@ -113,10 +115,12 @@ class AclGraphEntry:
         "eplb",
         "layer_shared_cache",
         "replay_logged",
+        "kv_capacity_pages",
     )
 
     def __init__(self) -> None:
         self.eplb: EplbRuntimeState | None = None
+        self.kv_capacity_pages = 0
 
 
 class AclGraphRunner(BaseRunner):

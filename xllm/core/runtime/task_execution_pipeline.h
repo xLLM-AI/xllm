@@ -105,6 +105,8 @@ struct SpeculativeTaskCapacity {
   // Restore committed draft KV from verifier hidden states before reuse.
   bool refresh_target_prefix = false;
   bool is_probabilistic_draft = false;
+  // Reuse the refreshed final row for the next admitted first proposal.
+  bool reuse_prefix_refresh_output = false;
   bool unified_graph = false;
   bool adaptive_target_verify = false;
   bool adaptive_draft_step = false;
@@ -118,6 +120,7 @@ struct SpeculativeTaskCapacity {
 
 struct MtpContextStorage;
 struct MtpContextView;
+struct MtpContextPublication;
 
 struct TaskSubmission {
   Status status;
@@ -220,6 +223,8 @@ class TaskExecutionPipeline final {
       const Stream& stream,
       std::span<const int32_t> bootstrap_rows);
   static void context_gather(MtpContextView& view);
+  static void context_gather_state(MtpContextView& view);
+  static void context_gather_prefix_hidden(MtpContextView& view);
   static void context_publish(MtpContextView& view);
   static void context_advance(MtpContextView& view,
                               const torch::Tensor& accepted_tokens,
@@ -234,6 +239,8 @@ class TaskExecutionPipeline final {
                                    const torch::Device& device,
                                    std::unique_ptr<MtpContextStorage>& output);
   static uint64_t mtp_context_bytes(const MtpContextStorage& cache);
+  void reserve_draft_prefix_context(MtpContextStorage& context,
+                                    uint32_t capacity);
   friend class TaskExecutionPipelineInputTest;
   static Status validate_input(const LlmForwardInput& input,
                                const LlmTaskCapacity& capacity,
@@ -327,6 +334,10 @@ class TaskExecutionPipeline final {
   void warmup_draft_graphs(const LlmForwardInput& input);
   void prepare_draft_state(SpeculativeSlot& slot, uint32_t step, bool warmup);
   void prepare_prefix_refresh_state(SpeculativeSlot& slot, bool warmup);
+  bool prepares_mtp_context() const;
+  void prepare_mtp_context(SpeculativeSlot& slot);
+  void publish_mtp_context(SpeculativeSlot& slot);
+  void bind_mtp_publication(SpeculativeSlot& slot);
   void launch_prefix_refresh(SpeculativeSlot& slot);
   void prepare_empty_shard(SpeculativeSlot& slot, uint64_t batch_id);
   void launch_empty_shard(SpeculativeSlot& slot);
@@ -377,6 +388,10 @@ class TaskExecutionPipeline final {
   std::unique_ptr<TaskModel> draft_;
   torch::ScalarType hidden_dtype_ = torch::kFloat32;
   std::unique_ptr<MtpContextStorage> context_;
+  // Only Prepare owns the pool and last-admitted pointer. A lease remains
+  // immutable until its producer and consumer Slots have both retired.
+  std::vector<std::shared_ptr<MtpContextPublication>> context_publications_;
+  std::shared_ptr<MtpContextPublication> last_context_publication_;
   CausalLM& model_;
   Executor& executor_;
   std::vector<KVCache>& kv_caches_;

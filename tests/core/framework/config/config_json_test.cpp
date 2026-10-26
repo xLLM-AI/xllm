@@ -553,6 +553,26 @@ std::filesystem::path config_test_file_path() {
   return std::filesystem::path("tests/core/framework/config/config_test.json");
 }
 
+#if defined(USE_NPU)
+TEST(ModelConfigValidationTest, AcceptsQwen35PythonMtpSupportedWidths) {
+  for (const std::string_view implementation : {"python", "py"}) {
+    for (const std::string_view model_type :
+         {"qwen3_5", "qwen3_5_text", "qwen3_5_mtp"}) {
+      for (const std::string_view algorithm : {"MTP", "Mtp", "mtp"}) {
+        for (const int32_t width : {1, 2, 3, 4, 16}) {
+          SCOPED_TRACE(std::string(implementation) + "/" +
+                       std::string(model_type) + "/" + std::string(algorithm) +
+                       "/" + std::to_string(width));
+          EXPECT_FALSE(ModelConfig::validate_python_speculative_decode(
+                           implementation, model_type, width, algorithm)
+                           .has_value());
+        }
+      }
+    }
+  }
+}
+#endif
+
 TEST(ModelConfigValidationTest, RejectsQwen35PythonSpeculativeDecode) {
   const std::optional<std::string> error =
       ModelConfig::validate_python_speculative_decode(
@@ -565,9 +585,55 @@ TEST(ModelConfigValidationTest, RejectsQwen35PythonSpeculativeDecode) {
                   .has_value());
 }
 
+TEST(ModelConfigValidationTest, RejectsQwen35PythonMtpUnsupportedWidths) {
+  for (const std::string_view model_type :
+       {"qwen3_5", "qwen3_5_text", "qwen3_5_mtp"}) {
+    for (const int32_t width : {17, std::numeric_limits<int32_t>::max()}) {
+      SCOPED_TRACE(std::string(model_type) + "/" + std::to_string(width));
+      const std::optional<std::string> error =
+          ModelConfig::validate_python_speculative_decode(
+              "python", model_type, width, "MTP");
+      ASSERT_TRUE(error.has_value());
+      EXPECT_NE(error->find("1 to 16"), std::string::npos);
+    }
+  }
+}
+
+TEST(ModelConfigValidationTest, RejectsQwen35PythonNonMtpSpeculation) {
+  for (const std::string_view model_type :
+       {"qwen3_5_text", "qwen3_5_moe_text"}) {
+    for (const std::string_view algorithm :
+         {"", "Eagle3", "DFlash", "Suffix"}) {
+      SCOPED_TRACE(std::string(model_type) + "/" + std::string(algorithm));
+      const std::optional<std::string> error =
+          ModelConfig::validate_python_speculative_decode(
+              "py", model_type, 3, algorithm);
+      ASSERT_TRUE(error.has_value());
+      EXPECT_NE(error->find("supports dense NPU"), std::string::npos);
+    }
+  }
+}
+
+TEST(ModelConfigValidationTest, RejectsQwen35PythonUnsupportedModelTypes) {
+  for (const std::string_view model_type : {"qwen3_5_moe",
+                                            "qwen3_5_moe_text",
+                                            "qwen3_5_moe_mtp",
+                                            "qwen3_5_unknown"}) {
+    SCOPED_TRACE(std::string(model_type));
+    const std::optional<std::string> error =
+        ModelConfig::validate_python_speculative_decode(
+            "python", model_type, 3, "MTP");
+    ASSERT_TRUE(error.has_value());
+    EXPECT_NE(error->find("supports dense NPU"), std::string::npos);
+  }
+}
+
 TEST(ModelConfigValidationTest, AcceptsSupportedPythonExecutionModes) {
   EXPECT_FALSE(ModelConfig::validate_python_speculative_decode(
                    "python", "qwen3_5_text", 0, "MTP")
+                   .has_value());
+  EXPECT_FALSE(ModelConfig::validate_python_speculative_decode(
+                   "python", "qwen3_5_text", -1, "MTP")
                    .has_value());
   EXPECT_FALSE(ModelConfig::validate_python_speculative_decode(
                    "native", "qwen3_5_text", 4, "MTP")

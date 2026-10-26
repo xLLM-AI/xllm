@@ -171,6 +171,133 @@ class SlotBufferTest : public ::testing::Test {
   std::unique_ptr<Stream> consumer_;
 };
 
+class RecurrentSlotBufferTest : public SlotBufferTest {
+ protected:
+  void SetUp() override {
+    capacity_.model.enable_linear_attention = true;
+    SlotBufferTest::SetUp();
+  }
+
+  static LlmForwardInput direct_input() {
+    auto input = make_forward_input(make_input({2, 1}, {4, 1}),
+                                    BatchForwardType::CHUNKED_PREFILL,
+                                    /*actual_rows=*/2);
+    auto& params = input.input_params;
+    params.embedding.linear_state_ids = {2, 3};
+    params.embedding.linear_state_indices =
+        torch::tensor({2, 3}, torch::kInt32);
+    params.linear_state_cache_ops.resize(2);
+    params.linear_state_cache_ops[0].linear_state_id = 2;
+    params.linear_state_cache_ops[0].restore_src_slot_id = 1;
+    params.linear_state_cache_ops[1].linear_state_id = 3;
+    params.linear_state_cache_ops[1].reset_requested = true;
+    return input;
+  }
+};
+
+TEST_F(RecurrentSlotBufferTest, OwnsStateInputsAndKeepsSlotsIndependent) {
+  std::unique_ptr<SlotBuffer> second;
+  ASSERT_TRUE(SlotBuffer::create(capacity_, device_, second).ok());
+  auto input = direct_input();
+  ASSERT_TRUE(prepare_model(input, *transfer_).ok());
+  const auto& params = binding_->model_params();
+  const auto& metadata = *params.attn_metadata;
+  const std::array<const void*, 4> addresses{
+      params.embedding.linear_state_indices.data_ptr(),
+      metadata.linear_state_read_indices.data_ptr(),
+      metadata.has_initial_states.data_ptr(),
+      metadata.q_cu_seq_lens.data_ptr()};
+  const uint64_t pinned_bytes = binding_->pinned_bytes();
+  const uint64_t device_bytes = binding_->device_bytes();
+  input.input_params.embedding.linear_state_ids = {4, 2};
+  input.input_params.embedding.linear_state_indices.copy_(
+      torch::tensor({4, 2}, torch::kInt32));
+  input.input_params.linear_state_cache_ops[0].linear_state_id = 4;
+  input.input_params.linear_state_cache_ops[0].restore_src_slot_id = 3;
+  input.input_params.linear_state_cache_ops[1].linear_state_id = 2;
+  ASSERT_TRUE(second->validate(input, /*previous_rows=*/0, *transfer_).ok());
+  second->prepare(input, *transfer_);
+  ASSERT_EQ(transfer_->synchronize(), 0);
+  EXPECT_EQ(params.embedding.linear_state_ids, (std::vector<int32_t>{2, 3}));
+  EXPECT_EQ(params.linear_state_cache_ops[0].restore_src_slot_id, 1);
+  EXPECT_EQ(params.linear_state_cache_ops[1].linear_state_id, 3);
+  EXPECT_TRUE(torch::equal(params.embedding.linear_state_indices.cpu(),
+                           torch::tensor({2, 3}, torch::kInt32)));
+  EXPECT_TRUE(torch::equal(metadata.linear_state_read_indices.cpu(),
+                           torch::tensor({1, 3}, torch::kInt32)));
+  EXPECT_TRUE(torch::equal(metadata.has_initial_states.cpu(),
+                           torch::tensor({true, false}, torch::kBool)));
+  EXPECT_TRUE(torch::equal(metadata.q_cu_seq_lens.cpu(),
+                           torch::tensor({0, 2, 3}, torch::kInt32)));
+  const auto& other = second->model_params();
+  EXPECT_TRUE(torch::equal(other.embedding.linear_state_indices.cpu(),
+                           torch::tensor({4, 2}, torch::kInt32)));
+  EXPECT_TRUE(torch::equal(other.attn_metadata->linear_state_read_indices.cpu(),
+                           torch::tensor({3, 2}, torch::kInt32)));
+  EXPECT_NE(other.embedding.linear_state_indices.data_ptr(), addresses[0]);
+  EXPECT_NE(other.attn_metadata->linear_state_read_indices.data_ptr(),
+            addresses[1]);
+  EXPECT_NE(other.attn_metadata->has_initial_states.data_ptr(), addresses[2]);
+  EXPECT_NE(other.attn_metadata->q_cu_seq_lens.data_ptr(), addresses[3]);
+
+  ASSERT_TRUE(prepare_model(input, *transfer_).ok());
+  ASSERT_EQ(transfer_->synchronize(), 0);
+  EXPECT_EQ(params.embedding.linear_state_indices.data_ptr(), addresses[0]);
+  EXPECT_EQ(metadata.linear_state_read_indices.data_ptr(), addresses[1]);
+  EXPECT_EQ(metadata.has_initial_states.data_ptr(), addresses[2]);
+  EXPECT_EQ(metadata.q_cu_seq_lens.data_ptr(), addresses[3]);
+  EXPECT_TRUE(torch::equal(params.embedding.linear_state_indices.cpu(),
+                           torch::tensor({4, 2}, torch::kInt32)));
+  EXPECT_TRUE(torch::equal(metadata.linear_state_read_indices.cpu(),
+                           torch::tensor({3, 2}, torch::kInt32)));
+  EXPECT_EQ(binding_->pinned_bytes(), pinned_bytes);
+  EXPECT_EQ(binding_->device_bytes(), device_bytes);
+}
+
+TEST_F(RecurrentSlotBufferTest,
+       PaddedAndEmptyDecodeClearPreviousDirectReadState) {
+  ASSERT_TRUE(prepare_model(direct_input(), *transfer_).ok());
+  ASSERT_EQ(transfer_->synchronize(), 0);
+  auto decode = make_forward_input(make_input({1}, {3}),
+                                   BatchForwardType::DECODE,
+                                   /*actual_rows=*/1);
+  decode.input_params.embedding.linear_state_ids = {2};
+  decode.input_params.embedding.linear_state_indices =
+      torch::tensor({2}, torch::kInt32);
+  ASSERT_TRUE(binding_->validate(decode, /*previous_rows=*/0, *transfer_).ok());
+  binding_->prepare(decode, *transfer_, /*padded_batch_size=*/4);
+  ASSERT_EQ(transfer_->synchronize(), 0);
+  const auto& params = binding_->model_params();
+  const auto& metadata = *params.attn_metadata;
+  const void* indices_storage =
+      params.embedding.linear_state_indices.data_ptr();
+  const void* warm_storage = metadata.has_initial_states.data_ptr();
+  const void* query_storage = metadata.q_cu_seq_lens.data_ptr();
+  EXPECT_FALSE(metadata.linear_state_read_indices.defined());
+  EXPECT_TRUE(params.linear_state_cache_ops.empty());
+  EXPECT_TRUE(torch::equal(params.embedding.linear_state_indices.cpu(),
+                           torch::tensor({2, 0, 0, 0}, torch::kInt32)));
+  EXPECT_TRUE(
+      torch::equal(metadata.has_initial_states.cpu(),
+                   torch::tensor({true, false, false, false}, torch::kBool)));
+  EXPECT_TRUE(torch::equal(metadata.q_cu_seq_lens.cpu(),
+                           torch::tensor({0, 1, 2, 3, 4}, torch::kInt32)));
+  LlmForwardInput empty;
+  empty.input_params.meta.batch_forward_type = BatchForwardType::DECODE;
+  binding_->prepare(empty, *transfer_, /*padded_batch_size=*/4);
+  ASSERT_EQ(transfer_->synchronize(), 0);
+  EXPECT_EQ(params.embedding.linear_state_indices.data_ptr(), indices_storage);
+  EXPECT_EQ(metadata.has_initial_states.data_ptr(), warm_storage);
+  EXPECT_EQ(metadata.q_cu_seq_lens.data_ptr(), query_storage);
+  EXPECT_FALSE(metadata.linear_state_read_indices.defined());
+  EXPECT_EQ(params.embedding.linear_state_indices.cpu()
+                .count_nonzero()
+                .item<int64_t>(),
+            0);
+  EXPECT_EQ(metadata.has_initial_states.cpu().count_nonzero().item<int64_t>(),
+            0);
+}
+
 TEST_F(SlotBufferTest, PrefillUsesFixedInputsAndUncachedLengths) {
   InputData input = make_input({3, 2}, {3, 2});
   const auto forward =

@@ -48,6 +48,22 @@ enum class CombinedDraftExecutionPath {
 CombinedDraftExecutionPath classify_combined_draft_execution_path(
     std::string_view model_type);
 
+enum class DraftPrefixPolicy {
+  TAIL_REPAIR,
+  VERIFIER_CONDITIONED_FIRST_PASS,
+};
+
+// Resolve the draft-state protocol once from the loaded model layouts. Backend
+// and parallel constraints are checked separately by the execution path.
+DraftPrefixPolicy classify_draft_prefix_policy(
+    TargetSpecVerifyMode target_mode,
+    CombinedDraftExecutionPath draft_path);
+
+// The hybrid task-pipeline implementation has a narrower validated model set
+// than ordinary verification. Do not admit MoE or unknown model pairs here.
+bool supports_hybrid_mtp_pipeline_model_pair(std::string_view target_type,
+                                             std::string_view draft_type);
+
 bool supports_combined_draft_configuration(
     CombinedDraftExecutionPath execution_path,
     std::string_view npu_backend,

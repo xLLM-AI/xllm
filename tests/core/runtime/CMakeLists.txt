@@ -99,6 +99,17 @@ if(USE_NPU)
     "-Wl,--no-whole-archive")
 
   cc_test(
+    NAME task_execution_pipeline_recurrent_test
+    SRCS task_execution_pipeline_recurrent_test.cpp
+    DEPS :runtime GTest::gtest_main
+  )
+  target_link_libraries(task_execution_pipeline_recurrent_test PRIVATE nnopbase)
+  target_link_options(task_execution_pipeline_recurrent_test PRIVATE
+    "-Wl,--whole-archive"
+    "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
+    "-Wl,--no-whole-archive")
+
+  cc_test(
     NAME
       worker_memory_resources_test
     SRCS

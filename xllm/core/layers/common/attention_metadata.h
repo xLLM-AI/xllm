@@ -147,6 +147,8 @@ struct AttentionMetadata {
   torch::Tensor slot_mapping;
   // Framework-managed cache slot ids.
   torch::Tensor linear_state_indices;
+  // Prepared Slots own the final read view as well as the live write view.
+  torch::Tensor linear_state_read_indices;
   std::vector<int32_t> kpool_query_lens;
   std::shared_ptr<const KPoolBatchMetadata> kpool_batch_metadata;
   // Cache-shard derivations are immutable batch data shared by all layers.

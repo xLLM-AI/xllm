@@ -114,7 +114,7 @@ class Qwen3_5GdnMetadataBuilder:
     def build(self, metadata: AttentionMetadata) -> GdnMetadata:
         if self._state_caches is None or self._checkpoint_stride is None:
             raise RuntimeError("Qwen3.5 GDN state caches must be bound before execution")
-        if metadata.is_dummy:
+        if getattr(metadata, "is_dummy", False):
             return GdnDummyMetadata(self._state_caches)
         device = metadata.slot_mapping.device
         if device != self._device:
@@ -128,7 +128,7 @@ class Qwen3_5GdnMetadataBuilder:
         write_indices = write_indices.to(device=device, dtype=torch.int32).contiguous()
         # Verify is also marked chunked prefill by the speculative worker.
         # It must restore the last accepted checkpoint before processing rows.
-        if metadata.is_spec_verify:
+        if getattr(metadata, "is_spec_verify", False):
             return self._build_verify(metadata, write_indices)
         if not (metadata.is_prefill or metadata.is_chunked_prefill):
             if read_indices.numel() != metadata.slot_mapping.numel() or read_indices.numel() == 0:
@@ -183,6 +183,25 @@ class Qwen3_5GdnMetadataBuilder:
         width = self._checkpoint_stride
         if not 2 <= width <= 17:
             raise ValueError("Qwen3.5 MegaGdnMtpDecode requires 2 to 17 checkpoints per state slot")
+        accepted = metadata.num_accepted_tokens
+        accepted_host = tuple(getattr(metadata, "num_accepted_tokens_host_values", ()))
+        token_count = metadata.slot_mapping.numel()
+        # Prepared pipeline inputs keep attention at BS one-query rows and
+        # recurrent state at B rows. Their accepted counts are updated on the
+        # execution stream, so retain the final Device views without reading
+        # them on the Host or allocating graph-time index tensors.
+        if not accepted_host and state_indices.numel() * width == token_count:
+            if (
+                state_indices.numel() == 0
+                or accepted is None
+                or accepted.ndim != 1
+                or accepted.numel() != state_indices.numel()
+                or accepted.dtype != torch.int32
+                or accepted.device != state_indices.device
+                or not accepted.is_contiguous()
+            ):
+                raise ValueError("Qwen3.5 MTP requires contiguous int32 accepted lengths per logical sequence")
+            return GdnVerifyMetadata(self._state_caches, state_indices, accepted, width, None)
         query_lengths_host = metadata.q_seq_lens_host
         if (
             query_lengths_host is None
@@ -205,8 +224,6 @@ class Qwen3_5GdnMetadataBuilder:
             state_indices = state_indices.index_select(0, starts)
         elif state_indices.numel() != batch_size:
             raise ValueError("Qwen3.5 MTP requires one state slot per request or packed token")
-        accepted = metadata.num_accepted_tokens
-        accepted_host = metadata.num_accepted_tokens_host_values
         if accepted is None or accepted.ndim != 1 or accepted.numel() != batch_size:
             raise ValueError("Qwen3.5 MTP accepted counts must be sequence-scoped")
         if len(accepted_host) != batch_size or any(count < 1 or count > width for count in accepted_host):

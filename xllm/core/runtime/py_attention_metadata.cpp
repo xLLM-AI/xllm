@@ -248,12 +248,15 @@ PyAttentionMetadataView::PyAttentionMetadataView(
   linear_state_indices_ = params.embedding.linear_state_indices;
   num_accepted_tokens_ = params.num_accepted_tokens;
   num_accepted_tokens_host_values_ = params.num_accepted_tokens_host;
+  if (metadata_->linear_state_read_indices.defined()) {
+    linear_state_read_indices_ = metadata_->linear_state_read_indices;
+  }
   const auto& cache_ops = params.linear_state_cache_ops;
   const bool has_direct_read = std::any_of(
       cache_ops.begin(), cache_ops.end(), [](const LinearStateCacheOp& op) {
         return op.is_direct_read();
       });
-  if (has_direct_read) {
+  if (has_direct_read && !linear_state_read_indices_.defined()) {
     CHECK((metadata_->is_prefill || metadata_->is_chunked_prefill) &&
           !params.is_spec_verify)
         << "linear-state direct read is only supported for non-speculative "

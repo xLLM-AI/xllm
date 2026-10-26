@@ -37,12 +37,15 @@ struct MtpContextTensors {
   torch::Tensor hidden;
   torch::Tensor positions;
   torch::Tensor kv_seq_lens;
+  // Previous round's accepted tokens including its bonus, in [1, K+1].
+  torch::Tensor accepted_lengths;
   torch::Tensor repair_required;
 };
 
 // Tensor rows use the existing EMBEDDING block ids. The scheduler owns their
 // allocation and reuse; this storage has no allocator or retirement protocol.
-// Every gather/publication runs in FIFO order on the pipeline's task stream.
+// Publications run in FIFO order on the task stream. A Prepare snapshot waits
+// for the producing generation before reading into its own Slot storage.
 struct MtpContextStorage {
   torch::Tensor tokens_;
   MtpContextTensors mtp_state_;
@@ -50,6 +53,10 @@ struct MtpContextStorage {
   // accepted Task will publish before a following decode reads the row.
   std::vector<std::string> request_ids_;
   std::vector<uint8_t> published_;
+  // A nonzero generation promises a prior admitted Task's FIFO publication.
+  // Prepare owns this metadata; Launch never reads or mutates it.
+  std::vector<uint64_t> draft_prefix_generations_;
+  torch::Tensor draft_prefix_hidden_;
 };
 
 // One Slot's fixed snapshot; embedding rows belong to the scheduler.
@@ -58,6 +65,7 @@ struct MtpContextView {
   uint32_t capacity_;
   bool prepared_ = false;
   bool read_published_state_ = false;
+  bool reuse_draft_prefix_ = false;
   std::vector<int32_t> sorted_ids_;
   std::vector<uint32_t> identity_rows_;
   std::vector<int32_t> model_to_embedding_;
@@ -82,6 +90,19 @@ struct MtpContextView {
   torch::Tensor previous_hidden_output_;
   torch::Tensor no_previous_;
   torch::Tensor no_previous_mask_;
+  torch::Tensor draft_prefix_hidden_storage_;
+  torch::Tensor draft_prefix_hidden_;
+};
+
+// An event is never re-recorded while a producer/consumer retains this lease.
+// Host submission acknowledgement prevents waiting on an unrecorded event;
+// it does not wait for the device publication to complete.
+struct MtpContextPublication {
+  uint64_t task_id = 0;
+  StreamEventPtr ready;
+  std::mutex mutex;
+  std::condition_variable submitted_cv;
+  bool submitted = false;
 };
 
 // Fixed storage for the forwards in one speculative round. No scheduler,
@@ -164,6 +185,10 @@ struct TaskExecutionPipeline::SpeculativeSlot {
   torch::Tensor dummy_hidden;
   bool is_warmup = false;
   bool unified_graph = false;
+  bool context_prepared = false;
+  bool context_published = false;
+  std::shared_ptr<MtpContextPublication> publication;
+  std::shared_ptr<MtpContextPublication> predecessor_publication;
   uint32_t rows = 0;
   uint32_t samples = 0;
   uint32_t model_tokens = 0;
@@ -180,6 +205,7 @@ struct TaskExecutionPipeline::SpeculativeSlot {
   SamplingParameters host_validate_sampling;
   Bootstrap bootstrap;
   torch::Tensor draft_first_indices;
+  torch::Tensor draft_prefix_indices;
   torch::Tensor draft_block_indices;
   torch::Tensor target_token_storage;
   torch::Tensor target_tokens;

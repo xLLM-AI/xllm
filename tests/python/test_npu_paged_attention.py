@@ -102,6 +102,7 @@ def _ordinary_metadata(*, paged: bool) -> SimpleNamespace:
         kv_seq_lens=torch.tensor([6, 4], dtype=torch.int32),
         kv_seq_lens_host_values=[6, 4],
         is_prefill=not paged,
+        is_chunked_prefill=False,
         is_spec_verify=False,
         has_kv_shard=False,
     )
@@ -224,6 +225,127 @@ def test_prepared_host_lengths_remain_private_across_tasks(is_mla: bool, leading
             assert prepared.actual_seq_q == query_ends
             assert prepared.actual_seq_kv == kv_lengths
             assert prepared.actual_seq_q is not prepared.query_ends
+
+
+@pytest.mark.parametrize("width", [2, 3, 4, 17])
+@pytest.mark.parametrize("expanded", [False, True])
+def test_prepared_mtp_keeps_live_device_lengths(width: int, expanded: bool) -> None:
+    backend = _ordinary_backend()
+    rows = 2 * width
+    lengths = torch.arange(3, rows + 3, dtype=torch.int32)
+    table = torch.zeros(rows, 1, dtype=torch.int32)
+    expanded_view = SimpleNamespace(
+        enabled=expanded,
+        block_table=table,
+        kv_seq_lens=lengths,
+        kv_seq_lens_host_values=[100] * rows,
+    )
+    metadata = SimpleNamespace(
+        q_seq_lens=torch.full((2,), width, dtype=torch.int32) if expanded else torch.ones(rows, dtype=torch.int32),
+        q_cu_seq_lens_host_values=[0, width, rows] if expanded else list(range(rows + 1)),
+        block_table=torch.zeros(2, 1, dtype=torch.int32) if expanded else table,
+        kv_seq_lens=torch.ones(2, dtype=torch.int32) if expanded else lengths,
+        kv_seq_lens_host_values=[100] * (2 if expanded else rows),
+        slot_mapping=torch.zeros(rows, dtype=torch.int32),
+        expanded_decode_metadata=expanded_view,
+        linear_state_indices=torch.tensor([1, 2], dtype=torch.int32),
+        num_accepted_tokens=torch.tensor([1, width], dtype=torch.int32),
+        is_prefill=False,
+        is_chunked_prefill=expanded,
+        is_spec_verify=True,
+        has_kv_shard=False,
+    )
+    prepared = backend.prepare_metadata(metadata, device_kv_lengths=True)
+    assert prepared.device_kv_lengths is lengths
+    assert prepared.block_table is table
+    assert prepared.query_lengths == [1] * rows
+    assert prepared.query_ends == list(range(1, rows + 1))
+    assert prepared.kv_capacity == 128
+
+
+@pytest.mark.parametrize("width", [1, 4])
+def test_device_length_graph_skips_unused_tnd_workspace(width: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    from xllm.python.model_executor.forward_context import AclGraphExecutionState
+
+    backend = _ordinary_backend()
+    metadata = _ordinary_metadata(paged=True)
+    metadata.q_seq_lens.fill_(width)
+    metadata.q_cu_seq_lens_host_values = [width, 2 * width]
+    metadata.is_chunked_prefill = width > 1
+    metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=True)
+    execution = AclGraphExecutionState({}, {})
+    backend._paged_graph_state = object()
+
+    def reject_tnd_workspace(*args: object, **kwargs: object) -> None:
+        raise AssertionError("device-length BNSD graphs must not allocate unused TND .out workspace")
+
+    monkeypatch.setattr(backend, "_prepare_paged_graph", reject_tnd_workspace)
+    with forward_context(ForwardContext(backend, torch.device("cpu"), metadata, [], execution_state=execution)):
+        backend.prepare(metadata, graph_mode=True)
+
+    assert backend._paged_graph_state is None
+    assert backend._block_table_i32 is metadata.block_table
+    assert execution.paged_attention == {}
+    assert execution.persistent_buffers == {}
+
+
+def test_prepared_device_decode_masks_newly_rejected_tail(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = _ordinary_backend()
+    metadata = _ordinary_metadata(paged=True)
+    metadata.is_chunked_prefill = False
+    metadata.kv_seq_lens_host_values = [100, 100]
+    metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=True)
+    backend.prepare(metadata)
+    seen: list[torch.Tensor] = []
+
+    def attention(query: torch.Tensor, *args: object, **kwargs: object) -> tuple[torch.Tensor, None]:
+        seen.append(kwargs["atten_mask"].clone())
+        assert kwargs["actual_seq_lengths_kv"] == [128, 128]
+        assert kwargs["actual_seq_lengths"] == [1, 1]
+        return query, None
+
+    monkeypatch.setattr(torch.ops.npu, "npu_fused_infer_attention_score", attention, raising=False)
+    cache = backend._kv_caches[0].key
+    query = torch.zeros(2, 8, 64)
+    backend._decode(query, cache, cache, metadata, 2)
+    metadata.kv_seq_lens.copy_(torch.tensor([2, 9], dtype=torch.int32))
+    backend._decode(query, cache, cache, metadata, 2)
+    expected_first = torch.arange(128).view(1, 1, 1, -1) >= torch.tensor([6, 4]).view(2, 1, 1, 1)
+    expected_second = torch.arange(128).view(1, 1, 1, -1) >= torch.tensor([2, 9]).view(2, 1, 1, 1)
+    torch.testing.assert_close(seen[0], expected_first)
+    torch.testing.assert_close(seen[1], expected_second)
+
+
+@pytest.mark.parametrize("prepared", [False, True])
+def test_verify_routes_only_prepared_device_lengths_to_single_query_decode(prepared: bool) -> None:
+    backend = _ordinary_backend()
+    metadata = _ordinary_metadata(paged=True)
+    metadata.is_chunked_prefill = metadata.is_spec_verify = True
+    metadata.slot_mapping = torch.zeros(2, dtype=torch.int32)
+    metadata.linear_state_indices = torch.ones(1, dtype=torch.int32)
+    metadata.num_accepted_tokens = torch.ones(1, dtype=torch.int32)
+    if prepared:
+        metadata.expanded_decode_metadata = SimpleNamespace(
+            enabled=True,
+            block_table=metadata.block_table,
+            kv_seq_lens=metadata.kv_seq_lens,
+            kv_seq_lens_host_values=metadata.kv_seq_lens_host_values,
+        )
+        metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=True)
+    backend.prepare(metadata)
+    query = torch.zeros(2, 8 * 64)
+    key = value = torch.zeros(2, 2 * 64)
+    layer = SimpleNamespace(layer_id=0, causal=True)
+    context = ForwardContext(backend, torch.device("cpu"), metadata, backend._kv_caches)
+    with (
+        forward_context(context),
+        patch("xllm.python.attention.npu_paged_attention.kernels.reshape_paged_cache"),
+        patch.object(backend, "_prefill", return_value=query) as prefill,
+        patch.object(backend, "_decode", return_value=query) as decode,
+    ):
+        assert backend.execute(query, key, value, layer) is query
+    assert decode.call_count == int(prepared)
+    assert prefill.call_count == int(not prepared)
 
 
 def test_prepared_block_query_uses_cumulative_query_ends() -> None:

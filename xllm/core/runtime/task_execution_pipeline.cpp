@@ -23,6 +23,7 @@ limitations under the License.
 #include "core/framework/allocator/virtual_memory/physical_page_pool.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/sampling/sampler.h"
+#include "core/kv_cache/linear_state_restore.h"
 #include "core/kv_cache/transfer/kv_transfer_completion.h"
 #include "core/platform/platform.h"
 #include "core/runtime/decode_graph_bucket.h"
@@ -223,8 +224,10 @@ Status TaskExecutionPipeline::validate_input(const LlmForwardInput& source,
       !source.json_object_state_snapshots.empty() ||
       !source.json_object_invalid_draft.empty() ||
       !source.json_object_errors.empty() || params.is_spec_verify ||
-      params.prefill_without_cache || !params.linear_state_cache_ops.empty() ||
-      !params.linear_state_validity_mask.empty() ||
+      params.prefill_without_cache ||
+      ((!params.linear_state_cache_ops.empty() ||
+        !params.linear_state_validity_mask.empty()) &&
+       !capacity.model.enable_linear_attention) ||
       !params.multi_block_tables.empty() || params.mtp_topk_state != nullptr ||
       params.num_accepted_tokens.defined() ||
       !params.num_accepted_tokens_host.empty() ||
@@ -237,7 +240,7 @@ Status TaskExecutionPipeline::validate_input(const LlmForwardInput& source,
       !host.ring_cur_seqlen.empty() || !host.ring_cache_seqlen.empty()) {
     return Status(StatusCode::INVALID_ARGUMENT,
                   "Task pipeline requires CPU input without pre-expanded, "
-                  "structured or recurrent state.");
+                  "structured or unsupported recurrent state.");
   }
   if (!speculative && (params.mtp_shifted_token_ids.defined() ||
                        embedding.mtp_shifted_token_ids.defined() ||
@@ -250,16 +253,17 @@ Status TaskExecutionPipeline::validate_input(const LlmForwardInput& source,
   const auto inactive = [](int32_t id) { return id == -1; };
   const auto& linear_ids = embedding.linear_state_ids;
   const auto& linear_indices = embedding.linear_state_indices;
-  if ((!linear_ids.empty() &&
-       (linear_ids.size() != host.q_seq_lens.size() ||
-        !std::all_of(linear_ids.begin(), linear_ids.end(), inactive))) ||
-      (linear_indices.defined() &&
-       (!is_cpu_int_tensor(linear_indices, /*dimensions=*/1) ||
-        linear_indices.numel() !=
-            static_cast<int64_t>(host.q_seq_lens.size()) ||
-        !std::all_of(int_span(linear_indices).begin(),
-                     int_span(linear_indices).end(),
-                     inactive)))) {
+  if (!capacity.model.enable_linear_attention &&
+      ((!linear_ids.empty() &&
+        (linear_ids.size() != host.q_seq_lens.size() ||
+         !std::all_of(linear_ids.begin(), linear_ids.end(), inactive))) ||
+       (linear_indices.defined() &&
+        (!is_cpu_int_tensor(linear_indices, /*dimensions=*/1) ||
+         linear_indices.numel() !=
+             static_cast<int64_t>(host.q_seq_lens.size()) ||
+         !std::all_of(int_span(linear_indices).begin(),
+                      int_span(linear_indices).end(),
+                      inactive))))) {
     return Status(
         StatusCode::INVALID_ARGUMENT,
         "Task pipeline does not support active linear-attention state.");
@@ -654,10 +658,14 @@ Status TaskExecutionPipeline::validate(const Slot& slot,
   if (input.input_params.meta.batch_forward_type.is_empty()) {
     return Status();
   }
-  if (kv_caches_.empty() || kv_caches_.front().empty()) {
+  const auto full_attention = std::find_if(
+      kv_caches_.begin(), kv_caches_.end(), [](const KVCache& cache) {
+        return cache.get_k_cache().defined();
+      });
+  if (full_attention == kv_caches_.end()) {
     return Status(StatusCode::UNAVAILABLE, "KV cache is not allocated.");
   }
-  const int64_t blocks = kv_caches_.front().get_k_cache().size(/*dim=*/0);
+  const int64_t blocks = full_attention->get_k_cache().size(/*dim=*/0);
   const int64_t block_size = capacity_.logical_block_size;
   const auto& host = input.input_params.attention.host;
   const auto tokens = int_span(input.host_token_ids());
@@ -669,6 +677,30 @@ Status TaskExecutionPipeline::validate(const Slot& slot,
           : std::span<const int32_t>(host.new_cache_slots);
   const int64_t block_table_width =
       host.block_tables.defined() ? host.block_tables.size(/*dim=*/1) : 0;
+  if (capacity_.model.enable_linear_attention &&
+      !input.input_params.meta.is_graph_warmup) {
+    const auto& embedding = input.input_params.embedding;
+    const auto ids = embedding.linear_state_ids.empty()
+                         ? int_span(embedding.linear_state_indices)
+                         : std::span<const int32_t>(embedding.linear_state_ids);
+    for (const auto& cache : kv_caches_) {
+      const auto conv = cache.get_conv_cache();
+      if (!conv.defined()) {
+        continue;
+      }
+      const int64_t slots = conv.size(0);
+      if (std::any_of(ids.begin(), ids.end(), [slots](int32_t id) {
+            return id >= slots;
+          })) {
+        return invalid("Linear-state ID is outside allocated cache.");
+      }
+      for (const auto& op : input.input_params.linear_state_cache_ops) {
+        if (op.restore_src_slot_id >= slots) {
+          return invalid("Linear-state source is outside allocated cache.");
+        }
+      }
+    }
+  }
   int64_t offset = 0;
   for (uint32_t row = 0; row < host.q_seq_lens.size(); ++row) {
     const int32_t q = host.q_seq_lens[row];
@@ -850,6 +882,21 @@ void TaskExecutionPipeline::launch(uint32_t slot_id) {
         push_kv_(slot.transfer_kv_infos, slot.buffer->model_params()));
   }
   if (slot.buffer->tokens().numel() != 0) {
+    if (capacity_.model.enable_linear_attention) {
+      auto& model_params = slot.buffer->model_params();
+      // Host reloads can populate Conv/SSM caches as well as attention KV.
+      // Recurrent reset/restore must consume those loads on the task stream.
+      if (parallel.layer_wise_load_synchronizer != nullptr) {
+        CHECK(
+            parallel.layer_wise_load_synchronizer->wait_all_on_current_stream())
+            << "Hybrid model Host KV reload failed before state restoration.";
+      }
+      // Shared recurrent state is mutated only on the serialized Launch
+      // stream, after any previous Slot's forward has been enqueued.
+      restore_linear_state_slots(kv_caches_,
+                                 model_params.linear_state_cache_ops,
+                                 model_params.linear_state_validity_mask);
+    }
     slot.model_output = executor_.forward(slot.buffer->tokens(),
                                           slot.buffer->positions(),
                                           kv_caches_,

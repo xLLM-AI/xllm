@@ -58,7 +58,7 @@ from xllm.python.layers.npu.qwen3_5.decoder_layer import (
 from xllm.python.layers.npu.qwen3_5.gated_delta_net import (
     NpuQwen3_5GatedDeltaNet,
 )
-from xllm.python.layers.npu.qwen3_5.gdn_metadata import GdnMetadata, GdnPrefillMetadata
+from xllm.python.layers.npu.qwen3_5.gdn_metadata import GdnMetadata, GdnPrefillMetadata, GdnVerifyMetadata
 from xllm.python.layers.npu.qwen3_5.gdn_metadata_builder import (
     Qwen3_5GdnMetadataBuilder,
     _build_mega_prefill_indices,
@@ -696,6 +696,121 @@ def test_npu_gdn_uses_npu_prefill_fusion_boundary(monkeypatch: pytest.MonkeyPatc
     torch.testing.assert_close(args[10], torch.tensor([1], dtype=torch.int32))
     torch.testing.assert_close(args[11], torch.tensor([2], dtype=torch.int32))
     assert args[15] == 1
+
+
+@pytest.mark.parametrize("draft_width", [1, 2, 3, 4, 16])
+@pytest.mark.parametrize("legacy_chunked", [False, True])
+def test_npu_mtp_gdn_keeps_logical_state_rows(
+    draft_width: int, legacy_chunked: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    width = draft_width + 1
+    cfg = _linear_config(
+        linear_num_key_heads=1,
+        linear_num_value_heads=1,
+        linear_key_head_dim=128,
+        linear_value_head_dim=128,
+    )
+    builder = Qwen3_5GdnMetadataBuilder(cfg)
+    cache = LayerCache(
+        key=None,
+        value=None,
+        conv=torch.zeros(3, width + 2, 384, dtype=torch.bfloat16),
+        ssm=torch.zeros(3 * width, 1, 128, 128, dtype=torch.float32),
+    )
+    builder.bind_layer_caches([cache])
+    accepted = torch.tensor([1, width], dtype=torch.int32)
+    write = torch.tensor([1, 2], dtype=torch.int32)
+    read = write
+    metadata = SimpleNamespace(
+        slot_mapping=torch.zeros(2 * width, dtype=torch.int32),
+        q_seq_lens_host=torch.ones(2 * width, dtype=torch.int32),
+        linear_state_read_indices=read,
+        linear_state_write_indices=write,
+        num_accepted_tokens=accepted,
+        num_accepted_tokens_host_values=(),
+        is_spec_verify=True,
+        is_prefill=False,
+        is_chunked_prefill=legacy_chunked,
+        is_mixed=False,
+        expanded_decode_metadata=SimpleNamespace(enabled=legacy_chunked),
+    )
+
+    def reject_readback(*args: object, **kwargs: object) -> None:
+        raise AssertionError("MTP preparation must not read live accepted lengths on Host")
+
+    monkeypatch.setattr(torch.Tensor, "cpu", reject_readback)
+    monkeypatch.setattr(torch.Tensor, "tolist", reject_readback)
+    result = builder.build(metadata)
+    assert isinstance(result, GdnVerifyMetadata)
+    assert result.query_width == width
+    assert result.state_indices is write
+    assert result.packed_to_dense is None
+    assert result.num_accepted_tokens is accepted
+    assert result.state_caches[0] is cache
+    accepted[0] = width
+    assert result.num_accepted_tokens.data_ptr() == accepted.data_ptr()
+
+
+@pytest.mark.parametrize("width", [1, 18])
+def test_npu_mtp_gdn_rejects_unsupported_checkpoint_width(width: int) -> None:
+    cfg = _linear_config(
+        linear_num_key_heads=1,
+        linear_num_value_heads=1,
+        linear_key_head_dim=128,
+        linear_value_head_dim=128,
+    )
+    builder = Qwen3_5GdnMetadataBuilder(cfg)
+    builder.bind_layer_caches(
+        [
+            LayerCache(
+                key=None,
+                value=None,
+                conv=torch.zeros(2, width + 2, 384, dtype=torch.bfloat16),
+                ssm=torch.zeros(2 * width, 1, 128, 128, dtype=torch.float32),
+            )
+        ]
+    )
+    metadata = SimpleNamespace(
+        slot_mapping=torch.zeros(width, dtype=torch.int32),
+        linear_state_indices=torch.ones(1, dtype=torch.int32),
+        num_accepted_tokens=torch.ones(1, dtype=torch.int32),
+        is_spec_verify=True,
+        is_prefill=False,
+        is_chunked_prefill=False,
+        is_mixed=False,
+    )
+    with pytest.raises(ValueError, match="2 to 17 checkpoints"):
+        builder.build(metadata)
+
+
+def test_npu_mtp_gdn_projects_dense_groups_and_chunks_sequences(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _linear_config(
+        linear_num_key_heads=1,
+        linear_num_value_heads=1,
+        linear_key_head_dim=128,
+        linear_value_head_dim=128,
+    )
+    layer = NpuQwen3_5GatedDeltaNet(cfg, 0, torch.bfloat16, torch.device("cpu"))
+    layer.out_proj = torch.nn.Identity()
+    batch_size, width = 33, 3
+    indices = torch.arange(1, batch_size + 1, dtype=torch.int32)
+    accepted = torch.arange(batch_size, dtype=torch.int32) % width + 1
+    cache = LayerCache(
+        key=None,
+        value=None,
+        conv=torch.zeros(batch_size + 1, width + 2, 384, dtype=torch.bfloat16),
+        ssm=torch.zeros((batch_size + 1) * width, 1, 128, 128, dtype=torch.float32),
+    )
+    metadata = GdnVerifyMetadata({0: cache}, indices, accepted, width, None)
+    operation = MagicMock(side_effect=lambda _qkv, z, *_args: torch.zeros_like(z))
+    monkeypatch.setattr(kernels, "mega_gdn_mtp_decode", operation, raising=False)
+    output = layer._verify(torch.zeros(batch_size * width, 8, dtype=torch.bfloat16), metadata)
+    assert output.shape == (batch_size * width, 128)
+    assert [call.args[0].shape for call in operation.call_args_list] == [(32, width, 384), (1, width, 384)]
+    for call, start, end in zip(operation.call_args_list, (0, 32), (32, 33)):
+        torch.testing.assert_close(call.args[9], indices[start:end])
+        torch.testing.assert_close(call.args[10], indices[start:end])
+        torch.testing.assert_close(call.args[11], accepted[start:end])
 
 
 def test_npu_mega_prefill_builds_checkpoint_indices() -> None:

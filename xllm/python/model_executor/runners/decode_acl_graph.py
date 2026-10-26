@@ -60,20 +60,9 @@ from xllm.python.model_executor.runners.base import ModelExecutionOutput
 from xllm.python.model_executor.runners.decode_cuda_graph import (
     _decode_bucket,
 )
+from xllm.python.model_executor.runners.kv_capacity import kv_capacity_bucket, kv_capacity_buckets
 
-_GraphKey = tuple[
-    int,
-    bool,
-    torch.dtype | None,
-    torch.device | None,
-    tuple[int, ...] | None,
-    torch.dtype | None,
-    torch.device | None,
-    tuple[int, ...] | None,
-    tuple[int, ...],
-    tuple[int, ...],
-    tuple[int, ...],
-]
+_GraphKey = tuple[object, ...]
 
 
 @dataclass(slots=True)
@@ -126,6 +115,8 @@ class DecodeAclGraphRunner(AclGraphRunner):
         *,
         is_spec_draft: bool = False,
         enable_graph_mode_decode_no_padding: bool = False,
+        spec_verify_width: int = 1,
+        device_kv_lengths: bool = False,
     ) -> None:
         super().__init__(model, attention_backend, device)
         self.dp_size = dp_size
@@ -141,6 +132,12 @@ class DecodeAclGraphRunner(AclGraphRunner):
         if enable_graph_mode_decode_no_padding:
             self._capture_error_mode = "thread_local"
         self._serial_workspace_pool: list[torch.Tensor] | None = [] if enable_graph_mode_decode_no_padding else None
+        if not 1 <= spec_verify_width <= 17 or (is_spec_draft and spec_verify_width != 1):
+            raise ValueError("Speculative verify graph width must be in [1, 17], with width one for draft models")
+        self._spec_verify_width = spec_verify_width
+        if device_kv_lengths and dp_size != 1:
+            raise ValueError("Device-length ACL graphs require DP size one")
+        self._device_kv_lengths = device_kv_lengths
         self._has_index_cache = False
         self._has_linear_cache = False
         self._model_owns_linear_spec_verify = any(
@@ -207,6 +204,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             and not self.attention_backend.is_mla
             and linear_indices is not None
             and linear_indices.numel() > 0
+            and self._spec_verify_width == 1
             and not self.attention_backend.supports_linear_spec_verify_graph
             and not self._model_owns_linear_spec_verify
         ):
@@ -363,11 +361,11 @@ class DecodeAclGraphRunner(AclGraphRunner):
             batch_size = max(execution_counts)
         if batch_size > self.max_batch:
             raise ValueError("decode batch exceeds ACL graph capacity")
-        if self._model_owns_linear_spec_verify and metadata.is_spec_verify:
+        if (self._model_owns_linear_spec_verify and metadata.is_spec_verify) or self._spec_verify_width > 1:
             # MegaGdnMtpDecode consumes complete requests, including for MTP4
             # (width 5). Round request counts, never split a request at a token
             # bucket boundary.
-            width = self.num_decoding_tokens
+            width = self._spec_verify_width if self._spec_verify_width > 1 else self.num_decoding_tokens
             if batch_size % width:
                 raise ValueError("linear verify graph requires complete fixed-width requests")
             if self._enable_decode_no_padding:
@@ -602,6 +600,9 @@ class DecodeAclGraphRunner(AclGraphRunner):
         input_embedding: torch.Tensor | None,
         mtp_topk_indices: torch.Tensor | None,
         expanded: ExpandedDecodeMetadata | None,
+        *,
+        kv_capacity_pages: int = 0,
+        decode_metadata: DecodeAclGraphMetadata | None = None,
     ) -> tuple[_GraphKey, tuple[int, ...], tuple[int, ...]]:
         """Build the graph key plus the span layouts it was derived from."""
         batch_size = input_ids.shape[0]
@@ -620,7 +621,24 @@ class DecodeAclGraphRunner(AclGraphRunner):
             kpool_query_lens=kpool_query_lens,
             expanded_query_lens=expanded_query_lens,
         )
+        if self._device_kv_lengths:
+            if not kv_capacity_pages:
+                kv_capacity_pages = self._capacity_pages(
+                    self._decode_metadata(metadata, expanded) if decode_metadata is None else decode_metadata
+                )
+            graph_key = (*graph_key, kv_capacity_pages)
         return self._synchronize_dp_graph_key(graph_key, input_ids), kpool_query_lens, expanded_query_lens
+
+    def _capacity_page_limit(self) -> int:
+        return (self.max_model_len + self._logical_page_size - 1) // self._logical_page_size + 1
+
+    def _capacity_pages(self, metadata: DecodeAclGraphMetadata) -> int:
+        pages = kv_capacity_bucket(
+            metadata.kv_seq_lens_host_values, self._logical_page_size, self._capacity_page_limit()
+        )
+        if max(metadata.kv_seq_lens_host_values) > metadata.block_table.shape[1] * self._logical_page_size:
+            raise ValueError("Host KV upper bound exceeds the source block table")
+        return pages
 
     def warmup(
         self,
@@ -632,14 +650,66 @@ class DecodeAclGraphRunner(AclGraphRunner):
         *,
         eplb: EplbRuntimeState | None = None,
         decode_metadata: DecodeAclGraphMetadata | None = None,
+        is_graph_warmup: bool = False,
     ) -> _GraphKey:
         batch_size = input_ids.shape[0]
         padded_batch_size = self._padded_batch_size(batch_size, metadata)
 
         expanded = self._expanded_verify_view(metadata)
         graph_key, _, _ = self._resolve_graph_key(
-            input_ids, metadata, padded_batch_size, input_embedding, mtp_topk_indices, expanded
+            input_ids,
+            metadata,
+            padded_batch_size,
+            input_embedding,
+            mtp_topk_indices,
+            expanded,
+            decode_metadata=decode_metadata,
         )
+        if self._device_kv_lengths:
+            if not is_graph_warmup:
+                if graph_key not in self._graphs:
+                    raise RuntimeError("KV capacity graph was not captured during startup warmup")
+                return graph_key
+            capacity_pages = kv_capacity_buckets(self._capacity_page_limit())
+            previous_count = len(self._graphs)
+            for pages in capacity_pages:
+                capacity_key, _, _ = self._resolve_graph_key(
+                    input_ids,
+                    metadata,
+                    padded_batch_size,
+                    input_embedding,
+                    mtp_topk_indices,
+                    expanded,
+                    kv_capacity_pages=pages,
+                    decode_metadata=decode_metadata,
+                )
+                if capacity_key in self._graphs:
+                    continue
+                self._prepare_graph_entry(
+                    input_ids,
+                    positions,
+                    metadata,
+                    input_embedding,
+                    mtp_topk_indices,
+                    graph_key=capacity_key,
+                    eplb=eplb,
+                    expanded=expanded,
+                    decode_metadata=decode_metadata,
+                    kv_capacity_pages=pages,
+                    allow_capacity_capture=True,
+                )
+            if len(self._graphs) != previous_count:
+                logger.info(
+                    "Python KV capacity warmup: runner=ordinary model=%s rows=%d capacity_pages=%s "
+                    "capacity_tokens=%s binding_graphs=%d total_graphs=%d",
+                    type(self.model).__name__,
+                    padded_batch_size,
+                    capacity_pages,
+                    tuple(pages * self._logical_page_size for pages in capacity_pages),
+                    len(capacity_pages),
+                    len(self._graphs),
+                )
+            return graph_key
         if not self._synchronize_dp_graph_presence(graph_key, input_ids):
             return graph_key
 
@@ -775,11 +845,13 @@ class DecodeAclGraphRunner(AclGraphRunner):
 
         if not getattr(entry, "replay_logged", False):
             logger.info(
-                "Python ACL graph first replay: model=%s bucket=%d rows=%d mtp_topk=%s",
+                "Python ACL graph first replay: model=%s bucket=%d rows=%d mtp_topk=%s capacity_pages=%d capacity_tokens=%d",
                 type(self.model).__name__,
                 entry.batch_size,
                 batch_size,
                 mtp_topk_indices is not None,
+                entry.kv_capacity_pages,
+                entry.kv_capacity_pages * self._logical_page_size,
             )
             entry.replay_logged = True
 
@@ -853,22 +925,45 @@ class DecodeAclGraphRunner(AclGraphRunner):
         eplb: EplbRuntimeState | None = None,
         expanded: ExpandedDecodeMetadata | None = None,
         decode_metadata: DecodeAclGraphMetadata | None = None,
+        kv_capacity_pages: int = 0,
+        allow_capacity_capture: bool = False,
     ) -> AclGraphEntry:
         batch_size = input_ids.shape[0]
         padded_batch_size = self._padded_batch_size(batch_size, metadata)
 
         if expanded is None:
             expanded = self._expanded_verify_view(metadata)
+        if self._device_kv_lengths:
+            if decode_metadata is None:
+                decode_metadata = self._decode_metadata(metadata, expanded)
+            selected_pages = self._capacity_pages(decode_metadata)
+            if not kv_capacity_pages:
+                kv_capacity_pages = selected_pages
+            if kv_capacity_pages not in kv_capacity_buckets(self._capacity_page_limit()):
+                raise ValueError("KV capacity graph has an unsupported KV capacity")
+            if not allow_capacity_capture and selected_pages != kv_capacity_pages:
+                raise ValueError("KV capacity graph capacity does not match the current Host upper bound")
         resolved_spans: tuple[tuple[int, ...], tuple[int, ...]] | None = None
         if graph_key is None:
             graph_key, kpool_spans, expanded_spans = self._resolve_graph_key(
-                input_ids, metadata, padded_batch_size, input_embedding, mtp_topk_indices, expanded
+                input_ids,
+                metadata,
+                padded_batch_size,
+                input_embedding,
+                mtp_topk_indices,
+                expanded,
+                kv_capacity_pages=kv_capacity_pages,
+                decode_metadata=decode_metadata,
             )
             resolved_spans = (kpool_spans, expanded_spans)
+        if self._device_kv_lengths and graph_key[-1] != kv_capacity_pages:
+            raise ValueError("KV capacity graph key differs from its metadata")
         entry = self._graphs.get(graph_key)
         first_capture = entry is None
         decode_kwargs = {} if decode_metadata is None else {"decode_metadata": decode_metadata}
         if first_capture:
+            if self._device_kv_lengths and not allow_capacity_capture:
+                raise RuntimeError("KV capacity graph was not captured during startup warmup")
             entry = self._allocate_entry(
                 padded_batch_size,
                 input_ids,
@@ -877,6 +972,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 expanded=expanded,
                 kpool_query_lens=None if resolved_spans is None else resolved_spans[0],
                 expanded_query_lens=None if resolved_spans is None else resolved_spans[1],
+                **({"kv_capacity_pages": kv_capacity_pages} if self._device_kv_lengths else {}),
                 **decode_kwargs,
             )
             self._graphs[graph_key] = entry
@@ -995,6 +1091,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         kpool_query_lens: tuple[int, ...] | None = None,
         expanded_query_lens: tuple[int, ...] | None = None,
         decode_metadata: DecodeAclGraphMetadata | None = None,
+        kv_capacity_pages: int = 0,
     ) -> AclGraphEntry:
         device = input_ids.device
         if expanded is None:
@@ -1019,12 +1116,13 @@ class DecodeAclGraphRunner(AclGraphRunner):
 
         static_block_table = torch.zeros(
             padded_batch_size,
-            self._max_blocks_per_sequence,
+            kv_capacity_pages or self._max_blocks_per_sequence,
             dtype=torch.int32,
             device=device,
         )
 
         entry = AclGraphEntry()
+        entry.kv_capacity_pages = kv_capacity_pages
         entry.batch_size = padded_batch_size
         entry.graph = None
         entry.static_output = None
@@ -1046,6 +1144,9 @@ class DecodeAclGraphRunner(AclGraphRunner):
         if expanded_query_lens is None:
             expanded_query_lens = self._expanded_query_lens(metadata) if is_expanded else ()
         expanded_graph_query_lens = self._padded_expanded_query_lens(expanded_query_lens, padded_batch_size)
+        # Device-length attention consumes one query per physical row, even
+        # in padded draft buckets. GDN state slots remain logical sequences.
+        graph_query_lens = (1,) * padded_batch_size if self._device_kv_lengths else expanded_graph_query_lens
         entry.static_metadata = StaticGraphAttentionMetadata(
             slot_mapping=torch.zeros(
                 padded_batch_size,
@@ -1069,26 +1170,29 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 device=device,
             ),
             q_cu_seq_lens=(
-                torch.zeros(padded_batch_size + 1, dtype=torch.int32, device=device) if is_expanded else None
-            ),
-            q_seq_lens=(
-                torch.zeros(len(expanded_graph_query_lens), dtype=torch.int32, device=device)
-                if expanded_graph_query_lens
+                torch.arange(padded_batch_size + 1, dtype=torch.int32, device=device)
+                if self._device_kv_lengths
+                else torch.zeros(padded_batch_size + 1, dtype=torch.int32, device=device)
+                if is_expanded
                 else None
             ),
+            q_cu_seq_lens_host_values=list(range(padded_batch_size + 1)) if self._device_kv_lengths else None,
+            q_seq_lens=(torch.tensor(graph_query_lens, dtype=torch.int32, device=device) if graph_query_lens else None),
             q_seq_lens_host=(
-                torch.zeros(len(expanded_graph_query_lens), dtype=torch.int32) if expanded_graph_query_lens else None
+                torch.tensor(expanded_graph_query_lens or graph_query_lens, dtype=torch.int32)
+                if graph_query_lens
+                else None
             ),
             linear_state_indices=torch.zeros(
                 len(expanded_graph_query_lens)
-                if is_expanded and self._model_owns_linear_spec_verify
+                if is_expanded and (self._model_owns_linear_spec_verify or self._spec_verify_width > 1)
                 else padded_batch_size,
                 dtype=torch.int32,
                 device=device,
             ),
             num_accepted_tokens=(
                 torch.ones(len(expanded_graph_query_lens), dtype=torch.int32, device=device)
-                if is_expanded and self._model_owns_linear_spec_verify
+                if is_expanded and (self._model_owns_linear_spec_verify or self._spec_verify_width > 1)
                 else None
             ),
             kv_seq_lens_host_values=[1] * padded_batch_size,
@@ -1180,9 +1284,11 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 f"captured={static_metadata.kpool_query_lens}, current={kpool_query_lens}"
             )
         expanded_query_lens = self._expanded_query_lens(metadata) if expanded is not None else ()
-        if expanded is not None:
-            if not expanded_query_lens:
-                raise RuntimeError("expanded decode graph requires scheduler-provided query lengths")
+        if expanded is not None and not expanded_query_lens:
+            raise RuntimeError("expanded decode graph requires scheduler-provided query lengths")
+        if self._device_kv_lengths and expanded is not None and sum(expanded_query_lens) != batch_size:
+            raise RuntimeError("expanded decode query lengths must cover every input token")
+        if expanded is not None and not self._device_kv_lengths:
             if static_metadata.q_seq_lens is None or static_metadata.q_seq_lens_host is None:
                 raise RuntimeError("expanded decode graph is missing static query-length buffers")
             if len(expanded_query_lens) > static_metadata.q_seq_lens.numel():
@@ -1241,7 +1347,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             static_metadata.paged_kv_last_page_len,
             padded_batch_size,
         )
-        if expanded is not None and static_metadata.q_cu_seq_lens is not None:
+        if expanded is not None and static_metadata.q_cu_seq_lens is not None and not self._device_kv_lengths:
             # Expanded attention has one query token per physical row. The
             # caller can still provide cumulative ends per logical request;
             # preserve that grouping in q_seq_lens, not in this row buffer.
@@ -1265,6 +1371,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         )
         if static_metadata.num_accepted_tokens is not None:
             self._fill_linear_verify_state(entry, metadata, expanded_query_lens, linear_state_indices)
+            static_metadata.linear_state_write_indices = static_metadata.linear_state_indices
         elif linear_state_indices is not None:
             # MTP metadata carries one state index per sequence while the
             # decode graph input is expanded to one row per speculative token.
@@ -1290,6 +1397,10 @@ class DecodeAclGraphRunner(AclGraphRunner):
             static_metadata.linear_state_indices[batch_size:].zero_()
         self._fill_host_metadata(entry, kv_seq_lens_host_values, batch_size)
         self._fill_new_cache_slots_host_metadata(entry, metadata, batch_size)
+        if self._device_kv_lengths:
+            static_metadata.prepared_attention_state = self.attention_backend.prepare_metadata(
+                static_metadata, device_kv_lengths=True
+            )
 
         if input_embedding is not None:
             if input_embedding.shape[0] != batch_size:
@@ -1366,18 +1477,24 @@ class DecodeAclGraphRunner(AclGraphRunner):
         if state_indices.numel() != sequence_count:
             raise ValueError("linear verify state indices do not match the request count")
         accepted = metadata.num_accepted_tokens
-        accepted_host = tuple(metadata.num_accepted_tokens_host_values)
+        accepted_host = tuple(getattr(metadata, "num_accepted_tokens_host_values", ()))
         if accepted is None or accepted.ndim != 1 or accepted.numel() != sequence_count:
             raise ValueError("linear verify accepted counts must be sequence-scoped")
-        if len(accepted_host) != sequence_count or any(count < 1 or count > width for count in accepted_host):
+        if accepted_host and (
+            len(accepted_host) != sequence_count or any(count < 1 or count > width for count in accepted_host)
+        ):
             raise ValueError("linear verify accepted counts must be in [1, verify width]")
+        if not accepted_host and (
+            accepted.dtype != torch.int32 or accepted.device != state_indices.device or not accepted.is_contiguous()
+        ):
+            raise ValueError("linear verify requires final contiguous int32 accepted counts")
         static = entry.static_metadata
         static.linear_state_indices[:sequence_count].copy_(state_indices)
         static.linear_state_indices[sequence_count:].zero_()
         static.num_accepted_tokens[:sequence_count].copy_(accepted)
         static.num_accepted_tokens[sequence_count:].fill_(1)
-        static.num_accepted_tokens_host_values = accepted_host + (1,) * (
-            static.num_accepted_tokens.numel() - sequence_count
+        static.num_accepted_tokens_host_values = (
+            accepted_host + (1,) * (static.num_accepted_tokens.numel() - sequence_count) if accepted_host else ()
         )
 
     def _fill_dsa_block_tables(

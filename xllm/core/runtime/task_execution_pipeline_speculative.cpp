@@ -32,6 +32,7 @@ limitations under the License.
 #include "core/framework/speculative/draft_proposal.h"
 #include "core/framework/speculative/spec_verify.h"
 #include "core/framework/speculative/verify_layout.h"
+#include "core/kv_cache/linear_state_restore.h"
 #include "core/kv_cache/transfer/kv_transfer_completion.h"
 #include "core/runtime/dflash2_worker_impl.h"
 #include "runtime/dspark_worker_impl.h"
@@ -168,6 +169,7 @@ uint64_t state_bytes(const MtpContextTensors& state) {
                              &state.hidden,
                              &state.positions,
                              &state.kv_seq_lens,
+                             &state.accepted_lengths,
                              &state.repair_required}) {
     if (tensor->defined()) {
       bytes += tensor->nbytes();
@@ -306,6 +308,14 @@ Status TaskExecutionPipeline::create(
       static_cast<uint64_t>(capacity.num_speculative_tokens) + 1;
   const uint64_t rows =
       static_cast<uint64_t>(common.model.max_sequences) * width;
+  if (common.model.enable_linear_attention &&
+      (capacity.kind != SpeculativeTaskKind::MTP ||
+       capacity.num_speculative_tokens == 0 ||
+       capacity.num_speculative_tokens > 16 || common.dp_size != 1 ||
+       capacity.adaptive_target_verify || capacity.adaptive_draft_step)) {
+    return invalid(
+        "Hybrid MTP requires fixed widths, DP=1 and 1..16 speculative tokens.");
+  }
   if (capacity.kind == SpeculativeTaskKind::DSPARK && common.dp_size != 1 &&
       capacity.unified_graph) {
     return invalid("DP DSpark task pipeline requires split graphs.");
@@ -376,7 +386,13 @@ Status TaskExecutionPipeline::create(
       common.vocab_size == 0 ||
       (capacity.refresh_target_prefix &&
        capacity.kind != SpeculativeTaskKind::MTP) ||
-      (capacity.kind == SpeculativeTaskKind::MTP && !common.enable_mla) ||
+      (capacity.reuse_prefix_refresh_output &&
+       (!capacity.refresh_target_prefix || capacity.reuse_topk ||
+        capacity.num_speculative_tokens <= 1 || common.dp_size != 1 ||
+        common.cp_sampling_group != nullptr ||
+        capacity.adaptive_target_verify || capacity.adaptive_draft_step)) ||
+      (capacity.kind == SpeculativeTaskKind::MTP && !common.enable_mla &&
+       !common.model.enable_linear_attention) ||
       (capacity.kind != SpeculativeTaskKind::MTP &&
        (capacity.context_hidden_size == 0 || capacity.mask_token_id < 0 ||
         static_cast<uint32_t>(capacity.mask_token_id) >= common.vocab_size)) ||
@@ -433,9 +449,18 @@ Status TaskExecutionPipeline::initialize_speculative() {
   if (!status.ok()) {
     return status;
   }
+  reserve_draft_prefix_context(*context_, 0);
   const uint32_t draft_samples = block_draft() ? count * (width - 1) : count;
   const uint32_t max_batch_size = std::min(c.max_graph_batch_size, expanded);
-  graph_batch_sizes_ = decode_graph_batch_sizes(max_batch_size);
+  graph_batch_sizes_ = decode_graph_batch_sizes(c.model.enable_linear_attention
+                                                    ? max_batch_size / width
+                                                    : max_batch_size);
+  if (c.model.enable_linear_attention) {
+    // A captured recurrent invocation owns complete S-token sequence chunks.
+    for (int64_t& size : graph_batch_sizes_) {
+      size *= width;
+    }
+  }
   captured_graph_batch_sizes_.reserve(graph_batch_sizes_.size());
   const auto options = model_.options();
   const auto pinned = options.device(torch::kCPU).pinned_memory(true);
@@ -469,7 +494,10 @@ Status TaskExecutionPipeline::initialize_speculative() {
     if (!status.ok()) {
       return status;
     }
-    MtpInputSpec prefill_spec{c.model, context_hidden_size()};
+    ModelInputCapacity draft_model = c.model;
+    draft_model.enable_linear_attention = false;
+    MtpInputSpec prefill_spec{draft_model, context_hidden_size()};
+    prefill_spec.enable_mla = c.enable_mla;
     prefill_spec.context_only = block_draft();
     status = SlotBuffer::create_mtp_input(
         prefill_spec, hidden_dtype_, device_.unwrap(), slot->draft_prefill);
@@ -507,6 +535,9 @@ Status TaskExecutionPipeline::initialize_speculative() {
                     .reshape({-1});
     } else {
       slot->draft_first_indices = torch::arange(count, indices).mul(2).add(1);
+      if (speculative_capacity_->reuse_prefix_refresh_output) {
+        slot->draft_prefix_indices = torch::arange(count, indices);
+      }
     }
     if (adaptive_verify_) {
       slot->target_token_storage =
@@ -587,10 +618,11 @@ Status TaskExecutionPipeline::initialize_speculative() {
     for (uint32_t step = 0; step < draft_calls; ++step) {
       auto invocation = std::make_unique<SpeculativeSlot::Draft>();
       auto spec = validate_spec;
+      spec.model.enable_linear_attention = false;
       spec.kind = block_draft() ? MtpInvocationKind::BLOCK_DRAFT
                                 : MtpInvocationKind::DRAFT;
       spec.draft_step = step;
-      spec.enable_mla = !block_draft();
+      spec.enable_mla = !block_draft() && c.enable_mla;
       spec.mask_token_id =
           block_draft() ? speculative_capacity_->mask_token_id : 0;
       spec.sample_from_anchor =
@@ -631,8 +663,10 @@ Status TaskExecutionPipeline::initialize_speculative() {
     }
     if (speculative_capacity_->refresh_target_prefix) {
       auto refresh = std::make_unique<SpeculativeSlot::Draft>();
+      auto refresh_spec = validate_spec;
+      refresh_spec.model.enable_linear_attention = false;
       status = SlotBuffer::create_mtp_input(
-          validate_spec, hidden_dtype_, device_.unwrap(), refresh->input);
+          refresh_spec, hidden_dtype_, device_.unwrap(), refresh->input);
       if (!status.ok()) {
         return status;
       }
@@ -646,6 +680,17 @@ Status TaskExecutionPipeline::initialize_speculative() {
     task_slot->output_ready = reusable_event(device_.unwrap());
     task_slot->speculative = std::move(slot);
     slots_.emplace_back(std::move(task_slot));
+  }
+  if (prepares_mtp_context()) {
+    // At most one producer and predecessor per occupied Slot, plus the last
+    // admitted generation, can be retained. Keep one spare for admission.
+    const uint32_t publications = 2 * capacity_.slot_count + 1;
+    context_publications_.reserve(publications);
+    for (uint32_t index = 0; index < publications; ++index) {
+      auto publication = std::make_shared<MtpContextPublication>();
+      publication->ready = reusable_event(device_.unwrap());
+      context_publications_.emplace_back(std::move(publication));
+    }
   }
   return Status();
 }
@@ -801,6 +846,28 @@ Status TaskExecutionPipeline::validate_input(SpeculativeSlot& slot,
   if (!status.ok()) {
     return status;
   }
+  status = slot.target_prefill->validate_model_state(input);
+  if (!status.ok()) {
+    return status;
+  }
+  if (capacity_.model.enable_linear_attention &&
+      batch.forward_type.is_decode() &&
+      !input.input_params.meta.is_graph_warmup) {
+    const auto& params = input.input_params;
+    for (uint32_t row = 0; row < host.q_seq_lens.size(); ++row) {
+      bool valid = host.kv_seq_lens[row] > host.q_seq_lens[row];
+      if (!params.linear_state_validity_mask.empty()) {
+        valid = params.linear_state_validity_mask[row] != 0;
+      }
+      if (!params.linear_state_cache_ops.empty()) {
+        const auto& op = params.linear_state_cache_ops[row];
+        valid = op.restore_requested || (valid && !op.reset_requested);
+      }
+      if (!valid) {
+        return invalid("Hybrid MTP decode requires a warm recurrent state.");
+      }
+    }
+  }
   if (slot.adaptive && !adaptive_target_sampling(input.sampling_params)) {
     return invalid(
         "Adaptive DSpark task pipeline requires consistent sampling flags "
@@ -950,8 +1017,17 @@ Status TaskExecutionPipeline::validate_input(SpeculativeSlot& slot,
   if (!slot.run_models) {
     return Status();
   }
-  if (kv_caches_.empty() || kv_caches_.front().empty() ||
-      draft_->kv_caches.empty() || draft_->kv_caches.front().empty()) {
+  // Hybrid models may start with a recurrent layer. Page-table bounds belong
+  // to the full-attention pool, not the recurrent state bank of that layer.
+  const auto full_attention = [](const std::vector<KVCache>& caches) {
+    return std::find_if(caches.begin(), caches.end(), [](const KVCache& cache) {
+      return !cache.empty() && cache.get_k_cache().defined();
+    });
+  };
+  const auto target_cache = full_attention(kv_caches_);
+  const auto draft_cache = full_attention(draft_->kv_caches);
+  if (target_cache == kv_caches_.end() ||
+      draft_cache == draft_->kv_caches.end()) {
     return Status(StatusCode::UNAVAILABLE, "MTP requires Target and Draft KV.");
   }
   if (count == 0) {
@@ -960,9 +1036,8 @@ Status TaskExecutionPipeline::validate_input(SpeculativeSlot& slot,
     }
     return Status();
   }
-  const int64_t blocks =
-      std::min(kv_caches_.front().get_k_cache().size(/*dim=*/0),
-               draft_->kv_caches.front().get_k_cache().size(/*dim=*/0));
+  const int64_t blocks = std::min(target_cache->get_k_cache().size(/*dim=*/0),
+                                  draft_cache->get_k_cache().size(/*dim=*/0));
   if (std::any_of(
           host.block_tables.begin(),
           host.block_tables.end(),
@@ -1528,6 +1603,7 @@ void TaskExecutionPipeline::apply_bootstrap(SpeculativeSlot& slot) {
   }
   state.positions.index_copy_(/*dim=*/0, b.rows, b.state.positions);
   state.kv_seq_lens.index_copy_(/*dim=*/0, b.rows, b.state.kv_seq_lens);
+  state.accepted_lengths.index_fill_(/*dim=*/0, b.rows, /*value=*/1);
 }
 
 Status TaskExecutionPipeline::warmup_speculative_graphs(
@@ -1606,6 +1682,11 @@ Status TaskExecutionPipeline::warmup_speculative_graphs(
                                                         padded_batch_size);
       }
       CHECK(status.ok()) << status.message();
+      if (capacity_.model.enable_linear_attention) {
+        auto input_guard = prepare_stream_.set_stream_guard();
+        binding.prepare_model_state(
+            input, speculative_capacity_->num_speculative_tokens + 1);
+      }
       CHECK_EQ(prepare_stream_.synchronize(), 0);
 
       pad_task_parallel(binding.model_params().parallel, padded_batch_size);
@@ -2277,11 +2358,15 @@ Status TaskExecutionPipeline::prepare_speculative(
     slot.adaptive->generation = next_task_id_;
   }
   c10::DeviceGuard guard(device_.unwrap());
-  if (kv_caches_.empty() || kv_caches_.front().empty()) {
+  const auto embedding_cache = std::find_if(
+      kv_caches_.begin(), kv_caches_.end(), [](const KVCache& cache) {
+        return !cache.empty() && cache.get_k_cache().defined();
+      });
+  if (embedding_cache == kv_caches_.end()) {
     return Status(StatusCode::UNAVAILABLE,
                   "MTP embedding resources are not allocated.");
   }
-  const int64_t embedding_rows = kv_caches_.front().get_k_cache().size(0);
+  const int64_t embedding_rows = embedding_cache->get_k_cache().size(0);
   if (embedding_rows <= 0 ||
       embedding_rows > std::numeric_limits<int32_t>::max()) {
     return invalid("Invalid allocated MTP embedding capacity.");
@@ -2296,6 +2381,8 @@ Status TaskExecutionPipeline::prepare_speculative(
     if (!status.ok()) {
       return status;
     }
+    reserve_draft_prefix_context(*context,
+                                 static_cast<uint32_t>(embedding_rows));
     // Views retain the storage object's address, not its allocation contents.
     *context_ = std::move(*context);
     if (adaptive_verify_) {
@@ -2352,6 +2439,10 @@ Status TaskExecutionPipeline::prepare_speculative(
                                    input.sampling_params.logprobs);
   CHECK(status.ok()) << status.message();
   slot.is_warmup = input.input_params.meta.is_graph_warmup;
+  slot.state->reuse_draft_prefix_ =
+      slot.state->reuse_draft_prefix_ &&
+      speculative_capacity_->reuse_prefix_refresh_output && slot.decode &&
+      !slot.is_warmup;
   slot.unified_graph = slot.adaptive
                            ? speculative_capacity_->unified_graph
                            : supports_unified_block_graph(
@@ -2379,10 +2470,17 @@ Status TaskExecutionPipeline::prepare_speculative(
     if (slot.run_models) {
       prepare_empty_shard(slot, batch.batch_id);
     }
+    bind_mtp_publication(slot);
     record(prepare_stream_, slots_[slot_id]->input_ready);
     return Status();
   }
   if (slot.decode) {
+    if (capacity_.model.enable_linear_attention) {
+      status = slot.target_prefill->prepare(host, batch, prepare_stream_);
+      CHECK(status.ok()) << status.message();
+      auto input_guard = prepare_stream_.set_stream_guard();
+      slot.target_prefill->prepare_model_state(input);
+    }
     prepare_bootstrap(slot, input);
     auto conservative = host;
     conservative.positions = slot.upper_positions;
@@ -2408,6 +2506,10 @@ Status TaskExecutionPipeline::prepare_speculative(
                                                  slot.target_padded_batch_size);
     }
     CHECK(status.ok()) << status.message();
+    if (capacity_.model.enable_linear_attention) {
+      auto input_guard = prepare_stream_.set_stream_guard();
+      slot.validate_input->prepare_model_state(input, width);
+    }
     status = slot.validate_input->prepare_sampling(
         slot.host_validate_sampling,
         slot.adaptive ? slot.adaptive->plan.graph_rows : slot.rows * width,
@@ -2469,7 +2571,9 @@ Status TaskExecutionPipeline::prepare_speculative(
             prefix(slot.draft_block_indices, draft_rows);
       } else if (step == 0) {
         params.selected_token_idxes =
-            prefix(slot.draft_first_indices, slot.rows);
+            prefix(slot.state->reuse_draft_prefix_ ? slot.draft_prefix_indices
+                                                   : slot.draft_first_indices,
+                   slot.rows);
       }
       SampleOutput draft_output;
       draft_output.next_tokens = prefix(invocation.token_storage, draft_rows);
@@ -2507,6 +2611,10 @@ Status TaskExecutionPipeline::prepare_speculative(
   } else {
     status = slot.target_prefill->prepare(host, batch, prepare_stream_);
     CHECK(status.ok()) << status.message();
+    if (capacity_.model.enable_linear_attention) {
+      auto input_guard = prepare_stream_.set_stream_guard();
+      slot.target_prefill->prepare_model_state(input);
+    }
     status = SlotBuffer::prepare_planned_mtp_prefill(
         *slot.draft_prefill, host, batch, prepare_stream_);
     CHECK(status.ok()) << status.message();
@@ -2526,8 +2634,98 @@ Status TaskExecutionPipeline::prepare_speculative(
                                                   draft_input.model_params());
     }
   }
+  if (speculative_capacity_->reuse_prefix_refresh_output) {
+    const uint64_t generation =
+        slot.decode && !slot.is_warmup ? next_task_id_ : 0;
+    for (const int32_t id : input.input_params.embedding.embedding_ids) {
+      context_->draft_prefix_generations_[id] = generation;
+    }
+  }
+  bind_mtp_publication(slot);
+  if (prepares_mtp_context() && slot.decode && !slot.is_warmup) {
+    prepare_mtp_context(slot);
+  }
   record(prepare_stream_, slots_[slot_id]->input_ready);
   return Status();
+}
+
+bool TaskExecutionPipeline::prepares_mtp_context() const {
+  return speculative_capacity_->kind == SpeculativeTaskKind::MTP &&
+         !speculative_capacity_->adaptive_target_verify &&
+         !speculative_capacity_->adaptive_draft_step &&
+         !speculative_capacity_->unified_graph &&
+         capacity_.model.enable_linear_attention && !capacity_.enable_mla &&
+         capacity_.dp_size == 1 && capacity_.cp_sampling_group == nullptr &&
+         speculative_capacity_->num_speculative_tokens >= 1 &&
+         speculative_capacity_->num_speculative_tokens <= 16;
+}
+
+void TaskExecutionPipeline::bind_mtp_publication(SpeculativeSlot& slot) {
+  slot.context_prepared = false;
+  slot.context_published = false;
+  if (!prepares_mtp_context()) {
+    return;
+  }
+  CHECK(slot.publication == nullptr);
+  CHECK(slot.predecessor_publication == nullptr);
+  const auto available = std::find_if(
+      context_publications_.begin(),
+      context_publications_.end(),
+      [](const auto& publication) { return publication.use_count() == 1; });
+  CHECK(available != context_publications_.end())
+      << "MTP publication leases exceeded the bounded Slot ownership.";
+  slot.publication = *available;
+  slot.publication->task_id = next_task_id_;
+  slot.publication->submitted = false;
+  slot.predecessor_publication = last_context_publication_;
+  last_context_publication_ = slot.publication;
+}
+
+void TaskExecutionPipeline::prepare_mtp_context(SpeculativeSlot& slot) {
+  const auto& predecessor = slot.predecessor_publication;
+  if (predecessor != nullptr) {
+    // No Python/GIL or device synchronization is held here. Launch can submit
+    // this acknowledgement before entering its independent prefix-refresh body.
+    std::unique_lock<std::mutex> lock(predecessor->mutex);
+    predecessor->submitted_cv.wait(
+        lock, [&predecessor] { return predecessor->submitted; });
+    CHECK_LT(predecessor->task_id, slot.publication->task_id);
+  }
+  auto guard = prepare_stream_.set_stream_guard();
+  if (predecessor != nullptr) {
+    CHECK(prepare_stream_.wait_event(predecessor->ready));
+  }
+  context_gather_state(*slot.state);
+  apply_bootstrap(slot);
+  for (uint32_t step = 0; step < slot.drafts.size(); ++step) {
+    if (step == 0 && slot.state->reuse_draft_prefix_) {
+      continue;
+    }
+    SlotBuffer::patch_mtp_decode_metadata(*slot.drafts[step]->input,
+                                          *slot.state);
+  }
+  SlotBuffer::patch_mtp_decode_metadata(*slot.validate_input, *slot.state);
+  prefix(slot.validate_input->model_params().num_accepted_tokens, slot.rows)
+      .copy_(slot.state->state_.accepted_lengths);
+  if (slot.prefix_refresh) {
+    // Refresh positions use the old base, before Launch advances the context.
+    SlotBuffer::patch_mtp_decode_metadata(*slot.prefix_refresh->input,
+                                          *slot.state);
+  }
+  slot.context_prepared = true;
+}
+
+void TaskExecutionPipeline::publish_mtp_context(SpeculativeSlot& slot) {
+  if (slot.publication == nullptr || slot.context_published) {
+    return;
+  }
+  record(task_stream_, slot.publication->ready);
+  {
+    std::lock_guard<std::mutex> lock(slot.publication->mutex);
+    slot.publication->submitted = true;
+  }
+  slot.context_published = true;
+  slot.publication->submitted_cv.notify_all();
 }
 
 void TaskExecutionPipeline::prepare_empty_shard(SpeculativeSlot& slot,
@@ -2748,8 +2946,14 @@ void TaskExecutionPipeline::launch_prefix_refresh(SpeculativeSlot& slot) {
 }
 
 void TaskExecutionPipeline::launch_decode(SpeculativeSlot& slot) {
-  context_gather(*slot.state);
-  apply_bootstrap(slot);
+  if (slot.context_prepared) {
+    // Prefix output is published after the previous refresh, on this ordered
+    // stream. Its base metadata was already snapshotted by Prepare.
+    context_gather_prefix_hidden(*slot.state);
+  } else {
+    context_gather(*slot.state);
+    apply_bootstrap(slot);
+  }
   if (slot.adaptive && block_draft()) {
     launch_adaptive_verify(slot);
     return;
@@ -2763,42 +2967,53 @@ void TaskExecutionPipeline::launch_decode(SpeculativeSlot& slot) {
   } else {
     for (uint32_t step = 0; step < draft_calls(slot); ++step) {
       auto& invocation = *slot.drafts[step];
-      SlotBuffer::patch_mtp_decode(*invocation.input, *slot.state);
-      auto& binding = *invocation.input;
-      if (step == 0 && binding.model_params().enable_graph) {
-        invocation.next_hidden.copy_(slot.state->state_.hidden.view(
-            {2 * slot.rows, speculative_capacity_->common.hidden_size}));
-      }
-      if (step != 0) {
-        const auto& previous = *slot.drafts[step - 1];
-        prefix(binding.tokens(), slot.rows).copy_(previous.sampled.next_tokens);
-        const int64_t previous_rows = step == 1 ? 2 : 1;
-        invocation.next_hidden.copy_(
-            previous.output.hidden_states
-                .narrow(/*dim=*/0, /*start=*/0, slot.rows * previous_rows)
-                .view({slot.rows,
-                       previous_rows,
-                       speculative_capacity_->common.hidden_size})
-                .select(/*dim=*/1, previous_rows - 1));
-        if (speculative_capacity_->reuse_topk) {
-          CHECK(previous.output.mtp_topk_state != nullptr)
-              << "GLM Draft did not publish its configured TopK state.";
-          const auto topk = previous.output.mtp_topk_state->as_tensor();
-          CHECK(topk.has_value())
-              << "Prepared draft requires tensor-backed TopK state.";
-          invocation.next_topk.copy_(
-              topk->narrow(/*dim=*/0, /*start=*/0, slot.rows * previous_rows)
+      const bool reuse_prefix = step == 0 && slot.state->reuse_draft_prefix_;
+      if (reuse_prefix) {
+        invocation.output = ModelOutput(slot.state->draft_prefix_hidden_);
+      } else {
+        if (slot.context_prepared) {
+          SlotBuffer::patch_mtp_decode_tokens(*invocation.input, *slot.state);
+        } else {
+          SlotBuffer::patch_mtp_decode(*invocation.input, *slot.state);
+        }
+        auto& binding = *invocation.input;
+        if (step == 0 && binding.model_params().enable_graph) {
+          invocation.next_hidden.copy_(slot.state->state_.hidden.view(
+              {2 * slot.rows, speculative_capacity_->common.hidden_size}));
+        }
+        if (step != 0) {
+          const auto& previous = *slot.drafts[step - 1];
+          prefix(binding.tokens(), slot.rows)
+              .copy_(previous.sampled.next_tokens);
+          const int64_t previous_rows =
+              step == 1 && !slot.state->reuse_draft_prefix_ ? 2 : 1;
+          invocation.next_hidden.copy_(
+              previous.output.hidden_states
+                  .narrow(/*dim=*/0, /*start=*/0, slot.rows * previous_rows)
                   .view({slot.rows,
                          previous_rows,
-                         1,
-                         speculative_capacity_->index_topk})
+                         speculative_capacity_->common.hidden_size})
                   .select(/*dim=*/1, previous_rows - 1));
+          if (speculative_capacity_->reuse_topk) {
+            CHECK(previous.output.mtp_topk_state != nullptr)
+                << "GLM Draft did not publish its configured TopK state.";
+            const auto topk = previous.output.mtp_topk_state->as_tensor();
+            CHECK(topk.has_value())
+                << "Prepared draft requires tensor-backed TopK state.";
+            invocation.next_topk.copy_(
+                topk->narrow(/*dim=*/0, /*start=*/0, slot.rows * previous_rows)
+                    .view({slot.rows,
+                           previous_rows,
+                           1,
+                           speculative_capacity_->index_topk})
+                    .select(/*dim=*/1, previous_rows - 1));
+          }
         }
+        invocation.output = draft_->executor.forward(binding.tokens(),
+                                                     binding.positions(),
+                                                     draft_->kv_caches,
+                                                     binding.model_params());
       }
-      invocation.output = draft_->executor.forward(binding.tokens(),
-                                                   binding.positions(),
-                                                   draft_->kv_caches,
-                                                   binding.model_params());
       invocation.logits = draft_->model.logits(
           invocation.output.hidden_states,
           invocation.sampling->params.selected_token_idxes);
@@ -2826,8 +3041,18 @@ void TaskExecutionPipeline::launch_decode(SpeculativeSlot& slot) {
     launch_adaptive_verify(slot);
     return;
   }
-  SlotBuffer::patch_mtp_decode(*slot.validate_input, *slot.state);
+  if (slot.context_prepared) {
+    SlotBuffer::patch_mtp_decode_tokens(*slot.validate_input, *slot.state);
+  } else {
+    SlotBuffer::patch_mtp_decode(*slot.validate_input, *slot.state);
+  }
   auto& validate = *slot.validate_input;
+  if (capacity_.model.enable_linear_attention && !slot.context_prepared) {
+    // The verifier commits the previous round's true accepted checkpoint.
+    // Keep the captured Slot address stable and update only its contents.
+    prefix(validate.model_params().num_accepted_tokens, slot.rows)
+        .copy_(slot.state->state_.accepted_lengths);
+  }
   validate.tokens()
       .narrow(/*dim=*/0, /*start=*/0, slot.rows * width)
       .view({slot.rows, width})
@@ -2902,7 +3127,9 @@ void TaskExecutionPipeline::launch_decode(SpeculativeSlot& slot) {
   if (slot.prefix_refresh) {
     auto& refresh = *slot.prefix_refresh;
     // Snapshot before another body can reuse the verifier's output pool.
-    SlotBuffer::patch_mtp_decode(*refresh.input, *slot.state);
+    if (!slot.context_prepared) {
+      SlotBuffer::patch_mtp_decode(*refresh.input, *slot.state);
+    }
     prefix(refresh.hidden_storage, slot.rows * width)
         .copy_(slot.target_output.hidden_states);
     auto tokens = refresh.input->tokens().narrow(0, 0, slot.rows * width);
@@ -2915,8 +3142,24 @@ void TaskExecutionPipeline::launch_decode(SpeculativeSlot& slot) {
       block_draft() ? torch::Tensor()
                     : context.view({slot.rows, width, context_hidden_size()}));
   context_publish(*slot.state);
+  publish_mtp_context(slot);
   if (slot.prefix_refresh) {
     launch_prefix_refresh(slot);
+    if (speculative_capacity_->reuse_prefix_refresh_output && !slot.is_warmup) {
+      auto& state = *slot.state;
+      const auto refreshed =
+          slot.prefix_refresh->output.hidden_states
+              .narrow(/*dim=*/0, /*start=*/0, slot.rows * width)
+              .view({slot.rows, width, capacity_.hidden_size});
+      auto selected = state.draft_prefix_hidden_.unsqueeze(/*dim=*/1);
+      torch::gather_out(selected,
+                        refreshed,
+                        /*dim=*/1,
+                        state.last_hidden_indices_);
+      // Snapshot the borrowed output before any following model can reuse it.
+      state.context_->draft_prefix_hidden_.index_copy_(
+          /*dim=*/0, state.rows_, state.draft_prefix_hidden_);
+    }
   }
 }
 
@@ -3248,6 +3491,14 @@ void TaskExecutionPipeline::launch_speculative(uint32_t slot_id) {
   c10::DeviceGuard device_guard(device_.unwrap());
   auto guard = task_stream_.set_stream_guard();
   CHECK(task_stream_.wait_event(slots_[slot_id]->input_ready));
+  if (capacity_.model.enable_linear_attention && slot.rows != 0) {
+    // launch() has already waited for Host KV reloads, including Conv/SSM.
+    // Reset/restore and all recurrent forwards share this ordered stream.
+    auto& params = slot.target_prefill->model_params();
+    restore_linear_state_slots(kv_caches_,
+                               params.linear_state_cache_ops,
+                               params.linear_state_validity_mask);
+  }
   KVTransferCompletion kv_transfers;
   const auto& transfers = slots_[slot_id]->transfer_kv_infos;
   if (!transfers.empty()) {
@@ -3268,6 +3519,9 @@ void TaskExecutionPipeline::launch_speculative(uint32_t slot_id) {
   // Target and Draft have independent layer events and cache namespaces.
   // Both transfers must finish before publishing tokens/bootstrap hidden.
   CHECK(kv_transfers.wait()) << "Task pipeline MTP KV cache push failed";
+  // Prefill, empty and unchanged legacy paths still publish a generation for
+  // a following Prepare. Decode normally records it before prefix refresh.
+  publish_mtp_context(slot);
   record(task_stream_, slots_[slot_id]->output_ready);
   if (!slot.decode && slot.samples != 0) {
     CHECK(result_stream_.wait_event(slots_[slot_id]->output_ready));
@@ -3454,6 +3708,9 @@ void TaskExecutionPipeline::release_outputs(SpeculativeSlot& slot) {
   slot.draft_prefill->model_params().parallel.layer_synchronizer.reset();
 #endif
   context_release(*slot.state);
+  slot.publication.reset();
+  slot.predecessor_publication.reset();
+  slot.context_prepared = false;
   slot.draft_prefill->model_params().embedding.input_embedding =
       torch::Tensor();
   slot.target_output = ModelOutput();
@@ -3528,6 +3785,7 @@ uint64_t TaskExecutionPipeline::speculative_device_bytes() const {
     for (const auto* tensor : {&slot.context_slots_storage,
                                &slot.draft_block_indices,
                                &slot.draft_first_indices,
+                               &slot.draft_prefix_indices,
                                &slot.dummy_hidden}) {
       bytes += tensor->defined() ? tensor->nbytes() : 0;
     }
@@ -3567,11 +3825,12 @@ const SampleOutput& TaskExecutionPipeline::sample(Sampling& sampling,
 }
 
 namespace {
-constexpr std::array<torch::Tensor MtpContextTensors::*, 5> kContextFields = {
+constexpr std::array<torch::Tensor MtpContextTensors::*, 6> kContextFields = {
     &MtpContextTensors::previous_tokens,
     &MtpContextTensors::hidden,
     &MtpContextTensors::positions,
     &MtpContextTensors::kv_seq_lens,
+    &MtpContextTensors::accepted_lengths,
     &MtpContextTensors::repair_required};
 }  // namespace
 
@@ -3611,13 +3870,29 @@ Status TaskExecutionPipeline::create_mtp_context(
       torch::empty({capacity}, options.dtype(torch::kInt32));
   context->mtp_state_.kv_seq_lens =
       torch::empty({capacity}, options.dtype(torch::kInt32));
+  context->mtp_state_.accepted_lengths =
+      torch::ones({capacity}, options.dtype(torch::kInt32));
   output = std::move(context);
   return Status();
 }
 
 uint64_t TaskExecutionPipeline::mtp_context_bytes(
     const MtpContextStorage& cache) {
-  return cache.tokens_.nbytes() + state_bytes(cache.mtp_state_);
+  return cache.tokens_.nbytes() + state_bytes(cache.mtp_state_) +
+         (cache.draft_prefix_hidden_.defined()
+              ? cache.draft_prefix_hidden_.nbytes()
+              : 0);
+}
+
+void TaskExecutionPipeline::reserve_draft_prefix_context(
+    MtpContextStorage& context,
+    uint32_t capacity) {
+  if (!speculative_capacity_->reuse_prefix_refresh_output) {
+    return;
+  }
+  context.draft_prefix_generations_.resize(capacity);
+  context.draft_prefix_hidden_ =
+      torch::empty({capacity, capacity_.hidden_size}, model_.options());
 }
 
 // Block drafts keep their hidden context in KV. Their cross-round state only
@@ -3644,10 +3919,17 @@ Status TaskExecutionPipeline::context_create(
       torch::empty({capacity}, options.device(torch::kCPU).pinned_memory(true));
   view.device_rows_ = torch::empty({capacity}, options);
   view.token_storage_ = torch::empty({capacity}, options);
+  if (context.draft_prefix_hidden_.defined()) {
+    view.draft_prefix_hidden_storage_ =
+        torch::empty({capacity, context.draft_prefix_hidden_.size(/*dim=*/1)},
+                     context.draft_prefix_hidden_.options());
+  }
   view.storage_.positions =
       torch::empty({capacity}, options.dtype(torch::kInt32));
   view.storage_.kv_seq_lens =
       torch::empty({capacity}, options.dtype(torch::kInt32));
+  view.storage_.accepted_lengths =
+      torch::ones({capacity}, options.dtype(torch::kInt32));
   const bool history = context.mtp_state_.hidden.defined();
   // Both algorithms gather the last accepted token. Only MTP also gathers
   // its predecessor and tracks full-acceptance repair.
@@ -3807,6 +4089,8 @@ Status TaskExecutionPipeline::context_prepare_impl(
     }
     view.bootstrap_mask_[row] = 1;
   }
+  bool reuse_prefix = read_published_state && !embedding_ids.empty() &&
+                      view.context_->draft_prefix_hidden_.defined();
   for (uint32_t row = 0; row < embedding_ids.size(); ++row) {
     const int32_t id = embedding_ids[row];
     if (read_published_state && view.bootstrap_mask_[row] == 0 &&
@@ -3814,6 +4098,11 @@ Status TaskExecutionPipeline::context_prepare_impl(
          view.context_->request_ids_[id] != request_ids[row])) {
       return Status(StatusCode::INVALID_ARGUMENT,
                     "MTP decode has no published context for this request.");
+    }
+    if (reuse_prefix && (view.bootstrap_mask_[row] != 0 ||
+                         view.context_->request_ids_[id] != request_ids[row] ||
+                         view.context_->draft_prefix_generations_[id] == 0)) {
+      reuse_prefix = false;
     }
   }
   // Validation is complete. Host metadata only promises FIFO publication;
@@ -3826,6 +4115,7 @@ Status TaskExecutionPipeline::context_prepare_impl(
   c10::DeviceGuard guard(view.context_->tokens_.device());
   view.prepared_ = true;
   view.read_published_state_ = read_published_state;
+  view.reuse_draft_prefix_ = reuse_prefix;
   const int64_t count = static_cast<int64_t>(published_sequence_rows.size());
   int64_t* host = view.host_rows_.data_ptr<int64_t>();
   for (int64_t index = 0; index < count; ++index) {
@@ -3833,6 +4123,10 @@ Status TaskExecutionPipeline::context_prepare_impl(
   }
   view.rows_ = view.device_rows_.narrow(/*dim=*/0, /*start=*/0, count);
   view.tokens_ = view.token_storage_.narrow(/*dim=*/0, /*start=*/0, count);
+  if (view.draft_prefix_hidden_storage_.defined()) {
+    view.draft_prefix_hidden_ =
+        prefix(view.draft_prefix_hidden_storage_, count);
+  }
   for (const auto member : kContextFields) {
     const torch::Tensor& storage = view.storage_.*member;
     view.state_.*member = storage.defined()
@@ -3872,6 +4166,11 @@ Status TaskExecutionPipeline::context_prepare_impl(
 }
 
 void TaskExecutionPipeline::context_gather(MtpContextView& view) {
+  context_gather_state(view);
+  context_gather_prefix_hidden(view);
+}
+
+void TaskExecutionPipeline::context_gather_state(MtpContextView& view) {
   if (!view.prepared_ || view.tokens_.numel() == 0) {
     return;
   }
@@ -3885,6 +4184,17 @@ void TaskExecutionPipeline::context_gather(MtpContextView& view) {
     }
     torch::index_select_out(view.state_.*member, source, /*dim=*/0, view.rows_);
   }
+}
+
+void TaskExecutionPipeline::context_gather_prefix_hidden(MtpContextView& view) {
+  if (!view.prepared_ || view.tokens_.numel() == 0 ||
+      !view.reuse_draft_prefix_) {
+    return;
+  }
+  torch::index_select_out(view.draft_prefix_hidden_,
+                          view.context_->draft_prefix_hidden_,
+                          /*dim=*/0,
+                          view.rows_);
 }
 
 void TaskExecutionPipeline::context_publish(MtpContextView& view) {
@@ -3959,18 +4269,23 @@ void TaskExecutionPipeline::context_advance(
   }
   view.state_.positions.add_(accepted_lengths);
   view.state_.kv_seq_lens.add_(accepted_lengths);
+  view.state_.accepted_lengths.copy_(accepted_lengths);
 }
 
 void TaskExecutionPipeline::context_release(MtpContextView& view) {
   view.prepared_ = false;
   view.read_published_state_ = false;
+  view.reuse_draft_prefix_ = false;
 }
 
 uint64_t TaskExecutionPipeline::context_device_bytes(
     const MtpContextView& view) {
   return view.device_rows_.nbytes() + view.token_storage_.nbytes() +
          state_bytes(view.storage_) + view.index_storage_.nbytes() +
-         (view.mask_storage_.defined() ? view.mask_storage_.nbytes() : 0);
+         (view.mask_storage_.defined() ? view.mask_storage_.nbytes() : 0) +
+         (view.draft_prefix_hidden_storage_.defined()
+              ? view.draft_prefix_hidden_storage_.nbytes()
+              : 0);
 }
 
 }  // namespace xllm

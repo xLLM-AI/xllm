@@ -740,6 +740,8 @@ class TestModelExecutorConstruction:
             is_spec_draft=False,
             enable_mega_moe_token_mask=False,
             enable_graph_mode_decode_no_padding=False,
+            spec_verify_width=1,
+            device_kv_lengths=False,
         )
 
     @patch("xllm.python.model_executor.runners.decode_acl_graph.DecodeAclGraphRunner")
@@ -800,6 +802,8 @@ class TestModelExecutorConstruction:
             is_spec_draft=False,
             enable_mega_moe_token_mask=True,
             enable_graph_mode_decode_no_padding=False,
+            spec_verify_width=1,
+            device_kv_lengths=False,
         )
 
 
@@ -1255,6 +1259,7 @@ class TestDecodeAclGraphSpeculativeMetadata:
         graph = MagicMock()
         entry = SimpleNamespace(
             batch_size=padded_batch_size,
+            kv_capacity_pages=0,
             graph=graph,
             static_output=static_output,
             static_metadata=SimpleNamespace(),
@@ -2088,6 +2093,278 @@ def test_executor_prepares_private_metadata_after_cache_binding() -> None:
     executor.prepare_metadata(metadata)
     assert metadata.prepared_attention_state.source == [1, 2]
     assert not backend._prepared
+
+
+def _prepared_qwen_metadata() -> SimpleNamespace:
+    return SimpleNamespace(
+        slot_mapping=torch.arange(2, dtype=torch.int32),
+        q_seq_lens=torch.ones(2, dtype=torch.int32),
+        q_cu_seq_lens=torch.arange(3, dtype=torch.int32),
+        q_cu_seq_lens_host_values=[1, 2],
+        linear_state_indices=torch.tensor([1, 2], dtype=torch.int32),
+        has_initial_state=torch.ones(2, dtype=torch.bool),
+        is_prefill=False,
+        is_chunked_prefill=False,
+        is_spec_verify=False,
+    )
+
+
+@pytest.mark.parametrize("model_type", ["qwen3_5_text", "qwen3_5_moe_text"])
+@pytest.mark.parametrize("graph_backend", ["off", "aclgraph"])
+@pytest.mark.parametrize("direct_read", [False, True])
+def test_executor_accepts_prepared_qwen_hybrid_generation(
+    model_type: str, graph_backend: str, direct_read: bool
+) -> None:
+    backend = _PreparedStubAttentionBackend()
+    config = {
+        "model_type": model_type,
+        "python_graph_backend": graph_backend,
+        "enable_task_pipeline": True,
+    }
+    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
+        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2)
+
+    assert executor.supports_prepared_metadata
+    assert (executor.prepared_graph_runner is not None) == (graph_backend == "aclgraph")
+    assert executor.decode_graph_runner is None
+    cache = torch.empty(2, 4, 2, 64)
+    executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
+    metadata = _prepared_qwen_metadata()
+    if direct_read:
+        metadata.is_prefill = True
+        metadata.linear_state_read_indices = torch.tensor([3, 4], dtype=torch.int32)
+    executor.prepare_metadata(metadata)
+    assert metadata.prepared_attention_state.source == [1, 2]
+    assert not backend._prepared
+
+
+@pytest.mark.parametrize("draft_tokens", [1, 2, 3, 7, 16])
+@pytest.mark.parametrize("graph_backend", ["off", "aclgraph"])
+def test_executor_prepares_qwen_mtp_with_logical_accepted_state(draft_tokens: int, graph_backend: str) -> None:
+    backend = _PreparedStubAttentionBackend()
+    config = {
+        "model_type": "qwen3_5_text",
+        "is_mtp_algorithm": True,
+        "num_speculative_tokens": draft_tokens,
+        "enable_task_pipeline": True,
+        "python_graph_backend": graph_backend,
+    }
+    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
+        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2, num_decoding_tokens=draft_tokens + 1)
+    cache = torch.empty(2, 4, 2, 64)
+    executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
+    metadata = _prepared_qwen_metadata()
+    rows = 2 * (draft_tokens + 1)
+    metadata.slot_mapping = torch.arange(rows, dtype=torch.int32)
+    metadata.q_seq_lens = torch.ones(rows, dtype=torch.int32)
+    metadata.q_cu_seq_lens = torch.arange(rows + 1, dtype=torch.int32)
+    metadata.q_cu_seq_lens_host_values = list(range(rows + 1))
+    metadata.num_accepted_tokens = torch.tensor([1, draft_tokens + 1], dtype=torch.int32)
+    metadata.is_spec_verify = True
+    executor.prepare_metadata(metadata)
+    assert executor.supports_prepared_metadata
+    assert metadata.prepared_attention_state.device_kv_lengths
+    assert metadata.linear_state_indices.numel() == metadata.num_accepted_tokens.numel() == 2
+    metadata.num_accepted_tokens = metadata.num_accepted_tokens.to(torch.int64)
+    with pytest.raises(ValueError, match="accepted token counts"):
+        executor.prepare_metadata(metadata)
+
+
+@pytest.mark.parametrize("model_type", ["qwen3_5_mtp"])
+def test_executor_prepares_qwen_draft_device_lengths_only_for_decode(model_type: str) -> None:
+    backend = _PreparedStubAttentionBackend()
+    config = {"model_type": model_type, "is_mtp_algorithm": True, "is_draft_engine": True}
+    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
+        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2)
+    cache = torch.empty(2, 4, 2, 64)
+    executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
+    metadata = _prepared_qwen_metadata()
+    executor.prepare_metadata(metadata)
+    assert metadata.prepared_attention_state.device_kv_lengths
+    metadata.is_prefill = True
+    executor.prepare_metadata(metadata)
+    assert not metadata.prepared_attention_state.device_kv_lengths
+
+
+@pytest.mark.parametrize("draft_tokens", [1, 2, 3, 4, 16])
+@pytest.mark.parametrize("pipeline", [False, True])
+def test_qwen_draft_prefix_capacity_reaches_backend_and_both_graph_paths(draft_tokens: int, pipeline: bool) -> None:
+    width = draft_tokens + 1
+    config = {
+        "model_type": "qwen3_5_mtp",
+        "is_draft_engine": True,
+        "is_mtp_algorithm": True,
+        # Ordinary draft still decodes one token in later steps. The first
+        # pass must independently reserve the complete accepted target prefix.
+        "num_speculative_tokens": 0,
+        "mtp_draft_prefix_width": width,
+        "enable_task_pipeline": pipeline,
+        "python_graph_backend": "aclgraph",
+        "max_position_embeddings": 128,
+    }
+    with patch(
+        "xllm.python.model_executor.executor._create_attention_backend",
+        return_value=_PreparedStubAttentionBackend(),
+    ) as create:
+        executor = ModelExecutor(
+            _FakeModel(),
+            config,
+            max_seqs_per_batch=5,
+            num_decoding_tokens=1,
+            acl_graph_decode_batch_size_limit=4,
+        )
+    assert create.call_args.args[4] == 5 * width
+    assert create.call_args.kwargs["num_decoding_tokens"] == width
+    runner = executor.prepared_graph_runner if pipeline else executor.decode_graph_runner
+    assert runner is not None and runner.max_batch == 4 * width
+    assert (executor.decode_graph_runner is None) is pipeline
+
+
+def test_glm_draft_ignores_qwen_prefix_capacity_option() -> None:
+    config = {
+        "model_type": "glm_moe_dsa_mtp",
+        "is_draft_engine": True,
+        "is_mtp_algorithm": True,
+        "mtp_draft_prefix_width": 17,
+        "python_graph_backend": "aclgraph",
+        "max_position_embeddings": 128,
+    }
+    with patch(
+        "xllm.python.model_executor.executor._create_attention_backend",
+        return_value=_PreparedStubAttentionBackend(),
+    ) as create:
+        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=5, acl_graph_decode_batch_size_limit=4)
+    assert create.call_args.kwargs["num_decoding_tokens"] == 1
+    assert create.call_args.args[4] == 10
+    assert executor.decode_graph_runner.max_batch == 8
+
+
+@pytest.mark.parametrize("width", [0, 18])
+def test_qwen_draft_rejects_unsupported_prefix_capacity(width: int) -> None:
+    with pytest.raises(ValueError, match="prefix width"):
+        ModelExecutor(
+            _FakeModel(),
+            {"model_type": "qwen3_5_mtp", "mtp_draft_prefix_width": width},
+            max_seqs_per_batch=2,
+        )
+
+
+def test_executor_rejects_qwen_mtp_width_beyond_kernel_capacity() -> None:
+    with (
+        patch(
+            "xllm.python.model_executor.executor._create_attention_backend",
+            return_value=_PreparedStubAttentionBackend(),
+        ),
+        pytest.raises(NotImplementedError, match="1 to 16"),
+    ):
+        ModelExecutor(
+            _FakeModel(),
+            {"model_type": "qwen3_5_text", "is_mtp_algorithm": True, "num_speculative_tokens": 17},
+            max_seqs_per_batch=2,
+        )
+
+
+@pytest.mark.parametrize("adaptive", ["enable_adaptive_draft_step", "enable_adaptive_target_verify"])
+def test_executor_keeps_adaptive_qwen_on_upstream_legacy_metadata(adaptive: str) -> None:
+    config = {
+        "model_type": "qwen3_5_text",
+        "is_mtp_algorithm": True,
+        "num_speculative_tokens": 3,
+        "python_graph_backend": "aclgraph",
+        "max_position_embeddings": 128,
+        adaptive: True,
+    }
+    with patch(
+        "xllm.python.model_executor.executor._create_attention_backend", return_value=_PreparedStubAttentionBackend()
+    ):
+        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2, num_decoding_tokens=4)
+    assert not executor.supports_prepared_metadata
+    assert not executor.decode_graph_runner._device_kv_lengths
+    assert executor.decode_graph_runner._spec_verify_width == 1
+
+
+@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
+def test_executor_rejects_prepared_qwen_multimodal_metadata(model_type: str) -> None:
+    backend = _PreparedStubAttentionBackend()
+    config = {"model_type": model_type, "python_graph_backend": "off", "enable_task_pipeline": True}
+    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
+        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2)
+    assert not executor.supports_prepared_metadata
+    cache = torch.empty(2, 4, 2, 64)
+    executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
+    metadata = _prepared_qwen_metadata()
+    with (
+        patch.object(backend, "prepare_metadata", wraps=backend.prepare_metadata) as prepare,
+        pytest.raises(RuntimeError, match="prepared metadata requires an initialized supported"),
+    ):
+        executor.prepare_metadata(metadata)
+    prepare.assert_not_called()
+    assert not hasattr(metadata, "prepared_attention_state")
+
+
+@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
+def test_executor_rejects_prepared_qwen_multimodal_acl_graph(model_type: str) -> None:
+    config = {"model_type": model_type, "python_graph_backend": "aclgraph", "enable_task_pipeline": True}
+    with (
+        patch(
+            "xllm.python.model_executor.executor._create_attention_backend",
+            return_value=_PreparedStubAttentionBackend(),
+        ),
+        pytest.raises(ValueError, match="prepared ACL graphs require a supported target or MTP model"),
+    ):
+        ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2)
+
+
+@pytest.mark.parametrize(
+    "unsupported,num_decoding_tokens",
+    [
+        ({"num_speculative_tokens": 1}, 1),
+        ({}, 0),
+        ({}, 2),
+        ({"is_draft_engine": True}, 1),
+        ({"task_type": "embed"}, 1),
+    ],
+)
+def test_executor_rejects_prepared_qwen_nonordinary_generation(
+    unsupported: dict[str, object], num_decoding_tokens: int
+) -> None:
+    with patch(
+        "xllm.python.model_executor.executor._create_attention_backend", return_value=_PreparedStubAttentionBackend()
+    ):
+        executor = ModelExecutor(
+            _FakeModel(),
+            {"model_type": "qwen3_5_text", "python_graph_backend": "off", **unsupported},
+            max_seqs_per_batch=2,
+            num_decoding_tokens=num_decoding_tokens,
+        )
+    assert not executor.supports_prepared_metadata
+
+
+@pytest.mark.parametrize("invalid", ["missing_indices", "dtype", "validity", "query_ends", "separate_read"])
+def test_executor_validates_final_qwen_state_views_before_preparing_attention(invalid: str) -> None:
+    backend = _PreparedStubAttentionBackend()
+    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
+        executor = ModelExecutor(_FakeModel(), {"model_type": "qwen3_5_text"}, max_seqs_per_batch=2)
+    cache = torch.empty(2, 4, 2, 64)
+    executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
+    metadata = _prepared_qwen_metadata()
+    if invalid == "missing_indices":
+        metadata.linear_state_indices = None
+    elif invalid == "dtype":
+        metadata.linear_state_indices = metadata.linear_state_indices.to(torch.int64)
+    elif invalid == "validity":
+        metadata.has_initial_state = None
+    elif invalid == "query_ends":
+        metadata.q_cu_seq_lens = metadata.q_cu_seq_lens[1:]
+    elif invalid == "separate_read":
+        metadata.linear_state_read_indices = metadata.linear_state_indices.clone()
+    with (
+        patch.object(backend, "prepare_metadata", wraps=backend.prepare_metadata) as prepare,
+        pytest.raises(ValueError, match="prepared Qwen GDN"),
+    ):
+        executor.prepare_metadata(metadata)
+    prepare.assert_not_called()
+    assert not hasattr(metadata, "prepared_attention_state")
 
 
 @pytest.mark.parametrize(

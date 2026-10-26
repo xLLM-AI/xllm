@@ -344,7 +344,13 @@ class ModelExecutor:
 
         first_parameter = next(model.parameters())
         device = first_parameter.device
+        ordinary_decode = int(num_decoding_tokens) == 1
         num_decoding_tokens = max(1, int(num_decoding_tokens), int(config.get("num_speculative_tokens", 0)) + 1)
+        if config.get("model_type") == "qwen3_5_mtp":
+            prefix_width = int(config.get("mtp_draft_prefix_width", 1))
+            if not 1 <= prefix_width <= 17:
+                raise ValueError("Qwen MTP draft prefix width must be in [1, 17]")
+            num_decoding_tokens = max(num_decoding_tokens, prefix_width)
         # GLM MTP can prepend a repair row after all draft tokens are accepted.
         # Two requests then need up to four attention rows, even though later
         # draft steps still decode one token per request.
@@ -409,10 +415,52 @@ class ModelExecutor:
         prepared_kv = dcp_size == prepared_kv_split and (
             prepared_kv_split == 1 or (prepared_kv_split > 1 and prepared_glm_parallel)
         )
+        # Multimodal aliases own per-step embedding state outside prepared inputs.
+        self._prepared_qwen_gdn = config.get("model_type") in ("qwen3_5_text", "qwen3_5_moe_text")
+        qwen_mtp_parallel = dp_size == cp_size == prepared_kv_split == self.layerwise_split_size == 1
+        qwen_mtp_requested = bool(config.get("is_mtp_algorithm", False)) and (
+            (self._prepared_qwen_gdn and self.num_speculative_tokens > 0) or config.get("model_type") == "qwen3_5_mtp"
+        )
+        if qwen_mtp_requested and config.get("enable_task_pipeline", False) and not qwen_mtp_parallel:
+            raise NotImplementedError("Python Qwen MTP requires DP, CP, KV split and layerwise sizes of one")
+        if qwen_mtp_requested and self._prepared_qwen_gdn and not 1 <= self.num_speculative_tokens <= 16:
+            raise NotImplementedError("Python Qwen MTP supports 1 to 16 speculative tokens")
+        self._prepared_qwen_mtp_target = (
+            config.get("model_type") == "qwen3_5_text"
+            and bool(config.get("is_mtp_algorithm", False))
+            and 1 <= self.num_speculative_tokens <= 16
+            and int(config.get("num_speculative_tokens", 0)) + 1 == int(num_decoding_tokens)
+            and not config.get("is_draft_engine", False)
+            and config.get("task_type", "generate") == "generate"
+            and qwen_mtp_parallel
+            and not config.get("enable_adaptive_draft_step", False)
+            and not config.get("enable_adaptive_target_verify", False)
+        )
+        self._prepared_qwen_mtp_draft = (
+            config.get("model_type") == "qwen3_5_mtp"
+            and bool(config.get("is_mtp_algorithm", False))
+            and config.get("is_draft_engine", False)
+            and self.num_speculative_tokens == 0
+            and 1 <= num_decoding_tokens <= 17
+            and config.get("task_type", "generate") == "generate"
+            and qwen_mtp_parallel
+            and not config.get("enable_adaptive_draft_step", False)
+            and not config.get("enable_adaptive_target_verify", False)
+        )
+        prepared_qwen_generation = (
+            self._prepared_qwen_gdn
+            and self.num_speculative_tokens == 0
+            and ordinary_decode
+            and not config.get("is_draft_engine", False)
+            and config.get("task_type", "generate") == "generate"
+        )
         self._supports_prepared_metadata = (
             self.attention_backend.supports_prepared_metadata
             and (
                 config.get("model_type") in ("qwen3", "glm_moe_dsa", "glm_moe_dsa_mtp")
+                or prepared_qwen_generation
+                or self._prepared_qwen_mtp_target
+                or self._prepared_qwen_mtp_draft
                 or (self._prepared_block_draft and graph_backend in _DISABLED_GRAPH_BACKENDS)
                 or (self._prepared_dspark and config.get("enable_task_pipeline", False) and graph_backend == "aclgraph")
             )
@@ -485,6 +533,8 @@ class ModelExecutor:
                     dp_rank,
                     enable_mega_moe_token_mask=bool(config.get("enable_mega_moe", False)),
                     block_draft=self._prepared_dspark,
+                    spec_verify_width=self.num_speculative_tokens + 1 if self._prepared_qwen_mtp_target else 1,
+                    device_kv_lengths=self._prepared_qwen_mtp_target or self._prepared_qwen_mtp_draft,
                 )
             else:
                 if self._independent_block_draft:
@@ -512,6 +562,8 @@ class ModelExecutor:
                         enable_graph_mode_decode_no_padding=bool(
                             config.get("enable_graph_mode_decode_no_padding", False)
                         ),
+                        spec_verify_width=self.num_speculative_tokens + 1 if self._prepared_qwen_mtp_target else 1,
+                        device_kv_lengths=self._prepared_qwen_mtp_target or self._prepared_qwen_mtp_draft,
                     )
         else:
             if self.layerwise_split_size > 1:
@@ -780,10 +832,64 @@ class ModelExecutor:
     def supports_prepared_metadata(self) -> bool:
         return self._supports_prepared_metadata
 
+    def _validate_prepared_qwen_metadata(self, metadata: AttentionMetadata) -> None:
+        is_spec_verify = metadata.is_spec_verify
+        if is_spec_verify and not self._prepared_qwen_mtp_target:
+            raise ValueError("prepared Qwen GDN supports ordinary generation only")
+        device = metadata.slot_mapping.device
+        rows = metadata.q_seq_lens.numel()
+        state_rows = rows
+        if is_spec_verify:
+            width = self.num_speculative_tokens + 1
+            if metadata.slot_mapping.numel() != rows or rows % width:
+                raise ValueError("prepared Qwen MTP requires complete fixed-width token rows per sequence")
+            state_rows = rows // width
+        write_indices = getattr(metadata, "linear_state_write_indices", None)
+        if write_indices is None:
+            write_indices = getattr(metadata, "linear_state_indices", None)
+        read_indices = getattr(metadata, "linear_state_read_indices", None)
+        for name, tensor, count, dtype in (
+            ("write state indices", write_indices, state_rows, torch.int32),
+            ("state validity", metadata.has_initial_state, state_rows, torch.bool),
+            ("cumulative query lengths", metadata.q_cu_seq_lens, rows + 1, torch.int32),
+            *(
+                (("accepted token counts", getattr(metadata, "num_accepted_tokens", None), state_rows, torch.int32),)
+                if is_spec_verify
+                else ()
+            ),
+        ):
+            if (
+                tensor is None
+                or tensor.ndim != 1
+                or tensor.numel() != count
+                or tensor.dtype != dtype
+                or tensor.device != device
+                or not tensor.is_contiguous()
+            ):
+                raise ValueError(f"prepared Qwen GDN requires final contiguous {dtype} {name} on the input device")
+        if read_indices is not None:
+            if (
+                read_indices.ndim != 1
+                or read_indices.numel() != state_rows
+                or read_indices.dtype != torch.int32
+                or read_indices.device != device
+                or not read_indices.is_contiguous()
+            ):
+                raise ValueError("prepared Qwen GDN requires final contiguous int32 read state indices")
+            if not (metadata.is_prefill or metadata.is_chunked_prefill) and (
+                write_indices is None or read_indices.data_ptr() != write_indices.data_ptr()
+            ):
+                raise ValueError("prepared Qwen GDN decode requires shared read/write state indices")
+
     def prepare_metadata(self, metadata: AttentionMetadata) -> None:
         if not self._supports_prepared_metadata or not self._kv_bound:
             raise RuntimeError("prepared metadata requires an initialized supported Qwen3 or GLM executor")
-        if self._prepared_block_draft:
+        if self._prepared_qwen_gdn:
+            self._validate_prepared_qwen_metadata(metadata)
+        qwen_device_decode = (self._prepared_qwen_mtp_target or self._prepared_qwen_mtp_draft) and (
+            metadata.is_spec_verify or not (metadata.is_prefill or metadata.is_chunked_prefill)
+        )
+        if self._prepared_block_draft or qwen_device_decode:
             metadata.prepared_attention_state = self.attention_backend.prepare_metadata(
                 metadata, device_kv_lengths=True
             )
@@ -976,6 +1082,9 @@ class ModelExecutor:
             # CUDA can_execute only admits previously captured buckets. ACL
             # captures lazily with scheduler metadata and MTP inputs.
             if not isinstance(graph_runner, DecodeCudaGraphRunner):
+                warmup_kwargs = (
+                    {"is_graph_warmup": is_graph_warmup} if type(graph_runner) is DecodeAclGraphRunner else {}
+                )
                 graph_key = graph_runner.warmup(
                     input_ids,
                     positions,
@@ -983,6 +1092,7 @@ class ModelExecutor:
                     input_embedding,
                     **graph_kwargs,
                     eplb=eplb,
+                    **warmup_kwargs,
                 )
                 if graph_key is not None:
                     graph_kwargs["graph_key"] = graph_key

@@ -31,6 +31,112 @@ from xllm.python.model_executor.runners.decode_acl_graph import DecodeAclGraphRu
 from xllm.python.model_executor.runners.prepared_acl_graph import PreparedAclGraphRunner
 
 
+def test_prepared_capacity_selects_warmed_slot_owned_tables(
+    runner: PreparedAclGraphRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner._device_kv_lengths = True
+    runner.attention_backend.page_size = 128
+    runner.attention_backend.prepare_metadata = Mock(
+        side_effect=lambda metadata, **_: SimpleNamespace(
+            device_kv_lengths=metadata.kv_seq_lens,
+            kv_capacity=metadata.kv_seq_lens_host_values[0],
+        )
+    )
+    bindings = []
+    for slot in range(2):
+        tokens = torch.arange(2, dtype=torch.int32)
+        positions = torch.zeros_like(tokens)
+        metadata = _metadata(2)
+        metadata.block_table = (torch.arange(130, dtype=torch.int32) + slot * 1000).view(2, 65)
+        metadata.kv_seq_lens_host_values = [512, 512]
+        metadata.kv_seq_lens.fill_(511)
+        runner.warmup_prepared(tokens, positions, metadata)
+        bindings.append((tokens, positions, metadata))
+    assert runner._capture.call_count == 6
+    assert len(runner._prepared_graphs) == 6
+    entries = list(runner._prepared_graphs.values())
+    assert len({entry.static_metadata.block_table.data_ptr() for entry in entries}) == 6
+    for entry in entries:
+        table = entry.static_metadata.block_table
+        assert table.is_contiguous()
+        assert table.shape == (2, entry.kv_capacity_pages)
+        assert entry.static_metadata.kv_seq_lens_host_values == [entry.kv_capacity_pages * 128] * 2
+        assert entry.static_metadata.q_cu_seq_lens_host_values == [1, 2]
+        assert all(
+            entry.static_metadata.q_cu_seq_lens_host_values is not metadata.q_cu_seq_lens_host_values
+            for _, _, metadata in bindings
+        )
+        assert table.data_ptr() not in {metadata.block_table.data_ptr() for _, _, metadata in bindings}
+
+    def _reject_readback(*args: object, **kwargs: object) -> None:
+        raise AssertionError("Host tier selection must not read device KV lengths")
+
+    selected = {}
+    for slot, bound, pages in ((0, 512, 4), (1, 513, 32), (0, 4097, 65), (1, 512, 4), (0, 512, 4)):
+        tokens, positions, metadata = bindings[slot]
+        metadata.kv_seq_lens_host_values[:] = [bound, bound]
+        metadata.kv_seq_lens.fill_(min(bound, 7))
+        with monkeypatch.context() as guard:
+            guard.setattr(torch.Tensor, "cpu", _reject_readback)
+            guard.setattr(torch.Tensor, "item", _reject_readback)
+            guard.setattr(torch.Tensor, "tolist", _reject_readback)
+            entry = runner._resolve_entry(tokens, positions, metadata, None, None)
+        assert entry.kv_capacity_pages == pages
+        key = (slot, pages)
+        if key in selected:
+            assert selected[key] is entry
+        selected[key] = entry
+        torch.testing.assert_close(entry.static_metadata.block_table, metadata.block_table[:, :pages])
+    assert runner._capture.call_count == 6
+    tokens, positions, metadata = bindings[0]
+    metadata.kv_seq_lens_host_values[:] = [8321, 1]
+    with pytest.raises(ValueError, match="capacity"):
+        runner._resolve_entry(tokens, positions, metadata, None, None)
+    assert runner._capture.call_count == 6
+
+
+def test_ordinary_capacity_key_changes_without_device_readback(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = SimpleNamespace(page_size=128, logical_page_size=128, is_mla=False)
+    runner = DecodeAclGraphRunner(torch.nn.Identity(), backend, torch.device("cpu"), 2, 8192, device_kv_lengths=True)
+    tokens = torch.zeros(2, dtype=torch.int32)
+    metadata = _metadata(2)
+    metadata.block_table = torch.zeros(2, 65, dtype=torch.int32)
+    # The live lengths below stay at one token. Keep their row-aligned CSR
+    # valid while conservative Host bounds independently select graph tiers.
+    metadata.paged_kv_indptr = torch.arange(3, dtype=torch.int32)
+    metadata.paged_kv_indices = torch.zeros(2, dtype=torch.int32)
+    metadata.paged_kv_last_page_len = torch.ones(2, dtype=torch.int32)
+    keys = {}
+
+    def _reject_readback(*args: object, **kwargs: object) -> None:
+        raise AssertionError("Capacity graph keys use conservative Host bounds, not device values")
+
+    for bound, pages in ((511, 4), (512, 4), (513, 32), (4096, 32), (4097, 65), (512, 4)):
+        metadata.kv_seq_lens_host_values[:] = [bound, 1]
+        metadata.kv_seq_lens.fill_(1)
+        with monkeypatch.context() as guard:
+            guard.setattr(torch.Tensor, "cpu", _reject_readback)
+            guard.setattr(torch.Tensor, "item", _reject_readback)
+            guard.setattr(torch.Tensor, "tolist", _reject_readback)
+            key, _, _ = runner._resolve_graph_key(tokens, metadata, 2, None, None, None)
+        assert key[-1] == pages
+        if pages in keys:
+            assert keys[pages] == key
+        keys[pages] = key
+    assert len(set(keys.values())) == 3
+    runner._prepare_graph_entry = Mock(side_effect=AssertionError("runtime capture is forbidden"))
+    with pytest.raises(RuntimeError, match="startup warmup"):
+        runner.warmup(tokens, torch.zeros_like(tokens), metadata)
+    runner._prepare_graph_entry.assert_not_called()
+    metadata.kv_seq_lens_host_values[:] = [8321, 1]
+    with pytest.raises(ValueError, match="capacity"):
+        runner._resolve_graph_key(tokens, metadata, 2, None, None, None)
+    metadata.kv_seq_lens_host_values[:] = [513, 1]
+    metadata.block_table = torch.zeros(2, 4, dtype=torch.int32)
+    with pytest.raises(ValueError, match="source block table"):
+        runner._resolve_graph_key(tokens, metadata, 2, None, None, None)
+
+
 @pytest.mark.skipif(not hasattr(torch, "npu") or not torch.npu.is_available(), reason="requires Ascend NPU")
 @pytest.mark.parametrize("request_count", [1, 2, 3])
 @torch.inference_mode()
@@ -723,6 +829,286 @@ def test_capture_and_replay_bind_each_slot_without_input_copies(runner: Prepared
     runner.attention_backend.prepare.assert_not_called()
     assert runner.attention_backend.prepare_graph_replay.call_count == 5
     assert runner._capture.call_count == 4
+
+
+@pytest.mark.parametrize("explicit_read", [False, True])
+def test_prepared_gdn_metadata_keeps_final_state_views_across_slots(
+    runner: PreparedAclGraphRunner, explicit_read: bool
+) -> None:
+    from tests.python.qwen3_5_test_utils import make_linear_config
+    from xllm.python.attention.backend import LayerCache
+    from xllm.python.layers.npu.qwen3_5.gdn_metadata import GdnDecodeMetadata, GdnMetadata
+    from xllm.python.layers.npu.qwen3_5.gdn_metadata_builder import Qwen3_5GdnMetadataBuilder
+
+    builder = Qwen3_5GdnMetadataBuilder(
+        make_linear_config(
+            linear_num_key_heads=1,
+            linear_num_value_heads=1,
+            linear_key_head_dim=128,
+            linear_value_head_dim=128,
+        )
+    )
+    runner.execution_metadata_builders = (builder,)
+    runner.bind_layer_caches(
+        [
+            LayerCache(
+                key=None,
+                value=None,
+                conv=torch.zeros(5, 3, 384, dtype=torch.bfloat16),
+                ssm=torch.zeros(5, 1, 128, 128, dtype=torch.float32),
+            )
+        ]
+    )
+
+    def capture_context(entry: AclGraphEntry, _stream: object) -> None:
+        with patch.object(torch, "equal", side_effect=AssertionError("Device state comparison")):
+            entry.layer_shared_cache = runner._build_execution_contexts(entry.static_metadata, entry.static_input_ids)
+        entry.graph = Mock()
+
+    runner._capture.side_effect = capture_context
+    slots = []
+    for _ in range(2):
+        tokens = torch.arange(2, dtype=torch.int32)
+        positions = torch.zeros_like(tokens)
+        metadata = _metadata(2)
+        metadata.linear_state_indices = torch.tensor([1, 2], dtype=torch.int32)
+        metadata.linear_state_write_indices = metadata.linear_state_indices.view(-1)
+        metadata.linear_state_read_indices = metadata.linear_state_indices.view(-1) if explicit_read else None
+        metadata.has_initial_state = torch.ones(2, dtype=torch.bool)
+        runner.warmup_prepared(tokens, positions, metadata)
+        entry = runner._prepared_graphs[runner._prepared_binding(tokens, positions, metadata)]
+        gdn = entry.layer_shared_cache[GdnMetadata]
+        assert isinstance(gdn, GdnDecodeMetadata)
+        assert gdn.read_state_indices is gdn.write_state_indices
+        assert gdn.write_state_indices is metadata.linear_state_write_indices
+        assert entry.static_metadata.has_initial_state is metadata.has_initial_state
+        slots.append((tokens, positions, metadata, gdn))
+
+    for step, slot_id in enumerate((0, 1, 0, 1)):
+        tokens, positions, metadata, gdn = slots[slot_id]
+        metadata.linear_state_indices.copy_(torch.tensor([3, 4] if step % 2 else [2, 1], dtype=torch.int32))
+        runner.execute(tokens, positions, metadata)
+        torch.testing.assert_close(gdn.read_state_indices, metadata.linear_state_indices)
+        inactive = slots[1 - slot_id][3]
+        assert inactive.write_state_indices.data_ptr() != gdn.write_state_indices.data_ptr()
+    assert runner._capture.call_count == 2
+    assert runner.prepared_replays == 4
+
+
+@pytest.mark.parametrize("field", ["linear_state_indices", "linear_state_write_indices", "has_initial_state"])
+def test_prepared_gdn_rejects_replaced_state_views_before_replay(runner: PreparedAclGraphRunner, field: str) -> None:
+    tokens = torch.arange(2, dtype=torch.int32)
+    metadata = _metadata(2)
+    metadata.linear_state_indices = torch.tensor([1, 2], dtype=torch.int32)
+    metadata.linear_state_write_indices = metadata.linear_state_indices
+    metadata.has_initial_state = torch.ones(2, dtype=torch.bool)
+    runner.warmup_prepared(tokens, tokens, metadata)
+    setattr(metadata, field, getattr(metadata, field).clone())
+    runner.attention_backend.prepare_graph_replay.reset_mock()
+    with pytest.raises(RuntimeError, match="warmed Slot binding"):
+        runner.execute(tokens, tokens, metadata)
+    runner.attention_backend.prepare_graph_replay.assert_not_called()
+
+
+@pytest.mark.parametrize("invalid", ["dtype", "rows", "stride", "separate_read"])
+def test_prepared_gdn_rejects_nonfinal_state_views_before_capture(runner: PreparedAclGraphRunner, invalid: str) -> None:
+    tokens = torch.arange(2, dtype=torch.int32)
+    metadata = _metadata(2)
+    indices = torch.tensor([1, 2], dtype=torch.int32)
+    if invalid == "dtype":
+        indices = indices.to(torch.int64)
+    elif invalid == "rows":
+        indices = indices[:1]
+    elif invalid == "stride":
+        indices = torch.arange(4, dtype=torch.int32)[::2]
+    metadata.linear_state_indices = indices
+    if invalid == "separate_read":
+        metadata.linear_state_read_indices = indices.clone()
+    with pytest.raises(ValueError, match="linear_state_indices|shared linear-state read/write"):
+        runner.warmup_prepared(tokens, tokens, metadata)
+    runner._capture.assert_not_called()
+    runner.attention_backend.prepare.assert_not_called()
+
+
+@pytest.mark.parametrize("draft_tokens", [1, 2, 3, 8, 16])
+def test_prepared_verify_binds_logical_accepted_counts_without_host_reads(
+    runner: PreparedAclGraphRunner, draft_tokens: int
+) -> None:
+    width = draft_tokens + 1
+    runner._spec_verify_width = width
+    runner._device_kv_lengths = True
+    runner.attention_backend.page_size = 128
+    runner.attention_backend.prepare_metadata = Mock(
+        side_effect=lambda metadata, **_: SimpleNamespace(
+            device_kv_lengths=metadata.kv_seq_lens,
+            kv_capacity=metadata.kv_seq_lens_host_values[0],
+        )
+    )
+    runner.max_batch = 2 * width
+    tokens = torch.arange(2 * width, dtype=torch.int32)
+    metadata = _metadata(2 * width)
+    metadata.is_spec_verify = True
+    metadata.linear_state_indices = torch.tensor([1, 2], dtype=torch.int32)
+    metadata.num_accepted_tokens = torch.tensor([1, width], dtype=torch.int32)
+    metadata.has_initial_state = torch.ones(2, dtype=torch.bool)
+    runner.warmup_prepared(tokens, tokens, metadata)
+    key = runner._prepared_binding(tokens, tokens, metadata)
+    entry = runner._resolve_entry(tokens, tokens, metadata)
+    assert entry.static_metadata.num_accepted_tokens is metadata.num_accepted_tokens
+    assert entry.static_metadata.linear_state_indices.numel() == 2
+    assert entry.static_metadata.prepared_attention_state.device_kv_lengths is metadata.kv_seq_lens
+    assert entry.static_metadata.prepared_attention_state.kv_capacity == 256
+    with patch.object(torch.Tensor, "item", side_effect=AssertionError("accepted state readback")):
+        metadata.num_accepted_tokens.fill_(width)
+        runner.execute(tokens, tokens, metadata)
+    assert runner._prepared_binding(tokens, tokens, metadata) == key
+    metadata.num_accepted_tokens = metadata.num_accepted_tokens.clone()
+    with pytest.raises(RuntimeError, match="warmed Slot binding"):
+        runner.execute(tokens, tokens, metadata)
+
+
+@pytest.mark.parametrize("draft_tokens", [1, 2, 3, 8, 16])
+def test_legacy_verify_graph_uses_complete_sequence_buckets(runner: PreparedAclGraphRunner, draft_tokens: int) -> None:
+    width = draft_tokens + 1
+    legacy = DecodeAclGraphRunner(
+        torch.nn.Identity(),
+        runner.attention_backend,
+        torch.device("cpu"),
+        8 * width,
+        2048,
+        num_decoding_tokens=width,
+        spec_verify_width=width,
+    )
+    for sequences in (1, 3, 5, 8):
+        bucket = 1 if sequences == 1 else 4 if sequences == 3 else 8
+        assert legacy._padded_batch_size(sequences * width, _metadata(sequences * width)) == bucket * width
+    with pytest.raises(ValueError, match="complete fixed-width requests"):
+        legacy._padded_batch_size(width + 1, _metadata(width + 1))
+
+
+@pytest.mark.parametrize("width", [2, 3, 4, 9, 17])
+def test_legacy_verify_capture_restores_every_recurrent_checkpoint(runner: PreparedAclGraphRunner, width: int) -> None:
+    from xllm.python.attention.backend import LayerCache
+
+    backend = SimpleNamespace(snapshot_linear_state=Mock(return_value=None), restore_linear_state=Mock())
+    legacy = DecodeAclGraphRunner(
+        torch.nn.Identity(),
+        backend,
+        torch.device("cpu"),
+        2 * width,
+        2048,
+        num_decoding_tokens=width,
+        spec_verify_width=width,
+    )
+    conv = torch.arange(5 * (width + 2), dtype=torch.float32).view(5, width + 2, 1)
+    ssm = torch.arange(5 * width, dtype=torch.float32).view(5 * width, 1, 1, 1)
+    original_conv, original_ssm = conv.clone(), ssm.clone()
+    legacy.layer_caches = [LayerCache(None, None, conv=conv, ssm=ssm)]
+    entry = AclGraphEntry()
+    entry.static_metadata = SimpleNamespace(linear_state_indices=torch.tensor([1, 3], dtype=torch.int32))
+
+    def mutate_captured_state(_entry: AclGraphEntry, _stream: object) -> None:
+        conv[1].zero_()
+        conv[3].zero_()
+        ssm[width : 2 * width].zero_()
+        ssm[3 * width : 4 * width].zero_()
+
+    with patch.object(AclGraphRunner, "_capture", side_effect=mutate_captured_state):
+        legacy._capture(entry, Mock())
+    torch.testing.assert_close(conv, original_conv)
+    torch.testing.assert_close(ssm, original_ssm)
+
+
+@pytest.mark.parametrize("width", [1, 3, 4, 17], ids=["draft-padding", "target-k2", "target-k3", "target-k16"])
+def test_legacy_device_lengths_preserve_physical_query_rows(
+    runner: PreparedAclGraphRunner, monkeypatch: pytest.MonkeyPatch, width: int
+) -> None:
+    pytest.importorskip("torch_npu")
+    from xllm.python import kernels
+    from xllm.python.attention.backend import LayerCache
+    from xllm.python.attention.expanded_decode_metadata import ExpandedDecodeMetadata
+    from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend
+
+    sequences, rows = 3, 3 * width
+    backend = NpuPagedAttentionBackend(8, 2, 64, 0.125, 0, False, torch.device("cpu"), torch.float16)
+    cache = torch.empty(4, 128, 2, 64)
+    backend.bind_kv_caches([LayerCache(key=cache, value=cache)])
+    monkeypatch.setattr(backend, "_allocate_graph_workspace", Mock(return_value=torch.empty(1)))
+    metadata = _metadata(rows)
+    metadata.prepared_attention_state = None
+    metadata.kv_cu_seq_lens = None
+    metadata.paged_kv_indptr = torch.arange(rows + 1, dtype=torch.int32)
+    metadata.paged_kv_indices = torch.zeros(rows, dtype=torch.int32)
+    metadata.paged_kv_last_page_len = torch.ones(rows, dtype=torch.int32)
+    if width > 1:
+        metadata.is_chunked_prefill = metadata.is_spec_verify = True
+        metadata.q_seq_lens_host = torch.full((sequences,), width, dtype=torch.int32)
+        metadata.q_seq_lens = metadata.q_seq_lens_host.clone()
+        metadata.q_cu_seq_lens_host_values = list(range(0, rows + 1, width))
+        metadata.q_cu_seq_lens = torch.tensor(metadata.q_cu_seq_lens_host_values, dtype=torch.int32)
+        metadata.linear_state_indices = torch.arange(1, sequences + 1, dtype=torch.int32)
+        metadata.has_initial_state = torch.ones(sequences, dtype=torch.bool)
+        metadata.num_accepted_tokens = torch.ones(sequences, dtype=torch.int32)
+        metadata.expanded_decode_metadata = ExpandedDecodeMetadata(
+            kv_seq_lens=metadata.kv_seq_lens,
+            block_table=metadata.block_table,
+            paged_kv_indptr=metadata.paged_kv_indptr,
+            paged_kv_indices=metadata.paged_kv_indices,
+            paged_kv_last_page_len=metadata.paged_kv_last_page_len,
+            paged_attention_tiling_data=None,
+            kv_seq_lens_host=None,
+            kv_seq_lens_host_values=metadata.kv_seq_lens_host_values,
+        )
+
+    def update_lengths(*args: object) -> None:
+        # Only native metadata packing is substituted. Query preparation and
+        # validation run through the real paged-attention backend.
+        args[11].fill_(1)
+        args[11][:rows].copy_(metadata.kv_seq_lens)
+
+    monkeypatch.setattr(kernels, "update_decode_graph_metadata", update_lengths, raising=False)
+    legacy = DecodeAclGraphRunner(
+        torch.nn.Identity(),
+        backend,
+        torch.device("cpu"),
+        8 * width,
+        128,
+        num_decoding_tokens=width,
+        spec_verify_width=width,
+        device_kv_lengths=True,
+    )
+    legacy.bind_layer_caches([LayerCache(key=cache, value=cache)])
+    legacy._capture = Mock()
+    tokens = torch.zeros(rows, dtype=torch.int32)
+    key = legacy.warmup(tokens, tokens, metadata, is_graph_warmup=True)
+    entry = legacy._graphs[key]
+    static = entry.static_metadata
+    padded_rows = 4 * width
+    addresses = (static.q_seq_lens.data_ptr(), static.q_cu_seq_lens.data_ptr(), static.kv_seq_lens.data_ptr())
+    for value in (7, 11):
+        metadata.kv_seq_lens.fill_(value)
+        metadata.kv_seq_lens_host_values[:] = [value] * rows
+        if width > 1:
+            metadata.num_accepted_tokens.fill_(width)
+        legacy._fill_entry(entry, tokens, tokens, metadata, rows, None, expanded=legacy._expanded_verify_view(metadata))
+        prepared = static.prepared_attention_state
+        assert prepared.query_lengths == [1] * padded_rows
+        assert static.q_seq_lens.tolist() == [1] * padded_rows
+        assert static.q_seq_lens_host.tolist() == ([width] * 4 if width > 1 else [1] * 4)
+        assert static.q_cu_seq_lens.tolist() == static.q_cu_seq_lens_host_values == list(range(padded_rows + 1))
+        assert prepared.device_kv_lengths.data_ptr() == static.kv_seq_lens.data_ptr()
+        assert prepared.device_kv_lengths.tolist() == [value] * rows + [1] * (padded_rows - rows)
+        assert addresses == (
+            static.q_seq_lens.data_ptr(),
+            static.q_cu_seq_lens.data_ptr(),
+            static.kv_seq_lens.data_ptr(),
+        )
+        if width > 1:
+            assert static.linear_state_indices.tolist() == [1, 2, 3, 0]
+            assert static.num_accepted_tokens.tolist() == [width] * sequences + [1]
+            assert metadata.q_seq_lens_host.tolist() == [width] * sequences
+    with pytest.raises(ValueError, match="requires query lengths"):
+        backend.prepare_metadata(replace(static, q_seq_lens=None), device_kv_lengths=True)
 
 
 @pytest.mark.parametrize(

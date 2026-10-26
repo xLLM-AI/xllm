@@ -212,6 +212,11 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
   executor_config["task_type"] = options_.task_type();
   executor_config["max_encoder_cache_size"] = options_.max_encoder_cache_size();
   executor_config["num_speculative_tokens"] = options_.num_speculative_tokens();
+  executor_config["mtp_draft_prefix_width"] = options_.mtp_draft_prefix_width();
+  executor_config["enable_adaptive_draft_step"] =
+      options_.enable_adaptive_draft_step();
+  executor_config["enable_adaptive_target_verify"] =
+      options_.enable_adaptive_target_verify();
   executor_config["engine_type"] = SpeculativeConfig::uses_ssm_engine(
                                        options_.draft_model_path().value_or(""),
                                        options_.speculative_algorithm(),
@@ -505,11 +510,13 @@ void PyExecutorImpl::bind_kv_caches(std::vector<KVCache>& kv_caches) {
     kv_bound_ = true;
     kv_layer_count_ = num_layers;
     if (options_.enable_task_pipeline()) {
-      prepared_kv_bindings_.reserve(4 * kv_caches.size());
+      prepared_kv_bindings_.reserve(6 * kv_caches.size());
       for (const auto& kv : kv_caches) {
         prepared_kv_bindings_.emplace_back(kv.get_k_cache());
         prepared_kv_bindings_.emplace_back(kv.get_v_cache());
         prepared_kv_bindings_.emplace_back(kv.get_index_cache());
+        prepared_kv_bindings_.emplace_back(kv.get_conv_cache());
+        prepared_kv_bindings_.emplace_back(kv.get_ssm_cache());
         prepared_kv_bindings_.emplace_back(
             kv.get_indexer_cache_scale().value_or(torch::Tensor()));
       }
@@ -524,6 +531,8 @@ void PyExecutorImpl::bind_kv_caches(std::vector<KVCache>& kv_caches) {
              {kv.get_k_cache(),
               kv.get_v_cache(),
               kv.get_index_cache(),
+              kv.get_conv_cache(),
+              kv.get_ssm_cache(),
               kv.get_indexer_cache_scale().value_or(torch::Tensor())}) {
           const auto& bound = prepared_kv_bindings_[index++];
           CHECK_EQ(current.defined(), bound.defined())

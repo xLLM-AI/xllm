@@ -43,12 +43,15 @@ limitations under the License.
 #include "core/framework/speculative/adaptive/spec_cost_model.h"
 #include "core/framework/speculative/adaptive/spec_cost_profile_store.h"
 #include "core/framework/speculative/metrics.h"
+#include "core/framework/speculative/mtp_async_input_builder.h"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
+#include "core/layers/common/attention_metadata.h"
 #include "core/runtime/dflash_worker_impl.h"
 #include "core/runtime/executor_impl_factory.h"
 #include "core/runtime/task_execution_pipeline.h"
 #include "core/runtime/unified_mtp_worker_impl.h"
 #include "core/runtime/worker_impl.h"
+#include "core/util/scope_guard.h"
 #include "tests/core/runtime/task_pipeline_test_peer.h"
 #include "worker.pb.h"
 
@@ -139,6 +142,139 @@ enum class PreparedTestEvent : uint8_t {
   CONTEXT_WRITTEN,
 };
 
+// Tokens and metadata are disjoint views of one typed Slot arena. Their Torch
+// version counter is shared, so legal token writes cannot identify metadata
+// writes. Check the live binding and its values instead; this does not detect
+// an idempotent rewrite of the same metadata.
+struct PreparedMetadataSnapshot {
+  // The owning Slot outlives every comparison; observe its current binding,
+  // rather than a copied Tensor handle that would hide a later rebind.
+  const torch::Tensor* input;
+  torch::Tensor expected;
+  uintptr_t address;
+};
+
+template <typename Slot>
+std::vector<PreparedMetadataSnapshot> snapshot_prepared_metadata(
+    const Slot& slot) {
+  std::vector<PreparedMetadataSnapshot> snapshots;
+  snapshots.reserve(3 * (slot.drafts.size() + 2) + 1);
+  const auto append = [&snapshots](const SlotBuffer& input) {
+    const auto save = [&snapshots](const torch::Tensor& tensor) {
+      snapshots.emplace_back(PreparedMetadataSnapshot{
+          &tensor,
+          tensor.cpu().clone(),
+          reinterpret_cast<uintptr_t>(tensor.data_ptr())});
+    };
+    save(input.positions());
+    save(input.model_params().attention.device.kv_seq_lens);
+    save(input.model_params().attention.device.new_cache_slots);
+  };
+  for (uint32_t step = 0; step < slot.drafts.size(); ++step) {
+    if (step == 0 && slot.state->reuse_draft_prefix_) {
+      continue;
+    }
+    append(*slot.drafts[step]->input);
+  }
+  append(*slot.validate_input);
+  if (slot.prefix_refresh != nullptr) {
+    append(*slot.prefix_refresh->input);
+  }
+  const auto& accepted =
+      slot.validate_input->model_params().num_accepted_tokens;
+  snapshots.emplace_back(PreparedMetadataSnapshot{
+      &accepted,
+      accepted.cpu().clone(),
+      reinterpret_cast<uintptr_t>(accepted.data_ptr())});
+  return snapshots;
+}
+
+void expect_prepared_metadata_unchanged(
+    const std::vector<PreparedMetadataSnapshot>& snapshots) {
+  for (const auto& snapshot : snapshots) {
+    ASSERT_TRUE(snapshot.input->defined());
+    EXPECT_EQ(reinterpret_cast<uintptr_t>(snapshot.input->data_ptr()),
+              snapshot.address);
+    EXPECT_TRUE(torch::equal(snapshot.input->cpu(), snapshot.expected));
+  }
+}
+
+void expect_prepared_metadata(const SlotBuffer& input,
+                              int32_t base_position,
+                              int32_t first_offset,
+                              const std::vector<int32_t>& block_table,
+                              bool unused_repair_row = false) {
+  const int64_t count = input.positions().numel();
+  std::vector<int32_t> positions;
+  std::vector<int32_t> lengths;
+  std::vector<int32_t> slots;
+  positions.reserve(count);
+  lengths.reserve(count);
+  slots.reserve(count);
+  for (int64_t row = 0; row < count; ++row) {
+    const int32_t position = std::max<int32_t>(
+        0, base_position + first_offset + static_cast<int32_t>(row));
+    const int32_t cache_position =
+        unused_repair_row && row == 0 ? base_position : position;
+    positions.emplace_back(position);
+    lengths.emplace_back(std::max<int32_t>(
+        1, base_position + 1 + first_offset + static_cast<int32_t>(row)));
+    slots.emplace_back(block_table[cache_position / 16] * 16 +
+                       cache_position % 16);
+  }
+  EXPECT_TRUE(torch::equal(input.positions().cpu(),
+                           torch::tensor(positions, torch::kInt32)));
+  EXPECT_TRUE(
+      torch::equal(input.model_params().attention.device.kv_seq_lens.cpu(),
+                   torch::tensor(lengths, torch::kInt32)));
+  EXPECT_TRUE(
+      torch::equal(input.model_params().attention.device.new_cache_slots.cpu(),
+                   torch::tensor(slots, torch::kInt32)));
+}
+
+class PreparedDeviceGate final {
+ public:
+  PreparedDeviceGate()
+      : release_future_(release_.get_future().share()),
+        entered_future_(entered_.get_future()) {}
+
+  ~PreparedDeviceGate() { release(); }
+
+  void enqueue() {
+    CHECK_EQ(aclrtLaunchHostFunc(
+                 c10_npu::getCurrentNPUStream().stream(),
+                 [](void* data) {
+                   auto& gate = *static_cast<PreparedDeviceGate*>(data);
+                   gate.entered_.set_value();
+                   gate.timed_out_.store(gate.release_future_.wait_for(
+                                             std::chrono::seconds(10)) !=
+                                         std::future_status::ready);
+                 },
+                 this),
+             ACL_SUCCESS);
+  }
+
+  std::future_status wait_until_entered() {
+    return entered_future_.wait_for(std::chrono::seconds(5));
+  }
+
+  void release() {
+    if (!released_.exchange(true)) {
+      release_.set_value();
+    }
+  }
+
+  bool timed_out() const { return timed_out_.load(); }
+
+ private:
+  std::promise<void> release_;
+  std::shared_future<void> release_future_;
+  std::promise<void> entered_;
+  std::future<void> entered_future_;
+  std::atomic<bool> released_{false};
+  std::atomic<bool> timed_out_{false};
+};
+
 // Encode the consumed token in the hidden state. The real pipeline must patch
 // draft inputs and publish accepted context correctly to keep counting upward.
 class CountingModel final : public CausalLM {
@@ -149,7 +285,7 @@ class CountingModel final : public CausalLM {
 
   ModelOutput forward(const torch::Tensor& tokens,
                       const torch::Tensor& positions,
-                      std::vector<KVCache>& /*kv_caches*/,
+                      std::vector<KVCache>& kv_caches,
                       const ModelParamsView& params) override {
     {
       std::lock_guard<std::mutex> lock(prepared_mutex);
@@ -167,7 +303,37 @@ class CountingModel final : public CausalLM {
             : torch::Tensor());
     forward_had_sync.emplace_back(params.parallel.layer_synchronizer !=
                                   nullptr);
+    if (record_recurrent_state) {
+      forward_linear_indices.emplace_back(
+          params.embedding.linear_state_indices.clone());
+      forward_accepted_lengths.emplace_back(
+          params.num_accepted_tokens.defined()
+              ? params.num_accepted_tokens.clone()
+              : torch::Tensor());
+      forward_accepted_addresses.emplace_back(
+          params.num_accepted_tokens.defined()
+              ? reinterpret_cast<uintptr_t>(
+                    params.num_accepted_tokens.data_ptr())
+              : 0);
+      forward_verify.emplace_back(params.is_spec_verify);
+      forward_query_starts.emplace_back(
+          params.attn_metadata->q_cu_seq_lens.clone());
+      forward_initial_states.emplace_back(
+          params.attn_metadata->has_initial_states.clone());
+      forward_conv_states.emplace_back(
+          kv_caches.front().get_conv_cache().clone());
+      forward_ssm_states.emplace_back(
+          kv_caches.front().get_ssm_cache().clone());
+    }
     auto hidden = (block_draft ? positions : tokens).to(options_).view({-1, 1});
+    if (state_sensitive) {
+      auto feature =
+          tokens.to(options_) * 0.25 + positions.to(options_) * 0.125;
+      if (cache_sensitive_draft) {
+        feature = cache_sensitive_forward(tokens, positions, kv_caches, params);
+      }
+      hidden = torch::cat({hidden, feature.view({-1, 1})}, /*dim=*/1);
+    }
     if (borrowed_hidden_storage.defined()) {
       auto borrowed = borrowed_hidden_storage.narrow(0, 0, hidden.size(0));
       borrowed.copy_(hidden);
@@ -183,6 +349,9 @@ class CountingModel final : public CausalLM {
     }
     if (after_forward) {
       after_forward();
+    }
+    if (state_sensitive) {
+      forward_outputs.emplace_back(hidden.clone());
     }
     return ModelOutput(hidden, torch::Tensor(), auxiliary);
   }
@@ -227,11 +396,26 @@ class CountingModel final : public CausalLM {
   torch::Tensor logits(const torch::Tensor& hidden,
                        const torch::Tensor& selected) override {
     const int32_t call = logits_calls.fetch_add(1);
-    const auto next =
-        hidden.index_select(0, selected.to(torch::kInt64)).to(torch::kInt64) +
-        logit_increments[call % logit_increments.size()];
-    auto output = torch::full({selected.numel(), 32}, -logit_peak, options_);
+    auto sampled_hidden = hidden.index_select(0, selected.to(torch::kInt64));
+    if (state_sensitive) {
+      logits_inputs.emplace_back(sampled_hidden.clone());
+      sampled_hidden =
+          sampled_hidden.narrow(/*dim=*/1, /*start=*/0, /*length=*/1);
+    }
+    const auto next = sampled_hidden.to(torch::kInt64) +
+                      logit_increments[call % logit_increments.size()];
+    auto output =
+        torch::full({selected.numel(), vocab_size}, -logit_peak, options_);
     output.scatter_(/*dim=*/1, next, /*value=*/logit_peak);
+    if (state_sensitive) {
+      // Keep a large deterministic argmax margin to choose each accepted
+      // length, while making the complete scores depend on live Draft KV.
+      const auto signal = logits_inputs.back().select(/*dim=*/1, /*index=*/1);
+      output.add_(signal.unsqueeze(/*dim=*/1) *
+                  torch::arange(vocab_size, options_).unsqueeze(/*dim=*/0) /
+                  65536.0);
+      logits_outputs.emplace_back(output.clone());
+    }
     return output;
   }
 
@@ -270,6 +454,23 @@ class CountingModel final : public CausalLM {
 
   std::atomic<int32_t> logits_calls{0};
   std::vector<int64_t> logit_increments{1};
+  int64_t vocab_size = 32;
+  bool record_recurrent_state = false;
+  bool state_sensitive = false;
+  bool cache_sensitive_draft = false;
+  std::vector<torch::Tensor> forward_outputs;
+  std::vector<torch::Tensor> logits_inputs;
+  std::vector<torch::Tensor> logits_outputs;
+  std::vector<torch::Tensor> forward_key_cache;
+  std::vector<torch::Tensor> forward_value_cache;
+  std::vector<torch::Tensor> forward_linear_indices;
+  std::vector<torch::Tensor> forward_accepted_lengths;
+  std::vector<uintptr_t> forward_accepted_addresses;
+  std::vector<bool> forward_verify;
+  std::vector<torch::Tensor> forward_query_starts;
+  std::vector<torch::Tensor> forward_initial_states;
+  std::vector<torch::Tensor> forward_conv_states;
+  std::vector<torch::Tensor> forward_ssm_states;
   torch::Tensor borrowed_hidden_storage;
   bool block_draft = false;
   std::vector<int64_t> markov_increments{1};
@@ -310,8 +511,99 @@ class CountingModel final : public CausalLM {
   std::vector<std::array<uintptr_t, 4>> context_bindings;
 
  private:
+  torch::Tensor cache_sensitive_forward(const torch::Tensor& tokens,
+                                        const torch::Tensor& positions,
+                                        std::vector<KVCache>& kv_caches,
+                                        const ModelParamsView& params) {
+    CHECK(!kv_caches.empty());
+    const auto& embedding = params.embedding.input_embedding;
+    CHECK(embedding.defined());
+    CHECK_EQ(embedding.size(/*dim=*/1), 2);
+    auto keys = kv_caches.back().get_k_cache().view({-1});
+    auto values = kv_caches.back().get_v_cache().view({-1});
+    const auto slots =
+        params.attention.device.new_cache_slots.to(torch::kInt64);
+    const auto written = tokens.to(options_) / 8.0 +
+                         embedding.select(/*dim=*/1, /*index=*/0) / 32.0 +
+                         embedding.select(/*dim=*/1, /*index=*/1) / 64.0 +
+                         positions.to(options_) / 128.0;
+    const auto live = slots.ge(0);
+    keys.index_copy_(0, slots.masked_select(live), written.masked_select(live));
+    values.index_copy_(
+        0, slots.masked_select(live), written.masked_select(live) * 2.0);
+
+    // This test model uses the actual device KV tensors. Host reads only
+    // describe its small causal gathers; production execution stays untouched.
+    const auto queries = params.attention.device.q_seq_lens.cpu();
+    const auto lengths = params.attention.device.kv_seq_lens.cpu();
+    const auto tables = params.attention.device.block_tables.cpu();
+    auto feature = torch::zeros({tokens.numel()}, options_);
+    int64_t begin = 0;
+    for (int64_t sequence = 0; sequence < queries.numel(); ++sequence) {
+      const int32_t query = queries[sequence].item<int32_t>();
+      const int32_t length = lengths[sequence].item<int32_t>();
+      for (int32_t item = 0; item < query; ++item) {
+        const int32_t prefix_length = length - query + item + 1;
+        CHECK_GT(prefix_length, 0);
+        std::vector<int64_t> indices;
+        indices.reserve(prefix_length);
+        for (int32_t position = 0; position < prefix_length; ++position) {
+          const int32_t page = tables[sequence][position / 16].item<int32_t>();
+          indices.emplace_back(static_cast<int64_t>(page) * 16 + position % 16);
+        }
+        const auto gather = torch::tensor(indices, torch::kInt64).to(device());
+        const auto weights = torch::arange(1, prefix_length + 1, options_);
+        const auto attention =
+            ((keys.index_select(0, gather) + values.index_select(0, gather)) *
+             weights)
+                .sum() /
+            128.0;
+        feature[begin + item].copy_(attention +
+                                    embedding[begin + item][1] / 8.0 +
+                                    written[begin + item] / 4.0);
+      }
+      begin += query;
+    }
+    CHECK_EQ(begin, tokens.numel());
+    forward_key_cache.emplace_back(keys.clone());
+    forward_value_cache.emplace_back(values.clone());
+    return feature;
+  }
+
   torch::TensorOptions options_;
 };
+
+// Independent scalar teacher forcing for the counting sequence. Target token
+// p+1 is paired with Draft token p+2 at cache position p. In particular, the
+// verifier feature below is not the recursively generated Draft feature.
+float reference_draft_key(int32_t position) {
+  const double target_token = position + 1;
+  const double verifier_feature = target_token / 4.0 + position / 8.0;
+  return static_cast<float>((position + 2) / 8.0 + target_token / 32.0 +
+                            verifier_feature / 64.0 + position / 128.0);
+}
+
+torch::Tensor reference_draft_hidden(int32_t last_position) {
+  double attention = 0.0;
+  for (int32_t position = 0; position <= last_position; ++position) {
+    attention += 3.0 * reference_draft_key(position) * (position + 1) / 128.0;
+  }
+  const double verifier_feature =
+      (last_position + 1) / 4.0 + last_position / 8.0;
+  const float feature =
+      static_cast<float>(attention + verifier_feature / 8.0 +
+                         reference_draft_key(last_position) / 4.0);
+  return torch::tensor({{static_cast<float>(last_position + 2), feature}});
+}
+
+torch::Tensor reference_draft_keys(int32_t length) {
+  std::vector<float> expected;
+  expected.reserve(length);
+  for (int32_t position = 0; position < length; ++position) {
+    expected.emplace_back(reference_draft_key(position));
+  }
+  return torch::tensor(expected);
+}
 
 class PreparedTestExecutor final : public ExecutorImpl {
  public:
@@ -328,8 +620,12 @@ class PreparedTestExecutor final : public ExecutorImpl {
     counting->prepared_cache_bindings.reserve(kv_caches.size());
     for (const auto& cache : kv_caches) {
       counting->prepared_cache_bindings.emplace_back(std::array<uintptr_t, 2>{
-          reinterpret_cast<uintptr_t>(cache.get_k_cache().data_ptr()),
-          reinterpret_cast<uintptr_t>(cache.get_v_cache().data_ptr())});
+          cache.get_k_cache().defined()
+              ? reinterpret_cast<uintptr_t>(cache.get_k_cache().data_ptr())
+              : 0,
+          cache.get_v_cache().defined()
+              ? reinterpret_cast<uintptr_t>(cache.get_v_cache().data_ptr())
+              : 0});
     }
     counting->prepared_events.emplace_back(
         PreparedTestEvent::METADATA_PREPARED);
@@ -869,6 +1165,71 @@ class SpeculativePipelineTest : public ::testing::Test {
     capacity_.common.logical_block_size = 16;
     capacity_.common.slot_count = 2;
     capacity_.common.chunked_prefill = true;
+  }
+
+  void configure_hybrid_mtp(uint32_t draft_width) {
+    pipeline_.reset();
+    capacity_.common.model = {128, 4, 8, true};
+    capacity_.common.slot_count = 2;
+    capacity_.common.max_positions = 128;
+    capacity_.common.max_kv_seq_len = 128;
+    capacity_.common.vocab_size = 256;
+    capacity_.common.max_unique_tokens = 128;
+    capacity_.common.enable_mla = false;
+    capacity_.common.chunked_prefill = true;
+    capacity_.num_speculative_tokens = draft_width;
+    target_->vocab_size = 256;
+    draft_->vocab_size = 256;
+    target_->record_recurrent_state = true;
+    target_cache_.clear();
+    const int64_t width = static_cast<int64_t>(draft_width) + 1;
+    target_cache_.emplace_back(LinearAttentionKVCacheTensors{
+        torch::full({8, width + 2, 1}, 7.0, target_->options()),
+        torch::full({8 * width, 1, 1}, 11.0, target_->options())});
+    target_cache_.emplace_back(
+        KVCacheTensors{torch::zeros({32, 16, 1, 1}, target_->options()),
+                       torch::zeros({32, 16, 1, 1}, target_->options())});
+    draft_cache_.clear();
+    draft_cache_.emplace_back(
+        KVCacheTensors{torch::zeros({32, 16, 1, 1}, target_->options()),
+                       torch::zeros({32, 16, 1, 1}, target_->options())});
+  }
+
+  LlmForwardInput hybrid_input(bool decode,
+                               int32_t token = 3,
+                               int32_t position = 2) {
+    auto value = input(decode, token, position);
+    auto& params = value.input_params;
+    params.attention.host.block_tables =
+        torch::arange(8, torch::kInt32).view({1, 8});
+    params.embedding.linear_state_ids = {1};
+    params.embedding.linear_state_indices = torch::tensor({1}, torch::kInt32);
+    params.linear_state_validity_mask = {decode ? 1 : 0};
+    LinearStateCacheOp op;
+    op.linear_state_id = 1;
+    op.reset_requested = !decode;
+    params.linear_state_cache_ops = {op};
+    return value;
+  }
+
+  LlmForwardInput ordinary_prefix_input(int32_t width) {
+    LlmForwardInput value;
+    const auto integers = target_->options().dtype(torch::kInt32);
+    value.token_ids = torch::empty({width}, integers);
+    value.positions = torch::empty({width}, integers);
+    auto& params = value.input_params;
+    params.meta.batch_forward_type = BatchForwardType::DECODE;
+    params.meta.num_sequences = width;
+    params.meta.actual_num_sequences = width;
+    params.embedding.input_embedding =
+        torch::empty({width, 2}, target_->options());
+    params.attention.device.q_seq_lens = torch::ones({width}, integers);
+    params.attention.device.kv_seq_lens = torch::empty({width}, integers);
+    params.attention.device.new_cache_slots = torch::empty({width}, integers);
+    params.attention.device.block_tables =
+        torch::arange(8, integers).view({1, 8}).repeat({width, 1});
+    value.sampling_params.selected_token_idxes = torch::zeros({1}, integers);
+    return value;
   }
 
   LlmForwardInput input(bool decode, int32_t token = 3, int32_t position = 2) {
@@ -1682,6 +2043,260 @@ TEST_F(SpeculativePipelineTest, PrefillDecodeAndSlotReuseKeepAcceptedContext) {
   EXPECT_EQ(decoded.sample_output.next_tokens[0][2].item<int64_t>(), 6);
   EXPECT_TRUE(decoded.sample_output.next_tokens.device().is_cpu());
   EXPECT_EQ(decoded.ready_event, nullptr);
+}
+
+TEST_F(SpeculativePipelineTest,
+       HybridMtpWidthsPreservePreviousAcceptedCheckpointAcrossSlots) {
+  for (const uint32_t draft_width : {1U, 2U, 3U, 16U}) {
+    SCOPED_TRACE(draft_width);
+    configure_hybrid_mtp(draft_width);
+    draft_->logit_increments = {1};
+    const int64_t width = draft_width + 1;
+    const size_t first = target_->forward_linear_indices.size();
+    create();
+    ASSERT_NE(pipeline_, nullptr);
+    ASSERT_TRUE(
+        execute(hybrid_input(false)).sample_output.next_tokens.defined());
+    const auto all_accepted = execute(hybrid_input(true));
+    ASSERT_TRUE(all_accepted.sample_output.next_tokens.defined());
+    EXPECT_EQ(
+        all_accepted.sample_output.next_tokens.ge(0).sum().item<int64_t>(),
+        width);
+    const int32_t current = static_cast<int32_t>(
+        all_accepted.sample_output.next_tokens[0][width - 1].item<int64_t>());
+    draft_->logit_increments = {2};
+    const auto rejected = execute(hybrid_input(true, current, 2 + width));
+    ASSERT_TRUE(rejected.sample_output.next_tokens.defined());
+    EXPECT_EQ(rejected.sample_output.next_tokens.ge(0).sum().item<int64_t>(),
+              1);
+    draft_->logit_increments = {1};
+    const int32_t correction = static_cast<int32_t>(
+        rejected.sample_output.next_tokens[0][0].item<int64_t>());
+    ASSERT_TRUE(execute(hybrid_input(true, correction, 3 + width))
+                    .sample_output.next_tokens.defined());
+    ASSERT_EQ(target_->forward_linear_indices.size(), first + 4);
+    for (size_t round = 1; round <= 3; ++round) {
+      const size_t index = first + round;
+      EXPECT_TRUE(target_->forward_verify[index]);
+      EXPECT_EQ(target_->forward_inputs[index].numel(), width);
+      EXPECT_EQ(target_->forward_tables[index].size(0), width);
+      EXPECT_TRUE(torch::equal(target_->forward_query_starts[index].cpu(),
+                               torch::arange(width + 1, torch::kInt32)));
+      EXPECT_TRUE(torch::equal(target_->forward_linear_indices[index].cpu(),
+                               torch::tensor({1}, torch::kInt32)));
+      const int32_t expected = round == 2 ? static_cast<int32_t>(width) : 1;
+      EXPECT_TRUE(torch::equal(target_->forward_accepted_lengths[index].cpu(),
+                               torch::tensor({expected}, torch::kInt32)));
+      EXPECT_TRUE(
+          target_->forward_initial_states[index].cpu().all().item<bool>());
+    }
+    std::vector<uintptr_t> addresses(
+        target_->forward_accepted_addresses.begin() + first + 1,
+        target_->forward_accepted_addresses.begin() + first + 4);
+    std::sort(addresses.begin(), addresses.end());
+    EXPECT_NE(addresses.front(), 0U);
+    EXPECT_LE(
+        std::unique(addresses.begin(), addresses.end()) - addresses.begin(), 2);
+    EXPECT_EQ(
+        target_->forward_conv_states[first][1].cpu().abs().sum().item<float>(),
+        0.0F);
+    EXPECT_EQ(target_->forward_ssm_states[first]
+                  .narrow(0, width, width)
+                  .cpu()
+                  .abs()
+                  .sum()
+                  .item<float>(),
+              0.0F);
+    pipeline_.reset();
+  }
+}
+
+TEST_F(SpeculativePipelineTest,
+       HybridMtpRejectsUnsupportedWidthsAndColdDecode) {
+  for (const uint32_t width : {0U, 17U}) {
+    configure_hybrid_mtp(width);
+    EXPECT_FALSE(TaskExecutionPipeline::create(
+                     state_thread_,
+                     {*target_, *target_executor_, target_cache_},
+                     {*draft_, *draft_executor_, draft_cache_},
+                     capacity_,
+                     pipeline_)
+                     .ok());
+    EXPECT_EQ(pipeline_, nullptr);
+  }
+  configure_hybrid_mtp(3);
+  capacity_.common.dp_size = 2;
+  EXPECT_FALSE(TaskExecutionPipeline::create(
+                   state_thread_,
+                   {*target_, *target_executor_, target_cache_},
+                   {*draft_, *draft_executor_, draft_cache_},
+                   capacity_,
+                   pipeline_)
+                   .ok());
+  capacity_.common.dp_size = 1;
+  create();
+  ASSERT_TRUE(execute(hybrid_input(false)).sample_output.next_tokens.defined());
+  auto outside_cache = hybrid_input(true);
+  outside_cache.input_params.attention.host.block_tables =
+      torch::full({1, 8}, 32, torch::kInt32);
+  const auto rejected = pipeline_->submit(outside_cache);
+  EXPECT_FALSE(rejected.status.ok());
+  EXPECT_EQ(rejected.status.message(),
+            "MTP page table is outside allocated Target/Draft cache.");
+  auto cold = hybrid_input(true);
+  cold.input_params.linear_state_validity_mask = {0};
+  EXPECT_FALSE(pipeline_->submit(cold).status.ok());
+  auto malformed = hybrid_input(true);
+  malformed.input_params.linear_state_validity_mask = {1, 1};
+  EXPECT_FALSE(pipeline_->submit(malformed).status.ok());
+  ASSERT_TRUE(execute(hybrid_input(true)).sample_output.next_tokens.defined());
+}
+
+TEST_F(SpeculativePipelineTest,
+       HybridMtpHostReloadPrecedesWholeCheckpointRestoration) {
+  configure_hybrid_mtp(3);
+  auto load = create_layer_synchronizer(/*num_layers=*/1);
+  ASSERT_NE(load, nullptr);
+  create({}, {}, [load](uint64_t) {
+    return HostKVLoadHandle{load, /*layers_per_event=*/1};
+  });
+  auto source = hybrid_input(false);
+  source.input_params.meta.batch_forward_type =
+      BatchForwardType::CHUNKED_PREFILL;
+  source.input_params.attention.host.kv_seq_lens = {4};
+  source.input_params.attention.host.new_cache_slots = {2, 3};
+  source.positions = torch::tensor({2, 3}, torch::kInt32);
+  auto& op = source.input_params.linear_state_cache_ops.front();
+  op.reset_requested = false;
+  op.restore_requested = true;
+  op.restore_src_slot_id = 2;
+  const size_t first = target_->forward_conv_states.size();
+  const auto submitted = pipeline_->submit(source);
+  ASSERT_TRUE(submitted.status.ok()) << submitted.status.message();
+  Stream copy(target_->device());
+  const auto pinned =
+      torch::TensorOptions().dtype(torch::kFloat32).pinned_memory(true);
+  auto conv = torch::full({6, 1}, 23.0, pinned);
+  auto ssm = torch::full({4, 1, 1}, 47.0, pinned);
+  {
+    auto guard = copy.set_stream_guard();
+    target_cache_.front().get_conv_cache()[2].copy_(conv,
+                                                    /*non_blocking=*/true);
+    target_cache_.front().get_ssm_cache().narrow(0, 8, 4).copy_(
+        ssm, /*non_blocking=*/true);
+  }
+  ASSERT_TRUE(load->record_stream(/*layer_index=*/0, &copy));
+  const auto result = pipeline_->take_result_async(submitted.task_id).get();
+  ASSERT_TRUE(result.status.ok()) << result.status.message();
+  ASSERT_EQ(target_->forward_conv_states.size(), first + 1);
+  EXPECT_TRUE(torch::equal(target_->forward_conv_states[first][1].cpu(),
+                           torch::full({6, 1}, 23.0)));
+  EXPECT_TRUE(
+      torch::equal(target_->forward_ssm_states[first].narrow(0, 4, 4).cpu(),
+                   torch::full({4, 1, 1}, 47.0)));
+}
+
+TEST_F(SpeculativePipelineTest,
+       HybridMtpGraphBucketsRetainCompleteSequenceChunks) {
+  for (const uint32_t draft_width : {1U, 2U, 3U, 16U}) {
+    SCOPED_TRACE(draft_width);
+    configure_hybrid_mtp(draft_width);
+    const int64_t width = draft_width + 1;
+    capacity_.common.max_graph_batch_size = static_cast<uint32_t>(4 * width);
+    target_->graph_warmup_bindings.clear();
+    create();
+    auto prefill = dspark_batch_input(3, false);
+    auto decode = dspark_batch_input(3, true);
+    for (auto* value : {&prefill, &decode}) {
+      auto& params = value->input_params;
+      params.embedding.linear_state_ids = {1, 2, 3};
+      params.embedding.linear_state_indices =
+          torch::tensor({1, 2, 3}, torch::kInt32);
+      params.linear_state_cache_ops.resize(3);
+      for (int32_t row = 0; row < 3; ++row) {
+        params.linear_state_cache_ops[row].linear_state_id = row + 1;
+        params.linear_state_cache_ops[row].reset_requested = value == &prefill;
+      }
+    }
+    ASSERT_TRUE(execute(prefill).sample_output.next_tokens.defined());
+    decode.input_params.meta.is_graph_warmup = true;
+    const auto output = execute(decode);
+    ASSERT_TRUE(output.sample_output.next_tokens.defined());
+    EXPECT_TRUE(output.is_graph_warmup);
+    ASSERT_FALSE(target_->graph_warmup_bindings.empty());
+    for (const auto& binding : target_->graph_warmup_bindings) {
+      EXPECT_EQ(binding.second % width, 0);
+    }
+    EXPECT_EQ(target_->forward_linear_indices.back().numel(), 4);
+    EXPECT_EQ(
+        target_->forward_linear_indices.back().cpu().sum().item<int32_t>(), 0);
+    EXPECT_EQ(target_->forward_accepted_lengths.back().numel(), 4);
+    pipeline_.reset();
+  }
+}
+
+TEST_F(SpeculativePipelineTest,
+       HybridMtpAcceptedCheckpointsFollowRequestReorderingAcrossSlots) {
+  for (const int32_t width : {2, 4, 17}) {
+    SCOPED_TRACE(width);
+    std::unique_ptr<MtpContextStorage> context;
+    ASSERT_TRUE(TaskPipelineTestPeer::create_mtp_context(
+                    8, 1, torch::kFloat32, device_, context)
+                    .ok());
+    std::unique_ptr<MtpContextView> first;
+    std::unique_ptr<MtpContextView> second;
+    ASSERT_TRUE(TaskPipelineTestPeer::context_create(*context, 2, first).ok());
+    ASSERT_TRUE(TaskPipelineTestPeer::context_create(*context, 2, second).ok());
+    Stream stream(device_);
+    auto guard = stream.set_stream_guard();
+    const std::array<int32_t, 2> ids{1, 2};
+    const std::array<std::string, 2> requests{"first-request",
+                                              "second-request"};
+    ASSERT_TRUE(TaskPipelineTestPeer::context_prepare(
+                    *first, ids, requests, false, stream)
+                    .ok());
+    const void* address = first->state_.accepted_lengths.data_ptr();
+    first->tokens_.fill_(1);
+    first->state_.positions.zero_();
+    first->state_.kv_seq_lens.fill_(1);
+    first->state_.previous_tokens.fill_(1);
+    first->state_.hidden.zero_();
+    first->state_.repair_required.zero_();
+    auto accepted =
+        torch::arange(width, target_->options().dtype(torch::kInt64))
+            .add(5)
+            .repeat({2, 1});
+    auto lengths = torch::tensor({width, 1}, torch::kInt32).to(device_);
+    auto hidden = torch::zeros({2, width, 1}, target_->options());
+    TaskPipelineTestPeer::context_advance(*first, accepted, lengths, hidden);
+    TaskPipelineTestPeer::context_publish(*first);
+    TaskPipelineTestPeer::context_release(*first);
+    const std::array<int32_t, 2> reversed_ids{2, 1};
+    const std::array<std::string, 2> reversed_requests{requests[1],
+                                                       requests[0]};
+    ASSERT_TRUE(TaskPipelineTestPeer::context_prepare(
+                    *second, reversed_ids, reversed_requests, true, stream)
+                    .ok());
+    TaskPipelineTestPeer::context_gather(*second);
+    ASSERT_EQ(stream.synchronize(), 0);
+    EXPECT_TRUE(torch::equal(second->state_.accepted_lengths.cpu(),
+                             torch::tensor({1, width}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(second->state_.positions.cpu(),
+                             torch::tensor({1, width}, torch::kInt32)));
+    lengths.fill_(1);
+    TaskPipelineTestPeer::context_advance(*second, accepted, lengths, hidden);
+    TaskPipelineTestPeer::context_publish(*second);
+    TaskPipelineTestPeer::context_release(*second);
+    ASSERT_TRUE(TaskPipelineTestPeer::context_prepare(
+                    *first, ids, requests, true, stream)
+                    .ok());
+    TaskPipelineTestPeer::context_gather(*first);
+    ASSERT_EQ(stream.synchronize(), 0);
+    EXPECT_EQ(first->state_.accepted_lengths.data_ptr(), address);
+    EXPECT_TRUE(torch::equal(first->state_.accepted_lengths.cpu(),
+                             torch::tensor({1, 1}, torch::kInt32)));
+    TaskPipelineTestPeer::context_release(*first);
+  }
 }
 
 TEST_F(SpeculativePipelineTest,
@@ -4472,6 +5087,728 @@ TEST_F(SpeculativePipelineTest, MinimumLengthConstrainsTargetButNotDraft) {
   ASSERT_GE(draft_->forward_inputs.size(), 3U);
   EXPECT_EQ(draft_->forward_inputs[2].item<int32_t>(), 4);
   EXPECT_EQ(result.sample_output.next_tokens[0][0].item<int64_t>(), 0);
+}
+
+TEST_F(SpeculativePipelineTest, PrepareDependsOnExactContextPublication) {
+  constexpr uint32_t kDraftWidth = 3;
+  constexpr int32_t kVerifyWidth = kDraftWidth + 1;
+  configure_hybrid_mtp(kDraftWidth);
+  capacity_.refresh_target_prefix = true;
+  capacity_.reuse_prefix_refresh_output = true;
+  create();
+  ASSERT_TRUE(execute(hybrid_input(false)).sample_output.next_tokens.defined());
+  int32_t position = 2;
+  for (uint32_t generation = 0; generation < 3; ++generation) {
+    SCOPED_TRACE(generation);
+    PreparedDeviceGate gate;
+    std::atomic<bool> armed{true};
+    target_->after_forward = [&] {
+      if (armed.exchange(false)) {
+        gate.enqueue();
+      }
+    };
+    bool results_retired = false;
+    ScopeGuard clear_gate([&] {
+      gate.release();
+      if (!results_retired) {
+        pipeline_.reset();
+      }
+      target_->after_forward = {};
+    });
+    const auto first = pipeline_->submit(hybrid_input(true));
+    ASSERT_TRUE(first.status.ok()) << first.status.message();
+    EXPECT_EQ(gate.wait_until_entered(), std::future_status::ready);
+    const auto second = pipeline_->submit(hybrid_input(true));
+    ASSERT_TRUE(second.status.ok()) << second.status.message();
+    const auto& first_slot =
+        TaskPipelineTestPeer::speculative_slot(*pipeline_, 0);
+    const auto& second_slot =
+        TaskPipelineTestPeer::speculative_slot(*pipeline_, 1);
+    ASSERT_TRUE(first_slot.context_prepared);
+    ASSERT_TRUE(second_slot.context_prepared);
+    ASSERT_NE(first_slot.publication, nullptr);
+    ASSERT_EQ(first_slot.publication, second_slot.predecessor_publication);
+    EXPECT_EQ(first_slot.publication->task_id, first.task_id);
+    EXPECT_EQ(second_slot.publication->task_id, second.task_id);
+    EXPECT_NE(first_slot.publication, second_slot.publication);
+    {
+      std::lock_guard lock(first_slot.publication->mutex);
+      EXPECT_TRUE(first_slot.publication->submitted);
+    }
+    const auto first_lease =
+        reinterpret_cast<uintptr_t>(first_slot.publication.get());
+    const auto second_lease =
+        reinterpret_cast<uintptr_t>(second_slot.publication.get());
+    auto ready = std::async(std::launch::async, [this] {
+      c10::DeviceGuard guard(device_);
+      return TaskPipelineTestPeer::input_ready(*pipeline_, 1)->synchronize();
+    });
+    // The Host has submitted this generation's publication, but its Device
+    // producer is still blocked. Waiting on a stale/re-recorded event would
+    // incorrectly complete this next Slot's metadata readiness.
+    EXPECT_EQ(ready.wait_for(std::chrono::milliseconds(20)),
+              std::future_status::timeout);
+    gate.release();
+    EXPECT_TRUE(ready.get());
+    EXPECT_FALSE(gate.timed_out());
+    expect_prepared_metadata(*second_slot.validate_input,
+                             position + kVerifyWidth,
+                             /*first_offset=*/0,
+                             {0, 1, 2, 3, 4, 5, 6, 7});
+    const auto first_result = pipeline_->take_result_async(first.task_id).get();
+    ASSERT_TRUE(first_result.status.ok());
+    // First Slot retirement must not let its lease be reused while the second
+    // Slot still retains that exact predecessor generation.
+    EXPECT_EQ(second_slot.predecessor_publication->task_id, first.task_id);
+    const auto third = pipeline_->submit(hybrid_input(true));
+    ASSERT_TRUE(third.status.ok()) << third.status.message();
+    const auto& third_slot =
+        TaskPipelineTestPeer::speculative_slot(*pipeline_, 0);
+    EXPECT_EQ(
+        reinterpret_cast<uintptr_t>(third_slot.predecessor_publication.get()),
+        second_lease);
+    EXPECT_NE(reinterpret_cast<uintptr_t>(third_slot.publication.get()),
+              first_lease);
+    EXPECT_NE(reinterpret_cast<uintptr_t>(third_slot.publication.get()),
+              second_lease);
+    EXPECT_TRUE(pipeline_->take_result_async(second.task_id).get().status.ok());
+    EXPECT_TRUE(pipeline_->take_result_async(third.task_id).get().status.ok());
+    results_retired = true;
+    position += 3 * kVerifyWidth;
+  }
+}
+
+TEST_F(SpeculativePipelineTest, PreparedDecodeMetadataIsLaunchStable) {
+  const std::vector<int32_t> blocks{3, 5, 7, 9, 11, 13, 15, 17};
+  for (const uint32_t draft_width : {1U, 2U, 3U, 4U, 16U}) {
+    for (const int32_t accepted : {1, static_cast<int32_t>(draft_width) + 1}) {
+      SCOPED_TRACE(draft_width);
+      SCOPED_TRACE(accepted);
+      configure_hybrid_mtp(draft_width);
+      capacity_.refresh_target_prefix = draft_width > 1;
+      capacity_.reuse_prefix_refresh_output = draft_width > 1;
+      draft_->logits_calls.store(0);
+      draft_->logit_increments.assign(draft_width, 1);
+      if (accepted <= static_cast<int32_t>(draft_width)) {
+        draft_->logit_increments[accepted - 1] = 2;
+      }
+      std::shared_ptr<LayerSynchronizer> next_load;
+      create(
+          {},
+          {},
+          [&](uint64_t) -> std::optional<HostKVLoadHandle> {
+            if (next_load == nullptr) {
+              return std::nullopt;
+            }
+            return HostKVLoadHandle{std::exchange(next_load, nullptr),
+                                    /*layers_per_event=*/1,
+                                    std::nullopt};
+          },
+          [](const Stream& stream) { CHECK_EQ(stream.synchronize(), 0); });
+      ASSERT_TRUE(
+          execute(hybrid_input(false)).sample_output.next_tokens.defined());
+      Stream load_stream(device_);
+      for (uint32_t slot_id = 0; slot_id < 2; ++slot_id) {
+        SCOPED_TRACE(slot_id);
+        const int32_t position = 15 + (slot_id == 0 ? 0 : accepted);
+        auto source = hybrid_input(true, /*token=*/17, position);
+        source.input_params.attention.host.block_tables =
+            torch::tensor(blocks, torch::kInt32).view({1, 8});
+        source.input_params.attention.host.new_cache_slots = {
+            blocks[position / 16] * 16 + position % 16};
+        if (slot_id == 0) {
+          source.input_params.embedding.mtp_bootstrap_row_idxes = {0};
+          source.input_params.embedding.mtp_bootstrap_embeddings =
+              torch::tensor({{1.0F}});
+        } else {
+          draft_->logits_calls.store(0);
+          draft_->logit_increments = {1};
+        }
+        auto load = create_layer_synchronizer(/*num_layers=*/1);
+        ASSERT_NE(load, nullptr);
+        next_load = load;
+        bool load_submitted = false;
+        ScopeGuard release_load([&] {
+          if (!load_submitted) {
+            CHECK(load->record_stream(/*layer_index=*/0, &load_stream));
+          }
+        });
+        const auto task = pipeline_->submit(source);
+        ASSERT_TRUE(task.status.ok()) << task.status.message();
+        ASSERT_TRUE(TaskPipelineTestPeer::input_ready(*pipeline_, slot_id)
+                        ->synchronize());
+        const auto& slot =
+            TaskPipelineTestPeer::speculative_slot(*pipeline_, slot_id);
+        ASSERT_TRUE(slot.context_prepared);
+        EXPECT_EQ(slot.state->reuse_draft_prefix_,
+                  slot_id != 0 && draft_width > 1);
+        for (uint32_t step = 0; step < draft_width; ++step) {
+          if (step == 0 && slot.state->reuse_draft_prefix_) {
+            continue;
+          }
+          expect_prepared_metadata(
+              *slot.drafts[step]->input,
+              position,
+              step == 0 ? -2 : static_cast<int32_t>(step) - 1,
+              blocks,
+              /*unused_repair_row=*/step == 0 &&
+                  (slot_id == 0 ||
+                   accepted != static_cast<int32_t>(draft_width) + 1));
+        }
+        expect_prepared_metadata(*slot.validate_input,
+                                 position,
+                                 /*first_offset=*/0,
+                                 blocks);
+        if (slot.prefix_refresh != nullptr) {
+          expect_prepared_metadata(*slot.prefix_refresh->input,
+                                   position,
+                                   /*first_offset=*/0,
+                                   blocks);
+        }
+        const auto snapshots = snapshot_prepared_metadata(slot);
+        ASSERT_TRUE(load->record_stream(/*layer_index=*/0, &load_stream));
+        load_submitted = true;
+        pipeline_->fence_kv_cache();
+        expect_prepared_metadata_unchanged(snapshots);
+      }
+      const auto first = pipeline_->take_result_async().get();
+      ASSERT_TRUE(first.status.ok());
+      EXPECT_EQ(
+          first.output.sample_output.next_tokens.ge(0).sum().item<int64_t>(),
+          accepted);
+      EXPECT_TRUE(pipeline_->take_result_async().get().status.ok());
+      pipeline_.reset();
+    }
+  }
+}
+
+TEST_F(SpeculativePipelineTest,
+       PrepareCompletesWhilePrecedingRefreshStillOwnsItsOutput) {
+  constexpr uint32_t kDraftWidth = 3;
+  configure_hybrid_mtp(kDraftWidth);
+  capacity_.common.hidden_size = 2;
+  capacity_.refresh_target_prefix = true;
+  capacity_.reuse_prefix_refresh_output = true;
+  target_->state_sensitive = true;
+  draft_->state_sensitive = true;
+  auto borrowed = torch::empty({128, 2}, target_->options());
+  target_->borrowed_hidden_storage = borrowed;
+  draft_->borrowed_hidden_storage = borrowed;
+  create();
+  ASSERT_TRUE(execute(hybrid_input(false)).sample_output.next_tokens.defined());
+  std::promise<void> entered;
+  auto entered_future = entered.get_future();
+  std::promise<void> release;
+  auto release_future = release.get_future().share();
+  std::atomic<bool> released{false};
+  std::atomic<bool> refresh_armed{true};
+  const auto release_once = [&] {
+    if (!released.exchange(true)) {
+      release.set_value();
+    }
+  };
+  bool results_retired = false;
+  ScopeGuard release_refresh([&] {
+    release_once();
+    if (!results_retired) {
+      pipeline_.reset();
+    }
+    draft_->after_forward = {};
+  });
+  draft_->after_forward = [&] {
+    if (draft_->forward_inputs.back().numel() == kDraftWidth + 1 &&
+        refresh_armed.exchange(false)) {
+      entered.set_value();
+      EXPECT_EQ(release_future.wait_for(std::chrono::seconds(10)),
+                std::future_status::ready);
+    }
+  };
+  const auto first = pipeline_->submit(hybrid_input(true));
+  ASSERT_TRUE(first.status.ok());
+  EXPECT_EQ(entered_future.wait_for(std::chrono::seconds(5)),
+            std::future_status::ready);
+  const auto second = pipeline_->submit(hybrid_input(true));
+  ASSERT_TRUE(second.status.ok());
+  const auto& first_slot =
+      TaskPipelineTestPeer::speculative_slot(*pipeline_, 0);
+  const auto& second_slot =
+      TaskPipelineTestPeer::speculative_slot(*pipeline_, 1);
+  ASSERT_TRUE(second_slot.context_prepared);
+  EXPECT_EQ(second_slot.predecessor_publication, first_slot.publication);
+  EXPECT_TRUE(second_slot.state->reuse_draft_prefix_);
+  auto ready = std::async(std::launch::async, [this] {
+    c10::DeviceGuard guard(device_);
+    return TaskPipelineTestPeer::input_ready(*pipeline_, 1)->synchronize();
+  });
+  const auto completed = ready.wait_for(std::chrono::seconds(5));
+  if (completed != std::future_status::ready) {
+    release_once();
+  }
+  EXPECT_EQ(completed, std::future_status::ready);
+  EXPECT_TRUE(ready.get());
+  EXPECT_FALSE(released.load());
+  expect_prepared_metadata(*second_slot.validate_input,
+                           /*base_position=*/6,
+                           /*first_offset=*/0,
+                           {0, 1, 2, 3, 4, 5, 6, 7});
+  const auto snapshots = snapshot_prepared_metadata(second_slot);
+  // CountingModel's independent scalar rule is [token, token/4+position/8].
+  // The accepted prefix is tokens 4..7 at positions 2..5. Do not read its
+  // borrowed Device output on the test thread's unrelated default stream.
+  const auto first_hidden = torch::tensor({{7.0F, 2.375F}});
+  // The first forward is still inside its callback, so no returned ModelOutput
+  // or refreshed hidden has been published. Only base metadata may be ready.
+  EXPECT_FALSE(first_slot.prefix_refresh->output.hidden_states.defined());
+  release_once();
+  ASSERT_TRUE(pipeline_->take_result_async(first.task_id).get().status.ok());
+  ASSERT_TRUE(pipeline_->take_result_async(second.task_id).get().status.ok());
+  results_retired = true;
+  expect_prepared_metadata_unchanged(snapshots);
+  EXPECT_TRUE(torch::allclose(
+      draft_->logits_inputs[kDraftWidth].cpu(), first_hidden, 1e-6, 1e-6));
+}
+
+TEST_F(SpeculativePipelineTest,
+       RefreshedPrefixReusesOwnedHiddenWithoutChangingKvOrLogits) {
+  for (const uint32_t draft_width : {2U, 3U, 4U, 16U}) {
+    for (int32_t accepted = 1;
+         accepted <= static_cast<int32_t>(draft_width + 1);
+         ++accepted) {
+      SCOPED_TRACE(draft_width);
+      SCOPED_TRACE(accepted);
+      configure_hybrid_mtp(draft_width);
+      capacity_.common.hidden_size = 2;
+      capacity_.refresh_target_prefix = true;
+      capacity_.reuse_prefix_refresh_output = true;
+      target_->state_sensitive = true;
+      draft_->state_sensitive = true;
+      draft_->cache_sensitive_draft = true;
+      target_->logits_calls.store(0);
+      draft_->logits_calls.store(0);
+      draft_->logit_increments.assign(draft_width, 1);
+      if (accepted <= static_cast<int32_t>(draft_width)) {
+        draft_->logit_increments[accepted - 1] = 2;
+      }
+      // Both models deliberately lend the same output pool. Only an owned
+      // per-request snapshot can survive another body and Slot retirement.
+      auto borrowed = torch::empty({128, 2}, target_->options());
+      target_->borrowed_hidden_storage = borrowed;
+      draft_->borrowed_hidden_storage = borrowed;
+      const size_t first_forward = draft_->forward_inputs.size();
+      const size_t first_cache = draft_->forward_key_cache.size();
+      const size_t first_output = draft_->forward_outputs.size();
+      const size_t first_logits = draft_->logits_inputs.size();
+      create();
+      ASSERT_TRUE(
+          execute(hybrid_input(false)).sample_output.next_tokens.defined());
+      const auto first = execute(hybrid_input(true));
+      ASSERT_TRUE(first.sample_output.next_tokens.defined());
+      ASSERT_EQ(first.sample_output.next_tokens.ge(0).sum().item<int64_t>(),
+                accepted);
+      ASSERT_EQ(draft_->forward_inputs.size() - first_forward,
+                draft_width + 2U);
+
+      const int32_t committed = 2 + accepted;
+      const auto expected_keys = reference_draft_keys(committed);
+      auto keys = draft_cache_.front().get_k_cache().view({-1});
+      auto values = draft_cache_.front().get_v_cache().view({-1});
+      EXPECT_TRUE(torch::allclose(
+          keys.narrow(0, 0, committed).cpu(), expected_keys, 0.0, 1e-6));
+      EXPECT_TRUE(torch::allclose(values.narrow(0, 0, committed).cpu(),
+                                  expected_keys * 2.0,
+                                  0.0,
+                                  1e-6));
+      // This is the selected teacher-forced Draft reference. A difference
+      // before refresh is not evidence that the target verifier is wrong.
+      EXPECT_FALSE(
+          torch::allclose(draft_->forward_key_cache[first_cache + draft_width]
+                              .narrow(0, 0, committed)
+                              .cpu(),
+                          expected_keys,
+                          0.0,
+                          1e-6));
+
+      // Fork ordinary execution from the exact pre-refresh device cache.
+      // Its production input builder must match the pipeline and the scalar
+      // reference, rather than comparing two test copies of the same builder.
+      CountingModel ordinary(device_);
+      ordinary.state_sensitive = true;
+      ordinary.cache_sensitive_draft = true;
+      ordinary.vocab_size = 256;
+      std::vector<KVCache> ordinary_cache;
+      ordinary_cache.emplace_back(
+          KVCacheTensors{draft_->forward_key_cache[first_cache + draft_width]
+                             .view_as(draft_cache_.front().get_k_cache())
+                             .clone(),
+                         draft_->forward_value_cache[first_cache + draft_width]
+                             .view_as(draft_cache_.front().get_v_cache())
+                             .clone()});
+      auto ordinary_input = ordinary_prefix_input(draft_width + 1);
+      const auto accepted_tokens = first.sample_output.next_tokens.to(device_);
+      const auto target_hidden = target_->forward_outputs.back().view(
+          {1, static_cast<int64_t>(draft_width) + 1, 2});
+      mtp_async::prepare_draft_prefix_from_target(
+          ordinary_input,
+          accepted_tokens,
+          target_hidden,
+          torch::tensor({2}, torch::kInt32).to(device_),
+          torch::tensor({3}, torch::kInt32).to(device_),
+          /*block_size=*/16);
+      EXPECT_EQ(ordinary_input.sampling_params.selected_token_idxes.cpu()
+                    .item<int32_t>(),
+                accepted - 1);
+      EXPECT_TRUE(torch::equal(
+          ordinary_input.positions.cpu(),
+          torch::arange(
+              2, static_cast<int64_t>(draft_width) + 3, torch::kInt32)));
+      const ModelInputSnapshot ordinary_snapshot(
+          std::move(ordinary_input.input_params));
+      const auto ordinary_output = ordinary.forward(ordinary_input.token_ids,
+                                                    ordinary_input.positions,
+                                                    ordinary_cache,
+                                                    ordinary_snapshot.view());
+      const auto ordinary_logits =
+          ordinary.logits(ordinary_output.hidden_states,
+                          ordinary_input.sampling_params.selected_token_idxes);
+      EXPECT_TRUE(torch::equal(ordinary_cache.front().get_k_cache(),
+                               draft_cache_.front().get_k_cache()));
+      EXPECT_TRUE(torch::equal(ordinary_cache.front().get_v_cache(),
+                               draft_cache_.front().get_v_cache()));
+      EXPECT_TRUE(torch::allclose(ordinary_cache.front()
+                                      .get_k_cache()
+                                      .view({-1})
+                                      .narrow(0, 0, committed)
+                                      .cpu(),
+                                  expected_keys,
+                                  0.0,
+                                  1e-6));
+
+      const auto expected_hidden = reference_draft_hidden(committed - 1);
+      EXPECT_TRUE(torch::allclose(
+          ordinary_output.hidden_states.narrow(0, accepted - 1, 1).cpu(),
+          expected_hidden,
+          1e-6,
+          1e-6));
+      EXPECT_TRUE(torch::allclose(
+          draft_->forward_outputs[first_output + draft_width + 1]
+              .narrow(0, accepted - 1, 1)
+              .cpu(),
+          expected_hidden,
+          1e-6,
+          1e-6));
+      EXPECT_FALSE(torch::allclose(
+          expected_hidden, torch::zeros_like(expected_hidden), 1e-6, 1e-6));
+
+      // A rejected tail remains physically allocated. It must not affect the
+      // next admission or be mistaken for the selected refresh output.
+      keys.narrow(0, committed, keys.numel() - committed).fill_(777.0);
+      values.narrow(0, committed, values.numel() - committed).fill_(999.0);
+      auto ordinary_keys = ordinary_cache.front().get_k_cache().view({-1});
+      auto ordinary_values = ordinary_cache.front().get_v_cache().view({-1});
+      ordinary_keys.narrow(0, committed, ordinary_keys.numel() - committed)
+          .fill_(777.0);
+      ordinary_values.narrow(0, committed, ordinary_values.numel() - committed)
+          .fill_(999.0);
+      auto later_input = ordinary_prefix_input(/*width=*/1);
+      later_input.token_ids.copy_(ordinary_logits.argmax(/*dim=*/1));
+      later_input.input_params.embedding.input_embedding.copy_(
+          ordinary_output.hidden_states.narrow(0, accepted - 1, 1));
+      mtp_async::prepare_later_draft_from_device_base(
+          later_input,
+          later_input,
+          torch::tensor({committed}, torch::kInt32).to(device_),
+          torch::tensor({committed + 1}, torch::kInt32).to(device_),
+          /*position_offset=*/0,
+          /*block_size=*/16);
+      EXPECT_EQ(later_input.positions.cpu().item<int32_t>(), committed);
+      const ModelInputSnapshot later_snapshot(
+          std::move(later_input.input_params));
+      const auto later_output = ordinary.forward(later_input.token_ids,
+                                                 later_input.positions,
+                                                 ordinary_cache,
+                                                 later_snapshot.view());
+      const auto later_logits =
+          ordinary.logits(later_output.hidden_states,
+                          later_input.sampling_params.selected_token_idxes);
+      borrowed.fill_(19.0);
+      draft_->logit_increments = {1};
+      const auto second = execute(
+          hybrid_input(true, /*token=*/accepted + 3, /*position=*/committed));
+      ASSERT_TRUE(second.sample_output.next_tokens.defined());
+      EXPECT_EQ(second.sample_output.next_tokens.ge(0).sum().item<int64_t>(),
+                draft_width + 1);
+      EXPECT_EQ(draft_->forward_inputs.size() - first_forward,
+                2U * draft_width + 2U);
+      ASSERT_EQ(draft_->logits_inputs.size() - first_logits, 2U * draft_width);
+      const auto actual_hidden =
+          draft_->logits_inputs[first_logits + draft_width].cpu();
+      EXPECT_TRUE(torch::allclose(actual_hidden, expected_hidden, 1e-6, 1e-6));
+      auto expected_logits = torch::full({1, 256}, -20.0);
+      expected_logits[0][accepted + 4].fill_(20.0);
+      expected_logits.add_(expected_hidden[0][1] *
+                           torch::arange(256, torch::kFloat32).view({1, 256}) /
+                           65536.0);
+      EXPECT_TRUE(torch::allclose(
+          draft_->logits_outputs[first_logits + draft_width].cpu(),
+          expected_logits,
+          1e-6,
+          1e-6));
+      EXPECT_TRUE(
+          torch::allclose(draft_->logits_outputs[first_logits + draft_width],
+                          ordinary_logits,
+                          1e-6,
+                          1e-6));
+      EXPECT_TRUE(torch::equal(
+          draft_->forward_positions[first_forward + draft_width + 2],
+          later_input.positions));
+      EXPECT_TRUE(
+          torch::equal(draft_->forward_key_cache[first_cache + draft_width + 2],
+                       ordinary_keys));
+      EXPECT_TRUE(torch::equal(
+          draft_->forward_value_cache[first_cache + draft_width + 2],
+          ordinary_values));
+      EXPECT_TRUE(torch::allclose(
+          draft_->logits_outputs[first_logits + draft_width + 1],
+          later_logits,
+          1e-6,
+          1e-6));
+      const int32_t final_committed =
+          committed + static_cast<int32_t>(draft_width) + 1;
+      EXPECT_TRUE(torch::allclose(keys.narrow(0, 0, final_committed).cpu(),
+                                  reference_draft_keys(final_committed),
+                                  0.0,
+                                  1e-6));
+      pipeline_.reset();
+    }
+  }
+}
+
+TEST_F(SpeculativePipelineTest,
+       SingleDraftPrefixFirstPassMatchesNextOrdinaryCurrentRow) {
+  for (const int32_t accepted : {1, 2}) {
+    SCOPED_TRACE(accepted);
+    configure_hybrid_mtp(/*draft_width=*/1);
+    capacity_.common.hidden_size = 2;
+    capacity_.refresh_target_prefix = false;
+    capacity_.reuse_prefix_refresh_output = false;
+    target_->state_sensitive = true;
+    draft_->state_sensitive = true;
+    draft_->cache_sensitive_draft = true;
+    target_->logits_calls.store(0);
+    draft_->logits_calls.store(0);
+    draft_->logit_increments = {accepted == 1 ? 2 : 1};
+    auto borrowed = torch::empty({128, 2}, target_->options());
+    target_->borrowed_hidden_storage = borrowed;
+    draft_->borrowed_hidden_storage = borrowed;
+    const size_t first_cache = draft_->forward_key_cache.size();
+    const size_t first_logits = draft_->logits_inputs.size();
+    const size_t first_forward = draft_->forward_inputs.size();
+    create();
+    ASSERT_TRUE(
+        execute(hybrid_input(false)).sample_output.next_tokens.defined());
+    const auto first = execute(hybrid_input(true));
+    ASSERT_EQ(first.sample_output.next_tokens.ge(0).sum().item<int64_t>(),
+              accepted);
+
+    CountingModel ordinary(device_);
+    ordinary.state_sensitive = true;
+    ordinary.cache_sensitive_draft = true;
+    ordinary.vocab_size = 256;
+    std::vector<KVCache> ordinary_cache;
+    ordinary_cache.emplace_back(
+        KVCacheTensors{draft_->forward_key_cache[first_cache + 1]
+                           .view_as(draft_cache_.front().get_k_cache())
+                           .clone(),
+                       draft_->forward_value_cache[first_cache + 1]
+                           .view_as(draft_cache_.front().get_v_cache())
+                           .clone()});
+    auto prefix_input = ordinary_prefix_input(/*width=*/2);
+    mtp_async::prepare_draft_prefix_from_target(
+        prefix_input,
+        first.sample_output.next_tokens.to(device_),
+        target_->forward_outputs.back().view({1, 2, 2}),
+        torch::tensor({2}, torch::kInt32).to(device_),
+        torch::tensor({3}, torch::kInt32).to(device_),
+        /*block_size=*/16);
+    const ModelInputSnapshot prefix_snapshot(
+        std::move(prefix_input.input_params));
+    const auto output = ordinary.forward(prefix_input.token_ids,
+                                         prefix_input.positions,
+                                         ordinary_cache,
+                                         prefix_snapshot.view());
+    const auto logits =
+        ordinary.logits(output.hidden_states,
+                        prefix_input.sampling_params.selected_token_idxes);
+    const int32_t committed = 2 + accepted;
+    EXPECT_TRUE(
+        torch::allclose(output.hidden_states.narrow(0, accepted - 1, 1).cpu(),
+                        reference_draft_hidden(committed - 1),
+                        1e-6,
+                        1e-6));
+    // K=1 retains the pipeline's two-row current-body path. Compare after
+    // that body repairs/writes its rows, not before its cache update.
+    borrowed.fill_(39.0);
+    draft_->logit_increments = {1};
+    ASSERT_TRUE(execute(hybrid_input(true, accepted + 3, committed))
+                    .sample_output.next_tokens.defined());
+    EXPECT_EQ(draft_->forward_inputs.size() - first_forward, 3U);
+    EXPECT_TRUE(torch::allclose(
+        draft_->logits_outputs[first_logits + 1], logits, 1e-6, 1e-6));
+    EXPECT_TRUE(torch::allclose(draft_->forward_key_cache[first_cache + 2]
+                                    .narrow(0, 0, committed)
+                                    .cpu(),
+                                reference_draft_keys(committed),
+                                0.0,
+                                1e-6));
+    pipeline_.reset();
+  }
+}
+
+TEST_F(SpeculativePipelineTest,
+       RefreshedPrefixFollowsRequestsThroughReorderAndMixedBootstrap) {
+  constexpr uint32_t kDraftWidth = 3;
+  configure_hybrid_mtp(kDraftWidth);
+  capacity_.common.hidden_size = 2;
+  capacity_.refresh_target_prefix = true;
+  capacity_.reuse_prefix_refresh_output = true;
+  target_->state_sensitive = true;
+  draft_->state_sensitive = true;
+  draft_->cache_sensitive_draft = true;
+  auto borrowed = torch::empty({128, 2}, target_->options());
+  target_->borrowed_hidden_storage = borrowed;
+  draft_->borrowed_hidden_storage = borrowed;
+  const auto batch = [this](const std::vector<int32_t>& ids,
+                            const std::vector<std::string>& requests,
+                            bool decode,
+                            const std::vector<int32_t>& positions,
+                            const std::vector<int32_t>& tokens) {
+    const uint32_t count = static_cast<uint32_t>(ids.size());
+    auto value = dspark_batch_input(count, decode, /*placeholder=*/decode);
+    auto& params = value.input_params;
+    params.embedding.embedding_ids = ids;
+    params.embedding.request_ids = requests;
+    params.embedding.linear_state_ids = ids;
+    params.embedding.linear_state_indices = torch::tensor(ids, torch::kInt32);
+    params.linear_state_validity_mask.assign(count, decode ? 1 : 0);
+    params.linear_state_cache_ops.resize(count);
+    std::vector<int32_t> tables;
+    tables.reserve(2 * count);
+    for (uint32_t row = 0; row < count; ++row) {
+      params.linear_state_cache_ops[row].linear_state_id = ids[row];
+      params.linear_state_cache_ops[row].reset_requested = !decode;
+      tables.emplace_back(2 * ids[row] - 1);
+      tables.emplace_back(2 * ids[row]);
+    }
+    params.attention.host.block_tables =
+        torch::tensor(tables, torch::kInt32).view({count, 2});
+    if (decode) {
+      value.positions = torch::tensor(positions, torch::kInt32);
+      value.token_ids = torch::tensor(tokens, torch::kInt32);
+      params.attention.host.new_cache_slots.clear();
+      params.attention.host.kv_seq_lens.clear();
+      for (uint32_t row = 0; row < count; ++row) {
+        params.attention.host.new_cache_slots.emplace_back(
+            (2 * ids[row] - 1) * 16 + positions[row]);
+        params.attention.host.kv_seq_lens.emplace_back(positions[row] + 1);
+      }
+    }
+    return value;
+  };
+  create();
+  const auto execute_prepared = [this](const LlmForwardInput& source,
+                                       bool expected_reuse) {
+    const auto submitted = pipeline_->submit(source);
+    EXPECT_TRUE(submitted.status.ok()) << submitted.status.message();
+    if (!submitted.status.ok()) {
+      return ForwardOutput();
+    }
+    const auto& slot = TaskPipelineTestPeer::speculative_slot(*pipeline_, 0);
+    EXPECT_NE(slot.publication, nullptr);
+    EXPECT_EQ(slot.publication->task_id, submitted.task_id);
+    if (source.input_params.meta.batch_forward_type.is_decode()) {
+      EXPECT_TRUE(slot.context_prepared);
+      EXPECT_EQ(slot.state->reuse_draft_prefix_, expected_reuse);
+    }
+    auto result = pipeline_->take_result_async(submitted.task_id).get();
+    EXPECT_TRUE(result.status.ok()) << result.status.message();
+    return std::move(result.output);
+  };
+  ASSERT_TRUE(
+      execute_prepared(batch({1, 2}, {"first", "second"}, false, {}, {}),
+                       /*expected_reuse=*/false)
+          .sample_output.next_tokens.defined());
+  ASSERT_TRUE(
+      execute_prepared(batch({1, 2}, {"first", "second"}, true, {2, 2}, {3, 5}),
+                       /*expected_reuse=*/false)
+          .sample_output.next_tokens.defined());
+  const auto first_hidden =
+      draft_->forward_outputs.back()
+          .index_select(0, torch::tensor({3, 7}, torch::kInt64).to(device_))
+          .cpu();
+  const size_t before_reorder = draft_->forward_inputs.size();
+  const size_t logits_before_reorder = draft_->logits_inputs.size();
+  borrowed.fill_(19.0);
+  const auto reordered = execute_prepared(
+      batch({2, 1}, {"second", "first"}, true, {6, 6}, {-1, -1}),
+      /*expected_reuse=*/true);
+  ASSERT_TRUE(reordered.sample_output.next_tokens.defined());
+  EXPECT_EQ(draft_->forward_inputs.size() - before_reorder, kDraftWidth);
+  EXPECT_TRUE(
+      torch::allclose(draft_->logits_inputs[logits_before_reorder].cpu(),
+                      first_hidden.flip({0}),
+                      1e-6,
+                      1e-6));
+
+  // Results have retired, but request identity still owns the saved row.
+  // Reusing embedding id 1 without a new context must be rejected.
+  auto replacement =
+      batch({2, 1}, {"second", "replacement"}, true, {10, 5}, {13, 10});
+  EXPECT_FALSE(pipeline_->submit(replacement).status.ok());
+  replacement.input_params.embedding.mtp_bootstrap_row_idxes = {1};
+  replacement.input_params.embedding.mtp_bootstrap_embeddings =
+      torch::tensor({{9.0F, 3.5F}});
+  const size_t before_mixed = draft_->forward_inputs.size();
+  const size_t logits_before_mixed = draft_->logits_inputs.size();
+  // Bootstrap represents an externally imported prefix for the replacement,
+  // rather than permission to reuse the old request's physical KV contents.
+  auto imported_keys = torch::arange(5, draft_->options()) / 16.0 + 0.5;
+  draft_cache_.front().get_k_cache().view({-1}).narrow(0, 16, 5).copy_(
+      imported_keys);
+  draft_cache_.front().get_v_cache().view({-1}).narrow(0, 16, 5).copy_(
+      imported_keys * 2.0);
+  borrowed.fill_(23.0);
+  const auto mixed = execute_prepared(replacement, /*expected_reuse=*/false);
+  ASSERT_TRUE(mixed.sample_output.next_tokens.defined());
+  EXPECT_EQ(draft_->forward_inputs.size() - before_mixed, kDraftWidth + 1);
+  ASSERT_EQ(draft_->forward_inputs[before_mixed].numel(), 4);
+  EXPECT_TRUE(torch::equal(
+      draft_->forward_embeddings[before_mixed].narrow(0, 3, 1).cpu(),
+      torch::tensor({{9.0F, 3.5F}})));
+  EXPECT_TRUE(torch::allclose(
+      draft_->logits_inputs[logits_before_mixed].cpu(),
+      draft_->forward_outputs[before_mixed]
+          .index_select(0, torch::tensor({1, 3}, torch::kInt64).to(device_))
+          .cpu(),
+      1e-6,
+      1e-6));
+  const auto replacement_hidden =
+      draft_->forward_outputs.back().narrow(0, 7, 1).cpu();
+  EXPECT_FALSE(torch::allclose(
+      replacement_hidden, first_hidden.narrow(0, 0, 1), 1e-6, 1e-6));
+
+  // The mixed fallback's refresh publishes a new owned result for the new
+  // request. Removing the other row must neither lose it nor select its state.
+  const size_t before_single = draft_->forward_inputs.size();
+  const size_t logits_before_single = draft_->logits_inputs.size();
+  borrowed.fill_(29.0);
+  ASSERT_TRUE(execute_prepared(batch({1}, {"replacement"}, true, {9}, {-1}),
+                               /*expected_reuse=*/true)
+                  .sample_output.next_tokens.defined());
+  EXPECT_EQ(draft_->forward_inputs.size() - before_single, kDraftWidth);
+  EXPECT_TRUE(torch::allclose(draft_->logits_inputs[logits_before_single].cpu(),
+                              replacement_hidden,
+                              1e-6,
+                              1e-6));
 }
 
 class TargetPrefixLengthSpeculativePipelineTest

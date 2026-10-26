@@ -29,6 +29,15 @@ struct TaskPipelineTestPeer {
   static constexpr auto context_prepare_decode =
       TaskExecutionPipeline::context_prepare_decode;
   static constexpr auto context_gather = TaskExecutionPipeline::context_gather;
+  static constexpr auto speculative_slot =
+      [](const TaskExecutionPipeline& pipeline,
+         uint32_t slot_id) -> const auto& {
+    return *pipeline.slots_[slot_id]->speculative;
+  };
+  static constexpr auto input_ready = [](const TaskExecutionPipeline& pipeline,
+                                         uint32_t slot_id) {
+    return pipeline.slots_[slot_id]->input_ready;
+  };
   static constexpr auto context_publish =
       TaskExecutionPipeline::context_publish;
   static constexpr auto context_advance =

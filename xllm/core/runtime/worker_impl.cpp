@@ -2021,6 +2021,7 @@ bool WorkerImpl::wakeup_from_remote_weights(const WakeupOptions& options) {
                     static_cast<uint32_t>(options.max_seqs_per_batch()),
                     static_cast<uint32_t>((positions + logical_block_size - 1) /
                                           logical_block_size)};
+  capacity.model.enable_linear_attention = has_linear_attention_layers(args);
   capacity.max_kv_seq_len = static_cast<uint32_t>(positions);
   capacity.max_positions = static_cast<uint32_t>(positions);
   capacity.logical_block_size = static_cast<uint32_t>(logical_block_size);
