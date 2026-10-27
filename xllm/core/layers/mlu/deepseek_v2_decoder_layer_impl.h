@@ -102,7 +102,7 @@ class DeepseekV2DecoderLayerImpl : public torch::nn::Module {
     std::optional<PostAttnCarrier> carrier;
     std::optional<DeepseekV2SparseMoEBlockImpl::PrepOut> moe_prep;
     std::optional<DeepseekV2SparseMoEBlockImpl::ExecCfg> exec_cfg;
-    bool use_sp_moe_overlap = false;
+    bool use_cp_moe_overlap = false;
   };
 
   PostAttnCarrier build_post_attn_carrier(

@@ -335,6 +335,15 @@ std::string TritonBackend::compile(const std::string& path,
   if (!cfg.bottleneck.empty()) {
     options["bottleneck"] = cfg.bottleneck;
   }
+  if (cfg.enable_fp_fusion.has_value()) {
+    options["enable_fp_fusion"] = *cfg.enable_fp_fusion;
+  }
+  if (cfg.enable_soft_i64.has_value()) {
+    options["enable_soft_i64"] = *cfg.enable_soft_i64;
+  }
+  if (cfg.force_use_shared_memory.has_value()) {
+    options["force_use_shared_memory"] = *cfg.force_use_shared_memory;
+  }
   py::object result = mod.attr("compile")(path,
                                           name,
                                           args_spec,

@@ -29,6 +29,14 @@ DsaTopkState make_topk_state() {
   return DsaTopkState(block_tables, context_lens);
 }
 
+DsaTopkState make_localized_state() {
+  const torch::Tensor block_tables =
+      torch::tensor({{5, 0}, {6, 0}}, torch::dtype(torch::kInt32));
+  const torch::Tensor context_lens =
+      torch::tensor({1, 1}, torch::dtype(torch::kInt32));
+  return DsaTopkState(block_tables, context_lens);
+}
+
 TEST(DsaTopkRelayTest, PublishedStateIsReusedAsOneValue) {
   DsaTopkRelay relay;
   const DsaTopkShareDecision publish_decision{
@@ -45,7 +53,7 @@ TEST(DsaTopkRelayTest, PublishedStateIsReusedAsOneValue) {
       torch::tensor({{1, 2}, {3, 4}}, torch::dtype(torch::kInt32));
   const torch::Tensor context_lens =
       torch::tensor({2, 1}, torch::dtype(torch::kInt32));
-  publish_transfer->publish_output(DsaTopkState(block_tables, context_lens));
+  publish_transfer->complete(DsaTopkState(block_tables, context_lens));
   relay.finish_layer(publish_decision, *publish_transfer);
 
   const DsaTopkShareDecision reuse_decision{
@@ -79,6 +87,71 @@ TEST(DsaTopkRelayTest, ReuseBeforePublishFails) {
       "requires a previously published state");
 }
 
+TEST(DsaTopkRelayTest, LocalizedViewIsRelayedWithPublishedState) {
+  DsaTopkRelay relay;
+  const DsaTopkShareDecision publish_decision{
+      .reuse_topk = false,
+      .output_topk = true,
+  };
+  std::optional<DsaTopkTransfer> publish_transfer =
+      relay.prepare_layer(publish_decision);
+  ASSERT_TRUE(publish_transfer.has_value());
+
+  const DsaTopkState global_state = make_topk_state();
+  const DsaTopkState localized_state = make_localized_state();
+  publish_transfer->complete(global_state, localized_state);
+  const auto mtp_state = publish_transfer->mtp_output_state();
+  ASSERT_TRUE(mtp_state.has_value());
+  EXPECT_EQ(mtp_state->block_tables().data_ptr(),
+            global_state.block_tables().data_ptr());
+  relay.finish_layer(publish_decision, *publish_transfer);
+
+  const DsaTopkShareDecision reuse_decision{
+      .reuse_topk = true,
+      .output_topk = false,
+  };
+  std::optional<DsaTopkTransfer> reuse_transfer =
+      relay.prepare_layer(reuse_decision);
+  ASSERT_TRUE(reuse_transfer.has_value());
+  ASSERT_NE(reuse_transfer->localized_input(), nullptr);
+  EXPECT_EQ(reuse_transfer->localized_input()->block_tables().data_ptr(),
+            localized_state.block_tables().data_ptr());
+  EXPECT_EQ(reuse_transfer->localized_input()->context_lens().data_ptr(),
+            localized_state.context_lens().data_ptr());
+}
+
+TEST(DsaTopkRelayTest, StaleLocalizedViewIsDroppedWithoutRepublish) {
+  DsaTopkRelay relay;
+  const DsaTopkShareDecision publish_decision{
+      .reuse_topk = false,
+      .output_topk = true,
+  };
+  std::optional<DsaTopkTransfer> first_publish =
+      relay.prepare_layer(publish_decision);
+  ASSERT_TRUE(first_publish.has_value());
+  first_publish->complete(make_topk_state(), make_localized_state());
+  relay.finish_layer(publish_decision, *first_publish);
+
+  // The next forward publishes the global state only; consumers must not see
+  // the rank-local view derived from the previous forward.
+  relay.reset();
+  std::optional<DsaTopkTransfer> second_publish =
+      relay.prepare_layer(publish_decision);
+  ASSERT_TRUE(second_publish.has_value());
+  second_publish->complete(make_topk_state());
+  relay.finish_layer(publish_decision, *second_publish);
+
+  const DsaTopkShareDecision reuse_decision{
+      .reuse_topk = true,
+      .output_topk = false,
+  };
+  std::optional<DsaTopkTransfer> reuse_transfer =
+      relay.prepare_layer(reuse_decision);
+  ASSERT_TRUE(reuse_transfer.has_value());
+  ASSERT_NE(reuse_transfer->input(), nullptr);
+  EXPECT_EQ(reuse_transfer->localized_input(), nullptr);
+}
+
 TEST(DsaTopkStateTest, FlattenedStatePreservesSparseMetadataStorage) {
   const torch::Tensor block_tables =
       torch::tensor({{{1, 2}}, {{3, 4}}}, torch::dtype(torch::kInt32));
@@ -105,7 +178,7 @@ TEST(DsaTopkTransferTest, EmptyMtpStateCapturesStateForNextStep) {
       torch::tensor({{1, 2}, {3, 4}}, torch::dtype(torch::kInt32));
   const torch::Tensor context_lens =
       torch::tensor({2, 1}, torch::dtype(torch::kInt32));
-  transfer.publish_output(DsaTopkState(block_tables, context_lens));
+  transfer.complete(DsaTopkState(block_tables, context_lens));
 
   const std::optional<DsaTopkState> output = transfer.mtp_output_state();
   ASSERT_TRUE(output.has_value());
@@ -134,9 +207,10 @@ TEST(DsaTopkTransferTest, CompleteSkipsResolvedStateForReuseOnly) {
   const DsaTopkState resolved_state = make_topk_state();
   DsaTopkTransfer transfer = DsaTopkTransfer::reuse(input);
 
-  transfer.complete(resolved_state);
+  transfer.complete(resolved_state, make_localized_state());
 
   EXPECT_EQ(transfer.output(), nullptr);
+  EXPECT_EQ(transfer.localized_output(), nullptr);
 }
 
 TEST(DsaTopkTransferTest, CompletePublishesResolvedStateWhenCapturing) {

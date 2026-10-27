@@ -20,21 +20,21 @@ import triton.language as tl
 
 @triton.jit
 def tmo_dcp_globalize_indexer_candidates_single_row_kernel(
-    local_slots_ptr,
-    context_lens_ptr,
-    global_slots_ptr,
-    rows,
-    width,
-    dcp_size,
-    dcp_rank,
-    physical_block_size,
-    local_stride_row,
-    local_stride_col,
-    global_stride_row,
-    global_stride_col,
+    local_slots_ptr: tl.tensor,
+    context_lens_ptr: tl.tensor,
+    global_slots_ptr: tl.tensor,
+    rows: int,
+    width: int,
+    dcp_size: int,
+    dcp_rank: int,
+    physical_block_size: int,
+    local_stride_row: int,
+    local_stride_col: int,
+    global_stride_row: int,
+    global_stride_col: int,
     BLOCK_WIDTH: tl.constexpr,
     ROWS_PER_PROGRAM: tl.constexpr,
-):
+) -> None:
     row = tl.program_id(0)
     column = tl.program_id(1) * BLOCK_WIDTH + tl.arange(0, BLOCK_WIDTH)
     in_bounds = (row < rows) & (column < width)
@@ -54,21 +54,21 @@ def tmo_dcp_globalize_indexer_candidates_single_row_kernel(
 
 @triton.jit
 def tmo_dcp_globalize_indexer_candidates_multi_row_kernel(
-    local_slots_ptr,
-    context_lens_ptr,
-    global_slots_ptr,
-    rows,
-    width,
-    dcp_size,
-    dcp_rank,
-    physical_block_size,
-    local_stride_row,
-    local_stride_col,
-    global_stride_row,
-    global_stride_col,
+    local_slots_ptr: tl.tensor,
+    context_lens_ptr: tl.tensor,
+    global_slots_ptr: tl.tensor,
+    rows: int,
+    width: int,
+    dcp_size: int,
+    dcp_rank: int,
+    physical_block_size: int,
+    local_stride_row: int,
+    local_stride_col: int,
+    global_stride_row: int,
+    global_stride_col: int,
     BLOCK_WIDTH: tl.constexpr,
     ROWS_PER_PROGRAM: tl.constexpr,
-):
+) -> None:
     row = tl.program_id(0) * ROWS_PER_PROGRAM + tl.arange(0, ROWS_PER_PROGRAM)[:, None]
     column = tl.program_id(1) * BLOCK_WIDTH + tl.arange(0, BLOCK_WIDTH)[None, :]
     in_bounds = (row < rows) & (column < width)

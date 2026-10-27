@@ -125,25 +125,10 @@ KVShardCausalSelectorMetadata build_kv_shard_causal_selector_metadata(
       std::move(selector_q_cu_seq_lens)};
 }
 
-torch::Tensor expand_kv_shard_indexer_block_table(
-    const torch::Tensor& logical_block_table,
-    const KVShardLayout& layout) {
-  CHECK_EQ(logical_block_table.dim(), 2)
-      << "cache-shard indexer block table must be two-dimensional";
-  torch::Tensor shard_offsets =
-      torch::arange(layout.dcp_size(), logical_block_table.options());
-  torch::Tensor expanded =
-      logical_block_table.unsqueeze(-1) * layout.dcp_size() + shard_offsets;
-  expanded = torch::where(logical_block_table.unsqueeze(-1) >= 0,
-                          expanded,
-                          torch::full_like(expanded, -1));
-  return expanded.flatten(/*start_dim=*/1).contiguous();
-}
-
-std::shared_ptr<const KVShardBatchMetadata> build_kv_shard_batch_metadata(
+std::shared_ptr<KVShardBatchMetadata> build_kv_shard_batch_metadata(
     const AttentionMetadata& attention_metadata,
     const KVShardLayout& layout,
-    const KVShardBatchMetadataBuildOptions& build_options) {
+    bool materialize_attention_lengths) {
   CHECK(attention_metadata.slot_mapping.defined())
       << "cache-shard batch metadata requires slot mapping";
   auto metadata = std::make_shared<KVShardBatchMetadata>();
@@ -151,13 +136,7 @@ std::shared_ptr<const KVShardBatchMetadata> build_kv_shard_batch_metadata(
   metadata->kv_split_rank = layout.dcp_rank();
   metadata->local_slot_mapping =
       localize_kv_shard_slots(attention_metadata.slot_mapping, layout);
-  if (build_options.materialize_indexer_block_table &&
-      attention_metadata.block_table.defined()) {
-    metadata->expanded_indexer_block_table =
-        expand_kv_shard_indexer_block_table(attention_metadata.block_table,
-                                            layout);
-  }
-  if (build_options.materialize_attention_lengths) {
+  if (materialize_attention_lengths) {
     const auto& global_lengths = attention_metadata.kv_seq_lens_vec;
     metadata->query_end_offsets = attention_metadata.q_cu_seq_lens_host_vec;
     if (metadata->query_end_offsets.size() == global_lengths.size() + 1 &&

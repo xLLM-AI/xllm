@@ -24,9 +24,9 @@ limitations under the License.
 
 #include "layers/common/attention_metadata.h"
 
-namespace xllm::layer::v32_sp {
+namespace xllm::layer::v32_cp {
 
-struct DeepseekV32SPSegment {
+struct DeepseekV32CPSegment {
   int32_t req_idx = 0;
   int32_t rank = 0;
   int32_t q_tokens = 0;
@@ -35,26 +35,25 @@ struct DeepseekV32SPSegment {
   int32_t world_begin = 0;
 };
 
-struct DeepseekV32SPCommPlan {
+struct DeepseekV32CPCommPlan {
   std::vector<int32_t> tokens_per_rank;
-  std::vector<int32_t> padded_tokens_per_rank;
   int32_t token_num_offset = 0;
   bool ffn_can_rs = false;
 };
 
-struct DeepseekV32SPRuntimeArtifacts {
-  DeepseekV32SPCommPlan comm_plan;
+struct DeepseekV32CPRuntimeArtifacts {
+  DeepseekV32CPCommPlan comm_plan;
   std::vector<int32_t> gathered_reorder_index_cpu;
 };
 
 inline std::vector<int32_t> extract_q_seq_lens(
     const AttentionMetadata& attn_metadata) {
   CHECK(attn_metadata.q_cu_seq_lens.defined())
-      << "deepseek_v32 sequence parallel requires q_cu_seq_lens.";
+      << "deepseek_v32 context parallel requires q_cu_seq_lens.";
   CHECK(attn_metadata.q_cu_seq_lens.dim() == 1)
-      << "deepseek_v32 sequence parallel expects 1D q_cu_seq_lens.";
+      << "deepseek_v32 context parallel expects 1D q_cu_seq_lens.";
   CHECK(attn_metadata.q_cu_seq_lens.numel() >= 2)
-      << "deepseek_v32 sequence parallel expects at least one request.";
+      << "deepseek_v32 context parallel expects at least one request.";
 
   torch::Tensor q_cu_seq_lens = attn_metadata.q_cu_seq_lens.to(torch::kCPU)
                                     .to(torch::kInt64)
@@ -74,9 +73,9 @@ inline std::vector<int32_t> extract_q_seq_lens(
 inline std::vector<int32_t> extract_ctx_seq_lens(
     const AttentionMetadata& attn_metadata) {
   CHECK(attn_metadata.kv_seq_lens.defined())
-      << "deepseek_v32 sequence parallel requires kv_seq_lens.";
+      << "deepseek_v32 context parallel requires kv_seq_lens.";
   CHECK(attn_metadata.kv_seq_lens.dim() == 1)
-      << "deepseek_v32 sequence parallel expects 1D kv_seq_lens.";
+      << "deepseek_v32 context parallel expects 1D kv_seq_lens.";
 
   torch::Tensor kv_seq_lens =
       attn_metadata.kv_seq_lens.to(torch::kCPU).to(torch::kInt64).contiguous();
@@ -115,13 +114,13 @@ inline bool can_ffn_rs(const std::vector<int32_t>& tokens_per_rank) {
              tokens_per_rank.end();
 }
 
-inline std::vector<DeepseekV32SPSegment> build_all_sp_segments(
+inline std::vector<DeepseekV32CPSegment> build_all_cp_segments(
     int32_t world_size,
     const std::vector<int32_t>& q_seq_lens,
     const std::vector<int32_t>& ctx_seq_lens) {
   CHECK_EQ(q_seq_lens.size(), ctx_seq_lens.size())
       << "q_seq_lens and ctx_seq_lens size mismatch.";
-  std::vector<DeepseekV32SPSegment> segments;
+  std::vector<DeepseekV32CPSegment> segments;
   segments.reserve(q_seq_lens.size() * world_size * 2);
 
   int32_t global_offset = 0;
@@ -144,7 +143,7 @@ inline std::vector<DeepseekV32SPSegment> build_all_sp_segments(
       const int32_t left_token_num = rank_token_num / 2 + rank_token_num % 2;
       const int32_t right_token_num = rank_token_num / 2;
 
-      DeepseekV32SPSegment left_segment;
+      DeepseekV32CPSegment left_segment;
       left_segment.req_idx = req_idx;
       left_segment.rank = rank;
       left_segment.q_tokens = left_token_num;
@@ -154,7 +153,7 @@ inline std::vector<DeepseekV32SPSegment> build_all_sp_segments(
       left_segment.world_begin = world_left;
       segments.push_back(left_segment);
 
-      DeepseekV32SPSegment right_segment;
+      DeepseekV32CPSegment right_segment;
       right_segment.req_idx = req_idx;
       right_segment.rank = rank;
       right_segment.q_tokens = right_token_num;
@@ -177,10 +176,10 @@ inline std::vector<DeepseekV32SPSegment> build_all_sp_segments(
   return segments;
 }
 
-inline std::vector<DeepseekV32SPSegment> build_local_sp_segments(
+inline std::vector<DeepseekV32CPSegment> build_local_cp_segments(
     int32_t curr_rank,
-    const std::vector<DeepseekV32SPSegment>& all_segments) {
-  std::vector<DeepseekV32SPSegment> segments;
+    const std::vector<DeepseekV32CPSegment>& all_segments) {
+  std::vector<DeepseekV32CPSegment> segments;
   for (const auto& segment : all_segments) {
     if (segment.rank == curr_rank) {
       segments.push_back(segment);
@@ -189,15 +188,15 @@ inline std::vector<DeepseekV32SPSegment> build_local_sp_segments(
   return segments;
 }
 
-inline DeepseekV32SPRuntimeArtifacts build_sp_runtime_artifacts(
+inline DeepseekV32CPRuntimeArtifacts build_cp_runtime_artifacts(
     int32_t curr_rank,
     int32_t world_size,
-    const std::vector<DeepseekV32SPSegment>& all_segments,
+    const std::vector<DeepseekV32CPSegment>& all_segments,
     int32_t total_tokens) {
   CHECK_GE(curr_rank, 0) << "curr_rank must be non-negative.";
   CHECK_LT(curr_rank, world_size) << "curr_rank out of range.";
 
-  DeepseekV32SPRuntimeArtifacts artifacts;
+  DeepseekV32CPRuntimeArtifacts artifacts;
   auto& comm_plan = artifacts.comm_plan;
   comm_plan.tokens_per_rank.assign(world_size, 0);
 
@@ -213,9 +212,6 @@ inline DeepseekV32SPRuntimeArtifacts build_sp_runtime_artifacts(
     }
   }
 
-  const int32_t padded_token_num = *std::max_element(
-      comm_plan.tokens_per_rank.begin(), comm_plan.tokens_per_rank.end());
-  comm_plan.padded_tokens_per_rank.assign(world_size, padded_token_num);
   comm_plan.token_num_offset =
       std::accumulate(comm_plan.tokens_per_rank.begin(),
                       comm_plan.tokens_per_rank.begin() + curr_rank,
@@ -234,4 +230,4 @@ inline DeepseekV32SPRuntimeArtifacts build_sp_runtime_artifacts(
   return artifacts;
 }
 
-}  // namespace xllm::layer::v32_sp
+}  // namespace xllm::layer::v32_cp

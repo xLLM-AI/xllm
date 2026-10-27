@@ -21,17 +21,16 @@ limitations under the License.
 #include <string>
 #include <tuple>
 
-#include "attention.h"
+#include "core/framework/quantization/quant_args.h"
 #include "core/kv_cache/layout/kv_shard_layout.h"
-#include "framework/model/model_params_view.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/parallel_state/process_group.h"
-#include "framework/quantization/quant_args.h"
 #include "framework/state_dict/state_dict.h"
 #include "framework/state_dict/utils.h"
 #include "layers/common/linear.h"
 #include "layers/common/rms_norm.h"
 #include "layers/common/rotary_embedding.h"
+#include "layers/mlu/attention.h"
 #include "layers/mlu/deepseek_v32_cp_context.h"
 
 namespace xllm {
@@ -58,7 +57,7 @@ struct IndexerRuntimeContext {
   torch::Tensor _storage_k_full;
 };
 
-struct IndexerSPPreOut {
+struct IndexerCPPreOut {
   torch::Tensor q;
   torch::Tensor k_local;
   torch::Tensor weights;
@@ -69,13 +68,6 @@ struct DcpIndexerLocalCandidates {
   torch::Tensor scores;
   torch::Tensor global_slots;
 };
-
-// Bounds the temporary score workspace used by rank-local DCP candidate
-// reconstruction. The score result itself remains [token_count, topk].
-int64_t dcp_indexer_score_rows_per_chunk(int64_t token_count,
-                                         int64_t topk,
-                                         int64_t index_heads,
-                                         int64_t head_dim);
 
 class IndexerImpl : public torch::nn::Module {
  public:
@@ -120,35 +112,25 @@ class IndexerImpl : public torch::nn::Module {
       const AttentionMetadata& selector_metadata,
       const std::optional<torch::Tensor>& k_cache_scale = std::nullopt);
 
-  DcpIndexerLocalCandidates forward_dcp_local_prefill_from_sp(
-      const IndexerSPPreOut& pre_out,
+  DcpIndexerLocalCandidates forward_dcp_local_prefill_from_cp(
+      const IndexerCPPreOut& pre_out,
       torch::Tensor& k_cache,
       const AttentionMetadata& prefill_metadata,
       const AttentionMetadata& selector_metadata,
       const std::optional<torch::Tensor>& k_cache_scale = std::nullopt);
 
-  IndexerSPPreOut sp_pre(const torch::Tensor& x,
+  IndexerCPPreOut cp_pre(const torch::Tensor& x,
                          const torch::Tensor& q_norm,
                          const torch::Tensor& positions,
-                         const AttentionMetadata& attn_metadata,
-                         const v32_cp::DeepseekV32CPContext& sp_ctx,
-                         bool quantize_output = false);
+                         const AttentionMetadata& attn_metadata);
 
-  v32_cp::PaddedGatherHandle sp_comm(
-      const torch::Tensor& k_local,
-      const v32_cp::DeepseekV32CPContext& sp_ctx);
-
-  torch::Tensor sp_wait_k(const torch::Tensor& k_local,
-                          const v32_cp::PaddedGatherHandle& gather_handle,
-                          const v32_cp::DeepseekV32CPContext& sp_ctx);
-
-  std::tuple<torch::Tensor, torch::Tensor> sp_post(
-      const IndexerSPPreOut& pre_out,
+  std::tuple<torch::Tensor, torch::Tensor> cp_post(
+      const IndexerCPPreOut& pre_out,
       const torch::Tensor& k_gathered,
       torch::Tensor& k_cache,
       const AttentionMetadata& attn_metadata,
       const torch::Tensor& gathered_slot_mapping,
-      const v32_cp::DeepseekV32CPContext& sp_ctx,
+      const v32_cp::DeepseekV32CPContext& cp_ctx,
       const std::optional<torch::Tensor>& k_cache_scale = std::nullopt);
 
   void verify_loaded_weights(const std::string& prefix) const;
@@ -177,16 +159,12 @@ class IndexerImpl : public torch::nn::Module {
   torch::Tensor hadamard_matrix_;
   std::optional<KVShardLayout> dcp_indexer_layout_;
 
-  // Helper function for rotation activation
-  torch::Tensor rotate_activation(const torch::Tensor& input,
-                                  const torch::Tensor& hadamard_matrix);
-
   // Prepare runtime context for kernel
   IndexerRuntimeContext prepare_runtime_context(
       const torch::Tensor& k_current_dense,
       torch::Tensor& k_cache_paged,
-      torch::Tensor& q,
-      torch::Tensor& weights,
+      const torch::Tensor& q,
+      const torch::Tensor& weights,
       const AttentionMetadata& attn_metadata,
       bool is_prefill,
       int64_t num_tokens,
@@ -248,14 +226,23 @@ class IndexerImpl : public torch::nn::Module {
       IndexerRuntimeContext& ctx);
 
   std::tuple<torch::Tensor, torch::Tensor>
-  run_indexer_select_kernel_sp_segmented(
-      const IndexerSPPreOut& pre_out,
+  run_indexer_select_kernel_cp_segmented(
+      const IndexerCPPreOut& pre_out,
       const torch::Tensor& k_source,
       const std::optional<torch::Tensor>& k_source_scale,
       const AttentionMetadata& attn_metadata,
-      const v32_cp::DeepseekV32CPContext& sp_ctx);
+      const v32_cp::DeepseekV32CPContext& cp_ctx);
 
   torch::Tensor score_dcp_local_candidates(
+      const torch::Tensor& q,
+      const torch::Tensor& weights,
+      const torch::Tensor& k_cache,
+      const torch::Tensor& local_slots,
+      const torch::Tensor& context_lens,
+      const std::optional<torch::Tensor>& q_scale,
+      const std::optional<torch::Tensor>& k_cache_scale) const;
+
+  DcpIndexerLocalCandidates finalize_local_candidates(
       const torch::Tensor& q,
       const torch::Tensor& weights,
       const torch::Tensor& k_cache,

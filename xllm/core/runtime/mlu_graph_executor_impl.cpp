@@ -490,6 +490,21 @@ void MluGraph::prepare_model_graph_metadata(CausalLM* model,
     model_graph_metadata_state_ = model->create_graph_forward_metadata_state();
   }
   auto graph_params = make_graph_params(params, padding_num_tokens_);
+  // Metadata captured by the model must use the same bucket-shaped tensors
+  // as graph execution, while retaining the current logical batch metadata.
+  const auto& graph_attention = persistent_param_->params_->attention.device;
+  graph_params.attention.device.q_seq_lens = graph_attention.q_seq_lens;
+  graph_params.attention.device.kv_seq_lens = graph_attention.kv_seq_lens;
+  graph_params.attention.device.new_cache_slots =
+      graph_attention.new_cache_slots;
+  graph_params.attention.device.block_tables = graph_attention.block_tables;
+  graph_params.attention.host.q_seq_lens =
+      persistent_param_->params_->attention.host.q_seq_lens;
+  graph_params.attention.host.kv_seq_lens =
+      persistent_param_->params_->attention.host.kv_seq_lens;
+  graph_params.embedding.linear_state_indices =
+      persistent_param_->params_->embedding.linear_state_indices;
+  graph_params.enable_graph = true;
   int32_t slice_dim = persistent_param_->use_mrope_ ? 1 : 0;
   model->prepare_graph_forward_metadata(
       model_graph_metadata_state_.get(),

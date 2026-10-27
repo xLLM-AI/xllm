@@ -39,7 +39,10 @@ struct KVShardCausalSelectorMetadata {
 // The original logical metadata remains unchanged for consumers that need it.
 struct KVShardBatchMetadata {
   torch::Tensor local_slot_mapping;
-  torch::Tensor expanded_indexer_block_table;
+  torch::Tensor prefill_sorted_slots;
+  torch::Tensor prefill_sorted_rows;
+  torch::Tensor local_indexer_context_lens;
+  KVShardCausalSelectorMetadata causal_selector;
   torch::Tensor empty_shard_mask;
   std::vector<int64_t> query_end_offsets;
   std::vector<int64_t> local_kv_lengths;
@@ -58,22 +61,13 @@ torch::Tensor localize_kv_shard_context_lens(
     const torch::Tensor& global_context_lens,
     const KVShardLayout& layout);
 
-torch::Tensor expand_kv_shard_indexer_block_table(
-    const torch::Tensor& logical_block_table,
-    const KVShardLayout& layout);
-
 KVShardCausalSelectorMetadata build_kv_shard_causal_selector_metadata(
     const AttentionMetadata& attention_metadata,
     const KVShardLayout& layout);
 
-struct KVShardBatchMetadataBuildOptions {
-  bool materialize_indexer_block_table = true;
-  bool materialize_attention_lengths = false;
-};
-
-std::shared_ptr<const KVShardBatchMetadata> build_kv_shard_batch_metadata(
+std::shared_ptr<KVShardBatchMetadata> build_kv_shard_batch_metadata(
     const AttentionMetadata& attention_metadata,
     const KVShardLayout& layout,
-    const KVShardBatchMetadataBuildOptions& build_options = {});
+    bool materialize_attention_lengths = false);
 
 }  // namespace xllm::layer

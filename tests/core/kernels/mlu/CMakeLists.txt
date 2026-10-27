@@ -1,5 +1,7 @@
 include(cc_test)
 
+add_subdirectory(dcp)
+
 get_filename_component(_xllm_build_import_root
   "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}" DIRECTORY)
 

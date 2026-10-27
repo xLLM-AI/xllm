@@ -24,9 +24,12 @@ limitations under the License.
 #include "core/kv_cache/layout/deepseek_v4_cache_policy.h"
 #include "framework/model/model_args.h"
 #include "runtime/options.h"
+#include "tests/core/kv_cache/dcp_indexer_test_fixture.h"
 
 namespace xllm {
 namespace {
+
+class DcpIndexerEstimationTest : public test::DcpIndexerConfigTest {};
 
 ModelArgs make_standard_args() {
   ModelArgs model_args;
@@ -431,6 +434,84 @@ TEST(KVCacheEstimationTest, KPoolReservesSpeculativeTailWithRequestState) {
   EXPECT_EQ(speculative.n_blocks(), capacity.n_blocks());
 }
 #endif
+
+TEST(KVCacheEstimationTest, SharedKPoolPlanAlignsStateBeforeBudgeting) {
+  // Supply the compressed-tail layout directly: backend estimators select
+  // different layouts, while the shared planner operates on capacities.
+  KVCacheCapacity target_cap;
+  target_cap.kpool_layout(KPoolCacheLayout::COMPRESSED_WITH_TAIL)
+      .block_size(32)
+      .n_layers(2)
+      .num_full_attention_layers(2)
+      .num_indexer_layers(2)
+      .slot_size(64)
+      .index_slot_size(16)
+      .num_linear_state_blocks(4)
+      .kpool_tail_len(16)
+      .kpool_tail_slot_size(2048)
+      .linear_cache_size_in_bytes(16384)
+      .cache_size_in_bytes(65536);
+
+  for (const int32_t draft_kpool : {4, 32}) {
+    for (const int64_t draft_slots : {3, 5}) {
+      SCOPED_TRACE(::testing::Message() << "draft_kpool=" << draft_kpool
+                                        << ", draft_slots=" << draft_slots);
+      ModelArgs draft_args;
+      draft_args.index_head_dim(64).index_kpool(draft_kpool);
+      KVCacheCapacity draft_cap;
+      draft_cap.kpool_layout(KPoolCacheLayout::COMPRESSED_WITH_TAIL)
+          .block_size(32)
+          .n_layers(1)
+          .num_full_attention_layers(1)
+          .num_indexer_layers(1)
+          .slot_size(128)
+          .index_slot_size(draft_kpool == 4 ? 32 : 4)
+          .num_linear_state_blocks(draft_slots)
+          .kpool_tail_len(draft_kpool)
+          .kpool_tail_slot_size(draft_kpool == 4 ? 1024 : 8192)
+          .linear_cache_size_in_bytes(draft_slots *
+                                      (draft_kpool == 4 ? 1024 : 8192))
+          .cache_size_in_bytes(131072);
+      const SharedKPoolPlan plan =
+          plan_shared_kpool(target_cap, draft_cap, draft_args);
+
+      EXPECT_EQ(plan.target.num_linear_state_blocks(), 4);
+      EXPECT_EQ(plan.draft.num_linear_state_blocks(), 4);
+      EXPECT_EQ(plan.draft.kpool_tail_len(), draft_kpool == 4 ? 16 : 32);
+      EXPECT_EQ(plan.draft.kpool_tail_slot_size(),
+                draft_kpool == 4 ? 4096 : 8192);
+      EXPECT_EQ(plan.draft.linear_cache_size_in_bytes(),
+                draft_kpool == 4 ? 16384 : 32768);
+      EXPECT_EQ(plan.target.n_blocks(), draft_kpool == 4 ? 3 : 1);
+      EXPECT_EQ(plan.draft.n_blocks(), plan.target.n_blocks());
+
+      EXPECT_EQ(plan.target.cache_size_in_bytes(), 65536);
+      EXPECT_EQ(plan.draft.cache_size_in_bytes(), 65536);
+      EXPECT_EQ(plan.target.kpool_tail_len(), target_cap.kpool_tail_len());
+    }
+  }
+}
+
+TEST(KVCacheEstimationTest, SharedKPoolPlanRejectsInsufficientMemory) {
+  ModelArgs draft_args;
+  draft_args.index_kpool(4).index_head_dim(16);
+  KVCacheCapacity capacity;
+  capacity.block_size(16)
+      .slot_size(64)
+      .index_slot_size(8)
+      .num_full_attention_layers(1)
+      .num_indexer_layers(1)
+      .num_linear_state_blocks(5)
+      .kpool_tail_len(16)
+      .kpool_tail_slot_size(1024)
+      .linear_cache_size_in_bytes(5120)
+      .cache_size_in_bytes(10240);
+  EXPECT_DEATH(plan_shared_kpool(capacity, capacity, draft_args),
+               "target and draft KPool request state");
+  capacity.cache_size_in_bytes(10241);
+  EXPECT_DEATH(plan_shared_kpool(capacity, capacity, draft_args),
+               "no memory for a shared KPool block");
+}
 
 TEST(KVCacheEstimationTest, LinearStateCapacityVariants) {
   struct TestCase {
@@ -1090,5 +1171,30 @@ TEST(KVCacheEstimationTest, PhysicalHeadWidthControlsCacheBudget) {
   EXPECT_EQ(capacity.slot_size(), 2 * 2 * 128 * 2);
   EXPECT_EQ(model_args.head_dim(), 96);
 }
+
+TEST_P(DcpIndexerEstimationTest, IncludesAllIndexerBytes) {
+  ModelArgs model_args = make_standard_args();
+  model_args.index_n_heads(1).index_head_dim(16);
+  KVCacheEstimateOptions options = make_estimate_options();
+  options.indexer_cache_dtype = "auto";
+  const KVCacheCapacity ordinary =
+      estimate_kv_cache_capacity(model_args, options);
+  EXPECT_EQ(ordinary.index_slot_size(), 32 * expected_factor());
+
+  options.indexer_cache_dtype = "int8";
+  const KVCacheCapacity quantized =
+      estimate_kv_cache_capacity(model_args, options);
+  EXPECT_EQ(quantized.index_slot_size(), 20 * expected_factor());
+  EXPECT_EQ(quantized.slot_size(), ordinary.slot_size());
+
+  model_args.index_n_heads(0);
+  const KVCacheCapacity absent =
+      estimate_kv_cache_capacity(model_args, options);
+  EXPECT_EQ(absent.index_slot_size(), 0);
+}
+
+INSTANTIATE_TEST_SUITE_P(KvSplits,
+                         DcpIndexerEstimationTest,
+                         ::testing::Values(1, 2, 4, 0));
 
 }  // namespace xllm

@@ -538,13 +538,10 @@ AttentionMetadata build_common_attention_metadata(
 #endif
 
   if (build_options.kv_shard_layout.has_value()) {
-    KVShardBatchMetadataBuildOptions shard_build_options;
-    shard_build_options.materialize_indexer_block_table = false;
-    shard_build_options.materialize_attention_lengths = true;
     attn_metadata.kv_shard_batch_metadata =
         build_kv_shard_batch_metadata(attn_metadata,
                                       build_options.kv_shard_layout.value(),
-                                      shard_build_options);
+                                      /*materialize_attention_lengths=*/true);
   }
   return attn_metadata;
 }

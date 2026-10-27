@@ -80,11 +80,11 @@ cc_test(
     layer_test
   SRCS
     dense_mlp_test.cpp
-    dcp_attention_merge_test.cpp
+    mla_decode_lse_test.cpp
     dcp_indexer_candidate_test.cpp
     dcp_decode_context_test.cpp
     tests_utils.cpp
-    deepseek_v32_sp_utils_test.cpp
+    deepseek_v32_cp_utils_test.cpp
     dp_utils_test.cpp
     indexer_test.cpp
     mla_test.cpp
@@ -325,3 +325,90 @@ cc_test(
     torch
     GTest::gtest_main
 )
+
+# Keep fork-based MLU tests in separate binaries.
+cc_test(
+  NAME
+    glm5_attention_dcp_test
+  SRCS
+    glm5_attention_dcp_test.cpp
+    tests_utils.cpp
+  DEPS
+    :config
+    :block
+    :mlu_layers
+    :model_context
+    :parallel_state
+    :state_dict
+    :util
+    GTest::gtest_main
+    torch
+    glog::glog
+  ENVIRONMENT
+    "PYTHONPATH=${_xllm_build_import_root}:$ENV{PYTHONPATH}"
+)
+
+cc_test(
+  NAME
+    glm53_indexer_dcp_multi_device_test
+  SRCS
+    glm53_indexer_dcp_multi_device_test.cpp
+  DEPS
+    :config
+    :block
+    :mlu_layers
+    :common_layers
+    :model_context
+    :parallel_state
+    :state_dict
+    GTest::gtest_main
+    torch
+    glog::glog
+  ENVIRONMENT
+    "PYTHONPATH=${_xllm_build_import_root}:$ENV{PYTHONPATH}"
+)
+
+cc_test(
+  NAME
+    linear_shared_token_scale_test
+  SRCS
+    linear_shared_token_scale_test.cpp
+  DEPS
+    :config
+    :block
+    :mlu_layers
+    :common_layers
+    :model_context
+    :parallel_state
+    :state_dict
+    GTest::gtest_main
+    torch
+    glog::glog
+  ENVIRONMENT
+    "PYTHONPATH=${_xllm_build_import_root}:$ENV{PYTHONPATH}"
+)
+
+cc_test(
+  NAME
+    glm53_packed_attention_multi_device_test
+  SRCS
+    glm53_packed_attention_multi_device_test.cpp
+  DEPS
+    :config
+    :block
+    :mlu_layers
+    :common_layers
+    :model_context
+    :parallel_state
+    GTest::gtest_main
+    torch
+    glog::glog
+  ENVIRONMENT
+    "PYTHONPATH=${_xllm_build_import_root}:$ENV{PYTHONPATH}"
+)
+
+get_property(_glm53_distributed_tests DIRECTORY PROPERTY TESTS)
+list(FILTER _glm53_distributed_tests INCLUDE REGEX
+  "^(Glm53Indexer|PackedAttentionParallelTest|RowParallelLinearTest.PreservesGlobalTokenQuantization)")
+set_tests_properties(${_glm53_distributed_tests} PROPERTIES
+  RUN_SERIAL TRUE TIMEOUT 1800)

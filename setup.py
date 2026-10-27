@@ -196,13 +196,12 @@ def _stage_mlu_triton_kernels(base_dir: str, extdir: str, device: str) -> None:
     os.makedirs(dest_dir, exist_ok=True)
 
     copied_count = 0
-    for item in sorted(os.listdir(source_dir)):
-        if not item.endswith(".py"):
-            continue
-        source_path = os.path.join(source_dir, item)
+    for source_path in sorted(glob.glob(os.path.join(source_dir, "**", "*.py"), recursive=True)):
         if not os.path.isfile(source_path):
             continue
-        shutil.copy2(source_path, os.path.join(dest_dir, item))
+        dest_path = os.path.join(dest_dir, os.path.relpath(source_path, source_dir))
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        shutil.copy2(source_path, dest_path)
         copied_count += 1
 
     if copied_count == 0:
@@ -849,6 +848,7 @@ class TestUT(ExtBuild):
         "BroadcastMultiDeviceTest",
         "DeepEPMultiDeviceTest",
         "AttentionMultiDeviceTest",
+        "Glm5AttentionDcpTest",
         "FusedMoEAll2AllMultiDeviceTest",
     ]
 

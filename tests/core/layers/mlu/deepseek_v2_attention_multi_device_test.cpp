@@ -19,6 +19,7 @@ limitations under the License.
 #include <torch/torch.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -32,13 +33,16 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/model_context/model_context.h"
 #include "core/framework/parallel_state/parallel_topology.h"
+#include "core/framework/quantization/quant_args.h"
 #include "core/kv_cache/storage/kv_cache.h"
+#include "core/layers/mlu/dcp_batch_metadata.h"
 #include "framework/batch/batch_forward_type.h"
 #include "framework/model/model_args.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/parallel_state/process_group.h"
-#include "framework/quantization/quant_args.h"
 #include "framework/state_dict/state_dict.h"
+#include "layers/common/kv_shard_batch_metadata.h"
+#include "layers/mlu/dcp_decode_context.h"
 #include "layers/mlu/deepseek_v2_attention.h"
 #include "layers/mlu/deepseek_v32_cp_context.h"
 #include "layers/mlu/tests_utils.h"
@@ -303,6 +307,8 @@ class DistributedAttentionChildContext final {
   ParallelArgs& parallel_args() { return *parallel_args_; }
 
   const torch::TensorOptions& options() const { return options_; }
+
+  xllm::ProcessGroup* process_group() const { return process_group_.get(); }
 
  private:
   xllm::Device xllm_device_;
@@ -622,7 +628,6 @@ AttentionMetadata create_prefill_metadata(const torch::TensorOptions& options,
   metadata.kv_cu_seq_lens = torch::tensor({0, seq_len}, int_options);
   metadata.kv_seq_lens = torch::tensor({seq_len}, int_options);
   metadata.block_table = torch::zeros({1, 4}, int_options);
-  metadata.block_table[0][0] = 1;
   metadata.slot_mapping = torch::arange(seq_len, int_options);
   metadata.max_query_len = seq_len;
   metadata.max_seq_len = seq_len;
@@ -684,17 +689,17 @@ struct AttentionRunResult {
   torch::Tensor index_cache;
   DeepseekV2AttentionImpl::PostAttnLayout layout =
       DeepseekV2AttentionImpl::PostAttnLayout::kTpShard;
-  bool used_sp = false;
+  bool used_cp = false;
   int64_t local_token_num = 0;
 };
 
-void check_repl_output_contract(const AttentionRunResult& result,
+void check_full_output_contract(const AttentionRunResult& result,
                                 int64_t token_num,
                                 int64_t hidden_size,
                                 const std::string& label) {
-  CHECK(!result.used_sp) << label << " unexpectedly used sequence parallel";
-  CHECK(result.layout == DeepseekV2AttentionImpl::PostAttnLayout::kReplicated)
-      << label << " must report replicated attention output";
+  CHECK(!result.used_cp) << label << " unexpectedly used context parallel";
+  CHECK(result.layout == DeepseekV2AttentionImpl::PostAttnLayout::kTpShard)
+      << label << " must report full attention output from a single TP rank";
   CHECK_EQ(result.local_token_num, token_num)
       << label << " local token count mismatch";
   CHECK_EQ(result.local_output.sizes(), result.global_output.sizes())
@@ -710,12 +715,12 @@ void check_repl_output_contract(const AttentionRunResult& result,
                       label + " local/global");
 }
 
-void check_sp_output_contract(const AttentionRunResult& result,
+void check_cp_output_contract(const AttentionRunResult& result,
                               int64_t token_num,
                               int64_t hidden_size,
                               int64_t local_token_num,
                               const std::string& label) {
-  CHECK(result.used_sp) << label << " did not use sequence parallel";
+  CHECK(result.used_cp) << label << " did not use context parallel";
   CHECK(result.layout == DeepseekV2AttentionImpl::PostAttnLayout::kPackedLocal)
       << label << " must report packed-local attention output";
   CHECK_EQ(result.local_token_num, local_token_num)
@@ -764,6 +769,9 @@ torch::Tensor run_attention_decode_once(const ModelArgs& args,
   ParallelArgs effective_parallel_args = parallel_args;
   effective_parallel_args.cp_size() =
       enable_full_weight_path ? parallel_args.world_size() : 1;
+  if (enable_full_weight_path) {
+    effective_parallel_args.tp_group_ = parallel_args.single_rank_group_;
+  }
   OptimizationConfig optimization_config;
   optimization_config.enable_fused_mla_kernel = enable_fused_mla_kernel;
   optimization_config.enable_fused_indexer_qk = false;
@@ -794,6 +802,9 @@ AttentionRunResult run_attention_prefill_once(
   ParallelArgs effective_parallel_args = parallel_args;
   effective_parallel_args.cp_size() =
       enable_full_weight_path ? parallel_args.world_size() : 1;
+  if (enable_full_weight_path) {
+    effective_parallel_args.tp_group_ = parallel_args.single_rank_group_;
+  }
   ModelContext model_context(
       effective_parallel_args, args, quant_args, options);
   DeepseekV2Attention attention(model_context, enable_indexer);
@@ -803,7 +814,7 @@ AttentionRunResult run_attention_prefill_once(
       batch_forward_type.is_chunked_prefill()
           ? create_chunked_metadata(options, prefix_len, token_num)
           : create_prefill_metadata(options, token_num);
-  std::optional<layer::v32_cp::DeepseekV32CPContext> sp_ctx;
+  std::optional<layer::v32_cp::DeepseekV32CPContext> cp_ctx;
   torch::Tensor local_positions = positions;
   torch::Tensor local_hidden_states = hidden_states;
   if (build_cp_context && enable_full_weight_path && args.index_n_heads() > 0) {
@@ -816,7 +827,7 @@ AttentionRunResult run_attention_prefill_once(
                               effective_parallel_args.kv_split_size_effective(),
                               effective_parallel_args.kv_split_rank());
     }
-    sp_ctx = layer::v32_cp::build_deepseek_v32_cp_context(
+    cp_ctx = layer::v32_cp::build_deepseek_v32_cp_context(
         effective_parallel_args.cp_size(),
         metadata,
         batch_forward_type,
@@ -825,11 +836,11 @@ AttentionRunResult run_attention_prefill_once(
         parallel_args.rank(),
         parallel_args.world_size(),
         kv_shard_layout);
-    if (sp_ctx.has_value()) {
+    if (cp_ctx.has_value()) {
       local_positions =
-          layer::v32_cp::reorder_to_local_shard(positions, sp_ctx.value());
+          layer::v32_cp::reorder_to_local_shard(positions, cp_ctx.value());
       local_hidden_states =
-          layer::v32_cp::reorder_to_local_shard(hidden_states, sp_ctx.value());
+          layer::v32_cp::reorder_to_local_shard(hidden_states, cp_ctx.value());
     }
   }
   AttentionRunResult result;
@@ -837,20 +848,20 @@ AttentionRunResult run_attention_prefill_once(
                                              local_hidden_states,
                                              metadata,
                                              kv_cache,
-                                             sp_ctx ? &sp_ctx.value() : nullptr,
+                                             cp_ctx ? &cp_ctx.value() : nullptr,
                                              topk_transfer);
   result.local_output = std::move(attention_result.output);
   result.layout = attention_result.layout;
   result.global_output = result.local_output;
-  result.used_sp = sp_ctx.has_value();
+  result.used_cp = cp_ctx.has_value();
   result.local_token_num =
-      sp_ctx.has_value() ? sp_ctx->comm_plan.tokens_per_rank.at(sp_ctx->rank)
+      cp_ctx.has_value() ? cp_ctx->comm_plan.tokens_per_rank.at(cp_ctx->rank)
                          : result.local_output.size(0);
-  if (sp_ctx.has_value()) {
+  if (cp_ctx.has_value()) {
     result.global_output = layer::v32_cp::restore_gathered_to_global_order(
         layer::v32_cp::all_gather_across_ranks(result.local_output,
-                                               sp_ctx.value()),
-        sp_ctx.value());
+                                               cp_ctx.value()),
+        cp_ctx.value());
   }
   result.k_cache = kv_cache.get_k_cache().clone();
   if (kv_cache.get_index_cache().defined()) {
@@ -962,7 +973,7 @@ int32_t run_attention_prefill_repl_test_child(int32_t rank,
                                                       true);
 
         xllm_device.synchronize_default_stream();
-        check_repl_output_contract(repl_result,
+        check_full_output_contract(repl_result,
                                    seq_len,
                                    model_args.hidden_size(),
                                    "DeepseekV2Attention prefill replicated");
@@ -1022,7 +1033,7 @@ int32_t run_attention_prefill_fallback_test_child(int32_t rank,
                                                       true);
 
         xllm_device.synchronize_default_stream();
-        check_repl_output_contract(repl_result,
+        check_full_output_contract(repl_result,
                                    seq_len,
                                    model_args.hidden_size(),
                                    "DeepseekV2Attention prefill fallback");
@@ -1034,7 +1045,7 @@ int32_t run_attention_prefill_fallback_test_child(int32_t rank,
       });
 }
 
-int32_t run_attention_prefill_sp_test_child(int32_t rank,
+int32_t run_attention_prefill_cp_test_child(int32_t rank,
                                             int32_t world_size,
                                             int32_t port,
                                             const std::string& host,
@@ -1063,7 +1074,7 @@ int32_t run_attention_prefill_sp_test_child(int32_t rank,
             torch::arange(seq_len, options.dtype(torch::kInt32).device(device));
         torch::Tensor hidden_states = seeded_tensor(
             use_glm5_args ? "attention_multi_device/glm5_prefill_hidden_states"
-                          : "attention_multi_device/sp_prefill_hidden_states",
+                          : "attention_multi_device/cp_prefill_hidden_states",
             {seq_len, model_args.hidden_size()},
             torch::kBFloat16,
             device);
@@ -1074,7 +1085,7 @@ int32_t run_attention_prefill_sp_test_child(int32_t rank,
             create_decode_kv_cache(model_args, options);
         full_weight_kv_cache.get_k_cache().zero_();
 
-        auto sp_result = run_attention_prefill_once(model_args,
+        auto cp_result = run_attention_prefill_once(model_args,
                                                     quant_args,
                                                     parallel_args,
                                                     options,
@@ -1086,27 +1097,23 @@ int32_t run_attention_prefill_sp_test_child(int32_t rank,
                                                     true);
 
         xllm_device.synchronize_default_stream();
-        check_sp_output_contract(sp_result,
+        check_cp_output_contract(cp_result,
                                  seq_len,
                                  model_args.hidden_size(),
                                  /*local_token_num=*/seq_len / world_size,
                                  use_glm5_args
-                                     ? "DeepseekV2Attention glm5 prefill sp"
-                                     : "DeepseekV2Attention prefill sp");
+                                     ? "DeepseekV2Attention glm5 prefill cp"
+                                     : "DeepseekV2Attention prefill cp");
         check_tensor_same_across_ranks(
-            sp_result.global_output,
+            cp_result.global_output,
             parallel_args.tp_group_,
-            use_glm5_args ? "DeepseekV2Attention glm5 prefill sp output"
-                          : "DeepseekV2Attention prefill sp output");
+            use_glm5_args ? "DeepseekV2Attention glm5 prefill cp output"
+                          : "DeepseekV2Attention prefill cp output");
         return 0;
       });
 }
 
-// Runs prefill once under an orthogonal CP x TP topology (world_size=4,
-// cp_size=2, tp_size=2). With `use_sp` the sequence is sharded across the CP
-// group and attention goes through forward_sp with TP-sharded heads; otherwise
-// the full sequence runs through the TP-sharded forward_normal_tp path and is
-// used as the reference.
+// Compare sharded CP x TP prefill with the full-sequence TP reference.
 AttentionRunResult run_cptp_attention_prefill_once(
     const ModelArgs& args,
     const QuantArgs& quant_args,
@@ -1118,7 +1125,7 @@ AttentionRunResult run_cptp_attention_prefill_once(
     const torch::Tensor& hidden_states,
     KVCache& kv_cache,
     int32_t cp_size,
-    bool use_sp,
+    bool use_cp,
     ProcessGroup* cp_group = nullptr,
     int32_t cp_local_rank = 0) {
   ParallelArgs effective_parallel_args = parallel_args;
@@ -1131,12 +1138,12 @@ AttentionRunResult run_cptp_attention_prefill_once(
   attention->load_state_dict(state_dict);
   const int32_t token_num = static_cast<int32_t>(tokens.numel());
   AttentionMetadata metadata = create_prefill_metadata(options, token_num);
-  std::optional<layer::v32_cp::DeepseekV32CPContext> sp_ctx;
+  std::optional<layer::v32_cp::DeepseekV32CPContext> cp_ctx;
   torch::Tensor local_positions = positions;
   torch::Tensor local_hidden_states = hidden_states;
-  if (use_sp) {
-    CHECK(cp_group != nullptr) << "cp x tp SP run requires a CP group";
-    sp_ctx =
+  if (use_cp) {
+    CHECK(cp_group != nullptr) << "cp x tp CP run requires a CP group";
+    cp_ctx =
         layer::v32_cp::build_deepseek_v32_cp_context(cp_size,
                                                      metadata,
                                                      BatchForwardType::PREFILL,
@@ -1144,31 +1151,31 @@ AttentionRunResult run_cptp_attention_prefill_once(
                                                      cp_group,
                                                      cp_local_rank,
                                                      cp_group->world_size());
-    CHECK(sp_ctx.has_value()) << "cp x tp test failed to build the CP context";
+    CHECK(cp_ctx.has_value()) << "cp x tp test failed to build the CP context";
     local_positions =
-        layer::v32_cp::reorder_to_local_shard(positions, sp_ctx.value());
+        layer::v32_cp::reorder_to_local_shard(positions, cp_ctx.value());
     local_hidden_states =
-        layer::v32_cp::reorder_to_local_shard(hidden_states, sp_ctx.value());
+        layer::v32_cp::reorder_to_local_shard(hidden_states, cp_ctx.value());
   }
   AttentionRunResult result;
   auto attention_result = attention->forward(local_positions,
                                              local_hidden_states,
                                              metadata,
                                              kv_cache,
-                                             sp_ctx ? &sp_ctx.value() : nullptr,
+                                             cp_ctx ? &cp_ctx.value() : nullptr,
                                              /*topk_transfer=*/nullptr);
   result.local_output = std::move(attention_result.output);
   result.layout = attention_result.layout;
   result.global_output = result.local_output;
-  result.used_sp = sp_ctx.has_value();
+  result.used_cp = cp_ctx.has_value();
   result.local_token_num =
-      sp_ctx.has_value() ? sp_ctx->comm_plan.tokens_per_rank.at(sp_ctx->rank)
+      cp_ctx.has_value() ? cp_ctx->comm_plan.tokens_per_rank.at(cp_ctx->rank)
                          : result.local_output.size(0);
-  if (sp_ctx.has_value()) {
+  if (cp_ctx.has_value()) {
     result.global_output = layer::v32_cp::restore_gathered_to_global_order(
         layer::v32_cp::all_gather_across_ranks(result.local_output,
-                                               sp_ctx.value()),
-        sp_ctx.value());
+                                               cp_ctx.value()),
+        cp_ctx.value());
   }
   return result;
 }
@@ -1250,23 +1257,27 @@ int32_t run_attention_prefill_cp_tp_test_child(int32_t rank,
     QuantArgs quant_args = create_default_quant_args();
     StateDict state_dict = create_attention_state_dict(model_args, options);
 
-    // Sanity: cp_size=2, world_size=4, kv_split=1 must select TP-sharded
-    // (non-replicated) attention so forward_sp actually shards the heads.
     {
       ParallelArgs probe_args = parallel_args;
       probe_args.cp_size() = kCpSize;
       OptimizationConfig probe_opt;
       DeepseekV2Attention probe(
           model_args, quant_args, probe_args, options, probe_opt);
-      CHECK(!probe->use_replicated_attn_weights())
-          << "cp x tp topology must select TP-sharded attention weights";
+      probe->load_state_dict(state_dict);
+      const auto modules = probe->named_children();
+      const auto query_projection =
+          modules["q_b_proj"]->as<ColumnParallelLinearImpl>();
+      CHECK_EQ(
+          query_projection->weight().size(0),
+          model_args.n_heads() / kTpSize *
+              (model_args.qk_nope_head_dim() + model_args.qk_rope_head_dim()));
     }
 
     constexpr int32_t seq_len = 4;
     torch::Tensor tokens =
         torch::arange(seq_len, options.dtype(torch::kInt32).device(device));
     torch::Tensor hidden_states =
-        seeded_tensor("attention_multi_device/cp_tp_sp_hidden_states",
+        seeded_tensor("attention_multi_device/cp_tp_cp_hidden_states",
                       {seq_len, model_args.hidden_size()},
                       torch::kBFloat16,
                       device);
@@ -1288,12 +1299,11 @@ int32_t run_attention_prefill_cp_tp_test_child(int32_t rank,
                                         hidden_states,
                                         ref_kv_cache,
                                         /*cp_size=*/kCpSize,
-                                        /*use_sp=*/false);
+                                        /*use_cp=*/false);
 
-    // SP run: CP-sharded sequence, forward_sp with TP-sharded heads.
-    KVCache sp_kv_cache = create_decode_kv_cache(model_args, options);
-    sp_kv_cache.get_k_cache().zero_();
-    AttentionRunResult sp_result =
+    KVCache cp_kv_cache = create_decode_kv_cache(model_args, options);
+    cp_kv_cache.get_k_cache().zero_();
+    AttentionRunResult cp_result =
         run_cptp_attention_prefill_once(model_args,
                                         quant_args,
                                         parallel_args,
@@ -1302,34 +1312,34 @@ int32_t run_attention_prefill_cp_tp_test_child(int32_t rank,
                                         tokens,
                                         positions,
                                         hidden_states,
-                                        sp_kv_cache,
+                                        cp_kv_cache,
                                         /*cp_size=*/kCpSize,
-                                        /*use_sp=*/true,
+                                        /*use_cp=*/true,
                                         cp_group.get(),
                                         cp_local_rank);
 
     xllm_device.synchronize_default_stream();
 
-    CHECK(sp_result.used_sp) << "cp x tp prefill must use sequence parallel";
-    CHECK(sp_result.layout ==
+    CHECK(cp_result.used_cp) << "cp x tp prefill must use context parallel";
+    CHECK(cp_result.layout ==
           DeepseekV2AttentionImpl::PostAttnLayout::kPackedLocal)
-        << "cp x tp SP prefill must report packed-local layout";
-    CHECK_EQ(sp_result.local_output.size(1), model_args.hidden_size())
-        << "cp x tp SP prefill output hidden width mismatch";
+        << "cp x tp CP prefill must report packed-local layout";
+    CHECK_EQ(cp_result.local_output.size(1), model_args.hidden_size())
+        << "cp x tp CP prefill output hidden width mismatch";
     CHECK(ref_result.layout ==
           DeepseekV2AttentionImpl::PostAttnLayout::kTpShard)
         << "cp x tp reference must report TP-shard layout";
 
     // The reference is a TP-shard partial over the full sequence; reduce it
-    // over the TP group before comparing with the SP output restored across
+    // over the TP group before comparing with the CP output restored across
     // the CP group.
     torch::Tensor ref_full = get_full_out(
         ref_result.local_output, tp_group.get(), model_args.hidden_size());
-    check_tensors_close(sp_result.global_output,
+    check_tensors_close(cp_result.global_output,
                         ref_full,
                         /*rtol=*/1e-3,
                         /*atol=*/1e-2,
-                        "DeepseekV2Attention cp x tp TP-sharded SP output");
+                        "DeepseekV2Attention cp x tp TP-sharded CP output");
     return 0;
   } catch (const std::exception& e) {
     LOG(ERROR) << "Rank " << rank << ": Exception: " << e.what();
@@ -1337,11 +1347,13 @@ int32_t run_attention_prefill_cp_tp_test_child(int32_t rank,
   }
 }
 
-int32_t run_attention_prefill_sp_topk_share_test_child(
-    int32_t rank,
-    int32_t world_size,
-    int32_t port,
-    const std::string& host) {
+int32_t run_prefill_share_child(int32_t rank,
+                                int32_t world_size,
+                                int32_t port,
+                                const std::string& host,
+                                bool missing_slot = false,
+                                bool use_cp = true) {
+  bool checking_missing_slot = false;
   try {
     const int32_t dev_count = xllm::Platform::device_count();
     if (dev_count < world_size) {
@@ -1404,14 +1416,15 @@ int32_t run_attention_prefill_sp_topk_share_test_child(
                                    /*enable_full_weight_path=*/true,
                                    BatchForwardType::PREFILL,
                                    /*prefix_len=*/0,
-                                   /*build_cp_context=*/true,
+                                   /*build_cp_context=*/use_cp,
                                    &full_transfer);
     xllm_device.synchronize_default_stream();
 
     const DsaTopkState* full_topk = full_transfer.output();
     CHECK(full_topk != nullptr)
         << "GLM5.2 PCP Full layer must publish rank-local DSA top-k state";
-    CHECK_EQ(full_topk->block_tables().size(0), kSeqLen / world_size)
+    CHECK_EQ(full_topk->block_tables().size(0),
+             use_cp ? kSeqLen / world_size : kSeqLen)
         << "GLM5.2 PCP top-k rows must match rank-local query rows";
     CHECK_EQ(full_topk->block_tables().size(1), model_args.index_topk())
         << "GLM5.2 PCP top-k width mismatch";
@@ -1422,8 +1435,13 @@ int32_t run_attention_prefill_sp_topk_share_test_child(
 
     KVCache shared_layer_cache = create_decode_kv_cache(model_args, options);
     shared_layer_cache.get_k_cache().zero_();
+    DsaTopkState shared_topk(
+        missing_slot ? torch::full_like(full_topk->block_tables(), kSeqLen + 1)
+                     : full_topk->block_tables(),
+        full_topk->context_lens());
     DsaTopkTransfer shared_transfer =
-        DsaTopkTransfer::reuse_and_capture(*full_topk);
+        DsaTopkTransfer::reuse_and_capture(shared_topk);
+    checking_missing_slot = missing_slot;
     AttentionRunResult shared_result =
         run_attention_prefill_once(model_args,
                                    quant_args,
@@ -1437,11 +1455,15 @@ int32_t run_attention_prefill_sp_topk_share_test_child(
                                    /*enable_full_weight_path=*/true,
                                    BatchForwardType::PREFILL,
                                    /*prefix_len=*/0,
-                                   /*build_cp_context=*/true,
+                                   /*build_cp_context=*/use_cp,
                                    &shared_transfer,
                                    /*enable_indexer=*/false);
     xllm_device.synchronize_default_stream();
 
+    if (missing_slot) {
+      LOG(ERROR) << "Prefill accepted a top-k slot absent from the input K";
+      return 1;
+    }
     const DsaTopkState* reused_topk = shared_transfer.output();
     CHECK(reused_topk != nullptr)
         << "GLM5.2 PCP Shared layer must publish the state it consumed";
@@ -1464,12 +1486,233 @@ int32_t run_attention_prefill_sp_topk_share_test_child(
                         "GLM5.2 PCP Full/Shared output");
     return 0;
   } catch (const std::exception& e) {
+    if (checking_missing_slot &&
+        std::string(e.what()).find("Device-side assert") != std::string::npos) {
+      return 0;
+    }
     LOG(ERROR) << "Rank " << rank << ": Exception: " << e.what();
     return 1;
   }
 }
 
-int32_t run_attention_prefill_sp_baseline_test_child(int32_t rank,
+int32_t run_sparse_prefill_child(int32_t rank,
+                                 int32_t world_size,
+                                 int32_t port,
+                                 const std::string& host,
+                                 bool use_cp,
+                                 int32_t second_length = 33,
+                                 bool duplicate_slot = false) {
+  return run_distributed_attention_child(
+      rank,
+      world_size,
+      port,
+      host,
+      /*enable_context_parallel=*/true,
+      [rank, world_size, use_cp, second_length, duplicate_slot](
+          DistributedAttentionChildContext& context) {
+        const auto& options = context.options();
+        auto int_options = options.dtype(torch::kInt32);
+        ModelArgs args = create_glm5_attention_model_args();
+        QuantArgs quant_args = create_default_quant_args();
+        StateDict weights = create_attention_state_dict(args, options);
+        // Two requests cross both a physical block and a logical DCP block.
+        // Their logical blocks are deliberately high and out of token order.
+        const int32_t token_count = 17 + second_length;
+        AttentionMetadata metadata =
+            create_prefill_metadata(options, token_count);
+        metadata.q_cu_seq_lens =
+            torch::tensor({0, 17, token_count}, int_options);
+        metadata.kv_cu_seq_lens = metadata.q_cu_seq_lens;
+        metadata.kv_seq_lens = torch::tensor({17, second_length}, int_options);
+        metadata.block_table = torch::tensor({{6, 0}, {2, 5}}, int_options);
+        metadata.slot_mapping = torch::cat(
+            {torch::arange(192, 209, int_options),
+             torch::arange(
+                 64, 64 + std::min(second_length, int32_t{32}), int_options),
+             torch::arange(160,
+                           160 + std::max(second_length - 32, int32_t{0}),
+                           int_options)});
+        metadata.max_query_len = std::max(int32_t{17}, second_length);
+        metadata.max_seq_len = metadata.max_query_len;
+        torch::Tensor positions =
+            torch::cat({torch::arange(17, int_options),
+                        torch::arange(second_length, int_options)});
+        torch::Tensor hidden = seeded_tensor("oom/sparse_prefill",
+                                             {token_count, args.hidden_size()},
+                                             torch::kBFloat16,
+                                             context.device());
+        torch::Tensor tokens = torch::arange(token_count, int_options);
+        // Hand-built causal top-k, in reverse token order, independent of the
+        // production indexer and remapping algorithm. Padding tests include a
+        // high positive slot outside context length and a zero-context row.
+        torch::Tensor slots_cpu = metadata.slot_mapping.cpu();
+        torch::Tensor table_cpu =
+            torch::full({token_count, args.index_topk()}, -1, torch::kInt32);
+        torch::Tensor lens_cpu = torch::zeros({token_count}, torch::kInt32);
+        auto slot_data = slots_cpu.accessor<int32_t, 1>();
+        auto table_data = table_cpu.accessor<int32_t, 2>();
+        auto lens_data = lens_cpu.accessor<int32_t, 1>();
+        for (int32_t row = 0; row < token_count; ++row) {
+          const int32_t start = row < 17 ? 0 : 17;
+          const int32_t count = std::min(
+              row - start + 1, static_cast<int32_t>(args.index_topk()));
+          lens_data[row] = count;
+          for (int32_t col = 0; col < count; ++col) {
+            table_data[row][col] = slot_data[row - col];
+          }
+        }
+        lens_data[0] = 0;
+        table_data[0][0] = 1000000;
+        table_data[1][7] = 1000000;
+        // Repeated padding slots are legal; these queries have no valid keys
+        // and must not write the resident KV.
+        metadata.slot_mapping.slice(/*dim=*/0, token_count - 2).fill_(-1);
+        lens_cpu.slice(/*dim=*/0, token_count - 2).zero_();
+        DsaTopkState global_topk(table_cpu.to(context.device()),
+                                 lens_cpu.to(context.device()));
+        const torch::Tensor original_table = global_topk.block_tables().clone();
+        const torch::Tensor original_lens = global_topk.context_lens().clone();
+
+        auto run = [&](bool sharded) {
+          ParallelArgs parallel = context.parallel_args();
+          parallel.cp_size() = world_size;
+          parallel.kv_split_size() = sharded ? world_size : 1;
+          parallel.dcp_group_ = parallel.process_group_;
+          ModelContext model_context(parallel, args, quant_args, options);
+          DeepseekV2Attention attention(model_context,
+                                        /*enable_indexer=*/false);
+          attention->load_state_dict(weights);
+          AttentionMetadata batch = metadata;
+          std::optional<v32_cp::DeepseekV32CPContext> cp;
+          const KVShardLayout layout(
+              /*physical_block_size=*/16, world_size, rank);
+          if (sharded && duplicate_slot) {
+            batch.slot_mapping = batch.slot_mapping.clone();
+            batch.slot_mapping[1] = batch.slot_mapping[0];
+          } else if (sharded) {
+            auto shard = build_kv_shard_batch_metadata(batch, layout);
+            if (batch.kv_seq_lens.defined()) {
+              shard->local_indexer_context_lens =
+                  localize_kv_shard_context_lens(batch.kv_seq_lens, layout);
+            }
+            if (batch.is_prefill) {
+              std::tie(shard->prefill_sorted_slots,
+                       shard->prefill_sorted_rows) =
+                  build_prefill_slot_order(batch.slot_mapping);
+              shard->prefill_sorted_slots =
+                  shard->prefill_sorted_slots.to(torch::kInt64);
+            }
+            if ((batch.is_prefill || batch.is_chunked_prefill) &&
+                batch.q_cu_seq_lens.defined() &&
+                batch.kv_cu_seq_lens.defined() && batch.block_table.defined() &&
+                batch.slot_mapping.defined()) {
+              shard->causal_selector =
+                  build_kv_shard_causal_selector_metadata(batch, layout);
+            }
+            batch.kv_shard_batch_metadata = std::move(shard);
+          }
+          if (sharded && use_cp) {
+            cp =
+                v32_cp::build_deepseek_v32_cp_context(world_size,
+                                                      batch,
+                                                      BatchForwardType::PREFILL,
+                                                      tokens,
+                                                      parallel.cp_group_,
+                                                      rank,
+                                                      world_size,
+                                                      layout);
+            CHECK(cp.has_value());
+          }
+          torch::Tensor query_hidden =
+              cp ? v32_cp::reorder_to_local_shard(hidden, *cp) : hidden;
+          torch::Tensor query_positions =
+              cp ? v32_cp::reorder_to_local_shard(positions, *cp) : positions;
+          DsaTopkState topk =
+              cp ? DsaTopkState(v32_cp::reorder_to_local_shard(
+                                    global_topk.block_tables(), *cp),
+                                v32_cp::reorder_to_local_shard(
+                                    global_topk.context_lens(), *cp))
+                 : global_topk;
+          torch::Tensor topk_snapshot = topk.block_tables().clone();
+          DsaTopkTransfer transfer = DsaTopkTransfer::reuse_and_capture(topk);
+          KVCache cache(KVCacheTensors{
+              torch::zeros({sharded ? 8 : 16,
+                            1,
+                            16,
+                            args.kv_lora_rank() + args.qk_rope_head_dim()},
+                           options),
+              torch::Tensor()});
+          auto output = attention->forward(query_positions,
+                                           query_hidden,
+                                           batch,
+                                           cache,
+                                           cp ? &*cp : nullptr,
+                                           &transfer);
+          torch::Tensor global_output =
+              cp ? v32_cp::gather_and_restore_global(output.output, *cp)
+                 : output.output;
+          context.xllm_device().synchronize_default_stream();
+          CHECK(torch::equal(topk.block_tables(), topk_snapshot));
+          CHECK(transfer.output() != nullptr);
+          CHECK(torch::equal(transfer.output()->block_tables(), topk_snapshot));
+          return std::make_pair(global_output, cache.get_k_cache());
+        };
+        auto [reference, reference_cache] = run(/*sharded=*/false);
+        if (duplicate_slot) {
+          try {
+            run(/*sharded=*/true);
+          } catch (const std::exception& error) {
+            if (std::string(error.what()).find("Device-side assert") !=
+                std::string::npos) {
+              return 0;
+            }
+            throw;
+          }
+          LOG(ERROR) << "Prefill accepted duplicate valid source slots";
+          return 1;
+        }
+        auto [actual, actual_cache] = run(/*sharded=*/true);
+        check_tensors_close(
+            actual,
+            reference,
+            /*rtol=*/1e-3,
+            /*atol=*/1e-2,
+            "Sparse prefill output against unsharded attention");
+        // Independent physical layout: each logical block holds one 16-token
+        // strip from each rank. Derive written slots from the input mapping so
+        // holes and padding remain subject to exact checks.
+        torch::Tensor expected_cache =
+            reference_cache.view({8, world_size, 16, -1})
+                .select(1, rank)
+                .unsqueeze(1);
+        torch::Tensor valid_slots =
+            metadata.slot_mapping.cpu().to(torch::kInt64);
+        valid_slots = valid_slots.masked_select(valid_slots.ge(0));
+        torch::Tensor written_mask = torch::zeros({256}, torch::kBool);
+        written_mask.index_fill_(/*dim=*/0, valid_slots, true);
+        written_mask = written_mask.view({8, world_size, 16, 1})
+                           .select(1, rank)
+                           .unsqueeze(1)
+                           .to(actual_cache.device())
+                           .expand_as(actual_cache);
+        // CP projects smaller, reordered batches independently. Allow BF16
+        // rounding differences with a 1% relative tolerance and a small floor.
+        check_tensors_close(actual_cache.masked_select(written_mask),
+                            expected_cache.masked_select(written_mask),
+                            /*rtol=*/1e-2,
+                            /*atol=*/1e-2,
+                            "Sparse prefill populated resident KV cache");
+        torch::Tensor untouched_cache =
+            actual_cache.masked_select(written_mask.logical_not());
+        CHECK(torch::equal(untouched_cache, torch::zeros_like(untouched_cache)))
+            << "Sparse prefill modified untouched resident KV cache slots";
+        CHECK(torch::equal(global_topk.block_tables(), original_table));
+        CHECK(torch::equal(global_topk.context_lens(), original_lens));
+        return 0;
+      });
+}
+
+int32_t run_attention_prefill_cp_baseline_test_child(int32_t rank,
                                                      int32_t world_size,
                                                      int32_t port,
                                                      const std::string& host) {
@@ -1494,7 +1737,7 @@ int32_t run_attention_prefill_sp_baseline_test_child(int32_t rank,
         torch::Tensor tokens =
             torch::arange(seq_len, options.dtype(torch::kInt32).device(device));
         torch::Tensor hidden_states = seeded_tensor(
-            "attention_multi_device/sp_prefill_baseline_hidden_states",
+            "attention_multi_device/cp_prefill_baseline_hidden_states",
             {seq_len, model_args.hidden_size()},
             torch::kBFloat16,
             device);
@@ -1503,8 +1746,8 @@ int32_t run_attention_prefill_sp_baseline_test_child(int32_t rank,
 
         KVCache baseline_kv_cache = create_decode_kv_cache(model_args, options);
         baseline_kv_cache.get_k_cache().zero_();
-        KVCache sp_kv_cache = create_decode_kv_cache(model_args, options);
-        sp_kv_cache.get_k_cache().zero_();
+        KVCache cp_kv_cache = create_decode_kv_cache(model_args, options);
+        cp_kv_cache.get_k_cache().zero_();
 
         auto baseline_result =
             run_attention_prefill_once(model_args,
@@ -1520,7 +1763,7 @@ int32_t run_attention_prefill_sp_baseline_test_child(int32_t rank,
                                        BatchForwardType::PREFILL,
                                        /*prefix_len=*/0,
                                        /*build_cp_context=*/false);
-        auto sp_result =
+        auto cp_result =
             run_attention_prefill_once(model_args,
                                        quant_args,
                                        parallel_args,
@@ -1529,24 +1772,24 @@ int32_t run_attention_prefill_sp_baseline_test_child(int32_t rank,
                                        tokens,
                                        positions,
                                        hidden_states,
-                                       sp_kv_cache,
+                                       cp_kv_cache,
                                        /*enable_full_weight_path=*/true);
 
         xllm_device.synchronize_default_stream();
-        check_repl_output_contract(baseline_result,
+        check_full_output_contract(baseline_result,
                                    seq_len,
                                    model_args.hidden_size(),
                                    "DeepseekV2Attention prefill baseline");
-        check_sp_output_contract(sp_result,
+        check_cp_output_contract(cp_result,
                                  seq_len,
                                  model_args.hidden_size(),
                                  /*local_token_num=*/seq_len / world_size,
-                                 "DeepseekV2Attention prefill sp baseline");
-        check_tensors_close(sp_result.global_output,
+                                 "DeepseekV2Attention prefill cp baseline");
+        check_tensors_close(cp_result.global_output,
                             baseline_result.global_output,
                             /*rtol=*/1e-3,
                             /*atol=*/1e-2,
-                            "DeepseekV2Attention prefill sp output");
+                            "DeepseekV2Attention prefill cp output");
         return 0;
       });
 }
@@ -1617,7 +1860,7 @@ int32_t run_attention_chunked_test_child(int32_t rank,
             create_decode_kv_cache(model_args, options);
         full_weight_kv_cache.get_k_cache().zero_();
 
-        auto sp_prefix_result = run_attention_prefill_once(model_args,
+        auto cp_prefix_result = run_attention_prefill_once(model_args,
                                                            quant_args,
                                                            parallel_args,
                                                            options,
@@ -1627,17 +1870,17 @@ int32_t run_attention_chunked_test_child(int32_t rank,
                                                            prefix_hidden_states,
                                                            full_weight_kv_cache,
                                                            true);
-        check_sp_output_contract(sp_prefix_result,
+        check_cp_output_contract(cp_prefix_result,
                                  prefix_len,
                                  model_args.hidden_size(),
                                  /*local_token_num=*/prefix_len / world_size,
-                                 "DeepseekV2Attention chunked prefix sp");
+                                 "DeepseekV2Attention chunked prefix cp");
         check_tensor_same_across_ranks(
-            sp_prefix_result.global_output,
+            cp_prefix_result.global_output,
             parallel_args.tp_group_,
             "DeepseekV2Attention chunked prefix output");
 
-        auto sp_result =
+        auto cp_result =
             run_attention_prefill_once(model_args,
                                        quant_args,
                                        parallel_args,
@@ -1652,17 +1895,17 @@ int32_t run_attention_chunked_test_child(int32_t rank,
                                        prefix_len);
 
         xllm_device.synchronize_default_stream();
-        check_sp_output_contract(sp_result,
+        check_cp_output_contract(cp_result,
                                  chunk1_len,
                                  model_args.hidden_size(),
                                  /*local_token_num=*/chunk1_len / world_size,
-                                 "DeepseekV2Attention chunked prefill sp");
+                                 "DeepseekV2Attention chunked prefill cp");
         check_tensor_same_across_ranks(
-            sp_result.global_output,
+            cp_result.global_output,
             parallel_args.tp_group_,
             "DeepseekV2Attention chunked prefill output");
 
-        auto sp_second_result =
+        auto cp_second_result =
             run_attention_prefill_once(model_args,
                                        quant_args,
                                        parallel_args,
@@ -1677,16 +1920,67 @@ int32_t run_attention_chunked_test_child(int32_t rank,
                                        prefix_len + chunk1_len);
 
         xllm_device.synchronize_default_stream();
-        check_sp_output_contract(
-            sp_second_result,
+        check_cp_output_contract(
+            cp_second_result,
             chunk2_len,
             model_args.hidden_size(),
             /*local_token_num=*/chunk2_len / world_size,
-            "DeepseekV2Attention second chunked prefill sp");
+            "DeepseekV2Attention second chunked prefill cp");
         check_tensor_same_across_ranks(
-            sp_second_result.global_output,
+            cp_second_result.global_output,
             parallel_args.tp_group_,
             "DeepseekV2Attention second chunked prefill output");
+        return 0;
+      });
+}
+
+int32_t run_dcp_remote_prefix_cache_merge_test_child(int32_t rank,
+                                                     int32_t world_size,
+                                                     int32_t port,
+                                                     const std::string& host) {
+  return run_distributed_attention_child(
+      rank,
+      world_size,
+      port,
+      host,
+      /*enable_context_parallel=*/false,
+      [world_size](DistributedAttentionChildContext& context) {
+        xllm::Device& xllm_device = context.xllm_device();
+        const torch::Device& device = context.device();
+        const torch::TensorOptions& options = context.options();
+        const int32_t rank = context.process_group()->rank();
+        DcpDecodeContext dcp_context(
+            KVShardLayout(
+                KVCacheConfig::get_instance().block_size(), world_size, rank),
+            context.process_group());
+
+        // A cached prefix can put a valid suffix query on another rank's
+        // local KV page. The -1 below is an ownership marker, not padding.
+        torch::Tensor global_slot_mapping =
+            torch::zeros({1}, options.dtype(torch::kInt32).device(device));
+        torch::Tensor local_slot_mapping =
+            dcp_context.localize_slots(global_slot_mapping);
+        CHECK_EQ(global_slot_mapping.item<int32_t>(), 0);
+        CHECK_EQ(local_slot_mapping.item<int32_t>(),
+                 rank == 0 ? 0 : KVShardLayout::kInvalidSlot);
+
+        torch::Tensor local_output =
+            torch::full({1, 1, 1, 1}, static_cast<float>(rank + 2), options);
+        torch::Tensor local_lse = torch::zeros(
+            {1, 1, 1}, options.dtype(torch::kFloat32).device(device));
+        torch::Tensor merged_output = dcp_context.merge(local_output,
+                                                        local_lse,
+                                                        global_slot_mapping,
+                                                        /*head_sharded=*/false);
+
+        xllm_device.synchronize_default_stream();
+        torch::Tensor expected = torch::full_like(merged_output, 2.5f);
+        check_tensors_close(
+            merged_output,
+            expected,
+            /*rtol=*/0.0,
+            /*atol=*/0.0,
+            "DCP merge preserves a remote prefix-cache contribution");
         return 0;
       });
 }
@@ -1762,7 +2056,7 @@ int32_t run_attention_topk_share_test_child(int32_t rank,
                                                hidden_states,
                                                full_metadata,
                                                full_kv_cache,
-                                               /*sp_ctx=*/nullptr,
+                                               /*cp_ctx=*/nullptr,
                                                &full_transfer)
                                      .output;
         xllm_device.synchronize_default_stream();
@@ -1803,7 +2097,7 @@ int32_t run_attention_topk_share_test_child(int32_t rank,
                                                  hidden_states,
                                                  shared_metadata,
                                                  shared_kv_cache,
-                                                 /*sp_ctx=*/nullptr,
+                                                 /*cp_ctx=*/nullptr,
                                                  &shared_transfer)
                                        .output;
         xllm_device.synchronize_default_stream();
@@ -1876,7 +2170,7 @@ int32_t run_attention_topk_share_dummy_run_test_child(int32_t rank,
                            hidden_states,
                            dummy_metadata,
                            kv_cache,
-                           /*sp_ctx=*/nullptr,
+                           /*cp_ctx=*/nullptr,
                            &output_transfer);
         xllm_device.synchronize_default_stream();
 
@@ -1963,7 +2257,7 @@ int32_t run_attention_topk_share_bucket_test_child(int32_t rank,
                                                hidden_states,
                                                full_metadata,
                                                full_kv_cache,
-                                               /*sp_ctx=*/nullptr,
+                                               /*cp_ctx=*/nullptr,
                                                &full_transfer)
                                      .output;
         xllm_device.synchronize_default_stream();
@@ -1996,7 +2290,7 @@ int32_t run_attention_topk_share_bucket_test_child(int32_t rank,
                                                  hidden_states,
                                                  shared_metadata,
                                                  shared_kv_cache,
-                                                 /*sp_ctx=*/nullptr,
+                                                 /*cp_ctx=*/nullptr,
                                                  &shared_transfer)
                                        .output;
         xllm_device.synchronize_default_stream();
@@ -2118,16 +2412,16 @@ class AttentionMultiDeviceTest : public ::testing::Test {
         "Attention multi-device prefill fallback test failed.");
   }
 
-  void run_prefill_sp_test(bool use_glm5_args = false) {
+  void run_prefill_cp_test(bool use_glm5_args = false) {
     run_child_test(
         [use_glm5_args](int32_t rank,
                         int32_t world_size,
                         int32_t port,
                         const std::string& host) {
-          return run_attention_prefill_sp_test_child(
+          return run_attention_prefill_cp_test_child(
               rank, world_size, port, host, use_glm5_args);
         },
-        "Attention multi-device SP prefill test failed.");
+        "Attention multi-device CP prefill test failed.");
   }
 
   void run_prefill_cp_tp_test() {
@@ -2141,17 +2435,16 @@ class AttentionMultiDeviceTest : public ::testing::Test {
           return run_attention_prefill_cp_tp_test_child(
               rank, world_size, port, host);
         },
-        "Attention multi-device CP x TP TP-sharded SP prefill test failed.");
+        "Attention multi-device CP x TP TP-sharded CP prefill test failed.");
   }
 
-  void run_prefill_sp_topk_share_test() {
+  void run_prefill_cp_topk_share_test() {
     run_child_test(
         [](int32_t rank,
            int32_t world_size,
            int32_t port,
            const std::string& host) {
-          return run_attention_prefill_sp_topk_share_test_child(
-              rank, world_size, port, host);
+          return run_prefill_share_child(rank, world_size, port, host);
         },
         "GLM5.2 PCP cross-layer top-k share test failed.");
   }
@@ -2167,16 +2460,28 @@ class AttentionMultiDeviceTest : public ::testing::Test {
         "Attention multi-device chunked test failed.");
   }
 
-  void run_prefill_sp_baseline_test() {
+  void run_dcp_remote_prefix_cache_merge_test() {
     run_child_test(
         [](int32_t rank,
            int32_t world_size,
            int32_t port,
            const std::string& host) {
-          return run_attention_prefill_sp_baseline_test_child(
+          return run_dcp_remote_prefix_cache_merge_test_child(
               rank, world_size, port, host);
         },
-        "Attention multi-device SP prefill baseline test failed.");
+        "DCP remote prefix-cache merge test failed.");
+  }
+
+  void run_prefill_cp_baseline_test() {
+    run_child_test(
+        [](int32_t rank,
+           int32_t world_size,
+           int32_t port,
+           const std::string& host) {
+          return run_attention_prefill_cp_baseline_test_child(
+              rank, world_size, port, host);
+        },
+        "Attention multi-device CP prefill baseline test failed.");
   }
 
   void run_topk_share_test() {
@@ -2234,33 +2539,192 @@ TEST_F(AttentionMultiDeviceTest,
 }
 
 TEST_F(AttentionMultiDeviceTest,
-       PrefillSpLocalPackedOutputRestoresToTpBaseline) {
-  run_prefill_sp_test();
+       PrefillCpLocalPackedOutputRestoresToTpBaseline) {
+  run_prefill_cp_test();
 }
 
 TEST_F(AttentionMultiDeviceTest, PrefillShortSeqFallsBackToReplicatedPath) {
   run_prefill_fallback_test();
 }
 
-TEST_F(AttentionMultiDeviceTest, Glm5PrefillSpRestoresToTpBaseline) {
-  run_prefill_sp_test(/*use_glm5_args=*/true);
+TEST_F(AttentionMultiDeviceTest, Glm5PrefillCpRestoresToTpBaseline) {
+  run_prefill_cp_test(/*use_glm5_args=*/true);
 }
 
-TEST_F(AttentionMultiDeviceTest, CpTpPrefillSpTpShardsAttentionHeads) {
+TEST_F(AttentionMultiDeviceTest, CpTpPrefillCpTpShardsAttentionHeads) {
   run_prefill_cp_tp_test();
 }
 
+TEST_F(AttentionMultiDeviceTest, PrefillRejectsMissingTopkSlot) {
+  run_child_test(
+      [](int32_t rank,
+         int32_t world_size,
+         int32_t port,
+         const std::string& host) {
+        return run_prefill_share_child(
+            rank, world_size, port, host, /*missing_slot=*/true);
+      },
+      "Prefill must reject a top-k slot absent from the input K.");
+}
+
+TEST_F(AttentionMultiDeviceTest, EmptyDcpPrefillLeavesResidentCacheUnchanged) {
+  run_child_test(
+      [](int32_t rank,
+         int32_t world_size,
+         int32_t port,
+         const std::string& host) {
+        return run_distributed_attention_child(
+            rank,
+            world_size,
+            port,
+            host,
+            /*enable_context_parallel=*/true,
+            [world_size](DistributedAttentionChildContext& context) {
+              ParallelArgs parallel = context.parallel_args();
+              parallel.kv_split_size() = world_size;
+              parallel.dcp_group_ = parallel.process_group_;
+              const auto& options = context.options();
+              ModelArgs args = create_glm5_attention_model_args();
+              QuantArgs quant_args = create_default_quant_args();
+              StateDict weights = create_attention_state_dict(args, options);
+              KVCache cache = create_decode_kv_cache(args, options);
+              torch::Tensor original = cache.get_k_cache().clone();
+              torch::Tensor tokens =
+                  torch::empty({0}, options.dtype(torch::kInt32));
+              AttentionRunResult result = run_attention_prefill_once(
+                  args,
+                  quant_args,
+                  parallel,
+                  options,
+                  weights,
+                  tokens,
+                  tokens,
+                  torch::empty({0, args.hidden_size()}, options),
+                  cache,
+                  /*enable_full_weight_path=*/true,
+                  BatchForwardType::PREFILL,
+                  /*prefix_len=*/0,
+                  /*build_cp_context=*/false);
+              CHECK_EQ(result.global_output.size(0), 0);
+              CHECK_EQ(result.global_output.size(1), args.hidden_size());
+              CHECK(torch::equal(cache.get_k_cache(), original));
+              return 0;
+            });
+      },
+      "Empty DCP prefill must leave the resident cache unchanged.");
+}
+
+TEST_F(AttentionMultiDeviceTest, DcpPrefillRejectsMissingTopkSlot) {
+  run_child_test(
+      [](int32_t rank,
+         int32_t world_size,
+         int32_t port,
+         const std::string& host) {
+        return run_prefill_share_child(rank,
+                                       world_size,
+                                       port,
+                                       host,
+                                       /*missing_slot=*/true,
+                                       /*use_cp=*/false);
+      },
+      "DCP prefill must reject a top-k slot absent from the input K.");
+}
+
+TEST_F(AttentionMultiDeviceTest, DcpPrefillRejectsDuplicateSourceSlots) {
+  run_child_test(
+      [](int32_t rank,
+         int32_t world_size,
+         int32_t port,
+         const std::string& host) {
+        return run_sparse_prefill_child(rank,
+                                        world_size,
+                                        port,
+                                        host,
+                                        /*use_cp=*/false,
+                                        /*second_length=*/33,
+                                        /*duplicate_slot=*/true);
+      },
+      "DCP prefill must reject duplicate valid source slots.");
+}
+
+TEST_F(AttentionMultiDeviceTest, DcpSparsePrefillMatchesUnshardedAttention) {
+  run_child_test(
+      [](int32_t rank,
+         int32_t world_size,
+         int32_t port,
+         const std::string& host) {
+        return run_sparse_prefill_child(rank,
+                                        world_size,
+                                        port,
+                                        host,
+                                        /*use_cp=*/false);
+      },
+      "DCP sparse prefill must match unsharded attention.");
+}
+
+TEST_F(AttentionMultiDeviceTest, CpDcpSparsePrefillMatchesUnshardedAttention) {
+  run_child_test(
+      [](int32_t rank,
+         int32_t world_size,
+         int32_t port,
+         const std::string& host) {
+        return run_sparse_prefill_child(rank,
+                                        world_size,
+                                        port,
+                                        host,
+                                        /*use_cp=*/true);
+      },
+      "CP+DCP sparse prefill must match unsharded attention.");
+}
+
+TEST_F(AttentionMultiDeviceTest, DcpPrefillAtBlockBoundaryMatchesUnsharded) {
+  run_child_test(
+      [](int32_t rank,
+         int32_t world_size,
+         int32_t port,
+         const std::string& host) {
+        return run_sparse_prefill_child(rank,
+                                        world_size,
+                                        port,
+                                        host,
+                                        /*use_cp=*/false,
+                                        /*second_length=*/15);
+      },
+      "DCP block-aligned prefill must match unsharded attention.");
+}
+
+TEST_F(AttentionMultiDeviceTest, CpDcpPrefillTailBlockMatchesUnsharded) {
+  run_child_test(
+      [](int32_t rank,
+         int32_t world_size,
+         int32_t port,
+         const std::string& host) {
+        return run_sparse_prefill_child(rank,
+                                        world_size,
+                                        port,
+                                        host,
+                                        /*use_cp=*/true,
+                                        /*second_length=*/16);
+      },
+      "CP+DCP tail-block prefill must match unsharded attention.");
+}
+
 TEST_F(AttentionMultiDeviceTest, Glm52PrefillCpReusesRankLocalTopkState) {
-  run_prefill_sp_topk_share_test();
+  run_prefill_cp_topk_share_test();
 }
 
 TEST_F(AttentionMultiDeviceTest,
-       ChunkedPrefillSpAcrossChunksMatchesTpBaseline) {
+       ChunkedPrefillCpAcrossChunksMatchesTpBaseline) {
   run_chunked_test();
 }
 
-TEST_F(AttentionMultiDeviceTest, PrefillSpNonChunkedMatchesReplicatedBaseline) {
-  run_prefill_sp_baseline_test();
+TEST_F(AttentionMultiDeviceTest,
+       DcpMergePreservesRemotePrefixCacheContribution) {
+  run_dcp_remote_prefix_cache_merge_test();
+}
+
+TEST_F(AttentionMultiDeviceTest, PrefillCpNonChunkedMatchesReplicatedBaseline) {
+  run_prefill_cp_baseline_test();
 }
 
 TEST_F(AttentionMultiDeviceTest, DummyRunOutputLayerYieldsNoSparseTopk) {

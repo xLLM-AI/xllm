@@ -19,6 +19,8 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 
+#include <algorithm>
+#include <cmath>
 #include <sstream>
 
 #include "core/framework/config/kv_cache_config.h"
@@ -27,8 +29,10 @@ limitations under the License.
 #include "framework/parallel_state/parallel_state.h"
 #include "framework/quantization/quant_args.h"
 #include "framework/state_dict/state_dict.h"
+#include "kernels/mlu/mlu_ops_api.h"
 #include "layers/common/kv_shard_batch_metadata.h"
 #include "layers/mlu/attention.h"
+#include "layers/mlu/dcp_decode_context.h"
 #include "layers/mlu/tests_utils.h"
 #include "platform/device.h"
 #include "platform/platform.h"
@@ -253,7 +257,6 @@ class IndexerTest : public ::testing::Test {
                            bool quantized_cache = false,
                            int64_t cache_block_size = 1,
                            bool use_noncontiguous_blocks = false) {
-    test_config_ = TestConfig();
     test_config_.block_size = cache_block_size;
     KVCacheConfig::get_instance().block_size(cache_block_size);
     if (use_default_rope) {
@@ -456,14 +459,14 @@ class IndexerTest : public ::testing::Test {
     EXPECT_TRUE(k_cache_scale_cpu.ne(0).any().item<bool>());
   }
 
-  v32_cp::DeepseekV32CPContext make_single_rank_sp_context(
+  v32_cp::DeepseekV32CPContext make_single_rank_cp_context(
       const TestInputs& inputs,
       int64_t token_num) const {
     const int32_t token_num_i32 = static_cast<int32_t>(token_num);
     const int32_t context_len = static_cast<int32_t>(
         inputs.metadata.is_chunked_prefill ? inputs.metadata.total_kv_len
                                            : token_num);
-    v32_sp::DeepseekV32SPSegment segment;
+    v32_cp::DeepseekV32CPSegment segment;
     segment.req_idx = 0;
     segment.rank = 0;
     segment.q_tokens = token_num_i32;
@@ -475,25 +478,25 @@ class IndexerTest : public ::testing::Test {
         torch::tensor({0, token_num_i32}, int_option_).view({1, 2});
     torch::Tensor context_prefix =
         torch::tensor({0, context_len}, int_option_).view({1, 2});
-    v32_cp::DeepseekV32CPContext sp_ctx;
-    sp_ctx.local_attn_metadata = inputs.metadata;
-    sp_ctx.batch_forward_type = inputs.metadata.is_chunked_prefill
+    v32_cp::DeepseekV32CPContext cp_ctx;
+    cp_ctx.local_attn_metadata = inputs.metadata;
+    cp_ctx.batch_forward_type = inputs.metadata.is_chunked_prefill
                                     ? BatchForwardType::CHUNKED_PREFILL
                                     : BatchForwardType::PREFILL;
-    sp_ctx.local_segments = {segment};
-    sp_ctx.seg_q_starts_cpu = {0};
-    sp_ctx.req_q_offsets_cpu = {0};
-    sp_ctx.req_ctx_offsets_cpu = {0};
-    sp_ctx.seg_q_cu_lens_2col = segment_prefix;
-    sp_ctx.seg_suffix_k_cu_lens_2col = segment_prefix;
-    sp_ctx.seg_ctx_k_cu_lens_2col = context_prefix;
-    sp_ctx.seg_ctx_lens_1col = torch::tensor({context_len}, int_option_);
-    sp_ctx.gathered_reorder_index =
+    cp_ctx.local_segments = {segment};
+    cp_ctx.seg_q_starts_cpu = {0};
+    cp_ctx.req_q_offsets_cpu = {0};
+    cp_ctx.req_ctx_offsets_cpu = {0};
+    cp_ctx.seg_q_cu_lens_2col = segment_prefix;
+    cp_ctx.seg_suffix_k_cu_lens_2col = segment_prefix;
+    cp_ctx.seg_ctx_k_cu_lens_2col = context_prefix;
+    cp_ctx.seg_ctx_lens_1col = torch::tensor({context_len}, int_option_);
+    cp_ctx.gathered_reorder_index =
         torch::arange(token_num, options_.dtype(torch::kInt64));
-    sp_ctx.gathered_slot_mapping = inputs.metadata.slot_mapping;
-    sp_ctx.total_tokens = token_num_i32;
-    sp_ctx.rank = 0;
-    return sp_ctx;
+    cp_ctx.gathered_slot_mapping = inputs.metadata.slot_mapping;
+    cp_ctx.total_tokens = token_num_i32;
+    cp_ctx.rank = 0;
+    return cp_ctx;
   }
 
   ParallelArgs parallel_args_{0, 1, nullptr};
@@ -568,6 +571,7 @@ TEST_F(IndexerTest, ChunkedPrefillBatch) {
 }
 
 TEST_F(IndexerTest, DcpLocalCausalPrefillSelectsRankLocalCandidates) {
+  test_config_.index_n_heads = 32;
   TestInputs inputs = create_inputs(
       /*batch_size=*/1,
       /*max_query_len=*/24,
@@ -581,6 +585,7 @@ TEST_F(IndexerTest, DcpLocalCausalPrefillSelectsRankLocalCandidates) {
 }
 
 TEST_F(IndexerTest, DcpLocalCausalChunkedPrefillSelectsRankLocalCandidates) {
+  test_config_.index_n_heads = 32;
   TestInputs inputs = create_inputs(
       /*batch_size=*/1,
       /*max_query_len=*/24,
@@ -593,17 +598,314 @@ TEST_F(IndexerTest, DcpLocalCausalChunkedPrefillSelectsRankLocalCandidates) {
   expect_dcp_local_prefill_candidates(inputs);
 }
 
-TEST_F(IndexerTest, DcpLocalCandidateScoreBoundsGlm52PrefillWorkspace) {
-  constexpr int64_t kTokenCount = 8192;
-  constexpr int64_t kTopk = 2048;
-  constexpr int64_t kIndexHeads = 32;
-  constexpr int64_t kHeadDim = 128;
+class DcpIndexerScoreTest : public IndexerTest {
+ protected:
+  void SetUp() override {
+    IndexerTest::SetUp();
+    test_config_.index_n_heads = 32;
+  }
+  void expect_scores(const DcpIndexerLocalCandidates& candidates,
+                     const IndexerCPPreOut& pre_out,
+                     const torch::Tensor& cache,
+                     const std::optional<torch::Tensor>& cache_scale,
+                     const KVShardLayout& layout,
+                     double tolerance = 1e-4) {
+    torch::Tensor q = pre_out.q.cpu().to(torch::kFloat32);
+    if (pre_out.q_scale.has_value()) {
+      q *= pre_out.q_scale->cpu().unsqueeze(-1);
+    }
+    torch::Tensor weights = pre_out.weights.cpu().to(torch::kFloat32);
+    torch::Tensor keys = cache.cpu().flatten(0, 2).to(torch::kFloat32);
+    if (cache_scale.has_value()) {
+      keys *= cache_scale->cpu().flatten().unsqueeze(-1);
+    }
+    torch::Tensor slots =
+        localize_kv_shard_slots(candidates.global_slots.cpu(), layout);
+    torch::Tensor scores = candidates.scores.cpu();
+    const auto q_data = q.accessor<float, 3>();
+    const auto weight_data = weights.accessor<float, 2>();
+    const auto key_data = keys.accessor<float, 2>();
+    const auto slot_data = slots.accessor<int32_t, 2>();
+    const auto score_data = scores.accessor<float, 2>();
+    int64_t valid_count = 0;
+    int64_t invalid_count = 0;
+    for (int64_t row = 0; row < slots.size(0); ++row) {
+      for (int64_t col = 0; col < slots.size(1); ++col) {
+        const int32_t slot = slot_data[row][col];
+        if (slot < 0) {
+          EXPECT_TRUE(std::isinf(score_data[row][col]));
+          EXPECT_LT(score_data[row][col], 0);
+          ++invalid_count;
+          continue;
+        }
+        double expected = 0;
+        for (int64_t head = 0; head < q.size(1); ++head) {
+          double dot = 0;
+          for (int64_t dim = 0; dim < q.size(2); ++dim) {
+            dot += static_cast<double>(q_data[row][head][dim]) *
+                   key_data[slot][dim];
+          }
+          expected += std::max(dot, 0.0) * weight_data[row][head];
+        }
+        ASSERT_NEAR(score_data[row][col],
+                    expected,
+                    tolerance * (1.0 + std::abs(expected)))
+            << "row=" << row << " slot=" << slot;
+        ++valid_count;
+      }
+    }
+    EXPECT_GT(valid_count, 0);
+    EXPECT_GT(invalid_count, 0);
+  }
 
-  const int64_t rows_per_chunk = dcp_indexer_score_rows_per_chunk(
-      kTokenCount, kTopk, kIndexHeads, kHeadDim);
+  void expect_entry_scores(bool is_prefill,
+                           bool chunked,
+                           bool quantized_cache = false) {
+    TestInputs inputs = create_inputs(
+        /*batch_size=*/1,
+        /*max_query_len=*/is_prefill ? 8 : 1,
+        is_prefill,
+        chunked,
+        /*history_len=*/chunked ? 8 : 0,
+        /*use_default_rope=*/true,
+        quantized_cache,
+        /*cache_block_size=*/1);
+    if (quantized_cache) {
+      fill_quantized_cache(inputs);
+    }
+    parallel_args_.world_size() = 2;
+    parallel_args_.kv_split_size() = 2;
+    const KVShardLayout layout(
+        /*physical_block_size=*/1, /*dcp_size=*/2, /*dcp_rank=*/0);
+    inputs.positions.zero_();
+    // Fixed projections produce opposite query heads and signed head weights.
+    // Position zero avoids differences between fused and eager rotary paths.
+    inputs.x.fill_(1);
+    inputs.q_norm.fill_(1);
+    inputs.weights.at("wq_b.weight").zero_();
+    inputs.weights.at("wq_b.weight").index_put_({0, 0}, 1);
+    inputs.weights.at("wq_b.weight")
+        .index_put_({test_config_.index_head_dim, 0}, -1);
+    inputs.weights.at("weights_proj.weight").zero_();
+    inputs.weights.at("weights_proj.weight").index_put_({0, 0}, 1);
+    inputs.weights.at("weights_proj.weight").index_put_({1, 0}, -2);
+    Indexer indexer = create_indexer(inputs, /*enable_fused_qk=*/true);
+    IndexerCPPreOut reference = indexer->cp_pre(
+        inputs.x, inputs.q_norm, inputs.positions, inputs.metadata);
+    if (quantized_cache) {
+      const torch::Tensor smooth =
+          torch::ones({reference.q.size(-1)},
+                      torch::TensorOptions()
+                          .dtype(torch::kFloat32)
+                          .device(reference.q.device()));
+      std::tie(reference.q, reference.q_scale) =
+          kernel::mlu::scaled_quantize(reference.q, smooth);
+    }
+    DcpIndexerLocalCandidates candidates;
+    if (is_prefill) {
+      const KVShardCausalSelectorMetadata causal =
+          build_kv_shard_causal_selector_metadata(inputs.metadata, layout);
+      AttentionMetadata selector = inputs.metadata;
+      selector.q_cu_seq_lens = causal.q_cu_seq_lens;
+      selector.kv_cu_seq_lens = causal.q_cu_seq_lens;
+      selector.kv_seq_lens = causal.local_context_lens;
+      selector.block_table = causal.block_table;
+      selector.max_query_len = 1;
+      selector.is_prefill = false;
+      selector.is_chunked_prefill = false;
+      inputs.metadata.slot_mapping =
+          localize_kv_shard_slots(inputs.metadata.slot_mapping, layout);
+      candidates = indexer->forward_dcp_local_prefill(inputs.x,
+                                                      inputs.q_norm,
+                                                      inputs.positions,
+                                                      inputs.k_cache,
+                                                      inputs.metadata,
+                                                      selector,
+                                                      inputs.k_cache_scale);
+    } else {
+      inputs.metadata.kv_seq_lens.fill_(8);
+      inputs.metadata.block_table = torch::arange(8, int_option_).view({1, 8});
+      candidates = indexer->forward_dcp_local(inputs.x,
+                                              inputs.q_norm,
+                                              inputs.positions,
+                                              inputs.k_cache,
+                                              inputs.metadata,
+                                              inputs.k_cache_scale);
+    }
+    expect_scores(candidates,
+                  reference,
+                  inputs.k_cache,
+                  inputs.k_cache_scale,
+                  layout,
+                  /*tolerance=*/1e-4);
+  }
+};
 
-  // 128 MiB / (2 * 2048 * (128 + 32) * sizeof(float)) = 51 rows.
-  EXPECT_EQ(rows_per_chunk, 51);
+TEST_F(DcpIndexerScoreTest, DecodeMatchesReluReference) {
+  expect_entry_scores(/*is_prefill=*/false, /*chunked=*/false);
+}
+
+TEST_F(DcpIndexerScoreTest, PrefillMatchesReluReference) {
+  expect_entry_scores(/*is_prefill=*/true, /*chunked=*/false);
+}
+
+TEST_F(DcpIndexerScoreTest, ChunkedPrefillMatchesReluReference) {
+  expect_entry_scores(/*is_prefill=*/true, /*chunked=*/true);
+}
+
+TEST_F(DcpIndexerScoreTest, CpCandidatesPreserveGlobalTopk) {
+  parallel_args_.world_size() = 2;
+  parallel_args_.kv_split_size() = 2;
+  rotary_emb_ = std::make_shared<RotaryEmbeddingImpl>(
+      test_config_.qk_rope_head_dim,
+      test_config_.max_position_embeddings,
+      test_config_.rope_theta,
+      test_config_.rope_interleaved,
+      options_);
+  IndexerCPPreOut pre_out;
+  pre_out.q = torch::zeros({2, 32, 128}, options_);
+  pre_out.q.select(/*dim=*/2, /*index=*/0).fill_(1);
+  pre_out.q.select(/*dim=*/1, /*index=*/1).zero_();
+  pre_out.q.index_put_({torch::indexing::Slice(), 1, 1}, 1);
+  pre_out.k_local = torch::zeros({2, 128}, options_);
+  pre_out.weights = torch::zeros({2, 32}, options_);
+  pre_out.weights.index_put_({0, 0}, 1);
+  pre_out.weights.index_put_({0, 1}, 1);
+  pre_out.weights.index_put_({1, 0}, -1);
+  pre_out.weights.index_put_({1, 1}, 2);
+  std::vector<torch::Tensor> rank_scores;
+  std::vector<torch::Tensor> rank_slots;
+  rank_scores.reserve(2);
+  rank_slots.reserve(2);
+  for (int32_t rank = 0; rank < 2; ++rank) {
+    SCOPED_TRACE(rank);
+    parallel_args_.rank() = rank;
+    const KVShardLayout layout(
+        /*physical_block_size=*/1, /*dcp_size=*/2, rank);
+    TestInputs inputs;
+    Indexer indexer = create_indexer(inputs, /*enable_fused_qk=*/true);
+    const int32_t ctx_len = 1025 - rank;
+    torch::Tensor keys = torch::zeros({ctx_len, 1, 1, 128}, options_);
+    keys.select(/*dim=*/3, /*index=*/0).fill_(20);
+    keys.index_put_({0, 0, 0, 0}, rank == 0 ? 10 : 6);
+    keys.index_put_({0, 0, 0, 1}, rank == 0 ? -9 : 0);
+    std::optional<torch::Tensor> scales = std::nullopt;
+    AttentionMetadata prefill;
+    prefill.slot_mapping = torch::full({2}, -1, int_option_);
+    AttentionMetadata selector;
+    selector.block_table =
+        torch::arange(ctx_len, int_option_).unsqueeze(0).repeat({2, 1});
+    selector.kv_seq_lens = torch::full({2}, ctx_len, int_option_);
+    selector.q_cu_seq_lens = torch::arange(3, int_option_);
+    const DcpIndexerLocalCandidates candidates =
+        indexer->forward_dcp_local_prefill_from_cp(
+            pre_out, keys, prefill, selector);
+    expect_scores(candidates, pre_out, keys, scales, layout);
+    rank_scores.emplace_back(candidates.scores);
+    rank_slots.emplace_back(candidates.global_slots);
+  }
+  DcpIndexerGatherAsyncCtx gathered;
+  gathered.gathered_scores = torch::stack(rank_scores);
+  gathered.gathered_global_slots = torch::stack(rank_slots);
+  const DcpDecodeContext context(
+      KVShardLayout(/*physical_block_size=*/1, /*dcp_size=*/2, /*dcp_rank=*/0),
+      /*dcp_group=*/nullptr);
+  const DsaTopkState merged = context.finish_indexer_candidate_merge(
+      std::move(gathered), /*topk=*/2048, torch::zeros({2}, int_option_));
+  torch::Tensor selected = merged.block_tables()[0].cpu();
+  torch::Tensor expected = torch::arange(2049, torch::kInt32);
+  expected = expected.masked_select(expected.ne(1));
+  EXPECT_TRUE(torch::equal(std::get<0>(selected.sort()), expected));
+  EXPECT_TRUE(selected.eq(0).any().item<bool>());
+  EXPECT_FALSE(selected.eq(1).any().item<bool>());
+  EXPECT_EQ(merged.context_lens()[0].item<int32_t>(), 2048);
+}
+
+TEST_F(DcpIndexerScoreTest, GenericCpPreservesInt8Scales) {
+  test_config_.index_n_heads = 64;
+  parallel_args_.world_size() = 2;
+  parallel_args_.kv_split_size() = 2;
+  const KVShardLayout layout(
+      /*physical_block_size=*/1, /*dcp_size=*/2, /*dcp_rank=*/0);
+  TestInputs empty_inputs;
+  Indexer indexer = create_indexer(empty_inputs, /*enable_fused_qk=*/true);
+  for (const bool quantized_query : {false, true}) {
+    SCOPED_TRACE(quantized_query);
+    IndexerCPPreOut pre_out;
+    pre_out.q = torch::zeros(
+        {2, test_config_.index_n_heads, test_config_.index_head_dim}, options_);
+    pre_out.q.select(1, 0).select(1, 0).fill_(1);
+    pre_out.q.select(1, 1).select(1, 0).fill_(-1);
+    if (quantized_query) {
+      pre_out.q = pre_out.q.to(torch::kChar);
+      pre_out.q_scale = torch::full({2, test_config_.index_n_heads},
+                                    0.5,
+                                    options_.dtype(torch::kFloat32));
+    }
+    pre_out.weights = torch::zeros({2, test_config_.index_n_heads}, options_);
+    pre_out.weights.select(1, 0).fill_(1);
+    pre_out.weights.select(1, 1).fill_(-2);
+    pre_out.k_local = torch::zeros({2, test_config_.index_head_dim}, options_);
+    torch::Tensor cache = torch::zeros({3, 1, 1, test_config_.index_head_dim},
+                                       options_.dtype(torch::kChar));
+    cache.index_put_({0, 0, 0, 0}, 4);
+    cache.index_put_({1, 0, 0, 0}, -3);
+    cache.index_put_({2, 0, 0, 0}, 2);
+    const torch::Tensor cache_scale =
+        torch::tensor({0.25f, 1.0f, 2.0f}, options_.dtype(torch::kFloat32))
+            .view({3, 1, 1});
+    AttentionMetadata prefill;
+    // Score resident history without overwriting it during the CP cache write.
+    prefill.slot_mapping = torch::full({2}, -1, int_option_);
+    AttentionMetadata selector;
+    selector.is_prefill = false;
+    selector.q_cu_seq_lens = torch::arange(3, int_option_);
+    selector.kv_cu_seq_lens = selector.q_cu_seq_lens;
+    selector.kv_seq_lens = torch::full({2}, 3, int_option_);
+    selector.block_table = torch::arange(3, int_option_).repeat({2, 1});
+    const DcpIndexerLocalCandidates candidates =
+        indexer->forward_dcp_local_prefill_from_cp(
+            pre_out, cache, prefill, selector, cache_scale);
+    expect_scores(candidates,
+                  pre_out,
+                  cache,
+                  cache_scale,
+                  layout,
+                  /*tolerance=*/1e-4);
+  }
+}
+
+TEST_F(DcpIndexerScoreTest, GenericDecodeSupports64Heads) {
+  test_config_.index_n_heads = 64;
+  expect_entry_scores(/*is_prefill=*/false, /*chunked=*/false);
+}
+
+TEST_F(DcpIndexerScoreTest, GenericPrefillSupports64Heads) {
+  test_config_.index_n_heads = 64;
+  expect_entry_scores(/*is_prefill=*/true, /*chunked=*/false);
+}
+
+TEST_F(DcpIndexerScoreTest, GenericDecodeSupportsFloat16) {
+  options_ = options_.dtype(torch::kFloat16);
+  expect_entry_scores(/*is_prefill=*/false, /*chunked=*/false);
+}
+
+TEST_F(DcpIndexerScoreTest, GenericDecodePreservesInt8Scales) {
+  expect_entry_scores(/*is_prefill=*/false,
+                      /*chunked=*/false,
+                      /*quantized_cache=*/true);
+}
+
+TEST_F(DcpIndexerScoreTest, GenericPrefillPreservesInt8Scales) {
+  expect_entry_scores(/*is_prefill=*/true,
+                      /*chunked=*/false,
+                      /*quantized_cache=*/true);
+}
+
+TEST_F(DcpIndexerScoreTest, GenericChunkedPrefillPreservesInt8Scales) {
+  expect_entry_scores(/*is_prefill=*/true,
+                      /*chunked=*/true,
+                      /*quantized_cache=*/true);
 }
 
 TEST_F(IndexerTest, CompareFusedVsNonFusedDecode) {
@@ -723,37 +1025,33 @@ TEST_F(IndexerTest, Int8DecodeWritesCacheScaleAndSelectsBlocks) {
   expect_quantized_cache_updated(inputs);
 }
 
-TEST_F(IndexerTest, Int8SpPrefillWritesCacheScaleAndSelectsBlocks) {
+TEST_F(IndexerTest, Int8CpPrefillWritesCacheScaleAndSelectsBlocks) {
   constexpr int64_t kTokenNum = 128;
   TestInputs inputs = create_quantized_inputs(
       /*batch_size=*/1, kTokenNum, /*is_prefill=*/true);
   Indexer indexer = create_indexer(inputs, /*enable_fused_qk=*/true);
-  v32_cp::DeepseekV32CPContext sp_ctx =
-      make_single_rank_sp_context(inputs, kTokenNum);
+  v32_cp::DeepseekV32CPContext cp_ctx =
+      make_single_rank_cp_context(inputs, kTokenNum);
 
-  IndexerSPPreOut pre_out = indexer->sp_pre(inputs.x,
-                                            inputs.q_norm,
-                                            inputs.positions,
-                                            inputs.metadata,
-                                            sp_ctx,
-                                            /*quantize_output=*/false);
+  IndexerCPPreOut pre_out = indexer->cp_pre(
+      inputs.x, inputs.q_norm, inputs.positions, inputs.metadata);
   EXPECT_EQ(pre_out.q.scalar_type(), torch::kBFloat16);
   EXPECT_FALSE(pre_out.q_scale.has_value());
 
   auto [block_tables, context_lens] =
-      indexer->sp_post(pre_out,
+      indexer->cp_post(pre_out,
                        pre_out.k_local,
                        inputs.k_cache,
                        inputs.metadata,
-                       sp_ctx.gathered_slot_mapping,
-                       sp_ctx,
+                       cp_ctx.gathered_slot_mapping,
+                       cp_ctx,
                        inputs.k_cache_scale);
 
   expect_select_output(block_tables, context_lens, kTokenNum);
   expect_quantized_cache_updated(inputs);
 }
 
-TEST_F(IndexerTest, Int8SpChunkedPrefillMatchesSingleRankNormalPath) {
+TEST_F(IndexerTest, Int8CpChunkedPrefillMatchesSingleRankNormalPath) {
   constexpr int64_t kBatchSize = 1;
   constexpr int64_t kHistoryLen = 24;
   constexpr int64_t kQueryLen = 24;
@@ -768,38 +1066,34 @@ TEST_F(IndexerTest, Int8SpChunkedPrefillMatchesSingleRankNormalPath) {
                               /*use_noncontiguous_blocks=*/true);
   fill_quantized_cache(normal_inputs);
 
-  TestInputs sp_inputs = normal_inputs;
-  sp_inputs.k_cache = normal_inputs.k_cache.clone();
-  sp_inputs.k_cache_scale = normal_inputs.k_cache_scale->clone();
+  TestInputs cp_inputs = normal_inputs;
+  cp_inputs.k_cache = normal_inputs.k_cache.clone();
+  cp_inputs.k_cache_scale = normal_inputs.k_cache_scale->clone();
 
   auto [normal_block_tables, normal_context_lens] =
       run_indexer(normal_inputs,
                   /*is_prefill=*/true,
                   /*enable_fused_qk=*/true);
 
-  Indexer indexer = create_indexer(sp_inputs, /*enable_fused_qk=*/true);
-  v32_cp::DeepseekV32CPContext sp_ctx =
-      make_single_rank_sp_context(sp_inputs, kQueryLen);
-  IndexerSPPreOut pre_out = indexer->sp_pre(sp_inputs.x,
-                                            sp_inputs.q_norm,
-                                            sp_inputs.positions,
-                                            sp_inputs.metadata,
-                                            sp_ctx,
-                                            /*quantize_output=*/false);
-  auto [sp_block_tables, sp_context_lens] =
-      indexer->sp_post(pre_out,
+  Indexer indexer = create_indexer(cp_inputs, /*enable_fused_qk=*/true);
+  v32_cp::DeepseekV32CPContext cp_ctx =
+      make_single_rank_cp_context(cp_inputs, kQueryLen);
+  IndexerCPPreOut pre_out = indexer->cp_pre(
+      cp_inputs.x, cp_inputs.q_norm, cp_inputs.positions, cp_inputs.metadata);
+  auto [cp_block_tables, cp_context_lens] =
+      indexer->cp_post(pre_out,
                        pre_out.k_local,
-                       sp_inputs.k_cache,
-                       sp_inputs.metadata,
-                       sp_ctx.gathered_slot_mapping,
-                       sp_ctx,
-                       sp_inputs.k_cache_scale);
+                       cp_inputs.k_cache,
+                       cp_inputs.metadata,
+                       cp_ctx.gathered_slot_mapping,
+                       cp_ctx,
+                       cp_inputs.k_cache_scale);
 
-  expect_select_output(sp_block_tables, sp_context_lens, kQueryLen);
-  expect_quantized_cache_updated(sp_inputs);
-  EXPECT_TRUE(torch::equal(sp_context_lens, normal_context_lens));
+  expect_select_output(cp_block_tables, cp_context_lens, kQueryLen);
+  expect_quantized_cache_updated(cp_inputs);
+  EXPECT_TRUE(torch::equal(cp_context_lens, normal_context_lens));
   EXPECT_TRUE(torch::equal(
-      sp_block_tables.slice(/*dim=*/1, /*start=*/0, /*end=*/1),
+      cp_block_tables.slice(/*dim=*/1, /*start=*/0, /*end=*/1),
       normal_block_tables.slice(/*dim=*/1, /*start=*/0, /*end=*/1)));
 }
 

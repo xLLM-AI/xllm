@@ -180,51 +180,69 @@ TEST(CompressedTensorsMluTest, AttentionPreservesBothCheckpointFormats) {
   for (bool compressed : {false, true}) {
     const auto args = attention_args(compressed);
     const auto quant = attention_quant(compressed);
-    const std::string prefix = compressed
-                                   ? "model.language_model.layers.45.self_attn."
-                                   : "model.layers.0.self_attn.";
-    OptimizationConfig optimization;
-    optimization.enable_fused_mla_kernel = true;
-    DeepseekV2Attention attention(args,
-                                  quant,
-                                  parallel,
-                                  mlu_options(),
-                                  optimization,
-                                  /*enable_indexer=*/false);
-    const auto weights = attention_weights(args, compressed);
-    Weights tensors;
-    Weights scales;
-    for (const auto& [key, tensor] : weights) {
-      if (key.ends_with("scale") || key.ends_with("smooth")) {
-        scales.emplace(key, tensor);
-      } else {
-        tensors.emplace(key, tensor);
+    for (int32_t layer : {compressed ? 3 : 0, compressed ? 45 : 78}) {
+      const std::string prefix =
+          (compressed ? "model.language_model.layers." : "model.layers.") +
+          std::to_string(layer) + ".self_attn.";
+      OptimizationConfig optimization;
+      optimization.enable_fused_mla_kernel = true;
+      DeepseekV2Attention attention(args,
+                                    quant,
+                                    parallel,
+                                    mlu_options(),
+                                    optimization,
+                                    /*enable_indexer=*/false);
+      const auto weights = attention_weights(args, compressed);
+      // Load scale/smooth separately from weights, as safetensors shards can.
+      Weights tensors;
+      Weights scales;
+      for (const auto& [key, tensor] : weights) {
+        if (key.ends_with("scale") || key.ends_with("smooth")) {
+          scales.emplace(key, tensor);
+        } else {
+          tensors.emplace(key, tensor);
+        }
       }
+      attention->load_state_dict(StateDict(std::move(scales), prefix));
+      attention->load_state_dict(StateDict(std::move(tensors), prefix));
+      attention->verify_loaded_weights();
+      const auto children = attention->named_children();
+      const auto q_b = children["q_b_proj"]->as<ColumnParallelLinearImpl>();
+      ASSERT_NE(q_b, nullptr);
+      EXPECT_EQ(q_b->weight().scalar_type(), torch::kInt8);
+      const auto input =
+          torch::linspace(-1, 2, 3 * 128).reshape({3, 128}).to(mlu_options());
+      expect_close(
+          q_b->forward(input),
+          reference(input, ct_weights(q_b->weight().size(0), 128, true)));
+      const auto q_a = children["q_a_proj"]->as<ReplicatedLinearImpl>();
+      ASSERT_NE(q_a, nullptr);
+      EXPECT_EQ(q_a->weight().scalar_type(),
+                compressed ? torch::kInt8 : torch::kBFloat16);
+      if (compressed) {
+        expect_close(q_a->forward(input),
+                     reference(input, ct_weights(128, 128, true)));
+      }
+      const auto kv_a =
+          children["kv_a_proj_with_mqa"]->as<ReplicatedLinearImpl>();
+      ASSERT_NE(kv_a, nullptr);
+      EXPECT_EQ(kv_a->weight().scalar_type(),
+                compressed ? torch::kInt8 : torch::kBFloat16);
+      if (compressed) {
+        expect_close(kv_a->forward(input),
+                     reference(input, ct_weights(128, 128, true)));
+      }
+      const auto out = children["o_proj"]->as<RowParallelLinearImpl>();
+      ASSERT_NE(out, nullptr);
+      EXPECT_EQ(out->weight().scalar_type(), torch::kInt8);
+      expect_close(out->forward(input),
+                   reference(input, ct_weights(128, 128, true)));
+      EXPECT_EQ(children["kv_b_proj"]
+                    ->as<ColumnParallelLinearImpl>()
+                    ->weight()
+                    .scalar_type(),
+                torch::kBFloat16);
     }
-    attention->load_state_dict(StateDict(std::move(scales), prefix));
-    attention->load_state_dict(StateDict(std::move(tensors), prefix));
-    attention->verify_loaded_weights();
-    const auto children = attention->named_children();
-    const auto q_b = children["q_b_proj"]->as<ColumnParallelLinearImpl>();
-    ASSERT_NE(q_b, nullptr);
-    EXPECT_EQ(q_b->weight().scalar_type(), torch::kInt8);
-    const auto q_a = children["q_a_proj"]->as<ReplicatedLinearImpl>();
-    ASSERT_NE(q_a, nullptr);
-    EXPECT_EQ(q_a->weight().scalar_type(),
-              compressed ? torch::kInt8 : torch::kBFloat16);
-    const auto kv_a =
-        children["kv_a_proj_with_mqa"]->as<ReplicatedLinearImpl>();
-    ASSERT_NE(kv_a, nullptr);
-    EXPECT_EQ(kv_a->weight().scalar_type(),
-              compressed ? torch::kInt8 : torch::kBFloat16);
-    const auto out = children["o_proj"]->as<RowParallelLinearImpl>();
-    ASSERT_NE(out, nullptr);
-    EXPECT_EQ(out->weight().scalar_type(), torch::kInt8);
-    EXPECT_EQ(children["kv_b_proj"]
-                  ->as<ColumnParallelLinearImpl>()
-                  ->weight()
-                  .scalar_type(),
-              torch::kBFloat16);
   }
 }
 
@@ -252,6 +270,10 @@ TEST(CompressedTensorsMluTest, KpoolProjectionRemainsBfloat16) {
   ASSERT_NE(projection, nullptr);
   EXPECT_TRUE(projection->is_weight_loaded());
   EXPECT_EQ(projection->weight().scalar_type(), torch::kBFloat16);
+  const auto input = torch::ones({2, 128}, mlu_options());
+  expect_close(projection->forward(input),
+               torch::matmul(input.cpu().to(torch::kFloat32),
+                             weight.to(torch::kFloat32).t()));
 }
 
 TEST(CompressedTensorsMluDeathTest, AttentionRejectsIncompleteCheckpoint) {

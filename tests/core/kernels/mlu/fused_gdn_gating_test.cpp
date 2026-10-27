@@ -20,9 +20,11 @@ limitations under the License.
 
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <utility>
 #include <vector>
 
+#include "compiler/triton/include/spec.h"
 #include "kernels/mlu/mlu_ops_api.h"
 
 namespace xllm {
@@ -47,6 +49,24 @@ bool tensors_allclose(const torch::Tensor& a,
   torch::Tensor diff = (ac - bc).abs();
   torch::Tensor tol = atol + rtol * bc.abs();
   return (diff <= tol).all().item<bool>();
+}
+
+TEST(TritonLaunchCfgTest, CompileOptionsSeparateCachedKernels) {
+  using triton_jit::LaunchCfg;
+  using triton_jit::serialize_key;
+  const LaunchCfg defaults;
+  for (std::optional<bool> LaunchCfg::* field :
+       {&LaunchCfg::enable_fp_fusion,
+        &LaunchCfg::enable_soft_i64,
+        &LaunchCfg::force_use_shared_memory}) {
+    LaunchCfg disabled;
+    disabled.*field = false;
+    LaunchCfg enabled;
+    enabled.*field = true;
+    EXPECT_NE(serialize_key({}, defaults, 0), serialize_key({}, disabled, 0));
+    EXPECT_NE(serialize_key({}, defaults, 0), serialize_key({}, enabled, 0));
+    EXPECT_NE(serialize_key({}, disabled, 0), serialize_key({}, enabled, 0));
+  }
 }
 
 class FusedGdnGatingJitTest : public ::testing::Test {

@@ -21,21 +21,22 @@ limitations under the License.
 #include <cstdint>
 #include <numeric>
 #include <optional>
-#include <tuple>
+#include <utility>
 #include <vector>
 
 #include "core/kv_cache/layout/kv_shard_layout.h"
+#include "core/layers/mlu/dcp_batch_metadata.h"
 #include "framework/batch/batch_forward_type.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "framework/parallel_state/process_group.h"
 #include "layers/common/kv_shard_batch_metadata.h"
-#include "layers/mlu/deepseek_v32_sp_plan.h"
+#include "layers/mlu/deepseek_v32_cp_plan.h"
 
 namespace xllm::layer::v32_cp {
 
 using PaddedGatherHandle = xllm::parallel_state::GatherAsyncCtx;
 
-inline torch::Tensor make_sp_prefix(const std::vector<int32_t>& seq_lens,
+inline torch::Tensor make_cp_prefix(const std::vector<int32_t>& seq_lens,
                                     const torch::TensorOptions& options) {
   std::vector<int32_t> cu_lens = {0};
   cu_lens.reserve(seq_lens.size() + 1);
@@ -49,7 +50,7 @@ inline torch::Tensor make_sp_prefix(const std::vector<int32_t>& seq_lens,
 
 inline AttentionMetadata build_local_prefill_attention_metadata(
     const AttentionMetadata& base_attn_metadata,
-    const std::vector<v32_sp::DeepseekV32SPSegment>& segments) {
+    const std::vector<v32_cp::DeepseekV32CPSegment>& segments) {
   const auto int32_options =
       torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
   std::vector<int32_t> seg_q_tokens;
@@ -61,7 +62,7 @@ inline AttentionMetadata build_local_prefill_attention_metadata(
   int32_t max_seq_len = 0;
   for (const auto& segment : segments) {
     CHECK_LE(segment.suffix_k_len, segment.ctx_k_len)
-        << "deepseek_v32 sequence parallel expects suffix_k_len <= ctx_k_len.";
+        << "deepseek_v32 context parallel expects suffix_k_len <= ctx_k_len.";
     seg_q_tokens.push_back(segment.q_tokens);
     seg_suffix_k_lens.push_back(segment.suffix_k_len);
     max_query_len = std::max(max_query_len, segment.q_tokens);
@@ -71,10 +72,10 @@ inline AttentionMetadata build_local_prefill_attention_metadata(
   AttentionMetadata local_attn_metadata = base_attn_metadata;
   const torch::Device device = base_attn_metadata.q_cu_seq_lens.device();
   local_attn_metadata.q_cu_seq_lens =
-      make_sp_prefix(seg_q_tokens, int32_options).to(device);
+      make_cp_prefix(seg_q_tokens, int32_options).to(device);
   local_attn_metadata.kv_cu_seq_lens =
-      make_sp_prefix(seg_suffix_k_lens, int32_options).to(device);
-  // Local SP metadata stays on the live suffix view. Cached prefix tokens are
+      make_cp_prefix(seg_suffix_k_lens, int32_options).to(device);
+  // Local CP metadata stays on the live suffix view. Cached prefix tokens are
   // addressed later through seg_ctx_lens + block_table in the indexer path.
   local_attn_metadata.kv_seq_lens =
       torch::tensor(seg_suffix_k_lens, int32_options).to(device);
@@ -96,8 +97,8 @@ inline std::vector<int32_t> build_seq_offsets(
 }
 
 inline torch::Tensor build_segment_length_matrix(
-    const std::vector<v32_sp::DeepseekV32SPSegment>& segments,
-    int32_t v32_sp::DeepseekV32SPSegment::* length_field,
+    const std::vector<v32_cp::DeepseekV32CPSegment>& segments,
+    int32_t v32_cp::DeepseekV32CPSegment::* length_field,
     const torch::Device& device) {
   std::vector<int32_t> values;
   values.reserve(segments.size() * 2);
@@ -115,7 +116,7 @@ inline torch::Tensor build_segment_length_matrix(
 }
 
 inline torch::Tensor build_segment_ctx_lens_tensor(
-    const std::vector<v32_sp::DeepseekV32SPSegment>& segments,
+    const std::vector<v32_cp::DeepseekV32CPSegment>& segments,
     const torch::Device& device) {
   std::vector<int32_t> values;
   values.reserve(segments.size());
@@ -129,10 +130,10 @@ inline torch::Tensor build_segment_ctx_lens_tensor(
 }
 
 struct DeepseekV32CPContext {
-  v32_sp::DeepseekV32SPCommPlan comm_plan;
+  v32_cp::DeepseekV32CPCommPlan comm_plan;
   AttentionMetadata local_attn_metadata;
   BatchForwardType batch_forward_type;
-  std::vector<v32_sp::DeepseekV32SPSegment> local_segments;
+  std::vector<v32_cp::DeepseekV32CPSegment> local_segments;
   std::vector<int32_t> seg_q_starts_cpu;
   std::vector<int32_t> req_q_offsets_cpu;
   std::vector<int32_t> req_ctx_offsets_cpu;
@@ -145,7 +146,6 @@ struct DeepseekV32CPContext {
   torch::Tensor gathered_reorder_index;
   torch::Tensor gathered_slot_mapping;
   torch::Tensor local_dcp_gathered_slot_mapping;
-  torch::Tensor sorted_gathered_slot_mapping;
   torch::Tensor sorted_gathered_slot_mapping_int64;
   torch::Tensor sorted_gathered_slot_rows;
 
@@ -185,16 +185,16 @@ inline std::optional<DeepseekV32CPContext> build_deepseek_v32_cp_context(
   CHECK(cp_group != nullptr) << "deepseek_v32 Prefill CP requires cp_group.";
   CHECK_EQ(cp_size, world_size) << "cp_size must match cp_group world_size.";
   CHECK_EQ(tokens.dim(), 1)
-      << "deepseek_v32 sequence parallel expects 1D tokens.";
+      << "deepseek_v32 context parallel expects 1D tokens.";
   CHECK_GE(curr_rank, 0) << "curr_rank must be non-negative.";
   CHECK_LT(curr_rank, world_size) << "curr_rank must be less than world_size.";
 
   const std::vector<int32_t> q_seq_lens =
-      v32_sp::extract_q_seq_lens(base_attn_metadata);
+      v32_cp::extract_q_seq_lens(base_attn_metadata);
   const std::vector<int32_t> ctx_seq_lens =
-      v32_sp::extract_ctx_seq_lens(base_attn_metadata);
+      v32_cp::extract_ctx_seq_lens(base_attn_metadata);
   CHECK(!q_seq_lens.empty())
-      << "deepseek_v32 sequence parallel requires non-empty prefill requests.";
+      << "deepseek_v32 context parallel requires non-empty prefill requests.";
   for (int32_t seq_len : q_seq_lens) {
     if (seq_len < world_size) {
       return std::nullopt;
@@ -208,17 +208,17 @@ inline std::optional<DeepseekV32CPContext> build_deepseek_v32_cp_context(
 
   DeepseekV32CPContext context;
   const auto all_segments =
-      v32_sp::build_all_sp_segments(world_size, q_seq_lens, ctx_seq_lens);
-  const auto local_segments =
-      v32_sp::build_local_sp_segments(curr_rank, all_segments);
-  const auto runtime_artifacts = v32_sp::build_sp_runtime_artifacts(
+      v32_cp::build_all_cp_segments(world_size, q_seq_lens, ctx_seq_lens);
+  context.local_segments =
+      v32_cp::build_local_cp_segments(curr_rank, all_segments);
+  const auto& local_segments = context.local_segments;
+  auto runtime_artifacts = v32_cp::build_cp_runtime_artifacts(
       curr_rank, world_size, all_segments, total_tokens);
   const torch::Device runtime_device =
       base_attn_metadata.block_table.defined()
           ? base_attn_metadata.block_table.device()
           : base_attn_metadata.q_cu_seq_lens.device();
-  context.comm_plan = runtime_artifacts.comm_plan;
-  context.local_segments = local_segments;
+  context.comm_plan = std::move(runtime_artifacts.comm_plan);
   context.local_attn_metadata = build_local_prefill_attention_metadata(
       base_attn_metadata, local_segments);
   if (base_attn_metadata.block_table.defined()) {
@@ -235,48 +235,28 @@ inline std::optional<DeepseekV32CPContext> build_deepseek_v32_cp_context(
     context.local_attn_metadata.block_table =
         base_attn_metadata.block_table.index_select(0, request_index);
   }
-  context.seg_q_starts_cpu = build_seq_offsets(
-      v32_sp::extract_q_seq_lens(context.local_attn_metadata));
+  context.seg_q_starts_cpu.reserve(local_segments.size());
+  int32_t segment_query_start = 0;
+  for (const auto& segment : local_segments) {
+    context.seg_q_starts_cpu.push_back(segment_query_start);
+    segment_query_start += segment.q_tokens;
+  }
   context.req_q_offsets_cpu = build_seq_offsets(q_seq_lens);
   context.req_ctx_offsets_cpu = build_seq_offsets(ctx_seq_lens);
   context.seg_q_cu_lens_2col = build_segment_length_matrix(
-      local_segments, &v32_sp::DeepseekV32SPSegment::q_tokens, runtime_device);
+      local_segments, &v32_cp::DeepseekV32CPSegment::q_tokens, runtime_device);
   context.seg_suffix_k_cu_lens_2col =
       build_segment_length_matrix(local_segments,
-                                  &v32_sp::DeepseekV32SPSegment::suffix_k_len,
+                                  &v32_cp::DeepseekV32CPSegment::suffix_k_len,
                                   runtime_device);
   context.seg_ctx_k_cu_lens_2col = build_segment_length_matrix(
-      local_segments, &v32_sp::DeepseekV32SPSegment::ctx_k_len, runtime_device);
+      local_segments, &v32_cp::DeepseekV32CPSegment::ctx_k_len, runtime_device);
   context.seg_ctx_lens_1col =
       build_segment_ctx_lens_tensor(local_segments, runtime_device);
   context.batch_forward_type = batch_forward_type;
   context.total_tokens = total_tokens;
   context.rank = curr_rank;
   context.process_group = cp_group;
-
-  CHECK_EQ(context.seg_q_starts_cpu.size(), context.local_segments.size())
-      << "deepseek_v32 sequence parallel expects one q start per segment.";
-  CHECK_EQ(context.seg_q_cu_lens_2col.size(0),
-           static_cast<int64_t>(context.local_segments.size()))
-      << "deepseek_v32 sequence parallel expects one q cu-lens row per "
-         "segment.";
-  CHECK_EQ(context.seg_suffix_k_cu_lens_2col.size(0),
-           static_cast<int64_t>(context.local_segments.size()))
-      << "deepseek_v32 sequence parallel expects one suffix-k cu-lens row "
-         "per segment.";
-  CHECK_EQ(context.seg_ctx_k_cu_lens_2col.size(0),
-           static_cast<int64_t>(context.local_segments.size()))
-      << "deepseek_v32 sequence parallel expects one ctx-k cu-lens row per "
-         "segment.";
-  CHECK_EQ(context.seg_ctx_lens_1col.size(0),
-           static_cast<int64_t>(context.local_segments.size()))
-      << "deepseek_v32 sequence parallel expects one ctx len per segment.";
-  CHECK_EQ(context.req_q_offsets_cpu.size(), q_seq_lens.size())
-      << "deepseek_v32 sequence parallel expects one request-q offset per "
-         "request.";
-  CHECK_EQ(context.req_ctx_offsets_cpu.size(), ctx_seq_lens.size())
-      << "deepseek_v32 sequence parallel expects one request-ctx offset per "
-         "request.";
 
   const auto int64_options =
       torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU);
@@ -293,12 +273,16 @@ inline std::optional<DeepseekV32CPContext> build_deepseek_v32_cp_context(
             0, context.comm_plan.token_num_offset, local_token_count);
     context.local_attn_metadata.slot_mapping =
         reorder_by_index(base_attn_metadata.slot_mapping, local_reorder_index);
-    std::tie(context.sorted_gathered_slot_mapping,
-             context.sorted_gathered_slot_rows) =
-        torch::sort(context.gathered_slot_mapping);
-    context.sorted_gathered_slot_mapping_int64 =
-        context.sorted_gathered_slot_mapping.to(torch::kInt64);
     if (kv_shard_layout.has_value()) {
+      if (base_attn_metadata.is_prefill &&
+          !base_attn_metadata.is_chunked_prefill &&
+          !base_attn_metadata.is_dummy) {
+        auto [sorted_slots, sorted_rows] =
+            build_prefill_slot_order(context.gathered_slot_mapping);
+        context.sorted_gathered_slot_mapping_int64 =
+            sorted_slots.to(torch::kInt64);
+        context.sorted_gathered_slot_rows = std::move(sorted_rows);
+      }
       context.local_dcp_gathered_slot_mapping = localize_kv_shard_slots(
           context.gathered_slot_mapping, kv_shard_layout.value());
       context.local_attn_metadata.kv_shard_batch_metadata =
@@ -315,7 +299,7 @@ inline torch::Tensor reorder_by_index(const torch::Tensor& tensor,
     return tensor;
   }
   CHECK_GT(tensor.dim(), 0)
-      << "deepseek_v32 sequence parallel expects non-scalar tensors.";
+      << "deepseek_v32 context parallel expects non-scalar tensors.";
 
   torch::Tensor index = reorder_index;
   if (index.scalar_type() != torch::kLong) {
@@ -357,10 +341,6 @@ inline PaddedGatherHandle launch_all_gather_across_ranks(
       local_tensor, context.process_group, context.comm_plan.tokens_per_rank);
 }
 
-inline torch::Tensor finish_all_gather_across_ranks(PaddedGatherHandle handle) {
-  return xllm::parallel_state::finish_gather(std::move(handle));
-}
-
 inline torch::Tensor restore_gathered_to_global_order(
     const torch::Tensor& gathered_tensor,
     const DeepseekV32CPContext& context) {
@@ -368,7 +348,7 @@ inline torch::Tensor restore_gathered_to_global_order(
     return gathered_tensor;
   }
   CHECK_GT(gathered_tensor.dim(), 0)
-      << "deepseek_v32 sequence parallel expects non-scalar tensors.";
+      << "deepseek_v32 context parallel expects non-scalar tensors.";
 
   std::vector<int64_t> output_sizes;
   output_sizes.reserve(gathered_tensor.dim());
@@ -380,7 +360,7 @@ inline torch::Tensor restore_gathered_to_global_order(
       torch::zeros(output_sizes, gathered_tensor.options());
 
   CHECK_EQ(gathered_tensor.size(0), context.gathered_reorder_index.size(0))
-      << "unexpected packed tensor length for sequence parallel restore.";
+      << "unexpected packed tensor length for context parallel restore.";
   torch::Tensor restore_index = context.gathered_reorder_index;
 
   if (restore_index.device() != gathered_tensor.device()) {
@@ -406,32 +386,12 @@ inline torch::Tensor slice_local_packed(const torch::Tensor& packed_tensor,
     return packed_tensor;
   }
   CHECK_GT(packed_tensor.dim(), 0)
-      << "deepseek_v32 sequence parallel expects non-scalar tensors.";
+      << "deepseek_v32 context parallel expects non-scalar tensors.";
   const int32_t start = context.comm_plan.token_num_offset;
   const int32_t token_num = context.comm_plan.tokens_per_rank.at(context.rank);
   CHECK_LE(start + token_num, packed_tensor.size(0))
       << "packed tensor rows are smaller than local slice range.";
   return packed_tensor.slice(0, start, start + token_num);
-}
-
-inline torch::Tensor pad_to_sp_rows(const torch::Tensor& local_tensor,
-                                    const DeepseekV32CPContext& context) {
-  if (!local_tensor.defined()) {
-    return local_tensor;
-  }
-  const int32_t target_rows =
-      context.comm_plan.padded_tokens_per_rank.at(context.rank);
-  CHECK_GT(local_tensor.dim(), 0)
-      << "deepseek_v32 sequence parallel expects non-scalar tensors.";
-  CHECK_LE(local_tensor.size(0), target_rows)
-      << "local tensor rows exceed padded target.";
-  if (local_tensor.size(0) == target_rows) {
-    return local_tensor.contiguous();
-  }
-  auto pad_shape = local_tensor.sizes().vec();
-  pad_shape[0] = target_rows - local_tensor.size(0);
-  torch::Tensor pad_tensor = torch::zeros(pad_shape, local_tensor.options());
-  return torch::cat({local_tensor.contiguous(), pad_tensor}, /*dim=*/0);
 }
 
 }  // namespace xllm::layer::v32_cp

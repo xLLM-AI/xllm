@@ -33,6 +33,9 @@ struct LinearExtraArgs {
   // parameters for fused smoothquant behavior
   std::string act_mode;
   bool is_gated;
+  // TP-shared token scale: input quantization gathers the amax across the TP
+  // group instead of computing a rank-local scale.
+  bool share_token_scale = false;
 
   // default constructor
   LinearExtraArgs(const std::string& act_mode_ = "none", bool is_gated_ = false)

@@ -26,22 +26,25 @@ limitations under the License.
 
 namespace xllm::layer {
 
-// Per-attention transfer prepared by a relay or the MTP bridge. Factory
-// methods expose only valid reuse/capture combinations, and output is
-// published as one DsaTopkState rather than through independent pointers.
+// DCP may share a forward-local projection; MTP carries only global state.
 class DsaTopkTransfer final {
  public:
   static DsaTopkTransfer capture_output() {
     return DsaTopkTransfer(/*input=*/std::nullopt,
+                           /*localized_input=*/std::nullopt,
                            /*captures_output=*/true);
   }
 
-  static DsaTopkTransfer reuse(const DsaTopkState& input) {
-    return DsaTopkTransfer(input, /*captures_output=*/false);
+  static DsaTopkTransfer reuse(
+      const DsaTopkState& input,
+      const std::optional<DsaTopkState>& localized_input = std::nullopt) {
+    return DsaTopkTransfer(input, localized_input, /*captures_output=*/false);
   }
 
   static DsaTopkTransfer reuse_and_capture(const DsaTopkState& input) {
-    return DsaTopkTransfer(input, /*captures_output=*/true);
+    return DsaTopkTransfer(input,
+                           /*localized_input=*/std::nullopt,
+                           /*captures_output=*/true);
   }
 
   static DsaTopkTransfer prepare_mtp_step(
@@ -57,35 +60,46 @@ class DsaTopkTransfer final {
     return input_.has_value() ? &input_.value() : nullptr;
   }
 
-  bool captures_output() const { return captures_output_; }
-
-  void publish_output(DsaTopkState output) {
-    CHECK(captures_output_) << "DSA top-k transfer does not capture output.";
-    CHECK(!output_.has_value()) << "DSA top-k output was already published.";
-    output_ = std::move(output);
+  const DsaTopkState* localized_input() const {
+    return localized_input_.has_value() ? &localized_input_.value() : nullptr;
   }
 
-  void complete(const std::optional<DsaTopkState>& resolved_state) {
-    // A data-parallel dummy invocation resolves no state and publishes nothing.
+  bool captures_output() const { return captures_output_; }
+
+  void complete(
+      const std::optional<DsaTopkState>& resolved_state,
+      const std::optional<DsaTopkState>& localized_state = std::nullopt) {
     if (!captures_output_ || !resolved_state.has_value()) {
       return;
     }
-    publish_output(resolved_state.value());
+    CHECK(!output_.has_value()) << "DSA top-k output was already published.";
+    output_ = resolved_state.value();
+    localized_output_ = localized_state;
   }
 
   const DsaTopkState* output() const {
     return output_.has_value() ? &output_.value() : nullptr;
   }
 
+  const DsaTopkState* localized_output() const {
+    return localized_output_.has_value() ? &localized_output_.value() : nullptr;
+  }
+
   std::optional<DsaTopkState> mtp_output_state() const { return output_; }
 
  private:
-  DsaTopkTransfer(std::optional<DsaTopkState> input, bool captures_output)
-      : input_(std::move(input)), captures_output_(captures_output) {}
+  DsaTopkTransfer(std::optional<DsaTopkState> input,
+                  std::optional<DsaTopkState> localized_input,
+                  bool captures_output)
+      : input_(std::move(input)),
+        localized_input_(std::move(localized_input)),
+        captures_output_(captures_output) {}
 
   std::optional<DsaTopkState> input_;
+  std::optional<DsaTopkState> localized_input_;
   bool captures_output_ = false;
   std::optional<DsaTopkState> output_;
+  std::optional<DsaTopkState> localized_output_;
 };
 
 // Owns the forward-scoped producer-to-consumer state. The model only resets
@@ -93,7 +107,10 @@ class DsaTopkTransfer final {
 // below the model boundary.
 class DsaTopkRelay final {
  public:
-  void reset() { state_.reset(); }
+  void reset() {
+    state_.reset();
+    localized_state_.reset();
+  }
 
   std::optional<DsaTopkTransfer> prepare_layer(
       const DsaTopkShareDecision& decision) const {
@@ -102,7 +119,7 @@ class DsaTopkRelay final {
     if (decision.reuse_topk) {
       CHECK(state_.has_value())
           << "DSA top-k reuse requires a previously published state.";
-      return DsaTopkTransfer::reuse(state_.value());
+      return DsaTopkTransfer::reuse(state_.value(), localized_state_);
     }
     if (decision.output_topk) {
       return DsaTopkTransfer::capture_output();
@@ -118,10 +135,17 @@ class DsaTopkRelay final {
     const DsaTopkState* output = transfer.output();
     CHECK(output != nullptr) << "DSA top-k producer did not publish its state.";
     state_ = *output;
+    if (const DsaTopkState* localized = transfer.localized_output();
+        localized != nullptr) {
+      localized_state_ = *localized;
+    } else {
+      localized_state_.reset();
+    }
   }
 
  private:
   std::optional<DsaTopkState> state_;
+  std::optional<DsaTopkState> localized_state_;
 };
 
 }  // namespace xllm::layer

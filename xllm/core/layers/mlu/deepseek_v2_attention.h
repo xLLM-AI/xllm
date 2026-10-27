@@ -21,19 +21,21 @@ limitations under the License.
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 
-#include "attention.h"
+#include "core/framework/model_context/model_context.h"
+#include "core/framework/quantization/quant_args.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/layers/mlu/dsa_topk_relay.h"
 #include "framework/model/model_args.h"
-#include "framework/model_context/model_context.h"
 #include "framework/parallel_state/parallel_args.h"
+#include "framework/parallel_state/parallel_state.h"
 #include "framework/parallel_state/process_group.h"
-#include "framework/quantization/quant_args.h"
 #include "framework/state_dict/state_dict.h"
 #include "layers/common/linear.h"
 #include "layers/common/rms_norm.h"
 #include "layers/common/rotary_embedding.h"
+#include "layers/mlu/attention.h"
 #include "layers/mlu/dcp_decode_context.h"
 #include "layers/mlu/deepseek_v32_cp_context.h"
 #include "layers/mlu/glm5_next/glm5_next_kpool_indexer.h"
@@ -43,23 +45,10 @@ limitations under the License.
 namespace xllm {
 namespace layer {
 
-struct ShardedPrefillScratchCachePlan {
-  bool use_compact = false;
-  torch::Tensor source_rows;
-  torch::Tensor remapped_slots;
-};
-
-ShardedPrefillScratchCachePlan plan_sharded_prefill_scratch_cache(
-    const torch::Tensor& sorted_gathered_slots,
-    const torch::Tensor& sorted_gathered_rows,
-    const torch::Tensor& sparse_slots,
-    int64_t token_count);
-
 class DeepseekV2AttentionImpl : public torch::nn::Module {
  public:
   enum class PostAttnLayout {
     kTpShard,
-    kReplicated,
     kPackedLocal,
   };
 
@@ -82,12 +71,8 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
                         const torch::Tensor& hidden_states,
                         const AttentionMetadata& attn_metadata,
                         KVCache& kv_cache,
-                        const v32_cp::DeepseekV32CPContext* sp_ctx = nullptr,
+                        const v32_cp::DeepseekV32CPContext* cp_ctx = nullptr,
                         DsaTopkTransfer* topk_transfer = nullptr);
-
-  bool use_replicated_attn_weights() const {
-    return use_full_replicated_attention_weights_;
-  }
 
   void load_state_dict(const StateDict& state_dict);
   void verify_loaded_weights() const;
@@ -97,20 +82,11 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
   struct HeadInfo {
     int64_t attn = 1;
     int64_t proj = 1;
-
-    int64_t proj_width(int64_t dim) const { return proj * dim; }
   };
 
   struct QueryPrep {
     torch::Tensor q;
     torch::Tensor q_norm;
-  };
-
-  struct MlaInputs {
-    torch::Tensor q_norm;
-    torch::Tensor q_input;
-    torch::Tensor k_input;
-    torch::Tensor v_input;
   };
 
   torch::Tensor forward_normal_tp(const torch::Tensor& positions,
@@ -127,55 +103,22 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
                             bool is_prefill_or_chunked_prefill,
                             DsaTopkTransfer* topk_transfer);
 
-  // ===== sequence parallel related =====
-  torch::Tensor forward_sp(const torch::Tensor& positions,
+  torch::Tensor forward_cp(const torch::Tensor& positions,
                            const torch::Tensor& hidden_states,
                            const AttentionMetadata& attn_metadata,
-                           const v32_cp::DeepseekV32CPContext& sp_ctx,
+                           const v32_cp::DeepseekV32CPContext& cp_ctx,
                            KVCache& kv_cache,
                            bool is_prefill_or_chunked_prefill,
                            DsaTopkTransfer* topk_transfer);
-  QueryPrep prep_query(const torch::Tensor& hidden_states,
-                       const HeadInfo& heads);
+  QueryPrep prep_query(const torch::Tensor& hidden_states);
   void fill_q_input(torch::Tensor& q_input,
                     const torch::Tensor& q,
                     const torch::Tensor& positions,
                     const AttentionMetadata& attn_metadata,
                     bool use_prompt_rope);
-  MlaInputs build_sp_mla_inputs(const torch::Tensor& hidden_states,
-                                const torch::Tensor& positions,
-                                const QueryPrep& query_prep,
-                                const v32_cp::DeepseekV32CPContext& sp_ctx);
-  v32_cp::PaddedGatherHandle sp_mla_comm(
-      const torch::Tensor& k_input,
-      const v32_cp::DeepseekV32CPContext& sp_ctx) const;
-  void finish_sp_k_gather(MlaInputs& mla_inputs,
-                          const v32_cp::PaddedGatherHandle& k_handle,
-                          const v32_cp::DeepseekV32CPContext& sp_ctx) const;
   void decode_kv_pre_base(torch::Tensor& latent_cache,
                           const torch::Tensor& positions,
                           const AttentionMetadata& attn_metadata,
-                          bool use_prompt_rope);
-  void decode_qkv_pre_fused(torch::Tensor& q,
-                            torch::Tensor& q_norm,
-                            torch::Tensor& q_input,
-                            torch::Tensor& latent_cache,
-                            torch::Tensor& kv_cache,
-                            std::optional<torch::Tensor> k_cache_scale,
-                            const torch::Tensor& positions,
-                            const AttentionMetadata& attn_metadata,
-                            bool use_prompt_rope);
-
-  void prepare_mla_inputs(torch::Tensor& q,
-                          torch::Tensor& q_norm,
-                          torch::Tensor& q_input,
-                          torch::Tensor& latent_cache,
-                          const torch::Tensor& hidden_states,
-                          torch::Tensor& k_cache,
-                          std::optional<torch::Tensor> k_cache_scale,
-                          const torch::Tensor& positions,
-                          const AttentionMetadata& attn_metadata,
-                          bool enable_fused_qkv,
                           bool use_prompt_rope);
 
   void update_mla_k_cache(
@@ -186,58 +129,21 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
       bool is_prefill_phase,
       const std::optional<torch::Tensor>& slot_mapping = std::nullopt) const;
 
-  std::optional<DsaTopkState> resolve_dsa_topk_state(
-      const torch::Tensor& positions,
-      const torch::Tensor& hidden_states,
-      const torch::Tensor& q_norm,
-      const AttentionMetadata& attn_metadata,
-      KVCache& kv_cache,
-      bool is_prefill_phase,
-      const DsaTopkState* external_topk = nullptr);
-
   AttentionMetadata build_mla_attention_metadata(
       const AttentionMetadata& attn_metadata,
       const std::optional<DsaTopkState>& topk_state) const;
 
-  DcpAttentionResult run_dcp_paged_attention(
+  torch::Tensor run_dcp_chunked_prefill_attention(
       const torch::Tensor& q_input,
-      const DsaTopkState& global_topk,
+      const DsaTopkState& local_topk,
+      std::optional<parallel_state::GatherAsyncCtx>& query_gather,
       KVCache& kv_cache,
-      const AttentionMetadata& base_metadata);
+      const AttentionMetadata& local_cache_metadata,
+      const torch::Tensor& query_slot_mapping);
 
-  DcpAttentionResult run_dcp_chunked_prefill_attention(
-      const torch::Tensor& q_input,
-      const DsaTopkState& global_topk,
-      KVCache& kv_cache,
-      const AttentionMetadata& base_metadata);
-
-  std::pair<AttentionMetadata, KVCache> build_sharded_prefill_attention_cache(
-      const torch::Tensor& gathered_k,
-      const torch::Tensor& gathered_slot_mapping,
-      const torch::Tensor& sorted_gathered_slots,
-      const torch::Tensor& sorted_gathered_rows,
-      const AttentionMetadata& kernel_metadata) const;
-
-  torch::Tensor project_output(const torch::Tensor& attn_output,
-                               const HeadInfo& heads);
-
-  bool can_use_sp(const DsaTopkTransfer* topk_transfer) const {
-    const bool reuses_topk =
-        topk_transfer != nullptr && topk_transfer->input() != nullptr;
-    // Sequence-parallel attention works with both replicated (all heads per
-    // rank) and TP-sharded (heads / tp_size per rank) attention weights; the
-    // top-k metadata (indexer or reused state) is the only hard requirement.
-    return !use_kpool_indexer_ && (has_indexer_ || reuses_topk);
-  }
-
-  const HeadInfo& tp_heads() const { return tp_heads_; }
-  const HeadInfo& full_heads() const { return full_heads_; }
-  const HeadInfo& active_heads() const {
-    return use_replicated_attn_weights() ? full_heads_ : tp_heads_;
-  }
+  torch::Tensor project_output(const torch::Tensor& attn_output);
 
  private:
-  bool use_full_replicated_attention_weights_ = false;
   bool use_fused_mla_qkv_ = false;
   bool enable_lighting_indexer_ = false;
   bool dcp_spans_tp_ = false;
@@ -282,7 +188,7 @@ class DeepseekV2AttentionImpl : public torch::nn::Module {
   std::shared_ptr<RotaryEmbeddingBase> indexer_rotary_emb_;
   Indexer indexer_{nullptr};
   Glm5NextKPoolIndexer glm5_next_kpool_indexer_{nullptr};
-  std::shared_ptr<Stream> sp_comm_stream_;
+  std::shared_ptr<Stream> cp_comm_stream_;
   Attention dcp_full_head_attn_{nullptr};
 };
 TORCH_MODULE(DeepseekV2Attention);

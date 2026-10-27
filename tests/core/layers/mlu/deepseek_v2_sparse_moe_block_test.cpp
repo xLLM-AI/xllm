@@ -44,10 +44,6 @@ class DeepseekV2SparseMoEBlockTestPeer {
     return block.moe_;
   }
 
-  static ProcessGroup* routed_pg(DeepseekV2SparseMoEBlockImpl& block) {
-    return block.routed_pg();
-  }
-
   static void set_enable_deep_ep(DeepseekV2SparseMoEBlockImpl& block,
                                  bool enable) {
     block.enable_deep_ep_ = enable;
@@ -253,17 +249,16 @@ class DeepseekV2SparseMoEBlockTest : public ::testing::Test {
   std::unique_ptr<test::MockProcessGroup> tp_pg_;
   std::unique_ptr<test::MockProcessGroup> single_rank_pg_;
 
-  v32_cp::DeepseekV32CPContext make_sp_ctx(
+  v32_cp::DeepseekV32CPContext make_cp_ctx(
       std::vector<int32_t> tokens_per_rank = {2, 2}) const {
-    v32_cp::DeepseekV32CPContext sp_ctx;
-    sp_ctx.rank = 0;
-    sp_ctx.process_group = tp_pg_.get();
-    sp_ctx.comm_plan.tokens_per_rank = std::move(tokens_per_rank);
-    sp_ctx.comm_plan.padded_tokens_per_rank = sp_ctx.comm_plan.tokens_per_rank;
-    sp_ctx.comm_plan.token_num_offset = 0;
-    sp_ctx.comm_plan.ffn_can_rs =
-        v32_sp::can_ffn_rs(sp_ctx.comm_plan.tokens_per_rank);
-    return sp_ctx;
+    v32_cp::DeepseekV32CPContext cp_ctx;
+    cp_ctx.rank = 0;
+    cp_ctx.process_group = tp_pg_.get();
+    cp_ctx.comm_plan.tokens_per_rank = std::move(tokens_per_rank);
+    cp_ctx.comm_plan.token_num_offset = 0;
+    cp_ctx.comm_plan.ffn_can_rs =
+        v32_cp::can_ffn_rs(cp_ctx.comm_plan.tokens_per_rank);
+    return cp_ctx;
   }
 };
 
@@ -315,11 +310,8 @@ TEST_F(DeepseekV2SparseMoEBlockTest, PrepInDpGatherBuildsLocalSkip) {
   tp_pg_->set_allgather_outputs(
       {full_tokens.slice(0, 0, 2), full_tokens.slice(0, 2, 4)});
 
-  auto prep = block->prep_in(attn_out,
-                             residual,
-                             input_params,
-                             block->plan_exec(input_params),
-                             DeepseekV2AttentionImpl::PostAttnLayout::kTpShard);
+  auto prep = block->prep_in(
+      attn_out, residual, input_params, block->plan_exec(input_params));
 
   EXPECT_TRUE(prep.need_dp_gather);
   EXPECT_FALSE(prep.need_tp_pad);
@@ -363,11 +355,8 @@ TEST_F(DeepseekV2SparseMoEBlockTest, PrepInAll2AllPadsTpShardInput) {
   auto attn_out = mat(/*rows=*/3, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
   auto residual = mat(/*rows=*/3, {10.0f, 20.0f, 30.0f, 40.0f, 50.0f, 60.0f});
 
-  auto prep = block->prep_in(attn_out,
-                             residual,
-                             input_params,
-                             block->plan_exec(input_params),
-                             DeepseekV2AttentionImpl::PostAttnLayout::kTpShard);
+  auto prep = block->prep_in(
+      attn_out, residual, input_params, block->plan_exec(input_params));
 
   EXPECT_FALSE(prep.need_dp_gather);
   EXPECT_TRUE(prep.need_tp_pad);
@@ -396,11 +385,7 @@ TEST_F(DeepseekV2SparseMoEBlockTest, PrepInUsesProvidedExecCfg) {
   auto attn_out = mat(/*rows=*/3, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
   auto residual = mat(/*rows=*/3, {10.0f, 20.0f, 30.0f, 40.0f, 50.0f, 60.0f});
 
-  auto prep = block->prep_in(attn_out,
-                             residual,
-                             input_params,
-                             forced_cfg,
-                             DeepseekV2AttentionImpl::PostAttnLayout::kTpShard);
+  auto prep = block->prep_in(attn_out, residual, input_params, forced_cfg);
 
   EXPECT_FALSE(prep.need_dp_gather);
   EXPECT_TRUE(prep.need_tp_pad);
@@ -622,7 +607,7 @@ TEST_F(DeepseekV2SparseMoEBlockTest, ForwardIgnoresSharedLocalGate) {
   auto shared = raw_moe->forward_shared(hidden_states);
   ASSERT_TRUE(shared.defined());
 
-  auto* routed_pg = DeepseekV2SparseMoEBlockTestPeer::routed_pg(*block);
+  auto* routed_pg = tp_pg_.get();
   auto* shared_pg = DeepseekV2SparseMoEBlockTestPeer::moe(*block)->shared_pg();
   ASSERT_NE(routed_pg, shared_pg);
   ASSERT_EQ(shared_pg, single_rank_pg_.get());
@@ -673,7 +658,7 @@ TEST_F(DeepseekV2SparseMoEBlockTest, ForwardWithoutSharedIgnoresNullSharedPg) {
       hidden_states, /*enable_all2all_communication=*/false);
   ASSERT_FALSE(raw_moe->forward_shared(hidden_states).defined());
 
-  auto* routed_pg = DeepseekV2SparseMoEBlockTestPeer::routed_pg(*block);
+  auto* routed_pg = tp_pg_.get();
 
   int comm_calls = 0;
   int reduce_calls = 0;
@@ -704,36 +689,36 @@ TEST_F(DeepseekV2SparseMoEBlockTest, ForwardWithoutSharedIgnoresNullSharedPg) {
   test::verify_tensor_close(result.output, expected, 1e-3, 1e-4);
 }
 
-TEST_F(DeepseekV2SparseMoEBlockTest, ForwardSPAddsLocalSharedAfterRoutedComm) {
+TEST_F(DeepseekV2SparseMoEBlockTest, ForwardCPAddsLocalSharedAfterRoutedComm) {
   auto block = create_block();
   auto raw_moe = create_raw_moe();
   StateDict state_dict(create_fp_weights(/*n_shared_experts=*/1));
   block->load_state_dict(state_dict);
   raw_moe->load_state_dict(state_dict);
 
-  auto local = test::seeded_tensor("deepseek_v2_sparse_moe_block.sp_local",
+  auto local = test::seeded_tensor("deepseek_v2_sparse_moe_block.cp_local",
                                    {2, model_args_.hidden_size()},
                                    torch::kBFloat16,
                                    options_.device());
-  auto remote = test::seeded_tensor("deepseek_v2_sparse_moe_block.sp_remote",
+  auto remote = test::seeded_tensor("deepseek_v2_sparse_moe_block.cp_remote",
                                     {2, model_args_.hidden_size()},
                                     torch::kBFloat16,
                                     options_.device());
   tp_pg_->set_allgather_outputs({local, remote});
-  auto sp_ctx = make_sp_ctx();
+  auto cp_ctx = make_cp_ctx();
 
   auto gathered = torch::cat({local, remote}, 0);
   auto routed = raw_moe->forward_experts(
       gathered, /*enable_all2all_communication=*/false);
   auto shared = raw_moe->forward_shared(local);
-  auto* routed_pg = DeepseekV2SparseMoEBlockTestPeer::routed_pg(*block);
+  auto* routed_pg = tp_pg_.get();
   const int64_t local_token_num = local.size(0);
 
   int comm_calls = 0;
   int reduce_calls = 0;
-  auto result = block->forward_sp(
+  auto result = block->forward_cp(
       local,
-      sp_ctx,
+      cp_ctx,
       DeepseekV2SparseMoEBlockImpl::CommFns{
           .can_keep_local = std::function<bool(ProcessGroup*)>(
               [&](ProcessGroup* pg) { return pg == routed_pg; }),
@@ -762,7 +747,7 @@ TEST_F(DeepseekV2SparseMoEBlockTest, ForwardSPAddsLocalSharedAfterRoutedComm) {
   test::verify_tensor_close(result.output, expected, 1e-3, 1e-4);
 }
 
-TEST_F(DeepseekV2SparseMoEBlockTest, ForwardSPFallsBackWhenLocalKeepOff) {
+TEST_F(DeepseekV2SparseMoEBlockTest, ForwardCPFallsBackWhenLocalKeepOff) {
   auto block = create_block();
   auto raw_moe = create_raw_moe();
   StateDict state_dict(create_fp_weights(/*n_shared_experts=*/1));
@@ -770,29 +755,29 @@ TEST_F(DeepseekV2SparseMoEBlockTest, ForwardSPFallsBackWhenLocalKeepOff) {
   raw_moe->load_state_dict(state_dict);
 
   auto local =
-      test::seeded_tensor("deepseek_v2_sparse_moe_block.sp_fallback_local",
+      test::seeded_tensor("deepseek_v2_sparse_moe_block.cp_fallback_local",
                           {2, model_args_.hidden_size()},
                           torch::kBFloat16,
                           options_.device());
   auto remote =
-      test::seeded_tensor("deepseek_v2_sparse_moe_block.sp_fallback_remote",
+      test::seeded_tensor("deepseek_v2_sparse_moe_block.cp_fallback_remote",
                           {2, model_args_.hidden_size()},
                           torch::kBFloat16,
                           options_.device());
   tp_pg_->set_allgather_outputs({local, remote});
-  auto sp_ctx = make_sp_ctx();
+  auto cp_ctx = make_cp_ctx();
 
   auto gathered = torch::cat({local, remote}, 0);
   auto routed = raw_moe->forward_experts(
       gathered, /*enable_all2all_communication=*/false);
   auto shared = raw_moe->forward_shared(gathered);
-  auto* routed_pg = DeepseekV2SparseMoEBlockTestPeer::routed_pg(*block);
+  auto* routed_pg = tp_pg_.get();
 
   int comm_calls = 0;
   int reduce_calls = 0;
-  auto result = block->forward_sp(
+  auto result = block->forward_cp(
       local,
-      sp_ctx,
+      cp_ctx,
       DeepseekV2SparseMoEBlockImpl::CommFns{
           .can_keep_local = std::function<bool(ProcessGroup*)>(
               [&](ProcessGroup* /*pg*/) { return false; }),
@@ -804,6 +789,7 @@ TEST_F(DeepseekV2SparseMoEBlockTest, ForwardSPFallsBackWhenLocalKeepOff) {
           .reduce = std::function<torch::Tensor(torch::Tensor, ProcessGroup*)>(
               [&](torch::Tensor x, ProcessGroup* pg) {
                 ++reduce_calls;
+                EXPECT_EQ(pg, routed_pg);
                 return run_reduce(std::move(x), pg);
               }),
       });

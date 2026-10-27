@@ -15,10 +15,12 @@ limitations under the License.
 #pragma once
 
 #include <optional>
+#include <tuple>
 
 #include "core/framework/config/kv_cache_config.h"
 #include "core/layers/common/dsa_topk_share_plan.h"
 #include "core/layers/common/kv_shard_batch_metadata.h"
+#include "core/layers/mlu/dcp_batch_metadata.h"
 #include "core/layers/mlu/dsa_topk_relay.h"
 #include "models/llm/glm5.h"
 
@@ -35,7 +37,7 @@ struct Glm52GraphMetadataState final : ModelGraphMetadataState {
   torch::Tensor q_seq_lens;
   torch::Tensor kv_seq_lens;
   torch::Tensor local_slot_mapping;
-  torch::Tensor expanded_indexer_block_table;
+  torch::Tensor local_indexer_context_lens;
 };
 
 class Glm52ModelImpl : public Glm5ModelImpl {
@@ -73,7 +75,22 @@ class Glm52ModelImpl : public Glm5ModelImpl {
     CHECK(input_params.meta.batch_forward_type.is_decode())
         << "GLM-5.2 DCP graph supports decode only";
 
-    prepare_dcp_graph_padding(input_params);
+    const int64_t actual_rows = input_params.meta.num_sequences;
+    const torch::Tensor& slots = input_params.attention.device.new_cache_slots;
+    CHECK(slots.defined())
+        << "GLM-5.2 DCP graph requires persistent cache slots";
+    CHECK_LE(actual_rows, slots.numel())
+        << "GLM-5.2 DCP graph actual rows exceed graph bucket";
+
+    // The MLU indexer needs a physically valid block-table row during graph
+    // replay, while DCP treats non-negative slots as cache writes. Keep the
+    // generic safe block row and mark bucket tails with the slot sentinel;
+    // DCP later masks their derived sparse metadata to an empty row.
+    if (actual_rows < slots.numel()) {
+      input_params.attention.device.new_cache_slots
+          .slice(/*dim=*/0, /*start=*/actual_rows, /*end=*/slots.numel())
+          .fill_(KVShardLayout::kInvalidSlot);
+    }
 
     auto attention_metadata = std::make_shared<layer::AttentionMetadata>(
         layer::AttentionMetadataBuilder::build(input_params,
@@ -93,10 +110,10 @@ class Glm52ModelImpl : public Glm5ModelImpl {
         layer::localize_kv_shard_slots(attention_metadata->slot_mapping,
                                        kv_shard_layout_.value()),
         graph_state->local_slot_mapping);
-    shard_metadata->expanded_indexer_block_table = copy_to_graph_tensor(
-        layer::expand_kv_shard_indexer_block_table(
-            attention_metadata->block_table, kv_shard_layout_.value()),
-        graph_state->expanded_indexer_block_table);
+    shard_metadata->local_indexer_context_lens = copy_to_graph_tensor(
+        layer::localize_kv_shard_context_lens(attention_metadata->kv_seq_lens,
+                                              kv_shard_layout_.value()),
+        graph_state->local_indexer_context_lens);
     attention_metadata->kv_shard_batch_metadata = std::move(shard_metadata);
     input_params.attn_metadata = std::move(attention_metadata);
   }
@@ -108,8 +125,31 @@ class Glm52ModelImpl : public Glm5ModelImpl {
         attn_metadata.kv_shard_batch_metadata != nullptr) {
       return;
     }
-    attn_metadata.kv_shard_batch_metadata =
-        build_kv_shard_batch_metadata(attn_metadata, kv_shard_layout_.value());
+    const KVShardLayout& layout = kv_shard_layout_.value();
+    auto metadata = layer::build_kv_shard_batch_metadata(attn_metadata, layout);
+    if (attn_metadata.kv_seq_lens.defined()) {
+      metadata->local_indexer_context_lens =
+          layer::localize_kv_shard_context_lens(attn_metadata.kv_seq_lens,
+                                                layout);
+    }
+    if (attn_metadata.is_prefill) {
+      std::tie(metadata->prefill_sorted_slots, metadata->prefill_sorted_rows) =
+          layer::build_prefill_slot_order(attn_metadata.slot_mapping);
+      metadata->prefill_sorted_slots =
+          metadata->prefill_sorted_slots.to(torch::kInt64);
+    }
+    // The causal selector is consumed only by DCP prefill paths. Decode graph
+    // buckets pad sequence metadata independently of token rows, so building it
+    // there is both unnecessary and can produce a non-token-shaped selector.
+    if ((attn_metadata.is_prefill || attn_metadata.is_chunked_prefill) &&
+        attn_metadata.q_cu_seq_lens.defined() &&
+        attn_metadata.kv_cu_seq_lens.defined() &&
+        attn_metadata.block_table.defined() &&
+        attn_metadata.slot_mapping.defined()) {
+      metadata->causal_selector =
+          layer::build_kv_shard_causal_selector_metadata(attn_metadata, layout);
+    }
+    attn_metadata.kv_shard_batch_metadata = std::move(metadata);
   }
 
   std::optional<KVShardLayout> cp_kv_shard_layout() const override {
@@ -141,25 +181,6 @@ class Glm52ModelImpl : public Glm5ModelImpl {
   }
 
  private:
-  static void prepare_dcp_graph_padding(ModelParamsView& input_params) {
-    const int64_t actual_rows = input_params.meta.num_sequences;
-    const torch::Tensor& slots = input_params.attention.device.new_cache_slots;
-    CHECK(slots.defined())
-        << "GLM-5.2 DCP graph requires persistent cache slots";
-    CHECK_LE(actual_rows, slots.numel())
-        << "GLM-5.2 DCP graph actual rows exceed graph bucket";
-
-    // The MLU indexer needs a physically valid block-table row during graph
-    // replay, while DCP treats non-negative slots as cache writes. Keep the
-    // generic safe block row and mark bucket tails with the slot sentinel;
-    // DCP later masks their derived sparse metadata to an empty row.
-    if (actual_rows < slots.numel()) {
-      input_params.attention.device.new_cache_slots
-          .slice(/*dim=*/0, /*start=*/actual_rows, /*end=*/slots.numel())
-          .fill_(KVShardLayout::kInvalidSlot);
-    }
-  }
-
   static torch::Tensor copy_to_graph_tensor(const torch::Tensor& source,
                                             torch::Tensor& destination) {
     CHECK(source.defined())

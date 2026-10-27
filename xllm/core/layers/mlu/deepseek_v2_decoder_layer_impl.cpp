@@ -24,16 +24,6 @@ namespace layer {
 
 namespace {
 
-bool same_sp_topology(ProcessGroup* pg, ProcessGroup* sp_pg) {
-  return pg != nullptr && sp_pg != nullptr &&
-         pg->world_size() == sp_pg->world_size() && pg->rank() == sp_pg->rank();
-}
-
-bool is_sp_alias_pg(ProcessGroup* pg, const ParallelArgs& parallel_args) {
-  return pg == parallel_args.process_group_ ||
-         pg == parallel_args.moe_ep_group_;
-}
-
 bool is_mtp_layer(const ModelArgs& model_args) {
   return model_args.model_type().ends_with("_mtp");
 }
@@ -153,7 +143,7 @@ DeepseekV2DecoderLayerImpl::build_post_attn_local(
     torch::Tensor x,
     const torch::Tensor& residual) {
   CHECK(context_parallel_context_ != nullptr)
-      << "SP carrier requires CP context";
+      << "CP carrier requires CP context";
   auto [ffn_in, skip_local] = post_norm_->forward(x, residual);
 
   PostAttnCarrier carrier;
@@ -176,9 +166,7 @@ DeepseekV2DecoderLayerImpl::build_post_attn_carrier(
     return carrier;
   }
 
-  if (attn_layout == DeepseekV2AttentionImpl::PostAttnLayout::kTpShard) {
-    x = xllm::parallel_state::reduce(x, parallel_args_.tp_group_);
-  }
+  x = xllm::parallel_state::reduce(x, parallel_args_.tp_group_);
   x = x + residual;
 
   carrier.ffn_in = x;
@@ -201,11 +189,11 @@ DeepseekV2DecoderLayerImpl::prepare_moe_inputs(
   }
 
   result.exec_cfg = sparse_moe_->plan_exec(input_params);
-  result.use_sp_moe_overlap =
+  result.use_cp_moe_overlap =
       attn_layout == DeepseekV2AttentionImpl::PostAttnLayout::kPackedLocal &&
       !result.exec_cfg->enable_all2all && !result.exec_cfg->need_dp_gather &&
       sparse_moe_->has_shared();
-  if (result.use_sp_moe_overlap) {
+  if (result.use_cp_moe_overlap) {
     result.carrier = build_post_attn_local(std::move(x), residual);
     result.ffn_in = result.carrier->ffn_in;
     return result;
@@ -223,11 +211,8 @@ DeepseekV2DecoderLayerImpl::prepare_moe_inputs(
   }
 
   if (result.exec_cfg->enable_all2all || result.exec_cfg->need_dp_gather) {
-    result.moe_prep = sparse_moe_->prep_in(std::move(x),
-                                           residual,
-                                           input_params,
-                                           result.exec_cfg.value(),
-                                           attn_layout);
+    result.moe_prep = sparse_moe_->prep_in(
+        std::move(x), residual, input_params, result.exec_cfg.value());
     result.ffn_in = result.moe_prep->ffn_in;
     return result;
   }
@@ -244,23 +229,25 @@ DeepseekV2DecoderLayerImpl::prepare_moe_inputs(
 bool DeepseekV2DecoderLayerImpl::can_keep_local_output(
     const PostAttnCarrier& carrier,
     ProcessGroup* pg) const {
-  const bool can_use_sp_fast = carrier.mode == PostAttnMode::kPackedLocal &&
+  const bool can_use_cp_fast = carrier.mode == PostAttnMode::kPackedLocal &&
                                context_parallel_context_ != nullptr &&
                                context_parallel_context_->comm_plan.ffn_can_rs;
-  if (!can_use_sp_fast) {
+  if (!can_use_cp_fast) {
     return false;
   }
 
-  ProcessGroup* const sp_pg = context_parallel_context_->process_group;
-  if (!pg || pg->world_size() <= 1 || pg == sp_pg) {
+  ProcessGroup* const cp_pg = context_parallel_context_->process_group;
+  if (!pg || pg->world_size() <= 1 || pg == cp_pg) {
     return true;
   }
 
-  if (parallel_args_.dp_size() != 1 || !is_sp_alias_pg(pg, parallel_args_)) {
+  if (parallel_args_.dp_size() != 1 || (pg != parallel_args_.process_group_ &&
+                                        pg != parallel_args_.moe_ep_group_)) {
     return false;
   }
 
-  return same_sp_topology(pg, sp_pg);
+  return cp_pg != nullptr && pg->world_size() == cp_pg->world_size() &&
+         pg->rank() == cp_pg->rank();
 }
 
 torch::Tensor DeepseekV2DecoderLayerImpl::comm_out(
@@ -276,7 +263,7 @@ torch::Tensor DeepseekV2DecoderLayerImpl::comm_out(
   }
 
   CHECK(context_parallel_context_ != nullptr)
-      << "SP fast path requires CP context";
+      << "CP fast path requires CP context";
   return v32_cp::slice_local_packed(x, *context_parallel_context_);
 }
 
@@ -443,8 +430,8 @@ torch::Tensor DeepseekV2DecoderLayerImpl::forward_impl(
             },
     };
     auto moe_result =
-        prep.use_sp_moe_overlap
-            ? sparse_moe_->forward_sp(
+        prep.use_cp_moe_overlap
+            ? sparse_moe_->forward_cp(
                   x, *context_parallel_context_, moe_comm_fns)
             : sparse_moe_->forward(x, exec_cfg->enable_all2all, moe_comm_fns);
     x = std::move(moe_result.output);

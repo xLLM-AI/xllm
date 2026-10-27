@@ -337,16 +337,10 @@ Status validate_coverage_for_sources(
     }
     const RegionGroup& sources = source_it->second;
     const int32_t tensor_role = std::get<2>(key);
+    const bool is_conv =
+        tensor_role == static_cast<int32_t>(KVCacheTensorRole::CONV);
     const bool is_linear_state_tensor =
-        tensor_role == static_cast<int32_t>(KVCacheTensorRole::CONV) ||
-        tensor_role == static_cast<int32_t>(KVCacheTensorRole::SSM);
-    const bool compact_linear_source =
-        is_linear_state_tensor &&
-        std::all_of(sources.begin(),
-                    sources.end(),
-                    [](const AtomicLogicalRegion* source) {
-                      return source->tensor->physical_rows_per_resource == 1;
-                    });
+        is_conv || tensor_role == static_cast<int32_t>(KVCacheTensorRole::SSM);
     const Status tensor_status =
         visit_overlaps(sources,
                        destinations,
@@ -360,7 +354,19 @@ Status validate_coverage_for_sources(
 
     std::vector<std::pair<uint64_t, int32_t>> events;
     events.reserve(sources.size() * 2);
+    bool compact_linear_source = is_linear_state_tensor;
+    int64_t max_source_state_len = std::numeric_limits<int64_t>::min();
     for (const AtomicLogicalRegion* source : sources) {
+      if (compact_linear_source) {
+        compact_linear_source =
+            source->tensor->physical_rows_per_resource == 1 &&
+            (!is_conv || source->tensor->shape.size() > 1);
+        if (compact_linear_source && is_conv) {
+          // The NPU CONV layout is [blocks, state_len, dim].
+          max_source_state_len =
+              std::max(max_source_state_len, source->tensor->shape[1]);
+        }
+      }
       events.emplace_back(source->logical_offset, 1);
       events.emplace_back(logical_end(*source), -1);
     }
@@ -389,21 +395,9 @@ Status validate_coverage_for_sources(
       const uint64_t destination_end = logical_end(*destination);
       const bool expanded_shape =
           compact_linear_source &&
-          std::all_of(
-              sources.begin(),
-              sources.end(),
-              [tensor_role, destination](const AtomicLogicalRegion* source) {
-                if (tensor_role ==
-                    static_cast<int32_t>(KVCacheTensorRole::CONV)) {
-                  // The NPU CONV layout is [blocks, state_len, dim].
-                  return destination->tensor->shape.size() > 1 &&
-                         source->tensor->shape.size() > 1 &&
-                         destination->tensor->shape[1] >
-                             source->tensor->shape[1];
-                }
-                return destination->tensor->physical_rows_per_resource >
-                       source->tensor->physical_rows_per_resource;
-              });
+          (is_conv ? destination->tensor->shape.size() > 1 &&
+                         destination->tensor->shape[1] > max_source_state_len
+                   : destination->tensor->physical_rows_per_resource > 1);
       const auto coverage_end = coverage.end();
       auto next_point =
           std::upper_bound(coverage.begin(),

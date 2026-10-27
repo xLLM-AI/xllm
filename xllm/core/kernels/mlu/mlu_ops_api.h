@@ -28,6 +28,21 @@ limitations under the License.
 
 namespace xllm::kernel::mlu {
 
+// Scale [B,H,V] in place using gathered [N,B,H] LSEs and int32 slots.
+void dcp_correct_attn_out(torch::Tensor& output,
+                          const torch::Tensor& lse,
+                          const torch::Tensor& slots,
+                          int64_t rank,
+                          bool base_e = true);
+
+// Write an independent contiguous [H,B,V] destination; inputs stay unchanged.
+void dcp_correct_attn_transpose(const torch::Tensor& output,
+                                const torch::Tensor& lse,
+                                const torch::Tensor& slots,
+                                int64_t rank,
+                                torch::Tensor& dst,
+                                bool base_e = true);
+
 void pack_cache_blocks(const std::vector<torch::Tensor>& sources,
                        const torch::Tensor& block_ids,
                        const std::vector<torch::Tensor>& destinations);
@@ -602,4 +617,45 @@ std::pair<torch::Tensor, torch::Tensor> fused_gdn_gating(
     const torch::Tensor& dt_bias,
     float beta = 1.0f,
     float threshold = 20.0f);
+inline constexpr int64_t kDcpScoreHeads = 32;
+inline constexpr int64_t kDcpScoreHeadDim = 128;
+
+// BF16 query [row,32,128], weights [row,32], cache [slot,128].
+std::tuple<torch::Tensor, torch::Tensor> dcp_score_candidates(
+    const torch::Tensor& query,
+    const torch::Tensor& weights,
+    const torch::Tensor& cache,
+    const torch::Tensor& slots,
+    const torch::Tensor& counts,
+    int64_t dcp_size,
+    int64_t dcp_rank,
+    int64_t physical_block_size);
+
+torch::Tensor dcp_globalize_candidates(const torch::Tensor& local_slots,
+                                       const torch::Tensor& context_lens,
+                                       int64_t dcp_size,
+                                       int64_t dcp_rank,
+                                       int64_t physical_block_size);
+
+// Global TopK: score descending; tied candidates follow torch::topk ordering.
+// Invalid slots/NaNs are excluded. Valid slots occupy the output prefix;
+// unused output slots are -1, including all slots of padding queries.
+void dcp_merge_topk(const torch::Tensor& scores,
+                    const torch::Tensor& slots,
+                    const torch::Tensor& mapping,
+                    int64_t topk,
+                    torch::Tensor& output,
+                    torch::Tensor& lengths);
+
+// Stable ownership projection. Lengths must be contiguous and in [0, width].
+// Both outputs are fully written, including zero padding; no input/output
+// alias.
+void dcp_localize_topk(const torch::Tensor& slots,
+                       const torch::Tensor& lengths,
+                       int32_t rank,
+                       int32_t size,
+                       int32_t physical_block_size,
+                       torch::Tensor& output,
+                       torch::Tensor& output_lengths);
+
 }  // namespace xllm::kernel::mlu

@@ -80,8 +80,7 @@ class DeepseekV2SparseMoEBlockImpl : public torch::nn::Module {
   PrepOut prep_in(torch::Tensor x,
                   const torch::Tensor& residual,
                   const ModelParamsView& input_params,
-                  const ExecCfg& exec,
-                  DeepseekV2AttentionImpl::PostAttnLayout attn_layout) const;
+                  const ExecCfg& exec) const;
   torch::Tensor gather_in(const PrepOut& prep,
                           const ModelParamsView& input_params) const;
   torch::Tensor merge_out(torch::Tensor x,
@@ -92,19 +91,11 @@ class DeepseekV2SparseMoEBlockImpl : public torch::nn::Module {
   ForwardResult forward(torch::Tensor x,
                         bool enable_moe_all2all,
                         const CommFns& comm_fns);
-  ForwardResult forward_sp(torch::Tensor x,
-                           const v32_cp::DeepseekV32CPContext& sp_ctx,
+  ForwardResult forward_cp(torch::Tensor x,
+                           const v32_cp::DeepseekV32CPContext& cp_ctx,
                            const CommFns& comm_fns);
 
  private:
-  std::pair<torch::Tensor, PaddingInfo> shard_attn_out(
-      torch::Tensor x,
-      const torch::Tensor& residual,
-      int64_t target_tokens,
-      DeepseekV2AttentionImpl::PostAttnLayout attn_layout) const;
-  torch::Tensor slice_tp_tokens(torch::Tensor x) const;
-  ProcessGroup* routed_pg() const;
-
   ParallelArgs parallel_args_;
   bool enable_deep_ep_ = false;
   FusedMoE moe_{nullptr};

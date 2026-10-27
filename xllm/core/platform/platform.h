@@ -63,10 +63,8 @@ class Platform final {
     return is_mlu() || is_npu();
   }
 
-  // Indexer cache uses expanded block IDs under kv_split
-  // (logical B -> [B*dcp, ..., B*dcp+dcp-1]).
   static constexpr bool supports_dsa_indexer_cache_sharding() {
-    return is_mlu() || is_npu();
+    return is_npu();
   }
 
   // Shared DSA layers reuse the previous full layer's top-k and never write

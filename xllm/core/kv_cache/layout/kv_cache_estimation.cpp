@@ -111,11 +111,9 @@ int64_t index_slot_size(const ModelArgs& model_args,
         << "KPool cache layouts do not support indexer_cache_dtype=\"int8\".";
     CHECK_GT(model_args.index_kpool(), 0) << "KPool requires index_kpool > 0.";
   }
-  int64_t split_factor = 1;
-  if (Platform::supports_dsa_indexer_cache_sharding() &&
-      util::kv_split_size_effective() > 1) {
-    split_factor = util::kv_split_size_effective();
-  }
+  const int64_t split_factor = Platform::supports_dsa_indexer_cache_sharding()
+                                   ? util::kv_split_size_effective()
+                                   : 1;
   if (enable_indexer_cache_quantization) {
     // int8 index cache: one byte per element, plus an independent per-token
     // fp32 scale (kept separate from the main-KV scale_slot_size path).

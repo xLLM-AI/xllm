@@ -91,6 +91,12 @@ std::string serialize_key(const SpecList& specs,
     s += "|b";
     s += cfg.bottleneck;
   }
+  for (const std::optional<bool>& option : {cfg.enable_fp_fusion,
+                                            cfg.enable_soft_i64,
+                                            cfg.force_use_shared_memory}) {
+    s += '|';
+    s += option.has_value() ? (*option ? '1' : '0') : '-';
+  }
   s += "|d";
   s += std::to_string(device);
   return s;

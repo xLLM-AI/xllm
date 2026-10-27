@@ -81,6 +81,7 @@ void patch_torch_mlu_accelerator() {
   py::module_::import("torch_mlu");
   // Restore the real accelerator so later queries see the genuine backend.
   torch_accelerator.attr("current_accelerator") = origin_func;
+  torch.attr("mlu").attr("init")();
 }
 #endif
 }  // namespace
