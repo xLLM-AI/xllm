@@ -98,6 +98,13 @@ class AuxHiddenCapture final {
 
   bool enabled() const { return !layers_to_capture_.empty(); }
 
+  // Only the sharded rows are written before CP restores global order; never
+  // slice with the global row count.
+  torch::Tensor sharded_aux_hidden_states(int64_t num_tokens) const {
+    CHECK_LE(num_tokens, buffer_.size(0));
+    return buffer_.slice(/*dim=*/0, /*start=*/0, /*end=*/num_tokens);
+  }
+
   // Typical k <= 5, so a cache-line linear scan beats any hashed lookup.
   bool should_capture(int32_t layer_idx) const {
     return std::find(layers_to_capture_.begin(),
@@ -105,12 +112,22 @@ class AuxHiddenCapture final {
                      layer_idx) != layers_to_capture_.end();
   }
 
+  // `aux_hidden_states` carries CP-gathered global-order rows when set.
   ModelOutput finalize(
       const torch::Tensor& hidden_states,
-      const std::optional<torch::Tensor>& residual = std::nullopt) const {
+      const std::optional<torch::Tensor>& residual = std::nullopt,
+      const std::optional<torch::Tensor>& aux_hidden_states =
+          std::nullopt) const {
     ModelOutput output(hidden_states, residual);
     if (enabled()) {
-      output.aux_hidden_states = buffer_.slice(0, 0, hidden_states.size(0));
+      if (aux_hidden_states.has_value()) {
+        CHECK_EQ(aux_hidden_states->size(0), hidden_states.size(0))
+            << "CP-restored aux rows must match the hidden state rows";
+        output.aux_hidden_states = *aux_hidden_states;
+      } else {
+        output.aux_hidden_states =
+            sharded_aux_hidden_states(hidden_states.size(0));
+      }
     }
     return output;
   }

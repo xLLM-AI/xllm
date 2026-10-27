@@ -1011,11 +1011,17 @@ class DeepseekV4ModelImpl
     if (is_sequence_sharded(fc1_ctx)) {
       h = gather_sequence(h, fc1_ctx);
     }
+    std::optional<torch::Tensor> aux_hidden_states;
     if (cp_ctx.enabled()) {
-      // Restore full global-order tokens before hc_head / norm / lm_head, which
-      // are not CP-aware. Done before capturing pre_hc_head_hidden_states so
-      // MTP receives full-length aux hidden states.
-      h = cp_ctx.gather_restore(h);
+      // hc_head / norm / lm_head are not CP-aware, so restore global token
+      // order first.
+      std::optional<torch::Tensor> sharded_aux_hidden_states;
+      if (aux_capture_.enabled()) {
+        sharded_aux_hidden_states =
+            aux_capture_.sharded_aux_hidden_states(cp_ctx.local_token_count);
+      }
+      std::tie(h, aux_hidden_states) =
+          cp_ctx.gather_restore(h, sharded_aux_hidden_states);
       if (attn_metadata.dsa_metadata) {
         attn_metadata.dsa_metadata->v4_cp_context = nullptr;
       }
@@ -1027,7 +1033,8 @@ class DeepseekV4ModelImpl
     h = hc_head(h);
     auto [hidden_states, residual_out] = norm_(h, std::nullopt);
     if (aux_capture_.enabled()) {
-      return aux_capture_.finalize(hidden_states, residual_out);
+      return aux_capture_.finalize(
+          hidden_states, residual_out, aux_hidden_states);
     }
     if (pre_hc_head_hidden_states.defined()) {
       ModelOutput out(hidden_states, residual_out);

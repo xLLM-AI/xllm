@@ -210,7 +210,7 @@ torch::Tensor DeepseekV4DecoderLayerImpl::forward(
   const v4_cp::DeepseekV4CpContext* cp_ctx = dsa.v4_cp_context;
   const bool cp_bridge_ffn = cp_ctx != nullptr && cp_ctx->enabled();
   if (cp_bridge_ffn) {
-    ffn_input = cp_ctx->gather_restore(ffn_input);
+    ffn_input = cp_ctx->gather_restore(ffn_input).first;
   }
 
   auto ffn_input_2d = ffn_input.reshape({-1, ffn_input.size(-1)});

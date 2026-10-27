@@ -64,4 +64,12 @@ struct ModelOutput {
         residual(residual),
         aux_hidden_states(aux_hidden_states) {}
 };
+
+// The aux capture / hook tensor when the model publishes one, the ordinary
+// primary output otherwise.
+inline const torch::Tensor& get_hidden_states_for_drafter(
+    const ModelOutput& output) {
+  return output.aux_hidden_states.defined() ? output.aux_hidden_states
+                                            : output.hidden_states;
+}
 }  // namespace xllm

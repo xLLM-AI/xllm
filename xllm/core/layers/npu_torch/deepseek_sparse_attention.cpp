@@ -762,7 +762,7 @@ DSAttentionImpl::forward(const DSAMetadata& attn_metadata,
   // back to the metadata's own query cumsum.
   std::optional<torch::Tensor> kv_cu_seq_lens;
   if (cp_enabled) {
-    kv_hidden_states = cp_ctx->gather_restore(hidden_states);
+    kv_hidden_states = cp_ctx->gather_restore(hidden_states).first;
     kv_cos = attn_metadata.kv_cos;
     kv_sin = attn_metadata.kv_sin;
     kv_cu_seq_lens = cp_ctx->global_q_cu_seq_lens;

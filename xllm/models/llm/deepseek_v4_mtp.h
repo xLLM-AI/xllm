@@ -385,10 +385,11 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
       // Restore global order before final_norm / lm_head, which are not
       // CP-aware. aux_hidden_states feeds the next draft step, so it has to be
       // restored as well or its row count would not match the batch.
-      hidden_states = cp_ctx.gather_restore(hidden_states);
-      if (aux_hidden_states.defined()) {
-        aux_hidden_states = cp_ctx.gather_restore(aux_hidden_states);
-      }
+      auto [gathered_hidden_states, gathered_aux_hidden_states] =
+          cp_ctx.gather_restore(hidden_states, aux_hidden_states);
+      hidden_states = gathered_hidden_states;
+      aux_hidden_states =
+          gathered_aux_hidden_states.value_or(aux_hidden_states);
       modified_input_params.attn_metadata->dsa_metadata->v4_cp_context =
           nullptr;
     }

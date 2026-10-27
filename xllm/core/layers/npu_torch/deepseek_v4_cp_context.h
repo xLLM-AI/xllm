@@ -21,6 +21,7 @@ limitations under the License.
 #include <algorithm>
 #include <cstdint>
 #include <numeric>
+#include <optional>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -120,14 +121,36 @@ struct DeepseekV4CpContext {
                                       local_row_indices.to(torch::kLong));
   }
 
-  // AllGather local rows across the CP group, then restore global order.
-  torch::Tensor gather_restore(const torch::Tensor& local_tensor) const {
-    if (!local_tensor.defined() || !enabled()) {
-      return local_tensor;
+  // AllGather local rows across the CP group, then restore global order. Two
+  // [rows, cols] tensors sharing row semantics ride one collective via a
+  // dim-1 cat; a nullopt sharded_aux_hidden_states restores
+  // sharded_last_hidden_states alone.
+  std::pair<torch::Tensor, std::optional<torch::Tensor>> gather_restore(
+      const torch::Tensor& sharded_last_hidden_states,
+      const std::optional<torch::Tensor>& sharded_aux_hidden_states =
+          std::nullopt) const {
+    if (!sharded_last_hidden_states.defined() || !enabled()) {
+      return {sharded_last_hidden_states, sharded_aux_hidden_states};
     }
+    if (!sharded_aux_hidden_states.has_value()) {
+      torch::Tensor gathered = xllm::parallel_state::gather(
+          sharded_last_hidden_states.contiguous(), cp_group, tokens_per_rank);
+      return {
+          gathered.index_select(/*dim=*/0, restore_indices.to(torch::kLong)),
+          std::nullopt};
+    }
+    const torch::Tensor& aux_hidden_states = sharded_aux_hidden_states.value();
+    const int64_t cols = sharded_last_hidden_states.size(1);
     torch::Tensor gathered = xllm::parallel_state::gather(
-        local_tensor.contiguous(), cp_group, tokens_per_rank);
-    return gathered.index_select(/*dim=*/0, restore_indices.to(torch::kLong));
+        torch::cat({sharded_last_hidden_states, aux_hidden_states}, /*dim=*/1),
+        cp_group,
+        tokens_per_rank);
+    // Row order restored to global; the two cat halves are still joined on
+    // dim 1, so narrow splits them back apart.
+    const torch::Tensor gathered_hidden_states =
+        gathered.index_select(/*dim=*/0, restore_indices.to(torch::kLong));
+    return {gathered_hidden_states.narrow(1, 0, cols),
+            gathered_hidden_states.narrow(1, cols, aux_hidden_states.size(1))};
   }
 };
 

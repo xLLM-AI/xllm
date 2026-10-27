@@ -384,8 +384,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
         !input.input_params.meta.batch_forward_type.is_decode() &&
         !is_spec_draft_;
     output_spec_hidden_states(output.sample_output,
-                              model_output.hidden_states,
-                              model_output.aux_hidden_states,
+                              model_output,
                               lm_head_selected_token_idxes,
                               selected_hidden,
                               is_target_prefill,

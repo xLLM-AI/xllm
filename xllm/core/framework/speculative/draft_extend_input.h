@@ -20,20 +20,17 @@ limitations under the License.
 namespace xllm {
 
 class SampleOutput;
+struct ModelOutput;
 class LlmForwardInput;
 class ForwardOutput;
 class EmbeddingCache;
 
-// Selects the target/draft hidden that feeds the next draft-extend step. Target
-// prefill exposes the full hidden as `embeddings` and the per-sequence selected
-// rows as `selected_embeddings`; draft/decode expose only the selected rows as
-// `embeddings`. `gathered_sample_hidden_states` supplies pre-gathered rows for
-// the CP draft/decode shard, whose all-gather-space `logits_indices` cannot
-// re-index the local hidden.
+// Selects the drafter's feed from `get_hidden_states_for_drafter(model_output)`
+// and exposes it through `embeddings` (plus `selected_embeddings` on target
+// prefill).
 void output_spec_hidden_states(
     SampleOutput& sample_output,
-    const torch::Tensor& hidden_states,
-    const torch::Tensor& aux_hidden_states,
+    const ModelOutput& model_output,
     const torch::Tensor& logits_indices,
     const torch::Tensor& gathered_sample_hidden_states,
     bool is_target_prefill,
