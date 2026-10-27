@@ -17,7 +17,6 @@ limitations under the License.
 
 #include <torch/types.h>
 
-#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -25,35 +24,22 @@ limitations under the License.
 
 namespace xllm {
 
-struct JsonObjectConstraintViolation final {
-  size_t state_index;
-  int64_t token_offset;
-  int32_t token_id;
-  size_t committed_tokens;
-  uint64_t state_fingerprint;
-};
+// The accepted-token mismatch record shared with the speculative JSON state
+// helpers: both scan accepted tokens against grammar states.
+using JsonObjectConstraintViolation = JsonAcceptedTokenMismatch;
 
-// Borrows grammar states for accepted-token advancement and mask construction.
+// Advances the borrowed grammar states in place with their accepted tokens.
 // The caller owns the states and any grammar objects they reference. Token
-// tensors are read only during advance() and are never retained.
-class JsonObjectConstraintBatch final {
- public:
-  explicit JsonObjectConstraintBatch(
-      std::vector<JsonObjectGrammarState>& states)
-      : states_(states) {}
-
-  // Tokens must already be ready on CPU, int64, and 1-D or 2-D. Each state maps
-  // to one token row, or -1 when it has no newly accepted tokens. Uninitialized
-  // states are skipped. An undefined tensor is allowed only when every
-  // initialized state maps to -1. A negative token ends its row.
-  std::vector<JsonObjectConstraintViolation> advance(
-      const torch::Tensor& accepted_tokens,
-      const std::vector<int32_t>& token_rows);
-
-  torch::Tensor build_filter_bitmask(const torch::Device& device) const;
-
- private:
-  std::vector<JsonObjectGrammarState>& states_;
-};
+// tensors are read only during the call and are never retained.
+//
+// Tokens must already be ready on CPU, int64, and 1-D or 2-D. Each state maps
+// to one token row, or -1 when it has no newly accepted tokens. Uninitialized
+// states are skipped. An undefined tensor is allowed only when every
+// initialized state maps to -1. A negative token ends its row. A state whose
+// token violates the grammar is recorded and reset to uninitialized.
+std::vector<JsonObjectConstraintViolation> advance_json_object_constraints(
+    std::vector<JsonObjectGrammarState>& states,
+    const torch::Tensor& accepted_tokens,
+    const std::vector<int32_t>& token_rows);
 
 }  // namespace xllm

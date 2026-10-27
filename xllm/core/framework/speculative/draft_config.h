@@ -20,6 +20,8 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "framework/model/model_args.h"
+
 namespace xllm {
 
 // Converts Speculators hidden-state boundary indices (0 = embedding output, v =
@@ -32,5 +34,11 @@ std::vector<int32_t> boundary_to_post_layer_ids(
 std::vector<int32_t> read_capture_layer_ids(
     const std::string& model_weights_path,
     bool required = true);
+
+// Block-diffusion targets derive their aux capture width from the draft
+// checkpoint; shared by the engine (scheduler warmup) and target workers so
+// both see the same layers_to_capture.
+void apply_block_diffusion_target_capture(ModelArgs& args,
+                                          const std::string& draft_model_path);
 
 }  // namespace xllm

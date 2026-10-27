@@ -27,7 +27,7 @@ limitations under the License.
 namespace xllm {
 
 void ProfileManager::calibrate_draft_step_startup() {
-  auto* calibration = engine_->draft_step_controller();
+  auto* calibration = draft_step_controller_;
   CHECK(calibration != nullptr && distributed_worker_manager_ != nullptr);
   CHECK(options_.enable_task_pipeline() && options_.enable_schedule_overlap());
   CHECK_EQ(options_.dp_size(), 1);
@@ -48,7 +48,7 @@ void ProfileManager::calibrate_draft_step_startup() {
   CHECK_EQ(geometry.at("algorithm").get<std::string>(), "mtp");
   CHECK_EQ(geometry.at("slot_count").get<uint32_t>(), 2U);
   const auto& config = calibration->configuration(
-      static_cast<uint32_t>(engine_->model_args().max_position_embeddings()));
+      static_cast<uint32_t>(model_args_->max_position_embeddings()));
   CHECK_EQ(geometry.at("draft_width").get<uint32_t>(), config.draft_width);
   CHECK_LE(config.contexts.back().max_kv_length,
            geometry.at("max_kv_length").get<uint64_t>());

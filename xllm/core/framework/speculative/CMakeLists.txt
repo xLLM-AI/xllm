@@ -11,6 +11,7 @@ cc_library(
     adaptive/spec_window_collector.h
     adaptive/spec_startup_calibration.h
     draft_config.h
+    mtp_utils.h
     draft_proposal.h
     draft_vocab_mapping.h
     rejection_sampler.h
@@ -18,7 +19,6 @@ cc_library(
     mtp_async_input_builder.h
     mtp_async_state.h
     mtp_json_object_state.h
-    mtp_utils.h
     adaptive/draft_step_selector.h
     adaptive/draft_step_controller.h
     draft_extend_input.h

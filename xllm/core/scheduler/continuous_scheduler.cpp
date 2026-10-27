@@ -29,7 +29,6 @@ limitations under the License.
 #include <vector>
 
 #include "core/distributed_runtime/distributed_worker_manager.h"
-#include "core/distributed_runtime/engine.h"
 #include "core/distributed_runtime/model_residency_coordinator.h"
 #include "core/framework/batch/batch_factory.h"
 #include "core/framework/config/kv_cache_config.h"
@@ -40,6 +39,7 @@ limitations under the License.
 #include "core/framework/request/priority_comparator.h"
 #include "core/framework/request/request.h"
 #include "core/framework/request/sequence.h"
+#include "core/scheduler/profile/profile_manager.h"
 #include "core/scheduler/request_priority_queue.h"
 #include "core/scheduler/scheduler_policy.h"
 #include "core/util/timer.h"
@@ -56,33 +56,36 @@ constexpr char kDecodeRestoreTimeoutMessage[] =
 
 }  // namespace
 
-ContinuousSchedulerBase::ContinuousSchedulerBase(
-    Engine* engine,
+ContinuousScheduler::ContinuousScheduler(
+    BlockManagerPool* block_manager_pool,
+    const ModelArgs* model_args,
+    const Tokenizer* tokenizer,
+    SchedulerCallbacks callbacks,
     const Options& options,
-    StepCallback step_callback,
-    ResultCallback result_callback,
     std::shared_ptr<ModelResidencyCoordinator> model_residency_coordinator,
-    std::shared_ptr<DistributedWorkerManager> distributed_worker_manager)
+    std::shared_ptr<DistributedWorkerManager> distributed_worker_manager,
+    DraftStepController* draft_step_controller)
     : options_(options),
       batch_mode_(create_batch_mode(options)),
       scheduler_config_(::xllm::SchedulerConfig::get_instance()),
       batch_factory_(options.dp_size()),
-      resource_engine_(engine),
+      model_args_(model_args),
+      tokenizer_(tokenizer),
+      callbacks_(std::move(callbacks)),
       distributed_worker_manager_(std::move(distributed_worker_manager)),
       model_residency_coordinator_(std::move(model_residency_coordinator)),
-      step_callback_(std::move(step_callback)),
-      result_callback_(std::move(result_callback)),
       notifier_(std::make_shared<SchedulerNotifier>()),
       request_queue_(options.request_queue_size()) {
-  CHECK(resource_engine_ != nullptr);
-  CHECK(step_callback_);
-  CHECK(result_callback_);
+  CHECK(block_manager_pool != nullptr);
+  CHECK(model_args_ != nullptr);
+  CHECK(tokenizer_ != nullptr);
+  CHECK(callbacks_.step);
+  CHECK(callbacks_.update_last_step_result);
 
-  kv_cache_manager_ = resource_engine_->block_manager_pool();
-  CHECK(kv_cache_manager_ != nullptr);
-  if (kv_cache_manager_->has_storage_prefetch()) {
+  block_manager_pool_ = block_manager_pool;
+  if (block_manager_pool_->has_storage_prefetch()) {
     kv_cache_prefetcher_ = std::make_unique<KVCachePrefetcher>(
-        *kv_cache_manager_,
+        *block_manager_pool_,
         request_admission_mutex_,
         notifier_,
         [this](std::shared_ptr<Request> request) {
@@ -91,13 +94,16 @@ ContinuousSchedulerBase::ContinuousSchedulerBase(
   }
   scheduler_metrics_ =
       std::make_unique<SchedulerMetrics>(distributed_worker_manager_,
-                                         kv_cache_manager_,
+                                         block_manager_pool_,
                                          options_.dp_size(),
                                          options_.num_speculative_tokens(),
                                          options_.enable_disagg_pd());
 
   enable_prefix_cache_ =
       ::xllm::KVCacheConfig::get_instance().enable_prefix_cache();
+
+  has_linear_attention_layers_ =
+      ::xllm::has_linear_attention_layers(*model_args_);
   enable_in_batch_prefix_cache_ =
       enable_prefix_cache_ &&
       ::xllm::KVCacheConfig::get_instance().enable_in_batch_prefix_cache();
@@ -125,19 +131,20 @@ ContinuousSchedulerBase::ContinuousSchedulerBase(
       .max_global_ttft_ms(options.max_global_ttft_ms())
       .instance_role(options.instance_role().value_or(InstanceRole::DEFAULT))
       .enable_profile_token_budget(options.enable_profile_token_budget());
-  profile_manager_ = std::unique_ptr<ProfileManager>(
-      new ProfileManager(resource_engine_,
-                         profile_manager_options,
-                         step_callback_,
-                         result_callback_,
-                         distributed_worker_manager_));
+  profile_manager_ =
+      std::make_unique<ProfileManager>(block_manager_pool_,
+                                       model_args_,
+                                       profile_manager_options,
+                                       callbacks_,
+                                       distributed_worker_manager_,
+                                       draft_step_controller);
 
   // Construct the scheduling policy from the resolved BatchMode.
   policy_ = create_scheduler_policy(batch_mode_, options_);
 
   cancel_request_queue_ = std::make_shared<CancelRequestQueue>();
   output_dispatcher_ = std::make_unique<RequestOutputDispatcher>(
-      resource_engine_->tokenizer(),
+      tokenizer_,
       options_.enable_service_routing(),
       options_.disable_log_stats(),
       [cancel_request_queue = cancel_request_queue_,
@@ -190,11 +197,11 @@ ContinuousSchedulerBase::ContinuousSchedulerBase(
   }
 }
 
-void ContinuousSchedulerBase::populate_heartbeat_request(
+void ContinuousScheduler::populate_heartbeat_request(
     xllm_service::proto::HeartbeatRequest& request,
     bool include_virtual_memory_info) {
   request.mutable_load_metrics()->set_gpu_cache_usage_perc(
-      resource_engine_->block_manager_pool()->get_gpu_cache_usage_perc());
+      block_manager_pool_->get_gpu_cache_usage_perc());
   request.mutable_load_metrics()->set_waiting_requests_num(
       get_waiting_requests_num());
 
@@ -234,7 +241,7 @@ void ContinuousSchedulerBase::populate_heartbeat_request(
   }
 }
 
-ContinuousSchedulerBase::~ContinuousSchedulerBase() {
+ContinuousScheduler::~ContinuousScheduler() {
   notifier_->request_stop();
 
   if (xservice_client_ != nullptr) {
@@ -248,12 +255,12 @@ ContinuousSchedulerBase::~ContinuousSchedulerBase() {
   running_requests_.clear();
 }
 
-bool ContinuousSchedulerBase::add_request(std::shared_ptr<Request>& request) {
+bool ContinuousScheduler::add_request(std::shared_ptr<Request>& request) {
   CHECK(request != nullptr);
   CHECK(!request->sequences().empty());
 
   if ((request->check_beam_search() || request->best_of() > 1) &&
-      ::xllm::has_linear_attention_layers(resource_engine_->model_args())) {
+      has_linear_attention_layers_) {
     output_dispatcher_->process_failed_request(
         request,
         {StatusCode::INVALID_ARGUMENT,
@@ -280,11 +287,11 @@ bool ContinuousSchedulerBase::add_request(std::shared_ptr<Request>& request) {
   return true;
 }
 
-size_t ContinuousSchedulerBase::num_queued_requests() const {
+size_t ContinuousScheduler::num_queued_requests() const {
   return static_cast<size_t>(std::max<ssize_t>(request_queue_.size(), 0));
 }
 
-bool ContinuousSchedulerBase::enqueue_ready_request(
+bool ContinuousScheduler::enqueue_ready_request(
     std::shared_ptr<Request> request) {
   const bool queued = request_queue_.write(std::move(request));
   if (queued) {
@@ -293,7 +300,7 @@ bool ContinuousSchedulerBase::enqueue_ready_request(
   return queued;
 }
 
-void ContinuousSchedulerBase::create_queues(const Options& options) {
+void ContinuousScheduler::create_queues(const Options& options) {
   if (options.priority_strategy() == "multi_slo_and_prio" ||
       options.priority_strategy() == "fcfs") {
     prefill_queue_ = std::make_unique<DequeQueue>();
@@ -308,7 +315,7 @@ void ContinuousSchedulerBase::create_queues(const Options& options) {
   }
 }
 
-void ContinuousSchedulerBase::clear_mtp_bootstrap(Request* request) {
+void ContinuousScheduler::clear_mtp_bootstrap(Request* request) {
   if (!options_.enable_disagg_pd() || options_.num_speculative_tokens() <= 0 ||
       request == nullptr || request->sequences().empty()) {
     return;
@@ -320,7 +327,7 @@ void ContinuousSchedulerBase::clear_mtp_bootstrap(Request* request) {
   sequence->clear_mtp_bootstrap_embedding();
 }
 
-void ContinuousSchedulerBase::drain_decode_restore_waiting(
+void ContinuousScheduler::drain_decode_restore_waiting(
     std::vector<std::shared_ptr<Request>>& finished) {
   const absl::Time now = absl::Now();
   for (auto it = decode_restore_waiting_.begin();
@@ -330,7 +337,7 @@ void ContinuousSchedulerBase::drain_decode_restore_waiting(
     request->update_connection_status();
     if (request->finished() || request->cancelled()) {
       clear_mtp_bootstrap(request.get());
-      kv_cache_manager_->deallocate(request.get());
+      block_manager_pool_->deallocate(request.get());
       finished.emplace_back(request);
       it = decode_restore_waiting_.erase(it);
       continue;
@@ -341,7 +348,7 @@ void ContinuousSchedulerBase::drain_decode_restore_waiting(
     }
 
     clear_mtp_bootstrap(request.get());
-    kv_cache_manager_->deallocate(request.get());
+    block_manager_pool_->deallocate(request.get());
     output_dispatcher_->process_failed_request(
         request,
         {StatusCode::RESOURCE_EXHAUSTED, kDecodeRestoreTimeoutMessage});
@@ -349,7 +356,7 @@ void ContinuousSchedulerBase::drain_decode_restore_waiting(
   }
 }
 
-BatchGroup ContinuousSchedulerBase::prepare_batch() {
+BatchGroup ContinuousScheduler::prepare_batch() {
   Timer timer;
   drain_request_releases();
   if (kv_cache_prefetcher_ != nullptr) {
@@ -416,15 +423,15 @@ BatchGroup ContinuousSchedulerBase::prepare_batch() {
       running_requests_,
       running_sequences_,
       running_sequences_budgets_,
-      kv_cache_manager_->get_swap_block_transfer_infos());
+      block_manager_pool_->get_swap_block_transfer_infos());
 
   bool is_batches_empty = std::all_of(
       batches.begin(), batches.end(), [](const Batch& b) { return b.empty(); });
   if (!is_batches_empty) {
     COUNTER_ADD(scheduling_latency_seconds, timer.elapsed_seconds());
-    kv_cache_manager_->transfer_blocks(batches);
+    block_manager_pool_->transfer_blocks(batches);
   } else {
-    kv_cache_manager_->transfer_blocks();
+    block_manager_pool_->transfer_blocks();
   }
 
   policy_->report_metrics(
@@ -432,7 +439,7 @@ BatchGroup ContinuousSchedulerBase::prepare_batch() {
   return batches;
 }
 
-SchedulerState ContinuousSchedulerBase::make_state() {
+SchedulerState ContinuousScheduler::make_state() {
   return SchedulerState{
       .prefill_queue = *prefill_queue_,
       .chunk_queue = *chunk_queue_,
@@ -442,14 +449,15 @@ SchedulerState ContinuousSchedulerBase::make_state() {
       .running_requests = running_requests_,
       .running_sequences = running_sequences_,
       .running_sequences_budgets = running_sequences_budgets_,
-      .kv_cache_manager = kv_cache_manager_,
+      .kv_cache_manager = block_manager_pool_,
       .profile_manager = profile_manager_.get(),
       .output_dispatcher = output_dispatcher_.get(),
-      .model_args = resource_engine_->model_args(),
+      .model_args = *model_args_,
       .last_step_prefill = last_step_prefill_,
       .options = options_,
       .min_speculative_tokens_required = min_speculative_tokens_required_,
       .enable_prefix_cache = enable_prefix_cache_,
+      .has_linear_attention_layers = has_linear_attention_layers_,
       .release_failed_request =
           [this](const std::shared_ptr<Request>& request) {
             release_failed_request(request);
@@ -460,7 +468,7 @@ SchedulerState ContinuousSchedulerBase::make_state() {
   };
 }
 
-BatchGroup ContinuousSchedulerBase::schedule_request(
+BatchGroup ContinuousScheduler::schedule_request(
     const absl::Duration& timeout) {
   const auto deadline = absl::Now() + timeout;
   BatchGroup batch;
@@ -501,7 +509,7 @@ BatchGroup ContinuousSchedulerBase::schedule_request(
   return batch;
 }
 
-void ContinuousSchedulerBase::apply_cancel_requests() {
+void ContinuousScheduler::apply_cancel_requests() {
   std::vector<std::shared_ptr<Request>> requests =
       cancel_request_queue_->take_all();
   for (const std::shared_ptr<Request>& request : requests) {
@@ -511,7 +519,7 @@ void ContinuousSchedulerBase::apply_cancel_requests() {
 
 // step the scheduler forward by one step
 // may get blocked if there are no requests to process
-void ContinuousSchedulerBase::step(const absl::Duration& timeout) {
+void ContinuousScheduler::step(const absl::Duration& timeout) {
   if (!options_.enable_schedule_overlap()) {
     // get a new batch of requests
     BatchGroup batch = schedule_request(timeout);
@@ -523,7 +531,7 @@ void ContinuousSchedulerBase::step(const absl::Duration& timeout) {
       return;
     }
 
-    step_callback_(batch);
+    callbacks_.step(batch);
 
     // process request output in batch
     process_batch_output(running_requests_);
@@ -532,7 +540,7 @@ void ContinuousSchedulerBase::step(const absl::Duration& timeout) {
   }
 }
 
-void ContinuousSchedulerBase::step_with_schedule_overlap(
+void ContinuousScheduler::step_with_schedule_overlap(
     const absl::Duration& timeout) {
   // get a new batch of requests
   BatchGroup batch = schedule_request(timeout);
@@ -562,10 +570,10 @@ void ContinuousSchedulerBase::step_with_schedule_overlap(
   const bool consumed_before_step =
       pending_step_.has_value() && needs_prefill_state;
   if (consumed_before_step) {
-    result_callback_(pending_step_->batches);
+    callbacks_.update_last_step_result(pending_step_->batches);
   }
   if (!cur_batch_all_empty) {
-    step_callback_(batch);
+    callbacks_.step(batch);
   }
 
   // producer-consumer mode, make sure only one step is scheduled in advance
@@ -586,15 +594,15 @@ void ContinuousSchedulerBase::step_with_schedule_overlap(
   pending_step_->requests = running_requests_;
 }
 
-void ContinuousSchedulerBase::complete_pending_step(bool outputs_collected) {
+void ContinuousScheduler::complete_pending_step(bool outputs_collected) {
   CHECK(pending_step_.has_value());
   if (!outputs_collected) {
-    result_callback_(pending_step_->batches);
+    callbacks_.update_last_step_result(pending_step_->batches);
   }
   process_batch_output(pending_step_->requests);
 }
 
-void ContinuousSchedulerBase::generate() {
+void ContinuousScheduler::generate() {
   bool batch_empty = false;
   while (num_pending_requests() > 0 || !batch_empty ||
          request_queue_.size() > 0 || has_pending_prefetch()) {
@@ -610,7 +618,7 @@ void ContinuousSchedulerBase::generate() {
     }
 
     // run inference for the batch
-    step_callback_(batch);
+    callbacks_.step(batch);
 
     // process request output in batch
     process_batch_output(running_requests_);
@@ -620,7 +628,7 @@ void ContinuousSchedulerBase::generate() {
   output_dispatcher_->wait_completion();
 }
 
-void ContinuousSchedulerBase::process_batch_output(
+void ContinuousScheduler::process_batch_output(
     const std::vector<std::shared_ptr<Request>>& requests) {
   // Beam search may replace Sequence objects inside SequencesGroup.
   // Always refresh the sequence pointers from requests before dereferencing.
@@ -668,7 +676,7 @@ void ContinuousSchedulerBase::process_batch_output(
   }
 }
 
-void ContinuousSchedulerBase::refresh_sequences_from_requests(
+void ContinuousScheduler::refresh_sequences_from_requests(
     const std::vector<std::shared_ptr<Request>>& requests,
     std::vector<Sequence*>& sequences) const {
   sequences.clear();

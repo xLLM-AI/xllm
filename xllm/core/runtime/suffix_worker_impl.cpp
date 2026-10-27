@@ -159,7 +159,7 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_prefill(
   }
 
   output.sample_output.embeddings = torch::Tensor();
-  if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
+  if (this->suppresses_non_driver_output()) {
     return std::nullopt;
   }
   return output;
@@ -353,7 +353,7 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
     }
   }
 
-  if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
+  if (this->suppresses_non_driver_output()) {
     return std::nullopt;
   }
   // Land the verify tokens on host once here, matching DFlash, so the metrics

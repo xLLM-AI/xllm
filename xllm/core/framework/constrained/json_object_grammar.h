@@ -18,6 +18,7 @@ limitations under the License.
 #include <torch/types.h>
 
 #include <cstdint>
+#include <limits>
 #include <list>
 #include <memory>
 #include <mutex>
@@ -267,5 +268,49 @@ torch::Tensor build_json_object_filter_bitmask(
 std::vector<JsonObjectGrammarState> advance_json_object_states(
     const std::vector<JsonObjectGrammarState>& states,
     const std::vector<int32_t>& token_ids);
+
+// One rejected token during accepted-token scanning: which state row rejected
+// it, at which offset, the token id, and the grammar fingerprint at rejection.
+struct JsonAcceptedTokenMismatch final {
+  size_t sequence_index = 0;
+  size_t token_offset = 0;
+  int32_t token_id = -1;
+  size_t committed_tokens = 0;
+  uint64_t state_fingerprint = 0;
+};
+
+// Scans one grammar state against accepted tokens until the row ends (negative
+// token), the state rejects a token, or the row is exhausted. Appends a
+// mismatch record on rejection. `token_at` maps (row, offset) to the raw
+// token id. Returns true when the row scanned clean.
+template <typename TokenAt>
+inline bool scan_json_accepted_tokens(
+    JsonObjectGrammarState& state,
+    size_t sequence_index,
+    size_t row_width,
+    const TokenAt& token_at,
+    std::vector<JsonAcceptedTokenMismatch>& mismatches) {
+  for (size_t token_offset = 0; token_offset < row_width; ++token_offset) {
+    const int64_t raw_token_id = token_at(sequence_index, token_offset);
+    if (raw_token_id < 0) {
+      break;
+    }
+    CHECK_LE(raw_token_id,
+             static_cast<int64_t>(std::numeric_limits<int32_t>::max()))
+        << "JSON accepted output token id exceeds int32 range";
+    const int32_t token_id = static_cast<int32_t>(raw_token_id);
+    if (!state.can_accept_token(token_id)) {
+      const JsonObjectGrammarSnapshot snapshot = state.snapshot();
+      mismatches.push_back({sequence_index,
+                            token_offset,
+                            token_id,
+                            snapshot.token_ids.size(),
+                            state.fingerprint()});
+      return false;
+    }
+    CHECK(state.accept_token(token_id));
+  }
+  return true;
+}
 
 }  // namespace xllm

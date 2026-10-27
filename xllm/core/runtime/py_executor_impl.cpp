@@ -209,8 +209,9 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
       enable_mla_(args.enable_mla()) {
   CHECK(py_causal_lm_ != nullptr) << "PyExecutorImpl requires PyCausalLM";
   CHECK_GT(dummy_token_count_, 0);
-  // GLM5 KDA targets need fixed-width speculative decoding; adaptive pruning
-  // resizes per-step draft widths, which the KDA handoff cannot follow.
+  // GLM5 KDA targets need fixed-width speculative decoding; adaptive target
+  // verification resizes per-step draft widths, which the KDA handoff cannot
+  // follow.
   CHECK(!(is_glm5_next_target_model_type(args.model_type()) &&
           (options.enable_adaptive_target_verify() ||
            options.enable_adaptive_draft_step())))
@@ -234,12 +235,6 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
       options_.enable_adaptive_draft_step();
   executor_config["enable_adaptive_target_verify"] =
       options_.enable_adaptive_target_verify();
-  executor_config["engine_type"] = SpeculativeConfig::uses_ssm_engine(
-                                       options_.draft_model_path().value_or(""),
-                                       options_.speculative_algorithm(),
-                                       options_.num_speculative_tokens())
-                                       ? "SSM"
-                                       : "LLM";
   executor_config["enable_chunked_prefill"] = options_.enable_chunked_prefill();
   executor_config["enable_prefix_cache"] =
       KVCacheConfig::get_instance().enable_prefix_cache();
@@ -247,7 +242,7 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
       options_.enable_schedule_overlap();
   executor_config["enable_unified_mtp_graph"] =
       ExecutionConfig::get_instance().enable_unified_mtp_graph();
-  executor_config["is_draft_engine"] = options_.is_draft_engine();
+  executor_config["is_draft_model"] = options_.is_draft_model();
   executor_config["is_mtp_algorithm"] =
       SpeculativeConfig::is_mtp_algorithm(options_.speculative_algorithm());
   executor_config["is_block_diffusion_algorithm"] =

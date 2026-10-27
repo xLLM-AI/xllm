@@ -32,6 +32,7 @@ limitations under the License.
 #include "core/common/types.h"
 #include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/parallel_config.h"
+#include "core/framework/model/model_args.h"
 #include "core/util/binary_payload.h"
 #include "rec.pb.h"
 #include "slice.h"
@@ -41,6 +42,11 @@ limitations under the License.
 namespace xllm {
 
 namespace util {
+// The model-type predicates moved to model_args.h (xllm namespace); re-export
+// under util:: for existing callers.
+using xllm::is_deepseek_v4_dspark_model_type;
+using xllm::is_deepseek_v4_model_type;
+using xllm::is_target_mtp_model_type;
 
 std::pair<int, int> find_ones_indices(std::vector<int>& q_seq_lens);
 
@@ -157,37 +163,6 @@ inline const std::unordered_set<std::string>& mla_model_type_set() {
 
 inline bool is_mla_model_type(std::string_view model_type) {
   return mla_model_type_set().contains(std::string(model_type));
-}
-
-inline bool has_mtp_model_type_marker(std::string_view model_type) {
-  return model_type.find("mtp") != std::string_view::npos;
-}
-
-inline bool starts_with_model_type(std::string_view model_type,
-                                   std::string_view target_model_type) {
-  return model_type.size() >= target_model_type.size() &&
-         model_type.compare(0, target_model_type.size(), target_model_type) ==
-             0;
-}
-
-inline bool is_target_mtp_model_type(std::string_view model_type,
-                                     std::string_view target_model_type) {
-  return starts_with_model_type(model_type, target_model_type) &&
-         has_mtp_model_type_marker(model_type);
-}
-
-inline constexpr std::string_view kDeepseekV4DSparkModelType =
-    "deepseek_v4_dspark";
-
-inline bool is_deepseek_v4_dspark_model_type(std::string_view model_type) {
-  return model_type == kDeepseekV4DSparkModelType;
-}
-
-inline bool is_deepseek_v4_model_type(std::string_view model_type) {
-  constexpr std::string_view kTargetModelType = "deepseek_v4";
-  return model_type == kTargetModelType ||
-         is_deepseek_v4_dspark_model_type(model_type) ||
-         is_target_mtp_model_type(model_type, kTargetModelType);
 }
 
 // Returns whether a model's KV cache can be transferred between different TP

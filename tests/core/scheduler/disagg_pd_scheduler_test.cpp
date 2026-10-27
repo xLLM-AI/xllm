@@ -42,9 +42,10 @@ limitations under the License.
 #include "core/framework/batch/sampling_input_builder.h"
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/transfer/kv_transfer_completion.h"
+#include "core/scheduler/continuous_scheduler.h"
+#include "core/scheduler/fake_scheduling_engine_test_utils.h"
 #include "core/util/scope_guard.h"
 #include "distributed_runtime/distributed_worker_manager.h"
-#include "distributed_runtime/engine.h"
 #include "distributed_runtime/kv_cache_transfer_coordinator.h"
 #include "framework/block/block_manager_pool.h"
 #include "framework/model/model_args.h"
@@ -180,7 +181,7 @@ class PrefetchBlockManagerPool final : public BlockManagerPool {
   std::atomic<size_t> prefetch_pipeline_calls_{0};
 };
 
-class FakeEngine final : public Engine {
+class FakeEngine final : public FakeSchedulingEngine {
  public:
   FakeEngine(int32_t num_blocks,
              int32_t block_size,
@@ -200,7 +201,7 @@ class FakeEngine final : public Engine {
         std::make_unique<PrefetchBlockManagerPool>(options, dp_size);
   }
 
-  std::function<ForwardOutput(BatchGroup&)> forward;
+  StepCallback forward;
   std::function<void(const BatchGroup&)> complete_forward;
 
   ForwardOutput step(BatchGroup& batch) {
@@ -217,24 +218,14 @@ class FakeEngine final : public Engine {
     return std::vector<RawForwardOutput>(batch.size());
   }
 
-  const Tokenizer* tokenizer() const override { return tokenizer_.get(); }
-
-  BlockManagerPool* block_manager_pool() const override {
-    return block_manager_.get();
-  }
-
-  const ModelArgs& model_args() const override { return model_args_; }
-
-  const TokenizerArgs& tokenizer_args() const override { NOT_IMPLEMENTED(); }
-
-  bool init() override { return true; }
-
   void set_storage_prefetch_enabled(bool enabled) {
-    block_manager_->set_storage_prefetch_enabled(enabled);
+    static_cast<PrefetchBlockManagerPool*>(block_manager_.get())
+        ->set_storage_prefetch_enabled(enabled);
   }
 
   size_t prefetch_pipeline_calls() const {
-    return block_manager_->prefetch_pipeline_calls();
+    return static_cast<const PrefetchBlockManagerPool*>(block_manager_.get())
+        ->prefetch_pipeline_calls();
   }
 
   void set_tokenizer(std::unique_ptr<Tokenizer> tokenizer) {
@@ -242,13 +233,9 @@ class FakeEngine final : public Engine {
   }
 
   void set_release_callback(std::function<void()> callback) {
-    block_manager_->on_release = std::move(callback);
+    static_cast<PrefetchBlockManagerPool*>(block_manager_.get())->on_release =
+        std::move(callback);
   }
-
- private:
-  std::unique_ptr<Tokenizer> tokenizer_;
-  std::unique_ptr<PrefetchBlockManagerPool> block_manager_;
-  ModelArgs model_args_;
 };
 
 class TestDisaggPDServiceImpl final : public DisaggPDServiceImpl {
@@ -263,12 +250,14 @@ class TestDisaggPDScheduler final : public DisaggPDScheduler {
   using DisaggPDScheduler::enqueue_request_block_release;
   using DisaggPDScheduler::prepare_batch;
 
-  template <typename TargetEngine>
-  TestDisaggPDScheduler(TargetEngine* engine,
+  TestDisaggPDScheduler(FakeEngine* engine,
                         const Options& options,
                         std::shared_ptr<KVCacheTransferCoordinator>
                             transfer_coordinator = nullptr)
-      : DisaggPDScheduler(engine,
+      : DisaggPDScheduler(engine->block_manager_pool(),
+                          &engine->model_args(),
+                          engine->tokenizer(),
+                          std::move(make_scheduler_callbacks(engine)),
                           options,
                           SkipRuntimeStart{},
                           /*distributed_worker_manager=*/nullptr,
@@ -443,7 +432,7 @@ class TestDisaggPDScheduler final : public DisaggPDScheduler {
 
   void cache_prefill_blocks_for_test(Request* request) {
     for (auto& sequence : request->sequences()) {
-      kv_cache_manager_->publish_prefix(sequence.get());
+      block_manager_pool()->publish_prefix(sequence.get());
     }
   }
 
@@ -1340,8 +1329,7 @@ TEST(DisaggPDSchedulerTest, DecodeBuildsMinTokenInputsFromLocalExecutionMode) {
     DisaggPDScheduler::Options options = make_decode_options();
     options.enable_task_pipeline(enable_task_pipeline);
     TestDisaggPDScheduler scheduler(&engine, options);
-    TestDisaggPDServiceImpl service(
-        &scheduler, &engine, /*kv_cache_block_tokens=*/2);
+    TestDisaggPDServiceImpl service(&scheduler, {});
     for (const uint32_t minimum : {0u, 3u}) {
       SCOPED_TRACE(::testing::Message()
                    << "task_pipeline=" << enable_task_pipeline
@@ -1392,8 +1380,7 @@ TEST(DisaggPDSchedulerTest, DecodeRejectsMalformedMetadataBeforeKvAllocation) {
   TestDisaggPDScheduler scheduler(&engine, make_options());
   DisaggPDServiceOptions options;
   options.enable_response_formatting = true;
-  DisaggPDServiceImpl service(
-      &scheduler, &engine, /*kv_cache_block_tokens=*/2, options);
+  DisaggPDServiceImpl service(&scheduler, options);
   for (int32_t invalid_field = 0; invalid_field < 4; ++invalid_field) {
     proto::DisaggRequests requests;
     auto* request = requests.add_reqs();

@@ -22,22 +22,44 @@ limitations under the License.
 #include <optional>
 
 #include "core/framework/block/block_manager_pool.h"
+#include "core/framework/model/model_args.h"
+#include "core/kv_cache/layout/kv_cache_estimation.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
+#include "core/runtime/options.h"
 
 namespace xllm {
 
 class KVCacheTransferCoordinatorBase;
-class ModelArgs;
-class VmmKVCacheLayout;
 
 struct KVCacheManagerFactoryResult final {
-  std::unique_ptr<KVCacheManager> manager;
+  std::unique_ptr<BlockManagerPool> manager;
   KVCacheShape shape;
+};
+
+// One side of a joint target+draft capacity estimation. Holds references:
+// callers keep the args/options alive for the duration of the estimation call.
+struct KVCacheModelEstimate final {
+  const ModelArgs& args;
+  const runtime::Options& options;
+  torch::ScalarType dtype;
 };
 
 class KVCacheManagerFactory final {
  public:
+  // Joint target+draft estimation: both sides are estimated from one
+  // worker-memory snapshot and share one KV budget, so the returned capacity
+  // carries the shared block count (workers derive the draft shape from the
+  // target shape). Runtime observation (polling workers, sizing the VMM pool,
+  // gauges) stays with the engine caller; pass the snapshot it collected.
+  static KVCacheCapacity estimate_speculative_capacity(
+      const KVCacheModelEstimate& target,
+      const std::optional<KVCacheModelEstimate>& draft,
+      int64_t world_size,
+      const std::vector<KVCacheMemorySnapshot>& worker_memory,
+      bool is_multimodal = false,
+      int64_t reserved_memory_bytes = 0);
+
   static KVCacheManagerFactoryResult create(
       const KVCacheCapacity& kv_cache_capacity,
       const ModelArgs& model_args,
@@ -47,8 +69,7 @@ class KVCacheManagerFactory final {
       std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator,
       int32_t dp_size = 1,
       std::optional<HostCacheValidationOptions> host_validation_options =
-          std::nullopt,
-      const VmmKVCacheLayout* shared_vmm_layout = nullptr);
+          std::nullopt);
 };
 
 }  // namespace xllm

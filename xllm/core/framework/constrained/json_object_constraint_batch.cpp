@@ -19,18 +19,19 @@ limitations under the License.
 
 namespace xllm {
 
-std::vector<JsonObjectConstraintViolation> JsonObjectConstraintBatch::advance(
+std::vector<JsonObjectConstraintViolation> advance_json_object_constraints(
+    std::vector<JsonObjectGrammarState>& states,
     const torch::Tensor& accepted_tokens,
     const std::vector<int32_t>& token_rows) {
-  CHECK_EQ(token_rows.size(), states_.size())
+  CHECK_EQ(token_rows.size(), states.size())
       << "JSON constraint states must align with accepted-token rows";
   for (const int32_t token_row : token_rows) {
     CHECK_GE(token_row, -1)
         << "JSON constraint token rows must be nonnegative or -1";
   }
   if (!accepted_tokens.defined()) {
-    for (size_t state_index = 0; state_index < states_.size(); ++state_index) {
-      if (!states_[state_index].initialized()) {
+    for (size_t state_index = 0; state_index < states.size(); ++state_index) {
+      if (!states[state_index].initialized()) {
         continue;
       }
       CHECK_EQ(token_rows[state_index], -1)
@@ -45,8 +46,8 @@ std::vector<JsonObjectConstraintViolation> JsonObjectConstraintBatch::advance(
       << "JSON constraint tokens must have int64 dtype";
   CHECK(accepted_tokens.dim() == 1 || accepted_tokens.dim() == 2)
       << "JSON constraint tokens must be 1-D or 2-D";
-  for (size_t state_index = 0; state_index < states_.size(); ++state_index) {
-    if (!states_[state_index].initialized()) {
+  for (size_t state_index = 0; state_index < states.size(); ++state_index) {
+    if (!states[state_index].initialized()) {
       continue;
     }
     CHECK_LT(token_rows[state_index], accepted_tokens.size(0))
@@ -61,43 +62,28 @@ std::vector<JsonObjectConstraintViolation> JsonObjectConstraintBatch::advance(
   const int64_t token_stride =
       has_multiple_tokens ? accepted_tokens.stride(1) : 0;
   std::vector<JsonObjectConstraintViolation> violations;
-  for (size_t state_index = 0; state_index < states_.size(); ++state_index) {
-    JsonObjectGrammarState& state = states_[state_index];
+  for (size_t state_index = 0; state_index < states.size(); ++state_index) {
+    JsonObjectGrammarState& state = states[state_index];
     const int32_t token_row = token_rows[state_index];
     if (!state.initialized() || token_row == -1) {
       continue;
     }
     const int64_t row_offset = static_cast<int64_t>(token_row) * row_stride;
-    for (int64_t token_offset = 0; token_offset < tokens_per_row;
-         ++token_offset) {
-      const int32_t token_id = static_cast<int32_t>(
-          token_data[row_offset + token_offset * token_stride]);
-      if (token_id < 0) {
-        break;
-      }
-      if (!state.can_accept_token(token_id)) {
-        const JsonObjectGrammarSnapshot snapshot = state.snapshot();
-        if (violations.empty()) {
-          violations.reserve(states_.size());
-        }
-        violations.emplace_back(
-            JsonObjectConstraintViolation{state_index,
-                                          token_offset,
-                                          token_id,
-                                          snapshot.token_ids.size(),
-                                          state.fingerprint()});
-        state = JsonObjectGrammarState();
-        break;
-      }
-      CHECK(state.accept_token(token_id));
+    const bool accepted = scan_json_accepted_tokens(
+        state,
+        state_index,
+        static_cast<size_t>(tokens_per_row),
+        [token_data, row_offset, token_stride](size_t, size_t offset) {
+          return token_data[row_offset +
+                            static_cast<int64_t>(offset) * token_stride];
+        },
+        violations);
+    if (!accepted) {
+      // The offending row resets so a later batch can retry the sequence.
+      state = JsonObjectGrammarState();
     }
   }
   return violations;
-}
-
-torch::Tensor JsonObjectConstraintBatch::build_filter_bitmask(
-    const torch::Device& device) const {
-  return build_json_object_filter_bitmask(states_, device);
 }
 
 }  // namespace xllm

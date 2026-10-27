@@ -58,6 +58,10 @@ class DFlash2WorkerImpl final : public DFlashWorkerImpl {
                   MasterStatus master_status) override;
 
  protected:
+  // DFlash2 shares target weights through plain torch tensors even on ATB
+  // backends.
+  bool draft_shares_atb_weights() const override { return false; }
+
   DraftProposal run_decode_draft(const LlmForwardInput& input,
                                  LlmForwardInput& validate_input) override;
 };

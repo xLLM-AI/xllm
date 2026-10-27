@@ -16,6 +16,8 @@ limitations under the License.
 
 #pragma once
 
+#include <glog/logging.h>
+
 #include <algorithm>
 #include <cstdint>
 #include <optional>
@@ -1283,9 +1285,75 @@ inline bool is_qwen3_5_target_model_type(std::string_view model_type) {
          model_type == "qwen3_5_text" || model_type == "qwen3_5_moe_text";
 }
 
+// Reconciles the model vocab size against the tokenizer's: adopts the
+// tokenizer size when unset, warns on unsafe mismatch.
+inline void reconcile_vocab_size(ModelArgs& args,
+                                 int64_t tokenizer_vocab_size) {
+  const int64_t model_vocab_size = args.vocab_size();
+  if (tokenizer_vocab_size == model_vocab_size) {
+    return;
+  }
+  // use tokenizer vocab size if model vocab size is not set
+  if (model_vocab_size <= 0) {
+    LOG(WARNING) << "Model vocab size is not set, using tokenizer vocab size: "
+                 << tokenizer_vocab_size;
+    args.vocab_size(tokenizer_vocab_size);
+  } else if (tokenizer_vocab_size > model_vocab_size) {
+    LOG(WARNING) << "Unsafe vocab mismatch: tokenizer: " << tokenizer_vocab_size
+                 << ", model: " << model_vocab_size;
+  } else {
+    LOG(INFO) << "Tokenizer/model vocab differ: tokenizer="
+              << tokenizer_vocab_size << ", model=" << model_vocab_size;
+  }
+}
+
+inline bool has_mtp_model_type_marker(std::string_view model_type) {
+  return model_type.find("mtp") != std::string_view::npos;
+}
+
+inline bool starts_with_model_type(std::string_view model_type,
+                                   std::string_view target_model_type) {
+  return model_type.size() >= target_model_type.size() &&
+         model_type.compare(0, target_model_type.size(), target_model_type) ==
+             0;
+}
+
+inline bool is_target_mtp_model_type(std::string_view model_type,
+                                     std::string_view target_model_type) {
+  return starts_with_model_type(model_type, target_model_type) &&
+         has_mtp_model_type_marker(model_type);
+}
+
+inline bool is_deepseek_v4_dspark_model_type(std::string_view model_type) {
+  return model_type == kDeepseekV4DSparkModelType;
+}
+
+inline bool is_deepseek_v4_model_type(std::string_view model_type) {
+  constexpr std::string_view kTargetModelType = "deepseek_v4";
+  return model_type == kTargetModelType ||
+         is_deepseek_v4_dspark_model_type(model_type) ||
+         is_target_mtp_model_type(model_type, kTargetModelType);
+}
+
 inline bool is_glm5_next_target_model_type(std::string_view model_type) {
   return model_type == "glm5_3_flash" || model_type == "glm5_next" ||
          model_type == "glm5_next_text";
+}
+
+// MTP targets whose num_speculative_tokens flows from engine Options into
+// ModelArgs; other targets keep the checkpoint default.
+inline bool uses_mtp_target_spec_width(std::string_view model_type) {
+  return is_glm5_next_target_model_type(model_type) ||
+         is_deepseek_v4_model_type(model_type);
+}
+
+// Hidden-state width the MTP draft consumes from the target: DeepSeek-V4
+// publishes hc_mult * hidden_size, everything else the plain hidden size.
+inline int64_t mtp_hidden_state_width(const ModelArgs& model_args) {
+  if (is_deepseek_v4_model_type(model_args.model_type())) {
+    return model_args.hc_mult() * model_args.hidden_size();
+  }
+  return model_args.hidden_size();
 }
 
 inline std::ostream& operator<<(std::ostream& os, const ModelArgs& args) {

@@ -75,4 +75,11 @@ std::vector<int32_t> read_capture_layer_ids(
   return capture_layer_ids;
 }
 
+void apply_block_diffusion_target_capture(ModelArgs& args,
+                                          const std::string& draft_model_path) {
+  CHECK(!draft_model_path.empty())
+      << "Block-diffusion target requires a draft checkpoint.";
+  args.layers_to_capture(read_capture_layer_ids(draft_model_path));
+}
+
 }  // namespace xllm

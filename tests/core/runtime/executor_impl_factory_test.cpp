@@ -104,10 +104,10 @@ REGISTER_EXECUTOR("executor_factory_macro_namespaced_first",
 REGISTER_EXECUTOR("executor_factory_macro_namespaced_second",
                   executor_factory_test::NamespacedExecutorImpl,
                   10);
-REGISTER_EXECUTOR("executor_factory_macro_extension",
-                  "executor_factory_macro_custom",
-                  executor_factory_test::NamespacedExecutorImpl,
-                  10);
+REGISTER_EXECUTOR_WITH_IMPL("executor_factory_macro_extension",
+                            "executor_factory_macro_custom",
+                            executor_factory_test::NamespacedExecutorImpl,
+                            10);
 
 namespace {
 

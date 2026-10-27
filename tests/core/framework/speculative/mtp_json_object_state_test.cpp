@@ -203,7 +203,7 @@ TEST(MtpJsonObjectStateTest, ReplaysFiveStepMixedAcceptedOutputRows) {
       0,
   };
 
-  const std::vector<detail::JsonAcceptedTokenMismatch> mismatches =
+  const std::vector<JsonAcceptedTokenMismatch> mismatches =
       detail::find_json_accepted_token_mismatches(
           initial_states, accepted_tokens, /*num_rows=*/2, /*row_width=*/6);
 
@@ -231,7 +231,7 @@ TEST(MtpJsonObjectStateTest, ReportsFirstAcceptedOutputMismatchPerSequence) {
       0,
   };
 
-  const std::vector<detail::JsonAcceptedTokenMismatch> mismatches =
+  const std::vector<JsonAcceptedTokenMismatch> mismatches =
       detail::find_json_accepted_token_mismatches(
           initial_states, accepted_tokens, /*num_rows=*/2, /*row_width=*/6);
 
@@ -248,7 +248,7 @@ TEST(MtpJsonObjectStateTest, AcceptedOutputStopsAtAnyNegativePadding) {
       grammar.initial_state()};
   const int64_t accepted_tokens[] = {0, -2};
 
-  const std::vector<detail::JsonAcceptedTokenMismatch> mismatches =
+  const std::vector<JsonAcceptedTokenMismatch> mismatches =
       detail::find_json_accepted_token_mismatches(
           initial_states, accepted_tokens, /*num_rows=*/1, /*row_width=*/2);
   EXPECT_TRUE(mismatches.empty());

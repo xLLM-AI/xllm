@@ -34,6 +34,7 @@ limitations under the License.
 #include "core/runtime/executor.h"
 #include "core/runtime/forward_params.h"
 #include "core/runtime/slot_buffer.h"
+#include "core/runtime/task_input_domain.h"
 #include "core/runtime/vlm_forward_params.h"
 #include "core/util/concurrent_queue.h"
 #include "core/util/threadpool.h"
@@ -80,8 +81,6 @@ using TaskKVPush =
 using TaskKVLoad = std::function<std::optional<HostKVLoadHandle>(uint64_t)>;
 using TaskKVFence = std::function<void(const Stream&)>;
 
-enum class TaskInputDomain : uint8_t { LLM, VLM };
-
 // Borrowed resources outlive the pipeline. PUSH binds a fresh layer
 // synchronizer to the invocation and resolves KV resources at Launch time.
 struct TaskModel {
@@ -92,7 +91,6 @@ struct TaskModel {
   TaskKVLoad load_kv = {};
   TaskKVFence fence_kv = {};
   std::function<void(const ModelParamsView&)> restore_request_state = {};
-  TaskInputDomain input_domain = TaskInputDomain::LLM;
 };
 
 class ProcessGroup;
@@ -314,6 +312,10 @@ class TaskExecutionPipeline final {
                         WorkerImpl* worker_pipeline = nullptr,
                         TaskInputDomain input_domain = TaskInputDomain::LLM);
   Status validate(const Slot& slot, const LlmForwardInput& input) const;
+  // Shared admit path: slot selection, ticketing, and result delivery for
+  // both input domains. prepare_slot fills one free slot or returns an error.
+  template <typename PrepareSlot>
+  TaskSubmission admit_task(PrepareSlot&& prepare_slot);
   Status prepare(uint32_t slot_id, const LlmForwardInput& input);
   Status prepare_worker(uint32_t slot_id, const LlmForwardInput& input);
   Status prepare_worker(uint32_t slot_id, const VlmForwardInput& input);

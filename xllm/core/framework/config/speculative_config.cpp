@@ -292,6 +292,12 @@ void SpeculativeConfig::validate() const {
         << " does not support enable_probabilistic_draft. Supported: MTP, "
            "DSpark, DFlash2, Eagle3.";
   }
+  // A non-empty draft model or the draft-free Suffix algorithm both turn on
+  // speculative decoding, and neither may run with a zero token width.
+  if (!draft_model().empty() || is_suffix_algorithm(speculative_algorithm())) {
+    CHECK_GT(num_speculative_tokens(), 0)
+        << "speculative tokens should not be zero";
+  }
 }
 
 }  // namespace xllm

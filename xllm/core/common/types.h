@@ -33,11 +33,9 @@ class EngineType {
  public:
   enum Value : int8_t {
     LLM = 0,
-    SSM = 1,
     VLM = 2,
     DIT = 3,
     REC = 4,
-    VLMSSM = 5,
     INVALID = -1,
   };
 
@@ -45,12 +43,8 @@ class EngineType {
   EngineType(const std::string& str) {
     if (str == "LLM" || str == "llm") {
       value_ = LLM;
-    } else if (str == "SSM" || str == "ssm") {
-      value_ = SSM;
     } else if (str == "VLM" || str == "vlm") {
       value_ = VLM;
-    } else if (str == "VLMSSM" || str == "vlmssm") {
-      value_ = VLMSSM;
     } else if (str == "DIT" || str == "dit") {
       value_ = DIT;
     } else if (str == "REC" || str == "rec") {
@@ -73,12 +67,8 @@ class EngineType {
   constexpr const char* to_string() const {
     if (this->value_ == LLM) {
       return "LLM";
-    } else if (this->value_ == SSM) {
-      return "SSM";
     } else if (this->value_ == VLM) {
       return "VLM";
-    } else if (this->value_ == VLMSSM) {
-      return "VLMSSM";
     } else if (this->value_ == DIT) {
       return "DIT";
     } else if (this->value_ == REC) {

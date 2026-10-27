@@ -73,8 +73,8 @@ Status normalize_tool_choice(nlohmann::json* json, bool* modified) {
 
 }  // namespace
 
-const ChatJsonParser& ChatJsonParser::get(ServingMode mode) {
-  if (mode == ServingMode::VLM) {
+const ChatJsonParser& ChatJsonParser::get(EngineType mode) {
+  if (mode == EngineType::VLM) {
     static const VlmChatJsonParser k_vlm_parser;
     return k_vlm_parser;
   }
