@@ -41,8 +41,12 @@ TEST(MluCpCapabilityTest, AcceptsOrthogonalDeepseekV4TargetAndSuffix) {
   EXPECT_FALSE(validate_context_parallel_config(
                    options, EngineType::LLM, "deepseek_v4", kWorldSize)
                    .has_value());
-  EXPECT_FALSE(validate_context_parallel_config(
-                   options, EngineType::SSM, "deepseek_v4", kWorldSize)
+  Options suffix_decode_options = options;
+  suffix_decode_options.num_speculative_tokens(/*value=*/2);
+  EXPECT_FALSE(validate_context_parallel_config(suffix_decode_options,
+                                                /*engine_type=*/EngineType::LLM,
+                                                /*model_type=*/"deepseek_v4",
+                                                kWorldSize)
                    .has_value());
 }
 
@@ -95,9 +99,12 @@ TEST(MluCpCapabilityTest, RejectsUnsupportedTopologyAndAcceptsMtp) {
                   .has_value());
 
   Options mtp_options = make_cp_options(kWorldSize);
-  mtp_options.speculative_algorithm("MTP");
-  EXPECT_FALSE(validate_context_parallel_config(
-                   mtp_options, EngineType::SSM, "glm_moe_dsa", kWorldSize)
+  mtp_options.speculative_algorithm(/*value=*/"MTP")
+      .num_speculative_tokens(/*value=*/2);
+  EXPECT_FALSE(validate_context_parallel_config(mtp_options,
+                                                /*engine_type=*/EngineType::LLM,
+                                                /*model_type=*/"glm_moe_dsa",
+                                                kWorldSize)
                    .has_value());
 
   Options invalid_kv_split = make_cp_options(kWorldSize);

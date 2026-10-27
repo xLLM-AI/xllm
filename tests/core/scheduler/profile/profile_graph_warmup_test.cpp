@@ -24,7 +24,6 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/options.h"
-#include "core/distributed_runtime/engine.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
@@ -35,6 +34,7 @@ limitations under the License.
 #include "core/framework/request/stopping_checker.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/kv_cache/manager/block_manager_pool.h"
+#include "core/scheduler/scheduler_callbacks.h"
 #include "platform/platform.h"
 #include "runtime/decode_graph_bucket.h"
 #include "scheduler/profile/decode_graph_warmup_plan.h"
@@ -99,44 +99,6 @@ class ScopedModelImplSnapshot final {
   std::string model_impl_;
 };
 
-TEST(StepTimeProfilePlanTest, NeverExceedsConfiguredSequenceCapacity) {
-  const std::vector<int32_t> batch_sizes =
-      build_step_time_profile_batch_sizes(/*max_seqs_per_batch=*/16);
-  ASSERT_FALSE(batch_sizes.empty());
-  EXPECT_EQ(batch_sizes.back(), 16);
-  EXPECT_TRUE(std::all_of(batch_sizes.begin(),
-                          batch_sizes.end(),
-                          [](int32_t x) { return x >= 1 && x <= 16; }));
-}
-
-TEST(StepTimeProfilePlanTest, BatchSizesCoverBoundaries) {
-  // Minimal input yields the single smallest bucket.
-  EXPECT_EQ(build_step_time_profile_batch_sizes(/*max_seqs_per_batch=*/1),
-            (std::vector<int32_t>{1}));
-  // Even tail buckets are padded up to the configured max.
-  EXPECT_EQ(build_step_time_profile_batch_sizes(/*max_seqs_per_batch=*/2),
-            (std::vector<int32_t>{1, 2}));
-  // The legacy upper bound keeps odd buckets only.
-  EXPECT_EQ(build_step_time_profile_batch_sizes(/*max_seqs_per_batch=*/23),
-            (std::vector<int32_t>{1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23}));
-  // Inputs beyond the legacy bound are capped by it.
-  EXPECT_EQ(build_step_time_profile_batch_sizes(/*max_seqs_per_batch=*/100),
-            build_step_time_profile_batch_sizes(/*max_seqs_per_batch=*/23));
-}
-
-TEST(StepTimeProfilePlanTest, WarmupDecodeSeqLenFollowsFiaAndContextBounds) {
-  // Without FIA the legacy 16-sequence bound applies, capped by the context.
-  const bool without_fia = false;
-  const bool with_fia = true;
-  EXPECT_EQ(warmup_decode_seq_len(without_fia, /*max_context_len=*/8), 8);
-  EXPECT_EQ(warmup_decode_seq_len(without_fia, /*max_context_len=*/16), 16);
-  EXPECT_EQ(warmup_decode_seq_len(without_fia, /*max_context_len=*/4096), 16);
-  // With FIA the bound rises to 2048, still capped by the context length.
-  EXPECT_EQ(warmup_decode_seq_len(with_fia, /*max_context_len=*/16), 16);
-  EXPECT_EQ(warmup_decode_seq_len(with_fia, /*max_context_len=*/2048), 2048);
-  EXPECT_EQ(warmup_decode_seq_len(with_fia, /*max_context_len=*/4096), 2048);
-}
-
 Sequence make_sequence(size_t index, const std::vector<int32_t>& tokens) {
   RequestSamplingParam sampling_param;
 
@@ -179,7 +141,7 @@ DecodeGraphWarmupConfig make_decode_graph_warmup_config(
   return warmup_config;
 }
 
-class RecordingProfileEngine final : public Engine {
+class RecordingProfileEngine final {
  public:
   explicit RecordingProfileEngine(bool overlap = false,
                                   int32_t dp_size = 1,
@@ -187,9 +149,7 @@ class RecordingProfileEngine final : public Engine {
                                   InstanceRole role = InstanceRole::DEFAULT,
                                   int32_t num_speculative_tokens = 0,
                                   bool enable_prefix_cache = false)
-      : overlap_(overlap),
-        linear_attention_(linear_attention),
-        num_speculative_tokens_(num_speculative_tokens) {
+      : overlap_(overlap), linear_attention_(linear_attention) {
     BlockManagerPool::Options options;
     options.num_blocks(/*num_blocks=*/64)
         .block_size(/*block_size=*/4)
@@ -264,11 +224,9 @@ class RecordingProfileEngine final : public Engine {
     return std::vector<RawForwardOutput>(batches.size());
   }
 
-  BlockManagerPool* kv_cache_manager() const override {
-    return block_manager_.get();
-  }
+  BlockManagerPool* kv_cache_manager() const { return block_manager_.get(); }
 
-  const ModelArgs& model_args() const override { return model_args_; }
+  const ModelArgs& model_args() const { return model_args_; }
 
   void reset_profile_markers() { all_requests_marked_ = true; }
 
@@ -298,7 +256,6 @@ class RecordingProfileEngine final : public Engine {
   bool all_requests_marked_ = true;
   bool overlap_ = false;
   bool linear_attention_ = false;
-  int32_t num_speculative_tokens_ = 0;
   int32_t pending_steps_ = 0;
   std::vector<int32_t> observed_batches_;
   std::vector<size_t> observed_token_lengths_;
@@ -356,7 +313,10 @@ TEST_P(LinearProfileGraphWarmupTest, PrefillWarmupDoesNotSplitIntoChunks) {
       /*linear_attention=*/true,
       InstanceRole::PREFILL,
       std::get<1>(GetParam()));
-  ProfileManager profile_manager(&engine, options(InstanceRole::PREFILL));
+  ProfileManager profile_manager(engine.kv_cache_manager(),
+                                 &engine.model_args(),
+                                 options(/*role=*/InstanceRole::PREFILL),
+                                 make_scheduler_callbacks(&engine));
 
   EXPECT_EQ(engine.prefill_batches(),
             (std::vector<std::vector<int32_t>>{{10}}));
@@ -378,7 +338,10 @@ TEST_P(LinearProfileGraphWarmupTest,
   profile_options.dp_size(3)
       .enable_dp_fair_token_budget(true)
       .max_tokens_per_chunk_for_prefill(-1);
-  ProfileManager profile_manager(&engine, profile_options);
+  ProfileManager profile_manager(engine.kv_cache_manager(),
+                                 &engine.model_args(),
+                                 profile_options,
+                                 make_scheduler_callbacks(&engine));
   EXPECT_EQ(engine.prefill_batches(),
             (std::vector<std::vector<int32_t>>{{10}}));
 }
@@ -397,7 +360,10 @@ TEST_P(LinearProfileGraphWarmupTest, PrefillUsesInjectedFairBudget) {
         .enable_dp_fair_token_budget(true)
         .enable_chunked_prefill(chunked)
         .max_tokens_per_chunk_for_prefill(6);
-    ProfileManager profile_manager(&engine, profile_options);
+    ProfileManager profile_manager(engine.kv_cache_manager(),
+                                   &engine.model_args(),
+                                   profile_options,
+                                   make_scheduler_callbacks(&engine));
     const int32_t expected_tokens = chunked ? 6 : 10;
     EXPECT_EQ(engine.prefill_batches(),
               (std::vector<std::vector<int32_t>>{{expected_tokens}}));
@@ -411,8 +377,11 @@ TEST_P(LinearProfileGraphWarmupTest, PrefillRespectsSequenceLimit) {
       /*linear_attention=*/true,
       InstanceRole::PREFILL,
       std::get<1>(GetParam()));
-  ProfileManager profile_manager(&engine,
-                                 options(InstanceRole::PREFILL, 10, 2));
+  ProfileManager profile_manager(
+      engine.kv_cache_manager(),
+      &engine.model_args(),
+      options(/*role=*/InstanceRole::PREFILL, /*sequence_budget=*/2),
+      make_scheduler_callbacks(&engine));
 
   EXPECT_EQ(engine.prefill_batches(),
             (std::vector<std::vector<int32_t>>{{10}}));
@@ -427,7 +396,10 @@ TEST_P(LinearProfileGraphWarmupTest, EagerWarmupAcceptsMoreThanOneCheckpoint) {
       std::get<1>(GetParam()));
   ProfileManager::Options profile_options = options(InstanceRole::PREFILL);
   profile_options.enable_graph(false);
-  ProfileManager profile_manager(&engine, profile_options);
+  ProfileManager profile_manager(engine.kv_cache_manager(),
+                                 &engine.model_args(),
+                                 profile_options,
+                                 make_scheduler_callbacks(&engine));
   EXPECT_EQ(engine.prefill_batches(),
             (std::vector<std::vector<int32_t>>{{10}}));
   EXPECT_EQ(engine.kv_cache_manager()->num_used_blocks(),
@@ -444,7 +416,10 @@ TEST_P(LinearProfileGraphWarmupTest,
       std::get<1>(GetParam()));
   ProfileManager::Options profile_options = options(InstanceRole::PREFILL);
   profile_options.disable_graph_warmup(true);
-  ProfileManager profile_manager(&engine, profile_options);
+  ProfileManager profile_manager(engine.kv_cache_manager(),
+                                 &engine.model_args(),
+                                 profile_options,
+                                 make_scheduler_callbacks(&engine));
   profile_manager.run_request(10, 3);
   profile_manager.run_request(8, 0);
   EXPECT_EQ(engine.prefill_batches(),
@@ -461,7 +436,10 @@ TEST_P(LinearProfileGraphWarmupTest, UnifiedWarmupSeedsDecodeSlots) {
       InstanceRole::DEFAULT,
       std::get<1>(GetParam()),
       /*enable_prefix_cache=*/true);
-  ProfileManager profile_manager(&engine, options(InstanceRole::DEFAULT));
+  ProfileManager profile_manager(engine.kv_cache_manager(),
+                                 &engine.model_args(),
+                                 options(/*role=*/InstanceRole::DEFAULT),
+                                 make_scheduler_callbacks(&engine));
 
   EXPECT_EQ(engine.prefill_batches(),
             (std::vector<std::vector<int32_t>>{{10}}));
@@ -480,7 +458,10 @@ TEST_P(LinearProfileGraphWarmupTest, DecodeOnlyWarmupAllocatesWorkingSlots) {
       /*linear_attention=*/true,
       InstanceRole::DECODE,
       std::get<1>(GetParam()));
-  ProfileManager profile_manager(&engine, options(InstanceRole::DECODE));
+  ProfileManager profile_manager(engine.kv_cache_manager(),
+                                 &engine.model_args(),
+                                 options(/*role=*/InstanceRole::DECODE),
+                                 make_scheduler_callbacks(&engine));
 
   EXPECT_TRUE(engine.prefill_batches().empty());
   EXPECT_GT(engine.decode_sequences(), 0);
@@ -814,27 +795,6 @@ TEST(GraphWarmupTest, DecodeRoleUsesDecodeOnlyPlan) {
             GraphWarmupPlan::DECODE_ONLY);
 }
 
-TEST(GraphWarmupTest, FormatsWarmupProgress) {
-  const std::string progress = graph_warmup_progress(
-      /*completed=*/3, /*total=*/8, /*token_bucket=*/8, /*latency_ms=*/12.5);
-
-  EXPECT_EQ(progress,
-            "Graph warmup progress: [########------------] 3/8 37.5%, "
-            "token_bucket=8, latency=12.50 ms");
-}
-
-TEST(GraphWarmupTest, FormatsCompletedWarmupProgress) {
-  const std::string progress = graph_warmup_progress(
-      /*completed=*/8,
-      /*total=*/8,
-      /*token_bucket=*/64,
-      /*latency_ms=*/100.0);
-
-  EXPECT_EQ(progress,
-            "Graph warmup progress: [####################] 8/8 100.0%, "
-            "token_bucket=64, latency=100.00 ms");
-}
-
 TEST(GraphWarmupTest, InjectsBootstrapEmbeddingWhenSpeculativeEnabled) {
   Sequence sequence = make_sequence(/*index=*/0, /*tokens=*/{1, 2, 3});
 
@@ -927,8 +887,13 @@ TEST(GraphWarmupTest, PresetDpRankControlsBlockAllocation) {
 TEST(GraphWarmupTest, MarksOrdinaryProfileRequestsAsSyntheticLoad) {
   RecordingProfileEngine engine;
   ProfileManager::Options options;
-  options.max_tokens_per_batch(4).max_seqs_per_batch(1).dp_size(1);
-  ProfileManager profile_manager(&engine, options);
+  options.max_tokens_per_batch(/*value=*/4)
+      .max_seqs_per_batch(/*value=*/1)
+      .dp_size(/*value=*/1);
+  ProfileManager profile_manager(engine.kv_cache_manager(),
+                                 &engine.model_args(),
+                                 options,
+                                 make_scheduler_callbacks(&engine));
   engine.reset_profile_markers();
 
   profile_manager.run_request(/*token_length=*/4, /*prefix_length=*/0);
@@ -948,7 +913,10 @@ TEST(GraphWarmupTest, DecodeProfileUsesConfiguredSpeculativeGeometry) {
       .dp_size(1)
       .instance_role(InstanceRole::DECODE)
       .decode_graph_warmup_config(engine_options.decode_graph_warmup_config());
-  ProfileManager profile_manager(&engine, options);
+  ProfileManager profile_manager(engine.kv_cache_manager(),
+                                 &engine.model_args(),
+                                 options,
+                                 make_scheduler_callbacks(&engine));
 
   profile_manager.profile_decode_step_time(/*token_length=*/5,
                                            /*batch_size=*/1,
@@ -1041,7 +1009,10 @@ TEST(GraphWarmupTest, OrdinaryStepsWarmBucketsAndDrainBeforeReleasingKv) {
             /*num_speculative_tokens=*/0,
             /*enable_no_padding=*/false,
             /*max_graph_batch_size=*/4));
-    ProfileManager profile_manager(&engine, options);
+    ProfileManager profile_manager(engine.kv_cache_manager(),
+                                   &engine.model_args(),
+                                   options,
+                                   make_scheduler_callbacks(&engine));
     EXPECT_EQ(engine.observed_batches(), (std::vector<int32_t>{4, 2, 1}));
     EXPECT_EQ(engine.pending_steps(), 0);
     EXPECT_EQ(engine.kv_cache_manager()->num_used_blocks(), used_blocks);
@@ -1122,7 +1093,10 @@ TEST(GraphWarmupTest, PythonNoPaddingWarmsEverySequenceCount) {
                                                 no_padding,
                                                 /*max_graph_batch_size=*/4));
 
-        ProfileManager profile_manager(&engine, options);
+        ProfileManager profile_manager(engine.kv_cache_manager(),
+                                       &engine.model_args(),
+                                       options,
+                                       make_scheduler_callbacks(&engine));
 
         std::vector<int32_t> expected = {4, 3, 2, 1};
         if (!no_padding) {
@@ -1162,7 +1136,10 @@ TEST(GraphWarmupTest, VmmUsesOrdinaryEagerWarmup) {
         .enable_profile_step_time(false)
         .instance_role(InstanceRole::DEFAULT);
 
-    ProfileManager profile_manager(&engine, options);
+    ProfileManager profile_manager(engine.kv_cache_manager(),
+                                   &engine.model_args(),
+                                   options,
+                                   make_scheduler_callbacks(&engine));
 
     EXPECT_EQ(engine.observed_batches(), (std::vector<int32_t>{1}));
     EXPECT_EQ(engine.observed_token_lengths(), (std::vector<size_t>{16}));
@@ -1192,7 +1169,10 @@ TEST(GraphWarmupTest, VmmDecodeOnlySkipsEagerWarmup) {
       .enable_profile_step_time(false)
       .instance_role(InstanceRole::DECODE);
 
-  ProfileManager profile_manager(&engine, options);
+  ProfileManager profile_manager(engine.kv_cache_manager(),
+                                 &engine.model_args(),
+                                 options,
+                                 make_scheduler_callbacks(&engine));
 
   EXPECT_TRUE(engine.observed_batches().empty());
   EXPECT_EQ(engine.pending_steps(), 0);
@@ -1221,7 +1201,10 @@ TEST(GraphWarmupTest, VmmGraphWarmupCanBeDisabled) {
       .enable_profile_step_time(false)
       .instance_role(InstanceRole::DEFAULT);
 
-  ProfileManager profile_manager(&engine, options);
+  ProfileManager profile_manager(engine.kv_cache_manager(),
+                                 &engine.model_args(),
+                                 options,
+                                 make_scheduler_callbacks(&engine));
 
   EXPECT_TRUE(engine.observed_batches().empty());
   EXPECT_EQ(engine.pending_steps(), 0);

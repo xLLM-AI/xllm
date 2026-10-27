@@ -204,12 +204,6 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
   executor_config["task_type"] = options_.task_type();
   executor_config["max_encoder_cache_size"] = options_.max_encoder_cache_size();
   executor_config["num_speculative_tokens"] = options_.num_speculative_tokens();
-  executor_config["engine_type"] = SpeculativeConfig::uses_ssm_engine(
-                                       options_.draft_model_path().value_or(""),
-                                       options_.speculative_algorithm(),
-                                       options_.num_speculative_tokens())
-                                       ? "SSM"
-                                       : "LLM";
   executor_config["enable_chunked_prefill"] = options_.enable_chunked_prefill();
   executor_config["enable_prefix_cache"] =
       KVCacheConfig::get_instance().enable_prefix_cache();

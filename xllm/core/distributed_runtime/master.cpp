@@ -31,7 +31,9 @@ limitations under the License.
 
 #include "common/types.h"
 #include "core/common/xllm_build_info.h"
+#include "core/distributed_runtime/xservice_client.h"
 #include "core/framework/config/eplb_config.h"
+#include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
@@ -39,6 +41,7 @@ limitations under the License.
 #include "framework/parallel_state/npu_rank_table_env.h"
 #endif
 #include "core/platform/device_name_utils.h"
+#include "core/scheduler/scheduler.h"
 #include "platform/platform.h"
 
 namespace brpc {
@@ -218,6 +221,64 @@ void Master::wait() {
   if (idle_thread_.joinable()) {
     idle_thread_.join();
   }
+}
+
+SchedulerOptions Master::make_scheduler_options() const {
+  const SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
+  SchedulerOptions scheduler_options;
+  scheduler_options.enable_graph(options_.enable_graph())
+      .disable_graph_warmup(options_.disable_graph_warmup())
+      .max_tokens_per_batch(options_.max_tokens_per_batch())
+      .max_seqs_per_batch(options_.max_seqs_per_batch())
+      .request_queue_size(options_.request_queue_size())
+      .max_tokens_per_chunk_for_prefill(
+          options_.max_tokens_per_chunk_for_prefill())
+      .num_speculative_tokens(options_.num_speculative_tokens())
+      .decode_graph_warmup_config(options_.decode_graph_warmup_config())
+      .nnodes(options_.nnodes())
+      .dp_size(options_.dp_size())
+      .cp_size(options_.cp_size())
+      .kv_split_size(ParallelConfig::get_instance().kv_split_size_effective())
+      .enable_mix_batch(scheduler_config.enable_mix_batch())
+      .prefill_scheduling_memory_usage_threshold(
+          scheduler_config.prefill_scheduling_memory_usage_threshold())
+      .chunked_match_frequency(scheduler_config.chunked_match_frequency())
+      .aggressive_coeff(scheduler_config.aggressive_coeff())
+      .enable_starve_prevent(scheduler_config.enable_starve_prevent())
+      .starve_threshold(scheduler_config.starve_threshold())
+      .enable_disagg_pd(options_.enable_disagg_pd())
+      .enable_schedule_overlap(options_.enable_schedule_overlap())
+      .enable_chunked_prefill(options_.enable_chunked_prefill())
+      .enable_dp_fair_token_budget(
+          scheduler_config.enable_dp_fair_token_budget())
+      .instance_name(options_.instance_name())
+      .instance_role(options_.instance_role())
+      .kv_cache_transfer_mode(options_.kv_cache_transfer_mode())
+      .enable_service_routing(options_.enable_service_routing())
+      .disable_log_stats(options_.disable_log_stats())
+      .priority_strategy(options_.priority_strategy())
+      .enable_profile_step_time(options_.enable_profile_step_time())
+      .enable_profile_token_budget(options_.enable_profile_token_budget())
+      .enable_latency_aware_schedule(options_.enable_latency_aware_schedule())
+      .profile_max_prompt_length(options_.profile_max_prompt_length())
+      .enable_profile_kv_blocks(options_.enable_profile_kv_blocks())
+      .disable_ttft_profiling(options_.disable_ttft_profiling())
+      .max_global_ttft_ms(options_.max_global_ttft_ms())
+      .max_global_tpot_ms(options_.max_global_tpot_ms())
+      .server_idx(options_.server_idx());
+  return scheduler_options;
+}
+
+XServiceClient* Master::init_service_routing() {
+  if (!options_.enable_service_routing()) {
+    return nullptr;
+  }
+  XServiceClient* xservice_client = XServiceClient::get_instance();
+  CHECK(xservice_client->init(options_.etcd_addr().value_or(""),
+                              options_.instance_name().value_or(""),
+                              options_.etcd_namespace().value_or("")))
+      << "XServiceClient init fail!";
+  return xservice_client;
 }
 
 void Master::run() {

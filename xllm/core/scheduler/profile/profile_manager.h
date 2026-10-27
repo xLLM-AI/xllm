@@ -15,8 +15,6 @@ limitations under the License.
 
 #pragma once
 
-#include <concepts>
-#include <functional>
 #include <memory>
 #include <optional>
 #include <tuple>
@@ -26,7 +24,6 @@ limitations under the License.
 #include "core/common/macros.h"
 #include "core/common/prefill_policy.h"
 #include "core/common/types.h"
-#include "core/distributed_runtime/engine.h"
 #include "core/framework/batch/batch_factory.h"
 #include "core/framework/request/request.h"
 #include "core/framework/request/sequence.h"
@@ -34,25 +31,10 @@ limitations under the License.
 #include "core/runtime/options.h"
 #include "core/scheduler/profile/decode_graph_warmup_plan.h"
 #include "core/scheduler/profile/time_predictor.h"
+#include "core/scheduler/scheduler_callbacks.h"
 
 namespace xllm {
-class DistributedWorkerManager;
-class SpeculativeConfig;
-
-std::vector<int32_t> build_step_time_profile_batch_sizes(
-    int32_t max_seqs_per_batch);
-
-// Returns the decode sequence length bound used to measure graph-mode decode
-// capacity during warmup. FIA decode replays refresh dynamic host parameters,
-// so the FIA path measures with the larger FIA warmup bound instead of the
-// default 16 to keep measured memory aligned with real captures.
-int32_t warmup_decode_seq_len(bool fia_enabled, int32_t max_context_len);
-
-class ProfileManager {
- private:
-  using StepCallback = std::function<ForwardOutput(BatchGroup&)>;
-  using ResultCallback = std::function<void(BatchGroup&)>;
-
+class ProfileManager final {
  public:
   struct Options {
     PROPERTY(bool, enable_graph) = false;
@@ -97,29 +79,11 @@ class ProfileManager {
     int block_size;
     double slope;      // milliseconds per block
     double intercept;  // milliseconds constant overhead
-    std::string note;
   };
-  template <typename TargetEngine>
-    requires requires(TargetEngine* engine, BatchGroup& batch) {
-      static_cast<Engine*>(engine);
-      { engine->step(batch) } -> std::same_as<ForwardOutput>;
-      {
-        engine->collect_step_outputs(batch)
-      } -> std::same_as<std::vector<RawForwardOutput>>;
-    }
-  ProfileManager(TargetEngine* engine,
+  ProfileManager(KVCacheManager* kv_cache_manager,
+                 const ModelArgs* model_args,
                  const Options& options,
-                 std::shared_ptr<DistributedWorkerManager>
-                     distributed_worker_manager = nullptr)
-      : ProfileManager(
-            static_cast<Engine*>(engine),
-            options,
-            [engine](BatchGroup& batch) { return engine->step(batch); },
-            [engine](BatchGroup& batch) {
-              batch.apply_outputs(engine->collect_step_outputs(batch),
-                                  BatchOutputAction::COMMIT_PENDING);
-            },
-            std::move(distributed_worker_manager)) {}
+                 SchedulerCallbacks callbacks);
 
   int32_t get_token_budget();
 
@@ -137,13 +101,6 @@ class ProfileManager {
   double predict_step_time(Sequence* sequence,
                            bool if_need_add_constant_term = true,
                            bool force_use_prefill_predictor = false);
-  // for single batch or sequences
-  double predict_step_time(int32_t length,
-                           int32_t prefix_length,
-                           int32_t batch_size);
-
-  double predict_step_time(const std::vector<int32_t>& length_vec,
-                           const std::vector<int32_t>& prefix_length_vec);
   // Generate a request of token_length and prefix_length, finally
   // executing and returning the inference time.
   double run_request(int32_t token_length,
@@ -151,8 +108,6 @@ class ProfileManager {
                      int32_t batch_size = 1,
                      int32_t extra_token_length = 0,
                      bool is_graph_warmup = true);
-  double run_request(const std::vector<int32_t>& token_length_vec,
-                     const std::vector<int32_t>& prefix_length_vec);
 
   // Generate a batch of decode requests in DECODE stage and execute one decode
   // step, then return the step latency.
@@ -171,10 +126,6 @@ class ProfileManager {
       std::vector<std::pair<int32_t, double>> time_profiling_data);
 
   double get_constant_overhead();
-
-  int32_t get_quadratic_root(Sequence* sequence, double budget);
-
-  std::vector<double> get_coefficients(bool is_prefill = true);
 
   void profile_step_time(bool if_dump_to_file);
 
@@ -203,10 +154,6 @@ class ProfileManager {
                                         int32_t total_length);
 
   std::string generate_filename(const std::string& file_suffix);
-
-  void eval_sequence_latency_prediction();
-
-  void eval_batch_latency_prediction(const std::string mode);
 
   void profile_token_budget();
 
@@ -248,14 +195,7 @@ class ProfileManager {
       int block_size) const;
 
  private:
-  friend class ContinuousSchedulerBase;
-
-  ProfileManager(
-      Engine* engine,
-      const Options& options,
-      StepCallback step_callback,
-      ResultCallback result_callback,
-      std::shared_ptr<DistributedWorkerManager> distributed_worker_manager);
+  void step_batch(BatchGroup& batches);
 
   std::unique_ptr<TimePredictor> prefill_time_predictor_;
   std::unique_ptr<TimePredictor> decode_time_predictor_;
@@ -263,10 +203,10 @@ class ProfileManager {
   const Options options_;
   const PrefillPolicy prefill_policy_;
 
-  Engine* engine_;
-  std::shared_ptr<DistributedWorkerManager> distributed_worker_manager_;
-  StepCallback step_callback_;
-  ResultCallback result_callback_;
+  const ModelArgs* model_args_;
+
+  SchedulerCallbacks callbacks_;
+
   BatchFactory batch_factory_;
 
   DecodeGraphWarmupPlan decode_graph_warmup_plan_;

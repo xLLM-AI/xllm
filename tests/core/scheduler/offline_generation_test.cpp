@@ -23,22 +23,15 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "core/distributed_runtime/engine.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/kv_cache/manager/block_manager_pool.h"
 #include "core/scheduler/continuous_scheduler.h"
+#include "core/scheduler/fake_scheduling_engine_test_utils.h"
 
 namespace xllm {
 namespace {
 
-class TestTokenizer final : public Tokenizer {
- public:
-  std::unique_ptr<Tokenizer> clone() const override {
-    return std::make_unique<TestTokenizer>();
-  }
-};
-
-class FiniteGenerationEngine final : public Engine {
+class FiniteGenerationEngine final : public FakeSchedulingEngine {
  public:
   explicit FiniteGenerationEngine(bool overlap) : overlap_(overlap) {
     BlockManagerPool::Options options;
@@ -46,11 +39,10 @@ class FiniteGenerationEngine final : public Engine {
         .block_size(4)
         .max_seqs_per_batch(1)
         .enable_prefix_cache(false);
-    kv_cache_manager_ = std::make_unique<BlockManagerPool>(options);
-    tokenizer_ = std::make_unique<TestTokenizer>();
+    block_manager_ = std::make_unique<BlockManagerPool>(options);
   }
 
-  ForwardOutput step(BatchGroup& batches) {
+  ForwardOutput step(BatchGroup& batches) override {
     ++submitted_;
     if (overlap_ && submitted_ > completed_ + 2) {
       throw std::logic_error("Pending generation results were not collected");
@@ -67,7 +59,7 @@ class FiniteGenerationEngine final : public Engine {
   }
 
   std::vector<RawForwardOutput> collect_step_outputs(
-      const BatchGroup& batches) {
+      const BatchGroup& batches) override {
     ++completed_;
     for (const Batch& batch : batches) {
       for (Sequence* sequence : batch.get_sequences()) {
@@ -87,38 +79,6 @@ class FiniteGenerationEngine final : public Engine {
   const bool overlap_;
   size_t submitted_ = 0;
   size_t completed_ = 0;
-};
-
-class OfflineGenerationScheduler final : public ContinuousScheduler<> {
- public:
-  OfflineGenerationScheduler(FiniteGenerationEngine* engine,
-                             const SchedulerOptions& options)
-      : ContinuousScheduler<>(engine, options) {}
-
-  void seed_pending_batch(const std::shared_ptr<Request>& request) {
-    pending_step_.emplace();
-    pending_step_->requests.emplace_back(request);
-    pending_step_->batches = BatchGroup(/*dp_size=*/1);
-    pending_step_->batches.front().add(request->sequences().front().get());
-  }
-
-  void notify_after_next_prepare_batch(std::promise<void>& notification) {
-    prepared_notification_ = &notification;
-  }
-
- protected:
-  BatchGroup prepare_batch() override {
-    BatchGroup batch = ContinuousSchedulerBase::prepare_batch();
-    std::promise<void>* notification =
-        std::exchange(prepared_notification_, nullptr);
-    if (notification != nullptr) {
-      notification->set_value();
-    }
-    return batch;
-  }
-
- private:
-  std::promise<void>* prepared_notification_ = nullptr;
 };
 
 SchedulerOptions generation_options(bool overlap) {
@@ -177,8 +137,9 @@ class OfflineGenerationTest : public ::testing::Test {
 TEST_F(OfflineGenerationTest, OverlapCommitsFinalTokensAndCanRunAgain) {
   SchedulerOptions options = generation_options(/*overlap=*/true);
   FiniteGenerationEngine engine(/*overlap=*/true);
-  OfflineGenerationScheduler scheduler(&engine, options);
-  const auto initial_free_blocks = engine.kv_cache_manager()->num_free_blocks();
+  TestableContinuousScheduler scheduler(&engine, options);
+  const auto initial_free_blocks =
+      engine.kv_cache_manager()->num_free_blocks();
 
   scheduler.generate_with_schedule_overlap();
   EXPECT_EQ(engine.submitted(), 0u);
@@ -210,7 +171,7 @@ TEST_F(OfflineGenerationTest, OverlapCommitsFinalTokensAndCanRunAgain) {
 TEST_F(OfflineGenerationTest, OverlapDrainsPreviouslySubmittedWork) {
   SchedulerOptions options = generation_options(/*overlap=*/true);
   FiniteGenerationEngine engine(/*overlap=*/true);
-  OfflineGenerationScheduler scheduler(&engine, options);
+  TestableContinuousScheduler scheduler(&engine, options);
   auto request = make_request(/*max_tokens=*/1, /*overlap=*/true);
   request->set_cancel();
   const std::weak_ptr<Request> retained_request = request;
@@ -228,7 +189,7 @@ TEST_F(OfflineGenerationTest, OverlapDrainsPreviouslySubmittedWork) {
 TEST_F(OfflineGenerationTest, OverlapWaitsForAdmissionAndResponse) {
   SchedulerOptions options = generation_options(/*overlap=*/true);
   FiniteGenerationEngine engine(/*overlap=*/true);
-  OfflineGenerationScheduler scheduler(&engine, options);
+  TestableContinuousScheduler scheduler(&engine, options);
   auto request = make_request(/*max_tokens=*/1, /*overlap=*/true);
   std::promise<void> callback_started;
   std::future<void> callback = callback_started.get_future();
@@ -240,14 +201,10 @@ TEST_F(OfflineGenerationTest, OverlapWaitsForAdmissionAndResponse) {
     return true;
   };
   scheduler.incr_pending_requests(/*count=*/1);
-  std::promise<void> prepared;
-  std::future<void> preparing = prepared.get_future();
-  scheduler.notify_after_next_prepare_batch(prepared);
   auto generated = std::async(std::launch::async, [&]() {
     scheduler.generate_with_schedule_overlap();
   });
-  EXPECT_EQ(preparing.wait_for(std::chrono::seconds(5)),
-            std::future_status::ready);
+  EXPECT_TRUE(scheduler.wait_until_armed());
   EXPECT_NE(generated.wait_for(std::chrono::seconds(0)),
             std::future_status::ready);
   EXPECT_TRUE(scheduler.add_request(request));
@@ -264,7 +221,7 @@ TEST_F(OfflineGenerationTest, OverlapWaitsForAdmissionAndResponse) {
 TEST_F(OfflineGenerationTest, LegacyGenerationKeepsSynchronousOutput) {
   SchedulerOptions options = generation_options(/*overlap=*/false);
   FiniteGenerationEngine engine(/*overlap=*/false);
-  OfflineGenerationScheduler scheduler(&engine, options);
+  TestableContinuousScheduler scheduler(&engine, options);
   auto request = make_request(/*max_tokens=*/3, /*overlap=*/false);
   std::vector<RequestOutput> outputs;
   outputs.reserve(1);

@@ -22,12 +22,9 @@ limitations under the License.
 
 namespace xllm {
 
-PDService::PDService(PDScheduler* scheduler,
-                     Engine* engine,
-                     PDServiceOptions response_options)
+PDService::PDService(PDScheduler* scheduler, PDServiceOptions response_options)
     : pd_service_impl_(
           std::make_unique<PDServiceImpl>(scheduler,
-                                          engine,
                                           std::move(response_options))) {}
 
 void PDService::ReleaseReservation(

@@ -170,4 +170,10 @@ SharedStaticKVCachePlan plan_shared_static_kv_cache(
     int64_t world_size,
     torch::ScalarType dtype);
 
+KVCacheCapacity combine_target_and_draft_kv_cache_capacity(
+    KVCacheCapacity target_cap,
+    const KVCacheCapacity& draft_cap,
+    const ModelArgs& target_args,
+    const ModelArgs& draft_args);
+
 }  // namespace xllm

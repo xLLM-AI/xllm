@@ -30,14 +30,13 @@ limitations under the License.
 #include "common/metrics.h"
 #include "core/common/message.h"
 #include "core/disaggregation/pd_service_impl.h"
-#include "core/distributed_runtime/engine_dispatch.h"
+#include "core/distributed_runtime/distributed_worker_manager.h"
 #include "core/distributed_runtime/kv_transfer_coordinator.h"
 #include "core/distributed_runtime/model_residency_coordinator.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/model_config.h"
-#include "core/framework/config/parallel_config.h"
 #include "core/framework/config/parallel_config_validation.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
@@ -51,7 +50,6 @@ limitations under the License.
 #include "core/framework/config/eplb_config.h"
 #include "models/model_registry.h"
 #endif
-#include "core/common/types.h"
 #include "distributed_runtime/xservice_client.h"
 #include "runtime/options.h"
 #include "scheduler/scheduler_factory.h"
@@ -149,18 +147,12 @@ VLMMaster::VLMMaster(const Options& options)
   CHECK(!options_.enable_disagg_pd() ||
         options_.kv_cache_transfer_mode() != "PULL")
       << "VLM disaggregated PD does not support KV cache PULL.";
-  const auto& draft_model_path = options_.draft_model_path();
-  const bool use_speculative_engine =
-      draft_model_path && !draft_model_path->empty() &&
-      !SpeculativeConfig::is_suffix_algorithm(options_.speculative_algorithm());
+  const bool loads_draft_model = SpeculativeConfig::loads_draft_model(options_);
   const std::string model_type =
       get_model_type(options_.model_path(), options_.backend());
   options_.validate(model_type);
   const std::optional<std::string> cp_error = validate_context_parallel_config(
-      options_,
-      use_speculative_engine ? EngineType::VLMSSM : EngineType::VLM,
-      model_type,
-      options_.nnodes());
+      options_, /*engine_type=*/EngineType::VLM, model_type, options_.nnodes());
   CHECK(!cp_error.has_value()) << cp_error.value();
   const std::optional<std::string> speculative_error =
       ModelConfig::validate_python_speculative_decode(
@@ -171,7 +163,7 @@ VLMMaster::VLMMaster(const Options& options)
   CHECK(!speculative_error.has_value()) << speculative_error.value();
   validate_layerwise_split_size_startup_config(
       options_, model_type, options_.nnodes());
-  CHECK(options_.host_blocks_factor() <= 1.0 || !use_speculative_engine ||
+  CHECK(options_.host_blocks_factor() <= 1.0 || !loads_draft_model ||
         SpeculativeConfig::supports_host_kv_cache(
             options_.speculative_algorithm()))
       << "Host KV cache requires ordinary generation or model-based "
@@ -248,38 +240,17 @@ VLMMaster::VLMMaster(const Options& options)
       .max_tokens_per_chunk_for_prefill(
           options_.max_tokens_per_chunk_for_prefill());
 
-  if (use_speculative_engine) {
+  if (loads_draft_model) {
     CHECK(!options_.enable_disagg_pd())
         << "VLM speculative decoding does not support disaggregated PD";
     CHECK(!options_.enable_service_routing())
         << "VLM speculative decoding does not support service routing";
-    engine_options.draft_model_path(options_.draft_model_path())
-        .num_speculative_tokens(options_.num_speculative_tokens())
-        .speculative_algorithm(options_.speculative_algorithm())
-        .enable_probabilistic_draft(options_.enable_probabilistic_draft())
-        .enable_mtp_draft_body_tp1(options_.enable_mtp_draft_body_tp1())
-        .speculative_suffix_cache_max_depth(
-            options_.speculative_suffix_cache_max_depth())
-        .speculative_suffix_max_cached_requests(
-            options_.speculative_suffix_max_cached_requests())
-        .transfer_listen_port(options_.transfer_listen_port());
-    speculative_engine_ =
-        std::make_unique<SpeculativeEngineBase<VLMEngine>>(engine_options);
-    draft_model_residency_coordinator_ =
-        std::make_unique<ModelResidencyCoordinator>(
-            ModelResidencyCoordinator::Options{
-                .enabled = KVCacheConfig::get_instance().enable_vmm_kvcache() ||
-                           LoadConfig::get_instance().enable_vmm_weights(),
-                .model_id = engine_options.model_id()},
-            speculative_engine_->get_distributed_worker_manager());
-  } else {
-    vlm_engine_ = std::make_unique<VLMEngine>(engine_options);
+    SpeculativeConfig::apply_speculative_options(options_, engine_options);
+    engine_options.transfer_listen_port(options_.transfer_listen_port());
   }
-  distributed_worker_manager_ = dispatch_engine(
-      [](auto* engine) { return engine->get_distributed_worker_manager(); },
-      vlm_engine_.get(),
-      speculative_engine_.get());
-  if (vlm_engine_ != nullptr) {
+  vlm_engine_ = std::make_unique<VLMEngine>(engine_options);
+  distributed_worker_manager_ = vlm_engine_->get_distributed_worker_manager();
+  if (!loads_draft_model) {
     model_residency_coordinator_ = std::make_shared<ModelResidencyCoordinator>(
         ModelResidencyCoordinator::Options{
             .enabled = KVCacheConfig::get_instance().enable_vmm_kvcache() ||
@@ -298,117 +269,41 @@ VLMMaster::VLMMaster(const Options& options)
           .prefetch_batch_size = options_.prefetch_batch_size()},
       distributed_worker_manager_);
 
-  auto finish_engine_initialization = [this](auto* engine) {
-    model_args_ = engine->model_args();
-    if (options_.enable_service_routing()) {
-      xservice_client_ = XServiceClient::get_instance();
-      CHECK(xservice_client_->init(options_.etcd_addr().value_or(""),
-                                   options_.instance_name().value_or(""),
-                                   options_.etcd_namespace().value_or("")))
-          << "XServiceClient init fail!";
-    }
-  };
-  if (use_speculative_engine) {
-    const LLMEngine::ModelInitCallback prepare_draft =
-        [this](const ModelLoader& model_loader,
-               int64_t num_layers,
-               int32_t dp_size,
-               int32_t tp_size,
-               MasterStatus master_status) {
-          return draft_model_residency_coordinator_->initialize_model(
-              model_loader, num_layers, dp_size, tp_size, master_status);
-        };
-    CHECK(speculative_engine_->init(
-        options_.master_status(), prepare_draft, kv_transfer_coordinator_));
-    finish_engine_initialization(speculative_engine_.get());
-  } else {
-    const VLMEngine::ModelInitCallback prepare_model =
-        [this](const ModelLoader& loader,
-               int64_t num_layers,
-               int32_t dp_size,
-               int32_t tp_size,
-               MasterStatus status) {
-          return model_residency_coordinator_->initialize_model(
-              loader, num_layers, dp_size, tp_size, status);
-        };
-    CHECK(vlm_engine_->init(
-        master_status_, prepare_model, kv_transfer_coordinator_));
+  const ModelInitCallback prepare_model =
+      model_residency_coordinator_
+          ? make_model_init_callback(model_residency_coordinator_.get())
+          : ModelInitCallback{};
+  CHECK(vlm_engine_->init(
+      master_status_, prepare_model, kv_transfer_coordinator_));
+  if (model_residency_coordinator_) {
     CHECK(model_residency_coordinator_->finish_initialization(master_status_));
-    finish_engine_initialization(vlm_engine_.get());
+  }
+  model_args_ = vlm_engine_->model_args();
+  xservice_client_ = init_service_routing();
+
+  scheduler_ =
+      create_continuous_scheduler(vlm_engine_->kv_cache_manager(),
+                                  &vlm_engine_->model_args(),
+                                  vlm_engine_->tokenizer(),
+                                  make_scheduler_callbacks(vlm_engine_.get()),
+                                  make_scheduler_options(),
+                                  model_residency_coordinator_,
+                                  distributed_worker_manager_,
+                                  kv_transfer_coordinator_,
+                                  make_pd_service_options(options_, model_args_));
+
+  if (xservice_client_ != nullptr) {
+    xservice_client_->register_instance(scheduler_->get_instance_info());
   }
 
-  SchedulerOptions scheduler_options;
-  scheduler_options.enable_graph(options_.enable_graph())
-      .disable_graph_warmup(options_.disable_graph_warmup())
-      .max_tokens_per_batch(options_.max_tokens_per_batch())
-      .max_seqs_per_batch(options_.max_seqs_per_batch())
-      .request_queue_size(options_.request_queue_size())
-      .max_tokens_per_chunk_for_prefill(
-          options_.max_tokens_per_chunk_for_prefill())
-      .num_speculative_tokens(options_.num_speculative_tokens())
-      .decode_graph_warmup_config(options_.decode_graph_warmup_config())
-      .nnodes(options_.nnodes())
-      .dp_size(options_.dp_size())
-      .cp_size(options_.cp_size())
-      .kv_split_size(ParallelConfig::get_instance().kv_split_size_effective())
-      .enable_mix_batch(scheduler_config.enable_mix_batch())
-      .prefill_scheduling_memory_usage_threshold(
-          scheduler_config.prefill_scheduling_memory_usage_threshold())
-      .chunked_match_frequency(scheduler_config.chunked_match_frequency())
-      .aggressive_coeff(scheduler_config.aggressive_coeff())
-      .enable_starve_prevent(scheduler_config.enable_starve_prevent())
-      .starve_threshold(scheduler_config.starve_threshold())
-      .enable_disagg_pd(options_.enable_disagg_pd())
-      .enable_chunked_prefill(options_.enable_chunked_prefill())
-      .enable_dp_fair_token_budget(enable_dp_fair_token_budget)
-      .instance_name(options_.instance_name())
-      .instance_role(options_.instance_role())
-      .kv_cache_transfer_mode(options_.kv_cache_transfer_mode())
-      .enable_service_routing(options_.enable_service_routing())
-      .disable_log_stats(options_.disable_log_stats())
-      .priority_strategy(options_.priority_strategy())
-      .enable_profile_step_time(options_.enable_profile_step_time())
-      .enable_profile_token_budget(options_.enable_profile_token_budget())
-      .enable_latency_aware_schedule(options_.enable_latency_aware_schedule())
-      .profile_max_prompt_length(options_.profile_max_prompt_length())
-      .enable_profile_kv_blocks(options_.enable_profile_kv_blocks())
-      .disable_ttft_profiling(options_.disable_ttft_profiling())
-      .max_global_ttft_ms(options_.max_global_ttft_ms())
-      .max_global_tpot_ms(options_.max_global_tpot_ms())
-      .enable_schedule_overlap(options_.enable_schedule_overlap())
-      .server_idx(options_.server_idx());
-  dispatch_engine(
-      [&](auto* engine) {
-        scheduler_ = create_continuous_scheduler(
-            engine,
-            scheduler_options,
-            distributed_worker_manager_,
-            model_residency_coordinator_,
-            kv_transfer_coordinator_,
-            make_pd_service_options(options_, model_args_));
-      },
-      vlm_engine_.get(),
-      speculative_engine_.get());
-
-  if (options_.enable_service_routing()) {
-    auto& instance_info = scheduler_->get_instance_info();
-    XServiceClient::get_instance()->register_instance(instance_info);
-  }
-
-  dispatch_engine(
-      [this](auto* engine) {
-        chat_template_ = ChatTemplateFactory::create(engine->tokenizer_args(),
-                                                     model_args_.model_type());
-        tokenizer_ = engine->tokenizer()->clone();
-        processor_ =
-            create_multimodal_processor(options_.model_path(),
-                                        model_args_,
-                                        tokenizer_,
-                                        options_.max_processor_cache_items(),
-                                        engine->tokenizer_args());
-      },
-      vlm_engine_.get(),
-      speculative_engine_.get());
+  chat_template_ = ChatTemplateFactory::create(vlm_engine_->tokenizer_args(),
+                                               model_args_.model_type());
+  tokenizer_ = vlm_engine_->tokenizer()->clone();
+  processor_ = create_multimodal_processor(options_.model_path(),
+                                            model_args_,
+                                            tokenizer_,
+                                            options_.max_processor_cache_items(),
+                                            vlm_engine_->tokenizer_args());
 
   request_factory_ = std::make_unique<VLMRequestFactory>(
       processor_.get(),
@@ -741,15 +636,6 @@ void VLMMaster::count_chat_tokens(
   });
 }
 
-bool VLMMaster::handle_rpc_response(const RequestOutput& output) {
-  if (xservice_client_ == nullptr) {
-    return false;
-  }
-  auto accepted = xservice_client_->generations({output});
-  CHECK_EQ(accepted.size(), 1);
-  return accepted.front();
-}
-
 std::vector<bool> VLMMaster::handle_rpc_responses(
     const std::vector<RequestOutput>& outputs) {
   if (xservice_client_ == nullptr) {
@@ -759,7 +645,7 @@ std::vector<bool> VLMMaster::handle_rpc_responses(
 }
 
 bool VLMMaster::sleep() {
-  if (vlm_engine_ == nullptr) {
+  if (!model_residency_coordinator_) {
     LOG(ERROR) << "Sleep is not supported for speculative engines.";
     return false;
   }
@@ -772,7 +658,7 @@ bool VLMMaster::requires_wakeup() const {
 }
 
 bool VLMMaster::wakeup(const WakeupOptions& options) {
-  if (vlm_engine_ == nullptr) {
+  if (!model_residency_coordinator_) {
     LOG(ERROR) << "Wakeup is not supported for speculative engines.";
     return false;
   }
@@ -881,16 +767,8 @@ void VLMMaster::generate() {
   running_.store(false, std::memory_order_relaxed);
 }
 
-bool VLMMaster::start_profile() {
-  return dispatch_engine([](auto* engine) { return engine->start_profile(); },
-                         vlm_engine_.get(),
-                         speculative_engine_.get());
-}
+bool VLMMaster::start_profile() { return vlm_engine_->start_profile(); }
 
-bool VLMMaster::stop_profile() {
-  return dispatch_engine([](auto* engine) { return engine->stop_profile(); },
-                         vlm_engine_.get(),
-                         speculative_engine_.get());
-}
+bool VLMMaster::stop_profile() { return vlm_engine_->stop_profile(); }
 
 }  // namespace xllm

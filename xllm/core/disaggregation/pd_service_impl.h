@@ -28,8 +28,6 @@ limitations under the License.
 
 namespace xllm {
 
-class KVCacheManager;
-class Engine;
 class Request;
 class Sequence;
 class PDScheduler;
@@ -47,31 +45,28 @@ struct PDServiceOptions {
 PDServiceOptions make_pd_service_options(const Options& options,
                                          const ModelArgs& model_args);
 
-class PDServiceImpl {
+class PDServiceImpl final {
  public:
   explicit PDServiceImpl(PDScheduler* scheduler,
-                         Engine* engine,
                          PDServiceOptions response_options = {});
-  virtual ~PDServiceImpl() = default;
+  void decode_recv_new_requests(const proto::DisaggRequests* request,
+                                proto::DisaggResponses* response);
 
-  virtual void decode_recv_new_requests(const proto::DisaggRequests* request,
-                                        proto::DisaggResponses* response);
-
-  virtual void decode_recv_first_generation(
+  void decode_recv_first_generation(
       const proto::DisaggGenerationsRequests* request,
       proto::Status* response,
       const BinaryPayload& attachment = {});
 
-  virtual void link_instance(const proto::InstanceClusterInfo* request,
-                             proto::Status* response);
+  void link_instance(const proto::InstanceClusterInfo* request,
+                     proto::Status* response);
 
-  virtual void unlink_instance(const proto::InstanceClusterInfo* request,
-                               proto::Status* response);
+  void unlink_instance(const proto::InstanceClusterInfo* request,
+                       proto::Status* response);
 
   void release_reservation(const proto::ReleaseReservationRequest* request,
                            proto::ReleaseReservationResponse* response);
 
- protected:
+ private:
   std::shared_ptr<Request> generate_request(const proto::DisaggRequest& req);
 
   std::shared_ptr<const JsonObjectGrammar> get_json_object_grammar(
@@ -79,22 +74,11 @@ class PDServiceImpl {
       std::string* error);
 
   PDScheduler* scheduler_;  // not owned
-  Engine* engine_;          // not owned
   const PDServiceOptions response_options_;
   XServiceClient* xservice_client_ = nullptr;
   std::mutex json_object_grammar_mutex_;
   std::shared_ptr<const JsonObjectGrammar> json_object_grammar_;
   std::shared_ptr<const JsonObjectGrammar> json_reasoning_grammar_;
-
- private:
-  bool append_virtual_kv_offsets(int32_t dp_rank,
-                                 const std::string& request_id,
-                                 const std::vector<int32_t>& block_ids,
-                                 proto::DisaggResponse* response);
-
-  // Not owned. The initialized engine and its cache manager outlive this
-  // service.
-  const KVCacheManager* const kv_cache_manager_;
 };
 
 }  // namespace xllm

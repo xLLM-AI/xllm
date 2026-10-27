@@ -33,4 +33,8 @@ std::vector<int32_t> read_capture_layer_ids(
     const std::string& model_weights_path,
     bool required = true);
 
+std::vector<int32_t> read_eagle3_capture_layer_ids(
+    const std::string& model_weights_path,
+    int32_t num_layers);
+
 }  // namespace xllm

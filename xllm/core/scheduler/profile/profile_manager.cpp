@@ -30,12 +30,12 @@ limitations under the License.
 
 #include "core/common/global_flags.h"
 #include "core/common/types.h"
-#include "core/distributed_runtime/distributed_worker_manager.h"
 #include "core/framework/batch/batch_factory.h"
 #include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/service_config.h"
+#include "core/framework/model/model_args.h"
 #include "core/framework/request/request_state.h"
 #include "core/runtime/acl_graph_bucket_policy.h"
 #include "core/scheduler/profile/graph_warmup.h"
@@ -43,6 +43,7 @@ limitations under the License.
 #include "platform/platform.h"
 
 namespace xllm {
+namespace {
 
 std::vector<int32_t> build_step_time_profile_batch_sizes(
     int32_t max_seqs_per_batch) {
@@ -73,8 +74,6 @@ int32_t warmup_decode_seq_len(bool fia_enabled, int32_t max_context_len) {
       fia_enabled ? kFiaWarmupDecodeSeqLen : kDefaultWarmupDecodeSeqLen,
       max_context_len);
 }
-
-namespace {
 
 int32_t decode_warmup_token_bucket(const DecodeGraphWarmupPlan& plan,
                                    int32_t global_batch_size,
@@ -118,25 +117,18 @@ DecodeGraphWarmupPlan build_profile_decode_warmup_plan(
 
 }  // namespace
 
-ProfileManager::ProfileManager(
-    Engine* engine,
-    const Options& options,
-    StepCallback step_callback,
-    ResultCallback result_callback,
-    std::shared_ptr<DistributedWorkerManager> distributed_worker_manager)
+ProfileManager::ProfileManager(KVCacheManager* kv_cache_manager,
+                               const ModelArgs* model_args,
+                               const Options& options,
+                               SchedulerCallbacks callbacks)
     : options_(options),
       prefill_policy_(options.max_tokens_per_batch(),
                       options.max_tokens_per_chunk_for_prefill(),
                       options.enable_chunked_prefill(),
                       options.enable_dp_fair_token_budget()),
-      engine_(engine),
-      distributed_worker_manager_(std::move(distributed_worker_manager)),
-      step_callback_(std::move(step_callback)),
-      result_callback_(std::move(result_callback)),
+      model_args_(model_args),
+      callbacks_(std::move(callbacks)),
       batch_factory_(options.dp_size()) {
-  CHECK(engine_ != nullptr);
-  CHECK(step_callback_);
-  CHECK(result_callback_);
   int32_t max_decode_batch_size = options_.max_seqs_per_batch();
   const int32_t max_concurrent_requests =
       ::xllm::ServiceConfig::get_instance().max_concurrent_requests();
@@ -155,7 +147,7 @@ ProfileManager::ProfileManager(
   }
   decode_graph_warmup_plan_ =
       build_profile_decode_warmup_plan(options_, max_decode_batch_size);
-  kv_cache_manager_ = engine_->kv_cache_manager();
+  kv_cache_manager_ = kv_cache_manager;
   CHECK(kv_cache_manager_ != nullptr);
   prefill_time_predictor_ = std::make_unique<TimePredictor>(
       options.enable_profile_kv_blocks(), true /*is_prefill*/);
@@ -165,10 +157,6 @@ ProfileManager::ProfileManager(
     LOG(INFO) << "Starting profiliing step time.";
     profile_step_time(false);
     // test accuracy
-    // eval_sequence_latency_prediction();
-    // eval_batch_latency_prediction("only_prefill");
-    // eval_batch_latency_prediction("only_decode");
-    // eval_batch_latency_prediction("mix");
   }
   if (options.enable_profile_token_budget()) {
     LOG(INFO) << "Starting profiliing token budget.";
@@ -195,144 +183,6 @@ ProfileManager::ProfileManager(
 #endif
 }
 
-// --------------------- for test only ---------------------------
-void ProfileManager::eval_sequence_latency_prediction() {
-  std::vector<double> pred_vec;
-  std::vector<double> target_vec;
-  int32_t token_step = 500;
-  int32_t prefix_step = 500;
-  int32_t upper_bound = 4000;
-
-  LOG(INFO) << "Starting testing sequence latency prediction";
-  for (int32_t token_length = token_step; token_length < upper_bound;
-       token_length += token_step) {
-    for (int32_t prefix_length = 0; prefix_length < token_length;
-         prefix_length += prefix_step) {
-      target_vec.emplace_back(run_request(token_length, prefix_length));
-      pred_vec.emplace_back(predict_step_time(token_length, prefix_length));
-    }
-  }
-
-  // print for debug
-  for (const auto& element : pred_vec) {
-    std::cout << static_cast<int32_t>(element) << " ";
-  }
-  std::cout << std::endl;
-  for (const auto& element : target_vec) {
-    std::cout << static_cast<int32_t>(element) << " ";
-  }
-  std::cout << std::endl;
-
-  double sum_error = 0.0;
-  double sum_percentage_error = 0.0;
-
-  for (size_t i = 0; i < pred_vec.size(); ++i) {
-    double error = std::abs(pred_vec[i] - target_vec[i]);
-    sum_error += error;
-    sum_percentage_error += error / std::abs(target_vec[i]);
-  }
-  double mae = sum_error / pred_vec.size();
-  double mape = (sum_percentage_error / pred_vec.size()) * 100.0;
-
-  LOG(INFO) << "Mean Absolute Error (MAE) of latency prediction: " << mae
-            << " ms";
-  LOG(INFO) << "Mean Absolute Percentage Error (MAPE) of latency prediction: "
-            << mape << " %";
-}
-void ProfileManager::eval_batch_latency_prediction(const std::string mode) {
-  std::vector<double> pred_vec;
-  std::vector<double> target_vec;
-
-  LOG(INFO) << "Starting testing batch latency prediction for " << mode;
-  if (mode == "only_prefill") {
-    int32_t max_batch_size = 10;
-    int32_t token_step = 500;
-    int32_t prefix_step = 500;
-    int32_t upper_bound = 4000;
-    for (int32_t token_length = token_step; token_length < upper_bound;
-         token_length += token_step) {
-      for (int32_t prefix_length = 0; prefix_length < token_length;
-           prefix_length += prefix_step) {
-        target_vec.emplace_back(
-            run_request(token_length, prefix_length, max_batch_size));
-        pred_vec.emplace_back(
-            predict_step_time(token_length, prefix_length, max_batch_size));
-      }
-    }
-  }
-  if (mode == "only_decode") {
-    int32_t max_batch_size = 200;
-    int32_t token_length = 500;
-    for (int32_t batch_size = 1; batch_size < max_batch_size; batch_size++) {
-      target_vec.emplace_back(
-          run_request(token_length, token_length - 1, batch_size));
-      pred_vec.emplace_back(
-          predict_step_time(token_length, token_length - 1, batch_size));
-    }
-  }
-  if (mode == "mix") {
-    if (!prefill_policy_.enable_chunked_prefill()) {
-      LOG(WARNING) << "When chunked prefill is disabled, mixed prefill and "
-                      "decode scenarios will not be tested.";
-      return;
-    }
-    int32_t max_batch_size = 100;
-    int32_t max_prefill_cnt = 5;
-    int32_t token_length = 500;
-    for (int32_t batch_size = 50; batch_size <= max_batch_size;
-         batch_size += 10) {
-      for (int32_t prefill_cnt = 0; prefill_cnt <= max_prefill_cnt;
-           prefill_cnt++) {
-        std::vector<int32_t> token_length_vec;
-        std::vector<int32_t> prefix_length_vec;
-        token_length_vec.insert(
-            token_length_vec.end(), prefill_cnt, token_length);
-        prefix_length_vec.insert(prefix_length_vec.end(), prefill_cnt, 0);
-        // token_length_vec.insert(token_length_vec.end(), batch_size/5,
-        // token_length); prefix_length_vec.insert(prefix_length_vec.end(),
-        // batch_size/5, token_length-1);
-        token_length_vec.insert(
-            token_length_vec.end(), batch_size - prefill_cnt, token_length);
-        prefix_length_vec.insert(prefix_length_vec.end(),
-                                 batch_size - prefill_cnt,
-                                 token_length - 1);
-        target_vec.emplace_back(
-            run_request(token_length_vec, prefix_length_vec));
-        pred_vec.emplace_back(
-            predict_step_time(token_length_vec, prefix_length_vec));
-      }
-    }
-  }
-
-  // print for debug
-  for (const auto& element : pred_vec) {
-    std::cout << static_cast<int32_t>(element) << " ";
-  }
-  std::cout << std::endl;
-  for (const auto& element : target_vec) {
-    std::cout << static_cast<int32_t>(element) << " ";
-  }
-  std::cout << std::endl;
-
-  double sum_error = 0.0;
-  double sum_percentage_error = 0.0;
-
-  for (size_t i = 0; i < pred_vec.size(); ++i) {
-    double error = std::abs(pred_vec[i] - target_vec[i]);
-    sum_error += error;
-    sum_percentage_error += error / std::abs(target_vec[i]);
-  }
-  double mae = sum_error / pred_vec.size();
-  double mape = (sum_percentage_error / pred_vec.size()) * 100.0;
-
-  LOG(INFO) << "Mean Absolute Error (MAE) of latency prediction: " << mae
-            << " ms";
-  LOG(INFO) << "Mean Absolute Percentage Error (MAPE) of latency prediction: "
-            << mape << " %";
-}
-// -------------------------------------------------------------
-
-// ---------------------- dump to file-----------------------
 std::string ProfileManager::generate_filename(const std::string& file_suffix) {
   auto now = std::chrono::system_clock::now();
   auto in_time_t = std::chrono::system_clock::to_time_t(now);
@@ -389,7 +239,7 @@ void ProfileManager::dump_step_time_profile_to_file(
 
 void ProfileManager::profile_step_time(bool if_dump_to_file) {
   // get the maximum prefill token length
-  auto& model_args = engine_->model_args();
+  auto& model_args = *model_args_;
   int32_t max_context_len = model_args.max_position_embeddings();
 
   // TODO: support length for decode request profile
@@ -491,15 +341,6 @@ void ProfileManager::train_decode_time_predictor(
   decode_time_predictor_->fit_for_decode(time_profiling_data);
 }
 
-// ----------------------predict step time-----------------------
-std::vector<double> ProfileManager::get_coefficients(bool is_prefill) {
-  if (is_prefill) {
-    return prefill_time_predictor_->get_coefficients();
-  } else {
-    return decode_time_predictor_->get_coefficients();
-  }
-}
-
 double ProfileManager::get_constant_overhead() {
   if (prefill_time_predictor_->is_trained() &&
       decode_time_predictor_->is_trained()) {
@@ -514,17 +355,6 @@ double ProfileManager::get_constant_overhead() {
   return 0.0;
 }
 
-int32_t ProfileManager::get_quadratic_root(Sequence* sequence, double budget) {
-  auto length = sequence->num_tokens();
-  auto prefix_length = sequence->kv_state().kv_cache_tokens_num();
-  if (prefill_time_predictor_->is_trained()) {
-    return prefill_time_predictor_->get_quadratic_root(prefix_length, budget);
-  }
-  LOG(ERROR) << "Prefill time predictor is not trained yet.";
-  return 0;
-}
-
-// for single sequence
 double ProfileManager::predict_step_time(int32_t length,
                                          int32_t prefix_length,
                                          bool if_need_add_constant_term,
@@ -532,17 +362,16 @@ double ProfileManager::predict_step_time(int32_t length,
   CHECK(length > prefix_length)
       << "Token length (" << length << ") must be greater than prefix length "
       << " (" << prefix_length << ").";
-  double ratio = 1.0;
   if (force_use_prefill_predictor) {
-    return ratio * prefill_time_predictor_->predict_time(
-                       length, prefix_length, if_need_add_constant_term);
+    return prefill_time_predictor_->predict_time(
+        length, prefix_length, if_need_add_constant_term);
   }
   if (length - 1 == prefix_length) {
-    return ratio * decode_time_predictor_->predict_time(
-                       length, prefix_length, if_need_add_constant_term);
+    return decode_time_predictor_->predict_time(
+        length, prefix_length, if_need_add_constant_term);
   } else {
-    return ratio * prefill_time_predictor_->predict_time(
-                       length, prefix_length, if_need_add_constant_term);
+    return prefill_time_predictor_->predict_time(
+        length, prefix_length, if_need_add_constant_term);
   }
 }
 
@@ -557,35 +386,6 @@ double ProfileManager::predict_step_time(Sequence* sequence,
                                      force_use_prefill_predictor);
   return latency;
 }
-// for single batch or sequences
-double ProfileManager::predict_step_time(
-    const std::vector<int32_t>& length_vec,
-    const std::vector<int32_t>& prefix_length_vec) {
-  CHECK(length_vec.size() == prefix_length_vec.size());
-  double total_latency = get_constant_overhead();
-  for (int32_t i = 0; i < length_vec.size(); i++) {
-    // predict for each sequence
-    int32_t length = length_vec[i];
-    int32_t prefix_length = prefix_length_vec[i];
-    total_latency += predict_step_time(length, prefix_length, false);
-  }
-  return total_latency;
-}
-
-// for seq in batch with the same token and prefix length
-double ProfileManager::predict_step_time(int32_t length,
-                                         int32_t prefix_length,
-                                         int32_t batch_size) {
-  double total_latency = get_constant_overhead();
-  for (int32_t i = 0; i < batch_size; i++) {
-    // predict for each sequence
-    total_latency += predict_step_time(length, prefix_length, false);
-  }
-  return total_latency;
-}
-// ---------------------------------------------
-
-// ----------------------for profile token budget-----------------------
 void ProfileManager::profile_token_budget() {
   // use token budget means defaultly ignoring prefix cache and decode request's
   // kv cache load overhead
@@ -646,8 +446,8 @@ ProfileManager::get_copy_block_profile() {
   // NOTE: Add more model profiles here
   static const std::vector<CopyBlockProfile> profiles = {
       // offline copy block profile
-      {"Qwen2-7B", 128, 0.48, 0.24, "Qwen2-7B, block_size=128"},
-      {"Qwen2-7B", 64, 0.20, 0.25, "Qwen2-7B, block_size=128"},
+      {"Qwen2-7B", 128, 0.48, 0.24},
+      {"Qwen2-7B", 64, 0.20, 0.25},
   };
 
   return profiles;
@@ -704,7 +504,7 @@ std::shared_ptr<Request> ProfileManager::generate_single_request(
     int32_t token_length,
     int32_t prefix_length,
     bool is_graph_warmup) {
-  auto& model_args = engine_->model_args();
+  auto& model_args = *model_args_;
   int32_t vocab_size = model_args.vocab_size();
   int32_t eos_token_id = model_args.eos_token_id();
 
@@ -770,7 +570,7 @@ std::shared_ptr<Request> ProfileManager::try_generate_single_decode_request(
     bool is_graph_warmup) {
   CHECK_GT(total_length, 1) << "Decode profiling requires total_length > 1.";
 
-  auto& model_args = engine_->model_args();
+  auto& model_args = *model_args_;
   int32_t vocab_size = model_args.vocab_size();
   int32_t eos_token_id = model_args.eos_token_id();
 
@@ -899,50 +699,7 @@ double ProfileManager::run_request(int32_t token_length,
   auto batches = batch_factory_.create_batches(sequences, sequences_budget);
 
   absl::Time start_time = absl::Now();
-  step_callback_(batches);
-  if (options_.enable_schedule_overlap()) {
-    result_callback_(batches);
-  }
-  double latency = absl::ToDoubleMilliseconds(absl::Now() - start_time);
-  for (auto& request : requests) {
-    kv_cache_manager_->deallocate_without_cache(request->sequences()[0].get());
-  }
-
-  return latency;
-}
-
-// currently for test only
-double ProfileManager::run_request(
-    const std::vector<int32_t>& token_length_vec,
-    const std::vector<int32_t>& prefix_length_vec) {
-  CHECK(token_length_vec.size() == prefix_length_vec.size());
-  std::vector<Sequence*> sequences;
-  std::vector<size_t> sequences_budget;
-  std::vector<std::shared_ptr<Request>> requests;
-  sequences.reserve(token_length_vec.size());
-  sequences_budget.reserve(token_length_vec.size());
-  requests.reserve(token_length_vec.size());
-
-  // batch sequences with the same kv cache and token length
-  for (int32_t i = 0; i < token_length_vec.size(); i++) {
-    // generate random token ids and request
-    int32_t token_length = token_length_vec[i];
-    int32_t prefix_length = prefix_length_vec[i];
-
-    std::shared_ptr<Request> request =
-        generate_single_request(token_length, prefix_length);
-    requests.emplace_back(request);
-    sequences.emplace_back(request->sequences()[0].get());
-    sequences_budget.emplace_back(token_length - prefix_length);
-  }
-  // build batch
-  auto batches = batch_factory_.create_batches(sequences, sequences_budget);
-
-  absl::Time start_time = absl::Now();
-  step_callback_(batches);
-  if (options_.enable_schedule_overlap()) {
-    result_callback_(batches);
-  }
+  step_batch(batches);
   double latency = absl::ToDoubleMilliseconds(absl::Now() - start_time);
   for (auto& request : requests) {
     kv_cache_manager_->deallocate_without_cache(request->sequences()[0].get());
@@ -968,10 +725,7 @@ double ProfileManager::run_decode_request(
   auto batches = batch_factory_.create_batches(sequences, sequences_budget);
 
   absl::Time start_time = absl::Now();
-  step_callback_(batches);
-  if (options_.enable_schedule_overlap()) {
-    result_callback_(batches);
-  }
+  step_batch(batches);
   double latency = absl::ToDoubleMilliseconds(absl::Now() - start_time);
   for (auto& request : requests) {
     kv_cache_manager_->deallocate_without_cache(request->sequences()[0].get());
@@ -1003,10 +757,7 @@ double ProfileManager::run_graph_decode_request(
   auto batches = batch_factory_.create_batches(sequences, sequences_budget);
 
   absl::Time start_time = absl::Now();
-  step_callback_(batches);
-  if (options_.enable_schedule_overlap()) {
-    result_callback_(batches);
-  }
+  step_batch(batches);
   double latency = absl::ToDoubleMilliseconds(absl::Now() - start_time);
   for (auto& request : requests) {
     kv_cache_manager_->deallocate_without_cache(request->sequences()[0].get());
@@ -1076,15 +827,14 @@ void ProfileManager::generate_random_decode_batch(
 
 void ProfileManager::warmup_for_eager() {
   constexpr int32_t kMaxEagerWarmupTokens = 256;
-  const int32_t max_context_len =
-      engine_->model_args().max_position_embeddings();
+  const int32_t max_context_len = model_args_->max_position_embeddings();
   const int32_t prefill_tokens = std::min({options_.max_tokens_per_batch(),
                                            max_context_len,
                                            kMaxEagerWarmupTokens});
-  if (prefill_tokens <= 0 || engine_->model_args().vocab_size() <= 2) {
+  if (prefill_tokens <= 0 || model_args_->vocab_size() <= 2) {
     LOG(INFO) << "Skipping eager warmup because model metadata is incomplete: "
               << "tokens=" << prefill_tokens
-              << ", vocab_size=" << engine_->model_args().vocab_size();
+              << ", vocab_size=" << model_args_->vocab_size();
     return;
   }
   const double prefill_latency = run_request(prefill_tokens,
@@ -1113,7 +863,7 @@ void ProfileManager::warmup_for_graph() {
 }
 
 void ProfileManager::warmup_prefill_for_graph() {
-  auto& model_args = engine_->model_args();
+  auto& model_args = *model_args_;
   int32_t max_context_len = model_args.max_position_embeddings();
 
   int32_t prefill_tokens =
@@ -1137,7 +887,7 @@ void ProfileManager::warmup_unified_for_graph() {
 }
 
 void ProfileManager::warmup_decode_for_graph() {
-  auto& model_args = engine_->model_args();
+  auto& model_args = *model_args_;
   int32_t max_context_len = model_args.max_position_embeddings();
   int32_t max_decode_batch_size = options_.max_seqs_per_batch();
   const int32_t max_concurrent_requests =
@@ -1212,6 +962,13 @@ void ProfileManager::warmup_decode_for_graph() {
             << ", decode_max_sequence_batch=" << max_sequence_batch_size
             << ", decode_seq_len=" << decode_seq_len
             << ", decode_total_latency=" << decode_total_latency << " ms";
+}
+
+void ProfileManager::step_batch(BatchGroup& batches) {
+  callbacks_.step_(batches);
+  if (options_.enable_schedule_overlap()) {
+    callbacks_.update_last_step_result_(batches);
+  }
 }
 
 }  // namespace xllm

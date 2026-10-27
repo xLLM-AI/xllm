@@ -26,6 +26,7 @@ limitations under the License.
 #include "core/common/metrics.h"
 #include "core/framework/config/execution_config.h"
 #include "core/platform/device.h"
+#include "core/runtime/worker_client.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "runtime/worker.h"
@@ -33,11 +34,7 @@ limitations under the License.
 #include "util/timer.h"
 
 namespace xllm {
-DiTEngine::DiTEngine(
-    const runtime::Options& options,
-    std::shared_ptr<DistributedWorkerManager> distributed_worker_manager)
-    : options_(options),
-      distributed_worker_manager_(std::move(distributed_worker_manager)) {
+DiTEngine::DiTEngine(const runtime::Options& options) : Engine(options) {
   auto master_node_addr = options.master_node_addr().value_or("");
   CHECK(!master_node_addr.empty())
       << " DIT need to set master node addr, Please set --master_node_addr.";
@@ -53,18 +50,9 @@ DiTEngine::DiTEngine(
   }
 
   // setup all workers and create worker clients in nnode_rank=0 engine side.
-  setup_workers(options);
-  worker_clients_num_ = worker_clients_.size();
+  setup_workers();
 
   forward_input_factory_ = std::make_unique<DiTForwardInputFactory>();
-}
-
-void DiTEngine::setup_workers(const runtime::Options& options) {
-  if (!distributed_worker_manager_) {
-    distributed_worker_manager_ =
-        std::make_shared<DistributedWorkerManager>(options);
-  }
-  worker_clients_ = distributed_worker_manager_->get_worker_clients();
 }
 
 bool DiTEngine::init() {
@@ -78,28 +66,8 @@ bool DiTEngine::init() {
 bool DiTEngine::init_model() {
   const std::string& model_path = options_.model_path();
 
-  // init model for each worker in parallel
-  // multiple workers, call async init
-  std::vector<folly::SemiFuture<bool>> futures;
-  futures.reserve(worker_clients_num_);
-  for (auto& worker : worker_clients_) {
-    futures.push_back(worker->init_model_async(
-        model_path,
-        ::xllm::ExecutionConfig::get_instance().random_seed(),
-        MasterStatus::WAKEUP));
-  }
-
-  // wait for all futures to complete
-  auto results = folly::collectAll(futures).get();
-  LOG(INFO) << "All workers completed model initialization.";
-  for (const auto& result : results) {
-    if (!result.value()) {
-      return false;
-    }
-  }
-
-  LOG(INFO) << "All workers successfully initialized the model.";
-  return true;
+  return load_model_to_workers(model_path,
+                               /*master_status=*/MasterStatus::WAKEUP);
 }
 
 // TODO : change to ForwardOutput?
@@ -114,9 +82,10 @@ DiTForwardOutput DiTEngine::step(std::vector<DiTBatch>& batches) {
   COUNTER_ADD(prepare_input_latency_seconds, timer.elapsed_seconds());
 
   std::vector<folly::SemiFuture<std::optional<RawForwardOutput>>> futures;
-  futures.reserve(worker_clients_num_);
+  const size_t num_workers = worker_clients_num();
+  futures.reserve(num_workers);
 
-  for (auto worker_rank = 0; worker_rank < worker_clients_num_; ++worker_rank) {
+  for (size_t worker_rank = 0; worker_rank < num_workers; ++worker_rank) {
     futures.emplace_back(
         worker_clients_[worker_rank]->step_remote_async(forward_input));
   }

@@ -62,13 +62,9 @@ void Eagle3WorkerImpl<TargetInput>::apply_target_model_overrides(
   if (!args.layers_to_capture().empty()) {
     return;
   }
-  auto layers = read_capture_layer_ids(
-      this->options_.draft_model_path().value(), /*required=*/false);
-  if (layers.empty()) {
-    layers = AuxHiddenCapture::legacy_default_capture_layer_ids(
-        static_cast<int32_t>(args.n_layers()));
-  }
-  args.layers_to_capture(std::move(layers));
+  args.layers_to_capture(
+      read_eagle3_capture_layer_ids(this->options_.draft_model_path().value(),
+                                    static_cast<int32_t>(args.n_layers())));
 }
 #endif
 
