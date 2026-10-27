@@ -30,7 +30,6 @@ limitations under the License.
 #include "core/framework/speculative/verify_layout.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/util/tensor_helper.h"
-#include "framework/model/aux_hidden_capture.h"
 #include "framework/model_loader/model_loader.h"
 #include "runtime/decode_graph_bucket.h"
 #include "runtime/llm_worker_impl.h"
@@ -253,29 +252,7 @@ bool SpeculativeWorkerImpl<TargetInput>::init_model(
   if (impl_->get_status() == WorkerImpl::Status::UNINITIALIZED) {
     auto loader = ModelLoader::create(model_weights_path);
     auto args = loader->model_args();
-    const std::string& algorithm = impl_->options().speculative_algorithm();
-    if (SpeculativeConfig::is_block_diffusion_algorithm(algorithm)) {
-      CHECK(impl_->options().draft_model_path().has_value())
-          << "block-diffusion speculative decoding requires --draft_model.";
-      args.layers_to_capture(
-          read_capture_layer_ids(*impl_->options().draft_model_path()));
-    }
-#if defined(USE_NPU)
-    if (SpeculativeConfig::requires_aux_hidden_capture(algorithm) &&
-        args.layers_to_capture().empty()) {
-      std::vector<int32_t> layers;
-      if (SpeculativeConfig::is_eagle3_algorithm(algorithm) &&
-          impl_->options().draft_model_path().has_value()) {
-        layers =
-            read_capture_layer_ids(*impl_->options().draft_model_path(), false);
-      }
-      if (layers.empty()) {
-        layers = AuxHiddenCapture::legacy_default_capture_layer_ids(
-            static_cast<int32_t>(args.n_layers()));
-      }
-      args.layers_to_capture(std::move(layers));
-    }
-#endif
+    configure_speculative_model_args(args, impl_->options());
     auto tokenizer = impl_->load_tokenizer(*loader);
     auto context =
         impl_->load_model_config(std::move(args),

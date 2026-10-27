@@ -213,7 +213,7 @@ TEST_F(EplbControllerTest,
 
   runtime::Options target = original;
   runtime::Options draft = original;
-  draft.is_draft_engine(true);
+  draft.is_draft_model(true);
   original.eplb_controller_config().enabled = false;
   original.eplb_controller_config().policy.eplb_policy_kind = "greedy";
 

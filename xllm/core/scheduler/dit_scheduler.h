@@ -29,7 +29,6 @@ limitations under the License.
 #include "core/common/macros.h"
 #include "core/common/types.h"
 #include "core/distributed_runtime/dit_engine.h"
-#include "core/distributed_runtime/engine.h"
 #include "core/framework/batch/dit_batch.h"
 #include "core/framework/batch/dit_batch_factory.h"
 #include "core/framework/request/dit_request.h"

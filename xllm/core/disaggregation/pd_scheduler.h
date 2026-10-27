@@ -19,7 +19,6 @@ limitations under the License.
 #include <brpc/channel.h>
 
 #include <chrono>
-#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <future>
@@ -28,12 +27,12 @@ limitations under the License.
 #include <string>
 #include <thread>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "core/disaggregation/pd_service.h"
 #include "core/distributed_runtime/distributed_worker_manager.h"
+#include "core/framework/config/speculative_config.h"
 #include "disagg_pd.pb.h"
 #include "distributed_runtime/xservice_client.h"
 #include "framework/request/request.h"
@@ -60,53 +59,9 @@ bool exceeds_decode_capacity(size_t num_prompt_tokens,
 
 bool has_rank_preserving_kv_groups(const proto::DisaggResponse& response);
 
-class PDScheduler : public ContinuousScheduler<> {
+class PDScheduler : public ContinuousScheduler {
  public:
-  // Skips dispatch and RPC startup. Unit tests construct through this so they
-  // do not block in initialize_rpc_server.
-  struct SkipRuntimeStart {};
-
-  template <typename TargetEngine>
-    requires requires(TargetEngine* engine, BatchGroup& batch) {
-      static_cast<Engine*>(engine);
-      { engine->step(batch) } -> std::same_as<ForwardOutput>;
-      {
-        engine->collect_step_outputs(batch)
-      } -> std::same_as<std::vector<RawForwardOutput>>;
-    }
-  PDScheduler(
-      TargetEngine* engine,
-      const Options& options,
-      std::shared_ptr<DistributedWorkerManager> distributed_worker_manager,
-      std::shared_ptr<ModelResidencyCoordinator> model_residency_coordinator =
-          nullptr,
-      std::shared_ptr<KVTransferCoordinator> kv_transfer_coordinator = nullptr,
-      PDServiceOptions response_options = {})
-      : PDScheduler(engine,
-                    options,
-                    SkipRuntimeStart{},
-                    std::move(distributed_worker_manager),
-                    std::move(model_residency_coordinator),
-                    std::move(kv_transfer_coordinator)) {
-    CHECK(distributed_worker_manager_ != nullptr)
-        << "Disaggregated PD requires a distributed worker manager.";
-    CHECK(kv_transfer_coordinator_ != nullptr)
-        << "Disaggregated PD requires a KV cache transfer coordinator.";
-    dispatch_thread_ =
-        std::make_unique<std::thread>(&PDScheduler::dispatch_requests, this);
-    server_name_.append(std::to_string(options_.server_idx()));
-    rpc_server_thread_ = std::make_unique<std::thread>(
-        [this, response_options = std::move(response_options)]() mutable {
-          start_rpc_server(std::move(response_options));
-        });
-    initialize_rpc_server(server_name_);
-    register_instance_info(server_name_);
-    if (!options_.disable_ttft_profiling() &&
-        options_.instance_role().value() == InstanceRole::MIX) {
-      profile_ttft();
-      profile_tpot();
-    }
-  }
+  void start_runtime(PDServiceOptions response_options);
 
   ~PDScheduler() override;
 
@@ -153,6 +108,10 @@ class PDScheduler : public ContinuousScheduler<> {
   void release_request_blocks(std::shared_ptr<Request> request,
                               bool cache_prefix);
 
+  // Synchronous per-sequence release for RPC-thread paths that must not
+  // enqueue through the release queue.
+  void deallocate_sequences(Request& request, bool cache_prefix);
+
   // decode allocate blocks with prefix cache.
   bool try_allocate(Sequence* sequence);
 
@@ -183,35 +142,35 @@ class PDScheduler : public ContinuousScheduler<> {
                        const int32_t dp_size,
                        const int32_t src_kv_split_size);
 
- protected:
-  template <typename TargetEngine>
-    requires requires(TargetEngine* engine, BatchGroup& batch) {
-      static_cast<Engine*>(engine);
-      { engine->step(batch) } -> std::same_as<ForwardOutput>;
-      {
-        engine->collect_step_outputs(batch)
-      } -> std::same_as<std::vector<RawForwardOutput>>;
-    }
   PDScheduler(
-      TargetEngine* engine,
+      BlockManagerPool* block_manager_pool,
+      const ModelArgs* model_args,
+      const Tokenizer* tokenizer,
+      SchedulerCallbacks callbacks,
       const Options& options,
-      SkipRuntimeStart,
-      std::shared_ptr<DistributedWorkerManager> distributed_worker_manager =
-          nullptr,
+      std::shared_ptr<DistributedWorkerManager> distributed_worker_manager,
       std::shared_ptr<ModelResidencyCoordinator> model_residency_coordinator =
           nullptr,
       std::shared_ptr<KVTransferCoordinator> kv_transfer_coordinator = nullptr)
-      : ContinuousScheduler<>(engine,
-                              options,
-                              std::move(model_residency_coordinator),
-                              std::move(distributed_worker_manager)),
+      : ContinuousScheduler(block_manager_pool,
+                            model_args,
+                            tokenizer,
+                            std::move(callbacks),
+                            options,
+                            std::move(model_residency_coordinator),
+                            std::move(distributed_worker_manager)),
         kv_transfer_coordinator_(std::move(kv_transfer_coordinator)),
-        server_name_("PDServer") {
+        server_name_("PDServer"),
+        requires_bootstrap_hidden_(
+            options_.num_speculative_tokens() > 0 &&
+            SpeculativeConfig::requires_bootstrap_hidden(
+                SpeculativeConfig::get_instance().speculative_algorithm())) {
     if (!options_.instance_role().has_value()) {
       LOG(FATAL) << "Instance type is not set in disagg pd mode.";
     }
   }
 
+ protected:
   void release_failed_request(const std::shared_ptr<Request>& request) override;
 
   std::future<void> enqueue_request_block_release(
@@ -251,6 +210,9 @@ class PDScheduler : public ContinuousScheduler<> {
   // info
   void register_instance_info(const std::string& server_name);
 
+  // Both P->D handshake halves must agree on carrying the bootstrap hidden
+  // state.
+  bool requires_bootstrap_hidden_;
   std::shared_ptr<KVTransferCoordinator> kv_transfer_coordinator_;
 
   struct RequestBlockRelease {

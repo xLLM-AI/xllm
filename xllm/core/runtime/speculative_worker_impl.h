@@ -64,7 +64,7 @@ ForwardOutput finalize_verify_output(
 // draft generation and validation (MTP, Eagle3, Suffix, DFlash, etc.).
 template <typename TargetInput>
 class SpeculativeWorkerImpl : public WorkerImpl {
- public:
+ protected:
   using TargetModelParams = std::remove_reference_t<
       decltype(std::declval<TargetInput&>().input_params)>;
 

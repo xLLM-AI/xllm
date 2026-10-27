@@ -32,7 +32,7 @@ cc_library(
     dit_engine.h
     llm_engine.h
     vlm_engine.h
-    speculative_engine.h
+    vlm_master.h
     distributed_worker_manager.h
     remote_worker.h
     worker_server.h
@@ -44,12 +44,15 @@ cc_library(
     kv_transfer_coordinator.h
     xservice_client.h
     model_residency_coordinator.h
-    kv_capacity_planner.h
+
   SRCS
+    engine.cpp
+    master.cpp
+    master_factory.cpp
     dit_engine.cpp
     llm_engine.cpp
     vlm_engine.cpp
-    speculative_engine.cpp
+    vlm_master.cpp
     distributed_worker_manager.cpp
     kv_transfer_coordinator.cpp
     remote_worker.cpp
@@ -58,7 +61,7 @@ cc_library(
     shm_channel.cpp
     xservice_client.cpp
     model_residency_coordinator.cpp
-    kv_capacity_planner.cpp
+
   DEPS
     :common
     :worker_service

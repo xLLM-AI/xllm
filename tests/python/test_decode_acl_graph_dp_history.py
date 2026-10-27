@@ -28,7 +28,7 @@ def _runner(
     dp_size: int = 2,
     cap: int = 32768,
     page_size: int = 128,
-    is_spec_draft: bool = False,
+    is_draft_model: bool = False,
     num_speculative_tokens: int = 0,
 ) -> DecodeAclGraphRunner:
     runner = DecodeAclGraphRunner(
@@ -40,7 +40,7 @@ def _runner(
         dp_size=dp_size,
         dp_rank=dp_rank,
         num_speculative_tokens=num_speculative_tokens,
-        is_spec_draft=is_spec_draft,
+        is_draft_model=is_draft_model,
     )
     runner.bind_layer_caches([LayerCache(torch.empty(1), torch.empty(1), index=torch.empty(1))])
     return runner
@@ -222,16 +222,16 @@ def test_dp_index_draft_does_not_read_stale_history(rank: int) -> None:
     values = vars(_metadata(32769 if rank == 0 else 1, (1, 0))).copy()
     del values["dp_global_kv_max_seq_lens"]
     metadata = DraftMetadata(**values)
-    assert _runner(rank, is_spec_draft=True).prepare_execution(torch.tensor([1], dtype=torch.int32), metadata) is None
+    assert _runner(rank, is_draft_model=True).prepare_execution(torch.tensor([1], dtype=torch.int32), metadata) is None
 
 
 def test_tp_only_index_draft_remains_graphable() -> None:
-    runner = _runner(0, dp_size=1, is_spec_draft=True)
+    runner = _runner(0, dp_size=1, is_draft_model=True)
     assert runner.prepare_execution(torch.tensor([1], dtype=torch.int32), _metadata(1, ())) is not None
 
 
 def test_dp_non_index_draft_remains_graphable() -> None:
     for rank in range(2):
-        runner = _runner(rank, is_spec_draft=True)
+        runner = _runner(rank, is_draft_model=True)
         runner.bind_layer_caches([])
         assert runner.prepare_execution(torch.tensor([1], dtype=torch.int32), _metadata(1, ())) is not None

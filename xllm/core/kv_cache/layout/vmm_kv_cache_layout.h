@@ -28,17 +28,13 @@ namespace xllm {
 class KVCacheCapacity;
 class ModelArgs;
 
-// Tensors sharing one scheduler block ID space. A speculative pair combines
-// its target and draft tensors before calculating their physical page budget.
+// Tensors sharing one scheduler block ID space.
 class VmmKVCacheLayout final {
  public:
   VmmKVCacheLayout(const KVCacheCapacity& capacity,
                    const ModelArgs& model_args,
                    int64_t world_size,
-                   torch::ScalarType dtype,
-                   bool is_draft_engine = false);
-
-  void append(VmmKVCacheLayout layout);
+                   torch::ScalarType dtype);
 
   VirtualKVCachePageLayout page_layout(size_t page_size) const;
   size_t physical_pages(size_t page_size) const;

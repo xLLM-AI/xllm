@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
 
 #include "common/macros.h"
@@ -26,7 +27,6 @@ namespace xllm {
 class PDService : public proto::DisaggPDService {
  public:
   explicit PDService(PDScheduler* scheduler,
-                     Engine* engine,
                      PDServiceOptions response_options = {});
   PDService() = default;
   ~PDService() override = default;

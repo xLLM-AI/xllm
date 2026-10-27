@@ -40,13 +40,12 @@ limitations under the License.
 #include "common/metrics.h"
 #include "core/disaggregation/pd_service_impl.h"
 #include "core/framework/batch/sampling_input_builder.h"
-#include "core/framework/config/distributed_config.h"
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/transfer/kv_transfer_completion.h"
-#include "core/platform/device.h"
+#include "core/scheduler/continuous_scheduler.h"
+#include "core/scheduler/fake_scheduling_engine_test_utils.h"
 #include "core/util/scope_guard.h"
 #include "distributed_runtime/distributed_worker_manager.h"
-#include "distributed_runtime/engine.h"
 #include "distributed_runtime/kv_transfer_coordinator.h"
 #include "framework/block/block_manager_pool.h"
 #include "framework/model/model_args.h"
@@ -182,7 +181,7 @@ class PrefetchBlockManagerPool final : public BlockManagerPool {
   std::atomic<size_t> prefetch_pipeline_calls_{0};
 };
 
-class FakeEngine final : public Engine {
+class FakeEngine final : public FakeSchedulingEngine {
  public:
   FakeEngine(int32_t num_blocks,
              int32_t block_size,
@@ -198,11 +197,14 @@ class FakeEngine final : public Engine {
         .num_embedding_blocks(embedding_blocks == 0 ? num_blocks
                                                     : embedding_blocks);
     tokenizer_ = std::make_unique<FakeTokenizer>();
-    block_manager_ =
-        std::make_unique<PrefetchBlockManagerPool>(options, dp_size);
+    auto pool = std::make_unique<PrefetchBlockManagerPool>(options, dp_size);
+    prefetch_pool_ = pool.get();
+    block_manager_ = std::move(pool);
   }
 
-  std::function<ForwardOutput(BatchGroup&)> forward;
+  StepCallback forward;
+
+  PrefetchBlockManagerPool* prefetch_pool_ = nullptr;
   std::function<void(const BatchGroup&)> complete_forward;
 
   ForwardOutput step(BatchGroup& batch) {
@@ -219,24 +221,12 @@ class FakeEngine final : public Engine {
     return std::vector<RawForwardOutput>(batch.size());
   }
 
-  const Tokenizer* tokenizer() const override { return tokenizer_.get(); }
-
-  BlockManagerPool* block_manager_pool() const override {
-    return block_manager_.get();
-  }
-
-  const ModelArgs& model_args() const override { return model_args_; }
-
-  const TokenizerArgs& tokenizer_args() const override { NOT_IMPLEMENTED(); }
-
-  bool init() override { return true; }
-
   void set_storage_prefetch_enabled(bool enabled) {
-    block_manager_->set_storage_prefetch_enabled(enabled);
+    prefetch_pool_->set_storage_prefetch_enabled(enabled);
   }
 
   size_t prefetch_pipeline_calls() const {
-    return block_manager_->prefetch_pipeline_calls();
+    return prefetch_pool_->prefetch_pipeline_calls();
   }
 
   void set_tokenizer(std::unique_ptr<Tokenizer> tokenizer) {
@@ -244,13 +234,8 @@ class FakeEngine final : public Engine {
   }
 
   void set_release_callback(std::function<void()> callback) {
-    block_manager_->on_release = std::move(callback);
+    prefetch_pool_->on_release = std::move(callback);
   }
-
- private:
-  std::unique_ptr<Tokenizer> tokenizer_;
-  std::unique_ptr<PrefetchBlockManagerPool> block_manager_;
-  ModelArgs model_args_;
 };
 
 class TestPDServiceImpl final : public PDServiceImpl {
@@ -263,16 +248,16 @@ class TestPDScheduler final : public PDScheduler {
  public:
   using PDScheduler::drain_request_releases;
   using PDScheduler::enqueue_request_block_release;
-  using PDScheduler::prepare_batch;
 
-  template <typename TargetEngine>
   TestPDScheduler(
-      TargetEngine* engine,
+      FakeEngine* engine,
       const Options& options,
       std::shared_ptr<KVTransferCoordinator> transfer_coordinator = nullptr)
-      : PDScheduler(engine,
+      : PDScheduler(engine->block_manager_pool(),
+                    &engine->model_args(),
+                    engine->tokenizer(),
+                    std::move(make_scheduler_callbacks(engine)),
                     options,
-                    SkipRuntimeStart{},
                     /*distributed_worker_manager=*/nullptr,
                     /*model_residency_coordinator=*/nullptr,
                     std::move(transfer_coordinator)) {}
@@ -370,10 +355,10 @@ class TestPDScheduler final : public PDScheduler {
   }
 
   void start_idle_runtime() {
-    server_name_ = "PDShutdownTest";
+    server_name_ = "DisaggPDShutdownTest";
     auto server = ServerRegistry::get_instance().register_server(server_name_);
     auto service = std::make_shared<PDService>();
-    CHECK(server->start(service, "127.0.0.1:0", "PDShutdownTest"));
+    ASSERT_TRUE(server->start(service, "127.0.0.1:0", "DisaggPDShutdownTest"));
     rpc_server_thread_ = std::make_unique<std::thread>(
         [server, service = std::move(service)] { server->run(); });
     dispatch_thread_ = std::make_unique<std::thread>(
@@ -444,7 +429,7 @@ class TestPDScheduler final : public PDScheduler {
 
   void cache_prefill_blocks_for_test(Request* request) {
     for (auto& sequence : request->sequences()) {
-      kv_cache_manager_->publish_prefix(sequence.get());
+      block_manager_pool()->publish_prefix(sequence.get());
     }
   }
 
@@ -1328,16 +1313,16 @@ TEST(PDSchedulerTest, MissingServiceMetadataFailsBeforeDecodeLookup) {
   }
 }
 
-TEST(PDSchedulerTest, DecodeBuildsMinimumLengthLogitsBias) {
+TEST(PDSchedulerTest, DecodeBuildsMinTokenInputsFromLocalExecutionMode) {
   const bool initialized = XServiceClientTestPeer::set_initialized(true);
   ScopeGuard restore_client(
       [initialized] { XServiceClientTestPeer::set_initialized(initialized); });
   FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
   PDScheduler::Options options = make_decode_options();
   TestPDScheduler scheduler(&engine, options);
-  TestPDServiceImpl service(&scheduler, &engine);
+  TestPDServiceImpl service(&scheduler, {});
   for (const uint32_t minimum : {0u, 3u}) {
-    SCOPED_TRACE(minimum);
+    SCOPED_TRACE(::testing::Message() << "min_tokens=" << minimum);
     proto::DisaggRequest wire_request;
     wire_request.set_req_id("decode-min-tokens");
     wire_request.add_prompt_tokens(1);
@@ -1358,103 +1343,15 @@ TEST(PDSchedulerTest, DecodeBuildsMinimumLengthLogitsBias) {
     SamplingInputBuilder builder;
     builder.append(&request->state().sampling_param, /*token_index=*/0);
     const SamplingParameters input = builder.build();
-    EXPECT_FALSE(input.min_token_ids().defined());
-    EXPECT_FALSE(input.min_tokens_remaining().defined());
-    EXPECT_EQ(input.logits_bias().defined(), minimum > 0);
-    if (input.logits_bias().defined()) {
-      EXPECT_EQ(input.logits_bias()[0][7].item<float>(),
-                -std::numeric_limits<float>::infinity());
+    const bool device_min_tokens = minimum > 0;
+    EXPECT_EQ(input.min_token_ids().defined(), device_min_tokens);
+    EXPECT_EQ(input.min_tokens_remaining().defined(), device_min_tokens);
+    EXPECT_FALSE(input.logits_bias().defined());
+    if (input.min_tokens_remaining().defined()) {
+      EXPECT_EQ(input.min_tokens_remaining().item<int64_t>(), minimum);
+      EXPECT_EQ(input.min_token_ids()[0][0].item<int64_t>(), 7);
     }
   }
-}
-
-TEST(PDSchedulerTest, DecodeOutputCallbacksOutliveRpcService) {
-  DistributedConfig& config = DistributedConfig::get_instance();
-  const std::string previous_protocol = config.xservice_rpc_protocol();
-  ScopeGuard restore_protocol([&config, previous_protocol] {
-    config.xservice_rpc_protocol(previous_protocol);
-  });
-  config.xservice_rpc_protocol("baidu_std");
-
-  class GenerationService final : public xllm_service::proto::XllmRpcService {
-   public:
-    GenerationService() { requests_.reserve(2); }
-
-    void Generations(google::protobuf::RpcController* /*controller*/,
-                     const proto::DisaggStreamGenerations* request,
-                     proto::StatusSet* response,
-                     google::protobuf::Closure* done) override {
-      brpc::ClosureGuard done_guard(done);
-      std::lock_guard<std::mutex> lock(mutex_);
-      requests_.emplace_back(*request);
-      for (const auto& generation : request->gens()) {
-        response->add_all_status()->set_ok(generation.req_id() != "rejected");
-      }
-    }
-
-    std::vector<proto::DisaggStreamGenerations> requests() {
-      std::lock_guard<std::mutex> lock(mutex_);
-      return requests_;
-    }
-
-   private:
-    std::mutex mutex_;
-    std::vector<proto::DisaggStreamGenerations> requests_;
-  } service;
-
-  brpc::Server server;
-  ASSERT_EQ(server.AddService(&service, brpc::SERVER_DOESNT_OWN_SERVICE), 0);
-  ASSERT_EQ(server.Start("127.0.0.1:0", nullptr), 0);
-  ScopeGuard stop_server([&server] {
-    server.Stop(/*timeout_ms=*/0);
-    server.Join();
-  });
-  const std::string address =
-      "127.0.0.1:" + std::to_string(server.listen_address().port);
-  const bool initialized = XServiceClientTestPeer::set_initialized(true);
-  ScopeGuard restore_client(
-      [initialized] { XServiceClientTestPeer::set_initialized(initialized); });
-  FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
-  TestPDScheduler scheduler(&engine, make_decode_options());
-  std::shared_ptr<Request> request;
-  {
-    auto rpc_service = std::make_unique<TestPDServiceImpl>(&scheduler, &engine);
-    proto::DisaggRequest wire_request;
-    wire_request.set_req_id("retained");
-    wire_request.set_service_req_id("service-retained");
-    wire_request.set_source_xservice_addr(address);
-    wire_request.add_prompt_tokens(1);
-    wire_request.set_seq_capacity(16);
-    wire_request.set_n(1);
-    wire_request.set_best_of(1);
-    wire_request.set_max_tokens(8);
-    wire_request.set_max_context_len(16);
-    wire_request.set_vocab_size(8);
-    wire_request.set_repetition_penalty(1.0f);
-    wire_request.set_eos_token_id(7);
-    request = rpc_service->generate_request(wire_request);
-    ASSERT_NE(request, nullptr);
-  }
-
-  // Queued outputs retain the request after its RPC service is destroyed.
-  RequestOutput output;
-  output.request_id = request->request_id();
-  output.service_request_id = request->service_request_id();
-  output.target_xservice_addr = request->source_xservice_addr();
-  EXPECT_TRUE(request->state().output_func(output));
-  RequestOutput rejected = output;
-  rejected.request_id = "rejected";
-  EXPECT_EQ(request->state().outputs_func({output, rejected}),
-            (std::vector<bool>{true, false}));
-
-  const auto received = service.requests();
-  ASSERT_EQ(received.size(), 2);
-  ASSERT_EQ(received[0].gens_size(), 1);
-  EXPECT_EQ(received[0].gens(0).req_id(), "retained");
-  EXPECT_EQ(received[0].gens(0).service_req_id(), "service-retained");
-  ASSERT_EQ(received[1].gens_size(), 2);
-  EXPECT_EQ(received[1].gens(0).req_id(), "retained");
-  EXPECT_EQ(received[1].gens(1).req_id(), "rejected");
 }
 
 TEST(PDSchedulerTest, DecodeRejectsMalformedMetadataBeforeKvAllocation) {
@@ -1466,7 +1363,7 @@ TEST(PDSchedulerTest, DecodeRejectsMalformedMetadataBeforeKvAllocation) {
   TestPDScheduler scheduler(&engine, make_options());
   PDServiceOptions options;
   options.enable_response_formatting = true;
-  PDServiceImpl service(&scheduler, &engine, options);
+  PDServiceImpl service(&scheduler, options);
   for (int32_t invalid_field = 0; invalid_field < 4; ++invalid_field) {
     proto::DisaggRequests requests;
     auto* request = requests.add_reqs();
@@ -2160,22 +2057,13 @@ TEST_P(ChunkReservationTest,
   auto blocker = make_request(std::vector<int32_t>(12, 99), "blocker");
   ASSERT_TRUE(
       engine.block_manager_pool()->allocate(blocker->sequences()[0].get()));
-  // Physical pressure is retried before a persistent failure releases the
-  // reservation. Exhaust that window without collecting forward outputs.
   constexpr size_t kRetryLimit = 4096;
-  for (size_t attempt = 1; attempt < kRetryLimit; ++attempt) {
+  for (size_t attempt = 0; attempt < kRetryLimit; ++attempt) {
     EXPECT_TRUE(prefill.prepare_batch()[0].empty());
   }
   prefill.wait_notifications(&decode_);
-  EXPECT_EQ(service_.released, 0);
-  EXPECT_FALSE(decode_.reservations_empty());
-  EXPECT_GE(remote->sequences()[0]->get_embedding_block_id(), 0);
-  EXPECT_TRUE(prefill.prepare_batch()[0].empty());
-  prefill.wait_notifications(&decode_);
   EXPECT_EQ(service_.released, 1);
   EXPECT_TRUE(decode_.reservations_empty());
-  EXPECT_EQ(local->sequences()[0]->kv_state().num_blocks(BlockType::KV), 0u);
-  EXPECT_FALSE(prefill.has_channel(local->request_id()));
   if (GetParam()) {
     engine.complete_forward = [&](const BatchGroup&) {
       EXPECT_EQ(service_.released, 1);

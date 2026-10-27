@@ -636,14 +636,14 @@ class TestModelExecutorConstruction:
                 max_seqs_per_batch=4,
             )
 
-    @pytest.mark.parametrize("is_draft_engine", [False, True])
+    @pytest.mark.parametrize("is_draft_model", [False, True])
     @patch("xllm.python.model_executor.runners.decode_acl_graph.DecodeAclGraphRunner")
     @patch("xllm.python.model_executor.executor._create_attention_backend")
     def test_acl_graph_capacity_respects_decode_batch_limit(
         self,
         mock_create,
         mock_graph_runner,
-        is_draft_engine: bool,
+        is_draft_model: bool,
     ):
         mock_create.return_value = StubAttentionBackend()
         model = _FakeModel(num_layers=1)
@@ -653,7 +653,7 @@ class TestModelExecutorConstruction:
             {
                 "max_position_embeddings": 128,
                 "python_graph_backend": "aclgraph",
-                "is_draft_engine": is_draft_engine,
+                "is_draft_model": is_draft_model,
             },
             max_seqs_per_batch=256,
             acl_graph_decode_batch_size_limit=16,
@@ -668,7 +668,7 @@ class TestModelExecutorConstruction:
             1,
             0,
             num_speculative_tokens=0,
-            is_spec_draft=is_draft_engine,
+            is_draft_model=is_draft_model,
             enable_mega_moe_token_mask=False,
             enable_graph_mode_decode_no_padding=False,
             device_kv_lengths=False,
@@ -729,7 +729,7 @@ class TestModelExecutorConstruction:
             16,
             0,
             num_speculative_tokens=0,
-            is_spec_draft=False,
+            is_draft_model=False,
             enable_mega_moe_token_mask=True,
             enable_graph_mode_decode_no_padding=False,
             device_kv_lengths=False,
@@ -1191,7 +1191,7 @@ class TestDecodeAclGraphSpeculativeMetadata:
     ) -> None:
         runner = self._runner()
         runner.num_speculative_tokens = num_speculative_tokens
-        runner._is_spec_draft = is_draft
+        runner._is_draft_model = is_draft
         prepare_replay = MagicMock()
         runner.attention_backend.prepare_graph_replay = prepare_replay
         batch_size = 3
@@ -1424,7 +1424,7 @@ def test_cp_admission_preserves_model_specific_kv_support(
     config = _classify(
         {
             "model_type": model_type,
-            "is_draft_engine": is_draft,
+            "is_draft_model": is_draft,
             "is_mtp_algorithm": model_type == "glm_moe_dsa_mtp",
             "num_speculative_tokens": speculative_tokens,
             "cp_size": 2,
@@ -1444,7 +1444,7 @@ def test_cp_admission_preserves_model_specific_kv_support(
 def test_glm_cp_draft_admission_requires_mtp_draft_engine(is_draft: bool, algorithm: str) -> None:
     config = {
         "model_type": "glm_moe_dsa_mtp",
-        "is_draft_engine": is_draft,
+        "is_draft_model": is_draft,
         "is_mtp_algorithm": algorithm == "mtp",
         "cp_size": 2,
         "kv_split_size": 1,
@@ -2070,7 +2070,7 @@ def test_qwen_draft_prefix_capacity_reaches_backend_and_decode_graph(draft_token
     width = draft_tokens + 1
     config = {
         "model_type": "qwen3_5_mtp",
-        "is_draft_engine": True,
+        "is_draft_model": True,
         "is_mtp_algorithm": True,
         "num_speculative_tokens": draft_tokens,
         "python_graph_backend": "aclgraph",
@@ -2094,7 +2094,7 @@ def test_qwen_draft_prefix_capacity_reaches_backend_and_decode_graph(draft_token
 def test_glm_draft_graph_capacity_uses_two_rows_per_request() -> None:
     config = {
         "model_type": "glm_moe_dsa_mtp",
-        "is_draft_engine": True,
+        "is_draft_model": True,
         "is_mtp_algorithm": True,
         "num_speculative_tokens": 16,
         "python_graph_backend": "aclgraph",
@@ -2128,7 +2128,7 @@ def test_executor_rejects_qwen_mtp_width_beyond_kernel_capacity() -> None:
 def test_kv_transfer_uses_eager_and_preserves_step_inputs(is_mtp: bool) -> None:
     config = {
         "model_type": "glm_moe_dsa_mtp" if is_mtp else "glm_moe_dsa",
-        "is_draft_engine": is_mtp,
+        "is_draft_model": is_mtp,
         "is_mtp_algorithm": is_mtp,
     }
     backend = StubAttentionBackend()
@@ -2235,7 +2235,7 @@ def test_executor_passes_no_padding_policy_to_ordinary_acl_runner(
 ) -> None:
     config = {
         "model_type": model_type,
-        "is_draft_engine": model_type == "qwen3_5_mtp",
+        "is_draft_model": model_type == "qwen3_5_mtp",
         "is_mtp_algorithm": True,
         "num_speculative_tokens": 3,
         "python_graph_backend": "aclgraph",

@@ -356,8 +356,20 @@ class WorkerImpl {
   // model context, includes model args, parallel args and date type etc.
   mutable ModelContext context_;
 
-  OptimizationConfig get_optimization_config() const {
+  const OptimizationConfig& get_optimization_config() const {
     return context_.get_optimization_config();
+  }
+
+  // The spec pair's own workers handle their suppression.
+  bool suppresses_step_output() const {
+    return !options_.enable_speculative_decode() &&
+           suppresses_non_driver_output();
+  }
+
+  // Non-driver ranks suppress their step output unless schedule overlap is
+  // active.
+  bool suppresses_non_driver_output() const {
+    return !enable_schedule_overlap() && !is_driver();
   }
 
  protected:

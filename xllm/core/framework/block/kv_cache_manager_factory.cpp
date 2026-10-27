@@ -22,11 +22,10 @@ limitations under the License.
 
 #include "core/distributed_runtime/distributed_vmm_coordinator.h"
 #include "core/framework/block/hierarchy_block_manager_pool.h"
-#include "core/kv_cache/layout/static_kv_cache_layout.h"
+#include "core/kv_cache/layout/virtual_kv_cache_page_layout.h"
 #include "core/kv_cache/layout/vmm_kv_cache_layout.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
 #include "core/kv_cache/storage/vmm_kv_page_allocator_impl.h"
-#include "core/util/tensor_options.h"
 
 namespace xllm {
 
@@ -38,8 +37,7 @@ KVCacheManagerFactoryResult KVCacheManagerFactory::create(
     BlockManagerPool::Options options,
     std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator,
     int32_t dp_size,
-    std::optional<HostCacheValidationOptions> host_validation_options,
-    const VmmKVCacheLayout* shared_vmm_layout) {
+    std::optional<HostCacheValidationOptions> host_validation_options) {
   CHECK_GT(world_size, 0) << "world_size must be greater than 0";
   CHECK_GT(dp_size, 0) << "dp_size must be greater than 0";
   KVCacheShape shape(kv_cache_capacity, model_args, world_size);
@@ -53,45 +51,6 @@ KVCacheManagerFactoryResult KVCacheManagerFactory::create(
            static_cast<int64_t>(std::numeric_limits<uint32_t>::max()))
       << "KV cache embedding block count exceeds uint32_t range";
   options.num_embedding_blocks(static_cast<uint32_t>(key_cache_shape.front()));
-
-  const bool enable_shared_kv_cache = kv_cache_capacity.shared_slot_bytes() > 0;
-  CHECK(!options.enable_shared_kv_cache() || enable_shared_kv_cache)
-      << "Shared KV cache manager requires shared storage capacity metadata.";
-  options.enable_shared_kv_cache(enable_shared_kv_cache);
-  if (enable_shared_kv_cache) {
-    const std::string& model_type = model_args.model_type();
-    CHECK(model_type == "qwen3_next" ||
-          is_qwen3_5_target_model_type(model_type))
-        << "Shared KV cache requires a supported Qwen hybrid model.";
-    CHECK(options.enable_linear_state() && !options.enable_vmm_kvcache() &&
-          !options.enable_host_offload() && !options.enable_disagg_pd() &&
-          !options.enable_kvcache_store() && options.manager_types().empty() &&
-          shared_vmm_layout == nullptr)
-        << "Shared KV cache requires local Full and Linear cache managers.";
-    CHECK(!host_validation_options.has_value() ||
-          host_validation_options->host_blocks_factor == 0.0)
-        << "Shared KV cache does not support Host storage.";
-    CHECK_EQ(kv_cache_capacity.n_blocks(),
-             kv_cache_capacity.num_linear_state_blocks());
-    CHECK_EQ(kv_cache_capacity.linear_ssm_checkpoint_stride(),
-             options.num_speculative_tokens() + 1);
-    auto create_options =
-        get_kv_cache_create_options(model_args, shape, /*is_spec_draft=*/false);
-    create_options.num_layers(model_args.n_layers())
-        .dtype(dtype)
-        .ssm_dtype(resolve_ssm_dtype(model_args.mamba_ssm_dtype(), dtype));
-    auto layout = std::make_shared<StaticKVCacheLayout>(shape, create_options);
-    CHECK_EQ(layout->slot_bytes(),
-             static_cast<size_t>(kv_cache_capacity.shared_slot_bytes()));
-    CHECK_EQ(layout->num_linear_groups(),
-             kv_cache_capacity.shared_linear_state_slots());
-    CHECK_EQ(layout->num_slabs(),
-             static_cast<size_t>(kv_cache_capacity.shared_slab_count()));
-    options.num_blocks(static_cast<uint32_t>(key_cache_shape.front()))
-        .shared_layout(std::move(layout))
-        .shared_linear_state_slots(
-            kv_cache_capacity.shared_linear_state_slots());
-  }
 
   if (options.enable_linear_state()) {
     CHECK_LE(kv_cache_capacity.num_linear_state_blocks(),
@@ -121,13 +80,8 @@ KVCacheManagerFactoryResult KVCacheManagerFactory::create(
 
   VmmKVPageAllocator* page_allocator = nullptr;
   if (options.enable_vmm_kvcache()) {
-    std::optional<VmmKVCacheLayout> component_layout;
-    if (shared_vmm_layout == nullptr) {
-      component_layout.emplace(
-          kv_cache_capacity, model_args, world_size, dtype);
-    }
-    const VmmKVCacheLayout& tensors =
-        shared_vmm_layout == nullptr ? *component_layout : *shared_vmm_layout;
+    const VmmKVCacheLayout tensors(
+        kv_cache_capacity, model_args, world_size, dtype);
     auto& allocator =
         DistributedVmmCoordinator::get_instance().vmm_kv_page_allocator();
     if (options.enable_disagg_pd()) {
@@ -158,7 +112,7 @@ KVCacheManagerFactoryResult KVCacheManagerFactory::create(
         .num_blocks(static_cast<uint32_t>(usable_blocks));
     page_allocator = &allocator;
   }
-  std::unique_ptr<KVCacheManager> manager;
+  std::unique_ptr<BlockManagerPool> manager;
   if (options.enable_host_offload()) {
     CHECK(transfer_coordinator != nullptr)
         << "KV cache transfer coordinator is required for host-offload KV "

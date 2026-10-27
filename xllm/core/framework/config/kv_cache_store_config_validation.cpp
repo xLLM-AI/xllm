@@ -48,6 +48,12 @@ void validate_kv_cache_store_config(const std::string& model_type,
     }
   }
 
+  if (kv_cache_config.enable_vmm_kvcache() &&
+      store_config.host_blocks_factor() > 1.0) {
+    LOG(FATAL) << "Virtual memory does not support host KV cache offload; set "
+                  "--host_blocks_factor=0.";
+  }
+
   if (store_config.enable_kvcache_store()) {
     CHECK(kv_cache_config.enable_prefix_cache())
         << "KV cache Store requires --enable_prefix_cache=true.";
@@ -81,7 +87,7 @@ void validate_shared_kv_cache_config(const ModelArgs& args,
   if (python_model) {
     CHECK_EQ(options.npu_kernel_backend(), "TORCH");
     const bool mtp_draft =
-        options.is_draft_engine() &&
+        options.is_draft_model() &&
         (model_type == "qwen3_5_mtp" || model_type == "qwen3_5_moe_mtp");
     CHECK(model_type == "qwen3_next" ||
           is_qwen3_5_target_model_type(model_type) || mtp_draft)
@@ -89,13 +95,13 @@ void validate_shared_kv_cache_config(const ModelArgs& args,
            "or full-attention MTP draft.";
     const bool speculative = options.enable_speculative_decode() ||
                              options.num_speculative_tokens() > 0 ||
-                             options.is_draft_engine();
+                             options.is_draft_model();
     CHECK(
         !speculative ||
         (SpeculativeConfig::is_mtp_algorithm(options.speculative_algorithm()) &&
          (is_qwen3_5_target_model_type(model_type) || mtp_draft)))
         << "Shared Python KV cache supports Qwen3.5 MTP only.";
-    CHECK(!options.is_draft_engine() ||
+    CHECK(!options.is_draft_model() ||
           (mtp_draft && !has_linear_attention_layers(args)))
         << "Shared Python KV cache requires a full-attention-only MTP draft.";
   } else {
@@ -103,7 +109,7 @@ void validate_shared_kv_cache_config(const ModelArgs& args,
           model_type == "qwen3_5_moe_text")
         << "Shared native KV cache requires a supported Qwen hybrid model.";
     CHECK(!options.enable_speculative_decode() &&
-          options.num_speculative_tokens() == 0 && !options.is_draft_engine() &&
+          options.num_speculative_tokens() == 0 && !options.is_draft_model() &&
           !options.enable_graph())
         << "Shared native KV cache requires ordinary eager decoding.";
   }

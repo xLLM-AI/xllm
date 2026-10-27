@@ -61,7 +61,7 @@ runtime::Options DFlashWorkerImpl::draft_options(
     int32_t num_speculative_tokens) {
   runtime::Options opts = options;
   opts.enable_schedule_overlap(false)
-      .is_draft_engine(true)
+      .is_draft_model(true)
       .num_speculative_tokens(num_speculative_tokens)
       .enable_graph_aux_hidden_states(false);
   return opts;

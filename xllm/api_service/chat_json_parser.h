@@ -18,7 +18,6 @@ limitations under the License.
 #include <string>
 #include <utility>
 
-#include "api_service/serving_mode.h"
 #include "core/common/types.h"
 
 namespace xllm {
@@ -33,11 +32,9 @@ class ChatJsonParser {
   [[nodiscard]] virtual std::pair<Status, std::string> preprocess(
       std::string json_str) const = 0;
 
-  // Returns the singleton parser for the given serving mode.
-  // LLM → LlmChatJsonParser, VLM → VlmChatJsonParser.
-  static const ChatJsonParser& get(ServingMode mode);
+  // Everything except VLM → LlmChatJsonParser, VLM → VlmChatJsonParser.
+  static const ChatJsonParser& get(EngineType engine_type);
 
-  // Returns the Anthropic protocol parser (separate from serving mode).
   static const ChatJsonParser& anthropic();
 };
 

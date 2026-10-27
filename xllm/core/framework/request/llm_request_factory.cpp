@@ -218,7 +218,6 @@ RequestSamplingParam LLMRequestFactory::build_sampling_param(
   // Shared field mapping (and the best_of > n logprobs rule) lives on
   // RequestParams; layer the LLM-specific rules on top.
   RequestSamplingParam sampling_param = sp.to_sampling_param(best_of);
-  sampling_param.device_min_tokens = sp.min_tokens > 0;
   sampling_param.json_object =
       ServiceConfig::get_instance().enable_json_object_output() &&
       sp.response_format == ResponseFormatType::JSON_OBJECT;
@@ -378,9 +377,7 @@ std::shared_ptr<Request> LLMRequestFactory::create(
   RequestSamplingParam sampling_param = build_sampling_param(sp, best_of);
   if (options_->num_speculative_tokens() > 0 &&
       !SpeculativeConfig::is_mtp_algorithm(options_->speculative_algorithm()) &&
-      (sp.seed.has_value() ||
-       (sp.min_tokens > 0 && !sampling_param.device_min_tokens) ||
-       !sp.bad_words.empty())) {
+      (sp.seed.has_value() || !sp.bad_words.empty())) {
     CALLBACK_WITH_ERROR(
         StatusCode::INVALID_ARGUMENT,
         "seed, min_tokens and bad_words require num_speculative_tokens=0",

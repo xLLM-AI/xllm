@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include "core/framework/request/request.h"
 #include "core/framework/request/request_state.h"
 #include "core/framework/request/stopping_checker.h"
 #include "core/framework/sampling/sampling_params.h"
@@ -27,5 +28,7 @@ RequestSamplingParam make_pd_sampling_param(const proto::DisaggRequest& req);
 SchedulerParam make_pd_scheduler_param(const proto::DisaggRequest& req);
 
 StoppingChecker make_pd_stopping_checker(const proto::DisaggRequest& req);
+
+void fill_pd_request(Request& request, proto::DisaggRequest* req);
 
 }  // namespace xllm

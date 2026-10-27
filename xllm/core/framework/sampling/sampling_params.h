@@ -47,7 +47,7 @@ struct RequestSamplingParam {
   std::optional<int64_t> seed;
   uint32_t min_tokens = 0;
   // Task execution advances accepted lengths on device, after input staging.
-  bool device_min_tokens = false;
+  bool device_min_tokens() const { return min_tokens > 0; }
   int64_t vocab_size = 0;
   std::unordered_map<int32_t, float> logit_bias;
   std::optional<std::vector<int32_t>> allowed_token_ids;

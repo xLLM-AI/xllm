@@ -23,16 +23,15 @@ limitations under the License.
 #include <vector>
 
 #include "common/types.h"
-#include "core/common/types.h"
 #include "core/disaggregation/pd_kv_response.h"
 #include "core/disaggregation/pd_request_converter.h"
 #include "core/disaggregation/pd_response.h"
 #include "core/disaggregation/pd_scheduler.h"
 #include "core/distributed_runtime/distributed_vmm_coordinator.h"
-#include "core/distributed_runtime/engine.h"
 #include "core/framework/block/block_manager_pool.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/constrained/json_object_grammar.h"
+#include "core/framework/model/model_args.h"
 #include "core/framework/request/request_output.h"
 #include "core/util/tensor_codec.h"
 #include "util/utils.h"
@@ -40,13 +39,9 @@ limitations under the License.
 namespace xllm {
 
 PDServiceImpl::PDServiceImpl(PDScheduler* scheduler,
-                             Engine* engine,
                              PDServiceOptions response_options)
-    : scheduler_(scheduler),
-      engine_(engine),
-      response_options_(std::move(response_options)),
-      xservice_client_(XServiceClient::get_instance()),
-      block_manager_(engine->block_manager_pool()) {
+    : scheduler_(scheduler), response_options_(std::move(response_options)) {
+  xservice_client_ = XServiceClient::get_instance();
   if (!xservice_client_->initialize_done()) {
     LOG(FATAL) << "XServiceClient not init.";
     return;
@@ -60,13 +55,14 @@ std::shared_ptr<const JsonObjectGrammar> PDServiceImpl::get_json_object_grammar(
   std::shared_ptr<const JsonObjectGrammar>& grammar =
       reasoning_enabled ? json_reasoning_grammar_ : json_object_grammar_;
   if (grammar == nullptr) {
-    grammar = JsonObjectGrammar::create_from_tokenizer(
-        *engine_->tokenizer(),
-        engine_->model_args().eos_token_id(),
-        engine_->model_args().stop_token_ids(),
-        engine_->model_args().vocab_size(),
-        reasoning_enabled,
-        error);
+    const ModelArgs* model_args = scheduler_->model_args();
+    grammar =
+        JsonObjectGrammar::create_from_tokenizer(*scheduler_->tokenizer(),
+                                                 model_args->eos_token_id(),
+                                                 model_args->stop_token_ids(),
+                                                 model_args->vocab_size(),
+                                                 reasoning_enabled,
+                                                 error);
   }
   return grammar;
 }
@@ -96,7 +92,6 @@ std::shared_ptr<Request> PDServiceImpl::generate_request(
   StoppingChecker stopping_checker = make_pd_stopping_checker(req);
 
   // Queued outputs can outlive the RPC service during scheduler shutdown.
-  // Capture the process-wide client without retaining the service.
   OutputCallback output_callback =
       [client = xservice_client_](const RequestOutput& output) -> bool {
     // response to xllm service to avoid the redirect cost.
@@ -184,13 +179,13 @@ bool PDServiceImpl::append_virtual_kv_cache_offsets(
     const std::string& request_id,
     const std::vector<int32_t>& block_ids,
     proto::DisaggResponse* response) {
-  if (block_manager_ == nullptr ||
-      !block_manager_->options().enable_vmm_kvcache() || block_ids.empty()) {
+  BlockManagerPool* block_manager = scheduler_->block_manager_pool();
+  if (!block_manager->options().enable_vmm_kvcache() || block_ids.empty()) {
     return true;
   }
 
   std::vector<VirtualKVCacheLayerGlobalOffsets> layer_offsets;
-  const auto& block_options = block_manager_->options();
+  const auto& block_options = block_manager->options();
   const bool offsets_available =
       DistributedVmmCoordinator::get_instance().get_virtual_kv_cache_offsets(
           dp_rank, block_options.model_id(), block_ids, layer_offsets);
@@ -231,6 +226,10 @@ void PDServiceImpl::decode_recv_new_requests(
     proto::DisaggResponses* response) {
   response->mutable_resps()->Reserve(response->resps_size() +
                                      request->reqs_size());
+  BlockManagerPool* block_manager = scheduler_->block_manager_pool();
+  const bool has_linear_attention_layers =
+      ::xllm::has_linear_attention_layers(*scheduler_->model_args());
+  const bool enable_vmm_kvcache = block_manager->options().enable_vmm_kvcache();
   for (const auto& req : request->reqs()) {
     auto* resp = response->add_resps();
     resp->set_req_id(req.req_id());
@@ -269,12 +268,9 @@ void PDServiceImpl::decode_recv_new_requests(
     std::vector<int32_t> virtual_memory_block_ids;
     append_pd_kv_transfer_groups(
         sequence->kv_state(),
-        has_linear_attention_layers(engine_->model_args()),
+        has_linear_attention_layers,
         resp,
-        block_manager_ != nullptr &&
-                block_manager_->options().enable_vmm_kvcache()
-            ? &virtual_memory_block_ids
-            : nullptr);
+        enable_vmm_kvcache ? &virtual_memory_block_ids : nullptr);
     if (!append_virtual_kv_cache_offsets(sequence->dp_rank(),
                                          req.req_id(),
                                          virtual_memory_block_ids,
