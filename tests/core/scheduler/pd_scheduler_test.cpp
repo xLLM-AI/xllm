@@ -43,10 +43,10 @@ limitations under the License.
 #include "core/framework/config/distributed_config.h"
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/transfer/kv_transfer_completion.h"
-#include "core/platform/device.h"
+#include "core/scheduler/continuous_scheduler.h"
+#include "core/scheduler/fake_scheduling_engine_test_utils.h"
 #include "core/util/scope_guard.h"
 #include "distributed_runtime/distributed_worker_manager.h"
-#include "distributed_runtime/engine.h"
 #include "distributed_runtime/kv_transfer_coordinator.h"
 #include "framework/block/block_manager_pool.h"
 #include "framework/model/model_args.h"
@@ -182,7 +182,7 @@ class PrefetchBlockManagerPool final : public BlockManagerPool {
   std::atomic<size_t> prefetch_pipeline_calls_{0};
 };
 
-class FakeEngine final : public Engine {
+class FakeEngine final : public FakeSchedulingEngine {
  public:
   FakeEngine(int32_t num_blocks,
              int32_t block_size,
@@ -198,11 +198,14 @@ class FakeEngine final : public Engine {
         .num_embedding_blocks(embedding_blocks == 0 ? num_blocks
                                                     : embedding_blocks);
     tokenizer_ = std::make_unique<FakeTokenizer>();
-    block_manager_ =
-        std::make_unique<PrefetchBlockManagerPool>(options, dp_size);
+    auto pool = std::make_unique<PrefetchBlockManagerPool>(options, dp_size);
+    prefetch_pool_ = pool.get();
+    block_manager_ = std::move(pool);
   }
 
-  std::function<ForwardOutput(BatchGroup&)> forward;
+  StepCallback forward;
+
+  PrefetchBlockManagerPool* prefetch_pool_ = nullptr;
   std::function<void(const BatchGroup&)> complete_forward;
 
   ForwardOutput step(BatchGroup& batch) {
@@ -219,24 +222,12 @@ class FakeEngine final : public Engine {
     return std::vector<RawForwardOutput>(batch.size());
   }
 
-  const Tokenizer* tokenizer() const override { return tokenizer_.get(); }
-
-  BlockManagerPool* block_manager_pool() const override {
-    return block_manager_.get();
-  }
-
-  const ModelArgs& model_args() const override { return model_args_; }
-
-  const TokenizerArgs& tokenizer_args() const override { NOT_IMPLEMENTED(); }
-
-  bool init() override { return true; }
-
   void set_storage_prefetch_enabled(bool enabled) {
-    block_manager_->set_storage_prefetch_enabled(enabled);
+    prefetch_pool_->set_storage_prefetch_enabled(enabled);
   }
 
   size_t prefetch_pipeline_calls() const {
-    return block_manager_->prefetch_pipeline_calls();
+    return prefetch_pool_->prefetch_pipeline_calls();
   }
 
   void set_tokenizer(std::unique_ptr<Tokenizer> tokenizer) {
@@ -244,13 +235,8 @@ class FakeEngine final : public Engine {
   }
 
   void set_release_callback(std::function<void()> callback) {
-    block_manager_->on_release = std::move(callback);
+    prefetch_pool_->on_release = std::move(callback);
   }
-
- private:
-  std::unique_ptr<Tokenizer> tokenizer_;
-  std::unique_ptr<PrefetchBlockManagerPool> block_manager_;
-  ModelArgs model_args_;
 };
 
 class TestPDServiceImpl final : public PDServiceImpl {
@@ -261,18 +247,21 @@ class TestPDServiceImpl final : public PDServiceImpl {
 
 class TestPDScheduler final : public PDScheduler {
  public:
+  using ContinuousScheduler::prepare_batch;
+  using ContinuousScheduler::schedule_request;
+
   using PDScheduler::drain_request_releases;
   using PDScheduler::enqueue_request_block_release;
-  using PDScheduler::prepare_batch;
 
-  template <typename TargetEngine>
   TestPDScheduler(
-      TargetEngine* engine,
+      FakeEngine* engine,
       const Options& options,
       std::shared_ptr<KVTransferCoordinator> transfer_coordinator = nullptr)
-      : PDScheduler(engine,
+      : PDScheduler(engine->block_manager_pool(),
+                    &engine->model_args(),
+                    engine->tokenizer(),
+                    make_scheduler_callbacks(engine),
                     options,
-                    SkipRuntimeStart{},
                     /*distributed_worker_manager=*/nullptr,
                     /*model_residency_coordinator=*/nullptr,
                     std::move(transfer_coordinator)) {}
@@ -370,10 +359,10 @@ class TestPDScheduler final : public PDScheduler {
   }
 
   void start_idle_runtime() {
-    server_name_ = "PDShutdownTest";
+    server_name_ = "DisaggPDShutdownTest";
     auto server = ServerRegistry::get_instance().register_server(server_name_);
-    auto service = std::make_shared<PDService>();
-    CHECK(server->start(service, "127.0.0.1:0", "PDShutdownTest"));
+    auto service = std::make_shared<PDService>(this);
+    ASSERT_TRUE(server->start(service, "127.0.0.1:0", "DisaggPDShutdownTest"));
     rpc_server_thread_ = std::make_unique<std::thread>(
         [server, service = std::move(service)] { server->run(); });
     dispatch_thread_ = std::make_unique<std::thread>(
@@ -444,7 +433,7 @@ class TestPDScheduler final : public PDScheduler {
 
   void cache_prefill_blocks_for_test(Request* request) {
     for (auto& sequence : request->sequences()) {
-      kv_cache_manager_->publish_prefix(sequence.get());
+      block_manager_pool()->publish_prefix(sequence.get());
     }
   }
 
@@ -751,6 +740,7 @@ TEST(PDSchedulerShutdownTest, StopsListenerAndWakesIdleDispatchBeforeJoining) {
   ASSERT_EXIT(
       {
         alarm(5);
+        XServiceClientTestPeer::set_initialized(true);
         FakeEngine engine(/*num_blocks=*/32, /*block_size=*/16);
         PDScheduler::Options options = make_options();
         {
@@ -1335,7 +1325,7 @@ TEST(PDSchedulerTest, DecodeBuildsMinimumLengthLogitsBias) {
   FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
   PDScheduler::Options options = make_decode_options();
   TestPDScheduler scheduler(&engine, options);
-  TestPDServiceImpl service(&scheduler, &engine);
+  TestPDServiceImpl service(&scheduler);
   for (const uint32_t minimum : {0u, 3u}) {
     SCOPED_TRACE(minimum);
     proto::DisaggRequest wire_request;
@@ -1418,7 +1408,7 @@ TEST(PDSchedulerTest, DecodeOutputCallbacksOutliveRpcService) {
   TestPDScheduler scheduler(&engine, make_decode_options());
   std::shared_ptr<Request> request;
   {
-    auto rpc_service = std::make_unique<TestPDServiceImpl>(&scheduler, &engine);
+    auto rpc_service = std::make_unique<TestPDServiceImpl>(&scheduler);
     proto::DisaggRequest wire_request;
     wire_request.set_req_id("retained");
     wire_request.set_service_req_id("service-retained");
@@ -1466,7 +1456,7 @@ TEST(PDSchedulerTest, DecodeRejectsMalformedMetadataBeforeKvAllocation) {
   TestPDScheduler scheduler(&engine, make_options());
   PDServiceOptions options;
   options.enable_response_formatting = true;
-  PDServiceImpl service(&scheduler, &engine, options);
+  PDServiceImpl service(&scheduler, options);
   for (int32_t invalid_field = 0; invalid_field < 4; ++invalid_field) {
     proto::DisaggRequests requests;
     auto* request = requests.add_reqs();

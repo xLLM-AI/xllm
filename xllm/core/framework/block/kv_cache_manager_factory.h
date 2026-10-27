@@ -32,7 +32,7 @@ class ModelArgs;
 class VmmKVCacheLayout;
 
 struct KVCacheManagerFactoryResult final {
-  std::unique_ptr<KVCacheManager> manager;
+  std::unique_ptr<BlockManagerPool> manager;
   KVCacheShape shape;
 };
 

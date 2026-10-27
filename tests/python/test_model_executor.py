@@ -582,7 +582,7 @@ class TestModelExecutorConstruction:
             1,
             0,
             num_speculative_tokens=0,
-            is_spec_draft=is_draft_engine,
+            is_draft_engine=is_draft_engine,
             enable_mega_moe_token_mask=False,
             enable_graph_mode_decode_no_padding=False,
             device_kv_lengths=False,
@@ -644,7 +644,7 @@ class TestModelExecutorConstruction:
             16,
             0,
             num_speculative_tokens=0,
-            is_spec_draft=False,
+            is_draft_engine=False,
             enable_mega_moe_token_mask=True,
             enable_graph_mode_decode_no_padding=False,
             device_kv_lengths=False,
@@ -1107,7 +1107,7 @@ class TestDecodeAclGraphSpeculativeMetadata:
     ) -> None:
         runner = self._runner()
         runner.num_speculative_tokens = num_speculative_tokens
-        runner._is_spec_draft = is_draft
+        runner._is_draft_engine = is_draft
         prepare_replay = MagicMock()
         runner.attention_backend.prepare_graph_replay = prepare_replay
         batch_size = 3

@@ -158,7 +158,7 @@ KVCacheManagerFactoryResult KVCacheManagerFactory::create(
         .num_blocks(static_cast<uint32_t>(usable_blocks));
     page_allocator = &allocator;
   }
-  std::unique_ptr<KVCacheManager> manager;
+  std::unique_ptr<BlockManagerPool> manager;
   if (options.enable_host_offload()) {
     CHECK(transfer_coordinator != nullptr)
         << "KV cache transfer coordinator is required for host-offload KV "

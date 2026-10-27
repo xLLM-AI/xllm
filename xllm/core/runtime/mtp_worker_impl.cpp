@@ -38,6 +38,7 @@ limitations under the License.
 #include "core/framework/eplb/eplb_utils.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/multimodal/mm_data.h"
+#include "core/framework/speculative/draft_config.h"
 #include "core/kv_cache/block/block_utils.h"
 #include "core/kv_cache/layout/kv_cache_estimation.h"
 #if defined(USE_NPU)
@@ -296,13 +297,8 @@ template <typename TargetInput>
 runtime::Options MTPWorkerImpl<TargetInput>::draft_options(
     const runtime::Options& options) {
   runtime::Options draft_options = options;
-  if (KVCacheConfig::get_instance().enable_vmm_kvcache()) {
-    draft_options.model_id(options.model_id() + "::mtp_draft");
-  }
-  draft_options.backend("llm")
-      .enable_schedule_overlap(false)
-      .is_draft_engine(true)
-      .enable_graph_aux_hidden_states(true);
+  spec_detail::mark_spec_draft_options(draft_options);
+  draft_options.enable_graph_aux_hidden_states(true);
   return draft_options;
 }
 

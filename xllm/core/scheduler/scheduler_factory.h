@@ -15,61 +15,33 @@ limitations under the License.
 
 #pragma once
 
-#include <concepts>
 #include <cstdint>
 #include <memory>
 #include <utility>
-#include <vector>
 
-#include "core/disaggregation/pd_scheduler.h"
 #include "scheduler/continuous_scheduler.h"
 #include "scheduler/dit_scheduler.h"
 
 namespace xllm {
 
-enum class SchedulerKind : int8_t { CONTINUOUS = 0, PD = 5 };
+class DiTEngine;
+class KVTransferCoordinator;
+struct PDServiceOptions;
+
+enum class SchedulerKind : int8_t { CONTINUOUS = 0, DISAGG_PD = 5 };
 
 SchedulerKind select_scheduler_kind(const SchedulerOptions& options);
 
-template <typename TargetEngine>
-  requires requires(TargetEngine* engine, BatchGroup& batch) {
-    static_cast<Engine*>(engine);
-    { engine->step(batch) } -> std::same_as<ForwardOutput>;
-    {
-      engine->collect_step_outputs(batch)
-    } -> std::same_as<std::vector<RawForwardOutput>>;
-  }
 std::unique_ptr<Scheduler> create_continuous_scheduler(
-    TargetEngine* engine,
+    BlockManagerPool* block_manager_pool,
+    const ModelArgs* model_args,
+    const Tokenizer* tokenizer,
+    SchedulerCallbacks callbacks,
     SchedulerOptions options,
-    std::shared_ptr<DistributedWorkerManager> distributed_worker_manager =
-        nullptr,
-    std::shared_ptr<ModelResidencyCoordinator> model_residency_coordinator =
-        nullptr,
-    std::shared_ptr<KVTransferCoordinator> kv_transfer_coordinator = nullptr,
-    PDServiceOptions response_options = {}) {
-  switch (select_scheduler_kind(options)) {
-    case SchedulerKind::PD:
-      return std::make_unique<PDScheduler>(
-          engine,
-          options,
-          std::move(distributed_worker_manager),
-          std::move(model_residency_coordinator),
-          std::move(kv_transfer_coordinator),
-          std::move(response_options));
-    case SchedulerKind::CONTINUOUS:
-      return std::make_unique<ContinuousScheduler<TargetEngine>>(
-          engine,
-          options,
-          std::move(model_residency_coordinator),
-          std::move(distributed_worker_manager));
-  }
-  return std::make_unique<ContinuousScheduler<TargetEngine>>(
-      engine,
-      options,
-      std::move(model_residency_coordinator),
-      std::move(distributed_worker_manager));
-}
+    std::shared_ptr<ModelResidencyCoordinator> model_residency_coordinator,
+    std::shared_ptr<DistributedWorkerManager> distributed_worker_manager,
+    std::shared_ptr<KVTransferCoordinator> kv_transfer_coordinator,
+    PDServiceOptions response_options);
 
 std::unique_ptr<DiTScheduler> create_dit_scheduler(
     DiTEngine* engine,
