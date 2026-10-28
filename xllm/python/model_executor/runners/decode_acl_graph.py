@@ -40,7 +40,11 @@ import torch.nn as nn
 
 from scripts.logger import logger
 from xllm.python import kernels
-from xllm.python.attention.backend import AttentionBackend, AttentionMetadata, LayerCache
+from xllm.python.attention.backend import (
+    AttentionBackend,
+    AttentionMetadata,
+    LayerCache,
+)
 from xllm.python.attention.expanded_decode_metadata import (
     ExpandedDecodeMetadata,
     resolve_expanded_decode_metadata,
@@ -361,10 +365,10 @@ class DecodeAclGraphRunner(AclGraphRunner):
             batch_size = max(execution_counts)
         if batch_size > self.max_batch:
             raise ValueError("decode batch exceeds ACL graph capacity")
-        if (self._model_owns_linear_spec_verify and metadata.is_spec_verify) or self._spec_verify_width > 1:
-            # MegaGdnMtpDecode consumes complete requests, including for MTP4
-            # (width 5). Round request counts, never split a request at a token
-            # bucket boundary.
+        if (
+            (self._has_linear_cache or self._model_owns_linear_spec_verify) and metadata.is_spec_verify
+        ) or self._spec_verify_width > 1:
+            # Recurrent verify buckets must contain complete requests.
             width = self._spec_verify_width if self._spec_verify_width > 1 else self.num_decoding_tokens
             if batch_size % width:
                 raise ValueError("linear verify graph requires complete fixed-width requests")
@@ -875,44 +879,6 @@ class DecodeAclGraphRunner(AclGraphRunner):
             current_stream.wait_event(self._update_done_event)
         return output
 
-    def _capture(self, entry: AclGraphEntry, stream: torch.npu.Stream) -> None:
-        # Graph warmup and capture execute the model before the first replay.
-        # Linear attention advances recurrent state on each forward,
-        # so restore the touched slots before serving the decode step.
-        idx = entry.static_metadata.linear_state_indices
-        linear_snapshot = []
-        backend_snapshot = None
-        if idx is not None:
-            # Scheduler indices are int32, but index_copy_ restores with int64.
-            # Padding and synthetic warmup share slot zero. Snapshot each
-            # touched state once, not once per repeated request/token row.
-            idx = torch.unique(idx.to(torch.int64))
-            for cache in self.layer_caches:
-                if (conv := cache.conv) is not None and (ssm := cache.ssm) is not None:
-                    # GDN stores S SSM checkpoints for each Conv slot. Save
-                    # every checkpoint, not just the row at the logical ID.
-                    stride = ssm.shape[0] // conv.shape[0]
-                    ssm_idx = (idx[:, None] * stride + torch.arange(stride, device=idx.device)).reshape(-1)
-                    # Keep all layers' backups on Host. Retaining every GDN
-                    # checkpoint on Device can exhaust HBM before capture.
-                    linear_snapshot.append(
-                        (conv, ssm, ssm_idx, conv.index_select(0, idx).cpu(), ssm.index_select(0, ssm_idx).cpu())
-                    )
-            backend_snapshot = self.attention_backend.snapshot_linear_state(idx)
-
-        try:
-            super()._capture(entry, stream)
-        finally:
-            # Snapshot reads precede capture via the parent stream wait; wait
-            # for capture writes before restoring on the caller's stream.
-            torch.npu.current_stream().wait_stream(stream)
-            if idx is not None:
-                for conv, ssm, ssm_idx, conv_rows, ssm_rows in linear_snapshot:
-                    conv.index_copy_(0, idx, conv_rows.to(conv.device))
-                    ssm.index_copy_(0, ssm_idx, ssm_rows.to(ssm.device))
-            if backend_snapshot is not None:
-                self.attention_backend.restore_linear_state(backend_snapshot)
-
     def _prepare_graph_entry(
         self,
         input_ids: torch.Tensor,
@@ -1013,10 +979,44 @@ class DecodeAclGraphRunner(AclGraphRunner):
             **decode_kwargs,
         )
 
+        capture_linear_state = first_capture and self._has_linear_cache
+        if capture_linear_state:
+            current_stream.wait_stream(self._stream)
+            # Slot zero is reserved for padding. Only scratch checkpoints are
+            # initialized; the request metadata and live state stay untouched.
+            for cache in self.layer_caches:
+                if cache.conv is not None and cache.ssm is not None:
+                    if cache.conv.shape[0] <= 0 or cache.ssm.shape[0] % cache.conv.shape[0] != 0:
+                        raise RuntimeError("linear SSM cache does not align with state slots")
+                    stride = cache.ssm.shape[0] // cache.conv.shape[0]
+                    cache.conv[0].zero_()
+                    cache.ssm[:stride].zero_()
+            entry.static_metadata.linear_state_indices.zero_()
+            accepted = entry.static_metadata.num_accepted_tokens
+            if accepted is not None:
+                accepted.fill_(1)
+                entry.static_metadata.num_accepted_tokens_host_values = (1,) * accepted.numel()
+
         self._prepare_attention(entry, entry.static_metadata, replay=not first_capture)
 
         if first_capture:
             self._capture(entry, self._stream)
+            if capture_linear_state:
+                # Capture reads the persistent state indices. Restore real
+                # metadata only after capture, then refresh derived tables in place.
+                current_stream.wait_stream(self._stream)
+                self._fill_entry(
+                    entry,
+                    input_ids,
+                    positions,
+                    metadata,
+                    batch_size,
+                    input_embedding,
+                    mtp_topk_indices,
+                    expanded=expanded,
+                    **decode_kwargs,
+                )
+                self._prepare_attention(entry, entry.static_metadata, replay=True)
         return entry
 
     @staticmethod
@@ -1097,6 +1097,9 @@ class DecodeAclGraphRunner(AclGraphRunner):
         if expanded is None:
             expanded = self._expanded_verify_view(metadata)
         is_expanded = expanded is not None
+        has_linear_verify_state = is_expanded and (
+            self._has_linear_cache or self._model_owns_linear_spec_verify or self._spec_verify_width > 1
+        )
         if decode_metadata is None:
             decode_metadata = self._decode_metadata(metadata, expanded)
         paged_kv_indptr = decode_metadata.paged_kv_indptr
@@ -1184,15 +1187,13 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 else None
             ),
             linear_state_indices=torch.zeros(
-                len(expanded_graph_query_lens)
-                if is_expanded and (self._model_owns_linear_spec_verify or self._spec_verify_width > 1)
-                else padded_batch_size,
+                len(expanded_graph_query_lens) if has_linear_verify_state else padded_batch_size,
                 dtype=torch.int32,
                 device=device,
             ),
             num_accepted_tokens=(
                 torch.ones(len(expanded_graph_query_lens), dtype=torch.int32, device=device)
-                if is_expanded and (self._model_owns_linear_spec_verify or self._spec_verify_width > 1)
+                if has_linear_verify_state
                 else None
             ),
             kv_seq_lens_host_values=[1] * padded_batch_size,
@@ -1361,12 +1362,12 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 terminal = query_cu_seq_lens_host_values[-1]
                 static_metadata.q_cu_seq_lens[batch_size + 1 :].fill_(terminal)
                 static_metadata.q_cu_seq_lens_host_values.extend([terminal] * (padded_batch_size - batch_size))
-        # MLA does not consume recurrent state. The scheduler can still carry
+        # Pure MLA does not consume recurrent state. The scheduler can still carry
         # one linear-state index per request while GLM MTP adds a nonuniform
         # number of repair rows; those unrelated indices need no expansion.
         linear_state_indices = (
             None
-            if getattr(self.attention_backend, "is_mla", False)
+            if self.attention_backend.is_mla and not self._has_linear_cache
             else getattr(metadata, "linear_state_indices", None)
         )
         if static_metadata.num_accepted_tokens is not None:

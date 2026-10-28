@@ -169,6 +169,33 @@ torch::Tensor causal_conv1d_prefill_npu(torch::Tensor x,
       kRunModeForward);
 }
 
+torch::Tensor causal_conv1d_update_v2_npu(
+    torch::Tensor x,
+    torch::Tensor conv_state,
+    torch::Tensor weight,
+    bool activation,
+    const std::optional<torch::Tensor>& bias,
+    const std::optional<torch::Tensor>& conv_state_indices,
+    const std::optional<torch::Tensor>& query_start_loc,
+    int64_t max_query_len,
+    int64_t pad_slot_id,
+    const std::optional<torch::Tensor>& num_accepted_tokens) {
+  return xllm::kernel::npu::npu_causal_conv1d_update_v2(
+      x,
+      conv_state,
+      weight,
+      activation,
+      bias,
+      conv_state_indices,
+      query_start_loc,
+      static_cast<int32_t>(max_query_len),
+      static_cast<int32_t>(pad_slot_id),
+      /*block_idx_last_scheduled_token=*/std::nullopt,
+      /*initial_state_idx=*/std::nullopt,
+      /*validate_data=*/false,
+      num_accepted_tokens);
+}
+
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
 causal_conv1d_qkv_prefill_npu(torch::Tensor x,
                               torch::Tensor weight,
@@ -786,6 +813,11 @@ TORCH_LIBRARY(xllm_ops, m) {
       "Tensor state_indices, Tensor has_initial_state, "
       "Tensor query_start_loc) -> Tensor");
   m.def(
+      "causal_conv1d_update_v2(Tensor x, Tensor(a!) conv_state, Tensor weight, "
+      "bool activation, Tensor? bias, Tensor? conv_state_indices, "
+      "Tensor? query_start_loc, int max_query_len, int pad_slot_id, "
+      "Tensor? num_accepted_tokens) -> Tensor");
+  m.def(
       "causal_conv1d_qkv_prefill(Tensor x, Tensor weight, "
       "Tensor(a!) conv_state, Tensor state_indices, "
       "Tensor has_initial_state, Tensor query_start_loc, "
@@ -1044,6 +1076,8 @@ TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
   m.impl("mega_gdn_mtp_decode_varlen",
          TORCH_FN(xllm::kernel::npu::npu_mega_gdn_mtp_decode_varlen));
   m.impl("causal_conv1d_prefill", TORCH_FN(xllm::causal_conv1d_prefill_npu));
+  m.impl("causal_conv1d_update_v2",
+         TORCH_FN(xllm::causal_conv1d_update_v2_npu));
   m.impl("causal_conv1d_qkv_prefill",
          TORCH_FN(xllm::causal_conv1d_qkv_prefill_npu));
   m.impl("fused_sigmoid_gating_delta_rule_decode",

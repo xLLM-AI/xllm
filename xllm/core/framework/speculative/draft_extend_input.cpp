@@ -46,10 +46,13 @@ void output_spec_hidden_states(
       << "speculative hidden states are undefined";
   torch::Tensor sample_hidden_states;
   if (logits_indices.defined()) {
-    // All-gather-space logits_indices cannot re-index the CP-local primary
-    // shard, so the CP decode path must reuse the pre-gathered rows.
-    const bool must_use_gathered = cp_enabled && !is_target_prefill;
-    if (gathered_sample_hidden_states.defined() && !must_use_gathered) {
+    // The lm_head selection contains primary rows, not auxiliary rows.
+    const bool has_aux = model_output.aux_hidden_states.defined();
+    if (cp_enabled && !is_target_prefill && !has_aux) {
+      CHECK(gathered_sample_hidden_states.defined())
+          << "gathered selected hidden is required on the CP decode path";
+    }
+    if (gathered_sample_hidden_states.defined() && !has_aux) {
       sample_hidden_states = gathered_sample_hidden_states;
     } else {
       sample_hidden_states = target_hidden_states.index_select(

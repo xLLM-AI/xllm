@@ -53,6 +53,7 @@ from xllm.python.model_executor.forward_context import (  # noqa: E402
     get_forward_context,
     record_layer_event,
 )
+from xllm.python.model_executor.runners.acl_graph import AclGraphEntry
 from xllm.python.model_executor.runners.block_draft_acl_graph import (  # noqa: E402
     BlockDraftAclGraphRunner,
 )
@@ -424,8 +425,7 @@ class TestCreateAttentionBackend:
         "xllm.python.attention.npu_paged_attention.NpuPagedAttentionBackend",
         StubAttentionBackend,
     )
-    @pytest.mark.parametrize("num_decoding_tokens", [1, 4])
-    def test_npu_platform_creates_npu_backend(self, _mock_is_npu: MagicMock, num_decoding_tokens: int) -> None:
+    def test_npu_platform_creates_npu_backend(self, _mock_is_npu: MagicMock) -> None:
         attn = _make_attention_layer(num_kv_heads=1, head_dim=256)
         device = torch.device("cpu")
         module = types.ModuleType("xllm.python.attention.npu_paged_attention")
@@ -439,7 +439,6 @@ class TestCreateAttentionBackend:
                 device,
                 torch.float16,
                 {"enable_mla": False},
-                num_decoding_tokens=num_decoding_tokens,
             )
         assert isinstance(backend, StubAttentionBackend)
         assert backend.init_kwargs["device"] is device
@@ -447,7 +446,6 @@ class TestCreateAttentionBackend:
         assert backend.init_kwargs["num_kv_heads"] == 1
         assert backend.init_kwargs["head_dim"] == 256
         assert backend.init_kwargs["is_mla"] is False
-        assert backend.init_kwargs["num_decoding_tokens"] == num_decoding_tokens
 
     @patch(
         "xllm.python.model_executor.executor.current_platform.is_npu",
@@ -514,7 +512,6 @@ class TestCreateAttentionBackend:
                 torch.float16,
                 {"cp_size": 1, "enable_mla": True},
                 max_num_reqs=3,
-                num_decoding_tokens=4,
             )
 
         assert isinstance(backend, StubAttentionBackend)
@@ -522,19 +519,6 @@ class TestCreateAttentionBackend:
         assert backend.init_kwargs["dcp_group"] is dcp_group
         assert backend.init_kwargs["index_topk"] == 512
         assert backend.init_kwargs["max_num_reqs"] == 3
-        assert backend.init_kwargs["num_decoding_tokens"] == 4
-
-    def test_sfa_dcp_backend_accepts_executor_kwargs(self) -> None:
-        # The executor passes num_decoding_tokens to SfaDcpAttentionBackend;
-        # the stubbed selection test above cannot catch a signature drift, so
-        # guard the real class here.
-        import inspect
-
-        from xllm.python.attention.sfa_dcp_backend import SfaDcpAttentionBackend
-
-        params = inspect.signature(SfaDcpAttentionBackend.__init__).parameters
-        assert "num_decoding_tokens" in params
-        assert "max_num_reqs" in params
 
     @patch(
         "xllm.python.model_executor.executor.current_platform.is_npu",
@@ -566,7 +550,7 @@ class TestModelExecutorConstruction:
     )
     @patch("xllm.python.model_executor.runners.decode_acl_graph.DecodeAclGraphRunner")
     @patch("xllm.python.model_executor.executor._create_attention_backend")
-    def test_decoding_width_reaches_backend_and_graph_runner(
+    def test_decoding_width_reaches_graph_capacity(
         self,
         mock_create: MagicMock,
         mock_graph_runner: MagicMock,
@@ -587,7 +571,7 @@ class TestModelExecutorConstruction:
             num_decoding_tokens=explicit_width,
         )
 
-        assert mock_create.call_args.kwargs["num_decoding_tokens"] == expected_width
+        assert mock_create.call_args.args[4] == 4 * expected_width
         if graph_backend == "aclgraph":
             assert mock_graph_runner.call_args.kwargs["num_decoding_tokens"] == expected_width
         else:
@@ -967,6 +951,7 @@ class TestDecodeAclGraphSpeculativeMetadata:
             dp_execution_token_counts=dp_execution_token_counts,
             is_prefill=False,
             is_chunked_prefill=False,
+            is_spec_verify=False,
         )
 
     def test_expanded_metadata_selects_matching_paged_kv_rows(self) -> None:
@@ -1080,28 +1065,37 @@ class TestDecodeAclGraphSpeculativeMetadata:
             runner.warmup(input_ids, positions, metadata)
             prepare.assert_called_once()
 
-        # Capture warmup advances KDA state; the first real replay must start
-        # from the original recurrent state, not from a synthetic warmup step.
+        runner._graphs.clear()
         conv = torch.arange(4, dtype=torch.float32)
         ssm = torch.arange(4, dtype=torch.float32) + 10
-        runner.layer_caches = [SimpleNamespace(conv=conv, ssm=ssm)]
-        entry = SimpleNamespace(static_metadata=SimpleNamespace(linear_state_indices=torch.tensor([1])))
+        runner.bind_layer_caches([LayerCache(None, None, conv=conv, ssm=ssm)])
+        metadata = self._decode_metadata(1)
+        metadata.linear_state_indices = torch.tensor([1], dtype=torch.int32)
+        metadata.has_initial_state = torch.tensor([True])
         caller_stream = MagicMock()
         graph_stream = MagicMock()
+        runner._stream = graph_stream
 
-        def advance_state(_entry, _stream):
-            conv[1] += 10
-            ssm[1] += 20
+        def advance_state(entry: AclGraphEntry, _stream: object) -> None:
+            indices = entry.static_metadata.linear_state_indices.long()
+            assert not indices.any()
+            conv[indices] += 10
+            ssm[indices] += 20
 
         with (
             patch.object(torch, "npu", SimpleNamespace(current_stream=lambda: caller_stream), create=True),
-            patch("xllm.python.model_executor.runners.acl_graph.AclGraphRunner._capture", side_effect=advance_state),
+            patch.object(runner, "_capture", side_effect=advance_state),
+            patch.object(runner, "_prepare_attention"),
+            patch("xllm.python.model_executor.runners.decode_acl_graph.kernels.update_decode_graph_metadata"),
         ):
-            runner._capture(entry, graph_stream)
+            runner.warmup(input_ids[:1], positions[:1], metadata)
 
-        assert conv.tolist() == [0, 1, 2, 3]
-        assert ssm.tolist() == [10, 11, 12, 13]
-        caller_stream.wait_stream.assert_called_once_with(graph_stream)
+        assert conv.tolist() == [10, 1, 2, 3]
+        assert ssm.tolist() == [20, 11, 12, 13]
+        entry = next(iter(runner._graphs.values()))
+        assert entry.static_metadata.linear_state_indices.tolist() == [1]
+        assert caller_stream.wait_stream.call_count == 2
+        caller_stream.wait_stream.assert_called_with(graph_stream)
 
     @pytest.mark.parametrize(
         ("field", "value", "message"),
@@ -2285,7 +2279,6 @@ def test_qwen_draft_prefix_capacity_reaches_backend_and_both_graph_paths(draft_t
             acl_graph_decode_batch_size_limit=4,
         )
     assert create.call_args.args[4] == 5 * width
-    assert create.call_args.kwargs["num_decoding_tokens"] == width
     runner = executor.prepared_graph_runner if pipeline else executor.decode_graph_runner
     assert runner is not None and runner.max_batch == 4 * width
     assert (executor.decode_graph_runner is None) is pipeline
@@ -2305,7 +2298,6 @@ def test_glm_draft_ignores_qwen_prefix_capacity_option() -> None:
         return_value=_PreparedStubAttentionBackend(),
     ) as create:
         executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=5, acl_graph_decode_batch_size_limit=4)
-    assert create.call_args.kwargs["num_decoding_tokens"] == 1
     assert create.call_args.args[4] == 10
     assert executor.decode_graph_runner.max_batch == 8
 

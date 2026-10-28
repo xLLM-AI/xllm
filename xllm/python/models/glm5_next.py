@@ -2137,10 +2137,11 @@ class Glm5NextModel(nn.Module):
         # position embeddings are computed or threaded (reference passes None).
         hidden = hidden.unsqueeze(2).expand(-1, -1, self.cfg.hc_mult, -1).contiguous()
         prev_topk: Optional[torch.Tensor] = None
-        for i, layer in enumerate(self.layers):
+        for layer in self.layers:
             hidden, prev_topk = layer(hidden, position_ids, attention_mask, prev_topk)
-            self.aux_hidden_capture.capture_layer(i, hidden, None, aux_hidden_buffer)
-            record_layer_event(i)
+            # residual=None: the collapsed stream is itself the full residual.
+            self.aux_hidden_capture.capture_layer(layer.layer_id, hidden, None, aux_hidden_buffer)
+            record_layer_event(layer.layer_id)
         # Final collapse: unweighted mean over the streams, then RMSNorm
         # (reference `self.norm(self.hc_head(hidden_states))`, line 1537).
         # Flatten [B, S, D] -> [B*S, D]: the engine's compute_logits does

@@ -223,6 +223,14 @@ bool LLMEngine::init_model(MasterStatus master_status,
         read_capture_layer_ids(options_.draft_model_path().value()));
   }
 
+#if defined(USE_NPU)
+  if (options_.enable_speculative_decode() &&
+      SpeculativeConfig::is_mtp_algorithm(options_.speculative_algorithm()) &&
+      is_glm5_next_target_model_type(args_.model_type())) {
+    args_.num_speculative_tokens(options_.num_speculative_tokens());
+  }
+#endif
+
   // A draft engine is fed token ids and detokenized by the target, so it
   // shares the target vocabulary and loads no tokenizer of its own.
   if (!options_.is_draft_engine()) {

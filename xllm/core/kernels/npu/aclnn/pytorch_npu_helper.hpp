@@ -35,6 +35,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/platform/npu/native_host_path.h"
 #include "torch_npu/csrc/aten/NPUNativeFunctions.h"
 #include "torch_npu/csrc/core/npu/NPUStream.h"
 #include "torch_npu/csrc/framework/OpCommand.h"
@@ -139,25 +140,29 @@ inline std::string real_path(const std::string& path) {
 }
 
 inline std::vector<std::string> get_custom_lib_path() {
-  const char* ascend_custom_opp_path = std::getenv("ASCEND_CUSTOM_OPP_PATH");
-  std::vector<std::string> custom_lib_path_list;
-
-  if (ascend_custom_opp_path == nullptr) {
-    ASCEND_LOGW("ASCEND_CUSTOM_OPP_PATH is not exists");
-    return {};
+  static const int32_t kLibraryAnchor = 0;
+  std::error_code error;
+  const auto host = xllm::native_host_path(&kLibraryAnchor, error);
+  std::vector<std::string> paths;
+  if (!error) {
+    const auto bundle = host.parent_path() / "opp/vendors/custom_xllm_math";
+    if (std::filesystem::is_regular_file(bundle / "op_api/lib/libcust_opapi.so",
+                                         error)) {
+      paths.push_back(bundle.string());
+    }
   }
-
-  std::string ascend_custom_opp_path_str(ascend_custom_opp_path);
-  // split string with ":"
-  custom_lib_path_list = split_str(ascend_custom_opp_path_str, ":");
-  if (custom_lib_path_list.empty()) {
-    return {};
+  const char* custom = std::getenv("ASCEND_CUSTOM_OPP_PATH");
+  if (custom != nullptr) {
+    for (auto& path : split_str(custom, ":")) {
+      if (!path.empty() && (paths.empty() || path != paths.front())) {
+        paths.push_back(std::move(path));
+      }
+    }
   }
-  for (auto& it : custom_lib_path_list) {
-    it += "/op_api/lib/";
+  for (auto& path : paths) {
+    path += "/op_api/lib/";
   }
-
-  return custom_lib_path_list;
+  return paths;
 }
 
 inline std::vector<std::string> get_default_custom_lib_path() {

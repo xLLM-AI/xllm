@@ -1464,43 +1464,69 @@ TEST(KVCacheTest, SharedKPoolBudgetCoversBothModelsWithoutDoubleCounting) {
       target_args.num_nextn_predict_layers(nextn_layers);
       ModelArgs draft_args = target_args;
       draft_args.n_layers(1).index_kpool(draft_kpool);
-      KVCacheCapacity target_cap =
+      const KVCacheCapacity target_cap =
           estimate_kv_cache_capacity(target_args, options);
-      KVCacheCapacity draft_cap =
+      const KVCacheCapacity draft_cap =
           estimate_kv_cache_capacity(draft_args, draft_options);
       ASSERT_NE(target_cap.num_linear_state_blocks(),
                 draft_cap.num_linear_state_blocks());
-      const int64_t n_blocks =
-          estimate_shared_kpool_blocks(target_cap, draft_cap, draft_args);
-      target_cap.n_blocks(n_blocks);
-      draft_cap.n_blocks(n_blocks);
-      // Match the final draft shape's inherited request slots and window.
-      draft_cap.num_linear_state_blocks(target_cap.num_linear_state_blocks())
-          .kpool_tail_len(target_cap.kpool_tail_len());
-      const auto allocated_bytes = [&]() -> int64_t {
+      const SharedKPoolPlan plan =
+          plan_shared_kpool(target_cap, draft_cap, draft_args);
+      const int64_t n_blocks = plan.target.n_blocks();
+      const int64_t budget = std::min(target_cap.cache_size_in_bytes(),
+                                      draft_cap.cache_size_in_bytes());
+      EXPECT_GT(n_blocks, 0);
+      EXPECT_EQ(plan.draft.n_blocks(), n_blocks);
+      EXPECT_EQ(plan.target.cache_size_in_bytes(), budget);
+      EXPECT_EQ(plan.draft.cache_size_in_bytes(), budget);
+      EXPECT_EQ(plan.draft.num_linear_state_blocks(),
+                plan.target.num_linear_state_blocks());
+      EXPECT_GE(plan.draft.kpool_tail_len(), target_cap.kpool_tail_len());
+      const KVCacheShape plan_draft_shape(
+          plan.draft, draft_args, /*world_size=*/1);
+      EXPECT_EQ(plan_draft_shape.kpool_tail_shape()[0],
+                plan.target.num_linear_state_blocks());
+      EXPECT_EQ(plan_draft_shape.kpool_tail_shape()[2],
+                plan.draft.kpool_tail_len());
+      struct Allocation {
+        int64_t total_bytes = 0;
+        int64_t draft_tail_bytes = 0;
+      };
+      const auto measure = [&](const KVCacheCapacity& target_cap,
+                               const KVCacheCapacity& draft_cap) {
         const KVCacheShape target_shape(
             target_cap, target_args, /*world_size=*/1);
         const KVCacheShape draft_shape(draft_cap, draft_args, /*world_size=*/1);
         KVCacheCreateOptions create_options;
         create_options.enable_lighting_indexer(true).dtype(torch::kBFloat16);
-        int64_t bytes = 0;
+        Allocation allocation;
         for (int32_t layer_id = 0; layer_id < target_args.n_layers();
              ++layer_id) {
           KVCache cache(target_shape, create_options, layer_id);
           for (const KVCacheTensor& tensor : cache.get_cache_tensors()) {
-            bytes += tensor.tensor.numel() * tensor.tensor.element_size();
+            allocation.total_bytes +=
+                tensor.tensor.numel() * tensor.tensor.element_size();
           }
         }
         KVCache draft_cache(draft_shape, create_options, /*layer_id=*/0);
         for (const KVCacheTensor& tensor : draft_cache.get_cache_tensors()) {
-          bytes += tensor.tensor.numel() * tensor.tensor.element_size();
+          allocation.total_bytes +=
+              tensor.tensor.numel() * tensor.tensor.element_size();
         }
-        return bytes;
+        allocation.draft_tail_bytes =
+            draft_cache.get_kpool_tail().numel() *
+            draft_cache.get_kpool_tail().element_size();
+        return allocation;
       };
-      EXPECT_LE(allocated_bytes(), options.cache_size_in_bytes);
-      target_cap.n_blocks(n_blocks + 1);
-      draft_cap.n_blocks(n_blocks + 1);
-      EXPECT_GT(allocated_bytes(), options.cache_size_in_bytes);
+      const Allocation planned = measure(plan.target, plan.draft);
+      EXPECT_LE(planned.total_bytes, budget);
+      EXPECT_EQ(plan.draft.linear_cache_size_in_bytes(),
+                planned.draft_tail_bytes);
+      KVCacheCapacity over_target = plan.target;
+      KVCacheCapacity over_draft = plan.draft;
+      over_target.n_blocks(n_blocks + 1);
+      over_draft.n_blocks(n_blocks + 1);
+      EXPECT_GT(measure(over_target, over_draft).total_bytes, budget);
     }
   }
 }
@@ -1519,10 +1545,10 @@ TEST(KVCacheTest, SharedKPoolBudgetRejectsInsufficientMemory) {
       .kpool_tail_slot_size(1024)
       .linear_cache_size_in_bytes(5120)
       .cache_size_in_bytes(10240);
-  EXPECT_DEATH(estimate_shared_kpool_blocks(capacity, capacity, draft_args),
+  EXPECT_DEATH(plan_shared_kpool(capacity, capacity, draft_args),
                "target and draft KPool request state");
   capacity.cache_size_in_bytes(10241);
-  EXPECT_DEATH(estimate_shared_kpool_blocks(capacity, capacity, draft_args),
+  EXPECT_DEATH(plan_shared_kpool(capacity, capacity, draft_args),
                "no memory for a shared KPool block");
 }
 #endif

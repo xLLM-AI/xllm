@@ -1145,9 +1145,22 @@ void MTPWorkerImpl<TargetInput>::ensure_spec_verify_control_block_table(
 
 template <typename TargetInput>
 bool MTPWorkerImpl<TargetInput>::use_chunked_prefill_spec_verify_path() const {
-  return target_spec_verify_mode_ ==
-             mtp_async::TargetSpecVerifyMode::CAUSAL_CHUNKED_PREFILL ||
-         supports_explicit_spec_verify_replay_update();
+  if (target_spec_verify_mode_ ==
+          mtp_async::TargetSpecVerifyMode::CAUSAL_CHUNKED_PREFILL ||
+      supports_explicit_spec_verify_replay_update()) {
+    return true;
+  }
+#if defined(USE_NPU) || defined(USE_MLU)
+  if (impl_ == nullptr ||
+      impl_->get_status() == WorkerImpl::Status::UNINITIALIZED) {
+    return false;
+  }
+  const std::string& model_type = impl_->context_.get_model_args().model_type();
+  return is_qwen3_5_target_model_type(model_type) ||
+         is_glm5_next_target_model_type(model_type);
+#else
+  return false;
+#endif
 }
 
 template <typename TargetInput>

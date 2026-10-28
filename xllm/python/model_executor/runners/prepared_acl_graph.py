@@ -673,9 +673,12 @@ class PreparedAclGraphRunner(AclGraphRunner):
     ) -> list[torch.Tensor]:
         """Return this Slot's captured outputs for every KV-capacity tier."""
         binding = self._prepared_binding(input_ids, positions, metadata)
+        # Zero-page bindings have no KV tier and are registered by address only.
+        variants = self._prepared_kv_graphs.get(binding)
+        entries = variants.values() if variants is not None else (self._prepared_graphs.get(binding),)
         outputs = []
-        for key, entry in self._prepared_graphs.items():
-            if (key[:-1] if self._device_kv_lengths else key) != binding:
+        for entry in entries:
+            if entry is None:
                 continue
             output = entry.static_output
             if not isinstance(output, tuple) or len(output) < 2 or not isinstance(output[1], torch.Tensor):

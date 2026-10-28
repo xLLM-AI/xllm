@@ -25,14 +25,14 @@ import torch
 def _backend_for_linear_cache(
     conv_cache: torch.Tensor,
     ssm_cache: torch.Tensor,
-    verify_width: int = 1,
 ) -> Any:
     from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend
 
     backend = object.__new__(NpuPagedAttentionBackend)
     backend._kv_caches = [SimpleNamespace(conv=conv_cache, ssm=ssm_cache)]
     backend._metadata = None
-    backend._kda_verify_width = verify_width
+    backend._kda_checkpoint_stride = ssm_cache.shape[0] // conv_cache.shape[0] if conv_cache.shape[0] else None
+    backend._kda_query_start_locs = {}
     return backend
 
 
@@ -99,7 +99,7 @@ def _install_kda_stubs(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
 
     def recurrent_kda(*args: Any, **kwargs: Any) -> tuple[torch.Tensor, torch.Tensor]:
         gate_arg = args[3] if len(args) > 3 else None
-        kernel_calls.append({"op": "recurrent", "gate": gate_arg, **kwargs})
+        kernel_calls.append({"op": "recurrent", "gate": gate_arg, "beta": args[4], **kwargs})
         return torch.zeros_like(args[0]), kwargs["initial_state"] + 100
 
     ascendc.chunk_kda_fwd = chunk_kda_fwd
@@ -112,7 +112,11 @@ def _install_kda_stubs(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
 
     import xllm.python as python_package
 
-    monkeypatch.setitem(python_package.__dict__, "kernels", SimpleNamespace(l2_norm=lambda value: value))
+    monkeypatch.setitem(
+        python_package.__dict__,
+        "kernels",
+        SimpleNamespace(l2_norm=lambda value: value, causal_conv1d_update_v2=lambda value, *args, **kwargs: value),
+    )
 
     return kernel_calls
 
@@ -144,11 +148,11 @@ def test_execute_linear_without_state_indices(kda_test_environment: None) -> Non
 def test_merged_spec_verify_uses_remapped_state_indices(
     kda_test_environment: list[dict],
 ) -> None:
-    conv_cache = torch.arange(4 * 2 * 6, dtype=torch.bfloat16).reshape(4, 2, 6)
-    ssm_cache = torch.arange(4 * 1 * 2 * 2, dtype=torch.float32).reshape(4, 1, 2, 2)
-    backend = _backend_for_linear_cache(conv_cache, ssm_cache, verify_width=4)
+    conv_cache = torch.arange(4 * 3 * 6, dtype=torch.bfloat16).reshape(4, 3, 6)
+    ssm_cache = torch.arange(16 * 1 * 2 * 2, dtype=torch.float32).reshape(16, 1, 2, 2)
+    backend = _backend_for_linear_cache(conv_cache, ssm_cache)
     per_row_indices = torch.tensor([1, 1, 3, 3], dtype=torch.int32)
-    backend._metadata = SimpleNamespace(
+    metadata = SimpleNamespace(
         linear_state_indices=per_row_indices,
         linear_state_read_indices=per_row_indices.clone(),
         linear_state_write_indices=per_row_indices,
@@ -157,8 +161,11 @@ def test_merged_spec_verify_uses_remapped_state_indices(
         is_chunked_prefill=True,
         q_cu_seq_lens=torch.tensor([0, 2, 4], dtype=torch.int32),
         kv_seq_lens=torch.tensor([3, 4, 7, 8], dtype=torch.int32),
+        num_accepted_tokens=torch.ones(2, dtype=torch.int32),
         expanded_decode_metadata=None,
+        block_table=None,
     )
+    backend._metadata = metadata
 
     output = backend.execute_linear(
         torch.ones(1, 6, 4, dtype=torch.bfloat16),
@@ -172,7 +179,10 @@ def test_merged_spec_verify_uses_remapped_state_indices(
     verify_call = kda_test_environment[0]
     assert verify_call["op"] == "recurrent"
     assert verify_call["inplace_final_state"] is True
-    assert verify_call["ssm_state_indices"].tolist() == [1, 5, 3, 7]
+    assert verify_call["ssm_state_indices"].tolist() == [
+        [4, 5, 6, 7],
+        [12, 13, 14, 15],
+    ]
     assert verify_call["cu_seqlens"].tolist() == [0, 2, 4]
     assert verify_call["num_accepted_tokens"].tolist() == [1, 1]
 
@@ -287,11 +297,11 @@ def test_lower_bound_out_of_range_falls_back_to_python_gate(
 def test_chunked_spec_verify_does_not_fuse_gate(
     kda_test_environment: list[dict],
 ) -> None:
-    conv_cache = torch.arange(4 * 2 * 6, dtype=torch.bfloat16).reshape(4, 2, 6)
-    ssm_cache = torch.arange(4 * 1 * 2 * 2, dtype=torch.float32).reshape(4, 1, 2, 2)
-    backend = _backend_for_linear_cache(conv_cache, ssm_cache, verify_width=4)
+    conv_cache = torch.arange(4 * 3 * 6, dtype=torch.bfloat16).reshape(4, 3, 6)
+    ssm_cache = torch.arange(16 * 1 * 2 * 2, dtype=torch.float32).reshape(16, 1, 2, 2)
+    backend = _backend_for_linear_cache(conv_cache, ssm_cache)
     per_row_indices = torch.tensor([1, 1, 3, 3], dtype=torch.int32)
-    backend._metadata = SimpleNamespace(
+    metadata = SimpleNamespace(
         linear_state_indices=per_row_indices,
         linear_state_read_indices=per_row_indices.clone(),
         linear_state_write_indices=per_row_indices,
@@ -300,13 +310,16 @@ def test_chunked_spec_verify_does_not_fuse_gate(
         is_chunked_prefill=True,
         q_cu_seq_lens=torch.tensor([0, 2, 4], dtype=torch.int32),
         kv_seq_lens=torch.tensor([3, 4, 7, 8], dtype=torch.int32),
+        num_accepted_tokens=torch.ones(2, dtype=torch.int32),
         expanded_decode_metadata=None,
+        block_table=None,
     )
+    backend._metadata = metadata
 
     backend.execute_linear(
         torch.ones(1, 6, 4, dtype=torch.bfloat16),
         torch.ones(1, 4, 1, dtype=torch.float32),
-        *_kda_inputs(lower_bound=-5.0),
+        *_kda_inputs(-5.0),
         raw_gate_proj=torch.zeros(1, 4, 1, 2, dtype=torch.float32),
     )
 
@@ -314,21 +327,25 @@ def test_chunked_spec_verify_does_not_fuse_gate(
     verify_call = kda_test_environment[0]
     assert verify_call["op"] == "recurrent"
     assert verify_call["use_gate_in_kernel"] is False
+    assert verify_call["use_beta_sigmoid_in_kernel"] is False
     assert torch.equal(verify_call["gate"], torch.full((4, 1, 2), -2.5))
+    assert torch.equal(verify_call["beta"], torch.ones(4, 1))
 
 
 @pytest.mark.parametrize("in_graph", [False, True])
 @pytest.mark.parametrize("width", [2, 4])
+@pytest.mark.parametrize("chunked_verify", [False, True])
 def test_spec_verify_uses_combined_state_without_environment_flags(
     kda_test_environment: list[dict],
     monkeypatch: pytest.MonkeyPatch,
     in_graph: bool,
     width: int,
+    chunked_verify: bool,
 ) -> None:
     from xllm.python.attention import kda_linear_attention
 
     monkeypatch.setattr(kda_linear_attention, "in_acl_graph", lambda: in_graph)
-    backend = _backend_for_linear_cache(torch.zeros(4, 2, 6), torch.zeros(4, 1, 2, 2), verify_width=4)
+    backend = _backend_for_linear_cache(torch.zeros(4, 2, 6), torch.zeros(4, 1, 2, 2))
     slots = torch.tensor([1, 3], dtype=torch.int32)
     total_rows = 2 * width
     backend._metadata = SimpleNamespace(
@@ -337,10 +354,14 @@ def test_spec_verify_uses_combined_state_without_environment_flags(
         linear_state_write_indices=None,
         has_initial_state=None,
         is_prefill=False,
-        is_chunked_prefill=False,
-        q_cu_seq_lens=torch.arange(total_rows + 1, dtype=torch.int32),
+        is_chunked_prefill=chunked_verify,
+        is_spec_verify=chunked_verify,
+        q_cu_seq_lens=torch.arange(
+            0, total_rows + 1, width if chunked_verify and not in_graph else 1, dtype=torch.int32
+        ),
         q_seq_lens=torch.full((2,), width, dtype=torch.int32),
         kv_seq_lens=torch.arange(total_rows, dtype=torch.int32) + 10,
+        num_accepted_tokens=torch.ones(2, dtype=torch.int32),
         expanded_decode_metadata=SimpleNamespace() if in_graph else None,
     )
     expected_output = torch.zeros(1, total_rows, 1, 2)
@@ -360,52 +381,14 @@ def test_spec_verify_uses_combined_state_without_environment_flags(
 
     assert output is expected_output
     assert len(verify_calls) == 1
-    assert torch.equal(verify_calls[0][6], slots.to(torch.int64))
+    assert torch.equal(verify_calls[0][5], slots.to(torch.int64))
     assert not kda_test_environment
-
-
-def test_prefill_disarms_only_restarted_slots(kda_test_environment: list[dict]) -> None:
-    backend = _backend_for_linear_cache(torch.zeros(4, 2, 6, dtype=torch.bfloat16), torch.zeros(4, 1, 2, 2))
-    armed_slots = torch.ones(4, dtype=torch.bool)
-    backend._kda_state = {0: {"armed_buf": armed_slots}}
-    backend._metadata = _plain_prefill_metadata()
-
-    backend.execute_linear(
-        torch.ones(1, 6, 1, dtype=torch.bfloat16),
-        torch.ones(1, 1, 1),
-        *_kda_inputs(),
-        raw_gate_proj=torch.zeros(1, 1, 1, 2),
-    )
-
-    assert armed_slots.tolist() == [False, True, True, True]
-    assert kda_test_environment[0]["op"] == "chunk"
-
-
-def test_combined_state_snapshot_restores_all_draft_slots(kda_test_environment: list[dict]) -> None:
-    backend = _backend_for_linear_cache(torch.zeros(4, 2, 6), torch.zeros(4, 1, 2, 2))
-    state = {
-        "combined_conv": torch.arange(16 * 2 * 6).reshape(16, 2, 6).float(),
-        "combined_ssm": torch.arange(16 * 1 * 2 * 2).reshape(16, 1, 2, 2).float(),
-        "kv_prev": torch.arange(4),
-        "armed_buf": torch.tensor([False, True, False, True]),
-    }
-    original = {name: tensor.clone() for name, tensor in state.items()}
-    backend._kda_state = {0: state}
-    snapshot = backend.snapshot_linear_state(torch.tensor([1, 3], dtype=torch.int32))
-    for tensor in state.values():
-        tensor.zero_()
-
-    backend.restore_linear_state(snapshot)
-
-    for name, tensor in state.items():
-        assert torch.equal(tensor[1::2], original[name][1::2])
-        assert torch.count_nonzero(tensor[::2]) == 0
 
 
 def test_spec_verify_rejects_nonuniform_widths(kda_test_environment: list[dict]) -> None:
     conv_cache = torch.ones(4, 2, 6)
     ssm_cache = torch.ones(4, 1, 2, 2)
-    backend = _backend_for_linear_cache(conv_cache, ssm_cache, verify_width=4)
+    backend = _backend_for_linear_cache(conv_cache, ssm_cache)
     backend._metadata = SimpleNamespace(
         linear_state_indices=torch.tensor([1, 1, 3, 3, 3], dtype=torch.int32),
         linear_state_read_indices=None,
@@ -450,7 +433,6 @@ def test_plain_decode_keeps_fused_gate_without_verify_state(kda_test_environment
     )
 
     assert output.shape == (1, 2, 1, 2)
-    assert not hasattr(backend, "_kda_state")
     assert len(kda_test_environment) == 1
     assert kda_test_environment[0]["op"] == "recurrent"
     assert kda_test_environment[0]["use_gate_in_kernel"] is True
@@ -487,122 +469,115 @@ def test_varlen_prefill_uses_one_native_convolution(
     assert [call["cu_seqlens"].tolist() for call in kda_test_environment] == [[0, 1], [0, 2], [0, 3]]
 
 
-def _verify_metadata(
-    slots: torch.Tensor, base_lengths: torch.Tensor, width: int, in_graph: bool = False
-) -> SimpleNamespace:
-    from xllm.python.attention.expanded_decode_metadata import ExpandedDecodeMetadata
-
+def _verify_metadata(slots: torch.Tensor, width: int) -> SimpleNamespace:
     per_row_slots = slots.repeat_interleave(width)
-    kv_seq_lens = (base_lengths[:, None] + torch.arange(width)).flatten()
-    expanded = None
-    if in_graph and width > 1:
-        expanded = ExpandedDecodeMetadata(
-            kv_seq_lens=kv_seq_lens,
-            block_table=torch.zeros(per_row_slots.numel(), 1, dtype=torch.int32),
-            paged_kv_indptr=torch.arange(per_row_slots.numel() + 1, dtype=torch.int32),
-            paged_kv_indices=torch.zeros(per_row_slots.numel(), dtype=torch.int32),
-            paged_kv_last_page_len=kv_seq_lens.to(torch.int32),
-            paged_attention_tiling_data=None,
-            kv_seq_lens_host=None,
-            kv_seq_lens_host_values=None,
-        )
     return SimpleNamespace(
         linear_state_indices=per_row_slots,
-        slot_mapping=torch.arange(per_row_slots.numel(), dtype=torch.int32),
-        linear_state_read_indices=None,
-        linear_state_write_indices=None,
-        has_initial_state=None,
         is_prefill=False,
         is_chunked_prefill=False,
         q_cu_seq_lens=torch.arange(per_row_slots.numel() + 1, dtype=torch.int32),
-        q_seq_lens=torch.full((slots.numel(),), width, dtype=torch.int32),
-        kv_seq_lens=kv_seq_lens,
-        expanded_decode_metadata=expanded,
     )
 
 
-@pytest.mark.parametrize("in_graph", [False, True])
-@pytest.mark.parametrize("widths", [(4, 2, 4), (2, 4, 2), (4, 1, 4), (1, 4, 1)])
+@pytest.mark.parametrize("widths", [(1, 2, 4), (2, 4, 4), (4, 4, 4), (1, 4, 4)])
 def test_consecutive_verify_widths_preserve_accepted_state(
     kda_test_environment: list[dict],
     monkeypatch: pytest.MonkeyPatch,
-    in_graph: bool,
     widths: tuple[int, ...],
 ) -> None:
     from fla_npu.ops import ascendc
 
-    from xllm.python.attention import kda_linear_attention, npu_paged_attention
-
-    monkeypatch.setattr(kda_linear_attention, "in_acl_graph", lambda: in_graph)
-    monkeypatch.setattr(npu_paged_attention, "in_acl_graph", lambda: in_graph)
-    conv_cache = torch.arange(4 * 2 * 6).reshape(4, 2, 6).to(torch.bfloat16)
-    ssm_cache = torch.arange(4 * 1 * 2 * 2).reshape(4, 1, 2, 2).float()
-    backend = _backend_for_linear_cache(conv_cache, ssm_cache, verify_width=4)
-    slots = torch.tensor([1, 3])
-    base_lengths = torch.tensor([16, 32])
-    expected_conv = conv_cache[slots].clone()
-    expected_ssm = ssm_cache[slots].clone()
-    pointers = None
+    conv_cache = torch.zeros(4, 5, 6, dtype=torch.bfloat16)
+    ssm_cache = torch.zeros(16, 1, 2, 2)
+    backend = _backend_for_linear_cache(conv_cache, ssm_cache)
+    slots = torch.tensor([3, 1])
+    base_indices = slots * 4
+    ssm_cache[base_indices] = torch.tensor([1.0, 3.0]).view(2, 1, 1, 1)
+    expected_ssm = ssm_cache[base_indices].clone()
+    previous_checkpoints = None
     previous_width = 1
-    previous_conv = None
-    previous_ssm = None
 
-    def recurrent_kda(query: torch.Tensor, *_args: Any, **kwargs: Any) -> tuple[torch.Tensor, torch.Tensor]:
-        cumulative = kwargs["cu_seqlens"]
-        assert cumulative.tolist() == [0, width, 2 * width]
-        output_slots = kwargs["ssm_state_indices"].reshape(2, width).long()
-        accepted = kwargs["num_accepted_tokens"].long()
-        initial_slots = output_slots[torch.arange(2), accepted - 1]
-        pool = kwargs["initial_state"]
-        initial = pool[initial_slots].clone()
-        torch.testing.assert_close(initial, expected_ssm, rtol=0, atol=0)
-        for row in range(width):
-            pool.index_copy_(0, output_slots[:, row], initial + row + 1)
-        return torch.zeros_like(query), pool
+    def _make_recurrent_kda(
+        expected_state: torch.Tensor,
+        current_width: int,
+        expected_accepted: torch.Tensor,
+    ) -> Any:
+        def recurrent_kda(
+            query: torch.Tensor,
+            *_args: Any,
+            **kwargs: Any,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            state_indices = kwargs["ssm_state_indices"].long()
+            kernel_accepted = kwargs["num_accepted_tokens"].long()
+            assert torch.equal(kernel_accepted.cpu(), expected_accepted.long())
+            assert bool(((kernel_accepted >= 1) & (kernel_accepted <= current_width)).all())
+            selected_indices = state_indices[
+                torch.arange(2),
+                kernel_accepted - 1,
+            ]
+            state_pool = kwargs["initial_state"]
+            initial_state = state_pool[selected_indices].clone()
+            torch.testing.assert_close(initial_state, expected_state, rtol=0, atol=0)
+            for row in range(current_width):
+                state_pool.index_copy_(
+                    0,
+                    state_indices[:, row],
+                    initial_state + row + 1,
+                )
+            return torch.zeros_like(query), state_pool
 
-    monkeypatch.setattr(ascendc, "recurrent_kda", recurrent_kda)
-    for step, width in enumerate(widths):
-        if previous_conv is not None:
-            accepted = torch.tensor([previous_width, 1])
-            base_lengths += accepted
-            expected_conv = previous_conv[torch.arange(2), accepted - 1]
-            assert previous_ssm is not None
-            expected_ssm = previous_ssm[torch.arange(2), accepted - 1]
-        backend._metadata = _verify_metadata(slots, base_lengths, width, in_graph)
-        mixed_qkv = (torch.arange(6 * 2 * width).reshape(1, 6, 2 * width) + step * 8).to(torch.bfloat16)
-        output = backend.execute_linear(
-            mixed_qkv,
-            torch.ones(1, 2 * width, 1),
-            *_kda_inputs(),
-            raw_gate_proj=torch.zeros(1, 2 * width, 1, 2),
+        return recurrent_kda
+
+    for width in widths:
+        accepted = torch.ones(2, dtype=torch.int32)
+        if previous_checkpoints is not None:
+            accepted = torch.tensor([previous_width, 1], dtype=torch.int32)
+            expected_ssm = previous_checkpoints[
+                torch.arange(2),
+                accepted.to(torch.int64) - 1,
+            ]
+
+        monkeypatch.setattr(
+            ascendc,
+            "recurrent_kda",
+            _make_recurrent_kda(expected_ssm, width, accepted),
         )
+        metadata = _verify_metadata(slots, width)
+        metadata.num_accepted_tokens = accepted
+        output = backend._spec_verify(
+            torch.ones(1, 6, 2 * width, dtype=torch.bfloat16),
+            torch.zeros(1, 2 * width, 1, 2),
+            torch.ones(1, 2 * width, 1),
+            _kda_inputs()[1],
+            "silu",
+            slots,
+            metadata,
+            conv_cache,
+            ssm_cache,
+            ascendc.recurrent_kda,
+        )
+
         assert output.shape == (1, 2 * width, 1, 2)
-        state = backend._kda_state[0]
-        assert state["combined_conv"].shape[0] == 16
-        assert state["combined_ssm"].shape[0] == 16
-        current_pointers = (state["combined_conv"].data_ptr(), state["combined_ssm"].data_ptr())
-        if pointers is not None:
-            assert current_pointers == pointers
-        pointers = current_pointers
-        inputs = mixed_qkv.reshape(6, 2, width).permute(1, 2, 0)
-        history = torch.cat([expected_conv, inputs], dim=1)
-        previous_conv = torch.stack([history[:, row + 1 : row + 3] for row in range(width)], dim=1)
-        previous_ssm = torch.stack([expected_ssm + row + 1 for row in range(width)], dim=1)
-        for row in range(width):
-            torch.testing.assert_close(state["combined_conv"][slots + row * 4], previous_conv[:, row])
-            torch.testing.assert_close(state["combined_ssm"][slots + row * 4], previous_ssm[:, row])
-        torch.testing.assert_close(conv_cache[slots], previous_conv[:, 0])
-        torch.testing.assert_close(ssm_cache[slots], previous_ssm[:, 0])
+        checkpoint_indices = base_indices[:, None] + torch.arange(width)
+        previous_checkpoints = ssm_cache[checkpoint_indices].clone()
+        expected_checkpoints = expected_ssm[:, None] + torch.arange(1, width + 1).view(
+            1,
+            width,
+            1,
+            1,
+            1,
+        )
+        torch.testing.assert_close(previous_checkpoints, expected_checkpoints)
         previous_width = width
 
 
 def test_verify_rejects_width_above_capacity_before_mutation(kda_test_environment: list[dict]) -> None:
     conv_cache = torch.ones(4, 2, 6, dtype=torch.bfloat16)
     ssm_cache = torch.ones(4, 1, 2, 2)
-    backend = _backend_for_linear_cache(conv_cache, ssm_cache, verify_width=4)
-    backend._metadata = _verify_metadata(torch.tensor([1, 3]), torch.tensor([16, 32]), 5)
+    backend = _backend_for_linear_cache(conv_cache, ssm_cache)
+    backend._metadata = _verify_metadata(torch.tensor([1, 3]), 5)
 
-    with pytest.raises(ValueError, match="configured.*width"):
+    with pytest.raises(RuntimeError, match="conv checkpoint capacity"):
         backend.execute_linear(
             torch.ones(1, 6, 10, dtype=torch.bfloat16),
             torch.ones(1, 10, 1),
@@ -611,6 +586,104 @@ def test_verify_rejects_width_above_capacity_before_mutation(kda_test_environmen
         )
 
     assert not kda_test_environment
-    assert not hasattr(backend, "_kda_state")
     assert torch.equal(conv_cache, torch.ones_like(conv_cache))
     assert torch.equal(ssm_cache, torch.ones_like(ssm_cache))
+
+
+def test_spec_conv_treats_reserved_padding_slot_as_valid(monkeypatch: pytest.MonkeyPatch) -> None:
+    from xllm.python.kernels_npu.causal_conv1d import causal_conv1d_update_v2
+
+    captured_pad_slot_ids = []
+
+    def native_conv(*args: Any) -> torch.Tensor:
+        captured_pad_slot_ids.append(args[8])
+        return args[0]
+
+    monkeypatch.setattr(torch.ops.xllm_ops, "causal_conv1d_update_v2", native_conv, raising=False)
+    causal_conv1d_update_v2(
+        torch.ones(2, 6),
+        torch.ones(6, 3),
+        torch.zeros(2, 5, 6),
+        torch.tensor([1, 0]),
+        torch.tensor([0, 1, 2]),
+        1,
+        torch.ones(2, dtype=torch.int32),
+    )
+
+    assert captured_pad_slot_ids == [-1]
+
+
+@pytest.mark.parametrize(("query_lengths", "slot_repeats"), [((2, 2), 2), ((1, 1, 1, 1), 1)])
+def test_checkpoint_indices_follow_forward_lifetime(
+    kda_test_environment: list[dict], query_lengths: tuple[int, ...], slot_repeats: int
+) -> None:
+    from xllm.python.attention.backend import LayerCache
+    from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend
+    from xllm.python.model_executor.forward_context import ForwardContext, forward_context
+
+    backend = NpuPagedAttentionBackend(
+        num_heads=1,
+        num_kv_heads=1,
+        head_dim=2,
+        scale=1.0,
+        sliding_window=-1,
+        is_mla=False,
+        device=torch.device("cpu"),
+        dtype=torch.bfloat16,
+    )
+    backend.bind_kv_caches(
+        [
+            LayerCache(
+                key=torch.zeros(1, 4, 1, 2, dtype=torch.bfloat16),
+                value=torch.zeros(1, 4, 1, 2, dtype=torch.bfloat16),
+            ),
+            LayerCache(
+                key=None, value=None, conv=torch.zeros(4, 5, 6, dtype=torch.bfloat16), ssm=torch.zeros(16, 1, 2, 2)
+            ),
+            LayerCache(
+                key=None, value=None, conv=torch.zeros(4, 5, 6, dtype=torch.bfloat16), ssm=torch.zeros(16, 1, 2, 2)
+            ),
+        ]
+    )
+    metadata = SimpleNamespace(
+        linear_state_indices=torch.tensor([1, 3], dtype=torch.int32).repeat_interleave(slot_repeats),
+        num_accepted_tokens=torch.tensor([1, 2], dtype=torch.int32),
+        q_seq_lens=torch.tensor(query_lengths),
+        q_cu_seq_lens=torch.cat((torch.zeros(1, dtype=torch.int32), torch.tensor(query_lengths).cumsum(0))),
+        kv_seq_lens=None,
+        is_prefill=False,
+        is_chunked_prefill=False,
+        is_spec_verify=True,
+        expanded_decode_metadata=None,
+    )
+    backend._metadata = metadata
+    capture_cache: dict[object, object] = {}
+    for cache in (capture_cache.copy(), capture_cache):
+        context = ForwardContext(backend, torch.device("cpu"), metadata, backend._kv_caches, layer_shared_cache=cache)
+        with forward_context(context):
+            for layer_id in (1, 2):
+                backend.execute_linear(
+                    torch.ones(1, 6, 4, dtype=torch.bfloat16),
+                    torch.ones(1, 4, 1),
+                    layer_id,
+                    *_kda_inputs()[1:],
+                    raw_gate_proj=torch.zeros(1, 4, 1, 2),
+                )
+        assert kda_test_environment[-1]["ssm_state_indices"] is kda_test_environment[-2]["ssm_state_indices"]
+    warmup_indices = kda_test_environment[0]["ssm_state_indices"]
+    captured_indices = kda_test_environment[-1]["ssm_state_indices"]
+    assert warmup_indices is not captured_indices
+    assert captured_indices.tolist() == [[4, 5, 6, 7], [12, 13, 14, 15]]
+
+    metadata.linear_state_indices.copy_(torch.tensor([2, 0]).repeat_interleave(slot_repeats))
+    with forward_context(ForwardContext(backend, torch.device("cpu"), metadata, backend._kv_caches)):
+        backend.execute_linear(
+            torch.ones(1, 6, 4, dtype=torch.bfloat16),
+            torch.ones(1, 4, 1),
+            1,
+            *_kda_inputs()[1:],
+            raw_gate_proj=torch.zeros(1, 4, 1, 2),
+        )
+    next_indices = kda_test_environment[-1]["ssm_state_indices"]
+    assert next_indices is not captured_indices
+    assert next_indices.tolist() == [[8, 9, 10, 11], [0, 1, 2, 3]]

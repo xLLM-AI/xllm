@@ -116,8 +116,6 @@ def build_dspark_greedy_verify_commit_kernel(max_batch_size: int, draft_width: i
                         tokens_ub[request * result_width + column] = T.Cast("int64", -1)
                         if column < accepted:
                             tokens_ub[request * result_width + column] = target_ub[begin + column]
-                T.copy(tokens_ub, tokens[0 : batch_size * result_width])
-                T.copy(lengths_ub, lengths[0:batch_size])
             start = task * row_tile
             row_count = T.min(T.int32(row_tile), capacity - start)
             if row_count > 0:
@@ -137,5 +135,10 @@ def build_dspark_greedy_verify_commit_kernel(max_batch_size: int, draft_width: i
                         if columns_ub[lane] >= 0 and columns_ub[lane] < accepted:
                             context_slots_ub[lane] = source_slots_ub[lane]
                 T.copy(context_slots_ub, context_slots[start : start + row_count])
+            if task == 0 and batch_size > 0:
+                # Keep int64 staging live while the Ascend UB planner allocates
+                # int32 row tiles, preventing reuse with the wrong element type.
+                T.copy(tokens_ub, tokens[0 : batch_size * result_width])
+                T.copy(lengths_ub, lengths[0:batch_size])
 
     return dspark_greedy_verify_commit

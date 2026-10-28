@@ -575,6 +575,33 @@ TEST(KVCacheEstimationTest, Qwen35MtpExpandsConvStateLen) {
   EXPECT_EQ(capacity.linear_cache_size_in_bytes(), 8960);
 }
 
+TEST(KVCacheEstimationTest, GlmMtpAllocatesFrameworkCheckpointsOnlyForDecode) {
+  for (const std::string& model_type : {"glm5_3_flash", "glm5_next"}) {
+    ModelArgs model_args = make_standard_args();
+    model_args.model_type(model_type)
+        .full_attention_interval(2)
+        .linear_num_key_heads(2)
+        .linear_num_value_heads(2)
+        .linear_key_head_dim(4)
+        .linear_value_head_dim(8)
+        .linear_conv_kernel_dim(3);
+    KVCacheEstimateOptions options = make_estimate_options();
+    options.n_local_linear_k_heads = 2;
+    options.n_local_linear_v_heads = 2;
+    options.num_speculative_tokens = 3;
+    const KVCacheCapacity decode =
+        estimate_kv_cache_capacity(model_args, options);
+    EXPECT_EQ(decode.linear_conv_state_len(), 5);
+    EXPECT_EQ(decode.linear_ssm_checkpoint_stride(), 4);
+    options.instance_role = InstanceRole::PREFILL;
+    const KVCacheCapacity prefill =
+        estimate_kv_cache_capacity(model_args, options);
+    EXPECT_EQ(prefill.linear_conv_state_len(), 2);
+    EXPECT_EQ(prefill.linear_ssm_checkpoint_stride(), 1);
+    EXPECT_GT(decode.linear_slot_size(), prefill.linear_slot_size());
+  }
+}
+
 TEST(KVCacheEstimationTest, Qwen35TextMtpUsesSsmCheckpointStride) {
   ModelArgs model_args = make_standard_args();
   model_args.model_type("qwen3_5_text")

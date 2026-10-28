@@ -131,7 +131,6 @@ def _create_attention_backend(
     dtype: torch.dtype,
     config: dict | None = None,
     max_num_reqs: int = 1,
-    num_decoding_tokens: int = 1,
 ) -> AttentionBackend:
     config = config or {}
     model_type = config.get("model_type", "")
@@ -177,7 +176,6 @@ def _create_attention_backend(
                 dcp_group=dcp_group,
                 index_topk=index_topk,
                 max_num_reqs=max(max_num_reqs, 1),
-                num_decoding_tokens=max(num_decoding_tokens, 1),
             )
         from xllm.python.attention.npu_paged_attention import (
             NpuPagedAttentionBackend,
@@ -192,7 +190,6 @@ def _create_attention_backend(
             is_mla=bool(config.get("enable_mla", False)),
             device=device,
             dtype=dtype,
-            num_decoding_tokens=num_decoding_tokens,
             # Only the GLM5 DSpark draft carries the dense MLA block-draft
             # attention shape.
             mla_block_draft=model_type == "glm5_dspark",
@@ -362,7 +359,6 @@ class ModelExecutor:
         self._attention_backend_device = device
         self._attention_backend_dtype = first_parameter.dtype
         self._attention_backend_config = dict(config)
-        self._attention_backend_num_decoding_tokens = num_decoding_tokens
         self._attention_backend_max_num_reqs = max(max_seqs_per_batch, 1) * max_decode_rows_per_request
         self.attention_backend = _create_attention_backend(
             first_attention,
@@ -370,7 +366,6 @@ class ModelExecutor:
             first_parameter.dtype,
             config,
             self._attention_backend_max_num_reqs,
-            num_decoding_tokens=num_decoding_tokens,
         )
 
         execution_model = model.model
@@ -659,7 +654,6 @@ class ModelExecutor:
                 self._attention_backend_dtype,
                 self._attention_backend_config,
                 self._attention_backend_max_num_reqs,
-                num_decoding_tokens=self._attention_backend_num_decoding_tokens,
             )
             backend.bind_kv_caches(self.eager_runner.layer_caches)
             backends.append(backend)

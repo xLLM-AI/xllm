@@ -25,6 +25,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "core/kv_cache/block/block.h"
 #include "core/kv_cache/layout/kv_cache_tensor_role.h"
 
 namespace xllm {
@@ -106,13 +107,12 @@ WorkerCacheLayoutManifest make_ssm_manifest(int32_t tp_rank,
                                             int32_t tp_size,
                                             int64_t global_heads,
                                             uint64_t buffer_id,
-                                            const std::string& addr) {
+                                            const std::string& addr,
+                                            uint64_t checkpoint_stride = 3) {
   WorkerCacheLayoutManifest manifest =
       make_head_manifest(tp_rank, tp_size, global_heads, buffer_id, addr);
   const int64_t local_heads = global_heads / tp_size;
   const int64_t first_head = tp_rank * local_heads;
-  constexpr uint64_t kCheckpointStride = 3;
-
   CacheTensorManifest tensor;
   tensor.cache_namespace = CacheNamespace::MAIN;
   tensor.layer_id = 0;
@@ -121,16 +121,16 @@ WorkerCacheLayoutManifest make_ssm_manifest(int32_t tp_rank,
   tensor.mooncake_buffer_id = static_cast<int64_t>(buffer_id);
   tensor.scalar_type = 0;
   tensor.element_bytes = 1;
-  tensor.shape = {static_cast<int64_t>(kResourceCount * kCheckpointStride),
+  tensor.shape = {static_cast<int64_t>(kResourceCount * checkpoint_stride),
                   local_heads,
                   1,
                   1};
   tensor.stride = {local_heads, 1, 1, 1};
   tensor.contiguous = true;
   tensor.resource_count = kResourceCount;
-  tensor.physical_rows_per_resource = kCheckpointStride;
+  tensor.physical_rows_per_resource = checkpoint_stride;
   tensor.resource_stride_bytes =
-      kCheckpointStride * static_cast<uint64_t>(local_heads);
+      checkpoint_stride * static_cast<uint64_t>(local_heads);
   tensor.buffer_bytes = tensor.resource_count * tensor.resource_stride_bytes;
   tensor.shard.kind = LogicalShardKind::SHARDED;
   tensor.shard.resource_scope = CacheResourceScope::SEQUENCE;
@@ -140,12 +140,94 @@ WorkerCacheLayoutManifest make_ssm_manifest(int32_t tp_rank,
     span.logical_offset_bytes = static_cast<uint64_t>(first_head + local_head);
     span.physical_offset_bytes = static_cast<uint64_t>(local_head);
     span.bytes_per_region = 1;
-    span.repeat_count = kCheckpointStride;
+    span.repeat_count = checkpoint_stride;
     span.logical_stride_bytes = static_cast<uint64_t>(global_heads);
     span.physical_stride_bytes = static_cast<uint64_t>(local_heads);
     span.owner_tp_rank = tp_rank;
     tensor.shard.spans.emplace_back(std::move(span));
   }
+  manifest.tensors = {std::move(tensor)};
+  return manifest;
+}
+
+WorkerCacheLayoutManifest make_conv_manifest(uint64_t state_count,
+                                             uint64_t buffer_id,
+                                             const std::string& addr) {
+  WorkerCacheLayoutManifest manifest = make_head_manifest(/*tp_rank=*/0,
+                                                          /*tp_size=*/1,
+                                                          /*global_heads=*/1,
+                                                          buffer_id,
+                                                          addr);
+  CacheTensorManifest tensor;
+  tensor.cache_namespace = CacheNamespace::MAIN;
+  tensor.layer_id = 0;
+  tensor.role = static_cast<int32_t>(KVCacheTensorRole::CONV);
+  tensor.group_id = cache_group_id(BlockType::LINEAR);
+  tensor.mooncake_buffer_id = static_cast<int64_t>(buffer_id);
+  tensor.scalar_type = 0;
+  tensor.element_bytes = 1;
+  tensor.shape = {static_cast<int64_t>(kResourceCount),
+                  static_cast<int64_t>(state_count),
+                  1};
+  tensor.stride = {static_cast<int64_t>(state_count), 1, 1};
+  tensor.contiguous = true;
+  tensor.resource_count = kResourceCount;
+  tensor.resource_stride_bytes = state_count;
+  tensor.buffer_bytes = tensor.resource_count * tensor.resource_stride_bytes;
+  tensor.shard.kind = LogicalShardKind::COMPOSITE;
+  tensor.shard.resource_scope = CacheResourceScope::SEQUENCE;
+  LogicalSpan span;
+  span.logical_tensor = "conv";
+  span.logical_offset_bytes = 0;
+  span.physical_offset_bytes = 0;
+  span.bytes_per_region = 1;
+  span.repeat_count = state_count;
+  span.logical_stride_bytes = 1;
+  span.physical_stride_bytes = 1;
+  span.owner_tp_rank = 0;
+  tensor.shard.spans.emplace_back(std::move(span));
+  manifest.tensors = {std::move(tensor)};
+  return manifest;
+}
+
+WorkerCacheLayoutManifest make_kpool_tail_manifest(
+    uint64_t tail_length,
+    uint64_t buffer_id,
+    const std::string& addr,
+    CacheNamespace cache_namespace) {
+  WorkerCacheLayoutManifest manifest = make_head_manifest(/*tp_rank=*/0,
+                                                          /*tp_size=*/1,
+                                                          /*global_heads=*/1,
+                                                          buffer_id,
+                                                          addr);
+  CacheTensorManifest tensor;
+  tensor.cache_namespace = cache_namespace;
+  tensor.layer_id = 0;
+  tensor.role = static_cast<int32_t>(KVCacheTensorRole::KPOOL_TAIL);
+  tensor.group_id = cache_group_id(BlockType::LINEAR);
+  tensor.mooncake_buffer_id = static_cast<int64_t>(buffer_id);
+  tensor.scalar_type = 0;
+  tensor.element_bytes = 1;
+  tensor.shape = {static_cast<int64_t>(kResourceCount),
+                  2,
+                  static_cast<int64_t>(tail_length),
+                  1};
+  tensor.stride = {static_cast<int64_t>(2 * tail_length),
+                   static_cast<int64_t>(tail_length),
+                   1,
+                   1};
+  tensor.contiguous = true;
+  tensor.resource_count = kResourceCount;
+  tensor.resource_stride_bytes = 2 * tail_length;
+  tensor.buffer_bytes = tensor.resource_count * tensor.resource_stride_bytes;
+  tensor.shard.kind = LogicalShardKind::REPLICATED;
+  tensor.shard.resource_scope = CacheResourceScope::SEQUENCE;
+  LogicalSpan span;
+  span.logical_tensor = "kpool_tail";
+  span.bytes_per_region = tensor.resource_stride_bytes;
+  span.repeat_count = 1;
+  span.owner_tp_rank = 0;
+  tensor.shard.spans.emplace_back(std::move(span));
   manifest.tensors = {std::move(tensor)};
   return manifest;
 }
@@ -575,6 +657,178 @@ TEST(ReshardPlannerTest, CheckpointedSsmBindsLogicalSlotsAcrossTp) {
                               destination_bytes,
                               /*destination_resource=*/1,
                               /*source_resource=*/1);
+}
+
+TEST(ReshardPlannerTest, CompactSsmSourceCoversExpandedDestination) {
+  const WorkerCacheLayoutManifest source = make_ssm_manifest(
+      /*tp_rank=*/0,
+      /*tp_size=*/1,
+      /*global_heads=*/4,
+      /*buffer_id=*/3,
+      "source",
+      /*checkpoint_stride=*/1);
+  const WorkerCacheLayoutManifest destination = make_ssm_manifest(
+      /*tp_rank=*/0,
+      /*tp_size=*/1,
+      /*global_heads=*/4,
+      /*buffer_id=*/17,
+      "destination",
+      /*checkpoint_stride=*/3);
+
+  ReshardPlanner planner;
+  ASSERT_TRUE(
+      planner.validate_destination_coverage({source}, destination).ok());
+
+  ReshardPlanTemplate plan;
+  ASSERT_TRUE(planner.build_outgoing_plan(source, destination, &plan).ok());
+  KVTransferMapping mapping;
+  mapping.group_id = source.tensors[0].group_id;
+  mapping.local_ids = {1};
+  mapping.remote_ids = {1};
+  std::vector<ByteRegion> regions;
+  ASSERT_TRUE(RequestRegionBinder()
+                  .bind(plan,
+                        {mapping},
+                        CacheNamespace::MAIN,
+                        /*layer_id=*/0,
+                        &regions)
+                  .ok());
+  ASSERT_EQ(regions.size(), 1U);
+  EXPECT_EQ(regions[0].length, 4U);
+}
+
+TEST(ReshardPlannerTest, CompactConvSourceCoversExpandedDestination) {
+  const WorkerCacheLayoutManifest source =
+      make_conv_manifest(/*state_count=*/3, /*buffer_id=*/3, "source");
+  const WorkerCacheLayoutManifest destination =
+      make_conv_manifest(/*state_count=*/6, /*buffer_id=*/17, "destination");
+
+  ReshardPlanner planner;
+  ASSERT_TRUE(
+      planner.validate_destination_coverage({source}, destination).ok());
+
+  ReshardPlanTemplate plan;
+  ASSERT_TRUE(planner.build_outgoing_plan(source, destination, &plan).ok());
+  KVTransferMapping mapping;
+  mapping.group_id = cache_group_id(BlockType::LINEAR);
+  mapping.local_ids = {1};
+  mapping.remote_ids = {1};
+  std::vector<ByteRegion> regions;
+  ASSERT_TRUE(RequestRegionBinder()
+                  .bind(plan,
+                        {mapping},
+                        CacheNamespace::MAIN,
+                        /*layer_id=*/0,
+                        &regions)
+                  .ok());
+  ASSERT_EQ(regions.size(), 1U);
+  EXPECT_EQ(regions[0].length, 3U);
+}
+
+TEST(ReshardPlannerTest, CompactConvDoesNotSkipUncoveredPrefix) {
+  WorkerCacheLayoutManifest source =
+      make_conv_manifest(/*state_count=*/3, /*buffer_id=*/3, "source");
+  const WorkerCacheLayoutManifest destination =
+      make_conv_manifest(/*state_count=*/6, /*buffer_id=*/17, "destination");
+  source.tensors[0].shard.spans[0].logical_offset_bytes = 2;
+
+  const Status status =
+      ReshardPlanner().validate_destination_coverage({source}, destination);
+
+  EXPECT_FALSE(status.ok());
+  EXPECT_NE(status.message().find("no source writer"), std::string::npos);
+}
+
+TEST(ReshardPlannerTest, RejectsDifferentSpecDraftKpoolCapacities) {
+  for (bool expanded_destination : {false, true}) {
+    SCOPED_TRACE(expanded_destination);
+    const WorkerCacheLayoutManifest source = make_kpool_tail_manifest(
+        /*tail_length=*/expanded_destination ? 4 : 7,
+        /*buffer_id=*/3,
+        "source",
+        CacheNamespace::SPEC_DRAFT);
+    const WorkerCacheLayoutManifest destination = make_kpool_tail_manifest(
+        /*tail_length=*/expanded_destination ? 7 : 4,
+        /*buffer_id=*/17,
+        "destination",
+        CacheNamespace::SPEC_DRAFT);
+
+    ReshardPlanner planner;
+    const Status coverage =
+        planner.validate_destination_coverage({source}, destination);
+    EXPECT_FALSE(coverage.ok());
+    EXPECT_NE(coverage.message().find("KPool circular-tail layouts differ"),
+              std::string::npos);
+    ReshardPlanTemplate plan;
+    const Status outgoing =
+        planner.build_outgoing_plan(source, destination, &plan);
+    EXPECT_FALSE(outgoing.ok());
+    EXPECT_NE(outgoing.message().find("KPool circular-tail layouts differ"),
+              std::string::npos);
+  }
+}
+
+TEST(ReshardPlannerTest, TransfersEqualSpecDraftKpoolCapacity) {
+  const WorkerCacheLayoutManifest source = make_kpool_tail_manifest(
+      /*tail_length=*/4,
+      /*buffer_id=*/3,
+      "source",
+      CacheNamespace::SPEC_DRAFT);
+  WorkerCacheLayoutManifest destination = make_kpool_tail_manifest(
+      /*tail_length=*/4,
+      /*buffer_id=*/17,
+      "destination",
+      CacheNamespace::SPEC_DRAFT);
+  CacheTensorManifest& destination_tensor = destination.tensors[0];
+  ++destination_tensor.resource_count;
+  ++destination_tensor.shape[0];
+  destination_tensor.buffer_bytes = destination_tensor.resource_count *
+                                    destination_tensor.resource_stride_bytes;
+
+  ReshardPlanner planner;
+  ASSERT_TRUE(
+      planner.validate_destination_coverage({source}, destination).ok());
+
+  ReshardPlanTemplate plan;
+  ASSERT_TRUE(planner.build_outgoing_plan(source, destination, &plan).ok());
+  KVTransferMapping mapping;
+  mapping.group_id = cache_group_id(BlockType::LINEAR);
+  mapping.local_ids = {1};
+  mapping.remote_ids = {2};
+  std::vector<ByteRegion> regions;
+  ASSERT_TRUE(RequestRegionBinder()
+                  .bind(plan,
+                        {mapping},
+                        CacheNamespace::SPEC_DRAFT,
+                        /*layer_id=*/0,
+                        &regions)
+                  .ok());
+  ASSERT_EQ(regions.size(), 1U);
+  EXPECT_EQ(regions[0].local_offset, 8U);
+  EXPECT_EQ(regions[0].remote_offset, 16U);
+  EXPECT_EQ(regions[0].length, 8U);
+}
+
+TEST(ReshardPlannerTest, RejectsDifferentSpecDraftKpoolShapeWithEqualBytes) {
+  const WorkerCacheLayoutManifest source = make_kpool_tail_manifest(
+      /*tail_length=*/4,
+      /*buffer_id=*/3,
+      "source",
+      CacheNamespace::SPEC_DRAFT);
+  WorkerCacheLayoutManifest destination = make_kpool_tail_manifest(
+      /*tail_length=*/4,
+      /*buffer_id=*/17,
+      "destination",
+      CacheNamespace::SPEC_DRAFT);
+  destination.tensors[0].shape = {
+      static_cast<int64_t>(kResourceCount), 2, 2, 2};
+  destination.tensors[0].stride = {8, 4, 2, 1};
+
+  ReshardPlanner planner;
+  EXPECT_FALSE(
+      planner.validate_destination_coverage({source}, destination).ok());
+  ReshardPlanTemplate plan;
+  EXPECT_FALSE(planner.build_outgoing_plan(source, destination, &plan).ok());
 }
 
 TEST(ReshardPlannerTest, HandlesProductionScaleNonMlaLayout) {

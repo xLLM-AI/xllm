@@ -38,7 +38,7 @@ class _Embedding(nn.Module):
 class _DecoderLayer(nn.Module):
     def __init__(self, layer_id: int, events: list[str]) -> None:
         super().__init__()
-        self._layer_id = layer_id
+        self.layer_id = layer_id
         self._events = events
         self.positions: torch.Tensor | None = None
         self.attention_mask: torch.Tensor | None = None
@@ -56,8 +56,8 @@ class _DecoderLayer(nn.Module):
         self.attention_mask = attention_mask
         self.prev_topk = prev_topk
         self.output_topk = hidden[:, :1, 0].clone()
-        self._events.append(f"layer_{self._layer_id}")
-        return hidden + self._layer_id + 1, self.output_topk
+        self._events.append(f"layer_{self.layer_id}")
+        return hidden + self.layer_id + 1, self.output_topk
 
 
 class _Norm(nn.Module):

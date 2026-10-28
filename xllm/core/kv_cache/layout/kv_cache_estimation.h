@@ -140,10 +140,16 @@ KVCacheCapacity estimate_kv_cache_capacity(
     const ModelArgs& model_args,
     const KVCacheEstimateOptions& options);
 
-// Full-attention KPool drafts inherit the target's request-state slots/window.
-// Both capacities retain their own model's layer counts and page costs.
-int64_t estimate_shared_kpool_blocks(const KVCacheCapacity& target_cap,
-                                     const KVCacheCapacity& draft_cap,
-                                     const ModelArgs& draft_args);
+// Co-located full-attention KPool target and draft share one cache budget.
+// The draft inherits the target's request slots and verify window; each
+// capacity keeps its own model's layer counts and page costs.
+struct SharedKPoolPlan {
+  KVCacheCapacity target;
+  KVCacheCapacity draft;
+};
+
+SharedKPoolPlan plan_shared_kpool(KVCacheCapacity target_cap,
+                                  KVCacheCapacity draft_cap,
+                                  const ModelArgs& draft_args);
 
 }  // namespace xllm

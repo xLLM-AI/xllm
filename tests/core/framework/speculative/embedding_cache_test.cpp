@@ -17,6 +17,9 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include "core/framework/model/model_output.h"
+#include "core/framework/sampling/sampling_params.h"
+#include "core/framework/speculative/draft_extend_input.h"
 #include "platform/device.h"
 #include "platform/platform.h"
 
@@ -250,6 +253,44 @@ TEST(EmbeddingCacheTest, WriteMtpBootstrapContextStoresExactDecodeState) {
   states = cache.read_decode_states({1}, {"req_bootstrap"});
   EXPECT_FALSE(states[0].valid);
   EXPECT_FALSE(states[0].embedding.defined());
+}
+
+TEST(EmbeddingCacheTest, SpeculativeHiddenSelectionPreservesDrafterSource) {
+  const torch::Tensor primary = torch::tensor({{10.0f, 11.0f}, {20.0f, 21.0f}});
+  const torch::Tensor aux = torch::tensor({{1.0f, 2.0f}, {3.0f, 4.0f}});
+  const torch::Tensor indices = torch::tensor({1}, torch::kInt32);
+  const torch::Tensor gathered_primary = torch::tensor({{20.0f, 21.0f}});
+  const torch::Tensor selected_aux = torch::tensor({{3.0f, 4.0f}});
+  const ModelOutput model_output(primary, torch::Tensor(), aux);
+
+  for (const bool is_target_prefill : {false, true}) {
+    for (const bool cp_enabled : {false, true}) {
+      SCOPED_TRACE(::testing::Message()
+                   << "prefill=" << is_target_prefill << ", cp=" << cp_enabled);
+      SampleOutput output;
+      output_spec_hidden_states(output,
+                                model_output,
+                                indices,
+                                gathered_primary,
+                                is_target_prefill,
+                                cp_enabled);
+      EXPECT_TRUE(tensor_equal(
+          is_target_prefill ? output.selected_embeddings : output.embeddings,
+          selected_aux));
+      if (is_target_prefill) {
+        EXPECT_TRUE(tensor_equal(output.embeddings, aux));
+      }
+    }
+  }
+
+  SampleOutput output;
+  output_spec_hidden_states(output,
+                            ModelOutput(primary.narrow(0, 0, 1)),
+                            indices,
+                            gathered_primary,
+                            /*is_target_prefill=*/false,
+                            /*cp_enabled=*/true);
+  EXPECT_TRUE(tensor_equal(output.embeddings, gathered_primary));
 }
 
 }  // namespace xllm

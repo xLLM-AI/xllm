@@ -2233,7 +2233,8 @@ bool WorkerImpl::init_model_impl(const std::string& model_weights_path,
 #if defined(USE_NPU)
   if (options_.enable_speculative_decode() &&
       SpeculativeConfig::is_mtp_algorithm(speculative_algorithm) &&
-      util::is_deepseek_v4_model_type(args.model_type())) {
+      (util::is_deepseek_v4_model_type(args.model_type()) ||
+       is_glm5_next_target_model_type(args.model_type()))) {
     args.num_speculative_tokens(options_.num_speculative_tokens());
   }
   if (is_block_diffusion) {

@@ -163,35 +163,39 @@ def test_no_padding_graph_entries_use_exact_rows_and_reuse_matching_shapes(runne
 
 @pytest.mark.parametrize("no_padding", [False, True])
 @pytest.mark.parametrize("capture_fails", [False, True])
-def test_capture_restores_all_recurrent_checkpoints(
+def test_capture_preserves_live_checkpoints_on_success_and_failure(
     runner: DecodeAclGraphRunner, no_padding: bool, capture_fails: bool
 ) -> None:
+    from xllm.python.attention.backend import LayerCache
+
     runner._enable_decode_no_padding = no_padding
     indices = torch.tensor([1, 3], dtype=torch.int64)
     conv = torch.arange(24, dtype=torch.float32).reshape(4, 3, 2)
     ssm = torch.arange(80, dtype=torch.float32).reshape(20, 2, 2)
     original_conv, original_ssm = conv.clone(), ssm.clone()
-    runner.layer_caches = [SimpleNamespace(conv=conv, ssm=ssm)]
-    runner.attention_backend.snapshot_linear_state = Mock(return_value=None)
-    entry = AclGraphEntry()
-    entry.static_metadata = SimpleNamespace(linear_state_indices=indices)
+    runner.bind_layer_caches([LayerCache(None, None, conv=conv, ssm=ssm)])
+    metadata = _metadata()
+    metadata.linear_state_indices = indices
+    metadata.has_initial_state = torch.ones_like(indices, dtype=torch.bool)
 
-    def capture(*args: object) -> None:
-        conv.index_fill_(0, indices, -1)
-        checkpoint_indices = (indices[:, None] * 5 + torch.arange(5)).reshape(-1)
-        ssm.index_fill_(0, checkpoint_indices, -2)
+    def capture(entry: AclGraphEntry, _stream: object) -> None:
+        capture_indices = entry.static_metadata.linear_state_indices.long()
+        assert not capture_indices.any()
+        conv.index_fill_(0, capture_indices, -1)
+        checkpoints = (capture_indices[:, None] * 5 + torch.arange(5)).reshape(-1)
+        ssm.index_fill_(0, checkpoints, -2)
         if capture_fails:
             raise RuntimeError("capture failed")
 
+    runner._capture.side_effect = capture
     expected = pytest.raises(RuntimeError, match="capture failed") if capture_fails else nullcontext()
-    with (
-        patch("xllm.python.model_executor.runners.acl_graph.AclGraphRunner._capture", side_effect=capture),
-        expected,
-    ):
-        DecodeAclGraphRunner._capture(runner, entry, Mock())
+    with expected:
+        runner.warmup(torch.arange(2, dtype=torch.int32), torch.arange(2, dtype=torch.int32), metadata)
 
-    torch.testing.assert_close(conv, original_conv)
-    torch.testing.assert_close(ssm, original_ssm)
+    torch.testing.assert_close(conv[1:], original_conv[1:])
+    torch.testing.assert_close(ssm[5:], original_ssm[5:])
+    torch.testing.assert_close(metadata.linear_state_indices, indices)
+    assert metadata.has_initial_state.all()
 
 
 @pytest.mark.parametrize("mode", ["global", "thread_local"])

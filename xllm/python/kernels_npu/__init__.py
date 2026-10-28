@@ -37,7 +37,11 @@ _EXPORTS = {
         "update_decode_graph_metadata",
         "vision_fusion_attention",
     ),
-    "causal_conv1d": ("causal_conv1d_decode", "causal_conv1d_qkv_prefill"),
+    "causal_conv1d": (
+        "causal_conv1d_decode",
+        "causal_conv1d_qkv_prefill",
+        "causal_conv1d_update_v2",
+    ),
     "gated_delta_net": (
         "chunk_gated_delta_rule",
         "fused_gdn_gating",
@@ -226,6 +230,7 @@ __all__ = [
     "sparse_attn_sharedkv",
     "sparse_attn_sharedkv_metadata",
     "causal_conv1d_qkv_prefill",
+    "causal_conv1d_update_v2",
     "fused_gdn_gating",
     "fused_sigmoid_gating_delta_rule_decode",
     "chunk_gated_delta_rule",

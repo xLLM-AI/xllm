@@ -286,14 +286,6 @@ class AttentionBackend(ABC):
         """Install live metadata for an already captured graph entry."""
         self.prepare(metadata, graph_mode=True)
 
-    def snapshot_linear_state(self, indices: torch.Tensor) -> object | None:
-        """Save backend-owned state that graph warmup/capture may mutate."""
-        return None
-
-    def restore_linear_state(self, snapshot: object) -> None:
-        """Restore an opaque snapshot, including state first created by capture."""
-        del snapshot
-
     def reset_forward(self, metadata: AttentionMetadata | None = None) -> None:
         """Reset request-owned state before a model attaches current inputs."""
         del metadata

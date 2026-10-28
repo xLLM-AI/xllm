@@ -229,10 +229,12 @@ int64_t layerwise_split_block_count(const ModelArgs& model_args,
   return common_block_count;
 }
 
-bool enable_qwen3_5_spec_verify(const ModelArgs& model_args,
-                                const KVCacheEstimateOptions& options) {
+bool enable_hybrid_spec_verify(const ModelArgs& model_args,
+                               const KVCacheEstimateOptions& options) {
   return options.num_speculative_tokens > 0 && !options.is_draft_engine &&
-         is_qwen3_5_target_model_type(model_args.model_type());
+         options.instance_role != InstanceRole::PREFILL &&
+         (is_qwen3_5_target_model_type(model_args.model_type()) ||
+          is_glm5_next_target_model_type(model_args.model_type()));
 }
 
 int64_t linear_slot_size(const ModelArgs& model_args,
@@ -242,7 +244,7 @@ int64_t linear_slot_size(const ModelArgs& model_args,
     return 0;
   }
   const int64_t num_speculative_tokens =
-      enable_qwen3_5_spec_verify(model_args, options)
+      enable_hybrid_spec_verify(model_args, options)
           ? options.num_speculative_tokens
           : 0;
 
@@ -672,22 +674,27 @@ KPoolCacheLayout default_kpool_layout() {
                             : KPoolCacheLayout::PACKED;
 }
 
-int64_t estimate_shared_kpool_blocks(const KVCacheCapacity& target_cap,
-                                     const KVCacheCapacity& draft_cap,
-                                     const ModelArgs& draft_args) {
+SharedKPoolPlan plan_shared_kpool(KVCacheCapacity target_cap,
+                                  KVCacheCapacity draft_cap,
+                                  const ModelArgs& draft_args) {
   CHECK_EQ(target_cap.block_size(), draft_cap.block_size());
   CHECK_GT(target_cap.kpool_tail_slot_size(), 0);
   CHECK_GT(draft_cap.kpool_tail_slot_size(), 0);
   CHECK_EQ(draft_cap.num_linear_attention_layers(), 0);
-  // Draft request slots and the verify window are inherited from the target
-  // shape, rather than from the draft's standalone capacity estimate.
+  // The draft serves the target's requests, so it keeps the target's request
+  // slots and verify window instead of its standalone estimate.
   const int64_t draft_tail_len =
       std::max<int64_t>(target_cap.kpool_tail_len(), draft_args.index_kpool());
-  const int64_t draft_state_bytes =
-      draft_cap.num_indexer_layers() * target_cap.num_linear_state_blocks() *
+  const int64_t draft_tail_slot_size =
       kpool_tail_slot_size_bytes(draft_tail_len, draft_args.index_head_dim());
-  const int64_t state_bytes =
-      target_cap.linear_cache_size_in_bytes() + draft_state_bytes;
+  draft_cap.num_linear_state_blocks(target_cap.num_linear_state_blocks())
+      .kpool_tail_len(draft_tail_len)
+      .kpool_tail_slot_size(draft_tail_slot_size)
+      .linear_cache_size_in_bytes(draft_cap.num_indexer_layers() *
+                                  target_cap.num_linear_state_blocks() *
+                                  draft_tail_slot_size);
+  const int64_t state_bytes = target_cap.linear_cache_size_in_bytes() +
+                              draft_cap.linear_cache_size_in_bytes();
   const int64_t budget = std::min(target_cap.cache_size_in_bytes(),
                                   draft_cap.cache_size_in_bytes());
   CHECK_GT(budget, state_bytes)
@@ -697,7 +704,9 @@ int64_t estimate_shared_kpool_blocks(const KVCacheCapacity& target_cap,
       standard_full_cache_block_size_in_bytes(draft_cap);
   const int64_t n_blocks = (budget - state_bytes) / block_bytes;
   CHECK_GT(n_blocks, 0) << "no memory for a shared KPool block";
-  return n_blocks;
+  target_cap.n_blocks(n_blocks).cache_size_in_bytes(budget);
+  draft_cap.n_blocks(n_blocks).cache_size_in_bytes(budget);
+  return {std::move(target_cap), std::move(draft_cap)};
 }
 
 std::vector<bool> resolve_indexer_cache_enabled_layers(
@@ -921,7 +930,7 @@ KVCacheCapacity estimate_kv_cache_capacity(
       .n_layers(model_args.n_layers())
       .block_size(options.block_size);
   const int64_t num_speculative_tokens =
-      enable_qwen3_5_spec_verify(model_args, options)
+      enable_hybrid_spec_verify(model_args, options)
           ? options.num_speculative_tokens
           : 0;
   kv_cache_cap.linear_conv_state_len(model_args.linear_conv_kernel_dim() - 1 +

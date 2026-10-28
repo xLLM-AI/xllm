@@ -30,6 +30,124 @@ from xllm.python.models.glm5_next import _KDA_IN_PROJ
 _ATTENTION_PREFIX = "model.layers.0.self_attn."
 
 
+@pytest.mark.skipif(not os.getenv("XLLM_KDA_TEST_NPU_DEVICE"), reason="NPU device not configured")
+@pytest.mark.parametrize("capture_graph", [False, True])
+@pytest.mark.parametrize("width", [2, 4])
+@torch.inference_mode()
+def test_framework_kda_checkpoints_match_tokenwise_reference(
+    npu_runtime: ModuleType, capture_graph: bool, width: int
+) -> None:
+    from fla_npu.ops.ascendc import recurrent_kda
+
+    device = torch.device(os.environ["XLLM_KDA_TEST_NPU_DEVICE"])
+    torch.npu.set_device(device)
+    generator = torch.Generator().manual_seed(71)
+    head_dim, kernel_width = 128, 4
+    channels = 3 * head_dim
+
+    def random_tensor(shape: tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
+        return (torch.randn(shape, generator=generator) * 0.1).to(device=device, dtype=dtype)
+
+    conv = random_tensor((4, kernel_width + width - 2, channels), torch.bfloat16)
+    ssm = random_tensor((4 * width, 1, head_dim, head_dim), torch.float32)
+    slots = torch.tensor([1, 3], device=device, dtype=torch.int64)
+    indices = torch.tensor(
+        [list(range(width, 2 * width)), list(range(3 * width, 4 * width))],
+        dtype=torch.int32,
+        device=device,
+    )
+    backend = kda_linear_attention.KdaLinearAttentionMixin()
+    backend._kda_checkpoint_stride = width
+    backend._kda_query_start_locs = {}
+    inputs = random_tensor((1, channels, 2 * width), torch.bfloat16)
+    weight = random_tensor((kernel_width, channels), torch.bfloat16)
+    gate = torch.full((1, 2 * width, 1, head_dim), -0.1, device=device)
+    beta = torch.full((1, 2 * width, 1), 0.5, device=device)
+    accepted = torch.ones(2, dtype=torch.int32, device=device)
+    metadata = SimpleNamespace(is_spec_verify=True, num_accepted_tokens=accepted)
+
+    def forward() -> torch.Tensor:
+        return backend._spec_verify(inputs, gate, beta, weight, "silu", slots, metadata, conv, ssm, recurrent_kda)
+
+    graph = None
+    if capture_graph:
+        conv_snapshot, ssm_snapshot = conv.clone(), ssm.clone()
+        forward()
+        torch.npu.synchronize()
+        conv.copy_(conv_snapshot)
+        ssm.copy_(ssm_snapshot)
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            output = forward()
+        conv.copy_(conv_snapshot)
+        ssm.copy_(ssm_snapshot)
+
+    previous_conv = conv[slots, : kernel_width - 1].float().cpu().unsqueeze(1)
+    previous_ssm = ssm[indices[:, 0].long()].clone().unsqueeze(1)
+    for step, counts in enumerate(((1, 1), (width, 1), (width - 1, width), (1, 1))):
+        if step == 3:
+            # Replay must derive checkpoints from the reassigned live slots.
+            slots.copy_(torch.tensor([2, 1], dtype=slots.dtype, device=device))
+            indices.copy_(slots[:, None] * width + torch.arange(width, device=device))
+            conv[slots, : kernel_width - 1] = 0.25
+            ssm[indices[:, 0].long()] = 0.125
+            previous_conv = conv[slots, : kernel_width - 1].float().cpu().unsqueeze(1)
+            previous_ssm = ssm[indices[:, 0].long()].clone().unsqueeze(1)
+        accepted.copy_(torch.tensor(counts, dtype=torch.int32, device=device))
+        inputs.copy_(random_tensor(tuple(inputs.shape), torch.bfloat16))
+        reference_outputs = []
+        conv_checkpoints = []
+        ssm_checkpoints = []
+        for sequence, count in enumerate(counts):
+            tokens = inputs[0, :, sequence * width : (sequence + 1) * width].float().cpu().t()
+            history = torch.cat((previous_conv[sequence, count - 1], tokens))
+            projected = (
+                functional.silu(
+                    functional.conv1d(history.t().unsqueeze(0), weight.float().cpu().t().unsqueeze(1), groups=channels)
+                )
+                .squeeze(0)
+                .t()
+                .to(device=device, dtype=torch.bfloat16)
+            )
+            state = previous_ssm[sequence, count - 1].clone().unsqueeze(0)
+            sequence_outputs, sequence_states = [], []
+            for token in range(width):
+                q, k, v = projected[token].reshape(3, 1, head_dim)
+                result = recurrent_kda(
+                    q.unsqueeze(0),
+                    k.unsqueeze(0),
+                    v.unsqueeze(0),
+                    gate[:, sequence * width + token],
+                    beta[:, sequence * width + token],
+                    initial_state=state,
+                    cu_seqlens=torch.tensor([0, 1], device=device, dtype=torch.int32),
+                    layout="TND",
+                    scale=head_dim**-0.5,
+                    output_final_state=True,
+                    inplace_final_state=False,
+                    use_qk_l2norm_in_kernel=True,
+                    use_gate_in_kernel=False,
+                    use_beta_sigmoid_in_kernel=False,
+                    state_v_first=True,
+                )
+                sequence_outputs.append(result[0])
+                state = result[1]
+                sequence_states.append(state[0].clone())
+            reference_outputs.append(torch.cat(sequence_outputs))
+            ssm_checkpoints.append(torch.stack(sequence_states))
+            conv_checkpoints.append(torch.stack([history[token + 1 : token + kernel_width] for token in range(width)]))
+        if graph is None:
+            output = forward()
+        else:
+            graph.replay()
+        torch.npu.synchronize()
+        reference = torch.cat(reference_outputs).reshape_as(output)
+        torch.testing.assert_close(output, reference, rtol=0.02, atol=0.002)
+        previous_conv = torch.stack(conv_checkpoints)
+        previous_ssm = torch.stack(ssm_checkpoints)
+        torch.testing.assert_close(ssm[indices.long()], previous_ssm, rtol=0.02, atol=0.002)
+
+
 class _StateDict:
     def __init__(self, tensors: dict[str, torch.Tensor]) -> None:
         self.tensors = tensors

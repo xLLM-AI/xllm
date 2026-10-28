@@ -242,7 +242,6 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         is_mla: bool,
         device: torch.device,
         dtype: torch.dtype,
-        num_decoding_tokens: int = 1,
         mla_block_draft: bool = False,
     ) -> None:
         self._mla_block_draft = mla_block_draft
@@ -256,7 +255,8 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         self._use_fia_v2 = _HAS_FIA_V2
         self._is_mla = is_mla
         self._uses_sparse_mla = False
-        self._kda_verify_width = num_decoding_tokens
+        self._kda_checkpoint_stride: int | None = None
+        self._kda_query_start_locs: dict[tuple[int, int, torch.device], torch.Tensor] = {}
 
         self._kv_caches: list[LayerCache] = []
         self._kpool_cache_triton_compatible: tuple[bool, ...] = ()
@@ -373,6 +373,16 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         self._kpool_cache_triton_compatible = tuple(_is_compact_kpool_cache_compatible(cache) for cache in kv_caches)
         self._page_size = page_sizes.pop()
         self._num_kv_blocks = num_kv_blocks.pop()
+        checkpoint_strides: set[int] = set()
+        for cache in kv_caches:
+            if cache.conv is None or cache.ssm is None:
+                continue
+            if cache.conv.shape[0] <= 0 or cache.ssm.shape[0] % cache.conv.shape[0] != 0:
+                raise RuntimeError("linear SSM cache does not align with state slots")
+            checkpoint_strides.add(cache.ssm.shape[0] // cache.conv.shape[0])
+        if len(checkpoint_strides) > 1:
+            raise RuntimeError("linear-attention layers use inconsistent checkpoint capacities")
+        self._kda_checkpoint_stride = checkpoint_strides.pop() if checkpoint_strides else None
         has_sparse_index = any(cache.index is not None for cache in kv_caches)
         # glm5_next DSA layers are NoPE: the latent lives in the key slot and
         # the value/rope slot is a 0-dim tensor normalized to None, while the
