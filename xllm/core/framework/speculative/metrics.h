@@ -30,17 +30,13 @@ struct SpecMetrics {
   std::vector<int64_t> num_accepted_tokens_per_pos;
   std::vector<SpeculativeTokenStats> sequence_stats;
   // Batch totals, accumulated by make_spec_metrics alongside sequence_stats.
-  int64_t num_committed_tokens = 0;
   int64_t num_draft_tokens = 0;
   int64_t num_accepted_tokens = 0;
   int64_t constrained_num_accepted_tokens = 0;
   int64_t constrained_num_draft_tokens = 0;
 };
 
-// The output contains one target replacement or bonus token, plus the accepted
-// draft prefix. Column 0 is the first committed token.
-SpecMetrics make_spec_metrics(const torch::Tensor& tokens,
-                              const std::vector<VerifyRowLayout>& row_layouts);
+SpecMetrics make_spec_metrics(const SpecVerifyStats& stats);
 
 void record_spec_metrics(const SpecMetrics& metrics);
 

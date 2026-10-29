@@ -135,19 +135,6 @@ void record_prefix_cache_hit_metrics(size_t prompt_tokens, size_t hit_tokens);
     }                                          \
   } while (false)
 
-namespace xllm {
-
-// Cached handles for one label of a multi-dimension counter/gauge pair,
-// resolved once so hot paths do not repeat the locked get_stats lookups or
-// allocate the label string per step. The MultiDimension never drops stats,
-// so cached pointers stay valid for the process lifetime.
-struct MultiCounterGaugeHandles {
-  bvar::Adder<double>* counter = nullptr;
-  bvar::Status<double>* gauge = nullptr;
-};
-
-}  // namespace xllm
-
 // declare gauge
 #define DECLARE_GAUGE(name) extern bvar::Status<double> GAUGE_##name;
 
@@ -297,10 +284,7 @@ DECLARE_COUNTER(speculative_execution_latency_seconds_validation);
 DECLARE_COUNTER(speculative_num_drafts_total);
 DECLARE_COUNTER(speculative_num_accepted_tokens_total);
 DECLARE_COUNTER(speculative_num_draft_tokens_total);
-DECLARE_COUNTER(speculative_num_committed_tokens_total);
 DECLARE_MULTI_COUNTER(speculative_num_accepted_tokens_per_pos);
-DECLARE_GAUGE(speculative_mean_acceptance_length);
-DECLARE_MULTI_GAUGE(speculative_conditional_acceptance_rate_per_pos);
 DECLARE_HISTOGRAM(speculative_draft_token_d2h_latency_microseconds);
 DECLARE_MULTI_HISTOGRAM(
     speculative_draft_token_copy_submission_latency_microseconds);
@@ -318,7 +302,6 @@ DECLARE_COUNTER(speculative_num_draft_tokens_plain_total);
 // a valid committed-token result, so it measures actual executions rather
 // than capability checks or HTTP requests.
 DECLARE_COUNTER(speculative_unified_graph_executions_total);
-DECLARE_COUNTER(speculative_legacy_decode_steps_total);
 
 // latency of proto conversion in seconds
 DECLARE_COUNTER(proto_latency_seconds_proto2i);

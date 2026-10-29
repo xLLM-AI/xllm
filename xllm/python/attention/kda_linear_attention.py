@@ -24,7 +24,6 @@ import torch
 from xllm.python.attention.backend import resolve_linear_state_io_indices
 from xllm.python.model_executor.forward_context import (
     get_execution_buffer,
-    get_forward_context_or_none,
     in_acl_graph,
 )
 
@@ -42,6 +41,7 @@ class KdaLinearAttentionMixin:
     _kv_caches: list[LayerCache]
     _kda_checkpoint_stride: int | None
     _kda_query_start_locs: dict[tuple[int, int, torch.device], torch.Tensor]
+    _kda_checkpoint_offsets: dict[tuple[int, torch.device], torch.Tensor]
 
     def _causal_conv1d(
         self,
@@ -551,15 +551,15 @@ class KdaLinearAttentionMixin:
             raise ValueError("KDA accepted-token counts must be in [1, verify width]")
 
         idx32 = idx.to(torch.int32).contiguous()
-        context = get_forward_context_or_none()
-        ssm_state_indices = None if context is None else context.layer_shared_cache.get(self)
-        if ssm_state_indices is None:
-            # The kernel reads column accepted - 1 and writes each token's checkpoint.
-            ssm_state_indices = idx32.reshape(-1, 1) * checkpoint_stride + torch.arange(
-                checkpoint_stride, dtype=torch.int32, device=idx32.device
-            )
-            if context is not None:
-                context.layer_shared_cache[self] = ssm_state_indices
+        # The kernel reads column accepted - 1 and writes each token's
+        # checkpoint; the offsets are stride-shaped constants, only the
+        # per-step slot ids vary.
+        offsets_key = (checkpoint_stride, device)
+        offsets = self._kda_checkpoint_offsets.get(offsets_key)
+        if offsets is None:
+            offsets = torch.arange(checkpoint_stride, dtype=torch.int32, device=device)
+            self._kda_checkpoint_offsets[offsets_key] = offsets
+        ssm_state_indices = idx32.reshape(-1, 1) * checkpoint_stride + offsets
 
         qsl_key = (num_seqs, rows_per_seq, device)
         qsl_buf = self._kda_query_start_locs.get(qsl_key)

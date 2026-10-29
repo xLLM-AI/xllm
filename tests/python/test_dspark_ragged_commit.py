@@ -118,7 +118,7 @@ def test_mixed_requests_use_their_own_bonus_and_context_prefix() -> None:
     assert int(inputs[7][2, 3]) == (1 << 35) + 2
     assert inputs[9].tolist() == [40, 41, 42, 43, 44, 45, 46, 47] + [-1] * 8
     # Committed length includes one target correction/bonus, while the
-    # existing VerifyRowLayout receives width-1 proposed draft tokens.
+    # proposed-draft output receives width-1 draft tokens.
     proposed = inputs[2] - 1
     accepted = inputs[8] - 1
     assert proposed.tolist() == [0, 2, 7]

@@ -27,6 +27,13 @@ limitations under the License.
 
 namespace xllm {
 
+// NPU MTP targets whose num_speculative_tokens flows from engine Options into
+// ModelArgs; other targets keep the checkpoint default.
+inline bool uses_mtp_target_spec_width(std::string_view model_type) {
+  return is_glm5_next_target_model_type(model_type) ||
+         util::is_deepseek_v4_model_type(model_type);
+}
+
 inline bool configure_glm5_next_mtp_args(ModelArgs& model_args,
                                          std::string_view speculative_algorithm,
                                          bool is_draft_engine) {

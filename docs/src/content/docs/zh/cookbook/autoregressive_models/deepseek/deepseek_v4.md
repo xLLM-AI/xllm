@@ -221,25 +221,6 @@ DeepSeek-V4-Flash-0731 权重目录即可：
 `--enable_dspark_native_sas=true`，使用完整的 DSpark SWA 窗口。旧版算子会在
 tiling 阶段直接终止进程，因此无法安全地自动探测该能力。
 
-可通过逐位置计数观察 DSpark 接受率：
-
-```bash
-curl http://${HOST}:${PORT}/brpc_metrics | grep speculative_num
-```
-
-```text
-# 逐位置条件接受率（隔离 draft 质量）：
-conditional_acceptance[i] =
-  speculative_num_accepted_tokens_per_pos{i} /
-  speculative_num_accepted_tokens_per_pos{i-1}   # i = 0 时分母用 speculative_num_drafts_total
-```
-
-`speculative_num_accepted_tokens_per_pos` 是原始 counter（充分统计量）；逐位置优先看上式的**条件**接受率——“已到第 i 位、这一位能过”的概率。marginal 口径（`… / speculative_num_drafts_total`）因前缀存活偏差、即使 draft 每位一样好也会一路衰减，把 draft 质量和“能否走到”混在一起；条件率隔离每位质量，是选投机深度时该看的。xLLM 已把它直接暴露为 gauge `speculative_conditional_acceptance_rate_per_pos{position}`（由上面的 counter 算出），无需手动推导。
-
-指标 `speculative_mean_acceptance_length` 是累计 acceptance length：每个 proposal
-序列平均产出的 token 数（接受的草稿 + 1 个 target bonus），即
-`1 + speculative_num_accepted_tokens_total / speculative_num_drafts_total`。
-
 日志出现"Brpc Server Started"表示服务成功拉起。
 
 ## 其他可选环境变量

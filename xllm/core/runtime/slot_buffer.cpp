@@ -1161,8 +1161,7 @@ void SlotBuffer::prepare_model_state(const LlmForwardInput& input,
     }
     if (row < params.linear_state_cache_ops.size()) {
       const auto& op = params.linear_state_cache_ops[row];
-      valid = op.restore_requested || op.is_direct_read() ||
-              (valid && !op.reset_requested);
+      valid = op.is_valid_after(valid);
       if (op.is_direct_read()) {
         reads[row] = op.restore_src_slot_id;
         has_direct_read = true;

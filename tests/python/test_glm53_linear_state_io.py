@@ -33,6 +33,7 @@ def _backend_for_linear_cache(
     backend._metadata = None
     backend._kda_checkpoint_stride = ssm_cache.shape[0] // conv_cache.shape[0] if conv_cache.shape[0] else None
     backend._kda_query_start_locs = {}
+    backend._kda_checkpoint_offsets = {}
     return backend
 
 
@@ -669,10 +670,9 @@ def test_checkpoint_indices_follow_forward_lifetime(
                     *_kda_inputs()[1:],
                     raw_gate_proj=torch.zeros(1, 4, 1, 2),
                 )
-        assert kda_test_environment[-1]["ssm_state_indices"] is kda_test_environment[-2]["ssm_state_indices"]
-    warmup_indices = kda_test_environment[0]["ssm_state_indices"]
+        # Indices are derived per call from the per-step slot ids (no
+        # cross-layer tensor reuse), so compare values.
     captured_indices = kda_test_environment[-1]["ssm_state_indices"]
-    assert warmup_indices is not captured_indices
     assert captured_indices.tolist() == [[4, 5, 6, 7], [12, 13, 14, 15]]
 
     metadata.linear_state_indices.copy_(torch.tensor([2, 0]).repeat_interleave(slot_repeats))
@@ -685,5 +685,4 @@ def test_checkpoint_indices_follow_forward_lifetime(
             raw_gate_proj=torch.zeros(1, 4, 1, 2),
         )
     next_indices = kda_test_environment[-1]["ssm_state_indices"]
-    assert next_indices is not captured_indices
     assert next_indices.tolist() == [[8, 9, 10, 11], [0, 1, 2, 3]]

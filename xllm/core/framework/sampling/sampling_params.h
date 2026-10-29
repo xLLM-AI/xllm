@@ -425,6 +425,10 @@ class SampleOutput final {
   // per-sequence by the all-gather-space `logits_indices`.
   torch::Tensor selected_embeddings;
 
+  // Speculative verify only: accepted drafts per sequence [num_seq] int32,
+  // excluding the bonus token, from the verify kernel itself.
+  torch::Tensor num_accepted_tokens;
+
   std::vector<std::vector<torch::Tensor>> mm_embeddings;
 };
 

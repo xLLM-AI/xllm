@@ -1226,56 +1226,6 @@ TEST(DisaggPDSchedulerTest, EmptyOverlapOutputPreservesLatencyClock) {
   }
 }
 
-TEST(DisaggPDSchedulerTest, SchedulerDoesNotOverwriteSpeculativeOutputGauge) {
-  FakeEngine engine(/*num_blocks=*/8,
-                    /*block_size=*/2,
-                    /*num_speculative_tokens=*/1);
-  TestDisaggPDScheduler scheduler(&engine, make_mtp_decode_options());
-  GAUGE_SET(speculative_mean_acceptance_length, 4.25);
-
-  std::shared_ptr<Request> first_request = make_request({1, 2, 3, 4});
-  Sequence* first_sequence = first_request->sequences()[0].get();
-  first_sequence->kv_state().set_kv_cache_tokens_num(
-      first_sequence->num_prompt_tokens());
-  for (int32_t token_id = 10; token_id < 15; ++token_id) {
-    first_sequence->append_token(Token(token_id));
-  }
-
-  std::shared_ptr<Request> second_request = make_request({5, 6, 7, 8});
-  Sequence* second_sequence = second_request->sequences()[0].get();
-  second_sequence->kv_state().set_kv_cache_tokens_num(
-      second_sequence->num_prompt_tokens());
-  for (int32_t token_id = 20; token_id < 23; ++token_id) {
-    second_sequence->append_token(Token(token_id));
-  }
-
-  std::vector<Sequence*> sequences = {first_sequence, second_sequence};
-  scheduler.update_metrics(sequences);
-
-  EXPECT_DOUBLE_EQ(GAUGE_speculative_mean_acceptance_length.get_value(), 4.25);
-  EXPECT_EQ(first_sequence->generated_tokens_since_latency(), 0u);
-  EXPECT_EQ(second_sequence->generated_tokens_since_latency(), 0u);
-}
-
-TEST(DisaggPDSchedulerTest, SpeculativeMetricsSilentWhenDisabled) {
-  FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
-  // make_options() keeps num_speculative_tokens at its default of 0.
-  TestDisaggPDScheduler scheduler(&engine, make_options());
-
-  GAUGE_SET(speculative_mean_acceptance_length, -1.0);
-
-  std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
-  Sequence* sequence = request->sequences()[0].get();
-  sequence->kv_state().set_kv_cache_tokens_num(sequence->num_prompt_tokens());
-  sequence->append_token(Token(10));
-  sequence->append_token(Token(11));
-  std::vector<Sequence*> sequences = {sequence};
-
-  scheduler.update_metrics(sequences);
-
-  EXPECT_DOUBLE_EQ(GAUGE_speculative_mean_acceptance_length.get_value(), -1.0);
-}
-
 TEST(DisaggPDSchedulerTest, StructuredOutputFieldsPreserveWireTags) {
   proto::DisaggRequest request;
   request.set_include_stop_str_in_output(true);

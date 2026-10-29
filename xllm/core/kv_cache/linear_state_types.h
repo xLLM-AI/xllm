@@ -47,6 +47,11 @@ class LinearStateCacheOp final {
   bool is_direct_read() const {
     return restore_src_slot_id >= 0 && !restore_requested && !reset_requested;
   }
+
+  bool is_valid_after(bool prev_valid) const {
+    return restore_requested || is_direct_read() ||
+           (prev_valid && !reset_requested);
+  }
 };
 
 }  // namespace xllm

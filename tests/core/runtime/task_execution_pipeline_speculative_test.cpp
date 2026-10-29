@@ -3131,11 +3131,9 @@ TEST_F(SpeculativePipelineTest,
           torch::equal(draft_->context_slots.back().narrow(0, 24, 8).cpu(),
                        torch::full({8}, -1, torch::kInt32)));
     }
-    const auto metrics = make_spec_metrics(output.sample_output.next_tokens,
-                                           output.spec_verify_layouts);
+    const auto metrics = make_spec_metrics(output.spec_verify_stats);
     EXPECT_EQ(metrics.num_draft_tokens, batch_size * 7);
     EXPECT_EQ(metrics.num_accepted_tokens, batch_size * 7);
-    EXPECT_EQ(metrics.num_committed_tokens, batch_size * 8);
     EXPECT_EQ(target_->graph_warmup_bindings.size(), target_warmups);
     EXPECT_EQ(draft_->graph_warmup_bindings.size(), draft_warmups);
     EXPECT_EQ(target_->graph_output_allocations.load(), target_outputs);
@@ -3239,12 +3237,10 @@ TEST_F(SpeculativePipelineTest,
   EXPECT_EQ(draft_->forward_inputs.back().numel(), 28);
   EXPECT_EQ(draft_->markov_inputs.back().numel(), 3);
   const auto metrics =
-      make_spec_metrics(second_result.output.sample_output.next_tokens,
-                        second_result.output.spec_verify_layouts);
+      make_spec_metrics(second_result.output.spec_verify_stats);
   ASSERT_EQ(metrics.sequence_stats.size(), 3U);
   EXPECT_EQ(metrics.num_draft_tokens, 21);
   EXPECT_EQ(metrics.num_accepted_tokens, 14);
-  EXPECT_EQ(metrics.num_committed_tokens, 17);
   EXPECT_EQ(metrics.sequence_stats[0].accepted_tokens, 7);
   EXPECT_EQ(metrics.sequence_stats[1].accepted_tokens, 0);
   EXPECT_EQ(metrics.sequence_stats[2].accepted_tokens, 7);
@@ -3401,11 +3397,9 @@ TEST_F(SpeculativePipelineTest,
     ASSERT_TRUE(output.sample_output.next_tokens.defined());
     EXPECT_EQ(output.sample_output.next_tokens.size(0), rows);
     EXPECT_EQ(output.sample_output.next_tokens.size(1), 8);
-    const auto metrics = make_spec_metrics(output.sample_output.next_tokens,
-                                           output.spec_verify_layouts);
+    const auto metrics = make_spec_metrics(output.spec_verify_stats);
     EXPECT_EQ(metrics.num_draft_tokens, rows * 7);
     EXPECT_EQ(metrics.num_accepted_tokens, rows * 7);
-    EXPECT_EQ(metrics.num_committed_tokens, rows * 8);
     EXPECT_TRUE(output.dspark_feedback.confidence.empty());
     EXPECT_TRUE(output.dspark_feedback.rounds_since_full_width.empty());
     EXPECT_EQ(target_->graph_warmup_bindings.size(), target_warmups);
@@ -3442,8 +3436,7 @@ TEST_F(SpeculativePipelineTest,
     EXPECT_TRUE(torch::equal(
         draft_->context_slots.back().narrow(0, rows * 8, 32 - rows * 8).cpu(),
         torch::full({32 - rows * 8}, -1, torch::kInt32)));
-    const auto metrics = make_spec_metrics(output.sample_output.next_tokens,
-                                           output.spec_verify_layouts);
+    const auto metrics = make_spec_metrics(output.spec_verify_stats);
     EXPECT_EQ(metrics.num_draft_tokens, rows * 7);
   }
 }
@@ -3492,8 +3485,8 @@ TEST_F(SpeculativePipelineTest,
   EXPECT_EQ(output.dspark_feedback.rounds_since_full_width.size(), 1U);
   EXPECT_EQ(target_->forward_counts.back(), (std::vector<int32_t>{1, 1}));
   EXPECT_EQ(draft_->forward_counts.back(), (std::vector<int32_t>{7, 7}));
-  ASSERT_EQ(output.spec_verify_layouts.size(), 1U);
-  EXPECT_EQ(output.spec_verify_layouts.front().verify_len, 0);
+  ASSERT_EQ(output.spec_verify_stats.requests.size(), 1U);
+  EXPECT_EQ(output.spec_verify_stats.requests.front().num_draft_tokens, 0);
 }
 
 TEST_F(SpeculativePipelineTest,
@@ -3652,21 +3645,19 @@ TEST_F(SpeculativePipelineTest,
   ASSERT_TRUE(first_result.status.ok());
   ASSERT_TRUE(second_result.status.ok());
   for (const auto* result : {&first_result.output, &second_result.output}) {
-    ASSERT_EQ(result->spec_verify_layouts.size(), 3U);
-    for (const auto& layout : result->spec_verify_layouts) {
-      EXPECT_EQ(layout.verify_len, 7);
+    ASSERT_EQ(result->spec_verify_stats.requests.size(), 3U);
+    for (const auto& layout : result->spec_verify_stats.requests) {
+      EXPECT_EQ(layout.num_draft_tokens, 7);
     }
   }
   const auto output = execute(dspark_batch_input(
       3, /*decode=*/true, /*placeholder=*/false, /*position=*/18));
   EXPECT_EQ(target_->forward_inputs.back().numel(), 4);
   EXPECT_EQ(draft_->forward_inputs.back().numel(), 28);
-  const auto metrics = make_spec_metrics(output.sample_output.next_tokens,
-                                         output.spec_verify_layouts);
+  const auto metrics = make_spec_metrics(output.spec_verify_stats);
   ASSERT_EQ(metrics.sequence_stats.size(), 3U);
   EXPECT_EQ(metrics.num_draft_tokens, 1);
   EXPECT_EQ(metrics.num_accepted_tokens, 1);
-  EXPECT_EQ(metrics.num_committed_tokens, 4);
   for (uint32_t row = 0; row < 3; ++row) {
     EXPECT_EQ(metrics.sequence_stats[row].proposed_tokens, row == 0 ? 1 : 0);
     EXPECT_EQ(metrics.sequence_stats[row].accepted_tokens, row == 0 ? 1 : 0);
@@ -3728,8 +3719,10 @@ TEST_F(SpeculativePipelineTest,
   EXPECT_EQ(first_binding[3], 32U);
   EXPECT_EQ(second_binding[2], 3U);
   EXPECT_EQ(second_binding[3], 32U);
-  EXPECT_EQ(first_result.output.spec_verify_layouts[0].verify_len, 7);
-  EXPECT_EQ(second_result.output.spec_verify_layouts[0].verify_len, 7);
+  EXPECT_EQ(first_result.output.spec_verify_stats.requests[0].num_draft_tokens,
+            7);
+  EXPECT_EQ(second_result.output.spec_verify_stats.requests[0].num_draft_tokens,
+            7);
   EXPECT_EQ(first_result.output.sample_output.next_tokens[0][7].item<int64_t>(),
             11);
   EXPECT_EQ(
@@ -3820,8 +3813,9 @@ TEST_F(SpeculativePipelineTest,
   for (const auto* result : {&first_result, &second_result}) {
     ASSERT_TRUE(result->status.ok()) << result->status.message();
     EXPECT_EQ(result->output.sample_output.next_tokens.size(1), 6);
-    ASSERT_EQ(result->output.spec_verify_layouts.size(), 8U);
-    EXPECT_EQ(result->output.spec_verify_layouts.front().verify_len, 5);
+    ASSERT_EQ(result->output.spec_verify_stats.requests.size(), 8U);
+    EXPECT_EQ(
+        result->output.spec_verify_stats.requests.front().num_draft_tokens, 5);
   }
   ASSERT_EQ(target_->unified_run_bindings.size(), runs + 2);
   EXPECT_NE(target_->unified_run_bindings[runs][0],
@@ -3953,9 +3947,11 @@ TEST_F(SpeculativePipelineTest,
   const auto second_result = pipeline_->take_result_async(second.task_id).get();
   ASSERT_TRUE(first_result.status.ok());
   ASSERT_TRUE(second_result.status.ok());
-  ASSERT_EQ(first_result.output.spec_verify_layouts.size(), 3U);
-  EXPECT_EQ(first_result.output.spec_verify_layouts[0].verify_len, 5);
-  EXPECT_EQ(second_result.output.spec_verify_layouts[0].verify_len, 5);
+  ASSERT_EQ(first_result.output.spec_verify_stats.requests.size(), 3U);
+  EXPECT_EQ(first_result.output.spec_verify_stats.requests[0].num_draft_tokens,
+            5);
+  EXPECT_EQ(second_result.output.spec_verify_stats.requests[0].num_draft_tokens,
+            5);
   const size_t draft_calls = draft_->forward_inputs.size();
   const auto pruned = execute(dspark_batch_input(
       3, /*decode=*/true, /*placeholder=*/false, /*position=*/14));
@@ -3963,11 +3959,8 @@ TEST_F(SpeculativePipelineTest,
   // All five sequential Draft forwards still execute, plus KV refresh. Only
   // verification shrinks; this is independent of adaptive draft-step choice.
   EXPECT_EQ(draft_->forward_inputs.size() - draft_calls, 6U);
-  ASSERT_EQ(pruned.spec_verify_layouts.size(), 3U);
-  EXPECT_EQ(make_spec_metrics(pruned.sample_output.next_tokens,
-                              pruned.spec_verify_layouts)
-                .num_draft_tokens,
-            1);
+  ASSERT_EQ(pruned.spec_verify_stats.requests.size(), 3U);
+  EXPECT_EQ(make_spec_metrics(pruned.spec_verify_stats).num_draft_tokens, 1);
   EXPECT_TRUE(torch::equal(pruned.sample_output.next_tokens,
                            torch::tensor({{16, 17, -1, -1, -1, -1},
                                           {18, -1, -1, -1, -1, -1},
@@ -4102,8 +4095,10 @@ TEST_F(SpeculativePipelineTest,
   ASSERT_TRUE(second_result.status.ok());
   EXPECT_EQ(leader.broadcasts(), startup_broadcasts + 2);
   // Both plans were immutable full width before any usable feedback retired.
-  EXPECT_EQ(first_result.output.spec_verify_layouts[0].verify_len, 7);
-  EXPECT_EQ(second_result.output.spec_verify_layouts[0].verify_len, 7);
+  EXPECT_EQ(first_result.output.spec_verify_stats.requests[0].num_draft_tokens,
+            7);
+  EXPECT_EQ(second_result.output.spec_verify_stats.requests[0].num_draft_tokens,
+            7);
   EXPECT_EQ(
       second_result.output.sample_output.next_tokens[0][7].item<int64_t>(), 19);
   const auto output = execute(dspark_batch_input(
@@ -4113,10 +4108,10 @@ TEST_F(SpeculativePipelineTest,
                                           {22, -1, -1, -1, -1, -1, -1, -1},
                                           {24, -1, -1, -1, -1, -1, -1, -1}},
                                          torch::kInt64)));
-  ASSERT_EQ(output.spec_verify_layouts.size(), 3U);
-  EXPECT_EQ(output.spec_verify_layouts[0].verify_len, 1);
-  EXPECT_EQ(output.spec_verify_layouts[1].verify_len, 0);
-  EXPECT_EQ(output.spec_verify_layouts[2].verify_len, 0);
+  ASSERT_EQ(output.spec_verify_stats.requests.size(), 3U);
+  EXPECT_EQ(output.spec_verify_stats.requests[0].num_draft_tokens, 1);
+  EXPECT_EQ(output.spec_verify_stats.requests[1].num_draft_tokens, 0);
+  EXPECT_EQ(output.spec_verify_stats.requests[2].num_draft_tokens, 0);
   EXPECT_EQ(target_->forward_inputs.back().numel(), 4);
   EXPECT_EQ(draft_->forward_inputs.back().numel(), 28);
   EXPECT_EQ(draft_->context_hidden.back().size(0), 4);
@@ -4129,11 +4124,9 @@ TEST_F(SpeculativePipelineTest,
                                           {21, 22, 23, 24, 25, 26, 27},
                                           {23, 24, 25, 26, 27, 28, 29}},
                                          torch::kInt64)));
-  const auto metrics = make_spec_metrics(output.sample_output.next_tokens,
-                                         output.spec_verify_layouts);
+  const auto metrics = make_spec_metrics(output.spec_verify_stats);
   EXPECT_EQ(metrics.num_draft_tokens, 1);
   EXPECT_EQ(metrics.num_accepted_tokens, 1);
-  EXPECT_EQ(metrics.num_committed_tokens, 4);
   EXPECT_EQ(target_->graph_warmup_bindings.size(), target_warmups);
   EXPECT_EQ(draft_->graph_warmup_bindings.size(), draft_warmups);
   EXPECT_EQ(target_->graph_output_allocations.load(), target_outputs);
@@ -4165,8 +4158,8 @@ TEST_F(SpeculativePipelineTest,
     const auto output = execute(dspark_batch_input(1, /*decode=*/true));
     ASSERT_EQ(output.sample_output.next_tokens.size(0), 1);
     ASSERT_EQ(output.sample_output.next_tokens.size(1), 6);
-    ASSERT_EQ(output.spec_verify_layouts.size(), 1U);
-    EXPECT_LE(output.spec_verify_layouts.front().verify_len, 5);
+    ASSERT_EQ(output.spec_verify_stats.requests.size(), 1U);
+    EXPECT_LE(output.spec_verify_stats.requests.front().num_draft_tokens, 5);
     EXPECT_EQ(draft_->confidence_previous.back().size(1), 5);
   }
   EXPECT_EQ(target_->graph_warmup_bindings.size(), warmups);
@@ -4189,9 +4182,9 @@ TEST_F(SpeculativePipelineTest,
                                                /*decode=*/true,
                                                /*placeholder=*/false,
                                                /*position=*/18));
-  ASSERT_EQ(full.spec_verify_layouts.size(), 2U);
-  EXPECT_EQ(full.spec_verify_layouts[0].verify_len, 7);
-  EXPECT_EQ(full.spec_verify_layouts[1].verify_len, 7);
+  ASSERT_EQ(full.spec_verify_stats.requests.size(), 2U);
+  EXPECT_EQ(full.spec_verify_stats.requests[0].num_draft_tokens, 7);
+  EXPECT_EQ(full.spec_verify_stats.requests[1].num_draft_tokens, 7);
   EXPECT_EQ(target_->forward_inputs.back().numel(), 16);
 
   // A new Prefill generation using the same embedding ids must discard old
@@ -4211,13 +4204,13 @@ TEST_F(SpeculativePipelineTest,
                                                  /*decode=*/true,
                                                  /*placeholder=*/false,
                                                  /*position=*/18));
-  EXPECT_EQ(pruned.spec_verify_layouts[0].verify_len, 0);
-  EXPECT_EQ(pruned.spec_verify_layouts[1].verify_len, 0);
+  EXPECT_EQ(pruned.spec_verify_stats.requests[0].num_draft_tokens, 0);
+  EXPECT_EQ(pruned.spec_verify_stats.requests[1].num_draft_tokens, 0);
   EXPECT_EQ(target_->forward_inputs.back().numel(), 2);
   execute(dspark_batch_input(2, /*decode=*/false));
   const auto reset = execute(dspark_batch_input(2, /*decode=*/true));
-  EXPECT_EQ(reset.spec_verify_layouts[0].verify_len, 7);
-  EXPECT_EQ(reset.spec_verify_layouts[1].verify_len, 7);
+  EXPECT_EQ(reset.spec_verify_stats.requests[0].num_draft_tokens, 7);
+  EXPECT_EQ(reset.spec_verify_stats.requests[1].num_draft_tokens, 7);
   EXPECT_EQ(target_->forward_inputs.back().numel(), 16);
 }
 
@@ -4259,11 +4252,9 @@ TEST_F(SpeculativePipelineTest,
           .narrow(/*dim=*/0, /*start=*/0, /*length=*/8)
           .cpu(),
       torch::tensor({18, 19, 20, 21, 22, 23, 24, 25}, torch::kInt32)));
-  const auto metrics = make_spec_metrics(output.sample_output.next_tokens,
-                                         output.spec_verify_layouts);
+  const auto metrics = make_spec_metrics(output.spec_verify_stats);
   EXPECT_EQ(metrics.num_draft_tokens, 21);
   EXPECT_EQ(metrics.num_accepted_tokens, 21);
-  EXPECT_EQ(metrics.num_committed_tokens, 24);
   const auto next = execute(dspark_batch_input(
       3, /*decode=*/true, /*placeholder=*/true, /*position=*/3));
   ASSERT_EQ(leader.broadcasts(), startup_broadcasts + 2);
@@ -4310,8 +4301,8 @@ TEST_F(SpeculativePipelineTest,
     const auto output = execute(mixed_request(false, 18));
     EXPECT_EQ(output.sample_output.next_tokens.size(0), 3);
     EXPECT_EQ(output.sample_output.next_tokens.size(1), width + 1);
-    EXPECT_EQ(output.spec_verify_layouts[0].verify_len, 1);
-    EXPECT_EQ(output.spec_verify_layouts[1].verify_len, 0);
+    EXPECT_EQ(output.spec_verify_stats.requests[0].num_draft_tokens, 1);
+    EXPECT_EQ(output.spec_verify_stats.requests[1].num_draft_tokens, 0);
     EXPECT_EQ(target_->forward_inputs.back().numel(), 4);
     EXPECT_EQ(target_->adaptive_warmup_bindings.size(), captures);
     ASSERT_EQ(leader.broadcasts(), broadcasts + 6);
@@ -6493,10 +6484,10 @@ TEST_F(SpeculativePipelineTest, AdaptiveMtpSnapshotsDepthIndependentlyPerSlot) {
   EXPECT_TRUE(torch::equal(br.output.sample_output.next_tokens,
                            torch::tensor({{6, 7, 8, 9}}, torch::kInt64)));
   EXPECT_EQ(draft_->logits_calls.load(), 4);
-  ASSERT_EQ(ar.output.spec_verify_layouts.size(), 1U);
-  ASSERT_EQ(br.output.spec_verify_layouts.size(), 1U);
-  EXPECT_EQ(ar.output.spec_verify_layouts.front().verify_len, 1);
-  EXPECT_EQ(br.output.spec_verify_layouts.front().verify_len, 3);
+  ASSERT_EQ(ar.output.spec_verify_stats.requests.size(), 1U);
+  ASSERT_EQ(br.output.spec_verify_stats.requests.size(), 1U);
+  EXPECT_EQ(ar.output.spec_verify_stats.requests.front().num_draft_tokens, 1);
+  EXPECT_EQ(br.output.spec_verify_stats.requests.front().num_draft_tokens, 3);
 }
 
 TEST_F(SpeculativePipelineTest,
@@ -6526,8 +6517,8 @@ TEST_F(SpeculativePipelineTest,
   const auto result = execute(decode);
   EXPECT_TRUE(torch::equal(result.sample_output.next_tokens,
                            torch::tensor({{4, 5}}, torch::kInt64)));
-  ASSERT_EQ(result.spec_verify_layouts.size(), 1U);
-  EXPECT_EQ(result.spec_verify_layouts.front().verify_len, 1);
+  ASSERT_EQ(result.spec_verify_stats.requests.size(), 1U);
+  EXPECT_EQ(result.spec_verify_stats.requests.front().num_draft_tokens, 1);
   EXPECT_EQ(target_->graph_warmup_bindings.size(), captured);
   decode.input_params.meta.mtp_target_graph_rows = 8;
   EXPECT_FALSE(pipeline_->submit(decode).status.ok());

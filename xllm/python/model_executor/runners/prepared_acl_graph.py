@@ -243,6 +243,9 @@ class PreparedAclGraphRunner(AclGraphRunner):
             input_ids, positions, metadata, input_embedding, mtp_topk_indices, dspark_adaptive=dspark_adaptive
         )
         pages = self._kv_page_capacity(input_ids, metadata, dspark_adaptive)
+        return self.binding_for_pages(binding, pages)
+
+    def binding_for_pages(self, binding: tuple[object, ...], pages: int) -> tuple[object, ...]:
         if self._device_kv_lengths:
             return (*binding, pages)
         return binding + (("kv_pages", pages),) if pages else binding
@@ -519,11 +522,7 @@ class PreparedAclGraphRunner(AclGraphRunner):
             capacity_pages = tuple(sorted(set((*capacity_pages, *tiers)), reverse=True))
         previous_count = len(self._prepared_graphs)
         for pages in capacity_pages:
-            binding = slot_binding
-            if self._device_kv_lengths:
-                binding = (*binding, pages)
-            elif pages:
-                binding = binding + (("kv_pages", pages),)
+            binding = self.binding_for_pages(slot_binding, pages)
             self._warmup_prepared_entry(
                 input_ids,
                 positions,
@@ -757,11 +756,7 @@ class PreparedAclGraphRunner(AclGraphRunner):
         if slot_binding not in self._prepared_bindings:
             raise RuntimeError("prepared ACL replay requires a warmed Slot binding")
         pages = self._kv_page_capacity(input_ids, metadata, dspark_adaptive)
-        binding = slot_binding
-        if self._device_kv_lengths:
-            binding = (*binding, pages)
-        elif pages:
-            binding = binding + (("kv_pages", pages),)
+        binding = self.binding_for_pages(slot_binding, pages)
         entry = self._prepared_graphs.get(binding)
         if entry is None and pages and not self._device_kv_lengths:
             entry = self._fitting_kv_entry(slot_binding, pages)

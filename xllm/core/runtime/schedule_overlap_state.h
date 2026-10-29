@@ -73,8 +73,6 @@ class ScheduleOverlapState final {
   // state decision, so evaluate them under one lock.
   bool can_reuse_tokens(const std::vector<std::string>& request_ids) const;
 
-  bool has_request_overlap(const std::vector<std::string>& request_ids) const;
-
  private:
   void retire_prior_inputs() const;
   void update_prior_output(std::optional<ForwardOutput> output,

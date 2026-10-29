@@ -257,20 +257,10 @@ DEFINE_COUNTER(speculative_num_accepted_tokens_total,
                "Total number of accepted tokens in validation");
 DEFINE_COUNTER(speculative_num_draft_tokens_total,
                "Total number of draft tokens");
-DEFINE_COUNTER(speculative_num_committed_tokens_total,
-               "Total number of tokens committed by speculative decode");
 DEFINE_MULTI_COUNTER(speculative_num_accepted_tokens_per_pos,
                      "position",
                      "Accepted speculative tokens by zero-based draft "
                      "position");
-DEFINE_GAUGE(speculative_mean_acceptance_length,
-             "Cumulative acceptance length: mean tokens committed per "
-             "speculative proposal sequence, including the target bonus "
-             "token (1.0 without accepted draft tokens)");
-DEFINE_MULTI_GAUGE(speculative_conditional_acceptance_rate_per_pos,
-                   "position",
-                   "Per-position conditional draft acceptance rate: P(accept "
-                   "position i | position i-1 accepted)");
 DEFINE_HISTOGRAM(speculative_draft_token_d2h_latency_microseconds,
                  "Latency of draft token host copies in microseconds");
 DEFINE_MULTI_HISTOGRAM(
@@ -300,8 +290,6 @@ DEFINE_COUNTER(speculative_num_draft_tokens_plain_total,
                "Draft speculative tokens from plain rows");
 DEFINE_COUNTER(speculative_unified_graph_executions_total,
                "Successful unified Python MTP graph executions");
-DEFINE_COUNTER(speculative_legacy_decode_steps_total,
-               "MTP decode steps handled by the legacy path");
 
 // proto metrics
 DEFINE_COUNTER(proto_latency_seconds_proto2i,

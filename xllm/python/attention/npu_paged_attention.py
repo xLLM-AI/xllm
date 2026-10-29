@@ -262,6 +262,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         self._uses_sparse_mla = False
         self._kda_checkpoint_stride: int | None = None
         self._kda_query_start_locs: dict[tuple[int, int, torch.device], torch.Tensor] = {}
+        self._kda_checkpoint_offsets: dict[tuple[int, torch.device], torch.Tensor] = {}
 
         self._kv_caches: list[LayerCache] = []
         self._kpool_cache_triton_compatible: tuple[bool, ...] = ()

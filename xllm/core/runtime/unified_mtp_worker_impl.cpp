@@ -389,10 +389,15 @@ std::optional<ForwardOutput> UnifiedMtpWorkerImpl::run_unified_python_mtp_graph(
   if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
     return std::nullopt;
   }
-  target_output.spec_verify_layouts =
-      make_verify_layouts(target_output.sample_output.next_tokens,
-                          /*per_seq_draft_counts=*/nullptr,
-                          constrained_mask(input.json_object_states));
+  // The graph writes draft-only prefix lengths; every entry here is past the
+  // D2H sync.
+  const std::vector<int32_t> num_accepted_tokens = tensor_to_vector<int32_t>(
+      latest_pending_target_context().accepted_count_host);
+  target_output.spec_verify_stats =
+      make_verify_stats(target_output.sample_output.next_tokens,
+                        /*per_seq_draft_counts=*/nullptr,
+                        num_accepted_tokens,
+                        constrained_mask(input.json_object_states));
   return target_output;
 #else
   (void)input;

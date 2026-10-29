@@ -193,9 +193,11 @@ class WorkerService : public proto::DistributeWorker {
 
   void collect_llm_output(const ForwardOutput& output,
                           ForwardOutput& cpu_output,
-                          bool cpu_ready_result);
+                          bool cpu_ready_result,
+                          std::vector<SpeculativeTokenStats>& stats);
   void collect_vlm_output(const ForwardOutput& output,
-                          ForwardOutput& cpu_output);
+                          ForwardOutput& cpu_output,
+                          std::vector<SpeculativeTokenStats>& stats);
 
   void poll_llm_shm(
       std::unique_ptr<ForwardSharedMemoryManager> output_shm_manager);

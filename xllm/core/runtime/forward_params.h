@@ -618,11 +618,9 @@ class ForwardOutput final {
   // Optional CPU token snapshot, valid after ready_event. Device next_tokens
   // remains available for continuation; serializers can reuse this D2H copy.
   torch::Tensor next_tokens_host;
-  // Present only for speculative verification: per-row draft widths and
-  // JSON-constraint classification, request-ordered. A non-empty layout is
-  // the sole marker of a verify result (ordinary decode emits 1-D tokens);
-  // consumed before proto/shared-memory serialization.
-  std::vector<VerifyRowLayout> spec_verify_layouts;
+  // Non-empty requests is the sole marker of a verify result (ordinary decode
+  // emits 1-D tokens); consumed before proto/shared-memory serialization.
+  SpecVerifyStats spec_verify_stats;
   DSparkDpFeedback dspark_feedback;
   std::vector<JsonObjectOutputError> json_object_errors;
   // Keep no-sync input tensor handles alive until downstream consumers finish

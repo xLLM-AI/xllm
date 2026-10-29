@@ -52,20 +52,11 @@ namespace xllm {
 namespace {
 
 std::vector<SpeculativeTokenStats> record_speculative_metrics(
-    const ForwardOutput& output,
-    const torch::Tensor& cpu_next_tokens,
-    bool speculative_decode) {
-  if (output.is_graph_warmup || !speculative_decode) {
+    const ForwardOutput& output) {
+  if (output.is_graph_warmup || output.spec_verify_stats.requests.empty()) {
     return {};
   }
-  if (output.spec_verify_layouts.empty()) {
-    CHECK(!cpu_next_tokens.defined() || cpu_next_tokens.dim() != 2)
-        << "speculative verify output is missing row metadata";
-    return {};
-  }
-  // Reuse the completed output copy instead of issuing another D2H for metrics.
-  SpecMetrics metrics =
-      make_spec_metrics(cpu_next_tokens, output.spec_verify_layouts);
+  SpecMetrics metrics = make_spec_metrics(output.spec_verify_stats);
   record_spec_metrics(metrics);
   return std::move(metrics.sequence_stats);
 }
@@ -420,9 +411,12 @@ void WorkerService::InitModel(::google::protobuf::RpcController* controller,
   return;
 }
 
-void WorkerService::collect_llm_output(const ForwardOutput& output,
-                                       ForwardOutput& cpu_output,
-                                       bool cpu_ready_result) {
+void WorkerService::collect_llm_output(
+    const ForwardOutput& output,
+    ForwardOutput& cpu_output,
+    bool cpu_ready_result,
+    std::vector<SpeculativeTokenStats>& stats) {
+  stats = record_speculative_metrics(output);
   cpu_output.prepared_token = output.prepared_token;
   cpu_output.json_object_errors = output.json_object_errors;
   cpu_output.dspark_feedback = output.dspark_feedback;
@@ -528,11 +522,8 @@ void WorkerService::step_llm_model(
     }
     const bool cpu_ready_result =
         task_pipeline && (!worker_prepare || has_cpu_llm_output(*output));
-    collect_llm_output(*output, cpu_output, cpu_ready_result);
-    speculative_token_stats =
-        record_speculative_metrics(*output,
-                                   cpu_output.sample_output.next_tokens,
-                                   options_.enable_speculative_decode());
+    collect_llm_output(
+        *output, cpu_output, cpu_ready_result, speculative_token_stats);
     return;
   }
   if (task_pipeline) {
@@ -640,11 +631,8 @@ void WorkerService::GetLastLLMStepResult(
           task_pipeline && worker_->task_pipeline_uses_worker_prepare();
       const bool cpu_ready_result =
           task_pipeline && (!worker_prepare || has_cpu_llm_output(*output));
-      collect_llm_output(*output, cpu_output, cpu_ready_result);
-      speculative_token_stats =
-          record_speculative_metrics(*output,
-                                     cpu_output.sample_output.next_tokens,
-                                     options_.enable_speculative_decode());
+      collect_llm_output(
+          *output, cpu_output, cpu_ready_result, speculative_token_stats);
     }
     // Embedding-only and beam-only results are valid completed outputs.
     if (!encode_llm_output(cpu_output, speculative_token_stats, response)) {
@@ -653,8 +641,11 @@ void WorkerService::GetLastLLMStepResult(
   });
 }
 
-void WorkerService::collect_vlm_output(const ForwardOutput& output,
-                                       ForwardOutput& cpu_output) {
+void WorkerService::collect_vlm_output(
+    const ForwardOutput& output,
+    ForwardOutput& cpu_output,
+    std::vector<SpeculativeTokenStats>& stats) {
+  stats = record_speculative_metrics(output);
   cpu_output.prepared_token = output.prepared_token;
   cpu_output.json_object_errors = output.json_object_errors;
   const auto& sample = output.sample_output;
@@ -744,11 +735,7 @@ void WorkerService::step_vlm_model(
   if (!options_.enable_schedule_overlap()) {
     auto output = std::move(future).get();
     if (output.has_value()) {
-      collect_vlm_output(*output, cpu_output);
-      speculative_token_stats =
-          record_speculative_metrics(*output,
-                                     cpu_output.sample_output.next_tokens,
-                                     options_.enable_speculative_decode());
+      collect_vlm_output(*output, cpu_output, speculative_token_stats);
     }
     return;
   }
@@ -843,11 +830,7 @@ void WorkerService::GetLastVLMStepResult(
     ForwardOutput cpu_output;
     std::vector<SpeculativeTokenStats> speculative_token_stats;
     if (output.has_value()) {
-      collect_vlm_output(*output, cpu_output);
-      speculative_token_stats =
-          record_speculative_metrics(*output,
-                                     cpu_output.sample_output.next_tokens,
-                                     options_.enable_speculative_decode());
+      collect_vlm_output(*output, cpu_output, speculative_token_stats);
     }
     // Embedding-only and beam-only results are valid completed outputs.
     if (!encode_vlm_output(cpu_output, speculative_token_stats, response)) {
@@ -931,10 +914,7 @@ void WorkerService::step_rec_model(
   }
   copy_output_to_host();
   stream_->synchronize();
-  speculative_token_stats =
-      record_speculative_metrics(output,
-                                 cpu_output.sample_output.next_tokens,
-                                 options_.enable_speculative_decode());
+  speculative_token_stats = record_speculative_metrics(output);
 }
 
 void WorkerService::poll_rec_shm(

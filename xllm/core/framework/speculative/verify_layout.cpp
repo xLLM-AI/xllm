@@ -22,25 +22,20 @@ limitations under the License.
 
 namespace xllm {
 
-std::vector<VerifyRowLayout> make_verify_layouts(
-    const torch::Tensor& next_tokens) {
-  return make_verify_layouts(next_tokens,
-                             /*per_seq_draft_counts=*/nullptr,
-                             /*constrained_mask=*/{});
-}
-
-std::vector<VerifyRowLayout> make_verify_layouts(
+SpecVerifyStats make_verify_stats(
     const torch::Tensor& next_tokens,
     const std::vector<int32_t>* per_seq_draft_counts,
+    const std::vector<int32_t>& num_accepted_tokens,
     const std::vector<bool>& constrained_mask) {
   CHECK(next_tokens.defined()) << "verify output tokens are undefined";
   CHECK_EQ(next_tokens.dim(), 2)
       << "verify output tokens should be [batch, width]";
-  CHECK_GT(next_tokens.numel(), 0)
-      << "verify output tokens should not be empty";
   const int64_t batch_size = next_tokens.size(0);
-  const int32_t max_draft_tokens =
-      static_cast<int32_t>(next_tokens.size(1)) - 1;
+  const int64_t num_verify_tokens = next_tokens.size(1);
+  CHECK_GT(batch_size, 0) << "verify output needs at least one row";
+  CHECK_GE(num_verify_tokens, 1)
+      << "verify output needs a committed token column";
+  const int32_t max_draft_tokens = static_cast<int32_t>(num_verify_tokens) - 1;
   const bool have_per_seq = per_seq_draft_counts != nullptr;
   const bool have_constrained = !constrained_mask.empty();
   if (have_constrained) {
@@ -51,16 +46,23 @@ std::vector<VerifyRowLayout> make_verify_layouts(
     CHECK_EQ(per_seq_draft_counts->size(), static_cast<size_t>(batch_size))
         << "per-sequence draft count batch mismatch";
   }
-  std::vector<VerifyRowLayout> row_layouts(static_cast<size_t>(batch_size));
-  for (size_t seq_id = 0; seq_id < row_layouts.size(); ++seq_id) {
-    row_layouts[seq_id].verify_len =
+  CHECK_EQ(num_accepted_tokens.size(), static_cast<size_t>(batch_size))
+      << "accepted token count batch mismatch";
+  SpecVerifyStats stats;
+  stats.requests.resize(static_cast<size_t>(batch_size));
+  for (size_t seq_id = 0; seq_id < stats.requests.size(); ++seq_id) {
+    SpecVerifyStats::RequestStats& request = stats.requests[seq_id];
+    request.num_draft_tokens =
         have_per_seq
             ? std::clamp((*per_seq_draft_counts)[seq_id], 0, max_draft_tokens)
             : max_draft_tokens;
-    row_layouts[seq_id].json_constrained =
-        have_constrained && constrained_mask[seq_id];
+    request.num_accepted_tokens = num_accepted_tokens[seq_id];
+    // Accepted drafts always land inside the row's verified slots.
+    CHECK_LE(request.num_accepted_tokens, request.num_draft_tokens)
+        << "accepted token count exceeds the row's verified width";
+    request.json_constrained = have_constrained && constrained_mask[seq_id];
   }
-  return row_layouts;
+  return stats;
 }
 
 }  // namespace xllm

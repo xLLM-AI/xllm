@@ -228,7 +228,7 @@ bool LLMEngine::init_model(MasterStatus master_status,
 #if defined(USE_NPU)
   if (options_.enable_speculative_decode() &&
       SpeculativeConfig::is_mtp_algorithm(options_.speculative_algorithm()) &&
-      is_glm5_next_target_model_type(args_.model_type())) {
+      uses_mtp_target_spec_width(args_.model_type())) {
     args_.num_speculative_tokens(options_.num_speculative_tokens());
   }
 #endif

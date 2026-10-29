@@ -110,6 +110,12 @@ TEST(RejectionSamplerTest, Greedy) {
 
   EXPECT_TRUE(
       torch::allclose(output.next_tokens, full_logits.argmax(/*dim=*/-1)));
+  // Full-width acceptance, not the clamped gather index of width - 1.
+  EXPECT_TRUE(
+      torch::equal(output.num_accepted_tokens,
+                   torch::full({batch_size, 1},
+                               static_cast<int64_t>(n_speculative_tokens),
+                               torch::kInt32)));
 }
 
 TEST(RejectionSamplerTest, GreedyFromTokenIds) {
@@ -137,6 +143,9 @@ TEST(RejectionSamplerTest, GreedyFromTokenIds) {
   EXPECT_TRUE(
       torch::equal(output.next_tokens,
                    torch::tensor({{1, 4, -1, -1}, {3, 2, -1, -1}}, device)));
+  EXPECT_TRUE(torch::equal(
+      output.num_accepted_tokens,
+      torch::tensor({{1}, {1}}, torch::dtype(torch::kInt32).device(device))));
 }
 
 TEST(RejectionSamplerTest, GreedyForwardAllowsUndefinedDraftProbs) {

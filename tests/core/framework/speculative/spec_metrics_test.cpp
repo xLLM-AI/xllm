@@ -30,21 +30,19 @@ namespace {
 using testutil::make_rejection_params;
 using testutil::random_sample_from_probs;
 
-SpecMetrics calculate_from_widths(
-    const torch::Tensor& tokens,
-    const std::vector<int32_t>& num_draft_tokens) {
-  return make_spec_metrics(tokens,
-                           make_verify_layouts(tokens, &num_draft_tokens, {}));
+SpecMetrics calculate_from_widths(const torch::Tensor& tokens,
+                                  const std::vector<int32_t>& num_draft_tokens,
+                                  const std::vector<int32_t>& accepted) {
+  return make_spec_metrics(
+      make_verify_stats(tokens, &num_draft_tokens, accepted, {}));
 }
 
 TEST(SpeculativeTokenStatsTest, CountsTokensPerSequence) {
   const torch::Tensor tokens = torch::tensor(
       {{10, 11, 12, -1, -1, -1}, {20, 21, 22, 23, 24, 25}}, torch::kInt32);
-  // The 1-arg make_verify_layouts is the full-width default the static MTP,
-  // suffix, unified, and pipeline paths use.
-  const auto metrics = make_spec_metrics(tokens, make_verify_layouts(tokens));
+  const std::vector<int32_t> full_width_drafts = {5, 5};
+  const auto metrics = calculate_from_widths(tokens, full_width_drafts, {2, 5});
 
-  EXPECT_EQ(metrics.num_committed_tokens, 9);
   EXPECT_EQ(metrics.num_accepted_tokens_per_pos,
             (std::vector<int64_t>{2, 2, 1, 1, 1}));
   ASSERT_EQ(metrics.sequence_stats.size(), 2);
@@ -59,9 +57,11 @@ TEST(SpeculativeTokenStatsTest, CountsAdaptiveTokensPerSequence) {
       {{10, 11, 12, -1, -1}, {20, 21, 22, -1, -1}, {30, 31, 32, 33, -1}},
       torch::kInt32);
   const std::vector<int32_t> num_draft_tokens = {4, 2, 0};
-  const SpecMetrics aggregate = calculate_from_widths(tokens, num_draft_tokens);
+  const std::vector<int32_t> num_accepted_tokens = {2, 2, 0};
+  const SpecMetrics aggregate =
+      calculate_from_widths(tokens, num_draft_tokens, num_accepted_tokens);
   EXPECT_EQ(aggregate.num_accepted_tokens_per_pos,
-            (std::vector<int64_t>{2, 2, 0, 0}));
+            (std::vector<int64_t>{2, 2}));
 
   ASSERT_EQ(aggregate.sequence_stats.size(), 3);
   EXPECT_EQ(aggregate.sequence_stats[0].accepted_tokens, 2);
@@ -89,7 +89,8 @@ TEST(SpeculativeTokenStatsTest, CountsOneRoundForEveryVerifiedRowAndBudget) {
                                        {30, 31, 32, 33, 34, 35, 36, 37},
                                        {40, -1, -1, -1, -1, -1, -1, -1}},
                                       dtype);
-    const auto metrics = calculate_from_widths(tokens, {7, 2, 7, 0});
+    const auto metrics =
+        calculate_from_widths(tokens, {7, 2, 7, 0}, {0, 1, 7, 0});
     ASSERT_EQ(metrics.sequence_stats.size(), 4U);
     const std::vector<int64_t> accepted{0, 1, 7, 0};
     for (size_t row = 0; row < accepted.size(); ++row) {
@@ -128,7 +129,8 @@ TEST(SpeculativeTokenStatsTest, GreedyExcludesTargetTokens) {
           {{9, -1, -1, -1}, {1, 9, -1, -1}, {1, 2, 9, -1}, {1, 2, 3, 8}},
           torch::kInt64)));
 
-  const auto output_stats = calculate_from_widths(masked_tokens, {3, 3, 3, 3});
+  const auto output_stats =
+      calculate_from_widths(masked_tokens, {3, 3, 3, 3}, {0, 1, 2, 3});
   const auto& stats = output_stats.sequence_stats;
   ASSERT_EQ(stats.size(), 4);
   for (size_t row = 0; row < stats.size(); ++row) {
@@ -136,7 +138,6 @@ TEST(SpeculativeTokenStatsTest, GreedyExcludesTargetTokens) {
     EXPECT_EQ(stats[row].proposed_tokens, 3);
     EXPECT_EQ(stats[row].verified_rounds, 1);
   }
-  EXPECT_EQ(output_stats.num_committed_tokens, 10);
   EXPECT_EQ(output_stats.num_accepted_tokens_per_pos,
             (std::vector<int64_t>{3, 2, 1}));
 }
@@ -169,7 +170,8 @@ TEST(SpeculativeTokenStatsTest, BlockRandomExcludesTargetTokens) {
           torch::kInt64)));
 
   const auto stats =
-      calculate_from_widths(masked_tokens, {3, 3, 3, 3}).sequence_stats;
+      calculate_from_widths(masked_tokens, {3, 3, 3, 3}, {0, 1, 2, 3})
+          .sequence_stats;
   ASSERT_EQ(stats.size(), 4);
   for (size_t row = 0; row < stats.size(); ++row) {
     EXPECT_EQ(stats[row].accepted_tokens, static_cast<int64_t>(row));
@@ -195,7 +197,7 @@ TEST(SpeculativeTokenStatsTest, BlockHandlesSingleAndZeroDrafts) {
                        DraftProposal(num_draft_tokens),
                        testutil::flatten_rows(target_logits));
   const auto stats =
-      calculate_from_widths(sampled.next_tokens, {1, 1}).sequence_stats;
+      calculate_from_widths(sampled.next_tokens, {1, 1}, {0, 1}).sequence_stats;
   ASSERT_EQ(stats.size(), 2);
   EXPECT_EQ(stats[0].accepted_tokens, 0);
   EXPECT_EQ(stats[0].proposed_tokens, 1);
@@ -217,7 +219,7 @@ TEST(SpeculativeTokenStatsTest, BlockHandlesSingleAndZeroDrafts) {
   ASSERT_TRUE(
       torch::equal(bonus_only_tokens, torch::full({2, 1}, 8, torch::kInt64)));
   const auto zero_stats =
-      calculate_from_widths(bonus_only_tokens, {0, 0}).sequence_stats;
+      calculate_from_widths(bonus_only_tokens, {0, 0}, {0, 0}).sequence_stats;
   ASSERT_EQ(zero_stats.size(), 2);
   for (const SpeculativeTokenStats& row_stats : zero_stats) {
     EXPECT_EQ(row_stats.accepted_tokens, 0);

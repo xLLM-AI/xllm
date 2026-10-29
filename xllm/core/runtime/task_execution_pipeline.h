@@ -383,6 +383,8 @@ class TaskExecutionPipeline final {
                               bool& decode);
   bool block_draft() const;
   bool block_draft_graphs() const;
+  void restore_recurrent_state(const SpeculativeSlot& slot,
+                               const ModelParamsView& model_params);
   Status prepare_recurrent_state(SpeculativeSlot& slot,
                                  const LlmForwardInput& input);
   uint32_t context_hidden_size() const;

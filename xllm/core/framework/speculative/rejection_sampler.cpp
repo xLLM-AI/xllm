@@ -21,6 +21,7 @@ limitations under the License.
 
 #include <limits>
 #include <optional>
+#include <tuple>
 #include <utility>
 
 #include "core/framework/sampling/logits_processor.h"
@@ -35,17 +36,17 @@ namespace xllm {
 
 namespace {
 
-// Position of the first rejected draft per sequence [B, 1] — the number of
-// accepted drafts. Feeds the residual recovery's row gather.
+// Position of the first rejected draft per sequence [B, 1] int32 — the
+// number of accepted drafts. All-accepted rows argmin to the appended bonus
+// column (== width), which is the correct full-width count; gather callers
+// must clamp back into index range themselves.
 torch::Tensor first_rejected_indices(const torch::Tensor& accepted) {
-  auto accepted_int64 = accepted.to(torch::kInt64);
-  auto bonus_mask =
+  const torch::Tensor accepted_int64 = accepted.to(torch::kInt64);
+  const torch::Tensor bonus_mask =
       torch::zeros({accepted.size(0), 1}, accepted_int64.options());
-  // All-accepted rows argmin to the bonus column (== width); clamp back in
-  // range for gather callers.
   return torch::cat({accepted_int64, bonus_mask}, /*dim=*/-1)
       .argmin(/*dim=*/1, /*keepdim=*/true)
-      .clamp_max(accepted.size(1) - 1);
+      .to(torch::kInt32);
 }
 
 // The committed-prefix construction shared by the dispatch legs: `accepted`
@@ -251,7 +252,8 @@ SampleOutput rejection_sample(const SamplingParameters& params,
         /*dim=*/-1);
   };
 
-  auto random_sample_dispatch = [&]() -> torch::Tensor {
+  auto random_sample_dispatch =
+      [&]() -> std::pair<torch::Tensor, torch::Tensor> {
     const std::optional<torch::Tensor>& draft_logits = draft_proposal.logits();
 
     // Accept p/q > u in log space. −1 sentinel drafts clamp to column 0
@@ -277,8 +279,10 @@ SampleOutput rejection_sample(const SamplingParameters& params,
                         .logical_and(draft_token_ids.ge(0));
 
     const torch::Tensor first_reject = first_rejected_indices(accepted);
+    const torch::Tensor gather_reject =
+        first_reject.clamp_max(num_draft_tokens - 1);
     const torch::Tensor rejected_tokens =
-        draft_token_ids.gather(/*dim=*/1, first_reject);
+        draft_token_ids.gather(/*dim=*/1, gather_reject);
     // Row first_reject[i] of each [B, K, V] tensor as [B, V], kept as
     // log-probs (row logsumexp subtracted) — the residual recovery works in
     // log space.
@@ -287,10 +291,10 @@ SampleOutput rejection_sample(const SamplingParameters& params,
       torch::Tensor gathered_logits =
           index_select_2d(logits,
                           /*dim=*/1,
-                          first_reject.expand({grouped_logits.size(0),
-                                               grouped_logits.size(-1)}))
+                          gather_reject.expand({grouped_logits.size(0),
+                                                grouped_logits.size(-1)}))
               .to(torch::kFloat32);
-      return gathered_logits.sub_(lse.gather(/*dim=*/1, first_reject));
+      return gathered_logits.sub_(lse.gather(/*dim=*/1, gather_reject));
     };
     // Recovered token from the residual (p - q)+ at the first rejected step;
     // sentinel (-1) drafts carry log q = -inf.
@@ -322,31 +326,54 @@ SampleOutput rejection_sample(const SamplingParameters& params,
       recovered_tokens = gumbel_sample(target_log_probs);
     }
     auto recovered_token_ids = recovered_tokens.unsqueeze(/*dim=*/-1);
-    return commit_prefix(accepted, recovered_token_ids);
+    return {commit_prefix(accepted, recovered_token_ids), first_reject};
   };
 
-  auto greedy_sample_dispatch = [&]() -> torch::Tensor {
+  auto greedy_sample_dispatch =
+      [&]() -> std::pair<torch::Tensor, torch::Tensor> {
     CHECK_EQ(greedy_target_token_ids.sizes(), draft_token_ids.sizes())
         << "target and draft token shapes must match";
 #if defined(USE_NPU)
     if (greedy_target_token_ids.device().type() == torch::kPrivateUse1) {
-      return kernel::npu::tilelang::greedy_prefix_verify(
-          draft_token_ids, greedy_target_token_ids, bonus_token_ids);
+      const torch::Tensor committed_tokens =
+          kernel::npu::tilelang::greedy_prefix_verify(
+              draft_token_ids, greedy_target_token_ids, bonus_token_ids);
+      // The kernel -1-fills the rejected tail, so the non-sentinel draft-column
+      // count is the accepted count. Match first_rejected_indices' [B, 1]
+      // shape; token id 0 is a valid accepted draft, so count non-sentinel
+      // entries, not non-zero ones.
+      const torch::Tensor num_accepted_tokens =
+          committed_tokens.narrow(/*dim=*/1,
+                                  /*start=*/1,
+                                  /*length=*/num_draft_tokens);
+      return {committed_tokens,
+              num_accepted_tokens.ge(0)
+                  .sum(/*dim=*/1, /*keepdim=*/true)
+                  .to(torch::kInt32)};
     }
 #endif
     const torch::Tensor accepted = greedy_target_token_ids == draft_token_ids;
+    const torch::Tensor first_reject = first_rejected_indices(accepted);
+    const torch::Tensor gather_reject =
+        first_reject.clamp_max(num_draft_tokens - 1);
     const torch::Tensor correction = greedy_target_token_ids.gather(
-        /*dim=*/1, first_rejected_indices(accepted));
-    return commit_prefix(accepted, correction);
+        /*dim=*/1, gather_reject);
+    return {commit_prefix(accepted, correction), first_reject};
   };
 
   if (params.sampling_mode == SamplingMode::GREEDY) {
-    output.next_tokens = greedy_sample_dispatch();
-  } else if (params.sampling_mode == SamplingMode::RANDOM) {
-    output.next_tokens = random_sample_dispatch();
+    std::tie(output.next_tokens, output.num_accepted_tokens) =
+        greedy_sample_dispatch();
   } else {
-    output.next_tokens = torch::where(
-        greedy_rows, greedy_sample_dispatch(), random_sample_dispatch());
+    std::tie(output.next_tokens, output.num_accepted_tokens) =
+        random_sample_dispatch();
+    if (params.sampling_mode == SamplingMode::MIXED) {
+      const auto [greedy_tokens, greedy_counts] = greedy_sample_dispatch();
+      output.next_tokens =
+          torch::where(greedy_rows, greedy_tokens, output.next_tokens);
+      output.num_accepted_tokens =
+          torch::where(greedy_rows, greedy_counts, output.num_accepted_tokens);
+    }
   }
 
   compute_logprobs(
