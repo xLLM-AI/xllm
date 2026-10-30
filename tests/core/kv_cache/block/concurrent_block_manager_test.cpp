@@ -159,9 +159,7 @@ TEST_P(LinearConcurrentAllocationTest, KeepsLiveSlotsUniqueUntilFinalRelease) {
       }
       for (int32_t iteration = 0; iteration < kNumIterations; ++iteration) {
         std::vector<Block> blocks = manager->allocate(1);
-        if (blocks.empty()) {
-          continue;
-        }
+        ASSERT_FALSE(blocks.empty());
         const int32_t block_id = blocks.front().id();
         ASSERT_GT(block_id, 0);
         ASSERT_LE(block_id, kNumSlots);

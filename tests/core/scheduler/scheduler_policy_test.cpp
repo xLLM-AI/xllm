@@ -2377,4 +2377,112 @@ TEST(SchedulerPolicyTest, StaticCapacityRejectsPromptWithoutReservation) {
   }
 }
 
+TEST(SchedulerPolicyTest, FcfsDecodeHandoffAndTerminalCleanup) {
+  SchedulerOptions options = create_scheduler_options(
+      /*max_tokens_per_batch=*/1024,
+      /*max_seqs_per_batch=*/1,
+      /*num_speculative_tokens=*/0,
+      /*max_tokens_per_chunk_for_prefill=*/1024,
+      /*dp_size=*/1);
+  BatchMode mode{
+      .enable_mix_batch = true,
+      .enable_chunked_prefill = true,
+      .priority_strategy = "fcfs",
+  };
+  DecodeFirstPolicy policy(mode, options);
+  BlockManagerPool::Options pool_options;
+  pool_options.num_blocks_ = 64;
+  pool_options.block_size_ = 128;
+  pool_options.max_seqs_per_batch_ = 1;
+  pool_options.enable_prefix_cache_ = true;
+  BlockManagerPool block_manager_pool(pool_options, /*dp_size=*/1);
+
+  std::vector<std::shared_ptr<Request>> requests =
+      generate_request({128, 128},
+                       {8, 8},
+                       std::nullopt,
+                       std::nullopt,
+                       /*max_context_len=*/40000);
+  for (const std::shared_ptr<Request>& request : requests) {
+    Sequence* sequence = request->sequences().front().get();
+    sequence->kv_state().set_kv_cache_tokens_num(sequence->num_prompt_tokens());
+    sequence->append_token(Token(1));
+  }
+  const std::shared_ptr<Request>& older_waiter = requests[0];
+  const std::shared_ptr<Request>& handoff = requests[1];
+  DequeQueue prefill_queue;
+  DequeQueue chunk_queue;
+  DequeQueue decode_queue;
+  decode_queue.push(older_waiter, /*if_back=*/true);
+  std::list<std::shared_ptr<Request>> unified_queue;
+  std::deque<DecodeRestoreEntry> decode_restore_waiting;
+  std::vector<std::shared_ptr<Request>> running_requests;
+  std::vector<Sequence*> running_sequences;
+  std::vector<size_t> running_sequence_budgets;
+  bool last_step_prefill = false;
+  ModelArgs model_args;
+  SchedulerState state{
+      .prefill_queue = prefill_queue,
+      .chunk_queue = chunk_queue,
+      .decode_queue = decode_queue,
+      .unified_queue = unified_queue,
+      .decode_restore_waiting = decode_restore_waiting,
+      .running_requests = running_requests,
+      .running_sequences = running_sequences,
+      .running_sequences_budgets = running_sequence_budgets,
+      .kv_cache_manager = &block_manager_pool,
+      .profile_manager = nullptr,
+      .output_dispatcher = nullptr,
+      .model_args = model_args,
+      .last_step_prefill = last_step_prefill,
+      .options = options,
+      .min_speculative_tokens_required = 0,
+      .enable_prefix_cache = true,
+  };
+  folly::MPMCQueue<std::shared_ptr<Request>> request_queue(4);
+
+  // A handoff with KV already present must not overtake an older waiter.
+  ASSERT_TRUE(request_queue.write(handoff));
+  policy.drain_request_queue(state, request_queue);
+  EXPECT_TRUE(policy.collect_finished(state).empty());
+  ASSERT_EQ(decode_queue.size(), 1u);
+
+  ScheduleBudget budget{
+      .remaining_token_budget = 1024,
+      .remaining_seq_budget = 1,
+      .latency_budget = std::numeric_limits<double>::max(),
+      .estimate_latency = 0,
+      .num_preempted_requests = 0,
+  };
+  std::vector<std::shared_ptr<Request>> finished;
+  policy.schedule(state, budget, finished);
+
+  ASSERT_EQ(running_sequences.size(), 1u);
+  EXPECT_EQ(running_sequences.front(), older_waiter->sequences().front().get());
+  ASSERT_EQ(decode_queue.size(), 1u);
+  EXPECT_EQ(decode_queue.top(), handoff);
+  EXPECT_TRUE(finished.empty());
+
+  // A terminal arrival and a queued handoff cancelled while idle must be
+  // collected even though no budget admits them.
+  std::vector<std::shared_ptr<Request>> late_arrivals =
+      generate_request({128},
+                       {8},
+                       std::nullopt,
+                       std::nullopt,
+                       /*max_context_len=*/40000);
+  const std::shared_ptr<Request>& terminal_arrival = late_arrivals.front();
+  terminal_arrival->set_cancel();
+  handoff->set_cancel();
+  ASSERT_TRUE(request_queue.write(terminal_arrival));
+  policy.drain_request_queue(state, request_queue);
+  EXPECT_TRUE(prefill_queue.empty());
+  finished = policy.collect_finished(state);
+
+  EXPECT_EQ(finished.size(), 2u);
+  EXPECT_TRUE(decode_queue.empty());
+  ASSERT_FALSE(running_requests.empty());
+  EXPECT_EQ(running_requests.front(), older_waiter);
+}
+
 }  // namespace xllm

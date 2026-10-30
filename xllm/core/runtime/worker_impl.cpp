@@ -1361,6 +1361,16 @@ void WorkerImpl::prepare_work_before_execute_on_stream_impl(
         input_params.num_accepted_tokens = torch::ones(
             {1}, token_options.dtype(torch::kInt32).device(device_));
       }
+      if (ModelConfig::is_python_model_impl(
+              ModelConfig::get_instance().model_impl())) {
+        auto& execution_batch = input_params.meta.execution_batch;
+        execution_batch.num_reqs = 0;
+        execution_batch.num_tokens = dummy_tokens;
+        execution_batch.num_scheduled_tokens.clear();
+        execution_batch.num_computed_tokens.clear();
+        execution_batch.is_prefilling.clear();
+        execution_batch.query_start_loc.assign(1, 0);
+      }
       if (idle_block_input) {
         apply_idle_block_dummy_input(input_params, dummy_tokens, device_);
       }

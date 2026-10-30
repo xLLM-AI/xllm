@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
-from xllm.python.attention.backend import AttentionMetadata, LayerCache, resolve_linear_state_io_indices
+from xllm.python.attention.backend import ExecutionMetadataSource, LayerCache, resolve_linear_state_io_indices
 from xllm.python.layers.npu.qwen3_5.gdn_metadata import (
     GdnDecodeMetadata,
     GdnDummyMetadata,
@@ -30,6 +30,7 @@ from xllm.python.layers.npu.qwen3_5.gdn_metadata import (
 )
 
 if TYPE_CHECKING:
+    from xllm.python.model_executor.input_batch import InputBatch
     from xllm.python.models.qwen3_5 import Qwen3_5Config
 
 _MEGA_GDN_CHUNK_SIZE = 128
@@ -111,12 +112,29 @@ class Qwen3_5GdnMetadataBuilder:
             state_caches[layer_id] = cast(GdnStateCache, layer_caches[layer_id])
         self._state_caches, self._checkpoint_stride, self._device = state_caches, stride, device
 
-    def build(self, metadata: AttentionMetadata) -> GdnMetadata:
+    def allocate_persistent(self, input_batch: InputBatch, metadata: ExecutionMetadataSource) -> GdnMetadata:
+        if (
+            not input_batch.is_dummy
+            and (metadata.is_prefill or metadata.is_chunked_prefill)
+            and not getattr(metadata, "is_spec_verify", False)
+            and getattr(metadata, "linear_verify_graph", None) is None
+        ):
+            raise NotImplementedError("Qwen3.5 GDN ACL Graph supports decode and verify only")
+        return self.build(input_batch, metadata)
+
+    def update_persistent(
+        self, persistent_metadata: object, input_batch: InputBatch, metadata: ExecutionMetadataSource
+    ) -> None:
+        # The graph runner owns and updates the captured tensor aliases in place.
+        pass
+
+    def build(self, input_batch: InputBatch, metadata: ExecutionMetadataSource) -> GdnMetadata:
         if self._state_caches is None or self._checkpoint_stride is None:
             raise RuntimeError("Qwen3.5 GDN state caches must be bound before execution")
-        if getattr(metadata, "is_dummy", False):
+        # A padded graph entry must capture the stateful path for later replays.
+        if input_batch.is_dummy and input_batch.is_padding is None:
             return GdnDummyMetadata(self._state_caches)
-        device = metadata.slot_mapping.device
+        device = input_batch.input_ids.device
         if device != self._device:
             raise ValueError("Qwen3.5 GDN input and state caches must use one device")
         graph = getattr(metadata, "linear_verify_graph", None)
@@ -124,7 +142,7 @@ class Qwen3_5GdnMetadataBuilder:
             if graph.query_width != self._checkpoint_stride:
                 raise ValueError("Qwen3.5 packed graph width must match the GDN checkpoint stride")
             batch_size = graph.state_indices.numel()
-            token_count = metadata.slot_mapping.numel()
+            token_count = input_batch.num_tokens_after_padding
             if graph.cu_seqlens is not None and (
                 graph.cu_seqlens.shape != (batch_size + 1,)
                 or graph.cu_seqlens.dtype != torch.int32
@@ -162,9 +180,10 @@ class Qwen3_5GdnMetadataBuilder:
         # Verify is also marked chunked prefill by the speculative worker.
         # It must restore the last accepted checkpoint before processing rows.
         if getattr(metadata, "is_spec_verify", False):
-            return self._build_verify(metadata, write_indices)
+            return self._build_verify(input_batch, metadata, write_indices)
         if not (metadata.is_prefill or metadata.is_chunked_prefill):
-            if read_indices.numel() != metadata.slot_mapping.numel() or read_indices.numel() == 0:
+            # Captured decode graphs index their whole padded bucket.
+            if read_indices.numel() != input_batch.num_tokens_after_padding or read_indices.numel() == 0:
                 raise ValueError("Qwen3.5 GDN decode requires one state slot per token")
             if self._checkpoint_stride != 1:
                 raise ValueError("Qwen3.5 MegaGdnDecode requires one SSM row per Conv slot")
@@ -178,8 +197,17 @@ class Qwen3_5GdnMetadataBuilder:
             or query_lengths_host.dtype not in (torch.int32, torch.int64)
         ):
             raise ValueError("Qwen3.5 host query lengths must be a CPU int32/int64 vector")
-        query_lengths = query_lengths_host.tolist()
-        if len(query_lengths) != write_indices.numel() or sum(query_lengths) != metadata.slot_mapping.numel():
+        query_lengths: list[int] = query_lengths_host.tolist()
+        query_ends = list(accumulate(query_lengths, initial=0))
+        if (
+            len(query_lengths) != input_batch.num_reqs
+            or tuple(int(value) for value in input_batch.num_scheduled_tokens) != tuple(query_lengths)
+            or tuple(int(value) for value in input_batch.query_start_loc) != tuple(query_ends)
+            or len(input_batch.num_computed_tokens) != input_batch.num_reqs
+            or len(input_batch.is_prefilling) != input_batch.num_reqs
+        ):
+            raise ValueError("Qwen3.5 GDN request layout disagrees with the execution batch")
+        if len(query_lengths) != write_indices.numel() or sum(query_lengths) != input_batch.num_tokens:
             raise ValueError("Qwen3.5 packed token count does not match host query lengths")
         has_initial_state = metadata.has_initial_state
         if has_initial_state is None:
@@ -190,7 +218,6 @@ class Qwen3_5GdnMetadataBuilder:
             has_initial_state.to(device=device, dtype=torch.bool),
             self._checkpoint_stride,
         )
-        query_ends = list(accumulate(query_lengths, initial=0))
         cu_seqlens = metadata.q_cu_seq_lens
         host_query_ends = getattr(metadata, "q_cu_seq_lens_host_values", None)
         if host_query_ends and host_query_ends != query_ends and host_query_ends != query_ends[1:]:
@@ -221,19 +248,23 @@ class Qwen3_5GdnMetadataBuilder:
             _compute_mega_prefill_num_matrices(query_lengths, self._num_value_heads),
         )
 
-    def _build_verify(self, metadata: AttentionMetadata, state_indices: torch.Tensor) -> GdnVerifyMetadata:
+    def _build_verify(
+        self,
+        input_batch: InputBatch,
+        metadata: ExecutionMetadataSource,
+        state_indices: torch.Tensor,
+    ) -> GdnVerifyMetadata:
         assert self._state_caches is not None and self._checkpoint_stride is not None
         width = self._checkpoint_stride
         if not 2 <= width <= 17:
             raise ValueError("Qwen3.5 MegaGdnMtpDecode requires 2 to 17 checkpoints per state slot")
         accepted = metadata.num_accepted_tokens
         accepted_host = tuple(getattr(metadata, "num_accepted_tokens_host_values", ()))
-        token_count = metadata.slot_mapping.numel()
         # Prepared pipeline inputs keep attention at BS one-query rows and
         # recurrent state at B rows. Their accepted counts are updated on the
         # execution stream, so retain the final Device views without reading
         # them on the Host or allocating graph-time index tensors.
-        if not accepted_host and state_indices.numel() * width == token_count:
+        if not accepted_host and state_indices.numel() * width == input_batch.num_tokens_after_padding:
             if (
                 state_indices.numel() == 0
                 or accepted is None
@@ -257,7 +288,7 @@ class Qwen3_5GdnMetadataBuilder:
         if not lengths or any(length <= 0 or length > width for length in lengths):
             raise ValueError("Qwen3.5 MTP query lengths must be in [1, checkpoint stride]")
         token_count = sum(lengths)
-        if token_count != metadata.slot_mapping.numel():
+        if token_count != input_batch.num_tokens:
             raise ValueError("Qwen3.5 MTP query lengths must cover every packed token")
         batch_size = len(lengths)
         if state_indices.numel() == token_count:

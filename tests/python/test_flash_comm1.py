@@ -38,6 +38,41 @@ from xllm.python.layers.npu.qwen3_5.gated_delta_net import NpuQwen3_5GatedDeltaN
 from xllm.python.layers.npu.qwen3_5.gdn_metadata import GdnMetadata
 from xllm.python.layers.npu.qwen3_5.gdn_metadata_builder import Qwen3_5GdnMetadataBuilder
 from xllm.python.model_executor.forward_context import ForwardContext, forward_context
+from xllm.python.model_executor.input_batch import InputBatch
+
+
+def _input_batch(num_tokens: int, scheduled: tuple[int, ...], device: torch.device) -> InputBatch:
+    starts = [0]
+    for length in scheduled:
+        starts.append(starts[-1] + length)
+    return InputBatch(
+        input_ids=torch.zeros(num_tokens, dtype=torch.long, device=device),
+        positions=torch.zeros(num_tokens, dtype=torch.long, device=device),
+        num_reqs=len(scheduled),
+        num_tokens=num_tokens,
+        num_tokens_after_padding=num_tokens,
+        num_scheduled_tokens=scheduled,
+        num_computed_tokens=(0,) * len(scheduled),
+        query_start_loc=tuple(starts),
+        is_prefilling=(True,) * len(scheduled),
+        is_padding=None,
+        is_dummy=False,
+    )
+
+
+def _flashcomm_inputs(num_tokens: int, **overrides: bool) -> tuple[InputBatch, SimpleNamespace]:
+    scheduled = (num_tokens,) if num_tokens else ()
+    metadata = _metadata(num_tokens, **overrides)
+    return _input_batch(num_tokens, scheduled, torch.device("cpu")), metadata
+
+
+def _gdn_build(builder: Qwen3_5GdnMetadataBuilder, metadata: SimpleNamespace) -> GdnMetadata:
+    lengths_host = getattr(metadata, "q_seq_lens_host", None)
+    if metadata.is_prefill and lengths_host is not None:
+        lengths = tuple(int(value) for value in lengths_host.tolist())
+    else:
+        lengths = (1,) * metadata.slot_mapping.numel()
+    return builder.build(_input_batch(sum(lengths), lengths, metadata.slot_mapping.device), metadata)
 
 
 def _metadata(num_tokens: int, **overrides: bool) -> SimpleNamespace:
@@ -94,7 +129,7 @@ def _assert_sum_roundoff(
 
 @pytest.mark.parametrize("num_tokens,active", [(0, False), (31, False), (32, True), (33, True)])
 def test_prefill_threshold(num_tokens: int, active: bool) -> None:
-    context = FlashComm1MetadataBuilder(2, 0, 32).build(_metadata(num_tokens))
+    context = FlashComm1MetadataBuilder(2, 0, 32).build(*_flashcomm_inputs(num_tokens))
     assert (context is not None) == active
     if context is not None:
         assert context.local_num_tokens % 16 == 0
@@ -103,13 +138,13 @@ def test_prefill_threshold(num_tokens: int, active: bool) -> None:
 
 @pytest.mark.parametrize("excluded", ["is_mixed", "is_spec_verify", "is_dummy"])
 def test_excluded_batches_keep_replicated_rows(excluded: str) -> None:
-    assert FlashComm1MetadataBuilder(2, 0, 0).build(_metadata(33, **{excluded: True})) is None
+    assert FlashComm1MetadataBuilder(2, 0, 0).build(*_flashcomm_inputs(33, **{excluded: True})) is None
 
 
 def test_decode_stays_replicated_and_pure_chunked_prefill_can_shard() -> None:
     builder = FlashComm1MetadataBuilder(2, 0, 0)
-    assert builder.build(_metadata(33, is_prefill=False)) is None
-    assert builder.build(_metadata(33, is_prefill=False, is_chunked_prefill=True)) is not None
+    assert builder.build(*_flashcomm_inputs(33, is_prefill=False)) is None
+    assert builder.build(*_flashcomm_inputs(33, is_prefill=False, is_chunked_prefill=True)) is not None
 
 
 def test_configuration_defaults_and_negative_threshold() -> None:
@@ -127,9 +162,9 @@ def test_mmrs_options_follow_prefill_admission(mode: str) -> None:
     cfg = make_config(enable_flashcomm1=True, enable_mmrs_fusion=True, mmrs_comm_mode=mode)
     cfg.validate()
     builder = FlashComm1MetadataBuilder(2, 0, 32, enable_mmrs_fusion=True, mmrs_comm_mode=mode)
-    assert builder.build(_metadata(31)) is None
-    assert builder.build(_metadata(32, is_prefill=False)) is None
-    context = builder.build(_metadata(32))
+    assert builder.build(*_flashcomm_inputs(31)) is None
+    assert builder.build(*_flashcomm_inputs(32, is_prefill=False)) is None
+    context = builder.build(*_flashcomm_inputs(32))
     assert context is not None and context.enable_mmrs_fusion
     assert context.mmrs_comm_mode == mode
 
@@ -257,7 +292,7 @@ def test_distributed_projection_and_mlp_match_all_reduce(
     device, rank, world_size = npu_tp
     torch.manual_seed(1234)
     hidden = torch.randn(num_tokens, 64, dtype=torch.bfloat16, device=device)
-    plan = FlashComm1MetadataBuilder(world_size, rank, 0).build(_metadata(num_tokens))
+    plan = FlashComm1MetadataBuilder(world_size, rank, 0).build(*_flashcomm_inputs(num_tokens))
     assert plan is not None
     torch.testing.assert_close(plan.gather(plan.shard(hidden)), hidden, rtol=0, atol=0)
 
@@ -327,7 +362,7 @@ def test_distributed_gdn_preserves_prefill_and_decode_state(
     metadata.q_seq_lens_host = torch.tensor([17, 20], dtype=torch.int32)
     metadata.q_cu_seq_lens = torch.tensor([0, 17, 37], dtype=torch.int32, device=device)
     metadata.q_cu_seq_lens_host_values = [0, 17, 37]
-    plan = FlashComm1MetadataBuilder(world_size, rank, 0).build(metadata)
+    plan = FlashComm1MetadataBuilder(world_size, rank, 0).build(_input_batch(37, (17, 20), device), metadata)
     outputs = []
     for enabled in (False, True):
         cache = LayerCache(
@@ -338,7 +373,7 @@ def test_distributed_gdn_preserves_prefill_and_decode_state(
         )
         builder = Qwen3_5GdnMetadataBuilder(cfg)
         builder.bind_layer_caches([cache])
-        shared = {GdnMetadata: builder.build(metadata), FlashComm1Context: plan if enabled else None}
+        shared = {GdnMetadata: _gdn_build(builder, metadata), FlashComm1Context: plan if enabled else None}
         with (
             torch.no_grad(),
             forward_context(ForwardContext(None, device, metadata, [cache], layer_shared_cache=shared)),
@@ -353,7 +388,9 @@ def test_distributed_gdn_preserves_prefill_and_decode_state(
         with (
             torch.no_grad(),
             forward_context(
-                ForwardContext(None, device, decode, [cache], layer_shared_cache={GdnMetadata: builder.build(decode)})
+                ForwardContext(
+                    None, device, decode, [cache], layer_shared_cache={GdnMetadata: _gdn_build(builder, decode)}
+                )
             ),
         ):
             decode_output = layer(decode_hidden)
@@ -419,7 +456,7 @@ def test_distributed_mmrs_projection_matches_fp64(
             layer.weight = torch.nn.Parameter(layer.weight.t().contiguous())
             layer._weight_is_transposed = True
     inputs = torch.randn(tokens, 256, dtype=torch.bfloat16, device=device) * 0.03
-    plan = FlashComm1MetadataBuilder(world_size, rank, 0).build(_metadata(tokens))
+    plan = FlashComm1MetadataBuilder(world_size, rank, 0).build(*_flashcomm_inputs(tokens))
     assert plan is not None
     outputs = []
     for enabled in (False, True):
@@ -483,7 +520,7 @@ def test_distributed_mmrs_gdn_preserves_state_and_decode(
     metadata.q_seq_lens_host = torch.tensor([17, 20], dtype=torch.int32)
     metadata.q_cu_seq_lens = torch.tensor([0, 17, 37], dtype=torch.int32, device=device)
     metadata.q_cu_seq_lens_host_values = [0, 17, 37]
-    plan = FlashComm1MetadataBuilder(world_size, rank, 0).build(metadata)
+    plan = FlashComm1MetadataBuilder(world_size, rank, 0).build(_input_batch(37, (17, 20), device), metadata)
     assert plan is not None
     results = []
     for enabled in (False, True):
@@ -495,7 +532,10 @@ def test_distributed_mmrs_gdn_preserves_state_and_decode(
         )
         builder = Qwen3_5GdnMetadataBuilder(cfg)
         builder.bind_layer_caches([cache])
-        shared = {GdnMetadata: builder.build(metadata), FlashComm1Context: replace(plan, enable_mmrs_fusion=enabled)}
+        shared = {
+            GdnMetadata: _gdn_build(builder, metadata),
+            FlashComm1Context: replace(plan, enable_mmrs_fusion=enabled),
+        }
         with (
             torch.no_grad(),
             forward_context(ForwardContext(None, device, metadata, [cache], layer_shared_cache=shared)),
@@ -508,7 +548,9 @@ def test_distributed_mmrs_gdn_preserves_state_and_decode(
         with (
             torch.no_grad(),
             forward_context(
-                ForwardContext(None, device, decode, [cache], layer_shared_cache={GdnMetadata: builder.build(decode)})
+                ForwardContext(
+                    None, device, decode, [cache], layer_shared_cache={GdnMetadata: _gdn_build(builder, decode)}
+                )
             ),
         ):
             decode_output = layer(decode_hidden)

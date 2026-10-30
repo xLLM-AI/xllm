@@ -63,7 +63,7 @@ int32_t discover_num_slots(const std::vector<KVCache>& kv_caches) {
 
 }  // namespace
 
-std::vector<int64_t> build_linear_state_mask(
+LinearStateValidityMask build_linear_state_mask(
     const std::vector<int32_t>& cached_tokens,
     int64_t active_rows) {
   CHECK(!cached_tokens.empty()) << "cached_tokens must not be empty";
@@ -74,7 +74,7 @@ std::vector<int64_t> build_linear_state_mask(
       << logical_rows << ", active_rows=" << active_rows;
 
   const int64_t repeat_count = active_rows / logical_rows;
-  std::vector<int64_t> warm_mask;
+  LinearStateValidityMask warm_mask;
   warm_mask.reserve(static_cast<size_t>(active_rows));
   for (int32_t num_tokens : cached_tokens) {
     const int64_t is_warm = num_tokens > 0 ? 1 : 0;
@@ -88,7 +88,7 @@ std::vector<int64_t> build_linear_state_mask(
 void restore_linear_state_slots(std::vector<KVCache>& kv_caches,
                                 const std::vector<int32_t>& write_ids,
                                 const std::vector<int32_t>& read_ids,
-                                std::vector<int64_t>& validity_mask,
+                                LinearStateValidityMask& validity_mask,
                                 bool reads_distinct_state) {
   if (write_ids.empty() || validity_mask.empty()) {
     return;

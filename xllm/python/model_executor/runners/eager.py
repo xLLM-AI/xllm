@@ -26,6 +26,7 @@ from xllm.python.model_executor.forward_context import (
     LayerSynchronizer,
     forward_context,
 )
+from xllm.python.model_executor.input_batch import InputBatch
 from xllm.python.model_executor.runners.base import BaseRunner, ModelExecutionOutput
 
 
@@ -68,6 +69,7 @@ class EagerRunner(BaseRunner):
         *,
         eplb: EplbRuntimeState | None = None,
         kv_load: KVLoadContext | None = None,
+        input_batch: InputBatch | None = None,
     ) -> ModelExecutionOutput:
         cp_context = None
         is_mla = self.attention_backend.is_mla
@@ -115,7 +117,7 @@ class EagerRunner(BaseRunner):
         # Admission and context construction must finish before prepare(). A
         # sharded MLA backend enters CP collectives during prepare, so rejecting
         # unsupported batches afterwards could leave peer ranks deadlocked.
-        execution_contexts = self._build_execution_contexts(metadata, input_ids)
+        execution_contexts = self._build_execution_contexts(metadata, input_batch)
         self.attention_backend.prepare(metadata)
 
         with forward_context(

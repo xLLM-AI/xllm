@@ -23,6 +23,7 @@ from xllm.python.model_executor.forward_context import (
     LayerSynchronizer,
     forward_context,
 )
+from xllm.python.model_executor.input_batch import InputBatch
 from xllm.python.model_executor.runners.base import BaseRunner, ModelExecutionOutput
 
 
@@ -39,8 +40,9 @@ class InductorRunner(BaseRunner):
         input_embedding: torch.Tensor | None = None,
         layer_synchronizer: LayerSynchronizer | None = None,
         eplb: EplbRuntimeState | None = None,
+        input_batch: InputBatch | None = None,
     ) -> ModelExecutionOutput:
-        execution_contexts = self._build_execution_contexts(metadata, input_ids)
+        execution_contexts = self._build_execution_contexts(metadata, input_batch)
         self.attention_backend.prepare(metadata)
         with forward_context(
             ForwardContext(

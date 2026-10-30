@@ -19,6 +19,7 @@ limitations under the License.
 #include <span>
 #include <vector>
 
+#include "core/framework/model/model_input_types.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/platform/stream.h"
@@ -45,6 +46,7 @@ struct ModelInputHostView {
   std::span<const int32_t> q_cu_seq_lens;
   std::span<const int32_t> block_tables;
   uint32_t block_table_width = 0;
+  const ExecutionBatchMetadata* execution_batch = nullptr;
 };
 
 struct ModelInputBatch {
@@ -264,6 +266,7 @@ class SlotBuffer final {
     std::vector<int32_t> kv_lengths_;
     std::vector<int32_t> query_ends_;
     std::vector<int32_t> block_tables_;
+    ExecutionBatchMetadata planned_execution_batch_;
     ModelInputHostView planned_;
 
     torch::Tensor offsets_;
@@ -305,6 +308,7 @@ class SlotBuffer final {
   };
 
   std::unique_ptr<InputScratch> input_scratch_;
+  bool populate_execution_batch_ = false;
   struct Region {
     uint64_t offset = 0;
     uint64_t bytes = 0;

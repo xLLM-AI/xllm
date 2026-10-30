@@ -111,20 +111,36 @@ class LinearVerifyGraphInputs:
     cu_seqlens: torch.Tensor | None = None
 
 
-class AttentionMetadata(Protocol):
-    prepared_attention_state: object | None
+class ExecutionMetadataSource(Protocol):
     slot_mapping: torch.Tensor
+    q_cu_seq_lens: torch.Tensor | None
+    q_cu_seq_lens_host_values: list[int] | None
+    q_seq_lens_host: torch.Tensor | None
+    linear_state_indices: torch.Tensor | None
+    linear_verify_graph: LinearVerifyGraphInputs | None
+    linear_state_read_indices: torch.Tensor | None
+    linear_state_write_indices: torch.Tensor | None
+    num_accepted_tokens: torch.Tensor | None
+    num_accepted_tokens_host_values: Sequence[int]
+    has_initial_state: torch.Tensor | None
+    dp_execution_token_counts: Sequence[int]
+    is_prefill: bool
+    is_chunked_prefill: bool
+    is_mixed: bool
+    is_spec_verify: bool
+    is_dummy: bool
+
+
+class AttentionMetadata(ExecutionMetadataSource, Protocol):
+    prepared_attention_state: object | None
     paged_kv_indptr: torch.Tensor
     paged_kv_indices: torch.Tensor
     paged_kv_last_page_len: torch.Tensor
     qo_indptr: torch.Tensor | None
-    q_cu_seq_lens: torch.Tensor | None
-    q_cu_seq_lens_host_values: list[int] | None
     kv_cu_seq_lens: torch.Tensor | None
     kv_seq_lens_host: torch.Tensor | None
     kv_seq_lens_host_values: list[int] | None
     new_cache_slots_host_values: list[int] | None
-    q_seq_lens_host: torch.Tensor | None
     paged_kv_indptr_host: torch.Tensor | None
     paged_kv_last_page_len_host: torch.Tensor | None
     block_table: torch.Tensor | None
@@ -140,15 +156,7 @@ class AttentionMetadata(Protocol):
     dsa_c128_cos_sin: torch.Tensor | None
     dsa_graph_block_table_cols: int
     dsa_graph_mode: bool
-    linear_state_indices: torch.Tensor | None
-    linear_verify_graph: LinearVerifyGraphInputs | None
-    linear_state_read_indices: torch.Tensor | None
-    linear_state_write_indices: torch.Tensor | None
-    num_accepted_tokens: torch.Tensor | None
-    num_accepted_tokens_host_values: Sequence[int]
     kpool_query_lens: Sequence[int]
-    has_initial_state: torch.Tensor | None
-    dp_execution_token_counts: Sequence[int]
     raw_dp_execution_token_counts: Sequence[int]
     dp_global_sequence_nums: Sequence[int]
     # Host-planned logical KV lengths, including the query; empty ranks keep zero.
@@ -156,11 +164,6 @@ class AttentionMetadata(Protocol):
     dp_is_decode: Sequence[int]
     q_seq_lens: torch.Tensor | None
     expanded_decode_metadata: ExpandedDecodeMetadataLike
-    is_prefill: bool
-    is_chunked_prefill: bool
-    is_mixed: bool
-    is_spec_verify: bool
-    is_dummy: bool
     local_slot_mapping: torch.Tensor | None
     kv_split_size: int
     kv_split_rank: int
@@ -168,7 +171,7 @@ class AttentionMetadata(Protocol):
 
 
 def resolve_linear_state_io_indices(
-    metadata: AttentionMetadata,
+    metadata: ExecutionMetadataSource,
 ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
     """Resolve linear-state read and live/write slots for one forward."""
     write_indices = getattr(metadata, "linear_state_write_indices", None)

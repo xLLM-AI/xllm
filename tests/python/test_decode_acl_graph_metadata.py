@@ -88,6 +88,7 @@ def executor(runner: DecodeAclGraphRunner) -> ModelExecutor:
     executor.prepared_graph_runner = None
     executor.inductor_runner = None
     executor.eager_runner = Mock()
+    executor.requires_input_batch_metadata = False
     return executor
 
 
@@ -300,7 +301,9 @@ def test_executor_uses_eager_when_decode_admission_returns_none(
         output = executor.execute(input_ids, input_ids, metadata)
 
     decode.assert_not_called()
-    executor.eager_runner.execute.assert_called_once_with(input_ids, input_ids, metadata, None, None, None, eplb=None)
+    executor.eager_runner.execute.assert_called_once_with(
+        input_ids, input_ids, metadata, None, None, None, eplb=None, input_batch=None
+    )
     assert output is executor.eager_runner.execute.return_value
     runner._capture.assert_not_called()
     assert not runner._graphs

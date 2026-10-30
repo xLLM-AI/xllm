@@ -24,6 +24,7 @@ from xllm.python.attention.backend import AttentionBackend, AttentionMetadata, L
 from xllm.python.attention.block_draft_window import block_draft_model_window_context
 from xllm.python.model_executor.dspark_graph_input import DSparkAdaptiveGraphInputs
 from xllm.python.model_executor.forward_context import AclGraphExecutionState, EplbRuntimeState, LayerSynchronizer
+from xllm.python.model_executor.input_batch import InputBatch
 from xllm.python.model_executor.runners.acl_graph import AclGraphEntry, AclGraphRunner, StaticGraphAttentionMetadata
 from xllm.python.model_executor.runners.base import ModelExecutionOutput
 from xllm.python.model_executor.runners.kv_capacity import (
@@ -489,6 +490,7 @@ class PreparedAclGraphRunner(AclGraphRunner):
         eplb: EplbRuntimeState | None = None,
         dspark_adaptive: DSparkAdaptiveGraphInputs | None = None,
         pre_capture_kv_buckets: bool = False,
+        input_batch: InputBatch | None = None,
     ) -> None:
         self._validate_prepared_input(
             input_ids, positions, metadata, input_embedding, mtp_topk_indices, dspark_adaptive=dspark_adaptive
@@ -535,6 +537,7 @@ class PreparedAclGraphRunner(AclGraphRunner):
                 eplb=eplb,
                 dspark_adaptive=dspark_adaptive,
                 require_exact_capacity=pre_capture,
+                input_batch=input_batch,
             )
         if (self._device_kv_lengths or pre_capture) and len(self._prepared_graphs) != previous_count:
             logger.info(
@@ -562,6 +565,7 @@ class PreparedAclGraphRunner(AclGraphRunner):
         eplb: EplbRuntimeState | None,
         dspark_adaptive: DSparkAdaptiveGraphInputs | None,
         require_exact_capacity: bool = False,
+        input_batch: InputBatch | None = None,
     ) -> None:
         if binding in self._prepared_graphs:
             return
@@ -696,6 +700,7 @@ class PreparedAclGraphRunner(AclGraphRunner):
         if saved_control is not None:
             dspark_adaptive.control.bitwise_or_(2**32)
         try:
+            self._bind_graph_input_batch(entry, input_batch)
             self._capture(entry, torch.npu.current_stream(self.device))
         finally:
             if saved_slots is not None:
@@ -746,6 +751,7 @@ class PreparedAclGraphRunner(AclGraphRunner):
         *,
         dspark_adaptive: DSparkAdaptiveGraphInputs | None = None,
         eplb: EplbRuntimeState | None = None,
+        input_batch: InputBatch | None = None,
     ) -> AclGraphEntry:
         self._validate_prepared_input(
             input_ids, positions, metadata, input_embedding, mtp_topk_indices, dspark_adaptive=dspark_adaptive
@@ -771,6 +777,7 @@ class PreparedAclGraphRunner(AclGraphRunner):
                 mtp_topk_indices,
                 dspark_adaptive=dspark_adaptive,
                 eplb=eplb,
+                input_batch=input_batch,
             )
             entry = self._prepared_graphs[binding]
         return entry
@@ -868,6 +875,7 @@ class PreparedAclGraphRunner(AclGraphRunner):
         *,
         eplb: EplbRuntimeState | None = None,
         dspark_adaptive: DSparkAdaptiveGraphInputs | None = None,
+        input_batch: InputBatch | None = None,
     ) -> ModelExecutionOutput:
         if layer_synchronizer is not None:
             raise ValueError("prepared ACL replay does not support layer synchronization")
@@ -879,8 +887,11 @@ class PreparedAclGraphRunner(AclGraphRunner):
             mtp_topk_indices,
             dspark_adaptive=dspark_adaptive,
             eplb=eplb,
+            input_batch=input_batch,
         )
-        return self._execute_entry(entry, input_ids, metadata, input_embedding, mtp_topk_indices, eplb=eplb)
+        return self._execute_entry(
+            entry, input_ids, metadata, input_embedding, mtp_topk_indices, eplb=eplb, input_batch=input_batch
+        )
 
     def execute_block(
         self,
@@ -892,12 +903,17 @@ class PreparedAclGraphRunner(AclGraphRunner):
         mtp_topk_indices: torch.Tensor | None = None,
         *,
         eplb: EplbRuntimeState | None = None,
+        input_batch: InputBatch | None = None,
     ) -> ModelExecutionOutput | None:
         """Replay the request's compact KV bucket, capturing it once if needed."""
         if layer_synchronizer is not None:
             raise ValueError("prepared ACL replay does not support layer synchronization")
-        entry = self._resolve_entry(input_ids, positions, metadata, input_embedding, mtp_topk_indices, eplb=eplb)
-        return self._execute_entry(entry, input_ids, metadata, input_embedding, mtp_topk_indices, eplb=eplb)
+        entry = self._resolve_entry(
+            input_ids, positions, metadata, input_embedding, mtp_topk_indices, eplb=eplb, input_batch=input_batch
+        )
+        return self._execute_entry(
+            entry, input_ids, metadata, input_embedding, mtp_topk_indices, eplb=eplb, input_batch=input_batch
+        )
 
     def _execute_entry(
         self,
@@ -908,6 +924,7 @@ class PreparedAclGraphRunner(AclGraphRunner):
         mtp_topk_indices: torch.Tensor | None,
         *,
         eplb: EplbRuntimeState | None,
+        input_batch: InputBatch | None = None,
     ) -> ModelExecutionOutput:
         # Only serialized Launch installs shared backend state. This path
         # selects entry-owned buffers and refreshes its captured Host lists.
@@ -928,6 +945,7 @@ class PreparedAclGraphRunner(AclGraphRunner):
         self._prepare_graph_eplb_state(entry, eplb, metadata, first_capture=False)
         owned_metadata = self._block_draft or self._device_kv_lengths or isinstance(entry, _PreparedDSparkGraphEntry)
         self._prepare_attention(entry, entry.static_metadata if owned_metadata else metadata, replay=True)
+        self._bind_graph_input_batch(entry, input_batch)
         stream = torch.npu.current_stream(self.device)
         entry.graph.replay()
         self._update_after_replay(entry, stream)

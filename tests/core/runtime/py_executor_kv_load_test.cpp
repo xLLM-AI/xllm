@@ -83,6 +83,7 @@ class TestModel:
 
 class TestExecutor:
     supports_prepared_metadata = True
+    requires_input_batch_metadata = False
     context_kv_graph_runner = None
     def __init__(self, *args: object) -> None:
         self.supports_layerwise_kv_load = layerwise

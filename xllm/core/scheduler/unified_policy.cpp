@@ -38,6 +38,11 @@ void UnifiedPolicy::drain_request_queue(
   std::shared_ptr<Request> request;
   while (request_queue.read(request)) {
     CHECK(request);
+    if (request->finished() || request->cancelled()) {
+      // collect_finished() owns terminal cleanup.
+      state.running_requests.emplace_back(request);
+      continue;
+    }
     if (!state.enable_prefix_cache) {
       request->expand_sequences(/*force=*/false);
     }

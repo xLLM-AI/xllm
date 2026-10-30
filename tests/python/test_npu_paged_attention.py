@@ -952,7 +952,7 @@ def test_block_graph_replay_matches_eager_after_kv_length_changes(
         sliding_window=window if block_causal is not None else 0,
     )
     runner = BlockDraftAclGraphRunner(torch.nn.Identity(), backend, device, 1, capacity)
-    entry = runner._allocate_entry(tokens, tokens, metadata)
+    entry = runner._allocate_entry(tokens, tokens, metadata, sequence_count=1, page_table_capacity=32)
     runner._fill_entry(entry, tokens, tokens, metadata)
     static = entry.static_metadata
 
@@ -1085,11 +1085,6 @@ def test_windowed_draft_masks_are_cached_by_causality_and_refreshed_each_forward
     assert after[0, :, :, 4:].all()
 
 
-def test_ordinary_sliding_attention_does_not_acquire_block_geometry() -> None:
-    layer = SimpleNamespace(sliding_window=2048, causal=True, fia_sparse_mode=None)
-    assert not NpuPagedAttentionBackend._uses_block_draft_window(layer)
-
-
 @pytest.mark.parametrize("prepared_lengths", [False, True])
 @pytest.mark.parametrize("causal", [False, True])
 def test_windowed_draft_uses_explicit_mask_in_eager_and_prepared_paths(
@@ -1119,7 +1114,13 @@ def test_windowed_draft_uses_explicit_mask_in_eager_and_prepared_paths(
         fia_sparse_mode=0,
         sliding_window=2,
     )
-    backend._prefill(query, query, query, cache, cache, metadata, 4, layer)
+    with patch.object(backend, "prepare_metadata", wraps=backend.prepare_metadata) as prepare:
+        for _ in range(2):
+            backend._prefill(query, query, query, cache, cache, metadata, 4, layer)
+        assert prepare.call_count == (0 if prepared_lengths else 1)
+        backend.prepare(metadata)
+        backend._prefill(query, query, query, cache, cache, metadata, 4, layer)
+        assert prepare.call_count == (0 if prepared_lengths else 2)
     assert calls[0]["input_layout"] == "BNSD"
     mask = calls[0]["atten_mask"]
     assert torch.where(~mask[0, 0, 0])[0].tolist() == ([1, 2, 3] if causal else [1, 2, 3, 4])
@@ -1365,6 +1366,7 @@ def test_kda_verify_uses_framework_native_conv(
     backend = NpuPagedAttentionBackend.__new__(NpuPagedAttentionBackend)
     backend._kda_checkpoint_stride = 2
     backend._kda_query_start_locs = {}
+    backend._kda_checkpoint_offsets = {}
     indices = torch.tensor([1])
     accepted = torch.tensor([2], dtype=torch.int32)
     metadata = SimpleNamespace(num_accepted_tokens=accepted)

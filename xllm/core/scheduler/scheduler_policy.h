@@ -137,6 +137,7 @@ class SchedulerPolicy {
 
  protected:
   // ===== Common phases (internal) =====
+  // Resets batch state, then admits staged FCFS decode handoffs.
   void reset_batch_state(SchedulerState& state);
 
   // ===== Running request state update =====
@@ -211,6 +212,15 @@ class SchedulerPolicy {
 
   BatchMode batch_mode_;
   const SchedulerOptions& options_;
+
+ private:
+  bool collect_terminal(std::shared_ptr<Request>& request,
+                        SchedulerState& state,
+                        std::vector<std::shared_ptr<Request>>& finished);
+
+  // FCFS decode handoffs staged by drain_request_queue() until the policy
+  // requeue phase ends.
+  std::vector<std::shared_ptr<Request>> pending_decode_handoffs_;
 };
 
 // =============================================================================

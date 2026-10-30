@@ -26,6 +26,7 @@ from xllm.python.attention.backend import (
     LayerCache,
 )
 from xllm.python.model_executor.forward_context import EplbRuntimeState, ExecutionMetadataBuilder, LayerSynchronizer
+from xllm.python.model_executor.input_batch import InputBatch
 
 ModelExecutionOutput = (
     torch.Tensor | tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]
@@ -59,21 +60,35 @@ class BaseRunner(ABC):
         self.attention_backend = attention_backend
         self.device = device
         self.layer_caches: list[LayerCache] = []
-        self.execution_metadata_builders: tuple[ExecutionMetadataBuilder, ...] = tuple(
-            getattr(model, "execution_metadata_builders", ())
-        )
+        builders = tuple(getattr(model, "execution_metadata_builders", ()))
+        seen_types: set[object] = set()
+        for builder in builders:
+            metadata_type = builder.metadata_type
+            if metadata_type in seen_types:
+                raise RuntimeError(f"duplicate execution metadata builder for {metadata_type.__name__}")
+            seen_types.add(metadata_type)
+        self.execution_metadata_builders: tuple[ExecutionMetadataBuilder, ...] = builders
 
     def bind_layer_caches(self, layer_caches: list[LayerCache]) -> None:
         for builder in self.execution_metadata_builders:
             builder.bind_layer_caches(layer_caches)
         self.layer_caches = layer_caches
 
-    def _build_execution_contexts(self, metadata: AttentionMetadata, input_ids: torch.Tensor) -> dict[object, object]:
-        if self.execution_metadata_builders and (
-            input_ids.ndim != 1 or input_ids.numel() != metadata.slot_mapping.numel()
-        ):
+    def _build_execution_contexts(
+        self,
+        metadata: AttentionMetadata,
+        input_batch: InputBatch | None,
+    ) -> dict[object, object]:
+        if not self.execution_metadata_builders:
+            return {}
+        if input_batch is None:
+            raise RuntimeError("execution metadata builders require upstream InputBatch metadata")
+        if input_batch.num_tokens != int(metadata.slot_mapping.numel()):
             raise ValueError("execution metadata must contain one slot per input token")
-        return {builder.metadata_type: builder.build(metadata) for builder in self.execution_metadata_builders}
+        execution_contexts: dict[object, object] = {}
+        for builder in self.execution_metadata_builders:
+            execution_contexts[builder.metadata_type] = builder.build(input_batch, metadata)
+        return execution_contexts
 
     @staticmethod
     def _slice_output(
@@ -119,5 +134,6 @@ class BaseRunner(ABC):
         input_embedding: torch.Tensor | None = None,
         layer_synchronizer: LayerSynchronizer | None = None,
         eplb: EplbRuntimeState | None = None,
+        input_batch: InputBatch | None = None,
     ) -> ModelExecutionOutput:
         pass

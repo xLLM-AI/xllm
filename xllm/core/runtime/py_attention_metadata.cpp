@@ -259,9 +259,9 @@ PyAttentionMetadataView::PyAttentionMetadataView(
         << "linear-state read ids must align with Python metadata rows";
     linear_state_read_indices_ = params.embedding.linear_state_read_indices;
     if (!linear_state_read_indices_.defined()) {
-      linear_state_read_indices_ =
-          torch::tensor(params.embedding.linear_state_read_ids, torch::kInt32)
-              .to(linear_state_indices_.device());
+      materialize_linear_state_indices(params.embedding,
+                                       linear_state_indices_.device());
+      linear_state_read_indices_ = params.embedding.linear_state_read_indices;
     }
   }
   if (params.enable_graph || params.expert.eplb_decode_token_mask.defined()) {

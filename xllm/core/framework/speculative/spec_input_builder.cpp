@@ -21,6 +21,7 @@ limitations under the License.
 #include <limits>
 #include <utility>
 
+#include "framework/config/model_config.h"
 #include "framework/model/model_params_view.h"
 #include "framework/sampling/sampling_params.h"
 #include "layers/common/expanded_decode_metadata_builder.h"
@@ -288,6 +289,8 @@ void update_kv_seq_lens_and_max(std::vector<int32_t>& kv_seq_lens_vec,
 template <typename Input>
 DecodeRowContext make_decode_row_context(const Input& input) {
   DecodeRowContext ctx;
+  ctx.build_execution_batch = ModelConfig::is_python_model_impl(
+      ModelConfig::get_instance().model_impl());
   ctx.num_sequences = input.input_params.meta.num_sequences;
   CHECK_GE(ctx.num_sequences, 0) << "invalid num_sequences";
 
@@ -353,6 +356,21 @@ void append_decode_row(const DecodeRowContext& ctx,
     buf.out_token_ids.emplace_back(resolve_row_token_id(ctx, row));
   }
   buf.out_positions.emplace_back(model_position);
+
+  // Absolute model positions preserve history beyond a sliding KV window.
+  if (ctx.build_execution_batch) {
+    if (buf.out_num_scheduled_tokens.empty() ||
+        buf.last_sequence_id != row.seq_id) {
+      if (buf.out_num_scheduled_tokens.empty()) {
+        buf.out_num_scheduled_tokens.reserve(ctx.num_sequences);
+        buf.out_num_computed_tokens.reserve(ctx.num_sequences);
+      }
+      buf.last_sequence_id = row.seq_id;
+      buf.out_num_scheduled_tokens.emplace_back(0);
+      buf.out_num_computed_tokens.emplace_back(model_position);
+    }
+    ++buf.out_num_scheduled_tokens.back();
+  }
 
   std::optional<int32_t> row_kv_seq_len;
   if (row.append_kv_len) {
@@ -485,6 +503,23 @@ void update_input_params(Params& input_params,
                          bool update_block_tables) {
   CHECK_EQ(q_seq_lens_vec.empty(), q_cu_seq_lens_vec.empty())
       << "q_seq_lens and q_cu_seq_lens must be provided together";
+  if (ModelConfig::is_python_model_impl(
+          ModelConfig::get_instance().model_impl())) {
+    auto& execution_batch = input_params.meta.execution_batch;
+    execution_batch.num_tokens = static_cast<int64_t>(buf.out_positions.size());
+    execution_batch.num_scheduled_tokens =
+        std::move(buf.out_num_scheduled_tokens);
+    execution_batch.num_computed_tokens =
+        std::move(buf.out_num_computed_tokens);
+    execution_batch.num_reqs =
+        static_cast<int32_t>(execution_batch.num_scheduled_tokens.size());
+    fill_request_layout(execution_batch);
+    CHECK_EQ(execution_batch.query_start_loc.back(), execution_batch.num_tokens)
+        << "scheduled tokens must cover all built rows";
+    const auto forward_type = input_params.meta.batch_forward_type;
+    execution_batch.is_prefilling.assign(execution_batch.num_reqs,
+                                         forward_type.no_decode());
+  }
   input_params.meta.q_max_seq_len = q_max_seq_len;
   input_params.attention.host.q_seq_lens = std::move(q_seq_lens_vec);
   input_params.attention.host.q_cu_seq_lens = std::move(q_cu_seq_lens_vec);
@@ -559,6 +594,16 @@ void materialize_empty_block_draft_rows(LlmForwardInput& input,
   input.runtime.input_host_buffer_has_layout = false;
   params.meta.num_sequences = 1;
   params.meta.actual_num_sequences = 0;
+  if (ModelConfig::is_python_model_impl(
+          ModelConfig::get_instance().model_impl())) {
+    auto& execution_batch = params.meta.execution_batch;
+    execution_batch.num_reqs = 0;
+    execution_batch.num_tokens = query_width;
+    execution_batch.num_scheduled_tokens.clear();
+    execution_batch.num_computed_tokens.clear();
+    execution_batch.query_start_loc = {0};
+    execution_batch.is_prefilling.clear();
+  }
   params.meta.q_max_seq_len = query_width;
   params.meta.kv_max_seq_len = 1;
   params.attention.host.q_seq_lens.clear();

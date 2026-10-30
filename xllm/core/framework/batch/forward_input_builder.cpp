@@ -33,6 +33,7 @@ limitations under the License.
 #include "core/common/metrics.h"
 #include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/eplb_config.h"
+#include "core/framework/config/model_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/model/model_args.h"
@@ -229,6 +230,8 @@ ForwardInputBuilder::ForwardInputBuilder(
       swap_block_transfer_infos_(swap_block_transfer_infos),
       batch_id_(batch_id),
       cp_size_(cp_size) {
+  build_execution_batch_ = ModelConfig::is_python_model_impl(
+      ModelConfig::get_instance().model_impl());
   CHECK_GT(cp_size_, 0);
   // Reserve space for better performance
   const size_t reserve_size = 1024;
@@ -251,6 +254,11 @@ ForwardInputBuilder::ForwardInputBuilder(
   state_.acc_logprob_vec.reserve(sequences.size());
   state_.new_token_slot_ids.reserve(token_reserve);
   state_.kv_cache_tokens_nums.reserve(sequences.size());
+  if (build_execution_batch_) {
+    state_.num_scheduled_tokens.reserve(sequences.size());
+    state_.num_computed_tokens.reserve(sequences.size());
+    state_.is_prefilling.reserve(sequences.size());
+  }
   state_.paged_kv_indices.reserve(block_reserve);
   state_.paged_kv_indptr.reserve(sequences.size() + 1);
   state_.paged_kv_last_page_len.reserve(sequences.size());
@@ -532,6 +540,11 @@ void ForwardInputBuilder::process_sequences_multithreaded() {
     thread_state.block_tables_vec.reserve(sequences_per_thread);
     thread_state.new_token_slot_ids.reserve(thread_token_reserve);
     thread_state.kv_cache_tokens_nums.reserve(sequences_per_thread);
+    if (build_execution_batch_) {
+      thread_state.num_scheduled_tokens.reserve(sequences_per_thread);
+      thread_state.num_computed_tokens.reserve(sequences_per_thread);
+      thread_state.is_prefilling.reserve(sequences_per_thread);
+    }
     size_t thread_block_reserve = 0;
     for (size_t sequence_idx = thread_start_idx; sequence_idx < thread_end_idx;
          ++sequence_idx) {
@@ -613,6 +626,11 @@ void ForwardInputBuilder::process_sequences_multithreaded() {
   state_.block_tables_vec.reserve(total_seqs);
   state_.new_token_slot_ids.reserve(total_slots);
   state_.kv_cache_tokens_nums.reserve(total_seqs);
+  if (build_execution_batch_) {
+    state_.num_scheduled_tokens.reserve(total_seqs);
+    state_.num_computed_tokens.reserve(total_seqs);
+    state_.is_prefilling.reserve(total_seqs);
+  }
 #if defined(USE_NPU) || defined(USE_MUSA)
   state_.seq_lens.reserve(total_seqs);
   state_.q_seq_lens.reserve(total_seqs);
@@ -684,6 +702,17 @@ void ForwardInputBuilder::process_sequences_multithreaded() {
     state_.kv_cache_tokens_nums.insert(state_.kv_cache_tokens_nums.end(),
                                        state.kv_cache_tokens_nums.begin(),
                                        state.kv_cache_tokens_nums.end());
+    if (build_execution_batch_) {
+      state_.num_scheduled_tokens.insert(state_.num_scheduled_tokens.end(),
+                                         state.num_scheduled_tokens.begin(),
+                                         state.num_scheduled_tokens.end());
+      state_.num_computed_tokens.insert(state_.num_computed_tokens.end(),
+                                        state.num_computed_tokens.begin(),
+                                        state.num_computed_tokens.end());
+      state_.is_prefilling.insert(state_.is_prefilling.end(),
+                                  state.is_prefilling.begin(),
+                                  state.is_prefilling.end());
+    }
     state_.new_token_slot_ids.insert(state_.new_token_slot_ids.end(),
                                      state.new_token_slot_ids.begin(),
                                      state.new_token_slot_ids.end());
@@ -789,6 +818,13 @@ void ForwardInputBuilder::process_single_sequence(int32_t seq_index,
   state.max_seq_len = std::max(state.max_seq_len, seq_len);
   state.q_max_seq_len = std::max(state.q_max_seq_len, padded_q_seq_len);
   state.kv_cache_tokens_nums.emplace_back(n_kv_cache_tokens);
+  if (build_execution_batch_) {
+    state.num_scheduled_tokens.emplace_back(static_cast<int32_t>(q_seq_len));
+    state.num_computed_tokens.emplace_back(
+        static_cast<int32_t>(n_kv_cache_tokens));
+    state.is_prefilling.emplace_back(
+        static_cast<uint8_t>(sequence->is_prefill_stage()));
+  }
 #if defined(USE_NPU)
   state.seq_lens.push_back(seq_len);
   state.q_seq_lens.push_back(padded_q_seq_len);
@@ -1168,6 +1204,25 @@ Input ForwardInputBuilder::state_to_forward_input() {
   input_params.meta.kv_max_seq_len = state_.max_seq_len;
   input_params.meta.q_max_seq_len = state_.q_max_seq_len;
   input_params.meta.is_graph_warmup = is_graph_warmup_;
+  const int32_t num_reqs = static_cast<int32_t>(num_sequences_);
+  if (build_execution_batch_) {
+    auto& execution_batch = input_params.meta.execution_batch;
+    execution_batch.num_reqs = num_reqs;
+    execution_batch.num_scheduled_tokens =
+        std::move(state_.num_scheduled_tokens);
+    CHECK_EQ(execution_batch.num_scheduled_tokens.size(),
+             static_cast<size_t>(num_reqs));
+    fill_request_layout(execution_batch);
+    execution_batch.num_tokens =
+        static_cast<int64_t>(state_.flatten_tokens_vec.size());
+    execution_batch.num_computed_tokens = std::move(state_.num_computed_tokens);
+    CHECK_EQ(execution_batch.num_computed_tokens.size(),
+             static_cast<size_t>(num_reqs));
+    execution_batch.is_prefilling = std::move(state_.is_prefilling);
+    CHECK_EQ(execution_batch.is_prefilling.size(),
+             static_cast<size_t>(num_reqs));
+  }
+  CHECK_EQ(state_.kv_cache_tokens_nums.size(), static_cast<size_t>(num_reqs));
   input_params.attention.device.kv_seq_lens = make_cpu_tensor(state_.seq_lens);
   input_params.attention.device.kv_cache_tokens_nums =
       make_cpu_tensor(state_.kv_cache_tokens_nums);

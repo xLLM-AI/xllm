@@ -199,9 +199,6 @@ auto run_mega_gdn_prefill(MegaGdnInputs& inputs,
                           int32_t read_slot,
                           int32_t write_slot,
                           int64_t checkpoint_stride) {
-  const auto indices = [](int32_t slot) {
-    return torch::tensor({slot}, torch::kInt32).to(torch::kPrivateUse1);
-  };
   const int32_t sequence_length = static_cast<int32_t>(inputs.qkv.size(1));
   torch::Tensor cu_seqlens = torch::tensor({0, sequence_length}, torch::kInt32)
                                  .to(torch::kPrivateUse1);
@@ -209,12 +206,16 @@ auto run_mega_gdn_prefill(MegaGdnInputs& inputs,
   torch::Tensor packed_b = inputs.b.squeeze(0);
   torch::Tensor packed_a = inputs.a.squeeze(0);
   torch::Tensor packed_z = inputs.z.squeeze(0);
-  torch::Tensor conv_read_indices = indices(read_slot);
-  torch::Tensor conv_write_indices = indices(write_slot);
-  torch::Tensor ssm_read_indices = indices(
-      read_slot < 0 ? -1 : static_cast<int32_t>(read_slot * checkpoint_stride));
-  torch::Tensor ssm_write_indices =
-      indices(static_cast<int32_t>(write_slot * checkpoint_stride));
+  const auto index_options =
+      torch::TensorOptions().dtype(torch::kInt32).device(torch::kPrivateUse1);
+  torch::Tensor conv_read_indices = torch::tensor({read_slot}, index_options);
+  torch::Tensor conv_write_indices = torch::tensor({write_slot}, index_options);
+  torch::Tensor ssm_read_indices = torch::tensor(
+      {read_slot < 0 ? -1
+                     : static_cast<int32_t>(read_slot * checkpoint_stride)},
+      index_options);
+  torch::Tensor ssm_write_indices = torch::tensor(
+      {static_cast<int32_t>(write_slot * checkpoint_stride)}, index_options);
   return xllm::kernel::npu::npu_mega_gdn_prefill(packed_qkv,
                                                  packed_b,
                                                  packed_a,

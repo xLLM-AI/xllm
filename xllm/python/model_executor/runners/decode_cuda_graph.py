@@ -27,6 +27,7 @@ from xllm.python.model_executor.forward_context import (
     LayerSynchronizer,
     forward_context,
 )
+from xllm.python.model_executor.input_batch import InputBatch
 from xllm.python.model_executor.runners.base import BaseRunner, ModelExecutionOutput
 
 _CAPTURE_WARMUP_STEPS = 2
@@ -151,6 +152,19 @@ class DecodeCudaGraphRunner(BaseRunner):
             )
             input_ids = torch.zeros(batch_size, dtype=torch.int32, device=device)
             positions = torch.zeros(batch_size, dtype=torch.int32, device=device)
+            graph_input_batch = InputBatch(
+                input_ids=input_ids,
+                positions=positions,
+                num_reqs=batch_size,
+                num_tokens=batch_size,
+                num_tokens_after_padding=batch_size,
+                num_scheduled_tokens=(1,) * batch_size,
+                num_computed_tokens=(0,) * batch_size,
+                query_start_loc=tuple(range(batch_size + 1)),
+                is_prefilling=(False,) * batch_size,
+                is_padding=torch.zeros(batch_size, dtype=torch.bool, device=device),
+                is_dummy=False,
+            )
             graph_key = self._graph_key(input_ids, metadata)
             if graph_key is None:
                 raise RuntimeError("invalid decode CUDA graph warmup bucket")
@@ -170,9 +184,7 @@ class DecodeCudaGraphRunner(BaseRunner):
                         self.device,
                         entry.static_metadata,
                         self.layer_caches,
-                        layer_shared_cache=self._build_execution_contexts(
-                            entry.static_metadata, entry.static_input_ids
-                        ),
+                        layer_shared_cache=self._build_execution_contexts(entry.static_metadata, graph_input_batch),
                     )
                 ):
                     self._capture(entry)
@@ -189,7 +201,9 @@ class DecodeCudaGraphRunner(BaseRunner):
         input_embedding: torch.Tensor | None = None,
         layer_synchronizer: LayerSynchronizer | None = None,
         eplb: EplbRuntimeState | None = None,
+        input_batch: InputBatch | None = None,
     ) -> ModelExecutionOutput:
+        del input_batch
         batch_size = input_ids.shape[0]
         graph_key = self._graph_key(input_ids, metadata)
         if graph_key is None:

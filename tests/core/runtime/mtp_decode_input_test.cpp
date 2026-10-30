@@ -22,6 +22,7 @@ limitations under the License.
 #include <numeric>
 #include <vector>
 
+#include "core/framework/config/model_config.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/runtime/task_execution_pipeline.h"
 #include "tests/core/runtime/task_pipeline_test_peer.h"
@@ -32,6 +33,7 @@ namespace {
 class MtpDecodeInputTest : public ::testing::Test {
  protected:
   void SetUp() override {
+    ModelConfig::get_instance().model_impl("python");
     ASSERT_TRUE(TaskPipelineTestPeer::create_mtp_context(
                     /*capacity=*/4,
                     /*hidden_size=*/3,
@@ -63,6 +65,7 @@ class MtpDecodeInputTest : public ::testing::Test {
   }
 
   void TearDown() override {
+    ModelConfig::get_instance().model_impl(model_impl_);
     EXPECT_EQ(aclrtSynchronizeDevice(), ACL_SUCCESS);
     TaskPipelineTestPeer::context_release(*state_);
     state_.reset();
@@ -104,6 +107,7 @@ class MtpDecodeInputTest : public ::testing::Test {
   }
 
   torch::Device device_{torch::kPrivateUse1, 0};
+  const std::string model_impl_ = ModelConfig::get_instance().model_impl();
   std::unique_ptr<MtpContextStorage> context_;
   std::unique_ptr<MtpContextView> state_;
   MtpInputSpec spec_{{8, 2, 4}, 0, 8, 3, MtpInvocationKind::DRAFT, 0};
@@ -223,6 +227,12 @@ TEST_F(MtpDecodeInputTest, BlockDraftGraphPadsCompleteIsolatedRequests) {
       EXPECT_TRUE(params.meta.batch_forward_type.is_chunked_prefill());
       EXPECT_EQ(params.meta.num_sequences, physical_sequences);
       EXPECT_EQ(params.meta.actual_num_sequences, 2);
+      EXPECT_EQ(params.meta.execution_batch.num_reqs, 2);
+      EXPECT_EQ(params.meta.execution_batch.num_tokens, physical_rows);
+      EXPECT_EQ(params.meta.execution_batch.query_start_loc,
+                (std::vector<int32_t>{0,
+                                      static_cast<int32_t>(width),
+                                      static_cast<int32_t>(2 * width)}));
       EXPECT_EQ(binding->tokens().numel(), physical_rows);
       EXPECT_EQ(TaskPipelineTestPeer::input_scratch(*binding).sequences_, 2U);
       EXPECT_EQ(TaskPipelineTestPeer::input_scratch(*binding)

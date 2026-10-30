@@ -34,6 +34,7 @@ from xllm.python.layers.npu.qwen3_5.gdn_metadata_builder import Qwen3_5GdnMetada
 from xllm.python.layers.rotary_embedding import RotaryEmbedding
 from xllm.python.model_executor.dspark_graph_input import DSparkAdaptiveGraphInputs
 from xllm.python.model_executor.forward_context import ForwardContext, forward_context
+from xllm.python.model_executor.input_batch import InputBatch
 from xllm.python.model_executor.runners.prepared_acl_graph import PreparedAclGraphRunner
 from xllm.python.models import qwen3_5
 from xllm.python.models.aux_hidden_capture import AuxHiddenCapture
@@ -208,6 +209,26 @@ def _verify_builder(checkpoint_stride: int = 8) -> Qwen3_5GdnMetadataBuilder:
     return builder
 
 
+def _gdn_input_batch(scheduled: tuple[int, ...]) -> InputBatch:
+    total = sum(scheduled)
+    boundaries = [0]
+    for length in scheduled:
+        boundaries.append(boundaries[-1] + length)
+    return InputBatch(
+        input_ids=torch.zeros(total, dtype=torch.long),
+        positions=torch.zeros(total, dtype=torch.long),
+        num_reqs=len(scheduled),
+        num_tokens=total,
+        num_tokens_after_padding=total,
+        num_scheduled_tokens=scheduled,
+        num_computed_tokens=(0,) * len(scheduled),
+        query_start_loc=tuple(boundaries),
+        is_prefilling=(True,) * len(scheduled),
+        is_padding=None,
+        is_dummy=False,
+    )
+
+
 @pytest.mark.parametrize("end_only", [False, True])
 def test_prefill_accepts_native_slot_cumulative_ends(end_only: bool) -> None:
     ends = [2, 5] if end_only else [0, 2, 5]
@@ -225,13 +246,13 @@ def test_prefill_accepts_native_slot_cumulative_ends(end_only: bool) -> None:
         q_cu_seq_lens_host_values=ends,
         has_initial_state=torch.tensor([False, True]),
     )
-    actual = _verify_builder().build(metadata)
+    actual = _verify_builder().build(_gdn_input_batch((2, 3)), metadata)
     assert isinstance(actual, GdnPrefillMetadata)
     torch.testing.assert_close(actual.cu_seqlens, torch.tensor([0, 2, 5], dtype=torch.int32))
     if end_only:
         metadata.q_cu_seq_lens[0] = 1
         with pytest.raises(ValueError, match="do not match host"):
-            _verify_builder().build(metadata)
+            _verify_builder().build(_gdn_input_batch((2, 3)), metadata)
 
 
 @pytest.mark.parametrize("expanded", [False, True])
@@ -247,7 +268,7 @@ def test_verify_metadata_keeps_previous_accepted_checkpoint(expanded: bool) -> N
         is_dummy=False,
         is_spec_verify=True,
     )
-    actual = _verify_builder().build(metadata)
+    actual = _verify_builder().build(_gdn_input_batch((8, 8)), metadata)
     assert isinstance(actual, GdnVerifyMetadata)
     assert actual.query_width == 8
     torch.testing.assert_close(actual.state_indices, states)
@@ -268,7 +289,7 @@ def test_verify_rejects_query_width_exceeding_checkpoint_stride() -> None:
         is_spec_verify=True,
     )
     with pytest.raises(ValueError, match="checkpoint stride"):
-        _verify_builder().build(metadata)
+        _verify_builder().build(_gdn_input_batch((9, 9)), metadata)
 
 
 def test_verify_graph_uses_owned_device_maps_without_host_lengths() -> None:
@@ -284,7 +305,9 @@ def test_verify_graph_uses_owned_device_maps_without_host_lengths() -> None:
         is_dummy=False,
         linear_verify_graph=graph,
     )
-    actual = _verify_builder().build(metadata)
+    tokens = torch.zeros(8, dtype=torch.int32)
+    batch = _gdn_input_batch((2, 3)).bind_graph_inputs(tokens, tokens, torch.arange(8) >= 5)
+    actual = _verify_builder().build(batch, metadata)
     assert isinstance(actual, GdnVerifyMetadata)
     assert actual.state_indices is graph.state_indices
     assert actual.num_accepted_tokens is graph.num_accepted_tokens
@@ -306,11 +329,13 @@ def test_verify_graph_requires_maps_only_for_dense_kernel(packed_kernel: bool) -
         is_dummy=False,
         linear_verify_graph=graph,
     )
+    tokens = torch.zeros(8, dtype=torch.int32)
+    batch = _gdn_input_batch((2, 3)).bind_graph_inputs(tokens, tokens, torch.arange(8) >= 5)
     if not packed_kernel:
         with pytest.raises(ValueError, match="fixed request indices and token maps"):
-            _verify_builder().build(metadata)
+            _verify_builder().build(batch, metadata)
         return
-    actual = _verify_builder().build(metadata)
+    actual = _verify_builder().build(batch, metadata)
     assert actual.state_indices is graph.state_indices
     assert actual.num_accepted_tokens is graph.num_accepted_tokens
     assert actual.cu_seqlens is graph.cu_seqlens
@@ -330,6 +355,7 @@ def test_fixed_verify_routes_to_dense_kernel_without_host_lengths(monkeypatch: p
     builder = _verify_builder(width)
     states = torch.tensor([1, 2], dtype=torch.int32)
     metadata = builder.build(
+        _gdn_input_batch((width, width)),
         SimpleNamespace(
             slot_mapping=torch.arange(2 * width, dtype=torch.int32),
             q_seq_lens_host=None,
@@ -338,7 +364,7 @@ def test_fixed_verify_routes_to_dense_kernel_without_host_lengths(monkeypatch: p
             num_accepted_tokens_host_values=(),
             is_dummy=False,
             is_spec_verify=True,
-        )
+        ),
     )
     verify = MagicMock(return_value=torch.ones(2, width, 1, 128, dtype=torch.bfloat16))
     monkeypatch.setattr(kernels, "mega_gdn_mtp_decode", verify, raising=False)
@@ -381,7 +407,7 @@ def test_gdn_adaptive_packed_padding_does_not_enter_live_prefixes(
         dense_inputs.append(qkv.clone())
         return z.cumsum(dim=1)
 
-    monkeypatch.setattr(layer, "_project_prefill_inputs", project)
+    monkeypatch.setattr(layer, "_project_verify_inputs", project)
     monkeypatch.setattr(kernels, "mega_gdn_mtp_decode", verify, raising=False)
     hidden = torch.arange(1, 9, dtype=torch.float32).view(8, 1).expand(8, 128).clone()
     hidden[5:].fill_(padding_value)

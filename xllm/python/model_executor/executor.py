@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -38,6 +39,10 @@ from xllm.python.model_executor.forward_context import (
     KVLoadSynchronizer,
     LayerSynchronizer,
     forward_context,
+)
+from xllm.python.model_executor.input_batch import (
+    InputBatch,
+    InputBatchMetadata,
 )
 from xllm.python.model_executor.runners.base import ModelExecutionOutput
 from xllm.python.model_executor.runners.decode_cuda_graph import DecodeCudaGraphRunner
@@ -64,6 +69,9 @@ from xllm.python.model_platform_support import (
     uses_context_kv_projection,
 )
 from xllm.python.platform import current_platform
+
+if TYPE_CHECKING:
+    from xllm.python.model_executor.runners.decode_acl_graph import DecodeAclGraphRunner
 
 # Backend strings that mean "no graph execution" (matched case-insensitively).
 _DISABLED_GRAPH_BACKENDS = ("", "off", "none", "0")
@@ -378,7 +386,7 @@ class ModelExecutor:
         self.layerwise_split_rank = int(config.get("layerwise_split_rank", 0))
         if self.layerwise_split_size > 1 and config.get("model_type") != "glm_moe_dsa":
             raise NotImplementedError("Python layerwise split is supported only for GLM5.2")
-        self.decode_graph_runner = None
+        self.decode_graph_runner: DecodeCudaGraphRunner | DecodeAclGraphRunner | None = None
         self._serving_acl_graph_logged = False
         self.prepared_graph_runner = None
         self.context_kv_graph_runner = None
@@ -596,6 +604,15 @@ class ModelExecutor:
             from xllm.python.model_executor.runners.inductor import InductorRunner
 
             self.inductor_runner = InductorRunner(execution_model, self.attention_backend, device, graph_backend)
+        self.requires_input_batch_metadata = any(
+            runner is not None and runner.execution_metadata_builders
+            for runner in (
+                self.eager_runner,
+                self.inductor_runner,
+                self.decode_graph_runner,
+                self.prepared_graph_runner,
+            )
+        )
 
     @torch.inference_mode()
     def execute_mtp_role(
@@ -940,9 +957,19 @@ class ModelExecutor:
         is_graph_warmup: bool = False,
         *,
         dspark_adaptive: DSparkAdaptiveGraphInputs | None = None,
+        input_batch_metadata: InputBatchMetadata | None = None,
     ) -> None:
         if self.prepared_graph_runner is None:
             raise RuntimeError("prepared ACL graph runner is not enabled")
+        input_batch = None
+        if self.prepared_graph_runner.execution_metadata_builders:
+            if input_batch_metadata is None:
+                raise RuntimeError("execution metadata builders require upstream InputBatch metadata")
+            input_batch = InputBatch.from_runtime(
+                input_ids,
+                positions,
+                input_batch_metadata,
+            )
         if dspark_adaptive is not None:
             self._validate_dspark_graph_metadata(metadata)
         graph_kwargs = {} if dspark_adaptive is None else {"dspark_adaptive": dspark_adaptive}
@@ -959,6 +986,7 @@ class ModelExecutor:
             mtp_topk_indices,
             eplb=eplb,
             pre_capture_kv_buckets=True,
+            input_batch=input_batch,
             **graph_kwargs,
         )
 
@@ -1014,11 +1042,21 @@ class ModelExecutor:
         expert_load_data: torch.Tensor | None = None,
         eplb_decode_token_mask: torch.Tensor | None = None,
         is_graph_warmup: bool = False,
+        input_batch_metadata: InputBatchMetadata | None = None,
         *,
         dspark_adaptive: DSparkAdaptiveGraphInputs | None = None,
         kv_load_synchronizer: KVLoadSynchronizer | None = None,
         kv_load_layers_per_event: int = 1,
     ) -> ModelExecutionOutput:
+        input_batch = None
+        if self.requires_input_batch_metadata:
+            if input_batch_metadata is None:
+                raise RuntimeError("execution metadata builders require upstream InputBatch metadata")
+            input_batch = InputBatch.from_runtime(
+                input_ids,
+                positions,
+                input_batch_metadata,
+            )
         if not self._kv_bound:
             raise RuntimeError("KV caches are not bound")
         if dspark_adaptive is not None:
@@ -1059,6 +1097,7 @@ class ModelExecutor:
                 mtp_topk_indices,
                 eplb=eplb,
                 kv_load=kv_load,
+                input_batch=input_batch,
             )
         # Transfer completion events belong to this step. Graph replay cannot
         # record them through Python, and compilation must not retain a prior
@@ -1072,13 +1111,20 @@ class ModelExecutor:
                     raise RuntimeError("prepared ACL graph runner is not enabled")
                 if self._prepared_block_draft:
                     output = self.prepared_graph_runner.execute_block(
-                        input_ids, positions, metadata, input_embedding, layer_synchronizer, mtp_topk_indices, eplb=eplb
+                        input_ids,
+                        positions,
+                        metadata,
+                        input_embedding,
+                        layer_synchronizer,
+                        mtp_topk_indices,
+                        eplb=eplb,
+                        input_batch=input_batch,
                     )
                     if output is not None:
                         return output
                     # Only a declared capacity miss selects eager. Binding
                     # validation and replay failures propagate to the caller.
-                    return self.eager_runner.execute(input_ids, positions, metadata, eplb=eplb)
+                    return self.eager_runner.execute(input_ids, positions, metadata, eplb=eplb, input_batch=input_batch)
                 return self.prepared_graph_runner.execute(
                     input_ids,
                     positions,
@@ -1088,77 +1134,108 @@ class ModelExecutor:
                     mtp_topk_indices,
                     eplb=eplb,
                     **({} if dspark_adaptive is None else {"dspark_adaptive": dspark_adaptive}),
+                    input_batch=input_batch,
                 )
             if self._prepared_mtp:
                 return self.eager_runner.execute(
-                    input_ids, positions, metadata, input_embedding, layer_synchronizer, mtp_topk_indices, eplb=eplb
-                )
-            return self.eager_runner.execute(
-                input_ids, positions, metadata, input_embedding, layer_synchronizer, eplb=eplb
-            )
-        if graph_runner is not None or mtp_topk_indices is not None:
-            from xllm.python.model_executor.runners.block_draft_acl_graph import BlockDraftAclGraphRunner
-            from xllm.python.model_executor.runners.decode_acl_graph import DecodeAclGraphRunner
-
-        graph_kwargs = {}
-        if mtp_topk_indices is not None:
-            if isinstance(graph_runner, DecodeAclGraphRunner):
-                graph_kwargs["mtp_topk_indices"] = mtp_topk_indices
-            else:
-                graph_runner = None
-        use_graph = False
-        if graph_runner is not None and (eplb is None or current_platform.is_npu()):
-            if type(graph_runner) is DecodeAclGraphRunner:
-                # Subclasses can have a different admission/input contract.
-                # Ordinary decode reuses its resolved values only in this call.
-                decode_metadata = graph_runner.prepare_execution(input_ids, metadata, input_embedding, **graph_kwargs)
-                use_graph = decode_metadata is not None
-                if use_graph:
-                    graph_kwargs["decode_metadata"] = decode_metadata
-            else:
-                use_graph = graph_runner.can_execute(input_ids, metadata, input_embedding, **graph_kwargs)
-        if use_graph:
-            graph_key = None
-            # CUDA can_execute only admits previously captured buckets. ACL
-            # captures lazily with scheduler metadata and MTP inputs.
-            if not isinstance(graph_runner, DecodeCudaGraphRunner):
-                warmup_kwargs = (
-                    {"is_graph_warmup": is_graph_warmup} if type(graph_runner) is DecodeAclGraphRunner else {}
-                )
-                if isinstance(graph_runner, BlockDraftAclGraphRunner):
-                    warmup_kwargs["pre_capture_kv_buckets"] = is_graph_warmup
-                graph_key = graph_runner.warmup(
                     input_ids,
                     positions,
                     metadata,
                     input_embedding,
-                    **graph_kwargs,
+                    layer_synchronizer,
+                    mtp_topk_indices,
                     eplb=eplb,
-                    **warmup_kwargs,
+                    input_batch=input_batch,
                 )
-                if graph_key is not None:
-                    graph_kwargs["graph_key"] = graph_key
-            output = graph_runner.execute(
+            return self.eager_runner.execute(
                 input_ids,
                 positions,
                 metadata,
                 input_embedding,
-                **graph_kwargs,
+                layer_synchronizer,
                 eplb=eplb,
+                input_batch=input_batch,
             )
-            if (
-                isinstance(graph_runner, DecodeAclGraphRunner)
-                and not is_graph_warmup
-                and not self._serving_acl_graph_logged
-            ):
-                logger.info(
-                    "Python serving ACL graph replay: model=%s runner=%s rows=%d",
-                    type(self.model).__name__,
-                    type(graph_runner).__name__,
-                    input_ids.numel(),
+        if graph_runner is not None and (eplb is None or current_platform.is_npu()):
+            from xllm.python.model_executor.runners.block_draft_acl_graph import BlockDraftAclGraphRunner
+            from xllm.python.model_executor.runners.decode_acl_graph import DecodeAclGraphRunner
+
+            if isinstance(graph_runner, DecodeAclGraphRunner):
+                if type(graph_runner) is DecodeAclGraphRunner:
+                    # Subclasses can have a different admission/input contract.
+                    # Ordinary decode reuses its resolved values only in this call.
+                    decode_metadata = graph_runner.prepare_execution(
+                        input_ids, metadata, input_embedding, mtp_topk_indices
+                    )
+                    use_graph = decode_metadata is not None
+                else:
+                    decode_metadata = None
+                    use_graph = graph_runner.can_execute(input_ids, metadata, input_embedding, mtp_topk_indices)
+                if use_graph:
+                    if decode_metadata is not None:
+                        graph_key = graph_runner.warmup(
+                            input_ids,
+                            positions,
+                            metadata,
+                            input_embedding,
+                            mtp_topk_indices,
+                            eplb=eplb,
+                            decode_metadata=decode_metadata,
+                            is_graph_warmup=is_graph_warmup,
+                            input_batch=input_batch,
+                        )
+                    elif isinstance(graph_runner, BlockDraftAclGraphRunner):
+                        graph_key = graph_runner.warmup(
+                            input_ids,
+                            positions,
+                            metadata,
+                            input_embedding,
+                            mtp_topk_indices,
+                            eplb=eplb,
+                            pre_capture_kv_buckets=is_graph_warmup,
+                            input_batch=input_batch,
+                        )
+                    else:
+                        graph_key = graph_runner.warmup(
+                            input_ids,
+                            positions,
+                            metadata,
+                            input_embedding,
+                            mtp_topk_indices,
+                            eplb=eplb,
+                            input_batch=input_batch,
+                        )
+                    output = graph_runner.execute(
+                        input_ids,
+                        positions,
+                        metadata,
+                        input_embedding,
+                        mtp_topk_indices,
+                        graph_key=graph_key,
+                        eplb=eplb,
+                        decode_metadata=decode_metadata,
+                        input_batch=input_batch,
+                    )
+                    if not is_graph_warmup and not self._serving_acl_graph_logged:
+                        logger.info(
+                            "Python serving ACL graph replay: model=%s runner=%s rows=%d",
+                            type(self.model).__name__,
+                            type(graph_runner).__name__,
+                            input_ids.numel(),
+                        )
+                        self._serving_acl_graph_logged = True
+                    return output
+            elif mtp_topk_indices is None and graph_runner.can_execute(input_ids, metadata, input_embedding):
+                # CUDA can_execute only admits previously captured buckets. ACL
+                # captures lazily with scheduler metadata and MTP inputs.
+                return graph_runner.execute(
+                    input_ids,
+                    positions,
+                    metadata,
+                    input_embedding,
+                    eplb=eplb,
+                    input_batch=input_batch,
                 )
-                self._serving_acl_graph_logged = True
-            return output
         if mtp_topk_indices is None and self.inductor_runner is not None and layer_synchronizer is None:
             return self.inductor_runner.execute(
                 input_ids,
@@ -1167,6 +1244,7 @@ class ModelExecutor:
                 input_embedding,
                 layer_synchronizer,
                 eplb=eplb,
+                input_batch=input_batch,
             )
         return self.eager_runner.execute(
             input_ids,
@@ -1176,4 +1254,5 @@ class ModelExecutor:
             layer_synchronizer,
             mtp_topk_indices,
             eplb=eplb,
+            input_batch=input_batch,
         )

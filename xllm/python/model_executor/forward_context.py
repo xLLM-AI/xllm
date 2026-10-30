@@ -26,10 +26,12 @@ if TYPE_CHECKING:
     from xllm.python.attention.backend import (
         AttentionBackend,
         AttentionMetadata,
+        ExecutionMetadataSource,
         LayerCache,
     )
     from xllm.python.attention.npu_paged_attention import PagedAttentionGraphState
     from xllm.python.model_executor.cp_utils import CpContext
+    from xllm.python.model_executor.input_batch import InputBatch
 
 
 class ExecutionMetadataBuilder(Protocol):
@@ -37,7 +39,13 @@ class ExecutionMetadataBuilder(Protocol):
 
     def bind_layer_caches(self, layer_caches: list[LayerCache]) -> None: ...
 
-    def build(self, metadata: AttentionMetadata) -> object: ...
+    def build(self, input_batch: InputBatch, metadata: ExecutionMetadataSource) -> object: ...
+
+    def allocate_persistent(self, input_batch: InputBatch, metadata: ExecutionMetadataSource) -> object: ...
+
+    def update_persistent(
+        self, persistent_metadata: object, input_batch: InputBatch, metadata: ExecutionMetadataSource
+    ) -> None: ...
 
 
 class LayerSynchronizer(Protocol):

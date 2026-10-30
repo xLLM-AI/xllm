@@ -23,6 +23,7 @@ from scripts.logger import logger
 from xllm.python.attention.backend import AttentionBackend, AttentionMetadata
 from xllm.python.attention.block_draft_window import block_draft_model_window_context
 from xllm.python.model_executor.forward_context import AclGraphExecutionState, EplbRuntimeState
+from xllm.python.model_executor.input_batch import InputBatch
 from xllm.python.model_executor.runners.acl_graph import (
     AclGraphEntry,
     StaticGraphAttentionMetadata,
@@ -212,6 +213,7 @@ class BlockDraftAclGraphRunner(DecodeAclGraphRunner):
         *,
         eplb: EplbRuntimeState | None = None,
         pre_capture_kv_buckets: bool = False,
+        input_batch: InputBatch | None = None,
     ) -> _BlockGraphKey:
         self._validate_inputs(input_ids, positions, metadata)
         sequence_count = metadata.q_seq_lens.numel()
@@ -219,7 +221,8 @@ class BlockDraftAclGraphRunner(DecodeAclGraphRunner):
         padded_sequences = self._padded_sequence_count(metadata, sequence_count, query_width)
         assert padded_sequences is not None
         local_key = self._graph_key(input_ids, metadata, padded_sequences, query_width)
-        capacities = (int(local_key[2]),)
+        local_pages = local_key[2]
+        tiers: tuple[int, ...] = ()
         if pre_capture_kv_buckets and not self._windowed_block_draft:
             page_size = self._logical_page_size
             # The owned-table runner pads its last capacity to a power of two,
@@ -238,14 +241,15 @@ class BlockDraftAclGraphRunner(DecodeAclGraphRunner):
             # Model-wide tiers have the same order/count on every DP rank.
             # Keep the current local capacity as a separate final step: a
             # rank-local union would mismatch collectives for unequal shards.
-            capacities = (*tiers, int(local_key[2]))
-        for pages in capacities:
+        for pages in (*tiers, local_pages):
             capacity_key = (*local_key[:2], pages, *local_key[3:])
             # Peer variants belong to the complete capacity-specific key.
             graph_key = self._synchronize_dp_graph_key(capacity_key, input_ids)
             if self._synchronize_dp_graph_presence(graph_key, input_ids):
                 self._graphs.pop(graph_key, None)
-                self._prepare_graph_entry(input_ids, positions, metadata, graph_key=graph_key, eplb=eplb)
+                self._prepare_graph_entry(
+                    input_ids, positions, metadata, graph_key=graph_key, eplb=eplb, input_batch=input_batch
+                )
         return graph_key
 
     def _graph_key(
@@ -315,13 +319,14 @@ class BlockDraftAclGraphRunner(DecodeAclGraphRunner):
         *,
         graph_key: _BlockGraphKey,
         eplb: EplbRuntimeState | None = None,
+        input_batch: InputBatch | None = None,
     ) -> AclGraphEntry:
         if input_embedding is not None or mtp_topk_indices is not None:
             raise ValueError("DSpark ACL graph does not accept embedding or MTP graph inputs")
         page_table_capacity = int(graph_key[2])
         entry = self._graphs.get(graph_key)
         first_capture = entry is None
-        if first_capture:
+        if entry is None:
             logger.info(
                 "DSpark ACL graph page-table bucket: capacity=%d source_cols=%d windowed_draft=%s",
                 page_table_capacity,
@@ -346,6 +351,7 @@ class BlockDraftAclGraphRunner(DecodeAclGraphRunner):
             torch.npu.current_stream().wait_event(self._update_done_event)
         self._prepare_graph_eplb_state(entry, eplb, metadata, first_capture=first_capture)
         self._fill_entry(entry, input_ids, positions, metadata)
+        self._bind_graph_input_batch(entry, input_batch)
         self._prepare_attention(entry, entry.static_metadata)
         if first_capture:
             self._capture(entry, self._stream)
@@ -358,26 +364,23 @@ class BlockDraftAclGraphRunner(DecodeAclGraphRunner):
         positions: torch.Tensor,
         metadata: AttentionMetadata,
         *,
-        sequence_count: int | None = None,
-        page_table_capacity: int | None = None,
+        sequence_count: int,
+        page_table_capacity: int,
     ) -> AclGraphEntry:
         del positions
-        if sequence_count is None:
-            sequence_count = metadata.q_seq_lens.numel()
         query_width = int(metadata.q_seq_lens[0].item())
         token_count = sequence_count * query_width
         device = input_ids.device
         page_size = self._logical_page_size
         if page_size <= 0:
             raise ValueError("DSpark ACL graph page size must be positive")
-        max_block_cols = self._page_table_capacity(metadata) if page_table_capacity is None else page_table_capacity
-        kv_capacity = max_block_cols * page_size
+        kv_capacity = page_table_capacity * page_size
         if self._query_ends(metadata, [query_width] * metadata.q_seq_lens.numel()) is None:
             raise ValueError("DSpark ACL graph requires canonical query ends")
         query_ends = [query_width * (index + 1) for index in range(sequence_count)]
         static_block_table = torch.zeros(
             sequence_count,
-            max_block_cols,
+            page_table_capacity,
             dtype=torch.int32,
             device=device,
         )
@@ -385,7 +388,7 @@ class BlockDraftAclGraphRunner(DecodeAclGraphRunner):
         static_metadata = StaticGraphAttentionMetadata(
             slot_mapping=torch.full((token_count,), -1, dtype=metadata.slot_mapping.dtype, device=device),
             paged_kv_indptr=torch.zeros(sequence_count + 1, dtype=torch.int32, device=device),
-            paged_kv_indices=torch.zeros(sequence_count * max_block_cols, dtype=torch.int32, device=device),
+            paged_kv_indices=torch.zeros(sequence_count * page_table_capacity, dtype=torch.int32, device=device),
             paged_kv_last_page_len=torch.ones(sequence_count, dtype=torch.int32, device=device),
             q_cu_seq_lens=torch.tensor([0, *query_ends], dtype=torch.int32, device=device),
             q_cu_seq_lens_host_values=list(query_ends),

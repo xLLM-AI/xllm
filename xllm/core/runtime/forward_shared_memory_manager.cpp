@@ -103,7 +103,7 @@ constexpr PackedInputDomain packed_input_domain() {
   return PackedInputDomain::LLM;
 }
 constexpr uint64_t kPackedInputMagic = 0x584c4c4d494e5032;
-constexpr uint16_t kPackedInputSchemaVersion = 9;
+constexpr uint16_t kPackedInputSchemaVersion = 10;
 constexpr uint32_t kPackedInputHeaderBytes = 40;
 
 struct RawInputLayoutHeader final {
@@ -2591,6 +2591,12 @@ inline void deserialize_forward_input_payload(
   read_data(context, input_params.meta.q_max_seq_len);
   read_data(context, input_params.meta.batch_id);
   read_data(context, input_params.meta.is_graph_warmup);
+  read_data(context, input_params.meta.execution_batch.num_reqs);
+  read_data(context, input_params.meta.execution_batch.num_tokens);
+  read_vector(context, input_params.meta.execution_batch.num_scheduled_tokens);
+  read_vector(context, input_params.meta.execution_batch.num_computed_tokens);
+  read_vector(context, input_params.meta.execution_batch.query_start_loc);
+  read_vector(context, input_params.meta.execution_batch.is_prefilling);
   read_data(context, input_params.meta.mtp_draft_steps);
   read_data(context, input_params.meta.mtp_target_graph_rows);
   read_tensor_and_vector(context,
@@ -2940,6 +2946,16 @@ inline void serialize_forward_input_sections(
   write_data(context.descriptor, input_params.meta.q_max_seq_len);
   write_data(context.descriptor, input_params.meta.batch_id);
   write_data(context.descriptor, input_params.meta.is_graph_warmup);
+  write_data(context.descriptor, input_params.meta.execution_batch.num_reqs);
+  write_data(context.descriptor, input_params.meta.execution_batch.num_tokens);
+  write_vector(context.descriptor,
+               input_params.meta.execution_batch.num_scheduled_tokens);
+  write_vector(context.descriptor,
+               input_params.meta.execution_batch.num_computed_tokens);
+  write_vector(context.descriptor,
+               input_params.meta.execution_batch.query_start_loc);
+  write_vector(context.descriptor,
+               input_params.meta.execution_batch.is_prefilling);
   write_data(context.descriptor, input_params.meta.mtp_draft_steps);
   write_data(context.descriptor, input_params.meta.mtp_target_graph_rows);
 

@@ -106,6 +106,9 @@ class ForwardInputBuilder final {
     uint32_t q_max_seq_len = 0;
     // Tracking token counts in KV cache for linear-attention state setup.
     std::vector<int32_t> kv_cache_tokens_nums;
+    std::vector<int32_t> num_scheduled_tokens;
+    std::vector<int32_t> num_computed_tokens;
+    std::vector<uint8_t> is_prefilling;
 #if defined(USE_NPU)
     std::vector<int32_t> seq_lens;
     std::vector<int32_t> q_seq_lens;
@@ -189,6 +192,7 @@ class ForwardInputBuilder final {
   uint32_t num_sequences_ = 0;
   bool need_unique_tokens_ = true;
   bool build_eplb_decode_token_mask_ = false;
+  bool build_execution_batch_ = false;
   bool is_graph_warmup_ = false;
   int32_t cp_size_ = 1;
 

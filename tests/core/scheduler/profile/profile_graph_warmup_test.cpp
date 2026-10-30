@@ -337,12 +337,6 @@ class RecordingProfileEngine final : public Engine {
 
   const ModelArgs& model_args() const override { return model_args_; }
 
-  DecodeGraphWarmupConfig warmup_config() const {
-    return make_decode_graph_warmup_config(num_speculative_tokens_ + 1,
-                                           num_speculative_tokens_,
-                                           /*enable_no_padding=*/false);
-  }
-
   void reset_profile_markers() { all_requests_marked_ = true; }
 
   bool all_requests_marked() const { return all_requests_marked_; }

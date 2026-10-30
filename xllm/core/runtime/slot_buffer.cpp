@@ -26,6 +26,7 @@ limitations under the License.
 #include <numeric>
 #include <unordered_set>
 
+#include "core/framework/config/model_config.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/platform/platform.h"
 #include "core/runtime/forward_params.h"
@@ -310,10 +311,17 @@ BatchInputMeta batch_meta(const ModelInputBatch& batch) {
   return meta;
 }
 
-std::span<const int32_t> linear_ids(const LlmModelParams& params) {
-  return params.embedding.linear_state_ids.empty()
-             ? int_span(params.embedding.linear_state_indices)
-             : std::span<const int32_t>(params.embedding.linear_state_ids);
+std::span<const int32_t> linear_ids(const LlmEmbeddingInput& embedding,
+                                    bool read = false) {
+  if (read && !embedding.linear_state_read_ids.empty()) {
+    return embedding.linear_state_read_ids;
+  }
+  if (read && embedding.linear_state_read_indices.defined()) {
+    return int_span(embedding.linear_state_read_indices);
+  }
+  return embedding.linear_state_ids.empty()
+             ? int_span(embedding.linear_state_indices)
+             : std::span<const int32_t>(embedding.linear_state_ids);
 }
 
 void copy_to_device(const torch::Tensor& destination,
@@ -609,12 +617,21 @@ SlotBuffer::SlotBuffer(SlotBufferCapacity capacity,
         capacity_.model.max_sequences);
   }
 
+  populate_execution_batch_ = ModelConfig::is_python_model_impl(
+      ModelConfig::get_instance().model_impl());
   AttentionHostInputView& host = model_params_.attention.host;
+  auto& execution_batch = model_params_.meta.execution_batch;
   for (std::vector<int32_t>* lengths : {&host.q_seq_lens,
                                         &host.q_cu_seq_lens,
                                         &host.kv_seq_lens,
                                         &host.kv_cache_tokens_nums}) {
     lengths->reserve(capacity_.model.max_sequences);
+  }
+  if (populate_execution_batch_) {
+    execution_batch.num_scheduled_tokens.reserve(capacity_.model.max_sequences);
+    execution_batch.num_computed_tokens.reserve(capacity_.model.max_sequences);
+    execution_batch.query_start_loc.reserve(capacity_.model.max_sequences + 1);
+    execution_batch.is_prefilling.reserve(capacity_.model.max_sequences);
   }
   host.new_cache_slots.reserve(capacity_.model.max_tokens);
   model_params_.attn_metadata = std::make_shared<layer::AttentionMetadata>();
@@ -832,7 +849,8 @@ ModelInputHostView SlotBuffer::model_input_view(const LlmForwardInput& input) {
           int_span(host.block_tables),
           tokens.empty()
               ? 0
-              : static_cast<uint32_t>(host.block_tables.size(/*dim=*/1))};
+              : static_cast<uint32_t>(host.block_tables.size(/*dim=*/1)),
+          &input.input_params.meta.execution_batch};
 }
 
 Status SlotBuffer::validate_model_state(const LlmForwardInput& input) const {
@@ -846,7 +864,7 @@ Status SlotBuffer::validate_model_state(const LlmForwardInput& input) const {
                             indices.numel() != rows)) {
     return invalid("Linear-state indices must be row-aligned CPU int32.");
   }
-  const auto ids = linear_ids(params);
+  const auto ids = linear_ids(params.embedding);
   if (overlaps_host(ids, host_buffer_)) {
     return invalid("Linear-state input aliases destination staging storage.");
   }
@@ -863,9 +881,7 @@ Status SlotBuffer::validate_model_state(const LlmForwardInput& input) const {
        read_indices.numel() != rows)) {
     return invalid("Linear-state read indices must be row-aligned CPU int32.");
   }
-  const auto reads = !read_ids.empty() ? std::span<const int32_t>(read_ids)
-                     : read_indices.defined() ? int_span(read_indices)
-                                              : ids;
+  const auto reads = linear_ids(params.embedding, /*read=*/true);
   if ((!reads.empty() && reads.size() != rows) ||
       overlaps_host(reads, host_buffer_) ||
       (!validity.empty() && validity.size() != rows) ||
@@ -1090,6 +1106,21 @@ void SlotBuffer::prepare_model(const ModelInputHostView& input,
   model_params_.meta.is_graph_warmup = batch.is_graph_warmup;
   model_params_.meta.q_max_seq_len = maximum(host.q_seq_lens);
   model_params_.meta.kv_max_seq_len = maximum(host.kv_seq_lens);
+  if (populate_execution_batch_) {
+    auto& execution_batch = model_params_.meta.execution_batch;
+    if (input.execution_batch != nullptr) {
+      execution_batch = *input.execution_batch;
+    } else {
+      const int32_t requests = batch.actual_num_sequences;
+      execution_batch.num_reqs = requests;
+      execution_batch.num_scheduled_tokens.assign(
+          input.q_seq_lens.begin(), input.q_seq_lens.begin() + requests);
+      fill_request_layout(execution_batch, input.positions);
+      execution_batch.is_prefilling.assign(
+          requests, batch.batch_forward_type.no_decode());
+    }
+    execution_batch.num_tokens = token_count;
+  }
   // These are the original Python paged-attention inputs. The Slot owns the
   // tensor views and Host metadata until its last reader retires. No model
   // invocation, rotary computation or attention kernel is created here.
@@ -1140,7 +1171,7 @@ void SlotBuffer::prepare_model_state(const LlmForwardInput& input,
   const bool warmup = source.meta.is_graph_warmup;
   auto ids = model_host_.linear_state_indices.narrow(0, 0, rows);
   ids.zero_();
-  const auto source_ids = linear_ids(source);
+  const auto source_ids = linear_ids(source.embedding);
   if (!warmup && actual_rows != 0) {
     std::memcpy(
         ids.data_ptr<int32_t>(), source_ids.data(), source_ids.size_bytes());
@@ -1149,12 +1180,7 @@ void SlotBuffer::prepare_model_state(const LlmForwardInput& input,
   params.embedding.linear_state_indices =
       model_device_.linear_state_indices.narrow(0, 0, rows);
   params.embedding.linear_state_indices.copy_(ids, /*non_blocking=*/true);
-  const std::span<const int32_t> source_read_ids =
-      !source.embedding.linear_state_read_ids.empty()
-          ? std::span<const int32_t>(source.embedding.linear_state_read_ids)
-      : source.embedding.linear_state_read_indices.defined()
-          ? int_span(source.embedding.linear_state_read_indices)
-          : source_ids;
+  const auto source_read_ids = linear_ids(source.embedding, /*read=*/true);
   auto read_ids = model_host_.linear_state_read_indices.narrow(0, 0, rows);
   if (!warmup && actual_rows != 0) {
     const size_t copied = source_read_ids.size();
@@ -1619,6 +1645,14 @@ Status SlotBuffer::create_mtp_input(const MtpInputSpec& spec,
   auto scratch = std::make_unique<SlotBuffer::InputScratch>();
   auto& view = *scratch;
   view.spec_ = spec;
+  auto& execution_batch = view.planned_execution_batch_;
+  if (ModelConfig::is_python_model_impl(
+          ModelConfig::get_instance().model_impl())) {
+    execution_batch.num_scheduled_tokens.reserve(spec.model.max_sequences);
+    execution_batch.num_computed_tokens.reserve(spec.model.max_sequences);
+    execution_batch.query_start_loc.reserve(spec.model.max_sequences + 1);
+    execution_batch.is_prefilling.reserve(spec.model.max_sequences);
+  }
   ModelInputCapacity capacity = spec.model;
   if (!prefill) {
     view.rows_per_sequence_ =
@@ -1858,6 +1892,16 @@ Status SlotBuffer::plan_mtp_decode(SlotBuffer& input,
                    view.query_ends_,
                    view.block_tables_,
                    base.block_table_width};
+  auto& execution_batch = view.planned_execution_batch_;
+  if (input.populate_execution_batch_) {
+    execution_batch.num_reqs = static_cast<int32_t>(count);
+    execution_batch.num_tokens = view.tokens_.size();
+    execution_batch.num_scheduled_tokens.assign(count, view.rows_per_sequence_);
+    fill_request_layout(execution_batch, view.positions_);
+    execution_batch.is_prefilling.assign(
+        count, view.spec_.kind == MtpInvocationKind::BLOCK_DRAFT);
+  }
+  view.planned_.execution_batch = &view.planned_execution_batch_;
   return Status();
 }
 
@@ -1916,7 +1960,8 @@ Status SlotBuffer::prepare_block_draft_padded(SlotBuffer& input,
                                   view.kv_lengths_,
                                   view.query_ends_,
                                   view.block_tables_,
-                                  view.planned_.block_table_width};
+                                  view.planned_.block_table_width,
+                                  &view.planned_execution_batch_};
   status = input.prepare(padded, batch, stream);
   if (status.ok()) {
     input.model_params().enable_graph = true;

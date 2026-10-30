@@ -112,6 +112,7 @@ class __attribute__((visibility("hidden"))) PyExecutorImpl final
   pybind11::object adaptive_unified_registry_;
   PyExecutorImpl* adaptive_unified_draft_ = nullptr;
   ProcessGroup* adaptive_unified_sampling_group_ = nullptr;
+  bool requires_input_batch_metadata_ = false;
   bool supports_prepared_metadata_ = false;
   bool supports_layerwise_kv_load_ = false;
   bool kv_bound_ = false;

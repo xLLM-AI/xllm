@@ -21,10 +21,11 @@ from typing import TYPE_CHECKING
 import torch
 
 from xllm.python.layers.npu.mega_moe_metadata import MEGA_MOE_MAX_TOKENS, MegaMoeMetadata
-from xllm.python.layers.qwen3_5.common import Qwen3_5MoEConfig
 
 if TYPE_CHECKING:
-    from xllm.python.attention.backend import AttentionMetadata, LayerCache
+    from xllm.python.attention.backend import ExecutionMetadataSource, LayerCache
+    from xllm.python.layers.qwen3_5.common import Qwen3_5MoEConfig
+    from xllm.python.model_executor.input_batch import InputBatch
 
 
 class TokenOwnerMegaMoeMetadataBuilder:
@@ -38,13 +39,50 @@ class TokenOwnerMegaMoeMetadataBuilder:
         self._dp_rank = cfg.dp_rank
         self._hidden_size = cfg.hidden_size
         self._top_k = cfg.num_experts_per_tok
-        self._token_limit = cfg.mega_moe_num_max_tokens_per_rank
+        self._token_limit = min(MEGA_MOE_MAX_TOKENS, cfg.mega_moe_num_max_tokens_per_rank)
 
     def bind_layer_caches(self, layer_caches: list[LayerCache]) -> None:
         del layer_caches
 
-    def build(self, metadata: AttentionMetadata) -> MegaMoeMetadata:
-        local_token_count = int(metadata.slot_mapping.numel())
+    def allocate_persistent(self, input_batch: InputBatch, metadata: ExecutionMetadataSource) -> MegaMoeMetadata:
+        token_capacity = input_batch.num_tokens_after_padding
+        if token_capacity > self._token_limit:
+            return MegaMoeMetadata(None)
+        if not self._is_token_owner:
+            return self.build(input_batch, metadata)
+        graph_mask = getattr(metadata, "mega_moe_token_mask", None)
+        if graph_mask is not None:
+            if graph_mask.shape != (self._dp_size * token_capacity,) or graph_mask.dtype != torch.int8:
+                raise RuntimeError("MegaMoe graph token mask has an invalid shape or dtype")
+            return MegaMoeMetadata(graph_mask.narrow(0, self._dp_rank * token_capacity, token_capacity))
+        active_token_mask = torch.zeros(token_capacity, dtype=torch.int8, device=input_batch.input_ids.device)
+        active_token_mask[: input_batch.query_start_loc[-1]].fill_(1)
+        return MegaMoeMetadata(active_token_mask)
+
+    def update_persistent(
+        self,
+        persistent_metadata: object,
+        input_batch: InputBatch,
+        metadata: ExecutionMetadataSource,
+    ) -> None:
+        del metadata
+        if not isinstance(persistent_metadata, MegaMoeMetadata):
+            raise TypeError("MegaMoe received invalid persistent metadata")
+        active_token_mask = persistent_metadata.active_token_mask
+        if active_token_mask is None:
+            if input_batch.num_tokens_after_padding > self._token_limit:
+                return
+            raise RuntimeError("MegaMoe active execution requires a persistent token mask")
+        if not self._is_token_owner:
+            return
+        token_capacity = active_token_mask.shape[0]
+        is_padding = input_batch.is_padding
+        if is_padding is None or tuple(is_padding.shape) != (token_capacity,):
+            raise ValueError("MegaMoe requires one padding flag per graph token")
+        torch.logical_not(is_padding, out=active_token_mask)
+
+    def build(self, input_batch: InputBatch, metadata: ExecutionMetadataSource) -> MegaMoeMetadata:
+        local_token_count = input_batch.num_tokens_after_padding
         execution_counts = tuple(int(count) for count in metadata.dp_execution_token_counts)
         if not execution_counts and self._dp_size == 1:
             execution_counts = (local_token_count,)
@@ -65,7 +103,7 @@ class TokenOwnerMegaMoeMetadataBuilder:
         ):
             raise RuntimeError("MegaMoe graph token mask has an invalid shape, dtype or device")
 
-        if token_capacity > min(MEGA_MOE_MAX_TOKENS, self._token_limit):
+        if token_capacity > self._token_limit:
             return MegaMoeMetadata(None)
 
         if self._is_token_owner and graph_mask is not None:
@@ -74,7 +112,7 @@ class TokenOwnerMegaMoeMetadataBuilder:
         else:
             active_token_mask = torch.zeros(token_capacity, dtype=torch.int8, device=device)
             if self._is_token_owner:
-                active_token_mask[:local_token_count].fill_(1)
+                active_token_mask[: input_batch.query_start_loc[-1]].fill_(1)
             else:
                 # Every non-owner TP rank participates with one immutable dummy.
                 active_token_mask[0] = 1

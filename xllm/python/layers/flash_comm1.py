@@ -17,14 +17,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import torch
 
 from scripts.logger import logger
 from xllm.python import distributed
-from xllm.python.attention.backend import AttentionMetadata, LayerCache
 from xllm.python.model_executor.forward_context import get_forward_context_or_none
+
+if TYPE_CHECKING:
+    from xllm.python.attention.backend import ExecutionMetadataSource, LayerCache
+    from xllm.python.model_executor.input_batch import InputBatch
 
 
 @dataclass(frozen=True)
@@ -69,7 +72,7 @@ def get_flash_comm1_context() -> FlashComm1Context | None:
 
 
 class FlashComm1MetadataBuilder:
-    metadata_type = FlashComm1Context
+    metadata_type: type[object] = FlashComm1Context
 
     def __init__(
         self,
@@ -94,8 +97,17 @@ class FlashComm1MetadataBuilder:
     def bind_layer_caches(self, layer_caches: list[LayerCache]) -> None:
         pass
 
-    def build(self, metadata: AttentionMetadata) -> FlashComm1Context | None:
-        num_tokens = metadata.slot_mapping.numel()
+    def allocate_persistent(self, input_batch: InputBatch, metadata: ExecutionMetadataSource) -> None:
+        self.update_persistent(None, input_batch, metadata)
+
+    def update_persistent(
+        self, persistent_metadata: object, input_batch: InputBatch, metadata: ExecutionMetadataSource
+    ) -> None:
+        if persistent_metadata is not None or self.build(input_batch, metadata) is not None:
+            raise NotImplementedError("FlashComm1 does not support persistent graph metadata")
+
+    def build(self, input_batch: InputBatch, metadata: ExecutionMetadataSource) -> FlashComm1Context | None:
+        num_tokens = input_batch.num_tokens
         if (
             not (metadata.is_prefill or metadata.is_chunked_prefill)
             or metadata.is_mixed

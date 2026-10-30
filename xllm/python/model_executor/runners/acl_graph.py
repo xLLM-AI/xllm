@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -36,6 +37,10 @@ from xllm.python.model_executor.runners.base import BaseRunner, ModelExecutionOu
 from xllm.python.model_executor.runners.decode_cuda_graph import _CAPTURE_WARMUP_STEPS
 
 _GRAPH_POOL: tuple[int, int] | None = None
+
+
+if TYPE_CHECKING:
+    from xllm.python.model_executor.input_batch import InputBatch
 
 
 def _get_graph_pool() -> tuple[int, int]:
@@ -66,11 +71,11 @@ class StaticGraphAttentionMetadata:
     linear_state_indices: torch.Tensor | None = None
     linear_verify_graph: LinearVerifyGraphInputs | None = None
     num_accepted_tokens: torch.Tensor | None = None
-    num_accepted_tokens_host_values: tuple[int, ...] = ()
+    num_accepted_tokens_host_values: Sequence[int] = ()
     linear_state_read_indices: torch.Tensor | None = None
     linear_state_write_indices: torch.Tensor | None = None
     has_initial_state: torch.Tensor | None = None
-    dp_execution_token_counts: tuple[int, ...] = ()
+    dp_execution_token_counts: Sequence[int] = ()
     dp_global_sequence_nums: tuple[int, ...] = ()
     dp_is_decode: tuple[int, ...] = ()
     q_seq_lens: torch.Tensor | None = None
@@ -99,6 +104,11 @@ class StaticGraphAttentionMetadata:
 
 
 class AclGraphEntry:
+    batch_size: int
+    static_input_ids: torch.Tensor
+    static_positions: torch.Tensor
+    static_metadata: StaticGraphAttentionMetadata
+
     __slots__ = (
         "batch_size",
         "mega_moe_token_counts",
@@ -115,6 +125,8 @@ class AclGraphEntry:
         "execution_state",
         "eplb",
         "layer_shared_cache",
+        "is_padding",
+        "graph_input_batch",
         "replay_logged",
         "kv_capacity_pages",
     )
@@ -122,6 +134,9 @@ class AclGraphEntry:
     def __init__(self) -> None:
         self.eplb: EplbRuntimeState | None = None
         self.kv_capacity_pages = 0
+        self.is_padding: torch.Tensor | None = None
+        self.graph_input_batch: InputBatch | None = None
+        self.layer_shared_cache: dict[object, object] = {}
 
 
 class AclGraphRunner(BaseRunner):
@@ -132,6 +147,38 @@ class AclGraphRunner(BaseRunner):
         self._update_stream: torch.npu.Stream | None = None
         self._replay_done_event: torch.npu.Event | None = None
         self._capture_error_mode = "global"
+
+    def _bind_graph_input_batch(self, entry: AclGraphEntry, input_batch: InputBatch | None) -> None:
+        if not self.execution_metadata_builders:
+            return
+        if input_batch is None:
+            raise RuntimeError("execution metadata builders require upstream InputBatch metadata")
+        token_capacity = entry.static_input_ids.numel()
+        is_padding = entry.is_padding
+        if is_padding is None or tuple(is_padding.shape) != (token_capacity,):
+            with torch.inference_mode(False):
+                entry.is_padding = torch.empty(token_capacity, dtype=torch.bool, device=input_batch.input_ids.device)
+            is_padding = entry.is_padding
+        is_padding.fill_(True)
+        is_padding[: input_batch.query_start_loc[input_batch.num_reqs]].fill_(False)
+        entry.graph_input_batch = input_batch.bind_graph_inputs(
+            entry.static_input_ids,
+            entry.static_positions,
+            is_padding,
+        )
+        execution_contexts = entry.layer_shared_cache
+        if not execution_contexts:
+            with torch.inference_mode(False):
+                for builder in self.execution_metadata_builders:
+                    execution_contexts[builder.metadata_type] = builder.allocate_persistent(
+                        entry.graph_input_batch, entry.static_metadata
+                    )
+        for builder in self.execution_metadata_builders:
+            if builder.metadata_type not in execution_contexts:
+                raise RuntimeError(f"missing persistent execution metadata for {builder.metadata_type.__name__}")
+            builder.update_persistent(
+                execution_contexts[builder.metadata_type], entry.graph_input_batch, entry.static_metadata
+            )
 
     @staticmethod
     def _fill_mega_moe_token_mask(entry: AclGraphEntry, token_counts: Sequence[int]) -> None:
@@ -306,10 +353,6 @@ class AclGraphRunner(BaseRunner):
         # stream. A new bucket's eager warmup must observe those writes before
         # reading token IDs or page tables, just like an existing graph replay.
         stream.wait_stream(torch.npu.current_stream())
-        # Retain builder inputs for the graph's lifetime, including non-owner
-        # MegaMoe dummy tensors allocated before capture.
-        with torch.npu.stream(stream):
-            entry.layer_shared_cache = self._build_execution_contexts(entry.static_metadata, entry.static_input_ids)
         context = ForwardContext(
             self.attention_backend,
             self.device,

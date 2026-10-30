@@ -144,7 +144,7 @@ def test_dspark_dp_graph_uses_group_wide_complete_blocks(dp_rank: int, sequence_
 
     assert runner.can_execute(input_ids, metadata)
     assert runner._padded_sequence_count(metadata, sequence_count, 2) == 4
-    entry = runner._allocate_entry(input_ids, input_ids, metadata, sequence_count=4)
+    entry = runner._allocate_entry(input_ids, input_ids, metadata, sequence_count=4, page_table_capacity=4)
     runner._fill_entry(entry, input_ids, input_ids, metadata)
     static = entry.static_metadata
     assert entry.static_input_ids.numel() == 8
@@ -171,7 +171,7 @@ def test_dspark_dp_graph_admits_an_idle_rank_full_block() -> None:
     input_ids = torch.zeros(2, dtype=torch.int32)
 
     assert runner.can_execute(input_ids, metadata)
-    entry = runner._allocate_entry(input_ids, input_ids, metadata, sequence_count=4)
+    entry = runner._allocate_entry(input_ids, input_ids, metadata, sequence_count=4, page_table_capacity=4)
     runner._fill_entry(entry, input_ids, input_ids, metadata)
     assert entry.static_metadata.slot_mapping.tolist() == [-1] * 8
     assert entry.static_metadata.kv_seq_lens.tolist() == [1] * 4
@@ -209,7 +209,7 @@ def test_dspark_dp_replay_clears_rows_from_a_larger_local_batch() -> None:
     metadata = _block_draft_metadata(torch.full((3, 2), 10, dtype=torch.int32))
     input_ids = torch.arange(6, dtype=torch.int32) + 10
     metadata.kv_cu_seq_lens = torch.tensor([0, 8, 16, 24], dtype=torch.int32)
-    entry = runner._allocate_entry(input_ids, input_ids, metadata, sequence_count=4)
+    entry = runner._allocate_entry(input_ids, input_ids, metadata, sequence_count=4, page_table_capacity=4)
     runner._fill_entry(entry, input_ids, input_ids, metadata)
     smaller = _block_draft_metadata(torch.tensor([[20]], dtype=torch.int32))
     runner._fill_entry(entry, input_ids[:2], input_ids[:2], smaller)
@@ -259,8 +259,14 @@ def test_dspark_dp_warmup_recaptures_when_any_rank_is_missing() -> None:
         assert group_name == "dp"
         count.fill_(1)
 
-    def prepare(*args: object, graph_key: tuple[object, ...], eplb: object | None = None) -> None:
+    def prepare(
+        *_args: object,
+        graph_key: tuple[object, ...],
+        eplb: object | None = None,
+        input_batch: object = None,
+    ) -> None:
         assert eplb is expected_eplb
+        assert input_batch is None
         assert graph_key not in runner._graphs
         runner._graphs[graph_key] = object()
 
@@ -292,7 +298,7 @@ def test_block_draft_dp_prewarm_keeps_collectives_aligned_for_unequal_capacities
         assert group_name == "dp"
         count.mul_(2)
 
-    def prepare(*args: object, graph_key: tuple[object, ...], eplb: object = None) -> None:
+    def prepare(*_args: object, graph_key: tuple[object, ...], **_: object) -> None:
         captured.append(graph_key)
         runner._graphs[graph_key] = object()
 
@@ -334,7 +340,7 @@ def test_block_draft_dp_prewarmed_capacity_keys_are_reused_at_runtime() -> None:
         assert group_name == "dp"
         count.mul_(2)
 
-    def prepare(*args: object, graph_key: tuple[object, ...], eplb: object = None) -> None:
+    def prepare(*_args: object, graph_key: tuple[object, ...], **_: object) -> None:
         captured.append(graph_key)
         runner._graphs[graph_key] = object()
 
@@ -400,7 +406,7 @@ def test_dspark_graph_capacity_does_not_use_model_maximum() -> None:
     metadata.kv_seq_lens.fill_(15 * 128)
     metadata.kv_seq_lens_host_values = [15 * 128]
 
-    entry = runner._allocate_entry(input_ids, positions, metadata)
+    entry = runner._allocate_entry(input_ids, positions, metadata, sequence_count=1, page_table_capacity=32)
 
     assert entry.static_metadata.block_table.shape == (1, 32)
     assert entry.static_metadata.paged_kv_indices.numel() == 32
@@ -417,7 +423,9 @@ def test_windowed_block_draft_reuses_one_source_capacity_across_contexts(sparse_
     runner = BlockDraftAclGraphRunner(model, backend, torch.device("cpu"), max_batch=1, max_model_len=65537)
     tokens = torch.arange(2, dtype=torch.int32)
 
-    def prepare_entry(*args: object, graph_key: tuple[object, ...], eplb: object = None) -> None:
+    def prepare_entry(
+        *args: object, graph_key: tuple[object, ...], eplb: object = None, input_batch: object = None
+    ) -> None:
         runner._graphs[graph_key] = object()
 
     with patch.object(runner, "_prepare_graph_entry", side_effect=prepare_entry) as prepare:
@@ -429,7 +437,7 @@ def test_windowed_block_draft_reuses_one_source_capacity_across_contexts(sparse_
             key = runner.warmup(tokens, tokens, metadata, pre_capture_kv_buckets=True)
             assert key[2] == 513
     assert prepare.call_count == 1
-    entry = runner._allocate_entry(tokens, tokens, metadata)
+    entry = runner._allocate_entry(tokens, tokens, metadata, sequence_count=1, page_table_capacity=key[2])
     assert entry.static_metadata.block_table.shape == (1, 513)
 
 
@@ -444,7 +452,7 @@ def test_block_draft_graph_compacts_reserved_pages_with_live_lengths(sequence_co
     metadata.kv_seq_lens = torch.tensor(lengths, dtype=torch.int32)
     metadata.kv_seq_lens_host_values = lengths
     input_ids = torch.arange(2 * sequence_count, dtype=torch.int32)
-    entry = runner._allocate_entry(input_ids, input_ids, metadata, sequence_count=padded_count)
+    entry = runner._allocate_entry(input_ids, input_ids, metadata, sequence_count=padded_count, page_table_capacity=32)
 
     runner._fill_entry(entry, input_ids, input_ids, metadata)
 
@@ -479,7 +487,7 @@ def test_dspark_warmup_captures_once_per_page_capacity_bucket() -> None:
     input_ids = torch.arange(2, dtype=torch.int32)
     positions = input_ids.clone()
 
-    def prepare_entry(*args: object, graph_key: tuple[object, ...], eplb: object = None) -> None:
+    def prepare_entry(*_args: object, graph_key: tuple[object, ...], **_: object) -> None:
         runner._graphs[graph_key] = object()
 
     with patch.object(runner, "_prepare_graph_entry", side_effect=prepare_entry) as prepare:
@@ -509,7 +517,7 @@ def test_block_draft_startup_prewarms_large_buckets_with_short_metadata(
     tokens = torch.arange(2, dtype=torch.int32)
     captured = []
 
-    def prepare_entry(*args: object, graph_key: tuple[object, ...], eplb: object = None) -> None:
+    def prepare_entry(*_args: object, graph_key: tuple[object, ...], **_: object) -> None:
         captured.append(graph_key[2])
         runner._graphs[graph_key] = object()
 
@@ -590,7 +598,7 @@ def test_dspark_graph_replay_preserves_host_capacity_and_updates_device_lengths(
     input_ids = torch.arange(2, dtype=torch.int32)
     positions = input_ids.clone()
     first_metadata = _block_draft_metadata(torch.tensor([[10, 11, 12]], dtype=torch.int32))
-    entry = runner._allocate_entry(input_ids, positions, first_metadata)
+    entry = runner._allocate_entry(input_ids, positions, first_metadata, sequence_count=1, page_table_capacity=4)
     prepared = entry.static_metadata.prepared_attention_state
     host_bounds = prepared.actual_seq_kv
     device_lengths = entry.static_metadata.kv_seq_lens
@@ -631,7 +639,7 @@ def test_dspark_graph_replay_clears_stale_page_table_tail() -> None:
     first_metadata = _block_draft_metadata(
         torch.tensor([[10, 11, 12]], dtype=torch.int32),
     )
-    entry = runner._allocate_entry(input_ids, positions, first_metadata)
+    entry = runner._allocate_entry(input_ids, positions, first_metadata, sequence_count=1, page_table_capacity=4)
 
     runner._fill_entry(entry, input_ids, positions, first_metadata)
     assert entry.static_metadata.block_table.shape == (1, 4)
@@ -671,7 +679,7 @@ def test_dspark_graph_validation_preserves_static_inputs(
     input_ids = torch.arange(2, dtype=torch.int32)
     positions = input_ids.clone()
     metadata = _block_draft_metadata(torch.tensor([[10, 11, 12]], dtype=torch.int32))
-    entry = runner._allocate_entry(input_ids, positions, metadata)
+    entry = runner._allocate_entry(input_ids, positions, metadata, sequence_count=1, page_table_capacity=4)
     runner._fill_entry(entry, input_ids, positions, metadata)
     static = entry.static_metadata
     tensor_names = (
@@ -736,7 +744,9 @@ def test_block_draft_inherited_execute_keeps_entry_preparation_signature() -> No
     ):
         output = runner.execute(input_ids, input_ids, metadata, graph_key=graph_key)
 
-    prepare.assert_called_once_with(input_ids, input_ids, metadata, None, None, graph_key=graph_key, eplb=None)
+    prepare.assert_called_once_with(
+        input_ids, input_ids, metadata, None, None, graph_key=graph_key, eplb=None, input_batch=None
+    )
     entry.graph.replay.assert_called_once_with()
     stream_context.assert_called_once_with(caller)
     torch.testing.assert_close(output, entry.static_output[:2])
@@ -811,7 +821,7 @@ def test_taskless_metadata_fill_waits_only_when_stream_changes(same_stream: bool
     entry = SimpleNamespace(static_metadata=metadata, eplb=None)
     runner._graphs[key] = entry
 
-    def fill_entry(*args: object, expanded: object = None) -> None:
+    def fill_entry(*_args: object, expanded: object = None) -> None:
         if same_stream:
             current.wait_stream.assert_not_called()
         else:

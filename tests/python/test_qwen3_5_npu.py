@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import sys
 import types
+from itertools import accumulate
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -76,6 +77,7 @@ from xllm.python.model_executor.forward_context import (
     forward_context,
     get_execution_context,
 )
+from xllm.python.model_executor.input_batch import InputBatch
 from xllm.python.model_executor.runners.eager import EagerRunner
 from xllm.python.model_loader import ParallelLoadContext, ScopedWeightLoader
 from xllm.python.models.qwen3_5 import Qwen3_5Config
@@ -121,17 +123,39 @@ def _mega_moe_config(*, tp_rank: int = 0, dp_rank: int = 0, max_tokens_per_rank:
     )
 
 
+def _input_batch(
+    token_capacity: int,
+    scheduled: tuple[int, ...],
+    device: torch.device | str = "cpu",
+) -> InputBatch:
+    total = sum(scheduled)
+    return InputBatch(
+        input_ids=torch.zeros(token_capacity, dtype=torch.long, device=device),
+        positions=torch.zeros(token_capacity, dtype=torch.long, device=device),
+        num_reqs=len(scheduled),
+        num_tokens=total,
+        num_tokens_after_padding=token_capacity,
+        num_scheduled_tokens=scheduled,
+        num_computed_tokens=(0,) * len(scheduled),
+        query_start_loc=tuple(accumulate(scheduled, initial=0)),
+        is_prefilling=(True,) * len(scheduled),
+        is_padding=(torch.arange(token_capacity, device=device) >= total) if token_capacity != total else None,
+        is_dummy=not scheduled,
+    )
+
+
 def _mega_moe_eager_metadata(
     cfg: Qwen3_5Config,
     local_token_count: int,
     execution_token_counts: tuple[int, ...],
 ) -> MegaMoeMetadata:
     return TokenOwnerMegaMoeMetadataBuilder(cfg).build(
+        _input_batch(local_token_count, (local_token_count,) if local_token_count else ()),
         SimpleNamespace(
             slot_mapping=torch.zeros(local_token_count, dtype=torch.int32),
             dp_execution_token_counts=execution_token_counts,
             mega_moe_token_mask=None,
-        )
+        ),
     )
 
 
@@ -144,11 +168,12 @@ def _mega_moe_graph_metadata(
     start = cfg.dp_rank * token_capacity
     mask[start : start + local_token_count].fill_(1)
     return TokenOwnerMegaMoeMetadataBuilder(cfg).build(
+        _input_batch(token_capacity, (local_token_count,) if local_token_count else ()),
         SimpleNamespace(
             slot_mapping=torch.zeros(token_capacity, dtype=torch.int32),
             dp_execution_token_counts=(token_capacity,) * cfg.dp_size,
             mega_moe_token_mask=mask,
-        )
+        ),
     )
 
 
@@ -665,7 +690,9 @@ def test_npu_decode_uses_mega_fusion_boundary(monkeypatch: pytest.MonkeyPatch) -
     layer.execution_metadata_builders = (builder,)
     runner = EagerRunner(layer, None, torch.device("cpu"))
     runner.bind_layer_caches(context.layer_caches)
-    context.layer_shared_cache.update(runner._build_execution_contexts(metadata, metadata.slot_mapping))
+    context.layer_shared_cache.update(
+        runner._build_execution_contexts(metadata, _input_batch(batch_size, (1,) * batch_size))
+    )
     with forward_context(context):
         assert layer(torch.zeros(batch_size, 8, dtype=torch.bfloat16)).shape == (
             batch_size,
@@ -767,7 +794,9 @@ def test_npu_gdn_uses_npu_prefill_fusion_boundary(
     layer.execution_metadata_builders = (builder,)
     runner = EagerRunner(layer, None, torch.device("cpu"))
     runner.bind_layer_caches(context.layer_caches)
-    context.layer_shared_cache.update(runner._build_execution_contexts(metadata, metadata.slot_mapping))
+    context.layer_shared_cache.update(
+        runner._build_execution_contexts(metadata, _input_batch(num_tokens, (num_tokens,)))
+    )
     with forward_context(context):
         output = layer(torch.zeros(num_tokens, 8, dtype=torch.bfloat16))
 
@@ -827,7 +856,7 @@ def test_npu_mtp_gdn_keeps_logical_state_rows(
 
     monkeypatch.setattr(torch.Tensor, "cpu", reject_readback)
     monkeypatch.setattr(torch.Tensor, "tolist", reject_readback)
-    result = builder.build(metadata)
+    result = builder.allocate_persistent(_input_batch(2 * width, (width, width)), metadata)
     assert isinstance(result, GdnVerifyMetadata)
     assert result.query_width == width
     assert result.state_indices is write
@@ -867,7 +896,7 @@ def test_npu_mtp_gdn_rejects_unsupported_checkpoint_width(width: int) -> None:
         is_mixed=False,
     )
     with pytest.raises(ValueError, match="2 to 17 checkpoints"):
-        builder.build(metadata)
+        builder.build(_input_batch(width, (width,)), metadata)
 
 
 def test_npu_mtp_gdn_projects_dense_groups_and_chunks_sequences(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -950,7 +979,7 @@ def test_npu_mega_prefill_metadata_is_shared_within_one_forward() -> None:
         torch.device("cpu"),
         metadata,
         [cache],
-        layer_shared_cache=runner._build_execution_contexts(metadata, metadata.slot_mapping),
+        layer_shared_cache=runner._build_execution_contexts(metadata, _input_batch(256, (127, 129))),
     )
     with forward_context(context):
         first = get_execution_context(GdnMetadata)

@@ -1065,8 +1065,9 @@ bool MTPWorkerImpl<TargetInput>::should_use_explicit_spec_verify_replay_update(
            .enable_graph_mode_decode_no_padding() ||
       target_spec_verify_mode_ !=
           mtp_async::TargetSpecVerifyMode::EXPANDED_VERIFY ||
-      ModelConfig::is_python_model_impl(context_.get_model_impl()) || impl_ == nullptr ||
-      options_.num_speculative_tokens() <= 0 || options_.block_size() <= 0 ||
+      ModelConfig::is_python_model_impl(context_.get_model_impl()) ||
+      impl_ == nullptr || options_.num_speculative_tokens() <= 0 ||
+      options_.block_size() <= 0 ||
       !spec_verify::has_speculative_verify_block_table_layout(
           block_tables, input.input_params.multi_block_tables, num_sequences)) {
     return false;

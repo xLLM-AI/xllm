@@ -52,6 +52,9 @@ struct DecodeBuildBuffers {
   std::vector<int32_t> out_paged_kv_indices;
   std::vector<int32_t> out_paged_kv_last_page_len;
   std::vector<std::vector<std::vector<int32_t>>> out_multi_block_tables;
+  std::vector<int32_t> out_num_scheduled_tokens;
+  std::vector<int32_t> out_num_computed_tokens;
+  int32_t last_sequence_id = -1;
   int32_t out_block_table_rows = 0;
   int32_t out_block_table_stride = 0;
 
@@ -76,6 +79,7 @@ struct DecodeRowContext {
   int32_t num_sequences = 0;
   int32_t block_table_stride = 0;
   bool model_managed_multiblock = false;
+  bool build_execution_batch = false;
 };
 
 // Declarative spec for one emitted decode row.

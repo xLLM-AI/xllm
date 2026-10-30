@@ -99,6 +99,15 @@ py::object dspark_adaptive_graph_input(const ModelParamsView& params) {
 
 void register_xllm_runtime_module(py::module_& m) {
   register_attention_metadata_views(m);
+  py::class_<ExecutionBatchMetadata>(m, "InputBatchMetadata")
+      .def_readonly("num_reqs", &ExecutionBatchMetadata::num_reqs)
+      .def_readonly("num_tokens", &ExecutionBatchMetadata::num_tokens)
+      .def_readonly("num_scheduled_tokens",
+                    &ExecutionBatchMetadata::num_scheduled_tokens)
+      .def_readonly("num_computed_tokens",
+                    &ExecutionBatchMetadata::num_computed_tokens)
+      .def_readonly("query_start_loc", &ExecutionBatchMetadata::query_start_loc)
+      .def_readonly("is_prefilling", &ExecutionBatchMetadata::is_prefilling);
 
   py::class_<LayerSynchronizer, std::shared_ptr<LayerSynchronizer>>(
       m, "HostKVLoadSynchronizer")
@@ -272,6 +281,8 @@ PyExecutorImpl::PyExecutorImpl(CausalLM* model,
       ExecutionConfig::get_instance().acl_graph_decode_batch_size_limit());
   py_causal_lm_->set_context_kv_graph_runner(
       py_executor_.attr("context_kv_graph_runner"));
+  requires_input_batch_metadata_ =
+      py_executor_.attr("requires_input_batch_metadata").cast<bool>();
   supports_prepared_metadata_ =
       py_executor_.attr("supports_prepared_metadata").cast<bool>();
   supports_layerwise_kv_load_ =
@@ -589,6 +600,10 @@ void PyExecutorImpl::warmup_prepared_graph(const torch::Tensor& tokens,
   if (params.graph.dspark_adaptive.arena.defined()) {
     graph_kwargs["dspark_adaptive"] = dspark_adaptive_graph_input(params);
   }
+  if (requires_input_batch_metadata_) {
+    graph_kwargs["input_batch_metadata"] =
+        py::cast(ExecutionBatchMetadata(params.meta.execution_batch));
+  }
   py_executor_.attr("warmup_prepared_graph")(
       tokens,
       positions,
@@ -664,6 +679,10 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
           ? params.python_attention_metadata->value()
           : py::cast(PyAttentionMetadataView(
                 attn_metadata, params, dummy_token_count_));
+  py::object py_input_batch_metadata =
+      requires_input_batch_metadata_
+          ? py::cast(ExecutionBatchMetadata(params.meta.execution_batch))
+          : py::none();
   if (params.python_attention_metadata) {
     VLOG(1) << "Task pipeline model path="
             << (prepared_graph ? "aclgraph" : "eager")
@@ -817,6 +836,7 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
                                    expert_load_data,
                                    eplb_decode_token_mask,
                                    params.meta.is_graph_warmup,
+                                   py_input_batch_metadata,
                                    **graph_kwargs);
   if (layerwise_kv_load && params.parallel.draft_load_event_index.has_value()) {
     // Target prefill can overlap its own reload, but a following draft body

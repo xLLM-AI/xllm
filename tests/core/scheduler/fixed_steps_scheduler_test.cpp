@@ -621,4 +621,335 @@ TEST(FixedStepsSchedulerTest, StepExecutesRecBatch) {
   }
 }
 
+TEST(FixedStepsSchedulerTest, IdleStepWaitsWithoutRepeatedScansUntilAdmission) {
+  ScopedConfigValue<bool> prefix_cache(
+      KVCacheConfig::get_instance().enable_prefix_cache(), false);
+  ScopedConfigValue<double> memory_threshold(
+      SchedulerConfig::get_instance()
+          .prefill_scheduling_memory_usage_threshold(),
+      1.0);
+  auto engine = std::make_unique<FakeEngine>(64, 32);
+  std::promise<void> first_scan;
+  auto scanned = first_scan.get_future();
+  std::promise<void> repeated_scan;
+  auto rescanned = repeated_scan.get_future();
+  engine->set_drain_hook([&first_scan, &repeated_scan](size_t calls) {
+    // Each prepare_rec_batch() drains completions twice.
+    if (calls == 2) {
+      first_scan.set_value();
+    } else if (calls == 4) {
+      repeated_scan.set_value();
+    }
+  });
+  FixedStepsScheduler scheduler(engine.get(), CreateOptions());
+  auto finished = std::async(
+      std::launch::async, [&scheduler] { scheduler.step(absl::Seconds(2)); });
+
+  EXPECT_EQ(scanned.wait_for(std::chrono::seconds(1)),
+            std::future_status::ready);
+  EXPECT_EQ(rescanned.wait_for(std::chrono::milliseconds(50)),
+            std::future_status::timeout);
+  EXPECT_EQ(engine->drain_calls(), 2u);
+
+  auto requests = GenRequests({32}, {10}, RecType::kOneRec);
+  EXPECT_TRUE(scheduler.add_request(requests[0]));
+  EXPECT_EQ(finished.wait_for(std::chrono::milliseconds(200)),
+            std::future_status::ready);
+  finished.get();
+  engine->set_drain_hook({});
+  EXPECT_EQ(engine->step_calls(), 1u);
+  EXPECT_TRUE(engine->last_step_had_request());
+}
+
+TEST(FixedStepsSchedulerTest,
+     QueuedRequestProgressesAfterOversizedHeadWithoutNewNotification) {
+  ScopedConfigValue<bool> prefix_cache(
+      KVCacheConfig::get_instance().enable_prefix_cache(), false);
+  ScopedConfigValue<double> memory_threshold(
+      SchedulerConfig::get_instance()
+          .prefill_scheduling_memory_usage_threshold(),
+      1.0);
+  auto engine = std::make_unique<FakeEngine>(64, 32);
+  std::promise<Status> failure;
+  auto rejected = failure.get_future();
+  auto options = CreateOptions(/*max_tokens_per_batch=*/64,
+                               /*max_seqs_per_batch=*/1);
+  options.priority_strategy("priority");
+  FixedStepsScheduler scheduler(engine.get(), options);
+  auto requests = GenRequests({128, 32}, {10, 10}, RecType::kLlmRec);
+  requests[0]->state().scheduler_param.priority = RequestPriority::HIGH;
+  requests[0]->state().output_func = [&failure](const RequestOutput& output) {
+    if (output.status.has_value()) {
+      failure.set_value(output.status.value());
+    }
+    return true;
+  };
+  ASSERT_TRUE(scheduler.add_request(requests[0]));
+  ASSERT_TRUE(scheduler.add_request(requests[1]));
+
+  // Both admission notifications precede the first scan. After rejecting
+  // the head, only the scheduler-local queue can trigger the next scan.
+  auto finished = std::async(
+      std::launch::async, [&scheduler] { scheduler.step(absl::Seconds(2)); });
+  const std::future_status rejection_status =
+      rejected.wait_for(std::chrono::seconds(1));
+  EXPECT_EQ(rejection_status, std::future_status::ready);
+  if (rejection_status == std::future_status::ready) {
+    EXPECT_EQ(rejected.get().code(), StatusCode::RESOURCE_EXHAUSTED);
+  }
+  EXPECT_EQ(finished.wait_for(std::chrono::milliseconds(200)),
+            std::future_status::ready);
+  finished.get();
+  EXPECT_EQ(engine->step_calls(), 1u);
+  EXPECT_TRUE(engine->last_step_had_request());
+  EXPECT_EQ(scheduler.get_waiting_requests_num(), 0u);
+}
+
+TEST(FixedStepsSchedulerTest, RetriesRequestAfterTemporaryKvAllocationFailure) {
+  ScopedConfigValue<bool> prefix_cache(
+      KVCacheConfig::get_instance().enable_prefix_cache(), false);
+  ScopedConfigValue<double> memory_threshold(
+      SchedulerConfig::get_instance()
+          .prefill_scheduling_memory_usage_threshold(),
+      1.0);
+  auto engine = std::make_unique<FakeEngine>(64, 32);
+  engine->fail_next_allocations(1);
+  FixedStepsScheduler scheduler(engine.get(), CreateOptions());
+  auto requests = GenRequests({32}, {10}, RecType::kLlmRec);
+  ASSERT_TRUE(scheduler.add_request(requests[0]));
+
+  scheduler.step(absl::Seconds(1));
+
+  EXPECT_EQ(engine->allocation_attempts(), 2u);
+  EXPECT_EQ(engine->step_calls(), 1u);
+  EXPECT_TRUE(engine->last_step_had_request());
+  EXPECT_EQ(scheduler.get_waiting_requests_num(), 0u);
+}
+
+TEST(FixedStepsSchedulerTest,
+     QueuedRequestProgressesAfterPermanentlyOversizedKvHead) {
+  ScopedConfigValue<bool> prefix_cache(
+      KVCacheConfig::get_instance().enable_prefix_cache(), false);
+  ScopedConfigValue<double> memory_threshold(
+      SchedulerConfig::get_instance()
+          .prefill_scheduling_memory_usage_threshold(),
+      1.0);
+  auto engine = std::make_unique<FakeEngine>(3, 32);
+  std::promise<Status> failure;
+  auto rejected = failure.get_future();
+  auto options = CreateOptions(/*max_tokens_per_batch=*/10000,
+                               /*max_seqs_per_batch=*/1);
+  options.priority_strategy("priority");
+  FixedStepsScheduler scheduler(engine.get(), options);
+  // The first request needs three KV blocks; the following request fits in
+  // the two-block pool. Both are admitted before the scheduler starts.
+  auto requests = GenRequests({64, 32}, {10, 10}, RecType::kLlmRec);
+  requests[0]->state().scheduler_param.priority = RequestPriority::HIGH;
+  requests[0]->state().output_func = [&failure](const RequestOutput& output) {
+    if (output.status.has_value()) {
+      failure.set_value(output.status.value());
+    }
+    return true;
+  };
+  ASSERT_TRUE(scheduler.add_request(requests[0]));
+  ASSERT_TRUE(scheduler.add_request(requests[1]));
+
+  auto finished = std::async(
+      std::launch::async, [&scheduler] { scheduler.step(absl::Seconds(2)); });
+  const std::future_status rejection_status =
+      rejected.wait_for(std::chrono::seconds(1));
+  ASSERT_EQ(rejection_status, std::future_status::ready);
+  EXPECT_EQ(rejected.get().code(), StatusCode::RESOURCE_EXHAUSTED);
+  EXPECT_EQ(finished.wait_for(std::chrono::milliseconds(200)),
+            std::future_status::ready);
+  finished.get();
+  EXPECT_EQ(engine->allocation_attempts(), 1u);
+  EXPECT_EQ(engine->step_calls(), 1u);
+  EXPECT_TRUE(engine->last_step_had_request());
+  EXPECT_EQ(scheduler.get_waiting_requests_num(), 0u);
+}
+
+TEST(FixedStepsSchedulerTest,
+     RejectsAggregateKvReservationBeyondTotalCapacity) {
+  ScopedConfigValue<bool> prefix_cache(
+      KVCacheConfig::get_instance().enable_prefix_cache(), false);
+  ScopedConfigValue<double> memory_threshold(
+      SchedulerConfig::get_instance()
+          .prefill_scheduling_memory_usage_threshold(),
+      1.0);
+  for (int32_t dp_size : {1, 2}) {
+    SCOPED_TRACE(dp_size);
+    auto engine = std::make_unique<FakeEngine>(
+        4, 32, /*enable_storage_prefetch=*/false, dp_size);
+    std::promise<Status> failure;
+    auto rejected = failure.get_future();
+    FixedStepsScheduler scheduler(engine.get(),
+                                  CreateOptions(10000, 256, dp_size));
+    const size_t best_of = static_cast<size_t>(dp_size) + 1;
+    auto requests = GenRequests(
+        {32}, {10}, RecType::kLlmRec, /*max_context_len=*/30000, best_of);
+    requests[0]->state().output_func = [&failure](const RequestOutput& output) {
+      if (output.status.has_value()) {
+        failure.set_value(output.status.value());
+      }
+      return true;
+    };
+    ASSERT_TRUE(scheduler.add_request(requests[0]));
+
+    // Each sequence needs two blocks. Padding leaves three usable blocks
+    // per rank, so each rank can admit only one complete reservation.
+    scheduler.step(absl::Milliseconds(10));
+
+    ASSERT_EQ(rejected.wait_for(std::chrono::seconds(1)),
+              std::future_status::ready);
+    EXPECT_EQ(rejected.get().code(), StatusCode::RESOURCE_EXHAUSTED);
+    EXPECT_EQ(requests[0]->sequences().size(), best_of);
+    EXPECT_EQ(scheduler.get_waiting_requests_num(), 0u);
+    EXPECT_EQ(engine->allocation_attempts(), 0u);
+    EXPECT_EQ(engine->step_calls(), 0u);
+  }
+}
+
+TEST(FixedStepsSchedulerTest, SchedulesAggregateKvReservationAtTotalCapacity) {
+  ScopedConfigValue<bool> prefix_cache(
+      KVCacheConfig::get_instance().enable_prefix_cache(), false);
+  ScopedConfigValue<double> memory_threshold(
+      SchedulerConfig::get_instance()
+          .prefill_scheduling_memory_usage_threshold(),
+      1.0);
+  auto engine = std::make_unique<FakeEngine>(5, 32);
+  TestableFixedStepsScheduler scheduler(engine.get(), CreateOptions());
+  auto requests = GenRequests(
+      {32}, {10}, RecType::kLlmRec, /*max_context_len=*/30000, /*best_of=*/2);
+  ASSERT_TRUE(scheduler.add_request(requests[0]));
+
+  const RecBatchGroup batches = scheduler.prepare_batch_test();
+
+  ASSERT_EQ(batches.size(), 1u);
+  EXPECT_EQ(batches.front().size(), 2u);
+  EXPECT_EQ(engine->allocation_attempts(), 2u);
+  EXPECT_EQ(scheduler.get_waiting_requests_num(), 0u);
+}
+
+TEST(FixedStepsSchedulerTest,
+     SchedulesAggregateKvReservationAcrossRanksWithUnequalHeadroom) {
+  ScopedConfigValue<bool> prefix_cache(
+      KVCacheConfig::get_instance().enable_prefix_cache(), false);
+  ScopedConfigValue<double> memory_threshold(
+      SchedulerConfig::get_instance()
+          .prefill_scheduling_memory_usage_threshold(),
+      1.0);
+  auto engine = std::make_unique<FakeEngine>(
+      4, 32, /*enable_storage_prefetch=*/false, /*dp_size=*/2);
+  auto occupied = GenRequests({1}, {1}, RecType::kLlmRec);
+  occupied[0]->sequences()[0]->set_dp_rank(1);
+  ASSERT_TRUE(engine->block_manager_pool()->allocate(
+      occupied[0]->sequences()[0].get(), 1));
+  TestableFixedStepsScheduler scheduler(
+      engine.get(), CreateOptions(10000, 256, /*dp_size=*/2));
+  auto requests = GenRequests(
+      {32}, {10}, RecType::kLlmRec, /*max_context_len=*/30000, /*best_of=*/2);
+  ASSERT_TRUE(scheduler.add_request(requests[0]));
+
+  // Sequential allocation can place two blocks on rank 0, then two on rank 1.
+  // A capacity precheck must not pin both fresh sequences to the roomiest rank.
+  const RecBatchGroup batches = scheduler.prepare_batch_test();
+
+  ASSERT_EQ(batches.size(), 2u);
+  EXPECT_EQ(batches[0].size(), 1u);
+  EXPECT_EQ(batches[1].size(), 1u);
+  ASSERT_EQ(requests[0]->sequences().size(), 2u);
+  EXPECT_EQ(requests[0]->sequences()[0]->dp_rank(), 0);
+  EXPECT_EQ(requests[0]->sequences()[1]->dp_rank(), 1);
+  EXPECT_EQ(scheduler.get_waiting_requests_num(), 0u);
+  engine->block_manager_pool()->deallocate(occupied[0].get());
+}
+
+TEST(FixedStepsSchedulerTest,
+     RetriesAggregateKvReservationAfterOtherRankReleasesCapacity) {
+  ScopedConfigValue<bool> prefix_cache(
+      KVCacheConfig::get_instance().enable_prefix_cache(), false);
+  ScopedConfigValue<double> memory_threshold(
+      SchedulerConfig::get_instance()
+          .prefill_scheduling_memory_usage_threshold(),
+      1.0);
+  auto engine = std::make_unique<FakeEngine>(
+      4, 32, /*enable_storage_prefetch=*/false, /*dp_size=*/2);
+  auto occupied = GenRequests({64}, {10}, RecType::kLlmRec);
+  occupied[0]->sequences()[0]->set_dp_rank(1);
+  ASSERT_TRUE(engine->block_manager_pool()->allocate(
+      occupied[0]->sequences()[0].get(), 96));
+  TestableFixedStepsScheduler scheduler(
+      engine.get(), CreateOptions(10000, 256, /*dp_size=*/2));
+  auto requests = GenRequests(
+      {32}, {10}, RecType::kLlmRec, /*max_context_len=*/30000, /*best_of=*/2);
+  ASSERT_TRUE(scheduler.add_request(requests[0]));
+
+  RecBatchGroup batches = scheduler.prepare_batch_test();
+
+  ASSERT_EQ(batches.size(), 2u);
+  EXPECT_TRUE(batches[0].empty());
+  EXPECT_TRUE(batches[1].empty());
+  EXPECT_EQ(scheduler.get_waiting_requests_num(), 1u);
+  ASSERT_EQ(requests[0]->sequences().size(), 2u);
+  EXPECT_EQ(requests[0]->sequences()[0]->dp_rank(), -1);
+  EXPECT_EQ(requests[0]->sequences()[1]->dp_rank(), -1);
+
+  engine->block_manager_pool()->deallocate(occupied[0].get());
+  batches = scheduler.prepare_batch_test();
+
+  ASSERT_EQ(batches.size(), 2u);
+  EXPECT_EQ(batches[0].size(), 1u);
+  EXPECT_EQ(batches[1].size(), 1u);
+  EXPECT_NE(requests[0]->sequences()[0]->dp_rank(),
+            requests[0]->sequences()[1]->dp_rank());
+  EXPECT_EQ(scheduler.get_waiting_requests_num(), 0u);
+}
+
+TEST(FixedStepsSchedulerTest, DestructionWaitsForAsynchronousRecExecution) {
+  ScopedConfigValue<bool> prefix_cache(
+      KVCacheConfig::get_instance().enable_prefix_cache(), false);
+  ScopedConfigValue<double> memory_threshold(
+      SchedulerConfig::get_instance()
+          .prefill_scheduling_memory_usage_threshold(),
+      1.0);
+  auto engine = std::make_unique<FakeEngine>(64, 32);
+  auto options = CreateOptions();
+  options.rec_worker_max_concurrency(2);
+  auto requests = GenRequests({32}, {10}, RecType::kOneRec);
+  std::promise<void> step_started;
+  auto started = step_started.get_future();
+  std::promise<void> release_step;
+  auto release = release_step.get_future();
+  engine->set_step_hook([&step_started, &release] {
+    step_started.set_value();
+    release.wait_for(std::chrono::seconds(2));
+  });
+  auto scheduler = std::make_unique<FixedStepsScheduler>(engine.get(), options);
+  ASSERT_TRUE(scheduler->add_request(requests[0]));
+  scheduler->step(absl::Milliseconds(500));
+  ASSERT_EQ(started.wait_for(std::chrono::seconds(1)),
+            std::future_status::ready);
+
+  std::promise<void> destruction_started;
+  auto destroying = destruction_started.get_future();
+  std::promise<void> destruction_finished;
+  auto destroyed = destruction_finished.get_future();
+  std::thread destroy(
+      [&scheduler, &destruction_started, &destruction_finished] {
+        destruction_started.set_value();
+        scheduler.reset();
+        destruction_finished.set_value();
+      });
+  EXPECT_EQ(destroying.wait_for(std::chrono::seconds(1)),
+            std::future_status::ready);
+  EXPECT_EQ(destroyed.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+  release_step.set_value();
+  destroy.join();
+
+  EXPECT_EQ(engine->step_calls(), 1u);
+  EXPECT_TRUE(engine->last_step_had_request());
+}
+
 }  // namespace xllm

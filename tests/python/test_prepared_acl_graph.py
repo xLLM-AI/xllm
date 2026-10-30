@@ -26,6 +26,7 @@ from xllm.python.attention.backend import AttentionBackend, LinearVerifyGraphInp
 from xllm.python.model_executor.dspark_graph_input import DSparkAdaptiveGraphInputs
 from xllm.python.model_executor.dspark_ragged import allocate_verify_prefixes, create_verify_buffers, pack_verify_inputs
 from xllm.python.model_executor.executor import ModelExecutor
+from xllm.python.model_executor.input_batch import InputBatch
 from xllm.python.model_executor.runners.acl_graph import AclGraphEntry, AclGraphRunner
 from xllm.python.model_executor.runners.decode_acl_graph import DecodeAclGraphRunner
 from xllm.python.model_executor.runners.prepared_acl_graph import PreparedAclGraphRunner
@@ -810,19 +811,21 @@ def test_recurrent_prepared_fia_bounds_follow_two_slots_without_recapture(
             entry = runner._resolve_entry(tokens, positions, metadata, dspark_adaptive=inputs)
             runner.execute(tokens, positions, metadata, dspark_adaptive=inputs)
             torch.npu.synchronize()
-            assert len(entry.graph_tasks) == 1
+            assert len(entry.graph_tasks) == (1 if window is None else 0)
             assert entry.kv_capacity == 8192
             assert entry.static_metadata.prepared_attention_state.workspace_query_capacity == 8
-            state = entry.execution_state.paged_attention[rows]
-            slots.append((tokens, positions, metadata, inputs, entry, state, state.workspace.data_ptr()))
+            prepared = entry.static_metadata.prepared_attention_state
+            workspace_ptr = entry.execution_state.paged_attention[rows].workspace.data_ptr() if window is None else None
+            slots.append((tokens, positions, metadata, inputs, entry, prepared, workspace_ptr))
 
-        first_state, second_state = (slot[5] for slot in slots)
-        assert first_state.kv is not second_state.kv
-        assert first_state.workspace.data_ptr() == second_state.workspace.data_ptr()
-        assert first_state.output.data_ptr() != second_state.output.data_ptr()
+        first_prepared, second_prepared = (slot[5] for slot in slots)
+        assert first_prepared.actual_seq_kv is not second_prepared.actual_seq_kv
+        if window is None:
+            assert slots[0][6] == slots[1][6]
+        assert slots[0][4].static_output.data_ptr() != slots[1][4].static_output.data_ptr()
         references = []
         for step, length in enumerate((512, 2039, 4090, 6112, 8152, 512)):
-            for slot_index, (tokens, positions, metadata, inputs, entry, state, workspace_ptr) in enumerate(slots):
+            for slot_index, (tokens, positions, metadata, inputs, entry, prepared, workspace_ptr) in enumerate(slots):
                 live = 1 + (step + slot_index) % 3
                 inputs.control.fill_(live)
                 inputs.base_positions.fill_(length + slot_index)
@@ -830,15 +833,15 @@ def test_recurrent_prepared_fia_bounds_follow_two_slots_without_recapture(
                 bound = min(8192, length + 32)
                 metadata.kv_seq_lens_host_values[:] = [bound] * rows
                 other = slots[1 - slot_index][5]
-                previous_other = other.kv.copy()
+                previous_other = other.actual_seq_kv.copy()
                 actual = runner.execute(tokens, positions, metadata, dspark_adaptive=inputs).clone()
                 torch.npu.synchronize()
-                assert state.kv == [bound] * rows
-                assert state.kv is entry.static_metadata.prepared_attention_state.actual_seq_kv
-                assert state.workspace.data_ptr() == workspace_ptr
+                assert prepared.actual_seq_kv == [bound] * rows
+                if window is None:
+                    assert entry.execution_state.paged_attention[rows].workspace.data_ptr() == workspace_ptr
                 assert entry.static_metadata.prepared_attention_state.kv_capacity == 8192
                 assert entry.kv_capacity == 8192
-                assert other.kv == previous_other
+                assert other.actual_seq_kv == previous_other
                 # Readback is only the test oracle. Serving uses the Host
                 # conservative bound plus the exact in-graph Device mask.
                 metadata.kv_seq_lens_host_values = metadata.kv_seq_lens.cpu().tolist()
@@ -846,7 +849,7 @@ def test_recurrent_prepared_fia_bounds_follow_two_slots_without_recapture(
                 backend.prepare(metadata)
                 expected = backend._prefill(query, query, query, keys, values, metadata, rows, layer)
                 torch.testing.assert_close(actual, expected, rtol=1e-2, atol=2e-3)
-                assert other.kv == previous_other
+                assert other.actual_seq_kv == previous_other
                 references.append((slot_index, live, length + slot_index, bound, expected.clone()))
 
         # Native Launch can queue both Slots before either one completes.
@@ -855,14 +858,15 @@ def test_recurrent_prepared_fia_bounds_follow_two_slots_without_recapture(
         pending = []
         for _ in range(2):
             for slot_index, live, position, bound, expected in reversed(references):
-                tokens, positions, metadata, inputs, entry, state, workspace_ptr = slots[slot_index]
+                tokens, positions, metadata, inputs, entry, _, workspace_ptr = slots[slot_index]
                 inputs.control.fill_(live)
                 inputs.base_positions.fill_(position)
                 inputs.base_kv_lengths.fill_(position + 1)
                 metadata.kv_seq_lens_host_values[:] = [bound] * rows
                 actual = runner.execute(tokens, positions, metadata, dspark_adaptive=inputs).clone()
                 pending.append((actual, expected))
-                assert state.workspace.data_ptr() == workspace_ptr
+                if window is None:
+                    assert entry.execution_state.paged_attention[rows].workspace.data_ptr() == workspace_ptr
         torch.npu.synchronize()
         for actual, expected in pending:
             torch.testing.assert_close(actual, expected, rtol=1e-2, atol=2e-3)
@@ -1555,8 +1559,9 @@ def test_capture_and_replay_bind_each_slot_without_input_copies(runner: Prepared
 
 
 @pytest.mark.parametrize("explicit_read", [False, True])
+@pytest.mark.parametrize("first_empty", [False, True])
 def test_prepared_gdn_metadata_keeps_final_state_views_across_slots(
-    runner: PreparedAclGraphRunner, explicit_read: bool
+    runner: PreparedAclGraphRunner, explicit_read: bool, first_empty: bool
 ) -> None:
     from tests.python.qwen3_5_test_utils import make_linear_config
     from xllm.python.attention.backend import LayerCache
@@ -1584,8 +1589,6 @@ def test_prepared_gdn_metadata_keeps_final_state_views_across_slots(
     )
 
     def capture_context(entry: AclGraphEntry, _stream: object) -> None:
-        with patch.object(torch, "equal", side_effect=AssertionError("Device state comparison")):
-            entry.layer_shared_cache = runner._build_execution_contexts(entry.static_metadata, entry.static_input_ids)
         entry.graph = Mock()
 
     runner._capture.side_effect = capture_context
@@ -1598,19 +1601,46 @@ def test_prepared_gdn_metadata_keeps_final_state_views_across_slots(
         metadata.linear_state_write_indices = metadata.linear_state_indices.view(-1)
         metadata.linear_state_read_indices = metadata.linear_state_indices.view(-1) if explicit_read else None
         metadata.has_initial_state = torch.ones(2, dtype=torch.bool)
-        runner.warmup_prepared(tokens, positions, metadata)
+        graph_batch = InputBatch(
+            input_ids=tokens,
+            positions=positions,
+            num_reqs=2,
+            num_tokens=2,
+            num_tokens_after_padding=2,
+            num_scheduled_tokens=(1, 1),
+            num_computed_tokens=(0, 0),
+            query_start_loc=(0, 1, 2),
+            is_prefilling=(False, False),
+            is_padding=None,
+            is_dummy=False,
+        )
+        capture_batch = (
+            replace(
+                graph_batch,
+                num_reqs=0,
+                num_scheduled_tokens=(),
+                num_computed_tokens=(),
+                query_start_loc=(0,),
+                is_prefilling=(),
+                is_dummy=True,
+            )
+            if first_empty
+            else graph_batch
+        )
+        with patch.object(torch, "equal", side_effect=AssertionError("Device state comparison")):
+            runner.warmup_prepared(tokens, positions, metadata, input_batch=capture_batch)
         entry = runner._prepared_graphs[runner._prepared_binding(tokens, positions, metadata)]
         gdn = entry.layer_shared_cache[GdnMetadata]
         assert isinstance(gdn, GdnDecodeMetadata)
         assert gdn.read_state_indices is gdn.write_state_indices
         assert gdn.write_state_indices is metadata.linear_state_write_indices
         assert entry.static_metadata.has_initial_state is metadata.has_initial_state
-        slots.append((tokens, positions, metadata, gdn))
+        slots.append((tokens, positions, metadata, gdn, graph_batch))
 
     for step, slot_id in enumerate((0, 1, 0, 1)):
-        tokens, positions, metadata, gdn = slots[slot_id]
+        tokens, positions, metadata, gdn, graph_batch = slots[slot_id]
         metadata.linear_state_indices.copy_(torch.tensor([3, 4] if step % 2 else [2, 1], dtype=torch.int32))
-        runner.execute(tokens, positions, metadata)
+        runner.execute(tokens, positions, metadata, input_batch=graph_batch)
         torch.testing.assert_close(gdn.read_state_indices, metadata.linear_state_indices)
         inactive = slots[1 - slot_id][3]
         assert inactive.write_state_indices.data_ptr() != gdn.write_state_indices.data_ptr()
@@ -1996,6 +2026,7 @@ def test_prepare_keeps_previous_graph_metadata_independent(runner: PreparedAclGr
 def test_prepared_executor_obeys_admission_and_propagates_replay_failure(runner: PreparedAclGraphRunner) -> None:
     executor = object.__new__(ModelExecutor)
     executor._kv_bound = True
+    executor.requires_input_batch_metadata = False
     executor._prepared_mtp = False
     executor._prepared_block_draft = False
     executor.layerwise_split_size = 1

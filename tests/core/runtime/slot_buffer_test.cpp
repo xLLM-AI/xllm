@@ -23,6 +23,7 @@ limitations under the License.
 #include <mutex>
 #include <numeric>
 
+#include "core/framework/config/model_config.h"
 #include "core/framework/sampling/sampler.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/runtime/forward_params.h"
@@ -87,19 +88,40 @@ LlmForwardInput make_forward_input(const InputData& input,
   meta.num_sequences = static_cast<int32_t>(input.query.size());
   meta.batch_id = batch_id;
   meta.is_graph_warmup = is_warmup;
+  auto& execution = meta.execution_batch;
+  execution.query_start_loc.emplace_back(0);
+  execution.num_reqs = static_cast<int32_t>(input.query.size());
+  execution.num_tokens = input.tokens.size();
+  execution.num_scheduled_tokens = input.query;
+  execution.num_computed_tokens.resize(input.query.size());
+  execution.is_prefilling.assign(
+      input.query.size(), type.is_prefill() || type.is_chunked_prefill());
+  for (size_t row = 0; row < input.query.size(); ++row) {
+    const int32_t begin = execution.query_start_loc.back();
+    if (static_cast<size_t>(begin) < input.positions.size()) {
+      execution.num_computed_tokens[row] = input.positions[begin];
+    }
+    execution.query_start_loc.emplace_back(begin + input.query[row]);
+  }
   return forward;
 }
 
 class SlotBufferTest : public ::testing::Test {
  protected:
   void SetUp() override {
+    ModelConfig::get_instance().model_impl("python");
     ASSERT_TRUE(SlotBuffer::create(capacity_, device_, binding_).ok());
     transfer_ = std::make_unique<Stream>(device_);
     consumer_ = std::make_unique<Stream>(device_);
     ASSERT_EQ(aclrtSynchronizeDevice(), ACL_SUCCESS);
   }
 
-  void TearDown() override { EXPECT_EQ(aclrtSynchronizeDevice(), ACL_SUCCESS); }
+  void TearDown() override {
+    ModelConfig::get_instance().model_impl(model_impl_);
+    EXPECT_EQ(aclrtSynchronizeDevice(), ACL_SUCCESS);
+  }
+
+  const std::string model_impl_ = ModelConfig::get_instance().model_impl();
 
   Status prepare_model(const LlmForwardInput& input, const Stream& stream) {
     Status status = binding_->validate(input, 0, stream);
@@ -321,6 +343,10 @@ TEST_F(RecurrentSlotBufferTest,
   ASSERT_TRUE(binding_->validate(decode, /*previous_rows=*/0, *transfer_).ok());
   binding_->prepare(decode, *transfer_, /*padded_batch_size=*/4);
   ASSERT_EQ(transfer_->synchronize(), 0);
+  EXPECT_EQ(binding_->model_params().meta.execution_batch.num_reqs, 1);
+  EXPECT_EQ(binding_->model_params().meta.execution_batch.num_tokens, 4);
+  EXPECT_EQ(binding_->model_params().meta.execution_batch.num_scheduled_tokens,
+            (std::vector<int32_t>{1}));
   const auto& params = binding_->model_params();
   const auto& metadata = *params.attn_metadata;
   const void* indices_storage =
@@ -357,8 +383,9 @@ TEST_F(RecurrentSlotBufferTest,
 
 TEST_F(SlotBufferTest, PrefillUsesFixedInputsAndUncachedLengths) {
   InputData input = make_input({3, 2}, {3, 2});
-  const auto forward =
+  auto forward =
       make_forward_input(input, BatchForwardType::PREFILL, 2, 41, true);
+  forward.input_params.meta.execution_batch.num_computed_tokens = {17, 29};
   ASSERT_TRUE(prepare_model(forward, *transfer_).ok());
   expect_device_input(input);
   const ModelParamsView& params = binding_->model_params();
@@ -372,6 +399,13 @@ TEST_F(SlotBufferTest, PrefillUsesFixedInputsAndUncachedLengths) {
   EXPECT_TRUE(forward.input_params.meta.is_graph_warmup);
   EXPECT_EQ(params.meta.q_max_seq_len, 3);
   EXPECT_EQ(params.meta.kv_max_seq_len, 3);
+  const auto& execution = params.meta.execution_batch;
+  EXPECT_EQ(execution.num_reqs, 2);
+  EXPECT_EQ(execution.num_tokens, 5);
+  EXPECT_EQ(execution.query_start_loc, (std::vector<int32_t>{0, 3, 5}));
+  EXPECT_EQ(execution.num_scheduled_tokens, (std::vector<int32_t>{3, 2}));
+  EXPECT_EQ(execution.num_computed_tokens, (std::vector<int32_t>{17, 29}));
+  EXPECT_EQ(execution.is_prefilling, (std::vector<uint8_t>{1, 1}));
   EXPECT_EQ(params.attention.device.block_tables.stride(0), 5);
   EXPECT_EQ(params.attention.host.graph_q_seq_lens_data,
             params.attn_metadata->q_seq_lens_host.data_ptr<int32_t>());
@@ -411,6 +445,10 @@ TEST_F(SlotBufferTest, EmptyDpShardClearsSamplingAndPreviousTokenMapping) {
     EXPECT_EQ(binding_->tokens().numel(), 1);
     EXPECT_EQ(binding_->model_params().meta.actual_num_sequences, 0);
     EXPECT_EQ(binding_->model_params().meta.num_sequences, 1);
+    EXPECT_EQ(binding_->model_params().meta.execution_batch.num_reqs, 0);
+    EXPECT_EQ(binding_->model_params().meta.execution_batch.query_start_loc,
+              (std::vector<int32_t>{0}));
+    EXPECT_EQ(binding_->model_params().meta.execution_batch.num_tokens, 1);
     EXPECT_EQ(binding_->model_params().meta.batch_id, 73);
     EXPECT_EQ(binding_->model_params().meta.batch_forward_type.value(),
               forward_type.value());

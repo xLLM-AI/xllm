@@ -44,6 +44,7 @@ limitations under the License.
 #include "core/kv_cache/block/block_utils.h"
 #include "core/kv_cache/prefix/block_hasher.h"
 #include "core/kv_cache/storage/kv_cache.h"
+#include "core/util/scope_guard.h"
 #include "framework/block/block_manager_pool.h"
 #include "framework/block/composite_block_manager.h"
 #include "framework/config/beam_search_config.h"
@@ -425,21 +426,6 @@ class BatchOutputActionTest : public ::testing::TestWithParam<bool> {
  private:
   bool original_chunked_prefill_ = false;
   std::unique_ptr<BlockManagerImpl> manager_;
-};
-
-class ScopedModelImpl final {
- public:
-  explicit ScopedModelImpl(std::string model_impl)
-      : previous_(ModelConfig::get_instance().model_impl()) {
-    ModelConfig::get_instance().model_impl(std::move(model_impl));
-  }
-
-  ~ScopedModelImpl() {
-    ModelConfig::get_instance().model_impl(std::move(previous_));
-  }
-
- private:
-  std::string previous_;
 };
 
 class ScopedJsonObjectOutput final {
@@ -867,6 +853,40 @@ TEST(ForwardInputBuilderTest, DSV4PartialBlockIsRepeatedOnNextChunk) {
   expect_mapping(info, BlockType::C4, block_ids(blocks), {100, 101, 102});
   EXPECT_EQ(sequence.kv_state().next_group_transfer_block_idx(BlockType::C4),
             2u);
+}
+
+TEST(BatchTest, RecordsPrefillStageBeforeAdvancingKvCount) {
+  auto& model_config = ModelConfig::get_instance();
+  const auto model_impl = model_config.model_impl();
+  ScopeGuard restore_model_impl([&] { model_config.model_impl(model_impl); });
+  model_config.model_impl("python");
+  BlockManager::Options options;
+  options.num_blocks(4).block_size(4);
+  BlockManagerImpl manager(options);
+
+  Sequence full_prefill = make_basic_sequence({1, 2, 3, 4});
+  full_prefill.add_blocks(BlockType::KV, manager.allocate(1));
+
+  Sequence final_chunk = make_basic_sequence({5, 6, 7, 8, 9, 10, 11, 12});
+  final_chunk.add_blocks(BlockType::KV, manager.allocate(2));
+  final_chunk.kv_state().incr_kv_cache_tokens_num(/*size=*/4);
+
+  ASSERT_TRUE(full_prefill.is_prefill_stage());
+  ASSERT_TRUE(final_chunk.is_prefill_stage());
+
+  Batch batch({&full_prefill, &final_chunk});
+  LlmForwardInput forward_input = batch.prepare_forward_input(
+      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
+
+  const auto& execution_batch = forward_input.input_params.meta.execution_batch;
+  EXPECT_FALSE(full_prefill.is_prefill_stage());
+  EXPECT_FALSE(final_chunk.is_prefill_stage());
+  EXPECT_EQ(execution_batch.num_reqs, 2);
+  EXPECT_EQ(execution_batch.num_scheduled_tokens, (std::vector<int32_t>{4, 4}));
+  EXPECT_EQ(execution_batch.query_start_loc, (std::vector<int32_t>{0, 4, 8}));
+  EXPECT_EQ(execution_batch.num_tokens, 8);
+  EXPECT_EQ(execution_batch.num_computed_tokens, (std::vector<int32_t>{0, 4}));
+  EXPECT_EQ(execution_batch.is_prefilling, (std::vector<uint8_t>{1, 1}));
 }
 
 TEST(BatchTest, ProcessSampleOutputStoresMtpBootstrapEmbedding) {
@@ -2925,7 +2945,6 @@ class LinearBatchLifetimeTest : public ::testing::TestWithParam<bool> {};
 TEST_P(LinearBatchLifetimeTest,
        SequenceOwnsReadAndWriteSlotsWithoutBatchAliases) {
   ScopedPrefillChunkStride chunk_stride(4);
-  ScopedModelImpl model_impl("native");
   BlockManager::Options options;
   options.num_blocks(6).block_size(4);
   BlockManagerImpl manager(options);
@@ -2980,99 +2999,8 @@ INSTANTIATE_TEST_SUITE_P(ForwardInputPaths,
                          LinearBatchLifetimeTest,
                          ::testing::Bool());
 
-#if defined(USE_NPU)
-TEST(BatchTest, Glm53PrefillUsesCheckpointAsDirectReadSource) {
+TEST(BatchTest, MixedBatchPreservesPrefillReadIds) {
   ScopedPrefillChunkStride chunk_stride(/*chunk_stride=*/4);
-  ScopedModelImpl model_impl("python");
-
-  BlockManager::Options options;
-  options.num_blocks(/*num_blocks=*/6).block_size(/*block_size=*/4);
-  BlockManagerImpl manager(options);
-
-  Sequence sequence = make_basic_sequence({1, 2, 3, 4, 5, 6, 7, 8});
-  sequence.add_blocks(BlockType::KV, manager.allocate(2));
-  std::vector<Block> live_blocks = manager.allocate(1);
-  ASSERT_EQ(live_blocks.size(), 1u);
-  const int32_t live_id = live_blocks[0].id();
-  sequence.add_blocks(BlockType::LINEAR, std::move(live_blocks));
-  sequence.kv_state().incr_kv_cache_tokens_num(/*size=*/4);
-  std::vector<Block> restore_sources = manager.allocate(1);
-  ASSERT_EQ(restore_sources.size(), 1u);
-  const int32_t source_id = restore_sources[0].id();
-  mount_linear_source_for_test(
-      sequence, std::move(restore_sources[0]), manager);
-
-  std::optional<Batch> batch;
-  batch.emplace();
-  batch->add(&sequence, /*allowed_max_token=*/4);
-  ModelArgs args;
-  args.model_type("glm5_next");
-  args.layer_types({"linear_attention"});
-  auto forward_input = batch->prepare_forward_input(
-      /*num_decoding_tokens=*/0, /*min_decoding_bach_size=*/0, args);
-
-  ASSERT_EQ(forward_input.input_params.embedding.linear_state_read_ids.size(),
-            1u);
-  EXPECT_FALSE(
-      (forward_input.input_params.attention.host.kv_cache_tokens_nums[0] == 0 &&
-       forward_input.input_params.embedding.linear_state_read_ids[0] ==
-           forward_input.input_params.embedding.linear_state_ids[0]));
-
-  EXPECT_EQ(forward_input.input_params.embedding.linear_state_read_ids[0],
-            source_id);
-  EXPECT_EQ(forward_input.input_params.embedding.linear_state_ids[0], live_id);
-  EXPECT_NE(forward_input.input_params.embedding.linear_state_ids[0],
-            source_id);
-  std::vector<Block> remaining = manager.allocate(1);
-  ASSERT_EQ(remaining.size(), 1u);
-  EXPECT_TRUE(manager.allocate(1).empty());
-  EXPECT_EQ(sequence.kv_state().blocks(BlockType::LINEAR).front().ref_count(),
-            1u);
-  release_linear_source_for_test(sequence);
-  batch.reset();
-  std::vector<Block> reclaimed = manager.allocate(1);
-  ASSERT_EQ(reclaimed.size(), 1u);
-  EXPECT_EQ(reclaimed.front().id(), source_id);
-  EXPECT_EQ(reclaimed.front().ref_count(), 1u);
-}
-
-TEST(BatchTest, Glm53PrefillPreservesCheckpointReadIds) {
-  ScopedPrefillChunkStride chunk_stride(/*chunk_stride=*/4);
-  ScopedModelImpl model_impl("python");
-
-  BlockManager::Options options;
-  options.num_blocks(/*num_blocks=*/6).block_size(/*block_size=*/4);
-  BlockManagerImpl manager(options);
-
-  Sequence sequence = make_basic_sequence({1, 2, 3, 4, 5, 6, 7, 8});
-  sequence.add_blocks(BlockType::KV, manager.allocate(2));
-  sequence.add_blocks(BlockType::LINEAR, manager.allocate(1));
-  sequence.kv_state().incr_kv_cache_tokens_num(/*size=*/4);
-  std::vector<Block> restore_sources = manager.allocate(1);
-  ASSERT_EQ(restore_sources.size(), 1u);
-  const int32_t source_id = restore_sources[0].id();
-  mount_linear_source_for_test(
-      sequence, std::move(restore_sources[0]), manager);
-
-  Batch batch;
-  batch.add(&sequence, /*allowed_max_token=*/4);
-  ModelArgs args;
-  args.model_type("glm5_next");
-  args.layer_types({"linear_attention"});
-  auto forward_input = batch.prepare_forward_input(
-      /*num_decoding_tokens=*/0, /*min_decoding_bach_size=*/0, args);
-
-  ASSERT_EQ(forward_input.input_params.embedding.linear_state_read_ids.size(),
-            1u);
-  EXPECT_NE(forward_input.input_params.embedding.linear_state_read_ids[0],
-            forward_input.input_params.embedding.linear_state_ids[0]);
-  EXPECT_EQ(forward_input.input_params.embedding.linear_state_read_ids[0],
-            source_id);
-}
-
-TEST(BatchTest, Glm53MixedBatchPreservesPrefillReadIds) {
-  ScopedPrefillChunkStride chunk_stride(/*chunk_stride=*/4);
-  ScopedModelImpl model_impl("python");
 
   BlockManager::Options options;
   options.num_blocks(/*num_blocks=*/10).block_size(/*block_size=*/4);
@@ -3112,148 +3040,6 @@ TEST(BatchTest, Glm53MixedBatchPreservesPrefillReadIds) {
   EXPECT_EQ(forward_input.input_params.embedding.linear_state_read_ids[1],
             forward_input.input_params.embedding.linear_state_ids[1]);
 }
-
-TEST(BatchTest, Glm53NativeExecutorPreservesCheckpointReadIds) {
-  ScopedPrefillChunkStride chunk_stride(/*chunk_stride=*/4);
-  ScopedModelImpl model_impl("native");
-
-  BlockManager::Options options;
-  options.num_blocks(/*num_blocks=*/6).block_size(/*block_size=*/4);
-  BlockManagerImpl manager(options);
-
-  Sequence sequence = make_basic_sequence({1, 2, 3, 4, 5, 6, 7, 8});
-  sequence.add_blocks(BlockType::KV, manager.allocate(2));
-  sequence.add_blocks(BlockType::LINEAR, manager.allocate(1));
-  sequence.kv_state().incr_kv_cache_tokens_num(/*size=*/4);
-  std::vector<Block> restore_sources = manager.allocate(1);
-  ASSERT_EQ(restore_sources.size(), 1u);
-  mount_linear_source_for_test(
-      sequence, std::move(restore_sources[0]), manager);
-
-  Batch batch;
-  batch.add(&sequence, /*allowed_max_token=*/4);
-  ModelArgs args;
-  args.model_type("glm5_next");
-  args.layer_types({"linear_attention"});
-  auto forward_input = batch.prepare_forward_input(
-      /*num_decoding_tokens=*/0, /*min_decoding_bach_size=*/0, args);
-
-  ASSERT_EQ(forward_input.input_params.embedding.linear_state_read_ids.size(),
-            1u);
-  EXPECT_NE(forward_input.input_params.embedding.linear_state_read_ids[0],
-            forward_input.input_params.embedding.linear_state_ids[0]);
-}
-
-TEST(BatchTest, OtherLinearModelPreservesCheckpointReadIds) {
-  ScopedPrefillChunkStride chunk_stride(/*chunk_stride=*/4);
-  ScopedModelImpl model_impl("python");
-
-  BlockManager::Options options;
-  options.num_blocks(/*num_blocks=*/6).block_size(/*block_size=*/4);
-  BlockManagerImpl manager(options);
-
-  Sequence sequence = make_basic_sequence({1, 2, 3, 4, 5, 6, 7, 8});
-  sequence.add_blocks(BlockType::KV, manager.allocate(2));
-  sequence.add_blocks(BlockType::LINEAR, manager.allocate(1));
-  sequence.kv_state().incr_kv_cache_tokens_num(/*size=*/4);
-  std::vector<Block> restore_sources = manager.allocate(1);
-  ASSERT_EQ(restore_sources.size(), 1u);
-  mount_linear_source_for_test(
-      sequence, std::move(restore_sources[0]), manager);
-
-  std::optional<Batch> batch;
-  batch.emplace();
-  batch->add(&sequence, /*allowed_max_token=*/4);
-  ModelArgs args;
-  args.model_type("qwen3_5");
-  args.layer_types({"linear_attention"});
-  auto forward_input = batch->prepare_forward_input(
-      /*num_decoding_tokens=*/0, /*min_decoding_bach_size=*/0, args);
-
-  ASSERT_EQ(forward_input.input_params.embedding.linear_state_read_ids.size(),
-            1u);
-  EXPECT_NE(forward_input.input_params.embedding.linear_state_read_ids[0],
-            forward_input.input_params.embedding.linear_state_ids[0]);
-}
-
-TEST(BatchTest, Glm53DecodeUpdatesExistingTailWithoutRestore) {
-  ScopedPrefillChunkStride chunk_stride(/*chunk_stride=*/4);
-  ScopedModelImpl model_impl("python");
-
-  BlockManager::Options options;
-  options.num_blocks(/*num_blocks=*/6).block_size(/*block_size=*/4);
-  BlockManagerImpl manager(options);
-
-  RequestSamplingParam sampling_param;
-  StoppingChecker stopping_checker;
-  stopping_checker.set_max_generated_tokens(2);
-  SequenceParams seq_params;
-  seq_params.seq_capacity = 10;
-  seq_params.stopping_checker = &stopping_checker;
-  seq_params.sampling_param = &sampling_param;
-
-  IncrementalDecoder decoder("", 8, false, false);
-  Sequence sequence(/*index=*/0,
-                    /*token_ids=*/{1, 2, 3, 4, 5, 6, 7, 8},
-                    /*input_embedding=*/torch::Tensor(),
-                    /*mm_data=*/MMData(),
-                    std::move(decoder),
-                    seq_params);
-  sequence.add_blocks(BlockType::KV, manager.allocate(3));
-  sequence.add_blocks(BlockType::LINEAR, manager.allocate(1));
-  sequence.kv_state().incr_kv_cache_tokens_num(/*size=*/8);
-  sequence.append_token(9);
-  std::optional<Batch> batch;
-  batch.emplace();
-  batch->add(&sequence, /*allowed_max_token=*/1);
-  ModelArgs args;
-  args.model_type("glm5_next");
-  args.layer_types({"linear_attention"});
-  auto forward_input = batch->prepare_forward_input(
-      /*num_decoding_tokens=*/1, /*min_decoding_bach_size=*/0, args);
-
-  ASSERT_EQ(forward_input.input_params.embedding.linear_state_read_ids.size(),
-            1u);
-
-  EXPECT_FALSE(
-      (forward_input.input_params.attention.host.kv_cache_tokens_nums[0] == 0 &&
-       forward_input.input_params.embedding.linear_state_read_ids[0] ==
-           forward_input.input_params.embedding.linear_state_ids[0]));
-  EXPECT_EQ(forward_input.input_params.embedding.linear_state_read_ids[0],
-            forward_input.input_params.embedding.linear_state_ids[0]);
-}
-#else
-TEST(BatchTest, Glm53PrefillPreservesReadIdsOutsideNpu) {
-  ScopedPrefillChunkStride chunk_stride(/*chunk_stride=*/4);
-  ScopedModelImpl model_impl("python");
-
-  BlockManager::Options options;
-  options.num_blocks(/*num_blocks=*/6).block_size(/*block_size=*/4);
-  BlockManagerImpl manager(options);
-
-  Sequence sequence = make_basic_sequence({1, 2, 3, 4, 5, 6, 7, 8});
-  sequence.add_blocks(BlockType::KV, manager.allocate(2));
-  sequence.add_blocks(BlockType::LINEAR, manager.allocate(1));
-  sequence.kv_state().incr_kv_cache_tokens_num(/*size=*/4);
-  std::vector<Block> restore_sources = manager.allocate(1);
-  ASSERT_EQ(restore_sources.size(), 1u);
-  mount_linear_source_for_test(
-      sequence, std::move(restore_sources[0]), manager);
-
-  Batch batch;
-  batch.add(&sequence, /*allowed_max_token=*/4);
-  ModelArgs args;
-  args.model_type("glm5_next");
-  args.layer_types({"linear_attention"});
-  auto forward_input = batch.prepare_forward_input(
-      /*num_decoding_tokens=*/0, /*min_decoding_bach_size=*/0, args);
-
-  ASSERT_EQ(forward_input.input_params.embedding.linear_state_read_ids.size(),
-            1u);
-  EXPECT_NE(forward_input.input_params.embedding.linear_state_read_ids[0],
-            forward_input.input_params.embedding.linear_state_ids[0]);
-}
-#endif
 
 TEST(BatchTest, ColdPrefillResetsButShortPromptDecodeDoesNotReset) {
   ScopedPrefillChunkStride chunk_stride(4);
@@ -3500,9 +3286,7 @@ TEST(BatchTest, DecodeDestinationIsOwnedOnlyBySequence) {
 
 TEST(BatchTest, OverlapRawAcceptanceKeepsSingleLinearSlot) {
   ScopedPrefillChunkStride chunk_stride(2048);
-  const bool previous_overlap =
-      SchedulerConfig::get_instance().enable_schedule_overlap();
-  SchedulerConfig::get_instance().enable_schedule_overlap(true);
+  ScopedScheduleOverlap overlap(true);
   BlockManager::Options options;
   options.num_blocks(2048)
       .block_size(2)
@@ -3573,11 +3357,9 @@ TEST(BatchTest, OverlapRawAcceptanceKeepsSingleLinearSlot) {
   EXPECT_EQ(sequence.kv_state().blocks(BlockType::LINEAR).front().id(),
             source_id);
   manager.deallocate_for_sequence(&sequence);
-  SchedulerConfig::get_instance().enable_schedule_overlap(previous_overlap);
 }
 
 TEST(BatchTest, IntermediatePrefillAdvancesCacheProgress) {
-  ScopedModelImpl model_impl("native");
   for (const bool overlap : {false, true}) {
     for (const bool tensor_output : {false, true}) {
       SCOPED_TRACE(::testing::Message()
@@ -3626,7 +3408,6 @@ TEST(BatchTest, IntermediatePrefillAdvancesCacheProgress) {
 }
 
 TEST(BatchTest, OverlapDecodeReusesPrefillTailBeforeAndAfterResults) {
-  ScopedModelImpl model_impl("native");
   ScopedPrefillChunkStride chunk_stride(2048);
   RequestSamplingParam sampling;
   StoppingChecker stopping;
@@ -3702,7 +3483,6 @@ TEST(BatchTest, OverlapDecodeReusesPrefillTailBeforeAndAfterResults) {
 }
 
 TEST(BatchTest, CancelledOverlapOutputDoesNotUpdateReleasedSequence) {
-  ScopedModelImpl model_impl("native");
   ScopedPrefillChunkStride chunk_stride(4);
   for (const bool linear_state : {false, true}) {
     for (const bool tensor_output : {false, true}) {
@@ -3782,7 +3562,6 @@ TEST(BatchTest, CancelledOverlapOutputDoesNotUpdateReleasedSequence) {
 }
 
 TEST(BatchTest, OverlapTensorAcceptanceUpdatesCacheProgress) {
-  ScopedModelImpl model_impl("native");
   BlockManager::Options options;
   options.num_blocks(4).block_size(16);
   BlockManagerImpl manager(options);

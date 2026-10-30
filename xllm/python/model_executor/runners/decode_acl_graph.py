@@ -59,6 +59,7 @@ from xllm.python.model_executor.forward_context import (
     EplbRuntimeState,
     LayerSynchronizer,
 )
+from xllm.python.model_executor.input_batch import InputBatch
 from xllm.python.model_executor.runners.acl_graph import AclGraphEntry, AclGraphRunner, StaticGraphAttentionMetadata
 from xllm.python.model_executor.runners.base import ModelExecutionOutput
 from xllm.python.model_executor.runners.decode_cuda_graph import (
@@ -655,6 +656,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         eplb: EplbRuntimeState | None = None,
         decode_metadata: DecodeAclGraphMetadata | None = None,
         is_graph_warmup: bool = False,
+        input_batch: InputBatch | None = None,
     ) -> _GraphKey:
         batch_size = input_ids.shape[0]
         padded_batch_size = self._padded_batch_size(batch_size, metadata)
@@ -697,6 +699,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
                     mtp_topk_indices,
                     graph_key=capacity_key,
                     eplb=eplb,
+                    input_batch=input_batch,
                     expanded=expanded,
                     decode_metadata=decode_metadata,
                     kv_capacity_pages=pages,
@@ -728,6 +731,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             mtp_topk_indices,
             graph_key=graph_key,
             eplb=eplb,
+            input_batch=input_batch,
             expanded=expanded,
             **decode_kwargs,
         )
@@ -809,6 +813,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         layer_synchronizer: LayerSynchronizer | None = None,
         eplb: EplbRuntimeState | None = None,
         decode_metadata: DecodeAclGraphMetadata | None = None,
+        input_batch: InputBatch | None = None,
     ) -> ModelExecutionOutput:
         batch_size = input_ids.shape[0]
         if graph_key is not None:
@@ -825,6 +830,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             mtp_topk_indices,
             graph_key=graph_key,
             eplb=eplb,
+            input_batch=input_batch,
             **prepare_kwargs,
         )
 
@@ -893,6 +899,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         decode_metadata: DecodeAclGraphMetadata | None = None,
         kv_capacity_pages: int = 0,
         allow_capacity_capture: bool = False,
+        input_batch: InputBatch | None = None,
     ) -> AclGraphEntry:
         batch_size = input_ids.shape[0]
         padded_batch_size = self._padded_batch_size(batch_size, metadata)
@@ -927,7 +934,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         entry = self._graphs.get(graph_key)
         first_capture = entry is None
         decode_kwargs = {} if decode_metadata is None else {"decode_metadata": decode_metadata}
-        if first_capture:
+        if entry is None:
             if self._device_kv_lengths and not allow_capacity_capture:
                 raise RuntimeError("KV capacity graph was not captured during startup warmup")
             entry = self._allocate_entry(
@@ -999,6 +1006,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
 
         self._prepare_attention(entry, entry.static_metadata, replay=not first_capture)
 
+        self._bind_graph_input_batch(entry, input_batch)
         if first_capture:
             self._capture(entry, self._stream)
             if capture_linear_state:
@@ -1017,6 +1025,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
                     **decode_kwargs,
                 )
                 self._prepare_attention(entry, entry.static_metadata, replay=True)
+                self._bind_graph_input_batch(entry, input_batch)
         return entry
 
     @staticmethod

@@ -73,8 +73,8 @@ class BridgeTestModel:
 
   py::module_::import("sys").attr("modules")[kBridgeTestModule] = module;
   py::module_ registry = py::module_::import("xllm.python.registry");
-  registry.attr("_REGISTRY")[kBridgeTestModelType] =
-      py::make_tuple(kBridgeTestModule, "BridgeTestModel");
+  registry.attr("register_model")(kBridgeTestModelType)(
+      module.attr("BridgeTestModel"));
 
   py::dict support;
   support["cpu"] = true;

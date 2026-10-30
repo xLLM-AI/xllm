@@ -1532,7 +1532,7 @@ std::optional<Params> GraphPersistentParam::update(
               static_cast<uint32_t>(padded_batch_size));
       graph_params->embedding.linear_state_read_ids =
           params.embedding.linear_state_read_ids.empty()
-              ? params.embedding.linear_state_ids
+              ? graph_params->embedding.linear_state_ids
               : params.embedding.linear_state_read_ids;
       graph_params->embedding.linear_state_read_ids.resize(
           static_cast<size_t>(padded_batch_size), kPaddingLinearStateId);
