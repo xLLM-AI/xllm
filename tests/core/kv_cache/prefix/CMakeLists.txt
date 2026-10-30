@@ -3,6 +3,7 @@ include(cc_test)
 cc_test(
   NAME
     prefix_test
+  CPU_ONLY
   SRCS
     prefix_cache_test.cpp
   DEPS
@@ -20,6 +21,7 @@ add_dependencies(prefix_test brpc-static)
 cc_test(
   NAME
     linear_state_prefix_cache_test
+  CPU_ONLY
   SRCS
     linear_state_prefix_cache_test.cpp
   DEPS

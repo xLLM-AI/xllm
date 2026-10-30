@@ -3,7 +3,7 @@ include(cc_test)
 cc_test(
   NAME
     vlm_request_factory_test
-  NO_NPU_RUNTIME
+  CPU_ONLY
   SRCS
     vlm_request_factory_test.cpp
   DEPS
@@ -30,6 +30,7 @@ target_link_options(vlm_request_factory_test
 cc_test(
   NAME
     rec_request_factory_test
+  CPU_ONLY
   SRCS
     rec_request_factory_test.cpp
   DEPS
@@ -55,6 +56,7 @@ target_link_options(rec_request_factory_test
 cc_test(
   NAME
     sample_slot_test
+  CPU_ONLY
   SRCS
     sample_slot_test.cpp
   DEPS
@@ -81,7 +83,7 @@ cc_test(
 cc_test(
   NAME
     request_params_test
-  NO_NPU_RUNTIME
+  CPU_ONLY
   SRCS
     request_params_test.cpp
   DEPS
@@ -92,6 +94,7 @@ cc_test(
 cc_test(
   NAME
     llm_request_factory_test
+  CPU_ONLY
   SRCS
     llm_request_factory_test.cpp
   DEPS
@@ -116,6 +119,7 @@ target_link_options(llm_request_factory_test
 cc_test(
   NAME
     dit_media_sources_test
+  CPU_ONLY
   SRCS
     dit_media_sources_test.cpp
   DEPS
@@ -136,6 +140,7 @@ cc_test(
 cc_test(
   NAME
     dit_request_params_test
+  CPU_ONLY
   SRCS
     dit_request_params_test.cpp
   DEPS
@@ -146,6 +151,7 @@ cc_test(
 cc_test(
   NAME
     dit_request_test
+  CPU_ONLY
   SRCS
     dit_request_test.cpp
   DEPS
@@ -156,7 +162,7 @@ cc_test(
 cc_test(
   NAME
     stopping_checker_test
-  NO_NPU_RUNTIME
+  CPU_ONLY
   SRCS
     stopping_checker_test.cpp
     ${PROJECT_SOURCE_DIR}/xllm/core/framework/request/stopping_checker.cpp
@@ -168,6 +174,7 @@ cc_test(
 cc_test(
   NAME
     request_prefix_cache_tokens_test
+  CPU_ONLY
   SRCS
     request_prefix_cache_tokens_test.cpp
   DEPS
@@ -190,6 +197,7 @@ target_link_options(request_prefix_cache_tokens_test
 cc_test(
   NAME
     sequence_kv_state_test
+  CPU_ONLY
   SRCS
     sequence_kv_state_test.cpp
   DEPS
@@ -212,6 +220,7 @@ target_link_options(sequence_kv_state_test
 cc_test(
   NAME
     sequence_mtp_bootstrap_test
+  CPU_ONLY
   SRCS
     sequence_mtp_bootstrap_test.cpp
   DEPS
@@ -234,6 +243,7 @@ target_link_options(sequence_mtp_bootstrap_test
 cc_test(
   NAME
     sequence_generated_tokens_test
+  CPU_ONLY
   SRCS
     sequence_generated_tokens_test.cpp
   DEPS
@@ -256,6 +266,7 @@ target_link_options(sequence_generated_tokens_test
 cc_test(
   NAME
     sequence_stop_output_test
+  CPU_ONLY
   SRCS
     sequence_stop_output_test.cpp
   DEPS
@@ -278,6 +289,7 @@ target_link_options(sequence_stop_output_test
 cc_test(
   NAME
     sequence_mrope_positions_test
+  CPU_ONLY
   SRCS
     sequence_mrope_positions_test.cpp
   DEPS

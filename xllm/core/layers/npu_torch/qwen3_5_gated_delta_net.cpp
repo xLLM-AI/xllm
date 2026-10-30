@@ -10,17 +10,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "qwen3_5_gated_delta_net.h"
+#include "core/layers/npu_torch/qwen3_5_gated_delta_net.h"
 
 #include <glog/logging.h>
 #include <torch/torch.h>
 
 #include <algorithm>
 #include <limits>
+#include <optional>
 #include <tuple>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
+#include "core/common/constants.h"
 #include "core/kernels/npu/xllm_ops/mega_gdn_constants.h"
 #include "core/kernels/ops_api.h"
 #include "core/util/tensor_helper.h"
@@ -45,38 +48,13 @@ void check_tensor(const torch::Tensor& tensor,
   CHECK_EQ(tensor.device(), device) << name << " must be on the input device.";
 }
 
-void check_live_slots(const std::vector<int32_t>& live_slots,
-                      int64_t batch_size,
-                      int64_t num_slots) {
-  CHECK_EQ(static_cast<int64_t>(live_slots.size()), batch_size)
-      << "linear_state_ids must be sequence-scoped.";
-  CHECK_GT(num_slots, 0) << "GDN cache must contain at least one slot.";
-  std::unordered_set<int32_t> unique_slots;
-  unique_slots.reserve(live_slots.size());
-  for (const int32_t slot : live_slots) {
-    CHECK_GE(slot, 0) << "GDN live slot must be non-negative.";
-    CHECK_LT(static_cast<int64_t>(slot), num_slots)
-        << "GDN live slot exceeds cache capacity.";
-    if (slot != kPaddingLinearStateId) {
-      CHECK(unique_slots.emplace(slot).second)
-          << "GDN write slots must be unique within a batch, duplicate="
-          << slot;
-    }
-  }
-}
-
-torch::Tensor slots_to_device(const std::vector<int32_t>& slots,
-                              const torch::Device& device) {
-  return make_cpu_tensor(slots).to(device);
-}
-
 torch::Tensor graph_safe_indices(const torch::Tensor& indices,
                                  const std::vector<int32_t>& host_values,
                                  int64_t batch_size,
                                  const torch::Device& device,
                                  const char* name) {
   if (!indices.defined()) {
-    return slots_to_device(host_values, device);
+    return make_cpu_tensor(host_values).to(device);
   }
   check_tensor(indices, name, torch::kInt, 1, device);
   CHECK_EQ(indices.numel(), batch_size) << name << " must be sequence-scoped.";
@@ -131,6 +109,26 @@ int64_t compute_num_matrices(const std::vector<int32_t>& query_lengths,
         util::ceil_div<int64_t>(query_length, kernel::npu::kMegaGdnChunkSize);
   }
   return num_chunks * num_value_heads;
+}
+
+void check_live_slots(const std::vector<int32_t>& live_slots,
+                      int64_t batch_size,
+                      int64_t num_slots) {
+  CHECK_EQ(static_cast<int64_t>(live_slots.size()), batch_size)
+      << "linear_state_ids must be sequence-scoped.";
+  CHECK_GT(num_slots, 0) << "GDN cache must contain at least one slot.";
+  std::unordered_set<int32_t> unique_slots;
+  unique_slots.reserve(live_slots.size());
+  for (const int32_t slot : live_slots) {
+    CHECK_GE(slot, 0) << "GDN live slot must be non-negative.";
+    CHECK_LT(static_cast<int64_t>(slot), num_slots)
+        << "GDN live slot exceeds cache capacity.";
+    if (slot != kPaddingLinearStateId) {
+      CHECK(unique_slots.emplace(slot).second)
+          << "GDN write slots must be unique within a batch, duplicate="
+          << slot;
+    }
+  }
 }
 
 }  // namespace
@@ -217,10 +215,10 @@ const MegaGdnPrefillIndicesCache& get_or_build_prefill_indices(
               .linear_state_ids = live_slots,
               .linear_state_validity_mask = validity_mask,
               .linear_state_read_ids = read_ids}};
-  indices.conv_read = slots_to_device(conv_read, device);
-  indices.conv_write = slots_to_device(live_slots, device);
-  indices.ssm_read = slots_to_device(ssm_read, device);
-  indices.ssm_write = slots_to_device(ssm_write, device);
+  indices.conv_read = make_cpu_tensor(conv_read).to(device);
+  indices.conv_write = make_cpu_tensor(live_slots).to(device);
+  indices.ssm_read = make_cpu_tensor(ssm_read).to(device);
+  indices.ssm_write = make_cpu_tensor(ssm_write).to(device);
   attn_metadata.mega_gdn_prefill_indices.emplace(std::move(indices));
   return attn_metadata.mega_gdn_prefill_indices.value();
 }

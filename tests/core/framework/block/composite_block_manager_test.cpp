@@ -37,8 +37,6 @@ limitations under the License.
 #include "framework/request/sequence.h"
 #include "framework/request/stopping_checker.h"
 #include "framework/sampling/sampling_params.h"
-#include "platform/device.h"
-#include "platform/platform.h"
 
 namespace xllm {
 
@@ -111,7 +109,6 @@ inline size_t ExpectedSwaLogicalBlocks(size_t num_tokens) {
 // Creates a minimal Sequence for testing (same pattern as batch_test.cpp).
 Sequence MakeTestSequence(size_t index,
                           const std::vector<int32_t>& prompt_token_ids) {
-  torch::Device device(Platform::type_torch(), 0);
   RequestSamplingParam sampling_param;
   StoppingChecker stopping_checker;
   stopping_checker.set_max_generated_tokens(256);

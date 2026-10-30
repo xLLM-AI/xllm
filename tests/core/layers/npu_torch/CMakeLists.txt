@@ -3,6 +3,7 @@ include(cc_test)
 cc_test(
   NAME
     qwen3_5_gated_delta_net_indices_test
+  CPU_ONLY
   SRCS
     qwen3_5_gated_delta_net_indices_test.cpp
   DEPS
@@ -34,6 +35,7 @@ set_tests_properties(${_qwen3_5_gdn_tests} PROPERTIES RUN_SERIAL TRUE)
 cc_test(
   NAME
     deepseek_v4_eplb_load_utils_test
+  CPU_ONLY
   SRCS
     deepseek_v4_eplb_load_utils_test.cpp
   DEPS
@@ -72,6 +74,7 @@ target_link_options(npu_deepseek_v4_indexer_test PRIVATE
 cc_test(
   NAME
     deepseek_v4_eplb_test
+  CPU_ONLY
   SRCS
     deepseek_v4_eplb_test.cpp
   DEPS
