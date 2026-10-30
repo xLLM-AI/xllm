@@ -913,9 +913,20 @@ class PreparedTestWorker final : public WorkerImpl {
       prepared = input.clone();
       prepared.token_ids = input.token_ids.to(device_.unwrap());
     }
-    prepared.runtime.metadata_ready_event = prepare_stream_->record_event();
-    CHECK(prepared.runtime.metadata_ready_event != nullptr);
-    prepared.runtime.retained_device_tensors.emplace_back(torch::from_blob(
+    retain_prepared_input(prepared.runtime);
+  }
+
+  void prepare_task_pipeline_input(const VlmForwardInput& input,
+                                   VlmForwardInput& prepared) override {
+    auto guard = prepare_stream_->set_stream_guard();
+    prepared = input.to(device_.unwrap(), torch::kFloat32);
+    retain_prepared_input(prepared.runtime);
+  }
+
+  void retain_prepared_input(ForwardRuntimeState& runtime) {
+    runtime.metadata_ready_event = prepare_stream_->record_event();
+    CHECK(runtime.metadata_ready_event != nullptr);
+    runtime.retained_device_tensors.emplace_back(torch::from_blob(
         new int32_t(0),
         {1},
         [this](void* data) {
@@ -956,6 +967,23 @@ class PreparedTestWorker final : public WorkerImpl {
     output.ready_event = compute_stream_->record_event();
     CHECK(output.ready_event != nullptr);
     return output;
+  }
+
+  std::optional<ForwardOutput> execute_task_pipeline(
+      VlmForwardInput& prepared) override {
+    auto guard = compute_stream_->set_stream_guard();
+    CHECK(compute_stream_->wait_event(prepared.runtime.metadata_ready_event));
+    CHECK_EQ(prepared.positions.dim(), 2);
+    CHECK_EQ(prepared.positions.size(0), 3);
+    const auto pixels =
+        prepared.input_params.multimodal.mm_data.get<torch::Tensor>(
+            "pixel_values");
+    CHECK(pixels.has_value());
+    LlmForwardInput text;
+    text.token_ids = prepared.token_ids + prepared.positions.sum() +
+                     pixels->sum().to(torch::kInt32);
+    text.runtime.metadata_ready_event = prepared.runtime.metadata_ready_event;
+    return execute_task_pipeline(text);
   }
 
   std::future<void> entered() { return entered_.get_future(); }
@@ -1404,6 +1432,33 @@ class SpeculativePipelineTest : public ::testing::Test {
     params.attention.device.block_tables =
         torch::arange(8, integers).view({1, 8}).repeat({width, 1});
     value.sampling_params.selected_token_idxes() = torch::zeros({1}, integers);
+    return value;
+  }
+
+  VlmForwardInput vlm_input(int32_t token = 3,
+                            int32_t position = 2,
+                            float pixel = 5.0F) {
+    auto text = input(/*decode=*/true, token, position);
+    VlmForwardInput value;
+    value.token_ids = text.token_ids;
+    value.token_ids_host = value.token_ids;
+    value.positions =
+        torch::tensor({position, position + 1, position + 2}, torch::kInt32)
+            .view({3, 1});
+    value.positions_host = value.positions;
+    value.input_params.meta = text.input_params.meta;
+    detail::copy_attention_host_input(text.input_params.attention.host,
+                                      value.input_params.attention.host);
+    value.input_params.embedding.embedding_ids =
+        text.input_params.embedding.embedding_ids;
+    value.input_params.embedding.request_ids =
+        text.input_params.embedding.request_ids;
+    value.input_params.embedding.extra_token_ids =
+        text.input_params.embedding.extra_token_ids;
+    value.input_params.parallel = text.input_params.parallel;
+    value.input_params.multimodal.mm_data.batch({MMData(
+        MMType::IMAGE, MMDict{{"pixel_values", torch::tensor({pixel})}})});
+    value.sampling_params = text.sampling_params;
     return value;
   }
 
@@ -5582,6 +5637,110 @@ TEST_F(SpeculativePipelineTest, WorkerOwnedPipelineUsesBothSlotsAndFifo) {
       pipeline_->submit(input(true, /*token=*/8, /*position=*/7));
   EXPECT_TRUE(reused.status.ok()) << reused.status.message();
   pipeline_->take_result_async(reused.task_id).get();
+}
+
+TEST_F(SpeculativePipelineTest,
+       VlmWorkerPipelineRetainsPackedInputUntilRetired) {
+  PreparedTestWorker worker(device_);
+  ScopeGuard cleanup([this, &worker] {
+    worker.release();
+    pipeline_.reset();
+  });
+  auto entered = worker.entered();
+  TaskModel model{*target_, *target_executor_, target_cache_};
+  model.input_domain = TaskInputDomain::VLM;
+  ASSERT_TRUE(
+      TaskExecutionPipeline::create(
+          state_thread_, std::move(model), worker, capacity_.common, pipeline_)
+          .ok());
+  auto original = vlm_input();
+  proto::PackedForwardInput payload;
+  ASSERT_TRUE(original.to_packed_proto(&payload));
+  VlmForwardInput packed;
+  ASSERT_TRUE(packed.from_packed_proto(payload));
+  auto released = std::make_shared<std::atomic<bool>>(false);
+  torch::Tensor owner = packed.runtime.input_host_buffer;
+  packed.runtime.input_host_buffer = torch::from_blob(
+      owner.data_ptr(),
+      owner.sizes(),
+      [owner, released](void* /*unused*/) mutable {
+        owner = torch::Tensor();
+        released->store(true);
+      },
+      owner.options());
+  const auto submission = pipeline_->submit(packed);
+  ASSERT_TRUE(submission.status.ok()) << submission.status.message();
+  ASSERT_EQ(entered.wait_for(std::chrono::seconds(5)),
+            std::future_status::ready);
+  packed = VlmForwardInput();
+  payload.Clear();
+  owner = torch::Tensor();
+  EXPECT_FALSE(released->load());
+  worker.release();
+  const auto result = pipeline_->take_result_async(submission.task_id).get();
+  ASSERT_TRUE(result.status.ok()) << result.status.message();
+  // token 3, three distinct mRoPE coordinates 2/3/4, pixel 5 and increment 1.
+  EXPECT_EQ(result.output.sample_output.next_tokens.cpu().item<int32_t>(), 18);
+  EXPECT_TRUE(released->load());
+  EXPECT_FALSE(worker.released_early());
+}
+
+TEST_F(SpeculativePipelineTest, VlmWorkerPipelineUsesBothSlotsAndTypedFifo) {
+  capacity_.common.slot_count = 2;
+  PreparedTestWorker worker(device_);
+  ScopeGuard cleanup([this, &worker] {
+    worker.release();
+    pipeline_.reset();
+  });
+  auto entered = worker.entered();
+  TaskModel model{*target_, *target_executor_, target_cache_};
+  model.input_domain = TaskInputDomain::VLM;
+  ASSERT_TRUE(
+      TaskExecutionPipeline::create(
+          state_thread_, std::move(model), worker, capacity_.common, pipeline_)
+          .ok());
+  const auto first = pipeline_->submit(vlm_input());
+  ASSERT_TRUE(first.status.ok()) << first.status.message();
+  ASSERT_EQ(entered.wait_for(std::chrono::seconds(5)),
+            std::future_status::ready);
+  const auto second =
+      pipeline_->submit(vlm_input(/*token=*/6, /*position=*/5, /*pixel=*/9.0F));
+  ASSERT_TRUE(second.status.ok()) << second.status.message();
+  const auto full = pipeline_->submit(vlm_input());
+  EXPECT_EQ(full.status.code(), StatusCode::RESOURCE_EXHAUSTED);
+  const auto wrong_domain = pipeline_->submit(input(/*decode=*/true));
+  EXPECT_EQ(wrong_domain.status.code(), StatusCode::INVALID_ARGUMENT);
+  EXPECT_EQ(pipeline_->take_result_async(second.task_id).get().status.code(),
+            StatusCode::INVALID_ARGUMENT);
+  worker.release();
+  const auto first_result = pipeline_->take_result_async(first.task_id).get();
+  const auto second_result = pipeline_->take_result_async(second.task_id).get();
+  ASSERT_TRUE(first_result.status.ok());
+  ASSERT_TRUE(second_result.status.ok());
+  EXPECT_EQ(first_result.output.sample_output.next_tokens.cpu().item<int32_t>(),
+            18);
+  EXPECT_EQ(
+      second_result.output.sample_output.next_tokens.cpu().item<int32_t>(), 34);
+  const auto reused = pipeline_->submit(vlm_input());
+  ASSERT_TRUE(reused.status.ok()) << reused.status.message();
+  EXPECT_TRUE(pipeline_->take_result_async(reused.task_id).get().status.ok());
+}
+
+TEST_F(SpeculativePipelineTest, TextWorkerPipelineRejectsMultimodalInput) {
+  PreparedTestWorker worker(device_);
+  ScopeGuard cleanup([this, &worker] {
+    worker.release();
+    pipeline_.reset();
+  });
+  ASSERT_TRUE(TaskExecutionPipeline::create(
+                  state_thread_,
+                  {*target_, *target_executor_, target_cache_},
+                  worker,
+                  capacity_.common,
+                  pipeline_)
+                  .ok());
+  const auto wrong_domain = pipeline_->submit(vlm_input());
+  EXPECT_EQ(wrong_domain.status.code(), StatusCode::INVALID_ARGUMENT);
 }
 
 TEST_F(SpeculativePipelineTest, UnifiedTaskAdvancesJsonFromOwnedPriorTokens) {

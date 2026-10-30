@@ -141,7 +141,8 @@ Worker::Worker(const ParallelArgs& parallel_args,
             !options.enable_schedule_overlap())
           << "Task pipeline PD requires schedule overlap disabled on PREFILL.";
     }
-    CHECK(worker_type == WorkerType::LLM && options.task_type() == "generate" &&
+    CHECK((worker_type == WorkerType::LLM || worker_type == WorkerType::VLM) &&
+          options.task_type() == "generate" &&
           (!options.enable_speculative_decode() ||
            (SpeculativeConfig::supports_task_pipeline(
                 options.speculative_algorithm()) &&
@@ -156,9 +157,18 @@ Worker::Worker(const ParallelArgs& parallel_args,
           !LoadConfig::get_instance().enable_vmm_weights() &&
           !LoadConfig::get_instance().enable_rolling_load() &&
           parallel_args.layerwise_split_size() == 1)
-        << "Task pipeline requires Python LLM, fixed "
+        << "Task pipeline requires Python LLM/VLM, fixed "
            "MTP/DFlash/DFlash2/DSpark or adaptive MTP/DSpark graphs and "
            "a layerwise split of one.";
+    if (worker_type == WorkerType::VLM) {
+      CHECK(parallel_args.dp_size() == 1 && parallel_args.cp_size() == 1 &&
+            (!options.enable_speculative_decode() ||
+             (SpeculativeConfig::is_mtp_algorithm(
+                  options.speculative_algorithm()) &&
+              !execution.enable_unified_mtp_graph())))
+          << "VLM task pipeline requires DP=CP=1 and ordinary or fixed MTP "
+             "decode without unified graphs.";
+    }
     CHECK(options.host_blocks_factor() <= 1.0 ||
           (Platform::is_npu() && (!options.enable_speculative_decode() ||
                                   (SpeculativeConfig::is_mtp_algorithm(
@@ -328,7 +338,9 @@ std::optional<ForwardOutput> Worker::step(const RecForwardInput& inputs) {
 }
 
 std::optional<ForwardOutput> Worker::step(const VlmForwardInput& inputs) {
-  CHECK(!enable_task_pipeline_) << "VLM does not support the LLM task pipeline";
+  if (enable_task_pipeline_) {
+    return std::move(step_async(inputs)).get();
+  }
   return impl_->step(inputs);
 }
 
@@ -340,7 +352,21 @@ folly::SemiFuture<std::optional<ForwardOutput>> Worker::step_async(
 
 folly::SemiFuture<std::optional<ForwardOutput>> Worker::step_async(
     const VlmForwardInput& inputs) {
-  CHECK(!enable_task_pipeline_) << "VLM does not support the LLM task pipeline";
+  if (enable_task_pipeline_) {
+    CHECK(task_pipeline_ != nullptr);
+    const TaskSubmission submission = task_pipeline_->submit(inputs);
+    CHECK(submission.status.ok()) << submission.status.message();
+    if (impl_->enable_schedule_overlap()) {
+      return folly::makeSemiFuture(std::optional<ForwardOutput>{});
+    }
+    auto result = task_pipeline_->take_result_async(submission.task_id);
+    return std::move(result)
+        .thenValue([](TaskResult result) -> std::optional<ForwardOutput> {
+          CHECK(result.status.ok()) << result.status.message();
+          return std::move(result.output);
+        })
+        .semi();
+  }
   return impl_->step_async(inputs);
 }
 

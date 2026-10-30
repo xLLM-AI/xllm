@@ -29,6 +29,7 @@ limitations under the License.
 #include "core/framework/sampling/sampler.h"
 #include "core/framework/speculative/draft_extend_input.h"
 #include "core/kv_cache/storage/kv_cache.h"
+#include "core/runtime/task_execution_pipeline.h"
 #include "models/model_registry.h"
 #include "util/timer.h"
 
@@ -58,9 +59,28 @@ bool VLMWorkerImpl::init_model(ModelContext& context) {
   context.set_encoder_embedding_mode(false);
   model_ = create_vlm_model(context);
   CHECK(model_ != nullptr) << "Failed to create model.";
+  // The worker task path preserves the full multimodal input and uses the
+  // model's decode ACL graphs. Prepared LLM Slots do not carry visual data.
+  runtime::Options executor_options = options_;
+  executor_options.enable_task_pipeline(false);
   model_executor_ = std::make_unique<Executor>(
-      model_.get(), context.get_model_args(), device_, options_);
+      model_.get(), context.get_model_args(), device_, executor_options);
   return true;
+}
+
+::xllm::Status VLMWorkerImpl::create_task_pipeline(
+    std::unique_ptr<TaskExecutionPipeline>& output) {
+  LlmTaskCapacity capacity;
+  ::xllm::Status status = task_capacity(options_, capacity);
+  if (!status.ok()) {
+    return status;
+  }
+  status = TaskExecutionPipeline::create(
+      threadpool_, task_model(), *this, capacity, output);
+  if (status.ok()) {
+    LOG(INFO) << "VLM task execution pipeline: slots=" << capacity.slot_count;
+  }
+  return status;
 }
 
 std::optional<ForwardOutput> VLMWorkerImpl::step(const VlmForwardInput& input) {

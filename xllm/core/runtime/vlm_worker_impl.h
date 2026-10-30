@@ -39,6 +39,10 @@ class VLMWorkerImpl final : public WorkerImpl {
   // initialize model, cache manager. blocking call
   bool init_model(ModelContext& context) override;
 
+  bool uses_worker_task_pipeline() const override { return true; }
+  ::xllm::Status create_task_pipeline(
+      std::unique_ptr<TaskExecutionPipeline>& output) override;
+
   std::optional<ForwardOutput> step(const VlmForwardInput& input) override;
 
  protected:

@@ -789,6 +789,42 @@ TEST(KVCacheEstimationTest, Qwen35MtpExpandsConvStateLen) {
   EXPECT_EQ(capacity.linear_cache_size_in_bytes(), 8960);
 }
 
+TEST(KVCacheEstimationTest, MultimodalMtpReservesPerTokenRecurrentCheckpoints) {
+  ModelArgs model_args = make_standard_args();
+  model_args.model_type("qwen3_5")
+      .full_attention_interval(2)
+      .linear_num_key_heads(2)
+      .linear_num_value_heads(2)
+      .linear_key_head_dim(4)
+      .linear_value_head_dim(8)
+      .linear_conv_kernel_dim(3);
+  runtime::Options options;
+  options.max_memory_utilization(1.0)
+      .block_size(16)
+      .max_seqs_per_batch(4)
+      .max_tokens_per_batch(64)
+      .max_linear_state_cache_slots(16)
+      .enable_prefix_cache(false)
+      .num_speculative_tokens(0);
+  KVCacheEstimateContext context;
+  context.dtype = torch::kFloat16;
+  context.world_size = 1;
+  context.worker_memory = {{256LL << 20, 256LL << 20}};
+  context.is_multimodal = true;
+  const KVCacheCapacity ordinary =
+      KVCacheEstimator(model_args).estimate(options, context);
+  options.num_speculative_tokens(4);
+  const KVCacheCapacity speculative =
+      KVCacheEstimator(model_args).estimate(options, context);
+
+  EXPECT_EQ(ordinary.linear_ssm_checkpoint_stride(), 1);
+  EXPECT_EQ(speculative.linear_conv_state_len(), 6);
+  EXPECT_EQ(speculative.linear_ssm_checkpoint_stride(), 5);
+  EXPECT_GT(speculative.linear_cache_size_in_bytes(),
+            ordinary.linear_cache_size_in_bytes());
+  EXPECT_LT(speculative.n_blocks(), ordinary.n_blocks());
+}
+
 TEST(KVCacheEstimationTest, GlmMtpAllocatesFrameworkCheckpointsOnlyForDecode) {
   for (const std::string& model_type : {"glm5_3_flash", "glm5_next"}) {
     ModelArgs model_args = make_standard_args();

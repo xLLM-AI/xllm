@@ -3,6 +3,7 @@ include(cc_test)
 cc_test(
   NAME
     vlm_request_factory_test
+  NO_NPU_RUNTIME
   SRCS
     vlm_request_factory_test.cpp
   DEPS

@@ -108,6 +108,33 @@ int32_t decode_warmup_token_bucket(const DecodeGraphWarmupPlan& plan,
       num_token_rows, plan.warmup_config.enable_graph_mode_decode_no_padding));
 }
 
+DecodeGraphWarmupPlan build_profile_decode_warmup_plan(
+    const ProfileManager::Options& options,
+    int32_t max_global_batch_size) {
+  const auto& config = options.decode_graph_warmup_config();
+  DecodeGraphWarmupPlan plan = build_decode_graph_warmup_plan(
+      config, max_global_batch_size, options.dp_size());
+  const auto& model = ModelConfig::get_instance();
+  if (!options.enable_task_pipeline() || model.backend() != "vlm" ||
+      !ModelConfig::is_python_model_impl(model.model_impl()) ||
+      !config.enable_graph_mode_decode_no_padding) {
+    return plan;
+  }
+  // Worker-owned VLM execution replays exact Python graph shapes. The native
+  // compatibility schedule can omit intermediate sequence counts such as 3.
+  CHECK_EQ(options.dp_size(), 1);
+  const int32_t limit =
+      config.max_graph_batch_size > 0
+          ? std::min(max_global_batch_size, config.max_graph_batch_size)
+          : max_global_batch_size;
+  plan.batch_sizes.clear();
+  plan.batch_sizes.reserve(limit);
+  for (int32_t batch_size = 1; batch_size <= limit; ++batch_size) {
+    plan.batch_sizes.emplace_back(batch_size);
+  }
+  return plan;
+}
+
 }  // namespace
 
 ProfileManager::ProfileManager(
@@ -143,9 +170,7 @@ ProfileManager::ProfileManager(
             static_cast<uint32_t>(std::max<int32_t>(1, options_.dp_size()))));
   }
   decode_graph_warmup_plan_ =
-      build_decode_graph_warmup_plan(options_.decode_graph_warmup_config(),
-                                     max_decode_batch_size,
-                                     options_.dp_size());
+      build_profile_decode_warmup_plan(options_, max_decode_batch_size);
   block_manager_pool_ = engine_->block_manager_pool();
   CHECK(block_manager_pool_ != nullptr);
   prefill_time_predictor_ = std::make_unique<TimePredictor>(
@@ -1311,9 +1336,7 @@ void ProfileManager::warmup_decode_for_graph() {
   const int32_t warmup_capacity =
       std::min(max_decode_batch_size, allocatable_sequences);
   decode_graph_warmup_plan_ =
-      build_decode_graph_warmup_plan(options_.decode_graph_warmup_config(),
-                                     warmup_capacity,
-                                     options_.dp_size());
+      build_profile_decode_warmup_plan(options_, warmup_capacity);
   const std::vector<int32_t>& decode_batch_sizes =
       decode_graph_warmup_plan_.batch_sizes;
   const int32_t decode_bucket_count =

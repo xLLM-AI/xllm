@@ -49,8 +49,10 @@ TaskExecutionPipeline::TaskExecutionPipeline(ThreadPool& state_executor,
                                              TaskKVPush push_kv,
                                              TaskKVLoad load_kv,
                                              TaskKVFence fence_kv,
-                                             WorkerImpl* worker_pipeline)
+                                             WorkerImpl* worker_pipeline,
+                                             TaskInputDomain input_domain)
     : worker_pipeline_(worker_pipeline),
+      input_domain_(input_domain),
       model_(model),
       executor_(executor),
       kv_caches_(kv_caches),
@@ -84,6 +86,9 @@ Status TaskExecutionPipeline::create(
     std::unique_ptr<TaskExecutionPipeline>& output) {
   auto& model = resources.model;
   auto& executor = resources.executor;
+  if (resources.input_domain != TaskInputDomain::LLM) {
+    return invalid("Multimodal tasks require worker-owned preparation.");
+  }
   if (state_executor.size() != 1) {
     return invalid("Task pipeline requires one state thread.");
   }
@@ -183,7 +188,8 @@ Status TaskExecutionPipeline::create(
                                 std::move(target.push_kv),
                                 std::move(target.load_kv),
                                 std::move(target.fence_kv),
-                                &worker));
+                                &worker,
+                                target.input_domain));
   pipeline->slots_.reserve(capacity.slot_count);
   for (uint32_t slot_id = 0; slot_id < capacity.slot_count; ++slot_id) {
     pipeline->slots_.emplace_back(std::make_unique<Slot>());
@@ -498,6 +504,10 @@ Status TaskExecutionPipeline::warmup_slot_graphs(const LlmForwardInput& input,
 
 TaskSubmission TaskExecutionPipeline::submit(const LlmForwardInput& input) {
   check_external_thread();
+  if (input_domain_ != TaskInputDomain::LLM) {
+    return TaskSubmission{invalid("LLM input does not match the task domain."),
+                          0};
+  }
   LlmForwardInput unpacked;
   const LlmForwardInput* source = &input;
   // Worker-owned preparation calls LlmForwardInput::to() on the retained packed
@@ -567,6 +577,46 @@ TaskSubmission TaskExecutionPipeline::submit(const LlmForwardInput& input) {
         const SlotTicket ticket{slot_id, next_task_id_++};
         accepted_.emplace_back(ticket);
         execution_.push(ticket);
+        promise.setValue(TaskSubmission{Status(), ticket.task_id});
+      });
+  return std::move(future).get();
+}
+
+TaskSubmission TaskExecutionPipeline::submit(const VlmForwardInput& input) {
+  check_external_thread();
+  if (worker_pipeline_ == nullptr || input_domain_ != TaskInputDomain::VLM) {
+    return TaskSubmission{
+        invalid("VLM input requires a multimodal worker task."), 0};
+  }
+  folly::Promise<TaskSubmission> promise;
+  auto future = promise.getFuture();
+  state_executor_.schedule(
+      [this, &input, promise = std::move(promise)]() mutable {
+        if (accepted_.size() == capacity_.slot_count) {
+          promise.setValue(TaskSubmission{
+              Status(StatusCode::RESOURCE_EXHAUSTED,
+                     "All task Slots still hold unconsumed results."),
+              0});
+          return;
+        }
+        const uint32_t slot_id =
+            accepted_.empty() ? 0U : 1U - accepted_.front().slot_id;
+        CHECK_LT(next_task_id_, std::numeric_limits<uint64_t>::max());
+        Status status = prepare_worker(slot_id, input);
+        if (!status.ok()) {
+          promise.setValue(TaskSubmission{std::move(status), 0});
+          return;
+        }
+        auto& slot = *slots_[slot_id];
+        slot.kv_load.reset();
+        slot.is_warmup =
+            slot.worker_vlm_input.input_params.meta.is_graph_warmup;
+        const SlotTicket ticket{slot_id, next_task_id_++};
+        accepted_.emplace_back(ticket);
+        execution_.push(ticket);
+        VLOG(1) << "VLM task admitted: id=" << ticket.task_id
+                << ", slot=" << slot_id << ", batch_id="
+                << slot.worker_vlm_input.input_params.meta.batch_id;
         promise.setValue(TaskSubmission{Status(), ticket.task_id});
       });
   return std::move(future).get();
@@ -882,10 +932,31 @@ Status TaskExecutionPipeline::prepare_worker(uint32_t slot_id,
   return Status();
 }
 
+Status TaskExecutionPipeline::prepare_worker(uint32_t slot_id,
+                                             const VlmForwardInput& input) {
+  CHECK(worker_pipeline_ != nullptr);
+  if (slot_id >= slots_.size()) {
+    return invalid("Invalid worker task Slot index.");
+  }
+  Slot& slot = *slots_[slot_id];
+  slot.worker_input_host_buffer = input.runtime.input_host_buffer;
+  worker_pipeline_->prepare_task_pipeline_input(input, slot.worker_vlm_input);
+  slot.worker_output.reset();
+  return Status();
+}
+
 void TaskExecutionPipeline::launch(uint32_t slot_id) {
   CHECK_LT(slot_id, slots_.size());
   Slot& slot = *slots_[slot_id];
   if (worker_pipeline_ != nullptr) {
+    if (input_domain_ == TaskInputDomain::VLM) {
+      slot.worker_output =
+          worker_pipeline_->execute_task_pipeline(slot.worker_vlm_input);
+      if (slot.worker_output.has_value()) {
+        slot.worker_output->is_graph_warmup = slot.is_warmup;
+      }
+      return;
+    }
     // This mode runs on the worker's compute stream. Its Python executor (or
     // unified MTP executor) installs the load wait on that actual consumer.
     slot.worker_input.input_params.parallel.layer_wise_load_synchronizer =
@@ -1010,15 +1081,18 @@ ForwardOutput TaskExecutionPipeline::consume(uint32_t slot_id) {
     // Launch completion only means that device work has been enqueued. As
     // with SlotBuffer retirement, keep the prepared input alive until the
     // producer is done, even for an output without tokens or retained inputs.
-    const StreamEventPtr& ready =
-        output.ready_event != nullptr
-            ? output.ready_event
+    const StreamEventPtr& input_ready =
+        input_domain_ == TaskInputDomain::VLM
+            ? slot.worker_vlm_input.runtime.metadata_ready_event
             : slot.worker_input.runtime.metadata_ready_event;
+    const StreamEventPtr& ready =
+        output.ready_event != nullptr ? output.ready_event : input_ready;
     if (ready != nullptr) {
       CHECK(ready->synchronize()) << "Failed to retire worker task input.";
     }
     slot.worker_output.reset();
     slot.worker_input = LlmForwardInput();
+    slot.worker_vlm_input = VlmForwardInput();
     slot.worker_input_host_buffer = torch::Tensor();
     return output;
   }

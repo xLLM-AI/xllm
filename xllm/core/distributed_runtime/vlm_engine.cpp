@@ -437,6 +437,11 @@ std::vector<RawForwardOutput> VLMEngine::collect_step_outputs(
   // Under data parallelism (DP), we need to get dp_size outputs.
   // The `stride` means the workers num we can skip.
   int32_t stride = dp_local_tp_size_;
+  // Every pipeline rank retains its completed Slot, including non-drivers.
+  // Retire all ranks before another Step, then keep the driver output below.
+  if (options_.enable_task_pipeline()) {
+    stride = 1;
+  }
 
   for (int32_t worker_rank = 0; worker_rank < worker_clients_num_;
        worker_rank += stride) {

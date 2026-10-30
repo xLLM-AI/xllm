@@ -718,8 +718,7 @@ void WorkerService::step_vlm_model(
     ForwardOutput& cpu_output,
     std::vector<SpeculativeTokenStats>& speculative_token_stats) {
   speculative_token_stats.clear();
-  CHECK(!options_.enable_task_pipeline())
-      << "VLM does not support task pipeline";
+  const bool task_pipeline = options_.enable_task_pipeline();
   const bool worker_rebuilds_host_views =
       input.runtime.input_host_buffer_has_layout &&
       input.runtime.input_host_buffer.defined() &&
@@ -739,12 +738,18 @@ void WorkerService::step_vlm_model(
     }
     return;
   }
+  if (task_pipeline) {
+    auto ack = std::move(future).get();
+    CHECK(!ack.has_value()) << "VLM task Step must return PrepareAck";
+  }
   const auto int_options = torch::TensorOptions().device(torch::kCPU);
   if (worker_->is_driver()) {
     const int32_t sequence_count = get_decode_sequence_count(input);
     cpu_output.sample_output.next_tokens = torch::arange(
         -1, -(sequence_count + 1), -1, int_options.dtype(torch::kInt32));
-    std::move(future).deferValue([](auto&&) {});
+    if (!task_pipeline) {
+      std::move(future).deferValue([](auto&&) {});
+    }
   }
   cpu_output.expert_load_data =
       torch::zeros({1, 1}, int_options.dtype(torch::kInt64));
@@ -754,7 +759,8 @@ void WorkerService::poll_vlm_shm(
     std::unique_ptr<ForwardSharedMemoryManager> output_shm_manager) {
   device_.set_device();
   const InputDeviceMaterializationPolicy policy =
-      options_.enable_schedule_overlap() && options_.enable_graph()
+      options_.enable_task_pipeline() ||
+              (options_.enable_schedule_overlap() && options_.enable_graph())
           ? InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE
           : InputDeviceMaterializationPolicy::MATERIALIZE_ON_READ;
   while (true) {

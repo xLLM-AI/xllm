@@ -420,11 +420,12 @@ WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
     : options_(options),
       driver_(parallel_args.rank() == 0),
       dp_driver_(is_dp_driver(parallel_args)),
-      schedule_overlap_(
-          is_driver(),
-          EPLBConfig::get_instance().enable_eplb(),
-          /*retire_unconsumed_inputs=*/
-          options.enable_speculative_decode() && parallel_args.dp_size() > 1),
+      schedule_overlap_(is_driver() && !options.enable_task_pipeline(),
+                        EPLBConfig::get_instance().enable_eplb(),
+                        /*retire_unconsumed_inputs=*/
+                        options.enable_task_pipeline() ||
+                            (options.enable_speculative_decode() &&
+                             parallel_args.dp_size() > 1)),
       device_(device),
       parallel_args_(parallel_args) {
   if (options_.enable_speculative_decode() &&
@@ -1731,6 +1732,26 @@ std::optional<ForwardOutput> WorkerImpl::execute_task_pipeline(
   return step_for_schedule_overlap(prepared);
 }
 
+void WorkerImpl::prepare_task_pipeline_input(const VlmForwardInput& input,
+                                             VlmForwardInput& prepared) {
+  prepare_work_before_execute_on_stream_impl(input,
+                                             prepared,
+                                             *prepare_stream_,
+                                             /*record_ready_event=*/true,
+                                             /*restore_linear_state=*/true,
+                                             /*wait_for_compute_stream=*/false);
+}
+
+std::optional<ForwardOutput> WorkerImpl::execute_task_pipeline(
+    VlmForwardInput& prepared) {
+  // The task FIFO owns host publication. ScheduleOverlap retains only the
+  // device continuation needed to repair the next admitted decode input.
+  if (enable_schedule_overlap()) {
+    return schedule_overlap_.execute(*this, prepared);
+  }
+  return step(prepared);
+}
+
 ForwardOutput WorkerImpl::get_last_step_result() {
   return schedule_overlap_.consume();
 }
@@ -2111,6 +2132,8 @@ TaskModel WorkerImpl::task_model() {
   CHECK(status_ == Status::LOADED || status_ == Status::READY);
   CHECK(model_ != nullptr && model_executor_ != nullptr);
   TaskModel task{*model_, *model_executor_, kv_caches_};
+  task.input_domain =
+      options_.backend() == "vlm" ? TaskInputDomain::VLM : TaskInputDomain::LLM;
   task.restore_request_state = [this](const ModelParamsView& params) {
     prepare_linear_state_cache(params);
   };

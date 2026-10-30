@@ -191,28 +191,7 @@ std::shared_ptr<Request> VLMRequestFactory::build_request(
   const size_t best_of = sp.best_of.value_or(sp.n);
 
   RequestSamplingParam sampling_param = sp.to_sampling_param(best_of);
-  const bool has_constraints = !sp.logit_bias.empty() ||
-                               sp.allowed_token_ids.has_value() ||
-                               sp.min_tokens > 0 || !sp.bad_words.empty();
-  if (options_->enable_task_pipeline() &&
-      (has_constraints || sp.seed.has_value() || sp.top_logprobs == -1)) {
-    CALLBACK_WITH_ERROR(
-        StatusCode::INVALID_ARGUMENT,
-        "The requested sampling controls require enable_task_pipeline=false");
-    return nullptr;
-  }
-  if (options_->num_speculative_tokens() > 0 &&
-      (sp.seed.has_value() || sp.min_tokens > 0 || !sp.bad_words.empty())) {
-    CALLBACK_WITH_ERROR(
-        StatusCode::INVALID_ARGUMENT,
-        "seed, min_tokens and bad_words require num_speculative_tokens=0");
-    return nullptr;
-  }
-  if (options_->enable_schedule_overlap() && !sp.bad_words.empty()) {
-    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                        "bad_words requires enable_schedule_overlap=false");
-    return nullptr;
-  }
+  sampling_param.device_min_tokens = sp.min_tokens > 0;
   if (const auto error =
           sp.prepare_sampling_constraints(sampling_param,
                                           tokenizer_,

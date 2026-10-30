@@ -438,6 +438,9 @@ runtime::Options mtp_target_options(const runtime::Options& options) {
   opts.enable_schedule_overlap(false)
       .is_draft_engine(false)
       .enable_graph_aux_hidden_states(true);
+  if (options.backend() == "vlm") {
+    opts.enable_task_pipeline(false);
+  }
   return opts;
 }
 
@@ -453,6 +456,9 @@ runtime::Options mtp_draft_options(const runtime::Options& options) {
               : 1)
       .num_speculative_tokens(0)
       .enable_graph_aux_hidden_states(true);
+  if (options.backend() == "vlm") {
+    draft_options.enable_task_pipeline(false).num_decoding_tokens(1);
+  }
   return draft_options;
 }
 
@@ -821,6 +827,31 @@ template <typename TargetInput>
   const bool hybrid_paged_attention =
       mtp_async::supports_hybrid_mtp_pipeline_model_pair(target_type,
                                                          draft_type);
+  if constexpr (std::is_same_v<TargetInput, VlmForwardInput>) {
+    if (!hybrid_paged_attention || options_.num_speculative_tokens() <= 0 ||
+        options_.num_speculative_tokens() > 16 ||
+        parallel_args_.dp_size() != 1 || parallel_args_.cp_size() != 1 ||
+        options_.enable_adaptive_draft_step() ||
+        options_.enable_adaptive_target_verify()) {
+      return ::xllm::Status(
+          StatusCode::INVALID_ARGUMENT,
+          "VLM MTP task pipeline requires fixed Qwen hybrid models, "
+          "DP=CP=1 and 1..16 draft tokens.");
+    }
+    LlmTaskCapacity capacity;
+    ::xllm::Status status = impl_->task_capacity(options_, capacity);
+    if (!status.ok()) {
+      return status;
+    }
+    status = TaskExecutionPipeline::create(
+        threadpool_, impl_->task_model(), *this, capacity, output);
+    if (status.ok()) {
+      LOG(INFO) << "VLM MTP task execution pipeline: slots="
+                << capacity.slot_count
+                << ", speculative_tokens=" << options_.num_speculative_tokens();
+    }
+    return status;
+  }
   if (options_.num_speculative_tokens() <= 0 ||
       (draft_type != "glm_moe_dsa_mtp" && !hybrid_paged_attention)) {
     return ::xllm::Status(StatusCode::INVALID_ARGUMENT,
@@ -1960,10 +1991,30 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
       // Overlap can leave the scheduler's generated count behind accepted
       // tokens. Use the corrected target positions; rejection sampling applies
       // the candidate and bonus offsets within each verify row.
-      const auto first_positions =
-          validate_input.positions
-              .view({batch_size, num_speculative_tokens + 1})
-              .select(/*dim=*/1, /*index=*/0);
+      // KV lengths count text and visual tokens uniformly. mRoPE coordinates
+      // can have three axes and a prompt-dependent offset, so they cannot
+      // determine how many output tokens have already been committed.
+      torch::Tensor first_positions;
+      if constexpr (std::is_same_v<TargetInput, VlmForwardInput>) {
+        const torch::Tensor& lengths =
+            validate_input.input_params.attention.device.kv_seq_lens;
+        const int64_t width = num_speculative_tokens + 1;
+        if (lengths.numel() == batch_size) {
+          first_positions = lengths - width;
+        } else if (uses_step_major_validate_layout()) {
+          first_positions =
+              lengths.view({width, batch_size}).select(/*dim=*/0, /*index=*/0) -
+              1;
+        } else {
+          first_positions =
+              lengths.view({batch_size, width}).select(/*dim=*/1, /*index=*/0) -
+              1;
+        }
+      } else {
+        first_positions = validate_input.positions
+                              .view({batch_size, num_speculative_tokens + 1})
+                              .select(/*dim=*/1, /*index=*/0);
+      }
       verify_params.min_tokens_remaining() =
           verify_params.min_token_positions() - first_positions;
     }
