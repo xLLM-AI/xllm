@@ -149,7 +149,16 @@ TEST(ThreadPoolTest, CpuCoreBindingMismatchFallback) {
 TEST(ThreadPoolTest, CpuCoreBindingVerifyAffinity) {
   // Verify that after construction the thread is actually bound to the
   // requested core (if the system allows it).
-  const int32_t target_core = 0;
+  cpu_set_t allowed_cpus;
+  CPU_ZERO(&allowed_cpus);
+  ASSERT_EQ(pthread_getaffinity_np(
+                pthread_self(), sizeof(allowed_cpus), &allowed_cpus),
+            0);
+  int32_t target_core = 0;
+  while (target_core < CPU_SETSIZE && !CPU_ISSET(target_core, &allowed_cpus)) {
+    ++target_core;
+  }
+  ASSERT_LT(target_core, CPU_SETSIZE);
   std::vector<int32_t> cpu_cores = {target_core};
 
   absl::Notification done;

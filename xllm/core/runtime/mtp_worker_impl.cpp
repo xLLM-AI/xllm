@@ -949,9 +949,9 @@ bool MTPWorkerImpl<TargetInput>::init_model(
   draft_prefix_policy_ = mtp_async::classify_draft_prefix_policy(
       target_spec_verify_mode_, combined_draft_execution_path_);
 #if defined(USE_NPU)
-  if (result && supports_explicit_spec_verify_replay_update()) {
+  if (result && supports_expanded_spec_verify()) {
     CHECK_EQ(::xllm::KernelConfig::get_instance().npu_kernel_backend(), "TORCH")
-        << "Qwen3.5 MTP only supports NPU Torch backend";
+        << "Expanded MTP verify requires the NPU Torch backend";
   }
 #endif
   return result;
@@ -1042,18 +1042,15 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_worker_no_sync(
 }
 
 template <typename TargetInput>
-bool MTPWorkerImpl<TargetInput>::supports_explicit_spec_verify_replay_update()
-    const {
-  if (target_spec_verify_mode_ ==
-      mtp_async::TargetSpecVerifyMode::QWEN3_5_EXPANDED_VERIFY) {
-    return true;
+bool MTPWorkerImpl<TargetInput>::supports_expanded_spec_verify() const {
+  switch (target_spec_verify_mode_) {
+    case mtp_async::TargetSpecVerifyMode::EXPANDED_VERIFY:
+      return true;
+    case mtp_async::TargetSpecVerifyMode::PYTHON_EXPANDED_VERIFY:
+      return ModelConfig::is_python_model_impl(context_.get_model_impl());
+    default:
+      return false;
   }
-  // The Python NPU paged-attention runner consumes expanded metadata and can
-  // replay its ACL graph for DeepSeek MLA. The native target executor has no
-  // corresponding MLA spec-verify graph path yet, so it remains generic.
-  return target_spec_verify_mode_ ==
-             mtp_async::TargetSpecVerifyMode::DEEPSEEK_V32_EXPANDED_VERIFY &&
-         ModelConfig::is_python_model_impl(context_.get_model_impl());
 }
 
 template <typename TargetInput>
@@ -1066,7 +1063,9 @@ bool MTPWorkerImpl<TargetInput>::should_use_explicit_spec_verify_replay_update(
   if (!::xllm::ExecutionConfig::get_instance().enable_graph() ||
       !::xllm::ExecutionConfig::get_instance()
            .enable_graph_mode_decode_no_padding() ||
-      !supports_explicit_spec_verify_replay_update() || impl_ == nullptr ||
+      target_spec_verify_mode_ !=
+          mtp_async::TargetSpecVerifyMode::EXPANDED_VERIFY ||
+      ModelConfig::is_python_model_impl(context_.get_model_impl()) || impl_ == nullptr ||
       options_.num_speculative_tokens() <= 0 || options_.block_size() <= 0 ||
       !spec_verify::has_speculative_verify_block_table_layout(
           block_tables, input.input_params.multi_block_tables, num_sequences)) {
@@ -1147,7 +1146,7 @@ template <typename TargetInput>
 bool MTPWorkerImpl<TargetInput>::use_chunked_prefill_spec_verify_path() const {
   if (target_spec_verify_mode_ ==
           mtp_async::TargetSpecVerifyMode::CAUSAL_CHUNKED_PREFILL ||
-      supports_explicit_spec_verify_replay_update()) {
+      supports_expanded_spec_verify()) {
     return true;
   }
 #if defined(USE_NPU) || defined(USE_MLU)
@@ -1843,7 +1842,9 @@ void MTPWorkerImpl<TargetInput>::fill_validate_input_from_draft_outputs(
   const bool use_fused_verify_token_update =
       validate_input.input_params.graph.spec_verify_source_addresses_stable &&
       validate_input.input_params.graph.input_tokens_override.defined() &&
-      supports_explicit_spec_verify_replay_update() &&
+      target_spec_verify_mode_ ==
+          mtp_async::TargetSpecVerifyMode::EXPANDED_VERIFY &&
+      !ModelConfig::is_python_model_impl(context_.get_model_impl()) &&
       kernel::npu::tilelang::has_spec_verify_graph_update_specialization(
           num_val_tokens, options_.block_size());
   if (use_fused_verify_token_update) {
@@ -2943,7 +2944,7 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
       should_use_explicit_spec_verify_replay_update(input);
   const bool qwen_logical_state =
       target_spec_verify_mode_ ==
-      mtp_async::TargetSpecVerifyMode::QWEN3_5_EXPANDED_VERIFY;
+      mtp_async::TargetSpecVerifyMode::EXPANDED_VERIFY;
   const bool expand_python_mtp_linear_state_ids =
       num_val_tokens > 1 &&
       ModelConfig::is_python_model_impl(context_.get_model_impl()) &&
@@ -3275,7 +3276,7 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
     input_params.graph.input_tokens_override = validate_input.token_ids;
     input_params.graph.spec_verify_source_addresses_stable = true;
   } else {
-    if (supports_explicit_spec_verify_replay_update()) {
+    if (supports_expanded_spec_verify()) {
       ensure_spec_verify_control_block_table(input_params, num_sequences);
     }
     std::vector<PackedAttentionIntInput> extra_int_inputs;
@@ -3287,7 +3288,7 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
     }
     AttentionInputView(input_params.attention)
         .rebuild_device_buffer(device_, extra_int_inputs);
-    if (supports_explicit_spec_verify_replay_update()) {
+    if (supports_expanded_spec_verify()) {
       build_expanded_spec_verify_graph_input(
           input_params, device_, logical_block_size);
     }
@@ -3559,7 +3560,7 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
                                      std::move(buf.out_kv_seq_lens),
                                      /*update_block_tables=*/true);
   }
-  if (supports_explicit_spec_verify_replay_update()) {
+  if (supports_expanded_spec_verify()) {
     specBuilder::rebuild_q_cu_seq_lens(input_params);
   }
   input_params.attention.rebuild_device_buffer(device_);
@@ -3666,7 +3667,7 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_inputs(
       std::move(input_params.attention.host.q_cu_seq_lens),
       buf.meta.kv_max_seq_len,
       std::move(buf.out_kv_seq_lens));
-  if (supports_explicit_spec_verify_replay_update()) {
+  if (supports_expanded_spec_verify()) {
     specBuilder::rebuild_q_cu_seq_lens(input_params);
   }
   input_params.attention.rebuild_device_buffer(device_);

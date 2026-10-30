@@ -25,14 +25,15 @@ namespace xllm::mtp_async {
 enum class TargetSpecVerifyMode {
   GENERIC,
   CAUSAL_CHUNKED_PREFILL,
-  QWEN3_5_EXPANDED_VERIFY,
-  DEEPSEEK_V32_EXPANDED_VERIFY,
+  EXPANDED_VERIFY,
+  PYTHON_EXPANDED_VERIFY,
 };
 
 // Keep target verification policy closed over model types with validated
 // layouts. Unknown models retain the generic path.
 TargetSpecVerifyMode classify_target_spec_verify_mode(
     std::string_view model_type);
+
 
 // Whether the target's speculative decode path needs two uniform draft rows
 // after every fully accepted request. Keep model recognition in the policy

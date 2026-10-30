@@ -1354,6 +1354,13 @@ void WorkerImpl::prepare_work_before_execute_on_stream_impl(
       processed_input.input_params.embedding.linear_state_indices =
           torch::zeros({dummy_tokens},
                        token_options.dtype(torch::kInt32).device(device_));
+      if (model_args.num_speculative_tokens() > 0 &&
+          has_linear_attention_layers(model_args)) {
+        // The dummy shard is one logical sequence regardless of token width.
+        input_params.num_accepted_tokens_host.assign(1, 1);
+        input_params.num_accepted_tokens = torch::ones(
+            {1}, token_options.dtype(torch::kInt32).device(device_));
+      }
       if (idle_block_input) {
         apply_idle_block_dummy_input(input_params, dummy_tokens, device_);
       }

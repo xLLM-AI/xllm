@@ -145,7 +145,7 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   // prepare inputs for draft model at Prefill phase.
   void prepare_prefill_inputs(const TargetInput& inputs,
                               LlmForwardInput& prefill_inputs);
-  bool supports_explicit_spec_verify_replay_update() const;
+  bool supports_expanded_spec_verify() const;
   bool should_use_explicit_spec_verify_replay_update(
       const TargetInput& input) const;
   // A DCP block-table entry covers one logical KV page per KV split. All

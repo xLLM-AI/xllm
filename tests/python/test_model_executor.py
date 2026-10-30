@@ -2238,6 +2238,30 @@ def test_executor_prepares_qwen_mtp_with_logical_accepted_state(draft_tokens: in
         executor.prepare_metadata(metadata)
 
 
+def test_executor_rejects_token_row_scoped_accepted_counts() -> None:
+    backend = _PreparedStubAttentionBackend()
+    config = {
+        "model_type": "qwen3_5_text",
+        "is_mtp_algorithm": True,
+        "num_speculative_tokens": 3,
+        "enable_task_pipeline": True,
+    }
+    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
+        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2, num_decoding_tokens=4)
+    cache = torch.empty(2, 4, 2, 64)
+    executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
+    metadata = _prepared_qwen_metadata()
+    rows = 2 * 4
+    metadata.slot_mapping = torch.arange(rows, dtype=torch.int32)
+    metadata.q_seq_lens = torch.ones(rows, dtype=torch.int32)
+    metadata.q_cu_seq_lens = torch.arange(rows + 1, dtype=torch.int32)
+    metadata.q_cu_seq_lens_host_values = list(range(rows + 1))
+    metadata.is_spec_verify = True
+    metadata.num_accepted_tokens = torch.ones(rows, dtype=torch.int32)
+    with pytest.raises(ValueError, match="accepted token counts"):
+        executor.prepare_metadata(metadata)
+
+
 @pytest.mark.parametrize("model_type", ["qwen3_5_mtp"])
 def test_executor_prepares_qwen_draft_device_lengths_only_for_decode(model_type: str) -> None:
     backend = _PreparedStubAttentionBackend()
@@ -3187,3 +3211,34 @@ def test_eager_runner_skips_cp_for_empty_rank() -> None:
     build_context.assert_not_called()
     assert runner.attention_backend._prepared
     runner.model.assert_called_once()
+
+
+class TestDecodeAclGraphWidthKeying:
+    def test_graph_key_identifies_uniform_span_width_not_sequence_count(self) -> None:
+        runner = DecodeAclGraphRunner(
+            nn.Identity(),
+            _PagedStubAttentionBackend(),
+            torch.device("cpu"),
+            max_batch=16,
+            max_model_len=8,
+            num_decoding_tokens=4,
+        )
+        runner._has_linear_cache = True
+        runner._spec_verify_width = 1
+        runner._enable_decode_no_padding = False
+        runner._uses_compressed_kpool_tail = False
+
+        two = SimpleNamespace(kpool_query_lens=(4, 4))
+        four = SimpleNamespace(kpool_query_lens=(4, 4, 4, 4))
+
+        assert runner._padded_kpool_query_lens(two, 8, 16) == runner._padded_kpool_query_lens(four, 16, 16)
+        assert DecodeAclGraphRunner._graph_key(16, False, None, kpool_query_lens=runner._padded_kpool_query_lens(two, 8, 16)) == DecodeAclGraphRunner._graph_key(
+            16, False, None, kpool_query_lens=runner._padded_kpool_query_lens(four, 16, 16)
+        )
+        assert DecodeAclGraphRunner._graph_key(16, False, None, kpool_query_lens=(8, 8)) != DecodeAclGraphRunner._graph_key(
+            16, False, None, kpool_query_lens=runner._padded_kpool_query_lens(four, 16, 16)
+        )
+        with pytest.raises(ValueError, match="complete fixed-width requests"):
+            runner._padded_batch_size(6, SimpleNamespace(is_spec_verify=True))
+        with pytest.raises(ValueError, match="exceeds ACL graph capacity"):
+            runner._padded_batch_size(20, SimpleNamespace(is_spec_verify=True))

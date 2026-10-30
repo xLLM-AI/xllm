@@ -115,7 +115,16 @@ TEST(RejectionSamplerTest, Greedy) {
       torch::equal(output.num_accepted_tokens,
                    torch::full({batch_size, 1},
                                static_cast<int64_t>(n_speculative_tokens),
-                               torch::kInt32)));
+                               options.dtype(torch::kInt32))));
+  const auto no_draft =
+      rejection_sample(rejection_params,
+                       DraftProposal(draft_token_ids.narrow(1, 0, 0)),
+                       flatten_rows(full_logits.narrow(/*dim=*/1,
+                                                       /*start=*/0,
+                                                       /*length=*/1)));
+  EXPECT_TRUE(torch::equal(
+      no_draft.num_accepted_tokens,
+      torch::zeros({batch_size, 1}, options.dtype(torch::kInt32))));
 }
 
 TEST(RejectionSamplerTest, GreedyFromTokenIds) {

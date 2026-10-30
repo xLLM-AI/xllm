@@ -24,7 +24,7 @@ import pytest
 import torch
 from torch import nn
 
-from xllm.python.model_loader import W8A8WeightLoader
+from xllm.python.model_loader import QLinearWeightLoader, W8A8WeightLoader
 from xllm.python.models import glm5_next
 
 
@@ -526,6 +526,7 @@ def test_quantized_expert_scales_are_loaded_in_kernel_dtypes(
     )
     module = glm5_next.Glm5NextMoE(config, torch.bfloat16, torch.device("cpu"))
     monkeypatch.setattr(module.shared_experts, "forward", lambda hidden: hidden)
+    assert module.gate.weight.dtype == torch.float32
     module.use_w8a8 = True
     model = torch.nn.Module()
     model.cfg = config
@@ -580,15 +581,18 @@ def test_quantized_expert_scales_are_loaded_in_kernel_dtypes(
         return torch.zeros_like(hidden)
 
     monkeypatch.setattr(glm5_next.kernels, "grouped_moe_with_selected_experts", grouped_moe, raising=False)
-    monkeypatch.setattr(
-        glm5_next.kernels,
-        "moe_gate_routing",
-        lambda logits, *args, **kwargs: (
+
+    def route(
+        logits: torch.Tensor, bias: torch.Tensor, *args: object, routed_scaling_factor: float
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert logits.dtype == torch.float32
+        assert bias is module.e_score_correction_bias
+        return (
             torch.ones(logits.shape[0], config.num_experts_per_tok),
             torch.zeros(logits.shape[0], config.num_experts_per_tok, dtype=torch.int32),
-        ),
-        raising=False,
-    )
+        )
+
+    monkeypatch.setattr(glm5_next.kernels, "moe_gate_routing", route, raising=False)
     hidden = torch.ones(shape, dtype=torch.bfloat16)
     for _ in range(2):
         torch.testing.assert_close(module(hidden), hidden, rtol=0, atol=0)
@@ -611,3 +615,54 @@ def test_nonquantized_experts_do_not_allocate_quantization_scales() -> None:
     assert not hasattr(module, "experts_w13_scale")
     assert not hasattr(module, "experts_w2_scale")
     assert not hasattr(module, "experts_w2_scale_compute")
+
+
+class _RouterStateDict:
+    def __init__(self, tensors: dict[str, torch.Tensor]) -> None:
+        self.tensors = tensors
+        self.loaded: list[str] = []
+
+    def has(self, name: str) -> bool:
+        return name in self.tensors
+
+    def find(self, name: str) -> torch.Tensor | None:
+        return self.tensors.get(name)
+
+    def get_tensor(self, name: str) -> torch.Tensor:
+        self.loaded.append(name)
+        return self.tensors[name]
+
+
+@pytest.mark.parametrize("quantized", [False, True])
+def test_router_loading_preserves_fp32_weights_and_bias_after_model_cast(
+    monkeypatch: pytest.MonkeyPatch, quantized: bool
+) -> None:
+    config = _config()
+    module = glm5_next.Glm5NextMoE(config, torch.bfloat16, torch.device("cpu")).bfloat16()
+    model = glm5_next.Glm5NextForCausalLM.__new__(glm5_next.Glm5NextForCausalLM)
+    nn.Module.__init__(model)
+    model.cfg = config
+    model.model = nn.Module()
+    layer = nn.Module()
+    layer.mlp = module
+    model.model.layers = nn.ModuleList([layer])
+    prefix = "model.layers.0.mlp."
+    weight = torch.linspace(0.001, 0.2, 32).view(4, 8)
+    bias = torch.tensor([1.0001, 1.0002, 1.0003, 1.0004])
+    tensors = {prefix + "gate.weight": weight, prefix + "gate.e_score_correction_bias": bias}
+    if quantized:
+        tensors[prefix + "experts.0.gate_proj.weight_scale"] = torch.ones(1)
+    loader = QLinearWeightLoader(model, [_RouterStateDict(tensors)], 1, 0)
+    monkeypatch.setattr(model, "_load_experts_w8a8", lambda *_args: None)
+    monkeypatch.setattr(model, "_load_experts_bf16", lambda *_args: None)
+    monkeypatch.setattr(model, "_load_mlp_fp_or_w8a8", lambda *_args: None)
+    monkeypatch.setattr(module, "process_weights_after_loading", lambda: None)
+    model._load_mlp(loader, prefix, 0)
+    assert module.use_w8a8 == quantized
+    assert module.gate.weight.dtype == torch.float32
+    assert module.e_score_correction_bias.dtype == torch.float32
+    torch.testing.assert_close(module.gate.weight, weight, rtol=0, atol=0)
+    torch.testing.assert_close(module.e_score_correction_bias, bias, rtol=0, atol=0)
+    pointers = (module.gate.weight.data_ptr(), module.e_score_correction_bias.data_ptr())
+    model._load_mlp(loader, prefix, 0)
+    assert pointers == (module.gate.weight.data_ptr(), module.e_score_correction_bias.data_ptr())

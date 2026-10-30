@@ -166,11 +166,20 @@ TEST(RejectionSamplerControlsTest, SeededVerifyMatchesOrdinaryTokenOffsets) {
     }
     const auto proposal =
         torch::tensor({{expected[0], expected[1]}}, torch::kLong);
-    const auto result =
-        rejection_sample(params, DraftProposal(proposal), logits);
-    EXPECT_TRUE(
-        torch::equal(result.next_tokens,
-                     torch::tensor(expected, torch::kLong).unsqueeze(0)));
+    for (const int64_t num_draft_tokens : {0, 2}) {
+      const auto result = rejection_sample(
+          params,
+          DraftProposal(proposal.narrow(1, 0, num_draft_tokens)),
+          logits.narrow(0, 0, num_draft_tokens + 1));
+      EXPECT_TRUE(torch::equal(result.next_tokens,
+                               torch::tensor(expected, torch::kLong)
+                                   .unsqueeze(0)
+                                   .narrow(1, 0, num_draft_tokens + 1)));
+      EXPECT_EQ(result.num_accepted_tokens.scalar_type(), torch::kInt32);
+      EXPECT_TRUE(
+          torch::equal(result.num_accepted_tokens,
+                       torch::full({1, 1}, num_draft_tokens, torch::kInt32)));
+    }
   }
 }
 

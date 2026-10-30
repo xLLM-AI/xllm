@@ -16,6 +16,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 import torch.nn as nn
 
@@ -55,3 +56,83 @@ def test_dsa_graph_empty_rank_uses_reserved_block_zero() -> None:
 
     for table in static_metadata.multi_block_tables:
         assert torch.all(table == 0)
+
+
+def test_linear_verify_state_pads_accepted_counts_and_indices_for_bucket_tail() -> None:
+    counts = (3, 1)
+    entry = SimpleNamespace(
+        static_metadata=SimpleNamespace(
+            linear_state_indices=torch.full((5,), 7, dtype=torch.int32),
+            num_accepted_tokens=torch.full((5,), 5, dtype=torch.int32),
+            num_accepted_tokens_host_values=(9, 9),
+        ),
+    )
+    DecodeAclGraphRunner._fill_linear_verify_state(
+        entry,
+        SimpleNamespace(
+            num_accepted_tokens=torch.tensor(counts, dtype=torch.int32),
+            num_accepted_tokens_host_values=tuple(counts),
+        ),
+        (4, 4),
+        torch.tensor([5, 9], dtype=torch.int32),
+    )
+    assert entry.static_metadata.linear_state_indices.tolist() == [5, 9, 0, 0, 0]
+    assert entry.static_metadata.num_accepted_tokens.tolist() == [*counts, 1, 1, 1]
+    assert entry.static_metadata.num_accepted_tokens_host_values == (*counts, 1, 1, 1)
+
+
+@pytest.mark.parametrize("counts", [(0, 1), (1, 5)])
+def test_linear_verify_state_rejects_counts_outside_verify_width(counts: tuple[int, ...]) -> None:
+    entry = SimpleNamespace(
+        static_metadata=SimpleNamespace(
+            linear_state_indices=torch.zeros(5, dtype=torch.int32),
+            num_accepted_tokens=torch.ones(5, dtype=torch.int32),
+            num_accepted_tokens_host_values=(),
+        ),
+    )
+    with pytest.raises(ValueError, match=r"in \[1, verify width\]"):
+        DecodeAclGraphRunner._fill_linear_verify_state(
+            entry,
+            SimpleNamespace(
+                num_accepted_tokens=torch.tensor(counts, dtype=torch.int32),
+                num_accepted_tokens_host_values=tuple(counts),
+            ),
+            (4, 4),
+            torch.tensor([5, 9], dtype=torch.int32),
+        )
+
+
+@pytest.mark.parametrize("bad_accepted", [None, torch.ones(3, dtype=torch.int32)])
+def test_linear_verify_state_requires_sequence_scoped_accepted_counts(bad_accepted: torch.Tensor | None) -> None:
+    entry = SimpleNamespace(
+        static_metadata=SimpleNamespace(
+            linear_state_indices=torch.zeros(5, dtype=torch.int32),
+            num_accepted_tokens=torch.zeros(5, dtype=torch.int32),
+            num_accepted_tokens_host_values=(),
+        ),
+    )
+    with pytest.raises(ValueError, match="sequence-scoped"):
+        DecodeAclGraphRunner._fill_linear_verify_state(
+            entry,
+            SimpleNamespace(num_accepted_tokens=bad_accepted, num_accepted_tokens_host_values=()),
+            (4, 4),
+            torch.tensor([5, 9], dtype=torch.int32),
+        )
+
+
+def test_linear_verify_state_accepts_row_expanded_state_indices() -> None:
+    entry = SimpleNamespace(
+        static_metadata=SimpleNamespace(
+            linear_state_indices=torch.full((4,), 7, dtype=torch.int32),
+            num_accepted_tokens=torch.full((4,), 5, dtype=torch.int32),
+            num_accepted_tokens_host_values=(9,),
+        ),
+    )
+    DecodeAclGraphRunner._fill_linear_verify_state(
+        entry,
+        SimpleNamespace(num_accepted_tokens=torch.tensor([2], dtype=torch.int32)),
+        (3,),
+        torch.tensor([8, 8, 8], dtype=torch.int32),
+    )
+    assert entry.static_metadata.linear_state_indices.tolist() == [8, 0, 0, 0]
+    assert entry.static_metadata.num_accepted_tokens.tolist() == [2, 1, 1, 1]

@@ -156,7 +156,7 @@ class DecodeMetadataTestWorker final : public UnifiedMtpWorkerImpl {
       : UnifiedMtpWorkerImpl(parallel_args, device, options, WorkerType::LLM) {
     context_.set_model_impl("python");
     target_spec_verify_mode_ =
-        mtp_async::TargetSpecVerifyMode::DEEPSEEK_V32_EXPANDED_VERIFY;
+        mtp_async::TargetSpecVerifyMode::PYTHON_EXPANDED_VERIFY;
   }
 
   void initialize_target_cache() {
@@ -164,8 +164,7 @@ class DecodeMetadataTestWorker final : public UnifiedMtpWorkerImpl {
   }
 
   void use_qwen_hybrid_verify() {
-    target_spec_verify_mode_ =
-        mtp_async::TargetSpecVerifyMode::QWEN3_5_EXPANDED_VERIFY;
+    target_spec_verify_mode_ = mtp_async::TargetSpecVerifyMode::EXPANDED_VERIFY;
   }
 
   void retain_prefix(const LlmForwardInput& input, int32_t accepted_count) {

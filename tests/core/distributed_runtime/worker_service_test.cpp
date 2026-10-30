@@ -28,6 +28,7 @@ limitations under the License.
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "core/framework/config/execution_config.h"
 #include "core/runtime/options.h"
@@ -41,7 +42,9 @@ class WorkerServiceOutputTest : public ::testing::Test {
     runtime::Options options;
     options.backend("llm");
     WorkerService service(options, torch::Device("npu:0"), nullptr);
-    service.collect_llm_output(source, destination, /*cpu_ready_result=*/true);
+    std::vector<SpeculativeTokenStats> stats;
+    service.collect_llm_output(
+        source, destination, /*cpu_ready_result=*/true, stats);
   }
 };
 

@@ -171,6 +171,8 @@ SampleOutput rejection_sample(const SamplingParameters& params,
     SampleOutput output;
     if (num_draft_tokens == 0) {
       output.next_tokens = sampled;
+      output.num_accepted_tokens =
+          torch::zeros({batch_size, 1}, sampled.options().dtype(torch::kInt32));
     } else {
       const torch::Tensor accepted = sampled.narrow(1, 0, num_draft_tokens)
                                          .eq(draft_token_ids)
@@ -180,6 +182,8 @@ SampleOutput rejection_sample(const SamplingParameters& params,
                       accepted.to(torch::kInt32).cumprod(1).gt(0)},
                      1);
       output.next_tokens = sampled.masked_fill(valid.logical_not(), -1);
+      output.num_accepted_tokens =
+          valid.sum(/*dim=*/1, /*keepdim=*/true, torch::kInt32).sub_(1);
     }
     compute_logprobs(
         output, raw_logits.defined() ? raw_logits : grouped_logits, params);
@@ -210,6 +214,8 @@ SampleOutput rejection_sample(const SamplingParameters& params,
 
   if (num_draft_tokens == 0) {
     output.next_tokens = bonus_token_ids;
+    output.num_accepted_tokens = torch::zeros(
+        {batch_size, 1}, bonus_token_ids.options().dtype(torch::kInt32));
     compute_logprobs(
         output, raw_logits.defined() ? raw_logits : grouped_logits, params);
     return output;

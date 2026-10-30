@@ -3768,7 +3768,7 @@ ForwardOutput TaskExecutionPipeline::consume_speculative(uint32_t slot_id) {
       step.draft_tokens = slot.verify->selected_draft_tokens;
       step.request_ids = slot.verify->request_ids;
       for (const int32_t num_accepted : num_accepted_tokens) {
-        step.accepted_tokens += static_cast<uint32_t>(accepted);
+        step.accepted_tokens += static_cast<uint32_t>(num_accepted);
       }
     }
     if (adaptive_verify_->calibration_session) {

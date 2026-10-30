@@ -28,21 +28,21 @@ namespace {
 
 TEST(MtpAsyncStateTest, ClassifiesClosedTargetSpecVerifyPolicy) {
   const std::pair<std::string_view, TargetSpecVerifyMode> test_cases[] = {
-      {"qwen3_5", TargetSpecVerifyMode::QWEN3_5_EXPANDED_VERIFY},
-      {"qwen3_5_moe", TargetSpecVerifyMode::QWEN3_5_EXPANDED_VERIFY},
-      {"qwen3_5_text", TargetSpecVerifyMode::QWEN3_5_EXPANDED_VERIFY},
-      {"qwen3_5_moe_text", TargetSpecVerifyMode::QWEN3_5_EXPANDED_VERIFY},
-      {"deepseek_v32", TargetSpecVerifyMode::DEEPSEEK_V32_EXPANDED_VERIFY},
-      {"deepseek_v4", TargetSpecVerifyMode::DEEPSEEK_V32_EXPANDED_VERIFY},
-      {"deepseek_v4_dspark",
-       TargetSpecVerifyMode::DEEPSEEK_V32_EXPANDED_VERIFY},
+      {"qwen3_5", TargetSpecVerifyMode::EXPANDED_VERIFY},
+      {"qwen3_5_moe", TargetSpecVerifyMode::EXPANDED_VERIFY},
+      {"qwen3_5_text", TargetSpecVerifyMode::EXPANDED_VERIFY},
+      {"qwen3_5_moe_text", TargetSpecVerifyMode::EXPANDED_VERIFY},
+      {"deepseek_v32", TargetSpecVerifyMode::PYTHON_EXPANDED_VERIFY},
+      {"deepseek_v4", TargetSpecVerifyMode::PYTHON_EXPANDED_VERIFY},
+      {"deepseek_v4_dspark", TargetSpecVerifyMode::PYTHON_EXPANDED_VERIFY},
       {"mimo", TargetSpecVerifyMode::CAUSAL_CHUNKED_PREFILL},
-      {"glm5_next", TargetSpecVerifyMode::DEEPSEEK_V32_EXPANDED_VERIFY},
-      {"glm5_3_flash", TargetSpecVerifyMode::DEEPSEEK_V32_EXPANDED_VERIFY},
+      {"glm5_next", TargetSpecVerifyMode::PYTHON_EXPANDED_VERIFY},
+      {"glm5_next_mtp", TargetSpecVerifyMode::GENERIC},
+      {"glm5_3_flash", TargetSpecVerifyMode::PYTHON_EXPANDED_VERIFY},
       {"qwen3_next", TargetSpecVerifyMode::GENERIC},
       {"qwen3_5_mtp", TargetSpecVerifyMode::GENERIC},
       {"qwen3_5_moe_mtp", TargetSpecVerifyMode::GENERIC},
-      {"glm_moe_dsa", TargetSpecVerifyMode::DEEPSEEK_V32_EXPANDED_VERIFY},
+      {"glm_moe_dsa", TargetSpecVerifyMode::PYTHON_EXPANDED_VERIFY},
       {"mimo_mtp", TargetSpecVerifyMode::GENERIC},
       {"unknown_model", TargetSpecVerifyMode::GENERIC},
   };
@@ -77,8 +77,8 @@ TEST(MtpAsyncStateTest, ClassifiesDraftPrefixProtocolFromBothModelLayouts) {
   const TargetSpecVerifyMode target_modes[] = {
       TargetSpecVerifyMode::GENERIC,
       TargetSpecVerifyMode::CAUSAL_CHUNKED_PREFILL,
-      TargetSpecVerifyMode::QWEN3_5_EXPANDED_VERIFY,
-      TargetSpecVerifyMode::DEEPSEEK_V32_EXPANDED_VERIFY,
+      TargetSpecVerifyMode::EXPANDED_VERIFY,
+      TargetSpecVerifyMode::PYTHON_EXPANDED_VERIFY,
   };
   for (const TargetSpecVerifyMode target_mode : target_modes) {
     EXPECT_EQ(classify_draft_prefix_policy(
@@ -93,9 +93,9 @@ TEST(MtpAsyncStateTest, ClassifiesDraftPrefixProtocolFromBothModelLayouts) {
       {TargetSpecVerifyMode::GENERIC, DraftPrefixPolicy::TAIL_REPAIR},
       {TargetSpecVerifyMode::CAUSAL_CHUNKED_PREFILL,
        DraftPrefixPolicy::TAIL_REPAIR},
-      {TargetSpecVerifyMode::QWEN3_5_EXPANDED_VERIFY,
+      {TargetSpecVerifyMode::EXPANDED_VERIFY,
        DraftPrefixPolicy::VERIFIER_CONDITIONED_FIRST_PASS},
-      {TargetSpecVerifyMode::DEEPSEEK_V32_EXPANDED_VERIFY,
+      {TargetSpecVerifyMode::PYTHON_EXPANDED_VERIFY,
        DraftPrefixPolicy::TAIL_REPAIR},
   };
   for (const auto& [target_mode, expected] : paged_cases) {

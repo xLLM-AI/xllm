@@ -45,19 +45,20 @@ torch::Tensor gather_sequence_rows(const torch::Tensor& values,
 TargetSpecVerifyMode classify_target_spec_verify_mode(
     std::string_view model_type) {
   if (is_qwen3_5_target_model_type(model_type)) {
-    return TargetSpecVerifyMode::QWEN3_5_EXPANDED_VERIFY;
+    return TargetSpecVerifyMode::EXPANDED_VERIFY;
   }
   // GLM and DeepSeek use the same DSA expanded target-verify layout.
   if (model_type == "deepseek_v32" || model_type == "glm_moe_dsa" ||
       model_type == "deepseek_v4" || model_type == kDeepseekV4DSparkModelType ||
       is_glm5_next_target_model_type(model_type)) {
-    return TargetSpecVerifyMode::DEEPSEEK_V32_EXPANDED_VERIFY;
+    return TargetSpecVerifyMode::PYTHON_EXPANDED_VERIFY;
   }
   if (model_type == "mimo") {
     return TargetSpecVerifyMode::CAUSAL_CHUNKED_PREFILL;
   }
   return TargetSpecVerifyMode::GENERIC;
 }
+
 
 bool requires_uniform_draft_rows(std::string_view model_type) {
   return is_glm5_next_target_model_type(model_type);
@@ -77,7 +78,7 @@ CombinedDraftExecutionPath classify_combined_draft_execution_path(
 DraftPrefixPolicy classify_draft_prefix_policy(
     TargetSpecVerifyMode target_mode,
     CombinedDraftExecutionPath draft_path) {
-  if (target_mode == TargetSpecVerifyMode::QWEN3_5_EXPANDED_VERIFY &&
+  if (target_mode == TargetSpecVerifyMode::EXPANDED_VERIFY &&
       draft_path == CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION) {
     return DraftPrefixPolicy::VERIFIER_CONDITIONED_FIRST_PASS;
   }
