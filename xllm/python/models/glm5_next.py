@@ -54,8 +54,18 @@ from xllm.python.attention.mla_index_context import (
     KPoolMlaIndexContextBuilder,
     is_compact_kpool_tail,
 )
-from xllm.python.layers.moe_parallel import Eplv2CommPolicy
-from xllm.python.layers.npu.glm5_next_metadata import Glm5NextEplv2Metadata, Glm5NextEplv2MetadataBuilder
+from xllm.python.layers.embedding import HiddenParallelEmbedding
+from xllm.python.layers.kda import KdaForgetGate
+from xllm.python.layers.layernorm import RMSNorm
+from xllm.python.layers.linear import ColumnParallelLinear
+from xllm.python.layers.moe_parallel import (
+    Eplv2CommPolicy,
+    TokenParallelLayout,
+    dp_gather_tokens,
+    reduce_and_scatter,
+    shared_expert_stream,
+)
+from xllm.python.layers.qlinear import QLinear
 from xllm.python.model_executor.cp_utils import (
     cp_merge_rows,
     cp_shard_positions,
@@ -69,6 +79,29 @@ from xllm.python.model_executor.forward_context import (
     in_acl_graph,
     record_layer_event,
 )
+from xllm.python.model_loader import QLinearWeightLoader
+from xllm.python.models.aux_hidden_capture import AuxHiddenCapture
+from xllm.python.models.base import PyModelBase
+from xllm.python.models.glm5_next_kpool import (
+    append_causal_tail,
+    read_pools,
+    update_compressed_kpool,
+)
+from xllm.python.models.glm5_next_kpool import pooled_states as _kpool_pooled_states
+from xllm.python.models.glm5_next_metadata import Glm5NextEplv2Metadata, Glm5NextEplv2MetadataBuilder
+
+# xllm Attention base — present in the real engine (full xllm.python package).
+# Under the standalone stub-loader align path the package is not wired, so fall
+# back to a stub nn.Module that accepts (and ignores) the same __init__ kwargs;
+# the layers still work as plain modules there (the executor's
+# isinstance(module, Attention) check is never reached on that path).
+try:
+    from xllm.python.layers.attention import Attention
+except ImportError:  # pragma: no cover - stub-loader path
+
+    class Attention(nn.Module):  # type: ignore[no-redef]
+        def __init__(self, *args, **kwargs) -> None:  # noqa: D401
+            super().__init__()
 
 
 @functools.cache
@@ -101,38 +134,6 @@ def _compact_kpool_triton_query_len(
 # (= kv_len / index_kpool): 8 GiB at 32K context, 16 GiB at 64K — beyond the
 # activation headroom and a hard device OOM mid prefill.
 _SCORES_SLAB_CAP_BYTES = int(1.5 * 1024**3)
-from xllm.python.layers.embedding import HiddenParallelEmbedding
-from xllm.python.layers.kda import KdaForgetGate
-from xllm.python.layers.layernorm import RMSNorm
-from xllm.python.layers.linear import ColumnParallelLinear
-from xllm.python.layers.moe_dp import dp_gather_tokens, reduce_and_scatter
-from xllm.python.layers.moe_parallel import TokenParallelLayout
-from xllm.python.layers.qlinear import QLinear
-from xllm.python.model_loader import QLinearWeightLoader
-from xllm.python.models.aux_hidden_capture import AuxHiddenCapture
-from xllm.python.models.base import PyModelBase
-from xllm.python.models.glm5_next_kpool import (
-    append_causal_tail,
-    read_pools,
-    update_compressed_kpool,
-)
-from xllm.python.models.glm5_next_kpool import pooled_states as _kpool_pooled_states
-from xllm.python.npu_streams import shared_expert_stream
-
-# xllm Attention base — present in the real engine (full xllm.python package).
-# Under the standalone stub-loader align path the package is not wired, so fall
-# back to a stub nn.Module that accepts (and ignores) the same __init__ kwargs;
-# the layers still work as plain modules there (the executor's
-# isinstance(module, Attention) check is never reached on that path).
-try:
-    from xllm.python.layers.attention import Attention
-except ImportError:  # pragma: no cover - stub-loader path
-
-    class Attention(nn.Module):  # type: ignore[no-redef]
-        def __init__(self, *args, **kwargs) -> None:  # noqa: D401
-            super().__init__()
-
-
 # Paged pool cache: write-time incremental compression + direct pool read
 # (see glm5_next_kpool.py).
 

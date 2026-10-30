@@ -18,7 +18,7 @@ import pytest
 import torch
 
 from xllm.python.layers.moe_parallel import Eplv2CommPolicy, TokenParallelLayout
-from xllm.python.layers.npu.glm5_next_metadata import Glm5NextEplv2MetadataBuilder
+from xllm.python.models.glm5_next_metadata import Glm5NextEplv2MetadataBuilder
 
 
 def test_tp_shards_reconstruct_uneven_dp_batches_with_common_dispatch_capacity() -> None:

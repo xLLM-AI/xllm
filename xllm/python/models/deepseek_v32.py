@@ -46,6 +46,7 @@ from xllm.python.layers import (
     apply_rotary_half,
     gather_half_rope_cos_sin,
 )
+from xllm.python.layers.moe_parallel import shared_expert_stream
 from xllm.python.model_executor.cp_utils import (
     CpContext,
     cp_gather_kv,
@@ -64,7 +65,6 @@ from xllm.python.model_loader import (
 )
 from xllm.python.models.aux_hidden_capture import AuxHiddenCapture
 from xllm.python.models.base import PyModelBase
-from xllm.python.npu_streams import shared_expert_stream
 
 _GATE_STREAMS: dict[tuple[str, int | None], torch.npu.Stream] = {}
 
