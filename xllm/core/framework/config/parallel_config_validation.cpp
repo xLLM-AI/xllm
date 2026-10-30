@@ -181,8 +181,14 @@ std::optional<std::string> validate_context_parallel_config(
       return "MLU CP requires dp_size == 1";
     }
 
-    if (parallel_config.kv_split_size() != 1) {
-      return "MLU CP requires kv_split_size == 1";
+    const int32_t kv_split_size = parallel_config.kv_split_size_effective();
+    if (kv_split_size > 1 && model_type != "glm_moe_dsa") {
+      return "MLU CP with kv_split_size > 1 supports only glm_moe_dsa";
+    }
+    if (kv_split_size <= 0 || (options.cp_size() % kv_split_size != 0 &&
+                               kv_split_size != global_world_size)) {
+      return "MLU CP requires kv_split_size to divide cp_size or equal "
+             "cp_size * tp_size";
     }
 
     if (options.ep_size() != global_world_size) {

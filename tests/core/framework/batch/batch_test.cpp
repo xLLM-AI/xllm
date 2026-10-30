@@ -934,6 +934,38 @@ TEST(BatchTest, RecordsPrefillStageBeforeAdvancingKvCount) {
   EXPECT_EQ(execution_batch.is_prefilling, (std::vector<uint8_t>{1, 1}));
 }
 
+namespace {
+
+class HostRestoreInputTest : public ::testing::TestWithParam<bool> {};
+
+TEST_P(HostRestoreInputTest, ConsumesRestoreRequirementWhenBuildingInput) {
+  BlockManager::Options options;
+  options.num_blocks(4).block_size(4);
+  BlockManagerImpl manager(options);
+  Sequence sequence = make_basic_sequence({1, 2, 3, 4});
+  sequence.add_blocks(BlockType::KV, manager.allocate(2));
+  Batch batch({&sequence});
+  batch.set_batch_id();
+  batch.require_host_restore();
+  auto build_input = [&]() {
+    if (GetParam()) {
+      return batch.prepare_forward_input(ModelArgs(), /*thread_pool=*/nullptr);
+    }
+    return batch.prepare_forward_input(
+        /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
+  };
+  const LlmForwardInput input = build_input();
+  EXPECT_EQ(input.input_params.meta.batch_id, batch.batch_id());
+  EXPECT_TRUE(input.input_params.meta.requires_host_restore);
+  sequence.append_token(Token(/*id=*/5));
+  batch.refresh_forward_type();
+  EXPECT_FALSE(build_input().input_params.meta.requires_host_restore);
+}
+
+INSTANTIATE_TEST_SUITE_P(Builders, HostRestoreInputTest, ::testing::Bool());
+
+}  // namespace
+
 TEST(BatchTest, ProcessSampleOutputStoresMtpBootstrapEmbedding) {
   BlockManager::Options options;
   options.num_blocks(8).block_size(4);

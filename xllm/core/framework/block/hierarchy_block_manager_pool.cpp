@@ -1006,6 +1006,7 @@ void HierarchyBlockManagerPool::transfer_blocks(BatchGroup& batches) {
     CHECK_LT(i, batches.size())
         << "Missing batch for pending H2D transfer at dp_rank=" << i;
     batches[i].set_batch_id();
+    batches[i].require_host_restore();
     transfer_coordinator_->transfer_kv_blocks(
         i, batches[i].batch_id(), load_block_transfer_infos_[i]);
     load_block_transfer_infos_[i].clear();

@@ -88,6 +88,14 @@ TEST(HierarchyKVCacheTransferTest,
                                     cache_shape,
                                     create_options);
 
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  LlmModelParams missing_storage;
+  ModelParamsView missing(missing_storage);
+  missing.meta.batch_id = kBatchId;
+  missing.meta.requires_host_restore = true;
+  EXPECT_DEATH(transfer.set_layer_synchronizer(missing),
+               "Missing Host restore handle");
+
   BlockTransferInfo offload_info(kSourceBlockId, /*dst_block_id=*/0);
   offload_info.block_type = BlockType::KV;
   offload_info.transfer_type = TransferType::D2H2G;
@@ -98,10 +106,20 @@ TEST(HierarchyKVCacheTransferTest,
   load_info.transfer_type = TransferType::H2D;
   EXPECT_EQ(transfer.transfer_kv_blocks(kBatchId, {load_info}), 1U);
 
-  ModelParamsView input_params = ModelInputSnapshot(LlmModelParams()).view();
+  LlmModelParams input_storage;
+  ModelParamsView input_params(input_storage);
   input_params.meta.batch_id = kBatchId;
+  input_params.meta.requires_host_restore = true;
   transfer.set_layer_synchronizer(input_params);
   ASSERT_NE(input_params.parallel.layer_wise_load_synchronizer, nullptr);
+  EXPECT_FALSE(input_params.meta.requires_host_restore);
+  const auto synchronizer = input_params.parallel.layer_wise_load_synchronizer;
+  transfer.set_layer_synchronizer(input_params);
+  EXPECT_EQ(input_params.parallel.layer_wise_load_synchronizer, synchronizer);
+  EXPECT_FALSE(input_params.meta.requires_host_restore);
+  missing.meta.batch_id = kBatchId;
+  EXPECT_DEATH(transfer.set_layer_synchronizer(missing),
+               "Missing Host restore handle");
   EXPECT_EQ(input_params.parallel.layer_wise_load_synchronizer->size(), 2U);
   EXPECT_EQ(input_params.parallel.layers_per_event, 2U);
   for (uint32_t layer_index = 0; layer_index < kLayerCount; ++layer_index) {

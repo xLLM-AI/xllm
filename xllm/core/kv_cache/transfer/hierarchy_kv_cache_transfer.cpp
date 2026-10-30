@@ -607,12 +607,30 @@ bool HierarchyKVCacheTransfer::load_from_host(const HostKVRequest& request,
 void HierarchyKVCacheTransfer::set_layer_synchronizer(ModelParamsView& params) {
   std::optional<HostKVLoadHandle> handle =
       take_load_handle(params.meta.batch_id);
+  CHECK(!params.meta.requires_host_restore || handle.has_value())
+      << "Missing Host restore handle at batch_id=" << params.meta.batch_id;
   if (!handle.has_value()) {
     return;
+  }
+  CHECK(handle->synchronizer != nullptr)
+      << "Missing Host restore synchronizer at batch_id="
+      << params.meta.batch_id;
+  CHECK_GT(handle->layers_per_event, 0U)
+      << "Invalid Host restore granularity at batch_id="
+      << params.meta.batch_id;
+  CHECK_GT(handle->synchronizer->size(), 0U)
+      << "Empty Host restore synchronizer at batch_id=" << params.meta.batch_id;
+  if (handle->draft_event_index.has_value()) {
+    CHECK_LT(*handle->draft_event_index, handle->synchronizer->size())
+        << "Invalid Host draft restore event at batch_id="
+        << params.meta.batch_id;
   }
   params.parallel.layer_wise_load_synchronizer = handle->synchronizer;
   params.parallel.layers_per_event = handle->layers_per_event;
   params.parallel.draft_load_event_index = handle->draft_event_index;
+  // Derived target/draft inputs retain the synchronizer, not a second request
+  // to consume the same batch's handle.
+  params.meta.requires_host_restore = false;
 }
 
 std::optional<HostKVLoadHandle> HierarchyKVCacheTransfer::take_load_handle(

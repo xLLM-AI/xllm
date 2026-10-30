@@ -112,9 +112,14 @@ inline size_t ExpectedSwaLogicalBlocks(size_t num_tokens) {
 // Creates a minimal Sequence for testing (same pattern as batch_test.cpp).
 Sequence MakeTestSequence(size_t index,
                           const std::vector<int32_t>& prompt_token_ids) {
-  RequestSamplingParam sampling_param;
-  StoppingChecker stopping_checker;
-  stopping_checker.set_max_generated_tokens(256);
+  // Sequence keeps non-owning pointers to these parameters after this helper
+  // returns, so they must outlive every sequence created here.
+  static RequestSamplingParam sampling_param;
+  static StoppingChecker stopping_checker = [] {
+    StoppingChecker checker;
+    checker.set_max_generated_tokens(256);
+    return checker;
+  }();
   SequenceParams seq_params;
   // Large enough to hold DSV4-scale prompts (>= a full C128 block = 16384
   // tokens). Individual tests can still use short prompts; sequence capacity

@@ -328,6 +328,8 @@ LlmForwardInput BatchState::build_sequence_input(
   ForwardInputBuilder builder(data, &args, cp_size);
   auto input =
       builder.build_forward_input(num_decoding_tokens, min_decoding_batch_size);
+  input.input_params.meta.requires_host_restore =
+      std::exchange(requires_host_restore_, false);
   return input;
 }
 
@@ -341,6 +343,8 @@ LlmForwardInput BatchState::build_distributed_input(const BatchInputData& data,
   if (has_partial_finished_beam_group()) {
     input.sampling_params.acc_logprob() = torch::Tensor();
   }
+  input.input_params.meta.requires_host_restore =
+      std::exchange(requires_host_restore_, false);
   return input;
 }
 
@@ -365,6 +369,8 @@ VlmForwardInput BatchState::build_vlm_sequence_input(
   ForwardInputBuilder builder(data, &args, cp_size);
   auto input = builder.build_vlm_forward_input(num_decoding_tokens,
                                                min_decoding_batch_size);
+  input.input_params.meta.requires_host_restore =
+      std::exchange(requires_host_restore_, false);
   return input;
 }
 
@@ -378,6 +384,8 @@ VlmForwardInput BatchState::build_vlm_distributed_input(
   if (has_partial_finished_beam_group()) {
     input.sampling_params.acc_logprob() = torch::Tensor();
   }
+  input.input_params.meta.requires_host_restore =
+      std::exchange(requires_host_restore_, false);
   return input;
 }
 

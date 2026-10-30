@@ -2590,6 +2590,7 @@ inline void deserialize_forward_input_payload(
   read_data(context, input_params.meta.kv_max_seq_len);
   read_data(context, input_params.meta.q_max_seq_len);
   read_data(context, input_params.meta.batch_id);
+  read_data(context, input_params.meta.requires_host_restore);
   read_data(context, input_params.meta.is_graph_warmup);
   read_data(context, input_params.meta.execution_batch.num_reqs);
   read_data(context, input_params.meta.execution_batch.num_tokens);
@@ -2945,6 +2946,7 @@ inline void serialize_forward_input_sections(
   write_data(context.descriptor, input_params.meta.kv_max_seq_len);
   write_data(context.descriptor, input_params.meta.q_max_seq_len);
   write_data(context.descriptor, input_params.meta.batch_id);
+  write_data(context.descriptor, input_params.meta.requires_host_restore);
   write_data(context.descriptor, input_params.meta.is_graph_warmup);
   write_data(context.descriptor, input_params.meta.execution_batch.num_reqs);
   write_data(context.descriptor, input_params.meta.execution_batch.num_tokens);

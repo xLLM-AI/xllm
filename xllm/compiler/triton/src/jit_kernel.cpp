@@ -86,6 +86,13 @@ void patch_torch_mlu_accelerator() {
 #endif
 }  // namespace
 
+void JITKernel::initialize_backend() {
+#if defined(USE_MLU)
+  static std::once_flag once;
+  std::call_once(once, []() { patch_torch_mlu_accelerator(); });
+#endif
+}
+
 JITKernel& JITKernel::get(std::string py_path, std::string fn_name) {
   static std::unordered_map<std::string, std::unique_ptr<JITKernel>> registry;
   static std::mutex registry_mutex;
@@ -103,10 +110,7 @@ JITKernel& JITKernel::get(std::string py_path, std::string fn_name) {
 
 JITKernel::JITKernel(std::string py_path, std::string fn_name)
     : path_(std::move(py_path)), name_(std::move(fn_name)) {
-#if defined(USE_MLU)
-  static std::once_flag once;
-  std::call_once(once, []() { patch_torch_mlu_accelerator(); });
-#endif
+  initialize_backend();
 }
 
 void JITKernel::ensure_signature() {
