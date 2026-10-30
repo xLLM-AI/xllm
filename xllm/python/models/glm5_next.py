@@ -70,8 +70,6 @@ from xllm.python.model_executor.forward_context import (
     record_layer_event,
 )
 
-_has_mhc_fused = hasattr(kernels, "hc_pre") and kernels.hc_pre is not None
-
 
 @functools.cache
 def _load_compact_kpool_update_op() -> Callable[..., None] | None:
@@ -2201,59 +2199,44 @@ class Glm5NextHyperConnection(nn.Module):
         self.base = nn.Parameter(torch.empty(mix, dtype=torch.float32, device=device))
         # 3 outputs: pre (collapse), post (placement), comb (mixer) scales.
         self.scale = nn.Parameter(torch.empty(3, dtype=torch.float32, device=device))
+        self.register_buffer("_fn_compute", None, persistent=False)
+        self.register_buffer("_scale_compute", None, persistent=False)
+        self.register_buffer("_base_compute", None, persistent=False)
+        self.register_load_state_dict_post_hook(lambda module, _: module.process_weights_after_loading())
+
+    @torch.inference_mode()
+    def process_weights_after_loading(self) -> None:
+        """Prepare FP32 inputs from loaded parameters without changing their rounding."""
+        for name in ("fn", "scale", "base"):
+            value = getattr(self, name).detach().to(torch.float32).contiguous()
+            buffer_name = f"_{name}_compute"
+            cached = getattr(self, buffer_name)
+            if cached is not None and cached.device == value.device and cached.dtype == value.dtype:
+                cached.copy_(value)
+            else:
+                setattr(self, buffer_name, value)
+
+    def _apply(self, fn: Callable[[torch.Tensor], torch.Tensor], recurse: bool = True) -> Glm5NextHyperConnection:
+        prepared = self._fn_compute is not None
+        super()._apply(fn, recurse)
+        if prepared:
+            self.process_weights_after_loading()
+        return self
 
     def forward(self, hidden_streams: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        hc = self.hc_mult
-
-        if _has_mhc_fused:
-            # --- Fused NPU kernel path (matches DeepSeek V4 C++ decoder layer) ---
-            # hc_pre does rsqrt + linear + sinkhorn + weighted-sum-reduce in one
-            # fused call.  x: [B, S, hc_mult, D] -> (output [B,S,D], post [B,S,hc_mult],
-            # comb [B,S,hc_mult,hc_mult]).
-            # .float() guards against weight-loading casting params back to bf16;
-            # __init__ creates them in float32 (aligned with vLLM).
-            collapsed, post, comb = kernels.hc_pre(
-                hidden_streams,
-                self.fn,
-                self.scale.float(),
-                self.base.float(),
-                hc,
-                self.hc_sinkhorn_iters,
-                self.input_norm.variance_epsilon,
-                self.hc_eps,
-            )
-            return post, comb, collapsed
-        else:
-            # --- Fallback: pure-Python reference implementation ---
-            flat = self.input_norm(hidden_streams.flatten(start_dim=2).float())
-            pre_w, post_w, comb_w = F.linear(flat, self.fn.float()).split([hc, hc, hc * hc], dim=-1)
-            pre_b, post_b, comb_b = self.base.split([hc, hc, hc * hc])
-            pre_scale, post_scale, comb_scale = self.scale.unbind(0)
-
-            pre = torch.sigmoid(pre_w * pre_scale + pre_b) + self.hc_eps
-            post = 2 * torch.sigmoid(post_w * post_scale + post_b)
-            comb_logits = comb_w.view(*comb_w.shape[:-1], hc, hc) * comb_scale + comb_b.view(hc, hc)
-            comb = torch.softmax(comb_logits, dim=-1) + self.hc_eps
-            comb = comb / (comb.sum(dim=-2, keepdim=True) + self.hc_eps)
-            for _ in range(self.hc_sinkhorn_iters - 1):
-                comb = comb / (comb.sum(dim=-1, keepdim=True) + self.hc_eps)
-                comb = comb / (comb.sum(dim=-2, keepdim=True) + self.hc_eps)
-            collapsed = (pre.unsqueeze(-1) * hidden_streams).sum(dim=2).to(hidden_streams.dtype)
-            return post, comb, collapsed
-
-    def post(
-        self,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor,
-        post: torch.Tensor,
-        comb: torch.Tensor,
-    ) -> torch.Tensor:
-        if _has_mhc_fused:
-            return kernels.hc_post(hidden_states, residual, post, comb)
-        dtype = hidden_states.dtype
-        return post.to(dtype).unsqueeze(-1) * hidden_states.unsqueeze(-2) + torch.matmul(
-            comb.to(dtype).transpose(-1, -2), residual
+        if self._fn_compute is None:
+            raise RuntimeError("Full HcPre requires prepared kernel parameters")
+        collapsed, post, comb = kernels.hc_pre(
+            hidden_streams,
+            self._fn_compute,
+            self._scale_compute,
+            self._base_compute,
+            self.hc_mult,
+            self.hc_sinkhorn_iters,
+            self.input_norm.variance_epsilon,
+            self.hc_eps,
         )
+        return post, comb, collapsed
 
 
 class Glm5NextHyperHead(nn.Module):
@@ -2322,19 +2305,7 @@ class Glm5NextDecoderLayer(nn.Module):
             # explicit boundary rather than silently summing distinct tokens.
             shape = hidden_states.shape
             hidden_states = input_layout.gather(hidden_states.reshape(-1, *shape[2:])).unsqueeze(0)
-        if _has_mhc_fused:
-            return self._forward_fused(hidden_states, position_ids, attention_mask, prev_topk_indices)
-        else:
-            return self._forward_ref(hidden_states, position_ids, attention_mask, prev_topk_indices)
-
-    @staticmethod
-    def _post_sp(output: torch.Tensor, residual: torch.Tensor, post: torch.Tensor, comb: torch.Tensor) -> torch.Tensor:
-        if _has_mhc_fused:
-            return kernels.hc_post(output, residual, post, comb)
-        dtype = output.dtype
-        return post.to(dtype).unsqueeze(-1) * output.unsqueeze(-2) + torch.matmul(
-            comb.to(dtype).transpose(-1, -2), residual
-        )
+        return self._forward_fused(hidden_states, position_ids, attention_mask, prev_topk_indices)
 
     def _forward_sp(
         self,
@@ -2400,13 +2371,13 @@ class Glm5NextDecoderLayer(nn.Module):
         if hidden.numel() != output_layout.shard_tokens * self.cfg.hidden_size:
             raise ValueError("Attention must return reduced local SP rows")
         hidden = hidden.reshape(1, output_layout.shard_tokens, -1)
-        hidden_states = self._post_sp(hidden, residual, post, comb)
+        hidden_states = kernels.hc_post(hidden, residual, post, comb)
 
         residual = hidden_states
         post, comb, hidden = self.ffn_hc(hidden_states)
         hidden = self.post_attention_layernorm(hidden)
         hidden = self.mlp(hidden, token_layout=output_layout, token_mask=token_mask)
-        return self._post_sp(hidden, residual, post, comb), topk
+        return kernels.hc_post(hidden, residual, post, comb), topk
 
     def _forward_fused(
         self,
@@ -2426,13 +2397,13 @@ class Glm5NextDecoderLayer(nn.Module):
         # MLA returns [B*S, D]; mHC post expects [B, S, D].
         if hidden_states.dim() == 2:
             hidden_states = hidden_states.view(residual.shape[0], residual.shape[1], -1)
-        hidden_states = self.attn_hc.post(hidden_states, residual, post, comb)
+        hidden_states = kernels.hc_post(hidden_states, residual, post, comb)
 
         residual = hidden_states
         post, comb, hidden_states = self.ffn_hc(hidden_states)
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = self.ffn_hc.post(hidden_states, residual, post, comb)
+        hidden_states = kernels.hc_post(hidden_states, residual, post, comb)
         return hidden_states, topk
 
 
@@ -2683,6 +2654,7 @@ class Glm5NextForCausalLM(PyModelBase):
             for hc in ("attn_hc", "ffn_hc"):
                 for w in ("fn", "base", "scale"):
                     L.copy_replicated(p + hc + "." + w)
+                getattr(self.model.layers[i], hc).process_weights_after_loading()
         L.copy_replicated("model.norm.weight")
         # lm_head: ColumnParallelLinear — shard the vocab dim (dim 0).
         L.copy_shard("lm_head.weight", dim=0)
