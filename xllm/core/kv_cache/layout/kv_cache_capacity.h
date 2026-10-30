@@ -35,6 +35,7 @@ class KVCacheCapacity final {
 
   // for index cache
   PROPERTY(int64_t, index_slot_size) = 0;
+  PROPERTY(int64_t, index_block_bytes) = 0;
   PROPERTY(int64_t, num_indexer_layers) = 0;
   PROPERTY(bool, enable_indexer_cache_quant) = false;
 

@@ -351,12 +351,18 @@ class MtpModelImplBase : public torch::nn::Module {
       mtp_num_layers = 1;
     }
 
-    // get mtp start and end layer index
-    mtp_start_layer_idx_ = model_args_.n_layers();
+    // Normalized drafts separate their layer count from checkpoint indices.
+    // Other MTP models still use n_layers as the appended checkpoint offset.
+    mtp_start_layer_idx_ =
+        static_cast<int32_t>(model_args_.mtp_start_layer_idx() >= 0
+                                 ? model_args_.mtp_start_layer_idx()
+                                 : model_args_.n_layers());
     mtp_end_layer_idx_ = mtp_start_layer_idx_ + mtp_num_layers;
     mtp_layers_.reserve(mtp_num_layers);
 
-    // create mtp layers
+    // Preserve checkpoint layer indices in decoder construction: MLU MoE
+    // quantization looks module prefixes up by these indices. Execution and
+    // KV cache indexing below use the local mtp_layers_ index instead.
     for (int32_t i = mtp_start_layer_idx_; i < mtp_end_layer_idx_; ++i) {
       auto mtp_layer = DecoderLayerType(context, i);
       mtp_layers_.push_back(mtp_layer);
@@ -410,12 +416,7 @@ class MtpModelImplBase : public torch::nn::Module {
     auto& attn_metadata = *(modified_input_params.attn_metadata);
     torch::Tensor hidden_states = embed_tokens_(tokens);
     // Mask out embeddings where positions == 0 (for MTP not needed at pos 0)
-    auto mask = (positions == 0);  // bool tensor
-    if (mask.any().item<bool>()) {
-      // set masked rows to zero
-      hidden_states.index_put_({mask},
-                               torch::zeros_like(hidden_states.index({mask})));
-    }
+    hidden_states.masked_fill_((positions == 0).unsqueeze(-1), 0);
 
     std::optional<torch::Tensor> residual;
     LayerForwardAdapter forward_adapter(

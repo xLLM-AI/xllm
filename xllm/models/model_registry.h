@@ -83,6 +83,11 @@ enum class CpShardingMode : int8_t {
   MODEL = 1,
 };
 
+// Rewrites a target model's args into the registered MTP draft form. The
+// registry owns dispatch so engines never name a concrete MTP model.
+using MtpArgsAdapter =
+    std::function<void(ModelArgs& args, bool is_python_model)>;
+
 // TODO: add default args loader.
 struct ModelMeta {
   std::unordered_map<std::string, CausalLMRegistration> causal_lm_factories;
@@ -96,6 +101,7 @@ struct ModelMeta {
   CpShardingMode cp_sharding_mode = CpShardingMode::NONE;
   bool owns_mtp_shared_weights = false;
   bool supports_dcp = false;
+  MtpArgsAdapter mtp_args_adapter;
 };
 
 // Model config names may be aliases, but registry lookups use one canonical
@@ -174,6 +180,14 @@ class ModelRegistry {
 
   static void register_mtp_shared_weight_owner(const std::string& name);
   static bool owns_mtp_shared_weights(const std::string& name);
+
+  static void register_mtp_args_adapter(const std::string& name,
+                                        MtpArgsAdapter adapter);
+
+  static void configure_mtp_args(ModelArgs& args,
+                                 std::string_view algorithm,
+                                 bool is_draft_engine,
+                                 bool is_python_model);
 
   static CausalLMFactory get_causallm_factory(const std::string& name);
 

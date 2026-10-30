@@ -103,7 +103,8 @@ DeepseekV2DecoderLayerImpl::DeepseekV2DecoderLayerImpl(
             parallel_args_,
             options,
             stream_registry->get(ExecutionStreamRole::COMMUNICATION),
-            stream_registry->get(ExecutionStreamRole::AUXILIARY_COMPUTE)));
+            stream_registry->get(ExecutionStreamRole::AUXILIARY_COMPUTE),
+            "model.layers." + std::to_string(layer_id) + ".mlp"));
   } else {
     mlp_ = register_module("mlp",
                            DenseMLP(model_args.hidden_size(),

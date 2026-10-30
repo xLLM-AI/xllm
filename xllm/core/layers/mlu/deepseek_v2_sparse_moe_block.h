@@ -18,6 +18,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <functional>
+#include <string>
 
 #include "deepseek_v2_attention.h"
 #include "framework/model/model_args.h"
@@ -71,7 +72,8 @@ class DeepseekV2SparseMoEBlockImpl : public torch::nn::Module {
       const ParallelArgs& parallel_args,
       const torch::TensorOptions& options,
       const std::shared_ptr<Stream>& routed_comm_stream,
-      const std::shared_ptr<Stream>& shared_compute_stream);
+      const std::shared_ptr<Stream>& shared_compute_stream,
+      const std::string& module_prefix = "");
 
   void load_state_dict(const StateDict& state_dict);
   void verify_loaded_weights() const;

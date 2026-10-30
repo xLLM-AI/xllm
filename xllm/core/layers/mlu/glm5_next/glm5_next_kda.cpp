@@ -22,6 +22,7 @@ limitations under the License.
 #include <tuple>
 #include <vector>
 
+#include "core/common/constants.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "framework/state_dict/utils.h"
 #include "kernels/mlu/mlu_ops_api.h"
@@ -528,8 +529,6 @@ torch::Tensor Glm5NextKDAImpl::forward(const torch::Tensor& hidden_states,
     initial_state.index_put_(
         {~attn_metadata.has_initial_states, torch::indexing::Ellipsis}, 0.0f);
     torch::Tensor cu_seqlens = attn_metadata.q_cu_seq_lens.contiguous();
-    torch::Tensor chunk_indices = AttentionMetadataBuilder::build_chunk_indices(
-        cu_seqlens, kernel::mlu::kda_prefill_chunk_size());
     torch::Tensor final_state;
     std::tie(core_output, final_state) =
         chunk_kda_->forward(q,
@@ -539,7 +538,7 @@ torch::Tensor Glm5NextKDAImpl::forward(const torch::Tensor& hidden_states,
                             activated_beta,
                             initial_state,
                             cu_seqlens,
-                            chunk_indices,
+                            attn_metadata.chunk_indices,
                             /*output_final_state=*/true,
                             /*use_qk_l2norm=*/true);
     core_output = core_output.squeeze(/*dim=*/0).contiguous();
@@ -554,7 +553,7 @@ torch::Tensor Glm5NextKDAImpl::forward(const torch::Tensor& hidden_states,
           /*bias_opt=*/std::nullopt,
           logical_state_indices,
           /*activation=*/true,
-          /*pad_slot_id=*/-1,
+          /*pad_slot_id=*/kPaddingLinearStateId,
           attn_metadata.q_cu_seq_lens,
           static_cast<int32_t>(attn_metadata.max_query_len),
           input_params.num_accepted_tokens);
@@ -566,7 +565,7 @@ torch::Tensor Glm5NextKDAImpl::forward(const torch::Tensor& hidden_states,
           /*bias_opt=*/std::nullopt,
           logical_state_indices,
           /*activation=*/true,
-          /*pad_slot_id=*/-1);
+          /*pad_slot_id=*/kPaddingLinearStateId);
     }
     std::tie(q, k, v) = split_mixed_qkv(
         mixed_qkv, local_num_heads_, local_num_heads_, head_dim_, head_dim_);
@@ -586,6 +585,12 @@ torch::Tensor Glm5NextKDAImpl::forward(const torch::Tensor& hidden_states,
                                               checkpoint_stride,
                                               attn_metadata.max_query_len)
             : state_base_indices;
+    if (input_params.is_spec_verify) {
+      // Slot zero is reserved; every checkpoint of a virtual request skips
+      // state instead of overwriting the reserved slot.
+      params.initial_state_indices.masked_fill_(
+          logical_state_indices.eq(kPaddingLinearStateId).unsqueeze(1), 0);
+    }
     params.cu_seqlens = attn_metadata.q_cu_seq_lens;
     params.scale =
         static_cast<float>(1.0 / std::sqrt(static_cast<double>(head_dim_)));

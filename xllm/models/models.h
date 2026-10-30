@@ -97,6 +97,7 @@ limitations under the License.
 #include "llm/mlu/deepseek_v4_mtp.h"              // IWYU pragma: keep
 #include "llm/mlu/glm5_mtp.h"                     // IWYU pragma: keep
 #include "llm/mlu/glm5_next.h"                    // IWYU pragma: keep
+#include "llm/mlu/glm5_next_mtp.h"                // IWYU pragma: keep
 #include "llm/mlu/joyai_llm_flash_mtp.h"          // IWYU pragma: keep
 #include "llm/mlu/qwen3_5_mtp.h"                  // IWYU pragma: keep
 #include "llm/mtp_model_base.h"                   // IWYU pragma: keep

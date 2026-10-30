@@ -511,6 +511,7 @@ TEST(KVCacheEstimationTest, SharedKPoolPlanAlignsStateBeforeBudgeting) {
       .num_indexer_layers(2)
       .slot_size(64)
       .index_slot_size(16)
+      .index_block_bytes(512)
       .num_linear_state_blocks(4)
       .kpool_tail_len(16)
       .kpool_tail_slot_size(2048)
@@ -531,6 +532,7 @@ TEST(KVCacheEstimationTest, SharedKPoolPlanAlignsStateBeforeBudgeting) {
           .num_indexer_layers(1)
           .slot_size(128)
           .index_slot_size(draft_kpool == 4 ? 32 : 4)
+          .index_block_bytes(draft_kpool == 4 ? 1024 : 128)
           .num_linear_state_blocks(draft_slots)
           .kpool_tail_len(draft_kpool)
           .kpool_tail_slot_size(draft_kpool == 4 ? 1024 : 8192)
@@ -564,6 +566,7 @@ TEST(KVCacheEstimationTest, SharedKPoolPlanRejectsInsufficientMemory) {
   capacity.block_size(16)
       .slot_size(64)
       .index_slot_size(8)
+      .index_block_bytes(128)
       .num_full_attention_layers(1)
       .num_indexer_layers(1)
       .num_linear_state_blocks(5)
@@ -1326,5 +1329,32 @@ TEST_P(DcpIndexerEstimationTest, IncludesAllIndexerBytes) {
 INSTANTIATE_TEST_SUITE_P(KvSplits,
                          DcpIndexerEstimationTest,
                          ::testing::Values(1, 2, 4, 0));
+
+#if defined(USE_NPU)
+TEST(KVCacheIndexCacheBytesTest, CompressedTailChargesWholePools) {
+  ModelArgs args;
+  args.n_layers(4).head_dim(16).n_heads(4).n_kv_heads(4);
+  args.model_type("glm5_next")
+      .index_n_heads(1)
+      .index_head_dim(128)
+      .index_kpool(3)
+      .index_kpool_compress(true)
+      .index_kpool_always_select_tail(true);
+  KVCacheEstimateOptions options;
+  options.dtype = torch::kBFloat16;
+  options.kv_cache_dtype = "auto";
+  options.cache_size_in_bytes = 1024 * 1024;
+  options.block_size = 96;
+  options.world_size = 1;
+  options.n_local_kv_heads = 2;
+  options.max_seqs_per_batch = 8;
+  const KVCacheCapacity capacity = estimate_kv_cache_capacity(args, options);
+  const int64_t pool_bytes = 2 * 128;
+  EXPECT_EQ(capacity.index_slot_size(), (pool_bytes + 3 - 1) / 3);
+  EXPECT_EQ(capacity.index_block_bytes(), 96 / 3 * pool_bytes);
+  EXPECT_NE(capacity.index_block_bytes(),
+            capacity.index_slot_size() * options.block_size);
+}
+#endif
 
 }  // namespace xllm

@@ -60,6 +60,7 @@ limitations under the License.
 #include "core/framework/config/profile_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/framework/model/model_args.h"
 #include "core/kv_cache/layout/kv_cache_estimation.h"
 #include "core/platform/platform.h"
 #if defined(USE_NPU)
@@ -2201,12 +2202,20 @@ bool WorkerImpl::init_model_impl(const std::string& model_weights_path,
   model_weights_path_ = model_weights_path;
 
   auto args = model_loader->model_args();
-#if defined(USE_NPU)
-  if (configure_glm5_next_mtp_args(
-          args, options_.speculative_algorithm(), options_.is_draft_engine())) {
-    LOG(INFO) << "Loading GLM MTP directly from " << model_weights_path
-              << ", appended layer " << args.mtp_start_layer_idx();
-  }
+  ModelRegistry::configure_mtp_args(
+      args,
+      options_.speculative_algorithm(),
+      options_.is_draft_engine(),
+      ModelConfig::is_python_model_impl(context_.get_model_impl()));
+#if defined(USE_MLU)
+  const bool native_glm5_next =
+      !ModelConfig::is_python_model_impl(context_.get_model_impl()) &&
+      (is_glm5_next_target_model_type(args.model_type()) ||
+       args.model_type() == "glm5_next_mtp");
+  CHECK(!(native_glm5_next && options_.enable_speculative_decode()))
+      << "Native MLU GLM5-Next speculative decoding is not supported yet: "
+         "Dense Validate Span and accepted-span state replay are not wired "
+         "into the MTP worker. Disable speculative decoding.";
 #endif
   auto quant_args = model_loader->quant_args();
   const bool embedding_mode = options_.task_type() == "embed";

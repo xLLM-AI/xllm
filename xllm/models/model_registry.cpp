@@ -27,6 +27,7 @@ limitations under the License.
 #include "core/common/options.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/model_config.h"
+#include "core/framework/config/speculative_config.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model_loader/hf_model_config.h"
 #include "core/util/dit_model_discovery.h"
@@ -781,6 +782,27 @@ bool ModelRegistry::owns_mtp_shared_weights(const std::string& name) {
   const auto& models = get_instance()->model_registry_;
   const auto entry = models.find(name);
   return entry != models.end() && entry->second.owns_mtp_shared_weights;
+}
+
+void ModelRegistry::register_mtp_args_adapter(const std::string& name,
+                                              MtpArgsAdapter adapter) {
+  get_instance()->model_registry_[name].mtp_args_adapter = std::move(adapter);
+}
+
+void ModelRegistry::configure_mtp_args(ModelArgs& args,
+                                       std::string_view algorithm,
+                                       bool is_draft_engine,
+                                       bool is_python_model) {
+  if (!is_draft_engine || !SpeculativeConfig::is_mtp_algorithm(algorithm)) {
+    return;
+  }
+  const auto& models = get_instance()->model_registry_;
+  const auto entry =
+      models.find(canonical_model_registration_name(args.model_type()));
+  if (entry == models.end() || !entry->second.mtp_args_adapter) {
+    return;
+  }
+  entry->second.mtp_args_adapter(args, is_python_model);
 }
 
 std::string ModelRegistry::get_model_backend(const std::string& name) {

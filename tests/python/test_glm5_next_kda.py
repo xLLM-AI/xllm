@@ -59,6 +59,7 @@ def test_framework_kda_checkpoints_match_tokenwise_reference(
     backend = kda_linear_attention.KdaLinearAttentionMixin()
     backend._kda_checkpoint_stride = width
     backend._kda_query_start_locs = {}
+    backend._kda_checkpoint_offsets = {}
     inputs = random_tensor((1, channels, 2 * width), torch.bfloat16)
     weight = random_tensor((kernel_width, channels), torch.bfloat16)
     gate = torch.full((1, 2 * width, 1, head_dim), -0.1, device=device)

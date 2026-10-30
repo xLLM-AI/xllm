@@ -39,6 +39,7 @@ limitations under the License.
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
+#include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
@@ -211,10 +212,12 @@ bool LLMEngine::init_model(MasterStatus master_status,
   LOG(INFO) << "Initializing model from: " << model_path;
 
   args_ = model_loader->model_args();
-#if defined(USE_NPU)
-  configure_glm5_next_mtp_args(
-      args_, options_.speculative_algorithm(), options_.is_draft_engine());
-#endif
+  ModelRegistry::configure_mtp_args(
+      args_,
+      options_.speculative_algorithm(),
+      options_.is_draft_engine(),
+      ModelConfig::is_python_model_impl(
+          ModelConfig::get_instance().model_impl()));
   if (!options_.is_draft_engine() &&
       SpeculativeConfig::is_block_diffusion_algorithm(
           options_.speculative_algorithm())) {

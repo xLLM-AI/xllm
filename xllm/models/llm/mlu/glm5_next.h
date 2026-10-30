@@ -29,6 +29,7 @@ limitations under the License.
 #include "core/framework/model/model_output.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/model_context/model_context.h"
+#include "core/kernels/mlu/chunk_kda.h"
 #include "core/kernels/mlu/mlu_ops_api.h"
 #include "core/layers/common/attention_metadata_builder.h"
 #include "core/layers/common/rms_norm.h"
@@ -36,6 +37,7 @@ limitations under the License.
 #include "core/layers/mlu/dsa_topk_relay.h"
 #include "core/layers/mlu/glm5_next/glm5_next_decoder_layer.h"
 #include "models/llm/llm_model_base.h"
+#include "models/llm/mlu/glm5_next_graph.h"
 #include "models/model_registry.h"
 
 namespace xllm {
@@ -54,8 +56,6 @@ class Glm5NextModelImpl final
     const ParallelArgs& parallel_args = context.get_parallel_args();
     CHECK_EQ(parallel_args.cp_size(), 1)
         << "GLM5-Next MLU does not yet support context parallelism.";
-    CHECK_EQ(args.num_speculative_tokens(), 0)
-        << "GLM5-Next MLU speculative decoding is not supported yet.";
     CHECK_GT(hc_mult_, 0) << "GLM5-Next requires hc_mult > 0.";
 
     const int64_t tp_size = std::max<int64_t>(parallel_args.tp_size(), 1);
@@ -83,10 +83,13 @@ class Glm5NextModelImpl final
     torch::NoGradGuard no_grad;
     CHECK_EQ(kv_caches.size(), layers_.size())
         << "GLM5-Next requires one layer-specific cache object per layer.";
-    CHECK(!input_params.enable_graph)
-        << "GLM5-Next MLU currently requires eager execution.";
-    CHECK(!input_params.is_spec_verify)
-        << "GLM5-Next MLU speculative verification is not supported yet.";
+    CHECK(!input_params.is_spec_verify &&
+          (!input_params.attn_metadata ||
+           !input_params.attn_metadata->is_spec_verify))
+        << "Native MLU GLM5-Next speculative verification is not supported "
+           "yet: "
+           "the MTP worker must implement Dense Validate Span and state "
+           "commit.";
 
     if (tokens.numel() == 0) {
       tokens = torch::ones(
@@ -119,10 +122,23 @@ class Glm5NextModelImpl final
                                                      /*attn_mask=*/std::nullopt,
                                                      /*device=*/device_));
     }
-    // Convolution uses 64-token blocks; KDA builds its own chunk indices.
-    layer::AttentionMetadataBuilder::build_linear_prefill(
-        *modified_input_params.attn_metadata,
-        kernel::mlu::kCausalConv1dPrefillBlockSize);
+    // Conv owns its schedule; layers share the configured KDA chunk indices.
+    // Verification rows reuse decode metadata, so prefill scheduling would
+    // rewrite the chunk indices the captured graph holds.
+    if (!modified_input_params.attn_metadata->is_spec_verify &&
+        (modified_input_params.attn_metadata->is_prefill ||
+         modified_input_params.attn_metadata->is_chunked_prefill)) {
+      layer::AttentionMetadataBuilder::build_linear_prefill(
+          *modified_input_params.attn_metadata,
+          kernel::mlu::kCausalConv1dPrefillBlockSize);
+      const int64_t kda_chunk_size = kernel::mlu::kda_prefill_chunk_size();
+      if (kda_chunk_size != kernel::mlu::kCausalConv1dPrefillBlockSize) {
+        modified_input_params.attn_metadata->chunk_indices =
+            layer::AttentionMetadataBuilder::build_chunk_indices(
+                modified_input_params.attn_metadata->q_cu_seq_lens,
+                kda_chunk_size);
+      }
+    }
     const layer::AttentionMetadata& attn_metadata =
         *modified_input_params.attn_metadata;
 
@@ -176,6 +192,21 @@ class Glm5NextForCausalLMImpl final
       : LlmForCausalLMImplBase<Glm5NextModel>(context) {}
 
   bool is_hybrid_linear_attention() { return true; }
+
+  bool requires_graph_forward_metadata() override { return true; }
+
+  std::unique_ptr<ModelGraphMetadataState> create_graph_forward_metadata_state()
+      override {
+    return std::make_unique<Glm5NextGraphMetadataState>();
+  }
+
+  void prepare_graph_forward_metadata(ModelGraphMetadataState* state,
+                                      const torch::Tensor& positions,
+                                      ModelParamsView& params) override {
+    auto* graph_state = dynamic_cast<Glm5NextGraphMetadataState*>(state);
+    CHECK(graph_state != nullptr) << "GLM5 requires per-graph metadata state";
+    graph_state->prepare(positions, params);
+  }
 
   void load_model(std::unique_ptr<ModelLoader> loader,
                   std::string prefix = "model.") override {

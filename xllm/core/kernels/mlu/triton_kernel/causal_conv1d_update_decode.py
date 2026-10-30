@@ -131,6 +131,22 @@ def tmo_causal_conv1d_update_decode_kernel(
         if HAS_NULL_BLOCK:
             if conv_states_input_coord == null_block_id:
                 should_process = False
+                # Null rows carry no state; only their output needs defining.
+                if IS_VARLEN:
+                    null_start = tl.load(query_start_loc_ptr + idx_seq).to(tl.int64)
+                    null_end = tl.load(query_start_loc_ptr + (idx_seq + 1)).to(tl.int64)
+                    null_o_offset = null_start * stride_o_token
+                    null_seqlen = null_end - null_start
+                else:
+                    null_o_offset = idx_seq * stride_o_seq
+                    null_seqlen = seqlen
+                for null_token in range(null_seqlen):
+                    null_ptrs = o_ptr + null_o_offset + null_token * stride_o_token + (idx_feats * stride_o_dim)
+                    tl.store(
+                        null_ptrs,
+                        tl.zeros((BLOCK_N,), dtype=o_ptr.dtype.element_ty),
+                        mask=mask_bias,
+                    )
 
         if should_process:
             if IS_VARLEN:

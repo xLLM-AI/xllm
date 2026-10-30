@@ -277,15 +277,15 @@ int64_t SpeculativeEngineBase<TargetEngine>::calculate_kv_cache(
       << cache_size_in_bytes
       << ", linear_cache_size: " << linear_cache_size_in_bytes;
 
-  const int64_t target_full_attention_slot_size =
-      target_kv_cache_cap.slot_size() + target_kv_cache_cap.index_slot_size() +
-      target_kv_cache_cap.scale_slot_size();
-  const int64_t draft_full_attention_slot_size =
-      draft_kv_cache_cap.slot_size() + draft_kv_cache_cap.index_slot_size() +
-      draft_kv_cache_cap.scale_slot_size();
-  CHECK_GT(target_full_attention_slot_size, 0)
+  CHECK_GT(target_kv_cache_cap.slot_size() +
+               target_kv_cache_cap.index_slot_size() +
+               target_kv_cache_cap.scale_slot_size(),
+           0)
       << "target full-attention kv cache slot size must be greater than 0";
-  CHECK_GT(draft_full_attention_slot_size, 0)
+  CHECK_GT(draft_kv_cache_cap.slot_size() +
+               draft_kv_cache_cap.index_slot_size() +
+               draft_kv_cache_cap.scale_slot_size(),
+           0)
       << "draft full-attention kv cache slot size must be greater than 0";
 
   const int64_t target_full_attention_layers =
@@ -293,20 +293,20 @@ int64_t SpeculativeEngineBase<TargetEngine>::calculate_kv_cache(
   // Draft model has no linear-attention layers in the current MTP/Eagle path.
   const int64_t draft_full_attention_layers = draft_kv_cache_cap.n_layers();
   const int64_t target_full_attention_block_size_in_bytes =
-      block_size *
-      (target_full_attention_layers * (target_kv_cache_cap.slot_size() +
-                                       target_kv_cache_cap.scale_slot_size()) +
-       target_kv_cache_cap.num_indexer_layers() *
-           target_kv_cache_cap.index_slot_size());
+      block_size * (target_full_attention_layers *
+                    (target_kv_cache_cap.slot_size() +
+                     target_kv_cache_cap.scale_slot_size())) +
+      target_kv_cache_cap.num_indexer_layers() *
+          target_kv_cache_cap.index_block_bytes();
   // The draft KV cache is allocated from the draft's own KVCacheShape, so its
   // per-block cost uses the draft's own slot size, which may exceed the
   // target's (e.g. a full-attention draft against an MLA target).
   const int64_t draft_full_attention_block_size_in_bytes =
-      block_size *
-      (draft_full_attention_layers * (draft_kv_cache_cap.slot_size() +
-                                      draft_kv_cache_cap.scale_slot_size()) +
-       draft_kv_cache_cap.num_indexer_layers() *
-           draft_kv_cache_cap.index_slot_size());
+      block_size * (draft_full_attention_layers *
+                    (draft_kv_cache_cap.slot_size() +
+                     draft_kv_cache_cap.scale_slot_size())) +
+      draft_kv_cache_cap.num_indexer_layers() *
+          draft_kv_cache_cap.index_block_bytes();
   const int32_t layerwise_split_size =
       options_.is_draft_engine()
           ? 1
