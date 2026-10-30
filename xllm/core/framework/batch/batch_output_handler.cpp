@@ -55,7 +55,7 @@ Token make_empty_logprob_placeholder(const Sequence& seq) {
 }
 
 void update_sequence_embedding(Sequence* seq, const torch::Tensor& embedding) {
-  if (!embedding.defined()) {
+  if (seq->cancelled() || !embedding.defined()) {
     return;
   }
   torch::Tensor cur_seq_embed = safe_to(embedding, torch::kFloat32);
@@ -104,7 +104,7 @@ std::unordered_set<std::string> fail_json_object_requests(
 
   for (Sequence* sequence : sequences) {
     const auto error_iter = request_errors.find(sequence->request_id());
-    if (error_iter != request_errors.end()) {
+    if (!sequence->cancelled() && error_iter != request_errors.end()) {
       sequence->fail(error_iter->second);
     }
   }
@@ -179,7 +179,7 @@ void BatchOutputHandler::process_sample_output(
     auto* seq = target.sequence;
     CHECK(seq != nullptr);
 
-    if (failed_request_ids.contains(seq->request_id()) ||
+    if (seq->cancelled() || failed_request_ids.contains(seq->request_id()) ||
         seq->error_status().has_value()) {
       continue;
     }
@@ -296,7 +296,7 @@ void BatchOutputHandler::process_sample_output(
     const auto& target = output_targets_[output_idx];
     auto* seq = target.sequence;
     CHECK(seq != nullptr);
-    if (seq->error_status().has_value()) {
+    if (seq->cancelled() || seq->error_status().has_value()) {
       continue;
     }
 
@@ -375,6 +375,10 @@ void BatchOutputHandler::append_token_for_sequence(Sequence* seq,
 void BatchOutputHandler::process_beam_search(const BatchOutputData& data,
                                              bool force_requested_result_size) {
   for (auto* sequence_group : data.sequence_groups) {
+    const auto& sequences = sequence_group->sequences();
+    if (!sequences.empty() && sequences.front()->cancelled()) {
+      continue;
+    }
     sequence_group->process_beam_search(force_requested_result_size);
   }
 }
@@ -402,7 +406,8 @@ void BatchOutputHandler::process_beam_search_output(
     const auto& group_sequences =
         data.sequence_groups[sequence_group_id]->sequences();
     CHECK(!group_sequences.empty());
-    if (failed_request_ids.contains(group_sequences[0]->request_id())) {
+    if (group_sequences[0]->cancelled() ||
+        failed_request_ids.contains(group_sequences[0]->request_id())) {
       return;
     }
 

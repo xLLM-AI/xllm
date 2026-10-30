@@ -29,6 +29,8 @@ class EmbeddingInputView final {
         embedding_ids(common.embedding_ids),
         linear_state_ids(common.linear_state_ids),
         linear_state_indices(common.linear_state_indices),
+        linear_state_read_ids(common.linear_state_read_ids),
+        linear_state_read_indices(common.linear_state_read_indices),
         request_ids(common.request_ids),
         extra_token_ids(spec.extra_token_ids),
         mtp_shifted_token_ids(spec.mtp_shifted_token_ids),
@@ -38,6 +40,8 @@ class EmbeddingInputView final {
   std::vector<int32_t>& embedding_ids;
   std::vector<int32_t>& linear_state_ids;
   torch::Tensor& linear_state_indices;
+  std::vector<int32_t>& linear_state_read_ids;
+  torch::Tensor& linear_state_read_indices;
   std::vector<std::string>& request_ids;
   std::vector<int32_t>& extra_token_ids;
   torch::Tensor& mtp_shifted_token_ids;
@@ -161,7 +165,8 @@ class ModelParamsView final {
   void clear_linear_attention_state() {
     embedding.linear_state_ids.clear();
     embedding.linear_state_indices = torch::Tensor();
-    linear_state_cache_ops.clear();
+    embedding.linear_state_read_ids.clear();
+    embedding.linear_state_read_indices = torch::Tensor();
     linear_state_validity_mask.clear();
   }
 
@@ -254,7 +259,6 @@ class ModelParamsView final {
   BlockCopyInput& block_copy;
   ExpertInput& expert;
   GraphInputView graph;
-  std::vector<LinearStateCacheOp>& linear_state_cache_ops;
   LinearStateValidityMask& linear_state_validity_mask;
   std::vector<torch::Tensor>& multi_block_tables;
   torch::Tensor& mtp_shifted_token_ids;
@@ -280,7 +284,6 @@ class ModelParamsView final {
         block_copy(owner.block_copy),
         expert(owner.expert),
         graph(owner.graph, spec.graph),
-        linear_state_cache_ops(owner.linear_state_cache_ops),
         linear_state_validity_mask(owner.linear_state_validity_mask),
         multi_block_tables(spec.multi_block_tables),
         mtp_shifted_token_ids(spec.mtp_shifted_token_ids),

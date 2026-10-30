@@ -76,10 +76,16 @@ class RecurrentTestModel final : public CausalLM {
             : write_indices;
     const torch::Tensor conv = caches.front().get_conv_cache();
     const torch::Tensor ssm = caches.front().get_ssm_cache();
+    const torch::Tensor read_conv = conv.index_select(/*dim=*/0, read_indices);
+    const torch::Tensor read_ssm = ssm.index_select(/*dim=*/0, read_indices);
     const torch::Tensor previous_conv =
-        conv.index_select(/*dim=*/0, read_indices);
+        torch::where(metadata.has_initial_states.view({-1, 1, 1}),
+                     read_conv,
+                     torch::zeros_like(read_conv));
     const torch::Tensor previous_ssm =
-        ssm.index_select(/*dim=*/0, read_indices);
+        torch::where(metadata.has_initial_states.view({-1, 1, 1}),
+                     read_ssm,
+                     torch::zeros_like(read_ssm));
     observations.emplace_back(
         RecurrentObservation{read_indices.clone(),
                              write_indices.clone(),
@@ -94,11 +100,11 @@ class RecurrentTestModel final : public CausalLM {
     conv.index_copy_(
         /*dim=*/0,
         write_indices,
-        torch::where(active, previous_conv + delta, previous_conv));
+        torch::where(active, previous_conv + delta, read_conv));
     ssm.index_copy_(
         /*dim=*/0,
         write_indices,
-        torch::where(active, previous_ssm + delta * 10, previous_ssm));
+        torch::where(active, previous_ssm + delta * 10, read_ssm));
     return ModelOutput(tokens.to(options_).view({-1, 1}));
   }
 
@@ -258,10 +264,7 @@ class RecurrentPipelineTest : public ::testing::Test {
     params.embedding.linear_state_ids = {slot};
     params.embedding.linear_state_indices =
         torch::tensor({slot}, torch::kInt32);
-    LinearStateCacheOp op;
-    op.linear_state_id = slot;
-    op.reset_requested = cached == 0;
-    params.linear_state_cache_ops.emplace_back(op);
+    params.linear_state_validity_mask = {cached == 0 ? 0 : 1};
     return input;
   }
 
@@ -319,11 +322,9 @@ TEST_F(RecurrentPipelineTest,
   const auto entered_status = entered_future.wait_for(std::chrono::seconds(10));
   EXPECT_EQ(entered_status, std::future_status::ready);
   auto restore = input(/*slot=*/2, /*query=*/1, /*cached=*/2);
-  auto& op = restore.input_params.linear_state_cache_ops.front();
-  op.restore_requested = true;
-  op.restore_src_slot_id = 1;
+  restore.input_params.embedding.linear_state_read_ids = {1};
   const auto second = pipeline_->submit(restore);
-  restore.input_params.linear_state_cache_ops.clear();
+  restore.input_params.embedding.linear_state_read_ids.clear();
   restore.input_params.embedding.linear_state_ids.front() = 3;
   restore.input_params.embedding.linear_state_indices.fill_(3);
   release.set_value();
@@ -332,7 +333,7 @@ TEST_F(RecurrentPipelineTest,
   ASSERT_EQ(model_->observations.size(), 2);
   const auto& observed = model_->observations[1];
   EXPECT_EQ(observed.write_indices.cpu().item<int64_t>(), 2);
-  EXPECT_EQ(observed.read_indices.cpu().item<int64_t>(), 2);
+  EXPECT_EQ(observed.read_indices.cpu().item<int64_t>(), 1);
   EXPECT_EQ(observed.conv.cpu().item<float>(), 2);
   EXPECT_EQ(observed.ssm.cpu().item<float>(), 20);
   EXPECT_TRUE(observed.warm.cpu().item<bool>());
@@ -440,9 +441,8 @@ patch.__enter__()
       if (created.ok()) {
         auto restore = input(/*slot=*/2, /*query=*/1, /*cached=*/2);
         restore.input_params.meta.batch_id = 101;
-        auto& op = restore.input_params.linear_state_cache_ops.front();
-        op.restore_requested = true;
-        op.restore_src_slot_id = 1;
+        restore.input_params.embedding.linear_state_read_ids = {1};
+        restore.input_params.linear_state_validity_mask = {1};
         const auto submitted = pipeline_->submit(restore);
         EXPECT_TRUE(submitted.status.ok()) << submitted.status.message();
         if (submitted.status.ok()) {
@@ -496,7 +496,8 @@ TEST_F(RecurrentPipelineTest,
        DirectReadAdvancesOnlyLiveSlotBeforeContinuingDecode) {
   finish(pipeline_->submit(input(/*slot=*/1, /*query=*/2)));
   auto direct = input(/*slot=*/2, /*query=*/2, /*cached=*/2);
-  direct.input_params.linear_state_cache_ops.front().restore_src_slot_id = 1;
+  direct.input_params.embedding.linear_state_read_ids = {1};
+  direct.input_params.linear_state_validity_mask = {1};
   finish(pipeline_->submit(direct));
   ASSERT_EQ(model_->observations.size(), 2);
   const auto& observed = model_->observations[1];
@@ -524,24 +525,22 @@ TEST_F(RecurrentPipelineTest,
   const torch::Tensor initial_ssm =
       caches_.front().get_ssm_cache().cpu().clone();
   auto invalid = input(/*slot=*/2, /*query=*/1, /*cached=*/2);
-  auto& op = invalid.input_params.linear_state_cache_ops.front();
-  op.restore_requested = true;
-  op.restore_src_slot_id = 8;
+  invalid.input_params.embedding.linear_state_read_ids = {8};
   EXPECT_FALSE(pipeline_->submit(invalid).status.ok());
-  op.restore_src_slot_id = 0;
+  invalid.input_params.embedding.linear_state_read_ids = {0};
   EXPECT_FALSE(pipeline_->submit(invalid).status.ok());
-  op.restore_src_slot_id = -1;
+  invalid.input_params.embedding.linear_state_read_ids = {-1};
   EXPECT_FALSE(pipeline_->submit(invalid).status.ok());
-  op.restore_src_slot_id = 1;
-  op.reset_requested = true;
+  invalid.input_params.embedding.linear_state_read_ids = {1, 2};
   EXPECT_FALSE(pipeline_->submit(invalid).status.ok());
-  op.restore_requested = false;
+  invalid.input_params.embedding.linear_state_read_ids.clear();
+  invalid.input_params.embedding.linear_state_ids = {3, 2};
   EXPECT_FALSE(pipeline_->submit(invalid).status.ok());
-  op.reset_requested = false;
-  op.linear_state_id = 3;
-  EXPECT_FALSE(pipeline_->submit(invalid).status.ok());
+  invalid.input_params.embedding.linear_state_ids = {2};
   auto decode = input(/*slot=*/2, /*query=*/1, /*cached=*/2, /*decode=*/true);
-  decode.input_params.linear_state_cache_ops.front().restore_src_slot_id = 1;
+  // Cold checkpoint cannot back a direct Decode read.
+  decode.input_params.embedding.linear_state_read_ids = {1};
+  decode.input_params.linear_state_validity_mask = {0};
   EXPECT_FALSE(pipeline_->submit(decode).status.ok());
   auto padding = input(/*slot=*/0, /*query=*/1);
   EXPECT_FALSE(pipeline_->submit(padding).status.ok());
@@ -580,12 +579,7 @@ TEST_F(RecurrentPipelineTest,
   params.attention.device.new_cache_slots = warmup.positions.clone();
   params.embedding.linear_state_ids = {1, 2, 3, 4};
   params.embedding.linear_state_indices = torch::arange(1, 5, torch::kInt32);
-  params.linear_state_cache_ops.resize(4);
-  for (uint32_t row = 0; row < 4; ++row) {
-    params.linear_state_cache_ops[row].linear_state_id =
-        static_cast<int32_t>(row + 1);
-    params.linear_state_cache_ops[row].reset_requested = true;
-  }
+  params.linear_state_validity_mask.assign(4, 0);
   finish(pipeline_->submit(warmup));
   // Both Slots are captured and the admitted warmup Task then executes.
   ASSERT_EQ(model_->observations.size(), 3);
@@ -602,9 +596,8 @@ TEST_F(RecurrentPipelineTest,
   EXPECT_TRUE(torch::equal(caches_.front().get_ssm_cache().cpu(), initial_ssm));
   finish(pipeline_->submit(input(/*slot=*/1, /*query=*/2)));
   auto decode = input(/*slot=*/2, /*query=*/1, /*cached=*/2, /*decode=*/true);
-  auto& restore = decode.input_params.linear_state_cache_ops.front();
-  restore.restore_requested = true;
-  restore.restore_src_slot_id = 1;
+  decode.input_params.embedding.linear_state_read_ids = {1};
+  decode.input_params.linear_state_validity_mask = {1};
   finish(pipeline_->submit(decode));
   ASSERT_EQ(model_->observations.size(), 5);
   const auto& observed = model_->observations.back();

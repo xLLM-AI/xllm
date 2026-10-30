@@ -248,35 +248,21 @@ PyAttentionMetadataView::PyAttentionMetadataView(
   linear_state_indices_ = params.embedding.linear_state_indices;
   num_accepted_tokens_ = params.num_accepted_tokens;
   num_accepted_tokens_host_values_ = params.num_accepted_tokens_host;
-  if (metadata_->linear_state_read_indices.defined()) {
-    linear_state_read_indices_ = metadata_->linear_state_read_indices;
-  }
-  const auto& cache_ops = params.linear_state_cache_ops;
-  const bool has_direct_read = std::any_of(
-      cache_ops.begin(), cache_ops.end(), [](const LinearStateCacheOp& op) {
-        return op.is_direct_read();
-      });
-  if (has_direct_read && !linear_state_read_indices_.defined()) {
-    CHECK((metadata_->is_prefill || metadata_->is_chunked_prefill) &&
-          !params.is_spec_verify)
-        << "linear-state direct read is only supported for non-speculative "
-           "prefill";
+  if (!params.embedding.linear_state_read_ids.empty() &&
+      (metadata_->is_prefill || metadata_->is_chunked_prefill) &&
+      params.meta.batch_forward_type.no_decode() && !params.is_spec_verify) {
     CHECK(linear_state_indices_.defined());
-    CHECK_EQ(cache_ops.size(), params.embedding.linear_state_ids.size())
-        << "direct-read cache ops must align with host linear-state ids";
-    CHECK_EQ(cache_ops.size(),
+    CHECK_EQ(params.embedding.linear_state_read_ids.size(),
+             params.embedding.linear_state_ids.size());
+    CHECK_EQ(params.embedding.linear_state_read_ids.size(),
              static_cast<size_t>(linear_state_indices_.numel()))
-        << "direct-read cache ops must align with Python metadata rows";
-
-    std::vector<int32_t> read_ids = params.embedding.linear_state_ids;
-    for (size_t i = 0; i < cache_ops.size(); ++i) {
-      const LinearStateCacheOp& cache_op = cache_ops[i];
-      if (cache_op.is_direct_read()) {
-        read_ids[i] = cache_op.restore_src_slot_id;
-      }
+        << "linear-state read ids must align with Python metadata rows";
+    linear_state_read_indices_ = params.embedding.linear_state_read_indices;
+    if (!linear_state_read_indices_.defined()) {
+      linear_state_read_indices_ =
+          torch::tensor(params.embedding.linear_state_read_ids, torch::kInt32)
+              .to(linear_state_indices_.device());
     }
-    linear_state_read_indices_ =
-        make_cpu_tensor(read_ids).to(linear_state_indices_.device());
   }
   if (params.enable_graph || params.expert.eplb_decode_token_mask.defined()) {
     raw_dp_execution_token_counts_ =

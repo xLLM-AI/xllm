@@ -16,6 +16,7 @@ limitations under the License.
 
 #pragma once
 
+#include <glog/logging.h>
 #include <torch/types.h>
 
 #include <cstdint>
@@ -50,6 +51,26 @@ limitations under the License.
 #include "core/util/tensor_helper.h"
 
 namespace xllm {
+
+template <typename Embedding>
+void materialize_linear_state_indices(Embedding& embedding,
+                                      const torch::Device& device) {
+  if (embedding.linear_state_ids.empty()) {
+    return;
+  }
+  if (!embedding.linear_state_indices.defined()) {
+    embedding.linear_state_indices =
+        make_cpu_tensor(embedding.linear_state_ids).to(device);
+  }
+  if (!embedding.linear_state_read_indices.defined()) {
+    const auto& read_ids = embedding.linear_state_read_ids.empty()
+                               ? embedding.linear_state_ids
+                               : embedding.linear_state_read_ids;
+    CHECK_EQ(read_ids.size(), embedding.linear_state_ids.size());
+    embedding.linear_state_read_indices = make_cpu_tensor(read_ids).to(device);
+  }
+}
+
 class PythonAttentionMetadata;
 namespace npu {
 struct AclGraphTaskUpdateContext;
@@ -331,6 +352,9 @@ class LlmEmbeddingInput final {
   // IntTensor: [n_seq]
   torch::Tensor linear_state_indices;
 
+  std::vector<int32_t> linear_state_read_ids;
+  torch::Tensor linear_state_read_indices;
+
   // request ids of each sequence, used by suffix decoding request identity
   std::vector<std::string> request_ids;
 
@@ -351,6 +375,9 @@ class LlmEmbeddingInput final {
     out.embedding_ids = embedding_ids;
     out.linear_state_ids = linear_state_ids;
     out.linear_state_indices = safe_to(linear_state_indices, device, true);
+    out.linear_state_read_ids = linear_state_read_ids;
+    out.linear_state_read_indices =
+        safe_to(linear_state_read_indices, device, true);
     out.request_ids = request_ids;
     out.extra_token_ids = extra_token_ids;
     out.mtp_shifted_token_ids = safe_to(mtp_shifted_token_ids, device, true);
@@ -633,6 +660,9 @@ class VlmEmbeddingInput final {
   // IntTensor: [n_seq]
   torch::Tensor linear_state_indices;
 
+  std::vector<int32_t> linear_state_read_ids;
+  torch::Tensor linear_state_read_indices;
+
   // request ids of each sequence, used by suffix decoding request identity
   std::vector<std::string> request_ids;
 
@@ -653,6 +683,9 @@ class VlmEmbeddingInput final {
     out.embedding_ids = embedding_ids;
     out.linear_state_ids = linear_state_ids;
     out.linear_state_indices = safe_to(linear_state_indices, device, true);
+    out.linear_state_read_ids = linear_state_read_ids;
+    out.linear_state_read_indices =
+        safe_to(linear_state_read_indices, device, true);
     out.request_ids = request_ids;
     out.extra_token_ids = extra_token_ids;
     out.mtp_shifted_token_ids = safe_to(mtp_shifted_token_ids, device, true);

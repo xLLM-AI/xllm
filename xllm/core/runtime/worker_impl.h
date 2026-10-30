@@ -432,10 +432,10 @@ class WorkerImpl {
       const torch::Tensor& selected_token_idxes,
       const ParallelInput& parallel_input,
       const torch::Tensor& hidden_states) const;
-  // Restore on the caller's current stream only when this worker owns recurrent
-  // caches. Overlap callers must use compute_stream_ after the preceding
-  // forward.
-  void try_restore_linear_state_slots(const ModelParamsView& params);
+  // Prepare (reset/restore/direct-read) the recurrent slots on the caller's
+  // current stream. Overlap callers must use compute_stream_ after the
+  // preceding forward.
+  void prepare_linear_state_cache(const ModelParamsView& params);
   // Only used for deepseek chunked prefill ops on npu device
   void prepare_mla_prefixcache_inputs(LlmModelParams& input_params);
   void prepare_mla_prefixcache_inputs(VlmModelParams& input_params);

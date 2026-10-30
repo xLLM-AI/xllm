@@ -424,20 +424,6 @@ void SpeculativeWorkerImpl<TargetInput>::prepare_validate_inputs(
 }
 
 template <typename TargetInput>
-void SpeculativeWorkerImpl<TargetInput>::prepare_work_before_execute(
-    const TargetInput& input,
-    TargetInput& processed_input) {
-  // The composite owns no KV cache. Preserve linear-state metadata for the
-  // target leaf, which prepares and restores its own recurrent cache before
-  // execution.
-  prepare_work_before_execute_on_stream(input,
-                                        processed_input,
-                                        *prepare_stream_,
-                                        /*record_ready_event=*/true,
-                                        /*restore_linear_state=*/false);
-}
-
-template <typename TargetInput>
 void SpeculativeWorkerImpl<TargetInput>::restore_json_object_states(
     TargetInput& input) {
   impl_->restore_json_object_states(input);

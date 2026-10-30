@@ -309,6 +309,7 @@ class GraphPersistentParam final {
   // for mtp model
   torch::Tensor persistent_embedding_;
   torch::Tensor persistent_linear_state_indices_;
+  torch::Tensor persistent_linear_state_read_indices_;
   torch::Tensor persistent_num_accepted_tokens_;
 
   // ModelOutput fields

@@ -271,25 +271,6 @@ class Sequence {
     return get_linear_state_slot_id();
   }
 
-  void set_pending_linear_save(const XXH3Key& hash) {
-    kv_state_.set_pending_linear_save(hash);
-  }
-  std::optional<XXH3Key> take_pending_linear_save() {
-    return kv_state_.take_pending_linear_save();
-  }
-  bool has_pending_linear_save() const {
-    return kv_state_.has_pending_linear_save();
-  }
-  void set_linear_restore_src_block(Block block) {
-    kv_state_.set_linear_restore_src_block(std::move(block));
-  }
-  bool has_linear_restore_src_block() const {
-    return kv_state_.has_linear_restore_src_block();
-  }
-  std::optional<Block> take_linear_restore_src_block() {
-    return kv_state_.take_linear_restore_src_block();
-  }
-  Block copy_block(BlockType type) const { return kv_state_.copy_block(type); }
   // The request id already lives in sequence_params_; don't keep a second
   // copy per sequence (a heap allocation each for UUID-length ids).
   const std::string& request_id() const { return sequence_params_.request_id; }

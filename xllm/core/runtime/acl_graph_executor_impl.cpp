@@ -74,6 +74,12 @@ void reset_capture_linear_state_to_padding(ModelParamsView& params) {
            static_cast<int64_t>(params.embedding.linear_state_ids.size()))
       << "ACL graph capture linear-state host/device sizes must match.";
   params.embedding.linear_state_indices.fill_(kPaddingLinearStateId);
+  std::fill(params.embedding.linear_state_read_ids.begin(),
+            params.embedding.linear_state_read_ids.end(),
+            kPaddingLinearStateId);
+  if (params.embedding.linear_state_read_indices.defined()) {
+    params.embedding.linear_state_read_indices.fill_(kPaddingLinearStateId);
+  }
   params.linear_state_validity_mask.assign(
       params.embedding.linear_state_ids.size(), 0);
 }
@@ -278,7 +284,7 @@ std::pair<torch::Tensor, torch::Tensor> find_attention_plan_kv_cache(
   return {torch::Tensor(), torch::Tensor()};
 }
 
-std::optional<std::array<const void*, 11>> spec_verify_input_addresses(
+std::optional<std::array<const void*, 12>> spec_verify_input_addresses(
     const torch::Tensor& tokens,
     const torch::Tensor& positions,
     const ModelParamsView& params) {
@@ -289,7 +295,7 @@ std::optional<std::array<const void*, 11>> spec_verify_input_addresses(
   // The graph key fixes tensor view shapes; this address list protects their
   // backing storage. Fixed-capacity packed buffers keep the corresponding
   // strides stable across replay generations.
-  const std::array<const torch::Tensor*, 11> sources = {
+  const std::array<const torch::Tensor*, 12> sources = {
       &graph_tokens,
       &positions,
       &params.attention.device.q_seq_lens,
@@ -297,11 +303,12 @@ std::optional<std::array<const void*, 11>> spec_verify_input_addresses(
       &params.attention.device.new_cache_slots,
       &params.attention.device.block_tables,
       &params.embedding.linear_state_indices,
+      &params.embedding.linear_state_read_indices,
       &params.num_accepted_tokens,
       &params.attention.device.q_cu_seq_lens,
       &params.graph.expanded_kv_seq_lens,
       &params.graph.expanded_block_tables};
-  std::array<const void*, 11> addresses;
+  std::array<const void*, 12> addresses;
   for (size_t i = 0; i < sources.size(); ++i) {
     if (!sources[i]->defined()) {
       return std::nullopt;

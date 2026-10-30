@@ -173,9 +173,15 @@ void UnifiedPolicy::schedule_from_unified_queue(
       // Latency-aware scheduling.
       if (options_.enable_latency_aware_schedule()) {
         if (sequence->is_prefill_stage()) {
+          const size_t max_prefill_tokens = std::min(
+              num_tokens,
+              kv_cache_tokens_num +
+                  std::min(assume_max_tokens,
+                           static_cast<size_t>(
+                               options_.max_tokens_per_chunk_for_prefill())));
           assume_max_tokens =
               get_max_chunk(sequence.get(),
-                            num_tokens,
+                            max_prefill_tokens,
                             kv_cache_tokens_num,
                             static_cast<int32_t>(budget.latency_budget -
                                                  budget.estimate_latency),
@@ -184,7 +190,7 @@ void UnifiedPolicy::schedule_from_unified_queue(
             budget_exhausted = true;
             break;
           }
-          if (assume_max_tokens != num_tokens &&
+          if (assume_max_tokens != max_prefill_tokens &&
               (assume_max_tokens - kv_cache_tokens_num) <= 50) {
             budget_exhausted = true;
             break;
@@ -300,6 +306,10 @@ void UnifiedPolicy::schedule_from_unified_queue(
             {StatusCode::RESOURCE_EXHAUSTED,
              "No enough resource to schedule a single sequence"});
       }
+      break;
+    }
+
+    if (state.kv_cache_manager->has_pending_async_block_release()) {
       break;
     }
 

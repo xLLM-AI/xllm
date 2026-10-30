@@ -31,6 +31,9 @@ class RecEmbeddingInput final {
     out.embedding_ids = embedding_ids;
     out.linear_state_ids = linear_state_ids;
     out.linear_state_indices = safe_to(linear_state_indices, device, true);
+    out.linear_state_read_ids = linear_state_read_ids;
+    out.linear_state_read_indices =
+        safe_to(linear_state_read_indices, device, true);
     out.request_ids = request_ids;
     return out;
   }
@@ -38,6 +41,8 @@ class RecEmbeddingInput final {
   std::vector<int32_t> embedding_ids;
   std::vector<int32_t> linear_state_ids;
   torch::Tensor linear_state_indices;
+  std::vector<int32_t> linear_state_read_ids;
+  torch::Tensor linear_state_read_indices;
   std::vector<std::string> request_ids;
 };
 
@@ -93,7 +98,6 @@ class RecModelParams final {
     out.features = features;
     out.expert = expert;
     out.graph = graph;
-    out.linear_state_cache_ops = linear_state_cache_ops;
     out.linear_state_validity_mask = linear_state_validity_mask;
     out.rec_params = rec_params;
     out.attn_metadata = attn_metadata;
@@ -114,14 +118,8 @@ class RecModelParams final {
     params.features = features.to(device);
     params.expert = expert.to(device);
     params.graph = graph.to(device);
-    params.linear_state_cache_ops = linear_state_cache_ops;
     params.linear_state_validity_mask = linear_state_validity_mask;
-    if (!params.embedding.linear_state_indices.defined() &&
-        !params.embedding.linear_state_ids.empty()) {
-      params.embedding.linear_state_indices =
-          torch::tensor(params.embedding.linear_state_ids, torch::kInt)
-              .to(device);
-    }
+    materialize_linear_state_indices(params.embedding, device);
     if (const auto* xattention = onerec_xattention_params()) {
       params.rec_params = xattention->to(device);
     } else if (const auto* onerec = onerec_params()) {
@@ -215,7 +213,6 @@ class RecModelParams final {
   RecFeatureInput features;
   ExpertInput expert;
   RecGraphInput graph;
-  std::vector<LinearStateCacheOp> linear_state_cache_ops;
   LinearStateValidityMask linear_state_validity_mask;
   RecModelInputParams rec_params;
   std::shared_ptr<layer::AttentionMetadata> attn_metadata;

@@ -482,11 +482,11 @@ AttentionMetadata build_common_attention_metadata(
              "undefined";
       options = options.device(device.value());
     }
-    attn_metadata.slot_mapping = torch::tensor({0}, options);
-    attn_metadata.q_cu_seq_lens = torch::tensor({0, 1}, options);
-    attn_metadata.kv_cu_seq_lens = torch::tensor({0, 1}, options);
-    attn_metadata.q_seq_lens = torch::tensor({1}, options);
-    attn_metadata.kv_seq_lens = torch::tensor({1}, options);
+    attn_metadata.slot_mapping = torch::zeros({1}, options);
+    attn_metadata.q_cu_seq_lens = torch::arange(2, options);
+    attn_metadata.kv_cu_seq_lens = torch::arange(2, options);
+    attn_metadata.q_seq_lens = torch::ones({1}, options);
+    attn_metadata.kv_seq_lens = torch::ones({1}, options);
 #if defined(USE_NPU)
     // NPU keeps these host vectors as one length per sequence.  Keep the
     // dummy row consistent with normal NPU batches; the *_cu_seq_lens tensors
@@ -497,9 +497,9 @@ AttentionMetadata build_common_attention_metadata(
     attn_metadata.q_seq_lens_vec = {0, 1};
     attn_metadata.kv_seq_lens_vec = {0, 1};
 #endif
-    attn_metadata.paged_kv_indptr = torch::tensor({0, 1}, options);
-    attn_metadata.paged_kv_indices = torch::tensor({0}, options);
-    attn_metadata.paged_kv_last_page_len = torch::tensor({1}, options);
+    attn_metadata.paged_kv_indptr = torch::arange(2, options);
+    attn_metadata.paged_kv_indices = torch::zeros({1}, options);
+    attn_metadata.paged_kv_last_page_len = torch::ones({1}, options);
     attn_metadata.block_table = torch::zeros({1, 1}, options);
     attn_metadata.max_query_len = 1;
     attn_metadata.max_seq_len = std::max<int64_t>(attn_metadata.max_seq_len, 1);

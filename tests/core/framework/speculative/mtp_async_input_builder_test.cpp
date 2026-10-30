@@ -320,15 +320,8 @@ TEST(MtpAsyncInputBuilderTest, PybindViewExposesLinearStateReadAndWriteSlots) {
   ModelParamsView params = ModelInputSnapshot(LlmModelParams()).view();
   params.embedding.linear_state_ids = {3, 7};
   params.embedding.linear_state_indices = torch::tensor({3, 7}, torch::kInt);
-
-  LinearStateCacheOp direct_read;
-  direct_read.linear_state_id = 3;
-  direct_read.restore_src_slot_id = 2;
-  LinearStateCacheOp legacy_restore;
-  legacy_restore.linear_state_id = 7;
-  legacy_restore.restore_requested = true;
-  legacy_restore.restore_src_slot_id = 6;
-  params.linear_state_cache_ops = {direct_read, legacy_restore};
+  params.embedding.linear_state_read_ids = {2, 6};
+  params.meta.batch_forward_type = BatchForwardType::PREFILL;
 
   py::object py_metadata = py::cast(PyAttentionMetadataView(metadata, params));
   EXPECT_TRUE(torch::equal(
@@ -339,7 +332,7 @@ TEST(MtpAsyncInputBuilderTest, PybindViewExposesLinearStateReadAndWriteSlots) {
       torch::tensor({3, 7}, torch::kInt)));
   EXPECT_TRUE(torch::equal(
       py_metadata.attr("linear_state_read_indices").cast<torch::Tensor>(),
-      torch::tensor({2, 7}, torch::kInt)));
+      torch::tensor({2, 6}, torch::kInt)));
   EXPECT_TRUE(py_metadata.attr("is_dummy").cast<bool>());
 }
 

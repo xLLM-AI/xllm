@@ -90,9 +90,8 @@ ContinuousSchedulerBase::ContinuousSchedulerBase(
 
   enable_prefix_cache_ =
       ::xllm::KVCacheConfig::get_instance().enable_prefix_cache();
-  has_linear_attention_layers_ =
-      ::xllm::has_linear_attention_layers(resource_engine_->model_args());
   enable_in_batch_prefix_cache_ =
+      enable_prefix_cache_ &&
       ::xllm::KVCacheConfig::get_instance().enable_in_batch_prefix_cache();
 
   ProfileManager::Options profile_manager_options;
@@ -248,6 +247,16 @@ ContinuousSchedulerBase::~ContinuousSchedulerBase() {
 bool ContinuousSchedulerBase::add_request(std::shared_ptr<Request>& request) {
   CHECK(request != nullptr);
   CHECK(!request->sequences().empty());
+
+  if ((request->check_beam_search() || request->best_of() > 1) &&
+      ::xllm::has_linear_attention_layers(resource_engine_->model_args())) {
+    output_dispatcher_->process_failed_request(
+        request,
+        {StatusCode::INVALID_ARGUMENT,
+         "Beam search and best_of > 1 are not supported with LINEAR "
+         "attention."});
+    return true;
+  }
 
   std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
   const size_t pending_before_reservation =
@@ -493,7 +502,6 @@ SchedulerState ContinuousSchedulerBase::make_state() {
       .options = options_,
       .min_speculative_tokens_required = min_speculative_tokens_required_,
       .enable_prefix_cache = enable_prefix_cache_,
-      .has_linear_attention_layers = has_linear_attention_layers_,
       .release_failed_request =
           [this](const std::shared_ptr<Request>& request) {
             release_failed_request(request);
@@ -518,6 +526,10 @@ BatchGroup ContinuousSchedulerBase::schedule_request(
           return one_batch.empty();
         });
     if (!all_empty) {
+      return batch;
+    }
+
+    if (options_.enable_schedule_overlap() && pending_step_.has_value()) {
       return batch;
     }
 
@@ -674,6 +686,9 @@ void ContinuousSchedulerBase::process_batch_output(
   stream_requests.reserve(requests.size());
   // process request output in batch
   for (const auto& request : requests) {
+    if (request->cancelled()) {
+      continue;
+    }
     // PD Prefill records at handoff acknowledgement; Decode has no local
     // ingress timestamp and must not contribute a second sample.
     if (request->state().decode_address.empty()) {
@@ -682,9 +697,6 @@ void ContinuousSchedulerBase::process_batch_output(
     // ignore cancelled/finished requests when enable_schedule_overlap.
     if (options_.enable_schedule_overlap()) {
       if (request->state().stream) {
-        if (request->cancelled()) {
-          continue;
-        }
         if (request->error_status().has_value()) {
           continue;
         }

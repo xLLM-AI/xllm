@@ -915,9 +915,10 @@ Status TaskExecutionPipeline::validate_input(SpeculativeSlot& slot,
       if (!params.linear_state_validity_mask.empty()) {
         valid = params.linear_state_validity_mask[row] != 0;
       }
-      if (!params.linear_state_cache_ops.empty()) {
-        const auto& op = params.linear_state_cache_ops[row];
-        valid = op.restore_requested || (valid && !op.reset_requested);
+      const auto& read_ids = params.embedding.linear_state_read_ids;
+      if (!read_ids.empty() &&
+          read_ids[row] != params.embedding.linear_state_ids[row]) {
+        valid = true;
       }
       if (!valid) {
         return invalid("Hybrid MTP decode requires a warm recurrent state.");
@@ -2838,11 +2839,15 @@ Status TaskExecutionPipeline::prepare_recurrent_state(
   target.embedding.linear_state_ids = ids;
   target.embedding.linear_state_indices =
       prefix(recurrent.state_indices, slot.rows);
-  target.linear_state_cache_ops = source.linear_state_cache_ops;
+  target.embedding.linear_state_read_ids =
+      source.embedding.linear_state_read_ids;
+  target.embedding.linear_state_read_indices =
+      source.embedding.linear_state_read_indices;
   target.linear_state_validity_mask = source.linear_state_validity_mask;
   if (warmup) {
     // Synthetic warmup owns padding slot zero, never a live reset/copy lease.
-    target.linear_state_cache_ops.clear();
+    target.embedding.linear_state_read_ids.clear();
+    target.embedding.linear_state_read_indices = torch::Tensor();
     target.linear_state_validity_mask.assign(slot.rows, 0);
   } else if (target.linear_state_validity_mask.empty()) {
     const auto host = SlotBuffer::model_input_view(input);
@@ -2854,15 +2859,11 @@ Status TaskExecutionPipeline::prepare_recurrent_state(
     target.linear_state_validity_mask =
         build_linear_state_mask(cached, slot.rows);
   }
-  if (!target.linear_state_cache_ops.empty()) {
-    std::transform(target.linear_state_cache_ops.begin(),
-                   target.linear_state_cache_ops.end(),
-                   target.linear_state_validity_mask.begin(),
-                   target.linear_state_validity_mask.begin(),
-                   [](const LinearStateCacheOp& op, int64_t valid) {
-                     return op.is_valid_after(valid != 0) ? int64_t{1}
-                                                          : int64_t{0};
-                   });
+  const auto& read_ids = target.embedding.linear_state_read_ids;
+  for (size_t row = 0; row < read_ids.size(); ++row) {
+    if (read_ids[row] != target.embedding.linear_state_ids[row]) {
+      target.linear_state_validity_mask[row] = 1;
+    }
   }
   if (!slot.decode) {
     target.attn_metadata->has_initial_states = torch::tensor(
@@ -3675,8 +3676,10 @@ void TaskExecutionPipeline::launch_speculative(uint32_t slot_id) {
     // Reset/restore and all recurrent forwards share this ordered stream.
     auto& params = slot.target_prefill->model_params();
     restore_linear_state_slots(kv_caches_,
-                               params.linear_state_cache_ops,
-                               params.linear_state_validity_mask);
+                               params.embedding.linear_state_ids,
+                               params.embedding.linear_state_read_ids,
+                               params.linear_state_validity_mask,
+                               /*reads_distinct_state=*/false);
   }
   KVTransferCompletion kv_transfers;
   const auto& transfers = slots_[slot_id]->transfer_kv_infos;

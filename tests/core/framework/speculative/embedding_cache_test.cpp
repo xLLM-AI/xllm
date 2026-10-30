@@ -229,6 +229,99 @@ TEST(EmbeddingCacheTest, ReadAcceptedPrefixLengthsRejectsStaleRequest) {
   EXPECT_EQ(reused[0], 1);
 }
 
+TEST(EmbeddingCacheTest, BootstrapPreservesExistingPrefillContext) {
+  EmbeddingCache cache(2);
+  torch::Tensor embedding = torch::tensor({{1.0f, 2.0f}});
+  cache.write_prefill_target_context(
+      {1}, {"request"}, torch::tensor({17}, torch::kInt), embedding);
+
+  cache.write_mtp_bootstrap_context(
+      1, "request", 99, torch::tensor({9.0f, 9.0f}));
+
+  const auto states = cache.read_decode_states({1}, {"request"});
+  ASSERT_EQ(states.size(), 1);
+  EXPECT_EQ(states[0].token_id, 17);
+  EXPECT_TRUE(tensor_equal(states[0].embedding, embedding[0]));
+}
+
+class BootstrapAfterValidateTest : public ::testing::TestWithParam<int32_t> {};
+
+TEST_P(BootstrapAfterValidateTest, PreservesAcceptedStateAfterOverlapPause) {
+  EmbeddingCache cache(2);
+  const int32_t accepted_count = GetParam();
+  torch::Tensor accepted_tokens = torch::tensor({{11, 12, 13}}, torch::kInt64);
+  accepted_tokens.slice(1, accepted_count).fill_(-1);
+  torch::Tensor accepted_embeddings =
+      torch::tensor({{{1.0f, 1.1f}, {2.0f, 2.1f}, {3.0f, 3.1f}}});
+  cache.write_target_context(
+      {1}, {"request"}, accepted_tokens, accepted_embeddings, 2);
+
+  cache.write_mtp_bootstrap_context(
+      1, "request", 10 + accepted_count, torch::tensor({9.0f, 9.0f}));
+
+  const auto states = cache.read_decode_states({1}, {"request"});
+  ASSERT_EQ(states.size(), 1);
+  EXPECT_TRUE(states[0].valid);
+  EXPECT_EQ(states[0].request_id, "request");
+  EXPECT_EQ(states[0].token_id, 10 + accepted_count);
+  EXPECT_EQ(states[0].position_offset, accepted_count - 1);
+  EXPECT_EQ(states[0].correction_token_id, 10 + accepted_count);
+  EXPECT_EQ(states[0].correction_position_offset, accepted_count - 1);
+  EXPECT_EQ(states[0].all_draft_accepted, accepted_count == 3);
+  EXPECT_TRUE(tensor_equal(states[0].embedding,
+                           accepted_embeddings[0][accepted_count - 1]));
+  EXPECT_EQ(cache.read_accepted_prefix_lengths({1}, {"request"}),
+            std::vector<int32_t>({accepted_count}));
+  if (accepted_count > 1) {
+    EXPECT_EQ(states[0].prev_token_id, 9 + accepted_count);
+    EXPECT_TRUE(tensor_equal(states[0].prev_embedding,
+                             accepted_embeddings[0][accepted_count - 2]));
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(AcceptedWidths,
+                         BootstrapAfterValidateTest,
+                         ::testing::Values(1, 2, 3));
+
+TEST(EmbeddingCacheTest, BootstrapInitializesRecycledSlotForNewRequest) {
+  EmbeddingCache cache(2);
+  cache.write_mtp_bootstrap_context(1, "old", 17, torch::tensor({1.0f, 2.0f}));
+  torch::Tensor embedding = torch::tensor({3.0f, 4.0f});
+  cache.write_mtp_bootstrap_context(1, "new", 27, embedding);
+
+  const auto states = cache.read_decode_states({1}, {"new"});
+  ASSERT_EQ(states.size(), 1);
+  EXPECT_TRUE(states[0].valid);
+  EXPECT_EQ(states[0].token_id, 27);
+  EXPECT_TRUE(tensor_equal(states[0].embedding, embedding));
+}
+
+TEST(EmbeddingCacheTest, BootstrapInitializesClearedSlotForSameRequest) {
+  EmbeddingCache cache(2);
+  cache.write_mtp_bootstrap_context(
+      1, "request", 17, torch::tensor({1.0f, 2.0f}));
+  cache.clear({1});
+  torch::Tensor embedding = torch::tensor({3.0f, 4.0f});
+  cache.write_mtp_bootstrap_context(1, "request", 27, embedding);
+
+  const auto states = cache.read_decode_states({1}, {"request"});
+  ASSERT_EQ(states.size(), 1);
+  EXPECT_TRUE(states[0].valid);
+  EXPECT_EQ(states[0].token_id, 27);
+  EXPECT_TRUE(tensor_equal(states[0].embedding, embedding));
+}
+
+TEST(EmbeddingCacheTest,
+     BootstrapWithoutRequestIdentityRetainsOverwriteBehavior) {
+  EmbeddingCache cache(2);
+  cache.write_mtp_bootstrap_context(1, "", 17, torch::tensor({1.0f, 2.0f}));
+  cache.write_mtp_bootstrap_context(1, "", 27, torch::tensor({3.0f, 4.0f}));
+
+  const auto states = cache.read_decode_states({1}, {});
+  ASSERT_EQ(states.size(), 1);
+  EXPECT_EQ(states[0].token_id, 27);
+}
+
 TEST(EmbeddingCacheTest, WriteMtpBootstrapContextStoresExactDecodeState) {
   EmbeddingCache cache(/*total_nums=*/2);
   torch::Tensor embedding = torch::tensor({1.0f, 2.0f, 3.0f});

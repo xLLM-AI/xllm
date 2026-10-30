@@ -18,9 +18,13 @@ limitations under the License.
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 #include "framework/request/incremental_decoder.h"
+#include "framework/request/request.h"
+#include "framework/request/request_state.h"
 #include "framework/request/sequence.h"
 
 namespace xllm {
@@ -134,5 +138,57 @@ TEST(SequenceGeneratedTokensTest, CountsOverlapCommittedTokens) {
 
   EXPECT_EQ(sequence.generated_tokens_since_latency(), 2u);
 }
+
+class RequestGeneratedTokenUsageTest
+    : public ::testing::TestWithParam<std::tuple<bool, int32_t, int32_t>> {};
+
+TEST_P(RequestGeneratedTokenUsageTest, CountsOnlyCommittedTokens) {
+  const auto [enable_schedule_overlap, generated_tokens, placeholder_tokens] =
+      GetParam();
+  RequestState state(
+      "prompt",
+      std::vector<int32_t>{1, 2, 3},
+      RequestSamplingParam{},
+      SchedulerParam{},
+      StoppingChecker{},
+      /*seq_capacity=*/16,
+      /*n=*/1,
+      /*best_of=*/1,
+      /*logprobs=*/false,
+      /*stream=*/false,
+      /*echo=*/false,
+      /*skip_special_tokens=*/true,
+      enable_schedule_overlap,
+      [](const RequestOutput&) { return true; },
+      OutputsFunc{});
+  Request request("generated-token-usage", "", "", std::move(state));
+  auto& sequence = *request.sequences().front();
+  sequence.kv_state().set_kv_cache_tokens_num(sequence.num_prompt_tokens());
+  for (int32_t token_index = 0; token_index < generated_tokens; ++token_index) {
+    sequence.append_token(Token(10 + token_index));
+  }
+  for (int32_t token_index = 0; token_index < placeholder_tokens;
+       ++token_index) {
+    sequence.append_token(Token(-1));
+  }
+
+  Tokenizer tokenizer;
+  const RequestOutput output = request.generate_output(tokenizer);
+  ASSERT_TRUE(output.usage.has_value());
+  EXPECT_EQ(output.usage->num_prompt_tokens, 3);
+  EXPECT_EQ(output.usage->num_generated_tokens, generated_tokens);
+  EXPECT_EQ(output.usage->num_total_tokens, 3 + generated_tokens);
+}
+
+INSTANTIATE_TEST_SUITE_P(OverlapPlaceholders,
+                         RequestGeneratedTokenUsageTest,
+                         ::testing::Values(std::make_tuple(false, 0, 0),
+                                           std::make_tuple(false, 2, 0),
+                                           std::make_tuple(true, 0, 0),
+                                           std::make_tuple(true, 0, 1),
+                                           std::make_tuple(true, 0, 2),
+                                           std::make_tuple(true, 2, 0),
+                                           std::make_tuple(true, 2, 1),
+                                           std::make_tuple(true, 2, 2)));
 
 }  // namespace xllm

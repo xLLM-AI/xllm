@@ -51,7 +51,7 @@ TEST(Qwen3_5GatedDeltaNetIndicesTest,
   const std::vector<int32_t> slots = {3, 0, 7, 0};
   const std::vector<int64_t> validity = {0, 0, 1, 0};
   const MegaGdnPrefillIndicesCache& indices = get_or_build_prefill_indices(
-      metadata, slots, validity, kCheckpointStride, kNumSlots, kDevice);
+      metadata, slots, validity, {}, kCheckpointStride, kNumSlots, kDevice);
 
   expect_int32_vector(indices.conv_read, {-1, -1, 7, -1});
   expect_int32_vector(indices.conv_write, {3, 0, 7, 0});
@@ -60,12 +60,39 @@ TEST(Qwen3_5GatedDeltaNetIndicesTest,
 }
 
 TEST(Qwen3_5GatedDeltaNetIndicesTest,
+     MapsMixedColdContinuationAndIndependentReadSlots) {
+  AttentionMetadata metadata;
+  const std::vector<int32_t> slots = {2, 4, 6, 8};
+  const std::vector<int64_t> validity = {0, 1, 1, 1};
+  const std::vector<int32_t> read_ids = {
+      2,
+      4,
+      6,
+      12,
+  };
+
+  const MegaGdnPrefillIndicesCache& indices =
+      get_or_build_prefill_indices(metadata,
+                                   slots,
+                                   validity,
+                                   read_ids,
+                                   kCheckpointStride,
+                                   kNumSlots,
+                                   kDevice);
+
+  expect_int32_vector(indices.conv_read, {-1, 4, 6, 12});
+  expect_int32_vector(indices.conv_write, {2, 4, 6, 8});
+  expect_int32_vector(indices.ssm_read, {-1, 16, 24, 48});
+  expect_int32_vector(indices.ssm_write, {8, 16, 24, 32});
+}
+
+TEST(Qwen3_5GatedDeltaNetIndicesTest,
      ReusesAllTensorStorageForMatchingForwardKey) {
   AttentionMetadata metadata;
   const std::vector<int32_t> slots = {2, 5};
   const std::vector<int64_t> validity = {0, 1};
   const MegaGdnPrefillIndicesCache& first = get_or_build_prefill_indices(
-      metadata, slots, validity, kCheckpointStride, kNumSlots, kDevice);
+      metadata, slots, validity, {}, kCheckpointStride, kNumSlots, kDevice);
   const void* conv_read = first.conv_read.data_ptr();
   const void* conv_write = first.conv_write.data_ptr();
   const void* ssm_read = first.ssm_read.data_ptr();
@@ -73,7 +100,7 @@ TEST(Qwen3_5GatedDeltaNetIndicesTest,
 
   for (int64_t layer = 1; layer < 64; ++layer) {
     const MegaGdnPrefillIndicesCache& reused = get_or_build_prefill_indices(
-        metadata, slots, validity, kCheckpointStride, kNumSlots, kDevice);
+        metadata, slots, validity, {}, kCheckpointStride, kNumSlots, kDevice);
     EXPECT_EQ(reused.conv_read.data_ptr(), conv_read);
     EXPECT_EQ(reused.conv_write.data_ptr(), conv_write);
     EXPECT_EQ(reused.ssm_read.data_ptr(), ssm_read);
@@ -86,10 +113,22 @@ TEST(Qwen3_5GatedDeltaNetIndicesTest, NewMetadataMaterializesNewTensorSet) {
   AttentionMetadata next_metadata;
   const std::vector<int32_t> slots = {2, 5};
   const std::vector<int64_t> validity = {0, 1};
-  const MegaGdnPrefillIndicesCache& first = get_or_build_prefill_indices(
-      first_metadata, slots, validity, kCheckpointStride, kNumSlots, kDevice);
-  const MegaGdnPrefillIndicesCache& next = get_or_build_prefill_indices(
-      next_metadata, slots, validity, kCheckpointStride, kNumSlots, kDevice);
+  const MegaGdnPrefillIndicesCache& first =
+      get_or_build_prefill_indices(first_metadata,
+                                   slots,
+                                   validity,
+                                   {},
+                                   kCheckpointStride,
+                                   kNumSlots,
+                                   kDevice);
+  const MegaGdnPrefillIndicesCache& next =
+      get_or_build_prefill_indices(next_metadata,
+                                   slots,
+                                   validity,
+                                   {},
+                                   kCheckpointStride,
+                                   kNumSlots,
+                                   kDevice);
 
   EXPECT_NE(next.conv_read.data_ptr(), first.conv_read.data_ptr());
   EXPECT_NE(next.conv_write.data_ptr(), first.conv_write.data_ptr());
@@ -99,44 +138,79 @@ TEST(Qwen3_5GatedDeltaNetIndicesTest, NewMetadataMaterializesNewTensorSet) {
 
 TEST_F(Qwen3_5GatedDeltaNetIndicesDeathTest, RejectsInvalidValidity) {
   AttentionMetadata metadata;
-  EXPECT_DEATH(
-      get_or_build_prefill_indices(metadata, {1}, {2}, 1, kNumSlots, kDevice),
-      "validity must be 0 or 1");
+  EXPECT_DEATH(get_or_build_prefill_indices(
+                   metadata, {1}, {2}, {}, 1, kNumSlots, kDevice),
+               "validity must be 0 or 1");
 }
 
 TEST_F(Qwen3_5GatedDeltaNetIndicesDeathTest, RejectsValiditySizeMismatch) {
   AttentionMetadata metadata;
   EXPECT_DEATH(get_or_build_prefill_indices(
-                   metadata, {1, 2}, {1}, 1, kNumSlots, kDevice),
+                   metadata, {1, 2}, {1}, {}, 1, kNumSlots, kDevice),
                "validity_mask must be sequence-scoped");
 }
 
 TEST_F(Qwen3_5GatedDeltaNetIndicesDeathTest, RejectsNegativeSlot) {
   AttentionMetadata metadata;
-  EXPECT_DEATH(
-      get_or_build_prefill_indices(metadata, {-1}, {1}, 1, kNumSlots, kDevice),
-      "live slot must be non-negative");
+  EXPECT_DEATH(get_or_build_prefill_indices(
+                   metadata, {-1}, {1}, {}, 1, kNumSlots, kDevice),
+               "live slot must be non-negative");
 }
 
 TEST_F(Qwen3_5GatedDeltaNetIndicesDeathTest, RejectsSlotOutOfBounds) {
   AttentionMetadata metadata;
   EXPECT_DEATH(get_or_build_prefill_indices(
-                   metadata, {1, 16}, {1, 1}, 1, kNumSlots, kDevice),
+                   metadata, {1, 16}, {1, 1}, {}, 1, kNumSlots, kDevice),
                "live slot exceeds cache capacity");
 }
 
 TEST_F(Qwen3_5GatedDeltaNetIndicesDeathTest, RejectsDuplicateNonzeroSlot) {
   AttentionMetadata metadata;
   EXPECT_DEATH(get_or_build_prefill_indices(
-                   metadata, {3, 3}, {1, 0}, 1, kNumSlots, kDevice),
+                   metadata, {3, 3}, {1, 0}, {}, 1, kNumSlots, kDevice),
                "write slots must be unique");
+}
+
+TEST_F(Qwen3_5GatedDeltaNetIndicesDeathTest, RejectsReadSizeMismatch) {
+  AttentionMetadata metadata;
+  EXPECT_DEATH(get_or_build_prefill_indices(
+                   metadata, {1, 2}, {1, 1}, {1}, 1, kNumSlots, kDevice),
+               "read_ids must be empty or sequence-scoped");
+}
+
+TEST_F(Qwen3_5GatedDeltaNetIndicesDeathTest, RejectsNegativeReadSlot) {
+  AttentionMetadata metadata;
+  EXPECT_DEATH(get_or_build_prefill_indices(
+                   metadata, {1}, {1}, {-1}, 1, kNumSlots, kDevice),
+               "read_ids");
+}
+
+TEST_F(Qwen3_5GatedDeltaNetIndicesDeathTest, RejectsColdDirectRead) {
+  AttentionMetadata metadata;
+  EXPECT_DEATH(get_or_build_prefill_indices(
+                   metadata, {1}, {0}, {2}, 1, kNumSlots, kDevice),
+               "direct-read row must be warm");
+}
+
+TEST_F(Qwen3_5GatedDeltaNetIndicesDeathTest, RejectsPaddingSource) {
+  AttentionMetadata metadata;
+  EXPECT_DEATH(get_or_build_prefill_indices(
+                   metadata, {1}, {1}, {0}, 1, kNumSlots, kDevice),
+               "padding must not be used");
+}
+
+TEST_F(Qwen3_5GatedDeltaNetIndicesDeathTest, RejectsSourceOutOfBounds) {
+  AttentionMetadata metadata;
+  EXPECT_DEATH(get_or_build_prefill_indices(
+                   metadata, {1}, {1}, {16}, 1, kNumSlots, kDevice),
+               "source exceeds cache capacity");
 }
 
 TEST_F(Qwen3_5GatedDeltaNetIndicesDeathTest, RejectsInvalidStride) {
   AttentionMetadata metadata;
-  EXPECT_DEATH(
-      get_or_build_prefill_indices(metadata, {1}, {1}, 0, kNumSlots, kDevice),
-      "checkpoint stride must be positive");
+  EXPECT_DEATH(get_or_build_prefill_indices(
+                   metadata, {1}, {1}, {}, 0, kNumSlots, kDevice),
+               "checkpoint stride must be positive");
 }
 
 TEST_F(Qwen3_5GatedDeltaNetIndicesDeathTest, RejectsStrideOverflow) {
@@ -146,6 +220,7 @@ TEST_F(Qwen3_5GatedDeltaNetIndicesDeathTest, RejectsStrideOverflow) {
           metadata,
           {1},
           {1},
+          {},
           static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1,
           kNumSlots,
           kDevice),
@@ -154,68 +229,74 @@ TEST_F(Qwen3_5GatedDeltaNetIndicesDeathTest, RejectsStrideOverflow) {
 
 TEST_F(Qwen3_5GatedDeltaNetIndicesDeathTest, RejectsIndexOverflow) {
   AttentionMetadata metadata;
-  EXPECT_DEATH(
-      get_or_build_prefill_indices(
-          metadata, {1}, {1}, std::numeric_limits<int32_t>::max(), 3, kDevice),
-      "SSM state index does not fit");
-}
-
-TEST_F(Qwen3_5GatedDeltaNetIndicesDeathTest, RejectsChangedBatchSize) {
-  AttentionMetadata metadata;
-  get_or_build_prefill_indices(
-      metadata, {1}, {1}, kCheckpointStride, kNumSlots, kDevice);
-  EXPECT_DEATH(
-      get_or_build_prefill_indices(
-          metadata, {1, 2}, {1, 1}, kCheckpointStride, kNumSlots, kDevice),
-      "batch size changed");
+  EXPECT_DEATH(get_or_build_prefill_indices(metadata,
+                                            {1},
+                                            {1},
+                                            {},
+                                            std::numeric_limits<int32_t>::max(),
+                                            3,
+                                            kDevice),
+               "SSM state index does not fit");
 }
 
 TEST_F(Qwen3_5GatedDeltaNetIndicesDeathTest, RejectsChangedSlotGeometry) {
   AttentionMetadata metadata;
   get_or_build_prefill_indices(
-      metadata, {1}, {1}, kCheckpointStride, kNumSlots, kDevice);
+      metadata, {1}, {1}, {}, kCheckpointStride, kNumSlots, kDevice);
   EXPECT_DEATH(
       get_or_build_prefill_indices(
-          metadata, {1}, {1}, kCheckpointStride, kNumSlots + 1, kDevice),
+          metadata, {1}, {1}, {}, kCheckpointStride, kNumSlots + 1, kDevice),
       "slot geometry changed");
 }
 
 TEST_F(Qwen3_5GatedDeltaNetIndicesDeathTest, RejectsChangedCheckpointStride) {
   AttentionMetadata metadata;
   get_or_build_prefill_indices(
-      metadata, {1}, {1}, kCheckpointStride, kNumSlots, kDevice);
+      metadata, {1}, {1}, {}, kCheckpointStride, kNumSlots, kDevice);
   EXPECT_DEATH(
       get_or_build_prefill_indices(
-          metadata, {1}, {1}, kCheckpointStride + 1, kNumSlots, kDevice),
+          metadata, {1}, {1}, {}, kCheckpointStride + 1, kNumSlots, kDevice),
       "checkpoint stride changed");
 }
 
 TEST_F(Qwen3_5GatedDeltaNetIndicesDeathTest, RejectsChangedSlotOrder) {
   AttentionMetadata metadata;
   get_or_build_prefill_indices(
-      metadata, {1, 2}, {1, 1}, kCheckpointStride, kNumSlots, kDevice);
+      metadata, {1, 2}, {1, 1}, {}, kCheckpointStride, kNumSlots, kDevice);
   EXPECT_DEATH(
       get_or_build_prefill_indices(
-          metadata, {2, 1}, {1, 1}, kCheckpointStride, kNumSlots, kDevice),
+          metadata, {2, 1}, {1, 1}, {}, kCheckpointStride, kNumSlots, kDevice),
       "linear state ids changed");
 }
 
 TEST_F(Qwen3_5GatedDeltaNetIndicesDeathTest, RejectsChangedValidity) {
   AttentionMetadata metadata;
   get_or_build_prefill_indices(
-      metadata, {1}, {1}, kCheckpointStride, kNumSlots, kDevice);
-  EXPECT_DEATH(get_or_build_prefill_indices(
-                   metadata, {1}, {0}, kCheckpointStride, kNumSlots, kDevice),
-               "validity changed");
+      metadata, {1}, {1}, {}, kCheckpointStride, kNumSlots, kDevice);
+  EXPECT_DEATH(
+      get_or_build_prefill_indices(
+          metadata, {1}, {0}, {}, kCheckpointStride, kNumSlots, kDevice),
+      "validity changed");
+}
+
+TEST_F(Qwen3_5GatedDeltaNetIndicesDeathTest, RejectsChangedReadSlots) {
+  AttentionMetadata metadata;
+  get_or_build_prefill_indices(
+      metadata, {1}, {1}, {2}, kCheckpointStride, kNumSlots, kDevice);
+  EXPECT_DEATH(
+      get_or_build_prefill_indices(
+          metadata, {1}, {1}, {3}, kCheckpointStride, kNumSlots, kDevice),
+      "read state ids changed");
 }
 
 TEST_F(Qwen3_5GatedDeltaNetIndicesDeathTest, RejectsChangedDevice) {
   AttentionMetadata metadata;
   get_or_build_prefill_indices(
-      metadata, {1}, {1}, kCheckpointStride, kNumSlots, kDevice);
+      metadata, {1}, {1}, {}, kCheckpointStride, kNumSlots, kDevice);
   EXPECT_DEATH(get_or_build_prefill_indices(metadata,
                                             {1},
                                             {1},
+                                            {},
                                             kCheckpointStride,
                                             kNumSlots,
                                             torch::Device(torch::kMeta)),

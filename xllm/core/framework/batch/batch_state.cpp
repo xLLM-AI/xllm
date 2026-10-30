@@ -313,7 +313,6 @@ LlmForwardInput BatchState::build_sequence_input(
   ForwardInputBuilder builder(data, &args, cp_size);
   auto input =
       builder.build_forward_input(num_decoding_tokens, min_decoding_batch_size);
-  linear_restore_src_blocks_ = builder.take_linear_restore_src_blocks();
   return input;
 }
 
@@ -324,7 +323,6 @@ LlmForwardInput BatchState::build_distributed_input(const BatchInputData& data,
   ForwardInputBuilder builder(data, &args, cp_size, thread_pool);
   auto input = builder.build_forward_input(/*num_decoding_tokens=*/0,
                                            /*min_decoding_batch_size=*/0);
-  linear_restore_src_blocks_ = builder.take_linear_restore_src_blocks();
   if (has_partial_finished_beam_group()) {
     input.sampling_params.acc_logprob = torch::Tensor();
   }
@@ -340,7 +338,6 @@ RecForwardInput BatchState::build_rec_sequence_input(
   ForwardInputBuilder builder(data, &args, cp_size);
   auto input = builder.build_rec_forward_input(num_decoding_tokens,
                                                min_decoding_batch_size);
-  linear_restore_src_blocks_ = builder.take_linear_restore_src_blocks();
   return input;
 }
 
@@ -353,7 +350,6 @@ VlmForwardInput BatchState::build_vlm_sequence_input(
   ForwardInputBuilder builder(data, &args, cp_size);
   auto input = builder.build_vlm_forward_input(num_decoding_tokens,
                                                min_decoding_batch_size);
-  linear_restore_src_blocks_ = builder.take_linear_restore_src_blocks();
   return input;
 }
 
@@ -364,7 +360,6 @@ VlmForwardInput BatchState::build_vlm_distributed_input(
     int32_t cp_size) {
   ForwardInputBuilder builder(data, &args, cp_size, thread_pool);
   auto input = builder.build_vlm_forward_input(0, 0);
-  linear_restore_src_blocks_ = builder.take_linear_restore_src_blocks();
   if (has_partial_finished_beam_group()) {
     input.sampling_params.acc_logprob = torch::Tensor();
   }
@@ -378,7 +373,6 @@ RecForwardInput BatchState::build_rec_sequence_input(const BatchInputData& data,
   ForwardInputBuilder builder(data, &args, cp_size, thread_pool);
   auto input = builder.build_rec_forward_input(/*num_decoding_tokens=*/0,
                                                /*min_decoding_batch_size=*/0);
-  linear_restore_src_blocks_ = builder.take_linear_restore_src_blocks();
   if (has_partial_finished_beam_group()) {
     input.sampling_params.acc_logprob = torch::Tensor();
   }

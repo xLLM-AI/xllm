@@ -34,6 +34,7 @@ limitations under the License.
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <numeric>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -1383,10 +1384,6 @@ class SpeculativePipelineTest : public ::testing::Test {
     params.embedding.linear_state_ids = {1};
     params.embedding.linear_state_indices = torch::tensor({1}, torch::kInt32);
     params.linear_state_validity_mask = {decode ? 1 : 0};
-    LinearStateCacheOp op;
-    op.linear_state_id = 1;
-    op.reset_requested = !decode;
-    params.linear_state_cache_ops = {op};
     return value;
   }
 
@@ -2275,16 +2272,6 @@ TEST_F(SpeculativePipelineTest,
     EXPECT_NE(addresses.front(), 0U);
     EXPECT_LE(
         std::unique(addresses.begin(), addresses.end()) - addresses.begin(), 2);
-    EXPECT_EQ(
-        target_->forward_conv_states[first][1].cpu().abs().sum().item<float>(),
-        0.0F);
-    EXPECT_EQ(target_->forward_ssm_states[first]
-                  .narrow(0, width, width)
-                  .cpu()
-                  .abs()
-                  .sum()
-                  .item<float>(),
-              0.0F);
     pipeline_.reset();
   }
 }
@@ -2344,10 +2331,8 @@ TEST_F(SpeculativePipelineTest,
   source.input_params.attention.host.kv_seq_lens = {4};
   source.input_params.attention.host.new_cache_slots = {2, 3};
   source.positions = torch::tensor({2, 3}, torch::kInt32);
-  auto& op = source.input_params.linear_state_cache_ops.front();
-  op.reset_requested = false;
-  op.restore_requested = true;
-  op.restore_src_slot_id = 2;
+  source.input_params.embedding.linear_state_read_ids = {2};
+  source.input_params.linear_state_validity_mask = {1};
   const size_t first = target_->forward_conv_states.size();
   const auto submitted = pipeline_->submit(source);
   ASSERT_TRUE(submitted.status.ok()) << submitted.status.message();
@@ -2390,11 +2375,7 @@ TEST_F(SpeculativePipelineTest,
       params.embedding.linear_state_ids = {1, 2, 3};
       params.embedding.linear_state_indices =
           torch::tensor({1, 2, 3}, torch::kInt32);
-      params.linear_state_cache_ops.resize(3);
-      for (int32_t row = 0; row < 3; ++row) {
-        params.linear_state_cache_ops[row].linear_state_id = row + 1;
-        params.linear_state_cache_ops[row].reset_requested = value == &prefill;
-      }
+      params.linear_state_validity_mask.assign(3, value == &prefill ? 0 : 1);
     }
     ASSERT_TRUE(execute(prefill).sample_output.next_tokens.defined());
     decode.input_params.meta.is_graph_warmup = true;
@@ -4377,10 +4358,12 @@ TEST_P(RecurrentBlockPipelineTest,
     EXPECT_GE(params.embedding.linear_state_ids.size(),
               params.linear_state_validity_mask.size());
     if (warming_graph) {
-      EXPECT_TRUE(params.linear_state_cache_ops.empty());
-    } else {
-      EXPECT_EQ(params.linear_state_cache_ops.size(),
-                params.linear_state_validity_mask.size());
+      EXPECT_TRUE(params.embedding.linear_state_read_ids.empty() ||
+                  params.embedding.linear_state_read_ids ==
+                      params.embedding.linear_state_ids);
+    } else if (!params.embedding.linear_state_read_ids.empty()) {
+      EXPECT_EQ(params.embedding.linear_state_read_ids.size(),
+                params.embedding.linear_state_ids.size());
     }
     if (params.meta.batch_forward_type.is_prefill()) {
       EXPECT_TRUE(params.attn_metadata->has_initial_states.defined());
@@ -4424,13 +4407,11 @@ TEST_P(RecurrentBlockPipelineTest,
       source.sampling_params.max_top_logprobs = 2;
     }
     auto& params = source.input_params;
-    for (uint32_t row = 0; row < rows; ++row) {
-      LinearStateCacheOp op;
-      op.linear_state_id = static_cast<int32_t>(row + 1);
-      op.reset_requested = !decode;
-      params.embedding.linear_state_ids.emplace_back(op.linear_state_id);
-      params.linear_state_cache_ops.emplace_back(op);
-    }
+    params.embedding.linear_state_ids.resize(rows);
+    std::iota(params.embedding.linear_state_ids.begin(),
+              params.embedding.linear_state_ids.end(),
+              1);
+    params.linear_state_validity_mask.assign(rows, decode ? 1 : 0);
     return source;
   };
   for (uint32_t rows = 1; rows <= 3; ++rows) {
@@ -4522,19 +4503,15 @@ TEST_P(RecurrentBlockPipelineTest,
       pipeline_);
   ASSERT_TRUE(status.ok()) << status.message();
   const std::array<int32_t, 3> state_ids{4, 2, 1};
-  const auto recurrent_input =
-      [&](uint32_t rows, bool decode, bool placeholder = false) {
-        auto input = dspark_batch_input(rows, decode, placeholder);
-        for (uint32_t row = 0; row < rows; ++row) {
-          LinearStateCacheOp op;
-          op.linear_state_id = state_ids[row];
-          op.reset_requested = !decode;
-          input.input_params.embedding.linear_state_ids.emplace_back(
-              op.linear_state_id);
-          input.input_params.linear_state_cache_ops.emplace_back(op);
-        }
-        return input;
-      };
+  const auto recurrent_input = [&](uint32_t rows,
+                                   bool decode,
+                                   bool placeholder = false) {
+    auto input = dspark_batch_input(rows, decode, placeholder);
+    input.input_params.embedding.linear_state_ids.assign(
+        state_ids.begin(), state_ids.begin() + rows);
+    input.input_params.linear_state_validity_mask.assign(rows, decode ? 1 : 0);
+    return input;
+  };
   for (uint32_t rows = 1; rows <= 3; ++rows) {
     execute(recurrent_input(rows, /*decode=*/false));
     auto warmup = recurrent_input(rows, /*decode=*/true);
@@ -4575,8 +4552,6 @@ TEST_P(RecurrentBlockPipelineTest,
   std::swap(embedding.embedding_ids[0], embedding.embedding_ids[1]);
   std::swap(embedding.request_ids[0], embedding.request_ids[1]);
   std::swap(embedding.linear_state_ids[0], embedding.linear_state_ids[1]);
-  std::swap(reordered.input_params.linear_state_cache_ops[0],
-            reordered.input_params.linear_state_cache_ops[1]);
   auto& host = reordered.input_params.attention.host;
   host.block_tables = host.block_tables.index_select(
       0, torch::tensor({1, 0, 2}, torch::kInt64));
@@ -4625,13 +4600,8 @@ TEST_P(RecurrentBlockPipelineTest,
                   .ok());
   const auto request = [&](bool decode, bool minimum) {
     auto value = dspark_batch_input(3, decode, /*placeholder=*/decode);
-    for (int32_t row = 0; row < 3; ++row) {
-      LinearStateCacheOp op;
-      op.linear_state_id = row + 1;
-      op.reset_requested = !decode;
-      value.input_params.embedding.linear_state_ids.emplace_back(row + 1);
-      value.input_params.linear_state_cache_ops.emplace_back(op);
-    }
+    value.input_params.embedding.linear_state_ids = {1, 2, 3};
+    value.input_params.linear_state_validity_mask.assign(3, decode ? 1 : 0);
     if (minimum) {
       value.sampling_params.min_token_positions =
           torch::tensor({3, 3, 20}, torch::kLong);
@@ -6304,12 +6274,9 @@ TEST_F(SpeculativePipelineTest,
     params.embedding.linear_state_ids = ids;
     params.embedding.linear_state_indices = torch::tensor(ids, torch::kInt32);
     params.linear_state_validity_mask.assign(count, decode ? 1 : 0);
-    params.linear_state_cache_ops.resize(count);
     std::vector<int32_t> tables;
     tables.reserve(2 * count);
     for (uint32_t row = 0; row < count; ++row) {
-      params.linear_state_cache_ops[row].linear_state_id = ids[row];
-      params.linear_state_cache_ops[row].reset_requested = !decode;
       tables.emplace_back(2 * ids[row] - 1);
       tables.emplace_back(2 * ids[row]);
     }

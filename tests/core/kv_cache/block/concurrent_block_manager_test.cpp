@@ -21,6 +21,7 @@ limitations under the License.
 #include <thread>
 #include <vector>
 
+#include "core/framework/block/composite_block_manager.h"
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/block/concurrent_block_manager_impl.h"
 #include "core/kv_cache/prefix/prefix_cache.h"
@@ -124,6 +125,66 @@ TEST(ConcurrentBlockManagerTest, AllocatesWhileBlocksReleaseConcurrently) {
   EXPECT_EQ(manager.num_free_blocks(), manager.num_total_blocks());
   EXPECT_EQ(manager.num_used_blocks(), 0);
 }
+
+class LinearConcurrentAllocationTest
+    : public ::testing::TestWithParam<int32_t> {};
+
+TEST_P(LinearConcurrentAllocationTest, KeepsLiveSlotsUniqueUntilFinalRelease) {
+  constexpr int32_t kNumSlots = 64;
+  constexpr int32_t kNumThreads = 8;
+  constexpr int32_t kNumIterations = 10000;
+  BlockManager::Options options;
+  options.num_blocks(128)
+      .block_size(128)
+      .enable_linear_state(true)
+      .linear_state_num_slots(kNumSlots)
+      .enable_prefix_cache(false)
+      .instance_is_decode(true)
+      .enable_disagg_pd(GetParam() == 0)
+      .enable_kvcache_store(GetParam() == 1)
+      .enable_host_offload(GetParam() == 2);
+  auto leaves = build_composite_leaves(options);
+  BlockManager* manager = leaves.at(BlockType::LINEAR).leaf.get();
+  std::vector<std::atomic<int32_t>> live_ids(kNumSlots + 1);
+  for (auto& live : live_ids) {
+    live.store(0, std::memory_order_relaxed);
+  }
+  std::atomic<bool> start{false};
+  std::vector<std::thread> workers;
+  workers.reserve(kNumThreads);
+  for (int32_t thread_index = 0; thread_index < kNumThreads; ++thread_index) {
+    workers.emplace_back([&]() {
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      for (int32_t iteration = 0; iteration < kNumIterations; ++iteration) {
+        std::vector<Block> blocks = manager->allocate(1);
+        if (blocks.empty()) {
+          continue;
+        }
+        const int32_t block_id = blocks.front().id();
+        ASSERT_GT(block_id, 0);
+        ASSERT_LE(block_id, kNumSlots);
+        EXPECT_EQ(live_ids[block_id].fetch_add(1), 0);
+        Block inflight = blocks.front();
+        manager->deallocate(blocks);
+        blocks.clear();
+        EXPECT_EQ(live_ids[block_id].fetch_sub(1), 1);
+        inflight = Block();
+      }
+    });
+  }
+  start.store(true, std::memory_order_release);
+  for (std::thread& worker : workers) {
+    worker.join();
+  }
+  EXPECT_EQ(manager->num_free_blocks(), manager->num_total_blocks());
+  EXPECT_EQ(manager->num_used_blocks(), 0u);
+}
+
+INSTANTIATE_TEST_SUITE_P(ConcurrentModes,
+                         LinearConcurrentAllocationTest,
+                         ::testing::Values(0, 1, 2));
 
 // Root-cause repro for the disagg-PD prefix-cache block leak.
 //

@@ -214,7 +214,6 @@ class ContinuousSchedulerBase : public Scheduler {
   std::unique_ptr<SchedulerMetrics> scheduler_metrics_;
 
   bool enable_prefix_cache_ = false;
-  bool has_linear_attention_layers_ = false;
   bool enable_in_batch_prefix_cache_ = false;
 
   // the number of requests that are waiting to be scheduled

@@ -168,24 +168,19 @@ TEST_F(TaskExecutionPipelineInputTest,
   auto& params = source.input_params;
   params.embedding.linear_state_ids = {1};
   params.embedding.linear_state_indices = torch::tensor({1}, torch::kInt32);
-  LinearStateCacheOp op;
-  op.linear_state_id = 1;
-  op.reset_requested = true;
-  params.linear_state_cache_ops = {op};
   params.linear_state_validity_mask = {0};
   EXPECT_FALSE(validate_input(source).ok());
   EXPECT_TRUE(validate_input(source, {}, /*recurrent=*/true).ok());
   params.embedding.linear_state_indices = torch::tensor({2}, torch::kInt32);
   EXPECT_FALSE(validate_input(source, {}, /*recurrent=*/true).ok());
   params.embedding.linear_state_indices = torch::Tensor();
-  params.linear_state_cache_ops[0].linear_state_id = 2;
+  params.embedding.linear_state_read_ids = {2};
   EXPECT_FALSE(validate_input(source, {}, /*recurrent=*/true).ok());
-  params.linear_state_cache_ops[0].linear_state_id = 1;
+  params.embedding.linear_state_read_ids.clear();
   params.linear_state_validity_mask = {0, 1};
   EXPECT_FALSE(validate_input(source, {}, /*recurrent=*/true).ok());
   params.linear_state_validity_mask = {0};
   params.embedding.linear_state_ids = {0};
-  params.linear_state_cache_ops[0].linear_state_id = 0;
   EXPECT_FALSE(validate_input(source, {}, /*recurrent=*/true).ok());
   params.meta.is_graph_warmup = true;
   EXPECT_TRUE(validate_input(source, {}, /*recurrent=*/true).ok());
@@ -219,14 +214,12 @@ TEST_F(TaskExecutionPipelineInputTest,
   params.embedding.linear_state_ids = {1, 2};
   EXPECT_FALSE(validate_input(source, {}, /*recurrent=*/true).ok());
   params.embedding.linear_state_ids = {1};
-  LinearStateCacheOp op;
-  op.linear_state_id = 1;
-  params.linear_state_cache_ops = {op, op};
+  params.embedding.linear_state_read_ids = {1, 1};
   const Status status = validate_input(source, {}, /*recurrent=*/true);
   EXPECT_FALSE(status.ok());
   EXPECT_EQ(status.message(),
             "Recurrent task requires aligned CPU request state.");
-  params.linear_state_cache_ops = {op};
+  params.embedding.linear_state_read_ids.clear();
   EXPECT_TRUE(validate_input(source, {}, /*recurrent=*/true).ok());
 }
 
@@ -255,16 +248,16 @@ TEST_F(TaskExecutionPipelineInputTest,
 }
 
 TEST_F(TaskExecutionPipelineInputTest,
-       RecurrentDecodeRejectsDirectPrefillCheckpointReads) {
+       RecurrentDecodeRequiresWarmCheckpointReads) {
   auto source = ordinary_input(1, BatchForwardType::DECODE);
   auto& params = source.input_params;
   params.embedding.linear_state_ids = {1};
-  LinearStateCacheOp op;
-  op.linear_state_id = 1;
-  op.restore_src_slot_id = 2;
-  params.linear_state_cache_ops = {op};
+  params.embedding.linear_state_read_ids = {2};
+  params.linear_state_validity_mask = {0};
   EXPECT_FALSE(validate_input(source, {}, /*recurrent=*/true).ok());
-  params.linear_state_cache_ops[0].restore_requested = true;
+  params.linear_state_validity_mask.clear();
+  EXPECT_FALSE(validate_input(source, {}, /*recurrent=*/true).ok());
+  params.linear_state_validity_mask = {1};
   EXPECT_TRUE(validate_input(source, {}, /*recurrent=*/true).ok());
   params.num_accepted_tokens = torch::tensor({1}, torch::kInt32);
   EXPECT_FALSE(validate_input(source, {}, /*recurrent=*/true).ok());

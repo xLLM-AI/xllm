@@ -19,6 +19,31 @@ limitations under the License.
 
 namespace xllm {
 
+TEST(KVCacheStateTest, KvProgressDoesNotChangeLinearBlocks) {
+  KVCacheState state;
+  state.add_blocks(BlockType::LINEAR, {Block(1, nullptr)});
+  state.set_kv_cache_tokens_num(4);
+  state.add_blocks(BlockType::LINEAR, {Block(2, nullptr)});
+  state.set_kv_cache_tokens_num(8);
+  ASSERT_EQ(state.num_blocks(BlockType::LINEAR), 2u);
+  EXPECT_EQ(state.blocks(BlockType::LINEAR)[0].id(), 1);
+  (*state.mutable_blocks(BlockType::LINEAR))[0] = Block();
+  EXPECT_FALSE(state.blocks(BlockType::LINEAR)[0].is_valid());
+  EXPECT_EQ(state.get_linear_block_id(), 2);
+}
+
+TEST(KVCacheStateTest, LinearBlocksPreserveUnallocatedLogicalIntervals) {
+  KVCacheState state;
+  state.add_blocks(BlockType::LINEAR,
+                   {Block(1, nullptr), Block(), Block(), Block(2, nullptr)});
+  const Slice<Block> blocks = state.blocks(BlockType::LINEAR);
+  ASSERT_EQ(blocks.size(), 4u);
+  EXPECT_EQ(blocks[0].id(), 1);
+  EXPECT_FALSE(blocks[1].is_valid());
+  EXPECT_FALSE(blocks[2].is_valid());
+  EXPECT_EQ(state.get_linear_block_id(), 2);
+}
+
 TEST(KVCacheStateTest, TransferCursorTracksAndResets) {
   KVCacheState state;
   EXPECT_EQ(state.next_transfer_block_idx(), 0u);

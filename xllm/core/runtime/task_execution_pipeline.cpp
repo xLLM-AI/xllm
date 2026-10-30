@@ -227,7 +227,7 @@ Status TaskExecutionPipeline::validate_input(const LlmForwardInput& source,
       !source.json_object_invalid_draft.empty() ||
       !source.json_object_errors.empty() || params.is_spec_verify ||
       params.prefill_without_cache ||
-      ((!params.linear_state_cache_ops.empty() ||
+      ((!embedding.linear_state_read_ids.empty() ||
         !params.linear_state_validity_mask.empty()) &&
        !recurrent && !capacity.model.enable_linear_attention) ||
       !params.multi_block_tables.empty() || params.mtp_topk_state != nullptr ||
@@ -257,7 +257,7 @@ Status TaskExecutionPipeline::validate_input(const LlmForwardInput& source,
   const auto& linear_indices = embedding.linear_state_indices;
   if (recurrent) {
     const size_t rows = host.q_seq_lens.size();
-    const auto& ops = params.linear_state_cache_ops;
+    const auto& read_ids = embedding.linear_state_read_ids;
     constexpr const char* kInvalidState =
         "Recurrent task requires aligned CPU request state.";
     if (!speculative || linear_ids.size() != rows) {
@@ -280,16 +280,12 @@ Status TaskExecutionPipeline::validate_input(const LlmForwardInput& source,
         return invalid(kInvalidState);
       }
     }
-    if (!ops.empty()) {
-      if (ops.size() != rows) {
-        return invalid(kInvalidState);
-      }
-      if (!std::equal(ops.begin(),
-                      ops.end(),
-                      linear_ids.begin(),
-                      [](const LinearStateCacheOp& op, int32_t id) {
-                        return op.linear_state_id == id;
-                      })) {
+    if (!read_ids.empty()) {
+      if (read_ids.size() != rows ||
+          std::any_of(
+              read_ids.begin(), read_ids.end(), [min_state_id](int32_t id) {
+                return id < min_state_id;
+              })) {
         return invalid(kInvalidState);
       }
     }
@@ -297,12 +293,13 @@ Status TaskExecutionPipeline::validate_input(const LlmForwardInput& source,
         params.linear_state_validity_mask.size() != rows) {
       return invalid(kInvalidState);
     }
-    if (meta.batch_forward_type.is_decode() &&
-        std::any_of(ops.begin(), ops.end(), [](const LinearStateCacheOp& op) {
-          return op.is_direct_read();
-        })) {
-      return invalid(
-          "Recurrent Decode cannot directly read a Prefill checkpoint.");
+    for (size_t row = 0; row < read_ids.size(); ++row) {
+      if (read_ids[row] != linear_ids[row] &&
+          (params.linear_state_validity_mask.empty() ||
+           params.linear_state_validity_mask[row] == 0)) {
+        return invalid(
+            "Recurrent direct read requires a warm linear-state checkpoint.");
+      }
     }
   } else if (!capacity.model.enable_linear_attention) {
     constexpr const char* kInvalidState =
@@ -756,10 +753,11 @@ Status TaskExecutionPipeline::validate(const Slot& slot,
           })) {
         return invalid("Linear-state ID is outside allocated cache.");
       }
-      for (const auto& op : input.input_params.linear_state_cache_ops) {
-        if (op.restore_src_slot_id >= slots) {
-          return invalid("Linear-state source is outside allocated cache.");
-        }
+      const auto& reads = input.input_params.embedding.linear_state_read_ids;
+      if (std::any_of(reads.begin(), reads.end(), [slots](int32_t id) {
+            return id >= slots;
+          })) {
+        return invalid("Linear-state source is outside allocated cache.");
       }
     }
   }
@@ -956,8 +954,10 @@ void TaskExecutionPipeline::launch(uint32_t slot_id) {
       // Shared recurrent state is mutated only on the serialized Launch
       // stream, after any previous Slot's forward has been enqueued.
       restore_linear_state_slots(kv_caches_,
-                                 model_params.linear_state_cache_ops,
-                                 model_params.linear_state_validity_mask);
+                                 model_params.embedding.linear_state_ids,
+                                 model_params.embedding.linear_state_read_ids,
+                                 model_params.linear_state_validity_mask,
+                                 /*reads_distinct_state=*/false);
     }
     slot.model_output = executor_.forward(slot.buffer->tokens(),
                                           slot.buffer->positions(),

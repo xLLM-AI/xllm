@@ -57,8 +57,8 @@ struct MegaGdnPrefillIndicesKey {
   int64_t num_slots;
   int64_t checkpoint_stride;
   std::vector<int32_t> linear_state_ids;
-  std::vector<int32_t> linear_state_read_slots;
   std::vector<int64_t> linear_state_validity_mask;
+  std::vector<int32_t> linear_state_read_ids;
 };
 
 struct MegaGdnPrefillIndicesCache {

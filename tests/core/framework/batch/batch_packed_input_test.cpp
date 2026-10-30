@@ -169,12 +169,12 @@ TEST(ForwardSharedMemoryShutdownTest,
   EXPECT_EQ(received.model_params.prompts, source.model_params.prompts);
 }
 
-void expect_linear_state_cache_op_eq(const LinearStateCacheOp& actual,
-                                     const LinearStateCacheOp& expected) {
-  EXPECT_EQ(actual.linear_state_id, expected.linear_state_id);
-  EXPECT_EQ(actual.reset_requested, expected.reset_requested);
-  EXPECT_EQ(actual.restore_requested, expected.restore_requested);
-  EXPECT_EQ(actual.restore_src_slot_id, expected.restore_src_slot_id);
+TEST(BatchPackedInputTest, ModelInputConversionPreservesValidityMask) {
+  LlmModelParams input_params;
+  input_params.linear_state_validity_mask = {0, 1, 1, 0};
+  LlmModelParams converted = input_params.to(torch::Device(torch::kCPU));
+  EXPECT_EQ(converted.linear_state_validity_mask,
+            std::vector<int64_t>({0, 1, 1, 0}));
 }
 
 void expect_dit_forward_input_eq(const DiTForwardInput& actual,
@@ -660,7 +660,7 @@ TEST(BatchPackedInputTest, CpuPreparationAndReadyCopyRetainExecutionSources) {
       tensor_equals_vector<int32_t>(ready_copy.host_token_ids(), {11, 23}));
 }
 
-TEST(BatchPackedInputTest, PackedProtoLazyUnpackPreservesLinearStateCacheOps) {
+TEST(BatchPackedInputTest, PackedProtoLazyUnpackPreservesLinearReadWriteIds) {
   RequestSamplingParam sampling_param;
   sampling_param.logprobs = true;
 
@@ -679,7 +679,7 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackPreservesLinearStateCacheOps) {
   torch::Tensor input_embedding;
   MMData mm_data;
   BlockManager::Options options;
-  options.num_blocks(2).block_size(4);
+  options.num_blocks(3).block_size(4);
   BlockManagerImpl manager(options);
 
   IncrementalDecoder decoder("", 1, false, false);
@@ -692,8 +692,16 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackPreservesLinearStateCacheOps) {
 
   seq.add_blocks(BlockType::KV, manager.allocate(1));
 
-  std::vector<Sequence*> sequences = {&seq};
-  std::vector<uint32_t> budgets = {4};
+  Sequence second_sequence(1,
+                           {5, 6, 7, 8},
+                           input_embedding,
+                           mm_data,
+                           IncrementalDecoder("", 1, false, false),
+                           seq_params);
+  second_sequence.add_blocks(BlockType::KV, manager.allocate(1));
+
+  std::vector<Sequence*> sequences = {&seq, &second_sequence};
+  std::vector<uint32_t> budgets = {4, 4};
   ForwardInputBuilder builder(sequences,
                               budgets,
                               {},
@@ -706,37 +714,54 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackPreservesLinearStateCacheOps) {
   LlmForwardInput input =
       builder.build_forward_input(/*num_decoding_tokens=*/1,
                                   /*min_decoding_batch_size=*/0);
-  LinearStateCacheOp restore_op;
-  restore_op.linear_state_id = 7;
-  restore_op.restore_requested = true;
-  restore_op.restore_src_slot_id = 3;
-
-  LinearStateCacheOp direct_read_op;
-  direct_read_op.linear_state_id = 8;
-  direct_read_op.restore_src_slot_id = 4;
-
-  input.input_params.linear_state_cache_ops = {restore_op, direct_read_op};
+  ASSERT_EQ(input.input_params.meta.num_sequences, 2);
+  input.input_params.embedding.linear_state_ids = {7, 8};
+  input.input_params.embedding.linear_state_indices =
+      torch::tensor({7, 8}, torch::kInt32);
+  input.input_params.embedding.linear_state_read_ids = {3, 4};
+  input.input_params.embedding.linear_state_read_indices =
+      torch::tensor({3, 4}, torch::kInt32);
 
   proto::PackedForwardInput packed_input;
   ASSERT_TRUE(input.to_packed_proto(&packed_input));
 
   LlmForwardInput lazy_input;
   ASSERT_TRUE(lazy_input.from_packed_proto(packed_input));
-  EXPECT_TRUE(lazy_input.input_params.linear_state_cache_ops.empty());
+  EXPECT_TRUE(lazy_input.input_params.embedding.linear_state_read_ids.empty());
   EXPECT_TRUE(lazy_input.runtime.input_host_buffer_has_layout);
 
   LlmForwardInput unpacked_input;
-  unpacked_input.input_params.linear_state_cache_ops = {direct_read_op};
   ASSERT_TRUE(detail::unpack_from_input_host_buffer(lazy_input,
                                                     torch::Device(torch::kCPU),
                                                     torch::kFloat32,
                                                     unpacked_input,
                                                     false));
-  ASSERT_EQ(unpacked_input.input_params.linear_state_cache_ops.size(), 2u);
-  expect_linear_state_cache_op_eq(
-      unpacked_input.input_params.linear_state_cache_ops[0], restore_op);
-  expect_linear_state_cache_op_eq(
-      unpacked_input.input_params.linear_state_cache_ops[1], direct_read_op);
+  EXPECT_EQ(unpacked_input.input_params.embedding.linear_state_ids,
+            std::vector<int32_t>({7, 8}));
+  EXPECT_EQ(unpacked_input.input_params.embedding.linear_state_read_ids,
+            std::vector<int32_t>({3, 4}));
+  EXPECT_FALSE(unpacked_input.input_params.embedding.linear_state_read_indices
+                   .defined());
+  LlmModelParams device_params =
+      unpacked_input.input_params.to(torch::Device(torch::kCPU));
+  EXPECT_TRUE(torch::equal(device_params.embedding.linear_state_read_indices,
+                           torch::tensor({3, 4}, torch::kInt32)));
+}
+TEST(BatchPackedInputTest,
+     LinearReadIndicesPreserveHostIdsAndClearWithTargetState) {
+  LlmModelParams params;
+  params.embedding.linear_state_ids = {7, 8};
+  params.embedding.linear_state_read_ids = {3, 4};
+  LlmModelParams device_params = params.to(torch::Device(torch::kCPU));
+  EXPECT_EQ(device_params.embedding.linear_state_read_ids,
+            std::vector<int32_t>({3, 4}));
+  EXPECT_TRUE(torch::equal(device_params.embedding.linear_state_read_indices,
+                           torch::tensor({3, 4}, torch::kInt32)));
+  device_params.clear_linear_attention_state();
+  EXPECT_TRUE(device_params.embedding.linear_state_ids.empty());
+  EXPECT_TRUE(device_params.embedding.linear_state_read_ids.empty());
+  EXPECT_FALSE(device_params.embedding.linear_state_indices.defined());
+  EXPECT_FALSE(device_params.embedding.linear_state_read_indices.defined());
 }
 
 namespace {
@@ -1395,13 +1420,19 @@ TEST(BatchPackedInputTest, VlmDraftConversionExcludesTargetOnlyState) {
   target.input_params.embedding.linear_state_ids = {17};
   target.input_params.embedding.linear_state_indices =
       torch::tensor({17}, torch::kInt32);
-  target.input_params.linear_state_cache_ops = {{17, true, false, -1}};
+  target.input_params.embedding.linear_state_read_ids = {17};
+  target.input_params.embedding.linear_state_read_indices =
+      torch::tensor({17}, torch::kInt32);
+  target.input_params.linear_state_validity_mask = {0};
   auto draft = make_llm_draft_input(target);
   EXPECT_TRUE(torch::equal(draft.token_ids, target.token_ids));
   EXPECT_TRUE(torch::equal(draft.positions, target.positions));
   EXPECT_TRUE(draft.input_params.embedding.linear_state_ids.empty());
   EXPECT_FALSE(draft.input_params.embedding.linear_state_indices.defined());
-  EXPECT_TRUE(draft.input_params.linear_state_cache_ops.empty());
+  EXPECT_TRUE(draft.input_params.embedding.linear_state_read_ids.empty());
+  EXPECT_FALSE(
+      draft.input_params.embedding.linear_state_read_indices.defined());
+  EXPECT_TRUE(draft.input_params.linear_state_validity_mask.empty());
   draft.input_params.attention.host.kv_seq_lens[0] = 9;
   EXPECT_EQ(target.input_params.attention.host.kv_seq_lens[0], 2);
   EXPECT_EQ(target.input_params.embedding.linear_state_ids,

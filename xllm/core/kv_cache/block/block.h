@@ -37,7 +37,7 @@ class BlockManager;
 // Identity of a KV block's cache role inside a sequence's KVCacheState. Used as
 // the key of the per-sequence block map: the legacy flat attention KV lives
 // under KV, DSV4's three groups under SWA/C4/C128. EMBEDDING and LINEAR are
-// per-sequence single-resource slots (one block per sequence): EMBEDDING backs
+// per-sequence state slots: EMBEDDING backs
 // the spec-decode embedding-row id, LINEAR backs the GDN recurrent state (its
 // slot id also indexes the conv/ssm KV tensors, which are tagged as the LINEAR
 // cache group). A block carries no type identity itself; the owning

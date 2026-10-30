@@ -634,7 +634,8 @@ std::optional<std::string> validate_host_cache_options(
   }
   if (!options.enable_prefix_cache) {
     violations.emplace_back(
-        "prefix caching is disabled; set --enable_prefix_cache=true");
+        "prefix caching is disabled for this engine; host offload requires "
+        "an engine configuration that supports prefix caching");
   }
   if (!options.enable_disagg_pd &&
       options.instance_role != InstanceRole::DEFAULT) {

@@ -281,6 +281,8 @@ GraphPersistentParam::GraphPersistentParam(const ModelArgs& args,
       {eplb_decode_mask_capacity}, torch::dtype(torch::kBool).device(device));
   persistent_linear_state_indices_ = torch::zeros(
       {metadata_capacity}, torch::dtype(torch::kInt).device(device));
+  persistent_linear_state_read_indices_ = torch::zeros(
+      {metadata_capacity}, torch::dtype(torch::kInt).device(device));
   persistent_num_accepted_tokens_ = torch::ones(
       {metadata_capacity}, torch::dtype(torch::kInt).device(device));
 
@@ -912,6 +914,12 @@ void GraphPersistentParam::update_spec_verify_inputs(
   persistent_linear_state_indices_.narrow(0, 0, batch_size)
       .copy_(params.embedding.linear_state_indices.narrow(0, 0, batch_size),
              true);
+  const torch::Tensor& read_indices =
+      params.embedding.linear_state_read_indices.defined()
+          ? params.embedding.linear_state_read_indices
+          : params.embedding.linear_state_indices;
+  persistent_linear_state_read_indices_.narrow(0, 0, batch_size)
+      .copy_(read_indices.narrow(0, 0, batch_size), true);
   persistent_num_accepted_tokens_.narrow(0, 0, batch_size)
       .copy_(params.num_accepted_tokens.narrow(0, 0, batch_size), true);
   q_cu_seq_lens_.narrow(0, 0, batch_size + 1)
@@ -968,6 +976,11 @@ std::optional<Params> GraphPersistentParam::update(
       is_chunked_prefill
           ? (padded_num_tokens + q_max_seq_len - 1) / q_max_seq_len
           : padded_num_tokens;
+  const int32_t padding_tail_query_length =
+      is_chunked_prefill
+          ? static_cast<int32_t>(padded_num_tokens -
+                                 (padded_batch_size - 1) * q_max_seq_len)
+          : 1;
   const bool is_empty_dp_decode_rank =
       is_decode && params.meta.num_sequences == 0 && actual_num_tokens > 0 &&
       params.parallel.dp_global_token_nums.size() > 1 &&
@@ -1038,6 +1051,8 @@ std::optional<Params> GraphPersistentParam::update(
                /*start=*/actual_seq_len_rows,
                /*end=*/padded_batch_size)
         .fill_(padding_q_len);
+    q_seq_lens_.select(0, padded_batch_size - 1)
+        .fill_(padding_tail_query_length);
     kv_seq_lens_
         .slice(/*dim=*/0,
                /*start=*/actual_seq_len_rows,
@@ -1096,6 +1111,19 @@ std::optional<Params> GraphPersistentParam::update(
           .slice(/*dim=*/0,
                  /*start=*/actual_batch_size,
                  /*end=*/padded_batch_size)
+          .fill_(kPaddingLinearStateId);
+    }
+    if (linear_copy_len > 0) {
+      const torch::Tensor read_indices =
+          params.embedding.linear_state_read_indices.defined()
+              ? params.embedding.linear_state_read_indices
+              : persistent_linear_state_indices_;
+      persistent_linear_state_read_indices_.narrow(0, 0, linear_copy_len)
+          .copy_(read_indices.narrow(0, 0, linear_copy_len), true);
+    }
+    if (padded_batch_size > actual_batch_size) {
+      persistent_linear_state_read_indices_
+          .slice(0, actual_batch_size, padded_batch_size)
           .fill_(kPaddingLinearStateId);
     }
   }
@@ -1270,6 +1298,9 @@ std::optional<Params> GraphPersistentParam::update(
   for (int64_t i = actual_seq_len_rows; i < padded_batch_size; ++i) {
     padded_q_seq_lens_vec[static_cast<size_t>(i)] =
         is_chunked_prefill ? q_max_seq_len : 1;
+  }
+  if (padded_batch_size > actual_seq_len_rows) {
+    padded_q_seq_lens_vec.back() = padding_tail_query_length;
   }
   const bool use_expanded_spec_decode_attention = [&]() {
     if constexpr (std::is_same_v<Params, ModelParamsView>) {
@@ -1499,6 +1530,14 @@ std::optional<Params> GraphPersistentParam::update(
       graph_params->embedding.linear_state_indices =
           persistent_linear_state_indices(
               static_cast<uint32_t>(padded_batch_size));
+      graph_params->embedding.linear_state_read_ids =
+          params.embedding.linear_state_read_ids.empty()
+              ? params.embedding.linear_state_ids
+              : params.embedding.linear_state_read_ids;
+      graph_params->embedding.linear_state_read_ids.resize(
+          static_cast<size_t>(padded_batch_size), kPaddingLinearStateId);
+      graph_params->embedding.linear_state_read_indices =
+          persistent_linear_state_read_indices_.narrow(0, 0, padded_batch_size);
       graph_params->linear_state_validity_mask =
           params.linear_state_validity_mask;
       graph_params->linear_state_validity_mask.resize(

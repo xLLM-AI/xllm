@@ -603,7 +603,8 @@ SlotBuffer::SlotBuffer(SlotBufferCapacity capacity,
                      device_buffer_.options().dtype(torch::kBool));
     model_params_.embedding.linear_state_ids.reserve(
         capacity_.model.max_sequences);
-    model_params_.linear_state_cache_ops.reserve(capacity_.model.max_sequences);
+    model_params_.embedding.linear_state_read_ids.reserve(
+        capacity_.model.max_sequences);
     model_params_.linear_state_validity_mask.reserve(
         capacity_.model.max_sequences);
   }
@@ -854,14 +855,30 @@ Status SlotBuffer::validate_model_state(const LlmForwardInput& input) const {
        !std::equal(ids.begin(), ids.end(), indices.data_ptr<int32_t>()))) {
     return invalid("Linear-state IDs and indices must agree on every row.");
   }
-  const auto& ops = params.linear_state_cache_ops;
+  const auto& read_ids = params.embedding.linear_state_read_ids;
+  const auto& read_indices = params.embedding.linear_state_read_indices;
   const auto& validity = params.linear_state_validity_mask;
-  if ((!ops.empty() && ops.size() != rows) ||
+  if (read_indices.defined() &&
+      (!is_cpu_int_tensor(read_indices, /*dimensions=*/1) ||
+       read_indices.numel() != rows)) {
+    return invalid("Linear-state read indices must be row-aligned CPU int32.");
+  }
+  const auto reads = !read_ids.empty() ? std::span<const int32_t>(read_ids)
+                     : read_indices.defined() ? int_span(read_indices)
+                                              : ids;
+  if ((!reads.empty() && reads.size() != rows) ||
+      overlaps_host(reads, host_buffer_) ||
       (!validity.empty() && validity.size() != rows) ||
       std::any_of(validity.begin(), validity.end(), [](int64_t value) {
         return value != 0 && value != 1;
       })) {
-    return invalid("Linear-state operations and validity must be row-aligned.");
+    return invalid("Linear-state reads and validity must be row-aligned.");
+  }
+  if (!read_ids.empty() && read_indices.defined() &&
+      !std::equal(
+          reads.begin(), reads.end(), read_indices.data_ptr<int32_t>())) {
+    return invalid(
+        "Linear-state read IDs and indices must agree on every row.");
   }
   if (params.meta.is_graph_warmup) {
     return Status();
@@ -875,21 +892,12 @@ Status SlotBuffer::validate_model_state(const LlmForwardInput& input) const {
     if (ids[row] <= 0 || !active_ids.insert(ids[row]).second) {
       return invalid("Linear-state rows require unique non-padding IDs.");
     }
-    if (ops.empty()) {
-      continue;
-    }
-    const auto& op = ops[row];
-    if (op.linear_state_id != ids[row] ||
-        (op.reset_requested && op.restore_requested) ||
-        (op.reset_requested && op.restore_src_slot_id >= 0) ||
-        (op.restore_requested && op.restore_src_slot_id <= 0) ||
-        (op.is_direct_read() &&
-         (op.restore_src_slot_id == 0 ||
-          (!params.meta.batch_forward_type.is_prefill() &&
-           !params.meta.batch_forward_type.is_chunked_prefill() &&
-           !params.meta.batch_forward_type.is_mixed())))) {
+    const int32_t read_id = reads[row];
+    if (read_id <= kPaddingLinearStateId ||
+        (read_id != ids[row] && (validity.empty() || validity[row] == 0))) {
       return invalid(
-          "Invalid linear-state reset, restore or direct-read operation.");
+          "Invalid linear-state checkpoint read: a direct read requires a "
+          "warm checkpoint.");
     }
   }
   return Status();
@@ -1141,16 +1149,31 @@ void SlotBuffer::prepare_model_state(const LlmForwardInput& input,
   params.embedding.linear_state_indices =
       model_device_.linear_state_indices.narrow(0, 0, rows);
   params.embedding.linear_state_indices.copy_(ids, /*non_blocking=*/true);
-  params.linear_state_cache_ops.clear();
-  if (!warmup) {
-    params.linear_state_cache_ops.assign(source.linear_state_cache_ops.begin(),
-                                         source.linear_state_cache_ops.end());
-  }
+  const std::span<const int32_t> source_read_ids =
+      !source.embedding.linear_state_read_ids.empty()
+          ? std::span<const int32_t>(source.embedding.linear_state_read_ids)
+      : source.embedding.linear_state_read_indices.defined()
+          ? int_span(source.embedding.linear_state_read_indices)
+          : source_ids;
   auto read_ids = model_host_.linear_state_read_indices.narrow(0, 0, rows);
-  read_ids.copy_(ids);
-  int32_t* reads = read_ids.data_ptr<int32_t>();
+  if (!warmup && actual_rows != 0) {
+    const size_t copied = source_read_ids.size();
+    std::memcpy(read_ids.data_ptr<int32_t>(),
+                source_read_ids.data(),
+                source_read_ids.size_bytes());
+    std::memcpy(read_ids.data_ptr<int32_t>() + copied,
+                ids.data_ptr<int32_t>() + copied,
+                (rows - copied) * sizeof(int32_t));
+  } else {
+    read_ids.copy_(ids);
+  }
+  assign_prefix(params.embedding.linear_state_read_ids, read_ids, rows);
+  params.embedding.linear_state_read_indices =
+      model_device_.linear_state_read_indices.narrow(0, 0, rows);
+  params.embedding.linear_state_read_indices.copy_(read_ids,
+                                                   /*non_blocking=*/true);
   bool has_direct_read = false;
-  params.linear_state_validity_mask.assign(actual_rows, 0);
+  params.linear_state_validity_mask.assign(rows, 0);
   bool* initial = initial_states_host_.data_ptr<bool>();
   for (uint32_t row = 0; row < rows; ++row) {
     bool valid =
@@ -1159,13 +1182,10 @@ void SlotBuffer::prepare_model_state(const LlmForwardInput& input,
     if (!warmup && row < source.linear_state_validity_mask.size()) {
       valid = source.linear_state_validity_mask[row] != 0;
     }
-    if (row < params.linear_state_cache_ops.size()) {
-      const auto& op = params.linear_state_cache_ops[row];
-      valid = op.is_valid_after(valid);
-      if (op.is_direct_read()) {
-        reads[row] = op.restore_src_slot_id;
-        has_direct_read = true;
-      }
+    if (!warmup && row < actual_rows &&
+        source_read_ids[row] != source_ids[row]) {
+      has_direct_read = true;
+      valid = true;
     }
     initial[row] = valid;
     if (row < actual_rows) {
@@ -1174,12 +1194,9 @@ void SlotBuffer::prepare_model_state(const LlmForwardInput& input,
   }
   auto& metadata = *params.attn_metadata;
   metadata.linear_state_indices = params.embedding.linear_state_indices;
-  metadata.linear_state_read_indices = torch::Tensor();
-  if (has_direct_read) {
-    metadata.linear_state_read_indices =
-        model_device_.linear_state_read_indices.narrow(0, 0, rows);
-    metadata.linear_state_read_indices.copy_(read_ids, /*non_blocking=*/true);
-  }
+  metadata.linear_state_read_indices =
+      has_direct_read ? params.embedding.linear_state_read_indices
+                      : torch::Tensor();
   metadata.has_initial_states = initial_states_device_.narrow(0, 0, rows);
   metadata.has_initial_states.copy_(initial_states_host_.narrow(0, 0, rows),
                                     /*non_blocking=*/true);

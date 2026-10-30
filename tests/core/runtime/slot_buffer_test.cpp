@@ -186,11 +186,11 @@ class RecurrentSlotBufferTest : public SlotBufferTest {
     params.embedding.linear_state_ids = {2, 3};
     params.embedding.linear_state_indices =
         torch::tensor({2, 3}, torch::kInt32);
-    params.linear_state_cache_ops.resize(2);
-    params.linear_state_cache_ops[0].linear_state_id = 2;
-    params.linear_state_cache_ops[0].restore_src_slot_id = 1;
-    params.linear_state_cache_ops[1].linear_state_id = 3;
-    params.linear_state_cache_ops[1].reset_requested = true;
+    params.embedding.linear_state_read_ids = {1, 3};
+    params.embedding.linear_state_read_indices =
+        torch::tensor({1, 3}, torch::kInt32);
+    // Row 0 restores a warm checkpoint; row 1 resets cold state.
+    params.linear_state_validity_mask = {1, 0};
     return input;
   }
 };
@@ -212,15 +212,15 @@ TEST_F(RecurrentSlotBufferTest, OwnsStateInputsAndKeepsSlotsIndependent) {
   input.input_params.embedding.linear_state_ids = {4, 2};
   input.input_params.embedding.linear_state_indices.copy_(
       torch::tensor({4, 2}, torch::kInt32));
-  input.input_params.linear_state_cache_ops[0].linear_state_id = 4;
-  input.input_params.linear_state_cache_ops[0].restore_src_slot_id = 3;
-  input.input_params.linear_state_cache_ops[1].linear_state_id = 2;
+  input.input_params.embedding.linear_state_read_ids = {3, 2};
+  input.input_params.embedding.linear_state_read_indices.copy_(
+      torch::tensor({3, 2}, torch::kInt32));
   ASSERT_TRUE(second->validate(input, /*previous_rows=*/0, *transfer_).ok());
   second->prepare(input, *transfer_);
   ASSERT_EQ(transfer_->synchronize(), 0);
   EXPECT_EQ(params.embedding.linear_state_ids, (std::vector<int32_t>{2, 3}));
-  EXPECT_EQ(params.linear_state_cache_ops[0].restore_src_slot_id, 1);
-  EXPECT_EQ(params.linear_state_cache_ops[1].linear_state_id, 3);
+  EXPECT_EQ(params.embedding.linear_state_read_ids,
+            (std::vector<int32_t>{1, 3}));
   EXPECT_TRUE(torch::equal(params.embedding.linear_state_indices.cpu(),
                            torch::tensor({2, 3}, torch::kInt32)));
   EXPECT_TRUE(torch::equal(metadata.linear_state_read_indices.cpu(),
@@ -254,6 +254,60 @@ TEST_F(RecurrentSlotBufferTest, OwnsStateInputsAndKeepsSlotsIndependent) {
   EXPECT_EQ(binding_->device_bytes(), device_bytes);
 }
 
+TEST_F(RecurrentSlotBufferTest, AbsentReadSourceFallsBackToWriteIds) {
+  auto input = direct_input();
+  input.input_params.embedding.linear_state_read_ids.clear();
+  input.input_params.embedding.linear_state_read_indices = torch::Tensor();
+  ASSERT_TRUE(prepare_model(input, *transfer_).ok());
+  ASSERT_EQ(transfer_->synchronize(), 0);
+  const auto& params = binding_->model_params();
+  const auto& metadata = *params.attn_metadata;
+  EXPECT_EQ(params.embedding.linear_state_ids, (std::vector<int32_t>{2, 3}));
+  EXPECT_EQ(params.embedding.linear_state_read_ids,
+            (std::vector<int32_t>{2, 3}));
+  EXPECT_TRUE(torch::equal(params.embedding.linear_state_read_indices.cpu(),
+                           torch::tensor({2, 3}, torch::kInt32)));
+  EXPECT_FALSE(metadata.linear_state_read_indices.defined());
+}
+
+TEST_F(RecurrentSlotBufferTest, RejectsMismatchedReadIndicesMirror) {
+  auto input = direct_input();
+  ASSERT_TRUE(prepare_model(input, *transfer_).ok());
+  ASSERT_EQ(transfer_->synchronize(), 0);
+  input.input_params.embedding.linear_state_read_indices =
+      torch::tensor({1, 4}, torch::kInt32);
+  expect_rejected(input);
+  input = direct_input();
+  input.input_params.embedding.linear_state_read_indices =
+      torch::tensor({1}, torch::kInt32);
+  expect_rejected(input);
+  input = direct_input();
+  input.input_params.embedding.linear_state_read_indices =
+      torch::tensor({1, 3}, torch::kInt32);
+  ASSERT_TRUE(prepare_model(input, *transfer_).ok());
+  ASSERT_EQ(transfer_->synchronize(), 0);
+  EXPECT_TRUE(torch::equal(
+      binding_->model_params().attn_metadata->linear_state_read_indices.cpu(),
+      torch::tensor({1, 3}, torch::kInt32)));
+}
+
+TEST_F(RecurrentSlotBufferTest, TensorOnlyReadMirrorPreparesDirectRead) {
+  auto input = direct_input();
+  input.input_params.embedding.linear_state_read_ids.clear();
+  input.input_params.embedding.linear_state_read_indices =
+      torch::tensor({1, 3}, torch::kInt32);
+  ASSERT_TRUE(prepare_model(input, *transfer_).ok());
+  ASSERT_EQ(transfer_->synchronize(), 0);
+  const auto& params = binding_->model_params();
+  const auto& metadata = *params.attn_metadata;
+  EXPECT_EQ(params.embedding.linear_state_read_ids,
+            (std::vector<int32_t>{1, 3}));
+  EXPECT_TRUE(torch::equal(metadata.linear_state_read_indices.cpu(),
+                           torch::tensor({1, 3}, torch::kInt32)));
+  EXPECT_TRUE(torch::equal(metadata.has_initial_states.cpu(),
+                           torch::tensor({true, false}, torch::kBool)));
+}
+
 TEST_F(RecurrentSlotBufferTest,
        PaddedAndEmptyDecodeClearPreviousDirectReadState) {
   ASSERT_TRUE(prepare_model(direct_input(), *transfer_).ok());
@@ -274,7 +328,10 @@ TEST_F(RecurrentSlotBufferTest,
   const void* warm_storage = metadata.has_initial_states.data_ptr();
   const void* query_storage = metadata.q_cu_seq_lens.data_ptr();
   EXPECT_FALSE(metadata.linear_state_read_indices.defined());
-  EXPECT_TRUE(params.linear_state_cache_ops.empty());
+  EXPECT_EQ(params.embedding.linear_state_read_ids,
+            (std::vector<int32_t>{2, 0, 0, 0}));
+  EXPECT_EQ(params.linear_state_validity_mask,
+            (std::vector<int64_t>{1, 0, 0, 0}));
   EXPECT_TRUE(torch::equal(params.embedding.linear_state_indices.cpu(),
                            torch::tensor({2, 0, 0, 0}, torch::kInt32)));
   EXPECT_TRUE(

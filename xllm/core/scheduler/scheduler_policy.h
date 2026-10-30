@@ -69,7 +69,6 @@ struct SchedulerState {
   const SchedulerOptions& options;
   int32_t min_speculative_tokens_required;
   bool enable_prefix_cache;
-  bool has_linear_attention_layers;
   std::function<void(const std::shared_ptr<Request>&)> release_failed_request =
       {};
 };

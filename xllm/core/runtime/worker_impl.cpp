@@ -317,11 +317,11 @@ LinearStateInputRows get_mlu_linear_state_rows(Params& input_params) {
           ? static_cast<int64_t>(host_q_seq_lens.size()) - 1
           : static_cast<int64_t>(
                 input_params.attention.host.kpool_query_lens.size());
-  const int64_t cache_op_rows =
-      static_cast<int64_t>(input_params.linear_state_cache_ops.size());
+  const int64_t slot_rows =
+      static_cast<int64_t>(input_params.embedding.linear_state_ids.size());
 
   // A data-parallel worker may receive an empty shard during graph warmup.
-  if (sequence_rows == 0 && active_rows == -1 && cache_op_rows == 0) {
+  if (sequence_rows == 0 && active_rows == -1 && slot_rows == 0) {
     input_params.embedding.linear_state_ids = {kPaddingLinearStateId};
     return {{}, 0, /*empty_shard=*/true};
   }
@@ -329,21 +329,21 @@ LinearStateInputRows get_mlu_linear_state_rows(Params& input_params) {
   CHECK_GT(sequence_rows, 0)
       << "invalid MLU linear-state input row counts: sequence_rows="
       << sequence_rows << ", active_rows=" << active_rows
-      << ", cache_op_rows=" << cache_op_rows;
+      << ", slot_rows=" << slot_rows;
   CHECK_GT(active_rows, 0)
       << "invalid MLU linear-state input row counts: sequence_rows="
       << sequence_rows << ", active_rows=" << active_rows
-      << ", cache_op_rows=" << cache_op_rows;
+      << ", slot_rows=" << slot_rows;
   CHECK_EQ(host_q_seq_lens.front(), 0)
       << "MLU linear-state q_seq_lens must start with zero";
   CHECK_EQ(active_rows % sequence_rows, 0)
       << "invalid MLU linear-state input row counts: sequence_rows="
       << sequence_rows << ", active_rows=" << active_rows
-      << ", cache_op_rows=" << cache_op_rows;
-  CHECK_EQ(cache_op_rows, active_rows)
+      << ", slot_rows=" << slot_rows;
+  CHECK_EQ(slot_rows, active_rows)
       << "invalid MLU linear-state input row counts: sequence_rows="
       << sequence_rows << ", active_rows=" << active_rows
-      << ", cache_op_rows=" << cache_op_rows;
+      << ", slot_rows=" << slot_rows;
   return {cached_tokens, active_rows, /*empty_shard=*/false};
 }
 #endif
@@ -363,23 +363,6 @@ void prepare_input_params_for_linear_attention(Params& input_params) {
   }
   input_params.linear_state_validity_mask =
       build_linear_state_mask(rows.cached_tokens, rows.active_rows);
-  // MTP spec-verify expands one logical sequence into multiple active rows
-  // (bonus + drafted tokens) that share ONE linear state slot. cache_ops are
-  // built per logical sequence while the restore contract is one op per
-  // active row (validity_mask is indexed by row); replicate each op across
-  // its contiguous row group, mirroring build_linear_state_mask's layout.
-  auto& cache_ops = input_params.linear_state_cache_ops;
-  const size_t row_count = input_params.linear_state_validity_mask.size();
-  if (!cache_ops.empty() && row_count > cache_ops.size() &&
-      row_count % cache_ops.size() == 0) {
-    const size_t repeat = row_count / cache_ops.size();
-    std::vector<LinearStateCacheOp> expanded;
-    expanded.reserve(row_count);
-    for (const LinearStateCacheOp& cache_op : cache_ops) {
-      expanded.insert(expanded.end(), repeat, cache_op);
-    }
-    cache_ops = std::move(expanded);
-  }
 }
 #endif
 
@@ -987,16 +970,29 @@ torch::Tensor WorkerImpl::remap_selected_token_idxes_for_lm_head(
   return (remapped + dp_offset).to(remapped.scalar_type()).contiguous();
 }
 
-void WorkerImpl::try_restore_linear_state_slots(const ModelParamsView& params) {
+void WorkerImpl::prepare_linear_state_cache(const ModelParamsView& params) {
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_CUDA) || \
     defined(USE_MUSA)
   // Composite speculative workers restore through their cache-owning workers.
   if (!has_request_state_cache()) {
     return;
   }
+
+  bool reads_distinct_state = false;
+#if defined(USE_NPU)
+  const ModelArgs& args = context_.get_model_args();
+  const bool is_python_model = ModelConfig::is_python_model_impl(
+      ModelConfig::get_instance().model_impl());
+  reads_distinct_state =
+      (is_python_model && is_glm5_next_target_model_type(args.model_type()) &&
+       params.meta.batch_forward_type.no_decode() && !params.is_spec_verify) ||
+      (!is_python_model && is_qwen3_5_target_model_type(args.model_type()));
+#endif
   restore_linear_state_slots(kv_caches_,
-                             params.linear_state_cache_ops,
-                             params.linear_state_validity_mask);
+                             params.embedding.linear_state_ids,
+                             params.embedding.linear_state_read_ids,
+                             params.linear_state_validity_mask,
+                             reads_distinct_state);
 #endif
 }
 
@@ -1010,7 +1006,7 @@ void WorkerImpl::prepare_schedule_overlap_impl(const Input& input) {
       CHECK(compute_stream_->wait_event(input.runtime.metadata_ready_event))
           << "failed to wait input metadata ready event on compute stream";
     }
-    try_restore_linear_state_slots(ModelParamsView(input.input_params));
+    prepare_linear_state_cache(ModelParamsView(input.input_params));
   }
 #else
   (void)input;
@@ -1395,7 +1391,7 @@ void WorkerImpl::prepare_work_before_execute_on_stream_impl(
       // Overlap restores in the worker thread on compute_stream_, after the
       // preceding chunk finishes writing its live slots.
       if (restore_linear_state && !enable_schedule_overlap()) {
-        try_restore_linear_state_slots(ModelParamsView(input_params));
+        prepare_linear_state_cache(ModelParamsView(input_params));
       }
     }
 #endif
@@ -2098,7 +2094,7 @@ TaskModel WorkerImpl::task_model() {
   CHECK(model_ != nullptr && model_executor_ != nullptr);
   TaskModel task{*model_, *model_executor_, kv_caches_};
   task.restore_request_state = [this](const ModelParamsView& params) {
-    try_restore_linear_state_slots(params);
+    prepare_linear_state_cache(params);
   };
   if (options_.host_blocks_factor() > 1.0) {
     // KV allocation follows pipeline creation. Resolve the shared target/draft

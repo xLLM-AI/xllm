@@ -22,7 +22,6 @@ limitations under the License.
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <iterator>
 #include <limits>
 #include <numeric>
 #include <thread>
@@ -34,7 +33,6 @@ limitations under the License.
 #include "core/common/metrics.h"
 #include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/eplb_config.h"
-#include "core/framework/config/model_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/model/model_args.h"
@@ -189,35 +187,6 @@ BlockCopyKernelInputData build_block_copy_kernel_input_data(
   }
   input_data.cum_sum.emplace_back(static_cast<int32_t>(swap_blocks.size()));
   return input_data;
-}
-
-// Pick the direct-read path for NPU prefill when out-of-place linear state is
-// enabled. Native Qwen3.5 kernels support per-row selection in mixed batches;
-// Python glm5_next requires the whole batch to contain no decode rows, matching
-// the batch-level invariant enforced while building Python attention metadata.
-bool should_read_linear_state_out_of_place(const ModelArgs* args,
-                                           const BatchForwardType& forward_type,
-                                           const Sequence* sequence) {
-  if (args == nullptr || sequence == nullptr || !sequence->is_prefill_stage() ||
-      !Platform::is_npu() ||
-      !SchedulerConfig::get_instance().enable_linear_state_out_of_place()) {
-    return false;
-  }
-
-  const bool is_python_model = ModelConfig::is_python_model_impl(
-      ModelConfig::get_instance().model_impl());
-  return (is_python_model &&
-          is_glm5_next_target_model_type(args->model_type()) &&
-          forward_type.no_decode()) ||
-         (!is_python_model && is_qwen3_5_target_model_type(args->model_type()));
-}
-
-bool is_linear_checkpoint_boundary(uint32_t boundary_tokens,
-                                   int32_t chunk_stride) {
-  if (boundary_tokens == 0 || chunk_stride <= 0) {
-    return false;
-  }
-  return boundary_tokens % chunk_stride == 0;
 }
 
 }  // namespace
@@ -579,7 +548,6 @@ void ForwardInputBuilder::process_sequences_multithreaded() {
 #endif
     thread_state.embedding_ids.reserve(sequences_per_thread);
     thread_state.linear_state_ids.reserve(sequences_per_thread);
-    thread_state.linear_restore_src_blocks.reserve(sequences_per_thread);
     thread_state.request_ids.reserve(sequences_per_thread);
     thread_state.extra_token_ids.reserve(sequences_per_thread);
     thread_state.scheduled_mm_data_vec.reserve(sequences_per_thread);
@@ -628,14 +596,12 @@ void ForwardInputBuilder::process_sequences_multithreaded() {
   size_t total_seqs = 0;
   size_t total_slots = 0;
   size_t total_paged_indices = 0;
-  size_t total_linear_restore_sources = 0;
   for (const auto& state : thread_builder_states) {
     total_tokens += state.flatten_tokens_vec.size();
     total_sampling_rows += state.sampling.size();
     total_seqs += state.block_tables_vec.size();
     total_slots += state.new_token_slot_ids.size();
     total_paged_indices += state.paged_kv_indices.size();
-    total_linear_restore_sources += state.linear_restore_src_blocks.size();
   }
   state_.sampling.reserve(total_sampling_rows);
   state_.flatten_tokens_vec.reserve(total_tokens);
@@ -653,7 +619,6 @@ void ForwardInputBuilder::process_sequences_multithreaded() {
 #endif
   state_.embedding_ids.reserve(total_seqs);
   state_.linear_state_ids.reserve(total_seqs);
-  state_.linear_restore_src_blocks.reserve(total_linear_restore_sources);
   state_.request_ids.reserve(total_seqs);
   state_.extra_token_ids.reserve(total_seqs);
   state_.paged_kv_indices.reserve(total_paged_indices);
@@ -716,11 +681,9 @@ void ForwardInputBuilder::process_sequences_multithreaded() {
     }
 #endif
 
-#if defined(USE_NPU) || defined(USE_MUSA)
     state_.kv_cache_tokens_nums.insert(state_.kv_cache_tokens_nums.end(),
                                        state.kv_cache_tokens_nums.begin(),
                                        state.kv_cache_tokens_nums.end());
-#endif
     state_.new_token_slot_ids.insert(state_.new_token_slot_ids.end(),
                                      state.new_token_slot_ids.begin(),
                                      state.new_token_slot_ids.end());
@@ -732,13 +695,9 @@ void ForwardInputBuilder::process_sequences_multithreaded() {
     state_.linear_state_ids.insert(state_.linear_state_ids.end(),
                                    state.linear_state_ids.begin(),
                                    state.linear_state_ids.end());
-    state_.linear_state_cache_ops.insert(state_.linear_state_cache_ops.end(),
-                                         state.linear_state_cache_ops.begin(),
-                                         state.linear_state_cache_ops.end());
-    state_.linear_restore_src_blocks.insert(
-        state_.linear_restore_src_blocks.end(),
-        std::make_move_iterator(state.linear_restore_src_blocks.begin()),
-        std::make_move_iterator(state.linear_restore_src_blocks.end()));
+    state_.linear_state_read_ids.insert(state_.linear_state_read_ids.end(),
+                                        state.linear_state_read_ids.begin(),
+                                        state.linear_state_read_ids.end());
     state_.request_ids.insert(state_.request_ids.end(),
                               state.request_ids.begin(),
                               state.request_ids.end());
@@ -922,7 +881,7 @@ void ForwardInputBuilder::extract_tokens_and_positions(
     }
   }
 
-  append_linear_state_row(sequence, n_kv_cache_tokens, seq_len, state);
+  append_linear_state_row(sequence, state);
 
   // Add extra token id
   int32_t extra_token_id = -1;
@@ -964,8 +923,6 @@ void ForwardInputBuilder::extract_tokens_and_positions(
 }
 
 void ForwardInputBuilder::append_linear_state_row(Sequence* sequence,
-                                                  uint32_t n_kv_cache_tokens,
-                                                  uint32_t seq_len,
                                                   BuilderState& state) {
   // linear_state_ids must stay aligned with logical batch rows even when the
   // model has no linear-attention layers, because downstream consumers index by
@@ -977,78 +934,18 @@ void ForwardInputBuilder::append_linear_state_row(Sequence* sequence,
   int32_t linear_state_id = sequence->get_linear_state_slot_id();
   state.linear_state_ids.emplace_back(linear_state_id);
   if (!has_linear_attention) {
+    state.linear_state_read_ids.emplace_back(linear_state_id);
     return;
   }
 
-  LinearStateCacheOp linear_state_cache_op;
-  linear_state_cache_op.linear_state_id = state.linear_state_ids.back();
-  linear_state_cache_op.reset_requested = n_kv_cache_tokens == 0;
-  // Linear-state checkpoints live on chunk-end boundaries, so the prefix hash
-  // is chained per chunk (stride = max_tokens_per_chunk_for_prefill), not per
-  // KV block. The engine enforces this stride is a positive multiple of
-  // block_size when linear prefix cache is on (llm_engine.cpp); guard against
-  // an unset (<= 0) stride so a misconfigured run simply skips cache ops.
-  const int32_t chunk_stride = ::xllm::SchedulerConfig::get_instance()
-                                   .max_tokens_per_chunk_for_prefill();
-  const bool is_prefill = sequence->is_prefill_stage();
-  const bool has_restore_source = sequence->has_linear_restore_src_block();
-  const bool needs_restore_hash =
-      has_restore_source && is_prefill &&
-      is_linear_checkpoint_boundary(n_kv_cache_tokens, chunk_stride);
-  const bool needs_restore =
-      has_restore_source && (needs_restore_hash || !is_prefill);
-  // Exit-boundary save: persist the live state only when this prefill step
-  // lands on a chunk-end boundary, so the linear-state cache stays a sparse
-  // per-chunk overlay on top of the per-block KV cache.
-  const bool needs_save_hash =
-      is_prefill && is_linear_checkpoint_boundary(seq_len, chunk_stride);
-  // Refresh the sequence's cached chunk hashes to cover this step's deepest
-  // boundary, then read them back. The cache is chained and incremental, so
-  // this only hashes chunks not seen on a previous step; the match probe and
-  // this builder now share the one hash source instead of each recomputing.
-  Slice<XXH3Key> linear_state_hashes;
-  if (needs_restore_hash || needs_save_hash) {
-    sequence->update_linear_state_hashes(static_cast<uint32_t>(chunk_stride));
-    linear_state_hashes = sequence->linear_state_hashes();
-  }
-  // Restore source (block-carried): allocate_shared_for_sequence mounts the
-  // deepest-hit checkpoint at admission (class A); allocate_for_sequence
-  // mounts the slot it just checkpointed at the previous step's save-rotation
-  // (class B). Take it unconditionally so unused matches are released in this
-  // build. A source used by a restore descriptor moves into builder state and
-  // then the owning Batch, which pins it until the worker result is consumed.
-  std::optional<Block> mounted_restore_src =
-      sequence->take_linear_restore_src_block();
-  if (needs_restore) {
-    if (needs_restore_hash) {
-      const size_t restore_chunk_idx =
-          static_cast<size_t>(n_kv_cache_tokens) / chunk_stride - 1;
-      CHECK_LT(restore_chunk_idx, linear_state_hashes.size())
-          << "mounted linear-state checkpoint must have a matching chunk hash";
-    }
-    CHECK(mounted_restore_src.has_value())
-        << "linear-state restore must resolve its checkpoint slot before "
-           "building worker input";
-    linear_state_cache_op.restore_requested =
-        !should_read_linear_state_out_of_place(
-            args_, state.batch_forward_type, sequence);
-    linear_state_cache_op.restore_src_slot_id = mounted_restore_src->id();
-    state.linear_restore_src_blocks.emplace_back(
-        std::move(*mounted_restore_src));
-  }
-  if (needs_save_hash) {
-    const size_t save_chunk_idx =
-        static_cast<size_t>(seq_len) / chunk_stride - 1;
-    if (save_chunk_idx < linear_state_hashes.size()) {
-      // Record the boundary hash on the sequence. The LINEAR leaf executes
-      // the save at the next step's allocate_for_sequence, after this step's
-      // forward writes the boundary state into the live slot. Writing only
-      // the sequence's own pending-save field keeps this safe inside the
-      // parallel build loop.
-      sequence->set_pending_linear_save(linear_state_hashes[save_chunk_idx]);
-    }
-  }
-  state.linear_state_cache_ops.emplace_back(std::move(linear_state_cache_op));
+  const Slice<Block> linear_blocks =
+      sequence->kv_state().blocks(BlockType::LINEAR);
+  CHECK(!linear_blocks.empty());
+  CHECK(linear_blocks.back().is_valid());
+  const size_t read_index =
+      linear_blocks.size() > 1 ? linear_blocks.size() - 2 : 0;
+  CHECK(linear_blocks[read_index].is_valid());
+  state.linear_state_read_ids.emplace_back(linear_blocks[read_index].id());
 }
 
 void ForwardInputBuilder::handle_sampling_parameters(Sequence* sequence,
@@ -1348,8 +1245,8 @@ Input ForwardInputBuilder::state_to_forward_input() {
 
   input_params.embedding.embedding_ids = std::move(state_.embedding_ids);
   input_params.embedding.linear_state_ids = std::move(state_.linear_state_ids);
-  input_params.linear_state_cache_ops =
-      std::move(state_.linear_state_cache_ops);
+  input_params.embedding.linear_state_read_ids =
+      std::move(state_.linear_state_read_ids);
   if (!input_params.embedding.linear_state_ids.empty()) {
     input_params.embedding.linear_state_indices =
         make_cpu_tensor(input_params.embedding.linear_state_ids);

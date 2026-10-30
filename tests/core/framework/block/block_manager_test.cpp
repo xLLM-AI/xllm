@@ -21,6 +21,7 @@ limitations under the License.
 #include <vector>
 
 #include "common/global_flags.h"
+#include "core/framework/batch/batch.h"
 #include "core/framework/block/block_manager_pool.h"
 #include "core/framework/block/kv_cache_manager_factory.h"
 #include "core/framework/config/scheduler_config.h"
@@ -105,24 +106,24 @@ int32_t insert_linear_state_checkpoint(LinearStateBlockManager* cache,
   return insert_linear_state_checkpoint(cache, XXH3Key(hash.data()));
 }
 
-// Deferred linear-state saves are now executed by the LINEAR leaf at the top of
-// allocate_for_sequence (the production path runs it once per scheduler step
-// per sequence). Drive that same entry here to exercise the save. The leaf only
-// RETURNS freshly acquired slots; CompositeBlockManager::allocate_sequence is
-// what appends them to the sequence, so mirror that add_blocks step here.
-void apply_pending_linear_saves_via_leaf(
-    LinearStateBlockManager* leaf,
-    const std::vector<Sequence*>& sequences) {
-  for (Sequence* seq : sequences) {
-    if (seq == nullptr) {
-      continue;
-    }
-    std::optional<std::vector<Block>> blocks =
-        leaf->allocate_for_sequence(seq, seq->num_tokens());
-    if (blocks.has_value() && !blocks->empty()) {
-      seq->kv_state().add_blocks(BlockType::LINEAR, *blocks);
-    }
+bool allocate_kv_prefix_for_test(BlockManagerPool& pool, Sequence& sequence) {
+  int32_t dp_rank = -1;
+  std::vector<Block> blocks = pool.allocate(sequence.num_tokens(), dp_rank);
+  if (blocks.empty()) {
+    return false;
   }
+  sequence.set_dp_rank(dp_rank);
+  sequence.add_blocks(BlockType::KV, std::move(blocks));
+  return true;
+}
+
+bool allocate_next_linear_chunk(BlockManagerPool& pool, Sequence& sequence) {
+  pool.allocate_shared(&sequence);
+  const size_t chunk_stride =
+      SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill();
+  const size_t target = std::min(sequence.num_tokens(),
+                                 sequence.kv_cache_tokens_num() + chunk_stride);
+  return pool.allocate(&sequence, target);
 }
 
 class BlockManagerPoolTest : public ::testing::Test {
@@ -387,8 +388,9 @@ TEST_F(BlockManagerPoolTest, DpLinearStateAndPrefixCachesAreIsolated) {
   EXPECT_EQ(second.dp_rank(), 1);
   // Slot 0 is reserved independently in each DP-local slot namespace, so both
   // replicas may validly assign the same positive slot id.
-  EXPECT_EQ(first.get_linear_state_slot_id(), 1);
-  EXPECT_EQ(second.get_linear_state_slot_id(), 1);
+  const int32_t second_output_id = second.get_linear_state_slot_id();
+  EXPECT_GT(second_output_id, 0);
+  EXPECT_EQ(first.get_linear_state_slot_id(), second_output_id);
 
   LinearStateBlockManager* first_linear =
       BlockManagerPoolTestPeer::linear_leaf(pool, /*dp_rank=*/0);
@@ -407,7 +409,7 @@ TEST_F(BlockManagerPoolTest, DpLinearStateAndPrefixCachesAreIsolated) {
 
   pool.deallocate_without_cache(&first);
   EXPECT_EQ(second.dp_rank(), 1);
-  EXPECT_EQ(second.get_linear_state_slot_id(), 1);
+  EXPECT_EQ(second.get_linear_state_slot_id(), second_output_id);
   pool.deallocate_without_cache(&second);
 }
 
@@ -510,9 +512,7 @@ TEST_F(BlockManagerPoolTest, TryAllocateKvFailureRollsBackSingleBlock) {
       &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(options, /*dp_size=*/1);
 
-  // This sequence needs far more KV blocks than available, forcing KV failure
-  // after embedding and linear ids are allocated.
-  std::vector<int32_t> huge_prompt(100, 1);
+  std::vector<int32_t> huge_prompt(4, 1);
   Sequence fail_seq = make_sequence(0, huge_prompt);
   EXPECT_FALSE(pool.try_allocate(&fail_seq));
   EXPECT_FALSE(fail_seq.get_embedding_block_id() >= 0);
@@ -788,7 +788,7 @@ TEST_F(BlockManagerPoolTest,
 
   Sequence cached_seq =
       make_sequence(0, /*prompt_tokens=*/{1, 2, 3, 4, 5, 6, 7, 8});
-  ASSERT_TRUE(pool.allocate(&cached_seq));
+  ASSERT_TRUE(allocate_kv_prefix_for_test(pool, cached_seq));
   cached_seq.kv_state().set_kv_cache_tokens_num(cached_seq.num_tokens());
   pool.cache(&cached_seq);
   const LinearStatePrefixHash checkpoint_hash =
@@ -802,7 +802,7 @@ TEST_F(BlockManagerPoolTest,
   Sequence miss_seq =
       make_sequence(1, /*prompt_tokens=*/{1, 2, 3, 4, 5, 6, 7, 8});
   const std::vector<size_t> used_blocks_before_miss = pool.num_used_blocks();
-  ASSERT_TRUE(pool.allocate(&miss_seq, miss_seq.num_tokens()));
+  ASSERT_TRUE(allocate_next_linear_chunk(pool, miss_seq));
   EXPECT_EQ(miss_seq.kv_state().shared_blocks_num(BlockType::KV), 0u);
   pool.deallocate_without_cache(&miss_seq);
   EXPECT_EQ(pool.num_used_blocks(), used_blocks_before_miss);
@@ -820,7 +820,7 @@ TEST_F(BlockManagerPoolTest,
   Sequence hit_seq =
       make_sequence(2,
                     /*prompt_tokens=*/{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12});
-  ASSERT_TRUE(pool.allocate(&hit_seq, hit_seq.num_tokens()));
+  ASSERT_TRUE(allocate_next_linear_chunk(pool, hit_seq));
   EXPECT_EQ(hit_seq.kv_state().shared_blocks_num(BlockType::KV), 2u);
   pool.deallocate_without_cache(&hit_seq);
 }
@@ -844,7 +844,7 @@ TEST_F(BlockManagerPoolTest, ExactPromptCannotReuseUncheckpointedTailBoundary) {
 
   Sequence cached_seq =
       make_sequence(0, /*prompt_tokens=*/{1, 2, 3, 4, 5, 6, 7, 8});
-  ASSERT_TRUE(pool.allocate(&cached_seq));
+  ASSERT_TRUE(allocate_kv_prefix_for_test(pool, cached_seq));
   cached_seq.kv_state().set_kv_cache_tokens_num(cached_seq.num_tokens());
   pool.cache(&cached_seq);
   const LinearStatePrefixHash tail_hash =
@@ -861,7 +861,7 @@ TEST_F(BlockManagerPoolTest, ExactPromptCannotReuseUncheckpointedTailBoundary) {
   // checkpointed boundary at block 2 is out of reach and reuse falls to 0.
   Sequence exact_seq =
       make_sequence(1, /*prompt_tokens=*/{1, 2, 3, 4, 5, 6, 7, 8});
-  ASSERT_TRUE(pool.allocate(&exact_seq, exact_seq.num_tokens()));
+  ASSERT_TRUE(allocate_next_linear_chunk(pool, exact_seq));
   EXPECT_EQ(exact_seq.kv_state().shared_blocks_num(BlockType::KV), 0u);
   pool.deallocate_without_cache(&exact_seq);
 }
@@ -883,7 +883,7 @@ TEST_F(BlockManagerPoolTest, PromptPastCheckpointReusesCheckpointBoundary) {
 
   Sequence cached_seq =
       make_sequence(0, /*prompt_tokens=*/{1, 2, 3, 4, 5, 6, 7, 8});
-  ASSERT_TRUE(pool.allocate(&cached_seq));
+  ASSERT_TRUE(allocate_kv_prefix_for_test(pool, cached_seq));
   cached_seq.kv_state().set_kv_cache_tokens_num(cached_seq.num_tokens());
   pool.cache(&cached_seq);
   const LinearStatePrefixHash tail_hash =
@@ -900,300 +900,81 @@ TEST_F(BlockManagerPoolTest, PromptPastCheckpointReusesCheckpointBoundary) {
   // checkpointed boundary at block 2 is reusable.
   Sequence hit_seq =
       make_sequence(1, /*prompt_tokens=*/{1, 2, 3, 4, 5, 6, 7, 8, 9});
-  ASSERT_TRUE(pool.allocate(&hit_seq, hit_seq.num_tokens()));
+  ASSERT_TRUE(allocate_next_linear_chunk(pool, hit_seq));
   EXPECT_EQ(hit_seq.kv_state().shared_blocks_num(BlockType::KV), 2u);
-  ASSERT_TRUE(hit_seq.has_linear_restore_src_block());
-  std::optional<Block> restore_src = hit_seq.take_linear_restore_src_block();
-  EXPECT_TRUE(restore_src.has_value());
+  ASSERT_EQ(hit_seq.kv_state().num_blocks(BlockType::LINEAR), 2u);
+  EXPECT_TRUE(hit_seq.kv_state().blocks(BlockType::LINEAR)[0].is_valid());
   pool.deallocate_without_cache(&hit_seq);
 }
 
-TEST_F(BlockManagerPoolTest,
-       PendingLinearSaveEvictsUnpinnedCheckpointButNotPinned) {
+TEST_F(BlockManagerPoolTest, LinearAllocationEvictsOnlyUnpinnedCheckpoint) {
   ScopedValue<int32_t> chunk_guard(
       &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
-  BlockManagerPool pool(make_linear_state_pool_options(
-                            /*linear_state_num_slots=*/4),
-                        /*dp_size=*/1);
-
-  LinearStateBlockManager* prefix_cache =
-      BlockManagerPoolTestPeer::linear_leaf(pool, /*dp_rank=*/0);
-  ASSERT_NE(prefix_cache, nullptr);
-
-  // Allocate the saving sequence first so its live slot does not contend with
-  // the checkpoints we are about to insert.
-  Sequence saving_seq =
-      make_sequence(0, /*prompt_tokens=*/{1, 2, 3, 4, 5, 6, 7, 8});
-  ASSERT_TRUE(pool.allocate(&saving_seq, saving_seq.num_tokens()));
-  saving_seq.kv_state().set_kv_cache_tokens_num(4);
-  const int32_t saving_live_slot = saving_seq.get_linear_state_slot_id();
-  ASSERT_GE(saving_live_slot, 1);
-
-  const LinearStatePrefixHash pinned_hash = make_prefix_hash(1);
+  BlockManagerPool pool(make_linear_state_pool_options(4), 1);
+  LinearStateBlockManager* leaf =
+      BlockManagerPoolTestPeer::linear_leaf(pool, 0);
+  ASSERT_NE(leaf, nullptr);
+  Sequence sequence = make_sequence(0, {1, 2, 3, 4, 5, 6, 7, 8});
+  ASSERT_TRUE(pool.allocate(&sequence, 4));
+  Batch batch(&sequence);
+  sequence.kv_state().set_kv_cache_tokens_num(4);
+  const int32_t source_id = sequence.get_linear_state_slot_id();
+  const Block retained_old_read =
+      sequence.kv_state().blocks(BlockType::LINEAR)[0];
   const LinearStatePrefixHash evictable_hash = make_prefix_hash(2);
-  const LinearStatePrefixHash save_hash = make_prefix_hash(3);
-  // Insert evictable first so that it is the LRU front; pinned_hash is inserted
-  // after and then held by a live Block handle so eviction must skip it.
-  ASSERT_GE(insert_linear_state_checkpoint(prefix_cache, evictable_hash), 1);
-  ASSERT_GE(insert_linear_state_checkpoint(prefix_cache, pinned_hash), 1);
-  // Pool is now full (padding + saving live + evictable + pinned). Pin the
-  // checkpoint the way production does -- a held Block handle (refcount+1) that
-  // keeps PrefixCache from evicting it while the sequence still needs it.
-  Block pinned = BlockManagerPoolTestPeer::match(prefix_cache,
-                                                 XXH3Key(pinned_hash.data()));
+  const LinearStatePrefixHash pinned_hash = make_prefix_hash(1);
+  ASSERT_GE(insert_linear_state_checkpoint(leaf, evictable_hash), 1);
+  ASSERT_GE(insert_linear_state_checkpoint(leaf, pinned_hash), 1);
+  Block pinned =
+      BlockManagerPoolTestPeer::match(leaf, XXH3Key(pinned_hash.data()));
   ASSERT_TRUE(pinned.is_valid());
-
-  // The batch builder records the pending save on the sequence at build time;
-  // the LINEAR leaf executes it at the next step's allocate_for_sequence. With
-  // the pool full, the rotation's fresh live slot must be reclaimed from the
-  // unpinned LRU checkpoint (evictable), never from the pinned one.
-  saving_seq.set_pending_linear_save(XXH3Key(save_hash.data()));
-  std::vector<Sequence*> sequences = {&saving_seq};
-  apply_pending_linear_saves_via_leaf(prefix_cache, sequences);
-
-  EXPECT_TRUE(BlockManagerPoolTestPeer::contains(prefix_cache,
-                                                 XXH3Key(save_hash.data())));
-  EXPECT_TRUE(BlockManagerPoolTestPeer::contains(prefix_cache,
-                                                 XXH3Key(pinned_hash.data())));
-  EXPECT_FALSE(BlockManagerPoolTestPeer::contains(
-      prefix_cache, XXH3Key(evictable_hash.data())));
-
-  pool.deallocate_without_cache(&saving_seq);
-}
-
-TEST_F(BlockManagerPoolTest,
-       PendingLinearSavePromotesLiveSlotAndMountsRestoreSrc) {
-  ScopedValue<int32_t> chunk_guard(
-      &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
-  BlockManagerPool pool(make_linear_state_pool_options(
-                            /*linear_state_num_slots=*/3),
-                        /*dp_size=*/1);
-
-  Sequence sequence =
-      make_sequence(0, /*prompt_tokens=*/{1, 2, 3, 4, 5, 6, 7, 8});
-  ASSERT_TRUE(pool.allocate(&sequence, sequence.num_tokens()));
-  sequence.kv_state().set_kv_cache_tokens_num(4);
-  const int32_t old_live_slot = sequence.get_linear_state_slot_id();
-  ASSERT_GE(old_live_slot, 1);
-
-  const LinearStatePrefixHash save_hash = make_prefix_hash(9);
-  // The batch builder records the pending save on the sequence at build time.
-  sequence.set_pending_linear_save(XXH3Key(save_hash.data()));
-  std::vector<Sequence*> sequences = {&sequence};
-
-  LinearStateBlockManager* prefix_cache =
-      BlockManagerPoolTestPeer::linear_leaf(pool, /*dp_rank=*/0);
-  ASSERT_NE(prefix_cache, nullptr);
-  EXPECT_FALSE(BlockManagerPoolTestPeer::contains(prefix_cache,
-                                                  XXH3Key(save_hash.data())));
-
-  // allocate_for_sequence executes the deferred save: inserts old slot as
-  // checkpoint, mounts it as the sequence's class-B restore source, and rotates
-  // the sequence onto a fresh slot.
-  apply_pending_linear_saves_via_leaf(prefix_cache, sequences);
-
-  EXPECT_TRUE(BlockManagerPoolTestPeer::contains(prefix_cache,
-                                                 XXH3Key(save_hash.data())));
-  Block matched =
-      BlockManagerPoolTestPeer::match(prefix_cache, XXH3Key(save_hash.data()));
-  ASSERT_TRUE(matched.is_valid());
-  EXPECT_EQ(matched.id(), old_live_slot);
-  const int32_t new_live_slot = sequence.get_linear_state_slot_id();
-  EXPECT_NE(new_live_slot, old_live_slot);
-  EXPECT_FALSE(sequence.has_pending_linear_save());
-
-  // The save-rotation mounted the just-checkpointed slot as the restore source
-  // (block-carried, no scheduler-side find()): the next build consumes it to
-  // fill restore_src_slot_id. It must point at the old (checkpointed) slot.
-  ASSERT_TRUE(sequence.has_linear_restore_src_block());
-  std::optional<Block> restore_src = sequence.take_linear_restore_src_block();
-  ASSERT_TRUE(restore_src.has_value());
-  EXPECT_EQ(restore_src->id(), old_live_slot);
-
+  ASSERT_TRUE(pool.allocate(&sequence, 8));
+  EXPECT_NE(sequence.get_linear_state_slot_id(), source_id);
+  ASSERT_EQ(sequence.kv_state().num_blocks(BlockType::LINEAR), 2u);
+  EXPECT_EQ(sequence.kv_state().blocks(BlockType::LINEAR)[0].id(), source_id);
+  EXPECT_TRUE(
+      BlockManagerPoolTestPeer::contains(leaf, XXH3Key(pinned_hash.data())));
+  EXPECT_FALSE(
+      BlockManagerPoolTestPeer::contains(leaf, XXH3Key(evictable_hash.data())));
+  sequence.update_linear_state_hashes(4);
+  EXPECT_TRUE(BlockManagerPoolTestPeer::contains(
+      leaf, sequence.linear_state_hashes()[0]));
   pool.deallocate_without_cache(&sequence);
 }
 
 TEST_F(BlockManagerPoolTest,
-       PendingLinearSaveBeforeDecodeCarriesRestoreSource) {
+       PrefixMountSurvivesOutputAllocationFailureAndRetry) {
   ScopedValue<int32_t> chunk_guard(
       &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
-  BlockManagerPool pool(make_linear_state_pool_options(
-                            /*linear_state_num_slots=*/3),
-                        /*dp_size=*/1);
-
-  Sequence sequence =
-      make_sequence(0, /*prompt_tokens=*/{1, 2, 3, 4, 5, 6, 7, 8});
-  ASSERT_TRUE(pool.allocate(&sequence, sequence.num_tokens()));
-  sequence.kv_state().set_kv_cache_tokens_num(sequence.num_tokens());
-  const int32_t old_live_slot = sequence.get_linear_state_slot_id();
-  sequence.set_pending_linear_save(XXH3Key(make_prefix_hash(12).data()));
-
-  std::vector<Sequence*> sequences = {&sequence};
-  LinearStateBlockManager* prefix_cache =
-      BlockManagerPoolTestPeer::linear_leaf(pool, /*dp_rank=*/0);
-  ASSERT_NE(prefix_cache, nullptr);
-  apply_pending_linear_saves_via_leaf(prefix_cache, sequences);
-
-  EXPECT_NE(sequence.get_linear_state_slot_id(), old_live_slot);
-  std::optional<Block> restore_src = sequence.take_linear_restore_src_block();
-  ASSERT_TRUE(restore_src.has_value());
-  EXPECT_EQ(restore_src->id(), old_live_slot);
-
-  pool.deallocate_without_cache(&sequence);
-}
-
-TEST_F(BlockManagerPoolTest,
-       PendingLinearSaveSkipsWhenCheckpointAlreadyExists) {
-  ScopedValue<int32_t> chunk_guard(
-      &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
-  BlockManagerPool pool(make_linear_state_pool_options(
-                            /*linear_state_num_slots=*/4),
-                        /*dp_size=*/1);
-
-  LinearStateBlockManager* prefix_cache =
-      BlockManagerPoolTestPeer::linear_leaf(pool, /*dp_rank=*/0);
-  ASSERT_NE(prefix_cache, nullptr);
-
-  Sequence sequence = make_sequence(0, /*prompt_tokens=*/{1, 2, 3, 4});
-  ASSERT_TRUE(pool.allocate(&sequence, sequence.num_tokens()));
-  sequence.kv_state().set_kv_cache_tokens_num(sequence.num_tokens());
-  const int32_t live_slot = sequence.get_linear_state_slot_id();
-  ASSERT_GE(live_slot, 1);
-
-  // A checkpoint for this boundary already exists in the index (e.g. another
-  // sequence in the same batch saved it first). The contains() guard in
-  // allocate_for_sequence is the production dedup: the second save is a
-  // no-op, so the sequence keeps its live slot warm instead of rotating.
-  const LinearStatePrefixHash save_hash = make_prefix_hash(8);
-  const int32_t existing_slot =
-      insert_linear_state_checkpoint(prefix_cache, save_hash);
-  ASSERT_GE(existing_slot, 1);
-  ASSERT_NE(existing_slot, live_slot);
-
-  sequence.set_pending_linear_save(XXH3Key(save_hash.data()));
-  std::vector<Sequence*> sequences = {&sequence};
-  apply_pending_linear_saves_via_leaf(prefix_cache, sequences);
-
-  // The pending flag is consumed, but the save is skipped: no rotation, no
-  // restore-src mount, and the pre-existing checkpoint is untouched.
-  EXPECT_FALSE(sequence.has_pending_linear_save());
-  EXPECT_EQ(sequence.get_linear_state_slot_id(), live_slot);
-  EXPECT_FALSE(sequence.has_linear_restore_src_block());
-  EXPECT_TRUE(BlockManagerPoolTestPeer::contains(prefix_cache,
-                                                 XXH3Key(save_hash.data())));
-  EXPECT_EQ(
-      BlockManagerPoolTestPeer::match(prefix_cache, XXH3Key(save_hash.data()))
-          .id(),
-      existing_slot);
-
-  pool.deallocate_without_cache(&sequence);
-}
-
-TEST_F(BlockManagerPoolTest, ApplyPendingSaveSkipsWhenSlotRemoved) {
-  ScopedValue<int32_t> chunk_guard(
-      &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
-  BlockManagerPool pool(make_linear_state_pool_options(
-                            /*linear_state_num_slots=*/4),
-                        /*dp_size=*/1);
-
-  Sequence sequence =
-      make_sequence(0, /*prompt_tokens=*/{1, 2, 3, 4, 5, 6, 7, 8});
-  ASSERT_TRUE(pool.allocate(&sequence, sequence.num_tokens()));
-  sequence.kv_state().set_kv_cache_tokens_num(4);
-  const int32_t old_live_slot = sequence.get_linear_state_slot_id();
-  ASSERT_GE(old_live_slot, 1);
-
-  const LinearStatePrefixHash save_hash = make_prefix_hash(10);
-  // The batch builder records the pending save on the sequence at build time.
-  sequence.set_pending_linear_save(XXH3Key(save_hash.data()));
-  std::vector<Sequence*> sequences = {&sequence};
-  EXPECT_TRUE(sequence.has_pending_linear_save());
-
-  // Simulate the linear slot being removed between build and apply
-  // (e.g. sequence preempted then re-scheduled without a LINEAR slot). This is
-  // the same primitive production uses to drop a sequence's private LINEAR
-  // block (see Sequence's forked-sequence constructor).
-  sequence.kv_state().erase_blocks(BlockType::LINEAR);
-  // erase_blocks(LINEAR) also clears the deferred save (the recorded slot is
-  // gone), so the apply below simply takes the first-allocate path.
-  EXPECT_FALSE(sequence.has_pending_linear_save());
-
-  LinearStateBlockManager* prefix_cache =
-      BlockManagerPoolTestPeer::linear_leaf(pool, /*dp_rank=*/0);
-  ASSERT_NE(prefix_cache, nullptr);
-  apply_pending_linear_saves_via_leaf(prefix_cache, sequences);
-
-  // No checkpoint is published (the deferred save was cleared with the slot).
-  // But allocate_for_sequence owns the full slot lifecycle: after the save is
-  // skipped it takes the first-allocate path and hands the slot-less sequence a
-  // fresh live slot, exactly as a re-scheduled sequence expects.
-  EXPECT_FALSE(BlockManagerPoolTestPeer::contains(prefix_cache,
-                                                  XXH3Key(save_hash.data())));
-  EXPECT_TRUE(sequence.has_linear_state_slot());
-  EXPECT_FALSE(sequence.has_pending_linear_save());
-
-  pool.deallocate_without_cache(&sequence);
-}
-
-TEST_F(BlockManagerPoolTest,
-       PendingLinearSaveDedupsDuplicateSavesAcrossSequences) {
-  ScopedValue<int32_t> chunk_guard(
-      &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
-  BlockManagerPool pool(make_linear_state_pool_options(
-                            /*linear_state_num_slots=*/5),
-                        /*dp_size=*/1);
-
-  LinearStateBlockManager* prefix_cache =
-      BlockManagerPoolTestPeer::linear_leaf(pool, /*dp_rank=*/0);
-  ASSERT_NE(prefix_cache, nullptr);
-
-  Sequence seq1 = make_sequence(0, /*prompt_tokens=*/{1, 2, 3, 4, 5, 6, 7, 8});
-  Sequence seq2 =
-      make_sequence(1, /*prompt_tokens=*/{9, 10, 11, 12, 13, 14, 15, 16});
-  ASSERT_TRUE(pool.allocate(&seq1, seq1.num_tokens()));
-  ASSERT_TRUE(pool.allocate(&seq2, seq2.num_tokens()));
-  seq1.kv_state().set_kv_cache_tokens_num(4);
-  seq2.kv_state().set_kv_cache_tokens_num(4);
-  const int32_t live_slot1 = seq1.get_linear_state_slot_id();
-  const int32_t live_slot2 = seq2.get_linear_state_slot_id();
-  ASSERT_GE(live_slot1, 1);
-  ASSERT_GE(live_slot2, 1);
-  ASSERT_NE(live_slot1, live_slot2);
-
-  const LinearStatePrefixHash save_hash = make_prefix_hash(7);
-  // Two sequences in the same batch save the same prefix hash. Each records its
-  // own pending save at build time (thread-safe: touches only its own field).
-  seq1.set_pending_linear_save(XXH3Key(save_hash.data()));
-  seq2.set_pending_linear_save(XXH3Key(save_hash.data()));
-  std::vector<Sequence*> sequences = {&seq1, &seq2};
-
-  EXPECT_TRUE(seq1.has_pending_linear_save());
-  EXPECT_TRUE(seq2.has_pending_linear_save());
-  EXPECT_FALSE(BlockManagerPoolTestPeer::contains(prefix_cache,
-                                                  XXH3Key(save_hash.data())));
-
-  // Apply runs per sequence: seq1 publishes its checkpoint and rotates; seq2
-  // then hits allocate_for_sequence's contains() guard (the production
-  // dedup) and no-ops, keeping its live slot warm instead of double-publishing.
-  apply_pending_linear_saves_via_leaf(prefix_cache, sequences);
-
-  EXPECT_TRUE(BlockManagerPoolTestPeer::contains(prefix_cache,
-                                                 XXH3Key(save_hash.data())));
-  Block matched =
-      BlockManagerPoolTestPeer::match(prefix_cache, XXH3Key(save_hash.data()));
-  ASSERT_TRUE(matched.is_valid());
-  EXPECT_EQ(matched.id(), live_slot1);
-  EXPECT_FALSE(seq1.has_pending_linear_save());
-  EXPECT_FALSE(seq2.has_pending_linear_save());
-  // seq1 rotated onto a fresh slot and mounted its checkpoint as restore src;
-  // seq2 was deduped, so it kept its live slot and mounted nothing.
-  EXPECT_NE(seq1.get_linear_state_slot_id(), live_slot1);
-  EXPECT_TRUE(seq1.has_linear_restore_src_block());
-  EXPECT_EQ(seq2.get_linear_state_slot_id(), live_slot2);
-  EXPECT_FALSE(seq2.has_linear_restore_src_block());
-
-  pool.deallocate_without_cache(&seq1);
-  pool.deallocate_without_cache(&seq2);
+  BlockManagerPool pool(make_linear_state_pool_options(3), 1);
+  LinearStateBlockManager* leaf =
+      BlockManagerPoolTestPeer::linear_leaf(pool, 0);
+  ASSERT_NE(leaf, nullptr);
+  Sequence cached = make_sequence(0, {1, 2, 3, 4, 5, 6, 7, 8});
+  ASSERT_TRUE(allocate_kv_prefix_for_test(pool, cached));
+  cached.kv_state().set_kv_cache_tokens_num(8);
+  pool.cache(&cached);
+  cached.update_linear_state_hashes(4);
+  const int32_t source_id =
+      insert_linear_state_checkpoint(leaf, cached.linear_state_hashes()[1]);
+  ASSERT_GE(source_id, 1);
+  pool.deallocate_without_cache(&cached);
+  std::vector<Block> occupied = leaf->allocate(1);
+  ASSERT_EQ(occupied.size(), 1u);
+  Sequence consumer = make_sequence(1, {1, 2, 3, 4, 5, 6, 7, 8, 9});
+  pool.allocate_shared(&consumer);
+  ASSERT_EQ(consumer.kv_cache_tokens_num(), 8u);
+  EXPECT_FALSE(pool.allocate(&consumer, 9));
+  EXPECT_EQ(consumer.kv_state().num_blocks(BlockType::LINEAR), 1u);
+  EXPECT_EQ(consumer.get_linear_state_slot_id(), source_id);
+  pool.allocate_shared(&consumer);
+  EXPECT_EQ(consumer.get_linear_state_slot_id(), source_id);
+  leaf->deallocate(occupied);
+  occupied.clear();
+  ASSERT_TRUE(pool.allocate(&consumer, 9));
+  ASSERT_EQ(consumer.kv_state().num_blocks(BlockType::LINEAR), 2u);
+  EXPECT_EQ(consumer.kv_state().blocks(BlockType::LINEAR)[0].id(), source_id);
+  pool.deallocate_without_cache(&consumer);
 }
 
 TEST_F(BlockManagerPoolTest, PrefixUsesOnlyExactLinearStateCheckpoint) {
@@ -1219,7 +1000,7 @@ TEST_F(BlockManagerPoolTest, PrefixUsesOnlyExactLinearStateCheckpoint) {
 
     const std::vector<int32_t> prompt_tokens(513, 1);
     Sequence cached_seq = make_sequence(0, prompt_tokens);
-    ASSERT_TRUE(pool.allocate(&cached_seq));
+    ASSERT_TRUE(allocate_kv_prefix_for_test(pool, cached_seq));
     cached_seq.kv_state().set_kv_cache_tokens_num(cached_seq.num_tokens());
     pool.cache(&cached_seq);
 
@@ -1240,18 +1021,16 @@ TEST_F(BlockManagerPoolTest, PrefixUsesOnlyExactLinearStateCheckpoint) {
     pool.deallocate_without_cache(&cached_seq);
 
     Sequence hit_seq = make_sequence(1, prompt_tokens);
-    ASSERT_TRUE(pool.allocate(&hit_seq, hit_seq.num_tokens()));
+    ASSERT_TRUE(allocate_next_linear_chunk(pool, hit_seq));
     EXPECT_EQ(hit_seq.kv_state().kv_cache_tokens_num(), expected_tokens);
     EXPECT_EQ(hit_seq.kv_state().shared_blocks_num(BlockType::KV),
               expected_tokens / kCanonicalBlockSize);
     if (expected_tokens == 0) {
-      EXPECT_FALSE(hit_seq.has_linear_restore_src_block());
+      EXPECT_EQ(hit_seq.kv_state().num_blocks(BlockType::LINEAR), 1u);
     } else {
-      ASSERT_TRUE(hit_seq.has_linear_restore_src_block());
-      std::optional<Block> restore_src_block =
-          hit_seq.take_linear_restore_src_block();
-      ASSERT_TRUE(restore_src_block.has_value());
-      EXPECT_EQ(restore_src_block->id(), expected_slot);
+      const Slice<Block> blocks = hit_seq.kv_state().blocks(BlockType::LINEAR);
+      ASSERT_EQ(blocks.size(), 2u);
+      EXPECT_EQ(blocks.front().id(), expected_slot);
     }
     pool.deallocate_without_cache(&hit_seq);
   };
@@ -1276,7 +1055,7 @@ TEST_F(BlockManagerPoolTest, SparseLinearStateCheckpointCannotExceedKVMatch) {
 
   Sequence short_cached_seq =
       make_sequence(0, /*prompt_tokens=*/{1, 2, 3, 4, 5, 6, 7, 8});
-  ASSERT_TRUE(pool.allocate(&short_cached_seq));
+  ASSERT_TRUE(allocate_kv_prefix_for_test(pool, short_cached_seq));
   short_cached_seq.kv_state().set_kv_cache_tokens_num(
       short_cached_seq.num_tokens());
   pool.cache(&short_cached_seq);
@@ -1286,7 +1065,7 @@ TEST_F(BlockManagerPoolTest, SparseLinearStateCheckpointCannotExceedKVMatch) {
       make_sequence(1,
                     /*prompt_tokens=*/{
                         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16});
-  ASSERT_TRUE(pool.allocate(&long_cached_seq));
+  ASSERT_TRUE(allocate_kv_prefix_for_test(pool, long_cached_seq));
   const LinearStatePrefixHash kv_boundary_hash =
       compute_linear_state_prefix_hash_for_test(long_cached_seq.tokens(),
                                                 options.block_size(),
@@ -1306,7 +1085,7 @@ TEST_F(BlockManagerPoolTest, SparseLinearStateCheckpointCannotExceedKVMatch) {
 
   Sequence hit_seq =
       make_sequence(2, /*prompt_tokens=*/{1, 2, 3, 4, 5, 6, 7, 8, 17});
-  ASSERT_TRUE(pool.allocate(&hit_seq, hit_seq.num_tokens()));
+  ASSERT_TRUE(allocate_next_linear_chunk(pool, hit_seq));
   EXPECT_EQ(hit_seq.kv_state().shared_blocks_num(BlockType::KV), 2u);
   pool.deallocate_without_cache(&hit_seq);
 }
@@ -1328,7 +1107,7 @@ TEST_F(BlockManagerPoolTest, ExactPromptStopsAtEarlierCheckpoint) {
       make_sequence(0,
                     /*prompt_tokens=*/{
                         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16});
-  ASSERT_TRUE(pool.allocate(&cached_seq));
+  ASSERT_TRUE(allocate_kv_prefix_for_test(pool, cached_seq));
   cached_seq.kv_state().set_kv_cache_tokens_num(cached_seq.num_tokens());
   pool.cache(&cached_seq);
   const LinearStatePrefixHash inner_hash =
@@ -1352,7 +1131,7 @@ TEST_F(BlockManagerPoolTest, ExactPromptStopsAtEarlierCheckpoint) {
       make_sequence(1,
                     /*prompt_tokens=*/{
                         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16});
-  ASSERT_TRUE(pool.allocate(&exact_seq, exact_seq.num_tokens()));
+  ASSERT_TRUE(allocate_next_linear_chunk(pool, exact_seq));
   EXPECT_EQ(exact_seq.kv_state().shared_blocks_num(BlockType::KV), 2u);
   pool.deallocate_without_cache(&exact_seq);
 }

@@ -141,71 +141,47 @@ const MegaGdnPrefillIndicesCache& get_or_build_prefill_indices(
     const AttentionMetadata& attn_metadata,
     const std::vector<int32_t>& live_slots,
     const std::vector<int64_t>& validity_mask,
+    const std::vector<int32_t>& read_slots,
     int64_t checkpoint_stride,
     int64_t num_slots,
-    const torch::Device& device,
-    const std::vector<LinearStateCacheOp>& cache_ops) {
+    const torch::Device& device) {
   const int64_t batch_size = static_cast<int64_t>(live_slots.size());
-  CHECK(cache_ops.empty() ||
-        static_cast<int64_t>(cache_ops.size()) == batch_size)
-      << "linear_state_cache_ops must be empty or sequence-scoped.";
-  const auto read_slot_at = [&](int64_t row) {
-    CHECK(validity_mask[row] == 0 || validity_mask[row] == 1)
-        << "linear state validity must be 0 or 1.";
-    int32_t slot = validity_mask[row] == 0 ? -1 : live_slots[row];
-    if (!cache_ops.empty()) {
-      const LinearStateCacheOp& op = cache_ops[row];
-      CHECK_EQ(op.linear_state_id, live_slots[row]);
-      CHECK(!(op.reset_requested && op.restore_requested))
-          << "linear-state reset and restore are mutually exclusive.";
-      if (op.reset_requested) {
-        CHECK_LT(op.restore_src_slot_id, 0)
-            << "linear-state reset must not carry a restore source.";
-        CHECK_EQ(validity_mask[row], 0)
-            << "linear-state reset row must remain cold after restore.";
-      } else if (op.restore_requested) {
-        CHECK_GE(op.restore_src_slot_id, 0)
-            << "linear-state restore requires a valid source slot.";
-        CHECK_EQ(validity_mask[row], 1)
-            << "linear-state restored row must be warm after restore.";
-      } else if (op.restore_src_slot_id >= 0) {
-        CHECK_EQ(validity_mask[row], 1)
-            << "linear-state direct-read row must be warm after restore.";
-      }
-      if (op.restore_src_slot_id >= 0) {
-        CHECK_GT(op.restore_src_slot_id, kPaddingLinearStateId);
-        CHECK_LT(op.restore_src_slot_id, num_slots);
-      }
-      if (op.is_direct_read()) {
-        slot = op.restore_src_slot_id;
-      }
-    }
-    return slot;
-  };
-  const auto& cache = attn_metadata.mega_gdn_prefill_indices;
+  CHECK_EQ(static_cast<int64_t>(validity_mask.size()), batch_size)
+      << "linear_state_validity_mask must be sequence-scoped.";
+  CHECK(read_slots.empty() ||
+        static_cast<int64_t>(read_slots.size()) == batch_size)
+      << "linear_state_read_ids must be empty or sequence-scoped.";
+  const auto& read_ids = read_slots.empty() ? live_slots : read_slots;
+  std::optional<MegaGdnPrefillIndicesCache>& cache =
+      attn_metadata.mega_gdn_prefill_indices;
   if (cache.has_value()) {
-    const auto& key = cache->key;
-    CHECK_EQ(key.device, device) << "cache device changed within one forward";
-    CHECK_EQ(static_cast<int64_t>(key.linear_state_ids.size()), batch_size)
-        << "cache batch size changed within one forward";
+    const MegaGdnPrefillIndicesKey& key = cache->key;
+    CHECK_EQ(key.device, device)
+        << "MegaGdn Prefill indices cache device changed within one forward.";
     CHECK_EQ(key.num_slots, num_slots)
-        << "cache slot geometry changed within one forward";
+        << "MegaGdn Prefill cache slot geometry changed within one forward.";
     CHECK_EQ(key.checkpoint_stride, checkpoint_stride)
-        << "checkpoint stride changed within one forward";
+        << "MegaGdn Prefill checkpoint stride changed within one forward.";
     CHECK(key.linear_state_ids == live_slots)
-        << "linear state ids changed within one forward";
+        << "MegaGdn Prefill linear state ids changed within one forward.";
     CHECK(key.linear_state_validity_mask == validity_mask)
-        << "validity changed within one forward";
-    for (int64_t row = 0; row < batch_size; ++row) {
-      CHECK_EQ(key.linear_state_read_slots[row], read_slot_at(row))
-          << "linear state read slots changed within one forward";
-    }
+        << "MegaGdn Prefill validity changed within one forward.";
+    CHECK(key.linear_state_read_ids == read_ids)
+        << "MegaGdn Prefill read state ids changed within one forward.";
     return cache.value();
   }
 
   check_live_slots(live_slots, batch_size, num_slots);
-  CHECK_EQ(static_cast<int64_t>(validity_mask.size()), batch_size)
-      << "linear_state_validity_mask must be sequence-scoped.";
+  for (size_t row = 0; row < read_ids.size(); ++row) {
+    CHECK_GE(read_ids[row], kPaddingLinearStateId);
+    CHECK_LT(static_cast<int64_t>(read_ids[row]), num_slots)
+        << "linear-state source exceeds cache capacity.";
+    CHECK((read_ids[row] == kPaddingLinearStateId) ==
+          (live_slots[row] == kPaddingLinearStateId))
+        << "padding must not be used as a real linear-state source or target";
+    CHECK(read_ids[row] == live_slots[row] || validity_mask[row] == 1)
+        << "linear-state direct-read row must be warm.";
+  }
   CHECK_GT(checkpoint_stride, 0) << "checkpoint stride must be positive.";
   CHECK_LE(checkpoint_stride,
            static_cast<int64_t>(std::numeric_limits<int32_t>::max()))
@@ -214,6 +190,10 @@ const MegaGdnPrefillIndicesCache& get_or_build_prefill_indices(
            static_cast<int64_t>(std::numeric_limits<int32_t>::max()) /
                checkpoint_stride)
       << "SSM state index does not fit the operator int32 ABI.";
+  for (const int64_t validity : validity_mask) {
+    CHECK(validity == 0 || validity == 1)
+        << "linear state validity must be 0 or 1.";
+  }
 
   std::vector<int32_t> conv_read;
   std::vector<int32_t> ssm_read;
@@ -224,7 +204,7 @@ const MegaGdnPrefillIndicesCache& get_or_build_prefill_indices(
   const int32_t stride = static_cast<int32_t>(checkpoint_stride);
   for (int64_t i = 0; i < batch_size; ++i) {
     const int32_t live_slot = live_slots[i];
-    const int32_t read_slot = read_slot_at(i);
+    const int32_t read_slot = validity_mask[i] == 0 ? -1 : read_ids[i];
     conv_read.emplace_back(read_slot);
     ssm_read.emplace_back(read_slot < 0 ? -1 : read_slot * stride);
     ssm_write.emplace_back(live_slot * stride);
@@ -235,8 +215,8 @@ const MegaGdnPrefillIndicesCache& get_or_build_prefill_indices(
               .num_slots = num_slots,
               .checkpoint_stride = checkpoint_stride,
               .linear_state_ids = live_slots,
-              .linear_state_read_slots = conv_read,
-              .linear_state_validity_mask = validity_mask}};
+              .linear_state_validity_mask = validity_mask,
+              .linear_state_read_ids = read_ids}};
   indices.conv_read = slots_to_device(conv_read, device);
   indices.conv_write = slots_to_device(live_slots, device);
   indices.ssm_read = slots_to_device(ssm_read, device);
@@ -405,6 +385,9 @@ torch::Tensor Qwen3_5GatedDeltaNetImpl::forward(
   const torch::Tensor contiguous_norm_weight = norm_->weight().contiguous();
 
   torch::Tensor fused_norm_output;
+  const auto& read_slots = input_params.embedding.linear_state_read_ids.empty()
+                               ? live_slots
+                               : input_params.embedding.linear_state_read_ids;
   // Route order is semantic: spec verify is also decode-shaped and must win.
   if (use_spec_verify) {
     CHECK_EQ(checkpoint_stride, sequence_length)
@@ -451,6 +434,12 @@ torch::Tensor Qwen3_5GatedDeltaNetImpl::forward(
                            batch_size,
                            device,
                            "num_accepted_tokens");
+    const torch::Tensor read_indices =
+        graph_safe_indices(input_params.embedding.linear_state_read_indices,
+                           read_slots,
+                           batch_size,
+                           device,
+                           "linear_state_read_indices");
     std::vector<torch::Tensor> chunk_outputs;
     chunk_outputs.reserve(
         util::ceil_div(batch_size, kMegaGdnMaxDecodeBatchSize));
@@ -469,8 +458,9 @@ torch::Tensor Qwen3_5GatedDeltaNetImpl::forward(
       params.dt_bias = contiguous_dt_bias;
       params.ssm_state = ssm_cache;
       params.read_state_indices =
+          read_indices.slice(0, start, end).contiguous();
+      params.write_state_indices =
           state_indices.slice(0, start, end).contiguous();
-      params.write_state_indices = params.read_state_indices;
       params.num_accepted_tokens =
           accepted_indices.slice(0, start, end).contiguous();
       params.norm_weight = contiguous_norm_weight;
@@ -520,10 +510,10 @@ torch::Tensor Qwen3_5GatedDeltaNetImpl::forward(
             attn_metadata,
             live_slots,
             input_params.linear_state_validity_mask,
+            input_params.embedding.linear_state_read_ids,
             checkpoint_stride,
             num_slots,
-            device,
-            input_params.linear_state_cache_ops);
+            device);
     xllm::kernel::MegaGdnPrefillParams params;
     params.mixed_qkv = packed_qkv.contiguous();
     params.b = packed_b.view({total_tokens, local_value_heads}).contiguous();
@@ -561,6 +551,12 @@ torch::Tensor Qwen3_5GatedDeltaNetImpl::forward(
                            "linear_state_indices");
     const torch::Tensor decode_qkv =
         mixed_qkv.reshape({batch_size, local_conv_dim});
+    const torch::Tensor read_indices =
+        graph_safe_indices(input_params.embedding.linear_state_read_indices,
+                           read_slots,
+                           batch_size,
+                           device,
+                           "linear_state_read_indices");
     const torch::Tensor decode_z =
         z.reshape({batch_size, local_value_heads, head_v_dim_});
     const torch::Tensor decode_b = b.reshape({batch_size, local_value_heads});
@@ -583,8 +579,9 @@ torch::Tensor Qwen3_5GatedDeltaNetImpl::forward(
       params.dt_bias = contiguous_dt_bias;
       params.ssm_state = ssm_cache;
       params.read_state_indices =
+          read_indices.slice(0, start, end).contiguous();
+      params.write_state_indices =
           state_indices.slice(0, start, end).contiguous();
-      params.write_state_indices = params.read_state_indices;
       params.norm_weight = contiguous_norm_weight;
       params.fla_ssm_state_layout = use_fla_ssm_state_layout();
       torch::Tensor chunk_output;

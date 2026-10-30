@@ -25,28 +25,16 @@ limitations under the License.
 
 namespace xllm {
 
-namespace {
-
-BlockManager::Options make_linear_state_options(uint32_t num_slots,
-                                                int32_t chunk_stride,
-                                                bool enable_prefix_cache) {
-  BlockManager::Options options;
-  options.num_blocks(num_slots);
-  options.block_size(chunk_stride);
-  options.enable_prefix_cache(enable_prefix_cache);
-  options.enable_disagg_pd(false);
-  options.block_type(BlockType::LINEAR);
-  return options;
-}
-
-}  // namespace
-
 LinearStateBlockManager::LinearStateBlockManager(uint32_t num_slots,
                                                  int32_t chunk_stride,
-                                                 bool enable_prefix_cache)
-    : BlockManagerImpl(make_linear_state_options(num_slots,
-                                                 chunk_stride,
-                                                 enable_prefix_cache)) {
+                                                 bool enable_prefix_cache,
+                                                 bool instance_is_decode)
+    : BlockManagerImpl(
+          BlockManager::Options{.num_blocks_ = num_slots,
+                                .block_size_ = chunk_stride,
+                                .enable_prefix_cache_ = enable_prefix_cache,
+                                .block_type_ = BlockType::LINEAR,
+                                .instance_is_decode_ = instance_is_decode}) {
   CHECK_GT(num_slots, 1u)
       << "linear-state leaf needs at least one usable slot (plus padding)";
   CHECK_GT(chunk_stride, 0)
@@ -59,67 +47,57 @@ LinearStateBlockManager::allocate_for_sequence(Sequence* seq,
   if (seq == nullptr) {
     return std::nullopt;
   }
-  // Step 1: execute a save deferred from the previous step. The batch builder
-  // recorded the boundary hash last step (set_pending_linear_save) and the
-  // intervening forward wrote that boundary's recurrent state into the live
-  // slot, so the slot contents now match the recorded hash. When a save is due
-  // and a free slot is available we rotate the slot with the SAME accounting
-  // verbs KV blocks use: checkpoint the warm slot into the index under the
-  // RECORDED hash, mount it as this sequence's class-B restore source,
-  // deallocate the old slot through the standard manager path, and return the
-  // fresh slot for the composite to add_blocks -- no bespoke in-place swap. Any
-  // reason to skip (no pending save, dup hash, no live slot to promote, no free
-  // slot) leaves the current slot untouched: a best-effort checkpoint must
-  // never surface as an allocation failure, or the composite would roll back
-  // the whole sequence.
-  const std::optional<XXH3Key> pending_hash = seq->take_pending_linear_save();
-  // When prefix cache is off (DECODE role for LINEAR) the checkpoint index
-  // is not constructed; skip save-rotation entirely. forward_input_builder
-  // still may set a pending hash from an earlier PREFILL role transition,
-  // so guard here instead of assuming pending_hash stays nullopt.
-  const bool should_apply_save =
-      prefix_cache_ != nullptr && pending_hash.has_value() &&
-      seq->has_linear_state_slot() && !prefix_cache_->contains(*pending_hash);
-  Block new_live_slot = should_apply_save ? allocate() : Block();
-  if (new_live_slot.is_valid()) {
-    // Pin the warm slot into the checkpoint index (refcount+1) and mount a
-    // second alias as the class-B restore source the next step's builder
-    // consumes. The descriptor selects direct read or copy old->new later;
-    // copy_block leaves the slot in the sequence too.
-    Block checkpoint_slot = seq->copy_block(BlockType::LINEAR);
-    seq->set_linear_restore_src_block(checkpoint_slot);
-    insert_with_recorded_hash(std::move(checkpoint_slot), *pending_hash);
-    // Retire the old slot through the standard deallocate path: its refcount is
-    // still 3 (index + restore src + sequence), above the <=2u threshold, so
-    // used-block accounting is untouched here -- the index owner keeps it live
-    // until LRU eviction, exactly like a shared KV block. Then drop only the
-    // sequence's own alias by clearing the LINEAR vector; NOT erase_blocks,
-    // which would also reset the restore source just mounted.
-    deallocate(seq->kv_state().blocks(BlockType::LINEAR));
-    seq->kv_state().mutable_blocks(BlockType::LINEAR)->clear();
-    // Hand the fresh slot to the composite; its add_blocks commit installs it
-    // as the sequence's sole LINEAR slot, the same path a KV allocation takes.
-    std::vector<Block> rotated;
-    rotated.emplace_back(std::move(new_live_slot));
-    return rotated;
+  KVCacheState& kv_state = seq->kv_state();
+  std::vector<Block>* blocks = kv_state.mutable_blocks(BlockType::LINEAR);
+  CHECK(blocks->empty() || blocks->back().is_valid());
+  if (blocks->size() > 1) {
+    const bool shared_source =
+        kv_state.shared_blocks_num(BlockType::LINEAR) == blocks->size();
+    const size_t keep_begin = blocks->size() - 1;
+    deallocate(Slice<Block>(*blocks).slice(0, keep_begin));
+    blocks->erase(blocks->begin(), blocks->begin() + keep_begin);
+    kv_state.set_shared_blocks_num(BlockType::LINEAR, shared_source ? 1 : 0);
   }
-  // Step 2: no rotation happened. A continued chunk already holds its live slot
-  // -- return no new blocks, the composite keeps the slot it already has. Only
-  // a fresh sequence (no slot yet) falls through to acquire its first slot,
-  // returned for the composite to append.
-  if (seq->has_linear_state_slot()) {
+  const bool decode_step =
+      options_.instance_is_decode() || !seq->is_prefill_stage();
+  size_t checkpoint_index = 0;
+  std::optional<XXH3Key> checkpoint_hash;
+  if (!decode_step && !seq->is_graph_warmup() && prefix_cache_ != nullptr &&
+      !blocks->empty()) {
+    const size_t chunk_stride = block_size();
+    const size_t cached_tokens = seq->kv_cache_tokens_num();
+    checkpoint_index = cached_tokens / chunk_stride;
+    if (cached_tokens % chunk_stride == 0 &&
+        checkpoint_index > kv_state.num_cached_blocks(BlockType::LINEAR)) {
+      seq->update_linear_state_hashes(static_cast<uint32_t>(chunk_stride));
+      const Slice<XXH3Key> hashes = seq->linear_state_hashes();
+      CHECK_GE(hashes.size(), checkpoint_index);
+      if (prefix_cache_->contains(hashes[checkpoint_index - 1])) {
+        kv_state.set_num_cached_blocks(BlockType::LINEAR, checkpoint_index);
+      } else {
+        checkpoint_hash = hashes[checkpoint_index - 1];
+      }
+    }
+  }
+  if (!blocks->empty() &&
+      (decode_step || prefix_cache_ == nullptr ||
+       (!checkpoint_hash.has_value() && !blocks->back().is_shared()))) {
     return std::vector<Block>{};
   }
-  Block slot = allocate();
-  if (!slot.is_valid()) {
-    LOG(ERROR) << "Failed to acquire linear state slot! free="
-               << num_free_blocks() << ", used=" << num_used_blocks()
-               << ", total=" << num_total_blocks();
+  std::vector<Block> allocated = BlockManagerImpl::allocate(1);
+  if (allocated.empty()) {
+    // Checkpoint retention must not stall a private live slot.
+    if (!blocks->empty() && !blocks->back().is_shared()) {
+      return std::vector<Block>{};
+    }
     return std::nullopt;
   }
-  std::vector<Block> blocks;
-  blocks.emplace_back(std::move(slot));
-  return blocks;
+  if (checkpoint_hash.has_value()) {
+    blocks->back().set_hash_value(checkpoint_hash->data);
+    prefix_cache_->insert(Slice<Block>(*blocks));
+    kv_state.set_num_cached_blocks(BlockType::LINEAR, checkpoint_index);
+  }
+  return allocated;
 }
 
 Block LinearStateBlockManager::allocate() {
@@ -135,59 +113,40 @@ std::vector<Block> LinearStateBlockManager::allocate_shared(
     const Slice<Block>& /*existed_shared_blocks*/,
     const MMData& /*mm_data*/,
     const Slice<XXH3Key>& block_hashes) {
-  // Probe + mount through the base match virtual: prefix_cache_ is the
-  // LinearStatePrefixCache, whose gap-tolerant walk over the chunk-strided
-  // hash domain (chunk stride captured at construction from the scheduler
-  // config; block_size_ of this cache) returns a vector of shape
-  // `[hit_or_inv, ..., last_hit]` per chunk. |block_hashes| carries the
-  // sequence's precomputed chained per-chunk linear-state hashes
-  // (Sequence::update_linear_state_hashes) so the probe consumes them
-  // instead of recomputing; the composite picks the deepest valid slot out
-  // as the class-A restore source. Linear thus travels the same
-  // allocate_shared verb as KV, and beneath it the same match verb -- no
-  // downcast, plain virtual dispatch. The index is KV-blind; the composite
-  // owns the cross-leaf min + chunk alignment + deepest-pick.
-  //
-  // Reserve one fresh token by slicing off the last input token before the
-  // probe. The forward must compute at least one token, so a checkpoint that
-  // sits exactly at token_ids.size() would leave zero tokens to run; slicing
-  // to size-1 makes match() naturally stop at the deepest chunk STRICTLY
-  // below the final token. This is LINEAR-specific -- it cannot be delegated
-  // to KV's own size-1 (the add_shared_blocks last-block pop): that pop lands
-  // on an arbitrary KV block boundary, whereas linear checkpoints exist only
-  // on sparse chunk boundaries. If reuse were clamped by KV's boundary the
-  // restore would look for a checkpoint that need not be there; on a miss the
-  // sequence cold-starts on a non-empty KV prefix and its recurrent state is
-  // corrupt.
+  // Leave a token for forward execution; KV block boundaries cannot constrain
+  // sparse linear checkpoints without losing the matching recurrent state.
   if (token_ids.size() == 0 || prefix_cache_ == nullptr) {
     return {};
   }
-  return prefix_cache_->match(token_ids.slice(0, token_ids.size() - 1),
-                              /*existed_shared_blocks=*/{},
-                              MMData(),
-                              block_hashes);
+  std::vector<Block> blocks = prefix_cache_->match(
+      token_ids.slice(0, token_ids.size() - 1), {}, MMData(), block_hashes);
+  for (const Block& block : blocks) {
+    if (block.is_valid() && mark_used(&usage_accounted_ids_, block.id())) {
+      num_used_blocks_.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+  return blocks;
 }
 
-void LinearStateBlockManager::cache(const Slice<int32_t>& /*token_ids*/,
-                                    std::vector<Block>& /*blocks*/,
-                                    size_t /*existed_shared_blocks_num*/,
-                                    const MMData& /*mm_data*/,
-                                    const Slice<XXH3Key>& /*block_hashes*/) {
-  NOT_IMPLEMENTED();
-}
-
-void LinearStateBlockManager::insert_with_recorded_hash(Block&& slot,
-                                                        const XXH3Key& hash) {
-  // Key the checkpoint under the RECORDED boundary hash, never a hash
-  // recomputed from the sequence's current tokens: the pending save was
-  // recorded at a shallower boundary than where the sequence now stands, so a
-  // recompute would key the deeper current boundary and the checkpoint could
-  // never be matched. set_hash_value stamps the recorded key, then the
-  // inherited by-block cache() primitive inserts without recomputing.
-  slot.set_hash_value(hash.data);
-  std::vector<Block> checkpoint;
-  checkpoint.emplace_back(std::move(slot));
-  cache(checkpoint);
+void LinearStateBlockManager::cache(const Slice<int32_t>& token_ids,
+                                    std::vector<Block>& blocks,
+                                    size_t existed_shared_blocks_num,
+                                    const MMData& mm_data,
+                                    const Slice<XXH3Key>& block_hashes) {
+  if (blocks.empty() || prefix_cache_ == nullptr) {
+    return;
+  }
+  const size_t publish_end =
+      std::min(token_ids.size() / block_size(), blocks.size() - 1);
+  if (publish_end <= existed_shared_blocks_num) {
+    return;
+  }
+  CHECK_GE(block_hashes.size(), publish_end);
+  BlockManagerImpl::cache(token_ids.slice(0, publish_end * block_size()),
+                          blocks,
+                          existed_shared_blocks_num,
+                          mm_data,
+                          block_hashes);
 }
 
 }  // namespace xllm

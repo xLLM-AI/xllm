@@ -586,6 +586,8 @@ TEST(KVCacheEstimationTest, LinearStateCapacityVariants) {
     int64_t block_size;
     int64_t n_local_kv_heads;
     int64_t max_seqs_per_batch;
+    int64_t max_concurrent_requests;
+    InstanceRole instance_role;
     bool enable_prefix_cache;
     int64_t max_linear_state_cache_slots;
     int64_t expected_num_linear_state_blocks;
@@ -599,6 +601,8 @@ TEST(KVCacheEstimationTest, LinearStateCapacityVariants) {
        /*block_size=*/16,
        /*n_local_kv_heads=*/2,
        /*max_seqs_per_batch=*/200,
+       /*max_concurrent_requests=*/0,
+       /*instance_role=*/InstanceRole::DEFAULT,
        /*enable_prefix_cache=*/true,
        /*max_linear_state_cache_slots=*/0,
        /*expected_num_linear_state_blocks=*/-1,
@@ -609,9 +613,47 @@ TEST(KVCacheEstimationTest, LinearStateCapacityVariants) {
        /*block_size=*/1,
        /*n_local_kv_heads=*/1,
        /*max_seqs_per_batch=*/8,
+       /*max_concurrent_requests=*/0,
+       /*instance_role=*/InstanceRole::DEFAULT,
        /*enable_prefix_cache=*/true,
        /*max_linear_state_cache_slots=*/0,
        /*expected_num_linear_state_blocks=*/970,
+       /*min_num_linear_state_blocks=*/-1},
+      {"NoPrefixCacheBoundsLinearStateByConcurrentSequences",
+       /*head_dim=*/16,
+       /*cache_size_in_bytes=*/1024 * 1024,
+       /*block_size=*/16,
+       /*n_local_kv_heads=*/2,
+       /*max_seqs_per_batch=*/8,
+       /*max_concurrent_requests=*/0,
+       /*instance_role=*/InstanceRole::DEFAULT,
+       /*enable_prefix_cache=*/false,
+       /*max_linear_state_cache_slots=*/0,
+       /*expected_num_linear_state_blocks=*/10,
+       /*min_num_linear_state_blocks=*/-1},
+      {"NoPrefixCacheDecodeUsesSingleSlotPerSequence",
+       /*head_dim=*/16,
+       /*cache_size_in_bytes=*/1024 * 1024,
+       /*block_size=*/16,
+       /*n_local_kv_heads=*/2,
+       /*max_seqs_per_batch=*/8,
+       /*max_concurrent_requests=*/0,
+       /*instance_role=*/InstanceRole::DECODE,
+       /*enable_prefix_cache=*/false,
+       /*max_linear_state_cache_slots=*/0,
+       /*expected_num_linear_state_blocks=*/10,
+       /*min_num_linear_state_blocks=*/-1},
+      {"ConcurrencyLimitBoundsLinearStateSeats",
+       /*head_dim=*/16,
+       /*cache_size_in_bytes=*/1024 * 1024,
+       /*block_size=*/16,
+       /*n_local_kv_heads=*/2,
+       /*max_seqs_per_batch=*/64,
+       /*max_concurrent_requests=*/4,
+       /*instance_role=*/InstanceRole::DEFAULT,
+       /*enable_prefix_cache=*/false,
+       /*max_linear_state_cache_slots=*/0,
+       /*expected_num_linear_state_blocks=*/6,
        /*min_num_linear_state_blocks=*/-1},
       {"NoPrefixCacheCapsLinearStateBlocksByBudget",
        /*head_dim=*/16,
@@ -619,19 +661,23 @@ TEST(KVCacheEstimationTest, LinearStateCapacityVariants) {
        /*block_size=*/16,
        /*n_local_kv_heads=*/2,
        /*max_seqs_per_batch=*/100000,
+       /*max_concurrent_requests=*/0,
+       /*instance_role=*/InstanceRole::DEFAULT,
        /*enable_prefix_cache=*/false,
        /*max_linear_state_cache_slots=*/0,
        /*expected_num_linear_state_blocks=*/229,
        /*min_num_linear_state_blocks=*/-1},
-      {"UnlimitedConcurrencyFallsBackToPaddingSlots",
+      {"UnboundedConcurrencyUsesPhysicalLinearStateCap",
        /*head_dim=*/16,
        /*cache_size_in_bytes=*/1024 * 1024,
        /*block_size=*/16,
        /*n_local_kv_heads=*/2,
        /*max_seqs_per_batch=*/0,
+       /*max_concurrent_requests=*/0,
+       /*instance_role=*/InstanceRole::DEFAULT,
        /*enable_prefix_cache=*/false,
        /*max_linear_state_cache_slots=*/0,
-       /*expected_num_linear_state_blocks=*/2,
+       /*expected_num_linear_state_blocks=*/229,
        /*min_num_linear_state_blocks=*/-1},
       {"ExplicitLinearStateSlotsOverrideAutoSizing",
        /*head_dim=*/16,
@@ -639,7 +685,21 @@ TEST(KVCacheEstimationTest, LinearStateCapacityVariants) {
        /*block_size=*/16,
        /*n_local_kv_heads=*/2,
        /*max_seqs_per_batch=*/200,
+       /*max_concurrent_requests=*/0,
+       /*instance_role=*/InstanceRole::DEFAULT,
        /*enable_prefix_cache=*/true,
+       /*max_linear_state_cache_slots=*/32,
+       /*expected_num_linear_state_blocks=*/34,
+       /*min_num_linear_state_blocks=*/-1},
+      {"ExplicitLinearStateSlotsOverrideBoundedSizing",
+       /*head_dim=*/16,
+       /*cache_size_in_bytes=*/64LL << 30,
+       /*block_size=*/16,
+       /*n_local_kv_heads=*/2,
+       /*max_seqs_per_batch=*/200,
+       /*max_concurrent_requests=*/0,
+       /*instance_role=*/InstanceRole::DEFAULT,
+       /*enable_prefix_cache=*/false,
        /*max_linear_state_cache_slots=*/32,
        /*expected_num_linear_state_blocks=*/34,
        /*min_num_linear_state_blocks=*/-1},
@@ -653,6 +713,8 @@ TEST(KVCacheEstimationTest, LinearStateCapacityVariants) {
     options.block_size = test_case.block_size;
     options.n_local_kv_heads = test_case.n_local_kv_heads;
     options.max_seqs_per_batch = test_case.max_seqs_per_batch;
+    options.max_concurrent_requests = test_case.max_concurrent_requests;
+    options.instance_role = test_case.instance_role;
     options.enable_prefix_cache = test_case.enable_prefix_cache;
     options.max_linear_state_cache_slots =
         test_case.max_linear_state_cache_slots;
@@ -667,6 +729,9 @@ TEST(KVCacheEstimationTest, LinearStateCapacityVariants) {
       EXPECT_GT(capacity.num_linear_state_blocks(),
                 test_case.min_num_linear_state_blocks);
     }
+    EXPECT_GT(capacity.n_blocks(), 0);
+    EXPECT_LE(capacity.linear_cache_size_in_bytes(),
+              test_case.cache_size_in_bytes);
   }
 }
 

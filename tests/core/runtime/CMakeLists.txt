@@ -238,6 +238,31 @@ if(USE_NPU)
 
   cc_test(
     NAME
+      npu_linear_state_lifecycle_test
+    SRCS
+      npu_linear_state_lifecycle_test.cpp
+    DEPS
+      :runtime
+      :model_loader
+      :batch
+      :kv_cache
+      :platform
+      GTest::gtest_main
+  )
+  target_link_libraries(npu_linear_state_lifecycle_test
+                        PRIVATE
+                        torch_npu
+                        ascendcl
+                        hccl
+                        c_sec
+                        nnopbase)
+  target_link_options(npu_linear_state_lifecycle_test PRIVATE
+    "-Wl,--whole-archive"
+    "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
+    "-Wl,--no-whole-archive")
+
+  cc_test(
+    NAME
       dspark_confidence_head_test
     SRCS
       dspark_confidence_head_test.cpp

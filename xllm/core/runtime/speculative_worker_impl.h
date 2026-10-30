@@ -115,9 +115,6 @@ class SpeculativeWorkerImpl : public WorkerImpl {
     impl_->get_cache_info(cluster_id, addr, port);
   };
 
-  // prepare work before model execution
-  void prepare_work_before_execute(const TargetInput& input,
-                                   TargetInput& new_input) override;
   void restore_json_object_states(TargetInput& input) override;
 
   // Common step dispatch: prefill / decode / empty

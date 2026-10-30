@@ -48,6 +48,7 @@ cc_library(
     # collectives.cpp issues raw Hccl* calls on the caller's stream.
     hccl
     :torch_npu_kernels
+    :triton_adapter
     :tilelang_kernels
     xllm_ops
     nnopbase

@@ -201,7 +201,7 @@ class AclGraph {
   std::atomic<bool> replay_inputs_prepared_{false};
   bool first_hybrid_replay_after_capture_ = false;
   std::optional<StaticGraphTaskSignature> static_graph_task_signature_;
-  std::optional<std::array<const void*, 11>>
+  std::optional<std::array<const void*, 12>>
       spec_verify_input_addresses_at_capture_;
   torch::Tensor graph_paged_attention_tiling_data_;
   std::optional<kernel::npu::PagedAttentionTilingLayout>

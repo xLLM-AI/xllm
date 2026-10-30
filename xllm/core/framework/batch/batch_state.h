@@ -113,8 +113,6 @@ class BatchState final {
   std::vector<BlockTransferInfo> swap_block_transfer_infos_;
   std::vector<torch::Tensor> input_embeddings_vec_;
   std::vector<MMData> mm_data_vec_;
-  // Keep serialized restore sources alive through worker-result processing.
-  std::vector<Block> linear_restore_src_blocks_;
   // A cancelled sequence may release its own aliases before its pending
   // worker result. Pin H2D sources and destinations until this batch retires.
   std::vector<std::shared_ptr<KVCacheBlockLease>> host_restore_leases_;

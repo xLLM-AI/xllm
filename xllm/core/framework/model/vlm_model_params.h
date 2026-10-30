@@ -41,7 +41,6 @@ class VlmModelParams final {
     out.graph = graph;
     out.multi_block_tables = multi_block_tables;
     out.mtp_shifted_token_ids = mtp_shifted_token_ids;
-    out.linear_state_cache_ops = linear_state_cache_ops;
     out.linear_state_validity_mask = linear_state_validity_mask;
     out.is_spec_verify = is_spec_verify;
     out.prefill_without_cache = prefill_without_cache;
@@ -64,7 +63,6 @@ class VlmModelParams final {
     params.parallel = parallel.to(device);
     params.expert = expert.to(device);
     params.graph = graph.to(device);
-    params.linear_state_cache_ops = linear_state_cache_ops;
     params.linear_state_validity_mask = linear_state_validity_mask;
     params.is_spec_verify = is_spec_verify;
     params.prefill_without_cache = prefill_without_cache;
@@ -78,12 +76,7 @@ class VlmModelParams final {
           safe_to(table, table.options().device(torch::kCPU), true));
     }
     params.mtp_shifted_token_ids = safe_to(mtp_shifted_token_ids, device, true);
-    if (!params.embedding.linear_state_indices.defined() &&
-        !params.embedding.linear_state_ids.empty()) {
-      params.embedding.linear_state_indices =
-          torch::tensor(params.embedding.linear_state_ids, torch::kInt)
-              .to(device);
-    }
+    materialize_linear_state_indices(params.embedding, device);
 #if defined(USE_MUSA)
     params.attn_metadata = attn_metadata;
 #endif
@@ -93,7 +86,8 @@ class VlmModelParams final {
   void clear_linear_attention_state() {
     embedding.linear_state_ids.clear();
     embedding.linear_state_indices = torch::Tensor();
-    linear_state_cache_ops.clear();
+    embedding.linear_state_read_ids.clear();
+    embedding.linear_state_read_indices = torch::Tensor();
     linear_state_validity_mask.clear();
   }
 
@@ -154,7 +148,6 @@ class VlmModelParams final {
   VlmGraphInput graph;
   std::vector<torch::Tensor> multi_block_tables;
   torch::Tensor mtp_shifted_token_ids;
-  std::vector<LinearStateCacheOp> linear_state_cache_ops;
   LinearStateValidityMask linear_state_validity_mask;
   bool is_spec_verify = false;
   bool prefill_without_cache = false;

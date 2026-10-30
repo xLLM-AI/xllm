@@ -287,20 +287,17 @@ int64_t max_linear_state_blocks(int64_t cache_size_in_bytes,
 int64_t calculate_linear_state_blocks(int64_t cache_size_in_bytes,
                                       int64_t state_slot_bytes,
                                       int64_t full_cache_block_size_in_bytes,
-                                      int64_t max_seqs_per_batch,
-                                      int64_t max_concurrent_requests,
-                                      int64_t max_linear_state_cache_slots,
-                                      bool enable_prefix_cache) {
-  CHECK_GE(max_linear_state_cache_slots, 0)
+                                      const KVCacheEstimateOptions& options) {
+  CHECK_GE(options.max_linear_state_cache_slots, 0)
       << "max_linear_state_cache_slots must be greater than or equal to 0.";
   if (state_slot_bytes <= 0) {
     return kPaddingLinearStateBlocks;
   }
   const int64_t max_blocks = max_linear_state_blocks(
       cache_size_in_bytes, state_slot_bytes, full_cache_block_size_in_bytes);
-  if (max_linear_state_cache_slots > 0) {
+  if (options.max_linear_state_cache_slots > 0) {
     const int64_t requested_blocks =
-        max_linear_state_cache_slots + kPaddingLinearStateBlocks;
+        options.max_linear_state_cache_slots + kPaddingLinearStateBlocks;
     CHECK_LE(requested_blocks, max_blocks)
         << "max_linear_state_cache_slots requires " << requested_blocks
         << " linear-state blocks, but only " << max_blocks
@@ -308,18 +305,21 @@ int64_t calculate_linear_state_blocks(int64_t cache_size_in_bytes,
     return requested_blocks;
   }
 
-  if (!enable_prefix_cache) {
-    // Slots must cover every simultaneously running sequence, bounded by
-    // both the scheduler batch limit and the service concurrency cap.
-    int64_t running_seqs_upper_bound = max_seqs_per_batch;
-    if (max_concurrent_requests > 0) {
-      running_seqs_upper_bound =
-          std::min<int64_t>(running_seqs_upper_bound, max_concurrent_requests);
+  if (!options.enable_prefix_cache) {
+    int64_t running_seqs_upper_bound = options.max_seqs_per_batch;
+    if (options.max_concurrent_requests > 0) {
+      running_seqs_upper_bound = running_seqs_upper_bound > 0
+                                     ? std::min(running_seqs_upper_bound,
+                                                options.max_concurrent_requests)
+                                     : options.max_concurrent_requests;
     }
-    const int64_t live_slot_blocks =
-        running_seqs_upper_bound + kPaddingLinearStateBlocks;
-    return std::max<int64_t>(std::min<int64_t>(live_slot_blocks, max_blocks),
-                             kPaddingLinearStateBlocks);
+    if (running_seqs_upper_bound <= 0) {
+      return max_blocks;
+    }
+    if (running_seqs_upper_bound > max_blocks - kPaddingLinearStateBlocks) {
+      return max_blocks;
+    }
+    return running_seqs_upper_bound + kPaddingLinearStateBlocks;
   }
 
   // Auto-size: allocate ~47% of cache bytes to linear-state slots (ratio 0.9
@@ -617,10 +617,7 @@ void init_standard_counts(const ModelArgs& model_args,
       calculate_linear_state_blocks(kv_cache_cap->cache_size_in_bytes(),
                                     total_state_bytes,
                                     full_cache_block_size_in_bytes,
-                                    options.max_seqs_per_batch,
-                                    options.max_concurrent_requests,
-                                    options.max_linear_state_cache_slots,
-                                    options.enable_prefix_cache);
+                                    options);
   CHECK_GE(options.linear_state_cache_block_limit, 0);
   if (options.linear_state_cache_block_limit > 0 &&
       kv_cache_cap->num_linear_attention_layers() > 0) {

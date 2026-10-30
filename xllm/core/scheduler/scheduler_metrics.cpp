@@ -87,7 +87,7 @@ void SchedulerMetrics::update_token_latency_metrics_impl(
   const auto now = absl::Now();
   const bool speculative_metrics_enabled = num_speculative_tokens_ > 0;
   for (Sequence* sequence : sequences) {
-    if (sequence->is_chunked_prefill_stage() ||
+    if (sequence->cancelled() || sequence->is_chunked_prefill_stage() ||
         sequence->last_token_handled()) {
       continue;
     }
