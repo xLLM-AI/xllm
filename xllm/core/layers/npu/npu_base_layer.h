@@ -138,6 +138,10 @@ class BaseLayer : public torch::nn::Module {
     }
   };
 
+  bool is_weight_loaded() const {
+    return loader_ != nullptr && loader_->is_weight_loaded();
+  }
+
   virtual void merge_loaded_weights() {
     if (loader_) {
       loader_->merge_loaded_weights();

@@ -741,6 +741,32 @@ torch::Tensor ColumnParallelLinearImpl::forward(torch::Tensor input) {
   return output;
 }
 
+torch::Tensor ColumnParallelLinearImpl::forward(
+    const torch::Tensor& hidden_states,
+    const torch::Tensor& seleted_idxes,
+    int nodeId) {
+  (void)nodeId;
+  auto h = hidden_states;
+  if (seleted_idxes.defined()) {
+    h = h.index_select(/*dim=*/0, seleted_idxes);
+  }
+  return forward(h);
+}
+
+torch::Tensor ColumnParallelLinearImpl::forward_with_hidden(
+    const torch::Tensor& hidden_states,
+    const torch::Tensor& seleted_idxes,
+    torch::Tensor& out_hidden,
+    int nodeId) {
+  (void)nodeId;
+  if (seleted_idxes.defined()) {
+    out_hidden = hidden_states.index_select(/*dim=*/0, seleted_idxes);
+  } else {
+    out_hidden = hidden_states;
+  }
+  return forward(out_hidden);
+}
+
 torch::Tensor ColumnParallelLinearImpl::forward_quantized(
     const W8A8DynamicInput& input) {
   CHECK(uses_w8a8_dynamic_quant())

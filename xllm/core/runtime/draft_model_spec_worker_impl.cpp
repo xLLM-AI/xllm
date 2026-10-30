@@ -207,6 +207,10 @@ bool DraftModelSpecWorkerImpl<TargetInput>::init_model(
   if (impl_->get_status() == WorkerImpl::Status::LOADED) {
     context_ = impl_->context_;
   }
+  if (task_models_loaded()) {
+    draft_impl_->share_lm_head(*impl_);
+    draft_impl_->share_embed_tokens(*impl_);
+  }
   return result;
 }
 

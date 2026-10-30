@@ -37,6 +37,7 @@ class NpuWordEmbedding;
 }  // namespace layer
 
 namespace detail {
+
 template <typename T, typename = void>
 struct has_get_lm_head : std::false_type {};
 
@@ -53,6 +54,16 @@ struct has_set_lm_head<T,
                        std::void_t<decltype(std::declval<T>()->set_lm_head(
                            std::declval<layer::LmHead&>()))>> : std::true_type {
 };
+
+template <typename T, typename = void>
+struct has_load_lm_head : std::false_type {};
+
+template <typename T>
+struct has_load_lm_head<T,
+                        std::void_t<decltype(std::declval<T>()->load_lm_head(
+                            std::declval<const StateDict&>(),
+                            std::declval<layer::LmHead&>()))>>
+    : std::true_type {};
 
 template <typename T, typename = void>
 struct has_get_word_embedding : std::false_type {};
@@ -81,6 +92,16 @@ struct has_logits_with_hidden<T,
                                   std::declval<const torch::Tensor&>(),
                                   std::declval<const torch::Tensor&>(),
                                   std::declval<torch::Tensor&>()))>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct has_logits : std::false_type {};
+
+template <typename T>
+struct has_logits<T,
+                  std::void_t<decltype(std::declval<T>()->logits(
+                      std::declval<const torch::Tensor&>(),
+                      std::declval<const torch::Tensor&>()))>>
     : std::true_type {};
 
 template <typename T, typename = void>

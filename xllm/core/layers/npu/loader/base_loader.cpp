@@ -95,9 +95,9 @@ void BaseLoader::set_weight(const StateDict& state_dict,
       at::Tensor mutable_tensor = tensor;
       correct_tensor_dtype(mutable_tensor, tensor_name);
       if (to_host) {
-        at_host_weight_tensors_[weight_position] = mutable_tensor.to(device);
+        set_host_weight(weight_position, mutable_tensor.to(device));
       } else {
-        at_weight_tensors_[weight_position] = mutable_tensor.to(device);
+        set_device_weight(weight_position, mutable_tensor.to(device));
       }
     }
   }
@@ -115,9 +115,9 @@ void BaseLoader::set_weight(const StateDict& state_dict,
         at::Tensor mutable_tensor = tensor;
         correct_tensor_dtype(mutable_tensor, tensor_name);
         if (to_host) {
-          at_host_weight_tensors_[weight_position] = mutable_tensor.to(device);
+          set_host_weight(weight_position, mutable_tensor.to(device));
         } else {
-          at_weight_tensors_[weight_position] = mutable_tensor.to(device);
+          set_device_weight(weight_position, mutable_tensor.to(device));
         }
       }
     }
@@ -131,9 +131,9 @@ void BaseLoader::set_weight(const StateDict& state_dict,
             /*world_size=*/parallel_args_.world_size());
         correct_tensor_dtype(mutable_tensor, tensor_name);
         if (to_host) {
-          at_host_weight_tensors_[weight_position] = mutable_tensor.to(device);
+          set_host_weight(weight_position, mutable_tensor.to(device));
         } else {
-          at_weight_tensors_[weight_position] = mutable_tensor.to(device);
+          set_device_weight(weight_position, mutable_tensor.to(device));
         }
       }
     }
@@ -154,9 +154,9 @@ void BaseLoader::set_weight(const StateDict& state_dict,
         at::Tensor mutable_tensor = tensor;
         correct_tensor_dtype(mutable_tensor, tensor_name);
         if (to_host) {
-          at_host_weight_tensors_[weight_position] = mutable_tensor.to(device);
+          set_host_weight(weight_position, mutable_tensor.to(device));
         } else {
-          at_weight_tensors_[weight_position] = mutable_tensor.to(device);
+          set_device_weight(weight_position, mutable_tensor.to(device));
         }
       }
     }
@@ -170,9 +170,9 @@ void BaseLoader::set_weight(const StateDict& state_dict,
                                           /*world_size=*/world_size);
         correct_tensor_dtype(mutable_tensor, tensor_name);
         if (to_host) {
-          at_host_weight_tensors_[weight_position] = mutable_tensor.to(device);
+          set_host_weight(weight_position, mutable_tensor.to(device));
         } else {
-          at_weight_tensors_[weight_position] = mutable_tensor.to(device);
+          set_device_weight(weight_position, mutable_tensor.to(device));
         }
       }
     }
@@ -257,9 +257,9 @@ void BaseLoader::set_weight_with_padding(const StateDict& state_dict,
       }
       correct_tensor_dtype(mutable_tensor, tensor_name);
       if (to_host) {
-        at_host_weight_tensors_[weight_position] = mutable_tensor.to(device);
+        set_host_weight(weight_position, mutable_tensor.to(device));
       } else {
-        at_weight_tensors_[weight_position] = mutable_tensor.to(device);
+        set_device_weight(weight_position, mutable_tensor.to(device));
       }
     }
   }
@@ -318,9 +318,9 @@ void BaseLoader::set_weight_with_padding(const StateDict& state_dict,
       }
       correct_tensor_dtype(mutable_tensor, tensor_name);
       if (to_host) {
-        at_host_weight_tensors_[weight_position] = mutable_tensor.to(device);
+        set_host_weight(weight_position, mutable_tensor.to(device));
       } else {
-        at_weight_tensors_[weight_position] = mutable_tensor.to(device);
+        set_device_weight(weight_position, mutable_tensor.to(device));
       }
     }
   }

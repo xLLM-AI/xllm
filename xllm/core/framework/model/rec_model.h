@@ -25,6 +25,7 @@ limitations under the License.
 #include "core/framework/model/model_traits.h"
 #include "core/framework/model/rec_model_kind.h"
 #include "core/framework/model/rec_model_params.h"
+#include "core/framework/model_context/model_context.h"
 #include "core/kv_cache/storage/kv_cache.h"
 
 namespace xllm {
@@ -59,8 +60,26 @@ class RecModelImpl : public RecType {
   static_assert(std::is_base_of_v<RecModel, RecType>);
 
  public:
-  RecModelImpl(ModelType model, const torch::TensorOptions& options)
-      : model_(std::move(model)), options_(options) {}
+  RecModelImpl(ModelType model, const ModelContext& context)
+      : model_(std::move(model)), options_(context.get_tensor_options()) {
+    const auto& args = context.get_model_args();
+    tie_word_embeddings_ = args.tie_word_embeddings();
+    embedding_mode_ = args.embedding_mode();
+    // Models that own a non-standard head provide their own logits; skip
+    // registering a framework-owned lm_head for them.
+    const bool owns_custom_head = detail::has_logits<ModelType>::value;
+    if (!embedding_mode_ && !owns_custom_head) {
+#if defined(USE_NPU)
+      if constexpr (detail::has_get_npu_lm_head<ModelType>::value) {
+        npu_lm_head_ =
+            this->register_module("npu_lm_head", layer::NpuLmHead(context));
+      } else
+#endif
+      {
+        lm_head_ = this->register_module("lm_head", layer::LmHead(context));
+      }
+    }
+  }
 
   ModelOutput forward(const torch::Tensor& tokens,
                       const torch::Tensor& positions,
@@ -76,11 +95,53 @@ class RecModelImpl : public RecType {
 
   torch::Tensor logits(const torch::Tensor& hidden_states,
                        const torch::Tensor& selected_idxes) override {
-    return model_->logits(hidden_states, selected_idxes);
+    if constexpr (detail::has_logits<ModelType>::value) {
+      return model_->logits(hidden_states, selected_idxes);
+    }
+#if defined(USE_NPU)
+    if constexpr (detail::has_get_npu_lm_head<ModelType>::value) {
+      return npu_lm_head_(hidden_states, selected_idxes, 0);
+    }
+#endif
+    return lm_head_(hidden_states, selected_idxes, 0);
   }
 
   void load_model(std::unique_ptr<ModelLoader> loader) override {
+    if (!embedding_mode_ && !detail::has_logits<ModelType>::value) {
+      for (const auto& state_dict : loader->get_state_dicts()) {
+#if defined(USE_NPU)
+        if constexpr (detail::has_get_npu_lm_head<ModelType>::value) {
+          if (tie_word_embeddings_) {
+            npu_lm_head_->load_state_dict(
+                state_dict->get_dict_with_prefix(std::vector<std::string>{
+                    "model.embed_tokens.", "embed_tokens."}));
+          } else {
+            npu_lm_head_->load_state_dict(
+                state_dict->get_dict_with_prefix("lm_head."));
+          }
+        } else
+#endif
+        {
+          if (tie_word_embeddings_) {
+            lm_head_->load_state_dict(state_dict->get_dict_with_prefix(
+                std::vector<std::string>{"embed_tokens.", "embed."}));
+          } else {
+            lm_head_->load_state_dict(
+                state_dict->get_dict_with_prefix("lm_head."));
+          }
+        }
+      }
+    }
     model_->load_model(std::move(loader));
+    if (!embedding_mode_ && !detail::has_logits<ModelType>::value) {
+#if defined(USE_NPU)
+      if constexpr (detail::has_get_npu_lm_head<ModelType>::value) {
+        npu_lm_head_->verify_loaded_weights(
+            tie_word_embeddings_ ? "embed_tokens." : "lm_head.");
+        npu_lm_head_->merge_loaded_weights();
+      }
+#endif
+    }
   }
 
   void lazy_load_model(std::unique_ptr<ModelLoader> loader) override {
@@ -120,17 +181,16 @@ class RecModelImpl : public RecType {
   layer::NpuLmHead get_npu_lm_head() override {
     if constexpr (detail::has_get_npu_lm_head<ModelType>::value) {
       return model_->get_npu_lm_head();
-    } else {
-      return RecType::get_npu_lm_head();
     }
+    return npu_lm_head_;
   }
 
   void set_npu_lm_head(layer::NpuLmHead& head) override {
     if constexpr (detail::has_set_npu_lm_head<ModelType>::value) {
       model_->set_npu_lm_head(head);
-    } else {
-      RecType::set_npu_lm_head(head);
+      return;
     }
+    npu_lm_head_ = head;
   }
 
   layer::NpuWordEmbedding get_npu_word_embedding() override {
@@ -173,17 +233,16 @@ class RecModelImpl : public RecType {
   layer::LmHead get_lm_head() override {
     if constexpr (detail::has_get_lm_head<ModelType>::value) {
       return model_->get_lm_head();
-    } else {
-      return RecType::get_lm_head();
     }
+    return lm_head_;
   }
 
   void set_lm_head(layer::LmHead& head) override {
     if constexpr (detail::has_set_lm_head<ModelType>::value) {
       model_->set_lm_head(head);
-    } else {
-      RecType::set_lm_head(head);
+      return;
     }
+    lm_head_ = head;
   }
 
   layer::WordEmbedding get_word_embedding() override {
@@ -209,6 +268,14 @@ class RecModelImpl : public RecType {
  private:
   ModelType model_;
   torch::TensorOptions options_;
+
+  bool tie_word_embeddings_{false};
+  bool embedding_mode_{false};
+
+#if defined(USE_NPU)
+  layer::NpuLmHead npu_lm_head_{nullptr};
+#endif
+  layer::LmHead lm_head_{nullptr};
 };
 
 }  // namespace detail

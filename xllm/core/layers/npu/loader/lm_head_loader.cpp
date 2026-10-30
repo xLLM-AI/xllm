@@ -22,12 +22,7 @@ LmHeadLoader::LmHeadLoader(uint64_t weight_count,
                            const ModelContext& context,
                            LoadMode mode)
     : BaseLoader(weight_count, context, mode) {
-  auto options = context.get_tensor_options();
-  if (load_to_host()) {
-    working_tensors()[0] = torch::zeros({1});
-  } else {
-    working_tensors()[0] = torch::zeros({1}).to(options);
-  }
+  init_dummy_weight(0, context.get_tensor_options());
   vocab_size_ = context.get_model_args().vocab_size();
   padded_vocab_size_ = get_padded_vocab_size(context);
 }
@@ -68,7 +63,7 @@ void LmHeadLoader::load_state_dict(const StateDict& state_dict) {
 }
 
 void LmHeadLoader::verify_loaded_weights(const std::string& weight_str) const {
-  CHECK(working_tensors()[0].sizes() != std::vector<int64_t>({1}))
+  CHECK(is_weight_loaded())
       << "final lm_head weight is not loaded for " << weight_str;
 }
 

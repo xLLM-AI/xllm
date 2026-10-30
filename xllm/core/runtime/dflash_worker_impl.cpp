@@ -41,7 +41,6 @@ limitations under the License.
 #if defined(USE_NPU)
 #include "core/kv_cache/transfer/kv_transfer_completion.h"
 #include "core/layers/common/expanded_decode_metadata_builder.h"
-#include "core/layers/npu_torch/deepseek_sparse_attention.h"
 #endif
 #include "core/framework/model_loader/hf_model_config.h"
 #include "core/framework/speculative/draft_extend_input.h"
@@ -519,56 +518,6 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
 
   if (draft_impl_->get_status() == WorkerImpl::Status::LOADED) {
     const ModelArgs& draft_args = draft_impl_->context_.get_model_args();
-    // DeepSeek-V4 DSpark checkpoints carry trained mtp.0.embed /
-    // mtp.<last>.head tensors (with the draft-side QuaRot transform); replacing
-    // them after load destroys proposal quality.
-    const bool uses_own_head_and_embedding =
-        util::is_deepseek_v4_dspark_model_type(draft_args.model_type());
-    if (uses_own_head_and_embedding) {
-      LOG(INFO) << "Configured DeepSeek-V4 DSpark draft block size: "
-                << draft_args.dspark_block_size();
-      LOG(INFO) << "Configured DeepSeek-V4 DSpark SAS mode: "
-                << (draft_args.dspark_use_native_sas()
-                        ? "native explicit indices"
-                        : "CANN 9.0-compatible q_len=1 fallback");
-#if defined(USE_NPU)
-      if (draft_args.dspark_use_native_sas()) {
-        LOG(WARNING)
-            << "Native DeepSeek-V4 DSpark SAS requires an operator that "
-               "accepts non-empty ori_sparse_indices and ori_win_left="
-            << layer::deepseek_v4_ori_window_left(
-                   draft_args.window_size(),
-                   draft_args.dspark_block_size(),
-                   /*use_native_dspark_sas=*/true)
-            << ".";
-      }
-#endif
-      // Keep the trained mtp.0.embed and mtp.<last>.head modules loaded by
-      // DeepseekV4DSparkForCausalLMImpl. Sharing the target modules here makes
-      // the draft backbone/Markov head project through the wrong vocabulary
-      // basis and reduces acceptance to near-random levels.
-    } else {
-      const bool python_weights_shared =
-          draft_impl_->WorkerImpl::share_weights_from(*impl_);
-      if (!python_weights_shared) {
-#if defined(USE_NPU)
-        if (!SpeculativeConfig::is_dflash2_algorithm(
-                options_.speculative_algorithm())) {
-          auto head = impl_->get_npu_lm_head();
-          draft_impl_->set_npu_lm_head(head);
-          auto word_embedding = impl_->get_npu_word_embedding();
-          draft_impl_->set_npu_word_embedding(word_embedding);
-        } else
-#endif
-        {
-          auto head = impl_->get_lm_head();
-          draft_impl_->set_lm_head(head);
-          auto word_embedding = impl_->get_word_embedding();
-          draft_impl_->set_word_embedding(word_embedding);
-        }
-      }
-    }
-
     JsonReader reader;
     const std::string config_path = model_weights_path + "/config.json";
     CHECK(reader.parse(config_path))
