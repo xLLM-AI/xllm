@@ -691,12 +691,14 @@ class TestModelExecutorConstruction:
                 max_seqs_per_batch=4,
             )
 
+    @pytest.mark.parametrize("is_draft_engine", [False, True])
     @patch("xllm.python.model_executor.runners.decode_acl_graph.DecodeAclGraphRunner")
     @patch("xllm.python.model_executor.executor._create_attention_backend")
     def test_acl_graph_capacity_respects_decode_batch_limit(
         self,
         mock_create,
         mock_graph_runner,
+        is_draft_engine: bool,
     ):
         mock_create.return_value = StubAttentionBackend()
         model = _FakeModel(num_layers=1)
@@ -706,6 +708,7 @@ class TestModelExecutorConstruction:
             {
                 "max_position_embeddings": 128,
                 "python_graph_backend": "aclgraph",
+                "is_draft_engine": is_draft_engine,
             },
             max_seqs_per_batch=256,
             num_decoding_tokens=4,
@@ -721,7 +724,7 @@ class TestModelExecutorConstruction:
             1,
             0,
             num_decoding_tokens=4,
-            is_spec_draft=False,
+            is_spec_draft=is_draft_engine,
             enable_mega_moe_token_mask=False,
             enable_graph_mode_decode_no_padding=False,
             spec_verify_width=1,
