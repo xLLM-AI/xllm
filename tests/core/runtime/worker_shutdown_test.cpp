@@ -215,7 +215,7 @@ class BlockingKVCacheTransfer final : public KVCacheTransfer {
   bool push_kv_blocks(
       std::unordered_map<std::string, KVCacheInfo>& /*merged_kv_infos*/,
       std::shared_ptr<KVPushSynchronizerImpl>& /*layer_synchronizer*/,
-      bool /*is_spec_draft*/,
+      bool /*is_draft_model*/,
       int32_t /*kv_split_rank*/,
       int32_t /*kv_split_size*/) override {
     return true;

@@ -36,7 +36,6 @@ limitations under the License.
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/scheduler/request_output_dispatcher.h"
-#include "distributed_runtime/engine.h"
 #include "framework/block/block_manager_pool.h"
 #include "framework/model/model_args.h"
 #include "util/utils.h"
@@ -66,7 +65,7 @@ class FakeTokenizer : public Tokenizer {
   }
 };
 
-class FakeEngine : public Engine {
+class FakeEngine {
  public:
   FakeEngine(int32_t num_blocks,
              int32_t block_size,
@@ -95,18 +94,17 @@ class FakeEngine : public Engine {
       : fake_tokenizer_(std::make_unique<FakeTokenizer>()),
         fake_block_manager_(std::move(block_manager)) {}
 
-  virtual ForwardOutput step(BatchGroup& /*batch*/) { return {}; }
-  virtual std::vector<RawForwardOutput> collect_step_outputs(
+  ForwardOutput step(BatchGroup& /*batch*/) { return {}; }
+  std::vector<RawForwardOutput> collect_step_outputs(
       const BatchGroup& /*batch*/) {
-    NOT_IMPLEMENTED();
+    return {};
   }
+  void update_last_step_result(BatchGroup& /*batch*/) {}
   const Tokenizer* tokenizer() const { return fake_tokenizer_.get(); }
   BlockManagerPool* block_manager_pool() const {
     return fake_block_manager_.get();
   }
-  const ModelArgs& model_args() const override { return model_args_; }
-  const TokenizerArgs& tokenizer_args() const { NOT_IMPLEMENTED(); }
-  bool init() override { return true; }
+  const ModelArgs& model_args() const { return model_args_; }
 
  private:
   std::unique_ptr<Tokenizer> fake_tokenizer_;
@@ -526,14 +524,16 @@ void update_requests(std::vector<std::shared_ptr<Request>> requests) {
   }
 }
 
-class TestableContinuousScheduler final : public ContinuousScheduler<> {
+class TestableContinuousScheduler final : public ContinuousScheduler {
  public:
-  template <typename TargetEngine>
-  TestableContinuousScheduler(TargetEngine* engine, const Options& options)
-      : ContinuousScheduler<>(engine,
-                              options,
-                              /*model_residency_coordinator=*/nullptr,
-                              /*distributed_worker_manager=*/nullptr) {}
+  TestableContinuousScheduler(FakeEngine* engine, const Options& options)
+      : ContinuousScheduler(engine->block_manager_pool(),
+                            &engine->model_args(),
+                            engine->tokenizer(),
+                            std::move(make_scheduler_callbacks(engine)),
+                            options,
+                            /*model_residency_coordinator=*/nullptr,
+                            /*distributed_worker_manager=*/nullptr) {}
 
   BatchGroup prepare_batch_test() { return prepare_batch(); }
 
@@ -720,6 +720,7 @@ TEST(SchedulerPolicyTest, LinearPrefillPlanningAlignsAfterPartialBudget) {
       .options = options,
       .min_speculative_tokens_required = 0,
       .enable_prefix_cache = true,
+      .has_linear_attention_layers = true,
   };
   for (const auto& [token_budget, expected_tokens] :
        {std::pair<size_t, size_t>{128, 128},
@@ -1028,6 +1029,7 @@ TEST(SchedulerPolicyTest, KvlessCompositeReprobesAfterPartialAllocation) {
       .options = options,
       .min_speculative_tokens_required = 0,
       .enable_prefix_cache = true,
+      .has_linear_attention_layers = false,
   };
 
   policy.allocate_shared_blocks_for_test(sequence, state);
@@ -1055,7 +1057,11 @@ TEST(SchedulerPolicyTest, UnifiedRetryRefreshesHostRestoreBeforeChunkSizing) {
   auto profile_engine = std::make_unique<FakeEngine>(512, 128);
   ProfileManager::Options profile_options;
   profile_options.max_tokens_per_batch(16384).max_seqs_per_batch(16);
-  ProfileManager profile_manager(profile_engine.get(), profile_options);
+  ProfileManager profile_manager(
+      profile_engine->block_manager_pool(),
+      &profile_engine->model_args(),
+      profile_options,
+      std::move(make_scheduler_callbacks(profile_engine.get())));
 
   std::vector<std::shared_ptr<Request>> requests =
       generate_request({static_cast<int32_t>(kPromptTokens),
@@ -1092,6 +1098,7 @@ TEST(SchedulerPolicyTest, UnifiedRetryRefreshesHostRestoreBeforeChunkSizing) {
       .options = options,
       .min_speculative_tokens_required = 0,
       .enable_prefix_cache = true,
+      .has_linear_attention_layers = false,
   };
   ScheduleBudget budget{
       .remaining_token_budget = 16384,
@@ -1178,6 +1185,7 @@ TEST(SchedulerPolicyTest, DecodeRestoreRetrySizesChunkAfterHostMatch) {
       .options = options,
       .min_speculative_tokens_required = 0,
       .enable_prefix_cache = true,
+      .has_linear_attention_layers = false,
   };
   ScheduleBudget budget{
       .remaining_token_budget = kChunkTokens,
@@ -1277,6 +1285,7 @@ TEST_P(AsyncBlockReleasePolicyTest, WaitsWithoutPreemptionThenRetries) {
       .options = options,
       .min_speculative_tokens_required = 0,
       .enable_prefix_cache = false,
+      .has_linear_attention_layers = true,
   };
   ScheduleBudget budget{
       .remaining_token_budget = 1024,
@@ -1330,7 +1339,11 @@ TEST(SchedulerPolicyTest, DefersWhileAsyncBlockReleaseIsPending) {
   auto profile_engine = std::make_unique<FakeEngine>(256, 128);
   ProfileManager::Options profile_options;
   profile_options.max_tokens_per_batch(16384).max_seqs_per_batch(16);
-  ProfileManager profile_manager(profile_engine.get(), profile_options);
+  ProfileManager profile_manager(
+      profile_engine->block_manager_pool(),
+      &profile_engine->model_args(),
+      profile_options,
+      std::move(make_scheduler_callbacks(profile_engine.get())));
 
   std::vector<std::shared_ptr<Request>> requests = generate_request(
       {34025}, {2}, std::nullopt, std::nullopt, /*max_context_len=*/40000);
@@ -1361,6 +1374,7 @@ TEST(SchedulerPolicyTest, DefersWhileAsyncBlockReleaseIsPending) {
       .options = options,
       .min_speculative_tokens_required = 0,
       .enable_prefix_cache = true,
+      .has_linear_attention_layers = false,
   };
   ScheduleBudget budget{
       .remaining_token_budget = 16384,
@@ -1458,6 +1472,7 @@ TEST(SchedulerPolicyTest,
       .options = options,
       .min_speculative_tokens_required = 0,
       .enable_prefix_cache = true,
+      .has_linear_attention_layers = false,
   };
   ScheduleBudget budget{
       .remaining_token_budget = 16384,
@@ -1550,6 +1565,7 @@ TEST(SchedulerPolicyTest, PendingDecodeReleaseStopsFurtherPreemption) {
       .options = options,
       .min_speculative_tokens_required = 0,
       .enable_prefix_cache = true,
+      .has_linear_attention_layers = false,
   };
   ScheduleBudget budget{
       .remaining_token_budget = 16384,
@@ -1672,6 +1688,7 @@ TEST(SchedulerPolicyTest, RetriesBlockedDecodeBeforeRestoringVictim) {
       .options = options,
       .min_speculative_tokens_required = 0,
       .enable_prefix_cache = true,
+      .has_linear_attention_layers = false,
   };
   ScheduleBudget initial_budget{
       .remaining_token_budget = 16384,
@@ -1773,6 +1790,7 @@ TEST(SchedulerPolicyTest,
       .options = options,
       .min_speculative_tokens_required = 0,
       .enable_prefix_cache = true,
+      .has_linear_attention_layers = false,
   };
   ScheduleBudget initial_budget{
       .remaining_token_budget = 16384,
@@ -2438,6 +2456,7 @@ TEST(SchedulerPolicyTest, FcfsDecodeHandoffAndTerminalCleanup) {
       .options = options,
       .min_speculative_tokens_required = 0,
       .enable_prefix_cache = true,
+      .has_linear_attention_layers = false,
   };
   folly::MPMCQueue<std::shared_ptr<Request>> request_queue(4);
 

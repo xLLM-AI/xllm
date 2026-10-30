@@ -389,11 +389,6 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
     embed_tokens_ = npu_word_embedding;
   }
 
-  virtual void set_restored_npu_word_embedding(
-      layer::NpuWordEmbedding& npu_word_embedding) {
-    embed_tokens_ = npu_word_embedding;
-  }
-
  protected:
   std::string model_type_;
   torch::TensorOptions options_;
@@ -561,14 +556,6 @@ class QWen3Eagle3ForCausalLMImpl : public torch::nn::Module {
       return;  // draft checkpoint provides its own target-vocab embedding
     }
     model_->set_npu_word_embedding(npu_word_embedding);
-  }
-
-  virtual void set_restored_npu_word_embedding(
-      layer::NpuWordEmbedding& npu_word_embedding) {
-    if (owns_word_embedding_) {
-      return;  // draft checkpoint provides its own target-vocab embedding
-    }
-    model_->set_restored_npu_word_embedding(npu_word_embedding);
   }
 
  protected:

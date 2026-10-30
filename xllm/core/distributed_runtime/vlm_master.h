@@ -32,7 +32,7 @@ limitations under the License.
 #include "framework/tokenizer/tokenizer.h"
 #include "master.h"
 #include "scheduler/continuous_scheduler.h"
-#include "speculative_engine.h"
+#include "vlm_engine.h"
 #include "xllm/processors/multimodal_processor.h"
 
 namespace xllm {
@@ -84,9 +84,6 @@ class VLMMaster : public Master {
   // generate will run all requests, this is an blocking call
   void generate();
 
-  bool start_profile();
-  bool stop_profile();
-
   int get_image_limit() { return options_.limit_image_per_prompt(); }
 
  private:
@@ -95,10 +92,7 @@ class VLMMaster : public Master {
   // The LLM draft prepares VirtualMemory pages before loading worker weights.
   std::unique_ptr<ModelResidencyCoordinator> draft_model_residency_coordinator_;
 
-  // Exactly one of these owners is populated for VLM and VLM speculative
-  // execution respectively.
   std::unique_ptr<VLMEngine> vlm_engine_;
-  std::unique_ptr<SpeculativeEngineBase<VLMEngine>> speculative_engine_;
 
   // Scheduler must be destroyed before the engine it references.
   std::unique_ptr<Scheduler> scheduler_;

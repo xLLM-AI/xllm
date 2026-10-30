@@ -27,8 +27,6 @@ namespace xllm {
 class DisaggPDService : public proto::DisaggPDService {
  public:
   explicit DisaggPDService(DisaggPDScheduler* scheduler,
-                           Engine* engine,
-                           int32_t kv_cache_block_tokens,
                            DisaggPDServiceOptions response_options = {});
   explicit DisaggPDService() {}
   virtual ~DisaggPDService() = default;

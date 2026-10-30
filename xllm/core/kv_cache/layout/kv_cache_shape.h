@@ -157,6 +157,6 @@ KVCacheShape build_speculative_draft_kv_cache_shape(
 // interpreting model attention semantics.
 KVCacheCreateOptions get_kv_cache_create_options(const ModelArgs& model_args,
                                                  const KVCacheShape& shape,
-                                                 bool is_spec_draft);
+                                                 bool is_draft_model);
 
 }  // namespace xllm

@@ -1467,7 +1467,8 @@ TEST(KVCacheTest, SharedKPoolBudgetCoversBothModelsWithoutDoubleCounting) {
   options.max_seqs_per_batch = 2;
   options.num_speculative_tokens = 5;
   KVCacheEstimateOptions draft_options = options;
-  draft_options.is_draft_engine = true;
+  draft_options.is_draft_model = true;
+  draft_options.max_seqs_per_batch = 1;
   draft_options.num_speculative_tokens = 0;
 
   for (const int32_t nextn_layers : {0, 1}) {

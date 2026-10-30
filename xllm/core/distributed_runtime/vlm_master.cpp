@@ -28,7 +28,6 @@ limitations under the License.
 
 #include "common/metrics.h"
 #include "core/common/message.h"
-#include "core/distributed_runtime/engine_dispatch.h"
 #include "core/distributed_runtime/kv_cache_transfer_coordinator.h"
 #include "core/distributed_runtime/model_residency_coordinator.h"
 #include "core/framework/config/execution_config.h"
@@ -58,12 +57,6 @@ limitations under the License.
 namespace xllm {
 
 namespace {
-
-bool should_use_vlm_speculative_engine(const Options& options) {
-  return !SpeculativeConfig::is_suffix_algorithm(
-             options.speculative_algorithm()) &&
-         !options.draft_model_path().value_or("").empty();
-}
 
 std::vector<Message> build_user_messages_from_image_urls(
     std::string prompt,
@@ -145,15 +138,11 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
   CHECK(!options_.enable_disagg_pd() ||
         options_.kv_cache_transfer_mode() != "PULL")
       << "VLM disaggregated PD does not support KV cache PULL.";
-  const bool use_speculative_engine =
-      should_use_vlm_speculative_engine(options_);
+  const bool loads_draft_model = SpeculativeConfig::loads_draft_model(options_);
   const std::string model_type =
       get_model_type(options_.model_path(), options_.backend());
   const std::optional<std::string> cp_error = validate_context_parallel_config(
-      options_,
-      use_speculative_engine ? EngineType::VLMSSM : EngineType::VLM,
-      model_type,
-      options_.nnodes());
+      options_, EngineType::VLM, model_type, options_.nnodes());
   CHECK(!cp_error.has_value()) << cp_error.value();
   const std::optional<std::string> speculative_error =
       ModelConfig::validate_python_speculative_decode(
@@ -222,7 +211,7 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
       .max_tokens_per_chunk_for_prefill(
           options_.max_tokens_per_chunk_for_prefill());
 
-  if (use_speculative_engine) {
+  if (loads_draft_model) {
     CHECK(!options_.enable_disagg_pd())
         << "VLM speculative decoding does not support disaggregated PD";
     CHECK(!options_.enable_service_routing())
@@ -230,11 +219,7 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
     CHECK(!options_.enable_adaptive_target_verify())
         << "VLM speculative decoding does not support adaptive speculative "
            "decode";
-    const std::string draft_model_path =
-        options_.draft_model_path().value_or("");
-    CHECK(!draft_model_path.empty())
-        << "draft model path is required for VLM speculative decoding";
-    engine_options.draft_model_path(draft_model_path)
+    engine_options.draft_model_path(options_.draft_model_path().value())
         .num_speculative_tokens(options_.num_speculative_tokens())
         .speculative_algorithm(options_.speculative_algorithm())
         .enable_probabilistic_draft(options_.enable_probabilistic_draft())
@@ -271,17 +256,18 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
         .prefetch_timeout(options_.prefetch_timeout())
         .layers_wise_copy_batchs(options_.layers_wise_copy_batchs())
         .kv_cache_dtype(options_.kv_cache_dtype());
-    speculative_engine_ =
-        std::make_unique<SpeculativeEngineBase<VLMEngine>>(engine_options);
+  }
+  vlm_engine_ = std::make_unique<VLMEngine>(engine_options);
+  const std::shared_ptr<DistributedWorkerManager> distributed_worker_manager =
+      vlm_engine_->get_distributed_worker_manager();
+  if (loads_draft_model) {
     draft_model_residency_coordinator_ =
         std::make_unique<ModelResidencyCoordinator>(
             ModelResidencyCoordinator::Options{
                 .enabled = KVCacheConfig::get_instance().enable_vmm_kvcache() ||
                            LoadConfig::get_instance().enable_vmm_weights(),
                 .model_id = engine_options.model_id()},
-            speculative_engine_->get_distributed_worker_manager());
-  } else {
-    vlm_engine_ = std::make_unique<VLMEngine>(engine_options);
+            distributed_worker_manager);
   }
   if (!is_leader()) {
     return;
@@ -291,38 +277,22 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
       KVCacheTransferCoordinator::Options{
           .dp_size = options_.dp_size(),
           .prefetch_timeout_ms = options_.prefetch_timeout()},
-      dispatch_engine(
-          [](auto* engine) { return engine->get_distributed_worker_manager(); },
-          vlm_engine_.get(),
-          speculative_engine_.get()));
+      distributed_worker_manager);
 
-  auto finish_engine_initialization = [this](auto* engine) {
-    model_args_ = engine->model_args();
-    if (options_.enable_service_routing()) {
-      XServiceClient* xservice_client = XServiceClient::get_instance();
-      CHECK(xservice_client->init(options_.etcd_addr().value_or(""),
-                                  options_.instance_name().value_or(""),
-                                  options_.etcd_namespace().value_or("")))
-          << "XServiceClient init fail!";
-    }
-  };
-  if (use_speculative_engine) {
-    const LLMEngine::ModelInitCallback prepare_draft =
-        [this](const ModelLoader& model_loader,
-               int64_t num_layers,
-               int32_t dp_size,
-               int32_t tp_size,
-               MasterStatus master_status) {
-          return draft_model_residency_coordinator_->initialize_model(
-              model_loader, num_layers, dp_size, tp_size, master_status);
-        };
-    CHECK(speculative_engine_->init(
-        options_.master_status(), prepare_draft, kv_transfer_coordinator_));
-    finish_engine_initialization(speculative_engine_.get());
-  } else {
-    CHECK(vlm_engine_->init(options_.master_status()));
-    finish_engine_initialization(vlm_engine_.get());
-  }
+  const ModelInitCallback prepare_draft =
+      loads_draft_model
+          ? [this](const ModelLoader& model_loader,
+                   int64_t num_layers,
+                   int32_t dp_size,
+                   int32_t tp_size,
+                   MasterStatus master_status) {
+              return draft_model_residency_coordinator_->initialize_model(
+                  model_loader, num_layers, dp_size, tp_size, master_status);
+            }
+          : ModelInitCallback{};
+  CHECK(vlm_engine_->init(options_.master_status(), prepare_draft));
+  model_args_ = vlm_engine_->model_args();
+  init_service_routing();
 
   SchedulerOptions scheduler_options;
   scheduler_options.max_tokens_per_batch(options.max_tokens_per_batch())
@@ -349,36 +319,30 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
       .disable_ttft_profiling(options_.disable_ttft_profiling())
       .enable_schedule_overlap(options_.enable_schedule_overlap())
       .server_idx(options_.server_idx());
-  dispatch_engine(
-      [&](auto* engine) {
-        scheduler_ = create_continuous_scheduler(
-            engine,
-            scheduler_options,
-            engine->get_distributed_worker_manager(),
-            /*model_residency_coordinator=*/nullptr,
-            kv_transfer_coordinator_);
-      },
-      vlm_engine_.get(),
-      speculative_engine_.get());
+  scheduler_ =
+      create_continuous_scheduler(vlm_engine_->block_manager_pool(),
+                                  &model_args_,
+                                  vlm_engine_->tokenizer(),
+                                  make_scheduler_callbacks(vlm_engine_.get()),
+                                  scheduler_options,
+                                  /*model_residency_coordinator=*/nullptr,
+                                  distributed_worker_manager,
+                                  kv_transfer_coordinator_,
+                                  {},
+                                  /*draft_step_controller=*/nullptr);
 
   if (options_.enable_service_routing()) {
     auto& instance_info = scheduler_->get_instance_info();
     XServiceClient::get_instance()->register_instance(instance_info);
   }
 
-  dispatch_engine(
-      [this](auto* engine) {
-        chat_template_ =
-            std::make_unique<JinjaChatTemplate>(engine->tokenizer_args());
-        tokenizer_ = engine->tokenizer()->clone();
-        processor_ =
-            create_multimodal_processor(model_args_,
-                                        tokenizer_,
-                                        options_.max_processor_cache_items(),
-                                        engine->tokenizer_args());
-      },
-      vlm_engine_.get(),
-      speculative_engine_.get());
+  chat_template_ =
+      std::make_unique<JinjaChatTemplate>(vlm_engine_->tokenizer_args());
+  tokenizer_ = vlm_engine_->tokenizer()->clone();
+  processor_ = create_multimodal_processor(model_args_,
+                                           tokenizer_,
+                                           options_.max_processor_cache_items(),
+                                           vlm_engine_->tokenizer_args());
 
   request_factory_ = std::make_unique<VLMRequestFactory>(processor_.get(),
                                                          chat_template_.get(),
@@ -639,18 +603,6 @@ void VLMMaster::generate() {
   running_.store(true, std::memory_order_relaxed);
   scheduler_->generate();
   running_.store(false, std::memory_order_relaxed);
-}
-
-bool VLMMaster::start_profile() {
-  return dispatch_engine([](auto* engine) { return engine->start_profile(); },
-                         vlm_engine_.get(),
-                         speculative_engine_.get());
-}
-
-bool VLMMaster::stop_profile() {
-  return dispatch_engine([](auto* engine) { return engine->stop_profile(); },
-                         vlm_engine_.get(),
-                         speculative_engine_.get());
 }
 
 }  // namespace xllm

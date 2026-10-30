@@ -20,7 +20,6 @@ limitations under the License.
 #include <folly/futures/Future.h>
 
 #include <atomic>
-#include <concepts>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -34,23 +33,25 @@ limitations under the License.
 
 #include "core/common/macros.h"
 #include "core/common/types.h"
-#include "core/distributed_runtime/engine.h"
 #include "core/distributed_runtime/xservice_client.h"
 #include "core/framework/batch/batch_factory.h"
 #include "core/framework/batch/batch_group.h"
-#include "core/framework/block/kv_cache_manager.h"
+#include "core/framework/block/block_manager_pool.h"
 #include "core/framework/request/priority_comparator.h"
 #include "core/framework/request/request.h"
 #include "core/framework/request/sequence.h"
-#include "core/scheduler/profile/profile_manager.h"
 #include "core/scheduler/request_output_dispatcher.h"
 #include "core/scheduler/request_priority_queue.h"
 #include "core/scheduler/scheduler.h"
+#include "core/scheduler/scheduler_callbacks.h"
 #include "core/scheduler/scheduler_metrics.h"
 #include "core/scheduler/scheduler_notifier.h"
 
 namespace xllm {
+
+class DraftStepController;
 class DistributedWorkerManager;
+class ProfileManager;
 class RequestPriorityQueue;
 class SchedulerConfig;
 class SchedulerPolicy;
@@ -86,13 +87,21 @@ struct BatchMode {
   std::string priority_strategy = "fcfs";
 };
 
-class ContinuousSchedulerBase : public Scheduler {
+class ContinuousScheduler : public Scheduler {
  public:
   using Options = SchedulerOptions;
-  using StepCallback = std::function<ForwardOutput(BatchGroup&)>;
-  using ResultCallback = std::function<void(BatchGroup&)>;
 
-  ~ContinuousSchedulerBase() override;
+  ~ContinuousScheduler() override;
+
+  // Flat dependencies the scheduler was constructed with; services layered
+  // on top of the scheduler (e.g. DisaggPDService) take them from here
+  // instead of receiving them again as constructor parameters.
+  BlockManagerPool* block_manager_pool() const { return block_manager_pool_; }
+  bool has_linear_attention_layers() const {
+    return has_linear_attention_layers_;
+  }
+  const Tokenizer* tokenizer() const { return tokenizer_; }
+  const ModelArgs* model_args() const { return model_args_; }
 
   bool add_request(std::shared_ptr<Request>& request) override;
 
@@ -129,17 +138,21 @@ class ContinuousSchedulerBase : public Scheduler {
 
   const InstanceInfo& get_instance_info() override { return instance_info_; }
 
- protected:
-  ContinuousSchedulerBase(
-      Engine* engine,
+  ContinuousScheduler(
+      BlockManagerPool* block_manager_pool,
+      const ModelArgs* model_args,
+      const Tokenizer* tokenizer,
+      SchedulerCallbacks callbacks,
       const Options& options,
-      StepCallback step_callback,
-      ResultCallback result_callback,
       std::shared_ptr<ModelResidencyCoordinator> model_residency_coordinator =
           nullptr,
       std::shared_ptr<DistributedWorkerManager> distributed_worker_manager =
-          nullptr);
+          nullptr,
+      // The adaptive-draft-step calibration reads the engine-supplied
+      // controller; nullable for scheduler-only users (tests, benchmarks).
+      DraftStepController* draft_step_controller = nullptr);
 
+ protected:
   void clear_mtp_bootstrap(Request* request);
   void drain_prefetch_pipeline();
   void populate_heartbeat_request(
@@ -170,15 +183,14 @@ class ContinuousSchedulerBase : public Scheduler {
   // Policy object that encapsulates all batch-assembly logic.
   std::unique_ptr<SchedulerPolicy> policy_;
 
-  // the engine to run the batch
-  Engine* resource_engine_;
+  const ModelArgs* model_args_;
+  const Tokenizer* tokenizer_;
+  SchedulerCallbacks callbacks_;
+
+  BlockManagerPool* block_manager_pool_;
+
   std::shared_ptr<DistributedWorkerManager> distributed_worker_manager_;
   std::shared_ptr<ModelResidencyCoordinator> model_residency_coordinator_;
-
-  StepCallback step_callback_;
-  ResultCallback result_callback_;
-
-  KVCacheManager* kv_cache_manager_;
 
   std::shared_ptr<SchedulerNotifier> notifier_;
 
@@ -193,7 +205,7 @@ class ContinuousSchedulerBase : public Scheduler {
 
   // a batch of requests in running state, sorted by priority from high to low.
   // This may include decoding requests and prefill requests in chunked prefill
-  // scheudler.
+  // scheduler.
   std::vector<std::shared_ptr<Request>> running_requests_;
 
   // a batch of sequences that scheduled to run, sorted by priority from high to
@@ -215,6 +227,9 @@ class ContinuousSchedulerBase : public Scheduler {
 
   bool enable_prefix_cache_ = false;
   bool enable_in_batch_prefix_cache_ = false;
+
+  // Cached from model args at construction; layer types do not change.
+  bool has_linear_attention_layers_ = false;
 
   // the number of requests that are waiting to be scheduled
   std::atomic<size_t> pending_requests_{0};
@@ -245,9 +260,6 @@ class ContinuousSchedulerBase : public Scheduler {
 
   // build a batch of requests from the priority queue
   virtual BatchGroup prepare_batch();
-
-  // tokenizer
-  std::unique_ptr<Tokenizer> tokenizer_;
 
   XServiceClient* xservice_client_ = nullptr;
   XServiceClient::HeartbeatCallbackRegistration
@@ -286,71 +298,6 @@ class ContinuousSchedulerBase : public Scheduler {
       std::vector<Sequence*>& sequences) const;
 
   void create_queues(const Options& options);
-};
-
-template <typename EngineType = Engine>
-  requires std::derived_from<EngineType, Engine>
-class ContinuousScheduler : public ContinuousSchedulerBase {
- public:
-  using Options = SchedulerOptions;
-
-  ContinuousScheduler(
-      EngineType* engine,
-      const Options& options,
-      std::shared_ptr<ModelResidencyCoordinator> model_residency_coordinator =
-          nullptr,
-      std::shared_ptr<DistributedWorkerManager> distributed_worker_manager =
-          nullptr)
-    requires requires(EngineType* typed_engine, BatchGroup& batch) {
-      { typed_engine->step(batch) } -> std::same_as<ForwardOutput>;
-      {
-        typed_engine->collect_step_outputs(batch)
-      } -> std::same_as<std::vector<RawForwardOutput>>;
-    }
-      : ContinuousSchedulerBase(
-            engine,
-            options,
-            [engine](BatchGroup& batch) { return engine->step(batch); },
-            [engine](BatchGroup& batch) {
-              batch.apply_outputs(engine->collect_step_outputs(batch),
-                                  BatchOutputAction::COMMIT_PENDING);
-            },
-            std::move(model_residency_coordinator),
-            std::move(distributed_worker_manager)),
-        engine_(engine) {}
-
-  template <typename TargetEngine>
-    requires std::same_as<EngineType, Engine> &&
-                 requires(TargetEngine* typed_engine, BatchGroup& batch) {
-                   static_cast<Engine*>(typed_engine);
-                   { typed_engine->step(batch) } -> std::same_as<ForwardOutput>;
-                   {
-                     typed_engine->collect_step_outputs(batch)
-                   } -> std::same_as<std::vector<RawForwardOutput>>;
-                 }
-  ContinuousScheduler(
-      TargetEngine* engine,
-      const Options& options,
-      std::shared_ptr<ModelResidencyCoordinator> model_residency_coordinator =
-          nullptr,
-      std::shared_ptr<DistributedWorkerManager> distributed_worker_manager =
-          nullptr)
-      : ContinuousSchedulerBase(
-            static_cast<Engine*>(engine),
-            options,
-            [engine](BatchGroup& batch) { return engine->step(batch); },
-            [engine](BatchGroup& batch) {
-              batch.apply_outputs(engine->collect_step_outputs(batch),
-                                  BatchOutputAction::COMMIT_PENDING);
-            },
-            std::move(model_residency_coordinator),
-            std::move(distributed_worker_manager)),
-        engine_(static_cast<Engine*>(engine)) {}
-
-  ~ContinuousScheduler() override = default;
-
- protected:
-  EngineType* engine_;
 };
 
 }  // namespace xllm

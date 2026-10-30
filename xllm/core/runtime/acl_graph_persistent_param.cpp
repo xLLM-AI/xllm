@@ -68,7 +68,7 @@ int64_t get_decode_graph_token_capacity(const runtime::Options& options) {
     return runtime::get_decode_graph_token_bucket(
         token_capacity, options.enable_graph_mode_decode_no_padding());
   }
-  if (options.enable_speculative_decode() && !options.is_draft_engine()) {
+  if (options.enable_speculative_decode() && !options.is_draft_model()) {
     token_capacity *= options.num_decoding_tokens();
   }
   return runtime::get_decode_graph_token_bucket(

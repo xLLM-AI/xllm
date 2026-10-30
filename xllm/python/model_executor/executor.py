@@ -91,7 +91,7 @@ def _validate_npu_cp_model_config(config: dict, num_decoding_tokens: int) -> Non
     is_glm5_next = model_type in ("glm5_next", "glm5_3_flash")
     is_glm_mtp_draft = (
         model_type == "glm_moe_dsa_mtp"
-        and config.get("is_draft_engine", False)
+        and config.get("is_draft_model", False)
         and bool(config.get("is_mtp_algorithm", False))
     )
     if model_type not in ("qwen3", "glm_moe_dsa", "deepseek_v4") and not is_glm5_next and not is_glm_mtp_draft:
@@ -114,7 +114,7 @@ def _validate_npu_cp_model_config(config: dict, num_decoding_tokens: int) -> Non
     if model_type == "deepseek_v4" and kv_split != 1:
         raise NotImplementedError("Python DeepSeek-V4 CP requires replicated KV caches; use kv_split_size=1")
     if is_glm5_next:
-        if config.get("engine_type", "LLM") == "SSM":
+        if speculative:
             raise NotImplementedError(
                 "Python GLM-5 Next CP does not support target-side speculative verification; "
                 "run speculation on a cp_size=1 Decode instance"
@@ -280,7 +280,7 @@ class ModelExecutor:
         self.execution_model = model.model
         self.supports_layerwise_kv_load = bool(
             getattr(self.execution_model, "supports_layerwise_kv_load", False)
-        ) and not config.get("is_draft_engine", False)
+        ) and not config.get("is_draft_model", False)
         self._kv_bound = False
         cp_size = int(config.get("cp_size", 1))
         cp_rank = int(config.get("cp_rank", 0))
@@ -447,7 +447,7 @@ class ModelExecutor:
             and bool(config.get("is_mtp_algorithm", False))
             and 1 <= self.num_speculative_tokens <= 16
             and int(config.get("num_speculative_tokens", 0)) + 1 == int(num_decoding_tokens)
-            and not config.get("is_draft_engine", False)
+            and not config.get("is_draft_model", False)
             and config.get("task_type", "generate") == "generate"
             and qwen_mtp_parallel
             and not config.get("enable_adaptive_draft_step", False)
@@ -456,7 +456,7 @@ class ModelExecutor:
         self._prepared_qwen_mtp_draft = (
             config.get("model_type") == "qwen3_5_mtp"
             and bool(config.get("is_mtp_algorithm", False))
-            and config.get("is_draft_engine", False)
+            and config.get("is_draft_model", False)
             and self.num_speculative_tokens == 0
             and 1 <= num_decoding_tokens <= 17
             and config.get("task_type", "generate") == "generate"
@@ -468,7 +468,7 @@ class ModelExecutor:
             self._prepared_qwen_gdn
             and self.num_speculative_tokens == 0
             and ordinary_decode
-            and not config.get("is_draft_engine", False)
+            and not config.get("is_draft_model", False)
             and config.get("task_type", "generate") == "generate"
         )
         self._supports_prepared_metadata = (
@@ -587,7 +587,7 @@ class ModelExecutor:
                         dp_size,
                         dp_rank,
                         num_decoding_tokens=num_decoding_tokens,
-                        is_spec_draft=bool(config.get("is_draft_engine", False)),
+                        is_draft_model=bool(config.get("is_draft_model", False)),
                         enable_mega_moe_token_mask=bool(config.get("enable_mega_moe", False)),
                         enable_graph_mode_decode_no_padding=bool(
                             config.get("enable_graph_mode_decode_no_padding", False)

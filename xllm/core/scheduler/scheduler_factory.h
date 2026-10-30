@@ -15,7 +15,6 @@ limitations under the License.
 
 #pragma once
 
-#include <concepts>
 #include <cstdint>
 #include <memory>
 #include <utility>
@@ -39,51 +38,58 @@ enum class SchedulerKind : int8_t {
 
 SchedulerKind select_scheduler_kind(const SchedulerOptions& options);
 
-template <typename TargetEngine>
-  requires requires(TargetEngine* engine, BatchGroup& batch) {
-    static_cast<Engine*>(engine);
-    { engine->step(batch) } -> std::same_as<ForwardOutput>;
-    {
-      engine->collect_step_outputs(batch)
-    } -> std::same_as<std::vector<RawForwardOutput>>;
-  }
-std::unique_ptr<Scheduler> create_continuous_scheduler(
-    TargetEngine* engine,
+// Creates the scheduler kind selected by the options, binding the flat
+// scheduler callbacks. All scheduler constructors take the flat dependency
+// set (pool, model args, tokenizer, callbacks, ...).
+inline std::unique_ptr<Scheduler> create_continuous_scheduler(
+    BlockManagerPool* block_manager_pool,
+    const ModelArgs* model_args,
+    const Tokenizer* tokenizer,
+    SchedulerCallbacks callbacks,
     SchedulerOptions options,
-    std::shared_ptr<DistributedWorkerManager> distributed_worker_manager =
-        nullptr,
     std::shared_ptr<ModelResidencyCoordinator> model_residency_coordinator =
+        nullptr,
+    std::shared_ptr<DistributedWorkerManager> distributed_worker_manager =
         nullptr,
     std::shared_ptr<KVCacheTransferCoordinator> kv_transfer_coordinator =
         nullptr,
-    DisaggPDServiceOptions response_options = {}) {
+    DisaggPDServiceOptions response_options = {},
+    DraftStepController* draft_step_controller = nullptr) {
   switch (select_scheduler_kind(options)) {
     case SchedulerKind::DISAGG_PD:
       return std::make_unique<DisaggPDScheduler>(
-          engine,
+          block_manager_pool,
+          model_args,
+          tokenizer,
+          std::move(callbacks),
           options,
           std::move(distributed_worker_manager),
           std::move(model_residency_coordinator),
           std::move(kv_transfer_coordinator),
-          std::move(response_options));
+          std::move(response_options),
+          draft_step_controller);
     case SchedulerKind::ZERO_EVICTION:
       return std::make_unique<ZeroEvictionScheduler>(
-          engine,
+          block_manager_pool,
+          model_args,
+          tokenizer,
+          std::move(callbacks),
           options,
           std::move(model_residency_coordinator),
-          std::move(distributed_worker_manager));
+          std::move(distributed_worker_manager),
+          draft_step_controller);
     case SchedulerKind::CONTINUOUS:
-      return std::make_unique<ContinuousScheduler<TargetEngine>>(
-          engine,
-          options,
-          std::move(model_residency_coordinator),
-          std::move(distributed_worker_manager));
+      break;
   }
-  return std::make_unique<ContinuousScheduler<TargetEngine>>(
-      engine,
+  return std::make_unique<ContinuousScheduler>(
+      block_manager_pool,
+      model_args,
+      tokenizer,
+      std::move(callbacks),
       options,
       std::move(model_residency_coordinator),
-      std::move(distributed_worker_manager));
+      std::move(distributed_worker_manager),
+      draft_step_controller);
 }
 
 std::unique_ptr<DiTScheduler> create_dit_scheduler(

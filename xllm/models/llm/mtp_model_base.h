@@ -23,8 +23,8 @@ limitations under the License.
 #include <type_traits>
 #include <vector>
 
+#include "core/framework/config/mtp_utils.h"
 #include "core/framework/model/mtp_topk_state.h"
-#include "core/framework/speculative/mtp_utils.h"
 #include "core/framework/state_dict/utils.h"
 #include "core/util/utils.h"
 #include "llm_model_base.h"

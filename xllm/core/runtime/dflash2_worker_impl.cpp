@@ -30,6 +30,7 @@ limitations under the License.
 #include "core/framework/sampling/logits_processor.h"
 #include "core/framework/sampling/sampler.h"
 #include "core/framework/speculative/draft_proposal.h"
+#include "core/runtime/spec_runtime_helpers.h"
 #include "core/util/tensor_helper.h"
 #include "util/timer.h"
 
@@ -180,7 +181,7 @@ DraftProposal DFlash2WorkerImpl::run_decode_draft(
                              num_speculative_tokens,
                              selector_top_k,
                              draft_impl_->device(),
-                             sampling_process_group_);
+                             spec_detail::spec_sampling_group(parallel_args_));
 
   query_input.skip_sampling_for_logits_only = true;
   query_input.return_selected_hidden = true;

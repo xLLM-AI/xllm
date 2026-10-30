@@ -759,7 +759,7 @@ def test_block_draft_inherited_execute_keeps_entry_preparation_signature() -> No
 def test_replay_selects_stream_and_preserves_output_ownership(has_tasks: bool, has_mtp_inputs: bool, mode: str) -> None:
     runner = _runner()
     runner.num_decoding_tokens = 4 if mode == "mtp_target" else 1
-    runner._is_spec_draft = mode == "spec_draft"
+    runner._is_draft_model = mode == "spec_draft"
     caller = Mock()
     capture = Mock()
     runner._stream = capture

@@ -16,6 +16,8 @@ limitations under the License.
 
 #pragma once
 
+#include <glog/logging.h>
+
 #include <algorithm>
 #include <cstdint>
 #include <optional>
@@ -1281,6 +1283,28 @@ inline bool has_linear_attention_layers(const ModelArgs& args) {
 inline bool is_qwen3_5_target_model_type(std::string_view model_type) {
   return model_type == "qwen3_5" || model_type == "qwen3_5_moe" ||
          model_type == "qwen3_5_text" || model_type == "qwen3_5_moe_text";
+}
+
+// Reconciles the model vocab size against the tokenizer's: adopts the
+// tokenizer size when unset, warns on unsafe mismatch.
+inline void reconcile_vocab_size(ModelArgs& args,
+                                 int64_t tokenizer_vocab_size) {
+  const int64_t model_vocab_size = args.vocab_size();
+  if (tokenizer_vocab_size == model_vocab_size) {
+    return;
+  }
+  // use tokenizer vocab size if model vocab size is not set
+  if (model_vocab_size <= 0) {
+    LOG(WARNING) << "Model vocab size is not set, using tokenizer vocab size: "
+                 << tokenizer_vocab_size;
+    args.vocab_size(tokenizer_vocab_size);
+  } else if (tokenizer_vocab_size > model_vocab_size) {
+    LOG(WARNING) << "Unsafe vocab mismatch: tokenizer: " << tokenizer_vocab_size
+                 << ", model: " << model_vocab_size;
+  } else {
+    LOG(INFO) << "Tokenizer/model vocab differ: tokenizer="
+              << tokenizer_vocab_size << ", model=" << model_vocab_size;
+  }
 }
 
 inline bool is_glm5_next_target_model_type(std::string_view model_type) {

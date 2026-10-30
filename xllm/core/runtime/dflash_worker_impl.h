@@ -22,6 +22,7 @@ limitations under the License.
 #include <tuple>
 #include <vector>
 
+#include "core/framework/config/speculative_config.h"
 #include "core/framework/speculative/draft_proposal.h"
 #include "core/framework/speculative/embedding_cache.h"
 #include "core/kv_cache/transfer/kv_cache_transfer.h"
@@ -74,6 +75,15 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
                    const torch::Device& device,
                    const runtime::Options& options);
 
+ private:
+  // Delegating ctor: resolves the config-derived hybrid routing once so the
+  // base options, draft options, and hybrid_pipeline_ all agree.
+  DFlashWorkerImpl(const ParallelArgs& parallel_args,
+                   const torch::Device& device,
+                   const runtime::Options& options,
+                   bool hybrid_pipeline);
+
+ public:
   ~DFlashWorkerImpl() override;
 
   bool init_model(const std::string& model_weights_path,
@@ -147,10 +157,6 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
                                             const DraftProposal& draft_proposal,
                                             LlmForwardInput& validate_input);
 
-  // Mirrors sampled tokens to rank 0 under schedule-overlap so every rank
-  // commits the same prefix. No-op for a single rank.
-  void maybe_broadcast_spec_tokens(torch::Tensor& tokens);
-
   void update_decode_step_input(
       LlmForwardInput& input,
       const std::vector<EmbeddingCache::DecodeState>& last_states) const;
@@ -164,14 +170,13 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
                                      const SampleOutput& validate_output);
 
  protected:
-  // Shared by the DSpark/DFlash2 sampling sites.
-  ProcessGroup* sampling_process_group_ = nullptr;
-
   // Block drafts (DFlash2/DSpark) condition their first step on the decode
   // batch's first tokens.
   torch::Tensor anchor_token_ids(const LlmForwardInput& input) const;
   int32_t mask_token_id_ = -1;
   int64_t expected_context_hidden_size_ = 0;
+  // Resolved once in the constructor; qwen3.5 hybrid pipeline routing.
+  bool hybrid_pipeline_ = false;
   // Whether the target model owns recurrent (linear attention) layers.
   // Fixed once the target finishes loading; hybrid spec-verify gates read
   // this instead of re-scanning layer_types.

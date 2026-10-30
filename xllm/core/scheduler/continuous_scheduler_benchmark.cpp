@@ -19,7 +19,7 @@ limitations under the License.
 // scheduler loop then runs prepare_batch (drain the queue, collect finished
 // requests, allocate KV blocks through BlockManagerPool, build Batch objects)
 // and, after the engine step, process_batch_output. These benchmarks time each
-// of those scheduler-side steps against a FakeEngine that owns a real
+// of those scheduler-side steps against a FakeEngineContext that owns a real
 // BlockManagerPool but never runs a model, so the numbers are pure scheduler +
 // block-manager CPU cost.
 //
@@ -56,7 +56,6 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/types.h"
-#include "core/distributed_runtime/engine.h"
 #include "core/framework/block/block_manager_pool.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/request/request.h"
@@ -65,6 +64,7 @@ limitations under the License.
 #include "core/framework/request/stopping_checker.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/tokenizer/tokenizer.h"
+#include "core/runtime/forward_params.h"
 #include "core/scheduler/continuous_scheduler.h"
 
 namespace xllm {
@@ -93,10 +93,9 @@ class FakeTokenizer final : public Tokenizer {
   }
 };
 
-// Engine stand-in: real BlockManagerPool, no model.
-class FakeEngine final : public Engine {
- public:
-  FakeEngine() {
+// Engine dependencies stand-in: real BlockManagerPool, no model, no engine.
+struct FakeEngineContext {
+  FakeEngineContext() {
     BlockManagerPool::Options options;
     options.num_blocks(kNumBlocks)
         .block_size(kBlockSize)
@@ -106,17 +105,6 @@ class FakeEngine final : public Engine {
         std::make_unique<BlockManagerPool>(options, /*dp_size=*/1);
   }
 
-  virtual ForwardOutput step(BatchGroup& /*batch*/) { return {}; }
-  std::vector<RawForwardOutput> collect_step_outputs(const BatchGroup& batch) {
-    return std::vector<RawForwardOutput>(batch.size());
-  }
-  const Tokenizer* tokenizer() const override { return &fake_tokenizer_; }
-  BlockManagerPool* block_manager_pool() const override {
-    return block_manager_pool_.get();
-  }
-  const ModelArgs& model_args() const override { return model_args_; }
-
- private:
   FakeTokenizer fake_tokenizer_;
   std::unique_ptr<BlockManagerPool> block_manager_pool_;
   ModelArgs model_args_;
@@ -124,14 +112,9 @@ class FakeEngine final : public Engine {
 
 // Exposes the response processor so each iteration can drain the async
 // completion callbacks before the next one starts.
-class BenchContinuousScheduler final : public ContinuousScheduler<> {
+class BenchContinuousScheduler final : public ContinuousScheduler {
  public:
-  template <typename TargetEngine>
-  BenchContinuousScheduler(TargetEngine* engine, const Options& options)
-      : ContinuousScheduler<>(engine,
-                              options,
-                              /*model_residency_coordinator=*/nullptr,
-                              /*distributed_worker_manager=*/nullptr) {}
+  using ContinuousScheduler::ContinuousScheduler;
 
   BatchGroup prepare_batch_test() { return prepare_batch(); }
 
@@ -153,8 +136,16 @@ class SchedulerFixture final {
   }
 
  private:
-  SchedulerFixture() : scheduler_(&engine_, make_scheduler_options()) {}
-
+  SchedulerFixture()
+      : scheduler_(engine_.block_manager_pool_.get(),
+                   &engine_.model_args_,
+                   &engine_.fake_tokenizer_,
+                   SchedulerCallbacks{/*step=*/[](BatchGroup& /*batch*/) {
+                                        return ForwardOutput{};
+                                      },
+                                      /*update_last_step_result=*/
+                                      [](BatchGroup& /*batch*/) {}},
+                   make_scheduler_options()) {}
   static SchedulerOptions make_scheduler_options() {
     SchedulerOptions options;
     options.max_tokens_per_batch(kMaxTokensPerBatch)
@@ -168,7 +159,7 @@ class SchedulerFixture final {
   }
 
   // Declared before the scheduler so it outlives it.
-  FakeEngine engine_;
+  FakeEngineContext engine_;
   BenchContinuousScheduler scheduler_;
 };
 

@@ -68,6 +68,9 @@ class ModelResidencyCoordinator final {
   // This query does not wait for an in-progress allocator transition.
   bool is_suspended() const;
 
+  // Virtual memory is on and no draft model rides on the same workers.
+  bool enabled() const { return options_.enabled; }
+
  private:
   struct PendingSleep {
     MasterStatus master_status;

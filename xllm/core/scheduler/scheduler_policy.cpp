@@ -28,6 +28,7 @@ limitations under the License.
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/framework/model/model_args.h"
 #include "core/scheduler/request_output_dispatcher.h"
 #include "framework/batch/batch_factory.h"
 #include "framework/model/model_args.h"
@@ -572,8 +573,8 @@ bool SchedulerPolicy::allocate_for_prefill(Sequence* seq,
   const size_t kv_cache_tokens_num = seq->kv_cache_tokens_num();
   size_t max_handle_num_tokens =
       std::min(kv_cache_tokens_num + token_budget, seq->num_tokens());
-  if (has_linear_attention_layers(state.model_args) &&
-      state.enable_prefix_cache && seq->is_prefill_stage()) {
+  if (state.has_linear_attention_layers && state.enable_prefix_cache &&
+      seq->is_prefill_stage()) {
     const size_t chunk_stride = static_cast<size_t>(
         SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill());
     const size_t aligned = max_handle_num_tokens / chunk_stride * chunk_stride;
@@ -602,8 +603,7 @@ void SchedulerPolicy::allocate_shared_blocks_for(Sequence* seq,
     return;
   }
   if (seq->is_chunked_prefill_stage()) {
-    if (has_linear_attention_layers(state.model_args) &&
-        state.enable_prefix_cache) {
+    if (state.has_linear_attention_layers && state.enable_prefix_cache) {
       // Linear-state prefix cache can only resume at saved state checkpoints.
       // Re-match at every chunk boundary.
       state.kv_cache_manager->allocate_shared(seq);

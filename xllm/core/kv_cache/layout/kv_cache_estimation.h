@@ -19,7 +19,9 @@ limitations under the License.
 
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "common/types.h"
@@ -39,12 +41,20 @@ struct KVCacheMemorySnapshot {
   int64_t total_memory = 0;
 };
 
+// Per-snapshot available budget after the utilization buffer and the
+// max_cache_size cap: the single policy shared by KV cache estimation and the
+// recommendation engines' min-available-memory reduction.
+int64_t worker_available_budget(const KVCacheMemorySnapshot& snapshot,
+                                const runtime::Options& options);
+
 // Runtime facts collected by the factory; budgeting stays in the estimator.
+// worker_memory borrows the caller's snapshots for the duration of the
+// estimate call only.
 struct KVCacheEstimateContext {
   torch::ScalarType dtype = torch::kBFloat16;
   int64_t world_size = 1;
   int64_t linear_state_cache_block_limit = 0;
-  std::vector<KVCacheMemorySnapshot> worker_memory;
+  std::span<const KVCacheMemorySnapshot> worker_memory;
   std::optional<int64_t> virtual_memory_cache_size;
   // Future device allocations absent from the worker memory snapshot.
   int64_t reserved_memory_bytes = 0;
@@ -72,11 +82,10 @@ struct KVCacheEstimateOptions {
   int64_t max_tokens_per_chunk_for_prefill = 0;
   int64_t max_linear_state_cache_slots = 0;
   int64_t linear_state_cache_block_limit = 0;
-  bool is_draft_engine = false;
+  bool is_draft_model = false;
   bool enable_prefix_cache = false;
   int32_t layerwise_split_size = 1;
   bool enable_chunked_prefill = true;
-  bool enable_schedule_overlap = true;
   bool enable_disagg_pd = false;
   InstanceRole instance_role = InstanceRole::DEFAULT;
   // DP size used to bound the per-group prefill burst when
@@ -153,5 +162,14 @@ struct SharedKPoolPlan {
 SharedKPoolPlan plan_shared_kpool(KVCacheCapacity target_cap,
                                   KVCacheCapacity draft_cap,
                                   const ModelArgs& draft_args);
+
+// Target and draft share one KV budget; the returned capacity carries the
+// shared block count. Nullopt for unsupported configs (virtual memory cannot
+// host a draft model).
+std::optional<KVCacheCapacity> combine_target_and_draft_kv_cache_capacity(
+    const KVCacheCapacity& target_cap,
+    const ModelArgs& target_args,
+    const ModelArgs& draft_args,
+    const KVCacheCapacity& draft_cap);
 
 }  // namespace xllm

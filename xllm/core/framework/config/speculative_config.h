@@ -55,11 +55,25 @@ class SpeculativeConfig final {
     return boost::iequals(algorithm, "Suffix");
   }
 
-  static bool uses_ssm_engine(std::string_view draft_model_path,
-                              std::string_view algorithm,
-                              int32_t num_speculative_tokens) {
-    return !draft_model_path.empty() ||
-           (is_suffix_algorithm(algorithm) && num_speculative_tokens > 0);
+  // True when this deployment loads an external draft model alongside the
+  // target. Suffix never loads one; draft-free speculative decoding does not
+  // count either.
+  template <typename OptionsT>
+  static bool loads_draft_model(const OptionsT& options) {
+    return !is_suffix_algorithm(options.speculative_algorithm()) &&
+           options.num_speculative_tokens() > 0 &&
+           !options.draft_model_path().value_or("").empty();
+  }
+
+  // True when the deployment runs the speculative pipeline: an external
+  // draft model or the draft-free Suffix algorithm. Distinct from the
+  // Options::enable_speculative_decode() user flag and from
+  // loads_draft_model() above.
+  template <typename OptionsT>
+  static bool uses_speculative_pipeline(const OptionsT& options) {
+    return !options.draft_model_path().value_or("").empty() ||
+           (is_suffix_algorithm(options.speculative_algorithm()) &&
+            options.num_speculative_tokens() > 0);
   }
 
   static bool is_mtp_algorithm(std::string_view algorithm) {

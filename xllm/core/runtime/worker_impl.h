@@ -25,11 +25,13 @@ limitations under the License.
 
 #include "common/types.h"
 #include "core/framework/allocator/virtual_memory/mapped_virtual_memory_region.h"
+#include "core/framework/config/eplb_config.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/transfer/hierarchy_kv_cache_transfer.h"
 #include "core/kv_cache/transfer/kv_cache_store.h"
 #include "core/kv_cache/transfer/kv_cache_transfer.h"
 #include "core/runtime/schedule_overlap.h"
+#include "core/runtime/task_execution_pipeline.h"
 #include "core/runtime/worker_residency_state.h"
 #include "executor.h"
 #include "forward_params.h"
@@ -67,6 +69,8 @@ class WorkerImpl {
     READY,
   };
 
+  // options.is_draft_model() marks the draft-model child of a speculative
+  // worker; see the flag's comment in runtime/options.h.
   WorkerImpl(const ParallelArgs& parallel_args,
              const torch::Device& device,
              const runtime::Options& options);
@@ -326,18 +330,10 @@ class WorkerImpl {
     return model()->get_npu_word_embedding();
   }
 
-  virtual bool has_restored_npu_word_embedding() {
-    return model()->has_restored_npu_word_embedding();
-  }
-
   virtual void set_npu_word_embedding(layer::NpuWordEmbedding& embedding) {
     model()->set_npu_word_embedding(embedding);
   }
 
-  virtual void set_restored_npu_word_embedding(
-      layer::NpuWordEmbedding& embedding) {
-    model()->set_restored_npu_word_embedding(embedding);
-  }
 #endif
 
   virtual layer::LmHead get_lm_head() { return model()->get_lm_head(); }
@@ -365,6 +361,11 @@ class WorkerImpl {
     return options_.enable_schedule_overlap_;
   }
 
+  TaskInputDomain input_domain() const {
+    return options_.backend() == "vlm" ? TaskInputDomain::VLM
+                                       : TaskInputDomain::LLM;
+  }
+
   virtual ForwardOutput get_last_step_result();
 
   bool is_driver() const { return driver_ || dp_driver_; }
@@ -378,11 +379,34 @@ class WorkerImpl {
   // model context, includes model args, parallel args and date type etc.
   mutable ModelContext context_;
 
-  OptimizationConfig get_optimization_config() const {
+  const OptimizationConfig& get_optimization_config() const {
     return context_.get_optimization_config();
   }
 
+  // Ordinary (non-speculative) workers gate the same suppression on the
+  // speculative flag being off: the spec pair's own workers handle theirs.
+  bool suppresses_step_output() const {
+    return !options_.enable_speculative_decode() &&
+           suppresses_non_driver_output();
+  }
+
+  // Non-driver ranks suppress their step output unless schedule overlap is
+  // active; families whose EPLB aggregation consumes every rank's output
+  // (MTP) opt out of the suppression by overriding eplb_aggregates_output.
+  bool suppresses_non_driver_output() const {
+    if (enable_schedule_overlap()) {
+      return false;
+    }
+    if (is_driver()) {
+      return false;
+    }
+    return !eplb_aggregates_output() ||
+           !::xllm::EPLBConfig::get_instance().enable_eplb();
+  }
+
  protected:
+  virtual bool eplb_aggregates_output() const { return false; }
+
   virtual void prepare_expert_input(ExpertInput& /*input*/) const {}
 
   torch::Tensor select_hidden_states_for_embedding(
@@ -647,8 +671,6 @@ class WorkerImpl {
   mutable bool npu_cp_runtime_config_computed_ = false;
   mutable CpPlanRuntimeConfig npu_cp_runtime_config_;
 #endif
-
-  bool is_spec_draft_ = false;
 
   Status status_ = Status::UNINITIALIZED;
 

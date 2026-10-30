@@ -26,10 +26,13 @@ limitations under the License.
 
 #include "common/metrics.h"
 #include "core/common/global_flags.h"
+#include "core/distributed_runtime/distributed_worker_manager.h"
+#include "core/distributed_runtime/worker_fanout.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/model_loader/hf_model_config.h"
 #include "core/framework/model_loader/model_loader.h"
+#include "core/kv_cache/layout/kv_cache_estimation.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "framework/model/model_args.h"
 #include "framework/parallel_state/parallel_state.h"
@@ -56,8 +59,7 @@ constexpr int64_t kMinimalOneRecMetadataKVBlocks = 2;
 RecEngine::RecEngine(
     const runtime::Options& options,
     std::shared_ptr<DistributedWorkerManager> distributed_worker_manager)
-    : options_(options),
-      distributed_worker_manager_(std::move(distributed_worker_manager)) {
+    : Engine(options, std::move(distributed_worker_manager)) {
   const auto& devices = options_.devices();
   CHECK_GT(devices.size(), 0) << "At least one device is required";
 
@@ -101,10 +103,7 @@ void RecEngine::setup_distributed_workers() {
   FLAGS_enable_atb_comm_multiprocess =
       options_.enable_offline_inference() || (options_.nnodes() > 1);
 #endif
-  if (!distributed_worker_manager_) {
-    distributed_worker_manager_ =
-        std::make_shared<DistributedWorkerManager>(options_);
-  }
+  Engine::setup_workers();
 }
 
 bool RecEngine::init() {
@@ -159,7 +158,7 @@ bool RecEngine::init_model() {
 
   forward_input_factory_ =
       std::make_unique<RecForwardInputFactory>(RecForwardInputFactoryOptions{
-          .dp_size = static_cast<uint32_t>(dp_size_),
+          .dp_size = static_cast<uint32_t>(dp_size()),
           .num_decoding_tokens =
               static_cast<uint32_t>(options_.num_decoding_tokens()),
           .min_decoding_batch_size = 0});
@@ -271,7 +270,7 @@ bool RecEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
       .enable_prefix_cache(options_.enable_prefix_cache())
       .enable_disagg_pd(options_.enable_disagg_pd())
       .max_seqs_per_batch(options_.max_seqs_per_batch());
-  kv_cache_manager_ = std::make_unique<BlockManagerPool>(options, dp_size_);
+  block_manager_pool_ = std::make_unique<BlockManagerPool>(options, dp_size());
 
   return pipeline_->allocate_kv_cache(kv_cache_shape);
 }
@@ -293,84 +292,47 @@ RecEngine::LlmRecEnginePipeline::LlmRecEnginePipeline(RecEngine& engine)
 
 void RecEngine::LlmRecEnginePipeline::setup_workers() {
   engine_.setup_distributed_workers();
-  engine_.worker_clients_ =
-      engine_.distributed_worker_manager_->get_worker_clients();
-  engine_.dp_size_ = engine_.options_.dp_size();
-  engine_.worker_clients_num_ = engine_.worker_clients_.size();
-  engine_.dp_local_tp_size_ = engine_.worker_clients_num_ / engine_.dp_size_;
+
+  engine_.dp_local_tp_size_ = engine_.worker_clients_num() / engine_.dp_size();
 }
 
 void RecEngine::LlmRecEnginePipeline::process_group_test() {
 #if !defined(USE_NPU)
-  if (engine_.worker_clients_num_ > 1) {
-    std::vector<folly::SemiFuture<folly::Unit>> futures;
-    futures.reserve(engine_.worker_clients_num_);
-    for (auto& worker : engine_.worker_clients_) {
-      futures.emplace_back(worker->process_group_test_async());
-    }
-    const int32_t timeout_seconds =
-        util::get_process_group_test_timeout_seconds();
-    folly::collectAll(futures)
-        .within(std::chrono::seconds(timeout_seconds))
-        .get();
-  }
+  fanout_process_group_test(engine_.worker_clients_);
 #endif
 }
 
 bool RecEngine::LlmRecEnginePipeline::init_model_workers(
     const std::string& model_path) {
-  std::vector<folly::SemiFuture<bool>> futures;
-  futures.reserve(engine_.worker_clients_num_);
-  for (auto& worker : engine_.worker_clients_) {
-    futures.emplace_back(worker->init_model_async(
-        model_path,
-        ::xllm::ExecutionConfig::get_instance().random_seed(),
-        MasterStatus::WAKEUP));
-  }
-  auto results = folly::collectAll(futures).get();
-  for (const auto& result : results) {
-    if (!result.value()) {
-      return false;
-    }
-  }
-  return true;
+  return load_model(engine_.worker_clients_, model_path, MasterStatus::WAKEUP);
 }
 
-int64_t RecEngine::LlmRecEnginePipeline::estimate_min_available_memory() {
-  const int64_t max_cache_size = engine_.options_.max_cache_size();
-  const double max_memory_utilization =
-      engine_.options_.max_memory_utilization();
+namespace {
 
-  std::vector<folly::SemiFuture<std::tuple<int64_t, int64_t>>> futures;
-  futures.reserve(engine_.worker_clients_.size());
-  for (auto& worker : engine_.worker_clients_) {
-    futures.emplace_back(worker->estimate_kv_cache_capacity_async());
-  }
-
+int64_t min_available_memory(
+    const std::vector<KVCacheMemorySnapshot>& worker_memory,
+    const runtime::Options& options) {
   int64_t cache_size_in_bytes = std::numeric_limits<int64_t>::max();
-  auto results = folly::collectAll(futures).get();
-  for (size_t i = 0; i < results.size(); ++i) {
-    if (!results[i].hasValue()) {
-      LOG(ERROR) << "Failed to profile memory usage for worker: " << i;
-      continue;
-    }
-    auto [available_memory, total_memory] = results[i].value();
-    LOG(INFO) << "worker #" << i
-              << ": available memory: " << readable_size(available_memory)
-              << ", total memory: " << readable_size(total_memory)
-              << ". Using max_memory_utilization: " << max_memory_utilization
-              << ", max_cache_size: " << readable_size(max_cache_size);
-    if (max_memory_utilization < 1.0) {
-      const int64_t buffer_memory =
-          total_memory * (1.0 - max_memory_utilization);
-      available_memory -= buffer_memory;
-    }
-    if (max_cache_size > 0) {
-      available_memory = std::min(available_memory, max_cache_size);
-    }
-    cache_size_in_bytes = std::min(cache_size_in_bytes, available_memory);
+  for (size_t i = 0; i < worker_memory.size(); ++i) {
+    LOG(INFO) << "worker #" << i << ": available memory: "
+              << readable_size(worker_memory[i].available_memory)
+              << ", total memory: "
+              << readable_size(worker_memory[i].total_memory)
+              << ". Using max_memory_utilization: "
+              << options.max_memory_utilization() << ", max_cache_size: "
+              << readable_size(options.max_cache_size());
+    cache_size_in_bytes =
+        std::min(cache_size_in_bytes,
+                 worker_available_budget(worker_memory[i], options));
   }
   return cache_size_in_bytes;
+}
+
+}  // namespace
+
+int64_t RecEngine::LlmRecEnginePipeline::estimate_min_available_memory() {
+  return min_available_memory(poll_worker_memory(engine_.worker_clients_),
+                              engine_.options_);
 }
 
 bool RecEngine::LlmRecEnginePipeline::allocate_kv_cache(
@@ -390,7 +352,7 @@ bool RecEngine::LlmRecEnginePipeline::allocate_kv_cache(
 }
 
 size_t RecEngine::LlmRecEnginePipeline::num_workers() const {
-  if (engine_.dp_size_ > 1) {
+  if (engine_.dp_size() > 1) {
     return engine_.dp_local_tp_size_;
   }
   return engine_.worker_clients_.size();
@@ -401,8 +363,8 @@ ForwardOutput RecEngine::LlmRecEnginePipeline::step(RecBatchGroup& batches) {
     return {};
   }
 
-  DCHECK(engine_.dp_size_ == static_cast<int32_t>(batches.size()))
-      << "Split DP batch failed with dp_size as " << engine_.dp_size_
+  DCHECK(engine_.dp_size() == static_cast<int32_t>(batches.size()))
+      << "Split DP batch failed with dp_size as " << engine_.dp_size()
       << " and actual batch size as " << batches.size() << ".";
 
   auto run_one_step = [this, &batches](int step_idx) -> bool {
@@ -424,10 +386,10 @@ ForwardOutput RecEngine::LlmRecEnginePipeline::step(RecBatchGroup& batches) {
     }
 
     std::vector<folly::SemiFuture<std::optional<RawForwardOutput>>> futures;
-    futures.reserve(engine_.worker_clients_num_);
+    futures.reserve(engine_.worker_clients_num());
 
     timer.reset();
-    for (size_t worker_rank = 0; worker_rank < engine_.worker_clients_num_;
+    for (size_t worker_rank = 0; worker_rank < engine_.worker_clients_num();
          ++worker_rank) {
       auto dp_rank = worker_rank / engine_.dp_local_tp_size_;
       futures.emplace_back(
@@ -449,7 +411,7 @@ ForwardOutput RecEngine::LlmRecEnginePipeline::step(RecBatchGroup& batches) {
 
     timer.reset();
     size_t dp_rank = 0;
-    for (size_t worker_rank = 0; worker_rank < engine_.worker_clients_num_;
+    for (size_t worker_rank = 0; worker_rank < engine_.worker_clients_num();
          worker_rank += engine_.dp_local_tp_size_) {
       auto result = results[worker_rank].value();
       if (!result.has_value()) {
@@ -549,18 +511,7 @@ void RecEngine::OneRecLocalEnginePipeline::setup_workers() {
 }
 
 void RecEngine::OneRecLocalEnginePipeline::process_group_test() {
-  if (engine_.workers_.size() > 1) {
-    std::vector<folly::SemiFuture<folly::Unit>> futures;
-    futures.reserve(engine_.workers_.size());
-    for (auto& worker : engine_.workers_) {
-      futures.emplace_back(worker->process_group_test_async());
-    }
-    const int32_t timeout_seconds =
-        util::get_process_group_test_timeout_seconds();
-    folly::collectAll(futures)
-        .within(std::chrono::seconds(timeout_seconds))
-        .get();
-  }
+  fanout_process_group_test(engine_.workers_);
 }
 
 bool RecEngine::OneRecLocalEnginePipeline::init_model_workers(
@@ -600,58 +551,12 @@ bool RecEngine::OneRecLocalEnginePipeline::init_model_workers(
         parallel_args, devices[rank], engine_.options_, worker_type));
   }
 
-  std::vector<folly::SemiFuture<bool>> futures;
-  futures.reserve(engine_.workers_.size());
-  for (auto& worker : engine_.workers_) {
-    futures.emplace_back(worker->init_model_async(
-        model_path,
-        ::xllm::ExecutionConfig::get_instance().random_seed(),
-        MasterStatus::WAKEUP));
-  }
-  auto results = folly::collectAll(futures).get();
-  for (const auto& result : results) {
-    if (!result.value()) {
-      return false;
-    }
-  }
-  return true;
+  return load_model(engine_.workers_, model_path, MasterStatus::WAKEUP);
 }
 
 int64_t RecEngine::OneRecLocalEnginePipeline::estimate_min_available_memory() {
-  const int64_t max_cache_size = engine_.options_.max_cache_size();
-  const double max_memory_utilization =
-      engine_.options_.max_memory_utilization();
-
-  std::vector<folly::SemiFuture<std::tuple<int64_t, int64_t>>> futures;
-  futures.reserve(engine_.workers_.size());
-  for (auto& worker : engine_.workers_) {
-    futures.emplace_back(worker->estimate_kv_cache_capacity_async());
-  }
-
-  int64_t cache_size_in_bytes = std::numeric_limits<int64_t>::max();
-  auto results = folly::collectAll(futures).get();
-  for (size_t i = 0; i < results.size(); ++i) {
-    if (!results[i].hasValue()) {
-      LOG(ERROR) << "Failed to profile memory usage for worker: " << i;
-      continue;
-    }
-    auto [available_memory, total_memory] = results[i].value();
-    LOG(INFO) << "worker #" << i
-              << ": available memory: " << readable_size(available_memory)
-              << ", total memory: " << readable_size(total_memory)
-              << ". Using max_memory_utilization: " << max_memory_utilization
-              << ", max_cache_size: " << readable_size(max_cache_size);
-    if (max_memory_utilization < 1.0) {
-      const int64_t buffer_memory =
-          total_memory * (1.0 - max_memory_utilization);
-      available_memory -= buffer_memory;
-    }
-    if (max_cache_size > 0) {
-      available_memory = std::min(available_memory, max_cache_size);
-    }
-    cache_size_in_bytes = std::min(cache_size_in_bytes, available_memory);
-  }
-  return cache_size_in_bytes;
+  return min_available_memory(poll_worker_memory(engine_.workers_),
+                              engine_.options_);
 }
 
 bool RecEngine::OneRecLocalEnginePipeline::allocate_kv_cache(
@@ -997,18 +902,7 @@ void RecEngine::RecMultiRoundEnginePipeline::setup_workers() {
 }
 
 void RecEngine::RecMultiRoundEnginePipeline::process_group_test() {
-  if (engine_.workers_.size() > 1) {
-    std::vector<folly::SemiFuture<folly::Unit>> futures;
-    futures.reserve(engine_.workers_.size());
-    for (auto& worker : engine_.workers_) {
-      futures.emplace_back(worker->process_group_test_async());
-    }
-    const int32_t timeout_seconds =
-        util::get_process_group_test_timeout_seconds();
-    folly::collectAll(futures)
-        .within(std::chrono::seconds(timeout_seconds))
-        .get();
-  }
+  fanout_process_group_test(engine_.workers_);
 }
 
 bool RecEngine::RecMultiRoundEnginePipeline::init_model_workers(
@@ -1056,59 +950,13 @@ bool RecEngine::RecMultiRoundEnginePipeline::init_model_workers(
         parallel_args, devices[rank], engine_.options_, worker_type));
   }
 
-  std::vector<folly::SemiFuture<bool>> futures;
-  futures.reserve(engine_.workers_.size());
-  for (auto& worker : engine_.workers_) {
-    futures.emplace_back(worker->init_model_async(
-        model_path,
-        ::xllm::ExecutionConfig::get_instance().random_seed(),
-        MasterStatus::WAKEUP));
-  }
-  auto results = folly::collectAll(futures).get();
-  for (const auto& result : results) {
-    if (!result.value()) {
-      return false;
-    }
-  }
-  return true;
+  return load_model(engine_.workers_, model_path, MasterStatus::WAKEUP);
 }
 
 int64_t
 RecEngine::RecMultiRoundEnginePipeline::estimate_min_available_memory() {
-  const int64_t max_cache_size = engine_.options_.max_cache_size();
-  const double max_memory_utilization =
-      engine_.options_.max_memory_utilization();
-
-  std::vector<folly::SemiFuture<std::tuple<int64_t, int64_t>>> futures;
-  futures.reserve(engine_.workers_.size());
-  for (auto& worker : engine_.workers_) {
-    futures.emplace_back(worker->estimate_kv_cache_capacity_async());
-  }
-
-  int64_t cache_size_in_bytes = std::numeric_limits<int64_t>::max();
-  auto results = folly::collectAll(futures).get();
-  for (size_t i = 0; i < results.size(); ++i) {
-    if (!results[i].hasValue()) {
-      LOG(ERROR) << "Failed to profile memory usage for worker: " << i;
-      continue;
-    }
-    auto [available_memory, total_memory] = results[i].value();
-    LOG(INFO) << "worker #" << i
-              << ": available memory: " << readable_size(available_memory)
-              << ", total memory: " << readable_size(total_memory)
-              << ". Using max_memory_utilization: " << max_memory_utilization
-              << ", max_cache_size: " << readable_size(max_cache_size);
-    if (max_memory_utilization < 1.0) {
-      const int64_t buffer_memory =
-          total_memory * (1.0 - max_memory_utilization);
-      available_memory -= buffer_memory;
-    }
-    if (max_cache_size > 0) {
-      available_memory = std::min(available_memory, max_cache_size);
-    }
-    cache_size_in_bytes = std::min(cache_size_in_bytes, available_memory);
-  }
-  return cache_size_in_bytes;
+  return min_available_memory(poll_worker_memory(engine_.workers_),
+                              engine_.options_);
 }
 
 bool RecEngine::RecMultiRoundEnginePipeline::allocate_kv_cache(

@@ -33,7 +33,6 @@ limitations under the License.
 #if defined(USE_NPU)
 #include "models/model_registry.h"
 #endif
-#include "distributed_runtime/xservice_client.h"
 #include "rec_engine.h"
 #include "runtime/options.h"
 #include "scheduler/scheduler_factory.h"
@@ -141,15 +140,7 @@ RecMaster::RecMaster(const Options& options) : Master(options) {
     LOG(ERROR) << "Unsupported rec model_type: " << model_args_.model_type();
   }
 
-  if (options_.enable_service_routing()) {
-    XServiceClient* xservice_client = XServiceClient::get_instance();
-    if (!xservice_client->init(options_.etcd_addr().value_or(""),
-                               options_.instance_name().value_or(""),
-                               options_.etcd_namespace().value_or(""))) {
-      LOG(FATAL) << "XServiceClient init fail!";
-      return;
-    }
-  }
+  init_service_routing();
 
   SchedulerOptions scheduler_options;
   scheduler_options.max_tokens_per_batch(options_.max_tokens_per_batch())

@@ -17,6 +17,7 @@ cc_library(
     kv_cache_store_config.h
     load_config.h
     model_config.h
+    mtp_utils.h
     option_category.h
     parallel_config.h
     profile_config.h

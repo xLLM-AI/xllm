@@ -19,7 +19,6 @@ limitations under the License.
 #include <brpc/channel.h>
 
 #include <chrono>
-#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -32,6 +31,7 @@ limitations under the License.
 
 #include "core/distributed_runtime/disagg_pd_service.h"
 #include "core/distributed_runtime/distributed_worker_manager.h"
+#include "core/framework/config/speculative_config.h"
 #include "disagg_pd.pb.h"
 #include "distributed_runtime/xservice_client.h"
 #include "framework/request/request.h"
@@ -42,6 +42,8 @@ limitations under the License.
 #include "util/threadpool.h"
 
 namespace xllm {
+
+class DraftStepController;
 
 class KVCacheTransferCoordinator;
 
@@ -59,35 +61,35 @@ bool exceeds_decode_capacity(size_t num_prompt_tokens,
 
 bool has_rank_preserving_kv_groups(const proto::DisaggResponse& response);
 
-class DisaggPDScheduler : public ContinuousScheduler<> {
+class DisaggPDScheduler : public ContinuousScheduler {
  public:
   // Skips dispatch and RPC startup. Unit tests construct through this so they
   // do not block in initialize_rpc_server.
   struct SkipRuntimeStart {};
 
-  template <typename TargetEngine>
-    requires requires(TargetEngine* engine, BatchGroup& batch) {
-      static_cast<Engine*>(engine);
-      { engine->step(batch) } -> std::same_as<ForwardOutput>;
-      {
-        engine->collect_step_outputs(batch)
-      } -> std::same_as<std::vector<RawForwardOutput>>;
-    }
   DisaggPDScheduler(
-      TargetEngine* engine,
+      BlockManagerPool* block_manager_pool,
+      const ModelArgs* model_args,
+      const Tokenizer* tokenizer,
+      SchedulerCallbacks callbacks,
       const Options& options,
       std::shared_ptr<DistributedWorkerManager> distributed_worker_manager,
       std::shared_ptr<ModelResidencyCoordinator> model_residency_coordinator =
           nullptr,
       std::shared_ptr<KVCacheTransferCoordinator> kv_transfer_coordinator =
           nullptr,
-      DisaggPDServiceOptions response_options = {})
-      : DisaggPDScheduler(engine,
+      DisaggPDServiceOptions response_options = {},
+      DraftStepController* draft_step_controller = nullptr)
+      : DisaggPDScheduler(block_manager_pool,
+                          model_args,
+                          tokenizer,
+                          std::move(callbacks),
                           options,
                           SkipRuntimeStart{},
                           std::move(distributed_worker_manager),
                           std::move(model_residency_coordinator),
-                          std::move(kv_transfer_coordinator)) {
+                          std::move(kv_transfer_coordinator),
+                          draft_step_controller) {
     CHECK(distributed_worker_manager_ != nullptr)
         << "Disaggregated PD requires a distributed worker manager.";
     CHECK(kv_transfer_coordinator_ != nullptr)
@@ -121,6 +123,13 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
   void dispatch_requests();
   // prefill-2: for prefill send first token to decode
   void prefill_send_first_generation();
+
+  // True when the configured speculative algorithm carries a bootstrap
+  // hidden state through the P->D handoff. Shared by the prefill sender and
+  // the decode receiver so the two halves of the handshake stay consistent.
+  // Cached in the constructor: bootstrap-hidden support depends only on the
+  // static speculative algorithm and width.
+  bool requires_bootstrap_hidden_;
 
   // decode-1: for decode recveive new request from prefill
   bool decode_schedule(std::shared_ptr<Request>& request,
@@ -158,7 +167,9 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
   // count.
   bool exceeds_decode_capacity(Sequence* sequence) const;
 
-  bool enable_schedule_overlap() { return options_.enable_schedule_overlap(); };
+  bool enable_schedule_overlap() const {
+    return options_.enable_schedule_overlap();
+  }
 
   bool enable_task_pipeline() const { return options_.enable_task_pipeline(); }
 
@@ -180,16 +191,11 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
                        const int32_t src_kv_split_size);
 
  protected:
-  template <typename TargetEngine>
-    requires requires(TargetEngine* engine, BatchGroup& batch) {
-      static_cast<Engine*>(engine);
-      { engine->step(batch) } -> std::same_as<ForwardOutput>;
-      {
-        engine->collect_step_outputs(batch)
-      } -> std::same_as<std::vector<RawForwardOutput>>;
-    }
   DisaggPDScheduler(
-      TargetEngine* engine,
+      BlockManagerPool* block_manager_pool,
+      const ModelArgs* model_args,
+      const Tokenizer* tokenizer,
+      SchedulerCallbacks callbacks,
       const Options& options,
       SkipRuntimeStart,
       std::shared_ptr<DistributedWorkerManager> distributed_worker_manager =
@@ -197,13 +203,22 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
       std::shared_ptr<ModelResidencyCoordinator> model_residency_coordinator =
           nullptr,
       std::shared_ptr<KVCacheTransferCoordinator> kv_transfer_coordinator =
-          nullptr)
-      : ContinuousScheduler<>(engine,
-                              options,
-                              std::move(model_residency_coordinator),
-                              std::move(distributed_worker_manager)),
+          nullptr,
+      DraftStepController* draft_step_controller = nullptr)
+      : ContinuousScheduler(block_manager_pool,
+                            model_args,
+                            tokenizer,
+                            std::move(callbacks),
+                            options,
+                            std::move(model_residency_coordinator),
+                            std::move(distributed_worker_manager),
+                            draft_step_controller),
         kv_transfer_coordinator_(std::move(kv_transfer_coordinator)),
-        server_name_("DisaggPDServer") {
+        server_name_("DisaggPDServer"),
+        requires_bootstrap_hidden_(
+            options_.num_speculative_tokens() > 0 &&
+            SpeculativeConfig::requires_bootstrap_hidden(
+                SpeculativeConfig::get_instance().speculative_algorithm())) {
     if (!options_.instance_role().has_value()) {
       LOG(FATAL) << "Instance type is not set in disagg pd mode.";
     }

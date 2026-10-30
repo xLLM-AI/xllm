@@ -58,6 +58,7 @@ limitations under the License.
 #include "core/runtime/unified_mtp_worker_impl.h"
 #include "core/runtime/worker_impl.h"
 #include "core/util/scope_guard.h"
+#include "runtime/spec_runtime_helpers.h"
 #include "tests/core/runtime/task_pipeline_test_peer.h"
 #include "worker.pb.h"
 
@@ -1314,8 +1315,10 @@ class SpeculativePipelineTest : public ::testing::Test {
     draft_ = std::make_unique<CountingModel>(device_);
     target_executor_ = std::make_unique<Executor>(
         target_.get(), ModelArgs{}, device_, options);
-    draft_executor_ =
-        std::make_unique<Executor>(draft_.get(), ModelArgs{}, device_, options);
+    runtime::Options draft_options = options;
+    spec_detail::mark_spec_draft_options(draft_options);
+    draft_executor_ = std::make_unique<Executor>(
+        draft_.get(), ModelArgs{}, device_, draft_options);
     const auto cache_options = target_->options();
     for (auto* caches : {&target_cache_, &draft_cache_}) {
       caches->emplace_back(

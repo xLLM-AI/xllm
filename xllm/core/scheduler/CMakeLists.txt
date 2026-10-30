@@ -10,6 +10,7 @@ cc_library(
     scheduler_policy.h
     zero_eviction_scheduler.h
     continuous_scheduler.h
+    scheduler_callbacks.h
     disagg_pd_scheduler.h
     request_output_dispatcher.h
     scheduler.h

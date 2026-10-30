@@ -178,7 +178,7 @@ void MooncakeKVCacheTransferBase::configure_cache_layout(
     const ParallelArgs& parallel_args,
     const ModelArgs& model_args,
     int32_t block_token_capacity,
-    bool is_spec_draft) {
+    bool is_draft_model) {
   CHECK_GT(parallel_args.dp_size(), 0);
   CHECK_GT(parallel_args.cp_size(), 0);
   CHECK_GT(parallel_args.world_size(), 0);
@@ -189,7 +189,7 @@ void MooncakeKVCacheTransferBase::configure_cache_layout(
 
   CacheRegistrationContext context;
   context.cache_namespace =
-      is_spec_draft ? CacheNamespace::SPEC_DRAFT : CacheNamespace::MAIN;
+      is_draft_model ? CacheNamespace::SPEC_DRAFT : CacheNamespace::MAIN;
   const int32_t tp_size = parallel_args.world_size() / parallel_args.dp_size() /
                           parallel_args.cp_size();
   const int32_t rank_in_dp =
@@ -308,8 +308,8 @@ void MooncakeKVCacheTransferDefault::register_kv_cache(
     std::vector<xllm::KVCache>& kv_caches,
     const KVCacheShape& kv_cache_shape,
     torch::ScalarType dtype) {
-  const bool is_spec_draft = main_layout_.registered;
-  CHECK(!is_spec_draft || !spec_layout_.registered)
+  const bool is_draft_model = main_layout_.registered;
+  CHECK(!is_draft_model || !spec_layout_.registered)
       << "Spec draft kv cache is already registered.";
 
   const int64_t num_layers = static_cast<int64_t>(kv_caches.size());
@@ -337,7 +337,7 @@ void MooncakeKVCacheTransferDefault::register_kv_cache(
       tensor_layout.index_block_capacity =
           kv_cache_shape.index_cache_shape().at(token_axis);
     }
-    if (!is_spec_draft && kv_cache_shape.has_kpool_tail_shape()) {
+    if (!is_draft_model && kv_cache_shape.has_kpool_tail_shape()) {
       const auto& tail_shape = kv_cache_shape.kpool_tail_shape();
       CHECK_GE(tail_shape.size(), 4U);
       pending_registration_context_->fingerprint +=
@@ -350,7 +350,7 @@ void MooncakeKVCacheTransferDefault::register_kv_cache(
   BufLayout layout;
   layout.num_layers = num_layers;
   layout.layers.resize(static_cast<size_t>(num_layers));
-  if (is_spec_draft) {
+  if (is_draft_model) {
     layout.offset = main_layout_.offset + main_layout_.total_buf_cnt;
   }
   std::vector<CacheTensorManifest> tensor_manifests;
@@ -434,7 +434,7 @@ void MooncakeKVCacheTransferDefault::register_kv_cache(
   }
   layout.registered = true;
 
-  if (!is_spec_draft) {
+  if (!is_draft_model) {
     num_layers_ = num_layers;
     has_v_cache_ = has_v_cache;
     main_layout_ = layout;
@@ -712,10 +712,10 @@ void MooncakeKVCacheTransferBase::merge_kv_blocks(
 bool MooncakeKVCacheTransferDefault::push_kv_blocks(
     std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
     std::shared_ptr<KVPushSynchronizerImpl>& layer_synchronizer,
-    bool is_spec_draft,
+    bool is_draft_model,
     int32_t kv_split_rank,
     int32_t kv_split_size) {
-  const BufLayout& layout = is_spec_draft ? spec_layout_ : main_layout_;
+  const BufLayout& layout = is_draft_model ? spec_layout_ : main_layout_;
   CHECK(layout.registered) << "KV cache is not registered.";
   const int64_t num_layers = layout.num_layers;
 
@@ -730,7 +730,7 @@ bool MooncakeKVCacheTransferDefault::push_kv_blocks(
 
   bool result = true;
   const CacheNamespace cache_namespace =
-      is_spec_draft ? CacheNamespace::SPEC_DRAFT : CacheNamespace::MAIN;
+      is_draft_model ? CacheNamespace::SPEC_DRAFT : CacheNamespace::MAIN;
   for (int64_t layer_index = 0; layer_index < num_layers; ++layer_index) {
     if (!layer_synchronizer->synchronize_layer(layer_index)) {
       LOG(ERROR) << "Synchronize KV cache layer failed, layer=" << layer_index;
@@ -1022,10 +1022,10 @@ bool MooncakeVirtualKVCacheTransfer::pull_kv_blocks(
 bool MooncakeVirtualKVCacheTransfer::push_kv_blocks(
     std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
     std::shared_ptr<KVPushSynchronizerImpl>& layer_synchronizer,
-    bool is_spec_draft,
+    bool is_draft_model,
     int32_t kv_split_rank,
     int32_t kv_split_size) {
-  (void)is_spec_draft;
+  (void)is_draft_model;
   return push_kv_blocks_impl(
       merged_kv_infos, layer_synchronizer, kv_split_rank, kv_split_size);
 }

@@ -23,17 +23,17 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "core/distributed_runtime/engine.h"
 #include "core/framework/block/block_manager_pool.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/mtp_utils.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/request/incremental_decoder.h"
 #include "core/framework/request/sequence.h"
 #include "core/framework/request/stopping_checker.h"
 #include "core/framework/sampling/sampling_params.h"
-#include "core/framework/speculative/mtp_utils.h"
+#include "core/scheduler/continuous_scheduler.h"
 #include "platform/platform.h"
 #include "runtime/decode_graph_bucket.h"
 #include "scheduler/profile/decode_graph_warmup_plan.h"
@@ -232,7 +232,7 @@ class StaleCapacityBlockManagerPool final : public BlockManagerPool {
   }
 };
 
-class RecordingProfileEngine final : public Engine {
+class RecordingProfileEngine final {
  public:
   explicit RecordingProfileEngine(bool overlap = false,
                                   int32_t dp_size = 1,
@@ -331,11 +331,9 @@ class RecordingProfileEngine final : public Engine {
     return std::vector<RawForwardOutput>(batches.size());
   }
 
-  BlockManagerPool* block_manager_pool() const override {
-    return block_manager_.get();
-  }
+  BlockManagerPool* block_manager_pool() const { return block_manager_.get(); }
 
-  const ModelArgs& model_args() const override { return model_args_; }
+  const ModelArgs& model_args() const { return model_args_; }
 
   void reset_profile_markers() { all_requests_marked_ = true; }
 
@@ -400,7 +398,11 @@ TEST(GraphWarmupTest, AdaptiveVerifyPipelineUsesGreedySyntheticRequests) {
             .dp_size(1)
             .enable_task_pipeline(pipeline)
             .instance_role(InstanceRole::DECODE);
-        ProfileManager profile_manager(&engine, options);
+        ProfileManager profile_manager(
+            engine.block_manager_pool(),
+            &engine.model_args(),
+            options,
+            std::move(make_scheduler_callbacks(&engine)));
 
         // Exercise both synthetic factories, including non-capture profiling
         // requests that still execute through the same worker admission.
@@ -1088,7 +1090,10 @@ TEST(GraphWarmupTest, MarksOrdinaryProfileRequestsAsSyntheticLoad) {
   RecordingProfileEngine engine;
   ProfileManager::Options options;
   options.max_tokens_per_batch(4).max_seqs_per_batch(1).dp_size(1);
-  ProfileManager profile_manager(&engine, options);
+  ProfileManager profile_manager(engine.block_manager_pool(),
+                                 &engine.model_args(),
+                                 options,
+                                 std::move(make_scheduler_callbacks(&engine)));
   engine.reset_profile_markers();
 
   profile_manager.run_request(/*token_length=*/4, /*prefix_length=*/0);
@@ -1109,7 +1114,10 @@ TEST(GraphWarmupTest, DecodeProfileUsesConfiguredSpeculativeGeometry) {
           ExecutionConfig::get_instance().decode_graph_warmup_config(
               /*num_speculative_tokens=*/3,
               /*enable_no_padding=*/false));
-  ProfileManager profile_manager(&engine, options);
+  ProfileManager profile_manager(engine.block_manager_pool(),
+                                 &engine.model_args(),
+                                 options,
+                                 std::move(make_scheduler_callbacks(&engine)));
 
   profile_manager.profile_decode_step_time(/*token_length=*/5,
                                            /*batch_size=*/1,
@@ -1142,7 +1150,11 @@ TEST(GraphWarmupTest, OrdinaryStepsWarmBucketsAndDrainBeforeReleasingKv) {
         .enable_profile_step_time(false)
         .enable_profile_kv_blocks(false)
         .instance_role(InstanceRole::DECODE);
-    ProfileManager profile_manager(&engine, options);
+    ProfileManager profile_manager(
+        engine.block_manager_pool(),
+        &engine.model_args(),
+        options,
+        std::move(make_scheduler_callbacks(&engine)));
     EXPECT_EQ(engine.observed_batches(), (std::vector<int32_t>{4, 2, 1}));
     EXPECT_EQ(engine.pending_steps(), 0);
     EXPECT_EQ(engine.block_manager_pool()->num_used_blocks(), used_blocks);
@@ -1172,7 +1184,10 @@ TEST(GraphWarmupTest, ElasticEagerWarmupExercisesEveryDpAndDrainsOverlap) {
       .enable_profile_step_time(false)
       .instance_role(InstanceRole::DEFAULT);
 
-  ProfileManager profile_manager(&engine, options);
+  ProfileManager profile_manager(engine.block_manager_pool(),
+                                 &engine.model_args(),
+                                 options,
+                                 std::move(make_scheduler_callbacks(&engine)));
 
   EXPECT_EQ(engine.observed_batches(),
             (std::vector<int32_t>{2, 4, 4, 2, 4, 4}));
@@ -1202,7 +1217,10 @@ TEST(GraphWarmupTest, ElasticDecodeOnlyEagerWarmupIsNotSkipped) {
   options.max_tokens_per_batch(20).max_seqs_per_batch(4).instance_role(
       InstanceRole::DECODE);
 
-  ProfileManager profile_manager(&engine, options);
+  ProfileManager profile_manager(engine.block_manager_pool(),
+                                 &engine.model_args(),
+                                 options,
+                                 std::move(make_scheduler_callbacks(&engine)));
 
   EXPECT_EQ(engine.observed_batches(), (std::vector<int32_t>{4}));
   EXPECT_TRUE(engine.all_requests_marked());
@@ -1233,7 +1251,11 @@ TEST(GraphWarmupTest, ElasticWarmupAllocatesDespiteStaleCapacitySnapshot) {
         .enable_profile_step_time(false)
         .instance_role(InstanceRole::DEFAULT);
 
-    ProfileManager profile_manager(&engine, options);
+    ProfileManager profile_manager(
+        engine.block_manager_pool(),
+        &engine.model_args(),
+        options,
+        std::move(make_scheduler_callbacks(&engine)));
 
     EXPECT_EQ(engine.observed_batches(),
               (std::vector<int32_t>{2, 4, 4, 2, 4, 4}));
@@ -1261,7 +1283,11 @@ TEST(GraphWarmupTest, ElasticGraphWarmupCannotBeDeferredToServing) {
         RecordingProfileEngine engine;
         ProfileManager::Options options;
         options.max_tokens_per_batch(4).max_seqs_per_batch(4);
-        ProfileManager profile_manager(&engine, options);
+        ProfileManager profile_manager(
+            engine.block_manager_pool(),
+            &engine.model_args(),
+            options,
+            std::move(make_scheduler_callbacks(&engine)));
       },
       "Elastic VMM requires startup graph warmup");
   config.disable_graph_warmup(previous_disabled);

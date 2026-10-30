@@ -31,6 +31,7 @@ limitations under the License.
 
 #include "common/types.h"
 #include "core/common/xllm_build_info.h"
+#include "core/distributed_runtime/xservice_client.h"
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/parallel_config.h"
@@ -220,6 +221,17 @@ void Master::wait() {
   if (idle_thread_.joinable()) {
     idle_thread_.join();
   }
+}
+
+void Master::init_service_routing() {
+  if (!options_.enable_service_routing()) {
+    return;
+  }
+  XServiceClient* xservice_client = XServiceClient::get_instance();
+  CHECK(xservice_client->init(options_.etcd_addr().value_or(""),
+                              options_.instance_name().value_or(""),
+                              options_.etcd_namespace().value_or("")))
+      << "XServiceClient init fail!";
 }
 
 void Master::run() {

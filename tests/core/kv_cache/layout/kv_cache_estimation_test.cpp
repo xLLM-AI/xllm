@@ -59,8 +59,9 @@ TEST(KVCacheEstimationTest, RuntimeBudgetUsesMinimumAcrossWorkers) {
   KVCacheEstimateContext context;
   context.dtype = torch::kFloat16;
   context.world_size = 1;
-  context.worker_memory = {{8 * 1024 * 1024, 10 * 1024 * 1024},
-                           {16 * 1024 * 1024, 20 * 1024 * 1024}};
+  context.worker_memory =
+      std::vector<KVCacheMemorySnapshot>{{8 * 1024 * 1024, 10 * 1024 * 1024},
+                                         {16 * 1024 * 1024, 20 * 1024 * 1024}};
 
   const KVCacheCapacity capacity =
       KVCacheEstimator(model_args).estimate(runtime_options, context);
@@ -79,7 +80,7 @@ TEST(KVCacheEstimationTest, RuntimeBudgetCapsBeforeVlmEncoderReservation) {
 
   KVCacheEstimateContext context;
   context.dtype = torch::kFloat16;
-  context.worker_memory = {
+  context.worker_memory = std::vector<KVCacheMemorySnapshot>{
       {8 * 1024 * 1024, 10 * 1024 * 1024},
   };
   context.is_multimodal = true;
@@ -166,9 +167,8 @@ TEST(KVCacheEstimationTest, DraftTp1OverridesTensorParallelHeadDerivation) {
   ModelArgs model_args = make_standard_args();
   model_args.n_heads(8).n_kv_heads(4);
   runtime::Options runtime_options;
-  runtime_options.block_size(16)
-      .enable_mtp_draft_body_tp1(true)
-      .is_draft_engine(true);
+  runtime_options.block_size(16).enable_mtp_draft_body_tp1(true).is_draft_model(
+      true);
 
   KVCacheEstimateContext context;
   context.dtype = torch::kFloat16;
@@ -222,7 +222,7 @@ TEST(KVCacheEstimationTest, RuntimeEstimatorRejectsNonPositiveWorkerBudget) {
   ModelArgs model_args = make_standard_args();
   runtime::Options runtime_options;
   KVCacheEstimateContext context;
-  context.worker_memory = {{0, 0}};
+  context.worker_memory = std::vector<KVCacheMemorySnapshot>{{0, 0}};
 
   EXPECT_DEATH(
       (void)KVCacheEstimator(model_args).estimate(runtime_options, context),
@@ -1300,7 +1300,7 @@ TEST(KVCacheEstimationTest,
   target_options.max_seqs_per_batch = 4;
   target_options.max_tokens_per_batch = 2176;
   KVCacheEstimateOptions draft_options = target_options;
-  draft_options.is_draft_engine = true;
+  draft_options.is_draft_model = true;
 
   const KVCacheCapacity target_only_capacity =
       estimate_kv_cache_capacity(target_args, target_options);

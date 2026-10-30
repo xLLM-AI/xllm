@@ -118,7 +118,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         num_decoding_tokens: int = 1,
         enable_mega_moe_token_mask: bool = False,
         *,
-        is_spec_draft: bool = False,
+        is_draft_model: bool = False,
         enable_graph_mode_decode_no_padding: bool = False,
         spec_verify_width: int = 1,
         device_kv_lengths: bool = False,
@@ -129,7 +129,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         self.max_batch = (max_batch + dp_size - 1) // dp_size
         self.max_model_len = max_model_len
         self.num_decoding_tokens = max(1, int(num_decoding_tokens))
-        self._is_spec_draft = is_spec_draft
+        self._is_draft_model = is_draft_model
         self._enable_decode_no_padding = enable_graph_mode_decode_no_padding
         # New exact shapes can arrive while native input preparation copies
         # the next batch on another thread. Only this thread captures the
@@ -137,7 +137,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         if enable_graph_mode_decode_no_padding:
             self._capture_error_mode = "thread_local"
         self._serial_workspace_pool: list[torch.Tensor] | None = [] if enable_graph_mode_decode_no_padding else None
-        if not 1 <= spec_verify_width <= 17 or (is_spec_draft and spec_verify_width != 1):
+        if not 1 <= spec_verify_width <= 17 or (is_draft_model and spec_verify_width != 1):
             raise ValueError("Speculative verify graph width must be in [1, 17], with width one for draft models")
         self._spec_verify_width = spec_verify_width
         if device_kv_lengths and dp_size != 1:
@@ -335,7 +335,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
             return False
         if self.dp_size > 1:
             # Draft iterations advance KV without refreshing the shared host plan.
-            if self._is_spec_draft:
+            if self._is_draft_model:
                 return False
             global_kv_lengths = getattr(metadata, "dp_global_kv_max_seq_lens", None)
             if global_kv_lengths is None:
@@ -847,7 +847,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 batch_size,
                 detach=(
                     self.num_decoding_tokens > 1
-                    or self._is_spec_draft
+                    or self._is_draft_model
                     or input_embedding is not None
                     or mtp_topk_indices is not None
                 ),

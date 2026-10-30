@@ -162,7 +162,7 @@ std::optional<std::string> validate_context_parallel_config(
   }
 
   if (Platform::is_mlu()) {
-    if (engine_type != EngineType::LLM && engine_type != EngineType::SSM) {
+    if (engine_type != EngineType::LLM) {
       return "MLU CP supports only LLM text generation";
     }
     if (options.task_type() != "generate") {
@@ -192,14 +192,14 @@ std::optional<std::string> validate_context_parallel_config(
   }
 
   if (Platform::is_npu()) {
-    if (engine_type != EngineType::LLM && engine_type != EngineType::SSM) {
+    if (engine_type != EngineType::LLM) {
       return "Model-side CP supports only LLM text generation";
     }
     if (options.task_type() != "generate") {
       return "Model-side CP supports only the generate task";
     }
     const bool is_dsv4_model = util::is_deepseek_v4_model_type(model_type);
-    if (engine_type == EngineType::SSM &&
+    if (SpeculativeConfig::uses_speculative_pipeline(options) &&
         SpeculativeConfig::requires_aux_hidden_capture(
             options.speculative_algorithm()) &&
         (!is_dsv4_model || ModelConfig::is_python_model_impl(
@@ -273,7 +273,7 @@ std::optional<std::string> validate_context_parallel_config(
                "kv_split_size=1";
       }
       if (is_glm5_next_target_model_type(model_type)) {
-        if (engine_type == EngineType::SSM) {
+        if (SpeculativeConfig::uses_speculative_pipeline(options)) {
           return "Python GLM-5 Next CP does not support target-side "
                  "speculative "
                  "verification; run speculation on a cp_size=1 Decode instance";

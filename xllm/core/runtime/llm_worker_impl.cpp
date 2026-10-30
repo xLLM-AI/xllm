@@ -142,7 +142,7 @@ bool LLMWorkerImpl::init_model(ModelContext& context) {
         torch::TensorOptions().dtype(torch::kInt64).device(device_));
     // MTP draft MoE layers still write to their own load buffer, but only
     // the target reports loads and consumes EPLB prepare/update commands.
-    if (!is_spec_draft_) {
+    if (!options_.is_draft_model()) {
       eplb_executor_ = std::make_unique<EplbExecutor>(*model_, device_);
     }
   }
@@ -264,7 +264,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
         kv_cache_transfer_->push_kv_blocks_async(input.transfer_kv_infos,
                                                  context_.get_parallel_args(),
                                                  layer_synchronizer,
-                                                 is_spec_draft_));
+                                                 options_.is_draft_model()));
 #endif
   }
   auto wait_kv_push = [&kv_transfers]() {
@@ -337,8 +337,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     output.prepared_token = eplb_executor_->consume_ready_prepare_token();
   }
 
-  if (!enable_schedule_overlap() && !driver_ && !dp_driver_ &&
-      !options_.enable_speculative_decode()) {
+  if (suppresses_step_output()) {
     MULTI_MODEL_STEP_UNLOCK();
     if (sync_policy == ForwardSyncPolicy::NO_SYNC) {
       wait_kv_push();
@@ -393,7 +392,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
   if (options_.enable_speculative_decode()) {
     const bool is_target_prefill =
         !input.input_params.meta.batch_forward_type.is_decode() &&
-        !is_spec_draft_;
+        !options_.is_draft_model();
     output_spec_hidden_states(output.sample_output,
                               model_output,
                               lm_head_selected_token_idxes,

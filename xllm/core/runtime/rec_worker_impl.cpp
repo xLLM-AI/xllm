@@ -466,7 +466,7 @@ std::optional<ForwardOutput> RecWorkerImpl::RecWorkPipeline::step(
             input.transfer_kv_infos,
             runtime_.context->get_parallel_args(),
             layer_synchronizer,
-            runtime_.worker.is_spec_draft_));
+            /*is_draft_model=*/false));
 #endif
   }
 
@@ -487,8 +487,7 @@ std::optional<ForwardOutput> RecWorkerImpl::RecWorkPipeline::step(
   }
 
   ForwardOutput output;
-  if (!runtime_.worker.driver_ && !runtime_.worker.dp_driver_ &&
-      !runtime_.worker.options_.enable_speculative_decode()) {
+  if (!runtime_.worker.is_driver()) {
     auto ret = runtime_.stream->synchronize();
     // in p-d disaggregation scene, all micro batches should be in same
     // prefill/decode stage, so, to judge transfer_kv_infos.empty,
@@ -531,17 +530,6 @@ std::optional<ForwardOutput> RecWorkerImpl::RecWorkPipeline::step(
     output.max_top_logprobs = sampling_params.max_top_logprobs();
     // set beam search output to output
     output.beam_search_output = beam_search_output;
-  }
-
-  if (runtime_.worker.options_.enable_speculative_decode()) {
-    if (!input_params.meta.batch_forward_type.is_decode() &&
-        !runtime_.worker.is_spec_draft_) {
-      output.sample_output.embeddings = model_output.hidden_states;
-    } else if (sampling_params.num_sample_seqs() > 0) {
-      auto embeddings = model_output.hidden_states.index_select(
-          /*dim=*/0, sampling_params.selected_token_idxes());
-      output.sample_output.embeddings = embeddings;
-    }
   }
 
   auto ret = runtime_.stream->synchronize();
@@ -765,8 +753,7 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecWorkPipeline::step(
     return std::nullopt;
   }
 
-  if (!runtime_.worker.driver_ && !runtime_.worker.dp_driver_ &&
-      !runtime_.worker.options_.enable_speculative_decode()) {
+  if (!runtime_.worker.is_driver()) {
     runtime_.stream->synchronize();
     COUNTER_ADD(execution_latency_seconds_model, timer.elapsed_seconds());
     DeviceMonitor::get_instance().update_active_activation_memory(
@@ -1641,8 +1628,7 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecXAttentionWorkPipeline::step(
       return std::nullopt;
     }
 
-    if (!runtime_.worker.driver_ && !runtime_.worker.dp_driver_ &&
-        !runtime_.worker.options_.enable_speculative_decode()) {
+    if (!runtime_.worker.is_driver()) {
       runtime_.stream->synchronize();
       COUNTER_ADD(execution_latency_seconds_model, timer.elapsed_seconds());
       DeviceMonitor::get_instance().update_active_activation_memory(

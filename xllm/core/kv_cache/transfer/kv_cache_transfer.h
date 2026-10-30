@@ -94,7 +94,7 @@ class KVCacheTransfer {
   virtual void configure_cache_layout(const ParallelArgs& parallel_args,
                                       const ModelArgs& model_args,
                                       int32_t block_token_capacity,
-                                      bool is_spec_draft) {}
+                                      bool is_draft_model) {}
 
   virtual void register_kv_cache(std::vector<xllm::KVCache>& kv_caches,
                                  const KVCacheShape& kv_cache_shape,
@@ -132,7 +132,7 @@ class KVCacheTransfer {
       const std::vector<TransferKVInfo>& transfer_kv_infos,
       const ParallelArgs& parallel_args,
       std::shared_ptr<KVPushSynchronizerImpl> layer_synchronizer,
-      bool is_spec_draft);
+      bool is_draft_model);
 #endif
 
   virtual void merge_kv_blocks(
@@ -144,7 +144,7 @@ class KVCacheTransfer {
   virtual bool push_kv_blocks(
       std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
       std::shared_ptr<KVPushSynchronizerImpl>& layer_synchronizer,
-      bool is_spec_draft,
+      bool is_draft_model,
       int32_t kv_split_rank,
       int32_t kv_split_size) = 0;
 #endif

@@ -19,6 +19,8 @@ limitations under the License.
 
 namespace xllm {
 
+class DraftStepController;
+
 struct SequenceStatus {
   SequenceStatus(uint32_t need_to_use, uint32_t release_block)
       : num_block_need_to_use_(need_to_use),
@@ -55,7 +57,7 @@ class ResourceGuard {
 
 class BlockCapacityGuard {
  public:
-  BlockCapacityGuard(KVCacheManager* kv_cache_manager);
+  explicit BlockCapacityGuard(BlockManagerPool* block_manager_pool);
 
   bool if_accept_candidate_sequences(
       const std::vector<Sequence*>& candidate_sequences,
@@ -63,13 +65,13 @@ class BlockCapacityGuard {
       const std::vector<Sequence*>& running_sequences);
 
  private:
-  int32_t block_size() const { return kv_cache_manager_->block_size(); }
+  int32_t block_size() const { return block_manager_pool_->block_size(); }
 
-  uint32_t num_block() const { return kv_cache_manager_->num_blocks(); }
+  uint32_t num_block() const { return block_manager_pool_->num_blocks(); }
 
   uint32_t num_blocks_in_useless() const {
     // TODO for mutil dp
-    return num_block() - kv_cache_manager_->num_used_blocks()[0];
+    return num_block() - block_manager_pool_->num_used_blocks()[0];
   }
 
   bool simulate_is_satisfied_for_candidate_sequences();
@@ -89,7 +91,7 @@ class BlockCapacityGuard {
   std::vector<SequenceStatus> get_running_sequence_status();
 
  private:
-  KVCacheManager* kv_cache_manager_;
+  BlockManagerPool* block_manager_pool_;
 
   std::vector<Sequence*> candidate_sequences_;
   std::vector<Sequence*> decode_queue_;
@@ -98,29 +100,29 @@ class BlockCapacityGuard {
   uint32_t num_reserved_block_for_prefill_;
 };
 
-class ZeroEvictionScheduler final : public ContinuousScheduler<> {
+class ZeroEvictionScheduler final : public ContinuousScheduler {
  public:
-  template <typename TargetEngine>
-    requires requires(TargetEngine* engine, BatchGroup& batch) {
-      static_cast<Engine*>(engine);
-      { engine->step(batch) } -> std::same_as<ForwardOutput>;
-      {
-        engine->collect_step_outputs(batch)
-      } -> std::same_as<std::vector<RawForwardOutput>>;
-    }
   ZeroEvictionScheduler(
-      TargetEngine* engine,
+      BlockManagerPool* block_manager_pool,
+      const ModelArgs* model_args,
+      const Tokenizer* tokenizer,
+      SchedulerCallbacks callbacks,
       const Options& options,
       std::shared_ptr<ModelResidencyCoordinator> model_residency_coordinator =
           nullptr,
       std::shared_ptr<DistributedWorkerManager> distributed_worker_manager =
-          nullptr)
-      : ContinuousScheduler<>(engine,
-                              options,
-                              std::move(model_residency_coordinator),
-                              std::move(distributed_worker_manager)) {
+          nullptr,
+      DraftStepController* draft_step_controller = nullptr)
+      : ContinuousScheduler(block_manager_pool,
+                            model_args,
+                            tokenizer,
+                            std::move(callbacks),
+                            options,
+                            std::move(model_residency_coordinator),
+                            std::move(distributed_worker_manager),
+                            draft_step_controller) {
     block_capacity_guard_ =
-        std::make_unique<BlockCapacityGuard>(kv_cache_manager_);
+        std::make_unique<BlockCapacityGuard>(block_manager_pool_);
   }
   ~ZeroEvictionScheduler() override;
 

@@ -27,7 +27,6 @@ limitations under the License.
 #include "core/distributed_runtime/disagg_pd_request_converter.h"
 #include "core/distributed_runtime/disagg_pd_response.h"
 #include "core/distributed_runtime/distributed_virtual_memory_coordinator.h"
-#include "core/distributed_runtime/engine.h"
 #include "core/framework/block/block_manager_pool.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/constrained/json_object_grammar.h"
@@ -39,13 +38,8 @@ namespace xllm {
 
 DisaggPDServiceImpl::DisaggPDServiceImpl(
     DisaggPDScheduler* scheduler,
-    Engine* engine,
-    int32_t /*kv_cache_block_tokens*/,
     DisaggPDServiceOptions response_options)
-    : scheduler_(scheduler),
-      engine_(engine),
-      response_options_(std::move(response_options)),
-      block_manager_(engine->block_manager_pool()) {
+    : scheduler_(scheduler), response_options_(std::move(response_options)) {
   xservice_client_ = XServiceClient::get_instance();
   if (!xservice_client_->initialize_done()) {
     LOG(FATAL) << "XServiceClient not init.";
@@ -60,13 +54,14 @@ DisaggPDServiceImpl::get_json_object_grammar(bool reasoning_enabled,
   std::shared_ptr<const JsonObjectGrammar>& grammar =
       reasoning_enabled ? json_reasoning_grammar_ : json_object_grammar_;
   if (grammar == nullptr) {
-    grammar = JsonObjectGrammar::create_from_tokenizer(
-        *engine_->tokenizer(),
-        engine_->model_args().eos_token_id(),
-        engine_->model_args().stop_token_ids(),
-        engine_->model_args().vocab_size(),
-        reasoning_enabled,
-        error);
+    const ModelArgs* model_args = scheduler_->model_args();
+    grammar =
+        JsonObjectGrammar::create_from_tokenizer(*scheduler_->tokenizer(),
+                                                 model_args->eos_token_id(),
+                                                 model_args->stop_token_ids(),
+                                                 model_args->vocab_size(),
+                                                 reasoning_enabled,
+                                                 error);
   }
   return grammar;
 }
@@ -183,13 +178,13 @@ bool DisaggPDServiceImpl::append_virtual_kv_cache_offsets(
     const std::string& request_id,
     const std::vector<int32_t>& block_ids,
     proto::DisaggResponse* response) {
-  if (block_manager_ == nullptr ||
-      !block_manager_->options().enable_vmm_kvcache() || block_ids.empty()) {
+  BlockManagerPool* block_manager = scheduler_->block_manager_pool();
+  if (!block_manager->options().enable_vmm_kvcache() || block_ids.empty()) {
     return true;
   }
 
   std::vector<VirtualKVCacheLayerGlobalOffsets> layer_offsets;
-  const auto& block_options = block_manager_->options();
+  const auto& block_options = block_manager->options();
   const bool offsets_available =
       DistributedVirtualMemoryCoordinator::get_instance()
           .get_virtual_kv_cache_offsets(
@@ -231,6 +226,11 @@ void DisaggPDServiceImpl::decode_recv_new_requests(
     proto::DisaggResponses* response) {
   response->mutable_resps()->Reserve(response->resps_size() +
                                      request->reqs_size());
+  BlockManagerPool* block_manager = scheduler_->block_manager_pool();
+  const bool has_linear_attention_layers =
+      scheduler_->has_linear_attention_layers();
+  const bool enable_vmm_kvcache =
+      block_manager->options().enable_vmm_kvcache();
   for (const auto& req : request->reqs()) {
     auto* resp = response->add_resps();
     resp->set_req_id(req.req_id());
@@ -269,17 +269,14 @@ void DisaggPDServiceImpl::decode_recv_new_requests(
     std::vector<int32_t> virtual_memory_block_ids;
     append_disagg_kv_transfer_groups(
         sequence->kv_state(),
-        has_linear_attention_layers(engine_->model_args()),
+        has_linear_attention_layers,
         resp,
-        block_manager_ != nullptr &&
-                block_manager_->options().enable_vmm_kvcache()
-            ? &virtual_memory_block_ids
-            : nullptr);
+        enable_vmm_kvcache ? &virtual_memory_block_ids : nullptr);
     if (!append_virtual_kv_cache_offsets(sequence->dp_rank(),
                                          req.req_id(),
                                          virtual_memory_block_ids,
                                          resp)) {
-      engine_->block_manager_pool()->deallocate_without_cache(sequence);
+      block_manager->deallocate_without_cache(sequence);
       resp->clear_groups();
       resp->clear_virtual_kv_cache_layer_global_offsets();
       resp->set_status_code(500);

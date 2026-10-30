@@ -186,7 +186,7 @@ class ModelRegistry {
 
   static void configure_mtp_args(ModelArgs& args,
                                  std::string_view algorithm,
-                                 bool is_draft_engine,
+                                 bool is_draft_model,
                                  bool is_python_model);
 
   static CausalLMFactory get_causallm_factory(const std::string& name);

@@ -20,6 +20,7 @@ limitations under the License.
 #include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model_loader/model_loader.h"
 #include "core/framework/sampling/logits_processor.h"
+#include "core/runtime/spec_runtime_helpers.h"
 #include "core/util/tensor_helper.h"
 #include "runtime/llm_worker_impl.h"
 
@@ -27,19 +28,10 @@ namespace xllm {
 
 namespace {
 
-runtime::Options eagle3_main_options(const runtime::Options& options) {
-  auto opts = options;
-  opts.enable_schedule_overlap(false)
-      .is_draft_engine(false)
-      .enable_graph_aux_hidden_states(true);
-  return opts;
-}
-
 runtime::Options eagle3_draft_options(const runtime::Options& options) {
-  auto opts = options;
-  opts.enable_schedule_overlap(false)
-      .is_draft_engine(true)
-      .num_decoding_tokens(1)
+  runtime::Options opts = options;
+  spec_detail::mark_spec_draft_options(opts);
+  opts.num_decoding_tokens(1)
       .num_speculative_tokens(0)
       .enable_graph(false)
       .enable_graph_mode_decode_no_padding(false)
@@ -60,7 +52,7 @@ Eagle3WorkerImpl<TargetInput>::Eagle3WorkerImpl(
     : MTPWorkerImpl<TargetInput>(parallel_args,
                                  device,
                                  options,
-                                 eagle3_main_options(options),
+                                 spec_detail::spec_target_options(options),
                                  eagle3_draft_options(options),
                                  worker_type) {
   // Context parallelism does not expose the auxiliary hidden states.

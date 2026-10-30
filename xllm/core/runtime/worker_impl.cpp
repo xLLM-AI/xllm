@@ -79,9 +79,9 @@ limitations under the License.
 #include "core/distributed_runtime/master.h"
 #include "core/framework/allocator/global_virtual_memory_region.h"
 #include "core/framework/allocator/virtual_memory/physical_page_pool.h"
+#include "core/framework/config/mtp_utils.h"
 #include "core/framework/model_loader/model_loader.h"
 #include "core/framework/speculative/draft_config.h"
-#include "core/framework/speculative/mtp_utils.h"
 #include "core/kv_cache/layout/layerwise_split_layout.h"
 #include "core/kv_cache/linear_state_restore.h"
 #include "core/kv_cache/storage/kv_cache.h"
@@ -90,7 +90,6 @@ limitations under the License.
 #include "core/runtime/decode_graph_bucket.h"
 #include "core/runtime/worker_memory_resources.h"
 #include "core/runtime/worker_rendezvous.h"
-#include "framework/model/aux_hidden_capture.h"
 #include "framework/model/model_params_view.h"
 #include "framework/parallel_state/npu_cp_plan.h"
 #include "framework/state_dict/state_dict.h"
@@ -99,7 +98,6 @@ limitations under the License.
 #if defined(USE_NPU)
 #include "layers/npu/loader/rolling_weight_buffer.h"
 #endif
-#include "util/json_reader.h"
 #include "util/tensor_helper.h"
 #include "util/threadpool.h"
 #include "util/timer.h"
@@ -156,43 +154,6 @@ class ScopedAtenLoadThreads {
   int32_t prev_threads_ = 0;
   bool active_ = false;
 };
-
-#if defined(USE_NPU)
-int32_t read_block_size(const std::string& model_weights_path) {
-  JsonReader reader;
-  const std::string config_path = model_weights_path + "/config.json";
-  CHECK(reader.parse(config_path))
-      << "Failed to parse DSpark draft config: " << config_path;
-  return reader.value_or<int32_t>("dspark_block_size", 0);
-}
-
-void configure_deepseek_v4_dspark_args(ModelArgs& args,
-                                       const runtime::Options& options) {
-  CHECK_GT(args.dspark_num_layers(), 0)
-      << "DeepSeek-V4 DSpark requires at least one draft layer.";
-  args.n_layers(args.dspark_num_layers());
-  args.n_hash_layers(0);
-
-  // Default to the checkpoint's block_size; --num_speculative_tokens overrides.
-  const int32_t ckpt_block_size = read_block_size(options.model_path());
-  const int32_t user_num_spec = options.num_speculative_tokens();
-  if (user_num_spec > 0 && user_num_spec != ckpt_block_size) {
-    LOG(WARNING) << "--num_speculative_tokens=" << user_num_spec
-                 << " overrides DSpark checkpoint dspark_block_size="
-                 << ckpt_block_size << ".";
-  }
-  args.dspark_block_size(user_num_spec > 0 ? user_num_spec : ckpt_block_size);
-
-  // DSpark stages are all standard SWA layers. Their stage ids are not target
-  // model layer ids, so target compress_ratios[0..N) must not be reused.
-  args.compress_ratios(
-      std::vector<int32_t>(static_cast<size_t>(args.dspark_num_layers()),
-                           /*value=*/1));
-
-  args.dspark_use_native_sas(
-      KernelConfig::get_instance().enable_dspark_native_sas());
-}
-#endif
 
 void move_tensor_to_device_if_needed(torch::Tensor& tensor,
                                      const torch::Device& device) {
@@ -428,11 +389,6 @@ WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
                              parallel_args.dp_size() > 1)),
       device_(device),
       parallel_args_(parallel_args) {
-  if (options_.enable_speculative_decode() &&
-      options_.num_decoding_tokens() == 1) {
-    is_spec_draft_ = true;
-  }
-
   device_.set_device();
   device_.init_device_context();
   threadpool_.schedule([this]() mutable { device_.set_device(); });
@@ -532,8 +488,8 @@ bool WorkerImpl::allocate_kv_cache_storage(
         << "Grouped KV cache layout does not support VirtualMemory cache.";
   }
   const auto& args = context_.get_model_args();
-  KVCacheCreateOptions layout_options =
-      get_kv_cache_create_options(args, kv_cache_shape, is_spec_draft_);
+  KVCacheCreateOptions layout_options = get_kv_cache_create_options(
+      args, kv_cache_shape, options_.is_draft_model());
   const bool enable_linear_attention = layout_options.enable_linear_attention();
   const bool enable_lighting_indexer = args.index_n_heads() > 0;
   // A model may be BOTH linear-attention (KDA layers) AND have a lighting
@@ -554,7 +510,7 @@ bool WorkerImpl::allocate_kv_cache_storage(
   std::vector<bool> indexer_cache_enabled_layers =
       resolve_indexer_cache_enabled_layers(args, num_layers);
 
-  if (kv_cache_shape.has_kpool_tail_shape() && is_spec_draft_) {
+  if (kv_cache_shape.has_kpool_tail_shape() && options_.is_draft_model()) {
     // GLM Next MTP layers are full indexers, independent of the target's
     // hybrid layer schedule and shared-topk pattern.
     indexer_cache_enabled_layers.assign(num_layers, true);
@@ -694,7 +650,7 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
   kv_cache_transfer_->configure_cache_layout(parallel_args_,
                                              context_.get_model_args(),
                                              options_.block_size(),
-                                             /*is_spec_draft=*/false);
+                                             /*is_draft_model=*/false);
   kv_cache_transfer_->register_kv_cache(kv_caches_, kv_cache_shape, dtype_);
 
   status_ = Status::READY;
@@ -716,18 +672,15 @@ bool WorkerImpl::allocate_kv_cache_with_transfer(
     return false;
   }
 
-  if (is_spec_draft_) {
-    kv_cache_transfer_->configure_cache_layout(parallel_args_,
-                                               context_.get_model_args(),
-                                               options_.block_size(),
-                                               /*is_spec_draft=*/true);
+  kv_cache_transfer_->configure_cache_layout(
+      parallel_args_,
+      context_.get_model_args(),
+      options_.block_size(),
+      /*is_draft_model=*/options_.is_draft_model());
+  if (options_.is_draft_model()) {
     kv_cache_transfer_->register_kv_cache_spec(
         kv_caches_, kv_cache_shape, dtype_);
   } else {
-    kv_cache_transfer_->configure_cache_layout(parallel_args_,
-                                               context_.get_model_args(),
-                                               options_.block_size(),
-                                               /*is_spec_draft=*/false);
     kv_cache_transfer_->register_kv_cache(kv_caches_, kv_cache_shape, dtype_);
   }
 
@@ -1123,7 +1076,7 @@ void WorkerImpl::prepare_dp_ep_padding_impl(Params& input_params) {
   const std::vector<int32_t>& raw_token_sizes =
       input_params.parallel.raw_dp_global_token_nums;
   const bool is_prefill = input_params.meta.batch_forward_type.no_decode();
-  const bool use_draft_decode_cache = options_.is_draft_engine() && !is_prefill;
+  const bool use_draft_decode_cache = options_.is_draft_model() && !is_prefill;
   if (use_draft_decode_cache) {
     const DpEpPaddingData* cached =
         draft_dp_ep_padding_cache_.find(token_sizes, raw_token_sizes);
@@ -1136,7 +1089,7 @@ void WorkerImpl::prepare_dp_ep_padding_impl(Params& input_params) {
   const bool speculative_target_graph_decode =
       input_params.meta.batch_forward_type.is_decode() &&
       ::xllm::ExecutionConfig::get_instance().enable_graph() &&
-      options_.enable_speculative_decode() && !options_.is_draft_engine() &&
+      options_.enable_speculative_decode() && !options_.is_draft_model() &&
       token_sizes.size() > 1 &&
       input_params.parallel.dp_is_decode.size() == token_sizes.size() &&
       std::all_of(input_params.parallel.dp_is_decode.begin(),
@@ -1925,7 +1878,7 @@ bool WorkerImpl::wakeup_local(const WakeupOptions& options) {
   if (options.master_status == MasterStatus::LIGHT_SLEEP) {
 #if defined(USE_NPU)
     if (::xllm::LoadConfig::get_instance().enable_rolling_load() &&
-        !is_spec_draft_) {
+        !options_.is_draft_model()) {
       // Reuse rolling runtime state and refresh rolling initialization on
       // wakeup without re-reading checkpoint in LIGHT_SLEEP.
       if (!init_rolling_runtime_state()) {
@@ -2132,8 +2085,6 @@ TaskModel WorkerImpl::task_model() {
   CHECK(status_ == Status::LOADED || status_ == Status::READY);
   CHECK(model_ != nullptr && model_executor_ != nullptr);
   TaskModel task{*model_, *model_executor_, kv_caches_};
-  task.input_domain =
-      options_.backend() == "vlm" ? TaskInputDomain::VLM : TaskInputDomain::LLM;
   task.restore_request_state = [this](const ModelParamsView& params) {
     prepare_linear_state_cache(params);
   };
@@ -2171,7 +2122,7 @@ TaskModel WorkerImpl::task_model() {
           transfer_kv_infos,
           context_.get_parallel_args(),
           std::move(layer_synchronizer),
-          is_spec_draft_);
+          options_.is_draft_model());
     };
   }
 #endif
@@ -2218,7 +2169,7 @@ bool WorkerImpl::init_model_impl(const std::string& model_weights_path,
   device_.set_seed(random_seed);
 
   auto model_loader = ModelLoader::create(model_weights_path);
-  if (options_.is_draft_engine() && !options_.model_path().empty() &&
+  if (options_.is_draft_model() && !options_.model_path().empty() &&
       options_.model_path() != model_weights_path) {
     model_loader->set_reference_model_weights_path(options_.model_path());
   }
@@ -2228,7 +2179,7 @@ bool WorkerImpl::init_model_impl(const std::string& model_weights_path,
   ModelRegistry::configure_mtp_args(
       args,
       options_.speculative_algorithm(),
-      options_.is_draft_engine(),
+      options_.is_draft_model(),
       ModelConfig::is_python_model_impl(context_.get_model_impl()));
 #if defined(USE_MLU)
   const bool native_glm5_next =
@@ -2248,160 +2199,17 @@ bool WorkerImpl::init_model_impl(const std::string& model_weights_path,
   }
   torch::ScalarType dtype = util::parse_dtype(args.dtype(), device_);
 
-  // A draft engine is fed token ids and detokenized by the target, so it owns
-  // no tokenizer (its weights dir may not even ship tokenizer files, e.g. the
-  // DFlash / DSpark draft checkpoints). Only the target worker builds one and
-  // reconciles vocab sizes; its JSON grammar restoration below is target-only
-  // and never runs on a draft.
+  // Draft checkpoints may not ship tokenizer files; only the target builds one.
   std::unique_ptr<Tokenizer> tokenizer;
-  if (!options_.is_draft_engine()) {
+  if (!options_.is_draft_model()) {
     tokenizer = model_loader->tokenizer();
     CHECK(tokenizer != nullptr);
-
-    const int64_t tokenizer_vocab_size = tokenizer->vocab_size();
-    int64_t model_vocab_size = args.vocab_size();
-    // use tokenizer vocab size if model vocab size is not set
-    if (model_vocab_size <= 0) {
-      LOG(WARNING)
-          << "Model vocab size is not set, using tokenizer vocab size: "
-          << tokenizer_vocab_size;
-      args.vocab_size(tokenizer_vocab_size);
-    } else if (tokenizer_vocab_size > model_vocab_size) {
-      LOG(WARNING) << "Unsafe vocab mismatch: tokenizer: "
-                   << tokenizer_vocab_size << ", model: " << model_vocab_size;
-    }
+    reconcile_vocab_size(args, tokenizer->vocab_size());
   }
   tokenizer_ = std::move(tokenizer);
 
-  const std::string& speculative_algorithm = options_.speculative_algorithm();
-  const bool is_block_diffusion =
-      SpeculativeConfig::is_block_diffusion_algorithm(speculative_algorithm);
-
-#if defined(USE_NPU)
-  if (options_.enable_speculative_decode() &&
-      SpeculativeConfig::is_mtp_algorithm(speculative_algorithm) &&
-      uses_mtp_target_spec_width(args.model_type())) {
-    args.num_speculative_tokens(options_.num_speculative_tokens());
-  }
-  if (is_block_diffusion) {
-    if (options_.is_draft_engine()) {
-      args.layers_to_capture({});
-      const bool is_dspark =
-          SpeculativeConfig::is_dspark_algorithm(speculative_algorithm);
-      const bool is_deepseek_v4_dspark =
-          is_dspark && util::is_deepseek_v4_model_type(args.model_type());
-      std::string draft_model_type = "DFlashDraftModel";
-      if (is_dspark) {
-        draft_model_type = args.model_type() == kDSparkGLM5DraftModelType
-                               ? std::string(kDSparkGLM5DraftModelType)
-                               : "DSparkDraftModel";
-      } else if (SpeculativeConfig::is_dflash2_algorithm(
-                     speculative_algorithm)) {
-        draft_model_type = std::string(kDFlash2DraftModelType);
-        CHECK_GT(args.dflash2_block_size(), 0);
-      }
-      if (is_deepseek_v4_dspark) {
-        draft_model_type = std::string(kDeepseekV4DSparkModelType);
-      }
-      LOG(INFO) << "Overriding draft model_type from " << args.model_type()
-                << " to " << draft_model_type
-                << " for block-diffusion speculative decoding";
-      args.model_type(draft_model_type);
-      // The draft's decode step is num_speculative_tokens + 1 rows wide;
-      // record it on ModelArgs so dummy inputs derive the same width.
-      args.num_speculative_tokens(options_.num_speculative_tokens());
-      if (is_deepseek_v4_dspark) {
-        configure_deepseek_v4_dspark_args(args, options_);
-      }
-    } else {
-      CHECK(options_.draft_model_path().has_value())
-          << "block-diffusion speculative decoding requires --draft_model.";
-      args.layers_to_capture(
-          read_capture_layer_ids(options_.draft_model_path().value()));
-    }
-  } else if (options_.enable_speculative_decode() &&
-             ::xllm::SpeculativeConfig::get_instance()
-                 .enable_atb_spec_kernel()) {
-    args.num_speculative_tokens(options_.num_speculative_tokens());
-  } else if (options_.enable_speculative_decode() &&
-             options_.num_speculative_tokens() == 0 &&
-             args.num_nextn_predict_layers() != 0) {
-    const std::string& current_type = args.model_type();
-    const char* mtp_model_type = nullptr;
-    if (current_type == "qwen3_5_text") {
-      mtp_model_type = "qwen3_5_mtp";
-    } else if (current_type == "qwen3_5_moe_text") {
-      mtp_model_type = "qwen3_5_moe_mtp";
-    }
-    if (mtp_model_type != nullptr) {
-      LOG(INFO) << "Overriding draft model_type from " << current_type << " to "
-                << mtp_model_type << " for speculative decoding";
-      args.model_type(mtp_model_type);
-      const int32_t mtp_layers = args.num_nextn_predict_layers();
-      args.n_layers(mtp_layers);
-      args.layer_types(std::vector<std::string>(mtp_layers, "full_attention"));
-      args.full_attention_interval(1);
-    }
-  }
-  if (options_.enable_speculative_decode() && !options_.is_draft_engine() &&
-      SpeculativeConfig::requires_aux_hidden_capture(speculative_algorithm) &&
-      args.layers_to_capture().empty()) {
-    std::vector<int32_t> capture_layer_ids;
-    if (SpeculativeConfig::is_eagle3_algorithm(speculative_algorithm) &&
-        options_.draft_model_path().has_value()) {
-      // Eagle3.1 drafts pin their aux capture layers in the draft config;
-      // legacy eagle3 configs omit them and fall back to the default below.
-      capture_layer_ids = read_capture_layer_ids(*options_.draft_model_path(),
-                                                 /*required=*/false);
-    }
-    if (capture_layer_ids.empty()) {
-      const int32_t num_layers = static_cast<int32_t>(args.n_layers());
-      capture_layer_ids =
-          AuxHiddenCapture::legacy_default_capture_layer_ids(num_layers);
-    }
-    args.layers_to_capture(std::move(capture_layer_ids));
-  }
-#else
-  if (options_.enable_speculative_decode()) {
-    args.num_speculative_tokens(options_.num_speculative_tokens());
-    if (is_block_diffusion) {
-      if (options_.is_draft_engine()) {
-        LOG(FATAL) << speculative_algorithm
-                   << " block-diffusion draft is not supported on "
-                   << Platform::type_str() << ".";
-      }
-      CHECK(options_.draft_model_path().has_value())
-          << "block-diffusion speculative decoding requires --draft_model.";
-      args.layers_to_capture(
-          read_capture_layer_ids(options_.draft_model_path().value()));
-    }
-    // When running speculative decoding, the draft worker reuses the same
-    // checkpoint as the target model. The draft worker needs to instantiate
-    // the MTP variant, so override the model_type here without mutating the
-    // original config.
-    if (!is_block_diffusion && options_.num_speculative_tokens() == 0 &&
-        args.num_nextn_predict_layers() != 0) {
-      static const std::unordered_map<std::string, std::string>
-          kModelTypeToMtpType = {
-              {"deepseek_v3", "deepseek_v3_mtp"},
-              {"deepseek_v32", "deepseek_v32_mtp"},
-              {"deepseek_v4", "deepseek_v4_mtp"},
-              {"glm_moe_dsa", "glm_moe_dsa_mtp"},
-              {"joyai_llm_flash", "joyai_llm_flash_mtp"},
-              {"mimo", "mimo_mtp"},
-          };
-      const std::string& current_type = args.model_type();
-      auto it = kModelTypeToMtpType.find(current_type);
-      if (it != kModelTypeToMtpType.end()) {
-        LOG(INFO) << "Overriding draft model_type from " << current_type
-                  << " to " << it->second << " for speculative decoding";
-        args.model_type(it->second);
-      }
-    }
-  }
-#endif
-
-  if (options_.is_draft_engine() || is_spec_draft_) {
+  ::xllm::configure_speculative_model_args(args, options_);
+  if (options_.is_draft_model()) {
     disable_layerwise_split_for_draft(&parallel_args_);
   }
 
@@ -2427,11 +2235,9 @@ bool WorkerImpl::init_model_impl(const std::string& model_weights_path,
     return false;
   }
 
-  // Warm JSON grammars off the forward path so the first constrained request
-  // does not pay tokenizer.decode over the full vocab under the step lock.
-  // Draft-engine workers own no tokenizer and never serve constrained requests
-  // (the target does), so skip the warmup for them.
-  if (!options_.is_draft_engine()) {
+  // Warm JSON grammars off the forward path; workers without a tokenizer
+  // never serve constrained requests.
+  if (!options_.is_draft_model()) {
     if (ensure_json_object_grammar(/*reasoning_enabled=*/false) == nullptr) {
       LOG(WARNING) << "JSON object grammar warmup failed; will retry lazily";
     }
@@ -2486,7 +2292,7 @@ void WorkerImpl::load_model(std::unique_ptr<ModelLoader> loader) {
   // Rolling mode uses host-pinned weights as the single source of truth:
   // lazy_load_model -> init_rolling_runtime_state() to finish rolling init.
   if (::xllm::LoadConfig::get_instance().enable_rolling_load() &&
-      !is_spec_draft_) {
+      !options_.is_draft_model()) {
     model()->lazy_load_model(std::move(loader));
     CHECK(init_rolling_runtime_state())
         << "Failed to initialize rolling runtime state during load_model";
@@ -2502,7 +2308,7 @@ bool WorkerImpl::init_rolling_runtime_state() {
   // Draft model (speculative decoding) has only 1 decoder layer, skip rolling
   // load.
   if (!::xllm::LoadConfig::get_instance().enable_rolling_load() ||
-      is_spec_draft_) {
+      options_.is_draft_model()) {
     return true;
   }
 
@@ -2843,7 +2649,7 @@ void WorkerImpl::prepare_mla_prefixcache_inputs(RecModelParams& input_params) {
 int64_t WorkerImpl::get_num_layers() const {
   int64_t num_layers = context_.get_model_args().n_layers();
 #if !defined(USE_NPU)
-  if (is_spec_draft_) {
+  if (options_.is_draft_model()) {
     // for MTP draft models, the number of layers is the number of nextn
     // predict layers
     int64_t num_nextn_predict_layers =

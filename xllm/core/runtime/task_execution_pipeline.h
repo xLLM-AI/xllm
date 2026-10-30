@@ -91,7 +91,6 @@ struct TaskModel {
   TaskKVLoad load_kv = {};
   TaskKVFence fence_kv = {};
   std::function<void(const ModelParamsView&)> restore_request_state = {};
-  TaskInputDomain input_domain = TaskInputDomain::LLM;
 };
 
 class ProcessGroup;
@@ -312,6 +311,10 @@ class TaskExecutionPipeline final {
                         WorkerImpl* worker_pipeline = nullptr,
                         TaskInputDomain input_domain = TaskInputDomain::LLM);
   Status validate(const Slot& slot, const LlmForwardInput& input) const;
+  // Shared admit path: slot selection, ticketing, and result delivery for
+  // both input domains. prepare_slot fills one free slot or returns an error.
+  TaskSubmission admit_task(
+      const std::function<Status(uint32_t)>& prepare_slot);
   Status prepare(uint32_t slot_id, const LlmForwardInput& input);
   Status prepare_worker(uint32_t slot_id, const LlmForwardInput& input);
   Status prepare_worker(uint32_t slot_id, const VlmForwardInput& input);

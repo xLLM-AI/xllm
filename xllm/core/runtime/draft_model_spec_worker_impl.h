@@ -85,6 +85,18 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
       const KVCacheShape& target_kv_cache_shape,
       int64_t draft_world_size = -1) const;
 
+  // Shares the target's language-model weights with the draft: tries the
+  // Python-side share first; otherwise copies lm head / word embedding
+  // (NPU ATB tensors on non-TORCH backends, plain torch tensors otherwise).
+  // `share_lm_head` lets a family keep the draft's own head. NPU families
+  // specialize the ATB path via the two hooks below.
+  void share_target_weights_with_draft(bool share_lm_head);
+
+ protected:
+  // Whether the family shares weights through ATB tensors on non-TORCH NPU
+  // backends; DFlash2 overrides to share plain torch tensors instead.
+  virtual bool draft_shares_atb_weights() const { return true; }
+
   // MTP-family drafts reserve a pre-head hidden-state placeholder per row.
   virtual int64_t get_embedding_placeholder_size() const { return 0; }
 

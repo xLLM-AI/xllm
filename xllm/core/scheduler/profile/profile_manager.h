@@ -15,8 +15,6 @@ limitations under the License.
 
 #pragma once
 
-#include <concepts>
-#include <functional>
 #include <memory>
 #include <optional>
 #include <tuple>
@@ -25,7 +23,6 @@ limitations under the License.
 
 #include "core/common/macros.h"
 #include "core/common/types.h"
-#include "core/distributed_runtime/engine.h"
 #include "core/framework/batch/batch_factory.h"
 #include "core/framework/block/block_manager_pool.h"
 #include "core/framework/request/request.h"
@@ -34,9 +31,11 @@ limitations under the License.
 #include "core/runtime/options.h"
 #include "core/scheduler/profile/decode_graph_warmup_plan.h"
 #include "core/scheduler/profile/time_predictor.h"
+#include "core/scheduler/scheduler_callbacks.h"
 
 namespace xllm {
 class DistributedWorkerManager;
+class DraftStepController;
 class SpeculativeConfig;
 
 std::vector<int32_t> build_step_time_profile_batch_sizes(
@@ -49,11 +48,8 @@ std::vector<int32_t> build_step_time_profile_batch_sizes(
 int32_t warmup_decode_seq_len(bool fia_enabled, int32_t max_context_len);
 
 std::string spec_calibration_compatibility(const runtime::Options& options);
-class ProfileManager {
- private:
-  using StepCallback = std::function<ForwardOutput(BatchGroup&)>;
-  using ResultCallback = std::function<void(BatchGroup&)>;
 
+class ProfileManager final {
  public:
   struct Options {
     PROPERTY(bool, enable_schedule_overlap) = false;
@@ -98,27 +94,13 @@ class ProfileManager {
     double intercept;  // milliseconds constant overhead
     std::string note;
   };
-  template <typename TargetEngine>
-    requires requires(TargetEngine* engine, BatchGroup& batch) {
-      static_cast<Engine*>(engine);
-      { engine->step(batch) } -> std::same_as<ForwardOutput>;
-      {
-        engine->collect_step_outputs(batch)
-      } -> std::same_as<std::vector<RawForwardOutput>>;
-    }
-  ProfileManager(TargetEngine* engine,
+  ProfileManager(BlockManagerPool* block_manager_pool,
+                 const ModelArgs* model_args,
                  const Options& options,
+                 SchedulerCallbacks callbacks,
                  std::shared_ptr<DistributedWorkerManager>
-                     distributed_worker_manager = nullptr)
-      : ProfileManager(
-            static_cast<Engine*>(engine),
-            options,
-            [engine](BatchGroup& batch) { return engine->step(batch); },
-            [engine](BatchGroup& batch) {
-              batch.apply_outputs(engine->collect_step_outputs(batch),
-                                  BatchOutputAction::COMMIT_PENDING);
-            },
-            std::move(distributed_worker_manager)) {}
+                     distributed_worker_manager = nullptr,
+                 DraftStepController* draft_step_controller = nullptr);
 
   int32_t get_token_budget();
 
@@ -255,14 +237,7 @@ class ProfileManager {
       int block_size) const;
 
  private:
-  friend class ContinuousSchedulerBase;
-
-  ProfileManager(
-      Engine* engine,
-      const Options& options,
-      StepCallback step_callback,
-      ResultCallback result_callback,
-      std::shared_ptr<DistributedWorkerManager> distributed_worker_manager);
+  void step_batch(BatchGroup& batches);
 
   void calibrate_spec_startup();
   void calibrate_draft_step_startup();
@@ -282,10 +257,14 @@ class ProfileManager {
 
   const Options options_;
 
-  Engine* engine_;
+  const ModelArgs* model_args_;
+  // The adaptive-draft-step calibration reads the engine-supplied controller;
+  // kept nullable for scheduler-only users (tests, benchmarks).
+  DraftStepController* draft_step_controller_ = nullptr;
+
+  SchedulerCallbacks callbacks_;
+
   std::shared_ptr<DistributedWorkerManager> distributed_worker_manager_;
-  StepCallback step_callback_;
-  ResultCallback result_callback_;
   BatchFactory batch_factory_;
 
   DecodeGraphWarmupPlan decode_graph_warmup_plan_;

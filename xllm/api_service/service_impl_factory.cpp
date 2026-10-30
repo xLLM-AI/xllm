@@ -21,7 +21,6 @@ limitations under the License.
 #include <unordered_map>
 
 #include "api_service.h"
-#include "api_service/serving_mode.h"
 #include "core/common/global_flags.h"
 #include "core/distributed_runtime/dit_master.h"
 #include "core/distributed_runtime/llm_master.h"
@@ -41,7 +40,7 @@ void ServiceImplFactory::create(
       APIService*, Master*, const std::vector<std::string>&)>;
 
   static const std::unordered_map<int8_t, InitFn> kRegistry = {
-      {static_cast<int8_t>(ServingMode::LLM),
+      {static_cast<int8_t>(EngineType::LLM),
        [](APIService* self,
           Master* master,
           const std::vector<std::string>& models) {
@@ -67,7 +66,7 @@ void ServiceImplFactory::create(
                llm_master, models, self->master_manager_);
          }
        }},
-      {static_cast<int8_t>(ServingMode::VLM),
+      {static_cast<int8_t>(EngineType::VLM),
        [](APIService* self,
           Master* master,
           const std::vector<std::string>& models) {
@@ -78,7 +77,7 @@ void ServiceImplFactory::create(
          self->mm_embedding_service_impl_ =
              std::make_unique<MMEmbeddingServiceImpl>(vlm_master, models);
        }},
-      {static_cast<int8_t>(ServingMode::DIT),
+      {static_cast<int8_t>(EngineType::DIT),
        [](APIService* self,
           Master* master,
           const std::vector<std::string>& models) {
@@ -93,7 +92,7 @@ void ServiceImplFactory::create(
          self->video_generation_service_impl_ =
              std::make_unique<VideoGenerationServiceImpl>(dit_master, models);
        }},
-      {static_cast<int8_t>(ServingMode::REC),
+      {static_cast<int8_t>(EngineType::REC),
        [](APIService* self,
           Master* master,
           const std::vector<std::string>& models) {
@@ -106,7 +105,7 @@ void ServiceImplFactory::create(
        }},
   };
 
-  ServingMode mode = to_serving_mode(master->options().backend());
+  const EngineType mode(master->options().backend());
   auto it = kRegistry.find(static_cast<int8_t>(mode));
   if (it != kRegistry.end()) {
     it->second(service, master, model_names);

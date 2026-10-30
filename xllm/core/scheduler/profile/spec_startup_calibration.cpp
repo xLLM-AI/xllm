@@ -164,8 +164,7 @@ ProfileManager::target_verify_calibration_config() {
   if (!target_verify_calibration_config_) {
     if (options_.adaptive_target_verify_calibration().empty()) {
       target_verify_calibration_config_ = default_spec_startup_calibration(
-          static_cast<uint32_t>(
-              engine_->model_args().max_position_embeddings()),
+          static_cast<uint32_t>(model_args_->max_position_embeddings()),
           options_.decode_graph_warmup_config().num_speculative_tokens);
     } else {
       target_verify_calibration_config_ = parse_spec_startup_calibration(
@@ -191,10 +190,10 @@ ProfileManager::target_verify_calibration_config() {
 int32_t ProfileManager::adaptive_calibration_warmup_seq_len(
     int32_t default_length) {
   if (options_.enable_adaptive_draft_step()) {
-    auto* calibration = engine_->draft_step_controller();
+    auto* calibration = draft_step_controller_;
     CHECK(calibration != nullptr);
     const uint32_t max_positions =
-        static_cast<uint32_t>(engine_->model_args().max_position_embeddings());
+        static_cast<uint32_t>(model_args_->max_position_embeddings());
     const auto& config = calibration->configuration(max_positions);
     const auto length = spec_calibration_warmup_length(
         config.contexts.back().max_kv_length,
@@ -229,7 +228,7 @@ int32_t ProfileManager::adaptive_calibration_warmup_seq_len(
   }
   const auto length = spec_calibration_warmup_length(
       max_kv_length,
-      static_cast<uint32_t>(engine_->model_args().max_position_embeddings()),
+      static_cast<uint32_t>(model_args_->max_position_embeddings()),
       static_cast<uint32_t>(block_manager_pool_->block_size()),
       static_cast<uint32_t>(default_length),
       options_.decode_graph_warmup_config().num_speculative_tokens);
@@ -362,9 +361,8 @@ void ProfileManager::calibrate_spec_startup() {
              static_cast<uint64_t>(options_.max_seqs_per_batch()));
     CHECK_LE(static_cast<uint64_t>(point.requests) * options_.dp_size(),
              static_cast<uint64_t>(options_.max_tokens_per_batch()));
-    CHECK_LE(
-        static_cast<uint64_t>(point.context.max_kv_length),
-        static_cast<uint64_t>(engine_->model_args().max_position_embeddings()));
+    CHECK_LE(static_cast<uint64_t>(point.context.max_kv_length),
+             static_cast<uint64_t>(model_args_->max_position_embeddings()));
     const auto& bounds = geometry.at("kv_bounds");
     const auto captured =
         std::find_if(bounds.begin(), bounds.end(), [&](const auto& bound) {
@@ -375,7 +373,7 @@ void ProfileManager::calibrate_spec_startup() {
     CHECK_LE(point.context.max_kv_length,
              captured->at("max_kv_length").get<uint32_t>());
   }
-  CHECK_GT(engine_->model_args().vocab_size(), 2);
+  CHECK_GT(model_args_->vocab_size(), 2);
   nlohmann::json bundle{{"schema_version", 1},
                         {"measurement", "steady_full_step"},
                         {"compatibility", compatibility},
@@ -458,10 +456,10 @@ void ProfileManager::run_startup_speculative_sample(
   const uint64_t decode_rounds =
       static_cast<uint64_t>(config.warmup_steps) +
       static_cast<uint64_t>(config.window_steps) * config.windows_per_point + 1;
-  CHECK_GT(engine_->model_args().vocab_size(), 2);
+  CHECK_GT(model_args_->vocab_size(), 2);
   std::mt19937 random(config.token_seed);
-  std::uniform_int_distribution<int32_t> token(
-      1, engine_->model_args().vocab_size() - 1);
+  std::uniform_int_distribution<int32_t> token(1,
+                                               model_args_->vocab_size() - 1);
   std::vector<std::shared_ptr<Request>> owned;
   std::vector<Sequence*> sequences;
   const uint32_t total_requests = point.requests * options_.dp_size();
@@ -515,8 +513,7 @@ void ProfileManager::run_startup_speculative_sample(
     }
     auto batch =
         batch_factory_.create_batches(owned, sequences, budgets, nullptr);
-    step_callback_(batch);
-    result_callback_(batch);
+    step_batch(batch);
   }
   after_prefill();
   std::optional<BatchGroup> previous;
@@ -524,14 +521,14 @@ void ProfileManager::run_startup_speculative_sample(
   for (uint64_t round = 0; round < decode_rounds; ++round) {
     auto batch =
         batch_factory_.create_batches(owned, sequences, budgets, nullptr);
-    step_callback_(batch);
+    callbacks_.step(batch);
     if (previous) {
-      result_callback_(*previous);
+      callbacks_.update_last_step_result(*previous);
     }
     previous = std::move(batch);
   }
   CHECK(previous.has_value());
-  result_callback_(*previous);
+  callbacks_.update_last_step_result(*previous);
   previous.reset();
   after_drain();
   for (Sequence* sequence : sequences) {

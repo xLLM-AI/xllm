@@ -39,7 +39,6 @@ cc_library(
     llm_master.h
     vlm_engine.h
     vlm_master.h
-    speculative_engine.h
     rec_engine.h
     rec_master.h
     disagg_pd_service.h
@@ -48,6 +47,7 @@ cc_library(
     disagg_pd_request_converter.h
     disagg_pd_response.h
     distributed_worker_manager.h
+    worker_fanout.h
     remote_worker.h
     worker_server.h
     worker_service.h
@@ -60,6 +60,7 @@ cc_library(
     xservice_client.h
     model_residency_coordinator.h
   SRCS
+    engine.cpp
     master.cpp
     master_factory.cpp
     dit_engine.cpp
@@ -68,7 +69,6 @@ cc_library(
     llm_master.cpp
     vlm_engine.cpp
     vlm_master.cpp
-    speculative_engine.cpp
     rec_engine.cpp
     rec_master.cpp
     disagg_pd_service.cpp

@@ -36,7 +36,6 @@ limitations under the License.
 #include "api_service/request_id.h"
 #include "api_service/rpc_request_metrics.h"
 #include "api_service/service_impl_factory.h"
-#include "api_service/serving_mode.h"
 #include "call.h"
 #include "chat.pb.h"
 #include "common.pb.h"
@@ -515,7 +514,7 @@ void APIService::register_chat_completions_handler() {
           ctrl,
           request,
           response,
-          ChatJsonParser::get(ServingMode::VLM),
+          ChatJsonParser::get(EngineType::VLM),
           default_model_,
           system_fingerprint_);
     };
@@ -530,7 +529,7 @@ void APIService::register_chat_completions_handler() {
           ctrl,
           request,
           response,
-          ChatJsonParser::get(ServingMode::LLM),
+          ChatJsonParser::get(EngineType::LLM),
           default_model_,
           system_fingerprint_);
     };

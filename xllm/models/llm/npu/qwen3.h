@@ -133,12 +133,6 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
     has_restored_embed_tokens_ = true;
   }
 
-  bool has_restored_embed_tokens() const { return has_restored_embed_tokens_; }
-
-  bool has_restored_npu_word_embedding() const {
-    return has_restored_embed_tokens_;
-  }
-
   void verify_restored_embed_tokens(const std::string& prefix) const {
     if (has_restored_embed_tokens_) {
       restored_embed_tokens_->verify_loaded_weights(prefix + "embed_tokens.");
@@ -162,6 +156,15 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
       return restored_embed_tokens_;
     }
     return LlmModelImplBase<QWen3DecoderLayer>::get_npu_word_embedding();
+  }
+
+  // Symmetric with get: write through whichever table is in use.
+  void set_npu_word_embedding(layer::NpuWordEmbedding& embedding) override {
+    if (has_restored_embed_tokens_) {
+      restored_embed_tokens_ = embedding;
+      return;
+    }
+    LlmModelImplBase<QWen3DecoderLayer>::set_npu_word_embedding(embedding);
   }
 
   ModelOutput forward(torch::Tensor tokens,
@@ -347,10 +350,6 @@ class QWen3ForCausalLMImpl : public LlmForCausalLMImplBase<QWen3Model> {
     }
     return torch::nn::functional::normalize(
         h, torch::nn::functional::NormalizeFuncOptions().p(2).dim(1));
-  }
-
-  bool has_restored_npu_word_embedding() const {
-    return model_->has_restored_npu_word_embedding();
   }
 
   void load_model(std::unique_ptr<ModelLoader> loader,

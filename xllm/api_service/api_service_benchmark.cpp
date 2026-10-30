@@ -73,7 +73,6 @@ limitations under the License.
 #include "api_service/chat_json_parser.h"
 #include "api_service/chat_request_decoder.h"
 #include "api_service/completion_json_parser.h"
-#include "api_service/serving_mode.h"
 #include "chat.pb.h"
 #include "completion.pb.h"
 #include "core/framework/request/request_output.h"
@@ -260,7 +259,7 @@ void BM_ApiService_CompletionJsonToProto(benchmark::State& state) {
 
 void BM_ApiService_ChatJsonToProto(benchmark::State& state) {
   const std::string body = make_chat_json(static_cast<size_t>(state.range(0)));
-  const ChatJsonParser& parser = ChatJsonParser::get(ServingMode::LLM);
+  const ChatJsonParser& parser = ChatJsonParser::get(EngineType::LLM);
   proto::ChatRequest request;
 
   for (auto _ : state) {
@@ -280,7 +279,7 @@ void BM_ApiService_ChatJsonToProto(benchmark::State& state) {
 void BM_ApiService_ChatToolsJsonToProto(benchmark::State& state) {
   const std::string body =
       make_chat_tools_json(static_cast<size_t>(state.range(0)));
-  const ChatJsonParser& parser = ChatJsonParser::get(ServingMode::LLM);
+  const ChatJsonParser& parser = ChatJsonParser::get(EngineType::LLM);
   proto::ChatRequest request;
 
   for (auto _ : state) {
@@ -366,7 +365,7 @@ void BM_ApiService_CompletionJson2PbOnly(benchmark::State& state) {
 
 void BM_ApiService_ChatPreprocessOnly(benchmark::State& state) {
   const std::string body = make_chat_json(static_cast<size_t>(state.range(0)));
-  const ChatJsonParser& parser = ChatJsonParser::get(ServingMode::LLM);
+  const ChatJsonParser& parser = ChatJsonParser::get(EngineType::LLM);
 
   for (auto _ : state) {
     auto [status, processed_json] = parser.preprocess(body);
@@ -379,7 +378,7 @@ void BM_ApiService_ChatPreprocessOnly(benchmark::State& state) {
 
 void BM_ApiService_ChatJsonToMessageOnly(benchmark::State& state) {
   const std::string body = make_chat_json(static_cast<size_t>(state.range(0)));
-  const ChatJsonParser& parser = ChatJsonParser::get(ServingMode::LLM);
+  const ChatJsonParser& parser = ChatJsonParser::get(EngineType::LLM);
   auto [status, processed_json] = parser.preprocess(body);
   if (!status.ok()) {
     state.SkipWithError("failed to preprocess the benchmark body");
@@ -407,7 +406,7 @@ void BM_ApiService_ChatJsonToMessageOnly(benchmark::State& state) {
 // the bodies here carry no such field, so this measures the fast path only.
 void BM_ApiService_ChatJson2PbOnly(benchmark::State& state) {
   const std::string body = make_chat_json(static_cast<size_t>(state.range(0)));
-  const ChatJsonParser& parser = ChatJsonParser::get(ServingMode::LLM);
+  const ChatJsonParser& parser = ChatJsonParser::get(EngineType::LLM);
   auto [status, processed_json] = parser.preprocess(body);
   if (!status.ok()) {
     state.SkipWithError("failed to preprocess the benchmark body");

@@ -17,7 +17,6 @@ cc_library(
     mtp_async_input_builder.h
     mtp_async_state.h
     mtp_json_object_state.h
-    mtp_utils.h
     adaptive/draft_step_selector.h
     adaptive/draft_step_controller.h
     draft_extend_input.h

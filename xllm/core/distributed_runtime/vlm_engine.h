@@ -16,71 +16,43 @@ limitations under the License.
 
 #pragma once
 
-#include <gflags/gflags.h>
-
 #include <memory>
 #include <vector>
 
-#include "common/macros.h"
 #include "core/distributed_runtime/distributed_worker_manager.h"
+#include "core/distributed_runtime/engine.h"
 #include "core/framework/batch/vlm_forward_input_factory.h"
-#include "engine.h"
+#include "core/runtime/forward_params.h"
 #include "framework/batch/batch_group.h"
 #include "framework/block/block_manager_pool.h"
+#include "framework/model/model_args.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "framework/tokenizer/tokenizer_args.h"
-#include "runtime/vlm_forward_params.h"
 
 namespace xllm {
 
-class VLMEngine : public Engine {
+class VLMEngine final : public Engine {
  public:
   // create an engine with the given devices
-  VLMEngine(const runtime::Options& options,
-            std::shared_ptr<DistributedWorkerManager>
-                distributed_worker_manager = nullptr);
+  explicit VLMEngine(const runtime::Options& options,
+                     std::shared_ptr<DistributedWorkerManager>
+                         distributed_worker_manager = nullptr);
 
-  virtual ~VLMEngine() = default;
+  ~VLMEngine() override = default;
 
   ForwardOutput step(BatchGroup& batch);
 
-  const runtime::Options& options() const { return options_; }
-
-  std::shared_ptr<DistributedWorkerManager> get_distributed_worker_manager()
-      const {
-    return distributed_worker_manager_;
-  }
-
-  bool init(MasterStatus master_status) override;
+  bool init(MasterStatus master_status, const ModelInitCallback& prepare_model);
 
   std::vector<RawForwardOutput> collect_step_outputs(const BatchGroup& batch);
 
  private:
-  template <typename TargetEngine>
-  friend class SpeculativeEngineBase;
+  // The target load never takes a residency callback: plain VLM targets do
+  // not reserve weight pages, and routing the draft's callback here would
+  // double-reserve the draft's model_id.
   bool init_model(MasterStatus master_status);
-  KVCacheCapacity estimate_kv_cache_capacity();
   bool allocate_kv_cache(const KVCacheCapacity& kv_cache_cap);
-  void setup_workers(const runtime::Options& options);
   void process_group_test();
-
- private:
-  // options
-  runtime::Options options_;
-
-  // dtype
-  torch::ScalarType dtype_;
-
-  // a list of workers, with each worker handling a partial of model
-  std::vector<std::shared_ptr<WorkerClient>> worker_clients_;
-
-  // common frequently used args
-  uint32_t dp_size_;
-  uint32_t worker_clients_num_;
-  uint32_t dp_local_tp_size_;
-
-  std::shared_ptr<DistributedWorkerManager> distributed_worker_manager_ =
-      nullptr;
 
   std::unique_ptr<VlmForwardInputFactory> forward_input_factory_;
 };

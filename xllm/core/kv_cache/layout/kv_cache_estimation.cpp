@@ -24,6 +24,8 @@ limitations under the License.
 
 #include "core/common/metrics.h"
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/load_config.h"
+#include "core/framework/config/mtp_utils.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
@@ -189,7 +191,7 @@ int64_t layerwise_split_block_count(const ModelArgs& model_args,
 
 bool enable_hybrid_spec_verify(const ModelArgs& model_args,
                                const KVCacheEstimateOptions& options) {
-  return options.num_speculative_tokens > 0 && !options.is_draft_engine &&
+  return options.num_speculative_tokens > 0 && !options.is_draft_model &&
          options.instance_role != InstanceRole::PREFILL &&
          (is_qwen3_5_target_model_type(model_args.model_type()) ||
           is_glm5_next_target_model_type(model_args.model_type()));
@@ -699,6 +701,20 @@ int64_t estimate_layerwise_split_block_count(
                                      additional_block_bytes);
 }
 
+int64_t worker_available_budget(const KVCacheMemorySnapshot& snapshot,
+                                const runtime::Options& options) {
+  int64_t available_memory = snapshot.available_memory;
+  if (options.max_memory_utilization() < 1.0) {
+    const int64_t buffer_memory = static_cast<int64_t>(std::ceil(
+        snapshot.total_memory * (1.0 - options.max_memory_utilization())));
+    available_memory -= buffer_memory;
+  }
+  if (options.max_cache_size() > 0) {
+    available_memory = std::min(available_memory, options.max_cache_size());
+  }
+  return available_memory;
+}
+
 int64_t KVCacheEstimator::estimate_memory_budget(
     const runtime::Options& options,
     const KVCacheEstimateContext& context) const {
@@ -732,16 +748,9 @@ int64_t KVCacheEstimator::estimate_memory_budget(
     GAUGE_SET(weight_size_in_kilobytes,
               (total_memory - available_memory) / 1024);
     GAUGE_SET(total_memory_size_in_kilobytes, total_memory / 1024);
-    if (options.max_memory_utilization() < 1.0) {
-      const int64_t buffer_memory = static_cast<int64_t>(
-          std::ceil(total_memory * (1.0 - options.max_memory_utilization())));
-      available_memory -= buffer_memory;
-    }
-    if (options.max_cache_size() > 0) {
-      available_memory = std::min(available_memory, options.max_cache_size());
-    }
-    available_memory -= encoder_cache_reserved_bytes;
-    cache_size_in_bytes = std::min(cache_size_in_bytes, available_memory);
+    cache_size_in_bytes = std::min(cache_size_in_bytes,
+                                   worker_available_budget(memory, options) -
+                                       encoder_cache_reserved_bytes);
   }
   return cache_size_in_bytes;
 }
@@ -770,16 +779,15 @@ KVCacheCapacity KVCacheEstimator::estimate(
       options.max_linear_state_cache_slots();
   estimate_options.linear_state_cache_block_limit =
       context.linear_state_cache_block_limit;
-  estimate_options.is_draft_engine = options.is_draft_engine();
+  estimate_options.is_draft_model = options.is_draft_model();
   estimate_options.enable_chunked_prefill = options.enable_chunked_prefill();
-  estimate_options.enable_schedule_overlap = options.enable_schedule_overlap();
   const KVCacheConfig& kv_cache_config = KVCacheConfig::get_instance();
-  const bool is_mtp_draft_engine =
-      options.is_draft_engine() &&
+  const bool is_draft_model =
+      options.is_draft_model() &&
       SpeculativeConfig::is_mtp_algorithm(options.speculative_algorithm());
   estimate_options.enable_prefix_cache =
       options.enable_prefix_cache() && !kv_cache_config.enable_vmm_kvcache() &&
-      !is_mtp_draft_engine;
+      !is_draft_model;
   estimate_options.enable_disagg_pd = options.enable_disagg_pd();
   estimate_options.instance_role = options.instance_role();
   estimate_options.num_speculative_tokens =
@@ -788,16 +796,16 @@ KVCacheCapacity KVCacheEstimator::estimate(
     estimate_options.dp_size = options.dp_size();
     estimate_options.enable_dp_fair_token_budget =
         ::xllm::SchedulerConfig::get_instance().enable_dp_fair_token_budget();
-    if (options.enable_mtp_draft_body_tp1() && options.is_draft_engine()) {
+    if (options.enable_mtp_draft_body_tp1() && options.is_draft_model()) {
       estimate_options.world_size = 1;
     }
     estimate_options.layerwise_split_size =
-        options.is_draft_engine()
+        options.is_draft_model()
             ? 1
             : ParallelConfig::get_instance().layerwise_split_size();
 
     if (options.enable_task_pipeline() &&
-        options.num_speculative_tokens() > 0 && !options.is_draft_engine()) {
+        options.num_speculative_tokens() > 0 && !options.is_draft_model()) {
       estimate_options.embedding_context_bytes_per_block =
           sizeof(int64_t) + 2 * sizeof(int32_t);
       if (!SpeculativeConfig::is_block_diffusion_algorithm(
@@ -935,7 +943,7 @@ KVCacheCapacity estimate_kv_cache_capacity(
   kv_cache_cap.linear_conv_state_len(model_args.linear_conv_kernel_dim() - 1 +
                                      num_speculative_tokens);
   kv_cache_cap.linear_ssm_checkpoint_stride(num_speculative_tokens + 1);
-  if (options.is_draft_engine && model_args.num_nextn_predict_layers() > 0) {
+  if (options.is_draft_model && model_args.num_nextn_predict_layers() > 0) {
     kv_cache_cap.n_layers(model_args.num_nextn_predict_layers());
   }
 
@@ -969,6 +977,90 @@ KVCacheCapacity estimate_kv_cache_capacity(
     init_standard_counts(model_args, options, &kv_cache_cap);
   }
   return kv_cache_cap;
+}
+
+namespace {
+
+int64_t estimate_shared_target_draft_blocks(const KVCacheCapacity& target_cap,
+                                            const KVCacheCapacity& draft_cap,
+                                            const ModelArgs& target_args,
+                                            const ModelArgs& draft_args) {
+  CHECK_GT(target_cap.cache_size_in_bytes(), 0)
+      << "no memory for target kv cache";
+  CHECK_GT(draft_cap.cache_size_in_bytes(), 0)
+      << "no memory for draft kv cache";
+  CHECK_EQ(target_cap.block_size(), draft_cap.block_size())
+      << "target and draft kv cache block size must be the same";
+  CHECK_GT(target_cap.block_size(), 0)
+      << "kv cache block size must be greater than 0";
+
+  if (target_cap.kpool_tail_slot_size() > 0 &&
+      draft_cap.kpool_tail_slot_size() > 0) {
+    const SharedKPoolPlan plan =
+        plan_shared_kpool(target_cap, draft_cap, draft_args);
+    return plan.target.n_blocks();
+  }
+
+  const int64_t cache_size_in_bytes = std::min(target_cap.cache_size_in_bytes(),
+                                               draft_cap.cache_size_in_bytes());
+  const int64_t linear_cache_size_in_bytes =
+      target_cap.linear_cache_size_in_bytes() +
+      draft_cap.linear_cache_size_in_bytes();
+  CHECK_GT(cache_size_in_bytes, linear_cache_size_in_bytes)
+      << "no memory left for speculative full-attention kv cache after "
+         "reserving target and draft state caches, cache_size: "
+      << cache_size_in_bytes
+      << ", linear_cache_size: " << linear_cache_size_in_bytes;
+
+  // The draft KV cache is allocated from the draft's own KVCacheShape, so its
+  // per-block cost uses the draft's own slot size, which may exceed the
+  // target's (e.g. a full-attention draft against an MLA target).
+  const int64_t draft_full_attention_block_size_in_bytes =
+      standard_full_cache_block_size_in_bytes(draft_cap);
+  const int32_t layerwise_split_size =
+      ParallelConfig::get_instance().layerwise_split_size();
+  if (layerwise_split_size > 1) {
+    return estimate_layerwise_split_block_count(
+        target_args,
+        layerwise_split_size,
+        target_cap,
+        cache_size_in_bytes - linear_cache_size_in_bytes,
+        draft_full_attention_block_size_in_bytes);
+  }
+  const int64_t full_attention_block_size_in_bytes =
+      standard_full_cache_block_size_in_bytes(target_cap) +
+      draft_full_attention_block_size_in_bytes;
+  CHECK_GT(full_attention_block_size_in_bytes, 0)
+      << "speculative kv cache block size in bytes must be greater than 0";
+
+  return (cache_size_in_bytes - linear_cache_size_in_bytes) /
+         full_attention_block_size_in_bytes;
+}
+
+}  // namespace
+
+std::optional<KVCacheCapacity> combine_target_and_draft_kv_cache_capacity(
+    const KVCacheCapacity& target_cap,
+    const ModelArgs& target_args,
+    const ModelArgs& draft_args,
+    const KVCacheCapacity& draft_cap) {
+  if (KVCacheConfig::get_instance().enable_vmm_kvcache() ||
+      LoadConfig::get_instance().enable_vmm_weights()) {
+    LOG(ERROR) << "Virtual memory does not support an external speculative "
+                  "draft engine because target and draft would register the "
+                  "same model_id.";
+    return std::nullopt;
+  }
+
+  const int64_t n_blocks = estimate_shared_target_draft_blocks(
+      target_cap, draft_cap, target_args, draft_args);
+  CHECK_GT(n_blocks, 0) << "no memory for kv cache";
+
+  KVCacheCapacity combined = target_cap;
+  combined.n_blocks() = n_blocks;
+  combined.cache_size_in_bytes() = std::min(target_cap.cache_size_in_bytes(),
+                                            draft_cap.cache_size_in_bytes());
+  return combined;
 }
 
 }  // namespace xllm

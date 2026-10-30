@@ -25,25 +25,42 @@ limitations under the License.
 #include "core/common/device_monitor.h"
 #include "core/common/metrics.h"
 #include "core/distributed_runtime/distributed_virtual_memory_coordinator.h"
+#include "core/distributed_runtime/distributed_worker_manager.h"
+#include "core/distributed_runtime/worker_fanout.h"
 #include "core/framework/allocator/virtual_memory/physical_page_pool.h"
 #include "core/framework/block/hierarchy_block_manager_pool.h"
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/mtp_utils.h"
 #include "core/kv_cache/layout/kv_cache_estimation.h"
 #include "core/kv_cache/layout/virtual_kv_cache_page_layout.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
 #include "core/kv_cache/storage/vmm_kv_page_allocator_impl.h"
 #include "core/runtime/options.h"
 #include "core/runtime/worker_client.h"
+#include "core/util/utils.h"
 #include "models/model_registry.h"
 
 namespace xllm {
+namespace {
 
-KVCacheCapacity KVCacheManagerFactory::estimate_capacity(
+// True when the VMM physical-page budget replaces the worker-memory snapshot.
+bool vmm_budget_replaces_worker_memory(bool is_multimodal) {
+  return KVCacheConfig::get_instance().enable_vmm_kvcache() && !is_multimodal;
+}
+
+// Shared capacity estimation for one model side (target or draft): resolves
+// the memory budget, then the per-layer cache blocks. File-local (anonymous
+// namespace) so the KVCacheCapacity layout and NPU build guards stay out of
+// the public factory header. Reuses a worker-memory snapshot already polled
+// by the caller (empty when virtual memory or multimodal mode supplies the
+// budget differently).
+KVCacheCapacity estimate_capacity(
     const ModelArgs& model_args,
     const runtime::Options& options,
     torch::ScalarType dtype,
     int64_t world_size,
-    const std::vector<std::shared_ptr<WorkerClient>>& worker_clients,
+    const std::vector<KVCacheMemorySnapshot>& worker_memory,
+    int64_t num_workers,
     bool is_multimodal,
     int64_t reserved_memory_bytes) {
   KVCacheEstimateContext context;
@@ -54,7 +71,7 @@ KVCacheCapacity KVCacheManagerFactory::estimate_capacity(
   context.linear_state_cache_block_limit =
       get_npu_linear_state_cache_block_limit(model_args.model_type());
   const KVCacheConfig& config = KVCacheConfig::get_instance();
-  if (config.enable_vmm_kvcache()) {
+  if (vmm_budget_replaces_worker_memory(is_multimodal)) {
     auto& coordinator = DistributedVirtualMemoryCoordinator::get_instance();
     const auto& phy_pool = PhysicalPagePool::get_instance();
     if (!phy_pool.is_initialized()) {
@@ -71,7 +88,7 @@ KVCacheCapacity KVCacheManagerFactory::estimate_capacity(
     if (!coordinator.is_initialized()) {
       coordinator.init_page_budget(phy_pool.num_total(),
                                    options.dp_size(),
-                                   static_cast<int32_t>(worker_clients.size()),
+                                   static_cast<int32_t>(num_workers),
                                    config.phy_page_granularity_size(),
                                    /*enable_prealloc=*/true);
     }
@@ -82,25 +99,16 @@ KVCacheCapacity KVCacheManagerFactory::estimate_capacity(
         static_cast<int64_t>(phy_pool.num_total()) *
         config.phy_page_granularity_size();
   } else {
-    CHECK(!worker_clients.empty()) << "KV cache estimation requires workers";
-    std::vector<folly::SemiFuture<std::tuple<int64_t, int64_t>>> futures;
-    futures.reserve(worker_clients.size());
-    for (const auto& worker : worker_clients) {
-      futures.emplace_back(worker->estimate_kv_cache_capacity_async());
-    }
-    auto results = folly::collectAll(futures).get();
-    context.worker_memory.reserve(results.size());
-    for (size_t i = 0; i < results.size(); ++i) {
-      CHECK(results[i].hasValue())
-          << "Failed to estimate KV cache capacity for worker: " << i;
-      const auto& [available_memory, total_memory] = results[i].value();
-      context.worker_memory.emplace_back(
-          KVCacheMemorySnapshot{available_memory, total_memory});
-    }
+    context.worker_memory = worker_memory;
   }
 
-  KVCacheCapacity capacity =
-      KVCacheEstimator(model_args).estimate(options, context);
+  return KVCacheEstimator(model_args).estimate(options, context);
+}
+
+// Reports the final (post-combine) capacity so the KV memory gauges never
+// carry an intermediate per-model estimate.
+void report_capacity_metrics(const KVCacheCapacity& capacity,
+                             const runtime::Options& options) {
   GAUGE_SET(total_kv_cache_size_in_kilobytes,
             capacity.cache_size_in_bytes() / 1024);
   for (const auto& device : options.devices()) {
@@ -108,7 +116,70 @@ KVCacheCapacity KVCacheManagerFactory::estimate_capacity(
         device.index(), capacity.cache_size_in_bytes());
     DeviceMonitor::get_instance().set_total_activation_memory(device.index());
   }
-  return capacity;
+}
+
+// True when the draft gets no separate capacity of its own: the target
+// capacity passes through unchanged, so estimating a draft KV budget would be
+// wasted work. Covers the embedded Eagle3 draft (the draft model stays
+// inside the target engine with a separate shape) and DeepSeek V4 per-type
+// block pools (the draft shares the target's pool geometry).
+bool target_draft_capacity_passes_through(
+    const ModelArgs& target_args,
+    std::string_view speculative_algorithm,
+    const KVCacheCapacity& target_cap) {
+  return uses_embedded_eagle3_draft(speculative_algorithm, target_args) ||
+         util::is_deepseek_v4_model_type(target_args.model_type());
+}
+
+}  // namespace
+
+std::optional<KVCacheCapacity>
+KVCacheManagerFactory::estimate_speculative_capacity(
+    const KVCacheModelEstimate& target,
+    const std::optional<KVCacheModelEstimate>& draft,
+    int64_t world_size,
+    const std::vector<std::shared_ptr<WorkerClient>>& worker_clients,
+    bool is_multimodal,
+    int64_t reserved_memory_bytes) {
+  const std::vector<KVCacheMemorySnapshot> worker_memory =
+      vmm_budget_replaces_worker_memory(is_multimodal)
+          ? std::vector<KVCacheMemorySnapshot>{}
+          : poll_worker_memory(worker_clients);
+  KVCacheCapacity target_cap = estimate_capacity(target.args,
+                                                 target.options,
+                                                 target.dtype,
+                                                 world_size,
+                                                 worker_memory,
+                                                 worker_clients.size(),
+                                                 is_multimodal,
+                                                 reserved_memory_bytes);
+  // No draft side to estimate, or the target capacity passes through
+  // unchanged (embedded Eagle3 draft, DeepSeek V4 per-type pools): the draft
+  // estimator run would be discarded.
+  if (!draft.has_value() ||
+      target_draft_capacity_passes_through(
+          target.args, target.options.speculative_algorithm(), target_cap)) {
+    report_capacity_metrics(target_cap, target.options);
+    return target_cap;
+  }
+  // The draft model is always a plain text LLM even under a VLM target; keep
+  // its estimation on the text path so the encoder-cache reservation is only
+  // deducted once (by the target).
+  KVCacheCapacity draft_cap = estimate_capacity(draft->args,
+                                                draft->options,
+                                                draft->dtype,
+                                                world_size,
+                                                worker_memory,
+                                                worker_clients.size(),
+                                                /*is_multimodal=*/false,
+                                                reserved_memory_bytes);
+  const std::optional<KVCacheCapacity> combined =
+      combine_target_and_draft_kv_cache_capacity(
+          target_cap, target.args, draft->args, draft_cap);
+  if (combined.has_value()) {
+    report_capacity_metrics(*combined, target.options);
+  }
+  return combined;
 }
 
 KVCacheManagerFactoryResult KVCacheManagerFactory::create(
@@ -252,7 +323,7 @@ KVCacheManagerFactoryResult KVCacheManagerFactory::create(
         .num_blocks(static_cast<uint32_t>(usable_blocks));
     page_allocator = &allocator;
   }
-  std::unique_ptr<KVCacheManager> manager;
+  std::unique_ptr<BlockManagerPool> manager;
   if (options.enable_host_offload()) {
     CHECK(transfer_coordinator != nullptr)
         << "KV cache transfer coordinator is required for host-offload KV "

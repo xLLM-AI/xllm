@@ -24,6 +24,7 @@ limitations under the License.
 #include <string_view>
 #include <type_traits>
 
+#include "core/framework/config/mtp_utils.h"
 #include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model/causal_lm.h"
 #include "core/framework/model/causal_rec.h"
@@ -31,7 +32,6 @@ limitations under the License.
 #include "core/framework/model/rec_model.h"
 #include "core/framework/model_loader/hf_model_args.h"
 #include "core/framework/model_loader/hf_model_config.h"
-#include "core/framework/speculative/mtp_utils.h"
 #include "core/kv_cache/layout/kv_cache_estimation.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/platform/device.h"
@@ -414,12 +414,12 @@ TEST(HFModelLoaderTest, Glm5NextNativeMtpUsesAppendedLayer) {
   EXPECT_EQ(target_args.mtp_start_layer_idx(), -1);
   ModelRegistry::configure_mtp_args(target_args,
                                     /*speculative_algorithm=*/"MTP",
-                                    /*is_draft_engine=*/false,
+                                    /*is_draft_model=*/false,
                                     /*is_python_model=*/false);
   ModelArgs draft_args = target_args;
   ModelRegistry::configure_mtp_args(draft_args,
                                     /*speculative_algorithm=*/"MTP",
-                                    /*is_draft_engine=*/true,
+                                    /*is_draft_model=*/true,
                                     /*is_python_model=*/false);
   EXPECT_EQ(target_args.model_type(), "glm5_next");
   EXPECT_EQ(target_args.n_layers(), 45);
@@ -444,7 +444,7 @@ TEST(HFModelLoaderTest, Glm5FlashAliasUsesMlaAndNativeMtpNormalization) {
   EXPECT_TRUE(util::is_mla_model_type(args.model_type()));
   ModelRegistry::configure_mtp_args(args,
                                     /*speculative_algorithm=*/"MTP",
-                                    /*is_draft_engine=*/true,
+                                    /*is_draft_model=*/true,
                                     /*is_python_model=*/false);
   EXPECT_EQ(args.model_type(), "glm5_next_mtp");
   EXPECT_EQ(args.n_layers(), 1);
@@ -470,7 +470,7 @@ TEST(HFModelLoaderTest, Glm5NextExportedMtpKeepsNativeKeys) {
   ASSERT_TRUE(loader(reader, &args));
   ModelRegistry::configure_mtp_args(args,
                                     /*speculative_algorithm=*/"MTP",
-                                    /*is_draft_engine=*/true,
+                                    /*is_draft_model=*/true,
                                     /*is_python_model=*/false);
   EXPECT_EQ(args.model_type(), "glm5_next_mtp");
   EXPECT_EQ(args.n_layers(), 1);
@@ -482,11 +482,11 @@ TEST(HFModelLoaderTest, Glm5NextMtpNormalizationIsIdempotent) {
   args.model_type("glm5_next").n_layers(45).num_nextn_predict_layers(1);
   ModelRegistry::configure_mtp_args(args,
                                     /*speculative_algorithm=*/"MTP",
-                                    /*is_draft_engine=*/true,
+                                    /*is_draft_model=*/true,
                                     /*is_python_model=*/false);
   ModelRegistry::configure_mtp_args(args,
                                     /*speculative_algorithm=*/"MTP",
-                                    /*is_draft_engine=*/true,
+                                    /*is_draft_model=*/true,
                                     /*is_python_model=*/false);
   EXPECT_EQ(args.model_type(), "glm5_next_mtp");
   EXPECT_EQ(args.n_layers(), 1);
@@ -500,7 +500,7 @@ TEST(HFModelLoaderTest, Glm5NextMtpNormalizationIgnoresOtherAlgorithms) {
     args.model_type("glm5_next").n_layers(45).num_nextn_predict_layers(1);
     ModelRegistry::configure_mtp_args(args,
                                       algorithm,
-                                      /*is_draft_engine=*/true,
+                                      /*is_draft_model=*/true,
                                       /*is_python_model=*/false);
     EXPECT_EQ(args.model_type(), "glm5_next");
     EXPECT_EQ(args.n_layers(), 45);
@@ -515,7 +515,7 @@ TEST(HFModelLoaderTest, Glm5NextMtpNormalizationIgnoresOtherModels) {
     args.model_type(model_type).n_layers(45).num_nextn_predict_layers(1);
     ModelRegistry::configure_mtp_args(args,
                                       /*speculative_algorithm=*/"MTP",
-                                      /*is_draft_engine=*/true,
+                                      /*is_draft_model=*/true,
                                       /*is_python_model=*/false);
     EXPECT_EQ(args.model_type(), model_type);
     EXPECT_EQ(args.n_layers(), 45);
@@ -547,18 +547,16 @@ TEST(HFModelLoaderTest, Glm5NextMtpEngineAndWorkerMatchExportedCacheLayout) {
   engine_args.enable_mla(true);
   ModelArgs worker_args = engine_args;
   runtime::Options engine_options;
-  engine_options.is_draft_engine(true)
-      .speculative_algorithm("mTp")
-      .enable_speculative_decode(false);
+  engine_options.speculative_algorithm("mTp").enable_speculative_decode(false);
   runtime::Options worker_options = engine_options;
   worker_options.enable_speculative_decode(true);
   ModelRegistry::configure_mtp_args(engine_args,
                                     engine_options.speculative_algorithm(),
-                                    engine_options.is_draft_engine(),
+                                    engine_options.is_draft_model(),
                                     /*is_python_model=*/false);
   ModelRegistry::configure_mtp_args(worker_args,
                                     worker_options.speculative_algorithm(),
-                                    worker_options.is_draft_engine(),
+                                    worker_options.is_draft_model(),
                                     /*is_python_model=*/false);
 
   JsonReader exported_reader;
@@ -584,7 +582,7 @@ TEST(HFModelLoaderTest, Glm5NextMtpEngineAndWorkerMatchExportedCacheLayout) {
   exported_args.enable_mla(true);
   ModelRegistry::configure_mtp_args(exported_args,
                                     engine_options.speculative_algorithm(),
-                                    engine_options.is_draft_engine(),
+                                    engine_options.is_draft_model(),
                                     /*is_python_model=*/false);
 
   KVCacheEstimateOptions cache_options;
@@ -593,7 +591,7 @@ TEST(HFModelLoaderTest, Glm5NextMtpEngineAndWorkerMatchExportedCacheLayout) {
   cache_options.world_size = 8;
   cache_options.n_local_kv_heads = 8;
   cache_options.max_seqs_per_batch = 16;
-  cache_options.is_draft_engine = true;
+  cache_options.is_draft_model = true;
   const KVCacheCapacity exported_capacity =
       estimate_kv_cache_capacity(exported_args, cache_options);
   const KVCacheShape exported_shape(
@@ -627,21 +625,21 @@ TEST(HFModelLoaderTest, Glm5NextNativeMtpRejectsUnsupportedLayerCounts) {
   EXPECT_DEATH(
       ModelRegistry::configure_mtp_args(args,
                                         /*speculative_algorithm=*/"MTP",
-                                        /*is_draft_engine=*/true,
+                                        /*is_draft_model=*/true,
                                         /*is_python_model=*/false),
       "exactly one");
   args.num_nextn_predict_layers(2);
   EXPECT_DEATH(
       ModelRegistry::configure_mtp_args(args,
                                         /*speculative_algorithm=*/"MTP",
-                                        /*is_draft_engine=*/true,
+                                        /*is_draft_model=*/true,
                                         /*is_python_model=*/false),
       "exactly one");
   args.num_nextn_predict_layers(1).n_layers(0);
   EXPECT_DEATH(
       ModelRegistry::configure_mtp_args(args,
                                         /*speculative_algorithm=*/"MTP",
-                                        /*is_draft_engine=*/true,
+                                        /*is_draft_model=*/true,
                                         /*is_python_model=*/false),
       "n_layers");
 }

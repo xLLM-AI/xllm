@@ -15,7 +15,6 @@ limitations under the License.
 
 #include "runtime/dspark_worker_impl.h"
 
-#include <c10/core/DeviceGuard.h>
 #include <glog/logging.h>
 
 #include <optional>
@@ -25,6 +24,7 @@ limitations under the License.
 #include "core/framework/parallel_state/process_group.h"
 #include "core/framework/sampling/sampler.h"
 #include "core/framework/speculative/draft_proposal.h"
+#include "core/runtime/spec_runtime_helpers.h"
 #include "runtime/llm_worker_impl.h"
 #include "util/timer.h"
 
@@ -88,8 +88,9 @@ DraftProposal DSparkWorkerImpl::run_decode_draft(
         base_logits,
         anchors,
         sampling_params_on_device,
-        [this](torch::Tensor& tokens) {
-          sync_sampling_tensor(tokens, sampling_process_group_);
+        [this, &sampling_params_on_device](torch::Tensor& tokens) {
+          keep_tokens_consistent(tokens,
+                                 sampling_params_on_device.sampling_mode());
         },
         is_probabilistic_draft_);
   }

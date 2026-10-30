@@ -33,8 +33,8 @@ limitations under the License.
 #include "framework/request/request_params.h"
 #include "llm_engine.h"
 #include "master.h"
+#include "model_residency_coordinator.h"
 #include "scheduler/continuous_scheduler.h"
-#include "speculative_engine.h"
 
 namespace xllm {
 
@@ -47,7 +47,6 @@ class LLMMaster : public Master {
  public:
   explicit LLMMaster(const Options& options);
   ~LLMMaster() override;
-
   const ModelArgs* model_args() const override { return &model_args_; }
 
   // handle a request, the engine will execute the request asynchronously
@@ -125,8 +124,8 @@ class LLMMaster : public Master {
 
   bool unlink_p2p(const std::vector<std::string>& remote_addrs);
 
-  bool start_profile();
-  bool stop_profile();
+  bool start_profile() override;
+  bool stop_profile() override;
 
  private:
   template <typename Input>
@@ -134,10 +133,16 @@ class LLMMaster : public Master {
                               std::vector<RequestParams> params,
                               BatchOutputCallback callback);
 
+  // Delegates to the coordinator, which owns the residency capability (it is
+  // disabled at construction when a draft model rides on the same workers).
+  bool supports_model_residency() const {
+    return model_residency_coordinator_ != nullptr &&
+           model_residency_coordinator_->enabled();
+  }
+
   std::shared_ptr<KVCacheTransferCoordinator> kv_transfer_coordinator_;
 
   MasterStatus master_status_;
-  XServiceClient* xservice_client_ = nullptr;
 
   // Shared workers outlive the scheduler and every engine using them.
   std::shared_ptr<DistributedWorkerManager> distributed_worker_manager_;
@@ -145,11 +150,7 @@ class LLMMaster : public Master {
   // Created by the master after worker setup and shared with serving consumers.
   std::shared_ptr<ModelResidencyCoordinator> model_residency_coordinator_;
 
-  // Exactly one of these owners is populated, depending on the configured
-  // LLM execution mode.
   std::unique_ptr<LLMEngine> llm_engine_;
-  std::unique_ptr<SuffixSpeculativeEngine> suffix_engine_;
-  std::unique_ptr<SpeculativeEngineBase<LLMEngine>> speculative_engine_;
 
   // Scheduler must be destroyed before the engine it references.
   std::unique_ptr<Scheduler> scheduler_;

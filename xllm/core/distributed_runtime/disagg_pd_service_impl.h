@@ -27,8 +27,6 @@ limitations under the License.
 
 namespace xllm {
 
-class BlockManagerPool;
-class Engine;
 class Request;
 class Sequence;
 class DisaggPDScheduler;
@@ -45,8 +43,6 @@ struct DisaggPDServiceOptions {
 class DisaggPDServiceImpl {
  public:
   explicit DisaggPDServiceImpl(DisaggPDScheduler* scheduler,
-                               Engine* engine,
-                               int32_t kv_cache_block_tokens,
                                DisaggPDServiceOptions response_options = {});
   ~DisaggPDServiceImpl() = default;
 
@@ -74,7 +70,6 @@ class DisaggPDServiceImpl {
       std::string* error);
 
   DisaggPDScheduler* scheduler_;  // not owned
-  Engine* engine_;                // not owned
   const DisaggPDServiceOptions response_options_;
   XServiceClient* xservice_client_ = nullptr;
   std::mutex json_object_grammar_mutex_;
@@ -86,9 +81,6 @@ class DisaggPDServiceImpl {
                                        const std::string& request_id,
                                        const std::vector<int32_t>& block_ids,
                                        proto::DisaggResponse* response);
-
-  // Not owned. The initialized engine and its pool outlive this service.
-  const BlockManagerPool* const block_manager_;
 };
 
 }  // namespace xllm

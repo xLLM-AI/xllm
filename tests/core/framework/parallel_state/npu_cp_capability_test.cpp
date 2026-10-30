@@ -211,26 +211,22 @@ TEST(NpuCpCapabilityTest, PythonCpPreservesQwenAndRestrictsGlm) {
       .ep_size(16)
       .instance_role(InstanceRole::PREFILL)
       .enable_graph(false)
-      .speculative_algorithm("MTP");
+      .speculative_algorithm("MTP")
+      .num_speculative_tokens(2);
   EXPECT_FALSE(validate_context_parallel_config(options,
                                                 EngineType::LLM,
                                                 "qwen3",
                                                 /*global_world_size=*/16)
                    .has_value());
   EXPECT_FALSE(validate_context_parallel_config(options,
-                                                EngineType::SSM,
-                                                "qwen3",
-                                                /*global_world_size=*/16)
-                   .has_value());
-  EXPECT_FALSE(validate_context_parallel_config(options,
-                                                EngineType::SSM,
+                                                EngineType::LLM,
                                                 "glm_moe_dsa",
                                                 /*global_world_size=*/16)
                    .has_value());
 
-  options.speculative_algorithm("DSpark");
+  options.speculative_algorithm("DSpark").draft_model_path("/tmp/draft");
   EXPECT_EQ(validate_context_parallel_config(options,
-                                             EngineType::SSM,
+                                             EngineType::LLM,
                                              "glm_moe_dsa",
                                              /*global_world_size=*/16),
             std::optional<std::string>(
@@ -351,14 +347,20 @@ TEST(NpuCpCapabilityTest, PythonGlm5NextCapabilityGate) {
                                                 /*global_world_size=*/8)
                    .has_value());
 
+  options.speculative_algorithm("MTP")
+      .num_speculative_tokens(2)
+      .draft_model_path("/tmp/draft");
   EXPECT_EQ(
       validate_context_parallel_config(options,
-                                       EngineType::SSM,
+                                       EngineType::LLM,
                                        "glm5_next",
                                        /*global_world_size=*/8),
       std::optional<std::string>(
           "Python GLM-5 Next CP does not support target-side speculative "
           "verification; run speculation on a cp_size=1 Decode instance"));
+
+  // Back to a non-speculative configuration for the remaining gates.
+  options.num_speculative_tokens(0).draft_model_path(std::nullopt);
 
   execution_config.python_graph_backend("inductor");
   EXPECT_EQ(validate_context_parallel_config(options,
@@ -469,9 +471,10 @@ TEST(NpuCpCapabilityTest, PythonGlmMtpSupportsCpWithDecodeAclGraph) {
       .ep_size(1)
       .instance_role(InstanceRole::DEFAULT)
       .enable_graph(true)
-      .speculative_algorithm("MTP");
+      .speculative_algorithm("MTP")
+      .num_speculative_tokens(2);
   EXPECT_FALSE(validate_context_parallel_config(options,
-                                                EngineType::SSM,
+                                                EngineType::LLM,
                                                 "glm_moe_dsa",
                                                 /*global_world_size=*/16)
                    .has_value());
@@ -481,7 +484,7 @@ TEST(NpuCpCapabilityTest, PythonGlmMtpSupportsCpWithDecodeAclGraph) {
   options.instance_role(InstanceRole::PREFILL).enable_disagg_pd(true);
   parallel_config.kv_split_size(0);
   EXPECT_FALSE(validate_context_parallel_config(options,
-                                                EngineType::SSM,
+                                                EngineType::LLM,
                                                 "glm_moe_dsa",
                                                 /*global_world_size=*/16)
                    .has_value());

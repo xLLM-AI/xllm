@@ -42,10 +42,6 @@ static_assert(std::is_base_of_v<Scheduler, FixedStepsScheduler>);
 static_assert(std::is_constructible_v<FixedStepsScheduler,
                                       RecEngine*,
                                       const SchedulerOptions&>);
-static_assert(!std::is_constructible_v<FixedStepsScheduler,
-                                       Engine*,
-                                       const SchedulerOptions&>);
-
 class ControllablePrefetchBlockManagerPool final : public BlockManagerPool {
  public:
   ControllablePrefetchBlockManagerPool(const Options& options,
@@ -176,12 +172,13 @@ class FakeEngine final : public RecEngine {
     opt.enable_prefix_cache_ = false;
     opt.enable_linear_state_ = linear_state;
     opt.linear_state_num_slots_ = linear_state ? 8 : 0;
-    fake_tokenizer_ = std::make_unique<FakeTokenizer>();
-    fake_block_manager_ =
-        std::make_unique<ControllablePrefetchBlockManagerPool>(
-            opt, enable_storage_prefetch, dp_size);
+    tokenizer_ = std::make_unique<FakeTokenizer>();
+    auto block_manager = std::make_unique<ControllablePrefetchBlockManagerPool>(
+        opt, enable_storage_prefetch, dp_size);
+    fake_block_manager_ = block_manager.get();
+    block_manager_pool_ = std::move(block_manager);
   }
-  ForwardOutput step(RecBatchGroup& batch) override {
+  ForwardOutput step(RecBatchGroup& batch) {
     if (step_hook_) {
       step_hook_();
     }
@@ -201,22 +198,6 @@ class FakeEngine final : public RecEngine {
     step_calls_.fetch_add(1, std::memory_order_relaxed);
     return ForwardOutput();
   }
-  const Tokenizer* tokenizer() const override { return fake_tokenizer_.get(); }
-  BlockManagerPool* block_manager_pool() const override {
-    return fake_block_manager_.get();
-  }
-  const ModelArgs& model_args() const override {
-    static ModelArgs args;
-    return args;
-  }
-  const TokenizerArgs& tokenizer_args() const override {
-    static TokenizerArgs args;
-    return args;
-  }
-  std::vector<int64_t> get_active_activation_memory() const override {
-    return {};
-  }
-  bool init() override { return true; }
 
   size_t step_calls() const {
     return step_calls_.load(std::memory_order_relaxed);
@@ -252,8 +233,7 @@ class FakeEngine final : public RecEngine {
     return options;
   }
 
-  std::unique_ptr<Tokenizer> fake_tokenizer_;
-  std::unique_ptr<ControllablePrefetchBlockManagerPool> fake_block_manager_;
+  ControllablePrefetchBlockManagerPool* fake_block_manager_;
   std::atomic<size_t> step_calls_{0};
   std::atomic<bool> last_step_had_request_{false};
   std::function<void()> step_hook_;

@@ -44,6 +44,7 @@ limitations under the License.
 #include "core/platform/platform.h"
 #include "core/runtime/decode_graph_bucket.h"
 #include "core/runtime/py_executor_impl.h"
+#include "core/runtime/spec_runtime_helpers.h"
 #include "core/runtime/task_execution_pipeline.h"
 #include "core/util/tensor_helper.h"
 
@@ -1384,7 +1385,8 @@ Status TaskExecutionPipeline::plan_adaptive_verify(
         "binding.");
   }
   adaptive.plan = *plan;
-  adaptive.generation = generation;
+  // prepare_speculative assigns adaptive.generation from next_task_id_ after
+  // this call; do not duplicate it here.
   adaptive.selected_draft_tokens = plan->draft_budget;
   adaptive.embedding_ids.assign(embedding_ids.begin(), embedding_ids.end());
   adaptive.request_ids.assign(request_ids.begin(), request_ids.end());
@@ -3063,8 +3065,10 @@ void TaskExecutionPipeline::launch_prefill(SpeculativeSlot& slot) {
       auto tokens = slot.target_prefill->device_result().tokens;
       synchronize_tokens(
           tokens,
-          slot.target_prefill->sampling_params().sampling_mode() ==
-              SamplingMode::GREEDY);
+          spec_detail::pipeline_tokens_rank_local(
+              capacity_.cp_sampling_group,
+              slot.target_prefill->sampling_params().sampling_mode(),
+              /*already_broadcast_in_group=*/false));
     }
   }
   if (block_draft()) {
@@ -3178,10 +3182,11 @@ void TaskExecutionPipeline::launch_decode(SpeculativeSlot& slot) {
           invocation.output.hidden_states,
           invocation.sampling->params.selected_token_idxes());
       invocation.sampled = sample(*invocation.sampling, invocation.logits);
-      synchronize_tokens(
-          invocation.sampled.next_tokens,
-          invocation.sampling->params.sampling_mode() == SamplingMode::GREEDY &&
-              capacity_.cp_sampling_group == nullptr);
+      synchronize_tokens(invocation.sampled.next_tokens,
+                         spec_detail::pipeline_tokens_rank_local(
+                             capacity_.cp_sampling_group,
+                             invocation.sampling->params.sampling_mode(),
+                             /*already_broadcast_in_group=*/false));
       slot.proposal.select(/*dim=*/1, step)
           .copy_(invocation.sampled.next_tokens);
       if (adaptive_verify_) {
@@ -3280,7 +3285,11 @@ void TaskExecutionPipeline::finish_fixed_verify(SpeculativeSlot& slot) {
     synchronize_samples(result, base.sampling_mode());
   } else {
     auto tokens = result.tokens;
-    synchronize_tokens(tokens, base.sampling_mode() == SamplingMode::GREEDY);
+    synchronize_tokens(tokens,
+                       spec_detail::pipeline_tokens_rank_local(
+                           capacity_.cp_sampling_group,
+                           base.sampling_mode(),
+                           /*already_broadcast_in_group=*/false));
   }
   torch::ge_out(slot.accepted_mask, result.tokens, /*other=*/0);
   auto lengths = result.lengths;
@@ -3475,6 +3484,8 @@ void TaskExecutionPipeline::generate_adaptive_dspark_proposals(
   // confidence until cross-rank bitwise parity is verified, even for greedy
   // sampling.
   adaptive.confidence.copy_(confidence);
+  // Rank-determinism is not verified for confidence tensors yet, so keep the
+  // sampling-group broadcast even though greedy argmax is deterministic.
   sync_sampling_tensor(adaptive.consensus, capacity_.sampling_group);
   sync_sampling_tensor(adaptive.consensus, capacity_.cp_sampling_group);
 }
@@ -3623,13 +3634,15 @@ void TaskExecutionPipeline::synchronize_samples(
       speculative_capacity_ != nullptr &&
       speculative_capacity_->kind == SpeculativeTaskKind::DSPARK &&
       sampling_mode == SamplingMode::GREEDY;
+  const bool rank_local = spec_detail::pipeline_tokens_rank_local(
+      capacity_.cp_sampling_group, sampling_mode, already_broadcast);
   for (const auto* tensor : {&result.tokens,
                              &result.logprobs,
                              &result.top_tokens,
                              &result.top_logprobs}) {
     if (tensor->defined()) {
       auto view = *tensor;
-      synchronize_tokens(view, already_broadcast);
+      synchronize_tokens(view, rank_local);
     }
   }
 }

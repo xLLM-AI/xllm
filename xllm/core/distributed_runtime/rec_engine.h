@@ -21,11 +21,12 @@ limitations under the License.
 
 #include "common/macros.h"
 #include "core/distributed_runtime/distributed_worker_manager.h"
+#include "core/distributed_runtime/engine.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
-#include "engine.h"
 #include "framework/batch/rec_batch_group.h"
 #include "framework/batch/rec_forward_input_factory.h"
 #include "framework/block/block_manager_pool.h"
+#include "framework/model/model_args.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "framework/tokenizer/tokenizer_args.h"
 #include "runtime/worker.h"
@@ -35,28 +36,26 @@ namespace xllm {
 
 class KVCacheShape;
 
-class RecEngine : public Engine {
+class RecEngine final : public Engine {
  public:
   RecEngine(const runtime::Options& options,
             std::shared_ptr<DistributedWorkerManager>
                 distributed_worker_manager = nullptr);
 
-  virtual ~RecEngine() = default;
+  ~RecEngine() override = default;
 
-  virtual ForwardOutput step(RecBatchGroup& batch);
+  ForwardOutput step(RecBatchGroup& batch);
 
-  const runtime::Options& options() const { return options_; }
-
-  bool init() override;
+  bool init();
 
   // Start local WorkerServers without loading weights. Non-leader ranks
   // call this so rank 0's DistributedWorkerManager can collect the cluster;
   // LlmRec otherwise creates DistributedWorkerManager only inside init().
   void setup_distributed_workers();
 
-  virtual std::vector<int64_t> get_active_activation_memory() const;
+  std::vector<int64_t> get_active_activation_memory() const;
 
- private:
+ protected:
   // ============================================================
   // RecEnginePipeline: Abstract base class for rec engine execution
   // ============================================================
@@ -197,21 +196,12 @@ class RecEngine : public Engine {
   // ============================================================
   // Member variables
   // ============================================================
-  runtime::Options options_;
-  torch::ScalarType dtype_;
 
   // Pipeline
   std::unique_ptr<RecEnginePipeline> pipeline_;
 
   // Shared by both pipelines
-  std::shared_ptr<DistributedWorkerManager> distributed_worker_manager_;
   std::unique_ptr<RecForwardInputFactory> forward_input_factory_;
-
-  // LlmRec specific (managed by LlmRecEnginePipeline)
-  std::vector<std::shared_ptr<WorkerClient>> worker_clients_;
-  size_t worker_clients_num_ = 0;
-  int32_t dp_size_ = 1;
-  int32_t dp_local_tp_size_ = 1;
 
   // OneRec specific (managed by prefill-only/xattention local pipelines)
   std::vector<std::unique_ptr<ProcessGroup>> process_groups_;

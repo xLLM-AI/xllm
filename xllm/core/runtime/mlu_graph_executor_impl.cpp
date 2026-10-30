@@ -159,7 +159,7 @@ uint32_t get_tp_size(const xllm::runtime::Options& options) {
 int64_t get_graph_token_capacity(const xllm::runtime::Options& options) {
   int64_t capacity = options.max_seqs_per_batch();
 
-  if (options.enable_speculative_decode() && !options.is_draft_engine()) {
+  if (options.enable_speculative_decode() && !options.is_draft_model()) {
     capacity *= options.num_decoding_tokens();
   }
 
@@ -206,7 +206,7 @@ Params make_graph_params(const Params& params, uint32_t padding_num_tokens) {
 template <typename Params>
 RunMode get_run_mode(const xllm::runtime::Options& options,
                      const Params& params) {
-  if (options.is_draft_engine()) {
+  if (options.is_draft_model()) {
     return RunMode::kDraft;
   }
 
@@ -541,7 +541,7 @@ void MluGraph::capture(ModelType* model,
   persistent_param_->output_.slice(0, 0, forward_result.hidden_states.size(0))
       .copy_(forward_result.hidden_states, true);
   // Only capture aux_hidden_states when enable_graph_aux_hidden_states is on
-  // (e.g. main worker in EAGLE-3); draft worker has this option false.
+  // (e.g. the target model in EAGLE-3); the draft model has this option false.
   if (options.enable_graph_aux_hidden_states() &&
       forward_result.aux_hidden_states.defined()) {
     if (persistent_param_->aux_hidden_states_.numel() == 0) {
@@ -630,7 +630,7 @@ ModelOutput MluGraphExecutorImpl::run_eager(ModelType* model,
                                             const Params& params) {
   RunMode run_mode = get_run_mode(options_, params);
   if (run_mode == RunMode::kDraft) {
-    LOG_FIRST_N(INFO, 1) << "MLU graph fallback to eager for draft worker";
+    LOG_FIRST_N(INFO, 1) << "MLU graph fallback to eager for the draft model";
   } else if (run_mode == RunMode::kSpecVerify) {
     LOG_FIRST_N(INFO, 1) << "MLU graph fallback to eager for Spec Verify";
   } else if (run_mode == RunMode::kDummy) {

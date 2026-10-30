@@ -52,6 +52,9 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   ~MTPWorkerImpl() override;
 
  protected:
+  // MTP's EPLB aggregation consumes every rank's step output.
+  bool eplb_aggregates_output() const override { return true; }
+
   // For derived classes (e.g. Eagle3WorkerImpl) that need custom options for
   // target and draft models. `options` is passed to WorkerImpl (preserves
   // enable_schedule_overlap etc.), `target_options` / `draft_options` are used
@@ -70,8 +73,10 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
 
   ::xllm::Status create_task_pipeline(
       std::unique_ptr<TaskExecutionPipeline>& output) override;
+  // The VLM family routes task preparation through this worker; the LLM
+  // family prepares inside the pipeline. See create_task_pipeline.
   bool uses_worker_task_pipeline() const override {
-    return std::is_same_v<TargetInput, VlmForwardInput>;
+    return WorkerImpl::input_domain() == TaskInputDomain::VLM;
   }
 
   std::tuple<int64_t, int64_t> estimate_kv_cache_capacity() override;

@@ -23,29 +23,39 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/block/block_manager_pool.h"
+#include "core/framework/model/model_args.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
+#include "core/runtime/options.h"
 
 namespace xllm {
 
 class KVCacheTransferCoordinatorBase;
-class ModelArgs;
 class WorkerClient;
-namespace runtime {
-struct Options;
-}
 
 struct KVCacheManagerFactoryResult final {
-  std::unique_ptr<KVCacheManager> manager;
+  std::unique_ptr<BlockManagerPool> manager;
   KVCacheShape shape;
+};
+
+// One side of a joint target+draft capacity estimation. Holds references:
+// callers keep the args/options alive for the duration of the estimation call.
+struct KVCacheModelEstimate final {
+  const ModelArgs& args;
+  const runtime::Options& options;
+  torch::ScalarType dtype;
 };
 
 class KVCacheManagerFactory final {
  public:
-  static KVCacheCapacity estimate_capacity(
-      const ModelArgs& model_args,
-      const runtime::Options& options,
-      torch::ScalarType dtype,
+  // Joint target+draft estimation: both run on the same device list and share
+  // one KV budget, so the returned capacity carries the shared block count
+  // (workers derive the draft shape from the target shape). Pass draft only
+  // when an external draft model is loaded; nullopt for unsupported configs
+  // (virtual memory registers one model_id and cannot host a draft).
+  static std::optional<KVCacheCapacity> estimate_speculative_capacity(
+      const KVCacheModelEstimate& target,
+      const std::optional<KVCacheModelEstimate>& draft,
       int64_t world_size,
       const std::vector<std::shared_ptr<WorkerClient>>& worker_clients,
       bool is_multimodal = false,

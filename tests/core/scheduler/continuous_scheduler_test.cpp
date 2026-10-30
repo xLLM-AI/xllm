@@ -29,7 +29,6 @@
 #include "core/kv_cache/storage/kv_cache_utils.h"
 #include "core/scheduler/request_output_dispatcher.h"
 #include "core/scheduler/scheduler_notifier_test_peer.h"
-#include "distributed_runtime/engine.h"
 #include "scheduler_factory.h"
 #include "util/utils.h"
 
@@ -203,8 +202,9 @@ class SpeculativeStatsLogCapture final : public google::LogSink {
   std::string messages_;
 };
 
-class FakeEngine : public Engine {
+class FakeEngine {
  public:
+  virtual ~FakeEngine() = default;
   FakeEngine(int32_t num_blocks,
              int32_t block_size,
              bool enable_prefix_cache = false,
@@ -229,15 +229,13 @@ class FakeEngine : public Engine {
   virtual ForwardOutput step(BatchGroup& /*batch*/) { return {}; }
   virtual std::vector<RawForwardOutput> collect_step_outputs(
       const BatchGroup& /*batch*/) {
-    NOT_IMPLEMENTED();
+    return {};
   }
   const Tokenizer* tokenizer() const { return fake_tokenizer_.get(); }
   BlockManagerPool* block_manager_pool() const {
     return fake_block_manager_.get();
   }
   const ModelArgs& model_args() const { return model_args_; }
-  const TokenizerArgs& tokenizer_args() const { NOT_IMPLEMENTED(); }
-  bool init() override { return true; }
 
   void set_prefetch_ready(bool ready) {
     fake_block_manager_->set_prefetch_ready(ready);
@@ -287,14 +285,18 @@ class PipelinePhaseEngine final : public FakeEngine {
   bool step_observed_consumed = false;
 };
 
-class TestableContinuousScheduler final : public ContinuousScheduler<> {
+// Not final: RejectingReadyScheduler inherits it to reuse the engine-wiring
+// constructor while overriding ready-queue admission.
+class TestableContinuousScheduler : public ContinuousScheduler {
  public:
-  template <typename TargetEngine>
-  TestableContinuousScheduler(TargetEngine* engine, const Options& options)
-      : ContinuousScheduler<>(engine,
-                              options,
-                              /*model_residency_coordinator=*/nullptr,
-                              /*distributed_worker_manager=*/nullptr) {}
+  TestableContinuousScheduler(FakeEngine* engine, const Options& options)
+      : ContinuousScheduler(engine->block_manager_pool(),
+                            &engine->model_args(),
+                            engine->tokenizer(),
+                            std::move(make_scheduler_callbacks(engine)),
+                            options,
+                            /*model_residency_coordinator=*/nullptr,
+                            /*distributed_worker_manager=*/nullptr) {}
 
   using ContinuousScheduler<>::drain_prefetch_pipeline;
 
@@ -378,7 +380,7 @@ class TestableContinuousScheduler final : public ContinuousScheduler<> {
       batch.front().add(running_sequences_);
       return batch;
     }
-    BatchGroup batch = ContinuousSchedulerBase::prepare_batch();
+    BatchGroup batch = ContinuousScheduler::prepare_batch();
     std::promise<void>* notification =
         std::exchange(prepared_notification_, nullptr);
     if (notification != nullptr) {
@@ -393,13 +395,9 @@ class TestableContinuousScheduler final : public ContinuousScheduler<> {
   std::promise<void>* prepared_notification_ = nullptr;
 };
 
-class RejectingReadyScheduler final : public ContinuousScheduler<> {
+class RejectingReadyScheduler final : public TestableContinuousScheduler {
  public:
-  RejectingReadyScheduler(FakeEngine* engine, const Options& options)
-      : ContinuousScheduler<>(engine,
-                              options,
-                              /*model_residency_coordinator=*/nullptr,
-                              /*distributed_worker_manager=*/nullptr) {}
+  using TestableContinuousScheduler::TestableContinuousScheduler;
 
  protected:
   bool enqueue_ready_request(std::shared_ptr<Request> /*request*/) override {
@@ -1587,14 +1585,16 @@ TEST(ContinuousSchedulerFactoryTest, ChunkedPrefillCreatesContinuousScheduler) {
 
   auto engine = std::make_unique<FakeEngine>(32, 32);
   auto scheduler =
-      create_continuous_scheduler(engine.get(),
+      create_continuous_scheduler(engine->block_manager_pool(),
+                                  &engine->model_args(),
+                                  engine->tokenizer(),
+                                  make_scheduler_callbacks(engine.get()),
                                   opt,
-                                  /*distributed_worker_manager=*/nullptr,
-                                  /*model_residency_coordinator=*/nullptr);
+                                  /*model_residency_coordinator=*/nullptr,
+                                  /*distributed_worker_manager=*/nullptr);
 
   // All non-PD paths now create ContinuousScheduler with BatchMode routing.
-  EXPECT_NE(dynamic_cast<ContinuousScheduler<FakeEngine>*>(scheduler.get()),
-            nullptr);
+  EXPECT_NE(dynamic_cast<ContinuousScheduler*>(scheduler.get()), nullptr);
 }
 
 TEST(ContinuousSchedulerFactoryTest,
@@ -1604,14 +1604,16 @@ TEST(ContinuousSchedulerFactoryTest,
 
   auto engine = std::make_unique<FakeEngine>(32, 32);
   auto scheduler =
-      create_continuous_scheduler(engine.get(),
+      create_continuous_scheduler(engine->block_manager_pool(),
+                                  &engine->model_args(),
+                                  engine->tokenizer(),
+                                  make_scheduler_callbacks(engine.get()),
                                   opt,
-                                  /*distributed_worker_manager=*/nullptr,
-                                  /*model_residency_coordinator=*/nullptr);
+                                  /*model_residency_coordinator=*/nullptr,
+                                  /*distributed_worker_manager=*/nullptr);
 
   // All non-PD paths now create ContinuousScheduler with BatchMode routing.
-  EXPECT_NE(dynamic_cast<ContinuousScheduler<FakeEngine>*>(scheduler.get()),
-            nullptr);
+  EXPECT_NE(dynamic_cast<ContinuousScheduler*>(scheduler.get()), nullptr);
 }
 
 TEST(ContinuousSchedulerFactoryTest,
@@ -1889,8 +1891,12 @@ TEST(ContinuousSchedulerTest, RejectedStreamCancelsAtSchedulingBoundary) {
   const size_t initial_free_blocks =
       util::max(block_manager_pool->num_free_blocks());
 
-  auto request = generate_request_with_prompt_tokens(
-      {1, 2, 3, 4}, 4, 30000, /*enable_schedule_overlap=*/false, &rate_limiter);
+  auto request =
+      generate_request_with_prompt_tokens({1, 2, 3, 4},
+                                          4,
+                                          30000,
+                                          /*enable_schedule_overlap=*/false,
+                                          &rate_limiter);
   request->state().stream = true;
   request->state().output_func = [](const RequestOutput&) { return false; };
   make_request_decode_ready(request);
@@ -1941,8 +1947,12 @@ TEST(ContinuousSchedulerTest, FailedStreamReturnsStatusExactlyOnce) {
   auto engine = std::make_unique<FakeEngine>(32, 4);
   auto scheduler =
       std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
-  auto request = generate_request_with_prompt_tokens(
-      {1, 2, 3, 4}, 4, 30000, /*enable_schedule_overlap=*/false, &rate_limiter);
+  auto request =
+      generate_request_with_prompt_tokens({1, 2, 3, 4},
+                                          4,
+                                          30000,
+                                          /*enable_schedule_overlap=*/false,
+                                          &rate_limiter);
   request->state().stream = true;
   make_request_decode_ready(request);
   scheduler->add_request(request);

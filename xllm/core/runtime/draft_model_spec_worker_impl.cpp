@@ -24,9 +24,9 @@ limitations under the License.
 #include <system_error>
 #include <tuple>
 
+#include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/scheduler_config.h"
-#include "core/framework/config/speculative_config.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/sampling/sampling_params.h"
@@ -136,9 +136,8 @@ KVCacheEstimateOptions make_kv_cache_estimate_options(
       options.max_linear_state_cache_slots();
   estimate_options.linear_state_cache_block_limit =
       get_npu_linear_state_cache_block_limit(model_args.model_type());
-  estimate_options.is_draft_engine = options.is_draft_engine();
+  estimate_options.is_draft_model = options.is_draft_model();
   estimate_options.enable_chunked_prefill = options.enable_chunked_prefill();
-  estimate_options.enable_schedule_overlap = options.enable_schedule_overlap();
   const KVCacheConfig& kv_cache_config = KVCacheConfig::get_instance();
   estimate_options.enable_prefix_cache =
       kv_cache_config.enable_prefix_cache() &&
@@ -167,9 +166,9 @@ DraftModelSpecWorkerImpl<TargetInput>::DraftModelSpecWorkerImpl(
                                          target_options,
                                          worker_type),
       is_probabilistic_draft_(options.enable_probabilistic_draft()) {
-  CHECK(draft_factory) << "Draft worker factory must not be empty.";
+  CHECK(draft_factory) << "Draft model factory must not be empty.";
   draft_impl_ = draft_factory();
-  CHECK(draft_impl_ != nullptr) << "Draft worker factory must return a worker.";
+  CHECK(draft_impl_ != nullptr) << "Draft model factory must return a worker.";
 }
 
 template <typename TargetInput>
@@ -322,7 +321,7 @@ void DraftModelSpecWorkerImpl<
         draft_store_key_component(options_));
   } else {
     CHECK_EQ(draft_transfer.get(), unified_transfer.get())
-        << "Speculative draft worker hierarchy KV cache transfer changed "
+        << "Speculative draft-model hierarchy KV cache transfer changed "
            "unexpectedly.";
   }
 
@@ -417,6 +416,33 @@ bool DraftModelSpecWorkerImpl<TargetInput>::prepare_model_decode_continuation(
     TargetInput& /*inputs*/,
     const ForwardOutput& /*prior_output*/) {
   return true;
+}
+
+template <typename TargetInput>
+void DraftModelSpecWorkerImpl<TargetInput>::share_target_weights_with_draft(
+    bool share_lm_head) {
+  const bool python_weights_shared = draft_impl_->share_weights_from(*impl_);
+  if (python_weights_shared) {
+    return;
+  }
+#if defined(USE_NPU)
+  if (::xllm::KernelConfig::get_instance().npu_kernel_backend() != "TORCH" &&
+      draft_shares_atb_weights()) {
+    if (share_lm_head) {
+      auto head = impl_->get_npu_lm_head();
+      draft_impl_->set_npu_lm_head(head);
+    }
+    auto word_embedding = impl_->get_npu_word_embedding();
+    draft_impl_->set_npu_word_embedding(word_embedding);
+    return;
+  }
+#endif
+  if (share_lm_head) {
+    auto head = impl_->get_lm_head();
+    draft_impl_->set_lm_head(head);
+  }
+  auto word_embedding = impl_->get_word_embedding();
+  draft_impl_->set_word_embedding(word_embedding);
 }
 
 template <typename TargetInput>

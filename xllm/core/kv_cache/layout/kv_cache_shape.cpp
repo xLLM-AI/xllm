@@ -30,9 +30,9 @@ namespace xllm {
 
 KVCacheCreateOptions get_kv_cache_create_options(const ModelArgs& model_args,
                                                  const KVCacheShape& shape,
-                                                 bool is_spec_draft) {
+                                                 bool is_draft_model) {
   KVCacheCreateOptions options;
-  const bool kpool_draft = shape.has_kpool_tail_shape() && is_spec_draft;
+  const bool kpool_draft = shape.has_kpool_tail_shape() && is_draft_model;
   options.enable_linear_attention(has_linear_attention_layers(model_args) &&
                                   !kpool_draft);
   options.full_attention_interval(

@@ -249,14 +249,14 @@ folly::SemiFuture<bool> KVCacheTransfer::push_kv_blocks_async(
     const std::vector<TransferKVInfo>& transfer_kv_infos,
     const ParallelArgs& parallel_args,
     std::shared_ptr<KVPushSynchronizerImpl> layer_synchronizer,
-    bool is_spec_draft) {
+    bool is_draft_model) {
   folly::Promise<bool> promise;
   auto future = promise.getSemiFuture();
   threadpool_.schedule([this,
                         transfer_kv_infos,
                         parallel_args,
                         layer_synchronizer,
-                        is_spec_draft,
+                        is_draft_model,
                         promise = std::move(promise)]() mutable {
     std::unordered_map<std::string, KVCacheInfo> merged_kv_infos;
     std::vector<TransferKVInfo> filtered_kv_infos;
@@ -288,7 +288,7 @@ folly::SemiFuture<bool> KVCacheTransfer::push_kv_blocks_async(
     if (!merged_kv_infos.empty()) {
       success = this->push_kv_blocks(merged_kv_infos,
                                      layer_synchronizer,
-                                     is_spec_draft,
+                                     is_draft_model,
                                      parallel_args.kv_split_rank(),
                                      parallel_args.kv_split_size_effective());
     }

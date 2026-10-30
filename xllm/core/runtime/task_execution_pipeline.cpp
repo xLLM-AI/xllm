@@ -86,9 +86,6 @@ Status TaskExecutionPipeline::create(
     std::unique_ptr<TaskExecutionPipeline>& output) {
   auto& model = resources.model;
   auto& executor = resources.executor;
-  if (resources.input_domain != TaskInputDomain::LLM) {
-    return invalid("Multimodal tasks require worker-owned preparation.");
-  }
   if (state_executor.size() != 1) {
     return invalid("Task pipeline requires one state thread.");
   }
@@ -189,7 +186,7 @@ Status TaskExecutionPipeline::create(
                                 std::move(target.load_kv),
                                 std::move(target.fence_kv),
                                 &worker,
-                                target.input_domain));
+                                worker.input_domain()));
   pipeline->slots_.reserve(capacity.slot_count);
   for (uint32_t slot_id = 0; slot_id < capacity.slot_count; ++slot_id) {
     pipeline->slots_.emplace_back(std::make_unique<Slot>());
@@ -529,10 +526,66 @@ TaskSubmission TaskExecutionPipeline::submit(const LlmForwardInput& input) {
       return TaskSubmission{status, 0};
     }
   }
+  return admit_task([this, source](uint32_t slot_id) {
+    const Status status = worker_pipeline_ != nullptr
+                              ? prepare_worker(slot_id, *source)
+                              : prepare(slot_id, *source);
+    if (!status.ok()) {
+      return status;
+    }
+    auto& kv_load = slots_[slot_id]->kv_load;
+    const LlmModelParams& prepared_params =
+        worker_pipeline_ != nullptr ? slots_[slot_id]->worker_input.input_params
+                                    : source->input_params;
+    kv_load.reset();
+    if (prepared_params.parallel.layer_wise_load_synchronizer != nullptr) {
+      kv_load = HostKVLoadHandle{
+          prepared_params.parallel.layer_wise_load_synchronizer,
+          prepared_params.parallel.layers_per_event,
+          prepared_params.parallel.draft_load_event_index};
+    }
+    if (load_kv_) {
+      auto registered_load = load_kv_(prepared_params.meta.batch_id);
+      CHECK(!kv_load.has_value() || !registered_load.has_value())
+          << "Task has two Host KV reload handles.";
+      if (registered_load.has_value()) {
+        CHECK(registered_load->synchronizer != nullptr);
+        kv_load = std::move(registered_load);
+      }
+    }
+    slots_[slot_id]->is_warmup = source->input_params.meta.is_graph_warmup;
+    return status;
+  });
+}
+
+TaskSubmission TaskExecutionPipeline::submit(const VlmForwardInput& input) {
+  check_external_thread();
+  if (worker_pipeline_ == nullptr || input_domain_ != TaskInputDomain::VLM) {
+    return TaskSubmission{
+        invalid("VLM input requires a multimodal worker task."), 0};
+  }
+  return admit_task([this, &input](uint32_t slot_id) {
+    const Status status = prepare_worker(slot_id, input);
+    if (!status.ok()) {
+      return status;
+    }
+    auto& slot = *slots_[slot_id];
+    slot.kv_load.reset();
+    slot.is_warmup = slot.worker_vlm_input.input_params.meta.is_graph_warmup;
+    VLOG(1) << "VLM task admitted: slot=" << slot_id << ", batch_id="
+            << slot.worker_vlm_input.input_params.meta.batch_id;
+    return status;
+  });
+}
+
+TaskSubmission TaskExecutionPipeline::admit_task(
+    const std::function<Status(uint32_t)>& prepare_slot) {
   folly::Promise<TaskSubmission> promise;
   auto future = promise.getFuture();
+  // prepare_slot may reference callers' stack frames; submit() blocks on the
+  // returned future until the state thread finishes, keeping them alive.
   state_executor_.schedule(
-      [this, source, promise = std::move(promise)]() mutable {
+      [this, &prepare_slot, promise = std::move(promise)]() mutable {
         if (accepted_.size() == capacity_.slot_count) {
           promise.setValue(TaskSubmission{
               Status(StatusCode::RESOURCE_EXHAUSTED,
@@ -545,78 +598,14 @@ TaskSubmission TaskExecutionPipeline::submit(const LlmForwardInput& input) {
         const uint32_t slot_id =
             accepted_.empty() ? 0U : 1U - accepted_.front().slot_id;
         CHECK_LT(next_task_id_, std::numeric_limits<uint64_t>::max());
-        Status status = worker_pipeline_ != nullptr
-                            ? prepare_worker(slot_id, *source)
-                            : prepare(slot_id, *source);
+        const Status status = prepare_slot(slot_id);
         if (!status.ok()) {
           promise.setValue(TaskSubmission{std::move(status), 0});
           return;
         }
-        auto& kv_load = slots_[slot_id]->kv_load;
-        const LlmModelParams& prepared_params =
-            worker_pipeline_ != nullptr
-                ? slots_[slot_id]->worker_input.input_params
-                : source->input_params;
-        kv_load.reset();
-        if (prepared_params.parallel.layer_wise_load_synchronizer != nullptr) {
-          kv_load = HostKVLoadHandle{
-              prepared_params.parallel.layer_wise_load_synchronizer,
-              prepared_params.parallel.layers_per_event,
-              prepared_params.parallel.draft_load_event_index};
-        }
-        if (load_kv_) {
-          auto registered_load = load_kv_(prepared_params.meta.batch_id);
-          CHECK(!kv_load.has_value() || !registered_load.has_value())
-              << "Task has two Host KV reload handles.";
-          if (registered_load.has_value()) {
-            CHECK(registered_load->synchronizer != nullptr);
-            kv_load = std::move(registered_load);
-          }
-        }
-        slots_[slot_id]->is_warmup = source->input_params.meta.is_graph_warmup;
         const SlotTicket ticket{slot_id, next_task_id_++};
         accepted_.emplace_back(ticket);
         execution_.push(ticket);
-        promise.setValue(TaskSubmission{Status(), ticket.task_id});
-      });
-  return std::move(future).get();
-}
-
-TaskSubmission TaskExecutionPipeline::submit(const VlmForwardInput& input) {
-  check_external_thread();
-  if (worker_pipeline_ == nullptr || input_domain_ != TaskInputDomain::VLM) {
-    return TaskSubmission{
-        invalid("VLM input requires a multimodal worker task."), 0};
-  }
-  folly::Promise<TaskSubmission> promise;
-  auto future = promise.getFuture();
-  state_executor_.schedule(
-      [this, &input, promise = std::move(promise)]() mutable {
-        if (accepted_.size() == capacity_.slot_count) {
-          promise.setValue(TaskSubmission{
-              Status(StatusCode::RESOURCE_EXHAUSTED,
-                     "All task Slots still hold unconsumed results."),
-              0});
-          return;
-        }
-        const uint32_t slot_id =
-            accepted_.empty() ? 0U : 1U - accepted_.front().slot_id;
-        CHECK_LT(next_task_id_, std::numeric_limits<uint64_t>::max());
-        Status status = prepare_worker(slot_id, input);
-        if (!status.ok()) {
-          promise.setValue(TaskSubmission{std::move(status), 0});
-          return;
-        }
-        auto& slot = *slots_[slot_id];
-        slot.kv_load.reset();
-        slot.is_warmup =
-            slot.worker_vlm_input.input_params.meta.is_graph_warmup;
-        const SlotTicket ticket{slot_id, next_task_id_++};
-        accepted_.emplace_back(ticket);
-        execution_.push(ticket);
-        VLOG(1) << "VLM task admitted: id=" << ticket.task_id
-                << ", slot=" << slot_id << ", batch_id="
-                << slot.worker_vlm_input.input_params.meta.batch_id;
         promise.setValue(TaskSubmission{Status(), ticket.task_id});
       });
   return std::move(future).get();

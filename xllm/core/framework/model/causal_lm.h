@@ -170,7 +170,7 @@ class CausalLM : public torch::nn::Module, public Model {
     return {};
   }
 
-  // DSpark-specific low-rank Markov projection. The draft worker owns the
+  // DSpark-specific low-rank Markov projection. The draft model owns the
   // sequential sampling lifecycle; the model owns only the trained weights and
   // bias computation.
   virtual torch::Tensor dspark_markov_bias(
@@ -411,29 +411,11 @@ class CausalLMImpl : public CausalLM {
     }
   }
 
-  bool has_restored_npu_word_embedding() override {
-    if constexpr (detail::has_restored_npu_word_embedding<ModelType>::value) {
-      return model_->has_restored_npu_word_embedding();
-    } else {
-      return CausalLM::has_restored_npu_word_embedding();
-    }
-  }
-
   void set_npu_word_embedding(layer::NpuWordEmbedding& embedding) override {
     if constexpr (detail::has_set_npu_word_embedding<ModelType>::value) {
       model_->set_npu_word_embedding(embedding);
     } else {
       CausalLM::set_npu_word_embedding(embedding);
-    }
-  }
-
-  void set_restored_npu_word_embedding(
-      layer::NpuWordEmbedding& embedding) override {
-    if constexpr (detail::has_set_restored_npu_word_embedding<
-                      ModelType>::value) {
-      model_->set_restored_npu_word_embedding(embedding);
-    } else {
-      CausalLM::set_restored_npu_word_embedding(embedding);
     }
   }
 

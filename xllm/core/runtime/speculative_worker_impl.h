@@ -23,6 +23,8 @@ limitations under the License.
 #include <vector>
 
 #include "common/macros.h"
+#include "core/framework/config/eplb_config.h"
+#include "core/runtime/spec_runtime_helpers.h"
 #include "framework/sampling/sampling_params.h"
 #include "runtime/options.h"
 #include "runtime/worker_impl.h"
@@ -57,6 +59,21 @@ ForwardOutput finalize_verify_output(
 template <typename TargetInput>
 class SpeculativeWorkerImpl : public WorkerImpl {
  public:
+  // Keeps sampled tokens consistent across ranks: gates on the platform
+  // broadcast flag and the actual sampling mode, plus orthogonal-CP consensus.
+  void keep_tokens_consistent(torch::Tensor& tokens,
+                              SamplingMode sampling_mode) const {
+    if (!spec_detail::consensus_required(
+            parallel_args_,
+            get_optimization_config().enable_spec_token_broadcast,
+            sampling_mode)) {
+      return;
+    }
+    c10::StreamGuard guard = compute_stream_->set_stream_guard();
+    spec_detail::broadcast_consensus_tokens(tokens, parallel_args_);
+  }
+
+ protected:
   using TargetModelParams = std::remove_reference_t<
       decltype(std::declval<TargetInput&>().input_params)>;
 

@@ -1065,7 +1065,7 @@ bool CudaGraph::capture_typed(Model* model,
     // Store result in persistent buffer
     persistent_param_.set_hidden_states(forward_result.hidden_states);
     // Only capture aux_hidden_states when enable_graph_aux_hidden_states is on
-    // (e.g. main worker in EAGLE-3); draft worker has this option false.
+    // (e.g. main model in EAGLE-3); the draft model has this option false.
     if (options.enable_graph_aux_hidden_states() &&
         forward_result.aux_hidden_states.defined()) {
       persistent_param_.set_aux_hidden_states(forward_result.aux_hidden_states);
