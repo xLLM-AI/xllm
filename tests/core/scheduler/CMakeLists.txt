@@ -13,6 +13,18 @@ cc_test(
     GTest::gtest_main
 )
 
+# Placement is host-only and must not initialize an accelerator runtime.
+cc_test(
+  NAME
+    dp_rank_selector_test
+  NO_NPU_RUNTIME
+  SRCS
+    dp_rank_selector_test.cpp
+  DEPS
+    :dp_rank_selector
+    GTest::gtest_main
+)
+
 cc_test(
   NAME
     scheduler_test

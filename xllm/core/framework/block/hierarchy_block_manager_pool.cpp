@@ -608,6 +608,10 @@ void HierarchyBlockManagerPool::release_host_match(Sequence* sequence,
 
 void HierarchyBlockManagerPool::deallocate(Sequence* sequence) {
   DCHECK(sequence != nullptr);
+  if (sequence->dp_rank() < 0 && !sequence->has_any_blocks()) {
+    sequence->reset();
+    return;
+  }
   // PD handoff can release the owner while the scheduler retires its batch.
   // A lease must observe both manager deallocation and Sequence::reset before
   // it performs the final cached-usage check.

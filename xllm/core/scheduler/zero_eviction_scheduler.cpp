@@ -105,8 +105,10 @@ auto resource_guard(Func&& func) {
 
 }  // namespace
 
-BlockCapacityGuard::BlockCapacityGuard(KVCacheManager* kv_cache_manager)
-    : kv_cache_manager_(kv_cache_manager) {}
+BlockCapacityGuard::BlockCapacityGuard(KVCacheManager* kv_cache_manager,
+                                       DpRankSelector& dp_rank_selector)
+    : kv_cache_manager_(kv_cache_manager),
+      dp_rank_selector_(dp_rank_selector) {}
 
 void BlockCapacityGuard::compute_reserved_block_num() {
   for (const auto& sequence : candidate_sequences_) {
@@ -125,6 +127,11 @@ void BlockCapacityGuard::prefix_cache_for_candidate_sequences() {
       // sequence that holds cache-bearing blocks re-mounts and trips
       // mount_composite_shared's CHECK (DSV4), so match only fresh sequences.
       if (!sequence->kv_state().has_any_blocks()) {
+        if (sequence->dp_rank() < 0) {
+          sequence->set_dp_rank(
+              dp_rank_selector_.select(kv_cache_manager_->dp_rank_loads()));
+          CHECK_GE(sequence->dp_rank(), 0);
+        }
         kv_cache_manager_->allocate_shared(sequence);
       }
     }
@@ -322,6 +329,11 @@ bool ZeroEvictionScheduler::try_allocate_block_for(
   for (auto* prefill_sequence : *prefill_sequences) {
     // if scheduling is unsuccessful, everything will be deallocated together,
     // so no additional deallocation is needed here.
+    if (prefill_sequence->dp_rank() < 0) {
+      prefill_sequence->set_dp_rank(
+          dp_rank_selector_.select(kv_cache_manager_->dp_rank_loads()));
+      CHECK_GE(prefill_sequence->dp_rank(), 0);
+    }
     if (!kv_cache_manager_->allocate(prefill_sequence)) {
       return false;
     }

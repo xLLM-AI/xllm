@@ -42,6 +42,7 @@ limitations under the License.
 #include "core/framework/request/priority_comparator.h"
 #include "core/framework/request/request.h"
 #include "core/framework/request/sequence.h"
+#include "core/scheduler/dp_rank_selector.h"
 #include "core/scheduler/profile/profile_manager.h"
 #include "core/scheduler/request_output_dispatcher.h"
 #include "core/scheduler/request_priority_queue.h"
@@ -179,6 +180,7 @@ class ContinuousSchedulerBase : public Scheduler {
   ResultCallback result_callback_;
 
   KVCacheManager* kv_cache_manager_;
+  DpRankSelector dp_rank_selector_;
 
   std::shared_ptr<SchedulerNotifier> notifier_;
 

@@ -1,6 +1,19 @@
 include(cc_library)
 include(cc_binary)
 
+# Shared by scheduler admission and profiling without a scheduler dependency.
+cc_library(
+  NAME
+    dp_rank_selector
+  HDRS
+    dp_rank_selector.h
+  SRCS
+    dp_rank_selector.cpp
+  DEPS
+    proto::xllm_proto
+    glog::glog
+)
+
 add_subdirectory(profile)
 
 cc_library(
@@ -33,6 +46,7 @@ cc_library(
     scheduler_factory.cpp
     fixed_steps_scheduler.cpp
   DEPS
+    :dp_rank_selector
     :batch
     :distributed_runtime
     :distributed_virtual_memory_coordinator

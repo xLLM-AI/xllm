@@ -149,7 +149,7 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | `aggressive_coeff` | `double` | `1.0` | Aggressive coefficient for MixScheduler urgency judgment. |
 | `starve_threshold` | `double` | `1.0` | Starvation threshold coefficient for MixScheduler. |
 | `enable_starve_prevent` | `bool` | `true` | Whether to enable anti-starvation behavior in MixScheduler. |
-| `enable_dp_fair_token_budget` | `bool` | `true` | Whether to cap each DP group at `max_tokens_per_batch / dp_size` tokens per scheduling round on disaggregated PD PREFILL instances, floored at one prefill chunk. |
+| `enable_dp_fair_token_budget` | `bool` | `true` | Applies to PREFILL instances with DP > 1. With chunked prefill, each group's per-round cap is `ceil(max_tokens_per_batch / dp_size)`, floored at one prefill chunk; without chunking, it is `max_tokens_per_batch`. Rank placement checks the remaining quota; requests with an existing binding wait when their rank has insufficient quota. |
 | `request_queue_size` | `int32` | `100000` | Capacity of the scheduler request queue. Requests arriving while the queue is full are rejected at admission. |
 
 ## ParallelConfig
@@ -168,7 +168,7 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | `enable_mm_encoder_dp` | `bool` | `false` | Whether to enable encoder data parallelism for multimodal models. |
 | `enable_multi_stream_parallel` | `bool` | `false` | Whether to enable computation/communication parallelism with two streams and two micro batches in the prefill stage. See [Multi-Stream Parallelism](/en/features/multi_streams/). |
 | `micro_batch_num` | `int32` | `1` | Number of micro batches used for multi-stream parallelism. |
-| `enable_dp_balance` | `bool` | `false` | Whether to enable DP load balancing. If true, sequences within a single DP batch are shuffled. |
+| `enable_dp_balance` | `bool` | `false` | Reorder sequences within each DP batch for the custom 24-core NPU MLA kernel. Requires `enable_customize_mla_kernel` and more than 24 sequences; does not select DP ranks. |
 
 ## EPLBConfig
 

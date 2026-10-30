@@ -32,6 +32,7 @@ limitations under the License.
 #include "core/framework/request/sequence.h"
 #include "core/framework/speculative/adaptive/spec_startup_calibration.h"
 #include "core/runtime/options.h"
+#include "core/scheduler/dp_rank_selector.h"
 #include "core/scheduler/profile/decode_graph_warmup_plan.h"
 #include "core/scheduler/profile/time_predictor.h"
 
@@ -291,6 +292,7 @@ class ProfileManager {
   DecodeGraphWarmupPlan decode_graph_warmup_plan_;
 
   BlockManagerPool* block_manager_pool_;
+  DpRankSelector dp_rank_selector_;
 
   int32_t profile_length_step_ = 256;
 

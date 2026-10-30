@@ -28,6 +28,7 @@ limitations under the License.
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/block/linear_state_block_manager.h"
 #include "core/kv_cache/prefix/block_hasher.h"
+#include "core/scheduler/dp_rank_selector.h"
 #include "framework/block/block_manager_pool_test_peer.h"
 #include "framework/model/model_params_view.h"
 #include "framework/request/incremental_decoder.h"
@@ -107,7 +108,7 @@ int32_t insert_linear_state_checkpoint(LinearStateBlockManager* cache,
 }
 
 bool allocate_kv_prefix_for_test(BlockManagerPool& pool, Sequence& sequence) {
-  int32_t dp_rank = -1;
+  const int32_t dp_rank = 0;
   std::vector<Block> blocks = pool.allocate(sequence.num_tokens(), dp_rank);
   if (blocks.empty()) {
     return false;
@@ -354,15 +355,31 @@ TEST_F(BlockManagerPoolTest, AllocateAssignsSingleBlockWhenEnabled) {
   EXPECT_GT(seq.get_embedding_block_id(), 0);
 }
 
-TEST_F(BlockManagerPoolTest, EqualAvailableCapacityRotatesAcrossDpRanks) {
-  BlockManagerPool::Options options;
-  options.num_blocks(1).block_size(1).enable_prefix_cache(false);
-  BlockManagerPool pool(options, /*dp_size=*/3);
+TEST_F(BlockManagerPoolTest, SingleRankReleasesUnboundOwnedBlocks) {
+  for (const bool without_cache : {false, true}) {
+    BlockManagerPool::Options options;
+    options.num_blocks(/*num_blocks=*/8)
+        .block_size(/*block_size=*/2)
+        .enable_prefix_cache(/*enable_prefix_cache=*/false);
+    BlockManagerPool pool(options, /*dp_size=*/1);
+    std::vector<Block> blocks = pool.allocate(/*num_tokens=*/4, /*dp_rank=*/0);
+    ASSERT_EQ(blocks.size(), 2u);
+    Sequence seq = make_sequence(/*index=*/0, /*prompt_tokens=*/{1, 2, 3, 4});
+    seq.add_blocks(BlockType::KV, blocks);
+    blocks.clear();
+    ASSERT_EQ(seq.dp_rank(), -1);
+    ASSERT_TRUE(seq.has_any_blocks());
 
-  EXPECT_EQ(BlockManagerPoolTestPeer::select_dp_rank(pool), 0);
-  EXPECT_EQ(BlockManagerPoolTestPeer::select_dp_rank(pool), 1);
-  EXPECT_EQ(BlockManagerPoolTestPeer::select_dp_rank(pool), 2);
-  EXPECT_EQ(BlockManagerPoolTestPeer::select_dp_rank(pool), 0);
+    if (without_cache) {
+      pool.deallocate_without_cache(&seq);
+    } else {
+      pool.deallocate(&seq);
+    }
+
+    EXPECT_EQ(seq.dp_rank(), 0);
+    EXPECT_FALSE(seq.has_any_blocks());
+    EXPECT_EQ(pool.num_used_blocks(), (std::vector<size_t>{0}));
+  }
 }
 
 TEST_F(BlockManagerPoolTest, DpLinearStateAndPrefixCachesAreIsolated) {
@@ -418,6 +435,7 @@ TEST_F(BlockManagerPoolTest,
   BlockManagerPool::Options options;
   options.num_blocks(4).block_size(1).enable_prefix_cache(true);
   BlockManagerPool pool(options, /*dp_size=*/2);
+  DpRankSelector selector;
 
   Sequence active = make_sequence(0, /*prompt_tokens=*/{1});
   active.set_dp_rank(0);
@@ -435,7 +453,7 @@ TEST_F(BlockManagerPoolTest,
   EXPECT_GT(free_blocks[0], free_blocks[1]);
   EXPECT_GT(used_blocks[0], used_blocks[1]);
   EXPECT_DOUBLE_EQ(pool.kv_cache_utilization(), 0.0);
-  EXPECT_EQ(BlockManagerPoolTestPeer::select_dp_rank(pool), 1);
+  EXPECT_EQ(selector.select(pool.dp_rank_loads()), 1);
 
   pool.deallocate(&active);
 }
@@ -578,12 +596,15 @@ TEST_F(BlockManagerPoolTest, DpRankSelectionSkipsExhaustedSingleBlockPool) {
   ScopedValue<int32_t> chunk_guard(
       &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(options, /*dp_size=*/2);
+  DpRankSelector selector;
 
   Sequence seq0 = make_sequence(0, /*prompt_tokens=*/{1});
+  seq0.set_dp_rank(selector.select(pool.dp_rank_loads()));
   ASSERT_TRUE(pool.try_allocate(&seq0));
   EXPECT_EQ(seq0.dp_rank(), 0);
 
   Sequence seq1 = make_sequence(1, /*prompt_tokens=*/{2});
+  seq1.set_dp_rank(selector.select(pool.dp_rank_loads()));
   ASSERT_TRUE(pool.try_allocate(&seq1));
   EXPECT_EQ(seq1.dp_rank(), 1);
 }
@@ -606,13 +627,17 @@ TEST_F(BlockManagerPoolTest,
   ScopedValue<int32_t> chunk_guard(
       &SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 4);
   BlockManagerPool pool(options, /*dp_size=*/2);
+  DpRankSelector selector;
 
   Sequence seq0 = make_sequence(0, /*prompt_tokens=*/{1});
   Sequence seq1 = make_sequence(1, /*prompt_tokens=*/{2});
+  seq0.set_dp_rank(selector.select(pool.dp_rank_loads()));
   ASSERT_TRUE(pool.try_allocate(&seq0));
+  seq1.set_dp_rank(selector.select(pool.dp_rank_loads()));
   ASSERT_TRUE(pool.try_allocate(&seq1));
 
   Sequence retry = make_sequence(2, /*prompt_tokens=*/{3});
+  retry.set_dp_rank(selector.select(pool.dp_rank_loads()));
   EXPECT_FALSE(pool.try_allocate(&retry));
   const int32_t retry_dp_rank = retry.dp_rank();
   ASSERT_TRUE(retry_dp_rank == seq0.dp_rank() ||

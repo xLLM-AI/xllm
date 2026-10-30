@@ -20,6 +20,7 @@ limitations under the License.
 #include <vector>
 
 #include "common/macros.h"
+#include "core/common/types.h"
 #include "framework/batch/batch_group.h"
 #include "framework/batch/rec_batch_group.h"
 #include "framework/model/model_params_view.h"
@@ -83,7 +84,7 @@ class KVCacheManager {
   // Apply completed prefetches on the scheduler thread before cache admission.
   virtual void drain_prefetch_completions() {}
 
-  virtual std::vector<Block> allocate(size_t num_tokens, int32_t& dp_rank) = 0;
+  virtual std::vector<Block> allocate(size_t num_tokens, int32_t dp_rank) = 0;
   virtual void deallocate(Request* request) = 0;
   virtual void deallocate(std::vector<Sequence*>& sequences) = 0;
   virtual void deallocate(Sequence* sequence) = 0;
@@ -130,12 +131,13 @@ class KVCacheManager {
   virtual std::vector<size_t> num_used_blocks() const = 0;
   virtual double kv_cache_utilization() const = 0;
 
-  // Predict which DP rank a fresh sequence would be assigned to during
-  // allocation. Uses the same effective-headroom metric and round-robin
-  // tie-break as the real allocation path so callers can perform accurate
-  // per-rank admission checks before allocation happens.
-  // Returns 0 for single-rank or non-pool managers.
-  virtual int32_t select_dp_rank() const { return 0; }
+  // Resource adapters expose capacity; scheduler-owned selectors decide where
+  // to place requests. These are advisory snapshots, not reservations.
+  virtual std::vector<DpRankLoad> dp_rank_loads() const {
+    const std::vector<size_t> used_blocks = num_used_blocks();
+    return {{admission_capacity(/*dp_rank=*/0),
+             used_blocks.empty() ? 0 : used_blocks.front()}};
+  }
 
   // Reserve VirtualMemory padding blocks after KV tensors are created.
   virtual void reserve_virtual_memory_padding_blocks() {}

@@ -21,14 +21,10 @@ limitations under the License.
 
 namespace xllm {
 
-// Test-only accessor for BlockManagerPool internals. Exposes DP selection and
-// the private LINEAR leaf without widening the production API surface.
+// Test-only accessor for the private LINEAR leaf without widening the
+// production API surface.
 class BlockManagerPoolTestPeer final {
  public:
-  static int32_t select_dp_rank(BlockManagerPool& pool) {
-    return pool.select_dp_rank();
-  }
-
   static LinearStateBlockManager* linear_leaf(BlockManagerPool& pool,
                                               int32_t dp_rank) {
     if (!pool.options_.enable_linear_state()) {

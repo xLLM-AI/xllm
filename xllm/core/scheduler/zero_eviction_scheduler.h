@@ -55,7 +55,8 @@ class ResourceGuard {
 
 class BlockCapacityGuard {
  public:
-  BlockCapacityGuard(KVCacheManager* kv_cache_manager);
+  BlockCapacityGuard(KVCacheManager* kv_cache_manager,
+                     DpRankSelector& dp_rank_selector);
 
   bool if_accept_candidate_sequences(
       const std::vector<Sequence*>& candidate_sequences,
@@ -90,6 +91,7 @@ class BlockCapacityGuard {
 
  private:
   KVCacheManager* kv_cache_manager_;
+  DpRankSelector& dp_rank_selector_;
 
   std::vector<Sequence*> candidate_sequences_;
   std::vector<Sequence*> decode_queue_;
@@ -119,8 +121,8 @@ class ZeroEvictionScheduler final : public ContinuousScheduler<> {
                               options,
                               std::move(model_residency_coordinator),
                               std::move(distributed_worker_manager)) {
-    block_capacity_guard_ =
-        std::make_unique<BlockCapacityGuard>(kv_cache_manager_);
+    block_capacity_guard_ = std::make_unique<BlockCapacityGuard>(
+        kv_cache_manager_, dp_rank_selector_);
   }
   ~ZeroEvictionScheduler() override;
 

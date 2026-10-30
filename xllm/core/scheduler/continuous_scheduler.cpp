@@ -293,6 +293,13 @@ void ContinuousSchedulerBase::drain_prefetch_admissions() {
       continue;
     }
 
+    for (const auto& sequence : request->sequences()) {
+      if (sequence->dp_rank() < 0) {
+        sequence->set_dp_rank(
+            dp_rank_selector_.select(kv_cache_manager_->dp_rank_loads()));
+        CHECK_GE(sequence->dp_rank(), 0);
+      }
+    }
     kv_cache_manager_->prefetch_from_storage(
         request, [this](std::shared_ptr<Request> completed) {
           std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
@@ -495,6 +502,7 @@ SchedulerState ContinuousSchedulerBase::make_state() {
       .running_sequences = running_sequences_,
       .running_sequences_budgets = running_sequences_budgets_,
       .kv_cache_manager = kv_cache_manager_,
+      .dp_rank_selector = dp_rank_selector_,
       .profile_manager = profile_manager_.get(),
       .output_dispatcher = output_dispatcher_.get(),
       .model_args = resource_engine_->model_args(),

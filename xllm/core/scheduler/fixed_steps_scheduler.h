@@ -36,6 +36,7 @@ limitations under the License.
 #include "core/framework/block/kv_cache_manager.h"
 #include "core/framework/request/request.h"
 #include "core/framework/request/sequence.h"
+#include "core/scheduler/dp_rank_selector.h"
 #include "core/scheduler/request_output_dispatcher.h"
 #include "core/scheduler/request_priority_queue.h"
 #include "core/scheduler/scheduler.h"
@@ -183,6 +184,7 @@ class FixedStepsScheduler : public Scheduler {
   // RecMaster owns the engine and destroys the scheduler first.
   RecEngine* engine_;
   KVCacheManager* kv_cache_manager_;
+  DpRankSelector dp_rank_selector_;
 
   folly::MPMCQueue<std::shared_ptr<Request>> request_queue_;
   std::atomic<size_t> prefetching_requests_{0};

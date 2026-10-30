@@ -164,6 +164,13 @@ void FixedStepsScheduler::drain_prefetch_admissions() {
       continue;
     }
 
+    for (const auto& sequence : request->sequences()) {
+      if (sequence->dp_rank() < 0) {
+        sequence->set_dp_rank(
+            dp_rank_selector_.select(kv_cache_manager_->dp_rank_loads()));
+        CHECK_GE(sequence->dp_rank(), 0);
+      }
+    }
     kv_cache_manager_->prefetch_from_storage(
         request, [this](std::shared_ptr<Request> completed) {
           std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
@@ -318,6 +325,11 @@ bool FixedStepsScheduler::handle_prefill_requests(
       // the same reservations; any failure here is temporary cache pressure.
       for (const auto& [sequence, num_tokens] : prefill_reservations) {
         allocation_dp_ranks.emplace_back(sequence->dp_rank());
+        if (sequence->dp_rank() < 0) {
+          sequence->set_dp_rank(
+              dp_rank_selector_.select(kv_cache_manager_->dp_rank_loads()));
+          CHECK_GE(sequence->dp_rank(), 0);
+        }
         if (!kv_cache_manager_->allocate(sequence, num_tokens)) {
           can_schedule = false;
           break;

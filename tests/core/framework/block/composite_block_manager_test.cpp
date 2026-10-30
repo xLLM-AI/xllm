@@ -31,6 +31,7 @@ limitations under the License.
 #include "core/kv_cache/block/concurrent_block_manager_impl.h"
 #include "core/kv_cache/block/linear_state_block_manager.h"
 #include "core/kv_cache/storage/vmm_kv_page_allocator.h"
+#include "core/scheduler/dp_rank_selector.h"
 #include "framework/config/scheduler_config.h"
 #include "framework/request/request.h"
 #include "framework/request/sequence.h"
@@ -1213,7 +1214,7 @@ TEST(CompositeBlockManagerTest,
               std::make_pair(std::string("injected-cache"), int32_t{1}));
     EXPECT_EQ(allocator.prealloc_starts, 1);
 
-    int32_t dp_rank = -1;
+    const int32_t dp_rank = 0;
     std::vector<Block> blocks = pool.allocate(/*num_tokens=*/8, dp_rank);
     ASSERT_EQ(blocks.size(), 2u);
     EXPECT_NE(blocks[0].id(), 0);
@@ -1330,7 +1331,8 @@ TEST(CompositeBlockManagerTest,
   EXPECT_EQ(pool.admission_capacity(/*dp_rank=*/1), 4u);
   // Route to a rank with real headroom even though both virtual arenas have
   // the same logical size and neither owns blocks yet.
-  EXPECT_EQ(pool.select_dp_rank(), 1);
+  DpRankSelector selector;
+  EXPECT_EQ(selector.select(pool.dp_rank_loads()), 1);
   EXPECT_TRUE(allocator.allocation_requests.empty());
 }
 

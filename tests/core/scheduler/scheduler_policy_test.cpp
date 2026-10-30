@@ -31,6 +31,7 @@ limitations under the License.
 #include <vector>
 
 #include "continuous_scheduler.h"
+#include "core/framework/block/hierarchy_block_manager_pool.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/kv_cache_store_config.h"
 #include "core/framework/config/parallel_config.h"
@@ -104,7 +105,16 @@ class FakeEngine : public Engine {
   BlockManagerPool* block_manager_pool() const {
     return fake_block_manager_.get();
   }
+  void set_block_manager_pool(std::unique_ptr<BlockManagerPool> pool) {
+    fake_block_manager_ = std::move(pool);
+  }
   const ModelArgs& model_args() const override { return model_args_; }
+  void set_max_concurrent_prefills_per_dp(int32_t limit) {
+    model_args_.max_concurrent_prefills_per_dp() = limit;
+  }
+  void set_linear_attention_layers() {
+    model_args_.layer_types({"linear_attention"});
+  }
   const TokenizerArgs& tokenizer_args() const { NOT_IMPLEMENTED(); }
   bool init() override { return true; }
 
@@ -454,7 +464,8 @@ std::vector<std::shared_ptr<Request>> generate_request(
     const std::vector<int32_t>& max_tokens,
     std::optional<std::vector<bool>> offlines,
     std::optional<std::vector<int32_t>> priorities,
-    int32_t max_context_len) {
+    int32_t max_context_len,
+    size_t best_of = 1) {
   std::vector<std::shared_ptr<Request>> requests;
   EXPECT_TRUE(prompt_lens.size() == max_tokens.size());
 
@@ -494,7 +505,7 @@ std::vector<std::shared_ptr<Request>> generate_request(
                            stopping_checker,
                            prompt_lens[i] + 30000,
                            1,
-                           1,
+                           best_of,
                            false,
                            false,
                            false,
@@ -550,7 +561,507 @@ class TestableContinuousScheduler final : public ContinuousScheduler<> {
   void wait_for_responses() { output_dispatcher_->wait_completion(); }
 };
 
+class PrefillAdmissionPolicy final : public PrefillFirstPolicy {
+ public:
+  using PrefillFirstPolicy::PrefillFirstPolicy;
+  using SchedulerPolicy::schedule_prefill_from_queue;
+};
+
+class PrefillDpAdmissionTest : public ::testing::Test {
+ protected:
+  PrefillDpAdmissionTest() {
+    options_.enable_disagg_pd() = true;
+    options_.instance_role() = InstanceRole::PREFILL;
+  }
+
+  std::shared_ptr<Request> enqueue(int32_t prompt_tokens,
+                                   int32_t dp_rank = -1,
+                                   size_t best_of = 1) {
+    auto request = generate_request({prompt_tokens},
+                                    /*max_tokens=*/{1},
+                                    /*offlines=*/std::nullopt,
+                                    /*priorities=*/std::nullopt,
+                                    /*max_context_len=*/128,
+                                    best_of)
+                       .front();
+    if (best_of > 1) {
+      EXPECT_TRUE(request->expand_sequences(/*share_prefix=*/false));
+    }
+    for (auto& sequence : request->sequences()) {
+      sequence->set_dp_rank(dp_rank);
+    }
+    prefill_queue_.push(request, /*if_back=*/true);
+    return request;
+  }
+
+  void schedule(bool chunked = true) {
+    BatchMode mode{
+        .enable_mix_batch = false,
+        .enable_chunked_prefill = chunked,
+        .priority_strategy = "fcfs",
+    };
+    PrefillAdmissionPolicy policy(mode, options_);
+    policy.schedule_prefill_from_queue(
+        &prefill_queue_, state_, budget_, finished_, reserved_full_footprint_);
+  }
+
+  void cache_prefix(int32_t prompt_tokens, int32_t dp_rank = 0) {
+    auto cached = generate_request({prompt_tokens},
+                                   /*max_tokens=*/{1},
+                                   /*offlines=*/std::nullopt,
+                                   /*priorities=*/std::nullopt,
+                                   /*max_context_len=*/128)
+                      .front();
+    Sequence* sequence = cached->sequences().front().get();
+    sequence->set_dp_rank(dp_rank);
+    ASSERT_TRUE(engine_.block_manager_pool()->allocate(sequence));
+    sequence->kv_state().set_kv_cache_tokens_num(prompt_tokens);
+    engine_.block_manager_pool()->deallocate(sequence);
+  }
+
+  ScopedConfigValue<int32_t> chunk_size_guard_{
+      SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(),
+      /*new_value=*/8};
+  SchedulerOptions options_ = create_scheduler_options(
+      /*max_tokens_per_batch=*/16,
+      /*max_seqs_per_batch=*/4,
+      /*num_speculative_tokens=*/0,
+      /*max_tokens_per_chunk_for_prefill=*/8,
+      /*dp_size=*/2);
+  FakeEngine engine_{/*num_blocks=*/32,
+                     /*block_size=*/4,
+                     /*enable_prefix_cache=*/true,
+                     /*dp_size=*/2};
+  DequeQueue prefill_queue_;
+  DequeQueue chunk_queue_;
+  DequeQueue decode_queue_;
+  std::list<std::shared_ptr<Request>> unified_queue_;
+  std::deque<DecodeRestoreEntry> decode_restore_waiting_;
+  std::vector<std::shared_ptr<Request>> running_requests_;
+  std::vector<Sequence*> running_sequences_;
+  std::vector<size_t> running_sequence_budgets_;
+  bool last_step_prefill_ = false;
+  DpRankSelector dp_rank_selector_;
+  SchedulerState state_{
+      .prefill_queue = prefill_queue_,
+      .chunk_queue = chunk_queue_,
+      .decode_queue = decode_queue_,
+      .unified_queue = unified_queue_,
+      .decode_restore_waiting = decode_restore_waiting_,
+      .running_requests = running_requests_,
+      .running_sequences = running_sequences_,
+      .running_sequences_budgets = running_sequence_budgets_,
+      .kv_cache_manager = engine_.block_manager_pool(),
+      .dp_rank_selector = dp_rank_selector_,
+      .profile_manager = nullptr,
+      .output_dispatcher = nullptr,
+      .model_args = engine_.model_args(),
+      .last_step_prefill = last_step_prefill_,
+      .options = options_,
+      .min_speculative_tokens_required = 0,
+      .enable_prefix_cache = false,
+  };
+  ScheduleBudget budget_{
+      .remaining_token_budget = 16,
+      .remaining_seq_budget = 4,
+      .latency_budget = std::numeric_limits<double>::max(),
+      .estimate_latency = 0,
+      .num_preempted_requests = 0,
+      .dp_group_token_caps = {8, 8},
+      .dp_group_token_used = {0, 0},
+  };
+  std::vector<std::shared_ptr<Request>> finished_;
+  std::vector<size_t> reserved_full_footprint_{0, 0};
+};
+
 }  // namespace
+
+TEST_F(PrefillDpAdmissionTest, UsesSelectedRanksRemainingTokenQuota) {
+  budget_.dp_group_token_used = {8, 4};
+  auto request = enqueue(/*prompt_tokens=*/8);
+
+  schedule();
+
+  ASSERT_EQ(running_sequences_.size(), 1u);
+  EXPECT_EQ(request->sequences().front()->dp_rank(), 1);
+  EXPECT_EQ(running_sequence_budgets_, (std::vector<size_t>{4}));
+  EXPECT_EQ(budget_.dp_group_token_used, (std::vector<size_t>{8, 8}));
+  EXPECT_EQ(budget_.remaining_token_budget, 12u);
+}
+
+TEST_F(PrefillDpAdmissionTest, BoundRankWaitsForNextRoundsQuota) {
+  budget_.dp_group_token_used = {8, 0};
+  auto request = enqueue(/*prompt_tokens=*/8, /*dp_rank=*/0);
+
+  schedule();
+
+  ASSERT_EQ(prefill_queue_.size(), 1u);
+  EXPECT_EQ(prefill_queue_.top(), request);
+  EXPECT_TRUE(running_requests_.empty());
+  EXPECT_TRUE(running_sequences_.empty());
+  EXPECT_EQ(request->sequences().front()->dp_rank(), 0);
+  EXPECT_FALSE(request->sequences().front()->has_any_blocks());
+  EXPECT_EQ(budget_.remaining_token_budget, 16u);
+  EXPECT_EQ(budget_.dp_group_token_used, (std::vector<size_t>{8, 0}));
+
+  budget_.dp_group_token_used = {0, 0};
+  schedule();
+
+  EXPECT_TRUE(prefill_queue_.empty());
+  ASSERT_EQ(running_sequences_.size(), 1u);
+  EXPECT_EQ(request->sequences().front()->dp_rank(), 0);
+  EXPECT_EQ(running_sequence_budgets_, (std::vector<size_t>{8}));
+}
+
+TEST_F(PrefillDpAdmissionTest, ExhaustedQuotasLeaveUnboundRequestWaiting) {
+  budget_.dp_group_token_used = {8, 8};
+  auto request = enqueue(/*prompt_tokens=*/8);
+
+  schedule();
+
+  ASSERT_EQ(prefill_queue_.size(), 1u);
+  EXPECT_EQ(prefill_queue_.top(), request);
+  EXPECT_TRUE(running_requests_.empty());
+  EXPECT_TRUE(running_sequences_.empty());
+  EXPECT_EQ(request->sequences().front()->dp_rank(), -1);
+  EXPECT_FALSE(request->sequences().front()->has_any_blocks());
+  EXPECT_EQ(budget_.remaining_token_budget, 16u);
+
+  budget_.dp_group_token_used = {8, 0};
+  schedule();
+
+  EXPECT_TRUE(prefill_queue_.empty());
+  ASSERT_EQ(running_sequences_.size(), 1u);
+  EXPECT_EQ(request->sequences().front()->dp_rank(), 1);
+}
+
+TEST_F(PrefillDpAdmissionTest, AppliesRequestCapAndTokenQuotaTogether) {
+  engine_.set_max_concurrent_prefills_per_dp(/*limit=*/1);
+  budget_.dp_group_token_caps = {16, 16};
+  budget_.dp_group_token_used = {0, 16};
+  auto admitted = enqueue(/*prompt_tokens=*/8, /*dp_rank=*/0);
+  auto waiting = enqueue(/*prompt_tokens=*/8);
+
+  schedule();
+
+  ASSERT_EQ(running_requests_.size(), 1u);
+  EXPECT_EQ(running_requests_.front(), admitted);
+  ASSERT_EQ(prefill_queue_.size(), 1u);
+  EXPECT_EQ(prefill_queue_.top(), waiting);
+  EXPECT_EQ(waiting->sequences().front()->dp_rank(), -1);
+  EXPECT_EQ(budget_.dp_group_token_used, (std::vector<size_t>{8, 16}));
+}
+
+TEST_F(PrefillDpAdmissionTest, AlignsCpChunkWithinRankTokenQuota) {
+  ScopedConfigValue<int32_t> kv_split_guard(
+      ParallelConfig::get_instance().kv_split_size(), /*new_value=*/2);
+  budget_.dp_group_token_used = {8, 2};
+  auto request = enqueue(/*prompt_tokens=*/16);
+
+  schedule();
+
+  ASSERT_EQ(running_sequences_.size(), 1u);
+  EXPECT_EQ(request->sequences().front()->dp_rank(), 1);
+  EXPECT_EQ(running_sequence_budgets_, (std::vector<size_t>{4}));
+  EXPECT_EQ(budget_.dp_group_token_used, (std::vector<size_t>{8, 6}));
+  EXPECT_EQ(budget_.remaining_token_budget, 12u);
+}
+
+TEST_F(PrefillDpAdmissionTest, AllowsQuotaBelowLinearCheckpointStride) {
+  engine_.set_linear_attention_layers();
+  state_.enable_prefix_cache = true;
+  budget_.dp_group_token_used = {4, 0};
+  auto request = enqueue(/*prompt_tokens=*/16);
+
+  schedule();
+
+  ASSERT_EQ(running_sequences_.size(), 1u);
+  EXPECT_EQ(request->sequences().front()->dp_rank(), 0);
+  EXPECT_EQ(running_sequence_budgets_, (std::vector<size_t>{4}));
+  EXPECT_EQ(budget_.dp_group_token_used, (std::vector<size_t>{8, 0}));
+}
+
+TEST_F(PrefillDpAdmissionTest, AllowsShortFinalLinearChunk) {
+  engine_.set_linear_attention_layers();
+  state_.enable_prefix_cache = true;
+  budget_.dp_group_token_used = {8, 5};
+  auto request = enqueue(/*prompt_tokens=*/3);
+
+  schedule();
+
+  ASSERT_EQ(running_sequences_.size(), 1u);
+  EXPECT_EQ(request->sequences().front()->dp_rank(), 1);
+  EXPECT_EQ(running_sequence_budgets_, (std::vector<size_t>{3}));
+  EXPECT_EQ(budget_.dp_group_token_used, (std::vector<size_t>{8, 8}));
+}
+
+TEST_F(PrefillDpAdmissionTest, NonChunkedRequestNeedsWholePromptQuota) {
+  budget_.dp_group_token_used = {4, 0};
+  auto request = enqueue(/*prompt_tokens=*/8);
+
+  schedule(/*chunked=*/false);
+
+  ASSERT_EQ(running_sequences_.size(), 1u);
+  EXPECT_EQ(request->sequences().front()->dp_rank(), 1);
+  EXPECT_EQ(running_sequence_budgets_, (std::vector<size_t>{8}));
+  EXPECT_EQ(budget_.dp_group_token_used, (std::vector<size_t>{4, 8}));
+}
+
+TEST_F(PrefillDpAdmissionTest, ChargesActualTokensAfterPrefixMatch) {
+  state_.enable_prefix_cache = true;
+  cache_prefix(/*prompt_tokens=*/9);
+  budget_.remaining_token_budget = 32;
+  budget_.dp_group_token_caps = {16, 16};
+  auto request = enqueue(/*prompt_tokens=*/9, /*dp_rank=*/0);
+
+  schedule(/*chunked=*/false);
+
+  ASSERT_EQ(running_sequences_.size(), 1u);
+  EXPECT_EQ(request->sequences().front()->kv_cache_tokens_num(), 8u);
+  EXPECT_EQ(running_sequence_budgets_, (std::vector<size_t>{1}));
+  EXPECT_EQ(budget_.dp_group_token_used, (std::vector<size_t>{1, 0}));
+  EXPECT_EQ(budget_.remaining_token_budget, 31u);
+}
+
+TEST_F(PrefillDpAdmissionTest, PrefixHitFitsFullPrefillBeyondRoundBudget) {
+  state_.enable_prefix_cache = true;
+  cache_prefix(/*prompt_tokens=*/9);
+  budget_.remaining_token_budget = 8;
+  auto request = enqueue(/*prompt_tokens=*/9, /*dp_rank=*/0);
+
+  schedule(/*chunked=*/false);
+
+  EXPECT_TRUE(prefill_queue_.empty());
+  ASSERT_EQ(running_sequences_.size(), 1u);
+  EXPECT_EQ(request->sequences().front()->kv_cache_tokens_num(), 8u);
+  EXPECT_EQ(running_sequence_budgets_, (std::vector<size_t>{1}));
+  EXPECT_EQ(budget_.dp_group_token_used, (std::vector<size_t>{1, 0}));
+  EXPECT_EQ(budget_.remaining_token_budget, 7u);
+}
+
+TEST_F(PrefillDpAdmissionTest, ProbesOtherRanksAfterInsufficientPrefixHit) {
+  state_.enable_prefix_cache = true;
+  cache_prefix(/*prompt_tokens=*/9, /*dp_rank=*/0);
+  cache_prefix(/*prompt_tokens=*/17, /*dp_rank=*/1);
+  budget_.remaining_token_budget = 8;
+  RequestOutputDispatcher dispatcher(
+      engine_.tokenizer(),
+      /*enable_service_routing=*/false,
+      /*disable_log_stats=*/true,
+      [](std::shared_ptr<Request> /*request*/) {});
+  state_.output_dispatcher = &dispatcher;
+  auto request = enqueue(/*prompt_tokens=*/17);
+  std::optional<Status> failure;
+  request->state().output_func = [&failure](const RequestOutput& output) {
+    failure = output.status;
+    return true;
+  };
+
+  schedule(/*chunked=*/false);
+  dispatcher.wait_completion();
+
+  EXPECT_FALSE(failure.has_value());
+  EXPECT_TRUE(prefill_queue_.empty());
+  ASSERT_EQ(running_sequences_.size(), 1u);
+  EXPECT_EQ(request->sequences().front()->dp_rank(), 1);
+  EXPECT_EQ(request->sequences().front()->kv_cache_tokens_num(), 16u);
+  EXPECT_EQ(running_sequence_budgets_, (std::vector<size_t>{1}));
+  EXPECT_EQ(budget_.dp_group_token_used, (std::vector<size_t>{0, 1}));
+  EXPECT_EQ(budget_.remaining_token_budget, 7u);
+  EXPECT_EQ(engine_.block_manager_pool()->num_used_blocks()[0], 0u);
+}
+
+TEST_F(PrefillDpAdmissionTest, ProbesOtherRanksWithoutRankTokenQuotas) {
+  state_.enable_prefix_cache = true;
+  cache_prefix(/*prompt_tokens=*/9, /*dp_rank=*/1);
+  budget_.remaining_token_budget = 8;
+  budget_.dp_group_token_caps.clear();
+  budget_.dp_group_token_used.clear();
+  RequestOutputDispatcher dispatcher(
+      engine_.tokenizer(),
+      /*enable_service_routing=*/false,
+      /*disable_log_stats=*/true,
+      [](std::shared_ptr<Request> /*request*/) {});
+  state_.output_dispatcher = &dispatcher;
+  auto request = enqueue(/*prompt_tokens=*/9);
+  std::optional<Status> failure;
+  request->state().output_func = [&failure](const RequestOutput& output) {
+    failure = output.status;
+    return true;
+  };
+
+  schedule(/*chunked=*/false);
+  dispatcher.wait_completion();
+
+  EXPECT_FALSE(failure.has_value());
+  EXPECT_TRUE(prefill_queue_.empty());
+  ASSERT_EQ(running_sequences_.size(), 1u);
+  EXPECT_EQ(request->sequences().front()->dp_rank(), 1);
+  EXPECT_EQ(request->sequences().front()->kv_cache_tokens_num(), 8u);
+  EXPECT_EQ(running_sequence_budgets_, (std::vector<size_t>{1}));
+  EXPECT_EQ(budget_.remaining_token_budget, 7u);
+}
+
+TEST_F(PrefillDpAdmissionTest, RankRollbackAllowsAnotherHierarchyPrefixProbe) {
+  BlockManagerPool::Options options;
+  options.num_blocks(32).host_num_blocks(32).block_size(4).enable_prefix_cache(
+      true);
+  engine_.set_block_manager_pool(std::make_unique<HierarchyBlockManagerPool>(
+      options, /*transfer_coordinator=*/nullptr, /*dp_size=*/2));
+  state_.kv_cache_manager = engine_.block_manager_pool();
+  state_.enable_prefix_cache = true;
+  auto running = enqueue(/*prompt_tokens=*/1, /*dp_rank=*/1);
+  schedule(/*chunked=*/false);
+  ASSERT_EQ(running_requests_.size(), 1u);
+  EXPECT_EQ(running_requests_.front(), running);
+  auto waiting = enqueue(/*prompt_tokens=*/9);
+  reserved_full_footprint_[0] =
+      engine_.block_manager_pool()->admission_capacity(/*dp_rank=*/0);
+
+  schedule();
+
+  ASSERT_EQ(prefill_queue_.size(), 1u);
+  Sequence* sequence = waiting->sequences().front().get();
+  EXPECT_EQ(sequence->dp_rank(), -1);
+  EXPECT_FALSE(sequence->has_any_blocks());
+  EXPECT_FALSE(sequence->kv_state().prefix_cache_matched());
+  EXPECT_FALSE(sequence->host_kv_state().prefix_cache_matched());
+
+  cache_prefix(/*prompt_tokens=*/9, /*dp_rank=*/1);
+  reserved_full_footprint_[0] = 0;
+  budget_.remaining_token_budget = 8;
+  budget_.dp_group_token_used = {8, 0};
+  schedule();
+
+  EXPECT_TRUE(prefill_queue_.empty());
+  ASSERT_EQ(running_requests_.size(), 2u);
+  EXPECT_EQ(running_requests_.back(), waiting);
+  EXPECT_EQ(sequence->dp_rank(), 1);
+  EXPECT_EQ(sequence->kv_cache_tokens_num(), 8u);
+  EXPECT_EQ(running_sequence_budgets_.back(), 1u);
+  EXPECT_EQ(budget_.dp_group_token_used, (std::vector<size_t>{8, 1}));
+}
+
+TEST_F(PrefillDpAdmissionTest, PrefixProbeWaitsIfAnyRankFitsNextRoundsQuota) {
+  state_.enable_prefix_cache = true;
+  budget_.dp_group_token_caps = {8, 7};
+  budget_.dp_group_token_used = {7, 0};
+  auto request = enqueue(/*prompt_tokens=*/8);
+
+  schedule(/*chunked=*/false);
+
+  ASSERT_EQ(prefill_queue_.size(), 1u);
+  EXPECT_EQ(prefill_queue_.top(), request);
+  EXPECT_TRUE(running_sequences_.empty());
+  EXPECT_EQ(request->sequences().front()->dp_rank(), -1);
+  EXPECT_FALSE(request->sequences().front()->has_any_blocks());
+  EXPECT_EQ(budget_.dp_group_token_used, (std::vector<size_t>{7, 0}));
+
+  budget_.dp_group_token_used = {0, 0};
+  schedule(/*chunked=*/false);
+
+  EXPECT_TRUE(prefill_queue_.empty());
+  ASSERT_EQ(running_sequences_.size(), 1u);
+  EXPECT_EQ(request->sequences().front()->dp_rank(), 0);
+  EXPECT_EQ(running_sequence_budgets_, (std::vector<size_t>{8}));
+}
+
+TEST_F(PrefillDpAdmissionTest, PrefixHitEnablesShortFinalLinearChunk) {
+  engine_.set_linear_attention_layers();
+  state_.enable_prefix_cache = true;
+  cache_prefix(/*prompt_tokens=*/17, /*dp_rank=*/1);
+  budget_.dp_group_token_used = {8, 5};
+  auto request = enqueue(/*prompt_tokens=*/19);
+
+  schedule();
+
+  EXPECT_TRUE(prefill_queue_.empty());
+  ASSERT_EQ(running_sequences_.size(), 1u);
+  EXPECT_EQ(request->sequences().front()->dp_rank(), 1);
+  EXPECT_EQ(request->sequences().front()->kv_cache_tokens_num(), 16u);
+  EXPECT_EQ(running_sequence_budgets_, (std::vector<size_t>{3}));
+  EXPECT_EQ(budget_.dp_group_token_used, (std::vector<size_t>{8, 8}));
+}
+
+TEST_F(PrefillDpAdmissionTest, PrefixProbeWaitsForBoundRanksTokenQuota) {
+  state_.enable_prefix_cache = true;
+  cache_prefix(/*prompt_tokens=*/9);
+  budget_.dp_group_token_used = {8, 0};
+  auto request = enqueue(/*prompt_tokens=*/9, /*dp_rank=*/0);
+
+  schedule(/*chunked=*/false);
+
+  ASSERT_EQ(prefill_queue_.size(), 1u);
+  EXPECT_EQ(prefill_queue_.top(), request);
+  EXPECT_TRUE(running_requests_.empty());
+  EXPECT_TRUE(running_sequences_.empty());
+  EXPECT_EQ(request->sequences().front()->dp_rank(), 0);
+  EXPECT_EQ(request->sequences().front()->kv_cache_tokens_num(), 0u);
+  EXPECT_FALSE(request->sequences().front()->has_any_blocks());
+}
+
+TEST_F(PrefillDpAdmissionTest, PrefixHitPreservesFreshRequestFootprintGate) {
+  state_.enable_prefix_cache = true;
+  cache_prefix(/*prompt_tokens=*/9);
+  budget_.dp_group_token_caps = {16, 16};
+  reserved_full_footprint_[0] =
+      engine_.block_manager_pool()->admission_capacity(/*dp_rank=*/0) - 2;
+  auto admitted = enqueue(/*prompt_tokens=*/8, /*dp_rank=*/0);
+  auto waiting = enqueue(/*prompt_tokens=*/9, /*dp_rank=*/0);
+
+  schedule();
+
+  ASSERT_EQ(running_requests_.size(), 1u);
+  EXPECT_EQ(running_requests_.front(), admitted);
+  ASSERT_EQ(prefill_queue_.size(), 1u);
+  EXPECT_EQ(prefill_queue_.top(), waiting);
+  EXPECT_EQ(waiting->sequences().front()->kv_cache_tokens_num(), 8u);
+  EXPECT_EQ(reserved_full_footprint_[0],
+            engine_.block_manager_pool()->admission_capacity(/*dp_rank=*/0));
+}
+
+TEST_F(PrefillDpAdmissionTest, DeferredRequestCommitsNoPartialBudgetCharges) {
+  budget_.dp_group_token_used = {0, 8};
+  auto request = enqueue(/*prompt_tokens=*/8, /*dp_rank=*/0, /*best_of=*/2);
+  ASSERT_EQ(request->sequences().size(), 2u);
+  request->sequences()[1]->set_dp_rank(/*dp_rank=*/1);
+
+  schedule();
+
+  ASSERT_EQ(prefill_queue_.size(), 1u);
+  EXPECT_EQ(prefill_queue_.top(), request);
+  EXPECT_TRUE(running_requests_.empty());
+  EXPECT_TRUE(running_sequences_.empty());
+  EXPECT_EQ(budget_.dp_group_token_used, (std::vector<size_t>{0, 8}));
+  EXPECT_EQ(budget_.remaining_token_budget, 16u);
+  EXPECT_EQ(budget_.remaining_seq_budget, 4u);
+
+  budget_.dp_group_token_used = {0, 0};
+  schedule();
+
+  EXPECT_TRUE(prefill_queue_.empty());
+  ASSERT_EQ(running_sequences_.size(), 2u);
+  EXPECT_EQ(budget_.dp_group_token_used, (std::vector<size_t>{8, 8}));
+  EXPECT_EQ(budget_.remaining_token_budget, 0u);
+}
+
+TEST_F(PrefillDpAdmissionTest, CountsMultiSequenceRequestOncePerRank) {
+  engine_.set_max_concurrent_prefills_per_dp(/*limit=*/2);
+  budget_.remaining_token_budget = 32;
+  budget_.dp_group_token_caps = {24, 24};
+  auto multiple = enqueue(/*prompt_tokens=*/8, /*dp_rank=*/0, /*best_of=*/2);
+  auto single = enqueue(/*prompt_tokens=*/8, /*dp_rank=*/0);
+
+  schedule();
+
+  EXPECT_TRUE(prefill_queue_.empty());
+  ASSERT_EQ(running_requests_.size(), 2u);
+  EXPECT_EQ(running_requests_[0], multiple);
+  EXPECT_EQ(running_requests_[1], single);
+  ASSERT_EQ(running_sequences_.size(), 3u);
+  EXPECT_EQ(budget_.dp_group_token_used, (std::vector<size_t>{24, 0}));
+  EXPECT_EQ(budget_.remaining_token_budget, 8u);
+}
 
 // TEST-1:
 // Three independent prefill requests, according to the configs,
@@ -637,6 +1148,194 @@ TEST(SchedulerPolicyTest, NonChunkedPrefillAssignsDpBeforeFairBudget) {
   EXPECT_EQ(scheduled_sequences, 2u);
 }
 
+TEST(SchedulerPolicyTest, FairTokenBudgetFiltersRankBeforePlacement) {
+  ScopedConfigValue<bool> chunk_guard(
+      SchedulerConfig::get_instance().enable_chunked_prefill(),
+      /*new_value=*/true);
+  ScopedConfigValue<bool> mix_guard(
+      SchedulerConfig::get_instance().enable_mix_batch(), /*new_value=*/false);
+  for (bool fair_budget : {false, true}) {
+    ScopedConfigValue<bool> fair_guard(
+        SchedulerConfig::get_instance().enable_dp_fair_token_budget(),
+        fair_budget);
+    SchedulerOptions options = create_scheduler_options(
+        /*max_tokens_per_batch=*/16,
+        /*max_seqs_per_batch=*/4,
+        /*num_speculative_tokens=*/0,
+        /*max_tokens_per_chunk_for_prefill=*/8,
+        /*dp_size=*/2);
+    options.enable_chunked_prefill() = true;
+    options.enable_disagg_pd() = true;
+    options.instance_role() = InstanceRole::PREFILL;
+    auto engine = std::make_unique<FakeEngine>(
+        /*num_blocks=*/32,
+        /*block_size=*/4,
+        /*enable_prefix_cache=*/false,
+        /*dp_size=*/2);
+    auto blocker =
+        generate_request(
+            {16}, {1}, std::nullopt, std::nullopt, /*max_context_len=*/128)
+            .front();
+    blocker->sequences().front()->set_dp_rank(/*dp_rank=*/1);
+    ASSERT_TRUE(engine->block_manager_pool()->allocate(
+        blocker->sequences().front().get()));
+    auto scheduler =
+        std::make_unique<TestableContinuousScheduler>(engine.get(), options);
+    auto requests = generate_request(
+        {8, 8}, {1, 1}, std::nullopt, std::nullopt, /*max_context_len=*/128);
+    requests[0]->sequences().front()->set_dp_rank(/*dp_rank=*/0);
+    for (auto& request : requests) {
+      scheduler->add_request(request);
+    }
+
+    BatchGroup batches = scheduler->prepare_batch_test();
+
+    ASSERT_EQ(batches.size(), 2u);
+    const int32_t expected_rank = fair_budget ? 1 : 0;
+    EXPECT_EQ(requests[1]->sequences().front()->dp_rank(), expected_rank);
+    EXPECT_EQ(batches[0].size(), fair_budget ? 1u : 2u);
+    EXPECT_EQ(batches[1].size(), fair_budget ? 1u : 0u);
+    EXPECT_EQ(scheduler->get_running_requests().size(), 2u);
+    EXPECT_EQ(scheduler->get_running_sequences_budgets(),
+              (std::vector<size_t>{8, 8}));
+  }
+}
+
+TEST(SchedulerPolicyTest, ChunkedPrefillFiltersBusyRankBeforePlacement) {
+  ScopedConfigValue<bool> mix_guard(
+      SchedulerConfig::get_instance().enable_mix_batch(), false);
+  ScopedConfigValue<bool> chunk_guard(
+      SchedulerConfig::get_instance().enable_chunked_prefill(), true);
+  SchedulerOptions options = create_scheduler_options(
+      /*max_tokens_per_batch=*/32,
+      /*max_seqs_per_batch=*/2,
+      /*num_speculative_tokens=*/0,
+      /*max_tokens_per_chunk_for_prefill=*/8,
+      /*dp_size=*/2);
+  options.enable_chunked_prefill() = true;
+  options.enable_disagg_pd() = true;
+  options.instance_role() = InstanceRole::PREFILL;
+  auto engine = std::make_unique<FakeEngine>(
+      /*num_blocks=*/32,
+      /*block_size=*/4,
+      /*enable_prefix_cache=*/false,
+      /*dp_size=*/2);
+  engine->set_max_concurrent_prefills_per_dp(/*limit=*/1);
+  auto blocker =
+      generate_request({32}, {1}, std::nullopt, std::nullopt, 128).front();
+  blocker->sequences().front()->set_dp_rank(/*dp_rank=*/1);
+  ASSERT_TRUE(engine->block_manager_pool()->allocate(
+      blocker->sequences().front().get()));
+  auto scheduler =
+      std::make_unique<TestableContinuousScheduler>(engine.get(), options);
+  auto requests =
+      generate_request({8, 8}, {1, 1}, std::nullopt, std::nullopt, 128);
+  for (auto& request : requests) {
+    scheduler->add_request(request);
+  }
+  BatchGroup batches = scheduler->prepare_batch_test();
+  ASSERT_EQ(batches.size(), 2u);
+  EXPECT_EQ(batches[0].size(), 1u);
+  EXPECT_EQ(batches[1].size(), 1u);
+  EXPECT_EQ(requests[0]->sequences().front()->dp_rank(), 0);
+  EXPECT_EQ(requests[1]->sequences().front()->dp_rank(), 1);
+  engine->block_manager_pool()->deallocate(blocker.get());
+}
+
+TEST(SchedulerPolicyTest, ChunkedPrefillPreservesExplicitRankAtAdmission) {
+  ScopedConfigValue<bool> mix_guard(
+      SchedulerConfig::get_instance().enable_mix_batch(), false);
+  ScopedConfigValue<bool> chunk_guard(
+      SchedulerConfig::get_instance().enable_chunked_prefill(), true);
+  SchedulerOptions options = create_scheduler_options(
+      /*max_tokens_per_batch=*/16,
+      /*max_seqs_per_batch=*/2,
+      /*num_speculative_tokens=*/0,
+      /*max_tokens_per_chunk_for_prefill=*/8,
+      /*dp_size=*/2);
+  options.enable_chunked_prefill() = true;
+  auto engine = std::make_unique<FakeEngine>(
+      /*num_blocks=*/32,
+      /*block_size=*/4,
+      /*enable_prefix_cache=*/false,
+      /*dp_size=*/2);
+  auto scheduler =
+      std::make_unique<TestableContinuousScheduler>(engine.get(), options);
+  auto request =
+      generate_request({8}, {1}, std::nullopt, std::nullopt, 128).front();
+  request->sequences().front()->set_dp_rank(/*dp_rank=*/1);
+  scheduler->add_request(request);
+  BatchGroup batches = scheduler->prepare_batch_test();
+  EXPECT_TRUE(batches[0].empty());
+  EXPECT_EQ(batches[1].size(), 1u);
+  EXPECT_EQ(request->sequences().front()->dp_rank(), 1);
+}
+
+TEST(SchedulerPolicyTest, BudgetMissDoesNotBindAnUnallocatedRequest) {
+  ScopedConfigValue<bool> mix_guard(
+      SchedulerConfig::get_instance().enable_mix_batch(), false);
+  ScopedConfigValue<bool> chunk_guard(
+      SchedulerConfig::get_instance().enable_chunked_prefill(), false);
+  SchedulerOptions options = create_scheduler_options(
+      /*max_tokens_per_batch=*/4,
+      /*max_seqs_per_batch=*/2,
+      /*num_speculative_tokens=*/0,
+      /*max_tokens_per_chunk_for_prefill=*/8,
+      /*dp_size=*/2);
+  options.enable_chunked_prefill() = false;
+  auto engine = std::make_unique<FakeEngine>(
+      /*num_blocks=*/32,
+      /*block_size=*/4,
+      /*enable_prefix_cache=*/false,
+      /*dp_size=*/2);
+  auto scheduler =
+      std::make_unique<TestableContinuousScheduler>(engine.get(), options);
+  auto request =
+      generate_request({8}, {1}, std::nullopt, std::nullopt, 128).front();
+  std::optional<Status> callback_status;
+  request->state().output_func =
+      [&callback_status](const RequestOutput& output) {
+        callback_status = output.status;
+        return true;
+      };
+  scheduler->add_request(request);
+  scheduler->prepare_batch_test();
+  scheduler->wait_for_responses();
+  ASSERT_TRUE(callback_status.has_value());
+  EXPECT_EQ(callback_status->code(), StatusCode::RESOURCE_EXHAUSTED);
+  EXPECT_EQ(request->sequences().front()->dp_rank(), -1);
+  EXPECT_FALSE(request->sequences().front()->has_any_blocks());
+}
+
+TEST_F(PrefillDpAdmissionTest, FullQuotaLimitDoesNotWaitForLargerGlobalBudget) {
+  state_.enable_prefix_cache = true;
+  budget_.remaining_token_budget = 32;
+  budget_.dp_group_token_caps = {16, 16};
+  RequestOutputDispatcher dispatcher(
+      engine_.tokenizer(),
+      /*enable_service_routing=*/false,
+      /*disable_log_stats=*/true,
+      [](std::shared_ptr<Request> /*request*/) {});
+  state_.output_dispatcher = &dispatcher;
+  auto request = enqueue(/*prompt_tokens=*/17);
+  std::optional<Status> callback_status;
+  request->state().output_func =
+      [&callback_status](const RequestOutput& output) {
+        callback_status = output.status;
+        return true;
+      };
+  schedule(/*chunked=*/false);
+  dispatcher.wait_completion();
+
+  ASSERT_TRUE(callback_status.has_value());
+  EXPECT_EQ(callback_status->code(), StatusCode::RESOURCE_EXHAUSTED);
+  EXPECT_EQ(request->sequences().front()->dp_rank(), -1);
+  EXPECT_FALSE(request->sequences().front()->has_any_blocks());
+  EXPECT_TRUE(prefill_queue_.empty());
+  EXPECT_TRUE(running_requests_.empty());
+  EXPECT_EQ(budget_.remaining_token_budget, 32u);
+}
+
 TEST(SchedulerPolicyTest, UnifiedPrefixHitIncludesScheduledSuffixCapacity) {
   ScopedConfigValue<bool> mix_batch_guard(
       SchedulerConfig::get_instance().enable_mix_batch(), true);
@@ -703,6 +1402,7 @@ TEST(SchedulerPolicyTest, LinearPrefillPlanningAlignsAfterPartialBudget) {
   std::vector<size_t> running_sequence_budgets;
   bool last_step_prefill = false;
   const ModelArgs& model_args = engine.model_args();
+  DpRankSelector dp_rank_selector;
   SchedulerState state{
       .prefill_queue = prefill_queue,
       .chunk_queue = chunk_queue,
@@ -713,6 +1413,7 @@ TEST(SchedulerPolicyTest, LinearPrefillPlanningAlignsAfterPartialBudget) {
       .running_sequences = running_sequences,
       .running_sequences_budgets = running_sequence_budgets,
       .kv_cache_manager = engine.block_manager_pool(),
+      .dp_rank_selector = dp_rank_selector,
       .profile_manager = nullptr,
       .output_dispatcher = nullptr,
       .model_args = model_args,
@@ -1011,6 +1712,7 @@ TEST(SchedulerPolicyTest, KvlessCompositeReprobesAfterPartialAllocation) {
   std::vector<size_t> running_sequence_budgets;
   bool last_step_prefill = false;
   ModelArgs model_args;
+  DpRankSelector dp_rank_selector;
   SchedulerState state{
       .prefill_queue = prefill_queue,
       .chunk_queue = chunk_queue,
@@ -1021,6 +1723,7 @@ TEST(SchedulerPolicyTest, KvlessCompositeReprobesAfterPartialAllocation) {
       .running_sequences = running_sequences,
       .running_sequences_budgets = running_sequence_budgets,
       .kv_cache_manager = &block_manager_pool,
+      .dp_rank_selector = dp_rank_selector,
       .profile_manager = nullptr,
       .output_dispatcher = nullptr,
       .model_args = model_args,
@@ -1075,6 +1778,7 @@ TEST(SchedulerPolicyTest, UnifiedRetryRefreshesHostRestoreBeforeChunkSizing) {
   std::vector<size_t> running_sequence_budgets;
   bool last_step_prefill = false;
   ModelArgs model_args;
+  DpRankSelector dp_rank_selector;
   SchedulerState state{
       .prefill_queue = prefill_queue,
       .chunk_queue = chunk_queue,
@@ -1085,6 +1789,7 @@ TEST(SchedulerPolicyTest, UnifiedRetryRefreshesHostRestoreBeforeChunkSizing) {
       .running_sequences = running_sequences,
       .running_sequences_budgets = running_sequence_budgets,
       .kv_cache_manager = &block_manager_pool,
+      .dp_rank_selector = dp_rank_selector,
       .profile_manager = &profile_manager,
       .output_dispatcher = nullptr,
       .model_args = model_args,
@@ -1161,6 +1866,7 @@ TEST(SchedulerPolicyTest, DecodeRestoreRetrySizesChunkAfterHostMatch) {
   std::vector<size_t> running_sequence_budgets;
   bool last_step_prefill = false;
   ModelArgs model_args;
+  DpRankSelector dp_rank_selector;
   SchedulerState state{
       .prefill_queue = prefill_queue,
       .chunk_queue = chunk_queue,
@@ -1171,6 +1877,7 @@ TEST(SchedulerPolicyTest, DecodeRestoreRetrySizesChunkAfterHostMatch) {
       .running_sequences = running_sequences,
       .running_sequences_budgets = running_sequence_budgets,
       .kv_cache_manager = &block_manager_pool,
+      .dp_rank_selector = dp_rank_selector,
       .profile_manager = nullptr,
       .output_dispatcher = nullptr,
       .model_args = model_args,
@@ -1260,6 +1967,7 @@ TEST_P(AsyncBlockReleasePolicyTest, WaitsWithoutPreemptionThenRetries) {
   bool last_step_prefill = false;
   ModelArgs model_args;
   model_args.layer_types({"linear_attention"});
+  DpRankSelector dp_rank_selector;
   SchedulerState state{
       .prefill_queue = prefill_queue,
       .chunk_queue = chunk_queue,
@@ -1270,6 +1978,7 @@ TEST_P(AsyncBlockReleasePolicyTest, WaitsWithoutPreemptionThenRetries) {
       .running_sequences = running_sequences,
       .running_sequences_budgets = running_sequence_budgets,
       .kv_cache_manager = &block_manager_pool,
+      .dp_rank_selector = dp_rank_selector,
       .profile_manager = &profile_manager,
       .output_dispatcher = nullptr,
       .model_args = model_args,
@@ -1344,6 +2053,7 @@ TEST(SchedulerPolicyTest, DefersWhileAsyncBlockReleaseIsPending) {
   std::vector<size_t> running_sequence_budgets;
   bool last_step_prefill = false;
   ModelArgs model_args;
+  DpRankSelector dp_rank_selector;
   SchedulerState state{
       .prefill_queue = prefill_queue,
       .chunk_queue = chunk_queue,
@@ -1354,6 +2064,7 @@ TEST(SchedulerPolicyTest, DefersWhileAsyncBlockReleaseIsPending) {
       .running_sequences = running_sequences,
       .running_sequences_budgets = running_sequence_budgets,
       .kv_cache_manager = &block_manager_pool,
+      .dp_rank_selector = dp_rank_selector,
       .profile_manager = &profile_manager,
       .output_dispatcher = nullptr,
       .model_args = model_args,
@@ -1441,6 +2152,7 @@ TEST(SchedulerPolicyTest,
   std::vector<size_t> running_sequence_budgets;
   bool last_step_prefill = false;
   ModelArgs model_args;
+  DpRankSelector dp_rank_selector;
   SchedulerState state{
       .prefill_queue = prefill_queue,
       .chunk_queue = chunk_queue,
@@ -1451,6 +2163,7 @@ TEST(SchedulerPolicyTest,
       .running_sequences = running_sequences,
       .running_sequences_budgets = running_sequence_budgets,
       .kv_cache_manager = &block_manager_pool,
+      .dp_rank_selector = dp_rank_selector,
       .profile_manager = nullptr,
       .output_dispatcher = nullptr,
       .model_args = model_args,
@@ -1533,6 +2246,7 @@ TEST(SchedulerPolicyTest, PendingDecodeReleaseStopsFurtherPreemption) {
   std::vector<size_t> running_sequence_budgets;
   bool last_step_prefill = false;
   ModelArgs model_args;
+  DpRankSelector dp_rank_selector;
   SchedulerState state{
       .prefill_queue = prefill_queue,
       .chunk_queue = chunk_queue,
@@ -1543,6 +2257,7 @@ TEST(SchedulerPolicyTest, PendingDecodeReleaseStopsFurtherPreemption) {
       .running_sequences = running_sequences,
       .running_sequences_budgets = running_sequence_budgets,
       .kv_cache_manager = &block_manager_pool,
+      .dp_rank_selector = dp_rank_selector,
       .profile_manager = nullptr,
       .output_dispatcher = nullptr,
       .model_args = model_args,
@@ -1655,6 +2370,7 @@ TEST(SchedulerPolicyTest, RetriesBlockedDecodeBeforeRestoringVictim) {
   std::vector<size_t> running_sequence_budgets;
   bool last_step_prefill = false;
   ModelArgs model_args;
+  DpRankSelector dp_rank_selector;
   SchedulerState state{
       .prefill_queue = prefill_queue,
       .chunk_queue = chunk_queue,
@@ -1665,6 +2381,7 @@ TEST(SchedulerPolicyTest, RetriesBlockedDecodeBeforeRestoringVictim) {
       .running_sequences = running_sequences,
       .running_sequences_budgets = running_sequence_budgets,
       .kv_cache_manager = &block_manager_pool,
+      .dp_rank_selector = dp_rank_selector,
       .profile_manager = nullptr,
       .output_dispatcher = nullptr,
       .model_args = model_args,
@@ -1756,6 +2473,7 @@ TEST(SchedulerPolicyTest,
   std::vector<size_t> running_sequence_budgets;
   bool last_step_prefill = false;
   ModelArgs model_args;
+  DpRankSelector dp_rank_selector;
   SchedulerState state{
       .prefill_queue = prefill_queue,
       .chunk_queue = chunk_queue,
@@ -1766,6 +2484,7 @@ TEST(SchedulerPolicyTest,
       .running_sequences = running_sequences,
       .running_sequences_budgets = running_sequence_budgets,
       .kv_cache_manager = &block_manager_pool,
+      .dp_rank_selector = dp_rank_selector,
       .profile_manager = nullptr,
       .output_dispatcher = nullptr,
       .model_args = model_args,
@@ -2421,6 +3140,7 @@ TEST(SchedulerPolicyTest, FcfsDecodeHandoffAndTerminalCleanup) {
   std::vector<size_t> running_sequence_budgets;
   bool last_step_prefill = false;
   ModelArgs model_args;
+  DpRankSelector dp_rank_selector;
   SchedulerState state{
       .prefill_queue = prefill_queue,
       .chunk_queue = chunk_queue,
@@ -2431,6 +3151,7 @@ TEST(SchedulerPolicyTest, FcfsDecodeHandoffAndTerminalCleanup) {
       .running_sequences = running_sequences,
       .running_sequences_budgets = running_sequence_budgets,
       .kv_cache_manager = &block_manager_pool,
+      .dp_rank_selector = dp_rank_selector,
       .profile_manager = nullptr,
       .output_dispatcher = nullptr,
       .model_args = model_args,

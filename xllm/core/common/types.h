@@ -16,6 +16,7 @@ limitations under the License.
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -293,6 +294,12 @@ struct InstanceInfo {
     json_val["model_weight_segments"] = segments_json;
     return json_val;
   }
+};
+
+// Advisory resource snapshots; allocation still validates live capacity.
+struct DpRankLoad {
+  size_t admission_capacity = 0;
+  size_t used_blocks = 0;
 };
 
 // Per-layer KV cache byte offsets in GlobalVirtualMemoryRegion's physical-page

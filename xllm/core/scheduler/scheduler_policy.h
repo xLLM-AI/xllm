@@ -58,6 +58,7 @@ struct SchedulerState {
 
   // Infrastructure.
   KVCacheManager* kv_cache_manager;
+  DpRankSelector& dp_rank_selector;
   ProfileManager* profile_manager;
   RequestOutputDispatcher* output_dispatcher;
   const ModelArgs& model_args;
@@ -155,18 +156,31 @@ class SchedulerPolicy {
       const SchedulerState& state);
 
   // ===== Prefill scheduling =====
+  enum class PrefillPlacementStatus : int8_t {
+    READY,
+    DEFERRED,
+    BUDGET_EXHAUSTED,
+  };
+
+  struct PrefillPlacement {
+    PrefillPlacementStatus status = PrefillPlacementStatus::DEFERRED;
+    int32_t dp_rank = -1;
+    size_t num_tokens = 0;
+  };
+
   void schedule_prefill_from_queue(
       RequestPriorityQueue* queue,
       SchedulerState& state,
       ScheduleBudget& budget,
       std::vector<std::shared_ptr<Request>>& finished,
       std::vector<size_t>& reserved_full_footprint);
-  int32_t select_prefill_dp_rank(const Sequence* sequence,
-                                 const SchedulerState& state) const;
-  bool should_limit_prefill_requests(const SchedulerState& state) const;
+  // Selects a rank and prepares shared-cache matches without charging budget.
+  PrefillPlacement prepare_prefill_placement(Sequence* sequence,
+                                             SchedulerState& state,
+                                             const ScheduleBudget& budget);
   size_t compute_prefill_tokens(Sequence* seq,
                                 size_t remaining_budget,
-                                const SchedulerState& state);
+                                const SchedulerState& state) const;
   bool allocate_for_prefill(Sequence* seq,
                             size_t token_budget,
                             size_t* actual_tokens,

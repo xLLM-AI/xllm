@@ -149,7 +149,7 @@ VMM 的使用方式和容量配置说明见[KV Cache 与模型权重的虚拟内
 | `aggressive_coeff` | `double` | `1.0` | MixScheduler 紧急度判断的激进系数。 |
 | `starve_threshold` | `double` | `1.0` | MixScheduler 的饥饿阈值系数。 |
 | `enable_starve_prevent` | `bool` | `true` | 是否启用 MixScheduler 的防饥饿机制。 |
-| `enable_dp_fair_token_budget` | `bool` | `true` | 是否在 PD 分离的 PREFILL 实例上把每个 DP group 每轮调度的 token 数限制为 `max_tokens_per_batch / dp_size`（下限为一个 prefill chunk）。 |
+| `enable_dp_fair_token_budget` | `bool` | `true` | 仅在 PREFILL 实例且 DP > 1 时生效。Chunked Prefill 每组每轮上限为 `ceil(max_tokens_per_batch / dp_size)`（下限为一个 prefill chunk）；非 Chunked 时每组上限为 `max_tokens_per_batch`。选择 rank 时检查剩余配额；已有绑定的请求在原 rank 配额不足时等待。 |
 | `request_queue_size` | `int32` | `100000` | 调度器请求队列容量；队列满时新到的请求会在准入阶段被拒绝。 |
 
 ## ParallelConfig
@@ -168,7 +168,7 @@ VMM 的使用方式和容量配置说明见[KV Cache 与模型权重的虚拟内
 | `enable_mm_encoder_dp` | `bool` | `false` | 是否为多模态模型启用 encoder data parallel。 |
 | `enable_multi_stream_parallel` | `bool` | `false` | 是否在 prefill 阶段通过双 stream 和双 micro batch 启用计算通信并行；详见 [多流并行](/zh/features/multi_streams/)。 |
 | `micro_batch_num` | `int32` | `1` | 多流并行使用的 micro batch 数。 |
-| `enable_dp_balance` | `bool` | `false` | 是否启用 DP 负载均衡；启用后会 shuffle 单个 DP batch 内的 sequences。 |
+| `enable_dp_balance` | `bool` | `false` | 为自定义 24 核 NPU MLA kernel 重排单个 DP batch 内的序列；要求开启 `enable_customize_mla_kernel` 且序列数大于 24，不负责选择 DP rank。 |
 
 ## EPLBConfig
 

@@ -17,6 +17,7 @@ cc_library(
     draft_step_startup_calibration.cpp
     time_predictor.cpp
   DEPS
+    :dp_rank_selector
     :batch
     :distributed_runtime
     :request

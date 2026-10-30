@@ -1382,7 +1382,19 @@ bool DisaggPDScheduler::try_allocate(Sequence* sequence) {
   if (kv_cache_manager_->kv_cache_utilization() <
       ::xllm::SchedulerConfig::get_instance()
           .prefill_scheduling_memory_usage_threshold()) {
-    return kv_cache_manager_->try_allocate(sequence);
+    const int32_t original_rank = sequence->dp_rank();
+    if (original_rank < 0) {
+      sequence->set_dp_rank(
+          dp_rank_selector_.select(kv_cache_manager_->dp_rank_loads()));
+      CHECK_GE(sequence->dp_rank(), 0);
+    }
+    if (kv_cache_manager_->try_allocate(sequence)) {
+      return true;
+    }
+    if (!sequence->has_any_blocks()) {
+      sequence->set_dp_rank(original_rank);
+    }
+    return false;
   } else {
     return false;
   }

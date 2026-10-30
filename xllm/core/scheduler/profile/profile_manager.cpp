@@ -777,6 +777,10 @@ std::shared_ptr<Request> ProfileManager::generate_single_request(
     CHECK_GE(*dp_rank, 0);
     CHECK_LT(*dp_rank, options_.dp_size());
     request->sequences()[0]->set_dp_rank(*dp_rank);
+  } else {
+    request->sequences()[0]->set_dp_rank(
+        dp_rank_selector_.select(block_manager_pool_->dp_rank_loads()));
+    CHECK_GE(request->sequences()[0]->dp_rank(), 0);
   }
 
   // TODO: better disable prefix cache
@@ -864,6 +868,10 @@ std::shared_ptr<Request> ProfileManager::try_generate_single_decode_request(
     CHECK_GE(dp_rank.value(), 0);
     CHECK_LT(dp_rank.value(), options_.dp_size());
     sequence->set_dp_rank(dp_rank.value());
+  } else {
+    sequence->set_dp_rank(
+        dp_rank_selector_.select(block_manager_pool_->dp_rank_loads()));
+    CHECK_GE(sequence->dp_rank(), 0);
   }
   if (!block_manager_pool_->BlockManagerPool::allocate(sequence,
                                                        seq_capacity)) {

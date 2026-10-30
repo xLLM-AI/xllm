@@ -141,57 +141,28 @@ BlockManagerPool::BlockManagerPool(const Options& options,
   swap_block_transfer_infos_.resize(block_managers_.size());
 }
 
-int32_t BlockManagerPool::get_manager_with_max_available_blocks() const {
-  if (block_managers_.empty()) {
-    return 0;
-  }
-
-  // Prefix-cache entries consume physical free blocks but remain evictable.
-  // Rank by admissible headroom so an idle prefix cache remains evictable and
-  // an empty virtual arena without live physical headroom is not preferred.
-  size_t max_available = 0;
-  std::vector<size_t> candidate_indices;
-  candidate_indices.reserve(block_managers_.size());
+std::vector<DpRankLoad> BlockManagerPool::dp_rank_loads() const {
+  // Evictable prefix blocks remain admissible. Virtual address capacity alone
+  // is not physical headroom, so use the adapter's live admission capacity.
+  std::vector<DpRankLoad> loads;
+  loads.reserve(block_managers_.size());
   for (size_t i = 0; i < block_managers_.size(); ++i) {
-    const size_t total_blocks = block_managers_[i]->admission_capacity();
-    const size_t used_blocks = block_managers_[i]->num_used_blocks();
-    // Capacity and usage are advisory snapshots from separate calls. A
-    // concurrent allocation can consume headroom between the two reads.
-    const size_t available_blocks =
-        total_blocks > used_blocks ? total_blocks - used_blocks : 0;
-    if (candidate_indices.empty() || available_blocks > max_available) {
-      max_available = available_blocks;
-      candidate_indices.clear();
-      candidate_indices.emplace_back(i);
-    } else if (available_blocks == max_available) {
-      candidate_indices.emplace_back(i);
-    }
+    loads.emplace_back(DpRankLoad{admission_capacity(static_cast<int32_t>(i)),
+                                  block_managers_[i]->num_used_blocks()});
   }
-
-  CHECK(!candidate_indices.empty());
-  if (candidate_indices.size() == 1) {
-    return static_cast<int32_t>(candidate_indices.front());
-  }
-  // A fixed first-match tie break concentrates requests on DP 0 when every
-  // group's physical pool is full. Rotate equal candidates to spread admission.
-  const size_t candidate_offset =
-      dp_selection_cursor_.fetch_add(1, std::memory_order_relaxed) %
-      candidate_indices.size();
-  return static_cast<int32_t>(candidate_indices[candidate_offset]);
-}
-
-int32_t BlockManagerPool::select_dp_rank() const {
-  return get_manager_with_max_available_blocks();
+  return loads;
 }
 
 int32_t BlockManagerPool::get_dp_rank(Sequence* sequence) const {
-  int32_t dp_rank;
-  if (sequence->dp_rank() >= 0) {
-    dp_rank = sequence->dp_rank();
-  } else {
-    dp_rank = get_manager_with_max_available_blocks();
-    sequence->set_dp_rank(dp_rank);
+  CHECK(sequence != nullptr);
+  // A single-rank cache has no placement decision. Multi-rank callers must
+  // bind on the scheduler side before matching prefixes or allocating blocks.
+  if (sequence->dp_rank() < 0 && block_managers_.size() == 1) {
+    sequence->set_dp_rank(/*dp_rank=*/0);
   }
+  const int32_t dp_rank = sequence->dp_rank();
+  CHECK_GE(dp_rank, 0) << "Assign a DP rank before cache operations";
+  CHECK_LT(static_cast<size_t>(dp_rank), block_managers_.size());
   return dp_rank;
 }
 
@@ -210,6 +181,10 @@ void BlockManagerPool::deallocate(std::vector<Sequence*>& sequences) {
 
 void BlockManagerPool::deallocate(Sequence* sequence) {
   DCHECK(sequence != nullptr);
+  if (sequence->dp_rank() < 0 && !sequence->has_any_blocks()) {
+    sequence->reset();
+    return;
+  }
   int32_t dp_rank = get_dp_rank(sequence);
   // The composite fans deallocate (with final cache) out across all leaves,
   // including the EMBEDDING resource leaf, the LINEAR leaf, and the (flat or
@@ -409,8 +384,9 @@ bool BlockManagerPool::exceeds_total_capacity(
 }
 
 std::vector<Block> BlockManagerPool::allocate(size_t num_tokens,
-                                              int32_t& dp_rank) {
-  dp_rank = get_manager_with_max_available_blocks();
+                                              int32_t dp_rank) {
+  CHECK_GE(dp_rank, 0);
+  CHECK_LT(static_cast<size_t>(dp_rank), block_managers_.size());
   const size_t block_size = options_.block_size();
   const size_t num_blocks_needed = (num_tokens + block_size - 1) / block_size;
   // block_managers_[dp_rank] is always a CompositeBlockManager, whose
@@ -582,6 +558,10 @@ double BlockManagerPool::kv_cache_utilization() const {
 // If more often used in the future, can be integrated into deallocate function.
 void BlockManagerPool::deallocate_without_cache(Sequence* sequence) {
   DCHECK(sequence != nullptr);
+  if (sequence->dp_rank() < 0 && !sequence->has_any_blocks()) {
+    sequence->reset();
+    return;
+  }
   int32_t dp_rank = get_dp_rank(sequence);
   // Release every leaf's blocks directly (no prefix-cache final flush). Routing
   // by Block::manager() inside composite::deallocate dispatches each block to

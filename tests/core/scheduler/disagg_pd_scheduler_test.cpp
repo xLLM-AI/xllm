@@ -1681,6 +1681,7 @@ TEST_F(ReservationTest, ReleasePreservesValidPrefixOnly) {
   auto* pool = engine_.block_manager_pool();
   auto seed = make_request({1, 2, 3, 4}, "seed");
   auto* seq = seed->sequences()[0].get();
+  seq->set_dp_rank(/*dp_rank=*/0);
   ASSERT_TRUE(pool->allocate(seq));
   const int32_t dp_rank = seq->dp_rank();
   finish_prefill(seq);
@@ -1710,6 +1711,7 @@ TEST_F(ReservationTest, RejectedAllocationRollsBackWithoutReservation) {
   const auto free_before = pool->num_free_blocks();
   auto rejected = make_request(std::vector<int32_t>(40, 1));
   EXPECT_FALSE(decode_.try_allocate(rejected->sequences()[0].get()));
+  EXPECT_EQ(rejected->sequences()[0]->dp_rank(), -1);
   EXPECT_EQ(pool->num_free_blocks(), free_before);
   EXPECT_EQ(pool->num_used_blocks(), (std::vector<size_t>{0, 0}));
   EXPECT_EQ(rejected->sequences()[0]->get_embedding_block_id(), -1);
