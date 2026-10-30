@@ -96,19 +96,8 @@ bool configure_bundled_npu_ops() {
 // All NPU processes go through this path for consistency — the build system
 // links against the pip-installed torch_npu .so directly.
 // The caller owns the interpreter and holds the GIL during initialization.
-void init_npu_python_runtime() {
-  // Select the same logical device this process's worker will run on. Multi-
-  // process single-card serving lets every process see all TP cards and picks
-  // its own via node_rank (see Master ctor). Using .front() here would pin an
-  // extra context on logical device 0 for every node_rank != 0 process, piling
-  // small allocations onto die0. Mirror master.cpp's get_device_idx instead.
-  const auto& distributed_config = DistributedConfig::get_instance();
-  const int32_t visible_device_count =
-      DeviceNameUtils::parse_devices("auto").size();
-  const int32_t device_index =
-      DeviceNameUtils::get_device_idx(distributed_config.node_rank(),
-                                      distributed_config.nnodes(),
-                                      visible_device_count);
+void init_npu_python_runtime(int32_t device_index) {
+  CHECK_GE(device_index, 0);
 
   // Register fla_npu's embedded AscendC opapi (libcust_opapi) + OPP vendor
   // dir before aclInit. The KDA forward op (aclnnChunkKdaFwd) and its kernels
@@ -650,7 +639,7 @@ class VendorConfigLock {
 };
 }  // namespace
 
-bool initialize_npu_startup() {
+bool initialize_npu_startup(std::optional<int32_t> device_index) {
   if (!configure_bundled_npu_ops()) {
     return false;
   }
@@ -663,7 +652,17 @@ bool initialize_npu_startup() {
                   "skip automatic vendor configuration";
     return false;
   }
-  init_npu_python_runtime();
+  if (!device_index.has_value()) {
+    // Match the serving worker's logical device before creating any context.
+    const auto& distributed_config = DistributedConfig::get_instance();
+    const int32_t visible_device_count =
+        DeviceNameUtils::parse_devices("auto").size();
+    device_index =
+        DeviceNameUtils::get_device_idx(distributed_config.node_rank(),
+                                        distributed_config.nnodes(),
+                                        visible_device_count);
+  }
+  init_npu_python_runtime(*device_index);
   return true;
 }
 
