@@ -729,6 +729,7 @@ class TestModelExecutorConstruction:
             enable_graph_mode_decode_no_padding=False,
             spec_verify_width=1,
             device_kv_lengths=False,
+            max_capture_tokens=None,
         )
 
     @patch("xllm.python.model_executor.runners.decode_acl_graph.DecodeAclGraphRunner")
@@ -752,6 +753,26 @@ class TestModelExecutorConstruction:
         )
 
         assert mock_graph_runner.call_args.kwargs["enable_mega_moe_token_mask"] is True
+
+    @pytest.mark.parametrize("limit", [0, None])
+    @patch("xllm.python.model_executor.runners.decode_acl_graph.DecodeAclGraphRunner")
+    @patch("xllm.python.model_executor.executor._create_attention_backend")
+    def test_graph_runner_receives_model_capture_token_limit(self, mock_create, mock_graph_runner, limit: int | None):
+        mock_create.return_value = StubAttentionBackend()
+        model = _FakeModel(num_layers=1)
+        model.model.graph_capture_token_limit = limit
+
+        ModelExecutor(
+            model,
+            {
+                "model_type": "glm5_next",
+                "max_position_embeddings": 128,
+                "python_graph_backend": "aclgraph",
+            },
+            max_seqs_per_batch=128,
+        )
+
+        assert mock_graph_runner.call_args.kwargs["max_capture_tokens"] == limit
 
     @patch("xllm.python.model_executor.runners.decode_acl_graph.DecodeAclGraphRunner")
     @patch("xllm.python.model_executor.executor._create_attention_backend")
@@ -791,6 +812,7 @@ class TestModelExecutorConstruction:
             enable_graph_mode_decode_no_padding=False,
             spec_verify_width=1,
             device_kv_lengths=False,
+            max_capture_tokens=None,
         )
 
 

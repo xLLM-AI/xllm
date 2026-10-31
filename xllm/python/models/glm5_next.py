@@ -409,19 +409,15 @@ class Glm5NextConfig:
             raise ValueError("GLM EPLv2 requires EP > 1")
         if self.enable_eplb:
             raise ValueError("GLM EPLv2 does not support EPLB")
-        if self.layers_to_capture:
-            raise ValueError("GLM EPLv2 does not support auxiliary hidden capture (layers_to_capture)")
         if not math.isfinite(self.swiglu_limit) or self.swiglu_limit <= 0:
             raise ValueError("GLM EPLv2 requires a finite positive SwiGLU clamp limit")
-        if self.cp_size != 1 or self.num_speculative_tokens != 0:
-            raise ValueError("GLM EPLv2 currently requires CP1 and MTP0")
         if self.moe_tp_size != 1 or self.moe_tp_rank != 0:
             raise ValueError("GLM EPLv2 requires unsharded local experts (MoE-TP1)")
         if (self.ep_size, self.ep_rank) != (
-            self.dp_size * self.tp_size,
-            self.dp_rank * self.tp_size + self.tp_rank,
+            self.dp_size * self.cp_size * self.tp_size,
+            (self.dp_rank * self.cp_size + self.cp_rank) * self.tp_size + self.tp_rank,
         ):
-            raise ValueError("GLM EPLv2 requires EP over all DP/attention-TP ranks with MoE-TP1")
+            raise ValueError("GLM EPLv2 requires EP over all DP/CP/attention-TP ranks with MoE-TP1")
 
     def _resolve_schedules(self, full_attn_layers: list, d: dict) -> None:
         n = self.n_layers
@@ -610,8 +606,6 @@ class Glm5NextKdaAttention(Attention):
                 "Glm5NextKdaAttention requires an attention backend with execute_linear; run inside the engine."
             )
         cp_context = getattr(ctx, "cp_context", None)
-        if cp_context is not None and output_layout is not None:
-            raise ValueError("GLM EPLv2 SP attention currently requires CP1")
         if cp_context is not None:
             mixed_qkv = cp_merge_rows(mixed_qkv.transpose(1, 2).reshape(-1, self.conv_dim), cp_context)
             mixed_qkv = mixed_qkv.unsqueeze(0).transpose(1, 2).contiguous()
@@ -643,6 +637,8 @@ class Glm5NextKdaAttention(Attention):
         # o_proj). At tp==1 this is a no-op.
         o = self.o_proj(output)
         if output_layout is not None:
+            if cp_context is not None:
+                o = cp_zero_fill_local_rows(o, cp_context, leading_seq_dim=True)
             return output_layout.reduce_scatter(o.reshape(-1, self.cfg.hidden_size)).unsqueeze(0)
         if self.tp > 1:
             distributed.all_reduce_(o)
@@ -1569,8 +1565,6 @@ class Glm5NextMlaAttention(Attention):
         """
         forward_context = get_forward_context()
         cp_context = getattr(forward_context, "cp_context", None)
-        if cp_context is not None and output_layout is not None:
-            raise ValueError("GLM EPLv2 SP attention currently requires CP1")
         if cp_context is not None:
             hidden_states = cp_merge_rows(
                 hidden_states.reshape(-1, self.hidden_size),
@@ -1637,13 +1631,18 @@ class Glm5NextMlaAttention(Attention):
         v_full = torch.bmm(attn_out.transpose(0, 1), self.W_UV).transpose(0, 1)
         v_full = v_full.reshape(attn_out.shape[0], self.num_heads_local * self.v_head_dim)
         o = self.o_proj(v_full)
+        if cp_context is not None:
+            topk = cp_shard_rows(topk.reshape(num_tokens, -1), cp_context).view(cp_context.total_local, 1, -1)
         if output_layout is not None:
+            # Zero before reduce-scatter; the all-reduce path must zero after
+            # it because the reduction writes padding rows.
+            if cp_context is not None:
+                o = cp_zero_fill_local_rows(o, cp_context, leading_seq_dim=False)
             return output_layout.reduce_scatter(o), topk
         if self.cfg.tp_size > 1:
             distributed.all_reduce_(o)
         if cp_context is not None:
             o = cp_zero_fill_local_rows(o, cp_context, leading_seq_dim=False)
-            topk = cp_shard_rows(topk.reshape(num_tokens, -1), cp_context).view(cp_context.total_local, 1, -1)
         return o, topk
 
 
@@ -1843,26 +1842,55 @@ def _eplv2_token_layout(
     policy: Eplv2CommPolicy,
 ) -> tuple[TokenParallelLayout, torch.Tensor]:
     """Plan EP-wide communication from host counts, retaining TP-local rows."""
-    # Reject unsupported runtime modes before Attention or expert work.
     context = get_forward_context_or_none()
-    if getattr(context, "cp_context", None) is not None:
-        raise ValueError("GLM EPLv2 requires CP1 before entering attention or experts")
     metadata = context.metadata if context is not None else None
-    if metadata is not None:
-        expanded = getattr(metadata, "expanded_decode_metadata", None)
-        if metadata.is_spec_verify or (expanded is not None and getattr(expanded, "enabled", True)):
-            raise ValueError("GLM EPLv2 requires MTP0 before entering attention or experts")
     counts = getattr(metadata, "dp_execution_token_counts", None)
     rows = hidden.numel() // hidden.shape[-1]
-    layout = TokenParallelLayout.from_dp(rows, cfg.tp_size, cfg.tp_rank, cfg.dp_size, cfg.dp_rank, counts)
+    cp_context = getattr(context, "cp_context", None)
+    is_pcp_prefill = metadata is not None and (
+        getattr(metadata, "is_prefill", False) or getattr(metadata, "is_chunked_prefill", False)
+    )
+    is_dummy_pcp_rank = (
+        cp_context is None
+        and is_pcp_prefill
+        and cfg.cp_size > 1
+        and cfg.dp_size > 1
+        and bool(getattr(metadata, "is_dummy", False))
+    )
+    # InputBatch counts describe global (pre-PCP) rows while zigzag padding can
+    # make one local shard twice that size, so every DP rank must dispatch with
+    # one EP capacity.
+    dispatch_rows = None
+    if cfg.dp_size > 1 and (cp_context is not None or is_dummy_pcp_rank):
+        if counts is None or len(counts) != cfg.dp_size or any(count <= 0 for count in counts):
+            raise ValueError("DP/PCP EPLv2 requires positive global execution counts")
+        dispatch_rows = (2 * max(counts) + cfg.tp_size - 1) // cfg.tp_size
+    if cp_context is not None or is_dummy_pcp_rank:
+        if cp_context is not None and (
+            getattr(cp_context, "cp_size", None),
+            getattr(cp_context, "cp_rank", None),
+        ) != (cfg.cp_size, cfg.cp_rank):
+            raise ValueError("GLM EPLv2 PCP requires a matching prefill shard on every PCP rank")
+        layout = TokenParallelLayout(rows, cfg.tp_size, cfg.tp_rank, dispatch_rows=dispatch_rows)
+        mask = (
+            cp_context.shard_valid_mask
+            if cp_context is not None
+            else torch.zeros(rows, dtype=torch.bool, device=hidden.device)
+        )
+    else:
+        if is_pcp_prefill and cfg.cp_size > 1:
+            # A real prefill without a PCP shard would dispatch global rows that
+            # no other PCP rank agrees on.
+            raise ValueError("GLM EPLv2 PCP prefill requires a matching PCP shard")
+        layout = TokenParallelLayout.from_dp(rows, cfg.tp_size, cfg.tp_rank, cfg.dp_size, cfg.dp_rank, counts)
+        execution_metadata = get_execution_context(Glm5NextEplv2Metadata) if context is not None else None
+        if not isinstance(execution_metadata, Glm5NextEplv2Metadata):
+            raise ValueError("GLM EPLv2 requires typed execution metadata with a stable active-token mask")
+        mask = execution_metadata.local_token_mask
     graph = in_acl_graph() or getattr(context, "execution_state", None) is not None
     backend = policy.select(layout.dispatch_tokens, graph=graph)
-    execution_metadata = get_execution_context(Glm5NextEplv2Metadata) if context is not None else None
-    if not isinstance(execution_metadata, Glm5NextEplv2Metadata):
-        raise ValueError("GLM EPLv2 requires typed execution metadata with a stable active-token mask")
-    mask = execution_metadata.local_token_mask
     if mask.shape != (rows,) or mask.dtype != torch.bool or mask.device != hidden.device:
-        raise ValueError("GLM EPLv2 active-token mask must be a bool mask matching DP-local execution rows")
+        raise ValueError("GLM EPLv2 active-token mask must be a bool tensor over local execution rows")
     return replace(layout, routed_backend=backend), layout.shard(mask)
 
 
@@ -2437,6 +2465,11 @@ class Glm5NextModel(nn.Module):
                 cfg.eplv2_mc2_max_tokens_per_rank,
                 cfg.eplv2_comm_mode,
             )
+            # Only a capture whose per-TP-rank dispatch fits the MC2 HCCL window
+            # may be graphed; zero disables graph capture for this model.
+            self.graph_capture_token_limit = (
+                0 if self._comm_policy.mode == "alltoall" else self._comm_policy.mc2_capacity * cfg.tp_size
+            )
         else:
             self._comm_policy = None
         self.embed_tokens = HiddenParallelEmbedding(
@@ -2489,8 +2522,6 @@ class Glm5NextModel(nn.Module):
         is_eplv2 = getattr(self.cfg, "expert_parallel_degree", 0) == 2
         forward_context = get_forward_context_or_none() if is_eplv2 else get_forward_context()
         cp_context = getattr(forward_context, "cp_context", None)
-        if cp_context is not None and is_eplv2:
-            raise ValueError("GLM EPLv2 currently requires CP1 before entering attention")
         if cp_context is not None:
             hidden = cp_shard_rows(hidden.view(-1, self.cfg.hidden_size), cp_context).unsqueeze(0)
             position_ids = cp_shard_positions(position_ids.reshape(-1), cp_context).unsqueeze(0).contiguous()
@@ -2499,8 +2530,6 @@ class Glm5NextModel(nn.Module):
 
         token_layout = token_mask = None
         if is_eplv2:
-            if self.cfg.layers_to_capture:
-                raise ValueError("GLM EPLv2 does not support auxiliary hidden capture before entering attention")
             if self.cfg.eplv2_sequence_parallel and hidden.shape[0] != 1:
                 raise ValueError("GLM EPLv2 SP requires flattened engine input with batch dimension one")
             token_layout, token_mask = _eplv2_token_layout(self.cfg, hidden, self._comm_policy)
@@ -2530,9 +2559,12 @@ class Glm5NextModel(nn.Module):
                     token_mask=token_mask if output_layout is not None else None,
                 )
                 input_layout = output_layout
-            # EPLv2 rejects auxiliary capture before execution. Ordinary
-            # TP/EPLv1 retains main's full/CP-local capture and event protocol.
-            self.aux_hidden_capture.capture_layer(layer.layer_id, hidden, None, aux_hidden_buffer)
+            # DFlash2 needs full token order; SP layers own only local rows, so
+            # restore replicas at the capture boundary only.
+            captured_hidden = hidden
+            if input_layout is not None and layer.layer_id in self.cfg.layers_to_capture:
+                captured_hidden = input_layout.gather(hidden.reshape(-1, *hidden.shape[2:])).unsqueeze(0)
+            self.aux_hidden_capture.capture_layer(layer.layer_id, captured_hidden, None, aux_hidden_buffer)
             record_layer_event(layer.layer_id)
         # Final collapse: unweighted mean over the streams, then RMSNorm
         # (reference `self.norm(self.hc_head(hidden_states))`, line 1537).
@@ -2541,12 +2573,15 @@ class Glm5NextModel(nn.Module):
         # token ids in the flattened sequence, so a 3-D output would select the
         # wrong (batch) axis and gather out of range for multi-token prefill.
         h = self.norm(self.hc_head(hidden)).view(-1, self.cfg.hidden_size)
+        # The last MoE layer leaves SP-local rows and CP merge indexes
+        # owner_rank * total_local, so restore the full CP-local layout first.
+        # Capture already gathered aux rows before the SP split.
+        if input_layout is not None:
+            h = input_layout.gather(h)
         if cp_context is not None:
             h = cp_merge_rows(h, cp_context)
             if aux_hidden_buffer is not None:
                 aux_hidden_buffer = cp_merge_rows(aux_hidden_buffer, cp_context)
-        if input_layout is not None:
-            h = input_layout.gather(h)
         return self.aux_hidden_capture.finalize(h, aux_hidden_buffer)
 
 

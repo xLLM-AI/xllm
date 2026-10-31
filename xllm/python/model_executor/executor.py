@@ -596,6 +596,7 @@ class ModelExecutor:
                         ),
                         spec_verify_width=self.num_speculative_tokens + 1 if self._prepared_qwen_mtp_target else 1,
                         device_kv_lengths=self._prepared_qwen_mtp_target or self._prepared_qwen_mtp_draft,
+                        max_capture_tokens=getattr(execution_model, "graph_capture_token_limit", None),
                     )
         else:
             if self.layerwise_split_size > 1:
