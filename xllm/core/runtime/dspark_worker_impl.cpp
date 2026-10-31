@@ -22,26 +22,61 @@ limitations under the License.
 #include <utility>
 
 #include "common/metrics.h"
+#include "core/framework/config/model_config.h"
 #include "core/framework/parallel_state/process_group.h"
 #include "core/framework/sampling/sampler.h"
 #include "core/framework/speculative/draft_proposal.h"
 #include "runtime/llm_worker_impl.h"
 #include "util/timer.h"
+#include "util/utils.h"
 
 namespace xllm {
 
 DSparkWorkerImpl::DSparkWorkerImpl(const ParallelArgs& parallel_args,
                                    const torch::Device& device,
                                    const runtime::Options& options)
-    : DFlashWorkerImpl(parallel_args, device, options) {}
+    : DFlashWorkerImpl(parallel_args, device, options) {
+  draft_query_width_ = options.num_speculative_tokens();
+}
+
+bool DSparkWorkerImpl::init_model(const std::string& model_weights_path,
+                                  int32_t random_seed,
+                                  MasterStatus master_status) {
+  const bool result = DFlashWorkerImpl::init_model(
+      model_weights_path, random_seed, master_status);
+  if (draft_impl_->get_status() != WorkerImpl::Status::LOADED) {
+    return result;
+  }
+
+  const ModelArgs& draft_args = draft_impl_->context_.get_model_args();
+  const ModelArgs& target_args = impl_->context_.get_model_args();
+  const int64_t draft_vocab_size = draft_args.draft_vocab_size() > 0
+                                       ? draft_args.draft_vocab_size()
+                                       : draft_args.vocab_size();
+  draft_vocab_ = DraftVocabulary(draft_impl_->take_draft_d2t(),
+                                 draft_vocab_size,
+                                 target_args.vocab_size(),
+                                 device_);
+  CHECK(draft_vocab_size == target_args.vocab_size() ||
+        draft_vocab_.target_token_ids.defined())
+      << "A reduced draft vocabulary requires a DSpark d2t mapping.";
+
+  if (util::is_deepseek_v4_dspark_model_type(draft_args.model_type())) {
+    draft_row_layout_ = draft_args.dspark_use_native_sas()
+                            ? dflash_detail::DraftRowLayout::SPARSE_INDICES
+                            : dflash_detail::DraftRowLayout::BLOCK_ROWS;
+  }
+  draft_needs_dummy_rows_ =
+      draft_row_layout_ != dflash_detail::DraftRowLayout::BLOCK_ROWS &&
+      ModelConfig::is_python_model_impl(context_.get_model_impl());
+  return result;
+}
 
 DraftProposal DSparkWorkerImpl::run_decode_draft(
     const LlmForwardInput& input,
     LlmForwardInput& validate_input) {
   Timer draft_timer;
 
-  // Same input build as DFlash, but sample_from_anchor()==true makes the
-  // query block N-wide and every position predicts a draft token.
   LlmForwardInput query_input;
   prepare_query_inputs(input, query_input);
 
@@ -91,7 +126,9 @@ DraftProposal DSparkWorkerImpl::run_decode_draft(
         [this](torch::Tensor& tokens) {
           sync_sampling_tensor(tokens, sampling_process_group_);
         },
-        is_probabilistic_draft_);
+        is_probabilistic_draft_,
+        /*token_ids_out=*/torch::Tensor(),
+        draft_vocab_);
   }
 
   draft_proposal.keep_alive() = take_retained_inputs(*draft_output);
@@ -107,7 +144,8 @@ DraftProposal sample_dspark_markov_block(const DSparkMarkovBias& markov_bias,
                                          const SamplingParameters& sampling,
                                          const SyncSampledTokens& sync_tokens,
                                          bool is_probabilistic_draft,
-                                         torch::Tensor token_ids_out) {
+                                         torch::Tensor token_ids_out,
+                                         const DraftVocabulary& draft_vocab) {
   const int64_t rows = base_logits.size(0);
   const int64_t steps = base_logits.size(1);
   const int64_t vocab = base_logits.size(2);
@@ -116,17 +154,20 @@ DraftProposal sample_dspark_markov_block(const DSparkMarkovBias& markov_bias,
   // kernel error; enforce the contract here.
   CHECK_EQ(anchors.scalar_type(), torch::kInt64);
   CHECK_EQ(anchors.device(), base_logits.device());
+  const bool has_vocab_mapping = draft_vocab.target_token_ids.defined();
+  const int64_t proposal_vocab =
+      has_vocab_mapping ? draft_vocab.target_vocab_size : vocab;
   DraftProposal proposal =
       token_ids_out.defined()
           ? DraftProposal::from_token_buffer(
                 std::move(token_ids_out),
-                vocab,
+                proposal_vocab,
                 is_probabilistic_draft,
                 base_logits.options().dtype(torch::kFloat32))
           : DraftProposal::preallocate(
                 rows,
                 steps,
-                vocab,
+                proposal_vocab,
                 is_probabilistic_draft,
                 anchors.options(),
                 base_logits.options().dtype(torch::kFloat32));
@@ -136,9 +177,9 @@ DraftProposal sample_dspark_markov_block(const DSparkMarkovBias& markov_bias,
   for (int64_t step = 0; step < steps; ++step) {
     auto bias = markov_bias(previous);
     CHECK_EQ(bias.sizes(), torch::IntArrayRef({rows, vocab}))
-        << "DSpark reduced vocabulary requires draft-to-target remapping.";
+        << "DSpark markov bias must be [rows, draft_vocab].";
     torch::Tensor step_logits;
-    if (proposal.logits().has_value()) {
+    if (!has_vocab_mapping && proposal.logits().has_value()) {
       // add_out into the logits page lets the sampler mutate it in place;
       // draft_logits aliases the page directly.
       torch::Tensor page = proposal.logits_at(step);
@@ -146,8 +187,12 @@ DraftProposal sample_dspark_markov_block(const DSparkMarkovBias& markov_bias,
       step_logits = page;
     } else {
       if (!scratch.defined()) {
-        scratch = torch::empty(base_logits.select(1, step).sizes(),
-                               base_logits.options());
+        const bool float32_scratch =
+            has_vocab_mapping && proposal.logits().has_value();
+        scratch = torch::empty(
+            base_logits.select(1, step).sizes(),
+            base_logits.options().dtype(
+                float32_scratch ? torch::kFloat32 : base_logits.scalar_type()));
       }
       torch::add_out(scratch, base_logits.select(1, step), bias);
       step_logits = scratch;
@@ -155,6 +200,15 @@ DraftProposal sample_dspark_markov_block(const DSparkMarkovBias& markov_bias,
     auto sampled = sample(step_logits, sampling);
     if (needs_sync) {
       sync_tokens(sampled.next_tokens);
+    }
+    if (has_vocab_mapping) {
+      if (proposal.logits().has_value()) {
+        sampled.draft_logits = step_logits;
+        draft_vocab.remap(sampled, proposal.logits_at(step));
+      } else {
+        sampled.draft_logits = torch::Tensor();
+        draft_vocab.remap(sampled);
+      }
     }
     proposal.tokens_at(step).copy_(sampled.next_tokens);
     previous = sampled.next_tokens;

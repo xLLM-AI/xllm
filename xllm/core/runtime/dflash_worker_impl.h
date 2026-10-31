@@ -27,18 +27,12 @@ limitations under the License.
 #include "core/kv_cache/transfer/kv_cache_transfer.h"
 #include "framework/model/model_args.h"
 #include "runtime/draft_model_spec_worker_impl.h"
+#include "runtime/draft_vocabulary.h"
 #include "runtime/llm_worker_impl.h"
-#include "util/utils.h"
 
 namespace xllm {
 
 namespace dflash_detail {
-
-inline int32_t decode_draft_width(int32_t num_speculative_tokens,
-                                  bool sample_from_anchor) {
-  return sample_from_anchor ? num_speculative_tokens
-                            : num_speculative_tokens + 1;
-}
 
 inline void invalidate_draft_model_geometry(LlmModelParams& input_params) {
   // Attention metadata is model-owned: DeepSeek-V4 bakes DSA group layout and
@@ -50,21 +44,11 @@ inline void invalidate_draft_model_geometry(LlmModelParams& input_params) {
   input_params.clear_linear_attention_state();
 }
 
-enum class DSparkSasMode : uint8_t {
-  NOT_DSPARK,
-  COMPATIBILITY,
-  NATIVE,
+enum class DraftRowLayout : uint8_t {
+  SEQUENCE,
+  BLOCK_ROWS,
+  SPARSE_INDICES,
 };
-
-inline DSparkSasMode classify_dspark_sas_mode(const ModelArgs& draft_args,
-                                              bool sample_from_anchor) {
-  if (!sample_from_anchor ||
-      !util::is_deepseek_v4_dspark_model_type(draft_args.model_type())) {
-    return DSparkSasMode::NOT_DSPARK;
-  }
-  return draft_args.dspark_use_native_sas() ? DSparkSasMode::NATIVE
-                                            : DSparkSasMode::COMPATIBILITY;
-}
 
 }  // namespace dflash_detail
 
@@ -112,13 +96,6 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
   virtual DraftProposal run_decode_draft(const LlmForwardInput& input,
                                          LlmForwardInput& validate_input);
 
-  // Block layout hook: false (DFlash) -> query_width N+1, slot 0 is the
-  // un-selected anchor; true (DSpark) -> query_width N, every position predicts
-  // and slot 0 predicts the first draft token. prepare_query_inputs and the
-  // query row builder read this so the whole (helper-heavy) query-build logic
-  // stays here and a subclass flips one bit.
-  virtual bool sample_from_anchor() const { return false; }
-
   // Shared with subclasses (DSpark): build the N/N+1-wide draft query block and
   // the target validate input. A DSpark override of run_decode_draft calls both
   // before its draft forward.
@@ -127,17 +104,12 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
   void prepare_validate_inputs(const LlmForwardInput& input,
                                LlmForwardInput& validate_input);
 
+  int32_t draft_query_width_;
+  dflash_detail::DraftRowLayout draft_row_layout_ =
+      dflash_detail::DraftRowLayout::SEQUENCE;
+  bool draft_needs_dummy_rows_ = false;
+
  private:
-  bool draft_use_block_parallel_rows() const {
-    return draft_sas_mode_ == dflash_detail::DSparkSasMode::COMPATIBILITY;
-  }
-
-  BatchForwardType draft_batch_forward_type() const {
-    return draft_sas_mode_ == dflash_detail::DSparkSasMode::NATIVE
-               ? BatchForwardType::DECODE
-               : BatchForwardType::CHUNKED_PREFILL;
-  }
-
   void fill_validate_input_from_draft_outputs(
       const DraftProposal& draft_proposal,
       LlmForwardInput& validate_input,
@@ -171,13 +143,12 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
   // batch's first tokens.
   torch::Tensor anchor_token_ids(const LlmForwardInput& input) const;
   int32_t mask_token_id_ = -1;
+  DraftVocabulary draft_vocab_;
   int64_t expected_context_hidden_size_ = 0;
   // Whether the target model owns recurrent (linear attention) layers.
   // Fixed once the target finishes loading; hybrid spec-verify gates read
   // this instead of re-scanning layer_types.
   bool target_is_hybrid_recurrent_ = false;
-  dflash_detail::DSparkSasMode draft_sas_mode_ =
-      dflash_detail::DSparkSasMode::NOT_DSPARK;
 
  private:
   // Launch-thread-owned JSON context; never borrows a retired result Slot.

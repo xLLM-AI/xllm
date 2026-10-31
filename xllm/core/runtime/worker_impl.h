@@ -99,6 +99,8 @@ class WorkerImpl {
 
   virtual void load_model(std::unique_ptr<ModelLoader> loader);
 
+  torch::Tensor take_draft_d2t();
+
   virtual void lazy_load_model(std::unique_ptr<ModelLoader> loader);
 
   virtual std::tuple<int64_t, int64_t> estimate_kv_cache_capacity();
@@ -649,6 +651,8 @@ class WorkerImpl {
 #endif
 
   bool is_spec_draft_ = false;
+
+  torch::Tensor draft_d2t_;
 
   Status status_ = Status::UNINITIALIZED;
 

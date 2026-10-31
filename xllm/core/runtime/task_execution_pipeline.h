@@ -30,6 +30,7 @@ limitations under the License.
 #include "core/framework/speculative/draft_proposal.h"
 #include "core/kv_cache/transfer/host_transfer/transfer.h"
 #include "core/platform/device.h"
+#include "core/runtime/draft_vocabulary.h"
 #include "core/runtime/executor.h"
 #include "core/runtime/forward_params.h"
 #include "core/runtime/slot_buffer.h"
@@ -110,6 +111,7 @@ struct SpeculativeTaskCapacity {
   // Restore committed draft KV from verifier hidden states before reuse.
   bool refresh_target_prefix = false;
   bool is_probabilistic_draft = false;
+  DraftVocabulary draft_vocab;
   // Reuse the refreshed final row for the next admitted first proposal.
   bool reuse_prefix_refresh_output = false;
   bool unified_graph = false;

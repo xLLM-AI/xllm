@@ -1831,22 +1831,6 @@ TEST(DSparkWorkerInputTest, ScalesPaddedAndRawDpTokenCountsTogether) {
             (std::vector<int32_t>{5, 0, 15}));
 }
 
-TEST(DSparkSasFallbackTest, ChoosesCompatibleRowsUnlessNativeIsEnabled) {
-  ModelArgs draft_args;
-  draft_args.model_type("deepseek_v4_dspark");
-  EXPECT_EQ(dflash_detail::classify_dspark_sas_mode(
-                draft_args, /*sample_from_anchor=*/true),
-            dflash_detail::DSparkSasMode::COMPATIBILITY);
-
-  draft_args.dspark_use_native_sas(true);
-  EXPECT_EQ(dflash_detail::classify_dspark_sas_mode(
-                draft_args, /*sample_from_anchor=*/true),
-            dflash_detail::DSparkSasMode::NATIVE);
-  EXPECT_EQ(dflash_detail::classify_dspark_sas_mode(
-                draft_args, /*sample_from_anchor=*/false),
-            dflash_detail::DSparkSasMode::NOT_DSPARK);
-}
-
 TEST(DSparkWorkerWeightsTest, DedicatedVocabularyOverridesFallbackInAnyOrder) {
   dspark_detail::VocabularyWeightSelector fallback_first;
   EXPECT_TRUE(fallback_first.should_load(/*dedicated=*/false));

@@ -243,12 +243,18 @@ class UnifiedBlockAclGraph(_BlockGraphLifecycle):
             draft_hidden = draft_hidden[:, 1:]
         logits = self.draft.model.compute_logits(draft_hidden.reshape(batch * steps, -1), None)
         logits = logits.view(batch, steps, -1)
+        # Reduced-vocab draft: remap sampled draft ids to target ids before they
+        # feed the Markov bias (whose embedding indexes the full target vocab)
+        # and reach the target's verify input. target id = d2t[draft_id] + draft_id.
+        hot_token_id = getattr(self.draft.model, "hot_token_id", None)
         if self.dspark:
             previous = draft_ids.view(batch, steps)[:, 0].to(torch.int64)
             proposals = []
             for step in range(steps):
                 bias = self.draft.model.dspark_markov_bias(previous)
                 previous = (logits[:, step] + bias).argmax(dim=-1)
+                if hot_token_id is not None:
+                    previous = hot_token_id.index_select(0, previous)
                 proposals.append(previous)
             proposal = torch.stack(proposals, dim=1)
         elif self._dflash2_candidates is not None:
@@ -488,10 +494,15 @@ class _AdaptiveUnifiedBlockAclGraph(_BlockGraphLifecycle):
         logits = self.draft.model.compute_logits(hidden.reshape(self.batch * self.draft_width, -1), None)
         logits = logits.view(self.batch, self.draft_width, -1)
         anchor = draft_ids[: self.batch * self.draft_width].view(self.batch, self.draft_width)[:, 0].to(torch.int64)
+        # Same reduced-vocab remap as the static graph: proposals must be in
+        # target id space for the native verify packing and confidence head.
+        hot_token_id = getattr(self.draft.model, "hot_token_id", None)
         previous = anchor
         proposals = []
         for step in range(self.draft_width):
             previous = (logits[:, step] + self.draft.model.dspark_markov_bias(previous)).argmax(dim=-1)
+            if hot_token_id is not None:
+                previous = hot_token_id.index_select(0, previous)
             proposals.append(previous)
         self.proposals.copy_(torch.stack(proposals, dim=1))
         previous_matrix = torch.cat((anchor[:, None], self.proposals[:, : self.draft_width - 1]), dim=1)

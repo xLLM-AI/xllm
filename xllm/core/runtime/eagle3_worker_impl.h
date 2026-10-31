@@ -16,6 +16,7 @@ limitations under the License.
 #pragma once
 
 #include "forward_params.h"
+#include "runtime/draft_vocabulary.h"
 #include "runtime/mtp_worker_impl.h"
 
 namespace xllm {
@@ -30,16 +31,12 @@ class Eagle3WorkerImpl final : public MTPWorkerImpl<TargetInput> {
 
   ~Eagle3WorkerImpl() override;
 
-  // Override init_model to load hot_token_id_ for EAGLE-3
   bool init_model(const std::string& model_weights_path,
                   int32_t random_seed,
                   MasterStatus master_status) override;
 
   // EAGLE-3 draft input_embedding is num_aux_layers * target_hidden_size
   int64_t get_embedding_placeholder_size() const override;
-
-  // Get hot_token_id for draft-to-target token mapping
-  torch::Tensor get_hot_token_id() const { return hot_token_id_; }
 
  protected:
   using MTPWorkerImpl<TargetInput>::context_;
@@ -55,10 +52,7 @@ class Eagle3WorkerImpl final : public MTPWorkerImpl<TargetInput> {
                                    const std::string& phase) const override;
   bool share_target_lm_head_with_draft() const override { return false; }
 
-  // EAGLE-3 specific: hot_token_id for draft-to-target token mapping
-  // hot_token_id = d2t + arange(d2t.size(0))
-  torch::Tensor hot_token_id_;
-  bool use_draft_token_mapping_ = true;
+  DraftVocabulary draft_vocab_;
 };
 
 }  // namespace xllm

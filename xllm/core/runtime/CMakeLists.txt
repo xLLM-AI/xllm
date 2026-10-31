@@ -61,11 +61,13 @@ cc_library(
     dflash_worker_impl.h
     dflash2_worker_impl.h
     dspark_worker_impl.h
+    draft_vocabulary.h
     forward_shared_memory_manager.h
     worker_rendezvous.h
   SRCS
     decode_graph_bucket.cpp
     spec_startup_calibration.cpp
+    draft_vocabulary.cpp
     executor.cpp
     task_execution_pipeline.cpp
     slot_buffer.cpp
