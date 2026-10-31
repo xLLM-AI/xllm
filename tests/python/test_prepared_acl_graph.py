@@ -667,9 +667,12 @@ def test_recurrent_prepared_forward_fuses_state_refresh_with_input_packing(
     legacy_refresh.assert_not_called()
 
 
+@pytest.mark.parametrize("varlen", [False, True])
 def test_recurrent_prepared_graph_binds_request_state_and_compact_device_lengths(
     runner: PreparedAclGraphRunner,
+    varlen: bool,
 ) -> None:
+    runner._varlen_recurrent_verify = varlen
     runner.max_batch = 8
     runner.attention_backend.is_mla = False
     runner.attention_backend.page_size = runner.attention_backend.logical_page_size = 128
@@ -684,8 +687,13 @@ def test_recurrent_prepared_graph_binds_request_state_and_compact_device_lengths
     entry = next(iter(runner._prepared_graphs.values()))
     graph = entry.static_metadata.linear_verify_graph
     assert graph is not None and graph.query_width == 8
-    assert graph.packed_to_dense is None and graph.dense_to_packed is None
-    assert graph.cu_seqlens.shape == (4,)
+    if varlen:
+        assert graph.packed_to_dense is None and graph.dense_to_packed is None
+        assert graph.cu_seqlens.shape == (4,)
+    else:
+        assert graph.cu_seqlens is None
+        assert graph.packed_to_dense.shape == (8,)
+        assert graph.dense_to_packed.shape == (24,)
     assert entry.source_block_table is metadata.block_table
     assert entry.static_metadata.block_table.shape == (8, 32)
     assert entry.static_metadata.kv_seq_lens_host_values == [4096] * 8

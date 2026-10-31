@@ -101,6 +101,7 @@ class PreparedAclGraphRunner(AclGraphRunner):
         spec_verify_width: int = 1,
         device_kv_lengths: bool = False,
         block_draft_graph_warmup_max_kv_len: int = 0,
+        varlen_recurrent_verify: bool = True,
     ) -> None:
         super().__init__(model, attention_backend, device)
         # Launch serializes captures, but native Prepare can still allocate
@@ -118,6 +119,7 @@ class PreparedAclGraphRunner(AclGraphRunner):
         if not 1 <= spec_verify_width <= 17 or (block_draft and spec_verify_width != 1):
             raise ValueError("Speculative verify graph width must be in [1, 17], with width one for block drafts")
         self._spec_verify_width = spec_verify_width
+        self._varlen_recurrent_verify = varlen_recurrent_verify
         if device_kv_lengths and dp_size != 1:
             raise ValueError("Device-length ACL graphs require DP size one")
         self._device_kv_lengths = device_kv_lengths
@@ -654,7 +656,15 @@ class PreparedAclGraphRunner(AclGraphRunner):
                 state_indices=torch.zeros(capacity, dtype=torch.int32, device=self.device),
                 num_accepted_tokens=torch.ones(capacity, dtype=torch.int32, device=self.device),
                 query_width=width,
-                cu_seqlens=torch.zeros(capacity + 1, dtype=torch.int32, device=self.device),
+                packed_to_dense=None
+                if self._varlen_recurrent_verify
+                else torch.zeros(entry.batch_size, dtype=torch.int64, device=self.device),
+                dense_to_packed=None
+                if self._varlen_recurrent_verify
+                else torch.zeros(capacity * width, dtype=torch.int64, device=self.device),
+                cu_seqlens=torch.zeros(capacity + 1, dtype=torch.int32, device=self.device)
+                if self._varlen_recurrent_verify
+                else None,
             )
         if self._block_draft or self._device_kv_lengths or recurrent_verify:
             # Like the legacy DSpark runner, capture at least the startup

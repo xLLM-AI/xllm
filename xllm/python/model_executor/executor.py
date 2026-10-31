@@ -462,7 +462,15 @@ class ModelExecutor:
             and config.get("task_type", "generate") == "generate"
             and qwen_mtp_parallel
             and not config.get("enable_adaptive_draft_step", False)
-            and not config.get("enable_adaptive_target_verify", False)
+            and (
+                not config.get("enable_adaptive_target_verify", False)
+                or (
+                    current_platform.is_npu()
+                    and config.get("enable_task_pipeline", False)
+                    and graph_backend == "aclgraph"
+                    and num_decoding_tokens in (6, 8)
+                )
+            )
         )
         prepared_qwen_generation = (
             self._prepared_qwen_gdn
@@ -564,6 +572,13 @@ class ModelExecutor:
                     or self._prepared_qwen_mtp_draft
                     or self._prepared_fixed_recurrent_target,
                     block_draft_graph_warmup_max_kv_len=int(config.get("block_draft_graph_warmup_max_kv_len", 0)),
+                    # The varlen GDN kernel is packaged for A3. Other devices
+                    # retain packed target rows through fixed-kernel maps.
+                    varlen_recurrent_verify=not (
+                        self._prepared_qwen_gdn
+                        and qwen_mtp_requested
+                        and current_platform.get_ascend_soc_generation() != "a3"
+                    ),
                 )
             else:
                 if self._independent_block_draft:

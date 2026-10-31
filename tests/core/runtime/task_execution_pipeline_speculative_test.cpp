@@ -410,6 +410,9 @@ class CountingModel final : public CausalLM {
     }
     const auto next = sampled_hidden.to(torch::kInt64) +
                       logit_increments[call % logit_increments.size()];
+    if (row_logit_offsets.defined()) {
+      next.add_(row_logit_offsets);
+    }
     auto output =
         torch::full({selected.numel(), vocab_size}, -logit_peak, options_);
     output.scatter_(/*dim=*/1, next, /*value=*/logit_peak);
@@ -507,6 +510,7 @@ class CountingModel final : public CausalLM {
   std::vector<bool> context_cache_bound;
   bool adaptive_unified_capable = true;
   torch::Tensor row_markov_increments;
+  torch::Tensor row_logit_offsets;
   std::vector<torch::Tensor> dflash2_hidden;
   bool confidence_head = false;
   double logit_peak = 20.0;
@@ -4374,6 +4378,97 @@ TEST_F(SpeculativePipelineTest,
   EXPECT_TRUE(torch::equal(context_slots.masked_select(context_slots.ge(0)),
                            torch::tensor({18, 50, 82}, torch::kInt32)));
   pipeline_.reset();
+}
+
+TEST_F(SpeculativePipelineTest,
+       AdaptiveMtpCheckpointsFollowAcceptedLengthsAndResetOnPrefill) {
+  for (const uint32_t draft_width : {5U, 7U}) {
+    configure_adaptive_dspark(/*profiled=*/false, draft_width);
+    capacity_.kind = SpeculativeTaskKind::MTP;
+    capacity_.refresh_target_prefix = true;
+    capacity_.common.model.enable_linear_attention = true;
+    capacity_.common.enable_mla = false;
+    capacity_.sparse_dsa_target = false;
+    capacity_.hybrid_recurrent_target = true;
+    draft_->block_draft = false;
+    draft_->confidence_head = false;
+    target_cache_.emplace_back(LinearAttentionKVCacheTensors{
+        torch::zeros({5, 10, 1}, target_->options()),
+        torch::zeros({40, 1, 1, 1}, target_->options())});
+    TaskModel target{*target_, *target_executor_, target_cache_};
+    target.restore_request_state = [](const ModelParamsView& params) {
+      EXPECT_EQ(params.embedding.linear_state_indices.numel(),
+                params.embedding.linear_state_ids.size());
+    };
+    const Status status = TaskExecutionPipeline::create(
+        state_thread_,
+        std::move(target),
+        TaskModel{*draft_, *draft_executor_, draft_cache_},
+        capacity_,
+        pipeline_);
+    ASSERT_TRUE(status.ok()) << status.message();
+    const auto recurrent_input = [&](bool decode, bool placeholder = false) {
+      auto source = dspark_batch_input(3, decode, placeholder);
+      source.input_params.embedding.linear_state_ids = {4, 2, 1};
+      source.input_params.linear_state_validity_mask.assign(3, decode ? 1 : 0);
+      return source;
+    };
+    execute(recurrent_input(/*decode=*/false));
+    auto warmup = recurrent_input(/*decode=*/true);
+    warmup.input_params.meta.is_graph_warmup = true;
+    execute(warmup);
+    execute(recurrent_input(/*decode=*/false));
+    target_->recurrent_accepted_counts.clear();
+    draft_->row_logit_offsets =
+        torch::tensor({{0}, {1}, {0}}, target_->options().dtype(torch::kInt64));
+    const auto first = pipeline_->submit(recurrent_input(/*decode=*/true));
+    ASSERT_TRUE(first.status.ok()) << first.status.message();
+    const auto second = pipeline_->submit(
+        recurrent_input(/*decode=*/true, /*placeholder=*/true));
+    ASSERT_TRUE(second.status.ok()) << second.status.message();
+    const auto first_result = pipeline_->take_result_async(first.task_id).get();
+    const auto second_result =
+        pipeline_->take_result_async(second.task_id).get();
+    ASSERT_TRUE(first_result.status.ok()) << first_result.status.message();
+    ASSERT_TRUE(second_result.status.ok()) << second_result.status.message();
+    const auto accepted =
+        first_result.output.sample_output.next_tokens.ge(0).sum(1).cpu().to(
+            torch::kInt32);
+    ASSERT_TRUE(accepted.gt(1).any().item<bool>());
+    ASSERT_TRUE(accepted.eq(1).any().item<bool>());
+    ASSERT_EQ(target_->recurrent_accepted_counts.size(), 2U);
+    EXPECT_TRUE(torch::equal(
+        target_->recurrent_accepted_counts[0].narrow(0, 0, 3).cpu(),
+        torch::ones({3}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(
+        target_->recurrent_accepted_counts[1].narrow(0, 0, 3).cpu(), accepted));
+    auto reordered = recurrent_input(/*decode=*/true, /*placeholder=*/true);
+    auto& embedding = reordered.input_params.embedding;
+    std::swap(embedding.embedding_ids[0], embedding.embedding_ids[1]);
+    std::swap(embedding.request_ids[0], embedding.request_ids[1]);
+    std::swap(embedding.linear_state_ids[0], embedding.linear_state_ids[1]);
+    const auto order = torch::tensor({1, 0, 2}, torch::kInt64);
+    auto& attention = reordered.input_params.attention.host;
+    attention.block_tables = attention.block_tables.index_select(0, order);
+    std::swap(attention.new_cache_slots[0], attention.new_cache_slots[1]);
+    execute(reordered);
+    const auto second_accepted =
+        second_result.output.sample_output.next_tokens.ge(0).sum(1).cpu().to(
+            torch::kInt32);
+    ASSERT_EQ(target_->recurrent_accepted_counts.size(), 3U);
+    EXPECT_TRUE(torch::equal(
+        target_->recurrent_accepted_counts[2].narrow(0, 0, 3).cpu(),
+        second_accepted.index_select(0, order)));
+    execute(recurrent_input(/*decode=*/false));
+    execute(recurrent_input(/*decode=*/true));
+    ASSERT_EQ(target_->recurrent_accepted_counts.size(), 4U);
+    EXPECT_TRUE(torch::equal(
+        target_->recurrent_accepted_counts[3].narrow(0, 0, 3).cpu(),
+        torch::ones({3}, torch::kInt32)));
+    pipeline_.reset();
+    draft_->row_logit_offsets = torch::Tensor();
+    target_->recurrent_accepted_counts.clear();
+  }
 }
 
 class RecurrentBlockPipelineTest

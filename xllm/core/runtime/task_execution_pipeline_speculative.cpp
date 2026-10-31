@@ -393,7 +393,9 @@ Status TaskExecutionPipeline::create(
   }
   if (capacity.hybrid_recurrent_target &&
       ((capacity.kind != SpeculativeTaskKind::DSPARK &&
-        capacity.kind != SpeculativeTaskKind::DFLASH2) ||
+        capacity.kind != SpeculativeTaskKind::DFLASH2 &&
+        !(capacity.kind == SpeculativeTaskKind::MTP &&
+          capacity.adaptive_target_verify)) ||
        !Platform::is_npu() || common.max_graph_batch_size == 0 ||
        common.model.max_sequences > 128 ||
        capacity.num_speculative_tokens == 0 ||
@@ -443,7 +445,8 @@ Status TaskExecutionPipeline::create(
         common.cp_sampling_group != nullptr ||
         capacity.adaptive_target_verify || capacity.adaptive_draft_step)) ||
       (capacity.kind == SpeculativeTaskKind::MTP && !common.enable_mla &&
-       !common.model.enable_linear_attention) ||
+       !common.model.enable_linear_attention &&
+       !capacity.hybrid_recurrent_target) ||
       (capacity.kind != SpeculativeTaskKind::MTP &&
        (capacity.context_hidden_size == 0 || capacity.mask_token_id < 0 ||
         static_cast<uint32_t>(capacity.mask_token_id) >= common.vocab_size)) ||
@@ -3067,6 +3070,9 @@ void TaskExecutionPipeline::launch_prefill(SpeculativeSlot& slot) {
               SamplingMode::GREEDY);
     }
   }
+  if (slot.recurrent) {
+    recurrent_accepted_lengths_.index_fill_(0, slot.state->rows_, 1);
+  }
   if (block_draft()) {
     SlotBuffer::initialize_mtp_context(
         *slot.draft_prefill,
@@ -3074,9 +3080,6 @@ void TaskExecutionPipeline::launch_prefill(SpeculativeSlot& slot) {
         slot.target_prefill->device_result().tokens,
         *slot.state);
     write_block_context(slot, /*prefill=*/true);
-    if (slot.recurrent) {
-      recurrent_accepted_lengths_.index_fill_(0, slot.state->rows_, 1);
-    }
     context_publish(*slot.state);
     return;
   }
@@ -3561,12 +3564,12 @@ void TaskExecutionPipeline::launch_packed_verify(SpeculativeSlot& slot) {
                                                      result_tokens,
                                                      result_lengths,
                                                      slot.context_slots);
+  if (slot.recurrent) {
+    recurrent_accepted_lengths_.index_copy_(
+        0, slot.state->rows_, result.lengths.to(torch::kInt32));
+  }
   if (block_draft()) {
     write_block_context(slot, /*prefill=*/false);
-    if (slot.recurrent) {
-      recurrent_accepted_lengths_.index_copy_(
-          0, slot.state->rows_, result.lengths.to(torch::kInt32));
-    }
     context_advance(
         *slot.state, result.tokens, result.lengths, torch::Tensor());
   } else {

@@ -866,7 +866,8 @@ template <typename TargetInput>
       (options_.num_speculative_tokens() > 16 ||
        parallel_args_.dp_size() != 1 || parallel_args_.cp_size() != 1 ||
        options_.enable_adaptive_draft_step() ||
-       options_.enable_adaptive_target_verify())) {
+       (options_.enable_adaptive_target_verify() &&
+        !ModelConfig::is_python_model_impl(context_.get_model_impl())))) {
     return ::xllm::Status(StatusCode::INVALID_ARGUMENT,
                           "Qwen hybrid MTP task pipeline requires DP=CP=1 and "
                           "1..16 draft tokens.");
@@ -880,6 +881,8 @@ template <typename TargetInput>
   capacity.num_speculative_tokens = options_.num_speculative_tokens();
   capacity.adaptive_draft_step = options_.enable_adaptive_draft_step();
   capacity.adaptive_target_verify = options_.enable_adaptive_target_verify();
+  capacity.hybrid_recurrent_target =
+      hybrid_paged_attention && capacity.adaptive_target_verify;
   capacity.adaptive_min_gain = options_.adaptive_target_verify_min_gain();
   capacity.startup_calibration = capacity.adaptive_target_verify;
   capacity.calibration_leader = parallel_args_.rank() == 0;
@@ -889,9 +892,9 @@ template <typename TargetInput>
   capacity.reuse_topk = args.index_share_for_mtp_iteration();
   capacity.refresh_target_prefix = capacity.num_speculative_tokens > 1;
   capacity.reuse_prefix_refresh_output =
-      hybrid_paged_attention && capacity.refresh_target_prefix &&
-      !capacity.reuse_topk && parallel_args_.dp_size() == 1 &&
-      parallel_args_.cp_size() == 1;
+      hybrid_paged_attention && !capacity.adaptive_target_verify &&
+      capacity.refresh_target_prefix && !capacity.reuse_topk &&
+      parallel_args_.dp_size() == 1 && parallel_args_.cp_size() == 1;
   // Ragged random-target verification commits context before returning the
   // final result. Its target draws must agree even if optional legacy token
   // broadcast is disabled; greedy tasks still skip the collective entirely.

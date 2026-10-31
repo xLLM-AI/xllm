@@ -2232,17 +2232,24 @@ def test_executor_accepts_prepared_qwen_hybrid_generation(
 
 
 @pytest.mark.parametrize("prefill", [False, True])
-def test_packed_recurrent_dspark_keeps_request_state_separate_from_qwen_mtp(prefill: bool) -> None:
+@pytest.mark.parametrize("algorithm", ["is_block_diffusion_algorithm", "is_mtp_algorithm"])
+@pytest.mark.parametrize("soc", ["a2", "a3", "a5"])
+def test_packed_recurrent_target_keeps_request_state_separate_from_token_rows(
+    prefill: bool, algorithm: str, soc: str
+) -> None:
     backend = _PreparedStubAttentionBackend()
     config = {
         "model_type": "qwen3_5_text",
         "num_speculative_tokens": 7,
-        "is_block_diffusion_algorithm": True,
+        algorithm: True,
         "enable_task_pipeline": True,
         "enable_adaptive_target_verify": True,
         "python_graph_backend": "aclgraph",
     }
-    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
+    with (
+        patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend),
+        patch("xllm.python.model_executor.executor.current_platform.get_ascend_soc_generation", return_value=soc),
+    ):
         executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2, num_decoding_tokens=8)
     cache = torch.empty(2, 4, 2, 64)
     executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
@@ -2263,6 +2270,8 @@ def test_packed_recurrent_dspark_keeps_request_state_separate_from_qwen_mtp(pref
     assert not executor.prepared_graph_runner._device_kv_lengths
     assert metadata.linear_state_indices.numel() == 2
     assert metadata.prepared_attention_state.device_kv_lengths is not prefill
+
+    assert executor.prepared_graph_runner._varlen_recurrent_verify == (soc == "a3" or algorithm != "is_mtp_algorithm")
 
 
 @pytest.mark.parametrize("draft_tokens", [1, 2, 3, 7, 16])
@@ -2321,12 +2330,21 @@ def test_executor_rejects_token_row_scoped_accepted_counts() -> None:
         executor.prepare_metadata(metadata)
 
 
-@pytest.mark.parametrize("model_type", ["qwen3_5_mtp"])
-def test_executor_prepares_qwen_draft_device_lengths_only_for_decode(model_type: str) -> None:
+@pytest.mark.parametrize("adaptive", [False, True])
+@pytest.mark.parametrize("width", [6, 8])
+def test_executor_prepares_qwen_draft_device_lengths_only_for_decode(adaptive: bool, width: int) -> None:
     backend = _PreparedStubAttentionBackend()
-    config = {"model_type": model_type, "is_mtp_algorithm": True, "is_draft_engine": True}
+    config = {
+        "model_type": "qwen3_5_mtp",
+        "is_mtp_algorithm": True,
+        "is_draft_engine": True,
+        "enable_task_pipeline": True,
+        "enable_adaptive_target_verify": adaptive,
+        "python_graph_backend": "aclgraph",
+        "max_position_embeddings": 128,
+    }
     with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
-        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2)
+        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2, num_decoding_tokens=width)
     cache = torch.empty(2, 4, 2, 64)
     executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
     metadata = _prepared_qwen_metadata()
