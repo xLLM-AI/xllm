@@ -272,10 +272,10 @@ def init_tp_group(
     )
 
 
-def _require_group(x: torch.Tensor, group_name: str) -> ProcessGroup:
-    group = _groups.get((group_name, str(x.device)))
+def get_process_group(device: torch.device, group_name: str) -> ProcessGroup:
+    group = _groups.get((group_name, str(device)))
     if group is None:
-        raise RuntimeError(f"{group_name} collective called before its process group was initialized for {x.device}")
+        raise RuntimeError(f"{group_name} collective called before its process group was initialized for {device}")
     return group
 
 
@@ -367,19 +367,35 @@ def moe_ep_all_reduce(x: torch.Tensor) -> None:
     all_reduce_(x, "moe_ep")
 
 
+def moe_ep_hccl_info(device: torch.device | str) -> tuple[str, int, int]:
+    """Return the initialized expert group's HCCL name, rank and size."""
+    device_obj = torch.device(device)
+    group = get_process_group(device_obj, "moe_ep")
+    rank, world_size = group.rank(), group.size()
+    if world_size <= 1 or not 0 <= rank < world_size:
+        raise RuntimeError(f"MoE EP dispatch requires an initialized multi-rank group: rank {rank}/{world_size}")
+    get_comm_name = getattr(group._get_backend(device_obj), "get_hccl_comm_name", None)
+    if get_comm_name is None:
+        raise RuntimeError("MoE EP dispatch requires an HCCL process group")
+    comm_name = get_comm_name(rank)
+    if not isinstance(comm_name, str) or not comm_name:
+        raise RuntimeError("MoE EP dispatch requires a nonempty HCCL communication name")
+    return comm_name, rank, world_size
+
+
 def dcp_group(device: torch.device | str) -> ProcessGroup | None:
     return _groups.get(("dcp", str(torch.device(device))))
 
 
 @torch.library.custom_op("xllm_ops::all_reduce_", mutates_args={"x"})
 def all_reduce_(x: torch.Tensor, group_name: str = "tp") -> None:
-    group = _require_group(x, group_name)
+    group = get_process_group(x.device, group_name)
     _all_reduce(x, group=group)
 
 
 @torch.library.custom_op("xllm_ops::broadcast_", mutates_args={"x"})
 def broadcast_(x: torch.Tensor, src: int, group_name: str = "tp") -> None:
-    group = _require_group(x, group_name)
+    group = get_process_group(x.device, group_name)
     if not 0 <= src < group.size():
         raise RuntimeError(f"invalid {group_name} source rank {src}")
     ranks = _group_ranks.get((group_name, str(x.device)))
@@ -408,7 +424,7 @@ def _normalize_gather_dim(x: torch.Tensor, dim: int) -> int:
 @torch.library.custom_op("xllm_ops::reduce_scatter", mutates_args=())
 def reduce_scatter(x: torch.Tensor, world_size: int, group_name: str = "tp") -> torch.Tensor:
     """SUM and scatter equal contiguous token blocks in group-rank order."""
-    group = _require_group(x, group_name)
+    group = get_process_group(x.device, group_name)
     if group.size() != world_size or x.ndim == 0 or x.shape[0] % world_size:
         raise ValueError("reduce-scatter requires matching group size and divisible token rows")
     input = _contiguous_gather_input(x)
@@ -432,7 +448,7 @@ def matmul_reduce_scatter(
     """Fused NPU matmul and SUM scatter of equal token blocks."""
     if not _USE_PYTHON_NPU_GROUPS or x.device.type != "npu":
         raise RuntimeError("fused matmul-reduce-scatter requires an initialized Python NPU group")
-    group = _require_group(x, group_name)
+    group = get_process_group(x.device, group_name)
     if world_size not in (2, 4, 8) or group.size() != world_size:
         raise ValueError("MMRS requires a matching TP group of size 2, 4, or 8")
     if x.ndim != 2 or weight.ndim != 2 or x.shape[0] == 0 or x.shape[0] % world_size:
@@ -475,7 +491,7 @@ def _contiguous_gather_input(x: torch.Tensor) -> torch.Tensor:
 
 @torch.library.custom_op("xllm_ops::all_gather", mutates_args=())
 def all_gather(x: torch.Tensor, dim: int, world_size: int, group_name: str = "tp") -> torch.Tensor:
-    group = _require_group(x, group_name)
+    group = get_process_group(x.device, group_name)
     if group.size() != world_size:
         raise RuntimeError(f"{group_name} world-size mismatch: expected {world_size}, got {group.size()}")
     dim = _normalize_gather_dim(x, dim)
@@ -506,7 +522,7 @@ def all_gather_variable(
     rank: int,
     group_name: str,
 ) -> torch.Tensor:
-    group = _require_group(x, group_name)
+    group = get_process_group(x.device, group_name)
     if group.size() != len(token_counts):
         raise RuntimeError(
             f"{group_name} size mismatch: group has {group.size()} ranks, "
@@ -549,13 +565,6 @@ def _(
     return x.new_empty(shape)
 
 
-def _check_collective_buffers(output: torch.Tensor, input: torch.Tensor) -> None:
-    if output.device != input.device or output.dtype != input.dtype:
-        raise ValueError("collective buffers must have the same device and dtype")
-    if not output.is_contiguous() or not input.is_contiguous():
-        raise ValueError("collective buffers must be contiguous")
-
-
 @torch.library.custom_op("xllm_ops::all_to_all_single", mutates_args={"output"})
 def all_to_all_single(
     output: torch.Tensor,
@@ -563,13 +572,16 @@ def all_to_all_single(
     group_name: str = "tp",
 ) -> None:
     """Exchange equal first-dimension chunks among ranks in ``group_name``."""
-    group = _require_group(input, group_name)
+    group = get_process_group(input.device, group_name)
     if input.ndim == 0 or output.shape != input.shape or input.shape[0] % group.size():
         raise ValueError(
             f"{group_name} all-to-all requires equal shapes and a divisible first dimension, "
             f"got input={tuple(input.shape)}, output={tuple(output.shape)}, world_size={group.size()}"
         )
-    _check_collective_buffers(output, input)
+    if output.device != input.device or output.dtype != input.dtype:
+        raise ValueError("collective buffers must have the same device and dtype")
+    if not output.is_contiguous() or not input.is_contiguous():
+        raise ValueError("collective buffers must be contiguous")
     dist.all_to_all_single(output, input, group=group)
 
 
@@ -617,4 +629,6 @@ __all__ = [
     "all_to_all_single",
     "dp_all_gather",
     "gather_dp_execution_tokens",
+    "get_process_group",
+    "moe_ep_hccl_info",
 ]

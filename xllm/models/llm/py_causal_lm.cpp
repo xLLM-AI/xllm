@@ -388,6 +388,10 @@ py::dict PyCausalLM::build_config_dict(const ModelContext& context) const {
   d["enable_mmrs_fusion"] = flash_comm1_options.enable_mmrs_fusion;
   d["mmrs_comm_mode"] = flash_comm1_options.mmrs_comm_mode;
   d["enable_fused_mc2"] = KernelConfig::get_instance().enable_fused_mc2() > 0;
+  if (model_args_.model_type() == "glm5_next" ||
+      model_args_.model_type() == "glm5_next_text") {
+    d["expert_parallel_degree"] = eplb_config.expert_parallel_degree();
+  }
   if (mega_moe_comm_resource_ != nullptr) {
     d["enable_mega_moe"] = true;
     d["mega_moe_context"] = mega_moe_comm_resource_->context_tensor();

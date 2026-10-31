@@ -264,12 +264,10 @@ PyAttentionMetadataView::PyAttentionMetadataView(
       linear_state_read_indices_ = params.embedding.linear_state_read_indices;
     }
   }
-  if (params.enable_graph || params.expert.eplb_decode_token_mask.defined()) {
-    raw_dp_execution_token_counts_ =
-        params.parallel.raw_dp_global_token_nums.empty()
-            ? params.parallel.dp_global_token_nums
-            : params.parallel.raw_dp_global_token_nums;
-  }
+  raw_dp_execution_token_counts_ =
+      params.parallel.raw_dp_global_token_nums.empty()
+          ? params.parallel.dp_global_token_nums
+          : params.parallel.raw_dp_global_token_nums;
   // Python model kernels consume materialized execution rows. Empty DP ranks
   // contribute the model's complete dummy input, which may be a draft block.
   dp_execution_token_counts_ = params.parallel.dp_global_token_nums;

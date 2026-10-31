@@ -70,6 +70,8 @@ _EXPORTS = {
         "supports_mla_kv_cache_slot_reuse",
     ),
     "moe": (
+        "ep_moe_w8a8",
+        "ep_moe_w8a8_alltoall",
         "cutlass_fused_moe",
         "format_cast_nz",
         "fused_moe",
@@ -147,6 +149,8 @@ _EXPORTS = {
 }
 
 __all__ = [
+    "ep_moe_w8a8",
+    "ep_moe_w8a8_alltoall",
     "rms_norm",
     "gemma_rms_norm",
     "fused_add_rms_norm",
