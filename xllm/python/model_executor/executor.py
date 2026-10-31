@@ -119,8 +119,8 @@ def _validate_npu_cp_model_config(config: dict, num_decoding_tokens: int) -> Non
                 "Python GLM-5 Next CP does not support target-side speculative verification; "
                 "run speculation on a cp_size=1 Decode instance"
             )
-        if int(config.get("ep_size", 1)) != 1:
-            raise NotImplementedError("Python GLM-5 Next CP initially requires ep_size == 1")
+        if int(config.get("ep_size", 1)) < 1:
+            raise NotImplementedError("Python GLM-5 Next CP requires ep_size >= 1")
         if kv_split != 1:
             raise NotImplementedError("Python GLM-5 Next CP initially requires kv_split_size == 1")
         if bool(config.get("enable_disagg_pd", False)):
@@ -291,7 +291,9 @@ class ModelExecutor:
             raise ValueError("dp_size must be greater than or equal to 1")
         if not 0 <= cp_rank < cp_size:
             raise ValueError(f"cp_rank must be in [0, {cp_size}), got {cp_rank}")
-        if cp_size > 1 and dp_size > 1:
+        if cp_size > 1 and dp_size > 1 and config.get("model_type") not in ("glm5_next", "glm5_3_flash"):
+            # GLM-5.3-Flash CP restores DP-local rows before routed MoE and
+            # supports the dp * cp * tp rank layout.
             raise NotImplementedError("Python CP requires dp_size == 1")
         if current_platform.is_npu():
             kv_split_size = int(config.get("kv_split_size", 0))

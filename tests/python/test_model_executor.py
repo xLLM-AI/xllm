@@ -1533,9 +1533,10 @@ def test_glm5_next_cp_admission_matches_runtime_constraints(model_type: str) -> 
         }
     )
     _validate_npu_cp_model_config(config, 1)
+    _validate_npu_cp_model_config({**config, "ep_size": 2, "dp_size": 2}, 1)
 
-    with pytest.raises(NotImplementedError, match="ep_size == 1"):
-        _validate_npu_cp_model_config({**config, "ep_size": 2}, 1)
+    with pytest.raises(NotImplementedError, match="ep_size >= 1"):
+        _validate_npu_cp_model_config({**config, "ep_size": 0}, 1)
     with pytest.raises(NotImplementedError, match="disaggregated PD"):
         _validate_npu_cp_model_config({**config, "enable_disagg_pd": True}, 1)
 
@@ -2094,6 +2095,16 @@ def test_context_parallel_rejects_data_parallel_combination(_mock_create):
             {"cp_size": 2, "dp_size": 2, "python_graph_backend": "off"},
             max_seqs_per_batch=4,
         )
+
+
+@patch("xllm.python.model_executor.executor._create_attention_backend", return_value=StubAttentionBackend())
+def test_context_parallel_accepts_glm5_next_data_parallel_combination(_mock_create):
+    executor = ModelExecutor(
+        _FakeModel(num_layers=1),
+        {"cp_size": 2, "dp_size": 2, "kv_split_size": 1, "model_type": "glm5_3_flash", "python_graph_backend": "off"},
+        max_seqs_per_batch=4,
+    )
+    assert executor.dp_size == 2
 
 
 @patch("xllm.python.model_executor.executor._create_attention_backend")

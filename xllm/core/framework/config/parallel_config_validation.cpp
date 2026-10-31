@@ -229,15 +229,8 @@ std::optional<std::string> validate_context_parallel_config(
       return "Model-side CP supports only DEFAULT or PREFILL roles";
     }
 
-    // Python model executor runs a standalone torch CP path (all-gather KV,
-    // eager prefill only) that does not go through the ATB fused-attention op,
-    // so it bypasses the ATB-backend requirement and the ATB CP capability
-    // allowlist below. The safety constraints above (LLM/generate,
-    // DEFAULT/PREFILL) still apply. Orthogonal TP x CP is supported (both may
-    // be > 1, sharing world = cp * tp); the collective communicator builds the
-    // narrowed TP group and the strided CP group as separate torch subgroups
-    // off the shared world rendezvous endpoint. DP > 1 stays unsupported: the
-    // Python executor does not implement the dp * cp * tp rank layout.
+    // Python CP bypasses ATB; only GLM-5 Next restores DP-local rows
+    // before routed MoE, so other Python models require DP1.
     if (ModelConfig::is_python_model_impl(
             ModelConfig::get_instance().model_impl())) {
       // Only models whose Python forward actually shards the sequence (via
@@ -264,10 +257,17 @@ std::optional<std::string> validate_context_parallel_config(
         return "Python model-side CP requires Prefill to use EagerRunner; use "
                "--python_graph_backend=off or decode-only aclgraph";
       }
-      if (options.dp_size() != 1) {
+      if (options.dp_size() != 1 &&
+          !is_glm5_next_target_model_type(model_type)) {
         return "Python CP requires dp_size == 1";
       }
-      if (global_world_size % (options.dp_size() * options.cp_size()) != 0) {
+      if (options.dp_size() < 1) {
+        return "Python CP requires dp_size >= 1";
+      }
+      const int64_t parallel_width =
+          static_cast<int64_t>(options.dp_size()) * options.cp_size();
+      if (global_world_size < 1 ||
+          static_cast<int64_t>(global_world_size) % parallel_width != 0) {
         return "Python CP requires world_size divisible by dp_size * cp_size";
       }
       if (kv_split < 1 || options.cp_size() % kv_split != 0) {
@@ -284,8 +284,10 @@ std::optional<std::string> validate_context_parallel_config(
                  "speculative "
                  "verification; run speculation on a cp_size=1 Decode instance";
         }
-        if (options.ep_size() != 1) {
-          return "Python GLM-5 Next CP initially requires ep_size == 1";
+        if (options.ep_size() < 1 ||
+            global_world_size % options.ep_size() != 0) {
+          return "Python GLM-5 Next CP requires ep_size to be a positive "
+                 "divisor of world_size";
         }
         if (kv_split != 1) {
           return "Python GLM-5 Next CP initially requires kv_split_size == 1";

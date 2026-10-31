@@ -243,6 +243,7 @@ class Glm5NextConfig:
     moe_tp_size: Optional[int] = None
     moe_tp_rank: Optional[int] = None
     cp_size: int = 1
+    cp_rank: int = 0
     num_speculative_tokens: int = 0
     enable_eplb: bool = False
     expert_parallel_degree: int = 0
@@ -351,6 +352,7 @@ class Glm5NextConfig:
             moe_tp_size=pick("moe_tp_size"),
             moe_tp_rank=pick("moe_tp_rank"),
             cp_size=int(pick("cp_size", default=1)),
+            cp_rank=int(pick("cp_rank", default=0)),
             eplv2_sequence_parallel=bool(pick("eplv2_sequence_parallel", default=True)),
             eplv2_shared_overlap=bool(pick("eplv2_shared_overlap", default=True)),
             eplv2_comm_mode=str(
@@ -385,7 +387,7 @@ class Glm5NextConfig:
             raise ValueError("GLM-5.3-Flash ordinary EP does not support enable_mega_moe")
         if self.enable_fused_mc2:
             raise ValueError("GLM-5.3-Flash ordinary EP does not support enable_fused_mc2")
-        for name in ("tp", "ep", "dp", "moe_tp"):
+        for name in ("tp", "ep", "dp", "cp", "moe_tp"):
             size = getattr(self, f"{name}_size")
             rank = getattr(self, f"{name}_rank")
             if size <= 0 or not 0 <= rank < size:
@@ -394,11 +396,11 @@ class Glm5NextConfig:
             raise ValueError("n_routed_experts must be divisible by ep_size")
         if self.moe_intermediate_size % self.moe_tp_size:
             raise ValueError("moe_intermediate_size must be divisible by moe_tp_size")
-        if self.ep_size == 1 and self.dp_size == 1:
+        if self.ep_size == 1 and self.dp_size == 1 and self.cp_size == 1:
             if (self.moe_tp_size, self.moe_tp_rank) != (self.tp_size, self.tp_rank):
                 raise ValueError("TP-only MoE must use the attention TP size and rank")
-        elif self.ep_size * self.moe_tp_size != self.dp_size * self.tp_size:
-            raise ValueError("EP size times MoE-TP size must equal DP size times attention TP size")
+        elif self.ep_size * self.moe_tp_size != self.dp_size * self.cp_size * self.tp_size:
+            raise ValueError("EP size times MoE-TP size must equal DP size times CP size times attention TP size")
         if self.expert_parallel_degree == 2:
             self._validate_eplv2_parallelism()
 
@@ -2019,9 +2021,15 @@ class Glm5NextMoE(nn.Module):
         return final
 
     def _forward_w8a8(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Use clamped local experts and joint reduction for every TP/EP/DP layout."""
+        """Use clamped local experts and joint reduction for TP/EP/DP/CP layouts."""
         orig_shape = hidden_states.shape
-        flat = hidden_states.view(-1, self.hidden)
+        cp_context = getattr(get_forward_context_or_none(), "cp_context", None) if self.cfg.cp_size > 1 else None
+        # Routed experts span the full MoE group, including CP ranks. Restore
+        # identical full-request rows before routing, not per-shard padded rows.
+        moe_hidden = (
+            cp_merge_rows(hidden_states.view(-1, self.hidden), cp_context) if cp_context is not None else hidden_states
+        )
+        flat = moe_hidden.view(-1, self.hidden)
         flat, scatter_state = dp_gather_tokens(flat, self.cfg.dp_size, self.cfg.dp_rank)
         logits = self.gate(flat.float())
         topk_weights, topk_ids = kernels.moe_gate_routing(
@@ -2055,8 +2063,12 @@ class Glm5NextMoE(nn.Module):
         # fixed padded DP execution counts through the same scatter state.
         # Accumulate and reduce in FP32: adding BF16 routed/shared partials
         # first otherwise amplifies rounding when those terms cancel.
-        shared = self.shared_experts(hidden_states).view(-1, self.hidden).float()
-        scatter_state.scatter(out).add_(shared)
+        # Shared weights are replicated across CP and sharded only across
+        # attention TP. Contribute one CP replica, including during decode
+        # when cp_context is absent but the MoE group still spans CP ranks.
+        if self.cfg.cp_rank == 0:
+            shared = self.shared_experts(moe_hidden).view(-1, self.hidden).float()
+            scatter_state.scatter(out).add_(shared)
         out = reduce_and_scatter(
             out,
             scatter_state,
@@ -2064,6 +2076,8 @@ class Glm5NextMoE(nn.Module):
             moe_tp_size=self.cfg.moe_tp_size,
             ep_size=self.cfg.ep_size,
         )
+        if cp_context is not None:
+            out = cp_shard_rows(out, cp_context)
         return out.to(hidden_states.dtype).view(*orig_shape)
 
     def _run_routed_sp(
@@ -2908,6 +2922,8 @@ class Glm5NextForCausalLM(PyModelBase):
             # Expert branch: probe exp0's gate_proj for a weight_scale tensor.
             # Real W8A8 checkpoints carry weight_scale; bf16 checkpoints do not.
             is_w8a8 = L.find(mlp + "experts.0.gate_proj.weight_scale") is not None
+            if not is_w8a8 and self.cfg.cp_size > 1:
+                raise NotImplementedError("GLM-5.3-Flash CP supports W8A8 expert weights only, not BF16")
             if not is_w8a8 and (self.cfg.ep_size > 1 or self.cfg.dp_size > 1):
                 raise NotImplementedError("GLM-5.3-Flash ordinary EP/DP supports W8A8 expert weights only, not BF16")
             moe.use_w8a8 = is_w8a8
