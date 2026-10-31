@@ -27,6 +27,7 @@ limitations under the License.
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <limits>
 #include <memory>
@@ -348,14 +349,51 @@ torch::Tensor clone_host_tensor(const torch::Tensor& tensor) {
   return clone_contiguous_detached_tensor(tensor);
 }
 
+// Snapshot the host block tables without launching an ATen parallel copy
+// team on every TP rank: a plain non-pinned CPU allocation plus memcpy.
+// Other layouts fall back to the generic host clone.
 template <typename Input>
 void stabilize_decode_host_tensors(Input& input) {
   input.token_ids_host = clone_host_tensor(input.token_ids_host);
   input.positions_host = clone_host_tensor(input.positions_host);
-  input.input_params.attention.host.block_tables =
-      clone_host_tensor(input.input_params.attention.host.block_tables);
+  {
+    const torch::Tensor& tensor =
+        input.input_params.attention.host.block_tables;
+    if (tensor.defined()) {
+      if (tensor.device().is_cpu() && tensor.layout() == torch::kStrided &&
+          tensor.dim() == 2 && tensor.scalar_type() == torch::kInt32 &&
+          tensor.is_contiguous() && !tensor.is_neg() && !tensor.is_conj()) {
+        torch::Tensor snapshot =
+            torch::empty(tensor.sizes(), tensor.options().pinned_memory(false));
+        if (tensor.numel() != 0) {
+          std::memcpy(snapshot.data_ptr(), tensor.data_ptr(), tensor.nbytes());
+        }
+        input.input_params.attention.host.block_tables = std::move(snapshot);
+      } else {
+        input.input_params.attention.host.block_tables =
+            clone_host_tensor(tensor);
+      }
+    }
+  }
   for (torch::Tensor& block_table : input.input_params.multi_block_tables) {
-    block_table = clone_host_tensor(block_table);
+    if (!block_table.defined()) {
+      continue;
+    }
+    if (block_table.device().is_cpu() &&
+        block_table.layout() == torch::kStrided && block_table.dim() == 2 &&
+        block_table.scalar_type() == torch::kInt32 &&
+        block_table.is_contiguous() && !block_table.is_neg() &&
+        !block_table.is_conj()) {
+      torch::Tensor snapshot = torch::empty(
+          block_table.sizes(), block_table.options().pinned_memory(false));
+      if (block_table.numel() != 0) {
+        std::memcpy(
+            snapshot.data_ptr(), block_table.data_ptr(), block_table.nbytes());
+      }
+      block_table = std::move(snapshot);
+    } else {
+      block_table = clone_host_tensor(block_table);
+    }
   }
 }
 
@@ -925,26 +963,57 @@ bool MTPWorkerImpl<TargetInput>::init_model(
     MasterStatus master_status) {
   const bool result = DraftModelSpecWorkerImpl<TargetInput>::init_model(
       model_weights_path, random_seed, master_status);
+  if (!result) {
+    return false;
+  }
 
-  if (impl_ != nullptr && impl_->get_status() == WorkerImpl::Status::LOADED) {
+  if (impl_ != nullptr &&
+      impl_->get_status() != WorkerImpl::Status::UNINITIALIZED) {
     target_spec_verify_mode_ = mtp_async::classify_target_spec_verify_mode(
-        context_.get_model_args().model_type());
+        context_.get_model_args().model_type(),
+        ModelConfig::is_python_model_impl(context_.get_model_impl()));
   }
 
   if (draft_impl_ != nullptr &&
-      draft_impl_->get_status() == WorkerImpl::Status::LOADED) {
+      draft_impl_->get_status() != WorkerImpl::Status::UNINITIALIZED) {
     const std::string& draft_model_type =
         draft_impl_->context_.get_model_args().model_type();
     combined_draft_execution_path_ =
         mtp_async::classify_combined_draft_execution_path(draft_model_type);
+    std::string resolved_draft_model_name;
+    std::string error_message;
+    CHECK(resolve_model_registration_name(
+        draft_model_type, &resolved_draft_model_name, &error_message))
+        << error_message;
+    const MtpModelCapabilities draft_capabilities =
+        ModelRegistry::get_mtp_capabilities(resolved_draft_model_name);
+    const bool is_python_draft = ModelConfig::is_python_model_impl(
+        draft_impl_->context_.get_model_impl());
+    const bool use_tp1_draft_body =
+        options_.enable_mtp_draft_body_tp1() &&
+        combined_draft_execution_path_ ==
+            mtp_async::CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION;
     const bool draft_owns_shared_weights =
-        (options_.enable_mtp_draft_body_tp1() &&
-         combined_draft_execution_path_ ==
-             mtp_async::CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION) ||
-        ModelRegistry::owns_mtp_shared_weights(draft_model_type);
-    // Preserve independently loaded checkpoint weights when the draft model
-    // advertises ownership; other drafts share the target's weights.
-    if (!draft_owns_shared_weights) {
+        use_tp1_draft_body ||
+        (is_python_draft
+             ? draft_capabilities.python_draft_owns_embedding_and_lm_head
+             : draft_capabilities.native_draft_owns_embedding_and_lm_head);
+#if defined(USE_MLU)
+    if (!is_python_draft && !use_tp1_draft_body &&
+        !uses_embedded_eagle3_draft()) {
+      if (!draft_impl_->context_.get_model_args().embedding_mode() &&
+          share_target_lm_head_with_draft() &&
+          !draft_impl_->get_lm_head()->is_weight_loaded()) {
+        auto head = impl_->get_lm_head();
+        draft_impl_->set_lm_head(head);
+      }
+      if (!draft_impl_->get_word_embedding()->is_weight_loaded()) {
+        auto embedding = impl_->get_word_embedding();
+        draft_impl_->set_word_embedding(embedding);
+      }
+    } else
+#endif
+        if (!draft_owns_shared_weights) {
       const bool python_weights_shared =
           draft_impl_->share_weights_from(*impl_);
       if (!python_weights_shared) {
@@ -978,6 +1047,48 @@ bool MTPWorkerImpl<TargetInput>::init_model(
         auto word_embedding = impl_->get_word_embedding();
         draft_impl_->set_word_embedding(word_embedding);
 #endif
+      }
+    }
+    if (impl_->get_status() != WorkerImpl::Status::UNINITIALIZED) {
+      // Resolve tail-extend vs accepted-span replay once both models have
+      // loaded, before embedding/KV cache allocation.
+      const bool full_target_replay =
+          !is_python_draft &&
+          draft_capabilities.native_draft_requires_accepted_span_replay;
+      if (full_target_replay) {
+        // Accepted-span replay is validated only for native GLM5 target/MTP
+        // pairs without an embedded Eagle3 draft, under chunked-prefill verify.
+        const std::string_view target_model_type =
+            context_.get_model_args().model_type();
+        CHECK(!ModelConfig::is_python_model_impl(context_.get_model_impl()) &&
+              !is_python_draft &&
+              is_glm5_next_target_model_type(target_model_type) &&
+              draft_model_type == "glm5_next_mtp" &&
+              !uses_embedded_eagle3_draft() &&
+              target_spec_verify_mode_ ==
+                  mtp_async::TargetSpecVerifyMode::CAUSAL_CHUNKED_PREFILL)
+            << "Incompatible draft context update: target=" << target_model_type
+            << ", draft=" << draft_model_type << ", verify_mode="
+            << static_cast<int32_t>(target_spec_verify_mode_);
+      }
+      CHECK_GT(options_.num_speculative_tokens(), 0);
+      const DraftContextReplayPolicy replay_policy{
+          /*full_target_replay=*/full_target_replay,
+          /*target_expansion_width=*/
+          full_target_replay ? options_.num_speculative_tokens() + 1 : 2,
+          /*draft_position_offset=*/full_target_replay ? -1 : 0};
+      if (draft_context_replay_policy_.has_value()) {
+        CHECK_EQ(draft_context_replay_policy_->full_target_replay,
+                 replay_policy.full_target_replay)
+            << "Draft context update policy changed after initialization.";
+        CHECK_EQ(draft_context_replay_policy_->target_expansion_width,
+                 replay_policy.target_expansion_width)
+            << "Draft context update policy changed after initialization.";
+        CHECK_EQ(draft_context_replay_policy_->draft_position_offset,
+                 replay_policy.draft_position_offset)
+            << "Draft context update policy changed after initialization.";
+      } else {
+        draft_context_replay_policy_ = replay_policy;
       }
     }
   }
@@ -1081,14 +1192,15 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_worker_no_sync(
 
 template <typename TargetInput>
 bool MTPWorkerImpl<TargetInput>::supports_expanded_spec_verify() const {
-  switch (target_spec_verify_mode_) {
-    case mtp_async::TargetSpecVerifyMode::EXPANDED_VERIFY:
-      return true;
-    case mtp_async::TargetSpecVerifyMode::PYTHON_EXPANDED_VERIFY:
-      return ModelConfig::is_python_model_impl(context_.get_model_impl());
-    default:
-      return false;
-  }
+  return target_spec_verify_mode_ ==
+         mtp_async::TargetSpecVerifyMode::EXPANDED_VERIFY;
+}
+
+template <typename TargetInput>
+bool MTPWorkerImpl<TargetInput>::requires_full_target_replay() const {
+  CHECK(draft_context_replay_policy_.has_value())
+      << "Draft context replay policy is not initialized.";
+  return draft_context_replay_policy_->full_target_replay;
 }
 
 template <typename TargetInput>
@@ -1256,8 +1368,11 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_empty(
     draft_outputs.reserve(options_.num_speculative_tokens());
 
     LlmForwardInput draft_extend_input = make_llm_draft_input(input);
-    scale_speculative_parallel_token_counts(draft_extend_input.input_params,
-                                            /*multiplier=*/2);
+    CHECK(draft_context_replay_policy_.has_value())
+        << "Draft context replay policy is not initialized.";
+    scale_speculative_parallel_token_counts(
+        draft_extend_input.input_params,
+        draft_context_replay_policy_->target_expansion_width);
     if (use_prelaunched_first_draft) {
       draft_outputs.emplace_back(
           std::move(pending_draft_context_.output.value()));
@@ -1292,8 +1407,9 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_empty(
         output, *compute_stream_, enable_schedule_overlap());
     if (can_prelaunch_next_first_draft(input)) {
       LlmForwardInput next_first_draft_input = make_llm_draft_input(input);
-      scale_parallel_token_counts(next_first_draft_input.input_params.parallel,
-                                  /*multiplier=*/2);
+      scale_parallel_token_counts(
+          next_first_draft_input.input_params.parallel,
+          draft_context_replay_policy_->target_expansion_width);
       submit_pending_first_draft(input, std::move(next_first_draft_input));
     }
     return output;
@@ -2746,7 +2862,8 @@ void MTPWorkerImpl<TargetInput>::prepare_first_draft_template(
       clone_host_tensor(metadata_template.token_ids_host);
   metadata_template.positions_host =
       clone_host_tensor(metadata_template.positions_host);
-  const int32_t num_speculative_tokens = options_.num_speculative_tokens();
+  const int32_t next_draft_token_advance =
+      options_.num_speculative_tokens() + 1;
   int32_t* template_positions =
       metadata_template.positions_host.template data_ptr<int32_t>();
   int32_t* template_tokens =
@@ -2756,8 +2873,8 @@ void MTPWorkerImpl<TargetInput>::prepare_first_draft_template(
   for (int32_t seq_id = 0;
        seq_id < metadata_template.input_params.meta.num_sequences;
        ++seq_id) {
-    template_positions[seq_id] += num_speculative_tokens;
-    template_kv_lens[seq_id] += num_speculative_tokens;
+    template_positions[seq_id] += next_draft_token_advance;
+    template_kv_lens[seq_id] += next_draft_token_advance;
     if (template_tokens[seq_id] < 0) {
       template_tokens[seq_id] = 0;
     }
@@ -3435,6 +3552,143 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
   prepare_draft_sampling(is_probabilistic_draft_, extend_input.sampling_params);
   clear_ready_events(extend_input);
   extend_input.runtime.device_tensors_ready = false;
+  if (requires_full_target_replay()) {
+    // The prepare stream has waited for target context writes.
+    const int32_t uniform_width =
+        draft_context_replay_policy_->target_expansion_width;
+    auto& input_params = extend_input.input_params;
+    specBuilder::DecodeRowContext row_ctx =
+        specBuilder::make_decode_row_context(base_input);
+    const torch::Tensor placeholder = embedding_cache_->embedding_placeholder();
+    const int32_t block_size = logical_block_size();
+    // Replays the emitted target prefix at the positions of the target hidden
+    // states, one position before the corresponding emitted tokens. The
+    // uniform replay width pads leading rows to reserved slot 0.
+    const bool dp_enabled = parallel_args_.dp_size() > 1;
+    auto& mask = input_params.expert.eplb_decode_token_mask;
+    // Non-DP token-mask remap gathers each replay row back to its source
+    // sequence and zeroes padding rows; skip the bookkeeping otherwise.
+    const bool remap_token_mask = !dp_enabled && mask.defined();
+    CHECK_EQ(last_states.size(), static_cast<size_t>(row_ctx.num_sequences));
+    specBuilder::DecodeBuildBuffers rows;
+    std::vector<torch::Tensor> embeddings;
+    std::vector<int32_t> selected_rows;
+    std::vector<int32_t> source_sequences;
+    std::vector<int32_t> valid_rows;
+    const int32_t capacity = row_ctx.num_sequences * uniform_width;
+    rows.out_token_ids.reserve(capacity);
+    rows.out_positions.reserve(capacity);
+    rows.out_new_cache_slots.reserve(capacity);
+    rows.out_kv_seq_lens.reserve(capacity + 1);
+    rows.out_q_seq_lens.reserve(capacity + 1);
+    rows.out_q_cu_seq_lens.reserve(capacity + 1);
+    rows.out_block_tables.reserve(capacity * row_ctx.block_table_stride);
+    embeddings.reserve(capacity);
+    selected_rows.reserve(row_ctx.num_sequences);
+    if (remap_token_mask) {
+      source_sequences.reserve(capacity);
+      valid_rows.reserve(capacity);
+    }
+    for (int32_t seq_id = 0; seq_id < row_ctx.num_sequences; ++seq_id) {
+      const auto& state = last_states[seq_id];
+      const int32_t span = static_cast<int32_t>(state.replay_token_ids.size());
+      CHECK(state.valid || input_params.meta.is_graph_warmup)
+          << "MTP replay requires target context";
+      if (state.valid) {
+        CHECK_GT(span, 0);
+        CHECK_EQ(state.replay_token_ids.back(), row_ctx.token_ids[seq_id]);
+        CHECK(state.replay_embeddings.defined());
+        CHECK_EQ(state.replay_embeddings.dim(), 2);
+        CHECK_EQ(state.replay_embeddings.size(0), span);
+        CHECK_GE(row_ctx.positions[seq_id], span);
+      }
+      CHECK_GE(uniform_width, span);
+      const int32_t padding = uniform_width - span;
+      for (int32_t row_id = 0; row_id < uniform_width; ++row_id) {
+        const int32_t replay_id = row_id - padding;
+        const bool valid = replay_id >= 0;
+        specBuilder::RowSpec row;
+        row.seq_id = seq_id;
+        row.token_id = valid ? state.replay_token_ids[replay_id] : 0;
+        row.position_offset =
+            valid ? replay_id - span : -row_ctx.positions[seq_id];
+        row.append_q_len_one = true;
+        row.append_block_table = true;
+        specBuilder::append_decode_row(row_ctx, row, block_size, rows);
+        if (!valid) {
+          rows.out_new_cache_slots.back() = 0;
+        }
+        embeddings.emplace_back(
+            valid ? state.replay_embeddings.select(0, replay_id) : placeholder);
+        if (remap_token_mask) {
+          source_sequences.emplace_back(seq_id);
+          valid_rows.emplace_back(valid ? 1 : 0);
+        }
+      }
+      selected_rows.emplace_back(static_cast<int32_t>(embeddings.size()) - 1);
+    }
+    const int32_t num_rows = static_cast<int32_t>(rows.out_positions.size());
+    specBuilder::set_token_position_tensors(extend_input,
+                                            rows.out_token_ids,
+                                            rows.out_positions,
+                                            base_input.token_ids.options(),
+                                            base_input.positions.options());
+    input_params.meta.num_sequences = num_rows;
+    input_params.meta.batch_forward_type = BatchForwardType::DECODE;
+    input_params.is_spec_verify = false;
+    if (draft_impl_->has_request_state_cache()) {
+      input_params.attention.host.kpool_query_lens.assign(row_ctx.num_sequences,
+                                                          uniform_width);
+    }
+    input_params.attn_metadata.reset();
+    specBuilder::update_input_params(input_params,
+                                     rows,
+                                     /*q_max_seq_len=*/1,
+                                     std::move(rows.out_q_seq_lens),
+                                     std::move(rows.out_q_cu_seq_lens),
+                                     rows.meta.kv_max_seq_len,
+                                     std::move(rows.out_kv_seq_lens),
+                                     /*update_block_tables=*/true);
+    input_params.attention.rebuild_device_buffer(device_);
+    for (auto& embedding : embeddings) {
+      if (embedding.device() != device_) {
+        embedding = embedding.to(device_);
+      }
+    }
+    input_params.embedding.input_embedding = torch::stack(embeddings);
+
+    if (!input_params.parallel.dp_global_token_nums.empty()) {
+      if (dp_enabled) {
+        scale_parallel_token_counts(input_params.parallel, uniform_width);
+      } else if (input_params.parallel.dp_global_token_nums.size() == 1) {
+        input_params.parallel.dp_global_token_nums[0] = num_rows;
+      }
+    }
+    if (dp_enabled) {
+      mask = eplb::expand_decode_token_mask(mask, uniform_width);
+    } else if (remap_token_mask) {
+      auto source_rows =
+          torch::tensor(source_sequences, torch::dtype(torch::kLong))
+              .to(mask.device());
+      auto valid_rows_tensor =
+          torch::tensor(valid_rows, torch::dtype(torch::kInt))
+              .to(mask.options());
+      mask =
+          mask.reshape({-1}).index_select(0, source_rows) * valid_rows_tensor;
+    }
+    auto& params = extend_input.sampling_params;
+    torch::TensorOptions idx_options =
+        params.selected_token_idxes().defined()
+            ? params.selected_token_idxes().options()
+            : torch::dtype(torch::kInt).device(device_);
+    params.selected_token_idxes() =
+        async_h2d_tensor(selected_rows, idx_options);
+    extend_input.runtime.device_tensors_ready = true;
+    check_draft_input_embedding(input_params.embedding.input_embedding,
+                                "target replay");
+    finish_metadata_prepare(*prepare_stream_, extend_input);
+    return;
+  }
   auto& input_params = extend_input.input_params;
   const int32_t num_sequences = input_params.meta.num_sequences;
 
@@ -3443,11 +3697,14 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
       ::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel();
   CHECK_EQ(last_states.size(), static_cast<size_t>(num_sequences))
       << "draft extend state count mismatch";
+  const std::string_view target_model_type =
+      impl_->context_.get_model_args().model_type();
   const bool use_uniform_two_rows =
       force_two_rows || dp_enabled ||
       (Platform::is_npu() &&
-       mtp_async::requires_uniform_draft_rows(
-           impl_->context_.get_model_args().model_type()) &&
+       // Recurrent targets require a uniform verification width.
+       (is_qwen3_5_target_model_type(target_model_type) ||
+        is_glm5_next_target_model_type(target_model_type)) &&
        std::any_of(last_states.begin(),
                    last_states.end(),
                    [](const EmbeddingCache::DecodeState& state) {
@@ -3678,6 +3935,15 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_inputs(
     int32_t position_offset) {
   c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
   draft_input = make_llm_draft_input(input);
+  if (requires_full_target_replay()) {
+    // The first replay proposal consumed the target hidden at
+    // current_position - 1; recursive proposals advance from that draft
+    // position, while target validation keeps the unshifted template.
+    CHECK(draft_context_replay_policy_.has_value())
+        << "Draft context replay policy is not initialized.";
+    position_offset += draft_context_replay_policy_->draft_position_offset;
+    draft_input.input_params.attn_metadata.reset();
+  }
   prepare_draft_sampling(is_probabilistic_draft_, draft_input.sampling_params);
   clear_ready_events(draft_input);
   draft_input.runtime.device_tensors_ready = false;

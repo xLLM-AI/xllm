@@ -247,7 +247,7 @@ std::optional<std::string> validate_context_parallel_config(
         return "Python model-side CP does not support model_type=" +
                model_type +
                "; supported models are qwen3, glm_moe_dsa, deepseek_v4, "
-               "glm5_next and glm5_3_flash.";
+               "glm5_next, glm5_next_text and glm5_3_flash.";
       }
       // On NPU, the Python executor resolves enable_graph=true with an
       // off-like backend to ACLGraph. ACLGraph handles Decode only, so Prefill

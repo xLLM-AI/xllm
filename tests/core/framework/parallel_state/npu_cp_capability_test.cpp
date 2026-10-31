@@ -278,7 +278,8 @@ TEST(NpuCpCapabilityTest, PythonCpPreservesQwenAndRestrictsGlm) {
             std::optional<std::string>(
                 "Python model-side CP does not support "
                 "model_type=glm_moe_dsa_mtp; supported models are qwen3, "
-                "glm_moe_dsa, deepseek_v4, glm5_next and glm5_3_flash."));
+                "glm_moe_dsa, deepseek_v4, glm5_next, glm5_next_text and "
+                "glm5_3_flash."));
 
   parallel_config.kv_split_size(3);
   EXPECT_EQ(validate_context_parallel_config(options,

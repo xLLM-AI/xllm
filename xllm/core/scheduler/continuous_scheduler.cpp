@@ -35,6 +35,7 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/framework/config/speculative_config.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/request/priority_comparator.h"
 #include "core/framework/request/request.h"
@@ -171,10 +172,21 @@ ContinuousSchedulerBase::ContinuousSchedulerBase(
   instance_info_.kv_split_size =
       ::xllm::ParallelConfig::get_instance().kv_split_size_effective();
 
+  const int32_t num_speculative_tokens = options_.num_speculative_tokens();
   if (options_.enable_schedule_overlap()) {
-    min_speculative_tokens_required_ = options_.num_speculative_tokens() * 2;
+    const bool reserve_bonus_token =
+        num_speculative_tokens > 0 &&
+        SpeculativeConfig::is_mtp_algorithm(
+            SpeculativeConfig::get_instance().speculative_algorithm());
+    if (reserve_bonus_token) {
+      CHECK_LE(num_speculative_tokens,
+               (std::numeric_limits<int32_t>::max() - 1) / 2);
+    }
+    // MTP needs N pending tokens and N+1 next-draft tokens for the bonus.
+    min_speculative_tokens_required_ =
+        num_speculative_tokens * 2 + static_cast<int32_t>(reserve_bonus_token);
   } else {
-    min_speculative_tokens_required_ = options_.num_speculative_tokens();
+    min_speculative_tokens_required_ = num_speculative_tokens;
   }
 }
 

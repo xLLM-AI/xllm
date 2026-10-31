@@ -88,6 +88,10 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
   // MTP-family drafts reserve a pre-head hidden-state placeholder per row.
   virtual int64_t get_embedding_placeholder_size() const { return 0; }
 
+  // Some drafts replay every verified KV position, so retain the full
+  // accepted span when allocating their embedding cache.
+  virtual bool requires_full_target_replay() const { return false; }
+
   void prepare_hierarchy_kv_cache_transfers();
   void finalize_hierarchy_kv_cache_transfers();
   void init_embedding_cache(int64_t num_blocks);

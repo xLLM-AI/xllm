@@ -349,7 +349,8 @@ void DraftModelSpecWorkerImpl<
 template <typename TargetInput>
 void DraftModelSpecWorkerImpl<TargetInput>::init_embedding_cache(
     int64_t num_blocks) {
-  embedding_cache_ = std::make_unique<EmbeddingCache>(num_blocks);
+  embedding_cache_ = std::make_unique<EmbeddingCache>(
+      num_blocks, requires_full_target_replay());
   const int64_t placeholder_size = get_embedding_placeholder_size();
   if (placeholder_size > 0) {
     embedding_cache_->set_placeholder(

@@ -155,8 +155,7 @@ class DecodeMetadataTestWorker final : public UnifiedMtpWorkerImpl {
                            const runtime::Options& options)
       : UnifiedMtpWorkerImpl(parallel_args, device, options, WorkerType::LLM) {
     context_.set_model_impl("python");
-    target_spec_verify_mode_ =
-        mtp_async::TargetSpecVerifyMode::PYTHON_EXPANDED_VERIFY;
+    target_spec_verify_mode_ = mtp_async::TargetSpecVerifyMode::EXPANDED_VERIFY;
   }
 
   void initialize_target_cache() {

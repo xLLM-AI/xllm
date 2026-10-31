@@ -2239,16 +2239,6 @@ bool WorkerImpl::init_model_impl(const std::string& model_weights_path,
       options_.speculative_algorithm(),
       options_.is_draft_engine(),
       ModelConfig::is_python_model_impl(context_.get_model_impl()));
-#if defined(USE_MLU)
-  const bool native_glm5_next =
-      !ModelConfig::is_python_model_impl(context_.get_model_impl()) &&
-      (is_glm5_next_target_model_type(args.model_type()) ||
-       args.model_type() == "glm5_next_mtp");
-  CHECK(!(native_glm5_next && options_.enable_speculative_decode()))
-      << "Native MLU GLM5-Next speculative decoding is not supported yet: "
-         "Dense Validate Span and accepted-span state replay are not wired "
-         "into the MTP worker. Disable speculative decoding.";
-#endif
   auto quant_args = model_loader->quant_args();
   const bool embedding_mode = options_.task_type() == "embed";
   args.embedding_mode(embedding_mode);

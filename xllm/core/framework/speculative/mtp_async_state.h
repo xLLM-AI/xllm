@@ -26,18 +26,15 @@ enum class TargetSpecVerifyMode {
   GENERIC,
   CAUSAL_CHUNKED_PREFILL,
   EXPANDED_VERIFY,
-  PYTHON_EXPANDED_VERIFY,
 };
 
 // Keep target verification policy closed over model types with validated
-// layouts. Unknown models retain the generic path.
+// layouts. Unknown models retain the generic path. The python-model flag
+// distinguishes native implementations from PyCausalLM wrappers whose
+// expanded-verify layout is only exercised through the python path.
 TargetSpecVerifyMode classify_target_spec_verify_mode(
-    std::string_view model_type);
-
-// Whether the target's speculative decode path needs two uniform draft rows
-// after every fully accepted request. Keep model recognition in the policy
-// classifier; the worker only consumes this resolved capability.
-bool requires_uniform_draft_rows(std::string_view model_type);
+    std::string_view model_type,
+    bool is_python_model);
 
 enum class CombinedDraftExecutionPath {
   UNSUPPORTED,
