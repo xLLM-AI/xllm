@@ -113,13 +113,13 @@ def test_legacy_shim_and_glm_shared_layer_use_same_binding() -> None:
 def test_initialization_is_idempotent_and_policy_is_fixed() -> None:
     plan = prepare_rms_norm()
     initialize_runtime()
-    assert initialize(device="npu")["rms_norm"] is plan
+    assert initialize(device="npu", operations=("rms_norm",))["rms_norm"] is plan
     assert plan.spec.solution == "xlite"
     assert plan.function is torch.ops.xllm_kernel.xlite_rms_norm
     with pytest.raises(RuntimeError, match="restart"):
         initialize(device="cuda")
     with pytest.raises(RuntimeError, match="restart"):
-        initialize(device="npu", execution_mode="changed")
+        initialize(device="npu", operations=("rms_norm",), execution_mode="changed")
     importlib.import_module("xllm_kernel.custom_ops")
     assert prepare_rms_norm() is plan
 

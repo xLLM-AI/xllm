@@ -8,6 +8,10 @@ and standalone numerical validation and benchmarking. The package starts
 with Ascend NPU support and is organized to accommodate more operator
 families and backend implementations.
 
+The catalog provides 1 operation contracts and 3 implementation variants across
+ACLNN, ATB, HCCL, Torch, TileLang and xlite. Model integration currently uses
+RMSNorm; registering a backend does not replace other model call sites.
+
 It features:
 
 - Operator contracts that define numerical, mutation and aliasing semantics.
@@ -45,7 +49,7 @@ Check that the xlite backend can be loaded and prepared:
 python - <<'PY'
 from xllm_kernel import initialize
 
-prepared = initialize(device="npu", overrides={"rms_norm": "xlite"})["rms_norm"]
+prepared = initialize(device="npu", operations=("rms_norm",), overrides={"rms_norm": "xlite"})["rms_norm"]
 print(prepared.spec.name)  # npu.xlite.rms_norm
 PY
 ```
@@ -57,7 +61,7 @@ Complete the kernel installation above first, then build and install the xLLM
 wheel with the normal
 [xLLM build prerequisites](../docs/src/content/docs/en/getting_started/quick_start.md).
 `xllm-kernel` is used by the Python model executor, so launch with
-`--model_impl=python` and a supported Python model. 
+`--model_impl=python` and a supported Python model.
 
 From the same repository root, after installing xllm-kernel :
 

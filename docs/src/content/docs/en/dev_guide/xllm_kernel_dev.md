@@ -74,7 +74,7 @@ documentation consistent:
 [`OpContract`](https://github.com/xLLM-AI/xllm/blob/main/xllm-kernel/python/xllm_kernel/registry.py)
 currently describes `operation`, `version`, `mutates`, `aliases_inputs`, and
 `numerical_mode`. `KernelSpec` also declares the implementation name, `device`,
-`execution_modes`, `input_domain`, `solution`, and `priority`. `input_domain` is
+`execution_modes`, `input_domain`, `solution`, `variant`, `binding`, and `priority`. `input_domain` is
 currently a descriptive string: the registry does not use it to validate shapes
 or layouts automatically. The implementation must check arguments before launch.
 
@@ -104,13 +104,15 @@ _native_rms_norm = torch_npu.npu_rms_norm
 
 
 @register_kernel(
-    name="npu.xllm_native.rms_norm",
+    name="npu.aclnn.rms_norm.torch_npu",
     contract=RMS_NORM_CONTRACT,
     device="npu",
     execution_modes=("eager", "aclgraph"),
     input_domain="torch_npu.npu_rms_norm tensor domain",
-    solution="native",
-    priority=10,
+    solution="aclnn",
+    variant="torch_npu",
+    binding="torch_npu",
+    priority=20,
 )
 def rms_norm(input: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     return _native_rms_norm(input, weight, epsilon=eps)[0]
@@ -130,7 +132,7 @@ these SDK-free definitions before importing available backend candidates.
 `register_kernel` handles implementation selection metadata.
 `custom_ops.register_custom_op` separately handles Torch schemas, device kernels
 and optional fake implementations. See the existing
-[native adapter](https://github.com/xLLM-AI/xllm/blob/main/xllm-kernel/python/xllm_kernel/ops/rms_norm/npu.py)
+[native adapter](https://github.com/xLLM-AI/xllm/blob/main/xllm-kernel/python/xllm_kernel/ops/rms_norm/aclnn_torch_npu.py)
 and
 [xlite adapter](https://github.com/xLLM-AI/xllm/blob/main/xllm-kernel/python/xllm_kernel/ops/rms_norm/xlite.py).
 
@@ -152,7 +154,7 @@ conditions such as physical formats.
 ### 3.2 Automatic selection and preparation
 
 ```text
-initialize(device, execution_mode, overrides)
+initialize(device, execution_mode, operations, overrides)
     -> discover all OPERATION definitions from catalog._BUILTINS
     -> resolve XLLM_KERNEL_OVERRIDE_<OPERATION> and explicit overrides
     -> import available backend modules; decorators register callables
@@ -168,14 +170,14 @@ shape, or reselect during forward/replay. The selected implementation still
 validates its own input domain. Current RMSNorm choices and their supported
 domains are described in [section 3.4](#34-public-api-and-current-coverage).
 
-The host calls `xllm_kernel.initialize(device="npu")` after loading native
+The host calls `xllm_kernel.initialize(device="npu", operations=("rms_norm",))` after loading native
 operators and before model import or graph capture, then logs the resulting
 operation/name pairs. Direct callers receive `Mapping[str, PreparedKernel]`:
 
 ```python
 from xllm_kernel import initialize
 
-bindings = initialize(device="npu", overrides={"rms_norm": "xlite"})
+bindings = initialize(device="npu", operations=("rms_norm",), overrides={"rms_norm": "xlite"})
 plan = bindings["rms_norm"]
 ```
 
@@ -201,9 +203,23 @@ operation's backend list and use `@register_kernel` for their metadata/priority.
 The host needs no new operator-specific environment-variable handling. Extend
 the operation's offline suite and model call sites separately.
 
-The unified initializer currently serves RMSNorm; multi-operation behavior is
-covered by CPU test operations. Model integration tests remain necessary when
-adding a real operator or changing its semantics.
+The catalog contains 1 operations and 3 implementation variants; see section 8.
+The model host currently binds RMSNorm only. Registration does not replace model
+call sites, and model integration tests remain necessary for new consumers.
+
+
+`operations` declares the complete set required by this process; omitting it
+prepares the entire catalog. The model host currently requests `("rms_norm",)` so
+unused collectives do not require a process group. Each standalone CLI prepares
+only its target. Multi-operation consumers declare all operations in one call.
+Changing this set, device, mode or effective overrides requires a new worker.
+
+`BackendModule.implementations` provides SDK-free CLI choices; decorators own
+complete selection metadata. Binding variants use separate modules such as
+`aclnn_torch_npu.py` and `aclnn_xllm.py`. Host adapters require `xllm_export`, loaded
+by the model before initialization or by the standalone CLI when explicitly
+requested. Independent torch_npu/xlite preparation remains available without the
+host. Import or ABI errors in installed backends still propagate.
 
 ### 3.3 Vendor operators, custom registration, and extension builds
 
@@ -211,13 +227,12 @@ RMSNorm currently provides these implementation entry points:
 
 | Implementation | Execution entry | Torch schema owner | Package build option |
 | --- | --- | --- | --- |
-| `npu.xllm_native.rms_norm` | `torch_npu.npu_rms_norm(input, weight, epsilon=eps)[0]` | torch_npu | None |
+| `npu.aclnn.rms_norm.torch_npu` | `torch_npu.npu_rms_norm(input, weight, epsilon=eps)[0]` | torch_npu | None |
 | `npu.xlite.rms_norm` | `csrc/xlite/rms_norm.cpp` | `xllm_kernel::xlite_rms_norm` | `XLLM_KERNEL_BUILD_XLITE=1` |
 
 Native calls torch_npu directly and returns only its normalized output, matching
 the former C++ wrapper's tuple selection. It requires neither an xLLM host nor
-a package-owned native extension. Its selector is retained for configuration
-compatibility. The vendor owns its schema and FakeTensor implementation.
+a package-owned native extension. Its selector is `npu.aclnn.rms_norm.torch_npu`. The vendor owns its schema and FakeTensor implementation.
 
 `custom_ops.register_custom_op` is the shared preparation-time Torch registration
 helper. For a new Python kernel, provide its callable, explicit `mutates_args`
@@ -275,7 +290,8 @@ output = rms_norm(input, weight, eps)
 
 | Operator | Implementation | Execution modes | Priority and selection |
 | --- | --- | --- | --- |
-| `rms_norm` | `npu.xllm_native.rms_norm` | Eager, ACLGraph | Priority 10; automatic choice when both are available |
+| `rms_norm` | `npu.aclnn.rms_norm.torch_npu` | Eager, ACLGraph | Priority 20; default for this operation |
+| `rms_norm` | `npu.aclnn.rms_norm.xllm` | Eager, ACLGraph | Priority 10; requires the loaded host extension |
 | `rms_norm` | `npu.xlite.rms_norm` | Eager, ACLGraph | Priority 0; selectable through the unified override |
 
 Native preserves torch_npu's tensor domain. Its higher priority retains that
@@ -288,7 +304,7 @@ numerical equivalence is tolerance-based.
 
 The current host integration covers plain RMSNorm in shared layers and GLM-5.3
 MLA preprocessing. Residual, quantized, and Gemma normalization keep their
-existing paths. Other operator families, CUDA adapters, shape specialization,
+existing paths. Model integration for other operators, CUDA adapters, shape specialization,
 profiling/replay, compiler monitoring, and tuning remain future extensions.
 Adding a declaration or test double does not establish device or model support.
 
@@ -337,7 +353,7 @@ Each logical case implements these interfaces:
 | `unsupported_reason(plan)` | Returns a reason when inapplicable, otherwise `None`; do not infer support from execution failures |
 | `prepare(plan)` | Creates inputs and returns a `PreparedCase` |
 
-`PreparedCase` has three fields:
+`PreparedCase` has four fields:
 
 - `function()`: a zero-argument callable binding the inputs, scalar parameters,
   and prepared implementation. It may return a tensor, tuple, or another
@@ -369,6 +385,9 @@ size/scale arguments and dictionary outputs to verify that runners do not depend
 on RMSNorm's input/weight/eps structure. That operator tests the shared workflow;
 it does not represent additional device operator support.
 
+`PreparedCase.reset` optionally restores mutable inputs before validation, warmup,
+capture/replay, and each timed call.
+
 ## 5. Shared validation, timing, and reporting
 
 ```text
@@ -395,14 +414,12 @@ numerical failures; report and raise capture/replay failures. A run with no
 passing cases cannot produce a successful report. Device execution errors must
 not trigger eager or solution fallback followed by accepted performance results.
 
-The current timer supports NPU eager and ACLGraph execution. It reports host
-enqueue time, NPU event intervals, and synchronized wall time. Each graph benchmark
-capture contains 64 independent calls, and replay timings are normalized per
-operator call. Cases must therefore be safe to invoke
-repeatedly, with reusable input state during timing. For new operators that
-mutate inputs, consume state, or depend on randomness, first design explicit
-reset behavior and timing boundaries, then extend the common case interface.
-Do not apply the current loop unchanged.
+The NPU timer supports eager and ACLGraph execution, reporting host enqueue,
+device-event intervals and synchronized wall time. Without reset, each capture
+contains 64 independent calls. Mutable cases capture one call and reset before
+capture, replay and each measurement. Reset is outside device-event and host
+enqueue intervals; the mutating path's wall time includes reset and reports this
+boundary explicitly.
 
 Preparation, warmup, and capture are excluded from steady-state timing. Keep
 inputs, cases, devices, execution modes, and timing settings consistent. Report
@@ -427,10 +444,10 @@ suite-specific options. For example:
 
 ```bash
 python -m xllm_kernel.numerics --operation rms_norm --device npu --mode eager \
-  --implementation npu.xllm_native.rms_norm --rows 1 16 --widths 6144 \
+  --implementation npu.aclnn.rms_norm.torch_npu --rows 1 16 --widths 6144 \
   --revision "$(git rev-parse HEAD)" --output numerics.json
 python -m xllm_kernel.benchmark --operation rms_norm --device npu --mode aclgraph \
-  --implementation npu.xllm_native.rms_norm --rows 1 16 --widths 6144 \
+  --implementation npu.aclnn.rms_norm.torch_npu --rows 1 16 --widths 6144 \
   --iterations 50 --revision "$(git rev-parse HEAD)" --output benchmark.json
 ```
 
@@ -452,14 +469,14 @@ host's `tests/CMakeLists.txt`, CTest, or `all_tests`. Common tests require the
 package, PyTorch, pytest, and setuptools, but no NPU or host extension:
 
 ```bash
-python -m pytest -q xllm-kernel/test --ignore=xllm-kernel/test/npu
+python -m pytest -q xllm-kernel/test --ignore=xllm-kernel/test/npu --ignore=xllm-kernel/test/distributed
 ```
 
 NPU integration tests require matching host and backend build artifacts. Run
 the backends sequentially in separate processes on idle devices:
 
 ```bash
-XLLM_KERNEL_OVERRIDE_RMS_NORM=npu.xllm_native.rms_norm \
+XLLM_KERNEL_OVERRIDE_RMS_NORM=npu.aclnn.rms_norm.torch_npu \
   python -m pytest -q xllm-kernel/test/npu/test_kernel_rms_norm_npu.py
 XLLM_KERNEL_OVERRIDE_RMS_NORM=npu.xlite.rms_norm \
   python -m pytest -q xllm-kernel/test/npu/test_kernel_xlite_rms_norm_npu.py
@@ -517,3 +534,43 @@ tests. Shared initialization handles the selection without a new host branch.
   description.
 - Before adding JIT, state reset, multiple devices, or a new platform, define
   explicit interfaces and lifecycles, then add implementations.
+
+## 8. GLM-5.3 operator inventory and explicit adapters
+
+The initial expanded inventory follows `xllm/python/models/glm5_2.py`, its
+`deepseek_v32.py` parent path, `layers/embedding.py`, `layers/linear.py`, and
+`kernels_npu/{normalization,activation,quantization,rotary_embedding,moe,mla,sparse_attention}.py`.
+This is the full GLM-5.3 DSA model path. The code follows main's catalog, runtime,
+selection and import-driven registration architecture.
+
+| Operation | Solution and optional variant |
+| --- | --- |
+| `rms_norm` | `aclnn.xllm`, `aclnn.torch_npu`, `xlite` |
+
+The inventory contains 1 operation contracts and 3 implementation variants
+across the listed solutions. `aclnn` includes both standard CANN operators and custom
+operators exposed through the ACLNN API. An xLLM binding can dispatch to multiple
+ACLNN kernels; the variant name identifies the wrapper, not a fixed binary.
+`atb` wraps actual ATB execution. `hccl` identifies the communication library.
+`torch` is an explicit PyTorch NPU composition, and `tilelang` resolves an existing
+compiled AOT operator. xlite uses pinned GVirt launchers on the current stream.
+Initialization imports available candidates for the requested operations, then freezes and selects once.
+
+For new numerical suites, `tensor_suite` builds operation-owned shape matrices.
+`Example` binds a tensor tree, a CPU reference, declared mutations, comparison
+tolerances and optional semantic canonicalizers. `TensorCase` carries metadata
+without loading a device SDK. `PreparedCase.reset` restores mutable inputs
+outside the timed event pairs; graph capture uses one operation for mutable
+cases. Per-operator test files share the lifecycle in `test/npu/operator_checks.py`.
+No package test is added to `tests/CMakeLists.txt`.
+
+Catalog entries and CPU tests do not establish NPU or full-model correctness.
+Device accuracy, performance and end-to-end evidence must record the actual
+revision, inputs, occupancy and exit status; pre-refactor results do not validate
+this implementation.
+
+Routing and SwiGLU semantics were cross-checked against the official
+[MoeInitRoutingV2 API](https://www.hiascend.com/document/detail/en/Pytorch/2610/apiref/customapi/docs/en/custom_APIs/torch_npu/torch_npu-npu_moe_init_routing_v2.md)
+and [DequantSwigluQuant API](https://www.hiascend.com/document/detail/en/Pytorch/2610/apiref/customapi/docs/en/custom_APIs/torch_npu/torch_npu-npu_dequant_swiglu_quant.md).
+The installed runtime must provide those requested interfaces; preparation or
+execution fails visibly when it does not. Documentation is not binary ABI proof.

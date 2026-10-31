@@ -218,6 +218,42 @@ def test_graph_output_is_validated_before_timing(
         assert not cpu_runtime.measurements
 
 
+def test_mutating_graph_resets_inputs_and_captures_one_call(
+    monkeypatch: pytest.MonkeyPatch, cpu_runtime: SimpleNamespace
+) -> None:
+    from xllm_kernel.benchmark.npu import measure_graph
+
+    value = torch.zeros(1)
+    output = torch.zeros(1)
+    calls = []
+    resets = []
+
+    def run() -> torch.Tensor:
+        calls.append(1)
+        value.add_(1)
+        output.copy_(value)
+        return output
+
+    def reset() -> None:
+        resets.append(1)
+        value.zero_()
+
+    prepared = PreparedCase(
+        run,
+        lambda function: {"status": "passed" if function().item() == 1 else "failed"},
+        {},
+        reset,
+    )
+    monkeypatch.setattr(torch.npu, "NPUGraph", lambda: SimpleNamespace(replay=run), raising=False)
+    monkeypatch.setattr(torch.npu, "graph", lambda graph: nullcontext(), raising=False)
+    row = {}
+    measure_graph(prepared, row, iterations=2, repeats=1)
+    assert row["status"] == "passed"
+    assert len(calls) == 3  # Capture, validation replay, and the timing double.
+    assert len(resets) == 2
+    assert cpu_runtime.measurements == [{"iterations": 2, "repeats": 1, "divisor": 1, "reset": reset}]
+
+
 @dataclass(frozen=True)
 class _AffineCase:
     """A test operation with different argument names and structured outputs."""
@@ -352,8 +388,24 @@ def test_reports_render_multiple_operations_without_loading_them(module: str, tm
     report = {
         "status": "passed",
         "cases": [
-            {"case_id": "add/1", "operation": "add", "implementation": "test.add", "status": "passed"},
-            {"case_id": "matmul/2", "operation": "matmul", "implementation": "test.matmul", "status": "passed"},
+            {
+                "case_id": "add/1",
+                "operation": "add",
+                "implementation": "test.add",
+                "solution": "torch",
+                "variant": "",
+                "binding": "torch",
+                "status": "passed",
+            },
+            {
+                "case_id": "matmul/2",
+                "operation": "matmul",
+                "implementation": "test.matmul",
+                "solution": "torch",
+                "variant": "",
+                "binding": "torch",
+                "status": "passed",
+            },
         ],
     }
     output = tmp_path / "mixed.json"

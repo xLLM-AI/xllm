@@ -33,13 +33,18 @@ def _extension_options() -> dict:
     if (xlite / ".xlite_git_head").read_text().strip() != _GVIRT_REVISION:
         raise RuntimeError(f"The xlite bridge requires GVirt {_GVIRT_REVISION}")
     cann = Path(os.environ.get("ASCEND_HOME_PATH", "/usr/local/Ascend/ascend-toolkit/latest"))
-    libraries = ["libxlite_kernels_bf16_npu.so", "libxlite_kernels_f16_npu.so"]
+    libraries = ["libxlite_kernels_common_npu.so", "libxlite_kernels_bf16_npu.so", "libxlite_kernels_f16_npu.so"]
     manifest = {
         "schema_version": 1,
         "gvirt_revision": _GVIRT_REVISION,
         "torch": torch.__version__,
         "torch_npu": torch_npu.__version__,
         "source_sha256": hashlib.sha256((_ROOT / "csrc/xlite/rms_norm.cpp").read_bytes()).hexdigest(),
+        "sources_sha256": {
+            str(path.relative_to(_ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted((_ROOT / "csrc/xlite").glob("*"))
+            if path.suffix in (".cpp", ".h")
+        },
         "libraries": {name: hashlib.sha256((xlite / "lib" / name).read_bytes()).hexdigest() for name in libraries},
     }
 
@@ -54,10 +59,16 @@ def _extension_options() -> dict:
         "ext_modules": [
             CppExtension(
                 "xllm_kernel._xlite",
-                sources=["csrc/xlite/rms_norm.cpp"],
-                include_dirs=[str(npu / "include"), str(cann / "include")],
+                sources=[str(path.relative_to(_ROOT)) for path in sorted((_ROOT / "csrc/xlite").glob("*.cpp"))],
+                include_dirs=[str(_ROOT), str(npu / "include"), str(cann / "include")],
                 library_dirs=library_dirs,
-                libraries=["torch_npu", "ascendcl", "xlite_kernels_bf16_npu", "xlite_kernels_f16_npu"],
+                libraries=[
+                    "torch_npu",
+                    "ascendcl",
+                    "xlite_kernels_common_npu",
+                    "xlite_kernels_bf16_npu",
+                    "xlite_kernels_f16_npu",
+                ],
                 runtime_library_dirs=["$ORIGIN/../torch_npu/lib", "$ORIGIN/../xlite/lib", *library_dirs],
                 extra_compile_args=["-O2", "-std=c++17"],
             ),

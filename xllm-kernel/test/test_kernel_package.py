@@ -63,7 +63,7 @@ def _backend_registry(monkeypatch: pytest.MonkeyPatch, _registry: KernelRegistry
     monkeypatch.setattr(rms_norm.OPERATION, "prepared", None)
     monkeypatch.setattr(runtime, "find_spec", lambda name: object() if name == "torch_npu" else None)
     yield _registry
-    for backend in ("npu", "xlite"):
+    for backend in ("aclnn_xllm", "aclnn_torch_npu", "xlite"):
         sys.modules.pop(f"xllm_kernel.ops.rms_norm.{backend}", None)
         vars(rms_norm).pop(backend, None)
 
@@ -241,11 +241,11 @@ def test_native_module_import_registers_once_and_returns_normalized_output(
         return normalized, rstd
 
     monkeypatch.setitem(sys.modules, "torch_npu", SimpleNamespace(npu_rms_norm=native_rms_norm))
-    module = importlib.import_module("xllm_kernel.ops.rms_norm.npu")
+    module = importlib.import_module("xllm_kernel.ops.rms_norm.aclnn_torch_npu")
     assert importlib.import_module(module.__name__) is module
     _backend_registry.freeze()
     plan = _backend_registry.prepare(RMS_NORM_CONTRACT, device="npu", execution_mode="aclgraph")
-    assert plan.function is module._rms_norm
+    assert plan.function is module.rms_norm
     assert plan.generation == 1
     assert plan.function(value, weight, 0.125) is normalized
     assert calls == [(value, weight, 0.125)]
@@ -258,7 +258,7 @@ def test_native_missing_operator_fails_before_registration(
 
     monkeypatch.setitem(sys.modules, "torch_npu", SimpleNamespace())
     with pytest.raises(AttributeError, match="npu_rms_norm"):
-        initialize(device="npu")
+        initialize(device="npu", operations=("rms_norm",))
     _backend_registry.freeze()
     with pytest.raises(ValueError, match="registry is empty"):
         _backend_registry.prepare(RMS_NORM_CONTRACT, device="npu", execution_mode="eager")
@@ -276,7 +276,7 @@ def test_native_execution_error_propagates_without_retry(
         raise RuntimeError("native execution failed")
 
     monkeypatch.setitem(sys.modules, "torch_npu", SimpleNamespace(npu_rms_norm=fail))
-    plan = initialize(device="npu")["rms_norm"]
+    plan = initialize(device="npu", operations=("rms_norm",))["rms_norm"]
     with pytest.raises(RuntimeError, match="native execution failed"):
         plan.function(object(), object(), 1e-5)
     assert calls == [1e-5]
@@ -289,14 +289,14 @@ def test_initialize_selects_highest_priority_and_reuses_frozen_binding(
 
     monkeypatch.setitem(sys.modules, "torch_npu", SimpleNamespace(npu_rms_norm=lambda *args, **kwargs: (42, 0)))
     _backend_registry.register(replace(_spec("npu.other"), priority=99), _identity)
-    plan = initialize(device="npu")["rms_norm"]
+    plan = initialize(device="npu", operations=("rms_norm",))["rms_norm"]
     assert plan.spec.name == "npu.other"
-    assert initialize(device="npu")["rms_norm"] is plan
+    assert initialize(device="npu", operations=("rms_norm",))["rms_norm"] is plan
     assert "xllm_kernel.ops.rms_norm.xlite" not in sys.modules
     with pytest.raises(RuntimeError, match="frozen"):
         _backend_registry.register(_spec("late"), _identity)
     with pytest.raises(RuntimeError, match="restart the worker"):
-        initialize(device="npu", overrides={"rms_norm": "xlite"})
+        initialize(device="npu", operations=("rms_norm",), overrides={"rms_norm": "xlite"})
 
 
 @pytest.mark.parametrize("operation", ["missing", ""])
@@ -306,8 +306,8 @@ def test_unknown_initialization_operation_fails_without_loading_backend(
     from xllm_kernel import initialize
 
     with pytest.raises(ValueError, match="unknown kernel override operation"):
-        initialize(device="npu", overrides={operation: "native"})
-    assert "xllm_kernel.ops.rms_norm.npu" not in sys.modules
+        initialize(device="npu", operations=("rms_norm",), overrides={operation: "native"})
+    assert "xllm_kernel.ops.rms_norm.aclnn_torch_npu" not in sys.modules
     assert "xllm_kernel.ops.rms_norm.xlite" not in sys.modules
 
 

@@ -142,18 +142,14 @@ def _cases(args: argparse.Namespace) -> tuple[NumericsCase, ...]:
 
 
 def _prepare(device: str, mode: str, implementation: str) -> PreparedKernel:
-    from xllm_kernel import initialize
+    from xllm_kernel.runtime import prepare_operation
 
-    prepared = initialize(device=device, execution_mode=mode, overrides={"rms_norm": implementation})
-    plan = prepared["rms_norm"]
-    if plan.spec.name != implementation:
-        raise ValueError(f"requested {implementation!r}, but a kernel override selected {plan.spec.name!r}")
-    return plan
+    return prepare_operation("rms_norm", device, mode, implementation)
 
 
 SUITE = OperationSuite(
     operation="rms_norm",
-    implementations=("npu.xllm_native.rms_norm", "npu.xlite.rms_norm"),
+    implementations=("npu.aclnn.rms_norm.xllm", "npu.aclnn.rms_norm.torch_npu", "npu.xlite.rms_norm"),
     add_arguments=_add_arguments,
     cases=_cases,
     prepare=_prepare,

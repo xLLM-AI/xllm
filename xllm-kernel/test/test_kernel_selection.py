@@ -96,6 +96,63 @@ def _one_operation(
     return operation
 
 
+def test_requested_subset_does_not_import_unused_collectives(
+    monkeypatch: pytest.MonkeyPatch, registry: KernelRegistry
+) -> None:
+    add = _one_operation(monkeypatch, registry)
+    collective = Operation(_contract("collective"), (BackendModule("requires_process_group", "cpu", ()),))
+    monkeypatch.setattr(runtime, "load_operations", lambda: (add, collective))
+    imported = []
+    monkeypatch.setattr(runtime, "import_module", imported.append)
+    result = runtime.initialize(device="cpu", execution_mode="eager", operations=("add",))
+    assert tuple(result) == ("add",)
+    assert imported == ["add.backends"]
+    assert collective.prepared is None
+    with pytest.raises(RuntimeError, match="restart"):
+        runtime.initialize(device="cpu", execution_mode="eager")
+    assert imported == ["add.backends"]
+
+
+@pytest.mark.parametrize("operations", [(), ("missing",), ("add", "add")])
+def test_invalid_operation_set_fails_before_import(
+    monkeypatch: pytest.MonkeyPatch, registry: KernelRegistry, operations: tuple[str, ...]
+) -> None:
+    _one_operation(monkeypatch, registry)
+    imported = []
+    monkeypatch.setattr(runtime, "import_module", imported.append)
+    with pytest.raises(ValueError, match="invalid kernel operation set"):
+        runtime.initialize(device="cpu", execution_mode="eager", operations=operations)
+    assert not imported
+
+
+def test_offline_preparation_uses_startup_selection_and_rejects_environment_redirection(
+    monkeypatch: pytest.MonkeyPatch, registry: KernelRegistry
+) -> None:
+    operation = _one_operation(monkeypatch, registry)
+    monkeypatch.setenv("XLLM_KERNEL_OVERRIDE_ADD", "custom")
+    with pytest.raises(ValueError, match="environment override changed"):
+        runtime.prepare_operation("add", "cpu", "eager", "add.native")
+    assert operation.get_prepared().spec.name == "add.custom"
+
+
+def test_missing_optional_parent_does_not_probe_its_child(
+    monkeypatch: pytest.MonkeyPatch, registry: KernelRegistry
+) -> None:
+    operation = _one_operation(monkeypatch, registry)
+    operation.backends += (BackendModule("optional.backend", "cpu", ("missing_parent", "missing_parent.extension")),)
+    probed = []
+
+    def probe(name: str) -> None:
+        probed.append(name)
+        assert name == "missing_parent"
+        return None
+
+    monkeypatch.setattr(runtime, "find_spec", probe)
+    result = runtime.initialize(device="cpu", execution_mode="eager")
+    assert probed == ["missing_parent"]
+    assert result["add"].excluded[-1] == ("optional.backend", "missing dependencies: missing_parent")
+
+
 @pytest.mark.parametrize("target", ["custom", "add.custom"])
 def test_solution_and_exact_name_overrides_select_lower_priority(
     monkeypatch: pytest.MonkeyPatch, registry: KernelRegistry, target: str

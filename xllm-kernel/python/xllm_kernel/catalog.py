@@ -27,6 +27,7 @@ class BackendModule:
     module: str
     device: str
     requires: tuple[str, ...]
+    implementations: tuple[str, ...] = ()
 
 
 @dataclass
@@ -34,6 +35,11 @@ class Operation:
     contract: OpContract
     backends: tuple[BackendModule, ...]
     prepared: PreparedKernel | None = field(default=None, init=False, repr=False)
+
+    @property
+    def implementations(self) -> tuple[str, ...]:
+        """Expose CLI choices without importing device backends."""
+        return tuple(name for backend in self.backends for name in backend.implementations)
 
     def get_prepared(self) -> PreparedKernel:
         """Return the startup binding without performing selection."""

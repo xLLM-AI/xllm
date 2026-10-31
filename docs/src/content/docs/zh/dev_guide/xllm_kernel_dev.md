@@ -53,7 +53,7 @@ xLLM runtime。算子接收准备好的输入，不在 solution 内另建请求�
 
 [`OpContract`](https://github.com/xLLM-AI/xllm/blob/main/xllm-kernel/python/xllm_kernel/registry.py) 当前表达 operation、version、mutates、
 aliases_inputs 和 numerical_mode。`KernelSpec` 另外声明实现名、device、execution_modes、
-input_domain、solution 和 priority。`input_domain` 当前是描述字符串，注册表不会据此自动验证
+input_domain、solution、variant、binding 和 priority。`input_domain` 当前是描述字符串，注册表不会据此自动验证
 shape 或布局；真实实现仍须在 launch 前检查参数。
 
 给同一个算子新增 solution 时，只有语义一致的实现才能使用相同的 `OpContract`。
@@ -78,13 +78,15 @@ _native_rms_norm = torch_npu.npu_rms_norm
 
 
 @register_kernel(
-    name="npu.xllm_native.rms_norm",
+    name="npu.aclnn.rms_norm.torch_npu",
     contract=RMS_NORM_CONTRACT,
     device="npu",
     execution_modes=("eager", "aclgraph"),
     input_domain="torch_npu.npu_rms_norm tensor domain",
-    solution="native",
-    priority=10,
+    solution="aclnn",
+    variant="torch_npu",
+    binding="torch_npu",
+    priority=20,
 )
 def rms_norm(input: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     return _native_rms_norm(input, weight, epsilon=eps)[0]
@@ -100,7 +102,7 @@ def rms_norm(input: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Ten
 
 `register_kernel` 负责实现选择元数据；`custom_ops.register_custom_op` 另行负责 Torch schema、
 设备 kernel 和可选 fake 的注册。对照现有
-[native adapter](https://github.com/xLLM-AI/xllm/blob/main/xllm-kernel/python/xllm_kernel/ops/rms_norm/npu.py) 和
+[native adapter](https://github.com/xLLM-AI/xllm/blob/main/xllm-kernel/python/xllm_kernel/ops/rms_norm/aclnn_torch_npu.py) 和
 [xlite adapter](https://github.com/xLLM-AI/xllm/blob/main/xllm-kernel/python/xllm_kernel/ops/rms_norm/xlite.py) 阅读。
 
 复用宿主已有 Torch op 时，保留原有 schema、实现和 fake 的所有权。
@@ -115,7 +117,7 @@ NPU 实现使用当前 PyTorch stream，并遵循 torch_npu 的提交队列和 T
 ### 3.2 自动选择与准备阶段
 
 ```text
-initialize(device, execution_mode, overrides)
+initialize(device, execution_mode, operations, overrides)
     -> 从 catalog._BUILTINS 发现所有 OPERATION 定义
     -> 解析 XLLM_KERNEL_OVERRIDE_<OPERATION> 和显式 overrides
     -> 导入可用 backend 模块，由装饰器登记 callable
@@ -130,13 +132,13 @@ initialize(device, execution_mode, overrides)
 的当前实现和支持范围见[第 3.4 节](#34-公共-api-与当前支持范围)。
 
 宿主在加载 native 算子后、导入模型或 graph capture 前调用
-`xllm_kernel.initialize(device="npu")`，并记录各算子的选中实现。直接调用返回
+`xllm_kernel.initialize(device="npu", operations=("rms_norm",))`，并记录各算子的选中实现。直接调用返回
 `Mapping[str, PreparedKernel]`：
 
 ```python
 from xllm_kernel import initialize
 
-bindings = initialize(device="npu", overrides={"rms_norm": "xlite"})
+bindings = initialize(device="npu", operations=("rms_norm",), overrides={"rms_norm": "xlite"})
 plan = bindings["rms_norm"]
 ```
 
@@ -155,8 +157,18 @@ graph。数值验证和 benchmark 复用同一初始化入口，环境覆盖若�
 扩展该算子的 backend 列表，并用 `@register_kernel` 声明元数据与优先级。宿主无需新增逐算子
 环境变量处理逻辑。离线 suite 和模型调用点仍分别扩展。
 
-目前真实算子仍只有 RMSNorm；多算子初始化由 CPU 测试算子覆盖。新增真实算子或改变语义后，
-仍需验证模型接入路径。
+catalog 现包含 1 个算子、3 个实现变体；完整清单见第 8 节。模型目前只接入 RMSNorm，
+新增注册不自动替换宿主调用点。新增算子或改变语义后，仍需验证模型接入路径。
+
+
+`operations` 显式声明本进程需要的算子集合；省略时准备整个 catalog。模型宿主当前传入
+`("rms_norm",)`，避免加载未使用的通信算子。独立 CLI 仅准备指定算子；多算子调用方应在一次
+`initialize` 中给出完整集合。集合、设备、模式或有效 override 改变都要求重启 worker。
+
+`BackendModule.implementations` 提供不依赖 SDK 的 CLI 名单；装饰器仍拥有完整选择元数据。
+同一 solution 的绑定分为独立模块，如 `aclnn_torch_npu.py` 与 `aclnn_xllm.py`。
+宿主绑定声明 `xllm_export` 依赖：模型在初始化前加载它；独立 CLI 只在显式选择宿主绑定时加载。
+未加载宿主时，独立 torch_npu/xlite 路径仍可准备。已安装 backend 的 ABI/import 错误继续向上传播。
 
 ### 3.3 厂商算子、自定义注册与扩展构建
 
@@ -164,11 +176,11 @@ graph。数值验证和 benchmark 复用同一初始化入口，环境覆盖若�
 
 | 实现名 | 执行入口 | Torch schema 所有者 | 包内构建选项 |
 | --- | --- | --- | --- |
-| `npu.xllm_native.rms_norm` | `torch_npu.npu_rms_norm(input, weight, epsilon=eps)[0]` | torch_npu | 无 |
+| `npu.aclnn.rms_norm.torch_npu` | `torch_npu.npu_rms_norm(input, weight, epsilon=eps)[0]` | torch_npu | 无 |
 | `npu.xlite.rms_norm` | `csrc/xlite/rms_norm.cpp` | `xllm_kernel::xlite_rms_norm` | `XLLM_KERNEL_BUILD_XLITE=1` |
 
 Native 直接调用 torch_npu，只返回归一化结果，与原 C++ wrapper 取 tuple 第一个元素的语义一致。
-它不需要 xLLM host 或包内 native 扩展；保留原实现名以兼容已有配置。Torch schema 和
+它不需要 xLLM host 或包内 native 扩展；实现名为 `npu.aclnn.rms_norm.torch_npu`。Torch schema 和
 FakeTensor 实现由厂商包持有。
 
 `custom_ops.register_custom_op` 是准备阶段共用的 Torch 注册入口。新增 Python kernel 时，
@@ -219,7 +231,8 @@ output = rms_norm(input, weight, eps)
 
 | 算子 | 实现名 | 执行模式 | 优先级与选择 |
 | --- | --- | --- | --- |
-| `rms_norm` | `npu.xllm_native.rms_norm` | Eager、ACLGraph | 优先级 10；两者可用时自动选择 |
+| `rms_norm` | `npu.aclnn.rms_norm.torch_npu` | Eager、ACLGraph | 优先级 20；同算子的默认选择 |
+| `rms_norm` | `npu.aclnn.rms_norm.xllm` | Eager、ACLGraph | 优先级 10；需要已加载的宿主扩展 |
 | `rms_norm` | `npu.xlite.rms_norm` | Eager、ACLGraph | 优先级 0；可通过统一 override 指定 |
 
 Native 保留 torch_npu 的输入域，以较高优先级将这一更广的支持范围作为默认；这不表示 native
@@ -228,7 +241,7 @@ Native 保留 torch_npu 的输入域，以较高优先级将这一更广的支�
 支持非连续 ND 输入和空行。两种实现都不修改输入，也不让输出与输入 alias；数值等价按容差判断。
 
 当前宿主接入覆盖共享层的普通 RMSNorm 和 GLM-5.3 MLA 预处理。Residual、量化和 Gemma
-normalization 保留现有路径。其他算子族、CUDA adapter、shape 特化、profiling/replay、编译监控
+normalization 保留现有路径。其他算子的模型接入、CUDA adapter、shape 特化、profiling/replay、编译监控
 和调优仍属于后续扩展；增加注册声明或测试替身并不代表设备或模型已经支持。
 
 ## 4. 提供算子专属的离线 suite
@@ -270,13 +283,14 @@ shape、dtype 组合等算子参数由 `add_arguments` 和 `cases` 负责，不�
 | `unsupported_reason(plan)` | 不适用时返回原因，适用时返回 `None`；不得通过执行失败来猜支持域 |
 | `prepare(plan)` | 生成输入，返回 `PreparedCase` |
 
-`PreparedCase` 的三个字段是：
+`PreparedCase` 的字段是：
 
 - `function()`：绑定输入、标量参数和已准备实现的零参数 callable，返回值可以是 tensor、tuple
   或其他由该算子定义的结构。
 - `validate(function)`：调用传入的零参数 callable，按该算子的 reference 和容差返回包含
   `status` 的验证结果；校验输出结构、数值、mutation 和 alias 等契约。
 - `metadata`：输入 stride、格式等可序列化的专属记录。
+- `reset()`：可选的输入恢复函数；在验证、warmup 和每次可变输入计时前调用。
 
 验证器必须检查传入 callable 的结果，不能无视它而重新调用原始实现。ACLGraph 验证传入的是
 捕获输出的读取函数；重新执行 eager 算子会掩盖错误的 graph 输出。验证结果和 metadata
@@ -315,9 +329,9 @@ reference。`numerics/report.py` 和 `benchmark/report.py` 使用通用标题，
 继续给出有效性能结果。
 
 当前计时器支持 NPU eager 和 ACLGraph，报告主机入队时间、NPU event 间隔和同步墙钟时间。
-graph benchmark 每次 capture 包含 64 次独立调用，replay 时间折算为每次算子调用的样本。
-这要求用例能安全地反复调用且性能期间输入状态可复用。对会修改输入、消费状态或依赖随机数的
-新算子，应先设计显式 reset 和计时边界，再扩展公共用例接口；不要直接套用当前循环。
+无输入修改时，每张图捕获 64 次独立调用；有 `reset` 时只捕获一次，并在 capture/replay
+和每次计时调用前恢复输入。reset 在设备 event 与主机提交计时区间外；可变输入路径的墙钟时间
+包含 reset 成本，报告中显式记录该边界。
 
 准备、warmup 和 capture 不进入稳态计时。保持输入、case、设备、执行模式和计时设置一致，
 报告原始样本与离散程度，并记录资源占用。eager 的设备事件间隔包含主机提交间隙，不能简单
@@ -336,10 +350,10 @@ Native suite 直接调用 torch_npu，xlite suite 加载自己的可选 bridge�
 
 ```bash
 python -m xllm_kernel.numerics --operation rms_norm --device npu --mode eager \
-  --implementation npu.xllm_native.rms_norm --rows 1 16 --widths 6144 \
+  --implementation npu.aclnn.rms_norm.torch_npu --rows 1 16 --widths 6144 \
   --revision "$(git rev-parse HEAD)" --output numerics.json
 python -m xllm_kernel.benchmark --operation rms_norm --device npu --mode aclgraph \
-  --implementation npu.xllm_native.rms_norm --rows 1 16 --widths 6144 \
+  --implementation npu.aclnn.rms_norm.torch_npu --rows 1 16 --widths 6144 \
   --iterations 50 --revision "$(git rev-parse HEAD)" --output benchmark.json
 ```
 
@@ -356,13 +370,13 @@ suite 使用默认矩阵：BF16/FP16、行数 1/16/128/4096、宽度 512/2048/61
 公共测试需要安装本包、PyTorch、pytest 和 setuptools，不需要 NPU 或宿主扩展：
 
 ```bash
-python -m pytest -q xllm-kernel/test --ignore=xllm-kernel/test/npu
+python -m pytest -q xllm-kernel/test --ignore=xllm-kernel/test/npu --ignore=xllm-kernel/test/distributed
 ```
 
 NPU 集成测试需要匹配的 host 与 backend 构建产物。两种实现应在空闲设备上顺序、分进程运行：
 
 ```bash
-XLLM_KERNEL_OVERRIDE_RMS_NORM=npu.xllm_native.rms_norm \
+XLLM_KERNEL_OVERRIDE_RMS_NORM=npu.aclnn.rms_norm.torch_npu \
   python -m pytest -q xllm-kernel/test/npu/test_kernel_rms_norm_npu.py
 XLLM_KERNEL_OVERRIDE_RMS_NORM=npu.xlite.rms_norm \
   python -m pytest -q xllm-kernel/test/npu/test_kernel_xlite_rms_norm_npu.py
@@ -401,3 +415,34 @@ CPU double 和 FakeTensor 只证明对应逻辑，不能作为 NPU 精度或性�
 - 单测仍位于独立包 `test/`，不修改宿主的测试目标来自动运行它们。
 - 检查格式、安装包内容、CLI 示例和报告；提交说明区分源码检查、CPU、构建、NPU 和模型证据。
 - 如需 JIT、状态 reset、多设备或新平台服务，先补齐显式接口及生命周期，再增加实现。
+
+## 8. GLM-5.3 算子清单与显式后端接入
+
+本轮扩展对照 `xllm/python/models/glm5_2.py`、共享的 `deepseek_v32.py` 路径、
+`layers/embedding.py`、`layers/linear.py`，以及
+`kernels_npu/{normalization,activation,quantization,rotary_embedding,moe,mla,sparse_attention}.py`。
+这里指完整的 GLM-5.3 DSA 模型，不是 GLM-5.3 Flash。代码基于 main 的统一 catalog、runtime、selection 和装饰器注册架构。
+
+| 算子 | 方案及可选变体 |
+| --- | --- |
+| `rms_norm` | `aclnn.xllm`, `aclnn.torch_npu`, `xlite` |
+
+清单共 1 个算子契约、3 个实现变体，归属表中列出的方案。`aclnn` 包括标准 CANN 算子和通过 ACLNN
+API 调用的自定义算子。xLLM 绑定内部可能分派到不同 ACLNN kernel，变体名标识封装入口，
+不承诺固定二进制实现。`atb` 对应实际 ATB 调用，`hccl` 对应通信库，`torch` 是显式 PyTorch NPU
+组合实现，`tilelang` 解析已有 AOT 算子。xlite 使用固定 GVirt 版本的 launcher，提交到当前 stream。
+初始化导入所需算子的可用候选模块，然后统一冻结和选择。
+
+新增精度 suite 通过 `tensor_suite` 组织算子自己的形状矩阵。`Example` 绑定输入 tensor tree、
+CPU 参考、声明的输入修改、容差及可选的语义归一化比较方法。`TensorCase` 只携带元信息，
+发现 suite 时不加载设备 SDK。`PreparedCase.reset` 在计时 event 区间外恢复可变输入；
+有输入修改的算子每张图只捕获一次调用。各算子的测试文件复用
+`test/npu/operator_checks.py` 的执行流程，不接入 `tests/CMakeLists.txt`。
+
+注册清单和 CPU 测试不代表新增实现已通过设备或完整模型验证。真实 NPU 精度、性能和
+端到端结果必须记录实际 revision、输入、设备占用与退出状态，不能复用重构前的结论。
+
+路由及 SwiGLU 语义同时参考官方
+[MoeInitRoutingV2 API](https://www.hiascend.com/document/detail/en/Pytorch/2610/apiref/customapi/docs/en/custom_APIs/torch_npu/torch_npu-npu_moe_init_routing_v2.md) 和
+[DequantSwigluQuant API](https://www.hiascend.com/document/detail/en/Pytorch/2610/apiref/customapi/docs/en/custom_APIs/torch_npu/torch_npu-npu_dequant_swiglu_quant.md)。
+安装的 runtime 必须提供所选接口；缺失时准备或执行明确报错。文档不能替代二进制 ABI 验证。

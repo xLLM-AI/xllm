@@ -41,6 +41,8 @@ class KernelSpec:
     input_domain: str
     priority: int = 0
     solution: str = "native"
+    variant: str = ""
+    binding: str = ""
 
 
 @dataclass(frozen=True)
@@ -136,6 +138,8 @@ def register_kernel(
     input_domain: str,
     solution: str,
     priority: int = 0,
+    variant: str = "",
+    binding: str = "",
 ) -> Callable[[_Kernel], _Kernel]:
     """Declare a kernel's metadata and register its original callable.
 
@@ -153,6 +157,8 @@ def register_kernel(
         input_domain=input_domain,
         priority=priority,
         solution=solution,
+        variant=variant,
+        binding=binding,
     )
 
     def _register(function: _Kernel) -> _Kernel:

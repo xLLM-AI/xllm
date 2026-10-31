@@ -18,6 +18,7 @@ class PreparedCase:
     function: Callable[[], Any]
     validate: Callable[[Callable[[], Any]], dict[str, Any]]
     metadata: dict[str, Any]
+    reset: Callable[[], None] | None = None
 
 
 class KernelCase(Protocol):

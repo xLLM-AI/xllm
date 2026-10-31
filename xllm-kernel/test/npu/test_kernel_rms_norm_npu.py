@@ -93,11 +93,11 @@ def test_legacy_shim_and_glm_shared_layer_use_same_binding() -> None:
 def test_initialization_is_idempotent_and_policy_is_fixed() -> None:
     plan = prepare_rms_norm()
     initialize_runtime()
-    assert initialize(device="npu")["rms_norm"] is plan
+    assert initialize(device="npu", operations=("rms_norm",))["rms_norm"] is plan
     with pytest.raises(RuntimeError, match="restart"):
         initialize(device="cuda")
     with pytest.raises(RuntimeError, match="restart"):
-        initialize(device="npu", execution_mode="changed")
+        initialize(device="npu", operations=("rms_norm",), execution_mode="changed")
     importlib.import_module("xllm.python.kernels_npu._custom_op")
     assert prepare_rms_norm() is plan
 
@@ -115,7 +115,7 @@ import torch
 import torch_npu
 from xllm_kernel import initialize
 from xllm_kernel.ops import rms_norm
-plan = initialize(device='npu')
+plan = initialize(device='npu', operations=('rms_norm',))
 assert not hasattr(torch.ops.xllm_kernel, 'rms_norm')
 assert not hasattr(torch.ops.xllm_ops, 'rms_norm')
 for dtype in (torch.float16, torch.bfloat16, torch.float32):
@@ -129,7 +129,7 @@ with FakeTensorMode():
     value = torch.empty(7, 512, device='npu')
     weight = torch.empty(512, device='npu')
     assert rms_norm(value, weight, 1e-5).shape == value.shape
-assert initialize(device='npu') is plan
+assert initialize(device='npu', operations=('rms_norm',)) is plan
 """
     subprocess.run([sys.executable, "-c", script], cwd=tmp_path, check=True)
 
