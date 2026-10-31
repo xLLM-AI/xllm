@@ -135,12 +135,6 @@ bool FixedStepsScheduler::add_request(std::shared_ptr<Request>& request) {
   return true;
 }
 
-void FixedStepsScheduler::drain_prefetch_pipeline() {
-  if (kv_cache_prefetcher_ != nullptr) {
-    kv_cache_prefetcher_->drain();
-  }
-}
-
 void FixedStepsScheduler::apply_cancel_requests() {
   std::vector<std::shared_ptr<Request>> requests =
       cancel_request_queue_->take_all();
@@ -317,7 +311,9 @@ bool FixedStepsScheduler::handle_prefill_requests(
 RecBatchGroup FixedStepsScheduler::prepare_rec_batch() {
   Timer timer;
   apply_cancel_requests();
-  drain_prefetch_pipeline();
+  if (kv_cache_prefetcher_ != nullptr) {
+    kv_cache_prefetcher_->drain();
+  }
   // propagate new requests to prefill_queue_
   // Include those requests that are preempted by others.
   auto propagate_request = [this](std::shared_ptr<Request>& request) {

@@ -337,15 +337,11 @@ void ContinuousSchedulerBase::drain_decode_restore_waiting(
   }
 }
 
-void ContinuousSchedulerBase::drain_prefetch_pipeline() {
+BatchGroup ContinuousSchedulerBase::prepare_batch() {
+  Timer timer;
   if (kv_cache_prefetcher_ != nullptr) {
     kv_cache_prefetcher_->drain();
   }
-}
-
-BatchGroup ContinuousSchedulerBase::prepare_batch() {
-  Timer timer;
-  drain_prefetch_pipeline();
   auto state = make_state();
 
   // Common phases (strategy-independent)

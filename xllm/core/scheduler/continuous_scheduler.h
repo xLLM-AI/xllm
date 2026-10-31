@@ -141,7 +141,6 @@ class ContinuousSchedulerBase : public Scheduler {
           nullptr);
 
   void clear_mtp_bootstrap(Request* request);
-  void drain_prefetch_pipeline();
   void populate_heartbeat_request(
       xllm_service::proto::HeartbeatRequest& request,
       bool include_virtual_memory_info);

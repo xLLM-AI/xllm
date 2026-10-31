@@ -315,7 +315,11 @@ class TestableContinuousScheduler final : public ContinuousScheduler<> {
                               /*model_residency_coordinator=*/nullptr,
                               /*distributed_worker_manager=*/nullptr) {}
 
-  using ContinuousScheduler<>::drain_prefetch_pipeline;
+  void drain_prefetch_for_test() {
+    if (kv_cache_prefetcher_) {
+      kv_cache_prefetcher_->drain();
+    }
+  }
 
   BatchGroup prepare_batch_test() { return prepare_batch(); }
 
@@ -1274,7 +1278,7 @@ TEST(ContinuousSchedulerTest,
       const size_t free_blocks =
           engine.block_manager_pool()->num_free_blocks().front();
       EXPECT_TRUE(scheduler.add_request(request));
-      scheduler.drain_prefetch_pipeline();
+      scheduler.drain_prefetch_for_test();
       scheduler.wait_for_responses();
       if (linear_state && (beam_width > 1 || best_of > 1)) {
         EXPECT_EQ(callback_count, 1);

@@ -326,7 +326,11 @@ class TestDisaggPDScheduler final : public DisaggPDScheduler {
     return prefill_request_queue_.try_dequeue(*request);
   }
 
-  void drain_prefetch_for_test() { drain_prefetch_pipeline(); }
+  void drain_prefetch_for_test() {
+    if (kv_cache_prefetcher_) {
+      kv_cache_prefetcher_->drain();
+    }
+  }
 
   void stop_dispatch_for_test() {
     CHECK(prefill_request_queue_.enqueue(nullptr));

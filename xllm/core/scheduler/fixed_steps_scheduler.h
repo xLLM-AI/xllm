@@ -178,7 +178,6 @@ class FixedStepsScheduler : public Scheduler {
                : kv_cache_prefetcher_->num_pending_requests();
   }
 
-  void drain_prefetch_pipeline();
   void apply_cancel_requests();
 
   const Options options_;
