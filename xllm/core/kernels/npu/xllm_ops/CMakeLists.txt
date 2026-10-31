@@ -44,6 +44,7 @@ cc_library(
     npu_mega_gdn_decode.cpp
     npu_mega_gdn_mtp_decode.cpp
     layer_norm_fwd.cpp
+    dual_affine_layer_norm.cpp
     gamma_add_rms_norm.cpp
   INCLUDES
     ${PROJECT_SOURCE_DIR}/third_party/xllm_ops/build/autogen
