@@ -23,7 +23,7 @@ limitations under the License.
 #include <vector>
 
 #if defined(USE_NPU)
-#include <torch_npu/torch_npu.h>
+#include <torch_npu/csrc/core/npu/NPUStream.h>
 #endif
 
 #include "framework/parallel_state/parallel_state.h"
@@ -43,7 +43,7 @@ void synchronize_quantized_mmrs_launches() {
     return;
   }
 #if defined(USE_NPU)
-  torch::npu::synchronize();
+  c10_npu::npuSynchronizeDevice();
 #endif
   quantized_mmrs_launch_tensors.clear();
   quantized_mmrs_retained_bytes = 0;

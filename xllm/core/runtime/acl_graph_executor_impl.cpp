@@ -20,8 +20,7 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 #include <torch_npu/csrc/core/npu/NPUGuard.h>
-#include <torch_npu/csrc/libs/init_npu.h>
-#include <torch_npu/torch_npu.h>
+#include <torch_npu/csrc/core/npu/NPUStream.h>
 
 #include <algorithm>
 #include <type_traits>
@@ -382,7 +381,7 @@ bool AclGraph::capture(CausalLM* model,
 
   auto& tensor_options = model->options();
 
-  torch::npu::synchronize();
+  c10_npu::npuSynchronizeDevice();
 
   // Begin graph capture using NPUGraph mempool for temporary tensor management
   // Get current NPU stream from libtorch NPU API
@@ -588,7 +587,7 @@ bool AclGraph::capture(RecModel* model,
                        c10_npu::MempoolId_t graph_pool) {
   num_tokens_ = bucket_num_tokens;
   CHECK_LE(tokens.size(0), num_tokens_);
-  torch::npu::synchronize();
+  c10_npu::npuSynchronizeDevice();
   const c10::DeviceIndex device_idx = model->options().device().index();
   const c10_npu::NPUStream producer_stream =
       c10_npu::getCurrentNPUStream(device_idx);
