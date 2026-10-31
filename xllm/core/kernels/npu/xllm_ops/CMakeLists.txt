@@ -45,6 +45,7 @@ cc_library(
     npu_mega_gdn_mtp_decode.cpp
     layer_norm_fwd.cpp
     gamma_add_rms_norm.cpp
+    t5_split_qkv_append_cache.cpp
   INCLUDES
     ${PROJECT_SOURCE_DIR}/third_party/xllm_ops/build/autogen
   DEPS

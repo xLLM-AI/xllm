@@ -529,6 +529,13 @@ void reshape_and_cache_a5(const torch::Tensor& key,
                           torch::Tensor& value_cache,
                           const torch::Tensor& slot_mapping);
 
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
+t5_split_qkv_append_cache(const torch::Tensor& qkv,
+                          const torch::Tensor& past_key,
+                          const torch::Tensor& past_value,
+                          int64_t head_num,
+                          int64_t head_dim);
+
 std::pair<torch::Tensor, torch::Tensor> npu_mega_chunk_gdn(
     torch::Tensor& q,
     torch::Tensor& k,
