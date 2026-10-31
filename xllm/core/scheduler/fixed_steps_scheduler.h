@@ -35,11 +35,11 @@ limitations under the License.
 #include "core/framework/block/kv_cache_manager.h"
 #include "core/framework/request/request.h"
 #include "core/framework/request/sequence.h"
+#include "core/scheduler/kv_cache_prefetcher.h"
 #include "core/scheduler/request_output_dispatcher.h"
 #include "core/scheduler/request_priority_queue.h"
 #include "core/scheduler/scheduler.h"
 #include "core/scheduler/scheduler_notifier.h"
-#include "core/scheduler/storage_prefetch_stage.h"
 #include "core/util/threadpool.h"
 
 namespace xllm {
@@ -173,8 +173,9 @@ class FixedStepsScheduler : public Scheduler {
       std::vector<std::shared_ptr<Request>>& finished_requests);
 
   size_t num_prefetching_requests() const {
-    return prefetch_stage_ == nullptr ? 0
-                                      : prefetch_stage_->num_pending_requests();
+    return kv_cache_prefetcher_ == nullptr
+               ? 0
+               : kv_cache_prefetcher_->num_pending_requests();
   }
 
   void drain_prefetch_pipeline();
@@ -188,7 +189,7 @@ class FixedStepsScheduler : public Scheduler {
 
   folly::MPMCQueue<std::shared_ptr<Request>> request_queue_;
   std::mutex request_admission_mutex_;
-  std::unique_ptr<StoragePrefetchStage> prefetch_stage_;
+  std::unique_ptr<KVCachePrefetcher> kv_cache_prefetcher_;
 
   std::vector<Sequence*> running_sequences_;
   std::vector<size_t> running_sequences_budgets_;

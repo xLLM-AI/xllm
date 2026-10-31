@@ -42,13 +42,13 @@ limitations under the License.
 #include "core/framework/request/priority_comparator.h"
 #include "core/framework/request/request.h"
 #include "core/framework/request/sequence.h"
+#include "core/scheduler/kv_cache_prefetcher.h"
 #include "core/scheduler/profile/profile_manager.h"
 #include "core/scheduler/request_output_dispatcher.h"
 #include "core/scheduler/request_priority_queue.h"
 #include "core/scheduler/scheduler.h"
 #include "core/scheduler/scheduler_metrics.h"
 #include "core/scheduler/scheduler_notifier.h"
-#include "core/scheduler/storage_prefetch_stage.h"
 
 namespace xllm {
 class DistributedWorkerManager;
@@ -146,8 +146,9 @@ class ContinuousSchedulerBase : public Scheduler {
       xllm_service::proto::HeartbeatRequest& request,
       bool include_virtual_memory_info);
   size_t num_prefetching_requests() const {
-    return prefetch_stage_ == nullptr ? 0
-                                      : prefetch_stage_->num_pending_requests();
+    return kv_cache_prefetcher_ == nullptr
+               ? 0
+               : kv_cache_prefetcher_->num_pending_requests();
   }
 
   // Caller holds request_admission_mutex_ when reserving prefetch or PD slots.
@@ -192,7 +193,7 @@ class ContinuousSchedulerBase : public Scheduler {
   folly::MPMCQueue<std::shared_ptr<Request>> request_queue_;
 
   std::mutex request_admission_mutex_;
-  std::unique_ptr<StoragePrefetchStage> prefetch_stage_;
+  std::unique_ptr<KVCachePrefetcher> kv_cache_prefetcher_;
 
   // a batch of requests in running state, sorted by priority from high to low.
   // This may include decoding requests and prefill requests in chunked prefill

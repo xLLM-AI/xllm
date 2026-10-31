@@ -55,7 +55,7 @@ FixedStepsScheduler::FixedStepsScheduler(RecEngine* engine,
   kv_cache_manager_ = engine_->block_manager_pool();
   CHECK(kv_cache_manager_ != nullptr);
   if (kv_cache_manager_->has_storage_prefetch()) {
-    prefetch_stage_ = std::make_unique<StoragePrefetchStage>(
+    kv_cache_prefetcher_ = std::make_unique<KVCachePrefetcher>(
         *kv_cache_manager_,
         request_admission_mutex_,
         notifier_,
@@ -105,8 +105,8 @@ FixedStepsScheduler::~FixedStepsScheduler() {
   // Tasks capture scheduler state and must finish before it is destroyed.
   step_threadpool_.reset();
 
-  if (prefetch_stage_ != nullptr) {
-    prefetch_stage_->shutdown();
+  if (kv_cache_prefetcher_ != nullptr) {
+    kv_cache_prefetcher_->shutdown();
   }
   running_requests_.clear();
   output_dispatcher_.reset();
@@ -116,7 +116,7 @@ bool FixedStepsScheduler::add_request(std::shared_ptr<Request>& request) {
   CHECK(request != nullptr);
   CHECK(!request->sequences().empty());
 
-  if (prefetch_stage_ == nullptr) {
+  if (kv_cache_prefetcher_ == nullptr) {
     const bool accepted = request_queue_.write(request);
     if (accepted) {
       notifier_->notify();
@@ -131,13 +131,13 @@ bool FixedStepsScheduler::add_request(std::shared_ptr<Request>& request) {
       request_queue_.capacity()) {
     return false;
   }
-  prefetch_stage_->add_request(request);
+  kv_cache_prefetcher_->add_request(request);
   return true;
 }
 
 void FixedStepsScheduler::drain_prefetch_pipeline() {
-  if (prefetch_stage_ != nullptr) {
-    prefetch_stage_->drain();
+  if (kv_cache_prefetcher_ != nullptr) {
+    kv_cache_prefetcher_->drain();
   }
 }
 

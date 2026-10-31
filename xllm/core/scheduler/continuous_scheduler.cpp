@@ -80,7 +80,7 @@ ContinuousSchedulerBase::ContinuousSchedulerBase(
   kv_cache_manager_ = resource_engine_->block_manager_pool();
   CHECK(kv_cache_manager_ != nullptr);
   if (kv_cache_manager_->has_storage_prefetch()) {
-    prefetch_stage_ = std::make_unique<StoragePrefetchStage>(
+    kv_cache_prefetcher_ = std::make_unique<KVCachePrefetcher>(
         *kv_cache_manager_,
         request_admission_mutex_,
         notifier_,
@@ -230,8 +230,8 @@ ContinuousSchedulerBase::~ContinuousSchedulerBase() {
         heartbeat_callback_registration_);
   }
 
-  if (prefetch_stage_ != nullptr) {
-    prefetch_stage_->shutdown();
+  if (kv_cache_prefetcher_ != nullptr) {
+    kv_cache_prefetcher_->shutdown();
   }
   running_requests_.clear();
 }
@@ -252,7 +252,7 @@ bool ContinuousSchedulerBase::add_request(std::shared_ptr<Request>& request) {
 
   // The bounded ready queue handles direct admission without a reservation.
   // PD also reserves slots while requests are in its dispatch queues.
-  if (prefetch_stage_ == nullptr && !options_.enable_disagg_pd()) {
+  if (kv_cache_prefetcher_ == nullptr && !options_.enable_disagg_pd()) {
     return enqueue_ready_request(request);
   }
 
@@ -261,10 +261,10 @@ bool ContinuousSchedulerBase::add_request(std::shared_ptr<Request>& request) {
       request_queue_.capacity()) {
     return false;
   }
-  if (prefetch_stage_ == nullptr) {
+  if (kv_cache_prefetcher_ == nullptr) {
     return enqueue_ready_request(request);
   }
-  prefetch_stage_->add_request(request);
+  kv_cache_prefetcher_->add_request(request);
   return true;
 }
 
@@ -338,8 +338,8 @@ void ContinuousSchedulerBase::drain_decode_restore_waiting(
 }
 
 void ContinuousSchedulerBase::drain_prefetch_pipeline() {
-  if (prefetch_stage_ != nullptr) {
-    prefetch_stage_->drain();
+  if (kv_cache_prefetcher_ != nullptr) {
+    kv_cache_prefetcher_->drain();
   }
 }
 
