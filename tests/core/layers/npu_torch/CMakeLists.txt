@@ -134,3 +134,42 @@ cc_test(
     :npu_torch_layers
     GTest::gtest_main
 )
+
+# Keep the projection unit test independent of model runtime initialization.
+cc_test(
+  NAME
+    qwen3_5_gdn_projection_test
+  SRCS
+    qwen3_5_gdn_projection_test.cpp
+    ${PROJECT_SOURCE_DIR}/xllm/core/layers/npu_torch/qwen3_5_gdn_projection.cpp
+  DEPS
+    torch
+    glog::glog
+    GTest::gtest_main
+)
+target_link_libraries(qwen3_5_gdn_projection_test PRIVATE ascendcl hccl nnopbase)
+
+cc_test(
+  NAME
+    qwen3_5_gdn_prefill_test
+  SRCS
+    qwen3_5_gdn_prefill_test.cpp
+  DEPS
+    :npu_torch_layers
+    :state_dict
+    glog::glog
+    torch
+    GTest::gtest_main
+)
+target_link_libraries(qwen3_5_gdn_prefill_test
+                      PRIVATE ascendcl hccl c_sec nnopbase atb)
+target_link_options(qwen3_5_gdn_prefill_test PRIVATE
+  "-Wl,--whole-archive"
+  "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
+  "-Wl,--no-whole-archive")
+
+# These tests initialize one NPU and mutate device-local GDN state.
+get_property(_gdn_projection_tests DIRECTORY PROPERTY TESTS)
+list(FILTER _gdn_projection_tests
+     INCLUDE REGEX "GdnProjection|Qwen35GdnPrefill|GdnPackedPrefill")
+set_tests_properties(${_gdn_projection_tests} PROPERTIES RUN_SERIAL TRUE)

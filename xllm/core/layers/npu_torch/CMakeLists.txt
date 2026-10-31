@@ -16,6 +16,8 @@ cc_library(
     qwen3_next_attention.h
     qwen3_next_gated_delta_net.h
     qwen3_5_gated_delta_net.h
+    qwen3_5_gdn_prefill_layout.h
+    qwen3_5_gdn_projection.h
     qwen3_next_hybrid_decoder_layer_base.h
     qwen3_next_decoder_layer_impl.h
     qwen3_5_decoder_layer_impl.h
@@ -38,6 +40,7 @@ cc_library(
     qwen3_next_gated_delta_net.cpp
     qwen3_next_hybrid_decoder_layer_base.cpp
     qwen3_5_gated_delta_net.cpp
+    qwen3_5_gdn_projection.cpp
     qwen3_next_decoder_layer_impl.cpp
     qwen3_5_decoder_layer_impl.cpp
     deepseek_sparse_attention.cpp
