@@ -111,8 +111,7 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
   ~DisaggPDScheduler() override;
 
   uint32_t get_waiting_requests_num() const override {
-    return prefill_queue_->size() +
-           prefetching_requests_.load(std::memory_order_relaxed);
+    return prefill_queue_->size() + num_prefetching_requests();
   };
 
   void step(const absl::Duration& timeout) override;
@@ -279,7 +278,7 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
       prefill_request_queue_offline_;
 
   // Includes both dispatch queues, retries and the in-flight allocation RPC.
-  // Guarded by prefetch_admission_mutex_ through the transfer to
+  // Guarded by request_admission_mutex_ through the transfer to
   // request_queue_.
   size_t pending_dispatch_requests_ = 0;
 

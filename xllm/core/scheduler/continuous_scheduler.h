@@ -48,6 +48,7 @@ limitations under the License.
 #include "core/scheduler/scheduler.h"
 #include "core/scheduler/scheduler_metrics.h"
 #include "core/scheduler/scheduler_notifier.h"
+#include "core/scheduler/storage_prefetch_admission.h"
 
 namespace xllm {
 class DistributedWorkerManager;
@@ -115,13 +116,12 @@ class ContinuousSchedulerBase : public Scheduler {
   }
 
   bool has_pending_prefetch() const override {
-    return prefetching_requests_.load(std::memory_order_relaxed) > 0;
+    return num_prefetching_requests() > 0;
   }
 
   uint32_t get_waiting_requests_num() const override {
     return prefill_queue_->size() + chunk_queue_->size() +
-           decode_restore_waiting_.size() +
-           prefetching_requests_.load(std::memory_order_relaxed);
+           decode_restore_waiting_.size() + num_prefetching_requests();
   }
 
   void get_latency_metrics(std::vector<int64_t>& ttft,
@@ -145,7 +145,13 @@ class ContinuousSchedulerBase : public Scheduler {
   void populate_heartbeat_request(
       xllm_service::proto::HeartbeatRequest& request,
       bool include_virtual_memory_info);
-  // Caller holds prefetch_admission_mutex_ for both admission operations.
+  size_t num_prefetching_requests() const {
+    return prefetch_admission_ == nullptr
+               ? 0
+               : prefetch_admission_->num_pending_requests();
+  }
+
+  // Caller holds request_admission_mutex_ when reserving prefetch or PD slots.
   virtual size_t num_queued_requests() const;
   virtual bool enqueue_ready_request(std::shared_ptr<Request> request);
   virtual void release_failed_request(const std::shared_ptr<Request>& request) {
@@ -186,10 +192,8 @@ class ContinuousSchedulerBase : public Scheduler {
   // the schedule owns the requests and manages their lifetimes.
   folly::MPMCQueue<std::shared_ptr<Request>> request_queue_;
 
-  std::atomic<size_t> prefetching_requests_{0};
-  std::mutex prefetch_admission_mutex_;
-  std::deque<std::shared_ptr<Request>> prefetch_admissions_;
-  std::deque<std::shared_ptr<Request>> completed_prefetches_;
+  std::mutex request_admission_mutex_;
+  std::unique_ptr<StoragePrefetchAdmission> prefetch_admission_;
 
   // a batch of requests in running state, sorted by priority from high to low.
   // This may include decoding requests and prefill requests in chunked prefill
@@ -266,9 +270,6 @@ class ContinuousSchedulerBase : public Scheduler {
 
   // Construct a SchedulerState snapshot for the policy.
   SchedulerState make_state();
-
-  void drain_prefetch_admissions();
-  void drain_completed_prefetches();
 
   void apply_cancel_requests();
 

@@ -21,7 +21,6 @@ limitations under the License.
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -40,6 +39,7 @@ limitations under the License.
 #include "core/scheduler/request_priority_queue.h"
 #include "core/scheduler/scheduler.h"
 #include "core/scheduler/scheduler_notifier.h"
+#include "core/scheduler/storage_prefetch_admission.h"
 #include "core/util/threadpool.h"
 
 namespace xllm {
@@ -81,13 +81,12 @@ class FixedStepsScheduler : public Scheduler {
   }
 
   bool has_pending_prefetch() const override {
-    return prefetching_requests_.load(std::memory_order_relaxed) > 0;
+    return num_prefetching_requests() > 0;
   }
 
   uint32_t get_waiting_requests_num() const override {
-    return static_cast<uint32_t>(
-        prefill_queue_->size() +
-        prefetching_requests_.load(std::memory_order_relaxed));
+    return static_cast<uint32_t>(prefill_queue_->size() +
+                                 num_prefetching_requests());
   }
 
   void get_latency_metrics(std::vector<int64_t>& /*ttft*/,
@@ -173,8 +172,12 @@ class FixedStepsScheduler : public Scheduler {
       size_t& remaining_seq_budget,
       std::vector<std::shared_ptr<Request>>& finished_requests);
 
-  void drain_prefetch_admissions();
-  void drain_completed_prefetches();
+  size_t num_prefetching_requests() const {
+    return prefetch_admission_ == nullptr
+               ? 0
+               : prefetch_admission_->num_pending_requests();
+  }
+
   void drain_prefetch_pipeline();
   void apply_cancel_requests();
 
@@ -185,10 +188,8 @@ class FixedStepsScheduler : public Scheduler {
   KVCacheManager* kv_cache_manager_;
 
   folly::MPMCQueue<std::shared_ptr<Request>> request_queue_;
-  std::atomic<size_t> prefetching_requests_{0};
-  std::mutex prefetch_admission_mutex_;
-  std::deque<std::shared_ptr<Request>> prefetch_admissions_;
-  std::deque<std::shared_ptr<Request>> completed_prefetches_;
+  std::mutex request_admission_mutex_;
+  std::unique_ptr<StoragePrefetchAdmission> prefetch_admission_;
 
   std::vector<Sequence*> running_sequences_;
   std::vector<size_t> running_sequences_budgets_;
