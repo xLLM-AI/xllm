@@ -29,6 +29,7 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "common/metrics.h"
+#include "compiler/triton/include/jit_kernel.h"
 #include "core/common/constants.h"
 #include "core/framework/config/execution_config.h"
 #include "core/runtime/graph_input_snapshot.h"
@@ -528,6 +529,7 @@ void MluGraph::capture(ModelType* model,
     rec_graph_input_.emplace(graph_params.clone());
   }
   int32_t slice_dim = persistent_param_->use_mrope_ ? 1 : 0;
+  triton_jit::JITKernel::initialize_backend();
   torch_mlu::synchronize();
   auto prev_stream = torch_mlu::getCurrentMLUStream();
   torch_mlu::mlu::MLUStreamGuard guard(capture_stream);

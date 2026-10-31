@@ -729,6 +729,7 @@ class TestModelExecutorConstruction:
             enable_graph_mode_decode_no_padding=False,
             spec_verify_width=1,
             device_kv_lengths=False,
+            max_capture_tokens=None,
         )
 
     @patch("xllm.python.model_executor.runners.decode_acl_graph.DecodeAclGraphRunner")
@@ -752,6 +753,26 @@ class TestModelExecutorConstruction:
         )
 
         assert mock_graph_runner.call_args.kwargs["enable_mega_moe_token_mask"] is True
+
+    @pytest.mark.parametrize("limit", [0, None])
+    @patch("xllm.python.model_executor.runners.decode_acl_graph.DecodeAclGraphRunner")
+    @patch("xllm.python.model_executor.executor._create_attention_backend")
+    def test_graph_runner_receives_model_capture_token_limit(self, mock_create, mock_graph_runner, limit: int | None):
+        mock_create.return_value = StubAttentionBackend()
+        model = _FakeModel(num_layers=1)
+        model.model.graph_capture_token_limit = limit
+
+        ModelExecutor(
+            model,
+            {
+                "model_type": "glm5_next",
+                "max_position_embeddings": 128,
+                "python_graph_backend": "aclgraph",
+            },
+            max_seqs_per_batch=128,
+        )
+
+        assert mock_graph_runner.call_args.kwargs["max_capture_tokens"] == limit
 
     @patch("xllm.python.model_executor.runners.decode_acl_graph.DecodeAclGraphRunner")
     @patch("xllm.python.model_executor.executor._create_attention_backend")
@@ -791,6 +812,7 @@ class TestModelExecutorConstruction:
             enable_graph_mode_decode_no_padding=False,
             spec_verify_width=1,
             device_kv_lengths=False,
+            max_capture_tokens=None,
         )
 
 
@@ -1533,9 +1555,10 @@ def test_glm5_next_cp_admission_matches_runtime_constraints(model_type: str) -> 
         }
     )
     _validate_npu_cp_model_config(config, 1)
+    _validate_npu_cp_model_config({**config, "ep_size": 2, "dp_size": 2}, 1)
 
-    with pytest.raises(NotImplementedError, match="ep_size == 1"):
-        _validate_npu_cp_model_config({**config, "ep_size": 2}, 1)
+    with pytest.raises(NotImplementedError, match="ep_size >= 1"):
+        _validate_npu_cp_model_config({**config, "ep_size": 0}, 1)
     with pytest.raises(NotImplementedError, match="disaggregated PD"):
         _validate_npu_cp_model_config({**config, "enable_disagg_pd": True}, 1)
 
@@ -2094,6 +2117,16 @@ def test_context_parallel_rejects_data_parallel_combination(_mock_create):
             {"cp_size": 2, "dp_size": 2, "python_graph_backend": "off"},
             max_seqs_per_batch=4,
         )
+
+
+@patch("xllm.python.model_executor.executor._create_attention_backend", return_value=StubAttentionBackend())
+def test_context_parallel_accepts_glm5_next_data_parallel_combination(_mock_create):
+    executor = ModelExecutor(
+        _FakeModel(num_layers=1),
+        {"cp_size": 2, "dp_size": 2, "kv_split_size": 1, "model_type": "glm5_3_flash", "python_graph_backend": "off"},
+        max_seqs_per_batch=4,
+    )
+    assert executor.dp_size == 2
 
 
 @patch("xllm.python.model_executor.executor._create_attention_backend")

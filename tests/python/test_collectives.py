@@ -403,6 +403,29 @@ def test_dcp_group_is_strided_like_kv_split_rank(monkeypatch):
     ]
 
 
+@pytest.mark.parametrize(
+    ("group", "size", "world", "stride", "global_rank", "local_rank", "index", "own_members"),
+    [
+        ("cp", 2, 8, 2, 4, 0, 2, [4, 6]),
+        ("dcp", 2, 8, 1, 4, 0, 2, [4, 5]),
+        ("dcp", 2, 8, 4, 4, 1, 0, [0, 4]),
+        ("dcp", 2, 16, 4, 12, 1, 4, [8, 12]),
+    ],
+)
+def test_group_stride_membership_contracts(
+    monkeypatch, group, size, world, stride, global_rank, local_rank, index, own_members
+):
+    _, _, _, new_group = _mock_process_groups(monkeypatch, global_rank=global_rank)
+
+    group_obj = collectives.init_process_group(
+        group, "127.0.0.1", 46001, local_rank, size, "cuda:0", global_rank, world, index, group_stride=stride
+    )
+
+    assert group_obj.rank() == local_rank and group_obj.size() == size
+    assert list(collectives._group_ranks[(group, "cuda:0")]) == own_members
+    assert new_group.call_args_list[index].kwargs["ranks"] == own_members
+
+
 def test_dp_execution_gather_uses_fixed_collective_for_equal_counts(monkeypatch):
     value = torch.zeros(4, 8)
     gathered = torch.zeros(8, 8)

@@ -22,13 +22,13 @@ limitations under the License.
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
 #include "common/metrics.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kernel_config.h"
-#include "core/framework/config/model_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/model/model_args.h"
@@ -200,22 +200,15 @@ void build_query_rows(const LlmForwardInput& input,
                       int32_t mask_token_id,
                       int32_t num_speculative_tokens,
                       int32_t block_size,
-                      bool sample_from_anchor,
+                      int32_t query_width,
                       bool use_block_parallel_rows,
                       specBuilder::DecodeBuildBuffers& buf,
                       std::vector<int32_t>& selected_idxes) {
   const int32_t num_sequences = input.input_params.meta.num_sequences;
-  // DFlash: (1 + N) block — slot 0 is the un-selected anchor (real token), the
-  // N mask positions are sampled. DSpark: N-wide block — every position is a
-  // prediction; slot 0 still carries the real token but is itself sampled
-  // (predicts the first draft token), positions 1..N-1 are masks.
-  const int32_t query_width = dflash_detail::decode_draft_width(
-      num_speculative_tokens, sample_from_anchor);
+  const int32_t first_selected_row = query_width - num_speculative_tokens;
   specBuilder::DecodeRowContext row_ctx =
       specBuilder::make_decode_row_context(input);
   if (use_block_parallel_rows) {
-    CHECK(sample_from_anchor)
-        << "block-parallel rows require DSpark anchor sampling";
     CHECK(row_ctx.model_managed_multiblock)
         << "DSV4 block-parallel rows require grouped KV tables";
   }
@@ -249,8 +242,7 @@ void build_query_rows(const LlmForwardInput& input,
       row.token_id = query_idx == 0 ? token_ids[seq_id] : mask_token_id;
       row.position_offset = query_idx;
       specBuilder::append_decode_row(row_ctx, row, block_size, buf);
-      // DFlash skips slot 0 (anchor, not sampled); DSpark samples every slot.
-      if (sample_from_anchor || query_idx > 0) {
+      if (query_idx >= first_selected_row) {
         selected_idxes.emplace_back(seq_id * query_width + query_idx);
       }
     }
@@ -260,12 +252,8 @@ void build_query_rows(const LlmForwardInput& input,
     }
     specBuilder::append_q_seq_len(
         buf.out_q_seq_lens, buf.out_q_cu_seq_lens, query_width);
-    // kv_len must cover exactly this block's max absolute position (anchor +
-    // query_width - 1), not a fixed anchor + num_speculative_tokens: DFlash's
-    // (1+N)-wide block and DSpark's N-wide block (sample_from_anchor) advance
-    // the max position by different amounts, and using num_speculative_tokens
-    // unconditionally overshoots by one slot for DSpark, exposing an
-    // uninitialized cache slot to this block's non-causal attention.
+    // Attend through the final query position; an N-wide block must not
+    // expose the unused cache slot after it.
     const int32_t kv_len =
         specBuilder::calc_kv_len(input.input_params.attention.host.kv_seq_lens,
                                  seq_id,
@@ -347,6 +335,7 @@ DFlashWorkerImpl::DFlashWorkerImpl(const ParallelArgs& parallel_args,
             return std::make_unique<LLMWorkerImpl>(
                 parallel_args, device, draft_options(options));
           }),
+      draft_query_width_(options.num_speculative_tokens() + 1),
       sampling_process_group_(parallel_args.tp_group_ != nullptr
                                   ? parallel_args.tp_group_
                                   : parallel_args.process_group_) {
@@ -425,7 +414,8 @@ DFlashWorkerImpl::~DFlashWorkerImpl() {
                           "disable unified graphs.");
   }
   if (draft_args.hidden_size() != capacity.common.hidden_size ||
-      draft_args.vocab_size() != capacity.common.vocab_size ||
+      (draft_args.vocab_size() != capacity.common.vocab_size &&
+       !draft_vocab_.target_token_ids.defined()) ||
       expected_context_hidden_size_ <= 0 ||
       expected_context_hidden_size_ > std::numeric_limits<int32_t>::max()) {
     return ::xllm::Status(StatusCode::INVALID_ARGUMENT,
@@ -446,6 +436,7 @@ DFlashWorkerImpl::~DFlashWorkerImpl() {
   capacity.selector_top_k = draft_args.dflash2_selector_top_k();
   capacity.common.sampling_group = sampling_process_group_;
   capacity.is_probabilistic_draft = is_probabilistic_draft_;
+  capacity.draft_vocab = draft_vocab_;
   capacity.unified_graph =
       Platform::is_npu() && options_.enable_graph() &&
       ExecutionConfig::get_instance().enable_unified_mtp_graph() &&
@@ -581,12 +572,16 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
         << "Block-diffusion draft config requires mask_token_id, "
            "dflash_config.mask_token_id, or dspark_noise_token_id.";
 
-    const int64_t draft_vocab_size = draft_args.vocab_size();
+    const int64_t draft_vocab_size = draft_args.draft_vocab_size() > 0
+                                         ? draft_args.draft_vocab_size()
+                                         : draft_args.vocab_size();
+    const ModelArgs& target_args = impl_->context_.get_model_args();
     CHECK_GT(draft_vocab_size, 0)
         << "Block-diffusion draft vocab_size must be set.";
-    CHECK_LT(mask_token_id_, draft_vocab_size)
+    CHECK_LT(mask_token_id_, target_args.vocab_size())
         << "Block-diffusion mask_token_id (" << mask_token_id_
-        << ") must be < draft vocab_size (" << draft_vocab_size << ").";
+        << ") must be < target vocab_size (" << target_args.vocab_size()
+        << ").";
     if (SpeculativeConfig::is_dflash2_algorithm(
             options_.speculative_algorithm())) {
       const int32_t requested_block_size =
@@ -601,14 +596,6 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
              "checkpoint, while eager validation is not lossless.";
     }
     // Context hidden comes from the target.
-    const ModelArgs& target_args = impl_->context_.get_model_args();
-
-    if (is_probabilistic_draft_) {
-      CHECK_EQ(draft_vocab_size, target_args.vocab_size())
-          << "Probabilistic drafts require the draft vocab ("
-          << draft_vocab_size << ") to equal the target vocab ("
-          << target_args.vocab_size() << ").";
-    }
     const int64_t num_target_layers =
         static_cast<int64_t>(target_args.layers_to_capture().size());
     CHECK_GT(num_target_layers, 0)
@@ -617,8 +604,6 @@ bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
            "aux_hidden_state_layer_ids.";
     expected_context_hidden_size_ =
         static_cast<int64_t>(target_args.hidden_size()) * num_target_layers;
-    draft_sas_mode_ = dflash_detail::classify_dspark_sas_mode(
-        draft_args, sample_from_anchor());
   }
   return result;
 }
@@ -648,12 +633,15 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
   // Mirror prepare_query_inputs' metadata geometry: DSV4 DSpark represents
   // every block row as a q_len=1 sequence, while Qwen/DFlash keeps one
   // query_width-wide sequence.
-  const int32_t draft_width = dflash_detail::decode_draft_width(
-      options_.num_speculative_tokens(), sample_from_anchor());
-  const bool use_block_parallel_rows = draft_use_block_parallel_rows();
+  const int32_t draft_width = draft_query_width_;
+  const bool use_block_parallel_rows =
+      draft_row_layout_ == dflash_detail::DraftRowLayout::BLOCK_ROWS;
   LlmForwardInput query_input = input.clone();
   dflash_detail::invalidate_draft_model_geometry(query_input.input_params);
-  query_input.input_params.meta.batch_forward_type = draft_batch_forward_type();
+  query_input.input_params.meta.batch_forward_type =
+      draft_row_layout_ == dflash_detail::DraftRowLayout::SPARSE_INDICES
+          ? BatchForwardType::DECODE
+          : BatchForwardType::CHUNKED_PREFILL;
   query_input.input_params.meta.q_max_seq_len =
       use_block_parallel_rows ? 1 : draft_width;
   if (use_block_parallel_rows) {
@@ -661,8 +649,7 @@ std::optional<ForwardOutput> DFlashWorkerImpl::step_empty(
   }
   scale_speculative_parallel_token_counts(query_input.input_params,
                                           draft_width);
-  if (sample_from_anchor() && !use_block_parallel_rows &&
-      ModelConfig::is_python_model_impl(context_.get_model_impl())) {
+  if (draft_needs_dummy_rows_) {
     c10::StreamGuard stream_guard = prepare_stream_->set_stream_guard();
     specBuilder::materialize_empty_block_draft_rows(
         query_input, draft_width, mask_token_id_);
@@ -1023,18 +1010,17 @@ void DFlashWorkerImpl::prepare_query_inputs(const LlmForwardInput& input,
 
   specBuilder::DecodeBuildBuffers buf;
   std::vector<int32_t> selected_idxes;
-  const bool use_block_parallel_rows = draft_use_block_parallel_rows();
+  const bool use_block_parallel_rows =
+      draft_row_layout_ == dflash_detail::DraftRowLayout::BLOCK_ROWS;
+  const int32_t query_width = draft_query_width_;
   build_query_rows(input,
                    mask_token_id_,
                    options_.num_speculative_tokens(),
                    options_.block_size(),
-                   sample_from_anchor(),
+                   query_width,
                    use_block_parallel_rows,
                    buf,
                    selected_idxes);
-  // DFlash: (1 + N) rows per seq; DSpark (sample_from_anchor): N rows.
-  const int32_t query_width = dflash_detail::decode_draft_width(
-      options_.num_speculative_tokens(), sample_from_anchor());
   // DFlash emits query_width rows per seq unconditionally, so DP shape
   // symmetry holds by construction. Catch scheduler regressions that break
   // the invariant (see MTP dp_enabled idle-rank branch).
@@ -1049,7 +1035,10 @@ void DFlashWorkerImpl::prepare_query_inputs(const LlmForwardInput& input,
                                           buf.out_positions,
                                           input.token_ids.options(),
                                           input.positions.options());
-  input_params.meta.batch_forward_type = draft_batch_forward_type();
+  input_params.meta.batch_forward_type =
+      draft_row_layout_ == dflash_detail::DraftRowLayout::SPARSE_INDICES
+          ? BatchForwardType::DECODE
+          : BatchForwardType::CHUNKED_PREFILL;
   if (use_block_parallel_rows) {
     expand_block_parallel_sequence_rows(input_params, query_width);
   }
@@ -1063,8 +1052,7 @@ void DFlashWorkerImpl::prepare_query_inputs(const LlmForwardInput& input,
                                    /*update_block_tables=*/
                                    use_block_parallel_rows);
   scale_speculative_parallel_token_counts(input_params, query_width);
-  if (sample_from_anchor() && !use_block_parallel_rows &&
-      ModelConfig::is_python_model_impl(context_.get_model_impl())) {
+  if (draft_needs_dummy_rows_) {
     specBuilder::materialize_empty_block_draft_rows(
         query_input, query_width, mask_token_id_);
   }

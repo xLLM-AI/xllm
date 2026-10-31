@@ -53,11 +53,17 @@ class EmbeddingCache final {
     int32_t prev_token_id = -1;
     torch::Tensor prev_embedding;
 
+    // Full emitted prefix (accepted drafts plus correction/bonus), paired
+    // with the target hidden states that predicted those tokens. Retained
+    // only when the draft requires replay of every verified KV position.
+    std::vector<int32_t> replay_token_ids;
+    torch::Tensor replay_embeddings;
+
     int32_t correction_token_id = 0;  // accepted token for step correction
     int32_t correction_position_offset = 0;
   };
 
-  EmbeddingCache(int32_t total_nums);
+  explicit EmbeddingCache(int32_t total_nums, bool retain_replay_span = false);
 
   ~EmbeddingCache() = default;
 
@@ -115,6 +121,7 @@ class EmbeddingCache final {
  private:
   std::vector<DecodeState> decode_tails_;
   torch::Tensor embedding_placeholder_;
+  bool retain_replay_span_ = false;
 
   DecodeState& mutable_tail(int32_t embedding_id);
   const DecodeState& get_tail(int32_t embedding_id) const;

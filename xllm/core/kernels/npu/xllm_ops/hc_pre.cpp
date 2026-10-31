@@ -15,6 +15,10 @@ limitations under the License.
 
 #include <torch/library.h>
 
+#include <cmath>
+#include <optional>
+
+#include "core/kernels/npu/aclnn/pytorch_npu_helper.hpp"
 #include "xllm_ops_api.h"
 
 namespace xllm::kernel::npu {
@@ -37,6 +41,55 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> hc_pre(
   torch::Tensor x_bf16 = x;
   if (x_bf16.scalar_type() != torch::kBFloat16) {
     x_bf16 = x_bf16.to(torch::kBFloat16);
+  }
+
+  static const bool has_fused_hc_pre =
+      aclnn::detail::get_op_api_func_addr("aclnnHcPreGetWorkspaceSize") !=
+          nullptr &&
+      aclnn::detail::get_op_api_func_addr("aclnnHcPre") != nullptr;
+  if (has_fused_hc_pre && x_bf16.device().type() == torch::kPrivateUse1 &&
+      hc_mult == 4 && x_bf16.size(-2) == hc_mult && x_bf16.numel() > 0 &&
+      hc_fn.dim() == 2 && hc_fn.size(0) == 24 &&
+      hc_fn.size(1) == hc_mult * x_bf16.size(-1) && hc_scale.dim() == 1 &&
+      hc_scale.numel() == 3 && hc_base.dim() == 1 && hc_base.numel() == 24 &&
+      hc_fn.scalar_type() == torch::kFloat32 &&
+      hc_scale.scalar_type() == torch::kFloat32 &&
+      hc_base.scalar_type() == torch::kFloat32 &&
+      hc_fn.device() == x_bf16.device() &&
+      hc_scale.device() == x_bf16.device() &&
+      hc_base.device() == x_bf16.device() && x_bf16.is_contiguous() &&
+      hc_fn.is_contiguous() && hc_scale.is_contiguous() &&
+      hc_base.is_contiguous() && hc_sinkhorn_iters > 0 &&
+      std::isfinite(norm_eps) && norm_eps > 0 && std::isfinite(hc_eps) &&
+      hc_eps > 0) {
+    auto output_shape = x_bf16.sizes().vec();
+    output_shape.erase(output_shape.end() - 2);
+    auto post_shape = x_bf16.sizes().vec();
+    post_shape.pop_back();
+    auto combination_shape = post_shape;
+    combination_shape.emplace_back(hc_mult);
+    auto output = torch::empty(output_shape, x_bf16.options());
+    auto post =
+        torch::empty(post_shape, x_bf16.options().dtype(torch::kFloat32));
+    auto combination = torch::empty(combination_shape,
+                                    x_bf16.options().dtype(torch::kFloat32));
+    auto pre = torch::empty_like(post);
+    std::optional<torch::Tensor> pre_mix;
+    EXEC_NPU_CMD(aclnnHcPre,
+                 x_bf16,
+                 hc_fn,
+                 hc_scale,
+                 hc_base,
+                 pre_mix,
+                 hc_mult,
+                 hc_sinkhorn_iters,
+                 hc_eps,
+                 norm_eps,
+                 output,
+                 post,
+                 combination,
+                 pre);
+    return {output.to(original_type), post, combination};
   }
 
   torch::Tensor rsqrt = hc_pre_inv_rms(x_bf16, norm_eps);

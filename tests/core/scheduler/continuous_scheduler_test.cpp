@@ -73,12 +73,22 @@ class ControllableBlockManagerPool final : public BlockManagerPool {
 
   void prefetch_from_storage(std::shared_ptr<Request> request,
                              PrefetchDoneCallback done) override {
+    prefetch_pipeline_calls_.fetch_add(1, std::memory_order_relaxed);
     ++prefetch_calls_;
     if (prefetch_ready_) {
       done(std::move(request));
       return;
     }
     pending_.emplace_back(std::move(request), std::move(done));
+  }
+
+  void drain_prefetch_completions() override {
+    prefetch_pipeline_calls_.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  void set_prefetch_completion_callback(
+      PrefetchCompletionCallback /*callback*/) override {
+    prefetch_pipeline_calls_.fetch_add(1, std::memory_order_relaxed);
   }
 
   void set_prefetch_ready(bool ready) {
@@ -96,11 +106,16 @@ class ControllableBlockManagerPool final : public BlockManagerPool {
 
   size_t prefetch_calls() const { return prefetch_calls_; }
 
+  size_t prefetch_pipeline_calls() const {
+    return prefetch_pipeline_calls_.load(std::memory_order_relaxed);
+  }
+
  private:
   std::atomic<bool> pending_async_release_{false};
   bool enable_storage_prefetch_ = true;
   bool prefetch_ready_ = true;
   size_t prefetch_calls_ = 0;
+  std::atomic<size_t> prefetch_pipeline_calls_{0};
   std::vector<std::pair<std::shared_ptr<Request>, PrefetchDoneCallback>>
       pending_;
 };
@@ -255,6 +270,10 @@ class FakeEngine : public Engine {
     return fake_block_manager_->prefetch_calls();
   }
 
+  size_t prefetch_pipeline_calls() const {
+    return fake_block_manager_->prefetch_pipeline_calls();
+  }
+
  private:
   std::unique_ptr<Tokenizer> fake_tokenizer_;
   std::unique_ptr<ControllableBlockManagerPool> fake_block_manager_;
@@ -296,7 +315,11 @@ class TestableContinuousScheduler final : public ContinuousScheduler<> {
                               /*model_residency_coordinator=*/nullptr,
                               /*distributed_worker_manager=*/nullptr) {}
 
-  using ContinuousScheduler<>::drain_prefetch_pipeline;
+  void drain_prefetch_pipeline() {
+    if (kv_cache_prefetcher_ != nullptr) {
+      kv_cache_prefetcher_->drain();
+    }
+  }
 
   BatchGroup prepare_batch_test() { return prepare_batch(); }
 
@@ -792,7 +815,7 @@ TEST(EnginePrefixCacheTest, FullAttentionDecodeStillReusesKvPrefixes) {
   pool->deallocate(second_sequence);
 }
 
-TEST(EnginePrefixCacheTest, DecodeLinearRejectsHostPrefixCacheAndStore) {
+TEST(EnginePrefixCacheTest, DecodeLinearHostCacheRejectsStore) {
   ScopedConfigValue<bool> vmm_kvcache(
       KVCacheConfig::get_instance().enable_vmm_kvcache(), false);
   FakeEngine engine(32, 4, true, true, InstanceRole::DECODE);
@@ -810,9 +833,11 @@ TEST(EnginePrefixCacheTest, DecodeLinearRejectsHostPrefixCacheAndStore) {
     options.enable_kvcache_store = enable_store;
     const std::optional<std::string> error =
         validate_host_cache_options(options);
-    ASSERT_TRUE(error.has_value());
-    EXPECT_NE(error->find("linear-attention conv/SSM cache tensors"),
-              std::string::npos);
+    EXPECT_EQ(error.has_value(), enable_store);
+    if (error) {
+      EXPECT_NE(error->find("linear-attention Host checkpoints"),
+                std::string::npos);
+    }
   }
 }
 
@@ -1200,6 +1225,35 @@ TEST(ContinuousSchedulerTest,
   EXPECT_EQ(scheduler.scheduler_queue_size(), 1u);
   EXPECT_FALSE(scheduler.has_pending_prefetch());
   EXPECT_EQ(engine.prefetch_calls(), 0u);
+}
+
+TEST(ContinuousSchedulerTest,
+     DisabledStoragePrefetchSkipsManagerCallsThroughoutLifecycle) {
+  FakeEngine engine(/*num_blocks=*/64, /*block_size=*/32);
+  engine.set_storage_prefetch_enabled(false);
+  SchedulerOptions options = create_scheduler_options(64, 4, 0, 64, 1);
+  auto request = generate_request_with_prompt_tokens({1, 2}, 4, 30000);
+
+  {
+    TestableContinuousScheduler scheduler(&engine, options);
+    EXPECT_EQ(engine.prefetch_pipeline_calls(), 0u);
+    for (int32_t iteration = 0; iteration < 3; ++iteration) {
+      BatchGroup batches = scheduler.prepare_batch_test();
+      ASSERT_EQ(batches.size(), 1u);
+      EXPECT_TRUE(batches.front().empty());
+    }
+
+    ASSERT_TRUE(scheduler.add_request(request));
+    EXPECT_EQ(scheduler.scheduler_queue_size(), 1u);
+    EXPECT_FALSE(scheduler.has_pending_prefetch());
+    BatchGroup batches = scheduler.prepare_batch_test();
+    ASSERT_EQ(batches.size(), 1u);
+    ASSERT_EQ(batches.front().size(), 1u);
+    EXPECT_EQ(batches.front()[0], request->sequences().front().get());
+    EXPECT_EQ(engine.prefetch_pipeline_calls(), 0u);
+  }
+
+  EXPECT_EQ(engine.prefetch_pipeline_calls(), 0u);
 }
 
 TEST(ContinuousSchedulerTest,

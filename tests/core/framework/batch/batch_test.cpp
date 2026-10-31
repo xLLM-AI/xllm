@@ -934,6 +934,38 @@ TEST(BatchTest, RecordsPrefillStageBeforeAdvancingKvCount) {
   EXPECT_EQ(execution_batch.is_prefilling, (std::vector<uint8_t>{1, 1}));
 }
 
+namespace {
+
+class HostRestoreInputTest : public ::testing::TestWithParam<bool> {};
+
+TEST_P(HostRestoreInputTest, ConsumesRestoreRequirementWhenBuildingInput) {
+  BlockManager::Options options;
+  options.num_blocks(4).block_size(4);
+  BlockManagerImpl manager(options);
+  Sequence sequence = make_basic_sequence({1, 2, 3, 4});
+  sequence.add_blocks(BlockType::KV, manager.allocate(2));
+  Batch batch({&sequence});
+  batch.set_batch_id();
+  batch.require_host_restore();
+  auto build_input = [&]() {
+    if (GetParam()) {
+      return batch.prepare_forward_input(ModelArgs(), /*thread_pool=*/nullptr);
+    }
+    return batch.prepare_forward_input(
+        /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/0, ModelArgs());
+  };
+  const LlmForwardInput input = build_input();
+  EXPECT_EQ(input.input_params.meta.batch_id, batch.batch_id());
+  EXPECT_TRUE(input.input_params.meta.requires_host_restore);
+  sequence.append_token(Token(/*id=*/5));
+  batch.refresh_forward_type();
+  EXPECT_FALSE(build_input().input_params.meta.requires_host_restore);
+}
+
+INSTANTIATE_TEST_SUITE_P(Builders, HostRestoreInputTest, ::testing::Bool());
+
+}  // namespace
+
 TEST(BatchTest, ProcessSampleOutputStoresMtpBootstrapEmbedding) {
   BlockManager::Options options;
   options.num_blocks(8).block_size(4);
@@ -3348,7 +3380,7 @@ TEST(BatchTest, OverlapRawAcceptanceKeepsSingleLinearSlot) {
   stopping.set_max_generated_tokens(32);
   Sequence sequence = make_overlap_sequence(
       std::vector<int32_t>(2046, 7), 4096, &sampling, &stopping);
-  ASSERT_TRUE(manager.allocate_sequence(&sequence, 2046));
+  ASSERT_TRUE(manager.allocate_sequence(&sequence, sequence.kv_state(), 2046));
   ModelArgs args;
   args.model_type("qwen3_5").layer_types({"linear_attention"});
   RawForwardOutput fake;
@@ -3360,13 +3392,15 @@ TEST(BatchTest, OverlapRawAcceptanceKeepsSingleLinearSlot) {
   prefill.prepare_forward_input(1, 0, args);
   prefill.process_sample_output(fake, BatchOutputAction::RESERVE_PENDING);
   prefill.process_sample_output(first_token, BatchOutputAction::COMMIT_PENDING);
-  ASSERT_TRUE(manager.allocate_sequence(&sequence, sequence.num_tokens() + 6));
+  ASSERT_TRUE(manager.allocate_sequence(
+      &sequence, sequence.kv_state(), sequence.num_tokens() + 6));
   Batch first;
   first.add(&sequence, 1);
   first.prepare_forward_input(1, 0, args);
   const int32_t first_output_id = sequence.get_linear_state_slot_id();
   first.process_sample_output(fake, BatchOutputAction::RESERVE_PENDING);
-  ASSERT_TRUE(manager.allocate_sequence(&sequence, sequence.num_tokens() + 6));
+  ASSERT_TRUE(manager.allocate_sequence(
+      &sequence, sequence.kv_state(), sequence.num_tokens() + 6));
   Batch second;
   second.add(&sequence, 1);
   LlmForwardInput second_input = second.prepare_forward_input(1, 0, args);
@@ -3387,7 +3421,8 @@ TEST(BatchTest, OverlapRawAcceptanceKeepsSingleLinearSlot) {
   const int32_t source_id = sequence.get_linear_state_slot_id();
   EXPECT_EQ(source_id, first_output_id);
   ASSERT_EQ(sequence.kv_state().num_blocks(BlockType::LINEAR), 1u);
-  ASSERT_TRUE(manager.allocate_sequence(&sequence, sequence.num_tokens() + 6));
+  ASSERT_TRUE(manager.allocate_sequence(
+      &sequence, sequence.kv_state(), sequence.num_tokens() + 6));
   Batch third;
   third.add(&sequence, 1);
   LlmForwardInput third_input = third.prepare_forward_input(1, 0, args);
@@ -3399,12 +3434,13 @@ TEST(BatchTest, OverlapRawAcceptanceKeepsSingleLinearSlot) {
   third.process_sample_output(fake, BatchOutputAction::RESERVE_PENDING);
   accepted.outputs.front().tokens.resize(2);
   second.process_sample_output(accepted, BatchOutputAction::COMMIT_PENDING);
-  ASSERT_TRUE(manager.allocate_sequence(&sequence, sequence.num_tokens() + 6));
+  ASSERT_TRUE(manager.allocate_sequence(
+      &sequence, sequence.kv_state(), sequence.num_tokens() + 6));
   EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::LINEAR), 1u);
   EXPECT_EQ(sequence.get_linear_state_slot_id(), source_id);
   EXPECT_EQ(sequence.kv_state().blocks(BlockType::LINEAR).front().id(),
             source_id);
-  manager.deallocate_for_sequence(&sequence);
+  manager.deallocate_for_sequence(&sequence, sequence.kv_state());
 }
 
 TEST(BatchTest, IntermediatePrefillAdvancesCacheProgress) {
@@ -3490,7 +3526,9 @@ TEST(BatchTest, OverlapDecodeReusesPrefillTailBeforeAndAfterResults) {
         const uint32_t query_tokens =
             chunk_index < intermediate_chunks ? 2048 : 2046;
         ASSERT_TRUE(manager.allocate_sequence(
-            &sequence, sequence.kv_cache_tokens_num() + query_tokens));
+            &sequence,
+            sequence.kv_state(),
+            sequence.kv_cache_tokens_num() + query_tokens));
         Batch& prefill = prefills.emplace_back();
         prefill.add(&sequence, query_tokens);
         prefill.prepare_forward_input(1, 0, args);
@@ -3505,8 +3543,8 @@ TEST(BatchTest, OverlapDecodeReusesPrefillTailBeforeAndAfterResults) {
       EXPECT_EQ(sequence.kv_cache_tokens_num(), prompt_tokens);
       const int32_t source_id = sequence.get_linear_state_slot_id();
 
-      ASSERT_TRUE(
-          manager.allocate_sequence(&sequence, sequence.num_tokens() + 6));
+      ASSERT_TRUE(manager.allocate_sequence(
+          &sequence, sequence.kv_state(), sequence.num_tokens() + 6));
       ASSERT_EQ(sequence.kv_state().num_blocks(BlockType::LINEAR), 1u);
       EXPECT_EQ(sequence.get_linear_state_slot_id(), source_id);
       Batch first_decode;
@@ -3519,13 +3557,13 @@ TEST(BatchTest, OverlapDecodeReusesPrefillTailBeforeAndAfterResults) {
                                             BatchOutputAction::COMMIT_PENDING);
       EXPECT_EQ(sequence.kv_cache_tokens_num(), prompt_tokens + 1);
 
-      ASSERT_TRUE(
-          manager.allocate_sequence(&sequence, sequence.num_tokens() + 6));
+      ASSERT_TRUE(manager.allocate_sequence(
+          &sequence, sequence.kv_state(), sequence.num_tokens() + 6));
       ASSERT_EQ(sequence.kv_state().num_blocks(BlockType::LINEAR), 1u);
       EXPECT_EQ(sequence.kv_state().blocks(BlockType::LINEAR).front().id(),
                 source_id);
       EXPECT_EQ(sequence.get_linear_state_slot_id(), source_id);
-      manager.deallocate_for_sequence(&sequence);
+      manager.deallocate_for_sequence(&sequence, sequence.kv_state());
     }
   }
 }
@@ -4709,7 +4747,8 @@ TEST(BatchTest, OverlapMTPReplacementKeepsCompositeKvBlocks) {
 
   Sequence seq = make_overlap_sequence(
       {1, 10, 11}, /*seq_capacity=*/128, &sampling_param, &stopping_checker);
-  ASSERT_TRUE(manager.allocate_sequence(&seq, seq.num_prompt_tokens()));
+  ASSERT_TRUE(
+      manager.allocate_sequence(&seq, seq.kv_state(), seq.num_prompt_tokens()));
   ASSERT_EQ(seq.kv_state().num_blocks(BlockType::KV), 0u);
   ASSERT_GT(seq.kv_state().current_max_tokens_capacity(), 0u);
   seq.kv_state().incr_kv_cache_tokens_num(seq.num_prompt_tokens() - 1);

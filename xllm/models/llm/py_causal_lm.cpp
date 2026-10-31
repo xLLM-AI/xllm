@@ -30,6 +30,7 @@ limitations under the License.
 #include "core/framework/model/model_output.h"
 #include "core/framework/model_loader/model_loader.h"
 #include "core/framework/parallel_state/parallel_state.h"
+#include "core/framework/parallel_state/parallel_topology.h"
 #include "core/framework/parallel_state/process_group.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/kv_cache/layout/kpool_cache_policy.h"
@@ -231,7 +232,7 @@ PyCausalLM::PyCausalLM(const ModelContext& context,
                          c10::str(device_),
                          global_rank,
                          global_world_size,
-                         global_rank % tp_size_);
+                         global_rank % (global_world_size / dp_size_));
     }
     if (!is_deepseek_v4 && moe_tp_size_ > 1) {
       init_process_group("moe_tp",
@@ -267,24 +268,31 @@ PyCausalLM::PyCausalLM(const ModelContext& context,
                          c10::str(device_),
                          global_rank,
                          global_world_size,
-                         cp_group_index);
+                         cp_group_index,
+                         tp_size_);
     }
     const int32_t kv_split_size = parallel_args.kv_split_size_effective();
     const bool is_glm_dsa = model_args_.model_type() == "glm_moe_dsa" ||
                             model_args_.model_type() == "glm_moe_dsa_mtp";
     if (!is_deepseek_v4 && (cp_size_ == 1 || is_glm_dsa) && kv_split_size > 1) {
-      const int32_t dcp_rank = parallel_args.kv_split_rank();
-      const int32_t dcp_group_index =
-          global_rank % (global_world_size / kv_split_size);
+      const parallel_state::ParallelTopology dcp_topology(global_rank,
+                                                          global_world_size,
+                                                          dp_size_,
+                                                          ep_size_,
+                                                          cp_size_,
+                                                          kv_split_size);
+      const auto& dcp = dcp_topology.dcp();
+      const int32_t dcp_group_stride = dcp.ranks[1] - dcp.ranks[0];
       init_process_group("dcp",
                          parallel_args.python_rendezvous_host_,
                          parallel_args.python_rendezvous_port_,
-                         dcp_rank,
+                         dcp.rank,
                          kv_split_size,
                          c10::str(device_),
                          global_rank,
                          global_world_size,
-                         dcp_group_index);
+                         dcp.index,
+                         dcp_group_stride);
     }
     if (!is_deepseek_v4 && layerwise_split_size_ > 1) {
       CHECK_EQ(tp_size_ % layerwise_split_size_, 0)
@@ -388,6 +396,10 @@ py::dict PyCausalLM::build_config_dict(const ModelContext& context) const {
   d["enable_mmrs_fusion"] = flash_comm1_options.enable_mmrs_fusion;
   d["mmrs_comm_mode"] = flash_comm1_options.mmrs_comm_mode;
   d["enable_fused_mc2"] = KernelConfig::get_instance().enable_fused_mc2() > 0;
+  if (model_args_.model_type() == "glm5_next" ||
+      model_args_.model_type() == "glm5_next_text") {
+    d["expert_parallel_degree"] = eplb_config.expert_parallel_degree();
+  }
   if (mega_moe_comm_resource_ != nullptr) {
     d["enable_mega_moe"] = true;
     d["mega_moe_context"] = mega_moe_comm_resource_->context_tensor();

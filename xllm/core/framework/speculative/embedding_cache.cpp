@@ -26,7 +26,8 @@ limitations under the License.
 
 namespace xllm {
 
-EmbeddingCache::EmbeddingCache(int32_t total_nums) {
+EmbeddingCache::EmbeddingCache(int32_t total_nums, bool retain_replay_span)
+    : retain_replay_span_(retain_replay_span) {
   CHECK_GT(total_nums, 0) << "No embeddings to allocate";
   decode_tails_.resize(total_nums);
 }
@@ -68,6 +69,12 @@ void EmbeddingCache::write_prefill_target_context(
     state.position_offset = 0;
     state.embedding =
         clone_contiguous_detached_tensor(embeddings.select(/*dim=*/0, i));
+    if (retain_replay_span_) {
+      // The prefill tail is a single emitted position; seed the replay span
+      // from the already-detached clone so later producer reuse cannot alias.
+      state.replay_token_ids = {state.token_id};
+      state.replay_embeddings = state.embedding.unsqueeze(0);
+    }
 
     DecodeState& tail = mutable_tail(ids[i]);
     tail = std::move(state);
@@ -90,6 +97,10 @@ void EmbeddingCache::write_mtp_bootstrap_context(
   state.request_id = request_id;
   state.token_id = token_id;
   state.embedding = clone_contiguous_detached_tensor(embedding);
+  if (retain_replay_span_) {
+    state.replay_token_ids = {state.token_id};
+    state.replay_embeddings = state.embedding.unsqueeze(0);
+  }
   tail = std::move(state);
 }
 
@@ -213,7 +224,22 @@ void EmbeddingCache::write_target_context(
     state.position_offset = last_idx;
     state.correction_token_id = correction_token;
     state.correction_position_offset = correction_offset;
-    const torch::Tensor row = embedding_rows.select(/*dim=*/0, i);
+    if (retain_replay_span_) {
+      // Accepted-span replay needs every verified KV position, so the full
+      // [batch, width, hidden] layout is mandatory; the compact two-row view
+      // only covers the last two positions.
+      CHECK(!compact) << "replay-span retention requires full-span embeddings";
+      state.replay_token_ids.assign(
+          accepted_tokens_data + row_offset,
+          accepted_tokens_data + row_offset + accepted_len);
+      state.replay_embeddings = clone_contiguous_detached_tensor(
+          embedding_rows.select(/*dim=*/0, i).narrow(0, 0, accepted_len));
+    }
+    // Replay retention already owns an immutable copy of the accepted span;
+    // select legacy last/previous views from it instead of cloning again.
+    const torch::Tensor row = retain_replay_span_
+                                  ? state.replay_embeddings
+                                  : embedding_rows.select(/*dim=*/0, i);
     if (retain_previous_embedding && last_idx > 0) {
       const int64_t previous_token =
           accepted_tokens_data[row_offset + last_idx - 1];
@@ -221,20 +247,21 @@ void EmbeddingCache::write_target_context(
       // One request-sized snapshot keeps both rows alive without pinning a
       // whole batch output. Subsequent replay may overwrite its source.
       const torch::Tensor pair =
-          borrow_compact_view ? row.narrow(/*dim=*/0,
-                                           /*start=*/compact ? 0 : last_idx - 1,
-                                           /*length=*/2)
-                                    .detach()
-                              : clone_contiguous_detached_tensor(row.narrow(
-                                    /*dim=*/0,
-                                    /*start=*/compact ? 0 : last_idx - 1,
-                                    /*length=*/2));
+          borrow_compact_view || retain_replay_span_
+              ? row.narrow(/*dim=*/0,
+                           /*start=*/compact ? 0 : last_idx - 1,
+                           /*length=*/2)
+                    .detach()
+              : clone_contiguous_detached_tensor(row.narrow(
+                    /*dim=*/0,
+                    /*start=*/compact ? 0 : last_idx - 1,
+                    /*length=*/2));
       state.prev_embedding = pair.select(/*dim=*/0, /*index=*/0);
       state.embedding = pair.select(/*dim=*/0, /*index=*/1);
     } else {
       const torch::Tensor embedding =
           row.select(/*dim=*/0, /*index=*/compact ? 1 : last_idx);
-      state.embedding = borrow_compact_view
+      state.embedding = borrow_compact_view || retain_replay_span_
                             ? embedding
                             : clone_contiguous_detached_tensor(embedding);
     }

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import Any, Callable, Sequence
 
 import torch
@@ -53,7 +54,7 @@ from xllm.python.layers.attention import Attention
 from xllm.python.layers.embedding import HiddenParallelEmbedding
 from xllm.python.layers.layernorm import RMSNorm
 from xllm.python.layers.linear import ColumnParallelLinear, RowParallelLinear
-from xllm.python.layers.moe_dp import dp_gather_tokens
+from xllm.python.layers.moe_parallel import dp_gather_tokens
 from xllm.python.layers.rotary_embedding import _expand_half_rope_cos_sin
 from xllm.python.model_executor.forward_context import (
     get_forward_context,
@@ -1887,10 +1888,14 @@ class DeepseekV4ForCausalLM(PyModelBase):
         checkpoint_prefix: str,
         parameter_prefix: str,
         layer_id: int,
-        *,
-        w8a8_loader: Callable[[str, str, dict[str, int] | None], None],
-    ) -> tuple[DeepseekV4Attention, str]:
+        w8a8_loader: Callable[..., None] | None = None,
+    ) -> DeepseekV4Attention:
         """Resolve and load one attention block from a supported checkpoint layout."""
+        if w8a8_loader is None:
+            w8a8_loader = partial(
+                loader.load_projection,
+                suffixes=("weight", "weight_scale", "weight_offset"),
+            )
         attention_prefix = _find_checkpoint_prefix(
             loader,
             (
@@ -1907,17 +1912,17 @@ class DeepseekV4ForCausalLM(PyModelBase):
         w8a8_loader(
             attention_prefix + "wq_a",
             attention_parameter_prefix + "q_a_proj",
-            None,
+            shard_dims=None,
         )
         w8a8_loader(
             attention_prefix + "wq_b",
             attention_parameter_prefix + "q_b_proj",
-            {"weight": 0, "weight_scale": 0, "weight_offset": 0},
+            shard_dims={"weight": 0, "weight_scale": 0, "weight_offset": 0},
         )
         w8a8_loader(
             attention_prefix + "wkv",
             attention_parameter_prefix + "kv_proj",
-            None,
+            shard_dims=None,
         )
 
         loader.copy_in(
@@ -1967,7 +1972,36 @@ class DeepseekV4ForCausalLM(PyModelBase):
                     parameter_prefix + "hc." + name,
                     loader.get_tensor(checkpoint_prefix + name),
                 )
-        return attention, attention_prefix
+        if attention.indexer is not None and loader.has(attention_prefix + "indexer.wq_b.weight"):
+            loader.load_projection(
+                attention_prefix + "indexer.wq_b",
+                attention_parameter_prefix + "indexer.wq_b",
+                ("weight", "weight_scale", "weight_offset"),
+            )
+            loader.copy_in(
+                attention_parameter_prefix + "indexer.weights_proj.weight",
+                loader.get_tensor(attention_prefix + "indexer.weights_proj.weight"),
+            )
+            self._load_dsv4_compressor(
+                loader,
+                (
+                    attention_prefix + "indexer.compressor.",
+                    attention_prefix + "indexer.compress.",
+                ),
+                attention_parameter_prefix + "indexer.compressor_",
+                f"DeepSeek-V4 indexer compressor weights not found under {attention_prefix}indexer",
+            )
+        if hasattr(attention, "cmp_wkv"):
+            self._load_dsv4_compressor(
+                loader,
+                (
+                    attention_prefix + "compressor.",
+                    attention_prefix + "compress.",
+                ),
+                attention_parameter_prefix + "cmp_",
+                f"DeepSeek-V4 attention compressor weights not found under {attention_prefix}",
+            )
+        return attention
 
     def load_weights(self, state_dicts, tp_rank: int, tp_size: int) -> None:
         cfg = self.cfg
@@ -1989,13 +2023,6 @@ class DeepseekV4ForCausalLM(PyModelBase):
             },
         )
 
-        # Dynamic W8A8 uses int8 weights and per-channel scale/offset;
-        # static W8A8 uses deq_scale/quant_bias instead.
-        w8a8_suffixes = ("weight", "weight_scale", "weight_offset")
-
-        def _w8a8(ckpt_prefix: str, param_prefix: str, shard_dims: dict[str, int] | None = None) -> None:
-            loader.load_projection(ckpt_prefix, param_prefix, w8a8_suffixes, shard_dims)
-
         # --- Embedding (checkpoint: embed.weight). ---
         loader.copy_in(
             "model.embed_tokens.weight",
@@ -2006,45 +2033,12 @@ class DeepseekV4ForCausalLM(PyModelBase):
         for i in range(cfg.n_layers):
             ck = f"layers.{i}."  # checkpoint prefix
             pm = f"model.layers.{i}."  # parameter prefix
-            attn, attention_prefix = self._load_dsv4_attention(
+            attn = self._load_dsv4_attention(
                 loader,
                 checkpoint_prefix=ck,
                 parameter_prefix=pm,
                 layer_id=i,
-                w8a8_loader=_w8a8,
             )
-            # Indexer weights (ckpt layers.N.attn.indexer.*).
-            if attn.indexer is not None and loader.has(attention_prefix + "indexer.wq_b.weight"):
-                # Indexer wq_b (ReplicatedLinear, not sharded) + weights_proj.
-                loader.load_projection(attention_prefix + "indexer.wq_b", pm + "self_attn.indexer.wq_b", w8a8_suffixes)
-                loader.copy_in(
-                    pm + "self_attn.indexer.weights_proj.weight",
-                    loader.get_tensor(attention_prefix + "indexer.weights_proj.weight"),
-                )
-                # Compressor sub-module: wkv (unquantized f32 fused wk+wv) +
-                # wgate + ape + norm (all f32, not W8A8).
-                self._load_dsv4_compressor(
-                    loader,
-                    (
-                        attention_prefix + "indexer.compressor.",
-                        attention_prefix + "indexer.compress.",
-                    ),
-                    pm + "self_attn.indexer.compressor_",
-                    f"DeepSeek-V4 indexer compressor weights not found under {attention_prefix}indexer",
-                )
-            # Attention-level cmp_kv compressor (head_dim=512, separate from the
-            # indexer compressor at head_dim=128). Ckpt: attn.compressor.*.
-            # Mirrors C++ DSAttentionImpl compressor_ (compressor.cpp:590-597).
-            if hasattr(attn, "cmp_wkv"):
-                self._load_dsv4_compressor(
-                    loader,
-                    (
-                        attention_prefix + "compressor.",
-                        attention_prefix + "compress.",
-                    ),
-                    pm + "self_attn.cmp_",
-                    f"DeepSeek-V4 attention compressor weights not found under {attention_prefix}",
-                )
             attn.process_weights_after_loading()
             # MoE / dense MLP weights. MoE layers use hash routing
             # (gate.weight + gate.tid2eid) and per-expert w1/w2/w3, while dense

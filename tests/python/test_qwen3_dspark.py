@@ -98,20 +98,8 @@ def test_disabled_window_keeps_dspark_full_block_visibility(window: int | None) 
     assert not attention.causal
 
 
-def test_checkpoint_loads_dspark_heads(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        kernels,
-        "prepare_row_parallel_weight",
-        lambda weight: (weight, False),
-        raising=False,
-    )
-    model = Qwen3DSparkForCausalLM(
-        _config_dict(
-            enable_confidence_head=True,
-            confidence_head_with_markov=True,
-        )
-    )
-    tensors = {
+def _checkpoint_tensors(draft_vocab_size: int = 8) -> dict[str, torch.Tensor]:
+    return {
         "fc.weight": torch.eye(4),
         "hidden_norm.weight": torch.ones(4),
         "layers.0.input_layernorm.weight": torch.ones(4),
@@ -127,10 +115,26 @@ def test_checkpoint_loads_dspark_heads(monkeypatch: pytest.MonkeyPatch) -> None:
         "layers.0.mlp.down_proj.weight": torch.full((4, 8), 7.0),
         "norm.weight": torch.ones(4),
         "markov_head.markov_w1.weight": torch.full((8, 2), 8.0),
-        "markov_head.markov_w2.weight": torch.full((8, 2), 9.0),
+        "markov_head.markov_w2.weight": torch.full((draft_vocab_size, 2), 9.0),
         "confidence_head.proj.weight": torch.full((1, 6), 10.0),
         "confidence_head.proj.bias": torch.full((1,), 11.0),
     }
+
+
+def test_checkpoint_loads_dspark_heads(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        kernels,
+        "prepare_row_parallel_weight",
+        lambda weight: (weight, False),
+        raising=False,
+    )
+    model = Qwen3DSparkForCausalLM(
+        _config_dict(
+            enable_confidence_head=True,
+            confidence_head_with_markov=True,
+        )
+    )
+    tensors = _checkpoint_tensors()
 
     model.load_weights([_StateDict(tensors)], tp_rank=0, tp_size=1)
 
@@ -151,3 +155,28 @@ def test_checkpoint_loads_dspark_heads(monkeypatch: pytest.MonkeyPatch) -> None:
         model.confidence_head.proj.bias,
         tensors["confidence_head.proj.bias"],
     )
+
+
+def _load_reduced_model(monkeypatch: pytest.MonkeyPatch, tensors: dict) -> Qwen3DSparkForCausalLM:
+    monkeypatch.setattr(
+        kernels,
+        "prepare_row_parallel_weight",
+        lambda weight: (weight, False),
+        raising=False,
+    )
+    model = Qwen3DSparkForCausalLM(_config_dict(draft_vocab_size=4))
+    model.load_weights([_StateDict(tensors)], tp_rank=0, tp_size=1)
+    return model
+
+
+def test_reduced_dspark_loads_d2t_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
+    tensors = _checkpoint_tensors(draft_vocab_size=4)
+    tensors["d2t"] = torch.tensor([0, 1, 3, 4], dtype=torch.int64)
+    model = _load_reduced_model(monkeypatch, tensors)
+
+    assert model.hot_token_id.tolist() == [0, 2, 5, 7]
+
+
+def test_reduced_dspark_requires_d2t_at_load(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ValueError, match="must provide a d2t table"):
+        _load_reduced_model(monkeypatch, _checkpoint_tensors(draft_vocab_size=4))

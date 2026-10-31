@@ -55,7 +55,7 @@ void validate_role_id(KVCacheTensorRole::Value role) {
            static_cast<int32_t>(KVCacheTensorRole::KEY))
       << "host KV role is invalid.";
   CHECK_LE(static_cast<int32_t>(role),
-           static_cast<int32_t>(KVCacheTensorRole::COMPRESS_INDEX_STATE))
+           static_cast<int32_t>(KVCacheTensorRole::KPOOL_TAIL))
       << "host KV role is invalid.";
 }
 
@@ -65,13 +65,15 @@ void validate_role(const torch::Tensor& host_tensor,
                    KVCacheTensorRole::Value role,
                    const torch::Device& device) {
   CHECK(ref_device_tensor.defined()) << "device tensor must be defined.";
-  CHECK(ref_device_tensor.is_contiguous())
-      << "device tensor must be contiguous.";
-  CHECK_EQ(ref_device_tensor.device(), device)
-      << "device tensor is on the wrong device.";
   CHECK_GT(ref_device_tensor.dim(), 1)
       << "device tensor shape must be [blocks, ...block_dims].";
   CHECK_GT(ref_device_tensor.size(0), 0) << "device tensor must have blocks.";
+  // The device transfer tensor may be a per-block narrowed view (LINEAR conv
+  // history / SSM checkpoint rows), so only each block row must be contiguous.
+  CHECK(ref_device_tensor[0].is_contiguous())
+      << "each device block tensor must be contiguous.";
+  CHECK_EQ(ref_device_tensor.device(), device)
+      << "device tensor is on the wrong device.";
   CHECK_EQ(host_tensor.scalar_type(), ref_device_tensor.scalar_type())
       << "host and device role dtypes must match.";
   CHECK_EQ(host_tensor.dim(), ref_device_tensor.dim() + 1)
@@ -95,7 +97,6 @@ void validate_role(const torch::Tensor& host_tensor,
     }
     const torch::Tensor& tensor = device_it->second;
     CHECK(tensor.defined()) << "device tensor must be defined.";
-    CHECK(tensor.is_contiguous()) << "device tensor must be contiguous.";
     CHECK_EQ(tensor.device(), device)
         << "device tensor is on the wrong device.";
     CHECK_EQ(tensor.scalar_type(), ref_device_tensor.scalar_type())
@@ -104,6 +105,8 @@ void validate_role(const torch::Tensor& host_tensor,
         << "device role block dimensions must match across active layers.";
     CHECK_EQ(tensor.size(0), ref_device_tensor.size(0))
         << "device role block capacities must match across active layers.";
+    CHECK(tensor[0].is_contiguous())
+        << "each device block tensor must be contiguous.";
     for (int64_t dim = 1; dim < tensor.dim(); ++dim) {
       CHECK_EQ(tensor.size(dim), ref_device_tensor.size(dim))
           << "device role block shapes must match across active layers.";

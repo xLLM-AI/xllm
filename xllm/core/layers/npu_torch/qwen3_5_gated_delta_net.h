@@ -22,7 +22,7 @@ limitations under the License.
 #include <tuple>
 #include <utility>
 
-#include "qwen3_next_gated_delta_net.h"
+#include "core/layers/npu_torch/qwen3_next_gated_delta_net.h"
 
 namespace xllm {
 namespace layer {

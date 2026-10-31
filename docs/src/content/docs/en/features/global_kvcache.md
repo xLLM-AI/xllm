@@ -54,20 +54,31 @@ The current object-key namespace is `xllm-kv-v3`. Conceptually, a key contains t
 
 ```text
 Non-MLA: xllm-kv-v3 + model_id + key_component + tp_size
-                      + block_type + tp_rank + schema_hash + block_hash
+                      + block_type + tp_rank + optional KV split fields
+                      + schema_hash + block_hash
 
 MLA:     xllm-kv-v3 + model_id + key_component + mla
-                      + block_type + schema_hash + block_hash
+                      + block_type + optional KV split fields
+                      + schema_hash + block_hash
 ```
 
 - `model_id` is the target-model namespace and is included in both target and draft objects.
 - `key_component` separates the target model, speculative algorithm, and draft-model source.
-- Non-MLA caches use `tp_size`, `tp_rank`, and `block_type` to isolate different parallel topologies, ranks, and cache types.
-- MLA KV cache is replicated across ranks, so its object key uses a fixed `mla` marker and contains neither `tp_size` nor `tp_rank`. Every rank reads through the same object key, while only TP rank 0 writes to Mooncake Store.
+- Non-MLA caches use `tp_size`, `tp_rank`, `kv_split_size`, `kv_split_rank`, and `block_type` to isolate different parallel topologies, ranks, KV shards, and cache types.
+- MLA KV cache uses a fixed `mla` marker and contains neither `tp_size` nor `tp_rank`. The `kv:<kv_split_size>:<kv_split_rank>:` field is appended only when `kv_split_size > 1`; unsharded caches keep the existing object-key format. With `kv_split_size=1` the KV is not split: every rank reads the same object and only TP rank 0 writes. When KV split is enabled, each KV split rank reads and writes its own Store object.
+- `kv_split_size` is the effective number of KV shards and `kv_split_rank` is the shard index of the current worker. When set to `0`, the effective value follows `cp_size`; when set to `1`, KV is not split and `kv_split_rank` is pinned to `0`.
 - `schema_hash` is derived from each tensor's role, dtype, and per-block shape, excluding the number of Host blocks. Changing only `host_blocks_factor` therefore does not change object keys, while a cache-layout change automatically selects a new key space.
 - `block_hash` is the 128-bit content hash of the corresponding token block.
 
-The Store API exposes logical blocks to its caller and expands them into physical cache-domain requests internally. A worker reports a hit only when **all physical objects** for that logical block exist and are read successfully. `PrefetchResult` then applies a logical AND across all TP ranks. A Store hit is publishable only when it is complete across both cache domains and TP ranks.
+The Store API exposes logical blocks to its caller and expands them into physical cache-domain requests internally. A worker reports a hit only when **all physical objects** for that logical block exist and are read successfully. `PrefetchResult` then applies a logical AND across the local worker group participating in this prefetch. When KV split is enabled, this group is determined by the DP, CP, TP, and KV-split topology, and objects belonging to different `kv_split_rank` values must not be conflated as the same cache. A Store hit is publishable only when it is complete across all cache domains and across the required worker group.
+
+### KV split and Store
+
+KV split and Mooncake Store can be enabled at the same time. The Store maps each logical block to an independent object key by `kv_split_size` and `kv_split_rank`, so different KV shards never overwrite each other and a hit on a single shard is never mistaken for a complete KV. When Prefill restores from the Store, a block is mounted into the Host Prefix Cache only when the worker group required by this request and all registered cache domains hit.
+
+For MLA caches, the shared object is still written by TP rank 0 when unsharded; once sharded, each KV shard is written by one replica that owns it. For speculative decoding, the target and draft models still use separate `key_component` values, and each cache domain is further split by KV split, so a missing draft shard makes the corresponding logical block a miss.
+
+The allowed `kv_split_size` values are validated by the backend, model, and parallel topology. Under a normal CP configuration, `K` must be positive and satisfy the backend's requirement (typically a divisor of `cp_size`); `0` follows `cp_size` and `1` disables splitting. To reuse the same Store objects across instances, they must use an identical model identity, cache layout, and effective split topology; different split topologies enter different key spaces and never cross-hit.
 
 ## Block Lifecycle
 
@@ -82,7 +93,7 @@ sequenceDiagram
     participant BlockMgr as HierarchyBlockManagerPool
     participant Engine as Engine / RemoteWorker
     participant Result as PrefetchResult / Async Callback
-    participant Worker as TP Workers
+    participant Worker as Local Workers
     participant Store as Mooncake Store
     participant Host as Host Cache
     participant HBM as Device HBM
@@ -101,7 +112,7 @@ sequenceDiagram
         BlockMgr->>Engine: prefetch_from_storage(G2H infos)
         Engine->>Result: Create worker-by-block result matrix
 
-        par All TP ranks
+        par All participating local Workers in parallel
             Engine->>Worker: PrefetchFromStorage(G2H batch)
             Worker->>Worker: Expand each BlockType into cache-domain objects
             Worker->>Store: BatchIsExist(all physical keys)
@@ -119,8 +130,8 @@ sequenceDiagram
             BlockMgr->>Result: completed()?
         end
         BlockMgr->>Result: merged_hits()
-        Result-->>BlockMgr: Logical AND across all TP ranks
-        Note right of Result: Every cache domain must hit within one rank<br/>then all TP ranks are ANDed
+        Result-->>BlockMgr: Logical AND across all Worker bitmaps
+        Note right of Result: Every cache domain must hit within one Worker<br/>then a logical AND across the required worker group
 
         BlockMgr->>Host: Release Store-miss destinations
         BlockMgr->>Host: Cache Store-hit blocks
@@ -147,7 +158,7 @@ sequenceDiagram
         BlockMgr->>Engine: Enqueue TransferBlocks(H2D, batch_id)
         BlockMgr-->>Scheduler: Return after dispatch, without waiting for H2D completion
 
-        par All TP ranks
+        par All participating local Workers in parallel
             Engine->>Worker: Register H2D transfer
             Worker->>Worker: Create LayerSynchronizer(batch_id)
             Worker->>Worker: Schedule load_from_host asynchronously
@@ -181,14 +192,14 @@ sequenceDiagram
         Scheduler->>BlockMgr: transfer_offload_blocks()
         BlockMgr->>Engine: Submit asynchronous D2H2G plans
 
-        par All TP ranks
+        par All participating local Workers in parallel
             Engine->>Worker: TransferKvBlocks(D2H2G)
             Worker->>Worker: Copy stream waits for compute stream
             Worker->>HBM: Read Device KV
             HBM-->>Worker: Device KV
             Worker->>Host: D2H copy for each cache domain and synchronize stream
             Worker->>Worker: Expand physical objects and deduplicate by key
-            opt Non-MLA or MLA TP rank 0
+            opt Non-MLA, unsharded MLA TP rank 0, or sharded MLA shard owners
                 Worker->>Store: BatchIsExist(unique keys)
 
                 alt Store key is absent
@@ -199,20 +210,19 @@ sequenceDiagram
                 end
             end
 
-            Note right of Worker: Non-zero MLA ranks skip Store writes
             Worker->>Worker: Logical put succeeds only if all physical objects succeed
             Note right of Worker: Partial BatchPut failure is logged only<br/>and does not change D2H success
             Worker-->>Engine: Full block count when D2H succeeds
         end
 
-        Engine-->>Result: TP futures
-        Result->>Result: Validate every TP result against the expected block count
+        Engine-->>Result: All Worker futures
+        Result->>Result: Validate every Worker result against the expected block count
         Result-->>BlockMgr: Future callback(copy_ok)
         BlockMgr->>HBM: Always release offload-held Device blocks
 
-        alt D2H succeeds on every TP rank
+        alt D2H succeeds on every participating Worker
             BlockMgr->>Host: Publish Host Prefix Cache
-        else D2H fails on any TP rank
+        else D2H fails on any participating Worker
             BlockMgr->>Host: Publish nothing and release reserved Host blocks
         end
 
@@ -244,7 +254,7 @@ sequenceDiagram
     participant Client as Client / xLLM Service
     participant PSched as PREFILL Scheduler
     participant PBlock as PREFILL BlockManager
-    participant PWorker as PREFILL TP Workers
+    participant PWorker as PREFILL Workers
     participant Store as Mooncake Store
     participant Host as PREFILL Host Cache
     participant PHBM as PREFILL HBM
@@ -258,12 +268,12 @@ sequenceDiagram
 
         Client->>PSched: add_request(request, decode_address)
         PSched->>PBlock: prefetch_from_storage(request)
-        PBlock->>PWorker: TP-parallel PrefetchFromStorage(G2H)
+        PBlock->>PWorker: Local Worker group parallel PrefetchFromStorage(G2H)
         PWorker->>Store: BatchIsExist / BatchGet
         Store-->>PWorker: Fill registered Host tensors
         PWorker->>Host: Store-hit Host blocks are ready
         PWorker-->>PBlock: Rank-local bitmap through PrefetchResult
-        PBlock->>PBlock: TP logical AND and mount Host state
+        PBlock->>PBlock: Worker group logical AND and mount Host state
         PSched->>PBlock: Poll update_prefetch_result
         PBlock-->>PSched: Prefetch complete
         PSched->>PSched: enqueue_ready_request to PREFILL dispatch queue
@@ -485,6 +495,15 @@ Use the normal [Disaggregated PD](/en/features/disagg_pd/) flags and enable Stor
   --store_local_hostname=127.0.0.1:12345
 ```
 
+If the backend and model used by Prefill support KV split, the same command can include a parallel configuration such as:
+
+```text
+--cp_size=4 \
+--kv_split_size=2
+```
+
+Here `2` means the KV is sharded across two split ranks; each shard uses its own Store key. Whether Decode enables KV split, and with which topology, depends on its own backend and model support; a different topology uses a different Store key space.
+
 Enable Store on Decode with a different local endpoint range:
 
 ```bash
@@ -505,11 +524,11 @@ See the [CLI Reference](/en/cli_reference/) for all `KVCacheStoreConfig` paramet
 
 ## Correctness and Operational Notes
 
-- Store hits use two levels of completeness checks: each worker must successfully read every registered cache domain for the `BlockType`, and every TP rank must then report a hit before the block is mounted into the Host Prefix Cache.
-- `prefetch_timeout` stops issuing new prefetch batches after the timeout, but admission still waits for every in-flight TP batch to finish. `0` waits indefinitely.
+- Store hits use two levels of completeness checks: each worker must successfully read every registered cache domain for the `BlockType`, and every worker in the group participating in this prefetch must then report a hit before the block is mounted into the Host Prefix Cache. When KV split is enabled, shards with different `kv_split_rank` values must each hit.
+- `prefetch_timeout` stops issuing new prefetch batches after the timeout, but admission still waits for every in-flight Worker batch to finish. `0` waits indefinitely.
 - H2D registration does not wait for the physical copy. Forward attaches a `LayerSynchronizer` using `batch_id` and waits at the corresponding layers. The Scheduler receives no H2D-complete callback.
-- Host Prefix publication depends only on successful D2H completion from every TP rank. Mooncake `BatchPut` is best-effort; a partial Store write failure is logged but does not invalidate an already successful Host copy.
+- Host Prefix publication depends only on successful D2H completion from every participating Worker. Mooncake `BatchPut` is best-effort; a partial Store write failure is logged but does not invalidate an already successful Host copy.
 - `BatchPut` first deduplicates object keys and calls `BatchIsExist`. Existing objects are never overwritten, and duplicate objects in one batch are written only once. A logical block counts as a Store success only when every cache-domain object already exists or is written successfully.
-- The current Store key version is `xllm-kv-v3`. Host-block capacity is excluded from `schema_hash`, while tensor role, dtype, per-block shape, TP topology, `BlockType`, and cache-domain identity isolate the key space.
+- The current Store key version is `xllm-kv-v3`. Host-block capacity is excluded from `schema_hash`, while tensor role, dtype, per-block shape, TP topology, `kv_split_size`, `kv_split_rank`, `BlockType`, and cache-domain identity isolate the key space. An effective `kv_split_size` of 1 keeps existing Store object compatibility; values greater than 1 use a separate key space. The default of 0 follows `cp_size`, so instances with `cp_size > 1` will not hit old unsharded keys after upgrading and will rewrite sharded objects.
 - Weight contents are not automatically encoded in object keys. Use a new `model_id` whenever target or draft weights, quantization, or any other setting that can change KV values is updated, and rotate or clean the old Store namespace as needed.
 - In PD, Prefill and Decode both enable Store. They must use disjoint `store_local_hostname` base-port ranges because both roles reuse worker ranks and each worker binds `base_port + worker_rank`.

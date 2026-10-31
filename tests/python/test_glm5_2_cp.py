@@ -483,7 +483,7 @@ def test_glm_moe_finalize_orders_stream_dependencies(gate_overlap: bool) -> None
     with (
         patch.object(deepseek_v32, "_gate_stream", return_value=gate_stream),
         patch.object(glm5_2.kernels, "supports_fused_moe_gmm1", return_value=True),
-        patch.object(deepseek_v32, "_shared_expert_stream", return_value=shared_stream),
+        patch.object(deepseek_v32, "shared_expert_stream", return_value=shared_stream),
         patch.object(
             torch,
             "npu",

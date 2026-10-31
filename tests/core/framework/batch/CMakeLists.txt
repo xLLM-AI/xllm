@@ -27,6 +27,7 @@ target_link_libraries(batch_test
 cc_test(
   NAME
     dit_batch_test
+  CPU_ONLY
   SRCS
     dit_batch_test.cpp
   DEPS

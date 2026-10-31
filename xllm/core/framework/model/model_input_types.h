@@ -369,6 +369,7 @@ struct BatchInputMeta {
   int32_t q_max_seq_len = 0;
   ExecutionBatchMetadata execution_batch;
   uint64_t batch_id = 0;
+  bool requires_host_restore = false;
   bool is_graph_warmup = false;
   // Engine-selected MTP depth for this task; zero keeps configured maximum.
   // Transported with the input, never inferred independently on TP ranks.

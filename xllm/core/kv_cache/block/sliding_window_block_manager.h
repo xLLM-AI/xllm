@@ -33,9 +33,6 @@ class SlidingWindowBlockManager : public BlockManagerImpl {
 
   std::optional<std::vector<Block>> allocate_for_sequence(
       Sequence* seq,
-      size_t num_tokens) override;
-  std::optional<std::vector<Block>> allocate_for_sequence(
-      Sequence* seq,
       KVCacheState& kv_state,
       size_t num_tokens) override;
   bool allocate_for_prefetch(Sequence* seq, size_t num_tokens) override;
@@ -43,7 +40,6 @@ class SlidingWindowBlockManager : public BlockManagerImpl {
   // Deallocate leading blocks that have slid out of the window; leaves
   // invalid placeholders in their slots. Called by the composite after a
   // successful allocate commit.
-  void release_out_of_window(Sequence* seq) override;
   void release_out_of_window(Sequence* seq, KVCacheState& kv_state) override;
 
   // Gap-tolerant SWA probe. Delegates to LinearStatePrefixCache::match; see

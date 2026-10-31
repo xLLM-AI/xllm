@@ -87,22 +87,6 @@ void ConcurrentBlockManagerImpl::cache(const std::vector<Block>& blocks) {
 
 std::optional<std::vector<Block>>
 ConcurrentBlockManagerImpl::allocate_for_sequence(Sequence* seq,
-                                                  size_t num_tokens) {
-  std::lock_guard<std::recursive_mutex> lock(mutex_);
-  auto blocks = inner_->allocate_for_sequence(seq, num_tokens);
-  if (blocks.has_value()) {
-    // Route Block dtor -> free through this wrapper so the wrapper's lock
-    // covers the free path. inner_ stays the physical owner; free(id)
-    // re-acquires the wrapper lock and forwards.
-    for (Block& block : *blocks) {
-      block.set_manager(this);
-    }
-  }
-  return blocks;
-}
-
-std::optional<std::vector<Block>>
-ConcurrentBlockManagerImpl::allocate_for_sequence(Sequence* seq,
                                                   KVCacheState& kv_state,
                                                   size_t num_tokens) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -129,11 +113,6 @@ bool ConcurrentBlockManagerImpl::allocate_for_prefetch(Sequence* seq,
     }
   }
   return complete;
-}
-
-void ConcurrentBlockManagerImpl::release_out_of_window(Sequence* seq) {
-  std::lock_guard<std::recursive_mutex> lock(mutex_);
-  inner_->release_out_of_window(seq);
 }
 
 void ConcurrentBlockManagerImpl::release_out_of_window(Sequence* seq,

@@ -6,7 +6,8 @@ include(CMakeParseArguments)
 #
 # Parameters:
 # NAME: name of target (see Usage below)
-# NO_NPU_RUNTIME: keep host-only tests independent of NPU initialization
+# NO_NPU_RUNTIME: skip automatic NPU initialization
+# CPU_ONLY: skip NPU initialization and label all cases as CPU tests.
 # SRCS: List of source files for the binary
 # DEPS: List of other libraries to be linked in to the binary targets
 # COPTS: List of private compile options
@@ -40,7 +41,7 @@ function(cc_test)
 
   cmake_parse_arguments(
     CC_TEST # prefix
-    "NO_NPU_RUNTIME" # options
+    "NO_NPU_RUNTIME;CPU_ONLY" # options
     "NAME;ENVIRONMENT" # one value args
     "SRCS;COPTS;LINKOPTS;DEPS;INCLUDES;ARGS;DATA" # multi value args
     ${ARGN}
@@ -113,7 +114,7 @@ function(cc_test)
     PRIVATE ${CC_TEST_LINKOPTS}
   )
 
-  if(USE_NPU AND NOT CC_TEST_NO_NPU_RUNTIME)
+  if(USE_NPU AND NOT CC_TEST_NO_NPU_RUNTIME AND NOT CC_TEST_CPU_ONLY)
     if(NOT TARGET xllm_npu_test_runtime)
       # Reuse one object while retaining the global gtest Environment in each
       # executable; a static archive could discard its registration initializer.
@@ -159,6 +160,11 @@ function(cc_test)
     EXTRA_ARGS ${CC_TEST_ARGS}
     TEST_LIST _cc_test_${CC_TEST_NAME}_tests
   )
+
+  if(CC_TEST_CPU_ONLY)
+    set_property(TEST ${_cc_test_${CC_TEST_NAME}_tests}
+      APPEND PROPERTY LABELS cpu)
+  endif()
 
   if(CC_TEST_ENVIRONMENT)
     set_tests_properties(${_cc_test_${CC_TEST_NAME}_tests}

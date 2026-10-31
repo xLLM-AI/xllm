@@ -20,6 +20,7 @@ limitations under the License.
 #include <algorithm>
 #include <atomic>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <tuple>
 #include <unordered_map>
@@ -36,12 +37,12 @@ namespace xllm {
 namespace {
 
 using ProbeResult = CompositeBlockManager::ProbeResult;
-using HostLeafSnapshot = std::unordered_map<BlockType, BlockManager*>;
 
 void finalize_host_blocks(bool publish,
                           std::vector<Block> host_blocks,
                           const std::vector<BlockType>& block_types,
-                          const HostLeafSnapshot& host_leaves) {
+                          CompositeBlockManager* host_manager) {
+  CHECK(host_manager != nullptr);
   CHECK_EQ(host_blocks.size(), block_types.size());
   std::unordered_map<BlockType, std::vector<Block>> blocks_by_type;
   for (size_t i = 0; i < host_blocks.size(); ++i) {
@@ -49,16 +50,13 @@ void finalize_host_blocks(bool publish,
   }
 
   for (auto& [type, blocks] : blocks_by_type) {
-    auto leaf = host_leaves.find(type);
-    if (leaf == host_leaves.end()) {
-      LOG(ERROR) << "Missing Host block manager for block type "
-                 << static_cast<int32_t>(type);
-      continue;
-    }
+    BlockManager* leaf = host_manager->leaf_of(type);
+    CHECK(leaf != nullptr) << "Missing host block manager for block type "
+                           << static_cast<int32_t>(type);
     if (publish) {
-      leaf->second->cache(blocks);
+      leaf->cache(blocks);
     }
-    leaf->second->deallocate(blocks);
+    leaf->deallocate(blocks);
   }
 }
 
@@ -71,18 +69,6 @@ std::unique_ptr<BlockManager> wrap_for_offload(std::unique_ptr<BlockManager> l,
     return std::make_unique<ConcurrentBlockManagerImpl>(std::move(l));
   }
   return l;
-}
-
-ProbeResult* find_probe(std::vector<ProbeResult>* probes, BlockType type) {
-  if (probes == nullptr) {
-    return nullptr;
-  }
-  for (ProbeResult& probe : *probes) {
-    if (probe.type == type) {
-      return &probe;
-    }
-  }
-  return nullptr;
 }
 
 void trim_blocks_from_back(BlockManager* leaf,
@@ -105,161 +91,18 @@ void trim_blocks_from_back(BlockManager* leaf,
 bool has_valid_swa_window(size_t tokens,
                           size_t block_size,
                           size_t blocks_per_window,
-                          const Slice<Block>& hbm_blocks,
-                          const Slice<Block>& host_blocks = {}) {
+                          const Slice<Block>& blocks) {
   size_t index = tokens / block_size;
   if (index < blocks_per_window) {
     return false;
   }
   for (size_t i = 0; i < blocks_per_window; ++i) {
     --index;
-    const bool hbm_valid =
-        index < hbm_blocks.size() && hbm_blocks[index].is_valid();
-    const bool host_valid =
-        index < host_blocks.size() && host_blocks[index].is_valid();
-    if (!hbm_valid && !host_valid) {
+    if (index >= blocks.size() || !blocks[index].is_valid()) {
       return false;
     }
   }
   return true;
-}
-
-struct PrefixMatch {
-  size_t restore_tokens = 0;
-  size_t hbm_tokens = 0;
-  size_t host_tokens = 0;
-  size_t copy_units = 0;
-};
-
-size_t probe_reach(const ProbeResult& probe, bool sparse) {
-  if (sparse) {
-    size_t reach = 0;
-    for (size_t i = 0; i < probe.blocks.size(); ++i) {
-      if (probe.blocks[i].is_valid()) {
-        reach = i + 1;
-      }
-    }
-    return reach;
-  }
-  for (size_t i = 0; i < probe.blocks.size(); ++i) {
-    if (!probe.blocks[i].is_valid()) {
-      return i;
-    }
-  }
-  return probe.blocks.size();
-}
-
-PrefixMatch trim_shared_probes(
-    CompositeBlockManager::LeafCombination combination,
-    std::vector<ProbeResult>* hbm_probes,
-    std::vector<ProbeResult>* host_probes,
-    size_t prompt_tokens,
-    size_t target_tokens) {
-  PrefixMatch match;
-  if (hbm_probes == nullptr || hbm_probes->empty() || host_probes == nullptr ||
-      host_probes->empty()) {
-    return match;
-  }
-
-  const size_t max_prefix_tokens = prompt_tokens == 0 ? 0 : prompt_tokens - 1;
-  auto cap_and_align = [&](size_t tokens, size_t alignment) {
-    CHECK_GT(alignment, 0u);
-    const size_t capped = std::min({tokens, target_tokens, max_prefix_tokens});
-    return (capped / alignment) * alignment;
-  };
-
-  if (combination == CompositeBlockManager::LeafCombination::FLAT_KV) {
-    ProbeResult* hbm_kv = find_probe(hbm_probes, BlockType::KV);
-    ProbeResult* host_kv = find_probe(host_probes, BlockType::KV);
-    CHECK(hbm_kv != nullptr && host_kv != nullptr);
-    const size_t block_size = hbm_kv->block_size;
-    CHECK_EQ(block_size, host_kv->block_size);
-    match.restore_tokens = cap_and_align(
-        std::max(probe_reach(*hbm_kv, false), probe_reach(*host_kv, false)) *
-            block_size,
-        block_size);
-    const size_t restore_blocks = match.restore_tokens / block_size;
-    match.hbm_tokens =
-        std::min(probe_reach(*hbm_kv, false), restore_blocks) * block_size;
-    match.host_tokens =
-        std::min(probe_reach(*host_kv, false), restore_blocks) * block_size;
-    match.copy_units = restore_blocks > probe_reach(*hbm_kv, false)
-                           ? restore_blocks - probe_reach(*hbm_kv, false)
-                           : 0;
-    trim_blocks_from_back(hbm_kv->leaf, &hbm_kv->blocks, restore_blocks);
-    return match;
-  }
-
-  CHECK(combination == CompositeBlockManager::LeafCombination::SWA_COMPRESSED);
-  ProbeResult* hbm_swa = find_probe(hbm_probes, BlockType::SWA);
-  ProbeResult* hbm_c4 = find_probe(hbm_probes, BlockType::C4);
-  ProbeResult* hbm_c128 = find_probe(hbm_probes, BlockType::C128);
-  ProbeResult* host_swa = find_probe(host_probes, BlockType::SWA);
-  ProbeResult* host_c4 = find_probe(host_probes, BlockType::C4);
-  ProbeResult* host_c128 = find_probe(host_probes, BlockType::C128);
-  CHECK(hbm_swa != nullptr && hbm_c4 != nullptr && hbm_c128 != nullptr);
-  CHECK(host_swa != nullptr && host_c4 != nullptr && host_c128 != nullptr);
-
-  const size_t swa_block_size = hbm_swa->block_size;
-  const size_t c128_block_size = hbm_c128->block_size;
-
-  const size_t blocks_per_window =
-      static_cast<size_t>(hbm_swa->leaf->options().swa_blocks_per_seq());
-
-  size_t max_matched_tokens = cap_and_align(
-      std::min(
-          {std::max(probe_reach(*hbm_swa, true), probe_reach(*host_swa, true)) *
-               swa_block_size,
-           std::max(probe_reach(*hbm_c4, false), probe_reach(*host_c4, false)) *
-               hbm_c4->block_size,
-           std::max(probe_reach(*hbm_c128, false),
-                    probe_reach(*host_c128, false)) *
-               c128_block_size}),
-      c128_block_size);
-  while (max_matched_tokens > 0 && !has_valid_swa_window(max_matched_tokens,
-                                                         swa_block_size,
-                                                         blocks_per_window,
-                                                         hbm_swa->blocks,
-                                                         host_swa->blocks)) {
-    max_matched_tokens -= c128_block_size;
-  }
-
-  auto tier_matched_tokens = [&](const ProbeResult& swa,
-                                 const ProbeResult& c4,
-                                 const ProbeResult& c128) {
-    size_t tokens =
-        cap_and_align(std::min({probe_reach(swa, true) * swa_block_size,
-                                probe_reach(c4, false) * c4.block_size,
-                                probe_reach(c128, false) * c128_block_size}),
-                      c128_block_size);
-    tokens = std::min(tokens, max_matched_tokens);
-    while (tokens > 0 &&
-           !has_valid_swa_window(
-               tokens, swa_block_size, blocks_per_window, swa.blocks)) {
-      tokens -= c128_block_size;
-    }
-    return tokens;
-  };
-
-  const size_t max_hbm_matched_tokens =
-      tier_matched_tokens(*hbm_swa, *hbm_c4, *hbm_c128);
-  const size_t max_host_matched_tokens =
-      tier_matched_tokens(*host_swa, *host_c4, *host_c128);
-
-  const size_t restore_units = max_matched_tokens / c128_block_size;
-  match.restore_tokens = max_matched_tokens;
-  match.hbm_tokens = max_hbm_matched_tokens;
-  match.host_tokens = max_host_matched_tokens;
-  match.copy_units = restore_units > probe_reach(*hbm_c128, false)
-                         ? restore_units - probe_reach(*hbm_c128, false)
-                         : 0;
-
-  trim_blocks_from_back(
-      hbm_swa->leaf, &hbm_swa->blocks, max_matched_tokens / swa_block_size);
-  trim_blocks_from_back(
-      hbm_c4->leaf, &hbm_c4->blocks, max_matched_tokens / hbm_c4->block_size);
-  trim_blocks_from_back(hbm_c128->leaf, &hbm_c128->blocks, restore_units);
-  return match;
 }
 
 size_t prefetch_unit_size(CompositeBlockManager::LeafCombination combination,
@@ -462,10 +305,12 @@ StoragePrefetchRequest build_prefetch_request(
 }
 
 void finalize_prefetch(Sequence* sequence,
-                       const CompositeBlockManager::LeafMap& leaves,
+                       CompositeBlockManager* host_manager,
                        size_t final_tokens,
                        bool publish) {
   CHECK(sequence != nullptr);
+  CHECK(host_manager != nullptr);
+  const auto& leaves = host_manager->leaf_entries();
   trim_prefetch_state(sequence, leaves, publish ? final_tokens : 0);
   KVCacheState& host_state = sequence->host_kv_state();
   if (!publish) {
@@ -509,13 +354,13 @@ HierarchyBlockManagerPool::HierarchyBlockManagerPool(
         composite->leaf_combination();
     switch (combination) {
       case CompositeBlockManager::LeafCombination::FLAT_KV:
+      case CompositeBlockManager::LeafCombination::FLAT_KV_LINEAR:
       case CompositeBlockManager::LeafCombination::SWA_COMPRESSED:
         break;
-      case CompositeBlockManager::LeafCombination::FLAT_KV_LINEAR:
       case CompositeBlockManager::LeafCombination::UNSUPPORTED:
       default:
-        LOG(FATAL) << "HierarchyBlockManagerPool supports only FLAT_KV and "
-                      "SWA_COMPRESSED cache layouts; got "
+        LOG(FATAL) << "HierarchyBlockManagerPool supports only FLAT_KV, "
+                      "FLAT_KV_LINEAR and SWA_COMPRESSED cache layouts; got "
                    << static_cast<int32_t>(combination);
     }
     const CompositeBlockManager::LeafMap& device_leaves =
@@ -556,7 +401,14 @@ HierarchyBlockManagerPool::HierarchyBlockManagerPool(
               /*participates_in_admission=*/false,
               /*supports_prefix_cache=*/host_options.enable_prefix_cache()});
     }
-    host_block_managers_.emplace_back(std::move(per_type));
+    if (per_type.empty()) {
+      host_block_managers_.emplace_back(nullptr);
+    } else {
+      host_block_managers_.emplace_back(std::make_unique<CompositeBlockManager>(
+          std::move(per_type),
+          composite->options(),
+          CompositeBlockManager::PrefixCachePublishMode::EXPLICIT));
+    }
   }
 
   storage_prefetch_disabled_.resize(host_block_managers_.size(), false);
@@ -568,13 +420,17 @@ void HierarchyBlockManagerPool::quarantine_prefetch(Sequence* sequence,
                                                     int32_t dp_rank) {
   CHECK(sequence != nullptr);
   KVCacheState& host_state = sequence->host_kv_state();
+  const auto* host_manager = host_block_managers_[dp_rank].get();
+  if (host_manager == nullptr) {
+    return;
+  }
   size_t reserved_blocks = 0;
-  for (const auto& [type, entry] : host_block_managers_[dp_rank]) {
+  for (const auto& [type, entry] : host_manager->leaf_entries()) {
     reserved_blocks += host_state.blocks(type).size();
   }
   quarantined_prefetch_blocks_.reserve(quarantined_prefetch_blocks_.size() +
                                        reserved_blocks);
-  for (const auto& [type, entry] : host_block_managers_[dp_rank]) {
+  for (const auto& [type, entry] : host_manager->leaf_entries()) {
     std::vector<Block> blocks = host_state.take_blocks(type);
     for (Block& block : blocks) {
       if (block.is_valid()) {
@@ -596,11 +452,8 @@ void HierarchyBlockManagerPool::release_host_match(Sequence* sequence,
                                                    int32_t dp_rank) {
   CHECK(sequence != nullptr);
   KVCacheState& host_state = sequence->host_kv_state();
-  for (const auto& [type, entry] : host_block_managers_[dp_rank]) {
-    const Slice<Block> blocks = host_state.blocks(type);
-    if (!blocks.empty()) {
-      entry.leaf->deallocate(blocks);
-    }
+  if (auto* host_manager = host_block_managers_[dp_rank].get()) {
+    host_manager->deallocate_for_sequence(sequence, host_state);
   }
   host_state.reset();
   sequence->clear_host_cache_match();
@@ -624,39 +477,61 @@ void HierarchyBlockManagerPool::deallocate(Sequence* sequence) {
       static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
   composite->cache_full_blocks_for_sequence(sequence);
 
-  collect_offload_pairs(
-      sequence, dp_rank, sequence->kv_state().kv_cache_tokens_num());
+  collect_offload_pairs(sequence);
 
   // Release the host blocks still held by the sequence. Blocks moved into the
   // offload queue are now invalid in this vector and are skipped by
   // deallocate; their host ids stay reserved (held by the queue) until the
   // D2H copy completes and the offload callback caches + frees them.
-  for (const auto& [type, entry] : host_block_managers_[dp_rank]) {
-    const Slice<Block> host_blocks = sequence->host_kv_state().blocks(type);
-    if (!host_blocks.empty()) {
-      entry.leaf->deallocate(host_blocks);
-    }
+  if (auto* host_manager = host_block_managers_[dp_rank].get()) {
+    host_manager->deallocate_for_sequence(sequence, sequence->host_kv_state());
   }
 
   // Release device blocks via the composite (includes prefix cache flush).
-  composite->deallocate_for_sequence(sequence);
+  composite->deallocate_for_sequence(sequence, sequence->kv_state());
   sequence->reset();
 }
 
-void HierarchyBlockManagerPool::collect_offload_pairs(Sequence* sequence,
-                                                      int32_t dp_rank,
-                                                      size_t completed_tokens) {
-  if (!options_.enable_prefix_cache()) {
+void HierarchyBlockManagerPool::collect_offload_pairs(Sequence* sequence) {
+  const int32_t dp_rank = sequence->dp_rank();
+  const auto* host_manager = host_block_managers_[dp_rank].get();
+  if (!options_.enable_prefix_cache() || host_manager == nullptr) {
     return;
   }
 
   KVCacheState& hbm_state = sequence->kv_state();
   KVCacheState& host_state = sequence->host_kv_state();
-  for (const auto& [type, entry] : host_block_managers_[dp_rank]) {
+  const size_t completed_tokens = hbm_state.kv_cache_tokens_num();
+  for (const auto& [type, entry] : host_manager->leaf_entries()) {
     std::vector<Block>* hbm_blocks = hbm_state.mutable_blocks(type);
     std::vector<Block>* host_blocks = host_state.mutable_blocks(type);
     const size_t block_size = entry.leaf->block_size();
     CHECK_GT(block_size, 0u);
+
+    if (type == BlockType::LINEAR) {
+      if (!sequence->is_prefill_stage() || hbm_blocks->size() < 2) {
+        continue;
+      }
+      const size_t checkpoint_count =
+          hbm_state.num_cached_blocks(BlockType::LINEAR);
+      if (checkpoint_count == 0 || checkpoint_count > host_blocks->size()) {
+        continue;
+      }
+      const Block& hbm_block = hbm_blocks->front();
+      Block& host_destination = (*host_blocks)[checkpoint_count - 1];
+      if (!hbm_block.is_valid() || !host_destination.is_valid() ||
+          host_destination.is_shared()) {
+        continue;
+      }
+      host_destination.set_hash_value(hbm_block.get_immutable_hash_value());
+      auto pair = std::make_shared<OffloadBlockPair>(
+          OffloadBlockPair{/*src=*/hbm_block,
+                           /*dst=*/std::move(host_destination),
+                           /*block_type=*/BlockType::LINEAR});
+      offload_block_pair_queues_[dp_rank].enqueue(std::move(pair));
+      continue;
+    }
+
     size_t completed_blocks = completed_tokens / block_size;
     const BlockHasherType hasher_type = entry.leaf->options().hasher_type();
     const bool needs_sequence_hash = !entry.supports_prefix_cache;
@@ -781,99 +656,97 @@ bool HierarchyBlockManagerPool::allocate(Sequence* sequence,
   KVCacheState& hbm_state = sequence->kv_state();
   CHECK_LE(hbm_state.kv_cache_tokens_num(), restore_tokens);
   CHECK_LE(restore_tokens, num_tokens);
-  std::map<BlockType, size_t> previous_hbm_cached_blocks =
-      hbm_state.num_cached_blocks();
 
   auto* composite =
       static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
-  if (!composite->allocate_sequence(sequence, num_tokens)) {
+  if (!composite->allocate_sequence(
+          sequence, sequence->kv_state(), num_tokens)) {
     release_host_match(sequence, dp_rank);
     return false;
   }
 
   KVCacheState& host_state = sequence->host_kv_state();
-
-  // Host growth is best-effort and must not reject an HBM allocation that has
-  // already succeeded. Stage by BlockType so partial Host growth can be
-  // released without touching either cache state.
-  std::map<BlockType, std::vector<Block>> staged;
-
-  auto release_staged = [&]() {
-    for (auto& [type, blocks] : staged) {
-      host_block_managers_[dp_rank].at(type).leaf->deallocate(blocks);
-    }
-    staged.clear();
-  };
-
-  for (auto& [type, entry] : host_block_managers_[dp_rank]) {
-    std::optional<std::vector<Block>> blocks =
-        entry.leaf->allocate_for_sequence(sequence, host_state, num_tokens);
-    if (!blocks.has_value()) {
-      release_staged();
-      break;
-    }
-    if (!blocks->empty()) {
-      staged.emplace(type, std::move(*blocks));
-    }
-    const size_t leaf_block_size = entry.leaf->block_size();
-    const size_t needed = (num_tokens + leaf_block_size - 1) / leaf_block_size;
-    const auto staged_it = staged.find(type);
-    const size_t staged_for_type =
-        staged_it == staged.end() ? 0 : staged_it->second.size();
-    const size_t total = host_state.num_blocks(type) + staged_for_type;
-    if (total < needed) {
-      release_staged();
-      break;
-    }
+  auto* host_manager = host_block_managers_[dp_rank].get();
+  if (host_manager != nullptr &&
+      !host_manager->allocate_sequence(sequence, host_state, num_tokens)) {
+    host_manager->release_out_of_window_for_sequence(sequence, host_state);
   }
 
-  for (auto& [type, blocks] : staged) {
-    host_state.add_blocks(type, blocks);
-  }
-  staged.clear();
-
-  for (auto& [type, entry] : host_block_managers_[dp_rank]) {
-    entry.leaf->release_out_of_window(sequence, host_state);
-  }
-
-  std::vector<BlockTransferInfo>& load_infos =
-      load_block_transfer_infos_[dp_rank];
   std::vector<Block> restore_blocks;
-  for (const auto& [type, entry] : host_block_managers_[dp_rank]) {
-    std::vector<Block>* host_blocks = host_state.mutable_blocks(type);
-    std::vector<Block>* hbm_blocks = hbm_state.mutable_blocks(type);
-    const auto hbm_matched_it = previous_hbm_cached_blocks.find(type);
-    const size_t hbm_matched_blocks =
-        hbm_matched_it == previous_hbm_cached_blocks.end()
-            ? 0
-            : hbm_matched_it->second;
-    const size_t host_matched_blocks = host_state.num_cached_blocks(type);
-    const size_t comparable_blocks =
-        std::min(host_blocks->size(), hbm_blocks->size());
-    const size_t restore_end = std::min(comparable_blocks, host_matched_blocks);
-    const size_t restore_count =
-        restore_end - std::min(restore_end, hbm_matched_blocks);
-    restore_blocks.reserve(restore_blocks.size() + 2 * restore_count);
-    load_infos.reserve(load_infos.size() + restore_count);
-    for (size_t i = hbm_matched_blocks; i < restore_end; ++i) {
-      Block& host_block = (*host_blocks)[i];
-      Block& hbm_block = (*hbm_blocks)[i];
-      if (!hbm_block.is_valid() || !host_block.is_valid()) {
-        continue;
+  if (host_manager != nullptr) {
+    const size_t host_cached_tokens = host_state.kv_cache_tokens_num();
+    const size_t hbm_cached_tokens = hbm_state.kv_cache_tokens_num();
+    if (host_cached_tokens > hbm_cached_tokens) {
+      std::vector<BlockTransferInfo>& load_infos =
+          load_block_transfer_infos_[dp_rank];
+      for (const auto& [type, entry] : host_manager->leaf_entries()) {
+        if (type == BlockType::LINEAR) {
+          std::vector<Block>* host_blocks = host_state.mutable_blocks(type);
+          std::vector<Block>* hbm_blocks = hbm_state.mutable_blocks(type);
+          const size_t checkpoint_count =
+              host_cached_tokens / entry.leaf->block_size();
+          CHECK_GT(checkpoint_count, 0u);
+          CHECK_LE(checkpoint_count, host_blocks->size());
+          CHECK(!hbm_blocks->empty());
+          const Block& host_source = (*host_blocks)[checkpoint_count - 1];
+          CHECK(host_source.is_valid());
+          CHECK(hbm_blocks->back().is_valid());
+          CHECK(!hbm_blocks->back().is_shared());
+          if (hbm_blocks->size() > 1) {
+            // The Host checkpoint supersedes the older HBM read source.
+            composite->leaf_of(type)->deallocate(
+                Slice<Block>(*hbm_blocks).slice(0, hbm_blocks->size() - 1));
+            hbm_blocks->erase(hbm_blocks->begin(), hbm_blocks->end() - 1);
+          }
+          hbm_state.set_shared_blocks_num(type, 0);
+          hbm_state.set_num_cached_blocks(type, checkpoint_count);
+          Block& restore_block = hbm_blocks->back();
+          restore_block.set_hash_value(host_source.get_immutable_hash_value());
+          load_infos.emplace_back(host_source.id(),
+                                  restore_block.id(),
+                                  host_source.get_immutable_hash_value(),
+                                  TransferType::H2D,
+                                  BlockType::LINEAR);
+          restore_blocks.emplace_back(host_source);
+          restore_blocks.emplace_back(restore_block);
+          continue;
+        }
+
+        const size_t block_size = entry.leaf->block_size();
+        CHECK_GT(block_size, 0u);
+        std::vector<Block>* host_blocks = host_state.mutable_blocks(type);
+        std::vector<Block>* hbm_blocks = hbm_state.mutable_blocks(type);
+        const size_t begin_block = hbm_cached_tokens / block_size;
+        const size_t end_block = std::min({host_cached_tokens / block_size,
+                                           host_blocks->size(),
+                                           hbm_blocks->size()});
+        if (end_block > begin_block) {
+          restore_blocks.reserve(restore_blocks.size() +
+                                 2 * (end_block - begin_block));
+          load_infos.reserve(load_infos.size() + end_block - begin_block);
+        }
+        for (size_t block_index = begin_block; block_index < end_block;
+             ++block_index) {
+          Block& host_block = (*host_blocks)[block_index];
+          Block& hbm_block = (*hbm_blocks)[block_index];
+          if (!hbm_block.is_valid() || !host_block.is_valid()) {
+            continue;
+          }
+          // Shared Host sources can restore multiple private HBM destinations.
+          // Reference counts do not indicate whether a destination is
+          // initialized.
+          hbm_block.set_hash_value(host_block.get_immutable_hash_value());
+          load_infos.emplace_back(host_block.id(),
+                                  hbm_block.id(),
+                                  host_block.get_immutable_hash_value(),
+                                  TransferType::H2D,
+                                  type);
+          restore_blocks.emplace_back(host_block);
+          restore_blocks.emplace_back(hbm_block);
+        }
       }
-      // Shared Host sources can restore multiple private HBM destinations.
-      // Reference counts do not indicate whether a destination is initialized.
-      hbm_block.set_hash_value(host_block.get_immutable_hash_value());
-      load_infos.emplace_back(host_block.id(),
-                              hbm_block.id(),
-                              host_block.get_immutable_hash_value(),
-                              TransferType::H2D,
-                              type);
-      restore_blocks.emplace_back(host_block);
-      restore_blocks.emplace_back(hbm_block);
     }
   }
-
   auto lease = sequence->retain_host_restore_blocks(std::move(restore_blocks));
   if (lease != nullptr) {
     std::erase_if(host_restore_leases_,
@@ -881,9 +754,9 @@ bool HierarchyBlockManagerPool::allocate(Sequence* sequence,
     host_restore_leases_.reserve(host_restore_leases_.size() + 1);
     host_restore_leases_.emplace_back(lease);
   }
-  collect_offload_pairs(sequence, dp_rank, restore_tokens);
   CHECK_GE(hbm_state.current_max_tokens_capacity(), restore_tokens);
   hbm_state.set_kv_cache_tokens_num(restore_tokens);
+  collect_offload_pairs(sequence);
   sequence->clear_host_cache_match();
   return true;
 }
@@ -897,79 +770,34 @@ void HierarchyBlockManagerPool::allocate_shared(Sequence* sequence) {
   const int32_t dp_rank = BlockManagerPool::get_dp_rank(sequence);
   auto* composite =
       static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
-
-  // Decode participates in the device prefix cache only. In particular, the
-  // DSV4 decode layout probes C4/C128 (SWA is disabled by the composite role
-  // predicate), but must never mount Host aliases or schedule H2D restores.
   if (sequence->stage() == SequenceStage::DECODE) {
-    composite->allocate_shared_for_sequence(sequence);
+    composite->allocate_shared_for_sequence(sequence, sequence->kv_state());
     return;
   }
-
   KVCacheState& hbm_state = sequence->kv_state();
+  if (!hbm_state.prefix_cache_matched()) {
+    composite->allocate_shared_for_sequence(sequence, sequence->kv_state());
+  }
+
   KVCacheState& host_state = sequence->host_kv_state();
-  std::vector<ProbeResult> hbm_probes;
-  std::vector<ProbeResult> host_probes;
-
-  if (hbm_state.prefix_cache_matched()) {
-    for (const auto& [type, entry] : composite->leaf_entries()) {
-      if (!entry.supports_prefix_cache || entry.leaf == nullptr) {
-        continue;
-      }
-      hbm_probes.emplace_back(ProbeResult{type,
-                                          entry.leaf.get(),
-                                          hbm_state.take_blocks(type),
-                                          entry.leaf->block_size()});
+  if (!host_state.prefix_cache_matched()) {
+    if (auto* host_manager = host_block_managers_[dp_rank].get()) {
+      host_manager->allocate_shared_for_sequence(sequence, host_state);
     }
-  } else {
-    hbm_probes = CompositeBlockManager::probe_prefix_cache(
-        sequence, composite->leaf_entries(), hbm_state);
+    host_state.set_prefix_cache_matched();
   }
 
-  if (host_state.prefix_cache_matched()) {
-    for (const auto& [type, entry] : host_block_managers_[dp_rank]) {
-      if (!entry.supports_prefix_cache || entry.leaf == nullptr) {
-        continue;
-      }
-      host_probes.emplace_back(ProbeResult{type,
-                                           entry.leaf.get(),
-                                           host_state.take_blocks(type),
-                                           entry.leaf->block_size()});
-    }
-  } else {
-    host_probes = CompositeBlockManager::probe_prefix_cache(
-        sequence, host_block_managers_[dp_rank], host_state);
-  }
-
-  PrefixMatch match = trim_shared_probes(composite->leaf_combination(),
-                                         &hbm_probes,
-                                         &host_probes,
-                                         sequence->tokens().size(),
-                                         sequence->num_tokens());
+  const size_t hbm_tokens = hbm_state.kv_cache_tokens_num();
+  const size_t host_tokens = host_state.kv_cache_tokens_num();
   VLOG(1) << "[HostCache][PrefixMatch] sequence_id=" << sequence->seq_id()
-          << " hbm_tokens=" << match.hbm_tokens
-          << " host_tokens=" << match.host_tokens;
+          << " hbm_tokens=" << hbm_tokens << " host_tokens=" << host_tokens;
 
   sequence->clear_host_cache_match();
-  for (ProbeResult& probe : host_probes) {
-    host_state.mount_composite_shared(probe.type, std::move(probe.blocks));
-  }
-  CHECK_GE(host_state.current_max_tokens_capacity(), match.host_tokens);
-  host_state.incr_kv_cache_tokens_num_up_to(match.host_tokens);
-
-  for (ProbeResult& probe : hbm_probes) {
-    hbm_state.mount_composite_shared(probe.type, std::move(probe.blocks));
-  }
-  CHECK_LE(hbm_state.kv_cache_tokens_num(), match.hbm_tokens);
-  CHECK_GE(hbm_state.current_max_tokens_capacity(), match.hbm_tokens);
-  hbm_state.set_kv_cache_tokens_num(match.hbm_tokens);
-  CompositeBlockManager::release_probes(&hbm_probes);
-  CompositeBlockManager::release_probes(&host_probes);
-  hbm_state.set_prefix_cache_matched();
-  host_state.set_prefix_cache_matched();
-
-  if (match.restore_tokens > match.hbm_tokens) {
-    sequence->set_host_cache_match(match.restore_tokens, match.copy_units);
+  if (host_tokens > hbm_tokens) {
+    const size_t unit_size = prefetch_unit_size(composite->leaf_combination(),
+                                                composite->leaf_entries());
+    sequence->set_host_cache_match(host_tokens,
+                                   (host_tokens - hbm_tokens) / unit_size);
   }
 }
 
@@ -1004,6 +832,25 @@ HostCacheRestorePoint HierarchyBlockManagerPool::select_host_cache_restore(
   size_t selected_tokens =
       (hbm_cached_units + selected_copy_units) * copy_unit_tokens;
 
+  if (composite->leaf_combination() ==
+      CompositeBlockManager::LeafCombination::FLAT_KV_LINEAR) {
+    const size_t checkpoint_stride =
+        composite->leaf_of(BlockType::LINEAR)->block_size();
+    const Slice<Block> checkpoints =
+        sequence->host_kv_state().blocks(BlockType::LINEAR);
+    size_t checkpoint_count =
+        std::min(selected_tokens / checkpoint_stride, checkpoints.size());
+    while (checkpoint_count > 0 &&
+           !checkpoints[checkpoint_count - 1].is_valid()) {
+      --checkpoint_count;
+    }
+    selected_tokens = std::max(hbm_cached_units * copy_unit_tokens,
+                               checkpoint_count * checkpoint_stride);
+    return HostCacheRestorePoint{
+        /*restore_target_tokens=*/selected_tokens,
+        /*copy_units=*/selected_tokens / copy_unit_tokens - hbm_cached_units};
+  }
+
   if (!is_swa_compressed) {
     return HostCacheRestorePoint{/*restore_target_tokens=*/selected_tokens,
                                  /*copy_units=*/selected_copy_units};
@@ -1017,14 +864,11 @@ HostCacheRestorePoint HierarchyBlockManagerPool::select_host_cache_restore(
   CHECK_GT(swa_block_size, 0u);
   CHECK_GT(blocks_per_window, 0u);
 
-  const Slice<Block> hbm_swa = sequence->kv_state().blocks(BlockType::SWA);
   const Slice<Block> host_swa =
       sequence->host_kv_state().blocks(BlockType::SWA);
-  while (selected_copy_units > 0 && !has_valid_swa_window(selected_tokens,
-                                                          swa_block_size,
-                                                          blocks_per_window,
-                                                          hbm_swa,
-                                                          host_swa)) {
+  while (selected_copy_units > 0 &&
+         !has_valid_swa_window(
+             selected_tokens, swa_block_size, blocks_per_window, host_swa)) {
     --selected_copy_units;
     selected_tokens -= copy_unit_tokens;
   }
@@ -1056,13 +900,6 @@ bool HierarchyBlockManagerPool::should_probe_prefix_cache(
     return false;
   }
   return !sequence->host_kv_state().prefix_cache_matched();
-}
-
-BlockManager* HierarchyBlockManagerPool::leaf_of(BlockType type,
-                                                 int32_t dp_rank) const {
-  auto it = host_block_managers_[dp_rank].find(type);
-  return it == host_block_managers_[dp_rank].end() ? nullptr
-                                                   : it->second.leaf.get();
 }
 
 void HierarchyBlockManagerPool::prefetch_from_storage(
@@ -1104,8 +941,13 @@ void HierarchyBlockManagerPool::prefetch_from_storage(
         block_managers_[dp_rank].get());
     const CompositeBlockManager::LeafCombination combination =
         composite->leaf_combination();
+    auto* host_manager = host_block_managers_[dp_rank].get();
+    if (host_manager == nullptr) {
+      finish_sequence();
+      continue;
+    }
     const CompositeBlockManager::LeafMap& host_leaves =
-        host_block_managers_[dp_rank];
+        host_manager->leaf_entries();
     const size_t unit_size = prefetch_unit_size(combination, host_leaves);
     const size_t max_prefix_tokens =
         sequence->tokens().empty() ? 0 : sequence->tokens().size() - 1;
@@ -1122,8 +964,8 @@ void HierarchyBlockManagerPool::prefetch_from_storage(
     }
     const size_t target_tokens = (cacheable_tokens / unit_size) * unit_size;
 
-    std::vector<ProbeResult> probes =
-        CompositeBlockManager::probe_prefix_cache(sequence, host_leaves);
+    std::vector<ProbeResult> probes = CompositeBlockManager::probe_prefix_cache(
+        sequence, host_leaves, sequence->host_kv_state());
     for (ProbeResult& probe : probes) {
       sequence->host_kv_state().mount_composite_shared(probe.type,
                                                        std::move(probe.blocks));
@@ -1191,8 +1033,10 @@ void HierarchyBlockManagerPool::prefetch_from_storage(
           }
           const bool publish = !request->finished() && !request->cancelled();
           const size_t final_tokens = base_tokens + hit_units * unit_size;
-          finalize_prefetch(
-              sequence, host_block_managers_[dp_rank], final_tokens, publish);
+          finalize_prefetch(sequence,
+                            host_block_managers_[dp_rank].get(),
+                            final_tokens,
+                            publish);
           finish_sequence();
         });
         completion_callback = prefetch_completion_callback_;
@@ -1238,6 +1082,7 @@ void HierarchyBlockManagerPool::transfer_blocks(BatchGroup& batches) {
     CHECK_LT(i, batches.size())
         << "Missing batch for pending H2D transfer at dp_rank=" << i;
     batches[i].set_batch_id();
+    batches[i].require_host_restore();
     transfer_coordinator_->transfer_kv_blocks(
         i, batches[i].batch_id(), load_block_transfer_infos_[i]);
     load_block_transfer_infos_[i].clear();
@@ -1304,12 +1149,6 @@ void HierarchyBlockManagerPool::transfer_offload_blocks() {
     }
 
     if (!transfer_infos.empty()) {
-      // Capture per-leaf host manager pointers so the completion callback can
-      // route each block to the correct host leaf on publish.
-      HostLeafSnapshot host_leaves_snapshot;
-      for (const auto& [type, entry] : host_block_managers_[i]) {
-        host_leaves_snapshot.emplace(type, entry.leaf.get());
-      }
       std::shared_ptr<KVTransferTracker::Completion> completion =
           offload_transfers_.track();
       folly::collectAll(
@@ -1319,7 +1158,7 @@ void HierarchyBlockManagerPool::transfer_offload_blocks() {
                       host_blocks = std::move(dst_blocks),
                       block_types_vec = std::move(block_types),
                       device_block_mgr_ptr = block_managers_[i].get(),
-                      host_leaves = std::move(host_leaves_snapshot)](
+                      host_manager = host_block_managers_[i].get()](
                          std::vector<folly::Try<uint32_t>>&& results) mutable {
             bool copy_ok = !results.empty();
             if (results.empty()) {
@@ -1343,7 +1182,7 @@ void HierarchyBlockManagerPool::transfer_offload_blocks() {
             // Failures publish nothing, but both paths release every reserved
             // Host id through the same type-aware ownership path.
             finalize_host_blocks(
-                copy_ok, std::move(host_blocks), block_types_vec, host_leaves);
+                copy_ok, std::move(host_blocks), block_types_vec, host_manager);
 
             // Keep the source aliases until Host publication has retained its
             // content metadata. Otherwise an eviction can race store_copy.

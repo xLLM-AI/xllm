@@ -49,6 +49,7 @@ class LinearStateBlockManager final : public BlockManagerImpl {
 
   std::optional<std::vector<Block>> allocate_for_sequence(
       Sequence* seq,
+      KVCacheState& kv_state,
       size_t num_tokens) override;
 
   using BlockManagerImpl::allocate;

@@ -289,21 +289,54 @@ TEST(KVCacheStoreTest, MlaKeyExcludesTensorParallelTopology) {
 
   const auto build_key = [&cache, &block_info](uint32_t tp_rank,
                                                uint32_t tp_size,
-                                               bool enable_mla) {
+                                               bool enable_mla,
+                                               int32_t split_size = 1,
+                                               int32_t split_rank = 0) {
     KVCacheStore store;
     HostCacheStoreIndex index;
     index[BlockType::KV].emplace_back(
         HostCacheStoreEntry{/*cache_handle=*/0, "main", &cache});
-    KVCacheStoreTestPeer::initialize_index(
-        &store,
-        make_store_config("target-model", tp_rank, tp_size, enable_mla),
-        std::move(index));
+    KVCacheStoreInitConfig config =
+        make_store_config("target-model", tp_rank, tp_size, enable_mla);
+    config.kv_split_size = split_size;
+    config.kv_split_rank = split_rank;
+    KVCacheStoreTestPeer::initialize_index(&store, config, std::move(index));
     return KVCacheStoreTestPeer::build_keys(store, block_info).front().second;
   };
 
   const std::string mla_key = build_key(/*tp_rank=*/0,
                                         /*tp_size=*/1,
                                         /*enable_mla=*/true);
+  EXPECT_EQ(mla_key.find("xllm-kv-v3:12:target-model:4:main:mla:0:"), 0U);
+  for (bool enable_mla : {false, true}) {
+    const std::string split_key = build_key(/*tp_rank=*/0,
+                                            /*tp_size=*/8,
+                                            enable_mla,
+                                            /*split_size=*/4,
+                                            /*split_rank=*/0);
+    EXPECT_NE(split_key,
+              build_key(/*tp_rank=*/0,
+                        /*tp_size=*/8,
+                        enable_mla,
+                        /*split_size=*/4,
+                        /*split_rank=*/1));
+    EXPECT_NE(split_key,
+              build_key(/*tp_rank=*/0,
+                        /*tp_size=*/8,
+                        enable_mla,
+                        /*split_size=*/8,
+                        /*split_rank=*/0));
+  }
+  EXPECT_EQ(build_key(/*tp_rank=*/0,
+                      /*tp_size=*/8,
+                      /*enable_mla=*/true,
+                      /*split_size=*/4,
+                      /*split_rank=*/2),
+            build_key(/*tp_rank=*/7,
+                      /*tp_size=*/8,
+                      /*enable_mla=*/true,
+                      /*split_size=*/4,
+                      /*split_rank=*/2));
   EXPECT_EQ(mla_key,
             build_key(/*tp_rank=*/7,
                       /*tp_size=*/8,
@@ -320,25 +353,27 @@ TEST(KVCacheStoreTest, MlaKeyExcludesTensorParallelTopology) {
                       /*enable_mla=*/false));
 }
 
-TEST(KVCacheStoreTest, MlaNonzeroRankSkipsRemotePut) {
-  KVCacheStore store;
-  HostCacheStoreIndex index;
-  KVCache cache = make_attention_cache(/*host_blocks=*/2, /*width=*/8);
-  index[BlockType::KV].emplace_back(
-      HostCacheStoreEntry{/*cache_handle=*/0, "main", &cache});
-  KVCacheStoreTestPeer::initialize_index(&store,
-                                         make_store_config("target-model",
-                                                           /*tp_rank=*/3,
-                                                           /*tp_size=*/8,
-                                                           /*enable_mla=*/true),
-                                         std::move(index));
-  KVCacheStoreTestPeer::mark_initialized(&store);
-  const std::vector<BlockTransferInfo> block_info = {
-      make_block_info(10, BlockType::KV, /*destination_block_id=*/0),
-      make_block_info(11, BlockType::KV, /*destination_block_id=*/1)};
-
-  // A null client makes any accidental remote Store access fail loudly.
-  EXPECT_EQ(store.batch_put(block_info), block_info.size());
+TEST(KVCacheStoreTest, WriterRoleControlsRemotePut) {
+  for (const bool write_enabled : {false, true}) {
+    KVCacheStore store;
+    HostCacheStoreIndex index;
+    KVCache cache = make_attention_cache(/*host_blocks=*/2, /*width=*/8);
+    index[BlockType::KV].emplace_back(
+        HostCacheStoreEntry{/*cache_handle=*/0, "main", &cache});
+    auto config = make_store_config("target-model",
+                                    /*tp_rank=*/3,
+                                    /*tp_size=*/8,
+                                    /*enable_mla=*/true);
+    config.kv_split_size = 4;
+    config.write_enabled = write_enabled;
+    KVCacheStoreTestPeer::initialize_index(&store, config, std::move(index));
+    KVCacheStoreTestPeer::mark_initialized(&store);
+    const std::vector<BlockTransferInfo> block_info = {
+        make_block_info(10, BlockType::KV, /*destination_block_id=*/0),
+        make_block_info(11, BlockType::KV, /*destination_block_id=*/1)};
+    EXPECT_EQ(store.batch_put(block_info),
+              write_enabled ? 0U : block_info.size());
+  }
 }
 
 TEST(KVCacheStoreTest, SelectsOnlyExplicitRdmaDevices) {

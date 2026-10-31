@@ -27,8 +27,6 @@ limitations under the License.
 
 #include "core/framework/config/rec_config.h"
 #include "core/kv_cache/block/block_manager_impl.h"
-#include "platform/device.h"
-#include "platform/platform.h"
 #include "request.h"
 #include "request_state.h"
 
@@ -305,7 +303,6 @@ INSTANTIATE_TEST_SUITE_P(OverlapPlaceholders,
                                            std::make_tuple(true, 0, 2)));
 
 TEST(SampleSlotTest, RequestOutputSplitsSampleResultsBySampleId) {
-  torch::Device device(Platform::type_torch(), 0);
   BlockManager::Options options;
   options.num_blocks(4).block_size(4);
   BlockManagerImpl manager(options);
@@ -387,7 +384,6 @@ TEST(SampleSlotTest, RequestOutputSplitsSampleResultsBySampleId) {
 }
 
 TEST(SampleSlotTest, RequestOutputStableSortsOutOfOrderSampleIds) {
-  torch::Device device(Platform::type_torch(), 0);
   BlockManager::Options options;
   options.num_blocks(4).block_size(4);
   BlockManagerImpl manager(options);

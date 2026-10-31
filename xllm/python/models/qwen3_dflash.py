@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import ClassVar
 
 import torch
 import torch.nn as nn
@@ -57,6 +58,10 @@ def _load_reference_quarot_rotation(
 
 @dataclass
 class DFlashQwen3Config(Qwen3Config):
+    # Class policy, not checkpoint data: only draft variants that remap draft
+    # ids to target ids accept a draft vocabulary smaller than the target's.
+    supports_reduced_draft_vocab: ClassVar[bool] = False
+
     draft_vocab_size: int = 0
     world_size: int = 1
 
@@ -102,7 +107,10 @@ class DFlashQwen3Config(Qwen3Config):
         if self.vocab_size % self.tp_size:
             raise ValueError("vocab_size must be divisible by tp_size")
         if self.draft_vocab_size != self.vocab_size:
-            raise ValueError("reduced-vocabulary block-diffusion drafts are not supported")
+            if not self.supports_reduced_draft_vocab:
+                raise ValueError("reduced-vocabulary block-diffusion drafts are not supported")
+            if self.draft_vocab_size <= 0 or self.draft_vocab_size % self.tp_size:
+                raise ValueError("reduced draft_vocab_size must be positive and divisible by tp_size")
         if self.layers_to_capture:
             raise ValueError("DFlash draft model does not support layers_to_capture")
         self.head_split()

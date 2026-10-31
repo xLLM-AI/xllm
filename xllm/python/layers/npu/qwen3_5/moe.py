@@ -21,7 +21,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from xllm.python import distributed, kernels
-from xllm.python.layers.moe_dp import dp_gather_tokens, reduce_and_scatter
+from xllm.python.layers.moe_parallel import dp_gather_tokens, reduce_and_scatter
 from xllm.python.layers.npu.mega_moe_metadata import MegaMoeMetadata
 from xllm.python.layers.qwen3_5.common import Qwen3_5MoEConfig
 from xllm.python.layers.qwen3_5.moe import Qwen3_5SparseMoEBlockBase

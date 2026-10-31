@@ -18,7 +18,6 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include "core/framework/model/aux_hidden_capture.h"
-#include "core/framework/model_loader/model_loader.h"
 #include "core/framework/sampling/logits_processor.h"
 #include "core/util/tensor_helper.h"
 #include "runtime/llm_worker_impl.h"
@@ -79,34 +78,21 @@ bool Eagle3WorkerImpl<TargetInput>::init_model(
     const std::string& model_weights_path,
     int32_t random_seed,
     MasterStatus master_status) {
-  // Call parent's init_model first
-  bool result = MTPWorkerImpl<TargetInput>::init_model(
+  const bool result = MTPWorkerImpl<TargetInput>::init_model(
       model_weights_path, random_seed, master_status);
-
-  // Load hot_token_id_ directly from state_dict (EAGLE-3 specific)
-  // This should be done after draft model is loaded
+  if (!result) {
+    return false;
+  }
   if (draft_impl_->get_status() == WorkerImpl::Status::LOADED) {
-    use_draft_token_mapping_ = !uses_embedded_eagle3_draft();
-    if (!use_draft_token_mapping_) {
-      hot_token_id_ = torch::Tensor();
-      return result;
-    }
-
-    // d2t stores diffs between draft id and target id
-    // hot_token_id = d2t + arange(d2t.size(0))
-    auto model_loader = ModelLoader::create(model_weights_path);
-    auto& state_dicts = model_loader->get_state_dicts();
-    for (const auto& state_dict : state_dicts) {
-      torch::Tensor d2t_tensor = state_dict->get_tensor("d2t");
-      if (d2t_tensor.defined()) {
-        auto arange_tensor = torch::arange(d2t_tensor.size(0));
-        hot_token_id_ = (d2t_tensor + arange_tensor).to(device_, torch::kLong);
-        LOG(INFO) << "Eagle3WorkerImpl: Loaded d2t tensor from state_dict, "
-                     "hot_token_id size: "
-                  << hot_token_id_.size(0);
-        break;
-      }
-    }
+    torch::Tensor d2t = draft_impl_->take_draft_d2t();
+    draft_vocab_ =
+        uses_embedded_eagle3_draft()
+            ? DraftVocabulary{}
+            : DraftVocabulary(
+                  std::move(d2t),
+                  draft_impl_->context_.get_model_args().vocab_size(),
+                  context_.get_model_args().vocab_size(),
+                  device_);
   }
 
   return result;
@@ -120,31 +106,7 @@ int64_t Eagle3WorkerImpl<TargetInput>::get_embedding_placeholder_size() const {
 template <typename TargetInput>
 void Eagle3WorkerImpl<TargetInput>::process_draft_sample_output(
     SampleOutput& sample_output) {
-  // EAGLE-3 specific: map draft token IDs to target token IDs.
-  if (!use_draft_token_mapping_ || !hot_token_id_.defined() ||
-      !sample_output.next_tokens.defined() ||
-      sample_output.next_tokens.numel() == 0) {
-    return;
-  }
-
-  // Scatter q over the target vocab so the (p-q)+ residual keeps full
-  // target mass where the draft cannot propose (q=0).
-  if (sample_output.draft_logits.defined()) {
-    const int64_t num_draft_rows = sample_output.draft_logits.size(0);
-    torch::Tensor dense =
-        torch::full({num_draft_rows, context_.get_model_args().vocab_size()},
-                    -std::numeric_limits<float>::infinity(),
-                    sample_output.draft_logits.options());
-    dense.scatter_(
-        /*dim=*/1,
-        hot_token_id_.view({1, -1}).expand(
-            {num_draft_rows, hot_token_id_.size(0)}),
-        sample_output.draft_logits);
-    sample_output.draft_logits = dense;
-  }
-
-  sample_output.next_tokens =
-      hot_token_id_.index_select(0, sample_output.next_tokens);
+  draft_vocab_.remap(sample_output);
 }
 
 template <typename TargetInput>

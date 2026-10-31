@@ -52,6 +52,8 @@ class BatchState final {
     }
   }
   uint64_t batch_id() const { return batch_id_; }
+
+  void require_host_restore() { requires_host_restore_ = true; }
   bool empty() const {
     return sequence_plan_.empty() && sequence_groups_.empty();
   }
@@ -121,6 +123,7 @@ class BatchState final {
   std::vector<Block> vmm_kv_blocks_;
   BatchForwardType batch_forward_type_;
   uint64_t batch_id_ = UNINITIALIZED_BATCH_ID;
+  bool requires_host_restore_ = false;
 };
 
 }  // namespace xllm

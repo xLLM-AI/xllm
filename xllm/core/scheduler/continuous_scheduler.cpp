@@ -35,6 +35,7 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/framework/config/speculative_config.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/request/priority_comparator.h"
 #include "core/framework/request/request.h"
@@ -79,8 +80,15 @@ ContinuousSchedulerBase::ContinuousSchedulerBase(
 
   kv_cache_manager_ = resource_engine_->block_manager_pool();
   CHECK(kv_cache_manager_ != nullptr);
-  kv_cache_manager_->set_prefetch_completion_callback(
-      [notifier = notifier_]() { notifier->notify(); });
+  if (kv_cache_manager_->has_storage_prefetch()) {
+    kv_cache_prefetcher_ = std::make_unique<KVCachePrefetcher>(
+        *kv_cache_manager_,
+        request_admission_mutex_,
+        notifier_,
+        [this](std::shared_ptr<Request> request) {
+          return enqueue_ready_request(std::move(request));
+        });
+  }
   scheduler_metrics_ =
       std::make_unique<SchedulerMetrics>(distributed_worker_manager_,
                                          kv_cache_manager_,
@@ -164,10 +172,21 @@ ContinuousSchedulerBase::ContinuousSchedulerBase(
   instance_info_.kv_split_size =
       ::xllm::ParallelConfig::get_instance().kv_split_size_effective();
 
+  const int32_t num_speculative_tokens = options_.num_speculative_tokens();
   if (options_.enable_schedule_overlap()) {
-    min_speculative_tokens_required_ = options_.num_speculative_tokens() * 2;
+    const bool reserve_bonus_token =
+        num_speculative_tokens > 0 &&
+        SpeculativeConfig::is_mtp_algorithm(
+            SpeculativeConfig::get_instance().speculative_algorithm());
+    if (reserve_bonus_token) {
+      CHECK_LE(num_speculative_tokens,
+               (std::numeric_limits<int32_t>::max() - 1) / 2);
+    }
+    // MTP needs N pending tokens and N+1 next-draft tokens for the bonus.
+    min_speculative_tokens_required_ =
+        num_speculative_tokens * 2 + static_cast<int32_t>(reserve_bonus_token);
   } else {
-    min_speculative_tokens_required_ = options_.num_speculative_tokens();
+    min_speculative_tokens_required_ = num_speculative_tokens;
   }
 }
 
@@ -217,30 +236,15 @@ void ContinuousSchedulerBase::populate_heartbeat_request(
 
 ContinuousSchedulerBase::~ContinuousSchedulerBase() {
   notifier_->request_stop();
-  kv_cache_manager_->set_prefetch_completion_callback({});
 
   if (xservice_client_ != nullptr) {
     xservice_client_->clear_heartbeat_callback(
         heartbeat_callback_registration_);
   }
 
-  // Requests never submitted to the engine own no asynchronous callback and
-  // can be cancelled directly, including an offline scheduler never started.
-  {
-    std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
-    for (const std::shared_ptr<Request>& request : prefetch_admissions_) {
-      request->set_cancel();
-    }
-    const size_t unissued = prefetch_admissions_.size();
-    prefetch_admissions_.clear();
-    const size_t previous =
-        prefetching_requests_.fetch_sub(unissued, std::memory_order_acq_rel);
-    CHECK_GE(previous, unissued);
+  if (kv_cache_prefetcher_ != nullptr) {
+    kv_cache_prefetcher_->shutdown();
   }
-  kv_cache_manager_->drain_prefetch_completions();
-  drain_completed_prefetches();
-  CHECK_EQ(prefetching_requests_.load(std::memory_order_acquire), 0u)
-      << "ContinuousScheduler destroyed with pending prefetch callbacks";
   running_requests_.clear();
 }
 
@@ -258,74 +262,25 @@ bool ContinuousSchedulerBase::add_request(std::shared_ptr<Request>& request) {
     return true;
   }
 
-  std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
-  const size_t pending_before_reservation =
-      prefetching_requests_.load(std::memory_order_relaxed);
-  const size_t queued_requests = num_queued_requests();
-  if (queued_requests + pending_before_reservation >=
-      request_queue_.capacity()) {
-    return false;
-  }
-
-  if (!kv_cache_manager_->has_storage_prefetch()) {
+  // The bounded ready queue handles direct admission without a reservation.
+  // PD also reserves slots while requests are in its dispatch queues.
+  if (kv_cache_prefetcher_ == nullptr && !options_.enable_disagg_pd()) {
     return enqueue_ready_request(request);
   }
 
-  prefetching_requests_.fetch_add(1, std::memory_order_relaxed);
-  prefetch_admissions_.emplace_back(request);
-  notifier_->notify();
-  VLOG(1) << "[Mooncake][AdmissionPending] request=" << request->request_id();
+  std::lock_guard<std::mutex> lock(request_admission_mutex_);
+  if (num_queued_requests() +
+          (kv_cache_prefetcher_ == nullptr
+               ? 0
+               : kv_cache_prefetcher_->num_pending_requests()) >=
+      request_queue_.capacity()) {
+    return false;
+  }
+  if (kv_cache_prefetcher_ == nullptr) {
+    return enqueue_ready_request(request);
+  }
+  kv_cache_prefetcher_->add_request(request);
   return true;
-}
-
-void ContinuousSchedulerBase::drain_prefetch_admissions() {
-  std::deque<std::shared_ptr<Request>> requests;
-  {
-    std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
-    requests.swap(prefetch_admissions_);
-  }
-
-  for (std::shared_ptr<Request>& request : requests) {
-    if (request->finished() || request->cancelled()) {
-      const size_t previous =
-          prefetching_requests_.fetch_sub(1, std::memory_order_relaxed);
-      CHECK_GT(previous, 0u);
-      continue;
-    }
-
-    kv_cache_manager_->prefetch_from_storage(
-        request, [this](std::shared_ptr<Request> completed) {
-          std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
-          completed_prefetches_.emplace_back(std::move(completed));
-        });
-  }
-}
-
-void ContinuousSchedulerBase::drain_completed_prefetches() {
-  std::deque<std::shared_ptr<Request>> completed;
-  {
-    std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
-    completed.swap(completed_prefetches_);
-  }
-
-  for (std::shared_ptr<Request>& request : completed) {
-    const bool cancelled = request->finished() || request->cancelled();
-    {
-      // Admission observes the queue size and reservation count together.
-      std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
-      if (!cancelled) {
-        CHECK(enqueue_ready_request(request))
-            << "Reserved request queue slot disappeared before prefetch "
-               "completed.";
-      }
-      const size_t previous =
-          prefetching_requests_.fetch_sub(1, std::memory_order_relaxed);
-      CHECK_GT(previous, 0u);
-    }
-    VLOG(1) << (cancelled ? "[Mooncake][AdmissionCancelled] request="
-                          : "[Mooncake][AdmissionReady] request=")
-            << request->request_id();
-  }
 }
 
 size_t ContinuousSchedulerBase::num_queued_requests() const {
@@ -397,16 +352,11 @@ void ContinuousSchedulerBase::drain_decode_restore_waiting(
   }
 }
 
-void ContinuousSchedulerBase::drain_prefetch_pipeline() {
-  kv_cache_manager_->drain_prefetch_completions();
-  drain_prefetch_admissions();
-  kv_cache_manager_->drain_prefetch_completions();
-  drain_completed_prefetches();
-}
-
 BatchGroup ContinuousSchedulerBase::prepare_batch() {
   Timer timer;
-  drain_prefetch_pipeline();
+  if (kv_cache_prefetcher_ != nullptr) {
+    kv_cache_prefetcher_->drain();
+  }
   auto state = make_state();
 
   // Common phases (strategy-independent)
@@ -649,8 +599,7 @@ void ContinuousSchedulerBase::complete_pending_step(bool outputs_collected) {
 void ContinuousSchedulerBase::generate() {
   bool batch_empty = false;
   while (num_pending_requests() > 0 || !batch_empty ||
-         request_queue_.size() > 0 ||
-         prefetching_requests_.load(std::memory_order_relaxed) > 0) {
+         request_queue_.size() > 0 || has_pending_prefetch()) {
     // build a batch of requests/sequences
     const auto timeout = absl::Milliseconds(50);
     BatchGroup batch = schedule_request(timeout);

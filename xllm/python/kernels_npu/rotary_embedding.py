@@ -20,6 +20,35 @@ import torch
 import torch_npu
 
 
+def has_fused_qk_rotary(head_dim: int, dtype: torch.dtype, device: torch.device) -> bool:
+    return device.type == "npu" and dtype in (torch.float16, torch.bfloat16, torch.float32) and head_dim in (64, 128)
+
+
+def apply_qk_rotary(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    cosine: torch.Tensor,
+    sine: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Rotate [tokens, heads, dim] Q/K using [1, tokens, 1, dim] tables.
+
+    Inputs remain unchanged despite the native operator's in-place contract.
+    """
+    head_dim = query.size(-1)
+    if key.size(-1) != head_dim:
+        raise ValueError(f"q head_dim {head_dim} does not match k head_dim {key.size(-1)}")
+    if cosine.size(-1) != head_dim or sine.size(-1) != head_dim:
+        raise ValueError(f"cos/sin table width ({cosine.size(-1)}, {sine.size(-1)}) does not match head_dim {head_dim}")
+    query_out, key_out = torch_npu.npu_apply_rotary_pos_emb(
+        query.clone(memory_format=torch.contiguous_format).unsqueeze(0),
+        key.clone(memory_format=torch.contiguous_format).unsqueeze(0),
+        cosine,
+        sine,
+        layout="BSND",
+    )
+    return query_out.squeeze(0), key_out.squeeze(0)
+
+
 def has_split_qkv_rmsnorm_mrope_specialization(
     num_q_heads: int,
     num_kv_heads: int,
@@ -277,8 +306,10 @@ def npu_inplace_partial_rotary_mul(
 
 
 __all__ = [
+    "apply_qk_rotary",
     "build_split_qkv_rmsnorm_mrope_gather_pattern",
     "fused_qk_norm_rope",
+    "has_fused_qk_rotary",
     "has_split_qkv_rmsnorm_mrope_specialization",
     "inplace_partial_rotary_mul",
     "interleaved_rotary_embedding",

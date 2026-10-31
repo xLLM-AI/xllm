@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from typing import Any
 
 from setuptools import Command, Extension, find_namespace_packages, find_packages, setup
@@ -684,23 +685,34 @@ class ExtBuildSingleTest(ExtBuild):
                         test_executable = candidate
                         break
 
-        if not test_executable:
-            # If not found, try using ctest to run
-            logger.warning(f"⚠️  Could not find test executable {self.test_name}, trying ctest...")
-            try:
-                subprocess.check_call(["ctest", "-R", self.test_name, "--verbose"], cwd=cmake_dir, env=env)
-                logger.info(f"✅ Test {self.test_name} passed!")
-            except subprocess.CalledProcessError:
-                logger.exception(f"❌ Failed to run test {self.test_name}")
-                raise
-        else:
-            logger.info(f"🚀 Running test: {test_executable}")
-            try:
-                subprocess.check_call([test_executable], cwd=os.path.dirname(test_executable), env=env)
-                logger.info(f"✅ Test {self.test_name} passed!")
-            except subprocess.CalledProcessError as e:
-                logger.exception(f"❌ Test {self.test_name} failed with exit code {e.returncode}")
-                raise
+        env = dict(env)
+        cache_directory = None
+        if not env.get("TORCH_EXTENSIONS_DIR"):
+            cache_directory = tempfile.TemporaryDirectory(prefix="test-torch-extensions-", dir=cmake_dir)
+            env["TORCH_EXTENSIONS_DIR"] = cache_directory.name
+        try:
+            logger.info(f"Test Torch extensions cache: {env['TORCH_EXTENSIONS_DIR']}")
+            if not test_executable:
+                # If not found, try using ctest to run
+                logger.warning(f"⚠️  Could not find test executable {self.test_name}, trying ctest...")
+                try:
+                    subprocess.check_call(["ctest", "-R", self.test_name, "--verbose"], cwd=cmake_dir, env=env)
+                    logger.info(f"✅ Test {self.test_name} passed!")
+                except subprocess.CalledProcessError:
+                    logger.exception(f"❌ Failed to run test {self.test_name}")
+                    raise
+            else:
+                logger.info(f"🚀 Running test: {test_executable}")
+                try:
+                    subprocess.check_call([test_executable], cwd=os.path.dirname(test_executable), env=env)
+                    logger.info(f"✅ Test {self.test_name} passed!")
+                except subprocess.CalledProcessError as e:
+                    logger.exception(f"❌ Test {self.test_name} failed with exit code {e.returncode}")
+                    raise
+
+        finally:
+            if cache_directory is not None:
+                cache_directory.cleanup()
 
 
 class BuildDistWheel(bdist_wheel):
@@ -880,6 +892,12 @@ class TestUT(ExtBuild):
         default_parallel: int = max(os.cpu_count() or 1, 8)
         test_parallel: str = os.getenv("CTEST_PARALLEL", str(default_parallel))
         logger.info(f"Test parallelism: {test_parallel} (set CTEST_PARALLEL to override)")
+        test_environment = dict(os.environ)
+        cache_directory = None
+        if not test_environment.get("TORCH_EXTENSIONS_DIR"):
+            cache_directory = tempfile.TemporaryDirectory(prefix="test-torch-extensions-", dir=cmake_dir)
+            test_environment["TORCH_EXTENSIONS_DIR"] = cache_directory.name
+        logger.info(f"Test Torch extensions cache: {test_environment['TORCH_EXTENSIONS_DIR']}")
 
         def run_subprocess_with_streaming(
             cmd: list[str],
@@ -890,6 +908,7 @@ class TestUT(ExtBuild):
             process = subprocess.Popen(
                 cmd,
                 cwd=cmake_dir,
+                env=test_environment,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -953,6 +972,9 @@ class TestUT(ExtBuild):
         except subprocess.CalledProcessError as e:
             logger.exception(f"ctest failed: {e.stderr}")
             exit(1)
+        finally:
+            if cache_directory is not None:
+                cache_directory.cleanup()
 
 
 class SingleTest(Command):

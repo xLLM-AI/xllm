@@ -380,7 +380,7 @@ def test_dspark_moe_loader_receives_explicit_checkpoint_prefix(
     monkeypatch.setattr(
         model,
         "_load_dsv4_attention",
-        lambda *args, **kwargs: (attention, None),
+        lambda *args, **kwargs: attention,
     )
     monkeypatch.setattr(attention, "process_weights_after_loading", lambda: None)
     monkeypatch.setattr(
@@ -451,7 +451,7 @@ def test_dspark_loads_moe_from_mlp_checkpoint_prefix(
     monkeypatch.setattr(
         model,
         "_load_dsv4_attention",
-        lambda *args, **kwargs: (attention, "mtp.0.attn."),
+        lambda *args, **kwargs: attention,
     )
     monkeypatch.setattr(attention, "process_weights_after_loading", lambda: None)
     monkeypatch.setattr(mlp, "process_weights_after_loading", lambda: None)

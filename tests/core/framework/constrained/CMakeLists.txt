@@ -6,6 +6,7 @@ include(cc_test)
 cc_test(
   NAME
     json_object_grammar_test
+  CPU_ONLY
   SRCS
     json_object_grammar_test.cpp
   DEPS

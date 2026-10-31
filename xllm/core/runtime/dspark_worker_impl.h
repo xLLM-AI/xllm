@@ -20,6 +20,7 @@ limitations under the License.
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/draft_proposal.h"
 #include "runtime/dflash_worker_impl.h"
+#include "runtime/draft_vocabulary.h"
 
 namespace xllm {
 
@@ -47,17 +48,10 @@ DraftProposal sample_dspark_markov_block(
     const SamplingParameters& sampling,
     const SyncSampledTokens& sync_tokens,
     bool is_probabilistic_draft,
-    torch::Tensor token_ids_out = torch::Tensor());
+    torch::Tensor token_ids_out = torch::Tensor(),
+    const DraftVocabulary& draft_vocab = DraftVocabulary{});
 
-// DSpark = DFlash block-diffusion draft + a low-rank Markov head that adds a
-// prefix-dependent bias to each block position's draft logits. It reuses the
-// entire DFlash pipeline (prefill, context-K/V injection, validate, cache
-// writes) and overrides only:
-//   1. sample_from_anchor() — returns true, so the shared query builder makes
-//      an N-wide block (every position predicts, anchor predicts the first
-//      draft token) instead of DFlash's (1 + N) anchor + masks.
-//   2. run_decode_draft — performs the logits-only block forward and sequential
-//      Markov sampling before returning proposals to the shared validator.
+// DSpark adds sequential Markov sampling to the shared block-draft pipeline.
 class DSparkWorkerImpl final : public DFlashWorkerImpl {
  public:
   DSparkWorkerImpl(const ParallelArgs& parallel_args,
@@ -66,13 +60,11 @@ class DSparkWorkerImpl final : public DFlashWorkerImpl {
 
   ~DSparkWorkerImpl() override = default;
 
- protected:
-  // N-wide query block: anchor (slot 0) carries the last real token and
-  // predicts the first draft token; every position is a prediction. DFlash's
-  // prepare_query_inputs reads this hook to pick the block layout.
-  bool sample_from_anchor() const override { return true; }
+  bool init_model(const std::string& model_weights_path,
+                  int32_t random_seed,
+                  MasterStatus master_status) override;
 
-  // Build the DSpark query and produce the complete proposal block.
+ protected:
   DraftProposal run_decode_draft(const LlmForwardInput& input,
                                  LlmForwardInput& validate_input) override;
 };

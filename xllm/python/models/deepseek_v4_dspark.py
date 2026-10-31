@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 import torch
@@ -229,27 +230,18 @@ class DeepseekV4DSparkForCausalLM(
     ) -> None:
         """Load one draft decoder layer without requiring the target MTP model."""
 
-        def _w8a8(
-            checkpoint_module: str,
-            parameter_module: str,
-            shard_dims: dict[str, int] | None = None,
-        ) -> None:
-            load_w8a8_dynamic_projection(
-                loader,
-                checkpoint_module,
-                parameter_module,
-                shard_dims,
-                require_weight_and_scale=True,
-                fill_missing_offset=True,
-                description=f"DeepSeek-V4 DSpark {checkpoint_module}",
-            )
-
-        attention, _ = self._load_dsv4_attention(
+        attention = self._load_dsv4_attention(
             loader,
             checkpoint_prefix=checkpoint_prefix,
             parameter_prefix=parameter_prefix,
             layer_id=layer_id,
-            w8a8_loader=_w8a8,
+            w8a8_loader=partial(
+                load_w8a8_dynamic_projection,
+                loader,
+                require_weight_and_scale=True,
+                fill_missing_offset=True,
+                description="DeepSeek-V4 DSpark",
+            ),
         )
         attention.process_weights_after_loading()
 

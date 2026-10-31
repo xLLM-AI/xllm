@@ -257,11 +257,15 @@ TEST(MluLinearStateRestoreWorkerTest,
   input.input_params.embedding.linear_state_read_ids = {
       kRestoreSourceSlot, 2, 3, 5};
 
+  Device xllm_device(device);
+  std::unique_ptr<Stream> model_stream = xllm_device.current_stream();
+  // The fixture fills caches on the default stream; publish those writes
+  // before the worker restores them on its separate preparation stream.
+  Device(device).synchronize_default_stream();
+  input.runtime.metadata_ready_event = model_stream->record_event();
   LlmForwardInput processed_input;
   worker.prepare_work_before_execute(input, processed_input);
   ASSERT_NE(processed_input.runtime.metadata_ready_event, nullptr);
-  Device xllm_device(device);
-  std::unique_ptr<Stream> model_stream = xllm_device.current_stream();
   ASSERT_TRUE(
       model_stream->wait_event(processed_input.runtime.metadata_ready_event));
   ASSERT_EQ(model_stream->synchronize(), 0);
@@ -278,8 +282,10 @@ TEST(MluLinearStateRestoreWorkerTest,
                       kSecondStride);
   expect_slot_filled(first, /*slot=*/2, kFirstStride, /*value=*/13.0f);
   expect_slot_filled(second, /*slot=*/2, kSecondStride, /*value=*/17.0f);
-  expect_slot_filled(first, /*slot=*/3, kFirstStride, /*value=*/-101.0f);
-  expect_slot_filled(second, /*slot=*/3, kSecondStride, /*value=*/-202.0f);
+  // Cold rows retain their stored values; the validity mask tells the kernels
+  // to ignore their previous state.
+  expect_slot_filled(first, /*slot=*/3, kFirstStride, /*value=*/19.0f);
+  expect_slot_filled(second, /*slot=*/3, kSecondStride, /*value=*/23.0f);
   expect_slot_filled(first, /*slot=*/5, kFirstStride, /*value=*/-101.0f);
   expect_slot_filled(second, /*slot=*/5, kSecondStride, /*value=*/-202.0f);
 }
@@ -314,6 +320,9 @@ TEST(MluLinearStateRestoreWorkerTest,
   input.input_params.embedding.linear_state_ids = {1, 2, 3, 4, 5, 6};
   input.input_params.embedding.linear_state_read_ids = {1, 2, 3, 4, 5, 6};
 
+  Device xllm_device(device);
+  input.runtime.metadata_ready_event =
+      xllm_device.current_stream()->record_event();
   LlmForwardInput processed_input;
   worker.prepare_work_before_execute(input, processed_input);
 
@@ -385,6 +394,10 @@ TEST(MluLinearStateRestoreWorkerTest,
       kRestoreSourceSlot, 2, 3, 5};
   input.input_params.linear_state_validity_mask = {0, 1, 0, 0};
 
+  // Finish fixture initialization before the simulated previous forward writes
+  // the same cache tensors on the worker's compute stream.
+  Device xllm_device(device);
+  ASSERT_EQ(xllm_device.current_stream()->synchronize(), 0);
   worker.enqueue_previous_chunk_write(kRestoreSourceSlot,
                                       {{3.0f, 5.0f}, {7.0f, 11.0f}});
   worker.run_overlap_forward(input, /*destination_slot=*/1);

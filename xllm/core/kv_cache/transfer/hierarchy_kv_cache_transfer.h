@@ -61,6 +61,9 @@ class HierarchyKVCacheTransfer final {
   struct Options {
     PROPERTY(uint32_t, tp_rank);
     PROPERTY(uint32_t, tp_size);
+    PROPERTY(int32_t, kv_split_size) = 1;
+    PROPERTY(int32_t, kv_split_rank) = 0;
+    PROPERTY(bool, store_write_enabled) = true;
     PROPERTY(uint32_t, layers);
     PROPERTY(double, host_blocks_factor) = 0.0;
     PROPERTY(uint32_t, layers_wise_copy_batchs) = 1;

@@ -78,7 +78,8 @@ def _config(**overrides: object) -> glm5_next.Glm5NextConfig:
         ({"tp_size": 2, "moe_tp_size": 1}, "TP-only MoE"),
         ({"tp_size": 2, "tp_rank": 1, "moe_tp_size": 2, "moe_tp_rank": 0}, "TP-only MoE"),
         ({"tp_size": 4, "ep_size": 2, "moe_tp_size": 1}, "must equal"),
-        ({"expert_parallel_degree": 2}, "ordinary EP level 1"),
+        ({"expert_parallel_degree": 2}, "requires EP > 1"),
+        ({"expert_parallel_degree": 3}, "must be 0, 1 or 2"),
         ({"enable_mega_moe": True}, "does not support enable_mega_moe"),
         ({"enable_fused_mc2": True}, "does not support enable_fused_mc2"),
     ],
@@ -229,10 +230,10 @@ def test_grouped_moe_collectives_and_local_range(
         glm5_next.distributed, "moe_ep_all_reduce", lambda output: calls.append("moe_ep"), raising=False
     )
     monkeypatch.setattr(glm5_next.distributed, "all_reduce_", lambda output: calls.append("tp"), raising=False)
-    from xllm.python.layers import moe_dp
+    from xllm.python.layers import moe_parallel
 
     monkeypatch.setattr(
-        moe_dp,
+        moe_parallel,
         "get_forward_context",
         lambda: SimpleNamespace(metadata=SimpleNamespace(dp_execution_token_counts=(1, 2))),
     )
@@ -297,15 +298,28 @@ def test_shared_experts_keep_attention_tp_layout(dp_size: int, ep_size: int, moe
 
 
 @pytest.mark.parametrize(
-    "dp_size,tp_size,ep_size", [(1, 1, 1), (1, 8, 1), (1, 8, 8), (2, 4, 8), (2, 4, 4), (4, 2, 2), (2, 4, 1)]
+    "dp_size,cp_size,tp_size,ep_size",
+    [
+        (1, 1, 1, 1),
+        (1, 1, 8, 1),
+        (1, 1, 8, 8),
+        (2, 1, 4, 8),
+        (2, 1, 4, 4),
+        (4, 1, 2, 2),
+        (2, 1, 4, 1),
+        (1, 2, 4, 1),
+        (1, 2, 4, 8),
+        (2, 2, 2, 4),
+        (2, 2, 2, 8),
+    ],
 )
 @pytest.mark.parametrize("empty_rank", [False, True])
 def test_joint_reduction_injects_shared_once_in_its_dp_rows(
-    monkeypatch: pytest.MonkeyPatch, dp_size: int, tp_size: int, ep_size: int, empty_rank: bool
+    monkeypatch: pytest.MonkeyPatch, dp_size: int, cp_size: int, tp_size: int, ep_size: int, empty_rank: bool
 ) -> None:
-    from xllm.python.layers import moe_dp
+    from xllm.python.layers import moe_parallel
 
-    world_size = dp_size * tp_size
+    world_size = dp_size * cp_size * tp_size
     moe_tp_size = world_size // ep_size
     counts = tuple(1 if empty_rank and rank == 0 else rank + 2 for rank in range(dp_size))
     offsets = [sum(counts[:rank]) for rank in range(dp_size)]
@@ -325,7 +339,7 @@ def test_joint_reduction_injects_shared_once_in_its_dp_rows(
             return inputs * (self.rank + 1)
 
     monkeypatch.setattr(
-        moe_dp,
+        moe_parallel,
         "get_forward_context",
         lambda: SimpleNamespace(metadata=SimpleNamespace(dp_execution_token_counts=counts)),
     )
@@ -335,13 +349,17 @@ def test_joint_reduction_injects_shared_once_in_its_dp_rows(
         lambda output: pytest.fail("shared must not issue a TP reduction"),
         raising=False,
     )
+    monkeypatch.setattr(glm5_next, "get_forward_context_or_none", lambda: None)
     for rank in range(world_size):
-        dp_rank, tp_rank = divmod(rank, tp_size)
+        dp_rank, local_rank = divmod(rank, cp_size * tp_size)
+        cp_rank, tp_rank = divmod(local_rank, tp_size)
         config = _config(
             tp_size=tp_size,
             tp_rank=tp_rank,
             dp_size=dp_size,
             dp_rank=dp_rank,
+            cp_size=cp_size,
+            cp_rank=cp_rank,
             ep_size=ep_size,
             ep_rank=rank // moe_tp_size,
             moe_tp_size=moe_tp_size,
@@ -390,7 +408,8 @@ def test_joint_reduction_injects_shared_once_in_its_dp_rows(
         assert output.dtype == local.dtype
         assert len(captures) == int(moe_tp_size > 1) + int(ep_size > 1)
         expected = (hidden * ((rank + 1) * config.routed_scaling_factor)).float()
-        expected.narrow(0, offsets[dp_rank], counts[dp_rank]).add_((local * (tp_rank + 1)).float())
+        if cp_rank == 0:
+            expected.narrow(0, offsets[dp_rank], counts[dp_rank]).add_((local * (tp_rank + 1)).float())
         # TP1/EP1 has no collective to capture, but must account for the same
         # routed and shared contributions in its final output.
         partials = captures or [output.float()]

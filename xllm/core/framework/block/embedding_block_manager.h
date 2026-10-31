@@ -41,6 +41,7 @@ class EmbeddingBlockManager final : public BlockManagerImpl {
   // -- the composite commits the returned block under BlockType::EMBEDDING.
   std::optional<std::vector<Block>> allocate_for_sequence(
       Sequence* seq,
+      KVCacheState& kv_state,
       size_t num_tokens) override;
 
   // Single-block allocate: reuses the base free list but reports exhaustion

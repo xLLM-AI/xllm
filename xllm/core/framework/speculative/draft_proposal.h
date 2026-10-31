@@ -58,12 +58,10 @@ class DraftProposal final {
     if (!logits_.has_value()) {
       return;
     }
-    // The logits' vocab is the DRAFT model's own (an EAGLE3-style small head
-    // differs from the target's), so it is intentionally NOT compared to the
-    // target vocab: the rejection sampler only gathers at draft_token_ids,
-    // which index the draft domain.
+    // Proposal vocabulary depends on the sampler; remapped DSpark supplies
+    // target-vocabulary q logits.
     CHECK_EQ(logits_->dim(), 3)
-        << "proposal logits must be [batch, n_spec, draft_vocab]";
+        << "proposal logits must be [batch, n_spec, proposal_vocab]";
     CHECK_EQ(logits_->size(0), token_ids_.size(0))
         << "logits and token_ids must share the batch dim";
     CHECK_EQ(logits_->size(1), token_ids_.size(1))

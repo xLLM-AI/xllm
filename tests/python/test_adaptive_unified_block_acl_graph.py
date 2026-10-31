@@ -174,24 +174,28 @@ class _ToyBackend:
         return NpuPagedAttentionBackend.prepare_metadata(self, metadata, device_kv_lengths=device_kv_lengths)
 
 
-class _ToyExecutor:
+class _ToyExecutor(torch.nn.Module):
     """Use real tensor heads/commit recipe without pretending to run GLM."""
 
     def __init__(self, device: str, calls: list[str], *, target: bool) -> None:
+        super().__init__()
         resolved_device = torch.device(device)
         if resolved_device.type == "npu" and resolved_device.index is None:
             resolved_device = torch.device("npu", torch.npu.current_device())
-        self.model = self
         self.target = target
         self.calls = calls
         self.record_calls = resolved_device.type == "cpu"
         self.attention_backend = _ToyBackend(mla=target, block_draft=not target)
         self.eager_runner = SimpleNamespace(device=resolved_device, layer_caches=[])
         self.prepared_graph_runner = PreparedAclGraphRunner(
-            self, self.attention_backend, resolved_device, 128, block_draft=not target
+            self.model, self.attention_backend, resolved_device, 128, block_draft=not target
         )
         self.draft_cache = torch.zeros(512, device=resolved_device)
         self.context_cache = torch.zeros(512, device=resolved_device)
+
+    @property
+    def model(self) -> torch.nn.Module:
+        return self
 
     def _record(self, name: str) -> None:
         if self.record_calls:

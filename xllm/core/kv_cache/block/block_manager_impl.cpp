@@ -181,7 +181,7 @@ std::vector<Block> BlockManagerImpl::allocate_shared(
 
     // update effective block usage
     for (const auto& block : shared_blocks) {
-      if (mark_used(&usage_accounted_ids_, block.id())) {
+      if (block.is_valid() && mark_used(&usage_accounted_ids_, block.id())) {
         num_used_blocks_.fetch_add(1, std::memory_order_relaxed);
       }
     }
@@ -239,12 +239,6 @@ void BlockManagerImpl::free(int32_t block_id) {
 // the delta to cover num_tokens, and returns it (does not insert into the
 // sequence -- the CompositeBlockManager commits the returned blocks). Returns
 // std::nullopt on post-eviction shortage. SlidingWindow / Single override.
-std::optional<std::vector<Block>> BlockManagerImpl::allocate_for_sequence(
-    Sequence* seq,
-    size_t num_tokens) {
-  return allocate_for_sequence(seq, seq->kv_state(), num_tokens);
-}
-
 std::optional<std::vector<Block>> BlockManagerImpl::allocate_for_sequence(
     Sequence* seq,
     KVCacheState& kv_state,

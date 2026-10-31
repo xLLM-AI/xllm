@@ -73,6 +73,7 @@ class ControllablePrefetchBlockManagerPool final : public BlockManagerPool {
 
   void prefetch_from_storage(std::shared_ptr<Request> request,
                              PrefetchDoneCallback done) override {
+    prefetch_pipeline_calls_.fetch_add(1, std::memory_order_relaxed);
     ++prefetch_calls_;
     pending_.emplace_back(std::move(request), std::move(done));
     if (prefetch_started_callback_) {
@@ -92,25 +93,23 @@ class ControllablePrefetchBlockManagerPool final : public BlockManagerPool {
   }
 
   void drain_prefetch_completions() override {
-    const size_t calls =
-        drain_calls_.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (drain_hook_) {
-      drain_hook_(calls);
-    }
+    prefetch_pipeline_calls_.fetch_add(1, std::memory_order_relaxed);
+    drain_calls_.fetch_add(1, std::memory_order_relaxed);
   }
 
   size_t drain_calls() const {
     return drain_calls_.load(std::memory_order_relaxed);
   }
 
-  void set_drain_hook(std::function<void(size_t)> hook) {
-    drain_hook_ = std::move(hook);
+  size_t prefetch_pipeline_calls() const {
+    return prefetch_pipeline_calls_.load(std::memory_order_relaxed);
   }
 
   size_t prefetch_calls() const { return prefetch_calls_; }
 
   void set_prefetch_completion_callback(
       PrefetchCompletionCallback callback) override {
+    prefetch_pipeline_calls_.fetch_add(1, std::memory_order_relaxed);
     prefetch_completion_callback_ = std::move(callback);
   }
 
@@ -128,7 +127,7 @@ class ControllablePrefetchBlockManagerPool final : public BlockManagerPool {
   PrefetchCompletionCallback prefetch_completion_callback_;
   std::function<void()> prefetch_started_callback_;
   std::atomic<size_t> drain_calls_{0};
-  std::function<void(size_t)> drain_hook_;
+  std::atomic<size_t> prefetch_pipeline_calls_{0};
 };
 
 class FakeTokenizer : public Tokenizer {
@@ -241,8 +240,8 @@ class FakeEngine final : public RecEngine {
     step_hook_ = std::move(step_hook);
   }
   size_t drain_calls() const { return fake_block_manager_->drain_calls(); }
-  void set_drain_hook(std::function<void(size_t)> hook) {
-    fake_block_manager_->set_drain_hook(std::move(hook));
+  size_t prefetch_pipeline_calls() const {
+    return fake_block_manager_->prefetch_pipeline_calls();
   }
 
  private:
@@ -350,6 +349,36 @@ TEST(FixedStepsSchedulerTest, AddRequestSuccess) {
   auto requests = GenRequests({64}, {10}, RecType::kOneRec);
   std::shared_ptr<Request> req = requests[0];
   EXPECT_TRUE(scheduler.add_request(req));
+}
+
+TEST(FixedStepsSchedulerTest,
+     DisabledStoragePrefetchSkipsManagerCallsThroughoutLifecycle) {
+  ScopedConfigValue<bool> prefix_cache(
+      KVCacheConfig::get_instance().enable_prefix_cache(), false);
+  ScopedConfigValue<double> memory_threshold(
+      SchedulerConfig::get_instance()
+          .prefill_scheduling_memory_usage_threshold(),
+      1.0);
+  auto engine = std::make_unique<FakeEngine>(
+      /*num_blocks=*/64, /*block_size=*/32, /*enable_storage_prefetch=*/false);
+  auto requests = GenRequests({32}, {10}, RecType::kOneRec);
+
+  {
+    TestableFixedStepsScheduler scheduler(engine.get(), CreateOptions());
+    EXPECT_EQ(engine->prefetch_pipeline_calls(), 0u);
+    for (int32_t iteration = 0; iteration < 3; ++iteration) {
+      scheduler.step(absl::ZeroDuration());
+    }
+
+    ASSERT_TRUE(scheduler.add_request(requests.front()));
+    EXPECT_FALSE(scheduler.has_pending_prefetch());
+    scheduler.step(absl::ZeroDuration());
+    EXPECT_EQ(engine->step_calls(), 1u);
+    EXPECT_TRUE(engine->last_step_had_request());
+    EXPECT_EQ(engine->prefetch_pipeline_calls(), 0u);
+  }
+
+  EXPECT_EQ(engine->prefetch_pipeline_calls(), 0u);
 }
 
 TEST(FixedStepsSchedulerTest, QueueCapacityRejectsBeforeScheduling) {
@@ -628,35 +657,23 @@ TEST(FixedStepsSchedulerTest, IdleStepWaitsWithoutRepeatedScansUntilAdmission) {
       SchedulerConfig::get_instance()
           .prefill_scheduling_memory_usage_threshold(),
       1.0);
-  auto engine = std::make_unique<FakeEngine>(64, 32);
-  std::promise<void> first_scan;
-  auto scanned = first_scan.get_future();
-  std::promise<void> repeated_scan;
-  auto rescanned = repeated_scan.get_future();
-  engine->set_drain_hook([&first_scan, &repeated_scan](size_t calls) {
-    // Each prepare_rec_batch() drains completions twice.
-    if (calls == 2) {
-      first_scan.set_value();
-    } else if (calls == 4) {
-      repeated_scan.set_value();
-    }
-  });
+  auto engine = std::make_unique<FakeEngine>(
+      /*num_blocks=*/64, /*block_size=*/32, /*enable_storage_prefetch=*/true);
+  engine->set_prefetch_started_callback(
+      [&engine] { engine->complete_prefetches(); });
   FixedStepsScheduler scheduler(engine.get(), CreateOptions());
   auto finished = std::async(
       std::launch::async, [&scheduler] { scheduler.step(absl::Seconds(2)); });
 
-  EXPECT_EQ(scanned.wait_for(std::chrono::seconds(1)),
-            std::future_status::ready);
-  EXPECT_EQ(rescanned.wait_for(std::chrono::milliseconds(50)),
+  EXPECT_EQ(finished.wait_for(std::chrono::milliseconds(50)),
             std::future_status::timeout);
-  EXPECT_EQ(engine->drain_calls(), 2u);
+  EXPECT_EQ(engine->drain_calls(), 0u);
 
   auto requests = GenRequests({32}, {10}, RecType::kOneRec);
   EXPECT_TRUE(scheduler.add_request(requests[0]));
   EXPECT_EQ(finished.wait_for(std::chrono::milliseconds(200)),
             std::future_status::ready);
   finished.get();
-  engine->set_drain_hook({});
   EXPECT_EQ(engine->step_calls(), 1u);
   EXPECT_TRUE(engine->last_step_had_request());
 }

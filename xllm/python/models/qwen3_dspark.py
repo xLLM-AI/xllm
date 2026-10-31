@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 import torch
 import torch.nn as nn
@@ -36,6 +37,10 @@ from xllm.python.models.qwen3_dflash import (
 
 @dataclass
 class Qwen3DSparkConfig(DFlashQwen3Config):
+    # DSpark remaps draft ids to target ids (checkpoint "d2t" table), so a
+    # draft vocabulary smaller than the target's is supported.
+    supports_reduced_draft_vocab: ClassVar[bool] = True
+
     markov_rank: int = 0
     enable_confidence_head: bool = False
     confidence_head_with_markov: bool = False
@@ -97,6 +102,26 @@ class Qwen3DSparkForCausalLM(DSparkForCausalLMBase):
         if self.confidence_head is not None:
             all_weights.load_tensor(self.confidence_head.proj.weight, "confidence_head.proj.weight")
             all_weights.load_tensor(self.confidence_head.proj.bias, "confidence_head.proj.bias")
+        # target id = d2t[draft_id] + draft_id; a same-width permutation is a
+        # valid mapping too. Absent = draft and target share the vocabulary.
+        if all_weights.has("d2t"):
+            d2t = all_weights.get_tensor("d2t")
+            if d2t.dim() != 1:
+                raise ValueError("d2t table must be 1D")
+            if d2t.numel() != self.cfg.draft_vocab_size:
+                raise ValueError(
+                    f"d2t table has {d2t.numel()} entries but draft_vocab_size is {self.cfg.draft_vocab_size}"
+                )
+            mapped_ids = d2t.to(dtype=torch.int64) + torch.arange(d2t.numel(), device=d2t.device, dtype=torch.int64)
+            if torch.unique(mapped_ids).numel() != mapped_ids.numel():
+                raise ValueError("d2t mapped target ids must be unique")
+            if int(mapped_ids.min()) < 0 or int(mapped_ids.max()) >= self.cfg.vocab_size:
+                raise ValueError(f"d2t mapped target ids must be in [0, {self.cfg.vocab_size})")
+            self.hot_token_id = mapped_ids.to(device=self.device)
+        elif self.cfg.draft_vocab_size != self.cfg.vocab_size:
+            raise ValueError("reduced-vocabulary DSpark draft checkpoints must provide a d2t table")
+        else:
+            self.hot_token_id = None
 
     def adapt_weights_for_reference_model(
         self,

@@ -59,13 +59,9 @@ class ConcurrentBlockManagerImpl : public BlockManager {
   // free list / pool).
   std::optional<std::vector<Block>> allocate_for_sequence(
       Sequence* seq,
-      size_t num_tokens) override;
-  std::optional<std::vector<Block>> allocate_for_sequence(
-      Sequence* seq,
       KVCacheState& kv_state,
       size_t num_tokens) override;
   bool allocate_for_prefetch(Sequence* seq, size_t num_tokens) override;
-  void release_out_of_window(Sequence* seq) override;
   void release_out_of_window(Sequence* seq, KVCacheState& kv_state) override;
 
   size_t num_blocks_in_prefix_cache() const override;

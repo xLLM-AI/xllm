@@ -35,6 +35,24 @@ limitations under the License.
 
 namespace xllm {
 
+bool DFlash2WorkerImpl::init_model(const std::string& model_weights_path,
+                                   int32_t random_seed,
+                                   MasterStatus master_status) {
+  const bool result = DFlashWorkerImpl::init_model(
+      model_weights_path, random_seed, master_status);
+  if (result && draft_impl_->get_status() == WorkerImpl::Status::LOADED &&
+      is_probabilistic_draft_) {
+    const ModelArgs& draft_args = draft_impl_->context_.get_model_args();
+    const ModelArgs& target_args = impl_->context_.get_model_args();
+    CHECK_EQ(draft_args.draft_vocab_size() > 0 ? draft_args.draft_vocab_size()
+                                               : draft_args.vocab_size(),
+             target_args.vocab_size())
+        << "DFlash2 probabilistic drafts require draft and target vocabulary "
+           "sizes to match.";
+  }
+  return result;
+}
+
 // The selector takes only temperature — truncation, penalties, and grammar
 // constraints belong to verification.
 DraftProposal sample_dflash2_path(const DFlash2CandidateOutput& candidates,

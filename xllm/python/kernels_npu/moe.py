@@ -599,6 +599,8 @@ def _grouped_moe_with_selected_experts_impl(
     The routing and W8A8 grouped-matmul sequence mirrors the native NPU
     ``FusedMoEImpl::select_experts`` and ``forward_expert`` paths.
     """
+    from xllm.python import kernels as _kernels
+
     num_tokens = hidden_states.shape[0]
     expert_num = num_total_experts if num_total_experts > 0 else w13.shape[0]
     local_expert_count = num_experts_per_rank if num_experts_per_rank > 0 else w13.shape[0]
@@ -618,51 +620,22 @@ def _grouped_moe_with_selected_experts_impl(
         active_expert_range=active_range,
         quant_mode=-1,
     )
-    from xllm.python import kernels as _kernels
 
     sorted_hidden_i8, pertoken_scale = _kernels.dynamic_quant(expanded_hidden)
     if pertoken_scale is None:
         raise RuntimeError("dynamic_quant did not return a per-token scale")
     if expert_tokens.numel() < local_expert_count:
         raise RuntimeError("npu_moe_init_routing_v2 returned fewer groups than local experts")
-    group_list = expert_tokens[:local_expert_count]
-    gemm1_out = _group_gemm(
-        x=sorted_hidden_i8,
-        weight=w13,
-        scale=None,
-        per_token_scale=None,
-        group_list=group_list,
-        split_item=2,
-        group_type=0,
-        group_list_type=1,
-        output_dtype=torch.int32,
-    )
-    act_i8, act_pt = _kernels.dequant_swiglu_quant(
-        x=gemm1_out,
-        weight_scale=w13_scale,
-        activation_scale=pertoken_scale,
-        bias=None,
-        quant_scale=None,
-        quant_offset=None,
-        group_index=group_list,
-        activate_left=True,
-        quant_mode=1,
-        swiglu_mode=1,
-        clamp_limit=swiglu_limit,
-        glu_alpha=1.0,
-        glu_bias=0.0,
-    )
-    del w13_offset, w2_offset
-    output = _group_gemm(
-        x=act_i8,
-        weight=w2,
-        scale=w2_scale,
-        per_token_scale=act_pt,
-        group_list=group_list,
-        split_item=2,
-        group_type=0,
-        group_list_type=1,
-        output_dtype=hidden_states.dtype,
+    output = _grouped_w8a8_experts(
+        sorted_hidden_i8,
+        pertoken_scale,
+        expert_tokens[:local_expert_count],
+        w13,
+        w2,
+        w13_scale,
+        w2_scale,
+        hidden_states.dtype,
+        swiglu_limit,
     )
     local_mask = (topk_ids >= active_range[0]) & (topk_ids < active_range[1])
     local_topk_weights = topk_weights * local_mask
@@ -803,6 +776,484 @@ def _grouped_moe_with_selected_experts_fake(
     del topk_weights, topk_ids, w13, w2, w13_scale, w2_scale, w13_offset, w2_offset
     del num_total_experts, start_expert_id, num_experts_per_rank, swiglu_limit
     return torch.empty_like(hidden_states)
+
+
+def _validate_ep_moe_w8a8_inputs(
+    hidden: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    group_ep: str,
+    ep_size: int,
+    ep_rank: int,
+    num_experts: int,
+    x_active_mask: torch.Tensor | None,
+) -> None:
+    if hidden.ndim < 2:
+        raise ValueError(f"EP MoE hidden must have at least 2 dimensions, got {hidden.ndim}")
+    if hidden.shape[-1] == 0:
+        raise ValueError("EP MoE hidden size must be greater than zero")
+    if hidden.dtype not in (torch.bfloat16, torch.float16):
+        raise TypeError(f"EP MoE hidden must use bfloat16 or float16, got {hidden.dtype}")
+    if topk_ids.ndim < 2 or topk_ids.shape[-1] == 0:
+        raise ValueError("EP MoE topk_ids must have at least 2 dimensions and a non-empty top-k dimension")
+    if topk_weights.shape != topk_ids.shape:
+        raise ValueError(
+            "EP MoE topk_weights and topk_ids shapes must match: "
+            f"{tuple(topk_weights.shape)} != {tuple(topk_ids.shape)}"
+        )
+    num_tokens = hidden.numel() // hidden.shape[-1]
+    if topk_ids.numel() != num_tokens * topk_ids.shape[-1]:
+        raise ValueError(
+            "EP MoE routing token count must match hidden: "
+            f"expected {num_tokens}, got {topk_ids.numel() // topk_ids.shape[-1]}"
+        )
+    if topk_ids.dtype not in (torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64):
+        raise TypeError(f"EP MoE topk_ids must use an integer dtype, got {topk_ids.dtype}")
+    if not torch.is_floating_point(topk_weights):
+        raise TypeError(f"EP MoE topk_weights must use a floating-point dtype, got {topk_weights.dtype}")
+    if not group_ep:
+        raise ValueError("EP MoE group_ep must be non-empty")
+    if ep_size <= 1:
+        raise ValueError(f"EP MoE ep_size must be greater than one, got {ep_size}")
+    if ep_rank < 0 or ep_rank >= ep_size:
+        raise ValueError(f"EP MoE ep_rank {ep_rank} is outside [0, {ep_size})")
+    if num_experts <= 0 or num_experts % ep_size != 0:
+        raise ValueError(f"EP MoE num_experts must be positive and divisible by ep_size: {num_experts} / {ep_size}")
+
+    local_experts = num_experts // ep_size
+    if w13.ndim != 3 or w2.ndim != 3:
+        raise ValueError("EP MoE weights must have expert, input, and output dimensions")
+    if w13.shape[0] != local_experts or w2.shape[0] != local_experts:
+        raise ValueError(
+            f"EP MoE weights must contain {local_experts} local experts, got {w13.shape[0]} and {w2.shape[0]}"
+        )
+    if w13.dtype != torch.int8 or w2.dtype != torch.int8:
+        raise TypeError(f"EP MoE W8A8 weights must use int8, got {w13.dtype} and {w2.dtype}")
+    if w13.shape[1] != hidden.shape[-1] or w2.shape[2] != hidden.shape[-1] or w13.shape[2] != 2 * w2.shape[1]:
+        raise ValueError("EP MoE weight dimensions must match hidden size and paired gate/up projections")
+    if w13_scale.shape != (local_experts, w13.shape[2]) or w2_scale.shape != (local_experts, w2.shape[2]):
+        raise ValueError("EP MoE scale shapes must match each local expert's output channels")
+    if not torch.is_floating_point(w13_scale) or not torch.is_floating_point(w2_scale):
+        raise TypeError(
+            f"EP MoE requires ordinary floating-point W8A8 scales; got {w13_scale.dtype} and {w2_scale.dtype}"
+        )
+
+    tensors = {
+        "topk_weights": topk_weights,
+        "topk_ids": topk_ids,
+        "w13": w13,
+        "w2": w2,
+        "w13_scale": w13_scale,
+        "w2_scale": w2_scale,
+    }
+    for name, tensor in tensors.items():
+        if tensor.device != hidden.device:
+            raise ValueError(f"EP MoE {name} must be on {hidden.device}, got {tensor.device}")
+
+    if x_active_mask is not None:
+        if x_active_mask.ndim != 1 or x_active_mask.numel() != num_tokens:
+            raise ValueError(f"EP MoE x_active_mask must be 1D with {num_tokens} elements")
+        if x_active_mask.dtype != torch.bool:
+            raise TypeError(f"EP MoE x_active_mask must use bool, got {x_active_mask.dtype}")
+        if x_active_mask.device != hidden.device:
+            raise ValueError(f"EP MoE x_active_mask must be on {hidden.device}, got {x_active_mask.device}")
+
+
+def _grouped_w8a8_experts(
+    quantized_expand_x: torch.Tensor,
+    input_scale: torch.Tensor,
+    group_list: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    output_dtype: torch.dtype,
+    swiglu_limit: float,
+) -> torch.Tensor:
+    from xllm.python import kernels as _kernels
+
+    if quantized_expand_x.dtype != torch.int8 or input_scale.dtype != torch.float32:
+        raise TypeError("W8A8 dispatch must return INT8 activations and FP32 per-token scales")
+    if input_scale.numel() != quantized_expand_x.shape[0]:
+        raise ValueError("W8A8 dispatch scale rows must match expanded activations")
+    if quantized_expand_x.shape[0] == 0:
+        return torch.empty((0, w2.shape[-1]), dtype=output_dtype, device=quantized_expand_x.device)
+    gemm1_out = _group_gemm(
+        x=quantized_expand_x,
+        weight=w13,
+        scale=None,
+        per_token_scale=None,
+        group_list=group_list,
+        split_item=2,
+        group_type=0,
+        group_list_type=1,
+        output_dtype=torch.int32,
+    )
+    act_i8, act_scale = _kernels.dequant_swiglu_quant(
+        x=gemm1_out,
+        weight_scale=w13_scale,
+        activation_scale=input_scale,
+        bias=None,
+        quant_scale=None,
+        quant_offset=None,
+        group_index=group_list,
+        activate_left=True,
+        quant_mode=1,
+        swiglu_mode=1,
+        clamp_limit=swiglu_limit,
+        glu_alpha=1.0,
+        glu_bias=0.0,
+    )
+    return _group_gemm(
+        x=act_i8,
+        weight=w2,
+        scale=w2_scale,
+        per_token_scale=act_scale,
+        group_list=group_list,
+        split_item=2,
+        group_type=0,
+        group_list_type=1,
+        output_dtype=output_dtype,
+    )
+
+
+@torch.library.custom_op("xllm_python::ep_moe_w8a8", mutates_args=())
+def ep_moe_w8a8(
+    hidden: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    group_ep: str,
+    ep_size: int,
+    ep_rank: int,
+    num_experts: int,
+    x_active_mask: torch.Tensor | None = None,
+    swiglu_limit: float = 10.0,
+) -> torch.Tensor:
+    """Run routed W8A8 experts with separate MC2 dispatch and combine.
+
+    Every rank must participate, including ranks whose source mask is all false
+    or whose local experts receive zero tokens. The caller owns token sharding,
+    the final routed scaling, shared experts, and restoration to the TP layout.
+    This path uses uniform padded source rows.
+    """
+    from xllm.python import kernels as _kernels
+
+    _validate_ep_moe_w8a8_inputs(
+        hidden,
+        topk_weights,
+        topk_ids,
+        w13,
+        w2,
+        w13_scale,
+        w2_scale,
+        group_ep,
+        ep_size,
+        ep_rank,
+        num_experts,
+        x_active_mask,
+    )
+    original_shape = hidden.shape
+    topk = topk_ids.shape[-1]
+    hidden_2d = hidden.reshape(-1, hidden.shape[-1]).contiguous()
+    topk_ids_2d = topk_ids.reshape(-1, topk).to(torch.int32).contiguous()
+    topk_weights_2d = topk_weights.reshape(-1, topk).to(torch.float32).contiguous()
+    active_mask = x_active_mask.contiguous() if x_active_mask is not None else None
+
+    if hidden_2d.shape[0] > 512:
+        raise ValueError("A3 MC2 dispatch supports at most 512 source rows per rank")
+    dispatch_output = torch_npu.npu_moe_distribute_dispatch_v2(
+        x=hidden_2d,
+        expert_ids=topk_ids_2d,
+        scales=None,
+        x_active_mask=active_mask,
+        expert_scales=None,
+        group_ep=group_ep,
+        ep_world_size=ep_size,
+        ep_rank_id=ep_rank,
+        moe_expert_num=num_experts,
+        group_tp="",
+        tp_world_size=0,
+        tp_rank_id=0,
+        expert_shard_type=0,
+        shared_expert_num=1,
+        shared_expert_rank_num=0,
+        # Keep the model's input quantizer. MC2's fused quantizer makes
+        # different half-tie choices on real BF16 hidden states; valid
+        # quantization cells alone did not prevent model-quality regression.
+        quant_mode=0,
+        global_bs=0,
+        expert_token_nums_type=1,
+        comm_alg="",
+    )
+    (
+        expand_x,
+        _dynamic_scale,
+        assist_info_for_combine,
+        expert_token_nums,
+        ep_recv_counts,
+        tp_recv_counts,
+        _expand_scales,
+    ) = dispatch_output[:7]
+
+    if expand_x.shape[0]:
+        quantized_x, input_scale = _kernels.dynamic_quant(expand_x)
+        if input_scale is None:
+            raise RuntimeError("dynamic_quant did not return a per-token scale")
+    else:
+        quantized_x = torch.empty_like(expand_x, dtype=torch.int8)
+        input_scale = torch.empty(0, dtype=torch.float32, device=hidden.device)
+    expert_output = _grouped_w8a8_experts(
+        quantized_x,
+        input_scale,
+        expert_token_nums.to(torch.int64).contiguous(),
+        w13,
+        w2,
+        w13_scale,
+        w2_scale.to(hidden.dtype),
+        hidden.dtype,
+        swiglu_limit,
+    )
+    routed_output = torch_npu.npu_moe_distribute_combine_v2(
+        expand_x=expert_output,
+        expert_ids=topk_ids_2d,
+        assist_info_for_combine=assist_info_for_combine,
+        ep_send_counts=ep_recv_counts,
+        expert_scales=topk_weights_2d,
+        tp_send_counts=tp_recv_counts,
+        x_active_mask=active_mask,
+        expand_scales=None,
+        shared_expert_x=None,
+        group_ep=group_ep,
+        ep_world_size=ep_size,
+        ep_rank_id=ep_rank,
+        moe_expert_num=num_experts,
+        group_tp="",
+        tp_world_size=0,
+        tp_rank_id=0,
+        expert_shard_type=0,
+        shared_expert_num=1,
+        shared_expert_rank_num=0,
+        global_bs=0,
+        comm_quant_mode=0,
+        comm_alg="",
+    )
+    return routed_output.reshape(original_shape)
+
+
+@ep_moe_w8a8.register_fake
+def _ep_moe_w8a8_fake(
+    hidden: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    group_ep: str,
+    ep_size: int,
+    ep_rank: int,
+    num_experts: int,
+    x_active_mask: torch.Tensor | None = None,
+    swiglu_limit: float = 10.0,
+) -> torch.Tensor:
+    del (
+        topk_weights,
+        topk_ids,
+        w13,
+        w2,
+        w13_scale,
+        w2_scale,
+        group_ep,
+        ep_size,
+        ep_rank,
+        num_experts,
+        x_active_mask,
+        swiglu_limit,
+    )
+    return torch.empty_like(hidden)
+
+
+def _alltoall_variable_rows(
+    tensor: torch.Tensor,
+    send_splits: list[int],
+    recv_splits: list[int],
+    group: torch.distributed.ProcessGroup,
+) -> torch.Tensor:
+    """Exchange variable rows, including zero-work ranks on HCCL.
+
+    The A3 HCCL device-unfold implementation rejects an empty destination
+    offset map. Give empty edges a single transport-only row, then discard
+    those rows before expert computation. Real expert counts remain unchanged.
+    """
+    transport_send = [max(1, count) for count in send_splits]
+    transport_recv = [max(1, count) for count in recv_splits]
+    if transport_send != send_splits:
+        pieces = []
+        offset = 0
+        for count in send_splits:
+            pieces.append(tensor[offset : offset + count] if count else tensor.new_zeros((1, tensor.shape[1])))
+            offset += count
+        tensor = torch.cat(pieces, dim=0)
+    received = tensor.new_empty((sum(transport_recv), tensor.shape[1]))
+    torch.distributed.all_to_all_single(
+        received,
+        tensor,
+        output_split_sizes=transport_recv,
+        input_split_sizes=transport_send,
+        group=group,
+    )
+    if transport_recv == recv_splits:
+        return received
+    pieces = []
+    offset = 0
+    for count, capacity in zip(recv_splits, transport_recv):
+        pieces.append(received[offset : offset + count])
+        offset += capacity
+    return torch.cat(pieces, dim=0)
+
+
+@torch.library.custom_op("xllm_python::ep_moe_w8a8_alltoall", mutates_args=())
+def ep_moe_w8a8_alltoall(
+    hidden: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    ep_size: int,
+    ep_rank: int,
+    num_experts: int,
+    x_active_mask: torch.Tensor | None = None,
+    swiglu_limit: float = 10.0,
+) -> torch.Tensor:
+    """Quantized variable-size EP exchange; eager only, all ranks participate."""
+    from xllm.python import kernels as _kernels
+    from xllm.python.distributed import get_process_group
+    from xllm.python.model_executor.forward_context import in_acl_graph
+
+    if in_acl_graph():
+        raise ValueError("Variable-size All-to-AllV requires eager execution")
+    _validate_ep_moe_w8a8_inputs(
+        hidden,
+        topk_weights,
+        topk_ids,
+        w13,
+        w2,
+        w13_scale,
+        w2_scale,
+        "moe_ep",
+        ep_size,
+        ep_rank,
+        num_experts,
+        x_active_mask,
+    )
+    group = get_process_group(hidden.device, "moe_ep")
+    if group.size() != ep_size or group.rank() != ep_rank:
+        raise ValueError("All-to-AllV process group does not match the configured EP layout")
+    flat = hidden.reshape(-1, hidden.shape[-1])
+    mask = x_active_mask
+    if mask is None:
+        mask = torch.ones(flat.shape[0], dtype=torch.bool, device=flat.device)
+    active = flat[mask]
+    ids = topk_ids.reshape(flat.shape[0], -1)[mask].to(torch.int32).contiguous()
+    weights = topk_weights.reshape(flat.shape[0], -1)[mask].to(torch.float32).contiguous()
+    local_experts = num_experts // ep_size
+    width = flat.shape[-1]
+
+    if active.shape[0]:
+        # Use the same input quantizer as MC2/selected experts. Routing's
+        # fused quantization is not a numerical substitute at half ties.
+        expanded, row_map, counts, _ = torch_npu.npu_moe_init_routing_v2(
+            active,
+            ids,
+            scale=None,
+            active_num=ids.numel(),
+            expert_num=num_experts,
+            expert_tokens_num_type=1,
+            expert_tokens_num_flag=True,
+            active_expert_range=[0, num_experts],
+            quant_mode=-1,
+        )
+        quantized, scales = _kernels.dynamic_quant(expanded)
+        if scales is None:
+            raise RuntimeError("dynamic_quant did not return a per-token scale")
+        counts = counts[:num_experts].to(torch.int64).contiguous()
+        packed = torch.cat((quantized, scales.contiguous().view(torch.int8).reshape(-1, 4)), dim=1)
+    else:
+        counts = torch.zeros(num_experts, dtype=torch.int64, device=flat.device)
+        row_map = torch.empty(0, dtype=torch.int32, device=flat.device)
+        packed = torch.empty((0, width + 4), dtype=torch.int8, device=flat.device)
+
+    # Exchange only destination expert counts, not the full routing histogram.
+    received_counts = torch.empty_like(counts)
+    torch.distributed.all_to_all_single(received_counts, counts, group=group)
+    # One host transfer is necessary for PyTorch's variable split-size ABI.
+    host_counts = torch.stack((counts, received_counts)).cpu().reshape(2, ep_size, local_experts)
+    send_splits = host_counts[0].sum(1).tolist()
+    recv_splits = host_counts[1].sum(1).tolist()
+    recv_rows = sum(recv_splits)
+    received = _alltoall_variable_rows(packed, send_splits, recv_splits, group)
+
+    # AllToAll emits source-major/expert-minor blocks. Group them by expert for
+    # the same GEMMs used by MC2, then undo this permutation before returning.
+    # Expert IDs are small exact integers in FP32. Integer ArgSort falls back
+    # to AiCPU on this runtime; FP32 keeps this permutation on AiCore.
+    expert_ids = torch.arange(local_experts, dtype=torch.float32, device=flat.device).repeat(ep_size)
+    recv_experts = torch.repeat_interleave(expert_ids, received_counts, output_size=recv_rows)
+    order = torch.argsort(recv_experts, stable=True)
+    received_i8 = received[:, :width].contiguous().index_select(0, order)
+    received_scale = received[:, width:].contiguous().view(torch.float32).reshape(-1).index_select(0, order)
+    group_list = received_counts.reshape(ep_size, local_experts).sum(0)
+    expert_output = _grouped_w8a8_experts(
+        received_i8,
+        received_scale,
+        group_list,
+        w13,
+        w2,
+        w13_scale,
+        w2_scale.to(hidden.dtype),
+        hidden.dtype,
+        swiglu_limit,
+    )
+    unsorted = torch.empty_like(expert_output)
+    unsorted.index_copy_(0, order, expert_output)
+    returned = _alltoall_variable_rows(unsorted, recv_splits, send_splits, group)
+    output = torch.zeros_like(flat)
+    if active.shape[0]:
+        restored = torch_npu.npu_moe_token_unpermute(
+            permuted_tokens=returned,
+            sorted_indices=row_map.abs().to(torch.int32),
+            probs=weights,
+        )
+        output[mask] = restored
+    return output.reshape(hidden.shape)
+
+
+@ep_moe_w8a8_alltoall.register_fake
+def _ep_moe_w8a8_alltoall_fake(
+    hidden: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    ep_size: int,
+    ep_rank: int,
+    num_experts: int,
+    x_active_mask: torch.Tensor | None = None,
+    swiglu_limit: float = 10.0,
+) -> torch.Tensor:
+    return torch.empty_like(hidden)
 
 
 def moe_fused_topk(
@@ -1282,6 +1733,8 @@ def _moe_gmm2_combine_fake(
 
 
 __all__ = [
+    "ep_moe_w8a8",
+    "ep_moe_w8a8_alltoall",
     "dequant_swiglu_quant",
     "moe_gating_top_k_hash",
     "supports_cutlass_moe",

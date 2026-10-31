@@ -30,9 +30,11 @@ from __future__ import annotations
 
 import functools
 import importlib.util
+import math
+import os
 import re
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import accumulate
 from typing import Any, Optional, cast
 
@@ -52,6 +54,18 @@ from xllm.python.attention.mla_index_context import (
     KPoolMlaIndexContextBuilder,
     is_compact_kpool_tail,
 )
+from xllm.python.layers.embedding import HiddenParallelEmbedding
+from xllm.python.layers.kda import KdaForgetGate
+from xllm.python.layers.layernorm import RMSNorm
+from xllm.python.layers.linear import ColumnParallelLinear
+from xllm.python.layers.moe_parallel import (
+    Eplv2CommPolicy,
+    TokenParallelLayout,
+    dp_gather_tokens,
+    reduce_and_scatter,
+    shared_expert_stream,
+)
+from xllm.python.layers.qlinear import QLinear
 from xllm.python.model_executor.cp_utils import (
     cp_merge_rows,
     cp_shard_positions,
@@ -59,13 +73,35 @@ from xllm.python.model_executor.cp_utils import (
     cp_zero_fill_local_rows,
 )
 from xllm.python.model_executor.forward_context import (
+    get_execution_context,
     get_forward_context,
     get_forward_context_or_none,
     in_acl_graph,
     record_layer_event,
 )
+from xllm.python.model_loader import QLinearWeightLoader
+from xllm.python.models.aux_hidden_capture import AuxHiddenCapture
+from xllm.python.models.base import PyModelBase
+from xllm.python.models.glm5_next_kpool import (
+    append_causal_tail,
+    read_pools,
+    update_compressed_kpool,
+)
+from xllm.python.models.glm5_next_kpool import pooled_states as _kpool_pooled_states
+from xllm.python.models.glm5_next_metadata import Glm5NextEplv2Metadata, Glm5NextEplv2MetadataBuilder
 
-_has_mhc_fused = hasattr(kernels, "hc_pre") and kernels.hc_pre is not None
+# xllm Attention base — present in the real engine (full xllm.python package).
+# Under the standalone stub-loader align path the package is not wired, so fall
+# back to a stub nn.Module that accepts (and ignores) the same __init__ kwargs;
+# the layers still work as plain modules there (the executor's
+# isinstance(module, Attention) check is never reached on that path).
+try:
+    from xllm.python.layers.attention import Attention
+except ImportError:  # pragma: no cover - stub-loader path
+
+    class Attention(nn.Module):  # type: ignore[no-redef]
+        def __init__(self, *args, **kwargs) -> None:  # noqa: D401
+            super().__init__()
 
 
 @functools.cache
@@ -98,35 +134,6 @@ def _compact_kpool_triton_query_len(
 # (= kv_len / index_kpool): 8 GiB at 32K context, 16 GiB at 64K — beyond the
 # activation headroom and a hard device OOM mid prefill.
 _SCORES_SLAB_CAP_BYTES = int(1.5 * 1024**3)
-from xllm.python.layers.embedding import HiddenParallelEmbedding
-from xllm.python.layers.kda import KdaForgetGate
-from xllm.python.layers.layernorm import RMSNorm
-from xllm.python.layers.linear import ColumnParallelLinear
-from xllm.python.layers.moe_dp import dp_gather_tokens, reduce_and_scatter
-from xllm.python.layers.qlinear import QLinear
-from xllm.python.models.aux_hidden_capture import AuxHiddenCapture
-from xllm.python.models.base import PyModelBase
-from xllm.python.models.glm5_next_kpool import (
-    append_causal_tail,
-    read_pools,
-    update_compressed_kpool,
-)
-from xllm.python.models.glm5_next_kpool import pooled_states as _kpool_pooled_states
-
-# xllm Attention base — present in the real engine (full xllm.python package).
-# Under the standalone stub-loader align path the package is not wired, so fall
-# back to a stub nn.Module that accepts (and ignores) the same __init__ kwargs;
-# the layers still work as plain modules there (the executor's
-# isinstance(module, Attention) check is never reached on that path).
-try:
-    from xllm.python.layers.attention import Attention
-except ImportError:  # pragma: no cover - stub-loader path
-
-    class Attention(nn.Module):  # type: ignore[no-redef]
-        def __init__(self, *args, **kwargs) -> None:  # noqa: D401
-            super().__init__()
-
-
 # Paged pool cache: write-time incremental compression + direct pool read
 # (see glm5_next_kpool.py).
 
@@ -235,12 +242,20 @@ class Glm5NextConfig:
     dp_rank: int = 0
     moe_tp_size: Optional[int] = None
     moe_tp_rank: Optional[int] = None
+    cp_size: int = 1
+    cp_rank: int = 0
+    num_speculative_tokens: int = 0
+    enable_eplb: bool = False
     expert_parallel_degree: int = 0
     enable_mega_moe: bool = False
     enable_fused_mc2: bool = False
     # 0-based post-layer indices threaded from the draft's target_layer_ids
     # (via ModelArgs). Empty => capture disabled (non-speculative serving).
     layers_to_capture: tuple[int, ...] = ()
+    eplv2_sequence_parallel: bool = True
+    eplv2_shared_overlap: bool = True
+    eplv2_comm_mode: str = "auto"
+    eplv2_mc2_max_tokens_per_rank: int = 512
 
     def __post_init__(self) -> None:
         # Native EP callers supply the MoE group axes.
@@ -270,6 +285,7 @@ class Glm5NextConfig:
         n_layers = int(pick("n_layers", "num_hidden_layers", default=45))
         first_k_dense = int(pick("first_k_dense_replace", default=3))
         requires_kpool_tail_cache = pick("requires_kpool_tail_cache", default=None)
+        degree = int(pick("expert_parallel_degree", default=0))
 
         # KDA linear_attn_config (transformers stores it as a dict)
         lac = pick("linear_attn_config", default=None) or {}
@@ -335,7 +351,22 @@ class Glm5NextConfig:
             dp_rank=int(pick("dp_rank", default=0)),
             moe_tp_size=pick("moe_tp_size"),
             moe_tp_rank=pick("moe_tp_rank"),
-            expert_parallel_degree=int(pick("expert_parallel_degree", default=0)),
+            cp_size=int(pick("cp_size", default=1)),
+            cp_rank=int(pick("cp_rank", default=0)),
+            eplv2_sequence_parallel=bool(pick("eplv2_sequence_parallel", default=True)),
+            eplv2_shared_overlap=bool(pick("eplv2_shared_overlap", default=True)),
+            eplv2_comm_mode=str(
+                pick("eplv2_comm_mode", default=os.getenv("XLLM_EPLV2_COMM_MODE", "auto") if degree == 2 else "auto")
+            ),
+            eplv2_mc2_max_tokens_per_rank=int(
+                pick(
+                    "eplv2_mc2_max_tokens_per_rank",
+                    default=os.getenv("XLLM_EPLV2_MC2_MAX_TOKENS", "512") if degree == 2 else "512",
+                )
+            ),
+            num_speculative_tokens=int(pick("num_speculative_tokens", default=0)),
+            enable_eplb=bool(pick("enable_eplb", default=False)),
+            expert_parallel_degree=degree,
             enable_mega_moe=bool(pick("enable_mega_moe", default=False)),
             enable_fused_mc2=bool(pick("enable_fused_mc2", default=False)),
             layers_to_capture=tuple(int(layer_id) for layer_id in pick("layers_to_capture", default=[])),
@@ -350,13 +381,13 @@ class Glm5NextConfig:
         return cfg
 
     def _validate_moe_parallelism(self) -> None:
-        if self.expert_parallel_degree not in (0, 1):
-            raise ValueError("GLM-5.3-Flash supports ordinary EP level 1 only; expert_parallel_degree must be 0 or 1")
+        if self.expert_parallel_degree not in (0, 1, 2):
+            raise ValueError("expert_parallel_degree must be 0, 1 or 2")
         if self.enable_mega_moe:
             raise ValueError("GLM-5.3-Flash ordinary EP does not support enable_mega_moe")
         if self.enable_fused_mc2:
             raise ValueError("GLM-5.3-Flash ordinary EP does not support enable_fused_mc2")
-        for name in ("tp", "ep", "dp", "moe_tp"):
+        for name in ("tp", "ep", "dp", "cp", "moe_tp"):
             size = getattr(self, f"{name}_size")
             rank = getattr(self, f"{name}_rank")
             if size <= 0 or not 0 <= rank < size:
@@ -365,11 +396,28 @@ class Glm5NextConfig:
             raise ValueError("n_routed_experts must be divisible by ep_size")
         if self.moe_intermediate_size % self.moe_tp_size:
             raise ValueError("moe_intermediate_size must be divisible by moe_tp_size")
-        if self.ep_size == 1 and self.dp_size == 1:
+        if self.ep_size == 1 and self.dp_size == 1 and self.cp_size == 1:
             if (self.moe_tp_size, self.moe_tp_rank) != (self.tp_size, self.tp_rank):
                 raise ValueError("TP-only MoE must use the attention TP size and rank")
-        elif self.ep_size * self.moe_tp_size != self.dp_size * self.tp_size:
-            raise ValueError("EP size times MoE-TP size must equal DP size times attention TP size")
+        elif self.ep_size * self.moe_tp_size != self.dp_size * self.cp_size * self.tp_size:
+            raise ValueError("EP size times MoE-TP size must equal DP size times CP size times attention TP size")
+        if self.expert_parallel_degree == 2:
+            self._validate_eplv2_parallelism()
+
+    def _validate_eplv2_parallelism(self) -> None:
+        if self.ep_size <= 1:
+            raise ValueError("GLM EPLv2 requires EP > 1")
+        if self.enable_eplb:
+            raise ValueError("GLM EPLv2 does not support EPLB")
+        if not math.isfinite(self.swiglu_limit) or self.swiglu_limit <= 0:
+            raise ValueError("GLM EPLv2 requires a finite positive SwiGLU clamp limit")
+        if self.moe_tp_size != 1 or self.moe_tp_rank != 0:
+            raise ValueError("GLM EPLv2 requires unsharded local experts (MoE-TP1)")
+        if (self.ep_size, self.ep_rank) != (
+            self.dp_size * self.cp_size * self.tp_size,
+            (self.dp_rank * self.cp_size + self.cp_rank) * self.tp_size + self.tp_rank,
+        ):
+            raise ValueError("GLM EPLv2 requires EP over all DP/CP/attention-TP ranks with MoE-TP1")
 
     def _resolve_schedules(self, full_attn_layers: list, d: dict) -> None:
         n = self.n_layers
@@ -537,6 +585,8 @@ class Glm5NextKdaAttention(Attention):
         position_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         prev_topk_indices: Optional[torch.Tensor] = None,
+        *,
+        output_layout: TokenParallelLayout | None = None,
     ) -> torch.Tensor:
         batch_size, seq_len = hidden_states.shape[:2]
         projected = self.in_proj_qkvbfg_a(hidden_states)
@@ -555,7 +605,7 @@ class Glm5NextKdaAttention(Attention):
             raise RuntimeError(
                 "Glm5NextKdaAttention requires an attention backend with execute_linear; run inside the engine."
             )
-        cp_context = ctx.cp_context if ctx is not None else None
+        cp_context = getattr(ctx, "cp_context", None)
         if cp_context is not None:
             mixed_qkv = cp_merge_rows(mixed_qkv.transpose(1, 2).reshape(-1, self.conv_dim), cp_context)
             mixed_qkv = mixed_qkv.unsqueeze(0).transpose(1, 2).contiguous()
@@ -586,6 +636,10 @@ class Glm5NextKdaAttention(Attention):
         # all-reduce across ranks to assemble the full hidden (mirrors DSA
         # o_proj). At tp==1 this is a no-op.
         o = self.o_proj(output)
+        if output_layout is not None:
+            if cp_context is not None:
+                o = cp_zero_fill_local_rows(o, cp_context, leading_seq_dim=True)
+            return output_layout.reduce_scatter(o.reshape(-1, self.cfg.hidden_size)).unsqueeze(0)
         if self.tp > 1:
             distributed.all_reduce_(o)
         if cp_context is not None:
@@ -1500,6 +1554,8 @@ class Glm5NextMlaAttention(Attention):
         position_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         prev_topk_indices: Optional[torch.Tensor] = None,
+        *,
+        output_layout: TokenParallelLayout | None = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Absorbed MLA forward (mirrors DeepseekV3MlaAttention.forward).
 
@@ -1575,11 +1631,18 @@ class Glm5NextMlaAttention(Attention):
         v_full = torch.bmm(attn_out.transpose(0, 1), self.W_UV).transpose(0, 1)
         v_full = v_full.reshape(attn_out.shape[0], self.num_heads_local * self.v_head_dim)
         o = self.o_proj(v_full)
+        if cp_context is not None:
+            topk = cp_shard_rows(topk.reshape(num_tokens, -1), cp_context).view(cp_context.total_local, 1, -1)
+        if output_layout is not None:
+            # Zero before reduce-scatter; the all-reduce path must zero after
+            # it because the reduction writes padding rows.
+            if cp_context is not None:
+                o = cp_zero_fill_local_rows(o, cp_context, leading_seq_dim=False)
+            return output_layout.reduce_scatter(o), topk
         if self.cfg.tp_size > 1:
             distributed.all_reduce_(o)
         if cp_context is not None:
             o = cp_zero_fill_local_rows(o, cp_context, leading_seq_dim=False)
-            topk = cp_shard_rows(topk.reshape(num_tokens, -1), cp_context).view(cp_context.total_local, 1, -1)
         return o, topk
 
 
@@ -1594,6 +1657,7 @@ class Glm5NextMLP(nn.Module):
         dtype: torch.dtype,
         device: torch.device,
         skip_tp_reduce: bool = False,
+        tp_override: int | None = None,
     ) -> None:
         super().__init__()
         self.cfg = cfg
@@ -1603,7 +1667,10 @@ class Glm5NextMLP(nn.Module):
         # + row-parallel down_proj (sharded on the input dim, summed via
         # all_reduce_ in forward). At tp==1 inter_local == intermediate_size so
         # the fp graph is byte-identical to the previous nn.Linear trio.
-        tp = cfg.tp_size
+        tp = cfg.tp_size if tp_override is None else tp_override
+        if tp <= 0 or intermediate_size % tp:
+            raise ValueError("MLP intermediate size must divide its tensor-parallel group")
+        self.tp_size = tp
         inter_local = intermediate_size // tp
         self.gate_up_proj = QLinear(
             cfg.hidden_size,
@@ -1632,7 +1699,7 @@ class Glm5NextMLP(nn.Module):
         gate = gate.clamp(min=None, max=self.swiglu_limit)
         up = up.clamp(min=-self.swiglu_limit, max=self.swiglu_limit)
         out = self.down_proj(F.silu(gate) * up)
-        if self.cfg.tp_size > 1 and not self.skip_tp_reduce:
+        if self.tp_size > 1 and not self.skip_tp_reduce:
             distributed.all_reduce_(out)
         return out
 
@@ -1769,15 +1836,85 @@ class Glm5NextExperts(nn.Module):
         return current.sum(1).to(hidden_states.dtype)
 
 
+def _eplv2_token_layout(
+    cfg: Glm5NextConfig,
+    hidden: torch.Tensor,
+    policy: Eplv2CommPolicy,
+) -> tuple[TokenParallelLayout, torch.Tensor]:
+    """Plan EP-wide communication from host counts, retaining TP-local rows."""
+    context = get_forward_context_or_none()
+    metadata = context.metadata if context is not None else None
+    counts = getattr(metadata, "dp_execution_token_counts", None)
+    rows = hidden.numel() // hidden.shape[-1]
+    cp_context = getattr(context, "cp_context", None)
+    is_pcp_prefill = metadata is not None and (
+        getattr(metadata, "is_prefill", False) or getattr(metadata, "is_chunked_prefill", False)
+    )
+    is_dummy_pcp_rank = (
+        cp_context is None
+        and is_pcp_prefill
+        and cfg.cp_size > 1
+        and cfg.dp_size > 1
+        and bool(getattr(metadata, "is_dummy", False))
+    )
+    # InputBatch counts describe global (pre-PCP) rows while zigzag padding can
+    # make one local shard twice that size, so every DP rank must dispatch with
+    # one EP capacity.
+    dispatch_rows = None
+    if cfg.dp_size > 1 and (cp_context is not None or is_dummy_pcp_rank):
+        if counts is None or len(counts) != cfg.dp_size or any(count <= 0 for count in counts):
+            raise ValueError("DP/PCP EPLv2 requires positive global execution counts")
+        dispatch_rows = (2 * max(counts) + cfg.tp_size - 1) // cfg.tp_size
+    if cp_context is not None or is_dummy_pcp_rank:
+        if cp_context is not None and (
+            getattr(cp_context, "cp_size", None),
+            getattr(cp_context, "cp_rank", None),
+        ) != (cfg.cp_size, cfg.cp_rank):
+            raise ValueError("GLM EPLv2 PCP requires a matching prefill shard on every PCP rank")
+        layout = TokenParallelLayout(rows, cfg.tp_size, cfg.tp_rank, dispatch_rows=dispatch_rows)
+        mask = (
+            cp_context.shard_valid_mask
+            if cp_context is not None
+            else torch.zeros(rows, dtype=torch.bool, device=hidden.device)
+        )
+    else:
+        if is_pcp_prefill and cfg.cp_size > 1:
+            # A real prefill without a PCP shard would dispatch global rows that
+            # no other PCP rank agrees on.
+            raise ValueError("GLM EPLv2 PCP prefill requires a matching PCP shard")
+        layout = TokenParallelLayout.from_dp(rows, cfg.tp_size, cfg.tp_rank, cfg.dp_size, cfg.dp_rank, counts)
+        execution_metadata = get_execution_context(Glm5NextEplv2Metadata) if context is not None else None
+        if not isinstance(execution_metadata, Glm5NextEplv2Metadata):
+            raise ValueError("GLM EPLv2 requires typed execution metadata with a stable active-token mask")
+        mask = execution_metadata.local_token_mask
+    graph = in_acl_graph() or getattr(context, "execution_state", None) is not None
+    backend = policy.select(layout.dispatch_tokens, graph=graph)
+    if mask.shape != (rows,) or mask.dtype != torch.bool or mask.device != hidden.device:
+        raise ValueError("GLM EPLv2 active-token mask must be a bool tensor over local execution rows")
+    return replace(layout, routed_backend=backend), layout.shard(mask)
+
+
 class Glm5NextMoE(nn.Module):
-    def __init__(self, cfg: Glm5NextConfig, dtype: torch.dtype, device: torch.device) -> None:
+    def __init__(
+        self,
+        cfg: Glm5NextConfig,
+        dtype: torch.dtype,
+        device: torch.device,
+        *,
+        comm_policy: Eplv2CommPolicy | None = None,
+    ) -> None:
         super().__init__()
         self.cfg = cfg
+        if cfg.expert_parallel_degree == 2 and comm_policy is None:
+            raise ValueError("GLM EPLv2 requires the model-owned communication policy")
+        self._comm_policy = comm_policy
         tp = cfg.moe_tp_size
         self.num_experts = cfg.n_routed_experts
         self.num_local_experts, self.local_expert_start, self.local_expert_end = _local_expert_range(
             cfg, self.num_experts
         )
+        self._ep_dispatch_group_info: tuple[str, int, int] | None = None
+        self._shared_stream: torch.npu.Stream | None = None
         self.topk = cfg.num_experts_per_tok
         self.n_group = cfg.n_group
         self.topk_group = cfg.topk_group
@@ -1813,6 +1950,7 @@ class Glm5NextMoE(nn.Module):
             dtype,
             device,
             skip_tp_reduce=True,
+            tp_override=cfg.moe_tp_size if cfg.expert_parallel_degree == 2 else None,
         )
 
     def process_weights_after_loading(self) -> None:
@@ -1844,6 +1982,13 @@ class Glm5NextMoE(nn.Module):
         self.experts_w2_scale.data = self.experts_w2_scale.data.view(self.num_local_experts, -1).contiguous()
         self.experts_w2_offset.data = self.experts_w2_offset.data.view(self.num_local_experts, -1).contiguous()
         self.shared_experts.process_weights_after_loading()
+        if self.cfg.expert_parallel_degree == 2:
+            # Resolve the communication name before graph capture, not on replay.
+            self._ep_dispatch_group_info = distributed.moe_ep_hccl_info(self.gate.weight.device)
+            if self._ep_dispatch_group_info[1:] != (self.cfg.ep_rank, self.cfg.ep_size):
+                raise ValueError("GLM EPLv2 process group does not match the configured expert rank group")
+            if self.cfg.eplv2_shared_overlap and self.gate.weight.device.type in ("npu", "privateuseone"):
+                self._shared_stream = shared_expert_stream(self.gate.weight.device)
 
     def _topk(self, hidden_states: torch.Tensor):
         cfg = self.cfg
@@ -1870,7 +2015,22 @@ class Glm5NextMoE(nn.Module):
         topk_weights = topk_weights * cfg.routed_scaling_factor
         return router_logits, topk_weights, topk_indices
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        token_layout: TokenParallelLayout | None = None,
+        token_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if token_layout is not None:
+            return self._forward_sp(hidden_states, token_layout, token_mask)
+        if token_mask is not None:
+            raise ValueError("A local source mask requires an explicit SP token layout")
+        if self.cfg.expert_parallel_degree == 2:
+            flat = hidden_states.reshape(-1, self.hidden)
+            layout, mask = _eplv2_token_layout(self.cfg, flat, self._comm_policy)
+            local = self._forward_sp(layout.shard(flat), layout, mask)
+            return layout.gather(local).reshape(hidden_states.shape)
         if self.use_w8a8:
             return self._forward_w8a8(hidden_states)
         if self.cfg.ep_size > 1 or self.cfg.dp_size > 1:
@@ -1889,9 +2049,15 @@ class Glm5NextMoE(nn.Module):
         return final
 
     def _forward_w8a8(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Use clamped local experts and joint reduction for every TP/EP/DP layout."""
+        """Use clamped local experts and joint reduction for TP/EP/DP/CP layouts."""
         orig_shape = hidden_states.shape
-        flat = hidden_states.view(-1, self.hidden)
+        cp_context = getattr(get_forward_context_or_none(), "cp_context", None) if self.cfg.cp_size > 1 else None
+        # Routed experts span the full MoE group, including CP ranks. Restore
+        # identical full-request rows before routing, not per-shard padded rows.
+        moe_hidden = (
+            cp_merge_rows(hidden_states.view(-1, self.hidden), cp_context) if cp_context is not None else hidden_states
+        )
+        flat = moe_hidden.view(-1, self.hidden)
         flat, scatter_state = dp_gather_tokens(flat, self.cfg.dp_size, self.cfg.dp_rank)
         logits = self.gate(flat.float())
         topk_weights, topk_ids = kernels.moe_gate_routing(
@@ -1925,8 +2091,12 @@ class Glm5NextMoE(nn.Module):
         # fixed padded DP execution counts through the same scatter state.
         # Accumulate and reduce in FP32: adding BF16 routed/shared partials
         # first otherwise amplifies rounding when those terms cancel.
-        shared = self.shared_experts(hidden_states).view(-1, self.hidden).float()
-        scatter_state.scatter(out).add_(shared)
+        # Shared weights are replicated across CP and sharded only across
+        # attention TP. Contribute one CP replica, including during decode
+        # when cp_context is absent but the MoE group still spans CP ranks.
+        if self.cfg.cp_rank == 0:
+            shared = self.shared_experts(moe_hidden).view(-1, self.hidden).float()
+            scatter_state.scatter(out).add_(shared)
         out = reduce_and_scatter(
             out,
             scatter_state,
@@ -1934,7 +2104,117 @@ class Glm5NextMoE(nn.Module):
             moe_tp_size=self.cfg.moe_tp_size,
             ep_size=self.cfg.ep_size,
         )
+        if cp_context is not None:
+            out = cp_shard_rows(out, cp_context)
         return out.to(hidden_states.dtype).view(*orig_shape)
+
+    def _run_routed_sp(
+        self,
+        hidden: torch.Tensor,
+        layout: TokenParallelLayout,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        backend = layout.routed_backend
+        if backend not in ("mc2", "alltoall"):
+            raise ValueError(f"Unknown EPLv2 routed backend: {backend}")
+        if layout.valid_tokens:
+            # Match the FP32 router in _forward_w8a8 without changing expert
+            # inputs. Apply routed_scaling once after expert computation.
+            weights, indices = kernels.moe_gate_routing(
+                self.gate(hidden.float()),
+                self.e_score_correction_bias,
+                self.topk,
+                self.topk_group,
+                self.n_group,
+                self.cfg.norm_topk_prob,
+                routed_scaling_factor=1.0,
+            )
+        else:
+            weights = hidden.new_zeros((layout.shard_tokens, self.topk), dtype=torch.float32)
+            indices = hidden.new_zeros((layout.shard_tokens, self.topk), dtype=torch.int32)
+        if backend == "alltoall":
+            return kernels.ep_moe_w8a8_alltoall(
+                hidden,
+                weights,
+                indices,
+                self.experts_w13,
+                self.experts_w2,
+                self.experts_w13_scale,
+                self.experts_w2_scale,
+                ep_size=self.cfg.ep_size,
+                ep_rank=self.cfg.ep_rank,
+                num_experts=self.num_experts,
+                x_active_mask=mask,
+                swiglu_limit=self.cfg.swiglu_limit,
+            )
+        group_info = self._ep_dispatch_group_info
+        if group_info is None:
+            raise RuntimeError("GLM EPLv2 communication group must be initialized before execution")
+        output = kernels.ep_moe_w8a8(
+            layout.pad_dispatch(hidden),
+            layout.pad_dispatch(weights),
+            layout.pad_dispatch(indices),
+            self.experts_w13,
+            self.experts_w2,
+            self.experts_w13_scale,
+            self.experts_w2_scale,
+            group_ep=group_info[0],
+            ep_size=self.cfg.ep_size,
+            ep_rank=self.cfg.ep_rank,
+            num_experts=self.num_experts,
+            x_active_mask=layout.pad_dispatch(mask),
+            swiglu_limit=self.cfg.swiglu_limit,
+        )
+        return output[: layout.shard_tokens]
+
+    def _forward_sp(
+        self,
+        hidden_states: torch.Tensor,
+        layout: TokenParallelLayout,
+        token_mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if not self.use_w8a8 or self.cfg.expert_parallel_degree != 2 or self.cfg.moe_tp_size != 1:
+            raise ValueError("GLM EPLv2 SP requires W8A8 EP experts with MoE-TP1")
+        flat = hidden_states.reshape(-1, self.hidden)
+        if (layout.tp_size, layout.tp_rank) != (self.cfg.tp_size, self.cfg.tp_rank):
+            raise ValueError("GLM EPLv2 SP ownership must match the attention TP ranks")
+        if self.cfg.dp_size > 1 and layout.dispatch_rows is None:
+            raise ValueError("DP EPLv2 SP requires an EP-wide dispatch capacity")
+        if flat.shape[0] != layout.shard_tokens:
+            raise ValueError("GLM EPLv2 SP input must contain this rank's local token rows")
+        if (
+            token_mask is None
+            or token_mask.shape != (layout.shard_tokens,)
+            or token_mask.dtype != torch.bool
+            or token_mask.device != flat.device
+        ):
+            raise ValueError("GLM EPLv2 SP requires a bool source mask matching the local rows")
+        if layout.routed_backend is None:
+            # Direct layer calls need the same admission as model execution,
+            # before launching shared work on either stream.
+            graph = in_acl_graph() or getattr(get_forward_context_or_none(), "execution_state", None) is not None
+            layout = replace(layout, routed_backend=self._comm_policy.select(layout.dispatch_tokens, graph=graph))
+        if not layout.valid_tokens:
+            shared = torch.zeros_like(flat)
+            routed = self._run_routed_sp(flat, layout, token_mask)
+        elif self._shared_stream is None or not self.cfg.eplv2_shared_overlap:
+            shared = self.shared_experts(flat)
+            routed = self._run_routed_sp(flat, layout, token_mask)
+        else:
+            current = torch.npu.current_stream(flat.device)
+            auxiliary = self._shared_stream
+            auxiliary.wait_stream(current)
+            flat.record_stream(auxiliary)
+            with torch.npu.stream(auxiliary):
+                shared = self.shared_experts(flat)
+            routed = self._run_routed_sp(flat, layout, token_mask)
+            current.wait_stream(auxiliary)
+            shared.record_stream(current)
+        # Scale before the final cast: BF16/FP16 scaling would otherwise round
+        # away small residuals when routed and shared contributions cancel.
+        output = torch.add(shared.float(), routed.float(), alpha=self.routed_scaling).to(flat.dtype)
+        output.masked_fill_(~token_mask[:, None], 0)
+        return output.reshape(hidden_states.shape)
 
 
 # ---------------------------------------------------------------------------
@@ -1962,59 +2242,44 @@ class Glm5NextHyperConnection(nn.Module):
         self.base = nn.Parameter(torch.empty(mix, dtype=torch.float32, device=device))
         # 3 outputs: pre (collapse), post (placement), comb (mixer) scales.
         self.scale = nn.Parameter(torch.empty(3, dtype=torch.float32, device=device))
+        self.register_buffer("_fn_compute", None, persistent=False)
+        self.register_buffer("_scale_compute", None, persistent=False)
+        self.register_buffer("_base_compute", None, persistent=False)
+        self.register_load_state_dict_post_hook(lambda module, _: module.process_weights_after_loading())
+
+    @torch.inference_mode()
+    def process_weights_after_loading(self) -> None:
+        """Prepare FP32 inputs from loaded parameters without changing their rounding."""
+        for name in ("fn", "scale", "base"):
+            value = getattr(self, name).detach().to(torch.float32).contiguous()
+            buffer_name = f"_{name}_compute"
+            cached = getattr(self, buffer_name)
+            if cached is not None and cached.device == value.device and cached.dtype == value.dtype:
+                cached.copy_(value)
+            else:
+                setattr(self, buffer_name, value)
+
+    def _apply(self, fn: Callable[[torch.Tensor], torch.Tensor], recurse: bool = True) -> Glm5NextHyperConnection:
+        prepared = self._fn_compute is not None
+        super()._apply(fn, recurse)
+        if prepared:
+            self.process_weights_after_loading()
+        return self
 
     def forward(self, hidden_streams: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        hc = self.hc_mult
-
-        if _has_mhc_fused:
-            # --- Fused NPU kernel path (matches DeepSeek V4 C++ decoder layer) ---
-            # hc_pre does rsqrt + linear + sinkhorn + weighted-sum-reduce in one
-            # fused call.  x: [B, S, hc_mult, D] -> (output [B,S,D], post [B,S,hc_mult],
-            # comb [B,S,hc_mult,hc_mult]).
-            # .float() guards against weight-loading casting params back to bf16;
-            # __init__ creates them in float32 (aligned with vLLM).
-            collapsed, post, comb = kernels.hc_pre(
-                hidden_streams,
-                self.fn,
-                self.scale.float(),
-                self.base.float(),
-                hc,
-                self.hc_sinkhorn_iters,
-                self.input_norm.variance_epsilon,
-                self.hc_eps,
-            )
-            return post, comb, collapsed
-        else:
-            # --- Fallback: pure-Python reference implementation ---
-            flat = self.input_norm(hidden_streams.flatten(start_dim=2).float())
-            pre_w, post_w, comb_w = F.linear(flat, self.fn.float()).split([hc, hc, hc * hc], dim=-1)
-            pre_b, post_b, comb_b = self.base.split([hc, hc, hc * hc])
-            pre_scale, post_scale, comb_scale = self.scale.unbind(0)
-
-            pre = torch.sigmoid(pre_w * pre_scale + pre_b) + self.hc_eps
-            post = 2 * torch.sigmoid(post_w * post_scale + post_b)
-            comb_logits = comb_w.view(*comb_w.shape[:-1], hc, hc) * comb_scale + comb_b.view(hc, hc)
-            comb = torch.softmax(comb_logits, dim=-1) + self.hc_eps
-            comb = comb / (comb.sum(dim=-2, keepdim=True) + self.hc_eps)
-            for _ in range(self.hc_sinkhorn_iters - 1):
-                comb = comb / (comb.sum(dim=-1, keepdim=True) + self.hc_eps)
-                comb = comb / (comb.sum(dim=-2, keepdim=True) + self.hc_eps)
-            collapsed = (pre.unsqueeze(-1) * hidden_streams).sum(dim=2).to(hidden_streams.dtype)
-            return post, comb, collapsed
-
-    def post(
-        self,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor,
-        post: torch.Tensor,
-        comb: torch.Tensor,
-    ) -> torch.Tensor:
-        if _has_mhc_fused:
-            return kernels.hc_post(hidden_states, residual, post, comb)
-        dtype = hidden_states.dtype
-        return post.to(dtype).unsqueeze(-1) * hidden_states.unsqueeze(-2) + torch.matmul(
-            comb.to(dtype).transpose(-1, -2), residual
+        if self._fn_compute is None:
+            raise RuntimeError("Full HcPre requires prepared kernel parameters")
+        collapsed, post, comb = kernels.hc_pre(
+            hidden_streams,
+            self._fn_compute,
+            self._scale_compute,
+            self._base_compute,
+            self.hc_mult,
+            self.hc_sinkhorn_iters,
+            self.input_norm.variance_epsilon,
+            self.hc_eps,
         )
+        return post, comb, collapsed
 
 
 class Glm5NextHyperHead(nn.Module):
@@ -2028,8 +2293,17 @@ class Glm5NextHyperHead(nn.Module):
 # Decoder layer + model
 # ---------------------------------------------------------------------------
 class Glm5NextDecoderLayer(nn.Module):
-    def __init__(self, cfg: Glm5NextConfig, layer_id: int, dtype: torch.dtype, device: torch.device) -> None:
+    def __init__(
+        self,
+        cfg: Glm5NextConfig,
+        layer_id: int,
+        dtype: torch.dtype,
+        device: torch.device,
+        *,
+        comm_policy: Eplv2CommPolicy | None = None,
+    ) -> None:
         super().__init__()
+        self.cfg = cfg
         self.layer_id: int = layer_id
         self.input_layernorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
         if cfg.is_dsa(layer_id):
@@ -2038,7 +2312,7 @@ class Glm5NextDecoderLayer(nn.Module):
             self.self_attn = Glm5NextKdaAttention(cfg, layer_id, dtype, device)
         self.post_attention_layernorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
         if cfg.is_moe(layer_id):
-            self.mlp = Glm5NextMoE(cfg, dtype, device)
+            self.mlp = Glm5NextMoE(cfg, dtype, device, comm_policy=comm_policy)
         else:
             self.mlp = Glm5NextMLP(cfg, cfg.intermediate_size, dtype, device)
         # mHC residual sites (always on, per reference — `mhc` config is not consulted).
@@ -2050,8 +2324,111 @@ class Glm5NextDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         position_ids: torch.Tensor,
         attention_mask: torch.Tensor,
-        prev_topk_indices: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        prev_topk_indices: torch.Tensor | None = None,
+        *,
+        input_layout: TokenParallelLayout | None = None,
+        output_layout: TokenParallelLayout | None = None,
+        token_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        # hidden_states: [B, S, hc_mult, D] (4 residual streams).
+        if output_layout is not None:
+            return self._forward_sp(
+                hidden_states,
+                position_ids,
+                attention_mask,
+                prev_topk_indices,
+                input_layout,
+                output_layout,
+                token_mask,
+            )
+        if token_mask is not None:
+            raise ValueError("A local token mask requires an SP decoder output")
+        if input_layout is not None:
+            # A dense FFN still uses attention-TP weights. Restore at this
+            # explicit boundary rather than silently summing distinct tokens.
+            shape = hidden_states.shape
+            hidden_states = input_layout.gather(hidden_states.reshape(-1, *shape[2:])).unsqueeze(0)
+        return self._forward_fused(hidden_states, position_ids, attention_mask, prev_topk_indices)
+
+    def _forward_sp(
+        self,
+        hidden_states: torch.Tensor,
+        position_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        prev_topk_indices: torch.Tensor | None,
+        input_layout: TokenParallelLayout | None,
+        output_layout: TokenParallelLayout,
+        token_mask: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if not isinstance(self.mlp, Glm5NextMoE) or self.cfg.expert_parallel_degree != 2:
+            raise ValueError("SP decoder output requires an EPLv2 MoE layer")
+        if (output_layout.tp_size, output_layout.tp_rank) != (self.cfg.tp_size, self.cfg.tp_rank):
+            raise ValueError("SP decoder ownership must match the attention TP group")
+        if input_layout is not None and input_layout != output_layout:
+            raise ValueError("Consecutive SP layers must preserve token ownership")
+        if (
+            hidden_states.ndim != 4
+            or hidden_states.shape[0] != 1
+            or hidden_states.shape[2:] != (self.cfg.hc_mult, self.cfg.hidden_size)
+        ):
+            raise ValueError("GLM EPLv2 SP expects the engine's flattened [1, tokens, streams, hidden] input")
+        if input_layout is None:
+            # These residuals are replicas, not TP partials: slice, never SUM.
+            hidden_states = output_layout.shard(hidden_states.reshape(-1, *hidden_states.shape[2:])).unsqueeze(0)
+        elif hidden_states.shape[1] != output_layout.shard_tokens:
+            raise ValueError("SP residual streams must match local token rows")
+
+        if not output_layout.valid_tokens:
+            # A rank without structural rows (for example C1/TP8) owns only
+            # padding. Skip row-local work, but still contribute attention
+            # heads and participate in routed EP for remotely owned tokens.
+            local = hidden_states.new_zeros((output_layout.shard_tokens, self.cfg.hidden_size))
+            attention_input = output_layout.gather(local).unsqueeze(0)
+            attention_output = self.self_attn(
+                attention_input, position_ids, attention_mask, prev_topk_indices, output_layout=output_layout
+            )
+            if isinstance(attention_output, tuple):
+                local, topk = attention_output
+            else:
+                local, topk = attention_output, None
+            # RS padding is zero; retain the Attention/RS dependency instead
+            # of replacing its result with an unrelated zero allocation.
+            local = local.reshape(output_layout.shard_tokens, self.cfg.hidden_size)
+            local = self.mlp(local, token_layout=output_layout, token_mask=token_mask)
+            # Preserve a data dependency on EP completion even for padding.
+            return local.view(1, output_layout.shard_tokens, 1, -1).expand_as(hidden_states).contiguous(), topk
+
+        residual = hidden_states
+        post, comb, hidden = self.attn_hc(hidden_states)
+        hidden = self.input_layernorm(hidden)
+        # Only the collapsed, normalized H vector is gathered, not the four
+        # residual streams or their row-local mHC mixing matrices.
+        attention_input = output_layout.gather(hidden.reshape(-1, hidden.shape[-1])).unsqueeze(0)
+        attention_output = self.self_attn(
+            attention_input, position_ids, attention_mask, prev_topk_indices, output_layout=output_layout
+        )
+        if isinstance(attention_output, tuple):
+            hidden, topk = attention_output
+        else:
+            hidden, topk = attention_output, None
+        if hidden.numel() != output_layout.shard_tokens * self.cfg.hidden_size:
+            raise ValueError("Attention must return reduced local SP rows")
+        hidden = hidden.reshape(1, output_layout.shard_tokens, -1)
+        hidden_states = kernels.hc_post(hidden, residual, post, comb)
+
+        residual = hidden_states
+        post, comb, hidden = self.ffn_hc(hidden_states)
+        hidden = self.post_attention_layernorm(hidden)
+        hidden = self.mlp(hidden, token_layout=output_layout, token_mask=token_mask)
+        return kernels.hc_post(hidden, residual, post, comb), topk
+
+    def _forward_fused(
+        self,
+        hidden_states: torch.Tensor,
+        position_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        prev_topk_indices: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         residual = hidden_states
         post, comb, hidden_states = self.attn_hc(hidden_states)
         hidden_states = self.input_layernorm(hidden_states)
@@ -2063,13 +2440,13 @@ class Glm5NextDecoderLayer(nn.Module):
         # MLA returns [B*S, D]; mHC post expects [B, S, D].
         if hidden_states.dim() == 2:
             hidden_states = hidden_states.view(residual.shape[0], residual.shape[1], -1)
-        hidden_states = self.attn_hc.post(hidden_states, residual, post, comb)
+        hidden_states = kernels.hc_post(hidden_states, residual, post, comb)
 
         residual = hidden_states
         post, comb, hidden_states = self.ffn_hc(hidden_states)
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = self.ffn_hc.post(hidden_states, residual, post, comb)
+        hidden_states = kernels.hc_post(hidden_states, residual, post, comb)
         return hidden_states, topk
 
 
@@ -2077,6 +2454,24 @@ class Glm5NextModel(nn.Module):
     def __init__(self, cfg: Glm5NextConfig, dtype: torch.dtype, device: torch.device) -> None:
         super().__init__()
         self.cfg = cfg
+        if cfg.expert_parallel_degree == 2:
+            self.execution_metadata_builders = (Glm5NextEplv2MetadataBuilder(cfg.dp_size, cfg.dp_rank),)
+            self._comm_policy = Eplv2CommPolicy.from_geometry(
+                cfg.hidden_size,
+                cfg.n_routed_experts,
+                cfg.ep_size,
+                cfg.num_experts_per_tok,
+                int(os.getenv("HCCL_BUFFSIZE", "200")),
+                cfg.eplv2_mc2_max_tokens_per_rank,
+                cfg.eplv2_comm_mode,
+            )
+            # Only a capture whose per-TP-rank dispatch fits the MC2 HCCL window
+            # may be graphed; zero disables graph capture for this model.
+            self.graph_capture_token_limit = (
+                0 if self._comm_policy.mode == "alltoall" else self._comm_policy.mc2_capacity * cfg.tp_size
+            )
+        else:
+            self._comm_policy = None
         self.embed_tokens = HiddenParallelEmbedding(
             cfg.vocab_size,
             cfg.hidden_size // cfg.tp_size,
@@ -2084,7 +2479,9 @@ class Glm5NextModel(nn.Module):
             dtype=dtype,
             device=device,
         )
-        self.layers = nn.ModuleList([Glm5NextDecoderLayer(cfg, i, dtype, device) for i in range(cfg.n_layers)])
+        self.layers = nn.ModuleList(
+            [Glm5NextDecoderLayer(cfg, i, dtype, device, comm_policy=self._comm_policy) for i in range(cfg.n_layers)]
+        )
         self.norm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, dtype, device)
         self.hc_head = Glm5NextHyperHead()
         # Collapse each captured layer's mHC streams to the single residual stream
@@ -2122,7 +2519,8 @@ class Glm5NextModel(nn.Module):
         if attention_mask is None:
             attention_mask = torch.ones(batch_size, seq_len, dtype=torch.bool, device=hidden.device)
 
-        forward_context = get_forward_context()
+        is_eplv2 = getattr(self.cfg, "expert_parallel_degree", 0) == 2
+        forward_context = get_forward_context_or_none() if is_eplv2 else get_forward_context()
         cp_context = getattr(forward_context, "cp_context", None)
         if cp_context is not None:
             hidden = cp_shard_rows(hidden.view(-1, self.cfg.hidden_size), cp_context).unsqueeze(0)
@@ -2130,6 +2528,13 @@ class Glm5NextModel(nn.Module):
             attention_mask = cp_context.shard_valid_mask.unsqueeze(0)
             batch_size, seq_len = hidden.shape[:2]
 
+        token_layout = token_mask = None
+        if is_eplv2:
+            if self.cfg.eplv2_sequence_parallel and hidden.shape[0] != 1:
+                raise ValueError("GLM EPLv2 SP requires flattened engine input with batch dimension one")
+            token_layout, token_mask = _eplv2_token_layout(self.cfg, hidden, self._comm_policy)
+            if not self.cfg.eplv2_sequence_parallel:
+                token_layout = token_mask = None
         # 2-D [num_tokens, hidden_size * k] to match the C++ context-hidden
         # contract; capture CP-local rows and restore global order at the end.
         aux_hidden_buffer = self.aux_hidden_capture.create_buffer(hidden.reshape(-1, self.cfg.hidden_size))
@@ -2138,10 +2543,28 @@ class Glm5NextModel(nn.Module):
         # position embeddings are computed or threaded (reference passes None).
         hidden = hidden.unsqueeze(2).expand(-1, -1, self.cfg.hc_mult, -1).contiguous()
         prev_topk: Optional[torch.Tensor] = None
+        input_layout: TokenParallelLayout | None = None
         for layer in self.layers:
-            hidden, prev_topk = layer(hidden, position_ids, attention_mask, prev_topk)
-            # residual=None: the collapsed stream is itself the full residual.
-            self.aux_hidden_capture.capture_layer(layer.layer_id, hidden, None, aux_hidden_buffer)
+            if token_layout is None:
+                hidden, prev_topk = layer(hidden, position_ids, attention_mask, prev_topk)
+            else:
+                output_layout = token_layout if isinstance(layer.mlp, Glm5NextMoE) else None
+                hidden, prev_topk = layer(
+                    hidden,
+                    position_ids,
+                    attention_mask,
+                    prev_topk,
+                    input_layout=input_layout,
+                    output_layout=output_layout,
+                    token_mask=token_mask if output_layout is not None else None,
+                )
+                input_layout = output_layout
+            # DFlash2 needs full token order; SP layers own only local rows, so
+            # restore replicas at the capture boundary only.
+            captured_hidden = hidden
+            if input_layout is not None and layer.layer_id in self.cfg.layers_to_capture:
+                captured_hidden = input_layout.gather(hidden.reshape(-1, *hidden.shape[2:])).unsqueeze(0)
+            self.aux_hidden_capture.capture_layer(layer.layer_id, captured_hidden, None, aux_hidden_buffer)
             record_layer_event(layer.layer_id)
         # Final collapse: unweighted mean over the streams, then RMSNorm
         # (reference `self.norm(self.hc_head(hidden_states))`, line 1537).
@@ -2150,6 +2573,11 @@ class Glm5NextModel(nn.Module):
         # token ids in the flattened sequence, so a 3-D output would select the
         # wrong (batch) axis and gather out of range for multi-token prefill.
         h = self.norm(self.hc_head(hidden)).view(-1, self.cfg.hidden_size)
+        # The last MoE layer leaves SP-local rows and CP merge indexes
+        # owner_rank * total_local, so restore the full CP-local layout first.
+        # Capture already gathered aux rows before the SP split.
+        if input_layout is not None:
+            h = input_layout.gather(h)
         if cp_context is not None:
             h = cp_merge_rows(h, cp_context)
             if aux_hidden_buffer is not None:
@@ -2252,8 +2680,6 @@ class Glm5NextForCausalLM(PyModelBase):
 
     # -- weight loading ---------------------------------------------------
     def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
-        from xllm.python.model_loader import QLinearWeightLoader
-
         L = QLinearWeightLoader(
             self,
             state_dicts,
@@ -2278,6 +2704,7 @@ class Glm5NextForCausalLM(PyModelBase):
             for hc in ("attn_hc", "ffn_hc"):
                 for w in ("fn", "base", "scale"):
                     L.copy_replicated(p + hc + "." + w)
+                getattr(self.model.layers[i], hc).process_weights_after_loading()
         L.copy_replicated("model.norm.weight")
         # lm_head: ColumnParallelLinear — shard the vocab dim (dim 0).
         L.copy_shard("lm_head.weight", dim=0)
@@ -2392,7 +2819,9 @@ class Glm5NextForCausalLM(PyModelBase):
         L.copy_replicated(attn + "o_norm.weight")
         self.model.layers[i].self_attn.process_weights_after_loading()
 
-    def _load_mlp_fp_or_w8a8(self, L, mlp_pfx: str) -> None:
+    def _load_mlp_fp_or_w8a8(
+        self, L: QLinearWeightLoader, mlp_pfx: str, *, world: int | None = None, rank: int | None = None
+    ) -> None:
         """Load a ``Glm5NextMLP`` (gate_up_proj + down_proj) from the OLD-style
         checkpoint keys ``gate_proj`` / ``up_proj`` / ``down_proj``.
 
@@ -2420,12 +2849,18 @@ class Glm5NextForCausalLM(PyModelBase):
             # writes into ``_w8a8``.
             gate_mod.resolve_quant(True)
             down_mod.resolve_quant(True)
-            L.load_w8a8_mlp(mlp_pfx, destination_suffix="._w8a8")
+            L.load_w8a8_mlp(mlp_pfx, world=world, rank=rank, destination_suffix="._w8a8")
         else:
             gate_mod.resolve_quant(False)
             down_mod.resolve_quant(False)
-            L.copy_in(mlp_pfx + "gate_up_proj.weight", L.pack_gate_up(mlp_pfx))
-            L.copy_in(mlp_pfx + "down_proj.weight", L.load_shard(mlp_pfx + "down_proj.weight", 1))
+            L.copy_in(mlp_pfx + "gate_up_proj.weight", L.pack_gate_up(mlp_pfx, world=world, rank=rank))
+            if world is None:
+                L.copy_in(mlp_pfx + "down_proj.weight", L.load_shard(mlp_pfx + "down_proj.weight", 1))
+            else:
+                L.copy_in(
+                    mlp_pfx + "down_proj.weight",
+                    L.load_shard(mlp_pfx + "down_proj.weight", 1, world=world, rank=rank),
+                )
 
     def _load_experts_w8a8(self, L, mlp: str, moe_mod: Glm5NextMoE) -> None:
         """Load local W8A8 experts with separate EP and MoE-TP sharding."""
@@ -2477,6 +2912,8 @@ class Glm5NextForCausalLM(PyModelBase):
 
     def _load_experts_bf16(self, L, mlp: str, moe_mod: Glm5NextMoE) -> None:
         """Load local BF16 experts with separate EP and MoE-TP sharding."""
+        if self.cfg.expert_parallel_degree == 2:
+            raise ValueError("GLM EPLv2 requires a W8A8 expert checkpoint")
         start, end = moe_mod.local_expert_start, moe_mod.local_expert_end
         if moe_mod.experts is None:
             ref = moe_mod.shared_experts.gate_up_proj.weight
@@ -2520,6 +2957,8 @@ class Glm5NextForCausalLM(PyModelBase):
             # Expert branch: probe exp0's gate_proj for a weight_scale tensor.
             # Real W8A8 checkpoints carry weight_scale; bf16 checkpoints do not.
             is_w8a8 = L.find(mlp + "experts.0.gate_proj.weight_scale") is not None
+            if not is_w8a8 and self.cfg.cp_size > 1:
+                raise NotImplementedError("GLM-5.3-Flash CP supports W8A8 expert weights only, not BF16")
             if not is_w8a8 and (self.cfg.ep_size > 1 or self.cfg.dp_size > 1):
                 raise NotImplementedError("GLM-5.3-Flash ordinary EP/DP supports W8A8 expert weights only, not BF16")
             moe.use_w8a8 = is_w8a8
@@ -2527,7 +2966,12 @@ class Glm5NextForCausalLM(PyModelBase):
                 self._load_experts_w8a8(L, mlp, moe)
             else:
                 self._load_experts_bf16(L, mlp, moe)
-            self._load_mlp_fp_or_w8a8(L, mlp + "shared_experts.")
+            if self.cfg.expert_parallel_degree == 2:
+                self._load_mlp_fp_or_w8a8(
+                    L, mlp + "shared_experts.", world=self.cfg.moe_tp_size, rank=self.cfg.moe_tp_rank
+                )
+            else:
+                self._load_mlp_fp_or_w8a8(L, mlp + "shared_experts.")
             moe.process_weights_after_loading()
         else:
             self._load_mlp_fp_or_w8a8(L, mlp)

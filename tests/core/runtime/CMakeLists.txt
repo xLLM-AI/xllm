@@ -70,6 +70,7 @@ target_link_options(transport_codec_test PRIVATE
 cc_test(
   NAME
     acl_graph_bucket_policy_test
+  CPU_ONLY
   SRCS
     acl_graph_bucket_policy_test.cpp
   DEPS
@@ -359,6 +360,7 @@ endif()
 cc_test(
   NAME
     worker_json_object_overlap_test
+  CPU_ONLY
   SRCS
     worker_json_object_overlap_test.cpp
   DEPS
@@ -478,3 +480,13 @@ if(USE_DCU)
   )
 endif()
 
+cc_test(
+  NAME dspark_sampler_test
+  CPU_ONLY
+  SRCS dspark_sampler_test.cpp
+  DEPS :runtime GTest::gtest_main
+)
+target_link_options(dspark_sampler_test PRIVATE
+  "-Wl,--whole-archive"
+  "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
+  "-Wl,--no-whole-archive")

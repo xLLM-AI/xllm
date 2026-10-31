@@ -502,25 +502,36 @@ bool LLMEngine::allocate_kv_cache(
     // Translate a composite cache capacity into typed Host pools. The
     // hierarchy layer consumes only this BlockType map and does not need to
     // identify the model that produced the layout.
-    if (!options.manager_types().empty()) {
+    if (!options.manager_types().empty() || enable_state_cache) {
       std::map<BlockType, uint32_t> host_capacities;
-      if (kv_cache_cap.swa_count() > 0) {
+      if (options.manager_types().empty()) {
         host_capacities.emplace(
-            BlockType::SWA,
+            BlockType::KV,
             static_cast<uint32_t>(scale_host_block_count(
-                kv_cache_cap.swa_count(), options_.host_blocks_factor())));
+                kv_cache_cap.n_blocks(), options_.host_blocks_factor())));
+      }
+      if (enable_state_cache) {
+        host_capacities.emplace(BlockType::LINEAR,
+                                static_cast<uint32_t>(scale_host_block_count(
+                                    kv_cache_cap.num_linear_state_blocks(),
+                                    options_.host_blocks_factor())));
+      }
+      uint32_t host_c128_blocks = 0;
+      if (kv_cache_cap.c128_count() > 0) {
+        host_c128_blocks = static_cast<uint32_t>(scale_host_block_count(
+            kv_cache_cap.c128_count(), options_.host_blocks_factor()));
+        host_capacities.emplace(BlockType::C128, host_c128_blocks);
+      }
+      if (kv_cache_cap.swa_count() > 0) {
+        CHECK_GT(host_c128_blocks, 0u)
+            << "DSV4 Host SWA capacity requires a positive C128 capacity.";
+        host_capacities.emplace(BlockType::SWA, host_c128_blocks);
       }
       if (kv_cache_cap.c4_count() > 0) {
         host_capacities.emplace(
             BlockType::C4,
             static_cast<uint32_t>(scale_host_block_count(
                 kv_cache_cap.c4_count(), options_.host_blocks_factor())));
-      }
-      if (kv_cache_cap.c128_count() > 0) {
-        host_capacities.emplace(
-            BlockType::C128,
-            static_cast<uint32_t>(scale_host_block_count(
-                kv_cache_cap.c128_count(), options_.host_blocks_factor())));
       }
       options.host_num_blocks_by_type(std::move(host_capacities));
     }

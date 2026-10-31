@@ -18,7 +18,6 @@ limitations under the License.
 #include <atomic>
 #include <deque>
 #include <functional>
-#include <map>
 #include <memory>
 #include <mutex>
 
@@ -84,18 +83,14 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
   friend class HierarchyPoolTestPeer;
   void release_host_match(Sequence* sequence, int32_t dp_rank);
   void quarantine_prefetch(Sequence* sequence, int32_t dp_rank);
-  void collect_offload_pairs(Sequence* sequence,
-                             int32_t dp_rank,
-                             size_t completed_tokens);
+  void collect_offload_pairs(Sequence* sequence);
   bool should_probe_prefix_cache(Sequence* sequence) const;
   void transfer_offload_blocks();
-
-  BlockManager* leaf_of(BlockType type, int32_t dp_rank) const;
 
  private:
   std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator_;
   // Per-DP Host block managers discovered from the device prefix-cache leaves.
-  std::vector<CompositeBlockManager::LeafMap> host_block_managers_;
+  std::vector<std::unique_ptr<CompositeBlockManager>> host_block_managers_;
 
   // An interrupted stream cannot certify remote-write completion. Keep those
   // block ids reserved until pool destruction and stop further storage reads
