@@ -19,6 +19,7 @@ cc_library(
     fixed_steps_scheduler.h
     scheduler_metrics.h
     scheduler_notifier.h
+    kv_cache_prefetcher.h
   SRCS
     scheduler_policy.cpp
     prefill_first_policy.cpp
@@ -32,6 +33,7 @@ cc_library(
     dit_scheduler.cpp
     scheduler_factory.cpp
     fixed_steps_scheduler.cpp
+    kv_cache_prefetcher.cpp
   DEPS
     :batch
     :distributed_runtime
