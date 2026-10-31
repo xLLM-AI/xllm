@@ -441,7 +441,7 @@ def test_model_accepts_cp_config() -> None:
 
 
 def test_causal_lm_accepts_data_parallelism_config() -> None:
-    model = DeepseekV4ForCausalLM({**_DSV4_CONFIG, "dp_size": 2})
+    model = DeepseekV4ForCausalLM({**_DSV4_CONFIG, "dp_size": 2, "device": "cpu"})
     assert model.cfg.dp_size == 2
 
 
