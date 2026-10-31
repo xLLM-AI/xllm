@@ -1229,8 +1229,14 @@ TEST(ContinuousSchedulerTest,
      DisabledStoragePrefetchSkipsManagerCallsThroughoutLifecycle) {
   FakeEngine engine(/*num_blocks=*/64, /*block_size=*/32);
   engine.set_storage_prefetch_enabled(false);
-  SchedulerOptions options = create_scheduler_options(64, 4, 0, 64, 1);
-  auto request = generate_request_with_prompt_tokens({1, 2}, 4, 30000);
+  SchedulerOptions options =
+      create_scheduler_options(/*max_tokens_per_batch=*/64,
+                               /*max_seqs_per_batch=*/4,
+                               /*num_speculative_tokens=*/0,
+                               /*max_tokens_per_chunk_for_prefill=*/64,
+                               /*dp_size=*/1);
+  auto request = generate_request_with_prompt_tokens(
+      /*prompt_token_ids=*/{1, 2}, /*max_tokens=*/4, /*max_context_len=*/30000);
 
   {
     TestableContinuousScheduler scheduler(&engine, options);
