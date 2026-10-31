@@ -292,16 +292,12 @@ std::optional<std::string> TaskExecutionPipeline::spec_calibration_impl(
           profile.max_kv_length =
               std::min(entry.max_kv_length, kv_bound(batch));
           profile.cost_scope = SpecCostScope::FULL_STEP;
-          for (const uint32_t rows : graphs) {
-            if (rows < batch || rows > *full) {
-              continue;
-            }
-            const auto cost = entry.model.step_time_ms(batch, rows);
-            if (!cost) {
-              return std::nullopt;
-            }
-            profile.target_graph_costs.emplace_back(SpecGraphCost{rows, *cost});
+          auto measured_costs =
+              entry.model.verification_costs(batch, draft_width, graphs);
+          if (!measured_costs) {
+            return std::nullopt;
           }
+          profile.target_graph_costs = std::move(*measured_costs);
           if (!costs->store(std::move(profile))) {
             return std::nullopt;
           }

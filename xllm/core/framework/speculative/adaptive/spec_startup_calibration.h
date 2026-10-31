@@ -106,9 +106,9 @@ std::optional<std::vector<SpecCalibrationPoint>> plan_spec_calibration(
     std::span<const uint32_t> captured_target_rows,
     std::span<const SpecCalibrationGraphCoverage> graph_coverage = {});
 
-// Host-only startup fit using cell medians and an identifiable additive model.
-// No device/runtime or subprocess is involved. The serialized table includes
-// training diagnostics.
+// Host-only startup aggregation using exact graph-cell medians, SPS projection
+// or an identifiable additive model. No device/runtime or subprocess is
+// involved. The serialized table includes training diagnostics.
 std::optional<std::string> fit_spec_cost_table(
     std::span<const SpecSteadyWindow> windows,
     SpecCostModel::Kind kind,

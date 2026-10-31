@@ -226,8 +226,8 @@ VMM 的使用方式和容量配置说明见[KV Cache 与模型权重的虚拟内
 | `enable_adaptive_draft_step` | `bool` | `false` | 调整一次 target 验证前实际执行的顺序 draft forward 步数，以最大化预测的完整轮吞吐。适合自回归生成候选的路径，当前接入 MTP；`num_speculative_tokens` 是最大步数（1–64），而非当前实际步数。要求 Python GLM DSA、普通预热 ACL graph、异步 task pipeline、DP=CP=1；不支持 unified MTP 和 PD 分离。见[自适应投机推理](/zh/features/adaptive_speculation/)。 |
 | `adaptive_draft_step_config` | `string` | `""` | 可选 JSON 配置文件的路径：`policy` 配置接受率窗口、更新间隔与切换门槛，`calibration` 配置启动采样与拟合；不是成本表输入。不传时使用默认值并打印日志，仍在就绪前实测当前 MTP 服务各候选步数的完整轮成本，复用 SPS/二维加性拟合代码，不复用 DSpark 的实测值。见[自适应投机推理](/zh/features/adaptive_speculation/)及下文示例。 |
 | `adaptive_target_verify_min_gain` | `double` | `0.0` | DSpark 改变上一个有效验证预算时，要求的最小预测相对吞吐收益。 |
-| `adaptive_target_verify_calibration` | `string` | `""` | 可选的启动标定 JSON 文件；为空时使用内置默认配置，两种情况都会打印实际生效值。不能与已保存成本表输入同时指定。 |
-| `adaptive_target_verify_cost_table` | `string` | `""` | 加载兼容的已保存完整步成本表，跳过启动采样和拟合；支持一维 SPS 和二维加性模型，仍需 graph warmup。 |
+| `adaptive_target_verify_calibration` | `string` | `""` | 可选的启动标定 JSON 文件，`model` 支持 `sps`、`additive` 或 `graph`；为空时使用内置默认配置，两种情况都会打印实际生效值。不能与已保存成本表输入同时指定。 |
+| `adaptive_target_verify_cost_table` | `string` | `""` | 加载兼容的已保存完整步成本表，跳过启动采样和拟合；支持 SPS、加性模型和实测 `graph` 成本；graph 成本需要带兼容性信息的版本化 bundle，仍需 graph warmup。 |
 | `adaptive_target_verify_cost_table_output` | `string` | `""` | 可选的启动标定结果输出文件，保存为带版本和配置身份的 bundle；为空则只保留在内存，绝不覆盖已有文件。加载已保存表时不能指定输出。 |
 
 ### 吞吐感知的 draft 步数选择

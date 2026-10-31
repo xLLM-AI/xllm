@@ -293,7 +293,7 @@ field in the JSON must match it. For example:
 
 #### Cost models and coverage
 
-`model` accepts `sps` or `additive`. The SPS model is a one-dimensional
+`model` accepts `sps`, `additive`, or `graph`. The SPS model is a one-dimensional
 steps-per-second table over physical target graph rows `G`; cost is
 `1000 / SPS(G)` milliseconds. The additive model fits full-step seconds as
 `bias + alpha(Bcap) + theta(G)`, where `Bcap` is the physical draft request
@@ -317,6 +317,64 @@ with the source, all effective settings (including omitted defaults) and actual
 captured geometry. No serving request causes profiling, fitting or graph
 recapture. A KV range or request bucket without a calibrated profile uses the
 already-prewarmed full-width admission policy, not an eager retry.
+
+### Graph-cost-aware verification on NPU
+
+Set the startup calibration `model` to `graph` to retain the median full-step
+latency for each measured `(physical request bucket Bcap, physical target graph
+G, KV interval)` binding. Costs for the same G remain distinct across Bcap;
+latency jumps and non-monotonic costs between graph buckets are preserved.
+The existing budget planner uses n−2 or older confidence and maximizes expected
+output tokens divided by the measured full-step cost among prewarmed graphs.
+
+The graph-cost selection approach references
+[DeepInfer MTPVarlen](https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/mtp_varlen.hpp).
+xLLM measures stable completion windows in the existing NPU asynchronous
+pipeline, including draft, verification, commit and retirement. CUDA timing
+Events are not imported, and draft/commit costs are not counted twice. The
+resulting table is constructed at startup and installed consistently on all
+workers; this mode does not add online timing regression.
+
+For example, create `/configs/npu-graph-cost.json`:
+
+```json
+{
+  "model": "graph",
+  "request_buckets": [1, 2, 4, 8],
+  "contexts": [
+    {"prefill_tokens": 128, "min_kv_length": 1, "max_kv_length": 1024}
+  ],
+  "warmup_steps": 4,
+  "window_steps": 8,
+  "windows_per_point": 3,
+  "token_seed": 1
+}
+```
+
+Use these options in the NPU adaptive-target-verification launch command above:
+
+```bash
+--adaptive_target_verify_calibration=/configs/npu-graph-cost.json \
+--adaptive_target_verify_cost_table_output=/results/npu-graph-costs.json
+```
+
+Request buckets must exist in the service's captured geometry. Omitting
+`target_graph_rows` measures every legal prewarmed graph for each Bcap. An
+explicit sparse selection must retain the captured full-width graph for every
+Bcap. Unmeasured graphs are excluded from cost scoring. If the current logical
+batch has no measured full-width cost, admission uses the existing prewarmed
+full-width policy. A table without measured physical-request-bucket full-width
+coverage is rejected before serving.
+`graph_costs` stores `draft_requests`, `target_graph_rows` and `step_time_ms`.
+Graph tables require an explicit `max_kv_length` and a versioned bundle with
+compatibility metadata; they cannot use the legacy bare-table loading path.
+The enclosing bundle retains model, topology, Draft5/7 and KV coverage checks.
+
+Exact graph tables do not require the connected-grid assumption of additive
+fitting or pool different Bcap measurements into one G-only cost. Their zero
+training error only means cell medians were retained; it does not establish a
+serving speedup. Compare TPOT, throughput and output equality against SPS and
+additive modes with the same weights, context, concurrency and graph settings.
 
 ### Reuse a saved cost table
 

@@ -239,16 +239,20 @@ std::optional<VerifyBudgetPlan> VerifyBudgetPlanner::plan(
   // Conditional probabilities produce non-increasing paths in each request.
   // The top K values therefore describe a feasible prefix allocation; ties
   // can always be assigned to earlier positions in that request.
-  std::vector<double> expected_progress;
-  expected_progress.reserve(static_cast<size_t>(max_budget) + 1);
-  expected_progress.emplace_back(static_cast<double>(batch_size));
-  for (double probability : path_probabilities) {
-    expected_progress.emplace_back(expected_progress.back() + probability);
+  // The sorted probabilities are no longer needed after accumulation. Reuse
+  // their storage, preserving the original batch-first floating-point order.
+  double expected = static_cast<double>(batch_size);
+  for (double& probability : path_probabilities) {
+    expected += probability;
+    probability = expected;
   }
   const auto score = [&](const VerifyBudgetPlan& candidate,
                          const SpecGraphCost& cost) {
-    return expected_progress[candidate.draft_budget] /
-           (fixed_time_ms + cost.target_time_ms);
+    const double progress =
+        candidate.draft_budget == 0
+            ? static_cast<double>(batch_size)
+            : path_probabilities[candidate.draft_budget - 1];
+    return progress / (fixed_time_ms + cost.target_time_ms);
   };
 
   VerifyBudgetPlan best = full_plan;

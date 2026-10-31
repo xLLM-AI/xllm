@@ -22,6 +22,10 @@ limitations under the License.
 namespace xllm {
 namespace {
 
+uint64_t graph_cost_key(uint32_t requests, uint32_t rows) {
+  return (static_cast<uint64_t>(requests) << 32) | rows;
+}
+
 bool read_index(const nlohmann::json& value, uint32_t& output) {
   if (!value.is_number_integer()) {
     return false;
@@ -97,6 +101,18 @@ double interpolate(const std::vector<uint32_t>& probes,
 
 }  // namespace
 
+std::string_view SpecCostModel::kind_name(Kind kind) {
+  switch (kind) {
+    case Kind::SPS:
+      return "sps";
+    case Kind::ADDITIVE:
+      return "additive";
+    case Kind::GRAPH:
+      return "graph";
+  }
+  return {};
+}
+
 std::optional<SpecCostModel> SpecCostModel::from_json(std::string_view text) {
   const auto data =
       nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
@@ -110,7 +126,10 @@ std::optional<SpecCostModel> SpecCostModel::from_json(std::string_view text) {
       data.contains("bias_seconds") || data.contains("bs_probes") ||
       data.contains("alpha_seconds") || data.contains("m_probes") ||
       data.contains("theta_seconds");
-  if (sps == additive) {
+  const bool graph = data.contains("graph_costs");
+  if (static_cast<uint32_t>(sps) + static_cast<uint32_t>(additive) +
+          static_cast<uint32_t>(graph) !=
+      1) {
     return std::nullopt;
   }
   SpecCostModel model;
@@ -118,6 +137,35 @@ std::optional<SpecCostModel> SpecCostModel::from_json(std::string_view text) {
   if (kv_bound != data.end() && (!read_index(*kv_bound, model.max_kv_length_) ||
                                  model.max_kv_length_ == 0)) {
     return std::nullopt;
+  }
+  if (graph) {
+    model.kind_ = Kind::GRAPH;
+    const auto& cells = data["graph_costs"];
+    if (kv_bound == data.end() || !cells.is_array() || cells.empty()) {
+      return std::nullopt;
+    }
+    model.graph_costs_ms_.reserve(cells.size());
+    for (const auto& cell : cells) {
+      uint32_t requests = 0;
+      uint32_t rows = 0;
+      if (!cell.is_object() || !cell.contains("draft_requests") ||
+          !cell.contains("target_graph_rows") ||
+          !cell.contains("step_time_ms") ||
+          !read_index(cell["draft_requests"], requests) || requests == 0 ||
+          !read_index(cell["target_graph_rows"], rows) || rows < requests ||
+          !cell["step_time_ms"].is_number()) {
+        return std::nullopt;
+      }
+      const double milliseconds = cell["step_time_ms"].get<double>();
+      if (!std::isfinite(milliseconds) || milliseconds <= 0.0 ||
+          !std::isfinite(1000.0 / milliseconds) ||
+          !model.graph_costs_ms_
+               .emplace(graph_cost_key(requests, rows), milliseconds)
+               .second) {
+        return std::nullopt;
+      }
+    }
+    return model;
   }
   if (sps) {
     const auto maximum = data.find("max_batch_tokens");
@@ -182,6 +230,12 @@ std::optional<double> SpecCostModel::step_time_ms(
       target_graph_rows > max_batch_tokens_) {
     return std::nullopt;
   }
+  if (kind_ == Kind::GRAPH) {
+    const auto found =
+        graph_costs_ms_.find(graph_cost_key(draft_requests, target_graph_rows));
+    return found == graph_costs_ms_.end() ? std::nullopt
+                                          : std::optional(found->second);
+  }
   if (kind_ == Kind::SPS) {
     const auto upper = std::upper_bound(
         token_probes_.begin(), token_probes_.end(), target_graph_rows);
@@ -195,6 +249,44 @@ std::optional<double> SpecCostModel::step_time_ms(
          (bias_seconds_ +
           interpolate(bs_probes_, alpha_seconds_, draft_requests) +
           interpolate(token_probes_, token_values_, target_graph_rows));
+}
+
+std::optional<std::vector<SpecGraphCost>> SpecCostModel::verification_costs(
+    uint32_t draft_requests,
+    uint32_t draft_width,
+    std::span<const uint32_t> captured_graphs) const {
+  if (draft_requests == 0 || draft_width == 0 || captured_graphs.empty() ||
+      captured_graphs.front() == 0 ||
+      std::adjacent_find(captured_graphs.begin(),
+                         captured_graphs.end(),
+                         [](uint32_t lhs, uint32_t rhs) {
+                           return lhs >= rhs;
+                         }) != captured_graphs.end()) {
+    return std::nullopt;
+  }
+  const uint64_t full_rows = static_cast<uint64_t>(draft_requests) *
+                             (static_cast<uint64_t>(draft_width) + 1);
+  const auto full = std::lower_bound(
+      captured_graphs.begin(), captured_graphs.end(), full_rows);
+  if (full == captured_graphs.end() || !step_time_ms(draft_requests, *full)) {
+    return std::nullopt;
+  }
+  std::vector<SpecGraphCost> costs;
+  costs.reserve(captured_graphs.size());
+  for (const uint32_t rows : captured_graphs) {
+    if (rows < draft_requests || rows > *full) {
+      continue;
+    }
+    const auto milliseconds = step_time_ms(draft_requests, rows);
+    if (!milliseconds) {
+      if (kind_ == Kind::GRAPH) {
+        continue;
+      }
+      return std::nullopt;
+    }
+    costs.emplace_back(SpecGraphCost{rows, *milliseconds});
+  }
+  return costs;
 }
 
 }  // namespace xllm

@@ -18,7 +18,9 @@ limitations under the License.
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <span>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace xllm {
@@ -32,17 +34,19 @@ struct SpecGraphCost {
   double target_time_ms = 0.0;
 };
 
-// Immutable, Host-only speculative step costs. JSON fields and units match
-// SGLang's SPS and additive tables. Evaluate physical graph rows, not logical
-// B+K: padding does not reduce the replay's cost. The additive B axis
-// represents the physical Draft request bucket (Bcap), including padded
-// requests.
+// Immutable, Host-only speculative step costs. SPS/additive JSON keeps the
+// existing SGLang format; graph tables retain measured (Bcap, G) cells in ms.
+// Evaluate physical graph rows, not logical B+K: padding does not reduce the
+// replay cost. Bcap denotes the physical Draft request bucket, including padded
+// requests, for both additive and graph tables.
 class SpecCostModel final {
  public:
-  enum class Kind : uint8_t { SPS, ADDITIVE };
+  enum class Kind : uint8_t { SPS, ADDITIVE, GRAPH };
+
+  static std::string_view kind_name(Kind kind);
 
   // Reject malformed, ambiguous, non-finite or non-positive cost models.
-  // Optional max_kv_length bounds the contexts for which a table is valid.
+  // max_kv_length bounds valid contexts and is required for exact graph cells.
   static std::optional<SpecCostModel> from_json(std::string_view text);
 
   Kind kind() const { return kind_; }
@@ -50,6 +54,15 @@ class SpecCostModel final {
 
   std::optional<double> step_time_ms(uint32_t draft_requests,
                                      uint32_t target_graph_rows) const;
+
+  // Only measured graph cells are eligible in GRAPH mode. Every returned
+  // cost belongs to a captured bucket, and the smallest captured full-width
+  // bucket is required before installing a profile. Other models keep their
+  // existing interpolation/projection semantics.
+  std::optional<std::vector<SpecGraphCost>> verification_costs(
+      uint32_t draft_requests,
+      uint32_t draft_width,
+      std::span<const uint32_t> captured_graphs) const;
 
  private:
   SpecCostModel() = default;
@@ -63,6 +76,9 @@ class SpecCostModel final {
   std::vector<uint32_t> token_probes_;
   // SPS: full step milliseconds. Additive: theta seconds.
   std::vector<double> token_values_;
+  // Packed (Bcap, G) keys are lookup-only; graph order comes from
+  // captured_graphs.
+  std::unordered_map<uint64_t, double> graph_costs_ms_;
 };
 
 }  // namespace xllm
