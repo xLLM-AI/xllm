@@ -23,9 +23,12 @@ limitations under the License.
 namespace xllm {
 
 // The single sampling owner for speculative verification; the
-// general-purpose sample() never runs for verify steps.
+// general-purpose sample() never runs for verify steps. An optional Boolean
+// invalid_draft_mask [batch, steps] forces rejection without changing q or the
+// proposal's token IDs. Negative token IDs have the same sentinel semantics.
 SampleOutput rejection_sample(const SamplingParameters& params,
                               const DraftProposal& draft_proposal,
-                              torch::Tensor target_logits);
+                              torch::Tensor target_logits,
+                              const torch::Tensor& invalid_draft_mask = {});
 
 }  // namespace xllm

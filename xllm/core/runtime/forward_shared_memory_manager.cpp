@@ -103,7 +103,7 @@ constexpr PackedInputDomain packed_input_domain() {
   return PackedInputDomain::LLM;
 }
 constexpr uint64_t kPackedInputMagic = 0x584c4c4d494e5032;
-constexpr uint16_t kPackedInputSchemaVersion = 10;
+constexpr uint16_t kPackedInputSchemaVersion = 11;
 constexpr uint32_t kPackedInputHeaderBytes = 40;
 
 struct RawInputLayoutHeader final {
@@ -2723,6 +2723,8 @@ inline void deserialize_forward_input_payload(
     read_tensor(context, sampling_params.unique_token_counts(), stream);
     read_tensor(context, sampling_params.unique_token_ids_lens(), stream);
     read_tensor(context, sampling_params.do_sample(), stream);
+    read_data(context, sampling_params.has_unseeded_sample());
+    read_data(context, sampling_params.num_random_rows());
     read_data(context, sampling_params.sampling_mode());
     read_data(context, sampling_params.logprobs());
     read_data(context, sampling_params.is_embeddings());
@@ -3074,6 +3076,8 @@ inline void serialize_forward_input_sections(
     write_tensor(context, sampling_params.unique_token_counts());
     write_tensor(context, sampling_params.unique_token_ids_lens());
     write_tensor(context, sampling_params.do_sample());
+    write_data(context.descriptor, sampling_params.has_unseeded_sample());
+    write_data(context.descriptor, sampling_params.num_random_rows());
     write_data(context.descriptor, sampling_params.sampling_mode());
     write_data(context.descriptor, sampling_params.logprobs());
     write_data(context.descriptor, sampling_params.is_embeddings());

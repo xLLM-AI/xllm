@@ -66,10 +66,12 @@ torch::Tensor materialize_graph_speculative_verify_tokens(
 // input (DFlash's run_validate) copy once at this boundary.
 // `target_hidden_states`, when defined, is attached to the output as the
 // [batch, val_tokens, hidden] view.
-SampleOutput run_rejection_sampling(SamplingParameters sampling_params,
-                                    const DraftProposal& draft_proposal,
-                                    const torch::Tensor& target_logits,
-                                    const torch::Tensor& target_hidden_states);
+SampleOutput run_rejection_sampling(
+    SamplingParameters sampling_params,
+    const DraftProposal& draft_proposal,
+    const torch::Tensor& target_logits,
+    const torch::Tensor& target_hidden_states,
+    const torch::Tensor& invalid_draft_mask = {});
 // Packed verification for a deterministic (point-mass) draft: sample each
 // target row, then let the caller commit the prefix matching its proposals.
 // owners maps packed rows to requests; -1 padding borrows request zero's

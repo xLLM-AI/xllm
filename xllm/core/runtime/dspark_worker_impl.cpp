@@ -74,14 +74,13 @@ DraftProposal DSparkWorkerImpl::run_decode_draft(
       << "DSpark draft logits batch must match the decode batch.";
   torch::Tensor base_logits = draft_output->logits.view(
       {batch_size, num_speculative_tokens, draft_output->logits.size(-1)});
-  DraftProposal draft_proposal;
-  {
+  DraftProposal draft_proposal = [&] {
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
     SamplingParameters sampling_params_on_device = input.sampling_params;
     prepare_draft_sampling(is_probabilistic_draft_, sampling_params_on_device);
     sampling_params_on_device = sampling_params_on_device.to(
         base_logits.device(), base_logits.scalar_type());
-    draft_proposal = sample_dspark_markov_block(
+    return sample_dspark_markov_block(
         [this](const torch::Tensor& tokens) {
           return draft_impl_->dspark_markov_bias(tokens);
         },
@@ -92,7 +91,7 @@ DraftProposal DSparkWorkerImpl::run_decode_draft(
           sync_sampling_tensor(tokens, sampling_process_group_);
         },
         is_probabilistic_draft_);
-  }
+  }();
 
   draft_proposal.keep_alive() = take_retained_inputs(*draft_output);
 
@@ -116,20 +115,19 @@ DraftProposal sample_dspark_markov_block(const DSparkMarkovBias& markov_bias,
   // kernel error; enforce the contract here.
   CHECK_EQ(anchors.scalar_type(), torch::kInt64);
   CHECK_EQ(anchors.device(), base_logits.device());
-  DraftProposal proposal =
-      token_ids_out.defined()
-          ? DraftProposal::from_token_buffer(
-                std::move(token_ids_out),
-                vocab,
-                is_probabilistic_draft,
-                base_logits.options().dtype(torch::kFloat32))
-          : DraftProposal::preallocate(
-                rows,
-                steps,
-                vocab,
-                is_probabilistic_draft,
-                anchors.options(),
-                base_logits.options().dtype(torch::kFloat32));
+  torch::Tensor token_ids = std::move(token_ids_out);
+  if (!token_ids.defined()) {
+    token_ids = torch::empty({rows, steps}, anchors.options());
+  } else {
+    CHECK_EQ(token_ids.sizes(), torch::IntArrayRef({rows, steps}));
+    CHECK_EQ(token_ids.device(), anchors.device());
+    CHECK_EQ(token_ids.scalar_type(), anchors.scalar_type());
+  }
+  torch::Tensor draft_logits;
+  if (is_probabilistic_draft) {
+    draft_logits = torch::empty({rows, steps, vocab},
+                                base_logits.options().dtype(torch::kFloat32));
+  }
   auto previous = anchors;
   torch::Tensor scratch;
   const bool needs_sync = sampling.sampling_mode() != SamplingMode::GREEDY;
@@ -138,10 +136,10 @@ DraftProposal sample_dspark_markov_block(const DSparkMarkovBias& markov_bias,
     CHECK_EQ(bias.sizes(), torch::IntArrayRef({rows, vocab}))
         << "DSpark reduced vocabulary requires draft-to-target remapping.";
     torch::Tensor step_logits;
-    if (proposal.logits().has_value()) {
+    if (draft_logits.defined()) {
       // add_out into the logits page lets the sampler mutate it in place;
       // draft_logits aliases the page directly.
-      torch::Tensor page = proposal.logits_at(step);
+      torch::Tensor page = draft_logits.select(/*dim=*/1, step);
       torch::add_out(page, base_logits.select(1, step), bias);
       step_logits = page;
     } else {
@@ -156,10 +154,10 @@ DraftProposal sample_dspark_markov_block(const DSparkMarkovBias& markov_bias,
     if (needs_sync) {
       sync_tokens(sampled.next_tokens);
     }
-    proposal.tokens_at(step).copy_(sampled.next_tokens);
+    token_ids.select(/*dim=*/1, step).copy_(sampled.next_tokens);
     previous = sampled.next_tokens;
   }
-  return proposal;
+  return DraftProposal(std::move(token_ids), std::move(draft_logits));
 }
 
 }  // namespace xllm

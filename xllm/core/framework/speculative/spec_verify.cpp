@@ -103,9 +103,10 @@ torch::Tensor materialize_graph_speculative_verify_tokens(
 SampleOutput run_rejection_sampling(SamplingParameters sampling_params,
                                     const DraftProposal& draft_proposal,
                                     const torch::Tensor& target_logits,
-                                    const torch::Tensor& target_hidden_states) {
-  SampleOutput sample_output =
-      rejection_sample(sampling_params, draft_proposal, target_logits);
+                                    const torch::Tensor& target_hidden_states,
+                                    const torch::Tensor& invalid_draft_mask) {
+  SampleOutput sample_output = rejection_sample(
+      sampling_params, draft_proposal, target_logits, invalid_draft_mask);
 
   if (target_hidden_states.defined()) {
     // Reuse next_tokens' [batch, num_val_tokens] shape instead of

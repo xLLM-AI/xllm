@@ -125,6 +125,9 @@ class SamplingSelection final {
 
   // How this batch's sequences are sampled (see SamplingMode).
   PROPERTY(SamplingMode, sampling_mode) = SamplingMode::GREEDY;
+
+  // Host-known compaction size avoids reading the device mask back.
+  PROPERTY(int64_t, num_random_rows) = 0;
 };
 
 class SamplingDistribution final {
@@ -199,6 +202,9 @@ class SamplingRandom final {
   PROPERTY(torch::Tensor, seeds);
 
   PROPERTY(torch::Tensor, seed_offsets);
+
+  // Derived before H2D so sampling can select the default generator on host.
+  PROPERTY(bool, has_unseeded_sample) = false;
 };
 
 class SamplingOutput final {
@@ -246,6 +252,7 @@ class SamplingParameters final {
   FORWARD_PROPERTY(torch::Tensor, selected_token_idxes, selection);
   FORWARD_PROPERTY(torch::Tensor, do_sample, selection);
   FORWARD_PROPERTY(SamplingMode, sampling_mode, selection);
+  FORWARD_PROPERTY(int64_t, num_random_rows, selection);
 
   PROPERTY(SamplingDistribution, distribution);
   FORWARD_PROPERTY(torch::Tensor, temperatures, distribution);
@@ -274,6 +281,7 @@ class SamplingParameters final {
   PROPERTY(SamplingRandom, random);
   FORWARD_PROPERTY(torch::Tensor, seeds, random);
   FORWARD_PROPERTY(torch::Tensor, seed_offsets, random);
+  FORWARD_PROPERTY(bool, has_unseeded_sample, random);
 
   PROPERTY(SamplingOutput, output);
   FORWARD_PROPERTY(bool, logprobs, output);

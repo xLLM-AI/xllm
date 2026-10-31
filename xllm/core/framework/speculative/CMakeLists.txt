@@ -11,6 +11,7 @@ cc_library(
     adaptive/spec_window_collector.h
     adaptive/spec_startup_calibration.h
     draft_config.h
+    draft_distribution.h
     draft_proposal.h
     rejection_sampler.h
     spec_input_builder.h
@@ -33,6 +34,7 @@ cc_library(
     adaptive/spec_window_collector.cpp
     adaptive/spec_startup_calibration.cpp
     draft_config.cpp
+    draft_distribution.cpp
     draft_proposal.cpp
     rejection_sampler.cpp
     spec_input_builder.cpp
@@ -50,6 +52,7 @@ cc_library(
     torch
     $<$<BOOL:${USE_NPU}>:torch_npu>
     :common
+    :config
     :util
     :sampler
     :json_object_grammar

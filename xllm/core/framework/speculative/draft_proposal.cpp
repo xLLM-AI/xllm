@@ -17,42 +17,25 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <utility>
+
 namespace xllm {
 
-DraftProposal DraftProposal::from_token_buffer(
-    torch::Tensor token_ids,
-    int64_t vocab_size,
-    bool is_probabilistic_draft,
-    const torch::TensorOptions& logits_options) {
-  CHECK(token_ids.defined());
-  CHECK_EQ(token_ids.dim(), 2);
-  // Greedy drafts carry tokens only (no logits buffer), so callers pass
-  // vocab_size = 0; the vocabulary bound is only meaningful when q is
-  // reported.
-  DraftProposal proposal(std::move(token_ids));
-  if (is_probabilistic_draft) {
-    CHECK_GT(vocab_size, 0);
-    proposal.logits_ = torch::empty(
-        {proposal.token_ids_.size(0), proposal.token_ids_.size(1), vocab_size},
-        logits_options);
-  }
-  return proposal;
-}
+DraftProposal::DraftProposal(torch::Tensor token_ids, torch::Tensor logits)
+    : DraftProposal(
+          token_ids,
+          logits.defined()
+              ? std::unique_ptr<const DraftDistribution>(
+                    std::make_unique<DenseDraftDistribution>(std::move(logits)))
+              : std::unique_ptr<const DraftDistribution>(
+                    std::make_unique<PointMassDraftDistribution>(token_ids))) {}
 
-DraftProposal DraftProposal::preallocate(
-    int64_t batch,
-    int64_t num_speculative_tokens,
-    int64_t vocab_size,
-    bool is_probabilistic_draft,
-    const torch::TensorOptions& token_options,
-    const torch::TensorOptions& logits_options) {
-  CHECK_GT(batch, 0);
-  CHECK_GT(num_speculative_tokens, 0);
-  return from_token_buffer(
-      torch::empty({batch, num_speculative_tokens}, token_options),
-      vocab_size,
-      is_probabilistic_draft,
-      logits_options);
+DraftProposal::DraftProposal(
+    torch::Tensor token_ids,
+    std::unique_ptr<const DraftDistribution> distribution)
+    : token_ids_(std::move(token_ids)), distribution_(std::move(distribution)) {
+  CHECK(distribution_ != nullptr);
+  distribution_->validate(token_ids_);
 }
 
 }  // namespace xllm

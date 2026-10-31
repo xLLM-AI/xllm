@@ -2,6 +2,13 @@ cmake_minimum_required(VERSION 3.26)
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 option(USE_NPU "Enable NPU support" OFF)
+option(BUILD_NPU_SAMPLING_ABLATION
+       "Instrument NPU sampling for offline ablation; never use for deployment" OFF)
+if(BUILD_NPU_SAMPLING_ABLATION)
+  if(NOT USE_NPU)
+    message(FATAL_ERROR "NPU sampling ablation requires USE_NPU=ON")
+  endif()
+endif()
 option(USE_MLU "Enable MLU support" OFF)
 option(USE_ILU "Enable ILU support" OFF)
 option(USE_CUDA "Enable CUDA support" OFF)
@@ -934,3 +941,14 @@ endif()
 include(native_extension)
 add_subdirectory(xllm)
 add_subdirectory(tests)
+
+# Keep the test-only control out of unrelated libraries and normal builds.
+if(BUILD_NPU_SAMPLING_ABLATION)
+  foreach(sampling_target IN ITEMS sampler speculative runtime tilelang_kernels
+                                   npu_sampling_benchmark sampler_test)
+    if(TARGET ${sampling_target})
+      target_compile_definitions(${sampling_target}
+                                 PRIVATE XLLM_NPU_SAMPLING_ABLATION)
+    endif()
+  endforeach()
+endif()

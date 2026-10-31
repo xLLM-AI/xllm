@@ -28,6 +28,36 @@ namespace xllm::kernel::npu::tilelang {
 
 // Public TileLang kernel APIs exported to the xLLM NPU runtime.
 
+bool supports_sampling_logits(const torch::Tensor& logits);
+
+// FP32 [B] row maximum and log(sum(exp(logits - maximum))). Keep both
+// components separate when computing log probabilities to avoid cancellation.
+// The layout and value contract is the same as sampling_logits.
+std::tuple<torch::Tensor, torch::Tensor> row_log_normalization(
+    const torch::Tensor& logits);
+
+// Normalize logits on-chip and sample without a full probability tensor.
+// Each row must contain a finite logit and otherwise finite or masked (-inf)
+// values. Seed -1 consumes the corresponding caller-supplied uniform in [0,1);
+// other rows hash (seed, offset) without touching global RNG. Input rows may
+// be padded; all control vectors are contiguous [B]. Undefined seeds and
+// offsets select caller-supplied uniforms for every row. When seeds are
+// defined, omitted uniforms assign zero to seed -1 rows; callers may use
+// this only for rows whose sample will be discarded (e.g. mixed greedy rows).
+torch::Tensor sampling_logits(const torch::Tensor& logits,
+                              const torch::Tensor& seeds,
+                              const torch::Tensor& offsets,
+                              const torch::Tensor& uniforms);
+
+#if defined(XLLM_NPU_SAMPLING_ABLATION)
+// Offline A-only reference: finite, nonnegative FP32 weights [B,V] with a
+// positive sum in each row. RNG and layout contracts match sampling_logits.
+torch::Tensor seeded_sample(const torch::Tensor& weights,
+                            const torch::Tensor& seeds,
+                            const torch::Tensor& offsets,
+                            const torch::Tensor& uniforms);
+#endif
+
 // Draft5/7 adaptive verification. All buffers are preallocated contiguous
 // tensors on one NPU; these APIs enqueue on its current stream without copying
 // tensor values to Host. Admission validates the supported geometry first.

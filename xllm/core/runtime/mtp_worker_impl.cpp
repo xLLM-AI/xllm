@@ -3758,22 +3758,27 @@ SampleOutput MTPWorkerImpl<TargetInput>::validate(
   const torch::Tensor& first_tokens =
       draft_outputs.front().sample_output.next_tokens;
   const bool is_probabilistic_draft = first_step_logits.defined();
-  DraftProposal proposal = DraftProposal::preallocate(
-      first_tokens.size(0),
-      static_cast<int64_t>(num_speculative_tokens),
-      is_probabilistic_draft ? first_step_logits.size(-1) : 0,
-      /*is_probabilistic_draft=*/is_probabilistic_draft,
-      first_tokens.options(),
-      is_probabilistic_draft ? first_step_logits.options()
-                             : first_tokens.options());
+  CHECK_EQ(draft_outputs.size(), static_cast<size_t>(num_speculative_tokens));
+  torch::Tensor token_ids = torch::empty(
+      {first_tokens.size(0), num_speculative_tokens}, first_tokens.options());
+  torch::Tensor draft_logits;
+  if (is_probabilistic_draft) {
+    draft_logits = torch::empty({first_tokens.size(0),
+                                 num_speculative_tokens,
+                                 first_step_logits.size(-1)},
+                                first_step_logits.options());
+  }
   int64_t step = 0;
   for (const auto& draft_output : draft_outputs) {
-    proposal.tokens_at(step).copy_(draft_output.sample_output.next_tokens);
+    token_ids.select(/*dim=*/1, step)
+        .copy_(draft_output.sample_output.next_tokens);
     if (is_probabilistic_draft) {
-      proposal.logits_at(step).copy_(draft_output.sample_output.draft_logits);
+      draft_logits.select(/*dim=*/1, step)
+          .copy_(draft_output.sample_output.draft_logits);
     }
     ++step;
   }
+  const DraftProposal proposal(std::move(token_ids), std::move(draft_logits));
 
   return validate(std::move(sampling_params),
                   proposal,
@@ -3812,27 +3817,24 @@ SampleOutput MTPWorkerImpl<TargetInput>::validate(
     }
   }
 
-  // Grammar-invalid draft positions carry the -1 sentinel directly in the
-  // proposal token ids; the rejection sampler rejects negative ids.
-  torch::Tensor validation_token_ids;
+  // Grammar rejection is a verify constraint, not a replacement of the draft
+  // or its distribution. The original proposal retains all asynchronous owners.
+  torch::Tensor invalid_mask;
   if (!invalid_draft.empty()) {
     CHECK_EQ(invalid_draft.size(),
              static_cast<size_t>(batch_size * (num_val_tokens - 1)))
         << "MTP invalid draft mask shape mismatch";
-    torch::Tensor invalid_mask =
+    invalid_mask =
         async_h2d_tensor(invalid_draft, draft_proposal.token_ids().device())
             .view({batch_size, num_val_tokens - 1})
             .to(torch::kBool);
-    validation_token_ids =
-        draft_proposal.token_ids().masked_fill(invalid_mask, /*sentinel=*/-1);
   }
-  SampleOutput sample_output = spec_verify::run_rejection_sampling(
-      std::move(sampling_params),
-      DraftProposal(validation_token_ids.defined() ? validation_token_ids
-                                                   : draft_proposal.token_ids(),
-                    draft_proposal.logits()),
-      target_logits,
-      target_hidden_states);
+  SampleOutput sample_output =
+      spec_verify::run_rejection_sampling(std::move(sampling_params),
+                                          draft_proposal,
+                                          target_logits,
+                                          target_hidden_states,
+                                          invalid_mask);
 
   return sample_output;
 }

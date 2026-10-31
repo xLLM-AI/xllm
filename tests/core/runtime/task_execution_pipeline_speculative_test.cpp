@@ -53,6 +53,7 @@ limitations under the License.
 #include "core/layers/common/attention_metadata.h"
 #include "core/runtime/dflash2_worker_impl.h"
 #include "core/runtime/dflash_worker_impl.h"
+#include "core/runtime/dspark_worker_impl.h"
 #include "core/runtime/executor_impl_factory.h"
 #include "core/runtime/task_execution_pipeline.h"
 #include "core/runtime/unified_mtp_worker_impl.h"
@@ -73,6 +74,39 @@ class PhysicalPagePoolTestPeer final {
 };
 
 namespace {
+
+TEST(DSparkDraftProposalTest,
+     PublishesCompletedMarkovDistributionAndTokenBuffer) {
+  const torch::Tensor anchors = torch::tensor({0, 2}, torch::kInt64);
+  const torch::Tensor base_logits = torch::zeros({2, 3, 4});
+  const torch::Tensor expected =
+      torch::tensor({{1, 2, 3}, {3, 0, 1}}, torch::kInt64);
+  for (const bool probabilistic : {false, true}) {
+    SamplingParameters params;
+    params.sampling_mode() = SamplingMode::RANDOM;
+    prepare_draft_sampling(probabilistic, params);
+    const torch::Tensor output = torch::empty({2, 3}, torch::kInt64);
+    const DraftProposal proposal = sample_dspark_markov_block(
+        [](const torch::Tensor& previous) {
+          return torch::full({previous.size(0), 4}, -INFINITY)
+              .scatter_(1, (previous + 1).remainder(4).unsqueeze(1), 0.0F);
+        },
+        base_logits,
+        anchors,
+        params,
+        [](torch::Tensor&) {},
+        probabilistic,
+        output);
+    EXPECT_TRUE(torch::equal(output, expected));
+    EXPECT_TRUE(torch::equal(proposal.token_ids(), expected));
+    const torch::Tensor lse = proposal.distribution().logsumexp();
+    EXPECT_EQ(lse.defined(), probabilistic);
+    const torch::Tensor log_p = torch::full({2, 3}, -0.5F);
+    torch::Tensor acceptance = log_p.clone();
+    proposal.distribution().apply_acceptance(acceptance, expected, lse);
+    EXPECT_TRUE(torch::equal(acceptance, log_p));
+  }
+}
 
 TEST(UnifiedBlockAdmissionTest, HonorsGraphSwitchAndExpandedBatchLimit) {
   SpeculativeTaskCapacity capacity;

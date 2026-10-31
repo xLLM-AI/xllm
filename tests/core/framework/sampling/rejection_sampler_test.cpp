@@ -21,8 +21,17 @@ limitations under the License.
 #include <torch/torch.h>
 #include <torch/types.h>
 
-#include <cstdint>
+#if defined(USE_NPU)
+#include <torch_npu/csrc/aten/NPUGeneratorImpl.h>
+#endif
 
+#include <array>
+#include <cstdint>
+#include <limits>
+#include <memory>
+#include <tuple>
+
+#include "core/framework/sampling/npu_sampling_policy.h"
 #include "core/framework/sampling/sampler.h"
 #include "tests/core/framework/sampling/sampling_test_utils.h"
 
@@ -334,5 +343,301 @@ TEST(RejectionSamplerTest, Random) {
                               /*rtol=*/1e-2,
                               /*atol=*/1e-2));
 }
+
+namespace {
+
+class SparseDraftTest
+    : public testing::TestWithParam<std::tuple<torch::Device, bool, bool>> {
+#if defined(XLLM_NPU_SAMPLING_ABLATION)
+ protected:
+  void SetUp() override {
+    const uint8_t normalization = std::get<1>(GetParam()) ? 8 : 0;
+    const uint8_t verification = std::get<2>(GetParam()) ? 32 : 0;
+    xllm_npu_sampling_ablation_mask = 23 | normalization | verification;
+  }
+  void TearDown() override { xllm_npu_sampling_ablation_mask = saved_mask_; }
+
+ private:
+  uint8_t saved_mask_ = xllm_npu_sampling_ablation_mask;
+#endif
+};
+
+torch::Tensor sample_sparse_draft(const DraftProposal& proposal,
+                                  const torch::Tensor& probabilities,
+                                  int64_t seed) {
+#if defined(USE_NPU)
+  if (probabilities.device().type() == torch::kPrivateUse1) {
+    auto generator =
+        at_npu::detail::getDefaultNPUGenerator(probabilities.device().index());
+    generator.set_current_seed(static_cast<uint64_t>(seed));
+  }
+#endif
+  return random_sample_from_probs(proposal, probabilities, seed);
+}
+
+TEST_P(SparseDraftTest, PreservesRoundedTopLogprobTieIds) {
+  const auto options = torch::TensorOptions()
+                           .device(std::get<0>(GetParam()))
+                           .dtype(torch::kBFloat16);
+  torch::Tensor logits = torch::zeros({192, 65536}, options);
+  logits.narrow(1, 0, 16).copy_(
+      torch::arange(16, options.dtype(torch::kFloat32)).mul(1e-8));
+  const torch::Tensor tokens =
+      torch::full({64, 2}, 15, options.dtype(torch::kInt64));
+  SamplingParameters params;
+  params.sampling_mode() = SamplingMode::GREEDY;
+  params.logprobs() = true;
+  params.max_top_logprobs() = 5;
+  const auto [expected_values, expected_tokens] =
+      torch::log_softmax(
+          logits.view({64, 3, 65536}), /*dim=*/-1, /*dtype=*/torch::kFloat32)
+          .topk(/*k=*/5, /*dim=*/-1);
+  const SampleOutput actual =
+      rejection_sample(params, DraftProposal(tokens), logits);
+  EXPECT_TRUE(torch::equal(actual.top_tokens, expected_tokens));
+  EXPECT_TRUE(torch::equal(actual.top_logprobs, expected_values));
+}
+
+TEST_P(SparseDraftTest, GrammarRejectionDoesNotReplacePointMassProposal) {
+  const auto options = torch::TensorOptions().device(std::get<0>(GetParam()));
+  const auto ids_options = options.dtype(torch::kInt64);
+  const torch::Tensor tokens = torch::tensor({{1, 2}, {1, 2}}, ids_options);
+  const DraftProposal proposal(tokens);
+  const torch::Tensor invalid = torch::tensor({{true, false}, {false, true}},
+                                              options.dtype(torch::kBool));
+  const torch::Tensor target =
+      torch::full({6, 4}, -INFINITY, options)
+          .scatter_(1,
+                    torch::tensor({{1}, {2}, {3}, {1}, {2}, {3}}, ids_options),
+                    0.0F);
+  SamplingParameters params;
+  params.sampling_mode() = SamplingMode::RANDOM;
+  const SampleOutput masked =
+      rejection_sample(params, proposal, target.clone(), invalid);
+  EXPECT_TRUE(
+      torch::equal(masked.next_tokens,
+                   torch::tensor({{1, -1, -1}, {1, 2, -1}}, ids_options)));
+  const SampleOutput unmasked =
+      rejection_sample(params, proposal, target.clone());
+  EXPECT_TRUE(torch::equal(unmasked.next_tokens,
+                           torch::tensor({{1, 2, 3}, {1, 2, 3}}, ids_options)));
+  EXPECT_TRUE(torch::equal(proposal.token_ids(), tokens));
+}
+
+TEST_P(SparseDraftTest, PointMassMatchesOneHotDenseVerification) {
+  const auto options = torch::TensorOptions().device(std::get<0>(GetParam()));
+  for (const int64_t rows : {1, 8}) {
+    const torch::Tensor tokens =
+        torch::tensor({{1, 2}}, options.dtype(torch::kInt64)).repeat({rows, 1});
+    // Include a forced rejection alongside nontrivial acceptance probabilities.
+    tokens.select(0, 0).select(0, 1).fill_(-1);
+    const torch::Tensor dense_logits =
+        torch::full({rows, 2, 4}, -INFINITY, options)
+            .scatter_(-1, tokens.clamp_min(0).unsqueeze(-1), 0.0F);
+    const torch::Tensor target =
+        torch::tensor({{{0.1F, 0.2F, 0.3F, 0.4F}, {0.4F, 0.3F, 0.2F, 0.1F}}},
+                      options)
+            .repeat({rows, 1, 1});
+    const DraftProposal point_mass(tokens);
+    const DraftProposal dense(tokens, dense_logits);
+    for (const int64_t seed : {1, 42, 100}) {
+      EXPECT_TRUE(torch::equal(sample_sparse_draft(point_mass, target, seed),
+                               sample_sparse_draft(dense, target, seed)));
+    }
+  }
+}
+
+TEST_P(SparseDraftTest, SelectedLogprobsPreserveLargeCommonOffsets) {
+  const auto options = torch::TensorOptions()
+                           .device(std::get<0>(GetParam()))
+                           .dtype(torch::kBFloat16);
+  const torch::Tensor tokens =
+      torch::zeros({64, 2}, options.dtype(torch::kInt64));
+  SamplingParameters params;
+  params.sampling_mode() = SamplingMode::GREEDY;
+  params.logprobs() = true;
+  for (const float offset : {8192.0F, 1e8F}) {
+    torch::Tensor logits = torch::full({192, 65536}, offset, options);
+    const torch::Tensor expected =
+        torch::log_softmax(logits.view({64, 3, 65536}), -1, torch::kFloat32)
+            .select(-1, 0);
+    const SampleOutput actual =
+        rejection_sample(params, DraftProposal(tokens), logits);
+    EXPECT_TRUE(torch::allclose(actual.logprobs, expected, 1e-5, 5e-6));
+    EXPECT_TRUE(torch::equal(actual.next_tokens,
+                             torch::zeros({64, 3}, tokens.options())));
+  }
+}
+
+TEST_P(SparseDraftTest, MatchesDenseWideVocabularyVerification) {
+  const auto options = torch::TensorOptions()
+                           .device(std::get<0>(GetParam()))
+                           .dtype(torch::kFloat32);
+  const auto ids_options = options.dtype(torch::kInt64);
+  constexpr int64_t kVocab = 248320;
+  const torch::Tensor ids =
+      torch::arange(16, ids_options).view({1, 1, 16}).expand({8, 7, 16});
+  const torch::Tensor small_logits = torch::zeros({8, 7, 16}, options);
+  const torch::Tensor tokens = torch::full({8, 7}, 7, ids_options);
+  const torch::Tensor dense_logits =
+      torch::full(
+          {8, 7, kVocab}, -std::numeric_limits<float>::infinity(), options)
+          .scatter_(2, ids, small_logits);
+  torch::Tensor target = torch::full(
+      {64, kVocab}, -std::numeric_limits<float>::infinity(), options);
+  target.narrow(1, 0, 16).copy_(torch::arange(16, options).mul(0.125));
+  target.select(1, 7).fill_(-std::numeric_limits<float>::infinity());
+  SamplingParameters params;
+  params.sampling_mode() = SamplingMode::RANDOM;
+  params.logprobs() = true;
+#if defined(USE_NPU)
+  auto generator = at_npu::detail::getDefaultNPUGenerator(0);
+  generator.set_current_seed(42);
+#endif
+  torch::manual_seed(42);
+  torch::Tensor dense_target = target.clone();
+  const SampleOutput expected = rejection_sample(
+      params, DraftProposal(tokens, dense_logits), dense_target);
+#if defined(USE_NPU)
+  generator.set_current_seed(42);
+#endif
+  torch::manual_seed(42);
+  const SampleOutput actual = rejection_sample(
+      params,
+      DraftProposal(
+          tokens, std::make_unique<SparseDraftDistribution>(ids, small_logits)),
+      target);
+  EXPECT_TRUE(torch::equal(actual.next_tokens, expected.next_tokens));
+  EXPECT_TRUE(torch::allclose(actual.logprobs, expected.logprobs, 1e-5, 5e-6));
+}
+
+TEST_P(SparseDraftTest, MatchesDenseSupportAndSentinelRecovery) {
+  const auto options = torch::TensorOptions()
+                           .device(std::get<0>(GetParam()))
+                           .dtype(torch::kFloat32);
+  const auto ids_options = options.dtype(torch::kInt64);
+  const torch::Tensor tokens = torch::tensor({{1, 3}, {-1, 2}}, ids_options);
+  const torch::Tensor candidates =
+      torch::tensor({{{1, 2}, {3, 4}}, {{1, 2}, {2, 3}}}, ids_options);
+  const torch::Tensor sparse_logits =
+      torch::tensor(
+          {{{1.0F, 0.0F}, {1.0F, 0.0F}}, {{0.25F, 0.75F}, {0.5F, 0.5F}}},
+          options)
+          .log();
+  const torch::Tensor dense_logits =
+      torch::full({2, 2, 5}, -std::numeric_limits<float>::infinity(), options)
+          .scatter_(2, candidates, sparse_logits);
+  // Accept the first draft, then recover outside q's support; the sentinel
+  // row must recover directly from p, without subtracting its stored q.
+  const torch::Tensor target_probs = torch::tensor(
+      {{{0.0F, 1.0F, 0.0F, 0.0F, 0.0F}, {1.0F, 0.0F, 0.0F, 0.0F, 0.0F}},
+       {{0.0F, 0.0F, 0.0F, 0.0F, 1.0F}, {0.0F, 0.0F, 1.0F, 0.0F, 0.0F}}},
+      options);
+  const DraftProposal sparse = DraftProposal(
+      tokens,
+      std::make_unique<SparseDraftDistribution>(candidates, sparse_logits));
+  const torch::Tensor sparse_result =
+      sample_sparse_draft(sparse, target_probs, 123);
+  const torch::Tensor dense_result = sample_sparse_draft(
+      DraftProposal(tokens, dense_logits), target_probs, 123);
+  EXPECT_TRUE(torch::equal(sparse_result, dense_result));
+  EXPECT_TRUE(torch::equal(
+      sparse_result, torch::tensor({{1, 0, -1}, {4, -1, -1}}, ids_options)));
+}
+
+TEST_P(SparseDraftTest, MatchesDenseRandomRejection) {
+  const auto options = torch::TensorOptions()
+                           .device(std::get<0>(GetParam()))
+                           .dtype(torch::kFloat32);
+  constexpr int64_t kRows = 256;
+  const torch::Tensor candidates =
+      torch::tensor({{{0, 2}, {1, 3}}}, options.dtype(torch::kInt64))
+          .repeat({kRows, 1, 1});
+  const torch::Tensor sparse_logits =
+      torch::tensor({{{0.25F, 0.75F}, {0.5F, 0.5F}}}, options)
+          .log()
+          .repeat({kRows, 1, 1});
+  const torch::Tensor dense_logits =
+      torch::full(
+          {kRows, 2, 4}, -std::numeric_limits<float>::infinity(), options)
+          .scatter_(2, candidates, sparse_logits);
+  const torch::Tensor tokens =
+      torch::tensor({{2, 1}}, options.dtype(torch::kInt64)).repeat({kRows, 1});
+  const torch::Tensor target_probs =
+      torch::tensor(
+          {{{0.25F, 0.25F, 0.25F, 0.25F}, {0.125F, 0.125F, 0.25F, 0.5F}}},
+          options)
+          .repeat({kRows, 1, 1});
+  for (int64_t seed = 0; seed < 4; ++seed) {
+    const torch::Tensor dense_result = sample_sparse_draft(
+        DraftProposal(tokens, dense_logits), target_probs, seed);
+    const torch::Tensor sparse_result = sample_sparse_draft(
+        DraftProposal(tokens,
+                      std::make_unique<SparseDraftDistribution>(candidates,
+                                                                sparse_logits)),
+        target_probs,
+        seed);
+    EXPECT_TRUE(torch::equal(sparse_result, dense_result));
+  }
+}
+
+TEST_P(SparseDraftTest, RecoveredDistributionMatchesTarget) {
+  constexpr int64_t kRows = 2048;
+  constexpr int64_t kRounds = 16;
+  const auto options = torch::TensorOptions()
+                           .device(std::get<0>(GetParam()))
+                           .dtype(torch::kFloat32);
+  const torch::Tensor candidates =
+      torch::tensor({{{0, 2}}}, options.dtype(torch::kInt64))
+          .repeat({kRows, 1, 1});
+  const torch::Tensor logits =
+      torch::tensor({{{0.25F, 0.75F}}}, options).log().repeat({kRows, 1, 1});
+  const torch::Tensor target =
+      torch::tensor({{{0.1F, 0.2F, 0.3F, 0.4F}}}, options)
+          .repeat({kRows, 1, 1});
+  torch::Tensor counts = torch::zeros({4}, torch::kInt64);
+  for (int64_t round = 0; round < kRounds; ++round) {
+    const torch::Tensor selected = gumbel_sample(logits);
+    const torch::Tensor tokens =
+        candidates.gather(-1, selected.unsqueeze(-1)).squeeze(-1);
+    const torch::Tensor output = sample_sparse_draft(
+        DraftProposal(
+            tokens,
+            std::make_unique<SparseDraftDistribution>(candidates, logits)),
+        target,
+        100 + round);
+    counts.add_(output.select(1, 0).cpu().bincount({}, 4));
+  }
+  const torch::Tensor observed = counts.to(torch::kFloat32) / (kRows * kRounds);
+  EXPECT_TRUE(torch::allclose(observed,
+                              target.select(0, 0).select(0, 0).cpu(),
+                              /*rtol=*/0.0,
+                              /*atol=*/0.015));
+}
+
+#if defined(USE_NPU)
+const std::array<torch::Device, 2> kSparseDevices = {
+    torch::Device(torch::kCPU),
+    torch::Device(torch::kPrivateUse1, 0)};
+#else
+const std::array<torch::Device, 1> kSparseDevices = {
+    torch::Device(torch::kCPU)};
+#endif
+
+#if defined(XLLM_NPU_SAMPLING_ABLATION)
+INSTANTIATE_TEST_SUITE_P(Devices,
+                         SparseDraftTest,
+                         testing::Combine(testing::ValuesIn(kSparseDevices),
+                                          testing::Bool(),
+                                          testing::Bool()));
+#else
+INSTANTIATE_TEST_SUITE_P(Devices,
+                         SparseDraftTest,
+                         testing::Combine(testing::ValuesIn(kSparseDevices),
+                                          testing::Values(true),
+                                          testing::Values(true)));
+#endif
+
+}  // namespace
 
 }  // namespace xllm

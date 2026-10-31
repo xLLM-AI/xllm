@@ -22,12 +22,14 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <memory>
 #include <utility>
 
 #include "common/metrics.h"
 #include "core/framework/model/causal_lm.h"
 #include "core/framework/parallel_state/process_group.h"
 #include "core/framework/sampling/logits_processor.h"
+#include "core/framework/sampling/npu_sampling_policy.h"
 #include "core/framework/sampling/sampler.h"
 #include "core/framework/speculative/draft_proposal.h"
 #include "core/util/tensor_helper.h"
@@ -75,8 +77,13 @@ DraftProposal sample_dflash2_path(const DFlash2CandidateOutput& candidates,
   } else {
     CHECK_EQ(token_ids.sizes(), torch::IntArrayRef({batch_size, num_steps}));
   }
+  const bool sparse_distribution =
+      npu_sampling_enabled(NpuSamplingOptimization::SPARSE_DFLASH2) &&
+      is_probabilistic_draft && device.type() == c10::DeviceType::PrivateUse1;
   torch::Tensor draft_logits;
-  if (is_probabilistic_draft) {
+  if (sparse_distribution) {
+    draft_logits = torch::empty({batch_size, num_steps, top_k}, float_options);
+  } else if (is_probabilistic_draft) {
     draft_logits = torch::full({batch_size, num_steps, vocab_size},
                                -std::numeric_limits<float>::infinity(),
                                float_options);
@@ -123,13 +130,23 @@ DraftProposal sample_dflash2_path(const DFlash2CandidateOutput& candidates,
             /*dim=*/1, sampled_indices.view({batch_size, 1}), zero_log_probs);
         step_log_probs = torch::where(greedy_rows, one_hot, step_log_probs);
       }
-      draft_logits.select(/*dim=*/1, step)
-          .scatter_(/*dim=*/1, step_candidates, step_log_probs);
+      if (sparse_distribution) {
+        draft_logits.select(/*dim=*/1, step).copy_(step_log_probs);
+      } else {
+        draft_logits.select(/*dim=*/1, step)
+            .scatter_(/*dim=*/1, step_candidates, step_log_probs);
+      }
     }
     token_ids.select(/*dim=*/1, step).copy_(sampled_tokens);
     previous_indices = sampled_indices;
   }
 
+  if (sparse_distribution) {
+    return DraftProposal(
+        std::move(token_ids),
+        std::make_unique<SparseDraftDistribution>(
+            candidates.candidate_ids.clone(), std::move(draft_logits)));
+  }
   return DraftProposal(std::move(token_ids), std::move(draft_logits));
 }
 
@@ -209,16 +226,15 @@ DraftProposal DFlash2WorkerImpl::run_decode_draft(
        num_speculative_tokens,
        draft_output->selected_hidden.size(-1)});
 
-  DraftProposal draft_proposal;
-  {
+  DraftProposal draft_proposal = [&] {
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
     DFlash2CandidateOutput candidates =
         draft_impl_->dflash2_candidates(hidden_states, unary_logits, anchors);
-    draft_proposal = sample_dflash2_path(candidates,
-                                         draft_sampling_params,
-                                         selector_noise,
-                                         unary_logits.size(/*dim=*/-1));
-  }
+    return sample_dflash2_path(candidates,
+                               draft_sampling_params,
+                               selector_noise,
+                               unary_logits.size(/*dim=*/-1));
+  }();
   draft_proposal.keep_alive() = take_retained_inputs(*draft_output);
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
               draft_timer.elapsed_seconds());

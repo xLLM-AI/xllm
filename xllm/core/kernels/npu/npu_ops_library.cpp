@@ -710,6 +710,10 @@ void ensure_xllm_ops_registered() {
 // compiled only under USE_NPU (mutually exclusive with USE_CUDA).
 TORCH_LIBRARY(xllm_ops, m) {
   m.def(
+      "sampling_logits(Tensor logits, Tensor seeds, Tensor offsets, "
+      "Tensor uniforms) -> Tensor");
+  m.def("row_log_normalization(Tensor logits) -> (Tensor, Tensor)");
+  m.def(
       "dspark_allocate_verify_prefixes(Tensor confidence, "
       "Tensor(a!) widths, int budget) -> ()");
   m.def(
@@ -1036,6 +1040,10 @@ TORCH_LIBRARY(xllm_ops, m) {
 }
 
 TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
+  m.impl("sampling_logits",
+         TORCH_FN(xllm::kernel::npu::tilelang::sampling_logits));
+  m.impl("row_log_normalization",
+         TORCH_FN(xllm::kernel::npu::tilelang::row_log_normalization));
   m.impl(
       "dspark_allocate_verify_prefixes",
       TORCH_FN(xllm::kernel::npu::tilelang::dspark_allocate_verify_prefixes));

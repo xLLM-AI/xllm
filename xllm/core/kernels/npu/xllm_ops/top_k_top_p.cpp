@@ -16,6 +16,7 @@ limitations under the License.
 #include <c10/core/Device.h>
 #include <glog/logging.h>
 #include <torch/torch.h>
+#include <torch_npu/csrc/core/npu/sys_ctrl/npu_sys_ctrl.h>
 #include <torch_npu/csrc/libs/init_npu.h>
 #include <torch_npu/torch_npu.h>
 
@@ -41,6 +42,11 @@ namespace {
 class AclWorkspaceCache final {
  public:
   ~AclWorkspaceCache() {
+    // Runtime shutdown invalidates streams and releases device allocations
+    // before main-thread TLS destructors run in embedded Python programs.
+    if (!c10_npu::NpuSysCtrl::GetInstance().GetInitFlag()) {
+      return;
+    }
     for (auto& workspace : workspaces_) {
       if (workspace.second.addr_ != nullptr) {
         aclrtSynchronizeStream(workspace.first);
