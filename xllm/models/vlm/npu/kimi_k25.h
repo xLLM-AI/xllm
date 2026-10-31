@@ -988,19 +988,6 @@ class KimiK2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
 
   bool supports_mla_graph_kv_bucketing() const { return true; }
 
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) {
-    return language_model_->logits(hidden_states, seleted_idxes);
-  }
-
-  // Variant that also outputs hidden states for downstream processing
-  // (e.g., Eagle3 draft model aux hidden state capture).
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes,
-                       torch::Tensor& out_hidden) {
-    return language_model_->logits(hidden_states, seleted_idxes, out_hidden);
-  }
-
   void load_model(std::unique_ptr<ModelLoader> loader) {
     LOG(INFO) << "loading vit / projector weight...";
     for (const auto& state_dict : loader->get_state_dicts()) {
@@ -1036,19 +1023,19 @@ class KimiK2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
       LOG(INFO) << "loaded all weight.";
     }
   }
-  layer::NpuLmHead get_npu_lm_head() {
-    return language_model_->get_npu_lm_head();
-  }
-  void set_npu_lm_head(layer::NpuLmHead& head) {
-    language_model_->set_npu_lm_head(head);
-  }
-
   layer::NpuWordEmbedding get_npu_word_embedding() {
     return language_model_->get_npu_word_embedding();
   }
 
   void set_npu_word_embedding(layer::NpuWordEmbedding& npu_word_embedding) {
     language_model_->set_npu_word_embedding(npu_word_embedding);
+  }
+
+  // The checkpoint stores its head under "language_model.lm_head." rather than
+  // the standard "lm_head." prefix.
+  void load_lm_head(const StateDict& state_dict, layer::LmHead& head) {
+    head.load_state_dict(
+        state_dict.get_dict_with_prefix("language_model.lm_head."));
   }
 
  private:

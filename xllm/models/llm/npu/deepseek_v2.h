@@ -367,6 +367,7 @@ class DeepseekV2ForCausalLMImpl
   void load_model_with_prefixes(std::unique_ptr<ModelLoader> loader,
                                 const std::string& model_prefix,
                                 const std::string& lm_head_prefix) {
+    UNUSED_PARAMETER(lm_head_prefix);
     for (const auto& state_dict : loader->get_state_dicts()) {
       auto sub_dict = state_dict->get_dict_with_prefix(model_prefix);
       if (sub_dict.size() == 0) {
@@ -376,36 +377,10 @@ class DeepseekV2ForCausalLMImpl
         }
       }
       model_->load_state_dict(sub_dict);
-
-      if (tie_word_embeddings) {
-        auto embed_dict =
-            state_dict->get_dict_with_prefix(model_prefix + "embed_tokens.");
-        if (embed_dict.size() == 0) {
-          embed_dict = state_dict->get_dict_with_prefix("model.embed_tokens.");
-          if (embed_dict.size() == 0) {
-            embed_dict = state_dict->get_dict_with_prefix("embed_tokens.");
-          }
-        }
-        npu_lm_head_->load_state_dict(embed_dict);
-      } else {
-        auto lm_dict = state_dict->get_dict_with_prefix(lm_head_prefix);
-        if (lm_dict.size() == 0) {
-          lm_dict = state_dict->get_dict_with_prefix("lm_head.");
-        }
-        npu_lm_head_->load_state_dict(lm_dict);
-      }
     }
 
-    // verify
     model_->verify_loaded_weights(model_prefix);
-    if (tie_word_embeddings) {
-      npu_lm_head_->verify_loaded_weights(model_prefix + "embed_tokens.");
-    } else {
-      npu_lm_head_->verify_loaded_weights(lm_head_prefix);
-    }
-
     model_->merge_loaded_weights();
-    npu_lm_head_->merge_loaded_weights();
   }
 
  private:

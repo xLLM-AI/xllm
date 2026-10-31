@@ -60,7 +60,6 @@ limitations under the License.
 #include "core/platform/platform.h"
 #include "core/runtime/mtp_runtime_helpers.h"
 #include "core/runtime/task_execution_pipeline.h"
-#include "models/model_registry.h"
 #include "runtime/llm_worker_impl.h"
 #include "util/pretty_print.h"
 #include "util/slice.h"
@@ -937,49 +936,6 @@ bool MTPWorkerImpl<TargetInput>::init_model(
         draft_impl_->context_.get_model_args().model_type();
     combined_draft_execution_path_ =
         mtp_async::classify_combined_draft_execution_path(draft_model_type);
-    const bool draft_owns_shared_weights =
-        (options_.enable_mtp_draft_body_tp1() &&
-         combined_draft_execution_path_ ==
-             mtp_async::CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION) ||
-        ModelRegistry::owns_mtp_shared_weights(draft_model_type);
-    // Preserve independently loaded checkpoint weights when the draft model
-    // advertises ownership; other drafts share the target's weights.
-    if (!draft_owns_shared_weights) {
-      const bool python_weights_shared =
-          draft_impl_->share_weights_from(*impl_);
-      if (!python_weights_shared) {
-        const bool share_lm_head = share_target_lm_head_with_draft();
-#if defined(USE_NPU)
-        if (::xllm::KernelConfig::get_instance().npu_kernel_backend() !=
-            "TORCH") {
-          if (share_lm_head) {
-            auto head = impl_->get_npu_lm_head();
-            draft_impl_->set_npu_lm_head(head);
-          }
-          auto word_embedding = impl_->get_npu_word_embedding();
-          if (impl_->has_restored_npu_word_embedding()) {
-            draft_impl_->set_restored_npu_word_embedding(word_embedding);
-          } else {
-            draft_impl_->set_npu_word_embedding(word_embedding);
-          }
-        } else {
-          if (share_lm_head) {
-            auto head = impl_->get_lm_head();
-            draft_impl_->set_lm_head(head);
-          }
-          auto word_embedding = impl_->get_word_embedding();
-          draft_impl_->set_word_embedding(word_embedding);
-        }
-#else
-        if (share_lm_head) {
-          auto head = impl_->get_lm_head();
-          draft_impl_->set_lm_head(head);
-        }
-        auto word_embedding = impl_->get_word_embedding();
-        draft_impl_->set_word_embedding(word_embedding);
-#endif
-      }
-    }
   }
   draft_prefix_policy_ = mtp_async::classify_draft_prefix_policy(
       target_spec_verify_mode_, combined_draft_execution_path_);

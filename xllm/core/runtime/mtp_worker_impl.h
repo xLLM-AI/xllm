@@ -132,7 +132,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   virtual void check_draft_input_embedding(const torch::Tensor& /*embedding*/,
                                            const std::string& /*phase*/) const {
   }
-  virtual bool share_target_lm_head_with_draft() const { return true; }
 
   SampleOutput validate(SamplingParameters sampling_params,
                         const DraftProposal& draft_proposal,

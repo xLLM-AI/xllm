@@ -67,6 +67,17 @@ class ColumnParallelLinearImpl : public torch::nn::Module {
 
   torch::Tensor forward(torch::Tensor input);
 
+  // Mirrors NpuLmHead's three-argument interface so callers do not branch on
+  // the backend: gather the selected rows, then project. `nodeId` is unused.
+  torch::Tensor forward(const torch::Tensor& hidden_states,
+                        const torch::Tensor& seleted_idxes,
+                        int nodeId);
+
+  torch::Tensor forward_with_hidden(const torch::Tensor& hidden_states,
+                                    const torch::Tensor& seleted_idxes,
+                                    torch::Tensor& out_hidden,
+                                    int nodeId);
+
   torch::Tensor forward_quantized(const W8A8DynamicInput& input);
 
   // load the weight from the checkpoint

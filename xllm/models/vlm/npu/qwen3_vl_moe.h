@@ -199,11 +199,6 @@ class Qwen3_VLMoeForConditionalGenerationImpl : public torch::nn::Module {
     return language_model_->forward(tokens, positions, kv_caches, input_params);
   }
 
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) {
-    return language_model_->logits(hidden_states, seleted_idxes);
-  }
-
   void load_model(std::unique_ptr<ModelLoader> loader) {
     for (const auto& state_dict : loader->get_state_dicts()) {
       visual_->load_state_dict(
@@ -217,13 +212,6 @@ class Qwen3_VLMoeForConditionalGenerationImpl : public torch::nn::Module {
     if (!model_args_.encoder_embedding_mode()) {
       language_model_->load_model(std::move(loader), "model.language_model.");
     }
-  }
-
-  layer::NpuLmHead get_npu_lm_head() {
-    return language_model_->get_npu_lm_head();
-  }
-  void set_npu_lm_head(layer::NpuLmHead& head) {
-    language_model_->set_npu_lm_head(head);
   }
 
   layer::NpuWordEmbedding get_npu_word_embedding() {

@@ -22,6 +22,7 @@ limitations under the License.
 #include <memory>
 #include <string>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "core/kv_cache/storage/kv_cache.h"
@@ -59,6 +60,8 @@ class BaseLoader {
   virtual void load_state_dict(const StateDict& state_dict) {};
   virtual void verify_loaded_weights() const {};
   virtual void verify_loaded_weights(const std::string& prefix) const {};
+
+  bool is_weight_loaded() const { return weight_loaded_; }
 
   // Default merge path:
   //   kEager  : subclass overrides this method (no-op here).
@@ -158,6 +161,22 @@ class BaseLoader {
   }
   bool load_to_host() const { return mode_ == LoadMode::kManual; }
 
+  void init_dummy_weight(int idx, const torch::TensorOptions& options) {
+    working_tensors()[idx] = torch::zeros({1}, options.device(target_device()));
+  }
+
+  // Uniform write helpers: stage a loaded weight into the correct vector and
+  // mark it loaded. Subclasses and set_weight* go through these so the loaded
+  // flag stays consistent with the tensor state.
+  void set_device_weight(int idx, at::Tensor tensor) {
+    at_weight_tensors_[idx] = std::move(tensor);
+    weight_loaded_ = true;
+  }
+  void set_host_weight(int idx, at::Tensor tensor) {
+    at_host_weight_tensors_[idx] = std::move(tensor);
+    weight_loaded_ = true;
+  }
+
   // Return a {1}-shaped zeros tensor with the same dtype as the working slot
   // at `idx`, placed on the correct target device for the current mode.
   at::Tensor zero_like_working(int idx) const;
@@ -249,6 +268,7 @@ class BaseLoader {
   torch::TensorOptions options_;
   std::vector<at::Tensor> at_weight_tensors_;
   std::vector<at::Tensor> at_host_weight_tensors_;
+  bool weight_loaded_ = false;
   std::unique_ptr<ExpertBufferManager> shared_buffer_ = nullptr;
   std::unordered_map<std::string, torch::Tensor> shared_experts_weights_;
   std::unordered_map<std::string, std::vector<torch::Tensor>> experts_weights_;

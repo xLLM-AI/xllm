@@ -441,14 +441,7 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
   LlmForCausalLMImplBase(const ModelContext& context) {
     tie_word_embeddings = context.get_model_args().tie_word_embeddings();
     embedding_mode_ = context.get_model_args().embedding_mode();
-    // register submodules
     model_ = register_module("model", LlmModelType(context));
-
-    if (!embedding_mode_) {
-      npu_lm_head_ = register_module("npu_lm_head", layer::NpuLmHead(context));
-    } else {
-      LOG(INFO) << "Skip registering npu_lm_head in embedding mode.";
-    }
   }
 
   torch::Tensor get_input_embeddings(torch::Tensor input_ids) {
@@ -471,29 +464,6 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
                       std::vector<KVCache>& kv_caches,
                       const InputParams& input_params) {
     return model_->forward(tokens, positions, kv_caches, input_params);
-  }
-
-  // hidden_states: [num_tokens, hidden_size]
-  // seleted_idxes: [num_tokens]
-  // returns: [num_tokens, vocab_size]
-  virtual torch::Tensor logits(const torch::Tensor& hidden_states,
-                               const torch::Tensor& seleted_idxes) {
-    CHECK(!npu_lm_head_.is_empty())
-        << "npu_lm_head is not initialized in embedding mode.";
-    return npu_lm_head_(hidden_states, seleted_idxes, 0);
-  }
-
-  // hidden_states: [num_tokens, hidden_size]
-  // seleted_idxes: [num_tokens]
-  // out_hidden: [num_seqs, hidden_size]
-  // returns: [num_tokens, vocab_size]
-  virtual torch::Tensor logits(const torch::Tensor& hidden_states,
-                               const torch::Tensor& seleted_idxes,
-                               torch::Tensor& out_hidden) {
-    CHECK(!npu_lm_head_.is_empty())
-        << "npu_lm_head is not initialized in embedding mode.";
-    return npu_lm_head_->forward_with_hidden(
-        hidden_states, seleted_idxes, out_hidden, 0);
   }
 
   // hidden_states: [num_tokens, hidden_size]
@@ -521,32 +491,10 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
                                    prefix,
                                    "model.",
                                    ""}));
-      if (!embedding_mode_) {
-        if (tie_word_embeddings) {
-          npu_lm_head_->load_state_dict(
-              state_dict->get_dict_with_prefix(std::vector<std::string>{
-                  prefix + "embed_tokens.", "embed_tokens."}));
-        } else {
-          npu_lm_head_->load_state_dict(
-              state_dict->get_dict_with_prefix("lm_head."));
-        }
-      }
     }
 
-    // verify
     model_->verify_loaded_weights(prefix);
-    if (!embedding_mode_) {
-      if (tie_word_embeddings) {
-        npu_lm_head_->verify_loaded_weights("embed_tokens.");
-      } else {
-        npu_lm_head_->verify_loaded_weights("lm_head.");
-      }
-    }
-
     model_->merge_loaded_weights();
-    if (!embedding_mode_) {
-      npu_lm_head_->merge_loaded_weights();
-    }
   }
 
   virtual void lazy_load_model(
@@ -558,31 +506,9 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
     }
     for (const auto& state_dict : loader->get_state_dicts()) {
       model_->load_state_dict(state_dict->get_dict_with_prefix(prefix));
-      if (!embedding_mode_) {
-        if (tie_word_embeddings) {
-          npu_lm_head_->load_state_dict(
-              state_dict->get_dict_with_prefix(prefix + "embed_tokens."));
-        } else {
-          npu_lm_head_->load_state_dict(
-              state_dict->get_dict_with_prefix("lm_head."));
-        }
-      }
     }
-    // verify
     model_->verify_loaded_weights(prefix);
-    if (!embedding_mode_) {
-      if (tie_word_embeddings) {
-        npu_lm_head_->verify_loaded_weights(prefix + "embed_tokens.");
-      } else {
-        npu_lm_head_->verify_loaded_weights("lm_head.");
-      }
-    }
-
     model_->merge_and_move_pinned_host();
-    if (!embedding_mode_) {
-      npu_lm_head_->merge_and_move_pinned_host();
-    }
-
     keep_host_weights = true;
   }
 
@@ -592,17 +518,11 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
       return;
     }
     model_->free_weights();
-    if (!npu_lm_head_.is_empty()) {
-      npu_lm_head_->free_weights();
-    }
     keep_host_weights = false;
   }
 
   virtual void reload_model_weights() {
     model_->reload_weights();
-    if (!npu_lm_head_.is_empty()) {
-      npu_lm_head_->reload_weights();
-    }
     auto stream = c10_npu::getCurrentNPUStream();
     stream.synchronize();
   }
@@ -610,18 +530,12 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
   virtual void init_rolling_model_state() {
     model_->reload_non_decoder_weights();
     model_->refresh_rolling_weights();
-    if (!npu_lm_head_.is_empty()) {
-      npu_lm_head_->reload_weights();
-    }
     auto stream = c10_npu::getCurrentNPUStream();
     stream.synchronize();
   }
 
   virtual void reload_model_weights_from_device() {
     model_->reload_weights_from_device();
-    if (!npu_lm_head_.is_empty()) {
-      npu_lm_head_->reload_weights_from_device();
-    }
   }
 
   virtual void prepare_expert_weight(int32_t layer_id,
@@ -633,14 +547,6 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
   virtual bool last_prepare_expert_weight_ok(int32_t /*layer_id*/) const {
     return true;
   }
-
-  virtual layer::NpuLmHead get_npu_lm_head() {
-    CHECK(!npu_lm_head_.is_empty())
-        << "npu_lm_head is not initialized in embedding mode.";
-    return npu_lm_head_;
-  }
-
-  virtual void set_npu_lm_head(layer::NpuLmHead& head) { npu_lm_head_ = head; }
 
   virtual layer::NpuWordEmbedding get_npu_word_embedding() {
     return model_->get_npu_word_embedding();
@@ -719,8 +625,6 @@ class LlmForCausalLMImplBase : public torch::nn::Module {
   bool keep_host_weights{false};
   std::shared_ptr<layer::RollingWeightBuffer> rolling_weight_buffer_{nullptr};
   std::unique_ptr<RollingLoadManager> rolling_load_manager_{nullptr};
-  // test
-  layer::NpuLmHead npu_lm_head_{nullptr};
 };
 
 }  // namespace xllm::npu::model

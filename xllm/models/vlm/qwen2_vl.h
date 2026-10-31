@@ -509,11 +509,6 @@ class Qwen2_VLForConditionalGenerationImpl : public torch::nn::Module {
     return F::normalize(h, F::NormalizeFuncOptions().p(2).dim(1));
   }
 
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) {
-    return language_model_->logits(hidden_states, seleted_idxes);
-  }
-
   void load_model(std::unique_ptr<ModelLoader> loader) {
     for (const auto& state_dict : loader->get_state_dicts()) {
       visual_->load_state_dict(state_dict->get_dict_with_prefix("visual."));
@@ -522,9 +517,6 @@ class Qwen2_VLForConditionalGenerationImpl : public torch::nn::Module {
       language_model_->load_model(std::move(loader));
     }
   }
-
-  layer::LmHead get_lm_head() { return language_model_->get_lm_head(); }
-  void set_lm_head(layer::LmHead& head) { language_model_->set_lm_head(head); }
 
   layer::WordEmbedding get_word_embedding() {
     return language_model_->get_word_embedding();

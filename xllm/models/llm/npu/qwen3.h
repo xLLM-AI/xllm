@@ -369,33 +369,13 @@ class QWen3ForCausalLMImpl : public LlmForCausalLMImplBase<QWen3Model> {
         model_->load_restored_embed_tokens(
             model_state_dict, global_rotation, device_);
       }
-      if (!embedding_mode_) {
-        if (tie_word_embeddings) {
-          npu_lm_head_->load_state_dict(
-              state_dict->get_dict_with_prefix(std::vector<std::string>{
-                  prefix + "embed_tokens.", "embed_tokens."}));
-        } else {
-          npu_lm_head_->load_state_dict(
-              state_dict->get_dict_with_prefix("lm_head."));
-        }
-      }
     }
 
     model_->verify_loaded_weights(prefix);
     model_->verify_restored_embed_tokens(prefix);
-    if (!embedding_mode_) {
-      if (tie_word_embeddings) {
-        npu_lm_head_->verify_loaded_weights("embed_tokens.");
-      } else {
-        npu_lm_head_->verify_loaded_weights("lm_head.");
-      }
-    }
 
     model_->merge_loaded_weights();
     model_->merge_restored_embed_tokens();
-    if (!embedding_mode_) {
-      npu_lm_head_->merge_loaded_weights();
-    }
   }
 
   void lazy_load_model(std::unique_ptr<ModelLoader> loader,
@@ -418,32 +398,13 @@ class QWen3ForCausalLMImpl : public LlmForCausalLMImplBase<QWen3Model> {
         model_->load_restored_embed_tokens(
             model_state_dict, global_rotation, device_);
       }
-      if (!embedding_mode_) {
-        if (tie_word_embeddings) {
-          npu_lm_head_->load_state_dict(
-              state_dict->get_dict_with_prefix(prefix + "embed_tokens."));
-        } else {
-          npu_lm_head_->load_state_dict(
-              state_dict->get_dict_with_prefix("lm_head."));
-        }
-      }
     }
 
     model_->verify_loaded_weights(prefix);
     model_->verify_restored_embed_tokens(prefix);
-    if (!embedding_mode_) {
-      if (tie_word_embeddings) {
-        npu_lm_head_->verify_loaded_weights(prefix + "embed_tokens.");
-      } else {
-        npu_lm_head_->verify_loaded_weights("lm_head.");
-      }
-    }
 
     model_->merge_and_move_pinned_host();
     model_->merge_and_move_restored_embed_tokens();
-    if (!embedding_mode_) {
-      npu_lm_head_->merge_and_move_pinned_host();
-    }
 
     keep_host_weights = true;
   }

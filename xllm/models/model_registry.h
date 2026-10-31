@@ -99,7 +99,6 @@ struct ModelMeta {
   QuantArgsLoader quant_args_loader;
   TokenizerArgsLoader tokenizer_args_loader;
   CpShardingMode cp_sharding_mode = CpShardingMode::NONE;
-  bool owns_mtp_shared_weights = false;
   bool supports_dcp = false;
   MtpArgsAdapter mtp_args_adapter;
 };
@@ -177,9 +176,6 @@ class ModelRegistry {
 
   static void register_dcp_capability(const std::string& name);
   static bool supports_dcp(const std::string& name);
-
-  static void register_mtp_shared_weight_owner(const std::string& name);
-  static bool owns_mtp_shared_weights(const std::string& name);
 
   static void register_mtp_args_adapter(const std::string& name,
                                         MtpArgsAdapter adapter);
@@ -285,7 +281,7 @@ std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context);
           ModelClass model(context);                               \
           model->eval();                                           \
           return std::make_unique<xllm::CausalLMImpl<ModelClass>>( \
-              std::move(model), context.get_tensor_options());     \
+              std::move(model), context);                          \
         } __VA_OPT__(, ) __VA_ARGS__);                             \
     return true;                                                   \
   }()
@@ -328,7 +324,7 @@ std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context);
           ModelClass model(context);                                           \
           model->eval();                                                       \
           return std::make_unique<xllm::CausalRecImpl<ModelClass>>(            \
-              std::move(model), context.get_tensor_options());                 \
+              std::move(model), context);                                      \
         });                                                                    \
     return true;                                                               \
   }()
@@ -344,7 +340,7 @@ std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context);
           ModelClass model(context);                                 \
           model->eval();                                             \
           return std::make_unique<xllm::GenericRecImpl<ModelClass>>( \
-              std::move(model), context.get_tensor_options());       \
+              std::move(model), context);                            \
         });                                                          \
     return true;                                                     \
   }()
@@ -360,7 +356,7 @@ std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context);
           ModelClass model(context);                                \
           model->eval();                                            \
           return std::make_unique<xllm::CausalVLMImpl<ModelClass>>( \
-              std::move(model), context.get_tensor_options());      \
+              std::move(model), context);                           \
         } __VA_OPT__(, ) __VA_ARGS__);                              \
     return true;                                                    \
   }()
