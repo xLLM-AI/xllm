@@ -23,7 +23,12 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/kv_cache/storage/kv_cache_utils.h"
 #include "core/kv_cache/transfer/kv_cache_store.h"
+
+#if defined(USE_NPU)
+#include <torch_npu/csrc/core/npu/NPUFormat.h>
+#endif
 
 namespace xllm {
 namespace {
@@ -280,12 +285,17 @@ bool HierarchyKVCacheTransfer::finalize_registration() {
     store_config.model_id = options_.store_namespace();
     store_config.tp_rank = options_.tp_rank();
     store_config.tp_size = options_.tp_size();
+    store_config.kv_split_size = options_.kv_split_size();
+    store_config.kv_split_rank = options_.kv_split_rank();
+    store_config.write_enabled = options_.store_write_enabled();
     store_config.enable_mla = options_.enable_mla();
     LOG(INFO) << "[Mooncake][StoreEngine] initialize, endpoint="
               << store_local_hostname << ", protocol=" << store_config.protocol
               << ", worker_rank=" << options_.store_worker_id()
               << ", tp_rank=" << store_config.tp_rank
               << ", tp_size=" << store_config.tp_size
+              << ", kv_split_size=" << store_config.kv_split_size
+              << ", kv_split_rank=" << store_config.kv_split_rank
               << ", enable_mla=" << store_config.enable_mla;
     kv_cache_store_ = std::make_unique<KVCacheStore>();
     CHECK(kv_cache_store_->init(store_config, std::move(store_index)))
@@ -295,6 +305,8 @@ bool HierarchyKVCacheTransfer::finalize_registration() {
               << ", worker_rank=" << options_.store_worker_id()
               << ", tp_rank=" << store_config.tp_rank
               << ", tp_size=" << store_config.tp_size
+              << ", kv_split_size=" << store_config.kv_split_size
+              << ", kv_split_rank=" << store_config.kv_split_rank
               << ", enable_mla=" << store_config.enable_mla;
   }
   registration_finalized_ = true;
@@ -404,6 +416,24 @@ HostKVLayout HierarchyKVCacheTransfer::create_host_kv_layout(
       layer.group_layer_slot = static_cast<int64_t>(layer_slot);
       layer.device_roles =
           build_block_type_tensor_map(*group_caches[layer_slot], block_type);
+      for (auto& [role, tensor] : layer.device_roles) {
+        if (role != KVCacheTensorRole::INDEX &&
+            role != KVCacheTensorRole::INDEX_SCALE) {
+          continue;
+        }
+        const int64_t logical_blocks =
+            domain.kv_cache_shape.key_cache_shape().front();
+        if (tensor.size(0) == logical_blocks) {
+          continue;
+        }
+        CHECK(tensor.is_contiguous());
+#if defined(USE_NPU)
+        CHECK_EQ(at_npu::native::get_npu_format(tensor), ACL_FORMAT_ND)
+            << "host indexer folding requires ND storage";
+#endif
+        tensor = tensor.view(
+            fold_shape_for_host_transfer(tensor.sizes().vec(), logical_blocks));
+      }
       group.layers.emplace_back(std::move(layer));
     }
     groups.emplace_back(std::move(group));
@@ -537,7 +567,10 @@ std::vector<uint8_t> HierarchyKVCacheTransfer::prefetch_kv_blocks(
       kv_cache_store_->batch_get_with_status(block_transfer_info);
   const size_t hit_count =
       std::count(hits.begin(), hits.end(), static_cast<uint8_t>(1));
-  VLOG(1) << "[Mooncake][PrefetchGet] type="
+  VLOG(1) << "[Mooncake][PrefetchGet] worker_rank="
+          << options_.store_worker_id()
+          << ", kv_split_size=" << options_.kv_split_size()
+          << ", kv_split_rank=" << options_.kv_split_rank() << ", type="
           << static_cast<int32_t>(block_transfer_info[0].block_type)
           << ", blocks=" << hits.size() << ", hits=" << hit_count;
   return hits;
@@ -586,9 +619,10 @@ uint32_t HierarchyKVCacheTransfer::offload(
     VLOG(1) << "[Mooncake][OffloadPut] worker_rank="
             << options_.store_worker_id() << ", tp_rank=" << options_.tp_rank()
             << ", tp_size=" << options_.tp_size()
+            << ", kv_split_size=" << options_.kv_split_size()
+            << ", kv_split_rank=" << options_.kv_split_rank()
             << ", enable_mla=" << options_.enable_mla()
-            << ", skipped_mla_nonzero_rank="
-            << (options_.enable_mla() && options_.tp_rank() != 0U)
+            << ", store_write_enabled=" << options_.store_write_enabled()
             << ", blocks=" << block_transfer_info.size()
             << ", success=" << put_count;
   }

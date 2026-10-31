@@ -2620,12 +2620,25 @@ WorkerImpl::create_hierarchy_kv_cache_transfer(
   const uint32_t tp_size =
       mlu_overlap ? dp_local_size : dp_local_size / options_.cp_size();
   CHECK_GT(tp_size, 0u);
-  const int32_t worker_rank = context_.get_parallel_args().rank();
+  const auto& parallel_args = context_.get_parallel_args();
+  const int32_t worker_rank = parallel_args.rank();
   CHECK_GE(worker_rank, 0);
   const uint32_t worker_id = static_cast<uint32_t>(worker_rank);
+  const int32_t kv_split_size = parallel_args.kv_split_size_effective();
+  CHECK_GT(kv_split_size, 0);
+  CHECK_EQ(dp_local_size % kv_split_size, 0U);
+  // Pure DCP interleaves shards; PCP groups each shard's replicas contiguously.
+  const bool store_write_enabled =
+      !options_.enable_mla() ||
+      (options_.cp_size() == 1
+           ? worker_id % dp_local_size < static_cast<uint32_t>(kv_split_size)
+           : worker_id % (dp_local_size / kv_split_size) == 0);
   HierarchyKVCacheTransfer::Options transfer_options;
   transfer_options.tp_rank(worker_id % tp_size)
       .tp_size(tp_size)
+      .kv_split_size(kv_split_size)
+      .kv_split_rank(parallel_args.kv_split_rank())
+      .store_write_enabled(store_write_enabled)
       .layers(context_.get_model_args().n_layers())
       .host_blocks_factor(options_.host_blocks_factor())
       .layers_wise_copy_batchs(options_.layers_wise_copy_batchs())

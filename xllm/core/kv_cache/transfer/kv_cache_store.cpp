@@ -46,6 +46,9 @@ bool KVCacheStore::init(const KVCacheStoreInitConfig& config,
       << "KVCacheStore requires a target model identity.";
   CHECK_GT(config.tp_size, 0U);
   CHECK_LT(config.tp_rank, config.tp_size);
+  CHECK_GE(config.kv_split_size, 1);
+  CHECK_GE(config.kv_split_rank, 0);
+  CHECK_LT(config.kv_split_rank, config.kv_split_size);
   config_ = config;
   initialize_store_index(std::move(store_index));
 
@@ -187,6 +190,13 @@ std::string KVCacheStore::build_key_prefix(
     prefix.append(std::to_string(config_.tp_rank));
     prefix.push_back(':');
   }
+  if (config_.kv_split_size > 1) {
+    prefix.append("kv:");
+    prefix.append(std::to_string(config_.kv_split_size));
+    prefix.push_back(':');
+    prefix.append(std::to_string(config_.kv_split_rank));
+    prefix.push_back(':');
+  }
   prefix.append(schema_hash);
   return prefix;
 }
@@ -281,9 +291,10 @@ uint32_t KVCacheStore::batch_put(
   if (!is_initialized_ || block_transfer_info.empty()) {
     return 0;
   }
-  if (config_.enable_mla && config_.tp_rank != 0U) {
-    VLOG(1) << "KVCacheStore skips MLA remote put on non-zero rank: tp_rank="
-            << config_.tp_rank;
+  if (!config_.write_enabled) {
+    VLOG(1) << "KVCacheStore skips remote put on a non-writer: tp_rank="
+            << config_.tp_rank << ", kv_split_size=" << config_.kv_split_size
+            << ", kv_split_rank=" << config_.kv_split_rank;
     return static_cast<uint32_t>(block_transfer_info.size());
   }
 

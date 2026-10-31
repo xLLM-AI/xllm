@@ -659,6 +659,13 @@ std::optional<std::string> validate_host_cache_options(
   if (!options.has_key_cache_shape) {
     violations.emplace_back("KV cache has no key-cache tensor to offload");
   }
+#if defined(USE_NPU)
+  if (options.requires_indexer_row_folding &&
+      use_npu_nz_kv_cache_layout(options.model_type)) {
+    violations.emplace_back(
+        "split indexer host offload requires ND cache storage");
+  }
+#endif
   if (options.has_grouped_cache_layout &&
       !options.supports_grouped_cache_offload) {
     std::ostringstream violation;
@@ -711,6 +718,19 @@ std::vector<int64_t> build_host_group_tensor_shape(
       build_host_tensor_shape(base_shape, host_blocks_factor);
   host_shape.insert(host_shape.begin() + 1, layer_count);
   return host_shape;
+}
+
+std::vector<int64_t> fold_shape_for_host_transfer(
+    const std::vector<int64_t>& shape,
+    int64_t logical_blocks) {
+  CHECK_GE(shape.size(), 2);
+  CHECK_GT(logical_blocks, 0);
+  CHECK_EQ(shape[0] % logical_blocks, 0)
+      << "indexer pages must form complete logical KV blocks";
+  std::vector<int64_t> folded = shape;
+  folded[0] = logical_blocks;
+  folded[1] *= shape[0] / logical_blocks;
+  return folded;
 }
 
 void create_host_page_aligned_tensor(const std::vector<int64_t>& dims,

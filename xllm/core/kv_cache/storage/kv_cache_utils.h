@@ -142,6 +142,7 @@ struct HostCacheValidationOptions {
   bool supports_grouped_cache_offload = false;
   bool has_conv_cache_shape = false;
   bool has_ssm_cache_shape = false;
+  bool requires_indexer_row_folding = false;
   std::string kv_cache_dtype = "auto";
   std::string indexer_cache_dtype = "auto";
   std::string model_type;
@@ -237,6 +238,11 @@ std::vector<int64_t> build_host_group_tensor_shape(
     const std::vector<int64_t>& base_shape,
     double host_blocks_factor,
     int64_t layer_count);
+
+// Group physical indexer pages into one transfer row per logical KV block.
+std::vector<int64_t> fold_shape_for_host_transfer(
+    const std::vector<int64_t>& shape,
+    int64_t logical_blocks);
 
 // Allocate a page-aligned, mlock'd (and NPU-registered) host tensor over a
 // HostPageAlignedRegion. The region owns the memory; the tensor is a view.
