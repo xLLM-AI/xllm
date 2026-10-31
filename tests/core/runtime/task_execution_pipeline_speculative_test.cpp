@@ -106,6 +106,9 @@ TEST(UnifiedBlockAdmissionTest, RejectsNonGreedyAndTransformedRequests) {
   LlmForwardInput input;
   input.input_params.meta.batch_forward_type = BatchForwardType::DECODE;
   EXPECT_TRUE(supports_unified_block_graph(capacity, 1, input));
+  capacity.draft_swa_cache = true;
+  EXPECT_FALSE(supports_unified_block_graph(capacity, 1, input));
+  capacity.draft_swa_cache = false;
   input.sampling_params.logprobs() = true;
   EXPECT_FALSE(supports_unified_block_graph(capacity, 1, input));
   input.sampling_params.logprobs() = false;
@@ -1701,6 +1704,70 @@ class SpeculativePipelineTest : public ::testing::Test {
   SpeculativeTaskCapacity capacity_;
   std::unique_ptr<TaskExecutionPipeline> pipeline_;
 };
+
+TEST_F(SpeculativePipelineTest,
+       BlockDraftSwaMapsWaitForKvAllocationAndKeepSlotAddresses) {
+  for (const auto kind :
+       {SpeculativeTaskKind::DSPARK, SpeculativeTaskKind::DFLASH2}) {
+    SCOPED_TRACE(static_cast<int32_t>(kind));
+    configure_dspark_batch_graphs();
+    capacity_.kind = kind;
+    capacity_.selector_top_k = 1;
+    capacity_.draft_swa_cache = true;
+    auto target_cache = std::move(target_cache_);
+    auto draft_cache = std::move(draft_cache_);
+    target_cache_.clear();
+    draft_cache_.clear();
+    create();
+    ASSERT_NE(pipeline_, nullptr);
+    for (uint32_t slot_id = 0; slot_id < 2; ++slot_id) {
+      const auto& slot =
+          TaskPipelineTestPeer::speculative_slot(*pipeline_, slot_id);
+      EXPECT_FALSE(slot.draft_block_map.defined());
+      EXPECT_FALSE(slot.host_draft_block_map.defined());
+    }
+    EXPECT_EQ(pipeline_->submit(dspark_batch_input(1, /*decode=*/false))
+                  .status.code(),
+              StatusCode::UNAVAILABLE);
+    target_cache_ = std::move(target_cache);
+    draft_cache_ = std::move(draft_cache);
+    const auto swa_input = [&](bool decode) {
+      auto source = dspark_batch_input(1, decode);
+      source.input_params.cache_block_tables[BlockType::SWA] =
+          torch::tensor({{2, 1}}, torch::kInt32);
+      return source;
+    };
+    ASSERT_TRUE(execute(swa_input(false)).sample_output.next_tokens.defined());
+    EXPECT_TRUE(torch::equal(draft_->context_slots.back().cpu(),
+                             torch::tensor({32, 33}, torch::kInt32)));
+    std::array<std::array<uintptr_t, 2>, 2> bindings{};
+    for (uint32_t slot_id = 0; slot_id < 2; ++slot_id) {
+      const auto& slot =
+          TaskPipelineTestPeer::speculative_slot(*pipeline_, slot_id);
+      ASSERT_EQ(slot.draft_block_map.numel(), 8);
+      ASSERT_EQ(slot.host_draft_block_map.numel(), 8);
+      bindings[slot_id] = {
+          reinterpret_cast<uintptr_t>(slot.draft_block_map.data_ptr()),
+          reinterpret_cast<uintptr_t>(slot.host_draft_block_map.data_ptr())};
+    }
+    auto warmup = swa_input(true);
+    warmup.input_params.meta.is_graph_warmup = true;
+    ASSERT_TRUE(execute(warmup).is_graph_warmup);
+    for (uint32_t round = 0; round < 2; ++round) {
+      ASSERT_TRUE(execute(swa_input(true)).sample_output.next_tokens.defined());
+    }
+    for (uint32_t slot_id = 0; slot_id < 2; ++slot_id) {
+      const auto& slot =
+          TaskPipelineTestPeer::speculative_slot(*pipeline_, slot_id);
+      EXPECT_EQ(reinterpret_cast<uintptr_t>(slot.draft_block_map.data_ptr()),
+                bindings[slot_id][0]);
+      EXPECT_EQ(
+          reinterpret_cast<uintptr_t>(slot.host_draft_block_map.data_ptr()),
+          bindings[slot_id][1]);
+    }
+    pipeline_.reset();
+  }
+}
 
 TEST_F(SpeculativePipelineTest, HostReloadWaitsForTargetAndDraftBeforeForward) {
   auto load = create_layer_synchronizer(/*num_layers=*/2);

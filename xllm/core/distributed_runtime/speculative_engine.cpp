@@ -157,6 +157,8 @@ bool SpeculativeEngineBase<TargetEngine>::init_model(
 
     // check if the max context length are the same
     const auto& draft_model_args = draft_engine_->model_args();
+    draft_cache_plan_ =
+        resolve_draft_swa_cache_plan(draft_model_args, options_);
     if (model_args_.max_position_embeddings() !=
         draft_model_args.max_position_embeddings()) {
       LOG(WARNING) << "draft and target models have different max context "
@@ -290,7 +292,17 @@ bool SpeculativeEngineBase<TargetEngine>::allocate_kv_cache(
   // allocate kv cache
   target_kv_cache_cap.n_blocks() = n_blocks;
   target_kv_cache_cap.cache_size_in_bytes() = kv_cache_size;
-  draft_kv_cache_cap.n_blocks() = n_blocks;
+  const int64_t draft_swa_count = draft_cache_plan_.num_blocks;
+  if (draft_swa_count > 0) {
+    target_kv_cache_cap.draft_swa_count(draft_swa_count)
+        .draft_swa_window(draft_cache_plan_.window_size);
+    draft_kv_cache_cap.draft_swa_count(draft_swa_count);
+    LOG(INFO) << "Block draft SWA cache: target_blocks=" << n_blocks
+              << ", draft_blocks=" << draft_swa_count
+              << ", window=" << target_kv_cache_cap.draft_swa_window();
+  }
+  draft_kv_cache_cap.n_blocks() =
+      draft_swa_count > 0 ? draft_swa_count : n_blocks;
   draft_kv_cache_cap.cache_size_in_bytes() = kv_cache_size;
   return allocate_target_cache(target_kv_cache_cap) &&
          draft_engine_->allocate_kv_cache(draft_kv_cache_cap,
@@ -373,6 +385,15 @@ int64_t SpeculativeEngineBase<TargetEngine>::calculate_kv_cache(
       options_.is_draft_engine()
           ? 1
           : ParallelConfig::get_instance().layerwise_split_size();
+  const int64_t draft_swa_count = draft_cache_plan_.num_blocks;
+  if (draft_swa_count > 0) {
+    CHECK_EQ(layerwise_split_size, 1);
+    const int64_t remaining_bytes =
+        cache_size_in_bytes - linear_cache_size_in_bytes -
+        draft_swa_count * draft_full_attention_block_size_in_bytes;
+    CHECK_GT(remaining_bytes, 0) << "no KV memory after reserving draft SWA";
+    return remaining_bytes / target_full_attention_block_size_in_bytes;
+  }
   if (layerwise_split_size > 1) {
     return estimate_layerwise_split_block_count(
         model_args_,

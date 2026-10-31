@@ -145,6 +145,7 @@ TEST_F(TaskExecutionPipelineInputTest,
   source.input_params.embedding.extra_token_ids = {-1};
   source.input_params.embedding.embedding_ids = {-1};
   source.input_params.embedding.linear_state_ids = {-1};
+  source.input_params.embedding.linear_state_read_ids = {-1};
   source.input_params.embedding.linear_state_indices =
       torch::tensor({-1}, torch::kInt32);
   source.input_params.parallel.dp_global_token_nums = {3};
@@ -244,6 +245,27 @@ TEST_F(TaskExecutionPipelineInputTest,
   embedding.linear_state_indices = torch::tensor({-1}, torch::kInt32);
   EXPECT_TRUE(validate_input(source).ok());
   embedding.linear_state_ids.clear();
+  EXPECT_TRUE(validate_input(source).ok());
+}
+
+TEST_F(TaskExecutionPipelineInputTest,
+       OrdinaryAdmissionAcceptsOnlyAlignedInactiveReadIds) {
+  auto source = ordinary_input(2, BatchForwardType::DECODE);
+  auto& read_ids = source.input_params.embedding.linear_state_read_ids;
+  read_ids = {-1, -1};
+  EXPECT_TRUE(validate_input(source).ok());
+  for (const auto& invalid_ids : {std::vector<int32_t>{-1},
+                                  std::vector<int32_t>{-1, -1, -1},
+                                  std::vector<int32_t>{-1, 0},
+                                  std::vector<int32_t>{1, -1},
+                                  std::vector<int32_t>{-1, -2}}) {
+    read_ids = invalid_ids;
+    const Status status = validate_input(source);
+    EXPECT_FALSE(status.ok());
+    EXPECT_EQ(status.message(),
+              "Task pipeline does not support active linear-attention state.");
+  }
+  read_ids.clear();
   EXPECT_TRUE(validate_input(source).ok());
 }
 

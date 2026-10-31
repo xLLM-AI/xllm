@@ -52,20 +52,17 @@ class CompositeBlockManager : public BlockManager {
     size_t block_size = 0;
   };
 
-  // Which prefix-cache-supported leaf shape this composite carries. Classified
-  // once at construction and cached in `combination_`; the sequence-level
-  // orchestrators dispatch on it to pick the trim / mount strategy.
-  //   FLAT_KV        Plain KV. No cross-leaf trim.
-  //   FLAT_KV_LINEAR KV + LINEAR restore. Clamp KV to LINEAR's recoverable
-  //                  budget and select its deepest checkpoint.
-  //   SWA_COMPRESSED SWA + C4 + C128. Cross-leaf min, C128-stride clamp,
-  //                  SWA tail-continuity, exact-repeat pop.
-  //   UNSUPPORTED    No prefix-capable leaf or --enable_prefix_cache=false.
+  // Cache-bearing leaves participating in prefix reuse, classified once at
+  // construction from their BlockTypes, without model ownership. LINEAR
+  // denotes recurrent checkpoints. SWA_COMPRESSED covers grouped SWA/C4/C128
+  // caches. DISABLED means no prefix-capable leaf.
   enum class LeafCombination : int8_t {
-    FLAT_KV,
-    FLAT_KV_LINEAR,
+    KV_ONLY,
+    KV_LINEAR,
     SWA_COMPRESSED,
-    UNSUPPORTED,
+    DISABLED,
+    KV_SWA,
+    KV_SWA_LINEAR,
   };
 
   CompositeBlockManager(LeafMap leaves, const BlockManager::Options& options);

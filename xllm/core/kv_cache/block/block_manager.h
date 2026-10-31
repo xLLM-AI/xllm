@@ -55,6 +55,8 @@ class BlockManager {
     PROPERTY(uint32_t, swa_blocks_per_seq) = 0;
     // Total physical SWA rows computed by the KV cache estimator.
     PROPERTY(uint32_t, swa_num_blocks) = 0;
+    // Extra in-flight tokens retained by the SWA pool beyond the base span.
+    PROPERTY(uint32_t, swa_extra_tokens) = 0;
     // Scheduler token budget used to size the shared SWA burst pool.
     PROPERTY(uint32_t, max_tokens_per_batch) = 0;
     // For CompositeBlockManager (passed from upstream).

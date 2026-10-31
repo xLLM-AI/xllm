@@ -16,6 +16,7 @@ limitations under the License.
 #pragma once
 
 #include "common/macros.h"
+#include "core/kv_cache/layout/draft_cache_plan.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
 #include "engine.h"
 #include "framework/batch/batch_group.h"
@@ -108,6 +109,7 @@ class SpeculativeEngineBase : public Engine {
   const bool use_draft_engine_;
 
   ModelArgs model_args_;
+  DraftSwaCachePlan draft_cache_plan_;
 
   std::shared_ptr<DistributedWorkerManager> distributed_worker_manager_ =
       nullptr;

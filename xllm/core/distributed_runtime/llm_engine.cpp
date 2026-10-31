@@ -433,6 +433,18 @@ bool LLMEngine::allocate_kv_cache(
       // predicate in composite_block_manager.cpp. P and MIX are treated
       // identically (both admit prefix cache on every leaf).
       .instance_is_decode(options_.instance_role() == InstanceRole::DECODE);
+  if (kv_cache_cap.draft_swa_count() > 0 && !options_.is_draft_engine()) {
+    CHECK_LE(kv_cache_cap.draft_swa_count(),
+             static_cast<int64_t>(std::numeric_limits<uint32_t>::max()));
+    // DSpark's block-anchor window includes the anchor boundary. Retaining
+    // one extra token also safely covers DFlash2's per-query left window.
+    const uint32_t window =
+        static_cast<uint32_t>(kv_cache_cap.draft_swa_window() + 1);
+    options.swa_extra_tokens(options_.num_speculative_tokens())
+        .sliding_window_size(window)
+        .swa_blocks_per_seq(get_swa_blocks_per_seq(window, block_size))
+        .swa_num_blocks(static_cast<uint32_t>(kv_cache_cap.draft_swa_count()));
+  }
   if (enable_state_cache) {
     // The unified state slot pool spans all physical slots [0, N); it can
     // contain GDN state and KPool tail state.
@@ -496,6 +508,10 @@ bool LLMEngine::allocate_kv_cache(
     // Keep the draft engine's placeholder manager non-caching so a Draft
     // model with only SWA tensors does not pretend to own logical prefixes.
     options.enable_prefix_cache(false).enable_vmm_kvcache(false);
+  }
+  if (options_.is_draft_engine() && kv_cache_cap.draft_swa_count() > 0) {
+    // Only the target scheduler owns the coordinated KV + draft-SWA leaves.
+    options.enable_prefix_cache(false);
   }
 
   if (options_.host_blocks_factor() > 1.0 && !is_mtp_draft_engine) {

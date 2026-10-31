@@ -416,10 +416,12 @@ DFlashWorkerImpl::~DFlashWorkerImpl() {
         "dense target attention needs a device-length prepared contract.");
   }
   const auto& draft_args = draft_impl_->context_.get_model_args();
+  capacity.draft_swa_cache = draft_swa_cache_enabled_;
   if (SpeculativeConfig::is_dspark_algorithm(
           options_.speculative_algorithm()) &&
       parallel_args_.dp_size() > 1 &&
-      ExecutionConfig::get_instance().enable_unified_mtp_graph()) {
+      ExecutionConfig::get_instance().enable_unified_mtp_graph() &&
+      !capacity.draft_swa_cache) {
     return ::xllm::Status(StatusCode::INVALID_ARGUMENT,
                           "DP DSpark task pipeline requires split ACL graphs; "
                           "disable unified graphs.");
@@ -447,7 +449,8 @@ DFlashWorkerImpl::~DFlashWorkerImpl() {
   capacity.common.sampling_group = sampling_process_group_;
   capacity.is_probabilistic_draft = is_probabilistic_draft_;
   capacity.unified_graph =
-      Platform::is_npu() && options_.enable_graph() &&
+      !capacity.draft_swa_cache && Platform::is_npu() &&
+      options_.enable_graph() &&
       ExecutionConfig::get_instance().enable_unified_mtp_graph() &&
       impl_->context_.get_model_args().model_type() == "glm_moe_dsa" &&
       (draft_args.model_type() == "DFlashDraftModel" ||
@@ -455,6 +458,12 @@ DFlashWorkerImpl::~DFlashWorkerImpl() {
        draft_args.model_type() == "DSparkDraftModel") &&
       parallel_args_.dp_size() == 1 && parallel_args_.cp_size() == 1 &&
       parallel_args_.kv_split_size_effective() == 1;
+  if (capacity.draft_swa_cache &&
+      ExecutionConfig::get_instance().enable_unified_mtp_graph()) {
+    LOG(INFO)
+        << "Draft SWA cache uses split Target/Draft ACL graphs; "
+           "unified graphs require a separate draft context-slot binding.";
+  }
   capacity.adaptive_target_verify = options_.enable_adaptive_target_verify();
   capacity.adaptive_min_gain = options_.adaptive_target_verify_min_gain();
   capacity.startup_calibration = capacity.adaptive_target_verify;
@@ -1018,13 +1027,17 @@ void DFlashWorkerImpl::prepare_query_inputs(const LlmForwardInput& input,
   query_input = input.clone();
   query_input.runtime.device_tensors_ready = false;
   LlmModelParams& input_params = query_input.input_params;
+  const auto swa_table = input_params.cache_block_tables.find(BlockType::SWA);
+  if (swa_table != input_params.cache_block_tables.end()) {
+    input_params.attention.host.block_tables = swa_table->second;
+  }
   input_params.embedding.input_embedding = torch::Tensor();
   dflash_detail::invalidate_draft_model_geometry(input_params);
 
   specBuilder::DecodeBuildBuffers buf;
   std::vector<int32_t> selected_idxes;
   const bool use_block_parallel_rows = draft_use_block_parallel_rows();
-  build_query_rows(input,
+  build_query_rows(query_input,
                    mask_token_id_,
                    options_.num_speculative_tokens(),
                    options_.block_size(),
@@ -1103,6 +1116,32 @@ void DFlashWorkerImpl::write_context_kv(
   CHECK(input.input_params.synchronize_draft_layer())
       << "Failed to wait for Draft Host KV load completion.";
 
+  torch::Tensor draft_slots = new_cache_slots_device;
+  const auto swa_table =
+      input.input_params.cache_block_tables.find(BlockType::SWA);
+  if (swa_table != input.input_params.cache_block_tables.end()) {
+    const torch::Tensor& target_table =
+        input.input_params.attention.host.block_tables;
+    const torch::Tensor& draft_table = swa_table->second;
+    CHECK(is_cpu_int_tensor(target_table, /*dimensions=*/2));
+    CHECK(is_cpu_int_tensor(draft_table, /*dimensions=*/2));
+    CHECK(target_table.sizes() == draft_table.sizes());
+    CHECK_GT(target_table.numel(), 0);
+    CHECK_GE(target_table.min().item<int32_t>(), 0);
+    CHECK_GE(draft_table.min().item<int32_t>(), 0);
+    const int64_t target_blocks = target_table.max().item<int64_t>() + 1;
+    torch::Tensor block_map = torch::empty({target_blocks}, torch::kInt32);
+    specBuilder::fill_draft_swa_block_map(
+        {block_map.data_ptr<int32_t>(), static_cast<size_t>(block_map.numel())},
+        {target_table.data_ptr<int32_t>(),
+         static_cast<size_t>(target_table.numel())},
+        {draft_table.data_ptr<int32_t>(),
+         static_cast<size_t>(draft_table.numel())});
+    block_map = block_map.to(device_.unwrap(), /*non_blocking=*/true);
+    draft_slots = specBuilder::remap_draft_cache_slots(
+        new_cache_slots_device, block_map, options_.block_size());
+  }
+
 #if defined(USE_NPU)
   // PD PUSH: the draft context-KV scattered below is not covered by the target
   // push, so wire the draft push here. Overwrite layer_synchronizer with a
@@ -1125,11 +1164,8 @@ void DFlashWorkerImpl::write_context_kv(
   }
 #endif
 
-  ModelOutput scatter_output =
-      draft_impl_->write_context_kv(context_hidden,
-                                    positions_device,
-                                    new_cache_slots_device,
-                                    input.input_params);
+  ModelOutput scatter_output = draft_impl_->write_context_kv(
+      context_hidden, positions_device, draft_slots, input.input_params);
   // Model returns an empty ModelOutput (hidden_states undefined) when the
   // per-layer NPULayerSynchronizer::record_event fails mid-scatter under
   // PD-PUSH transfer. Fail fast instead of silently continuing: subsequent

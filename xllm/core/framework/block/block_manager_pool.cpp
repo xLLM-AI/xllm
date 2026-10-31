@@ -84,6 +84,7 @@ BlockManagerPool::BlockManagerPool(const Options& options,
       .sliding_window_size(options_.sliding_window_size())
       .swa_blocks_per_seq(options_.swa_blocks_per_seq())
       .swa_num_blocks(options_.swa_num_blocks())
+      .swa_extra_tokens(options_.swa_extra_tokens())
       .max_tokens_per_batch(options_.max_tokens_per_batch())
       .manager_types(options_.manager_types())
       .compress_ratios(options_.compress_ratios())

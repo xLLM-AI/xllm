@@ -82,6 +82,8 @@ DECLARE_int32(num_speculative_tokens);
 
 DECLARE_string(speculative_algorithm);
 
+DECLARE_bool(enable_draft_swa_manage);
+
 DECLARE_bool(enable_probabilistic_draft);
 
 DECLARE_bool(enable_mtp_draft_body_tp1);

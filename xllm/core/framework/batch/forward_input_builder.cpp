@@ -22,6 +22,7 @@ limitations under the License.
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <numeric>
 #include <thread>
@@ -607,12 +608,16 @@ void ForwardInputBuilder::process_sequences_multithreaded() {
   size_t total_tokens = 0;
   size_t total_sampling_rows = 0;
   size_t total_seqs = 0;
+  std::map<BlockType, size_t> total_cache_rows;
   size_t total_slots = 0;
   size_t total_paged_indices = 0;
   for (const auto& state : thread_builder_states) {
     total_tokens += state.flatten_tokens_vec.size();
     total_sampling_rows += state.sampling.size();
     total_seqs += state.block_tables_vec.size();
+    for (const auto& [type, tables] : state.cache_block_tables) {
+      total_cache_rows[type] += tables.size();
+    }
     total_slots += state.new_token_slot_ids.size();
     total_paged_indices += state.paged_kv_indices.size();
   }
@@ -624,6 +629,9 @@ void ForwardInputBuilder::process_sequences_multithreaded() {
     state_.mrope_positions_vec.reserve(total_seqs);
   }
   state_.block_tables_vec.reserve(total_seqs);
+  for (const auto& [type, rows] : total_cache_rows) {
+    state_.cache_block_tables[type].reserve(rows);
+  }
   state_.new_token_slot_ids.reserve(total_slots);
   state_.kv_cache_tokens_nums.reserve(total_seqs);
   if (build_execution_batch_) {
@@ -767,6 +775,12 @@ void ForwardInputBuilder::process_sequences_multithreaded() {
                                          state.paged_kv_last_page_len.begin(),
                                          state.paged_kv_last_page_len.end());
 
+    for (auto& [type, tables] : state.cache_block_tables) {
+      auto& destination = state_.cache_block_tables[type];
+      destination.insert(destination.end(),
+                         std::make_move_iterator(tables.begin()),
+                         std::make_move_iterator(tables.end()));
+    }
     if (!state.multi_block_tables.empty()) {
       if (state_.multi_block_tables.empty()) {
         state_.multi_block_tables.resize(state.multi_block_tables.size());
@@ -1045,6 +1059,22 @@ void ForwardInputBuilder::setup_kv_cache_info(Sequence* sequence,
   sequence->kv_state().incr_kv_cache_tokens_num(/*size=*/q_seq_len);
 
   const auto blocks = sequence->kv_state().blocks(BlockType::KV);
+  if (!blocks.empty()) {
+    for (const BlockType type : kMultiBlockExportOrder) {
+      const auto group_blocks = sequence->kv_state().blocks(type);
+      if (group_blocks.empty()) {
+        continue;
+      }
+      std::vector<int32_t> ids;
+      ids.reserve(group_blocks.size());
+      for (const Block& block : group_blocks) {
+        // Retired logical columns remain padding; only the live FIA window
+        // can read them, and writes to padding are separately suppressed.
+        ids.emplace_back(block.is_valid() ? block.id() : 0);
+      }
+      state.cache_block_tables[type].emplace_back(std::move(ids));
+    }
+  }
   if (sequence->kv_state().has_multi_block_export()) {
     const auto export_view = sequence->kv_state().multi_block_export_view();
     if (state.multi_block_tables.empty()) {
@@ -1166,6 +1196,9 @@ void ForwardInputBuilder::padding_decode_batch_size(
                                     num_decoding_tokens);
 #endif
         state_.block_tables_vec.emplace_back();
+        for (auto& [type, tables] : state_.cache_block_tables) {
+          tables.emplace_back();
+        }
         if (!state_.multi_block_tables.empty()) {
           for (auto& mgr_tables : state_.multi_block_tables) {
             mgr_tables.emplace_back(std::vector<int32_t>{});
@@ -1283,6 +1316,15 @@ Input ForwardInputBuilder::state_to_forward_input() {
       create_2d_tensor(state_.block_tables_vec, torch::kInt);
   input_params.attention.host.block_tables =
       input_params.attention.device.block_tables;
+
+  if constexpr (!std::is_same_v<Input, RecForwardInput>) {
+    for (auto& [type, tables] : state_.cache_block_tables) {
+      CHECK_EQ(tables.size(), state_.block_tables_vec.size());
+      util::pad_2d_vector(tables, /*pad_value=*/0);
+      input_params.cache_block_tables.emplace(
+          type, create_2d_tensor(tables, torch::kInt));
+    }
+  }
 
   // Setup grouped cache block tables.
   if constexpr (!std::is_same_v<Input, RecForwardInput>) {

@@ -1965,7 +1965,7 @@ TEST(HierarchyBlockManagerPoolTest, RejectsLinearCacheLayout) {
                                        /*transfer_coordinator=*/nullptr,
                                        /*dp_size=*/1);
       },
-      "supports only FLAT_KV and SWA_COMPRESSED cache layouts");
+      "supports only KV_ONLY and SWA_COMPRESSED cache layouts");
   SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() =
       original_chunk_stride;
 }

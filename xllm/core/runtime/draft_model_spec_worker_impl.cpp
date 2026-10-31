@@ -32,6 +32,7 @@ limitations under the License.
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/draft_proposal.h"
 #include "core/framework/speculative/embedding_cache.h"
+#include "core/kv_cache/layout/draft_cache_plan.h"
 #include "core/kv_cache/layout/kv_cache_capacity.h"
 #include "core/kv_cache/layout/kv_cache_estimation.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
@@ -207,6 +208,10 @@ bool DraftModelSpecWorkerImpl<TargetInput>::init_model(
   if (impl_->get_status() == WorkerImpl::Status::LOADED) {
     context_ = impl_->context_;
   }
+  if (result && task_models_loaded()) {
+    draft_swa_cache_enabled_ = should_use_draft_swa_cache(
+        draft_impl_->context_.get_model_args(), options_);
+  }
   return result;
 }
 
@@ -366,6 +371,8 @@ bool DraftModelSpecWorkerImpl<TargetInput>::allocate_pools(
       impl_->get_status() == WorkerImpl::Status::LOADED &&
       draft_impl_->get_status() == WorkerImpl::Status::LOADED &&
       impl_->context_.get_model_id() != draft_impl_->context_.get_model_id();
+  const bool allocate_embedding =
+      impl_->get_status() == WorkerImpl::Status::LOADED;
   const bool target_allocated = allocate_pool_if_loaded(
       *impl_,
       [&]() -> const KVCacheShape& { return kv_cache_shape; },
@@ -375,7 +382,10 @@ bool DraftModelSpecWorkerImpl<TargetInput>::allocate_pools(
       [&] { return draft_kv_cache_shape(kv_cache_shape); },
       allocate);
 
-  init_embedding_cache(kv_cache_shape.key_cache_shape()[0]);
+  const bool separate_swa = kv_cache_shape.draft_swa_count() > 0;
+  if (!separate_swa || allocate_embedding || embedding_cache_ == nullptr) {
+    init_embedding_cache(kv_cache_shape.key_cache_shape()[0]);
+  }
   const bool allocated = target_allocated && draft_allocated;
   if (allocated) {
     if (bind_vmm_group) {

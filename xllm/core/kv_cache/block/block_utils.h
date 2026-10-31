@@ -21,4 +21,11 @@ namespace xllm {
 
 int64_t get_swa_blocks_per_seq(int64_t window_size, int64_t block_size);
 
+// Reserve the retained request windows, one shared prefill burst, per-request
+// alignment slack and the pool's padding/safety blocks. Callers own the
+// model-specific window and burst semantics.
+int64_t swa_pool_block_count(int64_t retained_blocks_per_sequence,
+                             int64_t max_sequences,
+                             int64_t burst_blocks);
+
 }  // namespace xllm

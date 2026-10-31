@@ -160,6 +160,7 @@ Options create_options(const std::string& instance_name, bool is_local) {
           scheduler_config.max_tokens_per_chunk_for_prefill())
       .num_speculative_tokens(speculative_config.num_speculative_tokens())
       .speculative_algorithm(speculative_config.speculative_algorithm())
+      .enable_draft_swa_manage(speculative_config.enable_draft_swa_manage())
       .enable_probabilistic_draft(
           speculative_config.enable_probabilistic_draft())
       .speculative_suffix_cache_max_depth(

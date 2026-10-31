@@ -28,4 +28,14 @@ int64_t get_swa_blocks_per_seq(int64_t window_size, int64_t block_size) {
   return (window_size - 1) / block_size + 1;
 }
 
+int64_t swa_pool_block_count(int64_t retained_blocks_per_sequence,
+                             int64_t max_sequences,
+                             int64_t burst_blocks) {
+  CHECK_GT(retained_blocks_per_sequence, 0);
+  CHECK_GT(max_sequences, 0);
+  CHECK_GE(burst_blocks, 0);
+  return retained_blocks_per_sequence * max_sequences + burst_blocks +
+         max_sequences + 2;
+}
+
 }  // namespace xllm

@@ -42,6 +42,41 @@ limitations under the License.
 
 namespace xllm {
 
+TEST(KVCacheTest, DraftSwaShapeDoesNotInheritTargetPhysicalPageCount) {
+  ModelArgs args;
+  args.model_type("qwen3").n_layers(2).n_heads(4).n_kv_heads(2).head_dim(16);
+  KVCacheCapacity target_capacity;
+  target_capacity.n_blocks(1024).block_size(128).draft_swa_count(36);
+  const KVCacheShape target_shape(target_capacity, args, /*world_size=*/1);
+  proto::KVCacheShape serialized;
+  target_shape.to_proto(&serialized);
+  const KVCacheShape received_shape = KVCacheShape::from_proto(serialized);
+  EXPECT_EQ(received_shape.draft_swa_count(), 36);
+  KVCacheCapacity draft_capacity;
+  const KVCacheShape draft_shape =
+      build_speculative_draft_kv_cache_shape(received_shape,
+                                             draft_capacity,
+                                             args,
+                                             /*block_size=*/128,
+                                             /*draft_world_size=*/1,
+                                             "auto");
+  EXPECT_EQ(target_shape.key_cache_shape()[0], 1024);
+  EXPECT_EQ(draft_shape.key_cache_shape()[0], 36);
+  ASSERT_TRUE(draft_shape.has_value_cache_shape());
+  EXPECT_EQ(draft_shape.value_cache_shape()[0], 36);
+  target_capacity.draft_swa_count(0);
+  const KVCacheShape legacy_target(target_capacity, args, /*world_size=*/1);
+  const KVCacheShape legacy_shape =
+      build_speculative_draft_kv_cache_shape(legacy_target,
+                                             KVCacheCapacity(),
+                                             args,
+                                             /*block_size=*/128,
+                                             /*draft_world_size=*/1,
+                                             "auto");
+  EXPECT_EQ(legacy_shape.key_cache_shape()[0], 1024);
+  EXPECT_EQ(legacy_target.draft_swa_count(), 0);
+}
+
 namespace {
 
 class DcpIndexerShapeTest : public test::DcpIndexerConfigTest {};
@@ -779,6 +814,7 @@ TEST(KVCacheTest, GroupedCacheCapabilitySurvivesProtoRoundTrip) {
   const KVCacheShape restored = KVCacheShape::from_proto(serialized);
 
   EXPECT_TRUE(restored.has_grouped_cache_layout());
+  EXPECT_EQ(restored.draft_swa_count(), 0);
   EXPECT_EQ(restored.key_cache_shape(), original.key_cache_shape());
 }
 

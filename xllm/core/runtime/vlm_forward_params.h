@@ -321,6 +321,7 @@ inline LlmForwardInput make_llm_draft_input(const VlmForwardInput& target) {
   params.graph.spec_verify_static_graph_tasks_prepared =
       source.graph.spec_verify_static_graph_tasks_prepared;
   params.multi_block_tables = source.multi_block_tables;
+  params.cache_block_tables = source.cache_block_tables;
   params.mtp_shifted_token_ids = source.mtp_shifted_token_ids;
   params.is_spec_verify = source.is_spec_verify;
   params.prefill_without_cache = source.prefill_without_cache;

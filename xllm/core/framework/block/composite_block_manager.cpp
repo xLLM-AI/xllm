@@ -18,6 +18,7 @@ limitations under the License.
 #include <algorithm>
 #include <limits>
 #include <optional>
+#include <sstream>
 #include <utility>
 
 #include "core/framework/block/embedding_block_manager.h"
@@ -70,6 +71,18 @@ void publish_blocks(Sequence* seq,
              begin,
              seq->mm_data(),
              seq->block_hashes());
+  if (VLOG_IS_ON(1) && type == BlockType::SWA) {
+    std::ostringstream entries;
+    for (size_t index = begin; index < end; ++index) {
+      const Block& block = (*blocks)[index];
+      if (block.is_valid()) {
+        entries << index << ':' << block.id() << ',';
+      }
+    }
+    VLOG(1) << "SWA prefix publish: request_id=" << seq->request_id()
+            << ", begin=" << begin << ", end=" << end
+            << ", logical_physical_blocks=" << entries.str();
+  }
   kv.set_num_cached_blocks(type, end);
 }
 
@@ -117,6 +130,20 @@ std::unique_ptr<BlockManager> maybe_concurrent(
     return std::make_unique<ConcurrentBlockManagerImpl>(std::move(leaf));
   }
   return leaf;
+}
+
+CompositeBlockManager::LeafEntry make_swa_leaf(BlockManager::Options options,
+                                               bool prefix_cache) {
+  options.num_blocks(options.swa_num_blocks())
+      .num_speculative_tokens(options.num_speculative_tokens() +
+                              options.swa_extra_tokens())
+      .sliding_window_size(std::max(options.sliding_window_size(), 1U))
+      .block_type(BlockType::SWA)
+      .enable_prefix_cache(prefix_cache);
+  return {maybe_concurrent(std::make_unique<SlidingWindowBlockManager>(options),
+                           options),
+          /*participates_in_admission=*/false,
+          /*supports_prefix_cache=*/prefix_cache};
 }
 
 // Choose the paged virtual memory manager or the flat free-list manager.
@@ -168,20 +195,20 @@ std::optional<ProbeResult> take_probe(std::vector<ProbeResult>& probes,
   return std::nullopt;
 }
 
-// FLAT_KV: no trim; Sequence::add_shared_blocks owns replace + exact-repeat.
+// KV_ONLY: no trim; Sequence::add_shared_blocks owns replace + exact-repeat.
 TrimOutcome trim_flat_kv(std::vector<ProbeResult> probes) {
-  CHECK_EQ(probes.size(), 1u) << "FLAT_KV expects a single KV probe";
+  CHECK_EQ(probes.size(), 1u) << "KV_ONLY expects a single KV probe";
   TrimOutcome out;
   out.to_mount = std::move(probes);
   return out;
 }
 
-// FLAT_KV_LINEAR: retain only a KV prefix whose token boundary has an exact
+// KV_LINEAR: retain only a KV prefix whose token boundary has an exact
 // LINEAR checkpoint.
 TrimOutcome trim_flat_kv_linear(std::vector<ProbeResult> probes) {
   auto linear = take_probe(probes, BlockType::LINEAR);
   CHECK_EQ(probes.size(), 1u)
-      << "FLAT_KV_LINEAR expects one KV probe (LINEAR removed above)";
+      << "KV_LINEAR expects one KV probe (LINEAR removed above)";
   TrimOutcome out;
 
   ProbeResult& kv = probes.front();
@@ -233,6 +260,67 @@ TrimOutcome trim_flat_kv_linear(std::vector<ProbeResult> probes) {
   return out;
 }
 
+bool has_complete_swa_tail(const std::vector<Block>& blocks,
+                           size_t end,
+                           size_t window_blocks) {
+  if (end > blocks.size()) {
+    return false;
+  }
+  const size_t begin = end - std::min(end, window_blocks);
+  return std::all_of(blocks.begin() + begin,
+                     blocks.begin() + end,
+                     [](const Block& block) { return block.is_valid(); });
+}
+
+// KV and SWA must cover the same reusable boundary, including a complete
+// trailing SWA window. Keep global logical columns, including gaps.
+TrimOutcome trim_flat_kv_swa(std::vector<ProbeResult> probes,
+                             size_t prompt_tokens,
+                             bool has_linear) {
+  std::optional<ProbeResult> swa = take_probe(probes, BlockType::SWA);
+  CHECK(swa.has_value());
+  TrimOutcome out = has_linear ? trim_flat_kv_linear(std::move(probes))
+                               : trim_flat_kv(std::move(probes));
+  ProbeResult& kv = out.to_mount.front();
+  CHECK_EQ(kv.block_size, swa->block_size);
+  const size_t original_count = kv.blocks.size();
+  size_t count = std::min(original_count, swa->blocks.size());
+  // Leave input to recompute after an exact hit, matching
+  // Sequence::add_shared_blocks.
+  if (count > 0 && count * kv.block_size == prompt_tokens) {
+    --count;
+  }
+  const size_t window_blocks = swa->leaf->options().swa_blocks_per_seq();
+  CHECK_GT(window_blocks, 0U);
+  while (count > 0 &&
+         !has_complete_swa_tail(swa->blocks, count, window_blocks)) {
+    --count;
+  }
+  // Recurrent state cannot resume at an arbitrary earlier token boundary.
+  // If SWA lacks the selected checkpoint's window, replay from the start.
+  if (has_linear && count != original_count) {
+    count = 0;
+    auto linear = take_probe(out.to_mount, BlockType::LINEAR);
+    if (linear.has_value()) {
+      out.to_drop.emplace_back(std::move(*linear));
+    }
+  }
+  auto trim = [&](ProbeResult& probe) {
+    ProbeResult dropped{probe.type, probe.leaf, {}, probe.block_size};
+    dropped.blocks.reserve(probe.blocks.size() - count);
+    for (size_t index = count; index < probe.blocks.size(); ++index) {
+      dropped.blocks.emplace_back(std::move(probe.blocks[index]));
+    }
+    probe.blocks.resize(count);
+    out.to_drop.emplace_back(std::move(dropped));
+  };
+  trim(kv);
+  trim(*swa);
+  out.safe_hit_tokens = count * kv.block_size;
+  out.to_mount.emplace_back(std::move(*swa));
+  return out;
+}
+
 // SWA_COMPRESSED: cross-leaf min -> C128-stride clamp -> SWA tail-continuity
 // (fallback in C128 steps) -> exact-repeat pop -> per-leaf trim.
 TrimOutcome trim_swa_compressed(std::vector<ProbeResult> probes,
@@ -268,15 +356,9 @@ TrimOutcome trim_swa_compressed(std::vector<ProbeResult> probes,
     if (swa_block_size > 0 && tail_required > 0) {
       while (safe_hit_tokens >= c128_block_size) {
         const size_t trimmed_len = safe_hit_tokens / swa_block_size;
-        bool tail_ok = trimmed_len >= tail_required;
-        if (tail_ok) {
-          for (size_t i = trimmed_len - tail_required; i < trimmed_len; ++i) {
-            if (i >= swa_vector.size() || !swa_vector[i].is_valid()) {
-              tail_ok = false;
-              break;
-            }
-          }
-        }
+        const bool tail_ok =
+            trimmed_len >= tail_required &&
+            has_complete_swa_tail(swa_vector, trimmed_len, tail_required);
         if (tail_ok) {
           break;
         }
@@ -383,6 +465,12 @@ CompositeBlockManager::LeafMap build_composite_leaves(
                              options),
             /*participates_in_admission=*/true,
             /*supports_prefix_cache=*/kv_prefix_cache});
+    if (options.swa_num_blocks() > 0) {
+      CHECK(!options.enable_vmm_kvcache());
+      leaves.emplace(
+          BlockType::SWA,
+          make_swa_leaf(options, prefix_cache_on && swa_participates));
+    }
     return leaves;
   }
 
@@ -424,30 +512,11 @@ CompositeBlockManager::LeafMap build_composite_leaves(
                          /*participates_in_admission=*/true,
                          /*supports_prefix_cache=*/compressed_prefix_cache});
     } else if (type == kManagerTypeSlidingWindowBlockManager) {
-      const uint32_t swa_blocks_per_seq = options.swa_blocks_per_seq();
-      CHECK_GT(swa_blocks_per_seq, 0u) << "swa_blocks_per_seq must be positive";
-      CHECK_GT(options.block_size(), 0) << "block_size must be positive";
-      const uint32_t sliding_window_size =
-          std::max(options.sliding_window_size(), 1u);
-      const uint32_t swa_total_blocks = options.swa_num_blocks();
-      CHECK_GT(swa_total_blocks, 0u)
-          << "swa_num_blocks must be provided by the KV cache estimator";
       const bool swa_prefix_cache = prefix_cache_on && swa_participates;
-      opts.num_blocks(swa_total_blocks)
-          .swa_blocks_per_seq(swa_blocks_per_seq)
-          .sliding_window_size(sliding_window_size)
-          .block_type(BlockType::SWA)
-          .enable_prefix_cache(swa_prefix_cache)
-          .hasher_type(options.hasher_type());
       // SWA is not an admission leaf (pool sized by ring, not token budget)
       // but serves gap-tolerant prefix cache.
-      leaves.emplace(
-          BlockType::SWA,
-          CompositeBlockManager::LeafEntry{
-              maybe_concurrent(
-                  std::make_unique<SlidingWindowBlockManager>(opts), options),
-              /*participates_in_admission=*/false,
-              /*supports_prefix_cache=*/swa_prefix_cache});
+      leaves.emplace(BlockType::SWA,
+                     make_swa_leaf(std::move(opts), swa_prefix_cache));
     } else {
       LOG(FATAL) << "Unknown manager_type " << type;
     }
@@ -491,16 +560,19 @@ CompositeBlockManager::classify_leaf_combination(const LeafMap& leaves) {
     return LeafCombination::SWA_COMPRESSED;
   }
   if (has_swa) {
+    if (has_kv) {
+      return has_linear ? LeafCombination::KV_SWA_LINEAR
+                        : LeafCombination::KV_SWA;
+    }
     // A prefix-cache-on SWA leaf paired with no compressed leaves is not a
     // shape we build; the classifier surfaces the misconfiguration loudly
     // instead of silently mounting garbage.
     LOG(FATAL) << "SWA prefix cache is on but neither C4 nor C128 is present";
   }
   if (has_kv) {
-    return has_linear ? LeafCombination::FLAT_KV_LINEAR
-                      : LeafCombination::FLAT_KV;
+    return has_linear ? LeafCombination::KV_LINEAR : LeafCombination::KV_ONLY;
   }
-  return LeafCombination::UNSUPPORTED;
+  return LeafCombination::DISABLED;
 }
 
 BlockManager* CompositeBlockManager::leaf_of(BlockType type) const {
@@ -757,10 +829,12 @@ void CompositeBlockManager::release_probes(std::vector<ProbeResult>* probes) {
 void CompositeBlockManager::allocate_shared_for_sequence(Sequence* seq) {
   // Shared flow: probe -> trim -> mount. Trim strategy is per-shape (see
   // trim_flat_kv / trim_flat_kv_linear / trim_swa_compressed).
-  if (seq == nullptr || combination_ == LeafCombination::UNSUPPORTED) {
+  if (seq == nullptr || combination_ == LeafCombination::DISABLED) {
     return;
   }
-  if (combination_ == LeafCombination::FLAT_KV_LINEAR &&
+  if ((combination_ == LeafCombination::KV_LINEAR ||
+       combination_ == LeafCombination::KV_SWA ||
+       combination_ == LeafCombination::KV_SWA_LINEAR) &&
       seq->kv_state().prefix_cache_matched()) {
     return;
   }
@@ -772,27 +846,52 @@ void CompositeBlockManager::allocate_shared_for_sequence(Sequence* seq) {
 
   TrimOutcome trimmed;
   switch (combination_) {
-    case LeafCombination::FLAT_KV:
+    case LeafCombination::KV_ONLY:
       trimmed = trim_flat_kv(std::move(probes));
       break;
-    case LeafCombination::FLAT_KV_LINEAR:
+    case LeafCombination::KV_LINEAR:
       trimmed = trim_flat_kv_linear(std::move(probes));
+      break;
+    case LeafCombination::KV_SWA:
+    case LeafCombination::KV_SWA_LINEAR:
+      trimmed =
+          trim_flat_kv_swa(std::move(probes),
+                           seq->tokens().size(),
+                           combination_ == LeafCombination::KV_SWA_LINEAR);
       break;
     case LeafCombination::SWA_COMPRESSED:
       trimmed = trim_swa_compressed(std::move(probes), seq->tokens().size());
       break;
-    case LeafCombination::UNSUPPORTED:
+    case LeafCombination::DISABLED:
       return;
   }
 
   release_probes(&trimmed.to_drop);
+  if (VLOG_IS_ON(1) && (combination_ == LeafCombination::KV_SWA ||
+                        combination_ == LeafCombination::KV_SWA_LINEAR)) {
+    for (const ProbeResult& probe : trimmed.to_mount) {
+      if (probe.type != BlockType::SWA) {
+        continue;
+      }
+      std::ostringstream entries;
+      for (size_t index = 0; index < probe.blocks.size(); ++index) {
+        const Block& block = probe.blocks[index];
+        if (block.is_valid()) {
+          entries << index << ':' << block.id() << ',';
+        }
+      }
+      VLOG(1) << "SWA prefix mount: request_id=" << seq->request_id()
+              << ", hit_tokens=" << trimmed.safe_hit_tokens
+              << ", logical_physical_blocks=" << entries.str();
+    }
+  }
 
-  // FLAT_KV{,_LINEAR} defer to Sequence::add_shared_blocks, which owns replace
-  // and exact-repeat. Composite layouts mount every leaf before advancing the
-  // sequence-level token count once.
+  // KV_ONLY / KV_LINEAR defer to Sequence::add_shared_blocks, which owns
+  // replace and exact-repeat. Composite layouts mount every leaf before
+  // advancing the sequence-level token count once.
   switch (combination_) {
-    case LeafCombination::FLAT_KV:
-    case LeafCombination::FLAT_KV_LINEAR: {
+    case LeafCombination::KV_ONLY:
+    case LeafCombination::KV_LINEAR: {
       for (ProbeResult& probe : trimmed.to_mount) {
         if (probe.type == BlockType::LINEAR) {
           seq->kv_state().mount_composite_shared(probe.type,
@@ -803,6 +902,8 @@ void CompositeBlockManager::allocate_shared_for_sequence(Sequence* seq) {
       }
       break;
     }
+    case LeafCombination::KV_SWA:
+    case LeafCombination::KV_SWA_LINEAR:
     case LeafCombination::SWA_COMPRESSED: {
       for (ProbeResult& probe : trimmed.to_mount) {
         seq->kv_state().mount_composite_shared(probe.type,
@@ -811,7 +912,7 @@ void CompositeBlockManager::allocate_shared_for_sequence(Sequence* seq) {
       seq->kv_state().set_kv_cache_tokens_num(trimmed.safe_hit_tokens);
       break;
     }
-    case LeafCombination::UNSUPPORTED:
+    case LeafCombination::DISABLED:
       break;
   }
   seq->kv_state().set_prefix_cache_matched();
@@ -827,12 +928,14 @@ void CompositeBlockManager::cache_for_sequence(Sequence* seq,
   // SWA / C4 / C128 get their flush from the pre-grow hook at the top of
   // the next allocate_sequence.
   if (seq == nullptr || seq->is_graph_warmup() ||
-      combination_ == LeafCombination::UNSUPPORTED) {
+      combination_ == LeafCombination::DISABLED) {
     return;
   }
   switch (combination_) {
-    case LeafCombination::FLAT_KV:
-    case LeafCombination::FLAT_KV_LINEAR: {
+    case LeafCombination::KV_ONLY:
+    case LeafCombination::KV_LINEAR:
+    case LeafCombination::KV_SWA:
+    case LeafCombination::KV_SWA_LINEAR: {
       BlockManager& kv_leaf = *leaf_of(BlockType::KV);
       KVCacheState& kv_state = seq->kv_state();
       const size_t block_size = kv_leaf.block_size();
@@ -853,7 +956,7 @@ void CompositeBlockManager::cache_for_sequence(Sequence* seq,
       break;
     }
     case LeafCombination::SWA_COMPRESSED:
-    case LeafCombination::UNSUPPORTED:
+    case LeafCombination::DISABLED:
       break;
   }
 }

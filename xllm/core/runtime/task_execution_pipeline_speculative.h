@@ -225,6 +225,8 @@ struct TaskExecutionPipeline::SpeculativeSlot {
   torch::Tensor accepted_mask;
   torch::Tensor context_slots_storage;
   torch::Tensor context_slots;
+  torch::Tensor host_draft_block_map;
+  torch::Tensor draft_block_map;
   torch::Tensor block_gumbel;
   torch::Tensor host_hidden;
   ModelOutput target_output;

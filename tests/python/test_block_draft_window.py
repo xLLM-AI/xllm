@@ -127,3 +127,15 @@ def test_window_graph_policy_requires_every_attention_layer_to_be_windowed() -> 
     model.append(Attention(4, 1, 64, 0.125, 0, 2))
     assert block_draft_model_window_context(model) is None
     assert block_draft_model_window_context(torch.nn.Identity()) is None
+
+
+def test_window_padding_uses_live_page_after_prefix_blocks_are_retired() -> None:
+    source = torch.zeros((1, 64), dtype=torch.int32)
+    source[0, 15:32] = torch.arange(11, 28, dtype=torch.int32)
+    original = source.clone()
+    window = prepare_windowed_block_table(source, torch.tensor([4096], dtype=torch.int32), 7, 128, 2048)
+    assert window.block_table.shape == (1, 18)
+    torch.testing.assert_close(window.block_table[0, :17], source[0, 15:32])
+    assert int(window.block_table[0, -1]) == 11
+    assert bool((window.block_table > 0).all())
+    torch.testing.assert_close(source, original)

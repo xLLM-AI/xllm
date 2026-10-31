@@ -118,6 +118,7 @@ class SpeculativeConfig final {
         {"draft_model",
          "num_speculative_tokens",
          "speculative_algorithm",
+         "enable_draft_swa_manage",
          "speculative_suffix_cache_max_depth",
          "speculative_suffix_max_spec_factor",
          "speculative_suffix_max_spec_offset",
@@ -142,6 +143,8 @@ class SpeculativeConfig final {
   PROPERTY(int32_t, num_speculative_tokens) = 0;
 
   PROPERTY(std::string, speculative_algorithm) = "MTP";
+
+  PROPERTY(bool, enable_draft_swa_manage) = false;
 
   PROPERTY(int32_t, speculative_suffix_cache_max_depth) = 64;
 

@@ -56,6 +56,11 @@ class KVCacheCapacity final {
   PROPERTY(int64_t, num_full_attention_layers) = 0;
   PROPERTY(int64_t, num_linear_attention_layers) = 0;
 
+  // A full-history target can own a separate sliding-window draft page pool.
+  // These counts describe the draft, not the target's tensor geometry.
+  PROPERTY(int64_t, draft_swa_window) = 0;
+  PROPERTY(int64_t, draft_swa_count) = 0;
+
   // DeepSeek V4 uses separate block pools for sliding-window and compressed
   // caches. These fields are only meaningful for deepseek_v4.
   PROPERTY(int64_t, swa_count) = 0;

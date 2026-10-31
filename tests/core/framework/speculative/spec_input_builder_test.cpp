@@ -33,6 +33,28 @@ namespace xllm {
 namespace specBuilder {
 namespace {
 
+TEST(SpecDecodeInputBuilderTest,
+     DraftSwaSlotsUseIndependentPagesAndSuppressHoles) {
+  torch::Tensor mapping = torch::empty({16}, torch::kInt32);
+  const std::vector<int32_t> target = {1, 2, 3, 4, 5, 0};
+  const std::vector<int32_t> draft = {0, 8, 6, 9, 7, 0};
+  const std::span<int32_t> mapping_view(mapping.data_ptr<int32_t>(),
+                                        static_cast<size_t>(mapping.numel()));
+  fill_draft_swa_block_map(mapping_view, target, draft);
+  const torch::Tensor slots =
+      torch::tensor({-1, 0, 4, 7, 8, 11, 12, 16, 23}, torch::kInt32);
+  const torch::Tensor expected =
+      torch::tensor({-1, -1, -1, -1, 32, 35, 24, 36, 31}, torch::kInt32);
+  EXPECT_TRUE(remap_draft_cache_slots(slots, mapping, /*block_size=*/4)
+                  .equal(expected));
+  // A recycled Slot must not retain a mapping from the previous request.
+  const std::vector<int32_t> next_target = {10};
+  const std::vector<int32_t> next_draft = {2};
+  fill_draft_swa_block_map(mapping_view, next_target, next_draft);
+  EXPECT_EQ(mapping[2].item<int32_t>(), 0);
+  EXPECT_EQ(mapping[10].item<int32_t>(), 2);
+}
+
 Slice<int32_t> to_slice(std::vector<int32_t>& vec) {
   return {vec.data(), static_cast<size_t>(vec.size())};
 }

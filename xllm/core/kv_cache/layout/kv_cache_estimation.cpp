@@ -372,7 +372,7 @@ Dsv4KVCacheEstimateCost estimate_dsv4_kv_cache_cost(
   const int64_t burst_blocks =
       std::max(util::ceil_div(burst_budget, block_size), publish_unit_blocks);
   cache_cost.swa_count =
-      swa_blocks_per_seq * max_seqs + burst_blocks + max_seqs + 2;
+      swa_pool_block_count(swa_blocks_per_seq, max_seqs, burst_blocks);
 
   for (int64_t i = 0; i < model_args.n_layers(); ++i) {
     const int32_t ratio = i < static_cast<int64_t>(compress_ratios.size())

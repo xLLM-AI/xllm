@@ -91,6 +91,9 @@ class KVCacheShape final {
   bool has_grouped_cache_layout() const {
     return shape_kind_ == ShapeKind::GROUPED_POOL;
   }
+  // Engine-resolved size of the colocated draft pool. Workers must not
+  // independently infer it from their runtime configuration.
+  int64_t draft_swa_count() const { return draft_swa_count_; }
 
   void print_shapes() const;
 
@@ -130,6 +133,7 @@ class KVCacheShape final {
   KPoolCacheLayout kpool_layout_ = KPoolCacheLayout::PACKED;
   std::optional<std::vector<int64_t>> kpool_tail_shape_;
   ShapeKind shape_kind_ = ShapeKind::NORMAL;
+  int64_t draft_swa_count_ = 0;
   std::optional<std::vector<int64_t>> key_cache_shape_;
   std::optional<std::vector<int64_t>> value_cache_shape_;
 
@@ -143,7 +147,8 @@ class KVCacheShape final {
 };
 
 // Retains the draft capacity's indexer and linear-state metadata, borrowing
-// the target's block counts and selecting packed-C8 from the draft model.
+// the target's block counts unless its layout carries an independent draft
+// pool, and selecting packed-C8 from the draft model.
 KVCacheShape build_speculative_draft_kv_cache_shape(
     const KVCacheShape& target_kv_cache_shape,
     KVCacheCapacity draft_capacity,

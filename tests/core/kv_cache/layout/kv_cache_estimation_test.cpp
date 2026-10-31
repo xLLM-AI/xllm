@@ -24,6 +24,7 @@ limitations under the License.
 
 #include "core/framework/config/kv_cache_config.h"
 #include "core/kv_cache/layout/deepseek_v4_cache_policy.h"
+#include "core/kv_cache/layout/draft_cache_plan.h"
 #include "framework/model/model_args.h"
 #include "runtime/options.h"
 #include "tests/core/kv_cache/dcp_indexer_test_fixture.h"
@@ -68,6 +69,82 @@ KVCacheEstimateOptions make_estimate_options() {
 }
 
 }  // namespace
+
+TEST(KVCacheEstimationTest, BlockDraftSwaPoolUsesWindowAndPrefillBudget) {
+  ModelArgs draft;
+  draft.model_type("qwen3").n_layers(2).use_sliding_window(true).sliding_window(
+      2048);
+  runtime::Options options;
+  options.model_impl("python")
+      .backend("llm")
+      .speculative_algorithm("DSpark")
+      .block_size(128)
+      .num_speculative_tokens(7)
+      .max_seqs_per_batch(4)
+      .max_tokens_per_batch(4096)
+      .kv_cache_dtype("auto");
+  const auto default_plan = resolve_draft_swa_cache_plan(draft, options);
+  EXPECT_EQ(default_plan.window_size, 0);
+  EXPECT_EQ(default_plan.num_blocks, 0);
+  options.enable_draft_swa_manage(true);
+  const auto plan = resolve_draft_swa_cache_plan(draft, options);
+  EXPECT_EQ(plan.window_size, 2048);
+  EXPECT_EQ(plan.num_blocks, 110);
+  options.enable_draft_swa_manage(false);
+  EXPECT_EQ(resolve_draft_swa_cache_plan(draft, options).num_blocks, 0);
+  options.enable_draft_swa_manage(true);
+  draft.model_type("DSparkDraftModel");
+  EXPECT_EQ(resolve_draft_swa_cache_plan(draft, options).num_blocks,
+            plan.num_blocks);
+  options.speculative_algorithm("DFlash2");
+  draft.model_type("DFlash2DraftModel");
+  EXPECT_EQ(resolve_draft_swa_cache_plan(draft, options).window_size, 2048);
+  options.max_tokens_per_batch(8192);
+  EXPECT_EQ(resolve_draft_swa_cache_plan(draft, options).num_blocks, 142);
+  options.speculative_algorithm("MTP");
+  EXPECT_EQ(resolve_draft_swa_cache_plan(draft, options).num_blocks, 0);
+  options.speculative_algorithm("DSpark");
+  draft.use_sliding_window(false);
+  EXPECT_EQ(resolve_draft_swa_cache_plan(draft, options).num_blocks, 0);
+  draft.use_sliding_window(true).sliding_window(0);
+  EXPECT_EQ(resolve_draft_swa_cache_plan(draft, options).num_blocks, 0);
+  // These draft families retain their own MLA/grouped cache geometry.
+  draft.sliding_window(2048);
+  for (const std::string model_type : {"glm5_dspark", "deepseek_v4_dspark"}) {
+    draft.model_type(model_type);
+    EXPECT_EQ(resolve_draft_swa_cache_plan(draft, options).num_blocks, 0);
+  }
+}
+
+TEST(KVCacheEstimationTest, DraftSwaSelectionIgnoresDeploymentOptions) {
+  ModelArgs draft;
+  draft.model_type("DSparkDraftModel")
+      .use_sliding_window(true)
+      .sliding_window(2048);
+  runtime::Options options;
+  options.model_impl("python")
+      .backend("llm")
+      .enable_draft_swa_manage(true)
+      .speculative_algorithm("DSpark")
+      .num_speculative_tokens(7)
+      .max_seqs_per_batch(4)
+      .max_tokens_per_batch(8192);
+  const auto baseline = resolve_draft_swa_cache_plan(draft, options);
+  ASSERT_EQ(baseline.num_blocks, 142);
+  // Deployment support is separate from selecting the draft's cache geometry.
+  options.model_impl("native")
+      .backend("vlm")
+      .cp_size(2)
+      .enable_disagg_pd(true)
+      .instance_role(InstanceRole::PREFILL)
+      .enable_kvcache_store(true)
+      .host_blocks_factor(2.0)
+      .kv_cache_dtype("int8");
+  EXPECT_TRUE(should_use_draft_swa_cache(draft, options));
+  const auto plan = resolve_draft_swa_cache_plan(draft, options);
+  EXPECT_EQ(plan.num_blocks, baseline.num_blocks);
+  EXPECT_EQ(plan.window_size, baseline.window_size);
+}
 
 TEST(KVCacheEstimationTest, RuntimeBudgetUsesMinimumAcrossWorkers) {
   ModelArgs model_args = make_standard_args();

@@ -348,6 +348,11 @@ size_t KVCacheState::current_max_tokens_capacity() const {
 std::vector<std::pair<BlockType, const std::vector<Block>*>>
 KVCacheState::multi_block_export_view() const {
   std::vector<std::pair<BlockType, const std::vector<Block>*>> view;
+  if (!blocks(BlockType::KV).empty()) {
+    // A flat target may additionally own external draft SWA blocks. They are
+    // exported separately and must not select DSV4 target attention metadata.
+    return view;
+  }
   view.reserve(kMultiBlockExportOrder.size());
   for (const BlockType type : kMultiBlockExportOrder) {
     const auto it = composite_blocks_.find(type);
@@ -359,6 +364,9 @@ KVCacheState::multi_block_export_view() const {
 }
 
 bool KVCacheState::has_multi_block_export() const {
+  if (!blocks(BlockType::KV).empty()) {
+    return false;
+  }
   for (const BlockType type : kMultiBlockExportOrder) {
     const auto it = composite_blocks_.find(type);
     if (it != composite_blocks_.end() && !it->second.empty()) {

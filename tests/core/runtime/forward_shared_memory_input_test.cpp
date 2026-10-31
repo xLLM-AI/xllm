@@ -20,6 +20,7 @@ limitations under the License.
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -221,6 +222,31 @@ TYPED_TEST(ForwardSharedMemoryInputTest,
             parallel.dp_dspark_confidence);
   EXPECT_EQ(decoded.input_params.parallel.dp_dspark_rounds_since_full_width,
             parallel.dp_dspark_rounds_since_full_width);
+}
+
+TYPED_TEST(ForwardSharedMemoryInputTest,
+           PackedInputPreservesTypedCachePageTables) {
+  if constexpr (std::is_same_v<TypeParam, RecForwardInput>) {
+    GTEST_SKIP() << "Recommendation inputs have no speculative draft cache";
+  } else {
+    TypeParam source = make_input<TypeParam>({});
+    source.input_params.cache_block_tables[BlockType::SWA] =
+        torch::tensor({{0, 3, 5}}, torch::kInt32);
+    source.input_params.cache_block_tables[BlockType::C4] =
+        torch::tensor({{7, 9}}, torch::kInt32);
+    proto::PackedForwardInput packed;
+    ASSERT_TRUE(source.to_packed_proto(&packed));
+    TypeParam lazy;
+    ASSERT_TRUE(lazy.from_packed_proto(packed));
+    const auto decoded = lazy.to(torch::Device(torch::kCPU), torch::kFloat32);
+    ASSERT_EQ(decoded.input_params.cache_block_tables.size(), 2U);
+    for (const auto& [type, table] : source.input_params.cache_block_tables) {
+      const auto& received = decoded.input_params.cache_block_tables.at(type);
+      EXPECT_TRUE(received.equal(table));
+      EXPECT_TRUE(received.device().is_cpu());
+      EXPECT_NE(received.data_ptr(), table.data_ptr());
+    }
+  }
 }
 
 }  // namespace
