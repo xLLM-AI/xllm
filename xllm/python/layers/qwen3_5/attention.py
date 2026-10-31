@@ -97,6 +97,9 @@ class Qwen3_5Attention(nn.Module):
         )
         self.use_fused_qkv = False
 
+    def _apply_output_gate(self, output: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
+        return output * torch.sigmoid(gate.reshape(output.shape))
+
     def _finish_loading(self) -> None:
         """Run backend-specific post-load preparation, if any."""
 
@@ -137,5 +140,5 @@ class Qwen3_5Attention(nn.Module):
         k = self.rotary(positions, k).reshape(-1, self.kv_size)
         output = self.attn(q, k, v)
         if gate is not None:
-            output = output * torch.sigmoid(gate.reshape(-1, self.q_size))
+            output = self._apply_output_gate(output, gate)
         return self.o_proj(output)
