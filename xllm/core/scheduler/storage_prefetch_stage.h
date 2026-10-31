@@ -28,17 +28,17 @@ class KVCacheManager;
 class Request;
 class SchedulerNotifier;
 
-// Reserves ready-queue slots while requests wait for storage prefetch. The
-// scheduler creates this admission stage only when its cache manager supports
-// storage prefetch.
-class StoragePrefetchAdmission final {
+// Stages requests until storage prefetch completes, reserving their
+// ready-queue slots. Created only for cache managers that support storage
+// prefetch.
+class StoragePrefetchStage final {
  public:
-  StoragePrefetchAdmission(
+  StoragePrefetchStage(
       KVCacheManager& manager,
       std::mutex& admission_mutex,
       std::shared_ptr<SchedulerNotifier> notifier,
       std::function<bool(std::shared_ptr<Request>)> enqueue_ready_request);
-  ~StoragePrefetchAdmission();
+  ~StoragePrefetchStage();
 
   // Caller holds admission_mutex and has checked ready-queue capacity together
   // with num_pending_requests().

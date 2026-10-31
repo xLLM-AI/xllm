@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/scheduler/storage_prefetch_admission.h"
+#include "core/scheduler/storage_prefetch_stage.h"
 
 #include <glog/logging.h>
 
@@ -25,7 +25,7 @@ limitations under the License.
 
 namespace xllm {
 
-StoragePrefetchAdmission::StoragePrefetchAdmission(
+StoragePrefetchStage::StoragePrefetchStage(
     KVCacheManager& manager,
     std::mutex& admission_mutex,
     std::shared_ptr<SchedulerNotifier> notifier,
@@ -38,30 +38,30 @@ StoragePrefetchAdmission::StoragePrefetchAdmission(
       [notifier = notifier_]() { notifier->notify(); });
 }
 
-StoragePrefetchAdmission::~StoragePrefetchAdmission() {
+StoragePrefetchStage::~StoragePrefetchStage() {
   CHECK_EQ(pending_requests_.load(std::memory_order_acquire), 0u)
-      << "StoragePrefetchAdmission destroyed with pending prefetch callbacks";
+      << "StoragePrefetchStage destroyed with pending prefetch callbacks";
 }
 
-void StoragePrefetchAdmission::add_request(std::shared_ptr<Request> request) {
+void StoragePrefetchStage::add_request(std::shared_ptr<Request> request) {
   pending_requests_.fetch_add(1, std::memory_order_relaxed);
   VLOG(1) << "[Mooncake][AdmissionPending] request=" << request->request_id();
   admissions_.emplace_back(std::move(request));
   notifier_->notify();
 }
 
-size_t StoragePrefetchAdmission::num_pending_requests() const {
+size_t StoragePrefetchStage::num_pending_requests() const {
   return pending_requests_.load(std::memory_order_relaxed);
 }
 
-void StoragePrefetchAdmission::drain() {
+void StoragePrefetchStage::drain() {
   manager_.drain_prefetch_completions();
   drain_admissions();
   manager_.drain_prefetch_completions();
   drain_completed_prefetches();
 }
 
-void StoragePrefetchAdmission::shutdown() {
+void StoragePrefetchStage::shutdown() {
   manager_.set_prefetch_completion_callback({});
   {
     std::lock_guard<std::mutex> lock(admission_mutex_);
@@ -77,10 +77,10 @@ void StoragePrefetchAdmission::shutdown() {
   manager_.drain_prefetch_completions();
   drain_completed_prefetches();
   CHECK_EQ(pending_requests_.load(std::memory_order_acquire), 0u)
-      << "StoragePrefetchAdmission shut down with pending prefetch callbacks";
+      << "StoragePrefetchStage shut down with pending prefetch callbacks";
 }
 
-void StoragePrefetchAdmission::drain_admissions() {
+void StoragePrefetchStage::drain_admissions() {
   std::deque<std::shared_ptr<Request>> requests;
   {
     std::lock_guard<std::mutex> lock(admission_mutex_);
@@ -103,7 +103,7 @@ void StoragePrefetchAdmission::drain_admissions() {
   }
 }
 
-void StoragePrefetchAdmission::drain_completed_prefetches() {
+void StoragePrefetchStage::drain_completed_prefetches() {
   std::deque<std::shared_ptr<Request>> completed;
   {
     std::lock_guard<std::mutex> lock(admission_mutex_);

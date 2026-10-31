@@ -39,7 +39,7 @@ limitations under the License.
 #include "core/scheduler/request_priority_queue.h"
 #include "core/scheduler/scheduler.h"
 #include "core/scheduler/scheduler_notifier.h"
-#include "core/scheduler/storage_prefetch_admission.h"
+#include "core/scheduler/storage_prefetch_stage.h"
 #include "core/util/threadpool.h"
 
 namespace xllm {
@@ -173,9 +173,8 @@ class FixedStepsScheduler : public Scheduler {
       std::vector<std::shared_ptr<Request>>& finished_requests);
 
   size_t num_prefetching_requests() const {
-    return prefetch_admission_ == nullptr
-               ? 0
-               : prefetch_admission_->num_pending_requests();
+    return prefetch_stage_ == nullptr ? 0
+                                      : prefetch_stage_->num_pending_requests();
   }
 
   void drain_prefetch_pipeline();
@@ -189,7 +188,7 @@ class FixedStepsScheduler : public Scheduler {
 
   folly::MPMCQueue<std::shared_ptr<Request>> request_queue_;
   std::mutex request_admission_mutex_;
-  std::unique_ptr<StoragePrefetchAdmission> prefetch_admission_;
+  std::unique_ptr<StoragePrefetchStage> prefetch_stage_;
 
   std::vector<Sequence*> running_sequences_;
   std::vector<size_t> running_sequences_budgets_;
