@@ -216,7 +216,7 @@ void BlockManagerPool::deallocate(Sequence* sequence) {
   // virtual memory) KV leaf.
   auto* composite =
       static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
-  composite->deallocate_for_sequence(sequence);
+  composite->deallocate_for_sequence(sequence, sequence->kv_state());
   sequence->reset();
 }
 
@@ -257,7 +257,7 @@ bool BlockManagerPool::allocate(Sequence* sequence, size_t num_tokens) {
   auto* composite =
       static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
   if (started_empty) {
-    composite->allocate_shared_for_sequence(sequence);
+    composite->allocate_shared_for_sequence(sequence, sequence->kv_state());
   }
   // Beam swap decision uses the KV block count after the shared attach.
   const size_t kv_blocks = sequence->kv_state().num_blocks(BlockType::KV);
@@ -271,9 +271,10 @@ bool BlockManagerPool::allocate(Sequence* sequence, size_t num_tokens) {
   // sequence (e.g. a fork/clone of a beam parent) may still be missing its
   // per-sequence EMBEDDING / LINEAR block. The composite skips no-op leaves
   // internally.
-  if (!composite->allocate_sequence(sequence, num_tokens)) {
+  if (!composite->allocate_sequence(
+          sequence, sequence->kv_state(), num_tokens)) {
     if (started_empty) {
-      composite->deallocate_for_sequence(sequence);
+      composite->deallocate_for_sequence(sequence, sequence->kv_state());
       sequence->reset();
     }
     return false;
@@ -429,9 +430,10 @@ bool BlockManagerPool::try_allocate(Sequence* sequence) {
   // counter (try_allocate admits the full prompt up front).
   auto* composite =
       static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
-  composite->allocate_shared_for_sequence(sequence);
-  if (!composite->allocate_sequence(sequence, sequence->num_tokens())) {
-    composite->deallocate_for_sequence(sequence);
+  composite->allocate_shared_for_sequence(sequence, sequence->kv_state());
+  if (!composite->allocate_sequence(
+          sequence, sequence->kv_state(), sequence->num_tokens())) {
+    composite->deallocate_for_sequence(sequence, sequence->kv_state());
     sequence->reset();
     return false;
   }
@@ -492,7 +494,7 @@ void BlockManagerPool::allocate_shared(Sequence* sequence) {
       sequence->kv_state().prefix_cache_matched()) {
     return;
   }
-  composite->allocate_shared_for_sequence(sequence);
+  composite->allocate_shared_for_sequence(sequence, sequence->kv_state());
 }
 
 void BlockManagerPool::cache(Sequence* sequence) {
@@ -501,7 +503,7 @@ void BlockManagerPool::cache(Sequence* sequence) {
   }
   int32_t dp_rank = get_dp_rank(sequence);
   static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get())
-      ->cache_for_sequence(sequence);
+      ->cache_full_blocks_for_sequence(sequence);
 }
 
 void BlockManagerPool::cache(Sequence* sequence, size_t num_tokens) {

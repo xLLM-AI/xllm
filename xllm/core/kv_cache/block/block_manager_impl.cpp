@@ -241,12 +241,6 @@ void BlockManagerImpl::free(int32_t block_id) {
 // std::nullopt on post-eviction shortage. SlidingWindow / Single override.
 std::optional<std::vector<Block>> BlockManagerImpl::allocate_for_sequence(
     Sequence* seq,
-    size_t num_tokens) {
-  return allocate_for_sequence(seq, seq->kv_state(), num_tokens);
-}
-
-std::optional<std::vector<Block>> BlockManagerImpl::allocate_for_sequence(
-    Sequence* seq,
     KVCacheState& kv_state,
     size_t num_tokens) {
   if (seq == nullptr) {

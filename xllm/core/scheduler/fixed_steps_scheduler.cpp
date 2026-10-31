@@ -54,8 +54,15 @@ FixedStepsScheduler::FixedStepsScheduler(RecEngine* engine,
   CHECK(engine_ != nullptr);
   kv_cache_manager_ = engine_->block_manager_pool();
   CHECK(kv_cache_manager_ != nullptr);
-  kv_cache_manager_->set_prefetch_completion_callback(
-      [notifier = notifier_]() { notifier->notify(); });
+  if (kv_cache_manager_->has_storage_prefetch()) {
+    kv_cache_prefetcher_ = std::make_unique<KVCachePrefetcher>(
+        *kv_cache_manager_,
+        request_admission_mutex_,
+        notifier_,
+        [this](std::shared_ptr<Request> request) {
+          return request_queue_.write(std::move(request));
+        });
+  }
 
   enable_prefix_cache_ =
       ::xllm::KVCacheConfig::get_instance().enable_prefix_cache();
@@ -94,28 +101,13 @@ FixedStepsScheduler::FixedStepsScheduler(RecEngine* engine,
 
 FixedStepsScheduler::~FixedStepsScheduler() {
   notifier_->request_stop();
-  kv_cache_manager_->set_prefetch_completion_callback({});
 
   // Tasks capture scheduler state and must finish before it is destroyed.
   step_threadpool_.reset();
 
-  // Unissued admissions have no asynchronous callback and can be cancelled
-  // directly, including an offline scheduler that never started.
-  {
-    std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
-    for (const std::shared_ptr<Request>& request : prefetch_admissions_) {
-      request->set_cancel();
-    }
-    const size_t unissued = prefetch_admissions_.size();
-    prefetch_admissions_.clear();
-    const size_t previous =
-        prefetching_requests_.fetch_sub(unissued, std::memory_order_acq_rel);
-    CHECK_GE(previous, unissued);
+  if (kv_cache_prefetcher_ != nullptr) {
+    kv_cache_prefetcher_->shutdown();
   }
-  kv_cache_manager_->drain_prefetch_completions();
-  drain_completed_prefetches();
-  CHECK_EQ(prefetching_requests_.load(std::memory_order_acquire), 0u)
-      << "FixedStepsScheduler destroyed with pending prefetch callbacks";
   running_requests_.clear();
   output_dispatcher_.reset();
 }
@@ -124,17 +116,7 @@ bool FixedStepsScheduler::add_request(std::shared_ptr<Request>& request) {
   CHECK(request != nullptr);
   CHECK(!request->sequences().empty());
 
-  std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
-  const size_t pending_before_reservation =
-      prefetching_requests_.load(std::memory_order_relaxed);
-  const size_t queued_requests =
-      static_cast<size_t>(std::max<ssize_t>(request_queue_.size(), 0));
-  if (queued_requests + pending_before_reservation >=
-      request_queue_.capacity()) {
-    return false;
-  }
-
-  if (!kv_cache_manager_->has_storage_prefetch()) {
+  if (kv_cache_prefetcher_ == nullptr) {
     const bool accepted = request_queue_.write(request);
     if (accepted) {
       notifier_->notify();
@@ -142,68 +124,15 @@ bool FixedStepsScheduler::add_request(std::shared_ptr<Request>& request) {
     return accepted;
   }
 
-  prefetching_requests_.fetch_add(1, std::memory_order_relaxed);
-  prefetch_admissions_.emplace_back(request);
-  notifier_->notify();
-  VLOG(1) << "[Mooncake][AdmissionPending] request=" << request->request_id();
+  std::lock_guard<std::mutex> lock(request_admission_mutex_);
+  const size_t queued_requests =
+      static_cast<size_t>(std::max<ssize_t>(request_queue_.size(), 0));
+  if (queued_requests + kv_cache_prefetcher_->num_pending_requests() >=
+      request_queue_.capacity()) {
+    return false;
+  }
+  kv_cache_prefetcher_->add_request(request);
   return true;
-}
-
-void FixedStepsScheduler::drain_prefetch_admissions() {
-  std::deque<std::shared_ptr<Request>> requests;
-  {
-    std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
-    requests.swap(prefetch_admissions_);
-  }
-
-  for (std::shared_ptr<Request>& request : requests) {
-    if (request->finished() || request->cancelled()) {
-      const size_t previous =
-          prefetching_requests_.fetch_sub(1, std::memory_order_relaxed);
-      CHECK_GT(previous, 0u);
-      continue;
-    }
-
-    kv_cache_manager_->prefetch_from_storage(
-        request, [this](std::shared_ptr<Request> completed) {
-          std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
-          completed_prefetches_.emplace_back(std::move(completed));
-        });
-  }
-}
-
-void FixedStepsScheduler::drain_completed_prefetches() {
-  std::deque<std::shared_ptr<Request>> completed;
-  {
-    std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
-    completed.swap(completed_prefetches_);
-  }
-
-  for (std::shared_ptr<Request>& request : completed) {
-    const bool cancelled = request->finished() || request->cancelled();
-    {
-      // Admission observes the queue size and reservation count together.
-      std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
-      if (!cancelled) {
-        CHECK(request_queue_.write(request))
-            << "Reserved request queue slot disappeared before prefetch "
-               "completed.";
-      }
-      const size_t previous =
-          prefetching_requests_.fetch_sub(1, std::memory_order_relaxed);
-      CHECK_GT(previous, 0u);
-    }
-    VLOG(1) << (cancelled ? "[Mooncake][AdmissionCancelled] request="
-                          : "[Mooncake][AdmissionReady] request=")
-            << request->request_id();
-  }
-}
-
-void FixedStepsScheduler::drain_prefetch_pipeline() {
-  kv_cache_manager_->drain_prefetch_completions();
-  drain_prefetch_admissions();
-  kv_cache_manager_->drain_prefetch_completions();
-  drain_completed_prefetches();
 }
 
 void FixedStepsScheduler::apply_cancel_requests() {
@@ -382,7 +311,9 @@ bool FixedStepsScheduler::handle_prefill_requests(
 RecBatchGroup FixedStepsScheduler::prepare_rec_batch() {
   Timer timer;
   apply_cancel_requests();
-  drain_prefetch_pipeline();
+  if (kv_cache_prefetcher_ != nullptr) {
+    kv_cache_prefetcher_->drain();
+  }
   // propagate new requests to prefill_queue_
   // Include those requests that are preempted by others.
   auto propagate_request = [this](std::shared_ptr<Request>& request) {
@@ -550,8 +481,7 @@ ScheduleResult FixedStepsScheduler::schedule_request(
     // Idle schedulers wait until the deadline or the next notification. Keep
     // short retries while prefetches or local admissions still need progress.
     const bool has_pending_work =
-        prefetching_requests_.load(std::memory_order_relaxed) > 0 ||
-        !prefill_queue_->empty();
+        has_pending_prefetch() || !prefill_queue_->empty();
     const absl::Duration wait_duration =
         has_pending_work ? std::min(absl::Milliseconds(1), remaining)
                          : remaining;

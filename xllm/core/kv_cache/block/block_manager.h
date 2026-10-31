@@ -186,12 +186,6 @@ class BlockManager {
   // releases its own slid-out blocks in place as part of this call).
   virtual std::optional<std::vector<Block>> allocate_for_sequence(
       Sequence* seq,
-      size_t num_tokens) = 0;
-
-  // State-explicit growth for hierarchy-managed Host/HBM leaves. Unlike the
-  // Sequence overload, this does not assume that blocks live in kv_state().
-  virtual std::optional<std::vector<Block>> allocate_for_sequence(
-      Sequence* seq,
       KVCacheState& kv_state,
       size_t num_tokens) = 0;
 
@@ -203,7 +197,6 @@ class BlockManager {
   // window. The composite calls this on every leaf after a successful commit;
   // the SWA leaf may also call it after an allocation shortage before retrying.
   // Non-SWA leaves keep the empty default (no-op).
-  virtual void release_out_of_window(Sequence* /*seq*/) {}
   virtual void release_out_of_window(Sequence* /*seq*/,
                                      KVCacheState& /*kv_state*/) {}
 

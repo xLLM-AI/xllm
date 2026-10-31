@@ -230,7 +230,8 @@ TEST(CompositeMtpPrefixCacheTest, PublishesCompletedKvWithConfirmedLookahead) {
                                 mtp_options());
   const std::vector<int32_t> tokens(33, 7);
   Sequence sequence = make_mtp_sequence(tokens);
-  ASSERT_TRUE(manager.allocate_sequence(&sequence, tokens.size()));
+  ASSERT_TRUE(
+      manager.allocate_sequence(&sequence, sequence.kv_state(), tokens.size()));
   sequence.kv_state().set_kv_cache_tokens_num(15);
   manager.cache_full_blocks_for_sequence(&sequence);
   EXPECT_EQ(sequence.kv_state().num_cached_blocks(BlockType::KV), 0u);
@@ -239,10 +240,10 @@ TEST(CompositeMtpPrefixCacheTest, PublishesCompletedKvWithConfirmedLookahead) {
   manager.cache_full_blocks_for_sequence(&sequence);
   EXPECT_EQ(sequence.kv_state().num_cached_blocks(BlockType::KV), 1u);
   Sequence repeated = make_mtp_sequence(tokens);
-  manager.allocate_shared_for_sequence(&repeated);
+  manager.allocate_shared_for_sequence(&repeated, repeated.kv_state());
   EXPECT_EQ(repeated.kv_cache_tokens_num(), 16u);
-  manager.deallocate_for_sequence(&repeated);
-  manager.deallocate_for_sequence(&sequence);
+  manager.deallocate_for_sequence(&repeated, repeated.kv_state());
+  manager.deallocate_for_sequence(&sequence, sequence.kv_state());
 }
 
 TEST(CompositeMtpPrefixCacheTest, InBatchBudgetDoesNotPublishUnwrittenKv) {
@@ -250,42 +251,38 @@ TEST(CompositeMtpPrefixCacheTest, InBatchBudgetDoesNotPublishUnwrittenKv) {
                                 mtp_options());
   const std::vector<int32_t> tokens(33, 7);
   Sequence sequence = make_mtp_sequence(tokens);
-  ASSERT_TRUE(manager.allocate_sequence(&sequence, tokens.size()));
+  ASSERT_TRUE(
+      manager.allocate_sequence(&sequence, sequence.kv_state(), tokens.size()));
   manager.cache_for_sequence(&sequence, tokens.size());
   EXPECT_EQ(sequence.kv_state().num_cached_blocks(BlockType::KV), 0u);
   EXPECT_EQ(manager.num_blocks_in_prefix_cache(), 0u);
   sequence.kv_state().set_kv_cache_tokens_num(16);
   manager.cache_for_sequence(&sequence, tokens.size());
   EXPECT_EQ(sequence.kv_state().num_cached_blocks(BlockType::KV), 1u);
-  manager.deallocate_for_sequence(&sequence);
+  manager.deallocate_for_sequence(&sequence, sequence.kv_state());
 }
 
 TEST(CompositeMtpPrefixCacheTest, RealAppendPublishesEverySafeBlock) {
   for (size_t boundary : {16u, 32u}) {
-    for (int32_t path : {0, 1, 2}) {
+    for (const bool full_flush : {false, true}) {
       SCOPED_TRACE(boundary);
-      SCOPED_TRACE(path);
+      SCOPED_TRACE(full_flush);
       CompositeBlockManager manager(build_composite_leaves(mtp_options()),
                                     mtp_options());
       std::vector<int32_t> tokens(boundary, 7);
       Sequence sequence = make_mtp_sequence(tokens);
-      ASSERT_TRUE(manager.allocate_sequence(&sequence, boundary));
+      ASSERT_TRUE(
+          manager.allocate_sequence(&sequence, sequence.kv_state(), boundary));
       sequence.kv_state().set_kv_cache_tokens_num(boundary);
       sequence.append_token(Token(8));
       ASSERT_EQ(sequence.kv_cache_tokens_num(), boundary);
       ASSERT_EQ(sequence.hash_tokens(BlockHasherType::MTP_TEXT).size(),
                 boundary + 1);
       auto publish = [&]() {
-        switch (path) {
-          case 0:
-            manager.cache_full_blocks_for_sequence(&sequence);
-            break;
-          case 1:
-            manager.cache_for_sequence(&sequence);
-            break;
-          case 2:
-            manager.cache_for_sequence(&sequence, boundary);
-            break;
+        if (full_flush) {
+          manager.cache_full_blocks_for_sequence(&sequence);
+        } else {
+          manager.cache_for_sequence(&sequence, boundary);
         }
       };
       publish();
@@ -297,15 +294,15 @@ TEST(CompositeMtpPrefixCacheTest, RealAppendPublishesEverySafeBlock) {
       tokens.reserve(boundary + 1);
       tokens.emplace_back(8);
       Sequence repeated = make_mtp_sequence(tokens);
-      manager.allocate_shared_for_sequence(&repeated);
+      manager.allocate_shared_for_sequence(&repeated, repeated.kv_state());
       EXPECT_EQ(repeated.kv_cache_tokens_num(), boundary);
-      manager.deallocate_for_sequence(&repeated);
+      manager.deallocate_for_sequence(&repeated, repeated.kv_state());
       tokens.back() = 9;
       Sequence forked = make_mtp_sequence(tokens);
-      manager.allocate_shared_for_sequence(&forked);
+      manager.allocate_shared_for_sequence(&forked, forked.kv_state());
       EXPECT_EQ(forked.kv_cache_tokens_num(), boundary - 16);
-      manager.deallocate_for_sequence(&forked);
-      manager.deallocate_for_sequence(&sequence);
+      manager.deallocate_for_sequence(&forked, forked.kv_state());
+      manager.deallocate_for_sequence(&sequence, sequence.kv_state());
     }
   }
 }
@@ -317,13 +314,14 @@ TEST(CompositeMtpPrefixCacheTest, InBatchBoundsKvBudgetAndCapacitySeparately) {
                                   mtp_options());
     Sequence sequence = make_mtp_sequence(std::vector<int32_t>(33, 7));
     const size_t capacity = constraint == 2 ? 16 : 32;
-    ASSERT_TRUE(manager.allocate_sequence(&sequence, capacity));
+    ASSERT_TRUE(
+        manager.allocate_sequence(&sequence, sequence.kv_state(), capacity));
     sequence.kv_state().set_kv_cache_tokens_num(constraint == 0 ? 15 : 32);
     manager.cache_for_sequence(&sequence,
                                /*num_tokens=*/constraint == 1 ? 15 : 32);
     EXPECT_EQ(sequence.kv_state().num_cached_blocks(BlockType::KV),
               constraint == 2 ? 1u : 0u);
-    manager.deallocate_for_sequence(&sequence);
+    manager.deallocate_for_sequence(&sequence, sequence.kv_state());
   }
 }
 
@@ -332,7 +330,8 @@ TEST(CompositeMtpPrefixCacheTest, PublicationPathsShareAnIdempotentCursor) {
                                 mtp_options());
   const std::vector<int32_t> tokens(49, 7);
   Sequence sequence = make_mtp_sequence(tokens);
-  ASSERT_TRUE(manager.allocate_sequence(&sequence, tokens.size()));
+  ASSERT_TRUE(
+      manager.allocate_sequence(&sequence, sequence.kv_state(), tokens.size()));
   sequence.kv_state().set_kv_cache_tokens_num(33);
 
   // A mid-step publication respects its limit even with more completed KV.
@@ -343,15 +342,15 @@ TEST(CompositeMtpPrefixCacheTest, PublicationPathsShareAnIdempotentCursor) {
 
   // Neither a repeated publication nor the final flush publishes the tail.
   manager.cache_for_sequence(&sequence, tokens.size());
-  manager.cache_for_sequence(&sequence);
+  manager.cache_full_blocks_for_sequence(&sequence);
   EXPECT_EQ(sequence.kv_state().num_cached_blocks(BlockType::KV), 2u);
   EXPECT_EQ(manager.num_blocks_in_prefix_cache(), 2u);
 
   Sequence repeated = make_mtp_sequence(tokens);
-  manager.allocate_shared_for_sequence(&repeated);
+  manager.allocate_shared_for_sequence(&repeated, repeated.kv_state());
   EXPECT_EQ(repeated.kv_cache_tokens_num(), 32u);
-  manager.deallocate_for_sequence(&repeated);
-  manager.deallocate_for_sequence(&sequence);
+  manager.deallocate_for_sequence(&repeated, repeated.kv_state());
+  manager.deallocate_for_sequence(&sequence, sequence.kv_state());
 }
 
 TEST(CompositeMtpPrefixCacheTest, FinalFlushKeepsPublishCursorAtSafeBoundary) {
@@ -359,11 +358,12 @@ TEST(CompositeMtpPrefixCacheTest, FinalFlushKeepsPublishCursorAtSafeBoundary) {
                                 mtp_options());
   const std::vector<int32_t> tokens(32, 7);
   Sequence sequence = make_mtp_sequence(tokens);
-  ASSERT_TRUE(manager.allocate_sequence(&sequence, tokens.size()));
+  ASSERT_TRUE(
+      manager.allocate_sequence(&sequence, sequence.kv_state(), tokens.size()));
   sequence.kv_state().set_kv_cache_tokens_num(32);
-  manager.cache_for_sequence(&sequence);
+  manager.cache_full_blocks_for_sequence(&sequence);
   EXPECT_EQ(sequence.kv_state().num_cached_blocks(BlockType::KV), 1u);
-  manager.deallocate_for_sequence(&sequence);
+  manager.deallocate_for_sequence(&sequence, sequence.kv_state());
 }
 
 TEST(CompositeMtpPrefixCacheTest, NeverPublishesOverlapPlaceholderIdentity) {
@@ -371,19 +371,19 @@ TEST(CompositeMtpPrefixCacheTest, NeverPublishesOverlapPlaceholderIdentity) {
                                 mtp_options());
   Sequence sequence = make_mtp_sequence(std::vector<int32_t>(16, 7),
                                         /*overlap=*/true);
-  ASSERT_TRUE(manager.allocate_sequence(&sequence, /*num_tokens=*/18));
+  ASSERT_TRUE(manager.allocate_sequence(&sequence, sequence.kv_state(), 18));
   sequence.kv_state().set_kv_cache_tokens_num(16);
   sequence.append_token(Token(-1));
-  manager.cache_for_sequence(&sequence);
+  manager.cache_full_blocks_for_sequence(&sequence);
   EXPECT_EQ(sequence.kv_state().num_cached_blocks(BlockType::KV), 0u);
   EXPECT_EQ(manager.num_blocks_in_prefix_cache(), 0u);
 
   sequence.update_last_step_token(Token(8), /*token_offset=*/0);
   ASSERT_EQ(sequence.kv_cache_tokens_num(), 16u);
   ASSERT_EQ(sequence.hash_tokens(BlockHasherType::MTP_TEXT).size(), 17u);
-  manager.cache_for_sequence(&sequence);
+  manager.cache_full_blocks_for_sequence(&sequence);
   EXPECT_EQ(sequence.kv_state().num_cached_blocks(BlockType::KV), 1u);
-  manager.deallocate_for_sequence(&sequence);
+  manager.deallocate_for_sequence(&sequence, sequence.kv_state());
 }
 
 TEST(HierarchyMtpPrefixCacheTest, KeepsCoordinatorAliveForPoolLifetime) {
@@ -453,7 +453,8 @@ TEST(TypedMtpPrefixCacheTest, CompressedCheckpointRequiresNextToken) {
   CompositeBlockManager manager(build_composite_leaves(options), options);
   const std::vector<int32_t> tokens(2048, 7);
   Sequence sequence = make_mtp_sequence(tokens);
-  ASSERT_TRUE(manager.allocate_sequence(&sequence, tokens.size()));
+  ASSERT_TRUE(
+      manager.allocate_sequence(&sequence, sequence.kv_state(), tokens.size()));
   sequence.kv_state().set_kv_cache_tokens_num(2048);
   manager.cache_full_blocks_for_sequence(&sequence);
   EXPECT_EQ(sequence.kv_state().num_cached_blocks(BlockType::C128), 0u);
@@ -468,10 +469,10 @@ TEST(TypedMtpPrefixCacheTest, CompressedCheckpointRequiresNextToken) {
   confirmed.reserve(tokens.size() + 1);
   confirmed.emplace_back(8);
   Sequence repeated = make_mtp_sequence(confirmed);
-  manager.allocate_shared_for_sequence(&repeated);
+  manager.allocate_shared_for_sequence(&repeated, repeated.kv_state());
   EXPECT_EQ(repeated.kv_cache_tokens_num(), 2048u);
-  manager.deallocate_for_sequence(&repeated);
-  manager.deallocate_for_sequence(&sequence);
+  manager.deallocate_for_sequence(&repeated, repeated.kv_state());
+  manager.deallocate_for_sequence(&sequence, sequence.kv_state());
 }
 
 TEST(TypedMtpPrefixCacheTest, DecodeOffloadWaitsForCompletedLookahead) {

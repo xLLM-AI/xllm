@@ -147,11 +147,26 @@ class PrefetchBlockManagerPool final : public BlockManagerPool {
 
   void prefetch_from_storage(std::shared_ptr<Request> request,
                              PrefetchDoneCallback done) override {
+    prefetch_pipeline_calls_.fetch_add(1, std::memory_order_relaxed);
     done(std::move(request));
+  }
+
+  void drain_prefetch_completions() override {
+    prefetch_pipeline_calls_.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  void set_prefetch_completion_callback(
+      PrefetchCompletionCallback /*callback*/) override {
+    prefetch_pipeline_calls_.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  size_t prefetch_pipeline_calls() const {
+    return prefetch_pipeline_calls_.load(std::memory_order_relaxed);
   }
 
  private:
   bool enable_storage_prefetch_ = false;
+  std::atomic<size_t> prefetch_pipeline_calls_{0};
 };
 
 class FakeEngine final : public Engine {
@@ -205,6 +220,10 @@ class FakeEngine final : public Engine {
 
   void set_storage_prefetch_enabled(bool enabled) {
     block_manager_->set_storage_prefetch_enabled(enabled);
+  }
+
+  size_t prefetch_pipeline_calls() const {
+    return block_manager_->prefetch_pipeline_calls();
   }
 
   void set_tokenizer(std::unique_ptr<Tokenizer> tokenizer) {
@@ -307,7 +326,11 @@ class TestDisaggPDScheduler final : public DisaggPDScheduler {
     return prefill_request_queue_.try_dequeue(*request);
   }
 
-  void drain_prefetch_for_test() { drain_prefetch_pipeline(); }
+  void drain_prefetch_for_test() {
+    if (kv_cache_prefetcher_ != nullptr) {
+      kv_cache_prefetcher_->drain();
+    }
+  }
 
   void stop_dispatch_for_test() {
     CHECK(prefill_request_queue_.enqueue(nullptr));
@@ -602,6 +625,36 @@ TEST(DisaggPDSchedulerShutdownTest,
       },
       ::testing::ExitedWithCode(0),
       "");
+}
+
+TEST(DisaggPDSchedulerTest,
+     DisabledStoragePrefetchSkipsManagerCallsThroughoutLifecycle) {
+  for (const bool offline : {false, true}) {
+    SCOPED_TRACE(offline);
+    FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
+    auto request = make_request({1, 2}, "request");
+    request->state().scheduler_param.offline = offline;
+
+    {
+      TestDisaggPDScheduler scheduler(&engine, make_options());
+      EXPECT_EQ(engine.prefetch_pipeline_calls(), 0u);
+      for (int32_t iteration = 0; iteration < 3; ++iteration) {
+        BatchGroup batches = scheduler.prepare_batch();
+        ASSERT_EQ(batches.size(), 1u);
+        EXPECT_TRUE(batches.front().empty());
+      }
+
+      ASSERT_TRUE(scheduler.add_request(request));
+      EXPECT_FALSE(scheduler.has_pending_prefetch());
+      scheduler.drain_prefetch_for_test();
+      std::shared_ptr<Request> queued;
+      ASSERT_TRUE(scheduler.pop_prefill_request_for_test(offline, &queued));
+      EXPECT_EQ(queued, request);
+      EXPECT_EQ(engine.prefetch_pipeline_calls(), 0u);
+    }
+
+    EXPECT_EQ(engine.prefetch_pipeline_calls(), 0u);
+  }
 }
 
 TEST(DisaggPDSchedulerTest, AdmissionRetainsCapacityUntilDispatchCompletes) {

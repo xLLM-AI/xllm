@@ -39,15 +39,6 @@ SlidingWindowBlockManager::SlidingWindowBlockManager(const Options& options)
 
 std::optional<std::vector<Block>>
 SlidingWindowBlockManager::allocate_for_sequence(Sequence* seq,
-                                                 size_t num_tokens) {
-  if (seq == nullptr) {
-    return std::nullopt;
-  }
-  return allocate_for_sequence(seq, seq->kv_state(), num_tokens);
-}
-
-std::optional<std::vector<Block>>
-SlidingWindowBlockManager::allocate_for_sequence(Sequence* seq,
                                                  KVCacheState& kv_state,
                                                  size_t num_tokens) {
   if (seq == nullptr) {
@@ -152,15 +143,11 @@ bool SlidingWindowBlockManager::allocate_for_prefetch(Sequence* seq,
   return allocate_prefetch_range(seq, num_tokens, required_begin);
 }
 
-void SlidingWindowBlockManager::release_out_of_window(Sequence* seq) {
+void SlidingWindowBlockManager::release_out_of_window(Sequence* seq,
+                                                      KVCacheState& kv_state) {
   if (seq == nullptr) {
     return;
   }
-  release_out_of_window(seq, seq->kv_state(), seq->kv_cache_tokens_num());
-}
-
-void SlidingWindowBlockManager::release_out_of_window(Sequence* seq,
-                                                      KVCacheState& kv_state) {
   release_out_of_window(seq, kv_state, seq->kv_cache_tokens_num());
 }
 

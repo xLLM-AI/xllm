@@ -49,12 +49,13 @@ EmbeddingBlockManager::EmbeddingBlockManager(uint32_t num_blocks,
 
 std::optional<std::vector<Block>> EmbeddingBlockManager::allocate_for_sequence(
     Sequence* seq,
+    KVCacheState& kv_state,
     size_t /*num_tokens*/) {
   if (seq == nullptr) {
     return std::nullopt;
   }
   // One block per sequence, reused for its lifetime.
-  if (seq->kv_state().num_blocks(block_type()) > 0) {
+  if (kv_state.num_blocks(block_type()) > 0) {
     return std::vector<Block>{};
   }
   std::vector<Block> blocks = allocate(1);

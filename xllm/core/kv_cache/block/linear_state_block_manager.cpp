@@ -43,11 +43,11 @@ LinearStateBlockManager::LinearStateBlockManager(uint32_t num_slots,
 
 std::optional<std::vector<Block>>
 LinearStateBlockManager::allocate_for_sequence(Sequence* seq,
+                                               KVCacheState& kv_state,
                                                size_t /*num_tokens*/) {
   if (seq == nullptr) {
     return std::nullopt;
   }
-  KVCacheState& kv_state = seq->kv_state();
   std::vector<Block>* blocks = kv_state.mutable_blocks(BlockType::LINEAR);
   CHECK(blocks->empty() || blocks->back().is_valid());
   if (blocks->size() > 1) {
