@@ -142,6 +142,7 @@ struct HostCacheValidationOptions {
   bool supports_grouped_cache_offload = false;
   bool has_conv_cache_shape = false;
   bool has_ssm_cache_shape = false;
+  bool has_kpool_tail_shape = false;
   bool requires_indexer_row_folding = false;
   std::string kv_cache_dtype = "auto";
   std::string indexer_cache_dtype = "auto";

@@ -502,8 +502,20 @@ bool LLMEngine::allocate_kv_cache(
     // Translate a composite cache capacity into typed Host pools. The
     // hierarchy layer consumes only this BlockType map and does not need to
     // identify the model that produced the layout.
-    if (!options.manager_types().empty()) {
+    if (!options.manager_types().empty() || enable_state_cache) {
       std::map<BlockType, uint32_t> host_capacities;
+      if (options.manager_types().empty()) {
+        host_capacities.emplace(
+            BlockType::KV,
+            static_cast<uint32_t>(scale_host_block_count(
+                kv_cache_cap.n_blocks(), options_.host_blocks_factor())));
+      }
+      if (enable_state_cache) {
+        host_capacities.emplace(BlockType::LINEAR,
+                                static_cast<uint32_t>(scale_host_block_count(
+                                    kv_cache_cap.num_linear_state_blocks(),
+                                    options_.host_blocks_factor())));
+      }
       uint32_t host_c128_blocks = 0;
       if (kv_cache_cap.c128_count() > 0) {
         host_c128_blocks = static_cast<uint32_t>(scale_host_block_count(

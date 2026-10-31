@@ -73,6 +73,7 @@ KVCacheManagerFactoryResult KVCacheManagerFactory::create(
     validation.has_grouped_cache_layout = shape.has_grouped_cache_layout();
     validation.has_conv_cache_shape = shape.has_conv_cache_shape();
     validation.has_ssm_cache_shape = shape.has_ssm_cache_shape();
+    validation.has_kpool_tail_shape = shape.has_kpool_tail_shape();
     validation.requires_indexer_row_folding =
         shape.has_index_cache_shape() &&
         shape.index_cache_shape().front() != key_cache_shape.front();

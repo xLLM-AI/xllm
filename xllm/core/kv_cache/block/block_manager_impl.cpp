@@ -181,7 +181,7 @@ std::vector<Block> BlockManagerImpl::allocate_shared(
 
     // update effective block usage
     for (const auto& block : shared_blocks) {
-      if (mark_used(&usage_accounted_ids_, block.id())) {
+      if (block.is_valid() && mark_used(&usage_accounted_ids_, block.id())) {
         num_used_blocks_.fetch_add(1, std::memory_order_relaxed);
       }
     }

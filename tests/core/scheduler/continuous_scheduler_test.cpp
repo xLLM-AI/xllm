@@ -815,7 +815,7 @@ TEST(EnginePrefixCacheTest, FullAttentionDecodeStillReusesKvPrefixes) {
   pool->deallocate(second_sequence);
 }
 
-TEST(EnginePrefixCacheTest, DecodeLinearRejectsHostPrefixCacheAndStore) {
+TEST(EnginePrefixCacheTest, DecodeLinearHostCacheRejectsStore) {
   ScopedConfigValue<bool> vmm_kvcache(
       KVCacheConfig::get_instance().enable_vmm_kvcache(), false);
   FakeEngine engine(32, 4, true, true, InstanceRole::DECODE);
@@ -833,9 +833,11 @@ TEST(EnginePrefixCacheTest, DecodeLinearRejectsHostPrefixCacheAndStore) {
     options.enable_kvcache_store = enable_store;
     const std::optional<std::string> error =
         validate_host_cache_options(options);
-    ASSERT_TRUE(error.has_value());
-    EXPECT_NE(error->find("linear-attention conv/SSM cache tensors"),
-              std::string::npos);
+    EXPECT_EQ(error.has_value(), enable_store);
+    if (error) {
+      EXPECT_NE(error->find("linear-attention Host checkpoints"),
+                std::string::npos);
+    }
   }
 }
 

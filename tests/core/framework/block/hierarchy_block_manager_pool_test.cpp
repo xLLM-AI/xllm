@@ -31,6 +31,7 @@ limitations under the License.
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/block/block_utils.h"
 #include "core/kv_cache/block/sliding_window_block_manager.h"
+#include "core/util/scope_guard.h"
 #include "framework/block/block_manager_pool.h"
 #include "framework/block/composite_block_manager.h"
 #include "framework/config/scheduler_config.h"
@@ -111,6 +112,21 @@ class HierarchyPoolTestPeer final {
         pair.reset();
       }
     }
+  }
+
+  static std::vector<OffloadBlockPair> take_offload_pairs(
+      HierarchyBlockManagerPool& pool,
+      int32_t dp_rank = 0) {
+    std::vector<OffloadBlockPair> snapshot;
+    auto& queue = pool.offload_block_pair_queues_.at(dp_rank);
+    std::shared_ptr<OffloadBlockPair> pair;
+    while (queue.try_dequeue(pair)) {
+      if (pair != nullptr) {
+        snapshot.emplace_back(*pair);
+      }
+      pair.reset();
+    }
+    return snapshot;
   }
 };
 
@@ -243,6 +259,18 @@ BlockManagerPool::Options make_flat_kv_options() {
       .block_size(128)
       .enable_prefix_cache(true)
       .enable_host_offload(true);
+  return opts;
+}
+
+BlockManagerPool::Options make_flat_kv_linear_options() {
+  BlockManagerPool::Options opts;
+  opts.num_blocks(64)
+      .block_size(16)
+      .enable_prefix_cache(true)
+      .enable_host_offload(true)
+      .enable_linear_state(true)
+      .linear_state_num_slots(64)
+      .host_num_blocks_by_type({{BlockType::KV, 128}, {BlockType::LINEAR, 64}});
   return opts;
 }
 
@@ -2215,22 +2243,179 @@ TEST(HierarchyBlockManagerPoolTest, TypedLayoutSupportsStoragePrefetch) {
   EXPECT_EQ(HierarchyPoolTestPeer::host_leaves(pool).size(), 3u);
 }
 
-TEST(HierarchyBlockManagerPoolTest, RejectsLinearCacheLayout) {
-  BlockManagerPool::Options options = make_flat_kv_options();
-  options.enable_linear_state(true).linear_state_num_slots(64);
-
+TEST(HierarchyBlockManagerPoolTest,
+     FlatKvLinearLayoutBuildsKvAndLinearHostLeaves) {
   const int32_t original_chunk_stride =
       SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill();
   SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() = 128;
-  EXPECT_DEATH(
-      {
-        HierarchyBlockManagerPool pool(options,
-                                       /*transfer_coordinator=*/nullptr,
-                                       /*dp_size=*/1);
-      },
-      "supports only FLAT_KV and SWA_COMPRESSED cache layouts");
-  SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() =
-      original_chunk_stride;
+  ScopeGuard restore_chunk_stride([original_chunk_stride] {
+    SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() =
+        original_chunk_stride;
+  });
+
+  HierarchyBlockManagerPool pool(make_flat_kv_linear_options(),
+                                 /*transfer_coordinator=*/nullptr,
+                                 /*dp_size=*/1);
+  const auto& per_type = HierarchyPoolTestPeer::host_leaves(pool);
+  ASSERT_EQ(per_type.size(), 2u);
+  ASSERT_TRUE(per_type.count(BlockType::KV) == 1);
+  ASSERT_TRUE(per_type.count(BlockType::LINEAR) == 1);
+  EXPECT_EQ(per_type.at(BlockType::LINEAR).leaf->block_size(), 128u);
+  EXPECT_TRUE(per_type.at(BlockType::LINEAR).supports_prefix_cache);
+  EXPECT_TRUE(per_type.at(BlockType::KV).supports_prefix_cache);
+}
+
+TEST(HierarchyBlockManagerPoolTest,
+     LinearOffloadUsesCheckpointOrdinalAndImmutableHash) {
+  const int32_t original_chunk_stride =
+      SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill();
+  SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() = 128;
+  ScopeGuard restore_chunk_stride([original_chunk_stride] {
+    SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() =
+        original_chunk_stride;
+  });
+
+  HierarchyBlockManagerPool pool(make_flat_kv_linear_options(),
+                                 /*transfer_coordinator=*/nullptr,
+                                 /*dp_size=*/1);
+  std::vector<int32_t> tokens(384, 41);
+  Sequence sequence = make_test_sequence(/*index=*/0, tokens);
+  ASSERT_TRUE(pool.allocate(&sequence, /*num_tokens=*/128));
+  sequence.kv_state().set_kv_cache_tokens_num(128);
+  ASSERT_TRUE(pool.allocate(&sequence, /*num_tokens=*/256));
+  const auto first_pairs = HierarchyPoolTestPeer::take_offload_pairs(pool);
+  ASSERT_FALSE(first_pairs.empty());
+  const int32_t next_host_destination_id =
+      sequence.host_kv_state().blocks(BlockType::LINEAR)[1].id();
+  sequence.kv_state().set_kv_cache_tokens_num(256);
+  ASSERT_TRUE(pool.allocate(&sequence, /*num_tokens=*/384));
+
+  const Slice<Block> hbm_linear = sequence.kv_state().blocks(BlockType::LINEAR);
+  ASSERT_EQ(hbm_linear.size(), 2u);
+  ASSERT_EQ(sequence.kv_state().num_cached_blocks(BlockType::LINEAR), 2u);
+  ASSERT_GE(sequence.linear_state_hashes().size(), 2u);
+  EXPECT_EQ(XXH3Key(hbm_linear.front().get_immutable_hash_value()),
+            XXH3Key(sequence.linear_state_hashes()[1]));
+
+  const std::vector<OffloadBlockPair> pairs =
+      HierarchyPoolTestPeer::take_offload_pairs(pool);
+  const auto linear_it = std::find_if(
+      pairs.begin(), pairs.end(), [](const OffloadBlockPair& pair) {
+        return pair.block_type == BlockType::LINEAR;
+      });
+  ASSERT_NE(linear_it, pairs.end());
+  EXPECT_EQ(linear_it->src.id(), hbm_linear.front().id());
+  EXPECT_EQ(linear_it->dst.id(), next_host_destination_id);
+  EXPECT_EQ(XXH3Key(linear_it->dst.get_immutable_hash_value()),
+            XXH3Key(hbm_linear.front().get_immutable_hash_value()));
+  EXPECT_NE(linear_it->src.id(), hbm_linear.back().id());
+
+  pool.deallocate(&sequence);
+}
+
+TEST(HierarchyBlockManagerPoolTest,
+     SparseHostCheckpointReplacesOlderDeviceState) {
+  const int32_t original_chunk_stride =
+      SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill();
+  SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() = 128;
+  ScopeGuard restore_chunk_stride([original_chunk_stride] {
+    SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() =
+        original_chunk_stride;
+  });
+
+  HierarchyBlockManagerPool pool(make_flat_kv_linear_options(),
+                                 /*transfer_coordinator=*/nullptr,
+                                 /*dp_size=*/1);
+  std::vector<int32_t> tokens(385, 41);
+  auto& host = HierarchyPoolTestPeer::host_leaves(pool);
+  seed_host_prefix(host.at(BlockType::KV).leaf.get(), tokens);
+
+  Sequence probe = make_test_sequence(/*index=*/0, tokens);
+  probe.update_linear_state_hashes(/*chunk_stride=*/128);
+  ASSERT_EQ(probe.linear_state_hashes().size(), 3u);
+  BlockManager* host_linear = host.at(BlockType::LINEAR).leaf.get();
+  {
+    std::vector<Block> block = host_linear->allocate(1);
+    ASSERT_EQ(block.size(), 1u);
+    block[0].set_hash_value(probe.linear_state_hashes()[2].data);
+    host_linear->cache(block);
+    host_linear->deallocate(block);
+  }
+  auto* device = HierarchyPoolTestPeer::device_composite(pool);
+  seed_host_prefix(device->leaf_of(BlockType::KV),
+                   std::vector<int32_t>(tokens.begin(), tokens.begin() + 129));
+  BlockManager* device_linear = device->leaf_of(BlockType::LINEAR);
+  int32_t old_state_id = -1;
+  {
+    std::vector<Block> blocks = device_linear->allocate(1);
+    ASSERT_EQ(blocks.size(), 1u);
+    old_state_id = blocks[0].id();
+    blocks[0].set_hash_value(probe.linear_state_hashes()[0].data);
+    device_linear->cache(blocks);
+    device_linear->deallocate(blocks);
+  }
+
+  Sequence sequence = make_test_sequence(/*index=*/1, tokens);
+  pool.allocate_shared(&sequence);
+  const Slice<Block> host_linear_blocks =
+      sequence.host_kv_state().blocks(BlockType::LINEAR);
+  ASSERT_EQ(host_linear_blocks.size(), 3u);
+  EXPECT_FALSE(host_linear_blocks[0].is_valid());
+  EXPECT_FALSE(host_linear_blocks[1].is_valid());
+  EXPECT_TRUE(host_linear_blocks[2].is_valid());
+  const int32_t host_state_id = host_linear_blocks[2].id();
+  ASSERT_EQ(sequence.kv_state().kv_cache_tokens_num(), 128u);
+  const HostCacheRestorePoint selected =
+      pool.select_host_cache_restore(&sequence, /*max_copy_units=*/16);
+  ASSERT_EQ(selected.restore_target_tokens, 384u);
+  pool.trim_host_cache(&sequence, selected);
+  ASSERT_TRUE(pool.allocate(&sequence, tokens.size()));
+  const Slice<Block> restored = sequence.kv_state().blocks(BlockType::LINEAR);
+  ASSERT_EQ(restored.size(), 1u);
+  EXPECT_NE(restored[0].id(), old_state_id);
+  const auto transfers = HierarchyPoolTestPeer::pending_load_infos(pool);
+  const auto linear = std::find_if(
+      transfers.begin(), transfers.end(), [](const BlockTransferInfo& info) {
+        return info.block_type == BlockType::LINEAR;
+      });
+  ASSERT_NE(linear, transfers.end());
+  EXPECT_EQ(linear->src_block_id, host_state_id);
+  EXPECT_EQ(linear->dst_block_id, restored[0].id());
+  std::vector<Block> cached = device_linear->allocate_shared(
+      tokens, {}, MMData(), probe.linear_state_hashes());
+  ASSERT_EQ(cached.size(), 1u);
+  EXPECT_EQ(cached[0].id(), old_state_id);
+  device_linear->deallocate(cached);
+
+  pool.deallocate(&sequence);
+}
+
+TEST(HierarchyBlockManagerPoolTest,
+     LinearRestoreBudgetAlignsToExactCheckpointBoundary) {
+  const int32_t original_chunk_stride =
+      SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill();
+  SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() = 128;
+  ScopeGuard restore_chunk_stride([original_chunk_stride] {
+    SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() =
+        original_chunk_stride;
+  });
+
+  HierarchyBlockManagerPool pool(make_flat_kv_linear_options(),
+                                 /*transfer_coordinator=*/nullptr,
+                                 /*dp_size=*/1);
+  std::vector<int32_t> tokens(385, 41);
+  auto& host = HierarchyPoolTestPeer::host_leaves(pool);
+  seed_host_prefix(host.at(BlockType::KV).leaf.get(), tokens);
+  seed_host_prefix(host.at(BlockType::LINEAR).leaf.get(), tokens);
+
+  Sequence sequence = make_test_sequence(/*index=*/0, tokens);
+  pool.allocate_shared(&sequence);
+  const HostCacheRestorePoint selected =
+      pool.select_host_cache_restore(&sequence, /*max_copy_units=*/1);
+  EXPECT_EQ(selected.restore_target_tokens, 0u);
+  EXPECT_EQ(selected.copy_units, 0u);
+
+  pool.deallocate(&sequence);
 }
 
 }  // namespace xllm

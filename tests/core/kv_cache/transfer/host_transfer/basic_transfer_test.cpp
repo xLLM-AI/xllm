@@ -200,5 +200,96 @@ TEST(BasicHostKVTransferTest, RoundTripUsesConfiguredLayerEventGroups) {
   transfer.drain();
 }
 
+TEST(BasicHostKVTransferTest, RestoresNarrowedBlockViewsAcrossRoles) {
+  if (Platform::device_count() < 1) {
+    GTEST_SKIP() << "An accelerator device is required for Host KV transfer.";
+  }
+
+  Device device(/*device_index=*/0);
+  device.set_device();
+  device.init_device_context();
+  std::unique_ptr<Stream> compute_stream = device.get_stream_from_pool();
+  auto compute_guard = compute_stream->set_stream_guard();
+  const torch::TensorOptions host_options =
+      torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+  const torch::TensorOptions device_options =
+      torch::TensorOptions().dtype(torch::kFloat32).device(device.unwrap());
+
+  torch::Tensor conv_storage = torch::zeros({2, 5, 3}, device_options);
+  torch::Tensor ssm_storage = torch::zeros({8, 2}, device_options);
+  torch::Tensor tail_storage = torch::zeros({2, 2, 4, 3}, device_options);
+  conv_storage[0].fill_(11.0);
+  conv_storage[1].fill_(22.0);
+  ssm_storage.narrow(0, 0, 4).fill_(33.0);
+  ssm_storage.narrow(0, 4, 4).fill_(44.0);
+  tail_storage[0].fill_(55.0);
+  tail_storage[1].fill_(66.0);
+
+  torch::Tensor conv_view = conv_storage.narrow(1, 0, 3);
+  torch::Tensor ssm_view = ssm_storage.view({2, 4, 2}).narrow(1, 0, 1);
+
+  torch::Tensor conv_host = torch::zeros({2, 1, 3, 3}, host_options);
+  torch::Tensor ssm_host = torch::zeros({2, 1, 1, 2}, host_options);
+  torch::Tensor tail_host = torch::zeros({2, 1, 2, 4, 3}, host_options);
+  HostKVGroupLayout group;
+  group.group_id = 7;
+  group.host_roles.emplace(KVCacheTensorRole::CONV, conv_host);
+  group.host_roles.emplace(KVCacheTensorRole::SSM, ssm_host);
+  group.host_roles.emplace(KVCacheTensorRole::KPOOL_TAIL, tail_host);
+  group.layers.emplace_back(
+      HostKVLayerLayout{0,
+                        0,
+                        {{KVCacheTensorRole::CONV, conv_view},
+                         {KVCacheTensorRole::SSM, ssm_view},
+                         {KVCacheTensorRole::KPOOL_TAIL, tail_storage}}});
+  HostKVLayout layout(/*num_layers=*/1, {std::move(group)}, device.unwrap());
+  BasicHostKVTransfer transfer(std::move(layout),
+                               device,
+                               *compute_stream,
+                               /*layer_copy_batches=*/1);
+
+  const HostKVRequest offload_request{{HostKVMapping{7, 0, 1}}};
+  ASSERT_TRUE(transfer.offload(offload_request));
+  EXPECT_TRUE(
+      torch::equal(conv_host[0][0], torch::full({3, 3}, 22.0, host_options)));
+  EXPECT_TRUE(
+      torch::equal(ssm_host[0][0], torch::full({1, 2}, 44.0, host_options)));
+  EXPECT_TRUE(torch::equal(tail_host[0][0],
+                           torch::full({2, 4, 3}, 66.0, host_options)));
+
+  const double kSentinel = -1.0;
+  conv_storage.fill_(kSentinel);
+  ssm_storage.fill_(kSentinel);
+  tail_storage.fill_(kSentinel);
+  const HostKVRequest load_request{{HostKVMapping{7, 0, 1}}};
+  HostKVLoadHandle handle = transfer.prepare_load();
+  handle.producer_ready = compute_stream->record_event();
+  ASSERT_NE(handle.producer_ready, nullptr);
+  ASSERT_NE(handle.synchronizer, nullptr);
+  ASSERT_TRUE(transfer.load(load_request, handle));
+  {
+    auto consumer = device.get_stream_from_pool();
+    auto consumer_guard = consumer->set_stream_guard();
+    ASSERT_TRUE(handle.synchronizer->wait_layer_on_current_stream(0));
+    EXPECT_TRUE(torch::equal(conv_storage[1].narrow(0, 0, 3).cpu(),
+                             torch::full({3, 3}, 22.0, host_options)));
+    EXPECT_TRUE(torch::equal(ssm_storage.narrow(0, 4, 1).cpu(),
+                             torch::full({1, 2}, 44.0, host_options)));
+    EXPECT_TRUE(torch::equal(tail_storage[1].cpu(),
+                             torch::full({2, 4, 3}, 66.0, host_options)));
+    EXPECT_TRUE(torch::equal(conv_storage[1].narrow(0, 3, 2).cpu(),
+                             torch::full({2, 3}, kSentinel, host_options)));
+    EXPECT_TRUE(torch::equal(ssm_storage.narrow(0, 5, 3).cpu(),
+                             torch::full({3, 2}, kSentinel, host_options)));
+    EXPECT_TRUE(torch::equal(conv_storage[0].cpu(),
+                             torch::full({5, 3}, kSentinel, host_options)));
+    EXPECT_TRUE(torch::equal(ssm_storage.narrow(0, 0, 4).cpu(),
+                             torch::full({4, 2}, kSentinel, host_options)));
+    EXPECT_TRUE(torch::equal(tail_storage[0].cpu(),
+                             torch::full({2, 4, 3}, kSentinel, host_options)));
+  }
+  transfer.drain();
+}
+
 }  // namespace
 }  // namespace xllm

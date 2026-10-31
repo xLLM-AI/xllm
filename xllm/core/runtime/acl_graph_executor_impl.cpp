@@ -1508,6 +1508,11 @@ ModelOutput AclGraphExecutorImpl::run_typed(Model* model,
   stale_graph.reset();
 
   if (replay_graph != nullptr) {
+    if (params_single.parallel.layer_wise_load_synchronizer != nullptr) {
+      CHECK(params_single.parallel.layer_wise_load_synchronizer
+                ->wait_all_on_current_stream())
+          << "failed to wait for Host cache loads before ACL graph replay";
+    }
     // Replay the existing graph
     VLOG(kGraphExecutorLogVerboseLevel)
         << "AclGraphExecutorImpl::run() in replay mode";

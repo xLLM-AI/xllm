@@ -32,6 +32,7 @@ class LinearAttentionKVCacheImpl final : public KVCacheImpl {
 
   torch::Tensor get_conv_cache() const override;
   torch::Tensor get_ssm_cache() const override;
+  torch::Tensor get_kpool_tail() const override;
 
   BlockTypeTensorMap get_block_type_tensors(BlockType type) const override;
 
@@ -47,8 +48,10 @@ class LinearAttentionKVCacheImpl final : public KVCacheImpl {
  private:
   torch::Tensor conv_cache_;
   torch::Tensor ssm_cache_;
+  torch::Tensor kpool_tail_;
   std::vector<int64_t> conv_cache_shape_;
   std::vector<int64_t> ssm_cache_shape_;
+  std::vector<int64_t> kpool_tail_shape_;
 };
 
 }  // namespace xllm

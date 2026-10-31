@@ -674,12 +674,16 @@ std::optional<std::string> validate_host_cache_options(
                  "SWA/C4/C128) that host offload does not support";
     violations.emplace_back(violation.str());
   }
-  if (options.has_conv_cache_shape || options.has_ssm_cache_shape) {
+  if (options.has_conv_cache_shape != options.has_ssm_cache_shape) {
     std::ostringstream violation;
     violation << "model \"" << options.model_type
-              << "\" uses linear-attention conv/SSM cache tensors that host "
-                 "offload does not restore";
+              << "\" has a partial linear-attention cache layout; Host "
+                 "offload requires both conv and SSM tensors";
     violations.emplace_back(violation.str());
+  } else if ((options.has_conv_cache_shape || options.has_kpool_tail_shape) &&
+             options.enable_kvcache_store) {
+    violations.emplace_back(
+        "linear-attention Host checkpoints do not support KV cache Store");
   }
 
   if (violations.empty()) {

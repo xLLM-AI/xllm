@@ -23,6 +23,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
 #include "core/kv_cache/transfer/kv_cache_store.h"
 
@@ -86,16 +87,14 @@ BlockTypeTensorMap build_block_type_tensor_map(const KVCache& kv_cache,
   const torch::Tensor key_cache = kv_cache.get_k_cache();
   const torch::Tensor value_cache = kv_cache.get_v_cache();
   const torch::Tensor index_cache = kv_cache.get_index_cache();
-  const torch::Tensor conv_cache = kv_cache.get_conv_cache();
-  const torch::Tensor ssm_cache = kv_cache.get_ssm_cache();
   const torch::Tensor swa_cache = kv_cache.get_swa_cache();
   const std::optional<torch::Tensor> index_cache_scale =
       kv_cache.get_indexer_cache_scale();
 
   switch (type) {
     case BlockType::KV:
-      if (has_tensor(conv_cache) || has_tensor(ssm_cache) ||
-          has_tensor(swa_cache)) {
+      if (has_tensor(kv_cache.get_conv_cache()) ||
+          has_tensor(kv_cache.get_ssm_cache()) || has_tensor(swa_cache)) {
         return {};
       }
       if (has_tensor(key_cache)) {
@@ -114,14 +113,40 @@ BlockTypeTensorMap build_block_type_tensor_map(const KVCache& kv_cache,
                         index_cache_scale.value());
       }
       return tensors;
-    case BlockType::LINEAR:
-      if (has_tensor(conv_cache)) {
-        tensors.emplace(KVCacheTensorRole::CONV, conv_cache);
+    case BlockType::LINEAR: {
+      tensors = kv_cache.get_block_type_tensors(BlockType::LINEAR);
+      const auto conv_it = tensors.find(KVCacheTensorRole::CONV);
+      const auto ssm_it = tensors.find(KVCacheTensorRole::SSM);
+      if (conv_it == tensors.end() && ssm_it == tensors.end()) {
+        return tensors;
       }
-      if (has_tensor(ssm_cache)) {
-        tensors.emplace(KVCacheTensorRole::SSM, ssm_cache);
-      }
+      CHECK(conv_it != tensors.end() && ssm_it != tensors.end())
+          << "LINEAR transfer requires both Conv and SSM cache tensors.";
+      const torch::Tensor& conv_cache = conv_it->second;
+      const torch::Tensor& ssm_cache = ssm_it->second;
+      // Prefill checkpoints keep the first SSM row of each logical slot.
+      const int64_t checkpoint_stride =
+          KVCacheShape::linear_ssm_checkpoint_stride(conv_cache.size(0),
+                                                     ssm_cache.size(0));
+      std::vector<int64_t> logical_ssm_shape = ssm_cache.sizes().vec();
+      logical_ssm_shape[0] = checkpoint_stride;
+      logical_ssm_shape.insert(logical_ssm_shape.begin(), conv_cache.size(0));
+#if defined(USE_MUSA)
+      constexpr int64_t kDeviceConvHistoryAxis = 2;
+#else
+      constexpr int64_t kDeviceConvHistoryAxis = 1;
+#endif
+      CHECK_GT(conv_cache.dim(), kDeviceConvHistoryAxis);
+      const int64_t conv_history_rows =
+          conv_cache.size(kDeviceConvHistoryAxis) - checkpoint_stride + 1;
+      CHECK_GT(conv_history_rows, 0);
+      conv_it->second = conv_cache.narrow(kDeviceConvHistoryAxis,
+                                          /*start=*/0,
+                                          /*length=*/conv_history_rows);
+      ssm_it->second = ssm_cache.view(std::move(logical_ssm_shape))
+                           .narrow(/*dim=*/1, /*start=*/0, /*length=*/1);
       return tensors;
+    }
     case BlockType::SWA:
       // The persistent SWA window is restored for every DSV4 layer.
       if (has_tensor(swa_cache)) {
