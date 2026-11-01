@@ -797,9 +797,24 @@ bool DistributedVirtualMemoryCoordinator::try_reserve_pages(
   CHECK(budget_initialized_);
   const auto [first, last] = dp_worker_range_locked(model_id, dp_rank);
   if (first == last) {
+    LOG(WARNING) << "VMM physical page reservation failed: "
+                    "reason=invalid_worker_range"
+                 << " model_id=" << model_id << " dp_rank=" << dp_rank
+                 << " first_worker=" << first << " last_worker=" << last
+                 << " worker_count=" << page_budget_.worker_count();
     return false;
   }
   const bool reserved = page_budget_.try_reserve(first, last, physical_pages);
+  if (!reserved) {
+    LOG(WARNING) << "VMM physical page reservation failed: "
+                    "reason=shared_budget_exhausted"
+                 << " model_id=" << model_id << " dp_rank=" << dp_rank
+                 << " first_worker=" << first << " last_worker=" << last
+                 << " requested_pages_per_worker=" << physical_pages
+                 << " min_free_pages_per_worker="
+                 << page_budget_.min_free_pages(first, last)
+                 << " total_pages_per_worker=" << page_budget_.total_pages();
+  }
   update_memory_usage_locked();
   return reserved;
 }

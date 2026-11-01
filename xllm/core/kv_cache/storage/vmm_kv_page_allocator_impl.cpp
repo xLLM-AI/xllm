@@ -253,9 +253,35 @@ VmmKVPageAllocatorImpl::alloc_kv_cache_page(const std::string& model_id,
     }
     return std::make_unique<VirtualKVCachePageState>(page_id, page_size_);
   }
-  if (pages.num_unmapped_virt_pages(state.num_total_virt_pages) == 0 ||
-      !backend_.try_reserve_pages(
+  const size_t unmapped_virt_pages =
+      pages.num_unmapped_virt_pages(state.num_total_virt_pages);
+  if (unmapped_virt_pages == 0) {
+    LOG(WARNING) << "VMM KV page allocation failed: "
+                    "reason=virtual_capacity_exhausted"
+                 << " model_id=" << model_id << " dp_rank=" << dp_rank
+                 << " total_virtual_pages=" << state.num_total_virt_pages
+                 << " free_virtual_pages=" << pages.num_free_virt_pages
+                 << " reserved_virtual_pages="
+                 << pages.reserved_virt_page_list.size()
+                 << " allocated_virtual_pages="
+                 << pages.allocated_virt_page_list.size()
+                 << " unmapped_virtual_pages=" << unmapped_virt_pages;
+    return nullptr;
+  }
+  if (!backend_.try_reserve_pages(
           model_id, dp_rank, state.phy_pages_per_virt_page)) {
+    LOG(WARNING) << "VMM KV page allocation failed: "
+                    "reason=physical_page_budget_rejected"
+                 << " model_id=" << model_id << " dp_rank=" << dp_rank
+                 << " requested_physical_pages="
+                 << state.phy_pages_per_virt_page
+                 << " total_virtual_pages=" << state.num_total_virt_pages
+                 << " free_virtual_pages=" << pages.num_free_virt_pages
+                 << " reserved_virtual_pages="
+                 << pages.reserved_virt_page_list.size()
+                 << " allocated_virtual_pages="
+                 << pages.allocated_virt_page_list.size()
+                 << " unmapped_virtual_pages=" << unmapped_virt_pages;
     return nullptr;
   }
   int64_t page_id = pages.take_free_virt_page(state.num_total_virt_pages);
