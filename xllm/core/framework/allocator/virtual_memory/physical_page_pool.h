@@ -216,7 +216,7 @@ class PhysicalPagePool final {
 
   // Only the slow physical-growth path uses these boundaries. Tests can inject
   // deterministic memory snapshots and partial allocation failures.
-  std::function<int64_t()> free_memory_query_;
+  std::function<std::optional<int64_t>()> free_memory_query_;
   std::function<std::optional<AllocatorMemoryStats>()> allocator_memory_query_;
   std::function<std::unique_ptr<PhysicalPage>(page_id_t)> page_factory_;
 };

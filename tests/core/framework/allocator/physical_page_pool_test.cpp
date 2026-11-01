@@ -41,7 +41,11 @@ class PhysicalPagePoolTestPeer final {
       std::function<int64_t()> memory_query,
       std::function<std::unique_ptr<PhysicalPage>(page_id_t)> factory) {
     std::lock_guard<std::mutex> lock(pool.mtx_);
-    pool.free_memory_query_ = std::move(memory_query);
+    pool.free_memory_query_ =
+        [memory_query = std::move(memory_query)]() -> std::optional<int64_t> {
+      const int64_t free_bytes = memory_query();
+      return free_bytes < 0 ? std::nullopt : std::optional<int64_t>(free_bytes);
+    };
     pool.allocator_memory_query_ = []() {
       return std::optional<AllocatorMemoryStats>{};
     };

@@ -93,7 +93,7 @@ void PhysicalPagePool::init(const torch::Device& device,
   all_page_ptrs_.resize(num_pages, nullptr);
   page_allocated_.resize(num_pages, false);
   page_active_.resize(num_pages, false);
-  free_memory_query_ = [this]() { return Device(device_).free_memory(); };
+  free_memory_query_ = [this]() { return Device(device_).try_free_memory(); };
   allocator_memory_query_ = [this]() {
     return Device(device_).allocator_memory_stats();
   };
@@ -175,9 +175,9 @@ bool PhysicalPagePool::materialize_pages_locked(
     return true;
   }
   // A scheduler snapshot is not a reservation: recheck under the growth lock.
-  const int64_t free_bytes = free_memory_query_();
+  const auto free_bytes = free_memory_query_();
   const auto allocator_stats = allocator_memory_query_();
-  if (free_bytes < 0) {
+  if (!free_bytes.has_value()) {
     execution_memory_budget_.observe_allocator_memory(allocator_stats);
     LOG(WARNING) << "PhysicalPagePool growth failed: "
                     "reason=free_memory_query_failed"
@@ -187,11 +187,11 @@ bool PhysicalPagePool::materialize_pages_locked(
                  << " allocated_pages=" << num_allocated_pages_
                  << " active_pages=" << num_active_pages_
                  << " total_pages=" << num_total_pages_
-                 << " page_size=" << page_size_ << " free_bytes=" << free_bytes;
+                 << " page_size=" << page_size_ << " free_bytes=unavailable";
     return fail(PhysicalPagePoolFailureReason::kFreeMemoryQueryFailed);
   }
   const size_t headroom = allocation_headroom_locked(
-      static_cast<size_t>(free_bytes), allocator_stats);
+      static_cast<size_t>(*free_bytes), allocator_stats);
   if (missing.size() >
       (std::numeric_limits<size_t>::max() - headroom) / page_size_) {
     LOG(WARNING) << "PhysicalPagePool growth failed: "
@@ -205,13 +205,13 @@ bool PhysicalPagePool::materialize_pages_locked(
     return fail(PhysicalPagePoolFailureReason::kRequestSizeOverflow);
   }
   const size_t required_bytes = missing.size() * page_size_ + headroom;
-  if (static_cast<uint64_t>(free_bytes) < required_bytes) {
+  if (static_cast<uint64_t>(*free_bytes) < required_bytes) {
     LOG(WARNING)
         << "PhysicalPagePool growth failed: "
            "reason=insufficient_free_memory"
         << " device_index=" << static_cast<int32_t>(device_.index())
         << " requested_pages=" << missing.size() << " page_size=" << page_size_
-        << " required_bytes=" << required_bytes << " free_bytes=" << free_bytes
+        << " required_bytes=" << required_bytes << " free_bytes=" << *free_bytes
         << " headroom_bytes=" << headroom
         << " growth_reserve_bytes=" << growth_reserve_bytes_
         << " allocation_headroom_bytes=" << allocation_headroom_bytes_
@@ -264,11 +264,11 @@ bool PhysicalPagePool::materialize_pages_locked(
   // budget before publishing backing, keeping the more conservative recovery
   // reserve from allocator snapshots on both sides of the driver query.
   const auto allocator_stats_before = allocator_memory_query_();
-  const int64_t remaining_bytes = free_memory_query_();
+  const auto remaining_bytes = free_memory_query_();
   const auto allocator_stats_after = allocator_memory_query_();
   execution_memory_budget_.observe_allocator_memory(allocator_stats_before);
   execution_memory_budget_.observe_allocator_memory(allocator_stats_after);
-  if (remaining_bytes < 0) {
+  if (!remaining_bytes.has_value()) {
     LOG(WARNING) << "PhysicalPagePool growth failed: "
                     "reason=post_allocation_memory_query_failed"
                  << " device_index=" << static_cast<int32_t>(device_.index())
@@ -276,7 +276,7 @@ bool PhysicalPagePool::materialize_pages_locked(
                  << " page_size=" << page_size_
                  << " committed_pages=" << num_committed_pages_
                  << " allocated_pages=" << num_allocated_pages_
-                 << " remaining_bytes=" << remaining_bytes;
+                 << " remaining_bytes=unavailable";
     return fail(
         PhysicalPagePoolFailureReason::kPostAllocationMemoryQueryFailed);
   }
@@ -287,22 +287,22 @@ bool PhysicalPagePool::materialize_pages_locked(
   const size_t remaining_headroom =
       std::max(growth_reserve_bytes_,
                std::max(execution_memory_budget_.headroom(
-                            static_cast<size_t>(remaining_bytes),
+                            static_cast<size_t>(*remaining_bytes),
                             committed_bytes,
                             allocation_headroom_bytes_,
                             allocator_stats_before),
                         execution_memory_budget_.headroom(
-                            static_cast<size_t>(remaining_bytes),
+                            static_cast<size_t>(*remaining_bytes),
                             committed_bytes,
                             allocation_headroom_bytes_,
                             allocator_stats_after)));
-  if (static_cast<uint64_t>(remaining_bytes) < remaining_headroom) {
+  if (static_cast<uint64_t>(*remaining_bytes) < remaining_headroom) {
     LOG(WARNING) << "PhysicalPagePool growth failed: "
                     "reason=post_allocation_headroom"
                  << " device_index=" << static_cast<int32_t>(device_.index())
                  << " requested_pages=" << missing.size()
                  << " page_size=" << page_size_
-                 << " remaining_bytes=" << remaining_bytes
+                 << " remaining_bytes=" << *remaining_bytes
                  << " required_headroom_bytes=" << remaining_headroom
                  << " growth_reserve_bytes=" << growth_reserve_bytes_
                  << " allocation_headroom_bytes=" << allocation_headroom_bytes_
@@ -649,18 +649,18 @@ size_t PhysicalPagePool::num_allocatable() const {
     execution_memory_budget_.observe_allocator_memory(allocator_stats);
     return idle_pages;
   }
-  const int64_t free_bytes = free_memory_query_();
-  if (free_bytes <= 0) {
+  const auto free_bytes = free_memory_query_();
+  if (!free_bytes.has_value() || *free_bytes <= 0) {
     execution_memory_budget_.observe_allocator_memory(allocator_stats);
     return idle_pages;
   }
   const size_t headroom = allocation_headroom_locked(
-      static_cast<size_t>(free_bytes), allocator_stats);
-  if (static_cast<uint64_t>(free_bytes) <= headroom) {
+      static_cast<size_t>(*free_bytes), allocator_stats);
+  if (static_cast<uint64_t>(*free_bytes) <= headroom) {
     return idle_pages;
   }
   const size_t growth_pages =
-      (static_cast<size_t>(free_bytes) - headroom) / page_size_;
+      (static_cast<size_t>(*free_bytes) - headroom) / page_size_;
   return idle_pages + std::min(uncommitted_pages, growth_pages);
 }
 
@@ -700,10 +700,10 @@ void PhysicalPagePool::observe_execution_memory() {
   if (!initialized_) {
     return;
   }
-  const int64_t free_bytes = free_memory_query_();
+  const auto free_bytes = free_memory_query_();
   const auto allocator_stats = allocator_memory_query_();
-  if (free_bytes >= 0) {
-    execution_memory_budget_.observe(static_cast<size_t>(free_bytes),
+  if (free_bytes.has_value()) {
+    execution_memory_budget_.observe(static_cast<size_t>(*free_bytes),
                                      num_committed_pages_ * page_size_,
                                      allocator_stats);
   } else {
