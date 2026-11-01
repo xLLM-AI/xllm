@@ -355,7 +355,8 @@ class SlotBuffer final {
                                   const Region& region);
   static ModelTensors bind_views(const torch::Tensor& buffer,
                                  const Layout& layout);
-  static ModelInputHostView model_input_view(const LlmForwardInput& input);
+  static ModelInputHostView model_input_view(const LlmForwardInput& input,
+                                             const torch::Tensor& block_tables);
   static Status validate_batch(const ModelInputHostView& model,
                                const BatchInputMeta& batch);
   Status validate_model(const ModelInputHostView& model) const;

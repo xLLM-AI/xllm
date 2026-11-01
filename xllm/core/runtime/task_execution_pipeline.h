@@ -117,6 +117,7 @@ struct SpeculativeTaskCapacity {
   bool adaptive_draft_step = false;
   bool sparse_dsa_target = false;
   bool hybrid_recurrent_target = false;
+  bool draft_swa_cache = false;
   double adaptive_min_gain = 0.0;
   // Startup calibration installs identical immutable costs on sampling ranks.
   std::shared_ptr<const SpecCostProfileStore> adaptive_costs;

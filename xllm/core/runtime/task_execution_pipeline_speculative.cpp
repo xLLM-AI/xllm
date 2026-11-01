@@ -30,6 +30,7 @@ limitations under the License.
 #include "core/framework/sampling/sampler.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/draft_proposal.h"
+#include "core/framework/speculative/spec_input_builder.h"
 #include "core/framework/speculative/spec_verify.h"
 #include "core/framework/speculative/verify_layout.h"
 #include "core/kv_cache/linear_state_restore.h"
@@ -305,7 +306,8 @@ bool supports_unified_block_graph(const SpeculativeTaskCapacity& capacity,
                                   uint32_t rows,
                                   const LlmForwardInput& input) {
   const auto& sampling = input.sampling_params;
-  return capacity.unified_graph && !capacity.adaptive_target_verify &&
+  return capacity.unified_graph && !capacity.draft_swa_cache &&
+         !capacity.adaptive_target_verify &&
          capacity.kind != SpeculativeTaskKind::MTP && rows > 0 &&
          static_cast<uint64_t>(rows) *
                  (static_cast<uint64_t>(capacity.num_speculative_tokens) + 1) <=
@@ -847,7 +849,8 @@ Status TaskExecutionPipeline::plan_parallel(const ParallelInput& input,
 
 Status TaskExecutionPipeline::validate_bootstrap(
     const LlmForwardInput& input) const {
-  const auto host = SlotBuffer::model_input_view(input);
+  const auto host = SlotBuffer::model_input_view(
+      input, input.input_params.attention.host.block_tables);
   const auto batch = model_batch(input);
   const auto& rows = input.input_params.embedding.mtp_bootstrap_row_idxes;
   const auto& hidden = input.input_params.embedding.mtp_bootstrap_embeddings;
@@ -901,7 +904,8 @@ Status TaskExecutionPipeline::validate_input(SpeculativeSlot& slot,
       }
     }
   }
-  const auto host = SlotBuffer::model_input_view(input);
+  const auto host = SlotBuffer::model_input_view(
+      input, input.input_params.attention.host.block_tables);
   const auto batch = model_batch(input);
   Status status = slot.target_prefill->validate(host, batch);
   if (!status.ok()) {
@@ -1084,9 +1088,12 @@ Status TaskExecutionPipeline::validate_input(SpeculativeSlot& slot,
   if (!slot.run_models) {
     return Status();
   }
-  const int64_t blocks = std::min(paged_cache_blocks(kv_caches_),
-                                  paged_cache_blocks(draft_->kv_caches));
-  if (blocks == 0) {
+  const int64_t draft_blocks = paged_cache_blocks(draft_->kv_caches);
+  const int64_t blocks =
+      speculative_capacity_->draft_swa_cache
+          ? paged_cache_blocks(kv_caches_)
+          : std::min(paged_cache_blocks(kv_caches_), draft_blocks);
+  if (blocks == 0 || draft_blocks == 0) {
     return Status(StatusCode::UNAVAILABLE, "MTP requires Target and Draft KV.");
   }
   if (count == 0) {
@@ -1100,6 +1107,27 @@ Status TaskExecutionPipeline::validate_input(SpeculativeSlot& slot,
           host.block_tables.end(),
           [blocks](int32_t block) { return block < 0 || block >= blocks; })) {
     return invalid("MTP page table is outside allocated Target/Draft cache.");
+  }
+  if (speculative_capacity_->draft_swa_cache) {
+    const auto swa_table =
+        input.input_params.cache_block_tables.find(BlockType::SWA);
+    if (swa_table == input.input_params.cache_block_tables.end()) {
+      return invalid("Block draft SWA requires a CPU page table.");
+    }
+    const auto& table = swa_table->second;
+    const auto& target_table = input.input_params.attention.host.block_tables;
+    if (!is_cpu_int_tensor(table, /*dimensions=*/2) ||
+        table.sizes() != target_table.sizes()) {
+      return invalid("Block draft SWA requires a row-aligned CPU page table.");
+    }
+    const auto draft_host = SlotBuffer::model_input_view(input, table);
+    if (std::any_of(draft_host.block_tables.begin(),
+                    draft_host.block_tables.end(),
+                    [draft_blocks](int32_t block) {
+                      return block < 0 || block >= draft_blocks;
+                    })) {
+      return invalid("Block draft SWA page exceeds its physical pool.");
+    }
   }
   slot.upper_positions.clear();
   slot.upper_kv_lengths.clear();
@@ -1175,8 +1203,15 @@ Status TaskExecutionPipeline::validate_input(SpeculativeSlot& slot,
     return status;
   }
   for (auto& invocation : std::span(slot.drafts).first(draft_calls(slot))) {
-    status =
-        SlotBuffer::plan_mtp_decode(*invocation->input, conservative, batch);
+    auto draft_conservative = conservative;
+    if (speculative_capacity_->draft_swa_cache) {
+      const auto draft_host = SlotBuffer::model_input_view(
+          input, input.input_params.cache_block_tables.at(BlockType::SWA));
+      draft_conservative.block_tables = draft_host.block_tables;
+      draft_conservative.block_table_width = draft_host.block_table_width;
+    }
+    status = SlotBuffer::plan_mtp_decode(
+        *invocation->input, draft_conservative, batch);
     if (!status.ok()) {
       return status;
     }
@@ -1593,7 +1628,8 @@ Status TaskExecutionPipeline::plan_sampling(SpeculativeSlot& slot,
 
 void TaskExecutionPipeline::prepare_bootstrap(SpeculativeSlot& slot,
                                               const LlmForwardInput& input) {
-  const auto host = SlotBuffer::model_input_view(input);
+  const auto host = SlotBuffer::model_input_view(
+      input, input.input_params.attention.host.block_tables);
   auto& b = slot.bootstrap;
   const int64_t count =
       input.input_params.embedding.mtp_bootstrap_row_idxes.size();
@@ -1656,7 +1692,8 @@ void TaskExecutionPipeline::apply_bootstrap(SpeculativeSlot& slot) {
 
 Status TaskExecutionPipeline::warmup_speculative_graphs(
     const LlmForwardInput& input) {
-  const auto host = SlotBuffer::model_input_view(input);
+  const auto host = SlotBuffer::model_input_view(
+      input, input.input_params.attention.host.block_tables);
   const auto batch = model_batch(input);
   CHECK(input.input_params.meta.is_graph_warmup);
   if (graph_batch_sizes_.empty()) {
@@ -1886,9 +1923,11 @@ void TaskExecutionPipeline::bind_packed_verify_graph_input(
   input.base_positions = slot.state->storage_.positions;
   input.base_kv_lengths = slot.state->storage_.kv_seq_lens;
   input.base_block_table =
-      (block_draft() ? slot.drafts.front() : slot.drafts.back())
-          ->input->model_device_.block_tables.narrow(
-              /*dim=*/0, /*start=*/0, capacity_.model.max_sequences);
+      (speculative_capacity_->draft_swa_cache
+           ? slot.target_prefill->model_device_.block_tables
+           : (block_draft() ? slot.drafts.front() : slot.drafts.back())
+                 ->input->model_device_.block_tables)
+          .narrow(/*dim=*/0, /*start=*/0, capacity_.model.max_sequences);
   input.offsets = adaptive.offsets_storage;
   input.owners = prefix(adaptive.owners_storage, adaptive.plan.graph_rows);
   input.columns = prefix(adaptive.columns_storage, adaptive.plan.graph_rows);
@@ -1910,7 +1949,8 @@ void TaskExecutionPipeline::bind_packed_verify_graph_input(
 
 Status TaskExecutionPipeline::warmup_packed_verify_graphs(
     const LlmForwardInput& input) {
-  const auto host = SlotBuffer::model_input_view(input);
+  const auto host = SlotBuffer::model_input_view(
+      input, input.input_params.attention.host.block_tables);
   const auto batch = model_batch(input);
   if (!batch.forward_type.is_decode() || host.q_seq_lens.empty()) {
     return invalid("Adaptive DSpark graph warmup requires decode requests.");
@@ -1938,6 +1978,12 @@ Status TaskExecutionPipeline::warmup_packed_verify_graphs(
   }
   for (auto& task_slot : slots_) {
     auto& slot = *task_slot->speculative;
+    if (speculative_capacity_->draft_swa_cache) {
+      // Packed Target captures borrow this separate base table. Cold warmup
+      // suppresses writes and must read legal padding ids, not uninitialized
+      // Slot storage. Serving stages the real Target table before replay.
+      slot.target_prefill->model_device_.block_tables.zero_();
+    }
     if (!block_draft()) {
       bind_packed_verify_views(slot);
       continue;
@@ -2119,7 +2165,8 @@ TaskExecutionPipeline::adaptive_verify_graph_coverage() const {
 
 Status TaskExecutionPipeline::warmup_adaptive_unified_graphs(
     const LlmForwardInput& input) {
-  const auto host = SlotBuffer::model_input_view(input);
+  const auto host = SlotBuffer::model_input_view(
+      input, input.input_params.attention.host.block_tables);
   const auto batch = model_batch(input);
   const uint32_t draft_width = speculative_capacity_->num_speculative_tokens;
   CHECK(input.input_params.meta.is_graph_warmup);
@@ -2140,7 +2187,7 @@ Status TaskExecutionPipeline::warmup_adaptive_unified_graphs(
     // The graph keeps actual-B head/result shapes and a fixed physical G.
     for (uint32_t rows = 1; rows <= original_rows; ++rows) {
       slot.rows = rows;
-      const ModelInputHostView prefix_host{
+      ModelInputHostView prefix_host{
           host.token_ids.first(rows),
           std::span<const int32_t>(slot.upper_positions).first(rows),
           host.new_cache_slots.first(rows),
@@ -2150,6 +2197,13 @@ Status TaskExecutionPipeline::warmup_adaptive_unified_graphs(
           host.block_tables.first(static_cast<size_t>(rows) *
                                   host.block_table_width),
           host.block_table_width};
+      if (speculative_capacity_->draft_swa_cache) {
+        const auto draft_host = SlotBuffer::model_input_view(
+            input, input.input_params.cache_block_tables.at(BlockType::SWA));
+        prefix_host.block_tables = draft_host.block_tables.first(
+            static_cast<size_t>(rows) * draft_host.block_table_width);
+        prefix_host.block_table_width = draft_host.block_table_width;
+      }
       const ModelInputBatch prefix_batch{
           BatchForwardType::DECODE, rows, batch.batch_id, false};
       Status status =
@@ -2285,7 +2339,8 @@ Status TaskExecutionPipeline::warmup_adaptive_unified_graphs(
 }
 
 void TaskExecutionPipeline::warmup_draft_graphs(const LlmForwardInput& input) {
-  const auto host = SlotBuffer::model_input_view(input);
+  const auto host = SlotBuffer::model_input_view(
+      input, input.input_params.attention.host.block_tables);
   const auto batch = model_batch(input);
   for (auto& task_slot : slots_) {
     auto* slot = task_slot->speculative.get();
@@ -2396,7 +2451,8 @@ void TaskExecutionPipeline::prepare_prefix_refresh_state(SpeculativeSlot& slot,
 Status TaskExecutionPipeline::prepare_speculative(
     uint32_t slot_id,
     const LlmForwardInput& input) {
-  const auto host = SlotBuffer::model_input_view(input);
+  const auto host = SlotBuffer::model_input_view(
+      input, input.input_params.attention.host.block_tables);
   const auto batch = model_batch(input);
   if (slot_id >= slots_.size()) {
     return invalid("Invalid MTP SpeculativeSlot index.");
@@ -2442,6 +2498,19 @@ Status TaskExecutionPipeline::prepare_speculative(
                                  static_cast<uint32_t>(embedding_rows));
     // Views retain the storage object's address, not its allocation contents.
     *context_ = std::move(*context);
+    if (speculative_capacity_->draft_swa_cache) {
+      // Pipeline creation precedes KV allocation. Reserve every Slot's map
+      // once, alongside the embedding context, before any graph binds it.
+      const auto indices = model_.options().dtype(torch::kInt32);
+      const auto pinned = indices.device(torch::kCPU).pinned_memory(true);
+      auto stream_guard = prepare_stream_.set_stream_guard();
+      for (const auto& task_slot : slots_) {
+        auto& draft_slot = *task_slot->speculative;
+        draft_slot.host_draft_block_map =
+            torch::zeros({embedding_rows}, pinned);
+        draft_slot.draft_block_map = torch::zeros({embedding_rows}, indices);
+      }
+    }
     if (adaptive_verify_) {
       adaptive_verify_->histories.resize(embedding_rows);
     }
@@ -2537,12 +2606,32 @@ Status TaskExecutionPipeline::prepare_speculative(
     record(prepare_stream_, slots_[slot_id]->input_ready);
     return Status();
   }
+  if (speculative_capacity_->draft_swa_cache) {
+    specBuilder::fill_draft_swa_block_map(
+        {slot.host_draft_block_map.data_ptr<int32_t>(),
+         static_cast<size_t>(slot.host_draft_block_map.numel())},
+        host.block_tables,
+        SlotBuffer::model_input_view(
+            input, input.input_params.cache_block_tables.at(BlockType::SWA))
+            .block_tables);
+    copy_input(
+        slot.draft_block_map, slot.host_draft_block_map, prepare_stream_);
+    if (!slot.decode && !host.positions.empty()) {
+      VLOG(1) << "Draft SWA context prefill: batch_id=" << batch.batch_id
+              << ", tokens=" << host.positions.size()
+              << ", first_position=" << host.positions.front()
+              << ", last_position=" << host.positions.back();
+    }
+  }
   if (slot.decode) {
-    if (capacity_.model.enable_linear_attention) {
+    if (capacity_.model.enable_linear_attention ||
+        speculative_capacity_->draft_swa_cache) {
       status = slot.target_prefill->prepare(host, batch, prepare_stream_);
       CHECK(status.ok()) << status.message();
-      auto input_guard = prepare_stream_.set_stream_guard();
-      slot.target_prefill->prepare_model_state(input);
+      if (capacity_.model.enable_linear_attention) {
+        auto input_guard = prepare_stream_.set_stream_guard();
+        slot.target_prefill->prepare_model_state(input);
+      }
     }
     prepare_bootstrap(slot, input);
     auto conservative = host;
@@ -2856,7 +2945,8 @@ Status TaskExecutionPipeline::prepare_recurrent_state(
     target.embedding.linear_state_read_indices = torch::Tensor();
     target.linear_state_validity_mask.assign(slot.rows, 0);
   } else if (target.linear_state_validity_mask.empty()) {
-    const auto host = SlotBuffer::model_input_view(input);
+    const auto host = SlotBuffer::model_input_view(
+        input, input.input_params.attention.host.block_tables);
     std::vector<int32_t> cached;
     cached.reserve(slot.rows);
     for (uint32_t row = 0; row < slot.rows; ++row) {
@@ -3667,6 +3757,17 @@ void TaskExecutionPipeline::write_block_context(SpeculativeSlot& slot,
   // The serial task stream orders accepted-context publication before any
   // subsequent block reads the draft cache. Rejected rows disable the scatter;
   // no accepted length or token is copied to Host to build this operation.
+  if (speculative_capacity_->draft_swa_cache) {
+    torch::Tensor remapped = specBuilder::remap_draft_cache_slots(
+        cache_slots, slot.draft_block_map, capacity_.logical_block_size);
+    if (prefill) {
+      cache_slots = std::move(remapped);
+    } else {
+      // Preserve the borrowed Slot address used by context-KV ACL capture.
+      slot.context_slots.copy_(remapped);
+      cache_slots = slot.context_slots;
+    }
+  }
   slot.drafts.front()->output = draft_->model.write_context_kv(
       hidden, positions, cache_slots, draft_->kv_caches, input.model_params());
   CHECK(slot.drafts.front()->output.hidden_states.defined());
@@ -3944,6 +4045,9 @@ uint64_t TaskExecutionPipeline::speculative_pinned_bytes() const {
     if (slot.recurrent) {
       bytes += slot.recurrent->host_state_indices.nbytes();
     }
+    if (slot.host_draft_block_map.defined()) {
+      bytes += slot.host_draft_block_map.nbytes();
+    }
     if (slot.prefix_refresh) {
       bytes += slot.prefix_refresh->input->pinned_bytes();
     }
@@ -3988,6 +4092,7 @@ uint64_t TaskExecutionPipeline::speculative_device_bytes() const {
                slot.recurrent->accepted_lengths.nbytes();
     }
     for (const auto* tensor : {&slot.context_slots_storage,
+                               &slot.draft_block_map,
                                &slot.draft_block_indices,
                                &slot.draft_first_indices,
                                &slot.draft_prefix_indices,

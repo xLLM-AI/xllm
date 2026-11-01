@@ -200,6 +200,7 @@ LLMMaster::LLMMaster(const Options& options)
     engine_options.draft_model_path(draft_model_path)
         .num_speculative_tokens(options_.num_speculative_tokens())
         .speculative_algorithm(options_.speculative_algorithm())
+        .enable_draft_swa_manage(options_.enable_draft_swa_manage())
         .enable_probabilistic_draft(options_.enable_probabilistic_draft())
         .enable_mtp_draft_body_tp1(options_.enable_mtp_draft_body_tp1())
         .speculative_suffix_cache_max_depth(

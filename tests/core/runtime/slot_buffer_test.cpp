@@ -34,6 +34,27 @@ limitations under the License.
 namespace xllm {
 namespace {
 
+TEST(SlotBufferHostViewTest, DraftInputViewDoesNotReplaceTargetPageTable) {
+  LlmForwardInput input;
+  input.token_ids_host = torch::tensor({7}, torch::kInt32);
+  input.positions_host = torch::tensor({129}, torch::kInt32);
+  input.input_params.attention.host.block_tables =
+      torch::tensor({{20, 21}}, torch::kInt32);
+  input.input_params.cache_block_tables[BlockType::SWA] =
+      torch::tensor({{0, 3}}, torch::kInt32);
+  const ModelInputHostView target = TaskPipelineTestPeer::model_input_view(
+      input, input.input_params.attention.host.block_tables);
+  const ModelInputHostView draft = TaskPipelineTestPeer::model_input_view(
+      input, input.input_params.cache_block_tables.at(BlockType::SWA));
+  ASSERT_EQ(target.block_tables.size(), 2U);
+  ASSERT_EQ(draft.block_tables.size(), 2U);
+  EXPECT_EQ(target.block_tables[1], 21);
+  EXPECT_EQ(draft.block_tables[0], 0);
+  EXPECT_EQ(draft.block_tables[1], 3);
+  EXPECT_EQ(
+      input.input_params.attention.host.block_tables[0][1].item<int32_t>(), 21);
+}
+
 struct InputData {
   std::vector<int32_t> tokens;
   std::vector<int32_t> positions;
@@ -1170,12 +1191,11 @@ TEST_P(SlotSamplingInputTest, DoSampleBindingSurvivesInvalidReprepare) {
   auto expected = input.do_sample().clone();
   ASSERT_TRUE(prepare_sampling(input, /*model_tokens=*/8, *prepare_).ok());
   input.do_sample().zero_();
+  ASSERT_EQ(prepare_->synchronize(), ACL_SUCCESS);
   EXPECT_TRUE(torch::equal(binding_->sampling_params().do_sample().cpu(),
                            expected.cpu()));
   EXPECT_NE(binding_->sampling_params().do_sample().data_ptr(),
             input.do_sample().data_ptr());
-  ASSERT_EQ(prepare_->synchronize(), ACL_SUCCESS);
-
   auto invalid = make_input(/*rows=*/1, /*width=*/1);
   invalid.do_sample() = torch::zeros({1}, torch::kInt32);
   EXPECT_FALSE(prepare_sampling(invalid, /*model_tokens=*/8, *prepare_).ok());

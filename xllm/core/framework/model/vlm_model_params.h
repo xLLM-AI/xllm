@@ -40,6 +40,7 @@ class VlmModelParams final {
     out.expert = expert;
     out.graph = graph;
     out.multi_block_tables = multi_block_tables;
+    out.cache_block_tables = cache_block_tables;
     out.mtp_shifted_token_ids = mtp_shifted_token_ids;
     out.linear_state_validity_mask = linear_state_validity_mask;
     out.is_spec_verify = is_spec_verify;
@@ -63,6 +64,7 @@ class VlmModelParams final {
     params.parallel = parallel.to(device);
     params.expert = expert.to(device);
     params.graph = graph.to(device);
+    params.cache_block_tables = cache_block_tables;
     params.linear_state_validity_mask = linear_state_validity_mask;
     params.is_spec_verify = is_spec_verify;
     params.prefill_without_cache = prefill_without_cache;
@@ -147,6 +149,7 @@ class VlmModelParams final {
   ExpertInput expert;
   VlmGraphInput graph;
   std::vector<torch::Tensor> multi_block_tables;
+  CacheBlockTables cache_block_tables;
   torch::Tensor mtp_shifted_token_ids;
   LinearStateValidityMask linear_state_validity_mask;
   bool is_spec_verify = false;

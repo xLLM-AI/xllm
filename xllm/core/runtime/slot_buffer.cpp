@@ -884,22 +884,23 @@ Status SlotBuffer::validate_previous_tokens(const ModelInputHostView& model,
   return Status();
 }
 
-ModelInputHostView SlotBuffer::model_input_view(const LlmForwardInput& input) {
+ModelInputHostView SlotBuffer::model_input_view(
+    const LlmForwardInput& input,
+    const torch::Tensor& block_tables) {
   const auto& host = input.input_params.attention.host;
   const auto tokens = int_span(input.host_token_ids());
-  return {tokens,
-          int_span(input.host_positions()),
-          host.new_cache_slots.empty()
-              ? int_span(input.input_params.attention.device.new_cache_slots)
-              : std::span<const int32_t>(host.new_cache_slots),
-          host.q_seq_lens,
-          host.kv_seq_lens,
-          host.q_cu_seq_lens,
-          int_span(host.block_tables),
-          tokens.empty()
-              ? 0
-              : static_cast<uint32_t>(host.block_tables.size(/*dim=*/1)),
-          &input.input_params.meta.execution_batch};
+  return {
+      tokens,
+      int_span(input.host_positions()),
+      host.new_cache_slots.empty()
+          ? int_span(input.input_params.attention.device.new_cache_slots)
+          : std::span<const int32_t>(host.new_cache_slots),
+      host.q_seq_lens,
+      host.kv_seq_lens,
+      host.q_cu_seq_lens,
+      int_span(block_tables),
+      tokens.empty() ? 0 : static_cast<uint32_t>(block_tables.size(/*dim=*/1)),
+      &input.input_params.meta.execution_batch};
 }
 
 Status SlotBuffer::validate_model_state(const LlmForwardInput& input) const {
@@ -978,7 +979,8 @@ Status SlotBuffer::validate(const LlmForwardInput& input,
   if (stream.get_stream()->device_index() != device_.index()) {
     return invalid("Input stream and Slot device differ.");
   }
-  const ModelInputHostView model = model_input_view(input);
+  const ModelInputHostView model =
+      model_input_view(input, input.input_params.attention.host.block_tables);
   Status status = validate_model(model);
   if (!status.ok()) {
     return status;
@@ -1002,7 +1004,8 @@ void SlotBuffer::prepare(const LlmForwardInput& input,
                          const Stream& stream,
                          uint32_t padded_batch_size) {
   CHECK(!copy_submitted_) << "Pending result prevents Slot reuse.";
-  const ModelInputHostView model = model_input_view(input);
+  const ModelInputHostView model =
+      model_input_view(input, input.input_params.attention.host.block_tables);
   BatchInputMeta batch = batch_input_meta(input);
   if (padded_batch_size != 0) {
     CHECK_LE(padded_batch_size, capacity_.model.max_sequences);

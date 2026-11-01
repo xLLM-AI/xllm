@@ -37,6 +37,7 @@ std::string Options::to_string() const {
      << max_tokens_per_chunk_for_prefill()
      << ", num_speculative_tokens: " << num_speculative_tokens()
      << ", speculative_algorithm: " << speculative_algorithm()
+     << ", enable_draft_swa_manage: " << enable_draft_swa_manage()
      << ", enable_probabilistic_draft: " << enable_probabilistic_draft()
      << ", speculative_suffix_cache_max_depth: "
      << speculative_suffix_cache_max_depth()

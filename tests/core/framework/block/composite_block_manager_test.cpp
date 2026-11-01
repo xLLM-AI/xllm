@@ -1745,6 +1745,112 @@ TEST(CompositeBlockManagerTest, VirtualMemoryRejectsDoubleFreeAfterPageDetach) {
                "Page 0 not found in avail_pages or full_pages");
 }
 
+TEST(CompositeBlockManagerTest, DraftSwaRecyclesWithoutReleasingTargetHistory) {
+  BlockManager::Options options;
+  options.num_blocks(256)
+      .block_size(128)
+      .enable_prefix_cache(false)
+      .swa_extra_tokens(7)
+      .sliding_window_size(257)
+      .swa_blocks_per_seq(3)
+      .swa_num_blocks(8)
+      .num_speculative_tokens(7);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  std::vector<int32_t> tokens(8193, 71);
+  Sequence sequence = MakeTestSequence(/*index=*/0, tokens);
+  for (size_t length = 256; length <= 8192; length += 256) {
+    ASSERT_TRUE(manager.allocate_sequence(&sequence, length)) << length;
+    const Slice<Block> target = sequence.kv_state().blocks(BlockType::KV);
+    const Slice<Block> draft = sequence.kv_state().blocks(BlockType::SWA);
+    EXPECT_EQ(target.size(), length / 128);
+    EXPECT_EQ(draft.size(), target.size());
+    EXPECT_TRUE(
+        std::all_of(target.begin(), target.end(), [](const Block& block) {
+          return block.is_valid();
+        }));
+    const size_t live =
+        std::count_if(draft.begin(), draft.end(), [](const Block& block) {
+          return block.is_valid();
+        });
+    EXPECT_LE(live, 5U);
+    EXPECT_FALSE(sequence.kv_state().has_multi_block_export());
+    EXPECT_TRUE(sequence.kv_state().multi_block_export_view().empty());
+    sequence.kv_state().set_kv_cache_tokens_num(length);
+  }
+  EXPECT_FALSE(sequence.kv_state().blocks(BlockType::SWA)[0].is_valid());
+  EXPECT_TRUE(sequence.kv_state().blocks(BlockType::KV)[0].is_valid());
+  manager.deallocate_for_sequence(&sequence);
+  sequence.reset();
+}
+
+TEST(CompositeBlockManagerTest, DraftSwaPrefixRequiresCompleteTrailingWindow) {
+  BlockManager::Options options;
+  options.num_blocks(64)
+      .block_size(128)
+      .enable_prefix_cache(true)
+      .sliding_window_size(257)
+      .swa_blocks_per_seq(3)
+      .swa_num_blocks(32);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  EXPECT_EQ(manager.leaf_combination(),
+            CompositeBlockManager::LeafCombination::KV_SWA);
+  const std::vector<int32_t> tokens(1025, 43);
+  Sequence original = MakeTestSequence(/*index=*/0, tokens);
+  ASSERT_TRUE(manager.allocate_sequence(&original, 1024));
+  original.kv_state().set_kv_cache_tokens_num(1024);
+  manager.cache_full_blocks_for_sequence(&original);
+  manager.deallocate_for_sequence(&original);
+  original.reset();
+
+  Sequence replay = MakeTestSequence(/*index=*/1, tokens);
+  manager.allocate_shared_for_sequence(&replay);
+  EXPECT_EQ(replay.kv_state().kv_cache_tokens_num(), 1024U);
+  EXPECT_EQ(replay.kv_state().shared_blocks_num(BlockType::KV), 8U);
+  EXPECT_EQ(replay.kv_state().shared_blocks_num(BlockType::SWA), 8U);
+  manager.allocate_shared_for_sequence(&replay);
+  EXPECT_EQ(replay.kv_state().kv_cache_tokens_num(), 1024U);
+  manager.deallocate_for_sequence(&replay);
+  replay.reset();
+
+  BlockManager& swa = *manager.leaf_entries().at(BlockType::SWA).leaf;
+  std::vector<Block> pressure = swa.allocate(swa.num_total_blocks());
+  ASSERT_EQ(pressure.size(), swa.num_total_blocks());
+  Sequence miss = MakeTestSequence(/*index=*/2, tokens);
+  manager.allocate_shared_for_sequence(&miss);
+  EXPECT_EQ(miss.kv_state().kv_cache_tokens_num(), 0U);
+  EXPECT_EQ(miss.kv_state().num_blocks(BlockType::KV), 0U);
+  swa.deallocate(pressure);
+  pressure.clear();
+  manager.deallocate_for_sequence(&miss);
+  miss.reset();
+}
+
+TEST(CompositeBlockManagerTest, FlatKvSwaDecodeDoesNotProbeSwaPrefix) {
+  BlockManager::Options options;
+  options.num_blocks(64)
+      .block_size(128)
+      .enable_prefix_cache(true)
+      .instance_is_decode(true)
+      .sliding_window_size(257)
+      .swa_blocks_per_seq(3)
+      .swa_num_blocks(8);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  EXPECT_TRUE(manager.leaf_entries().at(BlockType::KV).supports_prefix_cache);
+  EXPECT_FALSE(manager.leaf_entries().at(BlockType::SWA).supports_prefix_cache);
+  EXPECT_EQ(manager.leaf_combination(),
+            CompositeBlockManager::LeafCombination::KV_ONLY);
+  Sequence sequence =
+      MakeTestSequence(/*index=*/0, std::vector<int32_t>(1025, 7));
+  ASSERT_TRUE(manager.allocate_sequence(&sequence, 1024));
+  EXPECT_EQ(sequence.kv_state().blocks(BlockType::KV).size(), 8U);
+  const auto swa = sequence.kv_state().blocks(BlockType::SWA);
+  ASSERT_EQ(swa.size(), 8U);
+  EXPECT_FALSE(swa.front().is_valid());
+  EXPECT_TRUE(swa.back().is_valid());
+  manager.deallocate_for_sequence(&sequence);
+  sequence.reset();
+}
+
 TEST(CompositeBlockManagerTest, VirtualMemoryRejectsUnknownPageRelease) {
   TestVmmKVPageAllocator allocator(/*dp_size=*/1);
   BlockManager::Options options;
@@ -2336,6 +2442,62 @@ TEST_P(LinearStateWindowTest, PrefixMountIsSparseAndMatchedOnlyOnce) {
   manager->allocate_shared_for_sequence(&consumer);
   EXPECT_EQ(consumer.kv_cache_tokens_num(), GetParam() ? 12u : 0u);
   manager->deallocate_for_sequence(&consumer);
+}
+
+TEST_P(LinearStateWindowTest, DraftSwaPrefixMountRequiresMatchingLinearState) {
+  BlockManager::Options options;
+  options.num_blocks(32)
+      .block_size(2)
+      .enable_linear_state(true)
+      .linear_state_num_slots(16)
+      .enable_prefix_cache(GetParam())
+      .sliding_window_size(4)
+      .swa_blocks_per_seq(3)
+      .swa_num_blocks(16);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  const std::vector<int32_t> tokens(13, 7);
+  Sequence producer = make_sequence(0, tokens);
+  for (const size_t target : {4u, 8u, 12u, 13u}) {
+    ASSERT_TRUE(manager.allocate_sequence(&producer, target));
+    producer.kv_state().set_kv_cache_tokens_num(target);
+  }
+  manager.deallocate_for_sequence(&producer);
+  producer.reset();
+
+  Sequence replay = make_sequence(1, tokens);
+  manager.allocate_shared_for_sequence(&replay);
+  EXPECT_EQ(replay.kv_cache_tokens_num(), GetParam() ? 12u : 0u);
+  EXPECT_EQ(replay.kv_state().num_blocks(BlockType::KV), GetParam() ? 6u : 0u);
+  EXPECT_EQ(replay.kv_state().num_blocks(BlockType::SWA), GetParam() ? 6u : 0u);
+  EXPECT_EQ(replay.kv_state().num_blocks(BlockType::LINEAR),
+            GetParam() ? 3u : 0u);
+  const int32_t checkpoint = replay.get_linear_state_slot_id();
+  manager.allocate_shared_for_sequence(&replay);
+  EXPECT_EQ(replay.get_linear_state_slot_id(), checkpoint);
+  ASSERT_TRUE(manager.allocate_sequence(&replay, GetParam() ? 13u : 4u));
+  if (GetParam()) {
+    EXPECT_EQ(replay.kv_state().blocks(BlockType::LINEAR).front().id(),
+              checkpoint);
+  }
+  manager.deallocate_for_sequence(&replay);
+  replay.reset();
+
+  // Evict only draft pages: a target/LINEAR hit must not restore a checkpoint
+  // after its corresponding draft window is gone.
+  BlockManager& swa = *manager.leaf_entries().at(BlockType::SWA).leaf;
+  std::vector<Block> pressure = swa.allocate(swa.num_total_blocks());
+  ASSERT_EQ(pressure.size(), swa.num_total_blocks());
+  Sequence miss = make_sequence(2, tokens);
+  manager.allocate_shared_for_sequence(&miss);
+  EXPECT_EQ(miss.kv_cache_tokens_num(), 0u);
+  EXPECT_EQ(miss.kv_state().num_blocks(BlockType::KV), 0u);
+  EXPECT_EQ(miss.kv_state().num_blocks(BlockType::SWA), 0u);
+  EXPECT_EQ(miss.kv_state().num_blocks(BlockType::LINEAR), 0u);
+  swa.deallocate(pressure);
+  pressure.clear();
+  ASSERT_TRUE(manager.allocate_sequence(&miss, 4));
+  EXPECT_EQ(miss.kv_state().num_blocks(BlockType::LINEAR), 1u);
+  manager.deallocate_for_sequence(&miss);
 }
 
 TEST_P(LinearStateWindowTest, DuplicateCheckpointHashesReusePrivateOutputs) {

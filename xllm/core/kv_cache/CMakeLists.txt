@@ -94,8 +94,10 @@ cc_library(
   HDRS
     layout/kv_cache_capacity.h
     layout/kv_cache_estimation.h
+    layout/draft_cache_plan.h
   SRCS
     layout/kv_cache_estimation.cpp
+    layout/draft_cache_plan.cpp
   DEPS
     :common
     :config

@@ -30,6 +30,32 @@ limitations under the License.
 
 namespace xllm::specBuilder {
 
+void fill_draft_swa_block_map(std::span<int32_t> block_map,
+                              std::span<const int32_t> target_pages,
+                              std::span<const int32_t> draft_pages) {
+  std::fill(block_map.begin(), block_map.end(), 0);
+  for (size_t index = 0; index < target_pages.size(); ++index) {
+    if (target_pages[index] != 0) {
+      block_map[target_pages[index]] = draft_pages[index];
+    }
+  }
+}
+
+torch::Tensor remap_draft_cache_slots(const torch::Tensor& target_slots,
+                                      const torch::Tensor& block_map,
+                                      int32_t block_size) {
+  CHECK_GT(block_size, 0);
+  const torch::Tensor indices = torch::floor_divide(target_slots, block_size)
+                                    .clamp_min(0)
+                                    .to(torch::kInt64);
+  const torch::Tensor draft_blocks = block_map.index_select(0, indices);
+  const torch::Tensor slots =
+      draft_blocks * block_size + torch::remainder(target_slots, block_size);
+  return torch::where(target_slots.ge(0).logical_and(draft_blocks.gt(0)),
+                      slots,
+                      torch::full_like(target_slots, -1));
+}
+
 namespace {
 
 // Builds cumulative seq-lens layout: [0, l0, l0+l1, ...].

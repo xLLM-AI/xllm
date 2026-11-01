@@ -29,6 +29,11 @@ DEFINE_string(speculative_algorithm,
               "Speculative decoding algorithm. Supported options: MTP, Eagle3, "
               "Suffix, DFlash, DFlash2 (NPU only), DSpark. Default is MTP.");
 
+DEFINE_bool(enable_draft_swa_manage,
+            false,
+            "Use an independent sliding-window KV pool for supported block "
+            "drafts. Disabled retains the full draft KV history.");
+
 DEFINE_int32(speculative_suffix_cache_max_depth,
              64,
              "Maximum suffix tree depth for suffix speculative decoding.");
@@ -129,6 +134,7 @@ void SpeculativeConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(draft_model);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(num_speculative_tokens);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(speculative_algorithm);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_draft_swa_manage);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(speculative_suffix_cache_max_depth);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(speculative_suffix_max_spec_factor);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(speculative_suffix_max_spec_offset);
@@ -176,6 +182,7 @@ void SpeculativeConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(draft_model);
   XLLM_CONFIG_ASSIGN_FROM_JSON(num_speculative_tokens);
   XLLM_CONFIG_ASSIGN_FROM_JSON(speculative_algorithm);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_draft_swa_manage);
   XLLM_CONFIG_ASSIGN_FROM_JSON(speculative_suffix_cache_max_depth);
   XLLM_CONFIG_ASSIGN_FROM_JSON(speculative_suffix_max_spec_factor);
   XLLM_CONFIG_ASSIGN_FROM_JSON(speculative_suffix_max_spec_offset);
@@ -203,6 +210,8 @@ void SpeculativeConfig::append_config_json(
       config_json, default_config, num_speculative_tokens);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, speculative_algorithm);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_draft_swa_manage);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, speculative_suffix_cache_max_depth);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

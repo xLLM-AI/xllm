@@ -68,7 +68,7 @@ def prepare_windowed_block_table(
     """Select live window pages on Device, with fixed capture-time shapes.
 
     The source retains global logical page indices. Padding columns point to
-    the request's first legal page rather than reading unallocated tail ids;
+    the window's first live page rather than reading unallocated tail ids;
     the existing global-position mask excludes those columns from attention.
     No KV data, rotary positions, or write slots are moved.
     """
@@ -80,7 +80,9 @@ def prepare_windowed_block_table(
     # before gathering, then replace every unused page by a known legal id.
     indices = columns.clamp(0, source.shape[1] - 1).to(torch.int64)
     selected = source.gather(1, indices)
-    table = torch.where(valid, selected, source[:, :1]).contiguous()
+    # Rolling SWA management can retire logical page zero. Reuse a live
+    # window page for padding instead of depending on that old prefix page.
+    table = torch.where(valid, selected, selected[:, :1]).contiguous()
     capacity = pages * page_size
     keys = first_page.view(-1, 1, 1, 1) * page_size
     keys = keys + torch.arange(capacity, device=source.device, dtype=kv_lengths.dtype).view(1, 1, 1, -1)

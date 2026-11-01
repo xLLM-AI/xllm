@@ -103,7 +103,7 @@ constexpr PackedInputDomain packed_input_domain() {
   return PackedInputDomain::LLM;
 }
 constexpr uint64_t kPackedInputMagic = 0x584c4c4d494e5032;
-constexpr uint16_t kPackedInputSchemaVersion = 10;
+constexpr uint16_t kPackedInputSchemaVersion = 11;
 constexpr uint32_t kPackedInputHeaderBytes = 40;
 
 struct RawInputLayoutHeader final {
@@ -2777,6 +2777,24 @@ inline void deserialize_forward_input_payload(
       // reading multi_block_tables (which stay on CPU for DSA metadata).
       input_params.multi_block_tables.emplace_back(manager_table.clone());
     }
+    uint32_t group_count = 0;
+    read_data(context, group_count);
+    input_params.cache_block_tables.clear();
+    for (uint32_t index = 0; index < group_count; ++index) {
+      int32_t group_id = 0;
+      read_data(context, group_id);
+      const auto type = block_type_from_cache_group_id(group_id);
+      CHECK(type.has_value()) << "Unknown cache page-table group " << group_id;
+      torch::Tensor table;
+      read_tensor(context,
+                  table,
+                  /*stream=*/nullptr,
+                  /*force_host_materialize=*/true);
+      // CPU metadata outlives the shared-memory frame under schedule overlap.
+      const bool inserted =
+          input_params.cache_block_tables.emplace(*type, table.clone()).second;
+      CHECK(inserted) << "Duplicate cache page-table group " << group_id;
+    }
   }
   CHECK_EQ(context.descriptor_cursor, descriptor_base + layout.descriptor_bytes)
       << "forward input descriptor was not consumed exactly";
@@ -3108,6 +3126,12 @@ inline void serialize_forward_input_sections(
                static_cast<int32_t>(input_params.multi_block_tables.size()));
     for (const auto& manager_table : input_params.multi_block_tables) {
       write_tensor(context, manager_table);
+    }
+    write_data(context.descriptor,
+               static_cast<uint32_t>(input_params.cache_block_tables.size()));
+    for (const auto& [type, table] : input_params.cache_block_tables) {
+      write_data(context.descriptor, cache_group_id(type));
+      write_tensor(context, table);
     }
   }
 }

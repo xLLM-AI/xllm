@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <vector>
 
 #include "core/framework/model/mtp_topk_state.h"
@@ -32,6 +33,16 @@ class LlmForwardInput;
 struct SamplingParameters;
 
 namespace specBuilder {
+
+// CPU staging map from target physical pages to independently allocated draft
+// pages. The input boundary validates aligned table sizes and physical IDs.
+// Logical holes map to reserved page zero, which suppresses writes.
+void fill_draft_swa_block_map(std::span<int32_t> block_map,
+                              std::span<const int32_t> target_pages,
+                              std::span<const int32_t> draft_pages);
+torch::Tensor remap_draft_cache_slots(const torch::Tensor& target_slots,
+                                      const torch::Tensor& block_map,
+                                      int32_t block_size);
 
 struct DecodeBuildMeta {
   int32_t kv_max_seq_len = 0;

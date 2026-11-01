@@ -3168,6 +3168,9 @@ TEST(BatchTest, ThreadedPrefillPreservesChunkSlicesAndFinalSamplingOffset) {
         .block_size(kBlockSize)
         .enable_prefix_cache(/*enable_prefix_cache=*/false);
     BlockManagerImpl manager(options);
+    options.num_blocks(517);
+    BlockManagerImpl swa_manager(options);
+    const std::vector<Block> reserved_swa = swa_manager.allocate(2);
 
     RequestSamplingParam sampling_param;
     StoppingChecker stopping_checker;
@@ -3209,6 +3212,12 @@ TEST(BatchTest, ThreadedPrefillPreservesChunkSlicesAndFinalSamplingOffset) {
                              seq_params);
     second_sequence.add_blocks(BlockType::KV,
                                manager.allocate(kBlocksPerSequence));
+    auto first_swa = swa_manager.allocate(kBlocksPerSequence);
+    auto second_swa = swa_manager.allocate(kBlocksPerSequence);
+    first_swa.front() = Block();
+    second_swa.front() = Block();
+    first_sequence.add_blocks(BlockType::SWA, std::move(first_swa));
+    second_sequence.add_blocks(BlockType::SWA, std::move(second_swa));
     second_sequence.kv_state().incr_kv_cache_tokens_num(/*size=*/5);
 
     // 2 * 32768 scheduled tokens meet the multithread threshold. The first
@@ -3238,6 +3247,15 @@ TEST(BatchTest, ThreadedPrefillPreservesChunkSlicesAndFinalSamplingOffset) {
     EXPECT_TRUE(
         torch::equal(input_params.attention.device.block_tables.flatten(),
                      make_cpu_tensor(expected_block_ids)));
+    ASSERT_EQ(input_params.cache_block_tables.size(), 1U);
+    const auto& swa_table = input_params.cache_block_tables.at(BlockType::SWA);
+    std::vector<int32_t> expected_swa_ids(2 * kBlocksPerSequence);
+    std::iota(expected_swa_ids.begin(), expected_swa_ids.end(), /*value=*/3);
+    expected_swa_ids[0] = 0;
+    expected_swa_ids[kBlocksPerSequence] = 0;
+    EXPECT_TRUE(
+        torch::equal(swa_table.flatten(), make_cpu_tensor(expected_swa_ids)));
+    EXPECT_TRUE(input_params.multi_block_tables.empty());
 
 #if defined(USE_NPU)
     const std::vector<int32_t> expected_q_seq_lens = {32768, 32768};

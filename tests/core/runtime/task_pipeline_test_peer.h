@@ -47,6 +47,7 @@ struct TaskPipelineTestPeer {
   static constexpr auto context_device_bytes =
       TaskExecutionPipeline::context_device_bytes;
   static constexpr auto create_mtp_input = SlotBuffer::create_mtp_input;
+  static constexpr auto model_input_view = SlotBuffer::model_input_view;
   static constexpr auto input_scratch = [](SlotBuffer& input) -> auto& {
     return *input.input_scratch_;
   };

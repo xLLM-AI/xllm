@@ -105,6 +105,7 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
 
   std::unique_ptr<LLMWorkerImpl> draft_impl_;
   std::unique_ptr<EmbeddingCache> embedding_cache_;
+  bool draft_swa_cache_enabled_ = false;
 
   bool is_probabilistic_draft_ = false;
 };

@@ -78,6 +78,8 @@ struct Options {
 
   PROPERTY(std::string, speculative_algorithm) = "mtp";
 
+  PROPERTY(bool, enable_draft_swa_manage) = false;
+
   PROPERTY(bool, enable_probabilistic_draft) = false;
 
   PROPERTY(int32_t, speculative_suffix_cache_max_depth) = 64;

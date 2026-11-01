@@ -261,6 +261,7 @@ class ModelParamsView final {
   GraphInputView graph;
   LinearStateValidityMask& linear_state_validity_mask;
   std::vector<torch::Tensor>& multi_block_tables;
+  CacheBlockTables& cache_block_tables;
   torch::Tensor& mtp_shifted_token_ids;
   bool& is_spec_verify;
   bool& prefill_without_cache;
@@ -286,6 +287,7 @@ class ModelParamsView final {
         graph(owner.graph, spec.graph),
         linear_state_validity_mask(owner.linear_state_validity_mask),
         multi_block_tables(spec.multi_block_tables),
+        cache_block_tables(spec.cache_block_tables),
         mtp_shifted_token_ids(spec.mtp_shifted_token_ids),
         is_spec_verify(spec.is_spec_verify),
         prefill_without_cache(spec.prefill_without_cache),

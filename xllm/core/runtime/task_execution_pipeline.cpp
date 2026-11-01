@@ -233,10 +233,10 @@ Status TaskExecutionPipeline::validate_input(const LlmForwardInput& source,
       !source.json_object_invalid_draft.empty() ||
       !source.json_object_errors.empty() || params.is_spec_verify ||
       params.prefill_without_cache ||
-      ((!embedding.linear_state_read_ids.empty() ||
-        !params.linear_state_validity_mask.empty()) &&
-       !recurrent && !capacity.model.enable_linear_attention) ||
+      (!params.linear_state_validity_mask.empty() && !recurrent &&
+       !capacity.model.enable_linear_attention) ||
       !params.multi_block_tables.empty() || params.mtp_topk_state != nullptr ||
+      (!speculative && !params.cache_block_tables.empty()) ||
       params.num_accepted_tokens.defined() ||
       !params.num_accepted_tokens_host.empty() ||
       embedding.input_embedding.defined() || !copy.swap_blocks.empty() ||
@@ -260,10 +260,10 @@ Status TaskExecutionPipeline::validate_input(const LlmForwardInput& source,
   // Only those inactive sentinels may be omitted from the prepared program.
   const auto inactive = [](int32_t id) { return id == -1; };
   const auto& linear_ids = embedding.linear_state_ids;
+  const auto& read_ids = embedding.linear_state_read_ids;
   const auto& linear_indices = embedding.linear_state_indices;
   if (recurrent) {
     const size_t rows = host.q_seq_lens.size();
-    const auto& read_ids = embedding.linear_state_read_ids;
     constexpr const char* kInvalidState =
         "Recurrent task requires aligned CPU request state.";
     if (!speculative || linear_ids.size() != rows) {
@@ -315,6 +315,11 @@ Status TaskExecutionPipeline::validate_input(const LlmForwardInput& source,
           !std::all_of(linear_ids.begin(), linear_ids.end(), inactive)) {
         return invalid(kInvalidState);
       }
+    }
+    if (!read_ids.empty() &&
+        (read_ids.size() != host.q_seq_lens.size() ||
+         !std::all_of(read_ids.begin(), read_ids.end(), inactive))) {
+      return invalid(kInvalidState);
     }
     if (linear_indices.defined()) {
       if (!is_cpu_int_tensor(linear_indices, /*dimensions=*/1) ||

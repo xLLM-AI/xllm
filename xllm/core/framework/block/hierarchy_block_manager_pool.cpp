@@ -168,7 +168,7 @@ PrefixMatch trim_shared_probes(
     return (capped / alignment) * alignment;
   };
 
-  if (combination == CompositeBlockManager::LeafCombination::FLAT_KV) {
+  if (combination == CompositeBlockManager::LeafCombination::KV_ONLY) {
     ProbeResult* hbm_kv = find_probe(hbm_probes, BlockType::KV);
     ProbeResult* host_kv = find_probe(host_probes, BlockType::KV);
     CHECK(hbm_kv != nullptr && host_kv != nullptr);
@@ -281,7 +281,7 @@ size_t complete_prefetch_tokens(
     size_t limit_tokens) {
   CHECK(sequence != nullptr);
   const KVCacheState& host_state = sequence->host_kv_state();
-  if (combination == CompositeBlockManager::LeafCombination::FLAT_KV) {
+  if (combination == CompositeBlockManager::LeafCombination::KV_ONLY) {
     const BlockManager* leaf = leaves.at(BlockType::KV).leaf.get();
     const size_t block_size = leaf->block_size();
     const size_t limit_blocks = limit_tokens / block_size;
@@ -408,7 +408,7 @@ StoragePrefetchRequest build_prefetch_request(
     next_swa_block = base_tokens / leaves.at(BlockType::SWA).leaf->block_size();
   }
   for (size_t unit = base_units; unit < final_units; ++unit) {
-    if (combination == CompositeBlockManager::LeafCombination::FLAT_KV) {
+    if (combination == CompositeBlockManager::LeafCombination::KV_ONLY) {
       append_prefetch_transfer(&request, BlockType::KV, unit, host_state);
     } else {
       CHECK(combination ==
@@ -508,13 +508,13 @@ HierarchyBlockManagerPool::HierarchyBlockManagerPool(
     const CompositeBlockManager::LeafCombination combination =
         composite->leaf_combination();
     switch (combination) {
-      case CompositeBlockManager::LeafCombination::FLAT_KV:
+      case CompositeBlockManager::LeafCombination::KV_ONLY:
       case CompositeBlockManager::LeafCombination::SWA_COMPRESSED:
         break;
-      case CompositeBlockManager::LeafCombination::FLAT_KV_LINEAR:
-      case CompositeBlockManager::LeafCombination::UNSUPPORTED:
+      case CompositeBlockManager::LeafCombination::KV_LINEAR:
+      case CompositeBlockManager::LeafCombination::DISABLED:
       default:
-        LOG(FATAL) << "HierarchyBlockManagerPool supports only FLAT_KV and "
+        LOG(FATAL) << "HierarchyBlockManagerPool supports only KV_ONLY and "
                       "SWA_COMPRESSED cache layouts; got "
                    << static_cast<int32_t>(combination);
     }
@@ -1132,7 +1132,7 @@ void HierarchyBlockManagerPool::prefetch_from_storage(
         sequence, combination, host_leaves, target_tokens);
     trim_prefetch_state(sequence, host_leaves, base_tokens);
 
-    if (combination == CompositeBlockManager::LeafCombination::FLAT_KV) {
+    if (combination == CompositeBlockManager::LeafCombination::KV_ONLY) {
       host_leaves.at(BlockType::KV)
           .leaf->allocate_for_prefetch(sequence, target_tokens);
     } else {

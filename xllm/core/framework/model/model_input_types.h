@@ -23,6 +23,7 @@ limitations under the License.
 #include <cstring>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <memory>
 #include <numeric>
 #include <optional>
@@ -54,6 +55,9 @@ limitations under the License.
 #include "core/util/tensor_helper.h"
 
 namespace xllm {
+
+// CPU page tables keyed by cache structure, independent of the consuming model.
+using CacheBlockTables = std::map<BlockType, torch::Tensor>;
 
 template <typename Embedding>
 void materialize_linear_state_indices(Embedding& embedding,
