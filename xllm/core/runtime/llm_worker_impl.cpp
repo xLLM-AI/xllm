@@ -174,7 +174,8 @@ bool LLMWorkerImpl::prepare_static_mtp_graph_tasks(
 std::optional<ForwardOutput> LLMWorkerImpl::execute_no_sync_on_stream(
     const LlmForwardInput& input,
     Stream& compute_stream,
-    ForwardCompletion completion) {
+    ForwardCompletion completion,
+    const std::function<void()>& prepare_sampling) {
   const ForwardSyncPolicy sync_policy = ForwardSyncPolicy::NO_SYNC;
   c10::StreamGuard stream_guard = compute_stream.set_stream_guard();
   if (::xllm::LoadConfig::get_instance().enable_manual_loader()) {
@@ -186,19 +187,19 @@ std::optional<ForwardOutput> LLMWorkerImpl::execute_no_sync_on_stream(
           const_cast<atb::Context*>(context_.get_atb_context());
       atb_context->SetExecuteStream(current_acl_stream);
       wait_input_ready_events(input, compute_stream);
-      return step_internal(input, sync_policy, completion);
+      return step_internal(input, sync_policy, completion, prepare_sampling);
     } else {
       SET_ATB_EXECUTE_STREAM((&compute_stream), device_, context_);
       wait_input_ready_events(input, compute_stream);
-      return step_internal(input, sync_policy, completion);
+      return step_internal(input, sync_policy, completion, prepare_sampling);
     }
 #else
     wait_input_ready_events(input, compute_stream);
-    return step_internal(input, sync_policy, completion);
+    return step_internal(input, sync_policy, completion, prepare_sampling);
 #endif
   }
   wait_input_ready_events(input, compute_stream);
-  return step_internal(input, sync_policy, completion);
+  return step_internal(input, sync_policy, completion, prepare_sampling);
 }
 
 std::optional<ForwardOutput> LLMWorkerImpl::step(const LlmForwardInput& input) {
@@ -224,16 +225,20 @@ std::optional<ForwardOutput> LLMWorkerImpl::step(const LlmForwardInput& input) {
 }
 
 std::optional<ForwardOutput> LLMWorkerImpl::step_for_schedule_overlap(
-    const LlmForwardInput& input) {
+    const LlmForwardInput& input,
+    const std::function<void()>& prepare_sampling) {
   prepare_schedule_overlap(input);
-  return execute_no_sync_on_stream(
-      input, *compute_stream_, ForwardCompletion::RECORD_EVENT);
+  return execute_no_sync_on_stream(input,
+                                   *compute_stream_,
+                                   ForwardCompletion::RECORD_EVENT,
+                                   prepare_sampling);
 }
 
 std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     const LlmForwardInput& input,
     ForwardSyncPolicy sync_policy,
-    ForwardCompletion completion) {
+    ForwardCompletion completion,
+    const std::function<void()>& prepare_sampling) {
   MULTI_MODEL_STEP_LOCK(
       ::xllm::LoadConfig::get_instance().enable_vmm_weights());
 
@@ -359,6 +364,9 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     output.logprobs = sampling_params.logprobs();
     output.max_top_logprobs = sampling_params.max_top_logprobs();
     if (!input.skip_sampling_for_logits_only) {
+      if (prepare_sampling) {
+        prepare_sampling();
+      }
       auto sample_output = [&]() {
         if (!sampling_params.min_token_positions().defined()) {
           return sample(logits, sampling_params);

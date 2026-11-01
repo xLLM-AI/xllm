@@ -132,14 +132,21 @@ void advance_sampling_history(SamplingParameters& params,
        !params.frequency_penalties().defined())) {
     return;
   }
-  CHECK_EQ(output_rows.size(), params.num_sample_seqs());
   const torch::Tensor rows =
       torch::tensor(output_rows, torch::kInt64).to(prior_tokens.device());
+  advance_sampling_history(params, prior_tokens, rows);
+}
+
+void advance_sampling_history(SamplingParameters& params,
+                              const torch::Tensor& prior_tokens,
+                              const torch::Tensor& output_rows) {
+  CHECK_EQ(output_rows.numel(), params.num_sample_seqs());
   const torch::Tensor tokens =
       prior_tokens.dim() == 1 ? prior_tokens.unsqueeze(1) : prior_tokens;
   params.prefix_tokens() =
-      tokens.index_select(/*dim=*/0, rows.clamp_min(0)).to(torch::kInt64);
-  params.prefix_tokens().masked_fill_(rows.lt(0).unsqueeze(1), -1);
+      tokens.index_select(/*dim=*/0, output_rows.clamp_min(0))
+          .to(torch::kInt64);
+  params.prefix_tokens().masked_fill_(output_rows.lt(0).unsqueeze(1), -1);
   if (params.bad_word_suffix().defined()) {
     params.bad_word_suffix() =
         append_token_suffix(params.bad_word_suffix(), params.prefix_tokens());

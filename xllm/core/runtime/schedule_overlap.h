@@ -53,6 +53,8 @@ class ScheduleOverlap final {
   template <typename Input>
   void prepare_continuation_impl(WorkerImpl& worker, Input& input);
   template <typename Input>
+  torch::Tensor prepare_sampling_impl(WorkerImpl& worker, Input& input);
+  template <typename Input>
   void complete_step_impl(const Input& input,
                           Stream& compute_stream,
                           std::optional<ForwardOutput>& output);

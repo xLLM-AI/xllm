@@ -112,16 +112,20 @@ std::optional<ForwardOutput> VLMWorkerImpl::step(const VlmForwardInput& input) {
 }
 
 std::optional<ForwardOutput> VLMWorkerImpl::step_for_schedule_overlap(
-    const VlmForwardInput& input) {
+    const VlmForwardInput& input,
+    const std::function<void()>& prepare_sampling) {
   prepare_schedule_overlap(input);
-  return execute_no_sync_on_stream(
-      input, *compute_stream_, ForwardCompletion::RECORD_EVENT);
+  return execute_no_sync_on_stream(input,
+                                   *compute_stream_,
+                                   ForwardCompletion::RECORD_EVENT,
+                                   prepare_sampling);
 }
 
 std::optional<ForwardOutput> VLMWorkerImpl::execute_no_sync_on_stream(
     const VlmForwardInput& input,
     Stream& compute_stream,
-    ForwardCompletion completion) {
+    ForwardCompletion completion,
+    const std::function<void()>& prepare_sampling) {
   const ForwardSyncPolicy sync_policy = ForwardSyncPolicy::NO_SYNC;
   c10::StreamGuard stream_guard = compute_stream.set_stream_guard();
   if (::xllm::LoadConfig::get_instance().enable_manual_loader()) {
@@ -133,25 +137,26 @@ std::optional<ForwardOutput> VLMWorkerImpl::execute_no_sync_on_stream(
           const_cast<atb::Context*>(context_.get_atb_context());
       atb_context->SetExecuteStream(current_acl_stream);
       wait_input_ready_events(input, compute_stream);
-      return step_internal(input, sync_policy, completion);
+      return step_internal(input, sync_policy, completion, prepare_sampling);
     } else {
       SET_ATB_EXECUTE_STREAM((&compute_stream), device_, context_);
       wait_input_ready_events(input, compute_stream);
-      return step_internal(input, sync_policy, completion);
+      return step_internal(input, sync_policy, completion, prepare_sampling);
     }
 #else
     wait_input_ready_events(input, compute_stream);
-    return step_internal(input, sync_policy, completion);
+    return step_internal(input, sync_policy, completion, prepare_sampling);
 #endif
   }
   wait_input_ready_events(input, compute_stream);
-  return step_internal(input, sync_policy, completion);
+  return step_internal(input, sync_policy, completion, prepare_sampling);
 }
 
 std::optional<ForwardOutput> VLMWorkerImpl::step_internal(
     const VlmForwardInput& input,
     ForwardSyncPolicy sync_policy,
-    ForwardCompletion completion) {
+    ForwardCompletion completion,
+    const std::function<void()>& prepare_sampling) {
   Timer timer;
   const bool empty_shard =
       input.input_params.meta.num_sequences == 0 &&
@@ -204,6 +209,9 @@ std::optional<ForwardOutput> VLMWorkerImpl::step_internal(
     output.logprobs = sampling_params.logprobs();
     output.max_top_logprobs = sampling_params.max_top_logprobs();
     if (!input.skip_sampling_for_logits_only) {
+      if (prepare_sampling) {
+        prepare_sampling();
+      }
       auto sample_output = sample(logits, sampling_params);
       COUNTER_ADD(execution_latency_seconds_sampling, timer.elapsed_seconds());
 
