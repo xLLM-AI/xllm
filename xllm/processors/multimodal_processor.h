@@ -166,7 +166,6 @@ class MultimodalProcessor final : public MultimodalProcessorBase {
   bool process_videos(const std::vector<torch::Tensor>& videos,
                       const std::vector<VideoMetadata>& video_metadata,
                       std::vector<MMDataItem>& output_items) const {
-    CHECK(videos.size() == video_metadata.size());
     output_items.clear();
     output_items.reserve(videos.size());
     const size_t video_size = videos.size();
@@ -187,7 +186,6 @@ class MultimodalProcessor final : public MultimodalProcessorBase {
   bool process_audios(const std::vector<torch::Tensor>& audios,
                       const std::vector<AudioMetadata>& audio_metadata,
                       std::vector<MMDataItem>& output_items) const {
-    CHECK(audios.size() == audio_metadata.size());
     output_items.clear();
     output_items.reserve(audios.size());
     const size_t audio_size = audios.size();

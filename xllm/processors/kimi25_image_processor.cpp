@@ -672,7 +672,6 @@ bool KimiK25PromptProcessor::process(std::string& prompt,
       LOG(FATAL) << "Unexpected Kimi media token type.";
     }
 
-    CHECK(token_counts != nullptr);
     CHECK_LT(*index, static_cast<int32_t>(token_counts->size()))
         << "media placeholder count does not match processed media count";
 

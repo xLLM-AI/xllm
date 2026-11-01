@@ -40,7 +40,6 @@ limitations under the License.
 
 XLLM_CAPI_EXPORT XLLM_REC_Handler* xllm_rec_create(void) {
   XLLM_REC_Handler* handler = new XLLM_REC_Handler();
-  CHECK(nullptr != handler);
 
   handler->initialized = false;
 

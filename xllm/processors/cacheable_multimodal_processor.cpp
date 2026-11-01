@@ -43,7 +43,7 @@ bool CacheableMultimodalProcessor::process_prompt(
 bool CacheableMultimodalProcessor::process_multimodal(const MMInput& inputs,
                                                       MMData& data) const {
   ProcessorCacheLookupVisitor cache_lookup_visitor(*cache_, inputs.size());
-  CHECK(inputs.foreach (cache_lookup_visitor));
+  inputs.foreach (cache_lookup_visitor);
 
   MMItemVec miss_items;
   if (!process_misses(cache_lookup_visitor.miss_inputs_, miss_items)) {
@@ -96,7 +96,6 @@ void CacheableMultimodalProcessor::assemble(
     full_type |= produced.type();
     full_items.emplace_back(std::move(produced));
   }
-  CHECK_EQ(miss_index, miss_items.size());
 
   data.set(full_type, std::move(full_items));
 }

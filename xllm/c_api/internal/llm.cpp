@@ -33,7 +33,6 @@ limitations under the License.
 
 XLLM_CAPI_EXPORT XLLM_LLM_Handler* xllm_llm_create(void) {
   XLLM_LLM_Handler* handler = new XLLM_LLM_Handler();
-  CHECK(nullptr != handler);
 
   handler->initialized = false;
 

@@ -47,7 +47,6 @@ void initialize_response(const std::string& request_id,
                          const std::string& model,
                          uint32_t created_time,
                          proto::SampleResponse* response) {
-  CHECK(response != nullptr);
   response->Clear();
   response->set_id(request_id);
   response->set_object("sample_completion");
@@ -57,7 +56,7 @@ void initialize_response(const std::string& request_id,
 
 void set_choice_logprobs(proto::Choice* choice,
                          const std::optional<std::vector<LogProb>>& logprobs) {
-  if (choice == nullptr || !logprobs.has_value() || logprobs->empty()) {
+  if (!logprobs.has_value() || logprobs->empty()) {
     return;
   }
 
@@ -117,7 +116,6 @@ uint32_t get_requested_logprobs(const proto::SampleRequest& request) {
 }
 
 Status get_rate_limit_status(LLMMaster* master) {
-  CHECK(master != nullptr);
   return master->get_rate_limiter()->acquire();
 }
 

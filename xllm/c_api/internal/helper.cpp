@@ -145,7 +145,6 @@ XLLM_Response* build_error_response(const std::string& request_id,
                                     XLLM_StatusCode status_code,
                                     const std::string& error_info) {
   XLLM_Response* response = new XLLM_Response();
-  CHECK(nullptr != response);
 
   response->status_code = status_code;
   strncpy(
@@ -167,7 +166,6 @@ XLLM_Response* build_success_response(const InferenceType& inference_type,
                                       int64_t created_time,
                                       const std::string& model) {
   XLLM_Response* response = new XLLM_Response();
-  CHECK(nullptr != response);
 
   response->status_code = XLLM_StatusCode::kSuccess;
   response->created = created_time;
@@ -184,7 +182,6 @@ XLLM_Response* build_success_response(const InferenceType& inference_type,
 
   response->choices.entries_size = output.outputs.size();
   response->choices.entries = new XLLM_Choice[response->choices.entries_size]();
-  CHECK(nullptr != response->choices.entries);
   const bool is_rec_inference =
       inference_type == InferenceType::REC_COMPLETIONS ||
       inference_type == InferenceType::REC_CHAT_COMPLETIONS;
@@ -194,7 +191,6 @@ XLLM_Response* build_success_response(const InferenceType& inference_type,
     response->rec_outputs.entries_size = output.outputs.size();
     response->rec_outputs.entries =
         new XLLM_RecOutput[response->rec_outputs.entries_size]();
-    CHECK(nullptr != response->rec_outputs.entries);
   }
 
   int32_t total_item_count = 0;
@@ -215,18 +211,15 @@ XLLM_Response* build_success_response(const InferenceType& inference_type,
         inference_type == InferenceType::REC_COMPLETIONS) {
       size_t text_len = seq_output.text.length();
       choice.text = new char[text_len + 1];
-      CHECK(nullptr != choice.text);
       strncpy(choice.text, seq_output.text.c_str(), text_len + 1);
       choice.text[text_len] = '\0';
     } else if (inference_type == InferenceType::LLM_CHAT_COMPLETIONS ||
                inference_type == InferenceType::REC_CHAT_COMPLETIONS) {
       choice.message = new XLLM_ChatMessage();
-      CHECK(nullptr != choice.message);
 
       snprintf(choice.message->role, sizeof(choice.message->role), "assistant");
       size_t text_len = seq_output.text.length();
       choice.message->content = new char[text_len + 1];
-      CHECK(nullptr != choice.message->content);
       strncpy(choice.message->content, seq_output.text.c_str(), text_len + 1);
       choice.message->content[text_len] = '\0';
     }
@@ -239,7 +232,6 @@ XLLM_Response* build_success_response(const InferenceType& inference_type,
     if (seq_output.token_ids.size() > 0) {
       choice.token_size = seq_output.token_ids.size();
       choice.token_ids = new int32_t[choice.token_size];
-      CHECK(nullptr != choice.token_ids);
       for (int j = 0; j < choice.token_size; j++) {
         choice.token_ids[j] = seq_output.token_ids[j];
       }
@@ -249,7 +241,6 @@ XLLM_Response* build_success_response(const InferenceType& inference_type,
       choice.logprobs.entries_size = seq_output.logprobs.value().size();
       choice.logprobs.entries =
           new XLLM_LogProb[choice.logprobs.entries_size]();
-      CHECK(nullptr != choice.logprobs.entries);
       for (int j = 0; j < seq_output.logprobs.value().size(); j++) {
         const auto& logprob = seq_output.logprobs.value()[j];
         XLLM_LogProb& xllm_logprob = choice.logprobs.entries[j];
@@ -271,7 +262,6 @@ XLLM_Response* build_success_response(const InferenceType& inference_type,
         if (copied_item_count > 0) {
           rec_output->item_ids_size = copied_item_count;
           rec_output->item_ids = new int64_t[copied_item_count];
-          CHECK(nullptr != rec_output->item_ids);
           for (size_t j = 0; j < copied_item_count; ++j) {
             rec_output->item_ids[j] = seq_output.item_ids_list[j];
           }
@@ -281,7 +271,6 @@ XLLM_Response* build_success_response(const InferenceType& inference_type,
                  total_item_count < total_threshold) {
         rec_output->item_ids_size = 1;
         rec_output->item_ids = new int64_t[1];
-        CHECK(nullptr != rec_output->item_ids);
         rec_output->item_ids[0] = seq_output.item_ids.value();
         ++total_item_count;
       }
@@ -294,7 +283,6 @@ XLLM_Response* build_success_response(const InferenceType& inference_type,
           seq_output.token_ids_logprobs.size();
       rec_output->rec_token_logprobs =
           new float[rec_output->rec_token_logprobs_size];
-      CHECK(nullptr != rec_output->rec_token_logprobs);
       for (size_t j = 0; j < rec_output->rec_token_logprobs_size; ++j) {
         if (seq_output.token_ids_logprobs[j].has_value()) {
           rec_output->rec_token_logprobs[j] =
@@ -326,8 +314,6 @@ XLLM_Response* handle_inference_request(
     void* extra,
     uint32_t timeout_ms,
     const XLLM_RequestParams* request_params) {
-  CHECK(nullptr != handler);
-
   std::string request_id;
   if (nullptr != request_params && strlen(request_params->request_id) > 0) {
     request_id = request_params->request_id;
@@ -417,9 +403,7 @@ XLLM_Response* handle_inference_request(
     } else if constexpr (std::is_same_v<HandlerType, XLLM_REC_Handler>) {
       if constexpr (std::is_same_v<InputType, std::vector<int>>) {
         if (nullptr != extra) {
-          xllm::MMData* mm_data =
-              dynamic_cast<xllm::MMData*>(static_cast<xllm::MMData*>(extra));
-          CHECK(nullptr != mm_data);
+          xllm::MMData* mm_data = static_cast<xllm::MMData*>(extra);
 
           std::optional<xllm::MMData> opt_mm_data = std::move(*mm_data);
           handler->master->handle_request(
@@ -482,30 +466,22 @@ void xllm_free_response(XLLM_Response* resp) {
     for (int i = 0; i < resp->choices.entries_size; ++i) {
       XLLM_Choice& choice = resp->choices.entries[i];
 
-      if (nullptr != choice.text) {
-        delete[] choice.text;
-        choice.text = nullptr;
-      }
+      delete[] choice.text;
+      choice.text = nullptr;
 
       if (nullptr != choice.message) {
-        if (nullptr != choice.message->content) {
-          delete[] choice.message->content;
-          choice.message->content = nullptr;
-        }
+        delete[] choice.message->content;
+        choice.message->content = nullptr;
         delete choice.message;
         choice.message = nullptr;
       }
 
-      if (nullptr != choice.token_ids) {
-        delete[] choice.token_ids;
-        choice.token_ids = nullptr;
-        choice.token_size = 0;
-      }
+      delete[] choice.token_ids;
+      choice.token_ids = nullptr;
+      choice.token_size = 0;
 
-      if (nullptr != choice.logprobs.entries) {
-        delete[] choice.logprobs.entries;
-        choice.logprobs.entries = nullptr;
-      }
+      delete[] choice.logprobs.entries;
+      choice.logprobs.entries = nullptr;
       choice.logprobs.entries_size = 0;
     }
 
@@ -517,16 +493,12 @@ void xllm_free_response(XLLM_Response* resp) {
   if (nullptr != resp->rec_outputs.entries) {
     for (size_t i = 0; i < resp->rec_outputs.entries_size; ++i) {
       XLLM_RecOutput& rec_output = resp->rec_outputs.entries[i];
-      if (nullptr != rec_output.item_ids) {
-        delete[] rec_output.item_ids;
-        rec_output.item_ids = nullptr;
-        rec_output.item_ids_size = 0;
-      }
-      if (nullptr != rec_output.rec_token_logprobs) {
-        delete[] rec_output.rec_token_logprobs;
-        rec_output.rec_token_logprobs = nullptr;
-        rec_output.rec_token_logprobs_size = 0;
-      }
+      delete[] rec_output.item_ids;
+      rec_output.item_ids = nullptr;
+      rec_output.item_ids_size = 0;
+      delete[] rec_output.rec_token_logprobs;
+      rec_output.rec_token_logprobs = nullptr;
+      rec_output.rec_token_logprobs_size = 0;
     }
     delete[] resp->rec_outputs.entries;
     resp->rec_outputs.entries = nullptr;
