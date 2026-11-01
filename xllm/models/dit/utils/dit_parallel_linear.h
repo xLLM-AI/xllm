@@ -162,8 +162,6 @@ class DiTParallelLinearImpl : public torch::nn::Module {
       sp_options_.validate();
     }
     if (has_tp_weights()) {
-      CHECK(tp_options_.has_value())
-          << "DiTParallelLinear: TpOptions required for the current LinearType";
       tp_options_->validate();
       init_tp_weights();
     } else {

@@ -128,8 +128,7 @@ ChatServiceImpl::ChatServiceImpl(LLMMaster* master,
       tool_call_parser_format_(
           check_master(master)->options().tool_call_parser().value_or("")),
       reasoning_parser_format_(
-          check_master(master)->options().reasoning_parser().value_or("")) {
-  CHECK(master != nullptr);
+          master->options().reasoning_parser().value_or("")) {
   CHECK(master_manager_ != nullptr);
 }
 
@@ -475,7 +474,6 @@ void ChatServiceImpl::process_async_impl(std::shared_ptr<ChatCall> call) {
                                              tool_call_parser_format_,
                                              reasoning_parser_format_,
                                              is_force_reasoning);
-    CHECK(stream_parser != nullptr) << "create StreamOutputParser failed!";
   }
 
   auto saved_tools = request_params.tools;
@@ -584,7 +582,6 @@ void MMChatServiceImpl::process_async_impl(std::shared_ptr<MMChatCall> call) {
                                              tool_call_parser_format_,
                                              reasoning_parser_format_,
                                              is_force_reasoning);
-    CHECK(stream_parser != nullptr) << "create StreamOutputParser failed!";
   }
 
   auto saved_streaming = request_params.streaming;

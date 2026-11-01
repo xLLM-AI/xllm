@@ -70,8 +70,6 @@ class DeepseekV4DSparkModelImpl final : public DeepseekV4ModelImpl {
         << "DeepSeek-V4 DSpark requires dspark_num_layers > 0.";
     CHECK_EQ(args.n_layers(), args.dspark_num_layers())
         << "DeepSeek-V4 DSpark draft layer count mismatch.";
-    CHECK_GT(args.markov_rank(), 0)
-        << "DeepSeek-V4 DSpark requires dspark_markov_rank > 0.";
 
     // DeepSeek-V4 DSpark checkpoints carry a confidence head (with_markov, no
     // bias) under mtp.<last>.confidence_head. Its config has no explicit enable
