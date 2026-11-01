@@ -25,13 +25,16 @@
 ## Pure C++ RDNA2/RDNA4 Conversion (Without Torch)
 
 ### Core Files to Convert:
-1. `xllm/core/kernels/cuda/utils.cpp` (567 lines)
-2. `xllm/core/kernels/cuda/utils.h` (164 lines)
-3. `xllm/core/kernels/cuda/batch_prefill.cpp` (232 lines)
-4. `xllm/core/kernels/cuda/batch_chunked_prefill.cpp` (95 lines)
-5. `xllm/core/kernels/cuda/attention_runner.cpp`
-6. `xllm/core/kernels/cuda/benchmarks/*`
-7. All other CUDA kernel files
+1. `xllm/core/kernels/cuda/utils.cpp` (567 lines) - **COMPLETED (Phase 1)**
+2. `xllm/core/kernels/cuda/utils.h` (164 lines) - **COMPLETED (Phase 1)**
+3. `xllm/core/kernels/cuda/batch_prefill.cpp` (232 lines) - **COMPLETED (Phase 1)**
+4. `xllm/core/kernels/cuda/batch_chunked_prefill.cpp` (95 lines) - **COMPLETED (Phase 1)**
+5. `xllm/core/kernels/cuda/attention_runner.cpp` - **COMPLETED (Phase 2)**
+6. `xllm/core/kernels/cuda/batch_decode.cpp` - **COMPLETED (Phase 2)**
+7. `xllm/core/kernels/cuda/matmul.cpp` - **COMPLETED (Phase 2)**
+8. `xllm/core/kernels/cuda/moe/fused_moe.cpp` - **COMPLETED (Phase 2)**
+9. `xllm/core/kernels/cuda/benchmarks/*` - **COMPLETED (Phase 1/3)**
+10. All other CUDA kernel files - **Phase 4**
 
 ### Conversion Approach:
 - Replace `#include <torch/torch.h>` and related with pure C++ RDNA2/RDNA4 HIP headers
@@ -54,19 +57,23 @@
 
 ## Implementation Priority
 
-### Phase 1: Core Utilities (Immediate)
-- `xllm/core/kernels/cuda/utils.h` - Header conversion
-- `xllm/core/kernels/cuda/utils.cpp` - Implementation conversion
+### Phase 1: Core Utilities (Completed)
+- `xllm/core/kernels/cuda/utils.h` - Header conversion (**COMPLETED**)
+- `xllm/core/kernels/cuda/utils.cpp` - Implementation conversion (**COMPLETED**)
+- `xllm/core/kernels/cuda/batch_prefill.cpp` - Batch prefill (**COMPLETED**)
+- `xllm/core/kernels/cuda/batch_chunked_prefill.cpp` - Chunked prefill (**COMPLETED**)
 
-### Phase 2: Batch Operations (Next)
-- `xllm/core/kernels/cuda/batch_prefill.cpp`
-- `xllm/core/kernels/cuda/batch_chunked_prefill.cpp`
+### Phase 2: Batch Operations (Completed)
+- `xllm/core/kernels/cuda/attention_runner.cpp` - Attention runner (**COMPLETED**)
+- `xllm/core/kernels/cuda/batch_decode.cpp` - Batch decode (**COMPLETED**)
+- `xllm/core/kernels/cuda/matmul.cpp` - Matmul (**COMPLETED**)
+- `xllm/core/kernels/cuda/moe/fused_moe.cpp` - Fused MoE (**COMPLETED**)
 
-### Phase 3: Benchmarks & Tests (Subsequent)
-- All benchmark files with performance trace integration
+### Phase 3: Benchmarks & Tests (Completed/Subsequent)
+- All benchmark files with performance trace integration (**COMPLETED in Phase 1**)
 
 ### Phase 4: Remaining Kernels (Final)
-- Attention runners, activation functions, etc.
+- Attention runners, activation functions, etc. (**Next Step**)
 
 ## RDNA2/RDNA4 Backend Tags
 
@@ -121,7 +128,10 @@ Preserve existing fallback logic:
 
 ## Next Steps
 
-**Shall I start with Phase 1: Converting `xllm/core/kernels/cuda/utils.h` and `xllm/core/kernels/cuda/utils.cpp` to pure C++ RDNA2/RDNA4 with Windows 11 ROCm 10.1 (7.16) support, maintaining CPU fallback and adding sherlock-it.md performance traces?**
+**Phase 2 Batch Operations Conversion COMPLETED.**
+Proceeding to **Phase 3 Benchmarks & Tests (Subsequent)** and **Phase 4 Remaining Kernels (Final)**.
+
+**Shall I continue with Phase 4: Converting remaining CUDA kernel files (e.g., `fp8_scaled_matmul.cpp`, `fp8_scaled_quantize.cpp`, `fused_logits_transform.h`, `global_capture_instance.cpp`, `llm_decode_metadata_update.h`, `piecewise_graphs.cpp`, `piecewise_graphs.h`, `xattention/beam_search.cpp`) to pure C++ RDNA2/RDNA4 with Windows 11 ROCm 10.1 (7.16) support, maintaining CPU fallback and adding sherlock-it.md performance traces?**
 
 The conversion will:
 1. Drop Torch/Python dependencies where possible
