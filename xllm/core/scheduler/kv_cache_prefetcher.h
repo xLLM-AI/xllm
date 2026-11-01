@@ -29,8 +29,8 @@ class Request;
 class SchedulerNotifier;
 
 // Prefetches KV cache from storage before requests enter the ready queue,
-// reserving their queue slots. Created only for cache managers that support
-// storage prefetch.
+// reserving their queue slots until the scheduler publishes or cancels them.
+// Created only for cache managers that support storage prefetch.
 class KVCachePrefetcher final {
  public:
   KVCachePrefetcher(
@@ -61,6 +61,7 @@ class KVCachePrefetcher final {
   std::mutex& admission_mutex_;
   std::shared_ptr<SchedulerNotifier> notifier_;
   std::function<bool(std::shared_ptr<Request>)> enqueue_ready_request_;
+  // Includes unissued, in-flight and completed requests awaiting handoff.
   std::atomic<size_t> pending_requests_{0};
   std::deque<std::shared_ptr<Request>> admissions_;
   std::deque<std::shared_ptr<Request>> completed_prefetches_;
