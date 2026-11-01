@@ -59,17 +59,13 @@ cc_library(
     shared_memory_manager.cpp
   DEPS
     Folly::folly
-    torch
     brpc
     OpenSSL::SSL
     OpenSSL::Crypto
     leveldb::leveldb
     nlohmann_json::nlohmann_json
     glog::glog
-    torch
-    $<$<BOOL:${USE_NPU}>:torch_npu>
     $<$<BOOL:${USE_NPU}>:ms_tools_ext>
-    Boost::serialization
     absl::synchronization
     ${Python_LIBRARIES}
     proto::xllm_proto

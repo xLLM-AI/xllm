@@ -35,7 +35,7 @@ constexpr const char* kC128Group = "c128";
 
 std::string normalize_group_name(const std::string& group_name) {
   std::string normalized = group_name;
-  boost::to_lower(normalized);
+  std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char c){ return std::tolower(c); });
   if (normalized == "c4" || normalized == "c_4") {
     return kC4Group;
   }

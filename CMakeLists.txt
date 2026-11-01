@@ -382,8 +382,6 @@ if(UNIX)
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -Og")
 endif()
 
-find_package(Boost REQUIRED)
-find_package(Boost REQUIRED COMPONENTS serialization)
 find_package(Threads REQUIRED)
 # find all dependencies from vcpkg
 set(GFLAGS_USE_TARGET_NAMESPACE TRUE)
@@ -452,11 +450,7 @@ if(USE_DCU)
     list(APPEND _TORCH_EXTRA_DIRS "${TORCH_BUNDLED_LIB_DIR}")
   endif()
 
-  find_package(Torch REQUIRED)
-  message(STATUS "Using ROCm PyTorch from: ${TORCH_CMAKE_PREFIX}")
 elseif (DEFINED ENV{LIBTORCH_ROOT})
-  find_package(Torch REQUIRED HINTS "$ENV{LIBTORCH_ROOT}")
-  message(STATUS "Using libtorch at $ENV{LIBTORCH_ROOT}")
   if(USE_NPU)
     get_filename_component(
       _NPU_TORCH_PARENT "$ENV{LIBTORCH_ROOT}" DIRECTORY)
@@ -486,8 +480,6 @@ else()
   )
   FetchContent_MakeAvailable(libtorch)
 
-  find_package(Torch REQUIRED PATHS ${LIBTORCH_SOURCE_DIR} NO_DEFAULT_PATH)
-  message(STATUS "Downloading and using libtorch 2.1.0 for CPU at ${LIBTORCH_SOURCE_DIR}")
 endif()
 
 if(USE_DCU AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
@@ -648,7 +640,6 @@ if(USE_MUSA)
 
   find_package(Python COMPONENTS Interpreter REQUIRED)
   list(APPEND CMAKE_PREFIX_PATH "$ENV{TORCH_MUSA_PYTHONPATH}")
-  find_package(TorchMusa REQUIRED CONFIG)
   list(POP_BACK CMAKE_PREFIX_PATH)
   get_filename_component(
     _TORCH_MUSA_ROOT

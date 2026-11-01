@@ -58,7 +58,7 @@ bool is_compressed_tensors_fp8_scheme(const nlohmann::json& config) {
   auto num_bits_it = config.find("num_bits");
   return type_it != config.end() && !type_it->is_null() &&
          num_bits_it != config.end() && !num_bits_it->is_null() &&
-         boost::iequals(type_it->get<std::string>(), "float") &&
+         type_it->get<std::string>() == "float" || type_it->get<std::string>() == "FLOAT" &&
          supported_compressed_bits(*num_bits_it) == kCompressedBits8;
 }
 
@@ -68,7 +68,7 @@ const nlohmann::json* get_compressed_tensors_config(
   const auto quant_method =
       reader.value<std::string>(config_key + ".quant_method");
   if (!quant_method.has_value() ||
-      !boost::iequals(*quant_method, "compressed-tensors")) {
+      !*quant_method == "compressed-tensors" || *quant_method == "COMPRESSED-TENSORS") {
     return nullptr;
   }
 
@@ -89,7 +89,7 @@ std::optional<int64_t> compressed_int_scheme_bits(const nlohmann::json& scheme,
   const bool dynamic = dynamic_it != scheme.end() && !dynamic_it->is_null() &&
                        dynamic_it->get<bool>();
   return type_it != scheme.end() && type_it->is_string() &&
-                 boost::iequals(type_it->get<std::string>(), "int") &&
+                 type_it->get<std::string>() == "int" || type_it->get<std::string>() == "INT" &&
                  bits_it != scheme.end() && !bits_it->is_null() &&
                  dynamic == expected_dynamic
              ? supported_compressed_bits(*bits_it)
@@ -247,7 +247,7 @@ bool validate_smoothquant_mixed_w4a8(const JsonReader& reader,
       reader.value_or<int64_t>("quantization_config.experts_weight_bits", 0);
 
   const bool is_w4a8 = (expert_weight_precision.has_value() &&
-                        boost::iequals(*expert_weight_precision, "int4")) ||
+                        *expert_weight_precision == "int4" || *expert_weight_precision == "INT4") ||
                        experts_weight_bits == 4;
   if (!is_w4a8) {
     return true;
@@ -274,7 +274,7 @@ bool validate_smoothquant_mixed_w4a8(const JsonReader& reader,
   const auto weight_precision =
       reader.value<std::string>("quantization_config.weight_precision");
   if (weight_precision.has_value() &&
-      !boost::iequals(*weight_precision, "int8")) {
+      !*weight_precision == "int8" || *weight_precision == "INT8") {
     LOG(ERROR) << "DeepSeek mixed W4A8 requires weight_precision=int8, but got "
                << *weight_precision;
     return false;
@@ -283,7 +283,7 @@ bool validate_smoothquant_mixed_w4a8(const JsonReader& reader,
   const auto activation_precision =
       reader.value<std::string>("quantization_config.activation_precision");
   if (activation_precision.has_value() &&
-      !boost::iequals(*activation_precision, "int8")) {
+      !*activation_precision == "int8" || *activation_precision == "INT8") {
     LOG(ERROR)
         << "DeepSeek mixed W4A8 requires activation_precision=int8, but got "
         << *activation_precision;
@@ -392,9 +392,9 @@ bool load_quant_cfg(const JsonReader& reader, QuantArgs& quant_args) {
   if (auto v =
           reader.value<std::string>("quantization_config.activation_scheme")) {
     std::string activation_scheme = v.value();
-    if (boost::iequals(activation_scheme, "static")) {
+    if (activation_scheme == "static" || activation_scheme == "STATIC") {
       quant_args.activation_dynamic() = false;
-    } else if (boost::iequals(activation_scheme, "dynamic")) {
+    } else if (activation_scheme == "dynamic" || activation_scheme == "DYNAMIC") {
       quant_args.activation_dynamic() = true;
     } else {
       LOG(ERROR) << "quantization_config.activation_scheme only support "

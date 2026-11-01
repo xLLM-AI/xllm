@@ -37,9 +37,7 @@ cc_library(
     glog::glog
     absl::strings
     absl::time
-    Boost::serialization
     SMHasherSupport
-    torch
     xxHash
 )
 

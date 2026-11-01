@@ -39,7 +39,7 @@ NpuGlm4MoeDecoderLiteImpl::NpuGlm4MoeDecoderLiteImpl(
           context.get_model_args().num_speculative_tokens()) {
   auto model_args = context.get_model_args();
 
-  if (boost::iequals(model_args.rope_scaling_rope_type(), "deepseek_yarn")) {
+  if (model_args.rope_scaling_rope_type() == "deepseek_yarn" || model_args.rope_scaling_rope_type() == "DEEPSEEK_YARN") {
     const float attn_scale =
         model_args.attn_scalar().value_or(static_cast<float>(
             model_args.qk_nope_head_dim() + model_args.qk_rope_head_dim()));
@@ -48,7 +48,7 @@ NpuGlm4MoeDecoderLiteImpl::NpuGlm4MoeDecoderLiteImpl(
         model_args.rope_scaling_factor(),
         model_args.rope_scaling_mscale_all_dim());
     sm_scale_ = sm_scale_ * mscale * mscale;
-  } else if (boost::iequals(model_args.rope_scaling_rope_type(), "mrope")) {
+  } else if (model_args.rope_scaling_rope_type() == "mrope" || model_args.rope_scaling_rope_type() == "MROPE") {
     sm_scale_ = std::pow(model_args.head_dim(), -0.5);
   } else {
     const float attn_scale = model_args.attn_scalar().value_or(

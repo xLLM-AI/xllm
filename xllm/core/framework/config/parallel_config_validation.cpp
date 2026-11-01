@@ -38,9 +38,13 @@ limitations under the License.
 namespace xllm {
 namespace {
 
+#include <string>
+#include <algorithm>
+
 bool is_python_cp_compatible_graph_backend(std::string_view graph_backend) {
   std::string normalized_backend(graph_backend);
-  boost::algorithm::to_lower(normalized_backend);
+  std::transform(normalized_backend.begin(), normalized_backend.end(), normalized_backend.begin(),
+                 [](unsigned char c){ return std::tolower(c); });
   return normalized_backend.empty() || normalized_backend == "off" ||
          normalized_backend == "none" || normalized_backend == "0" ||
          normalized_backend == "aclgraph";

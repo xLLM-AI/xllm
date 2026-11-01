@@ -97,7 +97,7 @@ std::shared_ptr<NpuRotaryEmbedding> create_rotary_embedding(
       args.rope_theta(),
       args.rope_scaling_original_max_position_embeddings());
 
-  if (boost::iequals(args.rope_scaling_rope_type(), "deepseek_yarn")) {
+  if (args.rope_scaling_rope_type() == "deepseek_yarn" || args.rope_scaling_rope_type() == "DEEPSEEK_YARN") {
     const float attn_scale = args.attn_scalar().value_or(
         static_cast<float>(args.qk_nope_head_dim() + args.qk_rope_head_dim()));
     return std::make_shared<RotaryEmbeddingDeepseekYarn>(
@@ -110,7 +110,7 @@ std::shared_ptr<NpuRotaryEmbedding> create_rotary_embedding(
         args.rope_scaling_mscale_all_dim(),
         inv_freq,
         options);
-  } else if (boost::iequals(args.rope_scaling_rope_type(), "mrope")) {
+  } else if (args.rope_scaling_rope_type() == "mrope" || args.rope_scaling_rope_type() == "MROPE") {
     return std::make_shared<MRotaryEmbedding>(rotary_dim,
                                               args.max_position_embeddings(),
                                               inv_freq,

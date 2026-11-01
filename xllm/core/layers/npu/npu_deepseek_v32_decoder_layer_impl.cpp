@@ -98,7 +98,7 @@ std::optional<std::string> get_layer_quant_desc(
     CHECK(quant_args.quant_descs().empty())
         << "Missing quant_desc for layer " << layer_id
         << " attention prefixes: "
-        << boost::algorithm::join(local_prefixes, ", ");
+        << ([](const std::vector<std::string>boost::algorithm::join(local_prefixes, ", ") v){ std::string res; for(size_t i=0; i<v.size(); ++i){ res += v[i]; if(i+1<v.size()) res += ", "; } return res; }(local_prefixes));
     return std::nullopt;
   }
   return resolved->second;
@@ -328,14 +328,14 @@ NpuDeepseekV32DecoderLayerImpl::NpuDeepseekV32DecoderLayerImpl(
   // compute sm_scale
   // TODO: refactor this code
   auto args = context.get_model_args();
-  if (boost::iequals(args.rope_scaling_rope_type(), "deepseek_yarn")) {
+  if (args.rope_scaling_rope_type() == "deepseek_yarn" || args.rope_scaling_rope_type() == "DEEPSEEK_YARN") {
     const float attn_scale = args.attn_scalar().value_or(
         static_cast<float>(args.qk_nope_head_dim() + args.qk_rope_head_dim()));
     sm_scale_ = 1.0f / std::sqrt(attn_scale);
     float mscale = layer::rotary::yarn_get_mscale(
         args.rope_scaling_factor(), args.rope_scaling_mscale_all_dim());
     sm_scale_ = sm_scale_ * mscale * mscale;
-  } else if (boost::iequals(args.rope_scaling_rope_type(), "mrope")) {
+  } else if (args.rope_scaling_rope_type() == "mrope" || args.rope_scaling_rope_type() == "MROPE") {
     sm_scale_ = std::pow(args.head_dim(), -0.5);
   } else {
     const float attn_scale =

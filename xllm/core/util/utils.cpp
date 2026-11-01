@@ -77,19 +77,19 @@ torch::ScalarType parse_dtype(const std::string& dtype_str,
     return torch::kFloat32;
   }
 
-  if (boost::iequals(dtype_str, "half") ||
-      boost::iequals(dtype_str, "float16")) {
+  if (dtype_str == "half" || dtype_str == "HALF" ||
+      dtype_str == "float16" || dtype_str == "FLOAT16") {
     return torch::kFloat16;
   }
-  if (boost::iequals(dtype_str, "bfloat16")) {
+  if (dtype_str == "bfloat16" || dtype_str == "BFLOAT16") {
     return torch::kBFloat16;
   }
-  if ((boost::iequals(dtype_str, "float") ||
-       boost::iequals(dtype_str, "float32"))) {
+  if ((dtype_str == "float" || dtype_str == "FLOAT" ||
+       dtype_str == "float32" || dtype_str == "FLOAT32")) {
     return torch::kFloat;
   }
 
-  if (dtype_str.empty() || boost::iequals(dtype_str, "auto")) {
+  if (dtype_str.empty() || dtype_str == "auto" || dtype_str == "AUTO") {
     return torch::kFloat16;
   }
   CHECK(false) << "Unsupported dtype: " << dtype_str << " on device "

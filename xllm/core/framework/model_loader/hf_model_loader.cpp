@@ -627,15 +627,15 @@ bool HFModelLoader::load_quant_args(const std::string& model_weights_path) {
         }
         const std::string quant_type = it.value().get<std::string>();
         std::string quant_type_lower = quant_type;
-        boost::algorithm::to_lower(quant_type_lower);
-        if (boost::algorithm::starts_with(quant_type_lower, "w4a8")) {
+        std::transform(quant_type_lower.begin(), quant_type_lower.end(), quant_type_lower.begin(), [](unsigned char c){ return std::tolower(c); });
+        if (quant_type_lower.find("w4a8") != std::string::npos) {
           desc_has_w4a8 = true;
-        } else if (boost::algorithm::starts_with(quant_type_lower, "w8a8")) {
+        } else if (quant_type_lower.find("w8a8") != std::string::npos) {
           desc_has_w8a8 = true;
         }
-        if (boost::iequals(quant_type, "w4a8_dynamic")) {
+        if (quant_type == "w4a8_dynamic" || quant_type == "W4A8_DYNAMIC") {
           desc_has_w4a8_dynamic = true;
-        } else if (boost::iequals(quant_type, "w8a8_dynamic")) {
+        } else if (quant_type == "w8a8_dynamic" || quant_type == "W8A8_DYNAMIC") {
           desc_has_w8a8_dynamic = true;
         }
         quant_descs.emplace(it.key(), quant_type);
