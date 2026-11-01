@@ -262,7 +262,8 @@ VmmKVPageAllocatorImpl::alloc_kv_cache_page(const std::string& model_id,
   --pages.num_free_virt_pages;
   ++state.pending_map_ops;
   lock.unlock();
-  const bool mapped = map_virtual_pages(model_id, dp_rank, {page_id});
+  const bool mapped = map_virtual_pages(
+      model_id, dp_rank, {page_id}, MappingSource::ALLOCATION);
   lock.lock();
   if (!mapped) {
     // The backend confirms rollback on every participating worker before the
@@ -414,7 +415,10 @@ bool VmmKVPageAllocatorImpl::map_pages(const std::string& model_id,
                                        const KVCacheMappingPlan& plan) {
   CHECK_EQ(plan.dp_group_page_ids.size(), static_cast<size_t>(dp_size_));
   for (int32_t dp_rank = 0; dp_rank < dp_size_; ++dp_rank) {
-    if (map_virtual_pages(model_id, dp_rank, plan.dp_group_page_ids[dp_rank])) {
+    if (map_virtual_pages(model_id,
+                          dp_rank,
+                          plan.dp_group_page_ids[dp_rank],
+                          MappingSource::MAPPING_PLAN)) {
       continue;
     }
     // This group rolled itself back. Revert earlier groups before the caller
@@ -578,7 +582,8 @@ void VmmKVPageAllocatorImpl::validate_dp_rank(int32_t dp_rank) const {
 bool VmmKVPageAllocatorImpl::map_virtual_pages(
     const std::string& model_id,
     int32_t dp_rank,
-    const std::vector<int64_t>& virtual_page_ids) {
+    const std::vector<int64_t>& virtual_page_ids,
+    MappingSource source) {
   if (virtual_page_ids.empty()) {
     return true;
   }
@@ -587,7 +592,28 @@ bool VmmKVPageAllocatorImpl::map_virtual_pages(
   for (int64_t page_id : virtual_page_ids) {
     offsets.emplace_back(get_offset(page_id));
   }
-  return backend_.map_pages(model_id, dp_rank, offsets);
+  const bool mapped = backend_.map_pages(model_id, dp_rank, offsets);
+  if (!mapped) {
+    LOG(WARNING) << "VMM KV page mapping failed: "
+                    "reason=backend_mapping_failure"
+                 << " source=" << mapping_source_name(source)
+                 << " model_id=" << model_id << " dp_rank=" << dp_rank
+                 << " virtual_page_count=" << virtual_page_ids.size()
+                 << " offset_count=" << offsets.size();
+  }
+  return mapped;
+}
+
+const char* VmmKVPageAllocatorImpl::mapping_source_name(MappingSource source) {
+  switch (source) {
+    case MappingSource::ALLOCATION:
+      return "allocation";
+    case MappingSource::MAPPING_PLAN:
+      return "mapping_plan";
+    case MappingSource::PREALLOCATION:
+      return "preallocation";
+  }
+  return "unknown";
 }
 
 void VmmKVPageAllocatorImpl::unmap_virtual_pages(
@@ -682,8 +708,10 @@ void VmmKVPageAllocatorImpl::prealloc_worker() {
           continue;
         }
       }
-      const bool mapped = map_virtual_pages(
-          batch.model_id, batch.dp_rank, batch.virtual_page_ids);
+      const bool mapped = map_virtual_pages(batch.model_id,
+                                            batch.dp_rank,
+                                            batch.virtual_page_ids,
+                                            MappingSource::PREALLOCATION);
       {
         std::lock_guard<std::mutex> lock(mtx_);
         ModelState& state = get_model_state(batch.model_id);
