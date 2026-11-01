@@ -204,10 +204,12 @@ bool MappedVirtualMemoryRegion::map_pages(
     region->mapping_.reserve(region->mapping_.size() + offsets.size());
   }
 
-  auto pages = pool.batch_get(missing.size());
-  if (pages.empty()) {
+  auto allocation = pool.batch_get_with_reason(missing.size());
+  if (allocation.pages.empty()) {
     LOG(WARNING) << "MappedVirtualMemoryRegion page allocation failed: "
-                    "reason=pool_allocation_failed"
+                    "reason=pool_allocation_failed pool_reason="
+                 << physical_page_pool_failure_reason_name(
+                        allocation.failure_reason)
                  << " requested_pages=" << missing.size() << " device_index="
                  << static_cast<int32_t>(pool.device().index())
                  << " page_size=" << pool.page_size();
@@ -217,13 +219,13 @@ bool MappedVirtualMemoryRegion::map_pages(
   for (size_t i = 0; i < missing.size(); ++i) {
     auto [region, offset] = missing[i];
     VirPtr addr = add_vir_ptr_offset(region->vaddr_, offset);
-    PhyMemHandle handle = pages[i]->get_phy_handle();
+    PhyMemHandle handle = allocation.pages[i]->get_phy_handle();
     if (!vmm::try_map(addr, handle, region->page_size_, region->dev_.index())) {
       LOG(WARNING) << "MappedVirtualMemoryRegion failed to map page: "
                    << "reason=backend_mapping_failure"
                    << " device_index="
                    << static_cast<int32_t>(region->dev_.index())
-                   << " physical_page_id=" << pages[i]->page_id()
+                   << " physical_page_id=" << allocation.pages[i]->page_id()
                    << " region_page_index=" << offset / region->page_size_
                    << " region_offset=" << offset
                    << " page_size=" << region->page_size_
@@ -238,13 +240,14 @@ bool MappedVirtualMemoryRegion::map_pages(
                    mapped_region->page_size_,
                    mapped_region->page_size_);
       }
-      pool.batch_put(pages);
+      pool.batch_put(allocation.pages);
       return false;
     }
   }
   for (size_t i = 0; i < missing.size(); ++i) {
     auto [region, offset] = missing[i];
-    region->mapping_.emplace(offset / region->page_size_, std::move(pages[i]));
+    region->mapping_.emplace(offset / region->page_size_,
+                             std::move(allocation.pages[i]));
   }
   return true;
 }

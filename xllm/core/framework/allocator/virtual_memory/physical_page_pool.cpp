@@ -33,6 +33,33 @@ size_t saturating_subtract(size_t value, size_t subtrahend) {
 
 }  // namespace
 
+const char* physical_page_pool_failure_reason_name(
+    PhysicalPagePoolFailureReason reason) {
+  switch (reason) {
+    case PhysicalPagePoolFailureReason::kNone:
+      return "none";
+    case PhysicalPagePoolFailureReason::kLogicalCapacity:
+      return "logical_capacity";
+    case PhysicalPagePoolFailureReason::kLogicalAccountingMismatch:
+      return "logical_accounting_mismatch";
+    case PhysicalPagePoolFailureReason::kFreeMemoryQueryFailed:
+      return "free_memory_query_failed";
+    case PhysicalPagePoolFailureReason::kRequestSizeOverflow:
+      return "request_size_overflow";
+    case PhysicalPagePoolFailureReason::kInsufficientFreeMemory:
+      return "insufficient_free_memory";
+    case PhysicalPagePoolFailureReason::kPhysicalPageCreation:
+      return "physical_page_creation";
+    case PhysicalPagePoolFailureReason::kPostAllocationMemoryQueryFailed:
+      return "post_allocation_memory_query_failed";
+    case PhysicalPagePoolFailureReason::kPostAllocationHeadroom:
+      return "post_allocation_headroom";
+    case PhysicalPagePoolFailureReason::kSharedPageMapping:
+      return "shared_page_mapping";
+  }
+  return "unknown";
+}
+
 void PhysicalPagePool::init(const torch::Device& device,
                             size_t num_pages,
                             size_t page_size,
@@ -124,7 +151,17 @@ bool PhysicalPagePool::reset() {
 }
 
 bool PhysicalPagePool::materialize_pages_locked(
-    const std::vector<page_id_t>& page_ids) {
+    const std::vector<page_id_t>& page_ids,
+    PhysicalPagePoolFailureReason* failure_reason) {
+  if (failure_reason != nullptr) {
+    *failure_reason = PhysicalPagePoolFailureReason::kNone;
+  }
+  const auto fail = [failure_reason](PhysicalPagePoolFailureReason reason) {
+    if (failure_reason != nullptr) {
+      *failure_reason = reason;
+    }
+    return false;
+  };
   std::vector<page_id_t> missing;
   missing.reserve(page_ids.size());
   for (page_id_t page_id : page_ids) {
@@ -151,7 +188,7 @@ bool PhysicalPagePool::materialize_pages_locked(
                  << " active_pages=" << num_active_pages_
                  << " total_pages=" << num_total_pages_
                  << " page_size=" << page_size_ << " free_bytes=" << free_bytes;
-    return false;
+    return fail(PhysicalPagePoolFailureReason::kFreeMemoryQueryFailed);
   }
   const size_t headroom = allocation_headroom_locked(
       static_cast<size_t>(free_bytes), allocator_stats);
@@ -165,7 +202,7 @@ bool PhysicalPagePool::materialize_pages_locked(
                  << " headroom_bytes=" << headroom
                  << " growth_reserve_bytes=" << growth_reserve_bytes_
                  << " allocation_headroom_bytes=" << allocation_headroom_bytes_;
-    return false;
+    return fail(PhysicalPagePoolFailureReason::kRequestSizeOverflow);
   }
   const size_t required_bytes = missing.size() * page_size_ + headroom;
   if (static_cast<uint64_t>(free_bytes) < required_bytes) {
@@ -188,7 +225,7 @@ bool PhysicalPagePool::materialize_pages_locked(
         << " allocated_pages=" << num_allocated_pages_
         << " active_pages=" << num_active_pages_
         << " total_pages=" << num_total_pages_;
-    return false;
+    return fail(PhysicalPagePoolFailureReason::kInsufficientFreeMemory);
   }
   std::vector<std::unique_ptr<PhysicalPage>> pending;
   std::vector<PhysicalPage*> pending_ptrs;
@@ -218,7 +255,7 @@ bool PhysicalPagePool::materialize_pages_locked(
           << " committed_pages=" << num_committed_pages_
           << " pending_pages=" << pending.size()
           << " allocated_pages=" << num_allocated_pages_;
-      return false;
+      return fail(PhysicalPagePoolFailureReason::kPhysicalPageCreation);
     }
     pending_ptrs.emplace_back(page.get());
     pending.emplace_back(std::move(page));
@@ -240,7 +277,8 @@ bool PhysicalPagePool::materialize_pages_locked(
                  << " committed_pages=" << num_committed_pages_
                  << " allocated_pages=" << num_allocated_pages_
                  << " remaining_bytes=" << remaining_bytes;
-    return false;
+    return fail(
+        PhysicalPagePoolFailureReason::kPostAllocationMemoryQueryFailed);
   }
   // Pending handles are already resident, although pool ownership has not
   // been published. Exclude their bytes from fallback execution accounting.
@@ -291,7 +329,7 @@ bool PhysicalPagePool::materialize_pages_locked(
                  << " committed_pages=" << num_committed_pages_
                  << " pending_pages=" << pending.size()
                  << " allocated_pages=" << num_allocated_pages_;
-    return false;
+    return fail(PhysicalPagePoolFailureReason::kPostAllocationHeadroom);
   }
   auto mapping = shared_mapping_.lock();
   if (mapping != nullptr && !mapping->map_pages(pending_ptrs)) {
@@ -302,7 +340,7 @@ bool PhysicalPagePool::materialize_pages_locked(
                  << " page_size=" << page_size_
                  << " committed_pages=" << num_committed_pages_
                  << " allocated_pages=" << num_allocated_pages_;
-    return false;
+    return fail(PhysicalPagePoolFailureReason::kSharedPageMapping);
   }
   for (size_t i = 0; i < missing.size(); ++i) {
     const page_id_t page_id = missing[i];
@@ -320,10 +358,15 @@ std::unique_ptr<PhysicalPage> PhysicalPagePool::get() {
 
 std::vector<std::unique_ptr<PhysicalPage>> PhysicalPagePool::batch_get(
     size_t count) {
+  return batch_get_with_reason(count).pages;
+}
+
+PhysicalPageBatchResult PhysicalPagePool::batch_get_with_reason(size_t count) {
   std::lock_guard<std::mutex> lock(mtx_);
   CHECK(initialized_) << "PhysicalPagePool not initialized";
+  PhysicalPageBatchResult result;
   if (count == 0) {
-    return {};
+    return result;
   }
   const size_t available_logical_slots =
       saturating_subtract(num_total_pages_, num_allocated_pages_);
@@ -338,7 +381,8 @@ std::vector<std::unique_ptr<PhysicalPage>> PhysicalPagePool::batch_get(
                  << " allocated_pages=" << num_allocated_pages_
                  << " active_pages=" << num_active_pages_
                  << " total_pages=" << num_total_pages_;
-    return {};
+    result.failure_reason = PhysicalPagePoolFailureReason::kLogicalCapacity;
+    return result;
   }
   std::vector<page_id_t> page_ids;
   page_ids.reserve(count);
@@ -364,12 +408,13 @@ std::vector<std::unique_ptr<PhysicalPage>> PhysicalPagePool::batch_get(
                  << " allocated_pages=" << num_allocated_pages_
                  << " active_pages=" << num_active_pages_
                  << " total_pages=" << num_total_pages_;
-    return {};
+    result.failure_reason =
+        PhysicalPagePoolFailureReason::kLogicalAccountingMismatch;
+    return result;
   }
-  std::vector<std::unique_ptr<PhysicalPage>> result;
-  result.reserve(count);
-  if (!materialize_pages_locked(page_ids)) {
-    return {};
+  result.pages.reserve(count);
+  if (!materialize_pages_locked(page_ids, &result.failure_reason)) {
+    return result;
   }
   // Activation is published only after the complete backing operation succeeds.
   activate_pages_locked(page_ids);
@@ -378,7 +423,7 @@ std::vector<std::unique_ptr<PhysicalPage>> PhysicalPagePool::batch_get(
   }
   for (page_id_t page_id : page_ids) {
     page_allocated_[page_id] = true;
-    result.emplace_back(std::move(all_pages_[page_id]));
+    result.pages.emplace_back(std::move(all_pages_[page_id]));
   }
   num_allocated_pages_ += count;
   return result;

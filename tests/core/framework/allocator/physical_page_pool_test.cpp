@@ -132,6 +132,69 @@ TEST_F(PhysicalPagePoolTest, LazyInitializationSeparatesCapacityAndBacking) {
   EXPECT_EQ(allocation_attempts_, 0);
 }
 
+TEST_F(PhysicalPagePoolTest, ReportsLogicalCapacityFailureReason) {
+  auto& pool = PhysicalPagePool::get_instance();
+
+  const PhysicalPageBatchResult result =
+      pool.batch_get_with_reason(kCapacity + 1);
+
+  EXPECT_TRUE(result.pages.empty());
+  EXPECT_EQ(result.failure_reason,
+            PhysicalPagePoolFailureReason::kLogicalCapacity);
+  EXPECT_STREQ(physical_page_pool_failure_reason_name(result.failure_reason),
+               "logical_capacity");
+  EXPECT_EQ(allocation_attempts_, 0);
+}
+
+TEST_F(PhysicalPagePoolTest, ReportsInsufficientFreeMemoryFailureReason) {
+  auto& pool = PhysicalPagePool::get_instance();
+  free_bytes_ = 0;
+
+  const PhysicalPageBatchResult result = pool.batch_get_with_reason(1);
+
+  EXPECT_TRUE(result.pages.empty());
+  EXPECT_EQ(result.failure_reason,
+            PhysicalPagePoolFailureReason::kInsufficientFreeMemory);
+  EXPECT_EQ(pool.num_committed(), 0);
+  EXPECT_EQ(allocation_attempts_, 0);
+}
+
+TEST_F(PhysicalPagePoolTest, ReportsPhysicalPageCreationFailureReason) {
+  auto& pool = PhysicalPagePool::get_instance();
+  fail_on_attempt_ = 1;
+
+  const PhysicalPageBatchResult result = pool.batch_get_with_reason(2);
+
+  EXPECT_TRUE(result.pages.empty());
+  EXPECT_EQ(result.failure_reason,
+            PhysicalPagePoolFailureReason::kPhysicalPageCreation);
+  EXPECT_EQ(pool.num_available(), kCapacity);
+  EXPECT_EQ(pool.num_committed(), 0);
+  EXPECT_EQ(allocation_attempts_, 1);
+}
+
+TEST_F(PhysicalPagePoolTest, ReportsPostAllocationMemoryQueryFailureReason) {
+  reset_with_active_pages(/*initial_pages=*/1);
+  auto& pool = PhysicalPagePool::get_instance();
+  PhysicalPagePoolTestPeer::inject(
+      pool,
+      [this]() { return free_bytes_; },
+      [this](page_id_t page_id) {
+        ++allocation_attempts_;
+        free_bytes_ = -1;
+        return PhysicalPagePoolTestPeer::make_page(page_id);
+      });
+
+  const PhysicalPageBatchResult result = pool.batch_get_with_reason(1);
+
+  EXPECT_TRUE(result.pages.empty());
+  EXPECT_EQ(result.failure_reason,
+            PhysicalPagePoolFailureReason::kPostAllocationMemoryQueryFailed);
+  EXPECT_EQ(pool.num_active(), 1);
+  EXPECT_EQ(pool.num_committed(), 0);
+  EXPECT_EQ(allocation_attempts_, 1);
+}
+
 TEST_F(PhysicalPagePoolTest, ActivatesAdditionalSlotsWhenStartupArenaIsFull) {
   reset_with_active_pages(/*initial_pages=*/2);
   auto& pool = PhysicalPagePool::get_instance();

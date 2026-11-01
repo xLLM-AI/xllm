@@ -31,6 +31,28 @@ namespace xllm {
 
 class SharedPhysicalPageMapping;
 
+enum class PhysicalPagePoolFailureReason {
+  kNone,
+  kLogicalCapacity,
+  kLogicalAccountingMismatch,
+  kFreeMemoryQueryFailed,
+  kRequestSizeOverflow,
+  kInsufficientFreeMemory,
+  kPhysicalPageCreation,
+  kPostAllocationMemoryQueryFailed,
+  kPostAllocationHeadroom,
+  kSharedPageMapping,
+};
+
+const char* physical_page_pool_failure_reason_name(
+    PhysicalPagePoolFailureReason reason);
+
+struct PhysicalPageBatchResult {
+  std::vector<std::unique_ptr<PhysicalPage>> pages;
+  PhysicalPagePoolFailureReason failure_reason =
+      PhysicalPagePoolFailureReason::kNone;
+};
+
 // Owns stable logical page slots and their optional physical backing. Eager
 // initialization preserves fixed-pool callers; lazy initialization commits
 // backing atomically when KV pages or weight reservations need it.
@@ -74,6 +96,8 @@ class PhysicalPagePool final {
   // Returns empty vector if not enough pages available
   // If partial allocation fails, all acquired pages are returned to pool
   std::vector<std::unique_ptr<PhysicalPage>> batch_get(size_t count);
+  // Return pages and the reason when this request cannot be satisfied.
+  PhysicalPageBatchResult batch_get_with_reason(size_t count);
 
   // Reserve contiguous pages by scanning from the right side.
   // Returns the starting page_id of the contiguous segment, or -1 if not found
@@ -144,7 +168,9 @@ class PhysicalPagePool final {
  private:
   friend class PhysicalPagePoolTestPeer;
 
-  bool materialize_pages_locked(const std::vector<page_id_t>& page_ids);
+  bool materialize_pages_locked(
+      const std::vector<page_id_t>& page_ids,
+      PhysicalPagePoolFailureReason* failure_reason = nullptr);
   void activate_pages_locked(const std::vector<page_id_t>& page_ids);
   size_t allocation_headroom_locked(
       size_t free_bytes,
