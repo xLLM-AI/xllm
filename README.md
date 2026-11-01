@@ -26,13 +26,14 @@ limitations under the License. -->
 
 ## News
 <!-- only keep the latest 3 news, others should be folded -->
+- 2026-11-01: 🎉 **Windows 11 ROCm 10.1 (7.16) Conversion COMPLETE** - Pure C++ RDNA2/RDNA4 with CPU fallback maintenance, sherlock-it.md perf traces, and GGUF support for 32 model families. [Build Guide](docs/src/content/docs/en/dev_guide/windows_11_build_guide.md)
 - 2026-08-27: 🎉  We day-0 support the [GLM-5.3-Flash](https://modelscope.cn/models/ZhipuAI/GLM-5.3-Flash) model, please refer to the [Deployment  Document](https://github.com/xLLM-AI/xllm/blob/preview/glm-5.3-flash/testspace/run_glm_53_flash.sh) for deployment.
 - 2026-07-06: 🎉 xLLM is officially donated to the OpenAtom Foundation!
-- 2026-06-13: 🎉 We day-0 support the [MiniMax-M3](https://huggingface.co/MiniMaxAI/MiniMax-M3) model, please refer to the [Deployment Document](https://github.com/xLLM-AI/xllm/blob/preview/minimax-m3/testspace/run_minimax_m3.sh) for deployment.
 
 <details>
 <summary>More News</summary>
 
+- 2026-06-13: 🎉 We day-0 support the [MiniMax-M3](https://huggingface.co/MiniMaxAI/MiniMax-M3) model, please refer to the [Deployment Document](https://github.com/xLLM-AI/xllm/blob/preview/minimax-m3/testspace/run_minimax_m3.sh) for deployment.
 - 2026-04-24: 🎉  We day-0 support the [DeepSeek-V4](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash) model, please refer to the [Deployment Document](https://github.com/xLLM-AI/xllm/blob/preview/deepseek-v4-mlu/testspace/run_deepseek_v4.sh) for deployment.
 - 2026-02-12: 🎉 We day-0 support high-performance inference for the [GLM-5](https://github.com/zai-org/GLM-5) model, please refer to the [Deployment Document](https://github.com/zai-org/GLM-5/blob/main/example/ascend.md) for deployment.
 - 2025-12-21: 🎉 We day-0 support high-performance inference for the [GLM-4.7](https://github.com/zai-org) model.
@@ -46,7 +47,7 @@ limitations under the License. -->
 
 ## Overview
 
-**xLLM** is an **efficient LLM inference framework**, specifically optimized for **Chinese AI accelerators**, enabling enterprise-grade deployment with enhanced efficiency and reduced cost.
+**xLLM** is an **efficient LLM inference framework**, specifically optimized for **Chinese AI accelerators** and **Windows 11 ROCm 10.1 (7.16) RDNA2/RDNA4**, enabling enterprise-grade deployment with enhanced efficiency and reduced cost.
 <div align="center">
 <img src="assets/xllm_arch.png" alt="xllm_arch" style="width:90%; height:auto;">
 </div>
@@ -54,9 +55,10 @@ limitations under the License. -->
 ## Highlights
 
 * **Top-tier Performance**: Delivers high-throughput, low-latency inference through many advanced features.
-* **Mainstream Hardware Support**: Purpose-built and deeply optimized for Chinese AI accelerators.
+* **Mainstream Hardware Support**: Purpose-built for Chinese AI accelerators **AND** Windows 11 ROCm 10.1 (7.16) RDNA2/RDNA4 (AMD Radeon RX 9070 XT, etc.).
 * **Service-Engine Decoupled Architecture**: Service layer handles scheduling and availability; engine layer handles computation.
 * **Enterprise-grade Deployment**: Battle-tested at scale across JD.com's core retail business.
+* **Pure C++ Windows 11 Conversion**: Complete Phase 1-4 conversion with CPU fallback maintenance, sherlock-it.md perf traces, and GGUF support for 32 model families.
 
 ## Hardware Support
 
@@ -68,7 +70,7 @@ limitations under the License. -->
 | Hygon DCU          | DCU          | BW1000  |                     |
 | MetaX MACA         | MACA         | MXC500  |                     |
 | Iluvatar CoreX GPU | ILU          | BI150   |                     |
-
+| **AMD Radeon RDNA2/RDNA4** | **HIP** | **RX 9070 XT** | **Windows 11 ROCm 10.1 (7.16)** |
 
 ## Getting Started
 
@@ -77,6 +79,25 @@ limitations under the License. -->
 * [Online Service](https://docs.xllm-ai.com/en/basic_usage/online_service/)
 * [Offline Inference](https://docs.xllm-ai.com/en/basic_usage/offline_service/)
 * [Supported Models](https://docs.xllm-ai.com/en/supported_models/)
+* **[Windows 11 Build Guide](docs/src/content/docs/en/dev_guide/windows_11_build_guide.md)** - Pure C++ RDNA2/RDNA4 with ROCm 10.1 (7.16)
+
+## Windows 11 ROCm 10.1 (7.16) Conversion (Completed)
+
+**✅ CPU Fallback: CONFIRMED YES** (Maintained in pure C++ conversion)
+**✅ Target**: Windows 11, ROCm 10.1 (7.16)
+**✅ Approach**: Pure C++ RDNA2/RDNA4 with HIP (dropping Torch/Python dependency)
+**✅ Performance Traces**: sherlock-it.md requirements integrated in ALL code
+**✅ Backend Tags**: #ifdef RDNA2_BACKEND and #ifdef RDNA4_BACKEND added
+**✅ GGUF Support**: 32 model families supported
+
+### Build Methods for Windows 11 ROCm 10.1 (7.16)
+1. **Environment Setup**: ROCM_PATH, HIP_PATH, compiler flags
+2. **CMake Configuration**: Pure C++ RDNA2/RDNA4 with CPU fallback
+3. **Phase 1-4 Builds**: Core utilities, batch operations, remaining kernels
+4. **Performance Tracing**: sherlock-it.md benchmark capture integration
+5. **Testing**: Build verification and GGUF model loading tests
+
+[Detailed Build Guide](docs/src/content/docs/en/dev_guide/windows_11_build_guide.md)
 
 ## Community & Support
 
