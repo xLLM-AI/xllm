@@ -34,7 +34,16 @@
 7. `xllm/core/kernels/cuda/matmul.cpp` - **COMPLETED (Phase 2)**
 8. `xllm/core/kernels/cuda/moe/fused_moe.cpp` - **COMPLETED (Phase 2)**
 9. `xllm/core/kernels/cuda/benchmarks/*` - **COMPLETED (Phase 1/3)**
-10. All other CUDA kernel files - **Phase 4**
+10. **Phase 4 Remaining Kernels (Current)**:
+    - `xllm/core/kernels/cuda/fp8_scaled_matmul.cpp` - **COMPLETED (Phase 4)**
+    - `xllm/core/kernels/cuda/fp8_scaled_quantize.cpp` - **COMPLETED (Phase 4)**
+    - `xllm/core/kernels/cuda/fused_logits_transform.h` - **COMPLETED (Phase 4)**
+    - `xllm/core/kernels/cuda/global_capture_instance.cpp` - **COMPLETED (Phase 4)**
+    - `xllm/core/kernels/cuda/global_capture_instance.h` - **COMPLETED (Phase 4)**
+    - `xllm/core/kernels/cuda/llm_decode_metadata_update.h` - **COMPLETED (Phase 4)**
+    - `xllm/core/kernels/cuda/piecewise_graphs.cpp` - **COMPLETED (Phase 4)**
+    - `xllm/core/kernels/cuda/piecewise_graphs.h` - **COMPLETED (Phase 4)**
+    - `xllm/core/kernels/cuda/xattention/beam_search.cpp` - **COMPLETED (Phase 4)**
 
 ### Conversion Approach:
 - Replace `#include <torch/torch.h>` and related with pure C++ RDNA2/RDNA4 HIP headers
@@ -72,8 +81,16 @@
 ### Phase 3: Benchmarks & Tests (Completed/Subsequent)
 - All benchmark files with performance trace integration (**COMPLETED in Phase 1**)
 
-### Phase 4: Remaining Kernels (Final)
-- Attention runners, activation functions, etc. (**Next Step**)
+### Phase 4: Remaining Kernels (Completed)
+- `xllm/core/kernels/cuda/fp8_scaled_matmul.cpp` - **COMPLETED (Phase 4)**
+- `xllm/core/kernels/cuda/fp8_scaled_quantize.cpp` - **COMPLETED (Phase 4)**
+- `xllm/core/kernels/cuda/fused_logits_transform.h` - **COMPLETED (Phase 4)**
+- `xllm/core/kernels/cuda/global_capture_instance.cpp` - **COMPLETED (Phase 4)**
+- `xllm/core/kernels/cuda/global_capture_instance.h` - **COMPLETED (Phase 4)**
+- `xllm/core/kernels/cuda/llm_decode_metadata_update.h` - **COMPLETED (Phase 4)**
+- `xllm/core/kernels/cuda/piecewise_graphs.cpp` - **COMPLETED (Phase 4)**
+- `xllm/core/kernels/cuda/piecewise_graphs.h` - **COMPLETED (Phase 4)**
+- `xllm/core/kernels/cuda/xattention/beam_search.cpp` - **COMPLETED (Phase 4)**
 
 ## RDNA2/RDNA4 Backend Tags
 
@@ -128,15 +145,15 @@ Preserve existing fallback logic:
 
 ## Next Steps
 
-**Phase 2 Batch Operations Conversion COMPLETED.**
-Proceeding to **Phase 3 Benchmarks & Tests (Subsequent)** and **Phase 4 Remaining Kernels (Final)**.
+**Phase 4 Remaining Kernels Conversion COMPLETED.**
+All phases (1-4) are now complete. The conversion plan for Windows 11 ROCm 10.1 (7.16) with pure C++ RDNA2/RDNA4 and CPU fallback maintenance is finished.
 
-**Shall I continue with Phase 4: Converting remaining CUDA kernel files (e.g., `fp8_scaled_matmul.cpp`, `fp8_scaled_quantize.cpp`, `fused_logits_transform.h`, `global_capture_instance.cpp`, `llm_decode_metadata_update.h`, `piecewise_graphs.cpp`, `piecewise_graphs.h`, `xattention/beam_search.cpp`) to pure C++ RDNA2/RDNA4 with Windows 11 ROCm 10.1 (7.16) support, maintaining CPU fallback and adding sherlock-it.md performance traces?**
+**Shall I open a final pull request for Phase 4 and close the session, or is there any further verification required?**
 
-The conversion will:
-1. Drop Torch/Python dependencies where possible
-2. Maintain existing CPU fallback mechanism
-3. Add RDNA2/RDNA4 backend tags
-4. Integrate sherlock-it.md performance traces in ALL code
-5. Target Windows 11 ROCm 10.1 (7.16)
-6. Use pure C++ with HIP for RDNA2/RDNA4
+The conversion has:
+1. Dropped Torch/Python dependencies where possible (pure C++ RDNA2/RDNA4 HIP headers added)
+2. Maintained existing CPU fallback mechanism
+3. Added RDNA2/RDNA4 backend tags
+4. Integrated sherlock-it.md performance traces in ALL code
+5. Targeted Windows 11 ROCm 10.1 (7.16)
+6. Used pure C++ with HIP for RDNA2/RDNA4
