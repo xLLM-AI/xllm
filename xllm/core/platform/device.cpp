@@ -136,26 +136,44 @@ std::optional<Device::DeviceMem> Device::query_device_mem() const {
   const aclError result =
       aclrtGetMemInfo(ACL_HBM_MEM, &free_memory, &total_memory);
   if (result != ACL_SUCCESS) {
+    const char* error_message = aclGetRecentErrMsg();
+    LOG(WARNING) << "Device memory query failed: api=aclrtGetMemInfo"
+                 << " device_index=" << index()
+                 << " driver_error=" << static_cast<int32_t>(result)
+                 << " driver_error_message="
+                 << (error_message == nullptr ? "unavailable" : error_message);
     return std::nullopt;
   }
 #elif defined(USE_MLU)
   const cnrtRet_t result = cnrtMemGetInfo(&free_memory, &total_memory);
   if (result != cnrtSuccess) {
+    LOG(WARNING) << "Device memory query failed: api=cnrtMemGetInfo"
+                 << " device_index=" << index()
+                 << " driver_error=" << static_cast<int32_t>(result);
     return std::nullopt;
   }
 #elif defined(USE_CUDA) || defined(USE_ILU)
   const cudaError_t result = cudaMemGetInfo(&free_memory, &total_memory);
   if (result != cudaSuccess) {
+    LOG(WARNING) << "Device memory query failed: api=cudaMemGetInfo"
+                 << " device_index=" << index()
+                 << " driver_error=" << static_cast<int32_t>(result);
     return std::nullopt;
   }
 #elif defined(USE_MUSA)
   const musaError_t result = musaMemGetInfo(&free_memory, &total_memory);
   if (result != musaSuccess) {
+    LOG(WARNING) << "Device memory query failed: api=musaMemGetInfo"
+                 << " device_index=" << index()
+                 << " driver_error=" << static_cast<int32_t>(result);
     return std::nullopt;
   }
 #elif defined(USE_DCU)
   const hipError_t result = hipMemGetInfo(&free_memory, &total_memory);
   if (result != hipSuccess) {
+    LOG(WARNING) << "Device memory query failed: api=hipMemGetInfo"
+                 << " device_index=" << index()
+                 << " driver_error=" << static_cast<int32_t>(result);
     return std::nullopt;
   }
 #endif

@@ -144,7 +144,7 @@ TEST_F(PhysicalPagePoolTest, ReportsLogicalCapacityFailureReason) {
 
   EXPECT_TRUE(result.pages.empty());
   EXPECT_EQ(result.failure_reason,
-            PhysicalPagePoolFailureReason::kLogicalCapacity);
+            PhysicalPagePoolFailureReason::LOGICAL_CAPACITY);
   EXPECT_STREQ(physical_page_pool_failure_reason_name(result.failure_reason),
                "logical_capacity");
   EXPECT_EQ(allocation_attempts_, 0);
@@ -158,7 +158,7 @@ TEST_F(PhysicalPagePoolTest, ReportsInsufficientFreeMemoryFailureReason) {
 
   EXPECT_TRUE(result.pages.empty());
   EXPECT_EQ(result.failure_reason,
-            PhysicalPagePoolFailureReason::kInsufficientFreeMemory);
+            PhysicalPagePoolFailureReason::INSUFFICIENT_FREE_MEMORY);
   EXPECT_EQ(pool.num_committed(), 0);
   EXPECT_EQ(allocation_attempts_, 0);
 }
@@ -171,7 +171,7 @@ TEST_F(PhysicalPagePoolTest, ReportsPhysicalPageCreationFailureReason) {
 
   EXPECT_TRUE(result.pages.empty());
   EXPECT_EQ(result.failure_reason,
-            PhysicalPagePoolFailureReason::kPhysicalPageCreation);
+            PhysicalPagePoolFailureReason::PHYSICAL_PAGE_CREATION);
   EXPECT_EQ(pool.num_available(), kCapacity);
   EXPECT_EQ(pool.num_committed(), 0);
   EXPECT_EQ(allocation_attempts_, 1);
@@ -193,7 +193,7 @@ TEST_F(PhysicalPagePoolTest, ReportsPostAllocationMemoryQueryFailureReason) {
 
   EXPECT_TRUE(result.pages.empty());
   EXPECT_EQ(result.failure_reason,
-            PhysicalPagePoolFailureReason::kPostAllocationMemoryQueryFailed);
+            PhysicalPagePoolFailureReason::POST_ALLOCATION_MEMORY_QUERY_FAILED);
   EXPECT_EQ(pool.num_active(), 1);
   EXPECT_EQ(pool.num_committed(), 0);
   EXPECT_EQ(allocation_attempts_, 1);

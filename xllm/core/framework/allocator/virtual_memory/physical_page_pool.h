@@ -32,16 +32,16 @@ namespace xllm {
 class SharedPhysicalPageMapping;
 
 enum class PhysicalPagePoolFailureReason {
-  kNone,
-  kLogicalCapacity,
-  kLogicalAccountingMismatch,
-  kFreeMemoryQueryFailed,
-  kRequestSizeOverflow,
-  kInsufficientFreeMemory,
-  kPhysicalPageCreation,
-  kPostAllocationMemoryQueryFailed,
-  kPostAllocationHeadroom,
-  kSharedPageMapping,
+  NONE,
+  LOGICAL_CAPACITY,
+  LOGICAL_ACCOUNTING_MISMATCH,
+  FREE_MEMORY_QUERY_FAILED,
+  REQUEST_SIZE_OVERFLOW,
+  INSUFFICIENT_FREE_MEMORY,
+  PHYSICAL_PAGE_CREATION,
+  POST_ALLOCATION_MEMORY_QUERY_FAILED,
+  POST_ALLOCATION_HEADROOM,
+  SHARED_PAGE_MAPPING,
 };
 
 const char* physical_page_pool_failure_reason_name(
@@ -50,7 +50,7 @@ const char* physical_page_pool_failure_reason_name(
 struct PhysicalPageBatchResult {
   std::vector<std::unique_ptr<PhysicalPage>> pages;
   PhysicalPagePoolFailureReason failure_reason =
-      PhysicalPagePoolFailureReason::kNone;
+      PhysicalPagePoolFailureReason::NONE;
 };
 
 // Owns stable logical page slots and their optional physical backing. Eager

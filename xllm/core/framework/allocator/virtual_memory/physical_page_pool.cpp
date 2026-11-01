@@ -36,25 +36,25 @@ size_t saturating_subtract(size_t value, size_t subtrahend) {
 const char* physical_page_pool_failure_reason_name(
     PhysicalPagePoolFailureReason reason) {
   switch (reason) {
-    case PhysicalPagePoolFailureReason::kNone:
+    case PhysicalPagePoolFailureReason::NONE:
       return "none";
-    case PhysicalPagePoolFailureReason::kLogicalCapacity:
+    case PhysicalPagePoolFailureReason::LOGICAL_CAPACITY:
       return "logical_capacity";
-    case PhysicalPagePoolFailureReason::kLogicalAccountingMismatch:
+    case PhysicalPagePoolFailureReason::LOGICAL_ACCOUNTING_MISMATCH:
       return "logical_accounting_mismatch";
-    case PhysicalPagePoolFailureReason::kFreeMemoryQueryFailed:
+    case PhysicalPagePoolFailureReason::FREE_MEMORY_QUERY_FAILED:
       return "free_memory_query_failed";
-    case PhysicalPagePoolFailureReason::kRequestSizeOverflow:
+    case PhysicalPagePoolFailureReason::REQUEST_SIZE_OVERFLOW:
       return "request_size_overflow";
-    case PhysicalPagePoolFailureReason::kInsufficientFreeMemory:
+    case PhysicalPagePoolFailureReason::INSUFFICIENT_FREE_MEMORY:
       return "insufficient_free_memory";
-    case PhysicalPagePoolFailureReason::kPhysicalPageCreation:
+    case PhysicalPagePoolFailureReason::PHYSICAL_PAGE_CREATION:
       return "physical_page_creation";
-    case PhysicalPagePoolFailureReason::kPostAllocationMemoryQueryFailed:
+    case PhysicalPagePoolFailureReason::POST_ALLOCATION_MEMORY_QUERY_FAILED:
       return "post_allocation_memory_query_failed";
-    case PhysicalPagePoolFailureReason::kPostAllocationHeadroom:
+    case PhysicalPagePoolFailureReason::POST_ALLOCATION_HEADROOM:
       return "post_allocation_headroom";
-    case PhysicalPagePoolFailureReason::kSharedPageMapping:
+    case PhysicalPagePoolFailureReason::SHARED_PAGE_MAPPING:
       return "shared_page_mapping";
   }
   return "unknown";
@@ -154,7 +154,7 @@ bool PhysicalPagePool::materialize_pages_locked(
     const std::vector<page_id_t>& page_ids,
     PhysicalPagePoolFailureReason* failure_reason) {
   if (failure_reason != nullptr) {
-    *failure_reason = PhysicalPagePoolFailureReason::kNone;
+    *failure_reason = PhysicalPagePoolFailureReason::NONE;
   }
   const auto fail = [failure_reason](PhysicalPagePoolFailureReason reason) {
     if (failure_reason != nullptr) {
@@ -188,7 +188,7 @@ bool PhysicalPagePool::materialize_pages_locked(
                  << " active_pages=" << num_active_pages_
                  << " total_pages=" << num_total_pages_
                  << " page_size=" << page_size_ << " free_bytes=unavailable";
-    return fail(PhysicalPagePoolFailureReason::kFreeMemoryQueryFailed);
+    return fail(PhysicalPagePoolFailureReason::FREE_MEMORY_QUERY_FAILED);
   }
   const size_t headroom = allocation_headroom_locked(
       static_cast<size_t>(*free_bytes), allocator_stats);
@@ -202,7 +202,7 @@ bool PhysicalPagePool::materialize_pages_locked(
                  << " headroom_bytes=" << headroom
                  << " growth_reserve_bytes=" << growth_reserve_bytes_
                  << " allocation_headroom_bytes=" << allocation_headroom_bytes_;
-    return fail(PhysicalPagePoolFailureReason::kRequestSizeOverflow);
+    return fail(PhysicalPagePoolFailureReason::REQUEST_SIZE_OVERFLOW);
   }
   const size_t required_bytes = missing.size() * page_size_ + headroom;
   if (static_cast<uint64_t>(*free_bytes) < required_bytes) {
@@ -225,7 +225,7 @@ bool PhysicalPagePool::materialize_pages_locked(
         << " allocated_pages=" << num_allocated_pages_
         << " active_pages=" << num_active_pages_
         << " total_pages=" << num_total_pages_;
-    return fail(PhysicalPagePoolFailureReason::kInsufficientFreeMemory);
+    return fail(PhysicalPagePoolFailureReason::INSUFFICIENT_FREE_MEMORY);
   }
   std::vector<std::unique_ptr<PhysicalPage>> pending;
   std::vector<PhysicalPage*> pending_ptrs;
@@ -243,7 +243,7 @@ bool PhysicalPagePool::materialize_pages_locked(
           << " requested_pages=" << missing.size()
           << " available_free_slots=" << free_page_ids_.size()
           << " page_size=" << page_size_
-          << " free_bytes_before_creation=" << free_bytes
+          << " free_bytes_before_creation=" << *free_bytes
           << " required_bytes_before_creation=" << required_bytes
           << " headroom_bytes_before_creation=" << headroom
           << " allocator_stats_available=" << allocator_stats.has_value()
@@ -255,7 +255,7 @@ bool PhysicalPagePool::materialize_pages_locked(
           << " committed_pages=" << num_committed_pages_
           << " pending_pages=" << pending.size()
           << " allocated_pages=" << num_allocated_pages_;
-      return fail(PhysicalPagePoolFailureReason::kPhysicalPageCreation);
+      return fail(PhysicalPagePoolFailureReason::PHYSICAL_PAGE_CREATION);
     }
     pending_ptrs.emplace_back(page.get());
     pending.emplace_back(std::move(page));
@@ -278,7 +278,7 @@ bool PhysicalPagePool::materialize_pages_locked(
                  << " allocated_pages=" << num_allocated_pages_
                  << " remaining_bytes=unavailable";
     return fail(
-        PhysicalPagePoolFailureReason::kPostAllocationMemoryQueryFailed);
+        PhysicalPagePoolFailureReason::POST_ALLOCATION_MEMORY_QUERY_FAILED);
   }
   // Pending handles are already resident, although pool ownership has not
   // been published. Exclude their bytes from fallback execution accounting.
@@ -329,7 +329,7 @@ bool PhysicalPagePool::materialize_pages_locked(
                  << " committed_pages=" << num_committed_pages_
                  << " pending_pages=" << pending.size()
                  << " allocated_pages=" << num_allocated_pages_;
-    return fail(PhysicalPagePoolFailureReason::kPostAllocationHeadroom);
+    return fail(PhysicalPagePoolFailureReason::POST_ALLOCATION_HEADROOM);
   }
   auto mapping = shared_mapping_.lock();
   if (mapping != nullptr && !mapping->map_pages(pending_ptrs)) {
@@ -340,7 +340,7 @@ bool PhysicalPagePool::materialize_pages_locked(
                  << " page_size=" << page_size_
                  << " committed_pages=" << num_committed_pages_
                  << " allocated_pages=" << num_allocated_pages_;
-    return fail(PhysicalPagePoolFailureReason::kSharedPageMapping);
+    return fail(PhysicalPagePoolFailureReason::SHARED_PAGE_MAPPING);
   }
   for (size_t i = 0; i < missing.size(); ++i) {
     const page_id_t page_id = missing[i];
@@ -381,7 +381,7 @@ PhysicalPageBatchResult PhysicalPagePool::batch_get_with_reason(size_t count) {
                  << " allocated_pages=" << num_allocated_pages_
                  << " active_pages=" << num_active_pages_
                  << " total_pages=" << num_total_pages_;
-    result.failure_reason = PhysicalPagePoolFailureReason::kLogicalCapacity;
+    result.failure_reason = PhysicalPagePoolFailureReason::LOGICAL_CAPACITY;
     return result;
   }
   std::vector<page_id_t> page_ids;
@@ -409,7 +409,7 @@ PhysicalPageBatchResult PhysicalPagePool::batch_get_with_reason(size_t count) {
                  << " active_pages=" << num_active_pages_
                  << " total_pages=" << num_total_pages_;
     result.failure_reason =
-        PhysicalPagePoolFailureReason::kLogicalAccountingMismatch;
+        PhysicalPagePoolFailureReason::LOGICAL_ACCOUNTING_MISMATCH;
     return result;
   }
   result.pages.reserve(count);
