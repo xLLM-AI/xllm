@@ -1389,6 +1389,53 @@ TEST(ContinuousSchedulerTest, RequestAdmissionWakesBlockedWaiter) {
   }
 }
 
+TEST(ContinuousSchedulerTest,
+     PrefetchAdmissionBatchesWakeupsWhileEarlierRequestsAreInFlight) {
+  SchedulerOptions options =
+      create_scheduler_options(/*max_tokens_per_batch=*/64,
+                               /*max_seqs_per_batch=*/4,
+                               /*num_speculative_tokens=*/0,
+                               /*max_tokens_per_chunk_for_prefill=*/64,
+                               /*dp_size=*/1);
+  FakeEngine engine(/*num_blocks=*/64, /*block_size=*/32);
+  engine.set_prefetch_ready(false);
+  TestableContinuousScheduler scheduler(&engine, options);
+  auto requests = generate_request(/*prompt_lens=*/{8, 8, 8},
+                                   /*max_tokens=*/{4, 4, 4},
+                                   std::nullopt,
+                                   std::nullopt,
+                                   std::nullopt,
+                                   std::nullopt,
+                                   /*max_context_len=*/30000);
+  const uint64_t initial_generation = scheduler.wakeup_generation();
+
+  ASSERT_TRUE(scheduler.add_request(requests[0]));
+  ASSERT_TRUE(scheduler.add_request(requests[1]));
+  EXPECT_EQ(scheduler.wakeup_generation(), initial_generation + 1);
+  scheduler.drain_prefetch_for_test();
+  EXPECT_EQ(engine.prefetch_calls(), 2u);
+  EXPECT_EQ(scheduler.scheduler_queue_size(), 0u);
+
+  // A new batch must wake the scheduler even while earlier prefetches wait.
+  const uint64_t observed_generation = scheduler.wakeup_generation();
+  auto awakened =
+      std::async(std::launch::async, [&scheduler, observed_generation] {
+        return scheduler.wait_for_wakeup(observed_generation);
+      });
+  ASSERT_TRUE(scheduler.wait_until_armed());
+  EXPECT_TRUE(scheduler.add_request(requests[2]));
+  EXPECT_EQ(awakened.wait_for(std::chrono::seconds(1)),
+            std::future_status::ready);
+  EXPECT_TRUE(awakened.get());
+  scheduler.drain_prefetch_for_test();
+  EXPECT_EQ(engine.prefetch_calls(), 3u);
+
+  engine.set_prefetch_ready(true);
+  scheduler.drain_prefetch_for_test();
+  EXPECT_FALSE(scheduler.has_pending_prefetch());
+  EXPECT_EQ(scheduler.scheduler_queue_size(), 3u);
+}
+
 TEST(ContinuousSchedulerTest, RejectedAdmissionDoesNotNotifyScheduler) {
   for (bool storage_prefetch : {false, true}) {
     SCOPED_TRACE(storage_prefetch);

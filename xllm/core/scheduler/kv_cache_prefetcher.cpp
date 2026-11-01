@@ -47,7 +47,10 @@ void KVCachePrefetcher::add_request(std::shared_ptr<Request> request) {
   pending_requests_.fetch_add(1, std::memory_order_relaxed);
   VLOG(1) << "[Mooncake][AdmissionPending] request=" << request->request_id();
   admissions_.emplace_back(std::move(request));
-  notifier_->notify();
+  // The batch keeps its wakeup until the scheduler swaps it out under the lock.
+  if (admissions_.size() == 1) {
+    notifier_->notify();
+  }
 }
 
 size_t KVCachePrefetcher::num_pending_requests() const {
@@ -55,6 +58,10 @@ size_t KVCachePrefetcher::num_pending_requests() const {
 }
 
 void KVCachePrefetcher::drain() {
+  if (num_pending_requests() == 0) {
+    return;
+  }
+
   manager_.drain_prefetch_completions();
   drain_admissions();
   manager_.drain_prefetch_completions();
@@ -112,21 +119,19 @@ void KVCachePrefetcher::drain_completed_prefetches() {
 
   for (std::shared_ptr<Request>& request : completed) {
     const bool cancelled = request->finished() || request->cancelled();
-    {
-      // Admission observes the queue size and reservation count together.
-      std::lock_guard<std::mutex> lock(admission_mutex_);
-      if (!cancelled) {
-        CHECK(enqueue_ready_request_(request))
-            << "Reserved request queue slot disappeared before prefetch "
-               "completed.";
-      }
-      const size_t previous =
-          pending_requests_.fetch_sub(1, std::memory_order_relaxed);
-      CHECK_GT(previous, 0u);
-    }
     VLOG(1) << (cancelled ? "[Mooncake][AdmissionCancelled] request="
                           : "[Mooncake][AdmissionReady] request=")
             << request->request_id();
+    // Admission observes the queue size and reservation count together.
+    std::lock_guard<std::mutex> lock(admission_mutex_);
+    if (!cancelled) {
+      CHECK(enqueue_ready_request_(std::move(request)))
+          << "Reserved request queue slot disappeared before prefetch "
+             "completed.";
+    }
+    const size_t previous =
+        pending_requests_.fetch_sub(1, std::memory_order_relaxed);
+    CHECK_GT(previous, 0u);
   }
 }
 
