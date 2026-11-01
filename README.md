@@ -137,7 +137,7 @@ cmake --build . --config Release
 ./build-hip/xllm.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf --ctx 2048
 
 # With performance tracing (sherlock-it.md requirements)
-KRK_TIME=1 ./build-hip/xllm.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf --bench --ctx 2048
+./build-hip/xllm.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf --bench --ctx 2048
 
 # CPU fallback mode (when GPU unavailable)
 ./build-hip/xllm.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf --cpu-fallback --ctx 2048
