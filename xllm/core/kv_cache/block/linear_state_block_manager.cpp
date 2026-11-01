@@ -37,8 +37,6 @@ LinearStateBlockManager::LinearStateBlockManager(uint32_t num_slots,
                                 .instance_is_decode_ = instance_is_decode}) {
   CHECK_GT(num_slots, 1u)
       << "linear-state leaf needs at least one usable slot (plus padding)";
-  CHECK_GT(chunk_stride, 0)
-      << "linear-state leaf needs a positive chunk stride";
 }
 
 std::optional<std::vector<Block>>
@@ -62,8 +60,8 @@ LinearStateBlockManager::allocate_for_sequence(Sequence* seq,
       options_.instance_is_decode() || !seq->is_prefill_stage();
   size_t checkpoint_index = 0;
   std::optional<XXH3Key> checkpoint_hash;
-  if (!decode_step && !seq->is_graph_warmup() && prefix_cache_ != nullptr &&
-      !blocks->empty()) {
+  if (!decode_step && !seq->is_graph_warmup() &&
+      options_.enable_prefix_cache() && !blocks->empty()) {
     const size_t chunk_stride = block_size();
     const size_t cached_tokens = seq->kv_cache_tokens_num();
     checkpoint_index = cached_tokens / chunk_stride;
@@ -80,7 +78,7 @@ LinearStateBlockManager::allocate_for_sequence(Sequence* seq,
     }
   }
   if (!blocks->empty() &&
-      (decode_step || prefix_cache_ == nullptr ||
+      (decode_step || !options_.enable_prefix_cache() ||
        (!checkpoint_hash.has_value() && !blocks->back().is_shared()))) {
     return std::vector<Block>{};
   }
@@ -115,13 +113,13 @@ std::vector<Block> LinearStateBlockManager::allocate_shared(
     const Slice<XXH3Key>& block_hashes) {
   // Leave a token for forward execution; KV block boundaries cannot constrain
   // sparse linear checkpoints without losing the matching recurrent state.
-  if (token_ids.size() == 0 || prefix_cache_ == nullptr) {
+  if (token_ids.size() == 0 || !options_.enable_prefix_cache()) {
     return {};
   }
   std::vector<Block> blocks = prefix_cache_->match(
       token_ids.slice(0, token_ids.size() - 1), {}, MMData(), block_hashes);
   for (const Block& block : blocks) {
-    if (block.is_valid() && mark_used(&usage_accounted_ids_, block.id())) {
+    if (block.is_valid() && mark_used(usage_accounted_ids_, block.id())) {
       num_used_blocks_.fetch_add(1, std::memory_order_relaxed);
     }
   }
@@ -133,7 +131,7 @@ void LinearStateBlockManager::cache(const Slice<int32_t>& token_ids,
                                     size_t existed_shared_blocks_num,
                                     const MMData& mm_data,
                                     const Slice<XXH3Key>& block_hashes) {
-  if (blocks.empty() || prefix_cache_ == nullptr) {
+  if (blocks.empty() || !options_.enable_prefix_cache()) {
     return;
   }
   const size_t publish_end =

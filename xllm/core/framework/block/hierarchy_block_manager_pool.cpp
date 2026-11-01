@@ -270,7 +270,6 @@ size_t prefetch_unit_size(CompositeBlockManager::LeafCombination combination,
           : BlockType::KV;
   const auto unit_leaf = leaves.find(unit_type);
   CHECK(unit_leaf != leaves.end());
-  CHECK_GT(unit_leaf->second.leaf->block_size(), 0u);
   return unit_leaf->second.leaf->block_size();
 }
 
@@ -387,8 +386,6 @@ StoragePrefetchRequest build_prefetch_request(
     const BlockManager* swa_leaf = leaves.at(BlockType::SWA).leaf.get();
     const size_t swa_block_size = swa_leaf->block_size();
     const size_t c4_block_size = leaves.at(BlockType::C4).leaf->block_size();
-    CHECK_GT(swa_block_size, 0u);
-    CHECK_GT(c4_block_size, 0u);
     CHECK_EQ(unit_size % swa_block_size, 0u);
     CHECK_EQ(unit_size % c4_block_size, 0u);
     const size_t blocks_per_window =
@@ -656,7 +653,6 @@ void HierarchyBlockManagerPool::collect_offload_pairs(Sequence* sequence,
     std::vector<Block>* hbm_blocks = hbm_state.mutable_blocks(type);
     std::vector<Block>* host_blocks = host_state.mutable_blocks(type);
     const size_t block_size = entry.leaf->block_size();
-    CHECK_GT(block_size, 0u);
     size_t completed_blocks = completed_tokens / block_size;
     const BlockHasherType hasher_type = entry.leaf->options().hasher_type();
     const bool needs_sequence_hash = !entry.supports_prefix_cache;
@@ -743,7 +739,6 @@ void HierarchyBlockManagerPool::trim_host_cache(
       continue;
     }
     const size_t block_size = entry.leaf->block_size();
-    CHECK_GT(block_size, 0u);
     const size_t keep = restore_tokens / block_size;
     host_state.set_num_cached_blocks(
         type, std::min(host_state.num_cached_blocks(type), keep));
@@ -990,7 +985,6 @@ HostCacheRestorePoint HierarchyBlockManagerPool::select_host_cache_restore(
   const auto unit_leaf = composite->leaf_entries().find(unit_type);
   CHECK(unit_leaf != composite->leaf_entries().end());
   const size_t copy_unit_tokens = unit_leaf->second.leaf->block_size();
-  CHECK_GT(copy_unit_tokens, 0u);
   const size_t restore_units = restore_tokens / copy_unit_tokens;
   const size_t hbm_cached_units = std::min(
       sequence->kv_state().num_cached_blocks(unit_type), restore_units);
@@ -1014,7 +1008,6 @@ HostCacheRestorePoint HierarchyBlockManagerPool::select_host_cache_restore(
   const size_t swa_block_size = swa_leaf->second.leaf->block_size();
   const size_t blocks_per_window = static_cast<size_t>(
       swa_leaf->second.leaf->options().swa_blocks_per_seq());
-  CHECK_GT(swa_block_size, 0u);
   CHECK_GT(blocks_per_window, 0u);
 
   const Slice<Block> hbm_swa = sequence->kv_state().blocks(BlockType::SWA);

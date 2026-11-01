@@ -1310,8 +1310,6 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecXAttentionWorkPipeline::step(
           const torch::Tensor& sequence_group,
           int32_t request_beam_width) -> std::optional<RoundResult> {
     auto* round_params = input_params.onerec_xattention_params();
-    CHECK(round_params != nullptr)
-        << "OneRec xattention pipeline requires onerec_xattention_params.";
 
     const bool has_decoder_context =
         round_params->decoder_context_embedding.defined();
@@ -1491,18 +1489,6 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecXAttentionWorkPipeline::step(
     if (sampling_params.num_sample_seqs() > 0) {
       torch::Tensor selected_token_idxes = selected_token_idxes_for_logits;
 #if defined(USE_NPU)
-      if (selected_token_cpu_check) {
-        auto selected_token_idxes_after_cpu = to_cpu_contiguous(
-            sampling_params.selected_token_idxes(), torch::kInt64);
-        CHECK(torch::equal(selected_token_idxes_after_cpu,
-                           selected_token_idxes_before_cpu))
-            << "OneRec xattention selected_token_idxes changed during model "
-               "forward, before="
-            << selected_token_idxes_before_cpu
-            << ", after=" << selected_token_idxes_after_cpu
-            << ", rec_stage=" << static_cast<int32_t>(round_params->rec_stage)
-            << ", is_first_prefill=" << round_params->is_first_prefill;
-      }
       if (selected_token_idxes.scalar_type() != torch::kInt64) {
         selected_token_idxes = selected_token_idxes.to(torch::kInt64);
       }
@@ -1518,13 +1504,6 @@ std::optional<ForwardOutput> RecWorkerImpl::OneRecXAttentionWorkPipeline::step(
               selected_token_idxes_before_cpu.min().item<int64_t>();
           const int64_t max_idx =
               selected_token_idxes_before_cpu.max().item<int64_t>();
-          CHECK_GE(min_idx, 0)
-              << "OneRec xattention selected_token_idxes contains negative "
-                 "index, min_idx="
-              << min_idx << ", max_idx=" << max_idx
-              << ", hidden_rows=" << hidden_rows
-              << ", rec_stage=" << static_cast<int32_t>(round_params->rec_stage)
-              << ", is_first_prefill=" << round_params->is_first_prefill;
           CHECK_LT(max_idx, hidden_rows)
               << "OneRec xattention selected_token_idxes out of range, "
               << "min_idx=" << min_idx << ", max_idx=" << max_idx

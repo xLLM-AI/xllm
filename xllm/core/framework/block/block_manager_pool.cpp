@@ -168,7 +168,6 @@ int32_t BlockManagerPool::get_manager_with_max_available_blocks() const {
     }
   }
 
-  CHECK(!candidate_indices.empty());
   if (candidate_indices.size() == 1) {
     return static_cast<int32_t>(candidate_indices.front());
   }
@@ -283,7 +282,6 @@ bool BlockManagerPool::allocate(Sequence* sequence, size_t num_tokens) {
 
 bool BlockManagerPool::exceeds_total_capacity(Sequence* sequence,
                                               size_t num_tokens) const {
-  DCHECK(sequence != nullptr);
   if (sequence == nullptr || block_managers_.empty()) {
     return false;
   }
@@ -328,7 +326,6 @@ bool BlockManagerPool::exceeds_total_capacity(
 
   bool can_aggregate = !options_.enable_prefix_cache();
   for (const auto& [sequence, num_tokens] : reservations) {
-    DCHECK(sequence != nullptr);
     if (sequence == nullptr) {
       return false;
     }

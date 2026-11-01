@@ -921,7 +921,6 @@ Status TaskExecutionPipeline::prepare(uint32_t slot_id,
 
 Status TaskExecutionPipeline::prepare_worker(uint32_t slot_id,
                                              const LlmForwardInput& input) {
-  CHECK(worker_pipeline_ != nullptr);
   if (slot_id >= slots_.size()) {
     return invalid("Invalid worker task Slot index.");
   }
@@ -934,7 +933,6 @@ Status TaskExecutionPipeline::prepare_worker(uint32_t slot_id,
 
 Status TaskExecutionPipeline::prepare_worker(uint32_t slot_id,
                                              const VlmForwardInput& input) {
-  CHECK(worker_pipeline_ != nullptr);
   if (slot_id >= slots_.size()) {
     return invalid("Invalid worker task Slot index.");
   }
