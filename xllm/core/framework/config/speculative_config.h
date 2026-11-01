@@ -15,11 +15,9 @@ limitations under the License.
 
 #pragma once
 
-#include <boost/algorithm/string/predicate.hpp>
-#include <cstdint>
-#include <nlohmann/json_fwd.hpp>
 #include <string>
 #include <string_view>
+#include <algorithm>
 
 #include "core/common/macros.h"
 #include "core/framework/config/option_category.h"
@@ -36,23 +34,33 @@ class SpeculativeConfig final {
   static SpeculativeConfig& get_instance();
 
   static bool is_eagle3_algorithm(std::string_view algorithm) {
-    return boost::iequals(algorithm, "Eagle3");
+    std::string s(algorithm);
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){ return std::tolower(c); });
+    return s == "eagle3";
   }
 
   static bool is_dflash_algorithm(std::string_view algorithm) {
-    return boost::iequals(algorithm, "DFlash");
+    std::string s(algorithm);
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){ return std::tolower(c); });
+    return s == "dflash";
   }
 
   static bool is_dflash2_algorithm(std::string_view algorithm) {
-    return boost::iequals(algorithm, "DFlash2");
+    std::string s(algorithm);
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){ return std::tolower(c); });
+    return s == "dflash2";
   }
 
   static bool is_dspark_algorithm(std::string_view algorithm) {
-    return boost::iequals(algorithm, "DSpark");
+    std::string s(algorithm);
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){ return std::tolower(c); });
+    return s == "dspark";
   }
 
   static bool is_suffix_algorithm(std::string_view algorithm) {
-    return boost::iequals(algorithm, "Suffix");
+    std::string s(algorithm);
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){ return std::tolower(c); });
+    return s == "suffix";
   }
 
   static bool uses_ssm_engine(std::string_view draft_model_path,

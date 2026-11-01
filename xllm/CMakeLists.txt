@@ -93,7 +93,6 @@ if(GENERATE_SO)
       :config
       :master
       absl::strings
-      Boost::serialization
       gflags::gflags
       glog::glog
       Folly::folly
@@ -118,7 +117,6 @@ else()
       :kv_cache_store_config_validation
       :util
       absl::strings
-      Boost::serialization
       gflags::gflags
       glog::glog
       Folly::folly
@@ -143,8 +141,6 @@ add_dependencies(xllm brpc-static)
 
 if(USE_NPU)
   set(COMMON_LIBS
-      torch_npu
-      torch_python
       npu_profiler
       Python::Python
       ascendcl
@@ -154,7 +150,6 @@ if(USE_NPU)
       c_sec
       nnopbase
       ms_tools_ext)
-  # Some Torch wheels embed TensorPipe in libtorch_cpu instead of shipping
   # a standalone library. Link it explicitly only when this Torch provides it.
   find_library(TENSORPIPE_LIBRARY NAMES tensorpipe
     HINTS "${TORCH_INSTALL_PREFIX}/lib"
@@ -173,7 +168,6 @@ if(USE_MSPTI)
 endif()
 target_link_libraries(xllm PUBLIC ${COMMON_LIBS})
 if(USE_MUSA)
-  target_link_libraries(xllm PUBLIC atomic musa_python torch_cpu c10)
 endif()
 
 if(USE_MUSA)

@@ -54,15 +54,12 @@ cc_library(
   DEPS
     :kv_cache_block_types
     :block_utils
-    $<$<BOOL:${USE_NPU}>:torch_npu>
     $<$<BOOL:${USE_NPU}>:graph>
     :request
     :common
     :prefix_cache
     :kv_transfer_completion
     glog::glog
-    Boost::serialization
     SMHasherSupport
-    torch
 )
 target_link_libraries(kv_cache_block PRIVATE Folly::folly)

@@ -442,7 +442,7 @@ bool DiTFolderLoader::load_quant_args(const std::string& model_weights_path) {
     const auto& path = entry.path();
     if (path.extension() == ".json") {
       std::string stem = path.stem().string();
-      boost::algorithm::to_lower(stem);
+      std::transform(stem.begin(), stem.end(), stem.begin(), [](unsigned char c){ return std::tolower(c); });
       if (stem.find("quant") != std::string::npos) {
         quant_desc_file_path = path.string();
         break;
@@ -481,10 +481,10 @@ bool DiTFolderLoader::load_quant_args(const std::string& model_weights_path) {
     }
     const std::string quant_type = it.value().get<std::string>();
     std::string quant_type_lower = quant_type;
-    boost::algorithm::to_lower(quant_type_lower);
-    if (boost::algorithm::starts_with(quant_type_lower, "w4a8")) {
+    std::transform(quant_type_lower.begin(), quant_type_lower.end(), quant_type_lower.begin(), [](unsigned char c){ return std::tolower(c); });
+    if (quant_type_lower.find("w4a8") != std::string::npos) {
       desc_has_w4a8 = true;
-    } else if (boost::algorithm::starts_with(quant_type_lower, "w8a8")) {
+    } else if (quant_type_lower.find("w8a8") != std::string::npos) {
       desc_has_w8a8 = true;
     }
     quant_descs.emplace(it.key(), quant_type);

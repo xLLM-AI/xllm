@@ -56,7 +56,6 @@ cc_library(
     $<$<BOOL:${USE_CUDA}>:CUDA::cudart>
     $<$<BOOL:${USE_MSPTI}>:mspti>
     $<$<BOOL:${USE_NPU}>:ms_tools_ext>
-    Boost::serialization
     cpprest
     etcd-cpp-api
     $<$<BOOL:${USE_MLU}>:torch_mlu>

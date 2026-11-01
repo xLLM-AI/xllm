@@ -1,22 +1,3 @@
-/* Copyright 2025-2026 The xLLM Authors.
-Copyright 2024 The ScaleLLM Authors. All Rights Reserved.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-==============================================================================*/
-
-#pragma once
-
-#include <boost/functional/hash.hpp>
 #include <cstdint>
 #include <optional>
 #include <set>
@@ -24,10 +5,37 @@ limitations under the License.
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <functional>
 
 #include "common/macros.h"
 #include "common/types.h"
 #include "util/slice.h"
+
+// Pure C++ hash replacement for Boost::hash
+namespace xllm {
+namespace pure_cpp {
+  struct RecTokenTripleHash {
+    size_t operator()(const RecTokenTriple& t) const {
+      size_t h = 0;
+      std::hash<int64_t> hasher;
+      h ^= hasher(t.t0) + 0x9e3779b9 + (h << 6) + (h >> 2);
+      h ^= hasher(t.t1) + 0x9e3779b9 + (h << 6) + (h >> 2);
+      h ^= hasher(t.t2) + 0x9e3779b9 + (h << 6) + (h >> 2);
+      return h;
+    }
+  };
+  struct VectorInt32Hash {
+    size_t operator()(const std::vector<int32_t>& v) const {
+      size_t h = 0;
+      std::hash<int32_t> hasher;
+      for (int32_t i : v) {
+        h ^= hasher(i) + 0x9e3779b9 + (h << 6) + (h >> 2);
+      }
+      return h;
+    }
+  };
+} // namespace pure_cpp
+} // namespace xllm
 
 namespace xllm {
 
@@ -48,71 +56,24 @@ struct RecConstraintTables {
   std::vector<int32_t> prefix2_values;
 
   int32_t vocab_size = 0;
-  int32_t max_first_degree = 0;
-  int32_t max_prefix1_degree = 0;
-  int32_t max_prefix2_degree = 0;
 };
 
-// A vocab dictionary in generative recommendation scenarios, used for mapping
-// token IDs and item IDs, currently updated with the model version, and
-// real-time updates are not supported.
-class RecVocabDict final {
- public:
-  RecVocabDict() = default;
+/**
+ * @brief Get all next token id list through the prefix token id list, for
+ * example, in the vocab file, there are these token id triplets, 1-2-3,
+ * 1-2-4, 7-8-9, if prefix the token id is [1], then the next token id list
+ * is [2], if the prefix token id is [1,2], then the next token id list is
+ * [3,4]
+ * @param prefix_token_ids, prefix token id list, the size must be less then
+ * three
+ * @attention if prefix_token_ids size is zero, will return all first token of
+ * the token triplets
+ * @return  next token id list
+ */
+const std::unordered_set<int32_t>& get_next_tokens_by_prefix_tokens(
+    const Slice<int32_t>& prefix_token_ids) const;
 
-  ~RecVocabDict() {
-    initialized_ = false;
-    item_to_tokens_map_.clear();
-    tokens_to_item_infos_map_.clear();
-    prefix_tokens_to_next_tokens_map_.clear();
-  }
-
-  /**
-   * @brief Initialize instance, parse vocab file
-   * @param vocab_file vocab file, need full path
-   * @return true represents successful initialization, false represents failed
-   * initialization
-   */
-  bool initialize(const std::string& vocab_file);
-
-  /**
-   * @brief Get the corresponding item ID list through a token ID triplet
-   * @param token_ids, a token ID triplet, so token_ids size must be three
-   * @param item_ids, output mapping item id list
-   * @return true represents successful gain, false represents failed gain
-   */
-  bool get_items_by_tokens(const RecTokenTriple& rec_token_triple,
-                           std::vector<int64_t>* item_ids) const;
-
-  bool get_item_infos_by_tokens(const RecTokenTriple& rec_token_triple,
-                                std::vector<RecItemInfo>* item_infos) const;
-
-  /**
-   * @brief Get the corresponding token ID triplet through a item id
-   * @param item_ids, input item id
-   * @param token_ids, output mapping token id triplet, so token_ids size will
-   * be three
-   * @return true represents successful gain, false represents failed gain
-   */
-  bool get_tokens_by_item(int64_t item_id,
-                          std::vector<int32_t>* token_ids) const;
-
-  /**
-   * @brief Get all next token id list through the prefix token id list, for
-   * example, in the vocab file, there are these token id triplets, 1-2-3,
-   * 1-2-4, 7-8-9, if prefix the token id is [1], then the next token id list
-   * is [2], if the prefix token id is [1,2], then the next token id list is
-   * [3,4]
-   * @param prefix_token_ids, prefix token id list, the size must be less then
-   * three
-   * @attention if prefix_token_ids size is zero, will return all first token of
-   * the token triplets
-   * @return  next token id list
-   */
-  const std::unordered_set<int32_t>& get_next_tokens_by_prefix_tokens(
-      const Slice<int32_t>& prefix_token_ids) const;
-
-  RecConstraintTables build_constraint_tables(int32_t vocab_size) const;
+RecConstraintTables build_constraint_tables(int32_t vocab_size) const;
 
  private:
   // Check if initialization has been successful
@@ -120,10 +81,10 @@ class RecVocabDict final {
 
   // Convert token to item map, key: token id triplet, value: item info list,
   // there is a token id triplet corresponding to multiple items, and
-  // boost::hash<RecTokenTriple> will generate ordered triplet hash value.
+  // pure C++ hash replacement for Boost::hash<RecTokenTriple>
   std::unordered_map<RecTokenTriple,
                      std::vector<RecItemInfo>,
-                     boost::hash<RecTokenTriple>>
+                     pure_cpp::RecTokenTripleHash>
       tokens_to_item_infos_map_;
 
   // Convert item to tokens map, key: item id, value: token triplet, there is a
@@ -134,7 +95,7 @@ class RecVocabDict final {
   // next token id list
   std::unordered_map<std::vector<int32_t>,
                      std::unordered_set<int32_t>,
-                     boost::hash<std::vector<int32_t>>>
+                     pure_cpp::VectorInt32Hash>
       prefix_tokens_to_next_tokens_map_;
 };
 }  // namespace xllm
