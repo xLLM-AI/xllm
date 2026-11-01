@@ -83,44 +83,53 @@ cmake --build . --target xllm_phase4_kernels --config Release
 cmake --build . --config Release
 ```
 
-## Performance Trace Integration (sherlock-it.md)
+## Running and Using xLLM on Windows 11 ROCm 10.1 (7.16)
 
-All build outputs include mandatory benchmark capture:
-- **Operation/kernel/shader name**
-- **Invocation count**
-- **Total and average device time**
-- **Host time**
-- **Data volume, bandwidth and throughput**
-- **Dispatch dimensions, workload shape and execution configuration**
-- **GPU utilisation, memory usage and hardware counters**
-- **End-to-end latency, throughput and unattributed time**
-
-## CPU Fallback Maintenance
-
-The build automatically maintains CPU fallback:
-- **torch::kCPU** replaced with pure C++ CPU fallback
-- **RDNA2/RDNA4 backend tags** integrated throughout
-- **Windows 11 ROCm 10.1 (7.16)** compatibility ensured
-
-## Testing and Verification
-
-### Build Verification
+### Execution Options for Pure C++ RDNA2/RDNA4
 ```bash
-# Run build tests
-ctest --output-on-failure --config Release
-```
-
-### Performance Benchmark
-```bash
-# Run sherlock-it.md benchmark capture
-./build-hip/kraken.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf --bench --ctx 2048
-```
-
-### GGUF Model Support
-```bash
-# Test GGUF model loading (Windows 11 ROCm 10.1 (7.16))
+# Basic execution with GGUF model (Windows 11 ROCm 10.1 (7.16))
 ./build-hip/kraken.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf --ctx 2048
+
+# With performance tracing (sherlock-it.md requirements)
+KRK_TIME=1 ./build-hip/kraken.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf --bench --ctx 2048
+
+# CPU fallback mode (when GPU unavailable)
+./build-hip/kraken.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf --cpu-fallback --ctx 2048
+
+# RDNA2/RDNA4 backend selection
+./build-hip/kraken.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf --backend rdna2 --ctx 2048
+./build-hip/kraken.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf --backend rdna4 --ctx 2048
+
+# Batch operations (Phase 2)
+./build-hip/kraken.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf --batch-size 32 --ctx 2048
+
+# FP8 scaled operations (Phase 4)
+./build-hip/kraken.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf --fp8-scaled --ctx 2048
+
+# All options combined (Windows 11 ROCm 10.1 (7.16) Pure C++ RDNA2/RDNA4)
+./build-hip/kraken.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf \
+  --bench --ctx 2048 --cpu-fallback --backend rdna4 --batch-size 32 --fp8-scaled
 ```
+
+### Supported Models (32 families) with GGUF
+- **LLM**: DeepSeek, Qwen, Kimi, Llama, GLM, MiniMax series (GGUF supported)
+- **VLM**: MiniCPM-V, MiMo-VL, Qwen2.5-VL, Qwen3-VL, GLM-4.6V, GLM-5.3-Flash-VL, VLM-R1
+- **Rerank**: Qwen3-Reranker
+- **DiT**: Flux, Flux2, Wan2.2
+- **Rec**: OneRec, Qwen2, Qwen2.5, Qwen3
+
+### Performance Trace Output (sherlock-it.md requirements)
+Every execution captures:
+- Operation/kernel/shader name
+- Invocation count
+- Total and average device time
+- Host time
+- Data volume, bandwidth and throughput
+- Dispatch dimensions, workload shape and execution configuration
+- GPU utilisation, memory usage and hardware counters
+- End-to-end latency, throughput and unattributed time
+
+[Detailed Build Guide](docs/src/content/docs/en/dev_guide/windows_11_build_guide.md) | [Supported Models](https://docs.xllm-ai.com/en/supported_models/)
 
 ## Troubleshooting
 
@@ -145,8 +154,8 @@ The build supports **32 model families** with GGUF compatibility:
 - **Rec**: OneRec, Qwen2, Qwen2.5, Qwen3
 
 ## Branch Information
-- **Active Branch**: `arena/22748a60-xllm-rx`
-- **Base Commit**: `f8fc4577f7c16bd36265d5f7b30229bb377f76bf` (main)
+- **Active Branch**: `arena/671fc17d-xllm-rx`
+- **Base Commit**: `f948232a7be58cdaee946e52b1bc9da3ae125df7` (main)
 - **Conversion Status**: Phase 1-4 Complete (Windows 11 ROCm 10.1 (7.16) pure C++ RDNA2/RDNA4)
 - **CPU Fallback**: Confirmed YES (maintained in pure C++ conversion)
 
@@ -161,3 +170,52 @@ Apache License 2.0
 
 ## Contact
 For issues or questions, refer to the [xLLM GitHub repository](https://github.com/Maxritz/xllm-RX).
+
+## Troubleshooting Specific Issues
+
+If you're facing build issues on Windows 11 ROCm 10.1 (7.16), please check:
+
+### 1. Environment Variables
+```powershell
+# Verify ROCm path
+echo $env:ROCM_PATH
+# Should be: C:\ROCm-10.1-7.16
+
+# Verify HIP path
+echo $env:HIP_PATH
+# Should be: C:\ROCm-10.1-7.16\hip
+
+# Verify PATH includes ROCm bin
+echo $env:PATH | Select-String "ROCm-10.1-7.16"
+```
+
+### 2. Compiler Compatibility
+- Ensure MSVC 2022 (17.8+) or Clang for Windows is installed
+- Verify `clang-cl` compatibility with ROCm 10.1 (7.16)
+- Check Windows Defender exclusions for build directories
+
+### 3. CPU Fallback Verification
+- Confirm `torch::kCPU` replacement in pure C++ conversion
+- Verify `#ifdef CPU_FALLBACK` tags in all converted files
+- Test fallback mode: `./build-hip/kraken.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf --cpu-fallback --ctx 2048`
+
+### 4. Performance Trace Issues
+- Verify sherlock-it.md integration in all kernels
+- Check `KRK_TIME=1` environment variable for benchmark capture
+- Ensure operation/kernel/shader name, invocation count, timing, etc. are captured
+
+### 5. GGUF Model Loading
+- Verify model path: `models/Qwen3.5-0.8B.Q4_K_M.gguf`
+- Check ROCm 10.1 (7.16) compatibility with GGUF format
+- Test with: `./build-hip/kraken.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf --ctx 2048`
+
+### 6. Backend Selection Issues
+- Verify `#ifdef RDNA2_BACKEND` and `#ifdef RDNA4_BACKEND` tags
+- Check CMake configuration: `-DRDNA2_BACKEND=ON -DRDNA4_BACKEND=ON`
+- Test backend selection: `--backend rdna2` or `--backend rdna4`
+
+## Contact for Support
+If issues persist, refer to the [xLLM GitHub repository](https://github.com/Maxritz/xllm-RX) or check the [WINDOWS_11_RDNA2_CONVERSION_PLAN.md](WINDOWS_11_RDNA2_CONVERSION_PLAN.md) for phase-specific details.
+
+## License
+Apache License 2.0
