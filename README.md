@@ -104,26 +104,26 @@ limitations under the License. -->
 ### Execution Options for Pure C++ RDNA2/RDNA4
 ```bash
 # Basic execution with GGUF model (Windows 11 ROCm 10.1 (7.16))
-./build-hip/kraken.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf --ctx 2048
+./build-hip/xllm.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf --ctx 2048
 
 # With performance tracing (sherlock-it.md requirements)
-KRK_TIME=1 ./build-hip/kraken.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf --bench --ctx 2048
+KRK_TIME=1 ./build-hip/xllm.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf --bench --ctx 2048
 
 # CPU fallback mode (when GPU unavailable)
-./build-hip/kraken.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf --cpu-fallback --ctx 2048
+./build-hip/xllm.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf --cpu-fallback --ctx 2048
 
 # RDNA2/RDNA4 backend selection
-./build-hip/kraken.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf --backend rdna2 --ctx 2048
-./build-hip/kraken.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf --backend rdna4 --ctx 2048
+./build-hip/xllm.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf --backend rdna2 --ctx 2048
+./build-hip/xllm.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf --backend rdna4 --ctx 2048
 
 # Batch operations (Phase 2)
-./build-hip/kraken.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf --batch-size 32 --ctx 2048
+./build-hip/xllm.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf --batch-size 32 --ctx 2048
 
 # FP8 scaled operations (Phase 4)
-./build-hip/kraken.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf --fp8-scaled --ctx 2048
+./build-hip/xllm.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf --fp8-scaled --ctx 2048
 
 # All options combined (Windows 11 ROCm 10.1 (7.16) Pure C++ RDNA2/RDNA4)
-./build-hip/kraken.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf \
+./build-hip/xllm.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf \
   --bench --ctx 2048 --cpu-fallback --backend rdna4 --batch-size 32 --fp8-scaled
 ```
 
