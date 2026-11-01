@@ -29,6 +29,8 @@ limitations under the License.
 
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/constrained/json_object_grammar.h"
+#include "core/framework/sampling/sampler.h"
+#include "core/framework/sampling/sampling_params.h"
 #include "core/runtime/worker_impl.h"
 
 namespace xllm {
@@ -120,6 +122,15 @@ class OverlapTestWorker final : public WorkerImpl {
   const torch::Tensor& executed_filter_mask() const {
     return executed_filter_mask_;
   }
+  const torch::Tensor& forward_prefix_tokens() const {
+    return forward_prefix_tokens_;
+  }
+  const SamplingParameters& executed_sampling_params() const {
+    return executed_sampling_params_;
+  }
+  void set_sampling_logits(torch::Tensor logits) {
+    sampling_logits_ = std::move(logits);
+  }
 
  protected:
   bool prepare_model_decode_continuation(
@@ -135,13 +146,15 @@ class OverlapTestWorker final : public WorkerImpl {
   }
 
   std::optional<ForwardOutput> step_for_schedule_overlap(
-      const LlmForwardInput& input) override {
-    return execute(input);
+      const LlmForwardInput& input,
+      const std::function<void()>& prepare_sampling = {}) override {
+    return execute(input, prepare_sampling);
   }
 
   std::optional<ForwardOutput> step_for_schedule_overlap(
-      const VlmForwardInput& input) override {
-    return execute(input);
+      const VlmForwardInput& input,
+      const std::function<void()>& prepare_sampling = {}) override {
+    return execute(input, prepare_sampling);
   }
 
  private:
@@ -174,7 +187,9 @@ class OverlapTestWorker final : public WorkerImpl {
   }
 
   template <typename Input>
-  std::optional<ForwardOutput> execute(const Input& input) {
+  std::optional<ForwardOutput> execute(
+      const Input& input,
+      const std::function<void()>& prepare_sampling) {
     executed_tokens_ = input.token_ids;
     executed_filter_bitmask_ = input.sampling_params.filter_bitmask();
     executed_filter_mask_ = input.sampling_params.filter_mask();
@@ -186,8 +201,19 @@ class OverlapTestWorker final : public WorkerImpl {
       executed_grammar_tokens_ =
           input.json_object_states.front().snapshot().token_ids;
     }
+    forward_prefix_tokens_ = input.sampling_params.prefix_tokens();
+    if (prepare_sampling) {
+      prepare_sampling();
+    }
+    executed_sampling_params_ = input.sampling_params;
     CHECK_LT(step_index_, outputs_.size());
     auto output = std::move(outputs_[step_index_++]);
+    if (output.has_value() && sampling_logits_.defined() &&
+        input.sampling_params.num_sample_seqs() > 0) {
+      auto stream_guard = compute_stream_->set_stream_guard();
+      torch::Tensor logits = sampling_logits_.clone();
+      output->sample_output = sample(logits, input.sampling_params);
+    }
     if (output.has_value() && output_hook_) {
       output_hook_(*output, *compute_stream_);
     } else if (!output.has_value() && empty_output_hook_) {
@@ -203,6 +229,9 @@ class OverlapTestWorker final : public WorkerImpl {
   torch::Tensor executed_tokens_;
   torch::Tensor executed_filter_bitmask_;
   torch::Tensor executed_filter_mask_;
+  torch::Tensor forward_prefix_tokens_;
+  SamplingParameters executed_sampling_params_;
+  torch::Tensor sampling_logits_;
   std::vector<int32_t> executed_grammar_tokens_;
   bool executed_grammar_initialized_ = false;
   std::function<void(ForwardOutput&, Stream&)> output_hook_;
@@ -585,6 +614,96 @@ TYPED_TEST(ScheduleOverlapTest, MixedConstrainedSequencesAdvancePriorRow) {
                            torch::tensor({{1 << 1}, {1 << 0}}, torch::kInt32)));
   EXPECT_EQ(worker.continuation_count(), 1);
   worker.get_last_step_result();
+}
+
+TYPED_TEST(ScheduleOverlapTest,
+           SamplingHistoryFollowsReorderedSequenceRowsAfterForward) {
+  for (const torch::Device& device :
+       {torch::Device(torch::kCPU),
+        torch::Device(torch::kPrivateUse1, /*index=*/0)}) {
+    SCOPED_TRACE(device.str());
+    ForwardOutput prior_output;
+    prior_output.sample_output.next_tokens =
+        torch::tensor({{2, -1}, {1, 1}}, torch::kInt64).to(device);
+    OverlapTestWorker worker(
+        {std::move(prior_output), token_output(7)},
+        /*driver=*/true,
+        OverlapTestWorker::ContinuationMode::MODEL_MANAGED);
+    if (!device.is_cpu()) {
+      worker.set_output_hook([](ForwardOutput& output, Stream& stream) {
+        auto guard = stream.set_stream_guard();
+        output.ready_event = stream.record_event();
+        CHECK(output.ready_event != nullptr);
+      });
+    }
+    auto initial_input = step_input<TypeParam>(/*decode=*/false);
+    initial_input.input_params.embedding.request_ids = {"first", "second"};
+    initial_input.sample_sequence_ids = {"first#0", "second#0"};
+    auto first = worker.step_async(initial_input);
+    ASSERT_TRUE(std::move(first).get().has_value());
+    worker.get_last_step_result();
+
+    auto input = step_input<TypeParam>(/*decode=*/true);
+    input.token_ids = torch::tensor({1, 2, 7}, torch::kInt32).to(device);
+    input.input_params.embedding.request_ids = {"second", "first", "new"};
+    input.sample_sequence_ids = {"second#0", "first#0", "new#0"};
+    input.sample_prior_output_rows = {1, 0, -1};
+    auto& sampling = input.sampling_params;
+    sampling.selected_token_idxes() =
+        torch::arange(3, torch::kInt64).to(device);
+    sampling.bad_words() =
+        torch::tensor({{{1, 3}}, {{1, 3}}, {{1, 3}}}, torch::kInt64).to(device);
+    sampling.bad_word_suffix() =
+        torch::full({3, 1}, -1, torch::kInt64).to(device);
+    sampling.seeds() = torch::tensor({7, 8, 9}, torch::kInt64).to(device);
+    sampling.seed_offsets() =
+        torch::tensor({10, 20, 30}, torch::kInt64).to(device);
+    worker.set_sampling_logits(torch::tensor({{4.0F, 0.0F, 0.0F, 10.0F},
+                                              {4.0F, 0.0F, 0.0F, 10.0F},
+                                              {4.0F, 0.0F, 0.0F, 10.0F}})
+                                   .to(device));
+
+    auto second = worker.step_async(input);
+    const auto output = std::move(second).get();
+    ASSERT_TRUE(output.has_value());
+    if (device.is_cpu()) {
+      EXPECT_TRUE(output->retained_inputs.empty());
+      EXPECT_EQ(output->ready_event, nullptr);
+    } else {
+      ASSERT_NE(output->ready_event, nullptr);
+      ASSERT_EQ(output->retained_inputs.size(), 1U);
+      const auto retained_rows = std::static_pointer_cast<const torch::Tensor>(
+          output->retained_inputs.front());
+      ASSERT_TRUE(retained_rows->device().is_cpu());
+      EXPECT_EQ(retained_rows->scalar_type(), torch::kInt64);
+      EXPECT_TRUE(retained_rows->is_pinned());
+      EXPECT_TRUE(torch::equal(*retained_rows,
+                               torch::tensor({1, 0, -1}, torch::kInt64)));
+      ASSERT_TRUE(output->ready_event->synchronize());
+    }
+    EXPECT_FALSE(worker.forward_prefix_tokens().defined());
+    const SamplingParameters& executed = worker.executed_sampling_params();
+    EXPECT_TRUE(torch::equal(
+        executed.prefix_tokens().to(torch::kCPU),
+        torch::tensor({{1, 1}, {2, -1}, {-1, -1}}, torch::kInt64)));
+    EXPECT_TRUE(torch::equal(executed.bad_word_suffix().to(torch::kCPU),
+                             torch::tensor({{1}, {2}, {-1}}, torch::kInt64)));
+    EXPECT_TRUE(torch::equal(executed.seed_offsets().to(torch::kCPU),
+                             torch::tensor({12, 21, 30}, torch::kInt64)));
+    // Only the reordered second sequence ends in the forbidden-word prefix.
+    EXPECT_TRUE(torch::equal(output->sample_output.next_tokens.to(torch::kCPU),
+                             torch::tensor({0, 3, 3}, torch::kInt64)));
+    EXPECT_FALSE(input.sampling_params.prefix_tokens().defined());
+    EXPECT_TRUE(
+        torch::equal(input.sampling_params.bad_word_suffix().to(torch::kCPU),
+                     torch::full({3, 1}, -1, torch::kInt64)));
+    EXPECT_TRUE(
+        torch::equal(input.sampling_params.seed_offsets().to(torch::kCPU),
+                     torch::tensor({10, 20, 30}, torch::kInt64)));
+    EXPECT_TRUE(torch::equal(
+        worker.get_last_step_result().sample_output.next_tokens.to(torch::kCPU),
+        output->sample_output.next_tokens.to(torch::kCPU)));
+  }
 }
 
 TYPED_TEST(ScheduleOverlapTest, NonDriverContinuesWithoutHostConsumption) {

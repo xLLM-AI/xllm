@@ -19,6 +19,7 @@ limitations under the License.
 #include <sys/mman.h>
 #include <torch/types.h>
 
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -205,11 +206,13 @@ class WorkerImpl {
   virtual std::optional<ForwardOutput> execute_no_sync_on_stream(
       const LlmForwardInput& input,
       Stream& compute_stream,
-      ForwardCompletion completion);
+      ForwardCompletion completion,
+      const std::function<void()>& prepare_sampling = {});
   virtual std::optional<ForwardOutput> execute_no_sync_on_stream(
       const VlmForwardInput& input,
       Stream& compute_stream,
-      ForwardCompletion completion);
+      ForwardCompletion completion,
+      const std::function<void()>& prepare_sampling = {});
 
   virtual void process_group_test();
 
@@ -395,10 +398,14 @@ class WorkerImpl {
 
   // Model-specific execution and decode rebuilding. The overlap coordinator
   // owns prior results, stream dependencies and publication.
+  // Leaf workers invoke prepare_sampling after forward and logits, immediately
+  // before sampling. Composite workers invoke it before their phase dispatch.
   virtual std::optional<ForwardOutput> step_for_schedule_overlap(
-      const LlmForwardInput& input);
+      const LlmForwardInput& input,
+      const std::function<void()>& prepare_sampling = {});
   virtual std::optional<ForwardOutput> step_for_schedule_overlap(
-      const VlmForwardInput& input);
+      const VlmForwardInput& input,
+      const std::function<void()>& prepare_sampling = {});
   // Orders linear-state restoration after input preparation on the compute
   // stream. Leaf workers use this before their no-sync forward; composite
   // workers use it before their regular step dispatch.
@@ -522,7 +529,8 @@ class WorkerImpl {
 
   template <typename Input>
   std::optional<ForwardOutput> step_for_schedule_overlap_impl(
-      const Input& input);
+      const Input& input,
+      const std::function<void()>& prepare_sampling);
   template <typename Input>
   void restore_json_object_states_impl(Input& input);
   template <typename Input>

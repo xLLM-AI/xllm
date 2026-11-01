@@ -16,6 +16,7 @@ limitations under the License.
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 
 #include "core/runtime/vlm_forward_params.h"
@@ -47,18 +48,21 @@ class VLMWorkerImpl final : public WorkerImpl {
 
  protected:
   std::optional<ForwardOutput> step_for_schedule_overlap(
-      const VlmForwardInput& input) override;
+      const VlmForwardInput& input,
+      const std::function<void()>& prepare_sampling = {}) override;
 
  private:
   std::optional<ForwardOutput> execute_no_sync_on_stream(
       const VlmForwardInput& input,
       Stream& compute_stream,
-      ForwardCompletion completion) override;
+      ForwardCompletion completion,
+      const std::function<void()>& prepare_sampling = {}) override;
 
   std::optional<ForwardOutput> step_internal(
       const VlmForwardInput& input,
       ForwardSyncPolicy sync_policy = ForwardSyncPolicy::LEGACY,
-      ForwardCompletion completion = ForwardCompletion::CALLER_MANAGED);
+      ForwardCompletion completion = ForwardCompletion::CALLER_MANAGED,
+      const std::function<void()>& prepare_sampling = {});
 };
 
 }  // namespace xllm

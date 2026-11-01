@@ -18,6 +18,8 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
+#include <algorithm>
+
 #include "core/runtime/json_object_decode_continuation.h"
 #include "core/runtime/vlm_forward_params.h"
 #include "core/runtime/worker_impl.h"
@@ -40,7 +42,18 @@ template <typename Input>
 std::optional<ForwardOutput> ScheduleOverlap::execute_impl(WorkerImpl& worker,
                                                            Input& input) {
   prepare_continuation_impl(worker, input);
-  auto output = worker.step_for_schedule_overlap(input);
+  torch::Tensor sampling_rows;
+  auto output = worker.step_for_schedule_overlap(
+      input, [&]() { sampling_rows = prepare_sampling_impl(worker, input); });
+  if (sampling_rows.defined()) {
+    if (output.has_value()) {
+      // Keep the pinned H2D source alive through this output's completion.
+      output->retained_inputs.emplace_back(
+          std::make_shared<torch::Tensor>(std::move(sampling_rows)));
+    } else {
+      CHECK_EQ(worker.compute_stream_->synchronize(), 0);
+    }
+  }
   worker.observe_execution_memory(input.input_params.meta.is_graph_warmup);
   complete_step_impl(input, *worker.compute_stream_, output);
   return output;
@@ -79,27 +92,6 @@ void ScheduleOverlap::prepare_continuation_impl(WorkerImpl& worker,
                                         state_.sample_sequence_ids(),
                                         worker.device_,
                                         compute_stream);
-  const auto& sampling = input.sampling_params;
-  const bool needs_sampling_history =
-      sampling.bad_words().defined() || sampling.seeds().defined() ||
-      sampling.repetition_penalties().defined() ||
-      sampling.frequency_penalties().defined();
-  if (needs_sampling_history &&
-      prior_output.sample_output.next_tokens.defined()) {
-    for (size_t row = 0; row < input.sample_prior_output_rows.size(); ++row) {
-      const int32_t prior_row = input.sample_prior_output_rows[row];
-      if (prior_row < 0) {
-        continue;
-      }
-      CHECK_LT(static_cast<size_t>(prior_row),
-               state_.sample_sequence_ids().size());
-      CHECK_EQ(input.sample_sequence_ids[row],
-               state_.sample_sequence_ids()[prior_row]);
-    }
-    advance_sampling_history(input.sampling_params,
-                             prior_output.sample_output.next_tokens,
-                             input.sample_prior_output_rows);
-  }
   if (reuse_tokens &&
       !worker.prepare_model_decode_continuation(input, prior_output)) {
     replace_tokens(
@@ -107,6 +99,50 @@ void ScheduleOverlap::prepare_continuation_impl(WorkerImpl& worker,
         prior_output,
         worker.can_prepare_npu_graph_decode_input(input.input_params));
   }
+}
+
+template <typename Input>
+torch::Tensor ScheduleOverlap::prepare_sampling_impl(WorkerImpl& worker,
+                                                     Input& input) {
+  if (input.token_ids.numel() == 0 ||
+      !input.input_params.meta.batch_forward_type.has_decode() ||
+      !state_.has_tokens() || input.sample_prior_output_rows.empty()) {
+    return {};
+  }
+  const auto& sampling = input.sampling_params;
+  if (!sampling.bad_words().defined() && !sampling.seeds().defined() &&
+      !sampling.repetition_penalties().defined() &&
+      !sampling.frequency_penalties().defined()) {
+    return {};
+  }
+  for (size_t row = 0; row < input.sample_prior_output_rows.size(); ++row) {
+    const int32_t prior_row = input.sample_prior_output_rows[row];
+    if (prior_row < 0) {
+      continue;
+    }
+    CHECK_LT(static_cast<size_t>(prior_row),
+             state_.sample_sequence_ids().size());
+    CHECK_EQ(input.sample_sequence_ids[row],
+             state_.sample_sequence_ids()[prior_row]);
+  }
+
+  auto stream_guard = worker.compute_stream_->set_stream_guard();
+  const auto& prior_tokens = state_.prior_output().sample_output.next_tokens;
+  const bool async_copy = !prior_tokens.device().is_cpu();
+  const torch::Tensor host_rows = torch::empty(
+      {static_cast<int64_t>(input.sample_prior_output_rows.size())},
+      torch::TensorOptions()
+          .device(torch::kCPU)
+          .dtype(torch::kInt64)
+          .pinned_memory(async_copy));
+  std::copy(input.sample_prior_output_rows.begin(),
+            input.sample_prior_output_rows.end(),
+            host_rows.data_ptr<int64_t>());
+  advance_sampling_history(
+      input.sampling_params,
+      prior_tokens,
+      host_rows.to(prior_tokens.device(), /*non_blocking=*/async_copy));
+  return async_copy ? host_rows : torch::Tensor{};
 }
 
 template <typename Input>

@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <torch/types.h>
 
+#include <functional>
+
 #include "forward_params.h"
 #include "framework/eplb/eplb_executor.h"
 #include "framework/model/causal_lm.h"
@@ -47,18 +49,21 @@ class LLMWorkerImpl : public WorkerImpl {
   std::optional<ForwardOutput> execute_no_sync_on_stream(
       const LlmForwardInput& input,
       Stream& compute_stream,
-      ForwardCompletion completion) override;
+      ForwardCompletion completion,
+      const std::function<void()>& prepare_sampling = {}) override;
 
   std::optional<ForwardOutput> step_internal(
       const LlmForwardInput& input,
       ForwardSyncPolicy sync_policy = ForwardSyncPolicy::LEGACY,
-      ForwardCompletion completion = ForwardCompletion::CALLER_MANAGED);
+      ForwardCompletion completion = ForwardCompletion::CALLER_MANAGED,
+      const std::function<void()>& prepare_sampling = {});
 
  protected:
   void prepare_expert_input(ExpertInput& input) const override;
 
   std::optional<ForwardOutput> step_for_schedule_overlap(
-      const LlmForwardInput& input) override;
+      const LlmForwardInput& input,
+      const std::function<void()>& prepare_sampling = {}) override;
 
  public:
 #if defined(USE_NPU)

@@ -1036,16 +1036,21 @@ void WorkerImpl::prepare_schedule_overlap(const VlmForwardInput& input) {
 
 template <typename Input>
 std::optional<ForwardOutput> WorkerImpl::step_for_schedule_overlap_impl(
-    const Input& input) {
+    const Input& input,
+    const std::function<void()>& prepare_sampling) {
   prepare_schedule_overlap(input);
   // Composite workers own their phase dispatch in step(). Leaf workers
   // override this method when they can expose a no-sync forward boundary.
+  if (prepare_sampling) {
+    prepare_sampling();
+  }
   return step(input);
 }
 
 std::optional<ForwardOutput> WorkerImpl::step_for_schedule_overlap(
-    const LlmForwardInput& input) {
-  return step_for_schedule_overlap_impl(input);
+    const LlmForwardInput& input,
+    const std::function<void()>& prepare_sampling) {
+  return step_for_schedule_overlap_impl(input, prepare_sampling);
 }
 
 bool WorkerImpl::model_supports_model_cp() const {
@@ -1256,7 +1261,8 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
 std::optional<ForwardOutput> WorkerImpl::execute_no_sync_on_stream(
     const LlmForwardInput& /*input*/,
     Stream& /*compute_stream*/,
-    ForwardCompletion /*completion*/) {
+    ForwardCompletion /*completion*/,
+    const std::function<void()>& /*prepare_sampling*/) {
   LOG(FATAL) << "execute_no_sync_on_stream is not supported by this worker";
   return std::nullopt;
 }
@@ -2913,14 +2919,16 @@ std::optional<ForwardOutput> WorkerImpl::step(
 std::optional<ForwardOutput> WorkerImpl::execute_no_sync_on_stream(
     const VlmForwardInput& /*input*/,
     Stream& /*compute_stream*/,
-    ForwardCompletion /*completion*/) {
+    ForwardCompletion /*completion*/,
+    const std::function<void()>& /*prepare_sampling*/) {
   LOG(FATAL) << "execute_no_sync_on_stream is not supported by this worker";
   return std::nullopt;
 }
 
 std::optional<ForwardOutput> WorkerImpl::step_for_schedule_overlap(
-    const VlmForwardInput& input) {
-  return step_for_schedule_overlap_impl(input);
+    const VlmForwardInput& input,
+    const std::function<void()>& prepare_sampling) {
+  return step_for_schedule_overlap_impl(input, prepare_sampling);
 }
 
 void WorkerImpl::set_hierarchy_layer_synchronizer(

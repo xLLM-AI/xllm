@@ -66,7 +66,11 @@ class ShutdownTestWorker final : public WorkerImpl {
 
  protected:
   std::optional<ForwardOutput> step_for_schedule_overlap(
-      const LlmForwardInput& /*input*/) override {
+      const LlmForwardInput& /*input*/,
+      const std::function<void()>& prepare_sampling = {}) override {
+    if (prepare_sampling) {
+      prepare_sampling();
+    }
     if (++step_count_ == 2) {
       second_step_entered_.set_value();
     }
