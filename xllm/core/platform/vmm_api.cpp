@@ -43,14 +43,34 @@ bool is_allocation_exhausted(int32_t result) {
 #endif
 }
 
-bool check_allocation_result(int32_t result, const char* operation) {
+const char* driver_error_message() {
+#if defined(USE_NPU)
+  const char* message = aclGetRecentErrMsg();
+  return message == nullptr ? "unavailable" : message;
+#else
+  return "unavailable";
+#endif
+}
+
+bool check_allocation_result(int32_t result,
+                             const char* operation,
+                             int32_t device_id,
+                             size_t requested_bytes) {
   if (result == 0) {
     return true;
   }
   if (is_allocation_exhausted(result)) {
+    LOG(WARNING) << "VMM operation failed with a driver "
+                    "resource-exhaustion error: operation="
+                 << operation << " device_index=" << device_id
+                 << " requested_bytes=" << requested_bytes
+                 << " driver_error=" << result
+                 << " driver_error_message=" << driver_error_message();
     return false;
   }
-  CHECK_EQ(result, 0) << operation;
+  CHECK_EQ(result, 0) << operation << " on device " << device_id
+                      << " requested_bytes=" << requested_bytes
+                      << " driver_error_message=" << driver_error_message();
   return false;
 }
 
@@ -184,8 +204,8 @@ bool try_create_phy_mem_handle(PhyMemHandle& phy_mem_handle,
 
   ret = cnMemCreate(&pending_handle, size, &prop, /*flags=*/0);
 
-  if (!check_allocation_result(ret,
-                               "Failed to create physical memory handle")) {
+  if (!check_allocation_result(
+          ret, "Failed to create physical memory handle", device_id, size)) {
     return false;
   }
   CNmemAccessDesc accessDesc = {};
@@ -195,7 +215,8 @@ bool try_create_phy_mem_handle(PhyMemHandle& phy_mem_handle,
   ret = cnMemSetAccess(pending_handle, size, &accessDesc, /*count=*/1);
   if (ret != 0) {
     release_phy_mem_handle(pending_handle);
-    return check_allocation_result(ret, "Failed to set physical memory access");
+    return check_allocation_result(
+        ret, "Failed to set physical memory access", device_id, size);
   }
 #elif defined(USE_MUSA)
   MUmemAllocationProp prop = {};
@@ -222,8 +243,8 @@ bool try_create_phy_mem_handle(PhyMemHandle& phy_mem_handle,
   (void)device_id;
   (void)size;
 #endif
-  if (!check_allocation_result(ret,
-                               "Failed to create physical memory handle")) {
+  if (!check_allocation_result(
+          ret, "Failed to create physical memory handle", device_id, size)) {
     return false;
   }
   phy_mem_handle = pending_handle;
@@ -305,7 +326,8 @@ bool try_map(VirPtr& vir_ptr,
   ret = cnMemMap(vir_ptr, granularity_size, 0, phy_mem_handle, 0);
 #elif defined(USE_CUDA) || defined(USE_ILU)
   ret = cuMemMap(vir_ptr, granularity_size, 0, phy_mem_handle, 0);
-  if (!check_allocation_result(ret, "Failed to map virtual memory")) {
+  if (!check_allocation_result(
+          ret, "Failed to map virtual memory", device_id, granularity_size)) {
     return false;
   }
 
@@ -318,11 +340,14 @@ bool try_map(VirPtr& vir_ptr,
   if (ret != 0) {
     unmap_chunk(vir_ptr, granularity_size);
     return check_allocation_result(ret,
-                                   "Failed to set memory access permissions");
+                                   "Failed to set memory access permissions",
+                                   device_id,
+                                   granularity_size);
   }
 #elif defined(USE_MUSA)
   ret = muMemMap(vir_ptr, granularity_size, 0, phy_mem_handle, 0);
-  if (!check_allocation_result(ret, "Failed to map virtual memory")) {
+  if (!check_allocation_result(
+          ret, "Failed to map virtual memory", device_id, granularity_size)) {
     return false;
   }
 
@@ -335,11 +360,14 @@ bool try_map(VirPtr& vir_ptr,
   if (ret != 0) {
     unmap_chunk(vir_ptr, granularity_size);
     return check_allocation_result(ret,
-                                   "Failed to set memory access permissions");
+                                   "Failed to set memory access permissions",
+                                   device_id,
+                                   granularity_size);
   }
 #elif defined(USE_DCU)
   ret = hipMemMap(vir_ptr, granularity_size, 0, phy_mem_handle, 0);
-  if (!check_allocation_result(ret, "Failed to map virtual memory")) {
+  if (!check_allocation_result(
+          ret, "Failed to map virtual memory", device_id, granularity_size)) {
     return false;
   }
 
@@ -352,10 +380,13 @@ bool try_map(VirPtr& vir_ptr,
   if (ret != 0) {
     unmap_chunk(vir_ptr, granularity_size);
     return check_allocation_result(ret,
-                                   "Failed to set memory access permissions");
+                                   "Failed to set memory access permissions",
+                                   device_id,
+                                   granularity_size);
   }
 #endif
-  return check_allocation_result(ret, "Failed to map virtual memory");
+  return check_allocation_result(
+      ret, "Failed to map virtual memory", device_id, granularity_size);
 }
 
 void unmap(VirPtr& vir_ptr, size_t aligned_size) {

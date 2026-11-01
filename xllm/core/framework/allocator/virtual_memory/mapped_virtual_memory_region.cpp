@@ -206,8 +206,11 @@ bool MappedVirtualMemoryRegion::map_pages(
 
   auto pages = pool.batch_get(missing.size());
   if (pages.empty()) {
-    LOG(WARNING) << "Not enough physical pages for " << missing.size()
-                 << " MappedVirtualMemoryRegion mappings";
+    LOG(WARNING) << "MappedVirtualMemoryRegion page allocation failed: "
+                    "reason=pool_allocation_failed"
+                 << " requested_pages=" << missing.size() << " device_index="
+                 << static_cast<int32_t>(pool.device().index())
+                 << " page_size=" << pool.page_size();
     return false;
   }
 
@@ -216,6 +219,15 @@ bool MappedVirtualMemoryRegion::map_pages(
     VirPtr addr = add_vir_ptr_offset(region->vaddr_, offset);
     PhyMemHandle handle = pages[i]->get_phy_handle();
     if (!vmm::try_map(addr, handle, region->page_size_, region->dev_.index())) {
+      LOG(WARNING) << "MappedVirtualMemoryRegion failed to map page: "
+                   << "reason=backend_mapping_failure"
+                   << " device_index="
+                   << static_cast<int32_t>(region->dev_.index())
+                   << " physical_page_id=" << pages[i]->page_id()
+                   << " region_page_index=" << offset / region->page_size_
+                   << " region_offset=" << offset
+                   << " page_size=" << region->page_size_
+                   << " batch_index=" << i << " batch_size=" << missing.size();
       // No page ownership has been published to a region yet. Undo only this
       // batch's new aliases; preexisting mappings remain untouched.
       for (size_t mapped = 0; mapped < i; ++mapped) {

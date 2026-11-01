@@ -737,6 +737,29 @@ TEST_F(PhysicalPagePoolTest, FailedWeightReservationLeavesNoPinnedSlots) {
   EXPECT_EQ(pool.num_available(), kCapacity);
 }
 
+TEST_F(PhysicalPagePoolTest, RejectsFragmentedContiguousAllocation) {
+  auto& pool = PhysicalPagePool::get_instance();
+  auto pages = pool.batch_get(kCapacity);
+  ASSERT_EQ(pages.size(), kCapacity);
+
+  std::vector<std::unique_ptr<PhysicalPage>> held_pages;
+  held_pages.reserve(3);
+  for (size_t i = 0; i < pages.size(); ++i) {
+    if (i % 2 == 0) {
+      held_pages.emplace_back(std::move(pages[i]));
+    } else {
+      pool.put(std::move(pages[i]));
+    }
+  }
+
+  EXPECT_EQ(pool.num_available(), 3);
+  EXPECT_EQ(pool.allocate_contiguous_from_right(/*count=*/2), -1);
+  EXPECT_EQ(pool.num_available(), 3);
+
+  pool.batch_put(held_pages);
+  EXPECT_EQ(pool.num_available(), kCapacity);
+}
+
 TEST_F(PhysicalPagePoolTest, ConcurrentGrowthRechecksMemoryUnderOnePoolLock) {
   auto& pool = PhysicalPagePool::get_instance();
   std::atomic<int64_t> free_bytes(3 * kPageSize);

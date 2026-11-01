@@ -25,6 +25,13 @@ limitations under the License.
 #include "core/platform/device.h"
 
 namespace xllm {
+namespace {
+
+size_t saturating_subtract(size_t value, size_t subtrahend) {
+  return value >= subtrahend ? value - subtrahend : 0;
+}
+
+}  // namespace
 
 void PhysicalPagePool::init(const torch::Device& device,
                             size_t num_pages,
@@ -135,16 +142,52 @@ bool PhysicalPagePool::materialize_pages_locked(
   const auto allocator_stats = allocator_memory_query_();
   if (free_bytes < 0) {
     execution_memory_budget_.observe_allocator_memory(allocator_stats);
+    LOG(WARNING) << "PhysicalPagePool growth failed: "
+                    "reason=free_memory_query_failed"
+                 << " device_index=" << static_cast<int32_t>(device_.index())
+                 << " requested_pages=" << missing.size()
+                 << " committed_pages=" << num_committed_pages_
+                 << " allocated_pages=" << num_allocated_pages_
+                 << " active_pages=" << num_active_pages_
+                 << " total_pages=" << num_total_pages_
+                 << " page_size=" << page_size_ << " free_bytes=" << free_bytes;
     return false;
   }
   const size_t headroom = allocation_headroom_locked(
       static_cast<size_t>(free_bytes), allocator_stats);
   if (missing.size() >
       (std::numeric_limits<size_t>::max() - headroom) / page_size_) {
+    LOG(WARNING) << "PhysicalPagePool growth failed: "
+                    "reason=request_size_overflow"
+                 << " device_index=" << static_cast<int32_t>(device_.index())
+                 << " requested_pages=" << missing.size()
+                 << " page_size=" << page_size_
+                 << " headroom_bytes=" << headroom
+                 << " growth_reserve_bytes=" << growth_reserve_bytes_
+                 << " allocation_headroom_bytes=" << allocation_headroom_bytes_;
     return false;
   }
   const size_t required_bytes = missing.size() * page_size_ + headroom;
   if (static_cast<uint64_t>(free_bytes) < required_bytes) {
+    LOG(WARNING)
+        << "PhysicalPagePool growth failed: "
+           "reason=insufficient_free_memory"
+        << " device_index=" << static_cast<int32_t>(device_.index())
+        << " requested_pages=" << missing.size() << " page_size=" << page_size_
+        << " required_bytes=" << required_bytes << " free_bytes=" << free_bytes
+        << " headroom_bytes=" << headroom
+        << " growth_reserve_bytes=" << growth_reserve_bytes_
+        << " allocation_headroom_bytes=" << allocation_headroom_bytes_
+        << " allocator_stats_available=" << allocator_stats.has_value()
+        << " allocator_reserved_bytes="
+        << (allocator_stats.has_value() ? allocator_stats->reserved_bytes : 0)
+        << " allocator_reported_peak_reserved_bytes="
+        << (allocator_stats.has_value() ? allocator_stats->peak_reserved_bytes
+                                        : 0)
+        << " committed_pages=" << num_committed_pages_
+        << " allocated_pages=" << num_allocated_pages_
+        << " active_pages=" << num_active_pages_
+        << " total_pages=" << num_total_pages_;
     return false;
   }
   std::vector<std::unique_ptr<PhysicalPage>> pending;
@@ -155,6 +198,26 @@ bool PhysicalPagePool::materialize_pages_locked(
     auto page = page_factory_(page_id);
     if (page == nullptr) {
       // Private handles are destroyed without publishing slots or accounting.
+      LOG(WARNING)
+          << "PhysicalPagePool growth failed: "
+             "reason=physical_page_creation"
+          << " device_index=" << static_cast<int32_t>(device_.index())
+          << " page_id=" << page_id << " creation_index=" << pending.size()
+          << " requested_pages=" << missing.size()
+          << " available_free_slots=" << free_page_ids_.size()
+          << " page_size=" << page_size_
+          << " free_bytes_before_creation=" << free_bytes
+          << " required_bytes_before_creation=" << required_bytes
+          << " headroom_bytes_before_creation=" << headroom
+          << " allocator_stats_available=" << allocator_stats.has_value()
+          << " allocator_reserved_bytes="
+          << (allocator_stats.has_value() ? allocator_stats->reserved_bytes : 0)
+          << " allocator_reported_peak_reserved_bytes="
+          << (allocator_stats.has_value() ? allocator_stats->peak_reserved_bytes
+                                          : 0)
+          << " committed_pages=" << num_committed_pages_
+          << " pending_pages=" << pending.size()
+          << " allocated_pages=" << num_allocated_pages_;
       return false;
     }
     pending_ptrs.emplace_back(page.get());
@@ -169,6 +232,14 @@ bool PhysicalPagePool::materialize_pages_locked(
   execution_memory_budget_.observe_allocator_memory(allocator_stats_before);
   execution_memory_budget_.observe_allocator_memory(allocator_stats_after);
   if (remaining_bytes < 0) {
+    LOG(WARNING) << "PhysicalPagePool growth failed: "
+                    "reason=post_allocation_memory_query_failed"
+                 << " device_index=" << static_cast<int32_t>(device_.index())
+                 << " requested_pages=" << missing.size()
+                 << " page_size=" << page_size_
+                 << " committed_pages=" << num_committed_pages_
+                 << " allocated_pages=" << num_allocated_pages_
+                 << " remaining_bytes=" << remaining_bytes;
     return false;
   }
   // Pending handles are already resident, although pool ownership has not
@@ -188,10 +259,49 @@ bool PhysicalPagePool::materialize_pages_locked(
                             allocation_headroom_bytes_,
                             allocator_stats_after)));
   if (static_cast<uint64_t>(remaining_bytes) < remaining_headroom) {
+    LOG(WARNING) << "PhysicalPagePool growth failed: "
+                    "reason=post_allocation_headroom"
+                 << " device_index=" << static_cast<int32_t>(device_.index())
+                 << " requested_pages=" << missing.size()
+                 << " page_size=" << page_size_
+                 << " remaining_bytes=" << remaining_bytes
+                 << " required_headroom_bytes=" << remaining_headroom
+                 << " growth_reserve_bytes=" << growth_reserve_bytes_
+                 << " allocation_headroom_bytes=" << allocation_headroom_bytes_
+                 << " allocator_stats_before_available="
+                 << allocator_stats_before.has_value()
+                 << " allocator_reserved_before_bytes="
+                 << (allocator_stats_before.has_value()
+                         ? allocator_stats_before->reserved_bytes
+                         : 0)
+                 << " allocator_peak_before_bytes="
+                 << (allocator_stats_before.has_value()
+                         ? allocator_stats_before->peak_reserved_bytes
+                         : 0)
+                 << " allocator_stats_after_available="
+                 << allocator_stats_after.has_value()
+                 << " allocator_reserved_after_bytes="
+                 << (allocator_stats_after.has_value()
+                         ? allocator_stats_after->reserved_bytes
+                         : 0)
+                 << " allocator_peak_after_bytes="
+                 << (allocator_stats_after.has_value()
+                         ? allocator_stats_after->peak_reserved_bytes
+                         : 0)
+                 << " committed_pages=" << num_committed_pages_
+                 << " pending_pages=" << pending.size()
+                 << " allocated_pages=" << num_allocated_pages_;
     return false;
   }
   auto mapping = shared_mapping_.lock();
   if (mapping != nullptr && !mapping->map_pages(pending_ptrs)) {
+    LOG(WARNING) << "PhysicalPagePool growth failed: "
+                    "reason=shared_page_mapping"
+                 << " device_index=" << static_cast<int32_t>(device_.index())
+                 << " requested_pages=" << missing.size()
+                 << " page_size=" << page_size_
+                 << " committed_pages=" << num_committed_pages_
+                 << " allocated_pages=" << num_allocated_pages_;
     return false;
   }
   for (size_t i = 0; i < missing.size(); ++i) {
@@ -212,7 +322,22 @@ std::vector<std::unique_ptr<PhysicalPage>> PhysicalPagePool::batch_get(
     size_t count) {
   std::lock_guard<std::mutex> lock(mtx_);
   CHECK(initialized_) << "PhysicalPagePool not initialized";
-  if (count == 0 || count > num_total_pages_ - num_allocated_pages_) {
+  if (count == 0) {
+    return {};
+  }
+  const size_t available_logical_slots =
+      saturating_subtract(num_total_pages_, num_allocated_pages_);
+  if (count > available_logical_slots) {
+    LOG(WARNING) << "PhysicalPagePool allocation failed: "
+                    "reason=logical_capacity"
+                 << " device_index=" << static_cast<int32_t>(device_.index())
+                 << " requested_pages=" << count
+                 << " available_logical_slots=" << available_logical_slots
+                 << " available_free_slots=" << free_page_ids_.size()
+                 << " committed_pages=" << num_committed_pages_
+                 << " allocated_pages=" << num_allocated_pages_
+                 << " active_pages=" << num_active_pages_
+                 << " total_pages=" << num_total_pages_;
     return {};
   }
   std::vector<page_id_t> page_ids;
@@ -226,6 +351,20 @@ std::vector<std::unique_ptr<PhysicalPage>> PhysicalPagePool::batch_get(
     if (!page_active_[i]) {
       page_ids.emplace_back(static_cast<page_id_t>(i));
     }
+  }
+  if (page_ids.size() < count) {
+    LOG(WARNING) << "PhysicalPagePool allocation failed: "
+                    "reason=logical_accounting_mismatch"
+                 << " device_index=" << static_cast<int32_t>(device_.index())
+                 << " requested_pages=" << count
+                 << " selected_pages=" << page_ids.size()
+                 << " available_logical_slots=" << available_logical_slots
+                 << " available_free_slots=" << free_page_ids_.size()
+                 << " committed_pages=" << num_committed_pages_
+                 << " allocated_pages=" << num_allocated_pages_
+                 << " active_pages=" << num_active_pages_
+                 << " total_pages=" << num_total_pages_;
+    return {};
   }
   std::vector<std::unique_ptr<PhysicalPage>> result;
   result.reserve(count);
@@ -311,7 +450,20 @@ void PhysicalPagePool::reserve_pages_locked(
 page_id_t PhysicalPagePool::allocate_contiguous_from_right(size_t count) {
   std::lock_guard<std::mutex> lock(mtx_);
   CHECK(initialized_) << "PhysicalPagePool not initialized";
-  if (count == 0 || count > num_total_pages_ - num_allocated_pages_) {
+  const size_t available_logical_slots =
+      saturating_subtract(num_total_pages_, num_allocated_pages_);
+  if (count == 0) {
+    return -1;
+  }
+  if (count > available_logical_slots) {
+    LOG(WARNING) << "PhysicalPagePool contiguous allocation failed: "
+                    "reason=logical_capacity"
+                 << " device_index=" << static_cast<int32_t>(device_.index())
+                 << " requested_pages=" << count
+                 << " available_logical_slots=" << available_logical_slots
+                 << " available_free_slots=" << free_page_ids_.size()
+                 << " allocated_pages=" << num_allocated_pages_
+                 << " total_pages=" << num_total_pages_;
     return -1;
   }
   size_t run = 0;
@@ -327,6 +479,14 @@ page_id_t PhysicalPagePool::allocate_contiguous_from_right(size_t count) {
     }
   }
   if (start_page < 0) {
+    LOG(WARNING) << "PhysicalPagePool contiguous allocation failed: "
+                    "reason=contiguous_capacity"
+                 << " device_index=" << static_cast<int32_t>(device_.index())
+                 << " requested_pages=" << count
+                 << " available_logical_slots=" << available_logical_slots
+                 << " available_free_slots=" << free_page_ids_.size()
+                 << " allocated_pages=" << num_allocated_pages_
+                 << " total_pages=" << num_total_pages_;
     return -1;
   }
   std::vector<page_id_t> page_ids;
@@ -347,7 +507,20 @@ std::vector<page_id_t> PhysicalPagePool::allocate_pages_from_right(
     size_t count) {
   std::lock_guard<std::mutex> lock(mtx_);
   CHECK(initialized_) << "PhysicalPagePool not initialized";
-  if (count == 0 || count > num_total_pages_ - num_allocated_pages_) {
+  const size_t available_logical_slots =
+      saturating_subtract(num_total_pages_, num_allocated_pages_);
+  if (count == 0) {
+    return {};
+  }
+  if (count > available_logical_slots) {
+    LOG(WARNING) << "PhysicalPagePool right-side allocation failed: "
+                    "reason=logical_capacity"
+                 << " device_index=" << static_cast<int32_t>(device_.index())
+                 << " requested_pages=" << count
+                 << " available_logical_slots=" << available_logical_slots
+                 << " available_free_slots=" << free_page_ids_.size()
+                 << " allocated_pages=" << num_allocated_pages_
+                 << " total_pages=" << num_total_pages_;
     return {};
   }
   std::vector<page_id_t> page_ids;
@@ -356,8 +529,20 @@ std::vector<page_id_t> PhysicalPagePool::allocate_pages_from_right(
        i >= 0 && page_ids.size() < count;
        --i) {
     if (!page_allocated_[i]) {
-      page_ids.emplace_back(i);
+      page_ids.emplace_back(static_cast<page_id_t>(i));
     }
+  }
+  if (page_ids.size() < count) {
+    LOG(WARNING) << "PhysicalPagePool right-side allocation failed: "
+                    "reason=logical_accounting_mismatch"
+                 << " device_index=" << static_cast<int32_t>(device_.index())
+                 << " requested_pages=" << count
+                 << " bitmap_free_pages=" << page_ids.size()
+                 << " available_logical_slots=" << available_logical_slots
+                 << " available_free_slots=" << free_page_ids_.size()
+                 << " allocated_pages=" << num_allocated_pages_
+                 << " total_pages=" << num_total_pages_;
+    return {};
   }
   if (!materialize_pages_locked(page_ids)) {
     return {};
@@ -410,8 +595,10 @@ size_t PhysicalPagePool::num_allocatable() const {
   if (!initialized_) {
     return 0;
   }
-  const size_t idle_pages = num_committed_pages_ - num_allocated_pages_;
-  const size_t uncommitted_pages = num_total_pages_ - num_committed_pages_;
+  const size_t idle_pages =
+      saturating_subtract(num_committed_pages_, num_allocated_pages_);
+  const size_t uncommitted_pages =
+      saturating_subtract(num_total_pages_, num_committed_pages_);
   const auto allocator_stats = allocator_memory_query_();
   if (uncommitted_pages == 0) {
     execution_memory_budget_.observe_allocator_memory(allocator_stats);
@@ -490,7 +677,8 @@ size_t PhysicalPagePool::trim_idle(size_t keep_pages) {
   if (mapping != nullptr && mapping.use_count() > 2) {
     return 0;
   }
-  const size_t idle_pages = num_committed_pages_ - num_allocated_pages_;
+  const size_t idle_pages =
+      saturating_subtract(num_committed_pages_, num_allocated_pages_);
   if (idle_pages <= keep_pages) {
     return 0;
   }
