@@ -1134,7 +1134,6 @@ template <typename TargetInput>
 int64_t MTPWorkerImpl<TargetInput>::spec_verify_block_table_width(
     const torch::Tensor& block_tables) const {
   CHECK(block_tables.defined() && block_tables.dim() == 2);
-  CHECK_GT(options_.block_size(), 0);
   int64_t required_width = block_tables.size(1);
   if (impl_ != nullptr) {
     const int64_t declared_capacity =

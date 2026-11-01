@@ -121,6 +121,11 @@ FlashInferAttentionImpl::forward(const AttentionMetadata& attn_metadata,
     output = output.view({-1, num_heads_ * head_size_});
     return std::make_tuple(output, output_lse);
   }
+  if (attn_metadata.enable_cuda_graph) {
+    CHECK(attn_metadata.plan_info->plan_info.defined())
+        << "plan_info plan_info should not be null when enable_cuda_graph is "
+           "true";
+  }
 
   query = query.view({-1, num_heads_, head_size_});
   key = key.view({-1, num_kv_heads_, head_size_});
@@ -171,9 +176,6 @@ void FlashInferAttentionImpl::prefill_forward(
       use_custom_mask);
 
   if (attn_metadata.enable_cuda_graph) {
-    CHECK(attn_metadata.plan_info->plan_info.defined())
-        << "plan_info plan_info should not be null when enable_cuda_graph is "
-           "true";
     VLOG(kGraphExecutorLogVerboseLevel)
         << "no need to update plan_info for CUDA graph";
   } else {
@@ -242,9 +244,6 @@ void FlashInferAttentionImpl::chunked_prefill_forward(
   std::string backend = "fa2";
 
   if (attn_metadata.enable_cuda_graph) {
-    CHECK(attn_metadata.plan_info->plan_info.defined())
-        << "plan_info plan_info should not be null when enable_cuda_graph is "
-           "true";
     VLOG(kGraphExecutorLogVerboseLevel)
         << "no need to update plan_info for CUDA graph";
   } else {
@@ -304,9 +303,6 @@ void FlashInferAttentionImpl::decoder_forward(
   std::string backend = "fa2";
 
   if (attn_metadata.enable_cuda_graph) {
-    CHECK(attn_metadata.plan_info->plan_info.defined())
-        << "plan_info plan_info should not be null when enable_cuda_graph is "
-           "true";
     VLOG(kGraphExecutorLogVerboseLevel)
         << "no need to update plan_info for CUDA graph";
   } else {

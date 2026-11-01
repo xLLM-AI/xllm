@@ -50,7 +50,6 @@ namespace xllm {
 namespace {
 
 void configure_disaggregated_pd_options(Options* options) {
-  CHECK(options != nullptr);
   if (!options->enable_disagg_pd()) {
     return;
   }

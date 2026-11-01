@@ -57,7 +57,6 @@ SlidingWindowBlockManager::allocate_for_sequence(Sequence* seq,
   if (restore_tokens > kv_state.kv_cache_tokens_num()) {
     CHECK_LE(restore_tokens, num_tokens);
     const size_t block_size = options_.block_size();
-    CHECK_GT(block_size, 0u);
     const size_t held = kv_state.num_blocks(block_type());
     const size_t logical_blocks = (num_tokens + block_size - 1) / block_size;
     if (logical_blocks <= held) {
@@ -105,7 +104,6 @@ SlidingWindowBlockManager::allocate_for_sequence(Sequence* seq,
     // reclaimable blocks make the retry large enough to succeed; otherwise a
     // failed composite round must preserve the existing SWA state.
     const size_t block_size = options_.block_size();
-    CHECK_GT(block_size, 0u);
     const size_t held = kv_state.num_blocks(block_type());
     const size_t num_blocks_needed = (num_tokens + block_size - 1) / block_size;
     CHECK_GT(num_blocks_needed, held);
@@ -120,7 +118,6 @@ SlidingWindowBlockManager::allocate_for_sequence(Sequence* seq,
   }
 
   const size_t block_size = options_.block_size();
-  CHECK_GT(block_size, 0u);
   const size_t logical_blocks = (num_tokens + block_size - 1) / block_size;
   const size_t sliding_window_tokens =
       std::max<size_t>(options_.sliding_window_size(), 1);
@@ -143,7 +140,6 @@ SlidingWindowBlockManager::allocate_for_sequence(Sequence* seq,
 bool SlidingWindowBlockManager::allocate_for_prefetch(Sequence* seq,
                                                       size_t num_tokens) {
   const size_t block_size = options_.block_size();
-  CHECK_GT(block_size, 0u);
   const size_t target_blocks = num_tokens / block_size;
   const size_t blocks_per_window =
       static_cast<size_t>(options_.swa_blocks_per_seq());
@@ -196,7 +192,7 @@ size_t SlidingWindowBlockManager::num_out_of_window_blocks(
     size_t cached_tokens) const {
   const size_t block_size = options_.block_size();
   const size_t held = kv_state.num_blocks(block_type());
-  if (block_size == 0 || held == 0) {
+  if (held == 0) {
     return 0;
   }
   const size_t num_spec_tokens =
@@ -235,8 +231,7 @@ std::vector<Block> SlidingWindowBlockManager::allocate_shared(
     const Slice<Block>& /*existed_shared_blocks*/,
     const MMData& mm_data,
     const Slice<XXH3Key>& block_hashes) {
-  if (!options_.enable_prefix_cache() || options_.block_size() == 0 ||
-      prefix_cache_ == nullptr) {
+  if (!options_.enable_prefix_cache()) {
     return {};
   }
   AUTO_COUNTER(prefix_cache_latency_seconds_match);
@@ -252,7 +247,7 @@ std::vector<Block> SlidingWindowBlockManager::allocate_shared(
   // per block id, so blocks shared across sequences are only counted once.
   size_t added = 0;
   for (const auto& b : result) {
-    if (b.is_valid() && mark_used(&usage_accounted_ids_, b.id())) {
+    if (b.is_valid() && mark_used(usage_accounted_ids_, b.id())) {
       ++added;
     }
   }

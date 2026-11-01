@@ -48,12 +48,12 @@ class RankGenerator final {
   std::unordered_map<std::string, std::vector<std::vector<int32_t>>>
   get_ranks_mapping(std::vector<int32_t>& group_ranks,
                     std::vector<std::string>& group_order) {
-    CHECK(!group_ranks.empty() && group_ranks.size() != 0)
+    CHECK(!group_ranks.empty())
         << "The RankGenerator expected to initialize with group_ranks that "
            "contains the ranks of sub groups"
         << ", but got an empty group_ranks";
 
-    CHECK(!group_order.empty() && group_order.size() != 0)
+    CHECK(!group_order.empty())
         << "The RankGenerator expected to initialize with group_order that "
            "indicates the priority of sub groups"
         << ", but got empty string";

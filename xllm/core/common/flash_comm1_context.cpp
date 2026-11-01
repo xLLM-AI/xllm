@@ -287,7 +287,6 @@ namespace {
 torch::Tensor reduce_scatter_padded_local(const torch::Tensor& input,
                                           const FlashComm1Context& ctx) {
   CHECK(ctx.tp_group);
-  CHECK(is_sequence_sharded(ctx));
   CHECK_EQ(input.size(0), ctx.original_num_tokens)
       << "FC1 row-parallel reduce_scatter expects full real-token output "
       << "before communication.";

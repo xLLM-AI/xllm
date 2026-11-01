@@ -57,7 +57,6 @@ void check_input_metadata(const torch::Tensor& input, const char* name) {
         input.scalar_type() == torch::kInt64)
       << name << " must contain int32 or int64 token IDs";
   for (int64_t dim = 0; dim < input.dim(); ++dim) {
-    CHECK_GE(input.size(dim), 0) << name;
     CHECK_LE(input.size(dim), kInt32Max) << name << " shape exceeds INT32";
     CHECK_GE(input.stride(dim), 0) << name << " requires nonnegative strides";
     CHECK_LE(input.stride(dim), kInt32Max) << name << " stride exceeds INT32";

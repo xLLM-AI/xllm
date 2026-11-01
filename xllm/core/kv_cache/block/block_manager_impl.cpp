@@ -23,28 +23,26 @@ limitations under the License.
 namespace xllm {
 namespace {
 
-bool clear_used(std::vector<uint8_t>* usage_ids, int32_t block_id) {
-  CHECK(usage_ids != nullptr);
+bool clear_used(std::vector<uint8_t>& usage_ids, int32_t block_id) {
   CHECK_GE(block_id, 0);
-  CHECK_LT(static_cast<size_t>(block_id), usage_ids->size());
-  if ((*usage_ids)[block_id] == 0) {
+  CHECK_LT(static_cast<size_t>(block_id), usage_ids.size());
+  if (usage_ids[block_id] == 0) {
     return false;
   }
-  (*usage_ids)[block_id] = 0;
+  usage_ids[block_id] = 0;
   return true;
 }
 
 }  // namespace
 
-bool BlockManagerImpl::mark_used(std::vector<uint8_t>* usage_ids,
+bool BlockManagerImpl::mark_used(std::vector<uint8_t>& usage_ids,
                                  int32_t block_id) {
-  CHECK(usage_ids != nullptr);
   CHECK_GE(block_id, 0);
-  CHECK_LT(static_cast<size_t>(block_id), usage_ids->size());
-  if ((*usage_ids)[block_id] != 0) {
+  CHECK_LT(static_cast<size_t>(block_id), usage_ids.size());
+  if (usage_ids[block_id] != 0) {
     return false;
   }
-  (*usage_ids)[block_id] = 1;
+  usage_ids[block_id] = 1;
   return true;
 }
 
@@ -92,7 +90,7 @@ std::vector<Block> BlockManagerImpl::allocate(size_t num_blocks) {
     size_t prev_count =
         num_free_blocks_.fetch_sub(1, std::memory_order_relaxed);
     const int32_t block_id = free_blocks_[prev_count - 1];
-    CHECK(mark_used(&usage_accounted_ids_, block_id))
+    CHECK(mark_used(usage_accounted_ids_, block_id))
         << "block " << block_id << " usage accounted repeatedly";
     blocks.emplace_back(block_id, this);
   }
@@ -113,7 +111,7 @@ void BlockManagerImpl::deallocate(const Slice<Block>& blocks) {
     // physical ids return to the free list when the last Block alias is
     // dropped.
     if ((!options_.enable_prefix_cache() || block.ref_count() <= 2u) &&
-        clear_used(&usage_accounted_ids_, block.id())) {
+        clear_used(usage_accounted_ids_, block.id())) {
       if (num_used_blocks_ == 0) {
         LOG(ERROR) << "num_used_blocks_==0 cannot fetch_sub for id:"
                    << block.id()
@@ -181,7 +179,7 @@ std::vector<Block> BlockManagerImpl::allocate_shared(
 
     // update effective block usage
     for (const auto& block : shared_blocks) {
-      if (mark_used(&usage_accounted_ids_, block.id())) {
+      if (mark_used(usage_accounted_ids_, block.id())) {
         num_used_blocks_.fetch_add(1, std::memory_order_relaxed);
       }
     }
@@ -223,7 +221,7 @@ Block BlockManagerImpl::allocate() {
 void BlockManagerImpl::free(int32_t block_id) {
   // do nothing for reserved block 0
   if (block_id != 0) {
-    if (clear_used(&usage_accounted_ids_, block_id)) {
+    if (clear_used(usage_accounted_ids_, block_id)) {
       CHECK_GT(num_used_blocks_.load(std::memory_order_relaxed), 0u);
       num_used_blocks_.fetch_sub(1, std::memory_order_relaxed);
     }
@@ -252,9 +250,6 @@ std::optional<std::vector<Block>> BlockManagerImpl::allocate_for_sequence(
   if (seq == nullptr) {
     return std::nullopt;
   }
-  if (block_size_ == 0) {
-    return std::vector<Block>{};
-  }
   const size_t held = kv_state.num_blocks(block_type());
   const size_t num_blocks_needed = (num_tokens + block_size_ - 1) / block_size_;
   if (num_blocks_needed <= held) {
@@ -275,7 +270,7 @@ bool BlockManagerImpl::allocate_for_prefetch(Sequence* seq, size_t num_tokens) {
 bool BlockManagerImpl::allocate_prefetch_range(Sequence* seq,
                                                size_t num_tokens,
                                                size_t required_begin_block) {
-  if (seq == nullptr || block_size_ == 0) {
+  if (seq == nullptr) {
     return false;
   }
 
