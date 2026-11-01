@@ -218,6 +218,8 @@ bool PhysicalPagePool::materialize_pages_locked(
         << " allocator_stats_available=" << allocator_stats.has_value()
         << " allocator_reserved_bytes="
         << (allocator_stats.has_value() ? allocator_stats->reserved_bytes : 0)
+        << " allocator_allocated_bytes="
+        << (allocator_stats.has_value() ? allocator_stats->allocated_bytes : 0)
         << " allocator_reported_peak_reserved_bytes="
         << (allocator_stats.has_value() ? allocator_stats->peak_reserved_bytes
                                         : 0)
@@ -249,6 +251,9 @@ bool PhysicalPagePool::materialize_pages_locked(
           << " allocator_stats_available=" << allocator_stats.has_value()
           << " allocator_reserved_bytes="
           << (allocator_stats.has_value() ? allocator_stats->reserved_bytes : 0)
+          << " allocator_allocated_bytes="
+          << (allocator_stats.has_value() ? allocator_stats->allocated_bytes
+                                          : 0)
           << " allocator_reported_peak_reserved_bytes="
           << (allocator_stats.has_value() ? allocator_stats->peak_reserved_bytes
                                           : 0)
@@ -312,6 +317,10 @@ bool PhysicalPagePool::materialize_pages_locked(
                  << (allocator_stats_before.has_value()
                          ? allocator_stats_before->reserved_bytes
                          : 0)
+                 << " allocator_allocated_before_bytes="
+                 << (allocator_stats_before.has_value()
+                         ? allocator_stats_before->allocated_bytes
+                         : 0)
                  << " allocator_peak_before_bytes="
                  << (allocator_stats_before.has_value()
                          ? allocator_stats_before->peak_reserved_bytes
@@ -321,6 +330,10 @@ bool PhysicalPagePool::materialize_pages_locked(
                  << " allocator_reserved_after_bytes="
                  << (allocator_stats_after.has_value()
                          ? allocator_stats_after->reserved_bytes
+                         : 0)
+                 << " allocator_allocated_after_bytes="
+                 << (allocator_stats_after.has_value()
+                         ? allocator_stats_after->allocated_bytes
                          : 0)
                  << " allocator_peak_after_bytes="
                  << (allocator_stats_after.has_value()

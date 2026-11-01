@@ -253,13 +253,16 @@ std::optional<AllocatorMemoryStats> Device::allocator_memory_stats() const {
 #if defined(USE_NPU) || defined(USE_CUDA) || defined(USE_ILU) || \
     defined(USE_MUSA)
   const auto& reserved = stats.reserved_bytes[stat_index];
-  if (reserved.current < 0 || reserved.peak < reserved.current ||
+  const auto& allocated = stats.allocated_bytes[stat_index];
+  if (allocated.current < 0 || reserved.current < allocated.current ||
+      reserved.peak < reserved.current ||
       static_cast<uint64_t>(reserved.peak) >
           std::numeric_limits<size_t>::max()) {
     return std::nullopt;
   }
   return AllocatorMemoryStats{static_cast<size_t>(reserved.current),
-                              static_cast<size_t>(reserved.peak)};
+                              static_cast<size_t>(reserved.peak),
+                              static_cast<size_t>(allocated.current)};
 #endif
 }
 
