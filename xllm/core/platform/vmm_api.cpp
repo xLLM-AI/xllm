@@ -52,6 +52,13 @@ const char* driver_error_message() {
 #endif
 }
 
+void check_granularity_query_result(int32_t result, int32_t device_id) {
+  CHECK_EQ(result, 0) << "Failed to get allocation granularity"
+                      << " device_index=" << device_id
+                      << " driver_error=" << result
+                      << " driver_error_message=" << driver_error_message();
+}
+
 bool check_allocation_result(int32_t result,
                              const char* operation,
                              int32_t device_id,
@@ -90,7 +97,7 @@ size_t get_recommended_granularity(int32_t device_id) {
   // get the recommended granularity size
   int ret = aclrtMemGetAllocationGranularity(
       &prop, ACL_RT_MEM_ALLOC_GRANULARITY_RECOMMENDED, &granularity_size);
-  CHECK_EQ(ret, 0) << "Failed to get allocation granularity";
+  check_granularity_query_result(ret, device_id);
 #elif defined(USE_MLU)
   CNmemAllocationProp prop = {};
   // The memory allocation type requested, which must be
@@ -107,7 +114,7 @@ size_t get_recommended_granularity(int32_t device_id) {
   // get the recommended granularity size
   int ret = cnMemGetAllocationGranularity(
       &granularity_size, &prop, CN_MEM_ALLOC_GRANULARITY_RECOMMENDED);
-  CHECK_EQ(ret, 0) << "Failed to get allocation granularity";
+  check_granularity_query_result(ret, device_id);
 #elif defined(USE_MUSA)
   MUmemAllocationProp prop = {};
   prop.type = MU_MEM_ALLOCATION_TYPE_PINNED;
@@ -115,7 +122,7 @@ size_t get_recommended_granularity(int32_t device_id) {
   prop.location.id = device_id;
   int ret = muMemGetAllocationGranularity(
       &granularity_size, &prop, MU_MEM_ALLOC_GRANULARITY_RECOMMENDED);
-  CHECK_EQ(ret, 0) << "Failed to get allocation granularity";
+  check_granularity_query_result(ret, device_id);
 #elif defined(USE_CUDA) || defined(USE_ILU)
   CUmemAllocationProp prop = {};
   prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
@@ -125,7 +132,7 @@ size_t get_recommended_granularity(int32_t device_id) {
   // get the recommended granularity size FIRST
   int ret = cuMemGetAllocationGranularity(
       &granularity_size, &prop, CU_MEM_ALLOC_GRANULARITY_RECOMMENDED);
-  CHECK_EQ(ret, 0) << "Failed to get allocation granularity";
+  check_granularity_query_result(ret, device_id);
 #elif defined(USE_DCU)
   hipMemAllocationProp prop = {};
   prop.type = hipMemAllocationTypePinned;
@@ -135,7 +142,7 @@ size_t get_recommended_granularity(int32_t device_id) {
   // get the recommended granularity size FIRST
   int ret = hipMemGetAllocationGranularity(
       &granularity_size, &prop, hipMemAllocationGranularityRecommended);
-  CHECK_EQ(ret, 0) << "Failed to get allocation granularity";
+  check_granularity_query_result(ret, device_id);
 #else
   (void)device_id;
 #endif
