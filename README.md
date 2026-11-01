@@ -90,18 +90,48 @@ limitations under the License. -->
 **✅ Backend Tags**: #ifdef RDNA2_BACKEND and #ifdef RDNA4_BACKEND added
 **✅ GGUF Support**: 32 model families supported
 
-### Build Methods for Windows 11 ROCm 10.1 (7.16)
-1. **Environment Setup**: ROCM_PATH, HIP_PATH, compiler flags
-2. **CMake Configuration**: Pure C++ RDNA2/RDNA4 with CPU fallback
-3. **Phase 1-4 Builds**: Core utilities, batch operations, remaining kernels
-4. **Performance Tracing**: sherlock-it.md benchmark capture integration
-5. **Testing**: Build verification and GGUF model loading tests
+### Quick Build Details (Windows 11 ROCm 10.1 (7.16) Pure C++ RDNA2/RDNA4)
+**Environment Setup:**
+```powershell
+$env:ROCM_PATH="C:\ROCm-10.1-7.16"
+$env:HIP_PATH="$env:ROCM_PATH\hip"
+$env:PATH="$env:ROCM_PATH\bin;$env:PATH"
+$env:CXXFLAGS="-O3 -march=gfx1201 -mcpu=gfx1201 -fPIC"
+$env:LDFLAGS="-L$env:ROCm-10.1-7.16\lib -Wl,--export-all-symbols"
+```
 
-[Detailed Build Guide](docs/src/content/docs/en/dev_guide/windows_11_build_guide.md)
+**CMake Configuration:**
+```bash
+mkdir build-hip && cd build-hip
+cmake .. \
+  -G "Ninja" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CXX_COMPILER="clang-cl" \
+  -DCMAKE_C_COMPILER="clang-cl" \
+  -DROCM_PATH="C:/ROCm-10.1-7.16" \
+  -DHIP_PATH="C:/ROCm-10.1-7.16/hip" \
+  -DRDNA2_BACKEND=ON \
+  -DRDNA4_BACKEND=ON \
+  -DCPU_FALLBACK=ON \
+  -DWINDOWS_11_TARGET=ON \
+  -DROCM_VERSION="10.1.7.16" \
+  -DPURE_CPP_MODE=ON \
+  -DSHERLOCK_IT_INTEGRATION=ON
+```
 
-## Running and Using xLLM on Windows 11 ROCm 10.1 (7.16)
+**Build Process:**
+```bash
+# Phase 1: Core utilities
+cmake --build . --target xllm_core_utils --config Release
+# Phase 2: Batch operations
+cmake --build . --target xllm_batch_ops --config Release
+# Phase 4: Remaining kernels
+cmake --build . --target xllm_phase4_kernels --config Release
+# Full build
+cmake --build . --config Release
+```
 
-### Execution Options for Pure C++ RDNA2/RDNA4
+**Execution Options (Corrected: xllm.exe/xllm_serve.exe instead of kraken.exe):**
 ```bash
 # Basic execution with GGUF model (Windows 11 ROCm 10.1 (7.16))
 ./build-hip/xllm.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf --ctx 2048
@@ -125,25 +155,19 @@ KRK_TIME=1 ./build-hip/xllm.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf --bench --ctx
 # All options combined (Windows 11 ROCm 10.1 (7.16) Pure C++ RDNA2/RDNA4)
 ./build-hip/xllm.exe -m models/Qwen3.5-0.8B.Q4_K_M.gguf \
   --bench --ctx 2048 --cpu-fallback --backend rdna4 --batch-size 32 --fp8-scaled
+
+# Service mode (from launch_xllm.md)
+xllm serve --model=models/Qwen3.5-0.8B.Q4_K_M.gguf \\
+       --port=8010 \\
+       --nnodes=1 \\
+       --master_node_addr="127.0.0.1:9748" \\
+       --block_size=128 \\
+       --max_memory_utilization=0.86 \\
+       --enable_prefix_cache=false \\
+       --enable_chunked_prefill=true \\
+       --enable_schedule_overlap=true \\
+       --enable_graph=true
 ```
-
-### Supported Models (32 families) with GGUF
-- **LLM**: DeepSeek, Qwen, Kimi, Llama, GLM, MiniMax series (GGUF supported)
-- **VLM**: MiniCPM-V, MiMo-VL, Qwen2.5-VL, Qwen3-VL, GLM-4.6V, GLM-5.3-Flash-VL, VLM-R1
-- **Rerank**: Qwen3-Reranker
-- **DiT**: Flux, Flux2, Wan2.2
-- **Rec**: OneRec, Qwen2, Qwen2.5, Qwen3
-
-### Performance Trace Output (sherlock-it.md requirements)
-Every execution captures:
-- Operation/kernel/shader name
-- Invocation count
-- Total and average device time
-- Host time
-- Data volume, bandwidth and throughput
-- Dispatch dimensions, workload shape and execution configuration
-- GPU utilisation, memory usage and hardware counters
-- End-to-end latency, throughput and unattributed time
 
 [Detailed Build Guide](docs/src/content/docs/en/dev_guide/windows_11_build_guide.md) | [Supported Models](https://docs.xllm-ai.com/en/supported_models/)
 
