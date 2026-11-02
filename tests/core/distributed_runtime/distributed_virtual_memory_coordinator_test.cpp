@@ -415,26 +415,29 @@ class ElasticPoolInitializationTest : public ::testing::Test {
 };
 
 TEST_F(ElasticPoolInitializationTest,
-       HeterogeneousWorkersApplyTheirOwnRatioCap) {
-  const int64_t page_size =
-      KVCacheConfig::get_instance().phy_page_granularity_size();
-  TransactionTestServer first(
-      MappingFailure::NONE, 10, 20 * page_size, 80 * page_size);
-  TransactionTestServer second(
-      MappingFailure::NONE, 10, 36 * page_size, 40 * page_size);
-  ASSERT_EQ(first.start(), 0);
-  ASSERT_EQ(second.start(), 0);
-  auto coordinator = DistributedVirtualMemoryCoordinatorTestPeer::create();
-  DistributedVirtualMemoryCoordinatorTestPeer::connect(
-      *coordinator, {first.address(), second.address()});
+       HeterogeneousWorkerCapacitiesIgnoreUtilizationRatio) {
+  for (double ratio : {0.75, 0.9, 1.0}) {
+    SCOPED_TRACE(ratio);
+    const int64_t page_size =
+        KVCacheConfig::get_instance().phy_page_granularity_size();
+    TransactionTestServer first(
+        MappingFailure::NONE, 10, 20 * page_size, 80 * page_size);
+    TransactionTestServer second(
+        MappingFailure::NONE, 10, 36 * page_size, 40 * page_size);
+    ASSERT_EQ(first.start(), 0);
+    ASSERT_EQ(second.start(), 0);
+    auto coordinator = DistributedVirtualMemoryCoordinatorTestPeer::create();
+    DistributedVirtualMemoryCoordinatorTestPeer::connect(
+        *coordinator, {first.address(), second.address()});
 
-  EXPECT_EQ(coordinator->init_physical_page_pools(0.8, 0), 32);
-  EXPECT_EQ(first.service().initialized_pages(), 32);
-  EXPECT_EQ(second.service().initialized_pages(), 32);
-  EXPECT_EQ(first.service().initial_pages(), 4);
-  EXPECT_EQ(second.service().initial_pages(), 4);
-  EXPECT_EQ(first.service().growth_memory_reserve_bytes(), 16 * page_size);
-  EXPECT_EQ(second.service().growth_memory_reserve_bytes(), 8 * page_size);
+    EXPECT_EQ(coordinator->init_physical_page_pools(ratio, 0), 40);
+    EXPECT_EQ(first.service().initialized_pages(), 40);
+    EXPECT_EQ(second.service().initialized_pages(), 40);
+    EXPECT_EQ(first.service().initial_pages(), 20);
+    EXPECT_EQ(second.service().initial_pages(), 20);
+    EXPECT_EQ(first.service().growth_memory_reserve_bytes(), 0);
+    EXPECT_EQ(second.service().growth_memory_reserve_bytes(), 0);
+  }
 }
 
 TEST_F(ElasticPoolInitializationTest,
@@ -454,15 +457,14 @@ TEST_F(ElasticPoolInitializationTest,
   EXPECT_EQ(coordinator->init_physical_page_pools(
                 /*max_memory_utilization=*/0.8,
                 /*max_cache_size=*/0,
-                /*max_memory_utilization_configured=*/true,
                 /*reserved_memory_bytes=*/2 * page_size),
-            30);
-  EXPECT_EQ(first.service().initialized_pages(), 30);
-  EXPECT_EQ(second.service().initialized_pages(), 30);
-  EXPECT_EQ(first.service().initial_pages(), 2);
-  EXPECT_EQ(second.service().initial_pages(), 2);
-  EXPECT_EQ(first.service().growth_memory_reserve_bytes(), 18 * page_size);
-  EXPECT_EQ(second.service().growth_memory_reserve_bytes(), 10 * page_size);
+            38);
+  EXPECT_EQ(first.service().initialized_pages(), 38);
+  EXPECT_EQ(second.service().initialized_pages(), 38);
+  EXPECT_EQ(first.service().initial_pages(), 18);
+  EXPECT_EQ(second.service().initial_pages(), 18);
+  EXPECT_EQ(first.service().growth_memory_reserve_bytes(), 2 * page_size);
+  EXPECT_EQ(second.service().growth_memory_reserve_bytes(), 2 * page_size);
 }
 
 TEST_F(ElasticPoolInitializationTest,
@@ -482,16 +484,15 @@ TEST_F(ElasticPoolInitializationTest,
   EXPECT_EQ(coordinator->init_physical_page_pools(
                 /*max_memory_utilization=*/0.8,
                 /*max_cache_size=*/0,
-                /*max_memory_utilization_configured=*/true,
                 /*reserved_memory_bytes=*/2 * page_size,
                 /*resident_memory_bytes=*/4 * page_size),
-            26);
-  EXPECT_EQ(first.service().initialized_pages(), 26);
-  EXPECT_EQ(second.service().initialized_pages(), 26);
-  EXPECT_EQ(first.service().initial_pages(), 6);
-  EXPECT_EQ(second.service().initial_pages(), 6);
-  EXPECT_EQ(first.service().growth_memory_reserve_bytes(), 18 * page_size);
-  EXPECT_EQ(second.service().growth_memory_reserve_bytes(), 10 * page_size);
+            34);
+  EXPECT_EQ(first.service().initialized_pages(), 34);
+  EXPECT_EQ(second.service().initialized_pages(), 34);
+  EXPECT_EQ(first.service().initial_pages(), 22);
+  EXPECT_EQ(second.service().initial_pages(), 22);
+  EXPECT_EQ(first.service().growth_memory_reserve_bytes(), 2 * page_size);
+  EXPECT_EQ(second.service().growth_memory_reserve_bytes(), 2 * page_size);
 }
 
 TEST_F(ElasticPoolInitializationTest,
@@ -520,7 +521,7 @@ TEST_F(ElasticPoolInitializationTest,
 }
 
 TEST_F(ElasticPoolInitializationTest,
-       UnconfiguredRatioAllowsFullDeviceAddressCapacity) {
+       SmallRatioDoesNotReduceElasticAddressCapacity) {
   const int64_t page_size =
       KVCacheConfig::get_instance().phy_page_granularity_size();
   TransactionTestServer first(
@@ -533,7 +534,7 @@ TEST_F(ElasticPoolInitializationTest,
   DistributedVirtualMemoryCoordinatorTestPeer::connect(
       *coordinator, {first.address(), second.address()});
 
-  EXPECT_EQ(coordinator->init_physical_page_pools(0.8, 0, false), 40);
+  EXPECT_EQ(coordinator->init_physical_page_pools(0.1, 0), 40);
   EXPECT_EQ(first.service().initialized_pages(), 40);
   EXPECT_EQ(second.service().initialized_pages(), 40);
   EXPECT_EQ(first.service().initial_pages(), 20);
@@ -558,12 +559,11 @@ TEST_F(ElasticPoolInitializationTest, MaxCacheSizeCapsElasticAddressCapacity) {
   EXPECT_EQ(coordinator->init_physical_page_pools(0.8, 12 * page_size), 12);
   EXPECT_EQ(first.service().initialized_pages(), 12);
   EXPECT_EQ(second.service().initialized_pages(), 12);
-  EXPECT_EQ(first.service().initial_pages(), 4);
-  EXPECT_EQ(second.service().initial_pages(), 4);
+  EXPECT_EQ(first.service().initial_pages(), 12);
+  EXPECT_EQ(second.service().initial_pages(), 12);
 }
 
-TEST_F(ElasticPoolInitializationTest,
-       ExhaustedRatioReserveKeepsArenaForGrowth) {
+TEST_F(ElasticPoolInitializationTest, LowStartupFreeMemoryKeepsArenaForGrowth) {
   const int64_t page_size =
       KVCacheConfig::get_instance().phy_page_granularity_size();
   TransactionTestServer first(
@@ -576,15 +576,14 @@ TEST_F(ElasticPoolInitializationTest,
   DistributedVirtualMemoryCoordinatorTestPeer::connect(
       *coordinator, {first.address(), second.address()});
 
-  EXPECT_EQ(coordinator->init_physical_page_pools(0.8, 0), 32);
-  EXPECT_EQ(first.service().initial_pages(), 0);
-  EXPECT_EQ(second.service().initial_pages(), 0);
-  EXPECT_EQ(first.service().growth_memory_reserve_bytes(), 16 * page_size);
-  EXPECT_EQ(second.service().growth_memory_reserve_bytes(), 8 * page_size);
+  EXPECT_EQ(coordinator->init_physical_page_pools(0.8, 0), 40);
+  EXPECT_EQ(first.service().initial_pages(), 8);
+  EXPECT_EQ(second.service().initial_pages(), 8);
+  EXPECT_EQ(first.service().growth_memory_reserve_bytes(), 0);
+  EXPECT_EQ(second.service().growth_memory_reserve_bytes(), 0);
 }
 
-TEST_F(ElasticPoolInitializationTest,
-       FullRatioSeparatesInitialAndMaximumSlots) {
+TEST_F(ElasticPoolInitializationTest, InitialSlotsUseMostConstrainedWorker) {
   const int64_t page_size =
       KVCacheConfig::get_instance().phy_page_granularity_size();
   TransactionTestServer first(

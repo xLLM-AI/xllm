@@ -506,8 +506,7 @@ int run() {
     if (load_config.enable_vmm_weights()) {
       const int64_t num_pages = memory_coordinator.init_physical_page_pools(
           kv_cache_config.max_memory_utilization(),
-          kv_cache_config.max_cache_size(),
-          kv_cache_config.max_memory_utilization_configured());
+          kv_cache_config.max_cache_size());
       CHECK_GT(num_pages, 0) << "Failed to initialize PhysicalPagePool";
       LOG(INFO) << "VirtualMemory initialized with " << num_pages
                 << " physical pages";
