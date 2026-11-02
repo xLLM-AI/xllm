@@ -23,7 +23,13 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/kv_cache/layout/kv_cache_shape.h"
+#include "core/kv_cache/storage/kv_cache_utils.h"
 #include "core/kv_cache/transfer/kv_cache_store.h"
+
+#if defined(USE_NPU)
+#include <torch_npu/csrc/core/npu/NPUFormat.h>
+#endif
 
 namespace xllm {
 namespace {
@@ -69,83 +75,6 @@ std::string make_store_local_hostname(const std::string& configured,
   CHECK_LE(port, 65535U - worker_id)
       << "Mooncake local endpoint port exceeds 65535.";
   return host + ":" + std::to_string(port + worker_id);
-}
-
-bool has_tensor(const torch::Tensor& tensor) {
-  return tensor.defined() && tensor.numel() > 0;
-}
-
-BlockTypeTensorMap build_block_type_tensor_map(const KVCache& kv_cache,
-                                               BlockType type) {
-  BlockTypeTensorMap tensors;
-  const torch::Tensor key_cache = kv_cache.get_k_cache();
-  const torch::Tensor value_cache = kv_cache.get_v_cache();
-  const torch::Tensor index_cache = kv_cache.get_index_cache();
-  const torch::Tensor conv_cache = kv_cache.get_conv_cache();
-  const torch::Tensor ssm_cache = kv_cache.get_ssm_cache();
-  const torch::Tensor swa_cache = kv_cache.get_swa_cache();
-  const std::optional<torch::Tensor> index_cache_scale =
-      kv_cache.get_indexer_cache_scale();
-
-  switch (type) {
-    case BlockType::KV:
-      if (has_tensor(conv_cache) || has_tensor(ssm_cache) ||
-          has_tensor(swa_cache)) {
-        return {};
-      }
-      if (has_tensor(key_cache)) {
-        tensors.emplace(KVCacheTensorRole::KEY, key_cache);
-      }
-      if (has_tensor(value_cache)) {
-        tensors.emplace(KVCacheTensorRole::VALUE, value_cache);
-      }
-      if (has_tensor(index_cache)) {
-        tensors.emplace(KVCacheTensorRole::INDEX, index_cache);
-      }
-      // Quantized index state and scale must move together.
-      if (index_cache_scale.has_value() &&
-          has_tensor(index_cache_scale.value())) {
-        tensors.emplace(KVCacheTensorRole::INDEX_SCALE,
-                        index_cache_scale.value());
-      }
-      return tensors;
-    case BlockType::LINEAR:
-      if (has_tensor(conv_cache)) {
-        tensors.emplace(KVCacheTensorRole::CONV, conv_cache);
-      }
-      if (has_tensor(ssm_cache)) {
-        tensors.emplace(KVCacheTensorRole::SSM, ssm_cache);
-      }
-      return tensors;
-    case BlockType::SWA:
-      // The persistent SWA window is restored for every DSV4 layer.
-      if (has_tensor(swa_cache)) {
-        tensors.emplace(KVCacheTensorRole::SWA, swa_cache);
-      }
-      return tensors;
-    case BlockType::C4:
-      if (!has_tensor(swa_cache) || has_tensor(value_cache) ||
-          !has_tensor(key_cache) || !has_tensor(index_cache)) {
-        return {};
-      }
-      tensors.emplace(KVCacheTensorRole::KEY, key_cache);
-      tensors.emplace(KVCacheTensorRole::INDEX, index_cache);
-      if (index_cache_scale.has_value() &&
-          has_tensor(index_cache_scale.value())) {
-        tensors.emplace(KVCacheTensorRole::INDEX_SCALE,
-                        index_cache_scale.value());
-      }
-      return tensors;
-    case BlockType::C128:
-      if (!has_tensor(swa_cache) || has_tensor(value_cache) ||
-          !has_tensor(key_cache) || has_tensor(index_cache)) {
-        return {};
-      }
-      tensors.emplace(KVCacheTensorRole::KEY, key_cache);
-      return tensors;
-    default:
-      return {};
-  }
 }
 
 }  // namespace
@@ -280,12 +209,17 @@ bool HierarchyKVCacheTransfer::finalize_registration() {
     store_config.model_id = options_.store_namespace();
     store_config.tp_rank = options_.tp_rank();
     store_config.tp_size = options_.tp_size();
+    store_config.kv_split_size = options_.kv_split_size();
+    store_config.kv_split_rank = options_.kv_split_rank();
+    store_config.write_enabled = options_.store_write_enabled();
     store_config.enable_mla = options_.enable_mla();
     LOG(INFO) << "[Mooncake][StoreEngine] initialize, endpoint="
               << store_local_hostname << ", protocol=" << store_config.protocol
               << ", worker_rank=" << options_.store_worker_id()
               << ", tp_rank=" << store_config.tp_rank
               << ", tp_size=" << store_config.tp_size
+              << ", kv_split_size=" << store_config.kv_split_size
+              << ", kv_split_rank=" << store_config.kv_split_rank
               << ", enable_mla=" << store_config.enable_mla;
     kv_cache_store_ = std::make_unique<KVCacheStore>();
     CHECK(kv_cache_store_->init(store_config, std::move(store_index)))
@@ -295,6 +229,8 @@ bool HierarchyKVCacheTransfer::finalize_registration() {
               << ", worker_rank=" << options_.store_worker_id()
               << ", tp_rank=" << store_config.tp_rank
               << ", tp_size=" << store_config.tp_size
+              << ", kv_split_size=" << store_config.kv_split_size
+              << ", kv_split_rank=" << store_config.kv_split_rank
               << ", enable_mla=" << store_config.enable_mla;
   }
   registration_finalized_ = true;
@@ -349,7 +285,7 @@ HierarchyKVCacheTransfer::build_device_groups(CacheDomain* domain) const {
     KVCache& kv_cache =
         domain->device_kv_caches->at(static_cast<size_t>(layer_id));
     for (BlockType type : block_types) {
-      if (!build_block_type_tensor_map(kv_cache, type).empty()) {
+      if (!kv_cache.get_block_type_tensors(type).empty()) {
         device_groups[type].emplace_back(&kv_cache);
         domain->layer_ids_by_type[type].emplace_back(layer_id);
       }
@@ -403,7 +339,59 @@ HostKVLayout HierarchyKVCacheTransfer::create_host_kv_layout(
       layer.absolute_layer_id = layer_ids_it->second[layer_slot];
       layer.group_layer_slot = static_cast<int64_t>(layer_slot);
       layer.device_roles =
-          build_block_type_tensor_map(*group_caches[layer_slot], block_type);
+          group_caches[layer_slot]->get_block_type_tensors(block_type);
+      if (block_type == BlockType::LINEAR) {
+        const auto conv_it = layer.device_roles.find(KVCacheTensorRole::CONV);
+        const auto ssm_it = layer.device_roles.find(KVCacheTensorRole::SSM);
+        if (conv_it != layer.device_roles.end() ||
+            ssm_it != layer.device_roles.end()) {
+          CHECK(conv_it != layer.device_roles.end() &&
+                ssm_it != layer.device_roles.end())
+              << "LINEAR transfer requires both Conv and SSM cache tensors.";
+          const torch::Tensor& conv_cache = conv_it->second;
+          const torch::Tensor& ssm_cache = ssm_it->second;
+          // Prefill checkpoints keep the first SSM row of each logical slot.
+          const int64_t checkpoint_stride =
+              KVCacheShape::linear_ssm_checkpoint_stride(conv_cache.size(0),
+                                                         ssm_cache.size(0));
+          std::vector<int64_t> logical_ssm_shape = ssm_cache.sizes().vec();
+          logical_ssm_shape[0] = checkpoint_stride;
+          logical_ssm_shape.insert(logical_ssm_shape.begin(),
+                                   conv_cache.size(0));
+#if defined(USE_MUSA)
+          constexpr int64_t kDeviceConvHistoryAxis = 2;
+#else
+          constexpr int64_t kDeviceConvHistoryAxis = 1;
+#endif
+          CHECK_GT(conv_cache.dim(), kDeviceConvHistoryAxis);
+          const int64_t conv_history_rows =
+              conv_cache.size(kDeviceConvHistoryAxis) - checkpoint_stride + 1;
+          CHECK_GT(conv_history_rows, 0);
+          conv_it->second = conv_cache.narrow(kDeviceConvHistoryAxis,
+                                              /*start=*/0,
+                                              /*length=*/conv_history_rows);
+          ssm_it->second = ssm_cache.view(std::move(logical_ssm_shape))
+                               .narrow(/*dim=*/1, /*start=*/0, /*length=*/1);
+        }
+      }
+      for (auto& [role, tensor] : layer.device_roles) {
+        if (role != KVCacheTensorRole::INDEX &&
+            role != KVCacheTensorRole::INDEX_SCALE) {
+          continue;
+        }
+        const int64_t logical_blocks =
+            domain.kv_cache_shape.key_cache_shape().front();
+        if (tensor.size(0) == logical_blocks) {
+          continue;
+        }
+        CHECK(tensor.is_contiguous());
+#if defined(USE_NPU)
+        CHECK_EQ(at_npu::native::get_npu_format(tensor), ACL_FORMAT_ND)
+            << "host indexer folding requires ND storage";
+#endif
+        tensor = tensor.view(
+            fold_shape_for_host_transfer(tensor.sizes().vec(), logical_blocks));
+      }
       group.layers.emplace_back(std::move(layer));
     }
     groups.emplace_back(std::move(group));
@@ -537,7 +525,10 @@ std::vector<uint8_t> HierarchyKVCacheTransfer::prefetch_kv_blocks(
       kv_cache_store_->batch_get_with_status(block_transfer_info);
   const size_t hit_count =
       std::count(hits.begin(), hits.end(), static_cast<uint8_t>(1));
-  VLOG(1) << "[Mooncake][PrefetchGet] type="
+  VLOG(1) << "[Mooncake][PrefetchGet] worker_rank="
+          << options_.store_worker_id()
+          << ", kv_split_size=" << options_.kv_split_size()
+          << ", kv_split_rank=" << options_.kv_split_rank() << ", type="
           << static_cast<int32_t>(block_transfer_info[0].block_type)
           << ", blocks=" << hits.size() << ", hits=" << hit_count;
   return hits;
@@ -586,9 +577,10 @@ uint32_t HierarchyKVCacheTransfer::offload(
     VLOG(1) << "[Mooncake][OffloadPut] worker_rank="
             << options_.store_worker_id() << ", tp_rank=" << options_.tp_rank()
             << ", tp_size=" << options_.tp_size()
+            << ", kv_split_size=" << options_.kv_split_size()
+            << ", kv_split_rank=" << options_.kv_split_rank()
             << ", enable_mla=" << options_.enable_mla()
-            << ", skipped_mla_nonzero_rank="
-            << (options_.enable_mla() && options_.tp_rank() != 0U)
+            << ", store_write_enabled=" << options_.store_write_enabled()
             << ", blocks=" << block_transfer_info.size()
             << ", success=" << put_count;
   }
@@ -607,12 +599,30 @@ bool HierarchyKVCacheTransfer::load_from_host(const HostKVRequest& request,
 void HierarchyKVCacheTransfer::set_layer_synchronizer(ModelParamsView& params) {
   std::optional<HostKVLoadHandle> handle =
       take_load_handle(params.meta.batch_id);
+  CHECK(!params.meta.requires_host_restore || handle.has_value())
+      << "Missing Host restore handle at batch_id=" << params.meta.batch_id;
   if (!handle.has_value()) {
     return;
+  }
+  CHECK(handle->synchronizer != nullptr)
+      << "Missing Host restore synchronizer at batch_id="
+      << params.meta.batch_id;
+  CHECK_GT(handle->layers_per_event, 0U)
+      << "Invalid Host restore granularity at batch_id="
+      << params.meta.batch_id;
+  CHECK_GT(handle->synchronizer->size(), 0U)
+      << "Empty Host restore synchronizer at batch_id=" << params.meta.batch_id;
+  if (handle->draft_event_index.has_value()) {
+    CHECK_LT(*handle->draft_event_index, handle->synchronizer->size())
+        << "Invalid Host draft restore event at batch_id="
+        << params.meta.batch_id;
   }
   params.parallel.layer_wise_load_synchronizer = handle->synchronizer;
   params.parallel.layers_per_event = handle->layers_per_event;
   params.parallel.draft_load_event_index = handle->draft_event_index;
+  // Derived target/draft inputs retain the synchronizer, not a second request
+  // to consume the same batch's handle.
+  params.meta.requires_host_restore = false;
 }
 
 std::optional<HostKVLoadHandle> HierarchyKVCacheTransfer::take_load_handle(

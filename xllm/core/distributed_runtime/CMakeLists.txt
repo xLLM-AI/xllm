@@ -59,6 +59,7 @@ cc_library(
     kv_cache_transfer_coordinator.h
     xservice_client.h
     model_residency_coordinator.h
+    kv_cache_capacity_planner.h
   SRCS
     master.cpp
     master_factory.cpp
@@ -85,6 +86,7 @@ cc_library(
     shm_channel.cpp
     xservice_client.cpp
     model_residency_coordinator.cpp
+    kv_cache_capacity_planner.cpp
   DEPS
     :api_response
     :worker_model_codec

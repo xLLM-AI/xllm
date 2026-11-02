@@ -13,6 +13,7 @@ cc_library(
     draft_config.h
     draft_distribution.h
     draft_proposal.h
+    draft_vocab_mapping.h
     rejection_sampler.h
     spec_input_builder.h
     mtp_async_input_builder.h
@@ -36,6 +37,7 @@ cc_library(
     draft_config.cpp
     draft_distribution.cpp
     draft_proposal.cpp
+    draft_vocab_mapping.cpp
     rejection_sampler.cpp
     spec_input_builder.cpp
     mtp_async_input_builder.cpp

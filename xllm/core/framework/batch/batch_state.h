@@ -52,6 +52,8 @@ class BatchState final {
     }
   }
   uint64_t batch_id() const { return batch_id_; }
+
+  void require_host_restore() { requires_host_restore_ = true; }
   bool empty() const {
     return sequence_plan_.empty() && sequence_groups_.empty();
   }
@@ -116,8 +118,12 @@ class BatchState final {
   // A cancelled sequence may release its own aliases before its pending
   // worker result. Pin H2D sources and destinations until this batch retires.
   std::vector<std::shared_ptr<KVCacheBlockLease>> host_restore_leases_;
+  // Sequence reset can precede the result of an overlapped forward. Keep its
+  // VMM pages mapped until the submitted batch retires.
+  std::vector<Block> vmm_kv_blocks_;
   BatchForwardType batch_forward_type_;
   uint64_t batch_id_ = UNINITIALIZED_BATCH_ID;
+  bool requires_host_restore_ = false;
 };
 
 }  // namespace xllm

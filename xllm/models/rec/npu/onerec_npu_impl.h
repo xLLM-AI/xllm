@@ -134,9 +134,7 @@ inline torch::Tensor compute_onerec_position_bias(
     LOG(FATAL) << "Unexpected OneRec position bias dim: " << values.dim();
   }
 
-  if (values.dim() == 3) {
-    values = values.permute({2, 0, 1});
-  }
+  values = values.permute({2, 0, 1});
 
   if (is_decode_stage && input_params != nullptr &&
       !input_params->attention.host.kv_seq_lens.empty()) {
@@ -402,7 +400,6 @@ class OneRecStackImpl : public torch::nn::Module {
     int64_t key_length = seq_length;
 
     const auto* onerec_params = input_params.onerec_params();
-    CHECK(onerec_params != nullptr) << "OneRec requires onerec_params().";
 
     if (is_decoder_) {
       if (is_prefill) {

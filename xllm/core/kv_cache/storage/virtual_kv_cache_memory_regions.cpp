@@ -21,6 +21,7 @@ limitations under the License.
 #include <algorithm>
 #include <limits>
 #include <memory>
+#include <numeric>
 #include <unordered_set>
 #include <utility>
 
@@ -81,11 +82,18 @@ std::vector<torch::Tensor> VirtualKVCacheMemoryRegions::create_k_tensors(
     torch::ScalarType dtype,
     int64_t num_layers,
     const torch::Device& device,
-    size_t page_size) {
+    size_t page_size,
+    const std::vector<bool>& layer_owned) {
   k_block_bytes_ = VirtualKVCachePageLayout::tensor_block_bytes(
       dims, torch::scalarTypeToTypeMeta(dtype).itemsize());
-  return create_tensors(
-      dims, dtype, num_layers, device, page_size, /*name=*/"K", k_regions_);
+  return create_tensors(dims,
+                        dtype,
+                        num_layers,
+                        device,
+                        page_size,
+                        /*name=*/"K",
+                        k_regions_,
+                        layer_owned);
 }
 
 std::vector<torch::Tensor> VirtualKVCacheMemoryRegions::create_v_tensors(
@@ -93,11 +101,18 @@ std::vector<torch::Tensor> VirtualKVCacheMemoryRegions::create_v_tensors(
     torch::ScalarType dtype,
     int64_t num_layers,
     const torch::Device& device,
-    size_t page_size) {
+    size_t page_size,
+    const std::vector<bool>& layer_owned) {
   v_block_bytes_ = VirtualKVCachePageLayout::tensor_block_bytes(
       dims, torch::scalarTypeToTypeMeta(dtype).itemsize());
-  return create_tensors(
-      dims, dtype, num_layers, device, page_size, /*name=*/"V", v_regions_);
+  return create_tensors(dims,
+                        dtype,
+                        num_layers,
+                        device,
+                        page_size,
+                        /*name=*/"V",
+                        v_regions_,
+                        layer_owned);
 }
 
 std::vector<torch::Tensor> VirtualKVCacheMemoryRegions::create_index_tensors(
@@ -137,7 +152,7 @@ std::vector<torch::Tensor> VirtualKVCacheMemoryRegions::create_tensors(
   CHECK_GT(num_layers, 0);
   CHECK(layer_owned.empty() ||
         layer_owned.size() == static_cast<size_t>(num_layers))
-      << "INDEX cache ownership mask must match num_layers";
+      << name << " cache ownership mask must match num_layers";
   CHECK_GT(dims.front(), 0);
   CHECK(num_blocks_ == 0 || num_blocks_ == static_cast<size_t>(dims.front()))
       << "Number of KV cache blocks mismatch";
@@ -160,6 +175,7 @@ std::vector<torch::Tensor> VirtualKVCacheMemoryRegions::create_tensors(
     size = aligned_size;
   }
 
+  page_size_ = page_size;
   num_layers_ = num_layers;
   num_blocks_ = static_cast<size_t>(dims.front());
   std::vector<torch::Tensor> tensors(num_layers);
@@ -177,90 +193,100 @@ std::vector<torch::Tensor> VirtualKVCacheMemoryRegions::create_tensors(
   return tensors;
 }
 
+size_t VirtualKVCacheMemoryRegions::mapping_block_bytes() const {
+  if (k_regions_.empty() || v_regions_.empty()) {
+    return 0;
+  }
+  size_t common_bytes = 0;
+  const auto include_role = [&common_bytes](const auto& regions,
+                                            size_t block_bytes) {
+    if (std::any_of(regions.begin(), regions.end(), [](const auto& region) {
+          return region != nullptr;
+        })) {
+      common_bytes = std::gcd(common_bytes, block_bytes);
+    }
+  };
+  include_role(k_regions_, k_block_bytes_);
+  include_role(v_regions_, v_block_bytes_);
+  include_role(index_regions_, index_block_bytes_);
+  return common_bytes;
+}
+
 bool VirtualKVCacheMemoryRegions::collect_page_targets(
     const std::vector<offset_t>& offsets,
+    size_t common_block_bytes,
     std::vector<std::pair<MappedVirtualMemoryRegion*, offset_t>>& targets)
     const {
-  if (k_regions_.empty() || v_regions_.empty()) {
-    LOG(ERROR) << "KV tensors not created";
+  const size_t model_block_bytes = mapping_block_bytes();
+  if (model_block_bytes == 0 || common_block_bytes == 0 ||
+      model_block_bytes % common_block_bytes != 0 ||
+      page_size_ % common_block_bytes != 0) {
+    LOG(ERROR) << "KV tensors have incompatible mapping geometry";
     return false;
   }
 
-  CHECK_GT(num_layers_, 0);
-  CHECK_EQ(k_regions_.size(), num_layers_);
-  CHECK_EQ(v_regions_.size(), num_layers_);
-  const size_t page_size = k_regions_.front()->page_size();
-  size_t index_layers = 0;
-  if (!index_regions_.empty()) {
-    CHECK_EQ(index_regions_.size(), num_layers_);
-    index_layers = static_cast<size_t>(std::count_if(
-        index_regions_.begin(), index_regions_.end(), [](const auto& region) {
-          return region != nullptr;
-        }));
-  }
-  std::vector<size_t> tensor_block_bytes{k_block_bytes_, v_block_bytes_};
-  if (index_layers > 0) {
-    tensor_block_bytes.emplace_back(index_block_bytes_);
-  }
-  const VirtualKVCachePageLayout layout(std::move(tensor_block_bytes),
-                                        page_size);
-  const size_t k_pages = layout.pages_per_tensor(/*role_index=*/0);
-  const size_t v_pages = layout.pages_per_tensor(/*role_index=*/1);
-  size_t index_pages = 0;
-  std::vector<size_t> tensor_counts{k_regions_.size(), v_regions_.size()};
-  if (index_layers > 0) {
-    index_pages = layout.pages_per_tensor(/*role_index=*/2);
-    tensor_counts.emplace_back(index_layers);
-  }
-  const size_t pages_per_offset = layout.physical_pages(tensor_counts);
-  CHECK_LE(offsets.size(),
-           std::numeric_limits<size_t>::max() / pages_per_offset);
-  targets.reserve(offsets.size() * pages_per_offset);
-
-  const size_t complete_pages = num_blocks_ / layout.blocks_per_page();
+  const size_t blocks_per_page = page_size_ / common_block_bytes;
+  const size_t complete_pages = num_blocks_ / blocks_per_page;
   for (offset_t offset : offsets) {
-    if (offset < 0 || static_cast<size_t>(offset) % page_size != 0 ||
-        static_cast<size_t>(offset) / page_size >= complete_pages) {
+    if (offset < 0 || static_cast<size_t>(offset) % page_size_ != 0 ||
+        static_cast<size_t>(offset) / page_size_ >= complete_pages) {
       LOG(ERROR) << "Invalid KV logical page offset " << offset;
       return false;
     }
   }
 
-  const auto append_targets = [&offsets, &targets, page_size](
-                                  MappedVirtualMemoryRegion& region,
-                                  size_t pages_per_tensor) {
-    CHECK_EQ(region.page_size(), page_size);
-    CHECK_LE(pages_per_tensor, std::numeric_limits<size_t>::max() / page_size);
-    const size_t page_span = pages_per_tensor * page_size;
-    for (offset_t offset : offsets) {
-      if (static_cast<size_t>(offset) >
-          static_cast<size_t>(std::numeric_limits<offset_t>::max()) /
-              pages_per_tensor) {
-        LOG(ERROR) << "KV mapping offset exceeds supported range";
-        return false;
+  size_t pages_per_offset = 0;
+  const auto count_role_pages = [&pages_per_offset, common_block_bytes](
+                                    const auto& regions, size_t block_bytes) {
+    const size_t owned_layers = static_cast<size_t>(
+        std::count_if(regions.begin(), regions.end(), [](const auto& region) {
+          return region != nullptr;
+        }));
+    const size_t pages_per_tensor = block_bytes / common_block_bytes;
+    if (owned_layers == 0) {
+      return;
+    }
+    pages_per_offset += owned_layers * pages_per_tensor;
+  };
+  count_role_pages(k_regions_, k_block_bytes_);
+  count_role_pages(v_regions_, v_block_bytes_);
+  count_role_pages(index_regions_, index_block_bytes_);
+  targets.reserve(targets.size() + offsets.size() * pages_per_offset);
+
+  const auto append_role = [&offsets, &targets, this, common_block_bytes](
+                               const auto& regions, size_t block_bytes) {
+    const size_t pages_per_tensor = block_bytes / common_block_bytes;
+    for (const auto& region : regions) {
+      if (region == nullptr) {
+        continue;
       }
-      const size_t role_offset = static_cast<size_t>(offset) * pages_per_tensor;
-      if (page_span > region.size() ||
-          role_offset > region.size() - page_span) {
-        LOG(ERROR) << "KV logical page exceeds its tensor region";
-        return false;
-      }
-      for (size_t page = 0; page < pages_per_tensor; ++page) {
-        targets.emplace_back(
-            &region, static_cast<offset_t>(role_offset + page * page_size));
+      const size_t page_span = pages_per_tensor * page_size_;
+      for (offset_t offset : offsets) {
+        if (static_cast<size_t>(offset) >
+            static_cast<size_t>(std::numeric_limits<offset_t>::max()) /
+                pages_per_tensor) {
+          LOG(ERROR) << "KV mapping offset exceeds supported range";
+          return false;
+        }
+        const size_t role_offset =
+            static_cast<size_t>(offset) * pages_per_tensor;
+        if (page_span > region->size() ||
+            role_offset > region->size() - page_span) {
+          LOG(ERROR) << "KV logical page exceeds its tensor region";
+          return false;
+        }
+        for (size_t page = 0; page < pages_per_tensor; ++page) {
+          targets.emplace_back(
+              region.get(),
+              static_cast<offset_t>(role_offset + page * page_size_));
+        }
       }
     }
     return true;
   };
-  for (size_t i = 0; i < k_regions_.size(); ++i) {
-    if (!append_targets(*k_regions_[i], k_pages) ||
-        !append_targets(*v_regions_[i], v_pages) ||
-        (index_pages > 0 && index_regions_[i] != nullptr &&
-         !append_targets(*index_regions_[i], index_pages))) {
-      return false;
-    }
-  }
-  return true;
+  return append_role(k_regions_, k_block_bytes_) &&
+         append_role(v_regions_, v_block_bytes_) &&
+         append_role(index_regions_, index_block_bytes_);
 }
 
 bool VirtualKVCacheMemoryRegions::can_prepare_mapping(
@@ -271,7 +297,7 @@ bool VirtualKVCacheMemoryRegions::can_prepare_mapping(
     return false;
   }
   std::vector<std::pair<MappedVirtualMemoryRegion*, offset_t>> targets;
-  if (!collect_page_targets(offsets, targets)) {
+  if (!collect_page_targets(offsets, mapping_block_bytes(), targets)) {
     return false;
   }
   return std::all_of(targets.begin(), targets.end(), [](const auto& target) {
@@ -281,13 +307,13 @@ bool VirtualKVCacheMemoryRegions::can_prepare_mapping(
 
 bool VirtualKVCacheMemoryRegions::map(const std::vector<offset_t>& offsets) {
   std::vector<std::pair<MappedVirtualMemoryRegion*, offset_t>> targets;
-  return collect_page_targets(offsets, targets) &&
+  return collect_page_targets(offsets, mapping_block_bytes(), targets) &&
          MappedVirtualMemoryRegion::map_pages(targets);
 }
 
 bool VirtualKVCacheMemoryRegions::unmap(const std::vector<offset_t>& offsets) {
   std::vector<std::pair<MappedVirtualMemoryRegion*, offset_t>> targets;
-  if (!collect_page_targets(offsets, targets)) {
+  if (!collect_page_targets(offsets, mapping_block_bytes(), targets)) {
     return false;
   }
   for (const auto& [region, offset] : targets) {
@@ -308,6 +334,9 @@ VirtualKVCacheMemoryRegions::get_global_offsets_for_block(
   }
   if (k_regions_.empty() || v_regions_.empty()) {
     LOG(ERROR) << "KV tensors not created";
+    return std::nullopt;
+  }
+  if (k_regions_[layer_id] == nullptr || v_regions_[layer_id] == nullptr) {
     return std::nullopt;
   }
   const auto k_offset = get_role_block_global_offset(
@@ -366,6 +395,9 @@ VirtualKVCacheMemoryRegions::get_global_offsets_for_block(
 
   const auto& k_region = k_regions_[layer_id];
   const auto& v_region = v_regions_[layer_id];
+  if (k_region == nullptr || v_region == nullptr) {
+    return {kInvalidOffset, kInvalidOffset};
+  }
   const size_t block_offset = static_cast<size_t>(block_id) * block_size;
   if (block_size > k_region->size() || block_size > v_region->size() ||
       block_offset > k_region->size() - block_size ||

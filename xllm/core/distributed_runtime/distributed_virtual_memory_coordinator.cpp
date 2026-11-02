@@ -30,11 +30,14 @@ limitations under the License.
 #include "core/distributed_runtime/collective_service.h"
 #include "core/distributed_runtime/worker_memory_rpc_client.h"
 #include "core/distributed_runtime/worker_memory_rpc_server.h"
+#include "core/framework/allocator/virtual_memory/physical_page_pool.h"
 #include "core/framework/allocator/vmm_arena_capacity.h"
 #include "core/framework/config/distributed_config.h"
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/config/load_config.h"
 #include "core/kv_cache/storage/vmm_kv_page_allocator_impl.h"
 #include "core/platform/device.h"
+#include "core/runtime/options.h"
 #include "core/runtime/worker_memory_resources.h"
 #include "server/xllm_server_registry.h"
 
@@ -56,6 +59,40 @@ DistributedVirtualMemoryCoordinator::DistributedVirtualMemoryCoordinator() {
 
 DistributedVirtualMemoryCoordinator::~DistributedVirtualMemoryCoordinator() {
   destroy();
+}
+
+void DistributedVirtualMemoryCoordinator::prepare_kv_cache_pool(
+    const runtime::Options& options,
+    int64_t world_size,
+    size_t worker_count,
+    int64_t reserved_state_bytes,
+    bool is_multimodal) {
+  CHECK(reserved_state_bytes == 0 ||
+        !LoadConfig::get_instance().enable_vmm_weights())
+      << "Virtual weight memory does not support hybrid linear-state caches.";
+  const KVCacheConfig& config = KVCacheConfig::get_instance();
+  const auto& phy_pool = PhysicalPagePool::get_instance();
+  if (!phy_pool.is_initialized()) {
+    const int64_t encoder_cache_reserved_bytes =
+        is_multimodal ? options.max_encoder_cache_size() * 1024 * 1024 : 0;
+    CHECK_GT(
+        init_physical_page_pools(config.max_memory_utilization(),
+                                 config.max_cache_size(),
+                                 config.max_memory_utilization_configured(),
+                                 encoder_cache_reserved_bytes,
+                                 reserved_state_bytes),
+        0)
+        << "Failed to initialize KV cache physical page pools";
+  }
+  if (!is_initialized()) {
+    init_page_budget(phy_pool.num_total(),
+                     options.dp_size(),
+                     static_cast<int32_t>(worker_count),
+                     config.phy_page_granularity_size(),
+                     /*enable_prealloc=*/true);
+  }
+  set_model_parallel_strategy(
+      options.model_id(), options.dp_size(), static_cast<int32_t>(world_size));
 }
 
 void DistributedVirtualMemoryCoordinator::destroy() {
@@ -180,7 +217,8 @@ int64_t DistributedVirtualMemoryCoordinator::init_physical_page_pools(
     double max_memory_utilization,
     int64_t max_cache_size,
     bool max_memory_utilization_configured,
-    int64_t reserved_memory_bytes) {
+    int64_t reserved_memory_bytes,
+    int64_t resident_memory_bytes) {
   CHECK(std::isfinite(max_memory_utilization));
   CHECK_GE(max_memory_utilization, 0.0);
   CHECK_LE(max_memory_utilization, 1.0);
@@ -212,7 +250,8 @@ int64_t DistributedVirtualMemoryCoordinator::init_physical_page_pools(
                                      max_memory_utilization_configured,
                                      lazy,
                                      max_cache_size,
-                                     reserved_memory_bytes);
+                                     reserved_memory_bytes,
+                                     resident_memory_bytes);
 
     const int64_t num_pages = capacity.maximum_bytes / page_size;
     const int64_t initial_pages = capacity.initial_bytes / page_size;
@@ -309,7 +348,8 @@ int64_t DistributedVirtualMemoryCoordinator::init_physical_page_pools(
                                      max_memory_utilization_configured,
                                      lazy,
                                      max_cache_size,
-                                     reserved_memory_bytes);
+                                     reserved_memory_bytes,
+                                     resident_memory_bytes);
     // Apply each worker's ratio before reducing so heterogeneous devices keep
     // their own configured arena ceiling.
     min_capacity_bytes = std::min(min_capacity_bytes, capacity.maximum_bytes);

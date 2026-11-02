@@ -18,18 +18,36 @@ limitations under the License.
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <string>
 #include <utility>
 #include <vector>
 
+#include "core/framework/config/kv_cache_config.h"
 #include "core/kv_cache/layout/deepseek_v4_cache_policy.h"
 #include "framework/model/model_args.h"
 #include "runtime/options.h"
 #include "tests/core/kv_cache/dcp_indexer_test_fixture.h"
 
+#if defined(USE_NPU)
+#include "models/model_registry.h"
+#endif
+
 namespace xllm {
 namespace {
 
 class DcpIndexerEstimationTest : public test::DcpIndexerConfigTest {};
+
+class VirtualMemoryPrefixEstimationTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    KVCacheConfig::get_instance().enable_vmm_kvcache(true);
+  }
+
+  void TearDown() override { KVCacheConfig::get_instance() = saved_config_; }
+
+ private:
+  KVCacheConfig saved_config_ = KVCacheConfig::get_instance();
+};
 
 ModelArgs make_standard_args() {
   ModelArgs model_args;
@@ -788,6 +806,125 @@ TEST(KVCacheEstimationTest, Qwen35MtpExpandsConvStateLen) {
   EXPECT_EQ(capacity.linear_slot_size(), 448);
   EXPECT_EQ(capacity.linear_cache_size_in_bytes(), 8960);
 }
+
+TEST(KVCacheEstimationTest, MultimodalMtpReservesPerTokenRecurrentCheckpoints) {
+  ModelArgs model_args = make_standard_args();
+  model_args.model_type("qwen3_5")
+      .full_attention_interval(2)
+      .linear_num_key_heads(2)
+      .linear_num_value_heads(2)
+      .linear_key_head_dim(4)
+      .linear_value_head_dim(8)
+      .linear_conv_kernel_dim(3);
+  runtime::Options options;
+  options.max_memory_utilization(1.0)
+      .block_size(16)
+      .max_seqs_per_batch(4)
+      .max_tokens_per_batch(64)
+      .max_linear_state_cache_slots(16)
+      .enable_prefix_cache(false)
+      .num_speculative_tokens(0);
+  KVCacheEstimateContext context;
+  context.dtype = torch::kFloat16;
+  context.world_size = 1;
+  context.worker_memory = {{256LL << 20, 256LL << 20}};
+  context.is_multimodal = true;
+  const KVCacheCapacity ordinary =
+      KVCacheEstimator(model_args).estimate(options, context);
+  options.num_speculative_tokens(4);
+  const KVCacheCapacity speculative =
+      KVCacheEstimator(model_args).estimate(options, context);
+
+  EXPECT_EQ(ordinary.linear_ssm_checkpoint_stride(), 1);
+  EXPECT_EQ(speculative.linear_conv_state_len(), 6);
+  EXPECT_EQ(speculative.linear_ssm_checkpoint_stride(), 5);
+  EXPECT_GT(speculative.linear_cache_size_in_bytes(),
+            ordinary.linear_cache_size_in_bytes());
+  EXPECT_LT(speculative.n_blocks(), ordinary.n_blocks());
+}
+
+TEST_F(VirtualMemoryPrefixEstimationTest, ReservesReusableLinearStateSlots) {
+  ModelArgs model_args = make_standard_args();
+  model_args.model_type("qwen3_5")
+      .full_attention_interval(2)
+      .linear_num_key_heads(2)
+      .linear_num_value_heads(2)
+      .linear_key_head_dim(4)
+      .linear_value_head_dim(8)
+      .linear_conv_kernel_dim(3);
+  runtime::Options options;
+  options.block_size(16)
+      .max_seqs_per_batch(4)
+      .max_tokens_per_batch(64)
+      .max_linear_state_cache_slots(0)
+      .enable_prefix_cache(false)
+      .num_speculative_tokens(0);
+  KVCacheEstimateContext context;
+  context.dtype = torch::kFloat16;
+  context.world_size = 1;
+  context.virtual_memory_cache_size = 1LL << 20;
+  const KVCacheCapacity without_prefix =
+      KVCacheEstimator(model_args).estimate(options, context);
+  options.enable_prefix_cache(true);
+  const KVCacheCapacity with_prefix =
+      KVCacheEstimator(model_args).estimate(options, context);
+
+  EXPECT_GT(with_prefix.num_linear_state_blocks(),
+            without_prefix.num_linear_state_blocks());
+  EXPECT_GT(with_prefix.linear_cache_size_in_bytes(),
+            without_prefix.linear_cache_size_in_bytes());
+  EXPECT_LT(with_prefix.n_blocks(), without_prefix.n_blocks());
+}
+
+#if defined(USE_NPU)
+TEST(KVCacheEstimationTest, Qwen35NativeMtpDraftUsesFullAttentionCacheBudget) {
+  for (const std::string& model_type :
+       {"qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"}) {
+    for (const int64_t draft_layers : {1, 2}) {
+      SCOPED_TRACE(model_type);
+      SCOPED_TRACE(draft_layers);
+      ModelArgs target_args = make_linear_attention_args();
+      target_args.model_type(model_type)
+          .num_nextn_predict_layers(draft_layers)
+          .layer_types({"linear_attention",
+                        "full_attention",
+                        "linear_attention",
+                        "full_attention"});
+      ModelRegistry::configure_mtp_args(target_args,
+                                        /*speculative_algorithm=*/"MTP",
+                                        /*is_draft_engine=*/false,
+                                        /*is_python_model=*/false);
+      ModelArgs draft_args = target_args;
+      ModelRegistry::configure_mtp_args(draft_args,
+                                        /*speculative_algorithm=*/"MTP",
+                                        /*is_draft_engine=*/true,
+                                        /*is_python_model=*/false);
+
+      KVCacheEstimateOptions target_options = make_linear_attention_options();
+      target_options.num_speculative_tokens = 3;
+      const KVCacheCapacity target_capacity =
+          estimate_kv_cache_capacity(target_args, target_options);
+      EXPECT_EQ(target_capacity.n_layers(), 4);
+      EXPECT_EQ(target_capacity.num_full_attention_layers(), 2);
+      EXPECT_EQ(target_capacity.num_linear_attention_layers(), 2);
+      EXPECT_GT(target_capacity.linear_cache_size_in_bytes(), 0);
+
+      KVCacheEstimateOptions draft_options = target_options;
+      draft_options.is_draft_engine = true;
+      const KVCacheCapacity draft_capacity =
+          estimate_kv_cache_capacity(draft_args, draft_options);
+      EXPECT_EQ(draft_capacity.n_layers(), draft_layers);
+      EXPECT_EQ(draft_capacity.num_full_attention_layers(), draft_layers);
+      EXPECT_EQ(draft_capacity.num_linear_attention_layers(), 0);
+      EXPECT_EQ(draft_capacity.linear_cache_size_in_bytes(), 0);
+      EXPECT_EQ(draft_capacity.slot_size(), 128);
+      EXPECT_EQ(draft_capacity.block_size(), 16);
+      EXPECT_EQ(draft_capacity.cache_size_in_bytes(), 1024 * 1024);
+      EXPECT_EQ(draft_capacity.n_blocks(), 512 / draft_layers);
+    }
+  }
+}
+#endif
 
 TEST(KVCacheEstimationTest, GlmMtpAllocatesFrameworkCheckpointsOnlyForDecode) {
   for (const std::string& model_type : {"glm5_3_flash", "glm5_next"}) {

@@ -427,7 +427,7 @@ bool DisaggPDScheduler::enqueue_ready_request(
 }
 
 void DisaggPDScheduler::release_dispatch_admission() {
-  std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
+  std::lock_guard<std::mutex> lock(request_admission_mutex_);
   CHECK_GT(pending_dispatch_requests_, 0u);
   --pending_dispatch_requests_;
 }
@@ -436,7 +436,7 @@ bool DisaggPDScheduler::enqueue_dispatched_request(
     std::shared_ptr<Request> request) {
   bool queued = false;
   {
-    std::lock_guard<std::mutex> lock(prefetch_admission_mutex_);
+    std::lock_guard<std::mutex> lock(request_admission_mutex_);
     CHECK_GT(pending_dispatch_requests_, 0u);
     queued = ContinuousSchedulerBase::enqueue_ready_request(request);
     --pending_dispatch_requests_;

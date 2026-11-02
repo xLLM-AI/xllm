@@ -293,13 +293,13 @@ as well as execution headroom. Memory released outside the pool can therefore
 enable growth beyond the startup slot count. Fixed VMM and the original
 physical cache retain their positive default ratio and fixed capacity.
 
-Before serving, elastic VMM warms long and wide prefill shapes and configured
-decode concurrency on every DP rank. Graph startup warmup cannot be disabled in
-this mode. The rounded KV footprint of these shapes must fit the configured
-capacity; otherwise startup fails with a capacity diagnostic. Worker execution
-samples and allocation checks use native NPU/CUDA/ILU/MUSA caching-allocator
-residency statistics when available. The pool preserves the difference between
-the highest recorded allocator reservation and its current reservation, plus
+Elastic VMM follows the configured graph or eager warmup behavior without
+additional VMM-specific warmup. Physical backing grows on demand, with growth
+constrained by current free memory, observed execution peaks, and the explicit
+reserve. Worker execution samples and allocation checks continue to use native
+NPU/CUDA/ILU/MUSA caching-allocator residency statistics when available. The pool
+preserves the difference between the highest recorded allocator reservation and
+its current reservation, plus
 `vmm_memory_reserve_bytes`. Resident caches are already charged against driver
 free memory, while released caches retain room to recover. A later larger
 allocator peak raises this reserve even after memory is released outside the

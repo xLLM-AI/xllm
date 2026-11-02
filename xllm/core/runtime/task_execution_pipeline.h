@@ -28,11 +28,13 @@ limitations under the License.
 #include "core/framework/model/causal_lm.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/draft_proposal.h"
+#include "core/framework/speculative/draft_vocab_mapping.h"
 #include "core/kv_cache/transfer/host_transfer/transfer.h"
 #include "core/platform/device.h"
 #include "core/runtime/executor.h"
 #include "core/runtime/forward_params.h"
 #include "core/runtime/slot_buffer.h"
+#include "core/runtime/vlm_forward_params.h"
 #include "core/util/concurrent_queue.h"
 #include "core/util/threadpool.h"
 
@@ -78,6 +80,8 @@ using TaskKVPush =
 using TaskKVLoad = std::function<std::optional<HostKVLoadHandle>(uint64_t)>;
 using TaskKVFence = std::function<void(const Stream&)>;
 
+enum class TaskInputDomain : uint8_t { LLM, VLM };
+
 // Borrowed resources outlive the pipeline. PUSH binds a fresh layer
 // synchronizer to the invocation and resolves KV resources at Launch time.
 struct TaskModel {
@@ -88,6 +92,7 @@ struct TaskModel {
   TaskKVLoad load_kv = {};
   TaskKVFence fence_kv = {};
   std::function<void(const ModelParamsView&)> restore_request_state = {};
+  TaskInputDomain input_domain = TaskInputDomain::LLM;
 };
 
 class ProcessGroup;
@@ -106,6 +111,7 @@ struct SpeculativeTaskCapacity {
   // Restore committed draft KV from verifier hidden states before reuse.
   bool refresh_target_prefix = false;
   bool is_probabilistic_draft = false;
+  DraftVocabMapping draft_vocab;
   // Reuse the refreshed final row for the next admitted first proposal.
   bool reuse_prefix_refresh_output = false;
   bool unified_graph = false;
@@ -178,6 +184,7 @@ class TaskExecutionPipeline final {
   // -(previous sampling output row + 1) with scheduler overlap.
   // Backpressure and validation return before accepting a Task.
   TaskSubmission submit(const LlmForwardInput& input);
+  TaskSubmission submit(const VlmForwardInput& input);
   // Publish all previously accepted model work to the hierarchy producer
   // stream. Waits only for Launch submission, without consuming any results.
   void fence_kv_cache();
@@ -284,6 +291,7 @@ class TaskExecutionPipeline final {
     // Used only by the WorkerImpl-owned execution mode. These values stay in
     // the normal task slot until the completed FIFO retires it.
     LlmForwardInput worker_input;
+    VlmForwardInput worker_vlm_input;
     // Packed host views borrow this storage even if worker preparation builds
     // a different contiguous H2D buffer.
     torch::Tensor worker_input_host_buffer;
@@ -303,10 +311,12 @@ class TaskExecutionPipeline final {
                         TaskKVPush push_kv,
                         TaskKVLoad load_kv,
                         TaskKVFence fence_kv,
-                        WorkerImpl* worker_pipeline = nullptr);
+                        WorkerImpl* worker_pipeline = nullptr,
+                        TaskInputDomain input_domain = TaskInputDomain::LLM);
   Status validate(const Slot& slot, const LlmForwardInput& input) const;
   Status prepare(uint32_t slot_id, const LlmForwardInput& input);
   Status prepare_worker(uint32_t slot_id, const LlmForwardInput& input);
+  Status prepare_worker(uint32_t slot_id, const VlmForwardInput& input);
   void launch(uint32_t slot_id);
   void observe_execution_memory(uint32_t slot_id);
   ForwardOutput consume(uint32_t slot_id);
@@ -396,6 +406,7 @@ class TaskExecutionPipeline final {
   // Embedding-row keyed; shared by both fixed and adaptive recurrent tasks.
   torch::Tensor recurrent_accepted_lengths_;
   WorkerImpl* worker_pipeline_ = nullptr;
+  TaskInputDomain input_domain_ = TaskInputDomain::LLM;
   std::unique_ptr<TaskModel> draft_;
   torch::ScalarType hidden_dtype_ = torch::kFloat32;
   std::unique_ptr<MtpContextStorage> context_;

@@ -31,6 +31,8 @@ from xllm.python.platform import current_platform
 _ModelPath = tuple[str, str]
 _REGISTRY: dict[str, _ModelPath] = {}
 
+GLM5_NEXT_TARGET_FAMILY = ("glm5_next", "glm5_3_flash", "glm5_next_text")
+
 
 def register_model(
     *names: str,
@@ -167,10 +169,15 @@ def _register_builtin_models() -> None:
         "deepseek_v32_mtp",
     )
     _register_model_path(
+        "xllm.python.models.deepseek_v4_mtp",
+        "DeepseekV4MtpForCausalLM",
+        "DeepseekV4MtpForCausalLM",
+        "deepseek_v4_mtp",
+    )
+    _register_model_path(
         "xllm.python.models.glm5_next",
         "Glm5NextForCausalLM",
-        "glm5_next",
-        "glm5_3_flash",
+        *GLM5_NEXT_TARGET_FAMILY,
     )
     # Internal key selected by the C++ VLM model factory.
     _register_model_path(

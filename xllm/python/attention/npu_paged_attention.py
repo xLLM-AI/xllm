@@ -2109,7 +2109,10 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 if left_context is None:
                     atten_mask = self._block_attention_mask(prepared, layer)
                     block_table = self._block_table_i32
-                    kv_lengths = prepared.actual_seq_kv
+                    # Taskless ACL graphs freeze FIA's Host lengths at capture.
+                    # The live Device mask can shorten that bound, but cannot
+                    # extend a short warmup prefix when later requests grow.
+                    kv_lengths = [prepared.kv_capacity] * len(widths) if in_acl_graph() else prepared.actual_seq_kv
                 else:
                     window = self._windowed_block_table(prepared, left_context)
                     atten_mask = self._block_attention_mask(prepared, layer, window.key_positions)

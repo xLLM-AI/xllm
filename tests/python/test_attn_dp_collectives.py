@@ -86,6 +86,20 @@ def _run_dp_tp_collectives(global_rank: int, rendezvous: str) -> None:
         with patch.object(collectives, "_all_reduce", dist.all_reduce):
             output = o_all_reduce_dp_tp(torch.full((6, 6), float(weight_rank + 1)), topology, padded, 2)
         torch.testing.assert_close(output, torch.full((6, 6), 10.0))
+
+        if tp_rank == 0:
+            input_splits, output_splits = ([1, 2], [1, 3]) if dp_rank == 0 else ([3, 0], [2, 0])
+            payload = torch.arange(3, dtype=torch.float32) + 2 * dp_rank
+            expected = torch.tensor([0.0, 2.0, 3.0, 4.0]) if dp_rank == 0 else torch.tensor([1.0, 2.0])
+        else:
+            input_splits, output_splits = [0, 0], [0, 0]
+            payload = torch.empty(0, dtype=torch.float32)
+            expected = payload
+        received = torch.empty_like(expected)
+        collectives.all_to_all_single_(
+            received, payload, groups[tp_rank], output_split_sizes=output_splits, input_split_sizes=input_splits
+        )
+        torch.testing.assert_close(received, expected)
     finally:
         collectives._groups.clear()
         dist.destroy_process_group()

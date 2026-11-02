@@ -164,8 +164,11 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
   CHECK(!speculative_error.has_value()) << speculative_error.value();
   validate_layerwise_split_size_startup_config(
       options_, model_type, options_.nnodes());
-  CHECK(!options_.enable_task_pipeline())
-      << "Task pipeline is only supported by the LLM master.";
+  if (options_.enable_task_pipeline()) {
+    CHECK(options_.dp_size() == 1 && options_.cp_size() == 1 &&
+          !options_.enable_disagg_pd())
+        << "VLM task pipeline requires DP=CP=1 without disaggregated PD.";
+  }
   CHECK(options_.host_blocks_factor() <= 1.0)
       << "Basic host KV cache offload supports the LLM engine and "
          "model-based speculative engines only.";
@@ -188,6 +191,7 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
       .ep_size(options_.ep_size())
       .cp_size(options_.cp_size())
       .enable_schedule_overlap(options_.enable_schedule_overlap())
+      .enable_task_pipeline(options_.enable_task_pipeline())
       .enable_chunked_prefill(options_.enable_chunked_prefill())
       .enable_offline_inference(options_.enable_offline_inference())
       .disable_log_stats(options_.disable_log_stats())
@@ -323,6 +327,7 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
   SchedulerOptions scheduler_options;
   scheduler_options.max_tokens_per_batch(options.max_tokens_per_batch())
       .max_seqs_per_batch(options.max_seqs_per_batch())
+      .enable_task_pipeline(options_.enable_task_pipeline())
       .request_queue_size(options.request_queue_size())
       .max_tokens_per_chunk_for_prefill(
           options.max_tokens_per_chunk_for_prefill())

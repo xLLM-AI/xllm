@@ -36,6 +36,7 @@ limitations under the License.
 #include "common/options.h"
 #include "core/common/global_flags.h"
 #include "core/distributed_runtime/distributed_virtual_memory_coordinator.h"
+#include "core/distributed_runtime/kv_cache_capacity_planner.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
@@ -318,20 +319,22 @@ bool LLMEngine::init_model(MasterStatus master_status,
   return true;
 }
 
-KVCacheCapacity LLMEngine::estimate_kv_cache_capacity() {
-  return KVCacheManagerFactory::estimate_capacity(
-      args_,
-      options_,
-      dtype_,
-      dp_local_tp_size_,
-      worker_clients_,
-      /*is_multimodal=*/false,
-      initial_weight_reservation_bytes_);
+KVCacheCapacity LLMEngine::estimate_kv_cache_capacity(
+    bool initialize_virtual_memory) {
+  return KVCacheCapacityPlanner(args_,
+                                options_,
+                                dtype_,
+                                dp_local_tp_size_,
+                                worker_clients_,
+                                /*is_multimodal=*/false,
+                                initial_weight_reservation_bytes_)
+      .plan(initialize_virtual_memory);
 }
 
 bool LLMEngine::allocate_kv_cache(
     const KVCacheCapacity& kv_cache_cap,
-    std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator) {
+    std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator,
+    const VmmKVCacheLayout* shared_vmm_layout) {
   const KVCacheConfig& kv_cache_config = KVCacheConfig::get_instance();
 
   const bool enable_state_cache = has_linear_attention_layers(args_) ||
@@ -492,32 +495,43 @@ bool LLMEngine::allocate_kv_cache(
     // The speculative scheduler owns only the target engine BlockManager.
     // Keep the draft engine's placeholder manager non-caching so a Draft
     // model with only SWA tensors does not pretend to own logical prefixes.
-    options.enable_prefix_cache(false);
+    options.enable_prefix_cache(false).enable_vmm_kvcache(false);
   }
 
   if (options_.host_blocks_factor() > 1.0 && !is_mtp_draft_engine) {
     // Translate a composite cache capacity into typed Host pools. The
     // hierarchy layer consumes only this BlockType map and does not need to
     // identify the model that produced the layout.
-    if (!options.manager_types().empty()) {
+    if (!options.manager_types().empty() || enable_state_cache) {
       std::map<BlockType, uint32_t> host_capacities;
-      if (kv_cache_cap.swa_count() > 0) {
+      if (options.manager_types().empty()) {
         host_capacities.emplace(
-            BlockType::SWA,
+            BlockType::KV,
             static_cast<uint32_t>(scale_host_block_count(
-                kv_cache_cap.swa_count(), options_.host_blocks_factor())));
+                kv_cache_cap.n_blocks(), options_.host_blocks_factor())));
+      }
+      if (enable_state_cache) {
+        host_capacities.emplace(BlockType::LINEAR,
+                                static_cast<uint32_t>(scale_host_block_count(
+                                    kv_cache_cap.num_linear_state_blocks(),
+                                    options_.host_blocks_factor())));
+      }
+      uint32_t host_c128_blocks = 0;
+      if (kv_cache_cap.c128_count() > 0) {
+        host_c128_blocks = static_cast<uint32_t>(scale_host_block_count(
+            kv_cache_cap.c128_count(), options_.host_blocks_factor()));
+        host_capacities.emplace(BlockType::C128, host_c128_blocks);
+      }
+      if (kv_cache_cap.swa_count() > 0) {
+        CHECK_GT(host_c128_blocks, 0u)
+            << "DSV4 Host SWA capacity requires a positive C128 capacity.";
+        host_capacities.emplace(BlockType::SWA, host_c128_blocks);
       }
       if (kv_cache_cap.c4_count() > 0) {
         host_capacities.emplace(
             BlockType::C4,
             static_cast<uint32_t>(scale_host_block_count(
                 kv_cache_cap.c4_count(), options_.host_blocks_factor())));
-      }
-      if (kv_cache_cap.c128_count() > 0) {
-        host_capacities.emplace(
-            BlockType::C128,
-            static_cast<uint32_t>(scale_host_block_count(
-                kv_cache_cap.c128_count(), options_.host_blocks_factor())));
       }
       options.host_num_blocks_by_type(std::move(host_capacities));
     }
@@ -532,7 +546,8 @@ bool LLMEngine::allocate_kv_cache(
                                     std::move(options),
                                     std::move(transfer_coordinator),
                                     dp_size_,
-                                    std::move(host_cache_validation_options));
+                                    std::move(host_cache_validation_options),
+                                    shared_vmm_layout);
   factory_result.shape.print_shapes();
   KVCacheShape kv_cache_shape = std::move(factory_result.shape);
   kv_cache_manager_ = std::move(factory_result.manager);

@@ -420,11 +420,12 @@ WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
     : options_(options),
       driver_(parallel_args.rank() == 0),
       dp_driver_(is_dp_driver(parallel_args)),
-      schedule_overlap_(
-          is_driver(),
-          EPLBConfig::get_instance().enable_eplb(),
-          /*retire_unconsumed_inputs=*/
-          options.enable_speculative_decode() && parallel_args.dp_size() > 1),
+      schedule_overlap_(is_driver() && !options.enable_task_pipeline(),
+                        EPLBConfig::get_instance().enable_eplb(),
+                        /*retire_unconsumed_inputs=*/
+                        options.enable_task_pipeline() ||
+                            (options.enable_speculative_decode() &&
+                             parallel_args.dp_size() > 1)),
       device_(device),
       parallel_args_(parallel_args) {
   if (options_.enable_speculative_decode() &&
@@ -601,11 +602,22 @@ bool WorkerImpl::allocate_kv_cache_storage(
   if (::xllm::KVCacheConfig::get_instance().enable_vmm_kvcache()) {
     CHECK(tensor_allocator == nullptr)
         << "Virtual memory KV cache cannot use another tensor allocator.";
+    std::vector<bool> kv_layer_owned;
+    if (enable_linear_attention) {
+      kv_layer_owned.reserve(static_cast<size_t>(num_layers));
+      for (int64_t layer_id = 0; layer_id < num_layers; ++layer_id) {
+        kv_layer_owned.emplace_back(
+            !is_linear_attention_layer(layer_id,
+                                       layout_options.full_attention_interval(),
+                                       layout_options.layer_types()));
+      }
+    }
     tensor_allocator = create_vmm_kv_tensor_allocator(
         WorkerMemoryResources::get_instance().kv_cache_memory(),
         options_.model_id(),
         num_layers,
-        indexer_cache_enabled_layers);
+        indexer_cache_enabled_layers,
+        std::move(kv_layer_owned));
   }
 
   KVCacheCreateOptions create_options;
@@ -1703,9 +1715,7 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async_impl(
   threadpool_.schedule([this,
                         input = std::move(input_on_device),
                         promise = std::move(promise)]() mutable {
-    if (hierarchy_kv_cache_transfer_ != nullptr) {
-      set_hierarchy_layer_synchronizer(input.input_params);
-    }
+    set_hierarchy_layer_synchronizer(input.input_params);
 
     if (enable_schedule_overlap()) {
       promise.setValue(schedule_overlap_.execute(*this, input));
@@ -1729,6 +1739,26 @@ void WorkerImpl::prepare_task_pipeline_input(const LlmForwardInput& input,
 std::optional<ForwardOutput> WorkerImpl::execute_task_pipeline(
     const LlmForwardInput& prepared) {
   return step_for_schedule_overlap(prepared);
+}
+
+void WorkerImpl::prepare_task_pipeline_input(const VlmForwardInput& input,
+                                             VlmForwardInput& prepared) {
+  prepare_work_before_execute_on_stream_impl(input,
+                                             prepared,
+                                             *prepare_stream_,
+                                             /*record_ready_event=*/true,
+                                             /*restore_linear_state=*/true,
+                                             /*wait_for_compute_stream=*/false);
+}
+
+std::optional<ForwardOutput> WorkerImpl::execute_task_pipeline(
+    VlmForwardInput& prepared) {
+  // The task FIFO owns host publication. ScheduleOverlap retains only the
+  // device continuation needed to repair the next admitted decode input.
+  if (enable_schedule_overlap()) {
+    return schedule_overlap_.execute(*this, prepared);
+  }
+  return step(prepared);
 }
 
 ForwardOutput WorkerImpl::get_last_step_result() {
@@ -2111,6 +2141,8 @@ TaskModel WorkerImpl::task_model() {
   CHECK(status_ == Status::LOADED || status_ == Status::READY);
   CHECK(model_ != nullptr && model_executor_ != nullptr);
   TaskModel task{*model_, *model_executor_, kv_caches_};
+  task.input_domain =
+      options_.backend() == "vlm" ? TaskInputDomain::VLM : TaskInputDomain::LLM;
   task.restore_request_state = [this](const ModelParamsView& params) {
     prepare_linear_state_cache(params);
   };
@@ -2207,16 +2239,6 @@ bool WorkerImpl::init_model_impl(const std::string& model_weights_path,
       options_.speculative_algorithm(),
       options_.is_draft_engine(),
       ModelConfig::is_python_model_impl(context_.get_model_impl()));
-#if defined(USE_MLU)
-  const bool native_glm5_next =
-      !ModelConfig::is_python_model_impl(context_.get_model_impl()) &&
-      (is_glm5_next_target_model_type(args.model_type()) ||
-       args.model_type() == "glm5_next_mtp");
-  CHECK(!(native_glm5_next && options_.enable_speculative_decode()))
-      << "Native MLU GLM5-Next speculative decoding is not supported yet: "
-         "Dense Validate Span and accepted-span state replay are not wired "
-         "into the MTP worker. Disable speculative decoding.";
-#endif
   auto quant_args = model_loader->quant_args();
   const bool embedding_mode = options_.task_type() == "embed";
   args.embedding_mode(embedding_mode);
@@ -2300,25 +2322,6 @@ bool WorkerImpl::init_model_impl(const std::string& model_weights_path,
              ::xllm::SpeculativeConfig::get_instance()
                  .enable_atb_spec_kernel()) {
     args.num_speculative_tokens(options_.num_speculative_tokens());
-  } else if (options_.enable_speculative_decode() &&
-             options_.num_speculative_tokens() == 0 &&
-             args.num_nextn_predict_layers() != 0) {
-    const std::string& current_type = args.model_type();
-    const char* mtp_model_type = nullptr;
-    if (current_type == "qwen3_5_text") {
-      mtp_model_type = "qwen3_5_mtp";
-    } else if (current_type == "qwen3_5_moe_text") {
-      mtp_model_type = "qwen3_5_moe_mtp";
-    }
-    if (mtp_model_type != nullptr) {
-      LOG(INFO) << "Overriding draft model_type from " << current_type << " to "
-                << mtp_model_type << " for speculative decoding";
-      args.model_type(mtp_model_type);
-      const int32_t mtp_layers = args.num_nextn_predict_layers();
-      args.n_layers(mtp_layers);
-      args.layer_types(std::vector<std::string>(mtp_layers, "full_attention"));
-      args.full_attention_interval(1);
-    }
   }
   if (options_.enable_speculative_decode() && !options_.is_draft_engine() &&
       SpeculativeConfig::requires_aux_hidden_capture(speculative_algorithm) &&
@@ -2431,6 +2434,21 @@ bool WorkerImpl::init_model_impl(const std::string& model_weights_path,
   scoped_load_threads =
       std::make_unique<ScopedAtenLoadThreads>(/*target_threads=*/1);
 
+  draft_token_id_offsets_ = torch::Tensor();
+  if (is_spec_draft_ && (SpeculativeConfig::is_eagle3_algorithm(
+                             options_.speculative_algorithm()) ||
+                         SpeculativeConfig::is_dspark_algorithm(
+                             options_.speculative_algorithm()))) {
+    for (const std::unique_ptr<StateDict>& state_dict :
+         model_loader->get_state_dicts()) {
+      torch::Tensor d2t = state_dict->get_tensor("d2t");
+      if (d2t.defined()) {
+        draft_token_id_offsets_ = std::move(d2t);
+        break;
+      }
+    }
+  }
+
   if (master_status == MasterStatus::WAKEUP) {
     this->load_model(std::move(model_loader));
   } else if (master_status == MasterStatus::LIGHT_SLEEP) {
@@ -2455,6 +2473,10 @@ torch::Tensor WorkerImpl::select_hidden_states_for_embedding(
       << "Captured hidden states are required but the model did not return "
          "aux_hidden_states";
   return model_output.aux_hidden_states;
+}
+
+torch::Tensor WorkerImpl::take_draft_token_id_offsets() {
+  return std::exchange(draft_token_id_offsets_, torch::Tensor());
 }
 
 void WorkerImpl::load_model(std::unique_ptr<ModelLoader> loader) {
@@ -2607,12 +2629,25 @@ WorkerImpl::create_hierarchy_kv_cache_transfer(
   const uint32_t tp_size =
       mlu_overlap ? dp_local_size : dp_local_size / options_.cp_size();
   CHECK_GT(tp_size, 0u);
-  const int32_t worker_rank = context_.get_parallel_args().rank();
+  const auto& parallel_args = context_.get_parallel_args();
+  const int32_t worker_rank = parallel_args.rank();
   CHECK_GE(worker_rank, 0);
   const uint32_t worker_id = static_cast<uint32_t>(worker_rank);
+  const int32_t kv_split_size = parallel_args.kv_split_size_effective();
+  CHECK_GT(kv_split_size, 0);
+  CHECK_EQ(dp_local_size % kv_split_size, 0U);
+  // Pure DCP interleaves shards; PCP groups each shard's replicas contiguously.
+  const bool store_write_enabled =
+      !options_.enable_mla() ||
+      (options_.cp_size() == 1
+           ? worker_id % dp_local_size < static_cast<uint32_t>(kv_split_size)
+           : worker_id % (dp_local_size / kv_split_size) == 0);
   HierarchyKVCacheTransfer::Options transfer_options;
   transfer_options.tp_rank(worker_id % tp_size)
       .tp_size(tp_size)
+      .kv_split_size(kv_split_size)
+      .kv_split_rank(parallel_args.kv_split_rank())
+      .store_write_enabled(store_write_enabled)
       .layers(context_.get_model_args().n_layers())
       .host_blocks_factor(options_.host_blocks_factor())
       .layers_wise_copy_batchs(options_.layers_wise_copy_batchs())
@@ -2689,6 +2724,10 @@ void WorkerImpl::clear_hierarchy_kv_cache_transfer() {
 
 void WorkerImpl::set_hierarchy_layer_synchronizer(
     LlmModelParams& input_params) {
+  CHECK(!input_params.meta.requires_host_restore ||
+        hierarchy_kv_cache_transfer_ != nullptr)
+      << "Missing Host restore manager at batch_id="
+      << input_params.meta.batch_id;
   if (hierarchy_kv_cache_transfer_ != nullptr) {
     ModelParamsView execution_params(input_params);
     hierarchy_kv_cache_transfer_->set_layer_synchronizer(execution_params);
@@ -2910,6 +2949,10 @@ std::optional<ForwardOutput> WorkerImpl::step_for_schedule_overlap(
 
 void WorkerImpl::set_hierarchy_layer_synchronizer(
     VlmModelParams& input_params) {
+  CHECK(!input_params.meta.requires_host_restore ||
+        hierarchy_kv_cache_transfer_ != nullptr)
+      << "Missing Host restore manager at batch_id="
+      << input_params.meta.batch_id;
   if (hierarchy_kv_cache_transfer_ != nullptr) {
     ModelParamsView execution_params(input_params);
     hierarchy_kv_cache_transfer_->set_layer_synchronizer(execution_params);

@@ -67,9 +67,12 @@ _GROUP_NAMES = frozenset(("tp", "dp", "moe_tp", "moe_ep", "cp", "layerwise", "dc
 # ``cp`` strides by the attention TP size: ranks sharing a (dp, tp) slot but
 # holding different sequence shards form one CP group, matching the C++
 # compute_cp_group_ranks layout (rank = dp*cp*tp + cp_rank*tp + tp_rank).
-# ``dcp`` matches ParallelArgs::kv_split_rank when cp_size == 1:
-# rank_in_group = global_rank / (world / dcp_size).
+# CP and DCP callers whose world contains multiple DP cohorts pass an explicit
+# within-cohort stride: the strided derivation above would otherwise mix
+# ranks from different requests. DCP then matches the DP-local ownership in
+# ParallelArgs::kv_split_rank.
 _CONTIGUOUS_GROUPS = frozenset(("tp", "moe_tp", "layerwise"))
+_STRIDED_COHORT_GROUPS = frozenset(("cp", "dcp"))
 
 _groups = {}
 _group_ranks = {}
@@ -171,7 +174,12 @@ def _ensure_world(
     _world_topology = _exchange_world_topology(store, device, global_rank, global_world_size)
 
 
-def _group_memberships(group_name: str, world_size: int, global_world_size: int) -> list[list[int]]:
+def _group_memberships(
+    group_name: str,
+    world_size: int,
+    global_world_size: int,
+    group_stride: int | None = None,
+) -> list[list[int]]:
     """Every group of this kind, in an order all ranks agree on.
 
     ``new_group`` is collective over the whole world, so each rank has to create
@@ -179,6 +187,21 @@ def _group_memberships(group_name: str, world_size: int, global_world_size: int)
     """
     if world_size <= 0 or global_world_size % world_size:
         raise ValueError(f"{group_name} size {world_size} does not divide the world size {global_world_size}")
+    if group_stride is not None:
+        if (
+            group_name not in _STRIDED_COHORT_GROUPS
+            or group_stride <= 0
+            or global_world_size % (world_size * group_stride)
+        ):
+            raise ValueError(
+                f"{group_name} stride {group_stride} must describe complete DP cohorts of the world {global_world_size}"
+            )
+        cohort_size = world_size * group_stride
+        return [
+            [base + tp_rank + cp_rank * group_stride for cp_rank in range(world_size)]
+            for base in range(0, global_world_size, cohort_size)
+            for tp_rank in range(group_stride)
+        ]
     if group_name == "attn_dp":
         if world_size != global_world_size:
             raise ValueError("attn_dp must cover the full process world")
@@ -199,6 +222,7 @@ def init_process_group(
     global_rank: int,
     global_world_size: int,
     group_index: int,
+    group_stride: int | None = None,
 ) -> ProcessGroup:
     if group_name not in _GROUP_NAMES:
         raise ValueError(f"unsupported parallel group: {group_name}")
@@ -225,7 +249,7 @@ def init_process_group(
 
     own = None
     own_ranks = None
-    memberships = _group_memberships(group_name, world_size, global_world_size)
+    memberships = _group_memberships(group_name, world_size, global_world_size, group_stride)
     for index, ranks in enumerate(memberships):
         candidate = dist.new_group(ranks=ranks, timeout=timedelta(minutes=5), backend=backend)
         if global_rank in ranks:
@@ -272,10 +296,10 @@ def init_tp_group(
     )
 
 
-def _require_group(x: torch.Tensor, group_name: str) -> ProcessGroup:
-    group = _groups.get((group_name, str(x.device)))
+def get_process_group(device: torch.device, group_name: str) -> ProcessGroup:
+    group = _groups.get((group_name, str(device)))
     if group is None:
-        raise RuntimeError(f"{group_name} collective called before its process group was initialized for {x.device}")
+        raise RuntimeError(f"{group_name} collective called before its process group was initialized for {device}")
     return group
 
 
@@ -367,19 +391,35 @@ def moe_ep_all_reduce(x: torch.Tensor) -> None:
     all_reduce_(x, "moe_ep")
 
 
+def moe_ep_hccl_info(device: torch.device | str) -> tuple[str, int, int]:
+    """Return the initialized expert group's HCCL name, rank and size."""
+    device_obj = torch.device(device)
+    group = get_process_group(device_obj, "moe_ep")
+    rank, world_size = group.rank(), group.size()
+    if world_size <= 1 or not 0 <= rank < world_size:
+        raise RuntimeError(f"MoE EP dispatch requires an initialized multi-rank group: rank {rank}/{world_size}")
+    get_comm_name = getattr(group._get_backend(device_obj), "get_hccl_comm_name", None)
+    if get_comm_name is None:
+        raise RuntimeError("MoE EP dispatch requires an HCCL process group")
+    comm_name = get_comm_name(rank)
+    if not isinstance(comm_name, str) or not comm_name:
+        raise RuntimeError("MoE EP dispatch requires a nonempty HCCL communication name")
+    return comm_name, rank, world_size
+
+
 def dcp_group(device: torch.device | str) -> ProcessGroup | None:
     return _groups.get(("dcp", str(torch.device(device))))
 
 
 @torch.library.custom_op("xllm_ops::all_reduce_", mutates_args={"x"})
 def all_reduce_(x: torch.Tensor, group_name: str = "tp") -> None:
-    group = _require_group(x, group_name)
+    group = get_process_group(x.device, group_name)
     _all_reduce(x, group=group)
 
 
 @torch.library.custom_op("xllm_ops::broadcast_", mutates_args={"x"})
 def broadcast_(x: torch.Tensor, src: int, group_name: str = "tp") -> None:
-    group = _require_group(x, group_name)
+    group = get_process_group(x.device, group_name)
     if not 0 <= src < group.size():
         raise RuntimeError(f"invalid {group_name} source rank {src}")
     ranks = _group_ranks.get((group_name, str(x.device)))
@@ -408,7 +448,7 @@ def _normalize_gather_dim(x: torch.Tensor, dim: int) -> int:
 @torch.library.custom_op("xllm_ops::reduce_scatter", mutates_args=())
 def reduce_scatter(x: torch.Tensor, world_size: int, group_name: str = "tp") -> torch.Tensor:
     """SUM and scatter equal contiguous token blocks in group-rank order."""
-    group = _require_group(x, group_name)
+    group = get_process_group(x.device, group_name)
     if group.size() != world_size or x.ndim == 0 or x.shape[0] % world_size:
         raise ValueError("reduce-scatter requires matching group size and divisible token rows")
     input = _contiguous_gather_input(x)
@@ -432,7 +472,7 @@ def matmul_reduce_scatter(
     """Fused NPU matmul and SUM scatter of equal token blocks."""
     if not _USE_PYTHON_NPU_GROUPS or x.device.type != "npu":
         raise RuntimeError("fused matmul-reduce-scatter requires an initialized Python NPU group")
-    group = _require_group(x, group_name)
+    group = get_process_group(x.device, group_name)
     if world_size not in (2, 4, 8) or group.size() != world_size:
         raise ValueError("MMRS requires a matching TP group of size 2, 4, or 8")
     if x.ndim != 2 or weight.ndim != 2 or x.shape[0] == 0 or x.shape[0] % world_size:
@@ -475,7 +515,7 @@ def _contiguous_gather_input(x: torch.Tensor) -> torch.Tensor:
 
 @torch.library.custom_op("xllm_ops::all_gather", mutates_args=())
 def all_gather(x: torch.Tensor, dim: int, world_size: int, group_name: str = "tp") -> torch.Tensor:
-    group = _require_group(x, group_name)
+    group = get_process_group(x.device, group_name)
     if group.size() != world_size:
         raise RuntimeError(f"{group_name} world-size mismatch: expected {world_size}, got {group.size()}")
     dim = _normalize_gather_dim(x, dim)
@@ -506,7 +546,7 @@ def all_gather_variable(
     rank: int,
     group_name: str,
 ) -> torch.Tensor:
-    group = _require_group(x, group_name)
+    group = get_process_group(x.device, group_name)
     if group.size() != len(token_counts):
         raise RuntimeError(
             f"{group_name} size mismatch: group has {group.size()} ranks, "
@@ -549,11 +589,77 @@ def _(
     return x.new_empty(shape)
 
 
-def _check_collective_buffers(output: torch.Tensor, input: torch.Tensor) -> None:
+def all_to_all_single_(
+    output: torch.Tensor,
+    input: torch.Tensor,
+    group: ProcessGroup,
+    *,
+    output_split_sizes: list[int] | None = None,
+    input_split_sizes: list[int] | None = None,
+) -> None:
+    """Backend all-to-all exchanging fixed or variable first-dimension rows."""
+    world_size = group.size()
+    if (output_split_sizes is None) != (input_split_sizes is None):
+        raise ValueError("output_split_sizes and input_split_sizes must be provided together")
     if output.device != input.device or output.dtype != input.dtype:
         raise ValueError("collective buffers must have the same device and dtype")
     if not output.is_contiguous() or not input.is_contiguous():
         raise ValueError("collective buffers must be contiguous")
+    if output_split_sizes is None:
+        if input.ndim == 0 or output.shape != input.shape or input.shape[0] % world_size:
+            raise ValueError(
+                f"all-to-all requires equal shapes and a divisible first dimension, "
+                f"got input={tuple(input.shape)}, output={tuple(output.shape)}, world_size={world_size}"
+            )
+        dist.all_to_all_single(output, input, group=group)
+        return
+    if input.ndim == 0 or output.ndim != input.ndim or output.shape[1:] != input.shape[1:]:
+        raise ValueError(
+            f"all-to-all requires matching trailing dimensions, "
+            f"got input={tuple(input.shape)}, output={tuple(output.shape)}"
+        )
+    if len(output_split_sizes) != world_size or len(input_split_sizes) != world_size:
+        raise ValueError(
+            f"all-to-all split sizes must cover all {world_size} ranks, "
+            f"got input={len(input_split_sizes)}, output={len(output_split_sizes)}"
+        )
+    if any(count < 0 for count in output_split_sizes) or any(count < 0 for count in input_split_sizes):
+        raise ValueError("all-to-all split sizes must be non-negative")
+    if sum(input_split_sizes) != input.shape[0]:
+        raise ValueError(f"input split sizes sum to {sum(input_split_sizes)} but input has {input.shape[0]} rows")
+    if sum(output_split_sizes) != output.shape[0]:
+        raise ValueError(f"output split sizes sum to {sum(output_split_sizes)} but output has {output.shape[0]} rows")
+    if all(input_split_sizes) and all(output_split_sizes) or input.device.type != "npu":
+        dist.all_to_all_single(
+            output, input, output_split_sizes=output_split_sizes, input_split_sizes=input_split_sizes, group=group
+        )
+        return
+    # The HCCL device unfold implementation rejects an empty offset map, so
+    # every zero edge gets one transport-only row that is discarded on receive.
+    transport_input = [max(1, count) for count in input_split_sizes]
+    if any(count == 0 for count in input_split_sizes):
+        pieces = []
+        offset = 0
+        for count in input_split_sizes:
+            pieces.append(input[offset : offset + count] if count else input.new_zeros((1, *input.shape[1:])))
+            offset += count
+        input = torch.cat(pieces, dim=0)
+    if all(output_split_sizes):
+        dist.all_to_all_single(
+            output, input, output_split_sizes=output_split_sizes, input_split_sizes=transport_input, group=group
+        )
+        return
+    transport_output = [max(1, count) for count in output_split_sizes]
+    padded = input.new_empty((sum(transport_output), *input.shape[1:]))
+    dist.all_to_all_single(
+        padded, input, output_split_sizes=transport_output, input_split_sizes=transport_input, group=group
+    )
+    valid = []
+    offset = 0
+    for count in output_split_sizes:
+        valid.append(padded[offset : offset + count])
+        offset += max(1, count)
+    torch.cat(valid, dim=0, out=output)
 
 
 @torch.library.custom_op("xllm_ops::all_to_all_single", mutates_args={"output"})
@@ -563,14 +669,8 @@ def all_to_all_single(
     group_name: str = "tp",
 ) -> None:
     """Exchange equal first-dimension chunks among ranks in ``group_name``."""
-    group = _require_group(input, group_name)
-    if input.ndim == 0 or output.shape != input.shape or input.shape[0] % group.size():
-        raise ValueError(
-            f"{group_name} all-to-all requires equal shapes and a divisible first dimension, "
-            f"got input={tuple(input.shape)}, output={tuple(output.shape)}, world_size={group.size()}"
-        )
-    _check_collective_buffers(output, input)
-    dist.all_to_all_single(output, input, group=group)
+    group = get_process_group(input.device, group_name)
+    all_to_all_single_(output, input, group)
 
 
 @all_to_all_single.register_fake
@@ -615,6 +715,9 @@ __all__ = [
     "all_gather",
     "all_gather_variable",
     "all_to_all_single",
+    "all_to_all_single_",
     "dp_all_gather",
     "gather_dp_execution_tokens",
+    "get_process_group",
+    "moe_ep_hccl_info",
 ]

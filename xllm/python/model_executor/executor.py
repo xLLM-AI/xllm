@@ -69,6 +69,7 @@ from xllm.python.model_platform_support import (
     uses_context_kv_projection,
 )
 from xllm.python.platform import current_platform
+from xllm.python.registry import GLM5_NEXT_TARGET_FAMILY
 
 if TYPE_CHECKING:
     from xllm.python.model_executor.runners.decode_acl_graph import DecodeAclGraphRunner
@@ -88,7 +89,7 @@ def _validate_npu_cp_model_config(config: dict, num_decoding_tokens: int) -> Non
     """Mirror model-side CP admission for callers without the C++ master."""
     model_type = config.get("model_type", "")
     # DSpark drafts do not run Python CP admission; only the dense target.
-    is_glm5_next = model_type in ("glm5_next", "glm5_3_flash")
+    is_glm5_next = model_type in GLM5_NEXT_TARGET_FAMILY
     is_glm_mtp_draft = (
         model_type == "glm_moe_dsa_mtp"
         and config.get("is_draft_engine", False)
@@ -97,8 +98,8 @@ def _validate_npu_cp_model_config(config: dict, num_decoding_tokens: int) -> Non
     if model_type not in ("qwen3", "glm_moe_dsa", "deepseek_v4") and not is_glm5_next and not is_glm_mtp_draft:
         raise NotImplementedError(
             f"Python model-side CP does not support model_type={model_type!r}; "
-            "supported models are qwen3, glm_moe_dsa, deepseek_v4, glm5_next, "
-            "glm5_3_flash and "
+            "supported models are qwen3, glm_moe_dsa, deepseek_v4, "
+            "glm5_next, glm5_3_flash, glm5_next_text and "
             "glm_moe_dsa_mtp draft engines"
         )
     if config.get("task_type", "generate") != "generate":
@@ -119,8 +120,8 @@ def _validate_npu_cp_model_config(config: dict, num_decoding_tokens: int) -> Non
                 "Python GLM-5 Next CP does not support target-side speculative verification; "
                 "run speculation on a cp_size=1 Decode instance"
             )
-        if int(config.get("ep_size", 1)) != 1:
-            raise NotImplementedError("Python GLM-5 Next CP initially requires ep_size == 1")
+        if int(config.get("ep_size", 1)) < 1:
+            raise NotImplementedError("Python GLM-5 Next CP requires ep_size >= 1")
         if kv_split != 1:
             raise NotImplementedError("Python GLM-5 Next CP initially requires kv_split_size == 1")
         if bool(config.get("enable_disagg_pd", False)):
@@ -291,7 +292,9 @@ class ModelExecutor:
             raise ValueError("dp_size must be greater than or equal to 1")
         if not 0 <= cp_rank < cp_size:
             raise ValueError(f"cp_rank must be in [0, {cp_size}), got {cp_rank}")
-        if cp_size > 1 and dp_size > 1:
+        if cp_size > 1 and dp_size > 1 and config.get("model_type") not in GLM5_NEXT_TARGET_FAMILY:
+            # GLM-5.3-Flash CP restores DP-local rows before routed MoE and
+            # supports the dp * cp * tp rank layout.
             raise NotImplementedError("Python CP requires dp_size == 1")
         if current_platform.is_npu():
             kv_split_size = int(config.get("kv_split_size", 0))
@@ -594,6 +597,7 @@ class ModelExecutor:
                         ),
                         spec_verify_width=self.num_speculative_tokens + 1 if self._prepared_qwen_mtp_target else 1,
                         device_kv_lengths=self._prepared_qwen_mtp_target or self._prepared_qwen_mtp_draft,
+                        max_capture_tokens=getattr(execution_model, "graph_capture_token_limit", None),
                     )
         else:
             if self.layerwise_split_size > 1:
@@ -1165,7 +1169,7 @@ class ModelExecutor:
                     # Subclasses can have a different admission/input contract.
                     # Ordinary decode reuses its resolved values only in this call.
                     decode_metadata = graph_runner.prepare_execution(
-                        input_ids, metadata, input_embedding, mtp_topk_indices
+                        input_ids, metadata, input_embedding, mtp_topk_indices, is_graph_warmup=is_graph_warmup
                     )
                     use_graph = decode_metadata is not None
                 else:

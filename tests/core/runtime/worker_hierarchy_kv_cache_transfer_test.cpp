@@ -149,6 +149,25 @@ TEST_F(WorkerHierarchyKVCacheTransferTest,
 }
 
 TEST_F(WorkerHierarchyKVCacheTransferTest,
+       RequiredRestoreRejectsMissingManager) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  const ModelArgs model_args = make_model_args();
+  const ParallelArgs parallel_args(
+      /*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr);
+  TestHierarchyWorker worker(parallel_args,
+                             device_->unwrap(),
+                             make_runtime_options(/*host_blocks_factor=*/0.0),
+                             model_args);
+  LlmModelParams params;
+  params.meta.batch_id = 91;
+  worker.set_hierarchy_layer_synchronizer(params);
+  EXPECT_EQ(params.parallel.layer_wise_load_synchronizer, nullptr);
+  params.meta.requires_host_restore = true;
+  EXPECT_DEATH(worker.set_hierarchy_layer_synchronizer(params),
+               "Missing Host restore manager");
+}
+
+TEST_F(WorkerHierarchyKVCacheTransferTest,
        SharedTransferCanBeClearedAndRecreatedFromSavedContext) {
   const ModelArgs model_args = make_model_args();
   const KVCacheShape cache_shape = make_cache_shape(model_args);

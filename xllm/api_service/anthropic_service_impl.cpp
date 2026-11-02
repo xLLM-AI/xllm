@@ -495,7 +495,7 @@ AnthropicServiceImpl::AnthropicServiceImpl(
       tool_call_parser_format_(
           check_master(master)->options().tool_call_parser().value_or("")),
       reasoning_parser_format_(
-          check_master(master)->options().reasoning_parser().value_or("")) {
+          master->options().reasoning_parser().value_or("")) {
   CHECK(master_manager_ != nullptr);
 }
 

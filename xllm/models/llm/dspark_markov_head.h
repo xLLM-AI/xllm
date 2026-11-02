@@ -59,9 +59,13 @@ class DSparkMarkovHead final {
         << "DSpark markov_w1 rank mismatch.";
     CHECK_EQ(markov_w2_.size(1), markov_rank_)
         << "DSpark markov_w2 rank mismatch.";
-    CHECK_EQ(markov_w1_.size(0), markov_w2_.size(0))
-        << "DSpark reduced-vocabulary drafts need draft-to-target remapping, "
-           "which is not implemented.";
+    // markov_w1 is a full-target-vocabulary embedding while markov_w2 emits
+    // a draft-vocabulary bias; a reduced-vocabulary draft (w1 rows > w2 rows)
+    // is valid only when the draft worker owns a d2t mapping.
+    CHECK_GE(markov_w1_.size(0), markov_w2_.size(0))
+        << "DSpark markov_w1 rows (" << markov_w1_.size(0)
+        << ") must cover at least the draft vocabulary (markov_w2 rows, "
+        << markov_w2_.size(0) << ").";
   }
 
   torch::Tensor bias(const torch::Tensor& previous_token_ids) const {

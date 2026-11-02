@@ -1,3 +1,96 @@
+# Release xllm 0.12.0
+
+## **Major Features and Improvements**
+
+### Highlights
+
+- **GLM-5.3 and GLM-5.3-Flash**: expand NPU inference with Python models, KDA attention, compressed KPool caches, MTP and DFlash2 decoding, and additional parallel serving configurations.
+- **Qwen3.8**: add Python multimodal inference and MTP, DFlash2, and DSpark decoding; improve Qwen prefill with FlashComm1, MMRS, and fused GDN operators.
+- **Elastic virtual KV cache**: grow and reclaim physical backing on demand, admit requests against live memory capacity, and support co-located MTP with separate KV-cache and weight VMM controls.
+- **Serving compatibility**: extend OpenAI-compatible sampling controls and improve OpenAI and Anthropic request validation, streaming, usage reporting, and tool handling.
+- **Developer tooling**: introduce the standalone `xllm-kernel` package, expand Ascend online profiling, and improve NPU wheel packaging and build workflows.
+
+### Model Support
+
+#### NPU
+
+- Add GLM-5.3-Flash Python inference with eager execution and ACLGraph decode, KDA kernels, compressed KPool cache management, and fused compression and indexer operators.
+- Add GLM-5.3 Python MTP and DFlash2 support, GLM-5.3-Flash MTP and DFlash2 support, and direct loading of Flash MTP weights from native checkpoints.
+- Extend GLM serving with prefill context parallelism, decode context parallelism, expert parallelism, and GLM-5.3 MTP in disaggregated prefill/decode (PD) deployments, according to model-specific configuration support.
+- Add Qwen3.8 Python image and video inference, plus MTP, DFlash2, and DSpark decoding. Extend Qwen3.5 Python execution with data parallelism, MoE expert parallelism, and decode context parallelism.
+- Extend the DeepSeek-V4 Python implementation with CSA/HCA attention, MTP and DSpark models, checkpoint weight aliases, and context/data parallel execution paths.
+- Add Eagle3 support for Kimi-K2.5 and vision-language models, and support Eagle3.1 drafts exported in the `speculators` format.
+- Extend GLM-5.2 with INT8 indexer caching, INT8 SFA KV caching on the C++ path, packed C8 KV layouts, MegaMoE execution, and attention data-parallel weight sharding.
+
+#### MLU and CUDA
+
+- Add native GLM5-Next inference on MLU with KDA and KPool layers; extend DCP indexer and cache-transfer support and optimize GLM DCP kernels.
+- Add compressed-tensors W8A8 checkpoint loading on MLU.
+- Add Phi-3 mini 4K inference on CUDA with native fused checkpoint loading and tensor-parallel weight handling.
+
+#### Multimodal and Diffusion
+
+- Add MiniMax-H3 inference with video and audio autoencoders, media processors, and diffusion scheduling.
+- Add JoyAI ASR speech recognition with audio preprocessing and Python model execution.
+- Improve DiT request serialization, media transport, and scheduler wakeups; preserve audio outputs across independent worker routes.
+
+### Speculative Decoding
+
+- Add throughput-aware MTP draft-step selection using startup calibration and observed prefix acceptance.
+- Add asynchronous adaptive target verification for DSpark and MTP, including Draft5/7 configurations and greedy, random, or mixed target sampling on supported execution paths.
+- Extend Python DSpark verification to recurrent targets with packed fused GDN kernels, and improve sliding-window attention handling for block drafts.
+- Expand prewarmed target/draft batch and KV-capacity coverage, support no-padding Python ACLGraph decode, and admit only execution shapes covered by warmup.
+- Improve MTP target sampling semantics for minimum output length, seeded generation, bad-word constraints, and token penalties in supported LLM configurations.
+- Correct speculative acceptance accounting to use actual verification results and exclude resampled tokens and warmup batches.
+
+### KV Cache and Distributed Serving
+
+- Add independent `enable_vmm_kvcache` and `enable_vmm_weights` controls on NPU. Elastic VMM grows physical pages on demand and releases idle backing while preserving execution headroom.
+- Support virtual KV caches for co-located MTP target/draft models, including different KV widths. Hybrid recurrent states remain resident outside the virtual KV page pool.
+- Add virtual-memory PD push/pull transfers for fixed resident pools, MLA-aware page geometry, and BF16 index-cache allocation.
+- Extend Python hierarchical KV caching and Mooncake integration, including SSD offload, heterogeneous PD cache topologies, and asynchronous cache-event publication and recovery.
+- Add native HTTP integration with xLLM Service for PD serving; improve metadata validation, worker registration, response routing, and per-DP-group prefill token budgets.
+- Improve cache-pressure scheduling, capacity admission, preemption restore ordering, and worker/cache teardown.
+
+### API and Observability
+
+- Extend sampling with `min_p`, `seed`, `min_tokens`, `logit_bias`, `allowed_token_ids`, and `bad_words`, subject to backend and execution-mode support. Align penalty, stop-token, temperature, and logprob semantics and validate unsupported requests explicitly.
+- Improve OpenAI-compatible model metadata, system fingerprints, explicit stop reasons, response usage, streaming, and concurrency-admission errors.
+- Improve Anthropic-compatible messages, token counting, tool-schema ordering, tool choice, request validation, and streaming response handling.
+- Add server time-to-first-token metrics that include request preprocessing, alongside multimodal preprocessing and encoder-cache metrics.
+- Extend online profiling on Ascend with `torch_npu.profiler` and CANN backends, per-worker trace collection, and Perfetto-compatible exports.
+
+### Performance, Build, and Documentation
+
+- Reduce request-path overhead through parallel prompt encoding, batched tokenization, faster streaming decode, fewer chat-template copies, direct shared-memory serialization, and reusable batch buffers.
+- Optimize GLM MLA preprocessing, RoPE reuse, multi-stream DSA execution, KDA projection/convolution/gating, KPool compression, and fused MoE execution.
+- Optimize Qwen prefill with FlashComm1, MMRS, grouped GDN projections, MegaGDN/MegaMoE integration, and fused sigmoid multiplication. Accelerate CUDA logits filtering with exact radix selection.
+- Reduce Python ACLGraph memory retention and redundant communication copies; run NPU collectives on the caller's stream and use event-driven scheduler waits.
+- Introduce `xllm-kernel` with operation contracts, implementation registration, preparation-time selection, and independent numerical validation and benchmarking.
+- Bundle NPU operators and required runtime libraries in wheels, preload bundled operators consistently, and improve TensorPipe, linker, and Ascend build compatibility.
+- Separate product compilation from unit-test builds, propagate build-job limits to operators, and improve ccache reuse. The optional xlite backend is disabled by default.
+- Expand bilingual API, deployment, profiling, kernel-development, virtual-memory, and xLLM Service documentation.
+
+### Bugfix
+
+- Fix MTP draft positions, hidden-state reuse, committed KV restoration, recurrent-state ownership, and multimodal input/cache layouts; keep VLM draft models on the LLM backend.
+- Fix ACLGraph admission at KV-history boundaries, data-parallel layout reuse, sparse index-cache writes, warmup bucket coverage, and graph-output lifetimes.
+- Fix virtual-memory over-reservation, physical-page lifetime, initialization ordering, retry behavior, and aggregate KV-capacity checks.
+- Fix PD output metadata, transfer completion and cleanup, prefix-cache identities, decode reservation release, and shutdown ordering.
+- Fix rejection-sampling gather index types, TileLang infinity masks, large routed-MoE batches, and Qwen multimodal position handling.
+- Fix shared-memory polling-thread shutdown, NPU/Python teardown ordering, and packaged multimodal/operator loading.
+
+### Upgrade Notes
+
+- Replace `enable_opt_validate_probs` and the intermediate `draft_sampling_mode` setting with `enable_probabilistic_draft`. Draft proposals now default to greedy selection; set `enable_probabilistic_draft=true` for probabilistic drafts on supported algorithms.
+- Replace `enable_adaptive_speculative_decode` and `enable_adaptive_spec_prune` with `enable_adaptive_target_verify`; related verification settings now use the `adaptive_target_verify_*` prefix. Use `enable_adaptive_draft_step` / `adaptive_draft_step_config` for MTP draft depth. The two adaptive controls cannot be enabled together; update both CLI arguments and JSON configuration.
+- Migrate virtual-memory configuration to `enable_vmm_kvcache`, `enable_vmm_weights`, and `worker_memory_master_node_addr`; legacy xtensor aliases have been removed. PD transfers require a fixed resident VMM pool. Quantized KV caches, host offload, and speculative PD serving are not supported with virtual KV caches.
+- Legacy PD-OOC co-location and asynchronous RL pause/resume, deep-sleep, and weight-reload interfaces have been removed.
+- Review monitoring queries that used removed derived speculative gauges; acceptance statistics now come from verification counters.
+- Standard NPU wheels include the bundled xLLM operators. xlite remains opt-in and requires a separately available runtime. Building or installing the product no longer automatically builds and runs unit tests; use the explicit test command when needed.
+
+**Full Changelog**: [v0.11.0...v0.12.0](https://github.com/xLLM-AI/xllm/compare/v0.11.0...v0.12.0)
+
 # Release xllm 0.11.0
 
 ## **Major Features and Improvements**

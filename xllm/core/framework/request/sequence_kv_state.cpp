@@ -18,6 +18,8 @@ limitations under the License.
 #include <algorithm>
 #include <limits>
 
+#include "core/kv_cache/block/block_manager.h"
+
 namespace xllm {
 
 namespace {
@@ -240,6 +242,8 @@ void KVCacheState::add_shared_blocks(BlockType type,
         ((current_total_num_tokens - 1) / block_size) * block_size;
     if (shared > 0) {
       shared--;
+      const Block& released = bs.back();
+      released.manager()->deallocate(Slice<Block>(&released, /*size=*/1));
       bs.pop_back();
     }
   }

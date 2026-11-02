@@ -263,8 +263,6 @@ torch::Tensor DeepseekV2DecoderLayerImpl::comm_out(
     return parallel_state::reduce_scatter(x, pg);
   }
 
-  CHECK(context_parallel_context_ != nullptr)
-      << "CP fast path requires CP context";
   return v32_cp::slice_local_packed(x, *context_parallel_context_);
 }
 
@@ -411,7 +409,6 @@ torch::Tensor DeepseekV2DecoderLayerImpl::forward_impl(
       return carrier.has_value() && can_keep_local_output(*carrier, pg);
     };
     auto comm = [&](torch::Tensor y, ProcessGroup* pg) {
-      CHECK(carrier.has_value()) << "local comm path requires decoder carrier";
       return comm_out(std::move(y), *carrier, pg);
     };
     auto moe_comm_fns = DeepseekV2SparseMoEBlockImpl::CommFns{

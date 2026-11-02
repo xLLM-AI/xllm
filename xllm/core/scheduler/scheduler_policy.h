@@ -71,6 +71,9 @@ struct SchedulerState {
   bool enable_prefix_cache;
   std::function<void(const std::shared_ptr<Request>&)> release_failed_request =
       {};
+  // A submitted VMM batch can still hold pages after its sequences release
+  // their aliases. Drain it before treating an allocation failure as final.
+  bool has_pending_vmm_batch = false;
 };
 
 // ScheduleBudget tracks the remaining resources for the current scheduling
@@ -175,11 +178,14 @@ class SchedulerPolicy {
                             bool reserve_full_prompt = false);
   void allocate_shared_blocks_for(Sequence* seq, SchedulerState& state);
   void schedule_decode_restore(SchedulerState& state, ScheduleBudget& budget);
+  bool has_pending_block_release(const SchedulerState& state) const;
 
   // ===== Decode scheduling =====
-  void schedule_decode_from_queue(RequestPriorityQueue* queue,
-                                  SchedulerState& state,
-                                  ScheduleBudget& budget);
+  void schedule_decode_from_queue(
+      RequestPriorityQueue* queue,
+      SchedulerState& state,
+      ScheduleBudget& budget,
+      std::vector<std::shared_ptr<Request>>& finished);
 
   // ===== Preemption and error handling =====
   void handle_unschedulable_head(

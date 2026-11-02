@@ -20,8 +20,6 @@ limitations under the License.
 #include "core/framework/model/model_output.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/draft_extend_input.h"
-#include "platform/device.h"
-#include "platform/platform.h"
 
 namespace xllm {
 
@@ -34,7 +32,6 @@ bool tensor_equal(const torch::Tensor& lhs, const torch::Tensor& rhs) {
 }  // namespace
 
 TEST(EmbeddingCacheTest, WritePrefillTargetContextAndClear) {
-  torch::Device device(Platform::type_torch(), 0);
   EmbeddingCache cache(/*total_nums=*/4);
 
   std::vector<int32_t> ids = {3, 2};
@@ -95,7 +92,6 @@ TEST(EmbeddingCacheTest, WritePrefillTargetContextClonesEmbeddingRows) {
 }
 
 TEST(EmbeddingCacheTest, WriteValidateTargetContext) {
-  torch::Device device(Platform::type_torch(), 0);
   EmbeddingCache cache(/*total_nums=*/2);
   std::vector<int32_t> ids = {0, 1};
   std::vector<std::string> request_ids = {"req_0", "req_1"};
@@ -384,6 +380,64 @@ TEST(EmbeddingCacheTest, SpeculativeHiddenSelectionPreservesDrafterSource) {
                             /*is_target_prefill=*/false,
                             /*cp_enabled=*/true);
   EXPECT_TRUE(tensor_equal(output.embeddings, gathered_primary));
+}
+
+TEST(EmbeddingCacheTest,
+     ReplayRetainsEveryAcceptedTargetHiddenAfterProducerReuse) {
+  EmbeddingCache cache(/*total_nums=*/2, /*retain_replay_span=*/true);
+  for (int32_t span = 1; span <= 4; ++span) {
+    auto tokens = torch::tensor({{41, 42, 43, 44}}, torch::kInt);
+    tokens.narrow(1, span, 4 - span).fill_(-1);
+    auto hidden = torch::arange(8, torch::kFloat).reshape({1, 4, 2});
+    const auto expected_hidden = hidden[0].narrow(0, 0, span).clone();
+    cache.write_target_context({1},
+                               {"req"},
+                               tokens,
+                               hidden,
+                               /*num_speculative_tokens=*/3);
+    hidden.fill_(999);
+    tokens.fill_(-1);
+    const auto states = cache.read_decode_states({1}, {"req"});
+    ASSERT_EQ(states[0].replay_token_ids.size(), span);
+    EXPECT_TRUE(torch::equal(states[0].replay_embeddings, expected_hidden));
+  }
+}
+
+TEST(EmbeddingCacheTest,
+     PrefillAndBootstrapReplayRetainTargetHiddenAfterProducerReuse) {
+  EmbeddingCache cache(/*total_nums=*/2, /*retain_replay_span=*/true);
+  torch::Tensor hidden = torch::tensor({{6.0f, 7.0f}});
+  cache.write_prefill_target_context(
+      {0}, {"prefill"}, torch::tensor({40}, torch::kInt), hidden);
+  cache.write_mtp_bootstrap_context(1, "bootstrap", 50, hidden[0]);
+  hidden.fill_(999);
+  auto states = cache.read_decode_states({0, 1}, {"prefill", "bootstrap"});
+  ASSERT_EQ(states.size(), 2);
+  EXPECT_EQ(states[0].replay_token_ids, std::vector<int32_t>({40}));
+  EXPECT_EQ(states[1].replay_token_ids, std::vector<int32_t>({50}));
+  EXPECT_TRUE(torch::equal(
+      torch::cat({states[0].replay_embeddings, states[1].replay_embeddings}),
+      torch::tensor({{6.0f, 7.0f}, {6.0f, 7.0f}})));
+}
+
+TEST(EmbeddingCacheTest, ReplayFollowsRequestOrderAndInvalidatesStaleSlots) {
+  EmbeddingCache cache(/*total_nums=*/2, /*retain_replay_span=*/true);
+  cache.write_target_context(
+      {0, 1},
+      {"short", "long"},
+      torch::tensor({{99, -1, -1, -1}, {41, 42, 43, -1}}, torch::kInt),
+      torch::arange(16, torch::kFloat).reshape({2, 4, 2}),
+      /*num_speculative_tokens=*/3);
+  const auto states = cache.read_decode_states({1, 0}, {"long", "short"});
+  ASSERT_EQ(states.size(), 2);
+  EXPECT_EQ(states[0].replay_token_ids, std::vector<int32_t>({41, 42, 43}));
+  EXPECT_EQ(states[0].replay_embeddings.size(0), 3);
+  EXPECT_EQ(states[1].replay_token_ids, std::vector<int32_t>({99}));
+  EXPECT_EQ(states[1].replay_embeddings.size(0), 1);
+  const auto stale = cache.read_decode_states({1}, {"replacement"});
+  EXPECT_FALSE(stale[0].valid);
+  EXPECT_TRUE(stale[0].replay_token_ids.empty());
+  EXPECT_FALSE(stale[0].replay_embeddings.defined());
 }
 
 }  // namespace xllm

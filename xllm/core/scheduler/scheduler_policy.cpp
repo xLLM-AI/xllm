@@ -244,33 +244,12 @@ std::vector<std::shared_ptr<Request>> SchedulerPolicy::collect_finished(
     collect_terminal(*it, state, finished_requests);
   }
 
-  // FCFS decode waiters can terminate before any budget admits them; rotate
-  // once, bounded by the current waiter count, and re-append live waiters to
-  // keep their order. Other strategies lack order-preserving back insertion.
-  if (batch_mode_.priority_strategy != "fcfs") {
-    return finished_requests;
-  }
-  bool has_terminal_waiter = false;
-  for (const auto& request : state.decode_queue) {
-    request->update_connection_status();
-    if (request->finished() || request->cancelled()) {
-      has_terminal_waiter = true;
-      break;
-    }
-  }
-  if (!has_terminal_waiter) {
-    return finished_requests;
-  }
-  const size_t num_decode_waiters = state.decode_queue.size();
-  for (size_t i = 0; i < num_decode_waiters; ++i) {
-    std::shared_ptr<Request> request = state.decode_queue.top();
-    state.decode_queue.pop_top();
-    if (request == nullptr ||
-        collect_terminal(request, state, finished_requests)) {
-      continue;
-    }
-    state.decode_queue.push(std::move(request), /*if_back=*/true);
-  }
+  auto retire_decode_waiter =
+      [this, &state, &finished_requests](std::shared_ptr<Request> request) {
+        return request == nullptr ||
+               collect_terminal(request, state, finished_requests);
+      };
+  state.decode_queue.erase_if(std::ref(retire_decode_waiter));
   return finished_requests;
 }
 
@@ -631,11 +610,16 @@ void SchedulerPolicy::allocate_shared_blocks_for(Sequence* seq,
   }
 }
 
+bool SchedulerPolicy::has_pending_block_release(
+    const SchedulerState& state) const {
+  return state.has_pending_vmm_batch ||
+         state.kv_cache_manager->has_pending_async_block_release();
+}
+
 void SchedulerPolicy::schedule_decode_restore(SchedulerState& state,
                                               ScheduleBudget& budget) {
   if (state.decode_restore_waiting.empty() ||
-      state.kv_cache_manager->has_pending_async_block_release() ||
-      budget_exhausted(budget)) {
+      has_pending_block_release(state) || budget_exhausted(budget)) {
     return;
   }
 
@@ -672,9 +656,11 @@ void SchedulerPolicy::schedule_decode_restore(SchedulerState& state,
 // Decode scheduling
 // =============================================================================
 
-void SchedulerPolicy::schedule_decode_from_queue(RequestPriorityQueue* queue,
-                                                 SchedulerState& state,
-                                                 ScheduleBudget& budget) {
+void SchedulerPolicy::schedule_decode_from_queue(
+    RequestPriorityQueue* queue,
+    SchedulerState& state,
+    ScheduleBudget& budget,
+    std::vector<std::shared_ptr<Request>>& finished) {
   if (queue == nullptr || queue->empty()) {
     return;
   }
@@ -689,6 +675,10 @@ void SchedulerPolicy::schedule_decode_from_queue(RequestPriorityQueue* queue,
          budget.latency_budget > budget.estimate_latency &&
          budget.remaining_seq_budget > 0) {
     std::shared_ptr<Request> request = queue->top();
+    if (collect_terminal(request, state, finished)) {
+      queue->pop_top();
+      continue;
+    }
 
     const size_t num_sequences = request->sequences().size();
     candidate_sequences.clear();
@@ -891,10 +881,10 @@ void SchedulerPolicy::schedule_decode_from_queue(RequestPriorityQueue* queue,
       break;
     }
 
-    // Blocks exhausted: wait for an in-flight async release before selecting
-    // another victim. The released blocks remain unavailable until the
-    // transfer completes.
-    if (state.kv_cache_manager->has_pending_async_block_release()) {
+    // The previous batch or an asynchronous transfer can still retain the
+    // pages released by a sequence. Let that owner finish before preempting
+    // another request.
+    if (has_pending_block_release(state)) {
       return;
     }
 
@@ -907,7 +897,7 @@ void SchedulerPolicy::schedule_decode_from_queue(RequestPriorityQueue* queue,
       state.chunk_queue.pop_back();
       request_to_preempt->set_preempted();
       state.prefill_queue.push(request_to_preempt);
-      if (state.kv_cache_manager->has_pending_async_block_release()) {
+      if (has_pending_block_release(state)) {
         return;
       }
       continue;
@@ -918,7 +908,7 @@ void SchedulerPolicy::schedule_decode_from_queue(RequestPriorityQueue* queue,
         ++budget.num_preempted_requests;
         enqueue_decode_restore(request_to_preempt, state);
         queue->pop_back();
-        if (state.kv_cache_manager->has_pending_async_block_release()) {
+        if (has_pending_block_release(state)) {
           return;
         }
         continue;
@@ -1030,8 +1020,7 @@ void SchedulerPolicy::handle_unschedulable_head(
     std::vector<std::shared_ptr<Request>>& finished,
     bool budget_exhausted,
     bool blocks_exhausted) {
-  if (blocks_exhausted &&
-      state.kv_cache_manager->has_pending_async_block_release()) {
+  if (blocks_exhausted && has_pending_block_release(state)) {
     return;
   }
   if (state.running_sequences.empty() && !queue->empty() &&

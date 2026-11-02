@@ -39,6 +39,7 @@ limitations under the License.
 #include "core/kv_cache/transfer/mooncake_kv_cache_transfer.h"
 #include "models/model_registry.h"
 #include "runtime/llm_worker_impl.h"
+#include "runtime/worker_memory_resources.h"
 #include "util/hash_util.h"
 #include "util/tensor_helper.h"
 #include "util/utils.h"
@@ -206,6 +207,17 @@ bool DraftModelSpecWorkerImpl<TargetInput>::init_model(
   if (impl_->get_status() == WorkerImpl::Status::LOADED) {
     context_ = impl_->context_;
   }
+  if (result && draft_impl_->get_status() == WorkerImpl::Status::LOADED) {
+    const ModelArgs& draft_args = draft_impl_->context_.get_model_args();
+    const int64_t draft_vocab_size = draft_args.draft_vocab_size() > 0
+                                         ? draft_args.draft_vocab_size()
+                                         : draft_args.vocab_size();
+    draft_vocab_ =
+        DraftVocabMapping(draft_impl_->take_draft_token_id_offsets(),
+                          draft_vocab_size,
+                          impl_->context_.get_model_args().vocab_size(),
+                          device_);
+  }
   return result;
 }
 
@@ -348,7 +360,8 @@ void DraftModelSpecWorkerImpl<
 template <typename TargetInput>
 void DraftModelSpecWorkerImpl<TargetInput>::init_embedding_cache(
     int64_t num_blocks) {
-  embedding_cache_ = std::make_unique<EmbeddingCache>(num_blocks);
+  embedding_cache_ = std::make_unique<EmbeddingCache>(
+      num_blocks, requires_full_target_replay());
   const int64_t placeholder_size = get_embedding_placeholder_size();
   if (placeholder_size > 0) {
     embedding_cache_->set_placeholder(
@@ -360,6 +373,11 @@ template <typename TargetInput>
 bool DraftModelSpecWorkerImpl<TargetInput>::allocate_pools(
     const KVCacheShape& kv_cache_shape,
     const AllocateFn& allocate) {
+  const bool bind_vmm_group =
+      KVCacheConfig::get_instance().enable_vmm_kvcache() &&
+      impl_->get_status() == WorkerImpl::Status::LOADED &&
+      draft_impl_->get_status() == WorkerImpl::Status::LOADED &&
+      impl_->context_.get_model_id() != draft_impl_->context_.get_model_id();
   const bool target_allocated = allocate_pool_if_loaded(
       *impl_,
       [&]() -> const KVCacheShape& { return kv_cache_shape; },
@@ -372,6 +390,15 @@ bool DraftModelSpecWorkerImpl<TargetInput>::allocate_pools(
   init_embedding_cache(kv_cache_shape.key_cache_shape()[0]);
   const bool allocated = target_allocated && draft_allocated;
   if (allocated) {
+    if (bind_vmm_group) {
+      // The scheduler's block IDs address both caches. Bind their mappings
+      // before the master reserves its first (padding) page group.
+      CHECK(WorkerMemoryResources::get_instance()
+                .kv_cache_memory()
+                .bind_mapping_group(impl_->context_.get_model_id(),
+                                    {impl_->context_.get_model_id(),
+                                     draft_impl_->context_.get_model_id()}));
+    }
     finalize_hierarchy_kv_cache_transfers();
   }
   return allocated;

@@ -126,6 +126,7 @@ cc_library(
     layout/kv_cache_tensor_role.h
     storage/kv_cache_utils.h
     layout/layerwise_split_layout.h
+    layout/vmm_kv_cache_layout.h
     storage/linear_attention_kv_cache_impl.h
     storage/quantized_kv_cache_impl.h
   SRCS
@@ -137,6 +138,7 @@ cc_library(
     storage/kv_cache_impl.cpp
     layout/kv_cache_shape.cpp
     layout/kv_shard_layout.cpp
+    layout/vmm_kv_cache_layout.cpp
     storage/kv_cache_tensor_allocator.cpp
     storage/kv_cache_utils.cpp
     storage/linear_attention_kv_cache_impl.cpp

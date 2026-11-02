@@ -15,8 +15,6 @@ limitations under the License.
 
 #pragma once
 
-#include <glog/logging.h>
-
 #include "common.pb.h"
 #include "core/framework/request/usage.h"
 
@@ -24,7 +22,6 @@ namespace xllm::api_service {
 
 inline void set_proto_usage(proto::Usage* proto_usage,
                             const xllm::Usage& usage) {
-  CHECK(proto_usage != nullptr);
   proto_usage->set_prompt_tokens(usage.num_prompt_tokens);
   proto_usage->set_completion_tokens(usage.num_generated_tokens);
   proto_usage->set_total_tokens(usage.num_total_tokens);

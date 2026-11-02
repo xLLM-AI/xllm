@@ -1,6 +1,7 @@
 include(cc_test)
 
 cc_test(
+  CPU_ONLY
   NAME
     fast_tokenizer_test
   SRCS
@@ -12,6 +13,7 @@ cc_test(
 )
 
 cc_test(
+  CPU_ONLY
   NAME
     rwkv_tokenizer_test
   SRCS

@@ -27,6 +27,8 @@ limitations under the License.
 #include <thread>
 #include <vector>
 
+#include "core/framework/allocator/vmm_arena_capacity.h"
+
 namespace xllm {
 
 // The production growth boundary is exercised without initializing a device
@@ -562,6 +564,44 @@ TEST_F(PhysicalPagePoolTest,
   EXPECT_TRUE(pool.batch_get(/*count=*/4).empty());
   EXPECT_EQ(pool.num_active(), 2);
   EXPECT_EQ(pool.num_committed(), 2);
+}
+
+TEST_F(PhysicalPagePoolTest, MapsPaddingPagesAfterPersistentStateAllocation) {
+  constexpr int64_t kAvailableBytes = 100 * kPageSize;
+  constexpr int64_t kResidentStateBytes = 60 * kPageSize;
+  constexpr size_t kPaddingPages = 34;
+  const VmmArenaCapacity capacity =
+      calculate_vmm_arena_capacity(kAvailableBytes,
+                                   /*total_memory=*/200 * kPageSize,
+                                   /*max_memory_utilization=*/0.0,
+                                   /*max_memory_utilization_configured=*/true,
+                                   /*lazy=*/true,
+                                   /*max_cache_size=*/0,
+                                   /*reserved_memory_bytes=*/0,
+                                   kResidentStateBytes);
+  auto& pool = PhysicalPagePool::get_instance();
+  ASSERT_TRUE(pool.reset());
+  pool.init(torch::Device(torch::kCPU),
+            capacity.maximum_bytes / kPageSize,
+            capacity.initial_bytes / kPageSize,
+            kPageSize,
+            /*lazy=*/true);
+  pool.set_growth_reserve(capacity.growth_memory_reserve_bytes);
+  // CONV/SSM tensors become resident before the first padding page group.
+  free_bytes_ = kAvailableBytes - kResidentStateBytes;
+  PhysicalPagePoolTestPeer::inject(
+      pool,
+      [this]() { return free_bytes_; },
+      [this](page_id_t page_id) {
+        free_bytes_ -= kPageSize;
+        return PhysicalPagePoolTestPeer::make_page(page_id);
+      });
+
+  auto pages = pool.batch_get(kPaddingPages);
+  ASSERT_EQ(pages.size(), kPaddingPages);
+  EXPECT_EQ(pool.num_committed(), kPaddingPages);
+  EXPECT_EQ(free_bytes_, 6 * kPageSize);
+  pool.batch_put(pages);
 }
 
 TEST_F(PhysicalPagePoolTest, PartialAllocationFailurePublishesNoBacking) {

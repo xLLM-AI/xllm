@@ -29,7 +29,7 @@ case "$subject" in
     ;;
 esac
 
-regex='^(feat|bugfix|docs|test|refactor|chore|style|revert|perf|model|build|skills): ([^[:space:]]+ ){3,}[^[:space:]]+\.$'
+regex='^(feat|bugfix|docs|test|refactor|chore|style|revert|perf|model|build|release|skills): ([^[:space:]]+ ){3,}[^[:space:]]+\.$'
 
 if [[ "$subject" =~ $regex ]]; then
   exit 0
@@ -40,7 +40,7 @@ cat >&2 <<'EOF'
 Commit message subject rejected.
 
 Format: <type>: <description>.
-  - type in {feat|bugfix|docs|test|refactor|chore|style|revert|perf|model|build|skills}
+  - type in {feat|bugfix|docs|test|refactor|chore|style|revert|perf|model|build|release|skills}
   - ": " (colon + single space) after type
   - description has >= 4 whitespace-separated tokens
   - subject ends with a literal "."

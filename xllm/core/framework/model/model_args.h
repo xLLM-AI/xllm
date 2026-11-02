@@ -1284,7 +1284,8 @@ inline bool is_qwen3_5_target_model_type(std::string_view model_type) {
 }
 
 inline bool is_glm5_next_target_model_type(std::string_view model_type) {
-  return model_type == "glm5_3_flash" || model_type == "glm5_next";
+  return model_type == "glm5_3_flash" || model_type == "glm5_next" ||
+         model_type == "glm5_next_text";
 }
 
 inline std::ostream& operator<<(std::ostream& os, const ModelArgs& args) {

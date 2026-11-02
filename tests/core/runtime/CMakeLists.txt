@@ -70,6 +70,7 @@ target_link_options(transport_codec_test PRIVATE
 cc_test(
   NAME
     acl_graph_bucket_policy_test
+  CPU_ONLY
   SRCS
     acl_graph_bucket_policy_test.cpp
   DEPS
@@ -370,6 +371,7 @@ endif()
 cc_test(
   NAME
     worker_json_object_overlap_test
+  CPU_ONLY
   SRCS
     worker_json_object_overlap_test.cpp
   DEPS
@@ -422,6 +424,19 @@ endif()
 if(USE_NPU OR USE_MLU)
   cc_test(
     NAME
+      mtp_worker_options_test
+    SRCS
+      mtp_worker_options_test.cpp
+    DEPS
+      :runtime
+      :model_loader
+      :batch
+      :kv_cache
+      :platform
+      GTest::gtest_main
+  )
+  cc_test(
+    NAME
       mtp_host_offload_test
     SRCS
       mtp_host_offload_test.cpp
@@ -434,6 +449,7 @@ if(USE_NPU OR USE_MLU)
       GTest::gtest_main
   )
   if(USE_MLU)
+    target_link_libraries(mtp_worker_options_test PRIVATE torch_mlu)
     target_link_libraries(mtp_host_offload_test PRIVATE torch_mlu)
   endif()
 endif()
@@ -475,3 +491,13 @@ if(USE_DCU)
   )
 endif()
 
+cc_test(
+  NAME dspark_sampler_test
+  CPU_ONLY
+  SRCS dspark_sampler_test.cpp
+  DEPS :runtime GTest::gtest_main
+)
+target_link_options(dspark_sampler_test PRIVATE
+  "-Wl,--whole-archive"
+  "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
+  "-Wl,--no-whole-archive")

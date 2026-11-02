@@ -3,6 +3,7 @@ include(cc_test)
 cc_test(
   NAME
     parallel_topology_test
+  CPU_ONLY
   SRCS
     parallel_topology_test.cpp
   DEPS
@@ -14,6 +15,7 @@ if(USE_NPU)
   cc_test(
     NAME
       mapping_npu_test
+    CPU_ONLY
     SRCS
       mapping_npu_test.cpp
     DEPS
@@ -32,6 +34,7 @@ if(USE_NPU)
   cc_test(
     NAME
       npu_dp_ep_padding_test
+    CPU_ONLY
     SRCS
       npu_dp_ep_padding_test.cpp
     DEPS
@@ -51,6 +54,7 @@ if(USE_NPU)
   cc_test(
     NAME
       npu_cp_capability_test
+    CPU_ONLY
     SRCS
       npu_cp_capability_test.cpp
     DEPS
@@ -69,6 +73,7 @@ if(USE_NPU)
   cc_test(
     NAME
       npu_cp_plan_test
+    CPU_ONLY
     SRCS
       npu_cp_plan_test.cpp
     DEPS
@@ -95,6 +100,7 @@ if(USE_NPU OR USE_MLU)
   cc_test(
     NAME
       cp_group_ranks_test
+    CPU_ONLY
     SRCS
       cp_group_ranks_test.cpp
     DEPS

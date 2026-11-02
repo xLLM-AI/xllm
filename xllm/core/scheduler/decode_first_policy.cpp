@@ -55,7 +55,7 @@ void DecodeFirstPolicy::schedule(
   budget.latency_budget = options_.max_global_tpot_ms();
 
   // Step 1: schedule decode requests first (decode-maximal batching).
-  schedule_decode_from_queue(&state.decode_queue, state, budget);
+  schedule_decode_from_queue(&state.decode_queue, state, budget, finished);
   schedule_decode_restore(state, budget);
   const bool has_decode = !state.running_sequences.empty();
 

@@ -99,6 +99,8 @@ class WorkerImpl {
 
   virtual void load_model(std::unique_ptr<ModelLoader> loader);
 
+  torch::Tensor take_draft_token_id_offsets();
+
   virtual void lazy_load_model(std::unique_ptr<ModelLoader> loader);
 
   virtual std::tuple<int64_t, int64_t> estimate_kv_cache_capacity();
@@ -217,6 +219,10 @@ class WorkerImpl {
                                            LlmForwardInput& prepared);
   virtual std::optional<ForwardOutput> execute_task_pipeline(
       const LlmForwardInput& prepared);
+  virtual void prepare_task_pipeline_input(const VlmForwardInput& input,
+                                           VlmForwardInput& prepared);
+  virtual std::optional<ForwardOutput> execute_task_pipeline(
+      VlmForwardInput& prepared);
   // Warmup waits for execution allocations; serving keeps stream overlap.
   void observe_execution_memory(bool is_warmup);
 
@@ -645,6 +651,8 @@ class WorkerImpl {
 #endif
 
   bool is_spec_draft_ = false;
+
+  torch::Tensor draft_token_id_offsets_;
 
   Status status_ = Status::UNINITIALIZED;
 

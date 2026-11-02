@@ -272,6 +272,12 @@ class TestMTPWorker final : public MTPWorkerImpl<LlmForwardInput> {
                                        options,
                                        WorkerType::LLM) {}
 
+  EmbeddingCache* initialize_replay_cache(bool retain_span) {
+    retain_replay_span_ = retain_span;
+    init_embedding_cache(kBlockCount);
+    return embedding_cache_.get();
+  }
+
   void replace_transfer_workers(std::unique_ptr<LLMWorkerImpl> target,
                                 std::unique_ptr<LLMWorkerImpl> draft) {
     impl_ = std::move(target);
@@ -304,6 +310,12 @@ class TestMTPWorker final : public MTPWorkerImpl<LlmForwardInput> {
       release.wait();
     });
   }
+
+ private:
+  bool requires_full_target_replay() const override {
+    return retain_replay_span_;
+  }
+  bool retain_replay_span_ = false;
 };
 
 class TestDFlashWorker final : public DFlashWorkerImpl {
@@ -364,6 +376,27 @@ TEST(SpeculativeDraftKVCacheShapeTest, ReusesGroupedTargetPoolCounts) {
 
   EXPECT_TRUE(draft_shape.has_grouped_cache_layout());
   EXPECT_EQ(draft_shape.key_cache_shape(), (std::vector<int64_t>{2, 3, 5}));
+}
+
+TEST_F(MTPHostOffloadTest, SharedCacheAllocationHonorsReplaySpanPolicy) {
+  const torch::Device device(Platform::type_torch(), /*index=*/0);
+  const ParallelArgs parallel_args(
+      /*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr);
+  const runtime::Options options =
+      make_runtime_options(/*host_blocks_factor=*/0.0);
+  TestMTPWorker worker(parallel_args, device, options);
+  const auto embedding = torch::tensor({1.0f, 2.0f});
+  for (bool retain_span : {false, true}) {
+    EmbeddingCache* cache = worker.initialize_replay_cache(retain_span);
+    cache->write_mtp_bootstrap_context(
+        /*embedding_id=*/0, "request", /*token_id=*/7, embedding);
+    const auto states = cache->read_decode_states({0}, {"request"});
+    ASSERT_EQ(states.size(), 1);
+    EXPECT_EQ(states.front().replay_embeddings.defined(), retain_span);
+    EXPECT_EQ(states.front().replay_token_ids,
+              retain_span ? std::vector<int32_t>{7} : std::vector<int32_t>{});
+    EXPECT_TRUE(torch::equal(states.front().embedding, embedding));
+  }
 }
 
 TEST_F(MTPHostOffloadTest, VectorTransferWithoutHierarchyIsNoop) {
@@ -607,12 +640,15 @@ TEST_F(MTPHostOffloadTest, UnifiedTransferRoundTripUsesSharedSynchronizer) {
 
   LlmModelParams target_input_params;
   target_input_params.meta.batch_id = kBatchId;
+  target_input_params.meta.requires_host_restore = true;
   worker.set_hierarchy_layer_synchronizer(target_input_params);
+  EXPECT_FALSE(target_input_params.meta.requires_host_restore);
   ASSERT_NE(target_input_params.parallel.layer_wise_load_synchronizer, nullptr);
   EXPECT_FALSE(unified_transfer->take_load_handle(kBatchId).has_value());
 
   LlmModelParams draft_input_params = target_input_params.clone();
   draft_ptr->set_hierarchy_layer_synchronizer(draft_input_params);
+  EXPECT_FALSE(draft_input_params.meta.requires_host_restore);
   ASSERT_NE(draft_input_params.parallel.layer_wise_load_synchronizer, nullptr);
   EXPECT_EQ(target_input_params.parallel.layer_wise_load_synchronizer.get(),
             draft_input_params.parallel.layer_wise_load_synchronizer.get());
@@ -756,12 +792,15 @@ TEST_F(MTPHostOffloadTest, Dsv4DraftSkipsUnsupportedCompressedBlockTypes) {
 
   LlmModelParams target_input_params;
   target_input_params.meta.batch_id = kBatchId;
+  target_input_params.meta.requires_host_restore = true;
   worker.set_hierarchy_layer_synchronizer(target_input_params);
+  EXPECT_FALSE(target_input_params.meta.requires_host_restore);
   for (uint32_t layer_index = 0; layer_index < 3; ++layer_index) {
     ASSERT_TRUE(target_input_params.synchronize_layer(layer_index));
   }
   LlmModelParams draft_input_params = target_input_params.clone();
   draft_ptr->set_hierarchy_layer_synchronizer(draft_input_params);
+  EXPECT_FALSE(draft_input_params.meta.requires_host_restore);
   ASSERT_TRUE(draft_input_params.synchronize_draft_layer());
 
   for (BlockType block_type : block_types) {

@@ -122,6 +122,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         enable_graph_mode_decode_no_padding: bool = False,
         spec_verify_width: int = 1,
         device_kv_lengths: bool = False,
+        max_capture_tokens: int | None = None,
     ) -> None:
         super().__init__(model, attention_backend, device)
         self.dp_size = dp_size
@@ -130,6 +131,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         self.max_model_len = max_model_len
         self.num_decoding_tokens = max(1, int(num_decoding_tokens))
         self._is_spec_draft = is_spec_draft
+        self._max_capture_tokens = max_capture_tokens
         self._enable_decode_no_padding = enable_graph_mode_decode_no_padding
         # New exact shapes can arrive while native input preparation copies
         # the next batch on another thread. Only this thread captures the
@@ -150,6 +152,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         )
         self._uses_compressed_kpool_tail = False
         self._graphs: dict[_GraphKey, AclGraphEntry] = {}
+        self._startup_batch_shapes: set[tuple[int, bool]] = set()
         self._dp_graph_variants: dict[_GraphKey, int] = {}
         self._enable_mega_moe_token_mask = enable_mega_moe_token_mask
         self._paged_kv_indices_buffer: torch.Tensor | None = None
@@ -182,6 +185,8 @@ class DecodeAclGraphRunner(AclGraphRunner):
         metadata: AttentionMetadata,
         input_embedding: torch.Tensor | None = None,
         mtp_topk_indices: torch.Tensor | None = None,
+        *,
+        is_graph_warmup: bool = False,
     ) -> DecodeAclGraphMetadata | None:
         """Admit a step and return metadata reusable until its replay is queued.
 
@@ -237,9 +242,27 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 return None
             padded_batch_size = self._padded_batch_size(batch_size, metadata)
 
+        # Physical KV capacity can limit startup shapes. Draft prefix steps
+        # also flatten multiple rows per request, so the largest warmed row
+        # count does not imply coverage of smaller shapes. Select eager for
+        # unsupported shapes before execution; missing variants still fail.
+        if (
+            self._device_kv_lengths
+            and not is_graph_warmup
+            and (padded_batch_size, is_expanded_spec_verify) not in self._startup_batch_shapes
+        ):
+            return None
+
         def reject_layout(reason: str) -> None:
             if self.dp_size > 1:
                 raise RuntimeError(f"DP decode graph layout is incompatible: {reason}")
+            return None
+
+        # The model caps capture at its collective dispatch window; wider
+        # batches (including expanded verify rows) replay eagerly. Every DP
+        # rank derives the same padded token count, so the choice is
+        # collective-safe.
+        if self._max_capture_tokens is not None and padded_batch_size > self._max_capture_tokens:
             return None
 
         if is_expanded_spec_verify:
@@ -674,7 +697,9 @@ class DecodeAclGraphRunner(AclGraphRunner):
         if self._device_kv_lengths:
             if not is_graph_warmup:
                 if graph_key not in self._graphs:
-                    raise RuntimeError("KV capacity graph was not captured during startup warmup")
+                    raise RuntimeError(
+                        f"KV capacity graph was not captured during startup warmup: graph_key={graph_key!r}"
+                    )
                 return graph_key
             capacity_pages = kv_capacity_buckets(self._capacity_page_limit())
             previous_count = len(self._graphs)
@@ -716,6 +741,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
                     len(capacity_pages),
                     len(self._graphs),
                 )
+            self._startup_batch_shapes.add((padded_batch_size, expanded is not None))
             return graph_key
         if not self._synchronize_dp_graph_presence(graph_key, input_ids):
             return graph_key
@@ -1452,6 +1478,8 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 static_metadata.block_table.shape[1],
             )
             static_metadata.block_table[:batch_size, :copy_cols].copy_(src_bt[:batch_size, :copy_cols])
+            # Drop old page IDs that VMM may have unmapped since the last replay.
+            static_metadata.block_table[:batch_size, copy_cols:].zero_()
             if padded_batch_size > batch_size:
                 static_metadata.block_table[batch_size:].zero_()
 

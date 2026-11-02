@@ -237,6 +237,107 @@ TEST_F(VLMRequestFactoryTest,
   EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 1);
 }
 
+TEST_F(VLMRequestFactoryTest, TaskPipelineMtpAcceptsMinimumLengthWithOverlap) {
+  auto factory = make_factory();
+  options_.enable_task_pipeline(true)
+      .enable_schedule_overlap(true)
+      .num_speculative_tokens(4)
+      .speculative_algorithm("MTP");
+  CallbackCapture capture;
+  RequestParams sp;
+  sp.max_tokens = 64;
+  sp.min_tokens = 32;
+
+  auto request = factory->create(
+      "describe this", MMData{}, sp, make_capture_callback(&capture));
+
+  ASSERT_NE(request, nullptr);
+  EXPECT_FALSE(capture.called);
+  EXPECT_EQ(request->state().sampling_param.min_tokens, 32U);
+  EXPECT_TRUE(request->state().sampling_param.device_min_tokens);
+  EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 1);
+}
+
+TEST_F(VLMRequestFactoryTest, MtpAcceptsSamplingControlsWithOverlap) {
+  auto factory = make_factory();
+  options_.enable_task_pipeline(false)
+      .enable_schedule_overlap(true)
+      .num_speculative_tokens(4)
+      .speculative_algorithm("MTP");
+  CallbackCapture capture;
+  RequestParams sp;
+  sp.max_tokens = 64;
+  sp.min_tokens = 16;
+  sp.seed = 42;
+  sp.bad_words = {"bad"};
+  sp.logit_bias = {{1, 2.0F}};
+  sp.allowed_token_ids = std::vector<int32_t>{1, 2, 3};
+
+  auto request = factory->create(
+      "describe this", MMData{}, sp, make_capture_callback(&capture));
+
+  ASSERT_NE(request, nullptr);
+  EXPECT_FALSE(capture.called);
+  const auto& sampling = request->state().sampling_param;
+  EXPECT_EQ(sampling.seed, 42);
+  EXPECT_TRUE(sampling.device_min_tokens);
+  EXPECT_FALSE(sampling.bad_words_token_ids.empty());
+}
+
+TEST_F(VLMRequestFactoryTest, SamplingControlsAreIndependentOfRuntimeOptions) {
+  auto factory = make_factory();
+  options_.enable_task_pipeline(true)
+      .enable_schedule_overlap(true)
+      .num_speculative_tokens(4)
+      .speculative_algorithm("DFlash");
+  CallbackCapture capture;
+  RequestParams sp;
+  sp.max_tokens = 64;
+  sp.min_tokens = 16;
+  sp.seed = 42;
+  sp.bad_words = {"bad"};
+  sp.logit_bias = {{1, 2.0F}};
+  sp.allowed_token_ids = std::vector<int32_t>{1, 2, 3};
+  sp.logprobs = true;
+  sp.top_logprobs = -1;
+
+  auto request = factory->create(
+      "describe this", MMData{}, sp, make_capture_callback(&capture));
+
+  ASSERT_NE(request, nullptr);
+  EXPECT_FALSE(capture.called);
+  const auto& sampling = request->state().sampling_param;
+  EXPECT_EQ(sampling.seed, 42);
+  EXPECT_EQ(sampling.min_tokens, 16U);
+  EXPECT_TRUE(sampling.device_min_tokens);
+  EXPECT_FALSE(sampling.bad_words_token_ids.empty());
+  EXPECT_EQ(sampling.logit_bias.at(1), 2.0F);
+  EXPECT_EQ(sampling.allowed_token_ids, sp.allowed_token_ids);
+  EXPECT_EQ(sampling.top_logprobs, 1000);
+  EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 1);
+}
+
+TEST_F(VLMRequestFactoryTest, RuntimeOptionsDoNotBypassVocabularyValidation) {
+  auto factory = make_factory();
+  options_.enable_task_pipeline(true)
+      .enable_schedule_overlap(true)
+      .num_speculative_tokens(4);
+  CallbackCapture capture;
+  RequestParams sp;
+  sp.seed = 42;
+  sp.logit_bias = {{1000, 2.0F}};
+
+  auto request = factory->create(
+      "describe this", MMData{}, sp, make_capture_callback(&capture));
+
+  EXPECT_EQ(request, nullptr);
+  ASSERT_TRUE(capture.status.has_value());
+  EXPECT_EQ(capture.status->code(), StatusCode::INVALID_ARGUMENT);
+  EXPECT_EQ(capture.status->message(),
+            "logit_bias token id is outside the model vocabulary");
+  EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 0);
+}
+
 TEST_F(VLMRequestFactoryTest, MessageOverloadFailsWhenTemplateRejects) {
   auto factory = make_factory();
   chat_template_->set_succeed(false);

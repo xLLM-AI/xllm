@@ -23,6 +23,7 @@ namespace py = pybind11;
 #include <atomic>
 #include <csignal>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
@@ -271,9 +272,10 @@ Options create_options(const std::string& instance_name, bool is_local) {
 }  // namespace
 
 void shutdown_handler(int signal) {
-  // TODO: gracefully shutdown the server
-  LOG(WARNING) << "Received signal " << signal << ", stopping server...";
-  exit(1);
+  // Async-signal-safe only: _Exit skips atexit/static teardown, which would
+  // release the embedded-CPython pybind11 objects without the GIL.
+  static_cast<void>(signal);
+  std::_Exit(1);
 }
 
 void validate_config(const std::string& model_type) {
@@ -605,5 +607,13 @@ int main(int argc, char** argv) {
   // Python/device finalization and its dependencies' static destructors.
   MooncakeTransferEngineCore::get_instance().shutdown();
 #endif
+#if defined(USE_NPU)
+  // Static teardown would release the embedded-CPython pybind11 objects
+  // without the GIL and abort; flush logs/stdio, then hard-exit.
+  google::FlushLogFiles(google::GLOG_INFO);
+  fflush(nullptr);
+  std::_Exit(exit_code);
+#else
   return exit_code;
+#endif
 }

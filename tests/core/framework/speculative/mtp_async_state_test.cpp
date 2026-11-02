@@ -27,37 +27,42 @@ namespace xllm::mtp_async {
 namespace {
 
 TEST(MtpAsyncStateTest, ClassifiesClosedTargetSpecVerifyPolicy) {
-  const std::pair<std::string_view, TargetSpecVerifyMode> test_cases[] = {
-      {"qwen3_5", TargetSpecVerifyMode::EXPANDED_VERIFY},
-      {"qwen3_5_moe", TargetSpecVerifyMode::EXPANDED_VERIFY},
-      {"qwen3_5_text", TargetSpecVerifyMode::EXPANDED_VERIFY},
-      {"qwen3_5_moe_text", TargetSpecVerifyMode::EXPANDED_VERIFY},
-      {"deepseek_v32", TargetSpecVerifyMode::PYTHON_EXPANDED_VERIFY},
-      {"deepseek_v4", TargetSpecVerifyMode::PYTHON_EXPANDED_VERIFY},
-      {"deepseek_v4_dspark", TargetSpecVerifyMode::PYTHON_EXPANDED_VERIFY},
-      {"mimo", TargetSpecVerifyMode::CAUSAL_CHUNKED_PREFILL},
-      {"glm5_next", TargetSpecVerifyMode::PYTHON_EXPANDED_VERIFY},
-      {"glm5_next_mtp", TargetSpecVerifyMode::GENERIC},
-      {"glm5_3_flash", TargetSpecVerifyMode::PYTHON_EXPANDED_VERIFY},
-      {"qwen3_next", TargetSpecVerifyMode::GENERIC},
-      {"qwen3_5_mtp", TargetSpecVerifyMode::GENERIC},
-      {"qwen3_5_moe_mtp", TargetSpecVerifyMode::GENERIC},
-      {"glm_moe_dsa", TargetSpecVerifyMode::PYTHON_EXPANDED_VERIFY},
-      {"mimo_mtp", TargetSpecVerifyMode::GENERIC},
-      {"unknown_model", TargetSpecVerifyMode::GENERIC},
+  struct TestCase {
+    std::string_view model_type;
+    TargetSpecVerifyMode native_mode;
+    TargetSpecVerifyMode python_mode;
+  };
+  using Mode = TargetSpecVerifyMode;
+  const TestCase test_cases[] = {
+      {"qwen3_5", Mode::EXPANDED_VERIFY, Mode::EXPANDED_VERIFY},
+      {"qwen3_5_moe", Mode::EXPANDED_VERIFY, Mode::EXPANDED_VERIFY},
+      {"qwen3_5_text", Mode::EXPANDED_VERIFY, Mode::EXPANDED_VERIFY},
+      {"qwen3_5_moe_text", Mode::EXPANDED_VERIFY, Mode::EXPANDED_VERIFY},
+      {"deepseek_v32", Mode::GENERIC, Mode::EXPANDED_VERIFY},
+      {"deepseek_v4", Mode::GENERIC, Mode::EXPANDED_VERIFY},
+      {"deepseek_v4_dspark", Mode::GENERIC, Mode::EXPANDED_VERIFY},
+      {"mimo", Mode::CAUSAL_CHUNKED_PREFILL, Mode::CAUSAL_CHUNKED_PREFILL},
+      {"glm5_next", Mode::CAUSAL_CHUNKED_PREFILL, Mode::EXPANDED_VERIFY},
+      {"glm5_3_flash", Mode::CAUSAL_CHUNKED_PREFILL, Mode::EXPANDED_VERIFY},
+      {"glm5_next_text", Mode::CAUSAL_CHUNKED_PREFILL, Mode::EXPANDED_VERIFY},
+      {"glm5_next_mtp", Mode::GENERIC, Mode::GENERIC},
+      {"qwen3_next", Mode::GENERIC, Mode::GENERIC},
+      {"qwen3_5_mtp", Mode::GENERIC, Mode::GENERIC},
+      {"qwen3_5_moe_mtp", Mode::GENERIC, Mode::GENERIC},
+      {"glm_moe_dsa", Mode::GENERIC, Mode::EXPANDED_VERIFY},
+      {"mimo_mtp", Mode::GENERIC, Mode::GENERIC},
+      {"unknown_model", Mode::GENERIC, Mode::GENERIC},
   };
 
-  for (const auto& [model_type, expected] : test_cases) {
-    EXPECT_EQ(classify_target_spec_verify_mode(model_type), expected)
-        << "model_type=" << model_type;
+  for (const auto& test_case : test_cases) {
+    SCOPED_TRACE(test_case.model_type);
+    EXPECT_EQ(classify_target_spec_verify_mode(test_case.model_type,
+                                               /*is_python_model=*/false),
+              test_case.native_mode);
+    EXPECT_EQ(classify_target_spec_verify_mode(test_case.model_type,
+                                               /*is_python_model=*/true),
+              test_case.python_mode);
   }
-}
-
-TEST(MtpAsyncStateTest, ClassifiesUniformDraftRowCapability) {
-  EXPECT_TRUE(requires_uniform_draft_rows("glm5_next"));
-  EXPECT_TRUE(requires_uniform_draft_rows("glm5_3_flash"));
-  EXPECT_FALSE(requires_uniform_draft_rows("deepseek_v4"));
-  EXPECT_FALSE(requires_uniform_draft_rows("unknown_model"));
 }
 
 TEST(MtpAsyncStateTest, ClassifiesSupportedCombinedDraftExecutionPaths) {
@@ -78,7 +83,6 @@ TEST(MtpAsyncStateTest, ClassifiesDraftPrefixProtocolFromBothModelLayouts) {
       TargetSpecVerifyMode::GENERIC,
       TargetSpecVerifyMode::CAUSAL_CHUNKED_PREFILL,
       TargetSpecVerifyMode::EXPANDED_VERIFY,
-      TargetSpecVerifyMode::PYTHON_EXPANDED_VERIFY,
   };
   for (const TargetSpecVerifyMode target_mode : target_modes) {
     EXPECT_EQ(classify_draft_prefix_policy(
@@ -95,8 +99,6 @@ TEST(MtpAsyncStateTest, ClassifiesDraftPrefixProtocolFromBothModelLayouts) {
        DraftPrefixPolicy::TAIL_REPAIR},
       {TargetSpecVerifyMode::EXPANDED_VERIFY,
        DraftPrefixPolicy::VERIFIER_CONDITIONED_FIRST_PASS},
-      {TargetSpecVerifyMode::PYTHON_EXPANDED_VERIFY,
-       DraftPrefixPolicy::TAIL_REPAIR},
   };
   for (const auto& [target_mode, expected] : paged_cases) {
     EXPECT_EQ(
@@ -137,7 +139,8 @@ TEST(MtpAsyncStateTest,
   }
   // The ordinary layout policy alone must not widen pipeline admission.
   EXPECT_EQ(classify_draft_prefix_policy(
-                classify_target_spec_verify_mode("qwen3_5_moe_text"),
+                classify_target_spec_verify_mode("qwen3_5_moe_text",
+                                                 /*is_python_model=*/false),
                 classify_combined_draft_execution_path("qwen3_5_moe_mtp")),
             DraftPrefixPolicy::VERIFIER_CONDITIONED_FIRST_PASS);
   EXPECT_FALSE(supports_hybrid_mtp_pipeline_model_pair("qwen3_5_moe_text",

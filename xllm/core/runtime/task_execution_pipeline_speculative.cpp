@@ -3408,8 +3408,8 @@ void TaskExecutionPipeline::launch_block_draft(SpeculativeSlot& slot) {
       generate_adaptive_dspark_proposals(slot, slot.state->tokens_);
       return;
     }
-    const auto base_logits = invocation.logits.view(
-        {slot.rows, steps, speculative_capacity_->common.vocab_size});
+    const auto base_logits =
+        invocation.logits.view({slot.rows, steps, invocation.logits.size(-1)});
     slot.proposal = sample_dspark_markov_block(
         [this](const torch::Tensor& tokens) {
           return draft_->model.dspark_markov_bias(tokens);
@@ -3421,7 +3421,8 @@ void TaskExecutionPipeline::launch_block_draft(SpeculativeSlot& slot) {
           synchronize_tokens(tokens, /*skip_sampling_group=*/false);
         },
         speculative_capacity_->is_probabilistic_draft,
-        /*token_ids_out=*/slot.draft_token_ids);
+        /*token_ids_out=*/slot.draft_token_ids,
+        speculative_capacity_->draft_vocab);
   } else {
     invocation.sampled = sample(*invocation.sampling, invocation.logits);
     slot.draft_token_ids.copy_(
@@ -3446,8 +3447,8 @@ void TaskExecutionPipeline::generate_adaptive_dspark_proposals(
   // the same minimal sampler in serving and startup profiling; do not launch
   // no-op penalty kernels merely because the client supplied neutral tensors.
   SamplingParameters sampling;
-  const auto base_logits =
-      invocation.logits.view({slot.rows, draft_width, capacity_.vocab_size});
+  const auto base_logits = invocation.logits.view(
+      {slot.rows, draft_width, invocation.logits.size(-1)});
   sample_dspark_markov_block(
       [this](const torch::Tensor& tokens) {
         return draft_->model.dspark_markov_bias(tokens);
@@ -3457,7 +3458,8 @@ void TaskExecutionPipeline::generate_adaptive_dspark_proposals(
       sampling,
       [](torch::Tensor& /*sampled_tokens*/) {},
       /*is_probabilistic_draft=*/false,
-      /*token_ids_out=*/slot.draft_token_ids);
+      /*token_ids_out=*/slot.draft_token_ids,
+      speculative_capacity_->draft_vocab);
   invocation.sampled.draft_logits = torch::Tensor();
   adaptive.previous_tokens.select(/*dim=*/1, /*index=*/0).copy_(anchors);
   adaptive.previous_tokens

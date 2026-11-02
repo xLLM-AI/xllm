@@ -42,9 +42,6 @@ class BlockManagerImpl : public BlockManager {
   // override.
   std::optional<std::vector<Block>> allocate_for_sequence(
       Sequence* seq,
-      size_t num_tokens) override;
-  std::optional<std::vector<Block>> allocate_for_sequence(
-      Sequence* seq,
       KVCacheState& kv_state,
       size_t num_tokens) override;
   bool allocate_for_prefetch(Sequence* seq, size_t num_tokens) override;
@@ -66,7 +63,6 @@ class BlockManagerImpl : public BlockManager {
 
   size_t num_blocks_in_prefix_cache() const override {
     if (options_.enable_prefix_cache()) {
-      CHECK(prefix_cache_);
       return prefix_cache_->num_blocks();
     }
     return 0;
@@ -101,7 +97,7 @@ class BlockManagerImpl : public BlockManager {
   // used). Shared with subclasses (e.g. SlidingWindowBlockManager) that need
   // to reproduce the base allocate_shared refcount bookkeeping over their own
   // custom probe path. Static-friendly signature keeps callers free of `this`.
-  static bool mark_used(std::vector<uint8_t>* usage_ids, int32_t block_id);
+  static bool mark_used(std::vector<uint8_t>& usage_ids, int32_t block_id);
   bool allocate_prefetch_range(Sequence* seq,
                                size_t num_tokens,
                                size_t required_begin_block);

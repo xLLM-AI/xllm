@@ -129,6 +129,7 @@ def test_load_weights_routes_compressor_aliases_through_loader(
     torch.nn.Module.__init__(model)
     model.cfg = SimpleNamespace(tp_size=1, tp_rank=0, n_layers=1, n_heads=1)
     model.model = SimpleNamespace(layers=[layer])
+    monkeypatch.setattr(model, "_load_dsv4_dense_mlp", lambda *_args: None)
 
     model.load_weights({}, tp_rank=0, tp_size=1)
 

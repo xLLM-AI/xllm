@@ -19,7 +19,9 @@ limitations under the License.
 
 #include <algorithm>
 
+#include "core/common/metrics.h"
 #include "core/framework/request/sequence.h"
+#include "core/kv_cache/prefix/prefix_cache_factory.h"
 
 namespace xllm {
 
@@ -38,6 +40,17 @@ VmmKVBlockManager::VmmKVBlockManager(const Options& options,
       page_size_(page_size),
       block_mem_size_(block_mem_size),
       num_avail_blocks_(0) {
+  if (options.enable_prefix_cache()) {
+    PrefixCache::Options cache_options;
+    cache_options.block_size(options.block_size())
+        .hasher_type(options.hasher_type())
+        .block_type(options.block_type());
+    prefix_cache_ = create_prefix_cache(cache_options);
+    if (options.event_journal()) {
+      prefix_cache_->set_event_sink(options.event_journal(),
+                                    options.event_scope());
+    }
+  }
   LOG(INFO) << "VmmKVBlockManager initialized: "
             << "model_id=" << model_id_ << ", dp_rank=" << dp_rank_
             << ", num_layers=" << num_layers_ << ", page_size=" << page_size_
@@ -57,6 +70,8 @@ void VmmKVBlockManager::reserve_virtual_memory_padding_blocks() {
 }
 
 VmmKVBlockManager::~VmmKVBlockManager() {
+  // Cached Block destructors call free(), which still needs the page states.
+  prefix_cache_.reset();
   std::vector<int64_t> page_ids;
   {
     std::lock_guard<std::mutex> lock(mtx_);
@@ -106,6 +121,16 @@ std::vector<int32_t> VmmKVBlockManager::alloc_internal(size_t need_size) {
       lock.unlock();
       auto new_page = page_allocator_.alloc_kv_cache_page(model_id_, dp_rank_);
       if (new_page == nullptr) {
+        // Allocation is the authoritative live-budget check. Cache-only blocks
+        // may be reclaimed without invalidating any active sequence's mapping.
+        if (prefix_cache_) {
+          std::lock_guard<std::mutex> cache_lock(prefix_cache_mtx_);
+          AUTO_COUNTER(prefix_cache_latency_seconds_evict);
+          if (prefix_cache_->evict(remaining_need) > 0) {
+            lock.lock();
+            continue;
+          }
+        }
         LOG(ERROR) << "Failed to allocate new page for dp_rank=" << dp_rank_;
         // Return what we have allocated so far (caller should handle partial
         // allocation)
@@ -160,15 +185,6 @@ std::vector<Block> VmmKVBlockManager::allocate(size_t num_blocks) {
 
 std::optional<std::vector<Block>> VmmKVBlockManager::allocate_for_sequence(
     Sequence* seq,
-    size_t num_tokens) {
-  if (seq == nullptr) {
-    return std::nullopt;
-  }
-  return allocate_for_sequence(seq, seq->kv_state(), num_tokens);
-}
-
-std::optional<std::vector<Block>> VmmKVBlockManager::allocate_for_sequence(
-    Sequence* seq,
     KVCacheState& kv_state,
     size_t num_tokens) {
   if (seq == nullptr) {
@@ -215,6 +231,10 @@ void VmmKVBlockManager::free_blocks(const std::vector<int32_t>& indices) {
   std::vector<int64_t> pages_to_free;
   pages_to_free.reserve(idx_dict.size());
   std::unique_lock<std::mutex> lock(mtx_);
+
+  for (int32_t idx : indices) {
+    inactive_blocks_.erase(idx);
+  }
 
   for (auto& [page_id, idxs] : idx_dict) {
     // Find the page - it must be in either full_pages or avail_pages
@@ -266,44 +286,72 @@ void VmmKVBlockManager::free_blocks(const std::vector<int32_t>& indices) {
   }
 }
 
-void VmmKVBlockManager::deallocate(const Slice<Block>& /*blocks*/) {
-  // No-op: Block destructor will call free() when ref_count reaches 0
-  // Prefix cache is not supported in VirtualMemory mode
+void VmmKVBlockManager::deallocate(const Slice<Block>& blocks) {
+  if (!prefix_cache_) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(mtx_);
+  for (const Block& block : blocks) {
+    // One cache owner and the departing sequence remain. Additional sequence
+    // or transfer owners must keep the block in active usage.
+    if (block.is_valid() && block.ref_count() <= 2u) {
+      inactive_blocks_.insert(block.id());
+    }
+  }
 }
 
 void VmmKVBlockManager::free(int32_t block_id) { free_blocks({block_id}); }
 
 std::vector<Block> VmmKVBlockManager::allocate_shared(
-    const Slice<int32_t>& /*token_ids*/,
-    const Slice<Block>& /*existed_shared_blocks*/,
-    const MMData& /*mm_data*/,
-    const Slice<XXH3Key>& /*block_hashes*/) {
-  // Prefix cache not supported
-  VLOG(1) << "allocate_shared called but prefix cache is not supported";
-  return {};
+    const Slice<int32_t>& token_ids,
+    const Slice<Block>& existed_shared_blocks,
+    const MMData& mm_data,
+    const Slice<XXH3Key>& block_hashes) {
+  if (!prefix_cache_) {
+    return {};
+  }
+  std::lock_guard<std::mutex> cache_lock(prefix_cache_mtx_);
+  AUTO_COUNTER(prefix_cache_latency_seconds_match);
+  std::vector<Block> blocks = prefix_cache_->match(
+      token_ids, existed_shared_blocks, mm_data, block_hashes);
+  std::lock_guard<std::mutex> lock(mtx_);
+  for (const Block& block : blocks) {
+    inactive_blocks_.erase(block.id());
+  }
+  return blocks;
 }
 
-void VmmKVBlockManager::cache(const Slice<int32_t>& /*token_ids*/,
-                              std::vector<Block>& /*blocks*/,
-                              size_t /*existed_shared_blocks_num*/,
-                              const MMData& /*mm_data*/,
-                              const Slice<XXH3Key>& /*block_hashes*/) {
-  // Prefix cache not supported
-  VLOG(1) << "cache called but prefix cache is not supported";
-  return;
+void VmmKVBlockManager::cache(const Slice<int32_t>& token_ids,
+                              std::vector<Block>& blocks,
+                              size_t existed_shared_blocks_num,
+                              const MMData& mm_data,
+                              const Slice<XXH3Key>& block_hashes) {
+  if (prefix_cache_) {
+    std::lock_guard<std::mutex> cache_lock(prefix_cache_mtx_);
+    AUTO_COUNTER(prefix_cache_latency_seconds_insert);
+    prefix_cache_->insert(
+        token_ids, blocks, existed_shared_blocks_num, mm_data, block_hashes);
+  }
 }
 
-void VmmKVBlockManager::cache(const std::vector<Block>& /*blocks*/) {
-  // Prefix cache not supported
-  VLOG(1) << "cache called but prefix cache is not supported";
-  return;
+void VmmKVBlockManager::cache(const std::vector<Block>& blocks) {
+  if (prefix_cache_) {
+    std::lock_guard<std::mutex> cache_lock(prefix_cache_mtx_);
+    AUTO_COUNTER(prefix_cache_latency_seconds_insert);
+    prefix_cache_->insert(blocks);
+  }
+}
+
+size_t VmmKVBlockManager::num_blocks_in_prefix_cache() const {
+  std::lock_guard<std::mutex> cache_lock(prefix_cache_mtx_);
+  return prefix_cache_ ? prefix_cache_->num_blocks() : 0;
 }
 
 size_t VmmKVBlockManager::num_free_blocks() const { return available_size(); }
 
 size_t VmmKVBlockManager::num_used_blocks() const {
   std::lock_guard<std::mutex> lock(mtx_);
-  return get_num_allocated_blocks();
+  return get_num_allocated_blocks() - inactive_blocks_.size();
 }
 
 double VmmKVBlockManager::kv_cache_utilization() const {
@@ -312,7 +360,9 @@ double VmmKVBlockManager::kv_cache_utilization() const {
   if (total == 0) {
     return 0.0;
   }
-  return static_cast<double>(get_num_allocated_blocks()) / total;
+  return static_cast<double>(get_num_allocated_blocks() -
+                             inactive_blocks_.size()) /
+         total;
 }
 
 size_t VmmKVBlockManager::num_total_blocks() const {
@@ -348,7 +398,8 @@ size_t VmmKVBlockManager::available_size() const {
   size_t resident_free_blocks = 0;
   {
     std::lock_guard<std::mutex> lock(mtx_);
-    resident_free_blocks = num_avail_blocks_.load() + reserved_blocks_.size();
+    resident_free_blocks = num_avail_blocks_.load() + reserved_blocks_.size() +
+                           inactive_blocks_.size();
   }
   return resident_free_blocks + unallocated_block_capacity();
 }

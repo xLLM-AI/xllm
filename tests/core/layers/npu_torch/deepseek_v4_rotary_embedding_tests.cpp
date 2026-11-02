@@ -19,7 +19,7 @@ limitations under the License.
 #include <unordered_map>
 #include <vector>
 
-#include "layers/npu/deepseek_v4_rotary_embedding.h"
+#include "core/layers/common/deepseek_v4_rotary_embedding.h"
 
 namespace xllm {
 namespace layer {

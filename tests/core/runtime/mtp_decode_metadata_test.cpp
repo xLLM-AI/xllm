@@ -155,15 +155,13 @@ class DecodeMetadataTestWorker final : public UnifiedMtpWorkerImpl {
                            const runtime::Options& options)
       : UnifiedMtpWorkerImpl(parallel_args, device, options, WorkerType::LLM) {
     context_.set_model_impl("python");
-    target_spec_verify_mode_ =
-        mtp_async::TargetSpecVerifyMode::PYTHON_EXPANDED_VERIFY;
   }
 
   void initialize_target_cache() {
     embedding_cache_ = std::make_unique<EmbeddingCache>(8);
   }
 
-  void use_qwen_hybrid_verify() {
+  void use_expanded_verify() {
     target_spec_verify_mode_ = mtp_async::TargetSpecVerifyMode::EXPANDED_VERIFY;
   }
 
@@ -376,6 +374,7 @@ class MtpDecodeMetadataTest : public ::testing::TestWithParam<int32_t> {
   void check_verify_across_logical_page() {
     DecodeMetadataTestWorker worker(
         parallel_args(), torch::Device("npu:0"), options());
+    worker.use_expanded_verify();
     const int32_t page_size = GetParam() == 1 ? 128 : 256;
     LlmForwardInput input =
         make_input(page_size - 1, torch::tensor({{10, 11}}, torch::kInt));
@@ -463,7 +462,7 @@ TEST_F(MtpDecodeMetadataTest, QwenVerifyKeepsLogicalStateRowsAtEveryWidth) {
     configuration.num_speculative_tokens(draft_width);
     DecodeMetadataTestWorker worker(
         parallel_args(1), torch::Device("npu:0"), configuration);
-    worker.use_qwen_hybrid_verify();
+    worker.use_expanded_verify();
     LlmForwardInput input;
     input.token_ids_host = torch::tensor({42, 43}, torch::kInt32);
     input.positions_host = torch::tensor({5, 9}, torch::kInt32);

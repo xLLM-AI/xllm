@@ -87,6 +87,54 @@ TEST(VmmArenaCapacityTest, ZeroRatioDisablesElasticUtilizationCeiling) {
   EXPECT_EQ(capacity.growth_memory_reserve_bytes, 0);
 }
 
+TEST(VmmArenaCapacityTest, ZeroRatioKeepsPersistentStatesWithinStartupBudget) {
+  const VmmArenaCapacity capacity = calculate_vmm_arena_capacity(
+      /*available_memory=*/20,
+      /*total_memory=*/80,
+      /*max_memory_utilization=*/0.0,
+      /*max_memory_utilization_configured=*/true,
+      /*lazy=*/true,
+      /*max_cache_size=*/0,
+      /*reserved_memory_bytes=*/0,
+      /*resident_memory_bytes=*/8);
+
+  EXPECT_EQ(capacity.maximum_bytes, 72);
+  EXPECT_EQ(capacity.initial_bytes, 12);
+  EXPECT_EQ(capacity.growth_memory_reserve_bytes, 0);
+}
+
+TEST(VmmArenaCapacityTest, SeparateResidentStatesFromEncoderGrowthReserve) {
+  const VmmArenaCapacity capacity = calculate_vmm_arena_capacity(
+      /*available_memory=*/40,
+      /*total_memory=*/80,
+      /*max_memory_utilization=*/0.8,
+      /*max_memory_utilization_configured=*/true,
+      /*lazy=*/true,
+      /*max_cache_size=*/0,
+      /*reserved_memory_bytes=*/8,
+      /*resident_memory_bytes=*/4);
+
+  EXPECT_EQ(capacity.maximum_bytes, 52);
+  EXPECT_EQ(capacity.initial_bytes, 12);
+  EXPECT_EQ(capacity.growth_memory_reserve_bytes, 24);
+}
+
+TEST(VmmArenaCapacityTest, ReserveResidentStatesOutsideFixedPool) {
+  const VmmArenaCapacity capacity = calculate_vmm_arena_capacity(
+      /*available_memory=*/40,
+      /*total_memory=*/80,
+      /*max_memory_utilization=*/0.8,
+      /*max_memory_utilization_configured=*/true,
+      /*lazy=*/false,
+      /*max_cache_size=*/20,
+      /*reserved_memory_bytes=*/0,
+      /*resident_memory_bytes=*/8);
+
+  EXPECT_EQ(capacity.maximum_bytes, 12);
+  EXPECT_EQ(capacity.initial_bytes, 12);
+  EXPECT_EQ(capacity.growth_memory_reserve_bytes, 16);
+}
+
 TEST(VmmArenaCapacityTest, FullUtilizationStillStartsWithinAvailableMemory) {
   const VmmArenaCapacity capacity = calculate_vmm_arena_capacity(
       /*available_memory=*/20,

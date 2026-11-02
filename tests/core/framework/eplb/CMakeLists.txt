@@ -17,6 +17,7 @@ target_link_libraries(eplb_controller_test
 cc_test(
   NAME
     eplb_options_test
+  CPU_ONLY
   SRCS
     eplb_options_test.cpp
   DEPS
@@ -28,6 +29,7 @@ target_link_libraries(eplb_options_test PRIVATE $<$<BOOL:${USE_NPU}>:c_sec>)
 cc_test(
   NAME
     eplb_policy_test
+  CPU_ONLY
   SRCS
     eplb_policy_test.cpp
   DEPS
@@ -40,6 +42,7 @@ target_link_libraries(eplb_policy_test PRIVATE $<$<BOOL:${USE_NPU}>:c_sec>)
 cc_test(
   NAME
     eplb_utils_test
+  CPU_ONLY
   SRCS
     eplb_utils_test.cpp
   DEPS
@@ -52,6 +55,7 @@ target_link_libraries(eplb_utils_test PRIVATE $<$<BOOL:${USE_NPU}>:c_sec>)
 cc_test(
   NAME
     eplb_aggregator_test
+  CPU_ONLY
   SRCS
     eplb_aggregator_test.cpp
   DEPS
@@ -65,6 +69,7 @@ target_link_libraries(eplb_aggregator_test
 cc_test(
   NAME
     expert_weight_buffer_shm_test
+  CPU_ONLY
   SRCS
     expert_weight_buffer_shm_test.cpp
   DEPS
@@ -78,6 +83,7 @@ target_link_libraries(expert_weight_buffer_shm_test
 cc_test(
   NAME
     eplb_manager_test
+  CPU_ONLY
   SRCS
     eplb_manager_test.cpp
   DEPS

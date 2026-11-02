@@ -31,6 +31,7 @@ limitations under the License.
 
 #include "common/metrics.h"
 #include "core/common/global_flags.h"
+#include "core/distributed_runtime/kv_cache_capacity_planner.h"
 #include "core/distributed_runtime/master.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
@@ -244,16 +245,20 @@ bool VLMEngine::init_model(MasterStatus master_status) {
   return true;
 }
 
-KVCacheCapacity VLMEngine::estimate_kv_cache_capacity() {
-  return KVCacheManagerFactory::estimate_capacity(args_,
-                                                  options_,
-                                                  dtype_,
-                                                  dp_local_tp_size_,
-                                                  worker_clients_,
-                                                  /*is_multimodal=*/true);
+KVCacheCapacity VLMEngine::estimate_kv_cache_capacity(
+    bool initialize_virtual_memory) {
+  return KVCacheCapacityPlanner(args_,
+                                options_,
+                                dtype_,
+                                dp_local_tp_size_,
+                                worker_clients_,
+                                /*is_multimodal=*/true,
+                                /*reserved_memory_bytes=*/0)
+      .plan(initialize_virtual_memory);
 }
 
-bool VLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
+bool VLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap,
+                                  const VmmKVCacheLayout* shared_vmm_layout) {
   const bool enable_state_cache = has_linear_attention_layers(args_) ||
                                   kv_cache_cap.kpool_tail_slot_size() > 0;
 
@@ -334,7 +339,9 @@ bool VLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
                                     dtype_,
                                     std::move(options),
                                     /*transfer_coordinator=*/nullptr,
-                                    dp_size_);
+                                    dp_size_,
+                                    /*host_validation_options=*/std::nullopt,
+                                    shared_vmm_layout);
   factory_result.shape.print_shapes();
   KVCacheShape kv_cache_shape = std::move(factory_result.shape);
   kv_cache_manager_ = std::move(factory_result.manager);
@@ -352,6 +359,7 @@ bool VLMEngine::allocate_kv_cache(const KVCacheCapacity& kv_cache_cap) {
       return false;
     }
   }
+  kv_cache_manager_->reserve_virtual_memory_padding_blocks();
   return true;
 }
 
@@ -437,6 +445,11 @@ std::vector<RawForwardOutput> VLMEngine::collect_step_outputs(
   // Under data parallelism (DP), we need to get dp_size outputs.
   // The `stride` means the workers num we can skip.
   int32_t stride = dp_local_tp_size_;
+  // Every pipeline rank retains its completed Slot, including non-drivers.
+  // Retire all ranks before another Step, then keep the driver output below.
+  if (options_.enable_task_pipeline()) {
+    stride = 1;
+  }
 
   for (int32_t worker_rank = 0; worker_rank < worker_clients_num_;
        worker_rank += stride) {

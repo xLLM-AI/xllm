@@ -17,6 +17,9 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <algorithm>
+#include <numeric>
+
 namespace xllm {
 
 void VirtualKVCacheMemoryRegistry::init(const torch::Device& device,
@@ -37,24 +40,26 @@ std::vector<torch::Tensor> VirtualKVCacheMemoryRegistry::create_k_tensors(
     const std::string& model_id,
     const std::vector<int64_t>& dims,
     torch::ScalarType dtype,
-    int64_t num_layers) {
+    int64_t num_layers,
+    const std::vector<bool>& layer_owned) {
   std::lock_guard<std::mutex> lock(mutex_);
   CHECK(initialized_) << "KV cache registry is not initialized";
   CHECK(!model_id.empty());
   return regions_[model_id].create_k_tensors(
-      dims, dtype, num_layers, device_, page_size_);
+      dims, dtype, num_layers, device_, page_size_, layer_owned);
 }
 
 std::vector<torch::Tensor> VirtualKVCacheMemoryRegistry::create_v_tensors(
     const std::string& model_id,
     const std::vector<int64_t>& dims,
     torch::ScalarType dtype,
-    int64_t num_layers) {
+    int64_t num_layers,
+    const std::vector<bool>& layer_owned) {
   std::lock_guard<std::mutex> lock(mutex_);
   CHECK(initialized_) << "KV cache registry is not initialized";
   CHECK(!model_id.empty());
   return regions_[model_id].create_v_tensors(
-      dims, dtype, num_layers, device_, page_size_);
+      dims, dtype, num_layers, device_, page_size_, layer_owned);
 }
 
 std::vector<torch::Tensor> VirtualKVCacheMemoryRegistry::create_index_tensors(
@@ -70,34 +75,129 @@ std::vector<torch::Tensor> VirtualKVCacheMemoryRegistry::create_index_tensors(
       dims, dtype, num_layers, device_, page_size_, layer_owned);
 }
 
+bool VirtualKVCacheMemoryRegistry::bind_mapping_group(
+    const std::string& group_id,
+    std::vector<std::string> member_ids) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (member_ids.empty() ||
+      std::find(member_ids.begin(), member_ids.end(), group_id) ==
+          member_ids.end()) {
+    LOG(ERROR) << "KV mapping group must contain its group ID";
+    return false;
+  }
+  std::sort(member_ids.begin(), member_ids.end());
+  if (std::adjacent_find(member_ids.begin(), member_ids.end()) !=
+      member_ids.end()) {
+    LOG(ERROR) << "KV mapping group contains duplicate members";
+    return false;
+  }
+  const auto group = mapping_groups_.find(group_id);
+  if (group != mapping_groups_.end()) {
+    return group->second == member_ids;
+  }
+  for (const std::string& member_id : member_ids) {
+    const auto member = regions_.find(member_id);
+    if (member == regions_.end() || member->second.mapping_block_bytes() == 0 ||
+        mapping_started_.count(member_id) != 0 ||
+        member_groups_.count(member_id) != 0) {
+      LOG(ERROR) << "KV mapping group member is unavailable: " << member_id;
+      return false;
+    }
+  }
+  for (const std::string& member_id : member_ids) {
+    member_groups_.emplace(member_id, group_id);
+  }
+  mapping_groups_.emplace(group_id, std::move(member_ids));
+  return true;
+}
+
+bool VirtualKVCacheMemoryRegistry::collect_page_targets(
+    const std::string& model_id,
+    const std::vector<offset_t>& offsets,
+    std::vector<std::pair<MappedVirtualMemoryRegion*, offset_t>>& targets)
+    const {
+  const auto model = regions_.find(model_id);
+  if (model == regions_.end()) {
+    LOG(ERROR) << "Model " << model_id << " has no KV cache regions";
+    return false;
+  }
+  const auto membership = member_groups_.find(model_id);
+  if (membership == member_groups_.end()) {
+    return model->second.collect_page_targets(
+        offsets, model->second.mapping_block_bytes(), targets);
+  }
+  const auto& members = mapping_groups_.at(membership->second);
+  size_t common_block_bytes = 0;
+  for (const std::string& member_id : members) {
+    common_block_bytes = std::gcd(common_block_bytes,
+                                  regions_.at(member_id).mapping_block_bytes());
+  }
+  for (const std::string& member_id : members) {
+    if (!regions_.at(member_id).collect_page_targets(
+            offsets, common_block_bytes, targets)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool VirtualKVCacheMemoryRegistry::can_prepare_mapping(
     const std::string& model_id,
     const std::vector<offset_t>& offsets) const {
   std::lock_guard<std::mutex> lock(mutex_);
-  const auto it = regions_.find(model_id);
-  return it != regions_.end() && it->second.can_prepare_mapping(offsets);
+  const std::unordered_set<offset_t> unique_offsets(offsets.begin(),
+                                                    offsets.end());
+  if (unique_offsets.size() != offsets.size()) {
+    return false;
+  }
+  std::vector<std::pair<MappedVirtualMemoryRegion*, offset_t>> targets;
+  if (!collect_page_targets(model_id, offsets, targets)) {
+    return false;
+  }
+  return std::all_of(targets.begin(), targets.end(), [](const auto& target) {
+    return target.first->get_phy_page_id(target.second) < 0;
+  });
+}
+
+void VirtualKVCacheMemoryRegistry::mark_mapping_started(
+    const std::string& model_id) {
+  if (mapping_started_.count(model_id) != 0) {
+    return;
+  }
+  const auto membership = member_groups_.find(model_id);
+  if (membership == member_groups_.end()) {
+    mapping_started_.emplace(model_id);
+    return;
+  }
+  const auto& members = mapping_groups_.at(membership->second);
+  mapping_started_.insert(members.begin(), members.end());
 }
 
 bool VirtualKVCacheMemoryRegistry::map(const std::string& model_id,
                                        const std::vector<offset_t>& offsets) {
   std::lock_guard<std::mutex> lock(mutex_);
-  auto it = regions_.find(model_id);
-  if (it == regions_.end()) {
-    LOG(ERROR) << "Model " << model_id << " has no KV cache regions";
+  std::vector<std::pair<MappedVirtualMemoryRegion*, offset_t>> targets;
+  if (!collect_page_targets(model_id, offsets, targets) ||
+      !MappedVirtualMemoryRegion::map_pages(targets)) {
     return false;
   }
-  return it->second.map(offsets);
+  if (!offsets.empty()) {
+    mark_mapping_started(model_id);
+  }
+  return true;
 }
 
 bool VirtualKVCacheMemoryRegistry::unmap(const std::string& model_id,
                                          const std::vector<offset_t>& offsets) {
   std::lock_guard<std::mutex> lock(mutex_);
-  auto it = regions_.find(model_id);
-  if (it == regions_.end()) {
-    LOG(ERROR) << "Model " << model_id << " has no KV cache regions";
+  std::vector<std::pair<MappedVirtualMemoryRegion*, offset_t>> targets;
+  if (!collect_page_targets(model_id, offsets, targets)) {
     return false;
   }
-  return it->second.unmap(offsets);
+  for (const auto& [region, offset] : targets) {
+    CHECK(region->unmap(offset));
+  }
+  return true;
 }
 
 std::optional<int64_t> VirtualKVCacheMemoryRegistry::num_layers(
@@ -142,11 +242,26 @@ VirtualKVCacheMemoryRegistry::get_global_offsets_for_block(
 
 void VirtualKVCacheMemoryRegistry::erase(const std::string& model_id) {
   std::lock_guard<std::mutex> lock(mutex_);
-  regions_.erase(model_id);
+  const auto membership = member_groups_.find(model_id);
+  if (membership == member_groups_.end()) {
+    mapping_started_.erase(model_id);
+    regions_.erase(model_id);
+    return;
+  }
+  const auto group = mapping_groups_.find(membership->second);
+  for (const std::string& member_id : group->second) {
+    member_groups_.erase(member_id);
+    mapping_started_.erase(member_id);
+    regions_.erase(member_id);
+  }
+  mapping_groups_.erase(group);
 }
 
 void VirtualKVCacheMemoryRegistry::clear() {
   std::lock_guard<std::mutex> lock(mutex_);
+  mapping_groups_.clear();
+  member_groups_.clear();
+  mapping_started_.clear();
   regions_.clear();
   initialized_ = false;
   page_size_ = 0;

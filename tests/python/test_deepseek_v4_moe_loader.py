@@ -239,8 +239,8 @@ def test_load_weights_reaches_routed_expert_aliases(
         process_weights_after_loading=lambda: None,
     )
 
-    def _load_attention(*_args: object, **_kwargs: object) -> tuple[SimpleNamespace, str]:
-        return attention, "layers.0.attn."
+    def _load_attention(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return attention
 
     parameters = {
         "model.layers.0.mlp.experts_w13": torch.nn.Parameter(torch.empty(0, dtype=torch.int8), requires_grad=False),
@@ -263,6 +263,7 @@ def test_load_weights_reaches_routed_expert_aliases(
         _load_dsv4_moe_routing=DeepseekV4ForCausalLM._load_dsv4_moe_routing,
     )
     owner._load_dsv4_moe = MethodType(DeepseekV4ForCausalLM._load_dsv4_moe, owner)
+    owner._load_dsv4_decoder_layer = MethodType(DeepseekV4ForCausalLM._load_dsv4_decoder_layer, owner)
 
     DeepseekV4ForCausalLM.load_weights(owner, [], tp_rank=0, tp_size=1)
 

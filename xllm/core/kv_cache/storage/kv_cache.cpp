@@ -351,14 +351,8 @@ void allocate_kv_caches(std::vector<KVCache>& kv_caches,
     CHECK(!kv_cache_shape.has_index_cache_shape() ||
           create_options.dtype() == torch::kBFloat16)
         << "VirtualMemory indexer cache requires BF16.";
-    CHECK(!kv_cache_shape.has_conv_cache_shape())
-        << "Only support key and value cache for VirtualMemory mode.";
-    CHECK(!kv_cache_shape.has_ssm_cache_shape())
-        << "Only support key and value cache for VirtualMemory mode.";
     CHECK(!create_options.model_id().empty())
         << "model_id must not be empty for VirtualMemory mode.";
-    CHECK(!create_options.enable_linear_attention())
-        << "Linear attention is not supported for VirtualMemory mode.";
 
     CHECK(create_options.tensor_allocator() != nullptr)
         << "Virtual memory KV cache requires a tensor allocator.";

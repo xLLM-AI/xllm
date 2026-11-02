@@ -66,6 +66,51 @@ TEST(VirtualKVCachePageLayoutTest, SymmetricCacheKeepsOnePagePerTensor) {
   EXPECT_EQ(layout.pages_per_tensor(1), 1);
 }
 
+TEST(VirtualKVCachePageLayoutTest, TargetAndDraftShareOneLogicalPageGeometry) {
+  // The target alone covers 16 blocks per page and the draft covers 64.
+  // Their shared group must cover the same 64 block IDs in every tensor.
+  const VirtualKVCachePageLayout layout(
+      {128 * 1024, 128 * 1024, 32 * 1024, 32 * 1024}, kPageSize);
+  EXPECT_EQ(layout.block_bytes(), 32 * 1024);
+  EXPECT_EQ(layout.blocks_per_page(), 64);
+  EXPECT_EQ(layout.physical_pages({8, 8, 1, 1}), 66);
+  EXPECT_EQ(layout.block_capacity(/*physical_page_budget=*/65, {8, 8, 1, 1}),
+            0);
+  EXPECT_EQ(layout.block_capacity(/*physical_page_budget=*/66, {8, 8, 1, 1}),
+            64);
+  EXPECT_EQ(layout.block_capacity(/*physical_page_budget=*/131, {8, 8, 1, 1}),
+            64);
+  EXPECT_EQ(layout.block_capacity(/*physical_page_budget=*/132, {8, 8, 1, 1}),
+            128);
+  for (size_t block : {size_t{0}, size_t{63}, size_t{64}, size_t{127}}) {
+    const size_t logical_page = block / layout.blocks_per_page();
+    for (size_t tensor_index = 0; tensor_index < 4; ++tensor_index) {
+      const size_t tensor_bytes = tensor_index < 2 ? 128 * 1024 : 32 * 1024;
+      const size_t pages = layout.pages_per_tensor(tensor_index);
+      EXPECT_GE(block * tensor_bytes, logical_page * pages * kPageSize);
+      EXPECT_LE((block + 1) * tensor_bytes,
+                (logical_page + 1) * pages * kPageSize);
+    }
+  }
+}
+
+TEST(VirtualKVCachePageLayoutTest,
+     CombinedBudgetFitsOnlyCompleteMappingGroups) {
+  const VirtualKVCachePageLayout target({128 * 1024, 128 * 1024}, kPageSize);
+  const VirtualKVCachePageLayout combined(
+      {128 * 1024, 128 * 1024, 32 * 1024, 32 * 1024}, kPageSize);
+  constexpr size_t kPoolPages = 131;
+  // Target-only budgeting would advertise 128 blocks, requiring 132 pages
+  // once the draft tensors are included. The pair must expose just 64.
+  EXPECT_EQ(target.block_capacity(kPoolPages, {8, 8}), 128);
+  const size_t blocks = combined.block_capacity(kPoolPages, {8, 8, 1, 1});
+  ASSERT_EQ(blocks, 64);
+  const size_t groups = blocks / combined.blocks_per_page();
+  const size_t pages = combined.physical_pages({8, 8, 1, 1});
+  EXPECT_LE(groups * pages, kPoolPages);
+  EXPECT_GT((groups + 1) * pages, kPoolPages);
+}
+
 TEST(VirtualKVCachePageLayoutTest, Glm53CountsOnlyOwnedIndexerLayers) {
   const size_t key_bytes = VirtualKVCachePageLayout::tensor_block_bytes(
       {256, 128, 1, 512}, /*element_size=*/2);

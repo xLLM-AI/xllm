@@ -41,6 +41,7 @@ def test_glm5_next_text_and_vl_registry_entries_are_distinct(monkeypatch: pytest
     monkeypatch.setattr(registry.current_platform, "device_type", lambda: "npu")
 
     text_cls = registry.get_model_class("glm5_next")
+    assert registry.get_model_class("glm5_next_text") is text_cls
     vl_cls = registry.get_model_class("glm5_next_vl")
 
     assert text_cls.__name__ == "Glm5NextForCausalLM"

@@ -19,15 +19,19 @@ limitations under the License.
 
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include <type_traits>
 #include <utility>
 
 #include "common/metrics.h"
+#include "core/distributed_runtime/distributed_virtual_memory_coordinator.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/parallel_config.h"
+#include "core/framework/config/speculative_config.h"
 #include "core/framework/eplb/eplb_controller.h"
 #include "core/kv_cache/layout/kv_cache_estimation.h"
+#include "core/kv_cache/layout/vmm_kv_cache_layout.h"
 #include "framework/speculative/mtp_utils.h"
 #include "llm_engine.h"
 #include "util/utils.h"
@@ -76,6 +80,9 @@ SpeculativeEngineBase<TargetEngine>::SpeculativeEngineBase(
         .enable_speculative_decode(/*enable_speculative_decode=*/false)
         .enable_graph(/*enable_graph=*/false)
         .is_draft_engine(true);
+    if (KVCacheConfig::get_instance().enable_vmm_kvcache()) {
+      draft_engine_options.model_id(options_.model_id() + "::mtp_draft");
+    }
     draft_engine_ = std::make_unique<LLMEngine>(draft_engine_options,
                                                 distributed_worker_manager_);
   }
@@ -122,12 +129,19 @@ bool SpeculativeEngineBase<TargetEngine>::init_model(
 
   model_args_ = engine_->model_args();
 
-  if ((KVCacheConfig::get_instance().enable_vmm_kvcache() ||
-       LoadConfig::get_instance().enable_vmm_weights()) &&
+  if (LoadConfig::get_instance().enable_vmm_weights() &&
       draft_engine_ != nullptr && !should_skip_external_draft_kv_cache()) {
-    LOG(ERROR) << "Virtual memory does not support an external speculative "
-                  "draft engine because target and draft would register the "
-                  "same model_id.";
+    LOG(ERROR) << "Virtual weight memory does not support an external "
+                  "speculative draft engine.";
+    return false;
+  }
+  if (KVCacheConfig::get_instance().enable_vmm_kvcache() &&
+      draft_engine_ != nullptr &&
+      (!SpeculativeConfig::is_mtp_algorithm(options_.speculative_algorithm()) ||
+       should_skip_external_draft_kv_cache() || options_.enable_disagg_pd() ||
+       options_.instance_role() != InstanceRole::DEFAULT)) {
+    LOG(ERROR) << "Virtual KV cache supports co-located MTP target and draft "
+                  "engines only; embedded Eagle3 and PD are unsupported.";
     return false;
   }
 
@@ -172,15 +186,24 @@ bool SpeculativeEngineBase<TargetEngine>::init_model(
 template <typename TargetEngine>
 bool SpeculativeEngineBase<TargetEngine>::allocate_kv_cache(
     std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator) {
-  KVCacheCapacity target_kv_cache_cap = engine_->estimate_kv_cache_capacity();
-  const auto allocate_target_cache =
-      [this, &transfer_coordinator](const KVCacheCapacity& capacity) {
-        if constexpr (std::is_same_v<TargetEngine, LLMEngine>) {
-          return engine_->allocate_kv_cache(capacity, transfer_coordinator);
-        } else {
-          return engine_->allocate_kv_cache(capacity);
-        }
-      };
+  const bool shared_vmm = KVCacheConfig::get_instance().enable_vmm_kvcache() &&
+                          use_draft_engine_ &&
+                          !should_skip_external_draft_kv_cache();
+  KVCacheCapacity target_kv_cache_cap =
+      engine_->estimate_kv_cache_capacity(!shared_vmm);
+  std::optional<VmmKVCacheLayout> shared_vmm_layout;
+  const auto allocate_target_cache = [this,
+                                      &transfer_coordinator,
+                                      shared_vmm,
+                                      &shared_vmm_layout](
+                                         const KVCacheCapacity& capacity) {
+    const VmmKVCacheLayout* layout = shared_vmm ? &*shared_vmm_layout : nullptr;
+    if constexpr (std::is_same_v<TargetEngine, LLMEngine>) {
+      return engine_->allocate_kv_cache(capacity, transfer_coordinator, layout);
+    } else {
+      return engine_->allocate_kv_cache(capacity, layout);
+    }
+  };
 
   if (!use_draft_engine_) {
     return allocate_target_cache(target_kv_cache_cap);
@@ -194,7 +217,45 @@ bool SpeculativeEngineBase<TargetEngine>::allocate_kv_cache(
   }
 
   KVCacheCapacity draft_kv_cache_cap =
-      draft_engine_->estimate_kv_cache_capacity();
+      draft_engine_->estimate_kv_cache_capacity(!shared_vmm);
+
+  int64_t shared_vmm_blocks = 0;
+  if (shared_vmm) {
+    shared_vmm_layout.emplace(target_kv_cache_cap,
+                              engine_->model_args(),
+                              engine_->dp_local_tp_size_,
+                              dtype_);
+    const int64_t draft_world_size = options_.enable_mtp_draft_body_tp1()
+                                         ? 1
+                                         : draft_engine_->dp_local_tp_size_;
+    VmmKVCacheLayout draft_layout(draft_kv_cache_cap,
+                                  draft_engine_->model_args(),
+                                  draft_world_size,
+                                  draft_engine_->dtype_,
+                                  /*is_draft_engine=*/true);
+    shared_vmm_layout->append(std::move(draft_layout));
+    const int64_t reserved_state_bytes =
+        target_kv_cache_cap.linear_cache_size_in_bytes() +
+        draft_kv_cache_cap.linear_cache_size_in_bytes();
+    auto& coordinator = DistributedVirtualMemoryCoordinator::get_instance();
+    coordinator.prepare_kv_cache_pool(
+        engine_->options_,
+        engine_->dp_local_tp_size_,
+        engine_->worker_clients_.size(),
+        reserved_state_bytes,
+        /*is_multimodal=*/std::is_same_v<TargetEngine, VLMEngine>);
+    const KVCacheConfig& config = KVCacheConfig::get_instance();
+    const size_t total_pages = coordinator.get_num_total_phy_pages();
+    const int64_t pool_bytes =
+        static_cast<int64_t>(total_pages) * config.phy_page_granularity_size();
+    const size_t n_blocks = shared_vmm_layout->block_capacity(
+        total_pages, config.phy_page_granularity_size());
+    shared_vmm_blocks = static_cast<int64_t>(n_blocks);
+    // Report the combined budget, while paged K/V block capacity depends only
+    // on the pool. Persistent states have already been reserved outside it.
+    target_kv_cache_cap.cache_size_in_bytes(pool_bytes + reserved_state_bytes);
+    draft_kv_cache_cap.cache_size_in_bytes(pool_bytes + reserved_state_bytes);
+  }
 
   if (target_kv_cache_cap.c4_count() > 0 ||
       target_kv_cache_cap.c128_count() > 0) {
@@ -222,7 +283,8 @@ bool SpeculativeEngineBase<TargetEngine>::allocate_kv_cache(
   // Target and draft run on the same device list, so they share a common KV
   // cache budget.
   const int64_t n_blocks =
-      calculate_kv_cache(target_kv_cache_cap, draft_kv_cache_cap);
+      shared_vmm ? shared_vmm_blocks
+                 : calculate_kv_cache(target_kv_cache_cap, draft_kv_cache_cap);
   CHECK_GT(n_blocks, 0) << "no memory for kv cache";
 
   // allocate kv cache

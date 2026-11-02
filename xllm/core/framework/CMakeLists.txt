@@ -28,8 +28,7 @@ add_subdirectory(eplb)
 add_subdirectory(dit_cache)
 add_subdirectory(speculative)
 
-# Factory orchestration may query WorkerClient and virtual memory, while
-# :kv_cache_block and :kv_cache_estimation avoid runtime manager dependencies.
+# Manager construction uses the shared VMM allocator backend.
 cc_library(
   NAME
     kv_cache_manager_factory
@@ -41,10 +40,4 @@ cc_library(
     :block
     :kv_cache
     :distributed_virtual_memory_coordinator
-    :common
-    :config
-    :runtime
-    :util
-    Folly::folly
-    :models
 )

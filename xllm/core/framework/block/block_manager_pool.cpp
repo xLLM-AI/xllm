@@ -168,7 +168,6 @@ int32_t BlockManagerPool::get_manager_with_max_available_blocks() const {
     }
   }
 
-  CHECK(!candidate_indices.empty());
   if (candidate_indices.size() == 1) {
     return static_cast<int32_t>(candidate_indices.front());
   }
@@ -283,7 +282,6 @@ bool BlockManagerPool::allocate(Sequence* sequence, size_t num_tokens) {
 
 bool BlockManagerPool::exceeds_total_capacity(Sequence* sequence,
                                               size_t num_tokens) const {
-  DCHECK(sequence != nullptr);
   if (sequence == nullptr || block_managers_.empty()) {
     return false;
   }
@@ -328,7 +326,6 @@ bool BlockManagerPool::exceeds_total_capacity(
 
   bool can_aggregate = !options_.enable_prefix_cache();
   for (const auto& [sequence, num_tokens] : reservations) {
-    DCHECK(sequence != nullptr);
     if (sequence == nullptr) {
       return false;
     }
@@ -501,7 +498,7 @@ void BlockManagerPool::cache(Sequence* sequence) {
   }
   int32_t dp_rank = get_dp_rank(sequence);
   static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get())
-      ->cache_for_sequence(sequence);
+      ->cache_full_blocks_for_sequence(sequence);
 }
 
 void BlockManagerPool::cache(Sequence* sequence, size_t num_tokens) {
@@ -511,7 +508,7 @@ void BlockManagerPool::cache(Sequence* sequence, size_t num_tokens) {
   }
   int32_t dp_rank = get_dp_rank(sequence);
   // Fan out the in-batch publish to the prefix leaf (KV); the composite no-ops
-  // for shapes without a prefix-capable KV leaf (DSV4 / virtual memory).
+  // for shapes without a prefix-capable KV leaf (DSV4).
   static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get())
       ->cache_for_sequence(sequence, num_tokens);
 }

@@ -23,6 +23,7 @@ limitations under the License.
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -36,20 +37,30 @@ class VirtualKVCacheMemoryRegistry final {
  public:
   void init(const torch::Device& device, size_t page_size);
 
-  std::vector<torch::Tensor> create_k_tensors(const std::string& model_id,
-                                              const std::vector<int64_t>& dims,
-                                              torch::ScalarType dtype,
-                                              int64_t num_layers);
-  std::vector<torch::Tensor> create_v_tensors(const std::string& model_id,
-                                              const std::vector<int64_t>& dims,
-                                              torch::ScalarType dtype,
-                                              int64_t num_layers);
+  std::vector<torch::Tensor> create_k_tensors(
+      const std::string& model_id,
+      const std::vector<int64_t>& dims,
+      torch::ScalarType dtype,
+      int64_t num_layers,
+      const std::vector<bool>& layer_owned = {});
+  std::vector<torch::Tensor> create_v_tensors(
+      const std::string& model_id,
+      const std::vector<int64_t>& dims,
+      torch::ScalarType dtype,
+      int64_t num_layers,
+      const std::vector<bool>& layer_owned = {});
   std::vector<torch::Tensor> create_index_tensors(
       const std::string& model_id,
       const std::vector<int64_t>& dims,
       torch::ScalarType dtype,
       int64_t num_layers,
       const std::vector<bool>& layer_owned = {});
+
+  // Bind before mapping any member. All members share logical block IDs and
+  // are mapped in one physical-page reservation; transfer queries remain local
+  // to each member. The group ID must also be one of its members.
+  bool bind_mapping_group(const std::string& group_id,
+                          std::vector<std::string> member_ids);
 
   bool can_prepare_mapping(const std::string& model_id,
                            const std::vector<offset_t>& offsets) const;
@@ -70,15 +81,26 @@ class VirtualKVCacheMemoryRegistry final {
       int64_t block_id,
       size_t block_size) const;
 
+  // Erasing a group member releases the complete mapping group.
   void erase(const std::string& model_id);
   void clear();
 
  private:
+  bool collect_page_targets(
+      const std::string& model_id,
+      const std::vector<offset_t>& offsets,
+      std::vector<std::pair<MappedVirtualMemoryRegion*, offset_t>>& targets)
+      const;
+  void mark_mapping_started(const std::string& model_id);
+
   mutable std::mutex mutex_;
   bool initialized_ = false;
   torch::Device device_{torch::kCPU};
   size_t page_size_ = 0;
   std::unordered_map<std::string, VirtualKVCacheMemoryRegions> regions_;
+  std::unordered_map<std::string, std::vector<std::string>> mapping_groups_;
+  std::unordered_map<std::string, std::string> member_groups_;
+  std::unordered_set<std::string> mapping_started_;
 };
 
 }  // namespace xllm

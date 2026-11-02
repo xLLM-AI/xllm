@@ -38,6 +38,88 @@ _OUTPUT_RTOL = 0.02
 _OUTPUT_ATOL = 1e-3
 
 
+@pytest.mark.parametrize("rows", [1, 5], ids=["draft-step", "draft-prefix"])
+@torch.inference_mode()
+def test_ordinary_draft_graph_reads_growing_kv_prefix(rows: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    from xllm.python.attention.backend import LayerCache
+    from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend
+    from xllm.python.attention.paged_kv_metadata import build_row_aligned_paged_kv_metadata
+    from xllm.python.layers.attention import Attention
+    from xllm.python.model_executor.runners.decode_acl_graph import DecodeAclGraphRunner
+
+    monkeypatch.setattr("xllm.python.model_executor.runners.acl_graph._GRAPH_POOL", None)
+    device = torch.device("npu:0")
+    heads, kv_heads, dimension, page_size, capacity = 4, 2, 64, 128, 4096
+    backend = NpuPagedAttentionBackend(heads, kv_heads, dimension, dimension**-0.5, 0, False, device, torch.bfloat16)
+    key = torch.zeros(33, page_size, kv_heads, dimension, device=device, dtype=torch.bfloat16)
+    values_host = torch.arange(33 * page_size, dtype=torch.float32) / 2048
+    values_host = values_host.view(33, page_size, 1, 1).expand(33, page_size, kv_heads, dimension)
+    value = values_host.contiguous().to(device=device, dtype=key.dtype)
+    caches = [LayerCache(key=key, value=value)]
+    backend.bind_kv_caches(caches)
+    attention = Attention(heads, kv_heads, dimension, dimension**-0.5, 0, 0)
+    query = torch.zeros(rows, heads * dimension, device=device, dtype=key.dtype)
+    projected = torch.zeros(rows, kv_heads * dimension, device=device, dtype=key.dtype)
+
+    class _DraftAttention(torch.nn.Module):
+        def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+            return attention(query, projected, projected)
+
+    runner = DecodeAclGraphRunner(
+        _DraftAttention(),
+        backend,
+        device,
+        rows,
+        capacity,
+        is_spec_draft=True,
+        enable_graph_mode_decode_no_padding=True,
+        device_kv_lengths=True,
+    )
+    runner.bind_layer_caches(caches)
+    tokens = torch.zeros(rows, dtype=torch.int32, device=device)
+    table = torch.arange(1, 33, dtype=torch.int32, device=device).expand(rows, -1).contiguous()
+
+    def _metadata_for(length: int) -> SimpleNamespace:
+        lengths = list(range(length, length + rows))
+        indptr, indices, last_page = build_row_aligned_paged_kv_metadata(table, lengths, page_size)
+        return SimpleNamespace(
+            is_prefill=False,
+            is_chunked_prefill=False,
+            is_spec_verify=False,
+            expanded_decode_metadata=None,
+            block_table=table,
+            kv_seq_lens=torch.tensor(lengths, dtype=torch.int32, device=device),
+            kv_seq_lens_host_values=lengths,
+            kv_cu_seq_lens=None,
+            q_seq_lens=torch.ones(rows, dtype=torch.int32, device=device),
+            q_cu_seq_lens=torch.arange(rows + 1, dtype=torch.int32, device=device),
+            q_cu_seq_lens_host_values=list(range(rows + 1)),
+            paged_kv_indptr=indptr,
+            paged_kv_indices=indices,
+            paged_kv_last_page_len=last_page,
+            slot_mapping=torch.full((rows,), -1, dtype=torch.int32, device=device),
+            linear_state_indices=None,
+        )
+
+    runner.warmup(tokens, tokens, _metadata_for(8), is_graph_warmup=True)
+    # With zero queries and keys, attention must average the entire live
+    # prefix. This distinguishes a frozen short capture bound from the mask.
+    for length in (129, 1875, 7, 1987):
+        metadata = _metadata_for(length)
+        decoded = runner.prepare_execution(tokens, metadata)
+        assert decoded is not None
+        graph_key = runner.warmup(tokens, tokens, metadata, decode_metadata=decoded)
+        actual = runner.execute(tokens, tokens, metadata, graph_key=graph_key, decode_metadata=decoded)
+        expected = (
+            torch.tensor(
+                [(page_size + (live_length - 1) / 2) / 2048 for live_length in metadata.kv_seq_lens_host_values]
+            )
+            .view(rows, 1)
+            .expand(rows, heads * dimension)
+        )
+        torch.testing.assert_close(actual.cpu().float(), expected, rtol=1e-2, atol=2e-3)
+
+
 @pytest.mark.parametrize("policy", ["dspark", "dspark_causal", "dflash2"])
 @pytest.mark.parametrize("kv_heads,dimension", [(4, 64), (1, 128)])
 @pytest.mark.parametrize("graph", [False, True])

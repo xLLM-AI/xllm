@@ -258,17 +258,17 @@ rank 0 再连接这些地址，派发内存操作。这套注册服务独立于 
 配置 ratio 要求的空闲比例和执行余量。因此池外显存释放后，可扩张到超过启动槽位数。
 固定 VMM 及原有物理 cache 保持正数默认 ratio 和固定容量。
 
-进入服务前，弹性 VMM 在每个 DP rank 预热长序列及宽 batch 的 prefill，并覆盖配置的
-decode 并发；该模式不能关闭启动时的 graph warmup。预热形状按 block 向上取整后的
-KV 占用必须能放入配置容量，否则启动明确报错。worker 执行采样和分配检查在原生
-NPU/CUDA/ILU/MUSA caching allocator 提供统计时，使用其历史最大保留量与当前
+弹性 VMM 遵循已配置的 graph 或 eager 预热行为，不增加 VMM 专用预热。物理页按需
+增长，受当前空闲显存、已观察到的执行峰值及显式 reserve 约束。worker 在执行期间
+持续采样。原生 NPU/CUDA/ILU/MUSA caching allocator 提供统计时，分配检查使用其
+历史最大保留量与当前
 保留量的差值作为恢复余量，再加上 `vmm_memory_reserve_bytes`。已驻留的 cache
 已经计入 driver 已用显存；cache 释放后仍保留恢复空间。池外显存释放后若执行产生
 更大峰值，预留会相应提高；本地记录的峰值不会随外部统计重置而降低。其他 allocator
 后端保留“driver 空闲字节 + 池已提交字节”的保守最低水位策略，这可能同时预留
 池外释放的显存。上述检查无法预测未观测的执行形状，以及绕过 caching allocator
 直接分配的 SDK buffer；这些额外余量需要根据设备实测配置。显式 reserve 在启动
-预热前也生效。
+阶段也生效。
 
 请求准入和 DP 选择取目标 worker 的最小实时容量，并受共享预留账本约束；实际
 映射在创建物理页前及发布前复核设备预算，检查失败时释放未发布的 handle，已有

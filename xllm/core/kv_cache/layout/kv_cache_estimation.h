@@ -39,7 +39,7 @@ struct KVCacheMemorySnapshot {
   int64_t total_memory = 0;
 };
 
-// Runtime facts collected by the factory; budgeting stays in the estimator.
+// Runtime memory observations; budgeting stays in the estimator.
 struct KVCacheEstimateContext {
   torch::ScalarType dtype = torch::kBFloat16;
   int64_t world_size = 1;

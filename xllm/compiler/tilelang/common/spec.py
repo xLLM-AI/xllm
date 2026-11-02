@@ -119,10 +119,6 @@ class KernelSpec:
         definitions: list[str] = []
 
         for macro_name, context_key in self.compile_definitions.items():
-            if context_key not in context:
-                raise KeyError(
-                    f"compile_definitions references unknown context key {context_key!r} for macro {macro_name!r}"
-                )
             definitions.append(f"{macro_name}={context[context_key]}")
 
         return definitions

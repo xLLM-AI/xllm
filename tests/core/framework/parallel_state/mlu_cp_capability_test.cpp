@@ -72,7 +72,7 @@ TEST(MluCpCapabilityTest, AcceptsOrthogonalDeepseekV4TargetAndSuffix) {
                    .has_value());
 }
 
-TEST(MluCpCapabilityTest, SupportsGlmPcpAndRejectsDcpAndLegacyDraftTargets) {
+TEST(MluCpCapabilityTest, SupportsGlmPcpDcpAndRejectsLegacyDraftTargets) {
   constexpr int32_t kWorldSize = 8;
   const Options options = make_cp_options(kWorldSize);
   Options glm_options = options;
@@ -86,10 +86,14 @@ TEST(MluCpCapabilityTest, SupportsGlmPcpAndRejectsDcpAndLegacyDraftTargets) {
                    .has_value());
 
   ParallelConfig::get_instance().kv_split_size(kWorldSize);
-  EXPECT_TRUE(validate_context_parallel_config(
-                  glm_options, EngineType::LLM, "glm_moe_dsa", kWorldSize)
-                  .has_value());
+  EXPECT_FALSE(validate_context_parallel_config(
+                   glm_options, EngineType::LLM, "glm_moe_dsa", kWorldSize)
+                   .has_value());
   ParallelConfig::get_instance().kv_split_size(2);
+  EXPECT_FALSE(validate_context_parallel_config(
+                   glm_options, EngineType::LLM, "glm_moe_dsa", kWorldSize)
+                   .has_value());
+  ParallelConfig::get_instance().kv_split_size(4);
   EXPECT_TRUE(validate_context_parallel_config(
                   glm_options, EngineType::LLM, "glm_moe_dsa", kWorldSize)
                   .has_value());

@@ -20,11 +20,13 @@ limitations under the License.
 #include <mutex>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "common/macros.h"
 #include "core/kv_cache/block/block_manager.h"
 #include "core/kv_cache/block/virtual_kv_cache_page_state.h"
+#include "core/kv_cache/prefix/prefix_cache.h"
 #include "core/kv_cache/storage/vmm_kv_page_allocator.h"
 
 namespace xllm {
@@ -43,7 +45,7 @@ namespace xllm {
  * - Uses an injected VmmKVPageAllocator for physical page management
  * - Maps blocks to virtual pages
  * - Supports reserved blocks for pre-allocation
- * - Does NOT support prefix cache (prefix cache disabled)
+ * - Retains shared prefix blocks until LRU eviction releases their pages
  */
 class VmmKVBlockManager final : public BlockManager {
  public:
@@ -70,20 +72,17 @@ class VmmKVBlockManager final : public BlockManager {
   // implements this directly.
   std::optional<std::vector<Block>> allocate_for_sequence(
       Sequence* seq,
-      size_t num_tokens) override;
-  std::optional<std::vector<Block>> allocate_for_sequence(
-      Sequence* seq,
       KVCacheState& kv_state,
       size_t num_tokens) override;
 
-  // Allocate shared blocks (prefix cache not supported)
+  // Match shared prefix blocks without changing their virtual addresses.
   std::vector<Block> allocate_shared(
       const Slice<int32_t>& token_ids,
       const Slice<Block>& existed_shared_blocks = {},
       const MMData& mm_data = MMData(),
       const Slice<XXH3Key>& block_hashes = {}) override;
 
-  // Cache blocks (prefix cache not supported)
+  // Retain completed prefix blocks.
   void cache(const Slice<int32_t>& token_ids,
              std::vector<Block>& blocks,
              size_t existed_shared_blocks_num = 0,
@@ -91,8 +90,7 @@ class VmmKVBlockManager final : public BlockManager {
              const Slice<XXH3Key>& block_hashes = {}) override;
   void cache(const std::vector<Block>& blocks) override;
 
-  // Get number of blocks in prefix cache (always 0, not supported)
-  size_t num_blocks_in_prefix_cache() const override { return 0; }
+  size_t num_blocks_in_prefix_cache() const override;
 
   // Get number of free blocks
   size_t num_free_blocks() const override;
@@ -183,6 +181,15 @@ class VmmKVBlockManager final : public BlockManager {
 
   // Padding block id (block 0, reserved for padding)
   std::optional<int32_t> padding_block_;
+
+  // Logically released blocks remain mapped while the prefix cache owns them.
+  // Exclude them from active usage so admission can reach the eviction path.
+  std::unordered_set<int32_t> inactive_blocks_;
+
+  std::unique_ptr<PrefixCache> prefix_cache_;
+
+  // Acquire before mtx_: eviction destroys Blocks and re-enters free().
+  mutable std::mutex prefix_cache_mtx_;
 
   // Mutex for thread safety
   mutable std::mutex mtx_;

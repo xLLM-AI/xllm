@@ -30,16 +30,31 @@ class VmmKVTensorAllocator final : public KVCacheTensorAllocator {
   VmmKVTensorAllocator(VirtualKVCacheMemoryRegistry& registry,
                        std::string model_id,
                        int64_t num_layers,
-                       std::vector<bool> index_layer_owned)
+                       std::vector<bool> index_layer_owned,
+                       std::vector<bool> kv_layer_owned)
       : registry_(registry),
         model_id_(std::move(model_id)),
         num_layers_(num_layers),
-        index_layer_owned_(std::move(index_layer_owned)) {
+        index_layer_owned_(std::move(index_layer_owned)),
+        kv_layer_owned_(std::move(kv_layer_owned)) {
     CHECK(!model_id_.empty());
     CHECK_GT(num_layers_, 0);
     CHECK(index_layer_owned_.empty() ||
           index_layer_owned_.size() == static_cast<size_t>(num_layers_))
         << "INDEX cache ownership mask must match num_layers";
+    CHECK(kv_layer_owned_.empty() ||
+          kv_layer_owned_.size() == static_cast<size_t>(num_layers_))
+        << "KV cache ownership mask must match num_layers";
+    if (!kv_layer_owned_.empty()) {
+      if (index_layer_owned_.empty()) {
+        index_layer_owned_ = kv_layer_owned_;
+      } else {
+        for (size_t layer = 0; layer < kv_layer_owned_.size(); ++layer) {
+          index_layer_owned_[layer] =
+              index_layer_owned_[layer] && kv_layer_owned_[layer];
+        }
+      }
+    }
   }
 
   torch::Tensor allocate(KVCacheTensorRole role,
@@ -57,11 +72,11 @@ class VmmKVTensorAllocator final : public KVCacheTensorAllocator {
                                                           : next_index_layer_;
     if (tensors.empty()) {
       if (role == KVCacheTensorRole::KEY) {
-        tensors =
-            registry_.create_k_tensors(model_id_, shape, dtype, num_layers_);
+        tensors = registry_.create_k_tensors(
+            model_id_, shape, dtype, num_layers_, kv_layer_owned_);
       } else if (role == KVCacheTensorRole::VALUE) {
-        tensors =
-            registry_.create_v_tensors(model_id_, shape, dtype, num_layers_);
+        tensors = registry_.create_v_tensors(
+            model_id_, shape, dtype, num_layers_, kv_layer_owned_);
       } else {
         tensors = registry_.create_index_tensors(
             model_id_, shape, dtype, num_layers_, index_layer_owned_);
@@ -84,6 +99,7 @@ class VmmKVTensorAllocator final : public KVCacheTensorAllocator {
   std::string model_id_;
   int64_t num_layers_;
   std::vector<bool> index_layer_owned_;
+  std::vector<bool> kv_layer_owned_;
   size_t next_k_layer_ = 0;
   size_t next_v_layer_ = 0;
   size_t next_index_layer_ = 0;
@@ -98,9 +114,13 @@ std::shared_ptr<KVCacheTensorAllocator> create_vmm_kv_tensor_allocator(
     VirtualKVCacheMemoryRegistry& registry,
     std::string model_id,
     int64_t num_layers,
-    std::vector<bool> index_layer_owned) {
-  return std::make_shared<VmmKVTensorAllocator>(
-      registry, std::move(model_id), num_layers, std::move(index_layer_owned));
+    std::vector<bool> index_layer_owned,
+    std::vector<bool> kv_layer_owned) {
+  return std::make_shared<VmmKVTensorAllocator>(registry,
+                                                std::move(model_id),
+                                                num_layers,
+                                                std::move(index_layer_owned),
+                                                std::move(kv_layer_owned));
 }
 
 }  // namespace xllm

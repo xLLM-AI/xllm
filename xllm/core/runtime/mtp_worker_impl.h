@@ -21,6 +21,7 @@ limitations under the License.
 #include <mutex>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -69,6 +70,9 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
 
   ::xllm::Status create_task_pipeline(
       std::unique_ptr<TaskExecutionPipeline>& output) override;
+  bool uses_worker_task_pipeline() const override {
+    return std::is_same_v<TargetInput, VlmForwardInput>;
+  }
 
   std::tuple<int64_t, int64_t> estimate_kv_cache_capacity() override;
 
@@ -122,9 +126,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
                                 int32_t num_speculative_tokens,
                                 const std::vector<uint8_t>& invalid_draft);
 
-  // Hook for algorithm-specific draft output post-processing during decode.
-  virtual void process_draft_sample_output(SampleOutput& /*sample_output*/) {}
-
   virtual void check_draft_input_embedding(const torch::Tensor& /*embedding*/,
                                            const std::string& /*phase*/) const {
   }
@@ -159,6 +160,7 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   // FlashInfer batch-decode read-before-write race on the bonus token.
   bool use_chunked_prefill_spec_verify_path() const;
   bool uses_embedded_eagle3_draft() const;
+  bool requires_full_target_replay() const override;
   // Multiaxis RoPE positions can include a prompt-dependent offset and do not
   // identify the corresponding KV cache length.
   bool positions_are_decoupled_from_kv_length() const;
@@ -321,6 +323,12 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
       mtp_async::CombinedDraftExecutionPath::UNSUPPORTED;
   mtp_async::DraftPrefixPolicy draft_prefix_policy_ =
       mtp_async::DraftPrefixPolicy::TAIL_REPAIR;
+  struct DraftContextReplayPolicy {
+    bool full_target_replay;
+    int32_t target_expansion_width;
+    int32_t draft_position_offset;
+  };
+  std::optional<DraftContextReplayPolicy> draft_context_replay_policy_;
 
 #if defined(USE_NPU)
   // Stable-address sources consumed by the target ACL graph's leading input

@@ -62,6 +62,7 @@ class RequestPriorityQueue {
  public:
   using Comparator = std::function<bool(const std::shared_ptr<Request>&,
                                         const std::shared_ptr<Request>&)>;
+  using Predicate = std::function<bool(std::shared_ptr<Request>)>;
 
   class Iterator {
     std::unique_ptr<BaseIterator> itr_;
@@ -85,6 +86,7 @@ class RequestPriorityQueue {
   virtual void push(std::shared_ptr<Request> req, bool if_back) = 0;
   virtual void pop_top() = 0;
   virtual void pop_back() = 0;
+  virtual void erase_if(const Predicate& predicate) = 0;
   virtual std::shared_ptr<Request> top() const = 0;
   virtual std::shared_ptr<Request> back() const = 0;
   virtual bool empty() const = 0;
@@ -119,6 +121,7 @@ class HeapQueue final : public RequestPriorityQueue {
   }
   void pop_top() override { queue_.pop(); }
   void pop_back() override { NOT_IMPLEMENTED(); }
+  void erase_if(const Predicate&) override { NOT_IMPLEMENTED(); }
   std::shared_ptr<Request> top() const override { return queue_.top(); }
   std::shared_ptr<Request> back() const override {
     NOT_IMPLEMENTED();
@@ -172,6 +175,9 @@ class SetQueue final : public RequestPriorityQueue {
   }
   void pop_top() override { queue_.erase(queue_.begin()); }
   void pop_back() override { queue_.erase(std::prev(queue_.end())); }
+  void erase_if(const Predicate& predicate) override {
+    std::erase_if(queue_, predicate);
+  }
   std::shared_ptr<Request> top() const override { return *queue_.begin(); }
   std::shared_ptr<Request> back() const override { return *queue_.rbegin(); }
   bool empty() const override { return queue_.empty(); }
@@ -225,6 +231,9 @@ class DequeQueue final : public RequestPriorityQueue {
 
   void pop_top() override { queue_.pop_front(); }
   void pop_back() override { queue_.pop_back(); }
+  void erase_if(const Predicate& predicate) override {
+    std::erase_if(queue_, predicate);
+  }
   std::shared_ptr<Request> top() const override { return queue_.front(); }
   std::shared_ptr<Request> back() const override { return queue_.back(); }
   bool empty() const override { return queue_.empty(); }

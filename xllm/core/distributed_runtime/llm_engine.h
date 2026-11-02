@@ -45,6 +45,7 @@ class EplbController;
 class KVCacheTransferCoordinatorBase;
 class ModelLoader;
 class DraftStepController;
+class VmmKVCacheLayout;
 
 class LLMEngine : public Engine {
  public:
@@ -103,10 +104,12 @@ class LLMEngine : public Engine {
   void setup_workers(const runtime::Options& options);
   bool init_model(MasterStatus master_status,
                   const ModelInitCallback& prepare_model);
-  KVCacheCapacity estimate_kv_cache_capacity();
+  KVCacheCapacity estimate_kv_cache_capacity(
+      bool initialize_virtual_memory = true);
   bool allocate_kv_cache(
       const KVCacheCapacity& kv_cache_cap,
-      std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator);
+      std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator,
+      const VmmKVCacheLayout* shared_vmm_layout = nullptr);
   void process_group_test();
 
  protected:

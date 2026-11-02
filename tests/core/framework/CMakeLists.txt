@@ -22,6 +22,7 @@ add_subdirectory(tokenizer)
 cc_test(
   NAME
     hf_model_loader_test
+  CPU_ONLY
   SRCS
     hf_model_loader_test.cpp
   DEPS
@@ -33,6 +34,7 @@ cc_test(
 cc_test(
   NAME
     causal_lm_test
+  CPU_ONLY
   SRCS
     causal_lm_test.cpp
   DEPS

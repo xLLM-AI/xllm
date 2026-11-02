@@ -58,10 +58,6 @@ class KVCacheImpl {
   virtual torch::Tensor get_compress_index_state() const;
   virtual std::vector<KVCacheTensor> get_cache_tensors() const;
 
-  // Host prefix cache extraction by block type. Unlike the device-side
-  // build_block_type_tensor_map in the transfer layer, this carries no
-  // device-pool discriminator guards: a per-type host cache holds exactly the
-  // tensors for that block type.
   virtual BlockTypeTensorMap get_block_type_tensors(BlockType type) const;
 
   virtual bool empty() const;

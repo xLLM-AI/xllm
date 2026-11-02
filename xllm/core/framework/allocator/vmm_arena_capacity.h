@@ -35,7 +35,8 @@ inline VmmArenaCapacity calculate_vmm_arena_capacity(
     bool max_memory_utilization_configured,
     bool lazy,
     int64_t max_cache_size,
-    int64_t reserved_memory_bytes = 0) {
+    int64_t reserved_memory_bytes = 0,
+    int64_t resident_memory_bytes = 0) {
   VmmArenaCapacity capacity;
   const bool has_ratio_cap = !lazy || (max_memory_utilization_configured &&
                                        max_memory_utilization > 0.0);
@@ -55,11 +56,17 @@ inline VmmArenaCapacity calculate_vmm_arena_capacity(
   // the startup pool and future elastic growth.
   capacity.maximum_bytes -= reserved_memory_bytes;
   capacity.growth_memory_reserve_bytes += reserved_memory_bytes;
+  // Persistent states are allocated before KV pages are mapped. They reduce
+  // the arena and startup budget, but their resident bytes already reduce
+  // live free memory and must not remain a physical-growth reserve.
+  capacity.maximum_bytes -= resident_memory_bytes;
   capacity.maximum_bytes = std::max<int64_t>(capacity.maximum_bytes, 0);
   capacity.initial_bytes =
       std::min(capacity.maximum_bytes,
-               std::max<int64_t>(
-                   available_memory - capacity.growth_memory_reserve_bytes, 0));
+               std::max<int64_t>(available_memory -
+                                     capacity.growth_memory_reserve_bytes -
+                                     resident_memory_bytes,
+                                 0));
   return capacity;
 }
 

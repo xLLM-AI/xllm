@@ -262,9 +262,9 @@ TEST(CompositeMtpPrefixCacheTest, InBatchBudgetDoesNotPublishUnwrittenKv) {
 
 TEST(CompositeMtpPrefixCacheTest, RealAppendPublishesEverySafeBlock) {
   for (size_t boundary : {16u, 32u}) {
-    for (int32_t path : {0, 1, 2}) {
+    for (const bool full_flush : {false, true}) {
       SCOPED_TRACE(boundary);
-      SCOPED_TRACE(path);
+      SCOPED_TRACE(full_flush);
       CompositeBlockManager manager(build_composite_leaves(mtp_options()),
                                     mtp_options());
       std::vector<int32_t> tokens(boundary, 7);
@@ -276,16 +276,10 @@ TEST(CompositeMtpPrefixCacheTest, RealAppendPublishesEverySafeBlock) {
       ASSERT_EQ(sequence.hash_tokens(BlockHasherType::MTP_TEXT).size(),
                 boundary + 1);
       auto publish = [&]() {
-        switch (path) {
-          case 0:
-            manager.cache_full_blocks_for_sequence(&sequence);
-            break;
-          case 1:
-            manager.cache_for_sequence(&sequence);
-            break;
-          case 2:
-            manager.cache_for_sequence(&sequence, boundary);
-            break;
+        if (full_flush) {
+          manager.cache_full_blocks_for_sequence(&sequence);
+        } else {
+          manager.cache_for_sequence(&sequence, boundary);
         }
       };
       publish();
@@ -343,7 +337,7 @@ TEST(CompositeMtpPrefixCacheTest, PublicationPathsShareAnIdempotentCursor) {
 
   // Neither a repeated publication nor the final flush publishes the tail.
   manager.cache_for_sequence(&sequence, tokens.size());
-  manager.cache_for_sequence(&sequence);
+  manager.cache_full_blocks_for_sequence(&sequence);
   EXPECT_EQ(sequence.kv_state().num_cached_blocks(BlockType::KV), 2u);
   EXPECT_EQ(manager.num_blocks_in_prefix_cache(), 2u);
 
@@ -361,7 +355,7 @@ TEST(CompositeMtpPrefixCacheTest, FinalFlushKeepsPublishCursorAtSafeBoundary) {
   Sequence sequence = make_mtp_sequence(tokens);
   ASSERT_TRUE(manager.allocate_sequence(&sequence, tokens.size()));
   sequence.kv_state().set_kv_cache_tokens_num(32);
-  manager.cache_for_sequence(&sequence);
+  manager.cache_full_blocks_for_sequence(&sequence);
   EXPECT_EQ(sequence.kv_state().num_cached_blocks(BlockType::KV), 1u);
   manager.deallocate_for_sequence(&sequence);
 }
@@ -371,17 +365,17 @@ TEST(CompositeMtpPrefixCacheTest, NeverPublishesOverlapPlaceholderIdentity) {
                                 mtp_options());
   Sequence sequence = make_mtp_sequence(std::vector<int32_t>(16, 7),
                                         /*overlap=*/true);
-  ASSERT_TRUE(manager.allocate_sequence(&sequence, /*num_tokens=*/18));
+  ASSERT_TRUE(manager.allocate_sequence(&sequence, 18));
   sequence.kv_state().set_kv_cache_tokens_num(16);
   sequence.append_token(Token(-1));
-  manager.cache_for_sequence(&sequence);
+  manager.cache_full_blocks_for_sequence(&sequence);
   EXPECT_EQ(sequence.kv_state().num_cached_blocks(BlockType::KV), 0u);
   EXPECT_EQ(manager.num_blocks_in_prefix_cache(), 0u);
 
   sequence.update_last_step_token(Token(8), /*token_offset=*/0);
   ASSERT_EQ(sequence.kv_cache_tokens_num(), 16u);
   ASSERT_EQ(sequence.hash_tokens(BlockHasherType::MTP_TEXT).size(), 17u);
-  manager.cache_for_sequence(&sequence);
+  manager.cache_full_blocks_for_sequence(&sequence);
   EXPECT_EQ(sequence.kv_state().num_cached_blocks(BlockType::KV), 1u);
   manager.deallocate_for_sequence(&sequence);
 }

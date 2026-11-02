@@ -921,5 +921,242 @@ TEST_F(VirtualIndexedKVCacheMemoryRegistryTest,
   registry_.erase("indexed");
 }
 
+TEST_F(VirtualMLAKVCacheMemoryRegistryTest,
+       MappingGroupUsesCommonGeometryForEveryMember) {
+  const int64_t blocks_per_group = static_cast<int64_t>(page_size_);
+  const std::vector<int64_t> target_shape{2 * blocks_per_group, 2};
+  const std::vector<int64_t> draft_shape{2 * blocks_per_group, 1};
+  auto target_keys = registry_.create_k_tensors(
+      "target", target_shape, torch::kUInt8, /*num_layers=*/1);
+  auto target_values = registry_.create_v_tensors(
+      "target", target_shape, torch::kUInt8, /*num_layers=*/1);
+  auto draft_keys = registry_.create_k_tensors(
+      "draft", draft_shape, torch::kUInt8, /*num_layers=*/1);
+  auto draft_values = registry_.create_v_tensors(
+      "draft", draft_shape, torch::kUInt8, /*num_layers=*/1);
+  ASSERT_TRUE(registry_.bind_mapping_group("target", {"target", "draft"}));
+  EXPECT_TRUE(registry_.bind_mapping_group("target", {"draft", "target"}));
+  EXPECT_TRUE(registry_.can_prepare_mapping("target", {0}));
+  EXPECT_TRUE(registry_.can_prepare_mapping("draft", {0}));
+  ASSERT_TRUE(registry_.map("target", {0, static_cast<offset_t>(page_size_)}));
+  auto& pool = PhysicalPagePool::get_instance();
+  EXPECT_EQ(pool.num_available(), pool_pages() - 12);
+  EXPECT_FALSE(registry_.can_prepare_mapping("draft", {0}));
+  EXPECT_TRUE(registry_.map("draft", {0}));
+  EXPECT_EQ(pool.num_available(), pool_pages() - 12);
+
+  for (int64_t block : {int64_t{0},
+                        blocks_per_group - 1,
+                        blocks_per_group,
+                        2 * blocks_per_group - 1}) {
+    fill_block_pattern(target_keys.front(), block, /*pattern=*/17);
+    fill_block_pattern(target_values.front(), block, /*pattern=*/27);
+    fill_block_pattern(draft_keys.front(), block, /*pattern=*/37);
+    fill_block_pattern(draft_values.front(), block, /*pattern=*/47);
+    const auto target_offsets =
+        registry_.get_global_offsets_for_block("target", /*layer_id=*/0, block);
+    const auto draft_offsets =
+        registry_.get_global_offsets_for_block("draft", /*layer_id=*/0, block);
+    ASSERT_TRUE(target_offsets.has_value());
+    ASSERT_TRUE(draft_offsets.has_value());
+    EXPECT_NE(target_offsets->k_offset, draft_offsets->k_offset);
+    EXPECT_NE(target_offsets->v_offset, draft_offsets->v_offset);
+    expect_block_pattern(target_keys.front(), block, /*pattern=*/17);
+    expect_block_pattern(target_values.front(), block, /*pattern=*/27);
+    expect_block_pattern(draft_keys.front(), block, /*pattern=*/37);
+    expect_block_pattern(draft_values.front(), block, /*pattern=*/47);
+  }
+
+  ASSERT_TRUE(registry_.unmap("draft", {0}));
+  EXPECT_EQ(pool.num_available(), pool_pages() - 6);
+  EXPECT_FALSE(registry_.get_global_offsets_for_block(
+      "target", /*layer_id=*/0, /*block_id=*/0));
+  EXPECT_FALSE(registry_.get_global_offsets_for_block(
+      "draft", /*layer_id=*/0, /*block_id=*/0));
+  expect_block_pattern(target_keys.front(), blocks_per_group, /*pattern=*/17);
+  expect_block_pattern(draft_keys.front(), blocks_per_group, /*pattern=*/37);
+  registry_.erase("target");
+  EXPECT_FALSE(registry_.num_layers("target"));
+  EXPECT_FALSE(registry_.num_layers("draft"));
+  EXPECT_EQ(pool.num_available(), pool_pages());
+}
+
+TEST_F(VirtualMLAKVCacheMemoryRegistryTest,
+       MappingGroupShortageRollsBackEveryMember) {
+  const int64_t blocks_per_group = static_cast<int64_t>(page_size_);
+  const std::vector<int64_t> target_shape{3 * blocks_per_group, 2};
+  const std::vector<int64_t> draft_shape{3 * blocks_per_group, 1};
+  registry_.create_k_tensors(
+      "target", target_shape, torch::kUInt8, /*num_layers=*/1);
+  registry_.create_v_tensors(
+      "target", target_shape, torch::kUInt8, /*num_layers=*/1);
+  registry_.create_k_tensors(
+      "draft", draft_shape, torch::kUInt8, /*num_layers=*/1);
+  registry_.create_v_tensors(
+      "draft", draft_shape, torch::kUInt8, /*num_layers=*/1);
+  create_model("busy", /*num_layers=*/1);
+  ASSERT_TRUE(registry_.bind_mapping_group("target", {"target", "draft"}));
+  ASSERT_TRUE(registry_.map("busy", {0}));
+  const auto busy_offsets = registry_.get_global_offsets_for_block(
+      "busy", /*layer_id=*/0, /*block_id=*/0);
+  const std::vector<offset_t> offsets{0,
+                                      static_cast<offset_t>(page_size_),
+                                      static_cast<offset_t>(2 * page_size_)};
+  auto& pool = PhysicalPagePool::get_instance();
+  EXPECT_FALSE(registry_.map("target", offsets));
+  EXPECT_EQ(pool.num_available(), pool_pages() - 2);
+  EXPECT_TRUE(registry_.can_prepare_mapping("target", offsets));
+  EXPECT_FALSE(registry_.get_global_offsets_for_block(
+      "target", /*layer_id=*/0, /*block_id=*/0));
+  EXPECT_FALSE(registry_.get_global_offsets_for_block(
+      "draft", /*layer_id=*/0, /*block_id=*/0));
+  const auto preserved_busy_offsets = registry_.get_global_offsets_for_block(
+      "busy", /*layer_id=*/0, /*block_id=*/0);
+  ASSERT_TRUE(busy_offsets.has_value());
+  ASSERT_TRUE(preserved_busy_offsets.has_value());
+  EXPECT_EQ(busy_offsets->k_offset, preserved_busy_offsets->k_offset);
+  EXPECT_EQ(busy_offsets->v_offset, preserved_busy_offsets->v_offset);
+  ASSERT_TRUE(registry_.unmap("target", offsets));
+  EXPECT_EQ(pool.num_available(), pool_pages() - 2);
+  ASSERT_TRUE(registry_.unmap("busy", {0}));
+  ASSERT_TRUE(registry_.map("target", offsets));
+  EXPECT_EQ(pool.num_available(), 0);
+  registry_.erase("draft");
+  EXPECT_EQ(pool.num_available(), pool_pages());
+}
+
+TEST_F(VirtualKVCacheMemoryRegistryTest,
+       MappingGroupsRejectMissingDuplicateAndAlreadyMappedMembers) {
+  create_model("target", /*num_layers=*/1);
+  create_model("draft", /*num_layers=*/1);
+  EXPECT_FALSE(registry_.bind_mapping_group("target", {}));
+  EXPECT_FALSE(registry_.bind_mapping_group("target", {"draft"}));
+  EXPECT_FALSE(registry_.bind_mapping_group("target", {"target", "target"}));
+  EXPECT_FALSE(registry_.bind_mapping_group("target", {"target", "missing"}));
+  ASSERT_TRUE(registry_.map("draft", {0}));
+  EXPECT_FALSE(registry_.bind_mapping_group("target", {"target", "draft"}));
+  ASSERT_TRUE(registry_.unmap("draft", {0}));
+  EXPECT_FALSE(registry_.bind_mapping_group("target", {"target", "draft"}));
+  registry_.erase("draft");
+  create_model("draft", /*num_layers=*/1);
+  ASSERT_TRUE(registry_.bind_mapping_group("target", {"target", "draft"}));
+  EXPECT_FALSE(registry_.bind_mapping_group("draft", {"target", "draft"}));
+  EXPECT_FALSE(registry_.bind_mapping_group("target", {"target"}));
+}
+
+TEST_F(VirtualIndexedKVCacheMemoryRegistryTest,
+       SparseKeyValueRegionsPreserveFullAttentionLayerIds) {
+  const int64_t blocks_per_group = static_cast<int64_t>(page_size_);
+  const std::vector<int64_t> shape{blocks_per_group, 1};
+  const std::vector<bool> layer_owned{false, true, false, true};
+  auto keys = registry_.create_k_tensors(
+      "hybrid", shape, torch::kUInt8, /*num_layers=*/4, layer_owned);
+  auto values = registry_.create_v_tensors(
+      "hybrid", shape, torch::kUInt8, /*num_layers=*/4, layer_owned);
+  ASSERT_EQ(keys.size(), layer_owned.size());
+  ASSERT_EQ(values.size(), layer_owned.size());
+  for (size_t layer = 0; layer < layer_owned.size(); ++layer) {
+    EXPECT_EQ(keys[layer].defined(), layer_owned[layer]);
+    EXPECT_EQ(values[layer].defined(), layer_owned[layer]);
+  }
+  ASSERT_TRUE(registry_.map("hybrid", {0}));
+  auto& pool = PhysicalPagePool::get_instance();
+  EXPECT_EQ(pool.num_available(), pool_pages() - 4);
+  for (int64_t layer : {int64_t{0}, int64_t{2}}) {
+    EXPECT_FALSE(registry_.get_global_offsets_for_block(
+        "hybrid", layer, /*block_id=*/0));
+    EXPECT_EQ(registry_.get_global_offsets_for_block(
+                  "hybrid", layer, /*block_id=*/0, /*block_size=*/1),
+              std::make_pair(UINT64_MAX, UINT64_MAX));
+  }
+  for (int64_t layer : {int64_t{1}, int64_t{3}}) {
+    fill_block_pattern(keys[layer], blocks_per_group - 1, /*pattern=*/61);
+    fill_block_pattern(values[layer], blocks_per_group - 1, /*pattern=*/71);
+    EXPECT_TRUE(registry_.get_global_offsets_for_block(
+        "hybrid", layer, blocks_per_group - 1));
+    expect_block_pattern(keys[layer], blocks_per_group - 1, /*pattern=*/61);
+    expect_block_pattern(values[layer], blocks_per_group - 1, /*pattern=*/71);
+  }
+  ASSERT_TRUE(registry_.unmap("hybrid", {0}));
+  EXPECT_EQ(pool.num_available(), pool_pages());
+}
+
+TEST_F(VirtualIndexedKVCacheMemoryRegistryTest,
+       TensorAllocatorSkipsLinearAttentionLayers) {
+  const std::vector<bool> kv_layer_owned{false, true, false, true};
+  auto allocator = create_vmm_kv_tensor_allocator(registry_,
+                                                  "hybrid",
+                                                  /*num_layers=*/4,
+                                                  /*index_layer_owned=*/{},
+                                                  kv_layer_owned);
+  const std::vector<int64_t> shape{
+      static_cast<int64_t>(page_size_ / sizeof(uint16_t)), 1};
+  std::vector<torch::Tensor> keys;
+  std::vector<torch::Tensor> values;
+  std::vector<torch::Tensor> indices;
+  keys.reserve(2);
+  values.reserve(2);
+  indices.reserve(2);
+  for (size_t index = 0; index < 2; ++index) {
+    keys.emplace_back(allocator->allocate(
+        KVCacheTensorRole::KEY, shape, torch::kBFloat16, device_));
+    values.emplace_back(allocator->allocate(
+        KVCacheTensorRole::VALUE, shape, torch::kBFloat16, device_));
+    indices.emplace_back(allocator->allocate(
+        KVCacheTensorRole::INDEX, shape, torch::kBFloat16, device_));
+  }
+  EXPECT_NE(keys[0].data_ptr(), keys[1].data_ptr());
+  EXPECT_NE(values[0].data_ptr(), values[1].data_ptr());
+  EXPECT_NE(indices[0].data_ptr(), indices[1].data_ptr());
+  ASSERT_TRUE(registry_.map("hybrid", {0}));
+  EXPECT_EQ(PhysicalPagePool::get_instance().num_available(), pool_pages() - 6);
+  for (size_t index = 0; index < keys.size(); ++index) {
+    fill_block_pattern(keys[index], /*block_id=*/0, /*pattern=*/81);
+    fill_block_pattern(values[index], /*block_id=*/0, /*pattern=*/91);
+    fill_block_pattern(indices[index], /*block_id=*/0, /*pattern=*/101);
+    expect_block_pattern(keys[index], /*block_id=*/0, /*pattern=*/81);
+    expect_block_pattern(values[index], /*block_id=*/0, /*pattern=*/91);
+    expect_block_pattern(indices[index], /*block_id=*/0, /*pattern=*/101);
+    const auto offsets = registry_.get_global_offsets_for_block(
+        "hybrid", static_cast<int64_t>(2 * index + 1), /*block_id=*/0);
+    ASSERT_TRUE(offsets.has_value());
+    EXPECT_TRUE(offsets->index_offset.has_value());
+  }
+  EXPECT_FALSE(registry_.get_global_offsets_for_block(
+      "hybrid", /*layer_id=*/0, /*block_id=*/0));
+  EXPECT_FALSE(registry_.get_global_offsets_for_block(
+      "hybrid", /*layer_id=*/2, /*block_id=*/0));
+}
+
+TEST_F(VirtualIndexedKVCacheMemoryRegistryTest,
+       TensorAllocatorRestrictsIndexToFullAttentionLayers) {
+  const std::vector<bool> kv_layer_owned{false, true, false, true};
+  const std::vector<bool> index_layer_owned{true, true, true, false};
+  auto allocator = create_vmm_kv_tensor_allocator(
+      registry_, "hybrid", /*num_layers=*/4, index_layer_owned, kv_layer_owned);
+  const std::vector<int64_t> shape{
+      static_cast<int64_t>(page_size_ / sizeof(uint16_t)), 1};
+  for (size_t index = 0; index < 2; ++index) {
+    allocator->allocate(
+        KVCacheTensorRole::KEY, shape, torch::kBFloat16, device_);
+    allocator->allocate(
+        KVCacheTensorRole::VALUE, shape, torch::kBFloat16, device_);
+  }
+  auto indices = allocator->allocate(
+      KVCacheTensorRole::INDEX, shape, torch::kBFloat16, device_);
+  ASSERT_TRUE(registry_.map("hybrid", {0}));
+  EXPECT_EQ(PhysicalPagePool::get_instance().num_available(), pool_pages() - 5);
+  fill_block_pattern(indices, /*block_id=*/0, /*pattern=*/111);
+  expect_block_pattern(indices, /*block_id=*/0, /*pattern=*/111);
+  const auto indexed_offsets = registry_.get_global_offsets_for_block(
+      "hybrid", /*layer_id=*/1, /*block_id=*/0);
+  ASSERT_TRUE(indexed_offsets.has_value());
+  EXPECT_TRUE(indexed_offsets->index_offset.has_value());
+  const auto non_indexed_offsets = registry_.get_global_offsets_for_block(
+      "hybrid", /*layer_id=*/3, /*block_id=*/0);
+  ASSERT_TRUE(non_indexed_offsets.has_value());
+  EXPECT_FALSE(non_indexed_offsets->index_offset.has_value());
+}
+
 }  // namespace
 }  // namespace xllm

@@ -3,6 +3,7 @@ include(cc_test)
 cc_test(
   NAME
     qwen3_5_gated_delta_net_indices_test
+  CPU_ONLY
   SRCS
     qwen3_5_gated_delta_net_indices_test.cpp
   DEPS
@@ -34,6 +35,7 @@ set_tests_properties(${_qwen3_5_gdn_tests} PROPERTIES RUN_SERIAL TRUE)
 cc_test(
   NAME
     deepseek_v4_eplb_load_utils_test
+  CPU_ONLY
   SRCS
     deepseek_v4_eplb_load_utils_test.cpp
   DEPS
@@ -72,6 +74,7 @@ target_link_options(npu_deepseek_v4_indexer_test PRIVATE
 cc_test(
   NAME
     deepseek_v4_eplb_test
+  CPU_ONLY
   SRCS
     deepseek_v4_eplb_test.cpp
   DEPS
@@ -132,5 +135,48 @@ cc_test(
     dcp_attention_test.cpp
   DEPS
     :npu_torch_layers
+    GTest::gtest_main
+)
+
+cc_library(
+  NAME
+    deepseek_v4_rotary_embedding_lib
+  HDRS
+    ${PROJECT_SOURCE_DIR}/xllm/core/layers/common/deepseek_v4_rotary_embedding.h
+    ${PROJECT_SOURCE_DIR}/xllm/core/layers/common/rotary_embedding_util.h
+  SRCS
+    ${PROJECT_SOURCE_DIR}/xllm/core/layers/common/deepseek_v4_rotary_embedding.cpp
+    ${PROJECT_SOURCE_DIR}/xllm/core/layers/common/rotary_embedding_util.cpp
+  INCLUDES
+    ${PROJECT_SOURCE_DIR}/xllm
+  DEPS
+    :platform
+    glog::glog
+    torch
+)
+
+cc_test(
+  NAME
+    deepseek_v4_rotary_embedding_test
+  CPU_ONLY
+  SRCS
+    deepseek_v4_rotary_embedding_tests.cpp
+  DEPS
+    :deepseek_v4_rotary_embedding_lib
+    torch
+    glog::glog
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
+    dflash2_grouped_conv_test
+  CPU_ONLY
+  SRCS
+    dflash2_grouped_conv_tests.cpp
+  DEPS
+    :common_layers
+    torch
+    glog::glog
     GTest::gtest_main
 )

@@ -729,6 +729,7 @@ class TestModelExecutorConstruction:
             enable_graph_mode_decode_no_padding=False,
             spec_verify_width=1,
             device_kv_lengths=False,
+            max_capture_tokens=None,
         )
 
     @patch("xllm.python.model_executor.runners.decode_acl_graph.DecodeAclGraphRunner")
@@ -791,6 +792,7 @@ class TestModelExecutorConstruction:
             enable_graph_mode_decode_no_padding=False,
             spec_verify_width=1,
             device_kv_lengths=False,
+            max_capture_tokens=None,
         )
 
 
@@ -1522,7 +1524,7 @@ def test_glm_non_mtp_cp_prefill_retains_sharded_kv_admission() -> None:
     )
 
 
-@pytest.mark.parametrize("model_type", ["glm5_next", "glm5_3_flash"])
+@pytest.mark.parametrize("model_type", ["glm5_next", "glm5_3_flash", "glm5_next_text"])
 def test_glm5_next_cp_admission_matches_runtime_constraints(model_type: str) -> None:
     config = _classify(
         {
@@ -1533,9 +1535,10 @@ def test_glm5_next_cp_admission_matches_runtime_constraints(model_type: str) -> 
         }
     )
     _validate_npu_cp_model_config(config, 1)
+    _validate_npu_cp_model_config({**config, "ep_size": 2, "dp_size": 2}, 1)
 
-    with pytest.raises(NotImplementedError, match="ep_size == 1"):
-        _validate_npu_cp_model_config({**config, "ep_size": 2}, 1)
+    with pytest.raises(NotImplementedError, match="ep_size >= 1"):
+        _validate_npu_cp_model_config({**config, "ep_size": 0}, 1)
     with pytest.raises(NotImplementedError, match="disaggregated PD"):
         _validate_npu_cp_model_config({**config, "enable_disagg_pd": True}, 1)
 
@@ -1998,6 +2001,63 @@ class TestExecuteRouting:
         assert torch.equal(result, torch.ones(4))
 
 
+def test_executor_admits_startup_graphs_and_runs_larger_serving_batches_eagerly() -> None:
+    backend = _PagedStubAttentionBackend()
+    model = _FakeModel(num_layers=1)
+    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
+        executor = ModelExecutor(model, {"python_graph_backend": "off"}, max_seqs_per_batch=4)
+    executor.bind_kv_caches([(torch.zeros(1), torch.zeros(1))])
+    executor.eager_runner = EagerRunner(model, backend, torch.device("cpu"))
+    runner = DecodeAclGraphRunner(
+        model,
+        backend,
+        torch.device("cpu"),
+        max_batch=4,
+        max_model_len=8,
+        enable_graph_mode_decode_no_padding=True,
+        device_kv_lengths=True,
+    )
+    executor.decode_graph_runner = runner
+
+    def _metadata(rows: int) -> SimpleNamespace:
+        return SimpleNamespace(
+            is_prefill=False,
+            is_chunked_prefill=False,
+            is_spec_verify=False,
+            block_table=torch.arange(1, rows + 1, dtype=torch.int32).reshape(rows, 1),
+            kv_seq_lens=torch.ones(rows, dtype=torch.int32),
+            kv_seq_lens_host_values=[1] * rows,
+            kv_cu_seq_lens=None,
+            q_cu_seq_lens=None,
+            paged_kv_indptr=torch.arange(rows + 1, dtype=torch.int32),
+            paged_kv_indices=torch.arange(1, rows + 1, dtype=torch.int32),
+            paged_kv_last_page_len=torch.ones(rows, dtype=torch.int32),
+            slot_mapping=torch.arange(rows, dtype=torch.int32),
+        )
+
+    def _prepare_entry(*_args: object, graph_key: tuple[object, ...], **_kwargs: object) -> None:
+        runner._graphs[graph_key] = AclGraphEntry()
+
+    tokens = torch.arange(2, dtype=torch.int32)
+    metadata = _metadata(2)
+    graph_output = tokens + 10
+    with (
+        patch.object(runner, "_prepare_graph_entry", side_effect=_prepare_entry) as capture,
+        patch.object(runner, "execute", return_value=graph_output) as replay,
+    ):
+        assert torch.equal(executor.execute(tokens, tokens, metadata, is_graph_warmup=True), graph_output)
+        captured_graphs = capture.call_count
+        assert captured_graphs > 0
+        assert torch.equal(executor.execute(tokens, tokens, metadata), graph_output)
+        assert not backend._prepared
+
+        larger_tokens = torch.arange(3, dtype=torch.int32)
+        assert torch.equal(executor.execute(larger_tokens, larger_tokens, _metadata(3)), larger_tokens)
+        assert backend._prepared
+        assert capture.call_count == captured_graphs
+        assert replay.call_count == 2
+
+
 @patch("xllm.python.model_executor.executor._create_attention_backend", return_value=StubAttentionBackend())
 @pytest.mark.parametrize("runner_type", [DecodeAclGraphRunner, BlockDraftAclGraphRunner])
 def test_serving_graph_log_excludes_eager_and_warmup(
@@ -2037,6 +2097,16 @@ def test_context_parallel_rejects_data_parallel_combination(_mock_create):
             {"cp_size": 2, "dp_size": 2, "python_graph_backend": "off"},
             max_seqs_per_batch=4,
         )
+
+
+@patch("xllm.python.model_executor.executor._create_attention_backend", return_value=StubAttentionBackend())
+def test_context_parallel_accepts_glm5_next_data_parallel_combination(_mock_create):
+    executor = ModelExecutor(
+        _FakeModel(num_layers=1),
+        {"cp_size": 2, "dp_size": 2, "kv_split_size": 1, "model_type": "glm5_3_flash", "python_graph_backend": "off"},
+        max_seqs_per_batch=4,
+    )
+    assert executor.dp_size == 2
 
 
 @patch("xllm.python.model_executor.executor._create_attention_backend")

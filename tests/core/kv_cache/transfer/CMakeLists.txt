@@ -3,6 +3,7 @@ include(cc_test)
 cc_test(
   NAME
     host_kv_transfer_test
+  CPU_ONLY
   SRCS
     host_transfer/transfer_test.cpp
   DEPS
@@ -13,6 +14,7 @@ cc_test(
 cc_test(
   NAME
     push_route_test
+  CPU_ONLY
   SRCS
     push_route_test.cpp
   DEPS
@@ -23,6 +25,7 @@ cc_test(
 cc_test(
   NAME
     pd_topology_guard_test
+  CPU_ONLY
   SRCS
     pd_topology_guard_test.cpp
   DEPS
@@ -33,6 +36,7 @@ cc_test(
 cc_test(
   NAME
     kv_transfer_completion_test
+  CPU_ONLY
   SRCS
     kv_transfer_completion_test.cpp
   DEPS
@@ -43,6 +47,7 @@ cc_test(
 cc_test(
   NAME
     reshard_planner_test
+  CPU_ONLY
   SRCS
     reshard_planner_test.cpp
   DEPS
@@ -77,6 +82,7 @@ if(USE_NPU OR USE_MLU)
 cc_test(
   NAME
     kv_cache_store_test
+  CPU_ONLY
   SRCS
     kv_cache_store_test.cpp
   DEPS

@@ -33,6 +33,8 @@ limitations under the License.
 
 namespace xllm {
 
+class VmmKVCacheLayout;
+
 class VLMEngine : public Engine {
  public:
   // create an engine with the given devices
@@ -59,8 +61,10 @@ class VLMEngine : public Engine {
   template <typename TargetEngine>
   friend class SpeculativeEngineBase;
   bool init_model(MasterStatus master_status);
-  KVCacheCapacity estimate_kv_cache_capacity();
-  bool allocate_kv_cache(const KVCacheCapacity& kv_cache_cap);
+  KVCacheCapacity estimate_kv_cache_capacity(
+      bool initialize_virtual_memory = true);
+  bool allocate_kv_cache(const KVCacheCapacity& kv_cache_cap,
+                         const VmmKVCacheLayout* shared_vmm_layout = nullptr);
   void setup_workers(const runtime::Options& options);
   void process_group_test();
 
