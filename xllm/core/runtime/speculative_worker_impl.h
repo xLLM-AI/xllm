@@ -23,6 +23,7 @@ limitations under the License.
 #include <vector>
 
 #include "common/macros.h"
+#include "core/framework/parallel_state/process_group.h"
 #include "framework/sampling/sampling_params.h"
 #include "runtime/options.h"
 #include "runtime/worker_impl.h"
@@ -143,6 +144,51 @@ class SpeculativeWorkerImpl : public WorkerImpl {
   // prepare inputs for target model at Decode phase (validation).
   void prepare_validate_inputs(const TargetInput& inputs,
                                TargetInput& validate_inputs);
+
+  bool should_broadcast_spec_tokens(bool enable_spec_token_broadcast,
+                                    bool all_greedy_sample) const {
+    const bool use_orthogonal_cp_consensus =
+        parallel_args_.cp_size() > 1 && parallel_args_.tp_group_ != nullptr &&
+        parallel_args_.cp_group_ != nullptr &&
+        parallel_args_.cp_group_ != parallel_args_.tp_group_;
+    return use_orthogonal_cp_consensus ||
+           (enable_spec_token_broadcast && !all_greedy_sample);
+  }
+
+  // Speculative state is replicated across every model rank within one DP
+  // replica. With orthogonal CP x TP, tp_group_ covers only one CP shard,
+  // while cp_group_ connects the same TP rank across CP shards. Broadcast
+  // along both axes so every replica caches and consumes the same sampled
+  // token, without crossing into another DP replica through the world group.
+  void broadcast_spec_tokens(torch::Tensor& tokens) const {
+    ProcessGroup* tp_group = parallel_args_.tp_group_ != nullptr
+                                 ? parallel_args_.tp_group_
+                                 : parallel_args_.process_group_;
+    const bool use_orthogonal_cp_consensus =
+        parallel_args_.cp_size() > 1 && parallel_args_.tp_group_ != nullptr &&
+        parallel_args_.cp_group_ != nullptr &&
+        parallel_args_.cp_group_ != parallel_args_.tp_group_;
+    if (!use_orthogonal_cp_consensus) {
+      sync_sampling_tensor(tokens, tp_group);
+      return;
+    }
+
+    sync_sampling_tensor(tokens, parallel_args_.tp_group_);
+    sync_sampling_tensor(tokens, parallel_args_.cp_group_);
+  }
+
+  void finalize_output_on_stream(ForwardOutput& output,
+                                 Stream& stream,
+                                 bool allow_async) const {
+    if (allow_async) {
+      output.ready_event = stream.record_event_or_sync();
+      return;
+    }
+    const int32_t ret = stream.synchronize();
+    CHECK_EQ(ret, 0) << "failed to synchronize speculative compute stream, ret="
+                     << ret;
+    output.retained_inputs.clear();
+  }
 
  protected:
   // Target model worker

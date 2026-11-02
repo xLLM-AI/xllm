@@ -351,6 +351,7 @@ REGISTER_MODEL_ARGS(qwen3, [&] {
   LOAD_ARG_OR(max_window_layers, "max_window_layers", 28);
 
   LOAD_ARG_OR(markov_rank, "markov_rank", 0);
+  LOAD_ARG_OR(draft_vocab_size, "draft_vocab_size", 0);
   LOAD_ARG_OR(enable_confidence_head, "enable_confidence_head", false);
   LOAD_ARG_OR(
       confidence_head_with_markov, "confidence_head_with_markov", false);

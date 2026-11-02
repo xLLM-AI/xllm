@@ -126,9 +126,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
                                 int32_t num_speculative_tokens,
                                 const std::vector<uint8_t>& invalid_draft);
 
-  // Hook for algorithm-specific draft output post-processing during decode.
-  virtual void process_draft_sample_output(SampleOutput& /*sample_output*/) {}
-
   virtual void check_draft_input_embedding(const torch::Tensor& /*embedding*/,
                                            const std::string& /*phase*/) const {
   }

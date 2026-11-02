@@ -22,6 +22,7 @@ limitations under the License.
 #include <tuple>
 
 #include "core/framework/speculative/draft_proposal.h"
+#include "core/framework/speculative/draft_vocab_mapping.h"
 #include "runtime/speculative_worker_impl.h"
 
 namespace xllm {
@@ -105,6 +106,8 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
 
   std::unique_ptr<LLMWorkerImpl> draft_impl_;
   std::unique_ptr<EmbeddingCache> embedding_cache_;
+
+  DraftVocabMapping draft_vocab_;
 
   bool is_probabilistic_draft_ = false;
 };

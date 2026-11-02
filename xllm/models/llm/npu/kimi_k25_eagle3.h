@@ -45,10 +45,11 @@ REGISTER_MODEL_ARGS(kimi_k25_eagle3, [&] {
   });
   LOAD_ARG_OR(draft_vocab_size, "draft_vocab_size", 0);
   LOAD_ARG_OR_FUNC(vocab_size, "vocab_size", [&] {
-    return args->draft_vocab_size() > 0
-               ? args->draft_vocab_size()
-               : json.value_or<int64_t>("text_config.vocab_size", 163840);
+    return json.value_or<int64_t>("text_config.vocab_size", 163840);
   });
+  if (args->draft_vocab_size() > 0) {
+    args->vocab_size(args->draft_vocab_size());
+  }
   LOAD_ARG_OR_FUNC(hidden_size, "hidden_size", [&] {
     return json.value_or<int64_t>("draft_config.hidden_size", 7168);
   });

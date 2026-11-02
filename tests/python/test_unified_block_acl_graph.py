@@ -219,13 +219,13 @@ def _binding(rows: int, width: int, device: str, *, draft: bool) -> tuple:
     return ids, positions.flatten(), metadata
 
 
-class _ToyExecutor:
+class _ToyExecutor(torch.nn.Module):
     """Deterministic tensor computation through the real composite graph recipe."""
 
     def __init__(self, algorithm: str, device: str, *, target: bool = False) -> None:
+        super().__init__()
         self.target = target
         self.algorithm = algorithm
-        self.model = self
         self.attention_backend = SimpleNamespace(page_size=16)
         self.eager_runner = SimpleNamespace(device=torch.device(device), layer_caches=[])
         self.cache = torch.full((128, 2), -50.0, device=device)
@@ -234,6 +234,10 @@ class _ToyExecutor:
         self._target_mismatch = torch.tensor([[0, 1, 0], [0, 0, 0]], dtype=torch.int64, device=device)
         if algorithm == "dflash2" and not target:
             self.dflash2_candidates = self._candidates
+
+    @property
+    def model(self) -> torch.nn.Module:
+        return self
 
     def create_mtp_role_backends(self, count: int) -> tuple:
         return tuple(SimpleNamespace(page_size=16) for _ in range(count))

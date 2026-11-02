@@ -179,7 +179,7 @@ void Stream::record_event(StreamEvent& event) const {
 StreamEventPtr Stream::record_event_or_sync() const {
   StreamEventPtr event = record_event();
   if (event == nullptr) {
-    synchronize();
+    CHECK_EQ(synchronize(), 0) << "failed to synchronize stream";
   }
   return event;
 }
