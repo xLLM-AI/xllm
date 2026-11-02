@@ -955,6 +955,7 @@ class Glm5NextIndexer(nn.Module):
             block_table=fused_block_table.to(dtype=torch.int32).contiguous(),
             mask_mode=kernels.POOL_KEY_INDEXER_MASK_MODE,
             layout_k="PA_BBND",
+            sparse_indices_mode=1,
         )
 
         output_width = self.topk + (self.index_kpool - 1 if self.index_kpool_always_select_tail else 0)
