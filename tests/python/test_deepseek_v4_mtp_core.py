@@ -24,7 +24,37 @@ from xllm.python.model_executor.forward_context import ForwardContext, forward_c
 from xllm.python.model_executor.runners.acl_graph import StaticGraphAttentionMetadata
 from xllm.python.models import deepseek_v4, deepseek_v4_mtp
 from xllm.python.models.deepseek_v4 import DeepseekV4Model
-from xllm.python.models.deepseek_v4_mtp import DeepseekV4MtpLayer, DeepseekV4MtpModel
+from xllm.python.models.deepseek_v4_mtp import DeepseekV4MtpForCausalLM, DeepseekV4MtpLayer, DeepseekV4MtpModel
+
+
+def test_mtp_causal_lm_constructs_configured_compressed_attention() -> None:
+    model = DeepseekV4MtpForCausalLM(
+        {
+            "device": "cpu",
+            "dtype": "float32",
+            "hidden_size": 8,
+            "vocab_size": 16,
+            "n_layers": 2,
+            "num_nextn_predict_layers": 2,
+            "n_heads": 2,
+            "head_dim": 8,
+            "q_lora_rank": 4,
+            "qk_rope_head_dim": 4,
+            "o_lora_rank": 4,
+            "o_groups": 1,
+            "index_n_heads": 2,
+            "index_head_dim": 4,
+            "index_topk": 2,
+            "moe_intermediate_size": 8,
+            "first_k_dense_replace": 2,
+            "max_position_embeddings": 16,
+            "compress_ratios": [4, 128],
+        }
+    )
+
+    attention = [layer.self_attn for layer in model.model.layers]
+    assert [layer.indexer is not None for layer in attention] == [True, False]
+    assert all(hasattr(layer, "cmp_wkv") for layer in attention)
 
 
 def _fusion_layer() -> DeepseekV4MtpLayer:

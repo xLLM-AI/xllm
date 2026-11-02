@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 import torch
@@ -36,7 +37,6 @@ from xllm.python.models.deepseek_v4 import (
     _find_checkpoint_prefix,
     _require_checkpoint_key,
     _require_tensor,
-    _resolve_dsv4_moe_prefix,
 )
 from xllm.python.models.dspark import DSparkForCausalLMBase
 
@@ -220,53 +220,6 @@ class DeepseekV4DSparkForCausalLM(
             layer_synchronizer,
         )
 
-    def _load_dsv4_decoder_layer(
-        self,
-        loader: W8A8WeightLoader,
-        checkpoint_prefix: str,
-        parameter_prefix: str,
-        layer_id: int,
-    ) -> None:
-        """Load one draft decoder layer without requiring the target MTP model."""
-
-        def _w8a8(
-            checkpoint_module: str,
-            parameter_module: str,
-            shard_dims: dict[str, int] | None = None,
-        ) -> None:
-            load_w8a8_dynamic_projection(
-                loader,
-                checkpoint_module,
-                parameter_module,
-                shard_dims,
-                require_weight_and_scale=True,
-                fill_missing_offset=True,
-                description=f"DeepSeek-V4 DSpark {checkpoint_module}",
-            )
-
-        attention, _ = self._load_dsv4_attention(
-            loader,
-            checkpoint_prefix=checkpoint_prefix,
-            parameter_prefix=parameter_prefix,
-            layer_id=layer_id,
-            w8a8_loader=_w8a8,
-        )
-        attention.process_weights_after_loading()
-
-        mlp = self.model.layers[layer_id].mlp
-        if hasattr(mlp, "experts_w13"):
-            moe_prefix = _resolve_dsv4_moe_prefix(loader, checkpoint_prefix, "DeepSeek-V4 DSpark")
-            self._load_dsv4_moe(
-                loader,
-                checkpoint_prefix,
-                parameter_prefix,
-                layer_id,
-                moe_prefix,
-            )
-            mlp.process_weights_after_loading()
-        else:
-            self._load_dsv4_dense_mlp(loader, checkpoint_prefix, parameter_prefix, mlp)
-
     @staticmethod
     def _load_quant_aware_linear(
         loader: W8A8WeightLoader,
@@ -338,6 +291,14 @@ class DeepseekV4DSparkForCausalLM(
                 checkpoint_prefix,
                 f"model.layers.{layer_id}.",
                 layer_id,
+                description="DeepSeek-V4 DSpark",
+                w8a8_loader=partial(
+                    load_w8a8_dynamic_projection,
+                    loader,
+                    require_weight_and_scale=True,
+                    fill_missing_offset=True,
+                    description="DeepSeek-V4 DSpark",
+                ),
             )
 
         first_prefix = layer_prefixes[0]

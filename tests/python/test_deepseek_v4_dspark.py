@@ -16,11 +16,14 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 import pytest
 import torch
 import torch.nn as nn
 
 from xllm.python import registry
+from xllm.python.model_loader.module_loaders import load_w8a8_dynamic_projection
 from xllm.python.model_platform_support import is_deepseek_v4_model
 from xllm.python.models import deepseek_v4_dspark, deepseek_v32
 from xllm.python.models.deepseek_v4_dspark import (
@@ -253,7 +256,7 @@ def test_dspark_loads_dedicated_vocab_and_heads(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(
         DeepseekV4DSparkForCausalLM,
         "_load_dsv4_decoder_layer",
-        lambda self, loader, checkpoint_prefix, parameter_prefix, layer_id: None,
+        lambda self, loader, checkpoint_prefix, parameter_prefix, layer_id, **kwargs: None,
     )
     tensors: dict[str, torch.Tensor] = {}
     for layer_id in range(3):
@@ -300,7 +303,7 @@ def test_dspark_loads_quantized_main_projection_and_head(monkeypatch: pytest.Mon
     monkeypatch.setattr(
         DeepseekV4DSparkForCausalLM,
         "_load_dsv4_decoder_layer",
-        lambda self, loader, checkpoint_prefix, parameter_prefix, layer_id: None,
+        lambda self, loader, checkpoint_prefix, parameter_prefix, layer_id, **kwargs: None,
     )
     monkeypatch.setattr(
         deepseek_v32.kernels,
@@ -366,6 +369,14 @@ def test_dspark_attention_loader_requires_weight_scale() -> None:
             "mtp.0.",
             "model.layers.0.",
             layer_id=0,
+            description="DeepSeek-V4 DSpark",
+            w8a8_loader=partial(
+                load_w8a8_dynamic_projection,
+                loader,
+                require_weight_and_scale=True,
+                fill_missing_offset=True,
+                description="DeepSeek-V4 DSpark",
+            ),
         )
 
 
@@ -380,7 +391,7 @@ def test_dspark_moe_loader_receives_explicit_checkpoint_prefix(
     monkeypatch.setattr(
         model,
         "_load_dsv4_attention",
-        lambda *args, **kwargs: (attention, None),
+        lambda *args, **kwargs: attention,
     )
     monkeypatch.setattr(attention, "process_weights_after_loading", lambda: None)
     monkeypatch.setattr(
@@ -395,6 +406,7 @@ def test_dspark_moe_loader_receives_explicit_checkpoint_prefix(
         "mtp.0.",
         "model.layers.0.",
         layer_id=0,
+        description="DeepSeek-V4 DSpark",
     )
 
     assert calls == [
@@ -451,7 +463,7 @@ def test_dspark_loads_moe_from_mlp_checkpoint_prefix(
     monkeypatch.setattr(
         model,
         "_load_dsv4_attention",
-        lambda *args, **kwargs: (attention, "mtp.0.attn."),
+        lambda *args, **kwargs: attention,
     )
     monkeypatch.setattr(attention, "process_weights_after_loading", lambda: None)
     monkeypatch.setattr(mlp, "process_weights_after_loading", lambda: None)
@@ -461,6 +473,7 @@ def test_dspark_loads_moe_from_mlp_checkpoint_prefix(
         "mtp.0.",
         "model.layers.0.",
         layer_id=0,
+        description="DeepSeek-V4 DSpark",
     )
 
     torch.testing.assert_close(mlp.gate.weight, tensors[source_prefix + "gate.weight"])
