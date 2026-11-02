@@ -54,20 +54,31 @@ Store 初始化时会按 `BlockType` 构建索引。每个支持该 `BlockType` 
 
 ```text
 非 MLA：xllm-kv-v3 + model_id + key_component + tp_size
-                   + block_type + tp_rank + schema_hash + block_hash
+                   + block_type + tp_rank + 可选 KV 分片字段
+                   + schema_hash + block_hash
 
 MLA：   xllm-kv-v3 + model_id + key_component + mla
-                   + block_type + schema_hash + block_hash
+                   + block_type + 可选 KV 分片字段
+                   + schema_hash + block_hash
 ```
 
 - `model_id` 是主模型命名空间，主模型和 Draft 模型对象都会包含它。
 - `key_component` 区分主模型、投机算法和 Draft 模型来源。
-- 非 MLA 缓存使用 `tp_size`、`tp_rank` 和 `block_type` 隔离不同并行拓扑、Rank 和缓存类型。
-- MLA KV Cache 在 Rank 间复制，因此对象键使用固定的 `mla` 标识，不包含 `tp_size` 或 `tp_rank`。所有 Rank 使用相同的对象键读取缓存，只有 TP Rank 0 写入 Mooncake Store。
+- 非 MLA 缓存使用 `tp_size`、`tp_rank`、`kv_split_size`、`kv_split_rank` 和 `block_type` 隔离不同并行拓扑、Rank、KV 分片和缓存类型。
+- MLA KV Cache 使用固定的 `mla` 标识，不包含 `tp_size` 或 `tp_rank`；仅在 `kv_split_size > 1` 时追加 `kv:<kv_split_size>:<kv_split_rank>:` 字段，未分片时保留既有对象键格式。`kv_split_size=1` 时 KV 未切分，所有 Rank 读取同一个对象且只有 TP Rank 0 写入；启用 KV split 后，每个 KV split rank 读写自己的 Store 对象。
+- `kv_split_size` 是有效的 KV 分片数，`kv_split_rank` 是当前 Worker 所属的分片编号。配置为 `0` 时有效值沿用 `cp_size`；配置为 `1` 时不切分 KV，`kv_split_rank` 固定为 `0`。
 - `schema_hash` 由单个 Block 内各 Tensor 的 role、dtype 和除 Host Block 数量之外的 shape 生成。因此只调整 `host_blocks_factor` 不会改变对象键，但缓存布局变化会自动进入新的键空间。
 - `block_hash` 是对应 Token Block 的 128 位内容哈希。
 
-Store API 以“逻辑 Block”为上层接口，以“缓存域对象”为物理请求。只有同一 Worker 内该逻辑 Block 对应的**全部物理对象**都存在且读取成功，该 Worker 才会报告命中；随后 `PrefetchResult` 还会对所有 TP Rank 的结果执行逻辑 AND。也就是说，最终可发布的 Store 命中必须同时满足“所有缓存域完整”和“所有 TP Rank 完整”。
+Store API 以“逻辑 Block”为上层接口，以“缓存域对象”为物理请求。只有同一 Worker 内该逻辑 Block 对应的**全部物理对象**都存在且读取成功，该 Worker 才会报告命中；随后 `PrefetchResult` 会对参与本次预取的本地 Worker group 执行逻辑 AND。启用 KV split 时，这个 group 按 DP、CP、TP 和 KV split 拓扑确定，不应把不同 `kv_split_rank` 的对象混为同一份缓存。最终可发布的 Store 命中必须同时满足“所有缓存域完整”和“所需 Worker group 完整”。
+
+### KV split 与 Store
+
+KV split 与 Mooncake Store 可以同时启用。Store 会把每个逻辑 Block 按 `kv_split_size` 和 `kv_split_rank` 映射到独立的对象键，因此不同 KV shard 不会互相覆盖，也不会把一个 shard 的命中误判为完整 KV。Prefill 从 Store 恢复时，只有本次请求所需的 Worker group 和所有注册缓存域都命中，Block 才会挂载到 Host Prefix Cache。
+
+对 MLA 缓存，未切分时仍由 TP Rank 0 负责写入公共对象；切分后每个 KV shard 由一个副本负责写入自己的对象。对投机解码，主模型和 Draft 模型仍然使用独立的 `key_component`，每个缓存域还会分别按 KV split 拆分，因此缺少任一 Draft shard 都会使对应逻辑 Block 视为未命中。
+
+`kv_split_size` 的可用取值由后端、模型和并行拓扑校验决定。常规 CP 配置下，`K` 应为正数并满足该后端要求（通常为 `cp_size` 的因子）；`0` 表示沿用 `cp_size`，`1` 表示不切分。如果期望不同实例复用同一批 Store 对象，它们必须使用一致的模型身份、缓存布局和有效 split 拓扑；不同 split 拓扑会进入不同键空间，不会交叉命中。
 
 ## Block 流转
 
@@ -82,7 +93,7 @@ sequenceDiagram
     participant BlockMgr as HierarchyBlockManagerPool
     participant Engine as Engine / RemoteWorker
     participant Result as PrefetchResult / Async Callback
-    participant Worker as TP Workers
+    participant Worker as Local Workers
     participant Store as Mooncake Store
     participant Host as Host Cache
     participant HBM as Device HBM
@@ -101,7 +112,7 @@ sequenceDiagram
         BlockMgr->>Engine: prefetch_from_storage(G2H infos)
         Engine->>Result: 创建 worker_count × block_count 结果矩阵
 
-        par 所有 TP Rank 并行
+        par 本次预取涉及的所有本地 Worker 并行
             Engine->>Worker: PrefetchFromStorage(G2H batch)
             Worker->>Worker: 按 BlockType 展开各缓存域物理对象
             Worker->>Store: BatchIsExist(all physical keys)
@@ -119,8 +130,8 @@ sequenceDiagram
             BlockMgr->>Result: completed()?
         end
         BlockMgr->>Result: merged_hits()
-        Result-->>BlockMgr: 所有 TP bitmap 逻辑 AND
-        Note right of Result: 单 Rank 内要求全部缓存域命中<br/>跨 Rank 再执行逻辑 AND
+        Result-->>BlockMgr: 所有 Worker bitmap 逻辑 AND
+        Note right of Result: 单 Worker 内要求全部缓存域命中<br/>跨所需 Worker group 再执行逻辑 AND
 
         BlockMgr->>Host: 释放 Store miss 的目标 blocks
         BlockMgr->>Host: cache Store hit blocks
@@ -147,7 +158,7 @@ sequenceDiagram
         BlockMgr->>Engine: enqueue TransferBlocks(H2D, batch_id)
         BlockMgr-->>Scheduler: 调度返回，不等待 H2D copy 完成
 
-        par 所有 TP Rank 并行
+        par 所有参与执行的本地 Worker 并行
             Engine->>Worker: 注册 H2D transfer
             Worker->>Worker: 创建 LayerSynchronizer(batch_id)
             Worker->>Worker: 异步调度 load_from_host
@@ -181,14 +192,14 @@ sequenceDiagram
         Scheduler->>BlockMgr: transfer_offload_blocks()
         BlockMgr->>Engine: 异步提交 D2H2G plans
 
-        par 所有 TP Rank 并行
+        par 所有参与执行的本地 Worker 并行
             Engine->>Worker: TransferKvBlocks(D2H2G)
             Worker->>Worker: copy stream wait_stream(compute stream)
             Worker->>HBM: 读取 Device KV
             HBM-->>Worker: Device KV
             Worker->>Host: 各缓存域 D2H copy 并同步 copy stream
             Worker->>Worker: 展开物理对象并按 key 去重
-            opt 非 MLA 或 MLA TP Rank 0
+            opt 非 MLA、未切分 MLA 的 TP Rank 0，或切分 MLA 的各 shard owner
                 Worker->>Store: BatchIsExist(unique keys)
 
                 alt Store key 不存在
@@ -199,20 +210,19 @@ sequenceDiagram
                 end
             end
 
-            Note right of Worker: MLA 非 0 Rank 跳过 Store 写入
             Worker->>Worker: 全部物理对象成功才记为 logical put success
             Note right of Worker: BatchPut 部分失败只记录日志<br/>不会改变 D2H 成功状态
             Worker-->>Engine: D2H 成功时返回完整 block count
         end
 
-        Engine-->>Result: 所有 TP futures
-        Result->>Result: 校验每个 TP 返回 expected block count
+        Engine-->>Result: 所有 Worker futures
+        Result->>Result: 校验每个 Worker 返回 expected block count
         Result-->>BlockMgr: future callback(copy_ok)
         BlockMgr->>HBM: 无论 copy_ok 与否都释放 offload 持有的 Device blocks
 
-        alt 所有 TP Rank 的 D2H 都成功
+        alt 所有参与 Worker 的 D2H 都成功
             BlockMgr->>Host: 发布 Host Prefix Cache
-        else 任一 TP Rank D2H 失败
+        else 任一参与 Worker 的 D2H 失败
             BlockMgr->>Host: 不发布 Host Prefix，并释放预留 Host blocks
         end
 
@@ -244,7 +254,7 @@ sequenceDiagram
     participant Client as Client / xLLM Service
     participant PSched as PREFILL Scheduler
     participant PBlock as PREFILL BlockManager
-    participant PWorker as PREFILL TP Workers
+    participant PWorker as PREFILL Workers
     participant Store as Mooncake Store
     participant Host as PREFILL Host Cache
     participant PHBM as PREFILL HBM
@@ -258,12 +268,12 @@ sequenceDiagram
 
         Client->>PSched: add_request(request, decode_address)
         PSched->>PBlock: prefetch_from_storage(request)
-        PBlock->>PWorker: TP 并行 PrefetchFromStorage(G2H)
+        PBlock->>PWorker: 本地 Worker group 并行 PrefetchFromStorage(G2H)
         PWorker->>Store: BatchIsExist / BatchGet
         Store-->>PWorker: KV 写入预注册 Host tensors
         PWorker->>Host: 命中的 Host blocks 已填充
         PWorker-->>PBlock: rank-local bitmap（经 PrefetchResult）
-        PBlock->>PBlock: TP 逻辑 AND 并 mount Host state
+        PBlock->>PBlock: Worker group 逻辑 AND 并 mount Host state
         PSched->>PBlock: 轮询 update_prefetch_result
         PBlock-->>PSched: Prefetch 完成
         PSched->>PSched: enqueue_ready_request → PREFILL dispatch queue
@@ -485,6 +495,15 @@ mooncake_client \
   --store_local_hostname=127.0.0.1:12345
 ```
 
+如果 Prefill 使用的后端和模型支持 KV split，可以在同一命令中加入例如下面的并行配置：
+
+```text
+--cp_size=4 \
+--kv_split_size=2
+```
+
+这里的 `2` 表示 KV 在两个 split rank 间分片；每个 shard 会使用独立的 Store key。Decode 端是否启用 KV split 以及使用何种拓扑，取决于其自身的后端和模型支持情况；若拓扑不同，将使用不同的 Store key 空间。
+
 Decode 使用不同的本地 endpoint 区间开启 Store：
 
 ```bash
@@ -505,11 +524,11 @@ Decode 使用不同的本地 endpoint 区间开启 Store：
 
 ## 正确性与运维说明
 
-- Store 命中采用两级完整性判定：单个 Worker 内必须成功读取该 `BlockType` 的全部注册缓存域，随后所有 TP Rank 还必须同时报告命中，Block 才会 mount 到 Host Prefix Cache。
-- `prefetch_timeout` 到期后会停止下发新的预取 batch，但请求准入仍会等待所有在途 TP batch 完成；`0` 表示无限等待。
+- Store 命中采用两级完整性判定：单个 Worker 内必须成功读取该 `BlockType` 的全部注册缓存域，随后参与本次预取的 Worker group 还必须同时报告命中，Block 才会 mount 到 Host Prefix Cache。启用 KV split 时，不同 `kv_split_rank` 的 shard 必须分别命中。
+- `prefetch_timeout` 到期后会停止下发新的预取 batch，但请求准入仍会等待所有在途 Worker batch 完成；`0` 表示无限等待。
 - H2D registration 不等待物理拷贝。Forward 通过 `batch_id` 挂载 `LayerSynchronizer`，并在对应计算层等待；Scheduler 不会收到 H2D-complete 回调。
-- 写回时，Host Prefix 是否发布只取决于所有 TP Rank 的 D2H 是否成功。Mooncake `BatchPut` 是 best-effort；Store 部分写入失败只记录日志，不会使已经成功的 Host copy 失效。
+- 写回时，Host Prefix 是否发布只取决于所有参与 Worker 的 D2H 是否成功。Mooncake `BatchPut` 是 best-effort；Store 部分写入失败只记录日志，不会使已经成功的 Host copy 失效。
 - `BatchPut` 会先按对象键去重并执行 `BatchIsExist`。已存在对象不会被覆盖，同一批次内的重复对象也只写一次；一个逻辑 Block 只有在全部缓存域对象已存在或写入成功时才计入 Store 成功数。
-- 当前 Store 键版本为 `xllm-kv-v3`。Host Block 容量不参与 `schema_hash`，但 Tensor role、dtype、单 Block shape、TP 拓扑、`BlockType` 和缓存域身份都会隔离键空间。
+- 当前 Store 键版本为 `xllm-kv-v3`。Host Block 容量不参与 `schema_hash`，但 Tensor role、dtype、单 Block shape、TP 拓扑、`kv_split_size`、`kv_split_rank`、`BlockType` 和缓存域身份都会隔离键空间。有效 `kv_split_size` 为 1 时保持既有 Store 对象兼容；大于 1 时使用独立键空间。默认值 0 沿用 `cp_size`，因此 `cp_size > 1` 的实例升级后不会命中旧的未分片键，将重新写入分片对象。
 - 权重内容本身不会自动进入对象键。每次主模型或 Draft 模型权重、量化方式或其他可能影响 KV 数值的配置变化时，都应使用新的 `model_id`，并按需轮换或清理旧 Store namespace。
 - PD 场景中，Prefill 和 Decode 都需要开启 Store。两个角色会复用 Worker Rank，并且每个 Worker 会绑定 `base_port + worker_rank`，因此必须使用不重叠的 `store_local_hostname` 基础端口区间。

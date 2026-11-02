@@ -19,8 +19,22 @@ limitations under the License.
 
 #include <vector>
 
+#include "core/framework/parallel_state/parallel_args.h"
+
 namespace xllm::parallel_state {
 namespace {
+
+TEST(ParallelTopologyTest, FallbackKvShardRanksRepeatWithinEachDpGroup) {
+  const std::vector<int32_t> expected = {0, 0, 1, 1, 0, 0, 1, 1};
+  for (int32_t rank = 0; rank < 8; ++rank) {
+    ParallelArgs args(rank, /*world_size=*/8, /*dp_size=*/2, nullptr);
+    args.cp_size(2);
+    args.kv_split_size(2);
+    EXPECT_EQ(args.kv_split_rank(), expected[rank]);
+    args.cp_size(1);
+    EXPECT_EQ(args.kv_split_rank(), rank % 2);
+  }
+}
 
 TEST(ParallelTopologyTest, SeparatesTpPcpAndFullDomainDcp) {
   const ParallelTopology topology(/*global_rank=*/3,
