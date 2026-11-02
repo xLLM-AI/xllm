@@ -32,6 +32,7 @@ limitations under the License.
 #include "core/framework/batch/batch.h"
 #include "core/framework/block/block_manager_pool.h"
 #include "core/framework/block/embedding_block_manager.h"
+#include "core/framework/block/kv_cache_manager.h"
 #include "core/framework/block/vmm_kv_block_manager.h"
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/block/block_utils.h"
@@ -2926,8 +2927,8 @@ TEST_F(SharedKVCacheBlockTest, AggregateAdmissionCountsEveryLinearSlot) {
   BlockManagerPool pool(options);
   Sequence first = MakeTestSequence(/*index=*/0, {1, 2, 3, 4});
   Sequence second = MakeTestSequence(/*index=*/1, {1, 2, 3, 4});
-  const std::vector<KVCacheReservation> reservations = {{&first, 4},
-                                                        {&second, 4}};
+  const std::vector<KVCacheManager::KVCacheReservation> reservations = {
+      {&first, 4}, {&second, 4}};
   EXPECT_TRUE(pool.exceeds_total_capacity(reservations));
 }
 
@@ -3075,8 +3076,8 @@ TEST_F(SharedKVCacheBlockTest, AdmissionCountsWeightedPhysicalExtents) {
   Sequence second = MakeTestSequence(/*index=*/1, {1, 2, 3, 4});
   EXPECT_FALSE(pool.exceeds_total_capacity(&first, /*num_tokens=*/8));
   EXPECT_TRUE(pool.exceeds_total_capacity(&first, /*num_tokens=*/9));
-  const std::vector<KVCacheReservation> reservations = {{&first, 4},
-                                                        {&second, 4}};
+  const std::vector<KVCacheManager::KVCacheReservation> reservations = {
+      {&first, 4}, {&second, 4}};
   EXPECT_TRUE(pool.exceeds_total_capacity(reservations));
 }
 

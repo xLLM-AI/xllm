@@ -79,7 +79,8 @@ KVCacheManagerFactoryResult KVCacheManagerFactory::create(
         << "Shared KV cache does not support Host storage.";
     CHECK_EQ(kv_cache_capacity.n_blocks(),
              kv_cache_capacity.num_linear_state_blocks());
-    auto create_options = get_kv_cache_create_options(model_args, shape);
+    auto create_options =
+        get_kv_cache_create_options(model_args, shape, /*is_spec_draft=*/false);
     create_options.num_layers(model_args.n_layers())
         .dtype(dtype)
         .ssm_dtype(resolve_ssm_dtype(model_args.mamba_ssm_dtype(), dtype));
