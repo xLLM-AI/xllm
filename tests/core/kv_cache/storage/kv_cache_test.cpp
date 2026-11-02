@@ -1331,7 +1331,7 @@ TEST_F(HostKVCacheTest, HostKVCacheDeepSeekV4PerBlockType) {
   ASSERT_TRUE(swa_tensors.count(KVCacheTensorRole::SWA) > 0);
   const torch::Tensor& swa = swa_tensors.at(KVCacheTensorRole::SWA);
   EXPECT_TRUE(swa.is_contiguous());
-  EXPECT_EQ(swa.size(0), scale_host_block_count(kSwaCount, kHostFactor));
+  EXPECT_EQ(swa.size(0), scale_host_block_count(kC128Count, kHostFactor));
   EXPECT_EQ(swa.size(1), 1);
 
   // C4 host cache: key + index, index uses the DSV4 index dtype.

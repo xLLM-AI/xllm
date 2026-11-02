@@ -498,7 +498,7 @@ void BlockManagerPool::cache(Sequence* sequence) {
   }
   int32_t dp_rank = get_dp_rank(sequence);
   static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get())
-      ->cache_for_sequence(sequence);
+      ->cache_full_blocks_for_sequence(sequence);
 }
 
 void BlockManagerPool::cache(Sequence* sequence, size_t num_tokens) {

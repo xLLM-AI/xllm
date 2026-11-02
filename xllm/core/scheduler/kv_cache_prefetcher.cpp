@@ -63,54 +63,34 @@ void KVCachePrefetcher::drain() {
   }
 
   manager_.drain_prefetch_completions();
-  drain_admissions();
-  manager_.drain_prefetch_completions();
-  drain_completed_prefetches();
-}
 
-void KVCachePrefetcher::shutdown() {
-  manager_.set_prefetch_completion_callback({});
-  {
-    std::lock_guard<std::mutex> lock(admission_mutex_);
-    for (const std::shared_ptr<Request>& request : admissions_) {
-      request->set_cancel();
-    }
-    const size_t unissued = admissions_.size();
-    admissions_.clear();
-    const size_t previous =
-        pending_requests_.fetch_sub(unissued, std::memory_order_acq_rel);
-    CHECK_GE(previous, unissued);
-  }
-  manager_.drain_prefetch_completions();
-  drain_completed_prefetches();
-  CHECK_EQ(pending_requests_.load(std::memory_order_acquire), 0u)
-      << "KVCachePrefetcher shut down with pending prefetch callbacks";
-}
-
-void KVCachePrefetcher::drain_admissions() {
   std::deque<std::shared_ptr<Request>> requests;
   {
     std::lock_guard<std::mutex> lock(admission_mutex_);
     requests.swap(admissions_);
   }
 
-  for (std::shared_ptr<Request>& request : requests) {
-    if (request->finished() || request->cancelled()) {
-      const size_t previous =
-          pending_requests_.fetch_sub(1, std::memory_order_relaxed);
-      CHECK_GT(previous, 0u);
-      continue;
+  if (!requests.empty()) {
+    for (std::shared_ptr<Request>& request : requests) {
+      if (request->finished() || request->cancelled()) {
+        const size_t previous =
+            pending_requests_.fetch_sub(1, std::memory_order_relaxed);
+        CHECK_GT(previous, 0u);
+        continue;
+      }
+
+      manager_.prefetch_from_storage(
+          std::move(request), [this](std::shared_ptr<Request> completed) {
+            std::lock_guard<std::mutex> lock(admission_mutex_);
+            completed_prefetches_.emplace_back(std::move(completed));
+          });
     }
-
-    manager_.prefetch_from_storage(
-        std::move(request), [this](std::shared_ptr<Request> completed) {
-          std::lock_guard<std::mutex> lock(admission_mutex_);
-          completed_prefetches_.emplace_back(std::move(completed));
-        });
+    // Release cancelled requests before completion processing so their
+    // leases do not linger across prefetch callbacks.
+    requests.clear();
+    manager_.drain_prefetch_completions();
   }
-}
 
-void KVCachePrefetcher::drain_completed_prefetches() {
   std::deque<std::shared_ptr<Request>> completed;
   {
     std::lock_guard<std::mutex> lock(admission_mutex_);
@@ -133,6 +113,24 @@ void KVCachePrefetcher::drain_completed_prefetches() {
         pending_requests_.fetch_sub(1, std::memory_order_relaxed);
     CHECK_GT(previous, 0u);
   }
+}
+
+void KVCachePrefetcher::shutdown() {
+  manager_.set_prefetch_completion_callback({});
+  {
+    std::lock_guard<std::mutex> lock(admission_mutex_);
+    for (const std::shared_ptr<Request>& request : admissions_) {
+      request->set_cancel();
+    }
+    const size_t unissued = admissions_.size();
+    admissions_.clear();
+    const size_t previous =
+        pending_requests_.fetch_sub(unissued, std::memory_order_acq_rel);
+    CHECK_GE(previous, unissued);
+  }
+  drain();
+  CHECK_EQ(pending_requests_.load(std::memory_order_acquire), 0u)
+      << "KVCachePrefetcher shut down with pending prefetch callbacks";
 }
 
 }  // namespace xllm

@@ -814,10 +814,6 @@ void Sequence::reset() {
   volatile_num_prompt_tokens_ = num_tokens_;
 }
 
-void Sequence::add_shared_blocks(BlockType type, std::vector<Block>&& blocks) {
-  kv_state_.add_shared_blocks(type, std::move(blocks), num_tokens_);
-}
-
 void Sequence::add_shared_host_blocks(BlockType type,
                                       std::vector<Block>&& blocks) {
   host_kv_state_.add_shared_blocks(type, std::move(blocks), num_tokens_);

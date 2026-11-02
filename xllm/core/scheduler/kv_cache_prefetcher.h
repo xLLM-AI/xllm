@@ -54,9 +54,6 @@ class KVCachePrefetcher final {
   void shutdown();
 
  private:
-  void drain_admissions();
-  void drain_completed_prefetches();
-
   KVCacheManager& manager_;
   std::mutex& admission_mutex_;
   std::shared_ptr<SchedulerNotifier> notifier_;

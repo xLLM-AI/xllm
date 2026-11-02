@@ -205,8 +205,13 @@ DeepSeekV4KVCacheImpl::DeepSeekV4KVCacheImpl(
   // for every DSV4 layer but no compressor scratch tensors.
   switch (type) {
     case BlockType::SWA: {
+      // Host restore resumes at a C128 boundary, so every stored C128 unit
+      // needs exactly one corresponding persistent SWA window. MTP drafts
+      // without compressed layers still offload their standalone SWA cache.
+      const int64_t swa_source_count =
+          pool_counts[2] > 0 ? pool_counts[2] : pool_counts[0];
       const int64_t host_swa_count =
-          scale_host_block_count(pool_counts[0], factor);
+          scale_host_block_count(swa_source_count, factor);
       host_page_aligned_regions_.reserve(1);
       create_host_tensor(host_group_shape(host_swa_count, n_heads, head_dim),
                          create_options.dtype(),
