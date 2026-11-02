@@ -122,6 +122,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         enable_graph_mode_decode_no_padding: bool = False,
         spec_verify_width: int = 1,
         device_kv_lengths: bool = False,
+        max_capture_tokens: int | None = None,
     ) -> None:
         super().__init__(model, attention_backend, device)
         self.dp_size = dp_size
@@ -130,6 +131,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         self.max_model_len = max_model_len
         self.num_decoding_tokens = max(1, int(num_decoding_tokens))
         self._is_spec_draft = is_spec_draft
+        self._max_capture_tokens = max_capture_tokens
         self._enable_decode_no_padding = enable_graph_mode_decode_no_padding
         # New exact shapes can arrive while native input preparation copies
         # the next batch on another thread. Only this thread captures the
@@ -254,6 +256,13 @@ class DecodeAclGraphRunner(AclGraphRunner):
         def reject_layout(reason: str) -> None:
             if self.dp_size > 1:
                 raise RuntimeError(f"DP decode graph layout is incompatible: {reason}")
+            return None
+
+        # The model caps capture at its collective dispatch window; wider
+        # batches (including expanded verify rows) replay eagerly. Every DP
+        # rank derives the same padded token count, so the choice is
+        # collective-safe.
+        if self._max_capture_tokens is not None and padded_batch_size > self._max_capture_tokens:
             return None
 
         if is_expanded_spec_verify:

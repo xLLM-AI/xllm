@@ -289,6 +289,14 @@ std::optional<std::string> validate_context_parallel_config(
           return "Python GLM-5 Next CP requires ep_size to be a positive "
                  "divisor of world_size";
         }
+        // EPLv1 may use any positive divisor. EPLv2 owns one expert shard per
+        // rank, so PCP still requires ep_size == world_size.
+        if (options.expert_parallel_degree().value_or(
+                EPLBConfig::get_instance().expert_parallel_degree()) == 2 &&
+            options.ep_size() != global_world_size) {
+          return "Python GLM-5 Next EPLv2 with PCP requires ep_size equal to "
+                 "world_size";
+        }
         if (kv_split != 1) {
           return "Python GLM-5 Next CP initially requires kv_split_size == 1";
         }

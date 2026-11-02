@@ -21,6 +21,9 @@ import pytest
 import torch
 import torch.nn as nn
 
+from xllm.python.layers import moe_parallel
+from xllm.python.layers.moe_parallel import Eplv2CommPolicy, TokenParallelLayout
+from xllm.python.model_executor import cp_utils
 from xllm.python.models import glm5_next
 from xllm.python.models.aux_hidden_capture import AuxHiddenCapture
 
@@ -135,6 +138,99 @@ def test_cp_model_loop_shards_rows_and_merges_final_hidden() -> None:
     torch.testing.assert_close(layers[0].attention_mask, torch.tensor([[True, False]]))
     assert layers[1].prev_topk is layers[0].output_topk
     torch.testing.assert_close(output, merged_output)
+
+
+class _SpMoe(glm5_next.Glm5NextMoE):
+    def __init__(self) -> None:
+        nn.Module.__init__(self)
+
+
+class _SpDecoder(nn.Module):
+    """Last sparse layer: keep only this TP rank's shard row."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.layer_id = 0
+        self.mlp = _SpMoe()
+
+    def forward(
+        self,
+        hidden: torch.Tensor,
+        positions: torch.Tensor,
+        attention_mask: torch.Tensor,
+        prev_topk: torch.Tensor | None,
+        *,
+        input_layout: TokenParallelLayout | None = None,
+        output_layout: TokenParallelLayout | None = None,
+        token_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, None]:
+        assert output_layout is not None and output_layout.shard_tokens == 1
+        local = hidden[:, :1] + 1
+        return local, None
+
+
+@pytest.mark.parametrize("layers_to_capture", [(), (0,)])
+def test_pcp_sp_gathers_tp_rows_before_cp_merge(layers_to_capture: tuple[int, ...]) -> None:
+    events: list[str] = []
+    model, _ = _make_model(events)
+    model.cfg = SimpleNamespace(
+        hidden_size=1,
+        hc_mult=4,
+        dp_size=1,
+        cp_size=2,
+        cp_rank=0,
+        expert_parallel_degree=2,
+        eplv2_sequence_parallel=True,
+        tp_size=4,
+        tp_rank=0,
+        layers_to_capture=layers_to_capture,
+    )
+    model.layers = nn.ModuleList([_SpDecoder()])
+    model._comm_policy = Eplv2CommPolicy(512)
+    if layers_to_capture:
+        model.aux_hidden_capture = AuxHiddenCapture(
+            layers_to_capture,
+            transform=lambda streams: streams.mean(dim=2).reshape(-1, 1),
+        )
+    cp_context = SimpleNamespace(
+        cp_size=2,
+        cp_rank=0,
+        total_local=4,
+        shard_gather_index=torch.arange(4),
+        shard_valid_mask=torch.ones(4, dtype=torch.bool),
+        restore_index=torch.arange(8),
+    )
+    merged_shapes: list[tuple[int, ...]] = []
+
+    def tp_all_gather(value: torch.Tensor, dim: int, world_size: int) -> torch.Tensor:
+        assert dim == 0 and world_size == 4 and value.shape[0] == 1
+        events.append("tp_gather")
+        return value.repeat(4, *([1] * (value.dim() - 1)))
+
+    def all_gather(value: torch.Tensor, dim: int, world_size: int, group_name: str) -> torch.Tensor:
+        assert dim == 0 and world_size == 2 and group_name == "cp"
+        assert value.shape[0] == cp_context.total_local
+        events.append(f"cp_merge:{tuple(value.shape)}")
+        merged_shapes.append(tuple(value.shape))
+        return torch.cat((value, value + 10), dim=0)
+
+    with (
+        patch.object(
+            glm5_next, "get_forward_context_or_none", return_value=SimpleNamespace(cp_context=cp_context, metadata=None)
+        ),
+        patch.object(moe_parallel.distributed, "tp_all_gather", side_effect=tp_all_gather, create=True),
+        patch.object(cp_utils.distributed, "all_gather", side_effect=all_gather, create=True),
+    ):
+        result = model(torch.arange(8), torch.arange(8))
+
+    if layers_to_capture:
+        hidden, aux = result
+        assert hidden.shape == (8, 1)
+        assert aux.shape[0] == 8
+        assert merged_shapes == [(4, 1), (4, 1)]
+    else:
+        assert result.shape == (8, 1)
+        assert events[-2:] == ["tp_gather", "cp_merge:(4, 1)"]
 
 
 def _cp2_context(rank: int) -> SimpleNamespace:
@@ -285,10 +381,12 @@ class _OutputProjection(nn.Module):
         return rows.expand(self.expected_shape[:-1] + (3,))
 
 
-def test_kda_cp_projects_only_local_rows_and_overwrites_padding(monkeypatch) -> None:
+@pytest.mark.parametrize("sequence_parallel", [False, True])
+def test_kda_cp_projects_only_local_rows_and_overwrites_padding(sequence_parallel: bool) -> None:
     attention = glm5_next.Glm5NextKdaAttention.__new__(glm5_next.Glm5NextKdaAttention)
     nn.Module.__init__(attention)
     attention.hidden_size = 3
+    attention.cfg = SimpleNamespace(hidden_size=3)
     attention.head_dim = 2
     attention.qkv_dim = 4
     attention.conv_dim = 12
@@ -327,6 +425,7 @@ def test_kda_cp_projects_only_local_rows_and_overwrites_padding(monkeypatch) -> 
     def compensate(output: torch.Tensor) -> None:
         output.add_(7)
 
+    kwargs = {"output_layout": TokenParallelLayout(2, 1, 0)} if sequence_parallel else {}
     with (
         patch.object(
             glm5_next,
@@ -336,15 +435,21 @@ def test_kda_cp_projects_only_local_rows_and_overwrites_padding(monkeypatch) -> 
         patch.object(glm5_next, "cp_merge_rows", merge),
         patch.object(glm5_next.distributed, "all_reduce_", side_effect=compensate, create=True) as all_reduce,
     ):
-        output = attention(local_hidden, torch.tensor([[0, 0]], dtype=torch.int32), torch.tensor([[True, False]]))
+        output = attention(
+            local_hidden, torch.tensor([[0, 0]], dtype=torch.int32), torch.tensor([[True, False]]), **kwargs
+        )
 
     assert merge.call_count == 3
     assert backend.execute_linear.call_args.args[0].shape == (1, 12, 3)
     assert backend.execute_linear.call_args.args[1].shape == (1, 3, 2)
     assert backend.execute_linear.call_args.kwargs["raw_gate_proj"].shape == (1, 3, 2, 2)
     assert attention.o_proj.input_shape == (1, 2, 4)
-    all_reduce.assert_called_once()
-    torch.testing.assert_close(output[0, 0], torch.tensor([8.0, 9.0, 10.0]))
+    if sequence_parallel:
+        all_reduce.assert_not_called()
+        torch.testing.assert_close(output[0, 0], torch.tensor([1.0, 2.0, 3.0]))
+    else:
+        all_reduce.assert_called_once()
+        torch.testing.assert_close(output[0, 0], torch.tensor([8.0, 9.0, 10.0]))
     assert torch.equal(output[0, 1], torch.zeros(3))
 
 
@@ -401,7 +506,8 @@ def test_mla_cp_one_keeps_full_postprocessing() -> None:
     torch.testing.assert_close(topk, torch.tensor([[[10]], [[20]], [[30]]], dtype=torch.int32))
 
 
-def test_mla_cp_projects_only_local_rows_and_overwrites_padding(monkeypatch) -> None:
+@pytest.mark.parametrize("sequence_parallel", [False, True])
+def test_mla_cp_projects_only_local_rows_and_overwrites_padding(sequence_parallel: bool) -> None:
     indexer = MagicMock()
     global_topk = torch.arange(6, dtype=torch.int32).view(3, 1, 2)
     indexer.select_qli.return_value = global_topk
@@ -431,6 +537,7 @@ def test_mla_cp_projects_only_local_rows_and_overwrites_padding(monkeypatch) -> 
     def compensate(output: torch.Tensor) -> None:
         output.add_(5)
 
+    kwargs = {"output_layout": TokenParallelLayout(2, 1, 0)} if sequence_parallel else {}
     with (
         patch.object(
             glm5_next,
@@ -444,14 +551,19 @@ def test_mla_cp_projects_only_local_rows_and_overwrites_padding(monkeypatch) -> 
             torch.tensor([[[1.0, 2.0, 3.0], [0.0, 0.0, 0.0]]]),
             torch.tensor([[0, 0]], dtype=torch.int32),
             torch.tensor([[True, False]]),
+            **kwargs,
         )
 
     assert merge.call_count == 2
     assert backend.execute_mla.call_args.args[0].shape == (3, 2, 3)
     assert backend.execute_mla.call_args.args[2].shape == (3, 1, 3)
     assert attention.o_proj.input_shape == (2, 6)
-    all_reduce.assert_called_once()
-    torch.testing.assert_close(output[0], torch.tensor([6.0, 7.0, 8.0]))
+    if sequence_parallel:
+        all_reduce.assert_not_called()
+        torch.testing.assert_close(output[0], torch.tensor([1.0, 2.0, 3.0]))
+    else:
+        all_reduce.assert_called_once()
+        torch.testing.assert_close(output[0], torch.tensor([6.0, 7.0, 8.0]))
     assert torch.equal(output[1], torch.zeros(3))
     torch.testing.assert_close(topk[0], global_topk[0])
     torch.testing.assert_close(topk[1], torch.zeros((1, 2), dtype=torch.int32))

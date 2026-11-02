@@ -3601,7 +3601,8 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
     extend_input.runtime.device_tensors_ready = true;
     check_draft_input_embedding(input_params.embedding.input_embedding,
                                 "target replay");
-    finish_metadata_prepare(*prepare_stream_, extend_input);
+    extend_input.runtime.metadata_ready_event =
+        prepare_stream_->record_event_or_sync();
     return;
   }
   auto& input_params = extend_input.input_params;
