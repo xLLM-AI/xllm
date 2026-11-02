@@ -63,7 +63,7 @@ LinearStateBlockManager::allocate_for_sequence(Sequence* seq,
   if (!decode_step && !seq->is_graph_warmup() &&
       options_.enable_prefix_cache() && !blocks->empty()) {
     const size_t chunk_stride = block_size();
-    const size_t cached_tokens = seq->kv_cache_tokens_num();
+    const size_t cached_tokens = kv_state.kv_cache_tokens_num();
     checkpoint_index = cached_tokens / chunk_stride;
     if (cached_tokens % chunk_stride == 0 &&
         checkpoint_index > kv_state.num_cached_blocks(BlockType::LINEAR)) {
@@ -113,17 +113,11 @@ std::vector<Block> LinearStateBlockManager::allocate_shared(
     const Slice<XXH3Key>& block_hashes) {
   // Leave a token for forward execution; KV block boundaries cannot constrain
   // sparse linear checkpoints without losing the matching recurrent state.
-  if (token_ids.size() == 0 || !options_.enable_prefix_cache()) {
+  if (token_ids.size() == 0) {
     return {};
   }
-  std::vector<Block> blocks = prefix_cache_->match(
+  return BlockManagerImpl::allocate_shared(
       token_ids.slice(0, token_ids.size() - 1), {}, MMData(), block_hashes);
-  for (const Block& block : blocks) {
-    if (block.is_valid() && mark_used(usage_accounted_ids_, block.id())) {
-      num_used_blocks_.fetch_add(1, std::memory_order_relaxed);
-    }
-  }
-  return blocks;
 }
 
 void LinearStateBlockManager::cache(const Slice<int32_t>& token_ids,
