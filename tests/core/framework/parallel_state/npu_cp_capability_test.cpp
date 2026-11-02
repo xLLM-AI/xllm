@@ -370,13 +370,27 @@ TEST(NpuCpCapabilityTest, PythonGlm5NextCapabilityGate) {
                 "--python_graph_backend=off or decode-only aclgraph"));
 
   execution_config.python_graph_backend("off");
-  options.ep_size(2);
-  EXPECT_EQ(validate_context_parallel_config(options,
-                                             EngineType::LLM,
-                                             "glm5_next",
-                                             /*global_world_size=*/8),
-            std::optional<std::string>(
-                "Python GLM-5 Next CP initially requires ep_size == 1"));
+  for (int32_t dp_size : {1, 2}) {
+    for (int32_t ep_size : {1, 2, 8}) {
+      options.dp_size(dp_size).ep_size(ep_size);
+      EXPECT_FALSE(validate_context_parallel_config(options,
+                                                    EngineType::LLM,
+                                                    "glm5_next",
+                                                    /*global_world_size=*/8)
+                       .has_value());
+    }
+  }
+  options.dp_size(1);
+  for (int32_t ep_size : {0, 3}) {
+    options.ep_size(ep_size);
+    EXPECT_EQ(validate_context_parallel_config(options,
+                                               EngineType::LLM,
+                                               "glm5_next",
+                                               /*global_world_size=*/8),
+              std::optional<std::string>(
+                  "Python GLM-5 Next CP requires ep_size to be a positive "
+                  "divisor of world_size"));
+  }
   options.ep_size(1);
 
   parallel_config.kv_split_size(2);

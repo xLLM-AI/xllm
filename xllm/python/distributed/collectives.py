@@ -67,9 +67,12 @@ _GROUP_NAMES = frozenset(("tp", "dp", "moe_tp", "moe_ep", "cp", "layerwise", "dc
 # ``cp`` strides by the attention TP size: ranks sharing a (dp, tp) slot but
 # holding different sequence shards form one CP group, matching the C++
 # compute_cp_group_ranks layout (rank = dp*cp*tp + cp_rank*tp + tp_rank).
-# ``dcp`` matches ParallelArgs::kv_split_rank when cp_size == 1:
-# rank_in_group = global_rank / (world / dcp_size).
+# CP and DCP callers whose world contains multiple DP cohorts pass an explicit
+# within-cohort stride: the strided derivation above would otherwise mix
+# ranks from different requests. DCP then matches the DP-local ownership in
+# ParallelArgs::kv_split_rank.
 _CONTIGUOUS_GROUPS = frozenset(("tp", "moe_tp", "layerwise"))
+_STRIDED_COHORT_GROUPS = frozenset(("cp", "dcp"))
 
 _groups = {}
 _group_ranks = {}
@@ -171,7 +174,12 @@ def _ensure_world(
     _world_topology = _exchange_world_topology(store, device, global_rank, global_world_size)
 
 
-def _group_memberships(group_name: str, world_size: int, global_world_size: int) -> list[list[int]]:
+def _group_memberships(
+    group_name: str,
+    world_size: int,
+    global_world_size: int,
+    group_stride: int | None = None,
+) -> list[list[int]]:
     """Every group of this kind, in an order all ranks agree on.
 
     ``new_group`` is collective over the whole world, so each rank has to create
@@ -179,6 +187,21 @@ def _group_memberships(group_name: str, world_size: int, global_world_size: int)
     """
     if world_size <= 0 or global_world_size % world_size:
         raise ValueError(f"{group_name} size {world_size} does not divide the world size {global_world_size}")
+    if group_stride is not None:
+        if (
+            group_name not in _STRIDED_COHORT_GROUPS
+            or group_stride <= 0
+            or global_world_size % (world_size * group_stride)
+        ):
+            raise ValueError(
+                f"{group_name} stride {group_stride} must describe complete DP cohorts of the world {global_world_size}"
+            )
+        cohort_size = world_size * group_stride
+        return [
+            [base + tp_rank + cp_rank * group_stride for cp_rank in range(world_size)]
+            for base in range(0, global_world_size, cohort_size)
+            for tp_rank in range(group_stride)
+        ]
     if group_name == "attn_dp":
         if world_size != global_world_size:
             raise ValueError("attn_dp must cover the full process world")
@@ -199,6 +222,7 @@ def init_process_group(
     global_rank: int,
     global_world_size: int,
     group_index: int,
+    group_stride: int | None = None,
 ) -> ProcessGroup:
     if group_name not in _GROUP_NAMES:
         raise ValueError(f"unsupported parallel group: {group_name}")
@@ -225,7 +249,7 @@ def init_process_group(
 
     own = None
     own_ranks = None
-    memberships = _group_memberships(group_name, world_size, global_world_size)
+    memberships = _group_memberships(group_name, world_size, global_world_size, group_stride)
     for index, ranks in enumerate(memberships):
         candidate = dist.new_group(ranks=ranks, timeout=timedelta(minutes=5), backend=backend)
         if global_rank in ranks:
