@@ -46,6 +46,10 @@ DraftDistribution::DraftDistribution(int64_t rank,
                                      const torch::Tensor& values) {
   CHECK(values.defined());
   CHECK_EQ(values.dim(), rank);
+  if (rank == 2) {
+    CHECK(values.scalar_type() == torch::kInt64 ||
+          values.scalar_type() == torch::kInt32);
+  }
   batch_size_ = values.size(0);
   num_draft_tokens_ = values.size(1);
   device_ = values.device();
@@ -62,16 +66,14 @@ void DraftDistribution::validate(const torch::Tensor& token_ids) const {
 }
 
 DraftDistribution::DraftDistribution(const torch::Tensor& token_ids)
-    : DraftDistribution(/*rank=*/2, token_ids) {
-  validate(token_ids);
-}
+    : DraftDistribution(/*rank=*/2, token_ids) {}
 
 DraftDistribution::DraftDistribution(const torch::Tensor& token_ids,
                                      torch::Tensor logits)
     : DraftDistribution(logits.defined() ? 3 : 2,
                         logits.defined() ? logits : token_ids) {
-  validate(token_ids);
   if (logits.defined()) {
+    validate(token_ids);
     representation_.emplace<Dense>(std::move(logits));
   }
 }

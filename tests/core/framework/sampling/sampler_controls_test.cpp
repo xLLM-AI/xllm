@@ -136,10 +136,13 @@ TEST(DraftDistributionTest, PointMassValidatesItsOwnTokenMetadata) {
   const torch::Tensor tokens = torch::zeros({1, 2}, torch::kInt64);
   EXPECT_NO_FATAL_FAILURE(DraftDistribution{tokens});
   EXPECT_NO_FATAL_FAILURE(DraftDistribution{tokens.to(torch::kInt32)});
+  EXPECT_NO_FATAL_FAILURE(DraftDistribution(tokens, {}));
+  EXPECT_NO_FATAL_FAILURE(DraftDistribution(tokens.to(torch::kInt32), {}));
   EXPECT_DEATH(DraftDistribution{tokens.to(torch::kFloat32)}, "scalar_type");
-  EXPECT_DEATH(
-      DraftProposal(tokens, DraftDistribution(tokens.to(torch::kFloat32))),
-      "scalar_type");
+  EXPECT_DEATH(DraftDistribution(tokens.to(torch::kFloat32), {}),
+               "scalar_type");
+  EXPECT_DEATH(DraftDistribution{tokens.view({2})}, "values.dim");
+  EXPECT_DEATH(DraftDistribution(tokens.view({2}), {}), "values.dim");
 }
 
 TEST(DraftDistributionTest, RejectsInvalidProposalAtConstruction) {
@@ -151,7 +154,9 @@ TEST(DraftDistributionTest, RejectsInvalidProposalAtConstruction) {
   EXPECT_DEATH(DraftProposal(torch::zeros({1, 3}, torch::kInt64),
                              DraftDistribution(tokens, logits)),
                "num_draft_tokens_");
-  EXPECT_DEATH(DraftDistribution(tokens.to(torch::kFloat32)), "scalar_type");
+  EXPECT_DEATH(
+      DraftProposal(tokens.to(torch::kFloat32), DraftDistribution(tokens)),
+      "scalar_type");
   EXPECT_DEATH(DraftDistribution(tokens, torch::zeros({2, 3})), "values.dim");
   EXPECT_DEATH(DraftDistribution(tokens, torch::zeros({1, 3, 4})),
                "num_draft_tokens_");

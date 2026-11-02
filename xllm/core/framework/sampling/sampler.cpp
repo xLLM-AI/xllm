@@ -193,7 +193,7 @@ SampleOutput sample(torch::Tensor& logits,
 
   torch::Tensor samples;
 #if defined(USE_NPU)
-  const bool batched_seed_sampling =
+  const bool use_batched_sampling =
       npu_sampling_enabled(NpuSamplingOptimization::BATCHED) &&
       params.sampling_mode() != SamplingMode::GREEDY &&
       kernel::npu::tilelang::supports_sample_from_logits(logits) &&
@@ -201,7 +201,7 @@ SampleOutput sample(torch::Tensor& logits,
        (params.seeds().dim() == 1 && params.seed_offsets().defined() &&
         params.seed_offsets().dim() == 1 && params.seeds().is_contiguous() &&
         params.seed_offsets().is_contiguous()));
-  if (batched_seed_sampling) {
+  if (use_batched_sampling) {
     const auto uniform_options = logits.options().dtype(torch::kFloat32);
     const torch::Tensor uniforms =
         (!params.seeds().defined() || params.has_unseeded_sample())

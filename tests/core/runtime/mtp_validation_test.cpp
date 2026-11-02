@@ -15,13 +15,16 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 #include <torch/torch.h>
+#include <torch_npu/csrc/aten/NPUGeneratorImpl.h>
 
 #include <cmath>
+#include <mutex>
 #include <tuple>
 #include <vector>
 
 #include "core/platform/platform.h"
 #include "core/runtime/mtp_worker_impl.h"
+#include "core/util/scope_guard.h"
 
 namespace xllm {
 namespace {
@@ -92,6 +95,75 @@ TEST_P(MtpValidationTest, MarksOnlyLocalVerificationTokens) {
     EXPECT_TRUE(torch::equal(drafts[step].sample_output.next_tokens.cpu(),
                              torch::full({2}, step + 1, token_dtype)));
   }
+}
+
+TEST(MtpValidationDistributionTest, PreservesNonPointMassDraftAcceptance) {
+  constexpr int64_t kBatchSize = 32;
+  const torch::Device device(Platform::type_torch(), /*index=*/0);
+  const ParallelArgs parallel_args(
+      /*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr);
+  runtime::Options options;
+  options.model_id("test_target")
+      .block_size(4)
+      .num_speculative_tokens(2)
+      .world_size(1)
+      .dp_size(1)
+      .cp_size(1);
+  ValidationWorker worker(parallel_args, device, options, WorkerType::LLM);
+  const auto tensor_options =
+      torch::TensorOptions().device(device).dtype(torch::kFloat32);
+  std::vector<ForwardOutput> drafts(2);
+  for (int64_t step = 0; step < 2; ++step) {
+    drafts[step].sample_output.next_tokens = torch::full(
+        {kBatchSize}, step + 1, tensor_options.dtype(torch::kInt64));
+    drafts[step].sample_output.draft_logits =
+        torch::zeros({kBatchSize, 4}, tensor_options);
+  }
+  // At both draft positions q(token) = 1/4 and p(token) = 1/2, so
+  // Dense must accept every proposal while PointMass can reject it.
+  torch::Tensor target_logits =
+      torch::full({kBatchSize, 3, 4}, -INFINITY, tensor_options);
+  target_logits.narrow(1, 0, 2).select(2, 0).fill_(0);
+  target_logits.select(1, 0).select(1, 1).fill_(0);
+  target_logits.select(1, 1).select(1, 2).fill_(0);
+  target_logits.select(1, 2).select(1, 3).fill_(0);
+  ForwardOutput target;
+  target.logits = target_logits.view({kBatchSize * 3, 4});
+  SamplingParameters sampling;
+  sampling.sampling_mode() = SamplingMode::RANDOM;
+
+  // Seed the device RNG, not the request: request seeds bypass p/q rejection.
+  auto generator = at_npu::detail::getDefaultNPUGenerator(/*device_index=*/0);
+  torch::Tensor rng_state;
+  {
+    std::lock_guard<std::mutex> lock(generator.mutex());
+    rng_state = generator.get_state();
+    generator.set_current_seed(42);
+  }
+  ScopeGuard restore_rng([&] {
+    std::lock_guard<std::mutex> lock(generator.mutex());
+    generator.set_state(rng_state);
+  });
+
+  const SampleOutput dense = worker.validate(
+      sampling, drafts, target, /*num_speculative_tokens=*/2, {});
+  EXPECT_TRUE(torch::equal(dense.num_accepted_tokens.cpu(),
+                           torch::full({kBatchSize, 1}, 2, torch::kInt32)));
+  EXPECT_TRUE(torch::equal(
+      dense.next_tokens.narrow(1, 0, 2).cpu(),
+      torch::tensor({{1, 2}}, torch::kInt64).expand({kBatchSize, 2})));
+
+  // Confirm this draw distinguishes absent logits from the Dense proposal.
+  for (auto& draft : drafts) {
+    draft.sample_output.draft_logits = torch::Tensor();
+  }
+  {
+    std::lock_guard<std::mutex> lock(generator.mutex());
+    generator.set_current_seed(42);
+  }
+  const SampleOutput point_mass = worker.validate(
+      sampling, drafts, target, /*num_speculative_tokens=*/2, {});
+  EXPECT_LT(point_mass.num_accepted_tokens.min().item<int32_t>(), 2);
 }
 
 INSTANTIATE_TEST_SUITE_P(
