@@ -46,6 +46,7 @@ def _runner(
     enable_graph_mode_decode_no_padding: bool = False,
     enable_mega_moe_token_mask: bool = False,
     device_kv_lengths: bool = False,
+    max_capture_tokens: int | None = None,
 ) -> DecodeAclGraphRunner:
     attention_backend = SimpleNamespace(page_size=4, is_mla=False, create_graph_block_tables=lambda *_: ())
     return DecodeAclGraphRunner(
@@ -60,6 +61,7 @@ def _runner(
         enable_graph_mode_decode_no_padding=enable_graph_mode_decode_no_padding,
         enable_mega_moe_token_mask=enable_mega_moe_token_mask,
         device_kv_lengths=device_kv_lengths,
+        max_capture_tokens=max_capture_tokens,
     )
 
 
@@ -1794,6 +1796,14 @@ def test_decode_rejects_mismatched_linear_state_validity_mask() -> None:
     metadata.has_initial_state = torch.ones(3, dtype=torch.int32)
 
     assert not runner.can_execute(torch.arange(4, dtype=torch.int32), metadata)
+
+
+def test_capture_token_limit_bounds_graph_admission() -> None:
+    runner = _runner(max_batch=128, max_capture_tokens=16)
+    with patch.object(runner, "_has_compatible_decode_metadata", return_value=True):
+        for rows, expected in ((8, True), (16, True), (24, False)):
+            metadata = _metadata(torch.arange(rows, dtype=torch.int32))
+            assert runner.can_execute(torch.arange(rows), metadata) is expected
 
 
 def test_decode_rejects_mismatched_linear_state_indices_without_cache_probe() -> None:

@@ -729,6 +729,7 @@ class TestModelExecutorConstruction:
             enable_graph_mode_decode_no_padding=False,
             spec_verify_width=1,
             device_kv_lengths=False,
+            max_capture_tokens=None,
         )
 
     @patch("xllm.python.model_executor.runners.decode_acl_graph.DecodeAclGraphRunner")
@@ -791,6 +792,7 @@ class TestModelExecutorConstruction:
             enable_graph_mode_decode_no_padding=False,
             spec_verify_width=1,
             device_kv_lengths=False,
+            max_capture_tokens=None,
         )
 
 
