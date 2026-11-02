@@ -405,8 +405,8 @@ class KdaLinearAttentionMixin:
             # concurrent requests flattened to [1, 2, ...]) surfaced it.
             core_attn_out = core_attn_out.to(query.dtype).reshape(hidden_shape)
         else:
-            q_in = kernels.l2_norm(query).to(torch.bfloat16).contiguous()
-            k_in = kernels.l2_norm(key).to(torch.bfloat16).contiguous()
+            q_in = kernels.l2_norm(query)
+            k_in = kernels.l2_norm(key)
             v_in = value.to(torch.bfloat16).contiguous()
             cu_seqlens = (
                 q_cu.to(torch.int32)
