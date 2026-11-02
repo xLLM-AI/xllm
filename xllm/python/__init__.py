@@ -60,7 +60,7 @@ def initialize_runtime() -> None:
 
         from scripts.logger import logger
 
-        prepared = xllm_kernel.initialize(device="npu")
+        prepared = xllm_kernel.initialize(device="npu", operations=("rms_norm",))
         for operation, kernel in prepared.items():
             logger.info("Python kernel %s: %s (generation=%s)", operation, kernel.spec.name, kernel.generation)
         backend_name = "xllm.python.kernels_npu"

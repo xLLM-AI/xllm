@@ -6,6 +6,7 @@ import time
 
 from xllm_kernel.benchmark.report import write_report
 from xllm_kernel.numerics.arguments import parse_arguments
+from xllm_kernel.numerics.distributed import rank_max_samples
 from xllm_kernel.numerics.verify import validation_session, verify_case
 
 
@@ -25,6 +26,7 @@ def main() -> None:
         revision=args.revision,
         output=args.output,
         report_writer=write_report,
+        distributed=args.distributed,
     ) as (plan, report):
         import torch
 
@@ -43,11 +45,17 @@ def main() -> None:
             function = prepared.function
             warmup_start = time.perf_counter()
             for _ in range(args.warmup):
+                if prepared.reset is not None:
+                    prepared.reset()
                 function()
             torch.npu.synchronize()
             row["warmup_s"] = time.perf_counter() - warmup_start
             if args.mode == "aclgraph":
                 measure_graph(prepared, row, iterations=args.iterations, repeats=args.repeats)
             else:
-                row["timing"] = measure(function, iterations=args.iterations, repeats=args.repeats, divisor=1)
+                row["timing"] = measure(
+                    function, iterations=args.iterations, repeats=args.repeats, divisor=1, reset=prepared.reset
+                )
+            if row["status"] == "passed":
+                row["timing"]["rank_max_samples"] = rank_max_samples(row["timing"])
             write_report(args.output, report)
