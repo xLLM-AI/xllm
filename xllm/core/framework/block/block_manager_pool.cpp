@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <limits>
+#include <mutex>
 
 #include "core/framework/block/composite_block_manager.h"
 #include "core/framework/block/vmm_kv_block_manager.h"
@@ -209,6 +210,14 @@ void BlockManagerPool::deallocate(std::vector<Sequence*>& sequences) {
 
 void BlockManagerPool::deallocate(Sequence* sequence) {
   DCHECK(sequence != nullptr);
+  // A pending forward may retire on the scheduler while PD releases its
+  // sequence. Keep the lease's accounting check after the complete release.
+  const auto lease_owners = sequence->kv_cache_lease_owners();
+  std::vector<std::unique_lock<std::mutex>> lease_locks;
+  lease_locks.reserve(lease_owners.size());
+  for (const auto& owner : lease_owners) {
+    lease_locks.emplace_back(owner->lock());
+  }
   int32_t dp_rank = get_dp_rank(sequence);
   // The composite fans deallocate (with final cache) out across all leaves,
   // including the EMBEDDING resource leaf, the LINEAR leaf, and the (flat or
