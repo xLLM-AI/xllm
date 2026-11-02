@@ -37,6 +37,7 @@ limitations under the License.
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/scheduler/request_output_dispatcher.h"
+#include "core/scheduler/zero_eviction_scheduler.h"
 #include "distributed_runtime/engine.h"
 #include "framework/block/block_manager_pool.h"
 #include "framework/model/model_args.h"
@@ -94,7 +95,11 @@ class FakeEngine : public Engine {
 
   explicit FakeEngine(std::unique_ptr<BlockManagerPool> block_manager)
       : fake_tokenizer_(std::make_unique<FakeTokenizer>()),
-        fake_block_manager_(std::move(block_manager)) {}
+        fake_block_manager_(std::move(block_manager)) {
+    if (fake_block_manager_->options().enable_linear_state()) {
+      model_args_.layer_types({"linear_attention"});
+    }
+  }
 
   virtual ForwardOutput step(BatchGroup& /*batch*/) { return {}; }
   virtual std::vector<RawForwardOutput> collect_step_outputs(
@@ -2494,6 +2499,78 @@ TEST(SchedulerPolicyTest, FullFootprintAdmitsBothWhenFits) {
   auto batch = scheduler->prepare_batch_test();
   ASSERT_EQ(batch.size(), 1);
   EXPECT_EQ(batch[0].size(), 2);  // Both admitted.
+}
+
+TEST(SchedulerPolicyTest, SharedArenaAdmissionReservesFullAndLinearResources) {
+  ScopedConfigValue<bool> prefix_cache_guard(
+      KVCacheConfig::get_instance().enable_prefix_cache(), false);
+  ScopedConfigValue<bool> mix_batch_guard(
+      SchedulerConfig::get_instance().enable_mix_batch(), true);
+  ScopedConfigValue<int32_t> chunk_size_guard(
+      SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 2);
+  for (const auto& [full_units, linear_units] :
+       {std::pair<uint32_t, uint32_t>{1, 4}, {3, 2}}) {
+    SCOPED_TRACE(full_units);
+    const uint32_t prompt_units = 4 * full_units + linear_units;
+    const uint32_t num_units = 2 * prompt_units;
+    BlockManagerPool::Options pool_options;
+    pool_options.num_blocks(num_units)
+        .block_size(2)
+        .enable_prefix_cache(false)
+        .enable_linear_state(true)
+        .linear_state_num_slots(num_units)
+        .enable_shared_kv_cache(true)
+        .shared_full_block_units(full_units)
+        .shared_linear_state_units(linear_units);
+    FakeEngine engine(std::make_unique<BlockManagerPool>(pool_options));
+    SchedulerOptions options = create_scheduler_options(4, 4, 0, 2, 1);
+    options.enable_chunked_prefill(true)
+        .enable_schedule_overlap(false)
+        .disable_log_stats(true);
+    TestableContinuousScheduler scheduler(&engine, options);
+    auto requests =
+        generate_request({8, 8}, {2, 2}, std::nullopt, std::nullopt, 64);
+    ASSERT_TRUE(scheduler.add_request(requests[0]));
+    ASSERT_TRUE(scheduler.add_request(requests[1]));
+
+    BatchGroup batches = scheduler.prepare_batch_test();
+
+    ASSERT_EQ(batches.size(), 1u);
+    EXPECT_EQ(batches.front().size(), 1u);
+    EXPECT_EQ(scheduler.get_waiting_requests_num(), 1u);
+    EXPECT_EQ(engine.block_manager_pool()->admission_capacity(0),
+              num_units - std::max(full_units, linear_units));
+    EXPECT_EQ(engine.block_manager_pool()->sequence_resource_units(8),
+              prompt_units);
+  }
+}
+
+TEST(SchedulerPolicyTest, SharedArenaZeroEvictionReservesStateAndDecodeGrowth) {
+  ScopedConfigValue<bool> prefix_cache_guard(
+      KVCacheConfig::get_instance().enable_prefix_cache(), false);
+  ScopedConfigValue<int32_t> decode_limit_guard(
+      SchedulerConfig::get_instance().max_decode_token_per_sequence(), 6);
+  auto requests = generate_request({4}, {6}, std::nullopt, std::nullopt, 64);
+  Sequence* sequence = requests.front()->sequences().front().get();
+  std::unique_ptr<RequestPriorityQueue> running_queue =
+      std::make_unique<DequeQueue>();
+  for (const uint32_t num_units : {12u, 16u}) {
+    SCOPED_TRACE(num_units);
+    BlockManagerPool::Options options;
+    options.num_blocks(num_units)
+        .block_size(2)
+        .enable_prefix_cache(false)
+        .enable_linear_state(true)
+        .linear_state_num_slots(num_units)
+        .enable_shared_kv_cache(true)
+        .shared_full_block_units(1)
+        .shared_linear_state_units(4);
+    BlockManagerPool pool(options);
+    BlockCapacityGuard guard(&pool);
+    EXPECT_EQ(guard.if_accept_candidate_sequences(
+                  {sequence}, running_queue, /*running_sequences=*/{}),
+              num_units == 16);
+  }
 }
 
 TEST(SchedulerPolicyTest, StaleCapacityReservesFullPromptBeforeFirstChunk) {

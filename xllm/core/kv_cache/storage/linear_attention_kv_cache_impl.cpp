@@ -36,8 +36,10 @@ LinearAttentionKVCacheImpl::LinearAttentionKVCacheImpl(
     : LinearAttentionKVCacheImpl(
           create_linear_attention_kv_cache_tensors(kv_cache_shape,
                                                    create_options)) {
-  conv_cache_shape_ = kv_cache_shape.conv_cache_shape();
-  ssm_cache_shape_ = kv_cache_shape.ssm_cache_shape();
+  if (create_options.static_layout() == nullptr) {
+    conv_cache_shape_ = kv_cache_shape.conv_cache_shape();
+    ssm_cache_shape_ = kv_cache_shape.ssm_cache_shape();
+  }
 }
 
 LinearAttentionKVCacheImpl::LinearAttentionKVCacheImpl(

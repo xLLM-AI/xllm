@@ -41,10 +41,12 @@ class Sequence;
 // the inherited padding block.
 class LinearStateBlockManager final : public BlockManagerImpl {
  public:
-  explicit LinearStateBlockManager(uint32_t num_slots,
-                                   int32_t chunk_stride,
-                                   bool enable_prefix_cache = true,
-                                   bool instance_is_decode = false);
+  explicit LinearStateBlockManager(
+      uint32_t num_slots,
+      int32_t chunk_stride,
+      bool enable_prefix_cache = true,
+      bool instance_is_decode = false,
+      std::shared_ptr<StaticKVCacheBlockPool> shared_block_pool = nullptr);
   ~LinearStateBlockManager() override = default;
 
   std::optional<std::vector<Block>> allocate_for_sequence(
