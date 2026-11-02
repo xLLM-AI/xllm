@@ -22,12 +22,74 @@ limitations under the License.
 #include <limits>
 
 #include "core/framework/sampling/logits_processor.h"
+#include "core/framework/sampling/rec_sampler.h"
 #include "core/framework/sampling/sampler.h"
 #include "core/framework/speculative/rejection_sampler.h"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 
 namespace xllm {
 namespace {
+
+TEST(RecSamplerTest, PreservesConstraintsAndFullLogitsProcessing) {
+  for (const torch::Device& device : std::array<torch::Device, 2>{
+           torch::Device(torch::kCPU), torch::Device(torch::kPrivateUse1, 0)}) {
+    SCOPED_TRACE(device.str());
+    const auto options = torch::TensorOptions().device(device);
+    SamplingParameters params;
+    params.selected_token_idxes() =
+        torch::zeros({1}, options.dtype(torch::kInt64));
+    params.logits_bias() = torch::tensor({{2.0F, 0.0F, 0.0F, 0.0F}}, options);
+    params.unique_token_ids() =
+        torch::zeros({1, 1}, options.dtype(torch::kInt64));
+    params.unique_token_ids_lens() =
+        torch::ones({1}, options.dtype(torch::kInt32));
+    params.unique_token_counts() =
+        torch::ones({1, 1}, options.dtype(torch::kInt32));
+    params.repetition_penalties() = torch::full({1}, 2.0F, options);
+    params.frequency_penalties() = torch::ones({1}, options);
+    params.presence_penalties() = torch::ones({1}, options);
+    params.temperatures() = torch::full({1}, 2.0F, options);
+    params.min_p() = torch::full({1}, 0.1F, options);
+    params.top_k() = torch::full({1}, 2, options.dtype(torch::kInt64));
+    params.top_p() = torch::ones({1}, options);
+    params.filter_mask() =
+        torch::tensor({{-INFINITY, 0.0F, 0.0F, 0.0F}}, options);
+    const torch::Tensor filter =
+        torch::tensor({{0.0F, 0.0F, 0.0F, -INFINITY}}, options);
+    const torch::Tensor original =
+        torch::tensor({{8.0F, 2.0F, 1.0F, 4.0F}}, options);
+
+    torch::Tensor greedy_logits = original.clone();
+    const RecSampler default_sampler(RecPipelineType::kLlmRecDefault);
+    const SampleOutput greedy =
+        default_sampler.forward(greedy_logits, params, filter);
+    // Bias, repetition, frequency and presence apply once, in that order.
+    EXPECT_TRUE(
+        torch::equal(greedy_logits,
+                     torch::tensor({{3.0F, 2.0F, 1.0F, -INFINITY}}, options)));
+    EXPECT_EQ(greedy.next_tokens.item<int64_t>(), 0);
+
+    params.sampling_mode() = SamplingMode::RANDOM;
+    params.use_beam_search() = true;
+    params.logprobs() = true;
+    params.max_top_logprobs() = 2;
+    torch::Tensor logits = original.clone();
+    const RecSampler constrained_sampler(RecPipelineType::kOneRecDefault);
+    const SampleOutput output =
+        constrained_sampler.forward(logits, params, filter);
+    const torch::Tensor expected =
+        torch::tensor({{1.5F, 1.0F, -INFINITY, -INFINITY}}, options);
+    EXPECT_TRUE(torch::equal(logits, expected));
+    EXPECT_TRUE(
+        torch::equal(output.top_tokens,
+                     torch::tensor({{0, 1}}, options.dtype(torch::kInt64))));
+    const torch::Tensor expected_logprobs = torch::log_softmax(expected, -1);
+    EXPECT_TRUE(torch::allclose(output.top_logprobs,
+                                expected_logprobs.narrow(1, 0, 2)));
+    EXPECT_TRUE(
+        torch::allclose(output.logprobs, expected_logprobs.select(1, 0)));
+  }
+}
 
 TEST(SeededSamplerTest, NpuVerificationMatchesOrdinaryDrawsAtTokenOffsets) {
   constexpr int64_t kRows = 8;

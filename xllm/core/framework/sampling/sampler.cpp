@@ -176,7 +176,17 @@ SampleOutput sample(torch::Tensor& logits,
           ? torch::log_softmax(logits, /*dim=*/-1, torch::kFloat32)
           : torch::Tensor();
 
-  apply_sampling_constraints(logits, params, filter_mask);
+  const torch::Tensor& effective_filter_mask =
+      filter_mask.defined() ? filter_mask : params.filter_mask();
+  apply_sampling_penalties(logits, params);
+
+  if (params.filter_bitmask().defined()) {
+    apply_token_bitmask_inplace(logits, params.filter_bitmask());
+  } else if (effective_filter_mask.defined()) {
+    CHECK_EQ(effective_filter_mask.sizes(), logits.sizes())
+        << "filter_mask must match the logits shape";
+    logits.add_(effective_filter_mask);
+  }
   if (!params.is_all_greedy()) {
 #if defined(USE_NPU)
     // Only random rows consume distribution transforms. Keep the original
@@ -199,20 +209,20 @@ SampleOutput sample(torch::Tensor& logits,
         return control.defined() ? control.index_select(/*dim=*/0, rows)
                                  : torch::Tensor();
       };
-      apply_sampling_transforms(selected,
-                                select_control(params.temperatures()),
-                                select_control(params.min_p()),
-                                select_control(params.top_k()),
-                                select_control(params.top_p()));
+      apply_logits_transforms(selected,
+                              select_control(params.temperatures()),
+                              select_control(params.min_p()),
+                              select_control(params.top_k()),
+                              select_control(params.top_p()));
       logits.index_copy_(/*dim=*/0, rows, selected);
     } else
 #endif
     {
-      apply_sampling_transforms(logits,
-                                params.temperatures(),
-                                params.min_p(),
-                                params.top_k(),
-                                params.top_p());
+      apply_logits_transforms(logits,
+                              params.temperatures(),
+                              params.min_p(),
+                              params.top_k(),
+                              params.top_p());
     }
   }
 

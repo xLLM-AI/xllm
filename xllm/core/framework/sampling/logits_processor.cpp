@@ -339,29 +339,11 @@ void apply_sampling_penalties(torch::Tensor& logits,
   apply_bad_words(logits, params);
 }
 
-void apply_sampling_constraints(torch::Tensor& logits,
-                                const SamplingParameters& params,
-                                const torch::Tensor& filter_mask) {
-  const torch::Tensor& effective_filter_mask =
-      filter_mask.defined() ? filter_mask : params.filter_mask();
-  apply_sampling_penalties(logits, params);
-
-  // Only penalties/bias/filters can move the argmax; the rest is
-  // argmax-preserving (see SamplingParameters::is_all_greedy).
-  if (params.filter_bitmask().defined()) {
-    apply_token_bitmask_inplace(logits, params.filter_bitmask());
-  } else if (effective_filter_mask.defined()) {
-    CHECK_EQ(effective_filter_mask.sizes(), logits.sizes())
-        << "filter_mask must match the logits shape";
-    logits.add_(effective_filter_mask);
-  }
-}
-
-void apply_sampling_transforms(torch::Tensor& logits,
-                               const torch::Tensor& temperatures,
-                               const torch::Tensor& min_p,
-                               const torch::Tensor& top_k,
-                               const torch::Tensor& top_p_values) {
+void apply_logits_transforms(torch::Tensor& logits,
+                             const torch::Tensor& temperatures,
+                             const torch::Tensor& min_p,
+                             const torch::Tensor& top_k,
+                             const torch::Tensor& top_p_values) {
   torch::Tensor top_p = top_p_values;
   if (top_k.defined() && top_p.defined()) {
     // Native top-k/top-p consumes top-p in the logits dtype.
@@ -388,13 +370,23 @@ void apply_sampling_transforms(torch::Tensor& logits,
 void process_logits(torch::Tensor& logits,
                     const SamplingParameters& params,
                     const torch::Tensor& filter_mask) {
-  apply_sampling_constraints(logits, params, filter_mask);
+  const torch::Tensor& effective_filter_mask =
+      filter_mask.defined() ? filter_mask : params.filter_mask();
+  apply_sampling_penalties(logits, params);
+
+  if (params.filter_bitmask().defined()) {
+    apply_token_bitmask_inplace(logits, params.filter_bitmask());
+  } else if (effective_filter_mask.defined()) {
+    CHECK_EQ(effective_filter_mask.sizes(), logits.sizes())
+        << "filter_mask must match the logits shape";
+    logits.add_(effective_filter_mask);
+  }
   if (!params.is_all_greedy()) {
-    apply_sampling_transforms(logits,
-                              params.temperatures(),
-                              params.min_p(),
-                              params.top_k(),
-                              params.top_p());
+    apply_logits_transforms(logits,
+                            params.temperatures(),
+                            params.min_p(),
+                            params.top_k(),
+                            params.top_p());
   }
 }
 
