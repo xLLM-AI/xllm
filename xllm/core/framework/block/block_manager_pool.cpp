@@ -90,6 +90,9 @@ BlockManagerPool::BlockManagerPool(const Options& options,
       .max_seqs_per_batch(options_.max_seqs_per_batch())
       .hasher_type(options_.hasher_type())
       .enable_vmm_kvcache(options_.enable_vmm_kvcache())
+      .enable_shared_kv_cache(options_.enable_shared_kv_cache())
+      .shared_full_block_units(options_.shared_full_block_units())
+      .shared_linear_state_units(options_.shared_linear_state_units())
       .num_layers(options_.num_layers())
       .slot_size(options_.slot_size())
       .virtual_block_bytes(options_.virtual_block_bytes())
@@ -292,6 +295,13 @@ bool BlockManagerPool::exceeds_total_capacity(Sequence* sequence,
     }
     const auto* composite = static_cast<const CompositeBlockManager*>(
         block_managers_[dp_rank].get());
+    if (options_.enable_shared_kv_cache()) {
+      if (sequence_resource_units(num_tokens) <=
+          composite->admission_capacity()) {
+        return false;
+      }
+      continue;
+    }
     bool fits_rank = true;
     for (const auto& [type, entry] : composite->leaf_entries()) {
       if (!entry.participates_in_admission || entry.leaf->block_size() == 0) {
@@ -361,6 +371,11 @@ bool BlockManagerPool::exceeds_total_capacity(
   for (size_t dp_rank = 0; dp_rank < block_managers_.size(); ++dp_rank) {
     const auto* composite = static_cast<const CompositeBlockManager*>(
         block_managers_[dp_rank].get());
+    if (options_.enable_shared_kv_cache()) {
+      remaining_slots[dp_rank] =
+          composite->admission_capacity() / sequence_resource_units(num_tokens);
+      continue;
+    }
     for (const auto& [type, entry] : composite->leaf_entries()) {
       if (!entry.participates_in_admission) {
         continue;
@@ -518,10 +533,23 @@ float BlockManagerPool::get_gpu_cache_usage_perc() const {
 
 uint32_t BlockManagerPool::num_blocks() const { return options_.num_blocks(); }
 
+size_t BlockManagerPool::block_resource_units(BlockType type,
+                                              size_t count) const {
+  if (!options_.enable_shared_kv_cache()) {
+    return KVCacheManager::block_resource_units(type, count);
+  }
+  if (type == BlockType::KV) {
+    return count * options_.shared_full_block_units();
+  }
+  return type == BlockType::LINEAR
+             ? count * options_.shared_linear_state_units()
+             : 0;
+}
+
 size_t BlockManagerPool::admission_capacity(int32_t dp_rank) const {
   CHECK_GE(dp_rank, 0);
   CHECK_LT(static_cast<size_t>(dp_rank), block_managers_.size());
-  if (!options_.enable_vmm_kvcache()) {
+  if (!options_.enable_vmm_kvcache() && !options_.enable_shared_kv_cache()) {
     // Preserve the original physical-cache scheduler's configured capacity.
     return num_blocks();
   }

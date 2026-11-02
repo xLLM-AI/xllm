@@ -74,6 +74,16 @@ class KVCache final {
 
   bool empty() const;
 
+  bool is_static_shared() const noexcept { return static_layout_ != nullptr; }
+  int64_t cache_row_stride(KVCacheTensorRole role) const;
+  int64_t linear_state_slot_count() const;
+  int64_t linear_checkpoint_stride() const;
+  int64_t physical_row_index(int64_t slot_id, KVCacheTensorRole role) const;
+  torch::Tensor physical_row_indices(const torch::Tensor& slot_ids,
+                                     KVCacheTensorRole role) const;
+  torch::Tensor physical_token_slots(const torch::Tensor& token_slots,
+                                     int64_t block_size) const;
+
   [[nodiscard]] bool owns_layer_cache() const noexcept {
     return owns_layer_cache_;
   }
@@ -85,6 +95,7 @@ class KVCache final {
 
   bool owns_layer_cache_ = true;
   std::shared_ptr<KVCacheImpl> impl_;
+  std::shared_ptr<const StaticKVCacheLayout> static_layout_;
 
   friend void allocate_kv_caches(std::vector<KVCache>& kv_caches,
                                  const KVCacheShape& kv_cache_shape,

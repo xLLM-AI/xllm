@@ -328,6 +328,18 @@ CompositeBlockManager::LeafMap build_composite_leaves(
     int32_t dp_rank,
     VmmKVPageAllocator* page_allocator) {
   CompositeBlockManager::LeafMap leaves;
+  BlockManager::Options cache_options = options;
+  if (options.enable_shared_kv_cache()) {
+    CHECK(!options.enable_vmm_kvcache());
+    CHECK(options.enable_linear_state());
+    CHECK(options.manager_types().empty());
+    CHECK_EQ(options.num_blocks(),
+             static_cast<uint32_t>(options.linear_state_num_slots()));
+    cache_options.shared_block_pool(std::make_shared<StaticKVCacheBlockPool>(
+        options.num_blocks(),
+        options.shared_full_block_units(),
+        options.shared_linear_state_units()));
+  }
 
   const bool prefix_cache_on = options.enable_prefix_cache();
   const bool is_decode = options.instance_is_decode();
@@ -358,7 +370,7 @@ CompositeBlockManager::LeafMap build_composite_leaves(
     } else if (chunk_stride <= 0) {
       chunk_stride = 1;
     }
-    BlockManager::Options linear_opts = options;
+    BlockManager::Options linear_opts = cache_options;
     linear_opts
         .num_blocks(static_cast<uint32_t>(options.linear_state_num_slots()))
         .block_size(chunk_stride)
@@ -376,7 +388,7 @@ CompositeBlockManager::LeafMap build_composite_leaves(
 
   if (options.manager_types().empty()) {
     // Normal / Qwen / virtual memory: a single KV leaf.
-    BlockManager::Options kv_opts = options;
+    BlockManager::Options kv_opts = cache_options;
     kv_opts.block_type(BlockType::KV);
     const bool kv_prefix_cache = prefix_cache_on && kv_participates;
     kv_opts.enable_prefix_cache(kv_prefix_cache);
@@ -467,6 +479,13 @@ CompositeBlockManager::CompositeBlockManager(
       combination_(classify_leaf_combination(leaves_)),
       cache_tier_(cache_tier) {
   CHECK(!leaves_.empty()) << "CompositeBlockManager requires at least one leaf";
+  if (options.enable_shared_kv_cache()) {
+    CHECK(cache_tier == CacheTier::DEVICE);
+    shared_block_pool_ = leaf_of(BlockType::KV)->options().shared_block_pool();
+    CHECK(shared_block_pool_ != nullptr);
+    CHECK_EQ(shared_block_pool_,
+             leaf_of(BlockType::LINEAR)->options().shared_block_pool());
+  }
 }
 
 CompositeBlockManager::LeafCombination
@@ -651,6 +670,17 @@ bool CompositeBlockManager::allocate_sequence(Sequence* seq,
 
   for (auto& [type, entry] : leaves_) {
     auto blocks = entry.leaf->allocate_for_sequence(seq, kv_state, num_tokens);
+    if (!blocks.has_value() && shared_block_pool_ &&
+        entry.leaf->options().shared_block_pool() == shared_block_pool_) {
+      // Bound retries to the cache snapshot: another thread may publish new
+      // cache entries while each leaf lock is released between attempts.
+      size_t remaining_evictions = num_blocks_in_prefix_cache();
+      while (!blocks.has_value() && remaining_evictions > 0 &&
+             reclaim_shared_cache()) {
+        --remaining_evictions;
+        blocks = entry.leaf->allocate_for_sequence(seq, kv_state, num_tokens);
+      }
+    }
     if (!blocks.has_value()) {
       release_staged();
       return false;
@@ -897,7 +927,17 @@ std::vector<Block> CompositeBlockManager::allocate_blocks(BlockType type,
   BlockManager* leaf = leaf_of(type);
   CHECK(leaf != nullptr) << "CompositeBlockManager has no leaf for block type "
                          << static_cast<int>(type);
-  return leaf->allocate(num_blocks);
+  std::vector<Block> blocks = leaf->allocate(num_blocks);
+  if (blocks.size() != num_blocks && shared_block_pool_ &&
+      leaf->options().shared_block_pool() == shared_block_pool_) {
+    size_t remaining_evictions = num_blocks_in_prefix_cache();
+    while (blocks.size() != num_blocks && remaining_evictions > 0 &&
+           reclaim_shared_cache()) {
+      --remaining_evictions;
+      blocks = leaf->allocate(num_blocks);
+    }
+  }
+  return blocks;
 }
 
 void CompositeBlockManager::deallocate(const Slice<Block>& blocks) {
@@ -993,7 +1033,25 @@ const CompositeBlockManager::LeafEntry* CompositeBlockManager::capacity_leaf()
   return chosen;
 }
 
+bool CompositeBlockManager::reclaim_shared_cache() {
+  CHECK(shared_block_pool_ != nullptr);
+  for (auto& [type, entry] : leaves_) {
+    if (entry.leaf->options().shared_block_pool() != shared_block_pool_) {
+      continue;
+    }
+    // Each call takes only this leaf lock. A cached Block destructor may
+    // re-enter its own free(), but never another leaf allocator.
+    if (entry.leaf->evict_prefix_cache(1) != 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 size_t CompositeBlockManager::num_free_blocks() const {
+  if (shared_block_pool_) {
+    return shared_block_pool_->num_free_blocks();
+  }
   // Reports one admission leaf's raw block count. Mixing leaves of different
   // block_size would make num_free * block_size() meaningless.
   const LeafEntry* leaf = capacity_leaf();
@@ -1001,6 +1059,9 @@ size_t CompositeBlockManager::num_free_blocks() const {
 }
 
 size_t CompositeBlockManager::num_used_blocks() const {
+  if (shared_block_pool_) {
+    return shared_block_pool_->num_used_blocks();
+  }
   const LeafEntry* leaf = capacity_leaf();
   return leaf == nullptr ? 0 : leaf->leaf->num_used_blocks();
 }
@@ -1020,11 +1081,17 @@ Block CompositeBlockManager::allocate() {
 }
 
 size_t CompositeBlockManager::admission_capacity() const {
+  if (shared_block_pool_) {
+    return shared_block_pool_->num_total_blocks();
+  }
   const auto* leaf = capacity_leaf();
   return leaf == nullptr ? 0 : leaf->leaf->admission_capacity();
 }
 
 size_t CompositeBlockManager::num_total_blocks() const {
+  if (shared_block_pool_) {
+    return shared_block_pool_->num_total_blocks();
+  }
   const LeafEntry* leaf = capacity_leaf();
   return leaf == nullptr ? 0 : leaf->leaf->num_total_blocks();
 }

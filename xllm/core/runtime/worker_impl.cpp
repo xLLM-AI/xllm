@@ -84,6 +84,7 @@ limitations under the License.
 #include "core/kv_cache/layout/layerwise_split_layout.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/kv_cache/storage/linear_state_restore.h"
+#include "core/kv_cache/storage/static_kv_cache_tensor_allocator.h"
 #include "core/kv_cache/storage/vmm_kv_tensor_allocator.h"
 #include "core/kv_cache/transfer/virtual_kv_cache_transfer_memory_provider_impl.h"
 #include "core/runtime/decode_graph_bucket.h"
@@ -117,6 +118,42 @@ constexpr uint32_t TIMEOUT_S = 60;      // second
 constexpr uint32_t TIMEOUT_MS = 60000;  // millisecond
 
 namespace {
+
+void validate_shared_kv_cache_support(const ModelArgs& args,
+                                      const runtime::Options& options,
+                                      const ParallelArgs& parallel_args) {
+  const auto& cache_config = KVCacheConfig::get_instance();
+  if (!cache_config.enable_shared_kv_cache()) {
+    return;
+  }
+  const std::string& model_type = args.model_type();
+  const std::string& model_impl = ModelConfig::get_instance().model_impl();
+  CHECK(Platform::is_npu() && options.backend() == "llm" &&
+        options.task_type() == "generate" &&
+        (model_impl.empty() || model_impl == "native") &&
+        options.extension_impl().empty())
+      << "Shared KV cache requires the native NPU Torch LLM implementation.";
+  CHECK(model_type == "qwen3_next" || model_type == "qwen3_5_text" ||
+        model_type == "qwen3_5_moe_text")
+      << "Shared KV cache supports Qwen3Next and text-only Qwen3.5 models.";
+  CHECK(!options.enable_speculative_decode() &&
+        options.num_speculative_tokens() == 0 && !options.is_draft_engine() &&
+        !options.enable_graph() && !options.enable_prefill_piecewise_graph() &&
+        !options.enable_task_pipeline())
+      << "Shared KV cache requires ordinary eager decoding.";
+  CHECK(!cache_config.enable_vmm_kvcache() && !options.enable_disagg_pd() &&
+        options.instance_role() == InstanceRole::DEFAULT &&
+        options.host_blocks_factor() == 0.0 && !options.enable_kvcache_store())
+      << "Shared KV cache requires local static device storage.";
+  CHECK(parallel_args.layerwise_split_size() == 1 &&
+        parallel_args.cp_size() == 1 &&
+        parallel_args.kv_split_size_effective() == 1)
+      << "Shared KV cache does not support layerwise, context or KV splitting.";
+  CHECK(args.index_n_heads() == 0 && !args.enable_mla() &&
+        !options.enable_mla() && options.kv_cache_dtype() == "auto" &&
+        cache_config.indexer_cache_dtype() != "int8")
+      << "Shared KV cache requires unquantized ordinary Full and GDN caches.";
+}
 
 // During TP model initialization, each rank loads weights concurrently.
 // MoE weight assembly (especially stack/cat on large expert tensors) runs on
@@ -620,6 +657,18 @@ bool WorkerImpl::allocate_kv_cache_storage(
 #if defined(USE_NPU)
   create_options.enable_kv_cache_huge_page_allocator(use_huge_page_allocator);
 #endif
+  if (KVCacheConfig::get_instance().enable_shared_kv_cache()) {
+    CHECK(!use_huge_page_allocator &&
+          create_options.tensor_allocator() == nullptr &&
+          kv_cache_transfer_ == nullptr)
+        << "Shared KV cache owns its static allocator and does not support "
+           "huge pages or cache transfer.";
+    auto allocator =
+        create_static_kv_tensor_allocator(kv_cache_shape, create_options);
+    create_options.static_layout(
+        std::make_shared<const StaticKVCacheLayout>(allocator->layout()));
+    create_options.tensor_allocator(std::move(allocator));
+  }
 
   allocate_kv_caches(kv_caches_, kv_cache_shape, create_options);
   init_hierarchy_kv_cache_transfer(kv_cache_shape, create_options);
@@ -1964,6 +2013,7 @@ bool WorkerImpl::init_model_impl(const std::string& model_weights_path,
   model_weights_path_ = model_weights_path;
 
   auto args = model_loader->model_args();
+  validate_shared_kv_cache_support(args, options_, parallel_args_);
   ModelRegistry::configure_mtp_args(
       args,
       options_.speculative_algorithm(),

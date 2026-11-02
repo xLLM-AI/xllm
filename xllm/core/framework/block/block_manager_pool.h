@@ -56,6 +56,9 @@ class BlockManagerPool : public KVCacheManager {
     // can free blocks off-thread safely.
     PROPERTY(bool, enable_host_offload) = false;
     PROPERTY(bool, enable_vmm_kvcache) = false;
+    PROPERTY(bool, enable_shared_kv_cache) = false;
+    PROPERTY(uint32_t, shared_full_block_units) = 1;
+    PROPERTY(uint32_t, shared_linear_state_units) = 1;
     PROPERTY(int64_t,
              num_layers) = 0;  // Required when enable_vmm_kvcache is true
     PROPERTY(int64_t,
@@ -121,6 +124,7 @@ class BlockManagerPool : public KVCacheManager {
   virtual float get_gpu_cache_usage_perc() const;
 
   uint32_t num_blocks() const override;
+  size_t block_resource_units(BlockType type, size_t count) const override;
   size_t admission_capacity(int32_t dp_rank) const override;
   int32_t block_size() const override;
   std::vector<size_t> num_blocks_in_prefix_cache() const override;

@@ -77,6 +77,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `max_linear_state_cache_slots` | `int64` | `0` | linear-attention state cache 的最大活跃槽位数；`0` 表示根据可用 KV Cache 预算自动推导容量。 |
 | `xxh3_128bits_seed` | `uint32` | `1024` | XXH3 128-bit 哈希的默认 seed。 |
 | `enable_vmm_kvcache` | `bool` | `false` | 为 KV Cache 启用 VMM，与 `enable_vmm_weights` 独立；`false` 使用原有物理 KV Cache 实现，仅 NPU 支持。 |
+| `enable_shared_kv_cache` | `bool` | `false` | Full KV blocks 与 Linear state extents 共享固定物理 arena。首版支持 NPU Torch Qwen3 混合模型的 eager 执行；不兼容 VMM KV、推测解码、Host/PD、indexer/量化缓存及 context/layerwise/KV split。 |
 | `vmm_elastic` | `bool` | `true` | 任一 VMM 开关启用后，按需扩张活动逻辑槽位及物理页，并释放空闲页的物理内存；`false` 使用固定驻留池。 |
 | `vmm_memory_reserve_bytes` | `int64` | `0` | 弹性虚拟内存增长时额外保留的设备空闲显存，单位 byte，须非负；在运行时执行预留空间之外叠加生效。 |
 | `vmm_startup_timeout_ms` | `int32` | `120000` | VMM 启动时，master 等待节点注册、各非 master 等待物理池就绪分别使用的超时，单位毫秒，须为正数。独立于单次 RPC 超时，每个等待阶段单独计时。 |

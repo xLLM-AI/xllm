@@ -277,19 +277,6 @@ std::tuple<torch::Tensor, torch::Tensor> torch_chunk_gated_delta_rule(
   return std::make_tuple(core_attn_out, last_recurrent_state);
 }
 
-int64_t get_checkpoint_stride(const torch::Tensor& conv_cache,
-                              const torch::Tensor& ssm_cache) {
-  if (!conv_cache.defined() || !ssm_cache.defined() ||
-      conv_cache.numel() == 0 || ssm_cache.numel() == 0) {
-    return 1;
-  }
-  CHECK_GT(conv_cache.size(0), 0) << "conv cache must have positive batch dim";
-  CHECK_EQ(ssm_cache.size(0) % conv_cache.size(0), 0)
-      << "ssm cache checkpoint layout mismatch, ssm_rows=" << ssm_cache.size(0)
-      << ", conv_rows=" << conv_cache.size(0);
-  return ssm_cache.size(0) / conv_cache.size(0);
-}
-
 torch::Tensor build_linear_state_base_indices(
     const torch::Tensor& logical_state_indices,
     int64_t checkpoint_stride) {
@@ -609,10 +596,15 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
   torch::Tensor conv_weight = conv1d_->weight();
   torch::Tensor logical_state_indices =
       get_linear_state_indices(input_params, device);
-  const int64_t checkpoint_stride =
-      get_checkpoint_stride(conv_cache, ssm_cache);
+  const int64_t checkpoint_stride = kv_cache.linear_checkpoint_stride();
+  const torch::Tensor conv_state_indices = kv_cache.physical_row_indices(
+      logical_state_indices, KVCacheTensorRole::CONV);
   torch::Tensor linear_state_base_indices =
-      build_linear_state_base_indices(logical_state_indices, checkpoint_stride);
+      kv_cache.is_static_shared()
+          ? kv_cache.physical_row_indices(logical_state_indices,
+                                          KVCacheTensorRole::SSM)
+          : build_linear_state_base_indices(logical_state_indices,
+                                            checkpoint_stride);
   auto graph_context = input_params.graph.acl_graph_task_update_context;
   const bool register_conv1d_graph_update =
       graph_context != nullptr && graph_context->capturing;
@@ -622,6 +614,11 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
     std::vector<int64_t> linear_state_indices_vec(
         input_params.embedding.linear_state_ids.begin(),
         input_params.embedding.linear_state_ids.end());
+    if (kv_cache.is_static_shared()) {
+      for (int64_t& index : linear_state_indices_vec) {
+        index = kv_cache.physical_row_index(index, KVCacheTensorRole::CONV);
+      }
+    }
     torch::Tensor conv_input = reshape_qkvz_unpad(attn_metadata, mixed_qkv);
 
     const bool direct_qkv_model_supported =
@@ -702,9 +699,14 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
     const auto& num_accepted = use_spec_verify
                                    ? input_params.num_accepted_tokens_host
                                    : std::vector<int64_t>();
-    const std::vector<int64_t> linear_state_indices_host(
+    std::vector<int64_t> linear_state_indices_host(
         input_params.embedding.linear_state_ids.begin(),
         input_params.embedding.linear_state_ids.end());
+    if (kv_cache.is_static_shared()) {
+      for (int64_t& index : linear_state_indices_host) {
+        index = kv_cache.physical_row_index(index, KVCacheTensorRole::CONV);
+      }
+    }
     if (register_conv1d_graph_update) {
       if (use_spec_verify) {
         const auto conv1d_branch =
@@ -727,7 +729,7 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
         conv1d_params.x = conv_input_2d;
         conv1d_params.conv_state = conv_cache;
         conv1d_params.weight = conv_weight;
-        conv1d_params.conv_state_indices = logical_state_indices;
+        conv1d_params.conv_state_indices = conv_state_indices;
         conv1d_params.query_start_loc = attn_metadata.q_cu_seq_lens;
         conv1d_params.max_query_len = attn_metadata.max_query_len;
         mixed_qkv = xllm::kernel::causal_conv1d_update(conv1d_params);
@@ -761,7 +763,7 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
         conv1d_params.x = conv_input_2d;
         conv1d_params.conv_state = conv_cache;
         conv1d_params.weight = conv_weight;
-        conv1d_params.conv_state_indices = logical_state_indices;
+        conv1d_params.conv_state_indices = conv_state_indices;
         conv1d_params.query_start_loc = attn_metadata.q_cu_seq_lens;
         conv1d_params.max_query_len = attn_metadata.max_query_len;
         mixed_qkv = xllm::kernel::causal_conv1d_update(conv1d_params);
@@ -1014,7 +1016,7 @@ torch::Tensor Qwen3GatedDeltaNetBaseImpl::forward(
                           beta.squeeze(0).contiguous(),
                           scale,
                           actual_seq_lengths,
-                          logical_state_indices,
+                          linear_state_base_indices,
                           c10::nullopt,
                           g.squeeze(0).contiguous(),
                           c10::nullopt)

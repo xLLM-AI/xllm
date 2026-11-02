@@ -377,11 +377,12 @@ void PDScheduler::profile_tpot() {
         std::min(max_context_len, options_.max_tokens_per_batch());
   }
 
-  int32_t num_blocks = kv_cache_manager_->num_blocks();
+  const size_t resource_capacity = kv_cache_manager_->admission_capacity(0);
   int32_t block_size = kv_cache_manager_->block_size();
   int32_t max_seqs_per_batch = options_.max_seqs_per_batch();
-  int32_t request_blocks = max_context_len / block_size + 1;
-  int32_t max_batch_size = num_blocks / request_blocks;
+  const size_t request_units = kv_cache_manager_->sequence_resource_units(
+      (max_context_len / block_size + 1) * block_size);
+  int32_t max_batch_size = resource_capacity / request_units;
 
   // warm up
   profile_manager_->run_request(
@@ -391,7 +392,9 @@ void PDScheduler::profile_tpot() {
   // each loop iteration. Skip small token lengths to speed up profiling.
   for (int32_t token_length = max_context_len; token_length > 64;
        token_length >>= 1) {
-    max_batch_size = num_blocks / (token_length / block_size + 1);
+    max_batch_size =
+        resource_capacity / kv_cache_manager_->sequence_resource_units(
+                                (token_length / block_size + 1) * block_size);
     int32_t current_max_batch_size = max_batch_size > max_seqs_per_batch
                                          ? max_seqs_per_batch
                                          : max_batch_size;
@@ -1341,6 +1344,10 @@ bool PDScheduler::exceeds_decode_capacity(Sequence* sequence) const {
       (block_options.enable_host_offload() &&
        options_.instance_role() != InstanceRole::DECODE)) {
     return false;
+  }
+  if (block_options.enable_shared_kv_cache()) {
+    return block_manager->exceeds_total_capacity(sequence,
+                                                 sequence->num_prompt_tokens());
   }
   return ::xllm::exceeds_decode_capacity(
       sequence->num_prompt_tokens(),
