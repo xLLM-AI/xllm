@@ -78,7 +78,8 @@ def _config(**overrides: object) -> glm5_next.Glm5NextConfig:
         ({"tp_size": 2, "moe_tp_size": 1}, "TP-only MoE"),
         ({"tp_size": 2, "tp_rank": 1, "moe_tp_size": 2, "moe_tp_rank": 0}, "TP-only MoE"),
         ({"tp_size": 4, "ep_size": 2, "moe_tp_size": 1}, "must equal"),
-        ({"expert_parallel_degree": 2}, "ordinary EP level 1"),
+        ({"expert_parallel_degree": 2}, "requires EP > 1"),
+        ({"expert_parallel_degree": 3}, "must be 0, 1 or 2"),
         ({"enable_mega_moe": True}, "does not support enable_mega_moe"),
         ({"enable_fused_mc2": True}, "does not support enable_fused_mc2"),
     ],
@@ -438,9 +439,10 @@ def test_expert_loader_only_reads_local_experts(quantized: bool) -> None:
     model = glm5_next.Glm5NextForCausalLM.__new__(glm5_next.Glm5NextForCausalLM)
     nn.Module.__init__(model)
     model.cfg = config
+    model.dtype = torch.bfloat16 if quantized else torch.float32
     model.model = nn.Module()
     model.model.layers = nn.ModuleList([nn.Module()])
-    moe = glm5_next.Glm5NextMoE(config, torch.float32, torch.device("cpu"))
+    moe = glm5_next.Glm5NextMoE(config, model.dtype, torch.device("cpu"))
     model.model.layers[0].mlp = moe
     tensors = {}
     for expert in range(4):
@@ -530,6 +532,7 @@ def test_quantized_expert_scales_are_loaded_in_kernel_dtypes(
     module.use_w8a8 = True
     model = torch.nn.Module()
     model.cfg = config
+    model.dtype = torch.bfloat16
     model.model = torch.nn.Module()
     layer = torch.nn.Module()
     layer.mlp = module

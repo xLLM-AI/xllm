@@ -329,6 +329,9 @@ TEST(MtpAsyncInputBuilderTest, PybindViewOwnsGlobalDpKvMaxSequenceLengths) {
                                               expected[1] == 0 ? 0 : 1};
       params.parallel.dp_global_kv_max_seq_lens = expected;
       py_metadata = py::cast(PyAttentionMetadataView(metadata, params));
+      EXPECT_EQ(py_metadata.attr("raw_dp_execution_token_counts")
+                    .cast<std::vector<int32_t>>(),
+                params.parallel.dp_global_token_nums);
       EXPECT_EQ(py_metadata.attr("dp_global_kv_max_seq_lens")
                     .cast<std::vector<int32_t>>(),
                 expected);
