@@ -10,6 +10,7 @@ add_subdirectory(transfer)
 cc_test(
   NAME
     linear_state_restore_test
+  CPU_ONLY
   SRCS
     linear_state_restore_test.cpp
   DEPS

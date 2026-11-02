@@ -20,8 +20,6 @@ limitations under the License.
 #include "core/framework/model/model_output.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/draft_extend_input.h"
-#include "platform/device.h"
-#include "platform/platform.h"
 
 namespace xllm {
 
@@ -34,7 +32,6 @@ bool tensor_equal(const torch::Tensor& lhs, const torch::Tensor& rhs) {
 }  // namespace
 
 TEST(EmbeddingCacheTest, WritePrefillTargetContextAndClear) {
-  torch::Device device(Platform::type_torch(), 0);
   EmbeddingCache cache(/*total_nums=*/4);
 
   std::vector<int32_t> ids = {3, 2};
@@ -95,7 +92,6 @@ TEST(EmbeddingCacheTest, WritePrefillTargetContextClonesEmbeddingRows) {
 }
 
 TEST(EmbeddingCacheTest, WriteValidateTargetContext) {
-  torch::Device device(Platform::type_torch(), 0);
   EmbeddingCache cache(/*total_nums=*/2);
   std::vector<int32_t> ids = {0, 1};
   std::vector<std::string> request_ids = {"req_0", "req_1"};

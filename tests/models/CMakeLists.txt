@@ -29,6 +29,7 @@ if(USE_NPU)
   cc_test(
     NAME
       model_registry_test
+    CPU_ONLY
     SRCS
       model_registry_test.cpp
     DEPS

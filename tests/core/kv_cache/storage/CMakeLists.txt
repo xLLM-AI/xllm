@@ -1,6 +1,7 @@
 include(cc_test)
 
 cc_test(
+  DISCOVER_TESTS
   NAME
     kv_cache_test
   SRCS

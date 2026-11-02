@@ -34,7 +34,6 @@ limitations under the License.
 #include "core/kv_cache/prefix/block_hasher.h"
 #include "util/hash_util.h"
 #include "util/slice.h"
-#include "util/threadpool.h"
 
 namespace xllm {
 
@@ -69,8 +68,6 @@ class PrefixCache {
                                KVCacheEventJournal::encode_hash(hash.data));
       }
     }
-    exited_.store(true);
-    sleep(2);
   };
 
   void set_event_sink(std::shared_ptr<KVCacheEventJournal> journal,
@@ -209,8 +206,6 @@ class PrefixCache {
   uint32_t block_size_;
   BlockHasherType hasher_type_;
   size_t num_blocks_ = 0;
-  std::atomic_bool exited_{false};
-
   std::unordered_map<XXH3Key, Node*, FixedStringKeyHash, FixedStringKeyEqual>
       cached_blocks_;
 

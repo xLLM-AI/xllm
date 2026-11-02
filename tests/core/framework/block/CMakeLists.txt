@@ -4,6 +4,7 @@ include(cc_test)
 cc_test(
   NAME
     mtp_prefix_cache_test
+  CPU_ONLY
   SRCS
     mtp_prefix_cache_test.cpp
     composite_block_manager_test.cpp
@@ -35,6 +36,7 @@ if(USE_NPU)
   cc_test(
     NAME
       block_test
+    CPU_ONLY
     SRCS
       block_manager_test.cpp
       embedding_block_manager_test.cpp

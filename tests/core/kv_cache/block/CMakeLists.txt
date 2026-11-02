@@ -15,6 +15,7 @@ cc_test(
 cc_test(
   NAME
     concurrent_block_manager_test
+  CPU_ONLY
   SRCS
     concurrent_block_manager_test.cpp
   DEPS

@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include <iostream>
+#include <memory>
 #include <random>
 #include <unordered_map>
 #include <vector>
@@ -17,14 +18,21 @@ TEST(PrefixCacheMtpTest, DifferentNextTokenCannotReuseFirstBlock) {
   BlockManager::Options options;
   options.num_blocks(8).block_size(16);
   BlockManagerImpl allocator(options);
-  PrefixCache cache(/*block_size=*/16, BlockHasherType::MTP_TEXT);
+  auto cache = std::make_unique<PrefixCache>(16, BlockHasherType::MTP_TEXT);
   std::vector<int32_t> tokens(33, 7);
   auto blocks = allocator.allocate(/*num_blocks=*/2);
-  ASSERT_EQ(cache.insert(tokens, blocks), 32u);
-  ASSERT_EQ(cache.match(tokens).size(), 2u);
+  ASSERT_EQ(cache->insert(tokens, blocks), 32u);
+  ASSERT_EQ(cache->match(tokens).size(), 2u);
 
   tokens[16] = 8;
-  EXPECT_TRUE(cache.match(tokens).empty());
+  EXPECT_TRUE(cache->match(tokens).empty());
+  for (const Block& block : blocks) {
+    EXPECT_EQ(block.ref_count(), 2u);
+  }
+  cache.reset();
+  for (const Block& block : blocks) {
+    EXPECT_EQ(block.ref_count(), 1u);
+  }
 }
 
 TEST(PrefixCacheMtpTest, RequiresNextTokenEvenWithPrecomputedHashes) {

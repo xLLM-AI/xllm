@@ -69,6 +69,7 @@ add_dependencies(native_library_local_host_test native_library_host_fixture
 cc_test(
   NAME
     common_test
+  CPU_ONLY
   SRCS
     flash_comm1_context_test.cpp
     metrics_test.cpp

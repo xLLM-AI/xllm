@@ -23,8 +23,6 @@ limitations under the License.
 #include <set>
 #include <vector>
 
-#include "core/platform/platform.h"
-
 namespace xllm {
 
 namespace {
@@ -75,7 +73,6 @@ void expect_distribution_valid(const torch::Tensor& distribution) {
 }  // namespace
 
 TEST(EplbPolicyTest, Build_Greedy) {
-  torch::Device device(Platform::type_torch(), 0);
   GreedyEplbPolicy policy(
       kDeviceExpertsNum, kDeviceNum, kLayerNum, EplbOptions{});
   auto expert_load = make_skewed_load();
@@ -87,7 +84,6 @@ TEST(EplbPolicyTest, Build_Greedy) {
 }
 
 TEST(EplbPolicyTest, Build_Balanced) {
-  torch::Device device(Platform::type_torch(), 0);
   BalancedEplbPolicy policy(
       kDeviceExpertsNum, kDeviceNum, kLayerNum, EplbOptions{});
   auto expert_load = make_skewed_load();

@@ -3,6 +3,7 @@ include(cc_test)
 cc_test(
   NAME
     compressed_tensors_test
+  CPU_ONLY
   SRCS
     compressed_tensors_test.cpp
   DEPS
@@ -17,6 +18,7 @@ cc_test(
 cc_test(
   NAME
     dsa_topk_share_plan_test
+  CPU_ONLY
   SRCS
     dsa_topk_share_plan_test.cpp
   DEPS
@@ -39,6 +41,7 @@ target_link_libraries(attention_metadata_builder_test PUBLIC Python::Python)
 cc_test(
   NAME
     rotary_embedding_util_test
+  CPU_ONLY
   SRCS
     rotary_embedding_util_test.cpp
   DEPS
@@ -54,6 +57,7 @@ cc_test(
 cc_test(
   NAME
     deepseek_v4_cp_split_test
+  CPU_ONLY
   SRCS
     deepseek_v4_cp_split_test.cpp
   DEPS

@@ -3,6 +3,7 @@ include(cc_test)
 cc_test(
   NAME
     util_test
+  CPU_ONLY
   SRCS
     binary_payload_test.cpp
     blocking_counter_test.cpp
