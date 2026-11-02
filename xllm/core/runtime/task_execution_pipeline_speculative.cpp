@@ -32,7 +32,7 @@ limitations under the License.
 #include "core/framework/speculative/draft_proposal.h"
 #include "core/framework/speculative/spec_verify.h"
 #include "core/framework/speculative/verify_layout.h"
-#include "core/kv_cache/linear_state_restore.h"
+#include "core/kv_cache/storage/linear_state_restore.h"
 #include "core/kv_cache/transfer/kv_transfer_completion.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/runtime/dflash2_worker_impl.h"

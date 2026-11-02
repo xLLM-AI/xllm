@@ -13,14 +13,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/kv_cache/linear_state_restore.h"
+#include "core/kv_cache/storage/linear_state_restore.h"
 
 #include <gtest/gtest.h>
 
 #include <cstdint>
 #include <vector>
-
-#include "framework/model/model_params_view.h"
 
 namespace xllm {
 namespace {

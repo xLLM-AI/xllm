@@ -52,17 +52,17 @@ class ScopedValue final {
   T old_;
 };
 
-LinearStatePrefixHash make_prefix_hash(uint8_t tag) {
-  LinearStatePrefixHash hash{};
+PrefixHash make_prefix_hash(uint8_t tag) {
+  PrefixHash hash{};
   hash.fill(tag);
   return hash;
 }
 
-LinearStatePrefixHash compute_linear_state_prefix_hash_for_test(
+PrefixHash compute_linear_state_prefix_hash_for_test(
     const Slice<int32_t>& token_ids,
     int32_t block_size,
     size_t boundary_tokens) {
-  LinearStatePrefixHash hash{};
+  PrefixHash hash{};
   if (block_size <= 0 || boundary_tokens == 0) {
     return hash;
   }
@@ -102,7 +102,7 @@ int32_t insert_linear_state_checkpoint(LinearStateBlockManager* cache,
 }
 
 int32_t insert_linear_state_checkpoint(LinearStateBlockManager* cache,
-                                       const LinearStatePrefixHash& hash) {
+                                       const PrefixHash& hash) {
   return insert_linear_state_checkpoint(cache, XXH3Key(hash.data()));
 }
 
@@ -400,7 +400,7 @@ TEST_F(BlockManagerPoolTest, DpLinearStateAndPrefixCachesAreIsolated) {
   ASSERT_NE(second_linear, nullptr);
   ASSERT_NE(first_linear, second_linear);
 
-  const LinearStatePrefixHash first_only_hash = make_prefix_hash(42);
+  const PrefixHash first_only_hash = make_prefix_hash(42);
   ASSERT_GE(insert_linear_state_checkpoint(first_linear, first_only_hash), 1);
   EXPECT_TRUE(BlockManagerPoolTestPeer::contains(
       first_linear, XXH3Key(first_only_hash.data())));
@@ -791,9 +791,8 @@ TEST_F(BlockManagerPoolTest,
   ASSERT_TRUE(allocate_kv_prefix_for_test(pool, cached_seq));
   cached_seq.kv_state().set_kv_cache_tokens_num(cached_seq.num_tokens());
   pool.cache(&cached_seq);
-  const LinearStatePrefixHash checkpoint_hash =
-      compute_linear_state_prefix_hash_for_test(
-          cached_seq.tokens(), options.block_size(), /*boundary_tokens=*/8);
+  const PrefixHash checkpoint_hash = compute_linear_state_prefix_hash_for_test(
+      cached_seq.tokens(), options.block_size(), /*boundary_tokens=*/8);
   pool.deallocate_without_cache(&cached_seq);
 
   // Without a linear-state checkpoint for the prefix boundary, prefix reuse is
@@ -847,9 +846,8 @@ TEST_F(BlockManagerPoolTest, ExactPromptCannotReuseUncheckpointedTailBoundary) {
   ASSERT_TRUE(allocate_kv_prefix_for_test(pool, cached_seq));
   cached_seq.kv_state().set_kv_cache_tokens_num(cached_seq.num_tokens());
   pool.cache(&cached_seq);
-  const LinearStatePrefixHash tail_hash =
-      compute_linear_state_prefix_hash_for_test(
-          cached_seq.tokens(), options.block_size(), /*boundary_tokens=*/8);
+  const PrefixHash tail_hash = compute_linear_state_prefix_hash_for_test(
+      cached_seq.tokens(), options.block_size(), /*boundary_tokens=*/8);
   pool.deallocate_without_cache(&cached_seq);
 
   LinearStateBlockManager* prefix_cache =
@@ -886,9 +884,8 @@ TEST_F(BlockManagerPoolTest, PromptPastCheckpointReusesCheckpointBoundary) {
   ASSERT_TRUE(allocate_kv_prefix_for_test(pool, cached_seq));
   cached_seq.kv_state().set_kv_cache_tokens_num(cached_seq.num_tokens());
   pool.cache(&cached_seq);
-  const LinearStatePrefixHash tail_hash =
-      compute_linear_state_prefix_hash_for_test(
-          cached_seq.tokens(), options.block_size(), /*boundary_tokens=*/8);
+  const PrefixHash tail_hash = compute_linear_state_prefix_hash_for_test(
+      cached_seq.tokens(), options.block_size(), /*boundary_tokens=*/8);
   pool.deallocate_without_cache(&cached_seq);
 
   LinearStateBlockManager* prefix_cache =
@@ -921,8 +918,8 @@ TEST_F(BlockManagerPoolTest, LinearAllocationEvictsOnlyUnpinnedCheckpoint) {
   const int32_t source_id = sequence.get_linear_state_slot_id();
   const Block retained_old_read =
       sequence.kv_state().blocks(BlockType::LINEAR)[0];
-  const LinearStatePrefixHash evictable_hash = make_prefix_hash(2);
-  const LinearStatePrefixHash pinned_hash = make_prefix_hash(1);
+  const PrefixHash evictable_hash = make_prefix_hash(2);
+  const PrefixHash pinned_hash = make_prefix_hash(1);
   ASSERT_GE(insert_linear_state_checkpoint(leaf, evictable_hash), 1);
   ASSERT_GE(insert_linear_state_checkpoint(leaf, pinned_hash), 1);
   Block pinned =
@@ -1009,9 +1006,8 @@ TEST_F(BlockManagerPoolTest, PrefixUsesOnlyExactLinearStateCheckpoint) {
     ASSERT_NE(prefix_cache, nullptr);
     int32_t expected_slot = -1;
     for (size_t checkpoint : checkpoints) {
-      const LinearStatePrefixHash hash =
-          compute_linear_state_prefix_hash_for_test(
-              cached_seq.tokens(), kChunkStride, checkpoint);
+      const PrefixHash hash = compute_linear_state_prefix_hash_for_test(
+          cached_seq.tokens(), kChunkStride, checkpoint);
       const int32_t slot = insert_linear_state_checkpoint(prefix_cache, hash);
       ASSERT_GE(slot, 1);
       if (checkpoint == expected_tokens) {
@@ -1066,11 +1062,11 @@ TEST_F(BlockManagerPoolTest, SparseLinearStateCheckpointCannotExceedKVMatch) {
                     /*prompt_tokens=*/{
                         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16});
   ASSERT_TRUE(allocate_kv_prefix_for_test(pool, long_cached_seq));
-  const LinearStatePrefixHash kv_boundary_hash =
+  const PrefixHash kv_boundary_hash =
       compute_linear_state_prefix_hash_for_test(long_cached_seq.tokens(),
                                                 options.block_size(),
                                                 /*boundary_tokens=*/8);
-  const LinearStatePrefixHash long_checkpoint_hash =
+  const PrefixHash long_checkpoint_hash =
       compute_linear_state_prefix_hash_for_test(long_cached_seq.tokens(),
                                                 options.block_size(),
                                                 /*boundary_tokens=*/16);
@@ -1110,12 +1106,10 @@ TEST_F(BlockManagerPoolTest, ExactPromptStopsAtEarlierCheckpoint) {
   ASSERT_TRUE(allocate_kv_prefix_for_test(pool, cached_seq));
   cached_seq.kv_state().set_kv_cache_tokens_num(cached_seq.num_tokens());
   pool.cache(&cached_seq);
-  const LinearStatePrefixHash inner_hash =
-      compute_linear_state_prefix_hash_for_test(
-          cached_seq.tokens(), options.block_size(), /*boundary_tokens=*/8);
-  const LinearStatePrefixHash tail_hash =
-      compute_linear_state_prefix_hash_for_test(
-          cached_seq.tokens(), options.block_size(), /*boundary_tokens=*/16);
+  const PrefixHash inner_hash = compute_linear_state_prefix_hash_for_test(
+      cached_seq.tokens(), options.block_size(), /*boundary_tokens=*/8);
+  const PrefixHash tail_hash = compute_linear_state_prefix_hash_for_test(
+      cached_seq.tokens(), options.block_size(), /*boundary_tokens=*/16);
   pool.deallocate_without_cache(&cached_seq);
 
   LinearStateBlockManager* prefix_cache =

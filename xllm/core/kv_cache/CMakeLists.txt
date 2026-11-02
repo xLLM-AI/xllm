@@ -114,7 +114,6 @@ cc_library(
     layout/cache_layout_builder.h
     layout/cache_layout_types.h
     layout/flashinfer_cache_layout.h
-    linear_state_types.h
     storage/deepseek_v4_kv_cache_impl.h
     storage/indexed_kv_cache_impl.h
     storage/kpool_kv_cache_impl.h
@@ -161,9 +160,9 @@ cc_library(
   NAME
     linear_state_restore
   HDRS
-    linear_state_restore.h
+    storage/linear_state_restore.h
   SRCS
-    linear_state_restore.cpp
+    storage/linear_state_restore.cpp
   DEPS
     :common
     :kv_cache

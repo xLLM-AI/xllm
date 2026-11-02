@@ -33,7 +33,6 @@ limitations under the License.
 #include "core/common/types.h"
 #include "core/framework/eplb/eplb_info.h"
 #include "core/kv_cache/block/block.h"
-#include "core/kv_cache/linear_state_types.h"
 #include "core/platform/layer_synchronizer.h"
 #if defined(USE_NPU)
 #include "core/platform/npu/npu_layer_synchronizer.h"

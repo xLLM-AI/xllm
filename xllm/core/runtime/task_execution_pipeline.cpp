@@ -24,7 +24,7 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/sampling/sampler.h"
-#include "core/kv_cache/linear_state_restore.h"
+#include "core/kv_cache/storage/linear_state_restore.h"
 #include "core/kv_cache/transfer/kv_transfer_completion.h"
 #include "core/platform/platform.h"
 #include "core/runtime/decode_graph_bucket.h"

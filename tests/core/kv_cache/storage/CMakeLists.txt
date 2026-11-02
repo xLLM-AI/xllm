@@ -1,6 +1,17 @@
 include(cc_test)
 
 cc_test(
+  NAME
+    linear_state_restore_test
+  CPU_ONLY
+  SRCS
+    linear_state_restore_test.cpp
+  DEPS
+    :linear_state_restore
+    GTest::gtest_main
+)
+
+cc_test(
   DISCOVER_TESTS
   NAME
     kv_cache_test
