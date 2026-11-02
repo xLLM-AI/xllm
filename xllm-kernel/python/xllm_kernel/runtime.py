@@ -115,17 +115,6 @@ def initialize(
 
 def prepare_operation(operation: str, device: str, mode: str, implementation: str) -> PreparedKernel:
     """Use the worker startup path for a single offline validation target."""
-    # The model host loads its extension before initialize(). Standalone tools
-    # load it only when explicitly requesting one of its existing schemas.
-    host_required = any(
-        implementation in backend.implementations and "xllm_export" in backend.requires
-        for candidate in load_operations()
-        if candidate.contract.operation == operation
-        for backend in candidate.backends
-    )
-    if host_required and find_spec("xllm_export") is None:
-        from xllm import xllm_export  # noqa: F401
-
     bindings = initialize(
         device=device,
         execution_mode=mode,

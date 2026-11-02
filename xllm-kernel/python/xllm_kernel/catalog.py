@@ -48,9 +48,12 @@ class Operation:
         return self.prepared
 
 
-_BUILTINS = ("xllm_kernel.ops.rms_norm",)
+_BUILTINS = (
+    "xllm_kernel.ops.normalization",
+    "xllm_kernel.ops.activation",
+)
 
 
 def load_operations() -> tuple[Operation, ...]:
     """Import operation definitions without importing their device backends."""
-    return tuple(import_module(module).OPERATION for module in _BUILTINS)
+    return tuple(operation for module in _BUILTINS for operation in import_module(module).OPERATIONS)

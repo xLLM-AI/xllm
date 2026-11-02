@@ -86,7 +86,7 @@ xLLM runtime。算子接收准备好的输入，不在 solution 内另建请求�
 import torch
 import torch_npu
 from xllm_kernel import register_kernel
-from xllm_kernel.ops.rms_norm import RMS_NORM_CONTRACT
+from xllm_kernel.ops.normalization import RMS_NORM_CONTRACT
 
 _native_rms_norm = torch_npu.npu_rms_norm
 
@@ -151,10 +151,17 @@ register_custom_op("my_native_op", fake_impl=my_native_fake)
 
 公共定义模块保持 SDK-free，设备依赖由实现模块加载。新增算子时，完成以下接入：
 
-1. 在 `ops/<operation>/__init__.py` 声明契约与 `OPERATION`，通过 `BackendModule` 列出实现模块、依赖和实现名。
-2. 将算子定义加入 `catalog._BUILTINS`，并从 `ops/__init__.py` 导出公共 API。
-3. 公共 API 通过 `OPERATION.get_prepared()` 获取固定绑定；模型初始化时将该算子加入 `operations`。
-4. 接入模型或 layer 调用点，并补充对应的离线 suite 和验证。
+1. 在 `ops/<group>/__init__.py` 声明契约与 `OPERATION`，通过 `BackendModule` 列出实现模块、依赖和实现名。
+   必须导出 `OPERATIONS` 元组，即使分组中只有一个算子：
+
+   ```python
+   OPERATIONS = (OPERATION,)
+   ```
+
+   包含多个算子的分组应在元组中列出所有声明，例如 `ops/normalization/__init__.py` 中的三个归一化算子。
+2. 将分组模块加入 `catalog._BUILTINS`，并从 `ops/__init__.py` 导出公共 API。
+3. 公共 API 通过对应的 `OPERATION.get_prepared()` 获取固定绑定；模型初始化时将算子名称而非分组名称加入 `operations`。
+4. 接入模型或 layer 调用点。自定义 kernel 需要数值或性能验证时，再添加离线 suite；原生 Torch 适配器无需重复添加数值对比 suite。
 
 初始化完成后的公共调用示例：
 
@@ -172,14 +179,18 @@ output = rms_norm(input, weight, eps)
 
 ### 4.1 `OperationSuite`
 
-在 `numerics/<operation>.py` 导出 `SUITE`，并加入 `numerics/catalog.py` 的 `_BUILTINS`。以 RMSNorm 为例：
+当前没有内置的数值验证 suite，包括 RMSNorm。公共数值验证和 benchmark 工具仍可用于自定义 kernel。
+使用算子专属的 CLI 参数前，先在 `numerics/<operation>.py` 实现并导出 `SUITE`，
+将模块完整路径加入 `numerics/catalog.py` 的 `_BUILTINS`。
+
+下面是自定义算子的声明模板。三个回调函数都需要在该模块中实现，算子名与实现名应与其 catalog 声明一致：
 
 ```python
 from xllm_kernel.numerics.suite import OperationSuite
 
 SUITE = OperationSuite(
-    operation="rms_norm",
-    implementations=("npu.torch.rms_norm",),
+    operation="my_operation",
+    implementations=("npu.my_solution.my_operation",),
     add_arguments=_add_arguments,  # 注册 CLI 参数
     cases=_cases,                # 生成用例
     prepare=_prepare,            # 准备实现
@@ -203,7 +214,10 @@ suite 发现阶段只加载元数据；Torch、设备 SDK 和扩展在准备或�
 
 tensor-tree 输出可复用 `numerics/factory.py` 的 `tensor_suite()`，按正数维度矩阵生成 suite，builder 返回 `Example`。
 `TensorCase` 在准备时绑定输入，`numerics/inputs.py` 提供固定 CPU seed 的随机输入；空维度用例自定义 `KernelCase`。
-完整示例见 [`numerics/rms_norm.py`](https://github.com/xLLM-AI/xllm/blob/main/xllm-kernel/python/xllm_kernel/numerics/rms_norm.py)。
+通用辅助函数见 [`numerics/factory.py`](https://github.com/xLLM-AI/xllm/blob/main/xllm-kernel/python/xllm_kernel/numerics/factory.py)，
+`Example` / `TensorCase` 接口见 [`numerics/tensor_case.py`](https://github.com/xLLM-AI/xllm/blob/main/xllm-kernel/python/xllm_kernel/numerics/tensor_case.py)。
+[`test/test_kernel_cli.py`](https://github.com/xLLM-AI/xllm/blob/main/xllm-kernel/test/test_kernel_cli.py)
+中的合成 suite 演示了 CLI 协议，使用的是 CPU 测试替身，而非设备 kernel。
 
 ## 5. 公共验证、计时和报告流程
 
@@ -229,24 +243,32 @@ Eager 的 event 间隔包含主机提交间隙；单算子结果与端到端性�
 
 ## 6. 测试与验证
 
-以下命令从仓库根目录执行，先安装包以及被测实现所需的依赖。命令以 RMSNorm 为例，
-其他算子替换 `--operation`、`--implementation` 和各自的专属参数。
+以下命令从仓库根目录执行，先安装本包。设备执行还需要安装被测实现的依赖，并确保 NPU 空闲。
 
 ### 6.1 独立数值验证与 benchmark
 
 ```bash
-python -m xllm_kernel.numerics --operation rms_norm --help
-python -m xllm_kernel.benchmark --operation rms_norm --help
+python -m xllm_kernel.numerics --help
+python -m xllm_kernel.benchmark --help
+```
 
-python -m xllm_kernel.numerics --operation rms_norm --device npu --mode eager \
-  --implementation npu.torch.rms_norm --rows 1 16 --widths 6144 \
+suite catalog 默认为空，暂不能运行算子专属命令。应先按第 4 节注册自定义 suite。
+以下模板假设该 suite 声明了 `my_operation` 和 `npu.my_solution.my_operation`；
+请替换为实际名称，并补齐该 suite 所需的专属参数：
+
+```bash
+python -m xllm_kernel.numerics --operation my_operation --help
+python -m xllm_kernel.benchmark --operation my_operation --help
+
+python -m xllm_kernel.numerics --operation my_operation --device npu --mode eager \
+  --implementation npu.my_solution.my_operation \
   --revision "$(git rev-parse HEAD)" --output numerics.json
-python -m xllm_kernel.benchmark --operation rms_norm --device npu --mode aclgraph \
-  --implementation npu.torch.rms_norm --rows 1 16 --widths 6144 \
+python -m xllm_kernel.benchmark --operation my_operation --device npu --mode aclgraph \
+  --implementation npu.my_solution.my_operation \
   --iterations 50 --revision "$(git rev-parse HEAD)" --output benchmark.json
 ```
 
-各算子的参数与默认值由对应 suite 定义，`--operation NAME --help` 用于查看可用选项。
+各算子的参数与默认值由已注册的 suite 定义；注册后才可用 `--operation NAME --help` 查看专属选项。
 
 ### 6.2 包测试
 

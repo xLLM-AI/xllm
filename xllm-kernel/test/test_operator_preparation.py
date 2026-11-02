@@ -37,20 +37,20 @@ def test_all_backend_modules_register_unique_variants_and_execute_public_binding
                 assert importlib.import_module(backend.module) is module
         specs = registry.specs()
         assert len(specs) == len({spec.name for spec in specs})
-        assert {spec.solution for spec in specs} <= {"aclnn", "atb", "hccl", "torch", "tilelang"}
+        assert {spec.solution for spec in specs} == {"torch"}
         registry.freeze()
         for operation in operations:
             assert {spec.name for spec in specs if spec.contract == operation.contract} == set(
                 operation.implementations
             )
-        rms_norm = importlib.import_module("xllm_kernel.ops.rms_norm")
-        plan = registry.prepare(rms_norm.CONTRACT, device="npu", execution_mode="eager")
-        monkeypatch.setattr(rms_norm.OPERATION, "prepared", plan)
+        rms_norm = importlib.import_module("xllm_kernel.ops.normalization")
+        plan = registry.prepare(rms_norm.RMS_NORM_CONTRACT, device="npu", execution_mode="eager")
+        monkeypatch.setattr(rms_norm.RMS_NORM_OPERATION, "prepared", plan)
         value = torch.tensor([2.0])
         assert rms_norm.rms_norm(value, torch.ones(1), 1e-5) is value
         assert plan.spec.solution == "torch"
         with pytest.raises(RuntimeError, match="frozen"):
-            importlib.reload(sys.modules["xllm_kernel.ops.rms_norm.torch_npu"])
+            importlib.reload(sys.modules["xllm_kernel.ops.normalization.torch"])
     finally:
         for operation in operations:
             for backend in operation.backends:

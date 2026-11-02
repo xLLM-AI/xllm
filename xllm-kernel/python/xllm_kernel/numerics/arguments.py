@@ -39,8 +39,6 @@ def parse_arguments(
         if (selected.operation is None or suite.operation == selected.operation)
         and (selected.implementation is None or selected.implementation in suite.implementations)
     ]
-    if not matches:
-        parser.error("no operation suite matches the requested operation and implementation")
     if len(matches) == 1:
         matches[0].add_arguments(parser)
     args = parser.parse_args()

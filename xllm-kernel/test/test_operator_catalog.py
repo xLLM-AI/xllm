@@ -8,8 +8,11 @@ import pytest
 from xllm_kernel.numerics.catalog import load_suites
 from xllm_kernel.numerics.suite import OperationSuite
 
+_SUITES = load_suites()
+_SUITE_IDS = tuple(suite.operation for suite in _SUITES)
 
-@pytest.mark.parametrize("suite", load_suites(), ids=lambda suite: suite.operation)
+
+@pytest.mark.parametrize("suite", _SUITES, ids=_SUITE_IDS)
 def test_operator_case_matrix_is_nonempty(suite: OperationSuite) -> None:
     import argparse
 
@@ -21,7 +24,7 @@ def test_operator_case_matrix_is_nonempty(suite: OperationSuite) -> None:
     assert len(suite.implementations) == len(set(suite.implementations))
 
 
-@pytest.mark.parametrize("suite", load_suites(), ids=lambda suite: suite.operation)
+@pytest.mark.parametrize("suite", _SUITES, ids=_SUITE_IDS)
 def test_backend_metadata_and_loader_modules(suite: OperationSuite) -> None:
     module = import_module(f"xllm_kernel.ops.{suite.operation}")
     operator = module.OPERATION
