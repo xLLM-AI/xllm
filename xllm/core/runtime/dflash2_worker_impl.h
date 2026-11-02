@@ -53,6 +53,10 @@ class DFlash2WorkerImpl final : public DFlashWorkerImpl {
 
   ~DFlash2WorkerImpl() override = default;
 
+  bool init_model(const std::string& model_weights_path,
+                  int32_t random_seed,
+                  MasterStatus master_status) override;
+
  protected:
   DraftProposal run_decode_draft(const LlmForwardInput& input,
                                  LlmForwardInput& validate_input) override;

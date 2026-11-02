@@ -207,6 +207,17 @@ bool DraftModelSpecWorkerImpl<TargetInput>::init_model(
   if (impl_->get_status() == WorkerImpl::Status::LOADED) {
     context_ = impl_->context_;
   }
+  if (result && draft_impl_->get_status() == WorkerImpl::Status::LOADED) {
+    const ModelArgs& draft_args = draft_impl_->context_.get_model_args();
+    const int64_t draft_vocab_size = draft_args.draft_vocab_size() > 0
+                                         ? draft_args.draft_vocab_size()
+                                         : draft_args.vocab_size();
+    draft_vocab_ =
+        DraftVocabMapping(draft_impl_->take_draft_token_id_offsets(),
+                          draft_vocab_size,
+                          impl_->context_.get_model_args().vocab_size(),
+                          device_);
+  }
   return result;
 }
 

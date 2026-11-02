@@ -2444,6 +2444,21 @@ bool WorkerImpl::init_model_impl(const std::string& model_weights_path,
   scoped_load_threads =
       std::make_unique<ScopedAtenLoadThreads>(/*target_threads=*/1);
 
+  draft_token_id_offsets_ = torch::Tensor();
+  if (is_spec_draft_ && (SpeculativeConfig::is_eagle3_algorithm(
+                             options_.speculative_algorithm()) ||
+                         SpeculativeConfig::is_dspark_algorithm(
+                             options_.speculative_algorithm()))) {
+    for (const std::unique_ptr<StateDict>& state_dict :
+         model_loader->get_state_dicts()) {
+      torch::Tensor d2t = state_dict->get_tensor("d2t");
+      if (d2t.defined()) {
+        draft_token_id_offsets_ = std::move(d2t);
+        break;
+      }
+    }
+  }
+
   if (master_status == MasterStatus::WAKEUP) {
     this->load_model(std::move(model_loader));
   } else if (master_status == MasterStatus::LIGHT_SLEEP) {
@@ -2468,6 +2483,10 @@ torch::Tensor WorkerImpl::select_hidden_states_for_embedding(
       << "Captured hidden states are required but the model did not return "
          "aux_hidden_states";
   return model_output.aux_hidden_states;
+}
+
+torch::Tensor WorkerImpl::take_draft_token_id_offsets() {
+  return std::exchange(draft_token_id_offsets_, torch::Tensor());
 }
 
 void WorkerImpl::load_model(std::unique_ptr<ModelLoader> loader) {

@@ -23,6 +23,7 @@ limitations under the License.
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 
 #include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model/causal_lm.h"
@@ -388,6 +389,30 @@ TEST(HFModelLoaderTest, QwenRetainsLlmBackendWithRecFactory) {
     EXPECT_EQ(ModelRegistry::get_model_backend(name), "llm");
     EXPECT_TRUE(static_cast<bool>(ModelRegistry::get_causallm_factory(name)));
     EXPECT_TRUE(static_cast<bool>(ModelRegistry::get_rec_model_factory(name)));
+  }
+}
+#endif
+
+#if defined(USE_NPU)
+TEST(HFModelLoaderTest, Eagle3DraftVocabSizeWinsOverFullVocab) {
+  const std::string names[] = {"qwen3_eagle3", "kimi_k25_eagle3"};
+  for (const std::string& name : names) {
+    SCOPED_TRACE(name);
+    ModelArgsLoader loader = ModelRegistry::get_model_args_loader(name);
+    ASSERT_NE(loader, nullptr);
+    const std::pair<int64_t, int64_t> cases[] = {{4, 4}, {0, 16}};
+    for (const auto& [draft_vocab_size, expected_vocab] : cases) {
+      SCOPED_TRACE("draft_vocab_size=" + std::to_string(draft_vocab_size));
+      JsonReader reader;
+      reader.mutable_data() =
+          nlohmann::json{{"model_type", name},
+                         {"vocab_size", 16},
+                         {"text_config", {{"vocab_size", 32}}},
+                         {"draft_vocab_size", draft_vocab_size}};
+      ModelArgs args;
+      ASSERT_TRUE(loader(reader, &args));
+      EXPECT_EQ(args.vocab_size(), expected_vocab);
+    }
   }
 }
 #endif

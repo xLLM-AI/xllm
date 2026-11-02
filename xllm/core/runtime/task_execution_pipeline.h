@@ -28,6 +28,7 @@ limitations under the License.
 #include "core/framework/model/causal_lm.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/draft_proposal.h"
+#include "core/framework/speculative/draft_vocab_mapping.h"
 #include "core/kv_cache/transfer/host_transfer/transfer.h"
 #include "core/platform/device.h"
 #include "core/runtime/executor.h"
@@ -110,6 +111,7 @@ struct SpeculativeTaskCapacity {
   // Restore committed draft KV from verifier hidden states before reuse.
   bool refresh_target_prefix = false;
   bool is_probabilistic_draft = false;
+  DraftVocabMapping draft_vocab;
   // Reuse the refreshed final row for the next admitted first proposal.
   bool reuse_prefix_refresh_output = false;
   bool unified_graph = false;
