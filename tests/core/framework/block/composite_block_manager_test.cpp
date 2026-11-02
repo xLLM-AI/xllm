@@ -2089,14 +2089,14 @@ TEST(CompositeBlockManagerTest,
   KVCacheConfig& config = KVCacheConfig::get_instance();
   const bool original_vmm = config.enable_vmm_kvcache();
   ScopeGuard restore_config([&] { config.enable_vmm_kvcache(original_vmm); });
-  config.enable_vmm_kvcache(true);
+  config.enable_vmm_kvcache(/*value=*/true);
   for (const bool release_sequence_first : {false, true}) {
     SCOPED_TRACE(release_sequence_first);
     TestVmmKVPageAllocator allocator(/*dp_size=*/1);
     auto manager = make_vmm_prefix_manager(allocator);
-    const std::vector<int32_t> tokens(5, 7);
-    Sequence sequence = MakeTestSequence(0, tokens);
-    std::vector<Block> blocks = manager->allocate(1);
+    const std::vector<int32_t> tokens(/*count=*/5, /*value=*/7);
+    Sequence sequence = MakeTestSequence(/*index=*/0, tokens);
+    std::vector<Block> blocks = manager->allocate(/*num_blocks=*/1);
     manager->cache(tokens, blocks);
     sequence.kv_state().replace_composite_blocks(BlockType::KV,
                                                  std::move(blocks),
@@ -2105,7 +2105,7 @@ TEST(CompositeBlockManagerTest,
     auto first = std::make_unique<BatchState>();
     auto second = std::make_unique<BatchState>();
     for (auto* batch : {first.get(), second.get()}) {
-      batch->add(&sequence, 4);
+      batch->add(&sequence, /*token_budget=*/4);
       batch->prepare_sequence_input_data();
       batch->prepare_sequence_input_data();
     }
