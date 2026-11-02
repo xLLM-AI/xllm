@@ -80,6 +80,19 @@ def fused_qk_norm_rope(
     )
 
 
+def has_fused_qk_rotary(head_dim: int, dtype: torch.dtype, device: torch.device) -> bool:
+    return False
+
+
+def apply_qk_rotary(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    cosine: torch.Tensor,
+    sine: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    raise NotImplementedError("apply_qk_rotary is NPU-only")
+
+
 def interleaved_rotary_embedding(
     value: torch.Tensor,
     cosine: torch.Tensor,
@@ -145,7 +158,9 @@ def inplace_partial_rotary_mul(
 
 
 __all__ = [
+    "apply_qk_rotary",
     "fused_qk_norm_rope",
+    "has_fused_qk_rotary",
     "inplace_partial_rotary_mul",
     "interleaved_rotary_embedding",
     "mrope",
