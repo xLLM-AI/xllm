@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""DSpark context projection and KV scatter graphs bound to warmed Slots."""
+"""DSpark context projection and KV scatter graphs with bucketed inputs."""
 
 from __future__ import annotations
 
@@ -39,14 +39,12 @@ class _ContextKvGraph:
 
 
 class ContextKvAclGraphRunner:
-    """Graph only the context update, retaining warmed native Slot bindings.
+    """Graph context updates in prewarmed row buckets.
 
     Accepted rows are compacted by the worker before this call. Unused bucket
     rows use negative slots, the same no-write contract as block-draft padding.
     The caller orders producers, this update and subsequent cache readers on
     its compute stream and retires the borrowed output before another update.
-    A larger Target KV variant may supply a new hidden buffer for the same
-    Slot geometry; serialized Launch captures its context consumer on demand.
     """
 
     def __init__(self, model: nn.Module, device: torch.device) -> None:
@@ -54,8 +52,6 @@ class ContextKvAclGraphRunner:
         self.device = device
         self._kv_caches: list[tuple[torch.Tensor, torch.Tensor]] | None = None
         self._graphs: dict[int, _ContextKvGraph] = {}
-        self._borrowed_graphs: dict[tuple[object, ...], _ContextKvGraph] = {}
-        self._borrowed_slot_bindings: set[tuple[object, ...]] = set()
         self._buckets: list[int] = []
         self._capture_stream: torch.npu.Stream | None = None
         self.replays = 0
@@ -160,70 +156,3 @@ class ContextKvAclGraphRunner:
         entry.graph.replay()
         self.replays += 1
         return entry.output[:rows]
-
-    @torch.inference_mode()
-    def execute_borrowed(
-        self, hidden: torch.Tensor, positions: torch.Tensor, slots: torch.Tensor, *, warmup: bool
-    ) -> torch.Tensor:
-        """Replay the pipeline's final views without staging or compaction.
-
-        Slots mask rejected rows on the ordered task stream. New Slot bindings
-        require startup warmup. A warmed Slot may acquire a new Target hidden
-        buffer after KV-graph growth; capture masks its writes and restores the
-        live slots before replay. The pipeline retires this output before
-        reusing the target graph or the Slot inputs.
-        """
-        if self._kv_caches is None:
-            raise RuntimeError("borrowed context graphs require bound KV caches")
-        if (
-            hidden.dim() != 2
-            or hidden.shape[0] <= 0
-            or positions.shape != (hidden.shape[0],)
-            or slots.shape != positions.shape
-            or hidden.shape[1] != self.model.model.context_projection_weight.shape[1]
-            or hidden.dtype != self.model.model.context_projection_weight.dtype
-            or positions.dtype != torch.int32
-            or slots.dtype != torch.int32
-            or any(tensor.device != self.device for tensor in (hidden, positions, slots))
-        ):
-            raise ValueError("invalid borrowed context graph inputs")
-        binding = tuple(
-            (tensor.data_ptr(), tuple(tensor.shape), tuple(tensor.stride()), tensor.dtype, tensor.device)
-            for tensor in (hidden, positions, slots)
-        )
-        # Only the Target output address may vary after startup. Slot-owned
-        # positions/slots and the hidden geometry remain part of admission.
-        slot_binding = (binding[0][1:], binding[1:])
-        entry = self._borrowed_graphs.get(binding)
-        if entry is None:
-            if not warmup and slot_binding not in self._borrowed_slot_bindings:
-                raise RuntimeError("borrowed context graph requires a warmed Slot binding")
-            caller = torch.npu.current_stream(self.device)
-            if self._capture_stream is None:
-                self._capture_stream = torch.npu.Stream(device=self.device)
-            stream = self._capture_stream
-            saved_slots = slots.clone()
-            slots.fill_(-1)
-            stream.wait_stream(caller)
-            try:
-                with torch.npu.stream(stream):
-                    for _ in range(_CAPTURE_WARMUP_STEPS):
-                        self.model.write_context_kv(hidden, positions, slots, self._kv_caches, None)
-                    stream.synchronize()
-                    graph = torch.npu.NPUGraph()
-                    with torch.npu.graph(
-                        graph, pool=_get_graph_pool(), stream=stream, capture_error_mode="thread_local"
-                    ):
-                        output = self.model.write_context_kv(hidden, positions, slots, self._kv_caches, None)
-                    if output is None:
-                        raise RuntimeError("borrowed context capture produced no output")
-            finally:
-                caller.wait_stream(stream)
-                slots.copy_(saved_slots)
-            entry = _ContextKvGraph(hidden, positions, slots, graph, output)
-            self._borrowed_graphs[binding] = entry
-            self._borrowed_slot_bindings.add(slot_binding)
-            logger.info("Python borrowed context KV ACL graph captured: rows=%d", hidden.shape[0])
-        entry.graph.replay()
-        self.replays += 1
-        return entry.output

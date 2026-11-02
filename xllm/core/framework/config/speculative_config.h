@@ -77,12 +77,6 @@ class SpeculativeConfig final {
            is_dspark_algorithm(algorithm);
   }
 
-  // Algorithm-level admission only; callers validate runtime geometry.
-  static bool supports_task_pipeline(std::string_view algorithm) {
-    return is_mtp_algorithm(algorithm) ||
-           is_block_diffusion_algorithm(algorithm);
-  }
-
   static bool supports_adaptive_target_verify(std::string_view algorithm) {
     return is_dspark_algorithm(algorithm) || is_mtp_algorithm(algorithm);
   }

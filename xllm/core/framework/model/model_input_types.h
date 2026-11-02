@@ -77,7 +77,6 @@ void materialize_linear_state_indices(Embedding& embedding,
   }
 }
 
-class PythonAttentionMetadata;
 namespace npu {
 struct AclGraphTaskUpdateContext;
 }  // namespace npu
@@ -569,50 +568,6 @@ class ExpertInput final {
   }
 };
 
-// Borrowed fixed-capacity sources for in-graph adaptive DSpark packing. The
-// control word stores the active request count in its low 32 bits and a
-// startup/profiling KV-write suppression bit in its high 32 bits. No control
-// value or compact-arena offset is captured as a Host kernel argument.
-struct DSparkAdaptiveGraphInput {
-  torch::Tensor arena;
-  torch::Tensor control;
-  torch::Tensor anchors;
-  torch::Tensor base_positions;
-  torch::Tensor base_kv_lengths;
-  torch::Tensor base_block_table;
-  torch::Tensor offsets;
-  torch::Tensor owners;
-  torch::Tensor columns;
-  torch::Tensor linear_state_indices;
-  torch::Tensor num_accepted_tokens;
-  uint32_t block_size = 0;
-  uint32_t draft_width = 7;
-};
-
-namespace detail {
-inline DSparkAdaptiveGraphInput dspark_adaptive_graph_input_to(
-    const DSparkAdaptiveGraphInput& input,
-    const torch::Device& device) {
-  DSparkAdaptiveGraphInput out = input;
-  for (torch::Tensor* tensor : {&out.arena,
-                                &out.control,
-                                &out.anchors,
-                                &out.base_positions,
-                                &out.base_kv_lengths,
-                                &out.base_block_table,
-                                &out.offsets,
-                                &out.owners,
-                                &out.columns,
-                                &out.linear_state_indices,
-                                &out.num_accepted_tokens}) {
-    if (tensor->defined()) {
-      *tensor = safe_to(*tensor, device, /*non_blocking=*/true);
-    }
-  }
-  return out;
-}
-}  // namespace detail
-
 class LlmGraphInput final {
  public:
   torch::Tensor attn_mask;
@@ -644,7 +599,6 @@ class LlmGraphInput final {
   // already been recorded on the signal stream. Replay can skip cold-path
   // signaling on the final-draft-to-target critical path.
   bool spec_verify_static_graph_tasks_prepared = false;
-  DSparkAdaptiveGraphInput dspark_adaptive;
 
   LlmGraphInput to(const torch::Device& device) const {
     LlmGraphInput out;
@@ -680,8 +634,6 @@ class LlmGraphInput final {
         spec_verify_source_addresses_stable;
     out.spec_verify_static_graph_tasks_prepared =
         spec_verify_static_graph_tasks_prepared;
-    out.dspark_adaptive =
-        detail::dspark_adaptive_graph_input_to(dspark_adaptive, device);
     return out;
   }
 };
@@ -767,7 +719,6 @@ class VlmGraphInput final {
   // already been recorded on the signal stream. Replay can skip cold-path
   // signaling on the final-draft-to-target critical path.
   bool spec_verify_static_graph_tasks_prepared = false;
-  DSparkAdaptiveGraphInput dspark_adaptive;
 
   VlmGraphInput to(const torch::Device& device) const {
     VlmGraphInput out;
@@ -803,8 +754,6 @@ class VlmGraphInput final {
         spec_verify_source_addresses_stable;
     out.spec_verify_static_graph_tasks_prepared =
         spec_verify_static_graph_tasks_prepared;
-    out.dspark_adaptive =
-        detail::dspark_adaptive_graph_input_to(dspark_adaptive, device);
     return out;
   }
 };

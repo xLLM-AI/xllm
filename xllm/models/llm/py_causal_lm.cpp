@@ -486,16 +486,7 @@ ModelOutput PyCausalLM::write_context_kv(
   set_active_instance(this);
   if (context_kv_graph_runner_ && !context_kv_graph_runner_.is_none() &&
       input_params.meta.batch_forward_type.is_decode() &&
-      layer_synchronizer.is_none() &&
-      (!input_params.python_attention_metadata || input_params.enable_graph)) {
-    if (input_params.python_attention_metadata && input_params.enable_graph) {
-      py::object output = context_kv_graph_runner_.attr("execute_borrowed")(
-          target_hidden,
-          positions,
-          device_cache_slots,
-          py::arg("warmup") = input_params.meta.is_graph_warmup);
-      return ModelOutput(output.cast<torch::Tensor>());
-    }
+      layer_synchronizer.is_none()) {
     py::object output = context_kv_graph_runner_.attr("execute")(
         target_hidden, positions, device_cache_slots);
     return ModelOutput(output.cast<torch::Tensor>());

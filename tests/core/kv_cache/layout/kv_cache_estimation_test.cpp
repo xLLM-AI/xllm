@@ -200,30 +200,27 @@ TEST(KVCacheEstimationTest, DraftTp1OverridesTensorParallelHeadDerivation) {
   EXPECT_EQ(capacity.slot_size(), 256);
 }
 
-TEST(KVCacheEstimationTest, SpeculativeEmbeddingCostDependsOnAlgorithm) {
+TEST(KVCacheEstimationTest, ReservedPipelineFlagPreservesSpeculativeCapacity) {
   ModelArgs model_args = make_standard_args();
-  // Large enough that the MTP hidden-state rows change the block count.
   model_args.hidden_size(512);
   runtime::Options runtime_options;
-  runtime_options.block_size(16)
-      .enable_task_pipeline(true)
-      .num_speculative_tokens(2);
-
+  runtime_options.block_size(16).num_speculative_tokens(2);
   KVCacheEstimateContext context;
   context.dtype = torch::kFloat16;
   context.virtual_memory_cache_size = 1024 * 1024;
 
-  runtime_options.speculative_algorithm("DFlash");
-  const KVCacheCapacity block_diffusion_capacity =
-      KVCacheEstimator(model_args).estimate(runtime_options, context);
-
-  runtime_options.speculative_algorithm("MTP");
-  const KVCacheCapacity mtp_capacity =
-      KVCacheEstimator(model_args).estimate(runtime_options, context);
-
-  // DFlash stores only token/position metadata; MTP also stores two hidden
-  // rows and therefore fits fewer blocks in the same budget.
-  EXPECT_GT(block_diffusion_capacity.n_blocks(), mtp_capacity.n_blocks());
+  for (const std::string algorithm : {"DFlash", "MTP"}) {
+    SCOPED_TRACE(algorithm);
+    runtime_options.speculative_algorithm(algorithm).enable_task_pipeline(
+        false);
+    const KVCacheCapacity baseline =
+        KVCacheEstimator(model_args).estimate(runtime_options, context);
+    runtime_options.enable_task_pipeline(true);
+    const KVCacheCapacity reserved =
+        KVCacheEstimator(model_args).estimate(runtime_options, context);
+    EXPECT_EQ(reserved.n_blocks(), baseline.n_blocks());
+    EXPECT_EQ(reserved.cache_size_in_bytes(), baseline.cache_size_in_bytes());
+  }
 }
 
 TEST(KVCacheEstimationTest, RuntimeEstimatorRejectsMissingWorkerBudget) {
@@ -285,18 +282,6 @@ TEST(KVCacheEstimationTest, EstimatesStandardAttentionBlocks) {
   EXPECT_EQ(capacity.num_full_attention_layers(), 4);
   EXPECT_EQ(capacity.num_linear_attention_layers(), 0);
   EXPECT_EQ(capacity.n_blocks(), 128);
-}
-
-TEST(KVCacheEstimationTest, EmbeddingContextSharesTheAvailableMemoryBudget) {
-  ModelArgs model_args = make_standard_args();
-  KVCacheEstimateOptions options = make_estimate_options();
-  options.embedding_context_bytes_per_block = 2048;
-  const KVCacheCapacity capacity =
-      estimate_kv_cache_capacity(model_args, options);
-  EXPECT_EQ(capacity.n_blocks(), 102);
-  EXPECT_LE(capacity.n_blocks() * (8192 + 2048), options.cache_size_in_bytes);
-  EXPECT_GT((capacity.n_blocks() + 1) * (8192 + 2048),
-            options.cache_size_in_bytes);
 }
 
 TEST(KVCacheEstimationTest, IgnoresLinearStateSlotsWithoutLinearAttention) {

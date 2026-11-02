@@ -21,13 +21,75 @@ limitations under the License.
 #include <functional>
 #include <future>
 
+#include "core/framework/config/execution_config.h"
 #include "core/kv_cache/transfer/kv_cache_transfer.h"
+#include "core/runtime/worker.h"
 #include "core/runtime/worker_impl.h"
+#include "core/util/scope_guard.h"
 
 namespace xllm {
 namespace {
 
 using namespace std::chrono_literals;
+
+TEST(WorkerFeatureGateDeathTest, RejectsTaskPipelineWhenUnsupported) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  const ParallelArgs parallel_args(
+      /*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr);
+  runtime::Options options;
+  options.enable_task_pipeline(true);
+
+  ASSERT_DEATH(
+      Worker(
+          parallel_args, torch::Device(torch::kCPU), options, WorkerType::LLM),
+      "enable_task_pipeline is currently unsupported");
+}
+
+TEST(WorkerFeatureGateDeathTest, RejectsUnifiedMtpGraphWhenUnsupported) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  auto& execution_config = ExecutionConfig::get_instance();
+  const bool enable_unified_mtp_graph =
+      execution_config.enable_unified_mtp_graph();
+  ScopeGuard restore_config([&] {
+    execution_config.enable_unified_mtp_graph(enable_unified_mtp_graph);
+  });
+  execution_config.enable_unified_mtp_graph(true);
+  const ParallelArgs parallel_args(
+      /*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr);
+
+  ASSERT_DEATH(Worker(parallel_args,
+                      torch::Device(torch::kCPU),
+                      runtime::Options(),
+                      WorkerType::LLM),
+               "enable_unified_mtp_graph is currently unsupported");
+}
+
+TEST(WorkerFeatureGateDeathTest, RejectsAdaptiveDraftStepWithoutTaskPipeline) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  const ParallelArgs parallel_args(
+      /*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr);
+  runtime::Options options;
+  options.enable_adaptive_draft_step(true);
+
+  ASSERT_DEATH(
+      Worker(
+          parallel_args, torch::Device(torch::kCPU), options, WorkerType::LLM),
+      "enable_adaptive_draft_step is currently unsupported");
+}
+
+TEST(WorkerFeatureGateDeathTest,
+     RejectsAdaptiveTargetVerifyWithoutTaskPipeline) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  const ParallelArgs parallel_args(
+      /*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr);
+  runtime::Options options;
+  options.enable_adaptive_target_verify(true);
+
+  ASSERT_DEATH(
+      Worker(
+          parallel_args, torch::Device(torch::kCPU), options, WorkerType::LLM),
+      "enable_adaptive_target_verify is currently unsupported");
+}
 
 class ShutdownTestWorker final : public WorkerImpl {
  public:

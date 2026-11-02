@@ -302,56 +302,8 @@ def test_glm_ep1_moe_reduction_matches_weight_sharding(cp_size: int, group: str)
     torch.testing.assert_close(output, routed + shared)
 
 
-@pytest.mark.parametrize(
-    ("enabled", "ep_size", "gate_overlap", "fine_overlap", "expected"),
-    [
-        (True, 1, False, False, True),
-        (False, 1, False, False, False),
-        (True, 2, False, False, False),
-        (True, 1, True, False, True),
-        (True, 1, True, True, True),
-        (False, 1, True, True, False),
-        (True, 2, True, True, False),
-    ],
-)
-def test_glm_moe_finalize_follows_unified_switch_contract(
-    enabled: bool,
-    ep_size: int,
-    gate_overlap: bool,
-    fine_overlap: bool,
-    expected: bool,
-) -> None:
-    moe = glm5_2.Glm52MoE.__new__(glm5_2.Glm52MoE)
-    nn.Module.__init__(moe)
-    moe.ep_size = ep_size
-    moe._expert_parallel_enabled = True
-    moe._gate_overlap_enabled = gate_overlap
-    moe._fine_overlap_enabled = fine_overlap
-    moe.set_unified_mtp_graph_enabled(enabled)
-    assert moe._enable_moe_finalize_routing is expected
-    if ep_size == 1:
-        assert moe._gate_overlap_enabled is enabled
-        assert moe._fine_overlap_enabled is False
-    else:
-        assert moe._gate_overlap_enabled is gate_overlap
-        assert moe._fine_overlap_enabled is fine_overlap
-
-
-def test_glm_unified_switch_does_not_enable_overlap_on_other_devices() -> None:
-    moe = glm5_2.Glm52MoE.__new__(glm5_2.Glm52MoE)
-    nn.Module.__init__(moe)
-    moe.ep_size = 1
-    moe._expert_parallel_enabled = False
-    moe._gate_overlap_enabled = False
-    moe._fine_overlap_enabled = False
-    moe.set_unified_mtp_graph_enabled(True)
-    assert not moe._enable_moe_finalize_routing
-    assert not moe._gate_overlap_enabled
-    assert not moe._fine_overlap_enabled
-
-
 @pytest.mark.parametrize(("enabled", "tokens"), [(False, 2), (True, 2), (True, 0)])
-def test_glm_unified_switch_selects_grouped_moe_output(enabled: bool, tokens: int) -> None:
+def test_glm_moe_finalize_selects_grouped_moe_output(enabled: bool, tokens: int) -> None:
     moe = glm5_2.Glm52MoE.__new__(glm5_2.Glm52MoE)
     nn.Module.__init__(moe)
     moe._enable_moe_finalize_routing = enabled

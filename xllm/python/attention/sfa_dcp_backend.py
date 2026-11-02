@@ -128,10 +128,6 @@ class SfaDcpAttentionBackend(NpuPagedAttentionBackend):
             max_num_reqs=max(self._max_num_reqs, 1),
         )
 
-    def prepare_owned_graph_metadata(self, metadata: AttentionMetadata) -> None:
-        """Reject Unified warmup until DCP derivations are part of its graph."""
-        raise NotImplementedError("Unified MTP graphs do not support DCP-derived metadata")
-
     def prepare(
         self,
         metadata: AttentionMetadata,

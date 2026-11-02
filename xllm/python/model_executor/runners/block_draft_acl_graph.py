@@ -225,9 +225,8 @@ class BlockDraftAclGraphRunner(DecodeAclGraphRunner):
         tiers: tuple[int, ...] = ()
         if pre_capture_kv_buckets and not self._windowed_block_draft:
             page_size = self._logical_page_size
-            # The owned-table runner pads its last capacity to a power of two,
-            # unlike the prepared runner's clamped source-table view. Include
-            # the existing short-model lookahead when matching runtime keys.
+            # The owned-table runner pads its last capacity to a power of two.
+            # Include the existing short-model lookahead for runtime keys.
             model_pages = (self.max_model_len + page_size - 1) // page_size
             warmup_length = min(self.max_model_len, page_size * self._WARMUP_PAGE_COUNT)
             warmup_pages = (warmup_length + query_width + page_size - 1) // page_size

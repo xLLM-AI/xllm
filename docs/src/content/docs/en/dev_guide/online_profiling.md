@@ -62,7 +62,7 @@ Stop synchronously flushes and exports `<profile_dir>/xllm_rank<rank>_<pid>_<tim
 python -c 'from torch_npu.profiler import analyse; analyse("/absolute/path/to/session_ascend_pt")'
 ```
 
-The torch_npu collector is process-wide and captures the current device. Use one worker process per NPU, as in distributed serving with `--nnodes=<world-size>` and a separate `--node_rank` per process. Multiple workers in a single process are rejected; use `ascend` for that deployment. CPU callbacks belong to the worker compute thread; use `--enable_task_pipeline=false` with `torch`. The separate task-pipeline launch thread is not supported by this backend. Native C++ and Python model execution on the compute thread are both supported, including device activity from ACLGraph replay; replay does not re-run every PyTorch CPU operator in the captured graph.
+The torch_npu collector is process-wide and captures the current device. Use one worker process per NPU, as in distributed serving with `--nnodes=<world-size>` and a separate `--node_rank` per process. Multiple workers in a single process are rejected; use `ascend` for that deployment. CPU callbacks belong to the worker compute thread. Native C++ and Python model execution on the compute thread are both supported, including device activity from ACLGraph replay; replay does not re-run every PyTorch CPU operator in the captured graph.
 
 ### Ascend NPU backend (`ascend`)
 

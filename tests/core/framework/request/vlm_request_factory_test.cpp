@@ -237,10 +237,9 @@ TEST_F(VLMRequestFactoryTest,
   EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 1);
 }
 
-TEST_F(VLMRequestFactoryTest, TaskPipelineMtpAcceptsMinimumLengthWithOverlap) {
+TEST_F(VLMRequestFactoryTest, MtpAcceptsMinimumLengthWithOverlap) {
   auto factory = make_factory();
-  options_.enable_task_pipeline(true)
-      .enable_schedule_overlap(true)
+  options_.enable_schedule_overlap(true)
       .num_speculative_tokens(4)
       .speculative_algorithm("MTP");
   CallbackCapture capture;
@@ -260,8 +259,7 @@ TEST_F(VLMRequestFactoryTest, TaskPipelineMtpAcceptsMinimumLengthWithOverlap) {
 
 TEST_F(VLMRequestFactoryTest, MtpAcceptsSamplingControlsWithOverlap) {
   auto factory = make_factory();
-  options_.enable_task_pipeline(false)
-      .enable_schedule_overlap(true)
+  options_.enable_schedule_overlap(true)
       .num_speculative_tokens(4)
       .speculative_algorithm("MTP");
   CallbackCapture capture;
@@ -286,8 +284,7 @@ TEST_F(VLMRequestFactoryTest, MtpAcceptsSamplingControlsWithOverlap) {
 
 TEST_F(VLMRequestFactoryTest, SamplingControlsAreIndependentOfRuntimeOptions) {
   auto factory = make_factory();
-  options_.enable_task_pipeline(true)
-      .enable_schedule_overlap(true)
+  options_.enable_schedule_overlap(true)
       .num_speculative_tokens(4)
       .speculative_algorithm("DFlash");
   CallbackCapture capture;
@@ -319,9 +316,7 @@ TEST_F(VLMRequestFactoryTest, SamplingControlsAreIndependentOfRuntimeOptions) {
 
 TEST_F(VLMRequestFactoryTest, RuntimeOptionsDoNotBypassVocabularyValidation) {
   auto factory = make_factory();
-  options_.enable_task_pipeline(true)
-      .enable_schedule_overlap(true)
-      .num_speculative_tokens(4);
+  options_.enable_schedule_overlap(true).num_speculative_tokens(4);
   CallbackCapture capture;
   RequestParams sp;
   sp.seed = 42;

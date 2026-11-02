@@ -32,6 +32,7 @@ limitations under the License.
 #include "common/types.h"
 #include "core/common/xllm_build_info.h"
 #include "core/framework/config/eplb_config.h"
+#include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
@@ -114,6 +115,14 @@ void validate_rank_tablefile_backend() {
 }  // namespace
 
 Master::Master(const Options& options) : options_(options) {
+  CHECK(!options_.enable_task_pipeline())
+      << "enable_task_pipeline is currently unsupported.";
+  CHECK(!ExecutionConfig::get_instance().enable_unified_mtp_graph())
+      << "enable_unified_mtp_graph is currently unsupported.";
+  CHECK(!options_.enable_adaptive_draft_step())
+      << "enable_adaptive_draft_step is currently unsupported.";
+  CHECK(!options_.enable_adaptive_target_verify())
+      << "enable_adaptive_target_verify is currently unsupported.";
   // Multi-process serving runs one worker per process. Select one runtime
   // logical device from the process-visible devices while keeping node_rank as
   // the global distributed identity.

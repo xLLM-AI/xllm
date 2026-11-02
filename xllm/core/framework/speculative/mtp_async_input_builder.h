@@ -57,7 +57,6 @@ void prepare_next_draft_from_accepted_state(
     bool use_chunked_prefill,
     bool rebuild_expanded_decode_metadata,
     int32_t block_size,
-    bool require_fused_npu_kernel = false,
     kernel::npu::MtpPrepareNextDraftWorkspace* reusable_workspace = nullptr);
 
 // Builds one-row-per-sequence metadata for a later draft step from the

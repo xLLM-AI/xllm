@@ -906,15 +906,10 @@ class Glm52MoE(DeepseekV3MoE):
         device: torch.device,
     ) -> None:
         super().__init__(cfg, layer_id, dtype, device)
-        # The executor configures both target and draft from the Unified
-        # switch. EP1 NPU models must not inherit experimental overlap flags.
-        self.set_unified_mtp_graph_enabled(False)
-
-    def set_unified_mtp_graph_enabled(self, enabled: bool) -> None:
-        supported = self.ep_size == 1 and self._expert_parallel_enabled
-        self._enable_moe_finalize_routing = bool(enabled) and supported
-        if supported:
-            self._gate_overlap_enabled = bool(enabled)
+        self._enable_moe_finalize_routing = False
+        if self.ep_size == 1 and self._expert_parallel_enabled:
+            # EP1 NPU models must not inherit experimental overlap flags.
+            self._gate_overlap_enabled = False
             self._fine_overlap_enabled = False
 
     def _use_moe_finalize_routing(self, hidden: torch.Tensor) -> bool:

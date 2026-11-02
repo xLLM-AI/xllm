@@ -159,8 +159,6 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
 
   bool enable_schedule_overlap() { return options_.enable_schedule_overlap(); };
 
-  bool enable_task_pipeline() const { return options_.enable_task_pipeline(); }
-
   void get_latency_metrics(std::vector<int64_t>& ttft,
                            std::vector<int64_t>& tbt) override;
 

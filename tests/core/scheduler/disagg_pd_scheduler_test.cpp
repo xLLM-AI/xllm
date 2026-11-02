@@ -1066,7 +1066,8 @@ TEST(DisaggPDSchedulerTest, MissingServiceMetadataFailsBeforeDecodeLookup) {
   }
 }
 
-TEST(DisaggPDSchedulerTest, DecodeBuildsMinTokenInputsFromLocalExecutionMode) {
+TEST(DisaggPDSchedulerTest,
+     ReservedPipelineFlagPreservesHostMinimumTokenInputs) {
   const bool initialized = XServiceClientTestPeer::set_initialized(true);
   ScopeGuard restore_client(
       [initialized] { XServiceClientTestPeer::set_initialized(initialized); });
@@ -1101,15 +1102,9 @@ TEST(DisaggPDSchedulerTest, DecodeBuildsMinTokenInputsFromLocalExecutionMode) {
       SamplingInputBuilder builder;
       builder.append(&request->state().sampling_param, /*token_index=*/0);
       const SamplingParameters input = builder.build();
-      const bool device_min_tokens = enable_task_pipeline && minimum > 0;
-      EXPECT_EQ(input.min_token_ids().defined(), device_min_tokens);
-      EXPECT_EQ(input.min_tokens_remaining().defined(), device_min_tokens);
-      EXPECT_EQ(input.logits_bias().defined(),
-                !enable_task_pipeline && minimum > 0);
-      if (input.min_tokens_remaining().defined()) {
-        EXPECT_EQ(input.min_tokens_remaining().item<int64_t>(), minimum);
-        EXPECT_EQ(input.min_token_ids()[0][0].item<int64_t>(), 7);
-      }
+      EXPECT_FALSE(input.min_token_ids().defined());
+      EXPECT_FALSE(input.min_tokens_remaining().defined());
+      EXPECT_EQ(input.logits_bias().defined(), minimum > 0);
       if (input.logits_bias().defined()) {
         EXPECT_EQ(input.logits_bias()[0][7].item<float>(),
                   -std::numeric_limits<float>::infinity());

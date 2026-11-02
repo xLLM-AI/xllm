@@ -30,14 +30,12 @@ limitations under the License.
 #include "core/framework/block/block_manager_pool.h"
 #include "core/framework/request/request.h"
 #include "core/framework/request/sequence.h"
-#include "core/framework/speculative/adaptive/spec_startup_calibration.h"
 #include "core/runtime/options.h"
 #include "core/scheduler/profile/decode_graph_warmup_plan.h"
 #include "core/scheduler/profile/time_predictor.h"
 
 namespace xllm {
 class DistributedWorkerManager;
-class SpeculativeConfig;
 
 std::vector<int32_t> build_step_time_profile_batch_sizes(
     int32_t max_seqs_per_batch);
@@ -48,7 +46,6 @@ std::vector<int32_t> build_step_time_profile_batch_sizes(
 // default 16 to keep measured memory aligned with real captures.
 int32_t warmup_decode_seq_len(bool fia_enabled, int32_t max_context_len);
 
-std::string spec_calibration_compatibility(const runtime::Options& options);
 class ProfileManager {
  private:
   using StepCallback = std::function<ForwardOutput(BatchGroup&)>;
@@ -59,12 +56,6 @@ class ProfileManager {
     PROPERTY(bool, enable_schedule_overlap) = false;
 
     PROPERTY(bool, enable_task_pipeline) = false;
-    PROPERTY(bool, enable_adaptive_target_verify) = false;
-    PROPERTY(bool, enable_adaptive_draft_step) = false;
-    PROPERTY(std::string, adaptive_target_verify_calibration);
-    PROPERTY(std::string, adaptive_target_verify_cost_table);
-    PROPERTY(std::string, adaptive_target_verify_cost_table_output);
-    PROPERTY(std::string, spec_calibration_compatibility);
 
     PROPERTY(int32_t, dp_size) = 1;
 
@@ -255,19 +246,6 @@ class ProfileManager {
       StepCallback step_callback,
       ResultCallback result_callback,
       std::shared_ptr<DistributedWorkerManager> distributed_worker_manager);
-
-  void calibrate_spec_startup();
-  void calibrate_draft_step_startup();
-  void run_startup_speculative_sample(
-      const SpecStartupCalibrationConfig& config,
-      const SpecCalibrationPoint& point,
-      uint64_t sample_id,
-      const std::function<void()>& after_prefill,
-      const std::function<void()>& after_drain);
-
-  const SpecStartupCalibrationConfig& target_verify_calibration_config();
-  int32_t adaptive_calibration_warmup_seq_len(int32_t default_length);
-  std::optional<SpecStartupCalibrationConfig> target_verify_calibration_config_;
 
   std::unique_ptr<TimePredictor> prefill_time_predictor_;
   std::unique_ptr<TimePredictor> decode_time_predictor_;

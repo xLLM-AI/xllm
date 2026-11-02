@@ -163,16 +163,6 @@ tilelang_register_runtime_kernel(
 )
 
 tilelang_register_runtime_kernel(
-  NAME mtp_greedy_commit
-  WRAPPER_SRCS mtp_greedy_commit_wrapper.cpp
-)
-
-tilelang_register_runtime_kernel(
-  NAME mtp_sparse_metadata_update
-  WRAPPER_SRCS mtp_sparse_metadata_update_wrapper.cpp
-)
-
-tilelang_register_runtime_kernel(
   NAME spec_verify_token_update
   WRAPPER_SRCS spec_verify_token_update_wrapper.cpp
 )

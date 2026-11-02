@@ -15,8 +15,6 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
-#include <initializer_list>
-
 #include "core/framework/parallel_state/parallel_args.h"
 #include "core/platform/platform.h"
 #include "core/runtime/llm_worker_impl.h"
@@ -52,20 +50,14 @@ TEST(MtpWorkerOptionsTest, VlmTargetKeepsVisionWhileDraftUsesText) {
     GTEST_SKIP() << "An accelerator is required for MTP worker construction.";
   }
   const torch::Device device(Platform::type_torch(), /*index=*/0);
-  for (const bool task_pipeline : {false, true}) {
-    SCOPED_TRACE(task_pipeline);
-    runtime::Options options;
-    options.backend("vlm")
-        .enable_graph(true)
-        .enable_task_pipeline(task_pipeline)
-        .num_speculative_tokens(4);
-    VlmMtpOptionsWorker worker(device, options);
+  runtime::Options options;
+  options.backend("vlm").enable_graph(true).num_speculative_tokens(4);
+  VlmMtpOptionsWorker worker(device, options);
 
-    EXPECT_EQ(worker.target_options().backend(), "vlm");
-    EXPECT_EQ(worker.draft_options().backend(), "llm");
-    EXPECT_TRUE(worker.target_options().enable_graph());
-    EXPECT_TRUE(worker.draft_options().enable_graph());
-  }
+  EXPECT_EQ(worker.target_options().backend(), "vlm");
+  EXPECT_EQ(worker.draft_options().backend(), "llm");
+  EXPECT_TRUE(worker.target_options().enable_graph());
+  EXPECT_TRUE(worker.draft_options().enable_graph());
 }
 
 }  // namespace

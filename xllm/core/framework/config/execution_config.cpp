@@ -28,13 +28,7 @@ DEFINE_string(extension_impl,
 
 DEFINE_bool(enable_task_pipeline,
             false,
-            "Enable the task execution pipeline. Uses two slots with "
-            "scheduler overlap and one slot without it. "
-            "Python eager/ACL Graph models with prepared attention metadata; "
-            "Supports DP, or GLM DSA DCP with DP=1 for ordinary/fixed MTP "
-            "decoding. Qwen3.5-family hybrid DFlash2/DSpark uses worker-owned "
-            "fixed-width ACL graphs with DP=1. CP/layerwise split are "
-            "unsupported.");
+            "Task pipeline execution is currently unsupported. Keep false.");
 
 DEFINE_bool(
     enable_graph,
@@ -47,10 +41,7 @@ DEFINE_bool(
 DEFINE_bool(
     enable_unified_mtp_graph,
     false,
-    "Whether to route supported NPU speculative decode requests through a "
-    "unified Python graph. Supports GLM MTP and task-pipeline "
-    "DFlash/DFlash2/DSpark. "
-    "When disabled, ordinary model graph execution remains unchanged.");
+    "Unified MTP graph execution is currently unsupported. Keep false.");
 
 DEFINE_bool(disable_graph_warmup,
             false,
@@ -268,28 +259,9 @@ DecodeGraphWarmupConfig ExecutionConfig::decode_graph_warmup_config(
       .enable_graph_mode_decode_no_padding = enable_no_padding,
       .max_graph_batch_size =
           Platform::is_npu() ? acl_graph_decode_batch_size_limit() : 0};
-  // Unified capture owns a combined graph key rather than independent draft
-  // graphs. Keep exact/no-padding admission on its existing schedule as well.
-  if (num_speculative_tokens <= 0 || enable_unified_mtp_graph() ||
-      enable_no_padding) {
-    return config;
-  }
-  if (SpeculativeConfig::is_mtp_algorithm(speculative_algorithm)) {
-    if (enable_task_pipeline()) {
-      // The first invocation also repairs the previous accepted boundary.
-      config.draft_shapes.emplace_back(DraftGraphWarmupShape{2, false});
-    }
-    if (!enable_task_pipeline() || num_speculative_tokens > 1) {
-      config.draft_shapes.emplace_back(DraftGraphWarmupShape{1, false});
-    }
-  } else if (enable_task_pipeline() &&
-             SpeculativeConfig::is_dspark_algorithm(speculative_algorithm)) {
-    config.draft_shapes.emplace_back(
-        DraftGraphWarmupShape{num_speculative_tokens, true});
-  } else if (enable_task_pipeline() &&
-             SpeculativeConfig::is_dflash2_algorithm(speculative_algorithm)) {
-    config.draft_shapes.emplace_back(
-        DraftGraphWarmupShape{num_speculative_tokens + 1, true});
+  if (num_speculative_tokens > 0 && !enable_no_padding &&
+      SpeculativeConfig::is_mtp_algorithm(speculative_algorithm)) {
+    config.draft_shapes.emplace_back(DraftGraphWarmupShape{1, false});
   }
   return config;
 }

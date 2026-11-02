@@ -40,10 +40,8 @@ from xllm.python.attention.csa_attention import DsaAttentionBackend  # noqa: E40
 from xllm.python.layers.attention import Attention  # noqa: E402
 from xllm.python.model_executor.executor import (  # noqa: E402
     ModelExecutor,
-    _configure_unified_mtp_graph,
     _create_attention_backend,
     _resolve_graph_backend,
-    _unified_mtp_graph_enabled,
     _validate_npu_cp_model_config,
 )
 from xllm.python.model_executor.forward_context import (  # noqa: E402
@@ -171,21 +169,44 @@ class _FakeModelNoAttention(nn.Module):
         self._param = nn.Parameter(torch.zeros(1))
 
 
-class _UnifiedSwitchProbe(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.enabled: bool | None = None
+@pytest.mark.parametrize(
+    "feature",
+    [
+        "enable_task_pipeline",
+        "enable_unified_mtp_graph",
+        "enable_adaptive_draft_step",
+        "enable_adaptive_target_verify",
+    ],
+)
+def test_executor_rejects_unsupported_features_before_configuring_runtime(feature: str) -> None:
+    model = _FakeModel()
+    model.configure_runtime = MagicMock()
 
-    def set_unified_mtp_graph_enabled(self, enabled: bool) -> None:
-        self.enabled = enabled
+    with pytest.raises(NotImplementedError, match=f"{feature} is currently unsupported"):
+        ModelExecutor(model, {feature: True}, max_seqs_per_batch=2)
+
+    model.configure_runtime.assert_not_called()
 
 
-def test_model_executor_propagates_unified_switch_to_moe_modules() -> None:
-    model = nn.Sequential(_UnifiedSwitchProbe(), nn.Sequential(_UnifiedSwitchProbe()))
-    _configure_unified_mtp_graph(model, True)
-    assert [module.enabled for module in model.modules() if isinstance(module, _UnifiedSwitchProbe)] == [True, True]
-    _configure_unified_mtp_graph(model, False)
-    assert [module.enabled for module in model.modules() if isinstance(module, _UnifiedSwitchProbe)] == [False, False]
+@pytest.mark.parametrize(
+    "feature",
+    [
+        "enable_task_pipeline",
+        "enable_unified_mtp_graph",
+        "enable_adaptive_draft_step",
+        "enable_adaptive_target_verify",
+    ],
+)
+def test_executor_accepts_disabled_unsupported_features(feature: str) -> None:
+    model = _FakeModel()
+    model.configure_runtime = MagicMock()
+    config = {feature: False}
+
+    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=StubAttentionBackend()):
+        executor = ModelExecutor(model, config, max_seqs_per_batch=2)
+
+    model.configure_runtime.assert_called_once_with(config)
+    assert executor.decode_graph_runner is None
 
 
 # Cell-by-cell twin of the C++ truth-table gtest
@@ -239,77 +260,6 @@ def test_classification_matches_cpp_truth_table(
     assert block_draft(config) is is_block_draft_model
     assert dspark_draft(config) is is_dspark_draft_model
     assert context_kv(config) is uses_context_kv_projection
-
-
-@pytest.mark.parametrize(
-    ("config", "expected"),
-    [
-        (
-            {
-                "enable_unified_mtp_graph": True,
-                "model_type": "glm_moe_dsa",
-                "is_draft_engine": False,
-                "num_speculative_tokens": 3,
-                "is_mtp_algorithm": True,
-            },
-            True,
-        ),
-        (
-            {
-                "enable_unified_mtp_graph": True,
-                "model_type": "glm_moe_dsa_mtp",
-                "is_draft_engine": True,
-                "num_speculative_tokens": 0,
-                "is_mtp_algorithm": True,
-            },
-            True,
-        ),
-        (
-            {
-                "enable_unified_mtp_graph": False,
-                "model_type": "glm_moe_dsa_mtp",
-                "is_draft_engine": True,
-                "num_speculative_tokens": 0,
-                "is_mtp_algorithm": True,
-            },
-            False,
-        ),
-        (
-            {
-                "enable_unified_mtp_graph": True,
-                "model_type": "glm_moe_dsa",
-                "is_draft_engine": False,
-                "num_speculative_tokens": 0,
-                "is_mtp_algorithm": True,
-            },
-            False,
-        ),
-        (
-            {
-                "enable_unified_mtp_graph": True,
-                "model_type": "qwen3",
-                "is_draft_engine": False,
-                "num_speculative_tokens": 3,
-                "is_mtp_algorithm": False,
-            },
-            False,
-        ),
-        # An MTP checkpoint served under a non-MTP algorithm must not switch
-        # GLM's MoE reduction path (mirrors the C++ worker's is_mtp gate).
-        (
-            {
-                "enable_unified_mtp_graph": True,
-                "model_type": "glm_moe_dsa_mtp",
-                "is_draft_engine": True,
-                "num_speculative_tokens": 0,
-                "is_mtp_algorithm": False,
-            },
-            False,
-        ),
-    ],
-)
-def test_unified_switch_targets_only_glm_mtp_roles(config: dict, expected: bool) -> None:
-    assert _unified_mtp_graph_enabled(config) is expected
 
 
 class _FailingLayerSynchronizer:
@@ -2140,219 +2090,8 @@ def test_mtp_topk_routes_to_acl_graph(mock_create):
     executor.eager_runner.execute.assert_not_called()
 
 
-class _PreparedStubAttentionBackend(StubAttentionBackend):
-    @property
-    def supports_prepared_metadata(self) -> bool:
-        return True
-
-    def prepare_metadata(self, metadata: AttentionMetadata, *, device_kv_lengths: bool = False) -> object:
-        return SimpleNamespace(source=metadata.q_cu_seq_lens_host_values, device_kv_lengths=device_kv_lengths)
-
-
-@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_text"])
-@pytest.mark.parametrize("adaptive", [False, True])
-@pytest.mark.parametrize("draft_width", [3, 5, 6, 7, 16])
-def test_recurrent_dspark_uses_prepared_graph_without_requiring_clipping(
-    model_type: str, adaptive: bool, draft_width: int
-) -> None:
-    config = {
-        "model_type": model_type,
-        "is_block_diffusion_algorithm": True,
-        "enable_adaptive_target_verify": adaptive,
-        "enable_task_pipeline": True,
-        "num_speculative_tokens": draft_width,
-        "python_graph_backend": "aclgraph",
-        "max_position_embeddings": 128,
-        "kv_split_size": 1,
-    }
-    with (
-        patch("xllm.python.model_executor.executor.current_platform.is_npu", return_value=True),
-        patch("xllm.python.model_executor.executor.distributed.dcp_group", return_value=None),
-        patch(
-            "xllm.python.model_executor.executor._create_attention_backend",
-            return_value=_PreparedStubAttentionBackend(),
-        ),
-    ):
-        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=4, num_decoding_tokens=draft_width + 1)
-    assert executor.supports_prepared_metadata
-    assert executor.prepared_graph_runner is not None
-    assert executor.decode_graph_runner is None
-    assert executor.prepared_graph_runner._spec_verify_width == (1 if adaptive else draft_width + 1)
-    assert executor.prepared_graph_runner._device_kv_lengths is not adaptive
-    cache = torch.empty(2, 4, 2, 64)
-    executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
-    metadata = SimpleNamespace(is_prefill=False, is_chunked_prefill=False, q_cu_seq_lens_host_values=[8])
-    executor.prepare_metadata(metadata)
-    assert metadata.prepared_attention_state.device_kv_lengths
-
-
-def test_executor_prepares_private_metadata_after_cache_binding() -> None:
-    backend = _PreparedStubAttentionBackend()
-    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
-        executor = ModelExecutor(_FakeModel(), {"model_type": "qwen3", "kv_split_size": 0}, max_seqs_per_batch=2)
-    assert executor.supports_prepared_metadata
-    metadata = SimpleNamespace(q_cu_seq_lens_host_values=[1, 2])
-    with pytest.raises(RuntimeError, match="initialized"):
-        executor.prepare_metadata(metadata)
-    cache = torch.empty(2, 4, 2, 64)
-    executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
-    executor.prepare_metadata(metadata)
-    assert metadata.prepared_attention_state.source == [1, 2]
-    assert not backend._prepared
-
-
-def _prepared_qwen_metadata() -> SimpleNamespace:
-    return SimpleNamespace(
-        slot_mapping=torch.arange(2, dtype=torch.int32),
-        q_seq_lens=torch.ones(2, dtype=torch.int32),
-        q_cu_seq_lens=torch.arange(3, dtype=torch.int32),
-        q_cu_seq_lens_host_values=[1, 2],
-        linear_state_indices=torch.tensor([1, 2], dtype=torch.int32),
-        has_initial_state=torch.ones(2, dtype=torch.bool),
-        is_prefill=False,
-        is_chunked_prefill=False,
-        is_spec_verify=False,
-    )
-
-
-@pytest.mark.parametrize("model_type", ["qwen3_5_text", "qwen3_5_moe_text"])
-@pytest.mark.parametrize("graph_backend", ["off", "aclgraph"])
-@pytest.mark.parametrize("direct_read", [False, True])
-def test_executor_accepts_prepared_qwen_hybrid_generation(
-    model_type: str, graph_backend: str, direct_read: bool
-) -> None:
-    backend = _PreparedStubAttentionBackend()
-    config = {
-        "model_type": model_type,
-        "python_graph_backend": graph_backend,
-        "enable_task_pipeline": True,
-    }
-    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
-        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2)
-
-    assert executor.supports_prepared_metadata
-    assert (executor.prepared_graph_runner is not None) == (graph_backend == "aclgraph")
-    assert executor.decode_graph_runner is None
-    cache = torch.empty(2, 4, 2, 64)
-    executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
-    metadata = _prepared_qwen_metadata()
-    if direct_read:
-        metadata.is_prefill = True
-        metadata.linear_state_read_indices = torch.tensor([3, 4], dtype=torch.int32)
-    executor.prepare_metadata(metadata)
-    assert metadata.prepared_attention_state.source == [1, 2]
-    assert not backend._prepared
-
-
-@pytest.mark.parametrize("prefill", [False, True])
-def test_packed_recurrent_dspark_keeps_request_state_separate_from_qwen_mtp(prefill: bool) -> None:
-    backend = _PreparedStubAttentionBackend()
-    config = {
-        "model_type": "qwen3_5_text",
-        "num_speculative_tokens": 7,
-        "is_block_diffusion_algorithm": True,
-        "enable_task_pipeline": True,
-        "enable_adaptive_target_verify": True,
-        "python_graph_backend": "aclgraph",
-    }
-    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
-        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2, num_decoding_tokens=8)
-    cache = torch.empty(2, 4, 2, 64)
-    executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
-    metadata = _prepared_qwen_metadata()
-    metadata.is_prefill = prefill
-    if not prefill:
-        # Packed target token rows and logical recurrent requests have different
-        # capacities; the graph descriptor supplies the request-scoped state.
-        metadata.slot_mapping = torch.arange(16, dtype=torch.int32)
-        metadata.q_seq_lens = torch.ones(16, dtype=torch.int32)
-        metadata.q_cu_seq_lens = torch.arange(17, dtype=torch.int32)
-        metadata.q_cu_seq_lens_host_values = list(range(1, 17))
-    executor.prepare_metadata(metadata)
-    assert executor.supports_prepared_metadata
-    assert executor._prepared_recurrent_target
-    assert not executor._prepared_qwen_mtp_target
-    assert executor.prepared_graph_runner._spec_verify_width == 1
-    assert not executor.prepared_graph_runner._device_kv_lengths
-    assert metadata.linear_state_indices.numel() == 2
-    assert metadata.prepared_attention_state.device_kv_lengths is not prefill
-
-
-@pytest.mark.parametrize("draft_tokens", [1, 2, 3, 7, 16])
-@pytest.mark.parametrize("graph_backend", ["off", "aclgraph"])
-def test_executor_prepares_qwen_mtp_with_logical_accepted_state(draft_tokens: int, graph_backend: str) -> None:
-    backend = _PreparedStubAttentionBackend()
-    config = {
-        "model_type": "qwen3_5_text",
-        "is_mtp_algorithm": True,
-        "num_speculative_tokens": draft_tokens,
-        "enable_task_pipeline": True,
-        "python_graph_backend": graph_backend,
-    }
-    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
-        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2, num_decoding_tokens=draft_tokens + 1)
-    cache = torch.empty(2, 4, 2, 64)
-    executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
-    metadata = _prepared_qwen_metadata()
-    rows = 2 * (draft_tokens + 1)
-    metadata.slot_mapping = torch.arange(rows, dtype=torch.int32)
-    metadata.q_seq_lens = torch.ones(rows, dtype=torch.int32)
-    metadata.q_cu_seq_lens = torch.arange(rows + 1, dtype=torch.int32)
-    metadata.q_cu_seq_lens_host_values = list(range(rows + 1))
-    metadata.num_accepted_tokens = torch.tensor([1, draft_tokens + 1], dtype=torch.int32)
-    metadata.is_spec_verify = True
-    executor.prepare_metadata(metadata)
-    assert executor.supports_prepared_metadata
-    assert metadata.prepared_attention_state.device_kv_lengths
-    assert metadata.linear_state_indices.numel() == metadata.num_accepted_tokens.numel() == 2
-    metadata.num_accepted_tokens = metadata.num_accepted_tokens.to(torch.int64)
-    with pytest.raises(ValueError, match="accepted token counts"):
-        executor.prepare_metadata(metadata)
-
-
-def test_executor_rejects_token_row_scoped_accepted_counts() -> None:
-    backend = _PreparedStubAttentionBackend()
-    config = {
-        "model_type": "qwen3_5_text",
-        "is_mtp_algorithm": True,
-        "num_speculative_tokens": 3,
-        "enable_task_pipeline": True,
-    }
-    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
-        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2, num_decoding_tokens=4)
-    cache = torch.empty(2, 4, 2, 64)
-    executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
-    metadata = _prepared_qwen_metadata()
-    rows = 2 * 4
-    metadata.slot_mapping = torch.arange(rows, dtype=torch.int32)
-    metadata.q_seq_lens = torch.ones(rows, dtype=torch.int32)
-    metadata.q_cu_seq_lens = torch.arange(rows + 1, dtype=torch.int32)
-    metadata.q_cu_seq_lens_host_values = list(range(rows + 1))
-    metadata.is_spec_verify = True
-    metadata.num_accepted_tokens = torch.ones(rows, dtype=torch.int32)
-    with pytest.raises(ValueError, match="accepted token counts"):
-        executor.prepare_metadata(metadata)
-
-
-@pytest.mark.parametrize("model_type", ["qwen3_5_mtp"])
-def test_executor_prepares_qwen_draft_device_lengths_only_for_decode(model_type: str) -> None:
-    backend = _PreparedStubAttentionBackend()
-    config = {"model_type": model_type, "is_mtp_algorithm": True, "is_draft_engine": True}
-    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
-        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2)
-    cache = torch.empty(2, 4, 2, 64)
-    executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
-    metadata = _prepared_qwen_metadata()
-    executor.prepare_metadata(metadata)
-    assert metadata.prepared_attention_state.device_kv_lengths
-    metadata.is_prefill = True
-    executor.prepare_metadata(metadata)
-    assert not metadata.prepared_attention_state.device_kv_lengths
-
-
 @pytest.mark.parametrize("draft_tokens", [1, 2, 3, 4, 16])
-@pytest.mark.parametrize("pipeline", [False, True])
-def test_qwen_draft_prefix_capacity_reaches_backend_and_both_graph_paths(draft_tokens: int, pipeline: bool) -> None:
+def test_qwen_draft_prefix_capacity_reaches_backend_and_acl_graph(draft_tokens: int) -> None:
     width = draft_tokens + 1
     config = {
         "model_type": "qwen3_5_mtp",
@@ -2362,13 +2101,12 @@ def test_qwen_draft_prefix_capacity_reaches_backend_and_both_graph_paths(draft_t
         # pass must independently reserve the complete accepted target prefix.
         "num_speculative_tokens": 0,
         "mtp_draft_prefix_width": width,
-        "enable_task_pipeline": pipeline,
         "python_graph_backend": "aclgraph",
         "max_position_embeddings": 128,
     }
     with patch(
         "xllm.python.model_executor.executor._create_attention_backend",
-        return_value=_PreparedStubAttentionBackend(),
+        return_value=StubAttentionBackend(),
     ) as create:
         executor = ModelExecutor(
             _FakeModel(),
@@ -2378,9 +2116,8 @@ def test_qwen_draft_prefix_capacity_reaches_backend_and_both_graph_paths(draft_t
             acl_graph_decode_batch_size_limit=4,
         )
     assert create.call_args.args[4] == 5 * width
-    runner = executor.prepared_graph_runner if pipeline else executor.decode_graph_runner
+    runner = executor.decode_graph_runner
     assert runner is not None and runner.max_batch == 4 * width
-    assert (executor.decode_graph_runner is None) is pipeline
 
 
 def test_glm_draft_ignores_qwen_prefix_capacity_option() -> None:
@@ -2394,7 +2131,7 @@ def test_glm_draft_ignores_qwen_prefix_capacity_option() -> None:
     }
     with patch(
         "xllm.python.model_executor.executor._create_attention_backend",
-        return_value=_PreparedStubAttentionBackend(),
+        return_value=StubAttentionBackend(),
     ) as create:
         executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=5, acl_graph_decode_batch_size_limit=4)
     assert create.call_args.args[4] == 10
@@ -2415,7 +2152,7 @@ def test_executor_rejects_qwen_mtp_width_beyond_kernel_capacity() -> None:
     with (
         patch(
             "xllm.python.model_executor.executor._create_attention_backend",
-            return_value=_PreparedStubAttentionBackend(),
+            return_value=StubAttentionBackend(),
         ),
         pytest.raises(NotImplementedError, match="1 to 16"),
     ):
@@ -2426,349 +2163,19 @@ def test_executor_rejects_qwen_mtp_width_beyond_kernel_capacity() -> None:
         )
 
 
-@pytest.mark.parametrize("adaptive", ["enable_adaptive_draft_step", "enable_adaptive_target_verify"])
-def test_executor_keeps_adaptive_qwen_on_upstream_legacy_metadata(adaptive: str) -> None:
-    config = {
-        "model_type": "qwen3_5_text",
-        "is_mtp_algorithm": True,
-        "num_speculative_tokens": 3,
-        "python_graph_backend": "aclgraph",
-        "max_position_embeddings": 128,
-        adaptive: True,
-    }
-    with patch(
-        "xllm.python.model_executor.executor._create_attention_backend", return_value=_PreparedStubAttentionBackend()
-    ):
-        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2, num_decoding_tokens=4)
-    assert not executor.supports_prepared_metadata
-    assert not executor.decode_graph_runner._device_kv_lengths
-    assert executor.decode_graph_runner._spec_verify_width == 1
-
-
-@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
-def test_executor_rejects_prepared_qwen_multimodal_metadata(model_type: str) -> None:
-    backend = _PreparedStubAttentionBackend()
-    config = {"model_type": model_type, "python_graph_backend": "off", "enable_task_pipeline": True}
-    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
-        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2)
-    assert not executor.supports_prepared_metadata
-    cache = torch.empty(2, 4, 2, 64)
-    executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
-    metadata = _prepared_qwen_metadata()
-    with (
-        patch.object(backend, "prepare_metadata", wraps=backend.prepare_metadata) as prepare,
-        pytest.raises(RuntimeError, match="prepared metadata requires an initialized supported"),
-    ):
-        executor.prepare_metadata(metadata)
-    prepare.assert_not_called()
-    assert not hasattr(metadata, "prepared_attention_state")
-
-
-@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
-def test_executor_rejects_prepared_qwen_multimodal_acl_graph(model_type: str) -> None:
-    config = {"model_type": model_type, "python_graph_backend": "aclgraph", "enable_task_pipeline": True}
-    with (
-        patch(
-            "xllm.python.model_executor.executor._create_attention_backend",
-            return_value=_PreparedStubAttentionBackend(),
-        ),
-        pytest.raises(ValueError, match="prepared ACL graphs require a supported target or MTP model"),
-    ):
-        ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2)
-
-
-@pytest.mark.parametrize(
-    "unsupported,num_decoding_tokens",
-    [
-        ({"num_speculative_tokens": 1}, 1),
-        ({}, 0),
-        ({}, 2),
-        ({"is_draft_engine": True}, 1),
-        ({"task_type": "embed"}, 1),
-    ],
-)
-def test_executor_rejects_prepared_qwen_nonordinary_generation(
-    unsupported: dict[str, object], num_decoding_tokens: int
-) -> None:
-    with patch(
-        "xllm.python.model_executor.executor._create_attention_backend", return_value=_PreparedStubAttentionBackend()
-    ):
-        executor = ModelExecutor(
-            _FakeModel(),
-            {"model_type": "qwen3_5_text", "python_graph_backend": "off", **unsupported},
-            max_seqs_per_batch=2,
-            num_decoding_tokens=num_decoding_tokens,
-        )
-    assert not executor.supports_prepared_metadata
-
-
-@pytest.mark.parametrize("invalid", ["missing_indices", "dtype", "validity", "query_ends", "separate_read"])
-def test_executor_validates_final_qwen_state_views_before_preparing_attention(invalid: str) -> None:
-    backend = _PreparedStubAttentionBackend()
-    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
-        executor = ModelExecutor(_FakeModel(), {"model_type": "qwen3_5_text"}, max_seqs_per_batch=2)
-    cache = torch.empty(2, 4, 2, 64)
-    executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
-    metadata = _prepared_qwen_metadata()
-    if invalid == "missing_indices":
-        metadata.linear_state_indices = None
-    elif invalid == "dtype":
-        metadata.linear_state_indices = metadata.linear_state_indices.to(torch.int64)
-    elif invalid == "validity":
-        metadata.has_initial_state = None
-    elif invalid == "query_ends":
-        metadata.q_cu_seq_lens = metadata.q_cu_seq_lens[1:]
-    elif invalid == "separate_read":
-        metadata.linear_state_read_indices = metadata.linear_state_indices.clone()
-    with (
-        patch.object(backend, "prepare_metadata", wraps=backend.prepare_metadata) as prepare,
-        pytest.raises(ValueError, match="prepared Qwen GDN"),
-    ):
-        executor.prepare_metadata(metadata)
-    prepare.assert_not_called()
-    assert not hasattr(metadata, "prepared_attention_state")
-
-
-@pytest.mark.parametrize(
-    "unsupported",
-    [{"cp_size": 2}, {"kv_split_size": 2}, {"model_type": "llama"}],
-)
-def test_executor_rejects_unsupported_prepared_metadata(unsupported: dict[str, object]) -> None:
-    backend = _PreparedStubAttentionBackend()
-    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
-        executor = ModelExecutor(_FakeModel(), {"model_type": "qwen3", **unsupported}, max_seqs_per_batch=2)
-    assert not executor.supports_prepared_metadata
-    metadata = SimpleNamespace(q_cu_seq_lens_host_values=[1, 2])
-    with pytest.raises(RuntimeError, match="supported Qwen3 or GLM"):
-        executor.prepare_metadata(metadata)
-    assert not hasattr(metadata, "prepared_attention_state")
-    assert not backend._prepared
-
-
-@pytest.mark.parametrize("model_type", ["qwen3", "glm_moe_dsa"])
-@pytest.mark.parametrize(
-    "tp,rank,ep,moe_tp",
-    [(1, 0, 1, 1), (2, 0, 1, 2), (2, 1, 1, 2), (2, 1, 2, 1), (16, 15, 16, 1), (16, 15, 1, 16)],
-)
-def test_executor_accepts_prepared_tensor_and_expert_parallel(
-    model_type: str, tp: int, rank: int, ep: int, moe_tp: int
-) -> None:
-    backend = _PreparedStubAttentionBackend()
-    config = _classify(
-        {
-            "model_type": model_type,
-            "tp_size": tp,
-            "tp_rank": rank,
-            "ep_size": ep,
-            "moe_tp_size": moe_tp,
-            "world_size": tp,
-            "kv_split_size": 0,
-            "dp_size": 1,
-            "cp_size": 1,
-        }
-    )
-    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
-        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2)
-    assert executor.supports_prepared_metadata
-    cache = torch.empty(2, 4, 1, 64)
-    executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
-    metadata = SimpleNamespace(q_cu_seq_lens_host_values=[1, 2])
-    executor.prepare_metadata(metadata)
-    assert metadata.prepared_attention_state.source == [1, 2]
-
-
-@pytest.mark.parametrize("split", ["kv_split_size", "layerwise_split_size"])
-def test_executor_rejects_prepared_glm_split_topologies(split: str) -> None:
-    with patch(
-        "xllm.python.model_executor.executor._create_attention_backend", return_value=_PreparedStubAttentionBackend()
-    ):
-        config = {"model_type": "glm_moe_dsa", "kv_split_size": 1, split: 2}
-        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2)
-    assert not executor.supports_prepared_metadata
-
-
-@pytest.mark.parametrize("model_type", ["glm_moe_dsa", "glm_moe_dsa_mtp"])
-@pytest.mark.parametrize("graph_backend", ["off", "aclgraph"])
-@pytest.mark.parametrize("cp_size,kv_split", [(2, 2), (4, 1)])
-def test_executor_accepts_prepared_glm_prefill_cp(
-    model_type: str, graph_backend: str, cp_size: int, kv_split: int
-) -> None:
-    config = _classify(
-        {
-            "model_type": model_type,
-            "is_draft_engine": model_type == "glm_moe_dsa_mtp",
-            "num_speculative_tokens": 2,
-            "is_mtp_algorithm": True,
-            "kv_split_size": kv_split,
-            "cp_size": cp_size,
-            "cp_rank": cp_size - 1,
-            "enable_task_pipeline": True,
-            "python_graph_backend": graph_backend,
-        }
-    )
-    group = SimpleNamespace(size=lambda: kv_split) if kv_split > 1 else None
-    with (
-        patch("xllm.python.model_executor.executor.current_platform.is_npu", return_value=True),
-        patch("xllm.python.model_executor.executor.distributed.dcp_group", return_value=group),
-        patch(
-            "xllm.python.model_executor.executor._create_attention_backend",
-            return_value=_PreparedStubAttentionBackend(),
-        ),
-    ):
-        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2, num_decoding_tokens=3)
-
-    assert executor.supports_prepared_metadata
-    assert executor.eager_runner.cp_size == cp_size
-    assert executor.eager_runner.cp_rank == cp_size - 1
-    assert (executor.prepared_graph_runner is not None) == (graph_backend == "aclgraph")
-    assert executor.decode_graph_runner is None
-
-
-@pytest.mark.parametrize(
-    "model_type,kv_split,group_size,is_npu",
-    [
-        ("qwen3", 1, 1, True),
-        ("glm_moe_dsa", 1, 2, True),
-        ("glm_moe_dsa", 2, 1, True),
-        ("glm_moe_dsa", 1, 1, False),
-    ],
-)
-def test_executor_rejects_unsupported_prepared_cp(
-    model_type: str, kv_split: int, group_size: int, is_npu: bool
-) -> None:
-    group = MagicMock()
-    group.size.return_value = group_size
-    config = _classify(
-        {
-            "model_type": model_type,
-            "cp_size": 2,
-            "kv_split_size": kv_split,
-            "enable_task_pipeline": True,
-            "enable_disagg_pd": True,
-            "instance_role": "PREFILL",
-        }
-    )
-    with (
-        patch("xllm.python.model_executor.executor.current_platform.is_npu", return_value=is_npu),
-        patch("xllm.python.model_executor.executor.distributed.dcp_group", return_value=group),
-        patch(
-            "xllm.python.model_executor.executor._create_attention_backend",
-            return_value=_PreparedStubAttentionBackend(),
-        ),
-    ):
-        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2)
-
-    assert not executor.supports_prepared_metadata
-
-
-@pytest.mark.parametrize("model_type", ["glm_moe_dsa", "glm_moe_dsa_mtp"])
-@pytest.mark.parametrize("graph_backend", ["off", "aclgraph"])
-@pytest.mark.parametrize("kv_split", [2, 4])
-def test_executor_accepts_prepared_glm_dcp(model_type: str, graph_backend: str, kv_split: int) -> None:
-    backend = _PreparedStubAttentionBackend()
-    group = MagicMock()
-    group.size.return_value = kv_split
-    config = _classify(
-        {
-            "model_type": model_type,
-            "kv_split_size": kv_split,
-            "dp_size": 1,
-            "cp_size": 1,
-            "enable_task_pipeline": True,
-            "python_graph_backend": graph_backend,
-        }
-    )
-    with (
-        patch("xllm.python.model_executor.executor.current_platform.is_npu", return_value=True),
-        patch("xllm.python.model_executor.executor.distributed.dcp_group", return_value=group),
-        patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend),
-    ):
-        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2)
-    assert executor.supports_prepared_metadata
-    assert (executor.prepared_graph_runner is not None) == (graph_backend == "aclgraph")
-    assert executor.decode_graph_runner is None
-
-
-@pytest.mark.parametrize(
-    "model_type,kv_split,group_size,is_npu",
-    [
-        ("qwen3", 2, 2, True),
-        ("DFlashDraftModel", 2, 2, True),
-        ("DFlash2DraftModel", 2, 2, True),
-        ("glm_moe_dsa", 2, None, True),
-        ("glm_moe_dsa", 2, 1, True),
-        ("glm_moe_dsa", 2, 4, True),
-        ("glm_moe_dsa", 1, 2, True),
-        ("glm_moe_dsa", 2, 2, False),
-    ],
-)
-def test_executor_rejects_unsupported_prepared_dcp(
-    model_type: str, kv_split: int, group_size: int | None, is_npu: bool
-) -> None:
-    group = None if group_size is None else MagicMock()
-    if group is not None:
-        group.size.return_value = group_size
-    config = _classify({"model_type": model_type, "kv_split_size": kv_split, "enable_task_pipeline": True})
-    with (
-        patch("xllm.python.model_executor.executor.current_platform.is_npu", return_value=is_npu),
-        patch("xllm.python.model_executor.executor.distributed.dcp_group", return_value=group),
-        patch(
-            "xllm.python.model_executor.executor._create_attention_backend",
-            return_value=_PreparedStubAttentionBackend(),
-        ),
-    ):
-        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2)
-    assert not executor.supports_prepared_metadata
-
-
-def test_executor_rejects_prepared_dcp_with_data_parallelism() -> None:
-    with (
-        patch("xllm.python.model_executor.executor.current_platform.is_npu", return_value=True),
-        pytest.raises(NotImplementedError, match="Python DCP requires dp_size == 1"),
-    ):
-        ModelExecutor(
-            _FakeModel(),
-            {"model_type": "glm_moe_dsa", "kv_split_size": 2, "dp_size": 2, "enable_task_pipeline": True},
-            max_seqs_per_batch=2,
-        )
-
-
-def test_prepared_executor_rejects_mtp_state_before_model_execution() -> None:
-    with patch(
-        "xllm.python.model_executor.executor._create_attention_backend", return_value=_PreparedStubAttentionBackend()
-    ):
-        executor = ModelExecutor(_FakeModel(), {"model_type": "glm_moe_dsa"}, max_seqs_per_batch=2)
-    cache = torch.empty(2, 4, 1, 64)
-    executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
-    metadata = SimpleNamespace(
-        q_cu_seq_lens_host_values=[1, 2],
-        is_prefill=False,
-        is_chunked_prefill=False,
-    )
-    executor.prepare_metadata(metadata)
-    executor.eager_runner = MagicMock()
-    executor.decode_graph_runner = MagicMock()
-    with pytest.raises(ValueError, match="MTP top-k"):
-        executor.execute(torch.zeros(2), torch.zeros(2), metadata, mtp_topk_indices=torch.zeros(2))
-    executor.eager_runner.execute.assert_not_called()
-
-
 @pytest.mark.parametrize("is_mtp", [False, True])
-@pytest.mark.parametrize("prepared", [False, True])
-def test_kv_transfer_uses_eager_and_preserves_step_inputs(prepared: bool, is_mtp: bool) -> None:
+def test_kv_transfer_uses_eager_and_preserves_step_inputs(is_mtp: bool) -> None:
     config = {
         "model_type": "glm_moe_dsa_mtp" if is_mtp else "glm_moe_dsa",
         "is_draft_engine": is_mtp,
         "is_mtp_algorithm": is_mtp,
     }
-    backend = _PreparedStubAttentionBackend() if prepared else StubAttentionBackend()
+    backend = StubAttentionBackend()
     with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
         executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2)
     cache = torch.empty(2, 4, 1, 64)
     executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
     metadata = SimpleNamespace(q_cu_seq_lens_host_values=[1, 2])
-    if prepared:
-        executor.prepare_metadata(metadata)
     tokens = torch.tensor([13, 17], dtype=torch.int32)
     positions = torch.tensor([7, 19], dtype=torch.int32)
     hidden = torch.zeros(2, 4) if is_mtp else None
@@ -2776,28 +2183,25 @@ def test_kv_transfer_uses_eager_and_preserves_step_inputs(prepared: bool, is_mtp
     executor.eager_runner = MagicMock()
     executor.decode_graph_runner = MagicMock(spec=DecodeAclGraphRunner)
     executor.decode_graph_runner.can_execute.return_value = True
-    executor.prepared_graph_runner = MagicMock(execution_metadata_builders=())
     executor.inductor_runner = MagicMock()
 
     for _ in range(2):
         synchronizer = MagicMock()
         result = executor.execute(tokens, positions, metadata, hidden, synchronizer, topk, enable_graph=True)
-        expected_args = (tokens, positions, metadata, hidden, synchronizer)
-        if not prepared or is_mtp:
-            expected_args += (topk,)
+        expected_args = (tokens, positions, metadata, hidden, synchronizer, topk)
         executor.eager_runner.execute.assert_called_with(*expected_args, eplb=None, input_batch=None)
         assert result is executor.eager_runner.execute.return_value
     assert executor.eager_runner.execute.call_count == 2
     executor.decode_graph_runner.can_execute.assert_not_called()
-    for runner in (executor.decode_graph_runner, executor.prepared_graph_runner, executor.inductor_runner):
+    for runner in (executor.decode_graph_runner, executor.inductor_runner):
         runner.execute.assert_not_called()
 
 
-def test_layerwise_load_prefill_keeps_following_prepared_decode_on_graph() -> None:
+def test_layerwise_load_prefill_keeps_following_decode_on_graph() -> None:
     model = _FakeModel()
     model.model.supports_layerwise_kv_load = True
     model.model.layers = nn.ModuleList([nn.Identity(), nn.Identity()])
-    backend = _PreparedStubAttentionBackend()
+    backend = StubAttentionBackend()
     with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
         executor = ModelExecutor(model, {"model_type": "glm_moe_dsa"}, max_seqs_per_batch=2)
     cache = torch.empty(2, 4, 1, 64)
@@ -2805,9 +2209,9 @@ def test_layerwise_load_prefill_keeps_following_prepared_decode_on_graph() -> No
     metadata = SimpleNamespace(
         q_cu_seq_lens_host_values=[1, 2], is_prefill=True, is_chunked_prefill=False, is_spec_verify=False
     )
-    executor.prepare_metadata(metadata)
     executor.eager_runner = MagicMock()
-    executor.prepared_graph_runner = MagicMock(execution_metadata_builders=())
+    executor.decode_graph_runner = create_autospec(DecodeAclGraphRunner, instance=True)
+    executor.decode_graph_runner.can_execute.return_value = True
     tokens = torch.tensor([1, 2], dtype=torch.int32)
     positions = torch.tensor([9, 11], dtype=torch.int32)
     load = MagicMock()
@@ -2816,11 +2220,11 @@ def test_layerwise_load_prefill_keeps_following_prepared_decode_on_graph() -> No
     context = executor.eager_runner.execute.call_args.kwargs["kv_load"]
     assert isinstance(context, KVLoadContext)
     assert context.synchronizer is load
-    executor.prepared_graph_runner.execute.assert_not_called()
+    executor.decode_graph_runner.execute.assert_not_called()
     metadata.is_prefill = False
     output = executor.execute(tokens, positions, metadata, enable_graph=True)
-    assert output is executor.prepared_graph_runner.execute.return_value
-    executor.prepared_graph_runner.execute.assert_called_once()
+    assert output is executor.decode_graph_runner.execute.return_value
+    executor.decode_graph_runner.execute.assert_called_once()
     assert executor.eager_runner.execute.call_count == 1
 
 
@@ -2847,175 +2251,6 @@ def test_layerwise_load_rejects_incompatible_execution_before_running(invalid: s
     executor.eager_runner.execute.assert_not_called()
 
 
-@pytest.mark.parametrize("model_type", ["qwen3", "glm_moe_dsa"])
-def test_executor_accepts_prepared_data_parallel(model_type: str) -> None:
-    config = _classify({"model_type": model_type, "dp_size": 2, "dp_rank": 1, "python_graph_backend": "off"})
-    with patch(
-        "xllm.python.model_executor.executor._create_attention_backend", return_value=_PreparedStubAttentionBackend()
-    ):
-        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2)
-    assert executor.supports_prepared_metadata
-
-
-@pytest.mark.parametrize("model_type", ["DSparkDraftModel", "glm5_dspark", "deepseek_v4_dspark"])
-def test_prepared_dspark_whitelist_matches_all_dspark_model_types(model_type: str) -> None:
-    config = _classify({"model_type": model_type, "python_graph_backend": "off"})
-    with patch(
-        "xllm.python.model_executor.executor._create_attention_backend", return_value=_PreparedStubAttentionBackend()
-    ):
-        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=1)
-    assert executor._prepared_dspark
-    assert executor.context_kv_graph_runner is None
-
-
-@pytest.mark.parametrize("model_type,query_width", [("DSparkDraftModel", 3), ("DFlash2DraftModel", 8)])
-def test_prepared_block_graph_keeps_query_width_and_explicit_capacity_admission(
-    model_type: str, query_width: int
-) -> None:
-    config = _classify(
-        {
-            "model_type": model_type,
-            "enable_task_pipeline": True,
-            "python_graph_backend": "aclgraph",
-            "num_speculative_tokens": 3,
-        }
-    )
-    with patch(
-        "xllm.python.model_executor.executor._create_attention_backend", return_value=_PreparedStubAttentionBackend()
-    ):
-        model = _FakeModel()
-        model.cfg = SimpleNamespace(block_size=8)
-        executor = ModelExecutor(model, config, max_seqs_per_batch=1)
-    assert executor.supports_prepared_metadata
-    assert executor.decode_graph_runner is None
-    assert executor.prepared_graph_runner.max_batch == query_width
-    assert executor.prepared_graph_runner._block_draft
-    executor._kv_bound = True
-    executor.prepared_graph_runner = MagicMock(execution_metadata_builders=())
-    executor.context_kv_graph_runner = MagicMock()
-    executor.eager_runner = MagicMock()
-    metadata = SimpleNamespace(prepared_attention_state=object(), is_prefill=False, is_chunked_prefill=True)
-    tokens = torch.arange(query_width, dtype=torch.int32)
-    positions = torch.arange(query_width, dtype=torch.int32)
-    output = executor.execute(tokens, positions, metadata, enable_graph=True, is_graph_warmup=True)
-    assert output is executor.prepared_graph_runner.execute_block.return_value
-    executor.prepared_graph_runner.execute_block.assert_called_once_with(
-        tokens, positions, metadata, None, None, None, eplb=None, input_batch=None
-    )
-    executor.prepared_graph_runner.can_execute_block.assert_not_called()
-    executor.prepared_graph_runner.execute.assert_not_called()
-    executor.context_kv_graph_runner.warmup.assert_not_called()
-    executor.prepared_graph_runner.execute_block.return_value = None
-    output = executor.execute(tokens, positions, metadata, enable_graph=True)
-    assert output is executor.eager_runner.execute.return_value
-    assert executor.prepared_graph_runner.execute_block.call_count == 2
-    for error in (RuntimeError("missing binding"), ValueError("invalid input")):
-        executor.prepared_graph_runner.execute_block.side_effect = error
-        with pytest.raises(type(error), match=str(error)):
-            executor.execute(tokens, positions, metadata, enable_graph=True)
-    executor.eager_runner.execute.assert_called_once_with(tokens, positions, metadata, eplb=None, input_batch=None)
-
-
-@pytest.mark.parametrize("dp_size,cp_size", [(1, 1), (2, 1), (1, 2), (1, 4)])
-def test_prepared_mtp_preserves_hidden_and_topk(dp_size: int, cp_size: int) -> None:
-    backend = _PreparedStubAttentionBackend()
-    config = {
-        "model_type": "glm_moe_dsa_mtp",
-        "is_draft_engine": True,
-        "is_mtp_algorithm": True,
-        "dp_size": dp_size,
-        "cp_size": cp_size,
-        "kv_split_size": 1,
-        "enable_task_pipeline": True,
-    }
-    with (
-        patch("xllm.python.model_executor.executor.current_platform.is_npu", return_value=True),
-        patch("xllm.python.model_executor.executor.distributed.dcp_group", return_value=None),
-        patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend),
-    ):
-        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2)
-    assert executor.supports_prepared_metadata
-    cache = torch.empty(2, 4, 2, 64)
-    executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
-    metadata = SimpleNamespace(q_cu_seq_lens_host_values=[1, 2])
-    executor.prepare_metadata(metadata)
-    tokens = torch.tensor([13, 17], dtype=torch.int32)
-    positions = torch.tensor([7, 19], dtype=torch.int32)
-    hidden = torch.arange(8, dtype=torch.float32).view(2, 4)
-    topk = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
-    executor.eager_runner = MagicMock()
-    result = executor.execute(tokens, positions, metadata, hidden, mtp_topk_indices=topk)
-    executor.eager_runner.execute.assert_called_once_with(
-        tokens, positions, metadata, hidden, None, topk, eplb=None, input_batch=None
-    )
-    assert result is executor.eager_runner.execute.return_value
-    with pytest.raises(RuntimeError, match="runner is not enabled"):
-        executor.execute(tokens, positions, metadata, hidden, mtp_topk_indices=topk, enable_graph=True)
-
-
-@pytest.mark.parametrize("model_type", ["DFlashDraftModel", "DFlash2DraftModel", "DSparkDraftModel"])
-@pytest.mark.parametrize("dp_size", [1, 2])
-def test_prepared_block_draft_uses_device_lengths(model_type: str, dp_size: int) -> None:
-    backend = _PreparedStubAttentionBackend()
-    config = _classify({"model_type": model_type, "dp_size": dp_size, "enable_task_pipeline": True})
-    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
-        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=4)
-    assert executor.supports_prepared_metadata
-    cache = torch.empty(2, 4, 2, 64)
-    executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
-    first = SimpleNamespace(q_cu_seq_lens_host_values=[4], dp_execution_token_counts=(4, 8))
-    second = SimpleNamespace(q_cu_seq_lens_host_values=[4, 8], dp_execution_token_counts=(8, 4))
-    executor.prepare_metadata(first)
-    executor.prepare_metadata(second)
-    assert first.prepared_attention_state.device_kv_lengths
-    assert first.prepared_attention_state.source == [4]
-    assert first.dp_execution_token_counts == (4, 8)
-    assert second.prepared_attention_state.source == [4, 8]
-    assert not backend._prepared
-
-
-@pytest.mark.parametrize("dp_size,cp_size", [(1, 1), (2, 1), (1, 2), (1, 4)])
-def test_prepared_mtp_graph_receives_bound_hidden_and_topk(dp_size: int, cp_size: int) -> None:
-    config = {
-        "model_type": "glm_moe_dsa_mtp",
-        "is_draft_engine": True,
-        "is_mtp_algorithm": True,
-        "dp_size": dp_size,
-        "dp_rank": 0,
-        "cp_size": cp_size,
-        "kv_split_size": 1,
-        "enable_task_pipeline": True,
-        "python_graph_backend": "aclgraph",
-    }
-    with (
-        patch("xllm.python.model_executor.executor.current_platform.is_npu", return_value=True),
-        patch("xllm.python.model_executor.executor.distributed.dcp_group", return_value=None),
-        patch(
-            "xllm.python.model_executor.executor._create_attention_backend",
-            return_value=_PreparedStubAttentionBackend(),
-        ),
-    ):
-        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=5, acl_graph_decode_batch_size_limit=4)
-    assert executor.supports_prepared_metadata
-    assert executor.prepared_graph_runner.max_batch == min((5 + dp_size - 1) // dp_size, 4) * 2
-    assert executor.decode_graph_runner is None
-    executor._kv_bound = True
-    executor.prepared_graph_runner = MagicMock(execution_metadata_builders=())
-    tokens = torch.tensor([13, 17], dtype=torch.int32)
-    positions = torch.tensor([7, 19], dtype=torch.int32)
-    hidden = torch.zeros(2, 4)
-    topk = torch.zeros(2, 1, 8, dtype=torch.int32)
-    metadata = SimpleNamespace(is_prefill=False, is_chunked_prefill=False, prepared_attention_state=object())
-    executor.warmup_prepared_graph(tokens, positions, metadata, hidden, topk)
-    executor.prepared_graph_runner.warmup_prepared.assert_called_once_with(
-        tokens, positions, metadata, hidden, topk, eplb=None, pre_capture_kv_buckets=True, input_batch=None
-    )
-    executor.execute(tokens, positions, metadata, hidden, mtp_topk_indices=topk, enable_graph=True)
-    executor.prepared_graph_runner.execute.assert_called_once_with(
-        tokens, positions, metadata, hidden, None, topk, eplb=None, input_batch=None
-    )
-
-
 @pytest.mark.parametrize("dp_size,cp_size", [(1, 1), (2, 1), (1, 2), (1, 4)])
 def test_speculative_target_graph_capacity_expands_validation_tokens(dp_size: int, cp_size: int) -> None:
     config = {
@@ -3024,7 +2259,6 @@ def test_speculative_target_graph_capacity_expands_validation_tokens(dp_size: in
         "dp_rank": 0,
         "cp_size": cp_size,
         "kv_split_size": 1,
-        "enable_task_pipeline": True,
         "python_graph_backend": "aclgraph",
         "max_position_embeddings": 128,
     }
@@ -3033,45 +2267,34 @@ def test_speculative_target_graph_capacity_expands_validation_tokens(dp_size: in
         patch("xllm.python.model_executor.executor.distributed.dcp_group", return_value=None),
         patch(
             "xllm.python.model_executor.executor._create_attention_backend",
-            return_value=_PreparedStubAttentionBackend(),
+            return_value=StubAttentionBackend(),
         ),
     ):
         executor = ModelExecutor(
             _FakeModel(), config, max_seqs_per_batch=5, num_decoding_tokens=4, acl_graph_decode_batch_size_limit=4
         )
-    assert executor.prepared_graph_runner.max_batch == min((5 + dp_size - 1) // dp_size, 4) * 4
-    assert executor.decode_graph_runner is None
+    assert executor.decode_graph_runner.max_batch == min((5 + dp_size - 1) // dp_size, 4) * 4
 
 
 @pytest.mark.parametrize("model_type", ["qwen3", "glm_moe_dsa"])
 @pytest.mark.parametrize("dp_size", [1, 2])
-@pytest.mark.parametrize("pipeline", [False, True])
-def test_executor_selects_acl_graph_input_owner(model_type: str, dp_size: int, pipeline: bool) -> None:
+def test_executor_selects_acl_graph_input_owner(model_type: str, dp_size: int) -> None:
     config = _classify(
         {
             "model_type": model_type,
             "dp_size": dp_size,
             "dp_rank": dp_size - 1,
             "python_graph_backend": "aclgraph",
-            "enable_task_pipeline": pipeline,
             "max_position_embeddings": 128,
         }
     )
-    with patch(
-        "xllm.python.model_executor.executor._create_attention_backend", return_value=_PreparedStubAttentionBackend()
-    ):
+    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=StubAttentionBackend()):
         executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=4 * dp_size)
-    assert executor.supports_prepared_metadata
-    if pipeline:
-        assert executor.decode_graph_runner is None
-        assert executor.prepared_graph_runner.dp_size == dp_size
-        assert executor.prepared_graph_runner.max_batch == 4
-    else:
-        assert executor.prepared_graph_runner is None
-        assert executor.decode_graph_runner.dp_size == dp_size
+    assert executor.decode_graph_runner.dp_size == dp_size
+    assert executor.decode_graph_runner.max_batch == 4
     cache = torch.empty(2, 4, 2, 64)
     executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
-    runner = executor.prepared_graph_runner if pipeline else executor.decode_graph_runner
+    runner = executor.decode_graph_runner
     assert len(runner.layer_caches) == 2
 
 
@@ -3088,9 +2311,7 @@ def test_executor_passes_no_padding_policy_to_ordinary_acl_runner(
         "max_position_embeddings": 4096,
         "enable_graph_mode_decode_no_padding": no_padding,
     }
-    with patch(
-        "xllm.python.model_executor.executor._create_attention_backend", return_value=_PreparedStubAttentionBackend()
-    ):
+    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=StubAttentionBackend()):
         executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=32)
 
     runner = executor.decode_graph_runner
@@ -3111,9 +2332,7 @@ def test_executor_selects_dspark_acl_graph_with_dp(dp_size: int) -> None:
             "max_position_embeddings": 128,
         }
     )
-    with patch(
-        "xllm.python.model_executor.executor._create_attention_backend", return_value=_PreparedStubAttentionBackend()
-    ):
+    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=StubAttentionBackend()):
         executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=5, acl_graph_decode_batch_size_limit=2)
     runner = executor.decode_graph_runner
     assert isinstance(runner, BlockDraftAclGraphRunner)
@@ -3132,13 +2351,10 @@ def test_dflash2_leaf_uses_full_block_graph_and_verify_context_capacity() -> Non
         "python_graph_backend": "aclgraph",
         "max_position_embeddings": 128,
     }
-    with patch(
-        "xllm.python.model_executor.executor._create_attention_backend", return_value=_PreparedStubAttentionBackend()
-    ):
+    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=StubAttentionBackend()):
         executor = ModelExecutor(model, config, max_seqs_per_batch=2, num_decoding_tokens=8)
     assert isinstance(executor.decode_graph_runner, BlockDraftAclGraphRunner)
     assert executor.decode_graph_runner.max_batch == 2
-    assert executor.prepared_graph_runner is None
     executor._kv_bound = True
     executor.context_kv_graph_runner.warmup = MagicMock()
     executor.decode_graph_runner.can_execute = MagicMock(return_value=False)
@@ -3158,9 +2374,7 @@ def test_executor_warms_context_prefix_buckets_only_during_startup() -> None:
             "max_position_embeddings": 128,
         }
     )
-    with patch(
-        "xllm.python.model_executor.executor._create_attention_backend", return_value=_PreparedStubAttentionBackend()
-    ):
+    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=StubAttentionBackend()):
         executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=4)
     cache = torch.empty(2, 4, 2, 64)
     executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
@@ -3185,9 +2399,7 @@ def test_executor_preserves_block_draft_admission_and_runner_arguments() -> None
             "max_position_embeddings": 128,
         }
     )
-    with patch(
-        "xllm.python.model_executor.executor._create_attention_backend", return_value=_PreparedStubAttentionBackend()
-    ):
+    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=StubAttentionBackend()):
         executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=4)
     executor._kv_bound = True
     runner = executor.decode_graph_runner
@@ -3212,17 +2424,17 @@ def test_executor_preserves_block_draft_admission_and_runner_arguments() -> None
     assert output is runner.execute.return_value
 
 
-def test_executor_binds_borrowed_context_caches_before_any_draft_execution(monkeypatch: pytest.MonkeyPatch) -> None:
-    backend = _PreparedStubAttentionBackend()
+def test_executor_binds_context_caches_before_any_draft_execution(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = StubAttentionBackend()
     model = _FakeModel()
     model.model.register_buffer("context_projection_weight", torch.ones(2, 4))
     model.write_context_kv = MagicMock(side_effect=lambda hidden, *_: hidden[:, :2].clone())
     config = _classify(
         {
             "model_type": "DSparkDraftModel",
-            "enable_task_pipeline": True,
             "python_graph_backend": "aclgraph",
             "num_speculative_tokens": 7,
+            "max_position_embeddings": 128,
         }
     )
     with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
@@ -3235,7 +2447,7 @@ def test_executor_binds_borrowed_context_caches_before_any_draft_execution(monke
     bound = backend._kv_caches
     context_bound = runner._kv_caches
     assert len(context_bound) == len(bound) == 2
-    assert bound is executor.eager_runner.layer_caches is executor.prepared_graph_runner.layer_caches
+    assert bound is executor.eager_runner.layer_caches is executor.decode_graph_runner.layer_caches
     assert all(actual is expected for actual, expected in zip(bound, caches))
     assert all(key is cache.key and value is cache.value for (key, value), cache in zip(context_bound, bound))
     npu = SimpleNamespace(
@@ -3251,19 +2463,20 @@ def test_executor_binds_borrowed_context_caches_before_any_draft_execution(monke
     positions = torch.arange(3, dtype=torch.int32)
     slots = torch.full((3,), -1, dtype=torch.int32)
     with patch.object(executor.eager_runner, "execute", wraps=executor.eager_runner.execute) as draft_execute:
-        output = runner.execute_borrowed(hidden, positions, slots, warmup=True)
-        assert len(runner._borrowed_graphs) == 1
-        entry = next(iter(runner._borrowed_graphs.values()))
-        assert output is entry.output
+        runner.warmup(3)
+        output = runner.execute(hidden, positions, slots)
+        entry = runner._graphs[4]
+        assert output.data_ptr() == entry.output.data_ptr()
+        assert output.shape == (3, 2)
         assert all(call.args[3] is context_bound for call in model.write_context_kv.call_args_list)
         capture_calls = npu.graph.call_count
         forward_calls = model.write_context_kv.call_count
         for value in (2.0, 3.0):
             hidden.fill_(value)
             positions.add_(1)
-            assert runner.execute_borrowed(hidden, positions, slots, warmup=False) is output
+            assert runner.execute(hidden, positions, slots).data_ptr() == output.data_ptr()
         draft_execute.assert_not_called()
-    assert npu.graph.call_count == capture_calls == 1
+    assert npu.graph.call_count == capture_calls == 3
     assert model.write_context_kv.call_count == forward_calls
     assert entry.graph.replay.call_count == 3
     assert runner._kv_caches is context_bound

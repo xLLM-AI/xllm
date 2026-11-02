@@ -222,117 +222,20 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | `speculative_suffix_use_tree_spec` | `bool` | `false` | Whether to use tree-based suffix speculation instead of path speculation. |
 | `enable_probabilistic_draft` | `bool` | false | Drafts sample proposals from their distribution (emitting q for rejection sampling). The default is greedy argmax. Only `MTP`, `DSpark`, `DFlash2`, `Eagle3` support it. |
 | `enable_atb_spec_kernel` | `bool` | `false` | Whether to use the ATB speculative kernel. |
-| `enable_adaptive_target_verify` | `bool` | `false` | Adapt how many already-generated draft proposals the target verifies, using historical confidence and calibrated full-cycle costs; draft generation width is unchanged. Supports DSpark and MTP greedy Draft5/7 with Python ACL graphs and task pipeline. MTP uses selected-token logits probabilities and requires ordinary graphs and DP=CP=1. Both ordinary-graph paths support greedy, random or mixed targets with a greedy draft; DSpark unified graphs require greedy targets. See [Adaptive Speculation](/en/features/adaptive_speculation/). |
-| `enable_adaptive_draft_step` | `bool` | `false` | Adapt the actual number of sequential draft forward steps before verification to maximize predicted full-cycle throughput. This suits autoregressive drafts, currently MTP; `num_speculative_tokens` is the maximum (1–64), not the current depth. Requires Python GLM DSA, ordinary prewarmed ACL graphs, async task pipeline and DP=CP=1; unified MTP and PD disaggregation are not supported. See [Adaptive Speculation](/en/features/adaptive_speculation/). |
-| `adaptive_draft_step_config` | `string` | `""` | Path to an optional JSON file: `policy` controls the acceptance window, update interval and switch margin; `calibration` controls startup sampling and fitting. It is not a cost-table input. Empty uses logged defaults and still measures the current MTP service's per-depth full-cycle costs before ready, sharing SPS/additive fitting code, not DSpark's measured values. See [Adaptive Speculation](/en/features/adaptive_speculation/) and the example below. |
-| `adaptive_target_verify_min_gain` | `double` | `0.0` | Minimum predicted relative throughput gain for changing the DSpark verification budget from the previous eligible plan. |
-| `adaptive_target_verify_calibration` | `string` | `""` | Optional startup-calibration JSON file. Empty selects built-in defaults; the effective settings are always logged. Cannot be combined with a saved-table input. |
-| `adaptive_target_verify_cost_table` | `string` | `""` | Load compatible saved full-step costs instead of sampling and fitting. Supports one-dimensional SPS and two-dimensional additive models. Graph warmup still runs. |
-| `adaptive_target_verify_cost_table_output` | `string` | `""` | Optionally save startup-calibrated costs as a versioned bundle. Empty keeps costs in memory. An existing output file is never overwritten. Not valid when loading a saved table. |
+| `enable_adaptive_target_verify` | `bool` | `false` | Retained switch for adapting the number of already-generated draft proposals verified by the target. Currently unsupported; keep this disabled. See [Adaptive Speculation](/en/features/adaptive_speculation/). |
+| `enable_adaptive_draft_step` | `bool` | `false` | Retained switch for adapting the number of sequential draft forward steps before verification. Currently unsupported; keep this disabled. See [Adaptive Speculation](/en/features/adaptive_speculation/). |
+| `adaptive_draft_step_config` | `string` | `""` | Retained path to an optional JSON file for the draft-step policy and startup calibration. The adaptive execution path is currently unsupported. |
+| `adaptive_target_verify_min_gain` | `double` | `0.0` | Retained minimum predicted relative throughput gain for changing the verification budget. The adaptive execution path is currently unsupported. |
+| `adaptive_target_verify_calibration` | `string` | `""` | Retained path to an optional startup-calibration JSON file. The adaptive execution path is currently unsupported. |
+| `adaptive_target_verify_cost_table` | `string` | `""` | Retained path to a saved full-step cost table. The adaptive execution path is currently unsupported. |
+| `adaptive_target_verify_cost_table_output` | `string` | `""` | Retained path for saving startup-calibrated costs. The adaptive execution path is currently unsupported. |
 
-### Throughput-aware draft-step configuration
+### Adaptive speculation availability
 
-`enable_adaptive_draft_step` changes the number of draft forward steps;
-`enable_adaptive_target_verify` prunes proposals before target verification.
-Both flags name execution capabilities, not algorithms. Shared Host-side
-cost models, budget planning, calibration and steady-window collection live
-under `core/framework/speculative/adaptive/` and use `Spec*` types; the
-draft-step selector uses the same infrastructure with its own measured costs.
-They are separate controls: currently the former supports MTP and the latter
-supports DSpark Draft5/7. They cannot be enabled together.
-
-The previous names `enable_adaptive_mtp`, `adaptive_mtp_config`, and
-`enable_adaptive_spec_prune` are replaced by `enable_adaptive_draft_step`,
-`adaptive_draft_step_config`, and `enable_adaptive_target_verify`, respectively.
-Update both CLI arguments and JSON configurations; old JSON keys are rejected
-with migration instructions instead of silently disabling the feature.
-
-Target-verification settings follow the same capability-oriented names:
-
-| Previous name | Current name |
-| --- | --- |
-| `adaptive_dspark_calibration` | `adaptive_target_verify_calibration` |
-| `adaptive_dspark_cost_table` | `adaptive_target_verify_cost_table` |
-| `adaptive_dspark_cost_table_output` | `adaptive_target_verify_cost_table_output` |
-| `adaptive_speculative_min_gain` | `adaptive_target_verify_min_gain` |
-
-Update CLI arguments and JSON keys together. Old flags are no longer registered;
-old JSON keys report the corresponding replacement. Saved cost-table JSON and
-its algorithm/backend compatibility identity are unchanged. `SpecCostModel`
-provides SPS/additive costs, `SpecCostProfileStore` indexes physical request
-buckets and KV coverage, and `VerifyBudgetPlanner` selects verification budgets.
-Backend-specific draft token layouts and supported kernel widths stay at the
-runtime boundary rather than in the shared profile store.
-
-Example launch arguments:
-
-```bash
---model_impl=python --speculative_algorithm=MTP \
---num_speculative_tokens=3 --enable_task_pipeline=true \
---enable_graph=true --enable_unified_mtp_graph=false \
---enable_schedule_overlap=true --enable_adaptive_draft_step=true \
---adaptive_draft_step_config=mtp_profile.json
-```
-
-Supply the usual target/draft model paths and parallel arguments separately.
-The optional JSON controls sampling, not precomputed cost values. Omit
-`adaptive_draft_step_config` to use defaults for both sections; the effective settings
-are always logged. An example for graphs covering request buckets 1, 2, 4, 8:
-
-```json
-{
-  "version": 1,
-  "policy": {
-    "window_size": 20, "update_interval": 5,
-    "switch_min_gain": 0.05
-  },
-  "calibration": {
-    "model": "additive", "request_buckets": [1, 2, 4, 8],
-    "contexts": [{"prefill_tokens": 2048, "min_kv_length": 1, "max_kv_length": 4096}],
-    "warmup_steps": 8, "window_steps": 32,
-    "windows_per_point": 3, "token_seed": 1
-  }
-}
-```
-
-Startup reuses DSpark's internal request driver and steady result-fence windows,
-executing real MTP prefill/decode without restarting a service or sending HTTP
-requests. Each depth gets its own measured SPS (`model: "sps"`) or additive
-model. The additive axes are physical first-draft request capacity and padded
-target rows; valid larger padded target buckets make the two axes identifiable.
-Costs include sequential draft forwards, verification, sampling, prefix refresh
-and ordinary result retirement. Fitted models are kept in engine memory;
-effective settings and calibration progress are logged. No cost JSON is
-required or taken from a DSpark run.
-Defaults use additive fitting, actual captured request buckets (up to 128),
-prefill up to 2048 and KV up to 4096 with worst-case decode headroom. Explicit
-sampling must fit the captured shapes and KV capacity; invalid coverage fails
-startup rather than silently using guessed costs. Sampling all depths and
-captured shapes adds startup time. No NPU timing Events are introduced.
-
-The engine learns `p[j] = P(accepted prefix length > j)` from completed result
-metadata and chooses the depth maximizing `B * (1 + sum(p[:depth])) / cost_ms`.
-Each retired verify batch contributes its fraction of requests accepting the
-whole prefix through `j`; batches have equal window weight regardless of size.
-The default window holds 20 completed batches, shared across batch sizes.
-Rescoring occurs every 5 completed batches once every active position has a
-full window, with a 5% minimum predicted gain for a switch. Positions beyond
-the verified depth are unobserved, not rejections. A depth decrease clears
-deeper windows; missing rates are geometrically extrapolated from the known
-prefix rates (a single known position supplies a flat tail). There is no
-periodic forced maximum-depth exploration. The former `min_observations` and
-`exploration_interval` policy keys are rejected; configure `window_size` and
-`update_interval` instead.
-
-No confidence D2H or additional TP decision broadcast is introduced. The
-normal async result harvest supplies historical feedback; an already-submitted
-task is never modified. CPU-side dispatch epochs prevent results from older
-in-flight batches from refilling windows cleared by a depth decrease. Cold
-start, missing cost coverage and requests outside warmed graph capacity use
-the configured maximum depth. The effective policy is logged at startup.
-Graphs warm all candidate depths using maximum-capacity Slot storage, so step
-selection does not deliberately trigger serving-time recapture. The enabling
-flag defaults to false and leaves fixed-width MTP unchanged when disabled.
+The adaptive configuration interface is retained, but the required
+task-pipeline and unified-MTP execution path is currently unsupported. Keep
+the adaptive feature switches disabled. See
+[Adaptive Speculation](/en/features/adaptive_speculation/) for availability.
 
 ## ProfileConfig
 
@@ -356,14 +259,15 @@ flag defaults to false and leaves fixed-width MTP unchanged when disabled.
 |:----------|:-----|:--------|:------------|
 | `extension_impl` | `string` | `""` | Native extension implementation family for registered components, including models and executors. An empty value preserves normal selection. The selected family must be registered; components without registrations in that family keep their normal selection. |
 | `enable_graph` | `bool` | `false` | Whether to enable graph execution for the decode phase to reduce kernel-launch overhead and device idle time. Supports CUDA Graph, ACL Graph (NPU), MLU Graph, and DCU Graph. See [Graph Mode](/en/features/graph_mode/). |
-| `enable_unified_mtp_graph` | `bool` | `false` | Route supported NPU speculative decode requests through a unified Python graph. Supports GLM DSA MTP and `DFlash`/`DFlash2`/`DSpark` with a GLM DSA target model. Requires `enable_graph=true`; `DFlash`/`DFlash2`/`DSpark` also require `enable_task_pipeline=true`. Disabling this flag leaves ordinary model graph execution unchanged. |
+| `enable_task_pipeline` | `bool` | `false` | Retained task-pipeline switch. Keep `false`; setting it to `true` fails at startup because the feature is currently unsupported. |
+| `enable_unified_mtp_graph` | `bool` | `false` | Retained unified-MTP switch. Keep `false`; setting it to `true` fails at startup because the feature is currently unsupported. |
 | `enable_graph_double_buffer` | `bool` | `true` | Whether to enable double-buffered ACL graph persistent params and graph instances for NPU schedule-overlap decode. |
 | `enable_graph_mode_decode_no_padding` | `bool` | `false` | Whether decode graph capture uses the actual `num_tokens` instead of a padded shape. |
 | `enable_prefill_piecewise_graph` | `bool` | `false` | Whether to enable piecewise CUDA graph for the prefill phase. Attention runs in eager mode while other operations are captured in CUDA graphs. |
 | `enable_graph_vmm_pool` | `bool` | `true` | Whether to enable a VMM-backed CUDA graph memory pool for multi-shape graph memory reuse. |
 | `max_tokens_for_graph_mode` | `int32` | `2048` | Maximum number of tokens for graph execution. `0` means no limit. |
 | `acl_graph_decode_batch_size_limit` | `int32` | `16` | Decode batch size threshold for ACL graph on NPU. When the actual decode batch size exceeds this value, ACL graph decode falls back to eager mode to avoid OOM. |
-| `block_draft_graph_warmup_max_kv_len` | `int32` | `0` | Pre-capture power-of-two KV capacity buckets for independent Python block-draft ACL graphs (DSpark/DFlash2, including GLM MLA drafts). `0` covers the full model context; a positive value selects the bucket covering that length; `-1` retains lazy capacity capture. Required existing warmup shapes are always retained, even above a positive limit. Requests beyond the warmup limit can still grow graphs lazily. More buckets increase startup time and draft graph memory. Does not change target, MTP, context-write or optional whole-round unified graph warmup. |
+| `block_draft_graph_warmup_max_kv_len` | `int32` | `0` | Pre-capture power-of-two KV capacity buckets for independent Python block-draft ACL graphs (DSpark/DFlash2, including GLM MLA drafts). `0` covers the full model context; a positive value selects the bucket covering that length; `-1` retains lazy capacity capture. Required existing warmup shapes are always retained, even above a positive limit. Requests beyond the warmup limit can still grow graphs lazily. More buckets increase startup time and draft graph memory. Does not change target, MTP or context-write warmup. |
 | `enable_shm` | `bool` | `false` | Whether to enable shared memory for model execution. |
 | `use_contiguous_input_buffer` | `bool` | `true` | Whether to use a contiguous device input buffer for model execution. |
 | `input_shm_size` | `uint64` | `1024` | Input shared-memory size. Default is 1GB. |

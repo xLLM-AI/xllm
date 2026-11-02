@@ -56,9 +56,6 @@ limitations under the License.
 namespace xllm {
 
 class WorkerRendezvous;
-class TaskExecutionPipeline;
-struct LlmTaskCapacity;
-struct TaskModel;
 
 class WorkerImpl {
  public:
@@ -80,16 +77,6 @@ class WorkerImpl {
   // destructor's drain cannot protect members of already-destroyed subclasses.
   void begin_shutdown();
   virtual void drain_pending_execution();
-
-  // Call outside the state executor, after weights load and before KV
-  // budgeting.
-  virtual ::xllm::Status create_task_pipeline(
-      std::unique_ptr<TaskExecutionPipeline>& output);
-  virtual bool task_models_loaded() const { return status_ == Status::LOADED; }
-  virtual bool uses_worker_task_pipeline() const { return false; }
-  ::xllm::Status task_capacity(const runtime::Options& options,
-                               LlmTaskCapacity& output) const;
-  TaskModel task_model();
 
   // initialize model, cache manager. blocking call
   virtual bool init_model(ModelContext& context) = 0;
@@ -153,12 +140,6 @@ class WorkerImpl {
                                              Stream& prepare_stream,
                                              bool record_ready_event = true,
                                              bool restore_linear_state = true);
-  void prepare_input_on_stream(const LlmForwardInput& input,
-                               LlmForwardInput& processed_input,
-                               Stream& prepare_stream,
-                               bool record_ready_event,
-                               bool restore_linear_state,
-                               bool wait_for_compute_stream);
 #if defined(USE_NPU)
   // Per-worker-static configuration handed to NpuCpPlan::prepare(); built once
   // and cached.
@@ -218,14 +199,6 @@ class WorkerImpl {
 
   virtual void process_group_test();
 
-  virtual void prepare_task_pipeline_input(const LlmForwardInput& input,
-                                           LlmForwardInput& prepared);
-  virtual std::optional<ForwardOutput> execute_task_pipeline(
-      const LlmForwardInput& prepared);
-  virtual void prepare_task_pipeline_input(const VlmForwardInput& input,
-                                           VlmForwardInput& prepared);
-  virtual std::optional<ForwardOutput> execute_task_pipeline(
-      VlmForwardInput& prepared);
   // Warmup waits for execution allocations; serving keeps stream overlap.
   void observe_execution_memory(bool is_warmup);
 
@@ -268,8 +241,8 @@ class WorkerImpl {
       const uint64_t batch_id,
       Slice<BlockTransferInfo>& block_transfer_info);
 
-  std::shared_ptr<HierarchyKVCacheTransfer> create_hierarchy_kv_cache_transfer(
-      std::optional<bool> enable_task_pipeline = std::nullopt);
+  std::shared_ptr<HierarchyKVCacheTransfer>
+  create_hierarchy_kv_cache_transfer();
 
   void bind_hierarchy_kv_cache_transfer(
       std::shared_ptr<HierarchyKVCacheTransfer> transfer,
@@ -536,13 +509,11 @@ class WorkerImpl {
   template <typename Input>
   void restore_json_object_states_impl(Input& input);
   template <typename Input>
-  void prepare_work_before_execute_on_stream_impl(
-      const Input& input,
-      Input& processed_input,
-      Stream& prepare_stream,
-      bool record_ready_event,
-      bool restore_linear_state,
-      bool wait_for_compute_stream = true);
+  void prepare_work_before_execute_on_stream_impl(const Input& input,
+                                                  Input& processed_input,
+                                                  Stream& prepare_stream,
+                                                  bool record_ready_event,
+                                                  bool restore_linear_state);
   template <typename Input>
   folly::SemiFuture<std::optional<ForwardOutput>> step_async_impl(
       const Input& input);

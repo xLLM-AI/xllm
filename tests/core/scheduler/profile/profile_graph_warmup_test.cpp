@@ -29,7 +29,6 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/scheduler_config.h"
-#include "core/framework/config/speculative_config.h"
 #include "core/framework/request/incremental_decoder.h"
 #include "core/framework/request/sequence.h"
 #include "core/framework/request/stopping_checker.h"
@@ -97,24 +96,6 @@ class ScopedModelImplSnapshot final {
 
  private:
   std::string model_impl_;
-};
-
-class ScopedSpeculativeSamplingConfigSnapshot final {
- public:
-  ScopedSpeculativeSamplingConfigSnapshot()
-      : adaptive_(
-            SpeculativeConfig::get_instance().enable_adaptive_target_verify()),
-        algorithm_(SpeculativeConfig::get_instance().speculative_algorithm()) {}
-
-  ~ScopedSpeculativeSamplingConfigSnapshot() {
-    SpeculativeConfig::get_instance()
-        .enable_adaptive_target_verify(adaptive_)
-        .speculative_algorithm(algorithm_);
-  }
-
- private:
-  bool adaptive_;
-  std::string algorithm_;
 };
 
 TEST(DecodeGraphWarmupConfigTest, OrdinaryTargetUsesSingleTokenShape) {
@@ -380,49 +361,35 @@ class RecordingProfileEngine final : public Engine {
   std::vector<std::vector<int32_t>> prefill_batches_;
   int32_t decode_sequences_ = 0;
 };
-TEST(GraphWarmupTest, AdaptiveVerifyPipelineUsesGreedySyntheticRequests) {
+TEST(GraphWarmupTest, ReservedPipelineFlagPreservesSyntheticSampling) {
   ScopedDecodeGraphConfigSnapshot execution_snapshot;
-  ScopedSpeculativeSamplingConfigSnapshot sampling_snapshot;
   ExecutionConfig::get_instance().enable_graph(false);
-  for (const bool adaptive : {false, true}) {
-    for (const bool pipeline : {false, true}) {
-      for (const std::string algorithm :
-           {"DSpark", "dspark", "MTP", "DFlash", "DFlash2"}) {
-        SCOPED_TRACE(algorithm);
-        SCOPED_TRACE(adaptive);
-        SCOPED_TRACE(pipeline);
-        SpeculativeConfig::get_instance()
-            .enable_adaptive_target_verify(adaptive)
-            .speculative_algorithm(algorithm);
-        RecordingProfileEngine engine;
-        ProfileManager::Options options;
-        options.max_tokens_per_batch(8)
-            .max_seqs_per_batch(2)
-            .dp_size(1)
-            .enable_task_pipeline(pipeline)
-            .instance_role(InstanceRole::DECODE);
-        ProfileManager profile_manager(&engine, options);
+  for (const bool pipeline : {false, true}) {
+    SCOPED_TRACE(pipeline);
+    RecordingProfileEngine engine;
+    ProfileManager::Options options;
+    options.max_tokens_per_batch(8)
+        .max_seqs_per_batch(2)
+        .dp_size(1)
+        .enable_task_pipeline(pipeline)
+        .instance_role(InstanceRole::DECODE);
+    ProfileManager profile_manager(&engine, options);
 
-        // Exercise both synthetic factories, including non-capture profiling
-        // requests that still execute through the same worker admission.
-        profile_manager.run_request(/*token_length=*/4,
-                                    /*prefix_length=*/0,
-                                    /*batch_size=*/2,
-                                    /*extra_token_length=*/0,
-                                    /*is_graph_warmup=*/false);
-        profile_manager.profile_decode_step_time(/*token_length=*/5,
-                                                 /*batch_size=*/2,
-                                                 /*min_context_len=*/5,
-                                                 /*max_context_len=*/5);
+    // Exercise both synthetic factories, including non-capture profiling
+    // requests that still execute through the same worker admission.
+    profile_manager.run_request(/*token_length=*/4,
+                                /*prefix_length=*/0,
+                                /*batch_size=*/2,
+                                /*extra_token_length=*/0,
+                                /*is_graph_warmup=*/false);
+    profile_manager.profile_decode_step_time(/*token_length=*/5,
+                                             /*batch_size=*/2,
+                                             /*min_context_len=*/5,
+                                             /*max_context_len=*/5);
 
-        const bool expected_greedy =
-            adaptive && pipeline &&
-            SpeculativeConfig::supports_adaptive_target_verify(algorithm);
-        ASSERT_EQ(engine.observed_greedy_samples().size(), 8);
-        for (const bool greedy : engine.observed_greedy_samples()) {
-          EXPECT_EQ(greedy, expected_greedy);
-        }
-      }
+    ASSERT_EQ(engine.observed_greedy_samples().size(), 8);
+    for (const bool greedy : engine.observed_greedy_samples()) {
+      EXPECT_FALSE(greedy);
     }
   }
   // Serving request defaults are independent of synthetic profile requests.
@@ -621,59 +588,31 @@ TEST(DecodeGraphWarmupPlanTest, CoversEveryPaddedMtpTokenBucket) {
           1, 2, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64}));
 }
 
-TEST(DecodeGraphWarmupPlanTest, ResolvesIndependentDraftInvocationShapes) {
-  ExecutionConfig execution;
-  auto config = execution.decode_graph_warmup_config(3, false, "mTp");
-  ASSERT_EQ(config.draft_shapes.size(), 1);
-  EXPECT_EQ(config.draft_shapes.front().tokens_per_sequence, 1);
-  EXPECT_FALSE(config.draft_shapes.front().bucket_by_sequence);
-
-  execution.enable_task_pipeline(true);
-  config = execution.decode_graph_warmup_config(3, false, "MTP");
-  ASSERT_EQ(config.draft_shapes.size(), 2);
-  EXPECT_EQ(config.draft_shapes[0].tokens_per_sequence, 2);
-  EXPECT_EQ(config.draft_shapes[1].tokens_per_sequence, 1);
-  config = execution.decode_graph_warmup_config(1, false, "MTP");
-  ASSERT_EQ(config.draft_shapes.size(), 1);
-  EXPECT_EQ(config.draft_shapes.front().tokens_per_sequence, 2);
-
-  for (const int32_t width : {5, 7}) {
-    config = execution.decode_graph_warmup_config(width, false, "dSpArK");
-    ASSERT_EQ(config.draft_shapes.size(), 1);
-    EXPECT_EQ(config.draft_shapes.front().tokens_per_sequence, width);
-    EXPECT_TRUE(config.draft_shapes.front().bucket_by_sequence);
-  }
-  config = execution.decode_graph_warmup_config(7, false, "DFlash2");
-  ASSERT_EQ(config.draft_shapes.size(), 1);
-  EXPECT_EQ(config.draft_shapes.front().tokens_per_sequence, 8);
-  EXPECT_TRUE(config.draft_shapes.front().bucket_by_sequence);
-  for (const std::string algorithm : {"DFlash", "Suffix"}) {
-    EXPECT_TRUE(execution.decode_graph_warmup_config(7, false, algorithm)
-                    .draft_shapes.empty());
-  }
-  EXPECT_TRUE(execution.decode_graph_warmup_config(0, false, "MTP")
-                  .draft_shapes.empty());
-  EXPECT_TRUE(execution.decode_graph_warmup_config(3, true, "MTP")
-                  .draft_shapes.empty());
-  execution.enable_unified_mtp_graph(true);
-  EXPECT_TRUE(execution.decode_graph_warmup_config(7, false, "DSpark")
-                  .draft_shapes.empty());
-}
-
-TEST(DecodeGraphWarmupPlanTest,
-     DsparkCoversDraftAndTargetWithoutRedundantBatch) {
-  if (!Platform::supports_mtp_decode_graph_warmup()) {
-    GTEST_SKIP() << "Token-bucket graph warmup is not supported.";
-  }
-  ExecutionConfig execution;
-  execution.enable_task_pipeline(true).acl_graph_decode_batch_size_limit(8);
-  for (const int32_t width : {5, 7}) {
-    const auto config =
-        execution.decode_graph_warmup_config(width, false, "DSpark");
-    const auto plan = build_decode_graph_warmup_plan(config, 8, 1);
-    EXPECT_EQ(plan.batch_sizes,
-              width == 5 ? (std::vector<int32_t>{1, 2, 4, 8})
-                         : (std::vector<int32_t>{1, 2, 4, 6, 8}));
+TEST(DecodeGraphWarmupPlanTest, ReservedFlagsPreserveOrdinaryDraftShapes) {
+  for (const bool pipeline : {false, true}) {
+    for (const bool unified : {false, true}) {
+      SCOPED_TRACE(pipeline);
+      SCOPED_TRACE(unified);
+      ExecutionConfig execution;
+      execution.enable_task_pipeline(pipeline).enable_unified_mtp_graph(
+          unified);
+      for (const int32_t width : {1, 3, 5, 7}) {
+        const auto config =
+            execution.decode_graph_warmup_config(width, false, "mTp");
+        ASSERT_EQ(config.draft_shapes.size(), 1);
+        EXPECT_EQ(config.draft_shapes.front().tokens_per_sequence, 1);
+        EXPECT_FALSE(config.draft_shapes.front().bucket_by_sequence);
+      }
+      for (const std::string algorithm :
+           {"DSpark", "DFlash2", "DFlash", "Suffix"}) {
+        EXPECT_TRUE(execution.decode_graph_warmup_config(7, false, algorithm)
+                        .draft_shapes.empty());
+      }
+      EXPECT_TRUE(execution.decode_graph_warmup_config(0, false, "MTP")
+                      .draft_shapes.empty());
+      EXPECT_TRUE(execution.decode_graph_warmup_config(3, true, "MTP")
+                      .draft_shapes.empty());
+    }
   }
 }
 
@@ -690,8 +629,7 @@ TEST(DecodeGraphWarmupPlanTest, JointCoverageUsesLocalDpGeometryAndGraphLimit) {
           SCOPED_TRACE(dp_size);
           SCOPED_TRACE(local_capacity);
           ExecutionConfig execution;
-          execution.enable_task_pipeline(true)
-              .acl_graph_decode_batch_size_limit(8);
+          execution.acl_graph_decode_batch_size_limit(8);
           const auto config =
               execution.decode_graph_warmup_config(width, false, algorithm);
           const int32_t global_capacity = local_capacity * dp_size;
@@ -1173,7 +1111,6 @@ TEST(GraphWarmupTest, PythonNoPaddingWarmsEverySequenceCount) {
         options.max_tokens_per_batch(20)
             .max_seqs_per_batch(4)
             .dp_size(1)
-            .enable_task_pipeline(false)
             .enable_schedule_overlap(overlap)
             .enable_profile_step_time(false)
             .enable_profile_kv_blocks(false)

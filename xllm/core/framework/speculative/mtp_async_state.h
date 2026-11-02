@@ -54,11 +54,6 @@ DraftPrefixPolicy classify_draft_prefix_policy(
     TargetSpecVerifyMode target_mode,
     CombinedDraftExecutionPath draft_path);
 
-// The hybrid task-pipeline implementation has a narrower validated model set
-// than ordinary verification. Do not admit MoE or unknown model pairs here.
-bool supports_hybrid_mtp_pipeline_model_pair(std::string_view target_type,
-                                             std::string_view draft_type);
-
 bool supports_combined_draft_configuration(
     CombinedDraftExecutionPath execution_path,
     std::string_view npu_backend,

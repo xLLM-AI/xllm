@@ -139,30 +139,6 @@ torch::Tensor greedy_prefix_verify(const torch::Tensor& draft,
                                    const torch::Tensor& target,
                                    const torch::Tensor& bonus);
 
-// One byte arena: contiguous int64 [B,K+1] IDs followed by int32 [B] counts.
-// Both views share the same snapshot/Host lease; no pack copy is required.
-std::tuple<torch::Tensor, torch::Tensor> mtp_greedy_commit(
-    const torch::Tensor& draft,
-    const torch::Tensor& target,
-    const torch::Tensor& hidden);
-
-// Update sparse MTP graph-owned metadata on the current producer stream.
-// Layout contains immutable [slot, kv, table] word offsets for K draft roles
-// and the target role; its owner validates all slices before the first launch.
-void mtp_sparse_metadata_update(const torch::Tensor& block_table,
-                                const torch::Tensor& base_positions,
-                                const torch::Tensor& base_kv_lengths,
-                                const torch::Tensor& first_kv_lengths,
-                                const torch::Tensor& first_slots,
-                                const torch::Tensor& layout,
-                                const torch::Tensor& draft_arena,
-                                const torch::Tensor& target_arena,
-                                const torch::Tensor& position_arena,
-                                int64_t speculative_tokens,
-                                int64_t table_capacity,
-                                int64_t block_size,
-                                bool target_step_major);
-
 // Take the first token from each row of an existing row-major int32 verify
 // buffer and pack it with `spec_width - 1` proposer columns into graph-owned
 // row-major int32 storage on the current NPU stream. `spec_width` equals

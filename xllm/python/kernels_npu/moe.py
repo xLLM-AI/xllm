@@ -288,9 +288,8 @@ def moe_finalize_routing(
 ) -> torch.Tensor:
     """Finalize routed tokens and add the shared expert output.
 
-    This is a thin Python-graph wrapper around the existing torch_npu op.  It
-    intentionally keeps the native argument layout in one place; no C++ or
-    ATB source is changed by the GLM Unified prototype.
+    This thin Python-graph wrapper keeps the native torch_npu argument layout
+    in one place.
     """
     return torch_npu.npu_moe_finalize_routing(
         permuted_tokens,
@@ -445,9 +444,8 @@ def grouped_moe_with_routing(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Return grouped output and routing metadata for fused finalization.
 
-    This variant deliberately leaves the grouped output permuted.  It is used
-    only by the EP=1 GLM Unified FinalizeRouting prototype; the legacy
-    ``grouped_moe`` API above still performs token unpermutation internally.
+    This variant leaves the grouped output permuted so the caller can finalize
+    routing separately. ``grouped_moe`` performs token unpermutation internally.
     """
     return _grouped_moe_impl(
         hidden_states,

@@ -80,9 +80,8 @@ void ScheduleOverlap::prepare_continuation_impl(WorkerImpl& worker,
   const ForwardOutput empty_output;
   const ForwardOutput& prior_output =
       state_.has_tokens() ? state_.prior_output() : empty_output;
-  // JSON continuation owns its prior-output dependency because it is also
-  // invoked directly by task-pipeline workers.  Keep the wait here only for
-  // the plain token-replacement path to avoid enqueueing the same event twice.
+  // JSON continuation owns its prior-output dependency. Keep the wait here
+  // only for plain token replacement to avoid enqueueing the event twice.
   if (reuse_tokens && input.json_object_states.empty()) {
     CHECK(compute_stream.wait_event(prior_output.ready_event))
         << "failed to wait last step output before overlap continuation";
