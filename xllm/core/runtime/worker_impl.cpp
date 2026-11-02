@@ -1766,6 +1766,11 @@ std::optional<ForwardOutput> WorkerImpl::execute_task_pipeline(
   return step(prepared);
 }
 
+StreamEventPtr WorkerImpl::record_task_pipeline_completion() const {
+  CHECK(compute_stream_ != nullptr);
+  return compute_stream_->record_event_or_sync();
+}
+
 ForwardOutput WorkerImpl::get_last_step_result() {
   return schedule_overlap_.consume();
 }
