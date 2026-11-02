@@ -17,12 +17,14 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <tuple>
 #include <utility>
 
-#include "qwen3_next_gated_delta_net.h"
+#include "core/layers/npu_torch/qwen3_5_gdn_projection.h"
+#include "core/layers/npu_torch/qwen3_next_gated_delta_net.h"
 
 namespace xllm {
 namespace layer {
@@ -54,6 +56,10 @@ class Qwen3_5GatedDeltaNetImpl : public Qwen3NextGatedDeltaNetImpl {
                         const ModelParamsView& input_params) override;
 
  protected:
+  // Prefill projections remain token-packed; Decode uses project_split_inputs.
+  virtual GdnProjectionTensors project_prefill_inputs(
+      const torch::Tensor& hidden_states);
+
   std::optional<
       std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>>
   project_split_inputs(const torch::Tensor& hidden_states,
@@ -64,6 +70,8 @@ class Qwen3_5GatedDeltaNetImpl : public Qwen3NextGatedDeltaNetImpl {
   void verify_projection_weights(const std::string& prefix) const override;
 
  private:
+  GdnProjectionMode prefill_projection_mode_ = GdnProjectionMode::SEPARATE;
+  std::unique_ptr<GdnPrefillProjection> prefill_projection_;
   ColumnParallelLinear in_proj_qkv_{nullptr};
   ColumnParallelLinear in_proj_z_{nullptr};
   ColumnParallelLinear in_proj_b_{nullptr};
