@@ -563,6 +563,73 @@ for op_name in (
 )PY");
 }
 
+TEST_F(NpuXllmOpsTest, HcPreMatchesReferenceAndGraph) {
+  py::gil_scoped_acquire gil;
+  py::exec(R"PY(
+import math
+
+import torch
+
+def run_hc_pre(hidden: torch.Tensor, weight: torch.Tensor,
+               scale: torch.Tensor, base: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    return torch.ops.xllm_ops.hc_pre(hidden, weight, scale, base, 4, 20, 0.125, 0.01)
+
+with torch.inference_mode():
+    weight_cpu = (((torch.arange(24) % 7) - 3).float()[:, None]
+                  .expand(24, 16384).contiguous() / 16384)
+    scale_cpu = torch.tensor([0.5, 1.5, 0.75])
+    base_cpu = (torch.arange(24).float() - 12) / 32
+    weight = weight_cpu.to("npu")
+    scale = scale_cpu.to("npu")
+    base = base_cpu.to("npu")
+    for shape in ((2, 4, 4096), (1, 4, 4, 4096)):
+        input_cpu = ((torch.arange(math.prod(shape)) % 32 + 1)
+                     .reshape(shape).float() / 16).bfloat16()
+        hidden = input_cpu.to("npu")
+        collapsed, post, combination = run_hc_pre(hidden, weight, scale, base)
+        assert collapsed.shape == (*shape[:-2], shape[-1])
+        assert post.shape == shape[:-1]
+        assert combination.shape == (*shape[:-1], 4)
+        assert collapsed.dtype == torch.bfloat16
+        assert post.dtype == combination.dtype == torch.float32
+
+        flat = input_cpu.flatten(-2).float()
+        mixes = torch.nn.functional.linear(flat, weight_cpu) * torch.rsqrt(
+            flat.square().mean(-1, keepdim=True) + 0.125)
+        pre_logits, post_logits, comb_logits = mixes.split([4, 4, 16], -1)
+        pre = torch.sigmoid(pre_logits * scale_cpu[0] + base_cpu[:4]) + 0.01
+        post_ref = 2 * torch.sigmoid(post_logits * scale_cpu[1] + base_cpu[4:8])
+        comb = torch.softmax((comb_logits * scale_cpu[2] + base_cpu[8:])
+                             .unflatten(-1, (4, 4)), -1) + 0.01
+        comb = comb / (comb.sum(-2, keepdim=True) + 0.01)
+        for _ in range(19):
+            comb = comb / (comb.sum(-1, keepdim=True) + 0.01)
+            comb = comb / (comb.sum(-2, keepdim=True) + 0.01)
+        y = (pre.unsqueeze(-1) * input_cpu.float()).sum(-2).bfloat16()
+        torch.testing.assert_close(collapsed.cpu(), y, rtol=4e-3, atol=4e-3)
+        torch.testing.assert_close(post.cpu(), post_ref, rtol=1e-4, atol=1e-4)
+        torch.testing.assert_close(combination.cpu(), comb, rtol=1e-4, atol=1e-4)
+
+        stream = torch.npu.Stream()
+        graph = torch.npu.NPUGraph()
+        with torch.npu.stream(stream):
+            run_hc_pre(hidden, weight, scale, base)
+        torch.npu.synchronize()
+        with torch.npu.graph(graph, stream=stream):
+            captured = run_hc_pre(hidden, weight, scale, base)
+        torch.npu.synchronize()
+        with torch.npu.stream(stream):
+            hidden.add_(0.125)
+            base.add_(0.0625)
+            graph.replay()
+        torch.npu.synchronize()
+        expected = run_hc_pre(hidden, weight, scale, base)
+        for actual, reference in zip(captured, expected, strict=True):
+            torch.testing.assert_close(actual.cpu(), reference.cpu(), rtol=0, atol=0)
+        base.copy_(base_cpu)
+)PY");
+}
+
 TEST_F(NpuXllmOpsTest, Dsv4GroupGemmMatchesInt32Reference) {
   py::gil_scoped_acquire gil;
 
