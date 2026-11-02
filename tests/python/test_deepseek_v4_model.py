@@ -27,7 +27,7 @@ import pytest
 import torch
 
 from xllm.python.distributed import collectives
-from xllm.python.layers import moe_dp
+from xllm.python.layers import moe_parallel
 from xllm.python.model_executor.forward_context import ForwardContext, forward_context
 from xllm.python.models import deepseek_v4, deepseek_v32
 from xllm.python.models.deepseek_v4 import (
@@ -872,7 +872,7 @@ def test_v4_o_b_row_parallel_keeps_checkpoint_layout() -> None:
 
 def test_moe_dp_rejects_metadata_token_count_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
     """DP slicing must never silently consume padding or drop real rows."""
-    monkeypatch.setattr(moe_dp, "distributed", collectives)
+    monkeypatch.setattr(moe_parallel, "distributed", collectives)
     moe = SimpleNamespace(
         dp_size=2,
         dp_rank=0,

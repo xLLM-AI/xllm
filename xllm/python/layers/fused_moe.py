@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 
 from xllm.python import kernels
-from xllm.python.layers.moe_dp import dp_gather_tokens, reduce_and_scatter
+from xllm.python.layers.moe_parallel import dp_gather_tokens, reduce_and_scatter
 
 
 class FusedMoE(nn.Module):

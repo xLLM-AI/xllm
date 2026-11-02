@@ -36,7 +36,7 @@ import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from itertools import accumulate
-from typing import Any, Optional, cast
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 import torch
 import torch.nn as nn
@@ -54,8 +54,18 @@ from xllm.python.attention.mla_index_context import (
     KPoolMlaIndexContextBuilder,
     is_compact_kpool_tail,
 )
-from xllm.python.layers.moe_parallel import Eplv2CommPolicy
-from xllm.python.layers.npu.glm5_next_metadata import Glm5NextEplv2Metadata, Glm5NextEplv2MetadataBuilder
+from xllm.python.layers.embedding import HiddenParallelEmbedding
+from xllm.python.layers.kda import KdaForgetGate
+from xllm.python.layers.layernorm import RMSNorm
+from xllm.python.layers.linear import ColumnParallelLinear
+from xllm.python.layers.moe_parallel import (
+    Eplv2CommPolicy,
+    TokenParallelLayout,
+    dp_gather_tokens,
+    reduce_and_scatter,
+    shared_expert_stream,
+)
+from xllm.python.layers.qlinear import QLinear
 from xllm.python.model_executor.cp_utils import (
     cp_merge_rows,
     cp_shard_positions,
@@ -69,6 +79,27 @@ from xllm.python.model_executor.forward_context import (
     in_acl_graph,
     record_layer_event,
 )
+from xllm.python.model_loader import QLinearWeightLoader
+from xllm.python.models.aux_hidden_capture import AuxHiddenCapture
+from xllm.python.models.base import PyModelBase
+from xllm.python.models.glm5_next_kpool import (
+    append_causal_tail,
+    read_pools,
+    update_compressed_kpool,
+)
+from xllm.python.models.glm5_next_kpool import pooled_states as _kpool_pooled_states
+
+if TYPE_CHECKING:
+    from xllm.python.attention.backend import ExecutionMetadataSource, LayerCache
+    from xllm.python.model_executor.input_batch import InputBatch
+
+try:
+    from xllm.python.layers.attention import Attention
+except ImportError:  # pragma: no cover - stub-loader path
+
+    class Attention(nn.Module):  # type: ignore[no-redef]
+        def __init__(self, *args, **kwargs) -> None:  # noqa: D401
+            super().__init__()
 
 
 @functools.cache
@@ -101,38 +132,6 @@ def _compact_kpool_triton_query_len(
 # (= kv_len / index_kpool): 8 GiB at 32K context, 16 GiB at 64K — beyond the
 # activation headroom and a hard device OOM mid prefill.
 _SCORES_SLAB_CAP_BYTES = int(1.5 * 1024**3)
-from xllm.python.layers.embedding import HiddenParallelEmbedding
-from xllm.python.layers.kda import KdaForgetGate
-from xllm.python.layers.layernorm import RMSNorm
-from xllm.python.layers.linear import ColumnParallelLinear
-from xllm.python.layers.moe_dp import dp_gather_tokens, reduce_and_scatter
-from xllm.python.layers.moe_parallel import TokenParallelLayout
-from xllm.python.layers.qlinear import QLinear
-from xllm.python.model_loader import QLinearWeightLoader
-from xllm.python.models.aux_hidden_capture import AuxHiddenCapture
-from xllm.python.models.base import PyModelBase
-from xllm.python.models.glm5_next_kpool import (
-    append_causal_tail,
-    read_pools,
-    update_compressed_kpool,
-)
-from xllm.python.models.glm5_next_kpool import pooled_states as _kpool_pooled_states
-from xllm.python.npu_streams import shared_expert_stream
-
-# xllm Attention base — present in the real engine (full xllm.python package).
-# Under the standalone stub-loader align path the package is not wired, so fall
-# back to a stub nn.Module that accepts (and ignores) the same __init__ kwargs;
-# the layers still work as plain modules there (the executor's
-# isinstance(module, Attention) check is never reached on that path).
-try:
-    from xllm.python.layers.attention import Attention
-except ImportError:  # pragma: no cover - stub-loader path
-
-    class Attention(nn.Module):  # type: ignore[no-redef]
-        def __init__(self, *args, **kwargs) -> None:  # noqa: D401
-            super().__init__()
-
-
 # Paged pool cache: write-time incremental compression + direct pool read
 # (see glm5_next_kpool.py).
 
@@ -1832,6 +1831,85 @@ class Glm5NextExperts(nn.Module):
         current = (current * flat_weights.unsqueeze(-1)).float()
         current = current.view(n_tokens, topk, hidden)
         return current.sum(1).to(hidden_states.dtype)
+
+
+@dataclass(slots=True)
+class Glm5NextEplv2Metadata:
+    local_token_mask: torch.Tensor
+
+
+class Glm5NextEplv2MetadataBuilder:
+    metadata_type = Glm5NextEplv2Metadata
+
+    def __init__(self, dp_size: int, dp_rank: int) -> None:
+        if dp_size <= 0 or not 0 <= dp_rank < dp_size:
+            raise ValueError(f"invalid GLM EPLv2 DP geometry: size={dp_size}, rank={dp_rank}")
+        self._dp_size = dp_size
+        self._dp_rank = dp_rank
+
+    def bind_layer_caches(self, layer_caches: list[LayerCache]) -> None:
+        del layer_caches
+
+    def build(
+        self,
+        input_batch: InputBatch,
+        metadata: ExecutionMetadataSource,
+    ) -> Glm5NextEplv2Metadata:
+        mask = torch.empty(
+            input_batch.num_tokens,
+            dtype=torch.bool,
+            device=input_batch.input_ids.device,
+        )
+        result = Glm5NextEplv2Metadata(mask)
+        self.update_persistent(result, input_batch, metadata)
+        return result
+
+    def allocate_persistent(
+        self,
+        input_batch: InputBatch,
+        metadata: ExecutionMetadataSource,
+    ) -> Glm5NextEplv2Metadata:
+        capacity = input_batch.num_tokens_after_padding
+        if capacity <= 0:
+            raise ValueError("GLM EPLv2 graph token capacity must be positive")
+        return Glm5NextEplv2Metadata(
+            torch.zeros(
+                capacity,
+                dtype=torch.bool,
+                device=input_batch.input_ids.device,
+            )
+        )
+
+    def update_persistent(
+        self,
+        persistent_metadata: object,
+        input_batch: InputBatch,
+        metadata: ExecutionMetadataSource,
+    ) -> None:
+        if not isinstance(persistent_metadata, Glm5NextEplv2Metadata):
+            raise TypeError("GLM EPLv2 received invalid persistent execution metadata")
+        mask = persistent_metadata.local_token_mask
+        if mask.dim() != 1 or mask.device != input_batch.input_ids.device:
+            raise ValueError("GLM EPLv2 local token mask must be a device one-dimensional tensor")
+        if input_batch.num_tokens > mask.numel():
+            raise RuntimeError(
+                "GLM EPLv2 local token mask capacity is smaller than the execution batch: "
+                f"tokens={input_batch.num_tokens}, capacity={mask.numel()}"
+            )
+        if self._dp_size > 1:
+            counts = metadata.raw_dp_execution_token_counts
+            if len(counts) != self._dp_size:
+                raise RuntimeError("GLM EPLv2 local masks require raw execution counts for every DP rank")
+            valid_rows = counts[self._dp_rank]
+            if valid_rows < 0 or valid_rows > input_batch.num_tokens:
+                raise RuntimeError(
+                    "GLM EPLv2 local active-token rows exceed the execution batch: "
+                    f"rows={valid_rows}, tokens={input_batch.num_tokens}"
+                )
+        else:
+            valid_rows = 0 if input_batch.is_dummy else input_batch.num_tokens
+        mask[valid_rows:].zero_()
+        mask[:valid_rows].fill_(True)
 
 
 def _eplv2_token_layout(

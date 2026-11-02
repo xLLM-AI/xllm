@@ -230,10 +230,10 @@ def test_grouped_moe_collectives_and_local_range(
         glm5_next.distributed, "moe_ep_all_reduce", lambda output: calls.append("moe_ep"), raising=False
     )
     monkeypatch.setattr(glm5_next.distributed, "all_reduce_", lambda output: calls.append("tp"), raising=False)
-    from xllm.python.layers import moe_dp
+    from xllm.python.layers import moe_parallel
 
     monkeypatch.setattr(
-        moe_dp,
+        moe_parallel,
         "get_forward_context",
         lambda: SimpleNamespace(metadata=SimpleNamespace(dp_execution_token_counts=(1, 2))),
     )
@@ -304,7 +304,7 @@ def test_shared_experts_keep_attention_tp_layout(dp_size: int, ep_size: int, moe
 def test_joint_reduction_injects_shared_once_in_its_dp_rows(
     monkeypatch: pytest.MonkeyPatch, dp_size: int, tp_size: int, ep_size: int, empty_rank: bool
 ) -> None:
-    from xllm.python.layers import moe_dp
+    from xllm.python.layers import moe_parallel
 
     world_size = dp_size * tp_size
     moe_tp_size = world_size // ep_size
@@ -326,7 +326,7 @@ def test_joint_reduction_injects_shared_once_in_its_dp_rows(
             return inputs * (self.rank + 1)
 
     monkeypatch.setattr(
-        moe_dp,
+        moe_parallel,
         "get_forward_context",
         lambda: SimpleNamespace(metadata=SimpleNamespace(dp_execution_token_counts=counts)),
     )
