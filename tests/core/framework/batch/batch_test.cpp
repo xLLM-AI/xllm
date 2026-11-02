@@ -520,7 +520,7 @@ TEST(KVCacheBlockLeaseTest, BatchRetirementDuringOwnerReleaseClearsUsage) {
   sequence.retain_host_restore_blocks(
       {sequence.kv_state().blocks(BlockType::KV)[0]});
   auto batch = std::make_unique<Batch>(&sequence);
-  const auto owners = sequence.host_restore_owners();
+  const auto owners = sequence.kv_cache_lease_owners();
   std::vector<std::unique_lock<std::mutex>> release_locks;
   release_locks.reserve(owners.size());
   for (const auto& owner : owners) {

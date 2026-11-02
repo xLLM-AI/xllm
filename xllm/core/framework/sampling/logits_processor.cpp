@@ -25,7 +25,6 @@ limitations under the License.
 #include "core/kernels/npu/xllm_ops/xllm_ops_api.h"
 #endif
 
-#include "core/framework/sampling/npu_sampling_policy.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/kernels/ops_api.h"
 
@@ -340,9 +339,9 @@ void apply_sampling_penalties(torch::Tensor& logits,
   apply_bad_words(logits, params);
 }
 
-void process_logits(torch::Tensor& logits,
-                    const SamplingParameters& params,
-                    const torch::Tensor& filter_mask) {
+void apply_sampling_constraints(torch::Tensor& logits,
+                                const SamplingParameters& params,
+                                const torch::Tensor& filter_mask) {
   const torch::Tensor& effective_filter_mask =
       filter_mask.defined() ? filter_mask : params.filter_mask();
   apply_sampling_penalties(logits, params);
@@ -356,70 +355,47 @@ void process_logits(torch::Tensor& logits,
         << "filter_mask must match the logits shape";
     logits.add_(effective_filter_mask);
   }
-  if (params.is_all_greedy()) {
-    return;
-  }
+}
 
-#if defined(USE_NPU)
-  // Compaction pays for itself only for large mixed batches with a minority
-  // of random rows. Grammar and penalties above still apply to every row.
-  if (npu_sampling_enabled(NpuSamplingOptimization::RANDOM_ROW_FILTER) &&
-      logits.device().type() == c10::DeviceType::PrivateUse1 &&
-      params.sampling_mode() == SamplingMode::MIXED && !params.logprobs() &&
-      !params.return_logits() && !params.use_beam_search() &&
-      logits.size(0) >= 2 && logits.size(1) >= 32768 &&
-      params.num_random_rows() > 0 &&
-      params.num_random_rows() <= logits.size(0) / 2 &&
-      params.require_do_sample().numel() == logits.size(0) &&
-      (params.top_k().defined() || params.top_p().defined())) {
-    const torch::Tensor rows =
-        std::get<1>(params.require_do_sample()
-                        .to(torch::kFloat32)
-                        .topk(params.num_random_rows(), /*dim=*/0));
-    torch::Tensor selected = logits.index_select(/*dim=*/0, rows);
-    const auto select_control = [&](const torch::Tensor& control) {
-      return control.defined() ? control.index_select(/*dim=*/0, rows)
-                               : torch::Tensor();
-    };
-    const torch::Tensor temperatures = select_control(params.temperatures());
-    const torch::Tensor min_p = select_control(params.min_p());
-    const torch::Tensor top_k = select_control(params.top_k());
-    torch::Tensor top_p = select_control(params.top_p());
-    if (top_k.defined() && top_p.defined()) {
-      top_p = top_p.to(logits.scalar_type());
-    }
-    if (temperatures.defined()) {
-      apply_temperatures(selected, temperatures);
-    }
-    apply_min_p(selected, min_p);
-    apply_top_k_top_p(selected, top_k, top_p);
-    logits.index_copy_(/*dim=*/0, rows, selected);
-    return;
-  }
-#endif
-
-  torch::Tensor top_p = params.top_p();
-  if (params.top_k().defined() && params.top_p().defined()) {
+void apply_sampling_transforms(torch::Tensor& logits,
+                               const torch::Tensor& temperatures,
+                               const torch::Tensor& min_p,
+                               const torch::Tensor& top_k,
+                               const torch::Tensor& top_p_values) {
+  torch::Tensor top_p = top_p_values;
+  if (top_k.defined() && top_p.defined()) {
     // Native top-k/top-p consumes top-p in the logits dtype.
     top_p = top_p.to(logits.scalar_type());
   }
-  const bool has_transforms = params.temperatures().defined() ||
-                              params.min_p().defined() ||
-                              params.top_k().defined() || top_p.defined();
+  const bool has_transforms = temperatures.defined() || min_p.defined() ||
+                              top_k.defined() || top_p.defined();
   if (has_transforms) {
     kernel::FusedLogitsTransformParams transform_params{
-        logits, params.temperatures(), params.min_p(), params.top_k(), top_p};
+        logits, temperatures, min_p, top_k, top_p};
     if (kernel::supports_fused_logits_transform(transform_params)) {
       // Falling through would apply the same transforms a second time.
       kernel::fused_logits_transform(transform_params);
       return;
     }
   }
-  if (params.temperatures().defined()) {
-    apply_temperatures(logits, params.temperatures());
+  if (temperatures.defined()) {
+    apply_temperatures(logits, temperatures);
   }
-  apply_min_p(logits, params.min_p());
-  apply_top_k_top_p(logits, params.top_k(), top_p);
+  apply_min_p(logits, min_p);
+  apply_top_k_top_p(logits, top_k, top_p);
+}
+
+void process_logits(torch::Tensor& logits,
+                    const SamplingParameters& params,
+                    const torch::Tensor& filter_mask) {
+  apply_sampling_constraints(logits, params, filter_mask);
+  if (!params.is_all_greedy()) {
+    apply_sampling_transforms(logits,
+                              params.temperatures(),
+                              params.min_p(),
+                              params.top_k(),
+                              params.top_p());
+  }
 }
 
 }  // namespace xllm

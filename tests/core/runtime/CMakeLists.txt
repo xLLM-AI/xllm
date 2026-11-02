@@ -494,6 +494,7 @@ endif()
 cc_test(
   NAME dspark_sampler_test
   CPU_ONLY
+  DISCOVER_TESTS
   SRCS dspark_sampler_test.cpp
   DEPS :runtime GTest::gtest_main
 )
@@ -501,3 +502,18 @@ target_link_options(dspark_sampler_test PRIVATE
   "-Wl,--whole-archive"
   "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
   "-Wl,--no-whole-archive")
+
+if(USE_NPU)
+  # Keep the CPU producer tests runnable without initializing an NPU runtime.
+  cc_test(
+    NAME dspark_sampler_npu_test
+    DISCOVER_TESTS
+    SRCS dspark_sampler_test.cpp
+    DEPS :runtime GTest::gtest_main
+  )
+  target_compile_definitions(dspark_sampler_npu_test PRIVATE XLLM_DSPARK_NPU_TEST)
+  target_link_options(dspark_sampler_npu_test PRIVATE
+    "-Wl,--whole-archive"
+    "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
+    "-Wl,--no-whole-archive")
+endif()

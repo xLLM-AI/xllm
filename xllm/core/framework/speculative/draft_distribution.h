@@ -53,59 +53,26 @@ class DraftDistribution final {
                       const torch::Tensor& rejected_tokens,
                       const torch::Tensor& lse) const;
 
-  // Check the token/distribution pairing when a proposal is built.
-  void validate(const torch::Tensor& token_ids) const;
-
  private:
-  class PointMass final {
-   public:
-    torch::Tensor logsumexp() const;
-    void apply_acceptance(torch::Tensor& log_p,
-                          const torch::Tensor& token_ids,
-                          const torch::Tensor& lse) const;
-    void apply_residual(torch::Tensor& log_p,
-                        const torch::Tensor& steps,
-                        const torch::Tensor& rejected_tokens,
-                        const torch::Tensor& lse) const;
-  };
-  class Dense final {
-   public:
-    explicit Dense(torch::Tensor logits);
-    torch::Tensor logsumexp() const;
-    void apply_acceptance(torch::Tensor& log_p,
-                          const torch::Tensor& token_ids,
-                          const torch::Tensor& lse) const;
-    void apply_residual(torch::Tensor& log_p,
-                        const torch::Tensor& steps,
-                        const torch::Tensor& rejected_tokens,
-                        const torch::Tensor& lse) const;
+  friend class DraftProposal;
 
-   private:
-    torch::Tensor logits_;
+  struct SparseData {
+    torch::Tensor candidate_ids;
+    torch::Tensor logits;
   };
-  class Sparse final {
-   public:
-    Sparse(torch::Tensor candidate_ids, torch::Tensor logits);
-    torch::Tensor logsumexp() const;
-    void apply_acceptance(torch::Tensor& log_p,
-                          const torch::Tensor& token_ids,
-                          const torch::Tensor& lse) const;
-    void apply_residual(torch::Tensor& log_p,
-                        const torch::Tensor& steps,
-                        const torch::Tensor& rejected_tokens,
-                        const torch::Tensor& lse) const;
+  // No data for point masses; a single logits tensor for dense distributions.
+  using Representation =
+      std::variant<std::monostate, torch::Tensor, SparseData>;
 
-   private:
-    torch::Tensor candidate_ids_;
-    torch::Tensor logits_;
-  };
-
-  DraftDistribution(int64_t rank, const torch::Tensor& values);
+  void validate(const torch::Tensor& token_ids);
+  // Metadata only: verification tokens may replace draft tokens with -1.
+  // Producers are responsible for the tokens' semantic association with q.
+  void check_compatible(const torch::Tensor& token_ids) const;
 
   int64_t batch_size_;
   int64_t num_draft_tokens_;
   torch::Device device_{torch::kCPU};
-  std::variant<PointMass, Dense, Sparse> representation_;
+  Representation representation_;
 };
 
 }  // namespace xllm

@@ -22,7 +22,7 @@ namespace xllm {
 DraftProposal::DraftProposal(torch::Tensor token_ids,
                              DraftDistribution distribution)
     : token_ids_(std::move(token_ids)), distribution_(std::move(distribution)) {
-  distribution_.validate(token_ids_);
+  distribution_.check_compatible(token_ids_);
 }
 
 }  // namespace xllm

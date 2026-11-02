@@ -783,13 +783,21 @@ std::shared_ptr<KVCacheBlockLease> Sequence::retain_host_restore_blocks(
     return nullptr;
   }
   CHECK(pending_host_restore_ == nullptr);
-  pending_host_restore_ =
-      std::make_shared<KVCacheBlockLease>(std::move(blocks));
-  std::erase_if(host_restore_owners_,
-                [](const auto& owner) { return owner.use_count() == 1; });
-  host_restore_owners_.reserve(host_restore_owners_.size() + 1);
-  host_restore_owners_.emplace_back(pending_host_restore_->owner());
+  pending_host_restore_ = retain_kv_cache_blocks(std::move(blocks));
   return pending_host_restore_;
+}
+
+std::shared_ptr<KVCacheBlockLease> Sequence::retain_kv_cache_blocks(
+    std::vector<Block> blocks) {
+  if (blocks.empty()) {
+    return nullptr;
+  }
+  auto lease = std::make_shared<KVCacheBlockLease>(std::move(blocks));
+  std::erase_if(kv_cache_lease_owners_,
+                [](const auto& owner) { return owner.use_count() == 1; });
+  kv_cache_lease_owners_.reserve(kv_cache_lease_owners_.size() + 1);
+  kv_cache_lease_owners_.emplace_back(lease->owner());
+  return lease;
 }
 
 std::shared_ptr<KVCacheBlockLease> Sequence::take_host_restore_blocks() {
@@ -797,19 +805,19 @@ std::shared_ptr<KVCacheBlockLease> Sequence::take_host_restore_blocks() {
 }
 
 std::vector<std::shared_ptr<KVCacheBlockLeaseOwner>>
-Sequence::host_restore_owners() const {
-  return host_restore_owners_;
+Sequence::kv_cache_lease_owners() const {
+  return kv_cache_lease_owners_;
 }
 
 // release all cache blocks
 void Sequence::reset() {
-  for (const auto& owner : host_restore_owners_) {
+  for (const auto& owner : kv_cache_lease_owners_) {
     owner->release();
   }
   kv_state_.reset();
   host_kv_state_.reset();
   pending_host_restore_.reset();
-  host_restore_owners_.clear();
+  kv_cache_lease_owners_.clear();
   clear_host_cache_match();
   volatile_num_prompt_tokens_ = num_tokens_;
 }

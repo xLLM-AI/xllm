@@ -126,10 +126,13 @@ TEST(DraftDistributionTest, RejectsMalformedSparseRepresentation) {
   const torch::Tensor ids = torch::zeros({1, 2, 3}, torch::kInt64);
   const torch::Tensor tokens = torch::zeros({1, 2}, torch::kInt64);
   EXPECT_DEATH(DraftDistribution(tokens, ids, torch::zeros({1, 2, 4})),
-               "candidate_ids_.sizes");
+               "candidate_ids.sizes");
   EXPECT_DEATH(
       DraftDistribution(tokens, ids.to(torch::kInt32), torch::zeros({1, 2, 3})),
-      "candidate_ids_.scalar_type");
+      "candidate_ids.scalar_type");
+  EXPECT_DEATH(DraftDistribution(tokens, ids, {}), "logits.defined");
+  EXPECT_DEATH(DraftDistribution(tokens, {}, torch::zeros({1, 2, 3})),
+               "candidate_ids.defined");
 }
 
 TEST(DraftDistributionTest, PointMassValidatesItsOwnTokenMetadata) {
@@ -141,8 +144,8 @@ TEST(DraftDistributionTest, PointMassValidatesItsOwnTokenMetadata) {
   EXPECT_DEATH(DraftDistribution{tokens.to(torch::kFloat32)}, "scalar_type");
   EXPECT_DEATH(DraftDistribution(tokens.to(torch::kFloat32), {}),
                "scalar_type");
-  EXPECT_DEATH(DraftDistribution{tokens.view({2})}, "values.dim");
-  EXPECT_DEATH(DraftDistribution(tokens.view({2}), {}), "values.dim");
+  EXPECT_DEATH(DraftDistribution{tokens.view({2})}, "token_ids.dim");
+  EXPECT_DEATH(DraftDistribution(tokens.view({2}), {}), "token_ids.dim");
 }
 
 TEST(DraftDistributionTest, RejectsInvalidProposalAtConstruction) {
@@ -157,9 +160,15 @@ TEST(DraftDistributionTest, RejectsInvalidProposalAtConstruction) {
   EXPECT_DEATH(
       DraftProposal(tokens.to(torch::kFloat32), DraftDistribution(tokens)),
       "scalar_type");
-  EXPECT_DEATH(DraftDistribution(tokens, torch::zeros({2, 3})), "values.dim");
+  EXPECT_DEATH(DraftDistribution(tokens, torch::zeros({2, 3})), "logits.dim");
   EXPECT_DEATH(DraftDistribution(tokens, torch::zeros({1, 3, 4})),
                "num_draft_tokens_");
+  EXPECT_DEATH(DraftDistribution(tokens, torch::zeros({1, 2, 0})),
+               "logits.size");
+  EXPECT_DEATH(
+      DraftDistribution(tokens, torch::zeros({1, 2, 3}, torch::kInt64)),
+      "is_floating_point");
+  EXPECT_DEATH(DraftDistribution(torch::Tensor(), logits), "token_ids.defined");
 }
 
 TEST(DraftDistributionTest, UndefinedLogitsUsePointMassSemantics) {

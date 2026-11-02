@@ -176,7 +176,45 @@ SampleOutput sample(torch::Tensor& logits,
           ? torch::log_softmax(logits, /*dim=*/-1, torch::kFloat32)
           : torch::Tensor();
 
-  process_logits(logits, params, filter_mask);
+  apply_sampling_constraints(logits, params, filter_mask);
+  if (!params.is_all_greedy()) {
+#if defined(USE_NPU)
+    // Only random rows consume distribution transforms. Keep the original
+    // logits for greedy rows after applying their constraints above.
+    if (npu_sampling_enabled(NpuSamplingOptimization::RANDOM_ROW_FILTER) &&
+        logits.device().type() == torch::kPrivateUse1 &&
+        params.sampling_mode() == SamplingMode::MIXED && !params.logprobs() &&
+        !params.return_logits() && !params.use_beam_search() &&
+        logits.size(0) >= 2 && logits.size(1) >= 32768 &&
+        params.num_random_rows() > 0 &&
+        params.num_random_rows() <= logits.size(0) / 2 &&
+        params.require_do_sample().numel() == logits.size(0) &&
+        (params.top_k().defined() || params.top_p().defined())) {
+      const torch::Tensor rows =
+          std::get<1>(params.require_do_sample()
+                          .to(torch::kFloat32)
+                          .topk(params.num_random_rows(), /*dim=*/0));
+      torch::Tensor selected = logits.index_select(/*dim=*/0, rows);
+      const auto select_control = [&](const torch::Tensor& control) {
+        return control.defined() ? control.index_select(/*dim=*/0, rows)
+                                 : torch::Tensor();
+      };
+      apply_sampling_transforms(selected,
+                                select_control(params.temperatures()),
+                                select_control(params.min_p()),
+                                select_control(params.top_k()),
+                                select_control(params.top_p()));
+      logits.index_copy_(/*dim=*/0, rows, selected);
+    } else
+#endif
+    {
+      apply_sampling_transforms(logits,
+                                params.temperatures(),
+                                params.min_p(),
+                                params.top_k(),
+                                params.top_p());
+    }
+  }
 
   // Keep the model dtype; consumers upcast where the reduction needs fp32.
   if (params.return_logits()) {
