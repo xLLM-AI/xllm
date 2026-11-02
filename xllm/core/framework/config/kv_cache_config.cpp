@@ -92,6 +92,11 @@ DEFINE_bool(enable_vmm_kvcache,
             "Whether to enable virtual memory for KV cache "
             "with the physical page pool.");
 
+DEFINE_bool(enable_shared_kv_cache,
+            false,
+            "Share a fixed physical arena between full-attention KV blocks "
+            "and linear-attention states. NPU Torch Qwen3 hybrid models only.");
+
 DEFINE_int64(
     phy_page_granularity_size,
     2 * 1024 * 1024,
@@ -112,6 +117,7 @@ void KVCacheConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(max_linear_state_cache_slots);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(xxh3_128bits_seed);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_vmm_kvcache);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_shared_kv_cache);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(vmm_elastic);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(vmm_memory_reserve_bytes);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(vmm_startup_timeout_ms);
@@ -135,6 +141,7 @@ void KVCacheConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(max_linear_state_cache_slots);
   XLLM_CONFIG_ASSIGN_FROM_JSON(xxh3_128bits_seed);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_vmm_kvcache);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_shared_kv_cache);
   XLLM_CONFIG_ASSIGN_FROM_JSON(vmm_elastic);
   XLLM_CONFIG_ASSIGN_FROM_JSON(vmm_memory_reserve_bytes);
   XLLM_CONFIG_ASSIGN_FROM_JSON(vmm_startup_timeout_ms);
@@ -173,6 +180,8 @@ void KVCacheConfig::append_config_json(
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_vmm_kvcache);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, enable_shared_kv_cache);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, vmm_elastic);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, vmm_memory_reserve_bytes);
@@ -196,6 +205,8 @@ void KVCacheConfig::initialize() {
 }
 
 void KVCacheConfig::validate() const {
+  CHECK(!enable_shared_kv_cache_ || !enable_vmm_kvcache_)
+      << "Static shared KV cache and VMM addressing are separate modes.";
   CHECK_GE(vmm_memory_reserve_bytes_, 0);
   CHECK_GT(vmm_startup_timeout_ms_, 0)
       << "vmm_startup_timeout_ms must be positive";

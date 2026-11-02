@@ -39,5 +39,6 @@ cc_library(
   DEPS
     :block
     :kv_cache
+    :static_kv_cache_tensor_allocator
     :distributed_virtual_memory_coordinator
 )

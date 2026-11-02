@@ -18,8 +18,10 @@ limitations under the License.
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
+#include "core/kv_cache/storage/static_kv_cache_tensor_allocator.h"
 #include "framework/model/model_params_view.h"
 
 namespace xllm {
@@ -114,7 +116,7 @@ TEST(LinearStateRestoreTest, RejectsNonDivisibleCheckpointLayout) {
   std::vector<int64_t> validity_mask = {0};
   EXPECT_DEATH(restore_linear_state_slots(
                    cache.kv_caches, {2}, {1}, validity_mask, false),
-               "checkpoint layout mismatch");
+               "physical rows must be divisible");
 }
 
 TEST(LinearStateRestoreTest, CopiesOnlyDestinationAcrossLayers) {
@@ -349,6 +351,127 @@ TEST(LinearStateRestoreTest, KPoolOnlyCachePreservesWarmAndPaddingSlots) {
   EXPECT_TRUE(torch::equal(tensors.kpool_tail[5], checkpoint));
   EXPECT_TRUE(torch::equal(tensors.kpool_tail[1], checkpoint));
   EXPECT_TRUE(torch::equal(tensors.kpool_tail[0], padding));
+}
+
+std::vector<KVCache> make_static_shared_caches() {
+  KVCacheCapacity capacity;
+  capacity.n_blocks(32)
+      .block_size(2)
+      .num_linear_state_blocks(32)
+      .linear_conv_state_len(2)
+      .linear_ssm_checkpoint_stride(2);
+  ModelArgs args;
+  args.model_type("qwen3_next")
+      .n_layers(2)
+      .n_heads(1)
+      .n_kv_heads(1)
+      .head_dim(2)
+      .full_attention_interval(2)
+      .linear_num_key_heads(1)
+      .linear_num_value_heads(1)
+      .linear_key_head_dim(2)
+      .linear_value_head_dim(2)
+      .linear_conv_kernel_dim(3);
+  const KVCacheShape shape(capacity, args, /*world_size=*/1);
+  KVCacheCreateOptions options;
+  options.device(torch::kCPU)
+      .dtype(torch::kFloat32)
+      .ssm_dtype(torch::kFloat32)
+      .num_layers(2)
+      .model_type(args.model_type())
+      .enable_linear_attention(true)
+      .full_attention_interval(2);
+  auto layout = std::make_shared<StaticKVCacheLayout>(shape, options);
+  options.static_layout(layout).tensor_allocator(
+      std::make_shared<StaticKVCacheTensorAllocator>(*layout, torch::kCPU));
+  std::vector<KVCache> caches;
+  allocate_kv_caches(caches, shape, options);
+  return caches;
+}
+
+TEST(LinearStateRestoreTest, StaticColdReuseClearsOnlyItsOwnRecurrentRows) {
+  auto caches = make_static_shared_caches();
+  ASSERT_EQ(caches.size(), 2u);
+  const KVCache& linear = caches[0];
+  const KVCache& full = caches[1];
+  ASSERT_TRUE(linear.is_static_shared());
+  ASSERT_EQ(linear.linear_state_slot_count(), 32);
+  ASSERT_EQ(linear.linear_checkpoint_stride(), 2);
+  ASSERT_EQ(linear.cache_row_stride(KVCacheTensorRole::CONV), 3);
+  ASSERT_EQ(linear.cache_row_stride(KVCacheTensorRole::SSM), 9);
+
+  // A released Full logical page at page 4 becomes a recurrent logical page.
+  full.get_k_cache()[36].fill_(17);
+  full.get_v_cache()[36].fill_(19);
+  ASSERT_EQ(full.get_k_cache()[36].data_ptr(),
+            linear.get_conv_cache()[12].data_ptr());
+  ASSERT_GT(linear.get_conv_cache()[12].count_nonzero().item<int64_t>(), 0);
+  linear.get_ssm_cache().narrow(0, 36, 2).fill_(23);
+  full.get_k_cache()[63].fill_(29);
+  full.get_v_cache()[63].fill_(31);
+  linear.get_conv_cache()[30].fill_(37);
+  linear.get_ssm_cache().narrow(0, 90, 2).fill_(41);
+  std::vector<int64_t> validity_mask = {0, 1};
+
+  restore_linear_state_slots(caches,
+                             {4, 10},
+                             {},
+                             validity_mask,
+                             /*reads_distinct_state=*/true);
+
+  EXPECT_EQ(validity_mask, std::vector<int64_t>({0, 1}));
+  EXPECT_EQ(linear.get_conv_cache()[12].count_nonzero().item<int64_t>(), 0);
+  EXPECT_EQ(
+      linear.get_ssm_cache().narrow(0, 36, 2).count_nonzero().item<int64_t>(),
+      0);
+  EXPECT_TRUE(full.get_k_cache()[63].eq(29).all().item<bool>());
+  EXPECT_TRUE(full.get_v_cache()[63].eq(31).all().item<bool>());
+  EXPECT_TRUE(linear.get_conv_cache()[30].eq(37).all().item<bool>());
+  EXPECT_TRUE(
+      linear.get_ssm_cache().narrow(0, 90, 2).eq(41).all().item<bool>());
+}
+
+TEST(LinearStateRestoreTest, StaticCheckpointCopyUsesIndependentRoleStrides) {
+  auto caches = make_static_shared_caches();
+  const KVCache& linear = caches[0];
+  const KVCache& full = caches[1];
+  linear.get_conv_cache()[12].fill_(11);
+  linear.get_ssm_cache()[36].fill_(13);
+  linear.get_ssm_cache()[37].fill_(17);
+  full.get_k_cache()[126].fill_(23);
+  full.get_v_cache()[126].fill_(29);
+  std::vector<int64_t> validity_mask = {0};
+
+  restore_linear_state_slots(caches,
+                             {10},
+                             {4},
+                             validity_mask,
+                             /*reads_distinct_state=*/false);
+
+  EXPECT_EQ(validity_mask, std::vector<int64_t>({1}));
+  EXPECT_TRUE(linear.get_conv_cache()[30].eq(11).all().item<bool>());
+  EXPECT_TRUE(linear.get_ssm_cache()[90].eq(13).all().item<bool>());
+  EXPECT_TRUE(linear.get_ssm_cache()[91].eq(17).all().item<bool>());
+  linear.get_ssm_cache()[90].fill_(31);
+  EXPECT_TRUE(linear.get_ssm_cache()[36].eq(13).all().item<bool>());
+  EXPECT_TRUE(full.get_k_cache()[126].eq(23).all().item<bool>());
+  EXPECT_TRUE(full.get_v_cache()[126].eq(29).all().item<bool>());
+}
+
+TEST(LinearStateRestoreTest, StaticFullIndicesPreserveOffsetsAndSentinels) {
+  auto caches = make_static_shared_caches();
+  const KVCache& full = caches[1];
+  const torch::Tensor rows = torch::tensor({-2, -1, 0, 2, 30}, torch::kInt32);
+  EXPECT_TRUE(
+      torch::equal(full.physical_row_indices(rows, KVCacheTensorRole::KEY),
+                   torch::tensor({-2, -1, 0, 18, 270}, torch::kInt32)));
+  const torch::Tensor slots =
+      torch::tensor({-2, -1, 0, 1, 2, 3, 8, 9, 61}, torch::kInt64);
+  EXPECT_TRUE(torch::equal(
+      full.physical_token_slots(slots, /*block_size=*/2),
+      torch::tensor({-2, -1, 0, 1, 18, 19, 72, 73, 541}, torch::kInt64)));
+  EXPECT_EQ(full.physical_row_index(-1, KVCacheTensorRole::KEY), -1);
+  EXPECT_EQ(full.physical_row_index(30, KVCacheTensorRole::KEY), 270);
 }
 
 }  // namespace

@@ -133,13 +133,16 @@ std::vector<int64_t> SchedulerMetrics::get_num_occupied_slots(
   const std::vector<size_t> num_used_blocks =
       kv_cache_manager_->num_used_blocks();
   const int32_t block_size = kv_cache_manager_->block_size();
+  const size_t full_block_units =
+      kv_cache_manager_->block_resource_units(BlockType::KV, 1);
   for (Sequence* sequence : sequences) {
     const int32_t dp_rank = sequence->dp_rank();
     const int32_t last_block_len =
         sequence->kv_state().kv_cache_tokens_num() % block_size;
-    num_occupied_slots[static_cast<size_t>(dp_rank)] += last_block_len;
+    num_occupied_slots[static_cast<size_t>(dp_rank)] +=
+        last_block_len * full_block_units;
     num_unfilled_blocks[static_cast<size_t>(dp_rank)] +=
-        last_block_len > 0 ? 1 : 0;
+        last_block_len > 0 ? full_block_units : 0;
   }
   for (int32_t dp_rank = 0; dp_rank < dp_size_; ++dp_rank) {
     num_occupied_slots[static_cast<size_t>(dp_rank)] +=

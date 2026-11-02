@@ -216,6 +216,17 @@ KVCacheTensors create_kv_cache_tensors(
                                              create_options);
   }
 #elif defined(USE_NPU)
+  if (create_options.static_layout() != nullptr) {
+    tensors.key_cache = alloc_cache_tensor(KVCacheTensorRole::KEY,
+                                           kv_cache_shape.key_cache_shape(),
+                                           create_options.dtype(),
+                                           create_options);
+    tensors.value_cache = alloc_cache_tensor(KVCacheTensorRole::VALUE,
+                                             kv_cache_shape.value_cache_shape(),
+                                             create_options.dtype(),
+                                             create_options);
+    return tensors;
+  }
   CHECK(!create_options.enable_vmm_kvcache() ||
         !use_npu_nz_kv_cache_layout(create_options.model_type()))
       << "Virtual memory does not support the NPU NZ KV cache layout.";
@@ -451,6 +462,17 @@ LinearAttentionKVCacheTensors create_linear_attention_kv_cache_tensors(
   LinearAttentionKVCacheTensors tensors;
 
 #if defined(USE_NPU)
+  if (create_options.static_layout() != nullptr) {
+    tensors.conv_cache = alloc_cache_tensor(KVCacheTensorRole::CONV,
+                                            kv_cache_shape.conv_cache_shape(),
+                                            create_options.dtype(),
+                                            create_options);
+    tensors.ssm_cache = alloc_cache_tensor(KVCacheTensorRole::SSM,
+                                           kv_cache_shape.ssm_cache_shape(),
+                                           create_options.ssm_dtype(),
+                                           create_options);
+    return tensors;
+  }
   tensors.conv_cache =
       alloc_npu_zeroed_tensor(kv_cache_shape.conv_cache_shape(),
                               create_options.dtype(),

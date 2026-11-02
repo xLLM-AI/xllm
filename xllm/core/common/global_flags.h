@@ -296,6 +296,7 @@ DECLARE_int32(max_global_tpot_ms);
 DECLARE_int32(max_requests_per_batch);
 
 DECLARE_bool(enable_vmm_kvcache);
+DECLARE_bool(enable_shared_kv_cache);
 
 DECLARE_int64(phy_page_granularity_size);
 
