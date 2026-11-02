@@ -186,6 +186,7 @@ class MLUBatchMemcpyTest : public ::testing::Test {
     const torch::Tensor device_tensor = torch::zeros(
         {count, width},
         torch::TensorOptions().dtype(torch::kUInt8).device(device_->unwrap()));
+    ASSERT_EQ(device_->synchronize_default_stream(), 0);
     torch::Tensor restored;
     HostPageAlignedRegion restored_region;
     create_host_page_aligned_tensor(
@@ -239,6 +240,7 @@ TEST_F(MLUBatchMemcpyTest, RoundTripSupportsDifferentTensorSizes) {
         torch::TensorOptions().dtype(torch::kUInt8).device(device_->unwrap())));
   }
 
+  ASSERT_EQ(device_->synchronize_default_stream(), 0);
   ASSERT_TRUE(
       batch_memcpy_->submit_h2d(sources, device_tensors, stream_.get()));
   ASSERT_TRUE(batch_memcpy_->copy_d2h(device_tensors, restored, stream_.get()));
@@ -297,6 +299,7 @@ TEST_F(MLUBatchMemcpyTest, SubmitD2HReturnsBeforeCopyStreamCompletes) {
   const torch::Tensor device_tensor = torch::zeros(
       {16},
       torch::TensorOptions().dtype(torch::kUInt8).device(device_->unwrap()));
+  ASSERT_EQ(device_->synchronize_default_stream(), 0);
   torch::Tensor restored;
   HostPageAlignedRegion restored_region;
   create_host_page_aligned_tensor(
@@ -337,6 +340,7 @@ TEST_F(MLUBatchMemcpyTest, CopyD2HWaitsForCopyStreamCompletes) {
   const torch::Tensor device_tensor = torch::zeros(
       {16},
       torch::TensorOptions().dtype(torch::kUInt8).device(device_->unwrap()));
+  ASSERT_EQ(device_->synchronize_default_stream(), 0);
   torch::Tensor restored;
   HostPageAlignedRegion restored_region;
   create_host_page_aligned_tensor(
@@ -423,6 +427,7 @@ TEST_F(MLUBatchMemcpyTest,
   const torch::Tensor device_tensor = torch::zeros(
       {kDescriptorCount, 1},
       torch::TensorOptions().dtype(torch::kUInt8).device(device_->unwrap()));
+  ASSERT_EQ(device_->synchronize_default_stream(), 0);
   torch::Tensor restored;
   HostPageAlignedRegion restored_region;
   create_host_page_aligned_tensor(

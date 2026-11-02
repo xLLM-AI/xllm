@@ -716,6 +716,7 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackPreservesLinearReadWriteIds) {
       builder.build_forward_input(/*num_decoding_tokens=*/1,
                                   /*min_decoding_batch_size=*/0);
   ASSERT_EQ(input.input_params.meta.num_sequences, 2);
+  input.input_params.meta.requires_host_restore = true;
   input.input_params.embedding.linear_state_ids = {7, 8};
   input.input_params.embedding.linear_state_indices =
       torch::tensor({7, 8}, torch::kInt32);
@@ -737,6 +738,7 @@ TEST(BatchPackedInputTest, PackedProtoLazyUnpackPreservesLinearReadWriteIds) {
                                                     torch::kFloat32,
                                                     unpacked_input,
                                                     false));
+  EXPECT_TRUE(unpacked_input.input_params.meta.requires_host_restore);
   EXPECT_EQ(unpacked_input.input_params.embedding.linear_state_ids,
             std::vector<int32_t>({7, 8}));
   EXPECT_EQ(unpacked_input.input_params.embedding.linear_state_read_ids,

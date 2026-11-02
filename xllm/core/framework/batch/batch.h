@@ -74,6 +74,8 @@ class Batch final {
 
   uint64_t batch_id() const { return state_.batch_id(); }
 
+  void require_host_restore() { state_.require_host_restore(); }
+
   // Logical execution rows.
   size_t size() const;
   bool empty() const { return state_.empty(); }

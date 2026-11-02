@@ -1715,9 +1715,7 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async_impl(
   threadpool_.schedule([this,
                         input = std::move(input_on_device),
                         promise = std::move(promise)]() mutable {
-    if (hierarchy_kv_cache_transfer_ != nullptr) {
-      set_hierarchy_layer_synchronizer(input.input_params);
-    }
+    set_hierarchy_layer_synchronizer(input.input_params);
 
     if (enable_schedule_overlap()) {
       promise.setValue(schedule_overlap_.execute(*this, input));
@@ -2704,6 +2702,10 @@ void WorkerImpl::clear_hierarchy_kv_cache_transfer() {
 
 void WorkerImpl::set_hierarchy_layer_synchronizer(
     LlmModelParams& input_params) {
+  CHECK(!input_params.meta.requires_host_restore ||
+        hierarchy_kv_cache_transfer_ != nullptr)
+      << "Missing Host restore manager at batch_id="
+      << input_params.meta.batch_id;
   if (hierarchy_kv_cache_transfer_ != nullptr) {
     ModelParamsView execution_params(input_params);
     hierarchy_kv_cache_transfer_->set_layer_synchronizer(execution_params);
@@ -2925,6 +2927,10 @@ std::optional<ForwardOutput> WorkerImpl::step_for_schedule_overlap(
 
 void WorkerImpl::set_hierarchy_layer_synchronizer(
     VlmModelParams& input_params) {
+  CHECK(!input_params.meta.requires_host_restore ||
+        hierarchy_kv_cache_transfer_ != nullptr)
+      << "Missing Host restore manager at batch_id="
+      << input_params.meta.batch_id;
   if (hierarchy_kv_cache_transfer_ != nullptr) {
     ModelParamsView execution_params(input_params);
     hierarchy_kv_cache_transfer_->set_layer_synchronizer(execution_params);

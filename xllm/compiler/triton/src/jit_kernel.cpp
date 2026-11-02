@@ -60,31 +60,34 @@ std::vector<ParamInfo> fetch_signature(const std::string& path,
   return sig;
 }
 
-#if defined(USE_MLU)
-void patch_torch_mlu_accelerator() {
-  // Skip torch's own backend-autoload machinery; we drive the import explicitly
-  // below and only need the accelerator probe to pass.
-  setenv("TORCH_DEVICE_BACKEND_AUTOLOAD", "0", 1);
-  ensure_embedded_interpreter();
-  py::gil_scoped_acquire gil;
-  py::module_ torch = py::module_::import("torch");
-  // Stub that satisfies the accelerator probe without touching real MLU state.
-  auto cpu_accelerator = [torch]() -> py::object {
-    return torch.attr("device")("cpu");
-  };
-  py::object torch_accelerator = torch.attr("accelerator");
-  py::object origin_func = torch_accelerator.attr("current_accelerator");
-  // Swap in the CPU stub for the duration of the device-backend import.
-  torch_accelerator.attr("current_accelerator") =
-      py::cpp_function(cpu_accelerator);
-  torch.attr("_import_device_backends")();
-  py::module_::import("torch_mlu");
-  // Restore the real accelerator so later queries see the genuine backend.
-  torch_accelerator.attr("current_accelerator") = origin_func;
-  torch.attr("mlu").attr("init")();
-}
-#endif
 }  // namespace
+
+void JITKernel::initialize_device() {
+#if defined(USE_MLU)
+  static std::once_flag once;
+  std::call_once(once, []() {
+    // Skip torch's own backend-autoload machinery; we drive the import
+    // explicitly below and only need the accelerator probe to pass.
+    setenv("TORCH_DEVICE_BACKEND_AUTOLOAD", "0", 1);
+    ensure_embedded_interpreter();
+    py::gil_scoped_acquire gil;
+    py::module_ torch = py::module_::import("torch");
+    // Stub that satisfies the accelerator probe without touching real MLU
+    // state.
+    auto cpu_accelerator = [torch]() -> py::object {
+      return torch.attr("device")("cpu");
+    };
+    py::object torch_accelerator = torch.attr("accelerator");
+    py::object origin_func = torch_accelerator.attr("current_accelerator");
+    torch_accelerator.attr("current_accelerator") =
+        py::cpp_function(cpu_accelerator);
+    torch.attr("_import_device_backends")();
+    py::module_::import("torch_mlu");
+    torch_accelerator.attr("current_accelerator") = origin_func;
+    torch.attr("mlu").attr("init")();
+  });
+#endif
+}
 
 JITKernel& JITKernel::get(std::string py_path, std::string fn_name) {
   static std::unordered_map<std::string, std::unique_ptr<JITKernel>> registry;
@@ -104,8 +107,7 @@ JITKernel& JITKernel::get(std::string py_path, std::string fn_name) {
 JITKernel::JITKernel(std::string py_path, std::string fn_name)
     : path_(std::move(py_path)), name_(std::move(fn_name)) {
 #if defined(USE_MLU)
-  static std::once_flag once;
-  std::call_once(once, []() { patch_torch_mlu_accelerator(); });
+  initialize_device();
 #endif
 }
 

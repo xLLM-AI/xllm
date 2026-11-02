@@ -157,6 +157,7 @@ cc_library(
     absl::flat_hash_map
     proto::xllm_proto
     $<$<BOOL:${USE_MLU}>:torch_mlu>
+    $<$<BOOL:${USE_MLU}>::triton_jit>
     $<$<BOOL:${USE_MUSA}>:torch_musa>
     $<$<BOOL:${USE_DCU}>:hip::host>
 )
