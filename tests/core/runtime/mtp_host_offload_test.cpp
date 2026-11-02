@@ -272,6 +272,12 @@ class TestMTPWorker final : public MTPWorkerImpl<LlmForwardInput> {
                                        options,
                                        WorkerType::LLM) {}
 
+  EmbeddingCache* initialize_replay_cache(bool retain_span) {
+    retain_replay_span_ = retain_span;
+    init_embedding_cache(kBlockCount);
+    return embedding_cache_.get();
+  }
+
   void replace_transfer_workers(std::unique_ptr<LLMWorkerImpl> target,
                                 std::unique_ptr<LLMWorkerImpl> draft) {
     impl_ = std::move(target);
@@ -304,6 +310,12 @@ class TestMTPWorker final : public MTPWorkerImpl<LlmForwardInput> {
       release.wait();
     });
   }
+
+ private:
+  bool requires_full_target_replay() const override {
+    return retain_replay_span_;
+  }
+  bool retain_replay_span_ = false;
 };
 
 class TestDFlashWorker final : public DFlashWorkerImpl {
@@ -364,6 +376,27 @@ TEST(SpeculativeDraftKVCacheShapeTest, ReusesGroupedTargetPoolCounts) {
 
   EXPECT_TRUE(draft_shape.has_grouped_cache_layout());
   EXPECT_EQ(draft_shape.key_cache_shape(), (std::vector<int64_t>{2, 3, 5}));
+}
+
+TEST_F(MTPHostOffloadTest, SharedCacheAllocationHonorsReplaySpanPolicy) {
+  const torch::Device device(Platform::type_torch(), /*index=*/0);
+  const ParallelArgs parallel_args(
+      /*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr);
+  const runtime::Options options =
+      make_runtime_options(/*host_blocks_factor=*/0.0);
+  TestMTPWorker worker(parallel_args, device, options);
+  const auto embedding = torch::tensor({1.0f, 2.0f});
+  for (bool retain_span : {false, true}) {
+    EmbeddingCache* cache = worker.initialize_replay_cache(retain_span);
+    cache->write_mtp_bootstrap_context(
+        /*embedding_id=*/0, "request", /*token_id=*/7, embedding);
+    const auto states = cache->read_decode_states({0}, {"request"});
+    ASSERT_EQ(states.size(), 1);
+    EXPECT_EQ(states.front().replay_embeddings.defined(), retain_span);
+    EXPECT_EQ(states.front().replay_token_ids,
+              retain_span ? std::vector<int32_t>{7} : std::vector<int32_t>{});
+    EXPECT_TRUE(torch::equal(states.front().embedding, embedding));
+  }
 }
 
 TEST_F(MTPHostOffloadTest, VectorTransferWithoutHierarchyIsNoop) {

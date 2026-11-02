@@ -88,6 +88,12 @@ enum class CpShardingMode : int8_t {
 using MtpArgsAdapter =
     std::function<void(ModelArgs& args, bool is_python_model)>;
 
+struct MtpModelCapabilities {
+  bool native_draft_requires_accepted_span_replay = false;
+  bool native_draft_owns_embedding_and_lm_head = false;
+  bool python_draft_owns_embedding_and_lm_head = false;
+};
+
 // TODO: add default args loader.
 struct ModelMeta {
   std::unordered_map<std::string, CausalLMRegistration> causal_lm_factories;
@@ -99,8 +105,8 @@ struct ModelMeta {
   QuantArgsLoader quant_args_loader;
   TokenizerArgsLoader tokenizer_args_loader;
   CpShardingMode cp_sharding_mode = CpShardingMode::NONE;
-  bool owns_mtp_shared_weights = false;
   bool supports_dcp = false;
+  MtpModelCapabilities mtp_capabilities;
   MtpArgsAdapter mtp_args_adapter;
 };
 
@@ -179,10 +185,14 @@ class ModelRegistry {
   static bool supports_dcp(const std::string& name);
 
   static void register_mtp_shared_weight_owner(const std::string& name);
-  static bool owns_mtp_shared_weights(const std::string& name);
 
   static void register_mtp_args_adapter(const std::string& name,
                                         MtpArgsAdapter adapter);
+
+  static void register_mtp_capabilities(const std::string& name,
+                                        MtpModelCapabilities capabilities);
+
+  static MtpModelCapabilities get_mtp_capabilities(const std::string& name);
 
   static void configure_mtp_args(ModelArgs& args,
                                  std::string_view algorithm,

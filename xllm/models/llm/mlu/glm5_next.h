@@ -83,13 +83,13 @@ class Glm5NextModelImpl final
     torch::NoGradGuard no_grad;
     CHECK_EQ(kv_caches.size(), layers_.size())
         << "GLM5-Next requires one layer-specific cache object per layer.";
-    CHECK(!input_params.is_spec_verify &&
-          (!input_params.attn_metadata ||
-           !input_params.attn_metadata->is_spec_verify))
-        << "Native MLU GLM5-Next speculative verification is not supported "
-           "yet: "
-           "the MTP worker must implement Dense Validate Span and state "
-           "commit.";
+    if (input_params.is_spec_verify ||
+        (input_params.attn_metadata &&
+         input_params.attn_metadata->is_spec_verify)) {
+      CHECK(input_params.meta.batch_forward_type.is_chunked_prefill())
+          << "GLM5-Next speculative verification requires chunked-prefill "
+             "Dense Validate Span.";
+    }
 
     if (tokens.numel() == 0) {
       tokens = torch::ones(
