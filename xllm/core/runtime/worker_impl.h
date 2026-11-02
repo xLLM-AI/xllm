@@ -226,6 +226,9 @@ class WorkerImpl {
                                            VlmForwardInput& prepared);
   virtual std::optional<ForwardOutput> execute_task_pipeline(
       VlmForwardInput& prepared);
+  // Records the ordered worker compute-stream boundary used to retire task
+  // pipeline inputs without blocking the state thread.
+  StreamEventPtr record_task_pipeline_completion() const;
   // Warmup waits for execution allocations; serving keeps stream overlap.
   void observe_execution_memory(bool is_warmup);
 

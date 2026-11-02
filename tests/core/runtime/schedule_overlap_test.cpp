@@ -799,7 +799,94 @@ TYPED_TEST(ScheduleOverlapTest, DpDriverPublishesWithoutEplb) {
 }
 
 TYPED_TEST(ScheduleOverlapTest,
-           DpSpeculativeNonDriverRetiresInputsBeforeReplacingPriorOutput) {
+           DriverDefersTokenlessInputsAfterFilteredPublication) {
+  ScopedConfigValue<bool> eplb(EPLBConfig::get_instance().enable_eplb(), false);
+  std::promise<void> callback_entered;
+  auto entered = callback_entered.get_future();
+  std::promise<void> release_callback;
+  auto callback_release = release_callback.get_future().share();
+  std::atomic<bool> device_finished{false};
+  std::atomic<bool> owner_released{false};
+  std::atomic<bool> owner_released_early{false};
+  std::function<void()> callback = [&]() {
+    callback_entered.set_value();
+    callback_release.wait_for(10s);
+    device_finished.store(true);
+  };
+  StreamEventPtr completion;
+  OverlapTestWorker worker({ForwardOutput{}, std::nullopt, token_output(31)});
+  worker.set_output_hook([&](ForwardOutput& output, Stream& stream) {
+    auto guard = stream.set_stream_guard();
+    CHECK_EQ(
+        aclrtLaunchHostFunc(
+            stream.get_stream()->stream(),
+            [](void* data) { (*static_cast<std::function<void()>*>(data))(); },
+            &callback),
+        ACL_SUCCESS);
+    output.ready_event = stream.record_event();
+    CHECK(output.ready_event != nullptr);
+    completion = output.ready_event;
+    output.retained_inputs.emplace_back(
+        std::shared_ptr<int32_t>(new int32_t(42), [&](int32_t* value) {
+          owner_released_early.store(!device_finished.load());
+          owner_released.store(true);
+          delete value;
+        }));
+  });
+  auto first = worker.step_async(step_input<TypeParam>(/*decode=*/false))
+                   .toUnsafeFuture()
+                   .thenValue([](std::optional<ForwardOutput> output) {
+                     return output.has_value();
+                   });
+  first.wait(2s);
+  const bool first_ready_without_completion = first.isReady();
+  const std::future_status callback_status = entered.wait_for(2s);
+  auto publication = std::async(std::launch::async, [&worker]() {
+    return worker.get_last_step_result();
+  });
+  const std::future_status publication_status = publication.wait_for(2s);
+  if (publication_status != std::future_status::ready) {
+    worker.begin_shutdown();
+  }
+  const ForwardOutput published = publication.get();
+  auto second = worker.step_async(step_input<TypeParam>(/*decode=*/false))
+                    .toUnsafeFuture()
+                    .thenValue([](std::optional<ForwardOutput> output) {
+                      return output.has_value();
+                    });
+  second.wait(2s);
+  const bool cleared_before_completion = second.isReady();
+  const bool released_before_completion = owner_released.load();
+
+  // Unblock device work before assertions so failures can drain the worker.
+  release_callback.set_value();
+  first.wait(2s);
+  second.wait(2s);
+  EXPECT_TRUE(first_ready_without_completion);
+  EXPECT_EQ(callback_status, std::future_status::ready);
+  EXPECT_EQ(publication_status, std::future_status::ready);
+  EXPECT_FALSE(published.sample_output.next_tokens.defined());
+  EXPECT_EQ(published.ready_event, nullptr);
+  EXPECT_TRUE(published.retained_inputs.empty());
+  EXPECT_TRUE(cleared_before_completion);
+  EXPECT_FALSE(released_before_completion);
+  ASSERT_TRUE(first.isReady());
+  ASSERT_TRUE(second.isReady());
+  EXPECT_TRUE(std::move(first).get());
+  EXPECT_FALSE(std::move(second).get());
+  ASSERT_NE(completion, nullptr);
+  ASSERT_TRUE(completion->synchronize());
+  (void)worker.get_last_step_result();
+  worker.set_output_hook({});
+  const auto next =
+      worker.step_async(step_input<TypeParam>(/*decode=*/false)).get();
+  EXPECT_TRUE(next.has_value());
+  EXPECT_TRUE(owner_released.load());
+  EXPECT_FALSE(owner_released_early.load());
+}
+
+TYPED_TEST(ScheduleOverlapTest,
+           DpSpeculativeNonDriverDefersInputsWithoutBlockingNextForward) {
   ScopedConfigValue<bool> eplb(EPLBConfig::get_instance().enable_eplb(), false);
   std::promise<void> callback_entered;
   auto entered = callback_entered.get_future();

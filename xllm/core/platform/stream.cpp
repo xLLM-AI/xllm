@@ -91,6 +91,20 @@ bool StreamEvent::synchronize() {
 #endif
 }
 
+bool StreamEvent::query() const {
+#if defined(USE_NPU)
+  aclrtEventRecordedStatus status = ACL_EVENT_RECORDED_STATUS_NOT_READY;
+  const aclError ret = aclrtQueryEventStatus(npu_event_, &status);
+  if (ret != ACL_SUCCESS) {
+    LOG(ERROR) << "Failed to query NPU event: " << ret;
+    return false;
+  }
+  return status == ACL_EVENT_RECORDED_STATUS_COMPLETE;
+#else
+  return c10_event_.query();
+#endif
+}
+
 Stream::Stream(const int32_t timeout)
     : stream_(get_stream_from_pool()), timeout_(timeout) {}
 
