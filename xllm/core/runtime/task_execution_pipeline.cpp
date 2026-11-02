@@ -18,6 +18,7 @@ limitations under the License.
 #include <c10/core/DeviceGuard.h>
 
 #include <algorithm>
+#include <iterator>
 #include <limits>
 
 #include "core/framework/allocator/virtual_memory/physical_page_pool.h"
@@ -748,6 +749,8 @@ TaskExecutionPipeline::~TaskExecutionPipeline() {
     slots_[ticket.slot_id]->kv_load.reset();
     accepted_.pop_front();
   }
+  c10::DeviceGuard guard(device_.unwrap());
+  retire_deferred_releases(/*wait=*/true);
   CHECK(completed_.empty());
 }
 
@@ -926,6 +929,7 @@ Status TaskExecutionPipeline::prepare_worker(uint32_t slot_id,
   }
   Slot& slot = *slots_[slot_id];
   slot.worker_input_host_buffer = input.runtime.input_host_buffer;
+  slot.worker_completion.reset();
   worker_pipeline_->prepare_task_pipeline_input(input, slot.worker_input);
   slot.worker_output.reset();
   return Status();
@@ -938,6 +942,7 @@ Status TaskExecutionPipeline::prepare_worker(uint32_t slot_id,
   }
   Slot& slot = *slots_[slot_id];
   slot.worker_input_host_buffer = input.runtime.input_host_buffer;
+  slot.worker_completion.reset();
   worker_pipeline_->prepare_task_pipeline_input(input, slot.worker_vlm_input);
   slot.worker_output.reset();
   return Status();
@@ -953,6 +958,8 @@ void TaskExecutionPipeline::launch(uint32_t slot_id) {
       if (slot.worker_output.has_value()) {
         slot.worker_output->is_graph_warmup = slot.is_warmup;
       }
+      slot.worker_completion =
+          worker_pipeline_->record_task_pipeline_completion();
       return;
     }
     // This mode runs on the worker's compute stream. Its Python executor (or
@@ -970,6 +977,8 @@ void TaskExecutionPipeline::launch(uint32_t slot_id) {
     if (slot.worker_output.has_value()) {
       slot.worker_output->is_graph_warmup = slot.is_warmup;
     }
+    slot.worker_completion =
+        worker_pipeline_->record_task_pipeline_completion();
     return;
   }
   if (slot.kv_load.has_value() &&
@@ -1072,26 +1081,46 @@ ForwardOutput TaskExecutionPipeline::consume(uint32_t slot_id) {
   if (worker_pipeline_ != nullptr) {
     CHECK_LT(slot_id, slots_.size());
     Slot& slot = *slots_[slot_id];
+    const bool has_output = slot.worker_output.has_value();
     ForwardOutput output = slot.worker_output.has_value()
                                ? std::move(*slot.worker_output)
                                : ForwardOutput{};
     c10::DeviceGuard guard(device_.unwrap());
-    // Launch completion only means that device work has been enqueued. As
-    // with SlotBuffer retirement, keep the prepared input alive until the
-    // producer is done, even for an output without tokens or retained inputs.
-    const StreamEventPtr& input_ready =
-        input_domain_ == TaskInputDomain::VLM
-            ? slot.worker_vlm_input.runtime.metadata_ready_event
-            : slot.worker_input.runtime.metadata_ready_event;
-    const StreamEventPtr& ready =
-        output.ready_event != nullptr ? output.ready_event : input_ready;
-    if (ready != nullptr) {
-      CHECK(ready->synchronize()) << "Failed to retire worker task input.";
+    retire_deferred_releases(/*wait=*/false);
+    // The completion recorded after the worker hook covers composite workers
+    // as well as leaf outputs. Prefer it over an inner output event so input
+    // owners are retained through the whole task, not just the final child.
+    StreamEventPtr ready = slot.worker_completion != nullptr
+                               ? slot.worker_completion
+                               : output.ready_event;
+    if (has_output) {
+      output.ready_event = ready;
+    }
+    std::vector<std::shared_ptr<const void>> owners;
+    owners.reserve(2);
+    if (input_domain_ == TaskInputDomain::VLM) {
+      owners.emplace_back(
+          std::make_shared<VlmForwardInput>(std::move(slot.worker_vlm_input)));
+    } else {
+      owners.emplace_back(
+          std::make_shared<LlmForwardInput>(std::move(slot.worker_input)));
+    }
+    if (slot.worker_input_host_buffer.defined()) {
+      owners.emplace_back(std::make_shared<torch::Tensor>(
+          std::move(slot.worker_input_host_buffer)));
+    }
+    if (has_output) {
+      std::vector<std::shared_ptr<const void>> output_owners =
+          take_retained_inputs(output);
+      output_owners.insert(output_owners.end(),
+                           std::make_move_iterator(owners.begin()),
+                           std::make_move_iterator(owners.end()));
+      defer_release(ready, std::move(output_owners));
+    } else if (ready != nullptr) {
+      defer_release(std::move(ready), std::move(owners));
     }
     slot.worker_output.reset();
-    slot.worker_input = LlmForwardInput();
-    slot.worker_vlm_input = VlmForwardInput();
-    slot.worker_input_host_buffer = torch::Tensor();
+    slot.worker_completion.reset();
     return output;
   }
   if (speculative_capacity_) {
@@ -1112,6 +1141,45 @@ ForwardOutput TaskExecutionPipeline::consume(uint32_t slot_id) {
   result.sample_output.top_logprobs = std::move(tokens.top_logprobs);
   release_outputs(slot);
   return result;
+}
+
+void TaskExecutionPipeline::retire_deferred_releases(bool wait) {
+  auto it = deferred_releases_.begin();
+  while (it != deferred_releases_.end()) {
+    const bool complete =
+        wait ? it->ready_event->synchronize() : it->ready_event->query();
+    CHECK(complete || !wait) << "Failed to retire task pipeline input.";
+    if (complete) {
+      it = deferred_releases_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+void TaskExecutionPipeline::defer_release(
+    StreamEventPtr ready_event,
+    std::vector<std::shared_ptr<const void>> owners) {
+  if (owners.empty()) {
+    return;
+  }
+  // record_event_or_sync() returns null after synchronizing when the backend
+  // cannot allocate an event, so the owners are safe to release immediately.
+  if (ready_event == nullptr) {
+    return;
+  }
+  retire_deferred_releases(/*wait=*/false);
+  if (ready_event->query()) {
+    return;
+  }
+  if (deferred_releases_.size() >= kMaxDeferredReleases) {
+    DeferredRelease& release = deferred_releases_.front();
+    CHECK(release.ready_event->synchronize())
+        << "Failed to retire deferred task pipeline input.";
+    deferred_releases_.pop_front();
+  }
+  deferred_releases_.push_back(
+      DeferredRelease{std::move(ready_event), std::move(owners)});
 }
 
 void TaskExecutionPipeline::discard(uint32_t slot_id) {

@@ -17,6 +17,7 @@ limitations under the License.
 #include <folly/futures/Future.h>
 
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -296,7 +297,15 @@ class TaskExecutionPipeline final {
     // a different contiguous H2D buffer.
     torch::Tensor worker_input_host_buffer;
     std::optional<ForwardOutput> worker_output;
+    StreamEventPtr worker_completion;
   };
+
+  struct DeferredRelease final {
+    StreamEventPtr ready_event;
+    std::vector<std::shared_ptr<const void>> owners;
+  };
+
+  static constexpr size_t kMaxDeferredReleases = 1;
 
   struct SlotTicket {
     uint32_t slot_id = 0;
@@ -321,6 +330,9 @@ class TaskExecutionPipeline final {
   void observe_execution_memory(uint32_t slot_id);
   ForwardOutput consume(uint32_t slot_id);
   void discard(uint32_t slot_id);
+  void retire_deferred_releases(bool wait);
+  void defer_release(StreamEventPtr ready_event,
+                     std::vector<std::shared_ptr<const void>> owners);
   void release_outputs(Slot& slot);
   folly::Future<TaskResult> take_result_impl(
       std::optional<uint64_t> expected_task_id);
@@ -433,6 +445,7 @@ class TaskExecutionPipeline final {
   Step accepted_tail_;
   Step published_tail_;
   std::vector<std::unique_ptr<Slot>> slots_;
+  std::deque<DeferredRelease> deferred_releases_;
   std::vector<int64_t> graph_batch_sizes_;
   // Sorted buckets captured for every Slot through ordinary warmup Tasks.
   // Only these buckets are eligible for serving on every DP rank.

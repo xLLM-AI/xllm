@@ -41,6 +41,11 @@ ScheduleOverlap::ScheduleOverlap(bool is_driver,
 template <typename Input>
 std::optional<ForwardOutput> ScheduleOverlap::execute_impl(WorkerImpl& worker,
                                                            Input& input) {
+  std::shared_ptr<const void> prior_tokens_owner;
+  if (state_.has_tokens()) {
+    prior_tokens_owner = std::make_shared<torch::Tensor>(
+        state_.prior_output().sample_output.next_tokens);
+  }
   prepare_continuation_impl(worker, input);
   torch::Tensor sampling_rows;
   auto output = worker.step_for_schedule_overlap(
@@ -50,6 +55,20 @@ std::optional<ForwardOutput> ScheduleOverlap::execute_impl(WorkerImpl& worker,
       // Keep the pinned H2D source alive through this output's completion.
       output->retained_inputs.emplace_back(
           std::make_shared<torch::Tensor>(std::move(sampling_rows)));
+    } else {
+      CHECK_EQ(worker.compute_stream_->synchronize(), 0);
+    }
+  }
+  // Composite workers may return retained inputs without an output event. The
+  // completion boundary must cover the full worker step before ownership is
+  // transferred to the overlap state or task pipeline.
+  if (output.has_value() && output->ready_event == nullptr &&
+      (!output->retained_inputs.empty() || prior_tokens_owner != nullptr)) {
+    output->ready_event = worker.compute_stream_->record_event_or_sync();
+  }
+  if (prior_tokens_owner != nullptr) {
+    if (output.has_value() && output->ready_event != nullptr) {
+      output->retained_inputs.emplace_back(std::move(prior_tokens_owner));
     } else {
       CHECK_EQ(worker.compute_stream_->synchronize(), 0);
     }
@@ -150,15 +169,6 @@ void ScheduleOverlap::complete_step_impl(const Input& input,
                                          Stream& compute_stream,
                                          std::optional<ForwardOutput>& output) {
   if (output.has_value()) {
-#if defined(USE_NPU)
-    // No token consumer will wait for this output. Retire its asynchronous
-    // input owners before either a result copy or the continuation is dropped.
-    if (!output->sample_output.next_tokens.defined() &&
-        output->ready_event != nullptr && !output->retained_inputs.empty()) {
-      CHECK(output->ready_event->synchronize())
-          << "failed to retire asynchronous output without tokens";
-    }
-#endif
     output->is_graph_warmup = input.input_params.meta.is_graph_warmup;
     output->json_object_errors.insert(output->json_object_errors.end(),
                                       input.json_object_errors.begin(),
@@ -206,7 +216,7 @@ void ScheduleOverlap::replace_tokens(
   auto next_tokens = prior_output.sample_output.next_tokens;
   kernel::npu::replace_token(input.token_ids,
                              next_tokens,
-                             /*synchronize_stream=*/!use_graph_decode_input);
+                             /*synchronize_stream=*/false);
   if (use_graph_decode_input) {
     input.input_params.graph.input_tokens_override = input.token_ids;
   }
