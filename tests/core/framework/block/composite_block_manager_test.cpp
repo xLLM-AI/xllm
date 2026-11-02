@@ -21,13 +21,16 @@ limitations under the License.
 #include <cstring>
 #include <functional>
 #include <future>
+#include <map>
 #include <set>
 #include <thread>
 #include <utility>
 
 #include "core/framework/batch/batch.h"
 #include "core/framework/block/block_manager_pool.h"
+#include "core/framework/block/embedding_block_manager.h"
 #include "core/framework/block/vmm_kv_block_manager.h"
+#include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/block/block_utils.h"
 #include "core/kv_cache/block/concurrent_block_manager_impl.h"
 #include "core/kv_cache/block/linear_state_block_manager.h"
@@ -78,9 +81,7 @@ BlockManager::Options MakeCompositeOptions(uint32_t base_num_blocks,
 
 void set_swa_capacity_for_token_budget(BlockManager::Options* options,
                                        uint32_t max_tokens_per_batch) {
-  ASSERT_NE(options, nullptr);
   const uint32_t block_size = options->block_size();
-  ASSERT_GT(block_size, 0u);
   const uint32_t burst_blocks =
       (max_tokens_per_batch + block_size - 1) / block_size;
   const uint32_t max_seqs = std::max(options->max_seqs_per_batch(), 1u);
@@ -264,6 +265,180 @@ std::unique_ptr<VmmKVBlockManager> make_vmm_prefix_manager(
 }
 
 }  // namespace
+
+TEST(CompositeBlockManagerTest, ExplicitHostAllocationNeverPublishesProgress) {
+  BlockManager::Options options;
+  options.num_blocks(16).block_size(4).enable_host_offload(true);
+  CompositeBlockManager device(build_composite_leaves(options), options);
+  auto host_leaves = build_composite_leaves(options);
+  host_leaves.at(BlockType::KV).participates_in_admission = false;
+  CompositeBlockManager host(
+      std::move(host_leaves), options, CompositeBlockManager::CacheTier::HOST);
+  Sequence sequence = MakeTestSequence(0, std::vector<int32_t>(9, 7));
+  ASSERT_TRUE(device.allocate_sequence(&sequence, 9));
+  sequence.kv_state().set_kv_cache_tokens_num(8);
+  const int32_t device_id = sequence.kv_state().blocks(BlockType::KV)[0].id();
+
+  ASSERT_TRUE(host.allocate_sequence(&sequence, 9));
+  EXPECT_EQ(host.num_total_blocks(), 0u);
+  EXPECT_EQ(sequence.host_kv_state().num_blocks(BlockType::KV), 3u);
+  EXPECT_EQ(sequence.host_kv_state().kv_cache_tokens_num(), 0u);
+  EXPECT_EQ(sequence.host_kv_state().num_cached_blocks(BlockType::KV), 0u);
+  for (const Block& block : sequence.host_kv_state().blocks(BlockType::KV)) {
+    EXPECT_EQ(block.ref_count(), 1u);
+  }
+  host.cache_for_sequence(&sequence, 8);
+  host.cache_full_blocks_for_sequence(&sequence);
+  EXPECT_EQ(
+      host.leaf_entries().at(BlockType::KV).leaf->num_blocks_in_prefix_cache(),
+      0u);
+  EXPECT_EQ(device.num_blocks_in_prefix_cache(), 0u);
+  EXPECT_EQ(sequence.kv_state().num_cached_blocks(BlockType::KV), 0u);
+  EXPECT_EQ(sequence.host_kv_state().num_cached_blocks(BlockType::KV), 0u);
+  for (const Block& block : sequence.kv_state().blocks(BlockType::KV)) {
+    EXPECT_EQ(block.ref_count(), 1u);
+  }
+  for (const Block& block : sequence.host_kv_state().blocks(BlockType::KV)) {
+    EXPECT_EQ(block.ref_count(), 1u);
+  }
+
+  host.deallocate_for_sequence(&sequence);
+  EXPECT_EQ(sequence.host_kv_state().num_blocks(BlockType::KV), 3u);
+  sequence.host_kv_state().reset();
+  EXPECT_EQ(sequence.kv_state().blocks(BlockType::KV)[0].id(), device_id);
+  EXPECT_EQ(sequence.kv_state().kv_cache_tokens_num(), 8u);
+  EXPECT_EQ(host.num_blocks_in_prefix_cache(), 0u);
+  EXPECT_EQ(host.leaf_entries().at(BlockType::KV).leaf->num_used_blocks(), 0u);
+  device.deallocate_for_sequence(&sequence);
+  sequence.reset();
+  EXPECT_EQ(device.num_blocks_in_prefix_cache(), 2u);
+}
+
+TEST(CompositeBlockManagerTest, ExplicitPublicationEnablesHostOnlySharedMatch) {
+  BlockManager::Options options;
+  options.num_blocks(16).block_size(4).enable_host_offload(true);
+  CompositeBlockManager host(build_composite_leaves(options),
+                             options,
+                             CompositeBlockManager::CacheTier::HOST);
+  Sequence source = MakeTestSequence(0, std::vector<int32_t>(9, 7));
+  ASSERT_TRUE(host.allocate_sequence(&source, 8));
+  source.update_block_hashes(4, BlockHasherType::TEXT);
+  auto& blocks = *source.host_kv_state().mutable_blocks(BlockType::KV);
+  for (size_t index = 0; index < blocks.size(); ++index) {
+    blocks[index].set_hash_value(source.block_hashes()[index].data);
+  }
+  host.leaf_of(BlockType::KV)->cache(blocks);
+  EXPECT_EQ(host.num_blocks_in_prefix_cache(), 2u);
+  EXPECT_EQ(source.host_kv_state().num_cached_blocks(BlockType::KV), 0u);
+  EXPECT_EQ(source.host_kv_state().kv_cache_tokens_num(), 0u);
+  for (const Block& block : blocks) {
+    EXPECT_EQ(block.ref_count(), 2u);
+  }
+
+  Sequence hit = MakeTestSequence(1, std::vector<int32_t>(9, 7));
+  host.allocate_shared_for_sequence(&hit);
+  EXPECT_EQ(hit.host_kv_state().kv_cache_tokens_num(), 8u);
+  EXPECT_EQ(hit.host_kv_state().num_cached_blocks(BlockType::KV), 2u);
+  EXPECT_TRUE(hit.host_kv_state().prefix_cache_matched());
+  EXPECT_FALSE(hit.kv_state().has_any_blocks());
+  EXPECT_FALSE(hit.kv_state().prefix_cache_matched());
+  host.deallocate_for_sequence(&hit);
+  hit.host_kv_state().reset();
+
+  Sequence exact = MakeTestSequence(2, std::vector<int32_t>(8, 7));
+  host.allocate_shared_for_sequence(&exact);
+  EXPECT_EQ(exact.host_kv_state().kv_cache_tokens_num(), 4u);
+  EXPECT_EQ(exact.host_kv_state().num_cached_blocks(BlockType::KV), 1u);
+  host.deallocate_for_sequence(&exact);
+  exact.host_kv_state().reset();
+  host.deallocate_for_sequence(&source);
+  source.host_kv_state().reset();
+  EXPECT_EQ(host.leaf_entries().at(BlockType::KV).leaf->num_used_blocks(), 0u);
+}
+
+TEST(CompositeBlockManagerTest, FailedHostGrowthRollsBackAllStagedLeaves) {
+  BlockManager::Options options = MakeCompositeOptions(4096, 128, 128, 4);
+  options.enable_prefix_cache(true).enable_host_offload(true);
+  CompositeBlockManager device(build_composite_leaves(options), options);
+  CompositeBlockManager host(build_composite_leaves(options),
+                             options,
+                             CompositeBlockManager::CacheTier::HOST);
+  Sequence sequence = MakeTestSequence(0, std::vector<int32_t>(129, 7));
+  ASSERT_TRUE(device.allocate_sequence(&sequence, 128));
+  const int32_t device_id = sequence.kv_state().blocks(BlockType::C4)[0].id();
+  BlockManager* c128 = host.leaf_entries().at(BlockType::C128).leaf.get();
+  auto held_blocks = c128->allocate(c128->num_free_blocks());
+  std::map<BlockType, size_t> used_before;
+  for (const auto& [type, entry] : host.leaf_entries()) {
+    used_before.emplace(type, entry.leaf->num_used_blocks());
+  }
+
+  EXPECT_FALSE(host.allocate_sequence(&sequence, 128));
+  EXPECT_FALSE(sequence.host_kv_state().has_any_blocks());
+  EXPECT_EQ(sequence.kv_state().blocks(BlockType::C4)[0].id(), device_id);
+  for (const auto& [type, entry] : host.leaf_entries()) {
+    EXPECT_EQ(entry.leaf->num_used_blocks(), used_before.at(type));
+  }
+  host.deallocate(held_blocks);
+  held_blocks.clear();
+  ASSERT_TRUE(host.allocate_sequence(&sequence, 128));
+  for (const auto& [type, entry] : host.leaf_entries()) {
+    EXPECT_EQ(sequence.host_kv_state().blocks(type)[0].ref_count(), 1u);
+  }
+  host.deallocate_for_sequence(&sequence);
+  sequence.host_kv_state().reset();
+  device.deallocate_for_sequence(&sequence);
+  sequence.reset();
+}
+
+TEST(CompositeBlockManagerTest, HostWindowReleaseUsesSequenceProgress) {
+  BlockManager::Options options = MakeCompositeOptions(4096, 128, 128, 4);
+  options.enable_prefix_cache(true);
+  CompositeBlockManager device(build_composite_leaves(options), options);
+  CompositeBlockManager host(build_composite_leaves(options),
+                             options,
+                             CompositeBlockManager::CacheTier::HOST);
+  Sequence sequence = MakeTestSequence(0, std::vector<int32_t>(1025, 7));
+  ASSERT_TRUE(device.allocate_sequence(&sequence, 1024));
+  ASSERT_TRUE(host.allocate_sequence(&sequence, 1024));
+  sequence.kv_state().set_kv_cache_tokens_num(1024);
+  host.release_out_of_window_for_sequence(&sequence);
+  const Slice<Block> host_swa = sequence.host_kv_state().blocks(BlockType::SWA);
+  ASSERT_EQ(host_swa.size(), 8u);
+  for (size_t index = 0; index + 1 < host_swa.size(); ++index) {
+    EXPECT_FALSE(host_swa[index].is_valid());
+    EXPECT_TRUE(sequence.kv_state().blocks(BlockType::SWA)[index].is_valid());
+  }
+  EXPECT_TRUE(host_swa.back().is_valid());
+  EXPECT_EQ(sequence.host_kv_state().kv_cache_tokens_num(), 0u);
+  EXPECT_EQ(host.num_blocks_in_prefix_cache(), 0u);
+  host.deallocate_for_sequence(&sequence);
+  sequence.host_kv_state().reset();
+  device.deallocate_for_sequence(&sequence);
+  sequence.reset();
+}
+
+TEST(CompositeBlockManagerTest, ExplicitDeviceStatePreservesEmbeddingDispatch) {
+  BlockManager::Options options;
+  options.num_blocks(16).block_size(128);
+  auto leaves = build_composite_leaves(options);
+  leaves.emplace(
+      BlockType::EMBEDDING,
+      CompositeBlockManager::LeafEntry{
+          std::make_unique<EmbeddingBlockManager>(4, "test"), false, false});
+  CompositeBlockManager manager(std::move(leaves), options);
+  Sequence sequence = MakeTestSequence(0, std::vector<int32_t>(1025, 7));
+  ASSERT_TRUE(manager.allocate_sequence(&sequence, 128));
+  ASSERT_EQ(sequence.kv_state().num_blocks(BlockType::EMBEDDING), 1u);
+  const int32_t embedding_id =
+      sequence.kv_state().blocks(BlockType::EMBEDDING)[0].id();
+  ASSERT_TRUE(manager.allocate_sequence(&sequence, 1024));
+  ASSERT_EQ(sequence.kv_state().num_blocks(BlockType::EMBEDDING), 1u);
+  EXPECT_EQ(sequence.kv_state().blocks(BlockType::EMBEDDING)[0].id(),
+            embedding_id);
+  manager.deallocate_for_sequence(&sequence);
+  sequence.reset();
+}
 
 TEST(CompositeBlockManagerTest, AllocateForSequence_SingleSeq) {
   const uint32_t base_block_size = kBaseBlockSize;
@@ -933,7 +1108,7 @@ TEST(CompositeBlockManagerTest, Dsv4PrefixCacheSkipsPartialCacheUnitTail) {
       MakeTestSequence(0, std::vector<int32_t>(completed_tokens, 17));
   ASSERT_TRUE(manager.allocate_sequence(&seq, completed_tokens));
   seq.kv_state().incr_kv_cache_tokens_num(completed_tokens);
-  manager.cache_for_sequence(&seq);
+  manager.cache_full_blocks_for_sequence(&seq);
 
   EXPECT_EQ(manager.leaf_entries()
                 .at(BlockType::SWA)
@@ -984,6 +1159,38 @@ TEST(CompositeBlockManagerTest, Dsv4PrefixCacheExactRepeatPopsOneC128) {
             num_tokens - kBlockSizeRatio128);
 
   manager.deallocate_for_sequence(&seq_hit);
+}
+
+TEST(CompositeBlockManagerTest,
+     Dsv4ExactRepeatRejectsEvictedPreviousSwaWindow) {
+  const uint32_t window_size = 4 * kBaseBlockSize;
+  BlockManager::Options opts = MakeCompositeOptions(
+      /*base_num_blocks=*/4096,
+      kBaseBlockSize,
+      window_size,
+      /*max_seqs_per_batch=*/1);
+  set_swa_capacity_for_token_budget(&opts, 2 * kBlockSizeRatio128);
+  CompositeBlockManager manager(build_composite_leaves(opts), opts);
+
+  const size_t prompt_tokens = 2 * kBlockSizeRatio128;
+  const std::vector<int32_t> prompt_a(prompt_tokens, 42);
+  Sequence source = MakeTestSequence(/*index=*/0, prompt_a);
+  ASSERT_TRUE(manager.allocate_sequence(&source, prompt_tokens));
+  source.kv_state().incr_kv_cache_tokens_num(prompt_tokens);
+  manager.deallocate_for_sequence(&source);
+  source.reset();
+
+  // Evict the older SWA window while retaining the C4/C128 prefix.
+  const std::vector<int32_t> prompt_b(prompt_tokens, 43);
+  Sequence pressure = MakeTestSequence(/*index=*/1, prompt_b);
+  ASSERT_TRUE(manager.allocate_sequence(&pressure, prompt_tokens));
+
+  Sequence probe = MakeTestSequence(/*index=*/2, prompt_a);
+  manager.allocate_shared_for_sequence(&probe);
+  EXPECT_EQ(probe.kv_state().kv_cache_tokens_num(), 0u);
+
+  manager.deallocate_for_sequence(&probe);
+  manager.deallocate_for_sequence(&pressure);
 }
 
 // DSV4 D-side (instance_is_decode=true) should skip the SWA leaf's prefix
@@ -1983,12 +2190,53 @@ class LinearStateWindowTest : public ::testing::TestWithParam<bool> {
 
 }  // namespace
 
+TEST_P(LinearStateWindowTest, DecodeReceiverUsesExplicitState) {
+  for (const bool concurrent : {false, true}) {
+    SCOPED_TRACE(concurrent);
+    std::unique_ptr<BlockManager> manager =
+        std::make_unique<LinearStateBlockManager>(4, 4, GetParam(), true);
+    if (concurrent) {
+      manager =
+          std::make_unique<ConcurrentBlockManagerImpl>(std::move(manager));
+    }
+    Sequence sequence = make_sequence(0, std::vector<int32_t>(12, 7));
+    sequence.kv_state().add_blocks(BlockType::LINEAR, manager->allocate(1));
+    const int32_t sequence_source_id = sequence.get_linear_state_slot_id();
+    KVCacheState kv_state;
+
+    auto allocated = manager->allocate_for_sequence(&sequence, kv_state, 12);
+    ASSERT_TRUE(allocated.has_value());
+    ASSERT_EQ(allocated->size(), 1u);
+    kv_state.add_blocks(BlockType::LINEAR, *allocated);
+    allocated->clear();
+    kv_state.add_blocks(BlockType::LINEAR, manager->allocate(1));
+    const int32_t retained_source_id =
+        kv_state.blocks(BlockType::LINEAR).back().id();
+
+    allocated = manager->allocate_for_sequence(&sequence, kv_state, 13);
+    ASSERT_TRUE(allocated.has_value());
+    EXPECT_TRUE(allocated->empty());
+    ASSERT_EQ(kv_state.num_blocks(BlockType::LINEAR), 1u);
+    EXPECT_EQ(kv_state.blocks(BlockType::LINEAR).front().id(),
+              retained_source_id);
+    EXPECT_EQ(sequence.get_linear_state_slot_id(), sequence_source_id);
+    EXPECT_EQ(manager->num_used_blocks(), 2u);
+    manager->deallocate(kv_state.blocks(BlockType::LINEAR));
+    kv_state.reset();
+    manager->deallocate(sequence.kv_state().blocks(BlockType::LINEAR));
+    sequence.reset();
+    EXPECT_EQ(manager->num_used_blocks(), 0u);
+    EXPECT_EQ(manager->num_free_blocks(), manager->num_total_blocks());
+  }
+}
+
 TEST_P(LinearStateWindowTest, DecodeReceiverAllocationIsOwnedByLeaf) {
   for (const size_t prompt_length : {12u, 13u}) {
     LinearStateBlockManager manager(3, 4, GetParam(), true);
     Sequence sequence =
         make_sequence(0, std::vector<int32_t>(prompt_length, 7));
-    auto allocated = manager.allocate_for_sequence(&sequence, prompt_length);
+    auto allocated = manager.allocate_for_sequence(
+        &sequence, sequence.kv_state(), prompt_length);
     ASSERT_TRUE(allocated.has_value());
     ASSERT_EQ(allocated->size(), 1u);
     EXPECT_TRUE(allocated->back().is_valid());
@@ -1996,19 +2244,22 @@ TEST_P(LinearStateWindowTest, DecodeReceiverAllocationIsOwnedByLeaf) {
     allocated.reset();
     EXPECT_EQ(manager.num_used_blocks(), 0u);
 
-    allocated = manager.allocate_for_sequence(&sequence, prompt_length);
+    allocated = manager.allocate_for_sequence(
+        &sequence, sequence.kv_state(), prompt_length);
     ASSERT_TRUE(allocated.has_value());
     sequence.kv_state().add_blocks(BlockType::LINEAR, *allocated);
     allocated->clear();
     const int32_t received_id = sequence.get_linear_state_slot_id();
-    allocated = manager.allocate_for_sequence(&sequence, prompt_length);
+    allocated = manager.allocate_for_sequence(
+        &sequence, sequence.kv_state(), prompt_length);
     ASSERT_TRUE(allocated.has_value());
     EXPECT_TRUE(allocated->empty());
     EXPECT_EQ(sequence.get_linear_state_slot_id(), received_id);
 
     sequence.kv_state().set_kv_cache_tokens_num(prompt_length);
     sequence.append_token(8);
-    allocated = manager.allocate_for_sequence(&sequence, prompt_length + 1);
+    allocated = manager.allocate_for_sequence(
+        &sequence, sequence.kv_state(), prompt_length + 1);
     ASSERT_TRUE(allocated.has_value());
     EXPECT_TRUE(allocated->empty());
     EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::LINEAR), 1u);
@@ -2078,7 +2329,7 @@ TEST_P(LinearStateWindowTest, PrefillCheckpointsDoNotAliasLiveState) {
     EXPECT_EQ(sequence.kv_state().num_cached_blocks(BlockType::LINEAR),
               GetParam() ? output_index : 0u);
     sequence.kv_state().set_kv_cache_tokens_num(target);
-    manager->cache_for_sequence(&sequence);
+    manager->cache_full_blocks_for_sequence(&sequence);
     EXPECT_EQ(sequence.kv_state().num_cached_blocks(BlockType::LINEAR),
               GetParam() ? output_index : 0u);
     previous_id = output_id;
@@ -2146,6 +2397,7 @@ TEST_P(LinearStateWindowTest, IncompleteKvGrowthRollsBackLinearAllocation) {
         : BlockManagerImpl(options) {}
 
     std::optional<std::vector<Block>> allocate_for_sequence(Sequence*,
+                                                            KVCacheState&,
                                                             size_t) override {
       return std::vector<Block>{};
     }

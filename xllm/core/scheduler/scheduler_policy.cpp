@@ -244,25 +244,12 @@ std::vector<std::shared_ptr<Request>> SchedulerPolicy::collect_finished(
     collect_terminal(*it, state, finished_requests);
   }
 
-  // Decode waiters can terminate before any budget admits them. Rotate once,
-  // bounded by the current waiter count, and re-append live waiters so every
-  // queue implementation keeps its ordering while terminal waiters are
-  // retired independently of decode admission.
-  const size_t num_decode_waiters = state.decode_queue.size();
-  for (size_t i = 0; i < num_decode_waiters; ++i) {
-    std::shared_ptr<Request> request = state.decode_queue.top();
-    state.decode_queue.pop_top();
-    if (request == nullptr ||
-        collect_terminal(request, state, finished_requests)) {
-      continue;
-    }
-    if (batch_mode_.priority_strategy == "fcfs" ||
-        batch_mode_.priority_strategy == "multi_slo_and_prio") {
-      state.decode_queue.push(std::move(request), /*if_back=*/true);
-    } else {
-      state.decode_queue.push(std::move(request));
-    }
-  }
+  auto retire_decode_waiter =
+      [this, &state, &finished_requests](std::shared_ptr<Request> request) {
+        return request == nullptr ||
+               collect_terminal(request, state, finished_requests);
+      };
+  state.decode_queue.erase_if(std::ref(retire_decode_waiter));
   return finished_requests;
 }
 
