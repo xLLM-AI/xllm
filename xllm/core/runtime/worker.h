@@ -91,7 +91,6 @@ class Worker {
   bool unlink_p2p(const std::string& remote_addr);
 
   const bool is_driver();
-  bool task_pipeline_uses_worker_prepare() const;
 
   std::optional<ForwardOutput> step(const RecForwardInput& inputs);
   std::optional<ForwardOutput> step(const VlmForwardInput& inputs);
@@ -133,8 +132,7 @@ class Worker {
   virtual std::vector<uint8_t> prefetch_kv_blocks(
       Slice<BlockTransferInfo>& block_transfer_info);
 
-  // Run the model asynchronously. Task pipeline with overlap returns an
-  // empty PrepareAck; the shared Slot pipeline retires the result later.
+  // Run the model asynchronously.
   folly::SemiFuture<std::optional<ForwardOutput>> step_async(
       const LlmForwardInput& inputs);
 
@@ -151,8 +149,6 @@ class Worker {
 
   const torch::Device& device() const;
 
-  // Task results use the shared FIFO and retain the worker's ready event when
-  // execution is worker-owned.
   folly::SemiFuture<std::optional<ForwardOutput>> get_last_step_result_async();
 
   int64_t get_active_activation_memory();
@@ -160,10 +156,7 @@ class Worker {
   folly::SemiFuture<int64_t> get_active_activation_memory_async();
 
  private:
-  bool initialize_task_pipeline();
-  bool enable_task_pipeline_ = false;
   WorkerImpl* impl_ = nullptr;
-  std::unique_ptr<TaskExecutionPipeline> task_pipeline_;
   ThreadPool threadpool_{/*num_threads=*/1,
                          /*cpu_binding=*/false,
                          /*pool_name=*/"Worker.async"};

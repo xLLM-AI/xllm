@@ -93,14 +93,12 @@ class ExecutionConfig final {
   // Select a native extension implementation family for registered components.
   PROPERTY(std::string, extension_impl) = "";
 
-  // Enable the task pipeline; scheduler overlap determines the slot count.
+  // Currently unsupported; keep disabled.
   PROPERTY(bool, enable_task_pipeline) = false;
 
   PROPERTY(bool, enable_graph) = false;
 
-  // Opt supported NPU MTP requests into the unified Python graph path.
-  // Disabling this keeps the legacy ACL graph/decode route available for
-  // comparison and fallback without disabling ordinary graph execution.
+  // Currently unsupported; ordinary graph execution is separate.
   PROPERTY(bool, enable_unified_mtp_graph) = false;
 
   PROPERTY(bool, disable_graph_warmup) = false;

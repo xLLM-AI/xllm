@@ -253,14 +253,8 @@ void prepare_next_draft_from_accepted_state(
     bool use_chunked_prefill,
     bool rebuild_expanded_decode_metadata,
     int32_t block_size,
-    bool require_fused_npu_kernel,
     kernel::npu::MtpPrepareNextDraftWorkspace* reusable_workspace) {
 #if defined(USE_NPU)
-  if (require_fused_npu_kernel &&
-      !block_table_source.input_params.multi_block_tables.empty()) {
-    LOG(FATAL) << "unified MTP requires a single paged block table for fused "
-                  "next-draft preparation";
-  }
   if (block_table_source.input_params.multi_block_tables.empty()) {
     const auto output = kernel::npu::try_mtp_prepare_next_draft(
         accepted_tokens,
@@ -282,10 +276,6 @@ void prepare_next_draft_from_accepted_state(
     }
   }
 #endif
-  if (require_fused_npu_kernel) {
-    LOG(FATAL)
-        << "unified MTP requires the fused NPU next-draft prepare kernel";
-  }
 
   AcceptedState state = build_accepted_state(accepted_tokens,
                                              accepted_embeddings,
@@ -553,7 +543,6 @@ template void prepare_next_draft_from_accepted_state(
     bool,
     bool,
     int32_t,
-    bool,
     kernel::npu::MtpPrepareNextDraftWorkspace*);
 template void prepare_later_draft_from_device_base(LlmForwardInput&,
                                                    const LlmForwardInput&,
@@ -579,7 +568,6 @@ template void prepare_next_draft_from_accepted_state(
     bool,
     bool,
     int32_t,
-    bool,
     kernel::npu::MtpPrepareNextDraftWorkspace*);
 template void prepare_later_draft_from_device_base(LlmForwardInput&,
                                                    const VlmForwardInput&,

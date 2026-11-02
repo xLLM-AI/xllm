@@ -36,37 +36,7 @@ limitations under the License.
 
 namespace xllm {
 
-class WorkerServiceOutputTest : public ::testing::Test {
- protected:
-  void collect(const ForwardOutput& source, ForwardOutput& destination) {
-    runtime::Options options;
-    options.backend("llm");
-    WorkerService service(options, torch::Device("npu:0"), nullptr);
-    std::vector<SpeculativeTokenStats> stats;
-    service.collect_llm_output(
-        source, destination, /*cpu_ready_result=*/true, stats);
-  }
-};
-
 namespace {
-
-TEST_F(WorkerServiceOutputTest, PreservesRetiredDsparkFeedbackBeforeEncoding) {
-  ForwardOutput source;
-  source.sample_output.next_tokens = torch::tensor({{7, 8}}, torch::kInt32);
-  source.dspark_feedback.confidence = {0.9F, 0.8F, 0.7F, 0.6F, 0.5F};
-  source.dspark_feedback.rounds_since_full_width = {3};
-  ForwardOutput collected;
-  collect(source, collected);
-  EXPECT_EQ(collected.dspark_feedback.confidence,
-            source.dspark_feedback.confidence);
-  EXPECT_EQ(collected.dspark_feedback.rounds_since_full_width,
-            source.dspark_feedback.rounds_since_full_width);
-
-  source.dspark_feedback = {};
-  collect(source, collected);
-  EXPECT_TRUE(collected.dspark_feedback.confidence.empty());
-  EXPECT_TRUE(collected.dspark_feedback.rounds_since_full_width.empty());
-}
 
 TEST(WorkerResidencyStateTest, RejectsUninitializedAndInvalidTransitions) {
   WorkerResidencyState state;

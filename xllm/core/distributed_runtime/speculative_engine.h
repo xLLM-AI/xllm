@@ -71,10 +71,6 @@ class SpeculativeEngineBase : public Engine {
 
   bool stop_profile() override { return engine_->stop_profile(); }
 
-  DraftStepController* draft_step_controller() override {
-    return engine_->draft_step_controller();
-  }
-
   std::vector<RawForwardOutput> collect_step_outputs(const BatchGroup& batch);
 
  protected:

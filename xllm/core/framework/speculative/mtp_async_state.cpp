@@ -85,12 +85,6 @@ DraftPrefixPolicy classify_draft_prefix_policy(
   return DraftPrefixPolicy::TAIL_REPAIR;
 }
 
-bool supports_hybrid_mtp_pipeline_model_pair(std::string_view target_type,
-                                             std::string_view draft_type) {
-  return (target_type == "qwen3_5" || target_type == "qwen3_5_text") &&
-         draft_type == "qwen3_5_mtp";
-}
-
 bool supports_combined_draft_configuration(
     CombinedDraftExecutionPath execution_path,
     std::string_view npu_backend,

@@ -217,7 +217,7 @@ class Options {
   PROPERTY(bool, enable_profile_kv_blocks) = true;
   // true if disable ttft profiling
   PROPERTY(bool, disable_ttft_profiling) = false;
-  // Enable the task pipeline; scheduler overlap determines the slot count.
+  // Currently unsupported; keep disabled.
   PROPERTY(bool, enable_task_pipeline) = false;
 
   // enable CUDA graph/ACL graph for performance optimization

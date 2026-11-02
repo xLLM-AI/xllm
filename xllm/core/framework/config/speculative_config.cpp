@@ -72,27 +72,17 @@ DEFINE_bool(enable_atb_spec_kernel,
 DEFINE_bool(
     enable_adaptive_target_verify,
     false,
-    "Adapt the target verification budget by pruning already-generated "
-    "draft proposals using historical confidence and full-cycle costs, "
-    "without reducing draft generation steps. Currently implemented "
-    "for DSpark and greedy MTP Draft5/7 with Python ACL graphs and task "
-    "pipeline. "
-    "Costs are calibrated at startup unless a saved table is supplied.");
+    "Adaptive target verification is currently unsupported. Keep false.");
 
 DEFINE_bool(enable_adaptive_draft_step,
             false,
-            "Adapt the number of sequential draft forward steps executed "
-            "before target verification using historical prefix acceptance "
-            "and calibrated full-cycle throughput. Currently implemented for "
-            "MTP with Python GLM, ordinary ACL graphs, async task pipeline "
-            "and DP=CP=1.");
+            "Adaptive draft-step selection is currently unsupported. Keep "
+            "false.");
 DEFINE_string(
     adaptive_draft_step_config,
     "",
-    "Path to an optional JSON file containing draft-step selection policy "
-    "and startup calibration sampling settings, not precomputed costs. Empty "
-    "uses logged defaults. The current MTP service measures full-cycle costs "
-    "for each depth using shared speculative SPS/additive fitting.");
+    "JSON draft-step selection policy and calibration settings. Currently "
+    "unsupported.");
 
 DEFINE_double(
     adaptive_target_verify_min_gain,
@@ -103,25 +93,21 @@ DEFINE_double(
 DEFINE_string(
     adaptive_target_verify_cost_table,
     "",
-    "JSON full-step cost table for adaptive DSpark task pipelines: "
-    "one-dimensional SPS or two-dimensional additive model. Loading a "
-    "compatible saved table skips startup sampling and fitting.");
+    "JSON full-step cost table for adaptive target verification: "
+    "one-dimensional SPS or two-dimensional additive model. Currently "
+    "unsupported.");
 
 DEFINE_string(
     adaptive_target_verify_calibration,
     "",
-    "JSON configuration for internal startup DSpark calibration: "
-    "capture graphs, drive the real asynchronous pipeline, fit CPU "
-    "SPS/additive costs, and serve without a client or restart. Empty uses "
-    "built-in defaults. Mutually exclusive with a cost-table input. "
-    "The effective configuration is logged for defaults and JSON input.");
+    "JSON startup calibration settings for adaptive target verification. "
+    "Mutually exclusive with a cost-table input. Currently unsupported.");
 
 DEFINE_string(
     adaptive_target_verify_cost_table_output,
     "",
-    "Optional new file for internally calibrated DSpark costs. "
-    "Requires adaptive DSpark startup calibration; existing files are not "
-    "overwritten.");
+    "Output file for adaptive target verification startup cost calibration. "
+    "Currently unsupported.");
 
 namespace xllm {
 

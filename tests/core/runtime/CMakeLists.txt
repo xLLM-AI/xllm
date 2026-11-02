@@ -77,16 +77,6 @@ cc_test(
     GTest::gtest_main
 )
 
-cc_test(
-  NAME task_execution_pipeline_input_test
-  SRCS task_execution_pipeline_input_test.cpp
-  DEPS :runtime GTest::gtest_main
-)
-target_link_options(task_execution_pipeline_input_test PRIVATE
-  "-Wl,--whole-archive"
-  "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
-  "-Wl,--no-whole-archive")
-
 if(USE_NPU)
   cc_test(
     NAME py_executor_kv_load_test
@@ -95,17 +85,6 @@ if(USE_NPU)
   )
   target_link_libraries(py_executor_kv_load_test PRIVATE nnopbase)
   target_link_options(py_executor_kv_load_test PRIVATE
-    "-Wl,--whole-archive"
-    "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
-    "-Wl,--no-whole-archive")
-
-  cc_test(
-    NAME task_execution_pipeline_recurrent_test
-    SRCS task_execution_pipeline_recurrent_test.cpp
-    DEPS :runtime GTest::gtest_main
-  )
-  target_link_libraries(task_execution_pipeline_recurrent_test PRIVATE nnopbase)
-  target_link_options(task_execution_pipeline_recurrent_test PRIVATE
     "-Wl,--whole-archive"
     "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
     "-Wl,--no-whole-archive")
@@ -139,19 +118,8 @@ if(USE_NPU)
   )
 
   cc_test(
-    NAME task_execution_pipeline_speculative_test
-    SRCS task_execution_pipeline_speculative_test.cpp worker_shutdown_test.cpp
-    DEPS :runtime GTest::gtest_main
-  )
-  target_link_libraries(task_execution_pipeline_speculative_test PRIVATE nnopbase)
-  target_link_options(task_execution_pipeline_speculative_test PRIVATE
-    "-Wl,--whole-archive"
-    "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
-    "-Wl,--no-whole-archive")
-
-  cc_test(
     NAME schedule_overlap_test
-    SRCS schedule_overlap_test.cpp
+    SRCS schedule_overlap_test.cpp worker_shutdown_test.cpp
     DEPS :runtime GTest::gtest_main
   )
   target_link_libraries(schedule_overlap_test PRIVATE nnopbase)
@@ -167,61 +135,6 @@ if(USE_NPU)
   )
   target_link_libraries(worker_forward_completion_test PRIVATE nnopbase)
   target_link_options(worker_forward_completion_test PRIVATE
-    "-Wl,--whole-archive"
-    "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
-    "-Wl,--no-whole-archive")
-
-  cc_test(
-    NAME mtp_parallel_plan_test
-    SRCS mtp_parallel_plan_test.cpp
-    DEPS :runtime GTest::gtest_main
-  )
-  target_link_libraries(mtp_parallel_plan_test PRIVATE nnopbase)
-  target_link_options(mtp_parallel_plan_test PRIVATE
-    "-Wl,--whole-archive"
-    "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
-    "-Wl,--no-whole-archive")
-
-  cc_test(
-    NAME mtp_context_test
-    SRCS mtp_context_test.cpp
-    DEPS :runtime GTest::gtest_main
-  )
-  target_link_libraries(mtp_context_test PRIVATE nnopbase)
-  target_link_options(mtp_context_test PRIVATE
-    "-Wl,--whole-archive"
-    "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
-    "-Wl,--no-whole-archive")
-
-  cc_test(
-    NAME mtp_decode_input_test
-    SRCS mtp_decode_input_test.cpp
-    DEPS :runtime GTest::gtest_main
-  )
-  target_link_libraries(mtp_decode_input_test PRIVATE nnopbase)
-  target_link_options(mtp_decode_input_test PRIVATE
-    "-Wl,--whole-archive"
-    "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
-    "-Wl,--no-whole-archive")
-
-  cc_test(
-    NAME mtp_prefill_input_test
-    SRCS mtp_prefill_input_test.cpp
-    DEPS :runtime GTest::gtest_main
-  )
-  target_link_libraries(mtp_prefill_input_test PRIVATE nnopbase)
-  target_link_options(mtp_prefill_input_test PRIVATE
-    "-Wl,--whole-archive"
-    "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
-    "-Wl,--no-whole-archive")
-
-  cc_test(
-    NAME slot_buffer_test
-    SRCS slot_buffer_test.cpp
-    DEPS :runtime GTest::gtest_main
-  )
-  target_link_libraries(slot_buffer_test PRIVATE nnopbase)
-  target_link_options(slot_buffer_test PRIVATE
     "-Wl,--whole-archive"
     "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
     "-Wl,--no-whole-archive")

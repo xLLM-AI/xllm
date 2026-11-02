@@ -23,8 +23,7 @@ namespace xllm {
 class ProcessGroup;
 
 // Gumbel-noise walk of the DFlash2 candidate tree; undefined noise (greedy
-// draft) degrades to the raw argmax. Shared with the task pipeline; TP
-// noise consensus is the caller's.
+// draft) degrades to the raw argmax. TP noise consensus is the caller's.
 DraftProposal sample_dflash2_path(
     const DFlash2CandidateOutput& candidates,
     const SamplingParameters& sampling_params,

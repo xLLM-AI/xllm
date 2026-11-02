@@ -60,7 +60,6 @@ limitations under the License.
 #include "core/layers/common/dsa_topk_share_plan.h"
 #include "core/platform/platform.h"
 #include "core/runtime/mtp_runtime_helpers.h"
-#include "core/runtime/task_execution_pipeline.h"
 #include "models/model_registry.h"
 #include "runtime/llm_worker_impl.h"
 #include "util/pretty_print.h"
@@ -381,9 +380,6 @@ runtime::Options mtp_target_options(const runtime::Options& options) {
   opts.enable_schedule_overlap(false)
       .is_draft_engine(false)
       .enable_graph_aux_hidden_states(true);
-  if (options.backend() == "vlm") {
-    opts.enable_task_pipeline(false);
-  }
   return opts;
 }
 
@@ -396,16 +392,9 @@ runtime::Options mtp_draft_options(const runtime::Options& options) {
       .enable_schedule_overlap(false)
       .is_draft_engine(true)
       .mtp_draft_prefix_width(options.num_speculative_tokens() + 1)
-      // The task path also restores the verifier prefix (K+1 rows).
-      .num_decoding_tokens(
-          options.enable_task_pipeline()
-              ? std::max(2, options.num_speculative_tokens() + 1)
-              : 1)
+      .num_decoding_tokens(1)
       .num_speculative_tokens(0)
       .enable_graph_aux_hidden_states(true);
-  if (options.backend() == "vlm") {
-    draft_options.enable_task_pipeline(false).num_decoding_tokens(1);
-  }
   return draft_options;
 }
 
@@ -757,108 +746,6 @@ void MTPWorkerImpl<TargetInput>::retire_legacy_prelaunch() {
     CHECK_EQ(compute_stream_->synchronize(), 0);
     pending_draft_context_ = PendingDraftContext();
   }
-}
-
-template <typename TargetInput>
-::xllm::Status MTPWorkerImpl<TargetInput>::create_task_pipeline(
-    std::unique_ptr<TaskExecutionPipeline>& output) {
-  if (impl_ == nullptr || draft_impl_ == nullptr) {
-    return ::xllm::Status(
-        StatusCode::INVALID_ARGUMENT,
-        "MTP task pipeline requires loaded Target/Draft models.");
-  }
-  const std::string& target_type =
-      impl_->context_.get_model_args().model_type();
-  const std::string& draft_type =
-      draft_impl_->context_.get_model_args().model_type();
-  const bool hybrid_paged_attention =
-      mtp_async::supports_hybrid_mtp_pipeline_model_pair(target_type,
-                                                         draft_type);
-  if constexpr (std::is_same_v<TargetInput, VlmForwardInput>) {
-    if (!hybrid_paged_attention || options_.num_speculative_tokens() <= 0 ||
-        options_.num_speculative_tokens() > 16 ||
-        parallel_args_.dp_size() != 1 || parallel_args_.cp_size() != 1 ||
-        options_.enable_adaptive_draft_step() ||
-        options_.enable_adaptive_target_verify()) {
-      return ::xllm::Status(
-          StatusCode::INVALID_ARGUMENT,
-          "VLM MTP task pipeline requires fixed Qwen hybrid models, "
-          "DP=CP=1 and 1..16 draft tokens.");
-    }
-    LlmTaskCapacity capacity;
-    ::xllm::Status status = impl_->task_capacity(options_, capacity);
-    if (!status.ok()) {
-      return status;
-    }
-    status = TaskExecutionPipeline::create(
-        threadpool_, impl_->task_model(), *this, capacity, output);
-    if (status.ok()) {
-      LOG(INFO) << "VLM MTP task execution pipeline: slots="
-                << capacity.slot_count
-                << ", speculative_tokens=" << options_.num_speculative_tokens();
-    }
-    return status;
-  }
-  if (options_.num_speculative_tokens() <= 0 ||
-      (draft_type != "glm_moe_dsa_mtp" && !hybrid_paged_attention)) {
-    return ::xllm::Status(StatusCode::INVALID_ARGUMENT,
-                          "MTP task pipeline requires fixed-width GLM DSA or "
-                          "Qwen hybrid models.");
-  }
-  if (hybrid_paged_attention &&
-      (options_.num_speculative_tokens() > 16 ||
-       parallel_args_.dp_size() != 1 || parallel_args_.cp_size() != 1 ||
-       options_.enable_adaptive_draft_step() ||
-       options_.enable_adaptive_target_verify())) {
-    return ::xllm::Status(StatusCode::INVALID_ARGUMENT,
-                          "Qwen hybrid MTP task pipeline requires DP=CP=1 and "
-                          "1..16 draft tokens.");
-  }
-  SpeculativeTaskCapacity capacity;
-  ::xllm::Status status = impl_->task_capacity(options_, capacity.common);
-  if (!status.ok()) {
-    return status;
-  }
-  const auto& args = draft_impl_->context_.get_model_args();
-  capacity.num_speculative_tokens = options_.num_speculative_tokens();
-  capacity.adaptive_draft_step = options_.enable_adaptive_draft_step();
-  capacity.adaptive_target_verify = options_.enable_adaptive_target_verify();
-  capacity.adaptive_min_gain = options_.adaptive_target_verify_min_gain();
-  capacity.startup_calibration = capacity.adaptive_target_verify;
-  capacity.calibration_leader = parallel_args_.rank() == 0;
-  capacity.sparse_dsa_target =
-      impl_->context_.get_model_args().model_type() == "glm_moe_dsa";
-  capacity.index_topk = args.index_topk();
-  capacity.reuse_topk = args.index_share_for_mtp_iteration();
-  capacity.refresh_target_prefix = capacity.num_speculative_tokens > 1;
-  capacity.reuse_prefix_refresh_output =
-      hybrid_paged_attention && capacity.refresh_target_prefix &&
-      !capacity.reuse_topk && parallel_args_.dp_size() == 1 &&
-      parallel_args_.cp_size() == 1;
-  // Ragged random-target verification commits context before returning the
-  // final result. Its target draws must agree even if optional legacy token
-  // broadcast is disabled; greedy tasks still skip the collective entirely.
-  if (get_optimization_config().enable_spec_token_broadcast ||
-      capacity.adaptive_target_verify) {
-    capacity.common.sampling_group = parallel_args_.tp_group_ != nullptr
-                                         ? parallel_args_.tp_group_
-                                         : parallel_args_.process_group_;
-  }
-  capacity.is_probabilistic_draft = is_probabilistic_draft_;
-  status = TaskExecutionPipeline::create(threadpool_,
-                                         impl_->task_model(),
-                                         draft_impl_->task_model(),
-                                         capacity,
-                                         output);
-  if (!status.ok()) {
-    return status;
-  }
-  LOG(INFO) << "MTP task execution pipeline: slots="
-            << capacity.common.slot_count
-            << ", speculative_tokens=" << capacity.num_speculative_tokens
-            << ", pinned_bytes=" << output->pinned_bytes()
-            << ", device_bytes=" << output->device_bytes();
-  return ::xllm::Status();
 }
 
 template <typename TargetInput>

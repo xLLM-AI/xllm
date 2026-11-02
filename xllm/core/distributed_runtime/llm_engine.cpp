@@ -47,7 +47,6 @@ limitations under the License.
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/eplb/eplb_controller.h"
 #include "core/framework/model_loader/model_loader.h"
-#include "core/framework/speculative/adaptive/draft_step_controller.h"
 #include "core/framework/speculative/draft_config.h"
 #include "core/kv_cache/block/block_utils.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
@@ -141,14 +140,6 @@ LLMEngine::LLMEngine(
   }
 
   process_group_test();
-  if (options_.enable_adaptive_draft_step() && !options_.is_draft_engine()) {
-    CHECK(options_.enable_task_pipeline() && options_.dp_size() == 1 &&
-          options_.cp_size() == 1 && options_.num_speculative_tokens() > 0 &&
-          options_.num_speculative_tokens() <= 64);
-    draft_step_controller_ = std::make_unique<DraftStepController>(
-        options_.adaptive_draft_step_config(),
-        static_cast<uint32_t>(options_.num_speculative_tokens()));
-  }
 }
 
 LLMEngine::~LLMEngine() = default;
@@ -578,64 +569,6 @@ bool LLMEngine::allocate_kv_cache(
   return true;
 }
 
-void LLMEngine::select_draft_steps(std::vector<LlmForwardInput>& inputs) {
-  if (!draft_step_controller_) {
-    return;
-  }
-  CHECK_EQ(inputs.size(), 1U);
-  auto& input = inputs.front();
-  auto& meta = input.input_params.meta;
-  if (meta.is_graph_warmup || !meta.batch_forward_type.is_decode() ||
-      input.input_params.embedding.embedding_ids.empty()) {
-    return;
-  }
-  if (draft_step_controller_->sampling()) {
-    meta.mtp_draft_steps = draft_step_controller_->forced_steps();
-    meta.mtp_target_graph_rows = draft_step_controller_->forced_graph_rows();
-    draft_step_controller_->dispatched(
-        input.input_params.embedding.request_ids);
-    return;
-  }
-  const uint32_t rows =
-      static_cast<uint32_t>(input.input_params.embedding.embedding_ids.size());
-  const uint32_t maximum =
-      static_cast<uint32_t>(options_.num_speculative_tokens());
-  const auto& lengths = input.input_params.attention.host.kv_seq_lens;
-  CHECK(!lengths.empty());
-  const int32_t max_kv = *std::max_element(lengths.begin(), lengths.end());
-  CHECK_GT(max_kv, 0);
-  meta.mtp_draft_steps = draft_step_controller_->select(
-      rows, static_cast<uint32_t>(max_kv) + maximum);
-  draft_step_controller_->dispatched(input.input_params.embedding.request_ids);
-}
-
-void LLMEngine::observe_draft_step_acceptance(const RawForwardOutput& output) {
-  if (!draft_step_controller_) {
-    return;
-  }
-  std::vector<DraftStepAcceptanceObservation> observations;
-  observations.reserve(output.outputs.size());
-  for (const auto& row : output.outputs) {
-    const auto& stats = row.speculative_token_stats;
-    if (stats.verified_rounds != 1 || stats.proposed_tokens <= 0) {
-      continue;
-    }
-    CHECK_LE(stats.proposed_tokens, options_.num_speculative_tokens());
-    CHECK_GE(stats.accepted_tokens, 0);
-    CHECK_LE(stats.accepted_tokens, stats.proposed_tokens);
-    observations.emplace_back(DraftStepAcceptanceObservation{
-        static_cast<uint32_t>(stats.proposed_tokens),
-        static_cast<uint32_t>(stats.accepted_tokens)});
-  }
-  if (!observations.empty()) {
-    const uint64_t completed_ns = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now().time_since_epoch())
-            .count());
-    draft_step_controller_->observe(observations, completed_ns);
-  }
-}
-
 ForwardOutput LLMEngine::step(BatchGroup& batch) {
   if (worker_clients_.empty()) {
     // empty worker, return
@@ -650,7 +583,6 @@ ForwardOutput LLMEngine::step(BatchGroup& batch) {
   bool is_graph_warmup = false;
   forward_input_factory_->create_inputs(
       batch, args_, forward_inputs, is_graph_warmup);
-  select_draft_steps(forward_inputs);
   if (eplb_controller_ != nullptr) {
     eplb_controller_->on_step_dispatched(forward_inputs, is_graph_warmup);
   }
@@ -734,9 +666,6 @@ ForwardOutput LLMEngine::step(BatchGroup& batch) {
   for (uint32_t worker_rank = 0; worker_rank < worker_clients_num_;
        worker_rank += dp_local_size_) {
     auto& result = results[worker_rank].value();
-    if (!options_.enable_schedule_overlap() && !is_graph_warmup) {
-      observe_draft_step_acceptance(*result);
-    }
     outputs.emplace_back(std::move(result.value()));
   }
   batch.apply_outputs(outputs,
@@ -771,11 +700,8 @@ std::vector<RawForwardOutput> LLMEngine::collect_step_outputs(
   // because the experts on each worker are different,
   // and the controller needs the token load of every expert shard.
   // so we can not skip any worker.
-  // Each pipeline worker retains its completed Slot until the result is taken,
-  // including non-drivers. Retire every worker's Slot before the next submit.
-  if ((eplb_controller_ != nullptr &&
-       eplb_controller_->requires_all_worker_results()) ||
-      options_.enable_task_pipeline()) {
+  if (eplb_controller_ != nullptr &&
+      eplb_controller_->requires_all_worker_results()) {
     stride = 1;
   }
 
@@ -799,9 +725,6 @@ std::vector<RawForwardOutput> LLMEngine::collect_step_outputs(
        worker_rank += dp_local_size_) {
     auto& result = last_step_results[worker_rank / stride].value();
     raw_forward_outputs.emplace_back(std::move(result.value()));
-    if (!is_graph_warmup) {
-      observe_draft_step_acceptance(raw_forward_outputs.back());
-    }
   }
 
   if (dspark_dp_coordinator_ != nullptr && !is_graph_warmup) {

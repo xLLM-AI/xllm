@@ -20,7 +20,6 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
-#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -91,28 +90,6 @@ void stabilize_host_views(Input& input) {
   input.positions_host = materialize_cpu_tensor(input.positions_host);
   input.input_params.attention.host.block_tables =
       materialize_cpu_tensor(input.input_params.attention.host.block_tables);
-}
-
-bool has_cpu_llm_output(const ForwardOutput& output) {
-  const auto on_cpu = [](const torch::Tensor& tensor) {
-    return !tensor.defined() || tensor.device().is_cpu();
-  };
-  const auto& sample = output.sample_output;
-  const auto& beam = output.beam_search_output;
-  const bool cpu_tensors =
-      on_cpu(output.next_tokens_host.defined() ? output.next_tokens_host
-                                               : sample.next_tokens) &&
-      on_cpu(output.expert_load_data) && on_cpu(sample.embeddings) &&
-      on_cpu(sample.logprobs) && on_cpu(sample.top_tokens) &&
-      on_cpu(sample.top_logprobs) && on_cpu(beam.src_seq_idxes) &&
-      on_cpu(beam.out_tokens) && on_cpu(beam.out_logprobs);
-  return cpu_tensors &&
-         std::all_of(sample.mm_embeddings.begin(),
-                     sample.mm_embeddings.end(),
-                     [&](const auto& sequence) {
-                       return std::all_of(
-                           sequence.begin(), sequence.end(), on_cpu);
-                     });
 }
 
 class WorkerPrefetchSession final
@@ -414,7 +391,6 @@ void WorkerService::InitModel(::google::protobuf::RpcController* controller,
 void WorkerService::collect_llm_output(
     const ForwardOutput& output,
     ForwardOutput& cpu_output,
-    bool cpu_ready_result,
     std::vector<SpeculativeTokenStats>& stats) {
   stats = record_speculative_metrics(output);
   cpu_output.prepared_token = output.prepared_token;
@@ -471,9 +447,7 @@ void WorkerService::collect_llm_output(
     }
   };
   const bool use_default_stream = !options_.enable_schedule_overlap();
-  if (cpu_ready_result) {
-    copy_output_to_host();
-  } else if (use_default_stream) {
+  if (use_default_stream) {
     copy_output_to_host();
     device_.synchronize_default_stream();
   } else {
@@ -498,9 +472,6 @@ void WorkerService::step_llm_model(
     ForwardOutput& cpu_output,
     std::vector<SpeculativeTokenStats>& speculative_token_stats) {
   speculative_token_stats.clear();
-  const bool task_pipeline = options_.enable_task_pipeline();
-  const bool worker_prepare =
-      task_pipeline && worker_->task_pipeline_uses_worker_prepare();
   const bool worker_rebuilds_host_views =
       input.runtime.input_host_buffer_has_layout &&
       input.runtime.input_host_buffer.defined() &&
@@ -508,8 +479,7 @@ void WorkerService::step_llm_model(
       input.runtime.input_host_buffer.is_contiguous() &&
       input.runtime.input_host_buffer.numel() > 0 &&
       !input.runtime.device_tensors_ready;
-  if (options_.enable_schedule_overlap() && !worker_rebuilds_host_views &&
-      (!task_pipeline || worker_prepare)) {
+  if (options_.enable_schedule_overlap() && !worker_rebuilds_host_views) {
     // Packed preparation rebuilds views from its retained owner. Device-ready
     // inputs reuse their existing views, which can still borrow shared memory.
     stabilize_host_views(input);
@@ -520,25 +490,15 @@ void WorkerService::step_llm_model(
     if (!output.has_value()) {
       return;
     }
-    const bool cpu_ready_result =
-        task_pipeline && (!worker_prepare || has_cpu_llm_output(*output));
-    collect_llm_output(
-        *output, cpu_output, cpu_ready_result, speculative_token_stats);
+    collect_llm_output(*output, cpu_output, speculative_token_stats);
     return;
-  }
-  if (task_pipeline) {
-    // Do not publish placeholders until the Worker accepts and owns the input.
-    auto ack = std::move(future).get();
-    CHECK(!ack.has_value()) << "LLM task Step must return PrepareAck";
   }
   const auto int_options = torch::TensorOptions().device(torch::kCPU);
   if (worker_->is_driver()) {
     const int32_t sequence_count = get_decode_sequence_count(input);
     cpu_output.sample_output.next_tokens = torch::arange(
         -1, -(sequence_count + 1), -1, int_options.dtype(torch::kInt32));
-    if (!task_pipeline) {
-      std::move(future).deferValue([](auto&&) {});
-    }
+    std::move(future).deferValue([](auto&&) {});
   }
   cpu_output.expert_load_data =
       torch::zeros({1, 1}, int_options.dtype(torch::kInt64));
@@ -547,10 +507,9 @@ void WorkerService::step_llm_model(
 void WorkerService::poll_llm_shm(
     std::unique_ptr<ForwardSharedMemoryManager> output_shm_manager) {
   device_.set_device();
-  // Graph updates and task preparation must stay on the ordered worker stream.
+  // Graph updates must stay on the ordered worker stream.
   const InputDeviceMaterializationPolicy policy =
-      options_.enable_task_pipeline() ||
-              (options_.enable_schedule_overlap() && options_.enable_graph())
+      options_.enable_schedule_overlap() && options_.enable_graph()
           ? InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE
           : InputDeviceMaterializationPolicy::MATERIALIZE_ON_READ;
   while (true) {
@@ -626,13 +585,7 @@ void WorkerService::GetLastLLMStepResult(
     ForwardOutput cpu_output;
     std::vector<SpeculativeTokenStats> speculative_token_stats;
     if (output.has_value()) {
-      const bool task_pipeline = options_.enable_task_pipeline();
-      const bool worker_prepare =
-          task_pipeline && worker_->task_pipeline_uses_worker_prepare();
-      const bool cpu_ready_result =
-          task_pipeline && (!worker_prepare || has_cpu_llm_output(*output));
-      collect_llm_output(
-          *output, cpu_output, cpu_ready_result, speculative_token_stats);
+      collect_llm_output(*output, cpu_output, speculative_token_stats);
     }
     // Embedding-only and beam-only results are valid completed outputs.
     if (!encode_llm_output(cpu_output, speculative_token_stats, response)) {
@@ -718,7 +671,6 @@ void WorkerService::step_vlm_model(
     ForwardOutput& cpu_output,
     std::vector<SpeculativeTokenStats>& speculative_token_stats) {
   speculative_token_stats.clear();
-  const bool task_pipeline = options_.enable_task_pipeline();
   const bool worker_rebuilds_host_views =
       input.runtime.input_host_buffer_has_layout &&
       input.runtime.input_host_buffer.defined() &&
@@ -738,18 +690,12 @@ void WorkerService::step_vlm_model(
     }
     return;
   }
-  if (task_pipeline) {
-    auto ack = std::move(future).get();
-    CHECK(!ack.has_value()) << "VLM task Step must return PrepareAck";
-  }
   const auto int_options = torch::TensorOptions().device(torch::kCPU);
   if (worker_->is_driver()) {
     const int32_t sequence_count = get_decode_sequence_count(input);
     cpu_output.sample_output.next_tokens = torch::arange(
         -1, -(sequence_count + 1), -1, int_options.dtype(torch::kInt32));
-    if (!task_pipeline) {
-      std::move(future).deferValue([](auto&&) {});
-    }
+    std::move(future).deferValue([](auto&&) {});
   }
   cpu_output.expert_load_data =
       torch::zeros({1, 1}, int_options.dtype(torch::kInt64));
@@ -759,8 +705,7 @@ void WorkerService::poll_vlm_shm(
     std::unique_ptr<ForwardSharedMemoryManager> output_shm_manager) {
   device_.set_device();
   const InputDeviceMaterializationPolicy policy =
-      options_.enable_task_pipeline() ||
-              (options_.enable_schedule_overlap() && options_.enable_graph())
+      options_.enable_schedule_overlap() && options_.enable_graph()
           ? InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE
           : InputDeviceMaterializationPolicy::MATERIALIZE_ON_READ;
   while (true) {
@@ -850,8 +795,6 @@ void WorkerService::step_rec_model(
     ForwardOutput& cpu_output,
     std::vector<SpeculativeTokenStats>& speculative_token_stats) {
   speculative_token_stats.clear();
-  CHECK(!options_.enable_task_pipeline())
-      << "REC does not support task pipeline";
   CHECK(!options_.enable_schedule_overlap())
       << "REC does not support schedule overlap";
   // RecWorkerImpl captures input by reference. Wait before releasing this
@@ -982,8 +925,6 @@ void WorkerService::ExecuteRECModel(
 
 void WorkerService::step_dit_model(const DiTForwardInput& input,
                                    ForwardOutput& cpu_output) {
-  CHECK(!options_.enable_task_pipeline())
-      << "DiT does not support task pipeline";
   auto result = std::move(worker_->step_async(input)).get();
   if (!result.has_value()) {
     return;

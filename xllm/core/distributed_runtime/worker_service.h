@@ -175,8 +175,6 @@ class WorkerService : public proto::DistributeWorker {
                    ::google::protobuf::Closure* done) override;
 
  private:
-  friend class WorkerServiceOutputTest;
-
   void step_llm_model(
       LlmForwardInput& input,
       ForwardOutput& cpu_output,
@@ -193,7 +191,6 @@ class WorkerService : public proto::DistributeWorker {
 
   void collect_llm_output(const ForwardOutput& output,
                           ForwardOutput& cpu_output,
-                          bool cpu_ready_result,
                           std::vector<SpeculativeTokenStats>& stats);
   void collect_vlm_output(const ForwardOutput& output,
                           ForwardOutput& cpu_output,

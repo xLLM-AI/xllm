@@ -20,7 +20,7 @@ xLLM 将 Device Prefix Cache 扩展为三级缓存：
 
 当前实现由 `HierarchyBlockManagerPool` 管理 Block 的分配、挂载和生命周期，由 `HierarchyKVCacheTransfer` 统一执行 Host↔Device 传输，并由每个 Worker 内的一个 `KVCacheStore` 访问 Mooncake Store。一个 Store 客户端可以同时管理主模型、投机解码 Draft 模型以及同一模型中的多种 `BlockType`。
 
-NPU Python LLM 支持在 eager、ACL graph 和 task pipeline 下使用 Host Cache 与 Mooncake Store。投机解码目前支持固定宽度 GLM DSA MTP，包含 Unified MTP 执行路径。GLM（`glm5_2.py`）的 eager prefill 在 attention 读取每组 Host KV 前等待对应的换入完成，允许加载与计算重叠；其余 Python 模型、graph replay 和投机 task pipeline 仍保留整批 target/draft reload 依赖。Task pipeline 的 load/offload 会先等待前序任务完成计算提交，再通过 stream 事件保证旧计算先于 H2D/D2H，避免 HBM 块复用冲突。
+NPU Python LLM 支持在 eager 和 ACL graph 下使用 Host Cache 与 Mooncake Store。GLM（`glm5_2.py`）的 eager prefill 在 attention 读取每组 Host KV 前等待对应的换入完成，允许加载与计算重叠；其余 Python 模型和 graph replay 仍保留整批 target/draft reload 依赖。
 
 ## 架构
 

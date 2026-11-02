@@ -164,11 +164,6 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
   CHECK(!speculative_error.has_value()) << speculative_error.value();
   validate_layerwise_split_size_startup_config(
       options_, model_type, options_.nnodes());
-  if (options_.enable_task_pipeline()) {
-    CHECK(options_.dp_size() == 1 && options_.cp_size() == 1 &&
-          !options_.enable_disagg_pd())
-        << "VLM task pipeline requires DP=CP=1 without disaggregated PD.";
-  }
   CHECK(options_.host_blocks_factor() <= 1.0)
       << "Basic host KV cache offload supports the LLM engine and "
          "model-based speculative engines only.";

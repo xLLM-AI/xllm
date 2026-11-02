@@ -229,8 +229,7 @@ def get_execution_buffer(
     if state is None:
         return factory()
     # A regular single-step graph has no sibling state to share with; use its
-    # private map in that case. MTP role adapters install the explicit shared
-    # pool above when serial steps can reuse temporary storage.
+    # private map unless its execution state supplies a shared buffer pool.
     buffers = (
         state.shared_persistent_buffers
         if shared and state.shared_persistent_buffers is not None

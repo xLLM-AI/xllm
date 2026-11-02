@@ -579,7 +579,7 @@ def test_mla_block_graph_matches_cpu_attention_after_prefix_changes() -> None:
         torch.testing.assert_close(captured.cpu().float(), torch.cat(expected), rtol=1e-2, atol=2e-3)
 
 
-def test_sparse_mtp_page_crossing_updates_without_host_lengths_or_query_rebuild(
+def test_owned_mla_metadata_page_crossing_updates_without_host_lengths_or_query_rebuild(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from xllm.python.model_executor.forward_context import (
@@ -604,13 +604,13 @@ def test_sparse_mtp_page_crossing_updates_without_host_lengths_or_query_rebuild(
     )
 
     def reject_readback(*args: object, **kwargs: object) -> None:
-        raise AssertionError("sparse MTP metadata must stay on Device")
+        raise AssertionError("owned MLA metadata must stay on Device")
 
     context = ForwardContext(backend, torch.device("cpu"), metadata, [], execution_state=AclGraphExecutionState({}))
     with monkeypatch.context() as no_readback, forward_context(context):
         no_readback.setattr(torch.Tensor, "cpu", reject_readback)
         no_readback.setattr(torch.Tensor, "item", reject_readback)
-        backend.prepare_owned_graph_metadata(metadata)
+        backend.prepare(metadata, graph_mode=True, owned_metadata=True)
         assert backend.graph_metadata_updated_in_place
         assert backend._mla_actual_seq_kv.data_ptr() == metadata.kv_seq_lens.data_ptr()
         destinations = tuple(

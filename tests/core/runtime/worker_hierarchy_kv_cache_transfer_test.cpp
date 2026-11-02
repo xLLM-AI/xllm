@@ -18,7 +18,6 @@ limitations under the License.
 
 #include <cstdint>
 #include <memory>
-#include <optional>
 #include <vector>
 
 #include "core/framework/config/model_config.h"
@@ -96,10 +95,9 @@ class TestHierarchyWorker final : public LLMWorkerImpl {
     init_hierarchy_kv_cache_transfer(cache_shape, create_options);
   }
 
-  std::shared_ptr<HierarchyKVCacheTransfer> recreate_hierarchy_transfer(
-      std::optional<bool> enable_task_pipeline = std::nullopt) {
+  std::shared_ptr<HierarchyKVCacheTransfer> recreate_hierarchy_transfer() {
     std::shared_ptr<HierarchyKVCacheTransfer> transfer =
-        create_hierarchy_kv_cache_transfer(enable_task_pipeline);
+        create_hierarchy_kv_cache_transfer();
     register_hierarchy_kv_cache(*transfer,
                                 HierarchyKVCacheTransfer::CacheRole::TARGET,
                                 compute_stream_.get());
@@ -232,33 +230,6 @@ TEST_F(WorkerHierarchyKVCacheTransferTest,
   }
 
   EXPECT_TRUE(owned_transfer.expired());
-}
-
-TEST_F(WorkerHierarchyKVCacheTransferTest,
-       CompositePipelineModeOverridesLeafExecutorOptions) {
-  const ModelArgs model_args = make_model_args();
-  const KVCacheShape cache_shape = make_cache_shape(model_args);
-  const KVCacheCreateOptions create_options =
-      make_create_options(device_->unwrap());
-  const ParallelArgs parallel_args(
-      /*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr);
-  TestHierarchyWorker worker(parallel_args,
-                             device_->unwrap(),
-                             make_runtime_options(/*host_blocks_factor=*/2.0),
-                             model_args);
-  worker.initialize_hierarchy_cache(cache_shape, create_options);
-  worker.clear_hierarchy_kv_cache_transfer();
-  auto transfer =
-      worker.recreate_hierarchy_transfer(/*enable_task_pipeline=*/true);
-  BlockTransferInfo info(/*src_block_id=*/0, /*dst_block_id=*/1);
-  info.transfer_type = TransferType::H2D;
-  info.block_type = BlockType::KV;
-  EXPECT_EQ(transfer->transfer_kv_blocks(/*batch_id=*/17, {info}), 1U);
-  auto handle = transfer->take_load_handle(/*batch_id=*/17);
-  ASSERT_TRUE(handle.has_value());
-  ASSERT_NE(handle->producer_ready, nullptr);
-  ASSERT_TRUE(handle->synchronizer->wait_all_on_current_stream());
-  EXPECT_EQ(device_->current_stream()->synchronize(), 0);
 }
 
 }  // namespace

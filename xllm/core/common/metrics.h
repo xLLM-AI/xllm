@@ -297,11 +297,6 @@ DECLARE_COUNTER(speculative_num_accepted_tokens_constrained_total);
 DECLARE_COUNTER(speculative_num_accepted_tokens_plain_total);
 DECLARE_COUNTER(speculative_num_draft_tokens_constrained_total);
 DECLARE_COUNTER(speculative_num_draft_tokens_plain_total);
-// Route counters for proving which MTP decode path handled a request.  The
-// unified counter is incremented only after a Python ACL graph replay returns
-// a valid committed-token result, so it measures actual executions rather
-// than capability checks or HTTP requests.
-DECLARE_COUNTER(speculative_unified_graph_executions_total);
 
 // latency of proto conversion in seconds
 DECLARE_COUNTER(proto_latency_seconds_proto2i);

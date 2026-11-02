@@ -264,7 +264,7 @@ struct Options {
   // if the model supports multiple version or there are multiple models.
   PROPERTY(int64_t, server_idx) = 0;
 
-  // Enable the task pipeline; scheduler overlap determines the slot count.
+  // Currently unsupported; keep disabled.
   PROPERTY(bool, enable_task_pipeline) = false;
 
   // enable CUDA graph/ACL graph for performance optimization

@@ -44,7 +44,6 @@ TEST(NativeLibraryIntegrationTest, CreatesTheRegisteredExecutorSubclass) {
       options,
       /*executor_type=*/"native_library_executor");
   ASSERT_NE(executor, nullptr);
-  EXPECT_TRUE(executor->supports_prepared_attention_metadata());
   EXPECT_TRUE(ExtensionRegistry::get_instance().has_implementation("custom",
                                                                    "executor"));
 }

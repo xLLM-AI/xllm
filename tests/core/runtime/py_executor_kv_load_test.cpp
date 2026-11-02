@@ -24,7 +24,6 @@ limitations under the License.
 #include "core/framework/parallel_state/process_group.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/platform/layer_synchronizer.h"
-#include "core/runtime/py_attention_metadata.h"
 #include "core/runtime/py_executor_impl.h"
 #include "models/llm/py_causal_lm.h"
 
@@ -64,7 +63,7 @@ class TestLoadSynchronizer final : public LayerSynchronizer {
 
 // Exercise the real C++ Python bridge with a small Python executor double.
 // Neither checkpoint weights nor accelerator allocations are needed.
-TEST(PyExecutorKVLoadTest, PrefillWaitsAtConsumersAndGraphKeepsCompositeFence) {
+TEST(PyExecutorKVLoadTest, PrefillSupportsLayerwiseAndWholeBatchWaits) {
   py::gil_scoped_acquire gil;
   py::dict scope;
   scope["torch"] = py::module_::import("torch");
@@ -82,7 +81,6 @@ class TestModel:
         return self
 
 class TestExecutor:
-    supports_prepared_metadata = True
     requires_input_batch_metadata = False
     context_kv_graph_runner = None
     def __init__(self, *args: object) -> None:
@@ -141,28 +139,21 @@ patch.__enter__()
     for (bool layerwise : {false, true}) {
       scope["layerwise"] = layerwise;
       PyExecutorImpl executor(&model, args, device, runtime::Options());
-      for (bool graph : {false, true}) {
-        ready.zero_();
-        auto load = std::make_shared<TestLoadSynchronizer>(ready);
-        LlmModelParams storage;
-        storage.attn_metadata = std::make_shared<layer::AttentionMetadata>();
-        storage.attn_metadata->is_prefill = true;
-        storage.parallel.layer_wise_load_synchronizer = load;
-        storage.parallel.layers_per_event = 1;
-        storage.parallel.draft_load_event_index = 2;
-        if (graph) {
-          storage.enable_graph = true;
-          storage.python_attention_metadata =
-              std::make_shared<PythonAttentionMetadata>(py::none());
-        }
-        const ModelOutput output = executor.run(torch::tensor({3}),
-                                                torch::tensor({0}),
-                                                caches,
-                                                ModelParamsView(storage));
-        EXPECT_EQ(load->waited(), (std::vector<int64_t>{0, 1, 2}));
-        EXPECT_EQ(ready[2].item<float>(), 7.0F);
-        EXPECT_EQ(output.hidden_states.item<float>(), 10.0F);
-      }
+      ready.zero_();
+      auto load = std::make_shared<TestLoadSynchronizer>(ready);
+      LlmModelParams storage;
+      storage.attn_metadata = std::make_shared<layer::AttentionMetadata>();
+      storage.attn_metadata->is_prefill = true;
+      storage.parallel.layer_wise_load_synchronizer = load;
+      storage.parallel.layers_per_event = 1;
+      storage.parallel.draft_load_event_index = 2;
+      const ModelOutput output = executor.run(torch::tensor({3}),
+                                              torch::tensor({0}),
+                                              caches,
+                                              ModelParamsView(storage));
+      EXPECT_EQ(load->waited(), (std::vector<int64_t>{0, 1, 2}));
+      EXPECT_EQ(ready[2].item<float>(), 7.0F);
+      EXPECT_EQ(output.hidden_states.item<float>(), 10.0F);
     }
   }
   scope["patch"].attr("__exit__")(py::none(), py::none(), py::none());

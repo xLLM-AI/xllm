@@ -20,140 +20,24 @@ limitations under the License.
 #include <limits>
 #include <vector>
 
-#include "core/framework/config/execution_config.h"
-#include "core/framework/config/model_config.h"
 #include "core/framework/parallel_state/parallel_args.h"
 #include "core/platform/platform.h"
 #include "core/runtime/forward_params.h"
+#include "core/runtime/mtp_worker_impl.h"
 #include "core/runtime/options.h"
-#include "core/runtime/unified_mtp_executor.h"
-#include "core/runtime/unified_mtp_worker_impl.h"
-#include "core/runtime/worker.h"
-#include "core/util/scope_guard.h"
 
 namespace xllm {
 namespace {
 
-TEST(MtpWorkerSelectionTest, UnifiedFlagSelectsPythonMtpWorker) {
-  if (Platform::device_count() < 1) {
-    GTEST_SKIP() << "An NPU is required for worker construction.";
-  }
-  const ModelConfig model_config = ModelConfig::get_instance();
-  const ExecutionConfig execution_config = ExecutionConfig::get_instance();
-  ScopeGuard restore_config([&] {
-    ModelConfig::get_instance() = model_config;
-    ExecutionConfig::get_instance() = execution_config;
-  });
-  ModelConfig::get_instance().model_impl("python");
-  const ParallelArgs parallel_args(
-      /*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr);
-  const torch::Device device("npu:0");
-  runtime::Options options;
-  options.enable_speculative_decode(true).num_speculative_tokens(3);
-  ExecutionConfig::get_instance() = ExecutionConfig();
-  {
-    Worker default_worker(parallel_args, device, options, WorkerType::LLM);
-    EXPECT_FALSE(default_worker.task_pipeline_uses_worker_prepare());
-  }
-  for (const bool unified : {false, true}) {
-    ExecutionConfig::get_instance().enable_unified_mtp_graph(unified);
-    Worker worker(parallel_args, device, options, WorkerType::LLM);
-    EXPECT_EQ(worker.task_pipeline_uses_worker_prepare(), unified);
-  }
-  options.enable_speculative_decode(false);
-  Worker ordinary_worker(parallel_args, device, options, WorkerType::LLM);
-  EXPECT_FALSE(ordinary_worker.task_pipeline_uses_worker_prepare());
-}
-
-TEST(MtpWorkerSelectionTest, RejectsLegacyAdaptiveExecutionBeforeModelSetup) {
-  const ParallelArgs parallel_args(
-      /*rank=*/0, /*world_size=*/1, /*process_group=*/nullptr);
-  const torch::Device device(torch::kCPU);
-  runtime::Options options;
-  options.enable_speculative_decode(true)
-      .enable_adaptive_target_verify(true)
-      .speculative_algorithm("DSpark")
-      .num_speculative_tokens(7);
-  EXPECT_DEATH(Worker(parallel_args, device, options, WorkerType::LLM),
-               "requires (MTP/)?DSpark Draft5/7 with task pipeline");
-  options.enable_task_pipeline(true).speculative_algorithm("MTP");
-  EXPECT_DEATH(Worker(parallel_args, device, options, WorkerType::LLM),
-               "requires (MTP/)?DSpark Draft5/7 with task pipeline");
-  options.speculative_algorithm("DSpark").num_speculative_tokens(6);
-  EXPECT_DEATH(Worker(parallel_args, device, options, WorkerType::LLM),
-               "requires (MTP/)?DSpark Draft5/7 with task pipeline");
-  options.num_speculative_tokens(5).enable_speculative_decode(false);
-  EXPECT_DEATH(Worker(parallel_args, device, options, WorkerType::LLM),
-               "requires (MTP/)?DSpark Draft5/7 with task pipeline");
-}
-
-TEST(MtpWorkerSelectionTest, RejectsDsparkDpUnifiedGraphsBeforeModelSetup) {
-  const ModelConfig model_config = ModelConfig::get_instance();
-  const ExecutionConfig execution_config = ExecutionConfig::get_instance();
-  ScopeGuard restore_config([&] {
-    ModelConfig::get_instance() = model_config;
-    ExecutionConfig::get_instance() = execution_config;
-  });
-  ModelConfig::get_instance().model_impl("python");
-  ExecutionConfig::get_instance() = ExecutionConfig();
-  ExecutionConfig::get_instance().enable_unified_mtp_graph(true);
-  const ParallelArgs parallel_args(
-      /*rank=*/0, /*world_size=*/2, /*dp_size=*/2, /*process_group=*/nullptr);
-  const torch::Device device(torch::kCPU);
-  runtime::Options options;
-  options.enable_speculative_decode(true)
-      .enable_task_pipeline(true)
-      .enable_graph(true)
-      .speculative_algorithm("dSpArK");
-  for (const bool adaptive : {false, true}) {
-    for (const int32_t width : {5, 7}) {
-      options.enable_adaptive_target_verify(adaptive).num_speculative_tokens(
-          width);
-      EXPECT_DEATH(Worker(parallel_args, device, options, WorkerType::LLM),
-                   "DP DSpark task pipeline requires split ACL graphs");
-    }
-  }
-}
-
-TEST(MtpWorkerSelectionTest, RequestRoutingDoesNotRejectUnsupportedSampling) {
-  LlmForwardInput input;
-  input.sampling_params.sampling_mode() = SamplingMode::GREEDY;
-  EXPECT_TRUE(supports_unified_mtp_request(input));
-  input.sampling_params.logprobs() = true;
-  input.sampling_params.max_top_logprobs() = 5;
-  EXPECT_TRUE(supports_unified_mtp_request(input));
-  input.sampling_params.sampling_mode() = SamplingMode::MIXED;
-  EXPECT_FALSE(supports_unified_mtp_request(input));
-  input.sampling_params.sampling_mode() = SamplingMode::GREEDY;
-  input.sampling_params.use_beam_search() = true;
-  EXPECT_FALSE(supports_unified_mtp_request(input));
-  input.sampling_params.use_beam_search() = false;
-  for (torch::Tensor* control : {&input.sampling_params.temperatures(),
-                                 &input.sampling_params.top_k(),
-                                 &input.sampling_params.top_p(),
-                                 &input.sampling_params.frequency_penalties(),
-                                 &input.sampling_params.presence_penalties(),
-                                 &input.sampling_params.repetition_penalties(),
-                                 &input.sampling_params.filter_mask(),
-                                 &input.sampling_params.filter_bitmask()}) {
-    *control = torch::ones({1});
-    EXPECT_FALSE(supports_unified_mtp_request(input));
-    *control = torch::Tensor();
-  }
-  input.json_object_states.emplace_back();
-  EXPECT_FALSE(supports_unified_mtp_request(input));
-  input.json_object_states.clear();
-  input.input_params.multi_block_tables.emplace_back(
-      torch::zeros({1, 1}, torch::kInt));
-  EXPECT_FALSE(supports_unified_mtp_request(input));
-}
-
-class DecodeMetadataTestWorker final : public UnifiedMtpWorkerImpl {
+class DecodeMetadataTestWorker final : public MTPWorkerImpl<LlmForwardInput> {
  public:
   DecodeMetadataTestWorker(const ParallelArgs& parallel_args,
                            const torch::Device& device,
                            const runtime::Options& options)
-      : UnifiedMtpWorkerImpl(parallel_args, device, options, WorkerType::LLM) {
+      : MTPWorkerImpl<LlmForwardInput>(parallel_args,
+                                       device,
+                                       options,
+                                       WorkerType::LLM) {
     context_.set_model_impl("python");
   }
 
@@ -231,14 +115,6 @@ class DecodeMetadataTestWorker final : public UnifiedMtpWorkerImpl {
     return acquire_accepted_tokens_host_buffer(tokens);
   }
 
-  const void* next_draft_workspace_identity(const LlmForwardInput& input) {
-    const torch::Tensor embeddings =
-        torch::empty({input.input_params.meta.num_sequences, 2, 4},
-                     torch::dtype(torch::kBFloat16).device(device_));
-    return &unified_executor().acquire_draft_workspace(
-        input.input_params.meta.num_sequences, embeddings);
-  }
-
   void resolve_decode_context(LlmForwardInput& input) const {
     update_decode_step_input(input,
                              std::vector<EmbeddingCache::DecodeState>(1));
@@ -251,82 +127,6 @@ class DecodeMetadataTestWorker final : public UnifiedMtpWorkerImpl {
     return verify_input;
   }
 };
-
-class StateBoundaryTestWorker final : public UnifiedMtpWorkerImpl {
- public:
-  using UnifiedMtpWorkerImpl::UnifiedMtpWorkerImpl;
-
-  void seed_state() {
-    unified_executor().remember({torch::tensor({41}, torch::kLong),
-                                 torch::ones({1, 2, 4}),
-                                 torch::tensor({10}, torch::kInt),
-                                 torch::tensor({11}, torch::kInt),
-                                 {0},
-                                 {"request-a"}});
-  }
-
-  std::optional<ForwardOutput> dispatch(const LlmForwardInput& input) {
-    return UnifiedMtpWorkerImpl::step(input);
-  }
-
- protected:
-  std::optional<ForwardOutput> step_decode(
-      const LlmForwardInput& input) override {
-    ForwardOutput output;
-    const auto* state = unified_executor().continuation_for(input);
-    if (state != nullptr) {
-      output.sample_output.next_tokens = state->accepted_tokens;
-    }
-    return output;
-  }
-
-  std::optional<ForwardOutput> step_prefill(
-      const LlmForwardInput& /*input*/) override {
-    return ForwardOutput();
-  }
-
-  std::optional<ForwardOutput> step_empty(
-      const LlmForwardInput& /*input*/) override {
-    return std::nullopt;
-  }
-};
-
-TEST(MtpDeviceStateTest,
-     NonDecodeDispatchInvalidatesContinuationBeforeSameRequestReturns) {
-  if (Platform::device_count() < 1) {
-    GTEST_SKIP() << "An NPU is required to construct the worker.";
-  }
-  for (const bool overlap : {false, true}) {
-    runtime::Options options;
-    options.block_size(128).num_speculative_tokens(1).enable_schedule_overlap(
-        overlap);
-    ParallelArgs args(0, 1, nullptr);
-    StateBoundaryTestWorker worker(
-        args, torch::Device("npu:0"), options, WorkerType::LLM);
-    LlmForwardInput decode;
-    decode.token_ids = torch::tensor({41}, torch::kInt);
-    decode.input_params.meta.num_sequences = 1;
-    decode.input_params.meta.batch_forward_type = BatchForwardType::DECODE;
-    decode.input_params.embedding.request_ids = {"request-a"};
-    decode.input_params.embedding.embedding_ids = {0};
-    for (const BatchForwardType::Value type :
-         {BatchForwardType::PREFILL,
-          BatchForwardType::CHUNKED_PREFILL,
-          BatchForwardType::MIXED,
-          BatchForwardType::EMPTY}) {
-      worker.seed_state();
-      ASSERT_TRUE(worker.dispatch(decode)->sample_output.next_tokens.defined());
-      LlmForwardInput intervening = decode.clone();
-      intervening.input_params.meta.batch_forward_type = type;
-      if (type == BatchForwardType::EMPTY) {
-        intervening.input_params.meta.num_sequences = 0;
-      }
-      worker.dispatch(intervening);
-      EXPECT_FALSE(
-          worker.dispatch(decode)->sample_output.next_tokens.defined());
-    }
-  }
-}
 
 class MtpDecodeMetadataTest : public ::testing::TestWithParam<int32_t> {
  protected:
@@ -636,20 +436,6 @@ TEST_F(MtpDecodeMetadataTest,
                "Verifier prefix exceeds the reserved KV capacity");
 }
 
-TEST_F(MtpDecodeMetadataTest, NextDraftWorkspaceDoesNotFollowTableCapacity) {
-  DecodeMetadataTestWorker worker(
-      parallel_args(/*kv_split_size=*/1), torch::Device("npu:0"), options());
-  LlmForwardInput input;
-  input.input_params.meta.num_sequences = 1;
-  input.input_params.attention.device.block_tables =
-      torch::zeros({1, 65}, torch::kInt);
-  const void* first = worker.next_draft_workspace_identity(input);
-  input.input_params.meta.num_sequences = 2;
-  EXPECT_NE(worker.next_draft_workspace_identity(input), first);
-  input.input_params.meta.num_sequences = 1;
-  EXPECT_EQ(worker.next_draft_workspace_identity(input), first);
-}
-
 TEST_F(MtpDecodeMetadataTest, PinnedOutputPoolKeepsConsumerViewsIndependent) {
   runtime::Options overlap_options = options();
   overlap_options.enable_schedule_overlap(true);
@@ -670,7 +456,7 @@ TEST_F(MtpDecodeMetadataTest, PinnedOutputPoolKeepsConsumerViewsIndependent) {
   torch::Tensor reused = worker.lease_host_tokens(source);
   EXPECT_EQ(reused.data_ptr(), first_address);
 
-  // Unified token/count views share a byte arena. A live count view must
+  // Packed token/count views share a byte arena. A live count view must
   // retain the lease even after its token sibling and parent are released.
   const torch::Tensor packed_source = torch::empty({20}, torch::kUInt8);
   torch::Tensor packed = worker.lease_host_tokens(packed_source);

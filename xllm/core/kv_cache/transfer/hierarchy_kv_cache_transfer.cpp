@@ -455,15 +455,6 @@ uint32_t HierarchyKVCacheTransfer::transfer_kv_blocks(
           host_kv_transfer_->prepare_load(!request.draft_mappings.empty());
       CHECK(handle.synchronizer != nullptr)
           << "Failed to create Host KV load synchronizer.";
-      if (options_.enable_task_pipeline()) {
-        // Worker fences the pipeline before registration. Snapshot that
-        // producer now; waiting on a later producer could include the very
-        // task that is waiting for this load and form a stream cycle.
-        handle.producer_ready =
-            cache_domains_.front().producer_stream->record_event();
-        CHECK(handle.producer_ready != nullptr)
-            << "Failed to snapshot Host KV reload producer.";
-      }
       {
         std::lock_guard<std::mutex> lock(mutex_);
         auto existing = load_handles_.find(batch_id);

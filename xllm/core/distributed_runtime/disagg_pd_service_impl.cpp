@@ -91,8 +91,6 @@ std::shared_ptr<Request> DisaggPDServiceImpl::generate_request(
                                      req.prompt_tokens().end());
 
   RequestSamplingParam sampling_param = make_disagg_sampling_param(req);
-  sampling_param.device_min_tokens =
-      scheduler_->enable_task_pipeline() && sampling_param.min_tokens > 0;
   const bool json_object = sampling_param.json_object;
   SchedulerParam scheduler_param = make_disagg_scheduler_param(req);
   StoppingChecker stopping_checker = make_disagg_stopping_checker(req);

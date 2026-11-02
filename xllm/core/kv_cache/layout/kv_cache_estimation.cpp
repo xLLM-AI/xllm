@@ -564,10 +564,8 @@ void init_standard_counts(const ModelArgs& model_args,
     kv_cache_cap->num_indexer_layers(num_indexer_layers);
   }
 
-  CHECK_GE(options.embedding_context_bytes_per_block, 0);
   const int64_t full_cache_block_size_in_bytes =
-      standard_full_cache_block_size_in_bytes(*kv_cache_cap) +
-      options.embedding_context_bytes_per_block;
+      standard_full_cache_block_size_in_bytes(*kv_cache_cap);
   const int64_t gdn_state_bytes = kv_cache_cap->num_linear_attention_layers() *
                                   kv_cache_cap->linear_slot_size();
   const int64_t kpool_state_bytes =
@@ -614,7 +612,7 @@ void init_standard_counts(const ModelArgs& model_args,
                                     options.layerwise_split_size,
                                     *kv_cache_cap,
                                     available_full_cache_size_in_bytes,
-                                    options.embedding_context_bytes_per_block));
+                                    /*additional_block_bytes=*/0));
   } else {
     kv_cache_cap->n_blocks(available_full_cache_size_in_bytes /
                            full_cache_block_size_in_bytes);
@@ -793,21 +791,6 @@ KVCacheCapacity KVCacheEstimator::estimate(
         options.is_draft_engine()
             ? 1
             : ParallelConfig::get_instance().layerwise_split_size();
-
-    if (options.enable_task_pipeline() &&
-        options.num_speculative_tokens() > 0 && !options.is_draft_engine()) {
-      estimate_options.embedding_context_bytes_per_block =
-          sizeof(int64_t) + 2 * sizeof(int32_t);
-      if (!SpeculativeConfig::is_block_diffusion_algorithm(
-              options.speculative_algorithm())) {
-        CHECK_GT(model_args_.hidden_size(), 0);
-        const int64_t element_bytes = static_cast<int64_t>(
-            torch::scalarTypeToTypeMeta(context.dtype).itemsize());
-        estimate_options.embedding_context_bytes_per_block +=
-            sizeof(int64_t) + 2 * model_args_.hidden_size() * element_bytes +
-            sizeof(bool);
-      }
-    }
   }
 
   return estimate(std::move(estimate_options));

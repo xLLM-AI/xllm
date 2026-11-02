@@ -24,7 +24,6 @@ limitations under the License.
 
 #include <algorithm>
 
-#include "core/runtime/task_execution_pipeline.h"
 #if defined(USE_NPU)
 #include "acl/acl.h"
 #include "torch_npu/csrc/core/npu/NPUFunctions.h"
@@ -420,12 +419,11 @@ WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
     : options_(options),
       driver_(parallel_args.rank() == 0),
       dp_driver_(is_dp_driver(parallel_args)),
-      schedule_overlap_(is_driver() && !options.enable_task_pipeline(),
-                        EPLBConfig::get_instance().enable_eplb(),
-                        /*retire_unconsumed_inputs=*/
-                        options.enable_task_pipeline() ||
-                            (options.enable_speculative_decode() &&
-                             parallel_args.dp_size() > 1)),
+      schedule_overlap_(
+          is_driver(),
+          EPLBConfig::get_instance().enable_eplb(),
+          /*retire_unconsumed_inputs=*/
+          options.enable_speculative_decode() && parallel_args.dp_size() > 1),
       device_(device),
       parallel_args_(parallel_args) {
   if (options_.enable_speculative_decode() &&
@@ -1267,28 +1265,13 @@ std::optional<ForwardOutput> WorkerImpl::execute_no_sync_on_stream(
   return std::nullopt;
 }
 
-void WorkerImpl::prepare_input_on_stream(const LlmForwardInput& input,
-                                         LlmForwardInput& processed_input,
-                                         Stream& prepare_stream,
-                                         bool record_ready_event,
-                                         bool restore_linear_state,
-                                         bool wait_for_compute_stream) {
-  prepare_work_before_execute_on_stream_impl(input,
-                                             processed_input,
-                                             prepare_stream,
-                                             record_ready_event,
-                                             restore_linear_state,
-                                             wait_for_compute_stream);
-}
-
 template <typename Input>
 void WorkerImpl::prepare_work_before_execute_on_stream_impl(
     const Input& input,
     Input& processed_input,
     Stream& prepare_stream,
     bool record_ready_event,
-    bool restore_linear_state,
-    bool wait_for_compute_stream) {
+    bool restore_linear_state) {
   if (!input.json_object_state_snapshots.empty()) {
     Input restored_input = input.clone();
     restore_json_object_states(restored_input);
@@ -1296,8 +1279,7 @@ void WorkerImpl::prepare_work_before_execute_on_stream_impl(
                                                processed_input,
                                                prepare_stream,
                                                record_ready_event,
-                                               restore_linear_state,
-                                               wait_for_compute_stream);
+                                               restore_linear_state);
     return;
   }
 #if defined(USE_NPU)
@@ -1319,7 +1301,7 @@ void WorkerImpl::prepare_work_before_execute_on_stream_impl(
   }
 #endif
   c10::StreamGuard stream_guard = prepare_stream.set_stream_guard();
-  if (enable_schedule_overlap() && wait_for_compute_stream &&
+  if (enable_schedule_overlap() &&
       !can_prepare_without_compute_stream_wait(input.input_params) &&
       compute_stream_) {
     // MTP updates reuse shared prepare/compute streams and need this ordering;
@@ -1737,36 +1719,6 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async_impl(
   return future;
 }
 
-void WorkerImpl::prepare_task_pipeline_input(const LlmForwardInput& input,
-                                             LlmForwardInput& prepared) {
-  prepare_work_before_execute(input, prepared);
-}
-
-std::optional<ForwardOutput> WorkerImpl::execute_task_pipeline(
-    const LlmForwardInput& prepared) {
-  return step_for_schedule_overlap(prepared);
-}
-
-void WorkerImpl::prepare_task_pipeline_input(const VlmForwardInput& input,
-                                             VlmForwardInput& prepared) {
-  prepare_work_before_execute_on_stream_impl(input,
-                                             prepared,
-                                             *prepare_stream_,
-                                             /*record_ready_event=*/true,
-                                             /*restore_linear_state=*/true,
-                                             /*wait_for_compute_stream=*/false);
-}
-
-std::optional<ForwardOutput> WorkerImpl::execute_task_pipeline(
-    VlmForwardInput& prepared) {
-  // The task FIFO owns host publication. ScheduleOverlap retains only the
-  // device continuation needed to repair the next admitted decode input.
-  if (enable_schedule_overlap()) {
-    return schedule_overlap_.execute(*this, prepared);
-  }
-  return step(prepared);
-}
-
 ForwardOutput WorkerImpl::get_last_step_result() {
   return schedule_overlap_.consume();
 }
@@ -1827,13 +1779,6 @@ bool WorkerImpl::start_profile() {
 #if defined(USE_NPU)
   if (cfg.profile_backend() != "ascend" && cfg.profile_backend() != "torch") {
     LOG(ERROR) << "NPU profiling requires --profile_backend=torch or ascend.";
-    return false;
-  }
-  if (cfg.profile_backend() == "torch" && options_.enable_task_pipeline()) {
-    LOG(ERROR)
-        << "NPU torch profiling requires --enable_task_pipeline=false "
-           "so CPU callbacks run on the model's compute thread. "
-           "Use --profile_backend=ascend for task-pipeline device traces.";
     return false;
   }
   const std::string profile_dir = cfg.profile_dir();
@@ -2032,188 +1977,6 @@ bool WorkerImpl::wakeup_from_remote_weights(const WakeupOptions& options) {
   return true;
 }
 #endif
-
-::xllm::Status WorkerImpl::task_capacity(const runtime::Options& options,
-                                         LlmTaskCapacity& output) const {
-  if (status_ != Status::LOADED || model_ == nullptr ||
-      model_executor_ == nullptr) {
-    return ::xllm::Status(StatusCode::INVALID_ARGUMENT,
-                          "Task pipeline requires loaded model weights.");
-  }
-  const auto& args = context_.get_model_args();
-  const int64_t positions = args.max_position_embeddings();
-  const int64_t vocab = args.vocab_size();
-  const int32_t kv_split_size = parallel_args_.kv_split_size_effective();
-  const int64_t logical_block_size =
-      static_cast<int64_t>(options.block_size()) * kv_split_size;
-  if (parallel_args_.cp_size() > 1 &&
-      (!Platform::is_npu() || args.model_type() != "glm_moe_dsa" ||
-       !args.enable_mla() || kv_split_size <= 0 ||
-       parallel_args_.cp_size() % kv_split_size != 0 ||
-       parallel_args_.dp_size() != 1 ||
-       parallel_args_.layerwise_split_size() != 1 ||
-       parallel_args_.tp_group_ == nullptr ||
-       parallel_args_.cp_group_ == nullptr ||
-       parallel_args_.cp_group_ == parallel_args_.tp_group_ ||
-       (options.enable_speculative_decode() &&
-        (!SpeculativeConfig::is_mtp_algorithm(
-             options.speculative_algorithm()) ||
-         options.enable_adaptive_target_verify())))) {
-    return ::xllm::Status(
-        StatusCode::INVALID_ARGUMENT,
-        "Task pipeline prefill CP requires an NPU GLM DSA target, KV split "
-        "dividing CP, DP/layerwise sizes of one, orthogonal TP/CP groups and "
-        "ordinary or fixed MTP decoding.");
-  }
-  if (kv_split_size > 1 &&
-      (args.model_type() != "glm_moe_dsa" || !args.enable_mla() ||
-       parallel_args_.dp_size() != 1 ||
-       parallel_args_.layerwise_split_size() != 1 ||
-       (options.enable_speculative_decode() &&
-        !SpeculativeConfig::is_mtp_algorithm(
-            options.speculative_algorithm())))) {
-    return ::xllm::Status(
-        StatusCode::INVALID_ARGUMENT,
-        "Task pipeline DCP requires a GLM DSA target with DP/layerwise "
-        "sizes of one and ordinary or fixed MTP decoding.");
-  }
-  if (positions <= 0 || positions > std::numeric_limits<int32_t>::max() ||
-      vocab <= 0 || vocab > std::numeric_limits<int32_t>::max() ||
-      args.hidden_size() <= 0 ||
-      args.hidden_size() > std::numeric_limits<int32_t>::max() ||
-      options.block_size() <= 0 || kv_split_size <= 0 ||
-      logical_block_size > std::numeric_limits<int32_t>::max() ||
-      options.max_tokens_per_batch() <= 0 ||
-      options.max_seqs_per_batch() <= 0) {
-    return ::xllm::Status(StatusCode::INVALID_ARGUMENT,
-                          "Invalid fixed task pipeline capacity.");
-  }
-  LlmTaskCapacity capacity;
-  capacity.slot_count = options.enable_schedule_overlap() ? 2U : 1U;
-  capacity.model = {static_cast<uint32_t>(options.max_tokens_per_batch()),
-                    static_cast<uint32_t>(options.max_seqs_per_batch()),
-                    static_cast<uint32_t>((positions + logical_block_size - 1) /
-                                          logical_block_size)};
-  capacity.model.enable_linear_attention = has_linear_attention_layers(args);
-  capacity.max_kv_seq_len = static_cast<uint32_t>(positions);
-  capacity.max_positions = static_cast<uint32_t>(positions);
-  capacity.logical_block_size = static_cast<uint32_t>(logical_block_size);
-  capacity.vocab_size = static_cast<uint32_t>(vocab);
-  capacity.max_unique_tokens =
-      static_cast<uint32_t>(std::min(positions, vocab));
-  capacity.max_top_logprobs =
-      static_cast<uint32_t>(std::min<int64_t>(/*a=*/2000, vocab));
-  capacity.hidden_size = static_cast<uint32_t>(args.hidden_size());
-  // Ordinary SHM materializes builder FP32 sampling tensors before Worker
-  // prepare, while RPC normalizes them to the model dtype. Preserve both
-  // existing contracts when staging directly into the Slot.
-  capacity.parameter_dtype = options.enable_shm() ? torch::kFloat32 : dtype_;
-  capacity.chunked_prefill = options.enable_chunked_prefill();
-  capacity.enable_mla = args.enable_mla();
-  capacity.enable_kv_push = Platform::is_npu() && options.enable_disagg_pd() &&
-                            options.instance_role() == InstanceRole::PREFILL &&
-                            options.kv_cache_transfer_mode() == "PUSH";
-  capacity.dp_size = parallel_args_.dp_size();
-  capacity.dp_rank = parallel_args_.rank() /
-                     (parallel_args_.world_size() / parallel_args_.dp_size());
-  if (parallel_args_.cp_size() > 1) {
-    capacity.sampling_group = parallel_args_.tp_group_;
-    capacity.cp_sampling_group = parallel_args_.cp_group_;
-  }
-  if (options.enable_graph()) {
-    const int64_t local_sequences =
-        (static_cast<int64_t>(options.max_seqs_per_batch()) + capacity.dp_size -
-         1) /
-        capacity.dp_size;
-    const int64_t limit = std::max<int64_t>(
-        1, ExecutionConfig::get_instance().acl_graph_decode_batch_size_limit());
-    const int64_t decode_width =
-        options.enable_speculative_decode()
-            ? static_cast<int64_t>(options.num_speculative_tokens()) + 1
-            : 1;
-    const int64_t tokens = std::min(local_sequences, limit) * decode_width;
-    if (tokens > std::numeric_limits<int32_t>::max()) {
-      return ::xllm::Status(
-          StatusCode::INVALID_ARGUMENT,
-          "Expanded speculative graph capacity exceeds int32.");
-    }
-    capacity.max_graph_batch_size = static_cast<uint32_t>(tokens);
-  }
-  output = capacity;
-  return ::xllm::Status();
-}
-
-TaskModel WorkerImpl::task_model() {
-  CHECK(status_ == Status::LOADED || status_ == Status::READY);
-  CHECK(model_ != nullptr && model_executor_ != nullptr);
-  TaskModel task{*model_, *model_executor_, kv_caches_};
-  task.input_domain =
-      options_.backend() == "vlm" ? TaskInputDomain::VLM : TaskInputDomain::LLM;
-  task.restore_request_state = [this](const ModelParamsView& params) {
-    prepare_linear_state_cache(params);
-  };
-  if (options_.host_blocks_factor() > 1.0) {
-    // KV allocation follows pipeline creation. Resolve the shared target/draft
-    // hierarchy only after a Task has passed admission and Prepare.
-    task.load_kv = [this](uint64_t batch_id) {
-      CHECK(hierarchy_kv_cache_transfer_ != nullptr);
-      return hierarchy_kv_cache_transfer_->take_load_handle(batch_id);
-    };
-    task.fence_kv = [this](const Stream& task_stream) {
-      // Composite MTP registers the shared hierarchy against its own producer
-      // stream, which need not be this leaf worker's default stream.
-      const Stream* producer = hierarchy_kv_cache_producer_stream_ != nullptr
-                                   ? hierarchy_kv_cache_producer_stream_
-                                   : compute_stream_.get();
-      Stream producer_stream(*producer->get_stream());
-      producer_stream.wait_stream(task_stream);
-    };
-  }
-#if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
-  if (options_.enable_disagg_pd() &&
-      options_.instance_role() == InstanceRole::PREFILL &&
-      options_.kv_cache_transfer_mode() == "PUSH") {
-    // The pipeline is created before KV allocation. Resolve the transfer
-    // backend only when Launch runs; this worker outlives its pipeline.
-    task.push_kv = [this](const std::vector<TransferKVInfo>& transfer_kv_infos,
-                          ModelParamsView& params) {
-      CHECK(kv_cache_transfer_ != nullptr) << "PD KV cache is not allocated.";
-      std::shared_ptr<KVPushSynchronizerImpl> layer_synchronizer =
-          std::make_shared<KVPushSynchronizerImpl>(
-              context_.get_model_args().n_layers());
-      params.parallel.layer_synchronizer = layer_synchronizer;
-      return kv_cache_transfer_->push_kv_blocks_async(
-          transfer_kv_infos,
-          context_.get_parallel_args(),
-          std::move(layer_synchronizer),
-          is_spec_draft_);
-    };
-  }
-#endif
-  return task;
-}
-
-::xllm::Status WorkerImpl::create_task_pipeline(
-    std::unique_ptr<TaskExecutionPipeline>& output) {
-  LlmTaskCapacity capacity;
-  ::xllm::Status status = task_capacity(options_, capacity);
-  if (!status.ok()) {
-    return status;
-  }
-  status = TaskExecutionPipeline::create(
-      threadpool_, task_model(), capacity, output);
-  if (!status.ok()) {
-    return status;
-  }
-  LOG(INFO) << "Task execution pipeline: slots=" << capacity.slot_count
-            << ", tokens=" << capacity.model.max_tokens
-            << ", sequences=" << capacity.model.max_sequences
-            << ", sampling_dtype=" << capacity.parameter_dtype
-            << ", positions=" << capacity.max_positions
-            << ", pinned_bytes=" << output->pinned_bytes()
-            << ", device_bytes=" << output->device_bytes();
-  return status;
-}
 
 // initialize model, cache manager. async call
 bool WorkerImpl::init_model(const std::string& model_weights_path,
@@ -2619,8 +2382,7 @@ uint32_t WorkerImpl::transfer_kv_blocks(
 }
 
 std::shared_ptr<HierarchyKVCacheTransfer>
-WorkerImpl::create_hierarchy_kv_cache_transfer(
-    std::optional<bool> enable_task_pipeline) {
+WorkerImpl::create_hierarchy_kv_cache_transfer() {
   CHECK_GT(options_.host_blocks_factor(), 1.0)
       << "Hierarchy KV cache transfer requires Host cache blocks.";
   CHECK_GT(options_.dp_size(), 0u);
@@ -2659,8 +2421,6 @@ WorkerImpl::create_hierarchy_kv_cache_transfer(
       .layers_wise_copy_batchs(options_.layers_wise_copy_batchs())
       .enable_mla(options_.enable_mla())
       .enable_kvcache_store(options_.enable_kvcache_store())
-      .enable_task_pipeline(
-          enable_task_pipeline.value_or(options_.enable_task_pipeline()))
       .store_protocol(options_.store_protocol())
       .store_rdma_devices(options_.store_rdma_devices())
       .store_master_server_address(options_.store_master_server_address())

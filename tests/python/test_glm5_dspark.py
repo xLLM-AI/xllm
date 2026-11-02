@@ -246,7 +246,6 @@ def test_real_mla_dspark_graph_and_context_replay_match_eager(
         enable_mla=True,
         num_speculative_tokens=8,
         python_graph_backend="aclgraph",
-        enable_task_pipeline=True,
         max_position_embeddings=cache_pages * 128,
         block_draft_graph_warmup_max_kv_len=warmup_limit,
     )
@@ -283,10 +282,9 @@ def test_real_mla_dspark_graph_and_context_replay_match_eager(
     stream = torch.npu.Stream(device=model.device)
     stream.wait_stream(torch.npu.current_stream())
     with torch.npu.stream(stream):
-        executor.prepare_metadata(metadata)
-        executor.warmup_prepared_graph(tokens, positions, metadata)
-        prepared = executor.prepared_graph_runner
-        initial_graphs = len(prepared._prepared_graphs)
+        draft_runner = executor.decode_graph_runner
+        draft_runner.warmup(tokens, positions, metadata, pre_capture_kv_buckets=True)
+        initial_graphs = len(draft_runner._graphs)
         assert initial_graphs == (2 if cache_pages == 64 and warmup_limit == 0 else 1)
         lengths = (12, 24, 8, 32) if cache_pages == 1 else (12, 4090, 4097, 6112, 32)
         for length in lengths:
@@ -294,26 +292,24 @@ def test_real_mla_dspark_graph_and_context_replay_match_eager(
             metadata.slot_mapping.copy_(positions)
             metadata.kv_seq_lens.fill_(length)
             metadata.kv_seq_lens_host_values[:] = [length]
-            executor.prepare_metadata(metadata)
-            reference = executor.execute(tokens, positions, metadata).clone()
+            reference = executor.eager_runner.execute(tokens, positions, metadata).clone()
             actual = executor.execute(tokens, positions, metadata, enable_graph=True)
             torch.npu.synchronize()
             torch.testing.assert_close(actual, reference)
-        assert prepared.prepared_replays == len(lengths)
-        assert len(prepared._prepared_graphs) == (2 if cache_pages == 64 else 1)
+        assert len(draft_runner._graphs) == (2 if cache_pages == 64 else 1)
         if warmup_limit == 0:
-            assert len(prepared._prepared_graphs) == initial_graphs
+            assert len(draft_runner._graphs) == initial_graphs
 
         context = torch.randn(8, 128, dtype=model.dtype, device=model.device)
         context_positions = torch.arange(8, dtype=torch.int32, device=model.device)
         slots = torch.arange(40, 48, dtype=torch.int32, device=model.device)
         runner = executor.context_kv_graph_runner
-        runner.execute_borrowed(context, context_positions, slots, warmup=True)
+        runner.warmup(8)
         slots[3:].fill_(-1)
         context.mul_(0.5)
         expected = model.write_context_kv(context, context_positions, slots, caches, None).clone()
         expected_cache = [(latent.clone(), rope.clone()) for latent, rope in caches]
-        actual = runner.execute_borrowed(context, context_positions, slots, warmup=False)
+        actual = runner.execute(context, context_positions, slots)
         torch.npu.synchronize()
         torch.testing.assert_close(actual, expected)
         for actual_pair, expected_pair in zip(caches, expected_cache):
