@@ -1,6 +1,7 @@
 include(cc_test)
 
 cc_test (
+  CPU_ONLY
   NAME
     chat_template_test
   SRCS
@@ -15,6 +16,7 @@ cc_test (
 )
 
 cc_test(
+  CPU_ONLY
   NAME
     jinja_chat_template_test
   SRCS
@@ -25,6 +27,7 @@ cc_test(
 )
 
 cc_test (
+  CPU_ONLY
   NAME
     deepseek_v32_cpp_template_test
   SRCS
@@ -35,6 +38,7 @@ cc_test (
 )
 
 cc_test (
+  CPU_ONLY
   NAME
     deepseek_v4_cpp_template_test
   SRCS

@@ -6,7 +6,9 @@ include(CMakeParseArguments)
 #
 # Parameters:
 # NAME: name of target (see Usage below)
-# NO_NPU_RUNTIME: keep host-only tests independent of NPU initialization
+# NO_NPU_RUNTIME: skip automatic NPU initialization
+# CPU_ONLY: skip NPU initialization and label all cases as CPU tests.
+# DISCOVER_TESTS: discover compiled cases for backend-conditional targets.
 # SRCS: List of source files for the binary
 # DEPS: List of other libraries to be linked in to the binary targets
 # COPTS: List of private compile options
@@ -40,7 +42,7 @@ function(cc_test)
 
   cmake_parse_arguments(
     CC_TEST # prefix
-    "NO_NPU_RUNTIME" # options
+    "NO_NPU_RUNTIME;CPU_ONLY;DISCOVER_TESTS" # options
     "NAME;ENVIRONMENT" # one value args
     "SRCS;COPTS;LINKOPTS;DEPS;INCLUDES;ARGS;DATA" # multi value args
     ${ARGN}
@@ -113,7 +115,7 @@ function(cc_test)
     PRIVATE ${CC_TEST_LINKOPTS}
   )
 
-  if(USE_NPU AND NOT CC_TEST_NO_NPU_RUNTIME)
+  if(USE_NPU AND NOT CC_TEST_NO_NPU_RUNTIME AND NOT CC_TEST_CPU_ONLY)
     if(NOT TARGET xllm_npu_test_runtime)
       # Reuse one object while retaining the global gtest Environment in each
       # executable; a static archive could discard its registration initializer.
@@ -131,6 +133,29 @@ function(cc_test)
   endif()
 
   add_dependencies(all_tests ${CC_TEST_NAME})
+
+  if(CC_TEST_DISCOVER_TESTS)
+    set(_cc_test_discovery_properties)
+    if(CC_TEST_CPU_ONLY)
+      list(APPEND _cc_test_discovery_properties LABELS cpu)
+    endif()
+    gtest_discover_tests(${CC_TEST_NAME}
+      DISCOVERY_MODE PRE_TEST
+      EXTRA_ARGS ${CC_TEST_ARGS}
+      TEST_LIST _cc_test_${CC_TEST_NAME}_tests
+      PROPERTIES ${_cc_test_discovery_properties}
+    )
+    if(NOT "${CC_TEST_ENVIRONMENT}" STREQUAL "")
+      set(_cc_test_properties_file
+        "${CMAKE_CURRENT_BINARY_DIR}/${CC_TEST_NAME}-properties.cmake")
+      file(GENERATE OUTPUT "${_cc_test_properties_file}"
+        CONTENT "set_tests_properties(\${_cc_test_${CC_TEST_NAME}_tests}
+  PROPERTIES ENVIRONMENT [==[${CC_TEST_ENVIRONMENT}]==])")
+      set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES
+        "${_cc_test_properties_file}")
+    endif()
+    return()
+  endif()
 
   # The GoogleTest source scanner does not match multiline test declarations.
   # Normalize whitespace only in discovery copies; compile the original sources
@@ -159,6 +184,11 @@ function(cc_test)
     EXTRA_ARGS ${CC_TEST_ARGS}
     TEST_LIST _cc_test_${CC_TEST_NAME}_tests
   )
+
+  if(CC_TEST_CPU_ONLY)
+    set_property(TEST ${_cc_test_${CC_TEST_NAME}_tests}
+      APPEND PROPERTY LABELS cpu)
+  endif()
 
   if(CC_TEST_ENVIRONMENT)
     set_tests_properties(${_cc_test_${CC_TEST_NAME}_tests}

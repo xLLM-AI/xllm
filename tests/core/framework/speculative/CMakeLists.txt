@@ -86,6 +86,7 @@ endif()
 cc_test(
   NAME
     mtp_json_object_state_test
+  CPU_ONLY
   SRCS
     mtp_json_object_state_test.cpp
   DEPS
@@ -97,6 +98,7 @@ cc_test(
 cc_test(
   NAME
     embedding_cache_test
+  CPU_ONLY
   SRCS
     embedding_cache_test.cpp
   DEPS
