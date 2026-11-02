@@ -775,18 +775,30 @@ std::string resolve_dit_pipeline_type(
 }  // namespace util
 
 void ModelRegistry::register_mtp_shared_weight_owner(const std::string& name) {
-  get_instance()->model_registry_[name].owns_mtp_shared_weights = true;
-}
-
-bool ModelRegistry::owns_mtp_shared_weights(const std::string& name) {
-  const auto& models = get_instance()->model_registry_;
-  const auto entry = models.find(name);
-  return entry != models.end() && entry->second.owns_mtp_shared_weights;
+  auto& capabilities = get_instance()->model_registry_[name].mtp_capabilities;
+  capabilities.native_draft_owns_embedding_and_lm_head = true;
+  capabilities.python_draft_owns_embedding_and_lm_head = true;
 }
 
 void ModelRegistry::register_mtp_args_adapter(const std::string& name,
                                               MtpArgsAdapter adapter) {
   get_instance()->model_registry_[name].mtp_args_adapter = std::move(adapter);
+}
+
+void ModelRegistry::register_mtp_capabilities(
+    const std::string& name,
+    MtpModelCapabilities capabilities) {
+  get_instance()->model_registry_[name].mtp_capabilities = capabilities;
+}
+
+MtpModelCapabilities ModelRegistry::get_mtp_capabilities(
+    const std::string& name) {
+  const auto& models = get_instance()->model_registry_;
+  const auto entry = models.find(name);
+  if (entry == models.end()) {
+    return MtpModelCapabilities();
+  }
+  return entry->second.mtp_capabilities;
 }
 
 void ModelRegistry::configure_mtp_args(ModelArgs& args,
