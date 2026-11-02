@@ -74,6 +74,7 @@ struct KVCacheEstimateOptions {
   int64_t linear_state_cache_block_limit = 0;
   bool is_draft_engine = false;
   bool enable_prefix_cache = false;
+  bool enable_shared_kv_cache = false;
   int32_t layerwise_split_size = 1;
   bool enable_chunked_prefill = true;
   bool enable_schedule_overlap = true;

@@ -25,6 +25,9 @@ namespace xllm {
 class KVCacheCapacity final {
  public:
   PROPERTY(int64_t, n_blocks) = 0;
+  PROPERTY(int64_t, shared_unit_bytes) = 0;
+  PROPERTY(uint32_t, shared_full_block_units) = 1;
+  PROPERTY(uint32_t, shared_linear_state_units) = 1;
   PROPERTY(int64_t, cache_size_in_bytes) = 0;
   PROPERTY(int64_t, block_size) = 0;
   PROPERTY(int64_t, slot_size) = 0;

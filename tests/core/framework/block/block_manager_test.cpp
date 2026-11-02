@@ -179,6 +179,38 @@ BlockManagerPool::Options make_linear_state_pool_options(
   return options;
 }
 
+ModelArgs make_shared_cache_model_args() {
+  ModelArgs args;
+  args.model_type("qwen3_next")
+      .n_layers(4)
+      .n_heads(1)
+      .n_kv_heads(1)
+      .head_dim(1)
+      .full_attention_interval(2)
+      .linear_num_key_heads(1)
+      .linear_num_value_heads(1)
+      .linear_key_head_dim(1)
+      .linear_value_head_dim(1)
+      .linear_conv_kernel_dim(2)
+      .mamba_ssm_dtype("float32");
+  return args;
+}
+
+KVCacheCapacity make_shared_cache_capacity() {
+  // Full rows cost 16 B, Conv rows 6 B and SSM rows 4 B: page=144 B.
+  // Two Full layers use one page; two recurrent layers use two pages.
+  KVCacheCapacity capacity;
+  capacity.n_blocks(12)
+      .block_size(8)
+      .num_linear_state_blocks(12)
+      .linear_conv_state_len(1)
+      .linear_ssm_checkpoint_stride(1)
+      .shared_unit_bytes(144)
+      .shared_full_block_units(1)
+      .shared_linear_state_units(2);
+  return capacity;
+}
+
 // Independently compute the chained block hashes for `tokens`, mirroring
 // xxh3_128bits_hash() so we can check Sequence::update_block_hashes().
 std::vector<XXH3Key> ExpectedChain(const std::vector<int32_t>& tokens,
@@ -251,6 +283,43 @@ TEST(KVCacheManagerFactoryTest,
                                              /*dp_size=*/1,
                                              host_options),
                "prefix caching is disabled");
+}
+
+TEST_F(BlockManagerPoolTest, SharedFactoryConnectsWeightedPhysicalCapacity) {
+  BlockManagerPool::Options options;
+  options.block_size(8).enable_linear_state(true).enable_prefix_cache(false);
+  auto result = KVCacheManagerFactory::create(make_shared_cache_capacity(),
+                                              make_shared_cache_model_args(),
+                                              /*world_size=*/1,
+                                              torch::kBFloat16,
+                                              options,
+                                              /*transfer_coordinator=*/nullptr);
+  EXPECT_EQ(result.shape.key_cache_shape().front(), 12);
+  EXPECT_EQ(result.shape.conv_cache_shape().front(), 12);
+  EXPECT_EQ(result.manager->block_resource_units(BlockType::KV, 2), 2);
+  EXPECT_EQ(result.manager->block_resource_units(BlockType::LINEAR, 1), 2);
+  ASSERT_EQ(result.manager->num_free_blocks(), std::vector<size_t>{10});
+  auto sequence = make_sequence(0, {1, 2, 3, 4, 5, 6, 7, 8, 9});
+  ASSERT_TRUE(result.manager->allocate(&sequence));
+  EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::KV), 2);
+  EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::LINEAR), 1);
+  EXPECT_EQ(result.manager->num_free_blocks(), std::vector<size_t>{6});
+  result.manager->deallocate(&sequence);
+  EXPECT_EQ(result.manager->num_free_blocks(), std::vector<size_t>{10});
+}
+
+TEST(KVCacheManagerFactoryTest, RejectsSharedStorageCostMismatch) {
+  BlockManagerPool::Options options;
+  options.block_size(8).enable_linear_state(true).enable_prefix_cache(false);
+  auto capacity = make_shared_cache_capacity();
+  capacity.shared_full_block_units(3);
+  EXPECT_DEATH(KVCacheManagerFactory::create(capacity,
+                                             make_shared_cache_model_args(),
+                                             /*world_size=*/1,
+                                             torch::kBFloat16,
+                                             options,
+                                             /*transfer_coordinator=*/nullptr),
+               "layout.full_block_units");
 }
 
 TEST(BlockManagerTest, Basic) {

@@ -77,6 +77,7 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | `max_linear_state_cache_slots` | `int64` | `0` | Maximum number of active linear-attention state cache slots. `0` derives an automatic capacity from the available KV Cache budget. |
 | `xxh3_128bits_seed` | `uint32` | `1024` | Default XXH3 128-bit hash seed. |
 | `enable_vmm_kvcache` | `bool` | `false` | Enable VMM for KV Cache. Independent of `enable_vmm_weights`; `false` uses the original physical KV Cache implementation. NPU only. |
+| `enable_shared_kv_cache` | `bool` | `false` | Share one fixed physical arena between Full KV blocks and Linear state extents. Initially supports NPU Torch Qwen3 hybrid models in eager execution; incompatible with VMM KV, speculative decoding, Host/PD, indexer/quantized caches, and context/layerwise/KV splitting. |
 | `vmm_elastic` | `bool` | `true` | When either VMM flag is enabled, grow active logical slots and physical backing on demand, and release idle backing. `false` uses a fixed resident pool. |
 | `vmm_memory_reserve_bytes` | `int64` | `0` | Additional device memory to keep free when elastic virtual memory grows, in bytes. Supplements runtime execution headroom; must be nonnegative. |
 | `vmm_startup_timeout_ms` | `int32` | `120000` | Positive timeout in milliseconds applied separately to the master's node-registration wait and each non-master's physical-pool readiness wait during VMM startup. Independent of per-request RPC timeouts; each wait has its own timer. |

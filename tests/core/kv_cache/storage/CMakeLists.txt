@@ -8,8 +8,23 @@ cc_test(
     linear_state_restore_test.cpp
   DEPS
     :linear_state_restore
+    :static_kv_cache_tensor_allocator
     GTest::gtest_main
 )
+target_link_libraries(linear_state_restore_test PUBLIC Python::Python)
+
+cc_test(
+  CPU_ONLY
+  NAME
+    static_kv_cache_tensor_allocator_test
+  SRCS
+    static_kv_cache_tensor_allocator_test.cpp
+  DEPS
+    :static_kv_cache_tensor_allocator
+    GTest::gtest_main
+    glog::glog
+)
+
 
 cc_test(
   DISCOVER_TESTS
@@ -30,6 +45,20 @@ target_link_libraries(kv_cache_test
                       $<$<BOOL:${USE_NPU}>:nnopbase>)
 
 if(USE_NPU)
+  cc_test(
+    NAME
+      static_kv_cache_tensor_allocator_npu_test
+    SRCS
+      static_kv_cache_tensor_allocator_npu_test.cpp
+    DEPS
+      :static_kv_cache_tensor_allocator
+      GTest::gtest_main
+  )
+  set_tests_properties(
+    StaticKVCacheTensorAllocatorNpuTest.KeepsDenseNdViewsInOnePhysicalArena
+    PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE
+  )
+
   # Exercise the concrete KV storage without distributed runtime initialization.
   cc_test(
     NAME

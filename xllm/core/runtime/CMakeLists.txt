@@ -111,6 +111,7 @@ cc_library(
     :global_virtual_memory_region
     :kv_cache
     :kv_cache_estimation
+    :static_kv_cache_tensor_allocator
     :virtual_memory_kv_cache_storage
     :virtual_kv_cache_transfer_memory_provider_impl
     :kv_cache_transfer

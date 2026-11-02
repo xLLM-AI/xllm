@@ -50,6 +50,7 @@ limitations under the License.
 namespace xllm {
 
 class KVCacheShape;
+class StaticKVCacheLayout;
 #if defined(USE_MLU)
 namespace mlu {
 class MLUHostMemoryRegion;
@@ -85,6 +86,7 @@ struct KVCacheCreateOptions {
   PROPERTY(std::vector<bool>, indexer_cache_enabled_layers);
   PROPERTY(bool, enable_kv_cache_quant) = false;
   PROPERTY(std::shared_ptr<KVCacheTensorAllocator>, tensor_allocator);
+  PROPERTY(std::shared_ptr<const StaticKVCacheLayout>, static_layout);
 
   // Convenience: true when this options set drives the SFA C8 packed KV cache
   // (int8 nope + bf16 rope + fp32 scale in one row, K==V). Every call site was
