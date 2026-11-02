@@ -176,7 +176,10 @@ struct ParallelArgs {
       return dcp_group_->rank();
     }
 
-    return rank_ / (world_size_ / kv);
+    const int32_t dp_local_size = world_size_ / dp_size_;
+    const int32_t dp_local_rank = rank_ % dp_local_size;
+    return cp_size_ <= 1 ? dp_local_rank % kv
+                         : dp_local_rank / (dp_local_size / kv);
   }
 
   // atb hccl mapping json data
