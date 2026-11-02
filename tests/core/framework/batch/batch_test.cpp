@@ -2011,7 +2011,8 @@ TEST(BatchTest, ReorderedMtpAcceptedRowsCommitToOwningSequences) {
         {row, 5, bonus_token_ids.index({row, 0}).item<int64_t>()}, 20.0F);
   }
   const SamplingParameters rejection_params = testutil::make_rejection_params();
-  DraftProposal draft_proposal = DraftProposal(draft_token_ids);
+  DraftProposal draft_proposal =
+      DraftProposal(draft_token_ids, DraftDistribution(draft_token_ids));
   const SampleOutput accepted_output = rejection_sample(
       rejection_params, draft_proposal, testutil::flatten_rows(target_logits));
   EXPECT_TRUE(torch::equal(

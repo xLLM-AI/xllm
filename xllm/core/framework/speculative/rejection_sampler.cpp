@@ -80,7 +80,7 @@ void compute_logprobs(SampleOutput& output,
       grouped_logits.view({-1, grouped_logits.size(-1)});
   if (npu_sampling_enabled(NpuSamplingOptimization::COMPACT_NORMALIZATION) &&
       params.max_top_logprobs() == 0 &&
-      kernel::npu::tilelang::supports_sampling_logits(flat_logits) &&
+      kernel::npu::tilelang::supports_sample_from_logits(flat_logits) &&
       flat_logits.numel() >= 8 * 1024 * 1024) {
     auto [compact_max, compact_log_sum] =
         kernel::npu::tilelang::row_log_normalization(flat_logits);
@@ -117,18 +117,8 @@ void compute_logprobs(SampleOutput& output,
 
 SampleOutput rejection_sample(const SamplingParameters& params,
                               const DraftProposal& draft_proposal,
-                              torch::Tensor target_logits,
-                              const torch::Tensor& invalid_draft_mask) {
-  const torch::Tensor& proposal_token_ids = draft_proposal.token_ids();
-  if (invalid_draft_mask.defined()) {
-    CHECK_EQ(invalid_draft_mask.sizes(), proposal_token_ids.sizes());
-    CHECK_EQ(invalid_draft_mask.device(), proposal_token_ids.device());
-    CHECK_EQ(invalid_draft_mask.scalar_type(), torch::kBool);
-  }
-  const torch::Tensor draft_token_ids =
-      invalid_draft_mask.defined()
-          ? proposal_token_ids.masked_fill(invalid_draft_mask, /*sentinel=*/-1)
-          : proposal_token_ids;
+                              torch::Tensor target_logits) {
+  const torch::Tensor& draft_token_ids = draft_proposal.token_ids();
   const int64_t num_draft_tokens = draft_token_ids.size(1);
   CHECK_EQ(target_logits.dim(), 2)
       << "target logits must arrive flat [batch * n_spec + 1, vocab]";
@@ -242,7 +232,7 @@ SampleOutput rejection_sample(const SamplingParameters& params,
   torch::Tensor compact_log_sum;
 #if defined(USE_NPU)
   if (npu_sampling_enabled(NpuSamplingOptimization::COMPACT_NORMALIZATION) &&
-      kernel::npu::tilelang::supports_sampling_logits(target_logits) &&
+      kernel::npu::tilelang::supports_sample_from_logits(target_logits) &&
       target_logits.numel() >= 8 * 1024 * 1024 &&
       params.sampling_mode() != SamplingMode::GREEDY) {
     std::tie(compact_max, compact_log_sum) =

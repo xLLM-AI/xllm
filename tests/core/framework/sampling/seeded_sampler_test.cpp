@@ -55,7 +55,7 @@ TEST(SeededSamplerTest, NpuVerificationMatchesOrdinaryDrawsAtTokenOffsets) {
       expected.select(1, column).copy_(sample(logits, step_params).next_tokens);
     }
     const torch::Tensor tokens = expected.narrow(1, 0, kSteps).clone();
-    const DraftProposal proposal(tokens);
+    const DraftProposal proposal(tokens, DraftDistribution(tokens));
     const SampleOutput accepted =
         rejection_sample(params, proposal, original.clone().view({-1, kVocab}));
     EXPECT_TRUE(torch::equal(accepted.next_tokens, expected));
@@ -63,20 +63,23 @@ TEST(SeededSamplerTest, NpuVerificationMatchesOrdinaryDrawsAtTokenOffsets) {
         accepted.num_accepted_tokens,
         torch::full({kRows, 1}, kSteps, options.dtype(torch::kInt32))));
 
+    const torch::Tensor empty_drafts =
+        torch::empty({kRows, 0}, params.seeds().options());
     const SampleOutput bonus = rejection_sample(
         params,
-        DraftProposal(torch::empty({kRows, 0}, params.seeds().options())),
+        DraftProposal(empty_drafts, DraftDistribution(empty_drafts)),
         original.select(1, 0).clone());
     EXPECT_TRUE(torch::equal(bonus.next_tokens, expected.narrow(1, 0, 1)));
     EXPECT_TRUE(
         torch::equal(bonus.num_accepted_tokens,
                      torch::zeros({kRows, 1}, options.dtype(torch::kInt32))));
 
-    const torch::Tensor invalid =
-        torch::zeros({kRows, kSteps}, options.dtype(torch::kBool));
-    invalid.select(1, 1).fill_(true);
+    const torch::Tensor verify_tokens = tokens.clone();
+    verify_tokens.select(1, 1).fill_(-1);
     const SampleOutput rejected = rejection_sample(
-        params, proposal, original.clone().view({-1, kVocab}), invalid);
+        params,
+        DraftProposal(verify_tokens, DraftDistribution(verify_tokens)),
+        original.clone().view({-1, kVocab}));
     expected.narrow(1, 2, kSteps - 1).fill_(-1);
     EXPECT_TRUE(torch::equal(rejected.next_tokens, expected));
     EXPECT_TRUE(
@@ -102,8 +105,9 @@ TEST(SeededSamplerTest, NpuVerificationLogprobsUseRawLogitsWithBiasAndTopK) {
   params.logits_bias() = torch::zeros({kRows, kVocab}, options);
   params.logits_bias().select(1, 0).fill_(100.0F);
   params.top_k() = torch::ones({kRows}, options.dtype(torch::kInt64));
-  const DraftProposal proposal(
-      torch::zeros({kRows, 2}, options.dtype(torch::kInt64)));
+  const torch::Tensor draft_tokens =
+      torch::zeros({kRows, 2}, options.dtype(torch::kInt64));
+  const DraftProposal proposal(draft_tokens, DraftDistribution(draft_tokens));
   const torch::Tensor expected =
       torch::log_softmax(original, -1, torch::kFloat32)
           .select(1, 0)
@@ -245,7 +249,7 @@ TEST(SeededSamplerTest, NpuLogitsSamplingHandlesDtypesTailsAndMissingSeeds) {
           vocab == 1
               ? torch::zeros({kRows}, torch::kInt64)
               : torch::where(uniforms.lt(0.5F), 0, vocab - 1).to(torch::kInt64);
-      const torch::Tensor actual = kernel::npu::tilelang::sampling_logits(
+      const torch::Tensor actual = kernel::npu::tilelang::sample_from_logits(
           device_logits, {}, {}, uniforms.to(device));
       EXPECT_TRUE(torch::equal(actual.cpu(), expected))
           << "vocab=" << vocab << ", dtype=" << dtype;
@@ -281,7 +285,7 @@ TEST(SeededSamplerTest,
       const torch::Tensor cdf = torch::softmax(quantized, -1).cumsum(-1);
       torch::Tensor uniforms = torch::linspace(0.0, 1.0, kRows);
       uniforms.select(0, kRows - 1).fill_(1.0F - 0x1p-24F);
-      const torch::Tensor selected = kernel::npu::tilelang::sampling_logits(
+      const torch::Tensor selected = kernel::npu::tilelang::sample_from_logits(
                                          storage.to(device).narrow(1, 0, vocab),
                                          {},
                                          {},
@@ -353,7 +357,7 @@ TEST(SeededSamplerTest, NpuCategoricalPreservesSupportAndDistribution) {
     }
     EXPECT_EQ(counts[2].item<int64_t>(), 0);
   };
-  check_distribution(kernel::npu::tilelang::sampling_logits(
+  check_distribution(kernel::npu::tilelang::sample_from_logits(
       weights.log(), seeds, offsets, {}));
 #if defined(XLLM_NPU_SAMPLING_ABLATION)
   check_distribution(
@@ -382,19 +386,19 @@ TEST(SeededSamplerTest,
                                      .expand({kRows, kVocab})
                                      .clone();
     const torch::Tensor expected =
-        kernel::npu::tilelang::sampling_logits(logits, seeds, offsets, {});
+        kernel::npu::tilelang::sample_from_logits(logits, seeds, offsets, {});
     for (int64_t repeat = 0; repeat < 8; ++repeat) {
       // Keep another allocation live while sampling a fresh logits buffer.
       [[maybe_unused]] const torch::Tensor unrelated =
           torch::full_like(logits, repeat);
-      const torch::Tensor actual = kernel::npu::tilelang::sampling_logits(
+      const torch::Tensor actual = kernel::npu::tilelang::sample_from_logits(
           logits.clone(), seeds, offsets, {});
       EXPECT_TRUE(torch::equal(actual, expected));
-      const torch::Tensor reordered =
-          kernel::npu::tilelang::sampling_logits(logits.index_select(0, order),
-                                                 seeds.index_select(0, order),
-                                                 offsets.index_select(0, order),
-                                                 {});
+      const torch::Tensor reordered = kernel::npu::tilelang::sample_from_logits(
+          logits.index_select(0, order),
+          seeds.index_select(0, order),
+          offsets.index_select(0, order),
+          {});
       EXPECT_TRUE(torch::equal(reordered, expected.index_select(0, order)));
     }
   }
@@ -420,8 +424,8 @@ TEST(SeededSamplerTest, NpuCompactLogprobsPreserveRawModelDistribution) {
             .gather(/*dim=*/-1, actual.next_tokens.view({-1, 1}))
             .view({-1});
     params.logprobs() = false;
-    torch::Tensor sampling_logits = logits.clone();
-    const SampleOutput sampled = sample(sampling_logits, params);
+    torch::Tensor sampling_input = logits.clone();
+    const SampleOutput sampled = sample(sampling_input, params);
     EXPECT_TRUE(torch::equal(actual.next_tokens, sampled.next_tokens));
     EXPECT_TRUE(torch::allclose(actual.logprobs,
                                 expected_logprobs,

@@ -3721,13 +3721,24 @@ SampleOutput MTPWorkerImpl<TargetInput>::validate(
     }
     ++step;
   }
-  const DraftProposal proposal(std::move(token_ids), std::move(draft_logits));
+  // Mark only the locally assembled verification tokens. Draft outputs and q
+  // retain their original contents and asynchronous ownership.
+  if (!invalid_draft.empty()) {
+    CHECK_EQ(invalid_draft.size(), static_cast<size_t>(token_ids.numel()))
+        << "MTP invalid draft mask shape mismatch";
+    const torch::Tensor invalid_mask =
+        async_h2d_tensor(invalid_draft, token_ids.device())
+            .view(token_ids.sizes())
+            .to(torch::kBool);
+    token_ids.masked_fill_(invalid_mask, /*sentinel=*/-1);
+  }
+  DraftDistribution distribution(token_ids, std::move(draft_logits));
+  const DraftProposal proposal(std::move(token_ids), std::move(distribution));
 
   return validate(std::move(sampling_params),
                   proposal,
                   target_output,
-                  num_speculative_tokens,
-                  invalid_draft);
+                  num_speculative_tokens);
 }
 
 template <typename TargetInput>
@@ -3735,8 +3746,7 @@ SampleOutput MTPWorkerImpl<TargetInput>::validate(
     SamplingParameters sampling_params,
     const DraftProposal& draft_proposal,
     const ForwardOutput& target_output,
-    int32_t num_speculative_tokens,
-    const std::vector<uint8_t>& invalid_draft) {
+    int32_t num_speculative_tokens) {
   const int32_t num_val_tokens = num_speculative_tokens + 1;
   const int32_t batch_size =
       static_cast<int32_t>(draft_proposal.token_ids().size(0));
@@ -3760,24 +3770,11 @@ SampleOutput MTPWorkerImpl<TargetInput>::validate(
     }
   }
 
-  // Grammar rejection is a verify constraint, not a replacement of the draft
-  // or its distribution. The original proposal retains all asynchronous owners.
-  torch::Tensor invalid_mask;
-  if (!invalid_draft.empty()) {
-    CHECK_EQ(invalid_draft.size(),
-             static_cast<size_t>(batch_size * (num_val_tokens - 1)))
-        << "MTP invalid draft mask shape mismatch";
-    invalid_mask =
-        async_h2d_tensor(invalid_draft, draft_proposal.token_ids().device())
-            .view({batch_size, num_val_tokens - 1})
-            .to(torch::kBool);
-  }
   SampleOutput sample_output =
       spec_verify::run_rejection_sampling(std::move(sampling_params),
                                           draft_proposal,
                                           target_logits,
-                                          target_hidden_states,
-                                          invalid_mask);
+                                          target_hidden_states);
 
   return sample_output;
 }

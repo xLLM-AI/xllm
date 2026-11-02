@@ -627,7 +627,7 @@ Status TaskExecutionPipeline::initialize_speculative() {
             torch::arange(width, options.dtype(torch::kInt64)).view({1, width});
       }
     } else {
-      slot->proposal_storage =
+      slot->draft_token_storage =
           torch::empty({count * (width - 1)}, options.dtype(torch::kInt64));
     }
     slot->accepted_mask_storage =
@@ -1839,9 +1839,9 @@ void TaskExecutionPipeline::bind_packed_verify_views(SpeculativeSlot& slot) {
       static_cast<int64_t>(slot.rows) * draft_width * 4;
   const int64_t feedback_bytes =
       static_cast<int64_t>(slot.rows) * (draft_width + 1) * 4;
-  slot.proposal = prefix(adaptive.arena_storage, proposal_bytes)
-                      .view(torch::kInt64)
-                      .view({slot.rows, draft_width});
+  slot.draft_token_ids = prefix(adaptive.arena_storage, proposal_bytes)
+                             .view(torch::kInt64)
+                             .view({slot.rows, draft_width});
   adaptive.confidence =
       adaptive.arena_storage.narrow(/*dim=*/0, proposal_bytes, confidence_bytes)
           .view(torch::kFloat32)
@@ -2581,8 +2581,9 @@ Status TaskExecutionPipeline::prepare_speculative(
     if (adaptive_verify_) {
       bind_packed_verify_views(slot);
     } else {
-      slot.proposal = prefix(slot.proposal_storage, slot.rows * (width - 1))
-                          .view({slot.rows, width - 1});
+      slot.draft_token_ids =
+          prefix(slot.draft_token_storage, slot.rows * (width - 1))
+              .view({slot.rows, width - 1});
     }
     slot.accepted_mask = prefix(slot.accepted_mask_storage, slot.rows * width)
                              .view({slot.rows, width});
@@ -3182,7 +3183,7 @@ void TaskExecutionPipeline::launch_decode(SpeculativeSlot& slot) {
           invocation.sampled.next_tokens,
           invocation.sampling->params.sampling_mode() == SamplingMode::GREEDY &&
               capacity_.cp_sampling_group == nullptr);
-      slot.proposal.select(/*dim=*/1, step)
+      slot.draft_token_ids.select(/*dim=*/1, step)
           .copy_(invocation.sampled.next_tokens);
       if (adaptive_verify_) {
         // Confidence is a proxy for acceptance, not a target probability.
@@ -3218,7 +3219,7 @@ void TaskExecutionPipeline::launch_decode(SpeculativeSlot& slot) {
       .narrow(/*dim=*/0, /*start=*/0, slot.rows * width)
       .view({slot.rows, width})
       .narrow(/*dim=*/1, /*start=*/1, width - 1)
-      .copy_(slot.proposal);
+      .copy_(slot.draft_token_ids);
   slot.target_output = executor_.forward(validate.tokens(),
                                          validate.positions(),
                                          kv_caches_,
@@ -3242,11 +3243,7 @@ void TaskExecutionPipeline::launch_decode(SpeculativeSlot& slot) {
 void TaskExecutionPipeline::finish_fixed_verify(SpeculativeSlot& slot) {
   const uint32_t width = slot.draft_steps + 1;
   const auto& base = slot.target_prefill->sampling_params();
-  SampleOutput accepted;
-  if (block_draft()) {
-    CHECK(slot.block_proposal.has_value());
-    accepted = rejection_sample(base, *slot.block_proposal, slot.target_logits);
-  } else {
+  if (!block_draft()) {
     // AR producers return one step at a time. Publish their completed q only
     // after collecting all pages; all-greedy drafts carry tokens alone.
     torch::Tensor draft_logits;
@@ -3265,9 +3262,13 @@ void TaskExecutionPipeline::finish_fixed_verify(SpeculativeSlot& slot) {
         ++step;
       }
     }
-    const DraftProposal proposal(slot.proposal, std::move(draft_logits));
-    accepted = rejection_sample(base, proposal, slot.target_logits);
+    slot.proposal.emplace(
+        slot.draft_token_ids,
+        DraftDistribution(slot.draft_token_ids, std::move(draft_logits)));
   }
+  CHECK(slot.proposal.has_value());
+  const SampleOutput accepted =
+      rejection_sample(base, *slot.proposal, slot.target_logits);
   const auto& result = slot.target_prefill->device_result();
   result.tokens.copy_(accepted.next_tokens);
   if (result.logprobs.defined()) {
@@ -3396,12 +3397,12 @@ void TaskExecutionPipeline::launch_block_draft(SpeculativeSlot& slot) {
         invocation.logits.view(
             {slot.rows, steps, speculative_capacity_->common.vocab_size}),
         slot.state->tokens_);
-    slot.block_proposal =
+    slot.proposal =
         sample_dflash2_path(candidates,
                             selector_sampling,
                             slot.block_gumbel,
                             speculative_capacity_->common.vocab_size,
-                            slot.proposal);
+                            slot.draft_token_ids);
   } else if (speculative_capacity_->kind == SpeculativeTaskKind::DSPARK) {
     if (adaptive_verify_) {
       generate_adaptive_dspark_proposals(slot, slot.state->tokens_);
@@ -3409,7 +3410,7 @@ void TaskExecutionPipeline::launch_block_draft(SpeculativeSlot& slot) {
     }
     const auto base_logits = invocation.logits.view(
         {slot.rows, steps, speculative_capacity_->common.vocab_size});
-    slot.block_proposal = sample_dspark_markov_block(
+    slot.proposal = sample_dspark_markov_block(
         [this](const torch::Tensor& tokens) {
           return draft_->model.dspark_markov_bias(tokens);
         },
@@ -3420,16 +3421,18 @@ void TaskExecutionPipeline::launch_block_draft(SpeculativeSlot& slot) {
           synchronize_tokens(tokens, /*skip_sampling_group=*/false);
         },
         speculative_capacity_->is_probabilistic_draft,
-        /*token_ids_out=*/slot.proposal);
+        /*token_ids_out=*/slot.draft_token_ids);
   } else {
     invocation.sampled = sample(*invocation.sampling, invocation.logits);
-    slot.proposal.copy_(
+    slot.draft_token_ids.copy_(
         invocation.sampled.next_tokens.view({slot.rows, steps}));
     torch::Tensor draft_logits = std::move(invocation.sampled.draft_logits);
     if (draft_logits.defined()) {
       draft_logits = draft_logits.view({slot.rows, steps, -1});
     }
-    slot.block_proposal.emplace(slot.proposal, std::move(draft_logits));
+    slot.proposal.emplace(
+        slot.draft_token_ids,
+        DraftDistribution(slot.draft_token_ids, std::move(draft_logits)));
   }
 }
 
@@ -3454,12 +3457,12 @@ void TaskExecutionPipeline::generate_adaptive_dspark_proposals(
       sampling,
       [](torch::Tensor& /*sampled_tokens*/) {},
       /*is_probabilistic_draft=*/false,
-      /*token_ids_out=*/slot.proposal);
+      /*token_ids_out=*/slot.draft_token_ids);
   invocation.sampled.draft_logits = torch::Tensor();
   adaptive.previous_tokens.select(/*dim=*/1, /*index=*/0).copy_(anchors);
   adaptive.previous_tokens
       .narrow(/*dim=*/1, /*start=*/1, /*length=*/draft_width - 1)
-      .copy_(slot.proposal.narrow(
+      .copy_(slot.draft_token_ids.narrow(
           /*dim=*/1, /*start=*/0, /*length=*/draft_width - 1));
   const auto confidence = draft_->model.dspark_confidence_probs(
       invocation.output.hidden_states
@@ -3552,7 +3555,7 @@ void TaskExecutionPipeline::launch_packed_verify(SpeculativeSlot& slot) {
   const auto& result = slot.target_prefill->device_result();
   auto result_tokens = result.tokens;
   auto result_lengths = result.lengths;
-  kernel::npu::tilelang::dspark_greedy_verify_commit(slot.proposal,
+  kernel::npu::tilelang::dspark_greedy_verify_commit(slot.draft_token_ids,
                                                      slot.target_tokens,
                                                      adaptive.widths,
                                                      adaptive.offsets,
@@ -3923,7 +3926,7 @@ void TaskExecutionPipeline::release_outputs(SpeculativeSlot& slot) {
   }
   slot.host_validate_sampling = SamplingParameters();
   // Slots are reused; q has a separate owner from invocation.sampled.
-  slot.block_proposal.reset();
+  slot.proposal.reset();
   slot.block_gumbel = torch::Tensor();
 }
 
@@ -3968,7 +3971,8 @@ uint64_t TaskExecutionPipeline::speculative_device_bytes() const {
         (slot.target_token_storage.defined()
              ? slot.target_token_storage.nbytes()
              : 0) +
-        (slot.proposal_storage.defined() ? slot.proposal_storage.nbytes() : 0) +
+        (slot.draft_token_storage.defined() ? slot.draft_token_storage.nbytes()
+                                            : 0) +
         slot.accepted_mask_storage.nbytes() +
         context_device_bytes(*slot.state) +
         slot.bootstrap.row_storage.nbytes() +

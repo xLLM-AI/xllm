@@ -42,12 +42,12 @@ void subtract_log_mass(torch::Tensor& log_q, const torch::Tensor& log_p) {
 
 }  // namespace
 
-DraftDistribution::DraftDistribution(const torch::Tensor& values,
-                                     int64_t rank) {
+DraftDistribution::DraftDistribution(int64_t rank,
+                                     const torch::Tensor& values) {
   CHECK(values.defined());
   CHECK_EQ(values.dim(), rank);
   batch_size_ = values.size(0);
-  num_steps_ = values.size(1);
+  num_draft_tokens_ = values.size(1);
   device_ = values.device();
 }
 
@@ -57,20 +57,63 @@ void DraftDistribution::validate(const torch::Tensor& token_ids) const {
   CHECK(token_ids.scalar_type() == torch::kInt64 ||
         token_ids.scalar_type() == torch::kInt32);
   CHECK_EQ(token_ids.size(0), batch_size_);
-  CHECK_EQ(token_ids.size(1), num_steps_);
+  CHECK_EQ(token_ids.size(1), num_draft_tokens_);
   CHECK_EQ(token_ids.device(), device_);
 }
 
-PointMassDraftDistribution::PointMassDraftDistribution(
-    const torch::Tensor& token_ids)
-    : DraftDistribution(token_ids, /*rank=*/2) {
-  CHECK(token_ids.scalar_type() == torch::kInt64 ||
-        token_ids.scalar_type() == torch::kInt32);
+DraftDistribution::DraftDistribution(const torch::Tensor& token_ids)
+    : DraftDistribution(/*rank=*/2, token_ids) {
+  validate(token_ids);
 }
 
-torch::Tensor PointMassDraftDistribution::logsumexp() const { return {}; }
+DraftDistribution::DraftDistribution(const torch::Tensor& token_ids,
+                                     torch::Tensor logits)
+    : DraftDistribution(logits.defined() ? 3 : 2,
+                        logits.defined() ? logits : token_ids) {
+  validate(token_ids);
+  if (logits.defined()) {
+    representation_.emplace<Dense>(std::move(logits));
+  }
+}
 
-void PointMassDraftDistribution::apply_acceptance(
+DraftDistribution::DraftDistribution(const torch::Tensor& token_ids,
+                                     torch::Tensor candidate_ids,
+                                     torch::Tensor logits)
+    : DraftDistribution(/*rank=*/3, logits) {
+  validate(token_ids);
+  representation_.emplace<Sparse>(std::move(candidate_ids), std::move(logits));
+}
+
+torch::Tensor DraftDistribution::logsumexp() const {
+  return std::visit(
+      [](const auto& distribution) { return distribution.logsumexp(); },
+      representation_);
+}
+
+void DraftDistribution::apply_acceptance(torch::Tensor& log_p,
+                                         const torch::Tensor& token_ids,
+                                         const torch::Tensor& lse) const {
+  std::visit(
+      [&](const auto& distribution) {
+        distribution.apply_acceptance(log_p, token_ids, lse);
+      },
+      representation_);
+}
+
+void DraftDistribution::apply_residual(torch::Tensor& log_p,
+                                       const torch::Tensor& steps,
+                                       const torch::Tensor& rejected_tokens,
+                                       const torch::Tensor& lse) const {
+  std::visit(
+      [&](const auto& distribution) {
+        distribution.apply_residual(log_p, steps, rejected_tokens, lse);
+      },
+      representation_);
+}
+
+torch::Tensor DraftDistribution::PointMass::logsumexp() const { return {}; }
+
+void DraftDistribution::PointMass::apply_acceptance(
     torch::Tensor& /*log_p*/,
     const torch::Tensor& /*token_ids*/,
     const torch::Tensor& /*lse*/) const {
@@ -78,7 +121,7 @@ void PointMassDraftDistribution::apply_acceptance(
   // rejected by the verifier independently of this correction.
 }
 
-void PointMassDraftDistribution::apply_residual(
+void DraftDistribution::PointMass::apply_residual(
     torch::Tensor& log_p,
     const torch::Tensor& /*steps*/,
     const torch::Tensor& rejected_tokens,
@@ -90,24 +133,25 @@ void PointMassDraftDistribution::apply_residual(
   log_p.scatter_(/*dim=*/-1, ids, remaining);
 }
 
-DenseDraftDistribution::DenseDraftDistribution(torch::Tensor logits)
-    : DraftDistribution(logits, /*rank=*/3), logits_(std::move(logits)) {
+DraftDistribution::Dense::Dense(torch::Tensor logits)
+    : logits_(std::move(logits)) {
   validate_logits(logits_);
 }
 
-torch::Tensor DenseDraftDistribution::logsumexp() const {
+torch::Tensor DraftDistribution::Dense::logsumexp() const {
   return torch::logsumexp(logits_.to(torch::kFloat32), /*dim=*/-1);
 }
 
-void DenseDraftDistribution::apply_acceptance(torch::Tensor& log_p,
-                                              const torch::Tensor& token_ids,
-                                              const torch::Tensor& lse) const {
+void DraftDistribution::Dense::apply_acceptance(
+    torch::Tensor& log_p,
+    const torch::Tensor& token_ids,
+    const torch::Tensor& lse) const {
   log_p.sub_(index_select_2d(logits_, /*dim=*/-1, token_ids)
                  .to(torch::kFloat32)
                  .sub(lse));
 }
 
-void DenseDraftDistribution::apply_residual(
+void DraftDistribution::Dense::apply_residual(
     torch::Tensor& log_p,
     const torch::Tensor& steps,
     const torch::Tensor& rejected_tokens,
@@ -122,11 +166,9 @@ void DenseDraftDistribution::apply_residual(
   log_p.add_(log_q);
 }
 
-SparseDraftDistribution::SparseDraftDistribution(torch::Tensor candidate_ids,
-                                                 torch::Tensor logits)
-    : DraftDistribution(logits, /*rank=*/3),
-      candidate_ids_(std::move(candidate_ids)),
-      logits_(std::move(logits)) {
+DraftDistribution::Sparse::Sparse(torch::Tensor candidate_ids,
+                                  torch::Tensor logits)
+    : candidate_ids_(std::move(candidate_ids)), logits_(std::move(logits)) {
   validate_logits(logits_);
   CHECK(candidate_ids_.defined());
   CHECK_EQ(candidate_ids_.sizes(), logits_.sizes());
@@ -134,13 +176,14 @@ SparseDraftDistribution::SparseDraftDistribution(torch::Tensor candidate_ids,
   CHECK_EQ(candidate_ids_.device(), logits_.device());
 }
 
-torch::Tensor SparseDraftDistribution::logsumexp() const {
+torch::Tensor DraftDistribution::Sparse::logsumexp() const {
   return torch::logsumexp(logits_.to(torch::kFloat32), /*dim=*/-1);
 }
 
-void SparseDraftDistribution::apply_acceptance(torch::Tensor& log_p,
-                                               const torch::Tensor& token_ids,
-                                               const torch::Tensor& lse) const {
+void DraftDistribution::Sparse::apply_acceptance(
+    torch::Tensor& log_p,
+    const torch::Tensor& token_ids,
+    const torch::Tensor& lse) const {
   const torch::Tensor matches = candidate_ids_.eq(token_ids.unsqueeze(-1));
   const torch::Tensor selected =
       logits_.to(torch::kFloat32)
@@ -149,7 +192,7 @@ void SparseDraftDistribution::apply_acceptance(torch::Tensor& log_p,
   log_p.sub_(torch::logsumexp(selected, /*dim=*/-1).sub(lse));
 }
 
-void SparseDraftDistribution::apply_residual(
+void DraftDistribution::Sparse::apply_residual(
     torch::Tensor& log_p,
     const torch::Tensor& steps,
     const torch::Tensor& rejected_tokens,

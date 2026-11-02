@@ -27,7 +27,7 @@ from .sampling_common import (
 )
 
 
-def build_sampling_logits_kernel(dtype: str, task_count: int = 48, normalize_only: bool = False) -> tvm.tir.PrimFunc:
+def build_sample_from_logits_kernel(dtype: str, task_count: int = 48, normalize_only: bool = False) -> tvm.tir.PrimFunc:
     """Read logits twice without a vocabulary-sized FP32 probability buffer."""
     if dtype not in ("float32", "bfloat16", "float16"):
         raise ValueError(f"unsupported input dtype: {dtype}")
@@ -56,7 +56,7 @@ def build_sampling_logits_kernel(dtype: str, task_count: int = 48, normalize_onl
         T.tile.select(tile, mask, tile, -T.infinity("float32"), "VSEL_TENSOR_SCALAR_MODE")
 
     @T.prim_func
-    def sampling_logits(
+    def sample_from_logits(
         inputs: T.Tensor((MAX_ROWS * MAX_VOCAB,), dtype),
         seeds: T.Tensor((MAX_ROWS,), "int64"),
         offsets: T.Tensor((MAX_ROWS,), "int64"),
@@ -144,4 +144,4 @@ def build_sampling_logits_kernel(dtype: str, task_count: int = 48, normalize_onl
                         result[0] = T.Cast("int64", choice[0] * TILE_SIZE + choice[2])
                         T.copy(result[:1], output[row : row + 1])
 
-    return sampling_logits
+    return sample_from_logits

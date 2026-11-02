@@ -287,7 +287,9 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
           .view({num_sequences, num_speculative_tokens})
           .to(target_output.logits.device());
 
-  DraftProposal draft_proposal = DraftProposal(std::move(draft_token_ids));
+  DraftDistribution distribution(draft_token_ids);
+  DraftProposal draft_proposal(std::move(draft_token_ids),
+                               std::move(distribution));
 
   SampleOutput val_output;
   {

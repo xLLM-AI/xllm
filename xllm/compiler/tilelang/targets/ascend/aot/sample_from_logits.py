@@ -15,18 +15,18 @@
 import tilelang
 from compiler.tilelang.common.spec import DispatchField, TilelangKernel, register_kernel
 
+from xllm.python.kernels_npu.tilelang import sample_from_logits as kernel_impl
 from xllm.python.kernels_npu.tilelang import sampling_common
-from xllm.python.kernels_npu.tilelang import sampling_logits as kernel_impl
 from xllm.python.kernels_npu.tilelang import utils as tilelang_utils
-from xllm.python.kernels_npu.tilelang.sampling_logits import (
-    build_sampling_logits_kernel,
+from xllm.python.kernels_npu.tilelang.sample_from_logits import (
+    build_sample_from_logits_kernel,
 )
 
 DEPENDENCY_MODULES = (kernel_impl, sampling_common, tilelang_utils)
 
 
 @register_kernel
-class SamplingLogitsKernel(TilelangKernel):
+class SampleFromLogitsKernel(TilelangKernel):
     DISPATCH_SCHEMA = [
         DispatchField("task_count", "int32"),
         DispatchField("dtype", "dtype"),
@@ -46,7 +46,7 @@ class SamplingLogitsKernel(TilelangKernel):
     @staticmethod
     def generate_source(task_count: int, dtype: str, normalize_only: int) -> str:
         tilelang.disable_cache()
-        kernel = build_sampling_logits_kernel(dtype, task_count, bool(normalize_only))
+        kernel = build_sample_from_logits_kernel(dtype, task_count, bool(normalize_only))
         with tilelang.tvm.transform.PassContext(opt_level=3, config=sampling_common.SAMPLING_PASS_CONFIGS):
             lowered = tilelang.engine.lower(kernel)
         return lowered.kernel_source

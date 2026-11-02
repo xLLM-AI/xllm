@@ -23,14 +23,14 @@ limitations under the License.
 #include "core/kernels/npu/tilelang/dispatch_registry.h"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 
-#ifndef XLLM_TL_SAMPLING_LOGITS_REGISTRY_INC
-#error "XLLM_TL_SAMPLING_LOGITS_REGISTRY_INC is not defined"
+#ifndef XLLM_TL_SAMPLE_FROM_LOGITS_REGISTRY_INC
+#error "XLLM_TL_SAMPLE_FROM_LOGITS_REGISTRY_INC is not defined"
 #endif
 
 namespace xllm::kernel::npu::tilelang {
 namespace {
 
-#include XLLM_TL_SAMPLING_LOGITS_REGISTRY_INC
+#include XLLM_TL_SAMPLE_FROM_LOGITS_REGISTRY_INC
 
 constexpr int64_t kMaxRows = 4096;
 constexpr int64_t kMaxVocab = 262144;
@@ -47,12 +47,12 @@ void check_vector(const torch::Tensor& input,
   CHECK(input.is_contiguous());
 }
 
-torch::Tensor run_sampling_logits(const torch::Tensor& logits,
-                                  const torch::Tensor& seeds,
-                                  const torch::Tensor& offsets,
-                                  const torch::Tensor& uniforms,
-                                  bool normalize_only) {
-  CHECK(supports_sampling_logits(logits));
+torch::Tensor run_sample_from_logits(const torch::Tensor& logits,
+                                     const torch::Tensor& seeds,
+                                     const torch::Tensor& offsets,
+                                     const torch::Tensor& uniforms,
+                                     bool normalize_only) {
+  CHECK(supports_sample_from_logits(logits));
   const bool has_seeds = seeds.defined();
   CHECK_EQ(offsets.defined(), has_seeds);
   if (has_seeds) {
@@ -73,12 +73,12 @@ torch::Tensor run_sampling_logits(const torch::Tensor& logits,
   if (logits.size(0) == 0) {
     return output;
   }
-  const auto* entry =
-      find_sampling_logits_kernel_entry(make_sampling_logits_specialization(
-          SamplingLogitsTaskCount{48},
-          SamplingLogitsDType{to_tilelang_dtype(logits.scalar_type())},
-          SamplingLogitsNormalizeOnly{static_cast<int32_t>(normalize_only)}));
-  CHECK(entry != nullptr) << available_sampling_logits_variant_keys();
+  const auto* entry = find_sample_from_logits_kernel_entry(
+      make_sample_from_logits_specialization(
+          SampleFromLogitsTaskCount{48},
+          SampleFromLogitsDType{to_tilelang_dtype(logits.scalar_type())},
+          SampleFromLogitsNormalizeOnly{static_cast<int32_t>(normalize_only)}));
+  CHECK(entry != nullptr) << available_sample_from_logits_variant_keys();
   const auto stream = c10_npu::getCurrentNPUStream(logits.device().index());
   entry->fn(
       reinterpret_cast<uint8_t*>(logits.data_ptr()),
@@ -97,7 +97,7 @@ torch::Tensor run_sampling_logits(const torch::Tensor& logits,
 
 }  // namespace
 
-bool supports_sampling_logits(const torch::Tensor& logits) {
+bool supports_sample_from_logits(const torch::Tensor& logits) {
   return logits.defined() && logits.device().type() == torch::kPrivateUse1 &&
          logits.dim() == 2 && logits.size(0) <= kMaxRows &&
          logits.size(1) > 0 && logits.size(1) <= kMaxVocab &&
@@ -111,21 +111,21 @@ bool supports_sampling_logits(const torch::Tensor& logits) {
           logits.scalar_type() == torch::kFloat16);
 }
 
-torch::Tensor sampling_logits(const torch::Tensor& logits,
-                              const torch::Tensor& seeds,
-                              const torch::Tensor& offsets,
-                              const torch::Tensor& uniforms) {
-  return run_sampling_logits(logits,
-                             seeds,
-                             offsets,
-                             uniforms,
-                             /*normalize_only=*/false);
+torch::Tensor sample_from_logits(const torch::Tensor& logits,
+                                 const torch::Tensor& seeds,
+                                 const torch::Tensor& offsets,
+                                 const torch::Tensor& uniforms) {
+  return run_sample_from_logits(logits,
+                                seeds,
+                                offsets,
+                                uniforms,
+                                /*normalize_only=*/false);
 }
 
 std::tuple<torch::Tensor, torch::Tensor> row_log_normalization(
     const torch::Tensor& logits) {
   const torch::Tensor values =
-      run_sampling_logits(logits, {}, {}, {}, /*normalize_only=*/true);
+      run_sample_from_logits(logits, {}, {}, {}, /*normalize_only=*/true);
   return {values.select(/*dim=*/1, /*index=*/0),
           values.select(/*dim=*/1, /*index=*/1)};
 }

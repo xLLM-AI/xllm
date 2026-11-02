@@ -218,15 +218,17 @@ struct TaskExecutionPipeline::SpeculativeSlot {
   torch::Tensor draft_block_indices;
   torch::Tensor target_token_storage;
   torch::Tensor target_tokens;
-  torch::Tensor proposal_storage;
+  torch::Tensor draft_token_storage;
   torch::Tensor accepted_mask_storage;
   torch::Tensor host_hidden_storage;
-  torch::Tensor proposal;
+  // Writable view of reusable token storage, also used by packed verification.
+  torch::Tensor draft_token_ids;
   torch::Tensor accepted_mask;
   torch::Tensor context_slots_storage;
   torch::Tensor context_slots;
   torch::Tensor block_gumbel;
-  std::optional<DraftProposal> block_proposal;
+  // Completed tokens and q retained through fixed verification retirement.
+  std::optional<DraftProposal> proposal;
   torch::Tensor host_hidden;
   ModelOutput target_output;
   torch::Tensor target_logits;

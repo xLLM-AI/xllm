@@ -112,11 +112,11 @@ torch::Tensor gumbel_noise(const SamplingParameters& params,
 torch::Tensor categorical_sample(const torch::Tensor& logits) {
 #if defined(USE_NPU)
   if (npu_sampling_enabled(NpuSamplingOptimization::VERIFICATION) &&
-      kernel::npu::tilelang::supports_sampling_logits(logits) &&
+      kernel::npu::tilelang::supports_sample_from_logits(logits) &&
       logits.size(0) >= 8) {
     const torch::Tensor uniforms =
         torch::rand({logits.size(0)}, logits.options().dtype(torch::kFloat32));
-    return kernel::npu::tilelang::sampling_logits(logits, {}, {}, uniforms);
+    return kernel::npu::tilelang::sample_from_logits(logits, {}, {}, uniforms);
   }
 #endif
   return gumbel_sample(logits);
@@ -156,7 +156,7 @@ SampleOutput sample(torch::Tensor& logits,
       params.logprobs() && params.max_top_logprobs() == 0 &&
       !params.use_beam_search() &&
       !ModelConfig::get_instance().enable_qwen3_reranker() &&
-      kernel::npu::tilelang::supports_sampling_logits(logits) &&
+      kernel::npu::tilelang::supports_sample_from_logits(logits) &&
       logits.size(0) >= 128 && logits.size(1) >= 65536 &&
       (logits.scalar_type() == torch::kBFloat16 ||
        logits.scalar_type() == torch::kFloat16);
@@ -196,7 +196,7 @@ SampleOutput sample(torch::Tensor& logits,
   const bool batched_seed_sampling =
       npu_sampling_enabled(NpuSamplingOptimization::BATCHED) &&
       params.sampling_mode() != SamplingMode::GREEDY &&
-      kernel::npu::tilelang::supports_sampling_logits(logits) &&
+      kernel::npu::tilelang::supports_sample_from_logits(logits) &&
       (!params.seeds().defined() ||
        (params.seeds().dim() == 1 && params.seed_offsets().defined() &&
         params.seed_offsets().dim() == 1 && params.seeds().is_contiguous() &&
@@ -216,7 +216,7 @@ SampleOutput sample(torch::Tensor& logits,
     } else
 #endif
     {
-      samples = kernel::npu::tilelang::sampling_logits(
+      samples = kernel::npu::tilelang::sample_from_logits(
           logits, params.seeds(), params.seed_offsets(), uniforms);
     }
     if (params.sampling_mode() == SamplingMode::MIXED) {

@@ -710,7 +710,7 @@ void ensure_xllm_ops_registered() {
 // compiled only under USE_NPU (mutually exclusive with USE_CUDA).
 TORCH_LIBRARY(xllm_ops, m) {
   m.def(
-      "sampling_logits(Tensor logits, Tensor seeds, Tensor offsets, "
+      "sample_from_logits(Tensor logits, Tensor seeds, Tensor offsets, "
       "Tensor uniforms) -> Tensor");
   m.def("row_log_normalization(Tensor logits) -> (Tensor, Tensor)");
   m.def(
@@ -1040,8 +1040,8 @@ TORCH_LIBRARY(xllm_ops, m) {
 }
 
 TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
-  m.impl("sampling_logits",
-         TORCH_FN(xllm::kernel::npu::tilelang::sampling_logits));
+  m.impl("sample_from_logits",
+         TORCH_FN(xllm::kernel::npu::tilelang::sample_from_logits));
   m.impl("row_log_normalization",
          TORCH_FN(xllm::kernel::npu::tilelang::row_log_normalization));
   m.impl(

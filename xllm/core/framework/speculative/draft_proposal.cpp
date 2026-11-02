@@ -15,27 +15,14 @@ limitations under the License.
 
 #include "core/framework/speculative/draft_proposal.h"
 
-#include <glog/logging.h>
-
 #include <utility>
 
 namespace xllm {
 
-DraftProposal::DraftProposal(torch::Tensor token_ids, torch::Tensor logits)
-    : DraftProposal(
-          token_ids,
-          logits.defined()
-              ? std::unique_ptr<const DraftDistribution>(
-                    std::make_unique<DenseDraftDistribution>(std::move(logits)))
-              : std::unique_ptr<const DraftDistribution>(
-                    std::make_unique<PointMassDraftDistribution>(token_ids))) {}
-
-DraftProposal::DraftProposal(
-    torch::Tensor token_ids,
-    std::unique_ptr<const DraftDistribution> distribution)
+DraftProposal::DraftProposal(torch::Tensor token_ids,
+                             DraftDistribution distribution)
     : token_ids_(std::move(token_ids)), distribution_(std::move(distribution)) {
-  CHECK(distribution_ != nullptr);
-  distribution_->validate(token_ids_);
+  distribution_.validate(token_ids_);
 }
 
 }  // namespace xllm

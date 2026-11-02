@@ -29,9 +29,7 @@ namespace xllm {
 // its tokens or access representation-specific buffers.
 class DraftProposal final {
  public:
-  explicit DraftProposal(torch::Tensor token_ids, torch::Tensor logits = {});
-  DraftProposal(torch::Tensor token_ids,
-                std::unique_ptr<const DraftDistribution> distribution);
+  DraftProposal(torch::Tensor token_ids, DraftDistribution distribution);
 
   DraftProposal(const DraftProposal&) = delete;
   DraftProposal& operator=(const DraftProposal&) = delete;
@@ -39,14 +37,14 @@ class DraftProposal final {
   DraftProposal& operator=(DraftProposal&&) = default;
 
   const torch::Tensor& token_ids() const { return token_ids_; }
-  const DraftDistribution& distribution() const { return *distribution_; }
+  const DraftDistribution& distribution() const { return distribution_; }
 
   // No-sync draft inputs must outlive the verify step's stream sync.
   std::vector<std::shared_ptr<const void>>& keep_alive() { return keep_alive_; }
 
  private:
   torch::Tensor token_ids_;
-  std::unique_ptr<const DraftDistribution> distribution_;
+  DraftDistribution distribution_;
   std::vector<std::shared_ptr<const void>> keep_alive_;
 };
 

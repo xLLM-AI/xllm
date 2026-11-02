@@ -140,8 +140,8 @@ if(BUILD_NPU_SAMPLING_ABLATION)
 endif()
 
 tilelang_register_runtime_kernel(
-  NAME sampling_logits
-  WRAPPER_SRCS sampling_logits_wrapper.cpp
+  NAME sample_from_logits
+  WRAPPER_SRCS sample_from_logits_wrapper.cpp
 )
 
 tilelang_register_runtime_kernel(
