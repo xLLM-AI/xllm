@@ -410,11 +410,11 @@ void HierarchyBlockManagerPool::deallocate(Sequence* sequence) {
   // it performs the final cached-usage check.
   // Destroy an unsubmitted lease only after releasing the owner locks below.
   const auto pending_restore = sequence->take_host_restore_blocks();
-  const auto lease_owners = sequence->kv_cache_lease_owners();
-  std::vector<std::unique_lock<std::mutex>> lease_locks;
-  lease_locks.reserve(lease_owners.size());
-  for (const auto& owner : lease_owners) {
-    lease_locks.emplace_back(owner->lock());
+  const auto restore_owners = sequence->host_restore_owners();
+  std::vector<std::unique_lock<std::mutex>> restore_locks;
+  restore_locks.reserve(restore_owners.size());
+  for (const auto& owner : restore_owners) {
+    restore_locks.emplace_back(owner->lock());
   }
   int32_t dp_rank = BlockManagerPool::get_dp_rank(sequence);
   auto* composite =

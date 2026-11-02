@@ -119,9 +119,8 @@ class BatchState final {
   // worker result. Pin H2D sources and destinations until this batch retires.
   std::vector<std::shared_ptr<KVCacheBlockLease>> host_restore_leases_;
   // Sequence reset can precede the result of an overlapped forward. Keep its
-  // VMM pages mapped until the submitted batch retires and reconcile cached
-  // usage when the last lease outlives its sequence.
-  std::vector<std::shared_ptr<KVCacheBlockLease>> vmm_kv_leases_;
+  // VMM pages mapped until the submitted batch retires.
+  std::vector<Block> vmm_kv_blocks_;
   BatchForwardType batch_forward_type_;
   uint64_t batch_id_ = UNINITIALIZED_BATCH_ID;
   bool requires_host_restore_ = false;
