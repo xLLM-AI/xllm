@@ -23,6 +23,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
 #include "core/kv_cache/transfer/kv_cache_store.h"
 
@@ -74,83 +75,6 @@ std::string make_store_local_hostname(const std::string& configured,
   CHECK_LE(port, 65535U - worker_id)
       << "Mooncake local endpoint port exceeds 65535.";
   return host + ":" + std::to_string(port + worker_id);
-}
-
-bool has_tensor(const torch::Tensor& tensor) {
-  return tensor.defined() && tensor.numel() > 0;
-}
-
-BlockTypeTensorMap build_block_type_tensor_map(const KVCache& kv_cache,
-                                               BlockType type) {
-  BlockTypeTensorMap tensors;
-  const torch::Tensor key_cache = kv_cache.get_k_cache();
-  const torch::Tensor value_cache = kv_cache.get_v_cache();
-  const torch::Tensor index_cache = kv_cache.get_index_cache();
-  const torch::Tensor conv_cache = kv_cache.get_conv_cache();
-  const torch::Tensor ssm_cache = kv_cache.get_ssm_cache();
-  const torch::Tensor swa_cache = kv_cache.get_swa_cache();
-  const std::optional<torch::Tensor> index_cache_scale =
-      kv_cache.get_indexer_cache_scale();
-
-  switch (type) {
-    case BlockType::KV:
-      if (has_tensor(conv_cache) || has_tensor(ssm_cache) ||
-          has_tensor(swa_cache)) {
-        return {};
-      }
-      if (has_tensor(key_cache)) {
-        tensors.emplace(KVCacheTensorRole::KEY, key_cache);
-      }
-      if (has_tensor(value_cache)) {
-        tensors.emplace(KVCacheTensorRole::VALUE, value_cache);
-      }
-      if (has_tensor(index_cache)) {
-        tensors.emplace(KVCacheTensorRole::INDEX, index_cache);
-      }
-      // Quantized index state and scale must move together.
-      if (index_cache_scale.has_value() &&
-          has_tensor(index_cache_scale.value())) {
-        tensors.emplace(KVCacheTensorRole::INDEX_SCALE,
-                        index_cache_scale.value());
-      }
-      return tensors;
-    case BlockType::LINEAR:
-      if (has_tensor(conv_cache)) {
-        tensors.emplace(KVCacheTensorRole::CONV, conv_cache);
-      }
-      if (has_tensor(ssm_cache)) {
-        tensors.emplace(KVCacheTensorRole::SSM, ssm_cache);
-      }
-      return tensors;
-    case BlockType::SWA:
-      // The persistent SWA window is restored for every DSV4 layer.
-      if (has_tensor(swa_cache)) {
-        tensors.emplace(KVCacheTensorRole::SWA, swa_cache);
-      }
-      return tensors;
-    case BlockType::C4:
-      if (!has_tensor(swa_cache) || has_tensor(value_cache) ||
-          !has_tensor(key_cache) || !has_tensor(index_cache)) {
-        return {};
-      }
-      tensors.emplace(KVCacheTensorRole::KEY, key_cache);
-      tensors.emplace(KVCacheTensorRole::INDEX, index_cache);
-      if (index_cache_scale.has_value() &&
-          has_tensor(index_cache_scale.value())) {
-        tensors.emplace(KVCacheTensorRole::INDEX_SCALE,
-                        index_cache_scale.value());
-      }
-      return tensors;
-    case BlockType::C128:
-      if (!has_tensor(swa_cache) || has_tensor(value_cache) ||
-          !has_tensor(key_cache) || has_tensor(index_cache)) {
-        return {};
-      }
-      tensors.emplace(KVCacheTensorRole::KEY, key_cache);
-      return tensors;
-    default:
-      return {};
-  }
 }
 
 }  // namespace
@@ -361,7 +285,7 @@ HierarchyKVCacheTransfer::build_device_groups(CacheDomain* domain) const {
     KVCache& kv_cache =
         domain->device_kv_caches->at(static_cast<size_t>(layer_id));
     for (BlockType type : block_types) {
-      if (!build_block_type_tensor_map(kv_cache, type).empty()) {
+      if (!kv_cache.get_block_type_tensors(type).empty()) {
         device_groups[type].emplace_back(&kv_cache);
         domain->layer_ids_by_type[type].emplace_back(layer_id);
       }
@@ -415,7 +339,41 @@ HostKVLayout HierarchyKVCacheTransfer::create_host_kv_layout(
       layer.absolute_layer_id = layer_ids_it->second[layer_slot];
       layer.group_layer_slot = static_cast<int64_t>(layer_slot);
       layer.device_roles =
-          build_block_type_tensor_map(*group_caches[layer_slot], block_type);
+          group_caches[layer_slot]->get_block_type_tensors(block_type);
+      if (block_type == BlockType::LINEAR) {
+        const auto conv_it = layer.device_roles.find(KVCacheTensorRole::CONV);
+        const auto ssm_it = layer.device_roles.find(KVCacheTensorRole::SSM);
+        if (conv_it != layer.device_roles.end() ||
+            ssm_it != layer.device_roles.end()) {
+          CHECK(conv_it != layer.device_roles.end() &&
+                ssm_it != layer.device_roles.end())
+              << "LINEAR transfer requires both Conv and SSM cache tensors.";
+          const torch::Tensor& conv_cache = conv_it->second;
+          const torch::Tensor& ssm_cache = ssm_it->second;
+          // Prefill checkpoints keep the first SSM row of each logical slot.
+          const int64_t checkpoint_stride =
+              KVCacheShape::linear_ssm_checkpoint_stride(conv_cache.size(0),
+                                                         ssm_cache.size(0));
+          std::vector<int64_t> logical_ssm_shape = ssm_cache.sizes().vec();
+          logical_ssm_shape[0] = checkpoint_stride;
+          logical_ssm_shape.insert(logical_ssm_shape.begin(),
+                                   conv_cache.size(0));
+#if defined(USE_MUSA)
+          constexpr int64_t kDeviceConvHistoryAxis = 2;
+#else
+          constexpr int64_t kDeviceConvHistoryAxis = 1;
+#endif
+          CHECK_GT(conv_cache.dim(), kDeviceConvHistoryAxis);
+          const int64_t conv_history_rows =
+              conv_cache.size(kDeviceConvHistoryAxis) - checkpoint_stride + 1;
+          CHECK_GT(conv_history_rows, 0);
+          conv_it->second = conv_cache.narrow(kDeviceConvHistoryAxis,
+                                              /*start=*/0,
+                                              /*length=*/conv_history_rows);
+          ssm_it->second = ssm_cache.view(std::move(logical_ssm_shape))
+                               .narrow(/*dim=*/1, /*start=*/0, /*length=*/1);
+        }
+      }
       for (auto& [role, tensor] : layer.device_roles) {
         if (role != KVCacheTensorRole::INDEX &&
             role != KVCacheTensorRole::INDEX_SCALE) {
