@@ -32,7 +32,7 @@ import pytest
 import setuptools
 from setuptools import Distribution
 from setuptools.command.build_py import build_py
-from xllm_kernel.ops.rms_norm import RMS_NORM_CONTRACT
+from xllm_kernel.ops.normalization import RMS_NORM_CONTRACT
 from xllm_kernel.registry import KernelRegistry, KernelSpec, register_kernel
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -55,16 +55,16 @@ def _registry(monkeypatch: pytest.MonkeyPatch) -> KernelRegistry:
 
 @pytest.fixture
 def _backend_registry(monkeypatch: pytest.MonkeyPatch, _registry: KernelRegistry) -> Iterator[KernelRegistry]:
-    rms_norm = importlib.import_module("xllm_kernel.ops.rms_norm")
+    rms_norm = importlib.import_module("xllm_kernel.ops.normalization")
 
     runtime = importlib.import_module("xllm_kernel.runtime")
     monkeypatch.setattr(runtime, "_prepared", None)
     monkeypatch.setattr(runtime, "_configuration", None)
-    monkeypatch.setattr(rms_norm.OPERATION, "prepared", None)
+    monkeypatch.setattr(rms_norm.RMS_NORM_OPERATION, "prepared", None)
     monkeypatch.setattr(runtime, "find_spec", lambda name: object() if name == "torch_npu" else None)
     yield _registry
-    sys.modules.pop("xllm_kernel.ops.rms_norm.torch_npu", None)
-    vars(rms_norm).pop("torch_npu", None)
+    sys.modules.pop("xllm_kernel.ops.normalization.torch", None)
+    vars(rms_norm).pop("torch", None)
 
 
 def test_decorator_preserves_callable_and_declares_selection_metadata(_registry: KernelRegistry) -> None:
@@ -239,13 +239,15 @@ def test_native_module_import_registers_once_and_returns_normalized_output(
         calls.append((input, weight, epsilon))
         return normalized, rstd
 
-    monkeypatch.setitem(sys.modules, "torch_npu", SimpleNamespace(npu_rms_norm=native_rms_norm))
-    module = importlib.import_module("xllm_kernel.ops.rms_norm.torch_npu")
+    monkeypatch.setitem(
+        sys.modules, "torch_npu", SimpleNamespace(npu_rms_norm=native_rms_norm, npu_add_rms_norm=lambda *args: None)
+    )
+    module = importlib.import_module("xllm_kernel.ops.normalization.torch")
     assert importlib.import_module(module.__name__) is module
     _backend_registry.freeze()
     plan = _backend_registry.prepare(RMS_NORM_CONTRACT, device="npu", execution_mode="aclgraph")
     assert plan.function is module.rms_norm
-    assert plan.generation == 1
+    assert plan.generation == len(_backend_registry.specs())
     assert plan.function(value, weight, 0.125) is normalized
     assert calls == [(value, weight, 0.125)]
 
@@ -274,7 +276,9 @@ def test_native_execution_error_propagates_without_retry(
         calls.append(epsilon)
         raise RuntimeError("native execution failed")
 
-    monkeypatch.setitem(sys.modules, "torch_npu", SimpleNamespace(npu_rms_norm=fail))
+    monkeypatch.setitem(
+        sys.modules, "torch_npu", SimpleNamespace(npu_rms_norm=fail, npu_add_rms_norm=lambda *args: None)
+    )
     plan = initialize(device="npu", operations=("rms_norm",))["rms_norm"]
     with pytest.raises(RuntimeError, match="native execution failed"):
         plan.function(object(), object(), 1e-5)
@@ -286,7 +290,11 @@ def test_initialize_selects_highest_priority_and_reuses_frozen_binding(
 ) -> None:
     from xllm_kernel import initialize
 
-    monkeypatch.setitem(sys.modules, "torch_npu", SimpleNamespace(npu_rms_norm=lambda *args, **kwargs: (42, 0)))
+    monkeypatch.setitem(
+        sys.modules,
+        "torch_npu",
+        SimpleNamespace(npu_rms_norm=lambda *args, **kwargs: (42, 0), npu_add_rms_norm=lambda *args: None),
+    )
     _backend_registry.register(replace(_spec("npu.other"), priority=99), _identity)
     plan = initialize(device="npu", operations=("rms_norm",))["rms_norm"]
     assert plan.spec.name == "npu.other"
@@ -305,7 +313,7 @@ def test_unknown_initialization_operation_fails_without_loading_backend(
 
     with pytest.raises(ValueError, match="unknown kernel override operation"):
         initialize(device="npu", operations=("rms_norm",), overrides={operation: "native"})
-    assert "xllm_kernel.ops.rms_norm.torch_npu" not in sys.modules
+    assert "xllm_kernel.ops.normalization.torch" not in sys.modules
 
 
 @pytest.mark.parametrize("layout", ["source", "source_with_installed_package", "installed"])

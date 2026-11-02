@@ -14,7 +14,7 @@
 
 """Python kernel contracts for xLLM; import does not load Torch or a device SDK."""
 
-from xllm_kernel.ops.rms_norm import prepare_rms_norm
+from xllm_kernel.ops.normalization import prepare_rms_norm
 from xllm_kernel.registry import register_kernel
 from xllm_kernel.runtime import initialize
 from xllm_kernel.selection import select_kernel

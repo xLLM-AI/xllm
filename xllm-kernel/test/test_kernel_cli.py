@@ -16,50 +16,81 @@ from typing import Any
 
 import pytest
 import torch
-from xllm_kernel.catalog import BackendModule
-from xllm_kernel.numerics import rms_norm
 from xllm_kernel.numerics import verify as verification
 from xllm_kernel.numerics.suite import OperationSuite, PreparedCase
-from xllm_kernel.ops.rms_norm import RMS_NORM_CONTRACT
-from xllm_kernel.registry import KernelRegistry, KernelSpec, OpContract, PreparedKernel, register_kernel
+from xllm_kernel.registry import KernelRegistry, KernelSpec, OpContract, PreparedKernel
 
-_IMPLEMENTATION = "npu.torch.rms_norm"
+_IMPLEMENTATION = "test.scale"
+
+
+@dataclass(frozen=True)
+class _CliCase:
+    """Synthetic tensor case for CLI lifecycle tests."""
+
+    rows: int
+    width: int
+    dtype: str
+
+    @property
+    def case_id(self) -> str:
+        return f"test_scale/{self.dtype}/{self.rows}x{self.width}"
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {"rows": self.rows, "width": self.width, "dtype": self.dtype}
+
+    def unsupported_reason(self, plan: PreparedKernel) -> str | None:
+        return None
+
+    def prepare(self, plan: PreparedKernel) -> PreparedCase:
+        value = torch.ones(self.rows, self.width, dtype=getattr(torch, self.dtype))
+        expected = torch.full_like(value, 2)
+
+        def validate(function: Any) -> dict[str, Any]:
+            return {"status": "passed" if torch.equal(function(), expected) else "failed"}
+
+        return PreparedCase(lambda: plan.function(value, 2.0), validate, {})
 
 
 @pytest.fixture
 def cpu_runtime(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
-    operation = importlib.import_module("xllm_kernel.ops.rms_norm")
-    runtime = SimpleNamespace(function=rms_norm.reference, measurements=[])
-    monkeypatch.setattr(KernelRegistry, "_instance", KernelRegistry())
-    kernel_runtime = importlib.import_module("xllm_kernel.runtime")
-    monkeypatch.setattr(kernel_runtime, "_prepared", None)
-    monkeypatch.setattr(kernel_runtime, "_configuration", None)
-    monkeypatch.setattr(operation.OPERATION, "prepared", None)
-    module_name = "test_rms_norm_backend"
-    monkeypatch.setitem(sys.modules, module_name, ModuleType(module_name))
-    monkeypatch.setattr(operation.OPERATION, "backends", (BackendModule(module_name, "npu", ()),))
-    register_kernel(
-        name=_IMPLEMENTATION,
-        contract=RMS_NORM_CONTRACT,
-        device="npu",
-        execution_modes=("eager", "aclgraph"),
-        input_domain="CPU test double",
-        solution="torch",
-        binding="torch_npu",
-    )(lambda *args: runtime.function(*args))
+    from xllm_kernel.numerics import catalog
 
-    def inputs(case: rms_norm.NumericsCase) -> tuple[torch.Tensor, torch.Tensor]:
-        dtype = getattr(torch, case.dtype)
-        return torch.ones(case.rows, case.width, dtype=dtype), torch.ones(case.width, dtype=dtype)
+    runtime = SimpleNamespace(function=lambda value, scale: value * scale, measurements=[])
+    contract = OpContract("test_scale", 1, (), False, "test")
+    registry = KernelRegistry()
+    registry.register(
+        KernelSpec(_IMPLEMENTATION, contract, "npu", ("eager", "aclgraph"), "CPU test double"),
+        lambda *args: runtime.function(*args),
+    )
+    registry.freeze()
 
-    monkeypatch.setitem(sys.modules, "torch_npu", SimpleNamespace(__version__="test", get_npu_format=lambda _: 2))
+    def add_arguments(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("--rows", type=int, nargs="+", default=[1])
+        parser.add_argument("--widths", type=int, nargs="+", default=[4])
+        parser.add_argument("--dtypes", nargs="+", choices=["bfloat16", "float16", "float32"], default=["float32"])
+
+    def cases(args: argparse.Namespace) -> tuple[_CliCase, ...]:
+        if min(args.widths) <= 0 or min(args.rows) < 0:
+            raise ValueError("widths must be positive; rows must be nonnegative")
+        return tuple(
+            _CliCase(rows, width, dtype) for dtype in args.dtypes for width in args.widths for rows in args.rows
+        )
+
+    def prepare(device: str, mode: str, implementation: str) -> PreparedKernel:
+        return registry.prepare(contract, device=device, execution_mode=mode, implementation=implementation)
+
+    provider = ModuleType("test_scale_suite")
+    provider.SUITE = OperationSuite("test_scale", (_IMPLEMENTATION,), add_arguments, cases, prepare)
+    monkeypatch.setitem(sys.modules, provider.__name__, provider)
+    monkeypatch.setattr(catalog, "_BUILTINS", (provider.__name__,))
+    monkeypatch.setitem(sys.modules, "torch_npu", SimpleNamespace(__version__="test"))
     monkeypatch.setattr(
         torch,
         "npu",
         SimpleNamespace(get_device_name=lambda: "CPU test double", synchronize=lambda: None),
         raising=False,
     )
-    monkeypatch.setattr(rms_norm, "inputs", inputs)
     monkeypatch.setattr(
         verification, "subprocess", SimpleNamespace(check_output=lambda *args, **kwargs: "test inventory")
     )
@@ -152,7 +183,7 @@ def test_failed_accuracy_or_empty_coverage_cannot_pass(
 ) -> None:
     cpu_runtime.function = lambda value, *_: torch.zeros_like(value)
     if status == "not_applicable":
-        monkeypatch.setattr(rms_norm.NumericsCase, "unsupported_reason", lambda self, plan: "outside test domain")
+        monkeypatch.setattr(_CliCase, "unsupported_reason", lambda self, plan: "outside test domain")
     output = tmp_path / f"{status}.json"
     with pytest.raises(SystemExit, match="1"):
         _invoke(module, output, monkeypatch)
@@ -195,8 +226,8 @@ def test_graph_output_is_validated_before_timing(
 ) -> None:
     outputs = []
 
-    def candidate(value: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
-        output = rms_norm.reference(value, weight, eps)
+    def candidate(value: torch.Tensor, scale: float) -> torch.Tensor:
+        output = value * scale
         outputs.append(output)
         return output
 
@@ -411,6 +442,7 @@ def test_invalid_arguments_fail_before_runtime_preparation(
     extra: tuple[str, ...],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    cpu_runtime: SimpleNamespace,
 ) -> None:
     output = tmp_path / "invalid.json"
     with pytest.raises(SystemExit, match="2"):
@@ -454,7 +486,7 @@ def test_reports_render_multiple_operations_without_loading_them(module: str, tm
 @pytest.mark.parametrize("module", ["numerics", "benchmark"])
 @pytest.mark.parametrize("filename", ["report", "report.json"])
 def test_distributed_reports_preserve_rank_in_both_formats(
-    module: str, filename: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    module: str, filename: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cpu_runtime: SimpleNamespace
 ) -> None:
     from xllm_kernel.numerics.arguments import parse_arguments
 
@@ -487,7 +519,7 @@ def test_distributed_reports_preserve_rank_in_both_formats(
             "cases": [
                 {
                     "case_id": f"rank{rank}",
-                    "operation": "rms_norm",
+                    "operation": "test_scale",
                     "implementation": _IMPLEMENTATION,
                     "solution": "torch",
                     "variant": "",

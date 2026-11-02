@@ -112,7 +112,7 @@ The following example registers RMSNorm through a vendor API:
 import torch
 import torch_npu
 from xllm_kernel import register_kernel
-from xllm_kernel.ops.rms_norm import RMS_NORM_CONTRACT
+from xllm_kernel.ops.normalization import RMS_NORM_CONTRACT
 
 _native_rms_norm = torch_npu.npu_rms_norm
 
@@ -189,14 +189,24 @@ register_custom_op("my_native_op", fake_impl=my_native_fake)
 Keep public definition modules SDK-free; implementation modules load device
 dependencies. To add an operator:
 
-1. Declare its contract and `OPERATION` in `ops/<operation>/__init__.py`.
+1. Declare its contract and `OPERATION` in `ops/<group>/__init__.py`.
    Use `BackendModule` to list implementation modules, dependencies, and names.
-2. Add the operator definition to `catalog._BUILTINS` and export its public API
+   Export an `OPERATIONS` tuple, even when the group contains only one operator:
+
+   ```python
+   OPERATIONS = (OPERATION,)
+   ```
+
+   Groups with several operators export every declaration in that tuple, as
+   `ops/normalization/__init__.py` does for the three normalization operators.
+2. Add the group module to `catalog._BUILTINS` and export its public API
    from `ops/__init__.py`.
 3. Have the public API obtain its fixed binding through `OPERATION.get_prepared()`;
-   include the operator in `operations` during model initialization.
-4. Connect the model or layer call sites and add the corresponding offline suite
-   and validation.
+   include the operation name, rather than the group name, in `operations` during
+   model initialization.
+4. Connect the model or layer call sites. Add an offline suite when a custom kernel
+   needs numerical or performance validation; native Torch adapters do not require
+   a duplicate numerical-comparison suite.
 
 Example public API call after initialization:
 
@@ -215,15 +225,21 @@ defines its inputs, reference, and tolerances.
 
 ### 4.1 `OperationSuite`
 
-Export `SUITE` from `numerics/<operation>.py` and add the module to `_BUILTINS` in
-`numerics/catalog.py`. For example, RMSNorm uses:
+There are currently no built-in numerical suites, including RMSNorm. The shared
+numerical and benchmark tools remain available for custom kernels. Before using
+operation-specific CLI options, implement a suite in `numerics/<operation>.py`,
+export `SUITE`, and add its full module path to `_BUILTINS` in
+`numerics/catalog.py`.
+
+The following is a template for a custom operation. Define all three callbacks
+in that module and use the operation and implementation names from its catalog:
 
 ```python
 from xllm_kernel.numerics.suite import OperationSuite
 
 SUITE = OperationSuite(
-    operation="rms_norm",
-    implementations=("npu.torch.rms_norm",),
+    operation="my_operation",
+    implementations=("npu.my_solution.my_operation",),
     add_arguments=_add_arguments,  # Register CLI arguments
     cases=_cases,                # Generate cases
     prepare=_prepare,            # Prepare the implementation
@@ -252,8 +268,13 @@ For tensor-tree outputs, reuse `tensor_suite()` in `numerics/factory.py` to gene
 a suite from positive dimension matrices; the builder returns an `Example`.
 `TensorCase` binds inputs during preparation, and `numerics/inputs.py` provides
 random inputs with a fixed CPU seed. Use a custom `KernelCase` for empty dimensions.
-See [`numerics/rms_norm.py`](https://github.com/xLLM-AI/xllm/blob/main/xllm-kernel/python/xllm_kernel/numerics/rms_norm.py)
-for a complete example.
+See the generic helpers in
+[`numerics/factory.py`](https://github.com/xLLM-AI/xllm/blob/main/xllm-kernel/python/xllm_kernel/numerics/factory.py)
+and the `Example` / `TensorCase` interfaces in
+[`numerics/tensor_case.py`](https://github.com/xLLM-AI/xllm/blob/main/xllm-kernel/python/xllm_kernel/numerics/tensor_case.py).
+The synthetic suites in
+[`test/test_kernel_cli.py`](https://github.com/xLLM-AI/xllm/blob/main/xllm-kernel/test/test_kernel_cli.py)
+illustrate the CLI protocol using CPU test doubles, rather than device kernels.
 
 ## 5. Shared validation, timing, and reporting
 
@@ -289,27 +310,36 @@ end-to-end performance separately.
 
 ## 6. Tests and validation
 
-Run the following commands from the repository root after installing the package
-and the dependencies of the implementation being tested. RMSNorm is the example;
-for other operators, replace `--operation`, `--implementation`, and their specific
-arguments.
+Run the following commands from the repository root after installing the package.
+Device execution also requires the dependencies of the implementation being tested
+and an idle NPU.
 
 ### 6.1 Standalone numerical validation and benchmarks
 
 ```bash
-python -m xllm_kernel.numerics --operation rms_norm --help
-python -m xllm_kernel.benchmark --operation rms_norm --help
+python -m xllm_kernel.numerics --help
+python -m xllm_kernel.benchmark --help
+```
 
-python -m xllm_kernel.numerics --operation rms_norm --device npu --mode eager \
-  --implementation npu.torch.rms_norm --rows 1 16 --widths 6144 \
+The suite catalog is empty by default, so operation-specific commands are not yet
+available. First register a custom suite as described in section 4. The following
+templates assume it declares `my_operation` and `npu.my_solution.my_operation`;
+replace those names and add any arguments required by your suite:
+
+```bash
+python -m xllm_kernel.numerics --operation my_operation --help
+python -m xllm_kernel.benchmark --operation my_operation --help
+
+python -m xllm_kernel.numerics --operation my_operation --device npu --mode eager \
+  --implementation npu.my_solution.my_operation \
   --revision "$(git rev-parse HEAD)" --output numerics.json
-python -m xllm_kernel.benchmark --operation rms_norm --device npu --mode aclgraph \
-  --implementation npu.torch.rms_norm --rows 1 16 --widths 6144 \
+python -m xllm_kernel.benchmark --operation my_operation --device npu --mode aclgraph \
+  --implementation npu.my_solution.my_operation \
   --iterations 50 --revision "$(git rev-parse HEAD)" --output benchmark.json
 ```
 
-Each suite defines its operator's arguments and defaults. Use
-`--operation NAME --help` to list available options.
+Each registered suite defines its operator's arguments and defaults. Use
+`--operation NAME --help` only after registering that suite.
 
 ### 6.2 Package tests
 
