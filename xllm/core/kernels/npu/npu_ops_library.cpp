@@ -32,7 +32,6 @@ limitations under the License.
 #include <tuple>
 #include <vector>
 
-#include "core/kernels/npu/atb_vision_attention.h"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 #include "core/util/tensor_helper.h"
 #include "kernels/npu/xllm_ops/xllm_ops_api.h"
@@ -764,9 +763,6 @@ TORCH_LIBRARY(xllm_ops, m) {
   m.def("l2_norm(Tensor input, float eps) -> Tensor");
   m.def("atb_matmul_ein_sum(Tensor input, Tensor weight) -> Tensor");
   m.def(
-      "atb_vision_attention(Tensor query, Tensor key, Tensor value, "
-      "int[] cumulative_seq_lens, float scale) -> Tensor");
-  m.def(
       "atb_matmul_ein_sum_out(Tensor input, Tensor weight, Tensor(a!) output) "
       "-> Tensor(a!)");
   m.def(
@@ -1067,8 +1063,6 @@ TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
          TORCH_FN(xllm::fused_add_gemma_rms_norm_npu));
   m.impl("l2_norm", TORCH_FN(xllm::l2_norm_npu));
   m.impl("atb_matmul_ein_sum", TORCH_FN(xllm::kernel::npu::atb_matmul_ein_sum));
-  m.impl("atb_vision_attention",
-         TORCH_FN(xllm::kernel::npu::atb_vision_attention));
   m.impl("atb_matmul_ein_sum_out",
          TORCH_FN(xllm::kernel::npu::atb_matmul_ein_sum_out));
   m.impl("moe_gating_top_k_softmax",

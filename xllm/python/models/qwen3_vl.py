@@ -249,7 +249,7 @@ class Qwen3VLVisionPatchMerger(nn.Module):
 
 
 class Qwen3VLVisionAttention(nn.Module):
-    """Head-parallel ViT attention with native-width varlen attention."""
+    """Head-parallel ViT attention with variable-length frame boundaries."""
 
     def __init__(
         self,

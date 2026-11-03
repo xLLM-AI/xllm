@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Checkpoint head partitioning and real native-width vision attention."""
+"""Checkpoint head partitioning and real FIA vision attention."""
 
 from __future__ import annotations
 
@@ -72,11 +72,9 @@ def test_vision_heads_must_partition_evenly() -> None:
         Qwen3VLVisionAttention(72 * 6, 6, tp_size=4)
 
 
-@pytest.mark.parametrize("layout", ["BSH", "TND"])
-def test_other_attention_layouts_retain_torch_npu_dispatch(monkeypatch: pytest.MonkeyPatch, layout: str) -> None:
+def test_other_attention_layouts_retain_torch_npu_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
     torch_npu = pytest.importorskip("torch_npu")
-    query = torch.zeros(2, 3, 96) if layout == "BSH" else torch.zeros(3, 2, 128)
-    q_lengths, kv_lengths = ([], []) if layout == "BSH" else ([1, 3], [2, 3])
+    query = torch.zeros(2, 3, 96)
     called = []
 
     def fusion_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, **kwargs: object) -> tuple[torch.Tensor]:
@@ -89,17 +87,43 @@ def test_other_attention_layouts_retain_torch_npu_dispatch(monkeypatch: pytest.M
         query,
         query,
         query,
-        actual_seq_qlen=q_lengths,
-        actual_seq_kvlen=kv_lengths,
+        actual_seq_qlen=[],
+        actual_seq_kvlen=[],
         num_heads=2,
         scale=0.125,
-        input_layout=layout,
+        input_layout="BSH",
     )
     torch.testing.assert_close(actual, query)
     assert len(called) == 1
-    assert called[0]["input_layout"] == layout
-    assert called[0]["actual_seq_qlen"] == q_lengths
-    assert called[0]["actual_seq_kvlen"] == kv_lengths
+    assert called[0]["input_layout"] == "BSH"
+
+
+def test_fia_padding_preserves_original_scale_and_frame_boundaries(monkeypatch: pytest.MonkeyPatch) -> None:
+    torch_npu = pytest.importorskip("torch_npu")
+    query = torch.arange(3 * 2 * 72, dtype=torch.float32).view(3, 2, 72)
+    called = []
+
+    def fused_infer_attention(
+        query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, **kwargs: object
+    ) -> tuple[torch.Tensor, None]:
+        called.append(kwargs)
+        for tensor in (query, key, value):
+            assert tensor.shape == (3, 2, 128) and tensor.is_contiguous()
+            torch.testing.assert_close(tensor[..., 72:], torch.zeros_like(tensor[..., 72:]))
+        return query, None
+
+    monkeypatch.setattr(torch_npu, "npu_fused_infer_attention_score", fused_infer_attention)
+    actual = kernels.vision_fusion_attention(
+        query, query, query, actual_seq_qlen=[1, 3], actual_seq_kvlen=[2, 3], num_heads=2, scale=72**-0.5
+    )
+    torch.testing.assert_close(actual, query)
+    assert len(called) == 1
+    assert called[0]["scale"] == 72**-0.5
+    assert called[0]["actual_seq_lengths"] == [1, 3]
+    assert called[0]["actual_seq_lengths_kv"] == [2, 3]
+    assert called[0]["num_heads"] == called[0]["num_key_value_heads"] == 2
+    assert called[0]["sparse_mode"] == 0
+    assert called[0]["pre_tokens"] == called[0]["next_tokens"] == 2147483647
 
 
 @pytest.mark.skipif(
@@ -110,7 +134,7 @@ def test_other_attention_layouts_retain_torch_npu_dispatch(monkeypatch: pytest.M
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("lengths", [[16], [16, 7, 11]])
 @torch.inference_mode()
-def test_native_width_attention_matches_per_frame_sdpa(head_dim: int, dtype: torch.dtype, lengths: list[int]) -> None:
+def test_fia_attention_matches_per_frame_sdpa(head_dim: int, dtype: torch.dtype, lengths: list[int]) -> None:
     generator = torch.Generator().manual_seed(23)
     tensors = [torch.randn(sum(lengths), 4, head_dim, generator=generator).to(dtype) for _ in range(3)]
     expected = []
