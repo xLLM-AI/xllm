@@ -13,37 +13,43 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-// DualAffineLayerNorm: both branches share one FP32 row mean/centered variance
-// and then apply their own affine parameters. The operator ships as a custom
-// ACLNN package (vendor `dual_affine_layernorm_custom`); EXEC_NPU_CMD resolves
-// `aclnnDualAffineLayerNormGetWorkspaceSize`/`aclnnDualAffineLayerNorm` from the
-// installed `libcust_opapi.so`, so no extra link-time dependency is added here.
+// DualAffineLayerNorm: both branches share one FP32 row mean/centered
+// variance and then apply their own affine parameters. The operator ships as a
+// custom ACLNN package (vendor `dual_affine_layernorm_custom`); EXEC_NPU_CMD
+// resolves `aclnnDualAffineLayerNormGetWorkspaceSize`/
+// `aclnnDualAffineLayerNorm` from the installed `libcust_opapi.so`, so no extra
+// link-time dependency is added here.
 
 #include "core/kernels/npu/aclnn/pytorch_npu_helper.hpp"
-#include "xllm_ops_api.h"
+#include "core/kernels/npu/xllm_ops/xllm_ops_api.h"
 
 namespace xllm::kernel::npu {
 namespace {
 
-bool is_dual_affine_dtype(at::ScalarType dtype) {
-  return dtype == at::kHalf || dtype == at::kBFloat16;
+bool is_dual_affine_dtype(torch::ScalarType dtype) {
+  return dtype == torch::kHalf || dtype == torch::kBFloat16;
 }
 
 void check_dual_affine_layer_norm_inputs(const torch::Tensor& x,
-                                        const torch::Tensor& gamma1,
-                                        const torch::Tensor& beta1,
-                                        const torch::Tensor& gamma2,
-                                        const torch::Tensor& beta2,
-                                        double eps) {
+                                         const torch::Tensor& gamma1,
+                                         const torch::Tensor& beta1,
+                                         const torch::Tensor& gamma2,
+                                         const torch::Tensor& beta2,
+                                         double eps) {
   CHECK(x.defined() && gamma1.defined() && beta1.defined() &&
         gamma2.defined() && beta2.defined())
       << "dual_affine_layer_norm: all inputs must be defined";
+  CHECK(x.device().is_privateuseone())
+      << "dual_affine_layer_norm: x must be an NPU tensor";
   CHECK(x.dim() == 2) << "dual_affine_layer_norm: x must be [N, H]";
   CHECK(is_dual_affine_dtype(x.scalar_type()))
       << "dual_affine_layer_norm: x dtype must be float16 or bfloat16, got "
       << x.scalar_type();
-  CHECK(x.is_contiguous())
-      << "dual_affine_layer_norm: x must be ND contiguous";
+  // The ACLNN converter preserves FRACTAL_NZ, so reject packed storage here
+  // instead of forwarding a descriptor the kernel cannot consume.
+  CHECK(at_npu::native::custom_ops::get_npu_format(x) == ACL_FORMAT_ND)
+      << "dual_affine_layer_norm: x must use ND storage format";
+  CHECK(x.is_contiguous()) << "dual_affine_layer_norm: x must be contiguous";
   const int64_t n = x.size(0);
   const int64_t h = x.size(1);
   CHECK(n >= 1 && n <= 4096)
@@ -80,15 +86,8 @@ std::tuple<torch::Tensor, torch::Tensor> dual_affine_layer_norm_fwd(
   torch::Tensor y2 = torch::empty_like(x);
   const float eps_f = static_cast<float>(eps);
 
-  EXEC_NPU_CMD(aclnnDualAffineLayerNorm,
-               x,
-               gamma1,
-               beta1,
-               gamma2,
-               beta2,
-               eps_f,
-               y1,
-               y2);
+  EXEC_NPU_CMD(
+      aclnnDualAffineLayerNorm, x, gamma1, beta1, gamma2, beta2, eps_f, y1, y2);
 
   return {y1, y2};
 }
