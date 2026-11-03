@@ -17,6 +17,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, fields
+from math import lcm
 from typing import TYPE_CHECKING, Protocol, TypeGuard
 
 import torch
@@ -183,16 +184,26 @@ def detect_shared_kv_cache_layout(
     solve the static allocator equations exactly; shape ratios alone are not
     used as a layout signal.
     """
-    full = [cache for cache in layer_caches if cache.key is not None and cache.value is not None]
-    linear = [cache for cache in layer_caches if cache.conv is not None and cache.ssm is not None]
+    full = [cache for cache in layer_caches if cache.key is not None or cache.value is not None]
+    linear = [cache for cache in layer_caches if cache.conv is not None or cache.ssm is not None]
     if not full or not linear:
         return None
-    tensors = [tensor for cache in full + linear for tensor in (cache.key, cache.value, cache.conv, cache.ssm)]
-    assert all(tensor is not None for tensor in tensors)
-    spans = [_tensor_storage_span(tensor) for tensor in tensors if tensor is not None]
-    storage_ids = {span[0] for span in spans}
-    if len(storage_ids) != 1:
+    full_tensors = [tensor for cache in full for tensor in (cache.key, cache.value) if tensor is not None]
+    linear_tensors = [tensor for cache in linear for tensor in (cache.conv, cache.ssm) if tensor is not None]
+    full_storages = {(tensor.device, _tensor_storage_span(tensor)[0]) for tensor in full_tensors}
+    linear_storages = {(tensor.device, _tensor_storage_span(tensor)[0]) for tensor in linear_tensors}
+    if not full_storages.intersection(linear_storages):
         return None
+    if len(full_storages.union(linear_storages)) != 1:
+        raise ValueError("shared KV cache roles must expose one complete arena")
+    if any(
+        cache.key is None or cache.value is None or cache.conv is not None or cache.ssm is not None for cache in full
+    ):
+        raise ValueError("shared Full cache layers require only paired key/value roles")
+    if any(
+        cache.conv is None or cache.ssm is None or cache.key is not None or cache.value is not None for cache in linear
+    ):
+        raise ValueError("shared Linear cache layers require only paired Conv/SSM roles")
     unsupported = (
         "index",
         "swa",
@@ -205,6 +216,8 @@ def detect_shared_kv_cache_layout(
     )
     if any(getattr(cache, field_name) is not None for cache in layer_caches for field_name in unsupported):
         raise ValueError("shared static KV cache supports only Full key/value and Linear Conv/SSM roles")
+    role_tensors = full_tensors + linear_tensors
+    spans = [_tensor_storage_span(tensor) for tensor in role_tensors]
     arena_bytes = spans[0][2]
     if arena_bytes <= 0 or any(span[2] != arena_bytes for span in spans):
         raise ValueError("shared KV cache views must expose one complete arena")
@@ -214,18 +227,16 @@ def detect_shared_kv_cache_layout(
     conv = linear[0].conv
     ssm = linear[0].ssm
     assert key is not None and value is not None and conv is not None and ssm is not None
-    page_size_tokens = int(key.shape[1])
-    if page_size_tokens <= 0:
-        raise ValueError("shared Full cache page size must be positive")
     full_row_bytes = _tensor_row_bytes(key)
-    if _tensor_row_bytes(value) != full_row_bytes:
-        raise ValueError("shared Full key and value rows must have equal byte widths")
     conv_row_bytes = _tensor_row_bytes(conv)
     ssm_row_bytes = _tensor_row_bytes(ssm)
+    page_size_tokens = int(key.shape[1])
+    if page_size_tokens <= 0 or min(full_row_bytes, conv_row_bytes, ssm_row_bytes) <= 0:
+        raise ValueError("shared KV cache rows and Full page size must be positive")
     full_groups = (len(full) + 3) // 4
     linear_groups = len(linear)
     full_base = (int(key.shape[0]) - 1) * full_row_bytes
-    if full_groups <= 0 or arena_bytes <= full_base:
+    if arena_bytes <= full_base:
         raise ValueError("shared Full cache view does not fit the arena")
     page_bytes, remainder = divmod(arena_bytes - full_base, full_groups)
     if remainder or page_bytes <= 0:
@@ -233,56 +244,51 @@ def detect_shared_kv_cache_layout(
     if page_bytes % full_row_bytes or page_bytes % conv_row_bytes or page_bytes % ssm_row_bytes:
         raise ValueError("shared physical page bytes must align with every cache row")
     logical_page_count, remainder = divmod(arena_bytes, page_bytes)
-    if remainder or logical_page_count <= 0:
-        raise ValueError("shared arena size is not a whole number of physical pages")
+    if remainder or logical_page_count < max(full_groups, linear_groups):
+        raise ValueError("shared arena cannot fit a complete cache resource extent")
 
     conv_base = (int(conv.shape[0]) - 1) * conv_row_bytes
     expected_conv_base = (logical_page_count - linear_groups) * page_bytes
     if conv_base != expected_conv_base:
         raise ValueError("shared Conv cache view geometry is inconsistent")
-    ssm_base = (logical_page_count - linear_groups) * page_bytes
-    checkpoint_rows = int(ssm.shape[0]) - ssm_base // ssm_row_bytes
-    if checkpoint_rows <= 0 or ssm_base % ssm_row_bytes:
+    checkpoint_rows = int(ssm.shape[0]) - expected_conv_base // ssm_row_bytes
+    if checkpoint_rows <= 0:
         raise ValueError("shared SSM cache view geometry is inconsistent")
+    linear_ssm_offset = (conv_row_bytes + ssm_row_bytes - 1) // ssm_row_bytes * ssm_row_bytes
+    page_payload_bytes = max(8 * full_row_bytes, linear_ssm_offset + checkpoint_rows * ssm_row_bytes)
+    row_alignment = lcm(full_row_bytes, conv_row_bytes, ssm_row_bytes)
+    expected_page_bytes = (page_payload_bytes + row_alignment - 1) // row_alignment * row_alignment
+    if page_bytes != expected_page_bytes:
+        raise ValueError("shared physical page bytes do not match the static allocator layout")
 
-    role_tensors = [
-        tensor
-        for cache in full + linear
-        for tensor in (cache.key, cache.value, cache.conv, cache.ssm)
-        if tensor is not None
-    ]
-    for tensor in role_tensors:
-        assert tensor is not None
-        _, offset, capacity = _tensor_storage_span(tensor)
+    for tensor, (_, offset, capacity) in zip(role_tensors, spans, strict=True):
         row_bytes = _tensor_row_bytes(tensor)
         view_bytes = int(tensor.shape[0]) * row_bytes
         if offset < 0 or offset + view_bytes > capacity or offset % row_bytes:
             raise ValueError("shared KV cache role view is outside aligned arena storage")
 
-    for cache in full:
-        assert cache.key is not None and cache.value is not None
-        if cache.key.shape[1] != page_size_tokens or _tensor_row_bytes(cache.key) != full_row_bytes:
-            raise ValueError("shared Full key views have inconsistent page geometry")
-        if cache.value.shape[1] != page_size_tokens or _tensor_row_bytes(cache.value) != full_row_bytes:
-            raise ValueError("shared Full value views have inconsistent page geometry")
-    for cache in linear:
-        assert cache.conv is not None and cache.ssm is not None
-        if _tensor_row_bytes(cache.conv) != conv_row_bytes or _tensor_row_bytes(cache.ssm) != ssm_row_bytes:
-            raise ValueError("shared Linear views have inconsistent row geometry")
-
-    def _offset(tensor: torch.Tensor) -> int:
-        return _tensor_storage_span(tensor)[1]
-
-    linear_ssm_offset = (conv_row_bytes + ssm_row_bytes - 1) // ssm_row_bytes * ssm_row_bytes
     for layer_index, cache in enumerate(full):
         assert cache.key is not None and cache.value is not None
+        for tensor in (cache.key, cache.value):
+            if tensor.shape != key.shape or tensor.dtype != key.dtype:
+                raise ValueError("shared Full cache views have inconsistent page geometry")
         expected = (layer_index // 4) * page_bytes + (layer_index % 4) * 2 * full_row_bytes
-        if _offset(cache.key) != expected or _offset(cache.value) != expected + full_row_bytes:
+        if (
+            _tensor_storage_span(cache.key)[1] != expected
+            or _tensor_storage_span(cache.value)[1] != expected + full_row_bytes
+        ):
             raise ValueError("shared Full cache views do not match static page role offsets")
     for layer_index, cache in enumerate(linear):
         assert cache.conv is not None and cache.ssm is not None
+        if cache.conv.shape != conv.shape or cache.conv.dtype != key.dtype:
+            raise ValueError("shared Linear Conv views have inconsistent row geometry")
+        if cache.ssm.shape != ssm.shape or cache.ssm.dtype != ssm.dtype:
+            raise ValueError("shared Linear SSM views have inconsistent row geometry")
         expected = layer_index * page_bytes
-        if _offset(cache.conv) != expected or _offset(cache.ssm) != expected + linear_ssm_offset:
+        if (
+            _tensor_storage_span(cache.conv)[1] != expected
+            or _tensor_storage_span(cache.ssm)[1] != expected + linear_ssm_offset
+        ):
             raise ValueError("shared Linear cache views do not match static page role offsets")
 
     return SharedKVCacheLayout(
