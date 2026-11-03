@@ -39,6 +39,10 @@ namespace xllm {
 
 namespace {
 
+// Empty scheduler rounds normally retry every millisecond. Allow repeated
+// probes across physical-page growth backoff without retrying forever.
+constexpr size_t kMaxConsecutiveKvAllocationFailures = 4096;
+
 inline size_t maybe_align_cp_chunk_tokens(size_t num_tokens,
                                           int32_t kv_split_size,
                                           int32_t logical_block_size,
@@ -224,6 +228,7 @@ bool SchedulerPolicy::collect_terminal(
   if (request->cancelled() && state.release_failed_request) {
     state.release_failed_request(request);
   }
+  clear_kv_allocation_failures(request.get());
   clear_mtp_bootstrap(request.get(), state);
   state.kv_cache_manager->deallocate(request.get());
   finished.emplace_back(std::move(request));
@@ -251,6 +256,16 @@ std::vector<std::shared_ptr<Request>> SchedulerPolicy::collect_finished(
       };
   state.decode_queue.erase_if(std::ref(retire_decode_waiter));
   return finished_requests;
+}
+
+bool SchedulerPolicy::record_kv_allocation_failure(Request* request) {
+  size_t& failures = kv_allocation_failures_[request];
+  ++failures;
+  return failures >= kMaxConsecutiveKvAllocationFailures;
+}
+
+void SchedulerPolicy::clear_kv_allocation_failures(Request* request) {
+  kv_allocation_failures_.erase(request);
 }
 
 void SchedulerPolicy::reset_batch_state(SchedulerState& state) {
@@ -324,6 +339,7 @@ void SchedulerPolicy::schedule_prefill_from_queue(
       if (state.release_failed_request) {
         state.release_failed_request(request);
       }
+      clear_kv_allocation_failures(request.get());
       clear_mtp_bootstrap(request.get(), state);
       state.kv_cache_manager->deallocate(request.get());
       state.output_dispatcher->process_failed_request(
@@ -485,7 +501,13 @@ void SchedulerPolicy::schedule_prefill_from_queue(
         }
       }
       if (allocation_deferred) {
-        return;
+        // A failed VMM mapping can recover after resident work or an
+        // in-flight batch releases its pages. Bound consecutive failures so a
+        // persistent failure cannot occupy the FCFS head forever.
+        if (!record_kv_allocation_failure(request.get())) {
+          return;
+        }
+        blocks_exhausted = true;
       }
       break;
     }
@@ -507,6 +529,7 @@ void SchedulerPolicy::schedule_prefill_from_queue(
         prefill_sequences_budget.begin(),
         prefill_sequences_budget.end());
     cache_in_batch_prefix(prefill_sequences, prefill_sequences_budget, state);
+    clear_kv_allocation_failures(request.get());
 
     // Update reserved footprint for the admission gate.
     if (batch_mode_.enable_chunked_prefill) {
@@ -1057,6 +1080,7 @@ void SchedulerPolicy::handle_abnormal_decode_request(
 
     // Reject only a permanent token-budget or static-capacity limit.
     queue->pop_top();
+    clear_kv_allocation_failures(request.get());
     clear_mtp_bootstrap(request.get(), state);
     state.kv_cache_manager->deallocate(request.get());
     if (budget_exhausted) {
@@ -1089,6 +1113,7 @@ void SchedulerPolicy::handle_unschedulable_head(
     if (state.release_failed_request) {
       state.release_failed_request(request);
     }
+    clear_kv_allocation_failures(request.get());
     clear_mtp_bootstrap(request.get(), state);
     state.kv_cache_manager->deallocate(request.get());
     if (blocks_exhausted) {

@@ -811,14 +811,15 @@ bool DistributedVirtualMemoryCoordinator::try_reserve_pages(
     }
   }
   if (!reserved) {
-    LOG(WARNING) << "VMM physical page reservation failed: "
-                    "reason=shared_budget_exhausted"
-                 << " model_id=" << model_id << " dp_rank=" << dp_rank
-                 << " first_worker=" << first << " last_worker=" << last
-                 << " requested_pages_per_worker=" << physical_pages
-                 << " min_free_pages_per_worker="
-                 << page_budget_.min_free_pages(first, last)
-                 << " total_pages_per_worker=" << page_budget_.total_pages();
+    LOG_EVERY_N(WARNING, 1000)
+        << "VMM physical page reservation failed: "
+           "reason=shared_budget_exhausted"
+        << " model_id=" << model_id << " dp_rank=" << dp_rank
+        << " first_worker=" << first << " last_worker=" << last
+        << " requested_pages_per_worker=" << physical_pages
+        << " min_free_pages_per_worker="
+        << page_budget_.min_free_pages(first, last)
+        << " total_pages_per_worker=" << page_budget_.total_pages();
   }
   update_memory_usage_locked();
   return reserved;
