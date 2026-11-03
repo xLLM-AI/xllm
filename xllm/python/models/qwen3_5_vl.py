@@ -71,9 +71,6 @@ class Qwen3_5ForConditionalGeneration(Qwen3_5ForCausalLM):
             inputs_embeds.masked_scatter_(
                 mask.unsqueeze(-1), embeds.to(device=inputs_embeds.device, dtype=inputs_embeds.dtype)
             )
-        # PyExecutorImpl calls the two-argument decoder after this merge.
-        # The decoder consumes and clears this per-step state before its layers.
-        self.model._inputs_embeds = inputs_embeds if masks else None
         return inputs_embeds
 
     def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:

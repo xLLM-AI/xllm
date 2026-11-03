@@ -2865,6 +2865,55 @@ class SharedKVCacheBlockTest : public ::testing::Test {
   int32_t original_chunk_size_ = 0;
 };
 
+TEST_F(SharedKVCacheBlockTest, MultimodalPrefixIdentityKeepsBothGroupsAligned) {
+  for (const MMType modality : {MMType::IMAGE, MMType::VIDEO}) {
+    BlockManager::Options options =
+        shared_options(/*num_slots=*/48, /*enable_prefix_cache=*/true);
+    options.hasher_type(BlockHasherType::MTP_MM).num_speculative_tokens(4);
+    CompositeBlockManager manager(build_composite_leaves(options), options);
+    const auto make_multimodal = [modality](size_t index, uint8_t content_key) {
+      Sequence sequence = MakeTestSequence(index, std::vector<int32_t>(13, 7));
+      auto& item = sequence.mutable_mm_data().add(modality);
+      item.mutable_state().mutable_token_pos() = {5, 3};
+      item.mutable_state().mutable_schedule_data().key.data[0] = content_key;
+      return sequence;
+    };
+
+    Sequence producer = make_multimodal(/*index=*/0, /*content_key=*/1);
+    for (const size_t target : {4u, 8u, 12u, 13u}) {
+      ASSERT_TRUE(manager.allocate_sequence(&producer, target));
+      producer.kv_state().set_kv_cache_tokens_num(target);
+    }
+    manager.deallocate_for_sequence(&producer);
+
+    Sequence repeated = make_multimodal(/*index=*/1, /*content_key=*/1);
+    manager.allocate_shared_for_sequence(&repeated);
+    EXPECT_EQ(repeated.kv_cache_tokens_num(), 12u);
+    EXPECT_EQ(repeated.kv_state().shared_blocks_num(BlockType::KV), 6u);
+    EXPECT_EQ(repeated.kv_state().shared_blocks_num(BlockType::LINEAR), 3u);
+
+    Sequence changed = make_multimodal(/*index=*/2, /*content_key=*/2);
+    manager.allocate_shared_for_sequence(&changed);
+    // Only the text before the visual span may reuse its Full KV and GDN
+    // checkpoint. Equal placeholder token IDs do not identify visual content.
+    EXPECT_EQ(changed.kv_cache_tokens_num(), 4u);
+    EXPECT_EQ(changed.kv_state().shared_blocks_num(BlockType::KV), 2u);
+    EXPECT_EQ(changed.kv_state().shared_blocks_num(BlockType::LINEAR), 1u);
+    EXPECT_NE(changed.get_linear_state_slot_id(),
+              repeated.get_linear_state_slot_id());
+
+    Sequence text_only =
+        MakeTestSequence(/*index=*/3, std::vector<int32_t>(13, 7));
+    manager.allocate_shared_for_sequence(&text_only);
+    EXPECT_EQ(text_only.kv_cache_tokens_num(), 4u);
+    EXPECT_EQ(text_only.kv_state().shared_blocks_num(BlockType::KV), 2u);
+    EXPECT_EQ(text_only.kv_state().shared_blocks_num(BlockType::LINEAR), 1u);
+    manager.deallocate_for_sequence(&text_only);
+    manager.deallocate_for_sequence(&changed);
+    manager.deallocate_for_sequence(&repeated);
+  }
+}
+
 TEST_F(SharedKVCacheBlockTest, FullAndLinearReuseOnePhysicalIdSpace) {
   const BlockManager::Options options = shared_options(/*num_slots=*/5);
   CompositeBlockManager manager(build_composite_leaves(options), options);

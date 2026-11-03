@@ -392,10 +392,14 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
           audio_embeds,
           audio_mask->view(execution_tokens.sizes()));
     } else if (!image_embeds.is_none() || !video_embeds.is_none()) {
-      // Vision models retain their existing deepstack state and merge
-      // signature.
-      top_model.attr("get_input_embeddings")(
+      py::object visual_embedding = top_model.attr("get_input_embeddings")(
           execution_tokens, image_embeds, video_embeds);
+      if (args_.model_type() == "qwen3_5" ||
+          args_.model_type() == "qwen3_5_moe") {
+        // Qwen3.5 passes chunk-local visual rows explicitly; no mutable
+        // embedding state can survive into a decode or unified MTP replay.
+        input_embedding = std::move(visual_embedding);
+      }
     }
   }
 
@@ -426,11 +430,9 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
   py::object eplb_decode_token_mask =
       optional_tensor(params.expert.eplb_decode_token_mask);
 
-  // Execute: one C++ -> Python call per step. input_embedding stays None for
-  // the Qwen3-VL python path (embeddings are merged via the attribute set by
-  // get_input_embeddings above), so the runner takes the 2-arg model() branch
-  // and Qwen3VLModel.forward reads _inputs_embeds. positions_arg carries the
-  // mRoPE [3,N]->1-D decode collapse.
+  // Qwen3-VL retains its DeepStack merge state and two-argument decoder.
+  // Qwen3.5 visual prefill instead passes its embedding as the third argument.
+  // Pure decode has no visual embedding and uses the captured token path.
   py::kwargs graph_kwargs;
   if (layerwise_kv_load) {
     graph_kwargs["kv_load_synchronizer"] =
