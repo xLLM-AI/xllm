@@ -18,6 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <map>
+#include <numeric>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -298,13 +299,33 @@ int64_t KVCache::linear_checkpoint_stride() const {
 
 int64_t KVCache::physical_row_index(int64_t slot_id,
                                     KVCacheTensorRole role) const {
-  return slot_id < 0 ? slot_id : slot_id * cache_row_stride(role);
+  if (slot_id < 0 || static_layout_ == nullptr) {
+    return slot_id;
+  }
+  return static_cast<int64_t>(
+      static_layout_->row_index(static_cast<size_t>(slot_id), role));
 }
 
 torch::Tensor KVCache::physical_row_indices(const torch::Tensor& slot_ids,
                                             KVCacheTensorRole role) const {
+  if (!slot_ids.defined() || static_layout_ == nullptr) {
+    return slot_ids;
+  }
+  const size_t page_bytes = static_layout_->unit_bytes();
+  const size_t row_bytes = static_layout_->row_bytes(role);
+  if (page_bytes % row_bytes != 0) {
+    const size_t divisor = std::gcd(page_bytes, row_bytes);
+    const int64_t numerator = static_cast<int64_t>(page_bytes / divisor);
+    const int64_t denominator = static_cast<int64_t>(row_bytes / divisor);
+    const auto wide_ids = slot_ids.to(torch::kInt64);
+    const auto offsets = wide_ids.clamp_min(0) * numerator;
+    const auto rows = torch::floor_divide(offsets, denominator) +
+                      torch::remainder(offsets, denominator).ne(0);
+    return torch::where(wide_ids.lt(0), wide_ids, rows)
+        .to(slot_ids.scalar_type());
+  }
   const int64_t stride = cache_row_stride(role);
-  if (!slot_ids.defined() || stride == 1) {
+  if (stride == 1) {
     return slot_ids;
   }
   return torch::where(slot_ids.lt(0), slot_ids, slot_ids * stride);

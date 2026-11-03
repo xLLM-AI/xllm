@@ -20,8 +20,13 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
-from xllm.python.attention import backend as attention_backend
-from xllm.python.attention.backend import ExecutionMetadataSource, LayerCache, resolve_linear_state_io_indices
+from xllm.python.attention.backend import (
+    ExecutionMetadataSource,
+    LayerCache,
+    SharedKVCacheLayout,
+    detect_shared_kv_cache_layout,
+    resolve_linear_state_io_indices,
+)
 from xllm.python.layers.npu.qwen3_5.gdn_metadata import (
     GdnDecodeMetadata,
     GdnDummyMetadata,
@@ -38,35 +43,12 @@ if TYPE_CHECKING:
 _MEGA_GDN_CHUNK_SIZE = 128
 
 
-def _layout_value(layout: object, name: str, *aliases: str) -> int | None:
-    """Read one validated shared-cache layout field without coupling to its class."""
-    for field_name in (name, *aliases):
-        value = getattr(layout, field_name, None)
-        if value is not None:
-            if not isinstance(value, int) or value <= 0:
-                raise ValueError(f"Qwen3.5 shared cache layout field {field_name} must be positive")
-            return value
-    return None
-
-
-def _detect_shared_layout(layer_caches: list[LayerCache]) -> object | None:
-    detector = getattr(attention_backend, "detect_shared_kv_cache_layout", None)
-    if detector is not None:
-        return detector(layer_caches)
-    for cache in layer_caches:
-        layout = getattr(cache, "shared_layout", None)
-        if layout is not None:
-            return layout
-    return None
-
-
 def _build_mega_prefill_indices(
     read_state_indices: torch.Tensor,
     write_state_indices: torch.Tensor,
     has_initial_state: torch.Tensor,
     checkpoint_stride: int,
-    conv_page_row_stride: int | None = None,
-    ssm_page_row_stride: int | None = None,
+    shared_layout: SharedKVCacheLayout | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     if checkpoint_stride <= 0:
         raise ValueError("Qwen3.5 SSM checkpoint stride must be positive")
@@ -74,7 +56,7 @@ def _build_mega_prefill_indices(
         raise ValueError("Qwen3.5 state validity must be sequence-scoped")
     valid_read = has_initial_state & (read_state_indices > 0)
     conv_read = torch.where(valid_read, read_state_indices, -1)
-    if conv_page_row_stride is None or ssm_page_row_stride is None:
+    if shared_layout is None:
         if checkpoint_stride == 1:
             return conv_read, write_state_indices, conv_read, write_state_indices
         return (
@@ -83,28 +65,12 @@ def _build_mega_prefill_indices(
             torch.where(valid_read, read_state_indices * checkpoint_stride, -1),
             write_state_indices * checkpoint_stride,
         )
-    if conv_page_row_stride <= 0 or ssm_page_row_stride <= 0:
-        raise ValueError("Qwen3.5 shared cache page row strides must be positive")
-    conv_read = torch.where(valid_read, read_state_indices * conv_page_row_stride, -1)
-    conv_write = torch.where(
-        write_state_indices >= 0,
-        write_state_indices * conv_page_row_stride,
-        write_state_indices,
+    return (
+        shared_layout.linear_state_indices(conv_read, role="conv"),
+        shared_layout.linear_state_indices(write_state_indices, role="conv"),
+        shared_layout.linear_state_indices(conv_read, role="ssm"),
+        shared_layout.linear_state_indices(write_state_indices, role="ssm"),
     )
-    ssm_read = torch.where(valid_read, read_state_indices * ssm_page_row_stride, -1)
-    ssm_write = torch.where(
-        write_state_indices >= 0,
-        write_state_indices * ssm_page_row_stride,
-        write_state_indices,
-    )
-    return conv_read, conv_write, ssm_read, ssm_write
-
-
-def _scale_state_indices(indices: torch.Tensor, row_stride: int) -> torch.Tensor:
-    """Translate logical state slots while preserving negative padding sentinels."""
-    if row_stride <= 0:
-        raise ValueError("Qwen3.5 shared cache row stride must be positive")
-    return torch.where(indices >= 0, indices * row_stride, indices)
 
 
 def _compute_mega_prefill_num_matrices(query_lengths: list[int], num_value_heads: int) -> int:
@@ -130,23 +96,15 @@ class Qwen3_5GdnMetadataBuilder:
         self._state_caches: dict[int, GdnStateCache] | None = None
         self._checkpoint_stride: int | None = None
         self._device: torch.device | None = None
-        self._shared_layout: object | None = None
-        self._conv_page_row_stride: int | None = None
-        self._ssm_page_row_stride: int | None = None
+        self._shared_layout: SharedKVCacheLayout | None = None
 
     def bind_layer_caches(self, layer_caches: list[LayerCache]) -> None:
         state_caches: dict[int, GdnStateCache] = {}
         stride: int | None = None
         device: torch.device | None = None
-        shared_layout = _detect_shared_layout(layer_caches)
-        conv_page_row_stride: int | None = None
-        ssm_page_row_stride: int | None = None
+        shared_layout = detect_shared_kv_cache_layout(layer_caches)
         if shared_layout is not None:
-            conv_page_row_stride = _layout_value(shared_layout, "conv_row_stride", "conv_page_row_stride")
-            ssm_page_row_stride = _layout_value(shared_layout, "ssm_row_stride", "ssm_page_row_stride")
-            stride = _layout_value(shared_layout, "checkpoint_stride", "linear_checkpoint_stride")
-            if conv_page_row_stride is None or ssm_page_row_stride is None or stride is None:
-                raise ValueError("Qwen3.5 shared cache layout is missing GDN row strides")
+            stride = shared_layout.checkpoint_stride
         for layer_id in self._layer_ids:
             if layer_id >= len(layer_caches):
                 raise ValueError(f"GDN cache is missing for layer {layer_id}")
@@ -177,8 +135,6 @@ class Qwen3_5GdnMetadataBuilder:
         self._checkpoint_stride = stride
         self._device = device
         self._shared_layout = shared_layout
-        self._conv_page_row_stride = conv_page_row_stride
-        self._ssm_page_row_stride = ssm_page_row_stride
 
     def allocate_persistent(self, input_batch: InputBatch, metadata: ExecutionMetadataSource) -> GdnMetadata:
         if (
@@ -291,9 +247,8 @@ class Qwen3_5GdnMetadataBuilder:
                 raise ValueError("Qwen3.5 MegaGdnDecode requires one SSM row per Conv slot")
             if self._shared_layout is None:
                 return GdnDecodeMetadata(self._state_caches, read_indices, write_indices)
-            assert self._conv_page_row_stride is not None and self._ssm_page_row_stride is not None
-            conv_state_indices = _scale_state_indices(read_indices, self._conv_page_row_stride)
-            ssm_state_indices = _scale_state_indices(read_indices, self._ssm_page_row_stride)
+            conv_state_indices = self._shared_layout.linear_state_indices(read_indices, role="conv")
+            ssm_state_indices = self._shared_layout.linear_state_indices(read_indices, role="ssm")
             return GdnDecodeMetadata(
                 self._state_caches,
                 read_indices,
@@ -332,8 +287,7 @@ class Qwen3_5GdnMetadataBuilder:
             write_indices,
             has_initial_state.to(device=device, dtype=torch.bool),
             self._checkpoint_stride,
-            self._conv_page_row_stride,
-            self._ssm_page_row_stride,
+            self._shared_layout,
         )
         cu_seqlens = metadata.q_cu_seq_lens
         host_query_ends = getattr(metadata, "q_cu_seq_lens_host_values", None)
@@ -368,11 +322,10 @@ class Qwen3_5GdnMetadataBuilder:
     def _with_shared_verify_indices(self, metadata: GdnVerifyMetadata) -> GdnVerifyMetadata:
         if self._shared_layout is None:
             return metadata
-        assert self._conv_page_row_stride is not None and self._ssm_page_row_stride is not None
         return replace(
             metadata,
-            conv_state_indices=_scale_state_indices(metadata.state_indices, self._conv_page_row_stride),
-            ssm_state_indices=_scale_state_indices(metadata.state_indices, self._ssm_page_row_stride),
+            conv_state_indices=self._shared_layout.linear_state_indices(metadata.state_indices, role="conv"),
+            ssm_state_indices=self._shared_layout.linear_state_indices(metadata.state_indices, role="ssm"),
         )
 
     def _build_verify(
