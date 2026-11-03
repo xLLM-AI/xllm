@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <torch/types.h>
 
+#include <chrono>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -39,6 +40,7 @@ enum class PhysicalPagePoolFailureReason {
   REQUEST_SIZE_OVERFLOW,
   INSUFFICIENT_FREE_MEMORY,
   PHYSICAL_PAGE_CREATION,
+  GROWTH_BACKOFF,
   POST_ALLOCATION_MEMORY_QUERY_FAILED,
   POST_ALLOCATION_HEADROOM,
   SHARED_PAGE_MAPPING,
@@ -176,6 +178,14 @@ class PhysicalPagePool final {
       size_t free_bytes,
       std::optional<AllocatorMemoryStats> allocator_stats) const;
   void reserve_pages_locked(const std::vector<page_id_t>& page_ids);
+  bool growth_backoff_active_locked(size_t growth_pages) const;
+  void record_growth_failure_locked(size_t growth_pages);
+
+  struct GrowthPressure {
+    size_t failed_growth_pages;
+    std::chrono::milliseconds retry_delay;
+    std::chrono::steady_clock::time_point retry_after;
+  };
 
   PhysicalPagePool() = default;
   ~PhysicalPagePool() = default;
@@ -193,6 +203,7 @@ class PhysicalPagePool final {
   size_t allocation_headroom_bytes_ = 0;
   size_t growth_reserve_bytes_ = 0;
   VmmMemoryBudget execution_memory_budget_;
+  std::optional<GrowthPressure> growth_pressure_;
 
   mutable std::mutex mtx_;
   // Pages owned by the pool, indexed by page_id.
@@ -219,6 +230,7 @@ class PhysicalPagePool final {
   std::function<std::optional<int64_t>()> free_memory_query_;
   std::function<std::optional<AllocatorMemoryStats>()> allocator_memory_query_;
   std::function<std::unique_ptr<PhysicalPage>(page_id_t)> page_factory_;
+  std::function<std::chrono::steady_clock::time_point()> growth_clock_;
 };
 
 }  // namespace xllm

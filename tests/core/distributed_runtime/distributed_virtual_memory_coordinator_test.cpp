@@ -22,11 +22,13 @@ limitations under the License.
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <future>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "core/distributed_runtime/worker_memory_rpc_client.h"
@@ -230,17 +232,44 @@ class TransactionTestService final : public proto::ModelMemoryDist {
     response->set_ok(true);
   }
 
-  void GetMemoryInfo(google::protobuf::RpcController* /*controller*/,
+  void GetMemoryInfo(google::protobuf::RpcController* controller,
                      const proto::Status* /*request*/,
                      proto::MemoryInfoResponse* response,
                      google::protobuf::Closure* done) override {
     brpc::ClosureGuard done_guard(done);
+    std::function<void()> reply_barrier;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      response->set_available_memory(available_memory_);
+      response->set_total_memory(total_memory_);
+      response->set_pool_initialized(true);
+      response->set_pool_allocatable_pages(allocatable_pages_);
+      ++memory_info_calls_;
+      if (memory_info_failure_after_ >= 0 &&
+          memory_info_calls_ > memory_info_failure_after_) {
+        controller->SetFailed("injected memory info query failure");
+        return;
+      }
+      reply_barrier = memory_info_reply_barrier_;
+    }
+    if (reply_barrier) {
+      reply_barrier();
+    }
+  }
+
+  void set_memory_info_reply_barrier(std::function<void()> barrier) {
     std::lock_guard<std::mutex> lock(mutex_);
-    response->set_available_memory(available_memory_);
-    response->set_total_memory(total_memory_);
-    response->set_pool_initialized(true);
-    response->set_pool_allocatable_pages(allocatable_pages_);
-    ++memory_info_calls_;
+    memory_info_reply_barrier_ = std::move(barrier);
+  }
+
+  void set_memory_info_failure_after(int32_t calls) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    memory_info_failure_after_ = calls;
+  }
+
+  void set_allocatable_pages(size_t pages) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    allocatable_pages_ = pages;
   }
 
   void InitPhysicalPagePool(google::protobuf::RpcController* /*controller*/,
@@ -353,7 +382,7 @@ class TransactionTestService final : public proto::ModelMemoryDist {
 
  private:
   const MappingFailure failure_;
-  const size_t allocatable_pages_;
+  size_t allocatable_pages_;
   const int64_t available_memory_;
   const int64_t total_memory_;
   mutable std::mutex mutex_;
@@ -365,6 +394,8 @@ class TransactionTestService final : public proto::ModelMemoryDist {
   uint64_t growth_memory_reserve_bytes_ = 0;
   bool lazy_ = false;
   int32_t memory_info_calls_ = 0;
+  int32_t memory_info_failure_after_ = -1;
+  std::function<void()> memory_info_reply_barrier_;
 };
 
 class TransactionTestServer final {
@@ -392,7 +423,7 @@ class TransactionTestServer final {
   std::string address() const {
     return "127.0.0.1:" + std::to_string(server_.listen_address().port);
   }
-  const TransactionTestService& service() const { return service_; }
+  TransactionTestService& service() { return service_; }
 
  private:
   TransactionTestService service_;
@@ -766,6 +797,8 @@ TEST(DistributedVirtualMemoryCoordinatorTest,
                                   /*enable_prealloc=*/false);
     DistributedVirtualMemoryCoordinatorTestPeer::connect(
         *coordinator, {first.address(), second.address()});
+    DistributedVirtualMemoryCoordinatorTestPeer::
+        refresh_worker_capacity_snapshot(*coordinator);
     ASSERT_TRUE(coordinator->try_reserve_pages(
         "model", /*dp_rank=*/0, /*physical_pages=*/2));
     EXPECT_FALSE(coordinator->map_pages("model", /*dp_rank=*/0, {0}));
@@ -779,6 +812,143 @@ TEST(DistributedVirtualMemoryCoordinatorTest,
     EXPECT_EQ(coordinator->get_worker_free_page_counts(),
               std::vector<size_t>({10, 10}));
   }
+}
+
+TEST_F(ElasticPoolInitializationTest,
+       CapacityQueryFailureDoesNotRejectStartupPadding) {
+  const int64_t page_size =
+      KVCacheConfig::get_instance().phy_page_granularity_size();
+  TransactionTestServer first(
+      MappingFailure::NONE, 10, 20 * page_size, 40 * page_size);
+  TransactionTestServer second(
+      MappingFailure::NONE, 10, 20 * page_size, 40 * page_size);
+  ASSERT_EQ(first.start(), 0);
+  ASSERT_EQ(second.start(), 0);
+  // The bootstrap memory query succeeds, but every post-init query fails.
+  first.service().set_memory_info_failure_after(1);
+  second.service().set_memory_info_failure_after(1);
+  auto coordinator = DistributedVirtualMemoryCoordinatorTestPeer::create();
+  DistributedVirtualMemoryCoordinatorTestPeer::connect(
+      *coordinator, {first.address(), second.address()});
+  ASSERT_EQ(coordinator->init_physical_page_pools(0.75, 0), 40);
+  coordinator->init_page_budget(/*total_pages=*/40,
+                                /*dp_size=*/1,
+                                /*worker_count=*/2,
+                                /*page_size=*/page_size,
+                                /*enable_prealloc=*/false);
+
+  ASSERT_TRUE(coordinator->try_reserve_pages(
+      "model", /*dp_rank=*/0, /*physical_pages=*/2));
+  EXPECT_TRUE(coordinator->map_pages("model", /*dp_rank=*/0, {0}));
+  EXPECT_EQ(coordinator->available_pages("model", /*dp_rank=*/0), 38);
+}
+
+TEST_F(ElasticPoolInitializationTest,
+       FailedCapacityQueryPreservesConsumedBudgetAndHealthyDp) {
+  TransactionTestServer first(MappingFailure::NONE, /*allocatable_pages=*/3);
+  TransactionTestServer second(MappingFailure::NONE, /*allocatable_pages=*/4);
+  ASSERT_EQ(first.start(), 0);
+  ASSERT_EQ(second.start(), 0);
+  auto coordinator = DistributedVirtualMemoryCoordinatorTestPeer::create();
+  coordinator->init_page_budget(/*total_pages=*/10,
+                                /*dp_size=*/2,
+                                /*worker_count=*/2,
+                                /*page_size=*/4096,
+                                /*enable_prealloc=*/false);
+  DistributedVirtualMemoryCoordinatorTestPeer::connect(
+      *coordinator, {first.address(), second.address()});
+  coordinator->set_model_parallel_strategy(
+      "model", /*dp_size=*/2, /*tp_size=*/1);
+  DistributedVirtualMemoryCoordinatorTestPeer::refresh_worker_capacity_snapshot(
+      *coordinator);
+  first.service().set_memory_info_failure_after(0);
+  second.service().set_allocatable_pages(7);
+  std::promise<void> sampled;
+  auto sampled_reply = sampled.get_future();
+  std::promise<void> release_reply;
+  auto released = release_reply.get_future().share();
+  second.service().set_memory_info_reply_barrier([&sampled, released]() {
+    sampled.set_value();
+    released.wait();
+  });
+  auto refresh = std::async(std::launch::async, [&coordinator]() {
+    DistributedVirtualMemoryCoordinatorTestPeer::
+        refresh_worker_capacity_snapshot(*coordinator);
+  });
+  const auto status = sampled_reply.wait_for(std::chrono::seconds(1));
+  EXPECT_EQ(status, std::future_status::ready);
+  if (status == std::future_status::ready) {
+    EXPECT_TRUE(coordinator->try_reserve_pages(
+        "model", /*dp_rank=*/0, /*physical_pages=*/2));
+    coordinator->release_pages("model", /*dp_rank=*/0, /*physical_pages=*/2);
+  }
+  release_reply.set_value();
+  refresh.get();
+  second.service().set_memory_info_reply_barrier({});
+  EXPECT_EQ(coordinator->available_pages("model", /*dp_rank=*/0), 1);
+  EXPECT_FALSE(coordinator->try_reserve_pages(
+      "model", /*dp_rank=*/0, /*physical_pages=*/2));
+  EXPECT_EQ(coordinator->available_pages("model", /*dp_rank=*/1), 7);
+  EXPECT_TRUE(coordinator->try_reserve_pages(
+      "model", /*dp_rank=*/1, /*physical_pages=*/5));
+}
+
+TEST_F(ElasticPoolInitializationTest, FailedMappingDiscardsOlderCapacityReply) {
+  TransactionTestServer first;
+  TransactionTestServer second(MappingFailure::PREPARE);
+  ASSERT_EQ(first.start(), 0);
+  ASSERT_EQ(second.start(), 0);
+  auto coordinator = DistributedVirtualMemoryCoordinatorTestPeer::create();
+  coordinator->init_page_budget(/*total_pages=*/10,
+                                /*dp_size=*/1,
+                                /*worker_count=*/2,
+                                /*page_size=*/4096,
+                                /*enable_prealloc=*/false);
+  DistributedVirtualMemoryCoordinatorTestPeer::connect(
+      *coordinator, {first.address(), second.address()});
+  DistributedVirtualMemoryCoordinatorTestPeer::refresh_worker_capacity_snapshot(
+      *coordinator);
+  ASSERT_EQ(coordinator->available_pages("model", /*dp_rank=*/0), 10);
+
+  std::promise<void> sampled;
+  auto sampled_reply = sampled.get_future();
+  std::promise<void> release_reply;
+  auto released = release_reply.get_future().share();
+  second.service().set_memory_info_reply_barrier([&sampled, released]() {
+    sampled.set_value();
+    released.wait();
+  });
+  auto refresh = std::async(std::launch::async, [&coordinator]() {
+    DistributedVirtualMemoryCoordinatorTestPeer::
+        refresh_worker_capacity_snapshot(*coordinator);
+  });
+  const auto status = sampled_reply.wait_for(std::chrono::seconds(1));
+  EXPECT_EQ(status, std::future_status::ready);
+  if (status == std::future_status::ready) {
+    EXPECT_TRUE(coordinator->try_reserve_pages(
+        "model", /*dp_rank=*/0, /*physical_pages=*/2));
+    EXPECT_FALSE(coordinator->map_pages("model", /*dp_rank=*/0, {0}));
+    coordinator->release_pages("model", /*dp_rank=*/0, /*physical_pages=*/2);
+    EXPECT_EQ(coordinator->available_pages("model", /*dp_rank=*/0), 0);
+  }
+  release_reply.set_value();
+  refresh.get();
+  second.service().set_memory_info_reply_barrier({});
+  // The delayed reply sampled before the allocation failure cannot reopen
+  // admission. Rolling back logical accounting does not prove recovery.
+  EXPECT_EQ(coordinator->available_pages("model", /*dp_rank=*/0), 0);
+
+  second.service().set_memory_info_failure_after(0);
+  DistributedVirtualMemoryCoordinatorTestPeer::refresh_worker_capacity_snapshot(
+      *coordinator);
+  EXPECT_EQ(coordinator->available_pages("model", /*dp_rank=*/0), 0);
+  EXPECT_FALSE(coordinator->try_reserve_pages(
+      "model", /*dp_rank=*/0, /*physical_pages=*/2));
+  second.service().set_memory_info_failure_after(-1);
+  second.service().set_allocatable_pages(4);
+  DistributedVirtualMemoryCoordinatorTestPeer::refresh_worker_capacity_snapshot(
+      *coordinator);
+  EXPECT_EQ(coordinator->available_pages("model", /*dp_rank=*/0), 4);
 }
 
 TEST(DistributedVirtualMemoryCoordinatorTest,
@@ -808,11 +978,21 @@ TEST(DistributedVirtualMemoryCoordinatorTest,
   EXPECT_EQ(coordinator->available_pages("model", /*dp_rank=*/0), 3);
   const int32_t first_calls = first.service().memory_info_calls();
   const int32_t second_calls = second.service().memory_info_calls();
-  ASSERT_TRUE(coordinator->try_reserve_pages(
+  EXPECT_FALSE(coordinator->try_reserve_pages(
       "model", /*dp_rank=*/0, /*physical_pages=*/8));
-  EXPECT_EQ(coordinator->available_pages("model", /*dp_rank=*/0), 2);
+  EXPECT_EQ(coordinator->available_pages("model", /*dp_rank=*/0), 3);
+  ASSERT_TRUE(coordinator->try_reserve_pages(
+      "model", /*dp_rank=*/0, /*physical_pages=*/2));
+  EXPECT_EQ(coordinator->available_pages("model", /*dp_rank=*/0), 1);
+  EXPECT_FALSE(coordinator->try_reserve_pages(
+      "model", /*dp_rank=*/0, /*physical_pages=*/2));
+  coordinator->release_pages("model", /*dp_rank=*/0, /*physical_pages=*/2);
+  EXPECT_EQ(coordinator->available_pages("model", /*dp_rank=*/0), 1);
   EXPECT_EQ(first.service().memory_info_calls(), first_calls);
   EXPECT_EQ(second.service().memory_info_calls(), second_calls);
+  DistributedVirtualMemoryCoordinatorTestPeer::refresh_worker_capacity_snapshot(
+      *coordinator);
+  EXPECT_EQ(coordinator->available_pages("model", /*dp_rank=*/0), 3);
 }
 
 TEST(DistributedVirtualMemoryCoordinatorTest,

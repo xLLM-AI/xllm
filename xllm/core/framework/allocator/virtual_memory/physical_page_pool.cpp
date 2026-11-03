@@ -27,6 +27,9 @@ limitations under the License.
 namespace xllm {
 namespace {
 
+constexpr std::chrono::milliseconds kInitialGrowthBackoff{250};
+constexpr std::chrono::milliseconds kMaxGrowthBackoff{4000};
+
 size_t saturating_subtract(size_t value, size_t subtrahend) {
   return value >= subtrahend ? value - subtrahend : 0;
 }
@@ -50,6 +53,8 @@ const char* physical_page_pool_failure_reason_name(
       return "insufficient_free_memory";
     case PhysicalPagePoolFailureReason::PHYSICAL_PAGE_CREATION:
       return "physical_page_creation";
+    case PhysicalPagePoolFailureReason::GROWTH_BACKOFF:
+      return "growth_backoff";
     case PhysicalPagePoolFailureReason::POST_ALLOCATION_MEMORY_QUERY_FAILED:
       return "post_allocation_memory_query_failed";
     case PhysicalPagePoolFailureReason::POST_ALLOCATION_HEADROOM:
@@ -100,6 +105,7 @@ void PhysicalPagePool::init(const torch::Device& device,
   page_factory_ = [this](page_id_t page_id) {
     return PhysicalPage::try_create(device_, page_size_, page_id);
   };
+  growth_clock_ = []() { return std::chrono::steady_clock::now(); };
   // Slot geometry remains stable independently of resident physical backing.
   for (size_t i = 0; i < initial_num_pages; ++i) {
     const page_id_t page_id = static_cast<page_id_t>(i);
@@ -136,6 +142,8 @@ bool PhysicalPagePool::reset() {
   page_factory_ = {};
   free_memory_query_ = {};
   allocator_memory_query_ = {};
+  growth_clock_ = {};
+  growth_pressure_.reset();
   num_total_pages_ = 0;
   num_active_pages_ = 0;
   num_allocated_pages_ = 0;
@@ -205,6 +213,9 @@ bool PhysicalPagePool::materialize_pages_locked(
     return fail(PhysicalPagePoolFailureReason::REQUEST_SIZE_OVERFLOW);
   }
   const size_t required_bytes = missing.size() * page_size_ + headroom;
+  const size_t growth_pages =
+      saturating_subtract(static_cast<size_t>(*free_bytes), headroom) /
+      page_size_;
   if (static_cast<uint64_t>(*free_bytes) < required_bytes) {
     LOG(WARNING)
         << "PhysicalPagePool growth failed: "
@@ -228,6 +239,9 @@ bool PhysicalPagePool::materialize_pages_locked(
         << " active_pages=" << num_active_pages_
         << " total_pages=" << num_total_pages_;
     return fail(PhysicalPagePoolFailureReason::INSUFFICIENT_FREE_MEMORY);
+  }
+  if (growth_backoff_active_locked(growth_pages)) {
+    return fail(PhysicalPagePoolFailureReason::GROWTH_BACKOFF);
   }
   std::vector<std::unique_ptr<PhysicalPage>> pending;
   std::vector<PhysicalPage*> pending_ptrs;
@@ -260,6 +274,10 @@ bool PhysicalPagePool::materialize_pages_locked(
           << " committed_pages=" << num_committed_pages_
           << " pending_pages=" << pending.size()
           << " allocated_pages=" << num_allocated_pages_;
+      // Rollback is not recovered capacity. Start the delay after private
+      // handles are released and retain the budget from before allocation.
+      pending.clear();
+      record_growth_failure_locked(growth_pages);
       return fail(PhysicalPagePoolFailureReason::PHYSICAL_PAGE_CREATION);
     }
     pending_ptrs.emplace_back(page.get());
@@ -361,7 +379,27 @@ bool PhysicalPagePool::materialize_pages_locked(
     all_pages_[page_id] = std::move(pending[i]);
   }
   num_committed_pages_ += missing.size();
+  growth_pressure_.reset();
   return true;
+}
+
+bool PhysicalPagePool::growth_backoff_active_locked(size_t growth_pages) const {
+  return growth_pressure_.has_value() &&
+         growth_pages <= growth_pressure_->failed_growth_pages &&
+         growth_clock_() < growth_pressure_->retry_after;
+}
+
+void PhysicalPagePool::record_growth_failure_locked(size_t growth_pages) {
+  const std::chrono::milliseconds delay =
+      growth_pressure_.has_value()
+          ? std::min(growth_pressure_->retry_delay * 2, kMaxGrowthBackoff)
+          : kInitialGrowthBackoff;
+  const size_t failed_growth_pages =
+      growth_pressure_.has_value()
+          ? std::max(growth_pressure_->failed_growth_pages, growth_pages)
+          : growth_pages;
+  growth_pressure_ =
+      GrowthPressure{failed_growth_pages, delay, growth_clock_() + delay};
 }
 
 std::unique_ptr<PhysicalPage> PhysicalPagePool::get() {
@@ -674,6 +712,9 @@ size_t PhysicalPagePool::num_allocatable() const {
   }
   const size_t growth_pages =
       (static_cast<size_t>(*free_bytes) - headroom) / page_size_;
+  if (growth_backoff_active_locked(growth_pages)) {
+    return idle_pages;
+  }
   return idle_pages + std::min(uncommitted_pages, growth_pages);
 }
 

@@ -443,6 +443,7 @@ bool DistributedVirtualMemoryCoordinator::broadcast_map_to_kv_tensors(
     }
     CHECK(resources.abort_kv_mapping(transaction_id))
         << "Local KV mapping rollback failed; physical ownership is uncertain";
+    invalidate_worker_capacity_snapshot(model_id, dp_rank);
     return false;
   }
 
@@ -492,6 +493,7 @@ bool DistributedVirtualMemoryCoordinator::broadcast_map_to_kv_tensors(
   CHECK(all_succeeded(futures)) << "Distributed KV mapping rollback was not "
                                    "acknowledged by every worker; "
                                    "physical page ownership is uncertain";
+  invalidate_worker_capacity_snapshot(model_id, dp_rank);
   return false;
 }
 
@@ -798,7 +800,16 @@ bool DistributedVirtualMemoryCoordinator::try_reserve_pages(
                  << " worker_count=" << page_budget_.worker_count();
     return false;
   }
+  const bool elastic = KVCacheConfig::get_instance().vmm_elastic();
+  if (elastic && physical_pages > available_pages_locked(first, last)) {
+    return false;
+  }
   const bool reserved = page_budget_.try_reserve(first, last, physical_pages);
+  if (reserved && elastic) {
+    for (int32_t worker = first; worker < last; ++worker) {
+      worker_allocatable_pages_[static_cast<size_t>(worker)] -= physical_pages;
+    }
+  }
   if (!reserved) {
     LOG(WARNING) << "VMM physical page reservation failed: "
                     "reason=shared_budget_exhausted"
@@ -822,6 +833,8 @@ void DistributedVirtualMemoryCoordinator::release_pages(
   const auto [first, last] = dp_worker_range_locked(model_id, dp_rank);
   CHECK_LT(first, last);
   page_budget_.release(first, last, physical_pages);
+  // A logical rollback does not prove recovery of the worker's live growth
+  // budget. The next capacity snapshot observes returned resident pages.
   update_memory_usage_locked();
 }
 
@@ -833,6 +846,12 @@ size_t DistributedVirtualMemoryCoordinator::available_pages(
   if (first == last) {
     return 0;
   }
+  return available_pages_locked(first, last);
+}
+
+size_t DistributedVirtualMemoryCoordinator::available_pages_locked(
+    int32_t first,
+    int32_t last) const {
   size_t available = page_budget_.min_free_pages(first, last);
   if (!KVCacheConfig::get_instance().vmm_elastic()) {
     return available;
@@ -844,43 +863,45 @@ size_t DistributedVirtualMemoryCoordinator::available_pages(
     available = std::min(
         available, worker_allocatable_pages_[static_cast<size_t>(worker)]);
   }
-  // This is an advisory snapshot. Mapping prepare rechecks the live worker
-  // budget before publishing any page ownership.
+  // Reservations consume this snapshot until the next refresh. Mapping prepare
+  // still rechecks driver memory before publishing physical page ownership.
   return available;
 }
 
-void DistributedVirtualMemoryCoordinator::refresh_worker_capacity_snapshot() {
-  const auto invalidate_snapshot = [this]() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    std::fill(
-        worker_allocatable_pages_.begin(), worker_allocatable_pages_.end(), 0);
-  };
+void DistributedVirtualMemoryCoordinator::invalidate_worker_capacity_snapshot(
+    const std::string& model_id,
+    int32_t dp_rank) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  ++worker_capacity_generation_;
+  const auto [first, last] = dp_worker_range_locked(model_id, dp_rank);
+  std::fill(worker_allocatable_pages_.begin() + first,
+            worker_allocatable_pages_.begin() + last,
+            0);
+}
 
+void DistributedVirtualMemoryCoordinator::refresh_worker_capacity_snapshot() {
   std::vector<std::shared_ptr<WorkerMemoryRpcClient>> workers;
   bool distributed = false;
   int32_t expected_worker_count = 0;
+  uint64_t generation;
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    generation = worker_capacity_generation_;
     distributed = world_size_ > 1;
     expected_worker_count = world_size_;
     if (distributed) {
       workers = clients_;
     }
   }
-
-  std::vector<size_t> capacities;
+  std::vector<std::optional<size_t>> capacities;
   capacities.reserve(distributed ? workers.size() : 1);
   if (!distributed) {
     const WorkerMemoryCapacity capacity =
         WorkerMemoryResources::get_instance().memory_capacity_snapshot();
-    if (!capacity.pool_initialized) {
-      invalidate_snapshot();
-      return;
-    }
-    capacities.emplace_back(capacity.pool_allocatable_pages);
+    capacities.emplace_back(
+        capacity.pool_initialized ? capacity.pool_allocatable_pages : 0);
   } else {
     if (workers.size() != static_cast<size_t>(expected_worker_count)) {
-      invalidate_snapshot();
       return;
     }
     std::vector<folly::SemiFuture<MemoryInfo>> futures;
@@ -890,22 +911,33 @@ void DistributedVirtualMemoryCoordinator::refresh_worker_capacity_snapshot() {
           worker->get_memory_info_async(kCapacityQueryTimeoutMs));
     }
     const auto results = folly::collectAll(futures).get();
-    capacities.reserve(results.size());
     for (const auto& result : results) {
-      if (!result.hasValue() || !result.value().pool_initialized) {
-        invalidate_snapshot();
-        return;
+      if (!result.hasValue()) {
+        capacities.emplace_back(std::nullopt);
+        continue;
       }
-      capacities.emplace_back(result.value().pool_allocatable_pages);
+      const auto& info = result.value();
+      capacities.emplace_back(
+          info.pool_initialized ? info.pool_allocatable_pages : 0);
     }
   }
 
   std::lock_guard<std::mutex> lock(mutex_);
-  if (capacities.size() == worker_allocatable_pages_.size()) {
-    worker_allocatable_pages_ = std::move(capacities);
-  } else {
-    std::fill(
-        worker_allocatable_pages_.begin(), worker_allocatable_pages_.end(), 0);
+  // A prepare failure can overlap the capacity RPC. Its older reply must not
+  // immediately restore growth that the worker has just failed to allocate.
+  if (generation != worker_capacity_generation_) {
+    return;
+  }
+  if (capacities.size() != worker_allocatable_pages_.size()) {
+    return;
+  }
+  for (size_t worker = 0; worker < capacities.size(); ++worker) {
+    if (!capacities[worker].has_value()) {
+      // A failed query is unknown capacity, not confirmed memory pressure.
+      // Preserve the current balance, including reservations made in flight.
+      continue;
+    }
+    worker_allocatable_pages_[worker] = capacities[worker].value();
   }
 }
 

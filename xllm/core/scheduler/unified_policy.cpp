@@ -104,6 +104,7 @@ void UnifiedPolicy::schedule_from_unified_queue(
           : std::numeric_limits<int32_t>::max();
 
   std::vector<std::shared_ptr<Request>> preempted_request_vec;
+  std::list<std::shared_ptr<Request>> deferred_prefill;
   bool is_preempt_iterator_valid = true;
   auto preempt_iterator = std::prev(unified.end());
 
@@ -128,6 +129,27 @@ void UnifiedPolicy::schedule_from_unified_queue(
     const size_t num_sequences = request->sequences().size();
     CHECK(num_sequences == 1) << "MixScheduler currently only supports one "
                                  "sequence per request.";
+
+    Sequence* candidate = request->sequences().front().get();
+    const size_t total_target_tokens =
+        candidate->is_prefill_stage()
+            ? candidate->num_tokens()
+            : candidate->num_tokens() + state.min_speculative_tokens_required;
+    if (state.kv_cache_manager->exceeds_total_capacity(candidate,
+                                                       total_target_tokens)) {
+      unified.pop_front();
+      clear_mtp_bootstrap(request.get(), state);
+      state.kv_cache_manager->deallocate(request.get());
+      state.output_dispatcher->process_failed_request(
+          request,
+          {StatusCode::RESOURCE_EXHAUSTED,
+           "Request exceeds total KV cache capacity"});
+      continue;
+    }
+    if (budget.kv_allocation_deferred && candidate->is_prefill_stage()) {
+      deferred_prefill.splice(deferred_prefill.end(), unified, unified.begin());
+      continue;
+    }
 
     std::vector<Sequence*> candidate_sequences;
     std::vector<size_t> candidate_token_budgets;
@@ -267,6 +289,7 @@ void UnifiedPolicy::schedule_from_unified_queue(
       }
       if (!alloc_success) {
         blocks_exhausted = true;
+        budget.kv_allocation_deferred = true;
         break;
       }
 
@@ -314,6 +337,10 @@ void UnifiedPolicy::schedule_from_unified_queue(
       break;
     }
 
+    if (candidate->is_prefill_stage()) {
+      deferred_prefill.splice(deferred_prefill.end(), unified, unified.begin());
+      continue;
+    }
     if (has_pending_block_release(state)) {
       break;
     }
@@ -347,25 +374,8 @@ void UnifiedPolicy::schedule_from_unified_queue(
       continue;
     }
 
-    // No enough memory to preempt.
-    if (candidate_sequences.empty() && state.running_sequences.empty()) {
-      if (has_pending_block_release(state)) {
-        VLOG(1) << "[HostCache][AdmissionDeferred] request="
-                << request->request_id()
-                << " waiting for asynchronous block release";
-      } else {
-        LOG(ERROR)
-            << "Request prompt is too long, no enough memory to schedule "
-            << "a single sequence.";
-        unified.pop_front();
-        clear_mtp_bootstrap(request.get(), state);
-        state.kv_cache_manager->deallocate(request.get());
-        state.output_dispatcher->process_failed_request(
-            request,
-            {StatusCode::RESOURCE_EXHAUSTED,
-             "No enough resource to schedule a single sequence"});
-      }
-    }
+    // Static capacity was checked before allocation. With no lower-priority
+    // work left to preempt, retain the request until backing memory is free.
     break;
   }
 
@@ -374,6 +384,7 @@ void UnifiedPolicy::schedule_from_unified_queue(
     unified.push_back(preempted_request_vec.back());
     preempted_request_vec.pop_back();
   }
+  unified.splice(unified.begin(), deferred_prefill);
 }
 
 // =============================================================================

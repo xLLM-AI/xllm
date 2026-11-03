@@ -90,6 +90,9 @@ struct ScheduleBudget {
   // current scheduling round.
   std::vector<size_t> dp_group_token_caps;
   std::vector<size_t> dp_group_token_used;
+  // A real allocation failure stops further prefill growth in this round.
+  // The next round retries after already scheduled work can release memory.
+  bool kv_allocation_deferred = false;
 };
 
 inline bool budget_exhausted(const ScheduleBudget& budget) {
