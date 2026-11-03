@@ -1,0 +1,159 @@
+{
+  "original_repository": "https://github.com/wangzhao-11a/t5-qkv-append-cache",
+  "tested_runtime_commit": "f52671207769bf5f334972c997743eb6aa6f91b3",
+  "upstream_base": "261274e5f45449e98d7740144c3a958a29f1fd3e",
+  "imported_files": [
+    {
+      "path": "common/t5_plan.h",
+      "sha256": "dfe4f6bd28d74a76f9243c6555c679c2e8cc656f57db56a2eb9a7d52cbb41a99"
+    },
+    {
+      "path": "csrc/torch_binding.cpp",
+      "sha256": "3d29a98ff738658c46696634a2c5d6c093b99b61614058cfd5b3393caf463a93"
+    },
+    {
+      "path": "direct/CMakeLists.txt",
+      "sha256": "03ccb90c9de5b86de7f8a352dd455f3b9afbfe170630fe438bb1ed730142b064"
+    },
+    {
+      "path": "direct/t5_direct.cpp",
+      "sha256": "a398f82400cd8b0023b0f5f4aa3785aafc9e2800aad5a8d0cb4d1f765161d9d1"
+    },
+    {
+      "path": "examples/CMakeLists.txt",
+      "sha256": "f86bf3cd6dc42a5733fdc7a05db30e55a4e6b50e2dd17957fbbfa252ae34b803"
+    },
+    {
+      "path": "examples/aclnn_example.cpp",
+      "sha256": "aabf9943952222defbe87c750fc35d3219f12d4ad05f45ad9d789e00d3049ce8"
+    },
+    {
+      "path": "op_host/t5_split_qkv_append_cache.cpp",
+      "sha256": "b234eccfa9d0ddc08cafa8eecb80ba86922e08ec191ae4663f019768a0e9d220"
+    },
+    {
+      "path": "op_host/t5_split_qkv_append_cache_tiling.h",
+      "sha256": "cf3dbfe73355e2749b6f2d0ad93affda56caff0d82ad6c252f89a683a03148ed"
+    },
+    {
+      "path": "op_kernel/t5_copy.h",
+      "sha256": "80187bdde2fc70e730a1f690dc1c0cfc4bf516a38a2d7988c9e3c0a911ea79c4"
+    },
+    {
+      "path": "op_kernel/t5_split_qkv_append_cache.cpp",
+      "sha256": "1f1fb9793e60a6c3a2261fe97cf597c6f49369bc472c2b12efc122ad65817227"
+    },
+    {
+      "path": "op_project.json",
+      "sha256": "e50d38f8c9e30e3e87ab26021a1d0d508157267ab1b52a0c7254acc430a3f2b2"
+    },
+    {
+      "path": "reference/README.md",
+      "sha256": "03cbb24ca636c45f26f5a5d1883d3678592290f4c949ef64dc20e3c0ec82acbc"
+    },
+    {
+      "path": "reference/SHA256SUMS.txt",
+      "sha256": "b124c8653715e91966be15aa00395e6f9bac9a5c150aa444ead097475d2bb5b3"
+    },
+    {
+      "path": "reference/T5QKV\u62c6\u5206\u4e0e\u7f13\u5b58\u8ffd\u52a0\u7b97\u5b50\u4efb\u52a1\u4e66.md",
+      "sha256": "e65bf0cc08fcb170bf9b15caac0922fa3cde539f4a58c23722c15fe3bdb7ca57"
+    },
+    {
+      "path": "reference/benchmark.py",
+      "sha256": "84a198138a226f6185348c81045dde9bfac1c70e98b0d8e3a529c34261db868d"
+    },
+    {
+      "path": "reference/case.json",
+      "sha256": "9ce34ba31fc08abe1969ad4997f7b6173fa950533473d6977398a8ed4db741e8"
+    },
+    {
+      "path": "reference/check_performance.py",
+      "sha256": "52f3fbb1280284c74585fbe2dfafeef91d8d77ee3ef1a8bbe4495c0c9bc0f2c5"
+    },
+    {
+      "path": "reference/coverage_requirements.json",
+      "sha256": "bff52ed8380d83c0e19e2c898b4507c3dd4e20a17736e17739aa44749edbdc57"
+    },
+    {
+      "path": "reference/generate_data.py",
+      "sha256": "39c73731b0afebd242b2fc8e3e85df24c4b9c5c423ebe9adc1e4140507b2292d"
+    },
+    {
+      "path": "reference/golden.py",
+      "sha256": "258c322025f5875bb89a2529c2d85659d96ee5bb9526f292dce3b3ca7648021a"
+    },
+    {
+      "path": "reference/op.json",
+      "sha256": "9bccb18b2dbfb48e7f4affc30141d0c0313d7269a1edd88cb0eab76641188357"
+    },
+    {
+      "path": "reference/performance_targets.json",
+      "sha256": "bd81fce31f5664f9c8d8461d077666c0d8cc96ae9c96b871e00fa89e82651c54"
+    },
+    {
+      "path": "reference/verify.py",
+      "sha256": "d3a467156b3aada1ef2175f51dbc3e878e80dd2a6836421574e51c36fda80bff"
+    },
+    {
+      "path": "reference_manifest.json",
+      "sha256": "6cecc082487f191ea86e95cbf83cfd5c2a4fd0502108e71a115ebc2561e51e18"
+    },
+    {
+      "path": "scripts/build.sh",
+      "sha256": "973bde55237e9faa5a00e126d7041a7d215d6fb12e73f1d8b7fd3e92075387a0"
+    },
+    {
+      "path": "scripts/validate.sh",
+      "sha256": "c6bd8c96b2821040d02305af5de5295371ad6a633cdce192c1306069b524d416"
+    },
+    {
+      "path": "setup.py",
+      "sha256": "b575de3ef3f1abd0d4085497fe0de5b3832557b5b1520e7c5b0b8909b56fd9c2"
+    },
+    {
+      "path": "solution.py",
+      "sha256": "0a8a64a66c0b38f12ad2cc7302656f44b960e22e306e5f3232c66114d2344256"
+    },
+    {
+      "path": "tests/compare_baseline.py",
+      "sha256": "354521b55f9201735330d66dfe1d15561b2b50bf8f5d214f97231b6e4efb3dec"
+    },
+    {
+      "path": "tests/cpu_address_model.py",
+      "sha256": "c0f41ddefd0026cb3c4a1b416650aed7ee76cbbb43e633c7854ee2784809c16f"
+    },
+    {
+      "path": "tests/npu_suite.py",
+      "sha256": "954e82f12adb1290545965321487949c21296e26507026873e212c29a85e94e9"
+    },
+    {
+      "path": "tools/check_cache_policy.py",
+      "sha256": "c372fe2c6876d0aa7760ada01d932bd2e4d2a7b1dd790f2f2a8c51e6678e18c8"
+    },
+    {
+      "path": "tools/check_coverage.py",
+      "sha256": "7245d2c64f9928f8c4a4db53d042db55369ef52da4e908b7d67439ad5d88d71d"
+    },
+    {
+      "path": "tools/check_environment.py",
+      "sha256": "05e1dbb2e04ba61c675cbb31efe0b76edadc3b0cb88c9e63fd03e807be91d79a"
+    },
+    {
+      "path": "tools/configure_generated.py",
+      "sha256": "282fc9f948c22e10b290d590e86b1620765e4cf46244ce01499ae0b614e643f6"
+    },
+    {
+      "path": "tools/fingerprint.py",
+      "sha256": "154619a4ff9b7423b473ea55e9dd9105f8b7ed58a230034f1024d1f7278143db"
+    },
+    {
+      "path": "tools/preflight.py",
+      "sha256": "cb21f41dc6cd884493e8d3e57caf9b16c75ec3b932d8197cef51aa2050a7df0f"
+    }
+  ],
+  "changes": "Copyright, naming, type annotations, braces/format and standalone-root include paths; no new kernel algorithm.",
+  "original_npu_evidence": "https://github.com/wangzhao-11a/t5-qkv-append-cache/tree/874f2bbbb385bc032d004735ae524244401a29ce/reports/accepted_f526712",
+  "this_pr_npu_validation": "not_run; require CANN rebuild and device validation before merge",
+  "frozen_reference_files_unchanged": true
+}

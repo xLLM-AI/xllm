@@ -1,0 +1,7 @@
+build/
+artifacts/
+reports/
+__pycache__/
+*.so
+*.egg-info/
+python_deps/

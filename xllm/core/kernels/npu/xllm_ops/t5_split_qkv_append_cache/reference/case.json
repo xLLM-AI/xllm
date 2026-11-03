@@ -1,0 +1,3327 @@
+[
+  {
+    "case_name": "T5SplitQkvAppendCache_000_float16_random",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "random",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          1,
+          1,
+          3
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          1,
+          1,
+          0,
+          1
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          1,
+          1,
+          0,
+          1
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 1
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 1
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_001_float16_random",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "random",
+    "performance": true,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          4,
+          1,
+          1536
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          4,
+          8,
+          0,
+          64
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          4,
+          8,
+          0,
+          64
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          4,
+          8,
+          1,
+          64
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          4,
+          8,
+          1,
+          64
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          4,
+          8,
+          1,
+          64
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 8
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 64
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_002_float16_random",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "random",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          2,
+          1,
+          45
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          2,
+          3,
+          2,
+          5
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          2,
+          3,
+          2,
+          5
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          2,
+          3,
+          1,
+          5
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          2,
+          3,
+          3,
+          5
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          2,
+          3,
+          3,
+          5
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 3
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 5
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_003_float16_random",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "random",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          3,
+          1,
+          1680
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          3,
+          7,
+          31,
+          80
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          3,
+          7,
+          31,
+          80
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          3,
+          7,
+          1,
+          80
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          3,
+          7,
+          32,
+          80
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          3,
+          7,
+          32,
+          80
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 7
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 80
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_004_float16_random",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "random",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          2,
+          1,
+          585
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          2,
+          3,
+          127,
+          65
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          2,
+          3,
+          127,
+          65
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          2,
+          3,
+          1,
+          65
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          2,
+          3,
+          128,
+          65
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          2,
+          3,
+          128,
+          65
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 3
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 65
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_005_float16_random",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "random",
+    "performance": true,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          1,
+          1,
+          1536
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          1,
+          8,
+          128,
+          64
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          1,
+          8,
+          128,
+          64
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          1,
+          8,
+          1,
+          64
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          1,
+          8,
+          129,
+          64
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          1,
+          8,
+          129,
+          64
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 8
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 64
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_006_float16_random",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "random",
+    "performance": true,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          8,
+          1,
+          2304
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          8,
+          12,
+          512,
+          64
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          8,
+          12,
+          512,
+          64
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          8,
+          12,
+          1,
+          64
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          8,
+          12,
+          513,
+          64
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          8,
+          12,
+          513,
+          64
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 12
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 64
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_007_float16_random",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "random",
+    "performance": true,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          16,
+          1,
+          3072
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          16,
+          16,
+          2048,
+          64
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          16,
+          16,
+          2048,
+          64
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          16,
+          16,
+          1,
+          64
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          16,
+          16,
+          2049,
+          64
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          16,
+          16,
+          2049,
+          64
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 16
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 64
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_008_float16_random",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "random",
+    "performance": true,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          1,
+          1,
+          384
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          1,
+          1,
+          8192,
+          128
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          1,
+          1,
+          8192,
+          128
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          1,
+          1,
+          1,
+          128
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          1,
+          1,
+          8193,
+          128
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          1,
+          1,
+          8193,
+          128
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 1
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 128
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_009_float16_bits",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "bits",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          1,
+          1,
+          384
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          1,
+          1,
+          512,
+          128
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          1,
+          1,
+          512,
+          128
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          1,
+          1,
+          1,
+          128
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          1,
+          1,
+          513,
+          128
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          1,
+          1,
+          513,
+          128
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 1
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 128
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_010_bfloat16_random",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "random",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          1,
+          1,
+          3
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          1,
+          1,
+          0,
+          1
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          1,
+          1,
+          0,
+          1
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 1
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 1
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_011_bfloat16_random",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "random",
+    "performance": true,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          4,
+          1,
+          1536
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          4,
+          8,
+          0,
+          64
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          4,
+          8,
+          0,
+          64
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          4,
+          8,
+          1,
+          64
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          4,
+          8,
+          1,
+          64
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          4,
+          8,
+          1,
+          64
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 8
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 64
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_012_bfloat16_random",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "random",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          2,
+          1,
+          45
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          2,
+          3,
+          2,
+          5
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          2,
+          3,
+          2,
+          5
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          2,
+          3,
+          1,
+          5
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          2,
+          3,
+          3,
+          5
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          2,
+          3,
+          3,
+          5
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 3
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 5
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_013_bfloat16_random",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "random",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          3,
+          1,
+          1680
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          3,
+          7,
+          31,
+          80
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          3,
+          7,
+          31,
+          80
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          3,
+          7,
+          1,
+          80
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          3,
+          7,
+          32,
+          80
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          3,
+          7,
+          32,
+          80
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 7
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 80
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_014_bfloat16_random",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "random",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          2,
+          1,
+          585
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          2,
+          3,
+          127,
+          65
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          2,
+          3,
+          127,
+          65
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          2,
+          3,
+          1,
+          65
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          2,
+          3,
+          128,
+          65
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          2,
+          3,
+          128,
+          65
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 3
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 65
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_015_bfloat16_random",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "random",
+    "performance": true,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          1,
+          1,
+          1536
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          1,
+          8,
+          128,
+          64
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          1,
+          8,
+          128,
+          64
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          1,
+          8,
+          1,
+          64
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          1,
+          8,
+          129,
+          64
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          1,
+          8,
+          129,
+          64
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 8
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 64
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_016_bfloat16_random",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "random",
+    "performance": true,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          8,
+          1,
+          2304
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          8,
+          12,
+          512,
+          64
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          8,
+          12,
+          512,
+          64
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          8,
+          12,
+          1,
+          64
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          8,
+          12,
+          513,
+          64
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          8,
+          12,
+          513,
+          64
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 12
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 64
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_017_bfloat16_random",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "random",
+    "performance": true,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          16,
+          1,
+          3072
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          16,
+          16,
+          2048,
+          64
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          16,
+          16,
+          2048,
+          64
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          16,
+          16,
+          1,
+          64
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          16,
+          16,
+          2049,
+          64
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          16,
+          16,
+          2049,
+          64
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 16
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 64
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_018_bfloat16_random",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "random",
+    "performance": true,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          1,
+          1,
+          384
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          1,
+          1,
+          8192,
+          128
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          1,
+          1,
+          8192,
+          128
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          1,
+          1,
+          1,
+          128
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          1,
+          1,
+          8193,
+          128
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          1,
+          1,
+          8193,
+          128
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 1
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 128
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_019_bfloat16_bits",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "bits",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          1,
+          1,
+          384
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          1,
+          1,
+          512,
+          128
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          1,
+          1,
+          512,
+          128
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          1,
+          1,
+          1,
+          128
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          1,
+          1,
+          513,
+          128
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          1,
+          1,
+          513,
+          128
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 1
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 128
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_020_float16_boundary",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "random",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          64,
+          1,
+          98304
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          64,
+          128,
+          0,
+          256
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          64,
+          128,
+          0,
+          256
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          64,
+          128,
+          1,
+          256
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          64,
+          128,
+          1,
+          256
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          64,
+          128,
+          1,
+          256
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 128
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 256
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_021_float16_boundary",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "random",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          1,
+          1,
+          97920
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          1,
+          128,
+          3,
+          255
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          1,
+          128,
+          3,
+          255
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          1,
+          128,
+          1,
+          255
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          1,
+          128,
+          4,
+          255
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          1,
+          128,
+          4,
+          255
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 128
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 255
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_022_float16_boundary",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "random",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          2,
+          1,
+          9
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          2,
+          1,
+          4097,
+          3
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          2,
+          1,
+          4097,
+          3
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          2,
+          1,
+          1,
+          3
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          2,
+          1,
+          4098,
+          3
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          2,
+          1,
+          4098,
+          3
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 1
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 3
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_023_bfloat16_boundary",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "random",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          64,
+          1,
+          98304
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          64,
+          128,
+          0,
+          256
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          64,
+          128,
+          0,
+          256
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          64,
+          128,
+          1,
+          256
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          64,
+          128,
+          1,
+          256
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          64,
+          128,
+          1,
+          256
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 128
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 256
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_024_bfloat16_boundary",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "random",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          1,
+          1,
+          97920
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          1,
+          128,
+          3,
+          255
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          1,
+          128,
+          3,
+          255
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          1,
+          128,
+          1,
+          255
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          1,
+          128,
+          4,
+          255
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          1,
+          128,
+          4,
+          255
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 128
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 255
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_025_bfloat16_boundary",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "random",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          2,
+          1,
+          9
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          2,
+          1,
+          4097,
+          3
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          2,
+          1,
+          4097,
+          3
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          2,
+          1,
+          1,
+          3
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          2,
+          1,
+          4098,
+          3
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          2,
+          1,
+          4098,
+          3
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 1
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 3
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_audit_026_float16_bits",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "bits",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          64,
+          1,
+          98304
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          64,
+          128,
+          0,
+          256
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          64,
+          128,
+          0,
+          256
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          64,
+          128,
+          1,
+          256
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          64,
+          128,
+          1,
+          256
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          64,
+          128,
+          1,
+          256
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 128
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 256
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_audit_027_float16_bits",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "bits",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          1,
+          1,
+          768
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          1,
+          1,
+          8192,
+          256
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          1,
+          1,
+          8192,
+          256
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          1,
+          1,
+          1,
+          256
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          1,
+          1,
+          8193,
+          256
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          1,
+          1,
+          8193,
+          256
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 1
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 256
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_audit_028_float16_bits",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "bits",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          2,
+          1,
+          2295
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          2,
+          3,
+          63,
+          255
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          2,
+          3,
+          63,
+          255
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          2,
+          3,
+          1,
+          255
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          2,
+          3,
+          64,
+          255
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          2,
+          3,
+          64,
+          255
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 3
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 255
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_audit_029_float16_bits",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "bits",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          1,
+          1,
+          384
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          1,
+          128,
+          1,
+          1
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          1,
+          128,
+          1,
+          1
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          1,
+          128,
+          1,
+          1
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          1,
+          128,
+          2,
+          1
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          1,
+          128,
+          2,
+          1
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 128
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 1
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_audit_030_bfloat16_bits",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "bits",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          64,
+          1,
+          98304
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          64,
+          128,
+          0,
+          256
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          64,
+          128,
+          0,
+          256
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          64,
+          128,
+          1,
+          256
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          64,
+          128,
+          1,
+          256
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          64,
+          128,
+          1,
+          256
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 128
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 256
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_audit_031_bfloat16_bits",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "bits",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          1,
+          1,
+          768
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          1,
+          1,
+          8192,
+          256
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          1,
+          1,
+          8192,
+          256
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          1,
+          1,
+          1,
+          256
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          1,
+          1,
+          8193,
+          256
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          1,
+          1,
+          8193,
+          256
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 1
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 256
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_audit_032_bfloat16_bits",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "bits",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          2,
+          1,
+          2295
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          2,
+          3,
+          63,
+          255
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          2,
+          3,
+          63,
+          255
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          2,
+          3,
+          1,
+          255
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          2,
+          3,
+          64,
+          255
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          2,
+          3,
+          64,
+          255
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 3
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 255
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_audit_033_bfloat16_bits",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "bits",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          1,
+          1,
+          384
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          1,
+          128,
+          1,
+          1
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          1,
+          128,
+          1,
+          1
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          1,
+          128,
+          1,
+          1
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          1,
+          128,
+          2,
+          1
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          1,
+          128,
+          2,
+          1
+        ],
+        "data_type": "bfloat16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 128
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 1
+      }
+    ]
+  },
+  {
+    "case_name": "T5SplitQkvAppendCache_audit_034_float16_bits",
+    "op_name": "T5SplitQkvAppendCache",
+    "kind": "bits",
+    "performance": false,
+    "case_path": ".",
+    "expect_func": "golden.py:calc_expect_func",
+    "input_desc": [
+      {
+        "name": "qkv",
+        "shape": [
+          64,
+          1,
+          98304
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastKey",
+        "shape": [
+          64,
+          128,
+          62,
+          256
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "pastValue",
+        "shape": [
+          64,
+          128,
+          62,
+          256
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "output_desc": [
+      {
+        "name": "query",
+        "shape": [
+          64,
+          128,
+          1,
+          256
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "key",
+        "shape": [
+          64,
+          128,
+          63,
+          256
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      },
+      {
+        "name": "value",
+        "shape": [
+          64,
+          128,
+          63,
+          256
+        ],
+        "data_type": "float16",
+        "format": "ND",
+        "param_type": "required"
+      }
+    ],
+    "attr_desc": [
+      {
+        "name": "headNum",
+        "type": "int",
+        "value": 128
+      },
+      {
+        "name": "headDim",
+        "type": "int",
+        "value": 256
+      }
+    ]
+  }
+]
