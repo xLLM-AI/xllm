@@ -133,6 +133,12 @@ class VmmKVPageAllocatorImpl final : public VmmKVPageAllocator {
 
   enum class ModelTransition : uint8_t { IDLE, SUSPENDING, RESUMING };
 
+  enum class MappingSource : uint8_t {
+    ALLOCATION,
+    MAPPING_PLAN,
+    PREALLOCATION,
+  };
+
   struct ModelState {
     int64_t num_layers = 0;
     size_t num_total_virt_pages = 0;
@@ -163,7 +169,9 @@ class VmmKVPageAllocatorImpl final : public VmmKVPageAllocator {
   void validate_dp_rank(int32_t dp_rank) const;
   bool map_virtual_pages(const std::string& model_id,
                          int32_t dp_rank,
-                         const std::vector<int64_t>& virtual_page_ids);
+                         const std::vector<int64_t>& virtual_page_ids,
+                         MappingSource source);
+  static const char* mapping_source_name(MappingSource source);
   void unmap_virtual_pages(const std::string& model_id,
                            int32_t dp_rank,
                            const std::vector<int64_t>& virtual_page_ids);

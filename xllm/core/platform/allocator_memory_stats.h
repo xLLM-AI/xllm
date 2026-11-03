@@ -24,6 +24,7 @@ namespace xllm {
 struct AllocatorMemoryStats {
   size_t reserved_bytes = 0;
   size_t peak_reserved_bytes = 0;
+  size_t allocated_bytes = 0;
 };
 
 }  // namespace xllm

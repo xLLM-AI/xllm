@@ -99,6 +99,8 @@ TEST_F(VirtualMemoryTest, AllocatorStatsTrackExecutionResidency) {
       {bytes}, torch::TensorOptions().device(device_).dtype(torch::kUInt8));
   const auto resident = device.allocator_memory_stats();
   ASSERT_TRUE(resident.has_value());
+  EXPECT_GE(resident->allocated_bytes, before->allocated_bytes + bytes);
+  EXPECT_LE(resident->allocated_bytes, resident->reserved_bytes);
   EXPECT_GE(resident->reserved_bytes, static_cast<size_t>(bytes));
   EXPECT_GE(resident->peak_reserved_bytes, resident->reserved_bytes);
   EXPECT_GE(resident->peak_reserved_bytes, before->peak_reserved_bytes);
@@ -107,6 +109,7 @@ TEST_F(VirtualMemoryTest, AllocatorStatsTrackExecutionResidency) {
   Device::empty_cache(device_.index());
   const auto released = device.allocator_memory_stats();
   ASSERT_TRUE(released.has_value());
+  EXPECT_EQ(released->allocated_bytes, before->allocated_bytes);
   EXPECT_LE(released->reserved_bytes, resident->reserved_bytes);
   EXPECT_GE(released->peak_reserved_bytes, resident->peak_reserved_bytes);
 }

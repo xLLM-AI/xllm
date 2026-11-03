@@ -66,7 +66,7 @@ namespace xllm {
 class PhysicalPagePoolTestPeer final {
  public:
   static void set_memory_query(PhysicalPagePool& pool,
-                               std::function<int64_t()> query) {
+                               std::function<std::optional<int64_t>()> query) {
     std::lock_guard<std::mutex> lock(pool.mtx_);
     pool.free_memory_query_ = std::move(query);
   }

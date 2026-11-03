@@ -45,6 +45,7 @@ class Device {
 
   int64_t total_memory();
   int64_t free_memory();
+  std::optional<int64_t> try_free_memory() const;
   // Unsupported allocator backends have no reliable residency statistics.
   std::optional<AllocatorMemoryStats> allocator_memory_stats() const;
   static void empty_cache(int32_t device_index);
@@ -57,11 +58,11 @@ class Device {
 
  private:
   struct DeviceMem {
-    int64_t total_memory;
-    int64_t free_memory;
+    int64_t total_memory = 0;
+    int64_t free_memory = 0;
   };
 
-  DeviceMem get_device_mem() const;
+  std::optional<DeviceMem> query_device_mem() const;
 
  private:
   torch::Device device_;

@@ -94,15 +94,55 @@ bool SharedPhysicalPageMapping::map_pages_locked(
   CHECK(initialized_);
   std::unordered_set<page_id_t> seen;
   seen.reserve(pages.size());
-  for (const PhysicalPage* page : pages) {
-    if (page == nullptr || page->page_id() < 0 ||
-        static_cast<size_t>(page->page_id()) >= num_total_pages_ ||
-        page->device() != device_ || page->page_size() != page_size_ ||
-        !seen.emplace(page->page_id()).second) {
+  for (size_t i = 0; i < pages.size(); ++i) {
+    const PhysicalPage* page = pages[i];
+    if (page == nullptr) {
+      LOG(ERROR) << "SharedPhysicalPageMapping rejected page: reason=null_page"
+                 << " device_index=" << static_cast<int32_t>(device_.index())
+                 << " input_index=" << i;
       return false;
     }
-    PhysicalPage* current = mapped_pages_[page->page_id()];
+
+    const page_id_t page_id = page->page_id();
+    if (page_id < 0 || static_cast<size_t>(page_id) >= num_total_pages_) {
+      LOG(ERROR)
+          << "SharedPhysicalPageMapping rejected page: reason=invalid_page_id"
+          << " device_index=" << static_cast<int32_t>(device_.index())
+          << " page_id=" << page_id << " total_pages=" << num_total_pages_;
+      return false;
+    }
+    if (page->device() != device_) {
+      LOG(ERROR)
+          << "SharedPhysicalPageMapping rejected page: reason=device_mismatch"
+          << " expected_device_index=" << static_cast<int32_t>(device_.index())
+          << " actual_device_index="
+          << static_cast<int32_t>(page->device().index())
+          << " page_id=" << page_id;
+      return false;
+    }
+    if (page->page_size() != page_size_) {
+      LOG(ERROR) << "SharedPhysicalPageMapping rejected page: "
+                    "reason=page_size_mismatch"
+                 << " device_index=" << static_cast<int32_t>(device_.index())
+                 << " page_id=" << page_id
+                 << " expected_page_size=" << page_size_
+                 << " actual_page_size=" << page->page_size();
+      return false;
+    }
+    if (!seen.emplace(page_id).second) {
+      LOG(ERROR)
+          << "SharedPhysicalPageMapping rejected page: reason=duplicate_page_id"
+          << " device_index=" << static_cast<int32_t>(device_.index())
+          << " page_id=" << page_id;
+      return false;
+    }
+
+    PhysicalPage* current = mapped_pages_[page_id];
     if (current != nullptr && current != page) {
+      LOG(ERROR) << "SharedPhysicalPageMapping rejected page: "
+                    "reason=conflicting_existing_mapping"
+                 << " device_index=" << static_cast<int32_t>(device_.index())
+                 << " page_id=" << page_id;
       return false;
     }
   }
@@ -116,6 +156,10 @@ bool SharedPhysicalPageMapping::map_pages_locked(
     VirPtr address = add_vir_ptr_offset(vaddr_, page_id * page_size_);
     PhyMemHandle handle = page->get_phy_handle();
     if (!vmm::try_map(address, handle, page_size_, device_.index())) {
+      LOG(WARNING) << "SharedPhysicalPageMapping failed to map page: "
+                      "reason=backend_mapping_failure"
+                   << " device_index=" << static_cast<int32_t>(device_.index())
+                   << " page_id=" << page_id << " page_size=" << page_size_;
       unmap_pages_locked(added);
       return false;
     }
