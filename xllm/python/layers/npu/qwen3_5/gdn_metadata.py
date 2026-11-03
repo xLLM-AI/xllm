@@ -49,6 +49,12 @@ class GdnPrefillMetadata(GdnMetadata):
 class GdnDecodeMetadata(GdnMetadata):
     read_state_indices: torch.Tensor
     write_state_indices: torch.Tensor
+    # Shared physical pages expose separate row spaces for Conv and SSM
+    # states.  The legacy fields above remain the common-index fast path.
+    conv_read_state_indices: torch.Tensor | None = None
+    conv_write_state_indices: torch.Tensor | None = None
+    ssm_read_state_indices: torch.Tensor | None = None
+    ssm_write_state_indices: torch.Tensor | None = None
 
 
 @dataclass(frozen=True, slots=True)
