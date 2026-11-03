@@ -148,6 +148,12 @@ def test_sparse_role_adopts_final_storage_and_rejects_foreign_views() -> None:
         MtpRoleAdapter(executor, (foreign, *storage.metadata[1:]), speculative_tokens=3, metadata_storage=storage)
     del storage
     role._metadata_arenas[0].fill_(17)
+    for metadata in role._metadata_by_step:
+        for field in ("slot_mapping", "kv_seq_lens", "block_table"):
+            assert torch.all(getattr(metadata, field) == 17)
+    # Step destinations share an allocation but never overlap.
+    role._metadata_by_step[0].block_table.fill_(29)
+    assert torch.all(role._metadata_by_step[1].block_table == 17)
 
 
 def test_hybrid_registry_owns_state_indices_and_acceptance_across_reordered_replays(
@@ -228,12 +234,6 @@ def test_hybrid_registry_owns_state_indices_and_acceptance_across_reordered_repl
     execute(65)
     assert captured[0].close.call_count == 1
     assert captured[1].recipe.target_forward._metadata_by_step[0].linear_state_indices.data_ptr() != owned_addresses[0]
-    for metadata in role._metadata_by_step:
-        for field in ("slot_mapping", "kv_seq_lens", "block_table"):
-            assert torch.all(getattr(metadata, field) == 17)
-    # Step destinations share an allocation but never overlap.
-    role._metadata_by_step[0].block_table.fill_(29)
-    assert torch.all(role._metadata_by_step[1].block_table == 17)
 
 
 @pytest.mark.parametrize("invalid", ["overlap", "foreign_storage", "shape"])
