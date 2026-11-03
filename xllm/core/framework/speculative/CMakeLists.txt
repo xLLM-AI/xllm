@@ -11,7 +11,6 @@ cc_library(
     adaptive/spec_window_collector.h
     adaptive/spec_startup_calibration.h
     draft_config.h
-    draft_distribution.h
     draft_proposal.h
     draft_vocab_mapping.h
     rejection_sampler.h
@@ -35,7 +34,6 @@ cc_library(
     adaptive/spec_window_collector.cpp
     adaptive/spec_startup_calibration.cpp
     draft_config.cpp
-    draft_distribution.cpp
     draft_proposal.cpp
     draft_vocab_mapping.cpp
     rejection_sampler.cpp

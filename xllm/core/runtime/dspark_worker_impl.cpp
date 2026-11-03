@@ -251,8 +251,7 @@ DraftProposal sample_dspark_markov_block(
     token_ids.select(/*dim=*/1, step).copy_(sampled.next_tokens);
     previous = sampled.next_tokens;
   }
-  DraftDistribution distribution(token_ids, std::move(draft_logits));
-  return DraftProposal(std::move(token_ids), std::move(distribution));
+  return DraftProposal(std::move(token_ids), std::move(draft_logits));
 }
 
 }  // namespace xllm

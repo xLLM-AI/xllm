@@ -159,13 +159,12 @@ DraftProposal sample_dflash2_path(const DFlash2CandidateOutput& candidates,
     previous_indices = sampled_indices;
   }
 
-  DraftDistribution distribution =
-      sparse_distribution
-          ? DraftDistribution(token_ids,
-                              candidates.candidate_ids.clone(),
-                              std::move(draft_logits))
-          : DraftDistribution(token_ids, std::move(draft_logits));
-  return DraftProposal(std::move(token_ids), std::move(distribution));
+  if (sparse_distribution) {
+    return DraftProposal(std::move(token_ids),
+                         candidates.candidate_ids.clone(),
+                         std::move(draft_logits));
+  }
+  return DraftProposal(std::move(token_ids), std::move(draft_logits));
 }
 
 torch::Tensor broadcast_gumbel_noise(int64_t batch_size,

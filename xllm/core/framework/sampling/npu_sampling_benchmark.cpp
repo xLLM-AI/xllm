@@ -145,24 +145,18 @@ void verification(benchmark::State& state, bool point_mass) {
   configure(mask);
   const auto execute = [&]() {
     if (point_mass) {
-      return rejection_sample(
-          params, DraftProposal(tokens, DraftDistribution(tokens)), working);
+      return rejection_sample(params, DraftProposal(tokens), working);
     }
     // Include both compact-q production and verification. The dense leg uses
     // one scatter, conservatively cheaper than the worker's per-step scatters.
     const DraftProposal proposal =
         (mask & 16) != 0
-            ? DraftProposal(
-                  tokens,
-                  DraftDistribution(tokens, ids.clone(), small_logits.clone()))
-            : DraftProposal(
-                  tokens,
-                  DraftDistribution(
-                      tokens,
-                      torch::full({rows, steps, vocab},
-                                  -std::numeric_limits<float>::infinity(),
-                                  options)
-                          .scatter_(2, ids, small_logits)));
+            ? DraftProposal(tokens, ids.clone(), small_logits.clone())
+            : DraftProposal(tokens,
+                            torch::full({rows, steps, vocab},
+                                        -std::numeric_limits<float>::infinity(),
+                                        options)
+                                .scatter_(2, ids, small_logits));
     return rejection_sample(params, proposal, working);
   };
   for (int64_t warmup = 0; warmup < 5; ++warmup) {

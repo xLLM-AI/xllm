@@ -3972,8 +3972,7 @@ SampleOutput MTPWorkerImpl<TargetInput>::validate(
             .to(torch::kBool);
     token_ids.masked_fill_(invalid_mask, /*sentinel=*/-1);
   }
-  DraftDistribution distribution(token_ids, std::move(draft_logits));
-  const DraftProposal proposal(std::move(token_ids), std::move(distribution));
+  const DraftProposal proposal(std::move(token_ids), std::move(draft_logits));
 
   return validate(std::move(sampling_params),
                   proposal,

@@ -315,8 +315,6 @@ SampleOutput rejection_sample(const SamplingParameters& params,
 
   auto random_sample_dispatch =
       [&]() -> std::pair<torch::Tensor, torch::Tensor> {
-    const DraftDistribution& distribution = draft_proposal.distribution();
-
     // Accept p/q > u in log space. −1 sentinel drafts clamp to column 0
     // and are re-masked by the acceptance term.
     const torch::Tensor draft_index =
@@ -330,8 +328,8 @@ SampleOutput rejection_sample(const SamplingParameters& params,
       target_log_prob.sub_(target_max);
     }
     target_log_prob.sub_(target_log_sum);
-    const torch::Tensor draft_lse = distribution.logsumexp();
-    distribution.apply_acceptance(target_log_prob, draft_index, draft_lse);
+    const torch::Tensor draft_lse = draft_proposal.logsumexp();
+    draft_proposal.apply_acceptance(target_log_prob, draft_index, draft_lse);
     torch::Tensor uniform_rand =
         torch::rand(draft_token_ids.sizes(),
                     grouped_logits.options().dtype(torch::kFloat32));
@@ -364,7 +362,7 @@ SampleOutput rejection_sample(const SamplingParameters& params,
     torch::Tensor recovered_tokens;
     {
       torch::Tensor target_log_probs = row_log_probs(grouped_logits);
-      distribution.apply_residual(
+      draft_proposal.apply_residual(
           target_log_probs, gather_reject, rejected_tokens, draft_lse);
       recovered_tokens = categorical_sample(target_log_probs);
     }

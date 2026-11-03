@@ -118,10 +118,10 @@ TEST(SpeculativeTokenStatsTest, GreedyExcludesTargetTokens) {
           .unsqueeze(/*dim=*/-1),
       /*value=*/10.0f);
   SamplingParameters rejection_params = make_rejection_params();
-  const SampleOutput sampled = rejection_sample(
-      rejection_params,
-      DraftProposal(num_draft_tokens, DraftDistribution(num_draft_tokens)),
-      testutil::flatten_rows(target_logits));
+  const SampleOutput sampled =
+      rejection_sample(rejection_params,
+                       DraftProposal(num_draft_tokens),
+                       testutil::flatten_rows(target_logits));
   const torch::Tensor& masked_tokens = sampled.next_tokens;
   ASSERT_TRUE(torch::equal(
       masked_tokens,
@@ -156,9 +156,7 @@ TEST(SpeculativeTokenStatsTest, BlockRandomExcludesTargetTokens) {
           .to(torch::kFloat32);
   const DraftProposal proposal(
       num_draft_tokens,
-      DraftDistribution(
-          num_draft_tokens,
-          torch::tensor({1.0f, 0.0f}).view({1, 1, 2}).repeat({4, 3, 1}).log()));
+      torch::tensor({1.0f, 0.0f}).view({1, 1, 2}).repeat({4, 3, 1}).log());
   // An explicit one-hot-on-token-1 bonus row makes the committed bonus token
   // deterministic.
   const torch::Tensor bonus_row =
@@ -194,10 +192,10 @@ TEST(SpeculativeTokenStatsTest, BlockHandlesSingleAndZeroDrafts) {
       torch::tensor({{9, 8}, {1, 8}}, torch::kInt64).unsqueeze(/*dim=*/-1),
       /*value=*/10.0f);
   SamplingParameters rejection_params = make_rejection_params();
-  const SampleOutput sampled = rejection_sample(
-      rejection_params,
-      DraftProposal(num_draft_tokens, DraftDistribution(num_draft_tokens)),
-      testutil::flatten_rows(target_logits));
+  const SampleOutput sampled =
+      rejection_sample(rejection_params,
+                       DraftProposal(num_draft_tokens),
+                       testutil::flatten_rows(target_logits));
   const auto stats =
       calculate_from_widths(sampled.next_tokens, {1, 1}, {0, 1}).sequence_stats;
   ASSERT_EQ(stats.size(), 2);
@@ -213,10 +211,10 @@ TEST(SpeculativeTokenStatsTest, BlockHandlesSingleAndZeroDrafts) {
   bonus_only_logits.scatter_(/*dim=*/-1,
                              torch::full({2, 1, 1}, 8, torch::kInt64),
                              /*value=*/10.0f);
-  const SampleOutput bonus_only = rejection_sample(
-      rejection_params,
-      DraftProposal(empty_drafts, DraftDistribution(empty_drafts)),
-      testutil::flatten_rows(bonus_only_logits));
+  const SampleOutput bonus_only =
+      rejection_sample(rejection_params,
+                       DraftProposal(empty_drafts),
+                       testutil::flatten_rows(bonus_only_logits));
   const torch::Tensor& bonus_only_tokens = bonus_only.next_tokens;
   ASSERT_TRUE(
       torch::equal(bonus_only_tokens, torch::full({2, 1}, 8, torch::kInt64)));

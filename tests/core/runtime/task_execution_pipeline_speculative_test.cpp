@@ -99,11 +99,11 @@ TEST(DSparkDraftProposalTest,
         output);
     EXPECT_TRUE(torch::equal(output, expected));
     EXPECT_TRUE(torch::equal(proposal.token_ids(), expected));
-    const torch::Tensor lse = proposal.distribution().logsumexp();
+    const torch::Tensor lse = proposal.logsumexp();
     EXPECT_EQ(lse.defined(), probabilistic);
     const torch::Tensor log_p = torch::full({2, 3}, -0.5F);
     torch::Tensor acceptance = log_p.clone();
-    proposal.distribution().apply_acceptance(acceptance, expected, lse);
+    proposal.apply_acceptance(acceptance, expected, lse);
     EXPECT_TRUE(torch::equal(acceptance, log_p));
   }
 }

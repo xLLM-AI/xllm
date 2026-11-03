@@ -34,33 +34,33 @@ SamplingParameters make_sampling_params(int64_t rows, bool random) {
       rows, random ? SamplingMode::RANDOM : SamplingMode::GREEDY);
 }
 
-TEST(DraftDistributionTest, PointMassPreservesAcceptanceAndSentinelTarget) {
+TEST(DraftProposalTest, PointMassPreservesAcceptanceAndSentinelTarget) {
   const torch::Tensor tokens = torch::tensor({{1}, {2}}, torch::kInt64);
-  const DraftDistribution distribution(tokens);
-  const torch::Tensor lse = distribution.logsumexp();
+  const DraftProposal proposal(tokens);
+  const torch::Tensor lse = proposal.logsumexp();
   EXPECT_FALSE(lse.defined());
   const torch::Tensor log_p = torch::tensor({{-INFINITY}, {-0.5F}});
   torch::Tensor acceptance = log_p.clone();
-  distribution.apply_acceptance(acceptance, tokens, lse);
+  proposal.apply_acceptance(acceptance, tokens, lse);
   EXPECT_TRUE(torch::equal(acceptance, log_p));
   const torch::Tensor target =
       torch::tensor({{0.2F, 0.3F, 0.5F}, {0.2F, 0.3F, 0.5F}}).log();
   torch::Tensor residual = target.clone();
-  distribution.apply_residual(residual,
-                              torch::zeros({2, 1}, torch::kInt64),
-                              torch::tensor({{1}, {-1}}, torch::kInt64),
-                              lse);
+  proposal.apply_residual(residual,
+                          torch::zeros({2, 1}, torch::kInt64),
+                          torch::tensor({{1}, {-1}}, torch::kInt64),
+                          lse);
   EXPECT_TRUE(torch::equal(residual.select(0, 1), target.select(0, 1)));
   EXPECT_TRUE(torch::allclose(residual.select(0, 0).exp(),
                               torch::tensor({0.2F, 0.0F, 0.5F})));
 }
 
-TEST(DraftDistributionTest, DenseAndSparseAgreeOnSupportAndResidual) {
+TEST(DraftProposalTest, DenseAndSparseAgreeOnSupportAndResidual) {
   const torch::Tensor ids = torch::tensor({{{1, 3}, {0, 2}}}, torch::kInt64);
   const torch::Tensor logits = torch::tensor({{{0.0F, 1.0F}, {2.0F, 0.0F}}});
   const torch::Tensor tokens = torch::tensor({{3, 0}}, torch::kInt64);
-  const DraftDistribution sparse(tokens, ids, logits);
-  const DraftDistribution dense(
+  const DraftProposal sparse(tokens, ids, logits);
+  const DraftProposal dense(
       tokens, torch::full({1, 2, 4}, -INFINITY).scatter_(2, ids, logits));
   const torch::Tensor sparse_lse = sparse.logsumexp();
   const torch::Tensor dense_lse = dense.logsumexp();
@@ -97,7 +97,7 @@ TEST(DraftDistributionTest, DenseAndSparseAgreeOnSupportAndResidual) {
   }
 }
 
-TEST(DraftDistributionTest, MoveRetainsDistributionAndAsynchronousInputOwner) {
+TEST(DraftProposalTest, MoveRetainsDistributionAndAsynchronousInputOwner) {
   auto owner = std::make_shared<int64_t>(42);
   const std::weak_ptr<int64_t> observer = owner;
   const torch::Tensor ids = torch::tensor({{{1, 2}}}, torch::kInt64);
@@ -105,8 +105,7 @@ TEST(DraftDistributionTest, MoveRetainsDistributionAndAsynchronousInputOwner) {
   std::optional<DraftProposal> retained;
   {
     const torch::Tensor draft_tokens = torch::tensor({{1}}, torch::kInt64);
-    DraftProposal original(draft_tokens,
-                           DraftDistribution(draft_tokens, ids, logits));
+    DraftProposal original(draft_tokens, ids, logits);
     original.keep_alive().emplace_back(owner);
     owner.reset();
     retained.emplace(std::move(original));
@@ -115,74 +114,69 @@ TEST(DraftDistributionTest, MoveRetainsDistributionAndAsynchronousInputOwner) {
   EXPECT_EQ(retained->token_ids().item<int64_t>(), 1);
   const torch::Tensor expected = torch::log_softmax(logits, -1).select(-1, 0);
   torch::Tensor acceptance = torch::zeros_like(expected);
-  retained->distribution().apply_acceptance(
-      acceptance, retained->token_ids(), retained->distribution().logsumexp());
+  retained->apply_acceptance(
+      acceptance, retained->token_ids(), retained->logsumexp());
   EXPECT_TRUE(torch::allclose(acceptance, -expected));
   retained.reset();
   EXPECT_TRUE(observer.expired());
 }
 
-TEST(DraftDistributionTest, RejectsMalformedSparseRepresentation) {
+TEST(DraftProposalTest, RejectsMalformedSparseRepresentation) {
   const torch::Tensor ids = torch::zeros({1, 2, 3}, torch::kInt64);
   const torch::Tensor tokens = torch::zeros({1, 2}, torch::kInt64);
-  EXPECT_DEATH(DraftDistribution(tokens, ids, torch::zeros({1, 2, 4})),
+  EXPECT_DEATH(DraftProposal(tokens, ids, torch::zeros({1, 2, 4})),
                "candidate_ids.sizes");
   EXPECT_DEATH(
-      DraftDistribution(tokens, ids.to(torch::kInt32), torch::zeros({1, 2, 3})),
+      DraftProposal(tokens, ids.to(torch::kInt32), torch::zeros({1, 2, 3})),
       "candidate_ids.scalar_type");
-  EXPECT_DEATH(DraftDistribution(tokens, ids, {}), "logits.defined");
-  EXPECT_DEATH(DraftDistribution(tokens, {}, torch::zeros({1, 2, 3})),
+  EXPECT_DEATH(DraftProposal(tokens, ids, {}), "logits.defined");
+  EXPECT_DEATH(DraftProposal(tokens, {}, torch::zeros({1, 2, 3})),
                "candidate_ids.defined");
 }
 
-TEST(DraftDistributionTest, PointMassValidatesItsOwnTokenMetadata) {
+TEST(DraftProposalTest, PointMassValidatesTokenMetadata) {
   const torch::Tensor tokens = torch::zeros({1, 2}, torch::kInt64);
-  EXPECT_NO_FATAL_FAILURE(DraftDistribution{tokens});
-  EXPECT_NO_FATAL_FAILURE(DraftDistribution{tokens.to(torch::kInt32)});
-  EXPECT_NO_FATAL_FAILURE(DraftDistribution(tokens, {}));
-  EXPECT_NO_FATAL_FAILURE(DraftDistribution(tokens.to(torch::kInt32), {}));
-  EXPECT_DEATH(DraftDistribution{tokens.to(torch::kFloat32)}, "scalar_type");
-  EXPECT_DEATH(DraftDistribution(tokens.to(torch::kFloat32), {}),
-               "scalar_type");
-  EXPECT_DEATH(DraftDistribution{tokens.view({2})}, "token_ids.dim");
-  EXPECT_DEATH(DraftDistribution(tokens.view({2}), {}), "token_ids.dim");
+  EXPECT_NO_FATAL_FAILURE(DraftProposal{tokens});
+  EXPECT_NO_FATAL_FAILURE(DraftProposal{tokens.to(torch::kInt32)});
+  EXPECT_NO_FATAL_FAILURE(DraftProposal(tokens, {}));
+  EXPECT_NO_FATAL_FAILURE(DraftProposal(tokens.to(torch::kInt32), {}));
+  EXPECT_DEATH(DraftProposal{tokens.to(torch::kFloat32)}, "scalar_type");
+  EXPECT_DEATH(DraftProposal(tokens.to(torch::kFloat32), {}), "scalar_type");
+  EXPECT_DEATH(DraftProposal{tokens.view({2})}, "token_ids_.dim");
+  EXPECT_DEATH(DraftProposal(tokens.view({2}), {}), "token_ids_.dim");
 }
 
-TEST(DraftDistributionTest, RejectsInvalidProposalAtConstruction) {
+TEST(DraftProposalTest, RejectsInvalidProposalAtConstruction) {
   const torch::Tensor tokens = torch::zeros({1, 2}, torch::kInt64);
   const torch::Tensor logits = torch::zeros({1, 2, 3});
-  EXPECT_DEATH(DraftProposal(torch::zeros({2, 2}, torch::kInt64),
-                             DraftDistribution(tokens, logits)),
-               "batch_size_");
-  EXPECT_DEATH(DraftProposal(torch::zeros({1, 3}, torch::kInt64),
-                             DraftDistribution(tokens, logits)),
-               "num_draft_tokens_");
-  EXPECT_DEATH(
-      DraftProposal(tokens.to(torch::kFloat32), DraftDistribution(tokens)),
-      "scalar_type");
-  EXPECT_DEATH(DraftDistribution(tokens, torch::zeros({2, 3})), "logits.dim");
-  EXPECT_DEATH(DraftDistribution(tokens, torch::zeros({1, 3, 4})),
-               "num_draft_tokens_");
-  EXPECT_DEATH(DraftDistribution(tokens, torch::zeros({1, 2, 0})),
-               "logits.size");
-  EXPECT_DEATH(
-      DraftDistribution(tokens, torch::zeros({1, 2, 3}, torch::kInt64)),
-      "is_floating_point");
-  EXPECT_DEATH(DraftDistribution(torch::Tensor(), logits), "token_ids.defined");
+  EXPECT_DEATH(DraftProposal(torch::zeros({2, 2}, torch::kInt64), logits),
+               "batch_size");
+  EXPECT_DEATH(DraftProposal(torch::zeros({1, 3}, torch::kInt64), logits),
+               "num_draft_tokens");
+  EXPECT_DEATH(DraftProposal(tokens.to(torch::kFloat32)), "scalar_type");
+  EXPECT_DEATH(DraftProposal(tokens, torch::zeros({2, 3})), "logits.dim");
+  EXPECT_DEATH(DraftProposal(tokens, torch::zeros({1, 3, 4})),
+               "num_draft_tokens");
+  EXPECT_DEATH(DraftProposal(tokens, torch::zeros({1, 2, 0})), "logits.size");
+  EXPECT_DEATH(DraftProposal(tokens, torch::zeros({1, 2, 3}, torch::kInt64)),
+               "is_floating_point");
+  EXPECT_DEATH(DraftProposal(torch::Tensor(), logits), "token_ids_.defined");
+  EXPECT_DEATH(DraftProposal(tokens, logits.to(torch::kMeta)), "device");
+  const torch::Tensor ids = torch::zeros({1, 2, 3}, torch::kInt64);
+  EXPECT_DEATH(DraftProposal(tokens, ids.to(torch::kMeta), logits), "device");
 }
 
-TEST(DraftDistributionTest, UndefinedLogitsUsePointMassSemantics) {
+TEST(DraftProposalTest, UndefinedLogitsUsePointMassSemantics) {
   const torch::Tensor tokens = torch::tensor({{1}}, torch::kInt64);
-  const DraftDistribution distribution(tokens, {});
-  EXPECT_FALSE(distribution.logsumexp().defined());
+  const DraftProposal proposal(tokens, {});
+  EXPECT_FALSE(proposal.logsumexp().defined());
   torch::Tensor residual = torch::tensor({{0.2F, 0.3F, 0.5F}}).log();
-  distribution.apply_residual(residual, torch::zeros_like(tokens), tokens, {});
+  proposal.apply_residual(residual, torch::zeros_like(tokens), tokens, {});
   EXPECT_TRUE(
       torch::allclose(residual.exp(), torch::tensor({{0.2F, 0.0F, 0.5F}})));
 }
 
-TEST(DraftDistributionTest,
-     SentinelRejectionPreservesDraftOutputsAndDistribution) {
+TEST(DraftProposalTest, SentinelRejectionPreservesDraftOutputsAndDistribution) {
   const torch::Tensor tokens = torch::tensor({{1, 2}, {1, 2}}, torch::kInt64);
   const torch::Tensor ids =
       torch::tensor({{{1, 0}, {2, 0}}, {{1, 0}, {2, 0}}}, torch::kInt64);
@@ -191,6 +185,9 @@ TEST(DraftDistributionTest,
                      {{0.0F, -INFINITY}, {0.0F, -INFINITY}}});
   const torch::Tensor dense_logits =
       torch::full({2, 2, 4}, -INFINITY).scatter_(2, ids, sparse_logits);
+  const torch::Tensor original_ids = ids.clone();
+  const torch::Tensor original_sparse_logits = sparse_logits.clone();
+  const torch::Tensor original_dense_logits = dense_logits.clone();
   const torch::Tensor target =
       torch::full({6, 4}, -INFINITY)
           .scatter_(
@@ -211,27 +208,30 @@ TEST(DraftDistributionTest,
       params.do_sample() = torch::tensor({false, true});
     }
     for (int64_t representation = 0; representation < 3; ++representation) {
-      const auto make_distribution = [&] {
-        return representation == 0 ? DraftDistribution(tokens)
+      const auto make_proposal = [&](const torch::Tensor& verification_tokens) {
+        return representation == 0 ? DraftProposal(verification_tokens)
                : representation == 1
-                   ? DraftDistribution(tokens, dense_logits)
-                   : DraftDistribution(tokens, ids, sparse_logits);
+                   ? DraftProposal(verification_tokens, dense_logits)
+                   : DraftProposal(verification_tokens, ids, sparse_logits);
       };
-      const DraftProposal proposal(verify_tokens, make_distribution());
-      const torch::Tensor before = proposal.distribution().logsumexp();
+      const DraftProposal proposal = make_proposal(verify_tokens);
+      const torch::Tensor before = proposal.logsumexp();
       const SampleOutput constrained =
           rejection_sample(params, proposal, target.clone());
       EXPECT_TRUE(torch::equal(constrained.next_tokens, expected));
       EXPECT_TRUE(torch::equal(proposal.token_ids(), verify_tokens));
       EXPECT_TRUE(
           torch::equal(tokens, torch::tensor({{1, 2}, {1, 2}}, torch::kInt64)));
-      const torch::Tensor after = proposal.distribution().logsumexp();
+      const torch::Tensor after = proposal.logsumexp();
       if (before.defined()) {
         EXPECT_TRUE(torch::equal(before, after));
       }
-      const SampleOutput unconstrained = rejection_sample(
-          params, DraftProposal(tokens, make_distribution()), target.clone());
+      const SampleOutput unconstrained =
+          rejection_sample(params, make_proposal(tokens), target.clone());
       EXPECT_TRUE(torch::equal(unconstrained.next_tokens, full));
+      EXPECT_TRUE(torch::equal(ids, original_ids));
+      EXPECT_TRUE(torch::equal(sparse_logits, original_sparse_logits));
+      EXPECT_TRUE(torch::equal(dense_logits, original_dense_logits));
     }
   }
 }
@@ -340,10 +340,7 @@ TEST(RejectionSamplerControlsTest, BadWordsAdvanceAcrossDraftAndBonusTokens) {
                                         {0.F, 0.F, 0.F, 10.F, 100.F},
                                         {0.F, 0.F, 0.F, 10.F, 100.F}});
   const torch::Tensor draft_tokens = torch::tensor({{2, 3}}, torch::kLong);
-  auto result = rejection_sample(
-      params,
-      DraftProposal(draft_tokens, DraftDistribution(draft_tokens)),
-      logits);
+  auto result = rejection_sample(params, DraftProposal(draft_tokens), logits);
   EXPECT_EQ(result.next_tokens[0][0].item<int64_t>(), 2);
   EXPECT_NE(result.next_tokens[0][1].item<int64_t>(), 3);
   EXPECT_EQ(result.next_tokens[0][2].item<int64_t>(), -1);
@@ -353,10 +350,7 @@ TEST(RejectionSamplerControlsTest, BadWordsAdvanceAcrossDraftAndBonusTokens) {
       {{0.F, 10.F, 0.F, 0.F}, {0.F, 0.F, 10.F, 0.F}, {0.F, 0.F, 0.F, 10.F}});
   const torch::Tensor bonus_draft_tokens =
       torch::tensor({{1, 2}}, torch::kLong);
-  result = rejection_sample(
-      params,
-      DraftProposal(bonus_draft_tokens, DraftDistribution(bonus_draft_tokens)),
-      logits);
+  result = rejection_sample(params, DraftProposal(bonus_draft_tokens), logits);
   EXPECT_EQ(result.next_tokens[0][0].item<int64_t>(), 1);
   EXPECT_EQ(result.next_tokens[0][1].item<int64_t>(), 2);
   EXPECT_NE(result.next_tokens[0][2].item<int64_t>(), 3);
@@ -382,10 +376,10 @@ TEST(RejectionSamplerControlsTest, SeededVerifyMatchesOrdinaryTokenOffsets) {
     for (const int64_t num_draft_tokens : {0, 2}) {
       const torch::Tensor draft_tokens =
           proposal.narrow(1, 0, num_draft_tokens);
-      const auto result = rejection_sample(
-          params,
-          DraftProposal(draft_tokens, DraftDistribution(draft_tokens)),
-          logits.narrow(0, 0, num_draft_tokens + 1));
+      const auto result =
+          rejection_sample(params,
+                           DraftProposal(draft_tokens),
+                           logits.narrow(0, 0, num_draft_tokens + 1));
       EXPECT_TRUE(torch::equal(result.next_tokens,
                                torch::tensor(expected, torch::kLong)
                                    .unsqueeze(0)
@@ -409,10 +403,8 @@ TEST(RejectionSamplerControlsTest, CandidatePenaltiesCountDraftPrefix) {
   torch::Tensor logits =
       torch::tensor({{0.F, 6.F, 2.F}, {0.F, 6.F, 2.F}, {0.F, 6.F, 2.F}});
   const torch::Tensor draft_tokens = torch::tensor({{1, 1}}, torch::kLong);
-  const auto result = rejection_sample(
-      params,
-      DraftProposal(draft_tokens, DraftDistribution(draft_tokens)),
-      logits);
+  const auto result =
+      rejection_sample(params, DraftProposal(draft_tokens), logits);
   EXPECT_EQ(result.next_tokens[0][0].item<int64_t>(), 1);
   EXPECT_EQ(result.next_tokens[0][1].item<int64_t>(), 2);
   EXPECT_EQ(result.next_tokens[0][2].item<int64_t>(), -1);
@@ -426,10 +418,8 @@ TEST(RejectionSamplerControlsTest, ReportsRawLogprobsBeforeTokenConstraints) {
   torch::Tensor logits = torch::tensor({{4.F, 2.F, 1.F}, {4.F, 2.F, 1.F}});
   const torch::Tensor expected = torch::log_softmax(logits[0], -1);
   const torch::Tensor draft_tokens = torch::tensor({{2}}, torch::kLong);
-  const auto result = rejection_sample(
-      params,
-      DraftProposal(draft_tokens, DraftDistribution(draft_tokens)),
-      logits);
+  const auto result =
+      rejection_sample(params, DraftProposal(draft_tokens), logits);
   EXPECT_NEAR(
       result.logprobs[0][0].item<float>(), expected[2].item<float>(), 1e-6);
   EXPECT_EQ(result.top_tokens[0][0][0].item<int64_t>(), 0);
@@ -607,10 +597,8 @@ TEST(RejectionSamplerControlsTest,
     logits.view({7, 4, 3}).narrow(0, 3, 3).select(2, 2).fill_(20);
     auto ragged_logits = logits.clone();
     const torch::Tensor draft_tokens = expected.narrow(1, 0, 3).clone();
-    const auto fixed = rejection_sample(
-        params,
-        DraftProposal(draft_tokens, DraftDistribution(draft_tokens)),
-        logits);
+    const auto fixed =
+        rejection_sample(params, DraftProposal(draft_tokens), logits);
     const auto ragged = spec_verify::rejection_sample_ragged(
         ragged_logits, params, owners, columns);
     EXPECT_TRUE(torch::equal(fixed.next_tokens, expected));
@@ -634,10 +622,8 @@ TEST(RejectionSamplerControlsTest, MinimumLengthRejectsEarlyDraftEos) {
     }
     auto logits = torch::tensor({{10.0F, 5.0F, 0.0F}}).repeat({6, 1});
     const torch::Tensor draft_tokens = torch::zeros({2, 2}, torch::kLong);
-    const auto result = rejection_sample(
-        params,
-        DraftProposal(draft_tokens, DraftDistribution(draft_tokens)),
-        logits);
+    const auto result =
+        rejection_sample(params, DraftProposal(draft_tokens), logits);
     EXPECT_TRUE(
         torch::equal(result.next_tokens,
                      torch::tensor({{1, -1, -1}, {0, 0, 0}}, torch::kLong)));
@@ -658,10 +644,8 @@ TEST(RejectionSamplerControlsTest, MinimumLengthWithoutDraftsUsesBonusRow) {
     }
     auto logits = torch::tensor({{10.0F, 5.0F, 0.0F}}).repeat({2, 1});
     const torch::Tensor draft_tokens = torch::empty({2, 0}, torch::kLong);
-    const auto result = rejection_sample(
-        params,
-        DraftProposal(draft_tokens, DraftDistribution(draft_tokens)),
-        logits);
+    const auto result =
+        rejection_sample(params, DraftProposal(draft_tokens), logits);
     EXPECT_TRUE(torch::equal(result.next_tokens,
                              torch::tensor({{1}, {0}}, torch::kLong)));
   }

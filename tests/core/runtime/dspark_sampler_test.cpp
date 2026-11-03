@@ -59,7 +59,7 @@ TEST_P(DSparkConstrainedProposalTest, DisjointRequestReturnsAllowedToken) {
       {},
       mapping);
   EXPECT_EQ(proposal.token_ids().item<int64_t>(), 1);
-  EXPECT_EQ(proposal.distribution().logsumexp().item<float>(), 0);
+  EXPECT_EQ(proposal.logsumexp().item<float>(), 0);
   const SampleOutput verified =
       rejection_sample(params, proposal, torch::zeros({2, 8}, options));
   EXPECT_TRUE(torch::equal(verified.next_tokens.cpu(),
@@ -129,7 +129,7 @@ TEST_P(DSparkConstrainedProposalTest, EmptySupportIsRepairedPerRow) {
         true,
         {},
         mapping);
-    const torch::Tensor lse = proposal.distribution().logsumexp();
+    const torch::Tensor lse = proposal.logsumexp();
     EXPECT_TRUE(lse.isfinite().all().item<bool>());
     EXPECT_TRUE(proposal.token_ids()[0].eq(1).all().item<bool>());
     EXPECT_TRUE(proposal.token_ids()[1].eq(4).all().item<bool>());
@@ -141,11 +141,10 @@ TEST_P(DSparkConstrainedProposalTest, EmptySupportIsRepairedPerRow) {
                                proposal.token_ids().select(1, step)));
       // p=1 exposes 1-q through the real residual implementation.
       torch::Tensor residual = torch::zeros({3, 8}, options);
-      proposal.distribution().apply_residual(
-          residual,
-          torch::full({3, 1}, step, id_options),
-          proposal.token_ids().narrow(1, step, 1),
-          lse);
+      proposal.apply_residual(residual,
+                              torch::full({3, 1}, step, id_options),
+                              proposal.token_ids().narrow(1, step, 1),
+                              lse);
       EXPECT_TRUE(torch::allclose(residual.exp(), 1 - expected_q, 1e-5, 1e-6));
       EXPECT_TRUE(expected_q.gather(1, proposal.token_ids().narrow(1, step, 1))
                       .gt(0)
@@ -153,8 +152,7 @@ TEST_P(DSparkConstrainedProposalTest, EmptySupportIsRepairedPerRow) {
                       .item<bool>());
     }
     torch::Tensor acceptance = torch::zeros({3, 3}, options);
-    proposal.distribution().apply_acceptance(
-        acceptance, proposal.token_ids(), lse);
+    proposal.apply_acceptance(acceptance, proposal.token_ids(), lse);
     EXPECT_TRUE(
         torch::allclose(acceptance,
                         -expected_q.gather(1, proposal.token_ids()).log(),
@@ -215,7 +213,7 @@ TEST_P(DSparkConstrainedProposalTest,
   ASSERT_EQ(feedback.size(), 3u);
   EXPECT_EQ(feedback[1].item<int64_t>(), 4);
   EXPECT_EQ(feedback[2].item<int64_t>(), 1);
-  const torch::Tensor lse = proposal.distribution().logsumexp();
+  const torch::Tensor lse = proposal.logsumexp();
   EXPECT_TRUE(lse.isfinite().all().item<bool>());
   EXPECT_EQ(lse[0][1].item<float>(), 0);
   for (const bool sentinel : {false, true}) {
@@ -230,7 +228,7 @@ TEST_P(DSparkConstrainedProposalTest,
                              torch::tensor({{4, 5, -1, -1}}, torch::kInt64)));
     EXPECT_EQ(verified.num_accepted_tokens.item<int32_t>(), 1);
   }
-  EXPECT_TRUE(torch::equal(proposal.distribution().logsumexp(), lse));
+  EXPECT_TRUE(torch::equal(proposal.logsumexp(), lse));
 }
 
 TEST_P(DSparkConstrainedProposalTest, NormalRowsPreserveSeededDraws) {
@@ -274,7 +272,7 @@ TEST_P(DSparkConstrainedProposalTest, NormalRowsPreserveSeededDraws) {
     EXPECT_EQ(proposal.token_ids()[0][0].item<int64_t>(), 1);
     EXPECT_TRUE(torch::equal(proposal.token_ids().narrow(0, 1, 3).squeeze(1),
                              expected.next_tokens.narrow(0, 1, 3)));
-    const torch::Tensor lse = proposal.distribution().logsumexp();
+    const torch::Tensor lse = proposal.logsumexp();
     EXPECT_TRUE(lse.isfinite().all().item<bool>());
     EXPECT_TRUE(torch::equal(lse.narrow(0, 1, 3).squeeze(1),
                              expected_logits.narrow(0, 1, 3).logsumexp(-1)));
@@ -327,7 +325,7 @@ TEST(DSparkMarkovSamplerTest,
     ASSERT_EQ(feedback.size(), 2u);
     EXPECT_TRUE(torch::equal(feedback[0], anchors));
     EXPECT_TRUE(torch::equal(feedback[1], proposal.token_ids().select(1, 0)));
-    const torch::Tensor lse = proposal.distribution().logsumexp();
+    const torch::Tensor lse = proposal.logsumexp();
     EXPECT_EQ(lse.defined(), probabilistic);
     for (int64_t step = 0; step < 2; ++step) {
       EXPECT_TRUE(mapping.eq(proposal.token_ids()[0][step]).any().item<bool>());
@@ -338,11 +336,10 @@ TEST(DSparkMarkovSamplerTest,
       expected.index_copy_(
           1, mapping, torch::softmax(logits.select(1, step), -1));
       torch::Tensor residual = torch::zeros({1, 8});
-      proposal.distribution().apply_residual(
-          residual,
-          torch::full({1, 1}, step, torch::kInt64),
-          proposal.token_ids().narrow(1, step, 1),
-          lse);
+      proposal.apply_residual(residual,
+                              torch::full({1, 1}, step, torch::kInt64),
+                              proposal.token_ids().narrow(1, step, 1),
+                              lse);
       EXPECT_TRUE(torch::allclose(residual.exp(), 1 - expected));
     }
   }
@@ -415,14 +412,13 @@ TEST(DSparkMarkovSamplerTest, ReducedVocabularyAppliesTargetSamplingControls) {
         EXPECT_TRUE(output.eq(expected_token).all().item<bool>());
         continue;
       }
-      const torch::Tensor lse = proposal.distribution().logsumexp();
+      const torch::Tensor lse = proposal.logsumexp();
       for (int64_t step = 0; step < 2; ++step) {
         torch::Tensor residual = torch::zeros({1, 8});
-        proposal.distribution().apply_residual(
-            residual,
-            torch::full({1, 1}, step, torch::kInt64),
-            output.narrow(1, step, 1),
-            lse);
+        proposal.apply_residual(residual,
+                                torch::full({1, 1}, step, torch::kInt64),
+                                output.narrow(1, step, 1),
+                                lse);
         EXPECT_TRUE(torch::allclose(residual.exp(),
                                     1 - torch::softmax(expected_logits, -1)));
         EXPECT_TRUE(expected_logits[0][output[0][step].item<int64_t>()]

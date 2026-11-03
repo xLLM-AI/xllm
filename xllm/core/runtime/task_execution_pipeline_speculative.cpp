@@ -3262,9 +3262,7 @@ void TaskExecutionPipeline::finish_fixed_verify(SpeculativeSlot& slot) {
         ++step;
       }
     }
-    slot.proposal.emplace(
-        slot.draft_token_ids,
-        DraftDistribution(slot.draft_token_ids, std::move(draft_logits)));
+    slot.proposal.emplace(slot.draft_token_ids, std::move(draft_logits));
   }
   CHECK(slot.proposal.has_value());
   const SampleOutput accepted =
@@ -3431,9 +3429,7 @@ void TaskExecutionPipeline::launch_block_draft(SpeculativeSlot& slot) {
     if (draft_logits.defined()) {
       draft_logits = draft_logits.view({slot.rows, steps, -1});
     }
-    slot.proposal.emplace(
-        slot.draft_token_ids,
-        DraftDistribution(slot.draft_token_ids, std::move(draft_logits)));
+    slot.proposal.emplace(slot.draft_token_ids, std::move(draft_logits));
   }
 }
 

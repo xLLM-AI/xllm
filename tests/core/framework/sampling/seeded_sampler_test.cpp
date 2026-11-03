@@ -117,7 +117,7 @@ TEST(SeededSamplerTest, NpuVerificationMatchesOrdinaryDrawsAtTokenOffsets) {
       expected.select(1, column).copy_(sample(logits, step_params).next_tokens);
     }
     const torch::Tensor tokens = expected.narrow(1, 0, kSteps).clone();
-    const DraftProposal proposal(tokens, DraftDistribution(tokens));
+    const DraftProposal proposal(tokens);
     const SampleOutput accepted =
         rejection_sample(params, proposal, original.clone().view({-1, kVocab}));
     EXPECT_TRUE(torch::equal(accepted.next_tokens, expected));
@@ -128,9 +128,7 @@ TEST(SeededSamplerTest, NpuVerificationMatchesOrdinaryDrawsAtTokenOffsets) {
     const torch::Tensor empty_drafts =
         torch::empty({kRows, 0}, params.seeds().options());
     const SampleOutput bonus = rejection_sample(
-        params,
-        DraftProposal(empty_drafts, DraftDistribution(empty_drafts)),
-        original.select(1, 0).clone());
+        params, DraftProposal(empty_drafts), original.select(1, 0).clone());
     EXPECT_TRUE(torch::equal(bonus.next_tokens, expected.narrow(1, 0, 1)));
     EXPECT_TRUE(
         torch::equal(bonus.num_accepted_tokens,
@@ -138,10 +136,10 @@ TEST(SeededSamplerTest, NpuVerificationMatchesOrdinaryDrawsAtTokenOffsets) {
 
     const torch::Tensor verify_tokens = tokens.clone();
     verify_tokens.select(1, 1).fill_(-1);
-    const SampleOutput rejected = rejection_sample(
-        params,
-        DraftProposal(verify_tokens, DraftDistribution(verify_tokens)),
-        original.clone().view({-1, kVocab}));
+    const SampleOutput rejected =
+        rejection_sample(params,
+                         DraftProposal(verify_tokens),
+                         original.clone().view({-1, kVocab}));
     expected.narrow(1, 2, kSteps - 1).fill_(-1);
     EXPECT_TRUE(torch::equal(rejected.next_tokens, expected));
     EXPECT_TRUE(
@@ -169,7 +167,7 @@ TEST(SeededSamplerTest, NpuVerificationLogprobsUseRawLogitsWithBiasAndTopK) {
   params.top_k() = torch::ones({kRows}, options.dtype(torch::kInt64));
   const torch::Tensor draft_tokens =
       torch::zeros({kRows, 2}, options.dtype(torch::kInt64));
-  const DraftProposal proposal(draft_tokens, DraftDistribution(draft_tokens));
+  const DraftProposal proposal(draft_tokens);
   const torch::Tensor expected =
       torch::log_softmax(original, -1, torch::kFloat32)
           .select(1, 0)
