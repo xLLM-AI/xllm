@@ -213,7 +213,7 @@ class RecModelParams final {
   RecFeatureInput features;
   ExpertInput expert;
   RecGraphInput graph;
-  LinearStateValidityMask linear_state_validity_mask;
+  std::vector<int64_t> linear_state_validity_mask;
   RecModelInputParams rec_params;
   std::shared_ptr<layer::AttentionMetadata> attn_metadata;
   std::shared_ptr<PythonAttentionMetadata> python_attention_metadata;

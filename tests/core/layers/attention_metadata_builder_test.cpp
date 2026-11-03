@@ -262,8 +262,7 @@ TEST(AttentionMetadataBuilderTest, SkipsInitialStateMaterializationOnRequest) {
       params, /*enable_mla=*/false, {}, std::nullopt, build_options);
 
   EXPECT_FALSE(metadata.has_initial_states.defined());
-  EXPECT_EQ(params.linear_state_validity_mask,
-            LinearStateValidityMask({0, 1, 0}));
+  EXPECT_EQ(params.linear_state_validity_mask, std::vector<int64_t>({0, 1, 0}));
   EXPECT_EQ(params.embedding.linear_state_ids, std::vector<int32_t>({4, 2, 9}));
 }
 

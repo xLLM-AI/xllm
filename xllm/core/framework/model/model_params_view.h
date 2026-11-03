@@ -259,7 +259,7 @@ class ModelParamsView final {
   BlockCopyInput& block_copy;
   ExpertInput& expert;
   GraphInputView graph;
-  LinearStateValidityMask& linear_state_validity_mask;
+  std::vector<int64_t>& linear_state_validity_mask;
   std::vector<torch::Tensor>& multi_block_tables;
   torch::Tensor& mtp_shifted_token_ids;
   bool& is_spec_verify;

@@ -33,7 +33,6 @@ limitations under the License.
 #include "core/framework/eplb/eplb_utils.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_params_view.h"
-#include "core/kv_cache/linear_state_restore.h"
 #include "core/kv_cache/transfer/kv_transfer_completion.h"
 #if defined(USE_CUDA) || defined(USE_ILU) || defined(USE_MUSA)
 #include "layers/cuda/flashinfer_workspace.h"

@@ -18,11 +18,21 @@ limitations under the License.
 #include <cstdint>
 #include <vector>
 
-#include "core/util/hash_util.h"
+#include "core/kv_cache/storage/kv_cache.h"
 
 namespace xllm {
 
-using LinearStatePrefixHash = PrefixHash;
-using LinearStateValidityMask = std::vector<int64_t>;
+// Convert logical sequence KV cursors to the warm/cold state mask consumed by
+// active linear-attention rows. Data-parallel expansion keeps each logical
+// row contiguous in the execution batch.
+std::vector<int64_t> build_linear_state_mask(
+    const std::vector<int32_t>& cached_tokens,
+    int64_t active_rows);
+
+void restore_linear_state_slots(std::vector<KVCache>& kv_caches,
+                                const std::vector<int32_t>& write_ids,
+                                const std::vector<int32_t>& read_ids,
+                                std::vector<int64_t>& validity_mask,
+                                bool reads_distinct_state);
 
 }  // namespace xllm
