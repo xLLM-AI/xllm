@@ -56,8 +56,7 @@ std::vector<std::string> compute_kv_block_hashes(
     const Slice<int32_t> block_tokens = tokens.slice(begin, end);
 
     std::vector<uint8_t> input;
-    input.reserve(previous.size() +
-                  block_tokens.size() * sizeof(int32_t));
+    input.reserve(previous.size() + block_tokens.size() * sizeof(int32_t));
     if (block_idx > 0) {
       input.insert(input.end(), previous.begin(), previous.end());
     }
