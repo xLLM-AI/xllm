@@ -22,6 +22,8 @@ reject stale cache state, an incorrect selected row, and an unmasked tail.
 from __future__ import annotations
 
 import os
+from itertools import accumulate
+from math import prod
 from types import SimpleNamespace
 
 import pytest
@@ -36,6 +38,274 @@ pytestmark = pytest.mark.skipif(
 
 _OUTPUT_RTOL = 0.02
 _OUTPUT_ATOL = 1e-3
+
+
+@pytest.mark.parametrize("layer_id", [0, 3], ids=["first-full-role", "last-full-role"])
+@pytest.mark.parametrize("width", [1, 3], ids=["decode", "expanded-verify"])
+@pytest.mark.parametrize("graph", [False, True], ids=["eager", "graph"])
+@torch.inference_mode()
+def test_shared_full_attention_matches_dense_after_chunked_prefill(layer_id: int, width: int, graph: bool) -> None:
+    from xllm.python.attention.backend import LayerCache
+    from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend
+    from xllm.python.layers.attention import Attention
+    from xllm.python.model_executor.forward_context import (
+        AclGraphExecutionState,
+        ForwardContext,
+        forward_context,
+    )
+
+    device = torch.device("npu:0")
+    heads, kv_heads, dimension, page_size, page_count = 4, 2, 64, 128, 8
+    full_row_bytes, conv_row_bytes, ssm_row_bytes, page_bytes = 32768, 5376, 65536, 393216
+    arena = torch.zeros(page_count * page_bytes, device=device, dtype=torch.uint8)
+
+    def arena_view(offset: int, shape: tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
+        byte_count = prod(shape) * torch.empty((), dtype=dtype).element_size()
+        return arena.narrow(0, offset, byte_count).view(dtype).view(shape)
+
+    full_rows = (page_count - 1) * page_bytes // full_row_bytes + 1
+    shared_caches = [
+        LayerCache(
+            key=arena_view(2 * role * full_row_bytes, (full_rows, page_size, kv_heads, dimension), torch.bfloat16),
+            value=arena_view(
+                (2 * role + 1) * full_row_bytes, (full_rows, page_size, kv_heads, dimension), torch.bfloat16
+            ),
+        )
+        for role in range(4)
+    ]
+    shared_caches.append(
+        LayerCache(
+            key=None,
+            value=None,
+            conv=arena_view(
+                0,
+                (((page_count - 1) * page_bytes + conv_row_bytes - 1) // conv_row_bytes + 1, 7, 384),
+                torch.bfloat16,
+            ),
+            ssm=arena_view(
+                ssm_row_bytes, ((page_count - 1) * page_bytes // ssm_row_bytes + 5, 1, 128, 128), torch.float32
+            ),
+        )
+    )
+    dense_caches = [
+        LayerCache(
+            key=torch.zeros(page_count, page_size, kv_heads, dimension, device=device, dtype=torch.bfloat16),
+            value=torch.zeros(page_count, page_size, kv_heads, dimension, device=device, dtype=torch.bfloat16),
+        )
+        for _ in range(4)
+    ]
+    cache_sets = [dense_caches, shared_caches]
+    backends = [
+        NpuPagedAttentionBackend(heads, kv_heads, dimension, dimension**-0.5, 0, False, device, torch.bfloat16)
+        for _ in cache_sets
+    ]
+    for backend, caches in zip(backends, cache_sets):
+        backend.bind_kv_caches(caches)
+    layout = backends[1].shared_kv_layout
+    assert backends[0].shared_kv_layout is None
+    assert layout is not None and layout.page_bytes == page_bytes and layout.conv_row_stride is None
+    attention = Attention(heads, kv_heads, dimension, dimension**-0.5, 0, layer_id)
+    generator = torch.Generator().manual_seed(37031 + layer_id * 7 + width)
+    table = [[5, 2], [1, 6]]
+    logical_pages = torch.tensor([1, 2, 5, 6], device=device, dtype=torch.int64)
+    physical_pages = layout.full_block_table(logical_pages)
+    protected = shared_caches[(layer_id + 1) % 4]
+    protected_keys = protected.key.index_select(0, physical_pages).clone()
+    protected_values = protected.value.index_select(0, physical_pages).clone()
+    # The allocator can assign this same arena page to Linear states. Full
+    # cache writes must not reach it or the neighboring Full role payload.
+    linear_page = arena.narrow(0, 7 * page_bytes, page_bytes)
+    linear_page.fill_(0x5A)
+    protected_linear = linear_page.clone()
+    histories: list[tuple[torch.Tensor, torch.Tensor]] = [
+        (
+            torch.empty(0, kv_heads, dimension, dtype=torch.bfloat16),
+            torch.empty(0, kv_heads, dimension, dtype=torch.bfloat16),
+        )
+        for _ in table
+    ]
+
+    def logical_slots(blocks: list[list[int]], starts: list[int], counts: list[int]) -> list[int]:
+        # Scheduler slots use logical block ids and retain the token offset.
+        return [
+            row[position // page_size] * page_size + position % page_size
+            for row, start, count in zip(blocks, starts, counts)
+            for position in range(start, start + count)
+        ]
+
+    def metadata_for(
+        backend: NpuPagedAttentionBackend,
+        blocks: list[list[int]],
+        counts: list[int],
+        lengths: list[int],
+        slots: list[int],
+        *,
+        prefill: bool = False,
+        chunked: bool = False,
+        verify: bool = False,
+        device_lengths: bool = False,
+    ) -> SimpleNamespace:
+        ends = list(accumulate(counts, initial=0))
+        metadata = SimpleNamespace(
+            slot_mapping=torch.tensor(slots, device=device, dtype=torch.int32),
+            block_table=torch.tensor(blocks, device=device, dtype=torch.int32),
+            q_seq_lens=torch.tensor(counts, device=device, dtype=torch.int32),
+            q_cu_seq_lens=torch.tensor(ends, device=device, dtype=torch.int32),
+            q_cu_seq_lens_host_values=ends,
+            kv_seq_lens=torch.tensor(lengths, device=device, dtype=torch.int32),
+            kv_seq_lens_host_values=[2 * page_size] * len(lengths) if device_lengths else lengths,
+            is_prefill=prefill,
+            is_chunked_prefill=chunked,
+            is_spec_verify=verify,
+            is_mixed=False,
+            has_kv_shard=False,
+            expanded_decode_metadata=None,
+            linear_state_indices=torch.tensor([3, 4], device=device, dtype=torch.int32) if verify else None,
+            num_accepted_tokens=torch.ones(2, device=device, dtype=torch.int32) if verify else None,
+        )
+        metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=device_lengths)
+        return metadata
+
+    def reference(query: torch.Tensor, keys: torch.Tensor, values: torch.Tensor, start: int) -> torch.Tensor:
+        repeated_keys = keys.float().repeat_interleave(heads // kv_heads, dim=1)
+        repeated_values = values.float().repeat_interleave(heads // kv_heads, dim=1)
+        scores = torch.einsum("thd,khd->htk", query.float(), repeated_keys) * dimension**-0.5
+        future = torch.arange(keys.shape[0])[None, :] > start + torch.arange(query.shape[0])[:, None]
+        scores.masked_fill_(future[None], float("-inf"))
+        return torch.einsum("htk,khd->thd", scores.softmax(-1), repeated_values).reshape(query.shape[0], -1)
+
+    def check_cache_pages() -> None:
+        for field in ("key", "value"):
+            actual = getattr(shared_caches[layer_id], field).index_select(0, physical_pages)
+            expected = getattr(dense_caches[layer_id], field).index_select(0, logical_pages)
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        torch.testing.assert_close(protected.key.index_select(0, physical_pages), protected_keys, rtol=0, atol=0)
+        torch.testing.assert_close(protected.value.index_select(0, physical_pages), protected_values, rtol=0, atol=0)
+        torch.testing.assert_close(linear_page, protected_linear, rtol=0, atol=0)
+
+    # The second chunk crosses 127 -> 128 and writes nonzero in-page offsets
+    # on nonadjacent physical blocks before the later cached-prefix reads.
+    for phase, counts in enumerate(([127, 130], [3, 2])):
+        starts = [keys.shape[0] for keys, _ in histories]
+        total = sum(counts)
+        query_host = (torch.randn(total, heads, dimension, generator=generator) * 0.2).to(torch.bfloat16)
+        key_host = (torch.randn(total, kv_heads, dimension, generator=generator) * 0.2).to(torch.bfloat16)
+        value_host = (torch.randn(total, kv_heads, dimension, generator=generator) * 0.1).to(torch.bfloat16)
+        expected, offset = [], 0
+        for row, count in enumerate(counts):
+            value_host[offset : offset + count].add_(
+                row * 1.5 + torch.arange(starts[row], starts[row] + count).view(-1, 1, 1) / page_size
+            )
+            keys, values = histories[row]
+            keys = torch.cat((keys, key_host[offset : offset + count]))
+            values = torch.cat((values, value_host[offset : offset + count]))
+            histories[row] = keys, values
+            expected.append(reference(query_host[offset : offset + count], keys, values, starts[row]))
+            offset += count
+        query, keys, values = query_host.to(device), key_host.to(device), value_host.to(device)
+        outputs = []
+        for backend, caches in zip(backends, cache_sets):
+            metadata = metadata_for(
+                backend,
+                table,
+                counts,
+                [start + count for start, count in zip(starts, counts)],
+                logical_slots(table, starts, counts),
+                prefill=phase == 0,
+                chunked=phase == 1,
+            )
+            with forward_context(ForwardContext(backend, device, metadata, caches)):
+                backend.prepare(metadata)
+                outputs.append(attention(query, keys, values))
+        torch.testing.assert_close(outputs[1], outputs[0], rtol=_OUTPUT_RTOL, atol=_OUTPUT_ATOL)
+        torch.testing.assert_close(outputs[1].float().cpu(), torch.cat(expected), rtol=_OUTPUT_RTOL, atol=_OUTPUT_ATOL)
+        check_cache_pages()
+
+    rows = 2 * width
+    query = torch.zeros(rows, heads, dimension, device=device, dtype=torch.bfloat16)
+    keys = torch.zeros(rows, kv_heads, dimension, device=device, dtype=torch.bfloat16)
+    values = torch.zeros_like(keys)
+    read_slots = logical_slots(table[::-1], [132, 130], [width, width])
+    read_lengths = [start + column + 1 for start in (132, 130) for column in range(width)]
+    read_metadata = [
+        metadata_for(
+            backend,
+            [row for row in table[::-1] for _ in range(width)],
+            [1] * rows,
+            read_lengths,
+            read_slots,
+            verify=width > 1,
+            device_lengths=True,
+        )
+        for backend in backends
+    ]
+    states = [AclGraphExecutionState({}) for _ in backends]
+
+    def read_forward(index: int) -> torch.Tensor:
+        metadata = read_metadata[index]
+        context = ForwardContext(
+            backends[index], device, metadata, cache_sets[index], execution_state=states[index] if graph else None
+        )
+        with forward_context(context):
+            backends[index].prepare(metadata)
+            return attention(query, keys, values)
+
+    captures, captured_outputs = [], []
+    if graph:
+        for index in range(2):
+            read_forward(index)
+            torch.npu.synchronize()
+            captured = torch.npu.NPUGraph()
+            with torch.npu.graph(captured):
+                captured_outputs.append(read_forward(index))
+            captures.append(captured)
+        torch.npu.synchronize()
+
+    for iteration, order in enumerate(([1, 0], [0, 1], [1, 0])):
+        current_table = [table[row] for row in order]
+        starts = [histories[row][0].shape[0] - iteration for row in order]
+        query_host = (torch.randn(rows, heads, dimension, generator=generator) * 0.2).to(torch.bfloat16)
+        key_host = (torch.randn(rows, kv_heads, dimension, generator=generator) * 0.2).to(torch.bfloat16)
+        value_host = (torch.randn(rows, kv_heads, dimension, generator=generator) * 0.1 + iteration + 3).to(
+            torch.bfloat16
+        )
+        query.copy_(query_host.to(device))
+        keys.copy_(key_host.to(device))
+        values.copy_(value_host.to(device))
+        slots = torch.tensor(logical_slots(current_table, starts, [width, width]), device=device, dtype=torch.int32)
+        lengths = torch.tensor(
+            [start + column + 1 for start in starts for column in range(width)], device=device, dtype=torch.int32
+        )
+        expanded_table = torch.tensor(
+            [row for row in current_table for _ in range(width)], device=device, dtype=torch.int32
+        )
+        for metadata in read_metadata:
+            metadata.slot_mapping.copy_(slots)
+            metadata.block_table.copy_(expanded_table)
+            metadata.kv_seq_lens.copy_(lengths)
+        outputs = []
+        for index in range(2):
+            if graph:
+                captures[index].replay()
+                outputs.append(captured_outputs[index])
+            else:
+                outputs.append(read_forward(index))
+        expected = []
+        for row, source in enumerate(order):
+            begin, end = row * width, (row + 1) * width
+            prefix_keys, prefix_values = histories[source]
+            expected.append(
+                reference(
+                    query_host[begin:end],
+                    torch.cat((prefix_keys[: starts[row]], key_host[begin:end])),
+                    torch.cat((prefix_values[: starts[row]], value_host[begin:end])),
+                    starts[row],
+                )
+            )
+        torch.testing.assert_close(outputs[1], outputs[0], rtol=_OUTPUT_RTOL, atol=_OUTPUT_ATOL)
+        torch.testing.assert_close(outputs[1].float().cpu(), torch.cat(expected), rtol=_OUTPUT_RTOL, atol=_OUTPUT_ATOL)
+        check_cache_pages()
+    torch.npu.synchronize()
 
 
 @pytest.mark.parametrize("rows", [1, 5], ids=["draft-step", "draft-prefix"])
