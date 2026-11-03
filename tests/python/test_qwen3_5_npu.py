@@ -1341,7 +1341,7 @@ def test_npu_shared_gdn_ordinary_decode_rejects_verify_checkpoints(width: int) -
 @pytest.mark.parametrize(
     "width,packed",
     [(1, False), (3, False), (5, False), (5, True)],
-    ids=["decode", "verify3", "verify5", "varlen5"],
+    ids=["decode", "verify3", "verify5", "ragged5"],
 )
 @pytest.mark.parametrize("graph_mode", [False, True], ids=["eager", "graph"])
 @torch.inference_mode()
@@ -1352,6 +1352,8 @@ def test_npu_shared_gdn_matches_dense_state_across_reordered_pages(width: int, p
     torch.manual_seed(163)
     device = torch.device("npu:0")
     cfg = _linear_config(
+        num_hidden_layers=2,
+        layer_types=["linear_attention", "full_attention"],
         linear_num_key_heads=1,
         linear_num_value_heads=1,
         linear_key_head_dim=128,
@@ -1392,38 +1394,74 @@ def test_npu_shared_gdn_matches_dense_state_across_reordered_pages(width: int, p
     full_value = shared[1].value.index_select(0, full_rows).clone()
     indices = torch.tensor([1, 3], device=device, dtype=torch.int32)
     accepted = torch.ones(2, device=device, dtype=torch.int32)
-    conv_indices = layout.linear_state_indices(indices, role="conv")
-    ssm_indices = indices * layout.ssm_row_stride
-    endpoints = torch.tensor([0, 1, width + 1], device=device, dtype=torch.int32) if packed else None
-    token_count = width + 1 if packed else 2 * width
+    lengths = (1, width) if packed else (width, width)
+    token_count = sum(lengths)
     hidden = torch.zeros(token_count, cfg.hidden_size, device=device, dtype=torch.bfloat16)
-    metadata = GdnVerifyMetadata(
-        {0: cache},
-        indices,
-        accepted,
-        width,
-        None,
-        cu_seqlens=endpoints,
-        conv_state_indices=conv_indices,
-        ssm_state_indices=ssm_indices,
+    input_batch = _input_batch(token_count, lengths, device)
+    source = SimpleNamespace(
+        linear_state_read_indices=indices,
+        linear_state_write_indices=indices,
+        num_accepted_tokens=accepted,
+        num_accepted_tokens_host_values=(1, 1),
+        q_seq_lens_host=torch.tensor(lengths, dtype=torch.int32),
+        is_spec_verify=width != 1,
+        is_prefill=False,
+        is_chunked_prefill=width != 1,
     )
-    reference_metadata = GdnVerifyMetadata({0: reference}, indices, accepted, width, None, cu_seqlens=endpoints)
+    builder = Qwen3_5GdnMetadataBuilder(cfg)
+    builder.bind_layer_caches(shared)
+    metadata = builder.allocate_persistent(input_batch, source)
+    reference_builder = Qwen3_5GdnMetadataBuilder(cfg)
+    reference_builder.bind_layer_caches([reference])
+    reference_metadata = reference_builder.allocate_persistent(input_batch, source)
+    if width != 1:
+        assert isinstance(metadata, GdnVerifyMetadata)
+        assert isinstance(reference_metadata, GdnVerifyMetadata)
+        assert metadata.cu_seqlens is None
+        assert reference_metadata.cu_seqlens is None
+        if packed:
+            assert metadata.packed_to_dense is not None
+            torch.testing.assert_close(
+                metadata.packed_to_dense,
+                torch.tensor([0, *range(width, 2 * width)], device=device, dtype=torch.int64),
+            )
+        else:
+            assert metadata.packed_to_dense is None
+    persistent_addresses = [
+        (current, name, tensor.data_ptr())
+        for current in (metadata, reference_metadata)
+        for name in (
+            "state_indices",
+            "num_accepted_tokens",
+            "packed_to_dense",
+            "conv_state_indices",
+            "ssm_state_indices",
+            "read_state_indices",
+            "write_state_indices",
+            "conv_read_state_indices",
+            "conv_write_state_indices",
+            "ssm_read_state_indices",
+            "ssm_write_state_indices",
+        )
+        if (tensor := getattr(current, name, None)) is not None
+    ]
     state = AclGraphExecutionState({})
     context = ForwardContext(None, device, None, shared, execution_state=state)
 
     def shared_forward() -> torch.Tensor:
-        if width != 1:
+        if isinstance(metadata, GdnVerifyMetadata):
             return layer._verify(hidden, metadata)
+        assert isinstance(metadata, GdnDecodeMetadata)
         return layer._decode(
             hidden,
             cache.conv,
             cache.ssm,
-            indices,
-            indices,
-            conv_indices,
-            conv_indices,
-            ssm_indices,
-            ssm_indices,
+            metadata.read_state_indices,
+            metadata.write_state_indices,
+            metadata.conv_read_state_indices,
+            metadata.conv_write_state_indices,
+            metadata.ssm_read_state_indices,
+            metadata.ssm_write_state_indices,
         )
 
     if graph_mode:
@@ -1442,18 +1480,29 @@ def test_npu_shared_gdn_matches_dense_state_across_reordered_pages(width: int, p
 
     for iteration, logical_pages in enumerate(([1, 3], [3, 1], [2, 4], [4, 2])):
         indices.copy_(torch.tensor(logical_pages, device=device, dtype=torch.int32))
-        conv_indices.copy_(layout.linear_state_indices(indices, role="conv"))
-        ssm_indices.copy_(indices * layout.ssm_row_stride)
-        accepted.copy_(torch.tensor([1, min(width, iteration + 1)], device=device, dtype=torch.int32))
+        counts = (1, min(width, iteration + 1))
+        accepted.copy_(torch.tensor(counts, device=device, dtype=torch.int32))
+        source.num_accepted_tokens_host_values = counts
+        builder.update_persistent(metadata, input_batch, source)
+        reference_builder.update_persistent(reference_metadata, input_batch, source)
+        for current, name, address in persistent_addresses:
+            assert getattr(current, name).data_ptr() == address
         hidden.normal_(std=0.1)
         if graph_mode:
             graph.replay()
         else:
             actual = shared_forward()
-        if width == 1:
-            expected = layer._decode(hidden, reference.conv, reference.ssm, indices, indices)
-        else:
+        if isinstance(reference_metadata, GdnVerifyMetadata):
             expected = layer._verify(hidden, reference_metadata)
+        else:
+            assert isinstance(reference_metadata, GdnDecodeMetadata)
+            expected = layer._decode(
+                hidden,
+                reference.conv,
+                reference.ssm,
+                reference_metadata.read_state_indices,
+                reference_metadata.write_state_indices,
+            )
         torch.npu.synchronize()
         torch.testing.assert_close(actual, expected, atol=0.02, rtol=0.02)
         torch.testing.assert_close(cache.conv.index_select(0, conv_rows), reference.conv[1:5], atol=0.02, rtol=0.02)
