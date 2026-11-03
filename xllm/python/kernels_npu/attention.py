@@ -20,9 +20,13 @@ graph can replay them without re-planning.
 
 from __future__ import annotations
 
-from typing import List
-
 import torch
+import torch.nn.functional as F
+
+_MIN_PAD_HEAD_DIM = 64
+_MAX_PAD_HEAD_DIM = 128
+_FIA_BLOCK_SIZE = 128
+_FIA_FULL_ATTENTION_TOKENS = 2147483647
 
 reshape_paged_cache = torch.ops.xllm_ops.reshape_paged_cache
 update_decode_graph_metadata = torch.ops.xllm_ops.update_decode_graph_metadata
@@ -39,7 +43,7 @@ def vision_fusion_attention(
     scale: float,
     input_layout: str = "TND",
 ) -> torch.Tensor:
-    """Run fused self-attention for ViT blocks via ``torch_npu.npu_fusion_attention``.
+    """Run TND vision attention through Fused Infer Attention.
 
     Args:
         q, k, v: Query/key/value in the layout specified by ``input_layout``.
@@ -53,6 +57,31 @@ def vision_fusion_attention(
         Attention output with same shape as ``q``.
     """
     import torch_npu
+
+    if input_layout == "TND":
+        # Match vLLM-Ascend's MM encoder FIA path. Padding changes storage,
+        # while scale continues to describe the original head dimension.
+        head_dim = q.shape[-1]
+        if _MIN_PAD_HEAD_DIM < head_dim < _MAX_PAD_HEAD_DIM:
+            q, k, v = (F.pad(tensor, (0, _MAX_PAD_HEAD_DIM - head_dim)) for tensor in (q, k, v))
+        output, _ = torch_npu.npu_fused_infer_attention_score(
+            query=q.contiguous(),
+            key=k.contiguous(),
+            value=v.contiguous(),
+            atten_mask=None,
+            block_table=None,
+            input_layout="TND",
+            block_size=_FIA_BLOCK_SIZE,
+            actual_seq_lengths=actual_seq_qlen,
+            actual_seq_lengths_kv=actual_seq_kvlen,
+            num_key_value_heads=k.shape[1],
+            num_heads=num_heads,
+            scale=scale,
+            sparse_mode=0,
+            pre_tokens=_FIA_FULL_ATTENTION_TOKENS,
+            next_tokens=_FIA_FULL_ATTENTION_TOKENS,
+        )
+        return output[..., :head_dim]
 
     return torch_npu.npu_fusion_attention(
         q,

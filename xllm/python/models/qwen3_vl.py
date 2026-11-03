@@ -33,7 +33,6 @@ from typing import Any, cast
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from xllm.python import kernels
 from xllm.python.layers import (
@@ -41,6 +40,7 @@ from xllm.python.layers import (
     HiddenParallelEmbedding,
     RMSNorm,
     RotaryEmbedding,
+    RowParallelLinear,
 )
 from xllm.python.model_loader import (
     ParallelLoadContext,
@@ -248,20 +248,8 @@ class Qwen3VLVisionPatchMerger(nn.Module):
         return self.linear_fc2(x)
 
 
-# npu_fusion_attention natively supports head_dim in {64, 128, ...}. Qwen3-VL
-# ViT head_dim is 72, so q/k/v are padded to 128 then sliced back. Mirrors
-# vllm-ascend's AscendMMEncoderAttention (MIN_PAD_SIZE/MAX_PAD_SIZE).
-_MIN_FUSED_HEAD_DIM = 64
-_MAX_FUSED_HEAD_DIM = 128
-
-
 class Qwen3VLVisionAttention(nn.Module):
-    """ViT attention: 2-D rotary + fused varlen flash attention.
-
-    All frames run in a single ``torch_npu.npu_fusion_attention`` varlen call
-    (TND layout, ``actual_seq_qlen`` = cumulative per-frame lengths from
-    ``cu_seqlens``), mirroring vllm-ascend's ``AscendMMEncoderAttention``.
-    """
+    """Head-parallel ViT attention with variable-length frame boundaries."""
 
     def __init__(
         self,
@@ -269,16 +257,18 @@ class Qwen3VLVisionAttention(nn.Module):
         num_heads: int,
         dtype: torch.dtype | None = None,
         device: torch.device | None = None,
+        tp_size: int = 1,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
-        self.num_heads = num_heads
+        if num_heads % tp_size:
+            raise ValueError("vision num_heads must be divisible by tp_size")
+        self.num_heads = num_heads // tp_size
         self.head_dim = hidden_size // num_heads
         self.scaling = self.head_dim**-0.5
-        self.qkv = nn.Linear(hidden_size, hidden_size * 3, bias=True)
-        self.proj = nn.Linear(hidden_size, hidden_size, bias=True)
-        # head_dim 72 is not a native npu_fusion_attention size: pad to 128.
-        self.pad_to_max = self.head_dim > _MIN_FUSED_HEAD_DIM and self.head_dim < _MAX_FUSED_HEAD_DIM
+        local_hidden_size = self.num_heads * self.head_dim
+        self.qkv = ColumnParallelLinear(hidden_size, 3 * local_hidden_size, tp_size, bias=True)
+        self.proj = RowParallelLinear(local_hidden_size, hidden_size, tp_size, bias=True)
         if dtype is not None and device is not None:
             self.to(dtype=dtype, device=device)
 
@@ -297,11 +287,6 @@ class Qwen3VLVisionAttention(nn.Module):
 
         # actual_seq (CPU cumulative per-frame lengths) is pre-computed once in
         # the ViT forward and reused across all layers — see comment there.
-        if self.pad_to_max:
-            pad = _MAX_FUSED_HEAD_DIM - self.head_dim
-            q = F.pad(q, (0, pad), value=0)
-            k = F.pad(k, (0, pad), value=0)
-            v = F.pad(v, (0, pad), value=0)
         attn_output = kernels.vision_fusion_attention(
             q.contiguous(),
             k.contiguous(),
@@ -312,9 +297,6 @@ class Qwen3VLVisionAttention(nn.Module):
             scale=self.scaling,
             input_layout="TND",
         )
-        if self.pad_to_max:
-            attn_output = attn_output[..., : self.head_dim]
-
         attn_output = attn_output.reshape(seq_length, -1).contiguous()
         return self.proj(attn_output)
 
@@ -329,9 +311,12 @@ class Qwen3VLVisionMLP(nn.Module):
         hidden_act: str = "gelu_pytorch_tanh",
         dtype: torch.dtype | None = None,
         device: torch.device | None = None,
+        tp_size: int = 1,
     ) -> None:
         super().__init__()
-        self.linear_fc1 = nn.Linear(hidden_size, intermediate_size, bias=True)
+        if intermediate_size % tp_size:
+            raise ValueError("vision intermediate_size must be divisible by tp_size")
+        self.linear_fc1 = ColumnParallelLinear(hidden_size, intermediate_size // tp_size, tp_size, bias=True)
         if hidden_act == "gelu_pytorch_tanh":
             self.act_fn = nn.GELU(approximate="tanh")
         elif hidden_act == "gelu":
@@ -340,7 +325,7 @@ class Qwen3VLVisionMLP(nn.Module):
             self.act_fn = nn.SiLU()
         else:
             raise ValueError(f"Unsupported hidden_act: {hidden_act}")
-        self.linear_fc2 = nn.Linear(intermediate_size, hidden_size, bias=True)
+        self.linear_fc2 = RowParallelLinear(intermediate_size // tp_size, hidden_size, tp_size, bias=True)
         if dtype is not None and device is not None:
             self.to(dtype=dtype, device=device)
 
@@ -359,12 +344,15 @@ class Qwen3VLVisionBlock(nn.Module):
         hidden_act: str = "gelu_pytorch_tanh",
         dtype: torch.dtype | None = None,
         device: torch.device | None = None,
+        tp_size: int = 1,
     ) -> None:
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, eps=1e-6)
-        self.attn = Qwen3VLVisionAttention(hidden_size, num_heads, dtype=dtype, device=device)
+        self.attn = Qwen3VLVisionAttention(hidden_size, num_heads, dtype=dtype, device=device, tp_size=tp_size)
         self.norm2 = nn.LayerNorm(hidden_size, eps=1e-6)
-        self.mlp = Qwen3VLVisionMLP(hidden_size, intermediate_size, hidden_act, dtype=dtype, device=device)
+        self.mlp = Qwen3VLVisionMLP(
+            hidden_size, intermediate_size, hidden_act, dtype=dtype, device=device, tp_size=tp_size
+        )
 
     def forward(
         self,
@@ -397,11 +385,13 @@ class Qwen3VLVisionTransformer(nn.Module):
         vision_config: Qwen3VLVisionConfig,
         dtype: torch.dtype,
         device: torch.device,
+        tp_size: int = 1,
     ) -> None:
         super().__init__()
         self.cfg = vision_config
         self.dtype = dtype
         self.device = device
+        self.tp_size = tp_size
 
         self.hidden_size = vision_config.hidden_size
         self.num_heads = vision_config.num_heads
@@ -445,6 +435,7 @@ class Qwen3VLVisionTransformer(nn.Module):
                     hidden_act=vision_config.hidden_act,
                     dtype=dtype,
                     device=device,
+                    tp_size=tp_size,
                 )
                 for _ in range(vision_config.depth)
             ]
@@ -623,8 +614,8 @@ class Qwen3VLVisionTransformer(nn.Module):
         )  # (total_image_tokens, out_hidden_size * (1 + num_deepstacks))
         return hidden_states
 
-    def load_weights(self, weights: ScopedWeightLoader) -> None:
-        """Load vision tower weights (replicated, no TP sharding)."""
+    def load_weights(self, weights: ScopedWeightLoader, tp_rank: int = 0) -> None:
+        """Shard encoder projections; keep embeddings, norms and mergers replicated."""
 
         def _copy(param_name: str, ckpt_name: str | None = None) -> None:
             weights.load_tensor(self.get_parameter(param_name), ckpt_name or param_name)
@@ -634,19 +625,12 @@ class Qwen3VLVisionTransformer(nn.Module):
         _copy("patch_embed.bias", "patch_embed.proj.bias")
         _copy("pos_embed.weight")
 
-        # Every other vision tensor maps 1:1 (same trailing key); load by list.
         block_ts = (
             "norm1.weight",
             "norm1.bias",
             "norm2.weight",
             "norm2.bias",
-            "attn.qkv.weight",
-            "attn.qkv.bias",
-            "attn.proj.weight",
             "attn.proj.bias",
-            "mlp.linear_fc1.weight",
-            "mlp.linear_fc1.bias",
-            "mlp.linear_fc2.weight",
             "mlp.linear_fc2.bias",
         )
         merger_ts = (
@@ -660,6 +644,24 @@ class Qwen3VLVisionTransformer(nn.Module):
         for i in range(len(self.blocks)):
             for t in block_ts:
                 _copy(f"blocks.{i}.{t}")
+            state = weights.with_prefix(f"blocks.{i}.")
+            block = self.blocks[i]
+            # Checkpoints pack all Q heads, then all K, then all V. Shard each
+            # component before packing the local Q/K/V; a flat shard mixes them.
+            for suffix in ("weight", "bias"):
+                name = f"attn.qkv.{suffix}"
+                shards = [
+                    state.shard_value(part, name, 0, tp_rank, self.tp_size)
+                    for part in state.get_tensor(name).chunk(3, dim=0)
+                ]
+                state.copy(block.get_parameter(name), torch.cat(shards, dim=0), name)
+            for name, dim in (
+                ("attn.proj.weight", 1),
+                ("mlp.linear_fc1.weight", 0),
+                ("mlp.linear_fc1.bias", 0),
+                ("mlp.linear_fc2.weight", 1),
+            ):
+                state.load_tensor(block.get_parameter(name), name, dim=dim, rank=tp_rank, world_size=self.tp_size)
         for t in merger_ts:
             _copy(f"merger.{t}")
         for i in range(len(self.deepstack_visual_indexes)):
@@ -883,7 +885,7 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
         self.multiscale_dim = self.visual_dim * self.deepstack_num_level
 
         # Vision tower
-        self.vision_model = Qwen3VLVisionTransformer(vision_cfg, dtype=dtype, device=device)
+        self.vision_model = Qwen3VLVisionTransformer(vision_cfg, dtype=dtype, device=device, tp_size=text_cfg.tp_size)
 
         # LLM (self.model is required by PyModelBase / the executor runner)
         self.model = Qwen3VLModel(text_cfg, dtype=dtype, device=device)  # pyright: ignore[reportIncompatibleVariableOverride]
@@ -998,7 +1000,7 @@ class Qwen3VLForConditionalGeneration(PyModelBase):
         Key layout: ``model.visual.*`` -> ``vision_model.*``,
         ``model.language_model.*`` -> ``model.*``, ``lm_head.*`` -> ``lm_head.*``.
         """
-        self.vision_model.load_weights(ScopedWeightLoader(state_dicts, src_prefixes=("model.visual.",)))
+        self.vision_model.load_weights(ScopedWeightLoader(state_dicts, src_prefixes=("model.visual.",)), tp_rank)
         all_weights = ScopedWeightLoader(state_dicts, src_prefixes=("model.language_model.", "model.", ""))
         load_causal_lm_weights(
             self.model,
