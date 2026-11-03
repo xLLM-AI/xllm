@@ -50,6 +50,7 @@ class DisaggPDConfig final {
          "disagg_pd_port",
          "instance_role",
          "kv_cache_transfer_mode",
+         "kv_cache_transfer_type",
          "transfer_listen_port"}};
     return kOptionCategory;
   }
@@ -61,6 +62,11 @@ class DisaggPDConfig final {
   PROPERTY(std::string, instance_role) = "DEFAULT";
 
   PROPERTY(std::string, kv_cache_transfer_mode) = "PUSH";
+
+  // Backend used for P/D KV movement: "mooncake" (peer-to-peer transfer
+  // engine) or "datasystem" (content-addressed host store). The DataSystem
+  // backend is only built when USE_YUANRONG_DATASYSTEM is enabled.
+  PROPERTY(std::string, kv_cache_transfer_type) = "mooncake";
 
   PROPERTY(int32_t, transfer_listen_port) = 26000;
 

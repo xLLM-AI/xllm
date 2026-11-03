@@ -38,6 +38,10 @@ DEFINE_string(kv_cache_transfer_mode,
               "PUSH",
               "The mode of kv cache transfer(e.g. PUSH, PULL).");
 
+DEFINE_string(kv_cache_transfer_type,
+              "mooncake",
+              "The backend of kv cache transfer(e.g. mooncake, datasystem).");
+
 DEFINE_int32(transfer_listen_port, 26000, "The KVCacheTranfer listen port.");
 
 DEFINE_bool(kv_push_dst_rotate,
@@ -52,6 +56,7 @@ void DisaggPDConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(disagg_pd_port);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(instance_role);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_cache_transfer_mode);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_cache_transfer_type);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(transfer_listen_port);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(kv_push_dst_rotate);
 }
@@ -62,6 +67,7 @@ void DisaggPDConfig::from_json(const JsonReader& json) {
   // instance role is different for prefill and decode instances, so we don't
   // need to assign it from json XLLM_CONFIG_ASSIGN_FROM_JSON(instance_role);
   XLLM_CONFIG_ASSIGN_FROM_JSON(kv_cache_transfer_mode);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(kv_cache_transfer_type);
   XLLM_CONFIG_ASSIGN_FROM_JSON(transfer_listen_port);
 }
 

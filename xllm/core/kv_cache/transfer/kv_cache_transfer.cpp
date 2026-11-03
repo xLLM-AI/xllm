@@ -25,6 +25,10 @@ limitations under the License.
 
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
 #include "core/kv_cache/transfer/mooncake_kv_cache_transfer.h"
+#if defined(USE_YUANRONG_DATASYSTEM)
+#include "core/framework/config/disagg_pd_config.h"
+#include "core/kv_cache/transfer/yuanrong_kv_cache_transfer.h"
+#endif
 #endif
 
 namespace xllm {
@@ -445,6 +449,24 @@ std::shared_ptr<KVCacheTransfer> KVCacheTransferFactory::create(
   std::shared_ptr<KVCacheTransfer> transfer;
 
   int32_t device_id = device.index();
+
+#if defined(USE_YUANRONG_DATASYSTEM)
+  const std::string& transfer_type =
+      ::xllm::DisaggPDConfig::get_instance().kv_cache_transfer_type();
+  if (transfer_type == "datasystem" || transfer_type == "yuanrong") {
+    // Only a prefill instance publishes; every other role is receive-only.
+    const bool publish_source_blocks =
+        ::xllm::DisaggPDConfig::get_instance().instance_role() == "PREFILL";
+    LOG(INFO) << "Create DataSystem KVCacheTransfer, publish="
+              << publish_source_blocks;
+    return std::make_shared<YuanRongKVCacheTransfer>(device_id,
+                                                     transfer_listen_port,
+                                                     device,
+                                                     model_type,
+                                                     model_id,
+                                                     publish_source_blocks);
+  }
+#endif
 
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
   LOG(INFO) << "Create Mooncake KVCacheTransfer.";
