@@ -54,12 +54,10 @@ class DistributedVirtualMemoryCoordinator final : public KVCachePageBackend {
   void setup_worker_memory_rpc(const WorkerMemoryRpcOptions& options,
                                const std::string& master_node_addr,
                                int32_t dp_size);
-  int64_t init_physical_page_pools(
-      double max_memory_utilization = 0.9,
-      int64_t max_cache_size = 0,
-      bool max_memory_utilization_configured = true,
-      int64_t reserved_memory_bytes = 0,
-      int64_t resident_memory_bytes = 0);
+  int64_t init_physical_page_pools(double max_memory_utilization = 0.9,
+                                   int64_t max_cache_size = 0,
+                                   int64_t reserved_memory_bytes = 0,
+                                   int64_t resident_memory_bytes = 0);
 
   // Prepare the shared KV page pool after persistent target/draft state
   // budgets are known, then register the model's parallel strategy.

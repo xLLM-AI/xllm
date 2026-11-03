@@ -89,7 +89,6 @@ KVCacheEstimateContext KVCacheCapacityPlanner::observe_memory() const {
             memory.available_memory,
             memory.total_memory,
             config.max_memory_utilization(),
-            config.max_memory_utilization_configured(),
             config.vmm_elastic(),
             config.max_cache_size(),
             reserved_memory_bytes_ + encoder_bytes);

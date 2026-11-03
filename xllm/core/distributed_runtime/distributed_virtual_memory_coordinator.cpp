@@ -75,13 +75,11 @@ void DistributedVirtualMemoryCoordinator::prepare_kv_cache_pool(
   if (!phy_pool.is_initialized()) {
     const int64_t encoder_cache_reserved_bytes =
         is_multimodal ? options.max_encoder_cache_size() * 1024 * 1024 : 0;
-    CHECK_GT(
-        init_physical_page_pools(config.max_memory_utilization(),
-                                 config.max_cache_size(),
-                                 config.max_memory_utilization_configured(),
-                                 encoder_cache_reserved_bytes,
-                                 reserved_state_bytes),
-        0)
+    CHECK_GT(init_physical_page_pools(config.max_memory_utilization(),
+                                      config.max_cache_size(),
+                                      encoder_cache_reserved_bytes,
+                                      reserved_state_bytes),
+             0)
         << "Failed to initialize KV cache physical page pools";
   }
   if (!is_initialized()) {
@@ -216,7 +214,6 @@ void DistributedVirtualMemoryCoordinator::setup_worker_memory_rpc(
 int64_t DistributedVirtualMemoryCoordinator::init_physical_page_pools(
     double max_memory_utilization,
     int64_t max_cache_size,
-    bool max_memory_utilization_configured,
     int64_t reserved_memory_bytes,
     int64_t resident_memory_bytes) {
   CHECK(std::isfinite(max_memory_utilization));
@@ -247,7 +244,6 @@ int64_t DistributedVirtualMemoryCoordinator::init_physical_page_pools(
         calculate_vmm_arena_capacity(available_memory,
                                      total_memory,
                                      max_memory_utilization,
-                                     max_memory_utilization_configured,
                                      lazy,
                                      max_cache_size,
                                      reserved_memory_bytes,
@@ -345,13 +341,11 @@ int64_t DistributedVirtualMemoryCoordinator::init_physical_page_pools(
         calculate_vmm_arena_capacity(info.available_memory,
                                      info.total_memory,
                                      max_memory_utilization,
-                                     max_memory_utilization_configured,
                                      lazy,
                                      max_cache_size,
                                      reserved_memory_bytes,
                                      resident_memory_bytes);
-    // Apply each worker's ratio before reducing so heterogeneous devices keep
-    // their own configured arena ceiling.
+    // Size each worker's arena before reducing across heterogeneous devices.
     min_capacity_bytes = std::min(min_capacity_bytes, capacity.maximum_bytes);
     min_initial_bytes = std::min(min_initial_bytes, capacity.initial_bytes);
     growth_memory_reserves.emplace_back(capacity.growth_memory_reserve_bytes);
