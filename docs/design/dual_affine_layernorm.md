@@ -1,3 +1,20 @@
+<!--
+Copyright 2026 The xLLM Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================
+-->
+
 # 需求背景（required）
 
 ## 需求来源
@@ -116,7 +133,10 @@ count = min(sliceH, H - start)
 **每个分片核都从 GM 读取整行 x 并独立重算同一份行统计**，再只处理自己的
 `[start, start+count)` 分片。各核执行的指令与数据完全相同，FP32 统计量逐位一致，
 因此不需要跨核归约、原子累加或 GM workspace。`H < 1024` 时 `coresPerRow=1`，
-退化为整行划分。分片起点恒为 64 的倍数，GM 地址满足 32 字节对齐。
+退化为整行划分。分片起点 `start` 恒为 64 的倍数；但行的基址 `row*H` 在 H 不是 16 的倍数、
+或输入带 storage offset 时并不保证 32 字节对齐（例如 FP16、H=1025、row=1 的字节偏移是 2050），
+因此 x/y 的搬运依赖 `DataCopyPad` 对非对齐字节基址与长度的处理，而不是依赖行首对齐；
+H=1537、8191 等非对齐用例已在真实设备上通过。
 
 N=2/H=8192 由 2 核变为 32 核后，该用例的设备时间从约 20 μs 降到约 3 μs。
 
