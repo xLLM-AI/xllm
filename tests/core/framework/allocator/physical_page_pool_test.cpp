@@ -633,6 +633,54 @@ TEST_F(PhysicalPagePoolTest,
   EXPECT_EQ(pool.num_committed(), 2);
 }
 
+TEST_F(PhysicalPagePoolTest, PhysicalGrowthUsesLiveBudgetIndependentOfRatio) {
+  const VmmArenaCapacity capacity = calculate_vmm_arena_capacity(
+      /*available_memory=*/16 * kPageSize,
+      /*total_memory=*/32 * kPageSize,
+      /*max_memory_utilization=*/0.75,
+      /*lazy=*/true,
+      /*max_cache_size=*/0);
+  auto& pool = PhysicalPagePool::get_instance();
+  ASSERT_TRUE(pool.reset());
+  pool.init(torch::Device(torch::kCPU),
+            capacity.maximum_bytes / kPageSize,
+            capacity.initial_bytes / kPageSize,
+            kPageSize,
+            /*lazy=*/true);
+  pool.set_growth_reserve(capacity.growth_memory_reserve_bytes);
+  pool.set_allocation_headroom(2 * kPageSize);
+  PhysicalPagePoolTestPeer::inject(
+      pool,
+      [this]() { return free_bytes_; },
+      [this](page_id_t page_id) {
+        ++allocation_attempts_;
+        free_bytes_ -= kPageSize;
+        return PhysicalPagePoolTestPeer::make_page(page_id);
+      });
+  inject_allocator_stats();
+
+  // Resident execution cache already reduces live free memory.
+  allocator_stats_ = AllocatorMemoryStats{10 * kPageSize, 10 * kPageSize};
+  free_bytes_ = 6 * kPageSize;
+  pool.observe_execution_memory();
+  auto pages = pool.batch_get(/*count=*/4);
+  ASSERT_EQ(pages.size(), 4);
+  EXPECT_EQ(free_bytes_, 2 * kPageSize);
+
+  // Released execution cache must remain recoverable alongside explicit
+  // headroom, even though the ratio does not constrain live free bytes.
+  allocator_stats_ = AllocatorMemoryStats{6 * kPageSize, 10 * kPageSize};
+  free_bytes_ = 6 * kPageSize;
+  EXPECT_TRUE(pool.batch_get(/*count=*/1).empty());
+  EXPECT_EQ(allocation_attempts_, 4);
+  free_bytes_ += kPageSize;
+  auto growth_pages = pool.batch_get(/*count=*/1);
+  ASSERT_EQ(growth_pages.size(), 1);
+  EXPECT_EQ(free_bytes_, 6 * kPageSize);
+  pool.batch_put(growth_pages);
+  pool.batch_put(pages);
+}
+
 TEST_F(PhysicalPagePoolTest, MapsPaddingPagesAfterPersistentStateAllocation) {
   constexpr int64_t kAvailableBytes = 100 * kPageSize;
   constexpr int64_t kResidentStateBytes = 60 * kPageSize;
@@ -641,7 +689,6 @@ TEST_F(PhysicalPagePoolTest, MapsPaddingPagesAfterPersistentStateAllocation) {
       calculate_vmm_arena_capacity(kAvailableBytes,
                                    /*total_memory=*/200 * kPageSize,
                                    /*max_memory_utilization=*/0.0,
-                                   /*max_memory_utilization_configured=*/true,
                                    /*lazy=*/true,
                                    /*max_cache_size=*/0,
                                    /*reserved_memory_bytes=*/0,
