@@ -23,6 +23,9 @@ from __future__ import annotations
 from typing import List
 
 import torch
+import torch.nn.functional as F
+
+from xllm.python.platform import current_platform
 
 reshape_paged_cache = torch.ops.xllm_ops.reshape_paged_cache
 update_decode_graph_metadata = torch.ops.xllm_ops.update_decode_graph_metadata
@@ -39,7 +42,7 @@ def vision_fusion_attention(
     scale: float,
     input_layout: str = "TND",
 ) -> torch.Tensor:
-    """Run fused self-attention for ViT blocks via ``torch_npu.npu_fusion_attention``.
+    """Run ViT self-attention at its native head width on Ascend A2/A3.
 
     Args:
         q, k, v: Query/key/value in the layout specified by ``input_layout``.
@@ -52,9 +55,22 @@ def vision_fusion_attention(
     Returns:
         Attention output with same shape as ``q``.
     """
+    if (
+        input_layout == "TND"
+        and actual_seq_qlen == actual_seq_kvlen
+        and current_platform.get_ascend_soc_generation() in ("a2", "a3")
+    ):
+        if num_heads != q.shape[1]:
+            raise ValueError("ATB vision self-attention requires matching TND heads")
+        return torch.ops.xllm_ops.atb_vision_attention(q, k, v, actual_seq_qlen, scale)
+
     import torch_npu
 
-    return torch_npu.npu_fusion_attention(
+    # Other Ascend platforms retain the torch_npu path's aligned head width.
+    head_dim = q.shape[-1]
+    if input_layout == "TND" and 64 < head_dim < 128:
+        q, k, v = (F.pad(tensor, (0, 128 - head_dim)) for tensor in (q, k, v))
+    output = torch_npu.npu_fusion_attention(
         q,
         k,
         v,
@@ -64,6 +80,7 @@ def vision_fusion_attention(
         scale=scale,
         input_layout=input_layout,
     )[0]
+    return output[..., :head_dim]
 
 
 __all__ = [

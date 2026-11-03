@@ -4,8 +4,8 @@ add_subdirectory(tilelang)
 
 add_subdirectory(xllm_ops)
 
-# Keep this adapter's cache separate from torch_npu's incompatible TLS cache.
-set_source_files_properties(atb_matmul_ein_sum.cpp PROPERTIES
+# Keep these adapters' caches separate from torch_npu's incompatible TLS cache.
+set_source_files_properties(atb_matmul_ein_sum.cpp atb_vision_attention.cpp PROPERTIES
   COMPILE_OPTIONS "-fvisibility=hidden"
 )
 
@@ -24,6 +24,7 @@ cc_library(
     matmul.cpp
     matmul_reduce_scatter.cpp
     atb_matmul_ein_sum.cpp
+    atb_vision_attention.cpp
     npu_causal_conv1d.cpp
     npu_fused_infer_attention.cpp
     npu_gemma_rms_norm.cpp
