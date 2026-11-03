@@ -92,6 +92,7 @@ cc_library(
     hierarchy_kv_cache_transfer.h
     $<$<OR:$<BOOL:${USE_NPU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:mooncake_kv_cache_transfer.h>
     mooncake_kv_cache_transfer_engine.h
+    $<$<BOOL:${USE_YUANRONG_DATASYSTEM}>:yuanrong_kv_cache_transfer.h>
   SRCS
     kv_cache_transfer.cpp
     kv_transport_codec.cpp
@@ -107,6 +108,7 @@ cc_library(
     hierarchy_kv_cache_transfer.cpp
     $<$<OR:$<BOOL:${USE_NPU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:mooncake_kv_cache_transfer.cpp>
     $<$<OR:$<BOOL:${USE_NPU}>,$<BOOL:${USE_MLU}>,$<BOOL:${USE_DCU}>>:mooncake_kv_cache_transfer_engine.cpp>
+    $<$<BOOL:${USE_YUANRONG_DATASYSTEM}>:yuanrong_kv_cache_transfer.cpp>
   DEPS
     :cache_layout
     :common
@@ -126,4 +128,38 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:platform_npu>
     $<$<BOOL:${USE_DCU}>:hip::host>
     $<$<BOOL:${USE_MLU}>:mlu_kernels>
+    $<$<BOOL:${USE_YUANRONG_DATASYSTEM}>:kv_content_hash>
+    ${CMAKE_DL_LIBS}
 )
+
+# The DataSystem SDK is never linked into the main binary: the adapter talks to
+# it through a pure C ABI bridge, and only this shim links libdatasystem.
+if(USE_YUANRONG_DATASYSTEM)
+  if(NOT YUANRONG_DATASYSTEM_INCLUDE_DIR OR NOT YUANRONG_DATASYSTEM_LIBRARY)
+    message(FATAL_ERROR
+      "USE_YUANRONG_DATASYSTEM requires the DataSystem SDK. Set "
+      "-DYUANRONG_DATASYSTEM_ROOT=/path/to/datasystem.")
+  endif()
+
+  file(WRITE "${CMAKE_BINARY_DIR}/xllm_yuanrong_bridge_symbols.map"
+       "{\n  global:\n    xllm_yr_ds_*;\n  local:\n    *;\n};\n")
+  add_library(xllm_yuanrong_datasystem_bridge SHARED
+    yuanrong_datasystem_bridge.cpp
+  )
+  target_include_directories(xllm_yuanrong_datasystem_bridge
+    PRIVATE
+      ${COMMON_INCLUDE_DIRS}
+      "${YUANRONG_DATASYSTEM_INCLUDE_DIR}"
+  )
+  target_link_libraries(xllm_yuanrong_datasystem_bridge
+    PRIVATE
+      "${YUANRONG_DATASYSTEM_LIBRARY}"
+      ${CMAKE_DL_LIBS}
+  )
+  set_target_properties(xllm_yuanrong_datasystem_bridge PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/xllm/core/server"
+    BUILD_RPATH "$ORIGIN;${YUANRONG_DATASYSTEM_LIB_DIR}"
+    INSTALL_RPATH "$ORIGIN;${YUANRONG_DATASYSTEM_LIB_DIR}"
+    CXX_VISIBILITY_PRESET hidden
+  )
+endif()
