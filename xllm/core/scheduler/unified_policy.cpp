@@ -18,6 +18,7 @@ limitations under the License.
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <utility>
 
 #include "common/metrics.h"
 #include "core/framework/config/kv_cache_store_config.h"
@@ -104,6 +105,15 @@ void UnifiedPolicy::schedule_from_unified_queue(
           : std::numeric_limits<int32_t>::max();
 
   std::vector<std::shared_ptr<Request>> preempted_request_vec;
+  const auto preempt_request = [&](auto it) {
+    std::shared_ptr<Request> request = *it;
+    ++budget.num_preempted_requests;
+    clear_mtp_bootstrap(request.get(), state);
+    state.kv_cache_manager->deallocate(request.get());
+    unified.erase(it);
+    request->set_preempted();
+    preempted_request_vec.emplace_back(std::move(request));
+  };
   std::list<std::shared_ptr<Request>> deferred_prefill;
   bool is_preempt_iterator_valid = true;
   auto preempt_iterator = std::prev(unified.end());
@@ -353,14 +363,9 @@ void UnifiedPolicy::schedule_from_unified_queue(
         if (request_to_preempt->sequences()[0]
                 ->kv_state()
                 .kv_cache_tokens_num() != 0) {
-          ++budget.num_preempted_requests;
-          clear_mtp_bootstrap(request_to_preempt.get(), state);
-          state.kv_cache_manager->deallocate(request_to_preempt.get());
-          auto prev = preempt_iterator;
+          auto victim = preempt_iterator;
           preempt_iterator--;
-          unified.erase(prev);
-          request_to_preempt->set_preempted();
-          preempted_request_vec.push_back(request_to_preempt);
+          preempt_request(victim);
           find_preempt = true;
           break;
         } else {
@@ -379,12 +384,27 @@ void UnifiedPolicy::schedule_from_unified_queue(
     break;
   }
 
+  const bool reclaim_for_progress =
+      !deferred_prefill.empty() && state.running_sequences.empty() &&
+      preempted_request_vec.empty() && !has_pending_block_release(state);
+  unified.splice(unified.begin(), deferred_prefill);
+  if (reclaim_for_progress && unified.size() > 1) {
+    // An empty batch cannot release memory. Reclaim one lower-priority request
+    // so mutually blocked chunks can make progress on the next round.
+    for (auto victim = std::prev(unified.end()); victim != unified.begin();
+         --victim) {
+      if ((*victim)->sequences().front()->kv_cache_tokens_num() != 0) {
+        preempt_request(victim);
+        break;
+      }
+    }
+  }
+
   // Push preempted requests back to unified queue.
   while (!preempted_request_vec.empty()) {
     unified.push_back(preempted_request_vec.back());
     preempted_request_vec.pop_back();
   }
-  unified.splice(unified.begin(), deferred_prefill);
 }
 
 // =============================================================================

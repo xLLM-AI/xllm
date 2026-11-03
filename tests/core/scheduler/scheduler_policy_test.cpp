@@ -223,6 +223,10 @@ class RetryRestoreBlockManagerPool final : public BlockManagerPool {
   void allocate_shared(Sequence* sequence) override {
     ++allocate_shared_calls_;
     sequence->host_kv_state().set_prefix_cache_matched();
+    if (sequence->kv_state().kv_cache_tokens_num() >= 32768) {
+      sequence->clear_host_cache_match();
+      return;
+    }
     sequence->set_host_cache_match(/*restore_tokens=*/32768,
                                    /*copy_units=*/2);
   }
@@ -1173,6 +1177,106 @@ TEST(SchedulerPolicyTest, UnifiedRetryRefreshesHostRestoreBeforeChunkSizing) {
             (std::vector<size_t>{kPromptTokens - kRestoreTokens, 1}));
   EXPECT_EQ(budget.num_preempted_requests, 0u);
   EXPECT_TRUE(finished.empty());
+}
+
+TEST(SchedulerPolicyTest, UnifiedReclaimsMutuallyBlockedChunksWhenIdle) {
+  ScopedConfigValue<bool> prefix_cache_guard(
+      KVCacheConfig::get_instance().enable_prefix_cache(), false);
+  for (const bool pending_release : {false, true}) {
+    SCOPED_TRACE(pending_release);
+    SchedulerOptions options = create_scheduler_options(
+        /*max_tokens_per_batch=*/32,
+        /*max_seqs_per_batch=*/2,
+        /*num_speculative_tokens=*/0,
+        /*max_tokens_per_chunk_for_prefill=*/16,
+        /*dp_size=*/1,
+        /*priority_strategy=*/"multi_slo_and_prio");
+    BatchMode mode{
+        .enable_mix_batch = true,
+        .enable_chunked_prefill = true,
+        .priority_strategy = "multi_slo_and_prio",
+    };
+    UnifiedPolicy policy(mode, options);
+    FakeEngine engine(/*num_blocks=*/9, /*block_size=*/16);
+    BlockManagerPool* pool = engine.block_manager_pool();
+    ProfileManager::Options profile_options;
+    profile_options.max_tokens_per_batch(32).max_seqs_per_batch(2);
+    ProfileManager profile_manager(&engine, profile_options);
+    auto requests = generate_request({96, 96},
+                                     {16, 16},
+                                     std::nullopt,
+                                     std::vector<int32_t>{1, 3},
+                                     /*max_context_len=*/256);
+    for (const auto& request : requests) {
+      Sequence* sequence = request->sequences().front().get();
+      ASSERT_TRUE(pool->allocate(sequence, 64));
+      sequence->kv_state().set_kv_cache_tokens_num(64);
+    }
+    ASSERT_EQ(pool->num_free_blocks().front(), 0u);
+    DequeQueue prefill_queue;
+    DequeQueue chunk_queue;
+    DequeQueue decode_queue;
+    std::list<std::shared_ptr<Request>> unified_queue{requests[0], requests[1]};
+    std::deque<DecodeRestoreEntry> decode_restore_waiting;
+    std::vector<std::shared_ptr<Request>> running_requests;
+    std::vector<Sequence*> running_sequences;
+    std::vector<size_t> running_sequence_budgets;
+    bool last_step_prefill = false;
+    const ModelArgs& model_args = engine.model_args();
+    SchedulerState state{
+        .prefill_queue = prefill_queue,
+        .chunk_queue = chunk_queue,
+        .decode_queue = decode_queue,
+        .unified_queue = unified_queue,
+        .decode_restore_waiting = decode_restore_waiting,
+        .running_requests = running_requests,
+        .running_sequences = running_sequences,
+        .running_sequences_budgets = running_sequence_budgets,
+        .kv_cache_manager = pool,
+        .profile_manager = &profile_manager,
+        .output_dispatcher = nullptr,
+        .model_args = model_args,
+        .last_step_prefill = last_step_prefill,
+        .options = options,
+        .min_speculative_tokens_required = 0,
+        .enable_prefix_cache = false,
+        .has_pending_vmm_batch = pending_release,
+    };
+    const ScheduleBudget initial_budget{
+        .remaining_token_budget = 32,
+        .remaining_seq_budget = 2,
+        .latency_budget = std::numeric_limits<double>::max(),
+        .estimate_latency = 0,
+        .num_preempted_requests = 0,
+    };
+    ScheduleBudget budget = initial_budget;
+    std::vector<std::shared_ptr<Request>> finished;
+
+    policy.schedule(state, budget, finished);
+
+    EXPECT_TRUE(running_sequences.empty());
+    EXPECT_TRUE(finished.empty());
+    ASSERT_EQ(unified_queue.size(), 2u);
+    EXPECT_TRUE(budget.kv_allocation_deferred);
+    EXPECT_FALSE(requests[0]->preempted());
+    EXPECT_EQ(budget.num_preempted_requests, pending_release ? 0u : 1u);
+    EXPECT_EQ(requests[1]->preempted(), !pending_release);
+    EXPECT_EQ(pool->num_free_blocks().front(), pending_release ? 0u : 4u);
+    if (!pending_release) {
+      // Reclaiming the queued victim, without any external owner releasing
+      // memory, lets the higher-priority chunk execute on the next round.
+      budget = initial_budget;
+      policy.schedule(state, budget, finished);
+      ASSERT_FALSE(running_sequences.empty());
+      EXPECT_EQ(running_sequences.front(),
+                requests[0]->sequences().front().get());
+      EXPECT_EQ(running_sequence_budgets.front(), 16u);
+      EXPECT_EQ(budget.num_preempted_requests, 0u);
+    }
+    for (const auto& request : requests) {
+      pool->deallocate(request.get());
+    }
+  }
 }
 
 TEST(SchedulerPolicyTest, DecodeRestoreRetrySizesChunkAfterHostMatch) {
@@ -3199,7 +3303,8 @@ TEST(SchedulerPolicyTest, BestOfPartialAdmissionReleasesPrefixUsage) {
   auto cached_request =
       generate_request({4}, {1}, std::nullopt, std::nullopt, 64)[0];
   Sequence* cached_sequence = cached_request->sequences().front().get();
-  ASSERT_TRUE(pool->BlockManagerPool::allocate(cached_sequence));
+  ASSERT_TRUE(pool->BlockManagerPool::allocate(cached_sequence,
+                                               /*num_tokens=*/4));
   cached_sequence->kv_state().set_kv_cache_tokens_num(4);
   pool->cache(cached_sequence);
   pool->deallocate(cached_request.get());
