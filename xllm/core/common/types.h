@@ -318,6 +318,10 @@ struct KVTransferMapping {
   // cache under this group. P uses this to compress its per-group transfer
   // cursor to the first block D actually needs (no shared -> zero, no-op).
   uint32_t remote_shared_num = 0;
+  // Optional content hashes for content-addressed backends (DataSystem). When
+  // set, hashes[k] addresses the content of remote_ids[k]. Backends that
+  // transfer by explicit block mapping (Mooncake) leave this empty.
+  std::vector<std::string> hashes;
 };
 
 struct TransferKVInfo {

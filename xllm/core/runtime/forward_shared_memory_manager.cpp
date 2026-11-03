@@ -346,7 +346,8 @@ inline size_t get_kv_transfer_mappings_size(
   size_t total = type_size<uint64_t>;
   for (const KVTransferMapping& mapping : mappings) {
     total += type_size<int32_t> + get_vector_size(mapping.local_ids) +
-             get_vector_size(mapping.remote_ids);
+             get_vector_size(mapping.remote_ids) +
+             get_string_vector_size(mapping.hashes);
   }
   return total;
 }
@@ -839,6 +840,7 @@ inline void write_kv_transfer_mappings(
     write_data(buffer, mapping.group_id);
     write_vector(buffer, mapping.local_ids);
     write_vector(buffer, mapping.remote_ids);
+    write_string_vector(buffer, mapping.hashes);
   }
 }
 
@@ -850,6 +852,7 @@ inline void write_kv_transfer_mappings(
     write_data(context.descriptor, mapping.group_id);
     write_vector(context.descriptor, mapping.local_ids);
     write_vector(context.descriptor, mapping.remote_ids);
+    write_string_vector(context.descriptor, mapping.hashes);
   }
 }
 
@@ -1789,6 +1792,7 @@ inline void read_kv_transfer_mappings(
     read_data(buffer, mapping.group_id);
     read_vector(buffer, mapping.local_ids);
     read_vector(buffer, mapping.remote_ids);
+    read_string_vector(buffer, mapping.hashes);
   }
 }
 
@@ -1802,6 +1806,7 @@ inline void read_kv_transfer_mappings(
     read_data(context, mapping.group_id);
     read_vector(context, mapping.local_ids);
     read_vector(context, mapping.remote_ids);
+    read_string_vector(context, mapping.hashes);
   }
 }
 

@@ -1181,6 +1181,8 @@ void WorkerService::PullKVCache(::google::protobuf::RpcController* controller,
                                proto_mapping.local_ids().end());
       mapping.remote_ids.assign(proto_mapping.remote_ids().begin(),
                                 proto_mapping.remote_ids().end());
+      mapping.hashes.assign(proto_mapping.hashes().begin(),
+                            proto_mapping.hashes().end());
       mappings.emplace_back(std::move(mapping));
     }
     auto future =

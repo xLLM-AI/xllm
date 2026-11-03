@@ -278,6 +278,9 @@ bool CommChannel::pull_kv_blocks(
     ADD_VECTOR_TO_PROTO(proto_mapping->mutable_local_ids(), mapping.local_ids);
     ADD_VECTOR_TO_PROTO(proto_mapping->mutable_remote_ids(),
                         mapping.remote_ids);
+    for (const std::string& hash : mapping.hashes) {
+      proto_mapping->add_hashes(hash);
+    }
   }
 
   proto::Status s;

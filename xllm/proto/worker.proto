@@ -202,6 +202,10 @@ message KVTransferMapping {
   reserved 2;
   repeated uint64 local_ids = 3;
   repeated uint64 remote_ids = 4;
+  // Optional content hashes for content-addressed backends (DataSystem).
+  // hashes[k] addresses the content of remote_ids[k]; empty for backends that
+  // transfer by explicit block mapping.
+  repeated string hashes = 5;
 }
 
 message EplbInfo {
