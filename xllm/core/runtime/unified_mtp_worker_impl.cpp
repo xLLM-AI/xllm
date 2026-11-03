@@ -130,11 +130,17 @@ bool UnifiedMtpWorkerImpl<TargetInput>::init_model(
     MasterStatus master_status) {
   const bool result = MTPWorkerImpl<TargetInput>::init_model(
       model_weights_path, random_seed, master_status);
+  // Target and draft load through separate calls. Resolve pair capabilities
+  // only after the second call has initialized both executors.
+  if (!result || !this->task_models_loaded()) {
+    unified_graph_capable_ = false;
+    return result;
+  }
   // Model/backend/topology capabilities are immutable during serving. Resolve
   // once after the pair loads; each step only examines request controls.
-  unified_graph_capable_ = result && supports_unified_configuration();
+  unified_graph_capable_ = supports_unified_configuration();
   const std::string& model_type = context_.get_model_args().model_type();
-  if (result && !unified_graph_capable_ &&
+  if (!unified_graph_capable_ &&
       (model_type == "qwen3_5" || model_type == "qwen3_5_text") &&
       ExecutionConfig::get_instance().enable_unified_mtp_graph()) {
     LOG(ERROR) << "Configured Qwen unified MTP requires fixed-width "
