@@ -287,3 +287,42 @@ SWA 继续采用绝对 logical index + invalid/null placeholders，初版不增�
 每层/role 的 page group 与页内 offset 放入 tensor view 的 base offset；所有 role view 保持 dense contiguous，以兼容现有 NPU Conv 内核。共同 page 字节按 role 行字节对齐，内核物理行索引为 extent_start_page * (page_bytes / role_row_bytes)。Full token slot mapping 保留块内 offset；Conv、SSM 分别映射，checkpoint stride 显式保存。padding 保留可容纳两种整模型资源的 extent；容量、admission、eviction 和 scheduler reservation 均以物理 page 计费。
 
 首版接入 native NPU Torch 的 text-only Qwen3Next/Qwen3.5 GDN 分解 kernel 路径。启动时拒绝未接通的 graph、spec、Host/PD/store、Python、index/quantized、layerwise/CP/KV-split 等组合。默认未启用共享开关时保持现有路径。完整验收仍要求最终提交上的真实 NPU 全量测试；开发快照、CPU tests 和语法检查不能替代。
+
+## 12. 后续实施调整：Python 组图路径（2026-11-02）
+
+根据本次范围调整，后续 Full/Linear 共享池的执行接入以 Python executor、attention backend、GDN metadata 和 ACL graph runner 为目标，不再扩展第 11 节的 native C++ 计算及组图实现。保留已经实现的底层静态 storage、页分配、调度和 APC 生命周期；Python 不另建与调度器脱节的显存池，也不撤销已有 C++ 提交。本次方案修订不修改 C++ 文件。
+
+### 12.1 复用边界与当前阻塞
+
+- Python 已有 `LayerCache` 的 K/V/Conv/SSM 角色、Qwen3.5 GDN metadata builder 和 ACL graph capture/replay，不需要重新实现整套组图框架。
+- `worker_impl.cpp` 的 `validate_shared_kv_cache_support` 当前只允许 native eager，并明确拒绝 Python 执行和 graph。纯 Python 修改不能解除这个启动限制。本节记录该接入依赖，不删除检查、不绕过检查，也不把 Python 单元测试通过解释为服务入口已可用。
+- 当前桥接的 cache tuple 只传 tensor，未向 Python 提供 page bytes、每个 role 的 row stride、checkpoint stride 及 scratch 所有权。native `KVCache` 已有布局访问方法，但现有 Python 桥没有暴露这些方法；本轮在 Python bind 边界增加了严格校验的 `SharedKVCacheLayout`，只接受 static allocator 产生的完整 arena view（共享 storage、整页字节对齐、角色 offset/extent 与静态布局方程全部匹配），并根据静态 block pool 保留的首个 padding extent 推导 graph scratch rows。普通 cache 返回 legacy 路径。不能用 `ssm.shape[0] / conv.shape[0]` 反推共享布局，也不能对未通过完整 view 校验的 storage offset 静默猜测。
+
+### 12.2 页面与执行索引契约
+
+沿用第 11.1 节的等字节 physical page：四个 Full 层各保留 128-token block，一层 Linear 保留 Conv/SSM 状态及检查点。512 仅表示四层合计槽位，不改变单层 token block、prefix hash 或 scheduler 粒度。
+
+Python 在 cache bind 时建立不可变的 role 布局描述；cache tensor 基址、shape 和 storage 在 graph 生命周期内保持稳定。每步输入仍是调度器拥有的逻辑 extent 起点，Full block table/slot mapping、Conv read/write rows 和 SSM read/write rows 分别映射。负值 sentinel 与 Full 块内 token offset 必须保留；checkpoint stride 不能与物理行跨度混用。所有图内映射结果使用持久 tensor，replay 前原地刷新，不重绑已捕获的 tensor。
+
+### 12.3 GDN 执行路径
+
+当前 Python `Qwen3_5GdnMetadataBuilder.bind_layer_caches` 使用 Conv/SSM 第一维比例推断 checkpoint stride；`NpuQwen3_5GatedDeltaNet._decode` 的 MegaGdn 接口对 Conv 和 SSM 共用 state index。共享 arena 中两个 role 的 row bytes 不同，因此不能仅给旧 state index 乘同一个系数。
+
+现有 Python NPU `causal_conv1d.py`、`gated_delta_net.py` 和 `normalization.py` 已有分别消费 Conv/SSM 索引的分解算子。共享模式的 decode 优先复用这些算子，普通布局仍保留既有 MegaGdn 路径；MegaGdn prefill 已接受分开的 Conv/SSM 索引，可以在显式布局验证通过后保留。两条路径在执行前选择，不得捕获执行失败后临时回退，也不为此修改 native C++ GDN 实现。普通 eager 和 graph 使用同一套索引语义。MTP verify 的多检查点状态恢复单独接入，不能凭普通 decode 通过就宣布支持。
+
+### 12.4 ACL graph 捕获与重放
+
+- 首阶段采用 eager prefill/chunked prefill + Python ACL decode graph，随后再评估 prefill 组图和 MTP；不把现有 GDN 的 decode/verify graph 能力误称为 prefill graph 支持。
+- 为每个 graph bucket 固定 block table、Full slot mapping、Conv/SSM read/write index 和 padding mask 的存储；接入现有 `execution_metadata_builders` 的 persistent metadata 生命周期。当前 GDN `update_persistent` 为空，依赖逻辑 tensor 的直接别名；新增物理索引不能只在 `build` 时计算一次，否则后续 replay 将使用首次 capture 的值。必须原地更新持久物理行 buffer，或将索引映射本身捕获在图内。
+- 现有 `DecodeAclGraphRunner` 会清零 `cache.conv[0]` 及按 Conv/SSM 形状比例选出的 SSM 首行；共享 view 的首维比例失效，不能据此确定清零范围。底层池已预留起始 `max(full_block_units, linear_state_units)` 页，Python 只对通过静态布局校验的首个 Conv/SSM 保留 extent 清零，供 capture/warmup/padding 复用。不得假定所有 tensor 的第零行互不别名，也不能把真实请求页当作 dummy page。
+- 页回收和跨类型复用仍由现有调度/所有权管理；Python 必须验证 replay、异步更新和在途 kernel 完成点，不引入独立的 Python 释放时机。
+
+### 12.5 实施顺序与验收
+
+1. 闭合现有桥接与 Python role layout 描述，确认启动门禁和 scratch 所有权依赖；不通过猜测 tensor 形状推进。
+2. 接通 Python eager 的 Full/Conv/SSM 映射和状态恢复，并与普通缓存比较模型数值，再接入 ACL decode graph 的持久索引。
+3. 验证 capture、warmup、padding、replay 和跨 bucket 执行不会污染其他角色或请求；检查多次 replay 后 tensor 地址稳定。
+4. 验证 APC + chunked prefill 的部分命中、checkpoint 边界、分叉续写、淘汰恢复及跨类型页复用。VLM 复用已有视觉处理及多模态 hash，单独验证显存峰值、MRoPE continuation 和相同文本不同图像的隔离。
+5. 在上述路径通过真实 NPU 验收后，另行接入 MTP、prefill graph 及其他分布式组合；未验收能力维持明确关闭。记录 exact-commit 测试与性能数据，不声称已有完整支持或显存收益。
+
+当前状态：Python eager Full/Linear 索引转换、Qwen3.5 GDN 分离 state index、ACL decode graph 的持久 block table/metadata 更新和静态 padding scratch 初始化已实现；共享 MTP verify、prefill graph 及生产入口 capability bridge 继续关闭。第 11 节记录的 C++ native eager 实现和既有验证范围保持不变。
