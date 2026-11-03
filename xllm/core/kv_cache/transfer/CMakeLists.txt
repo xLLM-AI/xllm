@@ -38,6 +38,19 @@ cc_library(
 
 cc_library(
   NAME
+    kv_content_hash
+  HDRS
+    kv_content_hash.h
+  SRCS
+    kv_content_hash.cpp
+  DEPS
+    glog::glog
+    torch
+    xxHash
+)
+
+cc_library(
+  NAME
     pd_topology_guard
   HDRS
     pd_topology_guard.h
