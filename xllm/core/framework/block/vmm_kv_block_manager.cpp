@@ -131,7 +131,8 @@ std::vector<int32_t> VmmKVBlockManager::alloc_internal(size_t need_size) {
             continue;
           }
         }
-        LOG(ERROR) << "Failed to allocate new page for dp_rank=" << dp_rank_;
+        LOG_EVERY_N(ERROR, 1000)
+            << "Failed to allocate new page for dp_rank=" << dp_rank_;
         // Return what we have allocated so far (caller should handle partial
         // allocation)
         return ret_index;
@@ -416,7 +417,7 @@ bool VmmKVBlockManager::try_to_reserve(size_t need_size) {
     // The live device budget can shrink after the advisory capacity check.
     // A failed reservation must not retain a partially allocated block batch.
     free_blocks(reserved);
-    LOG(WARNING) << "Failed to reserve blocks.";
+    LOG_EVERY_N(WARNING, 1000) << "Failed to reserve blocks.";
     return false;
   }
 

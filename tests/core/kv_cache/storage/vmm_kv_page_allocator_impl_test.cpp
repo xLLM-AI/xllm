@@ -23,6 +23,7 @@ limitations under the License.
 #include <future>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -30,6 +31,38 @@ limitations under the License.
 
 namespace xllm {
 namespace {
+
+class AllocationRejectionLogSink final : public google::LogSink {
+ public:
+  explicit AllocationRejectionLogSink(const std::string& model_id)
+      : model_filter_("model_id=" + model_id) {
+    google::AddLogSink(this);
+  }
+
+  ~AllocationRejectionLogSink() override { google::RemoveLogSink(this); }
+
+  void send(google::LogSeverity severity,
+            const char* /*full_filename*/,
+            const char* /*base_filename*/,
+            int /*line*/,
+            const google::LogMessageTime& /*logmsgtime*/,
+            const char* message,
+            size_t message_len) override {
+    const std::string_view text(message, message_len);
+    if (severity == google::GLOG_WARNING &&
+        text.find("reason=physical_page_budget_rejected") !=
+            std::string_view::npos &&
+        text.find(model_filter_) != std::string_view::npos) {
+      ++warning_count_;
+    }
+  }
+
+  size_t warning_count() const { return warning_count_; }
+
+ private:
+  const std::string model_filter_;
+  size_t warning_count_ = 0;
+};
 
 class FakeKVCachePageBackend final : public KVCachePageBackend {
  public:
@@ -262,6 +295,38 @@ TEST(VmmKVPageAllocatorImplTest,
   ASSERT_NE(second, nullptr);
   EXPECT_EQ(first->page_id(), 0);
   EXPECT_EQ(second->page_id(), 1);
+}
+
+TEST(VmmKVPageAllocatorImplTest,
+     PhysicalBudgetRejectionsLimitWarningsAndRecover) {
+  const std::string model_id = "budget-log-rate-limit";
+  FakeKVCachePageBackend backend(/*total_pages=*/8, /*dp_size=*/1);
+  VmmKVPageAllocatorImpl allocator(backend);
+  allocator.init(/*total_pages=*/8,
+                 /*page_size=*/64,
+                 /*dp_size=*/1,
+                 /*enable_prealloc=*/false,
+                 /*max_reserved_pages=*/0);
+  ASSERT_TRUE(allocator.register_model(model_id, /*num_layers=*/2));
+  ASSERT_TRUE(backend.try_reserve_pages("weights", /*dp_rank=*/0, 8));
+  AllocationRejectionLogSink log_sink(model_id);
+
+  for (size_t attempt = 0; attempt < 2000; ++attempt) {
+    EXPECT_EQ(allocator.alloc_kv_cache_page(model_id, /*dp_rank=*/0), nullptr);
+  }
+  EXPECT_GT(log_sink.warning_count(), 0u);
+  EXPECT_LE(log_sink.warning_count(), 3u);
+  EXPECT_EQ(allocator.get_num_free_virt_pages(model_id, /*dp_rank=*/0), 2u);
+  EXPECT_EQ(allocator.get_num_inuse_virt_pages(model_id, /*dp_rank=*/0), 0u);
+  EXPECT_TRUE(backend.mapped_offsets().empty());
+
+  backend.release_pages("weights", /*dp_rank=*/0, 8);
+  auto page = allocator.alloc_kv_cache_page(model_id, /*dp_rank=*/0);
+  ASSERT_NE(page, nullptr);
+  EXPECT_EQ(page->page_id(), 0);
+  EXPECT_EQ(backend.available_pages(model_id, /*dp_rank=*/0), 4u);
+  allocator.free_kv_cache_pages(model_id, /*dp_rank=*/0, {page->page_id()});
+  EXPECT_EQ(backend.available_pages(model_id, /*dp_rank=*/0), 8u);
 }
 
 TEST(VmmKVPageAllocatorImplTest,

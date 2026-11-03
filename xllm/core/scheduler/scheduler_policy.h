@@ -22,6 +22,7 @@ limitations under the License.
 #include <functional>
 #include <list>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 #include "framework/block/kv_cache_manager.h"
@@ -227,9 +228,16 @@ class SchedulerPolicy {
                         SchedulerState& state,
                         std::vector<std::shared_ptr<Request>>& finished);
 
+  // Physical VMM pressure can recover between scheduling rounds, but a
+  // permanently unmaterializable request must not occupy the FCFS head
+  // forever. The counter is reset after any successful allocation.
+  bool record_kv_allocation_failure(Request* request);
+  void clear_kv_allocation_failures(Request* request);
+
   // FCFS decode handoffs staged by drain_request_queue() until the policy
   // requeue phase ends.
   std::vector<std::shared_ptr<Request>> pending_decode_handoffs_;
+  std::unordered_map<Request*, size_t> kv_allocation_failures_;
 };
 
 // =============================================================================
