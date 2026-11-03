@@ -148,6 +148,86 @@ def test_sparse_role_adopts_final_storage_and_rejects_foreign_views() -> None:
         MtpRoleAdapter(executor, (foreign, *storage.metadata[1:]), speculative_tokens=3, metadata_storage=storage)
     del storage
     role._metadata_arenas[0].fill_(17)
+
+
+def test_hybrid_registry_owns_state_indices_and_acceptance_across_reordered_replays(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(torch.ops.xllm_ops, "mtp_sparse_metadata_update", Mock(), raising=False)
+    captured = []
+
+    def create(_draft_executor: object, _draft: object, _target: object, **kwargs: object) -> object:
+        def role(storage: MtpSparseMetadataStorage) -> SimpleNamespace:
+            return SimpleNamespace(
+                _metadata_by_step=storage.metadata,
+                _metadata_arenas=(storage.arena,),
+                require_direct_metadata_update=Mock(),
+                update_repair_token_ids=Mock(),
+            )
+
+        draft = kwargs["draft_metadata_storage"]
+        target = kwargs["target_metadata_storage"]
+        runner = SimpleNamespace(
+            recipe=SimpleNamespace(draft_forward=role(draft), target_forward=role(target)),
+            capture=Mock(),
+            execute=lambda seed, *args: seed.clone(),
+            close=Mock(),
+            draft_embedding_destination=None,
+        )
+        captured.append(runner)
+        return runner
+
+    executor = SimpleNamespace(
+        create_mtp_graph_runner_from_metadata=create,
+        eager_runner=SimpleNamespace(
+            execution_metadata_builders=(SimpleNamespace(supports_linear_spec_verify_graph=True),)
+        ),
+    )
+    registry = MtpGraphVariantRegistry(
+        executor, object(), draft_metadata_factory=_metadata, target_metadata_factory=_metadata
+    )
+    indices = torch.tensor([1, 3], dtype=torch.int32)
+    accepted = torch.tensor([1, 4], dtype=torch.int32)
+
+    def execute(columns: int = 1, *, include_indices: bool = True) -> object:
+        return registry.execute_sparse(
+            torch.ones(2, columns, dtype=torch.int32),
+            torch.ones(8, dtype=torch.int32),
+            torch.zeros(8, dtype=torch.int32),
+            torch.tensor([2, 3]),
+            torch.tensor([3, 4]),
+            torch.tensor([17, 102]),
+            torch.tensor([45, 120], dtype=torch.int32),
+            torch.ones(8, 8),
+            2,
+            3,
+            37,
+            128,
+            linear_state_indices=indices if include_indices else None,
+            num_accepted_tokens=accepted if include_indices else None,
+            first_draft_token_ids=torch.arange(8),
+            first_draft_positions=torch.arange(8),
+            first_draft_selected_rows=torch.tensor([0, 7]),
+        )
+
+    with pytest.raises(ValueError, match="requires logical recurrent state indices"):
+        execute(include_indices=False)
+    execute()
+    target = captured[0].recipe.target_forward._metadata_by_step[0]
+    assert target.is_spec_verify
+    assert target.request_count == 2 and target.query_width == 4
+    assert target.q_cu_seq_lens_host_values == list(range(1, 9))
+    assert target.linear_state_indices.data_ptr() != indices.data_ptr()
+    owned_addresses = target.linear_state_indices.data_ptr(), target.num_accepted_tokens.data_ptr()
+    indices.copy_(torch.tensor([3, 1], dtype=torch.int32))
+    accepted.copy_(torch.tensor([4, 1], dtype=torch.int32))
+    execute()
+    assert owned_addresses == (target.linear_state_indices.data_ptr(), target.num_accepted_tokens.data_ptr())
+    torch.testing.assert_close(target.linear_state_indices, indices)
+    torch.testing.assert_close(target.num_accepted_tokens, accepted)
+    execute(65)
+    assert captured[0].close.call_count == 1
+    assert captured[1].recipe.target_forward._metadata_by_step[0].linear_state_indices.data_ptr() != owned_addresses[0]
     for metadata in role._metadata_by_step:
         for field in ("slot_mapping", "kv_seq_lens", "block_table"):
             assert torch.all(getattr(metadata, field) == 17)

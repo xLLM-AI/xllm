@@ -1012,13 +1012,13 @@ class PreparedTestWorker final : public WorkerImpl {
 };
 
 // Exercise the production Unified execute hook without loading model weights.
-class JsonTaskTestWorker final : public UnifiedMtpWorkerImpl {
+class JsonTaskTestWorker final : public UnifiedMtpWorkerImpl<LlmForwardInput> {
  public:
   explicit JsonTaskTestWorker(const torch::Device& device)
-      : UnifiedMtpWorkerImpl(ParallelArgs(0, 1, 1, nullptr),
-                             device,
-                             options(),
-                             WorkerType::LLM) {}
+      : UnifiedMtpWorkerImpl<LlmForwardInput>(ParallelArgs(0, 1, 1, nullptr),
+                                              device,
+                                              options(),
+                                              WorkerType::LLM) {}
 
   std::optional<ForwardOutput> step(const LlmForwardInput& input) override {
     if (!input.json_object_states.empty()) {

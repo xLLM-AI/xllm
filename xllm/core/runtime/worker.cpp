@@ -165,9 +165,13 @@ Worker::Worker(const ParallelArgs& parallel_args,
             (!options.enable_speculative_decode() ||
              (SpeculativeConfig::is_mtp_algorithm(
                   options.speculative_algorithm()) &&
-              !execution.enable_unified_mtp_graph())))
+              (!execution.enable_unified_mtp_graph() ||
+               (Platform::is_npu() && !options.enable_adaptive_draft_step() &&
+                !options.enable_adaptive_target_verify() &&
+                options.num_speculative_tokens() > 0 &&
+                options.num_speculative_tokens() <= 16)))))
           << "VLM task pipeline requires DP=CP=1 and ordinary or fixed MTP "
-             "decode without unified graphs.";
+             "decode; unified NPU graphs require 1..16 fixed draft tokens.";
     }
     CHECK(options.host_blocks_factor() <= 1.0 ||
           (Platform::is_npu() && (!options.enable_speculative_decode() ||
@@ -201,16 +205,29 @@ Worker::Worker(const ParallelArgs& parallel_args,
     } else if (SpeculativeConfig::is_suffix_algorithm(algorithm)) {
       impl_ = new SuffixWorkerImpl(parallel_args, device, options);
     } else if (SpeculativeConfig::is_mtp_algorithm(algorithm)) {
-      if (worker_type == WorkerType::VLM) {
-        impl_ = new MTPWorkerImpl<VlmForwardInput>(
-            parallel_args, device, options, worker_type);
 #if defined(USE_NPU)
-      } else if (worker_type == WorkerType::LLM && device.is_privateuseone() &&
-                 ModelConfig::is_python_model_impl(
-                     ModelConfig::get_instance().model_impl()) &&
-                 ExecutionConfig::get_instance().enable_unified_mtp_graph()) {
+      const bool unified_python_mtp =
+          device.is_privateuseone() &&
+          ModelConfig::is_python_model_impl(
+              ModelConfig::get_instance().model_impl()) &&
+          ExecutionConfig::get_instance().enable_unified_mtp_graph();
+#endif
+      if (worker_type == WorkerType::VLM) {
+#if defined(USE_NPU)
+        if (unified_python_mtp) {
+          LOG(INFO) << "Unified VLM MTP worker enabled";
+          impl_ = new UnifiedMtpWorkerImpl<VlmForwardInput>(
+              parallel_args, device, options, worker_type);
+        } else
+#endif
+        {
+          impl_ = new MTPWorkerImpl<VlmForwardInput>(
+              parallel_args, device, options, worker_type);
+        }
+#if defined(USE_NPU)
+      } else if (worker_type == WorkerType::LLM && unified_python_mtp) {
         LOG(INFO) << "Unified MTP worker enabled";
-        impl_ = new UnifiedMtpWorkerImpl(
+        impl_ = new UnifiedMtpWorkerImpl<LlmForwardInput>(
             parallel_args, device, options, worker_type);
 #endif
       } else {

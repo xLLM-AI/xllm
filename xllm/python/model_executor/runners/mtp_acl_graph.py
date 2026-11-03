@@ -42,8 +42,10 @@ from xllm.python.model_executor.forward_context import (
     AclGraphExecutionState,
     AclGraphTask,
 )
+from xllm.python.model_executor.input_batch import InputBatch
 from xllm.python.model_executor.runners.base import SpeculativeRuntimeOutput
 from xllm.python.model_executor.runners.mtp_sparse_metadata import (
+    MtpPagedMetadataBinding,
     MtpSparseMetadataBinding,
     MtpSparseMetadataStorage,
     MtpSparsePositionStorage,
@@ -76,6 +78,51 @@ class MtpSamplingPlan:
             raise ValueError("max_top_logprobs must be nonnegative")
 
 
+class _MtpPagedAttentionMetadata:
+    """Singleton Full rows and request-scoped recurrent state for one role."""
+
+    def __init__(
+        self,
+        native: object,
+        *,
+        batch_size: int,
+        query_width: int,
+        block_size: int,
+        state_indices: torch.Tensor | None = None,
+        accepted_prefix: torch.Tensor | None = None,
+    ) -> None:
+        self._native = native
+        self.request_count = batch_size
+        self.query_width = query_width
+        rows = native.slot_mapping.numel()
+        self.q_seq_lens = torch.ones(rows, dtype=torch.int32, device=native.slot_mapping.device)
+        self.q_seq_lens_host = torch.ones(rows, dtype=torch.int32)
+        self.q_cu_seq_lens = torch.arange(1, rows + 1, dtype=torch.int32, device=native.slot_mapping.device)
+        self.q_cu_seq_lens_host_values = list(range(1, rows + 1))
+        self.kv_seq_lens_host_values = [native.block_table.shape[1] * block_size] * rows
+        self.linear_state_indices = state_indices
+        self.linear_state_read_indices = state_indices
+        self.linear_state_write_indices = state_indices
+        self.num_accepted_tokens = accepted_prefix
+        self.num_accepted_tokens_host_values = ()
+        self.is_spec_verify = state_indices is not None
+        self.is_prefill = False
+        self.is_chunked_prefill = False
+        self.is_mixed = False
+        self.prepared_attention_state: object | None = None
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._native, name)
+
+
+@dataclass(frozen=True, slots=True)
+class MtpDraftPrefixInputs:
+    token_ids: torch.Tensor
+    positions: torch.Tensor
+    selected_rows: torch.Tensor
+    query_width: int
+
+
 class MtpRoleAdapter:
     """Role-scoped body adapter for one composite MTP graph.
 
@@ -98,6 +145,7 @@ class MtpRoleAdapter:
         repair_token_ids: torch.Tensor | None = None,
         metadata_storage: MtpSparseMetadataStorage | None = None,
         repair_positions: torch.Tensor | None = None,
+        first_draft_prefix: MtpDraftPrefixInputs | None = None,
     ) -> None:
         if not metadata_by_step:
             raise ValueError("MTP role adapter requires at least one metadata plan")
@@ -125,6 +173,7 @@ class MtpRoleAdapter:
         self._target_width = speculative_tokens + 1
         self._layer_synchronizer = layer_synchronizer
         self._repair_positions = repair_positions
+        self._first_draft_prefix = first_draft_prefix
         # Worker may supply a strided int32 view of its two-row fused output.
         # Cast while copying into the final graph-owned int64 destination.
         self._repair_token_ids = (
@@ -156,6 +205,8 @@ class MtpRoleAdapter:
         self._graph_prepared = False
         self._step_execution_states: tuple[AclGraphExecutionState | None, ...] = ()
         self._shared_execution_buffers: dict[tuple[object, ...], object] | None = None
+        self._execution_contexts: list[dict[object, object]] = [{} for _ in self._metadata_by_step]
+        self._metadata_builders = tuple(getattr(executor.eager_runner, "execution_metadata_builders", ()))
 
     def bind_graph_context(
         self,
@@ -191,8 +242,21 @@ class MtpRoleAdapter:
         """Check once that every captured consumer borrows the owned tensors."""
         if not self._graph_prepared or not self._attention_backends:
             raise RuntimeError("sparse MTP binding requires prepared attention backends")
+        if all(isinstance(metadata, _MtpPagedAttentionMetadata) for metadata in self._metadata_by_step):
+            if any(metadata.prepared_attention_state is None for metadata in self._metadata_by_step):
+                raise RuntimeError("paged MTP binding requires prepared device-length attention")
+            return
         if not all(getattr(backend, "graph_metadata_updated_in_place", False) for backend in self._attention_backends):
             raise RuntimeError("sparse MTP binding requires in-place graph metadata consumers")
+
+    def snapshot_cache_state(self) -> tuple[object, ...]:
+        """Keep actual recurrent checkpoints unchanged by cold graph warmup."""
+        return tuple(
+            builder.snapshot_graph_state(metadata)
+            for metadata in self._metadata_by_step
+            for builder in self._metadata_builders
+            if hasattr(builder, "snapshot_graph_state")
+        )
 
     def update_repair_token_ids(self, repair_token_ids: torch.Tensor | None) -> None:
         if (self._repair_token_ids is None) != (repair_token_ids is None):
@@ -223,7 +287,14 @@ class MtpRoleAdapter:
         if target_batch > 1:
             call_token_ids = token_ids.view(target_batch, self._target_width).transpose(0, 1).reshape(-1)
             call_positions = positions.view(target_batch, self._target_width).transpose(0, 1).reshape(-1)
-        if not self._target and step == 0 and self._repair_token_ids is not None:
+        if not self._target and step == 0 and self._first_draft_prefix is not None:
+            prefix = self._first_draft_prefix
+            if input_embedding is None or input_embedding.shape[0] != prefix.token_ids.numel():
+                raise ValueError("Qwen MTP first draft requires the complete target-conditioned prefix")
+            call_token_ids, call_positions = prefix.token_ids, prefix.positions
+            selected_rows = prefix.selected_rows
+            select_current_rows = True
+        elif not self._target and step == 0 and self._repair_token_ids is not None:
             if self._repair_token_ids.shape != token_ids.shape:
                 raise ValueError("MTP repair token ids must match the draft batch")
             if input_embedding is None or input_embedding.shape[0] != token_ids.numel() * 2:
@@ -255,6 +326,38 @@ class MtpRoleAdapter:
             execution_state = (
                 self._step_execution_states[metadata_index] if self._step_execution_states else self._execution_state
             )
+            metadata = self._metadata_by_step[metadata_index]
+            contexts = self._execution_contexts[metadata_index]
+            if self._metadata_builders:
+                request_count = getattr(metadata, "request_count", call_token_ids.numel())
+                query_width = call_token_ids.numel() // request_count
+                input_batch = InputBatch(
+                    call_token_ids,
+                    call_positions,
+                    request_count,
+                    call_token_ids.numel(),
+                    call_token_ids.numel(),
+                    (query_width,) * request_count,
+                    (0,) * request_count,
+                    tuple(range(0, call_token_ids.numel() + 1, query_width)),
+                    (False,) * request_count,
+                    torch.zeros_like(call_token_ids, dtype=torch.bool),
+                    False,
+                )
+                for builder in self._metadata_builders:
+                    if builder.metadata_type not in contexts:
+                        contexts[builder.metadata_type] = builder.allocate_persistent(input_batch, metadata)
+                    else:
+                        builder.update_persistent(contexts[builder.metadata_type], input_batch, metadata)
+            backend = self._attention_backends[metadata_index] if self._attention_backends else None
+            if isinstance(metadata, _MtpPagedAttentionMetadata):
+                if backend is None:
+                    raise RuntimeError("paged MTP requires a role-local attention backend")
+                if metadata.prepared_attention_state is None:
+                    metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=True)
+                # Translation belongs inside capture: logical page IDs change
+                # between replays even when the owned table address is stable.
+                backend.prepare_owned_graph_metadata(metadata)
             output = execute_role(
                 call_token_ids,
                 call_positions,
@@ -264,8 +367,9 @@ class MtpRoleAdapter:
                 topk_indices,
                 acl_graph=self._acl_graph,
                 execution_state=execution_state,
-                attention_backend=(self._attention_backends[metadata_index] if self._attention_backends else None),
-                skip_prepare=self._graph_prepared,
+                attention_backend=backend,
+                skip_prepare=self._graph_prepared or isinstance(metadata, _MtpPagedAttentionMetadata),
+                execution_contexts=contexts,
             )
         if not select_current_rows and target_batch <= 1:
             return output
@@ -336,6 +440,7 @@ class MtpGraphRecipe(nn.Module):
         draft_greedy: LogitsFn | None = None,
         target_greedy: LogitsFn | None = None,
         position_storage: MtpSparsePositionStorage | None = None,
+        retain_target_prefix: bool = False,
     ) -> None:
         super().__init__()
         if batch_size <= 0:
@@ -359,6 +464,7 @@ class MtpGraphRecipe(nn.Module):
         self.draft_activate = draft_activate
         self.target_activate = target_activate
         self._position_storage = position_storage
+        self._retain_target_prefix = retain_target_prefix
         self.requires_kv_seq_lens = kv_seq_lens is not None
         if target_sampling is not None and target_sampling.batch_size != batch_size:
             raise ValueError("target sampling plan batch does not match MTP graph batch")
@@ -514,6 +620,11 @@ class MtpGraphRecipe(nn.Module):
             logprobs=committed_log_probs,
             top_logprobs=target_top_log_probs,
             top_tokens=target_top_tokens,
+            target_prefix_embeddings=(
+                target_hidden.view(self.batch_size, self.speculative_tokens + 1, -1)
+                if self._retain_target_prefix
+                else None
+            ),
         )
 
 
@@ -658,6 +769,7 @@ class MtpAclGraphRunner:
             logprobs=clone(output.logprobs),
             top_logprobs=clone(output.top_logprobs),
             top_tokens=clone(output.top_tokens),
+            target_prefix_embeddings=clone(output.target_prefix_embeddings),
         )
 
     def capture(
@@ -690,8 +802,18 @@ class MtpAclGraphRunner:
         self._capture_stream.wait_stream(torch.npu.current_stream())
         self.recipe.bind_graph_contexts(None, *self._execution_states)
         with torch.npu.stream(self._capture_stream):
+            snapshots = tuple(
+                snapshot
+                for role in (self.recipe.draft_forward, self.recipe.target_forward)
+                if hasattr(role, "snapshot_cache_state")
+                for snapshot in role.snapshot_cache_state()
+            )
             for _ in range(self.warmup_steps):
+                for snapshot in snapshots:
+                    snapshot.restore()
                 self._run_static()
+            for snapshot in snapshots:
+                snapshot.restore()
         self.recipe.finish_warmup()
         self._capture_stream.synchronize()
         torch.npu.current_stream().wait_stream(self._capture_stream)
@@ -702,6 +824,9 @@ class MtpAclGraphRunner:
         self.recipe.bind_graph_contexts(capture_context, *self._execution_states)
         with torch.npu.stream(self._capture_stream), torch.npu.graph(self._graph, stream=self._capture_stream):
             self._static_output = self._run_static()
+        with torch.npu.stream(self._capture_stream):
+            for snapshot in snapshots:
+                snapshot.restore()
         self._graph_tasks = capture_context.tasks
         self._captured = True
 
@@ -761,7 +886,11 @@ class MtpAclGraphRunner:
 @dataclass
 class _SparseVariant:
     runner: MtpAclGraphRunner
-    binding: MtpSparseMetadataBinding
+    binding: MtpSparseMetadataBinding | MtpPagedMetadataBinding
+    state_indices: torch.Tensor | None = None
+    accepted_prefix: torch.Tensor | None = None
+    first_replay_logged: bool = False
+    first_draft_prefix: MtpDraftPrefixInputs | None = None
 
 
 class MtpGraphVariantRegistry:
@@ -832,15 +961,49 @@ class MtpGraphVariantRegistry:
         target_step_major_layout: bool = False,
         logprobs: bool = False,
         max_top_logprobs: int = 0,
+        linear_state_indices: torch.Tensor | None = None,
+        num_accepted_tokens: torch.Tensor | None = None,
+        is_graph_warmup: bool = False,
+        first_draft_token_ids: torch.Tensor | None = None,
+        first_draft_positions: torch.Tensor | None = None,
+        first_draft_selected_rows: torch.Tensor | None = None,
     ) -> SpeculativeRuntimeOutput:
         """Execute the admitted sparse/greedy path using final graph storage.
 
         Sampling flags are immutable for a variant. The Worker has already
         rejected per-request distribution transforms before this entry point.
         """
+        builders = getattr(getattr(self._target_executor, "eager_runner", None), "execution_metadata_builders", ())
+        requires_recurrent = any(getattr(builder, "supports_linear_spec_verify_graph", False) for builder in builders)
+        recurrent = linear_state_indices is not None
+        if requires_recurrent and not recurrent:
+            raise ValueError("hybrid unified MTP requires logical recurrent state indices")
+        if recurrent:
+            if target_step_major_layout:
+                raise ValueError("hybrid unified MTP requires request-major target rows")
+            for name, value in (
+                ("linear_state_indices", linear_state_indices),
+                ("num_accepted_tokens", num_accepted_tokens),
+            ):
+                if (
+                    value is None
+                    or value.shape != (batch_size,)
+                    or value.dtype != torch.int32
+                    or value.device != block_table.device
+                ):
+                    raise ValueError(f"hybrid unified MTP requires device int32 {name} per request")
+            for name, value, shape in (
+                ("first_draft_token_ids", first_draft_token_ids, (batch_size * (speculative_tokens + 1),)),
+                ("first_draft_positions", first_draft_positions, (batch_size * (speculative_tokens + 1),)),
+                ("first_draft_selected_rows", first_draft_selected_rows, (batch_size,)),
+            ):
+                if value is None or value.shape != shape or value.device != block_table.device:
+                    raise ValueError(f"hybrid unified MTP requires fixed complete {name}")
+        elif num_accepted_tokens is not None:
+            raise ValueError("accepted checkpoint lengths require recurrent state indices")
         capacity = 1 << (max(32, block_table.shape[1]) - 1).bit_length()
         key = (
-            "sparse",
+            "hybrid-paged" if recurrent else "sparse",
             batch_size,
             speculative_tokens,
             vocab_size,
@@ -868,11 +1031,46 @@ class MtpGraphVariantRegistry:
             target_factory = self._target_metadata_factory
             if draft_factory is None or target_factory is None:
                 raise RuntimeError("sparse MTP registry requires native metadata factories")
+            state_indices = linear_state_indices.clone() if recurrent else None
+            accepted_prefix = num_accepted_tokens.clone() if recurrent else None
+            prefix = (
+                MtpDraftPrefixInputs(
+                    first_draft_token_ids.to(torch.long).clone(),
+                    first_draft_positions.to(torch.long).clone(),
+                    first_draft_selected_rows.to(torch.long).clone(),
+                    speculative_tokens + 1,
+                )
+                if recurrent
+                else None
+            )
             target_plan = MtpSamplingPlan(batch_size=batch_size, logprobs=logprobs, max_top_logprobs=max_top_logprobs)
+            if recurrent:
+                native_draft_factory, native_target_factory = draft_factory, target_factory
+
+                def draft_factory(table: torch.Tensor, lengths: torch.Tensor, slots: torch.Tensor) -> object:
+                    return _MtpPagedAttentionMetadata(
+                        native_draft_factory(table, lengths, slots),
+                        batch_size=batch_size,
+                        query_width=slots.numel() // batch_size,
+                        block_size=block_size,
+                    )
+
+                def target_factory(table: torch.Tensor, lengths: torch.Tensor, slots: torch.Tensor) -> object:
+                    return _MtpPagedAttentionMetadata(
+                        native_target_factory(table, lengths, slots),
+                        batch_size=batch_size,
+                        query_width=speculative_tokens + 1,
+                        block_size=block_size,
+                        state_indices=state_indices,
+                        accepted_prefix=accepted_prefix,
+                    )
 
             draft_storage = MtpSparseMetadataStorage(
                 draft_factory,
-                [batch_size * (2 if step == 0 else 1) for step in range(speculative_tokens)],
+                [
+                    batch_size * ((speculative_tokens + 1 if recurrent else 2) if step == 0 else 1)
+                    for step in range(speculative_tokens)
+                ],
                 capacity,
                 block_table.device,
                 share_block_tables=True,
@@ -897,10 +1095,12 @@ class MtpGraphVariantRegistry:
                 target_metadata_storage=target_storage,
                 position_storage=position_storage,
                 target_step_major_layout=target_step_major_layout,
+                first_draft_prefix=prefix,
             )
             draft_role = variant.recipe.draft_forward
             target_role = variant.recipe.target_forward
-            binding = MtpSparseMetadataBinding(
+            binding_type = MtpPagedMetadataBinding if recurrent else MtpSparseMetadataBinding
+            binding = binding_type(
                 draft_role._metadata_by_step,
                 draft_role._metadata_arenas,
                 target_role._metadata_by_step,
@@ -913,7 +1113,15 @@ class MtpGraphVariantRegistry:
                 target_step_major=target_step_major_layout,
             )
             binding.update(block_table, base_positions, kv_seq_lens, first_kv_seq_lens, first_slots)
-            logger.info("MTP Python graph variant capture: index=%d", len(self._variants))
+            logger.info(
+                "MTP Python graph variant capture: index=%d, mode=%s, batch=%d, k=%d, target=%s, draft=%s",
+                len(self._variants),
+                key[0],
+                batch_size,
+                speculative_tokens,
+                type(getattr(self._target_executor, "model", self._target_executor)).__name__,
+                type(getattr(self._draft_executor, "model", self._draft_executor)).__name__,
+            )
             inputs = (seed_token_ids, base_positions, kv_seq_lens, draft_input_embedding, None)
             if self._capture_runner is None:
                 variant.capture(*inputs)
@@ -921,13 +1129,30 @@ class MtpGraphVariantRegistry:
                 self._capture_runner(variant, *inputs)
             draft_role.require_direct_metadata_update()
             target_role.require_direct_metadata_update()
-            self._variants[key] = _SparseVariant(variant, binding)
+            self._variants[key] = _SparseVariant(
+                variant, binding, state_indices, accepted_prefix, first_draft_prefix=prefix
+            )
         else:
             entry.binding.update(block_table, base_positions, kv_seq_lens, first_kv_seq_lens, first_slots)
+            if entry.state_indices is not None:
+                entry.state_indices.copy_(linear_state_indices)
+                entry.accepted_prefix.copy_(num_accepted_tokens)
+                entry.first_draft_prefix.token_ids.copy_(first_draft_token_ids)
+                entry.first_draft_prefix.positions.copy_(first_draft_positions)
+                entry.first_draft_prefix.selected_rows.copy_(first_draft_selected_rows)
             variant = entry.runner
             variant.recipe.draft_forward.update_repair_token_ids(repair_token_ids)
             logger.debug("MTP Python graph variant replay: count=%d", len(self._variants))
         output = variant.execute(seed_token_ids, base_positions, kv_seq_lens, draft_input_embedding)
+        captured_entry = self._variants[key]
+        if not is_graph_warmup and not captured_entry.first_replay_logged:
+            logger.info(
+                "MTP Python graph variant first request replay: mode=%s, batch=%d, k=%d, warmup=False",
+                key[0],
+                batch_size,
+                speculative_tokens,
+            )
+            captured_entry.first_replay_logged = True
         # Export the destination for the next C++ fused prepare. A capacity or
         # output-layout transition copies once into the newly resolved variant
         # and publishes its replacement destination after execution.

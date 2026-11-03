@@ -339,3 +339,18 @@ Hybrid target 的 Full/Linear 共用静态 arena；full-only MTP draft 使用独
 测试启动使用 `enable_shared_kv_cache=true`、`enable_vmm_kvcache=false`、`enable_graph_vmm_pool=false`，并令 `max_linear_state_cache_slots=0`，由共享 arena 统一决定状态容量。四个 Full 层的 128-token block 与一个 Linear 层状态按真实字节数对齐；安全 Conv ceiling 间隙和必要的 LCM fallback padding 都计入预算，不能假定所有模型的 page 都只有四个 Full block 的有效载荷。
 
 当前实现已补齐 Python GDN 共享 decode/verify、ACL metadata 持久更新和生产入口资源接线，真实 NPU 完整构建、单测及 Qwen3.8-27B 压测仍需验证。VLM、prefill piecewise graph、task pipeline、PD/Host/store、CP/KV/layerwise split、MLA/index/量化以及其他 speculative 算法保持关闭。第 11 节的 native eager 实现保持原有边界。
+
+### 12.7 实施扩展：Qwen3.8-27B TP4 VLM 与 unified MTP（2026-11-03）
+
+本轮目标调整为单机四卡、`backend=vlm` 的 Qwen3.8-27B，使用 Python 模型、静态 Full/Linear 共享 target arena 和真正合并 target/draft 的固定宽度 unified MTP graph。真实 checkpoint 的外层类型为 `qwen3_5`，文本 decoder 为 `qwen3_5_text`，含 48 个 Linear 层、16 个 Full 层、独立视觉塔和一层 Full MTP draft；TP4 下的 head 数可整除。不得把普通 MTP worker 配置中打开 unified flag 视作已执行统一图。
+
+实施按以下依赖推进：
+
+1. 接通 dense Qwen VLM 的生产 capability 与 Python executor。共享 cache 的 shape 和容量来自拉平后的文本 decoder，不将视觉塔参数算成 KV 层。视觉 prefill/chunked prefill 通过显式 chunk embedding 和三轴 mRoPE 输入走 eager；纯 decode 不持有前一请求的视觉 embedding。
+2. 为统一图保留 target/draft 独立 backend、每步持久 metadata 和执行上下文。target 的逻辑 Linear state IDs 与上一轮 accepted prefix lengths 必须跨 native/Python 边界显式传递；Full table、Conv/SSM 索引以及 accepted checkpoint 在图重放和 variant 切换时同步更新。
+   Qwen 首步沿用 `VERIFIER_CONDITIONED_FIRST_PASS`：保留上一轮完整 target token/hidden span，按每请求 accepted 长度选择最后有效行；首步固定容量为 K+1，后续 draft step 的位置与 KV 写入沿用普通 Qwen MTP 的 offset。不能复用 GLM 的两行 tail repair；独立普通逐 token oracle 必须比较 draft hidden、logits 和 proposals，避免 target rejection 掩盖草稿状态错误。
+3. 通过 typed worker bridge 保留 VLM prefill 的输入类型，仅在纯 decode 采用既有 mRoPE continuation 位置转换。统一图的 verify KV 长度独立于 mRoPE 位置；不根据图像位置偏移推算 cache slot。native 只负责入口、资源和 metadata 转发，不新增 C++ attention 或组图算法。
+4. 运行结构/生命周期单测、真实 NPU 数值和统一图 capture/replay 测试，再验证 TP4 图文服务。对照服务使用普通 MTP、关闭 APC；正式服务启用 unified MTP 和 APC。使用真实图文请求比较输出，覆盖同图 warm prefix、相同文字不同图像、跨 512-token chunk、后缀变化、接受/拒绝回滚及并发 batch/variant 切换。
+5. 确认四个 rank 均使用同一提交的 Python 路径和共享 arena，日志实际出现 Unified worker、variant capture 与 replay；所有 VMM 开关保持关闭。用户文本压力客户端只作为补充，不能替代视觉验收。记录 exact-commit 构建、测试及服务证据后再发布。
+
+单层 Full token block 仍为 128，四层分组表示合计 512 个跨层槽位；TP4 下 physical page 的字节数必须由本地 head 数和实际 Conv/SSM checkpoint payload 重新计算，不能复用 TP2 的 9 MiB 数值。Full-only draft 仍独立存储并联合计费。本轮不扩展 prefill piecewise graph、PD/Host/store、CP/KV/layerwise split 或其他 speculative 算法。GLM 模型验收按用户要求排除。

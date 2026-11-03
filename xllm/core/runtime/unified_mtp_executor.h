@@ -57,12 +57,14 @@ class __attribute__((visibility("hidden"))) UnifiedMtpExecutor final {
   explicit UnifiedMtpExecutor(Stream& compute_stream);
   ~UnifiedMtpExecutor();
 
+  template <typename TargetInput>
   const UnifiedMtpContinuation* continuation_for(
-      const LlmForwardInput& input) const;
+      const TargetInput& input) const;
   const UnifiedMtpContinuation& remember(UnifiedMtpContinuation continuation);
   void clear_continuation();
 
-  LlmForwardInput prepare_next(const LlmForwardInput& input,
+  template <typename TargetInput>
+  LlmForwardInput prepare_next(const TargetInput& input,
                                const torch::Tensor& accepted_tokens,
                                const torch::Tensor& accepted_embeddings,
                                const torch::Tensor& base_positions,
@@ -70,14 +72,16 @@ class __attribute__((visibility("hidden"))) UnifiedMtpExecutor final {
                                const torch::Tensor& embedding_placeholder,
                                int32_t block_size);
 
+  template <typename TargetInput>
   UnifiedMtpExecutionResult execute(PyExecutorImpl& target_executor,
                                     PyExecutorImpl& draft_executor,
-                                    const LlmForwardInput& input,
+                                    const TargetInput& input,
                                     const LlmForwardInput& current_draft_input,
                                     int32_t speculative_tokens,
                                     int64_t vocab_size,
                                     int32_t block_size,
-                                    bool target_step_major_layout);
+                                    bool target_step_major_layout,
+                                    const torch::Tensor& accepted_prefix = {});
 
 #if defined(USE_NPU)
   kernel::npu::MtpPrepareNextDraftWorkspace& acquire_draft_workspace(

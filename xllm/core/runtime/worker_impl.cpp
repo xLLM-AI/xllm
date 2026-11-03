@@ -127,11 +127,16 @@ void validate_shared_kv_cache_support(const ModelArgs& args,
   const std::string& model_type = args.model_type();
   const std::string& model_impl = ModelConfig::get_instance().model_impl();
   const bool python_model = ModelConfig::is_python_model_impl(model_impl);
-  CHECK(Platform::is_npu() && options.backend() == "llm" &&
+  const bool python_vlm =
+      python_model && options.backend() == "vlm" && model_type == "qwen3_5";
+  CHECK(Platform::is_npu() && (options.backend() == "llm" || python_vlm) &&
         options.task_type() == "generate" &&
         (python_model || model_impl.empty() || model_impl == "native") &&
         options.extension_impl().empty())
-      << "Shared KV cache requires a native or Python NPU Torch LLM.";
+      << "Shared KV cache requires a native or Python NPU Torch LLM, or a "
+         "Python Qwen3.5 VLM.";
+  CHECK(!python_vlm || parallel_args.dp_size() == 1)
+      << "Shared Python Qwen3.5 VLM requires a single data-parallel rank.";
   CHECK(!options.enable_prefill_piecewise_graph() &&
         !options.enable_task_pipeline())
       << "Shared KV cache does not support piecewise graphs or task pipelines.";

@@ -30,6 +30,7 @@ limitations under the License.
 #include "core/runtime/py_executor_impl.h"
 #include "core/runtime/task_execution_pipeline.h"
 #include "core/runtime/unified_mtp_executor.h"
+#include "core/runtime/vlm_forward_params.h"
 #include "core/util/tensor_helper.h"
 
 namespace xllm {
@@ -50,7 +51,14 @@ runtime::Options unified_leaf_options(const runtime::Options& options,
 
 using mtp_detail::check_mtp_decode_states;
 
-bool supports_unified_mtp_request(const LlmForwardInput& input) {
+template <typename TargetInput>
+bool supports_unified_mtp_request(const TargetInput& input) {
+  if constexpr (std::is_same_v<TargetInput, VlmForwardInput>) {
+    if (input.input_params.multimodal.mm_data.valid() ||
+        !input.input_params.multimodal.deep_stacks.empty()) {
+      return false;
+    }
+  }
   const SamplingParameters& sampling = input.sampling_params;
   return input.json_object_states.empty() &&
          input.input_params.multi_block_tables.empty() &&
@@ -58,26 +66,30 @@ bool supports_unified_mtp_request(const LlmForwardInput& input) {
          !sampling.use_beam_search() && !sampling.has_sampling_fields();
 }
 
-UnifiedMtpWorkerImpl::UnifiedMtpWorkerImpl(const ParallelArgs& parallel_args,
-                                           const torch::Device& device,
-                                           const runtime::Options& options,
-                                           WorkerType worker_type)
-    : MTPWorkerImpl<LlmForwardInput>(parallel_args,
-                                     device,
-                                     options,
-                                     unified_leaf_options(options, false),
-                                     unified_leaf_options(options, true),
-                                     worker_type) {}
+template <typename TargetInput>
+UnifiedMtpWorkerImpl<TargetInput>::UnifiedMtpWorkerImpl(
+    const ParallelArgs& parallel_args,
+    const torch::Device& device,
+    const runtime::Options& options,
+    WorkerType worker_type)
+    : MTPWorkerImpl<TargetInput>(parallel_args,
+                                 device,
+                                 options,
+                                 unified_leaf_options(options, false),
+                                 unified_leaf_options(options, true),
+                                 worker_type) {}
 
-UnifiedMtpWorkerImpl::~UnifiedMtpWorkerImpl() {
+template <typename TargetInput>
+UnifiedMtpWorkerImpl<TargetInput>::~UnifiedMtpWorkerImpl() {
   // Derived graph owners must survive all queued work, before base teardown.
   drain_pending_execution();
   c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
   unified_executor_.reset();
 }
 
-std::optional<ForwardOutput> UnifiedMtpWorkerImpl::step(
-    const LlmForwardInput& input) {
+template <typename TargetInput>
+std::optional<ForwardOutput> UnifiedMtpWorkerImpl<TargetInput>::step(
+    const TargetInput& input) {
   if (!input.input_params.meta.batch_forward_type.is_decode() ||
       input.input_params.meta.num_sequences == 0 ||
       input.token_ids.numel() == 0 ||
@@ -87,11 +99,12 @@ std::optional<ForwardOutput> UnifiedMtpWorkerImpl::step(
   // Empty DP shards must let the compatibility executor consume a matching
   // prelaunch, keeping collective counts aligned with active peers. Prefill
   // and a real Unified transition retire stale prelaunches in their entries.
-  return SpeculativeWorkerImpl<LlmForwardInput>::step(input);
+  return SpeculativeWorkerImpl<TargetInput>::step(input);
 }
 
-std::optional<ForwardOutput> UnifiedMtpWorkerImpl::step_decode(
-    const LlmForwardInput& input) {
+template <typename TargetInput>
+std::optional<ForwardOutput> UnifiedMtpWorkerImpl<TargetInput>::step_decode(
+    const TargetInput& input) {
   if (supports_unified_python_mtp_graph(input)) {
     return step_unified(input);
   }
@@ -107,21 +120,32 @@ std::optional<ForwardOutput> UnifiedMtpWorkerImpl::step_decode(
     c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
     unified_executor_.reset();
   }
-  return MTPWorkerImpl<LlmForwardInput>::step_decode(input);
+  return MTPWorkerImpl<TargetInput>::step_decode(input);
 }
 
-bool UnifiedMtpWorkerImpl::init_model(const std::string& model_weights_path,
-                                      int32_t random_seed,
-                                      MasterStatus master_status) {
-  const bool result = MTPWorkerImpl<LlmForwardInput>::init_model(
+template <typename TargetInput>
+bool UnifiedMtpWorkerImpl<TargetInput>::init_model(
+    const std::string& model_weights_path,
+    int32_t random_seed,
+    MasterStatus master_status) {
+  const bool result = MTPWorkerImpl<TargetInput>::init_model(
       model_weights_path, random_seed, master_status);
   // Model/backend/topology capabilities are immutable during serving. Resolve
   // once after the pair loads; each step only examines request controls.
   unified_graph_capable_ = result && supports_unified_configuration();
+  const std::string& model_type = context_.get_model_args().model_type();
+  if (result && !unified_graph_capable_ &&
+      (model_type == "qwen3_5" || model_type == "qwen3_5_text") &&
+      ExecutionConfig::get_instance().enable_unified_mtp_graph()) {
+    LOG(ERROR) << "Configured Qwen unified MTP requires fixed-width "
+                  "verifier-conditioned Python graphs with DP=CP=KV split=1.";
+    return false;
+  }
   return result;
 }
 
-::xllm::Status UnifiedMtpWorkerImpl::create_task_pipeline(
+template <typename TargetInput>
+::xllm::Status UnifiedMtpWorkerImpl<TargetInput>::create_task_pipeline(
     std::unique_ptr<TaskExecutionPipeline>& output) {
   if (impl_ == nullptr || draft_impl_ == nullptr ||
       options_.num_speculative_tokens() <= 0 ||
@@ -146,9 +170,10 @@ bool UnifiedMtpWorkerImpl::init_model(const std::string& model_weights_path,
   return status;
 }
 
-void UnifiedMtpWorkerImpl::prepare_task_pipeline_input(
-    const LlmForwardInput& input,
-    LlmForwardInput& prepared) {
+template <typename TargetInput>
+void UnifiedMtpWorkerImpl<TargetInput>::prepare_task_pipeline_input(
+    const TargetInput& input,
+    TargetInput& prepared) {
   // The Unified task queue owns two independent prepared inputs.  Its launch
   // thread consumes them in order, so preparation may run while the previous
   // graph is on compute_stream_.  Keep the metadata event dependency, but do
@@ -161,8 +186,10 @@ void UnifiedMtpWorkerImpl::prepare_task_pipeline_input(
                           /*wait_for_compute_stream=*/false);
 }
 
-std::optional<ForwardOutput> UnifiedMtpWorkerImpl::execute_task_pipeline(
-    const LlmForwardInput& prepared) {
+template <typename TargetInput>
+std::optional<ForwardOutput>
+UnifiedMtpWorkerImpl<TargetInput>::execute_task_pipeline(
+    const TargetInput& prepared) {
   // The queue owns execution and results. JSON needs the preceding accepted
   // tokens as well, but must not use the driver's legacy last-step slot.
   if (!enable_schedule_overlap() || prepared.json_object_states.empty()) {
@@ -171,7 +198,7 @@ std::optional<ForwardOutput> UnifiedMtpWorkerImpl::execute_task_pipeline(
     return step(prepared);
   }
 
-  LlmForwardInput input = prepared.clone();
+  TargetInput input = prepared.clone();
   c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
   CHECK(compute_stream_->wait_event(input.runtime.metadata_ready_event));
   if (input.token_ids.numel() > 0 &&
@@ -207,13 +234,15 @@ std::optional<ForwardOutput> UnifiedMtpWorkerImpl::execute_task_pipeline(
   return output;
 }
 
-bool UnifiedMtpWorkerImpl::supports_unified_python_mtp_graph(
-    const LlmForwardInput& input) const {
+template <typename TargetInput>
+bool UnifiedMtpWorkerImpl<TargetInput>::supports_unified_python_mtp_graph(
+    const TargetInput& input) const {
   return unified_graph_capable_ && !is_probabilistic_draft_ &&
          supports_unified_mtp_request(input);
 }
 
-bool UnifiedMtpWorkerImpl::supports_unified_configuration() const {
+template <typename TargetInput>
+bool UnifiedMtpWorkerImpl<TargetInput>::supports_unified_configuration() const {
 #if defined(USE_NPU)
   if (!::xllm::ExecutionConfig::get_instance().enable_unified_mtp_graph()) {
     VLOG(1) << "MTP unified Python graph disabled by startup configuration";
@@ -237,6 +266,18 @@ bool UnifiedMtpWorkerImpl::supports_unified_configuration() const {
   const bool acl_backend = backend.empty() || backend == "off" ||
                            backend == "none" || backend == "0" ||
                            backend == "aclgraph";
+  const std::string& target_type = context_.get_model_args().model_type();
+  const std::string& draft_type =
+      draft_impl_->context_.get_model_args().model_type();
+  const bool sparse_pair =
+      target_type == "glm_moe_dsa" &&
+      combined_draft_execution_path_ ==
+          mtp_async::CombinedDraftExecutionPath::GLM_MOE_DSA_SPARSE_ATTENTION;
+  const bool hybrid_pair =
+      (target_type == "qwen3_5" || target_type == "qwen3_5_text") &&
+      draft_type == "qwen3_5_mtp" &&
+      combined_draft_execution_path_ ==
+          mtp_async::CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION;
   const bool unsupported_shape =
       !acl_backend || !::xllm::ExecutionConfig::get_instance().enable_graph() ||
       options_.num_speculative_tokens() <= 0 || impl_ == nullptr ||
@@ -244,9 +285,12 @@ bool UnifiedMtpWorkerImpl::supports_unified_configuration() const {
       !moe_topology_valid || parallel_args_.dp_size() != 1 ||
       parallel_args_.cp_size() != 1 ||
       parallel_args_.kv_split_size_effective() != 1 ||
-      context_.get_model_args().model_type() != "glm_moe_dsa" ||
-      combined_draft_execution_path_ !=
-          mtp_async::CombinedDraftExecutionPath::GLM_MOE_DSA_SPARSE_ATTENTION ||
+      (!sparse_pair && !hybrid_pair) ||
+      (hybrid_pair && !uses_verifier_conditioned_draft_prefix()) ||
+      (hybrid_pair && options_.num_speculative_tokens() > 16) ||
+      options_.enable_adaptive_draft_step() ||
+      options_.enable_adaptive_target_verify() ||
+      parallel_args_.layerwise_split_size() != 1 ||
       !ModelConfig::is_python_model_impl(context_.get_model_impl()) ||
       !ModelConfig::is_python_model_impl(
           draft_impl_->context_.get_model_impl());
@@ -297,14 +341,35 @@ bool UnifiedMtpWorkerImpl::supports_unified_configuration() const {
 #endif
 }
 
-std::optional<ForwardOutput> UnifiedMtpWorkerImpl::run_unified_python_mtp_graph(
-    const LlmForwardInput& input,
+template <typename TargetInput>
+std::optional<ForwardOutput>
+UnifiedMtpWorkerImpl<TargetInput>::run_unified_python_mtp_graph(
+    const TargetInput& input,
     const LlmForwardInput& current_draft_input,
     int32_t num_speculative_tokens) {
 #if defined(USE_NPU)
+  c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
   PyExecutorImpl* target_executor = impl_->model_executor()->python_impl();
   PyExecutorImpl* draft_executor = draft_impl_->model_executor()->python_impl();
   CHECK(target_executor != nullptr && draft_executor != nullptr);
+  torch::Tensor accepted_prefix;
+  const torch::Tensor& state_indices =
+      input.input_params.embedding.linear_state_indices;
+  if (state_indices.defined() && state_indices.numel() > 0) {
+    const UnifiedMtpContinuation* continuation =
+        unified_executor().continuation_for(input);
+    if (continuation != nullptr) {
+      accepted_prefix =
+          continuation->accepted_tokens.ge(0).sum(1).to(torch::kInt);
+    } else {
+      const std::vector<int32_t> lengths =
+          embedding_cache_->read_accepted_prefix_lengths(
+              input.input_params.embedding.embedding_ids,
+              input.input_params.embedding.request_ids);
+      accepted_prefix = torch::tensor(
+          lengths, torch::TensorOptions().dtype(torch::kInt).device(device_));
+    }
+  }
   UnifiedMtpExecutionResult execution =
       unified_executor().execute(*target_executor,
                                  *draft_executor,
@@ -313,12 +378,12 @@ std::optional<ForwardOutput> UnifiedMtpWorkerImpl::run_unified_python_mtp_graph(
                                  num_speculative_tokens,
                                  context_.get_model_args().vocab_size(),
                                  logical_block_size(),
-                                 uses_step_major_validate_layout());
+                                 uses_step_major_validate_layout(),
+                                 accepted_prefix);
   const int32_t batch_size = input.input_params.meta.num_sequences;
   detail::MtpPyGraphOutput& graph_output = execution.output;
   torch::Tensor base_positions = std::move(execution.base_positions);
   torch::Tensor kv_seq_lens = std::move(execution.base_kv_seq_lens);
-  c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
 
   ForwardOutput target_output;
   target_output.logprobs = input.sampling_params.logprobs();
@@ -330,6 +395,12 @@ std::optional<ForwardOutput> UnifiedMtpWorkerImpl::run_unified_python_mtp_graph(
   target_output.sample_output.logprobs = graph_output.committed_log_probs;
   target_output.sample_output.top_logprobs = graph_output.target_top_log_probs;
   target_output.sample_output.top_tokens = graph_output.target_top_tokens;
+  if (uses_verifier_conditioned_draft_prefix()) {
+    CHECK(graph_output.target_prefix_embeddings.defined());
+    SampleOutput prefix_output = target_output.sample_output;
+    prefix_output.embeddings = graph_output.target_prefix_embeddings;
+    retain_draft_prefix(input, prefix_output, base_positions, kv_seq_lens);
+  }
 
   // Persist the pre-acceptance graph base together with the committed-token
   // matrix. The fused next-draft preparation adds the accepted prefix to this
@@ -407,8 +478,9 @@ std::optional<ForwardOutput> UnifiedMtpWorkerImpl::run_unified_python_mtp_graph(
 #endif
 }
 
-std::optional<ForwardOutput> UnifiedMtpWorkerImpl::step_unified(
-    const LlmForwardInput& input) {
+template <typename TargetInput>
+std::optional<ForwardOutput> UnifiedMtpWorkerImpl<TargetInput>::step_unified(
+    const TargetInput& input) {
   CHECK(embedding_cache_ != nullptr);
   retire_legacy_prelaunch();
   const bool bootstrap =
@@ -434,6 +506,12 @@ std::optional<ForwardOutput> UnifiedMtpWorkerImpl::step_unified(
                                        pending.request_ids});
   }
   if (continuation != nullptr) {
+    if (uses_verifier_conditioned_draft_prefix()) {
+      LlmForwardInput prepared;
+      prepare_draft_prefix(input, {}, prepared);
+      return run_unified_python_mtp_graph(
+          input, prepared, options_.num_speculative_tokens());
+    }
     LlmForwardInput prepared =
         executor.prepare_next(input,
                               continuation->accepted_tokens,
@@ -450,7 +528,7 @@ std::optional<ForwardOutput> UnifiedMtpWorkerImpl::step_unified(
   // then materialize a corrected input from per-request cache state.
   clear_unified_device_state();
   flush_pending_target_context();
-  LlmForwardInput corrected = input.clone();
+  TargetInput corrected = input.clone();
   auto states = embedding_cache_->read_decode_states(
       input.input_params.embedding.embedding_ids,
       input.input_params.embedding.request_ids);
@@ -462,27 +540,38 @@ std::optional<ForwardOutput> UnifiedMtpWorkerImpl::step_unified(
   }
   update_decode_step_input(corrected, states);
   LlmForwardInput prepared;
-  prepare_draft_extend_inputs(
-      corrected,
-      states,
-      prepared,
-      /*force_two_rows=*/true,
-      /*wait_for_compute_stream=*/!options_.enable_task_pipeline());
+  if (uses_verifier_conditioned_draft_prefix()) {
+    prepare_draft_prefix(corrected, states, prepared);
+  } else {
+    prepare_draft_extend_inputs(
+        corrected,
+        states,
+        prepared,
+        /*force_two_rows=*/true,
+        /*wait_for_compute_stream=*/!options_.enable_task_pipeline());
+  }
   return run_unified_python_mtp_graph(
       corrected, prepared, options_.num_speculative_tokens());
 }
 
-UnifiedMtpExecutor& UnifiedMtpWorkerImpl::unified_executor() {
+template <typename TargetInput>
+UnifiedMtpExecutor& UnifiedMtpWorkerImpl<TargetInput>::unified_executor() {
   if (unified_executor_ == nullptr) {
     unified_executor_ = std::make_unique<UnifiedMtpExecutor>(*compute_stream_);
   }
   return *unified_executor_;
 }
 
-void UnifiedMtpWorkerImpl::clear_unified_device_state() {
+template <typename TargetInput>
+void UnifiedMtpWorkerImpl<TargetInput>::clear_unified_device_state() {
   if (unified_executor_ != nullptr) {
     unified_executor_->clear_continuation();
   }
 }
+
+template class UnifiedMtpWorkerImpl<LlmForwardInput>;
+template class UnifiedMtpWorkerImpl<VlmForwardInput>;
+template bool supports_unified_mtp_request(const LlmForwardInput&);
+template bool supports_unified_mtp_request(const VlmForwardInput&);
 
 }  // namespace xllm

@@ -34,6 +34,8 @@ MtpPyGraphOutput parse_graph_output(const py::object& output) {
       output.attr("committed_tokens").cast<torch::Tensor>();
   result.target_embeddings =
       tensor_from_python(output.attr("target_embeddings"));
+  result.target_prefix_embeddings =
+      tensor_from_python(output.attr("target_prefix_embeddings"));
   result.committed_log_probs = tensor_from_python(output.attr("logprobs"));
   result.target_top_log_probs = tensor_from_python(output.attr("top_logprobs"));
   result.target_top_tokens = tensor_from_python(output.attr("top_tokens"));
@@ -77,23 +79,41 @@ MtpPyGraphOutput MtpPyGraphVariantRegistry::execute_sparse(
     int32_t block_size,
     bool target_step_major_layout,
     bool logprobs,
-    int32_t max_top_logprobs) {
+    int32_t max_top_logprobs,
+    const torch::Tensor& linear_state_indices,
+    const torch::Tensor& num_accepted_tokens,
+    bool is_graph_warmup,
+    const torch::Tensor& first_draft_token_ids,
+    const torch::Tensor& first_draft_positions,
+    const torch::Tensor& first_draft_selected_rows) {
   py::gil_scoped_acquire gil;
-  py::object output = execute_sparse_(block_table,
-                                      first_kv_seq_lens,
-                                      first_slots,
-                                      repair_token_ids,
-                                      seed_token_ids,
-                                      base_positions,
-                                      kv_seq_lens,
-                                      draft_input_embedding,
-                                      batch_size,
-                                      speculative_tokens,
-                                      vocab_size,
-                                      block_size,
-                                      target_step_major_layout,
-                                      logprobs,
-                                      max_top_logprobs);
+  py::object output = execute_sparse_(
+      block_table,
+      first_kv_seq_lens,
+      first_slots,
+      repair_token_ids,
+      seed_token_ids,
+      base_positions,
+      kv_seq_lens,
+      draft_input_embedding,
+      batch_size,
+      speculative_tokens,
+      vocab_size,
+      block_size,
+      target_step_major_layout,
+      logprobs,
+      max_top_logprobs,
+      linear_state_indices.defined() ? py::cast(linear_state_indices)
+                                     : py::none(),
+      num_accepted_tokens.defined() ? py::cast(num_accepted_tokens)
+                                    : py::none(),
+      is_graph_warmup,
+      first_draft_token_ids.defined() ? py::cast(first_draft_token_ids)
+                                      : py::none(),
+      first_draft_positions.defined() ? py::cast(first_draft_positions)
+                                      : py::none(),
+      first_draft_selected_rows.defined() ? py::cast(first_draft_selected_rows)
+                                          : py::none());
   MtpPyGraphOutput parsed = parse_graph_output(output);
   parsed.draft_embedding_destination =
       tensor_from_python(registry_.attr("draft_embedding_destination"));

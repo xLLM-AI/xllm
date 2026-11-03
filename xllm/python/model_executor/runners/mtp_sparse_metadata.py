@@ -195,3 +195,77 @@ class MtpSparseMetadataBinding:
             self._block_size,
             self._target_step_major,
         )
+
+
+class MtpPagedMetadataBinding:
+    """Qwen's verifier-conditioned W-row prefix and later one-row proposals."""
+
+    def __init__(
+        self,
+        draft_metadata: Sequence[object],
+        draft_arenas: Sequence[torch.Tensor],
+        target_metadata: Sequence[object],
+        target_arenas: Sequence[torch.Tensor],
+        *,
+        position_storage: MtpSparsePositionStorage,
+        batch_size: int,
+        speculative_tokens: int,
+        table_capacity: int,
+        block_size: int,
+        target_step_major: bool,
+    ) -> None:
+        if target_step_major:
+            raise ValueError("Qwen unified MTP requires request-major verification")
+        width = speculative_tokens + 1
+        _role_layout(
+            draft_metadata, draft_arenas, [batch_size * width] + [batch_size] * (speculative_tokens - 1), table_capacity
+        )
+        _role_layout(target_metadata, target_arenas, [batch_size * width], table_capacity)
+        self._draft = tuple(draft_metadata)
+        self._target = target_metadata[0]
+        self._positions = position_storage.positions
+        self._batch = batch_size
+        self._steps = speculative_tokens
+        self._width = width
+        self._table_capacity = table_capacity
+        self._block_size = block_size
+
+    @property
+    def table_capacity(self) -> int:
+        return self._table_capacity
+
+    def update(
+        self,
+        block_table: torch.Tensor,
+        base_positions: torch.Tensor,
+        kv_seq_lens: torch.Tensor,
+        first_kv_seq_lens: torch.Tensor,
+        first_slots: torch.Tensor,
+    ) -> None:
+        def copy_table(metadata: object, width: int) -> None:
+            metadata.block_table.zero_()
+            metadata.block_table[:, : block_table.shape[1]].copy_(block_table.repeat_interleave(width, dim=0))
+
+        def slots(lengths: torch.Tensor) -> torch.Tensor:
+            cache_positions = lengths - 1
+            page_indices = torch.div(cache_positions, self._block_size, rounding_mode="floor").long()
+            pages = block_table.gather(1, page_indices)
+            return (pages * self._block_size + cache_positions.remainder(self._block_size)).flatten()
+
+        first = self._draft[0]
+        copy_table(first, self._width)
+        first.kv_seq_lens.copy_(first_kv_seq_lens)
+        first.slot_mapping.copy_(first_slots)
+        for step, metadata in enumerate(self._draft[1:], start=1):
+            copy_table(metadata, 1)
+            lengths = kv_seq_lens + step - 1
+            metadata.kv_seq_lens.copy_(lengths)
+            metadata.slot_mapping.copy_(slots(lengths[:, None]))
+        offsets = torch.arange(self._width, device=block_table.device)
+        target_lengths = kv_seq_lens[:, None] + offsets
+        copy_table(self._target, self._width)
+        self._target.kv_seq_lens.copy_(target_lengths.flatten())
+        self._target.slot_mapping.copy_(slots(target_lengths))
+        draft_positions = base_positions[None, :] + torch.arange(self._steps, device=block_table.device)[:, None] - 1
+        self._positions[: self._batch * self._steps].copy_(draft_positions.flatten())
+        self._positions[self._batch * self._steps :].copy_((base_positions[:, None] + offsets).flatten())

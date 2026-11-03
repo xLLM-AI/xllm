@@ -308,7 +308,7 @@ def test_classification_matches_cpp_truth_table(
         ),
     ],
 )
-def test_unified_switch_targets_only_glm_mtp_roles(config: dict, expected: bool) -> None:
+def test_unified_switch_selects_supported_mtp_roles(config: dict, expected: bool) -> None:
     assert _unified_mtp_graph_enabled(config) is expected
 
 
@@ -2445,7 +2445,7 @@ def test_executor_keeps_adaptive_qwen_on_upstream_legacy_metadata(adaptive: str)
     assert executor.decode_graph_runner._spec_verify_width == 1
 
 
-@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
+@pytest.mark.parametrize("model_type", ["qwen3_5_moe"])
 def test_executor_rejects_prepared_qwen_multimodal_metadata(model_type: str) -> None:
     backend = _PreparedStubAttentionBackend()
     config = {"model_type": model_type, "python_graph_backend": "off", "enable_task_pipeline": True}
@@ -2464,7 +2464,7 @@ def test_executor_rejects_prepared_qwen_multimodal_metadata(model_type: str) -> 
     assert not hasattr(metadata, "prepared_attention_state")
 
 
-@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe"])
+@pytest.mark.parametrize("model_type", ["qwen3_5_moe"])
 def test_executor_rejects_prepared_qwen_multimodal_acl_graph(model_type: str) -> None:
     config = {"model_type": model_type, "python_graph_backend": "aclgraph", "enable_task_pipeline": True}
     with (
@@ -3324,3 +3324,107 @@ class TestDecodeAclGraphWidthKeying:
             runner._padded_batch_size(6, SimpleNamespace(is_spec_verify=True))
         with pytest.raises(ValueError, match="exceeds ACL graph capacity"):
             runner._padded_batch_size(20, SimpleNamespace(is_spec_verify=True))
+
+
+@pytest.mark.parametrize(
+    "model_type,draft,width", [("qwen3_5", False, 4), ("qwen3_5_text", False, 4), ("qwen3_5_mtp", True, 0)]
+)
+@pytest.mark.parametrize(
+    "unsupported",
+    [
+        {},
+        {"dp_size": 2},
+        {"cp_size": 2},
+        {"kv_split_size": 2},
+        {"layerwise_split_size": 2},
+        {"enable_adaptive_target_verify": True},
+        {"enable_adaptive_draft_step": True},
+        {"python_graph_backend": "off"},
+    ],
+)
+def test_qwen_unified_roles_allow_tp4_with_fixed_decode(
+    model_type: str, draft: bool, width: int, unsupported: dict[str, object]
+) -> None:
+    config = {
+        "enable_unified_mtp_graph": True,
+        "is_mtp_algorithm": True,
+        "python_graph_backend": "aclgraph",
+        "model_type": model_type,
+        "is_draft_engine": draft,
+        "num_speculative_tokens": width,
+        "tp_size": 4,
+        **unsupported,
+    }
+    assert _unified_mtp_graph_enabled(config) is (not unsupported)
+
+
+def test_mtp_role_borrows_current_owned_execution_contexts() -> None:
+    class RoleBody(nn.Module):
+        def forward(self, ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+            context = get_forward_context()
+            # Position-derived caches belong to this forward, while metadata
+            # tensors remain borrowed from the role's persistent contexts.
+            context.layer_shared_cache.setdefault("position_bias", positions.clone())
+            return ids + context.layer_shared_cache.get("accepted", 0) + context.layer_shared_cache["position_bias"]
+
+    backend = StubAttentionBackend()
+    model = _FakeModel()
+    model.model = RoleBody()
+    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
+        executor = ModelExecutor(model, {}, max_seqs_per_batch=2)
+    metadata = SimpleNamespace(is_prefill=False, is_chunked_prefill=False)
+    ids = torch.tensor([3, 7])
+    accepted = torch.tensor([1, 2])
+    contexts = {"accepted": accepted}
+    first = executor.execute_mtp_role(ids, torch.tensor([10, 20]), metadata, execution_contexts=contexts)
+    torch.testing.assert_close(first, torch.tensor([14, 29]))
+    accepted.copy_(torch.tensor([4, 1]))
+    second = executor.execute_mtp_role(ids, torch.tensor([30, 40]), metadata, execution_contexts=contexts)
+    torch.testing.assert_close(second, torch.tensor([37, 48]))
+    assert "position_bias" not in contexts
+    torch.testing.assert_close(executor.execute_mtp_role(ids, torch.zeros_like(ids), metadata), ids)
+
+
+@pytest.mark.parametrize("graph_backend", ["off", "aclgraph"])
+def test_dense_qwen_vlm_accepts_prepared_decoder_metadata(graph_backend: str) -> None:
+    backend = _PreparedStubAttentionBackend()
+    config = {"model_type": "qwen3_5", "python_graph_backend": graph_backend, "enable_task_pipeline": True}
+    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
+        executor = ModelExecutor(_FakeModel(), config, max_seqs_per_batch=2)
+    assert executor.supports_prepared_metadata
+    cache = torch.empty(2, 4, 2, 64)
+    executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
+    metadata = _prepared_qwen_metadata()
+    executor.prepare_metadata(metadata)
+    assert metadata.prepared_attention_state is not None
+
+
+@pytest.mark.parametrize("chunked", [False, True])
+def test_dense_qwen_vlm_prefill_passes_visual_embeddings_and_mrope_eagerly(chunked: bool) -> None:
+    class VisualBody(nn.Module):
+        def forward(
+            self, ids: torch.Tensor, positions: torch.Tensor, input_embedding: torch.Tensor | None = None
+        ) -> torch.Tensor:
+            del ids
+            assert input_embedding is not None
+            return input_embedding + positions.transpose(0, 1)
+
+    backend = _PreparedStubAttentionBackend()
+    model = _FakeModel()
+    model.model = VisualBody()
+    with patch("xllm.python.model_executor.executor._create_attention_backend", return_value=backend):
+        executor = ModelExecutor(
+            model,
+            {"model_type": "qwen3_5", "python_graph_backend": "aclgraph", "enable_task_pipeline": True},
+            max_seqs_per_batch=2,
+        )
+    cache = torch.empty(2, 4, 2, 64)
+    executor.bind_kv_caches([LayerCache(cache, cache), LayerCache(cache, cache)])
+    metadata = SimpleNamespace(is_prefill=not chunked, is_chunked_prefill=chunked, is_spec_verify=False)
+    ids = torch.tensor([1, 2])
+    positions = torch.tensor([[1, 2], [3, 4], [5, 6]])
+    embeddings = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+    with patch.object(executor.prepared_graph_runner, "execute") as graph:
+        output = executor.execute(ids, positions, metadata, embeddings, enable_graph=True)
+    graph.assert_not_called()
+    torch.testing.assert_close(output, embeddings + positions.transpose(0, 1))

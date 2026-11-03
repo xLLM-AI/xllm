@@ -24,6 +24,7 @@ limitations under the License.
 #include "core/framework/speculative/mtp_async_input_builder.h"
 #include "core/platform/stream.h"
 #include "core/runtime/py_executor_impl.h"
+#include "core/runtime/vlm_forward_params.h"
 
 namespace xllm {
 namespace {
@@ -41,8 +42,9 @@ UnifiedMtpExecutor::~UnifiedMtpExecutor() {
 #endif
 }
 
+template <typename TargetInput>
 const UnifiedMtpContinuation* UnifiedMtpExecutor::continuation_for(
-    const LlmForwardInput& input) const {
+    const TargetInput& input) const {
   const auto& identity = input.input_params.embedding;
   if (continuation_.embedding_ids != identity.embedding_ids ||
       continuation_.request_ids != identity.request_ids ||
@@ -65,8 +67,9 @@ void UnifiedMtpExecutor::clear_continuation() {
   continuation_ = UnifiedMtpContinuation();
 }
 
+template <typename TargetInput>
 LlmForwardInput UnifiedMtpExecutor::prepare_next(
-    const LlmForwardInput& input,
+    const TargetInput& input,
     const torch::Tensor& accepted_tokens,
     const torch::Tensor& accepted_embeddings,
     const torch::Tensor& base_positions,
@@ -100,21 +103,31 @@ LlmForwardInput UnifiedMtpExecutor::prepare_next(
   return prepared;
 }
 
+template <typename TargetInput>
 UnifiedMtpExecutionResult UnifiedMtpExecutor::execute(
     PyExecutorImpl& target_executor,
     PyExecutorImpl& draft_executor,
-    const LlmForwardInput& input,
+    const TargetInput& input,
     const LlmForwardInput& current_draft_input,
     int32_t speculative_tokens,
     int64_t vocab_size,
     int32_t block_size,
-    bool target_step_major_layout) {
+    bool target_step_major_layout,
+    const torch::Tensor& accepted_prefix) {
   const int32_t batch_size = input.input_params.meta.num_sequences;
   CHECK_GT(batch_size, 0);
-  CHECK_EQ(current_draft_input.positions.numel(), batch_size * 2)
-      << "unified Python MTP graph requires [repair,current] draft rows";
-  CHECK_EQ(current_draft_input.token_ids.numel(), batch_size * 2)
-      << "unified Python MTP graph requires [repair,current] draft tokens";
+  const bool verifier_conditioned_prefix = accepted_prefix.defined();
+  const int32_t first_width =
+      verifier_conditioned_prefix ? speculative_tokens + 1 : 2;
+  torch::Tensor positions = current_draft_input.positions;
+  if (positions.dim() == 2) {
+    CHECK_EQ(positions.size(0), 3);
+    // Pure VLM decode has equal mRoPE axes. Keep its position coordinate
+    // independent of the true KV length, which includes visual tokens.
+    positions = positions.select(0, 0);
+  }
+  CHECK_EQ(positions.numel(), batch_size * first_width);
+  CHECK_EQ(current_draft_input.token_ids.numel(), batch_size * first_width);
   CHECK(current_draft_input.input_params.embedding.input_embedding.defined())
       << "unified Python MTP graph requires draft embeddings";
 
@@ -129,12 +142,11 @@ UnifiedMtpExecutionResult UnifiedMtpExecutor::execute(
   }
 
   torch::Tensor draft_rows =
-      current_draft_input.token_ids.view({batch_size, 2});
-  torch::Tensor draft_positions =
-      current_draft_input.positions.view({batch_size, 2});
+      current_draft_input.token_ids.view({batch_size, first_width});
+  torch::Tensor draft_positions = positions.view({batch_size, first_width});
   torch::Tensor draft_kv_rows =
       current_draft_input.input_params.attention.device.kv_seq_lens.view(
-          {batch_size, 2});
+          {batch_size, first_width});
   // The Python graph owns int64 token destinations. Let its final copy cast
   // these strided int32 views, without two intermediate device allocations.
   torch::Tensor seed_token_ids = draft_rows.select(/*dim=*/1, /*index=*/1);
@@ -144,6 +156,20 @@ UnifiedMtpExecutionResult UnifiedMtpExecutor::execute(
   torch::Tensor kv_seq_lens = draft_kv_rows.select(/*dim=*/1, /*index=*/1)
                                   .to(torch::kInt)
                                   .clone(torch::MemoryFormat::Contiguous);
+  torch::Tensor selected_rows;
+  if (verifier_conditioned_prefix) {
+    selected_rows =
+        current_draft_input.sampling_params.selected_token_idxes().to(
+            torch::kLong);
+    CHECK_EQ(selected_rows.numel(), batch_size);
+    seed_token_ids =
+        current_draft_input.token_ids.index_select(0, selected_rows);
+    base_positions = positions.index_select(0, selected_rows) + 1;
+    kv_seq_lens = current_draft_input.input_params.attention.device.kv_seq_lens
+                      .index_select(0, selected_rows)
+                      .to(torch::kInt) +
+                  1;
+  }
   torch::Tensor draft_embedding =
       current_draft_input.input_params.embedding.input_embedding;
 
@@ -168,7 +194,14 @@ UnifiedMtpExecutionResult UnifiedMtpExecutor::execute(
       block_size,
       target_step_major_layout,
       input.sampling_params.logprobs(),
-      input.sampling_params.max_top_logprobs());
+      input.sampling_params.max_top_logprobs(),
+      input.input_params.embedding.linear_state_indices,
+      accepted_prefix,
+      input.input_params.meta.is_graph_warmup,
+      verifier_conditioned_prefix ? current_draft_input.token_ids
+                                  : torch::Tensor(),
+      verifier_conditioned_prefix ? positions : torch::Tensor(),
+      selected_rows);
 
 #if defined(USE_NPU)
   const torch::Tensor& destination = graph_output.draft_embedding_destination;
@@ -180,8 +213,10 @@ UnifiedMtpExecutionResult UnifiedMtpExecutor::execute(
   // retains the allocation across FIFO/capacity transitions; the next fused
   // prepare follows previous graph reads on compute_stream_. No TensorImpl
   // owned by the scheduler is rebound, and old output snapshots stay separate.
-  acquire_draft_workspace(batch_size, destination).output.embeddings =
-      destination;
+  if (!verifier_conditioned_prefix) {
+    acquire_draft_workspace(batch_size, destination).output.embeddings =
+        destination;
+  }
 #endif
 
   // Count one completed graph execution, independent of batch size or K.
@@ -228,5 +263,46 @@ UnifiedMtpExecutor::acquire_draft_workspace(int64_t batch_size,
   return draft_workspaces_.back().workspace;
 }
 #endif
+
+template const UnifiedMtpContinuation* UnifiedMtpExecutor::continuation_for(
+    const LlmForwardInput&) const;
+template LlmForwardInput UnifiedMtpExecutor::prepare_next(
+    const LlmForwardInput&,
+    const torch::Tensor&,
+    const torch::Tensor&,
+    const torch::Tensor&,
+    const torch::Tensor&,
+    const torch::Tensor&,
+    int32_t);
+template UnifiedMtpExecutionResult UnifiedMtpExecutor::execute(
+    PyExecutorImpl&,
+    PyExecutorImpl&,
+    const LlmForwardInput&,
+    const LlmForwardInput&,
+    int32_t,
+    int64_t,
+    int32_t,
+    bool,
+    const torch::Tensor&);
+template const UnifiedMtpContinuation* UnifiedMtpExecutor::continuation_for(
+    const VlmForwardInput&) const;
+template LlmForwardInput UnifiedMtpExecutor::prepare_next(
+    const VlmForwardInput&,
+    const torch::Tensor&,
+    const torch::Tensor&,
+    const torch::Tensor&,
+    const torch::Tensor&,
+    const torch::Tensor&,
+    int32_t);
+template UnifiedMtpExecutionResult UnifiedMtpExecutor::execute(
+    PyExecutorImpl&,
+    PyExecutorImpl&,
+    const VlmForwardInput&,
+    const LlmForwardInput&,
+    int32_t,
+    int64_t,
+    int32_t,
+    bool,
+    const torch::Tensor&);
 
 }  // namespace xllm

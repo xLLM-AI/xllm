@@ -28,6 +28,7 @@ limitations under the License.
 #include "core/runtime/options.h"
 #include "core/runtime/unified_mtp_executor.h"
 #include "core/runtime/unified_mtp_worker_impl.h"
+#include "core/runtime/vlm_forward_params.h"
 #include "core/runtime/worker.h"
 #include "core/util/scope_guard.h"
 
@@ -148,12 +149,28 @@ TEST(MtpWorkerSelectionTest, RequestRoutingDoesNotRejectUnsupportedSampling) {
   EXPECT_FALSE(supports_unified_mtp_request(input));
 }
 
-class DecodeMetadataTestWorker final : public UnifiedMtpWorkerImpl {
+TEST(MtpWorkerSelectionTest, UnifiedVlmKeepsVisualPayloadOnTypedWorkerPath) {
+  VlmForwardInput input;
+  input.sampling_params.sampling_mode() = SamplingMode::GREEDY;
+  EXPECT_TRUE(supports_unified_mtp_request(input));
+  input.input_params.multimodal.deep_stacks.emplace_back(torch::ones({1}));
+  EXPECT_FALSE(supports_unified_mtp_request(input));
+  input.input_params.multimodal.deep_stacks.clear();
+  EXPECT_TRUE(supports_unified_mtp_request(input));
+  input.sampling_params.top_k() = torch::ones({1});
+  EXPECT_FALSE(supports_unified_mtp_request(input));
+}
+
+class DecodeMetadataTestWorker final
+    : public UnifiedMtpWorkerImpl<LlmForwardInput> {
  public:
   DecodeMetadataTestWorker(const ParallelArgs& parallel_args,
                            const torch::Device& device,
                            const runtime::Options& options)
-      : UnifiedMtpWorkerImpl(parallel_args, device, options, WorkerType::LLM) {
+      : UnifiedMtpWorkerImpl<LlmForwardInput>(parallel_args,
+                                              device,
+                                              options,
+                                              WorkerType::LLM) {
     context_.set_model_impl("python");
   }
 
@@ -252,9 +269,10 @@ class DecodeMetadataTestWorker final : public UnifiedMtpWorkerImpl {
   }
 };
 
-class StateBoundaryTestWorker final : public UnifiedMtpWorkerImpl {
+class StateBoundaryTestWorker final
+    : public UnifiedMtpWorkerImpl<LlmForwardInput> {
  public:
-  using UnifiedMtpWorkerImpl::UnifiedMtpWorkerImpl;
+  using UnifiedMtpWorkerImpl<LlmForwardInput>::UnifiedMtpWorkerImpl;
 
   void seed_state() {
     unified_executor().remember({torch::tensor({41}, torch::kLong),
@@ -266,7 +284,7 @@ class StateBoundaryTestWorker final : public UnifiedMtpWorkerImpl {
   }
 
   std::optional<ForwardOutput> dispatch(const LlmForwardInput& input) {
-    return UnifiedMtpWorkerImpl::step(input);
+    return UnifiedMtpWorkerImpl<LlmForwardInput>::step(input);
   }
 
  protected:

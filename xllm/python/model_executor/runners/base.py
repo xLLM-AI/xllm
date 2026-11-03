@@ -47,6 +47,8 @@ class SpeculativeRuntimeOutput:
     logprobs: torch.Tensor | None = None
     top_logprobs: torch.Tensor | None = None
     top_tokens: torch.Tensor | None = None
+    # Qwen's next draft replays every accepted verifier-conditioned row.
+    target_prefix_embeddings: torch.Tensor | None = None
 
 
 class BaseRunner(ABC):

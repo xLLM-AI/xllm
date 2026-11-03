@@ -33,6 +33,7 @@ struct MtpPyGraphOutput {
   torch::Tensor token_state;
   torch::Tensor committed_tokens;
   torch::Tensor target_embeddings;
+  torch::Tensor target_prefix_embeddings;
   torch::Tensor committed_log_probs;
   torch::Tensor target_top_log_probs;
   torch::Tensor target_top_tokens;
@@ -47,21 +48,28 @@ class __attribute__((visibility("hidden"))) MtpPyGraphVariantRegistry final {
 
   ~MtpPyGraphVariantRegistry();
 
-  MtpPyGraphOutput execute_sparse(const torch::Tensor& block_table,
-                                  const torch::Tensor& first_kv_seq_lens,
-                                  const torch::Tensor& first_slots,
-                                  const torch::Tensor& repair_token_ids,
-                                  const torch::Tensor& seed_token_ids,
-                                  const torch::Tensor& base_positions,
-                                  const torch::Tensor& kv_seq_lens,
-                                  const torch::Tensor& draft_input_embedding,
-                                  int32_t batch_size,
-                                  int32_t speculative_tokens,
-                                  int64_t vocab_size,
-                                  int32_t block_size,
-                                  bool target_step_major_layout,
-                                  bool logprobs,
-                                  int32_t max_top_logprobs);
+  MtpPyGraphOutput execute_sparse(
+      const torch::Tensor& block_table,
+      const torch::Tensor& first_kv_seq_lens,
+      const torch::Tensor& first_slots,
+      const torch::Tensor& repair_token_ids,
+      const torch::Tensor& seed_token_ids,
+      const torch::Tensor& base_positions,
+      const torch::Tensor& kv_seq_lens,
+      const torch::Tensor& draft_input_embedding,
+      int32_t batch_size,
+      int32_t speculative_tokens,
+      int64_t vocab_size,
+      int32_t block_size,
+      bool target_step_major_layout,
+      bool logprobs,
+      int32_t max_top_logprobs,
+      const torch::Tensor& linear_state_indices = {},
+      const torch::Tensor& num_accepted_tokens = {},
+      bool is_graph_warmup = false,
+      const torch::Tensor& first_draft_token_ids = {},
+      const torch::Tensor& first_draft_positions = {},
+      const torch::Tensor& first_draft_selected_rows = {});
 
  private:
   explicit MtpPyGraphVariantRegistry(pybind11::object registry);

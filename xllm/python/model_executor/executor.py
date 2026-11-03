@@ -52,6 +52,7 @@ from xllm.python.model_executor.runners.mtp_acl_graph import (
     ForwardFn,
     GraphBackend,
     MtpAclGraphRunner,
+    MtpDraftPrefixInputs,
     MtpGraphRecipe,
     MtpGraphVariantRegistry,
     MtpRoleAdapter,
@@ -227,7 +228,7 @@ def _configure_unified_mtp_graph(model: nn.Module, enabled: bool) -> None:
 
 
 def _unified_mtp_graph_enabled(config: dict) -> bool:
-    """Select GLM roles participating in a Unified speculative graph.
+    """Select model roles participating in a unified speculative graph.
 
     The MTP draft (``glm_moe_dsa_mtp``) and the speculative target
     (``glm_moe_dsa`` with a draft width) participate. Unified graphs are an
@@ -236,13 +237,31 @@ def _unified_mtp_graph_enabled(config: dict) -> bool:
     is_mtp_algorithm gate. Block-diffusion targets additionally require the
     task pipeline and graph execution; block-diffusion drafts
     (DFlash/DFlash2/DSpark model types) never participate and use native task
-    slots instead.
+    slots instead. Dense Qwen text/VLM targets and their Full-only MTP draft
+    participate with fixed-width ACL decode and replicated request state;
+    tensor parallelism remains available.
     """
     if not bool(config.get("enable_unified_mtp_graph", False)):
         return False
     if not bool(config.get("is_mtp_algorithm", False)):
         return False
     model_type = config.get("model_type")
+    if model_type in ("qwen3_5", "qwen3_5_text", "qwen3_5_mtp"):
+        cp_size = int(config.get("cp_size", 1))
+        if (
+            _resolve_graph_backend(config) != "aclgraph"
+            or int(config.get("dp_size", 1)) != 1
+            or cp_size != 1
+            or (int(config.get("kv_split_size", 0)) or cp_size) != 1
+            or int(config.get("layerwise_split_size", 1)) != 1
+            or config.get("enable_adaptive_draft_step", False)
+            or config.get("enable_adaptive_target_verify", False)
+            or config.get("task_type", "generate") != "generate"
+        ):
+            return False
+        if model_type == "qwen3_5_mtp":
+            return bool(config.get("is_draft_engine", False))
+        return not config.get("is_draft_engine", False) and 1 <= int(config.get("num_speculative_tokens", 0)) <= 16
     if model_type == "glm_moe_dsa_mtp":
         return True
     if model_type != "glm_moe_dsa":
@@ -435,8 +454,10 @@ class ModelExecutor:
         prepared_kv = dcp_size == prepared_kv_split and (
             prepared_kv_split == 1 or (prepared_kv_split > 1 and prepared_glm_parallel)
         )
-        # Multimodal aliases own per-step embedding state outside prepared inputs.
-        self._prepared_qwen_gdn = config.get("model_type") in ("qwen3_5_text", "qwen3_5_moe_text")
+        # The dense VLM composes the same decoder. Visual prefill consumes its
+        # chunk-owned embeddings eagerly; decode retains only decoder state.
+        self._prepared_qwen_gdn = config.get("model_type") in ("qwen3_5", "qwen3_5_text", "qwen3_5_moe_text")
+        self._eager_multimodal_prefill = config.get("model_type") == "qwen3_5"
         qwen_mtp_parallel = dp_size == cp_size == prepared_kv_split == self.layerwise_split_size == 1
         qwen_mtp_requested = bool(config.get("is_mtp_algorithm", False)) and (
             (self._prepared_qwen_gdn and self.num_speculative_tokens > 0) or config.get("model_type") == "qwen3_5_mtp"
@@ -446,7 +467,7 @@ class ModelExecutor:
         if qwen_mtp_requested and self._prepared_qwen_gdn and not 1 <= self.num_speculative_tokens <= 16:
             raise NotImplementedError("Python Qwen MTP supports 1 to 16 speculative tokens")
         self._prepared_qwen_mtp_target = (
-            config.get("model_type") == "qwen3_5_text"
+            config.get("model_type") in ("qwen3_5", "qwen3_5_text")
             and bool(config.get("is_mtp_algorithm", False))
             and 1 <= self.num_speculative_tokens <= 16
             and int(config.get("num_speculative_tokens", 0)) + 1 == int(num_decoding_tokens)
@@ -632,6 +653,7 @@ class ModelExecutor:
         execution_state: AclGraphExecutionState | None = None,
         attention_backend: AttentionBackend | None = None,
         skip_prepare: bool = False,
+        execution_contexts: dict[object, object] | None = None,
     ) -> ModelExecutionOutput:
         """Run one MTP role under the enclosing composite graph context."""
         if self.eager_runner.cp_size > 1 and (metadata.is_prefill or metadata.is_chunked_prefill):
@@ -649,6 +671,7 @@ class ModelExecutor:
             acl_graph=acl_graph,
             layer_synchronizer=layer_synchronizer,
             execution_state=execution_state,
+            layer_shared_cache={} if execution_contexts is None else execution_contexts.copy(),
         )
         with forward_context(context):
             if not skip_prepare:
@@ -697,6 +720,7 @@ class ModelExecutor:
         target_activate: ActivateFn | None = None,
         target_sampling: MtpSamplingPlan | None = None,
         position_storage: MtpSparsePositionStorage | None = None,
+        retain_target_prefix: bool = False,
     ) -> MtpAclGraphRunner:
         """Create a paired MTP runner with explicit role adapters.
 
@@ -741,6 +765,7 @@ class ModelExecutor:
             draft_greedy=getattr(draft_executor.model, "compute_greedy_tokens", None),
             target_greedy=getattr(self.model, "compute_greedy_tokens", None),
             position_storage=position_storage,
+            retain_target_prefix=retain_target_prefix,
         )
         return MtpAclGraphRunner(recipe, backend=backend)
 
@@ -791,6 +816,7 @@ class ModelExecutor:
         target_metadata_storage: MtpSparseMetadataStorage | None = None,
         position_storage: MtpSparsePositionStorage | None = None,
         target_step_major_layout: bool = False,
+        first_draft_prefix: MtpDraftPrefixInputs | None = None,
     ) -> MtpAclGraphRunner:
         """Construct both role adapters and their recipe in one Python call."""
         draft_forward = draft_executor.create_mtp_role_adapter(
@@ -799,6 +825,7 @@ class ModelExecutor:
             repair_token_ids=repair_token_ids,
             metadata_storage=draft_metadata_storage,
             repair_positions=None if position_storage is None else position_storage.first_draft,
+            first_draft_prefix=first_draft_prefix,
         )
         target_forward = self.create_mtp_role_adapter(
             (target_metadata,),
@@ -819,6 +846,7 @@ class ModelExecutor:
             target_activate=target_activate,
             target_sampling=target_sampling,
             position_storage=position_storage,
+            retain_target_prefix=first_draft_prefix is not None,
         )
 
     def create_mtp_role_adapter(
@@ -832,6 +860,7 @@ class ModelExecutor:
         repair_token_ids: torch.Tensor | None = None,
         metadata_storage: MtpSparseMetadataStorage | None = None,
         repair_positions: torch.Tensor | None = None,
+        first_draft_prefix: MtpDraftPrefixInputs | None = None,
     ) -> MtpRoleAdapter:
         """Bind fixed attention metadata to this executor's MTP role.
 
@@ -851,6 +880,7 @@ class ModelExecutor:
             repair_token_ids=repair_token_ids,
             metadata_storage=metadata_storage,
             repair_positions=repair_positions,
+            first_draft_prefix=first_draft_prefix,
         )
 
     @staticmethod
@@ -1101,6 +1131,23 @@ class ModelExecutor:
                 mtp_topk_indices,
                 eplb=eplb,
                 kv_load=kv_load,
+                input_batch=input_batch,
+            )
+        if (
+            self._eager_multimodal_prefill
+            and (metadata.is_prefill or metadata.is_chunked_prefill)
+            and not metadata.is_spec_verify
+        ):
+            # Visual chunks carry request-owned embeddings and three-axis
+            # positions; the fixed decode graph owns neither of these inputs.
+            return self.eager_runner.execute(
+                input_ids,
+                positions,
+                metadata,
+                input_embedding,
+                layer_synchronizer,
+                mtp_topk_indices,
+                eplb=eplb,
                 input_batch=input_batch,
             )
         # Transfer completion events belong to this step. Graph replay cannot
