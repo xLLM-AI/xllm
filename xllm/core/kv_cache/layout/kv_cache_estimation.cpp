@@ -604,8 +604,19 @@ void init_shared_counts(const ModelArgs& model_args,
       static_cast<int64_t>(max_index / full_stride / capacity->block_size()));
   for (const KVCacheTensorRole role :
        {KVCacheTensorRole::CONV, KVCacheTensorRole::SSM}) {
-    units = std::min(
-        units, static_cast<int64_t>(max_index / layout.role_row_stride(role)));
+    size_t lower = 0;
+    size_t upper = static_cast<size_t>(units);
+    // The byte-budget bound above makes every probed page offset fit int64.
+    // Conv can have a rational row stride, so bound the actual ceiling map.
+    while (lower < upper) {
+      const size_t middle = lower + (upper - lower + 1) / 2;
+      if (layout.row_index(middle, role) <= max_index) {
+        lower = middle;
+      } else {
+        upper = middle - 1;
+      }
+    }
+    units = static_cast<int64_t>(lower);
   }
   const size_t padding =
       std::max(layout.full_block_units(), layout.linear_state_units());

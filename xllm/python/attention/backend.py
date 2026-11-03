@@ -17,7 +17,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, fields
-from math import lcm
+from math import gcd, lcm
 from typing import TYPE_CHECKING, Protocol, TypeGuard
 
 import torch
@@ -95,17 +95,18 @@ class SharedKVCacheLayout:
     Scheduler block ids remain logical.  Full attention translates a logical
     block id to the first physical row of that layer's page, while linear
     state users translate a logical state slot with their role-specific row
-    stride.  The descriptor is deliberately independent of the native cache
+    mapping.  The descriptor is deliberately independent of the native cache
     object because the Python executor receives only tensor views.
     """
 
     page_size_tokens: int
     full_row_stride: int
-    conv_row_stride: int
+    conv_row_stride: int | None
     ssm_row_stride: int
     checkpoint_stride: int
     logical_page_count: int
     page_bytes: int
+    conv_row_bytes: int = 0
     scratch_full_rows: int = 0
     scratch_conv_rows: int = 0
     scratch_ssm_rows: int = 0
@@ -117,7 +118,6 @@ class SharedKVCacheLayout:
         values = (
             self.page_size_tokens,
             self.full_row_stride,
-            self.conv_row_stride,
             self.ssm_row_stride,
             self.checkpoint_stride,
             self.logical_page_count,
@@ -125,6 +125,16 @@ class SharedKVCacheLayout:
         )
         if any(value <= 0 for value in values):
             raise ValueError("shared KV cache layout dimensions must be positive")
+        if self.conv_row_stride is None:
+            if self.conv_row_bytes <= 0 or self.page_bytes % self.conv_row_bytes == 0:
+                raise ValueError("shared Conv ceiling mapping requires non-integral row geometry")
+        elif self.conv_row_stride <= 0:
+            raise ValueError("shared Conv row stride must be positive")
+        if self.conv_row_bytes < 0:
+            raise ValueError("shared Conv row bytes must be non-negative")
+        if self.conv_row_bytes > 0 and self.conv_row_stride is not None:
+            if self.page_bytes % self.conv_row_bytes or self.conv_row_stride != self.page_bytes // self.conv_row_bytes:
+                raise ValueError("shared Conv row stride does not match its physical page")
         scratch_values = (
             (self.scratch_full_offset, self.scratch_full_rows),
             (self.scratch_conv_offset, self.scratch_conv_rows),
@@ -161,15 +171,24 @@ class SharedKVCacheLayout:
     ) -> torch.Tensor:
         """Translate Conv or SSM state slots to physical row indices."""
         if role == "conv":
+            if checkpoint_offsets is not None:
+                raise ValueError("checkpoint offsets are valid only for SSM indices")
             stride = self.conv_row_stride
+            if stride is None:
+                divisor = gcd(self.page_bytes, self.conv_row_bytes)
+                numerator = self.page_bytes // divisor
+                denominator = self.conv_row_bytes // divisor
+                offsets = state_indices.to(torch.int64).clamp_min(0) * numerator
+                rows = torch.div(offsets, denominator, rounding_mode="floor") + torch.remainder(
+                    offsets, denominator
+                ).ne(0)
+                return torch.where(state_indices >= 0, rows, state_indices).to(state_indices.dtype)
         elif role == "ssm":
             stride = self.ssm_row_stride
         else:
             raise ValueError(f"unsupported shared linear cache role: {role}")
         rows = torch.where(state_indices >= 0, state_indices * stride, state_indices)
         if checkpoint_offsets is not None:
-            if role != "ssm":
-                raise ValueError("checkpoint offsets are valid only for SSM indices")
             rows = torch.where(state_indices >= 0, rows + checkpoint_offsets, rows)
         return rows
 
@@ -256,30 +275,37 @@ def detect_shared_kv_cache_layout(
     page_bytes, remainder = divmod(arena_bytes - full_base, full_groups)
     if remainder or page_bytes <= 0:
         raise ValueError("cannot derive static physical page bytes from Full views")
-    if page_bytes % full_row_bytes or page_bytes % conv_row_bytes or page_bytes % ssm_row_bytes:
-        raise ValueError("shared physical page bytes must align with every cache row")
+    if page_bytes % full_row_bytes or page_bytes % ssm_row_bytes:
+        raise ValueError("shared physical page bytes must align with Full and SSM rows")
     logical_page_count, remainder = divmod(arena_bytes, page_bytes)
     if remainder or logical_page_count < max(full_groups, linear_groups):
         raise ValueError("shared arena cannot fit a complete cache resource extent")
 
     conv_base = (int(conv.shape[0]) - 1) * conv_row_bytes
     expected_conv_base = (logical_page_count - linear_groups) * page_bytes
-    if conv_base != expected_conv_base:
+    expected_conv_start = (expected_conv_base + conv_row_bytes - 1) // conv_row_bytes * conv_row_bytes
+    if conv_base != expected_conv_start:
         raise ValueError("shared Conv cache view geometry is inconsistent")
     checkpoint_rows = int(ssm.shape[0]) - expected_conv_base // ssm_row_bytes
     if checkpoint_rows <= 0:
         raise ValueError("shared SSM cache view geometry is inconsistent")
     linear_ssm_offset = (conv_row_bytes + ssm_row_bytes - 1) // ssm_row_bytes * ssm_row_bytes
     page_payload_bytes = max(8 * full_row_bytes, linear_ssm_offset + checkpoint_rows * ssm_row_bytes)
-    row_alignment = lcm(full_row_bytes, conv_row_bytes, ssm_row_bytes)
-    expected_page_bytes = (page_payload_bytes + row_alignment - 1) // row_alignment * row_alignment
+    row_alignment = lcm(full_row_bytes, ssm_row_bytes)
+    candidate = (page_payload_bytes + row_alignment - 1) // row_alignment * row_alignment
+    conv_gap = conv_row_bytes - gcd(candidate, conv_row_bytes)
+    if linear_ssm_offset >= conv_row_bytes + conv_gap:
+        expected_page_bytes = candidate
+    else:
+        row_alignment = lcm(row_alignment, conv_row_bytes)
+        expected_page_bytes = (page_payload_bytes + row_alignment - 1) // row_alignment * row_alignment
     if page_bytes != expected_page_bytes:
         raise ValueError("shared physical page bytes do not match the static allocator layout")
 
     for tensor, (_, offset, capacity) in zip(role_tensors, spans, strict=True):
         row_bytes = _tensor_row_bytes(tensor)
         view_bytes = int(tensor.shape[0]) * row_bytes
-        if offset < 0 or offset + view_bytes > capacity or offset % row_bytes:
+        if offset < 0 or offset + view_bytes > capacity or offset % tensor.element_size():
             raise ValueError("shared KV cache role view is outside aligned arena storage")
 
     for layer_index, cache in enumerate(full):
@@ -309,11 +335,12 @@ def detect_shared_kv_cache_layout(
     return SharedKVCacheLayout(
         page_size_tokens=page_size_tokens,
         full_row_stride=page_bytes // full_row_bytes,
-        conv_row_stride=page_bytes // conv_row_bytes,
+        conv_row_stride=page_bytes // conv_row_bytes if page_bytes % conv_row_bytes == 0 else None,
         ssm_row_stride=page_bytes // ssm_row_bytes,
         checkpoint_stride=checkpoint_rows,
         logical_page_count=logical_page_count,
         page_bytes=page_bytes,
+        conv_row_bytes=conv_row_bytes,
         # StaticKVCacheBlockPool reserves the first max(full_block_units,
         # linear_state_units) units for padding. Every role's first state
         # extent is therefore graph-owned scratch, even though the tensor
