@@ -1,0 +1,101 @@
+/* Copyright 2026 The xLLM Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+#include "core/kv_cache/storage/static_kv_cache_tensor_allocator.h"
+
+#include <glog/logging.h>
+
+#include <limits>
+#include <utility>
+
+#include "core/kv_cache/layout/virtual_kv_cache_page_layout.h"
+
+namespace xllm {
+
+StaticKVCacheTensorAllocator::StaticKVCacheTensorAllocator(
+    StaticKVCacheLayout layout,
+    const torch::Device& device)
+    : layout_(std::move(layout)) {
+  CHECK_GT(layout_.bytes_used(), 0u)
+      << "Static tensor storage requires an arena capacity";
+  arena_ =
+      torch::zeros({static_cast<int64_t>(layout_.bytes_used())},
+                   torch::TensorOptions().dtype(torch::kUInt8).device(device));
+  LOG(INFO) << "Static shared KV arena: pages=" << layout_.num_units()
+            << ", page_bytes=" << layout_.unit_bytes()
+            << ", Full_pages_per_block=" << layout_.full_block_units()
+            << ", Linear_pages_per_state=" << layout_.linear_state_units()
+            << ", four_Full_layers_payload_bytes="
+            << layout_.full_page_payload_bytes()
+            << ", one_Linear_layer_payload_bytes="
+            << layout_.linear_page_payload_bytes()
+            << ", Full_page_padding_bytes="
+            << layout_.unit_bytes() - layout_.full_page_payload_bytes()
+            << ", Linear_page_padding_bytes="
+            << layout_.unit_bytes() - layout_.linear_page_payload_bytes();
+}
+
+void StaticKVCacheTensorAllocator::begin_layer(int64_t layer_id) {
+  CHECK(layout_.has_layer(layer_id)) << "Unknown static cache layer";
+  CHECK(started_layers_.emplace(layer_id).second)
+      << "Static cache layer cannot be allocated twice";
+  current_layer_id_ = layer_id;
+  allocated_roles_ = 0;
+}
+
+torch::Tensor StaticKVCacheTensorAllocator::allocate(
+    KVCacheTensorRole role,
+    const std::vector<int64_t>& shape,
+    torch::ScalarType dtype,
+    const torch::Device& device) {
+  CHECK_GE(current_layer_id_, 0)
+      << "Static cache allocation requires an explicit layer";
+  const StaticKVCacheTensorLayout& tensor =
+      layout_.tensor_layout(current_layer_id_, role);
+  CHECK_EQ(device, arena_.device());
+  CHECK_EQ(dtype, layout_.dtype(role));
+  CHECK(!shape.empty());
+  CHECK_LE(layout_.logical_num_slots(),
+           static_cast<size_t>(std::numeric_limits<int64_t>::max()) /
+               tensor.rows_per_slot);
+  const size_t expected_slots =
+      layout_.logical_num_slots() * tensor.rows_per_slot;
+  CHECK_EQ(shape.front(), static_cast<int64_t>(expected_slots))
+      << "Static cache logical capacity does not match the layout";
+  CHECK_EQ(VirtualKVCachePageLayout::tensor_block_bytes(
+               shape, torch::elementSize(dtype)),
+           tensor.row_bytes)
+      << "Static cache inner row geometry does not match the layout";
+
+  const uint32_t role_mask =
+      1u << static_cast<uint32_t>(static_cast<KVCacheTensorRole::Value>(role));
+  CHECK_EQ(allocated_roles_ & role_mask, 0u)
+      << "Static cache role cannot be allocated twice in one layer";
+  std::vector<int64_t> view_shape = shape;
+  view_shape.front() = static_cast<int64_t>(tensor.view_rows);
+  const int64_t view_bytes =
+      static_cast<int64_t>(tensor.view_rows * tensor.row_bytes);
+  torch::Tensor view =
+      arena_
+          .narrow(
+              /*dim=*/0, static_cast<int64_t>(tensor.offset_bytes), view_bytes)
+          .view(dtype)
+          .view(view_shape);
+  CHECK(view.is_contiguous());
+  allocated_roles_ |= role_mask;
+  return view;
+}
+
+}  // namespace xllm

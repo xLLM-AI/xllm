@@ -59,24 +59,6 @@ inline size_t maybe_align_cp_chunk_tokens(size_t num_tokens,
   return (num_tokens / kv_term) * kv_term;
 }
 
-// Estimate extra blocks needed for a decode step with speculative tokens.
-size_t estimate_decode_extra_blocks(Sequence* sequence,
-                                    size_t updated_num_tokens,
-                                    size_t block_size) {
-  const size_t num_blocks = sequence->kv_state().num_blocks(BlockType::KV);
-  const size_t num_blocks_needed =
-      (updated_num_tokens + block_size - 1) / block_size;
-  if (num_blocks_needed > num_blocks) {
-    return num_blocks_needed - num_blocks;
-  }
-  if (sequence->check_beam_search() &&
-      !sequence->kv_state().src_blocks().empty() &&
-      sequence->kv_state().need_swap()) {
-    return 1;
-  }
-  return 0;
-}
-
 size_t get_sequence_free_blocks_for_rank(KVCacheManager* kv_cache_manager,
                                          int32_t dp_rank) {
   const auto free_blocks = kv_cache_manager->num_free_blocks();
@@ -322,10 +304,9 @@ void SchedulerPolicy::schedule_prefill_from_queue(
     // blocks. In-flight chunked requests are always allowed to continue.
     if (batch_mode_.enable_chunked_prefill &&
         request->sequences()[0]->kv_state().kv_cache_tokens_num() == 0) {
-      const size_t block_size =
-          static_cast<size_t>(state.kv_cache_manager->block_size());
       const size_t full_footprint =
-          (request->sequences()[0]->num_tokens() + block_size - 1) / block_size;
+          state.kv_cache_manager->sequence_resource_units(
+              request->sequences()[0]->num_tokens());
       // Predict and pre-assign the target DP rank so that the subsequent
       // allocation reuses the same rank. This keeps the admission check
       // consistent with the allocation path (same available-blocks metric
@@ -476,8 +457,6 @@ void SchedulerPolicy::schedule_prefill_from_queue(
 
     // Update reserved footprint for the admission gate.
     if (batch_mode_.enable_chunked_prefill) {
-      const size_t block_size =
-          static_cast<size_t>(state.kv_cache_manager->block_size());
       for (auto* seq : prefill_sequences) {
         const int32_t dp_rank = seq->dp_rank();
         CHECK(dp_rank >= 0 &&
@@ -485,7 +464,7 @@ void SchedulerPolicy::schedule_prefill_from_queue(
             << "seq dp_rank=" << dp_rank << " out of range [0,"
             << reserved_full_footprint.size() << ")";
         reserved_full_footprint[dp_rank] +=
-            (seq->num_tokens() + block_size - 1) / block_size;
+            state.kv_cache_manager->sequence_resource_units(seq->num_tokens());
       }
     }
   }
@@ -732,13 +711,12 @@ void SchedulerPolicy::schedule_decode_from_queue(
       allocated_estimate_latency = 0.0;
 
       if (has_enough_budget) {
-        const size_t block_size = state.kv_cache_manager->block_size();
         size_t needed_blocks = 0;
         for (auto* sequence : active_sequences) {
           const size_t updated_num_tokens =
               sequence->num_tokens() + state.min_speculative_tokens_required;
-          needed_blocks += estimate_decode_extra_blocks(
-              sequence, updated_num_tokens, block_size);
+          needed_blocks += state.kv_cache_manager->additional_resource_units(
+              sequence, updated_num_tokens);
         }
         const int32_t dp_rank = active_sequences.front()->dp_rank();
         const size_t free_blocks =

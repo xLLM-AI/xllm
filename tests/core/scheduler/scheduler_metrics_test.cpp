@@ -85,6 +85,12 @@ class SchedulerMetricsTestPeer final {
       const SchedulerMetrics& metrics) {
     return metrics.get_active_activation_in_bytes();
   }
+
+  static std::vector<int64_t> occupied_slots(
+      const SchedulerMetrics& metrics,
+      const std::vector<Sequence*>& sequences) {
+    return metrics.get_num_occupied_slots(sequences);
+  }
 };
 
 namespace {
@@ -201,6 +207,32 @@ TEST(SchedulerMetricsTest, SamplesFirstWorkerOfEachDataParallelRank) {
 
   EXPECT_EQ(SchedulerMetricsTestPeer::active_activation_in_bytes(metrics),
             (std::vector<int64_t>{1025, 2049, 3073}));
+}
+
+TEST(SchedulerMetricsTest, SharedArenaWeightsFullTailsAndKeepsLinearState) {
+  BlockManagerPool::Options options;
+  options.num_blocks(18)
+      .block_size(2)
+      .enable_prefix_cache(false)
+      .enable_linear_state(true)
+      .linear_state_num_slots(18)
+      .enable_shared_kv_cache(true)
+      .shared_full_block_units(3)
+      .shared_linear_state_units(2);
+  BlockManagerPool block_manager(options);
+  SchedulerMetrics metrics(nullptr, &block_manager, 1, 0, false);
+  std::shared_ptr<Request> request = make_request();
+  Sequence* sequence = request->sequences().front().get();
+  ASSERT_TRUE(block_manager.allocate(sequence, /*num_tokens=*/4));
+  ASSERT_EQ(block_manager.num_used_blocks()[0], 8u);
+
+  sequence->kv_state().set_kv_cache_tokens_num(3);
+  EXPECT_EQ(SchedulerMetricsTestPeer::occupied_slots(metrics, {sequence}),
+            (std::vector<int64_t>{13}));
+  sequence->kv_state().set_kv_cache_tokens_num(4);
+  EXPECT_EQ(SchedulerMetricsTestPeer::occupied_slots(metrics, {sequence}),
+            (std::vector<int64_t>{16}));
+  block_manager.deallocate(sequence);
 }
 
 TEST(SchedulerMetricsTest, PropagatesActivationMemoryQueryFailure) {

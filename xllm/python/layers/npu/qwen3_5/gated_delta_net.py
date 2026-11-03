@@ -196,6 +196,10 @@ class NpuQwen3_5GatedDeltaNet(nn.Module):
         ssm_state: torch.Tensor,
         read_state_indices: torch.Tensor,
         write_state_indices: torch.Tensor,
+        conv_read_state_indices: torch.Tensor | None = None,
+        conv_write_state_indices: torch.Tensor | None = None,
+        ssm_read_state_indices: torch.Tensor | None = None,
+        ssm_write_state_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch_size = hidden.shape[0]
         mixed_qkvz = self.in_proj_qkvz(hidden)
@@ -203,6 +207,68 @@ class NpuQwen3_5GatedDeltaNet(nn.Module):
         mixed_qkv, z = mixed_qkvz.split((self.conv_dim, self.value_dim), dim=-1)
         b, a = mixed_ba.split((self.num_v_heads, self.num_v_heads), dim=-1)
         z = z.view(batch_size, self.num_v_heads, self.value_head_dim)
+        shared_indices = (
+            conv_read_state_indices,
+            conv_write_state_indices,
+            ssm_read_state_indices,
+            ssm_write_state_indices,
+        )
+        if any(index is not None for index in shared_indices):
+            if any(index is None for index in shared_indices):
+                raise ValueError("Qwen3.5 shared GDN decode requires all Conv/SSM state indices")
+            assert (
+                conv_read_state_indices is not None
+                and conv_write_state_indices is not None
+                and ssm_read_state_indices is not None
+                and ssm_write_state_indices is not None
+            )
+            # The decomposed decode kernels update one row in place and do not
+            # expose separate read/write indices.  Copy the source checkpoint
+            # into the scheduler-selected destination first, then run both
+            # kernels on the destination rows.  The copies are tensor
+            # operations, so ACL graph capture remains free of host/device
+            # synchronization and COW state transitions preserve their target.
+            conv_state.index_copy_(
+                0,
+                conv_write_state_indices,
+                conv_state.index_select(0, conv_read_state_indices),
+            )
+            ssm_state.index_copy_(
+                0,
+                ssm_write_state_indices,
+                ssm_state.index_select(0, ssm_read_state_indices),
+            )
+            # The target rows now contain the scheduler-selected read state,
+            # while the kernels can update them in place.
+            chunk_outputs = []
+            for start in range(0, batch_size, _MEGA_GDN_MAX_DECODE_BATCH_SIZE):
+                end = min(start + _MEGA_GDN_MAX_DECODE_BATCH_SIZE, batch_size)
+                mixed_qkv_chunk = kernels.causal_conv1d_decode(
+                    mixed_qkv[start:end].contiguous(),
+                    self.conv1d_weight,
+                    conv_state,
+                    conv_write_state_indices[start:end],
+                )
+                output = kernels.fused_sigmoid_gating_delta_rule_decode(
+                    mixed_qkv_chunk.contiguous(),
+                    a[start:end].contiguous(),
+                    b[start:end].contiguous(),
+                    self.A_log,
+                    self.dt_bias,
+                    ssm_state,
+                    ssm_write_state_indices[start:end],
+                    self.key_head_dim**-0.5,
+                )
+                if output.dim() == 4 and output.shape[1] == 1:
+                    output = output[:, 0]
+                output = kernels.rms_norm_sigmoid_gated(
+                    output,
+                    z[start:end].contiguous(),
+                    self.norm_weight,
+                    _MEGA_GDN_FIXED_RMS_NORM_EPS,
+                )
+                chunk_outputs.append(output)
+            return chunk_outputs[0] if len(chunk_outputs) == 1 else torch.cat(chunk_outputs, dim=0)
         chunk_outputs = []
         for start in range(0, batch_size, _MEGA_GDN_MAX_DECODE_BATCH_SIZE):
             end = min(start + _MEGA_GDN_MAX_DECODE_BATCH_SIZE, batch_size)
@@ -336,6 +402,10 @@ class NpuQwen3_5GatedDeltaNet(nn.Module):
                 state_cache.ssm,
                 metadata.read_state_indices,
                 metadata.write_state_indices,
+                metadata.conv_read_state_indices,
+                metadata.conv_write_state_indices,
+                metadata.ssm_read_state_indices,
+                metadata.ssm_write_state_indices,
             )
         else:
             raise TypeError(f"Unsupported Qwen3.5 GDN metadata: {type(metadata).__name__}")

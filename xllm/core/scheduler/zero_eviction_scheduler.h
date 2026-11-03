@@ -65,11 +65,11 @@ class BlockCapacityGuard {
  private:
   int32_t block_size() const { return kv_cache_manager_->block_size(); }
 
-  uint32_t num_block() const { return kv_cache_manager_->num_blocks(); }
-
   uint32_t num_blocks_in_useless() const {
     // TODO for mutil dp
-    return num_block() - kv_cache_manager_->num_used_blocks()[0];
+    const size_t capacity = kv_cache_manager_->admission_capacity(0);
+    const size_t used = kv_cache_manager_->num_used_blocks()[0];
+    return capacity > used ? capacity - used : 0;
   }
 
   bool simulate_is_satisfied_for_candidate_sequences();

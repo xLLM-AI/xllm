@@ -23,6 +23,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/kv_cache/layout/static_kv_cache_layout.h"
 #include "core/kv_cache/storage/deepseek_v4_kv_cache_impl.h"
 #include "core/kv_cache/storage/indexed_kv_cache_impl.h"
 #include "core/kv_cache/storage/kpool_kv_cache_impl.h"
@@ -39,6 +40,9 @@ std::unique_ptr<KVCacheImpl> create_kv_cache_impl(
     const KVCacheCreateOptions& create_options,
     int64_t layer_id) {
   CHECK_GE(layer_id, 0) << "KV cache layer_id must be non-negative.";
+  if (create_options.tensor_allocator() != nullptr) {
+    create_options.tensor_allocator()->begin_layer(layer_id);
+  }
 
   const bool mla_packed_c8 = create_options.mla_packed_c8();
 #if !defined(USE_MLU)
@@ -184,7 +188,8 @@ KVCache::KVCache(const KVCacheShape& kv_cache_shape,
                  int64_t layer_id,
                  bool owns_layer_cache)
     : owns_layer_cache_(owns_layer_cache),
-      impl_(create_kv_cache_impl(kv_cache_shape, create_options, layer_id)) {}
+      impl_(create_kv_cache_impl(kv_cache_shape, create_options, layer_id)),
+      static_layout_(create_options.static_layout()) {}
 
 KVCache::KVCache(const KVCacheShape& kv_cache_shape,
                  const KVCacheCreateOptions& create_options,
@@ -269,10 +274,59 @@ std::vector<std::vector<int64_t>> KVCache::get_shapes() {
 
 bool KVCache::empty() const { return impl_->empty(); }
 
+int64_t KVCache::cache_row_stride(KVCacheTensorRole role) const {
+  return static_layout_ == nullptr
+             ? 1
+             : static_cast<int64_t>(static_layout_->role_row_stride(role));
+}
+
+int64_t KVCache::linear_state_slot_count() const {
+  return static_layout_ == nullptr
+             ? get_conv_cache().size(0)
+             : static_cast<int64_t>(static_layout_->logical_num_slots());
+}
+
+int64_t KVCache::linear_checkpoint_stride() const {
+  if (static_layout_ != nullptr) {
+    return static_cast<int64_t>(static_layout_->checkpoint_stride());
+  }
+  const auto conv = get_conv_cache();
+  const auto ssm = get_ssm_cache();
+  return KVCacheShape::linear_ssm_checkpoint_stride(conv.size(0), ssm.size(0));
+}
+
+int64_t KVCache::physical_row_index(int64_t slot_id,
+                                    KVCacheTensorRole role) const {
+  return slot_id < 0 ? slot_id : slot_id * cache_row_stride(role);
+}
+
+torch::Tensor KVCache::physical_row_indices(const torch::Tensor& slot_ids,
+                                            KVCacheTensorRole role) const {
+  const int64_t stride = cache_row_stride(role);
+  if (!slot_ids.defined() || stride == 1) {
+    return slot_ids;
+  }
+  return torch::where(slot_ids.lt(0), slot_ids, slot_ids * stride);
+}
+
+torch::Tensor KVCache::physical_token_slots(const torch::Tensor& token_slots,
+                                            int64_t block_size) const {
+  const int64_t stride = cache_row_stride(KVCacheTensorRole::KEY);
+  if (!token_slots.defined() || stride == 1) {
+    return token_slots;
+  }
+  const auto rows = torch::floor_divide(token_slots, block_size);
+  return torch::where(
+      token_slots.lt(0),
+      token_slots,
+      rows * stride * block_size + torch::remainder(token_slots, block_size));
+}
+
 KVCache KVCache::create_shared_view() const {
   KVCache view;
   view.owns_layer_cache_ = false;
   view.impl_ = impl_;
+  view.static_layout_ = static_layout_;
   return view;
 }
 

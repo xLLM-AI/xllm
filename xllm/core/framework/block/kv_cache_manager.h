@@ -117,6 +117,36 @@ class KVCacheManager {
   get_swap_block_transfer_infos() = 0;
 
   virtual uint32_t num_blocks() const = 0;
+  // Scheduler counters use the same resource units as free/used capacity.
+  // Separate state pools do not consume token-KV capacity; a shared arena
+  // overrides the cost for each resource it stores.
+  virtual size_t block_resource_units(BlockType type, size_t count) const {
+    return type == BlockType::KV ? count : 0;
+  }
+  size_t sequence_resource_units(size_t num_tokens) const {
+    const size_t tokens_per_block = block_size();
+    const size_t full_blocks =
+        num_tokens / tokens_per_block + (num_tokens % tokens_per_block != 0);
+    return block_resource_units(BlockType::KV, full_blocks) +
+           block_resource_units(BlockType::LINEAR, 1);
+  }
+  size_t additional_resource_units(Sequence* sequence,
+                                   size_t num_tokens) const {
+    const size_t tokens_per_block = block_size();
+    const size_t full_blocks =
+        num_tokens / tokens_per_block + (num_tokens % tokens_per_block != 0);
+    const size_t held = sequence->kv_state().num_blocks(BlockType::KV);
+    size_t additional = full_blocks > held ? full_blocks - held : 0;
+    if (additional == 0 && sequence->check_beam_search() &&
+        !sequence->kv_state().src_blocks().empty() &&
+        sequence->kv_state().need_swap()) {
+      additional = 1;
+    }
+    return block_resource_units(BlockType::KV, additional) +
+           block_resource_units(
+               BlockType::LINEAR,
+               sequence->kv_state().num_blocks(BlockType::LINEAR) == 0);
+  }
   // Advisory total capacity, including held blocks. Elastic caches may return
   // a stale physical-budget snapshot; a low value alone cannot prove that an
   // otherwise idle request will fail allocation. num_blocks() is the configured

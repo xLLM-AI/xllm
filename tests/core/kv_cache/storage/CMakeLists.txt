@@ -1,6 +1,19 @@
 include(cc_test)
 
 cc_test(
+  CPU_ONLY
+  NAME
+    static_kv_cache_tensor_allocator_test
+  SRCS
+    static_kv_cache_tensor_allocator_test.cpp
+  DEPS
+    :static_kv_cache_tensor_allocator
+    GTest::gtest_main
+    glog::glog
+)
+
+
+cc_test(
   DISCOVER_TESTS
   NAME
     kv_cache_test
@@ -19,6 +32,20 @@ target_link_libraries(kv_cache_test
                       $<$<BOOL:${USE_NPU}>:nnopbase>)
 
 if(USE_NPU)
+  cc_test(
+    NAME
+      static_kv_cache_tensor_allocator_npu_test
+    SRCS
+      static_kv_cache_tensor_allocator_npu_test.cpp
+    DEPS
+      :static_kv_cache_tensor_allocator
+      GTest::gtest_main
+  )
+  set_tests_properties(
+    StaticKVCacheTensorAllocatorNpuTest.KeepsDenseNdViewsInOnePhysicalArena
+    PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE
+  )
+
   # Exercise the concrete KV storage without distributed runtime initialization.
   cc_test(
     NAME

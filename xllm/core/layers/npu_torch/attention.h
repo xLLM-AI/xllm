@@ -54,13 +54,15 @@ class AttentionImpl : public torch::nn::Module {
                        torch::Tensor& output,
                        const torch::Tensor& k_cache,
                        const std::optional<torch::Tensor>& v_cache,
-                       const AttentionMetadata& attn_metadata);
+                       const AttentionMetadata& attn_metadata,
+                       const torch::Tensor* physical_block_table = nullptr);
 
   void decoder_forward(torch::Tensor& query,
                        torch::Tensor& output,
                        const torch::Tensor& k_cache,
                        const std::optional<torch::Tensor>& v_cache,
-                       const AttentionMetadata& attn_metadata);
+                       const AttentionMetadata& attn_metadata,
+                       const torch::Tensor* physical_block_table = nullptr);
 
  private:
   int64_t num_heads_;

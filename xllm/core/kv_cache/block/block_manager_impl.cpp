@@ -65,6 +65,11 @@ BlockManagerImpl::BlockManagerImpl(const Options& options)
 
   size_t total_blocks = options_.num_blocks();
   block_size_ = options_.block_size();
+  if (options_.shared_block_pool()) {
+    CHECK_EQ(total_blocks, options_.shared_block_pool()->num_units());
+    usage_accounted_ids_.assign(total_blocks, 0);
+    return;
+  }
   num_free_blocks_.store(total_blocks, std::memory_order_relaxed);
   usage_accounted_ids_.assign(total_blocks, 0);
   free_blocks_.reserve(total_blocks);
@@ -79,10 +84,26 @@ BlockManagerImpl::BlockManagerImpl(const Options& options)
 }
 
 std::vector<Block> BlockManagerImpl::allocate(size_t num_blocks) {
+  if (options_.shared_block_pool()) {
+    std::vector<int32_t> ids =
+        options_.shared_block_pool()->allocate(num_blocks, block_type());
+    // Free units can still be fragmented. Retire one cached extent and retry
+    // the actual allocation until enough contiguous extents are available.
+    while (ids.size() != num_blocks && evict_prefix_cache(1) != 0) {
+      ids = options_.shared_block_pool()->allocate(num_blocks, block_type());
+    }
+    std::vector<Block> blocks;
+    blocks.reserve(ids.size());
+    for (int32_t block_id : ids) {
+      CHECK(mark_used(usage_accounted_ids_, block_id));
+      blocks.emplace_back(block_id, this);
+    }
+    num_used_blocks_.fetch_add(ids.size(), std::memory_order_relaxed);
+    return blocks;
+  }
   if (!has_enough_blocks(num_blocks)) {
     return {};
   }
-
   CHECK(num_blocks <= num_free_blocks_) << "Not enough blocks available";
   std::vector<Block> blocks;
   blocks.reserve(num_blocks);
@@ -107,11 +128,14 @@ void BlockManagerImpl::deallocate(const Slice<Block>& blocks) {
     }
     // Prefix-cache blocks may be shared by cache aliases, so only drop
     // effective usage when no sequence owner remains. Without prefix cache,
-    // deallocate() marks the passed ids logically released immediately; their
-    // physical ids return to the free list when the last Block alias is
-    // dropped.
-    if ((!options_.enable_prefix_cache() || block.ref_count() <= 2u) &&
-        clear_used(usage_accounted_ids_, block.id())) {
+    // deallocate() keeps shared physical usage pinned by any remaining alias;
+    // standalone pools retain their existing logical release behavior. The
+    // physical id returns only when the last Block alias is dropped.
+    const bool logically_released =
+        options_.enable_prefix_cache()
+            ? block.ref_count() <= 2u
+            : (!options_.shared_block_pool() || block.ref_count() == 1u);
+    if (logically_released && clear_used(usage_accounted_ids_, block.id())) {
       if (num_used_blocks_ == 0) {
         LOG(ERROR) << "num_used_blocks_==0 cannot fetch_sub for id:"
                    << block.id()
@@ -127,36 +151,38 @@ void BlockManagerImpl::deallocate(const Slice<Block>& blocks) {
         LOG(FATAL) << error_msg;
       }
       num_used_blocks_.fetch_sub(1, std::memory_order_relaxed);
+      if (options_.shared_block_pool()) {
+        options_.shared_block_pool()->mark_inactive(block.id(), block_type());
+      }
     }
   }
 }
 
-bool BlockManagerImpl::has_enough_blocks(uint32_t num_blocks) {
-  if (num_blocks <= num_free_blocks_) {
-    return true;
+size_t BlockManagerImpl::evict_prefix_cache(size_t num_blocks) {
+  if (!prefix_cache_) {
+    return 0;
   }
-
-  // prefix cache is disabled, no way to evict blocks
-  if (!options_.enable_prefix_cache()) {
-    return false;
-  }
-
-  // try to evict some blocks from the prefix cache
-  const uint32_t n_blocks_to_evict = num_blocks - num_free_blocks_;
-
   AUTO_COUNTER(prefix_cache_latency_seconds_evict);
-  const uint32_t n_blocks_evicted = prefix_cache_->evict(n_blocks_to_evict);
-  if (n_blocks_evicted < n_blocks_to_evict) {
-    return false;
-  }
+  return prefix_cache_->evict(num_blocks);
+}
 
-  if (num_free_blocks_ >= num_blocks) {
+bool BlockManagerImpl::has_enough_blocks(uint32_t num_blocks) {
+  const size_t free_blocks = num_free_blocks();
+  if (num_blocks <= free_blocks) {
     return true;
   }
-
-  LOG(WARNING) << "Potential block leak, free blocks in allocator: "
-               << num_free_blocks_
-               << " blocks in prefix cache: " << prefix_cache_->num_blocks();
+  const size_t required = num_blocks - free_blocks;
+  if (evict_prefix_cache(required) < required) {
+    return false;
+  }
+  if (num_blocks <= num_free_blocks()) {
+    return true;
+  }
+  if (!options_.shared_block_pool()) {
+    LOG(WARNING) << "Potential block leak, free blocks in allocator: "
+                 << num_free_blocks_
+                 << " blocks in prefix cache: " << num_blocks_in_prefix_cache();
+  }
   return false;
 }
 
@@ -181,6 +207,9 @@ std::vector<Block> BlockManagerImpl::allocate_shared(
     for (const auto& block : shared_blocks) {
       if (block.is_valid() && mark_used(usage_accounted_ids_, block.id())) {
         num_used_blocks_.fetch_add(1, std::memory_order_relaxed);
+        if (options_.shared_block_pool()) {
+          options_.shared_block_pool()->mark_active(block.id(), block_type());
+        }
       }
     }
     return shared_blocks;
@@ -211,6 +240,10 @@ void BlockManagerImpl::cache(const std::vector<Block>& blocks) {
 
 // allocate a block id
 Block BlockManagerImpl::allocate() {
+  if (options_.shared_block_pool()) {
+    std::vector<Block> blocks = allocate(1);
+    return blocks.empty() ? Block() : std::move(blocks[0]);
+  }
   CHECK(num_free_blocks_ > 0) << "No more blocks available";
   size_t prev_count = num_free_blocks_.fetch_sub(1, std::memory_order_relaxed);
   const int32_t block_id = free_blocks_[prev_count - 1];
@@ -219,6 +252,13 @@ Block BlockManagerImpl::allocate() {
 
 // caller should make sure the block_id is valid
 void BlockManagerImpl::free(int32_t block_id) {
+  if (options_.shared_block_pool()) {
+    if (clear_used(usage_accounted_ids_, block_id)) {
+      num_used_blocks_.fetch_sub(1, std::memory_order_relaxed);
+    }
+    options_.shared_block_pool()->release(block_id, block_type());
+    return;
+  }
   // do nothing for reserved block 0
   if (block_id != 0) {
     if (clear_used(usage_accounted_ids_, block_id)) {
