@@ -93,7 +93,7 @@ std::optional<ForwardOutput> UnifiedMtpWorkerImpl<TargetInput>::step(
   if (!input.input_params.meta.batch_forward_type.is_decode() ||
       input.input_params.meta.num_sequences == 0 ||
       input.token_ids.numel() == 0 ||
-      !should_run_speculative_decode(input.input_params)) {
+      !::xllm::should_run_speculative_decode(input.input_params)) {
     clear_unified_device_state();
   }
   // Empty DP shards must let the compatibility executor consume a matching
@@ -174,22 +174,26 @@ template <typename TargetInput>
 void UnifiedMtpWorkerImpl<TargetInput>::prepare_task_pipeline_input(
     const TargetInput& input,
     TargetInput& prepared) {
-  // The Unified task queue owns two independent prepared inputs.  Its launch
-  // thread consumes them in order, so preparation may run while the previous
-  // graph is on compute_stream_.  Keep the metadata event dependency, but do
-  // not insert a whole prepare_stream -> compute_stream wait here.
-  prepare_input_on_stream(input,
-                          prepared,
-                          *prepare_stream_,
-                          /*record_ready_event=*/true,
-                          /*restore_linear_state=*/true,
-                          /*wait_for_compute_stream=*/false);
+  if constexpr (std::is_same_v<TargetInput, VlmForwardInput>) {
+    MTPWorkerImpl<TargetInput>::prepare_task_pipeline_input(input, prepared);
+  } else {
+    // The Unified task queue owns two independent prepared inputs. Its launch
+    // thread consumes them in order, so preparation may run while the previous
+    // graph is on compute_stream_. Keep the metadata event dependency, but do
+    // not insert a whole prepare_stream -> compute_stream wait here.
+    prepare_input_on_stream(input,
+                            prepared,
+                            *prepare_stream_,
+                            /*record_ready_event=*/true,
+                            /*restore_linear_state=*/true,
+                            /*wait_for_compute_stream=*/false);
+  }
 }
 
 template <typename TargetInput>
 std::optional<ForwardOutput>
 UnifiedMtpWorkerImpl<TargetInput>::execute_task_pipeline(
-    const TargetInput& prepared) {
+    TaskPipelineInput& prepared) {
   // The queue owns execution and results. JSON needs the preceding accepted
   // tokens as well, but must not use the driver's legacy last-step slot.
   if (!enable_schedule_overlap() || prepared.json_object_states.empty()) {

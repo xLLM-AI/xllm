@@ -14,6 +14,9 @@ limitations under the License.
 ==============================================================================*/
 
 #pragma once
+
+#include <type_traits>
+
 #include "core/runtime/mtp_worker_impl.h"
 
 namespace xllm {
@@ -26,6 +29,11 @@ bool supports_unified_mtp_request(const TargetInput& input);
 template <typename TargetInput>
 class UnifiedMtpWorkerImpl : public MTPWorkerImpl<TargetInput> {
  public:
+  using TaskPipelineInput =
+      std::conditional_t<std::is_same_v<TargetInput, VlmForwardInput>,
+                         TargetInput,
+                         const TargetInput>;
+
   UnifiedMtpWorkerImpl(const ParallelArgs& parallel_args,
                        const torch::Device& device,
                        const runtime::Options& options,
@@ -40,7 +48,7 @@ class UnifiedMtpWorkerImpl : public MTPWorkerImpl<TargetInput> {
   void prepare_task_pipeline_input(const TargetInput& input,
                                    TargetInput& prepared) override;
   std::optional<ForwardOutput> execute_task_pipeline(
-      const TargetInput& prepared) override;
+      TaskPipelineInput& prepared) override;
   std::optional<ForwardOutput> step(const TargetInput& input) override;
 
  protected:
@@ -59,7 +67,6 @@ class UnifiedMtpWorkerImpl : public MTPWorkerImpl<TargetInput> {
   using MTPWorkerImpl<TargetInput>::threadpool_;
   using MTPWorkerImpl<TargetInput>::combined_draft_execution_path_;
   using MTPWorkerImpl<TargetInput>::drain_pending_execution;
-  using MTPWorkerImpl<TargetInput>::should_run_speculative_decode;
   using MTPWorkerImpl<TargetInput>::enable_schedule_overlap;
   using MTPWorkerImpl<TargetInput>::prepare_input_on_stream;
   using MTPWorkerImpl<TargetInput>::logical_block_size;
