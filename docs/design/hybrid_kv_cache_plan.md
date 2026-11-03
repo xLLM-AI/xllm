@@ -271,10 +271,17 @@ SWA 继续采用绝对 logical index + invalid/null placeholders，初版不增�
 
 记单 Full 层的一行 K（或 V）字节为 F，Conv 行字节为 C，SSM 单检查点行字节为 S，检查点数为 Q：
 
-    alignment = lcm(F, C, S)
     full_page_payload = 4 * (K + V) = 8F
-    linear_page_payload = align_up(C, S) + Q*S
-    page_bytes = align_up(max(full_page_payload, linear_page_payload), alignment)
+    ssm_offset = align_up(C, S)
+    linear_page_end = ssm_offset + Q*S
+    payload_bytes = max(full_page_payload, linear_page_end)
+    alignment = lcm(F, S)
+    candidate = align_up(payload_bytes, alignment)
+    max_conv_gap = C - gcd(candidate, C)
+    page_bytes = candidate                          if ssm_offset >= C + max_conv_gap
+                 align_up(payload_bytes, lcm(F,C,S)) otherwise
+
+Full 和 SSM 保留整行对齐；Conv 行起点向上取整，其最坏间隙必须落在原有 Conv/SSM 对齐空隙内，否则回退到包含 Conv 的 LCM。选择只依赖行字节，不改变四层 Full 分组和算子 tensor ABI。例如 Qwen3.8-27B TP2、BF16 Full/Conv、FP32 SSM、四个 speculative token 时，F=131072、C=71680、S=1572864、Q=5，安全页从原 52.5 MiB 减到 9 MiB；Conv 最大向上取整间隙为 68 KiB，可容纳于原有 1.5 MiB SSM offset 之前。
 
 两类 logical page 均对应一个相同字节大小的 physical page；较小载荷以及不足四层的 Full 尾组通过 padding 补齐。128*4=512 只是逻辑槽位示意，不能代替 dtype、head shape、Conv 和 SSM 的真实字节计算。物理页不是 512 字节，也不代表单层 512-token 的序列跨度。启动日志报告 page、载荷与 padding，不能仅凭共享容量声称节省显存。
 
@@ -284,7 +291,7 @@ SWA 继续采用绝对 logical index + invalid/null placeholders，初版不增�
 
 ### 11.2 连续 tensor view 与执行索引
 
-每层/role 的 page group 与页内 offset 放入 tensor view 的 base offset；所有 role view 保持 dense contiguous，以兼容现有 NPU Conv 内核。共同 page 字节按 role 行字节对齐，内核物理行索引为 extent_start_page * (page_bytes / role_row_bytes)。Full token slot mapping 保留块内 offset；Conv、SSM 分别映射，checkpoint stride 显式保存。padding 保留可容纳两种整模型资源的 extent；容量、admission、eviction 和 scheduler reservation 均以物理 page 计费。
+每层/role 的 page group 与页内 offset 放入 tensor view 的 base offset；所有 role view 保持 dense contiguous，以兼容现有 NPU Conv 内核。Full/SSM 物理行索引为 extent_start_page * (page_bytes / role_row_bytes)；Conv 使用 ceil(extent_start_page * page_bytes / C)，不把非整数比值伪装成固定 row stride。计算先约分并用 int64 中间值，保留负值 sentinel；view 行数也按最后合法 extent 的 ceiling 起点计算。Conv view 的 base offset 只要求 dtype 元素对齐，精确层偏移仍由静态布局校验。Full token slot mapping 保留块内 offset；checkpoint stride 显式保存。padding 保留可容纳两种整模型资源的 extent；容量、admission、eviction 和 scheduler reservation 均以物理 page 计费。
 
 首版接入 native NPU Torch 的 text-only Qwen3Next/Qwen3.5 GDN 分解 kernel 路径。启动时拒绝未接通的 graph、spec、Host/PD/store、Python、index/quantized、layerwise/CP/KV-split 等组合。默认未启用共享开关时保持现有路径。完整验收仍要求最终提交上的真实 NPU 全量测试；开发快照、CPU tests 和语法检查不能替代。
 
@@ -329,6 +336,6 @@ Python 在 cache bind 时建立不可变的 role 布局描述；cache tensor 基
 
 Hybrid target 的 Full/Linear 共用静态 arena；full-only MTP draft 使用独立 dense KV 存储，并为每个可能的 target 逻辑 arena ID 保留一行。容量规划按 `target page bytes + draft block bytes` 重新求可用 ID 数，同时更新 target Full/Linear 容量，避免重复预算或仅缩减 Full 容量。SSM checkpoint stride 为 speculative width，包含全部候选 checkpoint。
 
-测试启动使用 `enable_shared_kv_cache=true`、`enable_vmm_kvcache=false`、`enable_graph_vmm_pool=false`，并令 `max_linear_state_cache_slots=0`，由共享 arena 统一决定状态容量。四个 Full 层的 128-token block 与一个 Linear 层状态按真实字节数对齐；LCM padding 仍计入预算，不能假定所有模型的 page 都只有四个 Full block 的有效载荷。
+测试启动使用 `enable_shared_kv_cache=true`、`enable_vmm_kvcache=false`、`enable_graph_vmm_pool=false`，并令 `max_linear_state_cache_slots=0`，由共享 arena 统一决定状态容量。四个 Full 层的 128-token block 与一个 Linear 层状态按真实字节数对齐；安全 Conv ceiling 间隙和必要的 LCM fallback padding 都计入预算，不能假定所有模型的 page 都只有四个 Full block 的有效载荷。
 
 当前实现已补齐 Python GDN 共享 decode/verify、ACL metadata 持久更新和生产入口资源接线，真实 NPU 完整构建、单测及 Qwen3.8-27B 压测仍需验证。VLM、prefill piecewise graph、task pipeline、PD/Host/store、CP/KV/layerwise split、MLA/index/量化以及其他 speculative 算法保持关闭。第 11 节的 native eager 实现保持原有边界。

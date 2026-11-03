@@ -69,6 +69,30 @@ def _make_multigroup_caches() -> list[LayerCache]:
     return [full_caches[0], linear_caches[0], *full_caches[1:], linear_caches[1]]
 
 
+def _make_ceiling_mapped_caches(linear_layers: int = 1) -> list[LayerCache]:
+    # Scale Qwen3.8 TP2 row bytes by 512 while retaining its 4608/35 Conv ratio.
+    arena = torch.empty(40 * 18432, dtype=torch.uint8)
+    last_page = 40 - linear_layers
+    conv_rows = (last_page * 18432 + 139) // 140 + 1
+    ssm_rows = last_page * 6 + 5
+    caches = [
+        LayerCache(
+            key=_arena_view(arena, 0, (2809, 8, 8), torch.float32),
+            value=_arena_view(arena, 256, (2809, 8, 8), torch.float32),
+        )
+    ]
+    caches.extend(
+        LayerCache(
+            key=None,
+            value=None,
+            conv=_arena_view(arena, layer * 18432, (conv_rows, 7, 5), torch.float32),
+            ssm=_arena_view(arena, layer * 18432 + 3072, (ssm_rows, 3, 16, 16), torch.float32),
+        )
+        for layer in range(linear_layers)
+    )
+    return caches
+
+
 def test_detect_shared_layout_and_translate_full_indices() -> None:
     layout = detect_shared_kv_cache_layout(_make_shared_caches())
 
@@ -119,6 +143,69 @@ def test_multigroup_layout_maps_last_full_and_linear_extents() -> None:
     assert last_full.key[48].data_ptr() == last_linear.conv[24].data_ptr()
     torch.testing.assert_close(last_full.key[48], torch.full_like(last_full.key[48], 21))
     torch.testing.assert_close(last_linear.ssm[49], torch.full_like(last_linear.ssm[49], 22))
+
+
+def test_ceiling_conv_mapping_preserves_sentinels_and_int64_intermediates() -> None:
+    layout = detect_shared_kv_cache_layout(_make_ceiling_mapped_caches())
+
+    assert layout is not None
+    assert layout.page_bytes == 18432
+    assert layout.full_row_stride == 72
+    assert layout.conv_row_stride is None
+    assert layout.conv_row_bytes == 140
+    assert layout.ssm_row_stride == 6
+    assert layout.checkpoint_stride == 5
+    logical = torch.tensor([0, 1, 2, 34, 35, 500000, -1, -2], dtype=torch.int32)
+    torch.testing.assert_close(
+        layout.linear_state_indices(logical, role="conv"),
+        torch.tensor([0, 132, 264, 4477, 4608, 65828572, -1, -2], dtype=torch.int32),
+    )
+    with pytest.raises(ValueError, match="only for SSM"):
+        layout.linear_state_indices(logical, role="conv", checkpoint_offsets=torch.zeros_like(logical))
+
+
+def test_ceiling_conv_view_reuses_only_its_page_and_fits_final_extent() -> None:
+    caches = _make_ceiling_mapped_caches()
+    layout = detect_shared_kv_cache_layout(caches)
+    assert layout is not None
+    full, linear = caches
+    assert full.key is not None and linear.conv is not None and linear.ssm is not None
+    full.key[72].fill_(17)
+    full.key[144].fill_(53)
+    linear.conv[132].fill_(29)
+    torch.testing.assert_close(full.key[72].flatten()[:12], torch.full((12,), 17.0))
+    torch.testing.assert_close(full.key[72].flatten()[12:47], torch.full((35,), 29.0))
+    torch.testing.assert_close(full.key[72].flatten()[47:], torch.full((17,), 17.0))
+    torch.testing.assert_close(full.key[144], torch.full_like(full.key[144], 53))
+    logical = torch.tensor([39])
+    assert layout.linear_state_indices(logical, role="conv").item() == 5135
+    assert layout.linear_state_indices(logical, role="ssm", checkpoint_offsets=torch.tensor([4])).item() == 238
+    linear.conv[5135].fill_(31)
+    linear.ssm[238].fill_(37)
+    torch.testing.assert_close(linear.conv[5135], torch.full_like(linear.conv[5135], 31))
+    torch.testing.assert_close(linear.ssm[238], torch.full_like(linear.ssm[238], 37))
+
+
+def test_ceiling_conv_mapping_detects_multiple_linear_layers_at_last_extent() -> None:
+    caches = _make_ceiling_mapped_caches(linear_layers=2)
+    layout = detect_shared_kv_cache_layout(caches)
+    assert layout is not None
+    first, last = caches[1:]
+    assert first.conv is not None and first.ssm is not None and last.conv is not None and last.ssm is not None
+    assert last.conv.data_ptr() - first.conv.data_ptr() == 18432
+    assert 18432 % layout.conv_row_bytes != 0
+    conv_row = layout.linear_state_indices(torch.tensor([38]), role="conv").item()
+    ssm_row = layout.linear_state_indices(torch.tensor([38]), role="ssm", checkpoint_offsets=torch.tensor([4])).item()
+    assert conv_row == 5003
+    assert ssm_row == 232
+    first.conv[conv_row].fill_(31)
+    first.ssm[ssm_row].fill_(37)
+    last.conv[conv_row].fill_(43)
+    last.ssm[ssm_row].fill_(47)
+    torch.testing.assert_close(first.conv[conv_row], torch.full_like(first.conv[conv_row], 31))
+    torch.testing.assert_close(first.ssm[ssm_row], torch.full_like(first.ssm[ssm_row], 37))
+    torch.testing.assert_close(last.conv[conv_row], torch.full_like(last.conv[conv_row], 43))
+    torch.testing.assert_close(last.ssm[ssm_row], torch.full_like(last.ssm[ssm_row], 47))
 
 
 def test_independent_role_storage_keeps_legacy_layout() -> None:

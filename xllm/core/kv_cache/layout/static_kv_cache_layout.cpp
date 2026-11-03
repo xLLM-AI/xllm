@@ -68,11 +68,20 @@ StaticKVCacheLayout::StaticKVCacheLayout(StaticKVCacheLayoutSpec spec)
       checked_add(spec_.conv_row_bytes, ssm_payload_bytes);
   const size_t ssm_offset = align_up(spec_.conv_row_bytes, spec_.ssm_row_bytes);
   const size_t linear_page_end = checked_add(ssm_offset, ssm_payload_bytes);
+  const size_t payload_bytes =
+      std::max(full_page_payload_bytes_, linear_page_end);
   const size_t row_alignment =
-      checked_lcm(checked_lcm(spec_.full_row_bytes, spec_.conv_row_bytes),
-                  spec_.ssm_row_bytes);
-  unit_bytes_ = align_up(std::max(full_page_payload_bytes_, linear_page_end),
-                         row_alignment);
+      checked_lcm(spec_.full_row_bytes, spec_.ssm_row_bytes);
+  const size_t candidate = align_up(payload_bytes, row_alignment);
+  const size_t conv_gap =
+      spec_.conv_row_bytes - std::gcd(candidate, spec_.conv_row_bytes);
+  // A rounded Conv start must still end before the page's SSM payload.
+  // Fall back to integral Conv strides when that existing gap is too small.
+  unit_bytes_ =
+      ssm_offset >= checked_add(spec_.conv_row_bytes, conv_gap)
+          ? candidate
+          : align_up(payload_bytes,
+                     checked_lcm(row_alignment, spec_.conv_row_bytes));
   const size_t num_layers =
       checked_add(spec_.full_layer_ids.size(), spec_.linear_layer_ids.size());
   tensors_.reserve(checked_multiply(num_layers, 2));
@@ -139,28 +148,44 @@ StaticKVCacheLayout::StaticKVCacheLayout(StaticKVCacheLayoutSpec spec)
     }
     const size_t last_start_bytes =
         checked_multiply(spec_.num_units - tensor.extent_units, unit_bytes_);
-    tensor.view_rows =
-        checked_add(last_start_bytes / tensor.row_bytes, tensor.rows_per_slot);
+    const size_t last_start_row =
+        last_start_bytes / tensor.row_bytes +
+        static_cast<size_t>(last_start_bytes % tensor.row_bytes != 0);
+    tensor.view_rows = checked_add(last_start_row, tensor.rows_per_slot);
     const size_t view_bytes =
         checked_multiply(tensor.view_rows, tensor.row_bytes);
     CHECK_LE(checked_add(tensor.offset_bytes, view_bytes), bytes_used_);
   }
 }
 
-size_t StaticKVCacheLayout::role_row_stride(KVCacheTensorRole role) const {
+size_t StaticKVCacheLayout::row_bytes(KVCacheTensorRole role) const {
   switch (role) {
     case KVCacheTensorRole::KEY:
     case KVCacheTensorRole::VALUE:
-      return unit_bytes_ / spec_.full_row_bytes;
+      return spec_.full_row_bytes;
     case KVCacheTensorRole::CONV:
-      return unit_bytes_ / spec_.conv_row_bytes;
+      return spec_.conv_row_bytes;
     case KVCacheTensorRole::SSM:
-      return unit_bytes_ / spec_.ssm_row_bytes;
+      return spec_.ssm_row_bytes;
     default:
       LOG(FATAL) << "Unsupported static cache tensor role: "
                  << role.to_string();
       return 0;
   }
+}
+
+size_t StaticKVCacheLayout::row_index(size_t logical_page,
+                                      KVCacheTensorRole role) const {
+  const size_t bytes = checked_multiply(logical_page, unit_bytes_);
+  const size_t row_size = row_bytes(role);
+  return bytes / row_size + static_cast<size_t>(bytes % row_size != 0);
+}
+
+size_t StaticKVCacheLayout::role_row_stride(KVCacheTensorRole role) const {
+  const size_t row_size = row_bytes(role);
+  CHECK_EQ(unit_bytes_ % row_size, 0u)
+      << "Cache role requires ceiling physical row mapping.";
+  return unit_bytes_ / row_size;
 }
 
 torch::ScalarType StaticKVCacheLayout::dtype(KVCacheTensorRole role) const {

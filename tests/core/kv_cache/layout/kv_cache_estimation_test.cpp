@@ -599,6 +599,70 @@ TEST(KVCacheEstimationTest, SharedStaticBoundsExpandedInt32TokenSlots) {
   EXPECT_LT(capacity.cache_size_in_bytes(), options.cache_size_in_bytes);
 }
 
+TEST(KVCacheEstimationTest, SharedStaticBoundsCeilingConvIndices) {
+  ModelArgs model_args = make_linear_attention_args(/*head_dim=*/128);
+  model_args.linear_num_key_heads(1)
+      .linear_num_value_heads(1)
+      .linear_key_head_dim(8)
+      .linear_value_head_dim(8)
+      .mamba_ssm_dtype("float32");
+  KVCacheEstimateOptions options = make_linear_attention_options();
+  options.enable_shared_kv_cache = true;
+  options.n_local_linear_k_heads = 1;
+  options.n_local_linear_v_heads = 1;
+  options.cache_size_in_bytes = int64_t{256} << 40;
+
+  const KVCacheCapacity capacity =
+      estimate_kv_cache_capacity(model_args, options);
+
+  // Full/SSM rows align to 64 KiB pages; Conv maps with ceil(id * 2048/3).
+  const int64_t max_index = std::numeric_limits<int32_t>::max();
+  const int64_t expected_units = max_index * 3 / 2048;
+  EXPECT_EQ(capacity.shared_unit_bytes(), 65536);
+  EXPECT_EQ(capacity.n_blocks(), expected_units);
+  EXPECT_LE((expected_units * 2048 + 2) / 3, max_index);
+  EXPECT_GT(((expected_units + 1) * 2048 + 2) / 3, max_index);
+  EXPECT_EQ(capacity.cache_size_in_bytes(), expected_units * 65536);
+}
+
+TEST(KVCacheEstimationTest, SharedStaticQwen38MtpUsesNineMiBPages) {
+  ModelArgs model_args = make_linear_attention_args(/*head_dim=*/256);
+  model_args.model_type("qwen3_5_text")
+      .n_layers(64)
+      .n_heads(32)
+      .n_kv_heads(4)
+      .full_attention_interval(4)
+      .linear_num_key_heads(16)
+      .linear_num_value_heads(48)
+      .linear_key_head_dim(128)
+      .linear_value_head_dim(128)
+      .linear_conv_kernel_dim(4)
+      .mamba_ssm_dtype("float32");
+  KVCacheEstimateOptions options = make_linear_attention_options();
+  options.enable_shared_kv_cache = true;
+  options.dtype = torch::kBFloat16;
+  options.world_size = 2;
+  options.block_size = 128;
+  options.n_local_kv_heads = 2;
+  options.n_local_linear_k_heads = 8;
+  options.n_local_linear_v_heads = 24;
+  options.num_speculative_tokens = 4;
+  constexpr int64_t kPageBytes = 9 * 1024 * 1024;
+  options.cache_size_in_bytes = 100 * kPageBytes + kPageBytes - 1;
+
+  const KVCacheCapacity capacity =
+      estimate_kv_cache_capacity(model_args, options);
+
+  EXPECT_EQ(capacity.shared_unit_bytes(), kPageBytes);
+  EXPECT_EQ(capacity.shared_full_block_units(), 4);
+  EXPECT_EQ(capacity.shared_linear_state_units(), 48);
+  EXPECT_EQ(capacity.linear_conv_state_len(), 7);
+  EXPECT_EQ(capacity.linear_ssm_checkpoint_stride(), 5);
+  EXPECT_EQ(capacity.n_blocks(), 100);
+  EXPECT_EQ(capacity.num_linear_state_blocks(), 100);
+  EXPECT_EQ(capacity.cache_size_in_bytes(), 100 * kPageBytes);
+}
+
 TEST(KVCacheEstimationTest, SharedStaticRejectsQuantizedFullPageGeometry) {
   ModelArgs model_args = make_linear_attention_args();
   model_args.linear_value_head_dim(4).mamba_ssm_dtype("float32");

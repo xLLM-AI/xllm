@@ -473,5 +473,78 @@ TEST(LinearStateRestoreTest, StaticFullIndicesPreserveOffsetsAndSentinels) {
   EXPECT_EQ(full.physical_row_index(30, KVCacheTensorRole::KEY), 270);
 }
 
+TEST(LinearStateRestoreTest, StaticCeilingConvMappingRestoresEveryCheckpoint) {
+  KVCacheCapacity capacity;
+  capacity.n_blocks(8)
+      .block_size(2)
+      .num_linear_state_blocks(8)
+      .linear_conv_state_len(7)
+      .linear_ssm_checkpoint_stride(5);
+  ModelArgs args;
+  args.model_type("qwen3_next")
+      .n_layers(2)
+      .n_heads(1)
+      .n_kv_heads(1)
+      .head_dim(2)
+      .full_attention_interval(2)
+      .linear_num_key_heads(1)
+      .linear_num_value_heads(1)
+      .linear_key_head_dim(128)
+      .linear_value_head_dim(128)
+      .linear_conv_kernel_dim(4);
+  const KVCacheShape shape(capacity, args, /*world_size=*/1);
+  KVCacheCreateOptions options;
+  options.device(torch::kCPU)
+      .dtype(torch::kFloat32)
+      .ssm_dtype(torch::kFloat32)
+      .num_layers(2)
+      .model_type(args.model_type())
+      .enable_linear_attention(true)
+      .full_attention_interval(2);
+  auto layout = std::make_shared<StaticKVCacheLayout>(shape, options);
+  ASSERT_EQ(layout->unit_bytes(), 393216);
+  options.static_layout(layout).tensor_allocator(
+      std::make_shared<StaticKVCacheTensorAllocator>(*layout, torch::kCPU));
+  std::vector<KVCache> caches;
+  allocate_kv_caches(caches, shape, options);
+  const KVCache& linear = caches[0];
+  const KVCache& full = caches[1];
+  const torch::Tensor logical =
+      torch::tensor({-2, -1, 0, 1, 2, 6, 7, 10000000}, torch::kInt32);
+  EXPECT_TRUE(torch::equal(
+      linear.physical_row_indices(logical, KVCacheTensorRole::CONV),
+      torch::tensor({-2, -1, 0, 37, 74, 220, 256, 365714286}, torch::kInt32)));
+  EXPECT_EQ(linear.physical_row_index(10000000, KVCacheTensorRole::CONV),
+            365714286);
+  linear.get_conv_cache()[37].fill_(11);
+  for (int64_t checkpoint = 0; checkpoint < 5; ++checkpoint) {
+    linear.get_ssm_cache()[6 + checkpoint].fill_(13 + checkpoint);
+  }
+  linear.get_conv_cache()[110].fill_(41);
+  linear.get_ssm_cache().narrow(0, 18, 5).fill_(43);
+  full.get_k_cache()[98304].fill_(29);
+  full.get_v_cache()[98304].fill_(31);
+  std::vector<int64_t> validity_mask = {0, 0};
+
+  restore_linear_state_slots(caches,
+                             {2, 3},
+                             {1, 3},
+                             validity_mask,
+                             /*reads_distinct_state=*/false);
+
+  EXPECT_EQ(validity_mask, std::vector<int64_t>({1, 0}));
+  EXPECT_TRUE(linear.get_conv_cache()[74].eq(11).all().item<bool>());
+  EXPECT_TRUE(torch::equal(linear.get_ssm_cache().narrow(0, 12, 5),
+                           linear.get_ssm_cache().narrow(0, 6, 5)));
+  EXPECT_EQ(linear.get_conv_cache()[110].count_nonzero().item<int64_t>(), 0);
+  EXPECT_EQ(
+      linear.get_ssm_cache().narrow(0, 18, 5).count_nonzero().item<int64_t>(),
+      0);
+  EXPECT_TRUE(full.get_k_cache()[98304].eq(29).all().item<bool>());
+  EXPECT_TRUE(full.get_v_cache()[98304].eq(31).all().item<bool>());
+  linear.get_ssm_cache()[12].fill_(47);
+  EXPECT_TRUE(linear.get_ssm_cache()[6].eq(13).all().item<bool>());
+}
+
 }  // namespace
 }  // namespace xllm

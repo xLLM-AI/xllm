@@ -56,7 +56,8 @@ struct StaticKVCacheTensorLayout {
 
 // Every equal-sized physical page holds four Full layers' K/V blocks or one
 // Linear layer's Conv/SSM state. Page size includes padding required by both
-// payloads and dense row views; page p maps to p * role_row_stride(role).
+// payloads and dense row views. Conv starts at the first dense row wholly
+// inside its page; Full and SSM pages retain integral row strides.
 class StaticKVCacheLayout final {
  public:
   static constexpr size_t kFullLayersPerPage = 4;
@@ -73,6 +74,8 @@ class StaticKVCacheLayout final {
     return linear_page_payload_bytes_;
   }
   size_t num_units() const { return spec_.num_units; }
+  size_t row_bytes(KVCacheTensorRole role) const;
+  size_t row_index(size_t logical_page, KVCacheTensorRole role) const;
   size_t role_row_stride(KVCacheTensorRole role) const;
   size_t checkpoint_stride() const { return spec_.checkpoint_stride; }
   size_t logical_num_slots() const { return spec_.num_units; }

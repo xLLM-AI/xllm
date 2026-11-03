@@ -103,7 +103,8 @@ TEST(StaticKVCacheTensorAllocatorTest, GroupsFourFullLayersAcrossPaddedPages) {
   EXPECT_TRUE(key8[36].eq(3).all().item<bool>());
 }
 
-TEST(StaticKVCacheTensorAllocatorTest, PadsDefaultQwenGeometryToCommonPages) {
+TEST(StaticKVCacheTensorAllocatorTest,
+     FitsDefaultQwenGeometryInSsmAlignedPages) {
   auto spec = make_spec(/*num_units=*/0);
   spec.full_row_bytes = 128 * 2 * 256 * 2;
   spec.conv_row_bytes = 3 * (128 * 16 * 2 + 128 * 32) * 2;
@@ -118,7 +119,7 @@ TEST(StaticKVCacheTensorAllocatorTest, PadsDefaultQwenGeometryToCommonPages) {
     group.emplace_back(layer);
   }
   const StaticKVCacheLayout next_layout(spec);
-  EXPECT_EQ(next_layout.unit_bytes(), 3 * 1024 * 1024);
+  EXPECT_EQ(next_layout.unit_bytes(), 2 * 1024 * 1024);
   EXPECT_EQ(next_layout.full_page_payload_bytes(), 1024 * 1024);
   EXPECT_EQ(next_layout.linear_page_payload_bytes(), 1024 * 1024 + 48 * 1024);
   EXPECT_EQ(next_layout.full_block_units(), 3);
@@ -126,10 +127,91 @@ TEST(StaticKVCacheTensorAllocatorTest, PadsDefaultQwenGeometryToCommonPages) {
   spec.ssm_row_bytes *= 2;
   spec.ssm_dtype = torch::kFloat32;
   const StaticKVCacheLayout qwen35_layout(spec);
-  EXPECT_EQ(qwen35_layout.unit_bytes(), 6 * 1024 * 1024);
+  EXPECT_EQ(qwen35_layout.unit_bytes(), 4 * 1024 * 1024);
   EXPECT_EQ(qwen35_layout.full_page_payload_bytes(), 1024 * 1024);
   EXPECT_EQ(qwen35_layout.linear_page_payload_bytes(),
             2 * 1024 * 1024 + 48 * 1024);
+}
+
+TEST(StaticKVCacheTensorAllocatorTest,
+     FitsQwen38CheckpointsWithoutConvLcmPadding) {
+  auto spec = make_spec(/*num_units=*/0, /*checkpoint_stride=*/5);
+  spec.full_row_bytes = 128 * 2 * 256 * 2;
+  spec.conv_row_bytes = 7 * (2 * 8 * 128 + 24 * 128) * 2;
+  spec.ssm_row_bytes = 24 * 128 * 128 * 4;
+  spec.dtype = torch::kBFloat16;
+  spec.ssm_dtype = torch::kFloat32;
+  spec.full_layer_ids.clear();
+  spec.linear_layer_ids.clear();
+  for (int64_t layer = 0; layer < 64; ++layer) {
+    auto& group =
+        (layer + 1) % 4 == 0 ? spec.full_layer_ids : spec.linear_layer_ids;
+    group.emplace_back(layer);
+  }
+  const StaticKVCacheLayout layout(spec);
+  EXPECT_EQ(layout.unit_bytes(), 9 * 1024 * 1024);
+  EXPECT_EQ(layout.full_block_units(), 4);
+  EXPECT_EQ(layout.linear_state_units(), 48);
+  EXPECT_EQ(layout.role_row_stride(KVCacheTensorRole::KEY), 72);
+  EXPECT_EQ(layout.role_row_stride(KVCacheTensorRole::SSM), 6);
+  EXPECT_EQ(layout.row_index(1, KVCacheTensorRole::CONV), 132);
+  EXPECT_EQ(layout.row_index(2, KVCacheTensorRole::CONV), 264);
+  EXPECT_EQ(layout.row_index(34, KVCacheTensorRole::CONV), 4477);
+  EXPECT_EQ(layout.row_index(35, KVCacheTensorRole::CONV), 4608);
+  EXPECT_EQ(layout.row_index(500000, KVCacheTensorRole::CONV), 65828572);
+  EXPECT_DEATH(layout.role_row_stride(KVCacheTensorRole::CONV),
+               "ceiling physical row mapping");
+}
+
+TEST(StaticKVCacheTensorAllocatorTest, CeilingConvMappingReusesOnlyItsOwnPage) {
+  auto spec = make_spec(/*num_units=*/40, /*checkpoint_stride=*/5);
+  spec.full_row_bytes = 256;
+  spec.conv_row_bytes = 140;
+  spec.ssm_row_bytes = 3072;
+  spec.full_layer_ids = {0};
+  spec.linear_layer_ids = {1, 2};
+  StaticKVCacheTensorAllocator allocator(StaticKVCacheLayout(spec),
+                                         torch::kCPU);
+  const StaticKVCacheLayout& layout = allocator.layout();
+  ASSERT_EQ(layout.unit_bytes(), 18432);
+  allocator.begin_layer(0);
+  const torch::Tensor key =
+      allocate_float_tensor(allocator, KVCacheTensorRole::KEY, {40, 8, 8});
+  allocator.begin_layer(1);
+  const torch::Tensor conv =
+      allocate_float_tensor(allocator, KVCacheTensorRole::CONV, {40, 7, 5});
+  const torch::Tensor ssm = allocate_float_tensor(
+      allocator, KVCacheTensorRole::SSM, {200, 3, 16, 16});
+  allocator.begin_layer(2);
+  const torch::Tensor last_conv =
+      allocate_float_tensor(allocator, KVCacheTensorRole::CONV, {40, 7, 5});
+  const torch::Tensor last_ssm = allocate_float_tensor(
+      allocator, KVCacheTensorRole::SSM, {200, 3, 16, 16});
+  ASSERT_EQ(conv.size(0), 5004);
+  ASSERT_EQ(ssm.size(0), 233);
+  ASSERT_TRUE(key.is_contiguous());
+  ASSERT_TRUE(conv.is_contiguous());
+  ASSERT_TRUE(ssm.is_contiguous());
+  key[72].fill_(17);
+  key[144].fill_(53);
+  conv[132].fill_(29);
+  const torch::Tensor reused = key[72].flatten();
+  EXPECT_TRUE(reused.slice(0, 0, 12).eq(17).all().item<bool>());
+  EXPECT_TRUE(reused.slice(0, 12, 47).eq(29).all().item<bool>());
+  EXPECT_TRUE(reused.slice(0, 47, 64).eq(17).all().item<bool>());
+  EXPECT_TRUE(key[144].eq(53).all().item<bool>());
+  const size_t conv_row = layout.row_index(38, KVCacheTensorRole::CONV);
+  const size_t ssm_row = layout.row_index(38, KVCacheTensorRole::SSM) + 4;
+  ASSERT_EQ(conv_row, 5003);
+  ASSERT_EQ(ssm_row, 232);
+  conv[conv_row].fill_(31);
+  ssm[ssm_row].fill_(37);
+  last_conv[conv_row].fill_(43);
+  last_ssm[ssm_row].fill_(47);
+  EXPECT_TRUE(conv[conv_row].eq(31).all().item<bool>());
+  EXPECT_TRUE(ssm[ssm_row].eq(37).all().item<bool>());
+  EXPECT_TRUE(last_conv[conv_row].eq(43).all().item<bool>());
+  EXPECT_TRUE(last_ssm[ssm_row].eq(47).all().item<bool>());
 }
 
 TEST(StaticKVCacheTensorAllocatorTest,
