@@ -1,0 +1,80 @@
+{
+  "upstream": "https://gitcode.com/xLLM-AI/xllm",
+  "engine_base": "5e814b188b89c5e937bf681178814d3667a5c96a",
+  "datasystem": {
+    "version": "0.8.1",
+    "platform": "cp311-manylinux_2_34_aarch64",
+    "wheel": "openyuanrong_datasystem-0.8.1-cp311-cp311-manylinux_2_34_aarch64.whl",
+    "sha256": "c26a210b6411d19b28a0d28c05cc4aebf8f3fe7015bd0869183e2f24f0399e07",
+    "selection": "Public latest on 2026-10-09, selected by project owner"
+  },
+  "mooncake": {
+    "commit": "1adcb2fb399661e69df0bc4c342c3f4a7028b8e8",
+    "source": "engine gitlink"
+  },
+  "etcd": "3.5.21",
+  "service_candidate": "a54981bd4ba08fb7665b55794905f5145e70b9f9",
+  "service_candidate_npu_verified": false,
+  "model": {
+    "repository": "Qwen/Qwen2.5-7B-Instruct",
+    "revision": "a09a35458c702b33eeacc393d103063234e8bc28"
+  },
+  "submodules": [
+    {
+      "path": "third_party/Mooncake",
+      "commit": "1adcb2fb399661e69df0bc4c342c3f4a7028b8e8"
+    },
+    {
+      "path": "third_party/brpc",
+      "commit": "67d6372a340cb0663efcd3fda6f4c5e188bf5c24"
+    },
+    {
+      "path": "third_party/cpprestsdk",
+      "commit": "1aac2ea50ca18811b6ee28df39b4ecfff4401dff"
+    },
+    {
+      "path": "third_party/cutlass",
+      "commit": "f3fde58372d33e9a5650ba7b80fc48b3b49d40c8"
+    },
+    {
+      "path": "third_party/etcd_cpp_apiv3",
+      "commit": "7c6e714f188f9576e25e0350cac4181139eec23e"
+    },
+    {
+      "path": "third_party/minja",
+      "commit": "1e65bd7254aa974d4bc01f9819acec0a0f7bb2d3"
+    },
+    {
+      "path": "third_party/sentencepiece",
+      "commit": "ca10c9975797a4979b3c9fde33a14b2f92d1961d"
+    },
+    {
+      "path": "third_party/smhasher",
+      "commit": "c468c946c0c22f636904f211b37b23f980b4ea6d"
+    },
+    {
+      "path": "third_party/spdlog",
+      "commit": "9ca67e9a380e36a6f869e6c2090b0c3cdfd09269"
+    },
+    {
+      "path": "third_party/torch_npu_ops",
+      "commit": "adc29dc9d2e69875524b8a54bfc251463275d66e"
+    },
+    {
+      "path": "third_party/xllm_atb_layers",
+      "commit": "22432960cccbdbf46da615aaafbc2775eb48911b"
+    },
+    {
+      "path": "third_party/xllm_ops",
+      "commit": "bbbdfe3818149b6d4d725e1fbf44149c4c01a1a6"
+    },
+    {
+      "path": "third_party/xxHash",
+      "commit": "ce037363cd0fbf4cde9f5a4f4d8600167f7829f0"
+    }
+  ],
+  "npu_runtime_validation": "Pending on target server",
+  "fork": "https://gitcode.com/qq_45595516/xllm-datasystem-clean",
+  "feature_branch": "feat/datasystem-kv-backend",
+  "review_target": "release/v0.10.0"
+}
