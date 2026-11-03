@@ -75,11 +75,13 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `max_linear_state_cache_slots` | `int64` | `0` | linear-attention state cache 的最大活跃槽位数；`0` 表示根据可用 KV Cache 预算自动推导容量。 |
 | `xxh3_128bits_seed` | `uint32` | `1024` | XXH3 128-bit 哈希的默认 seed。 |
 | `enable_vmm_kvcache` | `bool` | `false` | 为 KV Cache 启用 VMM，与 `enable_vmm_weights` 独立；`false` 使用原有物理 KV Cache 实现，仅 NPU 支持。 |
-| `enable_shared_kv_cache` | `bool` | `false` | Full KV blocks 与 Linear state extents 共享固定物理 arena。首版支持 NPU Torch Qwen3 混合模型的 eager 执行；不兼容 VMM KV、推测解码、Host/PD、indexer/量化缓存及 context/layerwise/KV split。 |
+| `enable_shared_kv_cache` | `bool` | `false` | Full KV blocks 与 Linear state extents 共享固定物理 arena。原生 NPU Torch Qwen hybrid 路径仍限普通 eager；Python 路径已接通 eager/chunked prefill、ACL decode/verify、普通 Qwen3.5/3.8 MTP 和固定宽度 unified graph，含 dense Qwen3.8-27B TP4 图像 VLM。当前实现范围及验收要求见下文。 |
 | `vmm_elastic` | `bool` | `true` | 任一 VMM 开关启用后，按需扩张活动逻辑槽位及物理页，并释放空闲页的物理内存；`false` 使用固定驻留池。 |
 | `vmm_memory_reserve_bytes` | `int64` | `0` | 弹性虚拟内存增长时额外保留的设备空闲显存，单位 byte，须非负；在运行时执行预留空间之外叠加生效。 |
 | `vmm_startup_timeout_ms` | `int32` | `120000` | VMM 启动时，master 等待节点注册、各非 master 等待物理池就绪分别使用的超时，单位毫秒，须为正数。独立于单次 RPC 超时，每个等待阶段单独计时。 |
 | `phy_page_granularity_size` | `int64` | `2097152` | 单个物理页的粒度大小，单位 byte，默认 2 MiB；用于连续 KV Cache。 |
+
+共享池当前 Python VLM 实现范围为单机 TP4 dense Qwen3.8-27B 的 image 输入。Hybrid target 的 Full/Linear 共用静态 arena；Full-only MTP draft 使用独立 dense KV 池并联合计费，不与 target alias。实际验收以对应 exact-commit 的 NPU 全量及 TP4 服务证据为准，不据此声明所有组合已验收。该配置使用 `enable_vmm_kvcache=false`、`enable_vmm_weights=false`、`enable_graph_vmm_pool=false`、`vmm_elastic=false`、`max_linear_state_cache_slots=0`，DP/CP/KV/layerwise split 均为 1。shared prefill piecewise graph、task pipeline、PD/Host/store、MLA/indexer/量化缓存和其他 speculative 算法未扩展；视频完整端到端验收及多机部署不在本轮支持声明中。视觉 eager/chunked prefill 不代表支持 prefill piecewise graph。
 
 VMM 的使用方式和容量配置说明见[KV Cache 与模型权重的虚拟内存](/zh/features/virtual_memory/)。
 
@@ -344,7 +346,7 @@ engine 从正常回收的结果统计逐位置前缀接受概率
 |:---------|:-----|:-------|:---------|
 | `extension_impl` | `string` | `""` | 为模型、执行器等注册组件选择原生扩展实现族；空值保留原有选择方式。所选实现族必须已注册；该实现族未注册的组件继续使用原有选择方式。 |
 | `enable_graph` | `bool` | `false` | 是否在 decode 阶段启用图执行以降低 kernel launch 开销和设备空闲时间；支持 CUDA Graph、ACL Graph（NPU）、MLU Graph 和 DCU Graph，详见 [图执行](/zh/features/graph_mode/)。 |
-| `enable_unified_mtp_graph` | `bool` | `false` | 将支持的 NPU speculative decode 请求交由统一 Python graph 执行。支持 GLM DSA MTP，以及以 GLM DSA 为目标模型的 `DFlash`/`DFlash2`/`DSpark`。要求 `enable_graph=true`；`DFlash`/`DFlash2`/`DSpark` 还要求 `enable_task_pipeline=true`。关闭此开关不影响普通模型的图执行。 |
+| `enable_unified_mtp_graph` | `bool` | `false` | 将支持的 NPU speculative decode 请求交由统一 Python graph 执行。支持 GLM DSA MTP，以及以 GLM DSA 为目标模型的 `DFlash`/`DFlash2`/`DSpark`；另已接通 dense Qwen3.5/3.8 的 `qwen3_5`/`qwen3_5_text` target 与 full-only `qwen3_5_mtp` draft，使用固定 K=1–16 的 greedy unified graph。要求 `enable_graph=true`；`DFlash`/`DFlash2`/`DSpark` 还要求 `enable_task_pipeline=true`，Qwen 共享池路径则要求关闭 task pipeline，图像 VLM 实现范围与验收要求见 KV Cache 说明。关闭此开关不影响普通模型的图执行。 |
 | `enable_graph_double_buffer` | `bool` | `true` | 是否为 NPU schedule-overlap decode 启用双缓冲 ACL graph 持久化参数与 graph 实例。 |
 | `enable_graph_mode_decode_no_padding` | `bool` | `false` | decode 阶段是否按实际 `num_tokens` 捕获 graph，而不是按 padding 后 shape 捕获。 |
 | `enable_prefill_piecewise_graph` | `bool` | `false` | 是否在 prefill 阶段启用 piecewise CUDA graph；attention 使用 eager 模式，其他操作捕获进 CUDA graph。 |

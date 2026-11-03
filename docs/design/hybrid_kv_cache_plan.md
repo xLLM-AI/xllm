@@ -2,12 +2,12 @@
 
 <!-- Copyright 2026 The xLLM Authors. Licensed under the Apache License, Version 2.0. -->
 
-状态：静态 Full/Linear 共享后端已实现，正在验证。日期：2026-11-02。第 1–10 节保留总体演进路线，当前实现范围和页布局以第 11 节为准。
+状态：静态 Full/Linear 共享后端及 Python Qwen 路径已接通；实际验收以对应 exact-commit 的 NPU 全量及 TP4 服务证据为准，不据此声明所有组合已验收。日期：2026-11-04。第 1–10 节保留总体演进路线，第 11 节记录底层布局和历史 native eager 基线，第 12.1–12.6 节记录 Python 接入阶段；当前实现与验收范围以第 12.7 节为准，共同页布局沿用第 11.1–11.2 节。
 
 - xLLM 基线：上游 `xLLM-AI/xllm` 的 `main`，`9a656af7bfae7f77dfd7f9401987a603d50cda22`。
 - vLLM 参考：`main` 的固定提交 `5689c2790c911a55c75825aac5166305df0b591d`。
 - 目标分支：`features/rearch_kv_cache`。
-- 当前工作树已包含静态共享 arena、共同页布局、加权资源池及 native NPU 接入；尚未完成最终提交上的 NPU 全量验收，也未测量性能收益。
+- 当前工作树已包含静态共享 arena、共同页布局、加权资源池及 native/Python NPU 接入；实际能力与性能收益须由对应 exact-commit 的可复现测试和服务证据说明。
 
 ## 1. 目标与设计结论
 
@@ -261,7 +261,7 @@ SWA 继续采用绝对 logical index + invalid/null placeholders，初版不增�
 - VMM 独立 group 的大页碎片、reserve 滞留和映射成本，尤其是 SWA 短窗口与 GDN 小 state；据实测决定 fixed-C/其他 packing，避免把有效数据减少等同于实际物理占用减少。checkpoint 复制成本单独计量；只有数据证明必要才增加 size-class 等分配复杂度。
 - PD schema、rank 投影、辅助资源和 target/draft 的预算规则需要在 LayoutPlan 中闭合，不能把这些费用遗漏到“共享池之外”。
 
-## 11. 当前静态 Full/LINEAR 实施决策（2026-11-02）
+## 11. 底层静态布局与 native eager 基线（历史阶段，2026-11-02）
 
 首版使用一次预分配的连续 byte arena，Full/LINEAR 从同一物理 page 池分配和回收真实 backing。沿用当前 VMM 已有的逻辑块与物理存储职责分离；静态实现不做设备 map/unmap，不等同于关闭 VMM 的 elastic 开关。
 
@@ -299,7 +299,7 @@ Full 和 SSM 保留整行对齐；Conv 行起点向上取整，其最坏间隙�
 
 根据本次范围调整，后续 Full/Linear 共享池的执行接入以 Python executor、attention backend、GDN metadata 和 ACL graph runner 为目标，不再扩展第 11 节的 native C++ 计算及组图实现。保留已经实现的底层静态 storage、页分配、调度和 APC 生命周期；Python 不另建与调度器脱节的显存池，也不撤销已有 C++ 提交。生产入口只补齐必要的 capability bridge、target/draft 容量计费和 allocator 选择，不修改 native attention 算法或组图实现。
 
-### 12.1 复用边界与当前阻塞
+### 12.1 Python 接入边界与早期阻塞（阶段记录）
 
 - Python 已有 `LayerCache` 的 K/V/Conv/SSM 角色、Qwen3.5 GDN metadata builder 和 ACL graph capture/replay，不需要重新实现整套组图框架。
 - `worker_impl.cpp` 的 `validate_shared_kv_cache_support` 按执行能力区分 native eager 与 Python TORCH。Python 路径允许受支持的 Qwen hybrid LLM、ACL decode/verify 和 Qwen3.5 MTP；native 仍只允许普通 eager。启动校验继续拒绝未接通的组合，不把 Python 单元测试通过解释为完整服务验收。
@@ -320,7 +320,7 @@ Python 在 cache bind 时建立不可变的 role 布局描述；cache tensor 基
 ### 12.4 ACL graph 捕获与重放
 
 - 接入 eager prefill/chunked prefill、Python ACL decode 和固定宽度 GDN MTP verify；prefill 组图保持关闭。KDA shared verify graph 和 DSpark adaptive recurrent shared graph 尚未接通，保持明确拒绝。
-- 为每个 graph bucket 固定 block table、Full slot mapping、Conv/SSM read/write index 和 padding mask 的存储；接入现有 `execution_metadata_builders` 的 persistent metadata 生命周期。当前 GDN `update_persistent` 为空，依赖逻辑 tensor 的直接别名；新增物理索引不能只在 `build` 时计算一次，否则后续 replay 将使用首次 capture 的值。必须原地更新持久物理行 buffer，或将索引映射本身捕获在图内。
+- 为每个 graph bucket 固定 block table、Full slot mapping、Conv/SSM read/write index 和 padding mask 的存储；接入现有 `execution_metadata_builders` 的 persistent metadata 生命周期。GDN `update_persistent` 已实现按字段原地更新持久 tensor，保留捕获的地址及 views；共享布局的物理索引映射也在图内执行。新增物理索引不能只在首次 `build` 时计算，否则后续 replay 会沿用首次 capture 的值。
 - 现有 `DecodeAclGraphRunner` 会清零 `cache.conv[0]` 及按 Conv/SSM 形状比例选出的 SSM 首行；共享 view 的首维比例失效，不能据此确定清零范围。底层池已预留起始 `max(full_block_units, linear_state_units)` 页，Python 只对通过静态布局校验的首个 Conv/SSM 保留 extent 清零，供 capture/warmup/padding 复用。不得假定所有 tensor 的第零行互不别名，也不能把真实请求页当作 dummy page。
 - 页回收和跨类型复用仍由现有调度/所有权管理；Python 必须验证 replay、异步更新和在途 kernel 完成点，不引入独立的 Python 释放时机。
 
@@ -336,13 +336,15 @@ Python 在 cache bind 时建立不可变的 role 布局描述；cache tensor 基
 
 Hybrid target 的 Full/Linear 共用静态 arena；full-only MTP draft 使用独立 dense KV 存储，并为每个可能的 target 逻辑 arena ID 保留一行。容量规划按 `target page bytes + draft block bytes` 重新求可用 ID 数，同时更新 target Full/Linear 容量，避免重复预算或仅缩减 Full 容量。SSM checkpoint stride 为 speculative width，包含全部候选 checkpoint。
 
-测试启动使用 `enable_shared_kv_cache=true`、`enable_vmm_kvcache=false`、`enable_graph_vmm_pool=false`，并令 `max_linear_state_cache_slots=0`，由共享 arena 统一决定状态容量。四个 Full 层的 128-token block 与一个 Linear 层状态按真实字节数对齐；安全 Conv ceiling 间隙和必要的 LCM fallback padding 都计入预算，不能假定所有模型的 page 都只有四个 Full block 的有效载荷。
+测试启动使用 `enable_shared_kv_cache=true`、`enable_vmm_kvcache=false`、`enable_vmm_weights=false`、`enable_graph_vmm_pool=false`、`vmm_elastic=false`，并令 `max_linear_state_cache_slots=0`，由共享 arena 统一决定状态容量。四个 Full 层的 128-token block 与一个 Linear 层状态按真实字节数对齐；安全 Conv ceiling 间隙和必要的 LCM fallback padding 都计入预算，不能假定所有模型的 page 都只有四个 Full block 的有效载荷。
 
-当前实现已补齐 Python GDN 共享 decode/verify、ACL metadata 持久更新和生产入口资源接线，真实 NPU 完整构建、单测及 Qwen3.8-27B 压测仍需验证。VLM、prefill piecewise graph、task pipeline、PD/Host/store、CP/KV/layerwise split、MLA/index/量化以及其他 speculative 算法保持关闭。第 11 节的 native eager 实现保持原有边界。
+本阶段补齐了 Python GDN 共享 decode/verify、ACL metadata 持久更新和生产入口资源接线，最初验证范围为 LLM。第 12.7 节进一步接通 dense Qwen 图像 VLM 与 unified MTP，不再沿用本阶段的 VLM 关闭限制；实际验收以对应 exact-commit 的 NPU 全量及 TP4 服务证据为准，不据此声明所有组合已验收。prefill piecewise graph、task pipeline、PD/Host/store、CP/KV/layerwise split、MLA/index/量化以及其他 speculative 算法仍未扩展。第 11 节的 native eager 实现保持原有边界。
 
-### 12.7 实施扩展：Qwen3.8-27B TP4 VLM 与 unified MTP（2026-11-03）
+### 12.7 当前实现与验收范围：Qwen3.8-27B TP4 图像 VLM 与 unified MTP（2026-11-04）
 
-本轮目标调整为单机四卡、`backend=vlm` 的 Qwen3.8-27B，使用 Python 模型、静态 Full/Linear 共享 target arena 和真正合并 target/draft 的固定宽度 unified MTP graph。真实 checkpoint 的外层类型为 `qwen3_5`，文本 decoder 为 `qwen3_5_text`，含 48 个 Linear 层、16 个 Full 层、独立视觉塔和一层 Full MTP draft；TP4 下的 head 数可整除。不得把普通 MTP worker 配置中打开 unified flag 视作已执行统一图。
+当前代码已接通单机四卡、`backend=vlm` 的 dense Qwen3.8-27B Python 路径：target 的 Full/Linear 共用静态 arena，支持 eager/chunked prefill、ACL decode/verify、普通 Qwen MTP，以及真正合并 target/draft 的固定宽度 greedy unified MTP graph（K 为 1–16）。真实 checkpoint 的外层类型为 `qwen3_5`，文本 decoder 为 `qwen3_5_text`，含 48 个 Linear 层、16 个 Full 层、独立视觉塔和一层 Full MTP draft；TP4 下的 head 数可整除。不得把普通 MTP worker 配置中打开 unified flag 视作已执行统一图。
+
+本轮服务验收仅覆盖 image 输入，视频完整端到端验收和多机部署不在本轮支持声明中。配置使用 `enable_vmm_kvcache=false`、`enable_vmm_weights=false`、`enable_graph_vmm_pool=false`、`vmm_elastic=false`，DP/CP/KV/layerwise split 均为 1；prefill piecewise graph、task pipeline、PD/Host/store 维持关闭。实际验收以对应 exact-commit 的 NPU 全量及 TP4 真实图文服务证据为准，不据此声明所有组合已验收。
 
 实施按以下依赖推进：
 
@@ -353,4 +355,4 @@ Hybrid target 的 Full/Linear 共用静态 arena；full-only MTP draft 使用独
 4. 运行结构/生命周期单测、真实 NPU 数值和统一图 capture/replay 测试，再验证 TP4 图文服务。对照服务使用普通 MTP、关闭 APC；正式服务启用 unified MTP 和 APC。使用真实图文请求比较输出，覆盖同图 warm prefix、相同文字不同图像、跨 512-token chunk、后缀变化、接受/拒绝回滚及并发 batch/variant 切换。
 5. 确认四个 rank 均使用同一提交的 Python 路径和共享 arena，日志实际出现 Unified worker、variant capture 与 replay；所有 VMM 开关保持关闭。用户文本压力客户端只作为补充，不能替代视觉验收。记录 exact-commit 构建、测试及服务证据后再发布。
 
-单层 Full token block 仍为 128，四层分组表示合计 512 个跨层槽位；TP4 下 physical page 的字节数必须由本地 head 数和实际 Conv/SSM checkpoint payload 重新计算，不能复用 TP2 的 9 MiB 数值。Full-only draft 仍独立存储并联合计费。本轮不扩展 prefill piecewise graph、PD/Host/store、CP/KV/layerwise split 或其他 speculative 算法。GLM 模型验收按用户要求排除。
+单层 Full token block 仍为 128，四层分组表示合计 512 个跨层槽位；TP4 下 physical page 的字节数必须由本地 head 数和实际 Conv/SSM checkpoint payload 重新计算，不能复用 TP2 的 9 MiB 数值。Full-only draft 仍独立存储并联合计费。本轮不扩展 shared prefill piecewise graph、task pipeline、PD/Host/store、CP/KV/layerwise split、多机或其他 speculative 算法；视频完整端到端验收不在本轮范围内。GLM 模型验收按用户要求排除。
