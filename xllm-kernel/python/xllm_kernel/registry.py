@@ -20,6 +20,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
+from xllm_kernel.platform import PlatformEnum
+
 _Kernel = TypeVar("_Kernel", bound=Callable[..., Any])
 
 
@@ -36,13 +38,18 @@ class OpContract:
 class KernelSpec:
     name: str
     contract: OpContract
-    device: str
+    platform: PlatformEnum
     execution_modes: tuple[str, ...]
     input_domain: str
     priority: int = 0
     solution: str = "native"
     variant: str = ""
     binding: str = ""
+
+    @property
+    def device(self) -> str:
+        """Return the platform identifier for reports and CLI output."""
+        return self.platform.value
 
 
 @dataclass(frozen=True)
@@ -101,13 +108,14 @@ class KernelRegistry:
     ) -> PreparedKernel:
         if not self._frozen:
             raise RuntimeError("freeze the kernel registry before preparing a kernel")
+        platform = PlatformEnum(device)
         candidates = []
         excluded = []
         for spec, function in sorted(self._entries.values(), key=lambda entry: entry[0].name):
             reason = ""
             if spec.contract != contract:
                 reason = "operation contract mismatch"
-            elif spec.device != device:
+            elif spec.platform != platform:
                 reason = f"requires device {spec.device}"
             elif execution_mode not in spec.execution_modes:
                 reason = f"does not support execution mode {execution_mode}"
@@ -133,7 +141,7 @@ def register_kernel(
     *,
     name: str,
     contract: OpContract,
-    device: str,
+    platform: PlatformEnum,
     execution_modes: tuple[str, ...],
     input_domain: str,
     solution: str,
@@ -152,7 +160,7 @@ def register_kernel(
     spec = KernelSpec(
         name=name,
         contract=contract,
-        device=device,
+        platform=platform,
         execution_modes=execution_modes,
         input_domain=input_domain,
         priority=priority,

@@ -251,7 +251,7 @@ layer 的修改。修改 C++ 或编译为原生 AOT 产物的 Python DSL kernel 
 2. 保持包独立：管理自己的导出，不导入其他平台包。
 3. 添加 `_custom_op.py`，实现该平台 C++ 算子的 FakeTensor 契约。
    在原生算子注册后，通过包的 `_initialize_runtime()` 钩子导入它。
-4. 修改 `xllm/python/platform.py` 中的 `Platform`，扩展 `PlatformEnum` 和
+4. 修改 `xllm-kernel/python/xllm_kernel/platform.py` 中的 `Platform`，扩展 `PlatformEnum` 和
    `_torch_device_type()`，使其识别 `<device>`；在 `xllm.python.initialize_runtime()`
    中增加对应分支。
 5. `python setup.py build --device <device>` 随后会暂存该包。

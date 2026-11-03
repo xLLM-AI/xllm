@@ -84,25 +84,28 @@ xLLM runtime。算子接收准备好的输入，不在 solution 内另建请求�
 
 ```python
 import torch
-import torch_npu
-from xllm_kernel import register_kernel
+
+from xllm_kernel import Platform, PlatformEnum, register_kernel
 from xllm_kernel.ops.normalization import RMS_NORM_CONTRACT
 
-_native_rms_norm = torch_npu.npu_rms_norm
+if Platform.is_npu():
+    import torch_npu
+
+    _native_rms_norm = torch_npu.npu_rms_norm
 
 
-@register_kernel(
-    name="npu.torch.rms_norm",
-    contract=RMS_NORM_CONTRACT,
-    device="npu",
-    execution_modes=("eager", "aclgraph"),
-    input_domain="torch_npu.npu_rms_norm tensor domain",
-    solution="torch",
-    binding="torch_npu",
-    priority=20,
-)
-def rms_norm(input: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
-    return _native_rms_norm(input, weight, epsilon=eps)[0]
+    @register_kernel(
+        name="npu.torch.rms_norm",
+        contract=RMS_NORM_CONTRACT,
+        platform=PlatformEnum.NPU,
+        execution_modes=("eager", "aclgraph"),
+        input_domain="torch_npu.npu_rms_norm tensor domain",
+        solution="torch",
+        binding="torch_npu",
+        priority=20,
+    )
+    def rms_norm(input: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+        return _native_rms_norm(input, weight, epsilon=eps)[0]
 ```
 
 ### 3.2 自动选择与准备阶段

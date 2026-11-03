@@ -18,6 +18,7 @@ import pytest
 import torch
 from xllm_kernel.numerics import verify as verification
 from xllm_kernel.numerics.suite import OperationSuite, PreparedCase
+from xllm_kernel.platform import PlatformEnum
 from xllm_kernel.registry import KernelRegistry, KernelSpec, OpContract, PreparedKernel
 
 _IMPLEMENTATION = "test.scale"
@@ -60,7 +61,7 @@ def cpu_runtime(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     contract = OpContract("test_scale", 1, (), False, "test")
     registry = KernelRegistry()
     registry.register(
-        KernelSpec(_IMPLEMENTATION, contract, "npu", ("eager", "aclgraph"), "CPU test double"),
+        KernelSpec(_IMPLEMENTATION, contract, PlatformEnum.NPU, ("eager", "aclgraph"), "CPU test double"),
         lambda *args: runtime.function(*args),
     )
     registry.freeze()
@@ -374,7 +375,7 @@ def test_another_operation_uses_the_same_cli_validation_and_reports(
         contract = OpContract("test_affine", 1, (), False, "reference")
         registry = KernelRegistry()
         registry.register(
-            KernelSpec("test.affine", contract, device, ("eager", "aclgraph"), "CPU test double"),
+            KernelSpec("test.affine", contract, PlatformEnum(device), ("eager", "aclgraph"), "CPU test double"),
             lambda values, scale: {"values": tuple(value * scale for value in values), "count": len(values)},
         )
         registry.freeze()

@@ -11,6 +11,7 @@ families and backend implementations.
 
 It features:
 
+- Shared lazy platform detection and platform-specific backend discovery.
 - Operator contracts that define numerical, mutation and aliasing semantics.
 - A preparation-only registry that separates implementation selection from
   model execution.
