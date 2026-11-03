@@ -25,6 +25,7 @@ limitations under the License.
 
 #include "core/framework/config/kv_cache_config.h"
 #include "core/kv_cache/layout/deepseek_v4_cache_policy.h"
+#include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/layout/static_kv_cache_layout.h"
 #include "framework/model/model_args.h"
 #include "runtime/options.h"
@@ -461,6 +462,62 @@ TEST(KVCacheEstimationTest, SharedStaticCapacityUsesTheWholeArenaBudget) {
   EXPECT_EQ(capacity.num_linear_state_blocks(), 25);
   EXPECT_EQ(capacity.cache_size_in_bytes(), 25 * 9216);
   EXPECT_EQ(capacity.linear_cache_size_in_bytes(), 0);
+}
+
+TEST_F(SharedStaticRuntimeEstimationTest, VlmTp4UsesOnlyDecoderCacheGeometry) {
+  ModelArgs args;
+  args.model_type("qwen3_5")
+      .hidden_size(4096)
+      .n_layers(4)
+      .n_heads(32)
+      .n_kv_heads(8)
+      .head_dim(128)
+      .layer_types({"linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention"})
+      .linear_num_key_heads(16)
+      .linear_num_value_heads(32)
+      .linear_key_head_dim(128)
+      .linear_value_head_dim(128)
+      .linear_conv_kernel_dim(4)
+      .mamba_ssm_dtype("float32")
+      .mm_num_hidden_layers(27)
+      .mm_hidden_size(1152)
+      .mm_projection_dim(4096);
+  runtime::Options options;
+  options.backend("vlm")
+      .block_size(128)
+      .num_speculative_tokens(4)
+      .max_seqs_per_batch(4)
+      .max_tokens_per_chunk_for_prefill(512);
+  KVCacheEstimateContext context;
+  context.dtype = torch::kBFloat16;
+  context.world_size = 4;
+  context.is_multimodal = true;
+  context.virtual_memory_cache_size = 64 * 1024 * 1024;
+  const KVCacheCapacity vlm = KVCacheEstimator(args).estimate(options, context);
+  const KVCacheShape vlm_shape(vlm, args, /*world_size=*/4);
+
+  args.model_type("qwen3_5_text").mm_num_hidden_layers(0).mm_hidden_size(0);
+  options.backend("llm");
+  context.is_multimodal = false;
+  const KVCacheCapacity text =
+      KVCacheEstimator(args).estimate(options, context);
+  const KVCacheShape text_shape(text, args, /*world_size=*/4);
+
+  EXPECT_EQ(vlm.n_layers(), 4);
+  EXPECT_EQ(vlm.num_full_attention_layers(), 1);
+  EXPECT_EQ(vlm.num_linear_attention_layers(), 3);
+  EXPECT_EQ(vlm.linear_ssm_checkpoint_stride(), 5);
+  EXPECT_EQ(vlm.shared_unit_bytes(), text.shared_unit_bytes());
+  EXPECT_EQ(vlm.shared_full_block_units(), text.shared_full_block_units());
+  EXPECT_EQ(vlm.shared_linear_state_units(), text.shared_linear_state_units());
+  EXPECT_EQ(vlm.n_blocks(), text.n_blocks());
+  EXPECT_EQ(vlm_shape.key_cache_shape(), text_shape.key_cache_shape());
+  EXPECT_EQ(vlm_shape.value_cache_shape(), text_shape.value_cache_shape());
+  EXPECT_EQ(vlm_shape.conv_cache_shape(), text_shape.conv_cache_shape());
+  EXPECT_EQ(vlm_shape.ssm_cache_shape(), text_shape.ssm_cache_shape());
 }
 
 TEST(KVCacheEstimationTest, SharedStaticIgnoresSeparateMegaGdnSlotLimit) {

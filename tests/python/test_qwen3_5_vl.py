@@ -144,7 +144,6 @@ def _model() -> Qwen3_5ForConditionalGeneration:
     decoder.embed_tokens = nn.Embedding.from_pretrained(torch.arange(64).view(16, 4).float())
     decoder.layers = nn.ModuleList()
     decoder.norm = _IdentityNorm()
-    decoder._inputs_embeds = None
     decoder.aux_hidden_capture = AuxHiddenCapture(())
     model.model = decoder
     return model
@@ -158,7 +157,7 @@ def test_multimodal_registry_selects_vision_composer(name: str) -> None:
     assert get_model_class("qwen3_5_text") is Qwen3_5ForCausalLM
 
 
-def test_mixed_image_video_rows_are_consumed_once() -> None:
+def test_explicit_image_video_rows_do_not_leak_into_decode() -> None:
     model = _model()
     tokens = torch.tensor([1, 10, 10, 2, 11, 3])
     image = torch.full((2, 4), 100.0)
@@ -168,8 +167,10 @@ def test_mixed_image_video_rows_are_consumed_once() -> None:
     expected[4] = video[0]
     merged = model.get_input_embeddings(tokens, image, video)
     torch.testing.assert_close(merged, expected)
-    torch.testing.assert_close(model.model(tokens, torch.zeros(3, 6, dtype=torch.long)), expected)
-    assert model.model._inputs_embeds is None
+    torch.testing.assert_close(model.model(tokens, torch.zeros(3, 6, dtype=torch.long), merged), expected)
+    torch.testing.assert_close(
+        model.model(tokens, torch.zeros(3, 6, dtype=torch.long)), model.model.embed_tokens(tokens)
+    )
     decode_tokens = torch.tensor([4, 5])
     torch.testing.assert_close(
         model.model(decode_tokens, torch.tensor([6, 7])), model.model.embed_tokens(decode_tokens)
@@ -178,14 +179,15 @@ def test_mixed_image_video_rows_are_consumed_once() -> None:
 
 def test_chunk_uses_only_current_visual_rows() -> None:
     model = _model()
-    for values in (torch.full((2, 4), 100.0), torch.full((1, 4), 200.0)):
+    for values in (torch.full((2, 4), 100.0), torch.full((2, 4), 200.0), torch.full((1, 4), 300.0)):
         tokens = torch.tensor([1] + [10] * values.shape[0])
         merged = model.get_input_embeddings(tokens, values)
         torch.testing.assert_close(merged[1:], values)
-        model.model(tokens, torch.zeros(3, len(tokens), dtype=torch.long))
+        hidden = model.model(tokens, torch.zeros(3, len(tokens), dtype=torch.long), merged)
+        torch.testing.assert_close(hidden[1:], values)
     text = torch.tensor([1, 2])
     torch.testing.assert_close(model.get_input_embeddings(text), model.model.embed_tokens(text))
-    assert model.model._inputs_embeds is None
+    torch.testing.assert_close(model.model(text, torch.tensor([6, 7])), model.model.embed_tokens(text))
 
 
 def test_empty_visual_rows_keep_text_only_execution_state() -> None:
@@ -193,15 +195,16 @@ def test_empty_visual_rows_keep_text_only_execution_state() -> None:
     tokens = torch.tensor([1, 2])
     merged = model.get_input_embeddings(tokens, torch.empty(0, 4), torch.empty(0, 4))
     torch.testing.assert_close(merged, model.model.embed_tokens(tokens))
-    assert model.model._inputs_embeds is None
+    torch.testing.assert_close(model.model(tokens, torch.tensor([0, 1]), merged), model.model.embed_tokens(tokens))
 
 
 @pytest.mark.parametrize("shape", [(1, 4), (3, 4), (2, 8)])
-def test_visual_shape_mismatch_is_rejected_before_storing_state(shape: tuple[int, int]) -> None:
+def test_visual_shape_mismatch_does_not_change_decoder_input(shape: tuple[int, int]) -> None:
     model = _model()
     with pytest.raises(ValueError, match="visual embedding shape"):
         model.get_input_embeddings(torch.tensor([10, 10]), torch.zeros(shape))
-    assert model.model._inputs_embeds is None
+    tokens = torch.tensor([1, 2])
+    torch.testing.assert_close(model.model(tokens, torch.tensor([0, 1])), model.model.embed_tokens(tokens))
 
 
 def test_qwen35_rejects_deepstack_before_constructing_decoder() -> None:

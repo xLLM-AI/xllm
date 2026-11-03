@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from itertools import accumulate
 from typing import TYPE_CHECKING, cast
 
@@ -41,6 +41,15 @@ if TYPE_CHECKING:
     from xllm.python.models.qwen3_5 import Qwen3_5Config
 
 _MEGA_GDN_CHUNK_SIZE = 128
+
+
+@dataclass(frozen=True, slots=True)
+class _GdnGraphStateSnapshot:
+    rows: tuple[tuple[torch.Tensor, torch.Tensor, torch.Tensor], ...]
+
+    def restore(self) -> None:
+        for cache, indices, values in self.rows:
+            cache.index_copy_(0, indices, values)
 
 
 def _build_mega_prefill_indices(
@@ -145,6 +154,31 @@ class Qwen3_5GdnMetadataBuilder:
         ):
             raise NotImplementedError("Qwen3.5 GDN ACL Graph supports decode and verify only")
         return self.build(input_batch, metadata)
+
+    def snapshot_graph_state(self, metadata: ExecutionMetadataSource) -> _GdnGraphStateSnapshot:
+        """Preserve live state when a Unified variant captures actual requests."""
+        if self._state_caches is None or self._checkpoint_stride is None:
+            raise RuntimeError("Qwen3.5 GDN state caches must be bound before capture")
+        if not getattr(metadata, "is_spec_verify", False):
+            raise ValueError("Unified GDN capture requires fixed-width verification")
+        _, state_indices = resolve_linear_state_io_indices(metadata)
+        if state_indices is None:
+            raise ValueError("Unified GDN capture requires logical state indices")
+        width = self._checkpoint_stride
+        if self._shared_layout is None:
+            conv_indices = state_indices.to(torch.long)
+            ssm_bases = conv_indices * width
+        else:
+            conv_indices = self._shared_layout.linear_state_indices(state_indices, role="conv").to(torch.long)
+            ssm_bases = self._shared_layout.linear_state_indices(state_indices, role="ssm").to(torch.long)
+        ssm_indices = (ssm_bases[:, None] + torch.arange(width, device=ssm_bases.device)).reshape(-1)
+        return _GdnGraphStateSnapshot(
+            tuple(
+                (cache, indices, cache.index_select(0, indices))
+                for state in self._state_caches.values()
+                for cache, indices in ((state.conv, conv_indices), (state.ssm, ssm_indices))
+            )
+        )
 
     def update_persistent(
         self, persistent_metadata: object, input_batch: InputBatch, metadata: ExecutionMetadataSource
@@ -317,6 +351,7 @@ class Qwen3_5GdnMetadataBuilder:
             ssm_write,
             cu_seqlens.to(device=device, dtype=torch.int32).contiguous(),
             _compute_mega_prefill_num_matrices(query_lengths, self._num_value_heads),
+            shared_checkpoint_stride=self._checkpoint_stride if self._shared_layout is not None else None,
         )
 
     def _with_shared_verify_indices(self, metadata: GdnVerifyMetadata) -> GdnVerifyMetadata:

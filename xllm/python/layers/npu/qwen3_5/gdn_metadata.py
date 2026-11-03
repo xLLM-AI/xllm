@@ -43,6 +43,7 @@ class GdnPrefillMetadata(GdnMetadata):
     ssm_write_indices: torch.Tensor
     cu_seqlens: torch.Tensor
     num_matrices: int
+    shared_checkpoint_stride: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
