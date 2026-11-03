@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU-only tests for the hardware typing helpers in ``xllm/python/platform.py``.
+"""CPU-only tests for the hardware typing helpers in ``xllm_kernel.platform``.
 
 The Ascend chip name comes from ``npu-smi info`` or from ``acl.get_soc_name()``,
 so both sources are faked here; availability of the real hardware is not
@@ -28,10 +28,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-
-from xllm.auto_config import utils
-
-Platform = utils.Platform
+from xllm_kernel.platform import Platform, PlatformEnum
 
 # Verbatim per-device rows from ``npu-smi info`` on an Ascend 910B2 host; the
 # chip name is the token in the Name column.
@@ -63,7 +60,7 @@ SMI_310P3_OUTPUT = """
 
 def _clear_platform_caches() -> None:
     """Drop the cached detections so a case re-reads the faked sources."""
-    for name in ("get_npu_chip", "get_ascend_soc_generation"):
+    for name in ("enum", "get_npu_chip", "get_ascend_soc_generation"):
         Platform.__dict__[name].__func__.cache_clear()
 
 
@@ -133,3 +130,22 @@ def test_smi_chip_wins_over_acl(monkeypatch: pytest.MonkeyPatch) -> None:
     _fake_acl(monkeypatch, "Ascend910_93")
 
     assert Platform.get_npu_chip() == "910b2"
+
+
+@pytest.mark.parametrize("expected", [PlatformEnum.NPU, PlatformEnum.CUDA, PlatformEnum.CPU])
+def test_framework_detection_is_cached_and_shared(monkeypatch: pytest.MonkeyPatch, expected: PlatformEnum) -> None:
+    from xllm_kernel.platform import current_platform
+
+    cuda = SimpleNamespace(is_available=lambda: expected is PlatformEnum.CUDA)
+    npu = SimpleNamespace(is_available=lambda: expected is PlatformEnum.NPU)
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=cuda, npu=npu))
+    monkeypatch.setitem(sys.modules, "torch.utils.cpp_extension", SimpleNamespace(HIP_HOME=None))
+    monkeypatch.setitem(sys.modules, "torch_npu", SimpleNamespace())
+    for module in ("ixformer", "torch_musa", "torch_mlu"):
+        monkeypatch.setitem(sys.modules, module, None)
+    assert Platform.enum() is expected
+    assert current_platform.device_type() == expected.value
+    monkeypatch.setitem(sys.modules, "torch", None)
+    assert Platform.enum() is expected
+    Platform.enum.cache_clear()
+    assert Platform.enum() is PlatformEnum.CPU

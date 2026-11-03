@@ -19,15 +19,21 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from importlib import import_module
 
+from xllm_kernel.platform import PlatformEnum
 from xllm_kernel.registry import OpContract, PreparedKernel
 
 
 @dataclass(frozen=True)
 class BackendModule:
     module: str
-    device: str
+    platform: PlatformEnum
     requires: tuple[str, ...]
     implementations: tuple[str, ...] = ()
+
+    @property
+    def device(self) -> str:
+        """Return the platform identifier for reports and CLI output."""
+        return self.platform.value
 
 
 @dataclass

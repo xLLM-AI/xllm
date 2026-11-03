@@ -7,13 +7,14 @@ from typing import Any
 import pytest
 import torch
 from xllm_kernel.numerics.tensor_case import Example, compare
+from xllm_kernel.platform import PlatformEnum
 from xllm_kernel.registry import KernelRegistry, KernelSpec, OpContract, PreparedKernel
 
 
 def _plan(function: Callable[..., Any], mutates: tuple[str, ...]) -> PreparedKernel:
     contract = OpContract("state", 1, mutates, False, "test")
     registry = KernelRegistry()
-    registry.register(KernelSpec("cpu.torch.state", contract, "cpu", ("eager",), "CPU tensors"), function)
+    registry.register(KernelSpec("cpu.torch.state", contract, PlatformEnum.CPU, ("eager",), "CPU tensors"), function)
     registry.freeze()
     return registry.prepare(contract, device="cpu", execution_mode="eager")
 

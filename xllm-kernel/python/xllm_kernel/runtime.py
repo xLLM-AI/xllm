@@ -24,6 +24,7 @@ from threading import RLock
 from types import MappingProxyType
 
 from xllm_kernel.catalog import load_operations
+from xllm_kernel.platform import Platform, PlatformEnum
 from xllm_kernel.registry import KernelRegistry, PreparedKernel
 from xllm_kernel.selection import resolve_overrides, select_kernel
 
@@ -34,12 +35,16 @@ _lock = RLock()
 
 def initialize(
     *,
-    device: str,
-    execution_mode: str = "aclgraph",
+    device: str | None = None,
+    execution_mode: str | None = None,
     overrides: Mapping[str, str] | None = None,
     operations: tuple[str, ...] | None = None,
 ) -> Mapping[str, PreparedKernel]:
     """Prepare the requested operation set once and return bindings keyed by name.
+
+    The device defaults to the shared Platform detection. Execution defaults to
+    ACLGraph on NPU and eager on other platforms; graph modes can be explicit.
+    Only modules for the requested platform are probed or imported.
 
     Available backend modules register their implementations on import. Missing
     optional dependencies exclude a module; errors in an installed backend
@@ -52,6 +57,10 @@ def initialize(
     can declare a subset so unused collectives do not require a process group.
     """
     global _prepared, _configuration
+    platform = Platform.enum() if device is None else PlatformEnum(device)
+    device = platform.value
+    if execution_mode is None:
+        execution_mode = "aclgraph" if platform == PlatformEnum.NPU else "eager"
     with _lock:
         catalog = load_operations()
         names = tuple(op.contract.operation for op in catalog)
@@ -68,14 +77,14 @@ def initialize(
             if configuration != _configuration:
                 raise RuntimeError("xllm_kernel is already initialized; restart the worker to change kernel policy")
             return _prepared
-        if any(not any(b.device == device for b in op.backends) for op in selected):
+        if any(not any(b.platform == platform for b in op.backends) for op in selected):
             raise ValueError(f"kernel catalog does not provide all required operation adapters for {device!r}")
 
         unavailable: dict[str, tuple[tuple[str, str], ...]] = {}
         for operation in selected:
             excluded = []
             for backend in operation.backends:
-                if backend.device != device:
+                if backend.platform != platform:
                     continue
                 # Parent packages precede submodules; do not probe a child of
                 # an absent optional package (find_spec would raise).

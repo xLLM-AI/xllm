@@ -22,6 +22,7 @@ from dataclasses import replace
 import pytest
 from xllm_kernel import runtime
 from xllm_kernel.catalog import BackendModule, Operation
+from xllm_kernel.platform import PlatformEnum
 from xllm_kernel.registry import KernelRegistry, KernelSpec, OpContract
 from xllm_kernel.selection import resolve_overrides, select_kernel
 
@@ -44,7 +45,9 @@ def _contract(name: str) -> OpContract:
 
 
 def _spec(contract: OpContract, solution: str, priority: int = 0) -> KernelSpec:
-    return KernelSpec(f"{contract.operation}.{solution}", contract, "cpu", ("eager",), "test", priority, solution)
+    return KernelSpec(
+        f"{contract.operation}.{solution}", contract, PlatformEnum.CPU, ("eager",), "test", priority, solution
+    )
 
 
 def test_loads_all_operations_then_selects_and_freezes(
@@ -52,8 +55,8 @@ def test_loads_all_operations_then_selects_and_freezes(
 ) -> None:
     add, multiply = _contract("add"), _contract("multiply")
     operations = (
-        Operation(add, (BackendModule("add.backends", "cpu", ()),)),
-        Operation(multiply, (BackendModule("multiply.backends", "cpu", ()),)),
+        Operation(add, (BackendModule("add.backends", PlatformEnum.CPU, ()),)),
+        Operation(multiply, (BackendModule("multiply.backends", PlatformEnum.CPU, ()),)),
     )
     imported = []
 
@@ -88,7 +91,7 @@ def _one_operation(
     monkeypatch: pytest.MonkeyPatch,
     registry: KernelRegistry,
 ) -> Operation:
-    operation = Operation(_contract("add"), (BackendModule("add.backends", "cpu", ()),))
+    operation = Operation(_contract("add"), (BackendModule("add.backends", PlatformEnum.CPU, ()),))
     monkeypatch.setattr(runtime, "load_operations", lambda: (operation,))
     monkeypatch.setattr(runtime, "import_module", lambda module: None)
     registry.register(_spec(operation.contract, "native", 10), lambda value: value + 1)
@@ -100,7 +103,7 @@ def test_requested_subset_does_not_import_unused_collectives(
     monkeypatch: pytest.MonkeyPatch, registry: KernelRegistry
 ) -> None:
     add = _one_operation(monkeypatch, registry)
-    collective = Operation(_contract("collective"), (BackendModule("requires_process_group", "cpu", ()),))
+    collective = Operation(_contract("collective"), (BackendModule("requires_process_group", PlatformEnum.CPU, ()),))
     monkeypatch.setattr(runtime, "load_operations", lambda: (add, collective))
     imported = []
     monkeypatch.setattr(runtime, "import_module", imported.append)
@@ -139,7 +142,9 @@ def test_missing_optional_parent_does_not_probe_its_child(
     monkeypatch: pytest.MonkeyPatch, registry: KernelRegistry
 ) -> None:
     operation = _one_operation(monkeypatch, registry)
-    operation.backends += (BackendModule("optional.backend", "cpu", ("missing_parent", "missing_parent.extension")),)
+    operation.backends += (
+        BackendModule("optional.backend", PlatformEnum.CPU, ("missing_parent", "missing_parent.extension")),
+    )
     probed = []
 
     def probe(name: str) -> None:
@@ -177,7 +182,7 @@ def test_explicit_override_never_bypasses_compatibility_or_falls_back(
 ) -> None:
     operation = _one_operation(monkeypatch, registry)
     bad = _spec(operation.contract, "wrong_device", 100)
-    registry.register(replace(bad, device="npu"), lambda value: value)
+    registry.register(replace(bad, platform=PlatformEnum.NPU), lambda value: value)
     registry.register(replace(bad, name="add.wrong_contract", contract=_contract("other")), lambda value: value)
     registry.register(replace(bad, name="add.wrong_mode", execution_modes=("aclgraph",)), lambda value: value)
     with pytest.raises(ValueError, match="no kernel for add"):
@@ -190,7 +195,7 @@ def test_optional_missing_backend_is_reported_without_import(
     monkeypatch: pytest.MonkeyPatch, registry: KernelRegistry
 ) -> None:
     operation = _one_operation(monkeypatch, registry)
-    operation.backends += (BackendModule("add.optional", "cpu", ("missing_sdk",)),)
+    operation.backends += (BackendModule("add.optional", PlatformEnum.CPU, ("missing_sdk",)),)
     monkeypatch.setattr(runtime, "find_spec", lambda name: None)
     imported = []
     monkeypatch.setattr(runtime, "import_module", imported.append)
@@ -218,7 +223,7 @@ def test_missing_second_operation_does_not_publish_first_binding(
     monkeypatch: pytest.MonkeyPatch, registry: KernelRegistry
 ) -> None:
     operation = _one_operation(monkeypatch, registry)
-    second = Operation(_contract("missing"), (BackendModule("missing.backend", "cpu", ("sdk",)),))
+    second = Operation(_contract("missing"), (BackendModule("missing.backend", PlatformEnum.CPU, ("sdk",)),))
     monkeypatch.setattr(runtime, "load_operations", lambda: (operation, second))
     monkeypatch.setattr(runtime, "find_spec", lambda name: None)
     with pytest.raises(ValueError, match="missing dependencies: sdk"):
@@ -248,3 +253,48 @@ def test_exact_name_wins_over_identically_named_solution(registry: KernelRegistr
     registry.freeze()
     selected = select_kernel(contract, device="cpu", execution_mode="eager", override="add.custom")
     assert selected.spec.name == "add.custom"
+
+
+@pytest.mark.parametrize("platform", [PlatformEnum.NPU, PlatformEnum.CUDA, PlatformEnum.CPU])
+def test_detected_platform_only_loads_matching_backend(
+    monkeypatch: pytest.MonkeyPatch, registry: KernelRegistry, platform: PlatformEnum
+) -> None:
+    from xllm_kernel.platform import Platform
+
+    contract = _contract("add")
+    backends = tuple(
+        BackendModule(f"add.{p.value}", p, (f"sdk_{p.value}",))
+        for p in (PlatformEnum.NPU, PlatformEnum.CUDA, PlatformEnum.CPU)
+    )
+    operation = Operation(contract, backends)
+    monkeypatch.setattr(runtime, "load_operations", lambda: (operation,))
+    monkeypatch.setattr(Platform, "enum", classmethod(lambda cls: platform))
+    probed, imported = [], []
+
+    def probe(name: str) -> object:
+        probed.append(name)
+        return object()
+
+    def load(name: str) -> None:
+        imported.append(name)
+        registry.register(KernelSpec(name, contract, platform, ("eager", "aclgraph"), "test"), lambda value: value + 1)
+
+    monkeypatch.setattr(runtime, "find_spec", probe)
+    monkeypatch.setattr(runtime, "import_module", load)
+    result = runtime.initialize()
+    assert result["add"].function(3) == 4
+    assert result["add"].spec.platform is platform
+    assert imported == [f"add.{platform.value}"]
+    assert probed == [f"sdk_{platform.value}"]
+    mode = "aclgraph" if platform is PlatformEnum.NPU else "eager"
+    assert runtime.initialize(device=platform.value, execution_mode=mode) is result
+
+
+def test_unknown_device_fails_before_backend_discovery(
+    monkeypatch: pytest.MonkeyPatch, registry: KernelRegistry
+) -> None:
+    imported = []
+    monkeypatch.setattr(runtime, "import_module", imported.append)
+    with pytest.raises(ValueError, match="PlatformEnum"):
+        runtime.initialize(device="typo")
+    assert not imported

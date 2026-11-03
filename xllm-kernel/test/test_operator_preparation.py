@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 import torch
 from xllm_kernel.catalog import load_operations
+from xllm_kernel.platform import Platform, PlatformEnum
 from xllm_kernel.registry import KernelRegistry
 
 
@@ -22,6 +23,7 @@ class _Vendor:
 def test_all_backend_modules_register_unique_variants_and_execute_public_binding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(Platform, "enum", classmethod(lambda cls: PlatformEnum.NPU))
     registry = KernelRegistry()
     monkeypatch.setattr(KernelRegistry, "_instance", registry)
     monkeypatch.setitem(sys.modules, "torch_npu", _Vendor())
@@ -55,3 +57,33 @@ def test_all_backend_modules_register_unique_variants_and_execute_public_binding
         for operation in operations:
             for backend in operation.backends:
                 sys.modules.pop(backend.module, None)
+
+
+@pytest.mark.parametrize("platform", [PlatformEnum.CPU, PlatformEnum.CUDA])
+def test_torch_modules_do_not_import_or_register_npu_on_other_platforms(
+    monkeypatch: pytest.MonkeyPatch, platform: PlatformEnum
+) -> None:
+    import importlib.abc
+
+    class _BlockNpuImports(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname: str, path: Any = None, target: Any = None) -> None:
+            if fullname == "torch_npu" or fullname.startswith("torch_npu."):
+                raise AssertionError(f"unexpected NPU import on {platform.value}: {fullname}")
+
+    registry = KernelRegistry()
+    monkeypatch.setattr(KernelRegistry, "_instance", registry)
+    monkeypatch.setattr(Platform, "enum", classmethod(lambda cls: platform))
+    monkeypatch.delitem(sys.modules, "torch_npu", raising=False)
+    monkeypatch.setattr(sys, "meta_path", [_BlockNpuImports(), *sys.meta_path])
+    modules = ("xllm_kernel.ops.activation.torch", "xllm_kernel.ops.normalization.torch")
+    for name in modules:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    try:
+        for name in modules:
+            importlib.import_module(name)
+        assert not registry.specs()
+        assert "torch_npu" not in sys.modules
+    finally:
+        for name in modules:
+            sys.modules.pop(name, None)
+            vars(importlib.import_module(name.rsplit(".", 1)[0])).pop("torch", None)

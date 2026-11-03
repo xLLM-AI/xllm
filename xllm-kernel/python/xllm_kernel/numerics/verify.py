@@ -55,7 +55,7 @@ def validation_session(
         if plan.spec.contract.operation != suite.operation:
             raise ValueError("prepared implementation does not match the operation suite")
         report["preparation_s"] = time.perf_counter() - prepare_start
-        report["selection"] = asdict(plan.spec)
+        report["selection"] = {**asdict(plan.spec), "platform": plan.spec.platform.value, "device": plan.spec.device}
         report["environment"]["device_name"] = torch.npu.get_device_name()
         cann_version = (
             Path(os.environ.get("ASCEND_HOME_PATH", "/usr/local/Ascend/ascend-toolkit/latest")) / "version.cfg"
