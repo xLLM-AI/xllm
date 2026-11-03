@@ -224,6 +224,22 @@ class SchedulerPolicy {
   const SchedulerOptions& options_;
 
  private:
+  enum class PrefillScheduleResult {
+    kScheduled,
+    kBudgetExhausted,
+    kBlocksExhausted,
+    kDeferred,
+  };
+
+  PrefillScheduleResult schedule_one_prefill_request(
+      RequestPriorityQueue* queue,
+      SchedulerState& state,
+      ScheduleBudget& budget,
+      std::vector<std::shared_ptr<Request>>& finished,
+      std::vector<size_t>& reserved_full_footprint,
+      std::vector<Sequence*>& prefill_sequences,
+      std::vector<size_t>& prefill_sequences_budget);
+
   bool collect_terminal(std::shared_ptr<Request>& request,
                         SchedulerState& state,
                         std::vector<std::shared_ptr<Request>>& finished);
