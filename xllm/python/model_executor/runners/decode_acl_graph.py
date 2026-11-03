@@ -166,10 +166,9 @@ class DecodeAclGraphRunner(AclGraphRunner):
         super().bind_layer_caches(layer_caches)
         self._has_index_cache = any(cache.index is not None for cache in layer_caches)
         self._has_linear_cache = any(cache.conv is not None or cache.ssm is not None for cache in layer_caches)
-        if getattr(self.attention_backend, "shared_kv_layout", None) is not None:
-            # The current MegaGdn verify operator has one state-index input;
-            # shared Conv/SSM pages require two role-specific index spaces.
-            self._model_owns_linear_spec_verify = False
+        self._model_owns_linear_spec_verify = any(
+            getattr(builder, "supports_linear_spec_verify_graph", False) for builder in self.execution_metadata_builders
+        )
         # Compressed-tail signature is fixed after bind; cache it once instead
         # of rescanning every layer cache on each decode step.
         self._uses_compressed_kpool_tail = any(is_compact_kpool_tail(cache.kpool_tail) for cache in layer_caches)
@@ -264,10 +263,9 @@ class DecodeAclGraphRunner(AclGraphRunner):
         except RuntimeError:
             return None
         is_expanded_spec_verify = expanded_view is not None
-        if is_expanded_spec_verify and getattr(self.attention_backend, "shared_kv_layout", None) is not None:
-            # Qwen3.5's packed verifier still exposes one logical state index,
-            # while a shared arena needs independent Conv/SSM physical rows.
-            # Let the eager path handle it until the verifier has that ABI.
+        if is_expanded_spec_verify and self._shared_kv_layout() is not None and not self._model_owns_linear_spec_verify:
+            # Shared KDA verification still uses a single state-index space.
+            # Model-owned GDN metadata supplies independent Conv/SSM rows.
             return None
         if (metadata.is_prefill or metadata.is_chunked_prefill) and not is_expanded_spec_verify:
             return None

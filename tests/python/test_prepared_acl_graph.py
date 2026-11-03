@@ -551,6 +551,24 @@ def test_adaptive_and_ordinary_prepared_bindings_can_coexist(runner: PreparedAcl
     assert len(runner._prepared_graphs) == 2
 
 
+def test_shared_recurrent_adaptive_graph_rejects_before_capture(runner: PreparedAclGraphRunner) -> None:
+    runner.max_batch = 8
+    runner.attention_backend.is_mla = False
+    runner.attention_backend.shared_kv_layout = object()
+    tokens, positions, metadata, inputs = _adaptive_inputs(torch.device("cpu"))
+    inputs = replace(
+        inputs,
+        linear_state_indices=torch.tensor([2, 1, 3], dtype=torch.int32),
+        num_accepted_tokens=torch.tensor([4, 2, 1], dtype=torch.int32),
+    )
+
+    with pytest.raises(ValueError, match="does not support shared Conv/SSM"):
+        runner.warmup_prepared(tokens, positions, metadata, dspark_adaptive=inputs)
+
+    runner._capture.assert_not_called()
+    runner.attention_backend.prepare.assert_not_called()
+
+
 @pytest.mark.parametrize("live,suppress", [(0, False), (1, False), (2, False), (3, False), (2, True)])
 @pytest.mark.parametrize("packed_kernel", [False, True], ids=["dense", "varlen"])
 def test_recurrent_verify_maps_refresh_request_prefixes_and_zero_padding(

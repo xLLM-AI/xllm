@@ -22,7 +22,7 @@ import torch
 
 pytest.importorskip("torch_npu", reason="NPU paged-attention tests require torch_npu")
 
-from xllm.python.attention.backend import LayerCache  # noqa: E402
+from xllm.python.attention.backend import LayerCache, SharedKVCacheLayout  # noqa: E402
 from xllm.python.attention.npu_paged_attention import (  # noqa: E402
     NpuPagedAttentionBackend,
     PagedAttentionGraphState,
@@ -1202,6 +1202,47 @@ def test_paged_workspace_sharing_respects_kv_capacity(monkeypatch: pytest.Monkey
     assert capacities == [[128, 128], [256, 256]]
     assert states[0].workspace.data_ptr() != states[1].workspace.data_ptr()
     assert states[0].workspace.data_ptr() == states[2].workspace.data_ptr()
+
+
+def test_shared_paged_graph_refreshes_private_physical_indices(monkeypatch: pytest.MonkeyPatch) -> None:
+    from xllm.python.model_executor.forward_context import AclGraphExecutionState
+
+    backend = _ordinary_backend()
+    backend._shared_kv_layout = SharedKVCacheLayout(128, 8, 4, 8, 2, 32, 262144)
+    monkeypatch.setattr(backend, "_allocate_graph_workspace", lambda *_args, **_kwargs: torch.empty(4))
+    executions = [AclGraphExecutionState({}) for _ in range(2)]
+    metadata = [_mla_metadata(), _mla_metadata()]
+    mappings = []
+    contexts = []
+    for index, (view, execution) in enumerate(zip(metadata, executions)):
+        view.block_table.add_(2 * index)
+        view.slot_mapping = torch.tensor([129 + 256 * index, -1], dtype=torch.int32)
+        context = ForwardContext(backend, torch.device("cpu"), view, [], execution_state=execution)
+        contexts.append(context)
+        with forward_context(context):
+            backend.prepare(view, graph_mode=True)
+            mappings.append(backend._full_slot_mapping(view))
+
+    first, second = [execution.paged_attention[2] for execution in executions]
+    table_pointer = first.block_table.data_ptr()
+    mapping_pointer = mappings[0].data_ptr()
+    assert table_pointer != second.block_table.data_ptr()
+    assert mapping_pointer != mappings[1].data_ptr()
+    assert second.block_table.tolist() == [[16], [24]]
+    assert mappings[1].tolist() == [3073, -1]
+
+    metadata[0].block_table.copy_(torch.tensor([[4], [5]], dtype=torch.int32))
+    metadata[0].slot_mapping.copy_(torch.tensor([641, -1], dtype=torch.int32))
+    with forward_context(contexts[0]):
+        backend.prepare(metadata[0], graph_mode=True)
+        refreshed_mapping = backend._full_slot_mapping(metadata[0])
+
+    assert first.block_table.data_ptr() == table_pointer
+    assert refreshed_mapping.data_ptr() == mapping_pointer
+    assert first.block_table.tolist() == [[32], [40]]
+    assert refreshed_mapping.tolist() == [5121, -1]
+    assert second.block_table.tolist() == [[16], [24]]
+    assert mappings[1].tolist() == [3073, -1]
 
 
 def _sparse_attention_out_args(

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
+from dataclasses import dataclass, replace
 
 import torch
 import torch.nn as nn
@@ -31,17 +32,40 @@ from xllm.python.layers.npu.qwen3_5.gdn_metadata import (
     GdnDummyMetadata,
     GdnMetadata,
     GdnPrefillMetadata,
+    GdnStateCache,
     GdnVerifyMetadata,
 )
 from xllm.python.layers.qwen3_5.common import Qwen3_5GatedDeltaNetConfig
 from xllm.python.layers.qwen3_5.gated_delta_net import load_gdn_weights
-from xllm.python.model_executor.forward_context import get_execution_context
+from xllm.python.model_executor.forward_context import (
+    get_execution_buffer,
+    get_execution_context,
+    in_acl_graph,
+)
 from xllm.python.model_loader import ParallelLoadContext, ScopedWeightLoader
 
 _MEGA_GDN_MAX_DECODE_BATCH_SIZE = 32
 _MEGA_GDN_MAX_VARLEN_BATCH_SIZE = 128
 _MEGA_GDN_FIXED_RMS_NORM_EPS = 1e-6
 _SUPPORTED_MEGA_PREFILL_HEAD_COUNTS = frozenset((1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64))
+
+
+@dataclass(frozen=True, slots=True)
+class _StagedGdnState:
+    """Compact fused-kernel state and its physical shared-arena destinations."""
+
+    conv: torch.Tensor
+    ssm: torch.Tensor
+    indices: torch.Tensor
+    conv_rows: torch.Tensor
+    ssm_rows: torch.Tensor
+    checkpoint_stride: int
+
+    def write_back(self, conv_cache: torch.Tensor, ssm_cache: torch.Tensor) -> None:
+        conv_cache.view(-1, conv_cache.shape[-1]).index_copy_(
+            0, self.conv_rows, self.conv[1:].reshape(-1, conv_cache.shape[-1])
+        )
+        ssm_cache.index_copy_(0, self.ssm_rows, self.ssm[self.checkpoint_stride :])
 
 
 class NpuQwen3_5GatedDeltaNet(nn.Module):
@@ -189,6 +213,61 @@ class NpuQwen3_5GatedDeltaNet(nn.Module):
         a = torch.nn.functional.linear(hidden, a_weight)
         return mixed_qkv, a, b, z
 
+    def _stage_shared_state(
+        self,
+        conv_cache: torch.Tensor,
+        ssm_cache: torch.Tensor,
+        conv_indices: torch.Tensor,
+        ssm_indices: torch.Tensor,
+        *,
+        checkpoint_stride: int,
+        conv_rows: int,
+    ) -> _StagedGdnState:
+        """Adapt distinct physical row spaces to MegaGdn's common slot ABI."""
+        batch_size = conv_indices.numel()
+        conv_shape = (batch_size + 1, conv_rows, self.conv_dim)
+        ssm_shape = ((batch_size + 1) * checkpoint_stride, *ssm_cache.shape[1:])
+        if in_acl_graph():
+            # Linear layers execute serially on the graph stream. Sharing only
+            # this temporary state avoids retaining a second model-sized cache.
+            conv = get_execution_buffer(
+                ("GDN_SHARED_CONV", conv_shape, conv_cache.dtype),
+                lambda: conv_cache.new_empty(conv_shape),
+                shared=True,
+            )
+            ssm = get_execution_buffer(
+                ("GDN_SHARED_SSM", ssm_shape, ssm_cache.dtype),
+                lambda: ssm_cache.new_empty(ssm_shape),
+                shared=True,
+            )
+            indices = get_execution_buffer(
+                ("GDN_SHARED_STATE_INDICES", batch_size),
+                lambda: torch.arange(1, batch_size + 1, dtype=torch.int32, device=conv_cache.device),
+                shared=True,
+            )
+        else:
+            conv = conv_cache.new_empty(conv_shape)
+            ssm = ssm_cache.new_empty(ssm_shape)
+            indices = torch.arange(1, batch_size + 1, dtype=torch.int32, device=conv_cache.device)
+        conv_offsets = torch.arange(conv_rows, dtype=torch.int64, device=conv_cache.device)
+        ssm_offsets = torch.arange(checkpoint_stride, dtype=torch.int64, device=ssm_cache.device)
+        conv_physical_rows = (
+            conv_indices.to(torch.int64).clamp_min(0)[:, None] * conv_cache.shape[1] + conv_offsets
+        ).reshape(-1)
+        ssm_physical_rows = (ssm_indices.to(torch.int64).clamp_min(0)[:, None] + ssm_offsets).reshape(-1)
+        # The null slot is private to these buffers. Padded sequences also get
+        # distinct dense slots, so fused kernels never share an update target.
+        conv[0].zero_()
+        ssm[:checkpoint_stride].zero_()
+        torch.index_select(
+            conv_cache.view(-1, self.conv_dim),
+            0,
+            conv_physical_rows,
+            out=conv[1:].view(-1, self.conv_dim),
+        )
+        torch.index_select(ssm_cache, 0, ssm_physical_rows, out=ssm[checkpoint_stride:])
+        return _StagedGdnState(conv, ssm, indices, conv_physical_rows, ssm_physical_rows, checkpoint_stride)
+
     def _decode(
         self,
         hidden: torch.Tensor,
@@ -222,53 +301,19 @@ class NpuQwen3_5GatedDeltaNet(nn.Module):
                 and ssm_read_state_indices is not None
                 and ssm_write_state_indices is not None
             )
-            # The decomposed decode kernels update one row in place and do not
-            # expose separate read/write indices.  Copy the source checkpoint
-            # into the scheduler-selected destination first, then run both
-            # kernels on the destination rows.  The copies are tensor
-            # operations, so ACL graph capture remains free of host/device
-            # synchronization and COW state transitions preserve their target.
-            conv_state.index_copy_(
-                0,
-                conv_write_state_indices,
-                conv_state.index_select(0, conv_read_state_indices),
+            staged = self._stage_shared_state(
+                conv_state,
+                ssm_state,
+                conv_read_state_indices,
+                ssm_read_state_indices,
+                checkpoint_stride=1,
+                conv_rows=self.conv_kernel_size - 1,
             )
-            ssm_state.index_copy_(
-                0,
-                ssm_write_state_indices,
-                ssm_state.index_select(0, ssm_read_state_indices),
-            )
-            # The target rows now contain the scheduler-selected read state,
-            # while the kernels can update them in place.
-            chunk_outputs = []
-            for start in range(0, batch_size, _MEGA_GDN_MAX_DECODE_BATCH_SIZE):
-                end = min(start + _MEGA_GDN_MAX_DECODE_BATCH_SIZE, batch_size)
-                mixed_qkv_chunk = kernels.causal_conv1d_decode(
-                    mixed_qkv[start:end].contiguous(),
-                    self.conv1d_weight,
-                    conv_state,
-                    conv_write_state_indices[start:end],
-                )
-                output = kernels.fused_sigmoid_gating_delta_rule_decode(
-                    mixed_qkv_chunk.contiguous(),
-                    a[start:end].contiguous(),
-                    b[start:end].contiguous(),
-                    self.A_log,
-                    self.dt_bias,
-                    ssm_state,
-                    ssm_write_state_indices[start:end],
-                    self.key_head_dim**-0.5,
-                )
-                if output.dim() == 4 and output.shape[1] == 1:
-                    output = output[:, 0]
-                output = kernels.rms_norm_sigmoid_gated(
-                    output,
-                    z[start:end].contiguous(),
-                    self.norm_weight,
-                    _MEGA_GDN_FIXED_RMS_NORM_EPS,
-                )
-                chunk_outputs.append(output)
-            return chunk_outputs[0] if len(chunk_outputs) == 1 else torch.cat(chunk_outputs, dim=0)
+            conv_cache, ssm_cache = conv_state, ssm_state
+            conv_state, ssm_state = staged.conv, staged.ssm
+            read_state_indices = write_state_indices = staged.indices
+        else:
+            staged = None
         chunk_outputs = []
         for start in range(0, batch_size, _MEGA_GDN_MAX_DECODE_BATCH_SIZE):
             end = min(start + _MEGA_GDN_MAX_DECODE_BATCH_SIZE, batch_size)
@@ -289,12 +334,39 @@ class NpuQwen3_5GatedDeltaNet(nn.Module):
                     True,
                 )
             )
-        return chunk_outputs[0] if len(chunk_outputs) == 1 else torch.cat(chunk_outputs, dim=0)
+        output = chunk_outputs[0] if len(chunk_outputs) == 1 else torch.cat(chunk_outputs, dim=0)
+        if staged is not None:
+            staged.write_back(conv_cache, ssm_cache)
+        return output
 
     def _verify(self, hidden: torch.Tensor, metadata: GdnVerifyMetadata) -> torch.Tensor:
         batch_size = metadata.state_indices.numel()
         width = metadata.query_width
         state_cache = metadata.state_caches[self.layer_id]
+        if metadata.conv_state_indices is not None or metadata.ssm_state_indices is not None:
+            if metadata.conv_state_indices is None or metadata.ssm_state_indices is None:
+                raise ValueError("Qwen3.5 shared verify requires both Conv/SSM physical state indices")
+            staged = self._stage_shared_state(
+                state_cache.conv,
+                state_cache.ssm,
+                metadata.conv_state_indices,
+                metadata.ssm_state_indices,
+                checkpoint_stride=width,
+                conv_rows=width + self.conv_kernel_size - 2,
+            )
+            compact_cache: dict[int, GdnStateCache] = {self.layer_id: staged}
+            output = self._verify(
+                hidden,
+                replace(
+                    metadata,
+                    state_caches=compact_cache,
+                    state_indices=staged.indices,
+                    conv_state_indices=None,
+                    ssm_state_indices=None,
+                ),
+            )
+            staged.write_back(state_cache.conv, state_cache.ssm)
+            return output
 
         if metadata.cu_seqlens is not None:
             mixed_qkv, a, b, z = (tensor.contiguous() for tensor in self._project_prefill_inputs(hidden))

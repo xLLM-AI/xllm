@@ -65,20 +65,21 @@ KVCacheManagerFactoryResult KVCacheManagerFactory::create(
   options.enable_shared_kv_cache(enable_shared_kv_cache);
   if (enable_shared_kv_cache) {
     const std::string& model_type = model_args.model_type();
-    CHECK(model_type == "qwen3_next" || model_type == "qwen3_5_text" ||
-          model_type == "qwen3_5_moe_text")
+    CHECK(model_type == "qwen3_next" ||
+          is_qwen3_5_target_model_type(model_type))
         << "Shared KV cache requires a supported Qwen hybrid model.";
     CHECK(options.enable_linear_state() && !options.enable_vmm_kvcache() &&
           !options.enable_host_offload() && !options.enable_disagg_pd() &&
-          !options.enable_kvcache_store() &&
-          options.num_speculative_tokens() == 0 &&
-          options.manager_types().empty() && shared_vmm_layout == nullptr)
+          !options.enable_kvcache_store() && options.manager_types().empty() &&
+          shared_vmm_layout == nullptr)
         << "Shared KV cache requires local Full and Linear cache managers.";
     CHECK(!host_validation_options.has_value() ||
           host_validation_options->host_blocks_factor == 0.0)
         << "Shared KV cache does not support Host storage.";
     CHECK_EQ(kv_cache_capacity.n_blocks(),
              kv_cache_capacity.num_linear_state_blocks());
+    CHECK_EQ(kv_cache_capacity.linear_ssm_checkpoint_stride(),
+             options.num_speculative_tokens() + 1);
     auto create_options =
         get_kv_cache_create_options(model_args, shape, /*is_spec_draft=*/false);
     create_options.num_layers(model_args.n_layers())

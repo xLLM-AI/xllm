@@ -126,19 +126,44 @@ void validate_shared_kv_cache_support(const ModelArgs& args,
   }
   const std::string& model_type = args.model_type();
   const std::string& model_impl = ModelConfig::get_instance().model_impl();
+  const bool python_model = ModelConfig::is_python_model_impl(model_impl);
   CHECK(Platform::is_npu() && options.backend() == "llm" &&
         options.task_type() == "generate" &&
-        (model_impl.empty() || model_impl == "native") &&
+        (python_model || model_impl.empty() || model_impl == "native") &&
         options.extension_impl().empty())
-      << "Shared KV cache requires the native NPU Torch LLM implementation.";
-  CHECK(model_type == "qwen3_next" || model_type == "qwen3_5_text" ||
-        model_type == "qwen3_5_moe_text")
-      << "Shared KV cache supports Qwen3Next and text-only Qwen3.5 models.";
-  CHECK(!options.enable_speculative_decode() &&
-        options.num_speculative_tokens() == 0 && !options.is_draft_engine() &&
-        !options.enable_graph() && !options.enable_prefill_piecewise_graph() &&
+      << "Shared KV cache requires a native or Python NPU Torch LLM.";
+  CHECK(!options.enable_prefill_piecewise_graph() &&
         !options.enable_task_pipeline())
-      << "Shared KV cache requires ordinary eager decoding.";
+      << "Shared KV cache does not support piecewise graphs or task pipelines.";
+  if (python_model) {
+    CHECK_EQ(options.npu_kernel_backend(), "TORCH");
+    const bool mtp_draft =
+        options.is_draft_engine() &&
+        (model_type == "qwen3_5_mtp" || model_type == "qwen3_5_moe_mtp");
+    CHECK(model_type == "qwen3_next" ||
+          is_qwen3_5_target_model_type(model_type) || mtp_draft)
+        << "Shared Python KV cache requires a supported Qwen hybrid target "
+           "or full-attention MTP draft.";
+    const bool speculative = options.enable_speculative_decode() ||
+                             options.num_speculative_tokens() > 0 ||
+                             options.is_draft_engine();
+    CHECK(
+        !speculative ||
+        (SpeculativeConfig::is_mtp_algorithm(options.speculative_algorithm()) &&
+         (is_qwen3_5_target_model_type(model_type) || mtp_draft)))
+        << "Shared Python KV cache supports Qwen3.5 MTP only.";
+    CHECK(!options.is_draft_engine() ||
+          (mtp_draft && !has_linear_attention_layers(args)))
+        << "Shared Python KV cache requires a full-attention-only MTP draft.";
+  } else {
+    CHECK(model_type == "qwen3_next" || model_type == "qwen3_5_text" ||
+          model_type == "qwen3_5_moe_text")
+        << "Shared native KV cache requires a supported Qwen hybrid model.";
+    CHECK(!options.enable_speculative_decode() &&
+          options.num_speculative_tokens() == 0 && !options.is_draft_engine() &&
+          !options.enable_graph())
+        << "Shared native KV cache requires ordinary eager decoding.";
+  }
   CHECK(!cache_config.enable_vmm_kvcache() && !options.enable_disagg_pd() &&
         options.instance_role() == InstanceRole::DEFAULT &&
         options.host_blocks_factor() == 0.0 && !options.enable_kvcache_store())
@@ -683,7 +708,8 @@ bool WorkerImpl::allocate_kv_cache_storage(
 #if defined(USE_NPU)
   create_options.enable_kv_cache_huge_page_allocator(use_huge_page_allocator);
 #endif
-  if (KVCacheConfig::get_instance().enable_shared_kv_cache()) {
+  if (KVCacheConfig::get_instance().enable_shared_kv_cache() &&
+      !options_.is_draft_engine()) {
     CHECK(!use_huge_page_allocator &&
           create_options.tensor_allocator() == nullptr &&
           kv_cache_transfer_ == nullptr)
@@ -2289,12 +2315,12 @@ bool WorkerImpl::init_model_impl(const std::string& model_weights_path,
   model_weights_path_ = model_weights_path;
 
   auto args = model_loader->model_args();
-  validate_shared_kv_cache_support(args, options_, parallel_args_);
   ModelRegistry::configure_mtp_args(
       args,
       options_.speculative_algorithm(),
       options_.is_draft_engine(),
       ModelConfig::is_python_model_impl(context_.get_model_impl()));
+  validate_shared_kv_cache_support(args, options_, parallel_args_);
   auto quant_args = model_loader->quant_args();
   const bool embedding_mode = options_.task_type() == "embed";
   args.embedding_mode(embedding_mode);
