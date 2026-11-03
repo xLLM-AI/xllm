@@ -41,7 +41,11 @@ class PhysicalPagePoolTestPeer final {
       std::function<int64_t()> memory_query,
       std::function<std::unique_ptr<PhysicalPage>(page_id_t)> factory) {
     std::lock_guard<std::mutex> lock(pool.mtx_);
-    pool.free_memory_query_ = std::move(memory_query);
+    pool.free_memory_query_ =
+        [memory_query = std::move(memory_query)]() -> std::optional<int64_t> {
+      const int64_t free_bytes = memory_query();
+      return free_bytes < 0 ? std::nullopt : std::optional<int64_t>(free_bytes);
+    };
     pool.allocator_memory_query_ = []() {
       return std::optional<AllocatorMemoryStats>{};
     };
@@ -130,6 +134,69 @@ TEST_F(PhysicalPagePoolTest, LazyInitializationSeparatesCapacityAndBacking) {
   EXPECT_TRUE(pool.batch_get(/*count=*/0).empty());
   EXPECT_TRUE(pool.batch_get(kCapacity + 1).empty());
   EXPECT_EQ(allocation_attempts_, 0);
+}
+
+TEST_F(PhysicalPagePoolTest, ReportsLogicalCapacityFailureReason) {
+  auto& pool = PhysicalPagePool::get_instance();
+
+  const PhysicalPageBatchResult result =
+      pool.batch_get_with_reason(kCapacity + 1);
+
+  EXPECT_TRUE(result.pages.empty());
+  EXPECT_EQ(result.failure_reason,
+            PhysicalPagePoolFailureReason::LOGICAL_CAPACITY);
+  EXPECT_STREQ(physical_page_pool_failure_reason_name(result.failure_reason),
+               "logical_capacity");
+  EXPECT_EQ(allocation_attempts_, 0);
+}
+
+TEST_F(PhysicalPagePoolTest, ReportsInsufficientFreeMemoryFailureReason) {
+  auto& pool = PhysicalPagePool::get_instance();
+  free_bytes_ = 0;
+
+  const PhysicalPageBatchResult result = pool.batch_get_with_reason(1);
+
+  EXPECT_TRUE(result.pages.empty());
+  EXPECT_EQ(result.failure_reason,
+            PhysicalPagePoolFailureReason::INSUFFICIENT_FREE_MEMORY);
+  EXPECT_EQ(pool.num_committed(), 0);
+  EXPECT_EQ(allocation_attempts_, 0);
+}
+
+TEST_F(PhysicalPagePoolTest, ReportsPhysicalPageCreationFailureReason) {
+  auto& pool = PhysicalPagePool::get_instance();
+  fail_on_attempt_ = 1;
+
+  const PhysicalPageBatchResult result = pool.batch_get_with_reason(2);
+
+  EXPECT_TRUE(result.pages.empty());
+  EXPECT_EQ(result.failure_reason,
+            PhysicalPagePoolFailureReason::PHYSICAL_PAGE_CREATION);
+  EXPECT_EQ(pool.num_available(), kCapacity);
+  EXPECT_EQ(pool.num_committed(), 0);
+  EXPECT_EQ(allocation_attempts_, 1);
+}
+
+TEST_F(PhysicalPagePoolTest, ReportsPostAllocationMemoryQueryFailureReason) {
+  reset_with_active_pages(/*initial_pages=*/1);
+  auto& pool = PhysicalPagePool::get_instance();
+  PhysicalPagePoolTestPeer::inject(
+      pool,
+      [this]() { return free_bytes_; },
+      [this](page_id_t page_id) {
+        ++allocation_attempts_;
+        free_bytes_ = -1;
+        return PhysicalPagePoolTestPeer::make_page(page_id);
+      });
+
+  const PhysicalPageBatchResult result = pool.batch_get_with_reason(1);
+
+  EXPECT_TRUE(result.pages.empty());
+  EXPECT_EQ(result.failure_reason,
+            PhysicalPagePoolFailureReason::POST_ALLOCATION_MEMORY_QUERY_FAILED);
+  EXPECT_EQ(pool.num_active(), 1);
+  EXPECT_EQ(pool.num_committed(), 0);
+  EXPECT_EQ(allocation_attempts_, 1);
 }
 
 TEST_F(PhysicalPagePoolTest, ActivatesAdditionalSlotsWhenStartupArenaIsFull) {
@@ -734,6 +801,29 @@ TEST_F(PhysicalPagePoolTest, FailedWeightReservationLeavesNoPinnedSlots) {
   fail_on_attempt_ = allocation_attempts_ + 2;
   EXPECT_TRUE(pool.allocate_pages_from_right(/*count=*/3).empty());
   EXPECT_EQ(pool.num_committed(), 0);
+  EXPECT_EQ(pool.num_available(), kCapacity);
+}
+
+TEST_F(PhysicalPagePoolTest, RejectsFragmentedContiguousAllocation) {
+  auto& pool = PhysicalPagePool::get_instance();
+  auto pages = pool.batch_get(kCapacity);
+  ASSERT_EQ(pages.size(), kCapacity);
+
+  std::vector<std::unique_ptr<PhysicalPage>> held_pages;
+  held_pages.reserve(3);
+  for (size_t i = 0; i < pages.size(); ++i) {
+    if (i % 2 == 0) {
+      held_pages.emplace_back(std::move(pages[i]));
+    } else {
+      pool.put(std::move(pages[i]));
+    }
+  }
+
+  EXPECT_EQ(pool.num_available(), 3);
+  EXPECT_EQ(pool.allocate_contiguous_from_right(/*count=*/2), -1);
+  EXPECT_EQ(pool.num_available(), 3);
+
+  pool.batch_put(held_pages);
   EXPECT_EQ(pool.num_available(), kCapacity);
 }
 
