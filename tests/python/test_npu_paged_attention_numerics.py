@@ -38,13 +38,18 @@ _OUTPUT_RTOL = 0.02
 _OUTPUT_ATOL = 1e-3
 
 
-@pytest.mark.parametrize("rows", [1, 5], ids=["draft-step", "draft-prefix"])
+@pytest.mark.parametrize("rows", [1, 3, 5], ids=["draft-step", "padded-prefix", "draft-prefix"])
+@pytest.mark.parametrize("commit_in_graph", [False, True], ids=["prepared-lengths", "late-device-commit"])
 @torch.inference_mode()
-def test_ordinary_draft_graph_reads_growing_kv_prefix(rows: int, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ordinary_draft_graph_reads_growing_kv_prefix(
+    rows: int, commit_in_graph: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from xllm.python.attention.backend import LayerCache
     from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend
     from xllm.python.attention.paged_kv_metadata import build_row_aligned_paged_kv_metadata
     from xllm.python.layers.attention import Attention
+    from xllm.python.model_executor.runners.acl_graph import AclGraphEntry
+    from xllm.python.model_executor.runners.base import ModelExecutionOutput
     from xllm.python.model_executor.runners.decode_acl_graph import DecodeAclGraphRunner
 
     monkeypatch.setattr("xllm.python.model_executor.runners.acl_graph._GRAPH_POOL", None)
@@ -58,21 +63,32 @@ def test_ordinary_draft_graph_reads_growing_kv_prefix(rows: int, monkeypatch: py
     caches = [LayerCache(key=key, value=value)]
     backend.bind_kv_caches(caches)
     attention = Attention(heads, kv_heads, dimension, dimension**-0.5, 0, 0)
-    query = torch.zeros(rows, heads * dimension, device=device, dtype=key.dtype)
-    projected = torch.zeros(rows, kv_heads * dimension, device=device, dtype=key.dtype)
+    token_capacity = 8 if rows == 3 else rows
+    committed_lengths = torch.zeros(token_capacity, dtype=torch.int32, device=device)
+    committed_lengths[:rows].fill_(1)
 
     class _DraftAttention(torch.nn.Module):
         def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+            count = input_ids.numel()
+            query = torch.zeros(count, heads * dimension, device=device, dtype=key.dtype)
+            projected = torch.zeros(count, kv_heads * dimension, device=device, dtype=key.dtype)
             return attention(query, projected, projected)
 
-    runner = DecodeAclGraphRunner(
+    class _CommittedDraftRunner(DecodeAclGraphRunner):
+        def _forward_static(self, entry: AclGraphEntry) -> ModelExecutionOutput:
+            if commit_in_graph:
+                count = entry.static_input_ids.numel()
+                entry.static_metadata.kv_seq_lens.copy_(committed_lengths[:count])
+            return super()._forward_static(entry)
+
+    runner = _CommittedDraftRunner(
         _DraftAttention(),
         backend,
         device,
-        rows,
+        token_capacity,
         capacity,
         is_spec_draft=True,
-        enable_graph_mode_decode_no_padding=True,
+        enable_graph_mode_decode_no_padding=rows != 3,
         device_kv_lengths=True,
     )
     runner.bind_layer_caches(caches)
@@ -104,16 +120,16 @@ def test_ordinary_draft_graph_reads_growing_kv_prefix(rows: int, monkeypatch: py
     runner.warmup(tokens, tokens, _metadata_for(8), is_graph_warmup=True)
     # With zero queries and keys, attention must average the entire live
     # prefix. This distinguishes a frozen short capture bound from the mask.
-    for length in (129, 1875, 7, 1987):
-        metadata = _metadata_for(length)
+    for length, bound in ((129, 256), (1875, 2048), (7, 256), (1987, 4096 - rows + 1)):
+        live_lengths = list(range(length, length + rows))
+        committed_lengths[:rows].copy_(torch.tensor(live_lengths, dtype=torch.int32, device=device))
+        metadata = _metadata_for(bound if commit_in_graph else length)
         decoded = runner.prepare_execution(tokens, metadata)
         assert decoded is not None
         graph_key = runner.warmup(tokens, tokens, metadata, decode_metadata=decoded)
         actual = runner.execute(tokens, tokens, metadata, graph_key=graph_key, decode_metadata=decoded)
         expected = (
-            torch.tensor(
-                [(page_size + (live_length - 1) / 2) / 2048 for live_length in metadata.kv_seq_lens_host_values]
-            )
+            torch.tensor([(page_size + (live_length - 1) / 2) / 2048 for live_length in live_lengths])
             .view(rows, 1)
             .expand(rows, heads * dimension)
         )

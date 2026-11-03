@@ -263,15 +263,15 @@ def test_prepared_mtp_keeps_live_device_lengths(width: int, expanded: bool) -> N
     assert prepared.kv_capacity == 128
 
 
-@pytest.mark.parametrize("width", [1, 4])
-def test_device_length_graph_skips_unused_tnd_workspace(width: int, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("width", [1, 2, 4])
+def test_block_device_length_graph_skips_unused_tnd_workspace(width: int, monkeypatch: pytest.MonkeyPatch) -> None:
     from xllm.python.model_executor.forward_context import AclGraphExecutionState
 
     backend = _ordinary_backend()
     metadata = _ordinary_metadata(paged=True)
     metadata.q_seq_lens.fill_(width)
     metadata.q_cu_seq_lens_host_values = [width, 2 * width]
-    metadata.is_chunked_prefill = width > 1
+    metadata.is_chunked_prefill = True
     metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=True)
     execution = AclGraphExecutionState({}, {})
     backend._paged_graph_state = object()

@@ -381,6 +381,12 @@ class AclGraphRunner(BaseRunner):
         ):
             entry.static_output = self._forward_static(entry)
         entry.graph_tasks = capture_context.tasks
+        if any(task.prepare is not None for task in entry.graph_tasks):
+            self._initialize_task_updates()
+            with torch.npu.stream(self._update_stream):
+                for task in entry.graph_tasks:
+                    if task.prepare is not None:
+                        task.prepare.initialize()
         logger.info(
             "Python ACL graph captured: model=%s bucket=%d mtp_topk=%s tasks=%d",
             type(self.model).__name__,
@@ -422,6 +428,8 @@ class AclGraphRunner(BaseRunner):
         graph_tasks: list[AclGraphTask],
     ) -> None:
         for task in graph_tasks:
+            if task.prepare is not None:
+                task.prepare.refresh()
             torch.npu.graph_task_update_begin(stream, task.handle)
             task.update()
             torch.npu.graph_task_update_end(stream)

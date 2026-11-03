@@ -138,7 +138,11 @@ class DecodeAclGraphRunner(AclGraphRunner):
         # runner's owned static buffers, as in the unified MTP graph runner.
         if enable_graph_mode_decode_no_padding:
             self._capture_error_mode = "thread_local"
-        self._serial_workspace_pool: list[torch.Tensor] | None = [] if enable_graph_mode_decode_no_padding else None
+        # Capacity-tier FIA graphs replay serially too. Sharing their scratch
+        # storage avoids retaining a full-context workspace for every bucket.
+        self._serial_workspace_pool: list[torch.Tensor] | None = (
+            [] if enable_graph_mode_decode_no_padding or device_kv_lengths else None
+        )
         if not 1 <= spec_verify_width <= 17 or (is_spec_draft and spec_verify_width != 1):
             raise ValueError("Speculative verify graph width must be in [1, 17], with width one for draft models")
         self._spec_verify_width = spec_verify_width

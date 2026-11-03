@@ -52,6 +52,7 @@ from xllm.python.model_executor.forward_context import (
     get_execution_buffer,
     get_execution_workspace,
     get_forward_context,
+    get_forward_context_or_none,
     in_acl_graph,
 )
 
@@ -193,6 +194,36 @@ class _PreparedPagedAttention:
     workspace_query_capacity: int = 0
 
 
+@dataclass(slots=True)
+class _PagedAttentionDeviceLengths:
+    device: torch.Tensor
+    host: torch.Tensor
+    values: list[int]
+    ready: torch.npu.ExternalEvent
+    captured: bool = False
+    readback: torch.npu.NPUGraph | None = None
+
+    def initialize(self) -> None:
+        stream = torch.npu.current_stream()
+        self.readback = torch.npu.NPUGraph()
+        self.readback.capture_begin(capture_error_mode="relaxed")
+        self.ready.wait(stream)
+        self.host.copy_(self.device, non_blocking=True)
+        self.ready.reset(stream)
+        self.readback.capture_end()
+
+    def refresh(self) -> None:
+        stream = torch.npu.current_stream()
+        # CANN requires one fixed wait operation per captured record. Replay
+        # the same tiny transfer graph instead of issuing new stream waits.
+        assert self.readback is not None
+        self.readback.replay()
+        stream.synchronize()
+        # Padded rows have no live KV and their outputs are discarded. FIA
+        # still requires a positive bound for their singleton queries.
+        self.values[:] = [max(1, length) for length in self.host.tolist()]
+
+
 @dataclass(frozen=True, slots=True)
 class PagedAttentionGraphState:
     """One entry's paged attention buffers and captured Host parameter lists."""
@@ -203,6 +234,7 @@ class PagedAttentionGraphState:
     block_table: torch.Tensor
     query: list[int]
     kv: list[int]
+    device_lengths: _PagedAttentionDeviceLengths | None = None
 
 
 def write_mla_paged_cache(
@@ -649,12 +681,31 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 # The Slot owns conservative Host bounds, not accepted Device
                 # lengths. Captured FIA tasks retain this entry-private list.
                 prepared.actual_seq_kv[:] = metadata.kv_seq_lens_host_values
-            if graph_mode and prepared.device_kv_lengths is None:
+            context = get_forward_context_or_none()
+            device_decode = (
+                graph_mode
+                and prepared.device_kv_lengths is not None
+                and prepared.query_lengths[0] == 1
+                # Block drafts use chunked prefill without verification and
+                # retain BNSD attention even for singleton query rows.
+                and (not metadata.is_chunked_prefill or metadata.is_spec_verify)
+                and context is not None
+                and context.execution_state is not None
+            )
+            if graph_mode and device_decode:
+                self._actual_seq_kv = [prepared.kv_capacity] * len(prepared.actual_seq_q)
+                self._prepare_paged_graph(
+                    workspace_kv_length=prepared.kv_capacity,
+                    device_kv_lengths=prepared.device_kv_lengths,
+                )
+                context = get_forward_context().acl_graph
+                if context is not None:
+                    self._paged_graph_state.device_lengths.ready.record(context.stream)
+            elif graph_mode and prepared.device_kv_lengths is None:
                 self._prepare_paged_graph()
             else:
-                # Device-length attention captures the BNSD operator directly.
-                # It never consumes the TND .out buffers or task-update state;
-                # retaining that unused workspace for every tier wastes HBM.
+                # Eager, unowned and multi-query attention do not retain
+                # TND task-update storage.
                 self._paged_graph_state = None
             return
         self._metadata = metadata
@@ -816,7 +867,12 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             and kv_seq_lens.dtype == torch.int32
         )
 
-    def _prepare_paged_graph(self, *, workspace_kv_length: int | None = None) -> None:
+    def _prepare_paged_graph(
+        self,
+        *,
+        workspace_kv_length: int | None = None,
+        device_kv_lengths: torch.Tensor | None = None,
+    ) -> None:
         if self._block_table_i32 is None:
             raise ValueError("paged graph attention requires a block table")
         graph_batch_size = self._block_table_i32.shape[0]
@@ -825,6 +881,16 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             raise RuntimeError("paged graph attention requires an execution entry")
         state = graph_state.paged_attention.get(graph_batch_size)
         if state is None:
+            kv_values: list[int] = []
+            device_lengths = None
+            if device_kv_lengths is not None:
+                with torch.inference_mode(False):
+                    host_lengths = torch.empty(
+                        device_kv_lengths.shape, dtype=torch.int32, device="cpu", pin_memory=True
+                    )
+                device_lengths = _PagedAttentionDeviceLengths(
+                    device_kv_lengths, host_lengths, kv_values, torch.npu.ExternalEvent()
+                )
             workspace_actual_seq_kv = self._actual_seq_kv
             if workspace_kv_length is not None:
                 workspace_actual_seq_kv = [workspace_kv_length] * graph_batch_size
@@ -851,7 +917,8 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 ),
                 block_table=self._block_table_i32,
                 query=[],
-                kv=[],
+                kv=kv_values,
+                device_lengths=device_lengths,
             )
             graph_state.paged_attention[graph_batch_size] = state
         # Replace values, not list identities: capture-time task closures hold
@@ -2101,6 +2168,16 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             if isinstance(prepared, _PreparedPagedAttention) and prepared.device_kv_lengths is not None:
                 if layer.causal and not block_window and prepared.query_lengths[0] != 1:
                     raise ValueError("causal device-length attention requires singleton packed queries")
+                context = get_forward_context_or_none()
+                if (
+                    layer.causal
+                    and not block_window
+                    and prepared.query_lengths[0] == 1
+                    and context is not None
+                    and context.acl_graph is not None
+                    and self._paged_graph_state is not None
+                ):
+                    return self._decode(q_3d, k_cache, v_cache, metadata, num_tokens)
                 # Host lengths are safe upper bounds prepared before the prior
                 # Slot accepts its prefix. Mask that bounded tail using the
                 # exact device lengths; never read acceptance back to Host.
@@ -2352,7 +2429,13 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         v_flat = v_cache.view(v_cache.size(0), block_size, -1)
 
         prepared = getattr(metadata, "prepared_attention_state", None)
-        if isinstance(prepared, _PreparedPagedAttention) and prepared.device_kv_lengths is not None:
+        context = get_forward_context_or_none()
+        graph_context = context.acl_graph if context is not None else None
+        if (
+            isinstance(prepared, _PreparedPagedAttention)
+            and prepared.device_kv_lengths is not None
+            and graph_context is None
+        ):
             if any(width != 1 for width in prepared.query_lengths) or len(prepared.query_lengths) != num_tokens:
                 raise ValueError("device-length decode requires one query per expanded attention row")
             # The speculative prefix is committed on Device after Host
@@ -2382,7 +2465,6 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             )
             return output.transpose(1, 2).reshape(num_tokens, self.num_heads * self.head_dim)
 
-        graph_context = get_forward_context().acl_graph
         if graph_context is not None:
             state = self._paged_graph_state
             if state is None:
@@ -2394,6 +2476,12 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             output = state.output
             lse = state.lse
             stream = graph_context.stream
+            prepare = None
+            if state.device_lengths is not None and not state.device_lengths.captured:
+                # The graph prefix signals readiness after producing Slot
+                # lengths. Refresh once before updating any layer's group.
+                state.device_lengths.captured = True
+                prepare = state.device_lengths
             event = torch.npu.ExternalEvent()
             event.wait(stream)
             event.reset(stream)
@@ -2430,7 +2518,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                     lse=lse,
                 )
 
-            graph_context.tasks.append(AclGraphTask(event, handle, _update_fia_args))
+            graph_context.tasks.append(AclGraphTask(event, handle, _update_fia_args, prepare))
             return output.reshape(num_tokens, self.num_heads * self.head_dim)
 
         if self._use_fia_v2:

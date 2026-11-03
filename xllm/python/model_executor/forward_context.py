@@ -105,11 +105,20 @@ class KVLoadContext:
             raise RuntimeError("Python model did not consume every Host KV load group")
 
 
+class AclGraphTaskInput(Protocol):
+    """Initialize after model capture, then snapshot before task updates."""
+
+    def initialize(self) -> None: ...
+
+    def refresh(self) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class AclGraphTask:
     event: object
     handle: object
     update: Callable[[], None]
+    prepare: AclGraphTaskInput | None = None
 
 
 @dataclass(slots=True)
