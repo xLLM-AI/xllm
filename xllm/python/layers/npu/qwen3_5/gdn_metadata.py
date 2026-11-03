@@ -72,6 +72,10 @@ class GdnVerifyMetadata(GdnMetadata):
     # Device prefix endpoints for the fused packed verifier. Cache strides
     # and previous acceptance counts remain independent of current widths.
     cu_seqlens: torch.Tensor | None = None
+    # Physical role rows of the shared arena. The fused verifier consumes a
+    # compact per-batch state view because its ABI has one common slot index.
+    conv_state_indices: torch.Tensor | None = None
+    ssm_state_indices: torch.Tensor | None = None
 
 
 @dataclass(frozen=True, slots=True)

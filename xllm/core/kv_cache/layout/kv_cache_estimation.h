@@ -155,4 +155,14 @@ SharedKPoolPlan plan_shared_kpool(KVCacheCapacity target_cap,
                                   KVCacheCapacity draft_cap,
                                   const ModelArgs& draft_args);
 
+// The shared target arena and dense full-attention MTP draft use the same
+// logical IDs while owning separate tensor storage on one device.
+struct SharedStaticKVCachePlan {
+  KVCacheCapacity target;
+  KVCacheCapacity draft;
+};
+
+SharedStaticKVCachePlan plan_shared_static_kv_cache(KVCacheCapacity target_cap,
+                                                    KVCacheCapacity draft_cap);
+
 }  // namespace xllm
