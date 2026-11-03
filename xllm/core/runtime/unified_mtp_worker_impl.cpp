@@ -43,7 +43,10 @@ runtime::Options unified_leaf_options(const runtime::Options& options,
       .is_draft_engine(draft)
       .enable_graph_aux_hidden_states(true);
   if (draft) {
-    leaf_options.num_decoding_tokens(1).num_speculative_tokens(0);
+    leaf_options.backend("llm")
+        .mtp_draft_prefix_width(options.num_speculative_tokens() + 1)
+        .num_decoding_tokens(1)
+        .num_speculative_tokens(0);
   }
   return leaf_options;
 }
