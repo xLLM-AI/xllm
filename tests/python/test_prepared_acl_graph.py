@@ -2045,6 +2045,7 @@ def test_prepared_executor_obeys_admission_and_propagates_replay_failure(runner:
     executor = object.__new__(ModelExecutor)
     executor._kv_bound = True
     executor.requires_input_batch_metadata = False
+    executor._eager_multimodal_prefill = False
     executor._prepared_mtp = False
     executor._prepared_block_draft = False
     executor.layerwise_split_size = 1
