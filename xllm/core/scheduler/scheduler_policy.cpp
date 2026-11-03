@@ -328,259 +328,283 @@ void SchedulerPolicy::schedule_prefill_from_queue(
   // Reuse scratch capacity across requests within this scheduling round.
   std::vector<Sequence*> prefill_sequences;
   std::vector<size_t> prefill_sequences_budget;
-  std::vector<KVCacheManager::KVCacheReservation> reservations;
-
-  while (!budget.kv_allocation_deferred && !queue->empty() &&
-         budget.remaining_seq_budget > 0 && budget.remaining_token_budget > 0 &&
-         budget.latency_budget > budget.estimate_latency) {
-    std::shared_ptr<Request> request(queue->top());
-    if (collect_terminal(request, state, finished)) {
-      queue->pop_top();
-      continue;
-    }
-
-    const size_t num_sequences = request->sequences().size();
-    if (!request->preempted()) {
-      CHECK(num_sequences == 1 || num_sequences == request->best_of())
-          << "Waiting request should have either 1 or best_of("
-          << request->best_of() << ") sequences, got " << num_sequences;
-    }
-
-    // Reject only requests whose complete KV footprint cannot fit in the
-    // configured cache. A failed physical allocation is transient pressure and
-    // must leave the request queued for a later scheduling pass.
-    reservations.clear();
-    reservations.reserve(num_sequences);
-    for (const auto& sequence : request->sequences()) {
-      if (sequence->finished()) {
-        continue;
-      }
-      reservations.emplace_back(sequence.get(), sequence->num_tokens());
-    }
-    if (state.kv_cache_manager->exceeds_total_capacity(reservations)) {
-      queue->pop_top();
-      if (state.release_failed_request) {
-        state.release_failed_request(request);
-      }
-      clear_kv_allocation_failures(request.get());
-      clear_mtp_bootstrap(request.get(), state);
-      state.kv_cache_manager->deallocate(request.get());
-      state.output_dispatcher->process_failed_request(
-          request,
-          {StatusCode::RESOURCE_EXHAUSTED,
-           "Request exceeds total KV cache capacity"});
-      continue;
-    }
-
-    // Defer prefill for work that can make progress and release blocks. An
-    // idle cache must still attempt allocation, including chunk continuations
-    // whose own blocks already exceed the utilization threshold.
-    if (!options_.enable_disagg_pd() &&
-        (!state.running_sequences.empty() || !state.decode_queue.empty()) &&
-        state.kv_cache_manager->kv_cache_utilization() >=
-            SchedulerConfig::get_instance()
-                .prefill_scheduling_memory_usage_threshold()) {
-      blocks_exhausted = true;
-      break;
-    }
-
-    bool reserve_full_prompt = false;
-    // Full-footprint admission (fresh requests only): check that the system
-    // has enough capacity for this request's full KV plus all already-reserved
-    // blocks. In-flight chunked requests are always allowed to continue.
-    if (batch_mode_.enable_chunked_prefill &&
-        request->sequences()[0]->kv_state().kv_cache_tokens_num() == 0) {
-      const size_t block_size =
-          static_cast<size_t>(state.kv_cache_manager->block_size());
-      const size_t full_footprint =
-          (request->sequences()[0]->num_tokens() + block_size - 1) / block_size;
-      // Predict and pre-assign the target DP rank so that the subsequent
-      // allocation reuses the same rank. This keeps the admission check
-      // consistent with the allocation path (same available-blocks metric
-      // and round-robin tie-break, see KVCacheManager::select_dp_rank).
-      const int32_t dp_rank = state.kv_cache_manager->select_dp_rank();
-      request->sequences()[0]->set_dp_rank(dp_rank);
-      // The cache implementation owns static versus elastic capacity. Virtual
-      // address space is not evidence of currently admissible physical memory.
-      const size_t total_blocks =
-          state.kv_cache_manager->admission_capacity(dp_rank);
-      if (reserved_full_footprint[dp_rank] + full_footprint > total_blocks) {
-        if (!state.running_sequences.empty() || !state.decode_queue.empty()) {
-          blocks_exhausted = true;
-          break;
-        }
-        // An idle elastic cache may still report capacity sampled before the
-        // previous request released its pages, or zero after a failed query.
-        // Confirm the complete prompt with real mappings before rejecting it.
-        // Reserve only after token/latency checks, without advancing compute.
-        reserve_full_prompt = true;
-      }
-    }
-
-    size_t allocated_tokens = 0;
-    size_t allocated_seqs = 0;
-    double allocated_estimate_latency = 0;
-    bool can_schedule = true;
-    bool allocation_deferred = false;
-    prefill_sequences.clear();
-    prefill_sequences_budget.clear();
-    prefill_sequences.reserve(request->sequences().size());
-    prefill_sequences_budget.reserve(request->sequences().size());
-
-    for (auto& prefill_sequence : request->sequences()) {
-      if (prefill_sequence->finished()) {
-        continue;
-      }
-      if (should_limit_prefill_requests(state)) {
-        const int32_t dp_rank =
-            select_prefill_dp_rank(prefill_sequence.get(), state);
-        if (dp_rank < 0) {
-          LOG_EVERY_N(INFO, 100)
-              << "[prefill_cap] no eligible DP rank is below the cap of "
-              << state.model_args.max_concurrent_prefills_per_dp()
-              << " prefill requests; deferring remaining prefills";
-          can_schedule = false;
-          break;
-        }
-        prefill_sequence->set_dp_rank(dp_rank);
-      } else if (!budget.dp_group_token_caps.empty() &&
-                 prefill_sequence->dp_rank() < 0) {
-        // Non-chunked requests need a rank before allocation so the fair
-        // budget is charged to the same DP that will allocate their blocks.
-        prefill_sequence->set_dp_rank(state.kv_cache_manager->select_dp_rank());
-      }
-
-      size_t num_tokens = compute_prefill_tokens(
-          prefill_sequence.get(),
-          budget.remaining_token_budget - allocated_tokens,
-          state);
-      if (!budget.dp_group_token_caps.empty()) {
-        const int32_t dp_rank = prefill_sequence->dp_rank();
-        CHECK(dp_rank >= 0 &&
-              dp_rank < static_cast<int32_t>(budget.dp_group_token_caps.size()))
-            << "seq dp_rank=" << dp_rank << " out of range [0,"
-            << budget.dp_group_token_caps.size() << ")";
-        const size_t group_remaining = budget.dp_group_token_caps[dp_rank] -
-                                       budget.dp_group_token_used[dp_rank];
-        num_tokens = std::min(num_tokens, group_remaining);
-      }
-      if (num_tokens == 0) {
-        continue;
-      }
-
-      if (budget.remaining_token_budget < allocated_tokens + num_tokens ||
-          budget.remaining_seq_budget < allocated_seqs + 1) {
-        can_schedule = false;
+  auto has_schedule_budget = [&]() {
+    return !budget.kv_allocation_deferred && !queue->empty() &&
+           budget.remaining_seq_budget > 0 &&
+           budget.remaining_token_budget > 0 &&
+           budget.latency_budget > budget.estimate_latency;
+  };
+  auto stop_on_result = [&](PrefillScheduleResult result) -> bool {
+    switch (result) {
+      case PrefillScheduleResult::kScheduled:
+        return false;
+      case PrefillScheduleResult::kBudgetExhausted:
         budget_exhausted = true;
-        break;
-      }
-
-      // Latency check.
-      double seq_estimate_latency = 0;
-      if (options_.enable_latency_aware_schedule()) {
-        size_t kv_cache_tokens_num =
-            prefill_sequence->kv_state().kv_cache_tokens_num();
-        seq_estimate_latency = state.profile_manager->predict_step_time(
-            num_tokens + kv_cache_tokens_num, kv_cache_tokens_num, false);
-        if (budget.estimate_latency + allocated_estimate_latency +
-                seq_estimate_latency >
-            budget.latency_budget) {
-          can_schedule = false;
-          budget_exhausted = true;
-          break;
-        }
-      }
-
-      size_t actual_tokens = 0;
-      if (!allocate_for_prefill(prefill_sequence.get(),
-                                num_tokens,
-                                &actual_tokens,
-                                state,
-                                /*skip_shared=*/false,
-                                reserve_full_prompt)) {
-        can_schedule = false;
-        allocation_deferred = true;
-        budget.kv_allocation_deferred = true;
-        break;
-      }
-
-      prefill_sequences_budget.emplace_back(actual_tokens);
-      prefill_sequences.emplace_back(prefill_sequence.get());
-      allocated_tokens += actual_tokens;
-      allocated_seqs += 1;
-      allocated_estimate_latency += seq_estimate_latency;
-      if (!budget.dp_group_token_used.empty()) {
-        budget.dp_group_token_used[prefill_sequence->dp_rank()] +=
-            actual_tokens;
-      }
-    }
-
-    if (!can_schedule &&
-        (prefill_sequences.empty() || request->check_beam_search())) {
-      if (!budget.dp_group_token_used.empty()) {
-        for (size_t i = 0; i < prefill_sequences.size(); ++i) {
-          budget.dp_group_token_used[prefill_sequences[i]->dp_rank()] -=
-              prefill_sequences_budget[i];
-        }
-      }
-      if (allocation_deferred) {
-        // A failed VMM mapping can recover after resident work or an
-        // in-flight batch releases its pages. Bound consecutive failures so a
-        // persistent failure cannot occupy the FCFS head forever.
-        if (!record_kv_allocation_failure(request.get())) {
-          return;
-        }
+        return true;
+      case PrefillScheduleResult::kBlocksExhausted:
         blocks_exhausted = true;
-      }
-      break;
+        return true;
+      case PrefillScheduleResult::kDeferred:
+        return true;
     }
-    if (prefill_sequences.empty()) {
-      skipped.emplace_back(std::move(request));
+    LOG(FATAL) << "Unknown prefill scheduling result";
+    return true;
+  };
+
+  while (has_schedule_budget()) {
+    const std::shared_ptr<Request> request = queue->top();
+    const PrefillScheduleResult result =
+        schedule_one_prefill_request(queue,
+                                     state,
+                                     budget,
+                                     finished,
+                                     reserved_full_footprint,
+                                     prefill_sequences,
+                                     prefill_sequences_budget);
+    if (result == PrefillScheduleResult::kDeferred) {
+      return;
+    }
+    // A request can be terminal or have no remaining prefill work. Terminal
+    // requests are already removed by schedule_one_prefill_request; only
+    // temporarily remove an unchanged queue head so later requests can run.
+    if (result == PrefillScheduleResult::kScheduled &&
+        prefill_sequences.empty() && !queue->empty() && queue->top() == request) {
+      skipped.emplace_back(request);
       queue->pop_top();
       continue;
     }
-
-    // Non-beam best-of sequences can progress independently, as in decode
-    // scheduling. Keep successful allocations in this batch so Host restore
-    // transfers are submitted with their owning sequences.
-    budget.remaining_token_budget -= allocated_tokens;
-    budget.remaining_seq_budget -= allocated_seqs;
-    budget.estimate_latency += allocated_estimate_latency;
-    queue->pop_top();
-    state.running_requests.emplace_back(request);
-    request->record_num_prefix_cache_tokens();
-    state.running_sequences.insert(state.running_sequences.end(),
-                                   prefill_sequences.begin(),
-                                   prefill_sequences.end());
-    state.running_sequences_budgets.insert(
-        state.running_sequences_budgets.end(),
-        prefill_sequences_budget.begin(),
-        prefill_sequences_budget.end());
-    cache_in_batch_prefix(prefill_sequences, prefill_sequences_budget, state);
-    clear_kv_allocation_failures(request.get());
-
-    // Update reserved footprint for the admission gate.
-    if (batch_mode_.enable_chunked_prefill) {
-      const size_t block_size =
-          static_cast<size_t>(state.kv_cache_manager->block_size());
-      for (auto* seq : prefill_sequences) {
-        const int32_t dp_rank = seq->dp_rank();
-        CHECK(dp_rank >= 0 &&
-              dp_rank < static_cast<int32_t>(reserved_full_footprint.size()))
-            << "seq dp_rank=" << dp_rank << " out of range [0,"
-            << reserved_full_footprint.size() << ")";
-        reserved_full_footprint[dp_rank] +=
-            (seq->num_tokens() + block_size - 1) / block_size;
-      }
-    }
-    if (!can_schedule) {
-      return;
+    if (stop_on_result(result)) {
+      break;
     }
   }
 
   // Handle unschedulable head request.
   handle_unschedulable_head(
       queue, state, finished, budget_exhausted, blocks_exhausted);
+}
+
+SchedulerPolicy::PrefillScheduleResult
+SchedulerPolicy::schedule_one_prefill_request(
+    RequestPriorityQueue* queue,
+    SchedulerState& state,
+    ScheduleBudget& budget,
+    std::vector<std::shared_ptr<Request>>& finished,
+    std::vector<size_t>& reserved_full_footprint,
+    std::vector<Sequence*>& prefill_sequences,
+    std::vector<size_t>& prefill_sequences_budget) {
+  std::shared_ptr<Request> request(queue->top());
+  if (collect_terminal(request, state, finished)) {
+    queue->pop_top();
+    return PrefillScheduleResult::kScheduled;
+  }
+
+  const size_t num_sequences = request->sequences().size();
+  if (!request->preempted()) {
+    CHECK(num_sequences == 1 || num_sequences == request->best_of())
+        << "Waiting request should have either 1 or best_of("
+        << request->best_of() << ") sequences, got " << num_sequences;
+  }
+
+  // A request that exceeds the configured capacity cannot recover by waiting.
+  std::vector<KVCacheManager::KVCacheReservation> reservations;
+  reservations.reserve(num_sequences);
+  for (const auto& sequence : request->sequences()) {
+    if (!sequence->finished()) {
+      reservations.emplace_back(sequence.get(), sequence->num_tokens());
+    }
+  }
+  if (state.kv_cache_manager->exceeds_total_capacity(reservations)) {
+    queue->pop_top();
+    if (state.release_failed_request) {
+      state.release_failed_request(request);
+    }
+    clear_kv_allocation_failures(request.get());
+    clear_mtp_bootstrap(request.get(), state);
+    state.kv_cache_manager->deallocate(request.get());
+    state.output_dispatcher->process_failed_request(
+        request,
+        {StatusCode::RESOURCE_EXHAUSTED,
+         "Request exceeds total KV cache capacity"});
+    return PrefillScheduleResult::kScheduled;
+  }
+
+  // An idle cache must still attempt allocation, including chunk continuations
+  // whose own blocks already exceed the utilization threshold.
+  if (!options_.enable_disagg_pd() &&
+      (!state.running_sequences.empty() || !state.decode_queue.empty()) &&
+      state.kv_cache_manager->kv_cache_utilization() >=
+          SchedulerConfig::get_instance()
+              .prefill_scheduling_memory_usage_threshold()) {
+    return PrefillScheduleResult::kBlocksExhausted;
+  }
+
+  bool reserve_full_prompt = false;
+  // Full-footprint admission (fresh requests only): check that the system has
+  // enough capacity for this request's full KV and all prior reservations.
+  if (batch_mode_.enable_chunked_prefill &&
+      request->sequences()[0]->kv_state().kv_cache_tokens_num() == 0) {
+    const size_t block_size =
+        static_cast<size_t>(state.kv_cache_manager->block_size());
+    const size_t full_footprint =
+        (request->sequences()[0]->num_tokens() + block_size - 1) / block_size;
+    // Predict and pre-assign the target DP rank so admission and allocation use
+    // the same rank selection.
+    const int32_t dp_rank = state.kv_cache_manager->select_dp_rank();
+    request->sequences()[0]->set_dp_rank(dp_rank);
+    const size_t total_blocks =
+        state.kv_cache_manager->admission_capacity(dp_rank);
+    if (reserved_full_footprint[dp_rank] + full_footprint > total_blocks) {
+      if (!state.running_sequences.empty() || !state.decode_queue.empty()) {
+        return PrefillScheduleResult::kBlocksExhausted;
+      }
+      // An idle elastic cache may report stale capacity. Let the real
+      // allocation confirm the complete prompt after budget checks.
+      reserve_full_prompt = true;
+    }
+  }
+
+  size_t allocated_tokens = 0;
+  size_t allocated_seqs = 0;
+  double allocated_estimate_latency = 0;
+  PrefillScheduleResult result = PrefillScheduleResult::kScheduled;
+  bool allocation_deferred = false;
+  prefill_sequences.clear();
+  prefill_sequences_budget.clear();
+  prefill_sequences.reserve(request->sequences().size());
+  prefill_sequences_budget.reserve(request->sequences().size());
+
+  for (auto& prefill_sequence : request->sequences()) {
+    if (prefill_sequence->finished()) {
+      continue;
+    }
+
+    if (should_limit_prefill_requests(state)) {
+      const int32_t dp_rank =
+          select_prefill_dp_rank(prefill_sequence.get(), state);
+      if (dp_rank < 0) {
+        LOG_EVERY_N(INFO, 100)
+            << "[prefill_cap] no eligible DP rank is below the cap of "
+            << state.model_args.max_concurrent_prefills_per_dp()
+            << " prefill requests; deferring remaining prefills";
+        result = PrefillScheduleResult::kDeferred;
+        break;
+      }
+      prefill_sequence->set_dp_rank(dp_rank);
+    } else if (!budget.dp_group_token_caps.empty() &&
+               prefill_sequence->dp_rank() < 0) {
+      // Non-chunked requests need a rank before allocation so the fair budget
+      // is charged to the same DP that will allocate their blocks.
+      prefill_sequence->set_dp_rank(state.kv_cache_manager->select_dp_rank());
+    }
+
+    size_t num_tokens =
+        compute_prefill_tokens(prefill_sequence.get(),
+                               budget.remaining_token_budget - allocated_tokens,
+                               state);
+    if (!budget.dp_group_token_caps.empty()) {
+      const int32_t dp_rank = prefill_sequence->dp_rank();
+      CHECK(dp_rank >= 0 &&
+            dp_rank < static_cast<int32_t>(budget.dp_group_token_caps.size()))
+          << "seq dp_rank=" << dp_rank << " out of range [0,"
+          << budget.dp_group_token_caps.size() << ")";
+      const size_t group_remaining = budget.dp_group_token_caps[dp_rank] -
+                                     budget.dp_group_token_used[dp_rank];
+      num_tokens = std::min(num_tokens, group_remaining);
+    }
+    if (num_tokens == 0) {
+      continue;
+    }
+
+    if (budget.remaining_token_budget < allocated_tokens + num_tokens ||
+        budget.remaining_seq_budget < allocated_seqs + 1) {
+      result = PrefillScheduleResult::kBudgetExhausted;
+      break;
+    }
+
+    double seq_estimate_latency = 0;
+    if (options_.enable_latency_aware_schedule()) {
+      const size_t kv_cache_tokens_num =
+          prefill_sequence->kv_state().kv_cache_tokens_num();
+      seq_estimate_latency = state.profile_manager->predict_step_time(
+          num_tokens + kv_cache_tokens_num, kv_cache_tokens_num, false);
+      if (budget.estimate_latency + allocated_estimate_latency +
+              seq_estimate_latency >
+          budget.latency_budget) {
+        result = PrefillScheduleResult::kBudgetExhausted;
+        break;
+      }
+    }
+
+    size_t actual_tokens = 0;
+    // allocate_for_prefill owns cleanup for fresh and in-flight requests.
+    if (!allocate_for_prefill(prefill_sequence.get(),
+                              num_tokens,
+                              &actual_tokens,
+                              state,
+                              /*skip_shared=*/false,
+                              reserve_full_prompt)) {
+      allocation_deferred = true;
+      budget.kv_allocation_deferred = true;
+      result = PrefillScheduleResult::kDeferred;
+      break;
+    }
+
+    prefill_sequences_budget.emplace_back(actual_tokens);
+    prefill_sequences.emplace_back(prefill_sequence.get());
+    allocated_tokens += actual_tokens;
+    allocated_seqs += 1;
+    allocated_estimate_latency += seq_estimate_latency;
+    if (!budget.dp_group_token_used.empty()) {
+      budget.dp_group_token_used[prefill_sequence->dp_rank()] += actual_tokens;
+    }
+  }
+
+  if (result != PrefillScheduleResult::kScheduled &&
+      (prefill_sequences.empty() || request->check_beam_search())) {
+    if (!budget.dp_group_token_used.empty()) {
+      for (size_t i = 0; i < prefill_sequences.size(); ++i) {
+        budget.dp_group_token_used[prefill_sequences[i]->dp_rank()] -=
+            prefill_sequences_budget[i];
+      }
+    }
+    if (allocation_deferred && record_kv_allocation_failure(request.get())) {
+      return PrefillScheduleResult::kBlocksExhausted;
+    }
+    return result;
+  }
+
+  // Non-beam best-of sequences can progress independently.
+  budget.remaining_token_budget -= allocated_tokens;
+  budget.remaining_seq_budget -= allocated_seqs;
+  budget.estimate_latency += allocated_estimate_latency;
+  queue->pop_top();
+  state.running_requests.emplace_back(request);
+  request->record_num_prefix_cache_tokens();
+  state.running_sequences.insert(state.running_sequences.end(),
+                                 prefill_sequences.begin(),
+                                 prefill_sequences.end());
+  state.running_sequences_budgets.insert(state.running_sequences_budgets.end(),
+                                         prefill_sequences_budget.begin(),
+                                         prefill_sequences_budget.end());
+  cache_in_batch_prefix(prefill_sequences, prefill_sequences_budget, state);
+  clear_kv_allocation_failures(request.get());
+
+  if (batch_mode_.enable_chunked_prefill) {
+    const size_t block_size =
+        static_cast<size_t>(state.kv_cache_manager->block_size());
+    for (Sequence* sequence : prefill_sequences) {
+      const int32_t dp_rank = sequence->dp_rank();
+      CHECK(dp_rank >= 0 &&
+            dp_rank < static_cast<int32_t>(reserved_full_footprint.size()))
+          << "seq dp_rank=" << dp_rank << " out of range [0,"
+          << reserved_full_footprint.size() << ")";
+      reserved_full_footprint[dp_rank] +=
+          (sequence->num_tokens() + block_size - 1) / block_size;
+    }
+  }
+  return result == PrefillScheduleResult::kScheduled
+             ? PrefillScheduleResult::kScheduled
+             : PrefillScheduleResult::kDeferred;
 }
 
 size_t SchedulerPolicy::compute_prefill_tokens(Sequence* seq,
