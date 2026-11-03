@@ -367,6 +367,12 @@ class PreparedAclGraphRunner(AclGraphRunner):
                 "adaptive DSpark requires an MLA or recurrent target graph with token-only inputs; "
                 "recurrent targets require DP=1"
             )
+        if (
+            dspark_adaptive is not None
+            and dspark_adaptive.linear_state_indices is not None
+            and getattr(self.attention_backend, "shared_kv_layout", None) is not None
+        ):
+            raise ValueError("prepared recurrent verification does not support shared Conv/SSM cache pages")
         self._validate_prepared_dp(input_ids, metadata)
         if self._block_draft:
             if metadata.is_prefill or not metadata.is_chunked_prefill or metadata.is_spec_verify:
