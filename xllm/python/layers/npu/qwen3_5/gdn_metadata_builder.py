@@ -351,6 +351,7 @@ class Qwen3_5GdnMetadataBuilder:
             ssm_write,
             cu_seqlens.to(device=device, dtype=torch.int32).contiguous(),
             _compute_mega_prefill_num_matrices(query_lengths, self._num_value_heads),
+            shared_checkpoint_stride=self._checkpoint_stride if self._shared_layout is not None else None,
         )
 
     def _with_shared_verify_indices(self, metadata: GdnVerifyMetadata) -> GdnVerifyMetadata:

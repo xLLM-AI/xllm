@@ -61,11 +61,25 @@ class _StagedGdnState:
     ssm_rows: torch.Tensor
     checkpoint_stride: int
 
-    def write_back(self, conv_cache: torch.Tensor, ssm_cache: torch.Tensor) -> None:
-        conv_cache.view(-1, conv_cache.shape[-1]).index_copy_(
-            0, self.conv_rows, self.conv[1:].reshape(-1, conv_cache.shape[-1])
-        )
-        ssm_cache.index_copy_(0, self.ssm_rows, self.ssm[self.checkpoint_stride :])
+    def write_back(
+        self,
+        conv_cache: torch.Tensor,
+        ssm_cache: torch.Tensor,
+        *,
+        slot_begin: int = 1,
+        valid_slots: torch.Tensor | None = None,
+    ) -> None:
+        conv_rows = self.conv_rows[(slot_begin - 1) * self.conv.shape[1] :]
+        ssm_rows = self.ssm_rows[(slot_begin - 1) * self.checkpoint_stride :]
+        conv = self.conv[slot_begin:].reshape(-1, conv_cache.shape[-1])
+        ssm = self.ssm[slot_begin * self.checkpoint_stride :]
+        if valid_slots is not None:
+            conv_valid = valid_slots.repeat_interleave(self.conv.shape[1])
+            ssm_valid = valid_slots.repeat_interleave(self.checkpoint_stride)
+            conv_rows, conv = conv_rows[conv_valid], conv[conv_valid]
+            ssm_rows, ssm = ssm_rows[ssm_valid], ssm[ssm_valid]
+        conv_cache.view(-1, conv_cache.shape[-1]).index_copy_(0, conv_rows, conv)
+        ssm_cache.index_copy_(0, ssm_rows, ssm)
 
 
 class NpuQwen3_5GatedDeltaNet(nn.Module):
@@ -268,6 +282,60 @@ class NpuQwen3_5GatedDeltaNet(nn.Module):
         torch.index_select(ssm_cache, 0, ssm_physical_rows, out=ssm[checkpoint_stride:])
         return _StagedGdnState(conv, ssm, indices, conv_physical_rows, ssm_physical_rows, checkpoint_stride)
 
+    def _prefill(self, hidden: torch.Tensor, metadata: GdnPrefillMetadata) -> torch.Tensor:
+        state_cache = metadata.state_caches[self.layer_id]
+        conv_read, conv_write = metadata.conv_read_indices, metadata.conv_write_indices
+        ssm_read, ssm_write = metadata.ssm_read_indices, metadata.ssm_write_indices
+        checkpoint_stride = metadata.shared_checkpoint_stride
+        if checkpoint_stride is not None:
+            batch_size = conv_read.numel()
+            # Prefill leaves non-base SSM checkpoints and cold Conv tails at
+            # their destination values, so stage read and write slots separately.
+            staged = self._stage_shared_state(
+                state_cache.conv,
+                state_cache.ssm,
+                torch.cat((conv_read, conv_write)),
+                torch.cat((ssm_read, ssm_write)),
+                checkpoint_stride=checkpoint_stride,
+                conv_rows=checkpoint_stride + self.conv_kernel_size - 2,
+            )
+            compact_read, compact_write = staged.indices.split(batch_size)
+            conv_read = torch.where(conv_read >= 0, compact_read, -1)
+            conv_write = torch.where(conv_write >= 0, compact_write, -1)
+            ssm_read = torch.where(ssm_read >= 0, compact_read * checkpoint_stride, -1)
+            ssm_write = torch.where(ssm_write >= 0, compact_write * checkpoint_stride, -1)
+            conv_state, ssm_state = staged.conv, staged.ssm
+        else:
+            staged = None
+            conv_state, ssm_state = state_cache.conv, state_cache.ssm
+        mixed_qkv, a, b, z = self._project_prefill_inputs(hidden)
+        output = kernels.mega_gdn_prefill(
+            mixed_qkv,
+            b,
+            a,
+            z,
+            self.conv1d_weight,
+            conv_state,
+            self.A_log,
+            self.dt_bias,
+            conv_read,
+            conv_write,
+            ssm_read,
+            ssm_write,
+            ssm_state,
+            metadata.cu_seqlens,
+            self.norm_weight,
+            metadata.num_matrices,
+        )
+        if staged is not None:
+            staged.write_back(
+                state_cache.conv,
+                state_cache.ssm,
+                slot_begin=batch_size + 1,
+                valid_slots=metadata.conv_write_indices >= 0,
+            )
+        return output
+
     def _decode(
         self,
         hidden: torch.Tensor,
@@ -448,25 +516,7 @@ class NpuQwen3_5GatedDeltaNet(nn.Module):
         if isinstance(metadata, GdnVerifyMetadata):
             output = self._verify(hidden, metadata)
         elif isinstance(metadata, GdnPrefillMetadata):
-            mixed_qkv, a, b, z = self._project_prefill_inputs(hidden)
-            output = kernels.mega_gdn_prefill(
-                mixed_qkv,
-                b,
-                a,
-                z,
-                self.conv1d_weight,
-                state_cache.conv,
-                self.A_log,
-                self.dt_bias,
-                metadata.conv_read_indices,
-                metadata.conv_write_indices,
-                metadata.ssm_read_indices,
-                metadata.ssm_write_indices,
-                state_cache.ssm,
-                metadata.cu_seqlens,
-                self.norm_weight,
-                metadata.num_matrices,
-            )
+            output = self._prefill(hidden, metadata)
         elif isinstance(metadata, GdnDecodeMetadata):
             output = self._decode(
                 hidden,
