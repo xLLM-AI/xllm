@@ -144,6 +144,8 @@ class DistributedVirtualMemoryCoordinator final : public KVCachePageBackend {
 
   void configure_workers(int32_t world_size, int32_t dp_size, int32_t tp_size);
   void destroy();
+  void invalidate_worker_capacity_snapshot(const std::string& model_id,
+                                           int32_t dp_rank);
   void refresh_worker_capacity_snapshot();
   void start_worker_capacity_refresh();
   void stop_worker_capacity_refresh();
@@ -152,6 +154,8 @@ class DistributedVirtualMemoryCoordinator final : public KVCachePageBackend {
   std::pair<int32_t, int32_t> dp_worker_range_locked(
       const std::string& model_id,
       int32_t dp_rank) const;
+  size_t available_pages_locked(int32_t first_worker,
+                                int32_t last_worker) const;
   int32_t model_worker_count_locked(const std::string& model_id) const;
   std::vector<size_t> model_memory_demand_locked(
       const std::string& model_id,
@@ -179,6 +183,7 @@ class DistributedVirtualMemoryCoordinator final : public KVCachePageBackend {
   std::vector<std::shared_ptr<WorkerMemoryRpcClient>> clients_;
   std::vector<std::unique_ptr<WorkerMemoryRpcServer>> servers_;
   std::vector<size_t> worker_allocatable_pages_;
+  uint64_t worker_capacity_generation_ = 0;
   bool capacity_refresh_running_ = false;
   std::condition_variable capacity_refresh_cv_;
   std::thread capacity_refresh_thread_;

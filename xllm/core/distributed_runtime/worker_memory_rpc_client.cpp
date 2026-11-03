@@ -19,6 +19,7 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <chrono>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 
@@ -99,10 +100,9 @@ folly::SemiFuture<MemoryInfo> WorkerMemoryRpcClient::get_memory_info_async(
         stub_->GetMemoryInfo(&cntl, &req, &resp, nullptr);
         if (cntl.Failed()) {
           LOG(ERROR) << "GetMemoryInfo failed: " << cntl.ErrorText();
-          promise.setValue(MemoryInfo{0, 0});
+          promise.setException(std::runtime_error(cntl.ErrorText()));
           return;
         }
-        // Returns 0 for both fields on failure
         promise.setValue(MemoryInfo{
             resp.available_memory(),
             resp.total_memory(),

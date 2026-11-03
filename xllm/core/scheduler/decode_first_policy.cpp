@@ -92,7 +92,7 @@ void DecodeFirstPolicy::schedule(
 
   // Step 3: redistribute remaining budget to prefill sequences.
   if (!has_linear_attention_layers(state.model_args) &&
-      budget.remaining_token_budget > 0 &&
+      !budget.kv_allocation_deferred && budget.remaining_token_budget > 0 &&
       budget.latency_budget > budget.estimate_latency) {
     std::vector<Sequence*> prefill_stage_sequences;
     for (size_t i = 0; i < state.running_sequences.size(); ++i) {
@@ -179,6 +179,7 @@ void DecodeFirstPolicy::redistribute_remaining_budget(
                               &actual_tokens,
                               state,
                               /*skip_shared=*/true)) {
+      budget.kv_allocation_deferred = true;
       break;
     }
 

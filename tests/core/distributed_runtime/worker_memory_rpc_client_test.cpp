@@ -24,6 +24,7 @@ limitations under the License.
 #include <chrono>
 #include <cstdint>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -78,13 +79,17 @@ class OffsetTestService final : public proto::ModelMemoryDist {
     response->set_ok(true);
   }
 
-  void GetMemoryInfo(google::protobuf::RpcController* /*controller*/,
+  void GetMemoryInfo(google::protobuf::RpcController* controller,
                      const proto::Status* /*request*/,
                      proto::MemoryInfoResponse* response,
                      google::protobuf::Closure* done) override {
     brpc::ClosureGuard done_guard(done);
     std::lock_guard<std::mutex> lock(mutex_);
     ++memory_info_calls_;
+    if (mode_ == ResponseMode::TRANSPORT_FAILURE) {
+      controller->SetFailed("injected memory info transport failure");
+      return;
+    }
     response->set_available_memory(4096);
     response->set_total_memory(8192);
     response->set_pool_initialized(true);
@@ -459,6 +464,16 @@ TEST(WorkerMemoryRpcClientTest, EmptyWorkerResponseRemainsEmpty) {
 
   EXPECT_TRUE(
       client.get_virtual_kv_cache_offsets("missing-model", {0}).empty());
+}
+
+TEST(WorkerMemoryRpcClientTest, CapacityQueryReportsTransportFailure) {
+  OffsetTestServer server(ResponseMode::TRANSPORT_FAILURE);
+  ASSERT_EQ(server.start(), 0);
+  WorkerMemoryRpcClient client(
+      /*global_rank=*/1, server.address(), torch::Device(torch::kCPU));
+
+  auto capacity = client.get_memory_info_async(/*timeout_ms=*/1000);
+  EXPECT_THROW(std::move(capacity).get(), std::runtime_error);
 }
 
 TEST_F(WorkerMemoryRpcTimeoutTest, CapacityProbeBypassesBlockedMutationQueue) {

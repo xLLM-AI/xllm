@@ -281,7 +281,7 @@ void SchedulerPolicy::schedule_prefill_from_queue(
     ScheduleBudget& budget,
     std::vector<std::shared_ptr<Request>>& finished,
     std::vector<size_t>& reserved_full_footprint) {
-  if (queue == nullptr || queue->empty()) {
+  if (budget.kv_allocation_deferred || queue == nullptr || queue->empty()) {
     return;
   }
 
@@ -290,19 +290,11 @@ void SchedulerPolicy::schedule_prefill_from_queue(
   // Reuse scratch capacity across requests within this scheduling round.
   std::vector<Sequence*> prefill_sequences;
   std::vector<size_t> prefill_sequences_budget;
+  std::vector<KVCacheManager::KVCacheReservation> reservations;
 
-  while (!queue->empty() && budget.remaining_seq_budget > 0 &&
-         budget.remaining_token_budget > 0 &&
+  while (!budget.kv_allocation_deferred && !queue->empty() &&
+         budget.remaining_seq_budget > 0 && budget.remaining_token_budget > 0 &&
          budget.latency_budget > budget.estimate_latency) {
-    // Memory-utilization short-circuit.
-    if (!options_.enable_disagg_pd() &&
-        state.kv_cache_manager->kv_cache_utilization() >=
-            SchedulerConfig::get_instance()
-                .prefill_scheduling_memory_usage_threshold()) {
-      blocks_exhausted = true;
-      break;
-    }
-
     std::shared_ptr<Request> request(queue->top());
     if (collect_terminal(request, state, finished)) {
       queue->pop_top();
@@ -314,6 +306,43 @@ void SchedulerPolicy::schedule_prefill_from_queue(
       CHECK(num_sequences == 1 || num_sequences == request->best_of())
           << "Waiting request should have either 1 or best_of("
           << request->best_of() << ") sequences, got " << num_sequences;
+    }
+
+    // Reject only requests whose complete KV footprint cannot fit in the
+    // configured cache. A failed physical allocation is transient pressure and
+    // must leave the request queued for a later scheduling pass.
+    reservations.clear();
+    reservations.reserve(num_sequences);
+    for (const auto& sequence : request->sequences()) {
+      if (sequence->finished()) {
+        continue;
+      }
+      reservations.emplace_back(sequence.get(), sequence->num_tokens());
+    }
+    if (state.kv_cache_manager->exceeds_total_capacity(reservations)) {
+      queue->pop_top();
+      if (state.release_failed_request) {
+        state.release_failed_request(request);
+      }
+      clear_mtp_bootstrap(request.get(), state);
+      state.kv_cache_manager->deallocate(request.get());
+      state.output_dispatcher->process_failed_request(
+          request,
+          {StatusCode::RESOURCE_EXHAUSTED,
+           "Request exceeds total KV cache capacity"});
+      continue;
+    }
+
+    // Defer prefill for work that can make progress and release blocks. An
+    // idle cache must still attempt allocation, including chunk continuations
+    // whose own blocks already exceed the utilization threshold.
+    if (!options_.enable_disagg_pd() &&
+        (!state.running_sequences.empty() || !state.decode_queue.empty()) &&
+        state.kv_cache_manager->kv_cache_utilization() >=
+            SchedulerConfig::get_instance()
+                .prefill_scheduling_memory_usage_threshold()) {
+      blocks_exhausted = true;
+      break;
     }
 
     bool reserve_full_prompt = false;
@@ -336,10 +365,6 @@ void SchedulerPolicy::schedule_prefill_from_queue(
       // address space is not evidence of currently admissible physical memory.
       const size_t total_blocks =
           state.kv_cache_manager->admission_capacity(dp_rank);
-      if (full_footprint > state.kv_cache_manager->num_blocks()) {
-        blocks_exhausted = true;
-        break;
-      }
       if (reserved_full_footprint[dp_rank] + full_footprint > total_blocks) {
         if (!state.running_sequences.empty() || !state.decode_queue.empty()) {
           blocks_exhausted = true;
@@ -357,6 +382,7 @@ void SchedulerPolicy::schedule_prefill_from_queue(
     size_t allocated_seqs = 0;
     double allocated_estimate_latency = 0;
     bool can_schedule = true;
+    bool allocation_deferred = false;
     prefill_sequences.clear();
     prefill_sequences_budget.clear();
     prefill_sequences.reserve(request->sequences().size());
@@ -366,7 +392,6 @@ void SchedulerPolicy::schedule_prefill_from_queue(
       if (prefill_sequence->finished()) {
         continue;
       }
-
       if (should_limit_prefill_requests(state)) {
         const int32_t dp_rank =
             select_prefill_dp_rank(prefill_sequence.get(), state);
@@ -428,11 +453,6 @@ void SchedulerPolicy::schedule_prefill_from_queue(
       }
 
       size_t actual_tokens = 0;
-      // allocate_for_prefill internally handles cleanup on failure:
-      // - Fresh requests (no prior blocks): prefix cache blocks are released
-      //   and sequence is reset inside kv_cache_manager->allocate().
-      // - In-flight chunked requests: existing blocks are preserved.
-      // No external deallocate needed here.
       if (!allocate_for_prefill(prefill_sequence.get(),
                                 num_tokens,
                                 &actual_tokens,
@@ -440,7 +460,8 @@ void SchedulerPolicy::schedule_prefill_from_queue(
                                 /*skip_shared=*/false,
                                 reserve_full_prompt)) {
         can_schedule = false;
-        blocks_exhausted = true;
+        allocation_deferred = true;
+        budget.kv_allocation_deferred = true;
         break;
       }
 
@@ -455,10 +476,23 @@ void SchedulerPolicy::schedule_prefill_from_queue(
       }
     }
 
-    if (!can_schedule) {
+    if (!can_schedule &&
+        (prefill_sequences.empty() || request->check_beam_search())) {
+      if (!budget.dp_group_token_used.empty()) {
+        for (size_t i = 0; i < prefill_sequences.size(); ++i) {
+          budget.dp_group_token_used[prefill_sequences[i]->dp_rank()] -=
+              prefill_sequences_budget[i];
+        }
+      }
+      if (allocation_deferred) {
+        return;
+      }
       break;
     }
 
+    // Non-beam best-of sequences can progress independently, as in decode
+    // scheduling. Keep successful allocations in this batch so Host restore
+    // transfers are submitted with their owning sequences.
     budget.remaining_token_budget -= allocated_tokens;
     budget.remaining_seq_budget -= allocated_seqs;
     budget.estimate_latency += allocated_estimate_latency;
@@ -487,6 +521,9 @@ void SchedulerPolicy::schedule_prefill_from_queue(
         reserved_full_footprint[dp_rank] +=
             (seq->num_tokens() + block_size - 1) / block_size;
       }
+    }
+    if (!can_schedule) {
+      return;
     }
   }
 
@@ -618,7 +655,7 @@ bool SchedulerPolicy::has_pending_block_release(
 
 void SchedulerPolicy::schedule_decode_restore(SchedulerState& state,
                                               ScheduleBudget& budget) {
-  if (state.decode_restore_waiting.empty() ||
+  if (budget.kv_allocation_deferred || state.decode_restore_waiting.empty() ||
       has_pending_block_release(state) || budget_exhausted(budget)) {
     return;
   }
@@ -639,6 +676,7 @@ void SchedulerPolicy::schedule_decode_restore(SchedulerState& state,
 
   size_t actual_tokens = 0;
   if (!allocate_for_prefill(sequence, num_tokens, &actual_tokens, state)) {
+    budget.kv_allocation_deferred = true;
     return;
   }
 
@@ -767,6 +805,7 @@ void SchedulerPolicy::schedule_decode_from_queue(
         }
 
         if (allocate_failed) {
+          budget.kv_allocation_deferred = true;
           LOG(ERROR) << "Beam strict scheduling allocation failed. "
                      << "request_id=" << request->request_id()
                      << ", beam=" << request->check_beam_search();
@@ -837,6 +876,7 @@ void SchedulerPolicy::schedule_decode_from_queue(
                                  state.min_speculative_tokens_required);
         if (!allocated) {
           has_enough_blocks = false;
+          budget.kv_allocation_deferred = true;
           break;
         }
         if (sequence->if_cache_block_for_prefill()) {
@@ -996,7 +1036,26 @@ void SchedulerPolicy::handle_abnormal_decode_request(
     budget.remaining_seq_budget -= allocated_seqs;
     budget.estimate_latency += allocated_estimate_latency;
   } else if (candidate_sequences.empty() && state.running_sequences.empty()) {
-    // Nothing scheduled at all -- request is unschedulable.
+    if (!budget_exhausted) {
+      std::vector<KVCacheManager::KVCacheReservation> reservations;
+      reservations.reserve(request->sequences().size());
+      for (const auto& sequence : request->sequences()) {
+        if (sequence->finished()) {
+          continue;
+        }
+        const size_t target_tokens =
+            sequence->is_prefill_stage()
+                ? sequence->num_tokens()
+                : sequence->num_tokens() +
+                      state.min_speculative_tokens_required;
+        reservations.emplace_back(sequence.get(), target_tokens);
+      }
+      if (!state.kv_cache_manager->exceeds_total_capacity(reservations)) {
+        return;
+      }
+    }
+
+    // Reject only a permanent token-budget or static-capacity limit.
     queue->pop_top();
     clear_mtp_bootstrap(request.get(), state);
     state.kv_cache_manager->deallocate(request.get());
@@ -1009,7 +1068,7 @@ void SchedulerPolicy::handle_abnormal_decode_request(
       state.output_dispatcher->process_failed_request(
           request,
           {StatusCode::RESOURCE_EXHAUSTED,
-           "No enough memory to schedule a single sequence."});
+           "Request exceeds total KV cache capacity"});
     }
   }
 }
