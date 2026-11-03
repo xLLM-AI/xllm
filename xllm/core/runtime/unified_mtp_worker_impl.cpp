@@ -457,7 +457,7 @@ UnifiedMtpWorkerImpl<TargetInput>::run_unified_python_mtp_graph(
                              ready_event,
                              std::move(accepted_tokens_host),
                              {},
-                             std::move(accepted_count_host),
+                             accepted_count_host,
                              /*allow_immutable_compact_view=*/true);
   target_output.ready_event = ready_event;
 
@@ -473,10 +473,12 @@ UnifiedMtpWorkerImpl<TargetInput>::run_unified_python_mtp_graph(
   if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
     return std::nullopt;
   }
-  // The graph writes draft-only prefix lengths; every entry here is past the
-  // D2H sync.
-  const std::vector<int32_t> num_accepted_tokens = tensor_to_vector<int32_t>(
-      latest_pending_target_context().accepted_count_host);
+  // Host statistics need the D2H result even when output publication overlaps.
+  // Keep the local view because the non-overlap snapshot retires the queue.
+  CHECK(ready_event == nullptr || ready_event->synchronize())
+      << "failed to wait for unified MTP acceptance counts";
+  const std::vector<int32_t> num_accepted_tokens =
+      tensor_to_vector<int32_t>(accepted_count_host);
   target_output.spec_verify_stats =
       make_verify_stats(target_output.sample_output.next_tokens,
                         /*per_seq_draft_counts=*/nullptr,
