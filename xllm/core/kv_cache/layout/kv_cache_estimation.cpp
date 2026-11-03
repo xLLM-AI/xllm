@@ -551,7 +551,7 @@ void init_shared_counts(const ModelArgs& model_args,
   CHECK_GT(capacity->num_full_attention_layers(), 0);
   CHECK_GT(capacity->num_linear_attention_layers(), 0);
   CHECK_EQ(options.layerwise_split_size, 1);
-  CHECK_EQ(options.num_speculative_tokens, 0);
+  CHECK_GE(options.num_speculative_tokens, 0);
   CHECK_EQ(options.max_linear_state_cache_slots, 0)
       << "Shared static storage derives linear capacity from its arena.";
   CHECK_EQ(options.kv_cache_dtype, "auto")
@@ -754,6 +754,36 @@ SharedKPoolPlan plan_shared_kpool(KVCacheCapacity target_cap,
   return {std::move(target_cap), std::move(draft_cap)};
 }
 
+SharedStaticKVCachePlan plan_shared_static_kv_cache(KVCacheCapacity target_cap,
+                                                    KVCacheCapacity draft_cap) {
+  CHECK_GT(target_cap.shared_unit_bytes(), 0);
+  CHECK_EQ(target_cap.linear_cache_size_in_bytes(), 0);
+  CHECK_EQ(draft_cap.shared_unit_bytes(), 0);
+  CHECK_EQ(draft_cap.num_linear_attention_layers(), 0);
+  CHECK_EQ(draft_cap.linear_cache_size_in_bytes(), 0);
+  CHECK_EQ(target_cap.block_size(), draft_cap.block_size());
+  const int64_t budget = std::min(target_cap.cache_size_in_bytes(),
+                                  draft_cap.cache_size_in_bytes());
+  const int64_t draft_block_bytes =
+      standard_full_cache_block_size_in_bytes(draft_cap);
+  // Every possible shared extent start is also a dense draft block ID. The
+  // draft therefore pays one ordinary KV row per arena unit, including IDs
+  // currently owned by recurrent state or reserved as padding.
+  const int64_t unit_bytes = target_cap.shared_unit_bytes();
+  CHECK_LE(draft_block_bytes, std::numeric_limits<int64_t>::max() - unit_bytes);
+  const int64_t units = std::min(target_cap.n_blocks(),
+                                 budget / (unit_bytes + draft_block_bytes));
+  const int64_t full_units = target_cap.shared_full_block_units();
+  const int64_t linear_units = target_cap.shared_linear_state_units();
+  CHECK_GE(units,
+           std::max(full_units, linear_units) + full_units + linear_units)
+      << "Shared target and draft budget cannot fit one hybrid sequence.";
+  target_cap.n_blocks(units).num_linear_state_blocks(units).cache_size_in_bytes(
+      units * unit_bytes);
+  draft_cap.n_blocks(units).cache_size_in_bytes(units * draft_block_bytes);
+  return {std::move(target_cap), std::move(draft_cap)};
+}
+
 std::vector<bool> resolve_indexer_cache_enabled_layers(
     const ModelArgs& model_args,
     int64_t num_cache_layers) {
@@ -842,7 +872,8 @@ KVCacheCapacity KVCacheEstimator::estimate(
   KVCacheEstimateOptions estimate_options;
   estimate_options.dtype = context.dtype;
   estimate_options.enable_shared_kv_cache =
-      KVCacheConfig::get_instance().enable_shared_kv_cache();
+      KVCacheConfig::get_instance().enable_shared_kv_cache() &&
+      !options.is_draft_engine();
   estimate_options.kv_cache_dtype = options.kv_cache_dtype();
   estimate_options.indexer_cache_dtype =
       ::xllm::KVCacheConfig::get_instance().indexer_cache_dtype();

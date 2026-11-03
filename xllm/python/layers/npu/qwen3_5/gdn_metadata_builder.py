@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from itertools import accumulate
 from typing import TYPE_CHECKING, cast
 
@@ -169,9 +170,7 @@ class Qwen3_5GdnMetadataBuilder:
             else:
                 layer_stride = stride
                 if conv.shape[1] != layer_stride + 2:
-                    raise ValueError(
-                        f"GDN shared Conv cache checkpoint geometry is invalid for layer {layer_id}"
-                    )
+                    raise ValueError(f"GDN shared Conv cache checkpoint geometry is invalid for layer {layer_id}")
             stride, device = layer_stride, conv.device
             state_caches[layer_id] = cast(GdnStateCache, layer_caches[layer_id])
         self._state_caches = state_caches
@@ -218,6 +217,8 @@ class Qwen3_5GdnMetadataBuilder:
             "conv_write_indices",
             "ssm_read_indices",
             "ssm_write_indices",
+            "conv_state_indices",
+            "ssm_state_indices",
         ):
             current = getattr(persistent_metadata, field_name, None)
             replacement = getattr(updated, field_name, None)
@@ -238,10 +239,6 @@ class Qwen3_5GdnMetadataBuilder:
             raise ValueError("Qwen3.5 GDN input and state caches must use one device")
         graph = getattr(metadata, "linear_verify_graph", None)
         if graph is not None:
-            if self._shared_layout is not None:
-                raise NotImplementedError(
-                    "Qwen3.5 shared Conv/SSM pages do not support packed verify graphs yet"
-                )
             if graph.query_width != self._checkpoint_stride:
                 raise ValueError("Qwen3.5 packed graph width must match the GDN checkpoint stride")
             batch_size = graph.state_indices.numel()
@@ -264,14 +261,16 @@ class Qwen3_5GdnMetadataBuilder:
             for tensor, count, dtype in tensors:
                 if tensor is None or tensor.shape != (count,) or tensor.dtype != dtype or tensor.device != device:
                     raise ValueError("Qwen3.5 packed graph requires fixed request indices and token maps")
-            return GdnVerifyMetadata(
-                self._state_caches,
-                graph.state_indices,
-                graph.num_accepted_tokens,
-                graph.query_width,
-                graph.packed_to_dense,
-                graph.dense_to_packed,
-                graph.cu_seqlens,
+            return self._with_shared_verify_indices(
+                GdnVerifyMetadata(
+                    self._state_caches,
+                    graph.state_indices,
+                    graph.num_accepted_tokens,
+                    graph.query_width,
+                    graph.packed_to_dense,
+                    graph.dense_to_packed,
+                    graph.cu_seqlens,
+                )
             )
         read_indices, write_indices = resolve_linear_state_io_indices(metadata)
         if read_indices is None or write_indices is None:
@@ -283,32 +282,26 @@ class Qwen3_5GdnMetadataBuilder:
         # Verify is also marked chunked prefill by the speculative worker.
         # It must restore the last accepted checkpoint before processing rows.
         if getattr(metadata, "is_spec_verify", False):
-            if self._shared_layout is not None:
-                raise NotImplementedError(
-                    "Qwen3.5 shared Conv/SSM pages do not support speculative verify yet"
-                )
-            return self._build_verify(input_batch, metadata, write_indices)
+            return self._with_shared_verify_indices(self._build_verify(input_batch, metadata, write_indices))
         if not (metadata.is_prefill or metadata.is_chunked_prefill):
             # Captured decode graphs index their whole padded bucket.
             if read_indices.numel() != input_batch.num_tokens_after_padding or read_indices.numel() == 0:
                 raise ValueError("Qwen3.5 GDN decode requires one state slot per token")
-            if self._checkpoint_stride != 1 and self._shared_layout is None:
+            if self._checkpoint_stride != 1:
                 raise ValueError("Qwen3.5 MegaGdnDecode requires one SSM row per Conv slot")
             if self._shared_layout is None:
                 return GdnDecodeMetadata(self._state_caches, read_indices, write_indices)
             assert self._conv_page_row_stride is not None and self._ssm_page_row_stride is not None
             conv_state_indices = _scale_state_indices(read_indices, self._conv_page_row_stride)
-            conv_write_state_indices = _scale_state_indices(write_indices, self._conv_page_row_stride)
             ssm_state_indices = _scale_state_indices(read_indices, self._ssm_page_row_stride)
-            ssm_write_state_indices = _scale_state_indices(write_indices, self._ssm_page_row_stride)
             return GdnDecodeMetadata(
                 self._state_caches,
                 read_indices,
                 write_indices,
                 conv_state_indices,
-                conv_write_state_indices,
+                conv_state_indices,
                 ssm_state_indices,
-                ssm_write_state_indices,
+                ssm_state_indices,
             )
         query_lengths_host = metadata.q_seq_lens_host
         if query_lengths_host is None:
@@ -370,6 +363,16 @@ class Qwen3_5GdnMetadataBuilder:
             ssm_write,
             cu_seqlens.to(device=device, dtype=torch.int32).contiguous(),
             _compute_mega_prefill_num_matrices(query_lengths, self._num_value_heads),
+        )
+
+    def _with_shared_verify_indices(self, metadata: GdnVerifyMetadata) -> GdnVerifyMetadata:
+        if self._shared_layout is None:
+            return metadata
+        assert self._conv_page_row_stride is not None and self._ssm_page_row_stride is not None
+        return replace(
+            metadata,
+            conv_state_indices=_scale_state_indices(metadata.state_indices, self._conv_page_row_stride),
+            ssm_state_indices=_scale_state_indices(metadata.state_indices, self._ssm_page_row_stride),
         )
 
     def _build_verify(

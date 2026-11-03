@@ -50,6 +50,7 @@ from xllm.python.attention.expanded_decode_metadata import (
 from xllm.python.attention.mla_index_context import is_compact_kpool_tail
 from xllm.python.model_executor.cp_utils import cp_gather_kv
 from xllm.python.model_executor.forward_context import (
+    copy_into_execution_buffer,
     get_execution_buffer,
     get_execution_workspace,
     get_forward_context,
@@ -310,7 +311,6 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         self._kv_owner_representatives: torch.Tensor | None = None
         self._materialized_block_table: torch.Tensor | None = None
         self._sfa_page_layout: _SfaPageLayout | None = None
-        self._shared_slot_mapping: torch.Tensor | None = None
         self._graph_index_history_max_kv: int | None = None
         self._causal_mask: torch.Tensor | None = None
 
@@ -2505,15 +2505,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         if layout is None:
             return slot_mapping
         translated = layout.full_slot_mapping(slot_mapping)
-        if (
-            self._shared_slot_mapping is None
-            or self._shared_slot_mapping.shape != translated.shape
-            or self._shared_slot_mapping.dtype != translated.dtype
-            or self._shared_slot_mapping.device != translated.device
-        ):
-            self._shared_slot_mapping = torch.empty_like(translated)
-        self._shared_slot_mapping.copy_(translated)
-        return self._shared_slot_mapping
+        return copy_into_execution_buffer(("SHARED_FULL_SLOT_MAPPING", tuple(translated.shape)), translated)
 
     def _cumulative_seq_lens(
         self,
