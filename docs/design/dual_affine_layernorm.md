@@ -118,10 +118,12 @@ rowsPerCore = ceil(N / blockDim)
 blockDim    = ceil(N / rowsPerCore)        # 回算，避免 N=49 时 23 个空核
 ```
 
-`N < 48` 时把一行拆到多个核，以便小 N、大 H 的用例也能吃满核数：
+`N` 小于本平台 Vector Core 数（A3 为 48、A2 为 40）时把一行拆到多个核，
+以便小 N、大 H 的用例也能吃满核数；`N >= coreNum` 一律走整行路径，避免 `coreNum / N == 0`：
 
 ```text
-coresPerRow = min(coreNum / N, max(1, H / 512))     # 每个分片至少 512 元素
+coresPerRow = max(1, min(coreNum / N, max(1, H / 512)))  # 至少 1，每片 >=512 元素
+# 仅当 N < coreNum 时进入；A2 的 coreNum=40，N=41..47 走整行路径
 sliceH      = ceil(H / coresPerRow) 向上取到 64 的倍数
 coresPerRow = ceil(H / sliceH)
 blockDim    = N * coresPerRow
