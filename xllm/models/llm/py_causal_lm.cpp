@@ -447,11 +447,11 @@ torch::Tensor PyCausalLM::pooler(const torch::Tensor& hidden_states,
                                  const torch::Tensor& selected_idxes) {
   torch::NoGradGuard no_grad;
   py::gil_scoped_acquire gil;
-  if (!py::hasattr(py_model_, "pooler")) {
+  if (!py::hasattr(py_model_, /*name=*/"pooler")) {
     return CausalLM::pooler(hidden_states, selected_idxes);
   }
   return py_model_
-      .attr("pooler")(hidden_states, optional_tensor(selected_idxes))
+      .attr(/*key=*/"pooler")(hidden_states, optional_tensor(selected_idxes))
       .cast<torch::Tensor>();
 }
 
