@@ -24,6 +24,7 @@ limitations under the License.
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -108,6 +109,16 @@ class BlockManager {
   virtual ~BlockManager() = default;
 
   virtual void deallocate(const Slice<Block>& blocks) = 0;
+
+  // Consume these aliases, invalidating every handle before returning. Leaf
+  // concurrency adapters hold their existing lock across accounting and the
+  // reference drop so another releaser observes the updated ownership count.
+  virtual void release(std::span<Block> blocks) {
+    for (Block& block : blocks) {
+      deallocate(Slice<Block>(&block, /*size=*/1));
+      block = Block();
+    }
+  }
 
   virtual std::vector<Block> allocate(size_t num_blocks) = 0;
 

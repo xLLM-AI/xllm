@@ -63,6 +63,7 @@ class VmmKVBlockManager final : public BlockManager {
 
   // Deallocate blocks
   void deallocate(const Slice<Block>& blocks) override;
+  void release(std::span<Block> blocks) override;
 
   // Flat incremental growth: allocate ceil(num_tokens/block_size) - held blocks
   // (physical allocate() maps VMM pages) and return them; the

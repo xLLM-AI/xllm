@@ -159,6 +159,7 @@ size_t PrefixCache::insert(const Slice<int32_t>& token_ids,
       Node* new_node = new Node();
 
       new_node->block = blocks[block_idx];
+      cached_block_ids_.insert(new_node->block.id());
       new_node->last_access_time = now;
 
       node_list.push_front(new_node);
@@ -220,6 +221,7 @@ size_t PrefixCache::insert(Slice<Block>& blocks) {
       Node* new_node = new Node();
 
       new_node->block = blocks[i];
+      cached_block_ids_.insert(new_node->block.id());
       new_node->last_access_time = now;
 
       node_list.push_front(new_node);
@@ -256,6 +258,10 @@ bool PrefixCache::contains(const XXH3Key& hash) const {
   return cached_blocks_.find(hash) != cached_blocks_.end();
 }
 
+bool PrefixCache::owns(const Block& block) const {
+  return cached_block_ids_.contains(block.id());
+}
+
 size_t PrefixCache::evict(size_t n_blocks) {
   if (num_blocks_ == 0 || lru_lst_.is_empty()) {
     return 0;
@@ -281,6 +287,7 @@ size_t PrefixCache::evict(size_t n_blocks) {
     XXH3Key token_hash_key(del_node->block.get_immutable_hash_value());
 
     cached_blocks_.erase(token_hash_key);
+    cached_block_ids_.erase(del_node->block.id());
     if (event_journal_ && event_journal_->enabled()) {
       event_journal_->remove(
           event_scope_, KVCacheEventJournal::encode_hash(token_hash_key.data));

@@ -102,7 +102,7 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
   };
 
   friend class HierarchyPoolTestPeer;
-  void release_host_match(Sequence* sequence, int32_t dp_rank);
+  void release_host_match(Sequence* sequence);
   void quarantine_prefetch(Sequence* sequence, int32_t dp_rank);
   void collect_offload_pairs(Sequence* sequence);
   bool should_probe_prefix_cache(Sequence* sequence) const;

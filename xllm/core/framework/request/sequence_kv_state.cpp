@@ -242,8 +242,8 @@ void KVCacheState::add_shared_blocks(BlockType type,
         ((current_total_num_tokens - 1) / block_size) * block_size;
     if (shared > 0) {
       shared--;
-      const Block& released = bs.back();
-      released.manager()->deallocate(Slice<Block>(&released, /*size=*/1));
+      Block& released = bs.back();
+      released.manager()->release(std::span<Block>(&released, /*size=*/1));
       bs.pop_back();
     }
   }
@@ -421,9 +421,12 @@ void KVCacheState::reset() {
   num_owned_shared_blocks_.clear();
   num_cached_blocks_.clear();
   pushed_local_block_count_ = 0;
+  for (auto& [type, blocks] : composite_blocks_) {
+    Block::release(std::move(blocks));
+  }
   composite_blocks_.clear();
   block_sizes_.clear();
-  src_blocks_.clear();
+  Block::release(std::move(src_blocks_));
   need_swap_ = false;
   transfer_kv_info_.reset();
   next_transfer_block_idx_ = 0;

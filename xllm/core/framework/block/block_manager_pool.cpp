@@ -210,13 +210,10 @@ void BlockManagerPool::deallocate(std::vector<Sequence*>& sequences) {
 void BlockManagerPool::deallocate(Sequence* sequence) {
   DCHECK(sequence != nullptr);
   int32_t dp_rank = get_dp_rank(sequence);
-  // The composite fans deallocate (with final cache) out across all leaves,
-  // including the EMBEDDING resource leaf, the LINEAR leaf, and the (flat or
-  // virtual memory) KV leaf.
+  // The composite publishes the final prefix before resetting the sequence.
   auto* composite =
       static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
   composite->deallocate_for_sequence(sequence);
-  sequence->reset();
 }
 
 std::vector<std::vector<BlockTransferInfo>>*
@@ -273,7 +270,6 @@ bool BlockManagerPool::allocate(Sequence* sequence, size_t num_tokens) {
   if (!composite->allocate_sequence(sequence, num_tokens)) {
     if (started_empty) {
       composite->deallocate_for_sequence(sequence);
-      sequence->reset();
     }
     return false;
   }
@@ -429,7 +425,6 @@ bool BlockManagerPool::try_allocate(Sequence* sequence) {
   composite->allocate_shared_for_sequence(sequence);
   if (!composite->allocate_sequence(sequence, sequence->num_tokens())) {
     composite->deallocate_for_sequence(sequence);
-    sequence->reset();
     return false;
   }
   // add_shared_blocks (called inside allocate_shared_for_sequence) may have
@@ -579,21 +574,6 @@ double BlockManagerPool::kv_cache_utilization() const {
 // If more often used in the future, can be integrated into deallocate function.
 void BlockManagerPool::deallocate_without_cache(Sequence* sequence) {
   DCHECK(sequence != nullptr);
-  int32_t dp_rank = get_dp_rank(sequence);
-  // Release every leaf's blocks directly (no prefix-cache final flush). Routing
-  // by Block::manager() inside composite::deallocate dispatches each block to
-  // its owning leaf.
-  for (const BlockType type : {BlockType::KV,
-                               BlockType::SWA,
-                               BlockType::C4,
-                               BlockType::C128,
-                               BlockType::EMBEDDING,
-                               BlockType::LINEAR}) {
-    const Slice<Block> blocks = sequence->kv_state().blocks(type);
-    if (!blocks.empty()) {
-      block_managers_[dp_rank]->deallocate(blocks);
-    }
-  }
   sequence->reset();
 }
 
