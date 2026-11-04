@@ -105,8 +105,10 @@ def _ensure_python_model_path() -> None:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=f"{os.path.basename(sys.argv[0]) or 'xllm'} serve",
+        usage="%(prog)s [MODEL_PATH] [options]",
         description=(
-            "Launch the packaged xLLM server binary. Unknown arguments are forwarded to the xllm binary unchanged."
+            "Launch the packaged xLLM server binary. Place MODEL_PATH immediately after serve, "
+            "or use --model. Unknown arguments are forwarded to the xllm binary unchanged."
         ),
         allow_abbrev=False,
         # Handle -h/--help ourselves so we can also print the server binary's
@@ -492,6 +494,13 @@ def _print_binary_help(parser: argparse.ArgumentParser, binary_path: str) -> Non
 
 def launch_server(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # Only consume the leading positional argument: parse_known_args with an
+    # optional positional would steal values belonging to unknown server flags.
+    if argv and not argv[0].startswith("-"):
+        if any(arg == "--model" or arg.startswith("--model=") for arg in argv[1:]):
+            parser.error("specify the model either as MODEL_PATH or with --model, not both")
+        argv[0] = f"--model={argv[0]}"
     args, extra_args = parser.parse_known_args(argv)
 
     if args.show_help:
