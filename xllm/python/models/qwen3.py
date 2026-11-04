@@ -78,6 +78,7 @@ class Qwen3Config:
     layers_to_capture: tuple[int, ...] = ()
     mrope_section: Sequence[int] = ()
     rope_scaling: dict[str, Any] = field(default_factory=dict)
+    embedding_mode: bool = False
 
     @classmethod
     def from_dict(cls, d: dict) -> Qwen3Config:
@@ -108,6 +109,7 @@ class Qwen3Config:
             max_position_embeddings=int(pick("max_position_embeddings", default=40960)),
             vocab_size=int(pick("vocab_size", default=151936)),
             tie_word_embeddings=bool(pick("tie_word_embeddings", default=True)),
+            embedding_mode=bool(pick("embedding_mode", default=False)),
             sliding_window=int(pick("sliding_window", default=0)),
             attention_bias=bool(pick("attention_bias", default=False)),
             tp_size=int(pick("tp_size", default=1)),
@@ -377,7 +379,7 @@ class Qwen3ForCausalLM(PyModelBase):
     """Top-level entry the C++ PyCausalLM drives."""
 
     model: Qwen3Model
-    lm_head: ColumnParallelLinear
+    lm_head: ColumnParallelLinear | None
 
     def __init__(self, config: dict) -> None:
         super().__init__()
@@ -393,16 +395,23 @@ class Qwen3ForCausalLM(PyModelBase):
             raise ValueError("world_size must equal tp_size * dp_size")
         if not 0 <= self.cfg.dp_rank < dp:
             raise ValueError("dp_rank must be in [0, dp_size)")
-        assert self.cfg.vocab_size % tp == 0
         self.model = Qwen3Model(self.cfg, dtype, device)  # pyright: ignore[reportIncompatibleVariableOverride]
-        self.lm_head = ColumnParallelLinear(  # pyright: ignore[reportIncompatibleVariableOverride]
-            self.cfg.hidden_size,
-            self.cfg.vocab_size // tp,
-            tp,
-            gather_output=True,
-            dtype=dtype,
-            device=device,
-        )
+        self.lm_head = None
+        if not self.cfg.embedding_mode:
+            assert self.cfg.vocab_size % tp == 0
+            self.lm_head = ColumnParallelLinear(  # pyright: ignore[reportIncompatibleVariableOverride]
+                self.cfg.hidden_size,
+                self.cfg.vocab_size // tp,
+                tp,
+                gather_output=True,
+                dtype=dtype,
+                device=device,
+            )
+
+    def pooler(self, hidden: torch.Tensor, selected_idxes: torch.Tensor | None) -> torch.Tensor:
+        """Match ATB Qwen3: select tokens, then L2-normalize in the input dtype."""
+        hidden = super().pooler(hidden, selected_idxes)
+        return nn.functional.normalize(hidden, p=2, dim=1, eps=1e-12)
 
     # -- weight loading ---------------------------------------------------
     def load_weights(
@@ -414,5 +423,9 @@ class Qwen3ForCausalLM(PyModelBase):
         all_weights = ScopedWeightLoader(state_dicts, src_prefixes=("model.", ""))
         ctx = ParallelLoadContext(tp_rank, tp_size)
         load_causal_lm_weights(
-            self.model, self.lm_head.weight, all_weights, ctx, tie_word_embeddings=self.cfg.tie_word_embeddings
+            self.model,
+            None if self.lm_head is None else self.lm_head.weight,
+            all_weights,
+            ctx,
+            tie_word_embeddings=self.cfg.tie_word_embeddings,
         )

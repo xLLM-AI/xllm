@@ -60,6 +60,19 @@ class PyModelBase(nn.Module):
             hidden = hidden.index_select(0, selected_idxes)
         return self.lm_head(hidden)
 
+    def pooler(self, hidden: torch.Tensor, selected_idxes: torch.Tensor | None) -> torch.Tensor:
+        """Select packed token rows in request order without normalization.
+
+        The input builder supplies the last prompt token's row per sequence;
+        batching padding is not selected. An explicitly supplied EOS remains
+        a prompt token: poolers neither append nor remove it. None selects
+        all rows, while an empty index tensor selects no rows. Indices are
+        device-local int32 or int64 tensors supplied by the runtime.
+        """
+        if selected_idxes is not None:
+            return hidden.index_select(0, selected_idxes)
+        return hidden
+
     # -- weight loading -------------------------------------------------------
     def load_weights(
         self,

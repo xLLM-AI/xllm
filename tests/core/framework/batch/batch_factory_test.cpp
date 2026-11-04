@@ -123,6 +123,70 @@ TEST(SamplingInputBuilderTest, MergeOffsetsSelectedRows) {
                            torch::tensor({1, 3, 4}, torch::kInt)));
 }
 
+TEST(BatchTest, EmbeddingSelectsLastPromptTokensAndExcludesExecutionPadding) {
+  const ScopedConfigValue<bool> overlap(
+      SchedulerConfig::get_instance().enable_schedule_overlap(),
+      /*new_value=*/false);
+  BlockManager::Options options;
+  options.num_blocks(4).block_size(8);
+  BlockManagerImpl manager(options);
+  RequestSamplingParam sampling;
+  sampling.is_embeddings = true;
+  StoppingChecker stopping;
+  stopping.set_eos_token(/*eos_token=*/100);
+  stopping.set_max_generated_tokens(/*tokens=*/1);
+  SequenceParams params;
+  params.seq_capacity = 8;
+  params.sampling_param = &sampling;
+  params.stopping_checker = &stopping;
+  params.enable_schedule_overlap = false;
+  Sequence plain(/*index=*/0,
+                 /*prompt_token_ids=*/{11, 12},
+                 torch::Tensor(),
+                 MMData(),
+                 IncrementalDecoder(/*prompt=*/"",
+                                    /*num_prompt_tokens=*/2,
+                                    /*echo=*/false,
+                                    /*skip_special_tokens=*/true),
+                 params);
+  Sequence with_eos(/*index=*/1,
+                    /*prompt_token_ids=*/{21, 22, 23, 100},
+                    torch::Tensor(),
+                    MMData(),
+                    IncrementalDecoder(/*prompt=*/"",
+                                       /*num_prompt_tokens=*/4,
+                                       /*echo=*/false,
+                                       /*skip_special_tokens=*/true),
+                    params);
+  plain.add_blocks(BlockType::KV, manager.allocate(/*num_blocks=*/1));
+  with_eos.add_blocks(BlockType::KV, manager.allocate(/*num_blocks=*/1));
+  Batch batch({&plain, &with_eos});
+  const ModelArgs args{};
+
+  const LlmForwardInput prefill = batch.prepare_forward_input(
+      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/4, args);
+
+  EXPECT_TRUE(prefill.sampling_params.is_embeddings());
+  EXPECT_TRUE(
+      torch::equal(prefill.token_ids,
+                   torch::tensor({11, 12, 21, 22, 23, 100}, torch::kInt32)));
+  EXPECT_TRUE(torch::equal(prefill.sampling_params.selected_token_idxes(),
+                           torch::tensor({1, 5}, torch::kInt32)));
+
+  // Execution padding is added only to decode batches. It must not create
+  // output rows, even when a real input token is EOS.
+  plain.append_token(Token(/*id=*/100));
+  with_eos.append_token(Token(/*id=*/24));
+  batch.refresh_forward_type();
+  const LlmForwardInput decode = batch.prepare_forward_input(
+      /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/4, args);
+
+  EXPECT_TRUE(torch::equal(decode.token_ids,
+                           torch::tensor({100, 24, 0, 0}, torch::kInt32)));
+  EXPECT_TRUE(torch::equal(decode.sampling_params.selected_token_idxes(),
+                           torch::tensor({0, 1}, torch::kInt32)));
+}
+
 TEST(SamplingInputBuilderTest, PadsAndMergesAdjustedTokenCounts) {
   RequestSamplingParam params;
   params.frequency_penalty = 1.0;
