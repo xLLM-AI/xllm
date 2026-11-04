@@ -20,22 +20,36 @@ import torch
 from xllm.python.models.qwen3 import Qwen3ForCausalLM
 
 
+class _StateDict:
+    def __init__(self, tensors: dict[str, torch.Tensor]) -> None:
+        self._tensors = tensors
+
+    def has(self, name: str) -> bool:
+        return name in self._tensors
+
+    def get_tensor(self, name: str) -> torch.Tensor:
+        return self._tensors[name]
+
+
 @pytest.fixture
-def model() -> Qwen3ForCausalLM:
-    return Qwen3ForCausalLM(
-        {
-            "hidden_size": 4,
-            "n_layers": 0,
-            "n_heads": 1,
-            "n_kv_heads": 1,
-            "head_dim": 4,
-            "intermediate_size": 8,
-            "vocab_size": 8,
-            "max_position_embeddings": 8,
-            "dtype": "float32",
-            "device": "cpu",
-        }
-    )
+def config() -> dict[str, object]:
+    return {
+        "hidden_size": 4,
+        "n_layers": 0,
+        "n_heads": 1,
+        "n_kv_heads": 1,
+        "head_dim": 4,
+        "intermediate_size": 8,
+        "vocab_size": 8,
+        "max_position_embeddings": 8,
+        "dtype": "float32",
+        "device": "cpu",
+    }
+
+
+@pytest.fixture
+def model(config: dict[str, object]) -> Qwen3ForCausalLM:
+    return Qwen3ForCausalLM(config)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
@@ -88,3 +102,75 @@ def test_pooling_keeps_generation_logits_unchanged(model: Qwen3ForCausalLM) -> N
     expected = torch.nn.functional.linear(hidden.index_select(0, selected), model.lm_head.weight)
     torch.testing.assert_close(after, before, rtol=0, atol=0)
     torch.testing.assert_close(after, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("tie_word_embeddings", [False, True])
+@pytest.mark.parametrize("prefix", ["", "model."])
+def test_embedding_checkpoint_loads_without_output_head(
+    config: dict[str, object], tie_word_embeddings: bool, prefix: str
+) -> None:
+    model = Qwen3ForCausalLM(config | {"embedding_mode": True, "tie_word_embeddings": tie_word_embeddings})
+    embedding = torch.arange(32, dtype=torch.float32).reshape(8, 4)
+    norm = torch.tensor([1.0, 2.0, 3.0, 4.0])
+
+    model.load_weights([_StateDict({f"{prefix}embed_tokens.weight": embedding, f"{prefix}norm.weight": norm})], 0, 1)
+
+    assert model.lm_head is None
+    torch.testing.assert_close(model.model.embed_tokens.weight, embedding)
+    torch.testing.assert_close(model.model.norm.weight, norm)
+
+
+@pytest.mark.parametrize("tp_rank", [0, 1])
+def test_embedding_checkpoint_with_odd_vocab_loads_hidden_shards(config: dict[str, object], tp_rank: int) -> None:
+    model = Qwen3ForCausalLM(
+        config
+        | {
+            "embedding_mode": True,
+            "vocab_size": 9,
+            "tp_size": 2,
+            "tp_rank": tp_rank,
+            "n_heads": 2,
+            "n_kv_heads": 2,
+            "head_dim": 2,
+        }
+    )
+    embedding = torch.arange(36, dtype=torch.float32).reshape(9, 4)
+
+    model.load_weights([_StateDict({"embed_tokens.weight": embedding, "norm.weight": torch.ones(4)})], tp_rank, 2)
+
+    assert model.lm_head is None
+    torch.testing.assert_close(model.model.embed_tokens.weight, embedding[:, tp_rank * 2 : (tp_rank + 1) * 2])
+
+
+@pytest.mark.parametrize("tie_word_embeddings", [False, True])
+def test_generation_checkpoint_still_loads_output_head_and_computes_logits(
+    config: dict[str, object], tie_word_embeddings: bool
+) -> None:
+    model = Qwen3ForCausalLM(config | {"embedding_mode": False, "tie_word_embeddings": tie_word_embeddings})
+    embedding = torch.arange(32, dtype=torch.float32).reshape(8, 4)
+    head = embedding.flip(0)
+    tensors = {"model.embed_tokens.weight": embedding, "model.norm.weight": torch.ones(4)}
+    if not tie_word_embeddings:
+        tensors["lm_head.weight"] = head
+
+    model.load_weights([_StateDict(tensors)], 0, 1)
+
+    assert model.lm_head is not None
+    expected_head = embedding if tie_word_embeddings else head
+    torch.testing.assert_close(model.lm_head.weight, expected_head)
+    hidden = torch.tensor([[3.0, 4.0, 0.0, 0.0], [0.0, 0.0, 5.0, 12.0]])
+    selected = torch.tensor([1, 0])
+    torch.testing.assert_close(model.compute_logits(hidden, selected), hidden[selected] @ expected_head.t())
+
+
+def test_generation_checkpoint_still_requires_untied_output_head(config: dict[str, object]) -> None:
+    model = Qwen3ForCausalLM(config | {"tie_word_embeddings": False})
+    state = _StateDict({"model.embed_tokens.weight": torch.zeros(8, 4), "model.norm.weight": torch.ones(4)})
+
+    with pytest.raises(KeyError, match="lm_head.weight"):
+        model.load_weights([state], 0, 1)
+
+
+def test_generation_still_requires_vocab_divisible_by_tp(config: dict[str, object]) -> None:
+    with pytest.raises(AssertionError):
+        Qwen3ForCausalLM(config | {"vocab_size": 9, "tp_size": 2})
