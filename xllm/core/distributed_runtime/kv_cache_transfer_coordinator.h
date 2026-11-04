@@ -51,7 +51,7 @@ class KVCacheTransferCoordinator final : public KVCacheTransferCoordinatorBase {
       uint32_t dp_rank,
       const std::vector<BlockTransferInfo>& block_transfer_info) override;
 
-  void transfer_kv_blocks(
+  std::vector<folly::SemiFuture<uint32_t>> transfer_kv_blocks(
       uint32_t dp_rank,
       uint64_t batch_id,
       const std::vector<BlockTransferInfo>& block_transfer_info) override;

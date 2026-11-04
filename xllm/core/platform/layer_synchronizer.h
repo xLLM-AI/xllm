@@ -27,6 +27,8 @@ class LayerSynchronizer {
   virtual ~LayerSynchronizer() = default;
 
   virtual bool synchronize_layer(int64_t layer_index) = 0;
+  // Wait on the host until all copies finish before releasing their blocks.
+  virtual bool synchronize_all();
   // Order a consumer stream after a load without waiting for device completion
   // on the CPU. Backends without stream waits retain their blocking semantics.
   virtual bool wait_layer_on_current_stream(int64_t layer_index) {

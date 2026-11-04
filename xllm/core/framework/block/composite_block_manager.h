@@ -83,9 +83,11 @@ class CompositeBlockManager : public BlockManager {
   // Sequence-level orchestration (the only Sequence-aware surface). Drives
   // each leaf's own primitives and writes results back into KVCacheState
   // under the leaf's block_type().
-  bool allocate_sequence(Sequence* seq, size_t num_tokens);
+  bool allocate_sequence(Sequence* seq,
+                         size_t num_tokens,
+                         bool cache_prefix = true);
   void release_out_of_window_for_sequence(Sequence* seq);
-  void deallocate_for_sequence(Sequence* seq);
+  void deallocate_for_sequence(Sequence* seq, bool cache_prefix = true);
   void allocate_shared_for_sequence(Sequence* seq);
   void cache_for_sequence(Sequence* seq, size_t num_tokens);
   void cache_full_blocks_for_sequence(Sequence* seq);

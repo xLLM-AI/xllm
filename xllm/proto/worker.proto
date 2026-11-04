@@ -161,7 +161,11 @@ message PrefetchRequest {
 }
 
 message TransferStatus {
- uint32 success_cnt = 1;
+  uint32 success_cnt = 1;
+}
+
+message WaitForKVBlocksTransferRequest {
+  uint64 batch_id = 1;
 }
 
 message CacheInfo {
@@ -497,6 +501,7 @@ service DistributeWorker {
   rpc GetLastVLMStepResult (Empty) returns (VLMForwardResponse);
   rpc GetActiveActivationMemory (Empty) returns (ActivationMemory);
   rpc TransferBlocks(BlockTransferInfos) returns (TransferStatus) {}
+  rpc WaitForKVBlocksTransfer(WaitForKVBlocksTransferRequest) returns (Status) {}
   rpc PrefetchFromStorage(PrefetchRequest) returns (Status) {}
   rpc Sleep (SleepRequest)  returns (Status);
   rpc Wakeup (WakeupRequest) returns (Status);

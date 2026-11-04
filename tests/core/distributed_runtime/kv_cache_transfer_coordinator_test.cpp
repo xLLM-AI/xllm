@@ -57,12 +57,14 @@ class RecordingTransferWorkerClient final : public WorkerClient {
     return folly::makeSemiFuture(transfer_result_);
   }
 
-  void transfer_kv_blocks(
+  folly::SemiFuture<uint32_t> transfer_kv_blocks(
       uint64_t batch_id,
       const std::vector<BlockTransferInfo>& block_transfer_info) override {
     ++batch_transfer_calls_;
     batch_id_ = batch_id;
     transfer_info_ = block_transfer_info;
+    return folly::makeSemiFuture(
+        static_cast<uint32_t>(block_transfer_info.size()));
   }
 
   void prefetch_from_storage(

@@ -40,12 +40,6 @@ KVCacheManagerFactoryResult KVCacheManagerFactory::create(
     const VmmKVCacheLayout* shared_vmm_layout) {
   CHECK_GT(world_size, 0) << "world_size must be greater than 0";
   CHECK_GT(dp_size, 0) << "dp_size must be greater than 0";
-  CHECK(!options.enable_vmm_kvcache() ||
-        (!options.enable_host_offload() &&
-         (!host_validation_options.has_value() ||
-          host_validation_options->host_blocks_factor <= 1.0)))
-      << "Virtual memory does not support host KV cache offload; set "
-         "--host_blocks_factor=0.";
   KVCacheShape shape(kv_cache_capacity, model_args, world_size);
   CHECK(shape.has_key_cache_shape())
       << "KV cache shape must contain a key cache shape";

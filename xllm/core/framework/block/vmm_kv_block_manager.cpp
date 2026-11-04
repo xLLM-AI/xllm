@@ -352,18 +352,25 @@ size_t VmmKVBlockManager::num_free_blocks() const { return available_size(); }
 
 size_t VmmKVBlockManager::num_used_blocks() const {
   std::lock_guard<std::mutex> lock(mtx_);
-  return get_num_allocated_blocks() - inactive_blocks_.size();
+  size_t used_blocks = get_num_allocated_blocks() - inactive_blocks_.size();
+  if (padding_block_.has_value()) {
+    --used_blocks;
+  }
+  return used_blocks;
 }
 
 double VmmKVBlockManager::kv_cache_utilization() const {
   std::lock_guard<std::mutex> lock(mtx_);
   size_t total = num_total_blocks();
+  size_t used_blocks = get_num_allocated_blocks() - inactive_blocks_.size();
+  if (padding_block_.has_value()) {
+    --total;
+    --used_blocks;
+  }
   if (total == 0) {
     return 0.0;
   }
-  return static_cast<double>(get_num_allocated_blocks() -
-                             inactive_blocks_.size()) /
-         total;
+  return static_cast<double>(used_blocks) / total;
 }
 
 size_t VmmKVBlockManager::num_total_blocks() const {
@@ -372,13 +379,19 @@ size_t VmmKVBlockManager::num_total_blocks() const {
 
 size_t VmmKVBlockManager::admission_capacity() const {
   size_t resident_blocks = 0;
+  bool padding_reserved = false;
   {
     std::lock_guard<std::mutex> lock(mtx_);
     resident_blocks = get_num_allocated_blocks() + num_avail_blocks_.load() +
                       reserved_blocks_.size();
+    padding_reserved = padding_block_.has_value();
   }
-  return std::min(static_cast<size_t>(options_.num_blocks()),
-                  resident_blocks + unallocated_block_capacity());
+  size_t capacity = std::min(static_cast<size_t>(options_.num_blocks()),
+                             resident_blocks + unallocated_block_capacity());
+  if (padding_reserved && capacity > 0) {
+    --capacity;
+  }
+  return capacity;
 }
 
 size_t VmmKVBlockManager::unallocated_block_capacity() const {

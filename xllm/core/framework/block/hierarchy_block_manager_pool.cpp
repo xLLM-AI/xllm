@@ -24,6 +24,7 @@ limitations under the License.
 #include <mutex>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #include "core/framework/block/composite_block_manager.h"
@@ -322,6 +323,7 @@ HierarchyBlockManagerPool::HierarchyBlockManagerPool(
       BlockManager::Options host_options =
           device_leaf_it->second.leaf->options();
       host_options.num_blocks(num_blocks)
+          .enable_vmm_kvcache(false)
           .enable_disagg_pd(options_.enable_disagg_pd())
           .enable_kvcache_store(options_.enable_kvcache_store())
           .enable_host_offload(options_.enable_host_offload());
@@ -357,6 +359,7 @@ HierarchyBlockManagerPool::HierarchyBlockManagerPool(
 
   storage_prefetch_disabled_.resize(host_block_managers_.size(), false);
   load_block_transfer_infos_.resize(host_block_managers_.size());
+  inflight_restores_.resize(host_block_managers_.size());
   offload_block_pair_queues_.resize(host_block_managers_.size());
 }
 
@@ -405,6 +408,18 @@ void HierarchyBlockManagerPool::release_host_match(Sequence* sequence,
 
 void HierarchyBlockManagerPool::deallocate(Sequence* sequence) {
   DCHECK(sequence != nullptr);
+  const int32_t dp_rank = BlockManagerPool::get_dp_rank(sequence);
+  std::vector<PendingLoadTransfer>& pending_loads =
+      load_block_transfer_infos_[dp_rank];
+  const size_t pending_load_count = pending_loads.size();
+  std::erase_if(pending_loads, [sequence](const PendingLoadTransfer& pending) {
+    return pending.sequence == sequence;
+  });
+  const bool cancelled_pending_restore =
+      pending_loads.size() != pending_load_count;
+  const bool cancelled_restore =
+      restoring_sequences_.erase(sequence) > 0 || cancelled_pending_restore;
+
   // PD handoff can release the owner while the scheduler retires its batch.
   // A lease must observe both manager deallocation and Sequence::reset before
   // it performs the final cached-usage check.
@@ -416,12 +431,13 @@ void HierarchyBlockManagerPool::deallocate(Sequence* sequence) {
   for (const auto& owner : restore_owners) {
     restore_locks.emplace_back(owner->lock());
   }
-  int32_t dp_rank = BlockManagerPool::get_dp_rank(sequence);
   auto* composite =
       static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
-  composite->cache_full_blocks_for_sequence(sequence);
-
-  collect_offload_pairs(sequence);
+  if (!cancelled_restore) {
+    composite->cache_full_blocks_for_sequence(sequence);
+    collect_offload_pairs(
+        sequence, dp_rank, sequence->kv_state().kv_cache_tokens_num());
+  }
 
   // Release the host blocks still held by the sequence. Blocks moved into the
   // offload queue are now invalid in this vector and are skipped by
@@ -432,20 +448,36 @@ void HierarchyBlockManagerPool::deallocate(Sequence* sequence) {
   }
 
   // Release device blocks via the composite (includes prefix cache flush).
-  composite->deallocate_for_sequence(sequence);
+  composite->deallocate_for_sequence(sequence,
+                                     /*cache_prefix=*/!cancelled_restore);
   sequence->reset();
 }
 
-void HierarchyBlockManagerPool::collect_offload_pairs(Sequence* sequence) {
-  const int32_t dp_rank = sequence->dp_rank();
+void HierarchyBlockManagerPool::cache(Sequence* sequence) {
+  if (restoring_sequences_.contains(sequence)) {
+    return;
+  }
+  BlockManagerPool::cache(sequence);
+}
+
+void HierarchyBlockManagerPool::cache(Sequence* sequence, size_t num_tokens) {
+  if (restoring_sequences_.contains(sequence)) {
+    return;
+  }
+  BlockManagerPool::cache(sequence, num_tokens);
+}
+
+void HierarchyBlockManagerPool::collect_offload_pairs(Sequence* sequence,
+                                                      int32_t dp_rank,
+                                                      size_t completed_tokens) {
   const auto* host_manager = host_block_managers_[dp_rank].get();
-  if (!options_.enable_prefix_cache() || host_manager == nullptr) {
+  if (!options_.enable_prefix_cache() ||
+      host_manager == nullptr || restoring_sequences_.contains(sequence)) {
     return;
   }
 
   KVCacheState& hbm_state = sequence->kv_state();
   KVCacheState& host_state = sequence->host_kv_state();
-  const size_t completed_tokens = hbm_state.kv_cache_tokens_num();
   for (const auto& [type, entry] : host_manager->leaf_entries()) {
     std::vector<Block>* hbm_blocks = hbm_state.mutable_blocks(type);
     std::vector<Block>* host_blocks = host_state.mutable_blocks(type);
@@ -531,7 +563,8 @@ void HierarchyBlockManagerPool::set_prefetch_completion_callback(
   {
     std::lock_guard<std::mutex> lock(prefetch_completion_mutex_);
     prefetch_completion_callback_ = std::move(callback);
-    has_pending_completion = !prefetch_completions_.empty();
+    has_pending_completion =
+        !prefetch_completions_.empty() || !restore_completions_.empty();
     if (has_pending_completion) {
       callback_to_notify = prefetch_completion_callback_;
     }
@@ -597,10 +630,15 @@ bool HierarchyBlockManagerPool::allocate(Sequence* sequence,
   KVCacheState& hbm_state = sequence->kv_state();
   CHECK_LE(hbm_state.kv_cache_tokens_num(), restore_tokens);
   CHECK_LE(restore_tokens, num_tokens);
+  const std::map<BlockType, size_t> previous_hbm_cached_blocks =
+      hbm_state.num_cached_blocks();
 
   auto* composite =
       static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
-  if (!composite->allocate_sequence(sequence, num_tokens)) {
+  const bool already_restoring = restoring_sequences_.contains(sequence);
+  const bool cache_prefix =
+      !already_restoring && restore_tokens == hbm_state.kv_cache_tokens_num();
+  if (!composite->allocate_sequence(sequence, num_tokens, cache_prefix)) {
     release_host_match(sequence, dp_rank);
     return false;
   }
@@ -613,11 +651,11 @@ bool HierarchyBlockManagerPool::allocate(Sequence* sequence,
   }
 
   std::vector<Block> restore_blocks;
-  if (host_manager != nullptr) {
+  if (host_manager != nullptr && !already_restoring) {
     const size_t host_cached_tokens = host_state.kv_cache_tokens_num();
     const size_t hbm_cached_tokens = hbm_state.kv_cache_tokens_num();
     if (host_cached_tokens > hbm_cached_tokens) {
-      std::vector<BlockTransferInfo>& load_infos =
+      std::vector<PendingLoadTransfer>& load_infos =
           load_block_transfer_infos_[dp_rank];
       for (const auto& [type, entry] : host_manager->leaf_entries()) {
         if (type == BlockType::LINEAR) {
@@ -642,11 +680,13 @@ bool HierarchyBlockManagerPool::allocate(Sequence* sequence,
           hbm_state.set_num_cached_blocks(type, checkpoint_count);
           Block& restore_block = hbm_blocks->back();
           restore_block.set_hash_value(host_source.get_immutable_hash_value());
-          load_infos.emplace_back(host_source.id(),
-                                  restore_block.id(),
-                                  host_source.get_immutable_hash_value(),
-                                  TransferType::H2D,
-                                  BlockType::LINEAR);
+          load_infos.emplace_back(PendingLoadTransfer{
+              sequence,
+              BlockTransferInfo(host_source.id(),
+                                restore_block.id(),
+                                host_source.get_immutable_hash_value(),
+                                TransferType::H2D,
+                                BlockType::LINEAR)});
           restore_blocks.emplace_back(host_source);
           restore_blocks.emplace_back(restore_block);
           continue;
@@ -655,10 +695,17 @@ bool HierarchyBlockManagerPool::allocate(Sequence* sequence,
         const size_t block_size = entry.leaf->block_size();
         std::vector<Block>* host_blocks = host_state.mutable_blocks(type);
         std::vector<Block>* hbm_blocks = hbm_state.mutable_blocks(type);
-        const size_t begin_block = hbm_cached_tokens / block_size;
-        const size_t end_block = std::min({host_cached_tokens / block_size,
-                                           host_blocks->size(),
-                                           hbm_blocks->size()});
+        const auto hbm_matched_it = previous_hbm_cached_blocks.find(type);
+        const size_t begin_block =
+            hbm_matched_it == previous_hbm_cached_blocks.end()
+                ? 0
+                : hbm_matched_it->second;
+        const size_t host_matched_blocks = host_state.num_cached_blocks(type);
+        const size_t end_block =
+            std::min({host_cached_tokens / block_size,
+                      host_matched_blocks,
+                      host_blocks->size(),
+                      hbm_blocks->size()});
         if (end_block > begin_block) {
           restore_blocks.reserve(restore_blocks.size() +
                                  2 * (end_block - begin_block));
@@ -675,11 +722,13 @@ bool HierarchyBlockManagerPool::allocate(Sequence* sequence,
           // Reference counts do not indicate whether a destination is
           // initialized.
           hbm_block.set_hash_value(host_block.get_immutable_hash_value());
-          load_infos.emplace_back(host_block.id(),
-                                  hbm_block.id(),
-                                  host_block.get_immutable_hash_value(),
-                                  TransferType::H2D,
-                                  type);
+          load_infos.emplace_back(PendingLoadTransfer{
+              sequence,
+              BlockTransferInfo(host_block.id(),
+                                hbm_block.id(),
+                                host_block.get_immutable_hash_value(),
+                                TransferType::H2D,
+                                type)});
           restore_blocks.emplace_back(host_block);
           restore_blocks.emplace_back(hbm_block);
         }
@@ -688,6 +737,7 @@ bool HierarchyBlockManagerPool::allocate(Sequence* sequence,
   }
   auto lease = sequence->retain_host_restore_blocks(std::move(restore_blocks));
   if (lease != nullptr) {
+    restoring_sequences_.emplace(sequence, lease);
     std::erase_if(host_restore_leases_,
                   [](const auto& prior) { return prior.expired(); });
     host_restore_leases_.reserve(host_restore_leases_.size() + 1);
@@ -695,7 +745,7 @@ bool HierarchyBlockManagerPool::allocate(Sequence* sequence,
   }
   CHECK_GE(hbm_state.current_max_tokens_capacity(), restore_tokens);
   hbm_state.set_kv_cache_tokens_num(restore_tokens);
-  collect_offload_pairs(sequence);
+  collect_offload_pairs(sequence, dp_rank, restore_tokens);
   sequence->clear_host_cache_match();
   return true;
 }
@@ -1020,13 +1070,101 @@ void HierarchyBlockManagerPool::prefetch_from_storage(
 
 void HierarchyBlockManagerPool::drain_prefetch_completions() {
   std::deque<std::function<void()>> completed;
+  std::deque<RestoreCompletion> restored;
   {
     std::lock_guard<std::mutex> lock(prefetch_completion_mutex_);
     completed.swap(prefetch_completions_);
+    restored.swap(restore_completions_);
   }
   for (auto& finalize : completed) {
     finalize();
   }
+  for (const RestoreCompletion& completion : restored) {
+    complete_restore(completion);
+  }
+}
+
+void HierarchyBlockManagerPool::complete_restore(
+    const RestoreCompletion& completion) {
+  CHECK(completion.success)
+      << "Host KV restore failed: dp_rank=" << completion.dp_rank
+      << ", batch_id=" << completion.batch_id;
+  auto& per_dp = inflight_restores_[completion.dp_rank];
+  auto batch = per_dp.find(completion.batch_id);
+  CHECK(batch != per_dp.end());
+  std::vector<RestoringSequence> restored = std::move(batch->second);
+  per_dp.erase(batch);
+  auto* composite = static_cast<CompositeBlockManager*>(
+      block_managers_[completion.dp_rank].get());
+  for (const RestoringSequence& restore : restored) {
+    auto active = restoring_sequences_.find(restore.sequence);
+    if (active == restoring_sequences_.end() ||
+        active->second.lock() != restore.lease) {
+      continue;
+    }
+    restoring_sequences_.erase(active);
+    composite->cache_full_blocks_for_sequence(restore.sequence);
+  }
+}
+
+void HierarchyBlockManagerPool::transfer_load_blocks(int32_t dp_rank,
+                                                     uint64_t batch_id) {
+  auto& pending_loads = load_block_transfer_infos_[dp_rank];
+  CHECK(!pending_loads.empty());
+  CHECK(transfer_coordinator_ != nullptr);
+  auto [batch, inserted] = inflight_restores_[dp_rank].try_emplace(batch_id);
+  CHECK(inserted) << "Duplicate Host restore batch id " << batch_id;
+  std::vector<RestoringSequence>& restoring = batch->second;
+  restoring.reserve(restoring_sequences_.size());
+  std::unordered_set<Sequence*> retained_sequences;
+  retained_sequences.reserve(restoring_sequences_.size());
+  std::vector<BlockTransferInfo> transfer_infos;
+  transfer_infos.reserve(pending_loads.size());
+  for (PendingLoadTransfer& pending : pending_loads) {
+    // Each sequence contributes several blocks, but its lease is retained
+    // once per dispatched batch and survives cancellation or batch retirement.
+    if (retained_sequences.insert(pending.sequence).second) {
+      auto active = restoring_sequences_.find(pending.sequence);
+      CHECK(active != restoring_sequences_.end());
+      auto lease = active->second.lock();
+      CHECK(lease != nullptr);
+      restoring.emplace_back(
+          RestoringSequence{pending.sequence, std::move(lease)});
+    }
+    transfer_infos.emplace_back(std::move(pending.transfer_info));
+  }
+  pending_loads.clear();
+
+  std::shared_ptr<KVTransferTracker::Completion> tracked =
+      restore_transfers_.track();
+  const size_t expected_count = transfer_infos.size();
+  folly::collectAll(transfer_coordinator_->transfer_kv_blocks(
+                        dp_rank, batch_id, transfer_infos))
+      .via(&folly::InlineExecutor::instance())
+      .thenValue([this, dp_rank, batch_id, expected_count](
+                     std::vector<folly::Try<uint32_t>>&& results) {
+        const bool success =
+            !results.empty() &&
+            std::all_of(results.begin(),
+                        results.end(),
+                        [expected_count](const auto& result) {
+                          return result.hasValue() &&
+                                 result.value() == expected_count;
+                        });
+        CHECK(success) << "Host KV restore failed: dp_rank=" << dp_rank
+                       << ", batch_id=" << batch_id;
+        PrefetchCompletionCallback notify;
+        {
+          std::lock_guard<std::mutex> lock(prefetch_completion_mutex_);
+          restore_completions_.emplace_back(
+              RestoreCompletion{dp_rank, batch_id, success});
+          notify = prefetch_completion_callback_;
+        }
+        if (notify) {
+          notify();
+        }
+      })
+      .ensure([tracked = std::move(tracked)]() mutable { tracked.reset(); });
 }
 
 void HierarchyBlockManagerPool::transfer_blocks(BatchGroup& batches) {
@@ -1037,10 +1175,7 @@ void HierarchyBlockManagerPool::transfer_blocks(BatchGroup& batches) {
     CHECK_LT(i, batches.size())
         << "Missing batch for pending H2D transfer at dp_rank=" << i;
     batches[i].set_batch_id();
-    batches[i].require_host_restore();
-    transfer_coordinator_->transfer_kv_blocks(
-        i, batches[i].batch_id(), load_block_transfer_infos_[i]);
-    load_block_transfer_infos_[i].clear();
+    transfer_load_blocks(static_cast<int32_t>(i), batches[i].batch_id());
   }
 
   transfer_offload_blocks();
@@ -1054,9 +1189,7 @@ void HierarchyBlockManagerPool::transfer_blocks(RecBatchGroup& batches) {
     CHECK_LT(i, batches.size())
         << "Missing batch for pending H2D transfer at dp_rank=" << i;
     batches[i].set_batch_id();
-    transfer_coordinator_->transfer_kv_blocks(
-        i, batches[i].batch_id(), load_block_transfer_infos_[i]);
-    load_block_transfer_infos_[i].clear();
+    transfer_load_blocks(static_cast<int32_t>(i), batches[i].batch_id());
   }
 
   transfer_offload_blocks();
@@ -1065,7 +1198,7 @@ void HierarchyBlockManagerPool::transfer_blocks(RecBatchGroup& batches) {
 void HierarchyBlockManagerPool::transfer_blocks() { transfer_offload_blocks(); }
 
 bool HierarchyBlockManagerPool::has_pending_async_block_release() const {
-  if (offload_transfers_.has_pending() ||
+  if (offload_transfers_.has_pending() || restore_transfers_.has_pending() ||
       std::any_of(host_restore_leases_.begin(),
                   host_restore_leases_.end(),
                   [](const auto& lease) { return !lease.expired(); })) {

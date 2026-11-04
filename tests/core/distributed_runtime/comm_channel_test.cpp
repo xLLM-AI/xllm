@@ -18,8 +18,14 @@ limitations under the License.
 #include <brpc/closure_guard.h>
 #include <brpc/server.h>
 #include <butil/endpoint.h>
+#include <folly/ScopeGuard.h>
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <future>
+#include <mutex>
+
+#include "core/distributed_runtime/remote_worker.h"
 #include "runtime/rec_forward_params.h"
 #include "runtime/vlm_forward_params.h"
 
@@ -28,6 +34,76 @@ namespace {
 
 class ModelRoutingService final : public proto::DistributeWorker {
  public:
+  void Hello(google::protobuf::RpcController* /*controller*/,
+             const proto::Status* /*request*/,
+             proto::Status* response,
+             google::protobuf::Closure* done) override {
+    brpc::ClosureGuard guard(done);
+    response->set_ok(true);
+  }
+
+  void TransferBlocks(google::protobuf::RpcController* /*controller*/,
+                      const proto::BlockTransferInfos* request,
+                      proto::TransferStatus* response,
+                      google::protobuf::Closure* done) override {
+    std::lock_guard<std::mutex> lock(restore_mutex_);
+    restore_batch_id_ = request->batch_id();
+    registration_response_ = response;
+    registration_done_ = done;
+    registration_count_ = static_cast<uint32_t>(request->transfer_infos_size());
+    registration_requested_.set_value();
+  }
+
+  void WaitForKVBlocksTransfer(
+      google::protobuf::RpcController* controller,
+      const proto::WaitForKVBlocksTransferRequest* request,
+      proto::Status* response,
+      google::protobuf::Closure* done) override {
+    brpc::ClosureGuard guard(done);
+    std::lock_guard<std::mutex> lock(restore_mutex_);
+    if (request->batch_id() != restore_batch_id_ ||
+        registration_done_ != nullptr) {
+      controller->SetFailed("Restore has not been registered");
+      return;
+    }
+    completion_requested_.set_value();
+    if (completion_allowed_) {
+      response->set_ok(true);
+      return;
+    }
+    completion_response_ = response;
+    completion_done_ = guard.release();
+  }
+
+  std::future<void> registration_requested() {
+    return registration_requested_.get_future();
+  }
+
+  std::future<void> completion_requested() {
+    return completion_requested_.get_future();
+  }
+
+  void allow_restore_registration() {
+    std::lock_guard<std::mutex> lock(restore_mutex_);
+    if (registration_done_ == nullptr) {
+      return;
+    }
+    registration_response_->set_success_cnt(registration_count_);
+    brpc::ClosureGuard guard(registration_done_);
+    registration_done_ = nullptr;
+  }
+
+  void allow_restore_completion() {
+    std::lock_guard<std::mutex> lock(restore_mutex_);
+    completion_allowed_ = true;
+    if (completion_done_ == nullptr) {
+      return;
+    }
+    completion_response_->set_ok(true);
+    brpc::ClosureGuard guard(completion_done_);
+    completion_done_ = nullptr;
+  }
+
   void Sleep(google::protobuf::RpcController* /*controller*/,
              const proto::SleepRequest* request,
              proto::Status* response,
@@ -123,6 +199,18 @@ class ModelRoutingService final : public proto::DistributeWorker {
     brpc::ClosureGuard guard(done);
     controller->SetFailed("result unavailable");
   }
+
+ private:
+  std::mutex restore_mutex_;
+  uint64_t restore_batch_id_ = 0;
+  uint32_t registration_count_ = 0;
+  bool completion_allowed_ = false;
+  std::promise<void> registration_requested_;
+  std::promise<void> completion_requested_;
+  proto::TransferStatus* registration_response_ = nullptr;
+  google::protobuf::Closure* registration_done_ = nullptr;
+  proto::Status* completion_response_ = nullptr;
+  google::protobuf::Closure* completion_done_ = nullptr;
 };
 
 class CommChannelTest : public ::testing::Test {
@@ -167,6 +255,48 @@ TEST_F(CommChannelTest, PreservesResidencyGenerationAcrossLifecycleRpcs) {
   EXPECT_TRUE(channel_.wakeup(options));
   options.transition_id = 40;
   EXPECT_FALSE(channel_.wakeup(options));
+}
+
+TEST_F(CommChannelTest, RestoreAcknowledgesRegistrationBeforeCopyCompletion) {
+  const std::string address =
+      butil::endpoint2str(server_.listen_address()).c_str();
+  auto channel = std::make_unique<CommChannel>();
+  ASSERT_TRUE(channel->init_brpc(address));
+  RemoteWorker worker(/*global_rank=*/0,
+                      address,
+                      torch::Device(torch::kCPU),
+                      std::move(channel));
+  auto release_restore = folly::makeGuard([this]() {
+    service_.allow_restore_registration();
+    service_.allow_restore_completion();
+  });
+  auto registration_requested = service_.registration_requested();
+  auto completion_requested = service_.completion_requested();
+  const uint8_t hash_key[XXH3_128BITS_HASH_VALUE_LEN] = {};
+  const BlockTransferInfo info(
+      /*src_id=*/1, /*dst_id=*/2, hash_key, TransferType::H2D);
+  auto restored = worker.transfer_kv_blocks(/*batch_id=*/73, {info});
+  ASSERT_EQ(registration_requested.wait_for(std::chrono::seconds(5)),
+            std::future_status::ready);
+  LlmForwardInput input;
+  auto forward = worker.step_remote_async(input);
+  EXPECT_EQ(completion_requested.wait_for(std::chrono::milliseconds(50)),
+            std::future_status::timeout);
+  EXPECT_FALSE(forward.isReady());
+
+  service_.allow_restore_registration();
+  ASSERT_EQ(completion_requested.wait_for(std::chrono::seconds(5)),
+            std::future_status::ready);
+  const auto output = std::move(forward).get(std::chrono::seconds(5));
+  ASSERT_TRUE(output.has_value());
+  EXPECT_FALSE(restored.isReady());
+
+  service_.allow_restore_completion();
+  EXPECT_EQ(std::move(restored).get(std::chrono::seconds(5)), 1u);
+}
+
+TEST_F(CommChannelTest, RejectsCompletionForAnUnregisteredRestore) {
+  EXPECT_FALSE(channel_.wait_for_kv_blocks_transfer(/*batch_id=*/73));
 }
 
 TEST_F(CommChannelTest, RoutesVLMInputToItsOwnRpc) {

@@ -1208,7 +1208,21 @@ void WorkerService::TransferBlocks(
 
   resp->set_success_cnt(
       worker_->transfer_kv_blocks(batch_id, block_transfer_info));
-  return;
+}
+
+void WorkerService::WaitForKVBlocksTransfer(
+    google::protobuf::RpcController* controller,
+    const proto::WaitForKVBlocksTransferRequest* req,
+    proto::Status* resp,
+    google::protobuf::Closure* done) {
+  copy_threadpool_.schedule([this, controller, req, resp, done]() mutable {
+    brpc::ClosureGuard done_guard(done);
+    const bool success = worker_->wait_for_kv_blocks_transfer(req->batch_id());
+    resp->set_ok(success);
+    if (!success) {
+      controller->SetFailed("Host KV restore copy failed");
+    }
+  });
 }
 
 void WorkerService::PrefetchFromStorage(

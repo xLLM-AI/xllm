@@ -111,7 +111,7 @@ class WorkerClient {
   virtual folly::SemiFuture<uint32_t> transfer_kv_blocks(
       const std::vector<BlockTransferInfo>& block_transfer_info);
 
-  virtual void transfer_kv_blocks(
+  virtual folly::SemiFuture<uint32_t> transfer_kv_blocks(
       const uint64_t batch_id,
       const std::vector<BlockTransferInfo>& block_transfer_info);
 

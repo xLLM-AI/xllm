@@ -19,6 +19,21 @@ xLLM 可以分别为 KV Cache 和模型权重启用虚拟内存管理（VMM）�
 
 前缀匹配沿用物理 KV Cache 的 token 与多模态哈希。Chunked prefill 只发布完整 block；混合注意力模型还需要可恢复的线性状态检查点。此选项不会启用 VMM 的 KV Cache 事件发布。
 
+## 虚拟 KV Cache 的 HostKV offload
+
+开启前缀缓存，并将 `host_blocks_factor` 设置为大于 `1`，可在 Host 内存中保留已完成的 KV block。当设备前缀因显存压力被淘汰后，命中的请求可从 Host 缓存恢复到新映射的 VMM block。传输完成前会持续持有设备和 Host block，请求取消时也不会提前释放。只换出已完成的 block，不会将执行中的请求整体换出。
+
+在已有 NPU 启动命令中加入以下参数：
+
+```bash
+--enable_vmm_kvcache=true \
+--enable_prefix_cache=true \
+--host_blocks_factor=2 \
+--enable_task_pipeline=false
+```
+
+Host 容量按配置的设备 KV 张量容量乘以 `host_blocks_factor` 预分配，弹性模式也遵循这一规则。请结合可用 Host 内存配置 `max_cache_size` 和该系数。本 LLM 路径支持 `kv_cache_dtype=auto` 的 flat KV 和 MLA+INDEX 张量布局；VLM、grouped cache 和混合线性注意力的 conv/SSM cache 仍不支持 VMM HostKV offload。
+
 ## MTP 与虚拟 KV Cache
 
 部署在相同设备上的 MTP target 和 draft 模型可以同时开启 `enable_vmm_kvcache=true`。调度器会一起映射和释放两者的缓存，也支持 target 与 draft 的 KV 张量宽度不同。对于混合注意力模型，只有全注意力层的 KV 张量使用 VMM；卷积与循环状态保持常驻，提前从物理 KV 页池的预算中预留。
@@ -36,7 +51,7 @@ xLLM 可以分别为 KV Cache 和模型权重启用虚拟内存管理（VMM）�
 --enable_task_pipeline=false
 ```
 
-混合线性状态缓存和外部 draft 暂不支持同时使用权重 VMM。虚拟 KV Cache 暂不支持内嵌 Eagle3 draft，以及投机解码结合 PD 分离。KV VMM 原有的限制仍适用，包括不支持量化 KV Cache 和 host offload。
+混合线性状态缓存和外部 draft 暂不支持同时使用权重 VMM。虚拟 KV Cache 暂不支持内嵌 Eagle3 draft，以及投机解码结合 PD 分离。KV VMM 仍不支持量化 KV Cache。
 
 ## 弹性 KV Cache
 

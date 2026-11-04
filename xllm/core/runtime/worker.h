@@ -126,6 +126,8 @@ class Worker {
       const uint64_t batch_id,
       const std::vector<BlockTransferInfo>& block_transfer_info);
 
+  virtual bool wait_for_kv_blocks_transfer(uint64_t batch_id);
+
   virtual uint32_t transfer_kv_blocks(
       const uint64_t batch_id,
       Slice<BlockTransferInfo>& block_transfer_info);

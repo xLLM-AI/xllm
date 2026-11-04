@@ -111,6 +111,8 @@ class CommChannel {
       const uint64_t batch_id,
       const std::vector<BlockTransferInfo>& block_transfer_info);
 
+  virtual bool wait_for_kv_blocks_transfer(uint64_t batch_id);
+
   virtual void prefetch_from_storage(const StoragePrefetchRequest& request,
                                      std::shared_ptr<PrefetchResult> result,
                                      size_t worker_index);

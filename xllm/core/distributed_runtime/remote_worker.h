@@ -102,7 +102,7 @@ class RemoteWorker : public WorkerClient {
   folly::SemiFuture<uint32_t> transfer_kv_blocks(
       const std::vector<BlockTransferInfo>& block_transfer_info) override;
 
-  void transfer_kv_blocks(
+  folly::SemiFuture<uint32_t> transfer_kv_blocks(
       const uint64_t batch_id,
       const std::vector<BlockTransferInfo>& block_transfer_info) override;
 
