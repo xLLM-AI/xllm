@@ -279,7 +279,8 @@ void DisaggPDServiceImpl::decode_recv_new_requests(
                                          req.req_id(),
                                          virtual_memory_block_ids,
                                          resp)) {
-      engine_->block_manager_pool()->deallocate_without_cache(sequence);
+      scheduler_->release_request_blocks(std::move(new_request),
+                                         /*cache_prefix=*/false);
       resp->clear_groups();
       resp->clear_virtual_kv_cache_layer_global_offsets();
       resp->set_status_code(500);

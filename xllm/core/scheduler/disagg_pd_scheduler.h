@@ -22,6 +22,7 @@ limitations under the License.
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -148,6 +149,11 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
   bool release_reservation(const std::string& req_id,
                            const std::string& reservation_id);
 
+  // RPC and handoff threads retain the request until the scheduler has
+  // retired its blocks. Acknowledgement follows the actual release.
+  void release_request_blocks(std::shared_ptr<Request> request,
+                              bool cache_prefix);
+
   // decode allocate blocks with prefix cache.
   bool try_allocate(Sequence* sequence);
 
@@ -210,6 +216,11 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
 
   void release_failed_request(const std::shared_ptr<Request>& request) override;
 
+  std::future<void> enqueue_request_block_release(
+      std::shared_ptr<Request> request,
+      bool cache_prefix);
+  void drain_request_releases() override;
+
   // Caller holds received_request_map_mutex_. Deallocation stays outside it.
   std::shared_ptr<Request> take_waiting_request(const std::string& req_id);
 
@@ -226,8 +237,6 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
   void profile_ttft();
 
   void profile_tpot();
-
-  void cache_prefill_blocks(Request* request);
 
   void restore_disaggregated_latency(Request* request,
                                      double time_to_first_token_latency_seconds,
@@ -253,6 +262,19 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
   void register_instance_info(const std::string& server_name);
 
   std::shared_ptr<KVCacheTransferCoordinator> kv_transfer_coordinator_;
+
+  struct RequestBlockRelease {
+    std::shared_ptr<Request> request;
+    bool cache_prefix;
+    std::promise<void> completion;
+  };
+
+  void complete_request_block_release(RequestBlockRelease& release);
+
+  // Producers enqueue owning commands; only the scheduling thread consumes
+  // them. Destruction takes over consumption after the master loop joins.
+  moodycamel::BlockingConcurrentQueue<std::unique_ptr<RequestBlockRelease>>
+      request_block_releases_;
 
   // remote instance name(ID) -> instance info
   std::unordered_map<std::string, InstanceInfo> remote_instances_info_;

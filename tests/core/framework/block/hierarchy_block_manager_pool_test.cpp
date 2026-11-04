@@ -21,11 +21,8 @@ limitations under the License.
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
-#include <functional>
-#include <future>
 #include <limits>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_set>
@@ -67,7 +64,6 @@ class HierarchyPoolTestPeer final {
 
   static std::vector<BlockTransferInfo> pending_load_infos(
       const HierarchyBlockManagerPool& pool) {
-    std::lock_guard<std::mutex> lock(pool.restore_state_mutex_);
     std::vector<BlockTransferInfo> infos;
     for (const auto& per_dp : pool.load_block_transfer_infos_) {
       for (const auto& pending : per_dp) {
@@ -97,7 +93,6 @@ class HierarchyPoolTestPeer final {
 
   static void collect_offload_pairs(HierarchyBlockManagerPool& pool,
                                     Sequence* sequence) {
-    std::lock_guard<std::mutex> lock(pool.restore_state_mutex_);
     pool.collect_offload_pairs(sequence,
                                /*dp_rank=*/0,
                                sequence->kv_state().kv_cache_tokens_num());
@@ -266,10 +261,8 @@ class DeferredOffloadCoordinator final : public KVCacheTransferCoordinatorBase {
 class RecordingHostRestoreCoordinator final
     : public KVCacheTransferCoordinatorBase {
  public:
-  explicit RecordingHostRestoreCoordinator(
-      bool deferred = false,
-      std::function<void()> before_dispatch = {})
-      : deferred_(deferred), before_dispatch_(std::move(before_dispatch)) {}
+  explicit RecordingHostRestoreCoordinator(bool deferred = false)
+      : deferred_(deferred) {}
 
   std::vector<folly::SemiFuture<uint32_t>> transfer_kv_blocks(
       uint32_t /*dp_rank*/,
@@ -291,9 +284,6 @@ class RecordingHostRestoreCoordinator final
     } else {
       futures.emplace_back(
           folly::makeSemiFuture(static_cast<uint32_t>(infos.size())));
-    }
-    if (before_dispatch_) {
-      before_dispatch_();
     }
     return futures;
   }
@@ -317,7 +307,6 @@ class RecordingHostRestoreCoordinator final
 
  private:
   bool deferred_;
-  std::function<void()> before_dispatch_;
   std::unique_ptr<folly::Promise<uint32_t>> promise_;
   std::vector<BlockTransferInfo> dispatched_infos_;
 };
@@ -922,69 +911,6 @@ TEST(HierarchyBlockManagerPoolTest,
   pool.publish_prefix(&sequence, /*num_tokens=*/24);
   EXPECT_EQ(device_leaf->num_blocks_in_prefix_cache(), 6u);
   pool.deallocate(&sequence);
-}
-
-TEST(HierarchyBlockManagerPoolTest,
-     VmmRestoreRegistrationSerializesPdDeallocation) {
-  HostOffloadPageAllocator allocator(/*max_pages=*/2);
-  std::promise<void> registration_started;
-  auto registration_started_future = registration_started.get_future();
-  std::promise<void> finish_registration;
-  auto finish_registration_future = finish_registration.get_future().share();
-  auto coordinator = std::make_shared<RecordingHostRestoreCoordinator>(
-      /*deferred=*/true, [&]() {
-        registration_started.set_value();
-        finish_registration_future.wait();
-      });
-  HierarchyBlockManagerPool pool(make_vmm_host_offload_options(),
-                                 coordinator,
-                                 /*dp_size=*/1,
-                                 &allocator);
-  pool.reserve_virtual_memory_padding_blocks();
-  BlockManager* device_leaf = HierarchyPoolTestPeer::device_composite(pool)
-                                  ->leaf_entries()
-                                  .at(BlockType::KV)
-                                  .leaf.get();
-  BlockManager* host_leaf = HierarchyPoolTestPeer::host_block_managers(pool)
-                                .front()
-                                .at(BlockType::KV)
-                                .leaf.get();
-  const std::vector<int32_t> tokens(25, 71);
-  seed_host_prefix(host_leaf, tokens);
-  Sequence sequence = make_test_sequence(/*index=*/0, tokens);
-  ASSERT_TRUE(pool.allocate(&sequence, tokens.size()));
-  {
-    BatchGroup batches(/*dp_size=*/1);
-    batches[0].add(&sequence, /*allowed_max_token=*/1);
-    auto registering = std::async(std::launch::async,
-                                  [&]() { pool.transfer_blocks(batches); });
-    registration_started_future.wait();
-    std::promise<void> retirement_started;
-    auto retirement_started_future = retirement_started.get_future();
-    auto retiring = std::async(std::launch::async, [&]() {
-      retirement_started.set_value();
-      pool.deallocate(&sequence);
-    });
-    retirement_started_future.wait();
-    EXPECT_EQ(retiring.wait_for(std::chrono::milliseconds(20)),
-              std::future_status::timeout);
-    finish_registration.set_value();
-    registering.get();
-    retiring.get();
-  }
-  EXPECT_FALSE(sequence.kv_state().has_any_blocks());
-  EXPECT_EQ(device_leaf->num_blocks_in_prefix_cache(), 0u);
-  EXPECT_TRUE(pool.has_pending_async_block_release());
-
-  coordinator->complete(/*success=*/true);
-  pool.drain_prefetch_completions();
-  EXPECT_FALSE(pool.has_pending_async_block_release());
-  EXPECT_EQ(device_leaf->num_blocks_in_prefix_cache(), 0u);
-  std::vector<Block> pressure = device_leaf->allocate(/*num_blocks=*/7);
-  ASSERT_EQ(pressure.size(), 7u);
-  device_leaf->deallocate(pressure);
-  pressure.clear();
-  EXPECT_EQ(allocator.mapped_pages(), 1u);
 }
 
 TEST(HierarchyBlockManagerPoolTest,

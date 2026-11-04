@@ -121,12 +121,10 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
   std::vector<Block> quarantined_prefetch_blocks_;
   std::vector<bool> storage_prefetch_disabled_;
 
-  // PD handoff can deallocate on its own thread. Serialize restore registration
-  // and publication with that release, before taking any lease owner lock.
-  mutable std::mutex restore_state_mutex_;
-
   // Per-DP H2D descriptions waiting to be registered with workers. Blocks stay
-  // pinned by the sequence and then its batch's restore lease.
+  // pinned by the sequence and then its batch's restore lease. The scheduler
+  // owns restore registration, cancellation and publication; completion threads
+  // only enqueue events under prefetch_completion_mutex_.
   std::vector<std::vector<PendingLoadTransfer>> load_block_transfer_infos_;
   std::vector<std::weak_ptr<KVCacheBlockLease>> host_restore_leases_;
   std::unordered_map<Sequence*, std::weak_ptr<KVCacheBlockLease>>

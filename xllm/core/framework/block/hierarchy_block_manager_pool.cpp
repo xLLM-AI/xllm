@@ -578,7 +578,6 @@ void HierarchyBlockManagerPool::release_host_match(Sequence* sequence) {
 }
 
 void HierarchyBlockManagerPool::deallocate(Sequence* sequence) {
-  std::lock_guard<std::mutex> lock(restore_state_mutex_);
   DCHECK(sequence != nullptr);
   const int32_t dp_rank = BlockManagerPool::get_dp_rank(sequence);
   std::vector<PendingLoadTransfer>& pending_loads =
@@ -606,7 +605,6 @@ void HierarchyBlockManagerPool::deallocate(Sequence* sequence) {
 }
 
 void HierarchyBlockManagerPool::publish_prefix(Sequence* sequence) {
-  std::lock_guard<std::mutex> lock(restore_state_mutex_);
   if (restoring_sequences_.contains(sequence)) {
     return;
   }
@@ -622,7 +620,6 @@ void HierarchyBlockManagerPool::publish_prefix(Sequence* sequence) {
 void HierarchyBlockManagerPool::publish_prefix(Sequence* sequence,
                                                size_t num_tokens) {
   CHECK(sequence != nullptr);
-  std::lock_guard<std::mutex> lock(restore_state_mutex_);
   if (restoring_sequences_.contains(sequence)) {
     return;
   }
@@ -788,7 +785,6 @@ void HierarchyBlockManagerPool::trim_host_cache(
 
 bool HierarchyBlockManagerPool::allocate(Sequence* sequence,
                                          size_t num_tokens) {
-  std::lock_guard<std::mutex> lock(restore_state_mutex_);
   CHECK(sequence != nullptr);
   const int32_t dp_rank = BlockManagerPool::get_dp_rank(sequence);
   if (should_probe_prefix_cache(sequence)) {
@@ -942,6 +938,37 @@ void HierarchyBlockManagerPool::allocate_shared(Sequence* sequence) {
 
   KVCacheState& hbm_state = sequence->kv_state();
   KVCacheState& host_state = sequence->host_kv_state();
+  if (host_block_managers_[dp_rank] == nullptr) {
+    if (!hbm_state.prefix_cache_matched()) {
+      composite->allocate_shared_for_sequence(sequence);
+    }
+    host_state.set_prefix_cache_matched();
+    sequence->clear_host_cache_match();
+    return;
+  }
+
+  if (composite->leaf_combination() ==
+      CompositeBlockManager::LeafCombination::FLAT_KV_LINEAR) {
+    if (!hbm_state.prefix_cache_matched()) {
+      composite->allocate_shared_for_sequence(sequence);
+    }
+    if (!host_state.prefix_cache_matched()) {
+      host_block_managers_[dp_rank]->allocate_shared_for_sequence(sequence);
+    }
+    host_state.set_prefix_cache_matched();
+
+    const size_t hbm_tokens = hbm_state.kv_cache_tokens_num();
+    const size_t host_tokens = host_state.kv_cache_tokens_num();
+    sequence->clear_host_cache_match();
+    if (host_tokens > hbm_tokens) {
+      const size_t unit_size = prefetch_unit_size(
+          composite->leaf_combination(), composite->leaf_entries());
+      sequence->set_host_cache_match(host_tokens,
+                                     (host_tokens - hbm_tokens) / unit_size);
+    }
+    return;
+  }
+
   std::vector<ProbeResult> hbm_probes;
   std::vector<ProbeResult> host_probes;
 
@@ -961,20 +988,18 @@ void HierarchyBlockManagerPool::allocate_shared(Sequence* sequence) {
   }
 
   if (host_state.prefix_cache_matched()) {
-    if (auto* host_manager = host_block_managers_[dp_rank].get()) {
-      for (const auto& [type, entry] : host_manager->leaf_entries()) {
-        if (!entry.supports_prefix_cache || entry.leaf == nullptr) {
-          continue;
-        }
-        host_probes.emplace_back(ProbeResult{type,
-                                             entry.leaf.get(),
-                                             host_state.take_blocks(type),
-                                             entry.leaf->block_size()});
+    for (const auto& [type, entry] : host_block_managers_[dp_rank]->leaf_entries()) {
+      if (!entry.supports_prefix_cache || entry.leaf == nullptr) {
+        continue;
       }
+      host_probes.emplace_back(ProbeResult{type,
+                                           entry.leaf.get(),
+                                           host_state.take_blocks(type),
+                                           entry.leaf->block_size()});
     }
   } else {
     host_probes = CompositeBlockManager::probe_prefix_cache(
-        sequence, host_block_managers_[dp_rank], host_state);
+        sequence, host_block_managers_[dp_rank]->leaf_entries(), host_state);
   }
 
   const PrefixMatch match = trim_shared_probes(composite->leaf_combination(),
@@ -1305,7 +1330,6 @@ void HierarchyBlockManagerPool::drain_prefetch_completions() {
 
 void HierarchyBlockManagerPool::complete_restore(
     const RestoreCompletion& completion) {
-  std::lock_guard<std::mutex> lock(restore_state_mutex_);
   CHECK(completion.success)
       << "Host KV restore failed: dp_rank=" << completion.dp_rank
       << ", batch_id=" << completion.batch_id;
@@ -1391,7 +1415,6 @@ void HierarchyBlockManagerPool::transfer_load_blocks(int32_t dp_rank,
 }
 
 void HierarchyBlockManagerPool::transfer_blocks(BatchGroup& batches) {
-  std::lock_guard<std::mutex> lock(restore_state_mutex_);
   for (size_t i = 0; i < load_block_transfer_infos_.size(); ++i) {
     if (load_block_transfer_infos_[i].empty()) {
       continue;
@@ -1406,7 +1429,6 @@ void HierarchyBlockManagerPool::transfer_blocks(BatchGroup& batches) {
 }
 
 void HierarchyBlockManagerPool::transfer_blocks(RecBatchGroup& batches) {
-  std::lock_guard<std::mutex> lock(restore_state_mutex_);
   for (size_t i = 0; i < load_block_transfer_infos_.size(); ++i) {
     if (load_block_transfer_infos_[i].empty()) {
       continue;
@@ -1423,7 +1445,6 @@ void HierarchyBlockManagerPool::transfer_blocks(RecBatchGroup& batches) {
 void HierarchyBlockManagerPool::transfer_blocks() { transfer_offload_blocks(); }
 
 bool HierarchyBlockManagerPool::has_pending_async_block_release() const {
-  std::lock_guard<std::mutex> lock(restore_state_mutex_);
   if (offload_transfers_.has_pending() || restore_transfers_.has_pending() ||
       std::any_of(host_restore_leases_.begin(),
                   host_restore_leases_.end(),
