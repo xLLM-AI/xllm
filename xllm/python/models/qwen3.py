@@ -377,7 +377,7 @@ class Qwen3ForCausalLM(PyModelBase):
     """Top-level entry the C++ PyCausalLM drives."""
 
     model: Qwen3Model
-    lm_head: ColumnParallelLinear
+    lm_head: ColumnParallelLinear | None
 
     def __init__(self, config: dict) -> None:
         super().__init__()
@@ -393,16 +393,18 @@ class Qwen3ForCausalLM(PyModelBase):
             raise ValueError("world_size must equal tp_size * dp_size")
         if not 0 <= self.cfg.dp_rank < dp:
             raise ValueError("dp_rank must be in [0, dp_size)")
-        assert self.cfg.vocab_size % tp == 0
         self.model = Qwen3Model(self.cfg, dtype, device)  # pyright: ignore[reportIncompatibleVariableOverride]
-        self.lm_head = ColumnParallelLinear(  # pyright: ignore[reportIncompatibleVariableOverride]
-            self.cfg.hidden_size,
-            self.cfg.vocab_size // tp,
-            tp,
-            gather_output=True,
-            dtype=dtype,
-            device=device,
-        )
+        self.lm_head = None
+        if not config.get("embedding_mode", False):
+            assert self.cfg.vocab_size % tp == 0
+            self.lm_head = ColumnParallelLinear(  # pyright: ignore[reportIncompatibleVariableOverride]
+                self.cfg.hidden_size,
+                self.cfg.vocab_size // tp,
+                tp,
+                gather_output=True,
+                dtype=dtype,
+                device=device,
+            )
 
     def pooler(self, hidden_states: torch.Tensor, selected_idxes: torch.Tensor | None) -> torch.Tensor:
         """Pool the scheduler-selected final token rows, matching ATB Qwen3.
@@ -424,5 +426,9 @@ class Qwen3ForCausalLM(PyModelBase):
         all_weights = ScopedWeightLoader(state_dicts, src_prefixes=("model.", ""))
         ctx = ParallelLoadContext(tp_rank, tp_size)
         load_causal_lm_weights(
-            self.model, self.lm_head.weight, all_weights, ctx, tie_word_embeddings=self.cfg.tie_word_embeddings
+            self.model,
+            None if self.lm_head is None else self.lm_head.weight,
+            all_weights,
+            ctx,
+            tie_word_embeddings=self.cfg.tie_word_embeddings,
         )
