@@ -25,6 +25,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/model_context/model_context.h"
+#include "core/framework/multimodal/minimax_h3_reference_geometry.h"
 #include "models/dit/processors/vae_image_processor.h"
 #include "models/dit/utils/util.h"
 
@@ -86,11 +87,10 @@ class MiniMaxH3VisualProcessorImpl final : public torch::nn::Module {
       int64_t source_width) const {
     reference_aspect_ratio(
         source_height, source_width, "MiniMax-H3 reference images");
-    const double scale =
-        static_cast<double>(reference_image_short_edge_) /
-        static_cast<double>(std::min(source_height, source_width));
-    return {round_to_multiple(source_height * scale, canvas_multiple_),
-            round_to_multiple(source_width * scale, canvas_multiple_)};
+    return minimax_h3_reference_image_size(source_height,
+                                           source_width,
+                                           reference_image_short_edge_,
+                                           canvas_multiple_);
   }
 
   int64_t normalized_video_frame_count(int64_t source_frames,

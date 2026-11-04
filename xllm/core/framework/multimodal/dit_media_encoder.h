@@ -27,4 +27,13 @@ Status encode_minimax_h3_video_output(const DiTForwardOutput& output,
                                       int32_t sample_rate,
                                       DiTEncodedMedia& encoded);
 
+// Overload with an explicit encoder contract. Added as a new symbol; the
+// four-argument form above keeps CRF 18 and truncating quantization.
+Status encode_minimax_h3_video_output(const DiTForwardOutput& output,
+                                      double fps,
+                                      int32_t sample_rate,
+                                      DiTEncodedMedia& encoded,
+                                      int32_t crf,
+                                      bool round_quantization);
+
 }  // namespace xllm

@@ -32,7 +32,9 @@ limitations under the License.
 #include "core/common/types.h"
 #include "core/framework/config/config_utils.h"
 #include "core/framework/config/dit_config.h"
+#include "core/framework/config/load_config.h"
 #include "core/framework/model_loader/dit_model_loader.h"
+#include "core/framework/request/minimax_h3_conditioning.h"
 #include "core/platform/device.h"
 #include "core/util/tensor_options.h"
 #include "framework/dit_cache/dit_cache.h"
@@ -109,10 +111,36 @@ bool DiTWorkerImpl::init_model(const std::string& model_weights_path,
                                MasterStatus master_status) {
   CHECK(dit_model_ == nullptr) << "Model is already initialized.";
 
-  if (DiTConfig::get_instance().dit_h3_execution_profile() != "native") {
-    LOG(ERROR) << "MiniMax-H3 qualified execution profile is not available in "
-                  "this build";
+  const DiTConfig& config = DiTConfig::get_instance();
+  const bool qualified = config.dit_h3_execution_profile() != "native";
+  if (qualified) {
+    if (LoadConfig::get_instance().enable_rolling_load()) {
+      LOG(ERROR) << "Qualified MiniMax-H3 requires resident weights; "
+                    "rolling load is unsupported";
+      return false;
+    }
+#if !defined(USE_NPU)
+    LOG(ERROR) << "MiniMax-H3 qualified execution requires an Ascend build";
     return false;
+#else
+    if (config.dit_h3_execution_profile() != kMiniMaxH3ExecutionProfile ||
+        device_.unwrap().type() != torch::kPrivateUse1 ||
+        config.dit_h3_task_type() != "ref2va" ||
+        config.max_requests_per_batch() != 1) {
+      LOG(ERROR) << "MiniMax-H3 qualified execution requires the A3 16-card "
+                    "ref2va profile, an NPU device and batch limit 1";
+      return false;
+    }
+    // N07 establishes the dense baseline before enabling later optimizations.
+    if (config.dit_cache_policy() != "None" ||
+        config.dit_sp_communication_overlap() ||
+        config.dit_sparse_attention_enabled() ||
+        config.dit_laser_attention_enabled()) {
+      LOG(ERROR) << "MiniMax-H3 N07 requires cache=None and communication "
+                    "overlap, sparse attention and laser attention disabled";
+      return false;
+    }
+#endif
   }
 
   // set same random seed for all worker
@@ -125,6 +153,11 @@ bool DiTWorkerImpl::init_model(const std::string& model_weights_path,
   DiTCacheConfig cache_config = parse_dit_cache_from_flags();
 
   auto model_type = loader->get_model_type();
+  if (qualified && model_type != "MiniMaxH3ModularPipeline") {
+    LOG(ERROR) << "MiniMax-H3 qualified execution requires a "
+                  "MiniMaxH3ModularPipeline model index";
+    return false;
+  }
 
   if (!ModelRegistry::has_dit_model_factory(model_type)) {
     LOG(WARNING) << "could not find model_type: " << model_type

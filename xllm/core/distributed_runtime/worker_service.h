@@ -15,6 +15,7 @@ limitations under the License.
 
 #pragma once
 
+#include <atomic>
 #include <string>
 #include <vector>
 
@@ -196,6 +197,7 @@ class WorkerService : public proto::DistributeWorker {
  private:
   // runtime options
   runtime::Options options_;
+  std::atomic<int64_t> dit_request_index_{0};
 
   bool initialized_;
 

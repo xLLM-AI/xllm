@@ -397,6 +397,25 @@ TEST(DiTRequestParamsTest, PromptTokenTagsDecodeFromPromptEmbedParameters) {
   EXPECT_EQ(*tags, std::vector<int64_t>({0, 1}));
 }
 
+TEST(DiTRequestParamsTest, ImageEndpointRejectsMiniMaxH3ConditioningMetadata) {
+  proto::ImageGenerationRequest request = MakeImageRequest();
+  proto::Tensor* prompt_embed = request.mutable_input()->mutable_prompt_embed();
+  prompt_embed->set_datatype("FP32");
+  prompt_embed->add_shape(2);
+  prompt_embed->add_shape(2);
+  for (int32_t index = 0; index < 4; ++index) {
+    prompt_embed->mutable_contents()->add_fp32_contents(
+        static_cast<float>(index));
+  }
+  (*prompt_embed->mutable_parameters())["minimax_h3.schema"].set_string_param(
+      "xllm.minimax_h3.text_conditioning/v1");
+
+  DiTRequestParams params(request, "rid", "rtime");
+  EXPECT_FALSE(params.request_parse_status.ok());
+  EXPECT_EQ(params.request_parse_status.code(), StatusCode::INVALID_ARGUMENT);
+  EXPECT_TRUE(VerifyFailsWithInvalidArgument(params));
+}
+
 TEST(DiTRequestParamsTest, ImageOutputTypeDefaultsAndValidates) {
   proto::ImageGenerationRequest default_request = MakeImageRequest();
   DiTRequestParams default_params(default_request, "rid", "rtime");

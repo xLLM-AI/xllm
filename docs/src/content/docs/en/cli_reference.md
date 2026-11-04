@@ -270,6 +270,8 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | `dit_generation_image_area_max` | `int64` | `0` | Maximum allowed image area (`width * height`) for image generation requests. `0` means no limit. |
 | `dit_h3_task_type` | `string` | `"fl2va"` | MiniMax-H3 task type: `fl2va` or `ref2va`. |
 | `dit_h3_execution_profile` | `string` | `"native"` | MiniMax-H3 execution profile: `native` or `a3_16card_tp2_u8_ref2va_v1`. The qualified profile remains unavailable until the 16-card backend is enabled. |
+| `dit_h3_phase_timing` | `bool` | `false` | Measure MiniMax-H3 load, prepare, denoise and decode phases with device synchronization only at phase boundaries. Disable for end-to-end throughput measurements. Requires a single-request forward and exactly one prompt_embed when enabled. |
+| `dit_h3_correctness_diagnostics` | `bool` | `false` | Enable qualified MiniMax-H3 per-block finite-value and dummy-head checks. Correctness gates enable it; performance runs disable it. Startup and input validation remain enabled. |
 | `dit_enable_vae_tiling` | `bool` | `false` | Whether to enable VAE tiling. Currently only supported for `qwen-image-edit-plus`. |
 | `dit_vae_image_size` | `int64` | `1048576` | Qwen-Image-Edit-Plus VAE image size used to calculate dimensions. |
 | `dit_sparse_attention_enabled` | `bool` | `false` | Whether to enable block-wise sparse attention / RainFusion for WAN. |

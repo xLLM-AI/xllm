@@ -29,6 +29,20 @@ Status encode_minimax_h3_video_output(const DiTForwardOutput& output,
                                       double fps,
                                       int32_t sample_rate,
                                       DiTEncodedMedia& encoded) {
+  return encode_minimax_h3_video_output(output,
+                                        fps,
+                                        sample_rate,
+                                        encoded,
+                                        /*crf=*/18,
+                                        /*round_quantization=*/false);
+}
+
+Status encode_minimax_h3_video_output(const DiTForwardOutput& output,
+                                      double fps,
+                                      int32_t sample_rate,
+                                      DiTEncodedMedia& encoded,
+                                      int32_t crf,
+                                      bool round_quantization) {
   if (output.tensors.size() != 1 || output.audio_tensors.size() != 1 ||
       !output.text_output.empty() || !output.encoded_media.empty() ||
       !std::isfinite(fps) || fps <= 0 || sample_rate <= 0) {
@@ -75,12 +89,14 @@ Status encode_minimax_h3_video_output(const DiTForwardOutput& output,
       video.squeeze(0).to(torch::kCPU, torch::kFloat32).contiguous();
   const torch::Tensor cpu_audio =
       audio.to(torch::kCPU, torch::kFloat32).contiguous();
+  const VideoEncoderOptions options{crf, round_quantization};
   if (!encoder.encode(cpu_video,
                       cpu_audio,
                       fps,
                       sample_rate,
                       result.container,
-                      result.data) ||
+                      result.data,
+                      options) ||
       result.data.empty()) {
     return {StatusCode::UNKNOWN, "MiniMax-H3 video/audio encoding failed"};
   }

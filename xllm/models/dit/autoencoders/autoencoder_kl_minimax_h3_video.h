@@ -941,6 +941,17 @@ TORCH_MODULE(ViTDecoder3d);
 
 }  // namespace minimax_h3_video
 
+// Optional test-only capture; the default encode path retains no intermediates.
+struct MiniMaxH3ReferenceEncodeTrace {
+  torch::Tensor normalized_pixels;
+  torch::Tensor moments;
+  torch::Tensor sampled_latent;
+  torch::Tensor rounded_latent;
+  torch::Tensor normalized_latent;
+  torch::Tensor latents_mean;
+  torch::Tensor latents_std;
+};
+
 class AutoencoderKLMiniMaxH3Impl final : public torch::nn::Module {
  public:
   explicit AutoencoderKLMiniMaxH3Impl(const ModelContext& context)
@@ -999,7 +1010,10 @@ class AutoencoderKLMiniMaxH3Impl final : public torch::nn::Module {
     return encode_reference_condition(pixels);
   }
 
-  torch::Tensor encode_reference_condition(const torch::Tensor& pixels) {
+  torch::Tensor encode_reference_condition(
+      const torch::Tensor& pixels,
+      MiniMaxH3ReferenceEncodeTrace* trace = nullptr,
+      bool normalize_on_cpu = false) {
     CHECK_EQ(pixels.dim(), 5)
         << "MiniMax-H3 reference VAE expects [B,3,T,H,W] pixels";
     CHECK_EQ(pixels.size(0), 1);
@@ -1010,14 +1024,39 @@ class AutoencoderKLMiniMaxH3Impl final : public torch::nn::Module {
     torch::Tensor normalized_pixels =
         (pixels.to(torch::kFloat32) / 255.0 - pixel_mean) / pixel_std;
     torch::Tensor moments = encode_moments(normalized_pixels);
+    if (trace != nullptr) {
+      trace->normalized_pixels = normalized_pixels;
+      trace->moments = moments;
+      trace->latents_mean = latents_mean_tensor_;
+      trace->latents_std = latents_std_tensor_;
+    }
     dit::DiagonalGaussianDistribution posterior(moments);
     torch::Generator generator =
         torch::make_generator<torch::CPUGeneratorImpl>();
     generator.set_current_seed(keyframe_encode_seed_);
     torch::Tensor latent = posterior.sample(generator, torch::kFloat32);
+    if (trace != nullptr) {
+      trace->sampled_latent = latent;
+    }
     latent = latent.to(torch::kFloat16).to(torch::kFloat32);
-    return dit::normalize_latents(
+    if (trace != nullptr) {
+      trace->rounded_latent = latent;
+    }
+    const torch::Device output_device = latent.device();
+    if (normalize_on_cpu) {
+      // The qualified reference fixture uses CPU FP32 subtraction/division
+      // after the posterior FP16 round trip. Native retains device arithmetic.
+      latent = latent.to(torch::kCPU, torch::kFloat32).contiguous();
+    }
+    torch::Tensor normalized = dit::normalize_latents(
         latent, latents_mean_tensor_, latents_std_tensor_);
+    if (normalize_on_cpu) {
+      normalized = normalized.to(output_device, torch::kFloat32).contiguous();
+    }
+    if (trace != nullptr) {
+      trace->normalized_latent = normalized;
+    }
+    return normalized;
   }
 
   // Maps normalized latents back to the distribution decode() expects.

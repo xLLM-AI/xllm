@@ -27,6 +27,11 @@ namespace xllm {
 inline constexpr std::string_view kMiniMaxH3ExecutionProfile =
     "a3_16card_tp2_u8_ref2va_v1";
 
+// Server-owned transport metadata, assigned after batch construction. It is
+// separate from the client conditioning proof keys under minimax_h3.*.
+inline constexpr std::string_view kMiniMaxH3InternalRequestId =
+    "xllm.internal.h3_request_id";
+
 bool has_minimax_h3_condition_metadata(const proto::Tensor& tensor);
 bool has_minimax_h3_condition_metadata(const TensorParameters& parameters);
 Status validate_minimax_h3_condition_wire(const proto::Tensor& tensor,

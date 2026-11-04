@@ -23,6 +23,7 @@ limitations under the License.
 #include "core/common/macros.h"
 #include "core/common/types.h"
 #include "core/framework/config/dit_config.h"
+#include "core/framework/multimodal/minimax_h3_reference_geometry.h"
 #include "core/framework/multimodal/mm_codec.h"
 #include "core/framework/request/dit_source_decoder.h"
 #include "core/framework/request/minimax_h3_conditioning.h"
@@ -207,6 +208,22 @@ void fill_generation_params(DiTGenerationParams& generation_params,
   }
 }
 
+// minimax_h3.* conditioning metadata is only valid on the video generation
+// endpoint under the qualified ref2va profile. Reject incompatible endpoints
+// at the request boundary so unvalidated metadata never reaches the
+// endpoint-agnostic worker profile and encode gates.
+Status reject_minimax_h3_metadata_outside_video(
+    const DiTTensorSources& tensor_sources) {
+  for (const auto& entry : tensor_sources.entries()) {
+    if (has_minimax_h3_condition_metadata(entry.parameters)) {
+      return Status(StatusCode::INVALID_ARGUMENT,
+                    "minimax_h3 condition metadata is only valid on the "
+                    "video generation endpoint");
+    }
+  }
+  return Status{};
+}
+
 }  // namespace
 
 // Rejects MiniMax-H3 video requests whose client-controlled inputs the
@@ -382,6 +399,8 @@ DiTRequestParams::DiTRequestParams(const proto::ImageGenerationRequest& request,
       return;
     }
   }
+  request_parse_status =
+      reject_minimax_h3_metadata_outside_video(input_params.tensor_sources);
 }
 
 // ---------------------------------------------------------------------------
@@ -429,6 +448,8 @@ DiTRequestParams::DiTRequestParams(const proto::TextGenerationRequest& request,
       generation_params.repetition_penalty = params.repetition_penalty();
     }
   }
+  request_parse_status =
+      reject_minimax_h3_metadata_outside_video(input_params.tensor_sources);
 }
 
 // ---------------------------------------------------------------------------
@@ -509,6 +530,8 @@ DiTRequestParams::DiTRequestParams(const proto::AudioGenerationRequest& request,
   if (input.has_prompt_text()) {
     input_params.audio_prompt_text = input.prompt_text();
   }
+  request_parse_status =
+      reject_minimax_h3_metadata_outside_video(input_params.tensor_sources);
 }
 
 // ---------------------------------------------------------------------------
@@ -528,6 +551,18 @@ DiTRequestParams::DiTRequestParams(const proto::VideoGenerationRequest& request,
   if (request.has_parameters() && request.parameters().has_sampling_rate()) {
     generation_params.audio_sampling_rate =
         request.parameters().sampling_rate();
+  }
+
+  const bool qualified_profile =
+      DiTConfig::get_instance().dit_h3_execution_profile() ==
+      kMiniMaxH3ExecutionProfile;
+  if (qualified_profile &&
+      (!request.has_input() || !request.input().has_prompt_embed() ||
+       !has_minimax_h3_condition_metadata(request.input().prompt_embed()))) {
+    request_parse_status =
+        Status(StatusCode::INVALID_ARGUMENT,
+               "qualified MiniMax-H3 requires attested prompt_embed metadata");
+    return;
   }
 
   if (request.has_input()) {
@@ -598,6 +633,22 @@ DiTRequestParams::DiTRequestParams(const proto::VideoGenerationRequest& request,
       return;
     }
   }
+  // The qualified backend serves one frozen generation contract. Reject
+  // client-controlled mismatches before they enter the distributed worker.
+  if (qualified_profile &&
+      (generation_params.width != 1344 || generation_params.height != 768 ||
+       generation_params.num_frames != 124 ||
+       generation_params.video_fps != 24.0 ||
+       generation_params.audio_sampling_rate != 32000 ||
+       generation_params.num_inference_steps != 50 ||
+       generation_params.num_videos_per_prompt != 1)) {
+    request_parse_status =
+        Status(StatusCode::INVALID_ARGUMENT,
+               "qualified MiniMax-H3 requires 1344x768, 124 frames, 24fps, "
+               "audio32000, the 50-point schedule and one video per prompt");
+    return;
+  }
+
   const auto condition =
       input_params.tensor_sources.get_named_tensor("prompt_embed");
   if (condition.has_value() &&
@@ -610,6 +661,32 @@ DiTRequestParams::DiTRequestParams(const proto::VideoGenerationRequest& request,
     }
     request_parse_status = validate_minimax_h3_condition(
         condition->get(), input_params.media_sources);
+    if (!request_parse_status.ok()) {
+      return;
+    }
+    if (qualified_profile) {
+      // The condition validator established exactly one positive RGB CHW image.
+      // Reject untrusted geometry before the processor's native CHECK boundary.
+      const auto& pixels = input_params.media_sources.at(0).tensor;
+      const double ratio = static_cast<double>(pixels.size(2)) /
+                           static_cast<double>(pixels.size(1));
+      if (ratio < 0.25 || ratio > 4.0) {
+        request_parse_status =
+            Status(StatusCode::INVALID_ARGUMENT,
+                   "qualified MiniMax-H3 reference aspect ratio must be within "
+                   "1:4 and 4:1");
+        return;
+      }
+      // The qualified VAE spatial ratio is 16 and its patch size is 2.
+      const auto reference_size = minimax_h3_reference_image_size(
+          pixels.size(1), pixels.size(2), /*short_edge=*/2048, /*multiple=*/32);
+      if (reference_size != std::pair<int64_t, int64_t>{2048, 5536}) {
+        request_parse_status =
+            Status(StatusCode::INVALID_ARGUMENT,
+                   "qualified MiniMax-H3 reference must resolve to 2048x5536");
+        return;
+      }
+    }
   }
 }
 

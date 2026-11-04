@@ -16,6 +16,7 @@ limitations under the License.
 #include "mm_codec.h"
 
 #include <algorithm>
+#include <cfenv>
 #include <cmath>
 
 extern "C" {
@@ -1102,9 +1103,23 @@ class MemoryAudioWriter final {
   int32_t channels_ = 0;
 };
 
+// Round-half-to-even quantization matches the reference only while the ambient
+// floating-point rounding mode is FE_TONEAREST, because std::rint follows that
+// mode. Checked once per encode; the rounding mode is never modified. Callers
+// using the default truncating conversion never run this check.
+inline bool reference_round_half_to_even_available() {
+  if (std::fegetround() != FE_TONEAREST) {
+    return false;
+  }
+  return std::rint(0.5f) == 0.0f && std::rint(2.5f) == 2.0f &&
+         std::rint(4.5f) == 4.0f && std::rint(254.5f) == 254.0f;
+}
+
 class MemoryVideoWriter final : public MemoryMediaWriter {
  public:
   MemoryVideoWriter() = default;
+
+  void set_options(const VideoEncoderOptions& options) { options_ = options; }
 
   ~MemoryVideoWriter() override {
     if (sws_ctx_) {
@@ -1175,11 +1190,12 @@ class MemoryVideoWriter final : public MemoryMediaWriter {
       if (x264_codec) {
         codec_id = x264_codec->id;
         pix_fmt = AV_PIX_FMT_YUV420P;
-        av_dict_set(&opts, "crf", "18", 0);
+        const std::string crf_value = std::to_string(options_.crf);
+        av_dict_set(&opts, "crf", crf_value.c_str(), 0);
         av_dict_set(&opts, "preset", "medium", 0);
         av_dict_set(&opts, "profile", "high", 0);
         av_dict_set(&opts, "level", "4.1", 0);
-        LOG(INFO) << "Using libx264 H.264 encoder with CRF=18";
+        LOG(INFO) << "Using libx264 H.264 encoder with CRF=" << options_.crf;
       } else {
         codec_id = AV_CODEC_ID_MPEG4;
         pix_fmt = AV_PIX_FMT_YUV420P;
@@ -1239,19 +1255,32 @@ class MemoryVideoWriter final : public MemoryMediaWriter {
     const int64_t stride = W * 3;
     std::vector<uint8_t> rgb_buf(static_cast<size_t>(H * stride));
     int64_t pts = 0;
+    if (options_.round_quantization &&
+        !reference_round_half_to_even_available()) {
+      LOG(ERROR) << "MemoryVideoWriter: round-half-to-even quantization "
+                    "requires the default FE_TONEAREST rounding mode";
+      return false;
+    }
+    // The reference quantizes with (x * 255).round().astype("uint8"), which is
+    // IEEE-754 round-half-to-even on the float32 product. std::rint matches
+    // that under FE_TONEAREST; std::lround and std::floor(v + 0.5f) are
+    // round-half-away-from-zero and can differ on exact .5 ties.
+    const auto to_byte = [this](float value) -> uint8_t {
+      const float scaled = value * 255.0f;
+      const float quantized =
+          options_.round_quantization ? std::rint(scaled) : scaled;
+      return static_cast<uint8_t>(std::clamp(quantized, 0.0f, 255.0f));
+    };
 
     for (int64_t t = 0; t < T; ++t) {
       for (int64_t y = 0; y < H; ++y) {
         for (int64_t x = 0; x < W; ++x) {
           rgb_buf[static_cast<size_t>(y * stride + x * 3 + 0)] =
-              static_cast<uint8_t>(
-                  std::clamp(video_acc[t][0][y][x] * 255.0f, 0.0f, 255.0f));
+              to_byte(video_acc[t][0][y][x]);
           rgb_buf[static_cast<size_t>(y * stride + x * 3 + 1)] =
-              static_cast<uint8_t>(
-                  std::clamp(video_acc[t][1][y][x] * 255.0f, 0.0f, 255.0f));
+              to_byte(video_acc[t][1][y][x]);
           rgb_buf[static_cast<size_t>(y * stride + x * 3 + 2)] =
-              static_cast<uint8_t>(
-                  std::clamp(video_acc[t][2][y][x] * 255.0f, 0.0f, 255.0f));
+              to_byte(video_acc[t][2][y][x]);
         }
       }
 
@@ -1297,6 +1326,7 @@ class MemoryVideoWriter final : public MemoryMediaWriter {
   }
 
  private:
+  VideoEncoderOptions options_{};
   SwsContext* sws_ctx_ = nullptr;
   AVFrame* yuv_frame_ = nullptr;
 };
@@ -1319,6 +1349,26 @@ bool FFmpegVideoEncoder::encode(const torch::Tensor& video,
     return false;
   }
   MemoryVideoWriter writer;
+  return writer.write(video,
+                      fps,
+                      format,
+                      raw_data,
+                      audio,
+                      /*sample_rate=*/sample_rate);
+}
+
+bool FFmpegVideoEncoder::encode(const torch::Tensor& video,
+                                const torch::Tensor& audio,
+                                double fps,
+                                int32_t sample_rate,
+                                const std::string& format,
+                                std::string& raw_data,
+                                const VideoEncoderOptions& options) {
+  if (!audio.defined()) {
+    return false;
+  }
+  MemoryVideoWriter writer;
+  writer.set_options(options);
   return writer.write(video,
                       fps,
                       format,

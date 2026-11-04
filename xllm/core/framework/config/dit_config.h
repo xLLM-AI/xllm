@@ -56,6 +56,8 @@ class DiTConfig final {
          "dit_laser_attention_enabled",
          "dit_h3_task_type",
          "dit_h3_execution_profile",
+         "dit_h3_phase_timing",
+         "dit_h3_correctness_diagnostics",
          "dit_generation_image_area_max",
          "dit_vae_image_size",
          "dit_enable_vae_tiling",
@@ -98,6 +100,10 @@ class DiTConfig final {
   PROPERTY(std::string, dit_h3_task_type) = "fl2va";
 
   PROPERTY(std::string, dit_h3_execution_profile) = "native";
+
+  PROPERTY(bool, dit_h3_phase_timing) = false;
+
+  PROPERTY(bool, dit_h3_correctness_diagnostics) = false;
 
   PROPERTY(int64_t, dit_generation_image_area_max) = 0;
 

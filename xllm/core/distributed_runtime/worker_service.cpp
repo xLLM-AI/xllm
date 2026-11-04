@@ -21,11 +21,13 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <exception>
 #include <memory>
 #include <mutex>
 #include <new>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -43,6 +45,8 @@ limitations under the License.
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/transfer/kv_transport_codec.h"
 #include "core/kv_cache/transfer/prefetch_result.h"
+#include "core/runtime/minimax_h3_failure_injection.h"
+#include "core/util/env_var.h"
 #include "core/util/tensor_helper.h"
 #include "runtime/dit_forward_params.h"
 #include "runtime/forward_params.h"
@@ -802,7 +806,34 @@ void WorkerService::GetLastVLMStepResult(
 
 void WorkerService::step_dit_model(const DiTForwardInput& input,
                                    ForwardOutput& cpu_output) {
+  const bool qualified_profile =
+      DiTConfig::get_instance().dit_h3_execution_profile() ==
+      kMiniMaxH3ExecutionProfile;
+  const int64_t request_index =
+      qualified_profile
+          ? dit_request_index_.fetch_add(1, std::memory_order_relaxed) + 1
+          : 0;
   auto result = std::move(worker_->step_async(input)).get();
+  // The qualified pipeline has completed its final world status collective,
+  // and the worker has synchronized its device before this future resolves.
+  // Check before follower nullopt filtering so rank 7 exercises typed delivery.
+  if (qualified_profile &&
+      should_inject_minimax_h3_failure(
+          qualified_profile,
+          util::get_bool_env("XLLM_TEST_DIT_FAILURE_INJECTION", false),
+          util::get_int_env("XLLM_TEST_DIT_FAIL_RANK", -1),
+          // Mature env name kept for compatibility; it counts requests, not
+          // positions in a batch (see should_inject_minimax_h3_failure).
+          util::get_int_env("XLLM_TEST_DIT_FAIL_BATCH_INDEX", -1),
+          options_.node_rank(),
+          request_index)) {
+    const std::string message =
+        "injected post-forward DiT worker failure on rank " +
+        std::to_string(options_.node_rank()) + " for request " +
+        std::to_string(request_index);
+    LOG(ERROR) << message;
+    throw DiTForwardExecutionError({StatusCode::UNKNOWN, message});
+  }
   if (!result.has_value()) {
     return;
   }
@@ -813,6 +844,30 @@ void WorkerService::step_dit_model(const DiTForwardInput& input,
       throw DiTForwardExecutionError(
           {StatusCode::UNKNOWN, "wait DiT output ready event failed"});
     }
+  }
+  const auto condition =
+      input.model_params.tensor_sources.get_named_tensor("prompt_embed");
+  const bool qualified =
+      DiTConfig::get_instance().dit_h3_execution_profile() ==
+          kMiniMaxH3ExecutionProfile &&
+      condition.has_value() &&
+      has_minimax_h3_condition_metadata(condition->get().parameters);
+  const bool time_media = qualified &&
+                          DiTConfig::get_instance().dit_h3_phase_timing() &&
+                          worker_->is_driver() && !output.tensors.empty();
+  using MediaClock = std::chrono::steady_clock;
+  std::optional<MediaClock::time_point> d2h_started;
+  std::string media_request_id;
+  if (time_media) {
+    const auto* id = get_tensor_parameter<std::string>(
+        condition->get().parameters, kMiniMaxH3InternalRequestId);
+    if (id == nullptr || id->empty()) {
+      throw DiTForwardExecutionError(
+          {StatusCode::UNKNOWN,
+           "H3 media timing requires the server request ID"});
+    }
+    media_request_id = *id;
+    d2h_started = MediaClock::now();
   }
   auto& tensors = cpu_output.dit_forward_output.tensors;
   tensors.reserve(output.tensors.size());
@@ -828,29 +883,56 @@ void WorkerService::step_dit_model(const DiTForwardInput& input,
   cpu_output.dit_forward_output.text_output = output.text_output;
   cpu_output.dit_forward_output.encoded_media = output.encoded_media;
   stream_->synchronize();
-  const auto condition =
-      input.model_params.tensor_sources.get_named_tensor("prompt_embed");
-  const bool qualified =
-      DiTConfig::get_instance().dit_h3_execution_profile() ==
-          kMiniMaxH3ExecutionProfile &&
-      condition.has_value() &&
-      has_minimax_h3_condition_metadata(condition->get().parameters);
+  double d2h_ms = 0.0;
+  if (time_media) {
+    d2h_ms = std::chrono::duration<double, std::milli>(MediaClock::now() -
+                                                       *d2h_started)
+                 .count();
+  }
   auto& cpu_result = cpu_output.dit_forward_output;
   if (qualified && !cpu_result.tensors.empty()) {
     DiTEncodedMedia encoded;
     const auto& parameters = input.model_params.generation_params;
+    std::optional<MediaClock::time_point> encode_started;
+    if (time_media) {
+      encode_started = MediaClock::now();
+    }
+    // The qualified media contract pins CRF 12 and round-half-to-even
+    // float->uint8 quantization. The native path keeps CRF 18 with truncating
+    // conversion and never reaches this branch.
     Status status =
         encode_minimax_h3_video_output(cpu_result,
                                        parameters.video_fps,
                                        parameters.audio_sampling_rate,
-                                       encoded);
+                                       encoded,
+                                       /*crf=*/12,
+                                       /*round_quantization=*/true);
     if (!status.ok()) {
       throw DiTForwardExecutionError(std::move(status));
+    }
+    double encode_ms = 0.0;
+    if (time_media) {
+      encode_ms = std::chrono::duration<double, std::milli>(MediaClock::now() -
+                                                            *encode_started)
+                      .count();
     }
     cpu_result.encoded_media.clear();
     cpu_result.encoded_media.emplace_back(std::move(encoded));
     cpu_result.tensors.clear();
     cpu_result.audio_tensors.clear();
+    if (time_media) {
+      const nlohmann::json timing = {
+          {"kind", "h3_media_phase"},
+          {"status", "success"},
+          {"request_id", media_request_id},
+          {"global_rank", 0},
+          {"location", "qualified_worker"},
+          {"profile", std::string(kMiniMaxH3ExecutionProfile)},
+          {"candidate_count", cpu_result.encoded_media.size()},
+          {"d2h_ms", d2h_ms},
+          {"encode_ms", encode_ms}};
+      LOG(INFO) << "H3_MEDIA_PHASE_JSON " << timing.dump();
+    }
   }
 }
 

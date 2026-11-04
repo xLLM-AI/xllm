@@ -232,3 +232,10 @@ target_link_options(dit_result_status_test PRIVATE
   "-Wl,--whole-archive"
   "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
   "-Wl,--no-whole-archive")
+
+cc_test(
+  NAME minimax_h3_failure_injection_test
+  CPU_ONLY
+  SRCS minimax_h3_failure_injection_test.cpp
+  DEPS GTest::gtest_main
+)

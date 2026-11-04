@@ -270,6 +270,8 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `dit_generation_image_area_max` | `int64` | `0` | 图像生成请求允许的最大图像面积（宽 * 高）；`0` 表示不限制。 |
 | `dit_h3_task_type` | `string` | `"fl2va"` | MiniMax-H3 任务类型：`fl2va` 或 `ref2va`。 |
 | `dit_h3_execution_profile` | `string` | `"native"` | MiniMax-H3 执行配置：`native` 或 `a3_16card_tp2_u8_ref2va_v1`。16 卡后端启用前，后者会在模型加载前被拒绝。 |
+| `dit_h3_phase_timing` | `bool` | `false` | 测量 MiniMax-H3 加载、准备、去噪、解码耗时，仅在阶段边界同步设备。端到端吞吐测量须关闭。启用时要求单请求 forward 且恰好一个 prompt_embed。 |
+| `dit_h3_correctness_diagnostics` | `bool` | `false` | 开启 qualified MiniMax-H3 每层有限值及 dummy-head 检查。正确性验收开启，性能测量关闭；启动和输入验证始终保留。 |
 | `dit_enable_vae_tiling` | `bool` | `false` | 是否启用 VAE tiling，目前仅支持 `qwen-image-edit-plus`。 |
 | `dit_vae_image_size` | `int64` | `1048576` | Qwen-Image-Edit-Plus VAE 用于计算维度的 image size。 |
 | `dit_sparse_attention_enabled` | `bool` | `false` | 是否为 WAN 启用 block-wise sparse attention / RainFusion。 |

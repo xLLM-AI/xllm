@@ -57,6 +57,25 @@ TEST(DiTConfigTest, H3ExecutionProfileIsOptInAndRoundTripsJson) {
             "a3_16card_tp2_u8_ref2va_v1");
 }
 
+TEST(DiTConfigTest, H3MeasurementAndCorrectnessAreIndependentOptIns) {
+  DiTConfig config;
+  EXPECT_FALSE(config.dit_h3_phase_timing());
+  EXPECT_FALSE(config.dit_h3_correctness_diagnostics());
+  nlohmann::ordered_json output = nlohmann::ordered_json::object();
+  config.append_config_json(output);
+  EXPECT_FALSE(output.contains("dit_h3_phase_timing"));
+  EXPECT_FALSE(output.contains("dit_h3_correctness_diagnostics"));
+  config.from_json(config::parse_json_string(
+      R"({"dit_h3_phase_timing":true,"dit_h3_correctness_diagnostics":true})"));
+  EXPECT_TRUE(config.dit_h3_phase_timing());
+  EXPECT_TRUE(config.dit_h3_correctness_diagnostics());
+  config.dit_h3_phase_timing(false);
+  EXPECT_TRUE(config.dit_h3_correctness_diagnostics());
+  config.append_config_json(output);
+  EXPECT_FALSE(output.contains("dit_h3_phase_timing"));
+  EXPECT_EQ(output.at("dit_h3_correctness_diagnostics"), true);
+}
+
 inline constexpr std::string_view kInlineConfig = R"json({
   "block_size": 16,
   "max_memory_utilization": 0.5,

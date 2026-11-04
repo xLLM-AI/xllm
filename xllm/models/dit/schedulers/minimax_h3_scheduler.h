@@ -70,7 +70,8 @@ class MiniMaxH3Scheduler final {
 
   torch::Tensor step(const torch::Tensor& model_output,
                      const torch::Tensor& timestep,
-                     const torch::Tensor& sample) {
+                     const torch::Tensor& sample,
+                     torch::Tensor* denoised_output = nullptr) {
     CHECK(timestep.is_floating_point()) << "MiniMax-H3 scheduler.step expects "
                                            "timestep value, not integer index";
     if (step_index_ < 0) {
@@ -82,6 +83,10 @@ class MiniMaxH3Scheduler final {
     torch::Tensor sigma_from_t = broadcast_to_sample(
         1.0 - timestep.to(sample.device(), sample.scalar_type()), sample);
     torch::Tensor denoised = sample + sigma_from_t * model_output;
+    // Optional synchronous diagnostics borrow the actual scheduler x0.
+    if (denoised_output != nullptr) {
+      *denoised_output = denoised;
+    }
 
     torch::Dtype compute_dtype = (sample.scalar_type() == torch::kFloat16 ||
                                   sample.scalar_type() == torch::kBFloat16)

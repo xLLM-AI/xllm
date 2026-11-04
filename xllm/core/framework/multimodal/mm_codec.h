@@ -70,6 +70,14 @@ class FFmpegAudioDecoder {
   double max_duration_s_ = 0.0;
 };
 
+// Encoder options for callers that need an explicit media contract. The
+// defaults reproduce the existing native behaviour exactly: CRF 18 and
+// truncating float->uint8 conversion.
+struct VideoEncoderOptions {
+  int32_t crf = 18;
+  bool round_quantization = false;
+};
+
 class FFmpegVideoEncoder final {
  public:
   FFmpegVideoEncoder() = default;
@@ -88,5 +96,15 @@ class FFmpegVideoEncoder final {
               int32_t sample_rate,
               const std::string& format,
               std::string& raw_data);
+
+  // Explicit-options overload. Added as a new symbol so every existing caller
+  // and every existing mangled signature stays untouched.
+  bool encode(const torch::Tensor& video,
+              const torch::Tensor& audio,
+              double fps,
+              int32_t sample_rate,
+              const std::string& format,
+              std::string& raw_data,
+              const VideoEncoderOptions& options);
 };
 }  // namespace xllm
