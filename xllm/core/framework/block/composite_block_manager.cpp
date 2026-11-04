@@ -512,7 +512,17 @@ BlockManager* CompositeBlockManager::leaf_of(BlockType type) const {
   return it == leaves_.end() ? nullptr : it->second.leaf.get();
 }
 
-void CompositeBlockManager::cache_full_blocks_for_sequence(Sequence* seq) {
+void CompositeBlockManager::publish_prefix(Sequence* seq) {
+  publish_completed_prefix(seq, std::numeric_limits<size_t>::max());
+}
+
+void CompositeBlockManager::publish_restored_prefix(Sequence* seq,
+                                                    size_t restored_tokens) {
+  publish_completed_prefix(seq, restored_tokens);
+}
+
+void CompositeBlockManager::publish_completed_prefix(Sequence* seq,
+                                                     size_t token_limit) {
   if (seq == nullptr || seq->is_graph_warmup() ||
       cache_tier_ == CacheTier::HOST) {
     return;
@@ -524,7 +534,8 @@ void CompositeBlockManager::cache_full_blocks_for_sequence(Sequence* seq) {
   if (combination_ == LeafCombination::SWA_COMPRESSED) {
     BlockManager* c128_leaf = leaf_of(BlockType::C128);
     CHECK(c128_leaf != nullptr);
-    cacheable_tokens = publishable_tokens(*seq, *c128_leaf);
+    cacheable_tokens =
+        std::min(token_limit, publishable_tokens(*seq, *c128_leaf));
     cache_unit_size = c128_leaf->block_size();
     CHECK_GT(cache_unit_size, 0u);
 
@@ -564,9 +575,11 @@ void CompositeBlockManager::cache_full_blocks_for_sequence(Sequence* seq) {
     if (blocks == nullptr || blocks->empty()) {
       continue;
     }
-    const size_t num_full = combination_ == LeafCombination::SWA_COMPRESSED
-                                ? cacheable_tokens / block_size
-                                : publishable_tokens(*seq, leaf) / block_size;
+    const size_t num_full =
+        combination_ == LeafCombination::SWA_COMPRESSED
+            ? cacheable_tokens / block_size
+            : std::min(token_limit, publishable_tokens(*seq, leaf)) /
+                  block_size;
     size_t cached = kv.num_cached_blocks(type);
     const size_t end = std::min(num_full, blocks->size());
     if (end <= cached) {
@@ -620,7 +633,7 @@ bool CompositeBlockManager::allocate_sequence(Sequence* seq,
   // SlidingWindowBlockManager can then release a cached, slid-out block and
   // retry when its first allocation attempt exhausts the SWA pool.
   if (cache_prefix) {
-    cache_full_blocks_for_sequence(seq);
+    publish_prefix(seq);
   }
 
   // Fan out growth. Each leaf returns its newly allocated blocks (or nullopt
@@ -679,7 +692,7 @@ bool CompositeBlockManager::allocate_sequence(Sequence* seq,
   }
   staged.clear();
   if (cache_prefix) {
-    cache_full_blocks_for_sequence(seq);
+    publish_prefix(seq);
   }
 
   // Release slid-out SWA blocks only after they have had a chance to enter the
@@ -707,11 +720,20 @@ void CompositeBlockManager::deallocate_for_sequence(Sequence* seq,
   // Publish prefix cache first, then release blocks. seq->reset() belongs to
   // the pool caller.
   if (cache_prefix) {
-    cache_full_blocks_for_sequence(seq);
+    publish_prefix(seq);
   }
   for (auto& [type, entry] : leaves_) {
     entry.leaf->deallocate(kv_state.blocks(type));
   }
+}
+
+std::vector<CompositeBlockManager::ProbeResult>
+CompositeBlockManager::probe_prefix_cache(Sequence* seq,
+                                          const LeafMap& leaves) {
+  if (seq == nullptr) {
+    return {};
+  }
+  return probe_prefix_cache(seq, leaves, seq->kv_state());
 }
 
 std::vector<CompositeBlockManager::ProbeResult>
@@ -829,8 +851,7 @@ void CompositeBlockManager::allocate_shared_for_sequence(Sequence* seq) {
   kv_state.set_prefix_cache_matched();
 }
 
-void CompositeBlockManager::cache_for_sequence(Sequence* seq,
-                                               size_t num_tokens) {
+void CompositeBlockManager::publish_prefix(Sequence* seq, size_t num_tokens) {
   // Chunked-prefill mid-step: only KV needs a token-clamped flush now;
   // SWA / C4 / C128 get their flush from the pre-grow hook at the top of
   // the next allocate_sequence.

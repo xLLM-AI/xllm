@@ -492,16 +492,16 @@ void BlockManagerPool::allocate_shared(Sequence* sequence) {
   composite->allocate_shared_for_sequence(sequence);
 }
 
-void BlockManagerPool::cache(Sequence* sequence) {
+void BlockManagerPool::publish_prefix(Sequence* sequence) {
   if (!options_.enable_prefix_cache()) {
     return;
   }
   int32_t dp_rank = get_dp_rank(sequence);
   static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get())
-      ->cache_full_blocks_for_sequence(sequence);
+      ->publish_prefix(sequence);
 }
 
-void BlockManagerPool::cache(Sequence* sequence, size_t num_tokens) {
+void BlockManagerPool::publish_prefix(Sequence* sequence, size_t num_tokens) {
   CHECK(sequence != nullptr);
   if (!options_.enable_prefix_cache()) {
     return;
@@ -510,7 +510,7 @@ void BlockManagerPool::cache(Sequence* sequence, size_t num_tokens) {
   // Fan out the in-batch publish to the prefix leaf (KV); the composite no-ops
   // for shapes without a prefix-capable KV leaf (DSV4).
   static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get())
-      ->cache_for_sequence(sequence, num_tokens);
+      ->publish_prefix(sequence, num_tokens);
 }
 
 float BlockManagerPool::get_gpu_cache_usage_perc() const {

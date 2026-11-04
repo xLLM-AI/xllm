@@ -435,7 +435,7 @@ void HierarchyBlockManagerPool::deallocate(Sequence* sequence) {
   auto* composite =
       static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
   if (!cancelled_restore) {
-    composite->cache_full_blocks_for_sequence(sequence);
+    composite->publish_prefix(sequence);
     collect_offload_pairs(
         sequence, dp_rank, sequence->kv_state().kv_cache_tokens_num());
   }
@@ -454,20 +454,34 @@ void HierarchyBlockManagerPool::deallocate(Sequence* sequence) {
   sequence->reset();
 }
 
-void HierarchyBlockManagerPool::cache(Sequence* sequence) {
+void HierarchyBlockManagerPool::publish_prefix(Sequence* sequence) {
   std::lock_guard<std::mutex> lock(restore_state_mutex_);
   if (restoring_sequences_.contains(sequence)) {
     return;
   }
-  BlockManagerPool::cache(sequence);
+  if (!options_.enable_prefix_cache()) {
+    return;
+  }
+  const int32_t dp_rank = get_dp_rank(sequence);
+  auto* composite =
+      static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
+  composite->publish_prefix(sequence);
 }
 
-void HierarchyBlockManagerPool::cache(Sequence* sequence, size_t num_tokens) {
+void HierarchyBlockManagerPool::publish_prefix(Sequence* sequence,
+                                               size_t num_tokens) {
+  CHECK(sequence != nullptr);
   std::lock_guard<std::mutex> lock(restore_state_mutex_);
   if (restoring_sequences_.contains(sequence)) {
     return;
   }
-  BlockManagerPool::cache(sequence, num_tokens);
+  if (!options_.enable_prefix_cache()) {
+    return;
+  }
+  const int32_t dp_rank = get_dp_rank(sequence);
+  auto* composite =
+      static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
+  composite->publish_prefix(sequence, num_tokens);
 }
 
 void HierarchyBlockManagerPool::collect_offload_pairs(Sequence* sequence,
@@ -1112,7 +1126,8 @@ void HierarchyBlockManagerPool::complete_restore(
     restoring_sequences_.erase(active);
     // Input construction can already have advanced the cursor for an
     // unfinished forward while schedule overlap drains this completion.
-    composite->cache_for_sequence(restore.sequence, restore.restore_tokens);
+    composite->publish_restored_prefix(restore.sequence,
+                                       restore.restore_tokens);
   }
 }
 

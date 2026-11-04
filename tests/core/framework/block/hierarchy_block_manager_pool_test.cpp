@@ -668,6 +668,7 @@ TEST(HierarchyBlockManagerPoolTest,
     seed_host_prefix(host_leaf, tokens);
     const size_t host_used = host_leaf->num_used_blocks();
     const size_t device_used = device_leaf->num_used_blocks();
+    const size_t device_free = device_leaf->num_free_blocks();
     Sequence sequence = make_test_sequence(/*index=*/0, tokens);
     pool.allocate_shared(&sequence);
     ASSERT_TRUE(pool.allocate(&sequence, tokens.size()));
@@ -687,12 +688,15 @@ TEST(HierarchyBlockManagerPoolTest,
     pool.deallocate(&sequence);
     if (lease != nullptr) {
       EXPECT_GT(host_leaf->num_used_blocks(), host_used);
-      EXPECT_GT(device_leaf->num_used_blocks(), device_used);
+      EXPECT_EQ(device_leaf->num_used_blocks(), device_used);
+      EXPECT_EQ(device_leaf->num_blocks_in_prefix_cache(), 0u);
+      EXPECT_EQ(device_leaf->num_free_blocks(), device_free - 2);
       EXPECT_TRUE(pool.has_pending_async_block_release());
     }
     lease.reset();
     EXPECT_EQ(host_leaf->num_used_blocks(), host_used);
     EXPECT_EQ(device_leaf->num_used_blocks(), device_used);
+    EXPECT_EQ(device_leaf->num_free_blocks(), device_free);
     EXPECT_FALSE(pool.has_pending_async_block_release());
   }
 }
@@ -841,8 +845,8 @@ TEST(HierarchyBlockManagerPoolTest,
     Sequence sequence = make_test_sequence(/*index=*/0, tokens);
     ASSERT_TRUE(pool.allocate(&sequence, tokens.size()));
     EXPECT_EQ(device_leaf->num_blocks_in_prefix_cache(), 0u);
-    pool.cache(&sequence);
-    pool.cache(&sequence, tokens.size());
+    pool.publish_prefix(&sequence);
+    pool.publish_prefix(&sequence, tokens.size());
     ASSERT_TRUE(pool.allocate(&sequence, tokens.size()));
     EXPECT_EQ(device_leaf->num_blocks_in_prefix_cache(), 0u);
     {
@@ -914,7 +918,7 @@ TEST(HierarchyBlockManagerPoolTest,
   EXPECT_EQ(sequence.kv_state().kv_cache_tokens_num(), 24u);
   EXPECT_EQ(device_leaf->num_blocks_in_prefix_cache(), 4u);
 
-  pool.cache(&sequence, /*num_tokens=*/24);
+  pool.publish_prefix(&sequence, /*num_tokens=*/24);
   EXPECT_EQ(device_leaf->num_blocks_in_prefix_cache(), 6u);
   pool.deallocate(&sequence);
 }
@@ -1609,7 +1613,7 @@ TEST(HierarchyBlockManagerPoolTest, ExistingBlocksSkipHostCacheRematch) {
   EXPECT_EQ(sequence.kv_state().kv_cache_tokens_num(), 512u);
   sequence.kv_state().incr_kv_cache_tokens_num_up_to(/*new_target=*/1024);
   HierarchyPoolTestPeer::dispatch_pending_h2d(pool);
-  pool.cache(&sequence);
+  pool.publish_prefix(&sequence);
 
   pool.allocate_shared(&sequence);
   const HostCacheRestorePoint selected =
@@ -2126,7 +2130,7 @@ TEST(HierarchyBlockManagerPoolTest,
 
   ASSERT_TRUE(allocate_with_host_cache_budget(
       &pool, &first, kStepTargetTokens, /*max_copy_units=*/kCopyUnits));
-  pool.cache(&first, kStepTargetTokens);
+  pool.publish_prefix(&first, kStepTargetTokens);
   ASSERT_TRUE(allocate_with_host_cache_budget(
       &pool, &second, kStepTargetTokens, /*max_copy_units=*/kCopyUnits));
 
@@ -2303,7 +2307,7 @@ TEST(HierarchyBlockManagerPoolTest, ExistingHostPrefixSkipsDuplicateD2h) {
   CompositeBlockManager* device = HierarchyPoolTestPeer::device_composite(pool);
   ASSERT_TRUE(device->allocate_sequence(&sequence, kCachedTokens));
   sequence.kv_state().set_kv_cache_tokens_num(kCachedTokens);
-  device->cache_full_blocks_for_sequence(&sequence);
+  device->publish_prefix(&sequence);
 
   HierarchyPoolTestPeer::collect_offload_pairs(pool, &sequence);
   EXPECT_EQ(HierarchyPoolTestPeer::pending_offload_pair_count(pool), 0u);

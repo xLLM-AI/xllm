@@ -107,11 +107,12 @@ class KVCacheManager {
     sequence->set_host_cache_restore(selected_restore.restore_target_tokens,
                                      selected_restore.copy_units);
   }
-  virtual void cache(Sequence* sequence) = 0;
-  // Cache only the full blocks covered by the first `num_tokens` tokens. Used
+  // Publish reusable full prefix blocks from the sequence's completed KV.
+  virtual void publish_prefix(Sequence* sequence) = 0;
+  // Publish only the full blocks covered by the first `num_tokens` tokens. Used
   // by in-batch prefix cache to publish admitted prefill blocks before they are
   // deallocated, so later requests in the same batch can share them.
-  virtual void cache(Sequence* sequence, size_t num_tokens) = 0;
+  virtual void publish_prefix(Sequence* sequence, size_t num_tokens) = 0;
 
   virtual std::vector<std::vector<BlockTransferInfo>>*
   get_swap_block_transfer_infos() = 0;

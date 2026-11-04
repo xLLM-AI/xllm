@@ -66,8 +66,8 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
                        const HostCacheRestorePoint& selected_restore) override;
 
   void deallocate(Sequence* sequence) override;
-  void cache(Sequence* sequence) override;
-  void cache(Sequence* sequence, size_t num_tokens) override;
+  void publish_prefix(Sequence* sequence) override;
+  void publish_prefix(Sequence* sequence, size_t num_tokens) override;
 
   void transfer_blocks(BatchGroup& batches) override;
   void transfer_blocks(RecBatchGroup& batches) override;
