@@ -12,6 +12,8 @@ Install the xllm wheel package in advance, or use a release image:
 python setup.py install
 ```
 
+Place the model path directly after `serve`, for example `xllm serve /path/to/model`. The existing `--model=/path/to/model` and `--model /path/to/model` forms remain supported; specify the model using either the positional argument or `--model`.
+
 For single-machine deployments, set `NNODES` to the number of selected devices (one device per node). The following script supports both single-device and multi-device launches:
 
 ```bash
@@ -23,7 +25,7 @@ PORT=8010
 MASTER_NODE_ADDR="127.0.0.1:9748"
 NNODES=1
 
-xllm serve --model=$MODEL_PATH \
+xllm serve "$MODEL_PATH" \
        --port=$PORT \
        --nnodes=$NNODES \
        --master_node_addr=$MASTER_NODE_ADDR \
