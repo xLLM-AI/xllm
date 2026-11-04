@@ -171,49 +171,62 @@ ModelContext make_bridge_model_context(const char* model_type,
 
 TEST(PyCausalLMPoolerTest, DelegatesToQwen3WithoutChangingHiddenStates) {
   ModelArgs args;
-  args.hidden_size(4);
-  args.n_layers(0);
-  args.n_heads(1);
-  args.n_kv_heads(1);
-  args.head_dim(4);
-  args.intermediate_size(8);
-  args.vocab_size(8);
-  args.max_position_embeddings(8);
-  args.embedding_mode(true);
-  PyCausalLM model(make_bridge_model_context("qwen3", std::move(args)));
-  const torch::Tensor hidden =
-      torch::tensor({{3.0F, 4.0F, 0.0F, 0.0F},
-                     {0.0F, 0.0F, 5.0F, 12.0F},
-                     {99.0F, 99.0F, 99.0F, 99.0F}},
-                    torch::TensorOptions().requires_grad(true));
+  args.hidden_size(/*value=*/4);
+  args.n_layers(/*value=*/0);
+  args.n_heads(/*value=*/1);
+  args.n_kv_heads(/*value=*/1);
+  args.head_dim(/*value=*/4);
+  args.intermediate_size(/*value=*/8);
+  args.vocab_size(/*value=*/8);
+  args.max_position_embeddings(/*value=*/8);
+  args.embedding_mode(/*value=*/true);
+  PyCausalLM model(
+      make_bridge_model_context(/*model_type=*/"qwen3", std::move(args)));
+  const torch::Tensor hidden = torch::tensor(
+      /*tensor_data_container=*/{{3.0F, 4.0F, 0.0F, 0.0F},
+                                 {0.0F, 0.0F, 5.0F, 12.0F},
+                                 {99.0F, 99.0F, 99.0F, 99.0F}},
+      torch::TensorOptions().requires_grad(/*requires_grad=*/true));
   const torch::Tensor before = hidden.detach().clone();
-  const torch::Tensor selected = torch::tensor({1, 0, 1}, torch::kInt32);
+  const torch::Tensor selected = torch::tensor(
+      /*tensor_data_container=*/{1, 0, 1}, /*options=*/torch::kInt32);
 
   const torch::Tensor pooled = model.pooler(hidden, selected);
 
-  const torch::Tensor expected =
-      torch::tensor({{0.0F, 0.0F, 5.0F / 13.0F, 12.0F / 13.0F},
-                     {0.6F, 0.8F, 0.0F, 0.0F},
-                     {0.0F, 0.0F, 5.0F / 13.0F, 12.0F / 13.0F}});
+  const torch::Tensor expected = torch::tensor(
+      /*tensor_data_container=*/{{0.0F, 0.0F, 5.0F / 13.0F, 12.0F / 13.0F},
+                                 {0.6F, 0.8F, 0.0F, 0.0F},
+                                 {0.0F, 0.0F, 5.0F / 13.0F, 12.0F / 13.0F}});
   EXPECT_TRUE(torch::allclose(pooled, expected));
   EXPECT_TRUE(torch::equal(hidden.detach(), before));
   EXPECT_FALSE(pooled.requires_grad());
-  EXPECT_EQ(model.pooler(hidden, torch::Tensor()).size(0), 3);
-  EXPECT_EQ(model.pooler(hidden, torch::empty({0}, torch::kInt32)).size(0), 0);
+  EXPECT_EQ(model.pooler(hidden, torch::Tensor()).size(/*dim=*/0), 3);
+  EXPECT_EQ(
+      model
+          .pooler(hidden, torch::empty(/*size=*/{0}, /*options=*/torch::kInt32))
+          .size(/*dim=*/0),
+      0);
   py::gil_scoped_acquire gil;
-  EXPECT_TRUE(model.python_model().attr("lm_head").is_none());
+  EXPECT_TRUE(model.python_model().attr(/*key=*/"lm_head").is_none());
 }
 
 TEST(PyCausalLMPoolerTest, PreservesDefaultPoolingForModelsWithoutPooler) {
-  PyCausalLM model(make_bridge_model_context(kBridgeTestModelType));
-  const torch::Tensor hidden = torch::tensor({{3.0F, 4.0F}, {5.0F, 12.0F}});
-  const torch::Tensor selected = torch::tensor({1, 0, 1}, torch::kInt32);
+  PyCausalLM model(
+      make_bridge_model_context(/*model_type=*/kBridgeTestModelType));
+  const torch::Tensor hidden =
+      torch::tensor(/*tensor_data_container=*/{{3.0F, 4.0F}, {5.0F, 12.0F}});
+  const torch::Tensor selected = torch::tensor(
+      /*tensor_data_container=*/{1, 0, 1}, /*options=*/torch::kInt32);
 
-  EXPECT_TRUE(torch::equal(
-      model.pooler(hidden, selected),
-      torch::tensor({{5.0F, 12.0F}, {3.0F, 4.0F}, {5.0F, 12.0F}})));
+  EXPECT_TRUE(torch::equal(model.pooler(hidden, selected),
+                           torch::tensor(/*tensor_data_container=*/{
+                               {5.0F, 12.0F}, {3.0F, 4.0F}, {5.0F, 12.0F}})));
   EXPECT_TRUE(torch::equal(model.pooler(hidden, torch::Tensor()), hidden));
-  EXPECT_EQ(model.pooler(hidden, torch::empty({0}, torch::kInt32)).size(0), 0);
+  EXPECT_EQ(
+      model
+          .pooler(hidden, torch::empty(/*size=*/{0}, /*options=*/torch::kInt32))
+          .size(/*dim=*/0),
+      0);
 }
 
 TEST(PyCausalLMConfigBridgeTest, PreservesBlockDraftWindowEnablement) {

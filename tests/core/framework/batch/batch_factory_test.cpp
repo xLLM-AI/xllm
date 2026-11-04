@@ -128,7 +128,7 @@ TEST(BatchTest, EmbeddingSelectsLastPromptTokensAndExcludesExecutionPadding) {
       SchedulerConfig::get_instance().enable_schedule_overlap(),
       /*new_value=*/false);
   BlockManager::Options options;
-  options.num_blocks(4).block_size(8);
+  options.num_blocks(/*value=*/4).block_size(/*value=*/8);
   BlockManagerImpl manager(options);
   RequestSamplingParam sampling;
   sampling.is_embeddings = true;
@@ -158,8 +158,9 @@ TEST(BatchTest, EmbeddingSelectsLastPromptTokensAndExcludesExecutionPadding) {
                                        /*echo=*/false,
                                        /*skip_special_tokens=*/true),
                     params);
-  plain.add_blocks(BlockType::KV, manager.allocate(/*num_blocks=*/1));
-  with_eos.add_blocks(BlockType::KV, manager.allocate(/*num_blocks=*/1));
+  plain.add_blocks(/*type=*/BlockType::KV, manager.allocate(/*num_blocks=*/1));
+  with_eos.add_blocks(/*type=*/BlockType::KV,
+                      manager.allocate(/*num_blocks=*/1));
   Batch batch({&plain, &with_eos});
   const ModelArgs args{};
 
@@ -167,11 +168,13 @@ TEST(BatchTest, EmbeddingSelectsLastPromptTokensAndExcludesExecutionPadding) {
       /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/4, args);
 
   EXPECT_TRUE(prefill.sampling_params.is_embeddings());
-  EXPECT_TRUE(
-      torch::equal(prefill.token_ids,
-                   torch::tensor({11, 12, 21, 22, 23, 100}, torch::kInt32)));
+  EXPECT_TRUE(torch::equal(
+      prefill.token_ids,
+      torch::tensor(/*tensor_data_container=*/{11, 12, 21, 22, 23, 100},
+                    /*options=*/torch::kInt32)));
   EXPECT_TRUE(torch::equal(prefill.sampling_params.selected_token_idxes(),
-                           torch::tensor({1, 5}, torch::kInt32)));
+                           torch::tensor(/*tensor_data_container=*/{1, 5},
+                                         /*options=*/torch::kInt32)));
 
   // Execution padding is added only to decode batches. It must not create
   // output rows, even when a real input token is EOS.
@@ -181,10 +184,13 @@ TEST(BatchTest, EmbeddingSelectsLastPromptTokensAndExcludesExecutionPadding) {
   const LlmForwardInput decode = batch.prepare_forward_input(
       /*num_decoding_tokens=*/1, /*min_decoding_batch_size=*/4, args);
 
-  EXPECT_TRUE(torch::equal(decode.token_ids,
-                           torch::tensor({100, 24, 0, 0}, torch::kInt32)));
+  EXPECT_TRUE(
+      torch::equal(decode.token_ids,
+                   torch::tensor(/*tensor_data_container=*/{100, 24, 0, 0},
+                                 /*options=*/torch::kInt32)));
   EXPECT_TRUE(torch::equal(decode.sampling_params.selected_token_idxes(),
-                           torch::tensor({0, 1}, torch::kInt32)));
+                           torch::tensor(/*tensor_data_container=*/{0, 1},
+                                         /*options=*/torch::kInt32)));
 }
 
 TEST(SamplingInputBuilderTest, PadsAndMergesAdjustedTokenCounts) {
