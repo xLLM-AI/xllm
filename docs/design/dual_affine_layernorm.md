@@ -189,10 +189,19 @@ executor 销毁。缓存在进程内为 4 槽表并受互斥锁保护，只保�
 5. 两路分支各自 `Cast(gamma)/Cast(beta)` → `Mul` → `Add` → `Cast` 回 T，写入 `tmp1` 的
    T 视图并 `CopyOut` 到 `row*H + start`。
 
-同步只发生在核内且逐次覆盖：行首一次 `MTE2_V`（等整行 x 与参数落地）；每个分支的
-`CopyOut` 各自加一对 `V_MTE3`（等向量写完成再发 DMA）与 `MTE3_V`（等 DMA 读完再允许
-复用 `tmp1`）。两路输出共用 `tmp1` 视图，因此这对同步是**每个 CopyOut 各一组**，
-而不是整行一组；无跨核同步、无 workspace。
+同步只发生在核内，且与代码逐项对应（`ReadScalar` 内部就是 `SetFlag<V_S>` + `WaitFlag<V_S>`）：
+
+| 时机 | 事件 | 作用 |
+|---|---|---|
+| 每行 `x` 与参数 `CopyIn` 之后 | `MTE2_V` ×1 | 等 GM→UB 搬运完成再做 `Cast` |
+| 首次 `ReduceSum`（行和）之后 | `V_S` ×1 | 等归约完成再读标量求 `mean` |
+| 第二次 `ReduceSum`（居中平方和）之后 | `V_S` ×1 | 等归约完成再读标量求 `variance` |
+| 写入 `variance + eps` 之后 | `S_V` ×1 | 等标量写入可见再做向量 `Sqrt`/`Div` |
+| `Div` 得到 `rstd` 之后 | `V_S` ×1 | 等向量计算完成再读标量 |
+| 每个分支的 `CopyOut` 之前/之后 | `V_MTE3` + `MTE3_V` 各 ×1 | 等向量写完成再发 DMA；等 DMA 读完才允许复用 `tmp1` |
+
+向量内部依赖另有 `PipeBarrier<PIPE_V>`。两路输出共用 `tmp1` 视图，所以 `V_MTE3`/`MTE3_V`
+是**每个 CopyOut 各一组**，而不是整行一组。无跨核同步、无 workspace。
 
 ## 支持硬件
 
