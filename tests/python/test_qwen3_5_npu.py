@@ -1077,6 +1077,45 @@ def test_npu_shared_gdn_cold_capture_snapshot_restores_selected_state() -> None:
     torch.testing.assert_close(caches[1].key.index_select(0, full_rows), protected_full, rtol=0, atol=0)
 
 
+@torch.inference_mode()
+def test_npu_shared_gdn_prefill_capture_snapshot_restores_write_rows() -> None:
+    width = 3
+    cfg = _linear_config(
+        linear_num_key_heads=1,
+        linear_num_value_heads=1,
+        linear_key_head_dim=128,
+        linear_value_head_dim=128,
+    )
+    caches = _shared_gdn_caches(width)
+    builder = Qwen3_5GdnMetadataBuilder(cfg)
+    builder.bind_layer_caches(caches)
+    source = SimpleNamespace(
+        linear_state_read_indices=torch.tensor([1], dtype=torch.int32),
+        linear_state_write_indices=torch.tensor([2], dtype=torch.int32),
+        has_initial_state=torch.tensor([True]),
+        q_seq_lens_host=torch.tensor([1], dtype=torch.int32),
+        q_cu_seq_lens=torch.tensor([0, 1], dtype=torch.int32),
+        q_cu_seq_lens_host_values=[0, 1],
+        is_spec_verify=False,
+        is_prefill=True,
+        is_chunked_prefill=False,
+    )
+    metadata = builder.allocate_persistent(_input_batch(1, (1,)), source)
+    assert isinstance(metadata, GdnPrefillMetadata)
+    conv_rows = metadata.conv_write_indices.long()
+    ssm_rows = (metadata.ssm_write_indices[:, None] + torch.arange(width)).reshape(-1).long()
+    caches[0].conv.index_fill_(0, conv_rows, 0.5)
+    caches[0].ssm.index_fill_(0, ssm_rows, 0.25)
+    expected_conv = caches[0].conv.index_select(0, conv_rows).clone()
+    expected_ssm = caches[0].ssm.index_select(0, ssm_rows).clone()
+    snapshot = builder.snapshot_prefill_graph_state(metadata)
+    caches[0].conv.index_fill_(0, conv_rows, -1)
+    caches[0].ssm.index_fill_(0, ssm_rows, -2)
+    snapshot.restore()
+    torch.testing.assert_close(caches[0].conv.index_select(0, conv_rows), expected_conv, rtol=0, atol=0)
+    torch.testing.assert_close(caches[0].ssm.index_select(0, ssm_rows), expected_ssm, rtol=0, atol=0)
+
+
 def test_npu_bounded_qwen38_gdn_prefill_maps_conv_rows_after_page_boundaries(monkeypatch: pytest.MonkeyPatch) -> None:
     builder, layout = _bounded_qwen38_gdn_builder(monkeypatch)
     assert layout.conv_row_stride is None

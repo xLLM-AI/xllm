@@ -62,6 +62,51 @@ def test_uses_first_nonempty_key_cache() -> None:
     assert backend.page_size == 128
 
 
+@pytest.mark.parametrize("shared_pool", [False, True])
+def test_full_kv_graph_snapshot_restores_only_written_slots(shared_pool: bool) -> None:
+    backend = NpuPagedAttentionBackend(
+        num_heads=1,
+        num_kv_heads=1,
+        head_dim=2,
+        scale=1.0,
+        sliding_window=0,
+        is_mla=False,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+    caches = [
+        LayerCache(
+            key=(torch.arange(48, dtype=torch.float32) + 100 * layer).view(12, 2, 1, 2),
+            value=(torch.arange(48, dtype=torch.float32) + 100 * layer + 50).view(12, 2, 1, 2),
+        )
+        for layer in range(2)
+    ]
+    backend.bind_kv_caches(caches)
+    if shared_pool:
+        backend._shared_kv_layout = SharedKVCacheLayout(2, 4, 2, 4, 2, 8, 64, 32)
+    physical_slots = torch.tensor([8, 9, 16] if shared_pool else [2, 3, 4])
+    snapshot = backend.snapshot_full_cache_state(
+        [torch.tensor([2, 3, -1, 2], dtype=torch.int32), torch.tensor([4, 2], dtype=torch.int32)]
+    )
+    original = [
+        cache.view(-1, 1, 2).index_select(0, physical_slots).clone()
+        for layer in caches
+        for cache in (layer.key, layer.value)
+    ]
+    for layer in caches:
+        for cache in (layer.key, layer.value):
+            tokens = cache.view(-1, 1, 2)
+            tokens.index_fill_(0, physical_slots, -1)
+            tokens[0].fill_(-2)
+    snapshot.restore()
+    for cache, expected in zip(
+        (cache for layer in caches for cache in (layer.key, layer.value)), original, strict=True
+    ):
+        tokens = cache.view(-1, 1, 2)
+        torch.testing.assert_close(tokens.index_select(0, physical_slots), expected)
+        assert torch.all(tokens[0] == -2)
+
+
 @pytest.mark.parametrize("host_ends", [[3, 5], [0, 3, 5]])
 def test_prepared_host_query_ends_avoid_device_readback(host_ends: list[int], monkeypatch: pytest.MonkeyPatch) -> None:
     backend = NpuPagedAttentionBackend(
