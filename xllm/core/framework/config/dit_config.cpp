@@ -70,6 +70,11 @@ DEFINE_string(dit_h3_task_type,
               "fl2va",
               "MiniMax-H3 task type: fl2va or ref2va.");
 
+DEFINE_string(dit_h3_execution_profile,
+              "native",
+              "MiniMax-H3 execution profile: native or "
+              "a3_16card_tp2_u8_ref2va_v1 (qualification required).");
+
 DEFINE_int64(dit_generation_image_area_max,
              0,
              "Maximum allowed image area (width * height) for image generation "
@@ -139,6 +144,7 @@ void DiTConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_debug_print);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_laser_attention_enabled);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_h3_task_type);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_h3_execution_profile);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_generation_image_area_max);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_vae_image_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_enable_vae_tiling);
@@ -166,6 +172,7 @@ void DiTConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_debug_print);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_laser_attention_enabled);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_h3_task_type);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_h3_execution_profile);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_generation_image_area_max);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_vae_image_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_enable_vae_tiling);
@@ -214,6 +221,8 @@ void DiTConfig::append_config_json(nlohmann::ordered_json& config_json) const {
       config_json, default_config, dit_laser_attention_enabled);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, dit_h3_task_type);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_h3_execution_profile);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, dit_generation_image_area_max);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "dit_worker_impl.h"
+#include "core/runtime/dit_worker_impl.h"
 
 #include <c10/core/DeviceGuard.h>
 #include <folly/Unit.h>
@@ -21,6 +21,7 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
+#include <exception>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -108,6 +109,12 @@ bool DiTWorkerImpl::init_model(const std::string& model_weights_path,
                                MasterStatus master_status) {
   CHECK(dit_model_ == nullptr) << "Model is already initialized.";
 
+  if (DiTConfig::get_instance().dit_h3_execution_profile() != "native") {
+    LOG(ERROR) << "MiniMax-H3 qualified execution profile is not available in "
+                  "this build";
+    return false;
+  }
+
   // set same random seed for all worker
   device_.set_seed(random_seed);
 
@@ -164,9 +171,12 @@ folly::SemiFuture<bool> DiTWorkerImpl::init_model_async(
                         random_seed,
                         master_status,
                         promise]() mutable {
-    bool status =
-        this->init_model(model_weights_path, random_seed, master_status);
-    promise->setValue(status);
+    try {
+      promise->setValue(
+          this->init_model(model_weights_path, random_seed, master_status));
+    } catch (...) {
+      promise->setException(folly::exception_wrapper(std::current_exception()));
+    }
   });
   return future;
 }
@@ -188,7 +198,11 @@ std::optional<ForwardOutput> DiTWorkerImpl::step(
   DiTCache::get_instance().set_context({});
 
   const int32_t ret = device_.synchronize_default_stream();
-  CHECK_EQ(ret, 0) << "synchronize_default_stream failed";
+  if (ret != 0) {
+    throw DiTForwardExecutionError(
+        {StatusCode::UNKNOWN,
+         "DiT device synchronization failed: " + std::to_string(ret)});
+  }
   COUNTER_ADD(execution_latency_seconds_model, timer.elapsed_seconds());
 
   // DiT currently does not support DP, so is_driver() identifies global rank 0.
@@ -205,11 +219,15 @@ folly::SemiFuture<std::optional<ForwardOutput>> DiTWorkerImpl::step_async(
     const DiTForwardInput& inputs) {
   folly::Promise<std::optional<ForwardOutput>> promise;
   auto future = promise.getSemiFuture();
-  threadpool_.schedule(
-      [this, input = inputs, promise = std::move(promise)]() mutable {
-        auto output = this->step(input);
-        promise.setValue(output);
-      });
+  threadpool_.schedule([this,
+                        input = inputs,
+                        promise = std::move(promise)]() mutable {
+    try {
+      promise.setValue(this->step(input));
+    } catch (...) {
+      promise.setException(folly::exception_wrapper(std::current_exception()));
+    }
+  });
   return future;
 }
 
@@ -235,8 +253,12 @@ folly::SemiFuture<folly::Unit> DiTWorkerImpl::process_group_test_async() {
   folly::Promise<folly::Unit> promise;
   auto future = promise.getSemiFuture();
   threadpool_.schedule([this, promise = std::move(promise)]() mutable {
-    this->process_group_test();
-    promise.setValue();
+    try {
+      this->process_group_test();
+      promise.setValue();
+    } catch (...) {
+      promise.setException(folly::exception_wrapper(std::current_exception()));
+    }
   });
   return future;
 }

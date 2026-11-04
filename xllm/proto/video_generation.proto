@@ -124,6 +124,12 @@ message VideoGenData {
 
   // FPS of the output video
   double fps = 7;
+
+  // Present for worker-encoded media only.
+  optional string mime_type = 8;
+  optional string container = 9;
+  optional int32 audio_sample_rate = 10;
+  optional int32 audio_channels = 11;
 }
 
 // Output container for video generation results

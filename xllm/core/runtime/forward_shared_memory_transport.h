@@ -148,7 +148,9 @@ class ForwardSharedMemoryTransport final {
   bool vlm_output_write(
       const ForwardOutput& output,
       const std::vector<SpeculativeTokenStats>& speculative_token_stats);
-  bool dit_output_write(const DiTForwardOutput& output);
+  static size_t minimum_dit_output_size();
+  bool dit_output_write(const DiTForwardOutput& output,
+                        const Status& status = Status());
 
   // Read into owned storage and replace the destination only on success.
   bool llm_output_read(RawForwardOutput& output);

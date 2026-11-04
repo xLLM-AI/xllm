@@ -22,8 +22,10 @@ limitations under the License.
 
 #include <algorithm>
 #include <cstdint>
+#include <exception>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -33,7 +35,10 @@ limitations under the License.
 #include "common/metrics.h"
 #include "common/types.h"
 #include "core/distributed_runtime/worker_model_codec.h"
+#include "core/framework/config/dit_config.h"
 #include "core/framework/config/eplb_config.h"
+#include "core/framework/multimodal/dit_media_encoder.h"
+#include "core/framework/request/minimax_h3_conditioning.h"
 #include "core/framework/speculative/metrics.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/transfer/kv_transport_codec.h"
@@ -46,6 +51,20 @@ limitations under the License.
 
 namespace xllm {
 namespace {
+
+Status dit_exception_status(const std::exception_ptr& exception) {
+  try {
+    std::rethrow_exception(exception);
+  } catch (const DiTForwardExecutionError& error) {
+    return error.status();
+  } catch (const std::bad_alloc& error) {
+    return {StatusCode::RESOURCE_EXHAUSTED, error.what()};
+  } catch (const std::exception& error) {
+    return {StatusCode::UNKNOWN, error.what()};
+  } catch (...) {
+    return {StatusCode::UNKNOWN, "unknown DiT execution error"};
+  }
+}
 
 std::vector<SpeculativeTokenStats> record_speculative_metrics(
     const ForwardOutput& output) {
@@ -397,19 +416,23 @@ void WorkerService::InitModel(::google::protobuf::RpcController* controller,
                               ::google::protobuf::Closure* done) {
   threadpool_->schedule([this, controller, request, response, done]() mutable {
     brpc::ClosureGuard done_guard(done);
-    auto model_weights_path = request->model_weights_path();
-    auto random_seed = request->random_seed();
-    auto init_future =
-        worker_->init_model_async(model_weights_path,
-                                  random_seed,
-                                  MasterStatus(request->master_status()));
-    bool status = std::move(init_future).get();
-    if (!status) {
+    try {
+      auto model_weights_path = request->model_weights_path();
+      auto random_seed = request->random_seed();
+      auto init_future =
+          worker_->init_model_async(model_weights_path,
+                                    random_seed,
+                                    MasterStatus(request->master_status()));
+      response->set_ok(std::move(init_future).get());
+    } catch (...) {
+      if (options_.backend() != "dit") {
+        throw;
+      }
       response->set_ok(false);
-      return;
+      const Status status = dit_exception_status(std::current_exception());
+      controller->SetFailed("DiT model initialization failed: " +
+                            status.message());
     }
-
-    response->set_ok(true);
   });
   return;
 }
@@ -786,8 +809,10 @@ void WorkerService::step_dit_model(const DiTForwardInput& input,
   const auto& output = result->dit_forward_output;
   c10::StreamGuard stream_guard = stream_->set_stream_guard();
   if (result->ready_event != nullptr) {
-    CHECK(stream_->wait_event(result->ready_event))
-        << "wait DiT output ready event failed";
+    if (!stream_->wait_event(result->ready_event)) {
+      throw DiTForwardExecutionError(
+          {StatusCode::UNKNOWN, "wait DiT output ready event failed"});
+    }
   }
   auto& tensors = cpu_output.dit_forward_output.tensors;
   tensors.reserve(output.tensors.size());
@@ -801,7 +826,32 @@ void WorkerService::step_dit_model(const DiTForwardInput& input,
         safe_to(tensor, torch::kCPU, /*non_blocking=*/true));
   }
   cpu_output.dit_forward_output.text_output = output.text_output;
+  cpu_output.dit_forward_output.encoded_media = output.encoded_media;
   stream_->synchronize();
+  const auto condition =
+      input.model_params.tensor_sources.get_named_tensor("prompt_embed");
+  const bool qualified =
+      DiTConfig::get_instance().dit_h3_execution_profile() ==
+          kMiniMaxH3ExecutionProfile &&
+      condition.has_value() &&
+      has_minimax_h3_condition_metadata(condition->get().parameters);
+  auto& cpu_result = cpu_output.dit_forward_output;
+  if (qualified && !cpu_result.tensors.empty()) {
+    DiTEncodedMedia encoded;
+    const auto& parameters = input.model_params.generation_params;
+    Status status =
+        encode_minimax_h3_video_output(cpu_result,
+                                       parameters.video_fps,
+                                       parameters.audio_sampling_rate,
+                                       encoded);
+    if (!status.ok()) {
+      throw DiTForwardExecutionError(std::move(status));
+    }
+    cpu_result.encoded_media.clear();
+    cpu_result.encoded_media.emplace_back(std::move(encoded));
+    cpu_result.tensors.clear();
+    cpu_result.audio_tensors.clear();
+  }
 }
 
 void WorkerService::poll_dit_shm(
@@ -815,10 +865,16 @@ void WorkerService::poll_dit_shm(
     }
     Timer timer;
     ForwardOutput cpu_output;
-    step_dit_model(input, cpu_output);
-    const bool write_ok =
-        output_shm_manager->dit_output_write(cpu_output.dit_forward_output);
-    CHECK(write_ok) << "dit worker output shared memory write failed";
+    Status status;
+    try {
+      step_dit_model(input, cpu_output);
+    } catch (...) {
+      status = dit_exception_status(std::current_exception());
+    }
+    if (!output_shm_manager->dit_output_write(cpu_output.dit_forward_output,
+                                              status)) {
+      LOG(FATAL) << "DiT output channel cannot publish its failure status";
+    }
     COUNTER_ADD(worker_service_latency_seconds, timer.elapsed_seconds());
   }
 }
@@ -840,19 +896,30 @@ void WorkerService::ExecuteDITModel(
     }
     Timer timer;
     if (!request->has_packed_input()) {
-      controller->SetFailed("DIT requires a packed input payload");
+      encode_dit_failure(
+          {StatusCode::INVALID_ARGUMENT, "DIT requires a packed input payload"},
+          response);
       return;
     }
-    DiTForwardInput input;
-    // The native reader checks schema, layout, and domain before preparation.
-    if (!input.from_packed_proto(request->packed_input())) {
-      controller->SetFailed("Invalid DIT input domain, schema, or layout");
-      return;
-    }
-    ForwardOutput cpu_output;
-    step_dit_model(input, cpu_output);
-    if (!encode_dit_output(cpu_output, response)) {
-      controller->SetFailed("Failed to serialize DIT model output");
+    try {
+      DiTForwardInput input;
+      if (!input.from_packed_proto(request->packed_input())) {
+        encode_dit_failure({StatusCode::INVALID_ARGUMENT,
+                            "Invalid DIT input domain, schema, or layout"},
+                           response);
+        return;
+      }
+      ForwardOutput cpu_output;
+      step_dit_model(input, cpu_output);
+      if (!encode_dit_output(cpu_output, response)) {
+        encode_dit_failure(
+            {StatusCode::UNKNOWN, "Failed to serialize DIT model output"},
+            response);
+        return;
+      }
+    } catch (...) {
+      encode_dit_failure(dit_exception_status(std::current_exception()),
+                         response);
       return;
     }
     COUNTER_ADD(worker_service_latency_seconds, timer.elapsed_seconds());
@@ -866,9 +933,19 @@ void WorkerService::ProcessGroupTest(
     ::google::protobuf::Closure* done) {
   threadpool_->schedule([this, controller, request, response, done]() mutable {
     brpc::ClosureGuard done_guard(done);
-    auto future = worker_->process_group_test_async();
-    std::move(future).get();
-    response->set_ok(true);
+    try {
+      auto future = worker_->process_group_test_async();
+      std::move(future).get();
+      response->set_ok(true);
+    } catch (...) {
+      if (options_.backend() != "dit") {
+        throw;
+      }
+      response->set_ok(false);
+      const Status status = dit_exception_status(std::current_exception());
+      controller->SetFailed("DiT process group test failed: " +
+                            status.message());
+    }
   });
   return;
 }

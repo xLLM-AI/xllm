@@ -349,6 +349,7 @@ DECLARE_int64(dit_sparse_attention_mask_refresh_steps);
 DECLARE_bool(dit_laser_attention_enabled);
 
 DECLARE_string(dit_h3_task_type);
+DECLARE_string(dit_h3_execution_profile);
 
 DECLARE_bool(use_audio_in_video);
 

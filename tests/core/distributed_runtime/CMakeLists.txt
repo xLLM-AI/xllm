@@ -214,3 +214,21 @@ cc_test(
     brpc
     glog::glog
 )
+
+cc_test(
+  NO_NPU_RUNTIME
+  NAME
+    dit_result_status_test
+  SRCS
+    dit_result_status_test.cpp
+  DEPS
+    :distributed_runtime
+    GTest::gtest_main
+)
+if(USE_NPU)
+  target_link_libraries(dit_result_status_test PRIVATE nnopbase)
+endif()
+target_link_options(dit_result_status_test PRIVATE
+  "-Wl,--whole-archive"
+  "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
+  "-Wl,--no-whole-archive")

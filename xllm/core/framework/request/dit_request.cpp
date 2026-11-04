@@ -152,6 +152,7 @@ void DiTRequest::update_connection_status() {
 
 void DiTRequest::handle_forward_output(torch::Tensor output,
                                        torch::Tensor audio_output) {
+  output_.encoded_media.clear();
   uint32_t output_count = 1;
   switch (state_.request_kind()) {
     case DiTRequestKind::kImage:
@@ -173,7 +174,48 @@ void DiTRequest::handle_forward_output(torch::Tensor output,
 }
 
 void DiTRequest::handle_forward_text_output(const std::string& text) {
+  output_.encoded_media.clear();
   output_.text_output.push_back(text);
+}
+
+void DiTRequest::handle_forward_encoded_output(
+    std::vector<DiTEncodedMedia> outputs) {
+  output_ = DiTForwardOutput();
+  output_.encoded_media = std::move(outputs);
+}
+
+std::vector<DiTGenerationOutput> DiTRequest::generate_encoded_outputs() const {
+  std::vector<DiTGenerationOutput> outputs;
+  outputs.reserve(output_.encoded_media.size());
+  const DiTGenerationParams& params = state_.generation_params();
+  for (size_t index = 0; index < output_.encoded_media.size(); ++index) {
+    const DiTEncodedMedia& media = output_.encoded_media[index];
+    DiTGenerationOutput output;
+    fill_output_identity(output, static_cast<int32_t>(index), params);
+    output.width = media.width;
+    output.height = media.height;
+    output.num_frames = media.num_frames;
+    output.video_fps = media.fps;
+    output.mime_type = media.mime_type;
+    output.container = media.container;
+    output.audio_sample_rate = media.audio_sample_rate;
+    output.audio_channels = media.audio_channels;
+    switch (state_.request_kind()) {
+      case DiTRequestKind::kImage:
+        output.image = media.data;
+        break;
+      case DiTRequestKind::kVideo:
+        output.video = media.data;
+        break;
+      case DiTRequestKind::kAudio:
+        output.audio = media.data;
+        break;
+      case DiTRequestKind::kText:
+        LOG(FATAL) << "Text request must not contain encoded media";
+    }
+    outputs.emplace_back(std::move(output));
+  }
+  return outputs;
 }
 
 std::vector<DiTGenerationOutput> DiTRequest::generate_image_outputs() const {
@@ -274,6 +316,11 @@ const DiTRequestOutput DiTRequest::generate_output() {
   output.status = Status(StatusCode::OK);
   output.finished = finished();
   output.cancelled = cancelled();
+
+  if (!output_.encoded_media.empty()) {
+    output.outputs = generate_encoded_outputs();
+    return output;
+  }
 
   switch (state_.request_kind()) {
     case DiTRequestKind::kImage:

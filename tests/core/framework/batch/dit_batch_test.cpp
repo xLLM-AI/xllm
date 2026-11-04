@@ -18,9 +18,11 @@ limitations under the License.
 
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "core/framework/batch/dit_batch_factory.h"
+#include "worker.pb.h"
 
 namespace xllm {
 namespace {
@@ -32,6 +34,91 @@ std::shared_ptr<DiTRequest> make_dit_request(const std::string& prompt) {
       "image", "image", torch::ones({3, 2, 2}));
   state.input_params().tensor_sources.add("prompt_embed", torch::ones({2, 4}));
   return std::make_shared<DiTRequest>("request", "", "", state);
+}
+
+DiTEncodedMedia encoded_image(std::string data) {
+  return {.data = std::move(data),
+          .mime_type = "image/png",
+          .container = "png",
+          .width = 2,
+          .height = 2};
+}
+
+std::shared_ptr<DiTRequest> candidate_request(const std::string& id) {
+  DiTGenerationParams params;
+  params.num_images_per_prompt = 2;
+  DiTRequestState state({}, params, {}, DiTRequestKind::kImage);
+  return std::make_shared<DiTRequest>(id, "", "", std::move(state));
+}
+
+TEST(DiTBatchTest, EncodedCandidatesAreRequestMajorThenCandidateMajor) {
+  auto first = candidate_request("first");
+  auto second = candidate_request("second");
+  DiTBatch batch;
+  batch.add(first);
+  batch.add(second);
+  DiTForwardOutput output;
+  output.encoded_media = {encoded_image("a"),
+                          encoded_image("b"),
+                          encoded_image("c"),
+                          encoded_image("d")};
+  batch.process_forward_output(output);
+  output.encoded_media.clear();
+  const DiTRequestOutput first_output = first->generate_output();
+  const DiTRequestOutput second_output = second->generate_output();
+  ASSERT_EQ(first_output.outputs.size(), 2u);
+  ASSERT_EQ(second_output.outputs.size(), 2u);
+  EXPECT_EQ(first_output.outputs[0].image, "a");
+  EXPECT_EQ(first_output.outputs[1].image, "b");
+  EXPECT_EQ(second_output.outputs[0].image, "c");
+  EXPECT_EQ(second_output.outputs[1].image, "d");
+  EXPECT_EQ(first_output.outputs[1].index, 1u);
+  EXPECT_EQ(second_output.outputs[0].index, 0u);
+}
+
+TEST(DiTBatchTest, InvalidEncodedBatchDoesNotPartiallyReplaceRequests) {
+  auto first = candidate_request("first");
+  auto second = candidate_request("second");
+  first->handle_forward_encoded_output(
+      {encoded_image("old-a"), encoded_image("old-b")});
+  second->handle_forward_encoded_output(
+      {encoded_image("old-c"), encoded_image("old-d")});
+  DiTBatch batch;
+  batch.add(first);
+  batch.add(second);
+  DiTForwardOutput output;
+  output.encoded_media = {
+      encoded_image("a"), encoded_image("b"), encoded_image("c")};
+  EXPECT_THROW(batch.process_forward_output(output), DiTForwardExecutionError);
+  output.encoded_media.emplace_back(encoded_image("d"));
+  output.encoded_media.back().mime_type = "video/mp4";
+  EXPECT_THROW(batch.process_forward_output(output), DiTForwardExecutionError);
+  output.encoded_media.back().mime_type = "image/png";
+  output.text_output = {"mixed"};
+  EXPECT_THROW(batch.process_forward_output(output), DiTForwardExecutionError);
+  EXPECT_EQ(first->generate_output().outputs[0].image, "old-a");
+  EXPECT_EQ(second->generate_output().outputs[1].image, "old-d");
+}
+
+TEST(DiTBatchTest, RuntimeEncodedProtoRoundTripOwnsBytesAndRejectsMixedMode) {
+  DiTForwardOutput output;
+  output.encoded_media = {encoded_image(std::string("A\0B", 3))};
+  proto::DiTForwardOutput wire;
+  ASSERT_TRUE(output.to_proto(&wire));
+  DiTForwardOutput restored;
+  ASSERT_TRUE(restored.from_proto(wire));
+  wire.Clear();
+  ASSERT_EQ(restored.encoded_media.size(), 1u);
+  EXPECT_EQ(restored.encoded_media[0].data, std::string("A\0B", 3));
+  EXPECT_EQ(restored.encoded_media[0].mime_type, "image/png");
+  ASSERT_TRUE(output.to_proto(&wire));
+  wire.add_text_output("mixed");
+  EXPECT_FALSE(restored.from_proto(wire));
+  EXPECT_EQ(restored.encoded_media[0].data, std::string("A\0B", 3));
+  output.text_output = {"mixed"};
+  const std::string prior_wire = wire.SerializeAsString();
+  EXPECT_FALSE(output.to_proto(&wire));
+  EXPECT_EQ(wire.SerializeAsString(), prior_wire);
 }
 
 TEST(DiTBatchTest, EmptyFactoryResultKeepsEngineBatchSlot) {

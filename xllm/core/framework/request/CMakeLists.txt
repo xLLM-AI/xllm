@@ -7,6 +7,7 @@ cc_library(
   HDRS
     dit_request.h
     dit_input_sources.h
+    minimax_h3_conditioning.h
     dit_source_decoder.h
     dit_request_params.h
     finish_reason.h
@@ -33,6 +34,7 @@ cc_library(
     dit_request.cpp
     dit_request_state.cpp
     dit_input_sources.cpp
+    minimax_h3_conditioning.cpp
     dit_source_decoder.cpp
     finish_reason.cpp
     incremental_decoder.cpp
@@ -65,6 +67,7 @@ cc_library(
     :jinja_chat_template
     :multimodal
     :json_object_grammar
+    OpenSSL::Crypto
     glog::glog
     absl::strings
     absl::time

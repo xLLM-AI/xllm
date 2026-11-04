@@ -37,3 +37,21 @@ target_link_libraries(scheduler_test
                       $<$<BOOL:${USE_NPU}>:ascendcl>
                       $<$<BOOL:${USE_NPU}>:hccl>
                       $<$<BOOL:${USE_NPU}>:c_sec>)
+
+cc_test(
+  NO_NPU_RUNTIME
+  NAME
+    dit_failure_delivery_test
+  SRCS
+    dit_failure_delivery_test.cpp
+  DEPS
+    :scheduler
+    GTest::gtest_main
+)
+if(USE_NPU)
+  target_link_libraries(dit_failure_delivery_test PRIVATE nnopbase)
+endif()
+target_link_options(dit_failure_delivery_test PRIVATE
+  "-Wl,--whole-archive"
+  "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
+  "-Wl,--no-whole-archive")

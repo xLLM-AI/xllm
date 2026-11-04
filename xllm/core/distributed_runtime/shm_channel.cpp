@@ -17,6 +17,8 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <exception>
+#include <new>
 #include <utility>
 
 #include "runtime/vlm_forward_params.h"
@@ -30,6 +32,12 @@ ShmChannel::ShmChannel(int dp_group,
                        const runtime::Options& options)
     : enable_shm_(options.enable_shm()),
       input_shm_size_(options.input_shm_size()) {
+  if (options.backend() == "dit") {
+    CHECK_GE(options.output_shm_size(),
+             static_cast<int64_t>(
+                 ForwardSharedMemoryTransport::minimum_dit_output_size()))
+        << "DiT output shared memory cannot hold a failure status";
+  }
   bool is_creator;
 
   std::string name_prefix =
@@ -91,11 +99,34 @@ void ShmChannel::execute_dit_model_async(
       LOG(ERROR) << "DIT shared-memory input write failed, fallback to brpc";
     } else {
       RawForwardOutput output;
-      if (!output_shm_manager_->dit_output_read(output)) {
-        LOG(ERROR) << "DIT shared-memory output read failed";
-        // The model has already executed. Retrying with BRPC would execute it
-        // twice and advance worker state again.
-        promise.setValue(std::nullopt);
+      // Input is already published. Decode failures, including exceptions, must
+      // complete this future without retrying model execution through BRPC.
+      bool decoded = false;
+      try {
+        decoded = output_shm_manager_->dit_output_read(output);
+      } catch (const std::bad_alloc& error) {
+        promise.setException(DiTForwardExecutionError(
+            {StatusCode::RESOURCE_EXHAUSTED, error.what()}));
+        return;
+      } catch (const std::exception& error) {
+        promise.setException(
+            DiTForwardExecutionError({StatusCode::UNKNOWN, error.what()}));
+        return;
+      } catch (...) {
+        promise.setException(DiTForwardExecutionError(
+            {StatusCode::UNKNOWN,
+             "Unknown exception decoding DiT SHM output"}));
+        return;
+      }
+      if (!decoded) {
+        LOG(ERROR) << "Invalid DiT shared-memory output";
+        promise.setException(DiTForwardExecutionError(
+            {StatusCode::UNKNOWN, "Invalid DiT shared-memory output"}));
+        return;
+      }
+      if (!output.dit_execution_status.ok()) {
+        promise.setException(
+            DiTForwardExecutionError(output.dit_execution_status));
         return;
       }
       promise.setValue(std::move(output));

@@ -41,6 +41,20 @@ TEST(DiTTensorSourcesTest, MediaAudioStaysFloat32OnTransfer) {
   EXPECT_EQ(converted.at(1).tensor.scalar_type(), torch::kUInt8);
 }
 
+TEST(DiTTensorSourcesTest, TransferPreservesIntegerAndBoolDtypes) {
+  DiTTensorSources sources;
+  sources.add("tags", torch::tensor({16777217}, torch::kInt64));
+  sources.add("mask", torch::tensor({true, false}, torch::kBool));
+  sources.add("hidden", torch::ones({1}, torch::kFloat32));
+  const DiTTensorSources converted =
+      sources.to(torch::Device(torch::kCPU), torch::kBFloat16);
+  ASSERT_TRUE(converted.get("tags").has_value());
+  EXPECT_EQ(converted.get("tags")->scalar_type(), torch::kInt64);
+  EXPECT_EQ(converted.get("tags")->item<int64_t>(), 16777217);
+  EXPECT_EQ(converted.get("mask")->scalar_type(), torch::kBool);
+  EXPECT_EQ(converted.get("hidden")->scalar_type(), torch::kBFloat16);
+}
+
 TEST(DiTTensorSourcesTest, BatchSignatureMatchesByName) {
   DiTTensorSources reference;
   reference.add("prompt_embed", torch::zeros({2, 4}));

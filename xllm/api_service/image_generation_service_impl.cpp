@@ -75,6 +75,12 @@ bool send_result_to_client_brpc(std::shared_ptr<ImageGenerationCall> call,
     proto_result->set_width(output.width);
     proto_result->set_height(output.height);
     proto_result->set_seed(output.seed);
+    if (!output.mime_type.empty()) {
+      proto_result->set_mime_type(output.mime_type);
+    }
+    if (!output.container.empty()) {
+      proto_result->set_container(output.container);
+    }
   }
   return use_binary_output ? call->write_and_finish(response, binary_payload)
                            : call->write_and_finish(response);

@@ -49,6 +49,8 @@ class DiTRequest : public RequestBase {
 
   void handle_forward_text_output(const std::string& text);
 
+  void handle_forward_encoded_output(std::vector<DiTEncodedMedia> outputs);
+
   const DiTRequestOutput generate_output();
 
   void log_statistic(double total_latency);
@@ -66,6 +68,7 @@ class DiTRequest : public RequestBase {
   DiTRequestState& state() { return state_; }
 
  private:
+  std::vector<DiTGenerationOutput> generate_encoded_outputs() const;
   std::vector<DiTGenerationOutput> generate_image_outputs() const;
   std::vector<DiTGenerationOutput> generate_video_outputs() const;
   std::vector<DiTGenerationOutput> generate_audio_outputs() const;

@@ -314,10 +314,23 @@ message DiTForwardInput {
   repeated NamedTensor tensor_sources = 22;
 }
 
+message DiTEncodedMedia {
+  bytes data = 1;
+  string mime_type = 2;
+  string container = 3;
+  int32 width = 4;
+  int32 height = 5;
+  int32 num_frames = 6;
+  double fps = 7;
+  int32 audio_sample_rate = 8;
+  int32 audio_channels = 9;
+}
+
 message DiTForwardOutput {
   TensorList tensors = 1;
   repeated string text_output = 2;
   TensorList audio_tensors = 3;
+  repeated DiTEncodedMedia encoded_media = 4;
 }
 
 message DiTGenerationParams {
@@ -436,8 +449,14 @@ message VLMForwardResponse {
   repeated string failed_request_ids = 10;
 }
 
+message DiTExecutionStatus {
+  uint32 code = 1;
+  string message = 2;
+}
+
 message DITForwardResponse {
   DiTForwardOutput dit_forward_output = 1;
+  DiTExecutionStatus execution_status = 2;
 }
 
 // master create Collective service

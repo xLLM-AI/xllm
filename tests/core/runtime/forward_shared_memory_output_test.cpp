@@ -504,11 +504,14 @@ TEST_F(ForwardSharedMemoryOutputTest, TokenReadsClearPreviousDiTData) {
   source.sample_output.next_tokens = torch::tensor({7}, torch::kInt32);
   ASSERT_TRUE(writer_->llm_output_write(source, {}));
   RawForwardOutput output;
+  output.dit_execution_status =
+      Status(StatusCode::UNKNOWN, "previous DiT failure");
   output.dit_forward_output.text_output = {"old text"};
   output.dit_forward_output.tensors = {torch::ones({2})};
 
   output.json_object_errors = {{"old", "old error"}};
   ASSERT_TRUE(reader_->llm_output_read(output));
+  EXPECT_TRUE(output.dit_execution_status.ok());
   EXPECT_TRUE(output.dit_forward_output.text_output.empty());
   EXPECT_TRUE(output.dit_forward_output.tensors.empty());
 
@@ -572,47 +575,151 @@ TEST_F(ForwardSharedMemoryOutputTest, VlmTensorsSurviveSubsequentOutputWrites) {
 }
 
 TEST_F(ForwardSharedMemoryOutputTest,
-       OverflowDiTWritePreservesPublishedOutput) {
+       OverflowDiTWritePublishesFailureAndRecovers) {
   DiTForwardOutput valid;
   valid.text_output = {"first"};
   ASSERT_TRUE(writer_->dit_output_write(valid));
-  const uint64_t version = published_version();
-  const std::string published(static_cast<const char*>(writer_->base_address()),
-                              kSegmentBytes);
-  DiTForwardOutput overflow;
-  overflow.text_output = {std::string(kSegmentBytes, 'x')};
-  EXPECT_FALSE(writer_->dit_output_write(overflow));
-  overflow = DiTForwardOutput();
-  overflow.audio_tensors = {
-      torch::ones({static_cast<int64_t>(kSegmentBytes)}, torch::kFloat32)};
-  EXPECT_FALSE(writer_->dit_output_write(overflow));
-  EXPECT_EQ(
-      std::memcmp(writer_->base_address(), published.data(), kSegmentBytes), 0);
-  EXPECT_EQ(published_version(), version);
+  uint64_t version = published_version();
+  for (const bool audio : {false, true}) {
+    DiTForwardOutput overflow;
+    if (audio) {
+      overflow.audio_tensors = {
+          torch::ones({static_cast<int64_t>(kSegmentBytes)}, torch::kFloat32)};
+    } else {
+      overflow.text_output = {std::string(kSegmentBytes, 'x')};
+    }
+    ASSERT_TRUE(writer_->dit_output_write(overflow));
+    EXPECT_EQ(published_version(), ++version);
+    RawForwardOutput output;
+    output.dit_forward_output.text_output = {"stale"};
+    ASSERT_TRUE(reader_->dit_output_read(output));
+    EXPECT_EQ(output.dit_execution_status.code(),
+              StatusCode::RESOURCE_EXHAUSTED);
+    EXPECT_TRUE(output.dit_forward_output.text_output.empty());
+    EXPECT_TRUE(output.dit_forward_output.audio_tensors.empty());
+  }
+  ASSERT_TRUE(writer_->dit_output_write(valid));
   RawForwardOutput output;
   ASSERT_TRUE(reader_->dit_output_read(output));
+  EXPECT_TRUE(output.dit_execution_status.ok());
   EXPECT_EQ(output.dit_forward_output.text_output, valid.text_output);
 }
 
-TEST_F(ForwardSharedMemoryOutputTest, InvalidDiTTensorDoesNotPublishOutput) {
-  DiTForwardOutput source;
-  source.tensors = {torch::Tensor()};
-  EXPECT_FALSE(writer_->dit_output_write(source));
-  source.tensors = {torch::tensor(1.0f)};
-  EXPECT_FALSE(writer_->dit_output_write(source));
-  EXPECT_EQ(published_version(), 0);
+TEST_F(ForwardSharedMemoryOutputTest, InvalidDiTTensorPublishesFailure) {
+  for (const torch::Tensor& tensor : {torch::Tensor(), torch::tensor(1.0f)}) {
+    DiTForwardOutput source;
+    source.tensors = {tensor};
+    const uint64_t version = published_version();
+    ASSERT_TRUE(writer_->dit_output_write(source));
+    EXPECT_EQ(published_version(), version + 1);
+    RawForwardOutput output;
+    ASSERT_TRUE(reader_->dit_output_read(output));
+    EXPECT_EQ(output.dit_execution_status.code(), StatusCode::UNKNOWN);
+    EXPECT_TRUE(output.dit_forward_output.tensors.empty());
+  }
+}
+
+TEST_F(ForwardSharedMemoryOutputTest, InvalidDiTAudioTensorPublishesFailure) {
+  for (const torch::Tensor& tensor : {torch::Tensor(),
+                                      torch::tensor(1.0f),
+                                      torch::ones({2, 2}).transpose(0, 1)}) {
+    DiTForwardOutput source;
+    source.audio_tensors = {tensor};
+    const uint64_t version = published_version();
+    ASSERT_TRUE(writer_->dit_output_write(source));
+    EXPECT_EQ(published_version(), version + 1);
+    RawForwardOutput output;
+    ASSERT_TRUE(reader_->dit_output_read(output));
+    EXPECT_EQ(output.dit_execution_status.code(), StatusCode::UNKNOWN);
+    EXPECT_TRUE(output.dit_forward_output.audio_tensors.empty());
+  }
 }
 
 TEST_F(ForwardSharedMemoryOutputTest,
-       InvalidDiTAudioTensorDoesNotPublishOutput) {
-  DiTForwardOutput source;
-  source.audio_tensors = {torch::Tensor()};
-  EXPECT_FALSE(writer_->dit_output_write(source));
-  source.audio_tensors = {torch::tensor(1.0f)};
-  EXPECT_FALSE(writer_->dit_output_write(source));
-  source.audio_tensors = {torch::ones({2, 2}).transpose(0, 1)};
-  EXPECT_FALSE(writer_->dit_output_write(source));
-  EXPECT_EQ(published_version(), 0);
+       MinimumDiTFailureFrameRetainsCodeAndTruncatesMessage) {
+  const size_t minimum =
+      ForwardSharedMemoryTransport::minimum_dit_output_size();
+  ASSERT_EQ(minimum, sizeof(ControlMetadata) + 20);
+  for (const size_t message_bytes : {size_t{0}, size_t{3}}) {
+    const size_t capacity = minimum + message_bytes;
+    const std::string name =
+        writer_->name() + "_capacity_" + std::to_string(capacity);
+    bool is_creator = false;
+    ForwardSharedMemoryTransport writer(
+        name, capacity, is_creator, ForwardType::RAW_OUTPUT);
+    ASSERT_TRUE(is_creator);
+    ForwardSharedMemoryTransport reader(
+        name, capacity, is_creator, ForwardType::RAW_OUTPUT);
+    ASSERT_FALSE(is_creator);
+    const Status status(StatusCode::INVALID_ARGUMENT, "bad request");
+    ASSERT_TRUE(writer.dit_output_write({}, status));
+    EXPECT_EQ(
+        static_cast<const ControlMetadata*>(writer.base_address())->version, 1);
+    std::string expected;
+    append_wire_value(expected, uint64_t{0x0054554f54494458ULL});
+    append_wire_value(expected, uint32_t{3});
+    append_wire_value(expected, static_cast<uint64_t>(message_bytes));
+    expected.append("bad", message_bytes);
+    EXPECT_EQ(std::string(static_cast<const char*>(writer.base_address()) +
+                              sizeof(ControlMetadata),
+                          expected.size()),
+              expected);
+    RawForwardOutput output;
+    ASSERT_TRUE(reader.dit_output_read(output));
+    EXPECT_EQ(output.dit_execution_status.code(), StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(output.dit_execution_status.message(),
+              std::string("bad", message_bytes));
+    EXPECT_TRUE(output.dit_forward_output.tensors.empty());
+  }
+  bool is_creator = false;
+  ForwardSharedMemoryTransport too_small(writer_->name() + "_too_small",
+                                         minimum - 1,
+                                         is_creator,
+                                         ForwardType::RAW_OUTPUT);
+  EXPECT_FALSE(too_small.dit_output_write({}, {StatusCode::UNKNOWN, "bad"}));
+  EXPECT_EQ(
+      static_cast<const ControlMetadata*>(too_small.base_address())->version,
+      0);
+}
+
+TEST_F(ForwardSharedMemoryOutputTest,
+       DiTUnknownStatusNormalizesWithoutReadingSuccessPayload) {
+  ASSERT_TRUE(writer_->dit_output_write({}, {StatusCode::UNKNOWN, "unknown"}));
+  const uint32_t unknown_code = 256;
+  char* payload =
+      static_cast<char*>(writer_->base_address()) + sizeof(ControlMetadata);
+  std::memcpy(payload + sizeof(uint64_t), &unknown_code, sizeof(unknown_code));
+  RawForwardOutput output;
+  output.dit_forward_output.text_output = {"stale"};
+  ASSERT_TRUE(reader_->dit_output_read(output));
+  EXPECT_EQ(output.dit_execution_status.code(), StatusCode::UNKNOWN);
+  EXPECT_EQ(output.dit_execution_status.message(), "unknown");
+  EXPECT_TRUE(output.dit_forward_output.text_output.empty());
+}
+
+TEST_F(ForwardSharedMemoryOutputTest,
+       MalformedDiTStatusFramesPreserveDestinationAndNextReadRecovers) {
+  for (const bool corrupt_magic : {true, false}) {
+    ASSERT_TRUE(writer_->dit_output_write({}, {StatusCode::UNKNOWN, "bad"}));
+    char* payload =
+        static_cast<char*>(writer_->base_address()) + sizeof(ControlMetadata);
+    const uint64_t invalid = std::numeric_limits<uint64_t>::max();
+    std::memcpy(
+        payload + (corrupt_magic ? 0 : sizeof(uint64_t) + sizeof(uint32_t)),
+        &invalid,
+        sizeof(invalid));
+    RawForwardOutput output;
+    output.dit_forward_output.text_output = {"previous"};
+    EXPECT_FALSE(reader_->dit_output_read(output));
+    EXPECT_EQ(output.dit_forward_output.text_output,
+              (std::vector<std::string>{"previous"}));
+    DiTForwardOutput next;
+    next.text_output = {"next"};
+    ASSERT_TRUE(writer_->dit_output_write(next));
+    ASSERT_TRUE(reader_->dit_output_read(output));
+    EXPECT_TRUE(output.dit_execution_status.ok());
+    EXPECT_EQ(output.dit_forward_output.text_output, next.text_output);
+  }
 }
 
 TEST_F(ForwardSharedMemoryOutputTest,
@@ -622,7 +729,7 @@ TEST_F(ForwardSharedMemoryOutputTest,
   ASSERT_TRUE(writer_->dit_output_write(source));
   // Empty image/text vectors precede the audio vector and its tensor header.
   constexpr size_t kAudioTensorBytesOffset =
-      sizeof(ControlMetadata) + 3 * sizeof(uint64_t) + sizeof(int64_t) +
+      sizeof(ControlMetadata) + 20 + 3 * sizeof(uint64_t) + sizeof(int64_t) +
       sizeof(bool) + 2 * sizeof(int32_t) + 2 * sizeof(uint64_t) +
       sizeof(int64_t) + sizeof(int8_t);
   const uint64_t invalid_bytes = kSegmentBytes;
@@ -665,6 +772,86 @@ TEST_F(ForwardSharedMemoryOutputTest,
   EXPECT_EQ(output.outputs[0].tokens[0].id, 7);
 }
 
+DiTForwardOutput encoded_transport_fixture() {
+  DiTForwardOutput output;
+  output.encoded_media = {{.data = std::string("A\0B", 3),
+                           .mime_type = "video/mp4",
+                           .container = "mp4",
+                           .width = 2,
+                           .height = 2,
+                           .num_frames = 1,
+                           .fps = 25.0,
+                           .audio_sample_rate = 32000,
+                           .audio_channels = 2}};
+  return output;
+}
+
+TEST_F(ForwardSharedMemoryOutputTest,
+       EncodedMediaExactCapacityAndOverflowAreTerminal) {
+  constexpr size_t kExactCapacity = sizeof(ControlMetadata) + 144;
+  EXPECT_EQ(kExactCapacity, 152u);
+  RawForwardOutput retained;
+  for (const size_t capacity : {kExactCapacity, kExactCapacity - 1}) {
+    const std::string name =
+        writer_->name() + "_encoded_capacity_" + std::to_string(capacity);
+    bool is_creator = false;
+    ForwardSharedMemoryTransport writer(
+        name, capacity, is_creator, ForwardType::RAW_OUTPUT);
+    ASSERT_TRUE(is_creator);
+    ForwardSharedMemoryTransport reader(
+        name, capacity, is_creator, ForwardType::RAW_OUTPUT);
+    ASSERT_FALSE(is_creator);
+    ASSERT_TRUE(writer.dit_output_write(encoded_transport_fixture()));
+    EXPECT_EQ(
+        static_cast<const ControlMetadata*>(writer.base_address())->version, 1);
+    RawForwardOutput output;
+    ASSERT_TRUE(reader.dit_output_read(output));
+    if (capacity == kExactCapacity) {
+      EXPECT_TRUE(output.dit_execution_status.ok());
+      ASSERT_EQ(output.dit_forward_output.encoded_media.size(), 1u);
+      EXPECT_EQ(output.dit_forward_output.encoded_media.front().data,
+                std::string("A\0B", 3));
+      retained = std::move(output);
+    } else {
+      EXPECT_EQ(output.dit_execution_status.code(),
+                StatusCode::RESOURCE_EXHAUSTED);
+      EXPECT_TRUE(output.dit_forward_output.encoded_media.empty());
+    }
+  }
+  // Both mapped segments and the temporary source output have been destroyed.
+  ASSERT_EQ(retained.dit_forward_output.encoded_media.size(), 1u);
+  EXPECT_EQ(retained.dit_forward_output.encoded_media.front().data,
+            std::string("A\0B", 3));
+}
+
+TEST_F(ForwardSharedMemoryOutputTest,
+       EncodedLengthCorruptionPreservesDestinationAndRecovers) {
+  constexpr size_t kEncodedCountOffset =
+      sizeof(ControlMetadata) + 20 + 57 + 4 + 8 + 4;
+  for (const size_t offset :
+       {kEncodedCountOffset, kEncodedCountOffset + sizeof(uint64_t)}) {
+    ASSERT_TRUE(writer_->dit_output_write(encoded_transport_fixture()));
+    const uint64_t invalid_length = std::numeric_limits<uint64_t>::max();
+    std::memcpy(static_cast<char*>(writer_->base_address()) + offset,
+                &invalid_length,
+                sizeof(invalid_length));
+    RawForwardOutput output;
+    output.dit_forward_output.text_output = {"previous"};
+    EXPECT_FALSE(reader_->dit_output_read(output));
+    EXPECT_EQ(output.dit_forward_output.text_output,
+              (std::vector<std::string>{"previous"}));
+    ASSERT_TRUE(writer_->dit_output_write(encoded_transport_fixture()));
+    ASSERT_TRUE(reader_->dit_output_read(output));
+    EXPECT_TRUE(output.dit_forward_output.text_output.empty());
+    ASSERT_EQ(output.dit_forward_output.encoded_media.size(), 1u);
+    EXPECT_EQ(output.dit_forward_output.encoded_media.front().data,
+              std::string("A\0B", 3));
+    ASSERT_TRUE(writer_->dit_output_write({}));
+    EXPECT_EQ(output.dit_forward_output.encoded_media.front().data,
+              std::string("A\0B", 3));
+  }
+}
+
 TEST_F(ForwardSharedMemoryOutputTest, MalformedTensorSizeFailsWithoutMutation) {
   DiTForwardOutput source;
   source.tensors = {torch::ones({2})};
@@ -672,7 +859,7 @@ TEST_F(ForwardSharedMemoryOutputTest, MalformedTensorSizeFailsWithoutMutation) {
   // RAW_OUTPUT framing, tensor vector count, rank, shape, and dtype precede
   // the tensor byte count. Corrupt only that count in an otherwise valid frame.
   constexpr size_t kTensorBytesOffset =
-      sizeof(ControlMetadata) + 3 * sizeof(uint64_t) + sizeof(int64_t) +
+      sizeof(ControlMetadata) + 20 + 3 * sizeof(uint64_t) + sizeof(int64_t) +
       sizeof(bool) + sizeof(int32_t) + sizeof(uint64_t) + sizeof(int64_t) +
       sizeof(int8_t);
   char* byte_count =

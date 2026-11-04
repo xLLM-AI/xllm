@@ -38,6 +38,8 @@ bool decode_vlm_output(const proto::VLMForwardResponse& response,
 
 bool encode_dit_output(const ForwardOutput& output,
                        proto::DITForwardResponse* response);
+bool encode_dit_failure(const Status& status,
+                        proto::DITForwardResponse* response);
 bool decode_dit_output(const proto::DITForwardResponse& response,
                        RawForwardOutput& output);
 

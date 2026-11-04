@@ -404,6 +404,12 @@ void WorkerServer::prepare_shm(
     std::unique_ptr<ForwardSharedMemoryTransport>& input_shm_manager,
     std::unique_ptr<ForwardSharedMemoryTransport>& output_shm_manager) {
   if (options.is_local() && options.enable_shm()) {
+    if (options.backend() == "dit") {
+      CHECK_GE(options.output_shm_size(),
+               static_cast<int64_t>(
+                   ForwardSharedMemoryTransport::minimum_dit_output_size()))
+          << "DiT output shared memory cannot hold a failure status";
+    }
     bool is_creator;
     int32_t dp_local_tp_size =
         parallel_args.world_size() / parallel_args.dp_size();

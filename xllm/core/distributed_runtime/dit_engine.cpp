@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "dit_engine.h"
+#include "core/distributed_runtime/dit_engine.h"
 
 #include <glog/logging.h>
 #include <sys/sysinfo.h>
@@ -33,6 +33,38 @@ limitations under the License.
 #include "util/timer.h"
 
 namespace xllm {
+DiTForwardOutput select_dit_driver_output(
+    std::vector<folly::Try<std::optional<RawForwardOutput>>>& results) {
+  if (results.empty()) {
+    throw DiTForwardExecutionError({StatusCode::UNKNOWN, "no DiT ranks"});
+  }
+  for (size_t rank = 0; rank < results.size(); ++rank) {
+    try {
+      const auto& result = results[rank].value();
+      if (!result) {
+        throw DiTForwardExecutionError(
+            {StatusCode::UNKNOWN, "missing transport result"});
+      }
+      if (!result->dit_execution_status.ok()) {
+        throw DiTForwardExecutionError(result->dit_execution_status);
+      }
+    } catch (const DiTForwardExecutionError& error) {
+      throw DiTForwardExecutionError(
+          {error.status().code(),
+           "rank=" + std::to_string(rank) + ": " + error.what()});
+    } catch (const std::exception& error) {
+      throw DiTForwardExecutionError(
+          {StatusCode::UNKNOWN,
+           "rank=" + std::to_string(rank) + ": " + error.what()});
+    } catch (...) {
+      throw DiTForwardExecutionError(
+          {StatusCode::UNKNOWN,
+           "rank=" + std::to_string(rank) + ": unknown DiT execution error"});
+    }
+  }
+  return std::move(results.front().value()->dit_forward_output);
+}
+
 DiTEngine::DiTEngine(
     const runtime::Options& options,
     std::shared_ptr<DistributedWorkerManager> distributed_worker_manager)
@@ -105,8 +137,7 @@ bool DiTEngine::init_model() {
 // TODO : change to ForwardOutput?
 DiTForwardOutput DiTEngine::step(std::vector<DiTBatch>& batches) {
   if (worker_clients_.empty()) {
-    // empty worker, return
-    return {};
+    throw DiTForwardExecutionError({StatusCode::UNKNOWN, "no DiT workers"});
   }
 
   Timer timer;
@@ -124,11 +155,21 @@ DiTForwardOutput DiTEngine::step(std::vector<DiTBatch>& batches) {
   // wait for the all future to complete
   auto results = folly::collectAll(futures).get();
 
-  // return the result from the driver
-  CHECK(results.front().hasValue()) << "DiT driver execution failed";
-  auto forward_output = std::move(results.front().value());
-  CHECK(forward_output.has_value()) << "DiT driver returned no output";
-  DiTForwardOutput output = std::move(forward_output->dit_forward_output);
+  DiTForwardOutput output = select_dit_driver_output(results);
+  const size_t request_count = batches[0].size();
+  const bool valid_output =
+      !output.encoded_media.empty()
+          ? valid_dit_output_mode(output)
+          : (!output.text_output.empty()
+                 ? output.text_output.size() == request_count
+                 : output.tensors.size() == request_count &&
+                       (output.audio_tensors.empty() ||
+                        output.audio_tensors.size() == output.tensors.size()));
+  if (!valid_output) {
+    throw DiTForwardExecutionError(
+        {StatusCode::UNKNOWN,
+         "DiT driver output does not match request count"});
+  }
   batches[0].process_forward_output(output);
   return output;
 }

@@ -32,7 +32,7 @@ namespace {
 
 constexpr char kGenerationLockName[] = "/xllm_shm_generation_lock_v2";
 constexpr uint64_t kSharedMemoryMagic = 0x584C4C4D53484D32ULL;
-constexpr uint32_t kSharedMemoryLayoutVersion = 2;
+constexpr uint32_t kSharedMemoryLayoutVersion = 4;
 
 class alignas(64) SharedMemoryLayoutHeader final {
  public:

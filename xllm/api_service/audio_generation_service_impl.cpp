@@ -63,6 +63,16 @@ bool send_result_to_client_brpc(std::shared_ptr<AudioGenerationCall> call,
                                         *proto_result->mutable_audio(),
                                         binary_payload);
     proto_result->set_seed(output.seed);
+    if (!output.mime_type.empty()) {
+      proto_result->set_mime_type(output.mime_type);
+    }
+    if (!output.container.empty()) {
+      proto_result->set_container(output.container);
+    }
+    if (output.audio_sample_rate > 0 && output.audio_channels > 0) {
+      proto_result->set_audio_sample_rate(output.audio_sample_rate);
+      proto_result->set_audio_channels(output.audio_channels);
+    }
   }
   return use_binary_output ? call->write_and_finish(response, binary_payload)
                            : call->write_and_finish(response);

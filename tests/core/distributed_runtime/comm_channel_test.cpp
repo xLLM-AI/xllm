@@ -21,11 +21,16 @@ limitations under the License.
 #include <folly/ScopeGuard.h>
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <future>
 #include <mutex>
+#include <string>
+#include <vector>
 
 #include "core/distributed_runtime/remote_worker.h"
+#include "core/runtime/dit_forward_params.h"
 #include "runtime/vlm_forward_params.h"
 
 namespace xllm {
@@ -102,6 +107,10 @@ class ModelRoutingService final : public proto::DistributeWorker {
     brpc::ClosureGuard guard(completion_done_);
     completion_done_ = nullptr;
   }
+  // Test-only service modes: success, typed failure, malformed payload, RPC
+  // error.
+  std::atomic<int32_t> dit_mode{0};
+  std::atomic<int32_t> dit_calls{0};
 
   void Sleep(google::protobuf::RpcController* /*controller*/,
              const proto::SleepRequest* request,
@@ -164,6 +173,21 @@ class ModelRoutingService final : public proto::DistributeWorker {
         request->packed_input().payload().size() < 11 ||
         static_cast<uint8_t>(request->packed_input().payload()[10]) != 4) {
       controller->SetFailed("Unexpected packed input domain");
+      return;
+    }
+    dit_calls.fetch_add(1);
+    const int32_t mode = dit_mode.load();
+    if (mode == 1) {
+      response->mutable_execution_status()->set_code(5);
+      response->mutable_execution_status()->set_message("out");
+      return;
+    }
+    if (mode == 2) {
+      response->mutable_dit_forward_output()->mutable_tensors()->add_tensors();
+      return;
+    }
+    if (mode == 3) {
+      controller->SetFailed("worker unavailable");
       return;
     }
     response->mutable_dit_forward_output()->add_text_output("diffusion");
@@ -305,6 +329,64 @@ TEST_F(CommChannelTest, RoutesDITInputToItsOwnRpc) {
   ASSERT_TRUE(output.has_value());
   ASSERT_EQ(output->dit_forward_output.text_output.size(), 1);
   EXPECT_EQ(output->dit_forward_output.text_output[0], "diffusion");
+}
+
+TEST_F(CommChannelTest, DitFailureCompletesFutureAndNextRequestSucceeds) {
+  service_.dit_mode.store(1);
+  folly::Promise<std::optional<RawForwardOutput>> promise;
+  auto future = promise.getSemiFuture();
+  channel_.execute_dit_model_async(DiTForwardInput(), promise);
+  try {
+    std::move(future).get(std::chrono::seconds(5));
+    FAIL() << "expected typed DiT failure";
+  } catch (const DiTForwardExecutionError& error) {
+    EXPECT_EQ(error.status().code(), StatusCode::RESOURCE_EXHAUSTED);
+    EXPECT_EQ(error.status().message(), "out");
+  }
+  service_.dit_mode.store(0);
+  folly::Promise<std::optional<RawForwardOutput>> next_promise;
+  auto next = next_promise.getSemiFuture();
+  channel_.execute_dit_model_async(DiTForwardInput(), next_promise);
+  const auto output = std::move(next).get(std::chrono::seconds(5));
+  ASSERT_TRUE(output.has_value());
+  EXPECT_TRUE(output->dit_execution_status.ok());
+  EXPECT_EQ(output->dit_forward_output.text_output,
+            (std::vector<std::string>{"diffusion"}));
+  EXPECT_EQ(service_.dit_calls.load(), 2);
+}
+
+TEST_F(CommChannelTest, DitDecodeAndRpcErrorsPreserveFailureCategories) {
+  for (const int32_t mode : {2, 3}) {
+    service_.dit_mode.store(mode);
+    folly::Promise<std::optional<RawForwardOutput>> promise;
+    auto future = promise.getSemiFuture();
+    channel_.execute_dit_model_async(DiTForwardInput(), promise);
+    try {
+      std::move(future).get(std::chrono::seconds(5));
+      FAIL() << "expected typed DiT failure";
+    } catch (const DiTForwardExecutionError& error) {
+      EXPECT_EQ(error.status().code(),
+                mode == 2 ? StatusCode::UNKNOWN : StatusCode::UNAVAILABLE);
+      EXPECT_FALSE(error.status().message().empty());
+    }
+  }
+}
+
+TEST_F(CommChannelTest, PackingFailureCompletesFutureWithoutRpc) {
+  DiTForwardInput input;
+  input.model_params.tensor_sources.add("latent",
+                                        torch::ones({2, 2}).to_sparse());
+  folly::Promise<std::optional<RawForwardOutput>> promise;
+  auto future = promise.getSemiFuture();
+  channel_.execute_dit_model_async(input, promise);
+  ASSERT_TRUE(future.isReady());
+  try {
+    std::move(future).get();
+    FAIL() << "expected invalid input";
+  } catch (const DiTForwardExecutionError& error) {
+    EXPECT_EQ(error.status().code(), StatusCode::INVALID_ARGUMENT);
+  }
+  EXPECT_EQ(service_.dit_calls.load(), 0);
 }
 
 TEST_F(CommChannelTest, CompletesPromiseWhenLastLLMResultRpcFails) {

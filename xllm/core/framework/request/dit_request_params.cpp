@@ -25,6 +25,7 @@ limitations under the License.
 #include "core/framework/config/dit_config.h"
 #include "core/framework/multimodal/mm_codec.h"
 #include "core/framework/request/dit_source_decoder.h"
+#include "core/framework/request/minimax_h3_conditioning.h"
 #include "core/util/tensor_codec.h"
 #include "core/util/utils.h"
 #include "core/util/uuid.h"
@@ -531,6 +532,22 @@ DiTRequestParams::DiTRequestParams(const proto::VideoGenerationRequest& request,
 
   if (request.has_input()) {
     const auto& input = request.input();
+    if (input.has_prompt_embed() &&
+        has_minimax_h3_condition_metadata(input.prompt_embed())) {
+      const DiTConfig& config = DiTConfig::get_instance();
+      if (config.dit_h3_execution_profile() != kMiniMaxH3ExecutionProfile ||
+          config.dit_h3_task_type() != "ref2va") {
+        request_parse_status =
+            Status(StatusCode::INVALID_ARGUMENT,
+                   "qualified MiniMax-H3 ref2va profile is not enabled");
+        return;
+      }
+      request_parse_status = validate_minimax_h3_condition_wire(
+          input.prompt_embed(), request_payload);
+      if (!request_parse_status.ok()) {
+        return;
+      }
+    }
     if (!fill_input_params(
             input_params, input, request_payload, request_parse_status)) {
       return;
@@ -580,6 +597,19 @@ DiTRequestParams::DiTRequestParams(const proto::VideoGenerationRequest& request,
     if (!request_parse_status.ok()) {
       return;
     }
+  }
+  const auto condition =
+      input_params.tensor_sources.get_named_tensor("prompt_embed");
+  if (condition.has_value() &&
+      has_minimax_h3_condition_metadata(condition->get().parameters)) {
+    if (generation_params.num_videos_per_prompt != 1) {
+      request_parse_status =
+          Status(StatusCode::INVALID_ARGUMENT,
+                 "qualified MiniMax-H3 requires one video per prompt");
+      return;
+    }
+    request_parse_status = validate_minimax_h3_condition(
+        condition->get(), input_params.media_sources);
   }
 }
 

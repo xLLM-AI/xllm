@@ -673,6 +673,7 @@ class RawForwardOutput final {
   int64_t prepared_token = -1;
   // dit output data
   DiTForwardOutput dit_forward_output;
+  Status dit_execution_status;
 };
 
 }  // namespace xllm

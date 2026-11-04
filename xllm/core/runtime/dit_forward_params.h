@@ -17,11 +17,25 @@ limitations under the License.
 #pragma once
 
 #include <iostream>
+#include <stdexcept>
+#include <utility>
 
+#include "core/common/types.h"
 #include "core/framework/model/dit_model_output.h"
 #include "core/framework/model/dit_model_params.h"
 
 namespace xllm {
+
+class DiTForwardExecutionError final : public std::runtime_error {
+ public:
+  explicit DiTForwardExecutionError(Status status)
+      : std::runtime_error(status.message()), status_(std::move(status)) {}
+
+  const Status& status() const noexcept { return status_; }
+
+ private:
+  Status status_;
+};
 
 namespace proto {
 class DiTForwardInput;

@@ -21,6 +21,8 @@ limitations under the License.
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
+#include <new>
 
 #include "common/global_flags.h"
 #include "core/distributed_runtime/worker_model_codec.h"
@@ -632,9 +634,26 @@ bool CommChannel::execute_dit_model_with_brpc(
     const DiTForwardInput& input,
     folly::Promise<std::optional<RawForwardOutput>>& promise) {
   proto::DITForwardRequest request;
-  if (!input.to_packed_proto(request.mutable_packed_input())) {
+  bool packed = false;
+  try {
+    packed = input.to_packed_proto(request.mutable_packed_input());
+  } catch (const std::bad_alloc& error) {
+    promise.setException(DiTForwardExecutionError(
+        {StatusCode::RESOURCE_EXHAUSTED, error.what()}));
+    return false;
+  } catch (const std::exception& error) {
+    promise.setException(
+        DiTForwardExecutionError({StatusCode::INVALID_ARGUMENT, error.what()}));
+    return false;
+  } catch (...) {
+    promise.setException(DiTForwardExecutionError(
+        {StatusCode::UNKNOWN, "Unknown DiT input packing failure"}));
+    return false;
+  }
+  if (!packed) {
     LOG(ERROR) << "Failed to pack DiTForwardInput for remote execution";
-    promise.setValue(std::optional<RawForwardOutput>{});
+    promise.setException(DiTForwardExecutionError(
+        {StatusCode::INVALID_ARGUMENT, "Failed to pack DiTForwardInput"}));
     return false;
   }
   auto* done = new ExecuteDITModelClosure();
@@ -647,13 +666,35 @@ void ExecuteDITModelClosure::Run() {
   std::unique_ptr<ExecuteDITModelClosure> self_guard(this);
   if (cntl.Failed()) {
     LOG(ERROR) << "ExecuteDITModel failed: " << cntl.ErrorText();
-    promise.setValue(std::optional<RawForwardOutput>{});
+    promise.setException(
+        DiTForwardExecutionError({StatusCode::UNAVAILABLE, cntl.ErrorText()}));
     return;
   }
   RawForwardOutput output;
-  if (!decode_dit_output(pb_output, output)) {
+  bool decoded = false;
+  try {
+    decoded = decode_dit_output(pb_output, output);
+  } catch (const std::bad_alloc& error) {
+    promise.setException(DiTForwardExecutionError(
+        {StatusCode::RESOURCE_EXHAUSTED, error.what()}));
+    return;
+  } catch (const std::exception& error) {
+    promise.setException(
+        DiTForwardExecutionError({StatusCode::UNKNOWN, error.what()}));
+    return;
+  } catch (...) {
+    promise.setException(DiTForwardExecutionError(
+        {StatusCode::UNKNOWN, "Unknown exception decoding DiT RPC output"}));
+    return;
+  }
+  if (!decoded) {
     LOG(ERROR) << "Failed to decode DIT model output";
-    promise.setValue(std::optional<RawForwardOutput>{});
+    promise.setException(DiTForwardExecutionError(
+        {StatusCode::UNKNOWN, "Failed to decode DIT model output"}));
+    return;
+  }
+  if (!output.dit_execution_status.ok()) {
+    promise.setException(DiTForwardExecutionError(output.dit_execution_status));
     return;
   }
   promise.setValue(std::move(output));

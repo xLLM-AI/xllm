@@ -135,6 +135,10 @@ message ImageGenData {
 
   // Binary image output. Set only when output_type is "binary".
   optional MediaSource image_source = 6;
+
+  // Present for worker-encoded media only.
+  optional string mime_type = 7;
+  optional string container = 8;
 }
 
 // Output container for image generation task results

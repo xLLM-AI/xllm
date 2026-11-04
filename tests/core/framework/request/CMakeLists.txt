@@ -272,3 +272,14 @@ target_link_libraries(sequence_mrope_positions_test
 target_link_options(sequence_mrope_positions_test
                     PRIVATE
                     $<$<BOOL:${USE_MLU}>:-Wl,--no-as-needed>)
+
+cc_test(
+  NAME
+    minimax_h3_conditioning_test
+  CPU_ONLY
+  SRCS
+    minimax_h3_conditioning_test.cpp
+  DEPS
+    :request
+    GTest::gtest_main
+)

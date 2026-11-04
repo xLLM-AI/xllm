@@ -27,6 +27,7 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/config/config_utils.h"
 #include "core/framework/config/distributed_config.h"
+#include "core/framework/config/dit_config.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/config/kv_cache_config.h"
@@ -38,6 +39,23 @@ limitations under the License.
 
 namespace xllm {
 namespace {
+
+TEST(DiTConfigTest, H3ExecutionProfileIsOptInAndRoundTripsJson) {
+  DiTConfig config;
+  EXPECT_EQ(config.dit_h3_execution_profile(), "native");
+  EXPECT_EQ(config.dit_h3_task_type(), "fl2va");
+  nlohmann::ordered_json output = nlohmann::ordered_json::object();
+  config.append_config_json(output);
+  EXPECT_FALSE(output.contains("dit_h3_execution_profile"));
+  const JsonReader json = config::parse_json_string(
+      R"({"dit_h3_execution_profile":"a3_16card_tp2_u8_ref2va_v1"})");
+  config.from_json(json);
+  EXPECT_EQ(config.dit_h3_execution_profile(), "a3_16card_tp2_u8_ref2va_v1");
+  EXPECT_EQ(config.dit_h3_task_type(), "fl2va");
+  config.append_config_json(output);
+  EXPECT_EQ(output.at("dit_h3_execution_profile"),
+            "a3_16card_tp2_u8_ref2va_v1");
+}
 
 inline constexpr std::string_view kInlineConfig = R"json({
   "block_size": 16,

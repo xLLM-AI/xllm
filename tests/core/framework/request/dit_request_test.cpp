@@ -18,6 +18,8 @@ limitations under the License.
 #include <gtest/gtest.h>
 
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace xllm {
 namespace {
@@ -29,6 +31,59 @@ DiTRequest create_request(DiTRequestKind request_kind,
   DiTRequestState state(
       input_params, generation_params, output_func, request_kind);
   return DiTRequest("request", "x-request", "time", state);
+}
+
+DiTEncodedMedia encoded_video() {
+  return {.data = std::string("A\0B", 3),
+          .mime_type = "video/mp4",
+          .container = "mp4",
+          .width = 2,
+          .height = 2,
+          .num_frames = 1,
+          .fps = 25.0,
+          .audio_sample_rate = 32000,
+          .audio_channels = 2};
+}
+
+TEST(DiTRequestTest, EncodedVideoPreservesOwnedBytesAndActualMetadata) {
+  DiTGenerationParams params;
+  params.width = 512;
+  params.height = 512;
+  params.video_fps = 8.0;
+  params.seed = 17;
+  params.seed_is_set = true;
+  DiTRequest request = create_request(DiTRequestKind::kVideo, params);
+  {
+    std::vector<DiTEncodedMedia> media = {encoded_video()};
+    request.handle_forward_encoded_output(std::move(media));
+  }
+  // A\0B is not an MP4: success here proves no second encoder is invoked.
+  const DiTRequestOutput output = request.generate_output();
+  ASSERT_EQ(output.outputs.size(), 1u);
+  const DiTGenerationOutput& item = output.outputs.front();
+  EXPECT_EQ(item.video, std::string("A\0B", 3));
+  EXPECT_EQ(item.width, 2);
+  EXPECT_EQ(item.height, 2);
+  EXPECT_EQ(item.num_frames, 1);
+  EXPECT_DOUBLE_EQ(item.video_fps, 25.0);
+  EXPECT_EQ(item.mime_type, "video/mp4");
+  EXPECT_EQ(item.container, "mp4");
+  EXPECT_EQ(item.audio_sample_rate, 32000);
+  EXPECT_EQ(item.audio_channels, 2);
+  EXPECT_EQ(item.seed, 17);
+  EXPECT_TRUE(item.seed_is_set);
+}
+
+TEST(DiTRequestTest, NewEncodedOutputReplacesPreviousPayload) {
+  DiTRequest request = create_request(DiTRequestKind::kVideo);
+  request.handle_forward_output(torch::zeros({1, 1, 3, 2, 2}));
+  request.handle_forward_encoded_output({encoded_video()});
+  EXPECT_EQ(request.generate_output().outputs.front().video,
+            std::string("A\0B", 3));
+  DiTEncodedMedia next = encoded_video();
+  next.data = "next";
+  request.handle_forward_encoded_output({next});
+  EXPECT_EQ(request.generate_output().outputs.front().video, "next");
 }
 
 TEST(DiTRequestTest, GeneratesImageOutputByRequestKind) {
