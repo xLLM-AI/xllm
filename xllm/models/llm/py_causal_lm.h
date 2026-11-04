@@ -84,6 +84,9 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
     return torch::Tensor();
   }
 
+  torch::Tensor pooler(const torch::Tensor& hidden_states,
+                       const torch::Tensor& selected_idxes) override;
+
   torch::Tensor logits(const torch::Tensor& hidden_states,
                        const torch::Tensor& seleted_idxes) override;
 

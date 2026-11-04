@@ -404,6 +404,16 @@ class Qwen3ForCausalLM(PyModelBase):
             device=device,
         )
 
+    def pooler(self, hidden_states: torch.Tensor, selected_idxes: torch.Tensor | None) -> torch.Tensor:
+        """Pool the scheduler-selected final token rows, matching ATB Qwen3.
+
+        Selection already accounts for sequence lengths and scheduler padding.
+        Preserve a valid EOS row even when its token ID also denotes padding.
+        """
+        if selected_idxes is not None:
+            hidden_states = hidden_states.index_select(0, selected_idxes)
+        return torch.nn.functional.normalize(hidden_states, p=2, dim=1, eps=1e-12)
+
     # -- weight loading ---------------------------------------------------
     def load_weights(
         self,
