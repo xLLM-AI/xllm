@@ -34,8 +34,8 @@ limitations under the License.
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/block/block_utils.h"
 #include "core/kv_cache/block/sliding_window_block_manager.h"
-#include "core/util/scope_guard.h"
 #include "core/kv_cache/storage/vmm_kv_page_allocator.h"
+#include "core/util/scope_guard.h"
 #include "framework/block/block_manager_pool.h"
 #include "framework/block/composite_block_manager.h"
 #include "framework/config/scheduler_config.h"
@@ -454,35 +454,40 @@ BlockManagerPool::Options make_typed_cache_options() {
   return opts;
 }
 
-Sequence make_test_sequence(size_t index,
-                            const std::vector<int32_t>& prompt_token_ids) {
-  static RequestSamplingParam sampling_param;
-  static StoppingChecker stopping_checker(/*max_generated_tokens=*/16,
-                                          /*max_context_len=*/0,
-                                          /*eos_token=*/-1,
-                                          /*ignore_eos=*/false,
-                                          /*stop_tokens=*/{},
-                                          /*stop_sequences=*/{});
-  SequenceParams seq_params;
-  seq_params.seq_capacity =
-      std::max<size_t>(32768, prompt_token_ids.size() + 16);
-  seq_params.stopping_checker = &stopping_checker;
-  seq_params.sampling_param = &sampling_param;
-  seq_params.skip_special_tokens = true;
-  seq_params.echo = false;
-  seq_params.logprobs = false;
-  seq_params.enable_schedule_overlap = false;
+class HierarchyBlockManagerPoolTest : public ::testing::Test {
+ protected:
+  HierarchyBlockManagerPoolTest() {
+    stopping_checker_.set_max_generated_tokens(16);
+  }
 
-  torch::Tensor input_embedding;
-  MMData mm_data;
-  IncrementalDecoder decoder("", 1, false, false);
-  return Sequence(index,
-                  prompt_token_ids,
-                  input_embedding,
-                  mm_data,
-                  std::move(decoder),
-                  seq_params);
-}
+  Sequence make_test_sequence(size_t index,
+                              const std::vector<int32_t>& prompt_token_ids) {
+    SequenceParams seq_params;
+    seq_params.seq_capacity =
+        std::max<size_t>(32768, prompt_token_ids.size() + 16);
+    // Sequences borrow these settings, so the fixture outlives every sequence.
+    seq_params.stopping_checker = &stopping_checker_;
+    seq_params.sampling_param = &sampling_param_;
+    seq_params.skip_special_tokens = true;
+    seq_params.echo = false;
+    seq_params.logprobs = false;
+    seq_params.enable_schedule_overlap = false;
+
+    torch::Tensor input_embedding;
+    MMData mm_data;
+    IncrementalDecoder decoder("", 1, false, false);
+    return Sequence(index,
+                    prompt_token_ids,
+                    input_embedding,
+                    mm_data,
+                    std::move(decoder),
+                    seq_params);
+  }
+
+ private:
+  RequestSamplingParam sampling_param_;
+  StoppingChecker stopping_checker_;
+};
 
 std::shared_ptr<Request> make_test_request(
     const std::vector<int32_t>& prompt_token_ids) {
@@ -543,8 +548,8 @@ bool allocate_with_host_cache_budget(HierarchyBlockManagerPool* pool,
   return pool->allocate(sequence, num_tokens);
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     SharedHostPrefixCopiesEveryPrivateDestination) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       SharedHostPrefixCopiesEveryPrivateDestination) {
   constexpr size_t kPromptTokens = 65;
   constexpr size_t kPrefixBlocks = 4;
   for (size_t hbm_prefix_tokens : {0u, 32u}) {
@@ -624,7 +629,7 @@ TEST(HierarchyBlockManagerPoolTest,
 // A flat KV layout still creates a single KV host leaf. num_total_blocks
 // reports one less than the raw count because block id 0 is reserved as a
 // sentinel by BlockManagerImpl.
-TEST(HierarchyBlockManagerPoolTest, FlatKvHasSingleHostKvLeaf) {
+TEST_F(HierarchyBlockManagerPoolTest, FlatKvHasSingleHostKvLeaf) {
   HierarchyBlockManagerPool pool(make_flat_kv_options(),
                                  /*transfer_coordinator=*/nullptr,
                                  /*dp_size=*/1);
@@ -637,8 +642,8 @@ TEST(HierarchyBlockManagerPoolTest, FlatKvHasSingleHostKvLeaf) {
   EXPECT_EQ(per_type.at(BlockType::KV).leaf->num_total_blocks(), 127u);
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     HostRestoreLeaseRetainsUsageUntilFinalRelease) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       HostRestoreLeaseRetainsUsageUntilFinalRelease) {
   for (const auto [submitted, cancel_first] :
        {std::pair{false, true}, {true, true}, {true, false}}) {
     SCOPED_TRACE(submitted);
@@ -691,8 +696,8 @@ TEST(HierarchyBlockManagerPoolTest,
   }
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     VmmOffloadPinsSourcePagesUntilCopyCompletes) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       VmmOffloadPinsSourcePagesUntilCopyCompletes) {
   for (const bool success : {false, true}) {
     SCOPED_TRACE(success);
     HostOffloadPageAllocator allocator(/*max_pages=*/2);
@@ -749,8 +754,8 @@ TEST(HierarchyBlockManagerPoolTest,
   }
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     VmmHostRestoreMapsDestinationPagesAndPinsCancelledLease) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       VmmHostRestoreMapsDestinationPagesAndPinsCancelledLease) {
   HostOffloadPageAllocator allocator(/*max_pages=*/2);
   HierarchyBlockManagerPool pool(
       make_vmm_host_offload_options(),
@@ -810,8 +815,8 @@ TEST(HierarchyBlockManagerPoolTest,
   EXPECT_EQ(host_leaf->num_used_blocks(), host_used);
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     VmmRestoreCompletionOwnsPagesAndControlsPublication) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       VmmRestoreCompletionOwnsPagesAndControlsPublication) {
   for (const bool cancel : {false, true}) {
     SCOPED_TRACE(cancel);
     HostOffloadPageAllocator allocator(/*max_pages=*/2);
@@ -871,8 +876,8 @@ TEST(HierarchyBlockManagerPoolTest,
   }
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     VmmRestoreCompletionPublishesOnlyRestoredTokens) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       VmmRestoreCompletionPublishesOnlyRestoredTokens) {
   HostOffloadPageAllocator allocator(/*max_pages=*/2);
   auto coordinator = std::make_shared<RecordingHostRestoreCoordinator>(
       /*deferred=*/true);
@@ -913,8 +918,8 @@ TEST(HierarchyBlockManagerPoolTest,
   pool.deallocate(&sequence);
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     VmmCancelledUndispatchedRestoreIsNotCachedOrTransferred) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       VmmCancelledUndispatchedRestoreIsNotCachedOrTransferred) {
   HostOffloadPageAllocator allocator(/*max_pages=*/4);
   auto coordinator = std::make_shared<RecordingHostRestoreCoordinator>();
   BlockManagerPool::Options options = make_vmm_host_offload_options();
@@ -969,8 +974,8 @@ TEST(HierarchyBlockManagerPoolTest,
   pool.deallocate(&scheduled);
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     VmmChunkGrowthOffloadsEachCompletedBlockOnce) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       VmmChunkGrowthOffloadsEachCompletedBlockOnce) {
   HostOffloadPageAllocator allocator(/*max_pages=*/2);
   {
     auto coordinator = std::make_shared<DeferredOffloadCoordinator>();
@@ -1005,8 +1010,8 @@ TEST(HierarchyBlockManagerPoolTest,
   EXPECT_EQ(allocator.mapping_count(), allocator.unmapping_count());
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     KvEventsPublishHostOnlyAfterSuccessfulCopy) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       KvEventsPublishHostOnlyAfterSuccessfulCopy) {
   for (bool disagg_pd : {false, true}) {
     SCOPED_TRACE(disagg_pd);
     for (bool success : {false, true}) {
@@ -1040,8 +1045,8 @@ TEST(HierarchyBlockManagerPoolTest,
   }
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     EmptyCopyResultsDoNotAdvertiseHostResidency) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       EmptyCopyResultsDoNotAdvertiseHostResidency) {
   auto journal = std::make_shared<KVCacheEventJournal>();
   auto coordinator = std::make_shared<DeferredOffloadCoordinator>(
       /*worker_count=*/1, /*empty_results=*/true);
@@ -1068,7 +1073,7 @@ TEST(HierarchyBlockManagerPoolTest,
 // block_size and count. num_total_blocks() reports one less than the raw
 // count because block id 0 is reserved as a sentinel by BlockManagerImpl and
 // SlidingWindowBlockManager (a subclass).
-TEST(HierarchyBlockManagerPoolTest, TypedLayoutHasSwaC4C128HostLeaves) {
+TEST_F(HierarchyBlockManagerPoolTest, TypedLayoutHasSwaC4C128HostLeaves) {
   HierarchyBlockManagerPool pool(make_typed_cache_options(),
                                  /*transfer_coordinator=*/nullptr,
                                  /*dp_size=*/1);
@@ -1095,7 +1100,7 @@ TEST(HierarchyBlockManagerPoolTest, TypedLayoutHasSwaC4C128HostLeaves) {
 
 // Multi-DP: each DP rank owns its own host leaf triplet with fresh block-id
 // spaces.
-TEST(HierarchyBlockManagerPoolTest, TypedLayoutHasPerDpRankLeaves) {
+TEST_F(HierarchyBlockManagerPoolTest, TypedLayoutHasPerDpRankLeaves) {
   constexpr int32_t kDpSize = 2;
   HierarchyBlockManagerPool pool(make_typed_cache_options(),
                                  /*transfer_coordinator=*/nullptr,
@@ -1111,8 +1116,8 @@ TEST(HierarchyBlockManagerPoolTest, TypedLayoutHasPerDpRankLeaves) {
   }
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     DecodeTypedLayoutKeepsSwaHostLeafForOffloadOnly) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       DecodeTypedLayoutKeepsSwaHostLeafForOffloadOnly) {
   BlockManagerPool::Options options = make_typed_cache_options();
   options.instance_is_decode(true).enable_disagg_pd(true);
   HierarchyBlockManagerPool pool(options,
@@ -1133,7 +1138,7 @@ TEST(HierarchyBlockManagerPoolTest,
   EXPECT_TRUE(per_type.at(BlockType::C128).supports_prefix_cache);
 }
 
-TEST(HierarchyBlockManagerPoolTest, DecodeTypedLayoutProbesOnlyDeviceC4C128) {
+TEST_F(HierarchyBlockManagerPoolTest, DecodeTypedLayoutProbesOnlyDeviceC4C128) {
   constexpr size_t kPromptTokens = 20001;
   BlockManagerPool::Options options = make_typed_cache_options();
   options.instance_is_decode(true).enable_disagg_pd(true);
@@ -1166,8 +1171,8 @@ TEST(HierarchyBlockManagerPoolTest, DecodeTypedLayoutProbesOnlyDeviceC4C128) {
   EXPECT_TRUE(HierarchyPoolTestPeer::pending_load_infos(pool).empty());
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     DecodeTypedLayoutOffloadsNonPrefixSwaAndCompressedLeaves) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       DecodeTypedLayoutOffloadsNonPrefixSwaAndCompressedLeaves) {
   constexpr size_t kPromptTokens = 20001;
   BlockManagerPool::Options options = make_typed_cache_options();
   options.instance_is_decode(true).enable_disagg_pd(true);
@@ -1188,7 +1193,7 @@ TEST(HierarchyBlockManagerPoolTest,
   EXPECT_EQ(HierarchyPoolTestPeer::pending_offload_pair_count(pool), 34u);
 }
 
-TEST(HierarchyBlockManagerPoolTest, AllocateSharedMountsMatchesWithoutH2d) {
+TEST_F(HierarchyBlockManagerPoolTest, AllocateSharedMountsMatchesWithoutH2d) {
   constexpr size_t kPromptTokens = 20001;
   HierarchyBlockManagerPool pool(make_typed_cache_options(),
                                  /*transfer_coordinator=*/nullptr,
@@ -1209,8 +1214,8 @@ TEST(HierarchyBlockManagerPoolTest, AllocateSharedMountsMatchesWithoutH2d) {
   EXPECT_TRUE(HierarchyPoolTestPeer::pending_load_infos(pool).empty());
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     AllocateSharedAdvertisesC128AlignedCopyUnits) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       AllocateSharedAdvertisesC128AlignedCopyUnits) {
   constexpr size_t kPromptTokens = 65537;
   BlockManagerPool::Options options = make_typed_cache_options();
   options.host_num_blocks_by_type(
@@ -1254,8 +1259,8 @@ TEST(HierarchyBlockManagerPoolTest,
   pool.deallocate(&sequence);
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     SuccessfulAllocateBuildsTypedC128AlignedH2dPlan) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       SuccessfulAllocateBuildsTypedC128AlignedH2dPlan) {
   constexpr size_t kPromptTokens = 20001;
   constexpr size_t kSafeHitTokens = 16384;
   HierarchyBlockManagerPool pool(make_typed_cache_options(),
@@ -1323,8 +1328,8 @@ TEST(HierarchyBlockManagerPoolTest,
   EXPECT_EQ(c128_count, 1u);
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     IncompleteTiersDoNotCombineIntoHostRestore) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       IncompleteTiersDoNotCombineIntoHostRestore) {
   constexpr size_t kPromptTokens = 20001;
   HierarchyBlockManagerPool pool(make_typed_cache_options(),
                                  /*transfer_coordinator=*/nullptr,
@@ -1362,8 +1367,8 @@ TEST(HierarchyBlockManagerPoolTest,
   pool.deallocate(&sequence);
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     PartialDsv4PrefillDoesNotReprobeAnUnmatchedHostTier) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       PartialDsv4PrefillDoesNotReprobeAnUnmatchedHostTier) {
   constexpr size_t kPromptTokens = 20001;
   constexpr size_t kSharedTokens = 16384;
   HierarchyBlockManagerPool pool(make_typed_cache_options(),
@@ -1402,7 +1407,7 @@ TEST(HierarchyBlockManagerPoolTest,
   pool.deallocate(&sequence);
 }
 
-TEST(HierarchyBlockManagerPoolTest, FlatKvRestoreBudgetRemainsBlockLinear) {
+TEST_F(HierarchyBlockManagerPoolTest, FlatKvRestoreBudgetRemainsBlockLinear) {
   constexpr size_t kPromptTokens = 1025;
   HierarchyBlockManagerPool pool(
       make_flat_kv_options(),
@@ -1435,8 +1440,8 @@ TEST(HierarchyBlockManagerPoolTest, FlatKvRestoreBudgetRemainsBlockLinear) {
   pool.deallocate(&sequence);
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     ZeroCopyRestoreTargetDoesNotReprobeHostCache) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       ZeroCopyRestoreTargetDoesNotReprobeHostCache) {
   constexpr size_t kPromptTokens = 1025;
   HierarchyBlockManagerPool pool(make_flat_kv_options(),
                                  /*transfer_coordinator=*/nullptr,
@@ -1461,8 +1466,8 @@ TEST(HierarchyBlockManagerPoolTest,
   pool.deallocate(&sequence);
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     FailedHostGrowthStillRestoresExistingPrefix) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       FailedHostGrowthStillRestoresExistingPrefix) {
   BlockManagerPool::Options options = make_flat_kv_options();
   options.host_num_blocks(3);
   HierarchyBlockManagerPool pool(options, nullptr, 1);
@@ -1482,8 +1487,8 @@ TEST(HierarchyBlockManagerPoolTest,
   pool.deallocate(&sequence);
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     EmptyHostConfigurationKeepsDeviceAllocation) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       EmptyHostConfigurationKeepsDeviceAllocation) {
   BlockManagerPool::Options options = make_flat_kv_options();
   options.host_num_blocks(0).host_num_blocks_by_type({});
   HierarchyBlockManagerPool pool(options, nullptr, 1);
@@ -1496,7 +1501,7 @@ TEST(HierarchyBlockManagerPoolTest,
   pool.deallocate(&sequence);
 }
 
-TEST(HierarchyBlockManagerPoolTest, FailedHbmAllocationDoesNotQueueH2d) {
+TEST_F(HierarchyBlockManagerPoolTest, FailedHbmAllocationDoesNotQueueH2d) {
   constexpr size_t kPromptTokens = 1025;
   BlockManagerPool::Options options = make_flat_kv_options();
   options.num_blocks(8);
@@ -1523,7 +1528,7 @@ TEST(HierarchyBlockManagerPoolTest, FailedHbmAllocationDoesNotQueueH2d) {
   EXPECT_EQ(pool.num_used_blocks(), used_before);
 }
 
-TEST(HierarchyBlockManagerPoolTest, ExistingBlocksSkipHostCacheRematch) {
+TEST_F(HierarchyBlockManagerPoolTest, ExistingBlocksSkipHostCacheRematch) {
   constexpr size_t kPromptTokens = 4097;
   HierarchyBlockManagerPool pool(
       make_flat_kv_options(),
@@ -1557,7 +1562,7 @@ TEST(HierarchyBlockManagerPoolTest, ExistingBlocksSkipHostCacheRematch) {
   pool.deallocate(&sequence);
 }
 
-TEST(HierarchyBlockManagerPoolTest, ExistingHostBlocksSkipPrefixRematch) {
+TEST_F(HierarchyBlockManagerPoolTest, ExistingHostBlocksSkipPrefixRematch) {
   constexpr size_t kPromptTokens = 1025;
   constexpr size_t kInitialCachedTokens = 128;
   HierarchyBlockManagerPool pool(make_flat_kv_options(),
@@ -1583,7 +1588,7 @@ TEST(HierarchyBlockManagerPoolTest, ExistingHostBlocksSkipPrefixRematch) {
   pool.deallocate(&sequence);
 }
 
-TEST(HierarchyBlockManagerPoolTest, ExistingBlocksSkipHbmPrefixRematch) {
+TEST_F(HierarchyBlockManagerPoolTest, ExistingBlocksSkipHbmPrefixRematch) {
   constexpr size_t kPromptTokens = 2305;
   HierarchyBlockManagerPool pool(make_flat_kv_options(),
                                  /*transfer_coordinator=*/nullptr,
@@ -1607,7 +1612,7 @@ TEST(HierarchyBlockManagerPoolTest, ExistingBlocksSkipHbmPrefixRematch) {
   pool.deallocate(&sequence);
 }
 
-TEST(HierarchyBlockManagerPoolTest, HbmAllocationFailureDoesNotQueueH2d) {
+TEST_F(HierarchyBlockManagerPoolTest, HbmAllocationFailureDoesNotQueueH2d) {
   constexpr size_t kPromptTokens = 20001;
   HierarchyBlockManagerPool pool(make_typed_cache_options(),
                                  /*transfer_coordinator=*/nullptr,
@@ -1637,8 +1642,8 @@ TEST(HierarchyBlockManagerPoolTest, HbmAllocationFailureDoesNotQueueH2d) {
   exhausted_c128.clear();
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     HostAllocationFailureDoesNotRejectHbmAllocation) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       HostAllocationFailureDoesNotRejectHbmAllocation) {
   BlockManagerPool::Options options = make_flat_kv_options();
   // BlockManagerImpl reserves block id 0, leaving only one usable Host block.
   // HBM has enough capacity for both blocks requested below.
@@ -1664,8 +1669,8 @@ TEST(HierarchyBlockManagerPoolTest,
   pool.deallocate(&sequence);
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     FlatKvChunkGrowthOffloadsCompletedBlocksIncrementally) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       FlatKvChunkGrowthOffloadsCompletedBlocksIncrementally) {
   HierarchyBlockManagerPool pool(make_flat_kv_options(),
                                  /*transfer_coordinator=*/nullptr,
                                  /*dp_size=*/1);
@@ -1690,7 +1695,8 @@ TEST(HierarchyBlockManagerPoolTest,
   EXPECT_EQ(HierarchyPoolTestPeer::pending_offload_pair_count(pool), 2u);
 }
 
-TEST(HierarchyBlockManagerPoolTest, D2hUsesHbmProgressInsteadOfRestoreTarget) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       D2hUsesHbmProgressInsteadOfRestoreTarget) {
   constexpr size_t kBlockSize = 16;
   constexpr size_t kRestoreTokens = 64;
   for (const size_t completed_tokens : {0u, 15u, 16u, 17u, 48u, 63u, 64u}) {
@@ -1716,7 +1722,7 @@ TEST(HierarchyBlockManagerPoolTest, D2hUsesHbmProgressInsteadOfRestoreTarget) {
   }
 }
 
-TEST(HierarchyBlockManagerPoolTest, D2hUsesSequenceDpRank) {
+TEST_F(HierarchyBlockManagerPoolTest, D2hUsesSequenceDpRank) {
   auto options = make_flat_kv_options();
   options.block_size(16).hasher_type(BlockHasherType::MTP_TEXT);
   HierarchyBlockManagerPool pool(options, nullptr, 2);
@@ -1742,8 +1748,8 @@ TEST(HierarchyBlockManagerPoolTest, D2hUsesSequenceDpRank) {
   EXPECT_FALSE(sequence->has_any_blocks());
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     Dsv4ChunkGrowthOffloadsAllCompletedCacheGroups) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       Dsv4ChunkGrowthOffloadsAllCompletedCacheGroups) {
   constexpr size_t kFirstChunkTokens = 16384;
   constexpr size_t kPromptTokens = 20001;
   HierarchyBlockManagerPool pool(make_typed_cache_options(),
@@ -1769,8 +1775,8 @@ TEST(HierarchyBlockManagerPoolTest,
   EXPECT_TRUE(sequence.host_kv_state().blocks(BlockType::C128)[1].is_valid());
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     Dsv4OneMillionTokensReuseHostBlocksWithSmallChunks) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       Dsv4OneMillionTokensReuseHostBlocksWithSmallChunks) {
   constexpr size_t kChunkTokens = 4096;
   constexpr size_t kUnitTokens = 16384;
   constexpr size_t kContextTokens = 1024 * 1024;
@@ -1813,8 +1819,8 @@ TEST(HierarchyBlockManagerPoolTest,
   pool.deallocate(&sequence);
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     H2dRestoreIsPublishedOnlyAfterCopyCompletion) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       H2dRestoreIsPublishedOnlyAfterCopyCompletion) {
   constexpr size_t kPromptTokens = 20001;
   HierarchyBlockManagerPool pool(
       make_typed_cache_options(),
@@ -1845,8 +1851,8 @@ TEST(HierarchyBlockManagerPoolTest,
   EXPECT_TRUE(HierarchyPoolTestPeer::pending_load_infos(pool).empty());
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     Dsv4HostRestoreAllocatesOnlySwaTailWindowAndCurrentChunk) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       Dsv4HostRestoreAllocatesOnlySwaTailWindowAndCurrentChunk) {
   constexpr size_t kRestoreTokens = 65536;
   constexpr size_t kChunkTokens = 16384;
   constexpr size_t kTargetTokens = kRestoreTokens + kChunkTokens;
@@ -1916,8 +1922,8 @@ TEST(HierarchyBlockManagerPoolTest,
   pool.deallocate(&sequence);
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     H2dRestoreDescriptionsRemainOwnedByPoolUntilDispatch) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       H2dRestoreDescriptionsRemainOwnedByPoolUntilDispatch) {
   constexpr size_t kPromptTokens = 1025;
   HierarchyBlockManagerPool pool(
       make_flat_kv_options(),
@@ -1939,7 +1945,8 @@ TEST(HierarchyBlockManagerPoolTest,
   EXPECT_EQ(sequence.kv_state().num_cached_blocks(BlockType::KV), 4u);
 }
 
-TEST(HierarchyBlockManagerPoolTest, H2dUsesCachedTokensInsteadOfPublishCursor) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       H2dUsesCachedTokensInsteadOfPublishCursor) {
   constexpr size_t kBlockSize = 16;
   constexpr size_t kHostCachedTokens = 48;
   constexpr size_t kPromptTokens = 65;
@@ -2003,7 +2010,7 @@ TEST(HierarchyBlockManagerPoolTest, H2dUsesCachedTokensInsteadOfPublishCursor) {
   }
 }
 
-TEST(HierarchyBlockManagerPoolTest, H2dUsesSequenceDpRank) {
+TEST_F(HierarchyBlockManagerPoolTest, H2dUsesSequenceDpRank) {
   constexpr size_t kPromptTokens = 65;
   constexpr size_t kPrefixBlocks = 4;
   auto options = make_flat_kv_options();
@@ -2033,8 +2040,8 @@ TEST(HierarchyBlockManagerPoolTest, H2dUsesSequenceDpRank) {
   pool.deallocate(sequence);
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     SharedHostPrefixRestoresAndGrowsEveryInBatchSequence) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       SharedHostPrefixRestoresAndGrowsEveryInBatchSequence) {
   constexpr size_t kPromptTokens = 20017;
   constexpr size_t kStepTargetTokens = 17447;
   constexpr size_t kCopyUnits = 257;
@@ -2068,8 +2075,8 @@ TEST(HierarchyBlockManagerPoolTest,
   pool.deallocate(&second);
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     IncompleteDevicePrefixRequiresFullHostCopyUnit) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       IncompleteDevicePrefixRequiresFullHostCopyUnit) {
   constexpr size_t kPromptTokens = 32769;
   HierarchyBlockManagerPool pool(make_typed_cache_options(),
                                  /*transfer_coordinator=*/nullptr,
@@ -2109,8 +2116,8 @@ TEST(HierarchyBlockManagerPoolTest,
   EXPECT_TRUE(HierarchyPoolTestPeer::pending_load_infos(pool).empty());
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     CompleteHostPrefixDoesNotDiscountIncompleteDeviceUnits) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       CompleteHostPrefixDoesNotDiscountIncompleteDeviceUnits) {
   constexpr size_t kPromptTokens = 33793;
   HierarchyBlockManagerPool pool(make_typed_cache_options(),
                                  /*transfer_coordinator=*/nullptr,
@@ -2160,8 +2167,8 @@ TEST(HierarchyBlockManagerPoolTest,
   EXPECT_TRUE(HierarchyPoolTestPeer::pending_load_infos(pool).empty());
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     CopyBudgetDoesNotUseDeviceToFillMissingHostWindow) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       CopyBudgetDoesNotUseDeviceToFillMissingHostWindow) {
   constexpr size_t kRestoreTokens = 65536;
   constexpr size_t kInitialBudgetBoundary = 49152;
   constexpr size_t kExpectedBoundary = 32768;
@@ -2220,7 +2227,7 @@ TEST(HierarchyBlockManagerPoolTest,
   pool.deallocate(&sequence);
 }
 
-TEST(HierarchyBlockManagerPoolTest, ExistingHostPrefixSkipsDuplicateD2h) {
+TEST_F(HierarchyBlockManagerPoolTest, ExistingHostPrefixSkipsDuplicateD2h) {
   constexpr size_t kCachedTokens = 1024;
   HierarchyBlockManagerPool pool(make_flat_kv_options(),
                                  /*transfer_coordinator=*/nullptr,
@@ -2243,8 +2250,8 @@ TEST(HierarchyBlockManagerPoolTest, ExistingHostPrefixSkipsDuplicateD2h) {
   sequence.reset();
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     OffloadCompletionOwnsBlocksAndPublishesOnlyAfterAllWorkersSucceed) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       OffloadCompletionOwnsBlocksAndPublishesOnlyAfterAllWorkersSucceed) {
   for (const bool typed : {false, true}) {
     for (const bool copy_ok : {false, true}) {
       SCOPED_TRACE(typed);
@@ -2450,8 +2457,8 @@ TEST(PrefetchResultTest, StopsAfterCancellationOrTimeout) {
   EXPECT_EQ(*control, PrefetchControl::STOP);
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     StoragePrefetchTimeoutWaitsForWorkersToEnd) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       StoragePrefetchTimeoutWaitsForWorkersToEnd) {
   BlockManagerPool::Options options = make_flat_kv_options();
   options.enable_kvcache_store(true).prefetch_batch_size(2);
   auto coordinator = std::make_shared<FakePrefetchCoordinator>(
@@ -2503,8 +2510,8 @@ TEST(HierarchyBlockManagerPoolTest,
   pool.deallocate(sequence);
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     StoragePrefetchPublishesOnlyAfterAllTpWorkersEnd) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       StoragePrefetchPublishesOnlyAfterAllTpWorkersEnd) {
   BlockManagerPool::Options options = make_flat_kv_options();
   options.enable_kvcache_store(true).prefetch_batch_size(2);
   auto coordinator =
@@ -2548,8 +2555,8 @@ TEST(HierarchyBlockManagerPoolTest,
   pool.deallocate(sequence);
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     CancelledStoragePrefetchReleasesReservedBlocks) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       CancelledStoragePrefetchReleasesReservedBlocks) {
   BlockManagerPool::Options options = make_flat_kv_options();
   options.enable_kvcache_store(true).prefetch_batch_size(2);
   auto coordinator =
@@ -2619,8 +2626,8 @@ TEST(HierarchyBlockManagerPoolTest,
   EXPECT_EQ(host_leaf->num_free_blocks(), free_blocks_during_write);
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     TypedStoragePrefetchRetainsLongestPrefixWithinHostCapacity) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       TypedStoragePrefetchRetainsLongestPrefixWithinHostCapacity) {
   constexpr size_t kPromptTokens = 32769;
   BlockManagerPool::Options options = make_typed_cache_options();
   options.enable_kvcache_store(true)
@@ -2664,8 +2671,8 @@ TEST(HierarchyBlockManagerPoolTest,
   pool.deallocate(sequence);
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     TypedStoragePrefetchStopsAtFirstIncompleteUnit) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       TypedStoragePrefetchStopsAtFirstIncompleteUnit) {
   constexpr size_t kPromptTokens = 32769;
   BlockManagerPool::Options options = make_typed_cache_options();
   options.enable_kvcache_store(true).prefetch_batch_size(2);
@@ -2697,7 +2704,7 @@ TEST(HierarchyBlockManagerPoolTest,
   EXPECT_EQ(sequence->kv_cache_tokens_num(), 0u);
 }
 
-TEST(HierarchyBlockManagerPoolTest, TypedLayoutSupportsStoragePrefetch) {
+TEST_F(HierarchyBlockManagerPoolTest, TypedLayoutSupportsStoragePrefetch) {
   BlockManagerPool::Options options = make_typed_cache_options();
   options.enable_kvcache_store(true);
   HierarchyBlockManagerPool pool(options,
@@ -2706,8 +2713,8 @@ TEST(HierarchyBlockManagerPoolTest, TypedLayoutSupportsStoragePrefetch) {
   EXPECT_EQ(HierarchyPoolTestPeer::host_leaves(pool).size(), 3u);
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     FlatKvLinearLayoutBuildsKvAndLinearHostLeaves) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       FlatKvLinearLayoutBuildsKvAndLinearHostLeaves) {
   const int32_t original_chunk_stride =
       SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill();
   SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() = 128;
@@ -2728,8 +2735,8 @@ TEST(HierarchyBlockManagerPoolTest,
   EXPECT_TRUE(per_type.at(BlockType::KV).supports_prefix_cache);
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     LinearOffloadUsesCheckpointOrdinalAndImmutableHash) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       LinearOffloadUsesCheckpointOrdinalAndImmutableHash) {
   const int32_t original_chunk_stride =
       SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill();
   SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() = 128;
@@ -2776,8 +2783,8 @@ TEST(HierarchyBlockManagerPoolTest,
   pool.deallocate(&sequence);
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     SparseHostCheckpointReplacesOlderDeviceState) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       SparseHostCheckpointReplacesOlderDeviceState) {
   const int32_t original_chunk_stride =
       SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill();
   SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() = 128;
@@ -2853,8 +2860,8 @@ TEST(HierarchyBlockManagerPoolTest,
   pool.deallocate(&sequence);
 }
 
-TEST(HierarchyBlockManagerPoolTest,
-     LinearRestoreBudgetAlignsToExactCheckpointBoundary) {
+TEST_F(HierarchyBlockManagerPoolTest,
+       LinearRestoreBudgetAlignsToExactCheckpointBoundary) {
   const int32_t original_chunk_stride =
       SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill();
   SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill() = 128;

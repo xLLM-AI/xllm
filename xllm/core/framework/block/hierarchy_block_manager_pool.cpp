@@ -210,15 +210,14 @@ PrefixMatch trim_shared_probes(
                     probe_reach(*host_c128, false)) *
                c128_block_size}),
       c128_block_size);
-  while (max_matched_tokens > 0 &&
-         (!has_valid_swa_window(max_matched_tokens,
-                                swa_block_size,
-                                blocks_per_window,
-                                hbm_swa->blocks) ||
-          !has_valid_swa_window(max_matched_tokens,
-                                swa_block_size,
-                                blocks_per_window,
-                                host_swa->blocks))) {
+  while (max_matched_tokens > 0 && (!has_valid_swa_window(max_matched_tokens,
+                                                          swa_block_size,
+                                                          blocks_per_window,
+                                                          hbm_swa->blocks) ||
+                                    !has_valid_swa_window(max_matched_tokens,
+                                                          swa_block_size,
+                                                          blocks_per_window,
+                                                          host_swa->blocks))) {
     max_matched_tokens -= c128_block_size;
   }
 
@@ -636,8 +635,8 @@ void HierarchyBlockManagerPool::collect_offload_pairs(Sequence* sequence,
                                                       int32_t dp_rank,
                                                       size_t completed_tokens) {
   const auto* host_manager = host_block_managers_[dp_rank].get();
-  if (!options_.enable_prefix_cache() ||
-      host_manager == nullptr || restoring_sequences_.contains(sequence)) {
+  if (!options_.enable_prefix_cache() || host_manager == nullptr ||
+      restoring_sequences_.contains(sequence)) {
     return;
   }
 
@@ -872,11 +871,10 @@ bool HierarchyBlockManagerPool::allocate(Sequence* sequence,
                 ? 0
                 : hbm_matched_it->second;
         const size_t host_matched_blocks = host_state.num_cached_blocks(type);
-        const size_t end_block =
-            std::min({host_cached_tokens / block_size,
-                      host_matched_blocks,
-                      host_blocks->size(),
-                      hbm_blocks->size()});
+        const size_t end_block = std::min({host_cached_tokens / block_size,
+                                           host_matched_blocks,
+                                           host_blocks->size(),
+                                           hbm_blocks->size()});
         if (end_block > begin_block) {
           restore_blocks.reserve(restore_blocks.size() +
                                  2 * (end_block - begin_block));
@@ -961,8 +959,8 @@ void HierarchyBlockManagerPool::allocate_shared(Sequence* sequence) {
     const size_t host_tokens = host_state.kv_cache_tokens_num();
     sequence->clear_host_cache_match();
     if (host_tokens > hbm_tokens) {
-      const size_t unit_size = prefetch_unit_size(
-          composite->leaf_combination(), composite->leaf_entries());
+      const size_t unit_size = prefetch_unit_size(composite->leaf_combination(),
+                                                  composite->leaf_entries());
       sequence->set_host_cache_match(host_tokens,
                                      (host_tokens - hbm_tokens) / unit_size);
     }
@@ -988,7 +986,8 @@ void HierarchyBlockManagerPool::allocate_shared(Sequence* sequence) {
   }
 
   if (host_state.prefix_cache_matched()) {
-    for (const auto& [type, entry] : host_block_managers_[dp_rank]->leaf_entries()) {
+    for (const auto& [type, entry] :
+         host_block_managers_[dp_rank]->leaf_entries()) {
       if (!entry.supports_prefix_cache || entry.leaf == nullptr) {
         continue;
       }
