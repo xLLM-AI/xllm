@@ -1038,6 +1038,52 @@ def test_linear_state_indices_use_stable_graph_buffer() -> None:
     assert static_indices.tolist() == [4, 8, 12, 16, 0, 0, 0, 0]
 
 
+@pytest.mark.parametrize("device_type", ["cpu", "npu"])
+@pytest.mark.parametrize("use_cumulative", [False, True])
+def test_device_length_graph_refreshes_only_consumed_inputs(device_type: str, use_cumulative: bool) -> None:
+    if device_type == "npu" and not torch.npu.is_available():
+        pytest.skip("requires an NPU")
+    device = torch.device(device_type)
+    runner = _runner(max_batch=8, max_model_len=32, device_kv_lengths=True)
+    runner.attention_backend.prepare_metadata = Mock()
+    tokens = torch.arange(8, dtype=torch.int64, device=device)
+    metadata = _capacity_metadata(8, 12)
+    entry = runner._allocate_entry(8, tokens, metadata, kv_capacity_pages=4)
+    static = entry.static_metadata
+    unused = (static.kv_cu_seq_lens, static.paged_kv_indptr, static.paged_kv_indices, static.paged_kv_last_page_len)
+    for tensor in unused:
+        tensor.fill_(-777)
+    pointers = (entry.static_input_ids.data_ptr(), entry.static_positions.data_ptr(), static.kv_seq_lens.data_ptr())
+
+    for step, rows in enumerate((8, 3, 1, 8)):
+        metadata = _capacity_metadata(rows, 12)
+        for name in ("slot_mapping", "kv_seq_lens", "linear_state_indices", "block_table"):
+            setattr(metadata, name, getattr(metadata, name).to(device))
+        metadata.kv_seq_lens.add_(step)
+        metadata.kv_seq_lens_host_values = [12 + step] * rows
+        if use_cumulative:
+            metadata.kv_cu_seq_lens = torch.arange(rows + 1, dtype=torch.int32, device=device) * (12 + step)
+            # Preserve the original update's choice when both views exist.
+            metadata.kv_seq_lens.add_(1)
+        input_ids = tokens[:rows] + step * 10
+        # The destination copy casts strided int64 positions directly to int32.
+        position_storage = torch.arange(rows * 2, dtype=torch.int64, device=device) + step
+        positions = position_storage[::2]
+        runner._fill_entry(entry, input_ids, positions, metadata, rows, None)
+
+        assert entry.static_input_ids.tolist() == input_ids.tolist() + [0] * (8 - rows)
+        assert entry.static_positions.tolist() == positions.tolist() + [0] * (8 - rows)
+        assert static.slot_mapping.tolist() == list(range(rows)) + [-1] * (8 - rows)
+        assert static.kv_seq_lens.tolist() == [12 + step] * rows + [1] * (8 - rows)
+        for tensor in unused:
+            assert torch.all(tensor == -777)
+        assert pointers == (
+            entry.static_input_ids.data_ptr(),
+            entry.static_positions.data_ptr(),
+            static.kv_seq_lens.data_ptr(),
+        )
+
+
 def test_decode_graph_replay_clears_stale_page_table_tail() -> None:
     runner = _runner(max_batch=4, max_model_len=32, device_kv_lengths=True)
     runner.attention_backend.prepare_metadata = Mock()
