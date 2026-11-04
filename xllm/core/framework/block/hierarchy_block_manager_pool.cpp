@@ -407,6 +407,7 @@ void HierarchyBlockManagerPool::release_host_match(Sequence* sequence,
 }
 
 void HierarchyBlockManagerPool::deallocate(Sequence* sequence) {
+  std::lock_guard<std::mutex> lock(restore_state_mutex_);
   DCHECK(sequence != nullptr);
   const int32_t dp_rank = BlockManagerPool::get_dp_rank(sequence);
   std::vector<PendingLoadTransfer>& pending_loads =
@@ -454,6 +455,7 @@ void HierarchyBlockManagerPool::deallocate(Sequence* sequence) {
 }
 
 void HierarchyBlockManagerPool::cache(Sequence* sequence) {
+  std::lock_guard<std::mutex> lock(restore_state_mutex_);
   if (restoring_sequences_.contains(sequence)) {
     return;
   }
@@ -461,6 +463,7 @@ void HierarchyBlockManagerPool::cache(Sequence* sequence) {
 }
 
 void HierarchyBlockManagerPool::cache(Sequence* sequence, size_t num_tokens) {
+  std::lock_guard<std::mutex> lock(restore_state_mutex_);
   if (restoring_sequences_.contains(sequence)) {
     return;
   }
@@ -620,6 +623,7 @@ void HierarchyBlockManagerPool::trim_host_cache(
 
 bool HierarchyBlockManagerPool::allocate(Sequence* sequence,
                                          size_t num_tokens) {
+  std::lock_guard<std::mutex> lock(restore_state_mutex_);
   CHECK(sequence != nullptr);
   const int32_t dp_rank = BlockManagerPool::get_dp_rank(sequence);
   if (should_probe_prefix_cache(sequence)) {
@@ -682,6 +686,7 @@ bool HierarchyBlockManagerPool::allocate(Sequence* sequence,
           restore_block.set_hash_value(host_source.get_immutable_hash_value());
           load_infos.emplace_back(PendingLoadTransfer{
               sequence,
+              restore_tokens,
               BlockTransferInfo(host_source.id(),
                                 restore_block.id(),
                                 host_source.get_immutable_hash_value(),
@@ -724,6 +729,7 @@ bool HierarchyBlockManagerPool::allocate(Sequence* sequence,
           hbm_block.set_hash_value(host_block.get_immutable_hash_value());
           load_infos.emplace_back(PendingLoadTransfer{
               sequence,
+              restore_tokens,
               BlockTransferInfo(host_block.id(),
                                 hbm_block.id(),
                                 host_block.get_immutable_hash_value(),
@@ -1086,6 +1092,7 @@ void HierarchyBlockManagerPool::drain_prefetch_completions() {
 
 void HierarchyBlockManagerPool::complete_restore(
     const RestoreCompletion& completion) {
+  std::lock_guard<std::mutex> lock(restore_state_mutex_);
   CHECK(completion.success)
       << "Host KV restore failed: dp_rank=" << completion.dp_rank
       << ", batch_id=" << completion.batch_id;
@@ -1103,7 +1110,9 @@ void HierarchyBlockManagerPool::complete_restore(
       continue;
     }
     restoring_sequences_.erase(active);
-    composite->cache_full_blocks_for_sequence(restore.sequence);
+    // Input construction can already have advanced the cursor for an
+    // unfinished forward while schedule overlap drains this completion.
+    composite->cache_for_sequence(restore.sequence, restore.restore_tokens);
   }
 }
 
@@ -1128,8 +1137,8 @@ void HierarchyBlockManagerPool::transfer_load_blocks(int32_t dp_rank,
       CHECK(active != restoring_sequences_.end());
       auto lease = active->second.lock();
       CHECK(lease != nullptr);
-      restoring.emplace_back(
-          RestoringSequence{pending.sequence, std::move(lease)});
+      restoring.emplace_back(RestoringSequence{
+          pending.sequence, pending.restore_tokens, std::move(lease)});
     }
     transfer_infos.emplace_back(std::move(pending.transfer_info));
   }
@@ -1168,6 +1177,7 @@ void HierarchyBlockManagerPool::transfer_load_blocks(int32_t dp_rank,
 }
 
 void HierarchyBlockManagerPool::transfer_blocks(BatchGroup& batches) {
+  std::lock_guard<std::mutex> lock(restore_state_mutex_);
   for (size_t i = 0; i < load_block_transfer_infos_.size(); ++i) {
     if (load_block_transfer_infos_[i].empty()) {
       continue;
@@ -1182,6 +1192,7 @@ void HierarchyBlockManagerPool::transfer_blocks(BatchGroup& batches) {
 }
 
 void HierarchyBlockManagerPool::transfer_blocks(RecBatchGroup& batches) {
+  std::lock_guard<std::mutex> lock(restore_state_mutex_);
   for (size_t i = 0; i < load_block_transfer_infos_.size(); ++i) {
     if (load_block_transfer_infos_[i].empty()) {
       continue;
@@ -1198,6 +1209,7 @@ void HierarchyBlockManagerPool::transfer_blocks(RecBatchGroup& batches) {
 void HierarchyBlockManagerPool::transfer_blocks() { transfer_offload_blocks(); }
 
 bool HierarchyBlockManagerPool::has_pending_async_block_release() const {
+  std::lock_guard<std::mutex> lock(restore_state_mutex_);
   if (offload_transfers_.has_pending() || restore_transfers_.has_pending() ||
       std::any_of(host_restore_leases_.begin(),
                   host_restore_leases_.end(),

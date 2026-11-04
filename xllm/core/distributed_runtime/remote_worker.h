@@ -172,13 +172,14 @@ class RemoteWorker : public WorkerClient {
   int32_t global_rank_;
   // connection resource
   std::unique_ptr<CommChannel> channel_;
-  ThreadPool threadpool_{/*num_threads=*/1,
-                         /*cpu_binding=*/false,
-                         /*pool_name=*/"RemoteWorker.request"};
-  // copy working thread
+  // Request tasks can enqueue copy completion waits. Destroy and drain the
+  // request pool before the copy pool, and keep the channel alive for both.
   ThreadPool copy_threadpool_{/*num_threads=*/4,
                               /*cpu_binding=*/false,
                               /*pool_name=*/"RemoteWorker.copy"};
+  ThreadPool threadpool_{/*num_threads=*/1,
+                         /*cpu_binding=*/false,
+                         /*pool_name=*/"RemoteWorker.request"};
   const torch::Device device_;
 };
 }  // namespace xllm

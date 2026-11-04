@@ -85,11 +85,13 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
  private:
   struct PendingLoadTransfer {
     Sequence* sequence;
+    size_t restore_tokens;
     BlockTransferInfo transfer_info;
   };
 
   struct RestoringSequence {
     Sequence* sequence;
+    size_t restore_tokens;
     std::shared_ptr<KVCacheBlockLease> lease;
   };
 
@@ -118,6 +120,10 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
   // on the affected DP. Declared after the managers so blocks release first.
   std::vector<Block> quarantined_prefetch_blocks_;
   std::vector<bool> storage_prefetch_disabled_;
+
+  // PD handoff can deallocate on its own thread. Serialize restore registration
+  // and publication with that release, before taking any lease owner lock.
+  mutable std::mutex restore_state_mutex_;
 
   // Per-DP H2D descriptions waiting to be registered with workers. Blocks stay
   // pinned by the sequence and then its batch's restore lease.
