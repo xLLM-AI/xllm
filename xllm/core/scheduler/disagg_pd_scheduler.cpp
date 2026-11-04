@@ -182,21 +182,41 @@ DisaggPDScheduler::~DisaggPDScheduler() {
         heartbeat_callback_registration_);
   }
 
-  // start_rpc_server blocks in Server::Join(). Stop its listener before
-  // joining the owner thread, while the scheduler and engine are still alive.
+  // The master loop has joined. RPC handlers and the handoff worker may still
+  // be waiting for block retirement, so keep consuming their commands while
+  // another thread stops the producers. Server::stop itself waits for RPCs.
   auto rpc_server = ServerRegistry::get_instance().try_get_server(server_name_);
-  if (rpc_server != nullptr) {
-    rpc_server->stop();
-  }
+  std::thread stop_producers([this, rpc_server] {
+    if (rpc_server != nullptr) {
+      rpc_server->stop();
+    }
 
-  if (rpc_server_thread_ && rpc_server_thread_->joinable()) {
-    rpc_server_thread_->join();
-  }
+    if (rpc_server_thread_ && rpc_server_thread_->joinable()) {
+      rpc_server_thread_->join();
+    }
 
-  if (dispatch_thread_ && dispatch_thread_->joinable()) {
-    CHECK(prefill_request_queue_.enqueue(nullptr));
-    dispatch_thread_->join();
+    if (dispatch_thread_ && dispatch_thread_->joinable()) {
+      CHECK(prefill_request_queue_.enqueue(nullptr));
+      dispatch_thread_->join();
+    }
+
+    // The FIFO barrier follows every handoff task. All release producers have
+    // stopped when it enqueues the terminal command.
+    prefill_threadpool_.schedule(
+        [this] { CHECK(request_block_releases_.enqueue(nullptr)); });
+  });
+  std::unique_ptr<RequestBlockRelease> release;
+  while (true) {
+    request_block_releases_.wait_dequeue(release);
+    if (release == nullptr) {
+      break;
+    }
+    complete_request_block_release(*release);
   }
+  stop_producers.join();
+  // ConcurrentQueue preserves producer order, not a global order. Other
+  // producers' final commands can be observed after the terminal command.
+  drain_request_releases();
 
   if (rpc_server != nullptr) {
     ServerRegistry::get_instance().unregister_server(server_name_);
@@ -308,15 +328,6 @@ void DisaggPDScheduler::profile_tpot() {
           token_length, batch_size, /*min_context_len=*/64, max_context_len);
       instance_info_.tpot_profiling_data.emplace_back(
           token_length, batch_size, latency);
-    }
-  }
-}
-
-void DisaggPDScheduler::cache_prefill_blocks(Request* request) {
-  CHECK(request != nullptr);
-  for (auto& sequence : request->sequences()) {
-    if (sequence->if_cache_block_for_prefill()) {
-      kv_cache_manager_->publish_prefix(sequence.get());
     }
   }
 }
@@ -848,7 +859,7 @@ void DisaggPDScheduler::prefill_send_first_generation() {
       release_failed_request(request);
       output_dispatcher_->process_failed_request(request, status);
       output_dispatcher_->wait_completion();
-      kv_cache_manager_->deallocate(request.get());
+      release_request_blocks(request, /*cache_prefix=*/true);
     };
     for (auto& request : requests) {
       if (request->cancelled()) {
@@ -1013,8 +1024,7 @@ void DisaggPDScheduler::prefill_send_first_generation() {
         req_to_channel_map_.erase(request->request_id());
       }
       output_dispatcher_->wait_completion();
-      cache_prefill_blocks(request.get());
-      kv_cache_manager_->deallocate(request.get());
+      release_request_blocks(request, /*cache_prefix=*/true);
     }
   });
 }
@@ -1072,6 +1082,44 @@ std::shared_ptr<Request> DisaggPDScheduler::take_waiting_request(
   return request;
 }
 
+std::future<void> DisaggPDScheduler::enqueue_request_block_release(
+    std::shared_ptr<Request> request,
+    bool cache_prefix) {
+  auto release = std::make_unique<RequestBlockRelease>(
+      RequestBlockRelease{std::move(request), cache_prefix, {}});
+  auto completion = release->completion.get_future();
+  CHECK(request_block_releases_.enqueue(std::move(release)));
+  notifier_->notify();
+  return completion;
+}
+
+void DisaggPDScheduler::release_request_blocks(std::shared_ptr<Request> request,
+                                               bool cache_prefix) {
+  enqueue_request_block_release(std::move(request), cache_prefix).get();
+}
+
+void DisaggPDScheduler::complete_request_block_release(
+    RequestBlockRelease& release) {
+  if (release.cache_prefix) {
+    kv_cache_manager_->deallocate(release.request.get());
+  } else {
+    for (const auto& sequence : release.request->sequences()) {
+      if (sequence == nullptr) {
+        continue;
+      }
+      engine_->block_manager_pool()->deallocate_without_cache(sequence.get());
+    }
+  }
+  release.completion.set_value();
+}
+
+void DisaggPDScheduler::drain_request_releases() {
+  std::unique_ptr<RequestBlockRelease> release;
+  while (request_block_releases_.try_dequeue(release)) {
+    complete_request_block_release(*release);
+  }
+}
+
 bool DisaggPDScheduler::release_reservation(const std::string& req_id,
                                             const std::string& reservation_id) {
   if (reservation_id.empty()) {
@@ -1094,9 +1142,7 @@ bool DisaggPDScheduler::release_reservation(const std::string& req_id,
     }
     request = take_waiting_request(req_id);
   }
-  for (const auto& sequence : request->sequences()) {
-    engine_->block_manager_pool()->deallocate_without_cache(sequence.get());
-  }
+  release_request_blocks(std::move(request), /*cache_prefix=*/false);
   return true;
 }
 
@@ -1126,9 +1172,7 @@ bool DisaggPDScheduler::decode_schedule(
                  << "request_id=" << request->request_id()
                  << ", reservation_id=" << request->state().pd_reservation_id;
       lock.unlock();
-      for (const auto& sequence : request->sequences()) {
-        engine_->block_manager_pool()->deallocate_without_cache(sequence.get());
-      }
+      release_request_blocks(request, /*cache_prefix=*/false);
       return false;
     }
     received_request_map_[request->request_id()] = request;
@@ -1176,17 +1220,8 @@ bool DisaggPDScheduler::decode_recv_first_generation(
   }
   auto& sequences = request->sequences();
   bool kv_restored = false;
-  ScopeGuard release_unqueued_blocks([this, &sequences, &kv_restored] {
-    BlockManagerPool* block_manager_pool = engine_->block_manager_pool();
-    for (const auto& sequence : sequences) {
-      if (sequence != nullptr) {
-        if (kv_restored) {
-          block_manager_pool->deallocate(sequence.get());
-        } else {
-          block_manager_pool->deallocate_without_cache(sequence.get());
-        }
-      }
-    }
+  ScopeGuard release_unqueued_blocks([this, &request, &kv_restored] {
+    release_request_blocks(std::move(request), kv_restored);
   });
   if (sequences.empty() || sequences[0] == nullptr) {
     LOG(ERROR) << "Request has no valid sequences, request_id: " << req_id;
@@ -1417,7 +1452,7 @@ void DisaggPDScheduler::do_permanent_rejection(
                        : StatusCode::RESOURCE_EXHAUSTED,
        invalid_request ? "Decode rejected invalid PD service metadata"
                        : "Request prompt exceeds decode KV cache capacity"});
-  kv_cache_manager_->deallocate(request.get());
+  release_request_blocks(request, /*cache_prefix=*/true);
   std::lock_guard<std::mutex> lock(req_to_channel_map_mutex_);
   req_to_channel_map_.erase(request->request_id());
 }
@@ -1458,16 +1493,22 @@ bool DisaggPDScheduler::unlink_instance(
     const int32_t dp_size,
     const int32_t src_kv_split_size) {
   // Clear received requests from this instance
+  std::vector<std::shared_ptr<Request>> requests;
   {
     std::lock_guard<std::mutex> lock(received_request_map_mutex_);
     auto it = instance_to_received_requests_map_.find(instance_name);
     if (it != instance_to_received_requests_map_.end()) {
+      requests.reserve(it->second.size());
       for (const auto& req_id : it->second) {
+        requests.emplace_back(std::move(received_request_map_.at(req_id)));
         received_request_map_.erase(req_id);
         request_to_instance_map_.erase(req_id);
       }
       instance_to_received_requests_map_.erase(it);
     }
+  }
+  for (auto& request : requests) {
+    release_request_blocks(std::move(request), /*cache_prefix=*/false);
   }
 
   std::lock_guard<std::mutex> lock(linked_instances_mutex_);
