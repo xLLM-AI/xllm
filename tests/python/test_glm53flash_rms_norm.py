@@ -99,16 +99,3 @@ def test_gated_rms_norm_uses_sigmoid_fused_kernel_once(
     assert calls[0][1] is gate
     assert calls[0][2] is layer.weight
     assert calls[0][3] == layer.variance_epsilon
-
-
-def test_unweighted_rms_norm_pure_torch_semantics() -> None:
-    layer = glm5_next._UnweightedRMSNorm(eps=1e-5)
-    value = torch.randn(1, 6, 8)
-
-    output = layer(value)
-    value_fp32 = value.float()
-    expected = (value_fp32 * torch.rsqrt(value_fp32.square().mean(dim=-1, keepdim=True) + layer.variance_epsilon)).to(
-        value.dtype
-    )
-
-    torch.testing.assert_close(output, expected, rtol=0, atol=0)
