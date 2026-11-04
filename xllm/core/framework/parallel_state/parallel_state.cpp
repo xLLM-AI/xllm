@@ -331,12 +331,16 @@ std::function<torch::Tensor()> all_to_all_4D(const torch::Tensor& input,
                                        input_split_size,
                                        async_ops,
                                        &all2all_work);
-      return [output,
+      return [input_t,
+              output,
               all2all_work,
               bs,
               seqlen,
               shard_head_num,
               head_size]() mutable -> torch::Tensor {
+        // The sender's contiguous staging allocation must outlive async Work.
+        // Keep it explicitly even when a backend does not own input tensors.
+        (void)input_t;
         all2all_work->wait();
         return output.reshape({seqlen, bs, shard_head_num, head_size})
             .transpose(0, 1)

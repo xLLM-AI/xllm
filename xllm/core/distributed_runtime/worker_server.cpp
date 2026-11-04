@@ -65,6 +65,8 @@ limitations under the License.
 
 extern char** environ;
 
+#include "core/framework/config/dit_config.h"
+
 namespace xllm {
 namespace {
 void handle_signal(int signum) { _exit(0); }
@@ -163,6 +165,11 @@ void WorkerServer::create_server(const runtime::Options& options,
   const ParallelArgs* parallel_args = nullptr;
   std::unique_ptr<CollectiveCommunicatorBase> comm;
   if (worker_type == WorkerType::DIT) {
+    const DiTConfig& config = DiTConfig::get_instance();
+    const DiTSpQkvCommunicationOptions qkv_options =
+        make_dit_sp_qkv_communication_options(
+            config.dit_h3_execution_profile(),
+            config.dit_sp_qkv_communication_overlap());
     auto dit_comm = std::make_unique<DiTCollectiveCommunicator>(
         worker_global_rank,
         world_size,
@@ -171,7 +178,8 @@ void WorkerServer::create_server(const runtime::Options& options,
         options.sp_size(),
         options.cfg_size(),
         options.vae_size(),
-        options.text_encoder_tp_size());
+        options.text_encoder_tp_size(),
+        qkv_options);
     comm = std::move(dit_comm);
   } else {
     auto common_comm = std::make_unique<CollectiveCommunicator>(

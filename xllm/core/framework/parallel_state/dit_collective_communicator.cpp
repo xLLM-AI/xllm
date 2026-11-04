@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "dit_collective_communicator.h"
 
+#include <stdexcept>
+
 #include "mapping_npu.h"
 
 #if defined(USE_NPU)
@@ -43,8 +45,20 @@ DiTCollectiveCommunicator::DiTCollectiveCommunicator(
     int32_t dit_sp_size,
     int32_t dit_cfg_size,
     int32_t dit_vae_size,
-    int32_t dit_text_encoder_tp_size)
-    : CollectiveCommunicatorBase(global_rank, world_size) {
+    int32_t dit_text_encoder_tp_size,
+    DiTSpQkvCommunicationOptions qkv_options)
+    : CollectiveCommunicatorBase(global_rank, world_size),
+      qkv_options_(qkv_options) {
+  if (qkv_options_.create_domains &&
+      (world_size != 16 || dit_tp_size != 2 || dit_sp_size != 8 ||
+       dit_dp_size != 1 || dit_cfg_size != 1)) {
+    throw std::invalid_argument("H3 QKV domains require TP2/SP8 world16");
+  }
+#if !defined(USE_NPU)
+  if (qkv_options_.create_domains) {
+    throw std::invalid_argument("H3 QKV domains require the NPU backend");
+  }
+#endif
   parallel_args_ = std::make_unique<ParallelArgs>(global_rank,
                                                   world_size,
                                                   dit_dp_size,
@@ -94,6 +108,39 @@ void DiTCollectiveCommunicator::create_process_groups(
       create_process_group_by_type("vae", dit_vae_group_, device);
   parallel_args_->dit_text_encoder_tp_group_ = create_process_group_by_type(
       "text_encoder_tp", dit_text_encoder_tp_group_, device);
+  create_sp_qkv_comm_domains(device);
+}
+
+void DiTCollectiveCommunicator::create_sp_qkv_comm_domains(
+    const torch::Device& device) {
+  if (!qkv_options_.create_domains) {
+    return;
+  }
+  const auto specs = build_dit_sp_qkv_domain_specs(*dit_mapping_, port_);
+  const auto create = [&](const DiTSpQkvDomainSpec& spec) {
+    return create_process_group(global_rank_,
+                                spec.local_rank,
+                                spec.ranks,
+                                world_size_,
+                                8,
+                                spec.port,
+                                host_,
+                                spec.name,
+                                device);
+  };
+  // Construct Q/K/V in the same order on every rank. Publish borrowed
+  // references only after all groups have been constructed successfully.
+  std::unique_ptr<ProcessGroup> query = create(specs[0]);
+  std::unique_ptr<ProcessGroup> key = create(specs[1]);
+  std::unique_ptr<ProcessGroup> value = create(specs[2]);
+  validate_dit_sp_qkv_domains({query.get(), key.get(), value.get()},
+                              dit_sp_group_.get());
+  dit_sp_q_domain_ = std::move(query);
+  dit_sp_k_domain_ = std::move(key);
+  dit_sp_v_domain_ = std::move(value);
+  parallel_args_->dit_sp_qkv_domains_ = {
+      dit_sp_q_domain_.get(), dit_sp_k_domain_.get(), dit_sp_v_domain_.get()};
+  port_ += 64 + 3 * dit_mapping_->get_parallel_info("sp").num_group();
 }
 
 ProcessGroup* DiTCollectiveCommunicator::create_process_group_by_type(

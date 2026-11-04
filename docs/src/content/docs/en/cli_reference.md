@@ -273,6 +273,7 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | `dit_cachedit_back_blocks` | `int64` | `0` | CacheDiT back blocks executed on every step. |
 | `dit_cachedit_linear_residual_prediction` | `bool` | `true` | Enable CacheDiT linear residual prediction. |
 | `dit_sp_communication_overlap` | `bool` | `true` | Whether to overlap communication and computation for sequence parallelism. |
+| `dit_sp_qkv_communication_overlap` | `bool` | `false` | Enable three QKV domains only for the qualified H3 TP2/SP8 profile. |
 | `dit_debug_print` | `bool` | `false` | Whether to print debug information for DiT models. |
 | `dit_generation_image_area_max` | `int64` | `0` | Maximum allowed image area (`width * height`) for image generation requests. `0` means no limit. |
 | `dit_h3_task_type` | `string` | `"fl2va"` | MiniMax-H3 task type: `fl2va` or `ref2va`. |

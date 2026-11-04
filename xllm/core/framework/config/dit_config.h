@@ -59,6 +59,7 @@ class DiTConfig final {
          "dit_cachedit_back_blocks",
          "dit_cachedit_linear_residual_prediction",
          "dit_sp_communication_overlap",
+         "dit_sp_qkv_communication_overlap",
          "dit_debug_print",
          "dit_laser_attention_enabled",
          "dit_h3_task_type",
@@ -113,6 +114,8 @@ class DiTConfig final {
   PROPERTY(bool, dit_cachedit_linear_residual_prediction) = true;
 
   PROPERTY(bool, dit_sp_communication_overlap) = true;
+
+  PROPERTY(bool, dit_sp_qkv_communication_overlap) = false;
 
   PROPERTY(bool, dit_debug_print) = false;
 

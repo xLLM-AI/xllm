@@ -39,6 +39,7 @@ struct H3QualifiedCacheProbeRows {
 // the sole zero-based step clock; this context never increments another one.
 struct H3QualifiedExecutionContext {
   H3QualifiedExecutionMetrics metrics;
+  H3QualifiedLaunchSnapshot qkv_launches;
   std::unique_ptr<SimilarityResidualCacheState> cache;
   H3QualifiedCacheProbeRows probe_rows;
   ProcessGroup* consensus_group = nullptr;

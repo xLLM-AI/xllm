@@ -77,6 +77,18 @@ TEST(DiTConfigTest, CacheDiTDefaultsAndExplicitZeroRoundTrip) {
   }
 }
 
+TEST(DiTConfigTest, QkvDomainsAreOptInAndKeepExistingOverlapDefault) {
+  DiTConfig config;
+  EXPECT_TRUE(config.dit_sp_communication_overlap());
+  EXPECT_FALSE(config.dit_sp_qkv_communication_overlap());
+  config.from_json(config::parse_json_string(
+      R"({"dit_sp_qkv_communication_overlap":true})"));
+  EXPECT_TRUE(config.dit_sp_qkv_communication_overlap());
+  nlohmann::ordered_json output = nlohmann::ordered_json::object();
+  config.append_config_json(output);
+  EXPECT_EQ(output.at("dit_sp_qkv_communication_overlap"), true);
+}
+
 TEST(DiTConfigTest, H3ExecutionProfileIsOptInAndRoundTripsJson) {
   DiTConfig config;
   EXPECT_EQ(config.dit_h3_execution_profile(), "native");

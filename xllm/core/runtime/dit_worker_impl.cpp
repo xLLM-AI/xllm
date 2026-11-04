@@ -152,11 +152,12 @@ bool DiTWorkerImpl::init_model(const std::string& model_weights_path,
     // Only the qualified CacheDiT policy is enabled at this stage.
     if ((config.dit_cache_policy() != "None" &&
          config.dit_cache_policy() != "CacheDiT") ||
-        config.dit_sp_communication_overlap() ||
+        config.dit_sp_communication_overlap() !=
+            config.dit_sp_qkv_communication_overlap() ||
         config.dit_sparse_attention_enabled() ||
         config.dit_laser_attention_enabled()) {
-      LOG(ERROR) << "MiniMax-H3 requires cache=None/CacheDiT and communication "
-                    "overlap, sparse attention and laser attention disabled";
+      LOG(ERROR) << "MiniMax-H3 requires cache=None/CacheDiT, paired QKV "
+                    "overlap flags, and sparse/laser attention disabled";
       return false;
     }
 #endif

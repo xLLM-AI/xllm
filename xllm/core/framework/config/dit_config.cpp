@@ -85,6 +85,10 @@ DEFINE_bool(dit_sp_communication_overlap,
             true,
             "Communication & Computation overlap for sequence parallel");
 
+DEFINE_bool(dit_sp_qkv_communication_overlap,
+            false,
+            "Use three QKV communication domains for qualified H3 TP2/SP8.");
+
 DEFINE_bool(dit_debug_print,
             false,
             "whether print the debug info for dit models");
@@ -189,6 +193,7 @@ void DiTConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_cachedit_back_blocks);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_cachedit_linear_residual_prediction);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_sp_communication_overlap);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_sp_qkv_communication_overlap);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_debug_print);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_laser_attention_enabled);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(dit_h3_task_type);
@@ -226,6 +231,7 @@ void DiTConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_cachedit_back_blocks);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_cachedit_linear_residual_prediction);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_sp_communication_overlap);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(dit_sp_qkv_communication_overlap);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_debug_print);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_laser_attention_enabled);
   XLLM_CONFIG_ASSIGN_FROM_JSON(dit_h3_task_type);
@@ -288,6 +294,8 @@ void DiTConfig::append_config_json(nlohmann::ordered_json& config_json) const {
       config_json, default_config, dit_cachedit_linear_residual_prediction);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, dit_sp_communication_overlap);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, dit_sp_qkv_communication_overlap);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, dit_debug_print);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

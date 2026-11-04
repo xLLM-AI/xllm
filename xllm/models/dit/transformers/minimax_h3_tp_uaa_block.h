@@ -20,6 +20,7 @@ limitations under the License.
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -27,11 +28,14 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/framework/parallel_state/dit_sp_qkv_domains.h"
 #include "core/framework/parallel_state/parallel_state.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/layers/common/linear.h"
 #include "models/dit/transformers/minimax_h3_blocks.h"
 #include "models/dit/transformers/minimax_h3_tp_layout.h"
+#include "models/dit/utils/minimax_h3_execution_metrics.h"
+#include "models/dit/utils/minimax_h3_qkv_layout.h"
 
 namespace xllm {
 
@@ -51,21 +55,29 @@ namespace xllm {
 // kMiniMaxH3PhysicalHeadsPerTp * tp_size = 32 * 2 = 64, so a rank views its
 // input as (bs, shard_seq, 32, 128) and branch A of all_to_all_4D leaves it
 // with 32 / 8 = 4 local heads over the full sequence.
-inline torch::Tensor minimax_h3_sp_all_to_all(const torch::Tensor& input,
-                                              int64_t heads,
-                                              int64_t dim_head,
-                                              int64_t tp_size,
-                                              ProcessGroup* sp_group) {
+inline torch::Tensor minimax_h3_sp_all_to_all(
+    const torch::Tensor& input,
+    int64_t heads,
+    int64_t dim_head,
+    int64_t tp_size,
+    ProcessGroup* sp_group,
+    H3QualifiedLaunchSnapshot* launches = nullptr) {
   auto handler = parallel_state::all_to_all_4D(
       input.view({input.size(0), -1, heads / tp_size, dim_head}),
       /*scatter_dim=*/2,
       /*gather_dim=*/1,
       /*async_ops=*/false,
       sp_group);
-  return handler().view(
-      {input.size(0),
-       -1,
-       heads * dim_head / (tp_size * sp_group->world_size())});
+  if (launches != nullptr) {
+    ++launches->qkv_a2a_launches;
+  }
+  torch::Tensor result = handler();
+  if (launches != nullptr) {
+    ++launches->qkv_a2a_waits;
+  }
+  return result.view({input.size(0),
+                      -1,
+                      heads * dim_head / (tp_size * sp_group->world_size())});
 }
 
 inline torch::Tensor minimax_h3_sp_all_to_all_reverse(
@@ -73,7 +85,8 @@ inline torch::Tensor minimax_h3_sp_all_to_all_reverse(
     int64_t heads,
     int64_t dim_head,
     int64_t tp_size,
-    ProcessGroup* sp_group) {
+    ProcessGroup* sp_group,
+    H3QualifiedLaunchSnapshot* launches = nullptr) {
   auto handler = parallel_state::all_to_all_4D(
       input.view({input.size(0),
                   -1,
@@ -83,7 +96,11 @@ inline torch::Tensor minimax_h3_sp_all_to_all_reverse(
       /*gather_dim=*/2,
       /*async_ops=*/false,
       sp_group);
-  return handler().view({input.size(0), -1, heads * dim_head / tp_size});
+  torch::Tensor result = handler();
+  if (launches != nullptr) {
+    ++launches->inverse_a2a_calls;
+  }
+  return result.view({input.size(0), -1, heads * dim_head / tp_size});
 }
 
 // A size-1 stand-in process group. layer::ColumnParallelLinear dereferences its
@@ -193,10 +210,14 @@ class MiniMaxH3TpUaaAttentionImpl final : public torch::nn::Module {
   MiniMaxH3TpUaaAttentionImpl(const MiniMaxH3C4Config& config,
                               ProcessGroup* tp_group,
                               ProcessGroup* sp_group,
-                              const torch::TensorOptions& options)
+                              const torch::TensorOptions& options,
+                              const DiTSpQkvDomains& qkv_domains = {},
+                              bool qkv_overlap = false)
       : num_heads_(config.num_attention_heads),
         head_dim_(config.attention_head_dim),
-        hidden_size_(config.hidden_size) {
+        hidden_size_(config.hidden_size),
+        qkv_domains_(qkv_domains),
+        qkv_overlap_(qkv_overlap) {
     const torch::TensorOptions bf16 = options.dtype(torch::kBFloat16);
     tp_group_ =
         minimax_h3_resolve_group(tp_group, owned_tp_group_, options.device());
@@ -223,6 +244,9 @@ class MiniMaxH3TpUaaAttentionImpl final : public torch::nn::Module {
       physical_heads_ = kMiniMaxH3PhysicalHeadsPerTp;
     } else {
       physical_heads_ = logical_heads_;
+    }
+    if (qkv_overlap_) {
+      validate_dit_sp_qkv_domains(qkv_domains_, sp_group_);
     }
     local_heads_ = physical_heads_ / sp_size_;
     // wan passes the GLOBAL head count to sp_all_to_all, which divides by
@@ -257,7 +281,8 @@ class MiniMaxH3TpUaaAttentionImpl final : public torch::nn::Module {
                         const std::optional<torch::Tensor>& rope_frequencies,
                         const torch::Tensor& cu_seqlens,
                         MiniMaxH3UaaWorkspace* workspace = nullptr,
-                        bool verify_intermediates = false) {
+                        bool verify_intermediates = false,
+                        H3QualifiedLaunchSnapshot* qkv_launches = nullptr) {
     verify_loaded_weights();
     if (!input.defined() || input.dim() != 2 ||
         input.scalar_type() != torch::kBFloat16 ||
@@ -267,52 +292,98 @@ class MiniMaxH3TpUaaAttentionImpl final : public torch::nn::Module {
     }
     const int64_t rows = input.size(0);
 
-    // Grouped head-major QKV: per head the rows are [Q(head_dim); K; V], so a
-    // single fused projection reshaped to [T, logical_heads, 3, head_dim]
-    // keeps each head's Q/K/V rows together. Weight conversion preserves the
-    // logical projection rows; device numerical equivalence is a gate result.
-    torch::Tensor grouped =
-        qkv_proj_->forward(input).view({rows, logical_heads_, 3, head_dim_});
-    torch::Tensor query = q_norm_->forward(grouped.select(2, 0).contiguous());
-    torch::Tensor key = k_norm_->forward(grouped.select(2, 1).contiguous());
-    torch::Tensor value = grouped.select(2, 2).contiguous();
-    if (rope_frequencies.has_value()) {
-      query = minimax_h3_apply_rope(query, *rope_frequencies);
-      key = minimax_h3_apply_rope(key, *rope_frequencies);
+    torch::Tensor query_full;
+    torch::Tensor key_full;
+    torch::Tensor value_full;
+    if (qkv_overlap_) {
+      // Setup and weight layout are fixed before requests. Reject a missing
+      // shared workspace before the first asynchronous collective is submitted.
+      if (!qkv_weight_is_split_ || workspace == nullptr ||
+          workspace->local_rows() != rows) {
+        throw std::logic_error(
+            "H3 QKV overlap requires split weights and a reserved workspace");
+      }
+      const torch::Tensor split = qkv_proj_->weight();
+      const int64_t inner = logical_heads_ * head_dim_;
+      const auto project = [&](int64_t index) {
+        return torch::nn::functional::linear(
+                   input, split.narrow(0, index * inner, inner))
+            .view({rows, logical_heads_, head_dim_});
+      };
+      const auto launch = [&](int64_t slot,
+                              const torch::Tensor& logical,
+                              ProcessGroup* domain) {
+        auto pending = parallel_state::all_to_all_4D(
+            workspace->pad_heads(slot, logical), 2, 1, true, domain);
+        if (qkv_launches != nullptr) {
+          ++qkv_launches->qkv_a2a_launches;
+        }
+        return pending;
+      };
+      std::array<std::function<torch::Tensor()>, 3> pending;
+      torch::Tensor query = q_norm_->forward(project(0));
+      if (rope_frequencies.has_value()) {
+        query = minimax_h3_apply_rope(query, *rope_frequencies);
+      }
+      pending[0] = launch(0, query, qkv_domains_.q);
+      torch::Tensor key = k_norm_->forward(project(1));
+      if (rope_frequencies.has_value()) {
+        key = minimax_h3_apply_rope(key, *rope_frequencies);
+      }
+      pending[1] = launch(1, key, qkv_domains_.k);
+      pending[2] = launch(2, project(2), qkv_domains_.v);
+      std::array<torch::Tensor*, 3> results = {
+          &query_full, &key_full, &value_full};
+      for (size_t index = 0; index < pending.size(); ++index) {
+        *results[index] = pending[index]();
+        if (qkv_launches != nullptr) {
+          ++qkv_launches->qkv_a2a_waits;
+        }
+        pending[index] = nullptr;
+      }
+    } else {
+      // Native qualified baseline: one fused grouped projection and the base
+      // SP communicator in fixed Q/K/V order. The ordinary native model is
+      // independent of this qualified-only module.
+      torch::Tensor grouped =
+          qkv_proj_->forward(input).view({rows, logical_heads_, 3, head_dim_});
+      torch::Tensor query = q_norm_->forward(grouped.select(2, 0).contiguous());
+      torch::Tensor key = k_norm_->forward(grouped.select(2, 1).contiguous());
+      torch::Tensor value = grouped.select(2, 2).contiguous();
+      if (rope_frequencies.has_value()) {
+        query = minimax_h3_apply_rope(query, *rope_frequencies);
+        key = minimax_h3_apply_rope(key, *rope_frequencies);
+      }
+      if (sp_size_ == 1) {
+        return project_output(
+            minimax_h3_segmented_sdpa(query, key, value, cu_seqlens));
+      }
+      const torch::Tensor physical_query = pad_physical(workspace, 0, query);
+      const torch::Tensor physical_key = pad_physical(workspace, 1, key);
+      const torch::Tensor physical_value = pad_physical(workspace, 2, value);
+      const int64_t physical_inner = physical_heads_ * head_dim_;
+      query_full = minimax_h3_sp_all_to_all(
+          physical_query.view({1, rows, physical_inner}),
+          global_physical_heads_,
+          head_dim_,
+          tp_size_,
+          sp_group_,
+          qkv_launches);
+      key_full =
+          minimax_h3_sp_all_to_all(physical_key.view({1, rows, physical_inner}),
+                                   global_physical_heads_,
+                                   head_dim_,
+                                   tp_size_,
+                                   sp_group_,
+                                   qkv_launches);
+      value_full = minimax_h3_sp_all_to_all(
+          physical_value.view({1, rows, physical_inner}),
+          global_physical_heads_,
+          head_dim_,
+          tp_size_,
+          sp_group_,
+          qkv_launches);
     }
-
-    if (sp_size_ == 1) {
-      torch::Tensor attention =
-          minimax_h3_segmented_sdpa(query, key, value, cu_seqlens);
-      return project_output(attention);
-    }
-
-    // ── H3 glue: 28 logical heads -> 32 physical heads, 4 dummy heads zero ──
-    const torch::Tensor physical_query = pad_physical(workspace, 0, query);
-    const torch::Tensor physical_key = pad_physical(workspace, 1, key);
-    const torch::Tensor physical_value = pad_physical(workspace, 2, value);
-    const int64_t physical_inner = physical_heads_ * head_dim_;
-
-    // ── U8 serial Ulysses transpose: Q, K, V share ONE sp domain, fixed order
-    // ──
-    torch::Tensor query_full =
-        minimax_h3_sp_all_to_all(physical_query.view({1, rows, physical_inner}),
-                                 global_physical_heads_,
-                                 head_dim_,
-                                 tp_size_,
-                                 sp_group_);
-    torch::Tensor key_full =
-        minimax_h3_sp_all_to_all(physical_key.view({1, rows, physical_inner}),
-                                 global_physical_heads_,
-                                 head_dim_,
-                                 tp_size_,
-                                 sp_group_);
-    torch::Tensor value_full =
-        minimax_h3_sp_all_to_all(physical_value.view({1, rows, physical_inner}),
-                                 global_physical_heads_,
-                                 head_dim_,
-                                 tp_size_,
-                                 sp_group_);
 
     const int64_t full_rows = rows * sp_size_;
     const std::vector<int64_t> local_head_shape = {
@@ -329,7 +400,8 @@ class MiniMaxH3TpUaaAttentionImpl final : public torch::nn::Module {
         global_physical_heads_,
         head_dim_,
         tp_size_,
-        sp_group_);
+        sp_group_,
+        qkv_launches);
     restored = restored.view({1, rows, physical_heads_, head_dim_});
     if (verify_intermediates && !minimax_h3_dummy_heads_are_zero(restored)) {
       LOG(FATAL)
@@ -360,6 +432,13 @@ class MiniMaxH3TpUaaAttentionImpl final : public torch::nn::Module {
           "MiniMax-H3 TP/UAA attention is missing the grouped QKV weight");
     }
     qkv_proj_->load_state_dict(StateDict({{"weight", grouped}}));
+    if (qkv_overlap_) {
+      torch::NoGradGuard no_grad;
+      torch::Tensor weight = qkv_proj_->weight();
+      weight.copy_(minimax_h3_split_grouped_qkv_shard(
+          weight, logical_heads_, head_dim_));
+      qkv_weight_is_split_ = true;
+    }
     // out_proj is replicated dense (gather+dense forward), so the full
     // [hidden, 56*128] checkpoint weight is loaded verbatim on every rank --
     // it is NOT dim-1 sharded like a RowParallelLinear would shard it.
@@ -386,6 +465,8 @@ class MiniMaxH3TpUaaAttentionImpl final : public torch::nn::Module {
   ProcessGroup* tp_group() const { return tp_group_; }
   ProcessGroup* sp_group() const { return sp_group_; }
   torch::Tensor qkv_weight() const { return qkv_proj_->weight(); }
+  bool qkv_overlap_enabled() const { return qkv_overlap_; }
+  bool qkv_weight_is_split() const { return qkv_weight_is_split_; }
   torch::Tensor out_proj_weight() const { return out_proj_weight_; }
 
  private:
@@ -438,6 +519,9 @@ class MiniMaxH3TpUaaAttentionImpl final : public torch::nn::Module {
   std::unique_ptr<ProcessGroup> owned_sp_group_;
   MiniMaxH3RMSNorm q_norm_{nullptr};
   MiniMaxH3RMSNorm k_norm_{nullptr};
+  DiTSpQkvDomains qkv_domains_;
+  bool qkv_overlap_ = false;
+  bool qkv_weight_is_split_ = false;
   layer::ColumnParallelLinear qkv_proj_{nullptr};
   torch::Tensor out_proj_weight_;
 };
@@ -625,7 +709,9 @@ class MiniMaxH3TpUaaBlockImpl final : public torch::nn::Module {
   MiniMaxH3TpUaaBlockImpl(const MiniMaxH3C4Config& config,
                           ProcessGroup* tp_group,
                           ProcessGroup* sp_group,
-                          const torch::TensorOptions& options)
+                          const torch::TensorOptions& options,
+                          const DiTSpQkvDomains& qkv_domains = {},
+                          bool qkv_overlap = false)
       : config_(config) {
     const torch::TensorOptions bf16 = options.dtype(torch::kBFloat16);
     norm1_ = register_module(
@@ -633,7 +719,9 @@ class MiniMaxH3TpUaaBlockImpl final : public torch::nn::Module {
     norm2_ = register_module(
         "norm2", MiniMaxH3RMSNorm(config.hidden_size, config.norm_eps, bf16));
     attn_ = register_module(
-        "attn", MiniMaxH3TpUaaAttention(config, tp_group, sp_group, options));
+        "attn",
+        MiniMaxH3TpUaaAttention(
+            config, tp_group, sp_group, options, qkv_domains, qkv_overlap));
     mlp_ = register_module("mlp", MiniMaxH3TpUaaMlp(config, tp_group, options));
     adaln_proj_ = register_module("adaln_proj",
                                   MiniMaxH3TpUaaAdaLN(config,
@@ -650,7 +738,8 @@ class MiniMaxH3TpUaaBlockImpl final : public torch::nn::Module {
       const torch::Tensor& rope_frequencies,
       const torch::Tensor& cu_seqlens,
       MiniMaxH3UaaWorkspace* workspace = nullptr,
-      bool verify_intermediates = false) {
+      bool verify_intermediates = false,
+      H3QualifiedLaunchSnapshot* qkv_launches = nullptr) {
     verify_loaded_weights();
     torch::Tensor parameters = adaln_proj_->forward(time_embedding);
     MiniMaxH3ResidualBranchTrace trace;
@@ -674,7 +763,8 @@ class MiniMaxH3TpUaaBlockImpl final : public torch::nn::Module {
                                             rope_frequencies,
                                             cu_seqlens,
                                             workspace,
-                                            verify_intermediates);
+                                            verify_intermediates,
+                                            qkv_launches);
     trace.attention_delta = trace.gate_msa * trace.attention_output;
     torch::Tensor after_attention = input + trace.attention_delta;
     trace.norm2_output = norm2_->forward(after_attention);
@@ -686,13 +776,15 @@ class MiniMaxH3TpUaaBlockImpl final : public torch::nn::Module {
     return trace;
   }
 
-  torch::Tensor forward_output_only(const torch::Tensor& input,
-                                    const torch::Tensor& time_embedding,
-                                    const torch::Tensor& combined_indices,
-                                    const torch::Tensor& rope_frequencies,
-                                    const torch::Tensor& cu_seqlens,
-                                    MiniMaxH3UaaWorkspace* workspace = nullptr,
-                                    bool verify_intermediates = false) {
+  torch::Tensor forward_output_only(
+      const torch::Tensor& input,
+      const torch::Tensor& time_embedding,
+      const torch::Tensor& combined_indices,
+      const torch::Tensor& rope_frequencies,
+      const torch::Tensor& cu_seqlens,
+      MiniMaxH3UaaWorkspace* workspace = nullptr,
+      bool verify_intermediates = false,
+      H3QualifiedLaunchSnapshot* qkv_launches = nullptr) {
     verify_loaded_weights();
     torch::Tensor parameters = adaln_proj_->forward(time_embedding);
     torch::Tensor after_attention;
@@ -709,7 +801,8 @@ class MiniMaxH3TpUaaBlockImpl final : public torch::nn::Module {
                                                       rope_frequencies,
                                                       cu_seqlens,
                                                       workspace,
-                                                      verify_intermediates);
+                                                      verify_intermediates,
+                                                      qkv_launches);
       after_attention = input + gate_msa * attention_output;
     }
     torch::Tensor shift_mlp =

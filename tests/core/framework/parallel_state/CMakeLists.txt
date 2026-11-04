@@ -123,3 +123,10 @@ if(USE_MLU)
       glog::glog
   )
 endif()
+
+cc_test(
+  NAME dit_sp_qkv_domains_test
+  CPU_ONLY
+  SRCS dit_sp_qkv_domains_test.cpp
+  DEPS :parallel_state torch GTest::gtest_main
+)

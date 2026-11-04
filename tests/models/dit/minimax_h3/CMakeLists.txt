@@ -48,3 +48,18 @@ if(USE_NPU)
     DEPS :parallel_state dit_cache torch GTest::gtest_main
   )
 endif()
+
+cc_test(
+  NAME minimax_h3_qkv_layout_test
+  CPU_ONLY
+  SRCS minimax_h3_qkv_layout_test.cpp
+  DEPS torch GTest::gtest_main
+)
+
+if(USE_NPU)
+  cc_test(
+    NAME minimax_h3_qkv_collective_test
+    SRCS minimax_h3_qkv_collective_test.cpp
+    DEPS :parallel_state torch GTest::gtest_main
+  )
+endif()

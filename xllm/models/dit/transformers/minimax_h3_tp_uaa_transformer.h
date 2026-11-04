@@ -50,12 +50,15 @@ class MiniMaxH3TpUaaResidentTransformerImpl final : public torch::nn::Module {
   MiniMaxH3TpUaaResidentTransformerImpl(const MiniMaxH3C4Config& config,
                                         ProcessGroup* tp_group,
                                         ProcessGroup* sp_group,
-                                        const torch::TensorOptions& options)
+                                        const torch::TensorOptions& options,
+                                        const DiTSpQkvDomains& qkv_domains = {},
+                                        bool qkv_overlap = false)
       : config_(config), workspace_(std::make_unique<MiniMaxH3UaaWorkspace>()) {
     blocks_ = register_module("blocks", torch::nn::ModuleList());
     block_layers_.reserve(static_cast<size_t>(kResidentBlockCount));
     for (int64_t layer = 0; layer < kResidentBlockCount; ++layer) {
-      MiniMaxH3TpUaaBlock block(config, tp_group, sp_group, options);
+      MiniMaxH3TpUaaBlock block(
+          config, tp_group, sp_group, options, qkv_domains, qkv_overlap);
       blocks_->push_back(block);
       block_layers_.emplace_back(std::move(block));
     }
@@ -88,7 +91,8 @@ class MiniMaxH3TpUaaResidentTransformerImpl final : public torch::nn::Module {
                         const torch::Tensor& cu_seqlens,
                         const MiniMaxH3LayerObserver& observer = nullptr,
                         int64_t step = 0,
-                        bool verify_intermediates = false) {
+                        bool verify_intermediates = false,
+                        H3QualifiedLaunchSnapshot* qkv_launches = nullptr) {
     if (loaded_block_count_ != kResidentBlockCount) {
       throw std::logic_error(
           "MiniMax-H3 resident transformer does not hold all 50 blocks");
@@ -106,7 +110,8 @@ class MiniMaxH3TpUaaResidentTransformerImpl final : public torch::nn::Module {
                               cu_seqlens,
                               observer,
                               step,
-                              verify_intermediates);
+                              verify_intermediates,
+                              qkv_launches);
     }
     return current;
   }
@@ -120,7 +125,8 @@ class MiniMaxH3TpUaaResidentTransformerImpl final : public torch::nn::Module {
       int64_t step,
       H3QualifiedExecutionContext& execution,
       const MiniMaxH3LayerObserver& observer = nullptr,
-      bool verify_intermediates = false) {
+      bool verify_intermediates = false,
+      H3QualifiedLaunchSnapshot* qkv_launches = nullptr) {
     if (loaded_block_count_ != kResidentBlockCount ||
         execution.cache == nullptr) {
       throw std::logic_error(
@@ -146,7 +152,8 @@ class MiniMaxH3TpUaaResidentTransformerImpl final : public torch::nn::Module {
                                cu_seqlens,
                                observer,
                                step,
-                               verify_intermediates);
+                               verify_intermediates,
+                               qkv_launches);
         });
   }
 
@@ -191,7 +198,8 @@ class MiniMaxH3TpUaaResidentTransformerImpl final : public torch::nn::Module {
                               const torch::Tensor& cu_seqlens,
                               const MiniMaxH3LayerObserver& observer,
                               int64_t step,
-                              bool verify_intermediates) {
+                              bool verify_intermediates,
+                              H3QualifiedLaunchSnapshot* qkv_launches) {
     MiniMaxH3TpUaaBlock& block = block_layers_[static_cast<size_t>(layer)];
     torch::Tensor current;
     if (observer) {
@@ -201,7 +209,8 @@ class MiniMaxH3TpUaaResidentTransformerImpl final : public torch::nn::Module {
                                                           rope_frequencies,
                                                           cu_seqlens,
                                                           workspace_.get(),
-                                                          verify_intermediates);
+                                                          verify_intermediates,
+                                                          qkv_launches);
       current = trace.output;
       observer(step, layer, trace);
     } else {
@@ -211,7 +220,8 @@ class MiniMaxH3TpUaaResidentTransformerImpl final : public torch::nn::Module {
                                            rope_frequencies,
                                            cu_seqlens,
                                            workspace_.get(),
-                                           verify_intermediates);
+                                           verify_intermediates,
+                                           qkv_launches);
     }
     if (verify_intermediates && !torch::isfinite(current).all().item<bool>()) {
       LOG(FATAL) << "MiniMax-H3 resident block " << layer
@@ -291,7 +301,9 @@ class MiniMaxH3TpUaaResidentDenoiserImpl final : public torch::nn::Module {
 
   MiniMaxH3TpUaaResidentDenoiserImpl(ProcessGroup* tp_group,
                                      ProcessGroup* sp_group,
-                                     const torch::TensorOptions& options) {
+                                     const torch::TensorOptions& options,
+                                     const DiTSpQkvDomains& qkv_domains = {},
+                                     bool qkv_overlap = false) {
     const MiniMaxH3C4Config config;
     const torch::TensorOptions fp32 = options.dtype(torch::kFloat32);
     const torch::TensorOptions bf16 = options.dtype(torch::kBFloat16);
@@ -320,7 +332,8 @@ class MiniMaxH3TpUaaResidentDenoiserImpl final : public torch::nn::Module {
         register_module("final_layer", MiniMaxH3FinalLayer(config, options));
     transformer_ = register_module(
         "transformer",
-        MiniMaxH3TpUaaResidentTransformer(config, tp_group, sp_group, options));
+        MiniMaxH3TpUaaResidentTransformer(
+            config, tp_group, sp_group, options, qkv_domains, qkv_overlap));
     sp_group_ = transformer_->sp_group();
   }
 
@@ -430,29 +443,32 @@ class MiniMaxH3TpUaaResidentDenoiserImpl final : public torch::nn::Module {
             .contiguous();
     torch::Tensor local_hidden_out;
     if (execution != nullptr && execution->cache != nullptr) {
-      H3QualifiedCachedBlockOutput cached =
-          transformer_->forward_cached(local_hidden,
-                                       time_embedding,
-                                       local_indices,
-                                       local_rope,
-                                       layout.cu_seqlens,
-                                       step,
-                                       *execution,
-                                       observer,
-                                       verify_intermediates);
+      H3QualifiedCachedBlockOutput cached = transformer_->forward_cached(
+          local_hidden,
+          time_embedding,
+          local_indices,
+          local_rope,
+          layout.cu_seqlens,
+          step,
+          *execution,
+          observer,
+          verify_intermediates,
+          execution != nullptr ? &execution->qkv_launches : nullptr);
       local_hidden_out = std::move(cached.hidden);
       if (cache_decision != nullptr) {
         *cache_decision = cached.decision;
       }
     } else {
-      local_hidden_out = transformer_->forward(local_hidden,
-                                               time_embedding,
-                                               local_indices,
-                                               local_rope,
-                                               layout.cu_seqlens,
-                                               observer,
-                                               step,
-                                               verify_intermediates);
+      local_hidden_out = transformer_->forward(
+          local_hidden,
+          time_embedding,
+          local_indices,
+          local_rope,
+          layout.cu_seqlens,
+          observer,
+          step,
+          verify_intermediates,
+          execution != nullptr ? &execution->qkv_launches : nullptr);
     }
     hidden = parallel_state::gather(
         local_hidden_out.contiguous(), sp_group_, /*dim=*/0);

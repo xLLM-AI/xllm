@@ -204,6 +204,17 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
           "H3 CacheDiT requires qualified resident execution without rolling "
           "load");
     }
+    const DiTConfig& config = DiTConfig::get_instance();
+    const bool qkv_overlap = config.dit_sp_qkv_communication_overlap();
+    if (qkv_overlap && construction_ != H3BackendConstruction::A3_16CARD) {
+      throw std::invalid_argument(
+          "H3 three-domain QKV requires qualified execution");
+    }
+    if (construction_ == H3BackendConstruction::A3_16CARD &&
+        qkv_overlap != config.dit_sp_communication_overlap()) {
+      throw std::invalid_argument(
+          "H3 qualified QKV overlap flags must be paired");
+    }
     phase_timing_enabled_ = DiTConfig::get_instance().dit_h3_phase_timing();
     const ParallelArgs& timing_parallel = context.get_parallel_args();
     phase_timing_metadata_.profile =
@@ -305,7 +316,9 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
           context.get_parallel_args().dit_tp_group_,
           context.get_parallel_args().dit_sp_group_,
           options_,
-          std::move(diagnostics));
+          std::move(diagnostics),
+          context.get_parallel_args().dit_sp_qkv_domains_,
+          qkv_overlap);
     }
     if (construction_ == H3BackendConstruction::NATIVE
             ? is_video_vae_worker_
@@ -840,6 +853,9 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
                                             plan.unique_timesteps,
                                             plan.inverse_indices,
                                             step};
+      const H3QualifiedLaunchSnapshot before =
+          execution != nullptr ? execution->qkv_launches
+                               : H3QualifiedLaunchSnapshot{};
       H3QualifiedPrediction prediction =
           qualified_denoiser_->predict_step(request, step_input, execution);
       torch::Tensor video_x0;
@@ -870,7 +886,9 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
             static_cast<int32_t>(phase_timing_metadata_.global_rank),
             step,
             prediction.cache_hit,
-            prediction.executed_blocks);
+            prediction.executed_blocks,
+            before,
+            execution->qkv_launches);
       }
     }
   }
@@ -927,6 +945,8 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
       // The dense path creates no probe tensor or extra cache collective.
       prepare_execution();
     }
+    execution.metrics.qkv_observed =
+        construction_ == H3BackendConstruction::A3_16CARD;
     execution.metrics.request_id = std::move(request_id);
     timer.advance(H3TimingPhase::DENOISE);
     denoise_qualified_request(request, &execution);

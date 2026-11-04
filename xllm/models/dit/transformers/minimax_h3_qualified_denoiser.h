@@ -77,8 +77,14 @@ class H3QualifiedDenoiser final {
   H3QualifiedDenoiser(ProcessGroup* tp_group,
                       ProcessGroup* sp_group,
                       const torch::TensorOptions& options,
-                      H3QualifiedDiagnostics diagnostics = {})
-      : resident_(MiniMaxH3TpUaaResidentDenoiser(tp_group, sp_group, options)),
+                      H3QualifiedDiagnostics diagnostics = {},
+                      const DiTSpQkvDomains& qkv_domains = {},
+                      bool qkv_overlap = false)
+      : resident_(MiniMaxH3TpUaaResidentDenoiser(tp_group,
+                                                 sp_group,
+                                                 options,
+                                                 qkv_domains,
+                                                 qkv_overlap)),
         diagnostics_(std::move(diagnostics)) {}
 
   void load(std::unique_ptr<H3QualifiedWeightSource> source) {

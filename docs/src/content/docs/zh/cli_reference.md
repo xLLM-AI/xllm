@@ -273,6 +273,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `dit_cachedit_back_blocks` | `int64` | `0` | CacheDiT 每步实际执行的后部 block 数。 |
 | `dit_cachedit_linear_residual_prediction` | `bool` | `true` | 启用 CacheDiT 线性残差预测。 |
 | `dit_sp_communication_overlap` | `bool` | `true` | 是否为 sequence parallel 启用通信与计算的 overlap。 |
+| `dit_sp_qkv_communication_overlap` | `bool` | `false` | 仅为经验证的 H3 TP2/SP8 配置启用三个独立 QKV 通信域。 |
 | `dit_debug_print` | `bool` | `false` | 是否打印 DiT 模型 debug 信息。 |
 | `dit_generation_image_area_max` | `int64` | `0` | 图像生成请求允许的最大图像面积（宽 * 高）；`0` 表示不限制。 |
 | `dit_h3_task_type` | `string` | `"fl2va"` | MiniMax-H3 任务类型：`fl2va` 或 `ref2va`。 |
