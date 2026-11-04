@@ -16,8 +16,6 @@
   "enable_chunked_prefill": false,
   "max_tokens_per_chunk_for_prefill": 512,
   "chunked_match_frequency": 3,
-  "use_zero_evict": true,
-  "max_decode_token_per_sequence": 128,
   "priority_strategy": "priority",
   "aggressive_coeff": 1.5,
   "starve_threshold": 2.0,

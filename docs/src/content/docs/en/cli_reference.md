@@ -142,8 +142,6 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | `enable_chunked_prefill` | `bool` | `true` | Whether to enable chunked prefill. |
 | `max_tokens_per_chunk_for_prefill` | `int32` | `-1` | Maximum number of tokens per chunk in the prefill stage. `-1` uses the default policy. |
 | `chunked_match_frequency` | `int32` | `2` | Sequence prefix-cache match frequency. |
-| `use_zero_evict` | `bool` | `false` | Whether to use ZeroEvictionScheduler. See [Zero Evict Scheduler](/en/features/zero_evict_scheduler/). |
-| `max_decode_token_per_sequence` | `int32` | `256` | Maximum decode tokens per sequence for ZeroEvictionScheduler. |
 | `priority_strategy` | `string` | `"fcfs"` | Request priority strategy, for example `fcfs`, `priority`, or `deadline`. |
 | `enable_mix_batch` | `bool` | `true` | Whether to run prefill and decode in the same batch. Forced to `false` when CP or MTP is active. |
 | `aggressive_coeff` | `double` | `1.0` | Aggressive coefficient for MixScheduler urgency judgment. |

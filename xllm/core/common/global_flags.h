@@ -229,10 +229,6 @@ DECLARE_int32(rpc_channel_timeout_ms);
 
 DECLARE_int32(chunked_match_frequency);
 
-DECLARE_bool(use_zero_evict);
-
-DECLARE_int32(max_decode_token_per_sequence);
-
 DECLARE_string(priority_strategy);
 
 DECLARE_bool(enable_mix_batch);

@@ -18,22 +18,16 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/distributed_runtime/rec_engine.h"
 #include "core/framework/config/parallel_config.h"
-#include "core/framework/config/scheduler_config.h"
 #include "scheduler/continuous_scheduler.h"
 #include "scheduler/disagg_pd_scheduler.h"
 #include "scheduler/dit_scheduler.h"
 #include "scheduler/fixed_steps_scheduler.h"
-#include "scheduler/zero_eviction_scheduler.h"
 
 namespace xllm {
 
 SchedulerKind select_scheduler_kind(const SchedulerOptions& options) {
   if (options.enable_disagg_pd()) {
     return SchedulerKind::DISAGG_PD;
-  }
-
-  if (::xllm::SchedulerConfig::get_instance().use_zero_evict()) {
-    return SchedulerKind::ZERO_EVICTION;
   }
 
   return SchedulerKind::CONTINUOUS;

@@ -45,15 +45,6 @@ DEFINE_bool(enable_mix_batch,
             "Enable mixed batch (prefill + decode in same batch). "
             "Forced to false when CP or MTP is active.");
 
-DEFINE_bool(use_zero_evict,
-            false,
-            "Use ZeroEvictionScheduler but ContinuousScheduler.");
-
-DEFINE_int32(
-    max_decode_token_per_sequence,
-    256,
-    "Max decode token per sequence which used for ZeroEvictionScheduler.");
-
 DEFINE_string(priority_strategy,
               "fcfs",
               "Priority strategy for requests(e.g. fcfs, priority, deadline).");
@@ -90,8 +81,6 @@ void SchedulerConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_chunked_prefill);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(max_tokens_per_chunk_for_prefill);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(chunked_match_frequency);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(use_zero_evict);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(max_decode_token_per_sequence);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(priority_strategy);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_mix_batch);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(aggressive_coeff);
@@ -109,8 +98,6 @@ void SchedulerConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_chunked_prefill);
   XLLM_CONFIG_ASSIGN_FROM_JSON(max_tokens_per_chunk_for_prefill);
   XLLM_CONFIG_ASSIGN_FROM_JSON(chunked_match_frequency);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(use_zero_evict);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(max_decode_token_per_sequence);
   XLLM_CONFIG_ASSIGN_FROM_JSON(priority_strategy);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_mix_batch);
   XLLM_CONFIG_ASSIGN_FROM_JSON(aggressive_coeff);
@@ -137,10 +124,6 @@ void SchedulerConfig::append_config_json(
       config_json, default_config, max_tokens_per_chunk_for_prefill);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, chunked_match_frequency);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, use_zero_evict);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, max_decode_token_per_sequence);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, priority_strategy);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(

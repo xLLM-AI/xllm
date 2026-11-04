@@ -48,8 +48,6 @@ class SchedulerConfig final {
          "enable_chunked_prefill",
          "max_tokens_per_chunk_for_prefill",
          "chunked_match_frequency",
-         "use_zero_evict",
-         "max_decode_token_per_sequence",
          "priority_strategy",
          "enable_mix_batch",
          "aggressive_coeff",
@@ -73,10 +71,6 @@ class SchedulerConfig final {
   PROPERTY(int32_t, max_tokens_per_chunk_for_prefill) = -1;
 
   PROPERTY(int32_t, chunked_match_frequency) = 2;
-
-  PROPERTY(bool, use_zero_evict) = false;
-
-  PROPERTY(int32_t, max_decode_token_per_sequence) = 256;
 
   PROPERTY(std::string, priority_strategy) = "fcfs";
 

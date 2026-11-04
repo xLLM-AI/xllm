@@ -25,17 +25,12 @@ limitations under the License.
 #include "scheduler/disagg_pd_scheduler.h"
 #include "scheduler/dit_scheduler.h"
 #include "scheduler/fixed_steps_scheduler.h"
-#include "scheduler/zero_eviction_scheduler.h"
 
 namespace xllm {
 
 class RecEngine;
 
-enum class SchedulerKind : int8_t {
-  CONTINUOUS = 0,
-  ZERO_EVICTION = 4,
-  DISAGG_PD = 5
-};
+enum class SchedulerKind : int8_t { CONTINUOUS = 0, DISAGG_PD = 5 };
 
 SchedulerKind select_scheduler_kind(const SchedulerOptions& options);
 
@@ -66,12 +61,6 @@ std::unique_ptr<Scheduler> create_continuous_scheduler(
           std::move(model_residency_coordinator),
           std::move(kv_transfer_coordinator),
           std::move(response_options));
-    case SchedulerKind::ZERO_EVICTION:
-      return std::make_unique<ZeroEvictionScheduler>(
-          engine,
-          options,
-          std::move(model_residency_coordinator),
-          std::move(distributed_worker_manager));
     case SchedulerKind::CONTINUOUS:
       return std::make_unique<ContinuousScheduler<TargetEngine>>(
           engine,
