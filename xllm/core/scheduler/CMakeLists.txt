@@ -8,7 +8,6 @@ cc_library(
     scheduler
   HDRS
     scheduler_policy.h
-    zero_eviction_scheduler.h
     continuous_scheduler.h
     disagg_pd_scheduler.h
     request_output_dispatcher.h
@@ -25,7 +24,6 @@ cc_library(
     prefill_first_policy.cpp
     decode_first_policy.cpp
     unified_policy.cpp
-    zero_eviction_scheduler.cpp
     continuous_scheduler.cpp
     scheduler_metrics.cpp
     disagg_pd_scheduler.cpp

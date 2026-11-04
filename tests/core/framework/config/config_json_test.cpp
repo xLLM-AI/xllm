@@ -732,7 +732,6 @@ TEST(ConfigJsonTest, FromJsonUsesParsedOverrides) {
 
   EXPECT_EQ(kv_cache_config.kv_cache_dtype(), "auto");
   EXPECT_EQ(kv_cache_config.indexer_cache_dtype(), "auto");
-  EXPECT_EQ(scheduler_config.max_decode_token_per_sequence(), 256);
 }
 
 TEST(ExecutionConfigTest, GraphWarmupIsEnabledByDefault) {
@@ -1115,8 +1114,6 @@ TEST(ConfigJsonTest, LoadJsonFileReadsConfigFixture) {
   EXPECT_FALSE(scheduler_config.enable_chunked_prefill());
   EXPECT_EQ(scheduler_config.max_tokens_per_chunk_for_prefill(), 512);
   EXPECT_EQ(scheduler_config.chunked_match_frequency(), 3);
-  EXPECT_TRUE(scheduler_config.use_zero_evict());
-  EXPECT_EQ(scheduler_config.max_decode_token_per_sequence(), 128);
   EXPECT_EQ(scheduler_config.priority_strategy(), "priority");
   EXPECT_DOUBLE_EQ(scheduler_config.aggressive_coeff(), 1.5);
   EXPECT_DOUBLE_EQ(scheduler_config.starve_threshold(), 2.0);
@@ -1340,7 +1337,7 @@ TEST(ConfigPrecedenceTest, InitializeAppliesCliOverConfigOverDefault) {
 
   // Pin the default-asserted flag so this test is self-contained regardless of
   // sibling tests; FlagSaver reverts it on exit.
-  FLAGS_max_decode_token_per_sequence = 256;
+  FLAGS_chunked_match_frequency = 2;
 
   const std::filesystem::path config_path =
       std::filesystem::temp_directory_path() /
@@ -1360,8 +1357,7 @@ TEST(ConfigPrecedenceTest, InitializeAppliesCliOverConfigOverDefault) {
   EXPECT_EQ(kv_cache_config.block_size(), 64);               // CLI    > Config
   EXPECT_EQ(scheduler_config.max_tokens_per_batch(), 8192);  // Config > Default
   EXPECT_EQ(scheduler_config.max_seqs_per_batch(), 64);      // Config > Default
-  EXPECT_EQ(scheduler_config.max_decode_token_per_sequence(),
-            256);  // Default
+  EXPECT_EQ(scheduler_config.chunked_match_frequency(), 2);  // Default
 
   std::filesystem::remove(config_path);
 }

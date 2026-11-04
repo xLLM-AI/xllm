@@ -142,8 +142,6 @@ VMM 的使用方式和容量配置说明见[KV Cache 与模型权重的虚拟内
 | `enable_chunked_prefill` | `bool` | `true` | 是否启用 chunked prefill。 |
 | `max_tokens_per_chunk_for_prefill` | `int32` | `-1` | prefill 阶段每个 chunk 的最大 token 数；`-1` 表示使用默认策略。 |
 | `chunked_match_frequency` | `int32` | `2` | sequence prefix cache 匹配频率。 |
-| `use_zero_evict` | `bool` | `false` | 是否使用 ZeroEvictionScheduler；详见 [Zero Evict Scheduler](/zh/features/zero_evict_scheduler/)。 |
-| `max_decode_token_per_sequence` | `int32` | `256` | ZeroEvictionScheduler 中每个 sequence 的最大 decode token 数。 |
 | `priority_strategy` | `string` | `"fcfs"` | 请求优先级策略，例如 `fcfs`、`priority`、`deadline`。 |
 | `enable_mix_batch` | `bool` | `true` | 是否在同一 batch 中运行 prefill 和 decode。启用 CP 或 MTP 时会被强制设为 `false`。 |
 | `aggressive_coeff` | `double` | `1.0` | MixScheduler 紧急度判断的激进系数。 |
