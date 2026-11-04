@@ -38,9 +38,20 @@ _OUTPUT_RTOL = 0.02
 _OUTPUT_ATOL = 1e-3
 
 
-@pytest.mark.parametrize("rows", [1, 3, 5], ids=["draft-step", "padded-prefix", "draft-prefix"])
+@pytest.mark.parametrize(
+    "layers,rows",
+    [(1, 1), (1, 3), (1, 5), (16, 1), (16, 3), (16, 5), (16, 160)],
+    ids=[
+        "single-layer-draft-step",
+        "single-layer-padded-prefix",
+        "single-layer-draft-prefix",
+        "qwen-tp4-draft-step",
+        "qwen-tp4-padded-prefix",
+        "qwen-tp4-draft-prefix",
+        "qwen-tp4-mtp4-c32",
+    ],
+)
 @pytest.mark.parametrize("commit_in_graph", [False, True], ids=["prepared-lengths", "late-device-commit"])
-@pytest.mark.parametrize("layers", [1, 16])
 @pytest.mark.parametrize("use_v2", [False, True], ids=["fia-v1", "fia-v2"])
 @pytest.mark.parametrize("native_updates", [False, True], ids=["python-updates", "native-updates"])
 @torch.inference_mode()
