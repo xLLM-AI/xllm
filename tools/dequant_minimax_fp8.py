@@ -60,34 +60,67 @@ def is_fp8_dtype(dtype: torch.dtype) -> bool:
     }
 
 
+def _validate_block_size(block_size: object, field: str = "block_size") -> tuple[int, int]:
+    if not isinstance(block_size, (list, tuple)) or len(block_size) != 2:
+        raise ValueError(f"{field} must contain exactly two positive integers, got {block_size!r}")
+    for index, value in enumerate(block_size):
+        if type(value) is not int or value <= 0:
+            raise ValueError(f"{field}[{index}] must be a positive integer, got {value!r}")
+    return block_size[0], block_size[1]
+
+
 def dequantize_fp8_block_weight(
     fp8_weight: torch.Tensor,
     weight_scale_inv: torch.Tensor,
     block_size: tuple[int, int],
 ) -> torch.Tensor:
-    if fp8_weight.dim() != 2:
-        raise ValueError(f"Only 2D fp8 weights are supported, got shape {tuple(fp8_weight.shape)}")
-    if weight_scale_inv.dim() != 2:
-        raise ValueError(f"FP8 weight scale tensor must be 2D, got shape {tuple(weight_scale_inv.shape)}")
+    """Dequantize using the MiniMax loader's BF16 multiplication semantics.
 
-    block_n, block_k = block_size
+    The scale grid is ceil(weight.shape / block_size). Partial edge blocks
+    use their own scale and are cropped to the actual weight dimensions.
+    Scales may use FP16, BF16, FP32 or FP64 storage, but must remain finite
+    when converted to BF16.
+    """
+    block_n, block_k = _validate_block_size(block_size)
+    if fp8_weight.dim() != 2:
+        raise ValueError(f"fp8_weight.shape must be 2D, got {tuple(fp8_weight.shape)}")
+    if not is_fp8_dtype(fp8_weight.dtype):
+        raise ValueError(f"fp8_weight.dtype must be an FP8 dtype, got {fp8_weight.dtype}")
+    if weight_scale_inv.dim() != 2:
+        raise ValueError(f"weight_scale_inv.shape must be 2D, got {tuple(weight_scale_inv.shape)}")
+    if weight_scale_inv.dtype not in {torch.float16, torch.bfloat16, torch.float32, torch.float64}:
+        raise ValueError(
+            f"weight_scale_inv.dtype must be float16, bfloat16, float32 or float64, got {weight_scale_inv.dtype}"
+        )
+
     n, k = fp8_weight.shape
     n_tiles = (n + block_n - 1) // block_n
     k_tiles = (k + block_k - 1) // block_k
-
-    if tuple(weight_scale_inv.shape) != (n_tiles, k_tiles):
+    expected_scale_shape = (n_tiles, k_tiles)
+    if tuple(weight_scale_inv.shape) != expected_scale_shape:
         raise ValueError(
-            f"Unexpected fp8 scale shape {tuple(weight_scale_inv.shape)} for weight shape {tuple(fp8_weight.shape)}"
+            f"weight_scale_inv.shape must be {expected_scale_shape} for fp8_weight.shape={(n, k)} "
+            f"and block_size={(block_n, block_k)}, got {tuple(weight_scale_inv.shape)}"
         )
+    if not torch.isfinite(weight_scale_inv).all():
+        raise ValueError("weight_scale_inv must contain only finite values")
+
+    # CPU isfinite is not implemented for every FP8 dtype. Reuse the BF16
+    # conversion needed for multiplication rather than casting the weight twice.
+    weight_bf16 = fp8_weight.to(torch.bfloat16)
+    if not torch.isfinite(weight_bf16).all():
+        raise ValueError("fp8_weight must contain only finite values")
+    scale_bf16 = weight_scale_inv.to(torch.bfloat16)
+    if not torch.isfinite(scale_bf16).all():
+        raise ValueError("weight_scale_inv must remain finite after conversion to bfloat16")
 
     if n % block_n == 0 and k % block_k == 0:
-        weight_bf16 = fp8_weight.to(torch.bfloat16).reshape(n_tiles, block_n, k_tiles, block_k)
-        scale_bf16 = weight_scale_inv.to(torch.bfloat16).reshape(n_tiles, 1, k_tiles, 1)
+        weight_bf16 = weight_bf16.reshape(n_tiles, block_n, k_tiles, block_k)
+        scale_bf16 = scale_bf16.reshape(n_tiles, 1, k_tiles, 1)
         return (weight_bf16 * scale_bf16).reshape(n, k)
 
-    expanded_scale = weight_scale_inv.repeat_interleave(block_n, 0).repeat_interleave(block_k, 1)
-    expanded_scale = expanded_scale[:n, :k].to(torch.bfloat16)
-    return fp8_weight.to(torch.bfloat16) * expanded_scale
+    expanded_scale = scale_bf16.repeat_interleave(block_n, 0).repeat_interleave(block_k, 1)
+    return weight_bf16 * expanded_scale[:n, :k]
 
 
 def discover_safetensor_files(input_dir: Path) -> tuple[list[str], dict[str, str]]:
@@ -130,14 +163,12 @@ def update_config(input_dir: Path, output_dir: Path) -> tuple[int, int]:
     if quant_config.get("quant_method") != "fp8":
         raise ValueError("This converter expects quantization_config.quant_method == 'fp8'")
 
-    block_size = quant_config.get("weight_block_size")
-    if not isinstance(block_size, list) or len(block_size) != 2:
-        raise ValueError("This converter expects quantization_config.weight_block_size to be a 2-element list")
+    block_size = _validate_block_size(quant_config.get("weight_block_size"), "quantization_config.weight_block_size")
 
     config["torch_dtype"] = "bfloat16"
     config.pop("quantization_config", None)
     save_json(output_dir / "config.json", config)
-    return int(block_size[0]), int(block_size[1])
+    return block_size
 
 
 def tensor_nbytes(tensor: torch.Tensor) -> int:
@@ -171,9 +202,16 @@ def convert_shard(input_path: Path, output_path: Path, block_size: tuple[int, in
             if is_fp8_dtype(tensor.dtype):
                 scale_name = f"{name}_scale_inv"
                 if scale_name not in key_set:
-                    raise ValueError(f"Missing paired scale tensor {scale_name} for FP8 weight {name}")
+                    raise ValueError(
+                        f"{input_path.name}: missing paired scale tensor {scale_name!r} for FP8 weight {name!r}"
+                    )
                 scale = f.get_tensor(scale_name)
-                tensor = dequantize_fp8_block_weight(tensor, scale, block_size)
+                try:
+                    tensor = dequantize_fp8_block_weight(tensor, scale, block_size)
+                except ValueError as error:
+                    raise ValueError(
+                        f"{input_path.name}: FP8 weight {name!r}, scale {scale_name!r}: {error}"
+                    ) from error
                 skipped.add(scale_name)
                 converted_fp8_tensors += 1
 
