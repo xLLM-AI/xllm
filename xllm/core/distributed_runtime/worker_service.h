@@ -89,6 +89,11 @@ class WorkerService : public proto::DistributeWorker {
                       proto::TransferStatus* resp,
                       ::google::protobuf::Closure* done) override;
 
+  void WaitForKVBlocksTransfer(google::protobuf::RpcController* controller,
+                               const proto::WaitForKVBlocksTransferRequest* req,
+                               proto::Status* resp,
+                               google::protobuf::Closure* done) override;
+
   void PrefetchFromStorage(google::protobuf::RpcController* controller,
                            const proto::PrefetchRequest* req,
                            proto::Status* resp,

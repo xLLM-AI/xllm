@@ -91,7 +91,8 @@ KVCacheTransferCoordinator::transfer_kv_blocks(
   return futures;
 }
 
-void KVCacheTransferCoordinator::transfer_kv_blocks(
+std::vector<folly::SemiFuture<uint32_t>>
+KVCacheTransferCoordinator::transfer_kv_blocks(
     uint32_t dp_rank,
     uint64_t batch_id,
     const std::vector<BlockTransferInfo>& block_transfer_info) {
@@ -100,10 +101,14 @@ void KVCacheTransferCoordinator::transfer_kv_blocks(
   const auto workers = KVTransferTopology::get_dp_worker_range(
       worker_clients.size(), options_.dp_size, static_cast<int32_t>(dp_rank));
   CHECK(workers.has_value()) << "Invalid DP topology for KV cache transfer.";
+  std::vector<folly::SemiFuture<uint32_t>> futures;
+  futures.reserve(workers->count);
   for (size_t local_rank = 0; local_rank < workers->count; ++local_rank) {
-    worker_clients[workers->begin + local_rank]->transfer_kv_blocks(
-        batch_id, block_transfer_info);
+    futures.emplace_back(
+        worker_clients[workers->begin + local_rank]->transfer_kv_blocks(
+            batch_id, block_transfer_info));
   }
+  return futures;
 }
 
 void KVCacheTransferCoordinator::prefetch_from_storage(

@@ -70,14 +70,16 @@ class ConcurrentBlockManagerImpl : public BlockManager {
   size_t num_total_blocks() const override;
   size_t admission_capacity() const override;
   double kv_cache_utilization() const override;
+  void reserve_virtual_memory_padding_blocks() override;
 
  private:
-  std::unique_ptr<BlockManager> inner_;  // always a leaf, never a composite
   // Recursive: Block dtors call free() through this wrapper (we rewrite each
   // returned Block's manager_ to this), and inner_->allocate() may trigger
   // prefix-cache eviction which destroys cached Blocks while we still hold the
-  // lock from the outer wrapper call.
+  // lock from the outer wrapper call. Outlive inner_ because cached Blocks also
+  // call back during its destruction.
   mutable std::recursive_mutex mutex_;
+  std::unique_ptr<BlockManager> inner_;  // always a leaf, never a composite
 };
 
 }  // namespace xllm

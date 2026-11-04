@@ -23,6 +23,15 @@ limitations under the License.
 
 namespace xllm {
 
+bool LayerSynchronizer::synchronize_all() {
+  for (uint32_t index = 0; index < size(); ++index) {
+    if (!synchronize_layer(index)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool LayerSynchronizer::wait_all_on_current_stream() {
   for (uint32_t index = 0; index < size(); ++index) {
     if (!wait_layer_on_current_stream(index)) {
@@ -78,6 +87,15 @@ class MLULayerSynchronizerAdapter final : public LayerSynchronizer {
 
   bool synchronize_layer(int64_t layer_index) override {
     return impl_.wait_layer_on_current_stream(layer_index);
+  }
+
+  bool synchronize_all() override {
+    for (uint32_t index = 0; index < size(); ++index) {
+      if (!impl_.synchronize_layer(index)) {
+        return false;
+      }
+    }
+    return true;
   }
 
   bool record_stream(int64_t layer_index, Stream* stream) override {

@@ -201,35 +201,57 @@ std::vector<XXH3Key> ExpectedChain(const std::vector<int32_t>& tokens,
 }  // namespace
 
 TEST(KVCacheManagerFactoryTest,
-     RejectsVirtualMemoryHostOffloadBeforeAllocation) {
+     ValidatesVirtualMemoryHostOffloadProviderBeforeAllocation) {
+  KVCacheCapacity capacity;
+  capacity.n_blocks(64).block_size(4);
+  ModelArgs model_args;
+  model_args.model_type("test_model")
+      .n_layers(2)
+      .n_heads(1)
+      .n_kv_heads(1)
+      .head_dim(8);
   BlockManagerPool::Options options;
   options.enable_vmm_kvcache(true).enable_host_offload(true);
-
-  EXPECT_DEATH(KVCacheManagerFactory::create(KVCacheCapacity{},
-                                             ModelArgs{},
-                                             /*world_size=*/1,
-                                             torch::kBFloat16,
-                                             options,
-                                             /*transfer_coordinator=*/nullptr),
-               "Virtual memory does not support host KV cache offload");
-}
-
-TEST(KVCacheManagerFactoryTest,
-     RejectsVirtualMemoryHostOffloadConfigurationBeforeAllocation) {
-  BlockManagerPool::Options options;
-  options.enable_vmm_kvcache(true);
   HostCacheValidationOptions host_options;
   host_options.host_blocks_factor = 2.0;
 
-  EXPECT_DEATH(KVCacheManagerFactory::create(KVCacheCapacity{},
-                                             ModelArgs{},
+  EXPECT_DEATH(KVCacheManagerFactory::create(capacity,
+                                             model_args,
                                              /*world_size=*/1,
                                              torch::kBFloat16,
                                              options,
                                              /*transfer_coordinator=*/nullptr,
                                              /*dp_size=*/1,
                                              host_options),
-               "Virtual memory does not support host KV cache offload");
+               "current platform has no host KV offload");
+}
+
+TEST(KVCacheManagerFactoryTest,
+     ValidatesVirtualMemoryHostOffloadPrefixCacheBeforeAllocation) {
+  KVCacheCapacity capacity;
+  capacity.n_blocks(64).block_size(4);
+  ModelArgs model_args;
+  model_args.model_type("test_model")
+      .n_layers(2)
+      .n_heads(1)
+      .n_kv_heads(1)
+      .head_dim(8);
+  BlockManagerPool::Options options;
+  options.enable_vmm_kvcache(true).enable_host_offload(true);
+  HostCacheValidationOptions host_options;
+  host_options.host_blocks_factor = 2.0;
+  host_options.supports_host_kv_offload = true;
+  host_options.enable_prefix_cache = false;
+
+  EXPECT_DEATH(KVCacheManagerFactory::create(capacity,
+                                             model_args,
+                                             /*world_size=*/1,
+                                             torch::kBFloat16,
+                                             options,
+                                             /*transfer_coordinator=*/nullptr,
+                                             /*dp_size=*/1,
+                                             host_options),
+               "prefix caching is disabled");
 }
 
 TEST(BlockManagerTest, Basic) {

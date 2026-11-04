@@ -76,11 +76,16 @@ class CacheTransferCoordinator final : public KVCacheTransferCoordinatorBase {
         std::move(stop_requested),
         std::move(done));
   }
-  void transfer_kv_blocks(
+  std::vector<folly::SemiFuture<uint32_t>> transfer_kv_blocks(
       uint32_t /*dp_rank*/,
       uint64_t /*batch_id*/,
       const std::vector<BlockTransferInfo>& infos) override {
     loads_ = infos;
+    std::vector<folly::SemiFuture<uint32_t>> results;
+    results.reserve(1);
+    results.emplace_back(
+        folly::makeSemiFuture(static_cast<uint32_t>(infos.size())));
+    return results;
   }
   std::vector<folly::SemiFuture<uint32_t>> transfer_kv_blocks(
       uint32_t /*dp_rank*/,

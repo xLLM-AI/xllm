@@ -362,6 +362,20 @@ void CommChannel::transfer_kv_blocks(
       << batch_id;
 }
 
+bool CommChannel::wait_for_kv_blocks_transfer(uint64_t batch_id) {
+  proto::WaitForKVBlocksTransferRequest request;
+  request.set_batch_id(batch_id);
+  proto::Status response;
+  brpc::Controller controller;
+  stub_->WaitForKVBlocksTransfer(&controller, &request, &response, nullptr);
+  if (controller.Failed() || !response.ok()) {
+    LOG(ERROR) << "Host KV restore completion RPC failed for batch_id="
+               << batch_id << ": " << controller.ErrorText();
+    return false;
+  }
+  return true;
+}
+
 bool CommChannel::sleep(MasterStatus master_status, uint64_t transition_id) {
   proto::SleepRequest req;
   proto::Status s;

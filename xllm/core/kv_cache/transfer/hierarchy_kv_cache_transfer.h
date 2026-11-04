@@ -98,6 +98,7 @@ class HierarchyKVCacheTransfer final {
   uint32_t transfer_kv_blocks(
       uint64_t batch_id,
       const std::vector<BlockTransferInfo>& block_transfer_info);
+  bool wait_for_load(uint64_t batch_id);
   uint32_t transfer_kv_blocks(uint64_t batch_id,
                               Slice<BlockTransferInfo>& block_transfer_info);
   std::vector<uint8_t> prefetch_kv_blocks(
@@ -149,6 +150,8 @@ class HierarchyKVCacheTransfer final {
 
   mutable std::mutex mutex_;
   std::unordered_map<uint64_t, HostKVLoadHandle> load_handles_;
+  std::unordered_map<uint64_t, std::shared_ptr<LayerSynchronizer>>
+      load_completion_synchronizers_;
 };
 
 }  // namespace xllm

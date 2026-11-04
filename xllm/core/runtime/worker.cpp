@@ -483,6 +483,10 @@ uint32_t Worker::transfer_kv_blocks(
   return impl_->transfer_kv_blocks(batch_id, block_transfer_info);
 }
 
+bool Worker::wait_for_kv_blocks_transfer(uint64_t batch_id) {
+  return impl_->wait_for_kv_blocks_transfer(batch_id);
+}
+
 uint32_t Worker::transfer_kv_blocks(
     const uint64_t batch_id,
     Slice<BlockTransferInfo>& block_transfer_info) {

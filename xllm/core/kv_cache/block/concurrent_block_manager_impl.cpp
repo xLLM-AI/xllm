@@ -151,4 +151,9 @@ double ConcurrentBlockManagerImpl::kv_cache_utilization() const {
   return inner_->kv_cache_utilization();
 }
 
+void ConcurrentBlockManagerImpl::reserve_virtual_memory_padding_blocks() {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  inner_->reserve_virtual_memory_padding_blocks();
+}
+
 }  // namespace xllm

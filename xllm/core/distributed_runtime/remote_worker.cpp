@@ -320,14 +320,31 @@ folly::SemiFuture<uint32_t> RemoteWorker::transfer_kv_blocks(
   return future;
 }
 
-void RemoteWorker::transfer_kv_blocks(
+folly::SemiFuture<uint32_t> RemoteWorker::transfer_kv_blocks(
     const uint64_t batch_id,
     const std::vector<BlockTransferInfo>& block_transfer_info) {
+  folly::Promise<uint32_t> promise;
+  auto future = promise.getSemiFuture();
   threadpool_.schedule([this,
                         batch_id = batch_id,
-                        block_transfer_info = block_transfer_info]() mutable {
+                        block_transfer_info = block_transfer_info,
+                        promise = std::move(promise)]() mutable {
+    // Registration must finish before this queue can submit the matching
+    // forward. Device completion waits independently to preserve overlap.
     channel_->transfer_kv_blocks(batch_id, block_transfer_info);
+    const uint32_t block_count =
+        static_cast<uint32_t>(block_transfer_info.size());
+    copy_threadpool_.schedule([this,
+                               batch_id,
+                               block_count,
+                               promise = std::move(promise)]() mutable {
+      CHECK(channel_->wait_for_kv_blocks_transfer(batch_id))
+          << "Host KV restore completion could not be confirmed for batch_id="
+          << batch_id;
+      promise.setValue(block_count);
+    });
   });
+  return future;
 }
 
 void RemoteWorker::prefetch_from_storage(

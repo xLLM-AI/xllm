@@ -19,6 +19,21 @@ Set `enable_prefix_cache=true` together with `enable_vmm_kvcache=true` to reuse 
 
 Prefix matching uses the same token and multimodal hashes as the physical KV Cache. Chunked prefill publishes only complete blocks; hybrid attention also requires a recoverable linear-state checkpoint. This option does not enable KV Cache event publishing for VMM.
 
+## Host KV offload with virtual KV Cache
+
+Enable prefix caching and set `host_blocks_factor` greater than `1` to retain completed KV blocks in host memory. After a device prefix is evicted under memory pressure, a matching request can restore it from the host cache into newly mapped VMM blocks. Device and host blocks remain retained until their transfers finish, including when a request is cancelled. Only completed blocks are offloaded; active requests are not swapped out.
+
+Append these flags to an existing NPU launch command:
+
+```bash
+--enable_vmm_kvcache=true \
+--enable_prefix_cache=true \
+--host_blocks_factor=2 \
+--enable_task_pipeline=false
+```
+
+Host capacity is preallocated from the configured device KV tensor capacity multiplied by `host_blocks_factor`, including in elastic mode. Size `max_cache_size` and the factor for available host RAM. This LLM path supports flat KV and MLA+INDEX tensor layouts with `kv_cache_dtype=auto`; VLM, grouped caches, and hybrid linear-attention conv/SSM caches remain unsupported for VMM HostKV offload.
+
 ## MTP with virtual KV Cache
 
 Co-located MTP target and draft models can use `enable_vmm_kvcache=true`. The scheduler maps and releases both caches together, including models whose target and draft KV tensors have different widths. For hybrid attention models, only full-attention KV tensors use VMM; convolution and recurrent states remain resident and are reserved separately from the physical KV page pool.
@@ -36,7 +51,7 @@ Append these flags to an existing MTP launch command:
 --enable_task_pipeline=false
 ```
 
-Hybrid linear-state caches and external draft models do not support weight VMM. Embedded Eagle3 drafts and speculative decoding with PD disaggregation are unsupported with virtual KV Cache. Existing KV VMM restrictions, including quantized KV Cache and host offload, still apply.
+Hybrid linear-state caches and external draft models do not support weight VMM. Embedded Eagle3 drafts and speculative decoding with PD disaggregation are unsupported with virtual KV Cache. Quantized KV Cache remains unsupported with KV VMM.
 
 ## Elastic KV Cache
 

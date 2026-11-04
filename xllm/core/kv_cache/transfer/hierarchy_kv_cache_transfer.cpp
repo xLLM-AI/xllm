@@ -256,6 +256,7 @@ void HierarchyKVCacheTransfer::shutdown() {
   }
   std::lock_guard<std::mutex> lock(mutex_);
   load_handles_.clear();
+  load_completion_synchronizers_.clear();
 }
 
 int32_t HierarchyKVCacheTransfer::domain_group_id(CacheHandle handle,
@@ -473,6 +474,7 @@ uint32_t HierarchyKVCacheTransfer::transfer_kv_blocks(
           existing->second.synchronizer->abort();
         }
         load_handles_[batch_id] = handle;
+        load_completion_synchronizers_[batch_id] = handle.synchronizer;
       }
       load_threadpool_->schedule(
           [this, batch_id, request = std::move(request), handle]() mutable {
@@ -491,6 +493,27 @@ uint32_t HierarchyKVCacheTransfer::transfer_kv_blocks(
                         block_transfer_info.front().transfer_type);
       return 0;
   }
+}
+
+bool HierarchyKVCacheTransfer::wait_for_load(uint64_t batch_id) {
+  std::shared_ptr<LayerSynchronizer> synchronizer;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = load_completion_synchronizers_.find(batch_id);
+    if (it == load_completion_synchronizers_.end()) {
+      return false;
+    }
+    synchronizer = std::move(it->second);
+    load_completion_synchronizers_.erase(it);
+  }
+
+  CHECK(synchronizer != nullptr);
+  CHECK_GT(synchronizer->size(), 0u);
+  device_.set_device();
+  CHECK(synchronizer->synchronize_all())
+      << "Host KV restore completion failed for batch_id=" << batch_id
+      << "; in-flight copy blocks cannot be released.";
+  return true;
 }
 
 uint32_t HierarchyKVCacheTransfer::transfer_kv_blocks(

@@ -186,10 +186,11 @@ void WorkerClient::prefetch_from_storage(
   NOT_IMPLEMENTED();
 }
 
-void WorkerClient::transfer_kv_blocks(
+folly::SemiFuture<uint32_t> WorkerClient::transfer_kv_blocks(
     const uint64_t batch_id,
     const std::vector<BlockTransferInfo>& block_transfer_info) {
   NOT_IMPLEMENTED();
+  return folly::makeSemiFuture(uint32_t(0));
 }
 
 folly::SemiFuture<bool> WorkerClient::sleep_async(MasterStatus master_status,

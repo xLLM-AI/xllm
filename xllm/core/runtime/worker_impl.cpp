@@ -2608,6 +2608,11 @@ uint32_t WorkerImpl::transfer_kv_blocks(
   return 0;
 }
 
+bool WorkerImpl::wait_for_kv_blocks_transfer(uint64_t batch_id) {
+  return hierarchy_kv_cache_transfer_ != nullptr &&
+         hierarchy_kv_cache_transfer_->wait_for_load(batch_id);
+}
+
 uint32_t WorkerImpl::transfer_kv_blocks(
     const uint64_t batch_id,
     Slice<BlockTransferInfo>& block_transfer_info) {

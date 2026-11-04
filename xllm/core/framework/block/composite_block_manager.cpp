@@ -547,9 +547,8 @@ void CompositeBlockManager::cache_full_blocks_for_sequence(Sequence* seq) {
   }
 
   for (auto& [type, entry] : leaves_) {
-    // EMBEDDING / LINEAR hold no token cache. KV also participates here so a
-    // Host-restored prefix is published immediately after its HBM destination
-    // blocks are allocated; cache_for_sequence later flushes only the tail.
+    // EMBEDDING / LINEAR hold no token cache. KV participates here after the
+    // hierarchy pool confirms a Host restore; later calls flush its tail.
     if (type == BlockType::EMBEDDING || type == BlockType::LINEAR) {
       continue;
     }
@@ -610,7 +609,8 @@ KVCacheState& CompositeBlockManager::kv_state_for(Sequence& seq) const {
 }
 
 bool CompositeBlockManager::allocate_sequence(Sequence* seq,
-                                              size_t num_tokens) {
+                                              size_t num_tokens,
+                                              bool cache_prefix) {
   if (seq == nullptr) {
     return false;
   }
@@ -619,7 +619,9 @@ bool CompositeBlockManager::allocate_sequence(Sequence* seq,
   // Publish blocks completed by the previous forward before growing again.
   // SlidingWindowBlockManager can then release a cached, slid-out block and
   // retry when its first allocation attempt exhausts the SWA pool.
-  cache_full_blocks_for_sequence(seq);
+  if (cache_prefix) {
+    cache_full_blocks_for_sequence(seq);
+  }
 
   // Fan out growth. Each leaf returns its newly allocated blocks (or nullopt
   // on failure). Stage keyed by BlockType; commit only after every leaf
@@ -676,7 +678,9 @@ bool CompositeBlockManager::allocate_sequence(Sequence* seq,
     kv_state.add_blocks(type, blocks);
   }
   staged.clear();
-  cache_full_blocks_for_sequence(seq);
+  if (cache_prefix) {
+    cache_full_blocks_for_sequence(seq);
+  }
 
   // Release slid-out SWA blocks only after they have had a chance to enter the
   // prefix cache. Other leaves are no-ops here.
@@ -694,14 +698,17 @@ void CompositeBlockManager::release_out_of_window_for_sequence(Sequence* seq) {
   }
 }
 
-void CompositeBlockManager::deallocate_for_sequence(Sequence* seq) {
+void CompositeBlockManager::deallocate_for_sequence(Sequence* seq,
+                                                    bool cache_prefix) {
   if (seq == nullptr) {
     return;
   }
   KVCacheState& kv_state = kv_state_for(*seq);
   // Publish prefix cache first, then release blocks. seq->reset() belongs to
   // the pool caller.
-  cache_full_blocks_for_sequence(seq);
+  if (cache_prefix) {
+    cache_full_blocks_for_sequence(seq);
+  }
   for (auto& [type, entry] : leaves_) {
     entry.leaf->deallocate(kv_state.blocks(type));
   }
@@ -974,11 +981,8 @@ size_t CompositeBlockManager::num_used_blocks() const {
 }
 
 double CompositeBlockManager::kv_cache_utilization() const {
-  const size_t total = num_total_blocks();
-  if (total == 0) {
-    return 0.0;
-  }
-  return static_cast<double>(num_used_blocks()) / static_cast<double>(total);
+  const LeafEntry* leaf = capacity_leaf();
+  return leaf == nullptr ? 0.0 : leaf->leaf->kv_cache_utilization();
 }
 
 void CompositeBlockManager::free(int32_t /*block_id*/) {
