@@ -57,6 +57,7 @@ limitations under the License.
 #include "models/dit/utils/minimax_h3_backend_selection.h"
 #include "models/dit/utils/minimax_h3_execution_metrics.h"
 #include "models/dit/utils/minimax_h3_phase_timing.h"
+#include "models/dit/utils/minimax_h3_qualified_execution_context.h"
 #include "models/dit/utils/util.h"
 #include "models/model_registry.h"
 
@@ -196,6 +197,13 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
         construction_(construction) {
     CHECK(task_type_ == "fl2va" || task_type_ == "ref2va")
         << "MiniMax-H3 dit_h3_task_type must be fl2va or ref2va";
+    if (context.get_dit_config().selected_policy == PolicyType::CACHE_DIT &&
+        (construction_ != H3BackendConstruction::A3_16CARD ||
+         LoadConfig::get_instance().enable_rolling_load())) {
+      throw std::invalid_argument(
+          "H3 CacheDiT requires qualified resident execution without rolling "
+          "load");
+    }
     phase_timing_enabled_ = DiTConfig::get_instance().dit_h3_phase_timing();
     const ParallelArgs& timing_parallel = context.get_parallel_args();
     phase_timing_metadata_.profile =
@@ -216,6 +224,8 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
     if (construction_ != H3BackendConstruction::NATIVE) {
       CHECK_EQ(task_type_, "ref2va");
       const ParallelArgs& parallel = context.get_parallel_args();
+      qualified_cache_config_ = context.get_dit_config();
+      qualified_parallel_args_ = parallel;
       if (construction_ == H3BackendConstruction::REFERENCE_TEST) {
         CHECK_EQ(parallel.world_size(), 1);
         CHECK_EQ(parallel.rank(), 0);
@@ -808,9 +818,10 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
     CHECK_EQ(audio[0].item<float>(), 0.0F);
   }
 
-  void denoise_qualified_request(H3QualifiedRequest& request,
-                                 H3QualifiedExecutionMetrics* metrics = nullptr,
-                                 int64_t steps = 49) {
+  void denoise_qualified_request(
+      H3QualifiedRequest& request,
+      H3QualifiedExecutionContext* execution = nullptr,
+      int64_t steps = 49) {
     initialize_qualified_schedule(request);
     const torch::Tensor video_time = scheduler_.timesteps().to(torch::kCPU);
     const torch::Tensor audio_time =
@@ -830,7 +841,7 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
                                             plan.inverse_indices,
                                             step};
       H3QualifiedPrediction prediction =
-          qualified_denoiser_->predict_step(request, step_input);
+          qualified_denoiser_->predict_step(request, step_input, execution);
       torch::Tensor video_x0;
       torch::Tensor audio_x0;
       request.video_rows = step_generated_rows(
@@ -853,12 +864,12 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
       if (diagnostics.after_update) {
         diagnostics.after_update(step, request);
       }
-      if (metrics != nullptr) {
+      if (execution != nullptr) {
         record_h3_qualified_execution_step(
-            *metrics,
+            execution->metrics,
             static_cast<int32_t>(phase_timing_metadata_.global_rank),
             step,
-            /*cache_hit=*/false,
+            prediction.cache_hit,
             prediction.executed_blocks);
       }
     }
@@ -896,23 +907,39 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
 
   DiTForwardOutput forward_qualified(const DiTModelParams& input) {
     torch::NoGradGuard no_grad;
-    H3QualifiedExecutionMetrics metrics;
-    metrics.request_id = h3_execution_request_id(input);
-    H3PhaseTimer timer = make_phase_timer(metrics.request_id,
+    std::string request_id = h3_execution_request_id(input);
+    H3PhaseTimer timer = make_phase_timer(request_id,
                                           /*denoise_steps=*/49);
     timer.start(H3TimingPhase::PREPARE);
     H3QualifiedRequest request = prepare_qualified_request(input);
+    H3QualifiedExecutionContext execution;
+    const auto prepare_execution = [&] {
+      execution = make_h3_qualified_execution_context(request,
+                                                      qualified_cache_config_,
+                                                      *qualified_parallel_args_,
+                                                      /*infer_steps=*/49,
+                                                      options_.device());
+    };
+    if (qualified_cache_config_.selected_policy == PolicyType::CACHE_DIT) {
+      // All ranks finish row-index/state setup before any rank starts step 0.
+      run_qualified_phase("cache setup", prepare_execution);
+    } else {
+      // The dense path creates no probe tensor or extra cache collective.
+      prepare_execution();
+    }
+    execution.metrics.request_id = std::move(request_id);
     timer.advance(H3TimingPhase::DENOISE);
-    denoise_qualified_request(request, &metrics);
+    denoise_qualified_request(request, &execution);
     timer.advance(H3TimingPhase::DECODE);
     DiTForwardOutput output = run_qualified_owner_output(
         [&] { return decode_qualified_output(request); });
     run_qualified_phase("final synchronize", [&] {
-      finish_h3_qualified_request(metrics, options_.device());
+      finish_h3_qualified_request(execution.metrics, options_.device());
     });
     timer.finish();
     emit_h3_qualified_execution_summary(
-        metrics, static_cast<int32_t>(phase_timing_metadata_.global_rank));
+        execution.metrics,
+        static_cast<int32_t>(phase_timing_metadata_.global_rank));
     return output;
   }
 
@@ -1842,6 +1869,8 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
   bool phase_timing_enabled_ = false;
   H3PhaseTimingMetadata phase_timing_metadata_;
   H3QualifiedShapeConfig qualified_shape_;
+  DiTCacheConfig qualified_cache_config_;
+  std::optional<ParallelArgs> qualified_parallel_args_;
   std::unique_ptr<H3QualifiedDenoiser> qualified_denoiser_;
   int64_t patch_h_;
   int64_t patch_w_;

@@ -82,6 +82,10 @@ std::unique_ptr<DitCacheImpl> create_dit_cache(const DiTCacheConfig& cfg) {
       return std::make_unique<FBCacheTaylorSeer>();
     case PolicyType::ResidualCache:
       return std::make_unique<ResidualCache>();
+    case PolicyType::CACHE_DIT:
+      // The qualified denoiser owns one state per request. The singleton must
+      // not retain its residual tensors across requests.
+      return std::make_unique<DiTNonCache>();
     default:
       return std::make_unique<DiTNonCache>();
   }

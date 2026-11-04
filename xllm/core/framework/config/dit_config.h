@@ -51,6 +51,13 @@ class DiTConfig final {
          "dit_cache_end_steps",
          "dit_cache_start_blocks",
          "dit_cache_end_blocks",
+         "dit_cachedit_warmup_steps",
+         "dit_cachedit_residual_diff_threshold",
+         "dit_cachedit_max_cached_steps",
+         "dit_cachedit_max_consecutive_hits",
+         "dit_cachedit_front_blocks",
+         "dit_cachedit_back_blocks",
+         "dit_cachedit_linear_residual_prediction",
          "dit_sp_communication_overlap",
          "dit_debug_print",
          "dit_laser_attention_enabled",
@@ -90,6 +97,20 @@ class DiTConfig final {
   PROPERTY(int64_t, dit_cache_start_blocks) = 5;
 
   PROPERTY(int64_t, dit_cache_end_blocks) = 5;
+
+  PROPERTY(int64_t, dit_cachedit_warmup_steps) = 30;
+
+  PROPERTY(double, dit_cachedit_residual_diff_threshold) = 0.04;
+
+  PROPERTY(int64_t, dit_cachedit_max_cached_steps) = 4;
+
+  PROPERTY(int64_t, dit_cachedit_max_consecutive_hits) = 1;
+
+  PROPERTY(int64_t, dit_cachedit_front_blocks) = 1;
+
+  PROPERTY(int64_t, dit_cachedit_back_blocks) = 0;
+
+  PROPERTY(bool, dit_cachedit_linear_residual_prediction) = true;
 
   PROPERTY(bool, dit_sp_communication_overlap) = true;
 

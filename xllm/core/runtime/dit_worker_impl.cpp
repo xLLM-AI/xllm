@@ -24,6 +24,7 @@ limitations under the License.
 #include <exception>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <utility>
 
 #include "common/metrics.h"
@@ -86,6 +87,23 @@ DiTCacheConfig parse_dit_cache_from_flags() {
         ::xllm::DiTConfig::get_instance().dit_cache_end_blocks();
     cache_config.residual_cache.skip_interval_steps =
         ::xllm::DiTConfig::get_instance().dit_cache_skip_interval_steps();
+  } else if (DiTConfig::get_instance().dit_cache_policy() == "CacheDiT") {
+    const auto& config = DiTConfig::get_instance();
+    if (config.dit_h3_execution_profile() != kMiniMaxH3ExecutionProfile) {
+      throw std::invalid_argument(
+          "CacheDiT requires the qualified MiniMax-H3 execution profile");
+    }
+    cache_config.selected_policy = PolicyType::CACHE_DIT;
+    auto& options = cache_config.cache_dit;
+    options.warmup_steps = config.dit_cachedit_warmup_steps();
+    options.residual_diff_threshold =
+        static_cast<float>(config.dit_cachedit_residual_diff_threshold());
+    options.max_cached_steps = config.dit_cachedit_max_cached_steps();
+    options.max_consecutive_hits = config.dit_cachedit_max_consecutive_hits();
+    options.front_blocks = config.dit_cachedit_front_blocks();
+    options.back_blocks = config.dit_cachedit_back_blocks();
+    options.linear_residual_prediction =
+        config.dit_cachedit_linear_residual_prediction();
   } else if (::xllm::DiTConfig::get_instance().dit_cache_policy() == "None") {
     cache_config.selected_policy = PolicyType::None;
   }
@@ -131,12 +149,13 @@ bool DiTWorkerImpl::init_model(const std::string& model_weights_path,
                     "ref2va profile, an NPU device and batch limit 1";
       return false;
     }
-    // N07 establishes the dense baseline before enabling later optimizations.
-    if (config.dit_cache_policy() != "None" ||
+    // Only the qualified CacheDiT policy is enabled at this stage.
+    if ((config.dit_cache_policy() != "None" &&
+         config.dit_cache_policy() != "CacheDiT") ||
         config.dit_sp_communication_overlap() ||
         config.dit_sparse_attention_enabled() ||
         config.dit_laser_attention_enabled()) {
-      LOG(ERROR) << "MiniMax-H3 N07 requires cache=None and communication "
+      LOG(ERROR) << "MiniMax-H3 requires cache=None/CacheDiT and communication "
                     "overlap, sparse attention and laser attention disabled";
       return false;
     }

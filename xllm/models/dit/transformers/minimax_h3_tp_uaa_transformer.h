@@ -30,6 +30,7 @@ limitations under the License.
 #include "models/dit/transformers/minimax_h3_denoiser.h"
 #include "models/dit/transformers/minimax_h3_tp_uaa_block.h"
 #include "models/dit/utils/dit_parallel_linear.h"
+#include "models/dit/utils/minimax_h3_cached_blocks.h"
 
 namespace xllm {
 
@@ -97,35 +98,56 @@ class MiniMaxH3TpUaaResidentTransformerImpl final : public torch::nn::Module {
     workspace_->reserve(hidden.size(0), hidden.options());
     torch::Tensor current = hidden;
     for (int64_t layer = 0; layer < kResidentBlockCount; ++layer) {
-      MiniMaxH3TpUaaBlock& block = block_layers_[static_cast<size_t>(layer)];
-      if (observer) {
-        MiniMaxH3ResidualBranchTrace trace =
-            block->forward(current,
-                           time_embedding,
-                           combined_indices,
-                           rope_frequencies,
-                           cu_seqlens,
-                           workspace_.get(),
-                           verify_intermediates);
-        current = trace.output;
-        observer(step, layer, trace);
-      } else {
-        current = block->forward_output_only(current,
-                                             time_embedding,
-                                             combined_indices,
-                                             rope_frequencies,
-                                             cu_seqlens,
-                                             workspace_.get(),
-                                             verify_intermediates);
-      }
-      if (verify_intermediates &&
-          !torch::isfinite(current).all().item<bool>()) {
-        LOG(FATAL) << "MiniMax-H3 resident block " << layer
-                   << " produced NaN or Inf";
-      }
-      ++block_forwards_;
+      current = execute_block(layer,
+                              current,
+                              time_embedding,
+                              combined_indices,
+                              rope_frequencies,
+                              cu_seqlens,
+                              observer,
+                              step,
+                              verify_intermediates);
     }
     return current;
+  }
+
+  H3QualifiedCachedBlockOutput forward_cached(
+      const torch::Tensor& hidden,
+      const torch::Tensor& time_embedding,
+      const torch::Tensor& combined_indices,
+      const torch::Tensor& rope_frequencies,
+      const torch::Tensor& cu_seqlens,
+      int64_t step,
+      H3QualifiedExecutionContext& execution,
+      const MiniMaxH3LayerObserver& observer = nullptr,
+      bool verify_intermediates = false) {
+    if (loaded_block_count_ != kResidentBlockCount ||
+        execution.cache == nullptr) {
+      throw std::logic_error(
+          "H3 cached forward requires loaded resident blocks and request "
+          "state");
+    }
+    validate_forward_shapes(
+        hidden, time_embedding, combined_indices, rope_frequencies, cu_seqlens);
+    workspace_->reserve(hidden.size(0), hidden.options());
+    return run_h3_qualified_cached_blocks(
+        hidden,
+        step,
+        kResidentBlockCount,
+        *execution.cache,
+        execution.probe_rows,
+        execution.consensus_group,
+        [&](int64_t layer, const torch::Tensor& input) {
+          return execute_block(layer,
+                               input,
+                               time_embedding,
+                               combined_indices,
+                               rope_frequencies,
+                               cu_seqlens,
+                               observer,
+                               step,
+                               verify_intermediates);
+        });
   }
 
   int64_t loaded_block_count() const { return loaded_block_count_; }
@@ -161,6 +183,44 @@ class MiniMaxH3TpUaaResidentTransformerImpl final : public torch::nn::Module {
   }
 
  private:
+  torch::Tensor execute_block(int64_t layer,
+                              const torch::Tensor& input,
+                              const torch::Tensor& time_embedding,
+                              const torch::Tensor& combined_indices,
+                              const torch::Tensor& rope_frequencies,
+                              const torch::Tensor& cu_seqlens,
+                              const MiniMaxH3LayerObserver& observer,
+                              int64_t step,
+                              bool verify_intermediates) {
+    MiniMaxH3TpUaaBlock& block = block_layers_[static_cast<size_t>(layer)];
+    torch::Tensor current;
+    if (observer) {
+      MiniMaxH3ResidualBranchTrace trace = block->forward(input,
+                                                          time_embedding,
+                                                          combined_indices,
+                                                          rope_frequencies,
+                                                          cu_seqlens,
+                                                          workspace_.get(),
+                                                          verify_intermediates);
+      current = trace.output;
+      observer(step, layer, trace);
+    } else {
+      current = block->forward_output_only(input,
+                                           time_embedding,
+                                           combined_indices,
+                                           rope_frequencies,
+                                           cu_seqlens,
+                                           workspace_.get(),
+                                           verify_intermediates);
+    }
+    if (verify_intermediates && !torch::isfinite(current).all().item<bool>()) {
+      LOG(FATAL) << "MiniMax-H3 resident block " << layer
+                 << " produced NaN or Inf";
+    }
+    ++block_forwards_;
+    return current;
+  }
+
   void validate_forward_shapes(const torch::Tensor& hidden,
                                const torch::Tensor& time_embedding,
                                const torch::Tensor& combined_indices,
@@ -299,8 +359,14 @@ class MiniMaxH3TpUaaResidentDenoiserImpl final : public torch::nn::Module {
       const MiniMaxH3LayerObserver& observer = nullptr,
       bool retain_preparation = false,
       bool retain_model_boundary = false,
-      bool verify_intermediates = false) {
+      bool verify_intermediates = false,
+      H3QualifiedExecutionContext* execution = nullptr,
+      SimilarityResidualCacheDecision* cache_decision = nullptr) {
     verify_fixed_weights();
+    const int64_t before_blocks = transformer_->block_forwards();
+    if (cache_decision != nullptr) {
+      *cache_decision = {};
+    }
     if (step == 0) {
       validate_inputs(
           layout, video_rows, audio_rows, timesteps, inverse_indices);
@@ -362,15 +428,32 @@ class MiniMaxH3TpUaaResidentDenoiserImpl final : public torch::nn::Module {
     torch::Tensor local_indices =
         dit::sp_split_sequence(combined_indices, /*dim=*/0, sp_group_)
             .contiguous();
-    torch::Tensor local_hidden_out =
-        transformer_->forward(local_hidden,
-                              time_embedding,
-                              local_indices,
-                              local_rope,
-                              layout.cu_seqlens,
-                              observer,
-                              step,
-                              verify_intermediates);
+    torch::Tensor local_hidden_out;
+    if (execution != nullptr && execution->cache != nullptr) {
+      H3QualifiedCachedBlockOutput cached =
+          transformer_->forward_cached(local_hidden,
+                                       time_embedding,
+                                       local_indices,
+                                       local_rope,
+                                       layout.cu_seqlens,
+                                       step,
+                                       *execution,
+                                       observer,
+                                       verify_intermediates);
+      local_hidden_out = std::move(cached.hidden);
+      if (cache_decision != nullptr) {
+        *cache_decision = cached.decision;
+      }
+    } else {
+      local_hidden_out = transformer_->forward(local_hidden,
+                                               time_embedding,
+                                               local_indices,
+                                               local_rope,
+                                               layout.cu_seqlens,
+                                               observer,
+                                               step,
+                                               verify_intermediates);
+    }
     hidden = parallel_state::gather(
         local_hidden_out.contiguous(), sp_group_, /*dim=*/0);
     if (retain_model_boundary) {
@@ -388,7 +471,7 @@ class MiniMaxH3TpUaaResidentDenoiserImpl final : public torch::nn::Module {
     }
     output.video_velocity = final_output.raw_selected_video_logits;
     output.audio_velocity = final_output.raw_selected_audio_logits;
-    output.executed_layers = MiniMaxH3TransformerConfig::kNumLayers;
+    output.executed_layers = transformer_->block_forwards() - before_blocks;
     return output;
   }
 

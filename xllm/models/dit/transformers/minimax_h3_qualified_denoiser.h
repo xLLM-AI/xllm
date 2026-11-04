@@ -20,12 +20,15 @@ limitations under the License.
 
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
+#include <stdexcept>
 #include <utility>
 
 #include "models/dit/transformers/minimax_h3_denoiser.h"
 #include "models/dit/transformers/minimax_h3_qualified_weights.h"
 #include "models/dit/transformers/minimax_h3_tp_uaa_transformer.h"
+#include "models/dit/utils/minimax_h3_qualified_execution_context.h"
 #include "models/dit/utils/minimax_h3_qualified_input.h"
 
 namespace xllm {
@@ -42,6 +45,8 @@ struct H3QualifiedPrediction {
   torch::Tensor video_velocity;
   torch::Tensor audio_velocity;
   int64_t executed_blocks = 0;
+  bool cache_hit = false;
+  float relative_l1 = std::numeric_limits<float>::infinity();
 };
 
 // Callbacks consume borrowed tensors synchronously. Retaining a rows tensor
@@ -91,12 +96,19 @@ class H3QualifiedDenoiser final {
     weights_loaded_ = true;
   }
 
-  H3QualifiedPrediction predict_step(const H3QualifiedRequest& request,
-                                     const H3QualifiedStepInput& input) {
+  H3QualifiedPrediction predict_step(
+      const H3QualifiedRequest& request,
+      const H3QualifiedStepInput& input,
+      H3QualifiedExecutionContext* execution = nullptr) {
     CHECK(weights_loaded_) << "Qualified weights are not loaded";
     CHECK_GE(input.step_index, 0);
     CHECK_LT(input.step_index, 49);
+    if (execution != nullptr && execution->cache != nullptr && !resident_) {
+      throw std::invalid_argument(
+          "H3 CacheDiT requires the resident qualified denoiser");
+    }
     const int64_t before_blocks = resident_ ? resident_->block_forwards() : 0;
+    SimilarityResidualCacheDecision cache_decision;
     MiniMaxH3DenoiserOutput result;
     if (resident_) {
       result = resident_->forward(request.layout,
@@ -108,7 +120,9 @@ class H3QualifiedDenoiser final {
                                   diagnostics_.layer_observer,
                                   diagnostics_.retain_preparation,
                                   diagnostics_.retain_model_boundary,
-                                  diagnostics_.verify_intermediates);
+                                  diagnostics_.verify_intermediates,
+                                  execution,
+                                  &cache_decision);
     } else {
       result = streaming_->forward(*weight_source_,
                                    request.layout,
@@ -132,7 +146,9 @@ class H3QualifiedDenoiser final {
             .audio_velocity = result.audio_velocity.unsqueeze(0),
             .executed_blocks = resident_
                                    ? resident_->block_forwards() - before_blocks
-                                   : result.executed_layers};
+                                   : result.executed_layers,
+            .cache_hit = cache_decision.hit,
+            .relative_l1 = cache_decision.relative_l1};
   }
 
   const H3QualifiedDiagnostics& diagnostics() const { return diagnostics_; }

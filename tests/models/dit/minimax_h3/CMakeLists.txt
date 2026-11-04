@@ -16,8 +16,8 @@ cc_test(
 cc_test(
   NAME minimax_h3_math_test
   CPU_ONLY
-  SRCS minimax_h3_qualified_math_test.cpp
-  DEPS :model_loader state_dict torch GTest::gtest_main
+  SRCS minimax_h3_qualified_math_test.cpp minimax_h3_cached_blocks_test.cpp
+  DEPS :model_loader state_dict dit_cache torch GTest::gtest_main
 )
 
 cc_test(
@@ -40,3 +40,11 @@ cc_test(
   SRCS minimax_h3_backend_selection_test.cpp
   DEPS :config proto::xllm_proto torch GTest::gtest_main
 )
+
+if(USE_NPU)
+  cc_test(
+    NAME minimax_h3_cache_collective_test
+    SRCS minimax_h3_cache_collective_test.cpp
+    DEPS :parallel_state dit_cache torch GTest::gtest_main
+  )
+endif()

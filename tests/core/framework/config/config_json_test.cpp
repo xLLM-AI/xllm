@@ -40,6 +40,43 @@ limitations under the License.
 namespace xllm {
 namespace {
 
+TEST(DiTConfigTest, CacheDiTDefaultsAndExplicitZeroRoundTrip) {
+  DiTConfig config;
+  EXPECT_EQ(config.dit_cache_policy(), "TaylorSeer");
+  EXPECT_EQ(config.dit_cachedit_warmup_steps(), 30);
+  EXPECT_DOUBLE_EQ(config.dit_cachedit_residual_diff_threshold(), 0.04);
+  EXPECT_EQ(config.dit_cachedit_max_cached_steps(), 4);
+  EXPECT_EQ(config.dit_cachedit_max_consecutive_hits(), 1);
+  EXPECT_EQ(config.dit_cachedit_front_blocks(), 1);
+  EXPECT_EQ(config.dit_cachedit_back_blocks(), 0);
+  EXPECT_TRUE(config.dit_cachedit_linear_residual_prediction());
+  const JsonReader json = config::parse_json_string(
+      R"({"dit_cache_policy":"CacheDiT","dit_cachedit_warmup_steps":0,
+          "dit_cachedit_max_cached_steps":0,
+          "dit_cachedit_linear_residual_prediction":false})");
+  config.from_json(json);
+  EXPECT_EQ(config.dit_cachedit_warmup_steps(), 0);
+  EXPECT_EQ(config.dit_cachedit_max_cached_steps(), 0);
+  EXPECT_FALSE(config.dit_cachedit_linear_residual_prediction());
+  nlohmann::ordered_json output = nlohmann::ordered_json::object();
+  config.append_config_json(output);
+  EXPECT_EQ(output.at("dit_cachedit_warmup_steps"), 0);
+  EXPECT_EQ(output.at("dit_cachedit_max_cached_steps"), 0);
+  EXPECT_EQ(output.at("dit_cachedit_linear_residual_prediction"), false);
+  const auto& names = DiTConfig::option_category().option_names;
+  for (const std::string& name : {"dit_cachedit_warmup_steps",
+                                  "dit_cachedit_residual_diff_threshold",
+                                  "dit_cachedit_max_cached_steps",
+                                  "dit_cachedit_max_consecutive_hits",
+                                  "dit_cachedit_front_blocks",
+                                  "dit_cachedit_back_blocks",
+                                  "dit_cachedit_linear_residual_prediction"}) {
+    google::CommandLineFlagInfo info;
+    EXPECT_TRUE(google::GetCommandLineFlagInfo(name.c_str(), &info));
+    EXPECT_NE(std::find(names.begin(), names.end(), name), names.end());
+  }
+}
+
 TEST(DiTConfigTest, H3ExecutionProfileIsOptInAndRoundTripsJson) {
   DiTConfig config;
   EXPECT_EQ(config.dit_h3_execution_profile(), "native");

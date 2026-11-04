@@ -265,6 +265,13 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `dit_cache_end_steps` | `int64` | `5` | 末尾阶段跳过的 step 数。 |
 | `dit_cache_start_blocks` | `int64` | `5` | 起始阶段跳过的 block 数。 |
 | `dit_cache_end_blocks` | `int64` | `5` | 末尾阶段跳过的 block 数。 |
+| `dit_cachedit_warmup_steps` | `int64` | `30` | CacheDiT 预热步数；采样步从 0 开始。 |
+| `dit_cachedit_residual_diff_threshold` | `double` | `0.04` | CacheDiT 相对 L1 差异阈值。 |
+| `dit_cachedit_max_cached_steps` | `int64` | `4` | CacheDiT 总命中上限；-1 表示无限制，0 表示不命中。 |
+| `dit_cachedit_max_consecutive_hits` | `int64` | `1` | CacheDiT 连续命中上限。 |
+| `dit_cachedit_front_blocks` | `int64` | `1` | CacheDiT 每步实际执行的前部 block 数。 |
+| `dit_cachedit_back_blocks` | `int64` | `0` | CacheDiT 每步实际执行的后部 block 数。 |
+| `dit_cachedit_linear_residual_prediction` | `bool` | `true` | 启用 CacheDiT 线性残差预测。 |
 | `dit_sp_communication_overlap` | `bool` | `true` | 是否为 sequence parallel 启用通信与计算的 overlap。 |
 | `dit_debug_print` | `bool` | `false` | 是否打印 DiT 模型 debug 信息。 |
 | `dit_generation_image_area_max` | `int64` | `0` | 图像生成请求允许的最大图像面积（宽 * 高）；`0` 表示不限制。 |
