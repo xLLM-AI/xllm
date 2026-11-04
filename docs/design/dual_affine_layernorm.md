@@ -189,7 +189,10 @@ executor 销毁。缓存在进程内为 4 槽表并受互斥锁保护，只保�
 5. 两路分支各自 `Cast(gamma)/Cast(beta)` → `Mul` → `Add` → `Cast` 回 T，写入 `tmp1` 的
    T 视图并 `CopyOut` 到 `row*H + start`。
 
-仅在行首/行尾各一次 `MTE2_V` / `V_MTE3` / `MTE3_V` 同步；无跨核同步、无 workspace。
+同步只发生在核内且逐次覆盖：行首一次 `MTE2_V`（等整行 x 与参数落地）；每个分支的
+`CopyOut` 各自加一对 `V_MTE3`（等向量写完成再发 DMA）与 `MTE3_V`（等 DMA 读完再允许
+复用 `tmp1`）。两路输出共用 `tmp1` 视图，因此这对同步是**每个 CopyOut 各一组**，
+而不是整行一组；无跨核同步、无 workspace。
 
 ## 支持硬件
 
