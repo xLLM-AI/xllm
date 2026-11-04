@@ -282,18 +282,14 @@ Sequence* BatchState::group_sequence(size_t index) const {
 
 BatchInputData BatchState::input_data(const BatchSequencePlan& plan) {
   if (KVCacheConfig::get_instance().enable_vmm_kvcache()) {
-    std::vector<Block> retained_blocks;
-    size_t block_count = 0;
-    for (auto* sequence : plan.sequences()) {
-      block_count += sequence->kv_state().num_blocks(BlockType::KV);
-    }
-    retained_blocks.reserve(block_count);
+    std::vector<std::shared_ptr<KVCacheBlockLease>> leases;
+    leases.reserve(plan.sequences().size());
     for (auto* sequence : plan.sequences()) {
       const auto blocks = sequence->kv_state().blocks(BlockType::KV);
-      retained_blocks.insert(
-          retained_blocks.end(), blocks.begin(), blocks.end());
+      leases.emplace_back(sequence->retain_kv_cache_blocks(
+          std::vector<Block>(blocks.begin(), blocks.end())));
     }
-    vmm_kv_blocks_ = std::move(retained_blocks);
+    vmm_kv_leases_ = std::move(leases);
   }
   return {plan.sequences(),
           sequence_groups_,

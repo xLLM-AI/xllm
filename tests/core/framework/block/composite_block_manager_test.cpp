@@ -30,11 +30,13 @@ limitations under the License.
 #include "core/framework/block/block_manager_pool.h"
 #include "core/framework/block/embedding_block_manager.h"
 #include "core/framework/block/vmm_kv_block_manager.h"
+#include "core/framework/config/kv_cache_config.h"
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/block/block_utils.h"
 #include "core/kv_cache/block/concurrent_block_manager_impl.h"
 #include "core/kv_cache/block/linear_state_block_manager.h"
 #include "core/kv_cache/storage/vmm_kv_page_allocator.h"
+#include "core/util/scope_guard.h"
 #include "framework/config/scheduler_config.h"
 #include "framework/request/request.h"
 #include "framework/request/sequence.h"
@@ -2080,6 +2082,57 @@ TEST(CompositeBlockManagerTest,
   EXPECT_EQ(manager->num_used_blocks(), 0u);
   EXPECT_EQ(manager->num_free_blocks(), 4u);
   EXPECT_EQ(manager->allocate(/*num_blocks=*/1).size(), 1u);
+}
+
+TEST(CompositeBlockManagerTest,
+     VirtualMemoryPrefixCacheReconcilesRetiredBatchUsage) {
+  KVCacheConfig& config = KVCacheConfig::get_instance();
+  const bool original_vmm = config.enable_vmm_kvcache();
+  ScopeGuard restore_config([&] { config.enable_vmm_kvcache(original_vmm); });
+  config.enable_vmm_kvcache(/*value=*/true);
+  for (const bool release_sequence_first : {false, true}) {
+    SCOPED_TRACE(release_sequence_first);
+    TestVmmKVPageAllocator allocator(/*dp_size=*/1);
+    auto manager = make_vmm_prefix_manager(allocator);
+    const std::vector<int32_t> tokens(/*count=*/5, /*value=*/7);
+    Sequence sequence = MakeTestSequence(/*index=*/0, tokens);
+    std::vector<Block> blocks = manager->allocate(/*num_blocks=*/1);
+    manager->cache(tokens, blocks);
+    sequence.kv_state().replace_composite_blocks(BlockType::KV,
+                                                 std::move(blocks),
+                                                 /*num_shared_blocks=*/1,
+                                                 /*cache_publish_cursor=*/1);
+    auto first = std::make_unique<BatchState>();
+    auto second = std::make_unique<BatchState>();
+    for (auto* batch : {first.get(), second.get()}) {
+      batch->add(&sequence, /*token_budget=*/4);
+      batch->prepare_sequence_input_data();
+      batch->prepare_sequence_input_data();
+    }
+    ASSERT_EQ(sequence.kv_state().blocks(BlockType::KV)[0].ref_count(), 4u);
+    EXPECT_EQ(manager->num_used_blocks(), 1u);
+    if (release_sequence_first) {
+      manager->deallocate(sequence.kv_state().blocks(BlockType::KV));
+      sequence.reset();
+    }
+    first.reset();
+    EXPECT_EQ(manager->num_used_blocks(), 1u);
+    second.reset();
+    if (!release_sequence_first) {
+      // Batch retirement must not mark a live sequence's blocks inactive.
+      EXPECT_EQ(manager->num_used_blocks(), 1u);
+      manager->deallocate(sequence.kv_state().blocks(BlockType::KV));
+      sequence.reset();
+    }
+    EXPECT_EQ(manager->num_used_blocks(), 0u);
+    EXPECT_EQ(manager->num_blocks_in_prefix_cache(), 1u);
+    EXPECT_EQ(manager->num_free_blocks(), 4u);
+    EXPECT_TRUE(allocator.released_pages.empty());
+    std::vector<Block> reused = manager->allocate_shared(tokens);
+    ASSERT_EQ(reused.size(), 1u);
+    EXPECT_EQ(manager->num_used_blocks(), 1u);
+    manager->deallocate(reused);
+  }
 }
 
 TEST(CompositeBlockManagerTest,
