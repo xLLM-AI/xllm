@@ -140,7 +140,7 @@ class Sequence {
 
   Sequence(const Sequence& other);
   Sequence(const Sequence& other, size_t index);
-  virtual ~Sequence() = default;
+  virtual ~Sequence();
 
   // Polymorphic copy for beam / best_of expansion: same request, new index.
   // Derived types return their own type so no state is sliced away.
@@ -425,9 +425,6 @@ class Sequence {
   std::shared_ptr<KVCacheBlockLease> retain_host_restore_blocks(
       std::vector<Block> blocks);
   std::shared_ptr<KVCacheBlockLease> take_host_restore_blocks();
-  // Keep transfer retirement outside the manager-deallocate/reset window.
-  std::vector<std::shared_ptr<KVCacheBlockLeaseOwner>> host_restore_owners()
-      const;
 
   // for generated tokens
   float get_acc_logprob();
@@ -565,7 +562,6 @@ class Sequence {
   std::optional<size_t> effective_restore_tokens_;
   size_t host_cache_copy_units_ = 0;
   std::shared_ptr<KVCacheBlockLease> pending_host_restore_;
-  std::vector<std::shared_ptr<KVCacheBlockLeaseOwner>> host_restore_owners_;
 
   // Held by value: it is always present after construction, so a unique_ptr
   // only added a heap allocation per sequence and an indirection on the

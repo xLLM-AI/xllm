@@ -35,6 +35,7 @@ class BlockManagerImpl : public BlockManager {
   std::vector<Block> allocate(size_t num_blocks) override;
 
   void deallocate(const Slice<Block>& blocks) override;
+  void release(std::span<Block> blocks) override;
 
   // Flat incremental growth: allocate ceil(num_tokens/block_size) - held blocks
   // and return them (does not insert into the sequence). The shared default for

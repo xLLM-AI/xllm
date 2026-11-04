@@ -26,27 +26,24 @@ limitations under the License.
 
 namespace xllm {
 KVCacheBlockLease::KVCacheBlockLease(std::vector<Block> blocks)
-    : blocks_(std::move(blocks)),
-      owner_(std::make_shared<KVCacheBlockLeaseOwner>()) {}
+    : blocks_(std::move(blocks)) {}
 
-KVCacheBlockLease::~KVCacheBlockLease() {
-  auto lock = owner_->lock();
-  if (owner_->released()) {
-    for (Block& block : blocks_) {
-      Block retained = std::move(block);
-      if (retained.manager() != nullptr) {
-        // Sequence deallocation may have seen an extra transfer alias and kept
-        // a cached block logically in use. Recheck after the owner has gone.
-        retained.manager()->deallocate(Slice<Block>(&retained, /*size=*/1));
-      }
+KVCacheBlockLease::~KVCacheBlockLease() { Block::release(std::move(blocks_)); }
+
+void Block::release(std::vector<Block> blocks) {
+  size_t begin = 0;
+  while (begin < blocks.size()) {
+    BlockManager* manager = blocks[begin].manager();
+    size_t end = begin + 1;
+    while (end < blocks.size() && blocks[end].manager() == manager) {
+      ++end;
     }
+    if (manager != nullptr) {
+      manager->release(std::span<Block>(blocks).subspan(begin, end - begin));
+    }
+    begin = end;
   }
-  // Drop aliases before releasing the owner lock, including when the owner
-  // remains active. Its deallocator must observe the final reference count.
-  blocks_.clear();
 }
-
-void KVCacheBlockLease::release_owner() { owner_->release(); }
 
 Block::Block(int32_t id, BlockManager* manager)
     : id_(id), ref_count_(new std::atomic<uint32_t>(1)), manager_(manager) {

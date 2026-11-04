@@ -40,6 +40,7 @@ class ConcurrentBlockManagerImpl : public BlockManager {
   std::vector<Block> allocate(size_t num_blocks) override;
   Block allocate() override;
   void deallocate(const Slice<Block>& blocks) override;
+  void release(std::span<Block> blocks) override;
   void free(int32_t block_id) override;
 
   std::vector<Block> allocate_shared(

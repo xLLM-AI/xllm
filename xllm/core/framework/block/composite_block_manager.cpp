@@ -148,8 +148,8 @@ std::unique_ptr<BlockManager> make_kv_leaf(const BlockManager::Options& kv_opts,
 
 using ProbeResult = CompositeBlockManager::ProbeResult;
 
-// Trim outcome. `to_mount` feeds the shape's mount step; `to_drop` goes to
-// leaf->deallocate() (cache release, not physical free).
+// Trim outcome. `to_mount` feeds the shape's mount step; `to_drop` releases
+// the aliases that are outside the usable prefix.
 struct TrimOutcome {
   std::vector<ProbeResult> to_mount;
   std::vector<ProbeResult> to_drop;
@@ -643,7 +643,7 @@ bool CompositeBlockManager::allocate_sequence(Sequence* seq,
 
   auto release_staged = [&]() {
     for (auto& [type, blocks] : staged) {
-      leaf_of(type)->deallocate(blocks);
+      Block::release(std::move(blocks));
     }
     staged.clear();
   };
@@ -716,15 +716,12 @@ void CompositeBlockManager::deallocate_for_sequence(Sequence* seq,
   if (seq == nullptr) {
     return;
   }
-  KVCacheState& kv_state = kv_state_for(*seq);
-  // Publish prefix cache first, then release blocks. seq->reset() belongs to
-  // the pool caller.
+  // Prefix publication needs the live cache state. Reset consumes its block
+  // ownership as well as the sequence metadata.
   if (cache_prefix) {
     publish_prefix(seq);
   }
-  for (auto& [type, entry] : leaves_) {
-    entry.leaf->deallocate(kv_state.blocks(type));
-  }
+  seq->reset();
 }
 
 std::vector<CompositeBlockManager::ProbeResult>
@@ -779,14 +776,11 @@ void CompositeBlockManager::release_probes(std::vector<ProbeResult>* probes) {
   if (probes == nullptr) {
     return;
   }
-  // Clear aliases immediately after returning them. Concurrent deallocate
-  // accounting depends on observing only the cache and current caller refs.
   for (ProbeResult& probe : *probes) {
     if (probe.blocks.empty()) {
       continue;
     }
-    probe.leaf->deallocate(probe.blocks);
-    probe.blocks.clear();
+    Block::release(std::move(probe.blocks));
   }
   probes->clear();
 }

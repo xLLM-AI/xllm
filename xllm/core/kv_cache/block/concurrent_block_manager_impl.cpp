@@ -51,6 +51,11 @@ void ConcurrentBlockManagerImpl::deallocate(const Slice<Block>& blocks) {
   inner_->deallocate(blocks);
 }
 
+void ConcurrentBlockManagerImpl::release(std::span<Block> blocks) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  inner_->release(blocks);
+}
+
 void ConcurrentBlockManagerImpl::free(int32_t block_id) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   inner_->free(block_id);

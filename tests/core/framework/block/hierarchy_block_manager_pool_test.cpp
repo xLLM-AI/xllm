@@ -649,7 +649,7 @@ TEST(HierarchyBlockManagerPoolTest, FlatKvHasSingleHostKvLeaf) {
 }
 
 TEST(HierarchyBlockManagerPoolTest,
-     HostRestoreLeaseSurvivesCancellationAndReleasesCachedUsage) {
+     HostRestoreLeaseRetainsUsageUntilFinalRelease) {
   for (const auto [submitted, cancel_first] :
        {std::pair{false, true}, {true, true}, {true, false}}) {
     SCOPED_TRACE(submitted);
@@ -688,7 +688,8 @@ TEST(HierarchyBlockManagerPoolTest,
     pool.deallocate(&sequence);
     if (lease != nullptr) {
       EXPECT_GT(host_leaf->num_used_blocks(), host_used);
-      EXPECT_EQ(device_leaf->num_used_blocks(), device_used);
+      // Uncached H2D destinations remain active while the lease pins them.
+      EXPECT_EQ(device_leaf->num_used_blocks(), device_used + 2);
       EXPECT_EQ(device_leaf->num_blocks_in_prefix_cache(), 0u);
       EXPECT_EQ(device_leaf->num_free_blocks(), device_free - 2);
       EXPECT_TRUE(pool.has_pending_async_block_release());

@@ -24,6 +24,7 @@ limitations under the License.
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "common/macros.h"
@@ -110,6 +111,10 @@ class PrefixCache {
   // Block / false on miss.
   Block find(const XXH3Key& hash);
   bool contains(const XXH3Key& hash) const;
+
+  // Physical ownership is independent of a handle's hash: transfer aliases
+  // may have been copied before publication stamped the sequence's handles.
+  bool owns(const Block& block) const;
 
   // Evict up to `n_blocks` LRU-oldest entries. Returns the number evicted.
   virtual size_t evict(size_t n_blocks);
@@ -208,6 +213,8 @@ class PrefixCache {
   size_t num_blocks_ = 0;
   std::unordered_map<XXH3Key, Node*, FixedStringKeyHash, FixedStringKeyEqual>
       cached_blocks_;
+
+  std::unordered_set<int32_t> cached_block_ids_;
 
   std::atomic<uint64_t> total_blocks_{0}, matched_blocks_{0};
 };

@@ -131,6 +131,17 @@ void BlockManagerImpl::deallocate(const Slice<Block>& blocks) {
   }
 }
 
+void BlockManagerImpl::release(std::span<Block> blocks) {
+  for (Block& block : blocks) {
+    if (block.is_valid() && prefix_cache_ && block.ref_count() == 2u &&
+        prefix_cache_->owns(block)) {
+      deallocate(Slice<Block>(&block, /*size=*/1));
+    }
+    // Uncached blocks remain active until free() retires their final alias.
+    block = Block();
+  }
+}
+
 bool BlockManagerImpl::has_enough_blocks(uint32_t num_blocks) {
   if (num_blocks <= num_free_blocks_) {
     return true;

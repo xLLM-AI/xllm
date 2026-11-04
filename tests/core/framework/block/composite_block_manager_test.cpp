@@ -1734,7 +1734,6 @@ TEST(CompositeBlockManagerTest,
   ASSERT_EQ(state.num_blocks(BlockType::KV), 1u);
   EXPECT_EQ(manager->num_used_blocks(), 1u);
   EXPECT_EQ(state.kv_cache_tokens_num(), 4u);
-  manager->deallocate(state.blocks(BlockType::KV));
   state.reset();
   EXPECT_EQ(manager->num_used_blocks(), 0u);
   EXPECT_EQ(manager->num_blocks_in_prefix_cache(), 2u);
@@ -2109,9 +2108,7 @@ TEST(CompositeBlockManagerTest,
   manager->cache(tokens, blocks);
   std::optional<KVCacheBlockLease> transfer_lease;
   transfer_lease.emplace(blocks);
-  transfer_lease->release_owner();
-  manager->deallocate(blocks);
-  blocks.clear();
+  manager->release(blocks);
 
   EXPECT_EQ(manager->num_used_blocks(), 4u);
   EXPECT_EQ(manager->num_free_blocks(), 0u);
@@ -2122,6 +2119,80 @@ TEST(CompositeBlockManagerTest,
   EXPECT_EQ(manager->num_used_blocks(), 0u);
   EXPECT_EQ(manager->num_free_blocks(), 4u);
   EXPECT_EQ(manager->allocate(/*num_blocks=*/1).size(), 1u);
+}
+
+TEST(CompositeBlockManagerTest, SequenceResetReleasesCachedVirtualBlocks) {
+  TestVmmKVPageAllocator allocator(/*dp_size=*/1);
+  auto manager = make_vmm_prefix_manager(allocator);
+  const std::vector<int32_t> tokens(16, 7);
+  std::vector<Block> blocks = manager->allocate(/*num_blocks=*/4);
+  ASSERT_EQ(blocks.size(), 4u);
+  manager->cache(tokens, blocks);
+  Sequence sequence = MakeTestSequence(/*index=*/0, tokens);
+  sequence.kv_state().add_blocks(BlockType::KV, blocks);
+  blocks.clear();
+
+  sequence.reset();
+
+  EXPECT_FALSE(sequence.kv_state().has_any_blocks());
+  EXPECT_EQ(manager->num_used_blocks(), 0u);
+  EXPECT_EQ(manager->num_free_blocks(), 4u);
+  EXPECT_EQ(manager->num_blocks_in_prefix_cache(), 4u);
+  EXPECT_TRUE(allocator.released_pages.empty());
+  std::vector<Block> pressure = manager->allocate(/*num_blocks=*/4);
+  ASSERT_EQ(pressure.size(), 4u);
+  EXPECT_EQ(manager->num_blocks_in_prefix_cache(), 0u);
+  manager->release(pressure);
+  EXPECT_EQ(manager->num_used_blocks(), 0u);
+}
+
+TEST(CompositeBlockManagerTest, StateResetReleasesAliasedBeamSourceBlocks) {
+  BlockManager::Options options;
+  options.num_blocks(5).block_size(2).enable_prefix_cache(true);
+  ConcurrentBlockManagerImpl manager(
+      std::make_unique<BlockManagerImpl>(options));
+  const std::vector<int32_t> tokens = {11, 12};
+  std::vector<Block> blocks = manager.allocate(/*num_blocks=*/1);
+  ASSERT_EQ(blocks.size(), 1u);
+  manager.cache(tokens, blocks);
+  KVCacheState state;
+  state.set_src_blocks(blocks, /*need_swap=*/true);
+  state.add_blocks(BlockType::KV, blocks);
+  blocks.clear();
+
+  state.reset();
+
+  EXPECT_TRUE(state.src_blocks().empty());
+  EXPECT_FALSE(state.has_any_blocks());
+  EXPECT_FALSE(state.need_swap());
+  EXPECT_EQ(manager.num_used_blocks(), 0u);
+  EXPECT_EQ(manager.num_blocks_in_prefix_cache(), 1u);
+  EXPECT_EQ(manager.num_free_blocks(), manager.num_total_blocks() - 1);
+}
+
+TEST(CompositeBlockManagerTest, ForkPreservesParentPrivateBlockUsage) {
+  for (const BlockType type : {BlockType::EMBEDDING, BlockType::LINEAR}) {
+    SCOPED_TRACE(static_cast<int32_t>(type));
+    BlockManager::Options options;
+    options.num_blocks(3).block_size(1).block_type(type).enable_prefix_cache(
+        false);
+    BlockManagerImpl manager(options);
+    Sequence parent = MakeTestSequence(/*index=*/0, {11, 12});
+    parent.add_blocks(type, manager.allocate(/*num_blocks=*/1));
+    const int32_t parent_block_id = parent.kv_state().blocks(type).front().id();
+
+    std::unique_ptr<Sequence> child = parent.fork(/*index=*/1);
+
+    EXPECT_EQ(child->kv_state().num_blocks(type), 0u);
+    EXPECT_EQ(parent.kv_state().blocks(type).front().id(), parent_block_id);
+    EXPECT_EQ(manager.num_used_blocks(), 1u);
+    EXPECT_EQ(manager.num_free_blocks(), manager.num_total_blocks() - 1);
+    child.reset();
+    EXPECT_EQ(manager.num_used_blocks(), 1u);
+    parent.reset();
+    EXPECT_EQ(manager.num_used_blocks(), 0u);
+    EXPECT_EQ(manager.num_free_blocks(), manager.num_total_blocks());
+  }
 }
 
 TEST(CompositeBlockManagerTest,
@@ -2413,7 +2484,6 @@ TEST_P(LinearStateWindowTest, PoolPressureKeepsPrivatePrefillProgressing) {
             GetParam() ? 1u : 0u);
   sequence.kv_state().set_kv_cache_tokens_num(12);
   if (retained_old_read.has_value()) {
-    retained_old_read->release_owner();
     retained_old_read.reset();
   }
   manager->deallocate_for_sequence(&sequence);

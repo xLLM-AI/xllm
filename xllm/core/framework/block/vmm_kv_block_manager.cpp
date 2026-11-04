@@ -301,6 +301,21 @@ void VmmKVBlockManager::deallocate(const Slice<Block>& blocks) {
   }
 }
 
+void VmmKVBlockManager::release(std::span<Block> blocks) {
+  if (!prefix_cache_) {
+    BlockManager::release(blocks);
+    return;
+  }
+  std::lock_guard<std::mutex> cache_lock(prefix_cache_mtx_);
+  for (Block& block : blocks) {
+    if (block.is_valid() && block.ref_count() == 2u &&
+        prefix_cache_->owns(block)) {
+      deallocate(Slice<Block>(&block, /*size=*/1));
+    }
+    block = Block();
+  }
+}
+
 void VmmKVBlockManager::free(int32_t block_id) { free_blocks({block_id}); }
 
 std::vector<Block> VmmKVBlockManager::allocate_shared(

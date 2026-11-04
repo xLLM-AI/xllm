@@ -14,19 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "batch.h"
+#include "core/framework/batch/batch.h"
 
 #include <absl/time/clock.h>
 #include <gtest/gtest.h>
 
 #include <array>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <future>
 #include <limits>
 #include <memory>
-#include <mutex>
 #include <numeric>
 #include <optional>
 #include <string>
@@ -43,6 +41,7 @@ limitations under the License.
 #include "core/kv_cache/block/block.h"
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/block/block_utils.h"
+#include "core/kv_cache/block/concurrent_block_manager_impl.h"
 #include "core/kv_cache/prefix/block_hasher.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/util/scope_guard.h"
@@ -505,7 +504,8 @@ TEST(BatchHostRestoreTest, CancelledSequenceKeepsCopyBlocksUntilBatchRetires) {
 TEST(KVCacheBlockLeaseTest, BatchRetirementDuringOwnerReleaseClearsUsage) {
   BlockManager::Options options;
   options.num_blocks(4).block_size(16).enable_prefix_cache(true);
-  BlockManagerImpl manager(options);
+  ConcurrentBlockManagerImpl manager(
+      std::make_unique<BlockManagerImpl>(options));
   const size_t initial_used = manager.num_used_blocks();
   std::vector<Block> blocks = manager.allocate(1);
   std::array<uint8_t, XXH3_128BITS_HASH_VALUE_LEN> hash;
@@ -520,23 +520,11 @@ TEST(KVCacheBlockLeaseTest, BatchRetirementDuringOwnerReleaseClearsUsage) {
   sequence.retain_host_restore_blocks(
       {sequence.kv_state().blocks(BlockType::KV)[0]});
   auto batch = std::make_unique<Batch>(&sequence);
-  const auto owners = sequence.host_restore_owners();
-  std::vector<std::unique_lock<std::mutex>> release_locks;
-  release_locks.reserve(owners.size());
-  for (const auto& owner : owners) {
-    release_locks.emplace_back(owner->lock());
-  }
-  manager.deallocate(sequence.kv_state().blocks(BlockType::KV));
-  // Reproduce the scheduler retiring a batch between the PD thread's manager
-  // deallocation and its Sequence::reset.
+  // Batch retirement and reset consume their aliases through the same leaf.
   auto retired =
       std::async(std::launch::async,
                  [batch = std::move(batch)]() mutable { batch.reset(); });
-  EXPECT_EQ(retired.wait_for(std::chrono::milliseconds(20)),
-            std::future_status::timeout);
   sequence.reset();
-  EXPECT_EQ(manager.num_used_blocks(), initial_used + 1);
-  release_locks.clear();
   retired.get();
   EXPECT_EQ(manager.num_used_blocks(), initial_used);
 }
