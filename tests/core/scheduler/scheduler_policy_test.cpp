@@ -697,7 +697,7 @@ TEST(SchedulerPolicyTest, UnifiedPrefixHitIncludesScheduledSuffixCapacity) {
   Sequence* cached_sequence = cached_requests[0]->sequences()[0].get();
   ASSERT_TRUE(engine->block_manager_pool()->allocate(cached_sequence));
   cached_sequence->kv_state().set_kv_cache_tokens_num(kPrefixTokens);
-  engine->block_manager_pool()->cache(cached_sequence);
+  engine->block_manager_pool()->publish_prefix(cached_sequence);
   engine->block_manager_pool()->deallocate(cached_sequence);
 
   auto scheduler =

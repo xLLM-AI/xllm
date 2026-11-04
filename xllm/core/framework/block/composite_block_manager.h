@@ -89,10 +89,14 @@ class CompositeBlockManager : public BlockManager {
   void release_out_of_window_for_sequence(Sequence* seq);
   void deallocate_for_sequence(Sequence* seq, bool cache_prefix = true);
   void allocate_shared_for_sequence(Sequence* seq);
-  void cache_for_sequence(Sequence* seq, size_t num_tokens);
-  void cache_full_blocks_for_sequence(Sequence* seq);
+  void publish_prefix(Sequence* seq);
+  void publish_prefix(Sequence* seq, size_t num_tokens);
+  // Publish completed Host restore blocks without exposing the current forward.
+  void publish_restored_prefix(Sequence* seq, size_t restored_tokens);
 
   // Probe every prefix-capable leaf without mounting the returned aliases.
+  static std::vector<ProbeResult> probe_prefix_cache(Sequence* seq,
+                                                     const LeafMap& leaves);
   static std::vector<ProbeResult> probe_prefix_cache(
       Sequence* seq,
       const LeafMap& leaves,
@@ -144,6 +148,7 @@ class CompositeBlockManager : public BlockManager {
  private:
   friend class BlockManagerPoolTestPeer;
 
+  void publish_completed_prefix(Sequence* seq, size_t token_limit);
   // The admission leaf whose raw block count defines the pool's
   // scheduler-facing capacity unit. Picks the finest-grained admission leaf
   // (smallest block_size): KV for flat layouts, C4 for compressed layouts.

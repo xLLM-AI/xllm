@@ -316,7 +316,7 @@ void DisaggPDScheduler::cache_prefill_blocks(Request* request) {
   CHECK(request != nullptr);
   for (auto& sequence : request->sequences()) {
     if (sequence->if_cache_block_for_prefill()) {
-      kv_cache_manager_->cache(sequence.get());
+      kv_cache_manager_->publish_prefix(sequence.get());
     }
   }
 }

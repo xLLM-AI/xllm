@@ -113,8 +113,8 @@ class BlockManagerPool : public KVCacheManager {
   void deallocate_without_cache(Sequence* sequence);
 
   void allocate_shared(Sequence* sequence) override;
-  void cache(Sequence* sequence) override;
-  void cache(Sequence* sequence, size_t num_tokens) override;
+  void publish_prefix(Sequence* sequence) override;
+  void publish_prefix(Sequence* sequence, size_t num_tokens) override;
 
   std::vector<std::vector<BlockTransferInfo>>* get_swap_block_transfer_infos()
       override;

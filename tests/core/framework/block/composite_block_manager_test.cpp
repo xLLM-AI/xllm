@@ -292,8 +292,8 @@ TEST(CompositeBlockManagerTest, ExplicitHostAllocationNeverPublishesProgress) {
   for (const Block& block : sequence.host_kv_state().blocks(BlockType::KV)) {
     EXPECT_EQ(block.ref_count(), 1u);
   }
-  host.cache_for_sequence(&sequence, 8);
-  host.cache_full_blocks_for_sequence(&sequence);
+  host.publish_prefix(&sequence, 8);
+  host.publish_prefix(&sequence);
   EXPECT_EQ(
       host.leaf_entries().at(BlockType::KV).leaf->num_blocks_in_prefix_cache(),
       0u);
@@ -882,7 +882,7 @@ TEST(CompositeBlockManagerTest, Dsv4PrefixCacheHitOnRepeatedPrefix) {
   ASSERT_TRUE(manager.allocate_sequence(&seq_first, num_tokens));
   seq_first.kv_state().incr_kv_cache_tokens_num(num_tokens);
   // deallocate_for_sequence runs the pre-grow hook once more (via
-  // cache_for_sequence's fan-out), flushing the residual full blocks.
+  // publish_prefix's fan-out), flushing the residual full blocks.
   manager.deallocate_for_sequence(&seq_first);
   seq_first.reset();
 
@@ -1113,7 +1113,7 @@ TEST(CompositeBlockManagerTest, Dsv4PrefixCacheSkipsPartialCacheUnitTail) {
       MakeTestSequence(0, std::vector<int32_t>(completed_tokens, 17));
   ASSERT_TRUE(manager.allocate_sequence(&seq, completed_tokens));
   seq.kv_state().incr_kv_cache_tokens_num(completed_tokens);
-  manager.cache_full_blocks_for_sequence(&seq);
+  manager.publish_prefix(&seq);
 
   EXPECT_EQ(manager.leaf_entries()
                 .at(BlockType::SWA)
@@ -1134,6 +1134,48 @@ TEST(CompositeBlockManagerTest, Dsv4PrefixCacheSkipsPartialCacheUnitTail) {
   EXPECT_EQ(seq.kv_state().num_cached_blocks(BlockType::C128), 1u);
 
   manager.deallocate_for_sequence(&seq);
+}
+
+TEST(CompositeBlockManagerTest,
+     Dsv4RestorePublicationBoundsEveryLeafByCompletedCopy) {
+  for (const size_t restored_tokens : {0u,
+                                       kBlockSizeRatio128 - 1,
+                                       kBlockSizeRatio128,
+                                       kBlockSizeRatio128 + kBlockSizeRatio4}) {
+    SCOPED_TRACE(restored_tokens);
+    BlockManager::Options opts = MakeCompositeOptions(
+        /*base_num_blocks=*/4096,
+        kBaseBlockSize,
+        /*window_size=*/4 * kBaseBlockSize,
+        /*max_seqs_per_batch=*/4);
+    set_swa_capacity_for_token_budget(&opts, 2 * kBlockSizeRatio128);
+    CompositeBlockManager manager(build_composite_leaves(opts), opts);
+    const size_t advanced_tokens = 2 * kBlockSizeRatio128;
+    Sequence seq =
+        MakeTestSequence(0, std::vector<int32_t>(advanced_tokens + 1, 19));
+    ASSERT_TRUE(manager.allocate_sequence(&seq, advanced_tokens));
+
+    // Overlapped input construction may advance the cursor past the H2D copy.
+    seq.kv_state().set_kv_cache_tokens_num(advanced_tokens);
+    manager.publish_prefix(&seq, advanced_tokens);
+    EXPECT_EQ(seq.kv_state().num_cached_blocks(BlockType::C128), 0u);
+    manager.publish_restored_prefix(&seq, restored_tokens);
+    const size_t expected_tokens =
+        restored_tokens / kBlockSizeRatio128 * kBlockSizeRatio128;
+    EXPECT_EQ(seq.kv_state().num_cached_blocks(BlockType::SWA),
+              expected_tokens / kBaseBlockSize);
+    EXPECT_EQ(seq.kv_state().num_cached_blocks(BlockType::C4),
+              expected_tokens / kBlockSizeRatio4);
+    EXPECT_EQ(seq.kv_state().num_cached_blocks(BlockType::C128),
+              expected_tokens / kBlockSizeRatio128);
+
+    Sequence replay =
+        MakeTestSequence(1, std::vector<int32_t>(advanced_tokens + 1, 19));
+    manager.allocate_shared_for_sequence(&replay);
+    EXPECT_EQ(replay.kv_cache_tokens_num(), expected_tokens);
+    manager.deallocate_for_sequence(&replay);
+    manager.deallocate_for_sequence(&seq);
+  }
 }
 
 // v2b: exact-repeat safe-hit hits the pop path -- when a fresh sequence has a
@@ -2334,7 +2376,7 @@ TEST_P(LinearStateWindowTest, PrefillCheckpointsDoNotAliasLiveState) {
     EXPECT_EQ(sequence.kv_state().num_cached_blocks(BlockType::LINEAR),
               GetParam() ? output_index : 0u);
     sequence.kv_state().set_kv_cache_tokens_num(target);
-    manager->cache_full_blocks_for_sequence(&sequence);
+    manager->publish_prefix(&sequence);
     EXPECT_EQ(sequence.kv_state().num_cached_blocks(BlockType::LINEAR),
               GetParam() ? output_index : 0u);
     previous_id = output_id;

@@ -741,7 +741,7 @@ TEST_F(BlockManagerPoolTest, AllocateAfterPrefixCacheHitAllocatesSuffixBlocks) {
       make_sequence(0, /*prompt_tokens=*/{1, 2, 3, 4, 5, 6, 7, 8});
   ASSERT_TRUE(pool.allocate(&cached_seq));
   cached_seq.kv_state().set_kv_cache_tokens_num(cached_seq.num_tokens());
-  pool.cache(&cached_seq);
+  pool.publish_prefix(&cached_seq);
   pool.deallocate(&cached_seq);
 
   Sequence hit_seq =
@@ -767,7 +767,7 @@ TEST_F(BlockManagerPoolTest, PdPrefillPublishesReusableComputedPrefix) {
   ASSERT_TRUE(pool.allocate(&source));
   EXPECT_TRUE(journal->read("", 0)["events"].empty());
   source.kv_state().set_kv_cache_tokens_num(source.num_tokens());
-  pool.cache(&source);
+  pool.publish_prefix(&source);
   pool.deallocate(&source);
 
   const nlohmann::json snapshot = journal->read("", 0);
@@ -812,7 +812,7 @@ TEST_F(BlockManagerPoolTest,
       make_sequence(0, /*prompt_tokens=*/{1, 2, 3, 4, 5, 6, 7, 8});
   ASSERT_TRUE(allocate_kv_prefix_for_test(pool, cached_seq));
   cached_seq.kv_state().set_kv_cache_tokens_num(cached_seq.num_tokens());
-  pool.cache(&cached_seq);
+  pool.publish_prefix(&cached_seq);
   const PrefixHash checkpoint_hash = compute_linear_state_prefix_hash_for_test(
       cached_seq.tokens(), options.block_size(), /*boundary_tokens=*/8);
   pool.deallocate_without_cache(&cached_seq);
@@ -867,7 +867,7 @@ TEST_F(BlockManagerPoolTest, ExactPromptCannotReuseUncheckpointedTailBoundary) {
       make_sequence(0, /*prompt_tokens=*/{1, 2, 3, 4, 5, 6, 7, 8});
   ASSERT_TRUE(allocate_kv_prefix_for_test(pool, cached_seq));
   cached_seq.kv_state().set_kv_cache_tokens_num(cached_seq.num_tokens());
-  pool.cache(&cached_seq);
+  pool.publish_prefix(&cached_seq);
   const PrefixHash tail_hash = compute_linear_state_prefix_hash_for_test(
       cached_seq.tokens(), options.block_size(), /*boundary_tokens=*/8);
   pool.deallocate_without_cache(&cached_seq);
@@ -905,7 +905,7 @@ TEST_F(BlockManagerPoolTest, PromptPastCheckpointReusesCheckpointBoundary) {
       make_sequence(0, /*prompt_tokens=*/{1, 2, 3, 4, 5, 6, 7, 8});
   ASSERT_TRUE(allocate_kv_prefix_for_test(pool, cached_seq));
   cached_seq.kv_state().set_kv_cache_tokens_num(cached_seq.num_tokens());
-  pool.cache(&cached_seq);
+  pool.publish_prefix(&cached_seq);
   const PrefixHash tail_hash = compute_linear_state_prefix_hash_for_test(
       cached_seq.tokens(), options.block_size(), /*boundary_tokens=*/8);
   pool.deallocate_without_cache(&cached_seq);
@@ -972,7 +972,7 @@ TEST_F(BlockManagerPoolTest,
   Sequence cached = make_sequence(0, {1, 2, 3, 4, 5, 6, 7, 8});
   ASSERT_TRUE(allocate_kv_prefix_for_test(pool, cached));
   cached.kv_state().set_kv_cache_tokens_num(8);
-  pool.cache(&cached);
+  pool.publish_prefix(&cached);
   cached.update_linear_state_hashes(4);
   const int32_t source_id =
       insert_linear_state_checkpoint(leaf, cached.linear_state_hashes()[1]);
@@ -1021,7 +1021,7 @@ TEST_F(BlockManagerPoolTest, PrefixUsesOnlyExactLinearStateCheckpoint) {
     Sequence cached_seq = make_sequence(0, prompt_tokens);
     ASSERT_TRUE(allocate_kv_prefix_for_test(pool, cached_seq));
     cached_seq.kv_state().set_kv_cache_tokens_num(cached_seq.num_tokens());
-    pool.cache(&cached_seq);
+    pool.publish_prefix(&cached_seq);
 
     LinearStateBlockManager* prefix_cache =
         BlockManagerPoolTestPeer::linear_leaf(pool, /*dp_rank=*/0);
@@ -1076,7 +1076,7 @@ TEST_F(BlockManagerPoolTest, SparseLinearStateCheckpointCannotExceedKVMatch) {
   ASSERT_TRUE(allocate_kv_prefix_for_test(pool, short_cached_seq));
   short_cached_seq.kv_state().set_kv_cache_tokens_num(
       short_cached_seq.num_tokens());
-  pool.cache(&short_cached_seq);
+  pool.publish_prefix(&short_cached_seq);
   pool.deallocate_without_cache(&short_cached_seq);
 
   Sequence long_cached_seq =
@@ -1127,7 +1127,7 @@ TEST_F(BlockManagerPoolTest, ExactPromptStopsAtEarlierCheckpoint) {
                         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16});
   ASSERT_TRUE(allocate_kv_prefix_for_test(pool, cached_seq));
   cached_seq.kv_state().set_kv_cache_tokens_num(cached_seq.num_tokens());
-  pool.cache(&cached_seq);
+  pool.publish_prefix(&cached_seq);
   const PrefixHash inner_hash = compute_linear_state_prefix_hash_for_test(
       cached_seq.tokens(), options.block_size(), /*boundary_tokens=*/8);
   const PrefixHash tail_hash = compute_linear_state_prefix_hash_for_test(
@@ -1223,8 +1223,8 @@ TEST_F(BlockManagerPoolTest, SequenceUpdateBlockHashes) {
 }
 
 // In-batch prefix cache publishes only the full blocks covered by the given
-// token budget. When the budget is overestimated, cache() must clamp to the
-// sequence's own tokens and register just the complete blocks.
+// token budget. When the budget is overestimated, publish_prefix() clamps to
+// the sequence's own tokens and registers just the complete blocks.
 TEST_F(BlockManagerPoolTest,
        CachePrefixClampsToSequenceTokensWhenBudgetIsOverestimated) {
   ScopedValue<int32_t> max_seqs_guard(
@@ -1241,9 +1241,9 @@ TEST_F(BlockManagerPoolTest,
   Sequence seq = make_sequence(0, /*prompt_tokens=*/{1, 2, 3, 4, 5, 6, 7});
   ASSERT_TRUE(pool->allocate(&seq));
 
-  // num_tokens (8) is larger than the 7 real tokens. cache() must clamp to the
+  // num_tokens (8) is larger than the 7 real tokens. Publication clamps to the
   // sequence tokens, so only the single full block (tokens [0, 4)) is cached.
-  EXPECT_NO_FATAL_FAILURE(pool->cache(&seq, /*num_tokens=*/8));
+  EXPECT_NO_FATAL_FAILURE(pool->publish_prefix(&seq, /*num_tokens=*/8));
   EXPECT_EQ(pool->num_blocks_in_prefix_cache()[0], 1u);
 }
 

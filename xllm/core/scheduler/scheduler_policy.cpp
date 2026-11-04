@@ -819,7 +819,7 @@ void SchedulerPolicy::schedule_decode_from_queue(
             break;
           }
           if (sequence->if_cache_block_for_prefill()) {
-            state.kv_cache_manager->cache(sequence);
+            state.kv_cache_manager->publish_prefix(sequence);
           }
           candidate_sequences.emplace_back(sequence);
           candidate_token_budgets.emplace_back(decode_step_tokens);
@@ -903,7 +903,7 @@ void SchedulerPolicy::schedule_decode_from_queue(
           break;
         }
         if (sequence->if_cache_block_for_prefill()) {
-          state.kv_cache_manager->cache(sequence.get());
+          state.kv_cache_manager->publish_prefix(sequence.get());
         }
         allocated_tokens += num_tokens;
         allocated_seqs += 1;
@@ -1173,7 +1173,7 @@ void SchedulerPolicy::handle_running_requests(
   }
 
   if (request->expand_sequences()) {
-    state.kv_cache_manager->cache(request->sequences()[0].get());
+    state.kv_cache_manager->publish_prefix(request->sequences()[0].get());
   }
 
   for (auto& sequence : request->sequences()) {
@@ -1203,7 +1203,7 @@ void SchedulerPolicy::cache_in_batch_prefix(
     }
     const size_t max_handle_num_tokens =
         sequence->kv_state().kv_cache_tokens_num() + token_budgets[i];
-    state.kv_cache_manager->cache(sequence, max_handle_num_tokens);
+    state.kv_cache_manager->publish_prefix(sequence, max_handle_num_tokens);
   }
 }
 
