@@ -40,29 +40,49 @@ _OUTPUT_ATOL = 1e-3
 
 @pytest.mark.parametrize("rows", [1, 3, 5], ids=["draft-step", "padded-prefix", "draft-prefix"])
 @pytest.mark.parametrize("commit_in_graph", [False, True], ids=["prepared-lengths", "late-device-commit"])
+@pytest.mark.parametrize("layers", [1, 16])
+@pytest.mark.parametrize("use_v2", [False, True], ids=["fia-v1", "fia-v2"])
+@pytest.mark.parametrize("native_updates", [False, True], ids=["python-updates", "native-updates"])
 @torch.inference_mode()
 def test_ordinary_draft_graph_reads_growing_kv_prefix(
-    rows: int, commit_in_graph: bool, monkeypatch: pytest.MonkeyPatch
+    rows: int,
+    commit_in_graph: bool,
+    layers: int,
+    use_v2: bool,
+    native_updates: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from xllm.python.attention.backend import LayerCache
     from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend
     from xllm.python.attention.paged_kv_metadata import build_row_aligned_paged_kv_metadata
     from xllm.python.layers.attention import Attention
+    from xllm.python.model_executor.forward_context import AclGraphCaptureContext, AclGraphNativeTaskGroup, AclGraphTask
     from xllm.python.model_executor.runners.acl_graph import AclGraphEntry
     from xllm.python.model_executor.runners.base import ModelExecutionOutput
     from xllm.python.model_executor.runners.decode_acl_graph import DecodeAclGraphRunner
 
     monkeypatch.setattr("xllm.python.model_executor.runners.acl_graph._GRAPH_POOL", None)
+    if not native_updates:
+
+        def legacy_context(stream: object, tasks: list, *, batch_fia_task_updates: bool) -> AclGraphCaptureContext:
+            return AclGraphCaptureContext(stream, tasks)
+
+        monkeypatch.setattr("xllm.python.model_executor.runners.acl_graph.AclGraphCaptureContext", legacy_context)
     device = torch.device("npu:0")
-    heads, kv_heads, dimension, page_size, capacity = 4, 2, 64, 128, 4096
+    # Model-level batching uses Qwen3.8-27B's actual TP4 head geometry.
+    heads, kv_heads, dimension = (4, 2, 64) if layers == 1 else (6, 1, 256)
+    page_size, capacity = 128, 4096
     backend = NpuPagedAttentionBackend(heads, kv_heads, dimension, dimension**-0.5, 0, False, device, torch.bfloat16)
+    if use_v2 and not backend._use_fia_v2:
+        pytest.skip("FIA v2 is unavailable")
+    backend._use_fia_v2 = use_v2
     key = torch.zeros(33, page_size, kv_heads, dimension, device=device, dtype=torch.bfloat16)
     values_host = torch.arange(33 * page_size, dtype=torch.float32) / 2048
     values_host = values_host.view(33, page_size, 1, 1).expand(33, page_size, kv_heads, dimension)
     value = values_host.contiguous().to(device=device, dtype=key.dtype)
-    caches = [LayerCache(key=key, value=value)]
+    caches = [LayerCache(key=key, value=value + index / 16) for index in range(layers)]
     backend.bind_kv_caches(caches)
-    attention = Attention(heads, kv_heads, dimension, dimension**-0.5, 0, 0)
+    attentions = [Attention(heads, kv_heads, dimension, dimension**-0.5, 0, index) for index in range(layers)]
     token_capacity = 8 if rows == 3 else rows
     committed_lengths = torch.zeros(token_capacity, dtype=torch.int32, device=device)
     committed_lengths[:rows].fill_(1)
@@ -72,7 +92,7 @@ def test_ordinary_draft_graph_reads_growing_kv_prefix(
             count = input_ids.numel()
             query = torch.zeros(count, heads * dimension, device=device, dtype=key.dtype)
             projected = torch.zeros(count, kv_heads * dimension, device=device, dtype=key.dtype)
-            return attention(query, projected, projected)
+            return torch.cat([attention(query, projected, projected).clone() for attention in attentions], dim=-1)
 
     class _CommittedDraftRunner(DecodeAclGraphRunner):
         def _forward_static(self, entry: AclGraphEntry) -> ModelExecutionOutput:
@@ -128,11 +148,21 @@ def test_ordinary_draft_graph_reads_growing_kv_prefix(
         assert decoded is not None
         graph_key = runner.warmup(tokens, tokens, metadata, decode_metadata=decoded)
         actual = runner.execute(tokens, tokens, metadata, graph_key=graph_key, decode_metadata=decoded)
+        entry = runner._graphs[graph_key]
+        if native_updates:
+            assert len(entry.graph_tasks) == 1
+            group = entry.graph_tasks[0]
+            assert isinstance(group, AclGraphNativeTaskGroup)
+            assert group.end - group.begin == group.batch.size() == layers
+        else:
+            assert len(entry.graph_tasks) == layers
+            assert all(isinstance(task, AclGraphTask) for task in entry.graph_tasks)
         expected = (
             torch.tensor([(page_size + (live_length - 1) / 2) / 2048 for live_length in live_lengths])
             .view(rows, 1)
             .expand(rows, heads * dimension)
         )
+        expected = torch.cat([expected + index / 16 for index in range(layers)], dim=-1)
         torch.testing.assert_close(actual.cpu().float(), expected, rtol=1e-2, atol=2e-3)
 
 

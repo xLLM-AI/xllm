@@ -32,6 +32,7 @@ limitations under the License.
 #include <tuple>
 #include <vector>
 
+#include "core/kernels/npu/fia_graph_task_batch.h"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 #include "core/util/tensor_helper.h"
 #include "kernels/npu/xllm_ops/xllm_ops_api.h"
@@ -709,6 +710,17 @@ void ensure_xllm_ops_registered() {
 // Schema declarations (device-agnostic). Identical to cuda_ops_library.cpp —
 // compiled only under USE_NPU (mutually exclusive with USE_CUDA).
 TORCH_LIBRARY(xllm_ops, m) {
+  m.class_<xllm::npu::FiaGraphTaskBatch>("FiaGraphTaskBatch")
+      .def(torch::init<int64_t,
+                       int64_t,
+                       double,
+                       int64_t,
+                       bool,
+                       std::vector<int64_t>,
+                       std::vector<int64_t>>())
+      .def("capture", &xllm::npu::FiaGraphTaskBatch::capture)
+      .def("update", &xllm::npu::FiaGraphTaskBatch::update)
+      .def("size", &xllm::npu::FiaGraphTaskBatch::size);
   m.def(
       "dspark_allocate_verify_prefixes(Tensor confidence, "
       "Tensor(a!) widths, int budget) -> ()");

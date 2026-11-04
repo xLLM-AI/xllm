@@ -113,11 +113,45 @@ class AclGraphTaskInput(Protocol):
     def refresh(self) -> None: ...
 
 
+class AclGraphNativeTaskBatch(Protocol):
+    def capture(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        block_table: torch.Tensor,
+        workspace: torch.Tensor,
+        output: torch.Tensor,
+        lse: torch.Tensor,
+    ) -> int: ...
+
+    def update(self, begin: int, end: int, kv_lengths: list[int]) -> None: ...
+
+    def size(self) -> int: ...
+
+
 @dataclass(frozen=True, slots=True)
 class AclGraphTask:
     event: object
     handle: object
     update: Callable[[], None]
+    prepare: AclGraphTaskInput | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AclGraphNativeTask:
+    batch: AclGraphNativeTaskBatch
+    index: int
+    kv_lengths: list[int]
+    prepare: AclGraphTaskInput | None = None
+
+
+@dataclass(slots=True)
+class AclGraphNativeTaskGroup:
+    batch: AclGraphNativeTaskBatch
+    begin: int
+    end: int
+    kv_lengths: list[int]
     prepare: AclGraphTaskInput | None = None
 
 
@@ -136,12 +170,16 @@ class AclGraphExecutionState:
     # Only runners that serialize graph replay may supply this pool. Growing
     # it never replaces an allocation already referenced by a captured graph.
     serial_workspace_pool: list[torch.Tensor] | None = None
+    # Device-length FIA needs a runner that refreshes task inputs after the
+    # graph prefix commits its lengths, before releasing attention events.
+    supports_task_inputs: bool = False
 
 
 @dataclass(slots=True)
 class AclGraphCaptureContext:
     stream: object
-    tasks: list[AclGraphTask]
+    tasks: list[AclGraphTask | AclGraphNativeTask]
+    batch_fia_task_updates: bool = False
 
 
 @dataclass(slots=True)

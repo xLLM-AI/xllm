@@ -264,7 +264,10 @@ def test_prepared_mtp_keeps_live_device_lengths(width: int, expanded: bool) -> N
 
 
 @pytest.mark.parametrize("width", [1, 2, 4])
-def test_block_device_length_graph_skips_unused_tnd_workspace(width: int, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("supports_task_inputs", [False, True])
+def test_block_device_length_graph_skips_unused_tnd_workspace(
+    width: int, supports_task_inputs: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from xllm.python.model_executor.forward_context import AclGraphExecutionState
 
     backend = _ordinary_backend()
@@ -273,7 +276,7 @@ def test_block_device_length_graph_skips_unused_tnd_workspace(width: int, monkey
     metadata.q_cu_seq_lens_host_values = [width, 2 * width]
     metadata.is_chunked_prefill = True
     metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=True)
-    execution = AclGraphExecutionState({}, {})
+    execution = AclGraphExecutionState({}, {}, supports_task_inputs=supports_task_inputs)
     backend._paged_graph_state = object()
 
     def reject_tnd_workspace(*args: object, **kwargs: object) -> None:
@@ -289,7 +292,12 @@ def test_block_device_length_graph_skips_unused_tnd_workspace(width: int, monkey
     assert execution.persistent_buffers == {}
 
 
-def test_prepared_device_decode_masks_newly_rejected_tail(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("composite_graph", [False, True])
+def test_prepared_device_decode_masks_newly_rejected_tail(
+    composite_graph: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from xllm.python.model_executor.forward_context import AclGraphCaptureContext, AclGraphExecutionState
+
     backend = _ordinary_backend()
     metadata = _ordinary_metadata(paged=True)
     metadata.is_chunked_prefill = False
@@ -307,9 +315,18 @@ def test_prepared_device_decode_masks_newly_rejected_tail(monkeypatch: pytest.Mo
     monkeypatch.setattr(torch.ops.npu, "npu_fused_infer_attention_score", attention, raising=False)
     cache = backend._kv_caches[0].key
     query = torch.zeros(2, 8, 64)
-    backend._decode(query, cache, cache, metadata, 2)
-    metadata.kv_seq_lens.copy_(torch.tensor([2, 9], dtype=torch.int32))
-    backend._decode(query, cache, cache, metadata, 2)
+    execution = AclGraphExecutionState({})
+    capture = AclGraphCaptureContext(object(), []) if composite_graph else None
+    with forward_context(
+        ForwardContext(backend, torch.device("cpu"), metadata, [], execution_state=execution, acl_graph=capture)
+    ):
+        backend.prepare(metadata, graph_mode=composite_graph)
+        backend._decode(query, cache, cache, metadata, 2)
+        metadata.kv_seq_lens.copy_(torch.tensor([2, 9], dtype=torch.int32))
+        backend._decode(query, cache, cache, metadata, 2)
+    assert execution.paged_attention == {}
+    if capture is not None:
+        assert capture.tasks == []
     expected_first = torch.arange(128).view(1, 1, 1, -1) >= torch.tensor([6, 4]).view(2, 1, 1, 1)
     expected_second = torch.arange(128).view(1, 1, 1, -1) >= torch.tensor([2, 9]).view(2, 1, 1, 1)
     torch.testing.assert_close(seen[0], expected_first)

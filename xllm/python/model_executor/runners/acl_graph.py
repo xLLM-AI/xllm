@@ -28,6 +28,8 @@ from xllm.python.attention.backend import AttentionBackend, AttentionMetadata, L
 from xllm.python.attention.expanded_decode_metadata import ExpandedDecodeMetadata
 from xllm.python.model_executor.forward_context import (
     AclGraphCaptureContext,
+    AclGraphNativeTask,
+    AclGraphNativeTaskGroup,
     AclGraphTask,
     EplbRuntimeState,
     ForwardContext,
@@ -37,6 +39,29 @@ from xllm.python.model_executor.runners.base import BaseRunner, ModelExecutionOu
 from xllm.python.model_executor.runners.decode_cuda_graph import _CAPTURE_WARMUP_STEPS
 
 _GRAPH_POOL: tuple[int, int] | None = None
+
+
+def _group_graph_tasks(
+    tasks: list[AclGraphTask | AclGraphNativeTask],
+) -> list[AclGraphTask | AclGraphNativeTaskGroup]:
+    """Batch adjacent native tasks without moving across another update."""
+    grouped: list[AclGraphTask | AclGraphNativeTaskGroup] = []
+    for task in tasks:
+        if isinstance(task, AclGraphTask):
+            grouped.append(task)
+            continue
+        previous = grouped[-1] if grouped else None
+        if (
+            isinstance(previous, AclGraphNativeTaskGroup)
+            and previous.batch is task.batch
+            and previous.end == task.index
+            and previous.kv_lengths is task.kv_lengths
+            and task.prepare is None
+        ):
+            previous.end += 1
+            continue
+        grouped.append(AclGraphNativeTaskGroup(task.batch, task.index, task.index + 1, task.kv_lengths, task.prepare))
+    return grouped
 
 
 if TYPE_CHECKING:
@@ -353,6 +378,8 @@ class AclGraphRunner(BaseRunner):
         # stream. A new bucket's eager warmup must observe those writes before
         # reading token IDs or page tables, just like an existing graph replay.
         stream.wait_stream(torch.npu.current_stream())
+        if entry.execution_state is not None:
+            entry.execution_state.supports_task_inputs = True
         context = ForwardContext(
             self.attention_backend,
             self.device,
@@ -368,7 +395,7 @@ class AclGraphRunner(BaseRunner):
                 self._forward_static(entry)
         torch.npu.synchronize()
         entry.graph = torch.npu.NPUGraph()
-        capture_context = AclGraphCaptureContext(stream, [])
+        capture_context = AclGraphCaptureContext(stream, [], batch_fia_task_updates=True)
         context = replace(context, acl_graph=capture_context, layer_shared_cache=entry.layer_shared_cache)
         with (
             forward_context(context),
@@ -380,7 +407,7 @@ class AclGraphRunner(BaseRunner):
             ),
         ):
             entry.static_output = self._forward_static(entry)
-        entry.graph_tasks = capture_context.tasks
+        entry.graph_tasks = _group_graph_tasks(capture_context.tasks)
         if any(task.prepare is not None for task in entry.graph_tasks):
             self._initialize_task_updates()
             with torch.npu.stream(self._update_stream):
@@ -388,10 +415,11 @@ class AclGraphRunner(BaseRunner):
                     if task.prepare is not None:
                         task.prepare.initialize()
         logger.info(
-            "Python ACL graph captured: model=%s bucket=%d mtp_topk=%s tasks=%d",
+            "Python ACL graph captured: model=%s bucket=%d mtp_topk=%s tasks=%d update_groups=%d",
             type(self.model).__name__,
             entry.batch_size,
             entry.static_mtp_topk_indices is not None,
+            len(capture_context.tasks),
             len(entry.graph_tasks),
         )
 
@@ -425,11 +453,14 @@ class AclGraphRunner(BaseRunner):
     @staticmethod
     def _update_graph_tasks(
         stream: torch.npu.Stream,
-        graph_tasks: list[AclGraphTask],
+        graph_tasks: list[AclGraphTask | AclGraphNativeTaskGroup],
     ) -> None:
         for task in graph_tasks:
             if task.prepare is not None:
                 task.prepare.refresh()
+            if isinstance(task, AclGraphNativeTaskGroup):
+                task.batch.update(task.begin, task.end, task.kv_lengths)
+                continue
             torch.npu.graph_task_update_begin(stream, task.handle)
             task.update()
             torch.npu.graph_task_update_end(stream)

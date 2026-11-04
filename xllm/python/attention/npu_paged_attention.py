@@ -48,6 +48,8 @@ from xllm.python.attention.expanded_decode_metadata import (
 from xllm.python.attention.mla_index_context import is_compact_kpool_tail
 from xllm.python.model_executor.cp_utils import cp_gather_kv
 from xllm.python.model_executor.forward_context import (
+    AclGraphNativeTask,
+    AclGraphNativeTaskBatch,
     AclGraphTask,
     get_execution_buffer,
     get_execution_workspace,
@@ -202,6 +204,7 @@ class _PagedAttentionDeviceLengths:
     ready: torch.npu.ExternalEvent
     captured: bool = False
     readback: torch.npu.NPUGraph | None = None
+    native_tasks: AclGraphNativeTaskBatch | None = None
 
     def initialize(self) -> None:
         stream = torch.npu.current_stream()
@@ -686,21 +689,24 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 graph_mode
                 and prepared.device_kv_lengths is not None
                 and prepared.query_lengths[0] == 1
-                # Block drafts use chunked prefill without verification and
-                # retain BNSD attention even for singleton query rows.
-                and (not metadata.is_chunked_prefill or metadata.is_spec_verify)
                 and context is not None
                 and context.execution_state is not None
+                and context.execution_state.supports_task_inputs
             )
             if graph_mode and device_decode:
-                self._actual_seq_kv = [prepared.kv_capacity] * len(prepared.actual_seq_q)
-                self._prepare_paged_graph(
-                    workspace_kv_length=prepared.kv_capacity,
-                    device_kv_lengths=prepared.device_kv_lengths,
-                )
-                context = get_forward_context().acl_graph
-                if context is not None:
-                    self._paged_graph_state.device_lengths.ready.record(context.stream)
+                state = context.execution_state.paged_attention.get(prepared.block_table.shape[0])
+                if state is not None and state.device_lengths is not None:
+                    self._actual_seq_kv = [prepared.kv_capacity] * len(prepared.actual_seq_q)
+                    self._prepare_paged_graph(
+                        workspace_kv_length=prepared.kv_capacity,
+                        device_kv_lengths=prepared.device_kv_lengths,
+                    )
+                    if context.acl_graph is not None:
+                        state.device_lengths.ready.record(context.acl_graph.stream)
+                else:
+                    # Warmup selects the layer's attention policy before
+                    # allocating TND storage. Windowed attention keeps BNSD.
+                    self._paged_graph_state = None
             elif graph_mode and prepared.device_kv_lengths is None:
                 self._prepare_paged_graph()
             else:
@@ -908,7 +914,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                     lambda: torch.empty(
                         graph_batch_size, self.num_heads, self.head_dim, dtype=self.dtype, device=self.device
                     ),
-                    shared=True,
+                    shared=device_kv_lengths is None,
                 ),
                 lse=get_execution_buffer(
                     ("FIA_LSE", graph_batch_size),
@@ -2169,20 +2175,21 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 if layer.causal and not block_window and prepared.query_lengths[0] != 1:
                     raise ValueError("causal device-length attention requires singleton packed queries")
                 context = get_forward_context_or_none()
+                left_context = block_draft_window_context(layer)
                 if (
                     layer.causal
                     and not block_window
+                    and left_context is None
                     and prepared.query_lengths[0] == 1
                     and context is not None
-                    and context.acl_graph is not None
-                    and self._paged_graph_state is not None
+                    and context.execution_state is not None
+                    and context.execution_state.supports_task_inputs
                 ):
                     return self._decode(q_3d, k_cache, v_cache, metadata, num_tokens)
                 # Host lengths are safe upper bounds prepared before the prior
                 # Slot accepts its prefix. Mask that bounded tail using the
                 # exact device lengths; never read acceptance back to Host.
                 widths = prepared.query_lengths
-                left_context = block_draft_window_context(layer)
                 if left_context is None:
                     atten_mask = self._block_attention_mask(prepared, layer)
                     block_table = self._block_table_i32
@@ -2431,10 +2438,27 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         prepared = getattr(metadata, "prepared_attention_state", None)
         context = get_forward_context_or_none()
         graph_context = context.acl_graph if context is not None else None
+        supports_task_inputs = (
+            context is not None and context.execution_state is not None and context.execution_state.supports_task_inputs
+        )
         if (
             isinstance(prepared, _PreparedPagedAttention)
             and prepared.device_kv_lengths is not None
+            and supports_task_inputs
+            and self._paged_graph_state is None
             and graph_context is None
+        ):
+            # This is the actual singleton decode policy's eager warmup.
+            # Allocate outside capture so outputs remain private to the Slot.
+            self._actual_seq_kv = [prepared.kv_capacity] * len(prepared.actual_seq_q)
+            self._prepare_paged_graph(
+                workspace_kv_length=prepared.kv_capacity,
+                device_kv_lengths=prepared.device_kv_lengths,
+            )
+        if (
+            isinstance(prepared, _PreparedPagedAttention)
+            and prepared.device_kv_lengths is not None
+            and (graph_context is None or not supports_task_inputs)
         ):
             if any(width != 1 for width in prepared.query_lengths) or len(prepared.query_lengths) != num_tokens:
                 raise ValueError("device-length decode requires one query per expanded attention row")
@@ -2482,6 +2506,21 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 # lengths. Refresh once before updating any layer's group.
                 state.device_lengths.captured = True
                 prepare = state.device_lengths
+            if state.device_lengths is not None and graph_context.batch_fia_task_updates:
+                lengths = state.device_lengths
+                if lengths.native_tasks is None:
+                    lengths.native_tasks = torch.classes.xllm_ops.FiaGraphTaskBatch(
+                        self.num_heads,
+                        self.num_kv_heads,
+                        self.scale,
+                        block_size,
+                        self._use_fia_v2,
+                        actual_seq_q,
+                        actual_seq_kv,
+                    )
+                index = lengths.native_tasks.capture(q_3d, k_flat, v_flat, block_table, workspace, output, lse)
+                graph_context.tasks.append(AclGraphNativeTask(lengths.native_tasks, index, actual_seq_kv, prepare))
+                return output.reshape(num_tokens, self.num_heads * self.head_dim)
             event = torch.npu.ExternalEvent()
             event.wait(stream)
             event.reset(stream)

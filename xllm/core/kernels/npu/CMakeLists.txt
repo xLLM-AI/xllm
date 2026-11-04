@@ -13,9 +13,11 @@ cc_library(
   NAME
     npu_kernels
   HDRS
+    fia_graph_task_batch.h
     npu_ops_api.h
     aclnn/pytorch_npu_helper.hpp
   SRCS
+    fia_graph_task_batch.cpp
     active.cpp
     attention.cpp
     collectives.cpp
