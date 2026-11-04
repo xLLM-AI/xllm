@@ -876,27 +876,27 @@ TEST(DisaggPDSchedulerShutdownTest, DrainsQueuedReleaseBeforeDestroyingOwner) {
 TEST(DisaggPDSchedulerShutdownTest,
      DrainsPrefillProducerWaitingForReleaseAcknowledgement) {
   ::testing::FLAGS_gtest_death_test_style = "threadsafe";
-  ASSERT_EXIT(
-      {
-        alarm(5);
-        FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
-        auto request = make_request({1, 2, 3, 4});
-        CHECK(engine.block_manager_pool()->allocate(
-            request->sequences()[0].get()));
-        const std::weak_ptr<Request> lifetime = request;
-        std::future<void> released;
-        {
-          TestDisaggPDScheduler scheduler(&engine, make_options());
-          released = scheduler.release_from_prefill_worker(std::move(request));
-        }
-        CHECK(released.wait_for(std::chrono::seconds(0)) ==
-              std::future_status::ready);
-        CHECK(lifetime.expired());
-        CHECK_EQ(engine.block_manager_pool()->num_used_blocks()[0], 0u);
-        _exit(0);
-      },
-      ::testing::ExitedWithCode(0),
-      "");
+  ASSERT_EXIT(([] {
+                alarm(5);
+                FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
+                auto request = make_request({1, 2, 3, 4});
+                CHECK(engine.block_manager_pool()->allocate(
+                    request->sequences()[0].get()));
+                const std::weak_ptr<Request> lifetime = request;
+                std::future<void> released;
+                {
+                  TestDisaggPDScheduler scheduler(&engine, make_options());
+                  released =
+                      scheduler.release_from_prefill_worker(std::move(request));
+                }
+                CHECK(released.wait_for(std::chrono::seconds(0)) ==
+                      std::future_status::ready);
+                CHECK(lifetime.expired());
+                CHECK_EQ(engine.block_manager_pool()->num_used_blocks()[0], 0u);
+                _exit(0);
+              }()),
+              ::testing::ExitedWithCode(0),
+              "");
 }
 
 TEST(DisaggPDSchedulerTest, AdmissionRetainsCapacityUntilDispatchCompletes) {
