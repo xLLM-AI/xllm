@@ -21,6 +21,7 @@ Prefill uses FIA TND with causal mask; decode uses FIA TND with block_table.
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -209,6 +210,18 @@ class PagedAttentionGraphState:
     block_table: torch.Tensor
     query: list[int]
     kv: list[int]
+
+
+@dataclass(frozen=True, slots=True)
+class FullKvGraphStateSnapshot:
+    """Restore the exact Full KV token slots modified by graph capture."""
+
+    slots: torch.Tensor
+    caches: tuple[tuple[torch.Tensor, torch.Tensor], ...]
+
+    def restore(self) -> None:
+        for cache, values in self.caches:
+            cache.index_copy_(0, self.slots, values)
 
 
 def write_mla_paged_cache(
@@ -424,6 +437,31 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         if has_sparse_index or has_latent_only_cache:
             self._is_mla = True
         self._uses_sparse_mla = self._is_mla and has_sparse_index
+
+    def snapshot_full_cache_state(self, slot_mappings: Sequence[torch.Tensor]) -> FullKvGraphStateSnapshot:
+        """Preserve live Full K/V at slots a cold graph capture will write.
+
+        Graph warmup and capture execute the real request against its allocated
+        pages. The caller restores this snapshot before each warmup and after
+        capture, then lets the first replay write the request once.
+        """
+        if not slot_mappings:
+            raise ValueError("Full KV graph snapshot requires at least one slot mapping")
+        logical_slots = torch.cat([mapping.reshape(-1) for mapping in slot_mappings])
+        logical_slots = logical_slots[logical_slots >= 0].to(torch.long)
+        layout = self._shared_kv_layout
+        physical_slots = layout.full_slot_mapping(logical_slots) if layout is not None else logical_slots
+        slots = torch.unique(physical_slots, sorted=True)
+        caches: list[tuple[torch.Tensor, torch.Tensor]] = []
+        for layer in self._kv_caches:
+            if layer.key is None or layer.value is None:
+                continue
+            for cache in (layer.key, layer.value):
+                tokens = cache.view(-1, *cache.shape[2:])
+                caches.append((tokens, tokens.index_select(0, slots)))
+        if not caches:
+            raise RuntimeError("Full KV graph snapshot requires bound key/value caches")
+        return FullKvGraphStateSnapshot(slots, tuple(caches))
 
     @staticmethod
     def _query_sequence_ends(
@@ -689,6 +727,12 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         self._metadata = metadata
         expanded = resolve_expanded_decode_metadata(metadata, block_size=self.logical_page_size)
         self._use_expanded_decode = expanded is not None
+        graph_prefill = (
+            graph_mode
+            and (metadata.is_prefill or metadata.is_chunked_prefill)
+            and not metadata.is_spec_verify
+            and expanded is None
+        )
         block_table = expanded.block_table if expanded is not None else metadata.block_table
         kv_seq_lens = expanded.kv_seq_lens if expanded is not None else metadata.kv_seq_lens
         kv_seq_lens_host_values = (
@@ -699,12 +743,16 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
 
         if block_table is not None:
             self._block_table_i32 = self._translate_full_block_table(block_table.to(torch.int32))
+            if graph_prefill and not self._is_mla:
+                self._block_table_i32 = copy_into_execution_buffer(
+                    ("PREFILL_GRAPH_BLOCK_TABLE", tuple(self._block_table_i32.shape)), self._block_table_i32
+                )
             real_batch = block_table.shape[0]
         else:
             self._block_table_i32 = None
             real_batch = 0
 
-        if self._use_expanded_decode or graph_mode or self._is_mla:
+        if self._use_expanded_decode or (graph_mode and not graph_prefill) or self._is_mla:
             self._actual_seq_lens = None
         elif metadata.q_cu_seq_lens is not None:
             q_seq_lens = getattr(metadata, "q_seq_lens", None)
@@ -738,14 +786,22 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                     kv_seq_lens_host_values = kv_seq_lens_host_values[:real_batch]
                 else:
                     raise RuntimeError("host KV lengths must have one entry per block-table row")
-            self._actual_seq_q: list[int] = list(range(1, real_batch + 1))
+            self._actual_seq_q: list[int] = (
+                list(self._actual_seq_lens)
+                if graph_prefill and self._actual_seq_lens is not None
+                else list(range(1, real_batch + 1))
+            )
             self._actual_seq_kv: list[int] = list(kv_seq_lens_host_values)
         else:
             self._actual_seq_q = []
             self._actual_seq_kv = []
 
         if graph_mode and self._block_table_i32 is not None and not self._is_mla:
-            self._prepare_paged_graph()
+            if graph_prefill:
+                # Direct prefill FIA does not use decode's .out workspace.
+                self._paged_graph_state = None
+            else:
+                self._prepare_paged_graph()
 
         # Pre-cache MLA (sparse SFA) seq-lens once per step; shared by
         # execute_mla / mla_index_context instead of re-derived per layer.

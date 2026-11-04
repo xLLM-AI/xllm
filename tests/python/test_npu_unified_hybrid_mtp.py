@@ -133,7 +133,11 @@ def _eager_capture(runner: MtpAclGraphRunner, *inputs: object) -> None:
     """Keep the same fixed role recipe while running the oracle eagerly."""
     runner.backend = "eager"
     runner.recipe.bind_graph_contexts(None, *runner._execution_states)
-    snapshots = runner.recipe.target_forward.snapshot_cache_state()
+    snapshots = tuple(
+        snapshot
+        for role in (runner.recipe.draft_forward, runner.recipe.target_forward)
+        for snapshot in role.snapshot_cache_state()
+    )
     runner.execute(*inputs)
     for snapshot in snapshots:
         snapshot.restore()

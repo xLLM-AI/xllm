@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import torch
 import torch.nn as nn
@@ -342,6 +342,8 @@ class AclGraphRunner(BaseRunner):
         self,
         entry: AclGraphEntry,
         stream: torch.npu.Stream,
+        *,
+        reset_state: Callable[[], None] | None = None,
     ) -> None:
         assert stream is not None
         logger.info(
@@ -366,8 +368,13 @@ class AclGraphRunner(BaseRunner):
         )
         with forward_context(context), torch.npu.stream(stream):
             for _ in range(_CAPTURE_WARMUP_STEPS):
+                if reset_state is not None:
+                    reset_state()
                 self._forward_static(entry)
         torch.npu.synchronize()
+        if reset_state is not None:
+            with torch.npu.stream(stream):
+                reset_state()
         entry.graph = torch.npu.NPUGraph()
         capture_context = AclGraphCaptureContext(stream, [])
         context = replace(context, acl_graph=capture_context, layer_shared_cache=entry.layer_shared_cache)
