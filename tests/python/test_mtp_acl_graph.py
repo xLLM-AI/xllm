@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import weakref
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -33,6 +34,7 @@ from xllm.python.model_executor.runners.mtp_acl_graph import (
     MtpGraphRecipe,
     MtpRoleAdapter,
     MtpSamplingPlan,
+    _MtpPagedAttentionMetadata,
 )
 from xllm.python.model_executor.runners.mtp_sparse_metadata import MtpSparsePositionStorage
 
@@ -144,6 +146,126 @@ def test_eager_recipe_carries_mtp_embedding_and_topk_state() -> None:
     assert torch.equal(seen[2][1], torch.tensor([[25], [46]]))
     assert torch.equal(seen[2][2], torch.tensor([[24], [35]]))
     assert output.target_embeddings.shape == (2 * batch_size, 1)
+
+
+def test_paged_role_capture_snapshots_all_draft_full_kv_slots() -> None:
+    snapshot = Mock()
+    backend = SimpleNamespace(snapshot_full_cache_state=Mock(return_value=snapshot))
+    executor = SimpleNamespace(
+        eager_runner=SimpleNamespace(execution_metadata_builders=()),
+        create_mtp_role_backends=lambda count: (backend,) * count,
+    )
+    metadata = tuple(
+        _MtpPagedAttentionMetadata(
+            SimpleNamespace(
+                slot_mapping=torch.tensor(slots, dtype=torch.int32),
+                kv_seq_lens=torch.ones(len(slots), dtype=torch.int32),
+                block_table=torch.zeros(len(slots), 1, dtype=torch.int32),
+            ),
+            batch_size=1,
+            query_width=len(slots),
+            block_size=128,
+        )
+        for slots in ([2, 3], [4])
+    )
+    adapter = MtpRoleAdapter(executor, metadata, speculative_tokens=2)
+
+    snapshots = adapter.snapshot_cache_state()
+
+    assert snapshots == (snapshot,)
+    slot_mappings = backend.snapshot_full_cache_state.call_args.args[0]
+    assert len(slot_mappings) == len(metadata)
+    assert all(actual is item.slot_mapping for actual, item in zip(slot_mappings, metadata, strict=True))
+
+
+@pytest.mark.parametrize(
+    ("failure_call", "message", "restore_failure"),
+    [(1, "warmup failed", False), (2, "capture failed", False), (None, "snapshot restore failed", True)],
+)
+def test_capture_failure_restores_cache_snapshot_on_capture_stream(
+    monkeypatch: pytest.MonkeyPatch, failure_call: int | None, message: str, restore_failure: bool
+) -> None:
+    events: list[str] = []
+    active_streams: list[object] = []
+    restore_count = 0
+
+    class Snapshot:
+        def restore(self) -> None:
+            nonlocal restore_count
+            assert active_streams[-1] is capture_stream
+            restore_count += 1
+            events.append("restore")
+            if restore_failure and restore_count == 5:
+                raise RuntimeError(message)
+
+    class Stream:
+        def wait_stream(self, stream: object) -> None:
+            del stream
+            events.append("wait_stream")
+
+        def synchronize(self) -> None:
+            events.append("synchronize")
+
+    class StreamContext:
+        def __init__(self, stream: object) -> None:
+            self._stream = stream
+
+        def __enter__(self) -> None:
+            active_streams.append(self._stream)
+
+        def __exit__(self, *args: object) -> None:
+            del args
+            active_streams.pop()
+
+    class StatefulRole:
+        def __call__(self, *args: object) -> torch.Tensor:
+            del args
+            return torch.zeros(1)
+
+        def snapshot_cache_state(self) -> tuple[Snapshot, ...]:
+            return (Snapshot(),)
+
+    recipe = make_recipe(torch.tensor([1]), 1)
+    recipe.draft_forward = StatefulRole()
+    recipe.target_forward = StatefulRole()
+    runner = MtpAclGraphRunner(recipe, warmup_steps=1)
+    capture_stream = Stream()
+    run_count = 0
+
+    def fail_during_capture() -> None:
+        nonlocal run_count
+        run_count += 1
+        events.append(f"run_{run_count}")
+        if failure_call is not None and run_count == failure_call:
+            raise RuntimeError(message)
+
+    runner._run_static = Mock(side_effect=fail_during_capture)
+    monkeypatch.setattr(
+        torch,
+        "npu",
+        SimpleNamespace(
+            Stream=lambda device: capture_stream,
+            current_stream=lambda: Stream(),
+            stream=StreamContext,
+            NPUGraph=Mock(),
+            graph=lambda graph, stream: nullcontext((graph, stream)),
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        torch,
+        "distributed",
+        SimpleNamespace(is_available=lambda: False, is_initialized=lambda: False),
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        runner.capture(torch.tensor([1]), torch.tensor([1]), torch.tensor([2], dtype=torch.int32))
+
+    assert not runner.captured
+    if restore_failure:
+        assert events[-2:] == ["restore", "wait_stream"]
+    else:
+        assert events[-5:] == ["synchronize", "restore", "restore", "synchronize", "wait_stream"]
 
 
 def test_role_adapter_keeps_draft_and_target_metadata_scoped() -> None:

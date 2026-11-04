@@ -250,13 +250,21 @@ class MtpRoleAdapter:
             raise RuntimeError("sparse MTP binding requires in-place graph metadata consumers")
 
     def snapshot_cache_state(self) -> tuple[object, ...]:
-        """Keep actual recurrent checkpoints unchanged by cold graph warmup."""
-        return tuple(
+        """Keep live Full KV and recurrent state unchanged by cold capture."""
+        snapshots = tuple(
             builder.snapshot_graph_state(metadata)
             for metadata in self._metadata_by_step
             for builder in self._metadata_builders
             if hasattr(builder, "snapshot_graph_state")
         )
+        if all(isinstance(metadata, _MtpPagedAttentionMetadata) for metadata in self._metadata_by_step):
+            if not self._attention_backends:
+                raise RuntimeError("paged MTP capture requires a bound attention backend")
+            full_snapshot = self._attention_backends[0].snapshot_full_cache_state(
+                [metadata.slot_mapping for metadata in self._metadata_by_step]
+            )
+            return (*snapshots, full_snapshot)
+        return snapshots
 
     def update_repair_token_ids(self, repair_token_ids: torch.Tensor | None) -> None:
         if (self._repair_token_ids is None) != (repair_token_ids is None):
@@ -799,35 +807,46 @@ class MtpAclGraphRunner:
         if self._static_draft_topk_indices is not None:
             self._static_draft_topk_indices.copy_(draft_topk_indices)
         self._capture_stream = torch.npu.Stream(device=self.recipe.device)
-        self._capture_stream.wait_stream(torch.npu.current_stream())
+        current_stream = torch.npu.current_stream()
+        self._capture_stream.wait_stream(current_stream)
         self.recipe.bind_graph_contexts(None, *self._execution_states)
-        with torch.npu.stream(self._capture_stream):
-            snapshots = tuple(
-                snapshot
-                for role in (self.recipe.draft_forward, self.recipe.target_forward)
-                if hasattr(role, "snapshot_cache_state")
-                for snapshot in role.snapshot_cache_state()
-            )
-            for _ in range(self.warmup_steps):
+        snapshots: tuple[object, ...] = ()
+        try:
+            with torch.npu.stream(self._capture_stream):
+                snapshots = tuple(
+                    snapshot
+                    for role in (self.recipe.draft_forward, self.recipe.target_forward)
+                    if hasattr(role, "snapshot_cache_state")
+                    for snapshot in role.snapshot_cache_state()
+                )
+                for _ in range(self.warmup_steps):
+                    for snapshot in snapshots:
+                        snapshot.restore()
+                    self._run_static()
                 for snapshot in snapshots:
                     snapshot.restore()
-                self._run_static()
-            for snapshot in snapshots:
-                snapshot.restore()
-        self.recipe.finish_warmup()
-        self._capture_stream.synchronize()
-        torch.npu.current_stream().wait_stream(self._capture_stream)
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            torch.distributed.barrier()
-        self._graph = torch.npu.NPUGraph()
-        capture_context = AclGraphCaptureContext(self._capture_stream, [])
-        self.recipe.bind_graph_contexts(capture_context, *self._execution_states)
-        with torch.npu.stream(self._capture_stream), torch.npu.graph(self._graph, stream=self._capture_stream):
-            self._static_output = self._run_static()
-        with torch.npu.stream(self._capture_stream):
-            for snapshot in snapshots:
-                snapshot.restore()
-        self._graph_tasks = capture_context.tasks
+            self.recipe.finish_warmup()
+            self._capture_stream.synchronize()
+            current_stream.wait_stream(self._capture_stream)
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                torch.distributed.barrier()
+            self._graph = torch.npu.NPUGraph()
+            capture_context = AclGraphCaptureContext(self._capture_stream, [])
+            self.recipe.bind_graph_contexts(capture_context, *self._execution_states)
+            with torch.npu.stream(self._capture_stream), torch.npu.graph(self._graph, stream=self._capture_stream):
+                self._static_output = self._run_static()
+            self._graph_tasks = capture_context.tasks
+        finally:
+            try:
+                self._capture_stream.synchronize()
+            finally:
+                try:
+                    with torch.npu.stream(self._capture_stream):
+                        for snapshot in snapshots:
+                            snapshot.restore()
+                    self._capture_stream.synchronize()
+                finally:
+                    current_stream.wait_stream(self._capture_stream)
         self._captured = True
 
     def execute(

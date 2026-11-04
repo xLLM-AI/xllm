@@ -146,13 +146,6 @@ class Qwen3_5GdnMetadataBuilder:
         self._shared_layout = shared_layout
 
     def allocate_persistent(self, input_batch: InputBatch, metadata: ExecutionMetadataSource) -> GdnMetadata:
-        if (
-            not input_batch.is_dummy
-            and (metadata.is_prefill or metadata.is_chunked_prefill)
-            and not getattr(metadata, "is_spec_verify", False)
-            and getattr(metadata, "linear_verify_graph", None) is None
-        ):
-            raise NotImplementedError("Qwen3.5 GDN ACL Graph supports decode and verify only")
         return self.build(input_batch, metadata)
 
     def snapshot_graph_state(self, metadata: ExecutionMetadataSource) -> _GdnGraphStateSnapshot:
@@ -179,6 +172,24 @@ class Qwen3_5GdnMetadataBuilder:
                 for cache, indices in ((state.conv, conv_indices), (state.ssm, ssm_indices))
             )
         )
+
+    def snapshot_prefill_graph_state(self, metadata: GdnPrefillMetadata) -> _GdnGraphStateSnapshot:
+        """Preserve the destination rows overwritten by a prefill capture."""
+        if self._state_caches is None or self._checkpoint_stride is None:
+            raise RuntimeError("Qwen3.5 GDN state caches must be bound before capture")
+        conv_slots = metadata.conv_write_indices.to(torch.long).clamp_min(0)
+        ssm_bases = metadata.ssm_write_indices.to(torch.long).clamp_min(0)
+        stride = self._checkpoint_stride
+        rows = []
+        for state in self._state_caches.values():
+            conv = state.conv.view(-1, state.conv.shape[-1])
+            conv_offsets = torch.arange(state.conv.shape[1], device=conv_slots.device)
+            conv_indices = (conv_slots[:, None] * state.conv.shape[1] + conv_offsets).reshape(-1)
+            ssm_offsets = torch.arange(stride, device=ssm_bases.device)
+            ssm_indices = (ssm_bases[:, None] + ssm_offsets).reshape(-1)
+            rows.append((conv, conv_indices, conv.index_select(0, conv_indices)))
+            rows.append((state.ssm, ssm_indices, state.ssm.index_select(0, ssm_indices)))
+        return _GdnGraphStateSnapshot(tuple(rows))
 
     def update_persistent(
         self, persistent_metadata: object, input_batch: InputBatch, metadata: ExecutionMetadataSource

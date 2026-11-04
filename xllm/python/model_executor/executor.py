@@ -409,6 +409,7 @@ class ModelExecutor:
         if self.layerwise_split_size > 1 and config.get("model_type") != "glm_moe_dsa":
             raise NotImplementedError("Python layerwise split is supported only for GLM5.2")
         self.decode_graph_runner: DecodeCudaGraphRunner | DecodeAclGraphRunner | None = None
+        self.prefill_graph_runner = None
         self._serving_acl_graph_logged = False
         self.prepared_graph_runner = None
         self.context_kv_graph_runner = None
@@ -629,6 +630,24 @@ class ModelExecutor:
             from xllm.python.model_executor.runners.inductor import InductorRunner
 
             self.inductor_runner = InductorRunner(execution_model, self.attention_backend, device, graph_backend)
+        if (
+            current_platform.is_npu()
+            and graph_backend == "aclgraph"
+            and self._eager_multimodal_prefill
+            and dp_size == cp_size == self.layerwise_split_size == 1
+            and not config.get("enable_disagg_pd", False)
+            and not config.get("enable_flashcomm1", False)
+        ):
+            from xllm.python.model_executor.runners.prefill_acl_graph import PrefillAclGraphRunner
+
+            self.prefill_graph_runner = PrefillAclGraphRunner(
+                execution_model,
+                self.attention_backend,
+                device,
+                max_seqs_per_batch,
+                int(config.get("acl_graph_prefill_max_tokens", 2048)),
+                int(config.get("acl_graph_prefill_max_variants", 8)),
+            )
         self.requires_input_batch_metadata = any(
             runner is not None and runner.execution_metadata_builders
             for runner in (
@@ -636,6 +655,7 @@ class ModelExecutor:
                 self.inductor_runner,
                 self.decode_graph_runner,
                 self.prepared_graph_runner,
+                self.prefill_graph_runner,
             )
         )
 
@@ -1055,6 +1075,8 @@ class ModelExecutor:
                 parameter = next(self.model.parameters())
                 with torch.inference_mode():
                     self.decode_graph_runner.warmup(parameter.device, parameter.dtype)
+        if self.prefill_graph_runner is not None:
+            self.prefill_graph_runner.bind_layer_caches(layer_caches)
         if self.prepared_graph_runner is not None:
             self.prepared_graph_runner.bind_layer_caches(layer_caches)
         if self.inductor_runner is not None:
@@ -1138,8 +1160,20 @@ class ModelExecutor:
             and (metadata.is_prefill or metadata.is_chunked_prefill)
             and not metadata.is_spec_verify
         ):
-            # Visual chunks carry request-owned embeddings and three-axis
-            # positions; the fixed decode graph owns neither of these inputs.
+            if (
+                self.prefill_graph_runner is not None
+                and layer_synchronizer is None
+                and mtp_topk_indices is None
+                and eplb is None
+                and self.prefill_graph_runner.can_execute(input_ids, positions, metadata, input_embedding, input_batch)
+            ):
+                return self.prefill_graph_runner.execute(
+                    input_ids,
+                    positions,
+                    metadata,
+                    input_embedding,
+                    input_batch=input_batch,
+                )
             return self.eager_runner.execute(
                 input_ids,
                 positions,

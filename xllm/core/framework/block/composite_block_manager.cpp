@@ -178,7 +178,8 @@ TrimOutcome trim_flat_kv(std::vector<ProbeResult> probes) {
 
 // FLAT_KV_LINEAR: retain only a KV prefix whose token boundary has an exact
 // LINEAR checkpoint.
-TrimOutcome trim_flat_kv_linear(std::vector<ProbeResult> probes) {
+TrimOutcome trim_flat_kv_linear(std::vector<ProbeResult> probes,
+                                size_t prompt_tokens) {
   auto linear = take_probe(probes, BlockType::LINEAR);
   CHECK_EQ(probes.size(), 1u)
       << "FLAT_KV_LINEAR expects one KV probe (LINEAR removed above)";
@@ -189,9 +190,11 @@ TrimOutcome trim_flat_kv_linear(std::vector<ProbeResult> probes) {
   size_t safe_count = 0;
   size_t source_index = 0;
   if (linear.has_value() && kv_block_size > 0 && linear->block_size > 0) {
+    const size_t max_hit_tokens =
+        std::min(kv.blocks.size() * kv_block_size,
+                 prompt_tokens == 0 ? 0 : prompt_tokens - 1);
     const size_t checkpoint_count =
-        std::min(linear->blocks.size(),
-                 kv.blocks.size() * kv_block_size / linear->block_size);
+        std::min(linear->blocks.size(), max_hit_tokens / linear->block_size);
     for (size_t index = checkpoint_count; index > 0; --index) {
       const size_t checkpoint_tokens = index * linear->block_size;
       if (checkpoint_tokens % kv_block_size == 0 &&
@@ -816,7 +819,7 @@ void CompositeBlockManager::allocate_shared_for_sequence(Sequence* seq) {
       trimmed = trim_flat_kv(std::move(probes));
       break;
     case LeafCombination::FLAT_KV_LINEAR:
-      trimmed = trim_flat_kv_linear(std::move(probes));
+      trimmed = trim_flat_kv_linear(std::move(probes), seq->tokens().size());
       break;
     case LeafCombination::SWA_COMPRESSED:
       trimmed = trim_swa_compressed(std::move(probes), seq->tokens().size());
