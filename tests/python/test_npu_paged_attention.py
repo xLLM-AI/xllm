@@ -1501,6 +1501,7 @@ def test_kda_verify_uses_framework_native_conv(
             conv,
             ssm,
             recurrent,
+            0,
         )
         assert torch.isfinite(output).all()
     assert len(calls) == 2

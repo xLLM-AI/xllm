@@ -1768,7 +1768,7 @@ def test_npu_mega_prefill_metadata_is_shared_within_one_forward() -> None:
     assert first.num_matrices == 9
     torch.testing.assert_close(first.cu_seqlens, torch.tensor([0, 127, 256], dtype=torch.int32))
     assert first.cu_seqlens is metadata.q_cu_seq_lens
-    torch.testing.assert_close(first.ssm_read_indices, torch.tensor([-1, 6], dtype=torch.int32))
+    torch.testing.assert_close(first.ssm_read_indices[0], torch.tensor([-1, 6], dtype=torch.int32))
     assert first.state_caches[0] is cache
 
 

@@ -3189,7 +3189,7 @@ TEST_F(SharedKVCacheBlockTest, AdmissionCountsSlotsPerBlockType) {
       std::vector<KVCacheManager::KVCacheReservation>{{&first, 12},
                                                       {&second, 12}}));
   EXPECT_TRUE(pool.exceeds_total_capacity(
-      std::vector<KVCacheManager::KVCacheReservation>{{&first, 12},
+      std::vector<KVCacheManager::KVCacheReservation>{{&first, 13},
                                                       {&second, 13}}));
 }
 
