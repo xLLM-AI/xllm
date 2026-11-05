@@ -41,10 +41,7 @@ class Sequence;
 // the inherited padding block.
 class LinearStateBlockManager final : public BlockManagerImpl {
  public:
-  explicit LinearStateBlockManager(uint32_t num_slots,
-                                   int32_t chunk_stride,
-                                   bool enable_prefix_cache = true,
-                                   bool instance_is_decode = false);
+  explicit LinearStateBlockManager(BlockManager::Options options);
   ~LinearStateBlockManager() override = default;
 
   std::optional<std::vector<Block>> allocate_for_sequence(
@@ -77,6 +74,14 @@ class LinearStateBlockManager final : public BlockManagerImpl {
   // probes by hash here -- the composite mounts restore sources through
   // allocate_shared -- so no by-hash probe method is exposed on this leaf.
   friend class BlockManagerPoolTestPeer;
+};
+
+class HostLinearStateBlockManager final : public BlockManagerImpl {
+ public:
+  explicit HostLinearStateBlockManager(BlockManager::Options options);
+
+  bool allocate_for_prefetch(Sequence* seq, size_t num_tokens) override;
+  void trim_prefetch_blocks(Sequence& seq, size_t max_hit_tokens) override;
 };
 
 }  // namespace xllm

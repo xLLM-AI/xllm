@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "scheduler/disagg_pd_scheduler.h"
+#include "core/disaggregation/disagg_pd_scheduler.h"
 
 #include <brpc/closure_guard.h>
 #include <brpc/server.h>
@@ -38,7 +38,7 @@ limitations under the License.
 #include <vector>
 
 #include "common/metrics.h"
-#include "core/distributed_runtime/disagg_pd_service_impl.h"
+#include "core/disaggregation/disagg_pd_service_impl.h"
 #include "core/framework/batch/sampling_input_builder.h"
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/transfer/kv_transfer_completion.h"

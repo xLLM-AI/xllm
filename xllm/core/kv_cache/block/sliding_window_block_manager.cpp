@@ -130,13 +130,89 @@ SlidingWindowBlockManager::allocate_for_sequence(Sequence* seq,
 
 bool SlidingWindowBlockManager::allocate_for_prefetch(Sequence* seq,
                                                       size_t num_tokens) {
+  if (seq == nullptr) {
+    return false;
+  }
   const size_t block_size = options_.block_size();
   const size_t target_blocks = num_tokens / block_size;
-  const size_t blocks_per_window =
-      static_cast<size_t>(options_.swa_blocks_per_seq());
-  const size_t required_begin =
-      target_blocks - std::min(target_blocks, blocks_per_window);
-  return allocate_prefetch_range(seq, num_tokens, required_begin);
+  constexpr size_t c128_span_blocks = 128;
+  const size_t window_span =
+      std::min<size_t>(options_.swa_blocks_per_seq(), c128_span_blocks);
+
+  KVCacheState& host_state = seq->host_kv_state();
+  const size_t cached_cursor =
+      std::min(host_state.num_cached_blocks(BlockType::SWA), target_blocks);
+  const size_t shared_blocks = host_state.shared_blocks_num(BlockType::SWA);
+  std::vector<Block> old = host_state.take_blocks(BlockType::SWA);
+  old.resize(target_blocks);
+
+  std::vector<Block> blocks(target_blocks);
+  for (size_t index = 0; index < old.size(); ++index) {
+    if (index % c128_span_blocks >= c128_span_blocks - window_span) {
+      blocks[index] = std::move(old[index]);
+    }
+  }
+  deallocate(old);
+  old.clear();
+
+  seq->update_block_hashes(static_cast<uint32_t>(block_size),
+                           options_.hasher_type());
+  const Slice<XXH3Key> hashes = seq->block_hashes();
+  CHECK_GE(hashes.size(), target_blocks);
+  std::vector<size_t> missing;
+  for (size_t index = cached_cursor; index < target_blocks; ++index) {
+    if (index % c128_span_blocks >= c128_span_blocks - window_span &&
+        !blocks[index].is_valid()) {
+      missing.emplace_back(index);
+    }
+  }
+
+  const bool complete = allocate_missing_blocks(missing, hashes, blocks);
+  if (!blocks.empty()) {
+    host_state.replace_composite_blocks(BlockType::SWA,
+                                        std::move(blocks),
+                                        std::min(shared_blocks, target_blocks),
+                                        target_blocks);
+  }
+  return complete;
+}
+
+void SlidingWindowBlockManager::trim_prefetch_blocks(Sequence& seq,
+                                                     size_t max_hit_tokens) {
+  KVCacheState& host_state = seq.host_kv_state();
+  std::vector<Block> blocks = host_state.take_blocks(BlockType::SWA);
+  const size_t keep = std::min(max_hit_tokens / block_size(), blocks.size());
+  size_t window_end = 0;
+  for (size_t index = keep; index > 0; --index) {
+    if (blocks[index - 1].is_valid()) {
+      window_end = index;
+      break;
+    }
+  }
+  const size_t window_begin =
+      window_end - std::min<size_t>(window_end, options_.swa_blocks_per_seq());
+  std::vector<Block> window(
+      std::make_move_iterator(blocks.begin() + window_begin),
+      std::make_move_iterator(blocks.begin() + window_end));
+  deallocate(blocks);
+  blocks.clear();
+  if (window.empty()) {
+    return;
+  }
+
+  seq.update_block_hashes(static_cast<uint32_t>(block_size()),
+                          options_.hasher_type());
+  const Slice<XXH3Key> hashes = seq.block_hashes();
+  CHECK_GE(hashes.size(), window_end);
+  for (size_t i = 0; i < window.size(); ++i) {
+    window[i].set_hash_value(hashes[window_begin + i].data);
+  }
+  BlockManagerImpl::cache(window);
+
+  blocks.resize(window_end);
+  std::move(window.begin(), window.end(), blocks.begin() + window_begin);
+  host_state.replace_composite_blocks(
+      BlockType::SWA, std::move(blocks), window_end, window_end);
 }
 
 void SlidingWindowBlockManager::release_out_of_window(Sequence* seq,

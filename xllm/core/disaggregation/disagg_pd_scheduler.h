@@ -31,14 +31,13 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "core/distributed_runtime/disagg_pd_service.h"
+#include "core/disaggregation/disagg_pd_service.h"
 #include "core/distributed_runtime/distributed_worker_manager.h"
 #include "disagg_pd.pb.h"
 #include "distributed_runtime/xservice_client.h"
 #include "framework/request/request.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "scheduler/continuous_scheduler.h"
-#include "server/xllm_server_registry.h"
 #include "util/blockingconcurrentqueue.h"
 #include "util/threadpool.h"
 
@@ -242,14 +241,6 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
                                      double time_to_first_token_latency_seconds,
                                      double upstream_elapsed_seconds);
 
-  // check remote instance info, if not exist, get from master service
-  bool check_remote_instance_info(const std::string& instance_name);
-
-  // create rpc channel to remote instance,
-  // we can get remote instance info from master service.
-  proto::DisaggPDService_Stub* create_rpc_channel(
-      const std::string& instance_name);
-
   void start_rpc_server(DisaggPDServiceOptions response_options);
 
   // Initialize RPC server and xservice client
@@ -276,9 +267,6 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
   moodycamel::BlockingConcurrentQueue<std::unique_ptr<RequestBlockRelease>>
       request_block_releases_;
 
-  // remote instance name(ID) -> instance info
-  std::unordered_map<std::string, InstanceInfo> remote_instances_info_;
-
   // rpc server for prefill/decode instance
   std::unique_ptr<std::thread> rpc_server_thread_;
 
@@ -286,7 +274,7 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
   // brpc channel is connected to remote instance rpc server
   std::unordered_map<std::string, proto::DisaggPDService_Stub*>
       req_to_channel_map_;
-  std::unordered_map<std::string, proto::DisaggPDService_Stub*>
+  std::unordered_map<std::string, std::unique_ptr<proto::DisaggPDService_Stub>>
       instance_channel_map_;
   std::mutex req_to_channel_map_mutex_;
   std::mutex instance_channel_map_mutex_;

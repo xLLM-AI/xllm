@@ -115,9 +115,22 @@ void KVCacheStore::initialize_store_index(HostCacheStoreIndex store_index) {
       CHECK(key_components.emplace(entry.key_component).second)
           << "Duplicate KVCacheStore key component for BlockType "
           << static_cast<int32_t>(block_type) << ": " << entry.key_component;
-      std::string schema_hash = build_schema_hash(block_type, *entry.cache);
-      std::string key_prefix =
-          build_key_prefix(entry.key_component, block_type, schema_hash);
+      const bool is_tp_replicated =
+          entry.enable_mla && block_type == BlockType::KV;
+      const bool is_kv_split_cache =
+          entry.is_target && is_kv_split_cache_block_type(block_type);
+      const uint32_t owner_rank =
+          is_kv_split_cache ? config_.kv_replica_rank : config_.dp_local_rank;
+      const bool put_owner =
+          owner_rank < (is_tp_replicated ? 1U : config_.tp_size);
+      is_storage_writer_ = is_storage_writer_ || put_owner;
+      const std::string schema_hash =
+          build_schema_hash(block_type, *entry.cache, is_tp_replicated);
+      std::string key_prefix = build_key_prefix(entry.key_component,
+                                                block_type,
+                                                schema_hash,
+                                                is_tp_replicated,
+                                                is_kv_split_cache);
       const BlockTypeTensorMap tensors =
           entry.cache->get_block_type_tensors(block_type);
       std::vector<torch::Tensor> block_tensors;
@@ -125,24 +138,23 @@ void KVCacheStore::initialize_store_index(HostCacheStoreIndex store_index) {
       for (const auto& tensor_entry : tensors) {
         block_tensors.emplace_back(tensor_entry.second);
       }
-      store_entries.emplace_back(StoreEntry{entry.cache_handle,
-                                            std::move(entry.key_component),
-                                            std::move(schema_hash),
-                                            entry.cache,
+      store_entries.emplace_back(StoreEntry{entry.cache,
                                             block_type,
                                             std::move(key_prefix),
-                                            std::move(block_tensors)});
+                                            std::move(block_tensors),
+                                            put_owner});
     }
   }
 }
 
 std::string KVCacheStore::build_schema_hash(BlockType block_type,
-                                            const KVCache& cache) const {
+                                            const KVCache& cache,
+                                            bool is_tp_replicated) const {
   const BlockTypeTensorMap tensors = cache.get_block_type_tensors(block_type);
   CHECK(!tensors.empty()) << "Host cache has no tensors for BlockType "
                           << static_cast<int32_t>(block_type);
 
-  std::string cache_schema = config_.enable_mla
+  std::string cache_schema = is_tp_replicated
                                  ? "parallel=mla"
                                  : "tp=" + std::to_string(config_.tp_size);
   cache_schema.append("|type=");
@@ -171,14 +183,15 @@ std::string KVCacheStore::build_schema_hash(BlockType block_type,
                      sizeof(schema_hash.data));
 }
 
-std::string KVCacheStore::build_key_prefix(
-    const std::string& key_component,
-    BlockType block_type,
-    const std::string& schema_hash) const {
+std::string KVCacheStore::build_key_prefix(const std::string& key_component,
+                                           BlockType block_type,
+                                           const std::string& schema_hash,
+                                           bool is_tp_replicated,
+                                           bool is_kv_split_cache) const {
   std::string prefix = "xllm-kv-v3:";
   append_key_field(prefix, config_.model_id);
   append_key_field(prefix, key_component);
-  if (config_.enable_mla) {
+  if (is_tp_replicated) {
     prefix.append("mla:");
   } else {
     prefix.append(std::to_string(config_.tp_size));
@@ -186,11 +199,11 @@ std::string KVCacheStore::build_key_prefix(
   }
   prefix.append(std::to_string(static_cast<int32_t>(block_type)));
   prefix.push_back(':');
-  if (!config_.enable_mla) {
+  if (!is_tp_replicated) {
     prefix.append(std::to_string(config_.tp_rank));
     prefix.push_back(':');
   }
-  if (config_.kv_split_size > 1) {
+  if (is_kv_split_cache && config_.kv_split_size > 1) {
     prefix.append("kv:");
     prefix.append(std::to_string(config_.kv_split_size));
     prefix.push_back(':');
@@ -291,10 +304,10 @@ uint32_t KVCacheStore::batch_put(
   if (!is_initialized_ || block_transfer_info.empty()) {
     return 0;
   }
-  if (!config_.write_enabled) {
-    VLOG(1) << "KVCacheStore skips remote put on a non-writer: tp_rank="
-            << config_.tp_rank << ", kv_split_size=" << config_.kv_split_size
-            << ", kv_split_rank=" << config_.kv_split_rank;
+  if (!is_storage_writer_) {
+    VLOG(1) << "KVCacheStore skips remote put on a non-writer: dp_local_rank="
+            << config_.dp_local_rank
+            << ", kv_replica_rank=" << config_.kv_replica_rank;
     return static_cast<uint32_t>(block_transfer_info.size());
   }
 
@@ -315,6 +328,12 @@ uint32_t KVCacheStore::batch_put(
   for (size_t group_index = 0; group_index < groups.size(); ++group_index) {
     const RequestGroup& group = groups[group_index];
     const PhysicalRequest& request = requests[group.request_indices.front()];
+    if (!request.entry->is_put_owner) {
+      for (size_t request_index : group.request_indices) {
+        physical_results[request_index] = 1;
+      }
+      continue;
+    }
     const std::optional<MooncakeMultiBuffer> buffer = build_multi_buffer(
         *request.entry,
         block_transfer_info[request.logical_index].dst_block_id);

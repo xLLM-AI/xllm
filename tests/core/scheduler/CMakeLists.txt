@@ -25,6 +25,8 @@ cc_test(
   DEPS
     :config
     :scheduler
+    :scheduler_factory
+    :disaggregation
     :xllm_server
     :block
     GTest::gtest_main

@@ -10,9 +10,16 @@ cc_library(
     xllm_server.cpp
     xllm_server_registry.cpp
   DEPS
-    :api_service
-    :request
-    absl::strings
+    :common
+    :config
+    :worker_service
+    :collective_service
+    brpc
     glog::glog
-    proto::xllm_proto
+    protobuf::libprotobuf
+)
+
+target_link_libraries(xllm_server PRIVATE
+  nlohmann_json::nlohmann_json
+  proto::xllm_proto
 )

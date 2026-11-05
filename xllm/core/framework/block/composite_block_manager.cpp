@@ -358,16 +358,18 @@ CompositeBlockManager::LeafMap build_composite_leaves(
     } else if (chunk_stride <= 0) {
       chunk_stride = 1;
     }
+    BlockManager::Options linear_opts = options;
+    linear_opts
+        .num_blocks(static_cast<uint32_t>(options.linear_state_num_slots()))
+        .block_size(chunk_stride)
+        .enable_prefix_cache(linear_prefix_cache)
+        .instance_is_decode(is_decode);
     leaves.emplace(
         BlockType::LINEAR,
         CompositeBlockManager::LeafEntry{
-            maybe_concurrent(
-                std::make_unique<LinearStateBlockManager>(
-                    static_cast<uint32_t>(options.linear_state_num_slots()),
-                    chunk_stride,
-                    linear_prefix_cache,
-                    is_decode),
-                options),
+            maybe_concurrent(std::make_unique<LinearStateBlockManager>(
+                                 std::move(linear_opts)),
+                             options),
             /*participates_in_admission=*/false,
             /*supports_prefix_cache=*/linear_prefix_cache});
   }
@@ -392,7 +394,6 @@ CompositeBlockManager::LeafMap build_composite_leaves(
   const size_t n = options.manager_types().size();
   CHECK_EQ(n, options.compress_ratios().size())
       << "manager_types and compress_ratios must have the same size";
-  CHECK_GT(n, 0u) << "Composite requires at least one sub-manager";
 
   for (size_t i = 0; i < n; ++i) {
     const uint32_t type = options.manager_types()[i];
@@ -713,7 +714,7 @@ void CompositeBlockManager::release_out_of_window_for_sequence(Sequence* seq) {
 
 void CompositeBlockManager::deallocate_for_sequence(Sequence* seq,
                                                     bool cache_prefix) {
-  if (seq == nullptr) {
+  if (seq == nullptr || cache_tier_ == CacheTier::HOST) {
     return;
   }
   // Prefix publication needs the live cache state. Reset consumes its block
@@ -882,6 +883,15 @@ void CompositeBlockManager::publish_prefix(Sequence* seq, size_t num_tokens) {
   }
 }
 
+void CompositeBlockManager::trim_prefetch_blocks(Sequence& seq,
+                                                 size_t max_hit_tokens) {
+  for (auto& [type, entry] : leaves_) {
+    if (type == BlockType::EMBEDDING) {
+      continue;
+    }
+    entry.leaf->trim_prefetch_blocks(seq, max_hit_tokens);
+  }
+}
 std::vector<Block> CompositeBlockManager::allocate_blocks(BlockType type,
                                                           size_t num_blocks) {
   BlockManager* leaf = leaf_of(type);

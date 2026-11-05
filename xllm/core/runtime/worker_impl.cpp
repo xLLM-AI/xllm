@@ -76,7 +76,6 @@ limitations under the License.
 #if defined(USE_CUDA)
 #include "platform/cuda_profiler.h"
 #endif
-#include "core/distributed_runtime/master.h"
 #include "core/framework/allocator/global_virtual_memory_region.h"
 #include "core/framework/allocator/virtual_memory/physical_page_pool.h"
 #include "core/framework/model_loader/model_loader.h"
@@ -2647,18 +2646,18 @@ WorkerImpl::create_hierarchy_kv_cache_transfer(
   const int32_t kv_split_size = parallel_args.kv_split_size_effective();
   CHECK_GT(kv_split_size, 0);
   CHECK_EQ(dp_local_size % kv_split_size, 0U);
+  const uint32_t dp_local_rank = worker_id % dp_local_size;
   // Pure DCP interleaves shards; PCP groups each shard's replicas contiguously.
-  const bool store_write_enabled =
-      !options_.enable_mla() ||
-      (options_.cp_size() == 1
-           ? worker_id % dp_local_size < static_cast<uint32_t>(kv_split_size)
-           : worker_id % (dp_local_size / kv_split_size) == 0);
+  const uint32_t kv_replica_rank =
+      options_.cp_size() == 1 ? dp_local_rank / kv_split_size
+                              : dp_local_rank % (dp_local_size / kv_split_size);
   HierarchyKVCacheTransfer::Options transfer_options;
   transfer_options.tp_rank(worker_id % tp_size)
       .tp_size(tp_size)
       .kv_split_size(kv_split_size)
       .kv_split_rank(parallel_args.kv_split_rank())
-      .store_write_enabled(store_write_enabled)
+      .dp_local_rank(dp_local_rank)
+      .kv_replica_rank(kv_replica_rank)
       .layers(context_.get_model_args().n_layers())
       .host_blocks_factor(options_.host_blocks_factor())
       .layers_wise_copy_batchs(options_.layers_wise_copy_batchs())
@@ -2699,6 +2698,7 @@ void WorkerImpl::register_hierarchy_kv_cache(
 
   HierarchyKVCacheTransfer::CacheRegistration registration;
   registration.role = role;
+  registration.enable_mla = context_.get_model_args().enable_mla();
   registration.device_kv_caches = &kv_caches_;
   registration.kv_cache_shape =
       hierarchy_kv_cache_transfer_context_->kv_cache_shape;

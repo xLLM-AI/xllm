@@ -17,17 +17,23 @@ limitations under the License.
 
 #include <brpc/server.h>
 #include <butil/at_exit.h>
+#include <butil/endpoint.h>
+#include <glog/logging.h>
 #include <unistd.h>
 
 #include <array>
 #include <csignal>
 
-#include "core/common/global_flags.h"
+#include "api_service/api_service.h"
+#include "core/disaggregation/disagg_pd_service.h"
+#include "core/distributed_runtime/collective_service.h"
+#include "core/distributed_runtime/worker_service.h"
 #include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/distributed_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/service_config.h"
 #include "health_reporter.h"
+#include "xllm_service.pb.h"
 
 namespace xllm {
 

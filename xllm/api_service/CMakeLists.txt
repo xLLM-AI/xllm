@@ -103,6 +103,9 @@ cc_library(
     embedding_output_builder.cpp
   DEPS
     :api_response
+    :common
+    :config
+    brpc
     :master
     :chat_template
     :util

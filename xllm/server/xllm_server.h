@@ -18,13 +18,22 @@ limitations under the License.
 #include <google/protobuf/service.h>
 
 #include <memory>
+#include <string>
+#include <thread>
 
-#include "api_service/api_service.h"
-#include "core/distributed_runtime/collective_service.h"
-#include "core/distributed_runtime/disagg_pd_service.h"
-#include "core/distributed_runtime/worker_service.h"
+#include "core/common/macros.h"
+
+namespace brpc {
+class Server;
+}
 
 namespace xllm {
+
+class CollectiveService;
+class DisaggPDService;
+class WorkerService;
+
+class APIService;
 
 class XllmServer final {
  public:

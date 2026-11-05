@@ -28,8 +28,8 @@ limitations under the License.
 #include <vector>
 
 #include "common/macros.h"
+#include "common/types.h"
 #include "core/distributed_runtime/distributed_worker_manager.h"
-#include "core/distributed_runtime/master.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
 #include "engine.h"
 #include "framework/batch/batch_group.h"
@@ -42,6 +42,7 @@ limitations under the License.
 namespace xllm {
 
 class EplbController;
+class DSparkDpCoordinator;
 class KVCacheTransferCoordinatorBase;
 class ModelLoader;
 class DraftStepController;

@@ -21,13 +21,12 @@ limitations under the License.
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <limits>
 #include <mutex>
 #include <optional>
 #include <utility>
 #include <vector>
 
-#include "framework/model/model_params_view.h"
+#include "core/framework/model/model_input_types.h"
 #include "util/timer.h"
 
 namespace xllm {
@@ -40,166 +39,152 @@ enum class PrefetchControl : uint8_t {
   STOP = 1,
 };
 
+struct PrefetchUnit final {
+  // Offsets into StoragePrefetchRequest::transfer_infos. The unit starts at
+  // the previous unit's end; gates occupy [begin, gated_end) and optional
+  // blocks occupy [gated_end, end).
+  size_t gated_end = 0;
+  size_t end = 0;
+  // A unit may have an optional cache whose allocation failed. Keeping this
+  // bit separate from the flat range lets the worker report an optional miss
+  // instead of treating an empty range as "not applicable".
+  bool has_non_gated = false;
+};
+
 class StoragePrefetchRequest final {
  public:
   bool to_proto(proto::PrefetchRequest* request) const;
   bool from_proto(const proto::PrefetchRequest& request);
 
   std::vector<BlockTransferInfo> transfer_infos;
-  std::vector<uint32_t> unit_end_offsets;
-  std::vector<uint32_t> batch_end_unit_offsets;
+  std::vector<PrefetchUnit> units;
 
   bool valid() const {
-    if (transfer_infos.empty() || unit_end_offsets.empty() ||
-        batch_end_unit_offsets.empty()) {
+    if (units.empty()) {
       return false;
     }
-
-    uint32_t previous = 0;
-    for (uint32_t offset : unit_end_offsets) {
-      if (offset <= previous || offset > transfer_infos.size()) {
+    size_t begin = 0;
+    for (const PrefetchUnit& unit : units) {
+      if (unit.gated_end <= begin || unit.gated_end > unit.end ||
+          unit.end > transfer_infos.size()) {
         return false;
       }
-      previous = offset;
+      begin = unit.end;
     }
-    if (unit_end_offsets.back() != transfer_infos.size()) {
-      return false;
-    }
-
-    previous = 0;
-    for (uint32_t offset : batch_end_unit_offsets) {
-      if (offset <= previous || offset > unit_end_offsets.size() ||
-          offset - previous > std::numeric_limits<uint8_t>::max()) {
-        return false;
-      }
-      previous = offset;
-    }
-    if (batch_end_unit_offsets.back() != unit_end_offsets.size()) {
-      return false;
-    }
-
-    return std::all_of(transfer_infos.begin(),
+    return begin == transfer_infos.size() &&
+           std::all_of(transfer_infos.begin(),
                        transfer_infos.end(),
                        [](const BlockTransferInfo& info) {
                          return info.transfer_type == TransferType::G2H;
                        });
   }
 
-  size_t batch_count() const { return batch_end_unit_offsets.size(); }
+  size_t unit_count() const { return units.size(); }
 
-  size_t batch_unit_begin(size_t batch_index) const {
-    return batch_index == 0 ? 0 : batch_end_unit_offsets[batch_index - 1];
+  size_t batch_count(size_t batch_size) const {
+    return (units.size() + batch_size - 1) / batch_size;
   }
 
-  size_t batch_unit_count(size_t batch_index) const {
-    CHECK_LT(batch_index, batch_end_unit_offsets.size());
-    return batch_end_unit_offsets[batch_index] - batch_unit_begin(batch_index);
+  size_t batch_unit_count(size_t batch_index, size_t batch_size) const {
+    const size_t begin = batch_index * batch_size;
+    return std::min(batch_size, units.size() - begin);
   }
+};
 
-  std::pair<size_t, size_t> batch_transfer_range(size_t batch_index) const {
-    CHECK_LT(batch_index, batch_end_unit_offsets.size());
-    const size_t unit_begin = batch_unit_begin(batch_index);
-    const size_t unit_end = batch_end_unit_offsets[batch_index];
-    const size_t transfer_begin =
-        unit_begin == 0 ? 0 : unit_end_offsets[unit_begin - 1];
-    return {transfer_begin, unit_end_offsets[unit_end - 1]};
-  }
-
-  std::optional<uint8_t> count_prefix_hit_units(
-      size_t batch_index,
-      const std::vector<uint8_t>& logical_hits) const {
-    if (batch_index >= batch_count()) {
-      return std::nullopt;
-    }
-    const auto [transfer_begin, transfer_end] =
-        batch_transfer_range(batch_index);
-    if (logical_hits.size() != transfer_end - transfer_begin) {
-      return std::nullopt;
-    }
-
-    const size_t unit_begin = batch_unit_begin(batch_index);
-    const size_t unit_end = batch_end_unit_offsets[batch_index];
-    size_t hit_units = 0;
-    size_t local_begin = 0;
-    for (size_t unit = unit_begin; unit < unit_end; ++unit) {
-      const size_t local_end = unit_end_offsets[unit] - transfer_begin;
-      const bool unit_hit = std::all_of(
-          logical_hits.begin() + static_cast<std::ptrdiff_t>(local_begin),
-          logical_hits.begin() + static_cast<std::ptrdiff_t>(local_end),
-          [](uint8_t hit) { return hit != 0; });
-      if (!unit_hit) {
-        break;
-      }
-      ++hit_units;
-      local_begin = local_end;
-    }
-    return static_cast<uint8_t>(hit_units);
-  }
+struct PrefetchSummary final {
+  // Per-unit AND across all workers. gated_hits is used for the contiguous
+  // full-cache prefix; non_gated_hits selects the deepest optional checkpoint
+  // inside that prefix.
+  std::vector<uint8_t> gated_hits;
+  std::vector<uint8_t> non_gated_hits;
 };
 
 class PrefetchResult final {
  public:
   using StopPredicate = std::function<bool()>;
   // The second argument certifies that no worker can still write host blocks.
-  using DoneCallback = std::function<void(size_t, bool)>;
+  using DoneCallback = std::function<void(PrefetchSummary, bool)>;
 
   PrefetchResult(size_t worker_count,
-                 std::vector<uint32_t> batch_end_unit_offsets,
+                 const StoragePrefetchRequest& request,
+                 size_t batch_size,
                  int64_t timeout_ms,
                  StopPredicate stop_requested,
                  DoneCallback done)
       : workers_(worker_count),
         remaining_workers_(worker_count),
-        batch_end_unit_offsets_(std::move(batch_end_unit_offsets)),
+        unit_count_(request.unit_count()),
+        batch_size_(batch_size),
         timeout_ms_(timeout_ms),
         stop_requested_(std::move(stop_requested)),
         done_(std::move(done)) {
     CHECK_GT(worker_count, 0u);
-    CHECK(!batch_end_unit_offsets_.empty());
+    CHECK_GT(batch_size_, 0u);
+    CHECK(request.valid());
     CHECK(timeout_ms_ == -1 || timeout_ms_ > 0);
     CHECK(stop_requested_ != nullptr);
     CHECK(done_ != nullptr);
+    for (WorkerProgress& worker : workers_) {
+      worker.gated_hits.assign(unit_count_, 0);
+      worker.non_gated_hits.assign(unit_count_, 0);
+    }
   }
 
   size_t worker_count() const { return workers_.size(); }
   int64_t stream_idle_timeout_ms() const { return timeout_ms_; }
+  size_t batch_wire_size() const { return batch_size_; }
+  size_t batch_count() const {
+    return (unit_count_ + batch_size_ - 1) / batch_size_;
+  }
+  void mark_worker_failed() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    failed_ = true;
+    continue_prefetch_ = false;
+  }
 
-  std::optional<PrefetchControl> record_batch_result(size_t worker_index,
-                                                     uint8_t prefix_hit_units) {
+  // The wire response always has 2 * batch_size bytes, including zero padding
+  // for a short final batch. Only the first real unit_count bytes from each
+  // vector are committed to the aggregate summary.
+  std::optional<PrefetchControl> record_batch_result(
+      size_t worker_index,
+      const std::vector<uint8_t>& gated_hits,
+      const std::vector<uint8_t>& non_gated_hits) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (worker_index >= workers_.size()) {
+      continue_prefetch_ = false;
       return std::nullopt;
     }
-
     WorkerProgress& worker = workers_[worker_index];
     if (worker.state != WorkerState::WAITING_RESULT ||
-        worker.batch_index >= batch_end_unit_offsets_.size()) {
+        worker.batch_index >= batch_count() ||
+        gated_hits.size() != batch_size_ ||
+        non_gated_hits.size() != batch_size_) {
+      continue_prefetch_ = false;
       return std::nullopt;
     }
+    const size_t begin = worker.batch_index * batch_size_;
+    const size_t count = std::min(batch_size_, unit_count_ - begin);
+    std::copy(gated_hits.begin(),
+              gated_hits.begin() + static_cast<std::ptrdiff_t>(count),
+              worker.gated_hits.begin() + static_cast<std::ptrdiff_t>(begin));
+    std::copy(
+        non_gated_hits.begin(),
+        non_gated_hits.begin() + static_cast<std::ptrdiff_t>(count),
+        worker.non_gated_hits.begin() + static_cast<std::ptrdiff_t>(begin));
 
-    const size_t batch_begin =
-        worker.batch_index == 0
-            ? 0
-            : batch_end_unit_offsets_[worker.batch_index - 1];
-    const size_t batch_end = batch_end_unit_offsets_[worker.batch_index];
-    const size_t batch_units = batch_end - batch_begin;
-    if (prefix_hit_units > batch_units) {
-      return std::nullopt;
-    }
-
-    worker.hit_units += prefix_hit_units;
-    const bool last_batch =
-        worker.batch_index + 1 == batch_end_unit_offsets_.size();
+    const bool gated_complete =
+        std::all_of(gated_hits.begin(),
+                    gated_hits.begin() + static_cast<std::ptrdiff_t>(count),
+                    [](uint8_t hit) { return hit != 0; });
     const bool timed_out =
         timeout_ms_ > 0 && timer_.elapsed_milliseconds() >= timeout_ms_;
-    const bool stopped = stop_requested_();
-
-    if (prefix_hit_units != batch_units || last_batch || timed_out || stopped ||
-        failed_) {
+    if (!gated_complete || timed_out || stop_requested_()) {
+      continue_prefetch_ = false;
+    }
+    if (!continue_prefetch_ || worker.batch_index + 1 >= batch_count()) {
       worker.state = WorkerState::WAITING_CLOSE;
       return PrefetchControl::STOP;
     }
-
     ++worker.batch_index;
     return PrefetchControl::CONTINUE;
   }
@@ -248,6 +233,7 @@ class PrefetchResult final {
       }
       if (!worker_ok || !worker_quiescent) {
         failed_ = true;
+        continue_prefetch_ = false;
       }
       worker.quiescent = worker_quiescent;
       worker.state = WorkerState::ENDED;
@@ -266,15 +252,16 @@ class PrefetchResult final {
 
   struct WorkerProgress {
     size_t batch_index = 0;
-    size_t hit_units = 0;
     WorkerState state = WorkerState::WAITING_RESULT;
+    std::vector<uint8_t> gated_hits;
+    std::vector<uint8_t> non_gated_hits;
     bool rpc_pending = false;
     bool quiescent = false;
   };
 
   void finish_if_ready() {
     DoneCallback done;
-    size_t common_hit_units = 0;
+    PrefetchSummary summary;
     bool workers_quiescent = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -287,9 +274,15 @@ class PrefetchResult final {
       // A failed worker cannot certify even the prefix it reported earlier.
       // Preserve the fail-closed behavior of the previous bitmap protocol.
       if (!failed_) {
-        common_hit_units = workers_.front().hit_units;
+        summary.gated_hits.assign(unit_count_, 1);
+        summary.non_gated_hits.assign(unit_count_, 1);
         for (const WorkerProgress& progress : workers_) {
-          common_hit_units = std::min(common_hit_units, progress.hit_units);
+          for (size_t index = 0; index < unit_count_; ++index) {
+            summary.gated_hits[index] =
+                summary.gated_hits[index] && progress.gated_hits[index];
+            summary.non_gated_hits[index] =
+                summary.non_gated_hits[index] && progress.non_gated_hits[index];
+          }
         }
       }
       workers_quiescent = std::all_of(
@@ -298,19 +291,21 @@ class PrefetchResult final {
           });
       done = std::move(done_);
     }
-    done(common_hit_units, workers_quiescent);
+    done(std::move(summary), workers_quiescent);
   }
 
   mutable std::mutex mutex_;
   std::vector<WorkerProgress> workers_;
   size_t remaining_workers_ = 0;
   size_t pending_worker_rpcs_ = 0;
-  std::vector<uint32_t> batch_end_unit_offsets_;
+  size_t unit_count_ = 0;
+  size_t batch_size_ = 0;
   int64_t timeout_ms_ = -1;
   StopPredicate stop_requested_;
   DoneCallback done_;
   Timer timer_;
   bool failed_ = false;
+  bool continue_prefetch_ = true;
 };
 
 }  // namespace xllm

@@ -33,7 +33,6 @@ limitations under the License.
 #include "common/device_monitor.h"
 #include "common/metrics.h"
 #include "common/types.h"
-#include "core/distributed_runtime/comm_channel.h"
 #include "core/distributed_runtime/worker_model_codec.h"
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/speculative/adaptive/spec_startup_calibration.h"
@@ -121,11 +120,15 @@ class WorkerPrefetchSession final
  public:
   WorkerPrefetchSession(Worker* worker,
                         ThreadPool* threadpool,
-                        StoragePrefetchRequest request)
-      : worker_(worker), threadpool_(threadpool), request_(std::move(request)) {
+                        StoragePrefetchRequest request,
+                        size_t batch_size)
+      : worker_(worker),
+        threadpool_(threadpool),
+        request_(std::move(request)),
+        batch_size_(batch_size) {
     CHECK(worker_ != nullptr);
-    CHECK(threadpool_ != nullptr);
-    CHECK(request_.valid());
+    gated_hits_.resize(batch_size_);
+    non_gated_hits_.resize(batch_size_);
   }
 
   void retain() {
@@ -174,9 +177,8 @@ class WorkerPrefetchSession final
         state_ = State::COMPLETED;
         close = true;
       } else if (control == PrefetchControl::CONTINUE &&
-                 last_prefix_hit_units_ ==
-                     request_.batch_unit_count(batch_index_) &&
-                 batch_index_ + 1 < request_.batch_count()) {
+                 last_batch_gate_complete_ &&
+                 batch_index_ + 1 < request_.batch_count(batch_size_)) {
         ++batch_index_;
         state_ = State::RUNNING_BATCH;
         run_next = true;
@@ -240,17 +242,42 @@ class WorkerPrefetchSession final
       batch_index = batch_index_;
     }
 
-    const auto [transfer_begin, transfer_end] =
-        request_.batch_transfer_range(batch_index);
-    Slice<BlockTransferInfo> all_transfers(request_.transfer_infos);
-    Slice<BlockTransferInfo> batch =
-        all_transfers.slice(transfer_begin, transfer_end);
-    std::vector<uint8_t> logical_hits = worker_->prefetch_kv_blocks(batch);
-    const std::optional<uint8_t> prefix_hit_units =
-        request_.count_prefix_hit_units(batch_index, logical_hits);
-    if (!prefix_hit_units.has_value()) {
+    const size_t unit_begin = batch_index * batch_size_;
+    const size_t unit_count =
+        request_.batch_unit_count(batch_index, batch_size_);
+    const size_t transfer_begin =
+        unit_begin == 0 ? 0 : request_.units[unit_begin - 1].end;
+    const size_t transfer_end = request_.units[unit_begin + unit_count - 1].end;
+    Slice<BlockTransferInfo> batch_slice =
+        Slice<BlockTransferInfo>(request_.transfer_infos)
+            .slice(transfer_begin, transfer_end);
+    const std::vector<uint8_t> transfer_hits =
+        worker_->prefetch_kv_blocks(batch_slice);
+    if (transfer_hits.size() != transfer_end - transfer_begin) {
       fail_and_close(stream_id_);
       return;
+    }
+    std::fill(gated_hits_.begin() + unit_count, gated_hits_.end(), 0);
+    std::fill(non_gated_hits_.begin() + unit_count, non_gated_hits_.end(), 0);
+    bool gate_complete = true;
+    size_t unit_gated_begin = transfer_begin;
+    for (size_t local = 0; local < unit_count; ++local) {
+      const PrefetchUnit& unit = request_.units[unit_begin + local];
+      const bool gated_hit = std::all_of(
+          transfer_hits.begin() + (unit_gated_begin - transfer_begin),
+          transfer_hits.begin() + (unit.gated_end - transfer_begin),
+          [](uint8_t hit) { return hit != 0; });
+      const bool non_gated_hit =
+          !unit.has_non_gated ||
+          (unit.gated_end < unit.end &&
+           std::all_of(
+               transfer_hits.begin() + (unit.gated_end - transfer_begin),
+               transfer_hits.begin() + (unit.end - transfer_begin),
+               [](uint8_t hit) { return hit != 0; }));
+      gated_hits_[local] = gated_hit ? 1 : 0;
+      non_gated_hits_[local] = non_gated_hit ? 1 : 0;
+      gate_complete = gate_complete && gated_hit;
+      unit_gated_begin = unit.end;
     }
 
     bool close_after_result = false;
@@ -259,13 +286,14 @@ class WorkerPrefetchSession final
       if (state_ != State::RUNNING_BATCH || batch_index != batch_index_) {
         return;
       }
-      last_prefix_hit_units_ = *prefix_hit_units;
+      last_batch_gate_complete_ = gate_complete;
       close_after_result = stop_after_batch_;
       state_ = close_after_result ? State::COMPLETED : State::WAITING_DECISION;
     }
 
     butil::IOBuf result;
-    result.append(&*prefix_hit_units, sizeof(*prefix_hit_units));
+    result.append(gated_hits_.data(), gated_hits_.size());
+    result.append(non_gated_hits_.data(), non_gated_hits_.size());
     if (brpc::StreamWrite(stream_id_, result) != 0) {
       fail_and_close(stream_id_);
     } else if (close_after_result) {
@@ -287,10 +315,13 @@ class WorkerPrefetchSession final
   Worker* worker_ = nullptr;
   ThreadPool* threadpool_ = nullptr;
   StoragePrefetchRequest request_;
+  size_t batch_size_ = 0;
+  std::vector<uint8_t> gated_hits_;
+  std::vector<uint8_t> non_gated_hits_;
   std::mutex mutex_;
   brpc::StreamId stream_id_ = brpc::INVALID_STREAM_ID;
   size_t batch_index_ = 0;
-  size_t last_prefix_hit_units_ = 0;
+  bool last_batch_gate_complete_ = false;
   bool stop_after_batch_ = false;
   State state_ = State::CREATED;
   std::shared_ptr<WorkerPrefetchSession> keepalive_;
@@ -1234,14 +1265,14 @@ void WorkerService::PrefetchFromStorage(
   brpc::Controller* cntl = static_cast<brpc::Controller*>(controller);
 
   StoragePrefetchRequest request;
-  if (!request.from_proto(*req)) {
+  if (!request.from_proto(*req) || req->batch_size() == 0) {
     resp->set_ok(false);
     LOG(ERROR) << "Invalid Mooncake prefetch request.";
     return;
   }
 
   auto session = std::make_shared<WorkerPrefetchSession>(
-      worker_.get(), &copy_threadpool_, std::move(request));
+      worker_.get(), &copy_threadpool_, std::move(request), req->batch_size());
 
   brpc::StreamId stream_id;
   brpc::StreamOptions stream_options;
@@ -1400,4 +1431,5 @@ void WorkerService::GetActiveActivationMemory(
   });
   return;
 }
+
 }  // namespace xllm

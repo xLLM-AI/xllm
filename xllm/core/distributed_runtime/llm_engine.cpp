@@ -48,6 +48,7 @@ limitations under the License.
 #include "core/framework/eplb/eplb_controller.h"
 #include "core/framework/model_loader/model_loader.h"
 #include "core/framework/speculative/adaptive/draft_step_controller.h"
+#include "core/framework/speculative/adaptive/dspark_dp_coordinator.h"
 #include "core/framework/speculative/draft_config.h"
 #include "core/kv_cache/block/block_utils.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
@@ -413,12 +414,10 @@ bool LLMEngine::allocate_kv_cache(
                                    options_.speculative_algorithm()))
       .block_size(kv_split_size_eff > 1 ? block_size * kv_split_size_eff
                                         : block_size)
-      .host_num_blocks(kv_cache_cap.n_blocks() * options_.host_blocks_factor())
       .enable_linear_state(enable_state_cache)
       .enable_prefix_cache(options_.enable_prefix_cache())
       .enable_disagg_pd(options_.enable_disagg_pd())
       .enable_kvcache_store(options_.enable_kvcache_store())
-      .prefetch_batch_size(options_.prefetch_batch_size())
       .enable_vmm_kvcache(kv_cache_config.enable_vmm_kvcache())
       .num_layers(args_.n_layers())
       .slot_size(kv_cache_cap.slot_size())
@@ -530,6 +529,9 @@ bool LLMEngine::allocate_kv_cache(
                 kv_cache_cap.c4_count(), options_.host_blocks_factor())));
       }
       options.host_num_blocks_by_type(std::move(host_capacities));
+    } else {
+      options.host_num_blocks(static_cast<uint32_t>(scale_host_block_count(
+          kv_cache_cap.n_blocks(), options_.host_blocks_factor())));
     }
     options.enable_host_offload(true);
   }

@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/distributed_runtime/disagg_pd_service_impl.h"
+#include "core/disaggregation/disagg_pd_service_impl.h"
 
 #include <glog/logging.h>
 
@@ -23,16 +23,16 @@ limitations under the License.
 #include <vector>
 
 #include "common/types.h"
+#include "core/disaggregation/disagg_pd_request_converter.h"
+#include "core/disaggregation/disagg_pd_response.h"
+#include "core/disaggregation/disagg_pd_scheduler.h"
 #include "core/distributed_runtime/disagg_pd_kv_response.h"
-#include "core/distributed_runtime/disagg_pd_request_converter.h"
-#include "core/distributed_runtime/disagg_pd_response.h"
 #include "core/distributed_runtime/distributed_virtual_memory_coordinator.h"
 #include "core/distributed_runtime/engine.h"
 #include "core/framework/block/block_manager_pool.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/constrained/json_object_grammar.h"
 #include "core/framework/request/request_output.h"
-#include "scheduler/disagg_pd_scheduler.h"
 #include "util/utils.h"
 
 namespace xllm {

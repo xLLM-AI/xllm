@@ -34,6 +34,7 @@ class KVCacheTransferCoordinator final : public KVCacheTransferCoordinatorBase {
   struct Options {
     int32_t dp_size = 1;
     uint32_t prefetch_timeout_ms = 0;
+    uint32_t prefetch_batch_size = 2;
   };
 
   KVCacheTransferCoordinator(

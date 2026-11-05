@@ -117,7 +117,6 @@ void KVCacheTransferCoordinator::prefetch_from_storage(
     PrefetchResult::StopPredicate stop_requested,
     PrefetchResult::DoneCallback done) {
   CHECK(request != nullptr);
-  CHECK(request->valid());
   const auto& worker_clients =
       distributed_worker_manager_->get_worker_clients();
   const auto workers = KVTransferTopology::get_dp_worker_range(
@@ -127,12 +126,12 @@ void KVCacheTransferCoordinator::prefetch_from_storage(
       options_.prefetch_timeout_ms == 0
           ? -1
           : static_cast<int64_t>(options_.prefetch_timeout_ms);
-  auto result =
-      std::make_shared<PrefetchResult>(workers->count,
-                                       request->batch_end_unit_offsets,
-                                       timeout_ms,
-                                       std::move(stop_requested),
-                                       std::move(done));
+  auto result = std::make_shared<PrefetchResult>(workers->count,
+                                                 *request,
+                                                 options_.prefetch_batch_size,
+                                                 timeout_ms,
+                                                 std::move(stop_requested),
+                                                 std::move(done));
   for (size_t local_rank = 0; local_rank < workers->count; ++local_rank) {
     worker_clients[workers->begin + local_rank]->prefetch_from_storage(
         request, result, local_rank);

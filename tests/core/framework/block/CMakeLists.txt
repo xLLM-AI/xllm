@@ -42,9 +42,11 @@ if(USE_NPU)
       embedding_block_manager_test.cpp
     DEPS
       :xllm_server
+      :batch
       :block
       :config
       :kv_cache
+      :kv_cache_manager_factory
       :prefix_cache
       absl::random_random
       Boost::serialization

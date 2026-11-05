@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "scheduler/disagg_pd_scheduler.h"
+#include "core/disaggregation/disagg_pd_scheduler.h"
 
 #include <absl/time/clock.h>
 #include <absl/time/time.h>
@@ -38,7 +38,6 @@ limitations under the License.
 #include "core/framework/config/service_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/kv_cache/transfer/pd_topology_guard.h"
-#include "core/scheduler/disagg_pd_scheduler.h"
 #include "core/util/scope_guard.h"
 #include "disagg_pd.pb.h"
 #include "distributed_runtime/engine.h"
@@ -48,6 +47,7 @@ limitations under the License.
 #include "framework/request/request_state.h"
 #include "framework/request/sequence.h"
 #include "scheduler/continuous_scheduler.h"
+#include "server/xllm_server_registry.h"
 #include "util/env_var.h"
 #include "util/timer.h"
 #include "util/utils.h"
@@ -332,78 +332,18 @@ void DisaggPDScheduler::profile_tpot() {
   }
 }
 
-// TODO: maybe we should consider update info case even if info already exists
-// in local.
-bool DisaggPDScheduler::check_remote_instance_info(
-    const std::string& instance_name) {
-  if (remote_instances_info_.find(instance_name) !=
-      remote_instances_info_.end()) {
-    return true;
-  }
-
-  InstanceInfo instance_info =
-      xservice_client_->get_instance_info(instance_name);
-  if (instance_info.name.empty()) {
-    LOG(ERROR)
-        << "Failed to get instance info from master server, instance name: "
-        << instance_name;
-    return false;
-  }
-
-  remote_instances_info_[instance_name] = instance_info;
-  return true;
-}
-
-proto::DisaggPDService_Stub* DisaggPDScheduler::create_rpc_channel(
-    const std::string& instance_name) {
-  std::lock_guard<std::mutex> lock(instance_channel_map_mutex_);
-  auto it = instance_channel_map_.find(instance_name);
-  if (it == instance_channel_map_.end()) {
-    LOG(INFO) << "Create rpc channel to instance: " << instance_name;
-    // check prefill instance info
-    if (!check_remote_instance_info(instance_name)) {
-      LOG(ERROR) << "Check remote instance info failed, instance name: "
-                 << instance_name;
-      return nullptr;
-    }
-    // create channel to prefill instance
-    brpc::Channel* channel = new brpc::Channel();
-    brpc::ChannelOptions options;
-    options.timeout_ms =
-        ::xllm::ServiceConfig::get_instance().rpc_channel_timeout_ms();
-    options.max_retry = 3;
-    std::string load_balancer = "";
-    if (channel->Init(remote_instances_info_[instance_name].rpc_address.c_str(),
-                      load_balancer.c_str(),
-                      &options) != 0) {
-      LOG(ERROR) << "Fail to initialize channel for "
-                 << remote_instances_info_[instance_name].rpc_address;
-      remote_instances_info_.erase(instance_name);
-      delete channel;
-      return nullptr;
-    }
-
-    proto::DisaggPDService_Stub* stub =
-        new proto::DisaggPDService_Stub(channel);
-    instance_channel_map_[instance_name] = stub;
-    return stub;
-  }
-
-  return it->second;
-}
-
 void DisaggPDScheduler::start_rpc_server(
     DisaggPDServiceOptions response_options) {
-  std::unique_ptr<DisaggPDService> service = std::make_unique<DisaggPDService>(
+  auto service = std::make_unique<DisaggPDService>(
       this,
       engine_,
       KVCacheConfig::get_instance().block_size(),
       std::move(response_options));
+  const int32_t port = ::xllm::DisaggPDConfig::get_instance().disagg_pd_port();
   auto rpc_server =
       ServerRegistry::get_instance().register_server(server_name_);
   if (!rpc_server->start(std::move(service))) {
-    LOG(ERROR) << "Failed to start brpc disagg pd server on port "
-               << ::xllm::DisaggPDConfig::get_instance().disagg_pd_port();
+    LOG(ERROR) << "Failed to start brpc disagg pd server on port " << port;
     return;
   }
 }
@@ -526,16 +466,12 @@ void DisaggPDScheduler::dispatch_requests() {
           {StatusCode::UNKNOWN, "failed to fetch remote decode instance info"});
       continue;
     }
-    remote_instances_info_[selected_instance] = remote_info;
 
     const PdTopoResult topo_result = check_pd_topo(
         instance_info_, remote_info, options_.kv_cache_transfer_mode());
     const bool allow_pd_topo = topo_result.status == PdTopoStatus::ALLOW_HOMO ||
                                topo_result.status == PdTopoStatus::ALLOW_HETERO;
     if (!allow_pd_topo) {
-      if (topo_result.status == PdTopoStatus::INVALID_REMOTE) {
-        remote_instances_info_.erase(selected_instance);
-      }
       output_dispatcher_->process_failed_request(
           request,
           {StatusCode::INVALID_ARGUMENT,
@@ -551,7 +487,31 @@ void DisaggPDScheduler::dispatch_requests() {
               << ", remote dp/tp=" << remote_topo.dp_size << "/"
               << remote_topo.tp_size;
     }
-    proto::DisaggPDService_Stub* stub = create_rpc_channel(selected_instance);
+    proto::DisaggPDService_Stub* stub = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(instance_channel_map_mutex_);
+      auto it = instance_channel_map_.find(remote_info.name);
+      if (it != instance_channel_map_.end()) {
+        stub = it->second.get();
+      } else {
+        LOG(INFO) << "Create rpc channel to instance: " << remote_info.name;
+        auto channel = std::make_unique<brpc::Channel>();
+        brpc::ChannelOptions options;
+        options.timeout_ms =
+            ::xllm::ServiceConfig::get_instance().rpc_channel_timeout_ms();
+        options.max_retry = 3;
+        if (channel->Init(remote_info.rpc_address.c_str(), "", &options) != 0) {
+          LOG(ERROR) << "Fail to initialize channel for "
+                     << remote_info.rpc_address;
+        } else {
+          auto owned_stub = std::make_unique<proto::DisaggPDService_Stub>(
+              channel.get(), google::protobuf::Service::STUB_OWNS_CHANNEL);
+          channel.release();
+          stub = owned_stub.get();
+          instance_channel_map_[remote_info.name] = std::move(owned_stub);
+        }
+      }
+    }
     if (stub == nullptr) {
       output_dispatcher_->process_failed_request(
           request, {StatusCode::UNKNOWN, "Fail to create rpc channel"});
@@ -751,8 +711,7 @@ void DisaggPDScheduler::dispatch_requests() {
             info.mappings.emplace_back(std::move(mapping));
           }
           info.dp_rank = resps.resps()[i].dp_rank();
-          // TODO: remote_instances_info_ is not multi-thread safe.
-          info.remote_instance_info = remote_instances_info_[selected_instance];
+          info.remote_instance_info = remote_info;
 
           // VirtualMemory mode: save destination offsets from D-node
           if (resp.virtual_kv_cache_layer_global_offsets_size() > 0) {
@@ -1414,13 +1373,10 @@ void DisaggPDScheduler::restore_disaggregated_latency(
 bool DisaggPDScheduler::try_allocate(Sequence* sequence) {
   // When the KV Cache usage reaches the threshold, prefill requests will no
   // longer be scheduled to avoid frequent preemption.
-  if (kv_cache_manager_->kv_cache_utilization() <
-      ::xllm::SchedulerConfig::get_instance()
-          .prefill_scheduling_memory_usage_threshold()) {
-    return kv_cache_manager_->try_allocate(sequence);
-  } else {
-    return false;
-  }
+  return kv_cache_manager_->kv_cache_utilization() <
+             ::xllm::SchedulerConfig::get_instance()
+                 .prefill_scheduling_memory_usage_threshold() &&
+         kv_cache_manager_->try_allocate(sequence);
 }
 
 bool DisaggPDScheduler::exceeds_decode_capacity(Sequence* sequence) const {

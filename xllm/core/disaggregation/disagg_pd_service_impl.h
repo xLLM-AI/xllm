@@ -48,7 +48,7 @@ class DisaggPDServiceImpl {
                                Engine* engine,
                                int32_t kv_cache_block_tokens,
                                DisaggPDServiceOptions response_options = {});
-  ~DisaggPDServiceImpl() = default;
+  virtual ~DisaggPDServiceImpl() = default;
 
   virtual void decode_recv_new_requests(const proto::DisaggRequests* request,
                                         proto::DisaggResponses* response);

@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/distributed_runtime/disagg_pd_request_converter.h"
+#include "core/disaggregation/disagg_pd_request_converter.h"
 
 #include <cstdint>
 #include <string>
@@ -83,9 +83,7 @@ StoppingChecker make_disagg_stopping_checker(const proto::DisaggRequest& req) {
   if (!req.stop_token_ids().empty()) {
     stop_tokens.reserve(req.stop_token_ids_size());
   }
-  for (int32_t stop_token_id : req.stop_token_ids()) {
-    stop_tokens.emplace(stop_token_id);
-  }
+  stop_tokens.insert(req.stop_token_ids().begin(), req.stop_token_ids().end());
   std::vector<std::vector<int32_t>> stop_sequences;
   std::vector<std::string> stop_strings;
   stop_sequences.reserve(req.stop_sequences_size());

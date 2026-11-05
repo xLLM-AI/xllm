@@ -46,6 +46,7 @@ class BlockManagerImpl : public BlockManager {
       KVCacheState& kv_state,
       size_t num_tokens) override;
   bool allocate_for_prefetch(Sequence* seq, size_t num_tokens) override;
+  void trim_prefetch_blocks(Sequence& seq, size_t max_hit_tokens) override;
 
   // allocate shared blocks when enable prefix cache
   std::vector<Block> allocate_shared(
@@ -102,6 +103,9 @@ class BlockManagerImpl : public BlockManager {
   bool allocate_prefetch_range(Sequence* seq,
                                size_t num_tokens,
                                size_t required_begin_block);
+  bool allocate_missing_blocks(const std::vector<size_t>& missing,
+                               const Slice<XXH3Key>& hashes,
+                               std::vector<Block>& blocks);
 
  private:
   // check if has enough slots, if not, try to evict some blocks

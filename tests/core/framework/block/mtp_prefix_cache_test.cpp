@@ -68,10 +68,13 @@ class CacheTransferCoordinator final : public KVCacheTransferCoordinatorBase {
       PrefetchResult::StopPredicate stop_requested,
       PrefetchResult::DoneCallback done) override {
     request_ = std::move(request);
-    queries_ = request_->transfer_infos;
+    queries_.insert(queries_.end(),
+                    request_->transfer_infos.begin(),
+                    request_->transfer_infos.end());
     result_ = std::make_shared<PrefetchResult>(
         /*worker_count=*/1,
-        request_->batch_end_unit_offsets,
+        *request_,
+        /*batch_size=*/2,
         /*timeout_ms=*/-1,
         std::move(stop_requested),
         std::move(done));
@@ -99,11 +102,12 @@ class CacheTransferCoordinator final : public KVCacheTransferCoordinatorBase {
   }
   void finish_prefetch() {
     ASSERT_NE(result_, nullptr);
-    for (size_t batch_index = 0; batch_index < request_->batch_count();
+    for (size_t batch_index = 0; batch_index < request_->batch_count(2);
          ++batch_index) {
       const auto control = result_->record_batch_result(
           /*worker_index=*/0,
-          static_cast<uint8_t>(request_->batch_unit_count(batch_index)));
+          /*gated_hits=*/{1, 1},
+          /*non_gated_hits=*/{1, 1});
       ASSERT_TRUE(control.has_value());
       if (*control == PrefetchControl::STOP) {
         break;

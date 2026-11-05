@@ -637,7 +637,12 @@ std::optional<std::string> validate_host_cache_options(
         "the current platform has no host KV offload copy/synchronization "
         "provider");
   }
-  if (!options.enable_prefix_cache) {
+  const bool has_linear_cache_shape =
+      options.has_conv_cache_shape && options.has_ssm_cache_shape;
+  const bool enable_offload_only_decode =
+      options.enable_disagg_pd && options.enable_kvcache_store &&
+      options.instance_role == InstanceRole::DECODE && !has_linear_cache_shape;
+  if (!options.enable_prefix_cache && !enable_offload_only_decode) {
     violations.emplace_back(
         "prefix caching is disabled for this engine; host offload requires "
         "an engine configuration that supports prefix caching");
@@ -680,10 +685,6 @@ std::optional<std::string> validate_host_cache_options(
               << "\" has a partial linear-attention cache layout; Host "
                  "offload requires both conv and SSM tensors";
     violations.emplace_back(violation.str());
-  } else if ((options.has_conv_cache_shape || options.has_kpool_tail_shape) &&
-             options.enable_kvcache_store) {
-    violations.emplace_back(
-        "linear-attention Host checkpoints do not support KV cache Store");
   }
 
   if (violations.empty()) {
