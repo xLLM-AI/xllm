@@ -48,7 +48,6 @@ from xllm.python.attention.expanded_decode_metadata import (
 from xllm.python.attention.mla_index_context import is_compact_kpool_tail
 from xllm.python.model_executor.cp_utils import cp_gather_kv
 from xllm.python.model_executor.forward_context import (
-    AclGraphTask,
     get_execution_buffer,
     get_execution_workspace,
     get_forward_context,
@@ -71,7 +70,7 @@ from xllm.python.attention.kda_linear_attention import (
 #    attend the full cached prefix plus their own tokens (mode 2, leftUpCausal,
 #    only aligns when q_len == kv_len and would misalign on a cache hit).
 _SPARSE_MODE_NONE = 0
-_SPARSE_MODE_RIGHT_DOWN_CAUSAL = 3
+SPARSE_MODE_RIGHT_DOWN_CAUSAL = 3
 
 _HAS_FIA_V2 = hasattr(torch.ops.npu, "npu_fused_infer_attention_score_v2") and hasattr(
     torch_npu, "_npu_fused_infer_attention_score_v2_get_max_workspace"
@@ -1785,7 +1784,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             num_key_value_heads=1,
             softmax_scale=self.scale,
             input_layout="TND",
-            sparse_mode=(_SPARSE_MODE_RIGHT_DOWN_CAUSAL if is_prefill else _SPARSE_MODE_NONE),
+            sparse_mode=(SPARSE_MODE_RIGHT_DOWN_CAUSAL if is_prefill else _SPARSE_MODE_NONE),
             block_size=block_size,
             return_softmax_lse=False,
             workspace=workspace,
@@ -1827,7 +1826,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             "num_key_value_heads": 1,
             "softmax_scale": self.scale,
             "input_layout": "TND",
-            "sparse_mode": (_SPARSE_MODE_RIGHT_DOWN_CAUSAL if is_prefill else _SPARSE_MODE_NONE),
+            "sparse_mode": (SPARSE_MODE_RIGHT_DOWN_CAUSAL if is_prefill else _SPARSE_MODE_NONE),
             "block_size": block_size,
             "return_softmax_lse": False,
         }
@@ -1882,40 +1881,17 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 shared=True,
             )
 
-        stream = graph_context.stream
-        event = torch.npu.ExternalEvent()
-        event.wait(stream)
-        event.reset(stream)
-        torch.npu.graph_task_group_begin(stream)
-        try:
-            self._mla_dense_fia_v2_out(
-                q_latent,
-                q_pe,
-                nope_cache,
-                rope_cache,
-                block_table,
-                workspace,
-                output,
-                softmax_lse,
-            )
-        except Exception:
-            torch.npu.graph_task_group_end(stream)
-            raise
-        handle = torch.npu.graph_task_group_end(stream)
-
-        def _update_mla_fia_v2_args() -> None:
-            self._mla_dense_fia_v2_out(
-                q_latent,
-                q_pe,
-                nope_cache,
-                rope_cache,
-                block_table,
-                workspace,
-                output,
-                softmax_lse,
-            )
-
-        graph_context.tasks.append(AclGraphTask(event, handle, _update_mla_fia_v2_args))
+        graph_context.capture_task(
+            self._mla_dense_fia_v2_out,
+            q_latent,
+            q_pe,
+            nope_cache,
+            rope_cache,
+            block_table,
+            workspace,
+            output,
+            softmax_lse,
+        )
         return output
 
     # ------------------------------------------------------------------
@@ -2025,40 +2001,27 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             )
             context.execution_state.paged_attention[query.shape[0]] = state
 
-        def _update_bounded_fia_args() -> None:
-            torch.ops.npu.npu_fused_infer_attention_score.out(
-                query,
-                key,
-                value,
-                atten_mask=mask,
-                block_table=state.block_table,
-                actual_seq_lengths=state.query,
-                actual_seq_lengths_kv=state.kv,
-                num_heads=self.num_heads,
-                num_key_value_heads=self.num_kv_heads,
-                scale=self.scale,
-                input_layout="BNSD",
-                block_size=block_size,
-                sparse_mode=_SPARSE_MODE_NONE,
-                pre_tokens=2147483647,
-                next_tokens=2147483647,
-                softmax_lse_flag=False,
-                workspace=state.workspace,
-                out=[state.output, state.lse],
-            )
-
-        stream = graph_context.stream
-        event = torch.npu.ExternalEvent()
-        event.wait(stream)
-        event.reset(stream)
-        torch.npu.graph_task_group_begin(stream)
-        try:
-            _update_bounded_fia_args()
-        except Exception:
-            torch.npu.graph_task_group_end(stream)
-            raise
-        handle = torch.npu.graph_task_group_end(stream)
-        graph_context.tasks.append(AclGraphTask(event, handle, _update_bounded_fia_args))
+        graph_context.capture_task(
+            torch.ops.npu.npu_fused_infer_attention_score.out,
+            query,
+            key,
+            value,
+            atten_mask=mask,
+            block_table=state.block_table,
+            actual_seq_lengths=state.query,
+            actual_seq_lengths_kv=state.kv,
+            num_heads=self.num_heads,
+            num_key_value_heads=self.num_kv_heads,
+            scale=self.scale,
+            input_layout="BNSD",
+            block_size=block_size,
+            sparse_mode=_SPARSE_MODE_NONE,
+            pre_tokens=2147483647,
+            next_tokens=2147483647,
+            softmax_lse_flag=False,
+            workspace=state.workspace,
+            out=[state.output, state.lse],
+        )
         return state.output
 
     def _prefill(
@@ -2079,7 +2042,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         )
         sparse_mode = layer.fia_sparse_mode
         if sparse_mode is None:
-            sparse_mode = _SPARSE_MODE_RIGHT_DOWN_CAUSAL if layer.causal else _SPARSE_MODE_NONE
+            sparse_mode = SPARSE_MODE_RIGHT_DOWN_CAUSAL if layer.causal else _SPARSE_MODE_NONE
 
         # Prefix-cache hit (or chunked prefill with prior context): part of the
         # KV already lives in the paged cache, so this forward only carries the
@@ -2393,44 +2356,20 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             workspace = state.workspace
             output = state.output
             lse = state.lse
-            stream = graph_context.stream
-            event = torch.npu.ExternalEvent()
-            event.wait(stream)
-            event.reset(stream)
-            torch.npu.graph_task_group_begin(stream)
-            try:
-                self._fia_out(
-                    q_3d,
-                    k_flat,
-                    v_flat,
-                    block_size,
-                    actual_seq_q=actual_seq_q,
-                    actual_seq_kv=actual_seq_kv,
-                    block_table=block_table,
-                    workspace=workspace,
-                    output=output,
-                    lse=lse,
-                )
-            except Exception:
-                torch.npu.graph_task_group_end(stream)
-                raise
-            handle = torch.npu.graph_task_group_end(stream)
 
-            def _update_fia_args() -> None:
-                self._fia_out(
-                    q_3d,
-                    k_flat,
-                    v_flat,
-                    block_size,
-                    actual_seq_q=actual_seq_q,
-                    actual_seq_kv=actual_seq_kv,
-                    block_table=block_table,
-                    workspace=workspace,
-                    output=output,
-                    lse=lse,
-                )
-
-            graph_context.tasks.append(AclGraphTask(event, handle, _update_fia_args))
+            graph_context.capture_task(
+                self._fia_out,
+                q_3d,
+                k_flat,
+                v_flat,
+                block_size,
+                actual_seq_q=actual_seq_q,
+                actual_seq_kv=actual_seq_kv,
+                block_table=block_table,
+                workspace=workspace,
+                output=output,
+                lse=lse,
+            )
             return output.reshape(num_tokens, self.num_heads * self.head_dim)
 
         if self._use_fia_v2:

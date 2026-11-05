@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     import torch
 
 
-def _validate_gqa_kv_split(n_kv_heads: int, tp_size: int) -> None:
+def validate_gqa_kv_split(n_kv_heads: int, tp_size: int) -> None:
     """Assert GQA K/V heads tile evenly against ``tp_size`` (shared by the KV shard/head helpers)."""
     if n_kv_heads >= tp_size:
         if n_kv_heads % tp_size:
@@ -37,7 +37,7 @@ def _validate_gqa_kv_split(n_kv_heads: int, tp_size: int) -> None:
 
 def _kv_head_replica_shard(n_kv_heads: int, tp_rank: int, tp_size: int) -> tuple[int, int]:
     """Per-rank ``(kv_rank, kv_world)`` for GQA K/V projections under TP head replication."""
-    _validate_gqa_kv_split(n_kv_heads, tp_size)
+    validate_gqa_kv_split(n_kv_heads, tp_size)
     if n_kv_heads >= tp_size:
         return tp_rank, tp_size
     return tp_rank // (tp_size // n_kv_heads), n_kv_heads
@@ -70,7 +70,7 @@ def gqa_head_split(n_heads: int, n_kv_heads: int, tp_size: int) -> tuple[int, in
     """
     if n_heads % tp_size:
         raise ValueError(f"n_heads {n_heads} not divisible by tp_size {tp_size}")
-    _validate_gqa_kv_split(n_kv_heads, tp_size)
+    validate_gqa_kv_split(n_kv_heads, tp_size)
     num_heads = n_heads // tp_size
     return num_heads, n_kv_heads // tp_size if n_kv_heads >= tp_size else 1
 

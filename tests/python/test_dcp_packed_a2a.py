@@ -186,6 +186,53 @@ def test_fused_combine_skips_invalid_lse() -> None:
 
 
 @pytest.mark.skipif(not _npu_available(), reason="NPU is not available")
+def test_fused_combine_includes_local_attention_contribution() -> None:
+    from xllm.python.kernels_npu.triton.dcp_packed_a2a import (
+        fused_dcp_lse_combine,
+        pack_dcp_output_lse,
+    )
+
+    device = torch.device("npu")
+    dcp_size = 2
+    num_tokens = 4
+    num_heads = 4
+    head_dim = 128
+    my_rank = 1
+    torch.manual_seed(3)
+    outputs = [
+        torch.randn(num_tokens, num_heads, head_dim, dtype=torch.bfloat16, device=device) for _ in range(dcp_size)
+    ]
+    lses = [torch.randn(num_tokens, num_heads, dtype=torch.float32, device=device) for _ in range(dcp_size)]
+    packed = [pack_dcp_output_lse(out, lse, dcp_size, scatter_dim=1) for out, lse in zip(outputs, lses)]
+    recv = _simulate_all_to_all(packed, my_rank)
+    local_heads = num_heads // dcp_size
+    local_output = torch.randn(
+        num_tokens,
+        local_heads,
+        head_dim,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    local_lse = torch.randn(num_tokens, local_heads, dtype=torch.float32, device=device)
+
+    merged = fused_dcp_lse_combine(
+        recv,
+        head_dim,
+        scatter_dim=1,
+        local_output=local_output,
+        local_lse=local_lse,
+    )
+    torch.npu.synchronize()
+
+    shard_output, shard_lse = _shard_for_rank(outputs, lses, dcp_size, 1, my_rank)
+    expected = _reference_merge(
+        torch.cat((shard_output, local_output.unsqueeze(0)), dim=0),
+        torch.cat((shard_lse, local_lse.unsqueeze(0)), dim=0),
+    )
+    torch.testing.assert_close(merged, expected, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.skipif(not _npu_available(), reason="NPU is not available")
 def test_pack_accepts_noncontiguous_and_graph_lse() -> None:
     from xllm.python.kernels_npu.triton.dcp_packed_a2a import pack_dcp_output_lse
 

@@ -299,6 +299,7 @@ class AclGraphRunner(BaseRunner):
             self.layer_caches,
             execution_state=entry.execution_state,
             eplb=entry.eplb,
+            layer_shared_cache=entry.layer_shared_cache,
         )
         with forward_context(context):
             if replay:

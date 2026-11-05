@@ -18,6 +18,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING, Protocol, TypeVar, cast
 
 import torch
@@ -26,7 +27,6 @@ if TYPE_CHECKING:
     from xllm.python.attention.backend import (
         AttentionBackend,
         AttentionMetadata,
-        ExecutionMetadataSource,
         LayerCache,
     )
     from xllm.python.attention.npu_paged_attention import PagedAttentionGraphState
@@ -35,16 +35,17 @@ if TYPE_CHECKING:
 
 
 class ExecutionMetadataBuilder(Protocol):
-    metadata_type: type[object]
+    @property
+    def metadata_type(self) -> type[object]: ...
 
     def bind_layer_caches(self, layer_caches: list[LayerCache]) -> None: ...
 
-    def build(self, input_batch: InputBatch, metadata: ExecutionMetadataSource) -> object: ...
+    def build(self, input_batch: InputBatch, metadata: AttentionMetadata) -> object: ...
 
-    def allocate_persistent(self, input_batch: InputBatch, metadata: ExecutionMetadataSource) -> object: ...
+    def allocate_persistent(self, input_batch: InputBatch, metadata: AttentionMetadata) -> object: ...
 
     def update_persistent(
-        self, persistent_metadata: object, input_batch: InputBatch, metadata: ExecutionMetadataSource
+        self, persistent_metadata: object, input_batch: InputBatch, metadata: AttentionMetadata
     ) -> None: ...
 
 
@@ -109,7 +110,7 @@ class KVLoadContext:
 class AclGraphTask:
     event: object
     handle: object
-    update: Callable[[], None]
+    update: Callable[[], object]
 
 
 @dataclass(slots=True)
@@ -133,6 +134,18 @@ class AclGraphExecutionState:
 class AclGraphCaptureContext:
     stream: object
     tasks: list[AclGraphTask]
+
+    def capture_task(self, update: Callable[..., object], *args: object, **kwargs: object) -> None:
+        update = partial(update, *args, **kwargs)
+        event = torch.npu.ExternalEvent()
+        event.wait(self.stream)
+        event.reset(self.stream)
+        torch.npu.graph_task_group_begin(self.stream)
+        try:
+            update()
+        finally:
+            handle = torch.npu.graph_task_group_end(self.stream)
+        self.tasks.append(AclGraphTask(event, handle, update))
 
 
 @dataclass(slots=True)

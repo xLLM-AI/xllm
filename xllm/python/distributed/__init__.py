@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from xllm.python.distributed.collectives import (
+    AllGatherContext,
     all_gather,
     all_gather_variable,
     all_reduce_,
@@ -27,6 +28,7 @@ from xllm.python.distributed.collectives import (
     cp_world_size,
     dcp_group,
     dp_all_gather,
+    finish_all_gather,
     gather_dp_execution_tokens,
     get_process_group,
     init_process_group,
@@ -37,12 +39,16 @@ from xllm.python.distributed.collectives import (
     moe_ep_hccl_info,
     moe_tp_all_reduce,
     reduce_scatter,
+    start_all_gather,
     tp_all_gather,
     tp_all_reduce,
     tp_rank,
 )
 
 __all__ = [
+    "AllGatherContext",
+    "finish_all_gather",
+    "start_all_gather",
     "init_process_group",
     "init_tp_group",
     "tp_rank",
