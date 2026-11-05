@@ -137,7 +137,7 @@ do
     --max_tokens_per_batch=32768 \
     --max_seqs_per_batch=8 \
     --block_size=128 \
-    --communication_backend="lccl" \
+    --communication_backend="hccl" \
     --enable_prefix_cache=false \
     --enable_chunked_prefill=true \
     --enable_schedule_overlap=true \
