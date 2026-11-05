@@ -62,11 +62,13 @@ cc_library(
     rerank_service_impl.h
     qwen3_rerank_service_impl.h
     non_stream_call.h
+    multipart_form_data.h
     service_impl_factory.h
     serving_mode.h
     stream_call.h
     models_service_impl.h
     mm_service_utils.h
+    speech_to_text_service_impl.h
     embedding_output_builder.h
   SRCS
     openai_request.cpp
@@ -95,6 +97,8 @@ cc_library(
     video_generation_service_impl.cpp
     models_service_impl.cpp
     rerank_service_impl.cpp
+    multipart_form_data.cpp
+    speech_to_text_service_impl.cpp
     qwen3_rerank_service_impl.cpp
     embedding_output_builder.cpp
   DEPS

@@ -41,6 +41,7 @@ struct VideoURL {
 struct AudioURL {
   std::string url;
   std::unordered_map<std::string, std::string> headers;
+  double max_duration_s = 0.0;
 };
 
 struct MMContent {

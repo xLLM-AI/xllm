@@ -101,12 +101,18 @@ void process_typed_brpc_request(std::unique_ptr<Service>& service_impl,
     return;
   }
 
-  auto arena = GetArenaWithCheck<CallT>(response);
-  // brpc passes the request as `const`, but downstream Call wrappers only read
-  // from it.  We cast away constness so the Call can hold a non-const pointer.
+  if constexpr (is_stream_call_v<CallT>) {
+    if (request->stream()) {
+      ctrl->SetFailed("Streaming requests require the HTTP endpoint.");
+      return;
+    }
+  }
+
+  // brpc owns the typed rpc messages and deletes them after done->Run();
+  // use_arena=true only suppresses the Call's own delete.
   auto req_pb = const_cast<typename CallT::ReqType*>(request);
   std::shared_ptr<Call> call = std::make_shared<CallT>(
-      ctrl, done_guard.release(), req_pb, response, arena != nullptr);
+      ctrl, done_guard.release(), req_pb, response, /*use_arena=*/true);
   service_impl->process_async(call);
 }
 
@@ -430,10 +436,6 @@ void media_generation_http_impl(std::unique_ptr<Service>& service,
   response_owner.release();
   service->process_async(call);
 }
-
-}  // namespace
-
-namespace {
 
 template <typename ChatCall, typename Service>
 void chat_completions_http_impl(std::unique_ptr<Service>& service,
@@ -810,6 +812,57 @@ void APIService::AudioGenerationHttp(
   }
   media_generation_http_impl<AudioGenerationCall>(
       audio_generation_service_impl_, done_guard, ctrl, request, response);
+}
+
+void APIService::AudioTranscription(
+    ::google::protobuf::RpcController* controller,
+    const proto::SpeechToTextRequest* request,
+    proto::SpeechToTextResponse* response,
+    ::google::protobuf::Closure* done) {
+  process_typed_brpc_request<SpeechToTextCall, SpeechToTextServiceImpl>(
+      audio_transcription_service_impl_,
+      controller,
+      request,
+      response,
+      done,
+      "AudioTranscription");
+}
+
+void APIService::AudioTranscriptionHttp(
+    ::google::protobuf::RpcController* controller,
+    const proto::HttpRequest*,
+    proto::HttpResponse*,
+    ::google::protobuf::Closure* done) {
+  SpeechToTextServiceImpl::process_http_request(
+      audio_transcription_service_impl_.get(),
+      controller,
+      done,
+      "AudioTranscription");
+}
+
+void APIService::AudioTranslation(::google::protobuf::RpcController* controller,
+                                  const proto::SpeechToTextRequest* request,
+                                  proto::SpeechToTextResponse* response,
+                                  ::google::protobuf::Closure* done) {
+  process_typed_brpc_request<SpeechToTextCall, SpeechToTextServiceImpl>(
+      audio_translation_service_impl_,
+      controller,
+      request,
+      response,
+      done,
+      "AudioTranslation");
+}
+
+void APIService::AudioTranslationHttp(
+    ::google::protobuf::RpcController* controller,
+    const proto::HttpRequest*,
+    proto::HttpResponse*,
+    ::google::protobuf::Closure* done) {
+  SpeechToTextServiceImpl::process_http_request(
+      audio_translation_service_impl_.get(),
+      controller,
+      done,
+      "AudioTranslation");
 }
 
 void APIService::TextGeneration(::google::protobuf::RpcController* controller,

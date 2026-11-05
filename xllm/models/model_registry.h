@@ -63,6 +63,11 @@ using ModelArgsLoader =
 using QuantArgsLoader =
     std::function<bool(const JsonReader& json, QuantArgs* args)>;
 
+class SpeechModelInterface;
+
+using SpeechModelFactory =
+    std::function<std::shared_ptr<const SpeechModelInterface>()>;
+
 using TokenizerArgsLoader =
     std::function<bool(const JsonReader& json, TokenizerArgs* args)>;
 
@@ -98,6 +103,7 @@ struct MtpModelCapabilities {
 struct ModelMeta {
   std::unordered_map<std::string, CausalLMRegistration> causal_lm_factories;
   RecModelFactory rec_model_factory;
+  SpeechModelFactory speech_model_factory;
   std::unordered_map<std::string, CausalVLMRegistration> causal_vlm_factories;
   DiTModelFactory dit_model_factory;
   MultimodalProcessorFactory multimodal_processor_factory;
@@ -172,6 +178,9 @@ class ModelRegistry {
       const std::string& name,
       MultimodalProcessorFactory factory);
 
+  static void register_speech_model_factory(const std::string& name,
+                                            SpeechModelFactory factory);
+
   // Register the model-side CP sharding mode advertised by `name`. Defaults to
   // NONE for any unregistered model.
   static void register_cp_sharding_mode(const std::string& name,
@@ -223,6 +232,8 @@ class ModelRegistry {
 
   static MultimodalProcessorFactory get_multimodal_processor_factory(
       const std::string& name);
+
+  static SpeechModelFactory get_speech_model_factory(const std::string& name);
 
   static bool has_dit_model_factory(const std::string& name);
 
@@ -441,6 +452,17 @@ std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context);
 #define REGISTER_MULTIMODAL_PROCESSOR(ModelType, ProcessorClass) \
   REGISTER_MULTIMODAL_PROCESSOR_WITH_VARNAME(                    \
       ModelType, ModelType, ProcessorClass)
+
+#define REGISTER_SPEECH_MODEL_WITH_VARNAME(                                 \
+    VarName, ModelType, SpeechModelClass)                                   \
+  const bool VarName##_speech_model_registered = []() {                     \
+    ModelRegistry::register_speech_model_factory(                           \
+        #ModelType, []() { return std::make_shared<SpeechModelClass>(); }); \
+    return true;                                                            \
+  }()
+
+#define REGISTER_SPEECH_MODEL(ModelType, SpeechModelClass) \
+  REGISTER_SPEECH_MODEL_WITH_VARNAME(ModelType, ModelType, SpeechModelClass)
 
 // Macro to register a model args loader with the ModelRegistry
 #define REGISTER_MODEL_ARGS_LOADER_WITH_VARNAME(VarName, ModelType, Loader) \

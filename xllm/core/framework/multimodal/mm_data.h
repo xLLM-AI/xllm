@@ -63,8 +63,8 @@ class MMData {
   MMData(uint32_t type, MMItemVec items);
   MMData(uint32_t type, MMDict items);
 
-  bool has(uint32_t type) const { return type & type_ != 0; }
-  bool has(MMType type) const { return type & type_ != 0; }
+  bool has(uint32_t type) const { return (type & type_) != 0; }
+  bool has(MMType type) const { return (type & type_) != 0; }
 
   bool has(const MMKey& key) const;
   bool valid() const { return type_ != MMType::NONE; }

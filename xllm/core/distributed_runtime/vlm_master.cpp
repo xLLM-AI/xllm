@@ -465,7 +465,7 @@ void VLMMaster::handle_request(std::string prompt,
 
 void VLMMaster::handle_request(std::vector<Message> messages,
                                RequestParams sp,
-                               std::string payload,
+                               MMInput mm_input,
                                OutputCallback callback,
                                bool use_prompt_as_is) {
   const auto arrival_time = std::chrono::steady_clock::now();
@@ -485,7 +485,7 @@ void VLMMaster::handle_request(std::vector<Message> messages,
   threadpool_->schedule([this,
                          messages = std::move(messages),
                          sp = std::move(sp),
-                         payload = std::move(payload),
+                         mm_input = std::move(mm_input),
                          use_prompt_as_is,
                          arrival_time,
                          callback = std::move(cb)]() mutable {
@@ -506,7 +506,7 @@ void VLMMaster::handle_request(std::vector<Message> messages,
     rate_limit_guard.dismiss();
     auto request = request_factory_->create(std::move(messages),
                                             sp,
-                                            std::move(payload),
+                                            std::move(mm_input),
                                             std::move(callback),
                                             use_prompt_as_is,
                                             arrival_time);
@@ -564,7 +564,6 @@ void VLMMaster::handle_batch_request_with_image_urls(
         std::move(prompts[i]), image_urls[i]));
   }
 
-  std::string payload;
   for (size_t i = 0; i < num_requests; ++i) {
     // Offline vLLM-style requests hand in a final prompt. The text-only
     // offline path never applies the chat template either, so use the
@@ -574,7 +573,7 @@ void VLMMaster::handle_batch_request_with_image_urls(
         std::move(conversations[i]),
         // the sampling parameter may be shared
         sps.size() == 1 ? sps[0] : std::move(sps[i]),
-        std::move(payload),
+        MMInput{},
         [i, callback](const RequestOutput& output) {
           output.log_request_status();
           return callback(i, output);
@@ -590,13 +589,12 @@ void VLMMaster::handle_batch_request(
   CHECK(conversations.size() == sps.size() || sps.size() == 1)
       << "Number of conversations and sampling parameters should be the same";
 
-  std::string payload;
   const size_t num_requests = conversations.size();
   for (size_t i = 0; i < num_requests; ++i) {
     handle_request(std::move(conversations[i]),
                    // the sampling parameter may be shared
                    sps.size() == 1 ? sps[0] : std::move(sps[i]),
-                   std::move(payload),
+                   MMInput{},
                    [i, callback](const RequestOutput& output) {
                      output.log_request_status();
                      return callback(i, output);

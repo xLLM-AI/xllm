@@ -668,6 +668,24 @@ MultimodalProcessorFactory ModelRegistry::get_multimodal_processor_factory(
   return instance->model_registry_[name].multimodal_processor_factory;
 }
 
+void ModelRegistry::register_speech_model_factory(const std::string& name,
+                                                  SpeechModelFactory factory) {
+  ModelRegistry* instance = get_instance();
+
+  if (instance->model_registry_[name].speech_model_factory != nullptr) {
+    SAFE_LOG_WARNING("speech model factory for " << name
+                                                 << " already registered.");
+  } else {
+    instance->model_registry_[name].speech_model_factory = std::move(factory);
+  }
+}
+
+SpeechModelFactory ModelRegistry::get_speech_model_factory(
+    const std::string& name) {
+  ModelRegistry* instance = get_instance();
+  return instance->model_registry_[name].speech_model_factory;
+}
+
 ModelArgsLoader ModelRegistry::get_model_args_loader(const std::string& name) {
   ModelRegistry* instance = get_instance();
 

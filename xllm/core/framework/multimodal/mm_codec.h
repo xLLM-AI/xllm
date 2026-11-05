@@ -54,7 +54,10 @@ class FFmpegVideoDecoder {
 
 class FFmpegAudioDecoder {
  public:
-  FFmpegAudioDecoder() = default;
+  // A positive budget bounds decode and flush. On failure, meta.duration
+  // reports the attempted duration; zero leaves decoding unrestricted.
+  explicit FFmpegAudioDecoder(double max_duration_s = 0.0)
+      : max_duration_s_(max_duration_s) {}
   ~FFmpegAudioDecoder() = default;
 
   bool decode(std::string_view raw_data,
@@ -62,6 +65,9 @@ class FFmpegAudioDecoder {
               AudioMetadata& meta,
               int64_t target_sr = 16000,
               int32_t target_channels = 1);
+
+ private:
+  double max_duration_s_ = 0.0;
 };
 
 class FFmpegVideoEncoder final {

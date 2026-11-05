@@ -28,7 +28,7 @@ class MMEmbeddingHandler : public MMHandlerBase {
   MMErrCode load(const MMContent& content,
                  MMInputItem& input,
                  MMPayload& payload) override;
-  MMErrCode decode(MMInputItem& input) override;
+  MMErrCode decode(const MMContent& content, MMInputItem& input) override;
 
  private:
   MMType::Value mm_type_;

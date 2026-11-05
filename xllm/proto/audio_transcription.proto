@@ -1,0 +1,144 @@
+/* Copyright 2025-2026 The xLLM Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+syntax = "proto3";
+
+option go_package = "jd.com/jd-infer/xllm;xllm";
+package xllm.proto;
+
+import "common.proto";
+
+// Duration usage returned by /v1/audio/transcriptions (OpenAI shape).
+message AudioUsage {
+  // Always "duration".
+  optional string type = 1;
+
+  // Audio duration in seconds, rounded up (OpenAI spec).
+  optional int32 seconds = 2;
+}
+
+// Request for /v1/audio/transcriptions and /v1/audio/translations
+// (OpenAI-compatible field names).
+message SpeechToTextRequest {
+  // Model id; may be empty, in which case the served model is used.
+  string model = 1;
+
+  // Audio container bytes: type "base64" (inline) or "binary"
+  // (BinaryRef into the request binary attachment).
+  optional MediaSource file = 2;
+
+  // Original filename (multipart), used only for content-type inference.
+  optional string filename = 3;
+
+  // Part Content-Type (multipart), e.g. "audio/mpeg".
+  optional string file_content_type = 4;
+
+  // ISO-639-1 language of the input audio.
+  optional string language = 5;
+
+  // Optional context hint; incorporated into the model's transcription prompt.
+  optional string prompt = 6;
+
+  // "json" (default), "text", or "verbose_json".
+  optional string response_format = 7;
+
+  // Requires timestamp support from the model adapter. Currently rejected.
+  repeated string timestamp_granularities = 8;
+
+  // Whether to stream partial results back as SSE chunks (HTTP only).
+  optional bool stream = 9;
+
+  // Stream options; only valid together with stream=true.
+  optional bool stream_include_usage = 10;
+  optional bool stream_continuous_usage_stats = 11;
+
+  // Sampling parameters.
+  optional float temperature = 12;
+  optional float top_p = 13;
+  optional int64 top_k = 14;
+
+  optional float min_p = 15;
+  // Accepted for compatibility; per-request seeding is not implemented.
+  optional int64 seed = 16;
+
+  optional float frequency_penalty = 17;
+  optional float presence_penalty = 18;
+  optional float repetition_penalty = 19;
+
+  // Maximum number of tokens to generate; 0 uses the remaining model context.
+  optional uint32 max_completion_tokens = 20;
+
+  // Sanitized and folded into the transcription context with `prompt`.
+  optional string hotwords = 21;
+
+  // Target language for translation; placeholder on transcription (vLLM).
+  optional string to_language = 22;
+
+  optional string user = 23;
+
+  optional string request_id = 24;
+}
+
+// Reserved shape for segment timestamps. Current adapters do not produce
+// segments and reject requests for timestamp granularities.
+message TranscriptionSegment {
+  optional int32 id = 1;
+  optional int32 seek = 2;
+  optional double start = 3;
+  optional double end = 4;
+  optional string text = 5;
+  repeated int32 tokens = 6;
+  optional float temperature = 7;
+  optional float avg_logprob = 8;
+  optional float compression_ratio = 9;
+  optional float no_speech_prob = 10;
+}
+
+// Non-streaming response (json / text / verbose_json).
+message SpeechToTextResponse {
+  // json / text / verbose_json: the transcribed or translated text.
+  optional string text = 1;
+
+  // json, transcription only: {"type": "duration", "seconds": N}.
+  optional AudioUsage usage = 2;
+
+  // verbose_json only:
+  optional double duration = 4;
+  optional string language = 5;
+  repeated TranscriptionSegment segments = 6;
+}
+
+message SpeechToTextDelta {
+  optional string content = 1;
+}
+
+message SpeechToTextChunkChoice {
+  optional uint32 index = 1;
+  SpeechToTextDelta delta = 2;
+  optional string finish_reason = 3;
+}
+
+// SSE chunk for stream=true. object is "transcription.chunk" or
+// "translation.chunk"; id is "trsc-<uuid>" / "trsl-<uuid>".
+message SpeechToTextStreamChunk {
+  string id = 1;
+  string object = 2;
+  uint32 created = 3;
+  string model = 4;
+  repeated SpeechToTextChunkChoice choices = 5;
+
+  // Token usage for the final chunk when stream_include_usage is set.
+  optional Usage usage = 6;
+}

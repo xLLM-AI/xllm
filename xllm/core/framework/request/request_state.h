@@ -191,6 +191,8 @@ class RequestState final {
   // multimodal
   MMData mm_data;
 
+  double input_audio_duration_s = 0.0;
+
   // whether to return log probabilities for output token.
   bool logprobs;
 

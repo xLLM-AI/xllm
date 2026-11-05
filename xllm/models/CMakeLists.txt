@@ -13,6 +13,7 @@ cc_library(
     models
   HDRS
     model_registry.h
+    speech_model.h
     models.h
     dit/utils/lanczos_resample.h
     $<$<BOOL:${USE_NPU}>:dit/utils/dit_block_weight_manager.h>

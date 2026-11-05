@@ -588,13 +588,13 @@ void MMChatServiceImpl::process_async_impl(std::shared_ptr<MMChatCall> call) {
   auto saved_request_id = request_params.request_id;
   auto saved_tools = request_params.tools;
 
-  auto payload = call->take_request_payload();
+  MMInput mm_input(call->take_request_payload());
 
   // schedule the request
   master_->handle_request(
       std::move(messages),
       std::move(request_params),
-      std::move(payload),
+      std::move(mm_input),
       [call,
        model,
        master = master_,

@@ -38,8 +38,6 @@ class CacheableMultimodalProcessor final : public MultimodalProcessorBase {
   bool process_multimodal(const MMInput& inputs, MMData& data) const override;
 
  private:
-  bool process_misses(const std::vector<MMInputItem>& miss_inputs,
-                      MMItemVec& miss_items) const;
   void assemble(std::vector<std::optional<MMDataItem>>& cache_hits,
                 MMItemVec miss_items,
                 MMData& data) const;

@@ -249,13 +249,13 @@ void MMEmbeddingServiceImpl::process_async_impl(
 
   auto request_id = request_params.request_id;
 
-  auto payload = call->take_request_payload();
+  MMInput mm_input(call->take_request_payload());
 
   // schedule the request
   master_->handle_request(
       std::move(messages),
       std::move(request_params),
-      std::move(payload),
+      std::move(mm_input),
       [call,
        model,
        request_id = request_id,

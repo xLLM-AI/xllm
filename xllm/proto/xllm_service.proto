@@ -26,6 +26,7 @@ import "chat.proto";
 import "embedding.proto";
 import "image_generation.proto";
 import "audio_generation.proto";
+import "audio_transcription.proto";
 import "text_generation.proto";
 import "video_generation.proto";
 import "rerank.proto";
@@ -85,6 +86,12 @@ service XllmAPIService {
 
   rpc AudioGeneration(AudioGenerationRequest) returns (AudioGenerationResponse);
   rpc AudioGenerationHttp(HttpRequest) returns (HttpResponse);
+
+  rpc AudioTranscription(SpeechToTextRequest) returns (SpeechToTextResponse);
+  rpc AudioTranscriptionHttp(HttpRequest) returns (HttpResponse);
+
+  rpc AudioTranslation(SpeechToTextRequest) returns (SpeechToTextResponse);
+  rpc AudioTranslationHttp(HttpRequest) returns (HttpResponse);
 
   rpc TextGeneration(TextGenerationRequest) returns (TextGenerationResponse);
   rpc TextGenerationHttp(HttpRequest) returns (HttpResponse);

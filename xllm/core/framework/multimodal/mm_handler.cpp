@@ -37,7 +37,7 @@ MMErrCode MMHandlerBase::process(const MMContent& content,
   MMErrCode code = this->load(content, input, payload);
   if (code != MMErrCode::SUCCESS) return code;
 
-  code = this->decode(input);
+  code = this->decode(content, input);
   if (code != MMErrCode::SUCCESS) return code;
 
   if (!input.raw_data.empty()) {
@@ -50,7 +50,7 @@ MMErrCode MMHandlerBase::process(const MMContent& content,
 MMErrCode MMHandlerBase::load_from_dataurl(const std::string& url,
                                            std::string& raw_data,
                                            MMPayload& payload) {
-  size_t pos = url.find_first_of(';');
+  size_t pos = url.rfind(';', url.find(','));
   if (pos == std::string::npos) return MMErrCode::LOAD_DATA_ERR;
 
   butil::StringPiece sub(url, pos + 1);
@@ -143,7 +143,7 @@ MMErrCode ImageHandler::load(const MMContent& content,
   }
 }
 
-MMErrCode ImageHandler::decode(MMInputItem& input) {
+MMErrCode ImageHandler::decode(const MMContent&, MMInputItem& input) {
   OpenCVImageDecoder decoder;
   if (!decoder.decode(input.raw_data, input.decode_image)) {
     return MMErrCode::DECODE_ERR;
@@ -181,7 +181,7 @@ MMErrCode VideoHandler::load(const MMContent& content,
   }
 }
 
-MMErrCode VideoHandler::decode(MMInputItem& input) {
+MMErrCode VideoHandler::decode(const MMContent&, MMInputItem& input) {
   if (::xllm::ModelConfig::get_instance().use_audio_in_video()) {
     FFmpegAudioDecoder audio_decoder;
     if (audio_decoder.decode(
@@ -224,10 +224,14 @@ MMErrCode AudioHandler::load(const MMContent& content,
   }
 }
 
-MMErrCode AudioHandler::decode(MMInputItem& input) {
-  FFmpegAudioDecoder decoder;
+MMErrCode AudioHandler::decode(const MMContent& content, MMInputItem& input) {
+  const double max_duration_s = content.audio_url.max_duration_s;
+  FFmpegAudioDecoder decoder(max_duration_s);
   if (!decoder.decode(input.raw_data, input.decode_audio, input.audio_meta)) {
-    return MMErrCode::DECODE_ERR;
+    if (max_duration_s > 0 && input.audio_meta.duration > max_duration_s) {
+      return MMErrCode::DURATION_EXCEEDED;
+    }
+    return MMErrCode::AUDIO_DECODE_ERR;
   }
   return MMErrCode::SUCCESS;
 }
