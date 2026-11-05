@@ -29,6 +29,7 @@ limitations under the License.
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/scheduler/request_output_dispatcher.h"
+#include "core/util/scope_guard.h"
 #include "framework/batch/batch_factory.h"
 #include "framework/model/model_args.h"
 #include "framework/request/priority_comparator.h"
@@ -318,6 +319,12 @@ void SchedulerPolicy::schedule_prefill_from_queue(
 
   bool budget_exhausted = false;
   bool blocks_exhausted = false;
+  std::vector<std::shared_ptr<Request>> skipped;
+  ScopeGuard restore_skipped_guard([queue, &skipped] {
+    for (auto it = skipped.rbegin(); it != skipped.rend(); ++it) {
+      queue->push(std::move(*it));
+    }
+  });
   // Reuse scratch capacity across requests within this scheduling round.
   std::vector<Sequence*> prefill_sequences;
   std::vector<size_t> prefill_sequences_budget;
@@ -526,6 +533,11 @@ void SchedulerPolicy::schedule_prefill_from_queue(
         blocks_exhausted = true;
       }
       break;
+    }
+    if (prefill_sequences.empty()) {
+      skipped.emplace_back(std::move(request));
+      queue->pop_top();
+      continue;
     }
 
     // Non-beam best-of sequences can progress independently, as in decode

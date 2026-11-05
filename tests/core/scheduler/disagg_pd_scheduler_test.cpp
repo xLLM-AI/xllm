@@ -52,6 +52,7 @@ limitations under the License.
 #include "framework/request/request_state.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "scheduler/request_output_dispatcher.h"
+#include "server/xllm_server_registry.h"
 
 namespace xllm {
 
@@ -2088,7 +2089,10 @@ TEST_P(ChunkReservationTest,
   auto blocker = make_request(std::vector<int32_t>(12, 99), "blocker");
   ASSERT_TRUE(
       engine.block_manager_pool()->allocate(blocker->sequences()[0].get()));
-  EXPECT_TRUE(prefill.prepare_batch()[0].empty());
+  constexpr size_t kRetryLimit = 4096;
+  for (size_t attempt = 0; attempt < kRetryLimit; ++attempt) {
+    EXPECT_TRUE(prefill.prepare_batch()[0].empty());
+  }
   prefill.wait_notifications(&decode_);
   EXPECT_EQ(service_.released, 1);
   EXPECT_TRUE(decode_.reservations_empty());

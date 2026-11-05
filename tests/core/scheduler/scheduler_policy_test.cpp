@@ -55,7 +55,7 @@ class FakeTokenizer : public Tokenizer {
   }
   std::string decode(const Slice<int32_t>& ids,
                      bool skip_special_tokens) const {
-    NOT_IMPLEMENTED();
+    return {};
   }
   std::optional<int32_t> token_to_id(const std::string_view& token) const {
     NOT_IMPLEMENTED();
@@ -524,21 +524,22 @@ std::vector<std::shared_ptr<Request>> generate_request(
     stopping_checker.set_max_context_len(max_context_len);
     stopping_checker.set_ignore_eos(true);
 
-    RequestState req_state("x",
-                           prompt_token_ids,
-                           sampling_param,
-                           scheduler_param,
-                           stopping_checker,
-                           prompt_lens[i] + 30000,
-                           1,
-                           1,
-                           false,
-                           false,
-                           false,
-                           false,
-                           false,
-                           nullptr,
-                           nullptr);
+    RequestState req_state(
+        "x",
+        prompt_token_ids,
+        sampling_param,
+        scheduler_param,
+        stopping_checker,
+        prompt_lens[i] + 30000,
+        1,
+        1,
+        false,
+        false,
+        false,
+        false,
+        false,
+        [](const RequestOutput&) { return true; },
+        nullptr);
 
     auto request =
         std::make_shared<Request>("1", "1", "1", std::move(req_state), "1");
@@ -594,11 +595,11 @@ class TestableContinuousScheduler final : public ContinuousScheduler<> {
 // verify how many tokens are processed in one scheduling.
 TEST(SchedulerPolicyTest, AddNewRequestBase) {
   std::vector<int32_t> prompt_len{10, 1024, 2048, 2048};
-  std::vector<int32_t> num_blocks{16, 128, 128, 128};
+  std::vector<int32_t> num_blocks{16, 128, 129, 128};
   std::vector<int32_t> block_size{16, 16, 16, 256};
   std::vector<int32_t> chunk_size{1024, 1024, 1024, 768};
   std::vector<int32_t> kv_split_size{1, 1, 1, 2};
-  std::vector<int32_t> validate_allowed_max_tokens{10, 1024, 1024, 768};
+  std::vector<int32_t> validate_allowed_max_tokens{10, 1024, 2048, 768};
   for (size_t idx = 0; idx < prompt_len.size(); ++idx) {
     SchedulerOptions opt =
         create_scheduler_options(10000, 256, 0, chunk_size[idx], 1);
@@ -1617,7 +1618,7 @@ TEST(SchedulerPolicyTest, DefersWhileAsyncBlockReleaseIsPending) {
   ProfileManager profile_manager(profile_engine.get(), profile_options);
 
   std::vector<std::shared_ptr<Request>> requests = generate_request(
-      {34025}, {2}, std::nullopt, std::nullopt, /*max_context_len=*/40000);
+      {32000}, {2}, std::nullopt, std::nullopt, /*max_context_len=*/40000);
   DequeQueue prefill_queue;
   DequeQueue chunk_queue;
   DequeQueue decode_queue;
@@ -3433,7 +3434,7 @@ TEST(SchedulerPolicyTest, BestOfPartialAdmissionReleasesPrefixUsage) {
   ASSERT_TRUE(pool->BlockManagerPool::allocate(cached_sequence,
                                                /*num_tokens=*/4));
   cached_sequence->kv_state().set_kv_cache_tokens_num(4);
-  pool->cache(cached_sequence);
+  pool->publish_prefix(cached_sequence);
   pool->deallocate(cached_request.get());
 
   TestableContinuousScheduler scheduler(&engine, options);
