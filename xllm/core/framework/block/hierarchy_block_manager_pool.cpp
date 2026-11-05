@@ -1484,7 +1484,8 @@ void HierarchyBlockManagerPool::transfer_offload_blocks() {
 
     if (!transfer_infos.empty()) {
       HostLeafSnapshot host_leaves_snapshot;
-      for (const auto& [type, entry] : host_block_managers_[i]) {
+      for (const auto& [type, entry] :
+           host_block_managers_[i]->leaf_entries()) {
         host_leaves_snapshot.emplace(type, entry.leaf.get());
       }
       std::shared_ptr<KVTransferTracker::Completion> completion =
