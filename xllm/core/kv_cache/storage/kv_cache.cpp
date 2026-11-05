@@ -29,6 +29,7 @@ limitations under the License.
 #include "core/kv_cache/storage/indexed_kv_cache_impl.h"
 #include "core/kv_cache/storage/kpool_kv_cache_impl.h"
 #include "core/kv_cache/storage/linear_attention_kv_cache_impl.h"
+#include "core/kv_cache/storage/linear_state_slot_table.h"
 #include "core/kv_cache/storage/quantized_kv_cache_impl.h"
 #include "util/tensor_helper.h"
 #include "util/utils.h"
@@ -190,7 +191,15 @@ KVCache::KVCache(const KVCacheShape& kv_cache_shape,
                  bool owns_layer_cache)
     : owns_layer_cache_(owns_layer_cache),
       impl_(create_kv_cache_impl(kv_cache_shape, create_options, layer_id)),
-      static_layout_(create_options.static_layout()) {}
+      static_layout_(create_options.static_layout()),
+      linear_state_slots_(create_options.linear_state_slot_table()) {
+  if (static_layout_ != nullptr) {
+    CHECK(linear_state_slots_ != nullptr);
+    CHECK_EQ(linear_state_slots_->num_groups(),
+             static_layout_->num_linear_groups());
+    linear_group_ = static_layout_->linear_group(layer_id);
+  }
+}
 
 KVCache::KVCache(const KVCacheShape& kv_cache_shape,
                  const KVCacheCreateOptions& create_options,
@@ -284,7 +293,7 @@ int64_t KVCache::cache_row_stride(KVCacheTensorRole role) const {
 int64_t KVCache::linear_state_slot_count() const {
   return static_layout_ == nullptr
              ? get_conv_cache().size(0)
-             : static_cast<int64_t>(static_layout_->logical_num_slots());
+             : static_cast<int64_t>(static_layout_->num_slots());
 }
 
 int64_t KVCache::linear_checkpoint_stride() const {
@@ -301,20 +310,27 @@ int64_t KVCache::physical_row_index(int64_t slot_id,
   if (slot_id < 0 || static_layout_ == nullptr) {
     return slot_id;
   }
+  if (role == KVCacheTensorRole::CONV || role == KVCacheTensorRole::SSM) {
+    slot_id = linear_state_slots_->slot(slot_id, linear_group_);
+  }
   return static_cast<int64_t>(
       static_layout_->row_index(static_cast<size_t>(slot_id), role));
 }
 
-torch::Tensor KVCache::physical_row_indices(const torch::Tensor& slot_ids,
+torch::Tensor KVCache::physical_row_indices(const torch::Tensor& state_ids,
                                             KVCacheTensorRole role) const {
-  if (!slot_ids.defined() || static_layout_ == nullptr) {
-    return slot_ids;
+  if (!state_ids.defined() || static_layout_ == nullptr) {
+    return state_ids;
   }
-  const size_t page_bytes = static_layout_->unit_bytes();
+  const torch::Tensor slot_ids =
+      role == KVCacheTensorRole::CONV || role == KVCacheTensorRole::SSM
+          ? linear_state_slots_->slots(state_ids, linear_group_)
+          : state_ids;
+  const size_t slot_bytes = static_layout_->slot_bytes();
   const size_t row_bytes = static_layout_->row_bytes(role);
-  if (page_bytes % row_bytes != 0) {
-    const size_t divisor = std::gcd(page_bytes, row_bytes);
-    const int64_t numerator = static_cast<int64_t>(page_bytes / divisor);
+  if (slot_bytes % row_bytes != 0) {
+    const size_t divisor = std::gcd(slot_bytes, row_bytes);
+    const int64_t numerator = static_cast<int64_t>(slot_bytes / divisor);
     const int64_t denominator = static_cast<int64_t>(row_bytes / divisor);
     const auto wide_ids = slot_ids.to(torch::kInt64);
     const auto offsets = wide_ids.clamp_min(0) * numerator;
@@ -348,7 +364,24 @@ KVCache KVCache::create_shared_view() const {
   view.owns_layer_cache_ = false;
   view.impl_ = impl_;
   view.static_layout_ = static_layout_;
+  view.linear_state_slots_ = linear_state_slots_;
+  view.linear_group_ = linear_group_;
   return view;
+}
+
+torch::Tensor KVCache::linear_state_slot_row() const {
+  if (linear_state_slots_ == nullptr || !get_conv_cache().defined()) {
+    return torch::Tensor();
+  }
+  return linear_state_slots_->device_slots().select(
+      0, static_cast<int64_t>(linear_group_));
+}
+
+void KVCache::update_linear_state_slots(
+    const std::vector<int32_t>& rows) const {
+  if (linear_state_slots_ != nullptr) {
+    linear_state_slots_->update(rows);
+  }
 }
 
 void KVCache::swap_blocks(torch::Tensor& src_tensor,

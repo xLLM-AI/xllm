@@ -2508,20 +2508,18 @@ TEST(SchedulerPolicyTest, SharedArenaAdmissionReservesFullAndLinearResources) {
       SchedulerConfig::get_instance().enable_mix_batch(), true);
   ScopedConfigValue<int32_t> chunk_size_guard(
       SchedulerConfig::get_instance().max_tokens_per_chunk_for_prefill(), 2);
-  for (const auto& [full_units, linear_units] :
-       {std::pair<uint32_t, uint32_t>{1, 4}, {3, 2}}) {
-    SCOPED_TRACE(full_units);
-    const uint32_t prompt_units = 4 * full_units + linear_units;
-    const uint32_t num_units = 2 * prompt_units;
+  for (const uint32_t linear_slots : {1u, 4u}) {
+    SCOPED_TRACE(linear_slots);
+    const uint32_t prompt_slots = 4 + linear_slots;
+    const uint32_t num_slots = 2 * prompt_slots;
     BlockManagerPool::Options pool_options;
-    pool_options.num_blocks(num_units)
+    pool_options.num_blocks(num_slots)
         .block_size(2)
         .enable_prefix_cache(false)
         .enable_linear_state(true)
-        .linear_state_num_slots(num_units)
+        .linear_state_num_slots(num_slots)
         .enable_shared_kv_cache(true)
-        .shared_full_block_units(full_units)
-        .shared_linear_state_units(linear_units);
+        .shared_linear_state_slots(linear_slots);
     FakeEngine engine(std::make_unique<BlockManagerPool>(pool_options));
     SchedulerOptions options = create_scheduler_options(4, 4, 0, 2, 1);
     options.enable_chunked_prefill(true)
@@ -2539,9 +2537,9 @@ TEST(SchedulerPolicyTest, SharedArenaAdmissionReservesFullAndLinearResources) {
     EXPECT_EQ(batches.front().size(), 1u);
     EXPECT_EQ(scheduler.get_waiting_requests_num(), 1u);
     EXPECT_EQ(engine.block_manager_pool()->admission_capacity(0),
-              num_units - std::max(full_units, linear_units));
+              num_slots - 1);
     EXPECT_EQ(engine.block_manager_pool()->sequence_resource_units(8),
-              prompt_units);
+              prompt_slots);
   }
 }
 
@@ -2554,22 +2552,22 @@ TEST(SchedulerPolicyTest, SharedArenaZeroEvictionReservesStateAndDecodeGrowth) {
   Sequence* sequence = requests.front()->sequences().front().get();
   std::unique_ptr<RequestPriorityQueue> running_queue =
       std::make_unique<DequeQueue>();
-  for (const uint32_t num_units : {12u, 16u}) {
-    SCOPED_TRACE(num_units);
+  // Admission capacities of 8 and 12 slots bracket the request's demand.
+  for (const uint32_t num_slots : {9u, 13u}) {
+    SCOPED_TRACE(num_slots);
     BlockManagerPool::Options options;
-    options.num_blocks(num_units)
+    options.num_blocks(num_slots)
         .block_size(2)
         .enable_prefix_cache(false)
         .enable_linear_state(true)
-        .linear_state_num_slots(num_units)
+        .linear_state_num_slots(num_slots)
         .enable_shared_kv_cache(true)
-        .shared_full_block_units(1)
-        .shared_linear_state_units(4);
+        .shared_linear_state_slots(4);
     BlockManagerPool pool(options);
     BlockCapacityGuard guard(&pool);
     EXPECT_EQ(guard.if_accept_candidate_sequences(
                   {sequence}, running_queue, /*running_sequences=*/{}),
-              num_units == 16);
+              num_slots == 13);
   }
 }
 

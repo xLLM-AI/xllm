@@ -16,7 +16,6 @@ limitations under the License.
 #pragma once
 
 #include <cstdint>
-#include <map>
 #include <mutex>
 #include <vector>
 
@@ -24,37 +23,44 @@ limitations under the License.
 
 namespace xllm {
 
-// Owns the physical unit space shared by Full KV blocks and linear states.
-// Each block id starts a contiguous extent whose cost is group-specific.
-// Device storage indexes the same units; final Block release returns an extent.
+// Owns the fixed-size slots shared by Full KV blocks and recurrent states.
+// A Full block costs one slot and is identified by it. A recurrent state costs
+// one slot per Linear group; its id is the group-0 slot, and the other slots
+// are recorded for execution. Slot 0 is padding for every group. Any free slot
+// can serve either type, so free capacity is never fragmented.
 class StaticKVCacheBlockPool final {
  public:
-  explicit StaticKVCacheBlockPool(uint32_t num_units,
-                                  uint32_t full_block_units = 1,
-                                  uint32_t linear_state_units = 1);
+  StaticKVCacheBlockPool(uint32_t num_slots, uint32_t linear_state_slots);
 
   std::vector<int32_t> allocate(size_t num_blocks, BlockType type);
   void release(int32_t block_id, BlockType type);
   void mark_active(int32_t block_id, BlockType type);
   void mark_inactive(int32_t block_id, BlockType type);
 
-  // Capacity and occupancy are physical units, rather than logical blocks.
-  size_t num_total_blocks() const { return owners_.size() - padding_units_; }
-  size_t num_free_blocks() const;
-  size_t num_used_blocks() const;
-  size_t num_units() const { return owners_.size(); }
-  size_t block_units(BlockType type) const;
+  // Physical slots of a recurrent state in Linear group order. Negative ids
+  // stay sentinels in every group.
+  void append_linear_state_slots(int32_t state_id,
+                                 std::vector<int32_t>* slots) const;
+
+  size_t num_slots() const { return owners_.size(); }
+  size_t num_total_slots() const { return owners_.size() - 1; }
+  size_t num_free_slots() const;
+  size_t num_used_slots() const;
+  size_t slots_per_block(BlockType type) const;
 
  private:
+  void release_slot(int32_t slot);
+
   mutable std::mutex mutex_;
-  std::map<int32_t, size_t> free_extents_;
+  std::vector<int32_t> free_slots_;
+  // Block type owning each slot, or -1 when free.
   std::vector<int32_t> owners_;
+  // Indexed by block id; accounts the whole block once.
   std::vector<uint8_t> active_;
-  size_t full_block_units_;
-  size_t linear_state_units_;
-  size_t padding_units_;
-  size_t num_free_units_ = 0;
-  size_t num_used_blocks_ = 0;
+  // Row per recurrent state id: [num_slots, linear_state_slots].
+  std::vector<int32_t> linear_state_slots_;
+  size_t slots_per_linear_state_;
+  size_t num_used_slots_ = 0;
 };
 
 }  // namespace xllm

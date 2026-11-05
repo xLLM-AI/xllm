@@ -483,7 +483,7 @@ TEST(KVCacheEstimationTest, SharedStaticCapacityUsesTheWholeArenaBudget) {
   const KVCacheCapacity capacity =
       estimate_kv_cache_capacity(model_args, options);
 
-  EXPECT_EQ(capacity.shared_unit_bytes(), 9216);
+  EXPECT_EQ(capacity.shared_slot_bytes(), 9216);
   EXPECT_EQ(capacity.n_blocks(), 25);
   EXPECT_EQ(capacity.num_linear_state_blocks(), 25);
   EXPECT_EQ(capacity.cache_size_in_bytes(), 25 * 9216);
@@ -536,9 +536,8 @@ TEST_F(SharedStaticRuntimeEstimationTest, VlmTp4UsesOnlyDecoderCacheGeometry) {
   EXPECT_EQ(vlm.num_full_attention_layers(), 1);
   EXPECT_EQ(vlm.num_linear_attention_layers(), 3);
   EXPECT_EQ(vlm.linear_ssm_checkpoint_stride(), 5);
-  EXPECT_EQ(vlm.shared_unit_bytes(), text.shared_unit_bytes());
-  EXPECT_EQ(vlm.shared_full_block_units(), text.shared_full_block_units());
-  EXPECT_EQ(vlm.shared_linear_state_units(), text.shared_linear_state_units());
+  EXPECT_EQ(vlm.shared_slot_bytes(), text.shared_slot_bytes());
+  EXPECT_EQ(vlm.shared_linear_state_slots(), text.shared_linear_state_slots());
   EXPECT_EQ(vlm.n_blocks(), text.n_blocks());
   EXPECT_EQ(vlm_shape.key_cache_shape(), text_shape.key_cache_shape());
   EXPECT_EQ(vlm_shape.value_cache_shape(), text_shape.value_cache_shape());
@@ -582,11 +581,10 @@ TEST(KVCacheEstimationTest, SharedStaticCostsMatchTheStorageLayout) {
   const KVCacheCapacity capacity =
       estimate_kv_cache_capacity(model_args, options);
 
-  EXPECT_EQ(capacity.shared_unit_bytes(), layout.unit_bytes());
-  EXPECT_EQ(capacity.shared_full_block_units(), layout.full_block_units());
-  EXPECT_EQ(capacity.shared_linear_state_units(), layout.linear_state_units());
-  EXPECT_EQ(capacity.shared_full_block_units(), 1);
-  EXPECT_EQ(capacity.shared_linear_state_units(), 2);
+  EXPECT_EQ(capacity.shared_slot_bytes(), layout.slot_bytes());
+  EXPECT_EQ(capacity.shared_linear_state_slots(), layout.num_linear_groups());
+  EXPECT_EQ(layout.pages_per_slot(), 1);
+  EXPECT_EQ(capacity.shared_linear_state_slots(), 2);
 }
 
 TEST(KVCacheEstimationTest, SharedStaticDoesNotReserveLinearMemoryTwice) {
@@ -613,16 +611,16 @@ TEST(KVCacheEstimationTest, SharedStaticRequiresOneHybridWorkingSet) {
   model_args.linear_value_head_dim(4).mamba_ssm_dtype("float32");
   KVCacheEstimateOptions options = make_linear_attention_options();
   options.enable_shared_kv_cache = true;
-  options.cache_size_in_bytes = 4 * 9216;
+  options.cache_size_in_bytes = 3 * 9216;
 
   EXPECT_DEATH((void)estimate_kv_cache_capacity(model_args, options),
                "cannot fit padding and one hybrid sequence");
 
-  // Two padding pages, one Full page, and one page for each LINEAR layer.
-  options.cache_size_in_bytes = 5 * 9216;
+  // One padding slot, one Full slot, and one slot per Linear group.
+  options.cache_size_in_bytes = 4 * 9216;
   const KVCacheCapacity capacity =
       estimate_kv_cache_capacity(model_args, options);
-  EXPECT_EQ(capacity.n_blocks(), 5);
+  EXPECT_EQ(capacity.n_blocks(), 4);
 }
 
 TEST(KVCacheEstimationTest, SharedStaticRejectsIndependentLinearSlotOverride) {
@@ -675,14 +673,14 @@ TEST(KVCacheEstimationTest, SharedStaticBoundsCeilingConvIndices) {
   // Full/SSM rows align to 64 KiB pages; Conv maps with ceil(id * 2048/3).
   const int64_t max_index = std::numeric_limits<int32_t>::max();
   const int64_t expected_units = max_index * 3 / 2048;
-  EXPECT_EQ(capacity.shared_unit_bytes(), 65536);
+  EXPECT_EQ(capacity.shared_slot_bytes(), 65536);
   EXPECT_EQ(capacity.n_blocks(), expected_units);
   EXPECT_LE((expected_units * 2048 + 2) / 3, max_index);
   EXPECT_GT(((expected_units + 1) * 2048 + 2) / 3, max_index);
   EXPECT_EQ(capacity.cache_size_in_bytes(), expected_units * 65536);
 }
 
-TEST(KVCacheEstimationTest, SharedStaticQwen38MtpUsesNineMiBPages) {
+TEST(KVCacheEstimationTest, SharedStaticQwen38MtpPacksFourNineMiBPagesPerSlot) {
   ModelArgs model_args = make_linear_attention_args(/*head_dim=*/256);
   model_args.model_type("qwen3_5_text")
       .n_layers(64)
@@ -704,20 +702,20 @@ TEST(KVCacheEstimationTest, SharedStaticQwen38MtpUsesNineMiBPages) {
   options.n_local_linear_k_heads = 8;
   options.n_local_linear_v_heads = 24;
   options.num_speculative_tokens = 4;
-  constexpr int64_t kPageBytes = 9 * 1024 * 1024;
-  options.cache_size_in_bytes = 100 * kPageBytes + kPageBytes - 1;
+  // 16 Full layers fill four pages; 48 Linear layers form 12 slot groups.
+  constexpr int64_t kSlotBytes = 4 * 9 * 1024 * 1024;
+  options.cache_size_in_bytes = 25 * kSlotBytes + kSlotBytes - 1;
 
   const KVCacheCapacity capacity =
       estimate_kv_cache_capacity(model_args, options);
 
-  EXPECT_EQ(capacity.shared_unit_bytes(), kPageBytes);
-  EXPECT_EQ(capacity.shared_full_block_units(), 4);
-  EXPECT_EQ(capacity.shared_linear_state_units(), 48);
+  EXPECT_EQ(capacity.shared_slot_bytes(), kSlotBytes);
+  EXPECT_EQ(capacity.shared_linear_state_slots(), 12);
   EXPECT_EQ(capacity.linear_conv_state_len(), 7);
   EXPECT_EQ(capacity.linear_ssm_checkpoint_stride(), 5);
-  EXPECT_EQ(capacity.n_blocks(), 100);
-  EXPECT_EQ(capacity.num_linear_state_blocks(), 100);
-  EXPECT_EQ(capacity.cache_size_in_bytes(), 100 * kPageBytes);
+  EXPECT_EQ(capacity.n_blocks(), 25);
+  EXPECT_EQ(capacity.num_linear_state_blocks(), 25);
+  EXPECT_EQ(capacity.cache_size_in_bytes(), 25 * kSlotBytes);
 }
 
 TEST(KVCacheEstimationTest, SharedStaticRejectsQuantizedFullPageGeometry) {
@@ -739,7 +737,7 @@ TEST(KVCacheEstimationTest, SharedStaticFlagPreservesDefaultSeparateBudgets) {
   const KVCacheCapacity capacity =
       estimate_kv_cache_capacity(model_args, options);
 
-  EXPECT_EQ(capacity.shared_unit_bytes(), 0);
+  EXPECT_EQ(capacity.shared_slot_bytes(), 0);
   EXPECT_EQ(capacity.num_linear_state_blocks(), 10);
   EXPECT_EQ(capacity.linear_cache_size_in_bytes(), 5120);
   EXPECT_EQ(capacity.n_blocks(), 254);
@@ -769,7 +767,7 @@ TEST(KVCacheEstimationTest, SharedStaticReservesEveryMtpCheckpoint) {
   const StaticKVCacheLayout layout(std::move(spec));
   EXPECT_EQ(capacity.linear_conv_state_len(), 6);
   EXPECT_EQ(capacity.linear_ssm_checkpoint_stride(), 5);
-  EXPECT_EQ(capacity.shared_unit_bytes(), layout.unit_bytes());
+  EXPECT_EQ(capacity.shared_slot_bytes(), layout.slot_bytes());
   EXPECT_EQ(capacity.n_blocks(), capacity.num_linear_state_blocks());
   EXPECT_LE(capacity.cache_size_in_bytes(), options.cache_size_in_bytes);
 }
@@ -792,7 +790,7 @@ TEST_F(SharedStaticRuntimeEstimationTest, FullOnlyDraftKeepsDenseKvRows) {
   const KVCacheCapacity capacity =
       KVCacheEstimator(model_args).estimate(options, context);
 
-  EXPECT_EQ(capacity.shared_unit_bytes(), 0);
+  EXPECT_EQ(capacity.shared_slot_bytes(), 0);
   EXPECT_EQ(capacity.num_full_attention_layers(), 1);
   EXPECT_EQ(capacity.num_linear_attention_layers(), 0);
   EXPECT_EQ(capacity.linear_cache_size_in_bytes(), 0);

@@ -91,8 +91,7 @@ BlockManagerPool::BlockManagerPool(const Options& options,
       .hasher_type(options_.hasher_type())
       .enable_vmm_kvcache(options_.enable_vmm_kvcache())
       .enable_shared_kv_cache(options_.enable_shared_kv_cache())
-      .shared_full_block_units(options_.shared_full_block_units())
-      .shared_linear_state_units(options_.shared_linear_state_units())
+      .shared_linear_state_slots(options_.shared_linear_state_slots())
       .num_layers(options_.num_layers())
       .slot_size(options_.slot_size())
       .virtual_block_bytes(options_.virtual_block_bytes())
@@ -544,10 +543,10 @@ size_t BlockManagerPool::block_resource_units(BlockType type,
     return KVCacheManager::block_resource_units(type, count);
   }
   if (type == BlockType::KV) {
-    return count * options_.shared_full_block_units();
+    return count;
   }
   return type == BlockType::LINEAR
-             ? count * options_.shared_linear_state_units()
+             ? count * options_.shared_linear_state_slots()
              : 0;
 }
 

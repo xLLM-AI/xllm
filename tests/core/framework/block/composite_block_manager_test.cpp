@@ -38,6 +38,7 @@ limitations under the License.
 #include "core/kv_cache/block/block_utils.h"
 #include "core/kv_cache/block/concurrent_block_manager_impl.h"
 #include "core/kv_cache/block/linear_state_block_manager.h"
+#include "core/kv_cache/block/static_kv_cache_block_pool.h"
 #include "core/kv_cache/storage/vmm_kv_page_allocator.h"
 #include "framework/config/scheduler_config.h"
 #include "framework/request/request.h"
@@ -3052,18 +3053,18 @@ TEST_F(SharedKVCacheBlockTest, ConcurrentGroupsCannotAllocateTheSameSlot) {
   EXPECT_EQ(manager.num_used_blocks(), 0u);
 }
 
-TEST_F(SharedKVCacheBlockTest, PhysicalCostsDetermineUsageAndCrossGroupReuse) {
+TEST_F(SharedKVCacheBlockTest, SlotCostsDetermineUsageAndCrossGroupReuse) {
   BlockManager::Options options = shared_options(/*num_slots=*/15);
-  options.shared_full_block_units(3).shared_linear_state_units(2);
+  options.shared_linear_state_slots(2);
   CompositeBlockManager manager(build_composite_leaves(options), options);
-  EXPECT_EQ(manager.num_total_blocks(), 12u);
+  EXPECT_EQ(manager.num_total_blocks(), 14u);
   std::vector<Block> full = manager.allocate_blocks(BlockType::KV, 2);
   std::vector<Block> linear = manager.allocate_blocks(BlockType::LINEAR, 1);
   ASSERT_EQ(full.size(), 2u);
   ASSERT_EQ(linear.size(), 1u);
-  EXPECT_EQ(manager.num_used_blocks(), 8u);
-  EXPECT_EQ(manager.num_free_blocks(), 4u);
-  EXPECT_EQ(manager.leaf_of(BlockType::KV)->num_used_blocks(), 6u);
+  EXPECT_EQ(manager.num_used_blocks(), 4u);
+  EXPECT_EQ(manager.num_free_blocks(), 10u);
+  EXPECT_EQ(manager.leaf_of(BlockType::KV)->num_used_blocks(), 2u);
   EXPECT_EQ(manager.leaf_of(BlockType::LINEAR)->num_used_blocks(), 2u);
 
   const int32_t released_id = full.front().id();
@@ -3071,61 +3072,83 @@ TEST_F(SharedKVCacheBlockTest, PhysicalCostsDetermineUsageAndCrossGroupReuse) {
   std::vector<Block> reused = manager.allocate_blocks(BlockType::LINEAR, 1);
   ASSERT_EQ(reused.size(), 1u);
   EXPECT_EQ(reused.front().id(), released_id);
-  EXPECT_EQ(manager.num_used_blocks(), 7u);
-  EXPECT_EQ(manager.num_free_blocks(), 5u);
-}
-
-TEST_F(SharedKVCacheBlockTest, PaddingReservesBothRolesEntireExtent) {
-  BlockManager::Options options = shared_options(/*num_slots=*/15);
-  options.shared_full_block_units(3).shared_linear_state_units(2);
-  CompositeBlockManager manager(build_composite_leaves(options), options);
-  std::vector<Block> linear = manager.allocate_blocks(BlockType::LINEAR, 6);
-  ASSERT_EQ(linear.size(), 6u);
-  for (const Block& block : linear) {
-    EXPECT_GE(block.id(), 3);
-    EXPECT_LE(block.id() + 2, 15);
-  }
-  EXPECT_EQ(manager.num_free_blocks(), 0u);
-  linear.clear();
-  std::vector<Block> full = manager.allocate_blocks(BlockType::KV, 4);
-  ASSERT_EQ(full.size(), 4u);
-  for (const Block& block : full) {
-    EXPECT_GE(block.id(), 3);
-    EXPECT_LE(block.id() + 3, 15);
-  }
-  EXPECT_EQ(manager.num_free_blocks(), 0u);
-}
-
-TEST_F(SharedKVCacheBlockTest, FragmentedBatchFailurePreservesCapacity) {
-  BlockManager::Options options = shared_options(/*num_slots=*/12);
-  options.shared_full_block_units(3).shared_linear_state_units(1);
-  CompositeBlockManager manager(build_composite_leaves(options), options);
-  std::vector<Block> linear = manager.allocate_blocks(BlockType::LINEAR, 9);
-  ASSERT_EQ(linear.size(), 9u);
-  for (const size_t index : {0u, 1u, 2u, 4u, 5u, 7u, 8u}) {
-    linear[index] = Block();
-  }
-  EXPECT_EQ(manager.num_free_blocks(), 7u);
-  EXPECT_TRUE(manager.allocate_blocks(BlockType::KV, 2).empty());
-  EXPECT_EQ(manager.num_free_blocks(), 7u);
-  EXPECT_EQ(manager.num_used_blocks(), 2u);
-
-  // Releasing the separator joins the first two holes into six units.
-  linear[3] = Block();
-  std::vector<Block> full = manager.allocate_blocks(BlockType::KV, 2);
-  ASSERT_EQ(full.size(), 2u);
-  EXPECT_EQ(full[0].id(), 3);
-  EXPECT_EQ(full[1].id(), 6);
-  EXPECT_EQ(manager.num_free_blocks(), 2u);
-  full.clear();
-  linear.clear();
+  EXPECT_EQ(manager.num_used_blocks(), 5u);
   EXPECT_EQ(manager.num_free_blocks(), 9u);
 }
 
-TEST_F(SharedKVCacheBlockTest, FragmentedCapacityReclaimsSiblingCheckpoint) {
+TEST_F(SharedKVCacheBlockTest, PaddingSlotIsNeverAllocatedInAnyGroup) {
+  BlockManager::Options options = shared_options(/*num_slots=*/15);
+  options.shared_linear_state_slots(2);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  std::vector<Block> linear = manager.allocate_blocks(BlockType::LINEAR, 7);
+  ASSERT_EQ(linear.size(), 7u);
+  const std::shared_ptr<StaticKVCacheBlockPool>& pool =
+      linear.front().manager()->options().shared_block_pool();
+  std::unordered_set<int32_t> slots;
+  for (const Block& block : linear) {
+    std::vector<int32_t> state_slots;
+    pool->append_linear_state_slots(block.id(), &state_slots);
+    ASSERT_EQ(state_slots.size(), 2u);
+    EXPECT_EQ(state_slots.front(), block.id());
+    for (const int32_t slot : state_slots) {
+      EXPECT_GE(slot, 1);
+      EXPECT_TRUE(slots.insert(slot).second);
+    }
+  }
+  EXPECT_EQ(manager.num_free_blocks(), 0u);
+  std::vector<int32_t> padding_slots;
+  pool->append_linear_state_slots(0, &padding_slots);
+  EXPECT_EQ(padding_slots, std::vector<int32_t>(2, 0));
+  linear.clear();
+  std::vector<Block> full = manager.allocate_blocks(BlockType::KV, 14);
+  ASSERT_EQ(full.size(), 14u);
+  for (const Block& block : full) {
+    EXPECT_GE(block.id(), 1);
+  }
+  EXPECT_EQ(manager.num_free_blocks(), 0u);
+}
+
+TEST_F(SharedKVCacheBlockTest, LinearStateTakesNonContiguousGroupSlots) {
+  BlockManager::Options options = shared_options(/*num_slots=*/12);
+  options.shared_linear_state_slots(2);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  std::vector<Block> full = manager.allocate_blocks(BlockType::KV, 3);
+  ASSERT_EQ(full.size(), 3u);
+  const int32_t hole = full[1].id();
+  full[1] = Block();
+
+  // The released hole and the next free slot need not be adjacent.
+  std::vector<Block> linear = manager.allocate_blocks(BlockType::LINEAR, 1);
+  ASSERT_EQ(linear.size(), 1u);
+  EXPECT_EQ(linear.front().id(), hole);
+  std::vector<int32_t> state_slots;
+  linear.front()
+      .manager()
+      ->options()
+      .shared_block_pool()
+      ->append_linear_state_slots(linear.front().id(), &state_slots);
+  ASSERT_EQ(state_slots.size(), 2u);
+  EXPECT_EQ(state_slots[0], hole);
+  EXPECT_NE(state_slots[1], hole + 1);
+  EXPECT_EQ(manager.num_used_blocks(), 4u);
+  EXPECT_EQ(manager.num_free_blocks(), 7u);
+
+  // A failed batch leaves every free slot available to the other type.
+  EXPECT_TRUE(manager.allocate_blocks(BlockType::LINEAR, 4).empty());
+  EXPECT_EQ(manager.num_free_blocks(), 7u);
+  std::vector<Block> rest = manager.allocate_blocks(BlockType::KV, 7);
+  ASSERT_EQ(rest.size(), 7u);
+  EXPECT_EQ(manager.num_free_blocks(), 0u);
+  rest.clear();
+  full.clear();
+  linear.clear();
+  EXPECT_EQ(manager.num_free_blocks(), 11u);
+}
+
+TEST_F(SharedKVCacheBlockTest, CachedStateSlotsServeFullBlocks) {
   BlockManager::Options options =
       shared_options(/*num_slots=*/14, /*enable_prefix_cache=*/true);
-  options.shared_full_block_units(4).shared_linear_state_units(2);
+  options.shared_linear_state_slots(2);
   CompositeBlockManager manager(build_composite_leaves(options), options);
   BlockManager* linear_leaf = manager.leaf_of(BlockType::LINEAR);
   std::vector<Block> linear = manager.allocate_blocks(BlockType::LINEAR, 5);
@@ -3137,56 +3160,57 @@ TEST_F(SharedKVCacheBlockTest, FragmentedCapacityReclaimsSiblingCheckpoint) {
   linear_leaf->cache(std::vector<Block>{linear[1], linear[3]});
   linear_leaf->deallocate(linear);
   linear.clear();
-  ASSERT_EQ(manager.num_free_blocks(), 6u);
+  ASSERT_EQ(manager.num_free_blocks(), 9u);
   ASSERT_EQ(linear_leaf->num_blocks_in_prefix_cache(), 2u);
 
-  std::vector<Block> full = manager.allocate_blocks(BlockType::KV, 1);
-  ASSERT_EQ(full.size(), 1u);
+  // Retiring one cached state frees both of its group slots.
+  std::vector<Block> full = manager.allocate_blocks(BlockType::KV, 10);
+  ASSERT_EQ(full.size(), 10u);
   EXPECT_EQ(linear_leaf->num_blocks_in_prefix_cache(), 1u);
-  EXPECT_EQ(manager.num_free_blocks(), 4u);
-  EXPECT_EQ(manager.num_used_blocks(), 4u);
+  EXPECT_EQ(manager.num_free_blocks(), 1u);
+  EXPECT_EQ(manager.num_used_blocks(), 10u);
 }
 
-TEST_F(SharedKVCacheBlockTest, AdmissionCountsWeightedPhysicalExtents) {
+TEST_F(SharedKVCacheBlockTest, AdmissionCountsSlotsPerBlockType) {
   BlockManagerPool::Options options;
   options.num_blocks(17)
       .block_size(2)
       .enable_linear_state(true)
       .linear_state_num_slots(17)
       .enable_shared_kv_cache(true)
-      .shared_full_block_units(3)
-      .shared_linear_state_units(2)
+      .shared_linear_state_slots(2)
       .enable_prefix_cache(false);
   BlockManagerPool pool(options);
   Sequence first = MakeTestSequence(/*index=*/0, {1, 2, 3, 4});
   Sequence second = MakeTestSequence(/*index=*/1, {1, 2, 3, 4});
-  EXPECT_FALSE(pool.exceeds_total_capacity(&first, /*num_tokens=*/8));
-  EXPECT_TRUE(pool.exceeds_total_capacity(&first, /*num_tokens=*/9));
-  const std::vector<KVCacheManager::KVCacheReservation> reservations = {
-      {&first, 4}, {&second, 4}};
-  EXPECT_TRUE(pool.exceeds_total_capacity(reservations));
+  EXPECT_FALSE(pool.exceeds_total_capacity(&first, /*num_tokens=*/28));
+  EXPECT_TRUE(pool.exceeds_total_capacity(&first, /*num_tokens=*/29));
+  EXPECT_FALSE(pool.exceeds_total_capacity(
+      std::vector<KVCacheManager::KVCacheReservation>{{&first, 12},
+                                                      {&second, 12}}));
+  EXPECT_TRUE(pool.exceeds_total_capacity(
+      std::vector<KVCacheManager::KVCacheReservation>{{&first, 12},
+                                                      {&second, 13}}));
 }
 
-TEST_F(SharedKVCacheBlockTest,
-       SchedulerDemandUsesPhysicalUnitsAndMissingState) {
+TEST_F(SharedKVCacheBlockTest, SchedulerDemandUsesSlotsAndMissingState) {
   BlockManagerPool::Options options;
   options.num_blocks(17)
       .block_size(2)
       .enable_linear_state(true)
       .linear_state_num_slots(17)
       .enable_shared_kv_cache(true)
-      .shared_full_block_units(3)
-      .shared_linear_state_units(2)
+      .shared_linear_state_slots(2)
       .enable_prefix_cache(false);
   BlockManagerPool pool(options);
   Sequence sequence = MakeTestSequence(/*index=*/0, {1, 2, 3, 4});
 
-  EXPECT_EQ(pool.admission_capacity(0), 14u);
-  EXPECT_EQ(pool.sequence_resource_units(/*num_tokens=*/4), 8u);
-  EXPECT_EQ(pool.additional_resource_units(&sequence, /*num_tokens=*/4), 8u);
+  EXPECT_EQ(pool.admission_capacity(0), 16u);
+  EXPECT_EQ(pool.sequence_resource_units(/*num_tokens=*/4), 4u);
+  EXPECT_EQ(pool.additional_resource_units(&sequence, /*num_tokens=*/4), 4u);
   ASSERT_TRUE(pool.allocate(&sequence, /*num_tokens=*/4));
   EXPECT_EQ(pool.additional_resource_units(&sequence, /*num_tokens=*/4), 0u);
-  EXPECT_EQ(pool.additional_resource_units(&sequence, /*num_tokens=*/5), 3u);
+  EXPECT_EQ(pool.additional_resource_units(&sequence, /*num_tokens=*/5), 1u);
 
   // A sequence with mounted KV but no recurrent slot still needs state.
   std::vector<Block> linear =
@@ -3195,11 +3219,9 @@ TEST_F(SharedKVCacheBlockTest,
   pool.deallocate_without_cache(&sequence);
 }
 
-TEST_F(SharedKVCacheBlockTest, ConcurrentWeightedExtentsNeverOverlap) {
+TEST_F(SharedKVCacheBlockTest, ConcurrentGroupSlotsNeverOverlap) {
   BlockManager::Options options = shared_options(/*num_slots=*/43);
-  options.enable_disagg_pd(true)
-      .shared_full_block_units(2)
-      .shared_linear_state_units(3);
+  options.enable_disagg_pd(true).shared_linear_state_slots(3);
   CompositeBlockManager manager(build_composite_leaves(options), options);
   std::promise<void> start;
   std::shared_future<void> ready = start.get_future().share();
@@ -3216,25 +3238,28 @@ TEST_F(SharedKVCacheBlockTest, ConcurrentWeightedExtentsNeverOverlap) {
   std::vector<Block> linear = linear_future.get();
   ASSERT_EQ(full.size(), 8u);
   ASSERT_EQ(linear.size(), 8u);
-  std::unordered_set<int32_t> units;
+  const std::shared_ptr<StaticKVCacheBlockPool>& pool =
+      linear.front().manager()->options().shared_block_pool();
+  std::unordered_set<int32_t> slots;
   for (const Block& block : full) {
-    EXPECT_GE(block.id(), 3);
-    for (int32_t offset = 0; offset < 2; ++offset) {
-      EXPECT_TRUE(units.insert(block.id() + offset).second);
-    }
+    EXPECT_GE(block.id(), 1);
+    EXPECT_TRUE(slots.insert(block.id()).second);
   }
   for (const Block& block : linear) {
-    EXPECT_GE(block.id(), 3);
-    for (int32_t offset = 0; offset < 3; ++offset) {
-      EXPECT_TRUE(units.insert(block.id() + offset).second);
+    std::vector<int32_t> state_slots;
+    pool->append_linear_state_slots(block.id(), &state_slots);
+    ASSERT_EQ(state_slots.size(), 3u);
+    for (const int32_t slot : state_slots) {
+      EXPECT_GE(slot, 1);
+      EXPECT_TRUE(slots.insert(slot).second);
     }
   }
-  EXPECT_EQ(units.size(), 40u);
-  EXPECT_EQ(manager.num_free_blocks(), 0u);
-  EXPECT_EQ(manager.num_used_blocks(), 40u);
+  EXPECT_EQ(slots.size(), 32u);
+  EXPECT_EQ(manager.num_free_blocks(), 10u);
+  EXPECT_EQ(manager.num_used_blocks(), 32u);
   full.clear();
   linear.clear();
-  EXPECT_EQ(manager.num_free_blocks(), 40u);
+  EXPECT_EQ(manager.num_free_blocks(), 42u);
 }
 
 }  // namespace xllm

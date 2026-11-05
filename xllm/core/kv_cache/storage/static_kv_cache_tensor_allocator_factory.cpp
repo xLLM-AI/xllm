@@ -43,7 +43,7 @@ StaticKVCacheLayoutSpec make_layout_spec(const KVCacheShape& shape,
   CHECK_GT(shape.key_cache_shape().front(), 0);
 
   StaticKVCacheLayoutSpec spec;
-  spec.num_units = static_cast<size_t>(shape.key_cache_shape().front());
+  spec.num_slots = static_cast<size_t>(shape.key_cache_shape().front());
   spec.dtype = options.dtype();
   spec.ssm_dtype = options.ssm_dtype();
   const size_t dtype_bytes = torch::elementSize(spec.dtype);

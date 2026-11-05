@@ -585,10 +585,10 @@ void init_shared_counts(const ModelArgs& model_args,
     }
   }
   const StaticKVCacheLayout layout(std::move(spec));
-  CHECK_LE(layout.unit_bytes(),
+  CHECK_LE(layout.slot_bytes(),
            static_cast<size_t>(std::numeric_limits<int64_t>::max()));
-  const int64_t unit_bytes = static_cast<int64_t>(layout.unit_bytes());
-  int64_t units = capacity->cache_size_in_bytes() / unit_bytes;
+  const int64_t slot_bytes = static_cast<int64_t>(layout.slot_bytes());
+  int64_t slots = capacity->cache_size_in_bytes() / slot_bytes;
   // Shared GDN uses generic physical indices, so the separate MegaGdn
   // state-slot limit does not bound this arena.
   // ForwardInputBuilder stores token slots and recurrent indices as int32.
@@ -596,14 +596,14 @@ void init_shared_counts(const ModelArgs& model_args,
   const size_t max_index = std::numeric_limits<int32_t>::max();
   const size_t full_stride = layout.role_row_stride(KVCacheTensorRole::KEY);
   CHECK_LE(full_stride, max_index / capacity->block_size());
-  units = std::min(
-      units,
+  slots = std::min(
+      slots,
       static_cast<int64_t>(max_index / full_stride / capacity->block_size()));
   for (const KVCacheTensorRole role :
        {KVCacheTensorRole::CONV, KVCacheTensorRole::SSM}) {
     size_t lower = 0;
-    size_t upper = static_cast<size_t>(units);
-    // The byte-budget bound above makes every probed page offset fit int64.
+    size_t upper = static_cast<size_t>(slots);
+    // The byte-budget bound above makes every probed slot offset fit int64.
     // Conv can have a rational row stride, so bound the actual ceiling map.
     while (lower < upper) {
       const size_t middle = lower + (upper - lower + 1) / 2;
@@ -613,24 +613,19 @@ void init_shared_counts(const ModelArgs& model_args,
         upper = middle - 1;
       }
     }
-    units = static_cast<int64_t>(lower);
+    slots = static_cast<int64_t>(lower);
   }
-  const size_t padding =
-      std::max(layout.full_block_units(), layout.linear_state_units());
-  CHECK_GE(units,
-           static_cast<int64_t>(padding + layout.full_block_units() +
-                                layout.linear_state_units()))
+  const size_t linear_state_slots = layout.num_linear_groups();
+  // Padding slot, one Full block and one recurrent state.
+  CHECK_GE(slots, static_cast<int64_t>(2 + linear_state_slots))
       << "Static shared KV budget cannot fit padding and one hybrid sequence.";
-  CHECK_LE(units, std::numeric_limits<int32_t>::max());
-  CHECK_LE(layout.full_block_units(), std::numeric_limits<uint32_t>::max());
-  CHECK_LE(layout.linear_state_units(), std::numeric_limits<uint32_t>::max());
-  capacity->n_blocks(units)
-      .num_linear_state_blocks(units)
-      .shared_unit_bytes(unit_bytes)
-      .shared_full_block_units(static_cast<uint32_t>(layout.full_block_units()))
-      .shared_linear_state_units(
-          static_cast<uint32_t>(layout.linear_state_units()))
-      .cache_size_in_bytes(units * unit_bytes)
+  CHECK_LE(slots, std::numeric_limits<int32_t>::max());
+  CHECK_LE(linear_state_slots, std::numeric_limits<uint32_t>::max());
+  capacity->n_blocks(slots)
+      .num_linear_state_blocks(slots)
+      .shared_slot_bytes(slot_bytes)
+      .shared_linear_state_slots(static_cast<uint32_t>(linear_state_slots))
+      .cache_size_in_bytes(slots * slot_bytes)
       .linear_cache_size_in_bytes(0);
 }
 
@@ -764,9 +759,9 @@ SharedKPoolPlan plan_shared_kpool(KVCacheCapacity target_cap,
 
 SharedStaticKVCachePlan plan_shared_static_kv_cache(KVCacheCapacity target_cap,
                                                     KVCacheCapacity draft_cap) {
-  CHECK_GT(target_cap.shared_unit_bytes(), 0);
+  CHECK_GT(target_cap.shared_slot_bytes(), 0);
   CHECK_EQ(target_cap.linear_cache_size_in_bytes(), 0);
-  CHECK_EQ(draft_cap.shared_unit_bytes(), 0);
+  CHECK_EQ(draft_cap.shared_slot_bytes(), 0);
   CHECK_EQ(draft_cap.num_linear_attention_layers(), 0);
   CHECK_EQ(draft_cap.linear_cache_size_in_bytes(), 0);
   CHECK_EQ(target_cap.block_size(), draft_cap.block_size());
@@ -774,21 +769,19 @@ SharedStaticKVCachePlan plan_shared_static_kv_cache(KVCacheCapacity target_cap,
                                   draft_cap.cache_size_in_bytes());
   const int64_t draft_block_bytes =
       standard_full_cache_block_size_in_bytes(draft_cap);
-  // Every possible shared extent start is also a dense draft block ID. The
-  // draft therefore pays one ordinary KV row per arena unit, including IDs
-  // currently owned by recurrent state or reserved as padding.
-  const int64_t unit_bytes = target_cap.shared_unit_bytes();
-  CHECK_LE(draft_block_bytes, std::numeric_limits<int64_t>::max() - unit_bytes);
-  const int64_t units = std::min(target_cap.n_blocks(),
-                                 budget / (unit_bytes + draft_block_bytes));
-  const int64_t full_units = target_cap.shared_full_block_units();
-  const int64_t linear_units = target_cap.shared_linear_state_units();
-  CHECK_GE(units,
-           std::max(full_units, linear_units) + full_units + linear_units)
+  // Every shared slot is also a dense draft block ID. The draft therefore pays
+  // one ordinary KV row per slot, including slots currently owned by recurrent
+  // state or reserved as padding.
+  const int64_t slot_bytes = target_cap.shared_slot_bytes();
+  CHECK_LE(draft_block_bytes, std::numeric_limits<int64_t>::max() - slot_bytes);
+  const int64_t slots = std::min(target_cap.n_blocks(),
+                                 budget / (slot_bytes + draft_block_bytes));
+  CHECK_GE(slots,
+           2 + static_cast<int64_t>(target_cap.shared_linear_state_slots()))
       << "Shared target and draft budget cannot fit one hybrid sequence.";
-  target_cap.n_blocks(units).num_linear_state_blocks(units).cache_size_in_bytes(
-      units * unit_bytes);
-  draft_cap.n_blocks(units).cache_size_in_bytes(units * draft_block_bytes);
+  target_cap.n_blocks(slots).num_linear_state_blocks(slots).cache_size_in_bytes(
+      slots * slot_bytes);
+  draft_cap.n_blocks(slots).cache_size_in_bytes(slots * draft_block_bytes);
   return {std::move(target_cap), std::move(draft_cap)};
 }
 

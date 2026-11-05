@@ -284,8 +284,9 @@ class NpuQwen3_5GatedDeltaNet(nn.Module):
 
     def _prefill(self, hidden: torch.Tensor, metadata: GdnPrefillMetadata) -> torch.Tensor:
         state_cache = metadata.state_caches[self.layer_id]
-        conv_read, conv_write = metadata.conv_read_indices, metadata.conv_write_indices
-        ssm_read, ssm_write = metadata.ssm_read_indices, metadata.ssm_write_indices
+        group = metadata.layer_groups.get(self.layer_id, 0)
+        conv_read, conv_write = metadata.conv_read_indices[group], metadata.conv_write_indices[group]
+        ssm_read, ssm_write = metadata.ssm_read_indices[group], metadata.ssm_write_indices[group]
         checkpoint_stride = metadata.shared_checkpoint_stride
         if checkpoint_stride is not None:
             batch_size = conv_read.numel()
@@ -332,7 +333,7 @@ class NpuQwen3_5GatedDeltaNet(nn.Module):
                 state_cache.conv,
                 state_cache.ssm,
                 slot_begin=batch_size + 1,
-                valid_slots=metadata.conv_write_indices >= 0,
+                valid_slots=metadata.conv_write_indices[group] >= 0,
             )
         return output
 
@@ -411,14 +412,15 @@ class NpuQwen3_5GatedDeltaNet(nn.Module):
         batch_size = metadata.state_indices.numel()
         width = metadata.query_width
         state_cache = metadata.state_caches[self.layer_id]
-        if metadata.conv_state_indices is not None or metadata.ssm_state_indices is not None:
-            if metadata.conv_state_indices is None or metadata.ssm_state_indices is None:
+        if metadata.conv_state_indices or metadata.ssm_state_indices:
+            if not metadata.conv_state_indices or not metadata.ssm_state_indices:
                 raise ValueError("Qwen3.5 shared verify requires both Conv/SSM physical state indices")
+            group = metadata.layer_groups.get(self.layer_id, 0)
             staged = self._stage_shared_state(
                 state_cache.conv,
                 state_cache.ssm,
-                metadata.conv_state_indices,
-                metadata.ssm_state_indices,
+                metadata.conv_state_indices[group],
+                metadata.ssm_state_indices[group],
                 checkpoint_stride=width,
                 conv_rows=width + self.conv_kernel_size - 2,
             )
@@ -429,8 +431,8 @@ class NpuQwen3_5GatedDeltaNet(nn.Module):
                     metadata,
                     state_caches=compact_cache,
                     state_indices=staged.indices,
-                    conv_state_indices=None,
-                    ssm_state_indices=None,
+                    conv_state_indices=(),
+                    ssm_state_indices=(),
                 ),
             )
             staged.write_back(state_cache.conv, state_cache.ssm)
@@ -518,16 +520,22 @@ class NpuQwen3_5GatedDeltaNet(nn.Module):
         elif isinstance(metadata, GdnPrefillMetadata):
             output = self._prefill(hidden, metadata)
         elif isinstance(metadata, GdnDecodeMetadata):
+            group = metadata.layer_groups.get(self.layer_id, 0)
             output = self._decode(
                 hidden,
                 state_cache.conv,
                 state_cache.ssm,
                 metadata.read_state_indices,
                 metadata.write_state_indices,
-                metadata.conv_read_state_indices,
-                metadata.conv_write_state_indices,
-                metadata.ssm_read_state_indices,
-                metadata.ssm_write_state_indices,
+                *(
+                    indices[group] if indices else None
+                    for indices in (
+                        metadata.conv_read_state_indices,
+                        metadata.conv_write_state_indices,
+                        metadata.ssm_read_state_indices,
+                        metadata.ssm_write_state_indices,
+                    )
+                ),
             )
         else:
             raise TypeError(f"Unsupported Qwen3.5 GDN metadata: {type(metadata).__name__}")

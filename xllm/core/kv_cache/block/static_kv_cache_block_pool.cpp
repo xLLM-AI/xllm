@@ -17,35 +17,36 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#include <algorithm>
-#include <iterator>
 #include <limits>
 
 namespace xllm {
 
-StaticKVCacheBlockPool::StaticKVCacheBlockPool(uint32_t num_units,
-                                               uint32_t full_block_units,
-                                               uint32_t linear_state_units)
-    : owners_(num_units, -1),
-      active_(num_units, 0),
-      full_block_units_(full_block_units),
-      linear_state_units_(linear_state_units),
-      padding_units_(std::max(full_block_units, linear_state_units)) {
-  CHECK_GT(full_block_units, 0u);
-  CHECK_GT(linear_state_units, 0u);
-  CHECK_GT(num_units, padding_units_);
-  CHECK_LE(num_units,
+StaticKVCacheBlockPool::StaticKVCacheBlockPool(uint32_t num_slots,
+                                               uint32_t linear_state_slots)
+    : owners_(num_slots, -1),
+      active_(num_slots, 0),
+      slots_per_linear_state_(linear_state_slots) {
+  CHECK_GT(linear_state_slots, 0u);
+  CHECK_GT(num_slots, 1u);
+  CHECK_LE(num_slots,
            static_cast<uint32_t>(std::numeric_limits<int32_t>::max()));
-  num_free_units_ = num_units - padding_units_;
-  free_extents_.emplace(static_cast<int32_t>(padding_units_), num_free_units_);
+  CHECK_LE(static_cast<size_t>(num_slots),
+           std::numeric_limits<size_t>::max() / linear_state_slots);
+  linear_state_slots_.assign(
+      static_cast<size_t>(num_slots) * slots_per_linear_state_, 0);
+  free_slots_.reserve(num_slots - 1);
+  // Pop smaller slot ids first.
+  for (uint32_t slot = num_slots - 1; slot > 0; --slot) {
+    free_slots_.emplace_back(static_cast<int32_t>(slot));
+  }
 }
 
-size_t StaticKVCacheBlockPool::block_units(BlockType type) const {
+size_t StaticKVCacheBlockPool::slots_per_block(BlockType type) const {
   switch (type) {
     case BlockType::KV:
-      return full_block_units_;
+      return 1;
     case BlockType::LINEAR:
-      return linear_state_units_;
+      return slots_per_linear_state_;
     default:
       LOG(FATAL) << "Unsupported shared static cache block type: "
                  << static_cast<int32_t>(type);
@@ -56,45 +57,33 @@ size_t StaticKVCacheBlockPool::block_units(BlockType type) const {
 std::vector<int32_t> StaticKVCacheBlockPool::allocate(size_t num_blocks,
                                                       BlockType type) {
   std::lock_guard<std::mutex> lock(mutex_);
-  const size_t units = block_units(type);
-  size_t available_blocks = 0;
-  for (const auto& [start, length] : free_extents_) {
-    available_blocks += length / units;
-    if (available_blocks >= num_blocks) {
-      break;
-    }
-  }
-  if (num_blocks > available_blocks) {
+  const size_t cost = slots_per_block(type);
+  if (num_blocks > free_slots_.size() / cost) {
     return {};
   }
   std::vector<int32_t> blocks;
   blocks.reserve(num_blocks);
-  auto it = free_extents_.begin();
-  while (blocks.size() < num_blocks) {
-    if (it->second < units) {
-      ++it;
-      continue;
+  for (size_t block = 0; block < num_blocks; ++block) {
+    const int32_t block_id = free_slots_.back();
+    for (size_t group = 0; group < cost; ++group) {
+      const int32_t slot = free_slots_.back();
+      free_slots_.pop_back();
+      owners_[slot] = static_cast<int32_t>(type);
+      if (type == BlockType::LINEAR) {
+        linear_state_slots_[static_cast<size_t>(block_id) * cost + group] =
+            slot;
+      }
     }
-    const int32_t start = it->first;
-    const size_t count =
-        std::min(it->second / units, num_blocks - blocks.size());
-    const size_t consumed_units = count * units;
-    const size_t remaining_units = it->second - consumed_units;
-    it = free_extents_.erase(it);
-    if (remaining_units > 0) {
-      free_extents_.emplace(start + static_cast<int32_t>(consumed_units),
-                            remaining_units);
-    }
-    for (size_t index = 0; index < count; ++index) {
-      const int32_t block_id = start + static_cast<int32_t>(index * units);
-      owners_[block_id] = static_cast<int32_t>(type);
-      active_[block_id] = 1;
-      blocks.emplace_back(block_id);
-    }
+    active_[block_id] = 1;
+    blocks.emplace_back(block_id);
   }
-  num_free_units_ -= num_blocks * units;
-  num_used_blocks_ += num_blocks * units;
+  num_used_slots_ += num_blocks * cost;
   return blocks;
+}
+
+void StaticKVCacheBlockPool::release_slot(int32_t slot) {
+  owners_[slot] = -1;
+  free_slots_.emplace_back(slot);
 }
 
 void StaticKVCacheBlockPool::release(int32_t block_id, BlockType type) {
@@ -102,52 +91,61 @@ void StaticKVCacheBlockPool::release(int32_t block_id, BlockType type) {
   CHECK_GT(block_id, 0);
   CHECK_LT(static_cast<size_t>(block_id), owners_.size());
   CHECK_EQ(owners_[block_id], static_cast<int32_t>(type));
-  const size_t units = block_units(type);
-  num_used_blocks_ -= active_[block_id] * units;
+  const size_t cost = slots_per_block(type);
+  num_used_slots_ -= active_[block_id] * cost;
   active_[block_id] = 0;
-  owners_[block_id] = -1;
-  int32_t start = block_id;
-  size_t length = units;
-  auto next = free_extents_.lower_bound(start);
-  if (next != free_extents_.begin()) {
-    const auto previous = std::prev(next);
-    if (previous->first + static_cast<int32_t>(previous->second) == start) {
-      start = previous->first;
-      length += previous->second;
-      free_extents_.erase(previous);
-    }
+  if (type != BlockType::LINEAR) {
+    release_slot(block_id);
+    return;
   }
-  if (next != free_extents_.end() &&
-      start + static_cast<int32_t>(length) == next->first) {
-    length += next->second;
-    free_extents_.erase(next);
+  const size_t row = static_cast<size_t>(block_id) * cost;
+  for (size_t group = 0; group < cost; ++group) {
+    const int32_t slot = linear_state_slots_[row + group];
+    CHECK_EQ(owners_[slot], static_cast<int32_t>(type));
+    release_slot(slot);
+    linear_state_slots_[row + group] = 0;
   }
-  free_extents_.emplace(start, length);
-  num_free_units_ += units;
 }
 
 void StaticKVCacheBlockPool::mark_active(int32_t block_id, BlockType type) {
   std::lock_guard<std::mutex> lock(mutex_);
   CHECK_EQ(owners_[block_id], static_cast<int32_t>(type));
-  num_used_blocks_ += active_[block_id] == 0 ? block_units(type) : 0;
+  num_used_slots_ += active_[block_id] == 0 ? slots_per_block(type) : 0;
   active_[block_id] = 1;
 }
 
 void StaticKVCacheBlockPool::mark_inactive(int32_t block_id, BlockType type) {
   std::lock_guard<std::mutex> lock(mutex_);
   CHECK_EQ(owners_[block_id], static_cast<int32_t>(type));
-  num_used_blocks_ -= active_[block_id] * block_units(type);
+  num_used_slots_ -= active_[block_id] * slots_per_block(type);
   active_[block_id] = 0;
 }
 
-size_t StaticKVCacheBlockPool::num_free_blocks() const {
+void StaticKVCacheBlockPool::append_linear_state_slots(
+    int32_t state_id,
+    std::vector<int32_t>* slots) const {
+  CHECK(slots != nullptr);
+  if (state_id < 0) {
+    slots->insert(slots->end(), slots_per_linear_state_, state_id);
+    return;
+  }
   std::lock_guard<std::mutex> lock(mutex_);
-  return num_free_units_;
+  CHECK_LT(static_cast<size_t>(state_id), owners_.size());
+  const auto row = linear_state_slots_.begin() +
+                   static_cast<size_t>(state_id) * slots_per_linear_state_;
+  CHECK_EQ(*row, state_id) << "Slot " << state_id
+                           << " does not identify a recurrent state";
+  slots->insert(slots->end(), row, row + slots_per_linear_state_);
 }
 
-size_t StaticKVCacheBlockPool::num_used_blocks() const {
+size_t StaticKVCacheBlockPool::num_free_slots() const {
   std::lock_guard<std::mutex> lock(mutex_);
-  return num_used_blocks_;
+  return free_slots_.size();
+}
+
+size_t StaticKVCacheBlockPool::num_used_slots() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return num_used_slots_;
 }
 
 }  // namespace xllm

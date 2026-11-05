@@ -1247,7 +1247,10 @@ def test_shared_capture_only_writes_reserved_physical_scratch(capture_fails: boo
     value = arena[128:].view(torch.bfloat16)[: 57 * 64].reshape(57, 1, 1, 64)
     conv = arena.view(torch.bfloat16)[: 29 * 128].reshape(29, 1, 1, 128)
     ssm = arena[256:].view(torch.float32)[: 58 * 32].reshape(58, 1, 1, 32)
-    caches = [LayerCache(key=key, value=value), LayerCache(key=None, value=None, conv=conv, ssm=ssm)]
+    caches = [
+        LayerCache(key=key, value=value),
+        LayerCache(key=None, value=None, conv=conv, ssm=ssm, linear_state_slots=torch.arange(8, dtype=torch.int32)),
+    ]
     layout = detect_shared_kv_cache_layout(caches)
     assert layout is not None
     runner.attention_backend.shared_kv_layout = layout
@@ -1257,7 +1260,7 @@ def test_shared_capture_only_writes_reserved_physical_scratch(capture_fails: boo
     indices = torch.tensor([1, 2], dtype=torch.int32)
     metadata = _metadata(indices)
     input_ids = torch.arange(2, dtype=torch.int32)
-    live_pages = arena[layout.page_bytes :].clone()
+    live_pages = arena[layout.slot_bytes :].clone()
 
     def capture(entry: AclGraphEntry, _stream: object) -> None:
         selected = entry.static_metadata.linear_state_indices
@@ -1282,7 +1285,7 @@ def test_shared_capture_only_writes_reserved_physical_scratch(capture_fails: boo
         with failure:
             runner._prepare_graph_entry(input_ids, input_ids, metadata, None)
 
-    torch.testing.assert_close(arena[layout.page_bytes :], live_pages)
+    torch.testing.assert_close(arena[layout.slot_bytes :], live_pages)
     torch.testing.assert_close(metadata.linear_state_indices, indices)
 
 

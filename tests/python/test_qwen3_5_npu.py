@@ -942,7 +942,7 @@ def test_npu_mtp_gdn_projects_dense_groups_and_chunks_sequences(monkeypatch: pyt
 
 
 def test_npu_mega_prefill_builds_checkpoint_indices() -> None:
-    conv_read, conv_write, ssm_read, ssm_write = _build_mega_prefill_indices(
+    (conv_read,), (conv_write,), (ssm_read,), (ssm_write,) = _build_mega_prefill_indices(
         torch.tensor([1, 3], dtype=torch.int32),
         torch.tensor([2, 4], dtype=torch.int32),
         torch.tensor([False, True]),
@@ -953,6 +953,12 @@ def test_npu_mega_prefill_builds_checkpoint_indices() -> None:
     torch.testing.assert_close(conv_write, torch.tensor([2, 4], dtype=torch.int32))
     torch.testing.assert_close(ssm_read, torch.tensor([-1, 6], dtype=torch.int32))
     torch.testing.assert_close(ssm_write, torch.tensor([4, 8], dtype=torch.int32))
+
+
+def _flat_tensors(value: torch.Tensor | tuple[torch.Tensor, ...] | None) -> tuple[torch.Tensor, ...]:
+    if value is None:
+        return ()
+    return value if isinstance(value, tuple) else (value,)
 
 
 def _shared_gdn_caches(
@@ -987,6 +993,7 @@ def _shared_gdn_caches(
             value=None,
             conv=_view(0, (conv_rows, width + 2, conv_dim), torch.bfloat16),
             ssm=_view(ssm_row_bytes, (ssm_rows, num_value_heads, 128, 128), torch.float32),
+            linear_state_slots=torch.arange(8, device=device, dtype=torch.int32),
         ),
         LayerCache(
             key=_view(0, (full_rows, 128, 1, full_head_dim), torch.bfloat16),
@@ -1008,8 +1015,8 @@ def _bounded_qwen38_gdn_builder(
         conv_row_stride=None,
         ssm_row_stride=width + 1,
         checkpoint_stride=width,
-        logical_page_count=500001,
-        page_bytes=page_bytes,
+        num_slots=500001,
+        slot_bytes=page_bytes,
         conv_row_bytes=(width + 2) * 5120 * 2,
     )
     monkeypatch.setattr(
@@ -1032,6 +1039,7 @@ def _bounded_qwen38_gdn_builder(
                 value=None,
                 conv=torch.empty(1, width + 2, 5120, dtype=torch.bfloat16),
                 ssm=torch.empty(width, 24, 128, 128, dtype=torch.float32),
+                linear_state_slots=torch.arange(layout.num_slots, dtype=torch.int32),
             )
         ]
     )
@@ -1102,8 +1110,8 @@ def test_npu_shared_gdn_prefill_capture_snapshot_restores_write_rows() -> None:
     )
     metadata = builder.allocate_persistent(_input_batch(1, (1,)), source)
     assert isinstance(metadata, GdnPrefillMetadata)
-    conv_rows = metadata.conv_write_indices.long()
-    ssm_rows = (metadata.ssm_write_indices[:, None] + torch.arange(width)).reshape(-1).long()
+    conv_rows = metadata.conv_write_indices[0].long()
+    ssm_rows = (metadata.ssm_write_indices[0][:, None] + torch.arange(width)).reshape(-1).long()
     caches[0].conv.index_fill_(0, conv_rows, 0.5)
     caches[0].ssm.index_fill_(0, ssm_rows, 0.25)
     expected_conv = caches[0].conv.index_select(0, conv_rows).clone()
@@ -1135,12 +1143,14 @@ def test_npu_bounded_qwen38_gdn_prefill_maps_conv_rows_after_page_boundaries(mon
     result = builder.build(_input_batch(6, (1,) * 6), source)
     assert isinstance(result, GdnPrefillMetadata)
     assert result.shared_checkpoint_stride == 5
-    torch.testing.assert_close(result.conv_read_indices, torch.tensor([132, -1, 4477, 4608, -1, -1], dtype=torch.int32))
     torch.testing.assert_close(
-        result.conv_write_indices, torch.tensor([264, 132, 4608, 4477, -2, -1], dtype=torch.int32)
+        result.conv_read_indices[0], torch.tensor([132, -1, 4477, 4608, -1, -1], dtype=torch.int32)
     )
-    torch.testing.assert_close(result.ssm_read_indices, torch.tensor([6, -1, 204, 210, -1, -1], dtype=torch.int32))
-    torch.testing.assert_close(result.ssm_write_indices, torch.tensor([12, 6, 210, 204, -2, -1], dtype=torch.int32))
+    torch.testing.assert_close(
+        result.conv_write_indices[0], torch.tensor([264, 132, 4608, 4477, -2, -1], dtype=torch.int32)
+    )
+    torch.testing.assert_close(result.ssm_read_indices[0], torch.tensor([6, -1, 204, 210, -1, -1], dtype=torch.int32))
+    torch.testing.assert_close(result.ssm_write_indices[0], torch.tensor([12, 6, 210, 204, -2, -1], dtype=torch.int32))
 
 
 @pytest.mark.parametrize("mode", ["eager", "dense", "varlen"])
@@ -1172,19 +1182,19 @@ def test_npu_bounded_qwen38_gdn_verify_refreshes_persistent_physical_indices(
     batch = _input_batch(35, (5,) * 7)
     persistent = builder.allocate_persistent(batch, source)
     assert isinstance(persistent, GdnVerifyMetadata)
-    conv_pointer, ssm_pointer = persistent.conv_state_indices.data_ptr(), persistent.ssm_state_indices.data_ptr()
+    conv_pointer, ssm_pointer = persistent.conv_state_indices[0].data_ptr(), persistent.ssm_state_indices[0].data_ptr()
     expected_conv = torch.tensor([132, 264, 4477, 4608, -1, -2, 65828572], dtype=torch.int32)
     expected_ssm = torch.tensor([6, 12, 204, 210, -1, -2, 3000000], dtype=torch.int32)
-    torch.testing.assert_close(persistent.conv_state_indices, expected_conv)
-    torch.testing.assert_close(persistent.ssm_state_indices, expected_ssm)
+    torch.testing.assert_close(persistent.conv_state_indices[0], expected_conv)
+    torch.testing.assert_close(persistent.ssm_state_indices[0], expected_ssm)
     for order in ([3, 2, 1, 0, 5, 4, 6], [4, 5, 0, 2, 1, 6, 3]):
         positions = torch.tensor(order)
         indices.copy_(logical_pages.index_select(0, positions))
         builder.update_persistent(persistent, batch, source)
-        torch.testing.assert_close(persistent.conv_state_indices, expected_conv.index_select(0, positions))
-        torch.testing.assert_close(persistent.ssm_state_indices, expected_ssm.index_select(0, positions))
-        assert persistent.conv_state_indices.data_ptr() == conv_pointer
-        assert persistent.ssm_state_indices.data_ptr() == ssm_pointer
+        torch.testing.assert_close(persistent.conv_state_indices[0], expected_conv.index_select(0, positions))
+        torch.testing.assert_close(persistent.ssm_state_indices[0], expected_ssm.index_select(0, positions))
+        assert persistent.conv_state_indices[0].data_ptr() == conv_pointer
+        assert persistent.ssm_state_indices[0].data_ptr() == ssm_pointer
 
 
 def test_npu_bounded_qwen38_gdn_decode_maps_nonintegral_conv_rows(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1199,10 +1209,12 @@ def test_npu_bounded_qwen38_gdn_decode_maps_nonintegral_conv_rows(monkeypatch: p
     result = builder.build(_input_batch(6, (1,) * 6), source)
     assert isinstance(result, GdnDecodeMetadata)
     torch.testing.assert_close(
-        result.conv_read_state_indices, torch.tensor([103, 205, 3482, 3584, -1, -2], dtype=torch.int32)
+        result.conv_read_state_indices[0], torch.tensor([103, 205, 3482, 3584, -1, -2], dtype=torch.int32)
     )
     assert result.conv_read_state_indices is result.conv_write_state_indices
-    torch.testing.assert_close(result.ssm_read_state_indices, torch.tensor([2, 4, 68, 70, -1, -2], dtype=torch.int32))
+    torch.testing.assert_close(
+        result.ssm_read_state_indices[0], torch.tensor([2, 4, 68, 70, -1, -2], dtype=torch.int32)
+    )
     assert result.ssm_read_state_indices is result.ssm_write_state_indices
 
 
@@ -1340,18 +1352,18 @@ def test_npu_shared_gdn_verify_updates_persistent_physical_indices(packed: bool)
     batch = _input_batch(4 if packed else 6, (1, 3) if packed else (3, 3))
     persistent = builder.allocate_persistent(batch, source)
     assert isinstance(persistent, GdnVerifyMetadata)
-    pointers = (persistent.conv_state_indices.data_ptr(), persistent.ssm_state_indices.data_ptr())
+    pointers = (persistent.conv_state_indices[0].data_ptr(), persistent.ssm_state_indices[0].data_ptr())
     for ids in ([2, 4], [4, 1], [1, 3]):
         indices.copy_(torch.tensor(ids, dtype=torch.int32))
         builder.update_persistent(persistent, batch, source)
         torch.testing.assert_close(
-            persistent.conv_state_indices,
+            persistent.conv_state_indices[0],
             layout.linear_state_indices(torch.tensor(ids, dtype=torch.int32), role="conv"),
         )
         torch.testing.assert_close(
-            persistent.ssm_state_indices, torch.tensor(ids, dtype=torch.int32) * layout.ssm_row_stride
+            persistent.ssm_state_indices[0], torch.tensor(ids, dtype=torch.int32) * layout.ssm_row_stride
         )
-        assert pointers == (persistent.conv_state_indices.data_ptr(), persistent.ssm_state_indices.data_ptr())
+        assert pointers == (persistent.conv_state_indices[0].data_ptr(), persistent.ssm_state_indices[0].data_ptr())
 
 
 @pytest.mark.parametrize("lengths", [(3, 3), (1, 3)], ids=["uniform", "ragged"])
@@ -1383,8 +1395,8 @@ def test_npu_shared_gdn_eager_verify_maps_logical_pages(lengths: tuple[int, int]
     )
     result = builder.build(_input_batch(sum(lengths), lengths), source)
     assert isinstance(result, GdnVerifyMetadata)
-    torch.testing.assert_close(result.conv_state_indices, layout.linear_state_indices(indices, role="conv"))
-    torch.testing.assert_close(result.ssm_state_indices, indices * layout.ssm_row_stride)
+    torch.testing.assert_close(result.conv_state_indices[0], layout.linear_state_indices(indices, role="conv"))
+    torch.testing.assert_close(result.ssm_state_indices[0], indices * layout.ssm_row_stride)
     torch.testing.assert_close(result.state_indices, indices)
     torch.testing.assert_close(result.num_accepted_tokens, accepted)
     if lengths[0] != 3:
@@ -1522,7 +1534,7 @@ def test_npu_shared_gdn_matches_dense_state_across_reordered_pages(width: int, p
             "ssm_read_state_indices",
             "ssm_write_state_indices",
         )
-        if (tensor := getattr(current, name, None)) is not None
+        for tensor in _flat_tensors(getattr(current, name, None))
     ]
     state = AclGraphExecutionState({})
     context = ForwardContext(None, device, None, shared, execution_state=state)
@@ -1537,10 +1549,10 @@ def test_npu_shared_gdn_matches_dense_state_across_reordered_pages(width: int, p
             cache.ssm,
             metadata.read_state_indices,
             metadata.write_state_indices,
-            metadata.conv_read_state_indices,
-            metadata.conv_write_state_indices,
-            metadata.ssm_read_state_indices,
-            metadata.ssm_write_state_indices,
+            metadata.conv_read_state_indices[0],
+            metadata.conv_write_state_indices[0],
+            metadata.ssm_read_state_indices[0],
+            metadata.ssm_write_state_indices[0],
         )
 
     if graph_mode:
@@ -1565,7 +1577,7 @@ def test_npu_shared_gdn_matches_dense_state_across_reordered_pages(width: int, p
         builder.update_persistent(metadata, input_batch, source)
         reference_builder.update_persistent(reference_metadata, input_batch, source)
         for current, name, address in persistent_addresses:
-            assert getattr(current, name).data_ptr() == address
+            assert address in {tensor.data_ptr() for tensor in _flat_tensors(getattr(current, name))}
         hidden.normal_(std=0.1)
         if graph_mode:
             graph.replay()

@@ -199,16 +199,16 @@ ModelArgs make_shared_cache_model_args() {
 
 KVCacheCapacity make_shared_cache_capacity() {
   // Full rows cost 16 B, Conv rows 6 B and SSM rows 4 B: page=144 B.
-  // Two Full layers use one page; two recurrent layers use two pages.
+  // Two Full layers fill one page per slot; two recurrent layers form two
+  // Linear groups, so one recurrent state takes two slots.
   KVCacheCapacity capacity;
   capacity.n_blocks(12)
       .block_size(8)
       .num_linear_state_blocks(12)
       .linear_conv_state_len(1)
       .linear_ssm_checkpoint_stride(1)
-      .shared_unit_bytes(144)
-      .shared_full_block_units(1)
-      .shared_linear_state_units(2);
+      .shared_slot_bytes(144)
+      .shared_linear_state_slots(2);
   return capacity;
 }
 
@@ -264,7 +264,7 @@ TEST(KVCacheManagerFactoryTest,
                "Virtual memory does not support host KV cache offload");
 }
 
-TEST_F(BlockManagerPoolTest, SharedFactoryConnectsWeightedPhysicalCapacity) {
+TEST_F(BlockManagerPoolTest, SharedFactoryConnectsSlotCapacity) {
   BlockManagerPool::Options options;
   options.block_size(8).enable_linear_state(true).enable_prefix_cache(false);
   auto result = KVCacheManagerFactory::create(make_shared_cache_capacity(),
@@ -277,28 +277,28 @@ TEST_F(BlockManagerPoolTest, SharedFactoryConnectsWeightedPhysicalCapacity) {
   EXPECT_EQ(result.shape.conv_cache_shape().front(), 12);
   EXPECT_EQ(result.manager->block_resource_units(BlockType::KV, 2), 2);
   EXPECT_EQ(result.manager->block_resource_units(BlockType::LINEAR, 1), 2);
-  ASSERT_EQ(result.manager->num_free_blocks(), std::vector<size_t>{10});
+  ASSERT_EQ(result.manager->num_free_blocks(), std::vector<size_t>{11});
   auto sequence = make_sequence(0, {1, 2, 3, 4, 5, 6, 7, 8, 9});
   ASSERT_TRUE(result.manager->allocate(&sequence));
   EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::KV), 2);
   EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::LINEAR), 1);
-  EXPECT_EQ(result.manager->num_free_blocks(), std::vector<size_t>{6});
+  EXPECT_EQ(result.manager->num_free_blocks(), std::vector<size_t>{7});
   result.manager->deallocate(&sequence);
-  EXPECT_EQ(result.manager->num_free_blocks(), std::vector<size_t>{10});
+  EXPECT_EQ(result.manager->num_free_blocks(), std::vector<size_t>{11});
 }
 
 TEST(KVCacheManagerFactoryTest, RejectsSharedStorageCostMismatch) {
   BlockManagerPool::Options options;
   options.block_size(8).enable_linear_state(true).enable_prefix_cache(false);
   auto capacity = make_shared_cache_capacity();
-  capacity.shared_full_block_units(3);
+  capacity.shared_linear_state_slots(3);
   EXPECT_DEATH(KVCacheManagerFactory::create(capacity,
                                              make_shared_cache_model_args(),
                                              /*world_size=*/1,
                                              torch::kBFloat16,
                                              options,
                                              /*transfer_coordinator=*/nullptr),
-               "layout.full_block_units");
+               "layout.num_linear_groups");
 }
 
 TEST(BlockManagerTest, Basic) {

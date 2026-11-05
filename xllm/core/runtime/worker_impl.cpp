@@ -85,6 +85,7 @@ limitations under the License.
 #include "core/kv_cache/layout/layerwise_split_layout.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/kv_cache/storage/linear_state_restore.h"
+#include "core/kv_cache/storage/linear_state_slot_table.h"
 #include "core/kv_cache/storage/static_kv_cache_tensor_allocator.h"
 #include "core/kv_cache/storage/vmm_kv_tensor_allocator.h"
 #include "core/kv_cache/transfer/virtual_kv_cache_transfer_memory_provider_impl.h"
@@ -722,8 +723,11 @@ bool WorkerImpl::allocate_kv_cache_storage(
            "huge pages or cache transfer.";
     auto allocator =
         create_static_kv_tensor_allocator(kv_cache_shape, create_options);
-    create_options.static_layout(
-        std::make_shared<const StaticKVCacheLayout>(allocator->layout()));
+    const StaticKVCacheLayout& layout = allocator->layout();
+    create_options
+        .linear_state_slot_table(std::make_shared<LinearStateSlotTable>(
+            layout.num_slots(), layout.num_linear_groups(), device_.unwrap()))
+        .static_layout(std::make_shared<const StaticKVCacheLayout>(layout));
     create_options.tensor_allocator(std::move(allocator));
   }
 
@@ -1503,6 +1507,8 @@ void WorkerImpl::prepare_work_before_execute_on_stream_impl(
     // and restore; attempting it here would treat target cache operations as
     // draft operations and fail discover_num_slots().
     if (has_request_state_cache()) {
+      update_linear_state_slots(kv_caches_,
+                                input_params.embedding.linear_state_slot_rows);
       prepare_input_params_for_linear_attention(input_params);
       // Overlap restores in the worker thread on compute_stream_, after the
       // preceding chunk finishes writing its live slots.

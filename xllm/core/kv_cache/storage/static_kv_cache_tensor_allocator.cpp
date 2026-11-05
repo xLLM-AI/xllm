@@ -33,18 +33,18 @@ StaticKVCacheTensorAllocator::StaticKVCacheTensorAllocator(
   arena_ =
       torch::zeros({static_cast<int64_t>(layout_.bytes_used())},
                    torch::TensorOptions().dtype(torch::kUInt8).device(device));
-  LOG(INFO) << "Static shared KV arena: pages=" << layout_.num_units()
-            << ", page_bytes=" << layout_.unit_bytes()
-            << ", Full_pages_per_block=" << layout_.full_block_units()
-            << ", Linear_pages_per_state=" << layout_.linear_state_units()
+  LOG(INFO) << "Static shared KV arena: slots=" << layout_.num_slots()
+            << ", pages_per_slot=" << layout_.pages_per_slot()
+            << ", page_bytes=" << layout_.page_bytes()
+            << ", Linear_slots_per_state=" << layout_.num_linear_groups()
             << ", four_Full_layers_payload_bytes="
             << layout_.full_page_payload_bytes()
             << ", one_Linear_layer_payload_bytes="
             << layout_.linear_page_payload_bytes()
             << ", Full_page_padding_bytes="
-            << layout_.unit_bytes() - layout_.full_page_payload_bytes()
+            << layout_.page_bytes() - layout_.full_page_payload_bytes()
             << ", Linear_page_padding_bytes="
-            << layout_.unit_bytes() - layout_.linear_page_payload_bytes();
+            << layout_.page_bytes() - layout_.linear_page_payload_bytes();
 }
 
 void StaticKVCacheTensorAllocator::begin_layer(int64_t layer_id) {
@@ -67,11 +67,10 @@ torch::Tensor StaticKVCacheTensorAllocator::allocate(
   CHECK_EQ(device, arena_.device());
   CHECK_EQ(dtype, layout_.dtype(role));
   CHECK(!shape.empty());
-  CHECK_LE(layout_.logical_num_slots(),
+  CHECK_LE(layout_.num_slots(),
            static_cast<size_t>(std::numeric_limits<int64_t>::max()) /
                tensor.rows_per_slot);
-  const size_t expected_slots =
-      layout_.logical_num_slots() * tensor.rows_per_slot;
+  const size_t expected_slots = layout_.num_slots() * tensor.rows_per_slot;
   CHECK_EQ(shape.front(), static_cast<int64_t>(expected_slots))
       << "Static cache logical capacity does not match the layout";
   CHECK_EQ(VirtualKVCachePageLayout::tensor_block_bytes(

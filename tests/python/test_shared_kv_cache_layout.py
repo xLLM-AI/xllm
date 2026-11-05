@@ -33,7 +33,12 @@ def _arena_view(arena: torch.Tensor, offset: int, shape: tuple[int, ...], dtype:
     return arena.narrow(0, offset, shape[0] * row_bytes).view(dtype).view(shape)
 
 
-def _make_shared_caches(page_bytes: int = 1024) -> list[LayerCache]:
+def _identity_slots(num_slots: int) -> torch.Tensor:
+    return torch.arange(num_slots, dtype=torch.int32)
+
+
+def _make_shared_caches(page_bytes: int = 1024, group_slots: tuple[torch.Tensor, ...] = ()) -> list[LayerCache]:
+    """One Full layer, so one page per slot; each extra row adds a Linear group."""
     arena = torch.empty(8 * page_bytes, dtype=torch.uint8)
     full_rows, conv_rows, ssm_rows = {512: (29, 15, 30), 1024: (57, 29, 58), 2048: (113, 57, 114)}[page_bytes]
     key = _arena_view(arena, 0, (full_rows, 1, 1, 64), torch.bfloat16)
@@ -42,13 +47,17 @@ def _make_shared_caches(page_bytes: int = 1024) -> list[LayerCache]:
     ssm = _arena_view(arena, 256, (ssm_rows, 1, 1, 32), torch.float32)
     return [
         LayerCache(key=key, value=value),
-        LayerCache(key=None, value=None, conv=conv, ssm=ssm),
+        *(
+            LayerCache(key=None, value=None, conv=conv, ssm=ssm, linear_state_slots=slots)
+            for slots in (_identity_slots(8), *group_slots)
+        ),
     ]
 
 
 def _make_multigroup_caches() -> list[LayerCache]:
-    # Eight physical pages, two Full groups, and two Linear layers.  These
-    # explicit row counts include the last legal extent in each role view.
+    # Four slots of two pages each: five Full layers fill two lanes and two
+    # Linear layers share Linear group 0.  These explicit row counts include
+    # the last slot in each role view.
     arena = torch.empty(8192, dtype=torch.uint8)
     full_caches = [
         LayerCache(
@@ -63,34 +72,31 @@ def _make_multigroup_caches() -> list[LayerCache]:
             value=None,
             conv=_arena_view(arena, offset, (25, 1, 1, 128), torch.bfloat16),
             ssm=_arena_view(arena, offset + 256, (50, 1, 1, 32), torch.float32),
+            linear_state_slots=_identity_slots(4),
         )
         for offset in (0, 1024)
     ]
     return [full_caches[0], linear_caches[0], *full_caches[1:], linear_caches[1]]
 
 
-def _make_ceiling_mapped_caches(linear_layers: int = 1) -> list[LayerCache]:
+def _make_ceiling_mapped_caches(group_slots: tuple[torch.Tensor, ...] = ()) -> list[LayerCache]:
     # Scale Qwen3.8 TP2 row bytes by 512 while retaining its 4608/35 Conv ratio.
+    # One Full layer gives one page per slot, so every Linear layer is a group.
     arena = torch.empty(40 * 18432, dtype=torch.uint8)
-    last_page = 40 - linear_layers
-    conv_rows = (last_page * 18432 + 139) // 140 + 1
-    ssm_rows = last_page * 6 + 5
-    caches = [
+    conv_rows = (39 * 18432 + 139) // 140 + 1
+    ssm_rows = 39 * 6 + 5
+    conv = _arena_view(arena, 0, (conv_rows, 7, 5), torch.float32)
+    ssm = _arena_view(arena, 3072, (ssm_rows, 3, 16, 16), torch.float32)
+    return [
         LayerCache(
             key=_arena_view(arena, 0, (2809, 8, 8), torch.float32),
             value=_arena_view(arena, 256, (2809, 8, 8), torch.float32),
-        )
+        ),
+        *(
+            LayerCache(key=None, value=None, conv=conv, ssm=ssm, linear_state_slots=slots)
+            for slots in (_identity_slots(40), *group_slots)
+        ),
     ]
-    caches.extend(
-        LayerCache(
-            key=None,
-            value=None,
-            conv=_arena_view(arena, layer * 18432, (conv_rows, 7, 5), torch.float32),
-            ssm=_arena_view(arena, layer * 18432 + 3072, (ssm_rows, 3, 16, 16), torch.float32),
-        )
-        for layer in range(linear_layers)
-    )
-    return caches
 
 
 def test_detect_shared_layout_and_translate_full_indices() -> None:
@@ -98,8 +104,10 @@ def test_detect_shared_layout_and_translate_full_indices() -> None:
 
     assert layout is not None
     assert layout.page_size_tokens == 1
-    assert layout.page_bytes == 1024
-    assert layout.logical_page_count == 8
+    assert layout.slot_bytes == 1024
+    assert layout.num_slots == 8
+    assert layout.pages_per_slot == 1
+    assert layout.num_linear_groups == 1
     assert layout.full_row_stride == 8
     assert layout.conv_row_stride == 4
     assert layout.ssm_row_stride == 8
@@ -119,13 +127,17 @@ def test_multigroup_layout_maps_last_full_and_linear_extents() -> None:
     layout = detect_shared_kv_cache_layout(caches)
 
     assert layout is not None
+    assert layout.slot_bytes == 2048
+    assert layout.pages_per_slot == 2
+    assert layout.num_slots == 4
+    assert layout.num_linear_groups == 1
     torch.testing.assert_close(
-        layout.full_block_table(torch.tensor([[6]], dtype=torch.int32)),
+        layout.full_block_table(torch.tensor([[3]], dtype=torch.int32)),
         torch.tensor([[48]], dtype=torch.int32),
     )
-    torch.testing.assert_close(layout.linear_state_indices(torch.tensor([6]), role="conv"), torch.tensor([24]))
+    torch.testing.assert_close(layout.linear_state_indices(torch.tensor([3]), role="conv"), torch.tensor([24]))
     torch.testing.assert_close(
-        layout.linear_state_indices(torch.tensor([6]), role="ssm", checkpoint_offsets=torch.tensor([1])),
+        layout.linear_state_indices(torch.tensor([3]), role="ssm", checkpoint_offsets=torch.tensor([1])),
         torch.tensor([49]),
     )
     last_full = caches[-2]
@@ -136,8 +148,8 @@ def test_multigroup_layout_maps_last_full_and_linear_extents() -> None:
     last_full.value[48].fill_(12)
     torch.testing.assert_close(last_full.key[48], torch.full_like(last_full.key[48], 11))
     torch.testing.assert_close(last_full.value[48], torch.full_like(last_full.value[48], 12))
-    # Once the Full extent is released, the same bytes can serve a Linear
-    # extent.  The second checkpoint also fits within the final physical page.
+    # Once the Full slot is released, the same bytes can serve a Linear
+    # state.  The second checkpoint also fits within the final physical page.
     last_linear.conv[24].fill_(21)
     last_linear.ssm[49].fill_(22)
     assert last_full.key[48].data_ptr() == last_linear.conv[24].data_ptr()
@@ -149,7 +161,7 @@ def test_ceiling_conv_mapping_preserves_sentinels_and_int64_intermediates() -> N
     layout = detect_shared_kv_cache_layout(_make_ceiling_mapped_caches())
 
     assert layout is not None
-    assert layout.page_bytes == 18432
+    assert layout.slot_bytes == 18432
     assert layout.full_row_stride == 72
     assert layout.conv_row_stride is None
     assert layout.conv_row_bytes == 140
@@ -186,26 +198,59 @@ def test_ceiling_conv_view_reuses_only_its_page_and_fits_final_extent() -> None:
     torch.testing.assert_close(linear.ssm[238], torch.full_like(linear.ssm[238], 37))
 
 
-def test_ceiling_conv_mapping_detects_multiple_linear_layers_at_last_extent() -> None:
-    caches = _make_ceiling_mapped_caches(linear_layers=2)
+def test_ceiling_conv_groups_resolve_one_state_to_separate_slots() -> None:
+    second_slots = _identity_slots(40)
+    second_slots[38] = 39
+    second_slots[39] = 38
+    caches = _make_ceiling_mapped_caches(group_slots=(second_slots,))
     layout = detect_shared_kv_cache_layout(caches)
     assert layout is not None
-    first, last = caches[1:]
-    assert first.conv is not None and first.ssm is not None and last.conv is not None and last.ssm is not None
-    assert last.conv.data_ptr() - first.conv.data_ptr() == 18432
+    assert layout.num_linear_groups == 2
+    first, second = caches[1:]
+    assert first.conv is not None and first.ssm is not None and second.conv is not None and second.ssm is not None
+    # Both groups read the same lane; their slots keep the bytes apart.
+    assert second.conv.data_ptr() == first.conv.data_ptr()
     assert 18432 % layout.conv_row_bytes != 0
-    conv_row = layout.linear_state_indices(torch.tensor([38]), role="conv").item()
-    ssm_row = layout.linear_state_indices(torch.tensor([38]), role="ssm", checkpoint_offsets=torch.tensor([4])).item()
-    assert conv_row == 5003
-    assert ssm_row == 232
-    first.conv[conv_row].fill_(31)
-    first.ssm[ssm_row].fill_(37)
-    last.conv[conv_row].fill_(43)
-    last.ssm[ssm_row].fill_(47)
-    torch.testing.assert_close(first.conv[conv_row], torch.full_like(first.conv[conv_row], 31))
-    torch.testing.assert_close(first.ssm[ssm_row], torch.full_like(first.ssm[ssm_row], 37))
-    torch.testing.assert_close(last.conv[conv_row], torch.full_like(last.conv[conv_row], 43))
-    torch.testing.assert_close(last.ssm[ssm_row], torch.full_like(last.ssm[ssm_row], 47))
+    state = torch.tensor([38])
+    rows = []
+    for cache in (first, second):
+        conv_row = layout.linear_state_indices(state, role="conv", slots=cache.linear_state_slots).item()
+        ssm_row = layout.linear_state_indices(
+            state, role="ssm", slots=cache.linear_state_slots, checkpoint_offsets=torch.tensor([4])
+        ).item()
+        rows.append((conv_row, ssm_row))
+    assert rows == [(5003, 232), (5135, 238)]
+    first.conv[5003].fill_(31)
+    first.ssm[232].fill_(37)
+    second.conv[5135].fill_(43)
+    second.ssm[238].fill_(47)
+    torch.testing.assert_close(first.conv[5003], torch.full_like(first.conv[5003], 31))
+    torch.testing.assert_close(first.ssm[232], torch.full_like(first.ssm[232], 37))
+    torch.testing.assert_close(second.conv[5135], torch.full_like(second.conv[5135], 43))
+    torch.testing.assert_close(second.ssm[238], torch.full_like(second.ssm[238], 47))
+
+
+def test_linear_groups_require_the_reading_layer_slot_row() -> None:
+    second_slots = torch.tensor([0, 5, 6, 7, 1, 2, 3, 4], dtype=torch.int32)
+    caches = _make_shared_caches(group_slots=(second_slots,))
+    layout = detect_shared_kv_cache_layout(caches)
+    assert layout is not None
+    assert layout.num_linear_groups == 2
+    state = torch.tensor([1, 0, -1], dtype=torch.int32)
+    torch.testing.assert_close(
+        layout.linear_state_indices(state, role="conv", slots=caches[2].linear_state_slots),
+        torch.tensor([20, 0, -1], dtype=torch.int32),
+    )
+    with pytest.raises(ValueError, match="reading layer's state slot row"):
+        layout.linear_state_indices(state, role="conv")
+
+
+def test_shared_linear_layer_without_slot_row_is_rejected() -> None:
+    caches = _make_shared_caches()
+    caches[1] = replace(caches[1], linear_state_slots=None)
+
+    with pytest.raises(ValueError, match="state slot row per slot"):
+        detect_shared_kv_cache_layout(caches)
 
 
 def test_independent_role_storage_keeps_legacy_layout() -> None:
@@ -332,8 +377,8 @@ def test_layout_preserves_token_offset_and_negative_state_sentinel() -> None:
         conv_row_stride=3,
         ssm_row_stride=9,
         checkpoint_stride=2,
-        logical_page_count=8,
-        page_bytes=1024,
+        num_slots=8,
+        slot_bytes=1024,
     )
     slots = torch.tensor([0, 127, 128, 255, -1, -2], dtype=torch.int32)
     torch.testing.assert_close(

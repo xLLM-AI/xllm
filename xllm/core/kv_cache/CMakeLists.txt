@@ -157,6 +157,7 @@ cc_library(
     layout/layerwise_split_layout.h
     layout/vmm_kv_cache_layout.h
     storage/linear_attention_kv_cache_impl.h
+    storage/linear_state_slot_table.h
     storage/quantized_kv_cache_impl.h
   SRCS
     layout/cache_layout_builder.cpp
@@ -171,6 +172,7 @@ cc_library(
     storage/kv_cache_tensor_allocator.cpp
     storage/kv_cache_utils.cpp
     storage/linear_attention_kv_cache_impl.cpp
+    storage/linear_state_slot_table.cpp
     storage/quantized_kv_cache_impl.cpp
   DEPS
     :block_utils

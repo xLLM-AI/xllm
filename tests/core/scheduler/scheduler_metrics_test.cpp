@@ -209,7 +209,7 @@ TEST(SchedulerMetricsTest, SamplesFirstWorkerOfEachDataParallelRank) {
             (std::vector<int64_t>{1025, 2049, 3073}));
 }
 
-TEST(SchedulerMetricsTest, SharedArenaWeightsFullTailsAndKeepsLinearState) {
+TEST(SchedulerMetricsTest, SharedArenaCountsFullTailsAndKeepsLinearState) {
   BlockManagerPool::Options options;
   options.num_blocks(18)
       .block_size(2)
@@ -217,21 +217,20 @@ TEST(SchedulerMetricsTest, SharedArenaWeightsFullTailsAndKeepsLinearState) {
       .enable_linear_state(true)
       .linear_state_num_slots(18)
       .enable_shared_kv_cache(true)
-      .shared_full_block_units(3)
-      .shared_linear_state_units(2);
+      .shared_linear_state_slots(2);
   BlockManagerPool block_manager(options);
   SchedulerMetrics metrics(nullptr, &block_manager, 1, 0, false);
   std::shared_ptr<Request> request = make_request();
   Sequence* sequence = request->sequences().front().get();
   ASSERT_TRUE(block_manager.allocate(sequence, /*num_tokens=*/4));
-  ASSERT_EQ(block_manager.num_used_blocks()[0], 8u);
+  ASSERT_EQ(block_manager.num_used_blocks()[0], 4u);
 
   sequence->kv_state().set_kv_cache_tokens_num(3);
   EXPECT_EQ(SchedulerMetricsTestPeer::occupied_slots(metrics, {sequence}),
-            (std::vector<int64_t>{13}));
+            (std::vector<int64_t>{7}));
   sequence->kv_state().set_kv_cache_tokens_num(4);
   EXPECT_EQ(SchedulerMetricsTestPeer::occupied_slots(metrics, {sequence}),
-            (std::vector<int64_t>{16}));
+            (std::vector<int64_t>{8}));
   block_manager.deallocate(sequence);
 }
 

@@ -75,13 +75,20 @@ StaticKVCacheLayout::StaticKVCacheLayout(StaticKVCacheLayoutSpec spec)
   const size_t candidate = align_up(payload_bytes, row_alignment);
   const size_t conv_gap =
       spec_.conv_row_bytes - std::gcd(candidate, spec_.conv_row_bytes);
-  // A rounded Conv start must still end before the page's SSM payload.
+  // A rounded Conv start must still end before the page's SSM payload. Slot
+  // starts are page multiples, so their Conv gap never exceeds this bound.
   // Fall back to integral Conv strides when that existing gap is too small.
-  unit_bytes_ =
+  page_bytes_ =
       ssm_offset >= checked_add(spec_.conv_row_bytes, conv_gap)
           ? candidate
           : align_up(payload_bytes,
                      checked_lcm(row_alignment, spec_.conv_row_bytes));
+  pages_per_slot_ = align_up(spec_.full_layer_ids.size(), kFullLayersPerPage) /
+                    kFullLayersPerPage;
+  slot_bytes_ = checked_multiply(pages_per_slot_, page_bytes_);
+  num_linear_groups_ =
+      align_up(spec_.linear_layer_ids.size(), pages_per_slot_) /
+      pages_per_slot_;
   const size_t num_layers =
       checked_add(spec_.full_layer_ids.size(), spec_.linear_layer_ids.size());
   tensors_.reserve(checked_multiply(num_layers, 2));
@@ -93,65 +100,63 @@ StaticKVCacheLayout::StaticKVCacheLayout(StaticKVCacheLayoutSpec spec)
     const int64_t layer_id = spec_.full_layer_ids[layer_index];
     CHECK_GE(layer_id, 0);
     CHECK(layer_ids.emplace(layer_id).second) << "Duplicate cache layer id";
-    const size_t page_offset =
-        checked_multiply(layer_index / kFullLayersPerPage, unit_bytes_);
+    const size_t lane = layer_index / kFullLayersPerPage;
     const size_t layer_offset = checked_multiply(
         checked_multiply(layer_index % kFullLayersPerPage, kFullRoles),
         spec_.full_row_bytes);
-    const size_t key_offset = checked_add(page_offset, layer_offset);
+    const size_t key_offset =
+        checked_add(checked_multiply(lane, page_bytes_), layer_offset);
     tensors_.emplace_back(StaticKVCacheTensorLayout{
-        layer_id, KVCacheTensorRole::KEY, key_offset, spec_.full_row_bytes});
-    tensors_.back().page_group_index = layer_index / kFullLayersPerPage;
-    tensors_.emplace_back(
-        StaticKVCacheTensorLayout{layer_id,
-                                  KVCacheTensorRole::VALUE,
-                                  checked_add(key_offset, spec_.full_row_bytes),
-                                  spec_.full_row_bytes});
-    tensors_.back().page_group_index = layer_index / kFullLayersPerPage;
+        .layer_id = layer_id,
+        .role = KVCacheTensorRole::KEY,
+        .offset_bytes = key_offset,
+        .row_bytes = spec_.full_row_bytes,
+        .lane = lane,
+    });
+    tensors_.emplace_back(StaticKVCacheTensorLayout{
+        .layer_id = layer_id,
+        .role = KVCacheTensorRole::VALUE,
+        .offset_bytes = checked_add(key_offset, spec_.full_row_bytes),
+        .row_bytes = spec_.full_row_bytes,
+        .lane = lane,
+    });
   }
-  full_block_units_ =
-      align_up(spec_.full_layer_ids.size(), kFullLayersPerPage) /
-      kFullLayersPerPage;
 
-  size_t linear_page_start = 0;
-  for (const int64_t layer_id : spec_.linear_layer_ids) {
+  for (size_t layer_index = 0; layer_index < spec_.linear_layer_ids.size();
+       ++layer_index) {
+    const int64_t layer_id = spec_.linear_layer_ids[layer_index];
     CHECK_GE(layer_id, 0);
     CHECK(layer_ids.emplace(layer_id).second) << "Duplicate cache layer id";
-    tensors_.emplace_back(StaticKVCacheTensorLayout{layer_id,
-                                                    KVCacheTensorRole::CONV,
-                                                    linear_page_start,
-                                                    spec_.conv_row_bytes});
-    tensors_.back().page_group_index = linear_page_start / unit_bytes_;
-    tensors_.emplace_back(
-        StaticKVCacheTensorLayout{layer_id,
-                                  KVCacheTensorRole::SSM,
-                                  checked_add(linear_page_start, ssm_offset),
-                                  spec_.ssm_row_bytes,
-                                  spec_.checkpoint_stride});
-    tensors_.back().page_group_index = linear_page_start / unit_bytes_;
-    linear_page_start = checked_add(linear_page_start, unit_bytes_);
+    const size_t lane = layer_index % pages_per_slot_;
+    const size_t page_offset = checked_multiply(lane, page_bytes_);
+    tensors_.emplace_back(StaticKVCacheTensorLayout{
+        .layer_id = layer_id,
+        .role = KVCacheTensorRole::CONV,
+        .offset_bytes = page_offset,
+        .row_bytes = spec_.conv_row_bytes,
+        .lane = lane,
+        .linear_group = layer_index / pages_per_slot_,
+    });
+    tensors_.emplace_back(StaticKVCacheTensorLayout{
+        .layer_id = layer_id,
+        .role = KVCacheTensorRole::SSM,
+        .offset_bytes = checked_add(page_offset, ssm_offset),
+        .row_bytes = spec_.ssm_row_bytes,
+        .rows_per_slot = spec_.checkpoint_stride,
+        .lane = lane,
+        .linear_group = layer_index / pages_per_slot_,
+    });
   }
-  linear_state_units_ = spec_.linear_layer_ids.size();
-  CHECK(spec_.num_units == 0 ||
-        spec_.num_units >= std::max(full_block_units_, linear_state_units_))
-      << "Static arena cannot fit one resource extent";
-  bytes_used_ = checked_multiply(spec_.num_units, unit_bytes_);
+  bytes_used_ = checked_multiply(spec_.num_slots, slot_bytes_);
   CHECK_LE(bytes_used_,
            static_cast<size_t>(std::numeric_limits<int64_t>::max()));
+  if (spec_.num_slots == 0) {
+    return;
+  }
 
   for (auto& tensor : tensors_) {
-    const bool full = tensor.role == KVCacheTensorRole::KEY ||
-                      tensor.role == KVCacheTensorRole::VALUE;
-    tensor.extent_units = full ? full_block_units_ : linear_state_units_;
-    if (spec_.num_units == 0) {
-      continue;
-    }
-    const size_t last_start_bytes =
-        checked_multiply(spec_.num_units - tensor.extent_units, unit_bytes_);
-    const size_t last_start_row =
-        last_start_bytes / tensor.row_bytes +
-        static_cast<size_t>(last_start_bytes % tensor.row_bytes != 0);
-    tensor.view_rows = checked_add(last_start_row, tensor.rows_per_slot);
+    tensor.view_rows = checked_add(row_index(spec_.num_slots - 1, tensor.role),
+                                   tensor.rows_per_slot);
     const size_t view_bytes =
         checked_multiply(tensor.view_rows, tensor.row_bytes);
     CHECK_LE(checked_add(tensor.offset_bytes, view_bytes), bytes_used_);
@@ -174,18 +179,18 @@ size_t StaticKVCacheLayout::row_bytes(KVCacheTensorRole role) const {
   }
 }
 
-size_t StaticKVCacheLayout::row_index(size_t logical_page,
+size_t StaticKVCacheLayout::row_index(size_t slot,
                                       KVCacheTensorRole role) const {
-  const size_t bytes = checked_multiply(logical_page, unit_bytes_);
+  const size_t bytes = checked_multiply(slot, slot_bytes_);
   const size_t row_size = row_bytes(role);
   return bytes / row_size + static_cast<size_t>(bytes % row_size != 0);
 }
 
 size_t StaticKVCacheLayout::role_row_stride(KVCacheTensorRole role) const {
   const size_t row_size = row_bytes(role);
-  CHECK_EQ(unit_bytes_ % row_size, 0u)
+  CHECK_EQ(slot_bytes_ % row_size, 0u)
       << "Cache role requires ceiling physical row mapping.";
-  return unit_bytes_ / row_size;
+  return slot_bytes_ / row_size;
 }
 
 torch::ScalarType StaticKVCacheLayout::dtype(KVCacheTensorRole role) const {
@@ -215,6 +220,17 @@ const StaticKVCacheTensorLayout& StaticKVCacheLayout::tensor_layout(
       << "Static cache layout has no " << role.to_string()
       << " tensor for layer " << layer_id;
   return *it;
+}
+
+size_t StaticKVCacheLayout::linear_group(int64_t layer_id) const {
+  const auto it =
+      std::find_if(tensors_.begin(),
+                   tensors_.end(),
+                   [layer_id](const StaticKVCacheTensorLayout& tensor) {
+                     return tensor.layer_id == layer_id &&
+                            tensor.role == KVCacheTensorRole::CONV;
+                   });
+  return it == tensors_.end() ? 0 : it->linear_group;
 }
 
 }  // namespace xllm

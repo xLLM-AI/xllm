@@ -30,7 +30,7 @@ TEST(StaticKVCacheTensorAllocatorNpuTest, KeepsDenseNdViewsInOnePhysicalArena) {
   }
   const torch::Device device("npu:0");
   StaticKVCacheLayoutSpec spec;
-  spec.num_units = 8;
+  spec.num_slots = 8;
   spec.full_row_bytes = 16;
   spec.conv_row_bytes = 8;
   spec.ssm_row_bytes = 32;

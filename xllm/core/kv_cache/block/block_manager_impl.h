@@ -76,7 +76,7 @@ class BlockManagerImpl : public BlockManager {
   // free blocks num
   size_t num_free_blocks() const override {
     return options_.shared_block_pool()
-               ? options_.shared_block_pool()->num_free_blocks()
+               ? options_.shared_block_pool()->num_free_slots()
                : num_free_blocks_.load(std::memory_order_relaxed);
   }
   size_t evict_prefix_cache(size_t num_blocks) override;
@@ -86,7 +86,7 @@ class BlockManagerImpl : public BlockManager {
     const size_t blocks = num_used_blocks_.load(std::memory_order_relaxed);
     return options_.shared_block_pool()
                ? blocks *
-                     options_.shared_block_pool()->block_units(block_type())
+                     options_.shared_block_pool()->slots_per_block(block_type())
                : blocks;
   }
 
@@ -107,7 +107,7 @@ class BlockManagerImpl : public BlockManager {
   // total blocks num
   size_t num_total_blocks() const override {
     return options_.shared_block_pool()
-               ? options_.shared_block_pool()->num_total_blocks()
+               ? options_.shared_block_pool()->num_total_slots()
                : free_blocks_.size() - 1;
   }
 

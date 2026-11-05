@@ -21,6 +21,7 @@ limitations under the License.
 #include <memory>
 #include <vector>
 
+#include "core/kv_cache/storage/linear_state_slot_table.h"
 #include "core/kv_cache/storage/static_kv_cache_tensor_allocator.h"
 
 namespace xllm {
@@ -352,7 +353,7 @@ TEST(LinearStateRestoreTest, KPoolOnlyCachePreservesWarmAndPaddingSlots) {
   EXPECT_TRUE(torch::equal(tensors.kpool_tail[0], padding));
 }
 
-std::vector<KVCache> make_static_shared_caches() {
+std::vector<KVCache> make_static_shared_caches(int64_t n_layers = 2) {
   KVCacheCapacity capacity;
   capacity.n_blocks(32)
       .block_size(2)
@@ -361,7 +362,7 @@ std::vector<KVCache> make_static_shared_caches() {
       .linear_ssm_checkpoint_stride(2);
   ModelArgs args;
   args.model_type("qwen3_next")
-      .n_layers(2)
+      .n_layers(n_layers)
       .n_heads(1)
       .n_kv_heads(1)
       .head_dim(2)
@@ -376,16 +377,50 @@ std::vector<KVCache> make_static_shared_caches() {
   options.device(torch::kCPU)
       .dtype(torch::kFloat32)
       .ssm_dtype(torch::kFloat32)
-      .num_layers(2)
+      .num_layers(n_layers)
       .model_type(args.model_type())
       .enable_linear_attention(true)
       .full_attention_interval(2);
   auto layout = std::make_shared<StaticKVCacheLayout>(shape, options);
-  options.static_layout(layout).tensor_allocator(
-      std::make_shared<StaticKVCacheTensorAllocator>(*layout, torch::kCPU));
+  options.static_layout(layout)
+      .linear_state_slot_table(std::make_shared<LinearStateSlotTable>(
+          layout->num_slots(), layout->num_linear_groups(), torch::kCPU))
+      .tensor_allocator(
+          std::make_shared<StaticKVCacheTensorAllocator>(*layout, torch::kCPU));
   std::vector<KVCache> caches;
   allocate_kv_caches(caches, shape, options);
   return caches;
+}
+
+TEST(LinearStateRestoreTest, StaticCopyFollowsEachLinearGroupSlot) {
+  // Linear layers 0 and 2 share one lane and form groups 0 and 1.
+  auto caches = make_static_shared_caches(/*n_layers=*/4);
+  ASSERT_EQ(caches.size(), 4u);
+  const KVCache& first = caches[0];
+  const KVCache& second = caches[2];
+  ASSERT_EQ(first.cache_row_stride(KVCacheTensorRole::SSM), 9);
+  // State 3 holds slots {3, 7}; state 5 holds slots {5, 9}.
+  update_linear_state_slots(caches, {3, 3, 7, 5, 5, 9});
+  EXPECT_EQ(first.physical_row_index(5, KVCacheTensorRole::SSM), 45);
+  EXPECT_EQ(second.physical_row_index(5, KVCacheTensorRole::SSM), 81);
+  EXPECT_TRUE(torch::equal(
+      second.physical_row_indices(torch::tensor({-1, 0, 3, 5}, torch::kInt32),
+                                  KVCacheTensorRole::SSM),
+      torch::tensor({-1, 0, 63, 81}, torch::kInt32)));
+  first.get_ssm_cache().narrow(0, 27, 2).fill_(11);
+  second.get_ssm_cache().narrow(0, 63, 2).fill_(13);
+  std::vector<int64_t> validity_mask = {0};
+
+  restore_linear_state_slots(caches,
+                             {5},
+                             {3},
+                             validity_mask,
+                             /*reads_distinct_state=*/false);
+
+  EXPECT_EQ(validity_mask, std::vector<int64_t>({1}));
+  EXPECT_TRUE(first.get_ssm_cache().narrow(0, 45, 2).eq(11).all().item<bool>());
+  EXPECT_TRUE(
+      second.get_ssm_cache().narrow(0, 81, 2).eq(13).all().item<bool>());
 }
 
 TEST(LinearStateRestoreTest, StaticColdReuseClearsOnlyItsOwnRecurrentRows) {
@@ -502,9 +537,12 @@ TEST(LinearStateRestoreTest, StaticCeilingConvMappingRestoresEveryCheckpoint) {
       .enable_linear_attention(true)
       .full_attention_interval(2);
   auto layout = std::make_shared<StaticKVCacheLayout>(shape, options);
-  ASSERT_EQ(layout->unit_bytes(), 393216);
-  options.static_layout(layout).tensor_allocator(
-      std::make_shared<StaticKVCacheTensorAllocator>(*layout, torch::kCPU));
+  ASSERT_EQ(layout->slot_bytes(), 393216);
+  options.static_layout(layout)
+      .linear_state_slot_table(std::make_shared<LinearStateSlotTable>(
+          layout->num_slots(), layout->num_linear_groups(), torch::kCPU))
+      .tensor_allocator(
+          std::make_shared<StaticKVCacheTensorAllocator>(*layout, torch::kCPU));
   std::vector<KVCache> caches;
   allocate_kv_caches(caches, shape, options);
   const KVCache& linear = caches[0];

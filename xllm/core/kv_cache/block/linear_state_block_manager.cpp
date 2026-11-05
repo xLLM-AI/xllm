@@ -36,16 +36,6 @@ LinearStateBlockManager::LinearStateBlockManager(
           .block_size_ = chunk_stride,
           .enable_prefix_cache_ = enable_prefix_cache,
           .block_type_ = BlockType::LINEAR,
-          .shared_full_block_units_ =
-              shared_block_pool == nullptr
-                  ? 1
-                  : static_cast<uint32_t>(
-                        shared_block_pool->block_units(BlockType::KV)),
-          .shared_linear_state_units_ =
-              shared_block_pool == nullptr
-                  ? 1
-                  : static_cast<uint32_t>(
-                        shared_block_pool->block_units(BlockType::LINEAR)),
           .shared_block_pool_ = std::move(shared_block_pool),
           .instance_is_decode_ = instance_is_decode}) {
   CHECK_GT(num_slots, 1u)

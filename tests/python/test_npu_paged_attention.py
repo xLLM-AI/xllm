@@ -83,7 +83,7 @@ def test_full_kv_graph_snapshot_restores_only_written_slots(shared_pool: bool) -
     ]
     backend.bind_kv_caches(caches)
     if shared_pool:
-        backend._shared_kv_layout = SharedKVCacheLayout(2, 4, 2, 4, 2, 8, 64, 32)
+        backend._shared_kv_layout = SharedKVCacheLayout(2, 4, 2, 4, 2, 8, 64, conv_row_bytes=32)
     physical_slots = torch.tensor([8, 9, 16] if shared_pool else [2, 3, 4])
     snapshot = backend.snapshot_full_cache_state(
         [torch.tensor([2, 3, -1, 2], dtype=torch.int32), torch.tensor([4, 2], dtype=torch.int32)]

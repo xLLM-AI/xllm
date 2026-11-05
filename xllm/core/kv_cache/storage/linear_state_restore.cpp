@@ -85,6 +85,21 @@ std::vector<int64_t> build_linear_state_mask(
   return warm_mask;
 }
 
+void update_linear_state_slots(const std::vector<KVCache>& kv_caches,
+                               const std::vector<int32_t>& rows) {
+  if (rows.empty()) {
+    return;
+  }
+  const auto it = std::find_if(
+      kv_caches.begin(), kv_caches.end(), [](const KVCache& kv_cache) {
+        return kv_cache.is_static_shared();
+      });
+  CHECK(it != kv_caches.end())
+      << "Linear state slot rows require shared static storage";
+  // Every layer shares one table.
+  it->update_linear_state_slots(rows);
+}
+
 void restore_linear_state_slots(std::vector<KVCache>& kv_caches,
                                 const std::vector<int32_t>& write_ids,
                                 const std::vector<int32_t>& read_ids,
