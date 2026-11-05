@@ -120,7 +120,15 @@ def _assert_fia_capacity_graphs(prepared: bool, rows: int, graph_owners: list[ob
     runner = (
         PreparedAclGraphRunner(AttentionProbe(), backend, device, rows, device_kv_lengths=True)
         if prepared
-        else DecodeAclGraphRunner(AttentionProbe(), backend, device, rows, 8192, device_kv_lengths=True)
+        else DecodeAclGraphRunner(
+            AttentionProbe(),
+            backend,
+            device,
+            rows,
+            8192,
+            device_kv_lengths=True,
+            enable_graph_mode_decode_no_padding=True,
+        )
     )
     runner.bind_layer_caches([cache])
     graph_owners.append(runner)
@@ -137,8 +145,11 @@ def _assert_fia_capacity_graphs(prepared: bool, rows: int, graph_owners: list[ob
     assert len(entries) == 3
     addresses = {capacity: entry.static_metadata.block_table.data_ptr() for capacity, entry in by_capacity.items()}
     assert len(set(addresses.values())) == 3
+    # Only a runner that shares one scratch allocation across its entries can
+    # afford the bounded FIA workspace; prepared entries keep the plain call.
+    expected_state = set() if prepared else {rows}
     for capacity, entry in by_capacity.items():
-        assert entry.execution_state.paged_attention == {}, "BNSD graphs must not retain unused TND workspace"
+        assert set(entry.execution_state.paged_attention) == expected_state
         assert entry.static_metadata.block_table.shape == (rows, capacity)
         assert entry.static_metadata.block_table.is_contiguous()
         assert entry.static_metadata.block_table.data_ptr() != table.data_ptr()
@@ -180,6 +191,10 @@ def _assert_fia_capacity_graphs(prepared: bool, rows: int, graph_owners: list[ob
             assert not torch.allclose(expected_tensor, torch.stack(truncated), rtol=0.01, atol=0.01)
         if live != capacity * page_size:
             assert not torch.allclose(expected_tensor, torch.stack(unmasked), rtol=0.01, atol=0.01)
+        if not prepared:
+            # Replay prepares a fresh Slot view, so the captured FIA must read
+            # this step's Host bound instead of the whole capacity tier.
+            assert by_capacity[capacity].execution_state.paged_attention[rows].kv == [host_bound] * rows
         compact = by_capacity[capacity].static_metadata.block_table
         torch.testing.assert_close(compact.cpu(), current_table[:, :capacity])
         assert compact.data_ptr() == addresses[capacity]

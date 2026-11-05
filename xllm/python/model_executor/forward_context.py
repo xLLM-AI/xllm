@@ -258,6 +258,19 @@ def get_execution_buffer(
     return buffer
 
 
+def shares_execution_workspace() -> bool:
+    """Whether every graph entry of this runner reuses one scratch allocation.
+
+    Large per-entry scratch, such as the FIA workspace, is only affordable
+    when the runner serializes replay and can therefore share it.
+    """
+    ctx = get_forward_context_or_none()
+    state = None if ctx is None else ctx.execution_state
+    return state is not None and (
+        state.serial_workspace_pool is not None or state.shared_persistent_buffers is not None
+    )
+
+
 def get_execution_workspace(key: tuple[object, ...], factory: Callable[[], torch.Tensor]) -> torch.Tensor:
     """Reuse scratch storage across explicitly serialized graph entries."""
     state = get_forward_context().execution_state
