@@ -290,7 +290,8 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
   kv_transfer_coordinator_ = std::make_shared<KVCacheTransferCoordinator>(
       KVCacheTransferCoordinator::Options{
           .dp_size = options_.dp_size(),
-          .prefetch_timeout_ms = options_.prefetch_timeout()},
+          .prefetch_timeout_ms = options_.prefetch_timeout(),
+          .prefetch_batch_size = options_.prefetch_batch_size()},
       dispatch_engine(
           [](auto* engine) { return engine->get_distributed_worker_manager(); },
           vlm_engine_.get(),
@@ -419,8 +420,7 @@ void VLMMaster::handle_request(std::string prompt,
                                OutputCallback callback) {
   const auto arrival_time = std::chrono::steady_clock::now();
   scheduler_->incr_pending_requests(1);
-  auto cb = [callback = std::move(callback),
-             scheduler = scheduler_.get()](const RequestOutput& output) {
+  auto cb = [callback = std::move(callback)](const RequestOutput& output) {
     output.log_request_status();
     return callback(output);
   };
@@ -457,8 +457,9 @@ void VLMMaster::handle_request(std::string prompt,
     }
 
     if (!scheduler_->add_request(request)) {
-      CALLBACK_WITH_ERROR(StatusCode::RESOURCE_EXHAUSTED,
-                          "No available resources to schedule request");
+      request->state().output_func(
+          Status{StatusCode::RESOURCE_EXHAUSTED,
+                 "No available resources to schedule request"});
     }
   });
 }
@@ -476,8 +477,7 @@ void VLMMaster::handle_request(std::vector<Message> messages,
   }
 
   scheduler_->incr_pending_requests(1);
-  auto cb = [callback = std::move(callback),
-             scheduler = scheduler_.get()](const RequestOutput& output) {
+  auto cb = [callback = std::move(callback)](const RequestOutput& output) {
     output.log_request_status();
     return callback(output);
   };
@@ -515,8 +515,9 @@ void VLMMaster::handle_request(std::vector<Message> messages,
     }
 
     if (!scheduler_->add_request(request)) {
-      CALLBACK_WITH_ERROR(StatusCode::RESOURCE_EXHAUSTED,
-                          "No available resources to schedule request");
+      request->state().output_func(
+          Status{StatusCode::RESOURCE_EXHAUSTED,
+                 "No available resources to schedule request"});
     }
   });
 }

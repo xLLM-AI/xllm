@@ -19,7 +19,7 @@ limitations under the License.
 #include <memory>
 
 #include "common/macros.h"
-#include "core/distributed_runtime/disagg_pd_service_impl.h"
+#include "core/disaggregation/disagg_pd_service_impl.h"
 #include "disagg_pd.pb.h"
 
 namespace xllm {

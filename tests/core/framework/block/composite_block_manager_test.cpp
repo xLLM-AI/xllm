@@ -2312,7 +2312,11 @@ TEST_P(LinearStateWindowTest, DecodeReceiverUsesExplicitState) {
   for (const bool concurrent : {false, true}) {
     SCOPED_TRACE(concurrent);
     std::unique_ptr<BlockManager> manager =
-        std::make_unique<LinearStateBlockManager>(4, 4, GetParam(), true);
+        std::make_unique<LinearStateBlockManager>(
+            BlockManager::Options{.num_blocks_ = 4,
+                                  .block_size_ = 4,
+                                  .enable_prefix_cache_ = GetParam(),
+                                  .instance_is_decode_ = true});
     if (concurrent) {
       manager =
           std::make_unique<ConcurrentBlockManagerImpl>(std::move(manager));
@@ -2350,7 +2354,11 @@ TEST_P(LinearStateWindowTest, DecodeReceiverUsesExplicitState) {
 
 TEST_P(LinearStateWindowTest, DecodeReceiverAllocationIsOwnedByLeaf) {
   for (const size_t prompt_length : {12u, 13u}) {
-    LinearStateBlockManager manager(3, 4, GetParam(), true);
+    LinearStateBlockManager manager(
+        BlockManager::Options{.num_blocks_ = 3,
+                              .block_size_ = 4,
+                              .enable_prefix_cache_ = GetParam(),
+                              .instance_is_decode_ = true});
     Sequence sequence =
         make_sequence(0, std::vector<int32_t>(prompt_length, 7));
     auto allocated = manager.allocate_for_sequence(

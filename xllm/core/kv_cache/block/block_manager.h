@@ -204,6 +204,12 @@ class BlockManager {
     return false;
   }
 
+  // Finalize a Store prefetch on the Host tier. The leaf owns the physical
+  // block accounting and prefix-cache insertion policy for its block type;
+  // `max_hit_tokens` is the common gate-derived logical boundary.
+  virtual void trim_prefetch_blocks(Sequence& /*seq*/,
+                                    size_t /*max_hit_tokens*/) {}
+
   // Sliding-window hook: release leading blocks that have slid out of the
   // window. The composite calls this on every leaf after a successful commit;
   // the SWA leaf may also call it after an allocation shortage before retrying.

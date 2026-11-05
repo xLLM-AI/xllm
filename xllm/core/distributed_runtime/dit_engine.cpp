@@ -22,9 +22,9 @@ limitations under the License.
 #include <utility>
 
 #include "common/device_monitor.h"
+#include "common/types.h"
 #include "core/common/global_flags.h"
 #include "core/common/metrics.h"
-#include "core/distributed_runtime/master.h"
 #include "core/framework/config/execution_config.h"
 #include "core/platform/device.h"
 #include "framework/parallel_state/parallel_args.h"

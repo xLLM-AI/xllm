@@ -1,4 +1,5 @@
 add_subdirectory(common)
+add_subdirectory(disaggregation)
 add_subdirectory(distributed_runtime)
 add_subdirectory(framework)
 add_subdirectory(kv_cache)

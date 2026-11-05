@@ -27,6 +27,7 @@ limitations under the License.
 #include "core/platform/device.h"
 #include "core/util/net.h"
 #include "server/xllm_server_registry.h"
+#include "worker.pb.h"
 
 namespace xllm {
 

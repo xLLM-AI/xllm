@@ -13,8 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include <brpc/server.h>
-#include <google/protobuf/service.h>
+#include <brpc/controller.h>
 
 #include "core/common/metrics.h"
 

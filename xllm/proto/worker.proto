@@ -154,10 +154,20 @@ message BlockTransferInfos {
   repeated BlockTransferInfo transfer_infos = 3;
 }
 
+message PrefetchUnit {
+  repeated BlockTransferInfo gated_blocks = 1;
+  repeated BlockTransferInfo non_gated_blocks = 2;
+  bool has_non_gated = 3;
+}
+
 message PrefetchRequest {
+  // Keep legacy tags so mixed versions reject unsupported layouts before
+  // opening a stream instead of interpreting incompatible result frames.
   repeated BlockTransferInfo transfer_infos = 1;
   repeated uint32 unit_end_offsets = 2;
   repeated uint32 batch_end_unit_offsets = 3;
+  repeated PrefetchUnit units = 4;
+  uint32 batch_size = 5;
 }
 
 message TransferStatus {

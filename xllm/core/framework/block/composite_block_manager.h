@@ -93,6 +93,7 @@ class CompositeBlockManager : public BlockManager {
   void publish_prefix(Sequence* seq, size_t num_tokens);
   // Publish completed Host restore blocks without exposing the current forward.
   void publish_restored_prefix(Sequence* seq, size_t restored_tokens);
+  void trim_prefetch_blocks(Sequence& seq, size_t max_hit_tokens) override;
 
   // Probe every prefix-capable leaf without mounting the returned aliases.
   static std::vector<ProbeResult> probe_prefix_cache(Sequence* seq,

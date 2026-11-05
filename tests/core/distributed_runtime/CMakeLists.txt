@@ -174,7 +174,7 @@ cc_test(
   SRCS
     disagg_pd_request_converter_test.cpp
   DEPS
-    :distributed_runtime
+    :disaggregation
     GTest::gtest_main
 )
 

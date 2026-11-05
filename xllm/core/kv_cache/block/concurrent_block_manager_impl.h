@@ -63,6 +63,7 @@ class ConcurrentBlockManagerImpl : public BlockManager {
       KVCacheState& kv_state,
       size_t num_tokens) override;
   bool allocate_for_prefetch(Sequence* seq, size_t num_tokens) override;
+  void trim_prefetch_blocks(Sequence& seq, size_t max_hit_tokens) override;
   void release_out_of_window(Sequence* seq, KVCacheState& kv_state) override;
 
   size_t num_blocks_in_prefix_cache() const override;

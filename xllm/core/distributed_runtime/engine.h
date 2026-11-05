@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <memory>
 
+#include "common/types.h"
 #include "framework/block/block_manager_pool.h"
 #include "framework/model/model_args.h"
 #include "framework/tokenizer/tokenizer.h"

@@ -30,7 +30,7 @@ limitations under the License.
 #include "api_service/call.h"
 #include "api_service/openai_json.h"
 #include "common/metrics.h"
-#include "core/distributed_runtime/disagg_pd_service_impl.h"
+#include "core/disaggregation/disagg_pd_service_impl.h"
 #include "core/distributed_runtime/engine_dispatch.h"
 #include "core/distributed_runtime/kv_cache_transfer_coordinator.h"
 #include "core/distributed_runtime/model_residency_coordinator.h"
@@ -249,7 +249,8 @@ LLMMaster::LLMMaster(const Options& options)
   kv_transfer_coordinator_ = std::make_shared<KVCacheTransferCoordinator>(
       KVCacheTransferCoordinator::Options{
           .dp_size = options_.dp_size(),
-          .prefetch_timeout_ms = options_.prefetch_timeout()},
+          .prefetch_timeout_ms = options_.prefetch_timeout(),
+          .prefetch_batch_size = options_.prefetch_batch_size()},
       distributed_worker_manager_);
 
   const LLMEngine::ModelInitCallback prepare_model =

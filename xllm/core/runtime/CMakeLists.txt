@@ -144,8 +144,6 @@ cc_library(
     :tokenizer
     :model_loader
     :util
-    :worker_service
-    :xllm_server
     $<$<BOOL:${USE_NPU}>:xllm_ops>
     $<$<BOOL:${USE_NPU}>:atb_customize>
     $<$<BOOL:${USE_NPU}>:platform_npu>

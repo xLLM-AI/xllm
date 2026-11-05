@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "xllm_server_registry.h"
 
+#include <glog/logging.h>
+
 namespace xllm {
 
 XllmServer* ServerRegistry::register_server(const std::string& name) {

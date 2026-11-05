@@ -308,5 +308,10 @@ cc_test(
   NAME pd_http_response_test
   NO_NPU_RUNTIME
   SRCS pd_http_response_test.cpp
-  DEPS distributed_runtime api_service GTest::gtest_main nlohmann_json::nlohmann_json
+  DEPS
+    distributed_runtime
+    disaggregation
+    api_service
+    GTest::gtest_main
+    nlohmann_json::nlohmann_json
 )

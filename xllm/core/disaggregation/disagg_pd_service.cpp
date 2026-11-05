@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/distributed_runtime/disagg_pd_service.h"
+#include "core/disaggregation/disagg_pd_service.h"
 
 #include <brpc/closure_guard.h>
 

@@ -21,6 +21,7 @@ limitations under the License.
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "core/distributed_runtime/worker_model_codec.h"
@@ -65,8 +66,13 @@ BlockTransferInfo make_block(int32_t src_id = 7,
 StoragePrefetchRequest make_prefetch_request() {
   StoragePrefetchRequest request;
   request.transfer_infos = {make_block()};
-  request.unit_end_offsets = {1};
-  request.batch_end_unit_offsets = {1};
+  request.transfer_infos.emplace_back(
+      make_block(/*src_id=*/7, TransferType::G2H, BlockType::LINEAR));
+  PrefetchUnit unit;
+  unit.gated_end = 1;
+  unit.end = 2;
+  unit.has_non_gated = true;
+  request.units.emplace_back(unit);
   return request;
 }
 
@@ -175,7 +181,10 @@ TEST(TransportCodecTest, PrefetchRoundTripAcceptsUnusedSourceBlock) {
     ASSERT_TRUE(request.to_proto(&encoded));
     StoragePrefetchRequest decoded;
     ASSERT_TRUE(decoded.from_proto(encoded));
-    ASSERT_EQ(decoded.transfer_infos.size(), 1U);
+    ASSERT_EQ(decoded.units.size(), 1U);
+    ASSERT_EQ(decoded.transfer_infos.size(), 2U);
+    EXPECT_EQ(decoded.units[0].gated_end, 1U);
+    EXPECT_EQ(decoded.units[0].end, 2U);
     EXPECT_EQ(decoded.transfer_infos[0].src_block_id, source_id);
     EXPECT_EQ(decoded.transfer_infos[0].dst_block_id, 11);
     EXPECT_EQ(decoded.transfer_infos[0].transfer_type, TransferType::G2H);
@@ -183,8 +192,12 @@ TEST(TransportCodecTest, PrefetchRoundTripAcceptsUnusedSourceBlock) {
                           request.transfer_infos[0].hash_key,
                           XXH3_128BITS_HASH_VALUE_LEN),
               0);
-    EXPECT_EQ(decoded.unit_end_offsets, request.unit_end_offsets);
-    EXPECT_EQ(decoded.batch_end_unit_offsets, request.batch_end_unit_offsets);
+    EXPECT_EQ(decoded.transfer_infos[1].block_type, BlockType::LINEAR);
+    EXPECT_EQ(std::memcmp(decoded.transfer_infos[1].hash_key,
+                          request.transfer_infos[1].hash_key,
+                          XXH3_128BITS_HASH_VALUE_LEN),
+              0);
+    EXPECT_TRUE(decoded.units[0].has_non_gated);
   }
 }
 
@@ -192,23 +205,28 @@ TEST(TransportCodecTest, InvalidPrefetchDecodePreservesDestination) {
   proto::PrefetchRequest valid;
   ASSERT_TRUE(make_prefetch_request().to_proto(&valid));
   std::vector<proto::PrefetchRequest> invalid_inputs(7, valid);
-  invalid_inputs[0].clear_transfer_infos();
-  invalid_inputs[1].mutable_transfer_infos(0)->set_hash_key("short");
-  invalid_inputs[2].mutable_transfer_infos(0)->set_block_type(
+  invalid_inputs[0].clear_units();
+  invalid_inputs[1].mutable_units(0)->clear_gated_blocks();
+  invalid_inputs[2].mutable_units(0)->mutable_gated_blocks(0)->set_hash_key(
+      "short");
+  invalid_inputs[3].mutable_units(0)->mutable_gated_blocks(0)->set_block_type(
       static_cast<proto::BlockType>(99));
-  invalid_inputs[3].set_unit_end_offsets(0, 2);
-  invalid_inputs[4].set_batch_end_unit_offsets(0, 0);
-  invalid_inputs[5].mutable_transfer_infos(0)->set_src_block_id(-2);
-  invalid_inputs[6].mutable_transfer_infos(0)->set_dst_block_id(-1);
+  invalid_inputs[4].mutable_units(0)->mutable_gated_blocks(0)->set_src_block_id(
+      -2);
+  invalid_inputs[5].mutable_units(0)->mutable_gated_blocks(0)->set_dst_block_id(
+      -1);
+  invalid_inputs[6]
+      .mutable_units(0)
+      ->mutable_non_gated_blocks(0)
+      ->set_src_block_id(-2);
 
   for (const proto::PrefetchRequest& invalid : invalid_inputs) {
     StoragePrefetchRequest destination = make_prefetch_request();
     destination.transfer_infos[0].src_block_id = 19;
     EXPECT_FALSE(destination.from_proto(invalid));
-    ASSERT_EQ(destination.transfer_infos.size(), 1);
+    ASSERT_EQ(destination.units.size(), 1);
+    ASSERT_EQ(destination.transfer_infos.size(), 2);
     EXPECT_EQ(destination.transfer_infos[0].src_block_id, 19);
-    EXPECT_EQ(destination.unit_end_offsets, (std::vector<uint32_t>{1}));
-    EXPECT_EQ(destination.batch_end_unit_offsets, (std::vector<uint32_t>{1}));
   }
 }
 
@@ -216,35 +234,44 @@ TEST(TransportCodecTest, InvalidPrefetchEncodePreservesDestination) {
   proto::PrefetchRequest destination;
   ASSERT_TRUE(make_prefetch_request().to_proto(&destination));
   const std::string original = destination.SerializeAsString();
-  std::vector<StoragePrefetchRequest> invalid_inputs(4,
+  std::vector<StoragePrefetchRequest> invalid_inputs(5,
                                                      make_prefetch_request());
-  invalid_inputs[0].unit_end_offsets = {2};
+  invalid_inputs[0].units[0].gated_end = 0;
   invalid_inputs[1].transfer_infos[0].block_type = static_cast<BlockType>(99);
   invalid_inputs[2].transfer_infos[0].src_block_id = -2;
-  invalid_inputs[3].transfer_infos[0].dst_block_id = -1;
+  invalid_inputs[3].transfer_infos[1].src_block_id = -2;
+  invalid_inputs[4].transfer_infos[0].dst_block_id = -1;
   for (const auto& invalid : invalid_inputs) {
     EXPECT_FALSE(invalid.to_proto(&destination));
     EXPECT_EQ(destination.SerializeAsString(), original);
   }
 }
 
-TEST(TransportCodecTest, PrefetchReuseReplacesTransfersAndOffsets) {
+TEST(TransportCodecTest, PrefetchReuseReplacesTransfersAndUnits) {
   StoragePrefetchRequest first = make_prefetch_request();
   first.transfer_infos.emplace_back(make_block(/*src_id=*/8));
-  first.unit_end_offsets = {1, 2};
-  first.batch_end_unit_offsets = {1, 2};
+  PrefetchUnit second_unit;
+  second_unit.gated_end = 3;
+  second_unit.end = 3;
+  second_unit.has_non_gated = true;
+  first.units.emplace_back(second_unit);
   proto::PrefetchRequest encoded;
   ASSERT_TRUE(first.to_proto(&encoded));
   StoragePrefetchRequest decoded;
   ASSERT_TRUE(decoded.from_proto(encoded));
 
-  ASSERT_TRUE(make_prefetch_request().to_proto(&encoded));
+  StoragePrefetchRequest replacement = make_prefetch_request();
+  replacement.transfer_infos.pop_back();
+  replacement.units[0].end = 1;
+  replacement.units[0].has_non_gated = false;
+  ASSERT_TRUE(replacement.to_proto(&encoded));
   ASSERT_TRUE(decoded.from_proto(encoded));
-  EXPECT_EQ(encoded.transfer_infos_size(), 1);
-  ASSERT_EQ(decoded.transfer_infos.size(), 1);
+  EXPECT_EQ(encoded.units_size(), 1);
+  ASSERT_EQ(decoded.units.size(), 1);
+  ASSERT_EQ(decoded.transfer_infos.size(), 1U);
   EXPECT_EQ(decoded.transfer_infos[0].src_block_id, 7);
-  EXPECT_EQ(decoded.unit_end_offsets, (std::vector<uint32_t>{1}));
-  EXPECT_EQ(decoded.batch_end_unit_offsets, (std::vector<uint32_t>{1}));
+  EXPECT_EQ(decoded.units[0].end, 1U);
+  EXPECT_FALSE(decoded.units[0].has_non_gated);
 }
 
 TEST(TransportCodecTest, InvalidMultimodalOutputEncodePreservesDestination) {

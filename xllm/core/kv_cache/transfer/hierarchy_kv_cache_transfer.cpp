@@ -101,6 +101,7 @@ HierarchyKVCacheTransfer::HierarchyKVCacheTransfer(
     : HierarchyKVCacheTransfer(options, device) {
   CacheRegistration registration;
   registration.role = CacheRole::TARGET;
+  registration.enable_mla = options.enable_mla();
   registration.device_kv_caches = kv_caches_ptr;
   registration.kv_cache_shape = kv_cache_shape;
   registration.create_options = create_options;
@@ -137,6 +138,7 @@ HierarchyKVCacheTransfer::CacheHandle HierarchyKVCacheTransfer::register_cache(
   CacheDomain domain;
   domain.handle = static_cast<CacheHandle>(cache_domains_.size());
   domain.role = registration.role;
+  domain.enable_mla = registration.enable_mla;
   domain.device_kv_caches = registration.device_kv_caches;
   domain.kv_cache_shape = std::move(registration.kv_cache_shape);
   domain.create_options = std::move(registration.create_options);
@@ -194,8 +196,12 @@ bool HierarchyKVCacheTransfer::finalize_registration() {
       CHECK(!domain.store_key_component.empty())
           << "Mooncake Store requires a cache key component.";
       for (auto& [block_type, host_cache] : domain.host_caches_by_type) {
-        store_index[block_type].emplace_back(HostCacheStoreEntry{
-            domain.handle, domain.store_key_component, host_cache.get()});
+        store_index[block_type].emplace_back(
+            HostCacheStoreEntry{domain.handle,
+                                domain.store_key_component,
+                                host_cache.get(),
+                                domain.enable_mla,
+                                domain.role == CacheRole::TARGET});
       }
     }
     KVCacheStoreInitConfig store_config;
@@ -211,16 +217,15 @@ bool HierarchyKVCacheTransfer::finalize_registration() {
     store_config.tp_size = options_.tp_size();
     store_config.kv_split_size = options_.kv_split_size();
     store_config.kv_split_rank = options_.kv_split_rank();
-    store_config.write_enabled = options_.store_write_enabled();
-    store_config.enable_mla = options_.enable_mla();
+    store_config.dp_local_rank = options_.dp_local_rank();
+    store_config.kv_replica_rank = options_.kv_replica_rank();
     LOG(INFO) << "[Mooncake][StoreEngine] initialize, endpoint="
               << store_local_hostname << ", protocol=" << store_config.protocol
               << ", worker_rank=" << options_.store_worker_id()
               << ", tp_rank=" << store_config.tp_rank
               << ", tp_size=" << store_config.tp_size
               << ", kv_split_size=" << store_config.kv_split_size
-              << ", kv_split_rank=" << store_config.kv_split_rank
-              << ", enable_mla=" << store_config.enable_mla;
+              << ", kv_split_rank=" << store_config.kv_split_rank;
     kv_cache_store_ = std::make_unique<KVCacheStore>();
     CHECK(kv_cache_store_->init(store_config, std::move(store_index)))
         << "Failed to initialize Mooncake Store.";
@@ -230,8 +235,7 @@ bool HierarchyKVCacheTransfer::finalize_registration() {
               << ", tp_rank=" << store_config.tp_rank
               << ", tp_size=" << store_config.tp_size
               << ", kv_split_size=" << store_config.kv_split_size
-              << ", kv_split_rank=" << store_config.kv_split_rank
-              << ", enable_mla=" << store_config.enable_mla;
+              << ", kv_split_rank=" << store_config.kv_split_rank;
   }
   registration_finalized_ = true;
   return true;
@@ -603,7 +607,6 @@ uint32_t HierarchyKVCacheTransfer::offload(
             << ", kv_split_size=" << options_.kv_split_size()
             << ", kv_split_rank=" << options_.kv_split_rank()
             << ", enable_mla=" << options_.enable_mla()
-            << ", store_write_enabled=" << options_.store_write_enabled()
             << ", blocks=" << block_transfer_info.size()
             << ", success=" << put_count;
   }
