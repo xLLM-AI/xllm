@@ -23,7 +23,8 @@ limitations under the License.
 namespace xllm {
 
 // The single sampling owner for speculative verification; the
-// general-purpose sample() never runs for verify steps.
+// general-purpose sample() never runs for verify steps. Negative draft token
+// IDs force rejection and recovery from the target distribution.
 SampleOutput rejection_sample(const SamplingParameters& params,
                               const DraftProposal& draft_proposal,
                               torch::Tensor target_logits);

@@ -25,6 +25,10 @@ SampleOutput sample(torch::Tensor& logits,
                     const SamplingParameters& params,
                     const torch::Tensor& filter_mask = torch::Tensor());
 
+// Unseeded categorical sampling. Supported NPU verification-sized rows use
+// inverse CDF; other inputs use Gumbel. RNG sequences differ by algorithm.
+torch::Tensor categorical_sample(const torch::Tensor& logits);
+
 // Gumbel primitives: argmax(logits + g), g ~ Gumbel(0, 1), samples exactly
 // categorical(softmax(logits)) without materializing probs. Noise buffers
 // carry log(Exp(1)) draws; greedy rows carry the 0.0 sentinel (log(0) = -inf,

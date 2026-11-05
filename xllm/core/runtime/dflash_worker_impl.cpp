@@ -775,8 +775,9 @@ DraftProposal DFlashWorkerImpl::run_decode_draft(
   CHECK_EQ(num_draft_tokens % num_speculative_tokens, 0)
       << "DFlash draft token count mismatch.";
   const int32_t batch_size = num_draft_tokens / num_speculative_tokens;
-  DraftProposal draft_proposal(draft_output.sample_output.next_tokens.view(
-      {batch_size, num_speculative_tokens}));
+  torch::Tensor token_ids = draft_output.sample_output.next_tokens.view(
+      {batch_size, num_speculative_tokens});
+  DraftProposal draft_proposal(std::move(token_ids));
   draft_proposal.keep_alive() = take_retained_inputs(draft_output);
   return draft_proposal;
 }

@@ -134,8 +134,7 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   SampleOutput validate(SamplingParameters sampling_params,
                         const DraftProposal& draft_proposal,
                         const ForwardOutput& target_output,
-                        int32_t num_speculative_tokens,
-                        const std::vector<uint8_t>& invalid_draft = {});
+                        int32_t num_speculative_tokens);
 
   // PD separation: placeholder size for empty embedding slot. Default: 1x
   // hidden_size. Eagle3 overrides to 3 * target_hidden_size.

@@ -1095,6 +1095,10 @@ class SlotSamplingInputTest
     for (const auto member : kInputs) {
       expect_equal(member(reference), member(binding_->sampling_params()));
     }
+    EXPECT_EQ(reference.has_unseeded_sample(),
+              binding_->sampling_params().has_unseeded_sample());
+    EXPECT_EQ(reference.num_random_rows(),
+              binding_->sampling_params().num_random_rows());
     EXPECT_EQ(reference.sampling_mode(),
               binding_->sampling_params().sampling_mode());
     EXPECT_EQ(reference.logprobs(), binding_->sampling_params().logprobs());
@@ -1170,6 +1174,7 @@ TEST_P(SlotSamplingInputTest, DoSampleBindingSurvivesInvalidReprepare) {
   auto expected = input.do_sample().clone();
   ASSERT_TRUE(prepare_sampling(input, /*model_tokens=*/8, *prepare_).ok());
   input.do_sample().zero_();
+  ASSERT_EQ(prepare_->synchronize(), ACL_SUCCESS);
   EXPECT_TRUE(torch::equal(binding_->sampling_params().do_sample().cpu(),
                            expected.cpu()));
   EXPECT_NE(binding_->sampling_params().do_sample().data_ptr(),
@@ -1196,6 +1201,8 @@ TEST_P(SlotSamplingInputTest, FixedAddressesSurviveShapeAndFeatureChanges) {
   for (int32_t round = 0; round < 16; ++round) {
     SCOPED_TRACE(round);
     SamplingParameters input = make_input(1 + round % 4, 1 + round % 7);
+    input.has_unseeded_sample() = round % 2 == 0;
+    input.num_random_rows() = round % 3;
     if (round == 15) {
       input.top_k().fill_(/*value=*/-7);
     }
@@ -1372,6 +1379,8 @@ TEST_P(SlotSamplingInputTest,
         input.top_p() = torch::Tensor();
       }
     }
+    input.has_unseeded_sample() = input.do_sample().any().item<bool>();
+    input.num_random_rows() = input.do_sample().sum().item<int64_t>();
     input.sampling_mode() =
         testutil::sampling_mode_from_do_sample(input.do_sample());
     const SamplingParameters legacy = input.to(device_, GetParam());

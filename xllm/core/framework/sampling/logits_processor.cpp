@@ -339,6 +339,34 @@ void apply_sampling_penalties(torch::Tensor& logits,
   apply_bad_words(logits, params);
 }
 
+void apply_logits_transforms(torch::Tensor& logits,
+                             const torch::Tensor& temperatures,
+                             const torch::Tensor& min_p,
+                             const torch::Tensor& top_k,
+                             const torch::Tensor& top_p_values) {
+  torch::Tensor top_p = top_p_values;
+  if (top_k.defined() && top_p.defined()) {
+    // Native top-k/top-p consumes top-p in the logits dtype.
+    top_p = top_p.to(logits.scalar_type());
+  }
+  const bool has_transforms = temperatures.defined() || min_p.defined() ||
+                              top_k.defined() || top_p.defined();
+  if (has_transforms) {
+    kernel::FusedLogitsTransformParams transform_params{
+        logits, temperatures, min_p, top_k, top_p};
+    if (kernel::supports_fused_logits_transform(transform_params)) {
+      // Falling through would apply the same transforms a second time.
+      kernel::fused_logits_transform(transform_params);
+      return;
+    }
+  }
+  if (temperatures.defined()) {
+    apply_temperatures(logits, temperatures);
+  }
+  apply_min_p(logits, min_p);
+  apply_top_k_top_p(logits, top_k, top_p);
+}
+
 void process_logits(torch::Tensor& logits,
                     const SamplingParameters& params,
                     const torch::Tensor& filter_mask) {
@@ -346,8 +374,6 @@ void process_logits(torch::Tensor& logits,
       filter_mask.defined() ? filter_mask : params.filter_mask();
   apply_sampling_penalties(logits, params);
 
-  // Only penalties/bias/filters can move the argmax; the rest is
-  // argmax-preserving (see SamplingParameters::is_all_greedy).
   if (params.filter_bitmask().defined()) {
     apply_token_bitmask_inplace(logits, params.filter_bitmask());
   } else if (effective_filter_mask.defined()) {
@@ -355,32 +381,13 @@ void process_logits(torch::Tensor& logits,
         << "filter_mask must match the logits shape";
     logits.add_(effective_filter_mask);
   }
-  if (params.is_all_greedy()) {
-    return;
+  if (!params.is_all_greedy()) {
+    apply_logits_transforms(logits,
+                            params.temperatures(),
+                            params.min_p(),
+                            params.top_k(),
+                            params.top_p());
   }
-
-  torch::Tensor top_p = params.top_p();
-  if (params.top_k().defined() && params.top_p().defined()) {
-    // Native top-k/top-p consumes top-p in the logits dtype.
-    top_p = top_p.to(logits.scalar_type());
-  }
-  const bool has_transforms = params.temperatures().defined() ||
-                              params.min_p().defined() ||
-                              params.top_k().defined() || top_p.defined();
-  if (has_transforms) {
-    kernel::FusedLogitsTransformParams transform_params{
-        logits, params.temperatures(), params.min_p(), params.top_k(), top_p};
-    if (kernel::supports_fused_logits_transform(transform_params)) {
-      // Falling through would apply the same transforms a second time.
-      kernel::fused_logits_transform(transform_params);
-      return;
-    }
-  }
-  if (params.temperatures().defined()) {
-    apply_temperatures(logits, params.temperatures());
-  }
-  apply_min_p(logits, params.min_p());
-  apply_top_k_top_p(logits, params.top_k(), top_p);
 }
 
 }  // namespace xllm

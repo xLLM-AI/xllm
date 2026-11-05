@@ -47,10 +47,17 @@ void apply_top_k_top_p(torch::Tensor& logits,
 void apply_token_bitmask_inplace(torch::Tensor& logits,
                                  const torch::Tensor& bitmask);
 
-// The full transform pipeline on [batch_size, vocab_size] logits: penalties
-// first, then the argmax-preserving transforms (temperature, min-p,
-// top-k/top-p) and the token filter mask/bitmask. A greedy batch that
-// reports no distribution values skips the argmax-preserving stage.
+// In-place temperature, min-p, then top-k/top-p on 2-D [rows, vocab] logits.
+// Uses a fused implementation when supported, otherwise equivalent operations.
+// Callers choose the rows and whether these transforms are needed.
+void apply_logits_transforms(torch::Tensor& logits,
+                             const torch::Tensor& temperatures,
+                             const torch::Tensor& min_p,
+                             const torch::Tensor& top_k,
+                             const torch::Tensor& top_p);
+
+// Full pipeline: constraints, then temperature/min-p/top-k/top-p.
+// All-greedy batches without distribution outputs skip the latter stage.
 void process_logits(torch::Tensor& logits,
                     const SamplingParameters& params,
                     const torch::Tensor& filter_mask = {});
