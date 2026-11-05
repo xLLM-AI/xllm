@@ -689,7 +689,6 @@ class PreparedAclGraphRunner(AclGraphRunner):
         if mega_moe_token_mask is not None:
             self._fill_mega_moe_token_mask(entry, metadata.raw_dp_execution_token_counts)
         self._prepare_graph_eplb_state(entry, eplb, metadata, first_capture=True)
-        self._prepare_attention(entry, entry.static_metadata)
         # Runtime capture runs on serialized Launch, never on native Prepare.
         # Its eager warmup rounds must not overwrite accepted KV or recurrent
         # state. Replay observes restored live inputs through the same addresses.
@@ -701,6 +700,7 @@ class PreparedAclGraphRunner(AclGraphRunner):
             dspark_adaptive.control.bitwise_or_(2**32)
         try:
             self._bind_graph_input_batch(entry, input_batch)
+            self._prepare_attention(entry, entry.static_metadata)
             self._capture(entry, torch.npu.current_stream(self.device))
         finally:
             if saved_slots is not None:
@@ -944,8 +944,8 @@ class PreparedAclGraphRunner(AclGraphRunner):
             self._fill_mega_moe_token_mask(entry, metadata.raw_dp_execution_token_counts)
         self._prepare_graph_eplb_state(entry, eplb, metadata, first_capture=False)
         owned_metadata = self._block_draft or self._device_kv_lengths or isinstance(entry, _PreparedDSparkGraphEntry)
-        self._prepare_attention(entry, entry.static_metadata if owned_metadata else metadata, replay=True)
         self._bind_graph_input_batch(entry, input_batch)
+        self._prepare_attention(entry, entry.static_metadata if owned_metadata else metadata, replay=True)
         stream = torch.npu.current_stream(self.device)
         entry.graph.replay()
         self._update_after_replay(entry, stream)

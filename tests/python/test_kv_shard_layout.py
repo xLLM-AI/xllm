@@ -51,6 +51,19 @@ def test_local_seq_lens_are_derived_from_global_kv_seq_lens() -> None:
     )
 
 
+def test_local_token_count_matches_tensor_layout() -> None:
+    layout = KVShardLayout(
+        physical_block_size=4,
+        dcp_size=2,
+        dcp_rank=1,
+    )
+    global_seq_lens = torch.arange(18, dtype=torch.int32)
+
+    assert [layout.local_token_count(int(length)) for length in global_seq_lens] == layout.local_seq_lens(
+        global_seq_lens
+    ).tolist()
+
+
 def test_indexer_reads_expanded_logical_block_table() -> None:
     layout = KVShardLayout(
         physical_block_size=4,

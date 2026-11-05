@@ -16,38 +16,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, NamedTuple, Protocol
 
 import torch
 import torch.distributed as dist
+from torch.distributed import ProcessGroup
 
-from xllm.python.attention.backend import has_rope_dim
+from xllm.python.attention.backend import has_rope_dim, normalize_attention_lse
 from xllm.python.attention.kv_shard_layout import KVShardLayout
+from xllm.python.distributed import (
+    AllGatherContext,
+    finish_all_gather,
+    start_all_gather,
+)
 from xllm.python.layers.sfa_dcp_ref import remap_sparse_indices
 
 # Must match xllm/python/kernels_npu/tilelang/sfa_dcp_remap.py AOT specializations.
 _REMAP_TOPK = 2048
 _REMAP_MAX_TOKENS = 256
-
-
-def _lse_as_token_head(
-    softmax_lse: torch.Tensor,
-    num_tokens: int,
-    num_heads: int,
-) -> torch.Tensor:
-    """Normalize SFA LSE to ``[T, H]``.
-
-    Graph capture can emit ``[1, T, H]``; eager decode may emit ``[T, H]`` or
-    ``[T, H, 1]``.
-    """
-    lse = softmax_lse
-    if lse.ndim >= 3 and lse.shape[-1] == 1:
-        lse = lse.squeeze(-1)
-    if lse.ndim >= 3 and lse.shape[0] == 1:
-        lse = lse.squeeze(0)
-    if tuple(lse.shape) != (num_tokens, num_heads):
-        raise RuntimeError(f"softmax_lse must be [T, H]=[{num_tokens}, {num_heads}], got {tuple(softmax_lse.shape)}")
-    return lse
 
 
 def _can_use_fused_remap(
@@ -97,34 +82,6 @@ def _fill_wide_remap(
     out.scatter_(-1, tail_offsets, layout.pack_owned_slots(tail_slots))
 
 
-class GroupCoordinator(Protocol):
-    world_size: int
-    rank_in_group: int
-    device_group: Any
-
-
-def all_gather_async(
-    input: torch.Tensor,
-    group: GroupCoordinator,
-    output: torch.Tensor | None = None,
-    async_op: bool = True,
-) -> tuple[torch.Tensor, torch.distributed.Work | None]:
-    if group.world_size == 1:
-        return input, None
-    if output is None:
-        input_size = input.size()
-        output_size = (input_size[0] * group.world_size,) + input_size[1:]
-        output = torch.empty(output_size, dtype=input.dtype, device=input.device)
-    return output, dist.all_gather_into_tensor(output, input, group=group.device_group, async_op=async_op)
-
-
-class DCPGatherContext(NamedTuple):
-    gathered: torch.Tensor
-    handle: torch.distributed.Work | None
-    restore_perm: tuple[int, ...] | None
-    split_sizes: tuple[int, ...]
-
-
 @dataclass
 class DCPContext:
     slot_mapping: torch.Tensor
@@ -132,7 +89,7 @@ class DCPContext:
     seq_lens: torch.Tensor
     kv_gather_block_ids: torch.Tensor | None = None
     kv_gather_block_table: torch.Tensor | None = None
-    gather_context: DCPGatherContext | None = None
+    gather_context: AllGatherContext | None = None
 
 
 @dataclass
@@ -236,7 +193,7 @@ class AscendSFADCPMetadataBuilder:
 class AscendSFADCPImpl:
     def __init__(
         self,
-        dcp_group: GroupCoordinator,
+        dcp_group: ProcessGroup | None,
         *,
         scale: float,
         index_topk: int,
@@ -263,11 +220,7 @@ class AscendSFADCPImpl:
         kv = torch.index_select(kv_nope, 0, valid_block_ids)
         key_rope = kv_cache[1] if len(kv_cache) >= 2 else None
         if not has_rope_dim(key_rope):
-            attn_metadata.dcp_context.gather_context = self._start_dcp_gather(
-                kv.contiguous(),
-                dim=0,
-                split_sizes=(kv.shape[-1],),
-            )
+            attn_metadata.dcp_context.gather_context = start_all_gather(kv, dim=0, group=self.dcp_group)
             return
         key_rope_blocks = torch.index_select(key_rope, 0, valid_block_ids)
         if kv.shape[:-1] != key_rope_blocks.shape[:-1] or kv.dtype != key_rope_blocks.dtype:
@@ -276,51 +229,9 @@ class AscendSFADCPImpl:
                 f"shapes {tuple(kv.shape)} / {tuple(key_rope_blocks.shape)} "
                 f"and dtypes {kv.dtype} / {key_rope_blocks.dtype}."
             )
-        attn_metadata.dcp_context.gather_context = self._start_dcp_gather(
-            torch.cat([kv, key_rope_blocks], dim=-1).contiguous(),
-            dim=0,
-            split_sizes=(kv.shape[-1], key_rope_blocks.shape[-1]),
+        attn_metadata.dcp_context.gather_context = start_all_gather(
+            torch.cat([kv, key_rope_blocks], dim=-1), dim=0, group=self.dcp_group
         )
-
-    def _start_dcp_gather(
-        self,
-        x: torch.Tensor,
-        dim: int,
-        split_sizes: tuple[int, ...],
-    ) -> DCPGatherContext:
-        gathered, handle, restore_perm = self._all_gather_dim_async(x, dim)
-        return DCPGatherContext(
-            gathered=gathered,
-            handle=handle,
-            restore_perm=restore_perm,
-            split_sizes=split_sizes,
-        )
-
-    @staticmethod
-    def _finish_dcp_gather(
-        context: DCPGatherContext,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        if context.handle is not None:
-            context.handle.wait()
-        gathered = context.gathered
-        if context.restore_perm is not None:
-            gathered = gathered.permute(context.restore_perm).contiguous()
-        parts = gathered.split(context.split_sizes, dim=-1)
-        return parts[0], parts[1] if len(parts) > 1 else None
-
-    def _all_gather_dim_async(
-        self,
-        x: torch.Tensor,
-        dim: int,
-    ) -> tuple[torch.Tensor, torch.distributed.Work | None, tuple[int, ...] | None]:
-        if dim == 0:
-            gathered, handle = all_gather_async(x.contiguous(), self.dcp_group)
-            return gathered, handle, None
-
-        perm = (dim, *[i for i in range(x.dim()) if i != dim])
-        restore_perm = tuple(perm.index(i) for i in range(x.dim()))
-        gathered, handle = all_gather_async(x.permute(perm).contiguous(), self.dcp_group)
-        return gathered, handle, restore_perm
 
     def _remap_sparse_indices(self, topk_indices: torch.Tensor) -> torch.Tensor:
         index_topk = int(self._dcp_index_topk)
@@ -362,61 +273,13 @@ class AscendSFADCPImpl:
         )
         return out
 
-    def _merge_dcp_outputs(
-        self,
-        output: torch.Tensor,
-        softmax_lse: torch.Tensor,
-    ) -> torch.Tensor:
-        """Pack output+LSE, run one AllToAll, and fuse LSE combine.
-
-        Payload layout is ``[dcp, H_local, T, D+4]`` for bf16/fp16.
-        """
-        from xllm.python.kernels_npu.triton.dcp_packed_a2a import (
-            fused_dcp_lse_combine,
-            pack_dcp_output_lse,
-            packed_send_shape,
-        )
-
-        num_tokens, num_heads, head_dim = (int(x) for x in output.shape)
-        lse_th = _lse_as_token_head(softmax_lse, num_tokens, num_heads)
-        dcp_size = int(self.dcp_size)
-        send_shape = packed_send_shape(
-            num_tokens,
-            num_heads,
-            head_dim,
-            dcp_size,
-            scatter_dim=1,
-            dtype=output.dtype,
-        )
-        send = torch.empty(send_shape, dtype=output.dtype, device=output.device)
-        recv = torch.empty(send_shape, dtype=output.dtype, device=output.device)
-        pack_dcp_output_lse(
-            output,
-            lse_th,
-            dcp_size,
-            scatter_dim=1,
-            send=send,
-        )
-        dist.all_to_all_single(recv, send, group=self.dcp_group.device_group)
-        h_local = num_heads // dcp_size
-        merged = torch.empty(
-            (num_tokens, h_local, head_dim),
-            dtype=output.dtype,
-            device=output.device,
-        )
-        return fused_dcp_lse_combine(recv, head_dim, scatter_dim=1, output=merged)
-
     def _start_dcp_query_gather(
         self,
         ql_nope: torch.Tensor,
         q_pe: torch.Tensor | None,
-    ) -> DCPGatherContext:
+    ) -> AllGatherContext:
         if not has_rope_dim(q_pe):
-            return self._start_dcp_gather(
-                ql_nope.contiguous(),
-                dim=1,
-                split_sizes=(ql_nope.shape[-1],),
-            )
+            return start_all_gather(ql_nope, dim=1, group=self.dcp_group)
         if ql_nope.shape[:-1] != q_pe.shape[:-1] or ql_nope.dtype != q_pe.dtype:
             raise RuntimeError(
                 "Cannot fuse DCP query gather for ql_nope/q_pe with "
@@ -424,12 +287,8 @@ class AscendSFADCPImpl:
                 f"and dtypes {ql_nope.dtype} / {q_pe.dtype}."
             )
 
-        fused_q = torch.cat([ql_nope, q_pe], dim=-1).contiguous()
-        return self._start_dcp_gather(
-            fused_q,
-            dim=1,
-            split_sizes=(ql_nope.shape[-1], q_pe.shape[-1]),
-        )
+        fused_q = torch.cat([ql_nope, q_pe], dim=-1)
+        return start_all_gather(fused_q, dim=1, group=self.dcp_group)
 
     def _record_query_gather_context(
         self,
@@ -496,7 +355,13 @@ class AscendSFADCPImpl:
         dcp_context.gather_context = None
         assert gather_context is not None
         if is_prefill:
-            gathered_kv_cache = self._finish_dcp_gather(gather_context)
+            gathered = finish_all_gather(gather_context)
+            key_rope = kv_cache[1] if len(kv_cache) > 1 else None
+            gathered_kv_cache = (
+                torch.split(gathered, (kv_cache[0].shape[-1], key_rope.shape[-1]), dim=-1)
+                if has_rope_dim(key_rope)
+                else (gathered, None)
+            )
             if block_table is None:
                 block_table = dcp_context.kv_gather_block_table
             assert block_table is not None
@@ -516,7 +381,12 @@ class AscendSFADCPImpl:
             )
 
         topk_indices = self._remap_sparse_indices(topk_indices)
-        ql_nope, q_pe = self._finish_dcp_gather(gather_context)
+        gathered = finish_all_gather(gather_context)
+        ql_nope, q_pe = (
+            torch.split(gathered, (ql_nope.shape[-1], q_pe.shape[-1]), dim=-1)
+            if has_rope_dim(q_pe)
+            else (gathered, None)
+        )
         sfa_output, softmax_max, softmax_sum = self._npu_sparse_flash_attention(
             ql_nope,
             q_pe,
@@ -529,4 +399,18 @@ class AscendSFADCPImpl:
             return_lse=True,
         )
         softmax_lse = softmax_max + torch.log(softmax_sum)
-        return self._merge_dcp_outputs(sfa_output, softmax_lse)
+        from xllm.python.kernels_npu.triton.dcp_packed_a2a import (
+            fused_dcp_lse_combine,
+            pack_dcp_output_lse,
+            packed_send_shape,
+        )
+
+        num_tokens, num_heads, head_dim = (int(x) for x in sfa_output.shape)
+        softmax_lse = normalize_attention_lse(softmax_lse, num_tokens, num_heads)
+        dcp_size = int(self.dcp_size)
+        send_shape = packed_send_shape(num_tokens, num_heads, head_dim, dcp_size, scatter_dim=1, dtype=sfa_output.dtype)
+        send = torch.empty(send_shape, dtype=sfa_output.dtype, device=sfa_output.device)
+        recv = torch.empty(send_shape, dtype=sfa_output.dtype, device=sfa_output.device)
+        pack_dcp_output_lse(sfa_output, softmax_lse, dcp_size, scatter_dim=1, send=send)
+        dist.all_to_all_single(recv, send, group=self.dcp_group)
+        return fused_dcp_lse_combine(recv, head_dim, scatter_dim=1)

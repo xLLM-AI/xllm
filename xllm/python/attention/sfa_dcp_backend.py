@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import torch
@@ -52,13 +52,6 @@ from xllm.python.model_executor.forward_context import (
 
 if TYPE_CHECKING:
     from xllm.python.layers.attention import Attention
-
-
-@dataclass
-class _ProcessGroupCoordinator:
-    world_size: int
-    rank_in_group: int
-    device_group: ProcessGroup
 
 
 def dcp_layer_options(layer: Attention) -> int:
@@ -113,11 +106,7 @@ class SfaDcpAttentionBackend(NpuPagedAttentionBackend):
             self._dcp_group.rank(),
         )
         self._impl = AscendSFADCPImpl(
-            _ProcessGroupCoordinator(
-                world_size=self._dcp_group.size(),
-                rank_in_group=self._dcp_group.rank(),
-                device_group=self._dcp_group,
-            ),
+            self._dcp_group,
             scale=self.scale,
             index_topk=self._index_topk,
             layout=self._kv_layout,

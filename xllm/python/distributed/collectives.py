@@ -27,6 +27,7 @@ import math
 import socket
 from collections.abc import Sequence
 from datetime import timedelta
+from typing import NamedTuple
 
 import torch
 import torch.distributed as dist
@@ -411,6 +412,42 @@ def dcp_group(device: torch.device | str) -> ProcessGroup | None:
     return _groups.get(("dcp", str(torch.device(device))))
 
 
+class AllGatherContext(NamedTuple):
+    gathered: torch.Tensor
+    handle: torch.distributed.Work | None
+    restore_perm: tuple[int, ...] | None
+
+
+def start_all_gather(tensor: torch.Tensor, dim: int, group: ProcessGroup | None) -> AllGatherContext:
+    # ``group is None`` explicitly denotes a singleton group: skip the
+    # collective rather than falling back to the WORLD group.
+    world_size = 1 if group is None else group.size()
+    if world_size == 1:
+        return AllGatherContext(tensor, None, None)
+    if dim == 0:
+        moved = tensor
+        restore_perm = None
+    else:
+        perm = (dim, *[index for index in range(tensor.dim()) if index != dim])
+        restore_perm = tuple(perm.index(index) for index in range(tensor.dim()))
+        moved = tensor.permute(perm)
+    moved = _contiguous_gather_input(moved)
+    input_size = moved.size()
+    output_size = (input_size[0] * world_size,) + input_size[1:]
+    gathered = torch.empty(output_size, dtype=moved.dtype, device=moved.device)
+    handle = dist.all_gather_into_tensor(gathered, moved, group=group, async_op=True)
+    return AllGatherContext(gathered, handle, restore_perm)
+
+
+def finish_all_gather(context: AllGatherContext) -> torch.Tensor:
+    if context.handle is not None:
+        context.handle.wait()
+    gathered = context.gathered
+    if context.restore_perm is not None:
+        gathered = gathered.permute(context.restore_perm).contiguous()
+    return gathered
+
+
 @torch.library.custom_op("xllm_ops::all_reduce_", mutates_args={"x"})
 def all_reduce_(x: torch.Tensor, group_name: str = "tp") -> None:
     group = get_process_group(x.device, group_name)
@@ -708,6 +745,9 @@ __all__ = [
     "cp_world_size",
     "layerwise_rank",
     "dcp_group",
+    "AllGatherContext",
+    "start_all_gather",
+    "finish_all_gather",
     "all_reduce_",
     "reduce_scatter",
     "matmul_reduce_scatter",

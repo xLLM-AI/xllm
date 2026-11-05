@@ -1030,9 +1030,8 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 accepted.fill_(1)
                 entry.static_metadata.num_accepted_tokens_host_values = (1,) * accepted.numel()
 
-        self._prepare_attention(entry, entry.static_metadata, replay=not first_capture)
-
         self._bind_graph_input_batch(entry, input_batch)
+        self._prepare_attention(entry, entry.static_metadata, replay=not first_capture)
         if first_capture:
             self._capture(entry, self._stream)
             if capture_linear_state:
@@ -1050,8 +1049,8 @@ class DecodeAclGraphRunner(AclGraphRunner):
                     expanded=expanded,
                     **decode_kwargs,
                 )
-                self._prepare_attention(entry, entry.static_metadata, replay=True)
                 self._bind_graph_input_batch(entry, input_batch)
+                self._prepare_attention(entry, entry.static_metadata, replay=True)
         return entry
 
     @staticmethod
@@ -1439,12 +1438,6 @@ class DecodeAclGraphRunner(AclGraphRunner):
                     )
                 repeat_count = batch_size // linear_state_indices.numel()
                 linear_state_indices = linear_state_indices.repeat_interleave(repeat_count)
-            if linear_state_indices.numel() < batch_size:
-                raise RuntimeError(
-                    "ACL graph linear_state_indices must contain one value "
-                    f"per decode row (rows={batch_size}, "
-                    f"values={linear_state_indices.numel()})"
-                )
             static_metadata.linear_state_indices[:batch_size].copy_(linear_state_indices[:batch_size])
         if static_metadata.num_accepted_tokens is None and padded_batch_size > batch_size:
             static_metadata.linear_state_indices[batch_size:].zero_()

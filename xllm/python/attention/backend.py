@@ -31,6 +31,21 @@ if TYPE_CHECKING:
     from xllm.python.model_executor.cp_utils import CpContext
 
 
+def normalize_attention_lse(
+    softmax_lse: torch.Tensor,
+    num_tokens: int,
+    num_heads: int,
+) -> torch.Tensor:
+    lse = softmax_lse
+    if lse.ndim >= 3 and lse.shape[-1] == 1:
+        lse = lse.squeeze(-1)
+    if lse.ndim >= 3 and lse.shape[0] == 1:
+        lse = lse.squeeze(0)
+    if tuple(lse.shape) != (num_tokens, num_heads):
+        raise RuntimeError(f"softmax_lse must be [T, H]=[{num_tokens}, {num_heads}], got {tuple(softmax_lse.shape)}")
+    return lse
+
+
 def has_rope_dim(tensor: torch.Tensor | None) -> TypeGuard[torch.Tensor]:
     """Whether an MLA rope operand carries a rope dimension.
 

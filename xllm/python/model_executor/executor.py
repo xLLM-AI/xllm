@@ -168,6 +168,51 @@ def _create_attention_backend(
             and dcp_group.size() > 1
             and (int(config.get("cp_size", 1)) == 1 or model_type in ("glm_moe_dsa", "glm_moe_dsa_mtp"))
         ):
+            if model_type in ("qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"):
+                if current_platform.get_ascend_soc_generation() == "a5":
+                    raise NotImplementedError(
+                        "Qwen3.5 Python DCP is not supported on Ascend950 because "
+                        "its TND attention fallback does not return softmax LSE"
+                    )
+                dcp_size = dcp_group.size()
+                tp_size = int(config.get("tp_size", 1))
+                if dcp_size > tp_size or tp_size % dcp_size:
+                    raise ValueError(f"Qwen3.5 DCP size must divide TP size: dcp_size={dcp_size}, tp_size={tp_size}")
+                num_kv_heads_value = config.get("n_kv_heads")
+                if num_kv_heads_value is None:
+                    num_kv_heads_value = config.get("num_key_value_heads")
+                if num_kv_heads_value is None:
+                    raise ValueError("Qwen3.5 DCP requires the global KV-head count")
+                num_kv_heads = int(num_kv_heads_value)
+                if num_kv_heads <= 0:
+                    raise ValueError("Qwen3.5 DCP requires a positive global KV-head count")
+                from xllm.python.model_loader.sharding import validate_gqa_kv_split
+
+                validate_gqa_kv_split(num_kv_heads, tp_size)
+                kv_head_replicas = 1 if num_kv_heads >= tp_size else tp_size // num_kv_heads
+                if kv_head_replicas % dcp_size:
+                    raise ValueError(
+                        "Qwen3.5 DCP size must divide the replicated KV-head group: "
+                        f"dcp_size={dcp_size}, kv_head_replicas={kv_head_replicas}"
+                    )
+                if bool(config.get("enable_disagg_pd", False)):
+                    raise NotImplementedError("Qwen3.5 Python DCP does not yet support disaggregated P/D")
+                from xllm.python.attention.dense_dcp_backend import (
+                    DenseDcpAttentionBackend,
+                )
+
+                return DenseDcpAttentionBackend(
+                    num_heads=first_attention.num_heads,
+                    num_kv_heads=first_attention.num_kv_heads,
+                    head_dim=first_attention.head_dim,
+                    scale=first_attention.scale,
+                    sliding_window=first_attention.sliding_window,
+                    device=device,
+                    dtype=dtype,
+                    dcp_group=dcp_group,
+                )
+            if not bool(config.get("enable_mla", False)):
+                raise NotImplementedError(f"Dense DCP attention is not supported for model type '{model_type}'")
             from xllm.python.attention.sfa_dcp_backend import (
                 SfaDcpAttentionBackend,
                 dcp_layer_options,

@@ -46,6 +46,16 @@ class KVShardLayout:
     def logical_block_size(self) -> int:
         return self.physical_block_size * self.dcp_size
 
+    def local_token_count(self, global_token_count: int) -> int:
+        """Return the tokens owned by this rank in one logical sequence."""
+        full_blocks, remainder = divmod(global_token_count, self.logical_block_size)
+        rank_start = self.dcp_rank * self.physical_block_size
+        owned_remainder = min(
+            max(remainder - rank_start, 0),
+            self.physical_block_size,
+        )
+        return full_blocks * self.physical_block_size + owned_remainder
+
     def local_seq_lens(self, seq_lens: torch.Tensor) -> torch.Tensor:
         logical = self.logical_block_size
         physical = self.physical_block_size
