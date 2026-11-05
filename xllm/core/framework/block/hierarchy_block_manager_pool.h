@@ -104,7 +104,9 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
   friend class HierarchyPoolTestPeer;
   void release_host_match(Sequence* sequence);
   void quarantine_prefetch(Sequence* sequence, int32_t dp_rank);
-  void collect_offload_pairs(Sequence* sequence);
+  void collect_offload_pairs(Sequence* sequence,
+                             int32_t dp_rank,
+                             size_t completed_tokens);
   bool should_probe_prefix_cache(Sequence* sequence) const;
   void transfer_offload_blocks();
   void transfer_load_blocks(int32_t dp_rank, uint64_t batch_id);
