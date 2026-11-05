@@ -47,16 +47,26 @@ void apply_top_k_top_p(torch::Tensor& logits,
 void apply_token_bitmask_inplace(torch::Tensor& logits,
                                  const torch::Tensor& bitmask);
 
-// The full transform pipeline on [batch_size, vocab_size] logits: penalties
-// first, then the argmax-preserving transforms (temperature, min-p,
-// top-k/top-p) and the token filter mask/bitmask. A greedy batch that
-// reports no distribution values skips the argmax-preserving stage.
+// Penalties plus the token filter mask/bitmask.
+void apply_logits_constraints(torch::Tensor& logits,
+                              const SamplingParameters& params,
+                              const torch::Tensor& filter_mask);
+
+// Temperature, min-p, then top-k/top-p on 2-D [rows, vocab] logits, fused
+// when supported.
+void apply_logits_transforms(torch::Tensor& logits,
+                             const torch::Tensor& temperatures,
+                             const torch::Tensor& min_p,
+                             const torch::Tensor& top_k,
+                             const torch::Tensor& top_p);
+
+// Constraints, then transforms. All-greedy batches without distribution
+// outputs skip the transform stage.
 void process_logits(torch::Tensor& logits,
                     const SamplingParameters& params,
                     const torch::Tensor& filter_mask = {});
 
-// Bias and repetition/frequency/presence penalties; the first stage of
-// process_logits, shared by paths that skip the later transforms (e.g. the
+// Penalties only, for paths that skip the transform stage (e.g. the
 // RecSampler fast path).
 void apply_sampling_penalties(torch::Tensor& logits,
                               const SamplingParameters& params);

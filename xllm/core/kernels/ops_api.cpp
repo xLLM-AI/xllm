@@ -913,10 +913,11 @@ torch::Tensor scaled_matmul(ScaledMatmulParams& params) {
 #endif
 }
 
-torch::Tensor apply_top_k_top_p(TopKPParams& params) {
+void apply_top_k_top_p(TopKPParams& params) {
 #if defined(USE_MLU)
-  return mlu::apply_top_k_top_p(
-      params.logits, params.temperatures, params.top_k, params.top_p);
+  // The vendor kernel is out-of-place and always returns float32.
+  params.logits.copy_(mlu::apply_top_k_top_p(
+      params.logits, params.temperatures, params.top_k, params.top_p));
 #else
   NOT_IMPLEMENTED();
 #endif

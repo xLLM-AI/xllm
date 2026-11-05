@@ -40,14 +40,6 @@ SamplingParameters make_transform_params(int64_t rows) {
   return params;
 }
 
-torch::Tensor effective_top_p(const SamplingParameters& params,
-                              torch::ScalarType dtype) {
-  if (!params.top_p().defined()) {
-    return {};
-  }
-  return params.top_k().defined() ? params.top_p().to(dtype) : params.top_p();
-}
-
 // Independent reference implementations of the now-private transform
 // primitives: the reference must recompute, not reuse, the code under test.
 void apply_min_p_reference(torch::Tensor& logits, const torch::Tensor& min_p) {
@@ -90,7 +82,8 @@ void apply_top_k_top_p_reference(torch::Tensor& logits,
   if (top_p.defined()) {
     const torch::Tensor probabilities =
         sorted_logits.softmax(-1, torch::kFloat32);
-    torch::Tensor mask = probabilities.cumsum(-1) <= (1 - top_p.unsqueeze(-1));
+    const torch::Tensor cutoff = 1 - top_p.to(torch::kFloat32).unsqueeze(-1);
+    torch::Tensor mask = probabilities.cumsum(-1) <= cutoff;
     mask.select(/*dim=*/-1, /*index=*/vocab_size - 1).fill_(false);
     sorted_logits.masked_fill_(mask, filter_value);
   }
@@ -103,12 +96,7 @@ torch::Tensor reference_transform(torch::Tensor logits,
     apply_temperatures(logits, params.temperatures());
   }
   apply_min_p_reference(logits, params.min_p());
-  const auto top_p = params.top_k().defined() && params.top_p().defined()
-                         ? params.top_p().to(logits.scalar_type())
-                         : params.top_p();
-  if (params.top_k().defined() || top_p.defined()) {
-    apply_top_k_top_p_reference(logits, params.top_k(), top_p);
-  }
+  apply_top_k_top_p_reference(logits, params.top_k(), params.top_p());
   return logits;
 }
 
@@ -116,12 +104,11 @@ void expect_transform(const torch::Tensor& input,
                       const SamplingParameters& params) {
   auto expected = reference_transform(input.clone(), params);
   auto actual = input.clone();
-  kernel::FusedLogitsTransformParams transform_params{
-      actual,
-      params.temperatures(),
-      params.min_p(),
-      params.top_k(),
-      effective_top_p(params, input.scalar_type())};
+  kernel::FusedLogitsTransformParams transform_params{actual,
+                                                      params.temperatures(),
+                                                      params.min_p(),
+                                                      params.top_k(),
+                                                      params.top_p()};
   ASSERT_TRUE(kernel::supports_fused_logits_transform(transform_params));
   kernel::fused_logits_transform(transform_params);
   ASSERT_TRUE(torch::equal(torch::isfinite(actual), torch::isfinite(expected)));
@@ -454,7 +441,7 @@ TEST(CudaLogitsTransformTest, LargeStridedRowsPreservePaddingAndParameters) {
     const auto padding = storage.slice(0, 1, 128, 2).clone();
     const auto expected = reference_transform(input.clone(), params);
     kernel::cuda::fused_logits_transform(
-        input, {}, {}, params.top_k(), effective_top_p(params, dtype));
+        input, {}, {}, params.top_k(), params.top_p());
     EXPECT_TRUE(
         torch::equal(torch::isfinite(input), torch::isfinite(expected)));
     EXPECT_TRUE(torch::allclose(input, expected, 1e-5, 1e-6));
