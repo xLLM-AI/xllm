@@ -36,6 +36,7 @@ limitations under the License.
 #include <unordered_set>
 #include <vector>
 
+#include "core/framework/model/lm_head_owner.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model/model_params_view.h"
@@ -150,23 +151,14 @@ TORCH_MODULE(RWKV7Model);
 // RWKV7ForCausalLM – adds the unembedding LM head
 // ---------------------------------------------------------------------------
 
-class RWKV7ForCausalLMImpl : public torch::nn::Module {
+class RWKV7ForCausalLMImpl : public torch::nn::Module,
+                             public detail::LmHeadOwner<> {
  public:
+  using HeadOwner = detail::LmHeadOwner<>;
+
   explicit RWKV7ForCausalLMImpl(const ModelContext& context) {
-    const ModelArgs& args = context.get_model_args();
-    const int64_t hidden_size = args.hidden_size();
-    const int64_t vocab_size = args.vocab_size();
-    const torch::TensorOptions opts = context.get_tensor_options();
-
     model_ = register_module("model", RWKV7Model(context));
-
-    // LM head: linear, no bias (BlinkDL convention)
-    head_ = register_module(
-        "head",
-        torch::nn::Linear(
-            torch::nn::LinearOptions(hidden_size, vocab_size).bias(false)));
-    head_->to(opts.device());
-    head_->to(opts.dtype().toScalarType());
+    init_lm_head(*this, context);
   }
 
   // Forward: compute hidden states for the packed token sequence.
@@ -177,27 +169,11 @@ class RWKV7ForCausalLMImpl : public torch::nn::Module {
     return model_(tokens, positions, kv_caches, input_params);
   }
 
-  // Compute logits for selected token positions.
-  //   hidden_states:  [total_tokens, hidden_size]
-  //   selected_idxes: optional token selector
-  //   returns:        [selected_tokens, vocab_size]
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& selected_idxes) {
-    torch::Tensor h = hidden_states;
-    if (selected_idxes.defined()) {
-      h = h.index_select(/*dim=*/0, selected_idxes);
-    }
-    return head_(h);
-  }
-
-  // Embedding / rerank path: return selected hidden states as-is.
-  torch::Tensor pooler(const torch::Tensor& hidden_states,
-                       const torch::Tensor& selected_idxes) {
-    torch::Tensor h = hidden_states;
-    if (selected_idxes.defined()) {
-      h = h.index_select(/*dim=*/0, selected_idxes);
-    }
-    return h;
+  void load_lm_head_weights(const StateDict& state_dict,
+                            layer::LmHead& head,
+                            bool /*tie_word_embeddings*/) override {
+    head->load_state_dict(state_dict.get_dict_with_prefix(
+        std::vector<std::string>{"head.", "lm_head.", "model.head."}));
   }
 
   // Load weights from checkpoint.
@@ -207,33 +183,17 @@ class RWKV7ForCausalLMImpl : public torch::nn::Module {
   //   head.weight) • HuggingFace:    "model." prefix (model.emb.weight, …,
   //   model.ln_out.*, lm_head.weight)
   void load_model(std::unique_ptr<ModelLoader> loader) {
+    HeadOwner::load_lm_head_weights(loader);
     for (const auto& state_dict : loader->get_state_dicts()) {
       // Try to strip common top-level prefixes for the body weights.
       // An empty prefix ("") matches the native BlinkDL flat format.
       model_->load_state_dict(state_dict->get_dict_with_prefix(
           std::vector<std::string>{"model.", ""}));
-
-      // LM head weight: "head.weight" (native) or "lm_head.weight" (HF)
-      for (const auto& key : std::vector<std::string>{
-               "head.weight", "lm_head.weight", "model.head.weight"}) {
-        torch::Tensor head_w = state_dict->get_tensor(key);
-        if (head_w.defined()) {
-          head_->weight =
-              head_w.to(head_->weight.device()).to(head_->weight.scalar_type());
-          break;
-        }
-      }
     }
   }
 
-  // Required by CausalLMImpl (no-ops for non-MoE models)
-  void prepare_expert_weight(int32_t /*layer_id*/,
-                             const std::vector<int32_t>& /*expert_ids*/) {}
-  void update_expert_weight(int32_t /*layer_id*/) {}
-
  private:
   RWKV7Model model_{nullptr};
-  torch::nn::Linear head_{nullptr};
 };
 
 TORCH_MODULE(RWKV7ForCausalLM);

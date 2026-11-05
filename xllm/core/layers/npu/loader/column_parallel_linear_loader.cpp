@@ -23,14 +23,9 @@ ColumParallelLinearLoader::ColumParallelLinearLoader(
     const ModelContext& context,
     LoadMode mode)
     : BaseLoader(weight_count, context, mode) {
-  auto options = context.get_tensor_options();
+  const auto& options = context.get_tensor_options();
   dtype_ = torch::typeMetaToScalarType(options.dtype());
-  if (load_to_host()) {
-    working_tensors()[0] = torch::zeros(
-        {1}, torch::TensorOptions().dtype(dtype_).device(torch::kCPU));
-  } else {
-    working_tensors()[0] = torch::zeros({1}).to(options);
-  }
+  init_dummy_weight(/*idx=*/0, options);
 }
 
 void ColumParallelLinearLoader::load_state_dict(const StateDict& state_dict) {

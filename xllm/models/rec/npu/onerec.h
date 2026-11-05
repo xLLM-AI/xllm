@@ -18,6 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
+#include <cmath>
 #include <mutex>
 #include <string>
 #include <type_traits>
@@ -37,6 +38,7 @@ class OneRecModelImpl final : public torch::nn::Module {
   explicit OneRecModelImpl(const ModelContext& context) {
     hidden_size_ = context.get_model_args().hidden_size();
     options_ = context.get_tensor_options();
+    head_scale_ = t5_head_scale(hidden_size_);
     shared_ = register_module("shared", layer::WordEmbedding(context));
 
     encoder_ = register_module(
@@ -97,7 +99,10 @@ class OneRecModelImpl final : public torch::nn::Module {
 
       auto decoder_output = decoder_(
           tokens, positions, kv_caches, input_params, cached_encoder_output);
-      return ModelOutput(decoder_output);
+      // T5 convention: the tied vocabulary head multiplies the decoder output
+      // by 1/sqrt(hidden_size). Encoder outputs keep their raw scale for the
+      // cross-attention cache.
+      return ModelOutput(decoder_output * head_scale_);
     }
 
     const bool is_encoder_forward =
@@ -122,6 +127,8 @@ class OneRecModelImpl final : public torch::nn::Module {
       }
     }
 
+    // Same T5 convention as the stacked path above.
+    hidden_states = hidden_states * head_scale_;
     return ModelOutput(hidden_states);
   }
 
@@ -244,6 +251,7 @@ class OneRecModelImpl final : public torch::nn::Module {
 
   torch::TensorOptions options_;
   int64_t hidden_size_ = 0;
+  float head_scale_ = 1.0f;
   layer::WordEmbedding shared_{nullptr};
 
   OneRecStack encoder_{nullptr};
@@ -261,6 +269,8 @@ class OneRecForConditionalGenerationImpl final
 
   void load_model(std::unique_ptr<ModelLoader> loader,
                   std::string prefix = "model.") override {
+    GenericRecImplBase<OneRecModel>::HeadOwner::load_lm_head_weights(loader);
+
     for (const auto& state_dict : loader->get_state_dicts()) {
       StateDict prefixed_state_dict =
           state_dict->get_dict_with_prefix("module.module3.t5_model.");
@@ -276,24 +286,6 @@ class OneRecForConditionalGenerationImpl final
         model_state_dict = *state_dict;
       }
       model_->load_state_dict(model_state_dict);
-
-      if (tie_word_embeddings_) {
-        auto shared_dict = model_state_dict.get_dict_with_prefix("shared.");
-        if (shared_dict.size() == 0) {
-          shared_dict = state_dict->get_dict_with_prefix("shared.");
-        }
-        if (shared_dict.size() != 0) {
-          lm_head_->load_state_dict(shared_dict);
-        }
-      } else {
-        auto lm_head_dict = model_state_dict.get_dict_with_prefix("lm_head.");
-        if (lm_head_dict.size() == 0) {
-          lm_head_dict = state_dict->get_dict_with_prefix("lm_head.");
-        }
-        if (lm_head_dict.size() != 0) {
-          lm_head_->load_state_dict(lm_head_dict);
-        }
-      }
     }
 
     model_->verify_loaded_weights();

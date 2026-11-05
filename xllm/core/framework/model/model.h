@@ -46,22 +46,12 @@ class Model {
   virtual const torch::TensorOptions& options() const = 0;
 
 #if defined(USE_NPU)
-  virtual layer::NpuLmHead get_npu_lm_head() {
-    NOT_IMPLEMENTED();
-    return nullptr;
-  }
-  virtual void set_npu_lm_head(layer::NpuLmHead& head) { NOT_IMPLEMENTED(); }
   virtual layer::NpuWordEmbedding get_npu_word_embedding() {
     NOT_IMPLEMENTED();
     return nullptr;
   }
-  virtual bool has_restored_npu_word_embedding() { return false; }
   virtual void set_npu_word_embedding(layer::NpuWordEmbedding& embedding) {
     NOT_IMPLEMENTED();
-  }
-  virtual void set_restored_npu_word_embedding(
-      layer::NpuWordEmbedding& embedding) {
-    set_npu_word_embedding(embedding);
   }
 
   virtual bool init_or_refresh_rolling_runtime(Stream* load_stream,
@@ -75,11 +65,6 @@ class Model {
 
 #endif
 
-  virtual layer::LmHead get_lm_head() {
-    NOT_IMPLEMENTED();
-    return nullptr;
-  }
-  virtual void set_lm_head(layer::LmHead& head) { NOT_IMPLEMENTED(); }
   virtual layer::WordEmbedding get_word_embedding() {
     NOT_IMPLEMENTED();
     return nullptr;

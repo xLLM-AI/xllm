@@ -30,6 +30,7 @@ limitations under the License.
 #include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model/model_params_view.h"
+#include "core/framework/model/model_traits.h"
 #include "core/framework/model_context/model_context.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/kv_cache/storage/kv_cache.h"
@@ -389,11 +390,6 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
     embed_tokens_ = npu_word_embedding;
   }
 
-  virtual void set_restored_npu_word_embedding(
-      layer::NpuWordEmbedding& npu_word_embedding) {
-    embed_tokens_ = npu_word_embedding;
-  }
-
  protected:
   std::string model_type_;
   torch::TensorOptions options_;
@@ -426,28 +422,17 @@ class QWen3Eagle3ModelImpl : public torch::nn::Module {
 };
 TORCH_MODULE(QWen3Eagle3Model);
 
-class QWen3Eagle3ForCausalLMImpl : public torch::nn::Module {
+class QWen3Eagle3ForCausalLMImpl
+    : public torch::nn::Module,
+      public ::xllm::detail::LmHeadOwner<layer::NpuLmHead> {
  public:
   QWen3Eagle3ForCausalLMImpl(const ModelContext& context)
       : device_(context.get_tensor_options().device()),
         dtype_(context.get_tensor_options().dtype().toScalarType()) {
-    auto model_args = context.get_model_args();
-    tie_word_embeddings_ = model_args.tie_word_embeddings();
-
     // register submodules
     model_ =
         register_module("model", QWen3Eagle3Model("qwen3_eagle3", context));
-
-    npu_lm_head_ = register_module("npu_lm_head", layer::NpuLmHead(context));
-
-    // Check if we need to load lm_head from target model
-    load_lm_head_from_target_ = false;
-    if (!tie_word_embeddings_) {
-      int64_t vocab_size = model_args.vocab_size();
-      if (vocab_size == 0) {
-        load_lm_head_from_target_ = true;
-      }
-    }
+    init_lm_head(*this, context);
   }
 
   torch::Tensor get_input_embeddings(torch::Tensor input_ids) {
@@ -466,30 +451,13 @@ class QWen3Eagle3ForCausalLMImpl : public torch::nn::Module {
 
   // hidden_states: [num_tokens, hidden_size]
   // seleted_idxes: [num_tokens]
-  // returns: [num_tokens, vocab_size]
-  virtual torch::Tensor logits(const torch::Tensor& hidden_states,
-                               const torch::Tensor& seleted_idxes) {
-    return npu_lm_head_(hidden_states, seleted_idxes, 0);
-  }
-
-  // hidden_states: [num_tokens, hidden_size]
-  // seleted_idxes: [num_tokens]
-  // returns: [num_seqs, hidden_size]
-  virtual torch::Tensor pooler(const torch::Tensor& hidden_states,
-                               const torch::Tensor& seleted_idxes) {
-    auto h = hidden_states;
-    if (seleted_idxes.defined()) {
-      h = h.index_select(/*dim=*/0, seleted_idxes);
-    }
-    return h;
-  }
-
   virtual void load_model(std::unique_ptr<ModelLoader> loader,
                           std::string prefix = "") {
     std::filesystem::path quarot_model_path(loader->model_weights_path());
     if (!loader->reference_model_weights_path().empty()) {
       quarot_model_path = loader->reference_model_weights_path();
     }
+    load_lm_head_weights(loader);
     for (const auto& state_dict : loader->get_state_dicts()) {
       auto sub_dict = state_dict->get_dict_with_prefix(prefix + "model.");
       if (sub_dict.size() == 0) {
@@ -500,54 +468,22 @@ class QWen3Eagle3ForCausalLMImpl : public torch::nn::Module {
       auto embed_dict = state_dict->get_dict_with_prefix("embed_tokens.");
       if (embed_dict.size() > 0) {
         model_->get_npu_word_embedding()->load_state_dict(embed_dict);
-        owns_word_embedding_ = true;
       }
       model_->load_state_dict(sub_dict);
-
-      if (!load_lm_head_from_target_) {
-        if (tie_word_embeddings_) {
-          npu_lm_head_->load_state_dict(
-              state_dict->get_dict_with_prefix(prefix + "embed_tokens."));
-        } else {
-          npu_lm_head_->load_state_dict(
-              state_dict->get_dict_with_prefix("lm_head."));
-        }
-      }
     }
 
     // verify
     model_->verify_loaded_weights(prefix);
-    if (owns_word_embedding_) {
+    const auto& embed_tokens = model_->get_npu_word_embedding();
+    const bool owns_word_embedding =
+        ::xllm::detail::weight_loaded(embed_tokens);
+    if (owns_word_embedding) {
       model_->get_npu_word_embedding()->verify_loaded_weights("embed_tokens.");
-    }
-    if (!load_lm_head_from_target_) {
-      if (tie_word_embeddings_) {
-        npu_lm_head_->verify_loaded_weights(prefix + "embed_tokens.");
-      } else {
-        npu_lm_head_->verify_loaded_weights("lm_head.");
-      }
     }
     load_optional_quarot_rotation(quarot_model_path);
     model_->merge_loaded_weights();
-    if (owns_word_embedding_) {
+    if (owns_word_embedding) {
       model_->get_npu_word_embedding()->merge_loaded_weights();
-    }
-    if (!load_lm_head_from_target_) {
-      npu_lm_head_->merge_loaded_weights();
-    }
-  }
-
-  virtual void prepare_expert_weight(int32_t layer_id,
-                                     const std::vector<int32_t>& expert_ids) {
-    return;
-  }
-  virtual void update_expert_weight(int32_t layer_id) { return; }
-
-  virtual layer::NpuLmHead get_npu_lm_head() { return npu_lm_head_; }
-
-  virtual void set_npu_lm_head(layer::NpuLmHead& head) {
-    if (load_lm_head_from_target_) {
-      npu_lm_head_ = head;
     }
   }
 
@@ -557,18 +493,7 @@ class QWen3Eagle3ForCausalLMImpl : public torch::nn::Module {
 
   virtual void set_npu_word_embedding(
       layer::NpuWordEmbedding& npu_word_embedding) {
-    if (owns_word_embedding_) {
-      return;  // draft checkpoint provides its own target-vocab embedding
-    }
     model_->set_npu_word_embedding(npu_word_embedding);
-  }
-
-  virtual void set_restored_npu_word_embedding(
-      layer::NpuWordEmbedding& npu_word_embedding) {
-    if (owns_word_embedding_) {
-      return;  // draft checkpoint provides its own target-vocab embedding
-    }
-    model_->set_restored_npu_word_embedding(npu_word_embedding);
   }
 
  protected:
@@ -606,13 +531,8 @@ class QWen3Eagle3ForCausalLMImpl : public torch::nn::Module {
   }
 
   QWen3Eagle3Model model_{nullptr};
-  int device_id_ = 0;
   torch::Device device_;
   torch::Dtype dtype_;
-  bool tie_word_embeddings_{false};
-  bool load_lm_head_from_target_{false};
-  bool owns_word_embedding_{false};
-  layer::NpuLmHead npu_lm_head_{nullptr};
 };
 TORCH_MODULE(QWen3Eagle3ForCausalLM);
 

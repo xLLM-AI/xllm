@@ -46,7 +46,7 @@ using RecModelFactory =
     std::function<std::unique_ptr<RecModel>(const ModelContext& context)>;
 
 using CausalVLMFactory =
-    std::function<std::unique_ptr<CausalVLM>(const ModelContext& context)>;
+    std::function<std::unique_ptr<CausalLM>(const ModelContext& context)>;
 
 using DiTModelFactory =
     std::function<std::unique_ptr<DiTModel>(const DiTModelContext& context)>;
@@ -95,8 +95,6 @@ using MtpArgsAdapter =
 
 struct MtpModelCapabilities {
   bool native_draft_requires_accepted_span_replay = false;
-  bool native_draft_owns_embedding_and_lm_head = false;
-  bool python_draft_owns_embedding_and_lm_head = false;
 };
 
 // TODO: add default args loader.
@@ -192,8 +190,6 @@ class ModelRegistry {
 
   static void register_dcp_capability(const std::string& name);
   static bool supports_dcp(const std::string& name);
-
-  static void register_mtp_shared_weight_owner(const std::string& name);
 
   static void register_mtp_args_adapter(const std::string& name,
                                         MtpArgsAdapter adapter);
@@ -293,7 +289,7 @@ std::unique_ptr<CausalLM> create_llm_model(const ModelContext& context);
 
 std::unique_ptr<RecModel> create_rec_model(const ModelContext& context);
 
-std::unique_ptr<CausalVLM> create_vlm_model(const ModelContext& context);
+std::unique_ptr<CausalLM> create_vlm_model(const ModelContext& context);
 
 std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context);
 
@@ -306,7 +302,7 @@ std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context);
           ModelClass model(context);                               \
           model->eval();                                           \
           return std::make_unique<xllm::CausalLMImpl<ModelClass>>( \
-              std::move(model), context.get_tensor_options());     \
+              std::move(model), context);                          \
         } __VA_OPT__(, ) __VA_ARGS__);                             \
     return true;                                                   \
   }()
@@ -349,7 +345,7 @@ std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context);
           ModelClass model(context);                                           \
           model->eval();                                                       \
           return std::make_unique<xllm::CausalRecImpl<ModelClass>>(            \
-              std::move(model), context.get_tensor_options());                 \
+              std::move(model), context);                                      \
         });                                                                    \
     return true;                                                               \
   }()
@@ -365,7 +361,7 @@ std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context);
           ModelClass model(context);                                 \
           model->eval();                                             \
           return std::make_unique<xllm::GenericRecImpl<ModelClass>>( \
-              std::move(model), context.get_tensor_options());       \
+              std::move(model), context);                            \
         });                                                          \
     return true;                                                     \
   }()
@@ -377,11 +373,13 @@ std::unique_ptr<DiTModel> create_dit_model(const DiTModelContext& context);
     VarName, ModelType, ModelClass, ...)                            \
   const bool VarName##_registered = []() {                          \
     ::xllm::ModelRegistry::register_causalvlm_factory(              \
-        #ModelType, [](const ::xllm::ModelContext& context) {       \
+        #ModelType,                                                 \
+        [](const ::xllm::ModelContext& context)                     \
+            -> std::unique_ptr<::xllm::CausalLM> {                  \
           ModelClass model(context);                                \
           model->eval();                                            \
           return std::make_unique<xllm::CausalVLMImpl<ModelClass>>( \
-              std::move(model), context.get_tensor_options());      \
+              std::move(model), context);                           \
         } __VA_OPT__(, ) __VA_ARGS__);                              \
     return true;                                                    \
   }()

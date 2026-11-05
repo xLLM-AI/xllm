@@ -22,6 +22,7 @@ limitations under the License.
 #include <memory>
 #include <vector>
 
+#include "core/framework/model/lm_head_owner.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model/rec_model_params.h"
 #include "core/framework/model_context/model_context.h"
@@ -32,18 +33,22 @@ limitations under the License.
 
 namespace xllm {
 
-template <typename ModelType>
-class GenericRecImplBase : public torch::nn::Module {
- public:
-  explicit GenericRecImplBase(const ModelContext& context) {
-    const auto& args = context.get_model_args();
-    tie_word_embeddings_ = args.tie_word_embeddings();
-    const float denom =
-        std::sqrt(static_cast<float>(std::max<int64_t>(1, args.hidden_size())));
-    scale_factor_ = denom > 0.0f ? (1.0f / denom) : 1.0f;
+// T5 convention: the tied vocabulary head multiplies the decoder output by
+// 1/sqrt(hidden_size). Shared by the stacked and flat OneRec decoders.
+inline float t5_head_scale(int64_t hidden_size) {
+  return 1.0f /
+         std::sqrt(static_cast<float>(std::max<int64_t>(1, hidden_size)));
+}
 
+template <typename ModelType>
+class GenericRecImplBase : public torch::nn::Module,
+                           public detail::LmHeadOwner<> {
+ public:
+  using HeadOwner = detail::LmHeadOwner<>;
+
+  explicit GenericRecImplBase(const ModelContext& context) {
     model_ = register_module("model", ModelType(context));
-    lm_head_ = register_module("lm_head", layer::LmHead(context));
+    this->init_lm_head(*this, context);
   }
 
   virtual ModelOutput forward(const torch::Tensor& tokens,
@@ -53,42 +58,23 @@ class GenericRecImplBase : public torch::nn::Module {
     return model_->forward(tokens, positions, kv_caches, input_params);
   }
 
-  virtual torch::Tensor logits(const torch::Tensor& hidden_states,
-                               const torch::Tensor& selected_idxes) {
-    auto h = hidden_states;
-    if (tie_word_embeddings_) {
-      h = hidden_states * scale_factor_;
+  void load_lm_head_weights(const StateDict& state_dict,
+                            layer::LmHead& head,
+                            bool tie_word_embeddings) override {
+    if (tie_word_embeddings) {
+      head->load_state_dict(state_dict.get_dict_with_prefix("model.shared."));
+    } else {
+      head->load_state_dict(state_dict.get_dict_with_prefix("lm_head."));
     }
-    if (selected_idxes.defined()) {
-      h = h.index_select(/*dim=*/0, selected_idxes);
-    }
-    return lm_head_(h);
-  }
-
-  virtual torch::Tensor pooler(const torch::Tensor& hidden_states,
-                               const torch::Tensor& selected_idxes) {
-    if (selected_idxes.defined()) {
-      return hidden_states.index_select(/*dim=*/0, selected_idxes);
-    }
-    return hidden_states;
   }
 
   virtual void load_model(std::unique_ptr<ModelLoader> loader,
                           std::string prefix = "model.") {
+    HeadOwner::load_lm_head_weights(loader);
     for (const auto& state_dict : loader->get_state_dicts()) {
       model_->load_state_dict(state_dict->get_dict_with_prefix(prefix));
-      if (tie_word_embeddings_) {
-        lm_head_->load_state_dict(
-            state_dict->get_dict_with_prefix(prefix + "shared."));
-      } else {
-        lm_head_->load_state_dict(state_dict->get_dict_with_prefix("lm_head."));
-      }
     }
   }
-
-  virtual layer::LmHead get_lm_head() { return lm_head_; }
-
-  virtual void set_lm_head(layer::LmHead& head) { lm_head_ = head; }
 
   virtual layer::WordEmbedding get_word_embedding() {
     return model_->get_word_embedding();
@@ -99,11 +85,7 @@ class GenericRecImplBase : public torch::nn::Module {
   }
 
  protected:
-  float scale_factor_ = 1.0f;
-  bool tie_word_embeddings_ = false;
-
   ModelType model_{nullptr};
-  layer::LmHead lm_head_{nullptr};
 };
 
 }  // namespace xllm

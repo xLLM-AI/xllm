@@ -255,13 +255,10 @@ REGISTER_MODEL_BACKEND(glm5_next_mtp, "llm");
 REGISTER_MODEL_ARGS_LOADER(glm5_next, &glm5_next_args::load_model_args);
 REGISTER_MODEL_ARGS_LOADER(glm5_next_mtp, &glm5_next_args::load_model_args);
 
-// Exported MTP checkpoints contain their own embedding and LM head weights.
 const bool glm5_next_mtp_capabilities_registered = []() {
   MtpModelCapabilities capabilities;
   capabilities.native_draft_requires_accepted_span_replay = true;
-  capabilities.python_draft_owns_embedding_and_lm_head = true;
   ModelRegistry::register_mtp_capabilities("glm5_next_mtp", capabilities);
   return true;
 }();
-
 }  // namespace xllm

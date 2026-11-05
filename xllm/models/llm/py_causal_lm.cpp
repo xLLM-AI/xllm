@@ -49,21 +49,39 @@ namespace py = pybind11;
 
 namespace xllm {
 
-namespace detail {
+namespace {
 
-void share_python_model_weights(py::object& draft_model,
-                                const py::object& target_model) {
-  // Keep the draft's own head/embedding when the checkpoint ships them (DSpark
-  // carries a trained mask-token basis); borrow the target's only when None.
+void share_python_lm_head(py::object& draft_model,
+                          const py::object& target_model) {
   if (draft_model.attr("lm_head").is_none()) {
     draft_model.attr("lm_head") = target_model.attr("lm_head");
   }
-  py::object draft_body = draft_model.attr("model");
-  py::object target_body = target_model.attr("model");
-  if (draft_body.attr("embed_tokens").is_none()) {
-    draft_body.attr("embed_tokens") = target_body.attr("embed_tokens");
-  }
 }
+
+void share_python_embed_tokens(py::object& draft_model,
+                               const py::object& target_model) {
+  py::object draft_body = draft_model.attr("model");
+  if (!draft_body.attr("embed_tokens").is_none()) {
+    return;
+  }
+  draft_body.attr("embed_tokens") =
+      target_model.attr("model").attr("embed_tokens");
+}
+
+PyCausalLM* share_target_or_warn(CausalLM& target, const char* what) {
+  auto* target_model = dynamic_cast<PyCausalLM*>(&target);
+  if (target_model == nullptr) {
+    LOG(WARNING) << "Cannot share " << what
+                 << ": target model is not a PyCausalLM; draft will keep its "
+                    "own weights.";
+    return nullptr;
+  }
+  return target_model;
+}
+
+}  // namespace
+
+namespace detail {
 
 int64_t python_mega_moe_max_num_tokens_per_rank(int64_t max_seqs_per_batch,
                                                 int64_t num_speculative_tokens,
@@ -706,15 +724,22 @@ void PyCausalLM::eplb_wait_batch_isend_irecv() {
 #endif
 }
 
-bool PyCausalLM::share_weights_from(CausalLM& source) {
-  auto* source_model = dynamic_cast<PyCausalLM*>(&source);
-  if (source_model == nullptr) {
-    return false;
+void PyCausalLM::share_lm_head(CausalLM& target) {
+  auto* target_model = share_target_or_warn(target, "lm_head");
+  if (target_model == nullptr) {
+    return;
   }
-
   py::gil_scoped_acquire gil;
-  detail::share_python_model_weights(py_model_, source_model->py_model_);
-  return true;
+  share_python_lm_head(py_model_, target_model->py_model_);
+}
+
+void PyCausalLM::share_embed_tokens(CausalLM& target) {
+  auto* target_model = share_target_or_warn(target, "embed_tokens");
+  if (target_model == nullptr) {
+    return;
+  }
+  py::gil_scoped_acquire gil;
+  share_python_embed_tokens(py_model_, target_model->py_model_);
 }
 
 }  // namespace xllm

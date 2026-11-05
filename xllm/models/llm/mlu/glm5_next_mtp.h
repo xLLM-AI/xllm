@@ -45,18 +45,45 @@ class Glm5NextMtpForCausalLMImpl final
               CHECK_EQ(args.n_layers(), 1);
               CHECK_EQ(args.num_nextn_predict_layers(), 1);
               return context;
-            }()) {}
+            }()),
+        mtp_layer_prefix_(
+            "layers." +
+            std::to_string(context.get_model_args().mtp_start_layer_idx()) +
+            ".") {}
 
   void load_model(std::unique_ptr<ModelLoader> loader,
                   std::string prefix = "model.") override {
+    LlmForCausalLMImplBase<DeepseekMtpModel>::load_lm_head_weights(loader);
+
     const std::vector<std::string> prefixes{"model.language_model.", prefix};
+    bool embedding_loaded = false;
     for (const auto& state_dict : loader->get_state_dicts()) {
       // The appended layer lives inside the target checkpoint, so try the
       // multimodal language-model root before the plain model root.
       StateDict model_state = state_dict->get_dict_with_prefix(prefixes);
       this->model_->load_state_dict(model_state);
+      StateDict embedding_state =
+          model_state.get_dict_with_prefix(mtp_layer_prefix_ + "embed_tokens.");
+      this->model_->get_word_embedding()->load_state_dict(embedding_state);
+      embedding_loaded |= embedding_state.has("weight");
     }
+    CHECK(embedding_loaded) << "Native MLU GLM5 MTP checkpoint is missing "
+                               "appended-layer embed_tokens.weight";
     this->model_->verify_loaded_weights();
+  }
+
+  void load_lm_head_weights(const StateDict& state_dict,
+                            layer::LmHead& head,
+                            bool tie_word_embeddings) override {
+    const std::string suffix =
+        tie_word_embeddings ? "embed_tokens." : "shared_head.head.";
+    const std::vector<std::string> prefixes{
+        "model.language_model." + mtp_layer_prefix_ + suffix,
+        "model." + mtp_layer_prefix_ + suffix};
+    head->load_state_dict(state_dict.get_dict_with_prefix(prefixes));
+    CHECK(head->is_weight_loaded())
+        << "Native MLU GLM5 MTP checkpoint is missing appended-layer "
+           "shared_head.head (lm_head) weights";
   }
 
   bool requires_graph_forward_metadata() override { return true; }
@@ -73,6 +100,9 @@ class Glm5NextMtpForCausalLMImpl final
     CHECK(graph_state != nullptr) << "GLM5 requires per-graph metadata state";
     graph_state->prepare(positions, params);
   }
+
+ private:
+  std::string mtp_layer_prefix_;
 };
 TORCH_MODULE(Glm5NextMtpForCausalLM);
 

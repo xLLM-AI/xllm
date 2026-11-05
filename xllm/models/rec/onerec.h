@@ -18,6 +18,7 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
+#include <cmath>
 #include <string>
 #include <type_traits>
 #include <unordered_set>
@@ -35,6 +36,7 @@ class OneRecModelImpl : public torch::nn::Module {
   explicit OneRecModelImpl(const ModelContext& context) {
     hidden_size_ = context.get_model_args().hidden_size();
     options_ = context.get_tensor_options();
+    head_scale_ = t5_head_scale(hidden_size_);
     shared_ = register_module("shared", layer::WordEmbedding(context));
   }
 
@@ -72,6 +74,10 @@ class OneRecModelImpl : public torch::nn::Module {
       }
     }
 
+    // T5 convention: the tied vocabulary head multiplies the decoder output
+    // by 1/sqrt(hidden_size). Encoder outputs keep their raw scale for the
+    // cross-attention cache.
+    hidden_states = hidden_states * head_scale_;
     return ModelOutput(hidden_states);
   }
 
@@ -173,6 +179,7 @@ class OneRecModelImpl : public torch::nn::Module {
 
   torch::TensorOptions options_;
   int64_t hidden_size_ = 0;
+  float head_scale_ = 1.0f;
   layer::WordEmbedding shared_{nullptr};
 };
 TORCH_MODULE(OneRecModel);
@@ -185,30 +192,14 @@ class OneRecForConditionalGenerationImpl
 
   void load_model(std::unique_ptr<ModelLoader> loader,
                   std::string prefix = "model.") override {
+    GenericRecImplBase<OneRecModel>::HeadOwner::load_lm_head_weights(loader);
+
     for (const auto& state_dict : loader->get_state_dicts()) {
       StateDict model_state_dict = state_dict->get_dict_with_prefix(prefix);
       if (model_state_dict.size() == 0) {
         model_state_dict = *state_dict;
       }
       model_->load_state_dict(model_state_dict);
-
-      if (tie_word_embeddings_) {
-        auto shared_dict = model_state_dict.get_dict_with_prefix("shared.");
-        if (shared_dict.size() == 0) {
-          shared_dict = state_dict->get_dict_with_prefix("shared.");
-        }
-        if (shared_dict.size() != 0) {
-          lm_head_->load_state_dict(shared_dict);
-        }
-      } else {
-        auto lm_head_dict = model_state_dict.get_dict_with_prefix("lm_head.");
-        if (lm_head_dict.size() == 0) {
-          lm_head_dict = state_dict->get_dict_with_prefix("lm_head.");
-        }
-        if (lm_head_dict.size() != 0) {
-          lm_head_->load_state_dict(lm_head_dict);
-        }
-      }
     }
   }
 };

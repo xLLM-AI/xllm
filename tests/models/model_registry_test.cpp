@@ -41,7 +41,7 @@ CausalLMFactory unused_lm_factory() {
 }
 
 CausalVLMFactory unused_vlm_factory() {
-  return [](const ModelContext& /*context*/) -> std::unique_ptr<CausalVLM> {
+  return [](const ModelContext& /*context*/) -> std::unique_ptr<CausalLM> {
     return nullptr;
   };
 }

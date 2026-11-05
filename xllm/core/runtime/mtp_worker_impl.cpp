@@ -894,66 +894,6 @@ bool MTPWorkerImpl<TargetInput>::init_model(
         ModelRegistry::get_mtp_capabilities(resolved_draft_model_name);
     const bool is_python_draft = ModelConfig::is_python_model_impl(
         draft_impl_->context_.get_model_impl());
-    const bool use_tp1_draft_body =
-        options_.enable_mtp_draft_body_tp1() &&
-        combined_draft_execution_path_ ==
-            mtp_async::CombinedDraftExecutionPath::QWEN3_5_PAGED_ATTENTION;
-    const bool draft_owns_shared_weights =
-        use_tp1_draft_body ||
-        (is_python_draft
-             ? draft_capabilities.python_draft_owns_embedding_and_lm_head
-             : draft_capabilities.native_draft_owns_embedding_and_lm_head);
-#if defined(USE_MLU)
-    if (!is_python_draft && !use_tp1_draft_body &&
-        !uses_embedded_eagle3_draft()) {
-      if (!draft_impl_->context_.get_model_args().embedding_mode() &&
-          share_target_lm_head_with_draft() &&
-          !draft_impl_->get_lm_head()->is_weight_loaded()) {
-        auto head = impl_->get_lm_head();
-        draft_impl_->set_lm_head(head);
-      }
-      if (!draft_impl_->get_word_embedding()->is_weight_loaded()) {
-        auto embedding = impl_->get_word_embedding();
-        draft_impl_->set_word_embedding(embedding);
-      }
-    } else
-#endif
-        if (!draft_owns_shared_weights) {
-      const bool python_weights_shared =
-          draft_impl_->share_weights_from(*impl_);
-      if (!python_weights_shared) {
-        const bool share_lm_head = share_target_lm_head_with_draft();
-#if defined(USE_NPU)
-        if (::xllm::KernelConfig::get_instance().npu_kernel_backend() !=
-            "TORCH") {
-          if (share_lm_head) {
-            auto head = impl_->get_npu_lm_head();
-            draft_impl_->set_npu_lm_head(head);
-          }
-          auto word_embedding = impl_->get_npu_word_embedding();
-          if (impl_->has_restored_npu_word_embedding()) {
-            draft_impl_->set_restored_npu_word_embedding(word_embedding);
-          } else {
-            draft_impl_->set_npu_word_embedding(word_embedding);
-          }
-        } else {
-          if (share_lm_head) {
-            auto head = impl_->get_lm_head();
-            draft_impl_->set_lm_head(head);
-          }
-          auto word_embedding = impl_->get_word_embedding();
-          draft_impl_->set_word_embedding(word_embedding);
-        }
-#else
-        if (share_lm_head) {
-          auto head = impl_->get_lm_head();
-          draft_impl_->set_lm_head(head);
-        }
-        auto word_embedding = impl_->get_word_embedding();
-        draft_impl_->set_word_embedding(word_embedding);
-#endif
-      }
-    }
     if (impl_->get_status() != WorkerImpl::Status::UNINITIALIZED) {
       // Resolve tail-extend vs accepted-span replay once both models have
       // loaded, before embedding/KV cache allocation.

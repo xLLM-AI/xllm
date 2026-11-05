@@ -20,7 +20,9 @@ namespace layer {
 WordEmbeddingLoader::WordEmbeddingLoader(uint64_t weight_count,
                                          const ModelContext& context,
                                          LoadMode mode)
-    : BaseLoader(weight_count, context, mode) {}
+    : BaseLoader(weight_count, context, mode) {
+  init_dummy_weight(0, context.get_tensor_options());
+}
 
 void WordEmbeddingLoader::load_state_dict(const StateDict& state_dict) {
   if (dp_size_ > 1 || cp_size_ > 1) {
@@ -46,8 +48,7 @@ void WordEmbeddingLoader::load_state_dict(const StateDict& state_dict) {
 
 void WordEmbeddingLoader::verify_loaded_weights(
     const std::string& weight_str) const {
-  CHECK(working_tensors()[0].sizes() != std::vector<int64_t>({1}))
-      << "weight is not loaded for " << weight_str;
+  CHECK(is_weight_loaded()) << "weight is not loaded for " << weight_str;
 }
 
 }  // namespace layer

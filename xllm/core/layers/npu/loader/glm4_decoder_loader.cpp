@@ -26,17 +26,9 @@ Glm4DecoderLoader::Glm4DecoderLoader(uint64_t weight_count,
                                      const ModelContext& context,
                                      LoadMode mode)
     : BaseLoader(weight_count, context, mode) {
-  auto options = context.get_tensor_options();
-  if (load_to_host()) {
-    auto host_options =
-        torch::TensorOptions().dtype(options.dtype()).device(torch::kCPU);
-    for (int i = 0; i < weight_count; ++i) {
-      working_tensors()[i] = torch::zeros({1}, host_options);
-    }
-  } else {
-    for (int i = 0; i < weight_count; ++i) {
-      working_tensors()[i] = torch::zeros({1}).to(options);
-    }
+  const auto& options = context.get_tensor_options();
+  for (uint64_t i = 0; i < weight_count; ++i) {
+    init_dummy_weight(static_cast<int>(i), options);
   }
 }
 

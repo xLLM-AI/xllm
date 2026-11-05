@@ -26,33 +26,42 @@ namespace xllm {
 class ModelParamsView;
 struct ModelGraphMetadataState;
 class KVCache;
+class StateDict;
 
 namespace layer {
 class LmHead;
 class WordEmbedding;
 #if defined(USE_NPU)
-class NpuLmHead;
 class NpuWordEmbedding;
+class NpuLmHead;
 #endif
 }  // namespace layer
 
 namespace detail {
+
+// The macro must expand to a real virtual override: a member function
+// template would hide the base virtual and silently dispatch base defaults
+// through base pointers.
+#define XLLM_FORWARD_OPTIONAL(ModelType, Base, trait, hook, ret, sig, args) \
+  ret hook sig override {                                                   \
+    if constexpr (trait<ModelType>::value) {                                \
+      return model_->hook args;                                             \
+    } else {                                                                \
+      return Base::hook args;                                               \
+    }                                                                       \
+  }
+
+// Family models that host a vocabulary head expose logits(h, idxes, out).
 template <typename T, typename = void>
-struct has_get_lm_head : std::false_type {};
+struct has_lm_head_logits : std::false_type {};
 
 template <typename T>
-struct has_get_lm_head<T,
-                       std::void_t<decltype(std::declval<T>()->get_lm_head())>>
+struct has_lm_head_logits<T,
+                          std::void_t<decltype(std::declval<T>()->logits(
+                              std::declval<const torch::Tensor&>(),
+                              std::declval<const torch::Tensor&>(),
+                              std::declval<torch::Tensor&>()))>>
     : std::true_type {};
-
-template <typename T, typename = void>
-struct has_set_lm_head : std::false_type {};
-
-template <typename T>
-struct has_set_lm_head<T,
-                       std::void_t<decltype(std::declval<T>()->set_lm_head(
-                           std::declval<layer::LmHead&>()))>> : std::true_type {
-};
 
 template <typename T, typename = void>
 struct has_get_word_embedding : std::false_type {};
@@ -63,6 +72,20 @@ struct has_get_word_embedding<
     std::void_t<decltype(std::declval<T>()->get_word_embedding())>>
     : std::true_type {};
 
+// Owner-hosting families can adopt a target head: adopt_lm_head(host, head)
+// exists only on LmHeadOwner hosts. Families that delegate their head to a
+// nested language model (e.g. VLM wrappers) are excluded — the head channel
+// for them is their forwarded get_npu_lm_head()/get_lm_head().
+template <typename T, typename = void>
+struct has_adopt_lm_head : std::false_type {};
+
+template <typename T>
+struct has_adopt_lm_head<T,
+                         std::void_t<decltype(std::declval<T>()->adopt_lm_head(
+                             std::declval<torch::nn::Module&>(),
+                             std::declval<layer::LmHead>()))>>
+    : std::true_type {};
+
 template <typename T, typename = void>
 struct has_set_word_embedding : std::false_type {};
 
@@ -71,17 +94,6 @@ struct has_set_word_embedding<
     T,
     std::void_t<decltype(std::declval<T>()->set_word_embedding(
         std::declval<layer::WordEmbedding&>()))>> : std::true_type {};
-
-template <typename T, typename = void>
-struct has_logits_with_hidden : std::false_type {};
-
-template <typename T>
-struct has_logits_with_hidden<T,
-                              std::void_t<decltype(std::declval<T>()->logits(
-                                  std::declval<const torch::Tensor&>(),
-                                  std::declval<const torch::Tensor&>(),
-                                  std::declval<torch::Tensor&>()))>>
-    : std::true_type {};
 
 template <typename T, typename = void>
 struct has_lazy_load_model : std::false_type {};
@@ -148,6 +160,25 @@ struct has_start_expert_weight_transfer<
         std::declval<int32_t>()))>> : std::true_type {};
 
 template <typename T, typename = void>
+struct has_prepare_expert_weight : std::false_type {};
+
+template <typename T>
+struct has_prepare_expert_weight<
+    T,
+    std::void_t<decltype(std::declval<T>()->prepare_expert_weight(
+        std::declval<int32_t>(),
+        std::declval<const std::vector<int32_t>&>()))>> : std::true_type {};
+
+template <typename T, typename = void>
+struct has_update_expert_weight : std::false_type {};
+
+template <typename T>
+struct has_update_expert_weight<
+    T,
+    std::void_t<decltype(std::declval<T>()->update_expert_weight(
+        std::declval<int32_t>()))>> : std::true_type {};
+
+template <typename T, typename = void>
 struct has_is_hybrid_linear_attention : std::false_type {};
 
 template <typename T>
@@ -198,24 +229,6 @@ struct has_pooler<T,
 
 #if defined(USE_NPU)
 template <typename T, typename = void>
-struct has_get_npu_lm_head : std::false_type {};
-
-template <typename T>
-struct has_get_npu_lm_head<
-    T,
-    std::void_t<decltype(std::declval<T>()->get_npu_lm_head())>>
-    : std::true_type {};
-
-template <typename T, typename = void>
-struct has_set_npu_lm_head : std::false_type {};
-
-template <typename T>
-struct has_set_npu_lm_head<
-    T,
-    std::void_t<decltype(std::declval<T>()->set_npu_lm_head(
-        std::declval<layer::NpuLmHead&>()))>> : std::true_type {};
-
-template <typename T, typename = void>
 struct has_get_npu_word_embedding : std::false_type {};
 
 template <typename T>
@@ -224,14 +237,26 @@ struct has_get_npu_word_embedding<
     std::void_t<decltype(std::declval<T>()->get_npu_word_embedding())>>
     : std::true_type {};
 
+// Family models expose their vocabulary head through these accessors.
 template <typename T, typename = void>
-struct has_restored_npu_word_embedding : std::false_type {};
+struct has_family_get_npu_lm_head : std::false_type {};
 
 template <typename T>
-struct has_restored_npu_word_embedding<
+struct has_family_get_npu_lm_head<
     T,
-    std::void_t<decltype(std::declval<T>()->has_restored_npu_word_embedding())>>
+    std::void_t<decltype(std::declval<T>()->get_npu_lm_head())>>
     : std::true_type {};
+
+// Owner-hosting families can adopt a target NPU head (see has_adopt_lm_head).
+template <typename T, typename = void>
+struct has_adopt_npu_lm_head : std::false_type {};
+
+template <typename T>
+struct has_adopt_npu_lm_head<
+    T,
+    std::void_t<decltype(std::declval<T>()->adopt_lm_head(
+        std::declval<torch::nn::Module&>(),
+        std::declval<layer::NpuLmHead>()))>> : std::true_type {};
 
 template <typename T, typename = void>
 struct has_set_npu_word_embedding : std::false_type {};
@@ -240,15 +265,6 @@ template <typename T>
 struct has_set_npu_word_embedding<
     T,
     std::void_t<decltype(std::declval<T>()->set_npu_word_embedding(
-        std::declval<layer::NpuWordEmbedding&>()))>> : std::true_type {};
-
-template <typename T, typename = void>
-struct has_set_restored_npu_word_embedding : std::false_type {};
-
-template <typename T>
-struct has_set_restored_npu_word_embedding<
-    T,
-    std::void_t<decltype(std::declval<T>()->set_restored_npu_word_embedding(
         std::declval<layer::NpuWordEmbedding&>()))>> : std::true_type {};
 
 template <typename T, typename = void>
@@ -326,6 +342,23 @@ struct has_has_dspark_confidence_head<
     T,
     std::void_t<decltype(std::declval<T>()->has_dspark_confidence_head())>>
     : std::true_type {};
+
+// Whether the holder's weight is loaded; an empty holder counts as not
+// loaded, so its owner may adopt the target's.
+template <typename Holder>
+bool weight_loaded(const Holder& holder) {
+  return !holder.is_empty() && holder->is_weight_loaded();
+}
+
+// Owner-hosting families expose tie_lm_head_weights(embedding).
+template <typename T, typename = void>
+struct has_tie_lm_head_weights : std::false_type {};
+
+template <typename T>
+struct has_tie_lm_head_weights<
+    T,
+    std::void_t<decltype(std::declval<T>()->tie_lm_head_weights(
+        std::declval<layer::WordEmbedding>()))>> : std::true_type {};
 
 }  // namespace detail
 }  // namespace xllm

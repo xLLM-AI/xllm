@@ -39,7 +39,6 @@ class Eagle3WorkerImpl final : public MTPWorkerImpl<TargetInput> {
 
   void check_draft_input_embedding(const torch::Tensor& embedding,
                                    const std::string& phase) const override;
-  bool share_target_lm_head_with_draft() const override { return false; }
 };
 
 }  // namespace xllm

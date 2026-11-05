@@ -133,12 +133,6 @@ class QWen3ModelImpl : public LlmModelImplBase<QWen3DecoderLayer> {
     has_restored_embed_tokens_ = true;
   }
 
-  bool has_restored_embed_tokens() const { return has_restored_embed_tokens_; }
-
-  bool has_restored_npu_word_embedding() const {
-    return has_restored_embed_tokens_;
-  }
-
   void verify_restored_embed_tokens(const std::string& prefix) const {
     if (has_restored_embed_tokens_) {
       restored_embed_tokens_->verify_loaded_weights(prefix + "embed_tokens.");
@@ -349,12 +343,10 @@ class QWen3ForCausalLMImpl : public LlmForCausalLMImplBase<QWen3Model> {
         h, torch::nn::functional::NormalizeFuncOptions().p(2).dim(1));
   }
 
-  bool has_restored_npu_word_embedding() const {
-    return model_->has_restored_npu_word_embedding();
-  }
-
   void load_model(std::unique_ptr<ModelLoader> loader,
                   std::string prefix = "model.") override {
+    load_lm_head_weights(loader);
+
     torch::Tensor global_rotation =
         load_optional_quarot_rotation(loader->model_weights_path());
     for (const auto& state_dict : loader->get_state_dicts()) {
@@ -369,33 +361,13 @@ class QWen3ForCausalLMImpl : public LlmForCausalLMImplBase<QWen3Model> {
         model_->load_restored_embed_tokens(
             model_state_dict, global_rotation, device_);
       }
-      if (!embedding_mode_) {
-        if (tie_word_embeddings) {
-          npu_lm_head_->load_state_dict(
-              state_dict->get_dict_with_prefix(std::vector<std::string>{
-                  prefix + "embed_tokens.", "embed_tokens."}));
-        } else {
-          npu_lm_head_->load_state_dict(
-              state_dict->get_dict_with_prefix("lm_head."));
-        }
-      }
     }
 
     model_->verify_loaded_weights(prefix);
     model_->verify_restored_embed_tokens(prefix);
-    if (!embedding_mode_) {
-      if (tie_word_embeddings) {
-        npu_lm_head_->verify_loaded_weights("embed_tokens.");
-      } else {
-        npu_lm_head_->verify_loaded_weights("lm_head.");
-      }
-    }
 
     model_->merge_loaded_weights();
     model_->merge_restored_embed_tokens();
-    if (!embedding_mode_) {
-      npu_lm_head_->merge_loaded_weights();
-    }
   }
 
   void lazy_load_model(std::unique_ptr<ModelLoader> loader,
@@ -418,32 +390,13 @@ class QWen3ForCausalLMImpl : public LlmForCausalLMImplBase<QWen3Model> {
         model_->load_restored_embed_tokens(
             model_state_dict, global_rotation, device_);
       }
-      if (!embedding_mode_) {
-        if (tie_word_embeddings) {
-          npu_lm_head_->load_state_dict(
-              state_dict->get_dict_with_prefix(prefix + "embed_tokens."));
-        } else {
-          npu_lm_head_->load_state_dict(
-              state_dict->get_dict_with_prefix("lm_head."));
-        }
-      }
     }
 
     model_->verify_loaded_weights(prefix);
     model_->verify_restored_embed_tokens(prefix);
-    if (!embedding_mode_) {
-      if (tie_word_embeddings) {
-        npu_lm_head_->verify_loaded_weights(prefix + "embed_tokens.");
-      } else {
-        npu_lm_head_->verify_loaded_weights("lm_head.");
-      }
-    }
 
     model_->merge_and_move_pinned_host();
     model_->merge_and_move_restored_embed_tokens();
-    if (!embedding_mode_) {
-      npu_lm_head_->merge_and_move_pinned_host();
-    }
 
     keep_host_weights = true;
   }

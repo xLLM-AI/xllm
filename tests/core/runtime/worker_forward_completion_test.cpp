@@ -66,17 +66,17 @@ struct ForwardObservation {
   bool weights_loaded = false;
 };
 
-class CompletionTestModel final : public CausalVLM {
+class CompletionTestBackbone final : public torch::nn::Module {
  public:
-  CompletionTestModel(const ModelContext& context,
-                      std::shared_ptr<ForwardObservation> observation)
+  CompletionTestBackbone(const ModelContext& context,
+                         std::shared_ptr<ForwardObservation> observation)
       : options_(context.get_tensor_options()),
         observation_(std::move(observation)) {}
 
   ModelOutput forward(const torch::Tensor& tokens,
                       const torch::Tensor& /*positions*/,
                       std::vector<KVCache>& /*kv_caches*/,
-                      const ModelParamsView& /*parameters*/) override {
+                      const ModelParamsView& /*parameters*/) {
     observation_->forward_saw_sampling_history =
         observation_->sampling_params != nullptr &&
         observation_->sampling_params->prefix_tokens().defined();
@@ -89,38 +89,41 @@ class CompletionTestModel final : public CausalVLM {
   }
 
   torch::Tensor logits(const torch::Tensor& /*hidden_states*/,
-                       const torch::Tensor& /*selected_idxes*/) override {
+                       const torch::Tensor& /*selected_idxes*/,
+                       torch::Tensor& /*out_hidden*/) {
     observation_->logits_saw_sampling_history =
         observation_->sampling_params != nullptr &&
         observation_->sampling_params->prefix_tokens().defined();
     return observation_->logits;
   }
 
-  void load_model(std::unique_ptr<ModelLoader> /*loader*/) override {
+  void load_model(std::unique_ptr<ModelLoader> /*loader*/) {
     observation_->weights_loaded = true;
   }
 
-  torch::Device device() const override { return options_.device(); }
+  MMDict get_multimodal_embeddings(const ModelParamsView& /*parameters*/) {
+    return {};
+  }
 
-  const torch::TensorOptions& options() const override { return options_; }
-
-  void prepare_expert_weight(
-      int32_t /*layer_id*/,
-      const std::vector<int32_t>& /*expert_ids*/) override {}
-
-  void update_expert_weight(int32_t /*layer_id*/) override {}
-
-  MMDict encode(const ModelParamsView& /*parameters*/) override { return {}; }
-
-  torch::Tensor get_input_embeddings(
-      const torch::Tensor& /*input_ids*/,
-      const ModelParamsView& /*input_params*/) override {
+  torch::Tensor get_input_embeddings(const torch::Tensor& /*input_ids*/,
+                                     const ModelParamsView& /*input_params*/) {
     return {};
   }
 
  private:
   torch::TensorOptions options_;
   std::shared_ptr<ForwardObservation> observation_;
+};
+
+class CompletionTestModel final
+    : public CausalVLMImpl<std::shared_ptr<CompletionTestBackbone>> {
+ public:
+  CompletionTestModel(const ModelContext& context,
+                      std::shared_ptr<ForwardObservation> observation)
+      : CausalVLMImpl<std::shared_ptr<CompletionTestBackbone>>(
+            std::make_shared<CompletionTestBackbone>(context,
+                                                     std::move(observation)),
+            context) {}
 };
 
 enum class WorkerKind : int8_t { LLM, VLM };

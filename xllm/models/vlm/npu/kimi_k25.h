@@ -28,6 +28,7 @@ limitations under the License.
 
 #include "core/framework/model/model_output.h"
 #include "core/framework/model/model_params_view.h"
+#include "core/framework/model/vlm_language_model_host.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/layers/npu/npu_kimik25_vision_encoder_layer_impl.h"
 #include "core/layers/npu/npu_lm_head_impl.h"
@@ -783,7 +784,10 @@ struct KimiK2_5_VLVideoInputs {
   torch::Tensor second_per_grid_ts;
 };
 
-class KimiK2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
+class KimiK2_5_VLForConditionalGenerationImpl
+    : public torch::nn::Module,
+      public ::xllm::detail::VlmLanguageModelHost<
+          npu::model::DeepseekV2ForCausalLM> {
  public:
   KimiK2_5_VLForConditionalGenerationImpl(const ModelContext& context)
       : model_args_(context.get_model_args()),
@@ -979,27 +983,7 @@ class KimiK2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
     return inputs_embeds;
   }
 
-  ModelOutput forward(const torch::Tensor& tokens,
-                      const torch::Tensor& positions,
-                      std::vector<KVCache>& kv_caches,
-                      const ModelParamsView& input_params) {
-    return language_model_->forward(tokens, positions, kv_caches, input_params);
-  }
-
   bool supports_mla_graph_kv_bucketing() const { return true; }
-
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) {
-    return language_model_->logits(hidden_states, seleted_idxes);
-  }
-
-  // Variant that also outputs hidden states for downstream processing
-  // (e.g., Eagle3 draft model aux hidden state capture).
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes,
-                       torch::Tensor& out_hidden) {
-    return language_model_->logits(hidden_states, seleted_idxes, out_hidden);
-  }
 
   void load_model(std::unique_ptr<ModelLoader> loader) {
     LOG(INFO) << "loading vit / projector weight...";
@@ -1031,24 +1015,9 @@ class KimiK2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
     if (!model_args_.encoder_embedding_mode()) {
       LOG(INFO) << "loading llm weight...";
       language_model_->load_model_with_prefixes(std::move(loader),
-                                                "language_model.model.",
-                                                "language_model.lm_head.");
+                                                "language_model.model.");
       LOG(INFO) << "loaded all weight.";
     }
-  }
-  layer::NpuLmHead get_npu_lm_head() {
-    return language_model_->get_npu_lm_head();
-  }
-  void set_npu_lm_head(layer::NpuLmHead& head) {
-    language_model_->set_npu_lm_head(head);
-  }
-
-  layer::NpuWordEmbedding get_npu_word_embedding() {
-    return language_model_->get_npu_word_embedding();
-  }
-
-  void set_npu_word_embedding(layer::NpuWordEmbedding& npu_word_embedding) {
-    language_model_->set_npu_word_embedding(npu_word_embedding);
   }
 
  private:
@@ -1057,7 +1026,6 @@ class KimiK2_5_VLForConditionalGenerationImpl : public torch::nn::Module {
 
   KimiK2_5_VisionTransformer visual_{nullptr};
   KimiK2_5_VisionPatchMerger mm_projector_{nullptr};
-  npu::model::DeepseekV2ForCausalLM language_model_{nullptr};
 };
 TORCH_MODULE(KimiK2_5_VLForConditionalGeneration);
 

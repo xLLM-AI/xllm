@@ -29,6 +29,7 @@ limitations under the License.
 #include "core/framework/model/causal_lm.h"
 #include "core/framework/model/causal_rec.h"
 #include "core/framework/model/generic_rec.h"
+#include "core/framework/model/lm_head_owner.h"
 #include "core/framework/model/rec_model.h"
 #include "core/framework/model_loader/hf_model_args.h"
 #include "core/framework/model_loader/hf_model_config.h"
@@ -41,6 +42,7 @@ limitations under the License.
 #include "core/util/json_reader.h"
 #include "core/util/utils.h"
 #include "models/model_registry.h"
+#include "tests/core/framework/lm_head_test_utils.h"
 
 namespace xllm {
 
@@ -64,9 +66,12 @@ static_assert(std::is_base_of_v<RecModel, CausalRec> &&
 static_assert(std::is_base_of_v<Model, RecModel>,
               "RecModel must expose input-independent model resources.");
 
-class DummyRecModelImpl final : public torch::nn::Module {
+class DummyRecModelImpl final : public torch::nn::Module,
+                                public detail::LmHeadOwner<> {
  public:
-  explicit DummyRecModelImpl(const ModelContext& /*context*/) {}
+  explicit DummyRecModelImpl(const ModelContext& context) {
+    init_lm_head(*this, context);
+  }
 
   ModelOutput forward(const torch::Tensor& tokens,
                       const torch::Tensor& positions,
@@ -82,13 +87,14 @@ class DummyRecModelImpl final : public torch::nn::Module {
     return hidden_states.index_select(/*dim=*/0, selected_idxes) * 2;
   }
 
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& selected_idxes) {
-    return hidden_states.index_select(/*dim=*/0, selected_idxes) * 3;
+  void load_model(std::unique_ptr<ModelLoader> loader) {
+    load_lm_head_weights(loader);
   }
 
-  void load_model(std::unique_ptr<ModelLoader> loader) {
-    UNUSED_PARAMETER(loader);
+  torch::Tensor logits(const torch::Tensor& hidden_states,
+                       const torch::Tensor& selected_idxes,
+                       torch::Tensor& out_hidden) {
+    return forward_lm_head(hidden_states, selected_idxes, out_hidden);
   }
 };
 TORCH_MODULE(DummyRecModel);
@@ -101,7 +107,8 @@ void expect_rec_factory_contract(const std::string& factory_name,
   RecModelFactory factory = ModelRegistry::get_rec_model_factory(factory_name);
   ASSERT_TRUE(static_cast<bool>(factory));
 
-  ModelContext context;
+  ModelContext context =
+      testutil::make_lm_test_context(/*hidden_size=*/1, /*vocab_size=*/1);
   std::unique_ptr<RecModel> rec_model = factory(context);
   ASSERT_NE(rec_model, nullptr);
   EXPECT_EQ(rec_model->model_kind(), expected_kind);
@@ -109,6 +116,11 @@ void expect_rec_factory_contract(const std::string& factory_name,
   Model& model = *rec_model;
   EXPECT_EQ(model.device(), torch::Device(torch::kCPU));
   EXPECT_EQ(model.options().dtype(), context.get_tensor_options().dtype());
+
+  // Head weight [[3]]: logits == selected hidden * 3.
+  model.load_model(std::make_unique<testutil::HeadOnlyModelLoader>(
+      3.0f *
+      torch::ones({1, 1}, torch::TensorOptions().dtype(torch::kFloat32))));
 
   RecModelParams rec_params;
   rec_params.embedding.input_embedding = torch::tensor({10.0f, 20.0f});

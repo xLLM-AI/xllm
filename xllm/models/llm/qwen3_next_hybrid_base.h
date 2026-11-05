@@ -27,6 +27,7 @@ limitations under the License.
 #include "core/common/flash_comm1_context.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/model/aux_hidden_capture.h"
+#include "core/framework/model/lm_head_owner.h"
 #include "core/framework/model/model_output.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/model_context/model_context.h"
@@ -35,7 +36,6 @@ limitations under the License.
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/layers/common/attention_mask.h"
 #include "core/layers/common/attention_metadata_builder.h"
-#include "core/layers/common/lm_head.h"
 #include "core/layers/common/qwen3_next_rms_norm.h"
 #include "core/layers/common/word_embedding.h"
 #if defined(USE_NPU)
@@ -322,11 +322,12 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
   AuxHiddenCapture aux_capture_;
 };
 
-class Qwen3HybridForCausalLMImplBase : public torch::nn::Module {
+class Qwen3HybridForCausalLMImplBase
+    : public torch::nn::Module,
+      public ::xllm::detail::LmHeadOwner<::xllm::layer::NpuLmHead> {
  public:
   explicit Qwen3HybridForCausalLMImplBase(const ModelContext& context) {
-    tie_word_embeddings_ = context.get_model_args().tie_word_embeddings();
-    lm_head_ = register_module("lm_head", layer::LmHead(context));
+    init_lm_head(*this, context);
   }
 
   // tokens: [num_tokens]
@@ -337,18 +338,6 @@ class Qwen3HybridForCausalLMImplBase : public torch::nn::Module {
                       std::vector<KVCache>& kv_caches,
                       const ModelParamsView& input_params) {
     return model_->forward(tokens, positions, kv_caches, input_params);
-  }
-
-  // hidden_states: [num_tokens, hidden_size]
-  // seleted_idxes: [num_tokens]
-  // returns: [num_tokens, vocab_size]
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) {
-    auto h = hidden_states;
-    if (seleted_idxes.defined()) {
-      h = h.index_select(/*dim=*/0, seleted_idxes);
-    }
-    return lm_head_(h);
   }
 
   // hidden_states: [num_tokens, hidden_size]
@@ -364,51 +353,20 @@ class Qwen3HybridForCausalLMImplBase : public torch::nn::Module {
   }
 
   void load_model(std::unique_ptr<ModelLoader> loader) {
-    load_model(std::move(loader), "model.", "lm_head.");
+    load_model(std::move(loader), "model.");
   }
 
   void load_model(std::unique_ptr<ModelLoader> loader,
                   const std::string& model_prefix) {
-    load_model(std::move(loader), model_prefix, "lm_head.");
-  }
-
-  void load_model(std::unique_ptr<ModelLoader> loader,
-                  const std::string& model_prefix,
-                  const std::string& lm_head_prefix) {
-    auto has_lm_head_weights = [](const StateDict& dict) {
-      return dict.get_tensor("weight").defined() ||
-             dict.get_tensor("qweight").defined();
-    };
-
+    load_lm_head_weights(loader);
     for (const auto& state_dict : loader->get_state_dicts()) {
       auto model_state_dict = state_dict->get_dict_with_prefix(model_prefix);
       model_->load_state_dict(model_state_dict);
-
-      auto lm_head_state_dict =
-          state_dict->get_dict_with_prefix(lm_head_prefix);
-      if (!has_lm_head_weights(lm_head_state_dict) && tie_word_embeddings_) {
-        auto tied_lm_head_state_dict =
-            model_state_dict.get_dict_with_prefix("embed_tokens.");
-        if (has_lm_head_weights(tied_lm_head_state_dict)) {
-          lm_head_state_dict = tied_lm_head_state_dict;
-        }
-      }
-      lm_head_->load_state_dict(lm_head_state_dict);
     }
     model_->verify_loaded_weights(model_prefix);
   }
 
-  virtual void prepare_expert_weight(int32_t layer_id,
-                                     const std::vector<int32_t>& expert_ids) {
-    return;
-  }
-  virtual void update_expert_weight(int32_t layer_id) { return; }
-
   bool is_hybrid_linear_attention() { return true; }
-
-  layer::LmHead get_lm_head() { return lm_head_; }
-
-  void set_lm_head(layer::LmHead& head) { lm_head_ = head; }
 
   layer::WordEmbedding get_word_embedding() {
     return model_->get_word_embedding();
@@ -423,8 +381,6 @@ class Qwen3HybridForCausalLMImplBase : public torch::nn::Module {
   }
 
  protected:
-  bool tie_word_embeddings_{false};
-  layer::LmHead lm_head_{nullptr};
   Qwen3HybridModelModulePtr model_;
 };
 

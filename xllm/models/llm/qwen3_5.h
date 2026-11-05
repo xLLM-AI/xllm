@@ -58,14 +58,8 @@ class Qwen3_5ForCausalLMImpl : public Qwen3NextForCausalLMImpl {
   }
 
   void load_model(std::unique_ptr<ModelLoader> loader) {
-    Qwen3NextForCausalLMImpl::load_model(
-        std::move(loader), "model.language_model.", "lm_head.");
-  }
-
-  void load_model(std::unique_ptr<ModelLoader> loader,
-                  const std::string& model_prefix) {
-    Qwen3NextForCausalLMImpl::load_model(
-        std::move(loader), model_prefix, "lm_head.");
+    Qwen3NextForCausalLMImpl::load_model(std::move(loader),
+                                         "model.language_model.");
   }
 };
 TORCH_MODULE(Qwen3_5ForCausalLM);

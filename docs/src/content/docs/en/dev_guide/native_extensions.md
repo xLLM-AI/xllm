@@ -68,13 +68,15 @@ and implementation family. Equal priorities keep the first registration.
 Model implementations use the same registration boundary. The built-in
 two-argument `REGISTER_CAUSAL_MODEL` and `REGISTER_CAUSAL_VLM_MODEL` macros
 remain the default native registrations, while an extension can register a
-direct subclass with `REGISTER_CAUSAL_LM` or `REGISTER_CAUSAL_VLM`:
+direct subclass with `REGISTER_CAUSAL_LM` or `REGISTER_CAUSAL_VLM`. Both
+macros require a `CausalLM` subclass; a VLM extension derives from
+`CausalVLMImpl<...>` (a `CausalLM` that also implements `CausalVLM`):
 
 ```cpp
 #include "models/model_registry.h"
 
 REGISTER_CAUSAL_LM(example_model, "custom", ExampleCausalLM, 100);
-REGISTER_CAUSAL_VLM(example_vlm, "custom", ExampleCausalVLM, 100);
+REGISTER_CAUSAL_VLM(example_vlm, "custom", ExampleVlmAdapter, 100);
 ```
 
 Start xLLM with the matching extension family, for example

@@ -352,29 +352,25 @@ class DeepseekV4ForCausalLMImpl final
 
   void load_model(std::unique_ptr<ModelLoader> loader,
                   std::string prefix = "model.") override {
+    LlmForCausalLMImplBase<DeepseekV4Model>::load_lm_head_weights(loader);
+
     for (const std::unique_ptr<StateDict>& state_dict :
          loader->get_state_dicts()) {
       std::unordered_map<std::string, torch::Tensor> remapped_dict;
-      std::unordered_map<std::string, torch::Tensor> lm_head_dict;
       for (auto it = state_dict->begin(); it != state_dict->end(); ++it) {
         remapped_dict[detail::normalize_model_parameter_name(
             it->first, prefix)] = it->second;
-        std::optional<std::string> lm_head_name =
-            detail::normalize_lm_head_parameter_name(it->first);
-        if (lm_head_name.has_value()) {
-          lm_head_dict[lm_head_name.value()] = it->second;
-        }
       }
 
       StateDict remapped_state_dict(remapped_dict);
       model_->load_state_dict(remapped_state_dict);
-      if (!lm_head_dict.empty()) {
-        lm_head_->load_state_dict(StateDict(lm_head_dict));
-      } else {
-        lm_head_->load_state_dict(
-            remapped_state_dict.get_dict_with_prefix("lm_head."));
-      }
     }
+  }
+
+  void load_lm_head_weights(const StateDict& state_dict,
+                            layer::LmHead& head,
+                            bool /*tie_word_embeddings*/) override {
+    detail::load_lm_head_from_normalized(state_dict, head, "lm_head.");
   }
 };
 TORCH_MODULE(DeepseekV4ForCausalLM);

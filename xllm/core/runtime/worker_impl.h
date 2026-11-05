@@ -324,51 +324,23 @@ class WorkerImpl {
   }
 
 #if defined(USE_NPU)
-  virtual layer::NpuLmHead get_npu_lm_head() {
-    return model()->get_npu_lm_head();
-  }
-
-  virtual void set_npu_lm_head(layer::NpuLmHead& head) {
-    model()->set_npu_lm_head(head);
-  }
-
-  virtual layer::NpuWordEmbedding get_npu_word_embedding() {
+  layer::NpuWordEmbedding get_npu_word_embedding() {
     return model()->get_npu_word_embedding();
-  }
-
-  virtual bool has_restored_npu_word_embedding() {
-    return model()->has_restored_npu_word_embedding();
-  }
-
-  virtual void set_npu_word_embedding(layer::NpuWordEmbedding& embedding) {
-    model()->set_npu_word_embedding(embedding);
-  }
-
-  virtual void set_restored_npu_word_embedding(
-      layer::NpuWordEmbedding& embedding) {
-    model()->set_restored_npu_word_embedding(embedding);
   }
 #endif
 
-  virtual layer::LmHead get_lm_head() { return model()->get_lm_head(); }
-
-  virtual void set_lm_head(layer::LmHead& head) { model()->set_lm_head(head); }
-
-  virtual layer::WordEmbedding get_word_embedding() {
+  layer::WordEmbedding get_word_embedding() {
     return model()->get_word_embedding();
   }
 
-  virtual void set_word_embedding(layer::WordEmbedding& embedding) {
-    model()->set_word_embedding(embedding);
-  }
-
-  bool share_weights_from(WorkerImpl& source) {
-    // Weight sharing is specific to CausalLM. Rec workers own their models in
-    // pipelines, so use model_ rather than the virtual model() accessor here.
-    if (model_ == nullptr || source.model_ == nullptr) {
-      return false;
+  // Adopt the target's vocabulary head and embedding when this worker's
+  // model has none of its own loaded.
+  void share_weights_from(WorkerImpl& target) {
+    if (model_ == nullptr || target.model_ == nullptr) {
+      return;
     }
-    return model_->share_weights_from(*source.model_);
+    model_->share_lm_head(*target.model_);
+    model_->share_embed_tokens(*target.model_);
   }
 
   bool enable_schedule_overlap() const {

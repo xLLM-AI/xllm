@@ -25,6 +25,7 @@ limitations under the License.
 
 #include "core/framework/model/model_output.h"
 #include "core/framework/model/model_params_view.h"
+#include "core/framework/model/vlm_language_model_host.h"
 #include "core/framework/model_context/model_context.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/layers/npu/npu_lm_head_impl.h"
@@ -39,7 +40,9 @@ limitations under the License.
 
 namespace xllm::npu::model {
 
-class Glm4vMoeForConditionalGenerationImpl : public torch::nn::Module {
+class Glm4vMoeForConditionalGenerationImpl
+    : public torch::nn::Module,
+      public ::xllm::detail::VlmLanguageModelHost<Glm4MoeForCausalLM> {
  public:
   Glm4vMoeForConditionalGenerationImpl(const ModelContext& context)
       : model_args_(context.get_model_args()),
@@ -160,18 +163,6 @@ class Glm4vMoeForConditionalGenerationImpl : public torch::nn::Module {
     return inputs_embeds;
   }
 
-  ModelOutput forward(const torch::Tensor& tokens,
-                      const torch::Tensor& positions,
-                      std::vector<KVCache>& kv_caches,
-                      const ModelParamsView& input_params) {
-    return language_model_->forward(tokens, positions, kv_caches, input_params);
-  }
-
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) {
-    return language_model_->logits(hidden_states, seleted_idxes);
-  }
-
   void load_model(std::unique_ptr<ModelLoader> loader) {
     for (const auto& state_dict : loader->get_state_dicts()) {
       visual_->load_state_dict(
@@ -185,28 +176,12 @@ class Glm4vMoeForConditionalGenerationImpl : public torch::nn::Module {
     }
   }
 
-  layer::NpuLmHead get_npu_lm_head() {
-    return language_model_->get_npu_lm_head();
-  }
-  void set_npu_lm_head(layer::NpuLmHead& head) {
-    language_model_->set_npu_lm_head(head);
-  }
-
-  layer::NpuWordEmbedding get_npu_word_embedding() {
-    return language_model_->get_npu_word_embedding();
-  }
-
-  void set_npu_word_embedding(layer::NpuWordEmbedding& npu_word_embedding) {
-    language_model_->set_npu_word_embedding(npu_word_embedding);
-  }
-
  private:
   ModelArgs model_args_;
   torch::TensorOptions options_;
   ProcessGroup* encoder_dp_group_ = nullptr;
   bool use_encoder_dp_ = false;
   Glm4VisionTransformer visual_{nullptr};
-  Glm4MoeForCausalLM language_model_{nullptr};
 };
 TORCH_MODULE(Glm4vMoeForConditionalGeneration);
 
