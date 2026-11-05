@@ -1695,13 +1695,12 @@ TEST(DisaggPDSchedulerTest, PendingReleaseDoesNotDelayFirstGeneration) {
     prefill.prefill_send_first_generation();
   }
   auto prefill_done = prefill.prefill_completion();
-  // Shorter than the release retry budget: handoff and local reclamation must
-  // finish while the release RPC is still awaiting its server-side completion.
   const std::future_status status =
-      prefill.wait_for_ready(prefill_done, std::chrono::seconds(1), &decode);
+      prefill_done.wait_for(std::chrono::seconds(1));
   EXPECT_EQ(status, std::future_status::ready);
   std::shared_ptr<Request> queued;
   if (status == std::future_status::ready) {
+    prefill.drain_request_releases();
     EXPECT_TRUE(local_healthy->server_ttft_seconds().has_value());
     if (local_healthy->server_ttft_seconds().has_value()) {
       EXPECT_GE(*local_healthy->server_ttft_seconds(), 3.0);
@@ -1709,7 +1708,7 @@ TEST(DisaggPDSchedulerTest, PendingReleaseDoesNotDelayFirstGeneration) {
     EXPECT_EQ(HISTOGRAM_server_time_to_first_token_latency_milliseconds.count(),
               server_ttft_count + 1);
     EXPECT_FALSE(remote_healthy->record_server_first_token());
-    EXPECT_TRUE(decode.pop_decode_request_for_test(&queued));
+    decode.pop_decode_request_for_test(&queued);
     EXPECT_EQ(queued, remote_healthy);
     EXPECT_EQ(remote_healthy->sequences()[0]->num_generated_tokens(), 1u);
     EXPECT_EQ(prefill_engine.block_manager_pool()->num_used_blocks()[0], 0u);

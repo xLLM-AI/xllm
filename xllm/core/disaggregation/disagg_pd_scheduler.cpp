@@ -983,7 +983,7 @@ void DisaggPDScheduler::prefill_send_first_generation() {
         req_to_channel_map_.erase(request->request_id());
       }
       output_dispatcher_->wait_completion();
-      release_request_blocks(request, /*cache_prefix=*/true);
+      enqueue_request_block_release(std::move(request), /*cache_prefix=*/true);
     }
   });
 }
