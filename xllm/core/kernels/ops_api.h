@@ -101,7 +101,8 @@ std::tuple<torch::Tensor, torch::Tensor> scaled_quantize(
 
 torch::Tensor scaled_matmul(ScaledMatmulParams& params);
 
-torch::Tensor apply_top_k_top_p(TopKPParams& params);
+// Updates params.logits in place, matching kernel::npu::top_k_top_p.
+void apply_top_k_top_p(TopKPParams& params);
 
 // Capability check only; does not mutate tensors or synchronize the device.
 bool supports_fused_logits_transform(const FusedLogitsTransformParams& params);
