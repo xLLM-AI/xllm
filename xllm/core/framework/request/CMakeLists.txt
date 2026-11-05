@@ -16,11 +16,9 @@ cc_library(
     llm_request_factory.h
     vlm_request_factory.h
     rec_request_factory.h
-    dit_request.h
     request_output.h
     usage.h
     dit_request_output.h
-    dit_request_params.h
     request_params.h
     dit_request_state.h
     sample_slot.h
@@ -47,7 +45,6 @@ cc_library(
     llm_request_factory.cpp
     vlm_request_factory.cpp
     rec_request_factory.cpp
-    dit_request.cpp
     request_output.cpp
     dit_request_output.cpp
     request_params.cpp

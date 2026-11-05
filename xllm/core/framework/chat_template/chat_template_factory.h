@@ -18,10 +18,10 @@ limitations under the License.
 #include <memory>
 #include <string>
 
-#include "framework/chat_template/chat_template.h"
-#include "framework/tokenizer/tokenizer_args.h"
-
 namespace xllm {
+
+class ChatTemplate;
+struct TokenizerArgs;
 
 class ChatTemplateFactory final {
  public:

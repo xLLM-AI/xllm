@@ -13,9 +13,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "tokenizer_factory.h"
+#include "core/framework/tokenizer/tokenizer_factory.h"
 
-#include <filesystem>
+#include <glog/logging.h>
+
+#include "core/framework/tokenizer/fast_tokenizer.h"
+#include "core/framework/tokenizer/rec_tokenizer.h"
+#include "core/framework/tokenizer/rwkv_tokenizer.h"
+#include "core/framework/tokenizer/sentencepiece_tokenizer.h"
+#include "core/framework/tokenizer/tiktoken_tokenizer.h"
+#include "core/framework/tokenizer/tokenizer.h"
+#include "core/framework/tokenizer/tokenizer_args.h"
+#include "core/framework/tokenizer/tokenizer_proxy.h"
 
 namespace xllm {
 

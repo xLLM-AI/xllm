@@ -19,10 +19,15 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "core/framework/config/execution_config.h"
+#include "core/platform/model_stream_registry.h"
 #include "platform/device.h"
 #include "platform/platform.h"
 #include "util/env_var.h"
 #if defined(USE_NPU)
+#include <acl/acl.h>
+
+#include "core/layers/npu/buffer/atb_workspace.h"
+
 #ifdef TORCH_HIGHER_THAN_PTA6
 // #include <torch_npu/csrc/core/npu/NPUFormat.h>
 #include <torch_npu/csrc/framework/OpCommand.h>
