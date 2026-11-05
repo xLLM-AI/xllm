@@ -16,6 +16,8 @@ limitations under the License.
 #pragma once
 
 #include "core/framework/parallel_state/collective_communicator_base.h"
+#include "core/framework/parallel_state/parallel_args.h"
+#include "core/framework/parallel_state/process_group.h"
 
 namespace xllm {
 

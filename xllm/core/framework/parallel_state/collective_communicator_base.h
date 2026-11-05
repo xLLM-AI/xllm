@@ -17,13 +17,11 @@ limitations under the License.
 
 #include <torch/types.h>
 
-#include <memory>
 #include <string>
 
-#include "core/framework/parallel_state/parallel_args.h"
-#include "core/framework/parallel_state/process_group.h"
-
 namespace xllm {
+
+struct ParallelArgs;
 
 class CollectiveCommunicatorBase {
  public:

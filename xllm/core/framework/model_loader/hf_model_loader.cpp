@@ -45,6 +45,8 @@ limitations under the License.
 #include "core/framework/tokenizer/rec_tokenizer.h"
 #include "core/framework/tokenizer/sentencepiece_tokenizer.h"
 #include "core/framework/tokenizer/tiktoken_tokenizer.h"
+#include "core/framework/tokenizer/tokenizer.h"
+#include "core/framework/tokenizer/tokenizer_args.h"
 #include "core/framework/tokenizer/tokenizer_factory.h"
 #include "core/kv_cache/layout/flashinfer_cache_layout.h"
 #include "core/platform/device.h"
