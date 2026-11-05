@@ -28,11 +28,11 @@ namespace xllm {
 class KVCacheShape;
 struct KVCacheCreateOptions;
 
-// Row costs are independent of arena capacity so the estimator and storage
-// backend can use the same layout without allocating tensors. An SSM row is
-// one checkpoint, while a Conv row and a KEY/VALUE row each hold one slot.
+// Row costs are independent of physical capacity. Logical IDs only bound
+// mapping tables; physical slabs supply bytes shared by every cache role.
 struct StaticKVCacheLayoutSpec {
-  size_t num_units = 0;
+  size_t num_slots = 0;
+  size_t num_slabs = 0;
   size_t full_row_bytes = 0;
   size_t conv_row_bytes = 0;
   size_t ssm_row_bytes = 0;
@@ -49,51 +49,67 @@ struct StaticKVCacheTensorLayout {
   size_t offset_bytes = 0;
   size_t row_bytes = 0;
   size_t rows_per_slot = 1;
-  size_t extent_units = 0;
   size_t view_rows = 0;
-  size_t page_group_index = 0;
+  // Layer index among layers with the same attention type.
+  size_t lane = 0;
+  // Mapping-table row: two rows per Linear layer, Conv then SSM.
+  size_t linear_group = 0;
 };
 
-// Every equal-sized physical page holds four Full layers' K/V blocks or one
-// Linear layer's Conv/SSM state. Page size includes padding required by both
-// payloads and dense row views. Conv starts at the first dense row wholly
-// inside its page; Full and SSM pages retain integral row strides.
+// One arena has dense typed views for every layer. A slab can be subdivided
+// into Full K/V pairs, Conv rows, or complete SSM checkpoint bundles. Its byte
+// size is the LCM of those object sizes, so no object needs per-layer padding.
+// KEY and VALUE views differ by one row; the same physical key-row index
+// therefore addresses an adjacent K/V pair through the existing kernel ABI.
 class StaticKVCacheLayout final {
  public:
-  static constexpr size_t kFullLayersPerPage = 4;
-
   explicit StaticKVCacheLayout(StaticKVCacheLayoutSpec spec);
   StaticKVCacheLayout(const KVCacheShape& shape,
                       const KVCacheCreateOptions& options);
 
-  size_t full_block_units() const { return full_block_units_; }
-  size_t linear_state_units() const { return linear_state_units_; }
-  size_t unit_bytes() const { return unit_bytes_; }
-  size_t full_page_payload_bytes() const { return full_page_payload_bytes_; }
+  size_t num_slabs() const { return spec_.num_slabs; }
+  size_t slab_bytes() const { return slab_bytes_; }
+  size_t num_slots() const { return spec_.num_slots; }
+  size_t full_row_bytes() const { return spec_.full_row_bytes; }
+  size_t conv_row_bytes() const { return spec_.conv_row_bytes; }
+  size_t ssm_row_bytes() const { return spec_.ssm_row_bytes; }
+  size_t full_pair_bytes() const { return full_pair_bytes_; }
+  size_t ssm_bundle_bytes() const { return ssm_bundle_bytes_; }
+  size_t full_layer_count() const { return spec_.full_layer_ids.size(); }
+  size_t linear_layer_count() const { return spec_.linear_layer_ids.size(); }
+  size_t num_linear_groups() const { return 2 * linear_layer_count(); }
+  size_t rows_per_slab(KVCacheTensorRole role) const;
+  size_t full_layer_index(int64_t layer_id) const;
+  // Capacity of an empty arena, including typed-slab fragmentation and IDs.
+  bool can_fit(size_t full_blocks, size_t linear_states) const;
+
+  size_t page_bytes() const { return slab_bytes(); }
+  size_t pages_per_slot() const { return 1; }
+  size_t slot_bytes() const { return slab_bytes(); }
+  size_t full_page_payload_bytes() const { return full_pair_bytes(); }
   size_t linear_page_payload_bytes() const {
-    return linear_page_payload_bytes_;
+    return spec_.conv_row_bytes + ssm_bundle_bytes();
   }
-  size_t num_units() const { return spec_.num_units; }
   size_t row_bytes(KVCacheTensorRole role) const;
-  size_t row_index(size_t logical_page, KVCacheTensorRole role) const;
+  size_t row_index(size_t slab, KVCacheTensorRole role) const;
   size_t role_row_stride(KVCacheTensorRole role) const;
   size_t checkpoint_stride() const { return spec_.checkpoint_stride; }
-  size_t logical_num_slots() const { return spec_.num_units; }
   size_t bytes_used() const { return bytes_used_; }
   torch::ScalarType dtype(KVCacheTensorRole role) const;
 
   bool has_layer(int64_t layer_id) const;
   const StaticKVCacheTensorLayout& tensor_layout(int64_t layer_id,
                                                  KVCacheTensorRole role) const;
+  // Zero for layers without recurrent state.
+  size_t linear_group(int64_t layer_id,
+                      KVCacheTensorRole role = KVCacheTensorRole::CONV) const;
 
  private:
   StaticKVCacheLayoutSpec spec_;
   std::vector<StaticKVCacheTensorLayout> tensors_;
-  size_t unit_bytes_ = 0;
-  size_t full_page_payload_bytes_ = 0;
-  size_t linear_page_payload_bytes_ = 0;
-  size_t full_block_units_ = 0;
-  size_t linear_state_units_ = 0;
+  size_t slab_bytes_ = 0;
+  size_t full_pair_bytes_ = 0;
+  size_t ssm_bundle_bytes_ = 0;
   size_t bytes_used_ = 0;
 };
 

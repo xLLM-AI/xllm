@@ -338,10 +338,12 @@ CompositeBlockManager::LeafMap build_composite_leaves(
     CHECK(options.manager_types().empty());
     CHECK_EQ(options.num_blocks(),
              static_cast<uint32_t>(options.linear_state_num_slots()));
-    cache_options.shared_block_pool(std::make_shared<StaticKVCacheBlockPool>(
-        options.num_blocks(),
-        options.shared_full_block_units(),
-        options.shared_linear_state_units()));
+    cache_options.shared_block_pool(
+        options.shared_layout()
+            ? std::make_shared<StaticKVCacheBlockPool>(options.num_blocks(),
+                                                       *options.shared_layout())
+            : std::make_shared<StaticKVCacheBlockPool>(
+                  options.num_blocks(), options.shared_linear_state_slots()));
   }
 
   const bool prefix_cache_on = options.enable_prefix_cache();
@@ -1053,7 +1055,7 @@ bool CompositeBlockManager::reclaim_shared_cache() {
 
 size_t CompositeBlockManager::num_free_blocks() const {
   if (shared_block_pool_) {
-    return shared_block_pool_->num_free_blocks();
+    return shared_block_pool_->num_free_slots();
   }
   // Reports one admission leaf's raw block count. Mixing leaves of different
   // block_size would make num_free * block_size() meaningless.
@@ -1063,7 +1065,7 @@ size_t CompositeBlockManager::num_free_blocks() const {
 
 size_t CompositeBlockManager::num_used_blocks() const {
   if (shared_block_pool_) {
-    return shared_block_pool_->num_used_blocks();
+    return shared_block_pool_->num_used_slots();
   }
   const LeafEntry* leaf = capacity_leaf();
   return leaf == nullptr ? 0 : leaf->leaf->num_used_blocks();
@@ -1085,7 +1087,7 @@ Block CompositeBlockManager::allocate() {
 
 size_t CompositeBlockManager::admission_capacity() const {
   if (shared_block_pool_) {
-    return shared_block_pool_->num_total_blocks();
+    return shared_block_pool_->num_total_slots();
   }
   const auto* leaf = capacity_leaf();
   return leaf == nullptr ? 0 : leaf->leaf->admission_capacity();
@@ -1093,7 +1095,7 @@ size_t CompositeBlockManager::admission_capacity() const {
 
 size_t CompositeBlockManager::num_total_blocks() const {
   if (shared_block_pool_) {
-    return shared_block_pool_->num_total_blocks();
+    return shared_block_pool_->num_total_slots();
   }
   const LeafEntry* leaf = capacity_leaf();
   return leaf == nullptr ? 0 : leaf->leaf->num_total_blocks();

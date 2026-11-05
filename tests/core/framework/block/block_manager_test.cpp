@@ -197,17 +197,18 @@ ModelArgs make_shared_cache_model_args() {
 }
 
 KVCacheCapacity make_shared_cache_capacity() {
-  // Full rows cost 16 B, Conv rows 6 B and SSM rows 4 B: page=144 B.
-  // Two Full layers use one page; two recurrent layers use two pages.
+  // Full pairs cost 32 B, Conv rows 6 B and SSM rows 4 B: slab=96 B.
+  // Logical IDs and physical slabs have independent capacities.
   KVCacheCapacity capacity;
-  capacity.n_blocks(12)
+  capacity.n_blocks(53)
       .block_size(8)
-      .num_linear_state_blocks(12)
+      .num_linear_state_blocks(53)
       .linear_conv_state_len(1)
       .linear_ssm_checkpoint_stride(1)
-      .shared_unit_bytes(144)
-      .shared_full_block_units(1)
-      .shared_linear_state_units(2);
+      .shared_slot_bytes(96)
+      .shared_slab_count(12)
+      .shared_min_slab_count(4)
+      .shared_linear_state_slots(4);
   return capacity;
 }
 
@@ -285,7 +286,8 @@ TEST(KVCacheManagerFactoryTest,
                "prefix caching is disabled");
 }
 
-TEST_F(BlockManagerPoolTest, SharedFactoryConnectsWeightedPhysicalCapacity) {
+TEST_F(BlockManagerPoolTest,
+       SharedFactorySeparatesLogicalIdsAndPhysicalBudget) {
   BlockManagerPool::Options options;
   options.block_size(8).enable_linear_state(true).enable_prefix_cache(false);
   auto result = KVCacheManagerFactory::create(make_shared_cache_capacity(),
@@ -294,32 +296,58 @@ TEST_F(BlockManagerPoolTest, SharedFactoryConnectsWeightedPhysicalCapacity) {
                                               torch::kBFloat16,
                                               options,
                                               /*transfer_coordinator=*/nullptr);
-  EXPECT_EQ(result.shape.key_cache_shape().front(), 12);
-  EXPECT_EQ(result.shape.conv_cache_shape().front(), 12);
-  EXPECT_EQ(result.manager->block_resource_units(BlockType::KV, 2), 2);
-  EXPECT_EQ(result.manager->block_resource_units(BlockType::LINEAR, 1), 2);
-  ASSERT_EQ(result.manager->num_free_blocks(), std::vector<size_t>{10});
+  EXPECT_EQ(result.shape.key_cache_shape().front(), 53);
+  EXPECT_EQ(result.shape.conv_cache_shape().front(), 53);
+  EXPECT_EQ(result.manager->block_resource_units(BlockType::KV, 2), 128);
+  EXPECT_EQ(result.manager->block_resource_units(BlockType::LINEAR, 1), 20);
+  ASSERT_EQ(result.manager->num_free_blocks(), std::vector<size_t>{1056});
   auto sequence = make_sequence(0, {1, 2, 3, 4, 5, 6, 7, 8, 9});
   ASSERT_TRUE(result.manager->allocate(&sequence));
   EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::KV), 2);
   EXPECT_EQ(sequence.kv_state().num_blocks(BlockType::LINEAR), 1);
-  EXPECT_EQ(result.manager->num_free_blocks(), std::vector<size_t>{6});
+  EXPECT_EQ(result.manager->num_free_blocks(), std::vector<size_t>{908});
   result.manager->deallocate(&sequence);
-  EXPECT_EQ(result.manager->num_free_blocks(), std::vector<size_t>{10});
+  EXPECT_EQ(result.manager->num_free_blocks(), std::vector<size_t>{1056});
+}
+
+TEST_F(BlockManagerPoolTest, SharedFactoryAccountsForTypedSlabFragmentation) {
+  BlockManagerPool::Options options;
+  options.block_size(8).enable_linear_state(true).enable_prefix_cache(false);
+  KVCacheCapacity capacity = make_shared_cache_capacity();
+  capacity.shared_slab_count(4);
+  auto result = KVCacheManagerFactory::create(capacity,
+                                              make_shared_cache_model_args(),
+                                              /*world_size=*/1,
+                                              torch::kBFloat16,
+                                              options,
+                                              /*transfer_coordinator=*/nullptr);
+  auto first = make_sequence(0, {1, 2, 3, 4, 5, 6, 7, 8});
+  auto second = make_sequence(1, {9, 10, 11, 12, 13, 14, 15, 16});
+  EXPECT_FALSE(result.manager->exceeds_total_capacity(&first, 8));
+  // Three Full blocks plus one state cost 212 B, below the 288 B budget,
+  // but require two KV slabs and one slab for each recurrent role.
+  EXPECT_TRUE(result.manager->exceeds_total_capacity(&first, 24));
+  EXPECT_TRUE(result.manager->exceeds_total_capacity(
+      std::vector<KVCacheManager::KVCacheReservation>{{&first, 8},
+                                                      {&second, 8}}));
+  ASSERT_TRUE(result.manager->allocate(&first));
+  EXPECT_FALSE(result.manager->allocate(&second));
+  result.manager->deallocate(&first);
+  EXPECT_EQ(result.manager->num_free_blocks(), std::vector<size_t>{288});
 }
 
 TEST(KVCacheManagerFactoryTest, RejectsSharedStorageCostMismatch) {
   BlockManagerPool::Options options;
   options.block_size(8).enable_linear_state(true).enable_prefix_cache(false);
   auto capacity = make_shared_cache_capacity();
-  capacity.shared_full_block_units(3);
+  capacity.shared_linear_state_slots(3);
   EXPECT_DEATH(KVCacheManagerFactory::create(capacity,
                                              make_shared_cache_model_args(),
                                              /*world_size=*/1,
                                              torch::kBFloat16,
                                              options,
                                              /*transfer_coordinator=*/nullptr),
-               "layout.full_block_units");
+               "num_linear_groups");
 }
 
 TEST(BlockManagerTest, Basic) {

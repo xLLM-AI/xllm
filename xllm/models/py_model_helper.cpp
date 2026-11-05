@@ -61,6 +61,7 @@ void prepend_sys_path(const std::string& dir) {
 py::list build_python_kv_caches(const std::vector<KVCache>& kv_caches) {
   py::list python_caches;
   for (const auto& kv_cache : kv_caches) {
+    const int64_t checkpoint_stride = kv_cache.shared_checkpoint_stride();
     python_caches.append(py::make_tuple(
         optional_tensor(kv_cache.get_k_cache()),
         optional_tensor(kv_cache.get_v_cache()),
@@ -73,7 +74,10 @@ py::list build_python_kv_caches(const std::vector<KVCache>& kv_caches) {
         optional_tensor(kv_cache.get_compress_index_kv_state()),
         optional_tensor(kv_cache.get_compress_index_score_state()),
         optional_tensor(kv_cache.get_indexer_cache_scale()),
-        optional_tensor(kv_cache.get_kpool_tail())));
+        optional_tensor(kv_cache.get_kpool_tail()),
+        optional_tensor(kv_cache.linear_state_slot_row()),
+        optional_tensor(kv_cache.full_block_rows()),
+        checkpoint_stride > 0 ? py::cast(checkpoint_stride) : py::none()));
   }
   return python_caches;
 }

@@ -85,6 +85,7 @@ def test_shared_full_attention_matches_dense_after_chunked_prefill(layer_id: int
             ssm=arena_view(
                 ssm_row_bytes, ((page_count - 1) * page_bytes // ssm_row_bytes + 5, 1, 128, 128), torch.float32
             ),
+            linear_state_slots=torch.arange(page_count, device=device, dtype=torch.int32),
         )
     )
     dense_caches = [
@@ -103,7 +104,7 @@ def test_shared_full_attention_matches_dense_after_chunked_prefill(layer_id: int
         backend.bind_kv_caches(caches)
     layout = backends[1].shared_kv_layout
     assert backends[0].shared_kv_layout is None
-    assert layout is not None and layout.page_bytes == page_bytes and layout.conv_row_stride is None
+    assert layout is not None and layout.slot_bytes == page_bytes and layout.conv_row_stride is None
     attention = Attention(heads, kv_heads, dimension, dimension**-0.5, 0, layer_id)
     generator = torch.Generator().manual_seed(37031 + layer_id * 7 + width)
     table = [[5, 2], [1, 6]]

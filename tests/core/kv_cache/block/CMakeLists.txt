@@ -2,6 +2,19 @@ include(cc_test)
 
 cc_test(
   NAME
+    static_kv_cache_block_pool_test
+  CPU_ONLY
+  SRCS
+    static_kv_cache_block_pool_test.cpp
+  DEPS
+    :kv_cache_block
+    :static_kv_cache_layout
+    GTest::gtest_main
+    glog::glog
+)
+
+cc_test(
+  NAME
     virtual_kv_cache_page_state_test
   NO_NPU_RUNTIME
   SRCS

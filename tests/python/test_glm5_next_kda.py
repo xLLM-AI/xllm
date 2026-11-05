@@ -68,7 +68,7 @@ def test_framework_kda_checkpoints_match_tokenwise_reference(
     metadata = SimpleNamespace(is_spec_verify=True, num_accepted_tokens=accepted)
 
     def forward() -> torch.Tensor:
-        return backend._spec_verify(inputs, gate, beta, weight, "silu", slots, metadata, conv, ssm, recurrent_kda)
+        return backend._spec_verify(inputs, gate, beta, weight, "silu", slots, metadata, conv, ssm, recurrent_kda, 0)
 
     graph = None
     if capture_graph:

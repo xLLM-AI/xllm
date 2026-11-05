@@ -782,6 +782,25 @@ TEST(KVCacheTest, GroupedCacheCapabilitySurvivesProtoRoundTrip) {
   EXPECT_EQ(restored.key_cache_shape(), original.key_cache_shape());
 }
 
+TEST(KVCacheTest, SharedSlabCapacitySurvivesProtoRoundTrip) {
+  KVCacheCapacity capacity;
+  capacity.block_size(16).n_blocks(100).shared_slab_count(7);
+  ModelArgs args;
+  args.n_layers(4).n_heads(4).n_kv_heads(2).head_dim(16);
+  const KVCacheShape original(capacity, args, /*world_size=*/1);
+
+  proto::KVCacheShape serialized;
+  original.to_proto(&serialized);
+  const KVCacheShape restored = KVCacheShape::from_proto(serialized);
+
+  EXPECT_EQ(original.shared_slab_count(), 7);
+  EXPECT_EQ(serialized.shared_slab_count(), 7);
+  EXPECT_EQ(restored.shared_slab_count(), 7);
+  EXPECT_EQ(restored.key_cache_shape(), original.key_cache_shape());
+  EXPECT_EQ(restored.value_cache_shape(), original.value_cache_shape());
+  EXPECT_EQ(restored.key_cache_shape().front(), 100);
+}
+
 TEST(KVCacheTest, DeepSeekV4KVCacheExposesIndexerScaleThroughSharedContract) {
   DeepSeekV4KVCacheTensors tensors;
   tensors.key_cache = torch::zeros({2, 4, 1, 64});

@@ -48,6 +48,8 @@ def test_executor_forwards_worker_eplb_state_to_eager_runner() -> None:
     executor.inductor_runner = None
     executor.eager_runner = MagicMock()
     executor.eager_runner.execute.return_value = torch.ones(1)
+    executor.requires_input_batch_metadata = False
+    executor._eager_multimodal_prefill = False
 
     metadata = SimpleNamespace(is_prefill=False, is_chunked_prefill=False)
     expert_load_data = torch.zeros((2, 4), dtype=torch.int64)

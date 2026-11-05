@@ -69,25 +69,22 @@ std::tuple<torch::Tensor, std::optional<torch::Tensor>> AttentionImpl::forward(
   torch::Tensor k_cache = kv_cache.get_k_cache();
   std::optional<torch::Tensor> v_cache = kv_cache.get_v_cache();
 
+  torch::Tensor shared_block_table;
+  torch::Tensor shared_slot_mapping;
   const torch::Tensor* physical_block_table = nullptr;
   const torch::Tensor* physical_slot_mapping = nullptr;
   if (kv_cache.is_static_shared()) {
     CHECK(attn_metadata.kv_shard_batch_metadata == nullptr);
     CHECK(!attn_metadata.expanded_decode.enabled);
-    const int64_t row_stride =
-        kv_cache.cache_row_stride(KVCacheTensorRole::KEY);
-    if (!attn_metadata.static_cache_indices.has_value()) {
-      attn_metadata.static_cache_indices.emplace(StaticKVCacheAttentionIndices{
-          row_stride,
-          kv_cache.physical_row_indices(attn_metadata.block_table,
-                                        KVCacheTensorRole::KEY),
-          kv_cache.physical_token_slots(attn_metadata.slot_mapping,
-                                        k_cache.size(1))});
-    }
-    const auto& indices = *attn_metadata.static_cache_indices;
-    CHECK_EQ(indices.row_stride, row_stride);
-    physical_block_table = &indices.block_table;
-    physical_slot_mapping = &indices.slot_mapping;
+    // Dense arena views share storage, but each layer owns different rows.
+    shared_block_table = kv_cache.physical_row_indices(
+        attn_metadata.block_table, KVCacheTensorRole::KEY);
+    shared_slot_mapping = kv_cache.physical_token_slots(
+        attn_metadata.slot_mapping, k_cache.size(1));
+    physical_block_table = &shared_block_table;
+    physical_slot_mapping = &shared_slot_mapping;
+    CHECK(v_cache.has_value() && v_cache->defined());
+    k_cache = k_cache.narrow(0, 0, v_cache->size(0));
   }
 
   if (!attn_metadata.prefill_without_cache) {

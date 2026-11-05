@@ -30,7 +30,8 @@ TEST(StaticKVCacheTensorAllocatorNpuTest, KeepsDenseNdViewsInOnePhysicalArena) {
   }
   const torch::Device device("npu:0");
   StaticKVCacheLayoutSpec spec;
-  spec.num_units = 8;
+  spec.num_slots = 8;
+  spec.num_slabs = 20;
   spec.full_row_bytes = 16;
   spec.conv_row_bytes = 8;
   spec.ssm_row_bytes = 32;
@@ -60,7 +61,8 @@ TEST(StaticKVCacheTensorAllocatorNpuTest, KeepsDenseNdViewsInOnePhysicalArena) {
 #endif
   }
   EXPECT_EQ(key[16].data_ptr(), conv[32].data_ptr());
-  EXPECT_EQ(key[16].data_ptr(), ssm[7].data_ptr());
+  EXPECT_EQ(key[16].data_ptr(), ssm[8].data_ptr());
+  EXPECT_EQ(value[16].data_ptr(), key[17].data_ptr());
   key[16].fill_(17);
   EXPECT_TRUE(conv[32].eq(17).all().item<bool>());
   conv[32].fill_(29);
@@ -71,11 +73,11 @@ TEST(StaticKVCacheTensorAllocatorNpuTest, KeepsDenseNdViewsInOnePhysicalArena) {
   key[8].fill_(3);
   value[8].fill_(4);
   conv[64].fill_(5);
-  ssm[16].fill_(6);
+  ssm[10].fill_(6);
   EXPECT_TRUE(key[8].eq(3).all().item<bool>());
   EXPECT_TRUE(value[8].eq(4).all().item<bool>());
   EXPECT_TRUE(conv[64].eq(5).all().item<bool>());
-  EXPECT_TRUE(ssm[16].eq(6).all().item<bool>());
+  EXPECT_TRUE(ssm[10].eq(6).all().item<bool>());
 }
 
 }  // namespace

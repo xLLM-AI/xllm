@@ -285,13 +285,13 @@ Full 和 SSM 保留整行对齐；Conv 行起点向上取整，其最坏间隙�
 
 两类 logical page 均对应一个相同字节大小的 physical page；较小载荷以及不足四层的 Full 尾组通过 padding 补齐。128*4=512 只是逻辑槽位示意，不能代替 dtype、head shape、Conv 和 SSM 的真实字节计算。物理页不是 512 字节，也不代表单层 512-token 的序列跨度。启动日志报告 page、载荷与 padding，不能仅凭共享容量声称节省显存。
 
-一个整模型 Full token-block 分配原子占用 ceil(num_full_layers/4) 个连续 page，一个 Linear sequence-state 分配原子占用 num_linear_layers 个连续 page。保留现有请求级 Full/Linear 生命周期和 APC 所有权；显式记录 layer 到 page group 的映射，组的物理页为 extent 起点加 group 索引。不同 extent 可在最终引用释放后跨类型复用，不把整模型资源组误称为单个物理 page。
+分配单位是固定大小的 slot（与 vLLM hybrid allocator 的分组方式一致），见第 12.8 节：slot 含 `S = ceil(num_full_layers/4)` 个 page，每次分配恰好一个 slot。一个整模型 Full token block 占一个 slot，第 i 个 Full 层位于 lane `i/4`、页内偏移 `(i%4)*2F`。Linear 层按 S 个一组划分为 `G = ceil(num_linear_layers/S)` 组，第 j 个 Linear 层位于第 `j/S` 组的 lane `j%S`；一个 Linear sequence state 在每组各占一个 slot，这些 slot 互不要求连续。保留现有请求级 Full/Linear 生命周期和 APC 所有权；任意空闲 slot 可在最终引用释放后跨类型复用，因此不存在连续 extent 的外部碎片。
 
-因此，统一的是 logical page 到 physical page 的分配单位和字节成本；token block、层分组和整模型 extent 各自保留已有职责。内核继续使用每层原有 tensor shape 和 token block size，通过固定起始地址及页索引访问共享 backing。
+因此，统一的是 page 的概念与字节大小，以及 slot 这一分配单位；token block、层分组各自保留已有职责。内核继续使用每层原有 tensor shape 和 token block size，通过固定起始地址及 slot 索引访问共享 backing。
 
 ### 11.2 连续 tensor view 与执行索引
 
-每层/role 的 page group 与页内 offset 放入 tensor view 的 base offset；所有 role view 保持 dense contiguous，以兼容现有 NPU Conv 内核。Full/SSM 物理行索引为 extent_start_page * (page_bytes / role_row_bytes)；Conv 使用 ceil(extent_start_page * page_bytes / C)，不把非整数比值伪装成固定 row stride。计算先约分并用 int64 中间值，保留负值 sentinel；view 行数也按最后合法 extent 的 ceiling 起点计算。Conv view 的 base offset 只要求 dtype 元素对齐，精确层偏移仍由静态布局校验。Full token slot mapping 保留块内 offset；checkpoint stride 显式保存。padding 保留可容纳两种整模型资源的 extent；容量、admission、eviction 和 scheduler reservation 均以物理 page 计费。
+每层/role 的 lane 与页内 offset 放入 tensor view 的 base offset；所有 role view 保持 dense contiguous，以兼容现有 NPU Conv 内核。Full/SSM 物理行索引为 slot * (slot_bytes / role_row_bytes)；Conv 使用 ceil(slot * slot_bytes / C)，不把非整数比值伪装成固定 row stride。计算先约分并用 int64 中间值，保留负值 sentinel；view 行数按最后一个 slot 的 ceiling 起点计算。Conv view 的 base offset 只要求 dtype 元素对齐，精确层偏移仍由静态布局校验。Full token slot mapping 保留块内 offset；checkpoint stride 显式保存。slot 0 在每个 Linear 组都作为 padding 保留；容量、admission、eviction 和 scheduler reservation 均以 slot 计费（Full block 为 1，Linear state 为 G）。
 
 首版接入 native NPU Torch 的 text-only Qwen3Next/Qwen3.5 GDN 分解 kernel 路径。启动时拒绝未接通的 graph、spec、Host/PD/store、Python、index/quantized、layerwise/CP/KV-split 等组合。默认未启用共享开关时保持现有路径。完整验收仍要求最终提交上的真实 NPU 全量测试；开发快照、CPU tests 和语法检查不能替代。
 
@@ -321,7 +321,7 @@ Python 在 cache bind 时建立不可变的 role 布局描述；cache tensor 基
 
 - 接入 eager prefill/chunked prefill、Python ACL decode 和固定宽度 GDN MTP verify；Qwen 图像 VLM 使用第 12.7 节的固定几何 Python prefill ACL graph。KDA shared verify graph 和 DSpark adaptive recurrent shared graph 尚未接通，保持明确拒绝。
 - 为每个 graph bucket 固定 block table、Full slot mapping、Conv/SSM read/write index 和 padding mask 的存储；接入现有 `execution_metadata_builders` 的 persistent metadata 生命周期。GDN `update_persistent` 已实现按字段原地更新持久 tensor，保留捕获的地址及 views；共享布局的物理索引映射也在图内执行。新增物理索引不能只在首次 `build` 时计算，否则后续 replay 会沿用首次 capture 的值。
-- 现有 `DecodeAclGraphRunner` 会清零 `cache.conv[0]` 及按 Conv/SSM 形状比例选出的 SSM 首行；共享 view 的首维比例失效，不能据此确定清零范围。底层池已预留起始 `max(full_block_units, linear_state_units)` 页，Python 只对通过静态布局校验的首个 Conv/SSM 保留 extent 清零，供 capture/warmup/padding 复用。不得假定所有 tensor 的第零行互不别名，也不能把真实请求页当作 dummy page。
+- 现有 `DecodeAclGraphRunner` 会清零 `cache.conv[0]` 及按 Conv/SSM 形状比例选出的 SSM 首行；共享 view 的首维比例失效，不能据此确定清零范围。底层池在每个 Linear 组都预留 slot 0，Python 只对通过静态布局校验的 slot 0 的 Conv/SSM 行清零，供 capture/warmup/padding 复用。不得假定所有 tensor 的第零行互不别名，也不能把真实请求页当作 dummy page。
 - 页回收和跨类型复用仍由现有调度/所有权管理；Python 必须验证 replay、异步更新和在途 kernel 完成点，不引入独立的 Python 释放时机。
 
 ### 12.5 实施顺序与验收
@@ -334,7 +334,7 @@ Python 在 cache bind 时建立不可变的 role 布局描述；cache tensor 基
 
 ### 12.6 MTP 资源与验证范围（2026-11-03）
 
-Hybrid target 的 Full/Linear 共用静态 arena；full-only MTP draft 使用独立 dense KV 存储，并为每个可能的 target 逻辑 arena ID 保留一行。容量规划按 `target page bytes + draft block bytes` 重新求可用 ID 数，同时更新 target Full/Linear 容量，避免重复预算或仅缩减 Full 容量。SSM checkpoint stride 为 speculative width，包含全部候选 checkpoint。
+Hybrid target 的 Full/Linear 共用静态 arena；full-only MTP draft 使用独立 dense KV 存储，并为每个 target slot 保留一行。容量规划按 `target slot bytes + draft block bytes` 重新求可用 slot 数，同时更新 target Full/Linear 容量，避免重复预算或仅缩减 Full 容量。SSM checkpoint stride 为 speculative width，包含全部候选 checkpoint。
 
 测试启动使用 `enable_shared_kv_cache=true`、`enable_vmm_kvcache=false`、`enable_vmm_weights=false`、`enable_graph_vmm_pool=false`、`vmm_elastic=false`，并令 `max_linear_state_cache_slots=0`，由共享 arena 统一决定状态容量。四个 Full 层的 128-token block 与一个 Linear 层状态按真实字节数对齐；安全 Conv ceiling 间隙和必要的 LCM fallback padding 都计入预算，不能假定所有模型的 page 都只有四个 Full block 的有效载荷。
 
@@ -356,3 +356,13 @@ Hybrid target 的 Full/Linear 共用静态 arena；full-only MTP draft 使用独
 5. 确认四个 rank 均使用同一提交的 Python 路径和共享 arena，日志实际出现 Unified worker、variant capture 与 replay；所有 VMM 开关保持关闭。用户文本压力客户端只作为补充，不能替代视觉验收。记录 exact-commit 构建、测试及服务证据后再发布。
 
 单层 Full token block 仍为 128，四层分组表示合计 512 个跨层槽位；TP4 下 physical page 的字节数必须由本地 head 数和实际 Conv/SSM checkpoint payload 重新计算，不能复用 TP2 的 9 MiB 数值。Full-only draft 仍独立存储并联合计费。本轮不扩展 C++ shared prefill piecewise graph、task pipeline、PD/Host/store、CP/KV/layerwise split、多机或其他 speculative 算法；视频完整端到端验收不在本轮范围内。GLM 模型验收按用户要求排除。
+
+### 12.8 固定 slot 与 Linear 分组（2026-11-04）
+
+早期实现中 Full block 原子占用 `ceil(num_full/4)` 个连续 page，Linear state 占用 `num_linear` 个连续 page；两种 extent 大小不同，混合分配后空闲 page 会碎片化，并要求 admission 按连续 extent 计算。现改为按 vLLM hybrid allocator 的分组方式：page 定义不变（四个 Full 层 block 或一个 Linear 层状态，字节数同第 11.1 节），但分配单位统一为固定的 slot。
+
+- **几何**：`S = ceil(num_full/4)`，`slot_bytes = S * page_bytes`，`G = ceil(num_linear/S)`。Full 层 i 位于 lane `i/4`；Linear 层 j 位于组 `j/S` 的 lane `j%S`。以 Qwen3.8-27B TP2 MTP 为例，page 9 MiB、S=4、slot 36 MiB、G=12。
+- **分配**：每次分配恰好一个 slot，空闲 slot 可被任意类型复用，不存在外部碎片。一个 Linear state 在每组各取一个 slot，可互不连续；state id 取其第 0 组 slot，`StaticKVCacheBlockPool` 记录全部 G 个 slot。slot 0 是各组共同的 padding，state 0 在所有组都映射到 slot 0。
+- **计费**：admission、eviction 与 scheduler reservation 以 slot 计数：Full block 为 1，Linear state 为 G。缓存中的 Linear state 被淘汰时一次释放其 G 个 slot。
+- **传输**：batch 以 `[state_id, slot_0..slot_{G-1}]` 行发布读写 state 的组 slot。native 侧 `LinearStateSlotTable` 维护 host 与 device `[G, num_slots]` 映射表，每步只更新本 batch 涉及的 state；Python 侧每个 Linear 层的 `LayerCache.linear_state_slots` 是其所在组的映射行。
+- **执行**：Linear 层先用所在组的映射行把 state id 换成本组 slot，再按第 11.2 节的 role 行公式求物理行。GDN metadata 的 Conv/SSM 索引按组给出 tuple，层按 `layer_groups` 选择；ACL graph 的持久索引同样按组原地刷新。只有单组时可省略映射行，多组时缺失映射行会在 bind 或索引计算时报错。

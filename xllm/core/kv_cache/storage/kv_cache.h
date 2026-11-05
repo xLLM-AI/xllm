@@ -78,9 +78,18 @@ class KVCache final {
   int64_t cache_row_stride(KVCacheTensorRole role) const;
   int64_t linear_state_slot_count() const;
   int64_t linear_checkpoint_stride() const;
+  // Resolve a logical block/state ID to this layer and role's physical row.
   int64_t physical_row_index(int64_t slot_id, KVCacheTensorRole role) const;
   torch::Tensor physical_row_indices(const torch::Tensor& slot_ids,
                                      KVCacheTensorRole role) const;
+  // Rows are [state id, group slots...]; a no-op outside shared storage.
+  void update_linear_state_slots(const std::vector<int32_t>& rows) const;
+  // This layer's [Conv, SSM] physical rows, [2, num_slots]. Undefined
+  // outside shared storage and for layers without recurrent state.
+  torch::Tensor linear_state_slot_row() const;
+  torch::Tensor full_block_rows() const;
+  void update_full_block_rows(const std::vector<int32_t>& rows) const;
+  int64_t shared_checkpoint_stride() const;
   torch::Tensor physical_token_slots(const torch::Tensor& token_slots,
                                      int64_t block_size) const;
 
@@ -96,6 +105,10 @@ class KVCache final {
   bool owns_layer_cache_ = true;
   std::shared_ptr<KVCacheImpl> impl_;
   std::shared_ptr<const StaticKVCacheLayout> static_layout_;
+  std::shared_ptr<LinearStateSlotTable> linear_state_slots_;
+  std::shared_ptr<LinearStateSlotTable> full_block_slots_;
+  size_t linear_group_ = 0;
+  size_t full_layer_index_ = 0;
 
   friend void allocate_kv_caches(std::vector<KVCache>& kv_caches,
                                  const KVCacheShape& kv_cache_shape,

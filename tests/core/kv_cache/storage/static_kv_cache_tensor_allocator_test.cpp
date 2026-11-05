@@ -23,10 +23,12 @@ limitations under the License.
 namespace xllm {
 namespace {
 
-StaticKVCacheLayoutSpec make_spec(size_t num_units = 12,
-                                  size_t checkpoint_stride = 1) {
+StaticKVCacheLayoutSpec make_spec(size_t num_slots = 12,
+                                  size_t checkpoint_stride = 1,
+                                  size_t num_slabs = 12) {
   StaticKVCacheLayoutSpec spec;
-  spec.num_units = num_units;
+  spec.num_slots = num_slots;
+  spec.num_slabs = num_slabs;
   spec.full_row_bytes = 16;
   spec.conv_row_bytes = 8;
   spec.ssm_row_bytes = 32;
@@ -45,179 +47,81 @@ torch::Tensor allocate_float_tensor(StaticKVCacheTensorAllocator& allocator,
 }
 
 TEST(StaticKVCacheTensorAllocatorTest, PlansGeometryWithoutAllocatingCapacity) {
-  const StaticKVCacheLayout layout(make_spec(/*num_units=*/0));
-  EXPECT_EQ(layout.unit_bytes(), 128);
-  EXPECT_EQ(layout.full_block_units(), 1);
-  EXPECT_EQ(layout.linear_state_units(), 2);
-  EXPECT_EQ(layout.role_row_stride(KVCacheTensorRole::KEY), 8);
-  EXPECT_EQ(layout.role_row_stride(KVCacheTensorRole::VALUE), 8);
-  EXPECT_EQ(layout.role_row_stride(KVCacheTensorRole::CONV), 16);
-  EXPECT_EQ(layout.role_row_stride(KVCacheTensorRole::SSM), 4);
+  const StaticKVCacheLayout layout(make_spec(
+      /*num_slots=*/0, /*checkpoint_stride=*/1, /*num_slabs=*/0));
+  EXPECT_EQ(layout.slab_bytes(), 32);
+  EXPECT_EQ(layout.num_slabs(), 0);
+  EXPECT_EQ(layout.full_pair_bytes(), 32);
+  EXPECT_EQ(layout.ssm_bundle_bytes(), 32);
+  EXPECT_EQ(layout.full_layer_count(), 2);
+  EXPECT_EQ(layout.linear_layer_count(), 2);
+  EXPECT_EQ(layout.num_linear_groups(), 4);
+  EXPECT_EQ(layout.full_layer_index(3), 1);
+  EXPECT_EQ(layout.linear_group(1, KVCacheTensorRole::CONV), 0);
+  EXPECT_EQ(layout.linear_group(1, KVCacheTensorRole::SSM), 1);
+  EXPECT_EQ(layout.linear_group(2, KVCacheTensorRole::CONV), 2);
+  EXPECT_EQ(layout.linear_group(2, KVCacheTensorRole::SSM), 3);
+  EXPECT_EQ(layout.rows_per_slab(KVCacheTensorRole::KEY), 2);
+  EXPECT_EQ(layout.rows_per_slab(KVCacheTensorRole::VALUE), 2);
+  EXPECT_EQ(layout.rows_per_slab(KVCacheTensorRole::CONV), 4);
+  EXPECT_EQ(layout.rows_per_slab(KVCacheTensorRole::SSM), 1);
   EXPECT_EQ(layout.bytes_used(), 0);
 }
 
-TEST(StaticKVCacheTensorAllocatorTest, GroupsFourFullLayersAcrossPaddedPages) {
-  auto spec = make_spec(/*num_units=*/6);
+TEST(StaticKVCacheTensorAllocatorTest,
+     SlabsFitWholeObjectsWithoutLayerPadding) {
+  auto spec = make_spec(/*num_slots=*/100,
+                        /*checkpoint_stride=*/2,
+                        /*num_slabs=*/3);
   spec.conv_row_bytes = 24;
+  const StaticKVCacheLayout first(spec);
+  EXPECT_EQ(first.slab_bytes(), 192);
+  EXPECT_EQ(first.bytes_used(), 576);
+  EXPECT_EQ(first.rows_per_slab(KVCacheTensorRole::KEY), 12);
+  EXPECT_EQ(first.rows_per_slab(KVCacheTensorRole::CONV), 8);
+  EXPECT_EQ(first.rows_per_slab(KVCacheTensorRole::SSM), 6);
   spec.full_layer_ids = {0, 1, 2, 3, 4, 5, 6, 7, 8};
   spec.linear_layer_ids = {9};
-  StaticKVCacheTensorAllocator allocator(StaticKVCacheLayout(spec),
-                                         torch::kCPU);
-  const auto& layout = allocator.layout();
-  EXPECT_EQ(layout.unit_bytes(), 192);
-  EXPECT_EQ(layout.full_page_payload_bytes(), 128);
-  EXPECT_EQ(layout.linear_page_payload_bytes(), 56);
-  EXPECT_EQ(layout.full_block_units(), 3);
-  EXPECT_EQ(layout.linear_state_units(), 1);
-  const auto& first = layout.tensor_layout(0, KVCacheTensorRole::KEY);
-  const auto& fourth = layout.tensor_layout(3, KVCacheTensorRole::KEY);
-  const auto& fifth = layout.tensor_layout(4, KVCacheTensorRole::KEY);
-  const auto& ninth = layout.tensor_layout(8, KVCacheTensorRole::KEY);
-  const auto& ninth_value = layout.tensor_layout(8, KVCacheTensorRole::VALUE);
-  EXPECT_EQ(first.page_group_index, 0);
-  EXPECT_EQ(fourth.page_group_index, 0);
-  EXPECT_EQ(fifth.page_group_index, 1);
-  EXPECT_EQ(ninth.page_group_index, 2);
-  EXPECT_EQ(fourth.offset_bytes, 96);
-  EXPECT_EQ(fifth.offset_bytes, 192);
-  EXPECT_EQ(ninth.offset_bytes, 384);
-  EXPECT_EQ(ninth_value.offset_bytes, 400);
-  // The last group has one live K/V pair and padding for three absent layers.
-  EXPECT_EQ(3 * layout.unit_bytes() - (ninth_value.offset_bytes + 16), 160);
-
-  allocator.begin_layer(0);
-  auto key0 =
-      allocate_float_tensor(allocator, KVCacheTensorRole::KEY, {6, 2, 2});
-  allocator.begin_layer(4);
-  auto key4 =
-      allocate_float_tensor(allocator, KVCacheTensorRole::KEY, {6, 2, 2});
-  allocator.begin_layer(8);
-  auto key8 =
-      allocate_float_tensor(allocator, KVCacheTensorRole::KEY, {6, 2, 2});
-  ASSERT_EQ(key8.size(0), 37);
-  key0[36].fill_(1);
-  key4[36].fill_(2);
-  key8[36].fill_(3);
-  EXPECT_TRUE(key0[36].eq(1).all().item<bool>());
-  EXPECT_TRUE(key4[36].eq(2).all().item<bool>());
-  EXPECT_TRUE(key8[36].eq(3).all().item<bool>());
+  const StaticKVCacheLayout many_layers(spec);
+  EXPECT_EQ(many_layers.slab_bytes(), first.slab_bytes());
+  EXPECT_EQ(many_layers.bytes_used(), first.bytes_used());
+  EXPECT_EQ(many_layers.tensor_layout(8, KVCacheTensorRole::KEY).offset_bytes,
+            0);
+  EXPECT_EQ(many_layers.tensor_layout(8, KVCacheTensorRole::VALUE).offset_bytes,
+            16);
+  EXPECT_EQ(many_layers.tensor_layout(9, KVCacheTensorRole::CONV).offset_bytes,
+            0);
+  EXPECT_EQ(many_layers.tensor_layout(9, KVCacheTensorRole::SSM).offset_bytes,
+            0);
 }
 
-TEST(StaticKVCacheTensorAllocatorTest,
-     FitsDefaultQwenGeometryInSsmAlignedPages) {
-  auto spec = make_spec(/*num_units=*/0);
-  spec.full_row_bytes = 128 * 2 * 256 * 2;
-  spec.conv_row_bytes = 3 * (128 * 16 * 2 + 128 * 32) * 2;
-  spec.ssm_row_bytes = 32 * 128 * 128 * 2;
-  spec.dtype = torch::kBFloat16;
-  spec.ssm_dtype = torch::kBFloat16;
-  spec.full_layer_ids.clear();
-  spec.linear_layer_ids.clear();
-  for (int64_t layer = 0; layer < 48; ++layer) {
-    auto& group =
-        (layer + 1) % 4 == 0 ? spec.full_layer_ids : spec.linear_layer_ids;
-    group.emplace_back(layer);
-  }
-  const StaticKVCacheLayout next_layout(spec);
-  EXPECT_EQ(next_layout.unit_bytes(), 2 * 1024 * 1024);
-  EXPECT_EQ(next_layout.full_page_payload_bytes(), 1024 * 1024);
-  EXPECT_EQ(next_layout.linear_page_payload_bytes(), 1024 * 1024 + 48 * 1024);
-  EXPECT_EQ(next_layout.full_block_units(), 3);
-  EXPECT_EQ(next_layout.linear_state_units(), 36);
-  spec.ssm_row_bytes *= 2;
-  spec.ssm_dtype = torch::kFloat32;
-  const StaticKVCacheLayout qwen35_layout(spec);
-  EXPECT_EQ(qwen35_layout.unit_bytes(), 4 * 1024 * 1024);
-  EXPECT_EQ(qwen35_layout.full_page_payload_bytes(), 1024 * 1024);
-  EXPECT_EQ(qwen35_layout.linear_page_payload_bytes(),
-            2 * 1024 * 1024 + 48 * 1024);
-}
-
-TEST(StaticKVCacheTensorAllocatorTest,
-     FitsQwen38CheckpointsWithoutConvLcmPadding) {
-  auto spec = make_spec(/*num_units=*/0, /*checkpoint_stride=*/5);
+TEST(StaticKVCacheTensorAllocatorTest, DerivesQwen38SlabsFromRealObjectSizes) {
+  auto spec = make_spec(/*num_slots=*/0,
+                        /*checkpoint_stride=*/5,
+                        /*num_slabs=*/0);
   spec.full_row_bytes = 128 * 2 * 256 * 2;
   spec.conv_row_bytes = 7 * (2 * 8 * 128 + 24 * 128) * 2;
   spec.ssm_row_bytes = 24 * 128 * 128 * 4;
   spec.dtype = torch::kBFloat16;
   spec.ssm_dtype = torch::kFloat32;
-  spec.full_layer_ids.clear();
-  spec.linear_layer_ids.clear();
-  for (int64_t layer = 0; layer < 64; ++layer) {
-    auto& group =
-        (layer + 1) % 4 == 0 ? spec.full_layer_ids : spec.linear_layer_ids;
-    group.emplace_back(layer);
-  }
   const StaticKVCacheLayout layout(spec);
-  EXPECT_EQ(layout.unit_bytes(), 9 * 1024 * 1024);
-  EXPECT_EQ(layout.full_block_units(), 4);
-  EXPECT_EQ(layout.linear_state_units(), 48);
-  EXPECT_EQ(layout.role_row_stride(KVCacheTensorRole::KEY), 72);
-  EXPECT_EQ(layout.role_row_stride(KVCacheTensorRole::SSM), 6);
-  EXPECT_EQ(layout.row_index(1, KVCacheTensorRole::CONV), 132);
-  EXPECT_EQ(layout.row_index(2, KVCacheTensorRole::CONV), 264);
-  EXPECT_EQ(layout.row_index(34, KVCacheTensorRole::CONV), 4477);
-  EXPECT_EQ(layout.row_index(35, KVCacheTensorRole::CONV), 4608);
-  EXPECT_EQ(layout.row_index(500000, KVCacheTensorRole::CONV), 65828572);
-  EXPECT_DEATH(layout.role_row_stride(KVCacheTensorRole::CONV),
-               "ceiling physical row mapping");
-}
-
-TEST(StaticKVCacheTensorAllocatorTest, CeilingConvMappingReusesOnlyItsOwnPage) {
-  auto spec = make_spec(/*num_units=*/40, /*checkpoint_stride=*/5);
-  spec.full_row_bytes = 256;
-  spec.conv_row_bytes = 140;
-  spec.ssm_row_bytes = 3072;
-  spec.full_layer_ids = {0};
-  spec.linear_layer_ids = {1, 2};
-  StaticKVCacheTensorAllocator allocator(StaticKVCacheLayout(spec),
-                                         torch::kCPU);
-  const StaticKVCacheLayout& layout = allocator.layout();
-  ASSERT_EQ(layout.unit_bytes(), 18432);
-  allocator.begin_layer(0);
-  const torch::Tensor key =
-      allocate_float_tensor(allocator, KVCacheTensorRole::KEY, {40, 8, 8});
-  allocator.begin_layer(1);
-  const torch::Tensor conv =
-      allocate_float_tensor(allocator, KVCacheTensorRole::CONV, {40, 7, 5});
-  const torch::Tensor ssm = allocate_float_tensor(
-      allocator, KVCacheTensorRole::SSM, {200, 3, 16, 16});
-  allocator.begin_layer(2);
-  const torch::Tensor last_conv =
-      allocate_float_tensor(allocator, KVCacheTensorRole::CONV, {40, 7, 5});
-  const torch::Tensor last_ssm = allocate_float_tensor(
-      allocator, KVCacheTensorRole::SSM, {200, 3, 16, 16});
-  ASSERT_EQ(conv.size(0), 5004);
-  ASSERT_EQ(ssm.size(0), 233);
-  ASSERT_TRUE(key.is_contiguous());
-  ASSERT_TRUE(conv.is_contiguous());
-  ASSERT_TRUE(ssm.is_contiguous());
-  key[72].fill_(17);
-  key[144].fill_(53);
-  conv[132].fill_(29);
-  const torch::Tensor reused = key[72].flatten();
-  EXPECT_TRUE(reused.slice(0, 0, 12).eq(17).all().item<bool>());
-  EXPECT_TRUE(reused.slice(0, 12, 47).eq(29).all().item<bool>());
-  EXPECT_TRUE(reused.slice(0, 47, 64).eq(17).all().item<bool>());
-  EXPECT_TRUE(key[144].eq(53).all().item<bool>());
-  const size_t conv_row = layout.row_index(38, KVCacheTensorRole::CONV);
-  const size_t ssm_row = layout.row_index(38, KVCacheTensorRole::SSM) + 4;
-  ASSERT_EQ(conv_row, 5003);
-  ASSERT_EQ(ssm_row, 232);
-  conv[conv_row].fill_(31);
-  ssm[ssm_row].fill_(37);
-  last_conv[conv_row].fill_(43);
-  last_ssm[ssm_row].fill_(47);
-  EXPECT_TRUE(conv[conv_row].eq(31).all().item<bool>());
-  EXPECT_TRUE(ssm[ssm_row].eq(37).all().item<bool>());
-  EXPECT_TRUE(last_conv[conv_row].eq(43).all().item<bool>());
-  EXPECT_TRUE(last_ssm[ssm_row].eq(47).all().item<bool>());
+  EXPECT_EQ(layout.full_pair_bytes(), 262144);
+  EXPECT_EQ(layout.conv_row_bytes(), 71680);
+  EXPECT_EQ(layout.ssm_bundle_bytes(), 7864320);
+  EXPECT_EQ(layout.slab_bytes(), 55050240);
+  EXPECT_EQ(layout.slab_bytes() % layout.full_pair_bytes(), 0);
+  EXPECT_EQ(layout.slab_bytes() % layout.conv_row_bytes(), 0);
+  EXPECT_EQ(layout.slab_bytes() % layout.ssm_bundle_bytes(), 0);
+  EXPECT_EQ(layout.rows_per_slab(KVCacheTensorRole::KEY), 420);
+  EXPECT_EQ(layout.rows_per_slab(KVCacheTensorRole::CONV), 768);
+  EXPECT_EQ(layout.rows_per_slab(KVCacheTensorRole::SSM), 35);
 }
 
 TEST(StaticKVCacheTensorAllocatorTest,
-     KeepsSimultaneousResourceExtentsIsolated) {
-  StaticKVCacheTensorAllocator allocator(StaticKVCacheLayout(make_spec()),
-                                         torch::kCPU);
+     KeepsSimultaneousResourceExtentsAndScratchIsolated) {
+  StaticKVCacheTensorAllocator allocator(
+      StaticKVCacheLayout(make_spec(/*num_slots=*/12, /*checkpoint_stride=*/2)),
+      torch::kCPU);
   allocator.begin_layer(0);
   auto key0 =
       allocate_float_tensor(allocator, KVCacheTensorRole::KEY, {12, 2, 2});
@@ -232,42 +136,46 @@ TEST(StaticKVCacheTensorAllocatorTest,
   auto conv1 =
       allocate_float_tensor(allocator, KVCacheTensorRole::CONV, {12, 2});
   auto ssm1 =
-      allocate_float_tensor(allocator, KVCacheTensorRole::SSM, {12, 2, 4});
+      allocate_float_tensor(allocator, KVCacheTensorRole::SSM, {24, 2, 4});
   allocator.begin_layer(2);
   auto conv2 =
       allocate_float_tensor(allocator, KVCacheTensorRole::CONV, {12, 2});
   auto ssm2 =
-      allocate_float_tensor(allocator, KVCacheTensorRole::SSM, {12, 2, 4});
+      allocate_float_tensor(allocator, KVCacheTensorRole::SSM, {24, 2, 4});
 
-  ASSERT_EQ(allocator.bytes_used(), 1536);
-  ASSERT_EQ(key0.size(0), 89);
-  ASSERT_EQ(value0.size(0), key0.size(0));
+  ASSERT_EQ(allocator.bytes_used(), 768);
+  ASSERT_EQ(key0.size(0), 48);
+  ASSERT_EQ(value0.size(0), 47);
   ASSERT_EQ(key3.size(0), key0.size(0));
-  ASSERT_EQ(value3.size(0), key0.size(0));
-  ASSERT_EQ(conv1.size(0), 161);
-  ASSERT_EQ(ssm1.size(0), 41);
+  ASSERT_EQ(value3.size(0), value0.size(0));
+  ASSERT_EQ(conv1.size(0), 96);
+  ASSERT_EQ(ssm1.size(0), 24);
+  EXPECT_EQ(key0.data_ptr(), key3.data_ptr());
+  EXPECT_EQ(value0.data_ptr(), key0[1].data_ptr());
   for (const auto& tensor :
        {key0, value0, key3, value3, conv1, ssm1, conv2, ssm2}) {
     ASSERT_TRUE(tensor.is_contiguous());
   }
 
-  // Full extent [1, 2) and recurrent extent [6, 8) are live together.
-  key0[8].fill_(11);
-  value0[8].fill_(12);
-  key3[8].fill_(13);
-  value3[8].fill_(14);
-  conv1[96].fill_(21);
-  ssm1[24].fill_(22);
-  conv2[96].fill_(23);
-  ssm2[24].fill_(24);
-  EXPECT_TRUE(key0[8].eq(11).all().item<bool>());
-  EXPECT_TRUE(value0[8].eq(12).all().item<bool>());
-  EXPECT_TRUE(key3[8].eq(13).all().item<bool>());
-  EXPECT_TRUE(value3[8].eq(14).all().item<bool>());
-  EXPECT_TRUE(conv1[96].eq(21).all().item<bool>());
-  EXPECT_TRUE(ssm1[24].eq(22).all().item<bool>());
-  EXPECT_TRUE(conv2[96].eq(23).all().item<bool>());
-  EXPECT_TRUE(ssm2[24].eq(24).all().item<bool>());
+  // The pool reserves slab zero, then maps live objects to independent rows.
+  key0[0].fill_(7);
+  key0[4].fill_(11);
+  value0[4].fill_(12);
+  key3[6].fill_(13);
+  value3[6].fill_(14);
+  conv1[16].fill_(21);
+  ssm1.narrow(0, 6, 2).fill_(22);
+  conv2[32].fill_(23);
+  ssm2.narrow(0, 10, 2).fill_(24);
+  EXPECT_TRUE(key0[0].eq(7).all().item<bool>());
+  EXPECT_TRUE(key0[4].eq(11).all().item<bool>());
+  EXPECT_TRUE(value0[4].eq(12).all().item<bool>());
+  EXPECT_TRUE(key3[6].eq(13).all().item<bool>());
+  EXPECT_TRUE(value3[6].eq(14).all().item<bool>());
+  EXPECT_TRUE(conv1[16].eq(21).all().item<bool>());
+  EXPECT_TRUE(ssm1.narrow(0, 6, 2).eq(22).all().item<bool>());
+  EXPECT_TRUE(conv2[32].eq(23).all().item<bool>());
+  EXPECT_TRUE(ssm2.narrow(0, 10, 2).eq(24).all().item<bool>());
 }
 
 TEST(StaticKVCacheTensorAllocatorTest, ReusesTheSameBytesAcrossAttentionTypes) {
@@ -292,31 +200,49 @@ TEST(StaticKVCacheTensorAllocatorTest, ReusesTheSameBytesAcrossAttentionTypes) {
 
 TEST(StaticKVCacheTensorAllocatorTest, FitsLastExtentAndAllCheckpointRows) {
   StaticKVCacheTensorAllocator allocator(
-      StaticKVCacheLayout(make_spec(/*num_units=*/12, /*checkpoint_stride=*/2)),
+      StaticKVCacheLayout(make_spec(/*num_slots=*/12, /*checkpoint_stride=*/2)),
       torch::kCPU);
-  ASSERT_EQ(allocator.layout().linear_state_units(), 2);
+  allocator.begin_layer(0);
+  auto key =
+      allocate_float_tensor(allocator, KVCacheTensorRole::KEY, {12, 2, 2});
+  auto value =
+      allocate_float_tensor(allocator, KVCacheTensorRole::VALUE, {12, 2, 2});
   allocator.begin_layer(1);
   auto conv =
       allocate_float_tensor(allocator, KVCacheTensorRole::CONV, {12, 2});
   auto ssm =
       allocate_float_tensor(allocator, KVCacheTensorRole::SSM, {24, 2, 4});
-  allocator.begin_layer(2);
-  auto last_ssm =
-      allocate_float_tensor(allocator, KVCacheTensorRole::SSM, {24, 2, 4});
-  ASSERT_EQ(conv.size(0), 161);
-  ASSERT_EQ(ssm.size(0), 42);
-  ASSERT_EQ(last_ssm.size(0), 42);
-  const int64_t last_start = 10;
-  conv[last_start * 16].fill_(3);
-  ssm[last_start * 4].fill_(4);
-  ssm[last_start * 4 + 1].fill_(5);
-  last_ssm[last_start * 4].fill_(6);
-  last_ssm[last_start * 4 + 1].fill_(7);
-  EXPECT_TRUE(conv[160].eq(3).all().item<bool>());
-  EXPECT_TRUE(ssm[40].eq(4).all().item<bool>());
-  EXPECT_TRUE(ssm[41].eq(5).all().item<bool>());
-  EXPECT_TRUE(last_ssm[40].eq(6).all().item<bool>());
-  EXPECT_TRUE(last_ssm[41].eq(7).all().item<bool>());
+  key[46].fill_(3);
+  value[46].fill_(4);
+  EXPECT_TRUE(key[46].eq(3).all().item<bool>());
+  EXPECT_TRUE(value[46].eq(4).all().item<bool>());
+  conv[95].fill_(5);
+  EXPECT_TRUE(conv[95].eq(5).all().item<bool>());
+  ssm[22].fill_(6);
+  ssm[23].fill_(7);
+  EXPECT_TRUE(ssm[22].eq(6).all().item<bool>());
+  EXPECT_TRUE(ssm[23].eq(7).all().item<bool>());
+  EXPECT_EQ(value[46].data_ptr(), key[47].data_ptr());
+}
+
+TEST(StaticKVCacheTensorAllocatorTest,
+     SeparatesLogicalCapacityFromPhysicalArenaCapacity) {
+  StaticKVCacheTensorAllocator allocator(
+      StaticKVCacheLayout(make_spec(/*num_slots=*/100,
+                                    /*checkpoint_stride=*/2,
+                                    /*num_slabs=*/3)),
+      torch::kCPU);
+  allocator.begin_layer(0);
+  auto key =
+      allocate_float_tensor(allocator, KVCacheTensorRole::KEY, {100, 2, 2});
+  allocator.begin_layer(1);
+  auto ssm =
+      allocate_float_tensor(allocator, KVCacheTensorRole::SSM, {200, 2, 4});
+  EXPECT_EQ(allocator.layout().num_slots(), 100);
+  EXPECT_EQ(allocator.layout().num_slabs(), 3);
+  EXPECT_EQ(allocator.bytes_used(), 192);
+  EXPECT_EQ(key.size(0), 12);
+  EXPECT_EQ(ssm.size(0), 6);
 }
 
 TEST(StaticKVCacheTensorAllocatorTest, TensorViewRetainsArenaOwnership) {
@@ -327,9 +253,9 @@ TEST(StaticKVCacheTensorAllocatorTest, TensorViewRetainsArenaOwnership) {
     allocator.begin_layer(0);
     retained =
         allocate_float_tensor(allocator, KVCacheTensorRole::KEY, {12, 2, 2});
-    retained[88].fill_(43);
+    retained[23].fill_(43);
   }
-  EXPECT_TRUE(retained[88].eq(43).all().item<bool>());
+  EXPECT_TRUE(retained[23].eq(43).all().item<bool>());
 }
 
 TEST(StaticKVCacheTensorAllocatorTest, RejectsInvalidLayerAndRowGeometry) {

@@ -41,6 +41,8 @@ limitations under the License.
 #include "core/framework/multimodal/mm_visitor.h"
 #include "core/framework/request/sequence.h"
 #include "core/framework/sampling/sampling_params.h"
+#include "core/kv_cache/block/block_manager.h"
+#include "core/kv_cache/block/static_kv_cache_block_pool.h"
 #if defined(USE_MUSA)
 #include "layers/common/attention_metadata.h"
 #endif
@@ -680,6 +682,12 @@ void ForwardInputBuilder::process_sequences_multithreaded() {
     state_.linear_state_read_ids.insert(state_.linear_state_read_ids.end(),
                                         state.linear_state_read_ids.begin(),
                                         state.linear_state_read_ids.end());
+    state_.linear_state_slot_rows.insert(state_.linear_state_slot_rows.end(),
+                                         state.linear_state_slot_rows.begin(),
+                                         state.linear_state_slot_rows.end());
+    state_.full_block_slot_rows.insert(state_.full_block_slot_rows.end(),
+                                       state.full_block_slot_rows.begin(),
+                                       state.full_block_slot_rows.end());
     state_.request_ids.insert(state_.request_ids.end(),
                               state.request_ids.begin(),
                               state.request_ids.end());
@@ -928,7 +936,27 @@ void ForwardInputBuilder::append_linear_state_row(Sequence* sequence,
   const size_t read_index =
       linear_blocks.size() > 1 ? linear_blocks.size() - 2 : 0;
   CHECK(linear_blocks[read_index].is_valid());
-  state.linear_state_read_ids.emplace_back(linear_blocks[read_index].id());
+  const int32_t read_id = linear_blocks[read_index].id();
+  state.linear_state_read_ids.emplace_back(read_id);
+
+  const std::shared_ptr<StaticKVCacheBlockPool>& shared_pool =
+      linear_blocks.back().manager()->options().shared_block_pool();
+  if (shared_pool == nullptr) {
+    return;
+  }
+  for (const int32_t state_id : {linear_state_id, read_id}) {
+    state.linear_state_slot_rows.emplace_back(state_id);
+    if (shared_pool->uses_slabs()) {
+      shared_pool->append_linear_state_rows(state_id,
+                                            &state.linear_state_slot_rows);
+    } else {
+      shared_pool->append_linear_state_slots(state_id,
+                                             &state.linear_state_slot_rows);
+    }
+    if (read_id == linear_state_id) {
+      break;
+    }
+  }
 }
 
 void ForwardInputBuilder::handle_sampling_parameters(Sequence* sequence,
@@ -992,6 +1020,24 @@ void ForwardInputBuilder::setup_kv_cache_info(Sequence* sequence,
   sequence->kv_state().incr_kv_cache_tokens_num(/*size=*/q_seq_len);
 
   const auto blocks = sequence->kv_state().blocks(BlockType::KV);
+  const auto shared_block =
+      std::find_if(blocks.begin(), blocks.end(), [](const Block& block) {
+        return block.is_valid() && block.manager() != nullptr;
+      });
+  if (shared_block != blocks.end()) {
+    const auto& shared_pool =
+        shared_block->manager()->options().shared_block_pool();
+    if (shared_pool != nullptr && shared_pool->uses_slabs()) {
+      for (const auto& block : blocks) {
+        if (!block.is_valid()) {
+          continue;
+        }
+        state.full_block_slot_rows.emplace_back(block.id());
+        shared_pool->append_full_block_rows(block.id(),
+                                            &state.full_block_slot_rows);
+      }
+    }
+  }
   if (sequence->kv_state().has_multi_block_export()) {
     const auto export_view = sequence->kv_state().multi_block_export_view();
     if (state.multi_block_tables.empty()) {
@@ -1246,6 +1292,10 @@ Input ForwardInputBuilder::state_to_forward_input() {
         make_cpu_tensor(input_params.embedding.linear_state_ids);
   }
   input_params.embedding.request_ids = std::move(state_.request_ids);
+  input_params.embedding.linear_state_slot_rows =
+      std::move(state_.linear_state_slot_rows);
+  input_params.embedding.full_block_slot_rows =
+      std::move(state_.full_block_slot_rows);
   input_params.embedding.extra_token_ids = std::move(state_.extra_token_ids);
   if (!state_.mtp_shifted_token_ids.empty()) {
     // Write both the upstream "root" path (consumed by non-CP MTP code paths

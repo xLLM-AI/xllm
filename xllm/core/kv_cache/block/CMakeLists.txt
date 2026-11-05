@@ -56,6 +56,7 @@ cc_library(
   DEPS
     :kv_cache_block_types
     :block_utils
+    :static_kv_cache_layout
     $<$<BOOL:${USE_NPU}>:torch_npu>
     $<$<BOOL:${USE_NPU}>:graph>
     :request

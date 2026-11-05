@@ -118,7 +118,7 @@ class AclGraphExecutionState:
     """Persistent resources owned by one model-execution graph entry."""
 
     persistent_buffers: dict[tuple[object, ...], object]
-    paged_attention: dict[int, PagedAttentionGraphState] = field(default_factory=dict)
+    paged_attention: dict[int | tuple[int, int | None], PagedAttentionGraphState] = field(default_factory=dict)
     # Serial MTP draft steps may share temporary attention storage.  Keep the
     # per-step map above for outputs and metadata whose addresses are part of
     # the captured graph, while allowing explicitly shared workspaces to use a

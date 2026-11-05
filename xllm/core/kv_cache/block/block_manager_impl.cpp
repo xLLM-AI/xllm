@@ -66,7 +66,7 @@ BlockManagerImpl::BlockManagerImpl(const Options& options)
   size_t total_blocks = options_.num_blocks();
   block_size_ = options_.block_size();
   if (options_.shared_block_pool()) {
-    CHECK_EQ(total_blocks, options_.shared_block_pool()->num_units());
+    CHECK_EQ(total_blocks, options_.shared_block_pool()->num_slots());
     usage_accounted_ids_.assign(total_blocks, 0);
     return;
   }
@@ -87,8 +87,8 @@ std::vector<Block> BlockManagerImpl::allocate(size_t num_blocks) {
   if (options_.shared_block_pool()) {
     std::vector<int32_t> ids =
         options_.shared_block_pool()->allocate(num_blocks, block_type());
-    // Free units can still be fragmented. Retire one cached extent and retry
-    // the actual allocation until enough contiguous extents are available.
+    // Cached blocks of either type hold shared slots. Retire them one at a
+    // time until the request fits.
     while (ids.size() != num_blocks && evict_prefix_cache(1) != 0) {
       ids = options_.shared_block_pool()->allocate(num_blocks, block_type());
     }

@@ -53,7 +53,7 @@ KVCacheManagerFactoryResult KVCacheManagerFactory::create(
       << "KV cache embedding block count exceeds uint32_t range";
   options.num_embedding_blocks(static_cast<uint32_t>(key_cache_shape.front()));
 
-  const bool enable_shared_kv_cache = kv_cache_capacity.shared_unit_bytes() > 0;
+  const bool enable_shared_kv_cache = kv_cache_capacity.shared_slot_bytes() > 0;
   CHECK(!options.enable_shared_kv_cache() || enable_shared_kv_cache)
       << "Shared KV cache manager requires shared storage capacity metadata.";
   options.enable_shared_kv_cache(enable_shared_kv_cache);
@@ -79,17 +79,17 @@ KVCacheManagerFactoryResult KVCacheManagerFactory::create(
     create_options.num_layers(model_args.n_layers())
         .dtype(dtype)
         .ssm_dtype(resolve_ssm_dtype(model_args.mamba_ssm_dtype(), dtype));
-    const StaticKVCacheLayout layout(shape, create_options);
-    CHECK_EQ(layout.unit_bytes(),
-             static_cast<size_t>(kv_cache_capacity.shared_unit_bytes()));
-    CHECK_EQ(layout.full_block_units(),
-             kv_cache_capacity.shared_full_block_units());
-    CHECK_EQ(layout.linear_state_units(),
-             kv_cache_capacity.shared_linear_state_units());
+    auto layout = std::make_shared<StaticKVCacheLayout>(shape, create_options);
+    CHECK_EQ(layout->slot_bytes(),
+             static_cast<size_t>(kv_cache_capacity.shared_slot_bytes()));
+    CHECK_EQ(layout->num_linear_groups(),
+             kv_cache_capacity.shared_linear_state_slots());
+    CHECK_EQ(layout->num_slabs(),
+             static_cast<size_t>(kv_cache_capacity.shared_slab_count()));
     options.num_blocks(static_cast<uint32_t>(key_cache_shape.front()))
-        .shared_full_block_units(kv_cache_capacity.shared_full_block_units())
-        .shared_linear_state_units(
-            kv_cache_capacity.shared_linear_state_units());
+        .shared_layout(std::move(layout))
+        .shared_linear_state_slots(
+            kv_cache_capacity.shared_linear_state_slots());
   }
 
   if (options.enable_linear_state()) {
