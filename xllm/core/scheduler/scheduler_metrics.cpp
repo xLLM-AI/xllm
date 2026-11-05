@@ -182,12 +182,16 @@ void SchedulerMetrics::update_memory_metrics(
       get_num_occupied_slots(sequences);
   const std::vector<int64_t> active_activation_size_in_bytes =
       get_active_activation_in_bytes();
-  const int64_t num_total_slots =
-      kv_cache_manager_->num_blocks() * kv_cache_manager_->block_size();
   for (int32_t dp_rank = 0; dp_rank < dp_size_; ++dp_rank) {
+    const double num_total_slots =
+        static_cast<double>(kv_cache_manager_->admission_capacity(dp_rank)) *
+        kv_cache_manager_->block_size();
     const double occupied_slots_ratio =
-        static_cast<double>(num_occupied_slots[static_cast<size_t>(dp_rank)]) /
-        num_total_slots;
+        num_total_slots > 0
+            ? static_cast<double>(
+                  num_occupied_slots[static_cast<size_t>(dp_rank)]) /
+                  num_total_slots
+            : 0;
     const double active_kv_cache_size_in_kilobytes =
         occupied_slots_ratio * GAUGE_VALUE(total_kv_cache_size_in_kilobytes);
     const int64_t active_activation_size_in_kilobytes =

@@ -57,8 +57,8 @@ class BlockManagerPool : public KVCacheManager {
     PROPERTY(bool, enable_host_offload) = false;
     PROPERTY(bool, enable_vmm_kvcache) = false;
     PROPERTY(bool, enable_shared_kv_cache) = false;
-    PROPERTY(uint32_t, shared_full_block_units) = 1;
-    PROPERTY(uint32_t, shared_linear_state_units) = 1;
+    PROPERTY(uint32_t, shared_linear_state_slots) = 1;
+    PROPERTY(std::shared_ptr<const StaticKVCacheLayout>, shared_layout);
     PROPERTY(int64_t,
              num_layers) = 0;  // Required when enable_vmm_kvcache is true
     PROPERTY(int64_t,

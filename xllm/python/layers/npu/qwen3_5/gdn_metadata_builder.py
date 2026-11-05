@@ -58,7 +58,8 @@ def _build_mega_prefill_indices(
     has_initial_state: torch.Tensor,
     checkpoint_stride: int,
     shared_layout: SharedKVCacheLayout | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    group_slots: tuple[torch.Tensor, ...] = (),
+) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...], tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
     if checkpoint_stride <= 0:
         raise ValueError("Qwen3.5 SSM checkpoint stride must be positive")
     if has_initial_state.shape != read_state_indices.shape:
@@ -67,18 +68,21 @@ def _build_mega_prefill_indices(
     conv_read = torch.where(valid_read, read_state_indices, -1)
     if shared_layout is None:
         if checkpoint_stride == 1:
-            return conv_read, write_state_indices, conv_read, write_state_indices
+            return (conv_read,), (write_state_indices,), (conv_read,), (write_state_indices,)
         return (
-            conv_read,
-            write_state_indices,
-            torch.where(valid_read, read_state_indices * checkpoint_stride, -1),
-            write_state_indices * checkpoint_stride,
+            (conv_read,),
+            (write_state_indices,),
+            (torch.where(valid_read, read_state_indices * checkpoint_stride, -1),),
+            (write_state_indices * checkpoint_stride,),
         )
-    return (
-        shared_layout.linear_state_indices(conv_read, role="conv"),
-        shared_layout.linear_state_indices(write_state_indices, role="conv"),
-        shared_layout.linear_state_indices(conv_read, role="ssm"),
-        shared_layout.linear_state_indices(write_state_indices, role="ssm"),
+    return tuple(
+        tuple(shared_layout.linear_state_indices(indices, role=role, slots=slots) for slots in group_slots)
+        for indices, role in (
+            (conv_read, "conv"),
+            (write_state_indices, "conv"),
+            (conv_read, "ssm"),
+            (write_state_indices, "ssm"),
+        )
     )
 
 
@@ -106,6 +110,8 @@ class Qwen3_5GdnMetadataBuilder:
         self._checkpoint_stride: int | None = None
         self._device: torch.device | None = None
         self._shared_layout: SharedKVCacheLayout | None = None
+        self._layer_groups: dict[int, int] = {}
+        self._group_slots: tuple[torch.Tensor, ...] = ()
 
     def bind_layer_caches(self, layer_caches: list[LayerCache]) -> None:
         state_caches: dict[int, GdnStateCache] = {}
@@ -144,6 +150,21 @@ class Qwen3_5GdnMetadataBuilder:
         self._checkpoint_stride = stride
         self._device = device
         self._shared_layout = shared_layout
+        self._layer_groups = {}
+        self._group_slots = ()
+        if shared_layout is not None:
+            # Slab storage allocates Conv and SSM rows independently for each
+            # layer. Legacy fixed pages instead share one map per lane group.
+            self._layer_groups = {
+                layer_id: index if shared_layout.num_slabs else index // shared_layout.pages_per_slot
+                for index, layer_id in enumerate(self._layer_ids)
+            }
+            group_slots: list[torch.Tensor] = [None] * shared_layout.num_linear_groups  # type: ignore[list-item]
+            for layer_id, group in self._layer_groups.items():
+                slots = layer_caches[layer_id].linear_state_slots
+                assert slots is not None
+                group_slots[group] = slots
+            self._group_slots = tuple(group_slots)
 
     def allocate_persistent(self, input_batch: InputBatch, metadata: ExecutionMetadataSource) -> GdnMetadata:
         return self.build(input_batch, metadata)
@@ -158,30 +179,34 @@ class Qwen3_5GdnMetadataBuilder:
         if state_indices is None:
             raise ValueError("Unified GDN capture requires logical state indices")
         width = self._checkpoint_stride
-        if self._shared_layout is None:
-            conv_indices = state_indices.to(torch.long)
-            ssm_bases = conv_indices * width
-        else:
-            conv_indices = self._shared_layout.linear_state_indices(state_indices, role="conv").to(torch.long)
-            ssm_bases = self._shared_layout.linear_state_indices(state_indices, role="ssm").to(torch.long)
-        ssm_indices = (ssm_bases[:, None] + torch.arange(width, device=ssm_bases.device)).reshape(-1)
-        return _GdnGraphStateSnapshot(
-            tuple(
-                (cache, indices, cache.index_select(0, indices))
-                for state in self._state_caches.values()
-                for cache, indices in ((state.conv, conv_indices), (state.ssm, ssm_indices))
-            )
-        )
+        rows = []
+        for layer_id, state in self._state_caches.items():
+            if self._shared_layout is None:
+                conv_indices = state_indices.to(torch.long)
+                ssm_bases = conv_indices * width
+            else:
+                slots = self._group_slots[self._layer_groups[layer_id]]
+                conv_indices = self._shared_layout.linear_state_indices(state_indices, role="conv", slots=slots).to(
+                    torch.long
+                )
+                ssm_bases = self._shared_layout.linear_state_indices(state_indices, role="ssm", slots=slots).to(
+                    torch.long
+                )
+            ssm_indices = (ssm_bases[:, None] + torch.arange(width, device=ssm_bases.device)).reshape(-1)
+            for cache, indices in ((state.conv, conv_indices), (state.ssm, ssm_indices)):
+                rows.append((cache, indices, cache.index_select(0, indices)))
+        return _GdnGraphStateSnapshot(tuple(rows))
 
     def snapshot_prefill_graph_state(self, metadata: GdnPrefillMetadata) -> _GdnGraphStateSnapshot:
         """Preserve the destination rows overwritten by a prefill capture."""
         if self._state_caches is None or self._checkpoint_stride is None:
             raise RuntimeError("Qwen3.5 GDN state caches must be bound before capture")
-        conv_slots = metadata.conv_write_indices.to(torch.long).clamp_min(0)
-        ssm_bases = metadata.ssm_write_indices.to(torch.long).clamp_min(0)
         stride = self._checkpoint_stride
         rows = []
-        for state in self._state_caches.values():
+        for layer_id, state in self._state_caches.items():
+            group = self._layer_groups.get(layer_id, 0)
+            conv_slots = metadata.conv_write_indices[group].to(torch.long).clamp_min(0)
+            ssm_bases = metadata.ssm_write_indices[group].to(torch.long).clamp_min(0)
             conv = state.conv.view(-1, state.conv.shape[-1])
             conv_offsets = torch.arange(state.conv.shape[1], device=conv_slots.device)
             conv_indices = (conv_slots[:, None] * state.conv.shape[1] + conv_offsets).reshape(-1)
@@ -225,9 +250,15 @@ class Qwen3_5GdnMetadataBuilder:
             replacement = getattr(updated, field_name, None)
             if current is None or replacement is None:
                 continue
-            if current.shape != replacement.shape or current.dtype != replacement.dtype:
-                raise ValueError(f"Qwen3.5 GDN graph metadata shape changed for {field_name}")
-            current.copy_(replacement)
+            if isinstance(current, tuple):
+                if len(current) != len(replacement):
+                    raise ValueError(f"Qwen3.5 GDN graph metadata group count changed for {field_name}")
+            else:
+                current, replacement = (current,), (replacement,)
+            for current_group, replacement_group in zip(current, replacement, strict=True):
+                if current_group.shape != replacement_group.shape or current_group.dtype != replacement_group.dtype:
+                    raise ValueError(f"Qwen3.5 GDN graph metadata shape changed for {field_name}")
+                current_group.copy_(replacement_group)
 
     def build(self, input_batch: InputBatch, metadata: ExecutionMetadataSource) -> GdnMetadata:
         if self._state_caches is None or self._checkpoint_stride is None:
@@ -292,8 +323,14 @@ class Qwen3_5GdnMetadataBuilder:
                 raise ValueError("Qwen3.5 MegaGdnDecode requires one SSM row per Conv slot")
             if self._shared_layout is None:
                 return GdnDecodeMetadata(self._state_caches, read_indices, write_indices)
-            conv_state_indices = self._shared_layout.linear_state_indices(read_indices, role="conv")
-            ssm_state_indices = self._shared_layout.linear_state_indices(read_indices, role="ssm")
+            conv_state_indices = tuple(
+                self._shared_layout.linear_state_indices(read_indices, role="conv", slots=slots)
+                for slots in self._group_slots
+            )
+            ssm_state_indices = tuple(
+                self._shared_layout.linear_state_indices(read_indices, role="ssm", slots=slots)
+                for slots in self._group_slots
+            )
             return GdnDecodeMetadata(
                 self._state_caches,
                 read_indices,
@@ -302,6 +339,7 @@ class Qwen3_5GdnMetadataBuilder:
                 conv_state_indices,
                 ssm_state_indices,
                 ssm_state_indices,
+                self._layer_groups,
             )
         query_lengths_host = metadata.q_seq_lens_host
         if query_lengths_host is None:
@@ -333,6 +371,7 @@ class Qwen3_5GdnMetadataBuilder:
             has_initial_state.to(device=device, dtype=torch.bool),
             self._checkpoint_stride,
             self._shared_layout,
+            self._group_slots,
         )
         cu_seqlens = metadata.q_cu_seq_lens
         host_query_ends = getattr(metadata, "q_cu_seq_lens_host_values", None)
@@ -362,6 +401,7 @@ class Qwen3_5GdnMetadataBuilder:
             ssm_write,
             cu_seqlens.to(device=device, dtype=torch.int32).contiguous(),
             _compute_mega_prefill_num_matrices(query_lengths, self._num_value_heads),
+            layer_groups=self._layer_groups,
             shared_checkpoint_stride=self._checkpoint_stride if self._shared_layout is not None else None,
         )
 
@@ -370,8 +410,15 @@ class Qwen3_5GdnMetadataBuilder:
             return metadata
         return replace(
             metadata,
-            conv_state_indices=self._shared_layout.linear_state_indices(metadata.state_indices, role="conv"),
-            ssm_state_indices=self._shared_layout.linear_state_indices(metadata.state_indices, role="ssm"),
+            conv_state_indices=tuple(
+                self._shared_layout.linear_state_indices(metadata.state_indices, role="conv", slots=slots)
+                for slots in self._group_slots
+            ),
+            ssm_state_indices=tuple(
+                self._shared_layout.linear_state_indices(metadata.state_indices, role="ssm", slots=slots)
+                for slots in self._group_slots
+            ),
+            layer_groups=self._layer_groups,
         )
 
     def _build_verify(
@@ -414,7 +461,8 @@ class Qwen3_5GdnMetadataBuilder:
         if not lengths or any(length <= 0 or length > width for length in lengths):
             raise ValueError("Qwen3.5 MTP query lengths must be in [1, checkpoint stride]")
         token_count = sum(lengths)
-        if token_count != input_batch.num_tokens:
+        # Bound graph metadata includes dummy rows from its static input bucket.
+        if token_count != input_batch.num_tokens_after_padding:
             raise ValueError("Qwen3.5 MTP query lengths must cover every packed token")
         batch_size = len(lengths)
         if state_indices.numel() == token_count:

@@ -88,6 +88,7 @@ def executor(runner: DecodeAclGraphRunner) -> ModelExecutor:
     executor.inductor_runner = None
     executor.eager_runner = Mock()
     executor.requires_input_batch_metadata = False
+    executor._eager_multimodal_prefill = False
     return executor
 
 

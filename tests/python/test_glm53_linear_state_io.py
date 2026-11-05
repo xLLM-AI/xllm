@@ -556,6 +556,7 @@ def test_consecutive_verify_widths_preserve_accepted_state(
             conv_cache,
             ssm_cache,
             ascendc.recurrent_kda,
+            0,
         )
 
         assert output.shape == (1, 2 * width, 1, 2)

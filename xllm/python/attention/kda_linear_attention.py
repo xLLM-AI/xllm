@@ -43,12 +43,12 @@ class KdaLinearAttentionMixin:
     _kda_query_start_locs: dict[tuple[int, int, torch.device], torch.Tensor]
     _kda_checkpoint_offsets: dict[tuple[int, torch.device], torch.Tensor]
 
-    def _shared_linear_state_rows(self, indices: torch.Tensor, role: str) -> torch.Tensor | None:
-        """Translate logical state slots when Conv/SSM share a physical arena."""
+    def _shared_linear_state_rows(self, indices: torch.Tensor, role: str, layer_id: int) -> torch.Tensor | None:
+        """Translate recurrent state ids when Conv/SSM share a physical arena."""
         layout = getattr(self, "_shared_kv_layout", None)
         if layout is None:
             return None
-        return layout.linear_state_indices(indices, role=role)
+        return layout.linear_state_indices(indices, role=role, slots=self._kv_caches[layer_id].linear_state_slots)
 
     def _causal_conv1d(
         self,
@@ -210,6 +210,7 @@ class KdaLinearAttentionMixin:
                         conv_cache,
                         ssm_cache,
                         recurrent_kda,
+                        layer_id,
                     )
             q_rows = 0 if in_graph else (int(q_cu_raw.numel()) - 1 if q_cu_raw is not None else 0)
             per_row_idx = None
@@ -272,6 +273,7 @@ class KdaLinearAttentionMixin:
                     conv_cache,
                     ssm_cache,
                     recurrent_kda,
+                    layer_id,
                 )
             if is_spec_verify:
                 raise RuntimeError("KDA spec-verify requires a non-empty uniform token block within the decoding width")
@@ -282,8 +284,8 @@ class KdaLinearAttentionMixin:
                 raise RuntimeError("KDA requires a bound linear-state checkpoint stride")
             conv_cache_base = conv_cache[:, :conv_state_len]
             state_read_idx = read_idx if is_prefill else idx
-            conv_read_idx = self._shared_linear_state_rows(state_read_idx, "conv")
-            ssm_read_idx = self._shared_linear_state_rows(state_read_idx, "ssm")
+            conv_read_idx = self._shared_linear_state_rows(state_read_idx, "conv", layer_id)
+            ssm_read_idx = self._shared_linear_state_rows(state_read_idx, "ssm", layer_id)
             if conv_read_idx is None or ssm_read_idx is None:
                 conv_read_idx = state_read_idx
                 ssm_read_idx = state_read_idx * ssm_checkpoint_stride
@@ -489,8 +491,8 @@ class KdaLinearAttentionMixin:
                 final_state = result[1]
 
         if idx is not None:
-            conv_write_idx = self._shared_linear_state_rows(idx, "conv")
-            ssm_write_idx = self._shared_linear_state_rows(idx, "ssm")
+            conv_write_idx = self._shared_linear_state_rows(idx, "conv", layer_id)
+            ssm_write_idx = self._shared_linear_state_rows(idx, "ssm", layer_id)
             if conv_write_idx is None or ssm_write_idx is None:
                 conv_write_idx = idx
                 ssm_write_idx = idx * ssm_checkpoint_stride
@@ -521,6 +523,7 @@ class KdaLinearAttentionMixin:
         conv_cache: torch.Tensor,
         ssm_cache: torch.Tensor,
         recurrent_kda: Callable[..., Any],
+        layer_id: int,
     ) -> torch.Tensor:
         from xllm.python import kernels
 
@@ -568,8 +571,8 @@ class KdaLinearAttentionMixin:
             raise ValueError("KDA accepted-token counts must be in [1, verify width]")
 
         idx32 = idx.to(torch.int32).contiguous()
-        conv_idx32 = self._shared_linear_state_rows(idx32, "conv")
-        ssm_base_idx32 = self._shared_linear_state_rows(idx32, "ssm")
+        conv_idx32 = self._shared_linear_state_rows(idx32, "conv", layer_id)
+        ssm_base_idx32 = self._shared_linear_state_rows(idx32, "ssm", layer_id)
         if conv_idx32 is None or ssm_base_idx32 is None:
             conv_idx32 = idx32
             ssm_base_idx32 = idx32 * checkpoint_stride

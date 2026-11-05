@@ -8,6 +8,7 @@ cc_test(
     linear_state_restore_test.cpp
   DEPS
     :linear_state_restore
+    :kv_cache_block
     :static_kv_cache_tensor_allocator
     GTest::gtest_main
 )

@@ -3000,6 +3000,67 @@ TEST(BatchTest, DecodeEmbeddingAndLinearStateIdsAreIndependentSlots) {
             expected_linear_id);
 }
 
+TEST(BatchTest, SharedArenaPublishesLinearGroupSlotsForReadAndWriteStates) {
+  BlockManager::Options options;
+  options.num_blocks(16)
+      .block_size(4)
+      .enable_linear_state(true)
+      .linear_state_num_slots(16)
+      .enable_shared_kv_cache(true)
+      .shared_linear_state_slots(2)
+      .enable_prefix_cache(false);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+
+  RequestSamplingParam sampling_param;
+  StoppingChecker stopping_checker;
+  stopping_checker.set_max_generated_tokens(20);
+  SequenceParams seq_params;
+  seq_params.seq_capacity = 32;
+  seq_params.stopping_checker = &stopping_checker;
+  seq_params.sampling_param = &sampling_param;
+  torch::Tensor input_embedding;
+  MMData mm_data;
+  IncrementalDecoder decoder("", 1, false, false);
+  Sequence seq(/*index=*/0,
+               /*token_ids=*/{1, 2, 3},
+               input_embedding,
+               mm_data,
+               std::move(decoder),
+               seq_params);
+  seq.add_blocks(BlockType::KV, manager.allocate_blocks(BlockType::KV, 1));
+  seq.kv_state().incr_kv_cache_tokens_num(/*size=*/3);
+  seq.append_token(4);
+  // Slot 1 holds the KV block. The read state takes slots {2, 3} and the
+  // write state takes slots {4, 5}.
+  std::vector<Block> linear = manager.allocate_blocks(BlockType::LINEAR, 2);
+  ASSERT_EQ(linear.size(), 2u);
+  seq.add_blocks(BlockType::LINEAR, linear);
+
+  std::vector<Sequence*> sequences = {&seq};
+  std::vector<uint32_t> allowed_max_tokens = {1};
+  std::vector<torch::Tensor> input_embeddings_vec;
+  std::vector<MMData> mm_data_vec;
+  ModelArgs args;
+  args.layer_types({"linear_attention", "full_attention"});
+  ForwardInputBuilder builder(sequences,
+                              allowed_max_tokens,
+                              input_embeddings_vec,
+                              mm_data_vec,
+                              /*swap_block_transfer_infos=*/nullptr,
+                              /*batch_id=*/1,
+                              &args,
+                              BatchForwardType::DECODE);
+  LlmForwardInput forward_input =
+      builder.build_forward_input(/*num_decoding_tokens=*/1,
+                                  /*min_decoding_batch_size=*/0);
+
+  const auto& embedding = forward_input.input_params.embedding;
+  EXPECT_EQ(embedding.linear_state_ids, std::vector<int32_t>({4}));
+  EXPECT_EQ(embedding.linear_state_read_ids, std::vector<int32_t>({2}));
+  EXPECT_EQ(embedding.linear_state_slot_rows,
+            std::vector<int32_t>({4, 4, 5, 2, 2, 3}));
+}
+
 class LinearBatchLifetimeTest : public ::testing::TestWithParam<bool> {};
 
 TEST_P(LinearBatchLifetimeTest,
@@ -3770,6 +3831,10 @@ TEST(BatchTest, SharedMemoryRoundTripPreservesLinearStateIds) {
   forward_input.input_params.attention.host.block_tables =
       forward_input.input_params.attention.device.block_tables;
   forward_input.input_params.embedding.linear_state_ids = {4, 6};
+  forward_input.input_params.embedding.linear_state_slot_rows = {
+      4, 4, 9, 6, 6, 11};
+  forward_input.input_params.embedding.full_block_slot_rows = {
+      4, 120, 122, 6, 180, 182};
   forward_input.input_params.embedding.embedding_ids = {2, 7};
   forward_input.input_params.embedding.request_ids = {"mtp-a", "mtp-b"};
 
@@ -3800,6 +3865,10 @@ TEST(BatchTest, SharedMemoryRoundTripPreservesLinearStateIds) {
   reader_manager.input_read(from_shm, torch::Device(torch::kCPU));
   EXPECT_EQ(from_shm.input_params.embedding.linear_state_ids,
             std::vector<int32_t>({4, 6}));
+  EXPECT_EQ(from_shm.input_params.embedding.linear_state_slot_rows,
+            std::vector<int32_t>({4, 4, 9, 6, 6, 11}));
+  EXPECT_EQ(from_shm.input_params.embedding.full_block_slot_rows,
+            std::vector<int32_t>({4, 120, 122, 6, 180, 182}));
   EXPECT_EQ(from_shm.input_params.embedding.embedding_ids,
             std::vector<int32_t>({2, 7}));
   EXPECT_EQ(from_shm.input_params.embedding.request_ids,

@@ -24,6 +24,7 @@ limitations under the License.
 #include "core/kv_cache/block/concurrent_block_manager_impl.h"
 #include "core/kv_cache/block/linear_state_block_manager.h"
 #include "core/kv_cache/events/kv_cache_event_publisher.h"
+#include "core/kv_cache/layout/static_kv_cache_layout.h"
 #include "framework/model/model_params_view.h"
 
 namespace xllm {
@@ -91,8 +92,8 @@ BlockManagerPool::BlockManagerPool(const Options& options,
       .hasher_type(options_.hasher_type())
       .enable_vmm_kvcache(options_.enable_vmm_kvcache())
       .enable_shared_kv_cache(options_.enable_shared_kv_cache())
-      .shared_full_block_units(options_.shared_full_block_units())
-      .shared_linear_state_units(options_.shared_linear_state_units())
+      .shared_linear_state_slots(options_.shared_linear_state_slots())
+      .shared_layout(options_.shared_layout())
       .num_layers(options_.num_layers())
       .slot_size(options_.slot_size())
       .virtual_block_bytes(options_.virtual_block_bytes())
@@ -296,8 +297,13 @@ bool BlockManagerPool::exceeds_total_capacity(Sequence* sequence,
     const auto* composite = static_cast<const CompositeBlockManager*>(
         block_managers_[dp_rank].get());
     if (options_.enable_shared_kv_cache()) {
-      if (sequence_resource_units(num_tokens) <=
-          composite->admission_capacity()) {
+      const size_t full_blocks =
+          num_tokens / block_size() + (num_tokens % block_size() != 0);
+      const bool fits = options_.shared_layout()
+                            ? options_.shared_layout()->can_fit(full_blocks, 1)
+                            : sequence_resource_units(num_tokens) <=
+                                  composite->admission_capacity();
+      if (fits) {
         return false;
       }
       continue;
@@ -374,6 +380,26 @@ bool BlockManagerPool::exceeds_total_capacity(
     if (options_.enable_shared_kv_cache()) {
       remaining_slots[dp_rank] =
           composite->admission_capacity() / sequence_resource_units(num_tokens);
+      if (options_.shared_layout()) {
+        const StaticKVCacheLayout& layout = *options_.shared_layout();
+        const size_t full_blocks =
+            num_tokens / block_size() + (num_tokens % block_size() != 0);
+        size_t lower = 0;
+        size_t upper =
+            std::min(remaining_slots[dp_rank], layout.num_slots() - 1);
+        if (full_blocks != 0) {
+          upper = std::min(upper, (layout.num_slots() - 1) / full_blocks);
+        }
+        while (lower < upper) {
+          const size_t middle = lower + (upper - lower + 1) / 2;
+          if (layout.can_fit(full_blocks * middle, middle)) {
+            lower = middle;
+          } else {
+            upper = middle - 1;
+          }
+        }
+        remaining_slots[dp_rank] = lower;
+      }
       continue;
     }
     for (const auto& [type, entry] : composite->leaf_entries()) {
@@ -538,11 +564,24 @@ size_t BlockManagerPool::block_resource_units(BlockType type,
   if (!options_.enable_shared_kv_cache()) {
     return KVCacheManager::block_resource_units(type, count);
   }
+  if (options_.shared_layout()) {
+    const StaticKVCacheLayout& layout = *options_.shared_layout();
+    if (type == BlockType::KV) {
+      return count * layout.full_layer_count() * 2 *
+             layout.row_bytes(KVCacheTensorRole::KEY);
+    }
+    return type == BlockType::LINEAR
+               ? count * layout.linear_layer_count() *
+                     (layout.row_bytes(KVCacheTensorRole::CONV) +
+                      layout.checkpoint_stride() *
+                          layout.row_bytes(KVCacheTensorRole::SSM))
+               : 0;
+  }
   if (type == BlockType::KV) {
-    return count * options_.shared_full_block_units();
+    return count;
   }
   return type == BlockType::LINEAR
-             ? count * options_.shared_linear_state_units()
+             ? count * options_.shared_linear_state_slots()
              : 0;
 }
 
