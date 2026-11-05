@@ -145,6 +145,32 @@ inline torch::Tensor create_2d_tensor(const std::vector<std::vector<T>>& vec,
   return tensor;
 }
 
+namespace util {
+
+template <typename T>
+void pad_2d_vector(std::vector<std::vector<T>>& vec, T pad_value) {
+  size_t max_col_size = 0;
+  for (const auto& row : vec) {
+    max_col_size = std::max(max_col_size, row.size());
+  }
+  for (auto& row : vec) {
+    row.resize(max_col_size, pad_value);
+  }
+}
+
+}  // namespace util
+
+inline std::vector<torch::Tensor> pad_and_stack_grouped_tables(
+    std::vector<std::vector<std::vector<int32_t>>>& tables) {
+  std::vector<torch::Tensor> out;
+  out.reserve(tables.size());
+  for (auto& manager_tables : tables) {
+    util::pad_2d_vector(manager_tables, -1);
+    out.emplace_back(create_2d_tensor(manager_tables, torch::kInt));
+  }
+  return out;
+}
+
 inline torch::Tensor safe_to(const torch::Tensor& t,
                              const torch::TensorOptions& options,
                              bool non_blocking = false) {
@@ -197,6 +223,20 @@ inline torch::Tensor arange_indices(int64_t count,
                                     const torch::Device& device) {
   return torch::arange(
       count, torch::TensorOptions().dtype(torch::kInt).device(device));
+}
+
+inline torch::Tensor sample_flattened_indices(int64_t count,
+                                              int64_t width,
+                                              const torch::Device& device) {
+  return arange_indices(count * width, device)
+      .view({count, width})
+      .narrow(1, 1, width - 1)
+      .reshape({-1});
+}
+
+inline torch::Tensor odd_indices(int64_t count,
+                                 const torch::TensorOptions& options) {
+  return torch::arange(1, 2 * count, 2, options);
 }
 
 inline std::vector<int64_t> batch_broadcast_shape(int64_t batch, int64_t ndim) {
@@ -656,4 +696,18 @@ inline std::vector<int64_t> get_tensor_shape(const torch::Tensor& tensor) {
   c10::IntArrayRef sizes = tensor.sizes();
   return std::vector<int64_t>(sizes.begin(), sizes.end());
 }
+
+class CachedDeviceIndices final {
+ public:
+  template <typename Builder>
+  const torch::Tensor& get(int64_t expected_numel, Builder&& build) {
+    if (!tensor_.defined() || tensor_.numel() != expected_numel) {
+      tensor_ = build();
+    }
+    return tensor_;
+  }
+
+ private:
+  torch::Tensor tensor_;
+};
 }  // namespace xllm

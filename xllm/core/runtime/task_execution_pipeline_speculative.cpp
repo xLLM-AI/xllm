@@ -588,12 +588,9 @@ Status TaskExecutionPipeline::initialize_speculative() {
       slot->draft_block_indices =
           speculative_capacity_->kind == SpeculativeTaskKind::DSPARK
               ? torch::arange(draft_samples, indices)
-              : torch::arange(expanded, indices)
-                    .view({count, width})
-                    .narrow(1, 1, width - 1)
-                    .reshape({-1});
+              : sample_flattened_indices(count, width, device_.unwrap());
     } else {
-      slot->draft_first_indices = torch::arange(count, indices).mul(2).add(1);
+      slot->draft_first_indices = odd_indices(count, indices);
       if (speculative_capacity_->reuse_prefix_refresh_output) {
         slot->draft_prefix_indices = torch::arange(count, indices);
       }
@@ -3567,7 +3564,7 @@ void TaskExecutionPipeline::launch_packed_verify(SpeculativeSlot& slot) {
     write_block_context(slot, /*prefill=*/false);
     if (slot.recurrent) {
       recurrent_accepted_lengths_.index_copy_(
-          0, slot.state->rows_, result.lengths.to(torch::kInt32));
+          0, slot.state->rows_, result_lengths);
     }
     context_advance(
         *slot.state, result.tokens, result.lengths, torch::Tensor());

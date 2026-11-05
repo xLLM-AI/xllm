@@ -58,12 +58,14 @@ bool DSparkWorkerImpl::init_model(const std::string& model_weights_path,
       << "A reduced draft vocabulary requires a DSpark d2t mapping.";
 
   if (util::is_deepseek_v4_dspark_model_type(draft_args.model_type())) {
-    draft_row_layout_ = draft_args.dspark_use_native_sas()
-                            ? dflash_detail::DraftRowLayout::SPARSE_INDICES
-                            : dflash_detail::DraftRowLayout::BLOCK_ROWS;
+    // Native-SAS keeps the chunked row geometry but commits as DECODE, which
+    // its own layout value encodes.
+    draft_query_layout_ = draft_args.dspark_use_native_sas()
+                              ? QueryLayout::kChunkedDecode
+                              : QueryLayout::kBlockParallel;
   }
   draft_needs_dummy_rows_ =
-      draft_row_layout_ != dflash_detail::DraftRowLayout::BLOCK_ROWS &&
+      draft_query_layout_ != QueryLayout::kBlockParallel &&
       ModelConfig::is_python_model_impl(context_.get_model_impl());
   return result;
 }
@@ -76,8 +78,8 @@ DraftProposal DSparkWorkerImpl::run_decode_draft(
   LlmForwardInput query_input;
   prepare_query_inputs(input, query_input);
 
-  const torch::Tensor anchors = anchor_token_ids(input);
   const int32_t batch_size = input.input_params.meta.num_sequences;
+  const torch::Tensor anchors = anchor_token_ids(input);
   const int32_t num_speculative_tokens = options_.num_speculative_tokens();
 
   CHECK_GT(num_speculative_tokens, 0)

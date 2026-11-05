@@ -20,6 +20,11 @@ from collections.abc import Sequence
 
 import torch
 
+# The allocator reserves block 0 as the padding target, so a block table entry
+# that must resolve to a real address without touching live KV uses it. Skipped
+# slots are negative and get clamped onto it.
+PADDING_BLOCK_ID = 0
+
 
 def is_row_aligned_paged_kv(
     paged_kv_indptr: torch.Tensor | None,

@@ -106,6 +106,14 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
       const runtime::Options& target_options,
       const runtime::Options& draft_options);
 
+  // A DCP block-table entry covers one logical KV page per KV split. All
+  // speculative cache-slot and expanded-attention metadata must use this
+  // logical size rather than the per-rank physical allocator block size.
+  int32_t logical_block_size() const;
+  // Multiaxis RoPE positions can include a prompt-dependent offset and do not
+  // identify the corresponding KV cache length.
+  bool positions_are_decoupled_from_kv_length() const;
+
   void prepare_draft_input(const TargetInput& input);
 
   std::unique_ptr<LLMWorkerImpl> draft_impl_;

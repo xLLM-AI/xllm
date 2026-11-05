@@ -27,6 +27,7 @@ limitations under the License.
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/parallel_state/parallel_state.h"
 #include "core/framework/parallel_state/process_group.h"
+#include "core/kv_cache/layout/seq_lens_layout.h"
 #include "core/runtime/vlm_forward_params.h"
 #include "core/util/tensor_helper.h"
 
@@ -723,7 +724,7 @@ std::vector<int32_t> preserve_length_layout(const std::vector<int32_t>& lengths,
   std::vector<int32_t> cumulative_lengths = {0};
   cumulative_lengths.reserve(lengths.size() + 1);
   for (int32_t length : lengths) {
-    cumulative_lengths.push_back(cumulative_lengths.back() + length);
+    CuSeqLens::append_cumulative(cumulative_lengths, length);
   }
   return cumulative_lengths;
 }
@@ -987,11 +988,7 @@ CpPlanInput make_plan_input(const Input& processed_input,
   std::vector<int32_t> global_q_seq_lens;
   if (!host_q_seq_lens.empty()) {
     if (q_seq_lens_are_cumulative) {
-      global_q_seq_lens.reserve(num_sequences);
-      for (int32_t i = 0; i < num_sequences; ++i) {
-        global_q_seq_lens.push_back(
-            std::max(0, host_q_seq_lens[i + 1] - host_q_seq_lens[i]));
-      }
+      global_q_seq_lens = CuSeqLens::to_lengths(host_q_seq_lens);
     } else {
       global_q_seq_lens = host_q_seq_lens;
     }
@@ -1081,11 +1078,10 @@ NpuCpPlan NpuCpPlan::build(const CpPlanInput& input,
                              input.kv_seq_lens_are_cumulative);
   plan.attention_meta_.host_q_cu_seq_lens.reserve(
       plan.input_shard_meta_.local_padded_seq_lens.size());
-  int32_t cumulative_length = 0;
   int32_t max_seq_len = 0;
   for (int32_t length : plan.input_shard_meta_.local_padded_seq_lens) {
-    cumulative_length += length;
-    plan.attention_meta_.host_q_cu_seq_lens.push_back(cumulative_length);
+    CuSeqLens::append_query_start(plan.attention_meta_.host_q_cu_seq_lens,
+                                  length);
     max_seq_len = std::max(max_seq_len, length);
   }
   plan.attention_meta_.q_max_seq_len = max_seq_len;

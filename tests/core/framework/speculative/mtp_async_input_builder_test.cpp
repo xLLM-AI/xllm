@@ -295,7 +295,7 @@ TEST(MtpAsyncInputBuilderTest, RejectsPageCountBeyondBlockTableWidth) {
 
   EXPECT_DEATH(prepare_single_sequence(
                    draft_input, block_table_source, /*base_kv_seq_len=*/9),
-               "Expanded KV length exceeds block-table capacity");
+               "KV length exceeds block-table capacity");
 }
 
 TEST(MtpAsyncInputBuilderTest, PybindViewOwnsGlobalDpKvMaxSequenceLengths) {

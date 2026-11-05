@@ -143,6 +143,9 @@ class WorkerImpl {
   virtual void prepare_work_before_execute(const VlmForwardInput& inputs,
                                            VlmForwardInput& processed_inputs);
   virtual void restore_json_object_states(VlmForwardInput& input);
+  // Speculative workers rebuild linear-attention state from their own draft
+  // cache, so the shared prepare path must not restore it first.
+  virtual bool restores_linear_state_on_prepare() const { return true; }
   void prepare_work_before_execute_on_stream(const LlmForwardInput& input,
                                              LlmForwardInput& processed_input,
                                              Stream& prepare_stream,

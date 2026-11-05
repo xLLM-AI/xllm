@@ -49,22 +49,6 @@ endif()
 
 cc_test(
   NAME
-    spec_input_builder_test
-  SRCS
-    spec_input_builder_test.cpp
-    "${PROJECT_SOURCE_DIR}/xllm/core/framework/speculative/spec_input_builder.cpp"
-  DEPS
-    :multimodal
-    :parallel_state
-    :request
-    torch
-    glog::glog
-    proto::xllm_proto
-    GTest::gtest_main
-)
-
-cc_test(
-  NAME
     mtp_async_state_test
   SRCS
     mtp_async_state_test.cpp

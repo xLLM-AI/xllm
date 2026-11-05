@@ -24,6 +24,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/kv_cache/layout/seq_lens_layout.h"
 #include "framework/model/model_args.h"
 #include "framework/model/model_params_view.h"
 #include "framework/model_context/model_context.h"
@@ -568,7 +569,8 @@ torch::Tensor RWKV7DecoderLayerImpl::forward(
 
   std::vector<int32_t> seq_lens(static_cast<size_t>(num_seqs));
   for (int32_t s = 0; s < num_seqs; ++s) {
-    seq_lens[static_cast<size_t>(s)] = input_params.get_q_seq_len(s);
+    seq_lens[static_cast<size_t>(s)] =
+        CuSeqLens::at(input_params.attention.host.q_seq_lens, s);
   }
 
   // Use scheduler-provided slot indices when available; otherwise fall back

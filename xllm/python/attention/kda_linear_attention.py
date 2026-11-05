@@ -136,7 +136,7 @@ class KdaLinearAttentionMixin:
             and seq_len == num_seqs
             # An expanded spec-verify batch keeps the [1, C, T] packing even
             # though its per-row slot count equals T: the KDA verify grouping
-            # reads [B, C, rows_per_seq] from it (see the dispatch below).
+            # reads [B, C, entries_per_request] from it (see the dispatch below).
             and getattr(metadata, "expanded_decode_metadata", None) is None
         )
         if flatten_graph_decode:
@@ -511,7 +511,7 @@ class KdaLinearAttentionMixin:
         num_seqs = idx.shape[0]
         if num_seqs == 0 or mixed_qkv.ndim != 3 or mixed_qkv.shape[0] != 1 or mixed_qkv.shape[2] % num_seqs:
             raise ValueError("KDA spec-verify requires flattened, equal-width sequence blocks")
-        rows_per_seq = mixed_qkv.shape[2] // num_seqs
+        entries_per_request = mixed_qkv.shape[2] // num_seqs
         in_graph = in_acl_graph()
         q_seq_lens_host = getattr(metadata, "q_seq_lens_host", None)
         if (
@@ -519,18 +519,18 @@ class KdaLinearAttentionMixin:
             and getattr(metadata, "is_spec_verify", False)
             and q_seq_lens_host is not None
             and q_seq_lens_host.numel() == num_seqs
-            and self._kda_validated_query_shape != (num_seqs, rows_per_seq)
+            and self._kda_validated_query_shape != (num_seqs, entries_per_request)
         ):
-            if any(length != rows_per_seq for length in q_seq_lens_host.tolist()):
+            if any(length != entries_per_request for length in q_seq_lens_host.tolist()):
                 raise ValueError("KDA spec-verify requires uniform query lengths")
-            self._kda_validated_query_shape = (num_seqs, rows_per_seq)
+            self._kda_validated_query_shape = (num_seqs, entries_per_request)
         head_dim = gate.shape[-1]
         nh = gate.shape[-2]
         qkv_dim = nh * head_dim
         conv_dim = conv_weight.shape[1]
         conv_state_len = conv_weight.shape[0] - 1
         scale = 1.0 / (head_dim**0.5)
-        required_conv_state_len = conv_state_len + rows_per_seq - 1
+        required_conv_state_len = conv_state_len + entries_per_request - 1
         if conv_cache.shape[1] < required_conv_state_len:
             raise RuntimeError("KDA conv checkpoint capacity is smaller than the verify width")
 
@@ -542,11 +542,11 @@ class KdaLinearAttentionMixin:
         checkpoint_stride = self._kda_checkpoint_stride
         if checkpoint_stride is None:
             raise RuntimeError("KDA requires a bound linear-state checkpoint stride")
-        if checkpoint_stride < rows_per_seq:
+        if checkpoint_stride < entries_per_request:
             raise RuntimeError("KDA SSM checkpoint capacity is smaller than the verify width")
         accepted_host = getattr(metadata, "num_accepted_tokens_host_values", ())
         if accepted_host and (
-            len(accepted_host) != num_seqs or any(count < 1 or count > rows_per_seq for count in accepted_host)
+            len(accepted_host) != num_seqs or any(count < 1 or count > entries_per_request for count in accepted_host)
         ):
             raise ValueError("KDA accepted-token counts must be in [1, verify width]")
 
@@ -561,10 +561,10 @@ class KdaLinearAttentionMixin:
             self._kda_checkpoint_offsets[offsets_key] = offsets
         ssm_state_indices = idx32.reshape(-1, 1) * checkpoint_stride + offsets
 
-        qsl_key = (num_seqs, rows_per_seq, device)
+        qsl_key = (num_seqs, entries_per_request, device)
         qsl_buf = self._kda_query_start_locs.get(qsl_key)
         if qsl_buf is None:
-            qsl_buf = torch.arange(num_seqs + 1, dtype=torch.int32, device=device) * rows_per_seq
+            qsl_buf = torch.arange(num_seqs + 1, dtype=torch.int32, device=device) * entries_per_request
             self._kda_query_start_locs[qsl_key] = qsl_buf
 
         conv_input = mixed_qkv.transpose(1, 2).reshape(-1, conv_dim).contiguous()
@@ -574,7 +574,7 @@ class KdaLinearAttentionMixin:
             conv_cache,
             idx32,
             qsl_buf,
-            rows_per_seq,
+            entries_per_request,
             num_accepted_tokens,
             bias=None,
             activation=activation in ("silu", "swish"),
@@ -606,4 +606,4 @@ class KdaLinearAttentionMixin:
             state_v_first=True,
         )
         core_out = ret[0] if isinstance(ret, tuple) else ret
-        return core_out.view(1, num_seqs * rows_per_seq, nh, head_dim)
+        return core_out.view(1, num_seqs * entries_per_request, nh, head_dim)

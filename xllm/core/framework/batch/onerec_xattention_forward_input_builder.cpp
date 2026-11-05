@@ -20,10 +20,10 @@ limitations under the License.
 
 #include "core/framework/batch/sampling_input_builder.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/framework/model/domain_attention_input.h"
 #include "core/framework/request/onerec_sequence.h"
 #include "core/util/rec_model_utils.h"
 #include "core/util/tensor_helper.h"
-#include "core/util/utils.h"
 
 namespace xllm {
 
@@ -134,11 +134,8 @@ RecForwardInput OneRecXAttentionForwardInputBuilder::build_rec_forward_input(
   }
 
   if (!block_tables_vec.empty()) {
-    util::pad_2d_vector(block_tables_vec, /*pad_value=*/0);
-    input.input_params.attention.device.block_tables =
-        create_2d_tensor(block_tables_vec, torch::kInt);
-    input.input_params.attention.host.block_tables =
-        input.input_params.attention.device.block_tables;
+    AttentionInputView(input.input_params.attention)
+        .set_block_tables_from(block_tables_vec, /*pad_value=*/0);
   }
   if (!new_cache_slots_vec.empty()) {
     input.input_params.attention.device.new_cache_slots =

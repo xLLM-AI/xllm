@@ -22,6 +22,7 @@ limitations under the License.
 #include "attention_metadata_builder.h"
 #include "dsa_metadata.h"
 #include "framework/model/model_params_view.h"
+#include "kv_cache/layout/paged_kv_layout.h"
 #include "util/tensor_helper.h"
 
 namespace xllm::layer {
@@ -416,28 +417,9 @@ void DSAMetadataBuilder::process_token_group(
   auto out_slots_tensor = torch::full({out_slot_rows}, -1, raw_bt.options());
   auto out_slots_acc = out_slots_tensor.accessor<int32_t, 1>();
   auto raw_bt_acc = raw_bt.accessor<int32_t, 2>();
-  const int64_t semantic_cols = raw_bt.size(1);
-  const int64_t block_size_i64 = static_cast<int64_t>(block_size);
-
-  auto slot_for_compressed_index = [&](int32_t seq,
-                                       int64_t compressed_idx) -> int32_t {
-    if (seq >= raw_bt.size(0) || semantic_cols <= 0) {
-      return -1;
-    }
-    const int64_t block_idx = compressed_idx / block_size_i64;
-    if (block_idx >= semantic_cols) {
-      return -1;
-    }
-    const int32_t block_id = raw_bt_acc[seq][block_idx];
-    if (block_id < 0) {
-      return -1;
-    }
-    const int64_t block_offset = compressed_idx % block_size_i64;
-    return static_cast<int32_t>(
-        static_cast<int64_t>(block_id) * block_size_i64 + block_offset);
-  };
 
   int64_t write_idx = 0;
+  const int64_t block_table_width = raw_bt.size(1);
   for (int32_t seq = 0; seq < batch_size; ++seq) {
     const int64_t ctx_len = static_cast<int64_t>(ctx_lens[seq]);
     const int64_t q_len =
@@ -446,9 +428,13 @@ void DSAMetadataBuilder::process_token_group(
     const int64_t prev_committed = prev_ctx_len / ratio;
     const int64_t committed = ctx_len / ratio;
     const int64_t new_committed = committed - prev_committed;
+    if (seq >= raw_bt.size(0)) {
+      write_idx += new_committed;
+      continue;
+    }
     for (int64_t i = 0; i < new_committed; ++i) {
-      out_slots_acc[write_idx++] =
-          slot_for_compressed_index(seq, prev_committed + i);
+      out_slots_acc[write_idx++] = slot_for_position</*kRing=*/false>(
+          raw_bt_acc[seq], prev_committed + i, block_size, block_table_width);
     }
   }
 
@@ -511,21 +497,6 @@ void DSAMetadataBuilder::process_swa_group(
       graph_slot_capacity > 0 && block_table_capacity_cols > 0
           ? std::max<int64_t>(block_table_capacity_cols, raw_bt.size(1))
           : raw_bt.size(1);
-  const int64_t block_size_i64 = static_cast<int64_t>(block_size);
-
-  auto slot_for_position = [&](int32_t seq, int64_t pos) -> int32_t {
-    if (semantic_cols <= 0) {
-      return -1;
-    }
-    const int64_t block_idx = (pos / block_size_i64) % semantic_cols;
-    const int32_t block_id = raw_bt_acc[seq][block_idx];
-    if (block_id < 0) {
-      return -1;
-    }
-    const int64_t block_offset = pos % block_size_i64;
-    return static_cast<int32_t>(
-        static_cast<int64_t>(block_id) * block_size_i64 + block_offset);
-  };
 
   int64_t write_idx = 0;
   if (static_cast<int64_t>(new_cache_slots.size()) == query_total_tokens) {
@@ -547,7 +518,8 @@ void DSAMetadataBuilder::process_swa_group(
       }
       const int64_t q_start = ctx_len - q_len;
       for (int64_t i = 0; i < q_len; ++i) {
-        out_slots_acc[write_idx++] = slot_for_position(seq, q_start + i);
+        out_slots_acc[write_idx++] = slot_for_position</*kRing=*/true>(
+            raw_bt_acc[seq], q_start + i, block_size, semantic_cols);
       }
     }
   }

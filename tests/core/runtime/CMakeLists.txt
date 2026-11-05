@@ -205,6 +205,17 @@ if(USE_NPU)
     "-Wl,--no-whole-archive")
 
   cc_test(
+    NAME dflash_decode_input_test
+    SRCS dflash_decode_input_test.cpp
+    DEPS :runtime GTest::gtest_main
+  )
+  target_link_libraries(dflash_decode_input_test PRIVATE nnopbase)
+  target_link_options(dflash_decode_input_test PRIVATE
+    "-Wl,--whole-archive"
+    "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
+    "-Wl,--no-whole-archive")
+
+  cc_test(
     NAME mtp_prefill_input_test
     SRCS mtp_prefill_input_test.cpp
     DEPS :runtime GTest::gtest_main

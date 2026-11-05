@@ -26,6 +26,8 @@ limitations under the License.
 #include "core/common/metrics.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/kv_cache/layout/paged_kv_layout.h"
+#include "core/kv_cache/layout/seq_lens_layout.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/attention_metadata_builder.h"
 #include "core/runtime/graph_input_snapshot.h"
@@ -53,8 +55,8 @@ void extend_q_cu_seq_lens(std::vector<int32_t>* cu_seq_lens,
 
   cu_seq_lens->reserve(cu_seq_lens->size() + padding_needed);
   for (uint32_t i = 0; i < padding_needed; ++i) {
-    cu_seq_lens->push_back(cu_seq_lens->back() +
-                           static_cast<int32_t>(num_decoding_tokens));
+    CuSeqLens::append_cumulative(*cu_seq_lens,
+                                 static_cast<int32_t>(num_decoding_tokens));
   }
 }
 
@@ -69,20 +71,6 @@ void extend_kv_cu_seq_lens_for_padding(std::vector<int32_t>* cu_seq_lens,
   // attention may try to read a padding block table entry (-1).
   cu_seq_lens->resize(cu_seq_lens->size() + padding_needed,
                       cu_seq_lens->back());
-}
-
-std::vector<int32_t> compute_cu_seq_lens_diff(
-    const std::vector<int32_t>& cu_seq_lens) {
-  std::vector<int32_t> seq_lens;
-  if (cu_seq_lens.size() < 2) {
-    return seq_lens;
-  }
-
-  seq_lens.reserve(cu_seq_lens.size() - 1);
-  for (std::size_t i = 1; i < cu_seq_lens.size(); ++i) {
-    seq_lens.push_back(cu_seq_lens[i] - cu_seq_lens[i - 1]);
-  }
-  return seq_lens;
 }
 
 std::size_t tensor_bytes(const torch::Tensor& tensor) {
@@ -263,7 +251,7 @@ std::optional<Params> DcuGraphPersistentParam::update(
     attn_metadata->q_cu_seq_lens = q_seq_lens_.slice(0, 0, q_seq_lens.size(0));
 
     if (q_seq_lens.size(0) > 1) {
-      auto q_seq_lens_diff_vec = compute_cu_seq_lens_diff(q_seq_lens_vec);
+      auto q_seq_lens_diff_vec = CuSeqLens::to_lengths(q_seq_lens_vec);
       auto q_seq_lens_diff = make_int_tensor_on_device(
           q_seq_lens_diff_vec, q_seq_lens_values_.options());
       q_seq_lens_values_.slice(0, 0, q_seq_lens_diff.size(0))
@@ -298,7 +286,7 @@ std::optional<Params> DcuGraphPersistentParam::update(
         kv_seq_lens_.slice(0, 0, kv_seq_lens.size(0));
 
     if (kv_seq_lens.size(0) > 1) {
-      auto kv_seq_lens_diff_vec = compute_cu_seq_lens_diff(kv_seq_lens_vec);
+      auto kv_seq_lens_diff_vec = CuSeqLens::to_lengths(kv_seq_lens_vec);
       auto kv_seq_lens_diff = make_int_tensor_on_device(
           kv_seq_lens_diff_vec, kv_seq_lens_values_.options());
       kv_seq_lens_values_.slice(0, 0, kv_seq_lens_diff.size(0))
@@ -328,7 +316,8 @@ std::optional<Params> DcuGraphPersistentParam::update(
         .copy_(params.attention.device.new_cache_slots, /*non_blocking=*/true);
 
     if (padded_num_tokens > src_size) {
-      new_cache_slots_.slice(0, src_size, padded_num_tokens).fill_(-1);
+      new_cache_slots_.slice(0, src_size, padded_num_tokens)
+          .fill_(kSkippedSlotId);
     }
 
     attn_metadata->slot_mapping = new_cache_slots(padded_num_tokens);
@@ -462,7 +451,7 @@ void DcuGraphPersistentParam::update_decode_input_buffer(
     q_seq_lens_.slice(0, 0, q_seq_lens.size(0))
         .copy_(q_seq_lens, /*non_blocking=*/true);
 
-    auto q_seq_lens_diff_vec = compute_cu_seq_lens_diff(q_seq_lens_vec);
+    auto q_seq_lens_diff_vec = CuSeqLens::to_lengths(q_seq_lens_vec);
     if (!q_seq_lens_diff_vec.empty()) {
       auto q_seq_lens_diff = make_int_tensor_on_device(
           q_seq_lens_diff_vec, q_seq_lens_values_.options());
@@ -489,7 +478,7 @@ void DcuGraphPersistentParam::update_decode_input_buffer(
     kv_seq_lens_.slice(0, 0, kv_seq_lens.size(0))
         .copy_(kv_seq_lens, /*non_blocking=*/true);
 
-    auto kv_seq_lens_diff_vec = compute_cu_seq_lens_diff(kv_seq_lens_vec);
+    auto kv_seq_lens_diff_vec = CuSeqLens::to_lengths(kv_seq_lens_vec);
     if (!kv_seq_lens_diff_vec.empty()) {
       auto kv_seq_lens_diff = make_int_tensor_on_device(
           kv_seq_lens_diff_vec, kv_seq_lens_values_.options());
@@ -516,7 +505,8 @@ void DcuGraphPersistentParam::update_decode_input_buffer(
         .copy_(params.attention.device.new_cache_slots, /*non_blocking=*/true);
 
     if (padded_num_tokens > src_size) {
-      new_cache_slots_.slice(0, src_size, padded_num_tokens).fill_(-1);
+      new_cache_slots_.slice(0, src_size, padded_num_tokens)
+          .fill_(kSkippedSlotId);
     }
   }
 

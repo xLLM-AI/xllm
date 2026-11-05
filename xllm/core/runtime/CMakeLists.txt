@@ -122,6 +122,7 @@ cc_library(
     :model_context
     :request
     :speculative
+    :decode_input_builder
     :encoder_cache
     :state_dict
     :dit_cache

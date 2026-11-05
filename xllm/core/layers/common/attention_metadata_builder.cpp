@@ -27,6 +27,7 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/rec_config.h"
+#include "core/kv_cache/layout/seq_lens_layout.h"
 #include "framework/model/model_args.h"
 #include "framework/model/model_params_view.h"
 #include "framework/model/rec_model_params.h"
@@ -87,13 +88,7 @@ void convert_cumulative_lengths(std::vector<int32_t>& lengths,
     return;
   }
   CHECK_EQ(lengths.front(), 0);
-
-  std::vector<int32_t> per_sequence_lengths;
-  per_sequence_lengths.reserve(lengths.size() - 1);
-  for (size_t i = 1; i < lengths.size(); ++i) {
-    per_sequence_lengths.emplace_back(lengths[i] - lengths[i - 1]);
-  }
-  lengths = std::move(per_sequence_lengths);
+  lengths = CuSeqLens::to_lengths(lengths);
 }
 
 template <typename InputParams>
@@ -487,16 +482,8 @@ AttentionMetadata build_common_attention_metadata(
     attn_metadata.kv_cu_seq_lens = torch::arange(2, options);
     attn_metadata.q_seq_lens = torch::ones({1}, options);
     attn_metadata.kv_seq_lens = torch::ones({1}, options);
-#if defined(USE_NPU)
-    // NPU keeps these host vectors as one length per sequence.  Keep the
-    // dummy row consistent with normal NPU batches; the *_cu_seq_lens tensors
-    // above carry the cumulative representation.
-    attn_metadata.q_seq_lens_vec = {1};
-    attn_metadata.kv_seq_lens_vec = {1};
-#else
-    attn_metadata.q_seq_lens_vec = {0, 1};
-    attn_metadata.kv_seq_lens_vec = {0, 1};
-#endif
+    attn_metadata.q_seq_lens_vec = CuSeqLens::from_lengths({1});
+    attn_metadata.kv_seq_lens_vec = CuSeqLens::from_lengths({1});
     attn_metadata.paged_kv_indptr = torch::arange(2, options);
     attn_metadata.paged_kv_indices = torch::zeros({1}, options);
     attn_metadata.paged_kv_last_page_len = torch::ones({1}, options);

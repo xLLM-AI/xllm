@@ -15,10 +15,16 @@ limitations under the License.
 
 #pragma once
 
-#include "core/framework/parallel_state/parallel_args.h"
+#include <cstdint>
+
+#include "core/framework/model/mtp_topk_state.h"
+#include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/embedding_cache.h"
-#include "core/platform/stream.h"
-#include "core/runtime/forward_params.h"
+
+namespace xllm {
+class LlmForwardInput;
+class VlmForwardInput;
+}  // namespace xllm
 
 namespace xllm::mtp_detail {
 void check_mtp_decode_states(
@@ -26,4 +32,53 @@ void check_mtp_decode_states(
     const std::vector<std::string>& request_ids,
     const torch::Tensor& token_ids_host,
     bool allow_overlap_fake_token);
+
+MtpTopkStatePtr select_mtp_topk_state_for_next_step(
+    const MtpTopkStatePtr& state,
+    const SamplingParameters& sampling_params);
+
+// How the expected KV length is derived for a decode step.
+struct ExpectedKvPolicy {
+  enum class Kind : uint8_t {
+    // expected_kv_len = position + 1.
+    kPositionCoupled,
+    // mrope-section targets pass the KV length through untouched.
+    kDecoupledPassThrough,
+    // The chunked-verify clamp on top of the position-coupled derivation.
+    kChunkedVerifyClamped,
+  };
+
+  Kind kind;
+  int32_t verify_lens = 0;
+  int32_t logical_block_size = 0;
+};
+
+// Derives the expected-KV-length policy for a speculative decode step. MTP and
+// the block drafts both rewrite the decode context, so they share one closed
+// derivation: the chunked-verify clamp wins over the mrope pass-through.
+ExpectedKvPolicy derive_expected_kv_policy(bool clamped_verify,
+                                           bool positions_decoupled,
+                                           int32_t verify_lens,
+                                           int64_t logical_block_size);
+
+// Shared decode-context rewrite for the MTP/DFlash decode-step paths:
+// resolves fake tokens against the cached target states and keeps the
+// position/kv-length invariant.
+template <typename Input>
+void update_decode_step_input(
+    Input& input,
+    const std::vector<EmbeddingCache::DecodeState>& last_states,
+    bool enable_cache_correction,
+    const ExpectedKvPolicy& kv_policy);
+extern template void update_decode_step_input<LlmForwardInput>(
+    LlmForwardInput&,
+    const std::vector<EmbeddingCache::DecodeState>&,
+    bool,
+    const ExpectedKvPolicy&);
+extern template void update_decode_step_input<VlmForwardInput>(
+    VlmForwardInput&,
+    const std::vector<EmbeddingCache::DecodeState>&,
+    bool,
+    const ExpectedKvPolicy&);
+
 }  // namespace xllm::mtp_detail

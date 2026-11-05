@@ -32,6 +32,7 @@ limitations under the License.
 #include "compiler/triton/include/jit_kernel.h"
 #include "framework/config/kv_cache_config.h"
 #include "framework/core/MLUStream.h"
+#include "kv_cache/layout/seq_lens_layout.h"
 #include "util/linalg.h"
 #include "util/tensor_helper.h"
 
@@ -67,12 +68,7 @@ std::vector<int32_t> resolve_seq_lens(const std::vector<int32_t>& host_lens,
   if (!host_lens.empty()) {
     if (device_lens.defined() && host_lens.front() == 0 &&
         host_lens.size() == static_cast<size_t>(device_lens.numel() + 1)) {
-      std::vector<int32_t> per_sequence_lens;
-      per_sequence_lens.reserve(host_lens.size() - 1);
-      for (size_t i = 1; i < host_lens.size(); ++i) {
-        per_sequence_lens.emplace_back(host_lens[i] - host_lens[i - 1]);
-      }
-      return per_sequence_lens;
+      return CuSeqLens::to_lengths(host_lens);
     }
     return host_lens;
   }

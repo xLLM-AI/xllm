@@ -1,4 +1,21 @@
 include(cc_test)
+cc_test(
+  NAME
+    decode_input_builder_test
+  SRCS
+    decode_input_builder_test.cpp
+  DEPS
+    :decode_input_builder
+    :runtime
+    :multimodal
+    :parallel_state
+    :request
+    :json_object_grammar
+    torch
+    glog::glog
+    proto::xllm_proto
+    GTest::gtest_main
+)
 
 cc_test(
   NAME

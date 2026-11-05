@@ -36,6 +36,7 @@ limitations under the License.
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
+#include "core/framework/model/domain_attention_input.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/multimodal/mm_visitor.h"
@@ -44,6 +45,8 @@ limitations under the License.
 #if defined(USE_MUSA)
 #include "layers/common/attention_metadata.h"
 #endif
+#include "core/kv_cache/layout/paged_kv_layout.h"
+#include "core/kv_cache/layout/seq_lens_layout.h"
 #include "core/platform/platform.h"
 #include "core/util/blocking_counter.h"
 #include "core/util/tensor_helper.h"
@@ -105,27 +108,6 @@ void append_virtual_kv_cache_global_offsets(
     info->dst_virtual_kv_cache_layer_global_offsets.emplace_back(
         std::move(layer));
   }
-}
-
-std::vector<int32_t> build_q_cu_seq_lens_vec(
-    const std::vector<int32_t>& q_seq_lens) {
-  std::vector<int32_t> q_cu_seq_lens;
-  if (q_seq_lens.empty()) {
-    return q_cu_seq_lens;
-  }
-#if defined(USE_NPU)
-  q_cu_seq_lens.reserve(q_seq_lens.size());
-  int32_t cum_seq_len = 0;
-  for (int32_t q_len : q_seq_lens) {
-    cum_seq_len += q_len;
-    q_cu_seq_lens.emplace_back(cum_seq_len);
-  }
-#else
-  CHECK(q_seq_lens.front() == 0)
-      << "q_seq_lens must be cumulative with leading zero";
-  q_cu_seq_lens.assign(q_seq_lens.begin() + 1, q_seq_lens.end());
-#endif
-  return q_cu_seq_lens;
 }
 
 struct BlockCopyKernelInputData {
@@ -680,24 +662,8 @@ void ForwardInputBuilder::process_sequences_multithreaded() {
         state.sample_prior_output_rows.end());
     state_.max_seq_len = std::max(state_.max_seq_len, state.max_seq_len);
     state_.q_max_seq_len = std::max(state_.q_max_seq_len, state.q_max_seq_len);
-#if defined(USE_NPU)
-    state_.seq_lens.insert(
-        state_.seq_lens.end(), state.seq_lens.begin(), state.seq_lens.end());
-    state_.q_seq_lens.insert(state_.q_seq_lens.end(),
-                             state.q_seq_lens.begin(),
-                             state.q_seq_lens.end());
-#elif defined(USE_MUSA) || defined(USE_MLU) || defined(USE_CUDA) || \
-    defined(USE_ILU) || defined(USE_DCU)
-    int32_t seq_len_offset = state_.seq_lens.back();
-    // skip the first element which is 0
-    for (size_t i = 1; i < state.seq_lens.size(); ++i) {
-      state_.seq_lens.emplace_back(state.seq_lens[i] + seq_len_offset);
-    }
-    int32_t q_seq_len_offset = state_.q_seq_lens.back();
-    for (size_t i = 1; i < state.q_seq_lens.size(); ++i) {
-      state_.q_seq_lens.emplace_back(state.q_seq_lens[i] + q_seq_len_offset);
-    }
-#endif
+    CuSeqLens::merge(state_.seq_lens, state.seq_lens);
+    CuSeqLens::merge(state_.q_seq_lens, state.q_seq_lens);
 
     state_.kv_cache_tokens_nums.insert(state_.kv_cache_tokens_nums.end(),
                                        state.kv_cache_tokens_nums.begin(),
@@ -825,14 +791,8 @@ void ForwardInputBuilder::process_single_sequence(int32_t seq_index,
     state.is_prefilling.emplace_back(
         static_cast<uint8_t>(sequence->is_prefill_stage()));
   }
-#if defined(USE_NPU)
-  state.seq_lens.push_back(seq_len);
-  state.q_seq_lens.push_back(padded_q_seq_len);
-#elif defined(USE_MLU) || defined(USE_CUDA) || defined(USE_ILU) || \
-    defined(USE_DCU) || defined(USE_MUSA)
-  state.seq_lens.push_back(state.seq_lens.back() + seq_len);
-  state.q_seq_lens.push_back(state.q_seq_lens.back() + padded_q_seq_len);
-#endif
+  CuSeqLens::append(state.seq_lens, seq_len);
+  CuSeqLens::append(state.q_seq_lens, padded_q_seq_len);
   // Process multi-modal input
   process_multi_modal_inputs(
       sequence, n_kv_cache_tokens, q_seq_len, seq_index, state_ptr);
@@ -1099,16 +1059,18 @@ void ForwardInputBuilder::setup_kv_cache_info(Sequence* sequence,
 
   std::vector<int32_t> block_ids;
   block_ids.reserve(blocks.size());
+  state.paged_kv_indices.reserve(state.paged_kv_indices.size() + blocks.size());
   int32_t block_size = 0;
   for (const auto& block : blocks) {
-    block_size = block.size();
+    block_size = static_cast<int32_t>(block.size());
     block_ids.push_back(block.id());
     state.paged_kv_indices.push_back(block.id());
   }
-  state.paged_kv_indptr.push_back(state.paged_kv_indptr.back() + blocks.size());
-  int32_t last_page_len =
-      (seq_len % block_size == 0) ? block_size : seq_len % block_size;
-  state.paged_kv_last_page_len.push_back(last_page_len);
+  append_paged_kv_geometry(static_cast<int32_t>(seq_len),
+                           static_cast<int64_t>(blocks.size()),
+                           block_size,
+                           state.paged_kv_indptr,
+                           state.paged_kv_last_page_len);
 
   auto& transfer_kv_info = sequence->kv_state().transfer_kv_info();
   if (transfer_kv_info.has_value()) {
@@ -1156,24 +1118,17 @@ void ForwardInputBuilder::padding_decode_batch_size(
             state_.eplb_decode_token_mask.emplace_back(0);
           }
         }
-#if defined(USE_NPU)
-        state_.seq_lens.push_back(num_decoding_tokens);
-        state_.q_seq_lens.push_back(num_decoding_tokens);
-#elif defined(USE_MLU) || defined(USE_CUDA) || defined(USE_ILU) || \
-    defined(USE_MUSA) || defined(USE_DCU)
-        state_.seq_lens.push_back(state_.seq_lens.back() + num_decoding_tokens);
-        state_.q_seq_lens.push_back(state_.q_seq_lens.back() +
-                                    num_decoding_tokens);
-#endif
+        CuSeqLens::append(state_.seq_lens, num_decoding_tokens);
+        CuSeqLens::append(state_.q_seq_lens, num_decoding_tokens);
         state_.block_tables_vec.emplace_back();
         if (!state_.multi_block_tables.empty()) {
           for (auto& mgr_tables : state_.multi_block_tables) {
             mgr_tables.emplace_back(std::vector<int32_t>{});
           }
         }
-        state_.paged_kv_indices.push_back(0);
-        state_.paged_kv_indptr.push_back(state_.paged_kv_indptr.back() + 1);
-        state_.paged_kv_last_page_len.push_back(1);
+        CuSeqLens::append_cumulative(state_.paged_kv_indptr, /*len=*/1);
+        state_.paged_kv_last_page_len.emplace_back(1);
+        state_.paged_kv_indices.emplace_back(0);
       }
     }
   }
@@ -1228,7 +1183,7 @@ Input ForwardInputBuilder::state_to_forward_input() {
       make_cpu_tensor(state_.kv_cache_tokens_nums);
   input_params.attention.device.q_seq_lens = make_cpu_tensor(state_.q_seq_lens);
   std::vector<int32_t> q_cu_seq_lens =
-      build_q_cu_seq_lens_vec(state_.q_seq_lens);
+      CuSeqLens::to_query_start_offsets(state_.q_seq_lens);
   input_params.attention.device.q_cu_seq_lens = make_cpu_tensor(q_cu_seq_lens);
   input_params.attention.host.kv_cache_tokens_nums =
       std::move(state_.kv_cache_tokens_nums);
@@ -1278,20 +1233,13 @@ Input ForwardInputBuilder::state_to_forward_input() {
   }
 
   // Setup block tables
-  util::pad_2d_vector(state_.block_tables_vec, /*pad_value=*/0);
-  input_params.attention.device.block_tables =
-      create_2d_tensor(state_.block_tables_vec, torch::kInt);
-  input_params.attention.host.block_tables =
-      input_params.attention.device.block_tables;
+  AttentionInputView(input_params.attention)
+      .set_block_tables_from(state_.block_tables_vec, /*pad_value=*/0);
 
   // Setup grouped cache block tables.
   if constexpr (!std::is_same_v<Input, RecForwardInput>) {
-    input_params.multi_block_tables.reserve(state_.multi_block_tables.size());
-    for (auto& mgr_tables : state_.multi_block_tables) {
-      util::pad_2d_vector(mgr_tables, /*pad_value=*/-1);
-      input_params.multi_block_tables.emplace_back(
-          create_2d_tensor(mgr_tables, torch::kInt));
-    }
+    input_params.multi_block_tables =
+        pad_and_stack_grouped_tables(state_.multi_block_tables);
   }
 
   if (input_embeddings_vec_.size() != 0) {

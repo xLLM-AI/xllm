@@ -1242,7 +1242,11 @@ void WorkerImpl::prepare_dp_ep_padding_on_stream(VlmModelParams& input_params,
 void WorkerImpl::prepare_work_before_execute(const LlmForwardInput& input,
                                              LlmForwardInput& processed_input) {
   prepare_work_before_execute_on_stream(
-      input, processed_input, *prepare_stream_);
+      input,
+      processed_input,
+      *prepare_stream_,
+      /*record_ready_event=*/true,
+      /*restore_linear_state=*/restores_linear_state_on_prepare());
 }
 
 std::optional<ForwardOutput> WorkerImpl::step(
@@ -2930,7 +2934,11 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
 void WorkerImpl::prepare_work_before_execute(const VlmForwardInput& input,
                                              VlmForwardInput& processed_input) {
   prepare_work_before_execute_on_stream(
-      input, processed_input, *prepare_stream_);
+      input,
+      processed_input,
+      *prepare_stream_,
+      /*record_ready_event=*/true,
+      /*restore_linear_state=*/restores_linear_state_on_prepare());
 }
 
 std::optional<ForwardOutput> WorkerImpl::step(
