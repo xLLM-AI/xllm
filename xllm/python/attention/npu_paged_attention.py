@@ -2099,6 +2099,11 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                     atten_mask = self._block_attention_mask(prepared, layer)
                     block_table = self._block_table_i32
                     kv_lengths = prepared.actual_seq_kv
+                    context = get_forward_context_or_none()
+                    if context is not None and context.acl_graph is not None and not shares_execution_workspace():
+                        # This direct FIA call cannot update Host arguments on
+                        # replay. The Device mask limits the capacity bound.
+                        kv_lengths = [prepared.kv_capacity] * len(widths)
                 else:
                     window = self._windowed_block_table(prepared, left_context)
                     atten_mask = self._block_attention_mask(prepared, layer, window.key_positions)

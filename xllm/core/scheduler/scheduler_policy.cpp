@@ -328,6 +328,7 @@ void SchedulerPolicy::schedule_prefill_from_queue(
   // Reuse scratch capacity across requests within this scheduling round.
   std::vector<Sequence*> prefill_sequences;
   std::vector<size_t> prefill_sequences_budget;
+  std::vector<KVCacheManager::KVCacheReservation> reservations;
   auto has_schedule_budget = [&]() {
     return !budget.kv_allocation_deferred && !queue->empty() &&
            budget.remaining_seq_budget > 0 &&
@@ -336,15 +337,16 @@ void SchedulerPolicy::schedule_prefill_from_queue(
   };
   auto stop_on_result = [&](PrefillScheduleResult result) -> bool {
     switch (result) {
-      case PrefillScheduleResult::kScheduled:
+      case PrefillScheduleResult::SCHEDULED:
         return false;
-      case PrefillScheduleResult::kBudgetExhausted:
+      case PrefillScheduleResult::BUDGET_EXHAUSTED:
         budget_exhausted = true;
         return true;
-      case PrefillScheduleResult::kBlocksExhausted:
+      case PrefillScheduleResult::BLOCKS_EXHAUSTED:
         blocks_exhausted = true;
         return true;
-      case PrefillScheduleResult::kDeferred:
+      case PrefillScheduleResult::STOPPED:
+      case PrefillScheduleResult::DEFERRED:
         return true;
     }
     LOG(FATAL) << "Unknown prefill scheduling result";
@@ -360,14 +362,15 @@ void SchedulerPolicy::schedule_prefill_from_queue(
                                      finished,
                                      reserved_full_footprint,
                                      prefill_sequences,
-                                     prefill_sequences_budget);
-    if (result == PrefillScheduleResult::kDeferred) {
+                                     prefill_sequences_budget,
+                                     reservations);
+    if (result == PrefillScheduleResult::DEFERRED) {
       return;
     }
     // A request can be terminal or have no remaining prefill work. Terminal
     // requests are already removed by schedule_one_prefill_request; only
     // temporarily remove an unchanged queue head so later requests can run.
-    if (result == PrefillScheduleResult::kScheduled &&
+    if (result == PrefillScheduleResult::SCHEDULED &&
         prefill_sequences.empty() && !queue->empty() && queue->top() == request) {
       skipped.emplace_back(request);
       queue->pop_top();
@@ -391,11 +394,12 @@ SchedulerPolicy::schedule_one_prefill_request(
     std::vector<std::shared_ptr<Request>>& finished,
     std::vector<size_t>& reserved_full_footprint,
     std::vector<Sequence*>& prefill_sequences,
-    std::vector<size_t>& prefill_sequences_budget) {
+    std::vector<size_t>& prefill_sequences_budget,
+    std::vector<KVCacheManager::KVCacheReservation>& reservations) {
   std::shared_ptr<Request> request(queue->top());
   if (collect_terminal(request, state, finished)) {
     queue->pop_top();
-    return PrefillScheduleResult::kScheduled;
+    return PrefillScheduleResult::SCHEDULED;
   }
 
   const size_t num_sequences = request->sequences().size();
@@ -406,7 +410,7 @@ SchedulerPolicy::schedule_one_prefill_request(
   }
 
   // A request that exceeds the configured capacity cannot recover by waiting.
-  std::vector<KVCacheManager::KVCacheReservation> reservations;
+  reservations.clear();
   reservations.reserve(num_sequences);
   for (const auto& sequence : request->sequences()) {
     if (!sequence->finished()) {
@@ -425,7 +429,7 @@ SchedulerPolicy::schedule_one_prefill_request(
         request,
         {StatusCode::RESOURCE_EXHAUSTED,
          "Request exceeds total KV cache capacity"});
-    return PrefillScheduleResult::kScheduled;
+    return PrefillScheduleResult::SCHEDULED;
   }
 
   // An idle cache must still attempt allocation, including chunk continuations
@@ -435,7 +439,7 @@ SchedulerPolicy::schedule_one_prefill_request(
       state.kv_cache_manager->kv_cache_utilization() >=
           SchedulerConfig::get_instance()
               .prefill_scheduling_memory_usage_threshold()) {
-    return PrefillScheduleResult::kBlocksExhausted;
+    return PrefillScheduleResult::BLOCKS_EXHAUSTED;
   }
 
   bool reserve_full_prompt = false;
@@ -455,7 +459,7 @@ SchedulerPolicy::schedule_one_prefill_request(
         state.kv_cache_manager->admission_capacity(dp_rank);
     if (reserved_full_footprint[dp_rank] + full_footprint > total_blocks) {
       if (!state.running_sequences.empty() || !state.decode_queue.empty()) {
-        return PrefillScheduleResult::kBlocksExhausted;
+        return PrefillScheduleResult::BLOCKS_EXHAUSTED;
       }
       // An idle elastic cache may report stale capacity. Let the real
       // allocation confirm the complete prompt after budget checks.
@@ -466,7 +470,7 @@ SchedulerPolicy::schedule_one_prefill_request(
   size_t allocated_tokens = 0;
   size_t allocated_seqs = 0;
   double allocated_estimate_latency = 0;
-  PrefillScheduleResult result = PrefillScheduleResult::kScheduled;
+  PrefillScheduleResult result = PrefillScheduleResult::SCHEDULED;
   bool allocation_deferred = false;
   prefill_sequences.clear();
   prefill_sequences_budget.clear();
@@ -486,7 +490,7 @@ SchedulerPolicy::schedule_one_prefill_request(
             << "[prefill_cap] no eligible DP rank is below the cap of "
             << state.model_args.max_concurrent_prefills_per_dp()
             << " prefill requests; deferring remaining prefills";
-        result = PrefillScheduleResult::kDeferred;
+        result = PrefillScheduleResult::STOPPED;
         break;
       }
       prefill_sequence->set_dp_rank(dp_rank);
@@ -517,7 +521,7 @@ SchedulerPolicy::schedule_one_prefill_request(
 
     if (budget.remaining_token_budget < allocated_tokens + num_tokens ||
         budget.remaining_seq_budget < allocated_seqs + 1) {
-      result = PrefillScheduleResult::kBudgetExhausted;
+      result = PrefillScheduleResult::BUDGET_EXHAUSTED;
       break;
     }
 
@@ -530,13 +534,12 @@ SchedulerPolicy::schedule_one_prefill_request(
       if (budget.estimate_latency + allocated_estimate_latency +
               seq_estimate_latency >
           budget.latency_budget) {
-        result = PrefillScheduleResult::kBudgetExhausted;
+        result = PrefillScheduleResult::BUDGET_EXHAUSTED;
         break;
       }
     }
 
     size_t actual_tokens = 0;
-    // allocate_for_prefill owns cleanup for fresh and in-flight requests.
     if (!allocate_for_prefill(prefill_sequence.get(),
                               num_tokens,
                               &actual_tokens,
@@ -545,7 +548,7 @@ SchedulerPolicy::schedule_one_prefill_request(
                               reserve_full_prompt)) {
       allocation_deferred = true;
       budget.kv_allocation_deferred = true;
-      result = PrefillScheduleResult::kDeferred;
+      result = PrefillScheduleResult::DEFERRED;
       break;
     }
 
@@ -559,7 +562,7 @@ SchedulerPolicy::schedule_one_prefill_request(
     }
   }
 
-  if (result != PrefillScheduleResult::kScheduled &&
+  if (result != PrefillScheduleResult::SCHEDULED &&
       (prefill_sequences.empty() || request->check_beam_search())) {
     if (!budget.dp_group_token_used.empty()) {
       for (size_t i = 0; i < prefill_sequences.size(); ++i) {
@@ -568,7 +571,7 @@ SchedulerPolicy::schedule_one_prefill_request(
       }
     }
     if (allocation_deferred && record_kv_allocation_failure(request.get())) {
-      return PrefillScheduleResult::kBlocksExhausted;
+      return PrefillScheduleResult::BLOCKS_EXHAUSTED;
     }
     return result;
   }
@@ -602,9 +605,9 @@ SchedulerPolicy::schedule_one_prefill_request(
           (sequence->num_tokens() + block_size - 1) / block_size;
     }
   }
-  return result == PrefillScheduleResult::kScheduled
-             ? PrefillScheduleResult::kScheduled
-             : PrefillScheduleResult::kDeferred;
+  return result == PrefillScheduleResult::SCHEDULED
+             ? PrefillScheduleResult::SCHEDULED
+             : PrefillScheduleResult::DEFERRED;
 }
 
 size_t SchedulerPolicy::compute_prefill_tokens(Sequence* seq,

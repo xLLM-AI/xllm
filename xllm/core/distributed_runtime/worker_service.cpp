@@ -503,6 +503,11 @@ void WorkerService::collect_llm_output(
   };
   const bool use_default_stream = !options_.enable_schedule_overlap();
   if (cpu_ready_result) {
+    // A CPU tensor can be the destination of a still-pending device copy.
+    if (output.ready_event != nullptr) {
+      CHECK(output.ready_event->synchronize())
+          << "wait LLM output ready event failed";
+    }
     copy_output_to_host();
   } else if (use_default_stream) {
     copy_output_to_host();

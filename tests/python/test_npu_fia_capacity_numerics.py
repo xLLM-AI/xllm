@@ -55,7 +55,18 @@ def test_fia_capacity_graphs_preserve_full_context_across_tiers(
     torch.npu.synchronize()
 
 
-def _assert_fia_capacity_graphs(prepared: bool, rows: int, graph_owners: list[object]) -> None:
+@torch.inference_mode()
+def test_padded_device_length_graph_preserves_full_context(_graph_owners: list[object]) -> None:
+    torch.npu.set_device(0)
+    task_stream = torch.npu.Stream(device=torch.device("npu:0"))
+    task_stream.wait_stream(torch.npu.current_stream())
+    with torch.npu.stream(task_stream):
+        _assert_fia_capacity_graphs(False, 3, _graph_owners, padded=True)
+    torch.npu.current_stream().wait_stream(task_stream)
+    torch.npu.synchronize()
+
+
+def _assert_fia_capacity_graphs(prepared: bool, rows: int, graph_owners: list[object], *, padded: bool = False) -> None:
     from xllm.python.attention.backend import LayerCache
     from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend
     from xllm.python.model_executor.forward_context import get_forward_context
@@ -83,7 +94,8 @@ def _assert_fia_capacity_graphs(prepared: bool, rows: int, graph_owners: list[ob
             physical = int(table_host[row, page])
             values_host[physical, :, 0] = logical[page * page_size : (page + 1) * page_size, None]
     value = values_host.to(device)
-    query = torch.zeros(rows, heads, dimension, device=device, dtype=torch.bfloat16)
+    graph_rows = 4 if padded else rows
+    query = torch.zeros(graph_rows, heads, dimension, device=device, dtype=torch.bfloat16)
     backend = NpuPagedAttentionBackend(heads, 1, dimension, dimension**-0.5, 0, False, device, torch.bfloat16)
     cache = LayerCache(key=key, value=value)
     backend.bind_kv_caches([cache])
@@ -91,6 +103,9 @@ def _assert_fia_capacity_graphs(prepared: bool, rows: int, graph_owners: list[ob
     class AttentionProbe(torch.nn.Module):
         def forward(self, tokens: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
             metadata = get_forward_context().metadata
+            if padded:
+                layer = SimpleNamespace(causal=False, fia_use_attention_mask=False, fia_sparse_mode=0)
+                return backend._prefill(query, query, query, key, value, metadata, tokens.numel(), layer)
             return backend._decode(query, key, value, metadata, tokens.numel())
 
     tokens = torch.zeros(rows, device=device, dtype=torch.int32)
@@ -124,10 +139,10 @@ def _assert_fia_capacity_graphs(prepared: bool, rows: int, graph_owners: list[ob
             AttentionProbe(),
             backend,
             device,
-            rows,
+            graph_rows,
             8192,
             device_kv_lengths=True,
-            enable_graph_mode_decode_no_padding=True,
+            enable_graph_mode_decode_no_padding=not padded,
         )
     )
     runner.bind_layer_caches([cache])
@@ -147,10 +162,10 @@ def _assert_fia_capacity_graphs(prepared: bool, rows: int, graph_owners: list[ob
     assert len(set(addresses.values())) == 3
     # Only a runner that shares one scratch allocation across its entries can
     # afford the bounded FIA workspace; prepared entries keep the plain call.
-    expected_state = set() if prepared else {rows}
+    expected_state = set() if prepared or padded else {rows}
     for capacity, entry in by_capacity.items():
         assert set(entry.execution_state.paged_attention) == expected_state
-        assert entry.static_metadata.block_table.shape == (rows, capacity)
+        assert entry.static_metadata.block_table.shape == (graph_rows, capacity)
         assert entry.static_metadata.block_table.is_contiguous()
         assert entry.static_metadata.block_table.data_ptr() != table.data_ptr()
 
@@ -191,12 +206,12 @@ def _assert_fia_capacity_graphs(prepared: bool, rows: int, graph_owners: list[ob
             assert not torch.allclose(expected_tensor, torch.stack(truncated), rtol=0.01, atol=0.01)
         if live != capacity * page_size:
             assert not torch.allclose(expected_tensor, torch.stack(unmasked), rtol=0.01, atol=0.01)
-        if not prepared:
+        if not prepared and not padded:
             # Replay prepares a fresh Slot view, so the captured FIA must read
             # this step's Host bound instead of the whole capacity tier.
             assert by_capacity[capacity].execution_state.paged_attention[rows].kv == [host_bound] * rows
         compact = by_capacity[capacity].static_metadata.block_table
-        torch.testing.assert_close(compact.cpu(), current_table[:, :capacity])
+        torch.testing.assert_close(compact[:rows].cpu(), current_table[:, :capacity])
         assert compact.data_ptr() == addresses[capacity]
         assert len(entries) == 3, "crossing or returning to a tier must not capture at runtime"
     torch.npu.synchronize()
