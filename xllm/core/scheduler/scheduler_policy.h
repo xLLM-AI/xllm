@@ -225,10 +225,11 @@ class SchedulerPolicy {
 
  private:
   enum class PrefillScheduleResult {
-    kScheduled,
-    kBudgetExhausted,
-    kBlocksExhausted,
-    kDeferred,
+    SCHEDULED,
+    BUDGET_EXHAUSTED,
+    BLOCKS_EXHAUSTED,
+    STOPPED,
+    DEFERRED,
   };
 
   PrefillScheduleResult schedule_one_prefill_request(
@@ -238,7 +239,8 @@ class SchedulerPolicy {
       std::vector<std::shared_ptr<Request>>& finished,
       std::vector<size_t>& reserved_full_footprint,
       std::vector<Sequence*>& prefill_sequences,
-      std::vector<size_t>& prefill_sequences_budget);
+      std::vector<size_t>& prefill_sequences_budget,
+      std::vector<KVCacheManager::KVCacheReservation>& reservations);
 
   bool collect_terminal(std::shared_ptr<Request>& request,
                         SchedulerState& state,
