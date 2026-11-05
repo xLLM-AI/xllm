@@ -3717,7 +3717,7 @@ void TaskExecutionPipeline::launch_speculative(uint32_t slot_id) {
   slots_[slot_id]->failed_request_ids = finalize_kv_push_failures(
       kv_transfers,
       transfers,
-      capacity_.enable_kv_push ? "PUSH" : "",
+      capacity_.enable_kv_push,
       {capacity_.sampling_group, capacity_.cp_sampling_group},
       device_);
   // Prefill, empty and unchanged legacy paths still publish a generation for

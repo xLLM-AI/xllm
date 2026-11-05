@@ -1153,7 +1153,8 @@ std::vector<std::string> DFlashWorkerImpl::write_context_kv(
   return finalize_kv_push_failures(
       kv_transfers,
       input.transfer_kv_infos,
-      options_.kv_cache_transfer_mode(),
+      options_.enable_disagg_pd() &&
+          options_.kv_cache_transfer_mode() == "PUSH",
       {draft_impl_->context_.get_parallel_args().tp_group_,
        draft_impl_->context_.get_parallel_args().cp_group_},
       device_);

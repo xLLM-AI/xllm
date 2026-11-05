@@ -76,7 +76,7 @@ class KVTransferCompletion final {
 std::vector<std::string> finalize_kv_push_failures(
     KVTransferCompletion& kv_transfers,
     const std::vector<TransferKVInfo>& transfer_kv_infos,
-    const std::string& kv_cache_transfer_mode,
+    bool enable_kv_push,
     const std::array<ProcessGroup*, 2>& groups,
     const Device& device);
 

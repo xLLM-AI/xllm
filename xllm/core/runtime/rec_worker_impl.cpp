@@ -453,7 +453,8 @@ std::optional<ForwardOutput> RecWorkerImpl::RecWorkPipeline::step(
     return finalize_kv_push_failures(
         kv_transfers,
         input.transfer_kv_infos,
-        runtime_.worker.options_.kv_cache_transfer_mode(),
+        runtime_.worker.options_.enable_disagg_pd() &&
+            runtime_.worker.options_.kv_cache_transfer_mode() == "PUSH",
         {runtime_.context->get_parallel_args().tp_group_,
          runtime_.context->get_parallel_args().cp_group_},
         runtime_.worker.device_);

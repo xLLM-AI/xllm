@@ -1073,7 +1073,7 @@ void TaskExecutionPipeline::launch(uint32_t slot_id) {
   slot.failed_request_ids = finalize_kv_push_failures(
       kv_transfers,
       slot.transfer_kv_infos,
-      capacity_.enable_kv_push ? "PUSH" : "",
+      capacity_.enable_kv_push,
       {capacity_.sampling_group, capacity_.cp_sampling_group},
       device_);
   published_tail_ = slot.step;  // Zero rows invalidate all previous tokens.

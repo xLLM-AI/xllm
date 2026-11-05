@@ -46,6 +46,22 @@ cc_test(
 
 cc_test(
   NAME
+    kv_transfer_failure_test
+  CPU_ONLY
+  SRCS
+    kv_transfer_failure_test.cpp
+  DEPS
+    :kv_transfer_failure
+    :kv_transfer_completion
+    :common
+    :parallel_state
+    :platform
+    torch
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
     reshard_planner_test
   CPU_ONLY
   SRCS
