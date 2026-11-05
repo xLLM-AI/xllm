@@ -109,6 +109,15 @@ DEFINE_bool(
     false,
     "Whether to decode both audio and video when the input is a video.");
 
+DEFINE_int32(audio_max_upload_file_mb,
+             25,
+             "Maximum accepted speech-to-text audio file size in MiB.");
+
+DEFINE_int32(audio_max_decode_duration_s,
+             600,
+             "Maximum decoded speech-to-text audio duration in seconds. "
+             "0 disables the limit.");
+
 // NOTE: This is an experimental flag,
 //       it needs to be removed after the function is stable.
 DEFINE_bool(use_cpp_chat_template,
@@ -152,6 +161,8 @@ void ModelConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(flashinfer_workspace_buffer_size);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(use_audio_in_video);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(use_cpp_chat_template);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(audio_max_upload_file_mb);
+  XLLM_CONFIG_ASSIGN_FROM_FLAG(audio_max_decode_duration_s);
 }
 
 bool ModelConfig::is_python_model_impl(std::string_view model_impl) {
@@ -222,6 +233,8 @@ void ModelConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(flashinfer_workspace_buffer_size);
   XLLM_CONFIG_ASSIGN_FROM_JSON(use_audio_in_video);
   XLLM_CONFIG_ASSIGN_FROM_JSON(use_cpp_chat_template);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(audio_max_upload_file_mb);
+  XLLM_CONFIG_ASSIGN_FROM_JSON(audio_max_decode_duration_s);
 }
 
 void ModelConfig::append_config_json(
@@ -258,6 +271,10 @@ void ModelConfig::append_config_json(
       config_json, default_config, use_audio_in_video);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, use_cpp_chat_template);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, audio_max_upload_file_mb);
+  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
+      config_json, default_config, audio_max_decode_duration_s);
 }
 
 ModelConfig& ModelConfig::get_instance() {
@@ -270,6 +287,11 @@ void ModelConfig::initialize() {
   if (const auto& json_config = config::get_parsed_json_config()) {
     from_json(*json_config);
   }
+
+  CHECK_GT(audio_max_upload_file_mb(), 0)
+      << "audio_max_upload_file_mb must be positive";
+  CHECK_GE(audio_max_decode_duration_s(), 0)
+      << "audio_max_decode_duration_s must be >= 0 (0 disables the limit)";
 }
 
 }  // namespace xllm

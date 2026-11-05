@@ -149,6 +149,8 @@ struct RequestOutput {
   // the statistics for the request.
   std::optional<Usage> usage;
 
+  double input_audio_duration_s = 0.0;
+
   // whether the request is finished.
   bool finished = false;
 

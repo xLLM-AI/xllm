@@ -56,7 +56,7 @@ class VLMMaster : public Master {
   // chat
   void handle_request(std::vector<Message> messages,
                       RequestParams sp,
-                      std::string payload,
+                      MMInput mm_input,
                       OutputCallback callback,
                       bool use_prompt_as_is = false);
 
@@ -88,6 +88,8 @@ class VLMMaster : public Master {
   bool stop_profile();
 
   int get_image_limit() { return options_.limit_image_per_prompt(); }
+
+  const std::string& model_type() const { return model_args_.model_type(); }
 
  private:
   std::shared_ptr<KVCacheTransferCoordinator> kv_transfer_coordinator_;

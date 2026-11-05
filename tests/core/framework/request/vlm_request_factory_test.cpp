@@ -349,10 +349,8 @@ TEST_F(VLMRequestFactoryTest, MessageOverloadFailsWhenTemplateRejects) {
   std::vector<Message> messages;
   messages.emplace_back("user", content);
 
-  auto request = factory->create(messages,
-                                 sp,
-                                 /*payload=*/std::string{},
-                                 make_capture_callback(&capture));
+  auto request =
+      factory->create(messages, sp, MMInput{}, make_capture_callback(&capture));
 
   EXPECT_EQ(request, nullptr);
   ASSERT_TRUE(capture.status.has_value());
@@ -397,7 +395,7 @@ TEST_F(VLMRequestFactoryTest,
   const std::chrono::steady_clock::time_point arrival_time{};
   auto request = factory->create(messages,
                                  sp,
-                                 /*payload=*/std::string{},
+                                 MMInput{},
                                  make_capture_callback(&capture),
                                  /*use_prompt_as_is=*/false,
                                  arrival_time);

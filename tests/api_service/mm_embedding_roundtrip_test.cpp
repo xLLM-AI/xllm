@@ -224,8 +224,7 @@ TEST_F(MMEmbeddingRoundtripTest, RoundTripsPreserveImageKeysAndPrefixHashes) {
       EXPECT_EQ(item.embedding.hash_key, embedding.hash_key);
       items.emplace_back(std::move(item));
     }
-    MMInput inputs;
-    inputs.insert(items);
+    MMInput inputs(std::move(items));
     MMData received;
     ASSERT_TRUE(processor.process_multimodal(inputs, received));
     prompt_processor.find_mm_spans(tokens, received);

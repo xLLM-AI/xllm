@@ -47,6 +47,8 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | `enable_return_mm_full_embeddings` | `bool` | `false` | Whether VLM models return ViT embeddings and sequence embeddings. |
 | `mm_download_headers` | `string` | `""` | Service-level default HTTP headers for multimodal downloads, as a JSON object. Per-request headers take precedence. Example: `{"Authorization":"Bearer xxx"}`. |
 | `use_audio_in_video` | `bool` | `false` | Whether to decode both audio and video when the input is a video. |
+| `audio_max_upload_file_mb` | `int32` | `25` | Maximum speech-to-text audio upload size in MiB. Must be positive. |
+| `audio_max_decode_duration_s` | `int32` | `600` | Maximum decoded speech-to-text audio duration in seconds. `0` disables the limit. |
 | `use_cpp_chat_template` | `bool` | `true` | Use native C++ chat templates for supported models, for example `deepseek_v32` and `deepseek_v4`. Set to `false` to fall back to Jinja for debugging. |
 
 ## LoadConfig

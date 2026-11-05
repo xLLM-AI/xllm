@@ -35,7 +35,7 @@ class MMBatchData {
   MMBatchData(std::vector<MMData> data);
   MMBatchData(uint32_t type, MMDict items);
 
-  bool has(uint32_t type) const { return type & type_ != 0; }
+  bool has(uint32_t type) const { return (type & type_) != 0; }
   bool valid() const { return type_ != MMType::NONE; }
 
   uint32_t type() const { return type_; }

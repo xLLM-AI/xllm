@@ -237,6 +237,13 @@ std::shared_ptr<Request> VLMRequestFactory::build_request(
                          callback,
                          nullptr);
   req_state.arrival_time = arrival_time;
+  if (req_state.mm_data.has(MMType::AUDIO)) {
+    std::vector<AudioMetadata> audio_metadata;
+    req_state.mm_data.get_metadata(MMType::AUDIO, audio_metadata);
+    for (const AudioMetadata& metadata : audio_metadata) {
+      req_state.input_audio_duration_s += metadata.duration;
+    }
+  }
   req_state.include_stop_str_in_output = sp.include_stop_str_in_output;
 
   rate_limit_guard.dismiss();
@@ -291,7 +298,7 @@ std::optional<StoppingChecker> VLMRequestFactory::build_stopping_checker(
 std::shared_ptr<Request> VLMRequestFactory::create(
     std::vector<Message> messages,
     const RequestParams& sp,
-    std::string payload,
+    MMInput mm_inputs,
     OutputCallback callback,
     bool use_prompt_as_is,
     std::chrono::steady_clock::time_point arrival_time) {
@@ -301,18 +308,18 @@ std::shared_ptr<Request> VLMRequestFactory::create(
   xllm::ScopeGuard rate_limit_guard(
       [this] { rate_limiter_->decrease_one_request(); });
 
-  static MMInputTransfer mm_input_transfer;
-
-  MMInput mm_inputs(std::move(payload));
-  Timer load_timer;
-  MMErrCode code = mm_input_transfer.trans(messages, mm_inputs);
-  HISTOGRAM_OBSERVE(mm_input_loading_latency_milliseconds,
-                    static_cast<int64_t>(load_timer.elapsed_milliseconds()));
-  if (code != MMErrCode::SUCCESS) {
-    std::string error_message = MMErrToString(code);
-    LOG(ERROR) << error_message;
-    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT, error_message);
-    return nullptr;
+  if (mm_inputs.empty()) {
+    static MMInputTransfer mm_input_transfer;
+    Timer load_timer;
+    MMErrCode code = mm_input_transfer.trans(messages, mm_inputs);
+    HISTOGRAM_OBSERVE(mm_input_loading_latency_milliseconds,
+                      static_cast<int64_t>(load_timer.elapsed_milliseconds()));
+    if (code != MMErrCode::SUCCESS) {
+      std::string error_message = MMErrToString(code);
+      LOG(ERROR) << error_message;
+      CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT, error_message);
+      return nullptr;
+    }
   }
 
   MMData mm_data;

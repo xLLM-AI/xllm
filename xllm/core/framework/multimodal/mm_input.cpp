@@ -128,7 +128,7 @@ MMErrCode MMInputTransfer::trans(const std::vector<Message>& messages,
       return code;
     }
 
-    inputs.insert(ins);
+    inputs.insert(std::move(ins));
   }
   return MMErrCode::SUCCESS;
 }

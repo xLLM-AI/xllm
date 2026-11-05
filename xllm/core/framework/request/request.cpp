@@ -254,6 +254,7 @@ RequestOutput Request::generate_output(const Tokenizer& tokenizer,
   output.stream = state_.stream;
   output.response_formatter = state_.response_formatter;
   output.usage = usage;
+  output.input_audio_duration_s = state_.input_audio_duration_s;
   output.finished = finished();
   output.cancelled = cancelled();
   const std::optional<Status> request_error = error_status();
