@@ -616,4 +616,12 @@ torch::Tensor layer_norm_fwd_aclnn(
     int64_t group_size = -1,
     bool norm_before_gate = true,
     bool is_rms_norm = false);
+
+std::tuple<torch::Tensor, torch::Tensor> dual_affine_layer_norm(
+    const torch::Tensor& x,
+    const torch::Tensor& gamma1,
+    const torch::Tensor& beta1,
+    const torch::Tensor& gamma2,
+    const torch::Tensor& beta2,
+    double epsilon);
 }  // namespace xllm::kernel::npu
