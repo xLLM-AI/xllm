@@ -38,6 +38,7 @@ class Executor final {
   virtual ~Executor() = default;
 
   bool supports_prepared_attention_metadata() const;
+  void set_dp_process_group(ProcessGroup* group);
   bool supports_adaptive_unified_graph() const;
   void warmup_adaptive_unified_graph(Executor& draft_executor,
                                      const AdaptiveDSparkGraphTask& task,

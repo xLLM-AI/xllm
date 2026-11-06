@@ -24,6 +24,7 @@ limitations under the License.
 #endif
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
@@ -964,21 +965,43 @@ bool MTPWorkerImpl<TargetInput>::init_model(
     if (impl_->get_status() != WorkerImpl::Status::UNINITIALIZED) {
       // Resolve tail-extend vs accepted-span replay once both models have
       // loaded, before embedding/KV cache allocation.
+      const bool is_python_target =
+          ModelConfig::is_python_model_impl(context_.get_model_impl());
+      const bool legacy_tail =
+          draft_capabilities.allow_tail_fallback &&
+          (is_python_target || is_python_draft || uses_embedded_eagle3_draft());
       const bool full_target_replay =
-          !is_python_draft &&
-          draft_capabilities.native_draft_requires_accepted_span_replay;
+          draft_capabilities.native_draft_requires_accepted_span_replay &&
+          !legacy_tail;
       if (full_target_replay) {
-        // Accepted-span replay is validated only for native GLM5 target/MTP
-        // pairs without an embedded Eagle3 draft, under chunked-prefill verify.
-        const std::string_view target_model_type =
-            context_.get_model_args().model_type();
-        CHECK(!ModelConfig::is_python_model_impl(context_.get_model_impl()) &&
-              is_glm5_next_target_model_type(target_model_type) &&
-              draft_model_type == "glm5_next_mtp" &&
+        // Accepted-span replay needs a target that declares the same native
+        // replay family and supports the active verify mode.
+        std::string resolved_target_model_name;
+        CHECK(resolve_model_registration_name(
+            context_.get_model_args().model_type(),
+            &resolved_target_model_name,
+            &error_message))
+            << error_message;
+        const MtpModelCapabilities target_capabilities =
+            ModelRegistry::get_mtp_capabilities(resolved_target_model_name);
+        const bool target_capable =
+            target_spec_verify_mode_ ==
+                    mtp_async::TargetSpecVerifyMode::CAUSAL_CHUNKED_PREFILL
+                ? target_capabilities.supports_causal_replay_target
+                : target_capabilities.supports_expanded_replay_target;
+        const bool replay_pair =
+            target_capable &&
+            target_capabilities.replay_family != MtpReplayFamily::NONE &&
+            target_capabilities.replay_family ==
+                draft_capabilities.replay_family;
+        CHECK(replay_pair && !is_python_target && !is_python_draft &&
               !uses_embedded_eagle3_draft() &&
-              target_spec_verify_mode_ ==
-                  mtp_async::TargetSpecVerifyMode::CAUSAL_CHUNKED_PREFILL)
-            << "Incompatible draft context update: target=" << target_model_type
+              (target_spec_verify_mode_ ==
+                   mtp_async::TargetSpecVerifyMode::CAUSAL_CHUNKED_PREFILL ||
+               target_spec_verify_mode_ ==
+                   mtp_async::TargetSpecVerifyMode::EXPANDED_VERIFY))
+            << "Incompatible draft context update: target="
+            << context_.get_model_args().model_type()
             << ", draft=" << draft_model_type << ", verify_mode="
             << static_cast<int32_t>(target_spec_verify_mode_);
       }
@@ -3506,12 +3529,15 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
     // Non-DP token-mask remap gathers each replay row back to its source
     // sequence and zeroes padding rows; skip the bookkeeping otherwise.
     const bool remap_token_mask = !dp_enabled && mask.defined();
+    // MLU recurrent kernels skip writing KV when the slot is negative.
+    const int32_t pad_cache_slot = Platform::is_mlu() ? -1 : 0;
     CHECK_EQ(last_states.size(), static_cast<size_t>(row_ctx.num_sequences));
     specBuilder::DecodeBuildBuffers rows;
     std::vector<torch::Tensor> embeddings;
     std::vector<int32_t> selected_rows;
     std::vector<int32_t> source_sequences;
     std::vector<int32_t> valid_rows;
+    std::vector<std::array<int32_t, 3>> mrope_positions;
     const int32_t capacity = row_ctx.num_sequences * uniform_width;
     rows.out_token_ids.reserve(capacity);
     rows.out_positions.reserve(capacity);
@@ -3522,6 +3548,9 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
     rows.out_block_tables.reserve(capacity * row_ctx.block_table_stride);
     embeddings.reserve(capacity);
     selected_rows.reserve(row_ctx.num_sequences);
+    if (row_ctx.position_axes == 3) {
+      mrope_positions.reserve(capacity);
+    }
     if (remap_token_mask) {
       source_sequences.reserve(capacity);
       valid_rows.reserve(capacity);
@@ -3553,10 +3582,31 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
         row.append_block_table = true;
         specBuilder::append_decode_row(row_ctx, row, block_size, rows);
         if (!valid) {
-          rows.out_new_cache_slots.back() = 0;
+          rows.out_new_cache_slots.back() = pad_cache_slot;
         }
         embeddings.emplace_back(
             valid ? state.replay_embeddings.select(0, replay_id) : placeholder);
+        if (row_ctx.position_axes == 3) {
+          std::array<int32_t, 3> rotary = {0, 0, 0};
+          if (valid) {
+            if (state.replay_mrope_positions.defined()) {
+              CHECK_EQ(state.replay_mrope_positions.sizes(),
+                       torch::IntArrayRef({3, span}));
+              const auto stored =
+                  state.replay_mrope_positions.accessor<int32_t, 2>();
+              for (int32_t axis = 0; axis < 3; ++axis) {
+                rotary[axis] = stored[axis][replay_id];
+              }
+            } else {
+              for (int32_t axis = 0; axis < 3; ++axis) {
+                rotary[axis] =
+                    row_ctx.positions[axis * row_ctx.num_sequences + seq_id] +
+                    row.position_offset;
+              }
+            }
+          }
+          mrope_positions.emplace_back(rotary);
+        }
         if (remap_token_mask) {
           source_sequences.emplace_back(seq_id);
           valid_rows.emplace_back(valid ? 1 : 0);
@@ -3570,6 +3620,25 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
                                             rows.out_positions,
                                             base_input.token_ids.options(),
                                             base_input.positions.options());
+    if (!mrope_positions.empty()) {
+      CHECK_EQ(mrope_positions.size(), static_cast<size_t>(num_rows));
+      std::vector<int32_t> rotary(3 * num_rows);
+      for (int32_t axis = 0; axis < 3; ++axis) {
+        for (int32_t row = 0; row < num_rows; ++row) {
+          rotary[axis * num_rows + row] = mrope_positions[row][axis];
+        }
+      }
+      extend_input.positions_host =
+          specBuilder::make_cpu_int_tensor(rotary).reshape({3, num_rows});
+      extend_input.positions = safe_to(extend_input.positions_host,
+                                       base_input.positions.options(),
+                                       /*non_blocking=*/true);
+    }
+    if (!draft_impl_->has_request_state_cache()) {
+      input_params.clear_linear_attention_state();
+      input_params.num_accepted_tokens = torch::Tensor();
+      input_params.num_accepted_tokens_host.clear();
+    }
     input_params.meta.num_sequences = num_rows;
     input_params.meta.batch_forward_type = BatchForwardType::DECODE;
     input_params.is_spec_verify = false;
@@ -3887,6 +3956,11 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_inputs(
 
   auto& input_params = draft_input.input_params;
   input_params.embedding.input_embedding = torch::Tensor();
+  if (!draft_impl_->has_request_state_cache()) {
+    input_params.clear_linear_attention_state();
+    input_params.num_accepted_tokens = torch::Tensor();
+    input_params.num_accepted_tokens_host.clear();
+  }
   const int32_t num_sequences = input_params.meta.num_sequences;
   if (draft_impl_->has_request_state_cache()) {
     input_params.attention.host.kpool_query_lens.assign(num_sequences, 1);

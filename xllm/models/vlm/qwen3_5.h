@@ -15,7 +15,11 @@ limitations under the License.
 
 #pragma once
 
+#include <algorithm>
+#include <optional>
+
 #include "core/framework/model/model_output.h"
+#include "core/framework/model/model_params_view.h"
 #include "core/layers/common/attention_metadata_builder.h"
 #include "core/layers/common/lm_head.h"
 #include "core/layers/common/rotary_embedding_util.h"
@@ -97,24 +101,39 @@ class Qwen3_5ModelImpl final
     return layer::rotary::apply_mrope(cos_sin_, positions, mrope_section_);
   }
 
-  virtual ModelOutput forward(torch::Tensor tokens,
-                              torch::Tensor positions,
-                              std::vector<KVCache>& kv_caches,
-                              const ModelParamsView& input_params) {
-    ModelParamsView& input_params_new =
-        const_cast<ModelParamsView&>(input_params);
+  ModelOutput forward(torch::Tensor tokens,
+                      torch::Tensor positions,
+                      std::vector<KVCache>& kv_caches,
+                      const ModelParamsView& input_params) override {
     std::vector<torch::Tensor> deep_stacks;
 
-    if (dp_size_ > 1) {
-      if (tokens.numel() == 0) {
-        tokens = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
-        positions = torch::tensor({1}).to(torch::kInt32).to(positions.device());
-      }
-      auto& dp_token_nums = input_params_new.parallel.dp_global_token_nums;
-      std::replace(dp_token_nums.begin(), dp_token_nums.end(), 0, 1);
+    if (dp_size_ > 1 && tokens.numel() == 0) {
+      tokens = torch::tensor({1}).to(torch::kInt32).to(tokens.device());
+      positions = torch::tensor({1}).to(torch::kInt32).to(positions.device());
     }
 
-    auto inputs_embeds = input_params.embedding.input_embedding;
+    // Normalize empty DP ranks to one fake token without mutating the shared
+    // input. Only materialize an independent snapshot when a rank is actually
+    // empty, so the common decode path keeps borrowing the caller's view. The
+    // returned view keeps the snapshot owner alive for its full lifetime.
+    std::optional<ModelInputSnapshot> snapshot;
+    ModelParamsView effective_params = [&]() -> ModelParamsView {
+      const auto& dp_token_nums = input_params.parallel.dp_global_token_nums;
+      if (dp_size_ <= 1 ||
+          std::none_of(dp_token_nums.begin(),
+                       dp_token_nums.end(),
+                       [](int32_t count) { return count == 0; })) {
+        return input_params;
+      }
+      snapshot.emplace(input_params.clone());
+      ModelParamsView patched = snapshot->view();
+      std::vector<int32_t>& patched_counts =
+          patched.parallel.dp_global_token_nums;
+      std::replace(patched_counts.begin(), patched_counts.end(), 0, 1);
+      return patched;
+    }();
+
+    auto inputs_embeds = effective_params.embedding.input_embedding;
     torch::Tensor h;
     if (inputs_embeds.defined()) {
       h = inputs_embeds;
@@ -122,13 +141,9 @@ class Qwen3_5ModelImpl final
       h = embed_tokens_(tokens);
     }
 
-    if (!input_params_new.attn_metadata) {
-      input_params_new.attn_metadata =
-          std::make_shared<layer::AttentionMetadata>(
-              get_attention_metadata(input_params_new, h));
-    }
-
-    auto& attn_metadata = *(input_params_new.attn_metadata);
+    // Build derived tensors inside forward so graph replay refreshes them from
+    // the persistent inputs instead of retaining values from capture time.
+    auto attn_metadata = get_attention_metadata(effective_params, h);
     std::tie(attn_metadata.mrope_cos, attn_metadata.mrope_sin) =
         apply_mrope(positions);
 
@@ -140,7 +155,7 @@ class Qwen3_5ModelImpl final
                 positions,
                 attn_metadata,
                 kv_caches[i],
-                input_params_new);
+                effective_params);
     }
     if (residual.has_value()) {
       h = h + residual.value();

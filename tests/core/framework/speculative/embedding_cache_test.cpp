@@ -440,4 +440,37 @@ TEST(EmbeddingCacheTest, ReplayFollowsRequestOrderAndInvalidatesStaleSlots) {
   EXPECT_FALSE(stale[0].replay_embeddings.defined());
 }
 
+TEST(EmbeddingCacheTest,
+     PrefillMropeReplayFollowsSelectedRowsAndSurvivesReuse) {
+  for (bool retain_replay : {false, true}) {
+    EmbeddingCache cache(/*total_nums=*/2, retain_replay);
+    auto positions = torch::tensor(
+        {{0, 1, 2, 3}, {10, 11, 12, 13}, {20, 21, 22, 23}}, torch::kInt);
+    auto hidden = torch::tensor({{6.0f, 7.0f}, {8.0f, 9.0f}});
+    cache.write_prefill_target_context({0, 1},
+                                       {"first", "second"},
+                                       torch::tensor({40, 50}, torch::kInt),
+                                       hidden,
+                                       torch::tensor({1, 3}, torch::kLong),
+                                       positions);
+    positions.fill_(-1);
+    hidden.fill_(999);
+    const auto states = cache.read_decode_states({1, 0}, {"second", "first"});
+    ASSERT_EQ(states.size(), 2);
+    ASSERT_TRUE(states[0].valid);
+    ASSERT_TRUE(states[1].valid);
+    EXPECT_EQ(states[0].token_id, 50);
+    EXPECT_EQ(states[1].token_id, 40);
+    if (retain_replay) {
+      EXPECT_TRUE(torch::equal(states[0].replay_mrope_positions,
+                               torch::tensor({{3}, {13}, {23}}, torch::kInt)));
+      EXPECT_TRUE(torch::equal(states[1].replay_mrope_positions,
+                               torch::tensor({{1}, {11}, {21}}, torch::kInt)));
+    } else {
+      EXPECT_FALSE(states[0].replay_mrope_positions.defined());
+      EXPECT_FALSE(states[1].replay_mrope_positions.defined());
+    }
+  }
+}
+
 }  // namespace xllm

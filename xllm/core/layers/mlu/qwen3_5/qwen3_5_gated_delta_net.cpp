@@ -16,6 +16,7 @@ limitations under the License.
 
 #include <cmath>
 
+#include "core/common/constants.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "framework/state_dict/utils.h"
 #include "kernels/mlu/mlu_ops_api.h"
@@ -264,7 +265,7 @@ torch::Tensor Qwen3_5GatedDeltaNetImpl::forward(
         /*bias_opt=*/std::nullopt,
         logical_state_indices,
         /*activation=*/true,
-        /*pad_slot_id=*/-1,
+        /*pad_slot_id=*/kPaddingLinearStateId,
         attn_metadata.q_cu_seq_lens,
         static_cast<int32_t>(q_max_seq_len),
         input_params.num_accepted_tokens);
@@ -361,7 +362,8 @@ torch::Tensor Qwen3_5GatedDeltaNetImpl::forward(
                                                        std::nullopt,
                                                        logical_state_indices,
                                                        /*activation=*/true,
-                                                       /*pad_slot_id=*/-1);
+                                                       /*pad_slot_id=*/
+                                                       kPaddingLinearStateId);
 
     double scale = 1.0 / std::sqrt(static_cast<double>(head_k_dim_));
     std::tie(core_attn_out, last_recurrent_state) =

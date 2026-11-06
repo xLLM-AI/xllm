@@ -42,6 +42,7 @@ class LlmModelParams final {
     out.multi_block_tables = multi_block_tables;
     out.mtp_shifted_token_ids = mtp_shifted_token_ids;
     out.linear_state_validity_mask = linear_state_validity_mask;
+    out.linear_state_validity_mask_tensor = linear_state_validity_mask_tensor;
     out.is_spec_verify = is_spec_verify;
     out.prefill_without_cache = prefill_without_cache;
     out.num_accepted_tokens = num_accepted_tokens;
@@ -63,6 +64,8 @@ class LlmModelParams final {
     params.expert = expert.to(device);
     params.graph = graph.to(device);
     params.linear_state_validity_mask = linear_state_validity_mask;
+    params.linear_state_validity_mask_tensor =
+        safe_to(linear_state_validity_mask_tensor, device, true);
     params.is_spec_verify = is_spec_verify;
     params.prefill_without_cache = prefill_without_cache;
     params.num_accepted_tokens = safe_to(num_accepted_tokens, device, true);
@@ -88,6 +91,7 @@ class LlmModelParams final {
     embedding.linear_state_read_ids.clear();
     embedding.linear_state_read_indices = torch::Tensor();
     linear_state_validity_mask.clear();
+    linear_state_validity_mask_tensor = torch::Tensor();
   }
 
   int32_t get_q_seq_len(int32_t seq_idx) const {
@@ -147,6 +151,9 @@ class LlmModelParams final {
   std::vector<torch::Tensor> multi_block_tables;
   torch::Tensor mtp_shifted_token_ids;
   std::vector<int64_t> linear_state_validity_mask;
+  // Graph executors supply a persistent device copy to avoid materializing the
+  // host mask while the accelerator queue is under graph capture.
+  torch::Tensor linear_state_validity_mask_tensor;
   bool is_spec_verify = false;
   bool prefill_without_cache = false;
   torch::Tensor num_accepted_tokens;

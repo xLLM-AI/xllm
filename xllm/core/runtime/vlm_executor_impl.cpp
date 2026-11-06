@@ -117,6 +117,13 @@ void VlmExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,
   }
 }
 
+void VlmExecutorImpl::set_dp_process_group(ProcessGroup* group) {
+  // The decode graph backend lives behind the inner LLM executor.
+  if (llm_executor_) {
+    llm_executor_->set_dp_process_group(group);
+  }
+}
+
 torch::Tensor VlmExecutorImpl::collapse_mrope_decode_positions(
     const torch::Tensor& positions) const {
   if (args_.rope_scaling_rope_type() == "mrope" && positions.dim() == 2) {

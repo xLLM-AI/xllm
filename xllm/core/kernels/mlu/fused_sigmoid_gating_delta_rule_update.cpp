@@ -33,6 +33,7 @@ namespace {
 
 constexpr int64_t kMaxBlockHv = 32;
 constexpr int64_t kMaxGdnBlockHv = 16;
+constexpr int64_t kMinGdnBlockHv = 2;
 constexpr int64_t kMaxBlockN = 4;
 constexpr int64_t kBlockQueryLen = 4;
 constexpr int64_t kSplitBlockV = 64;
@@ -271,6 +272,15 @@ std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule_update(
   }
 
   int64_t block_hv = choose_block_hv(num_k_heads, num_v_heads, max_block_hv);
+  // MTP verification has only a few sequences.  Give each Q/K head pair an
+  // independent state tile so GDN can use the MLU cores instead of serializing
+  // all value heads inside one program.
+  const bool split_gdn_hv = !is_kda && num_v_heads > 1;
+  if (split_gdn_hv) {
+    const int64_t heads_per_query = num_v_heads / num_k_heads;
+    block_hv = choose_block_hv(
+        num_k_heads, num_v_heads, std::max(kMinGdnBlockHv, heads_per_query));
+  }
   // A single-token KDA update has no recurrence across heads or value rows.
   // Split both dimensions so each program owns a disjoint state tile; keep K
   // whole because splitting the reduction would require synchronization.
@@ -283,8 +293,9 @@ std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule_update(
       block_v = std::min<int64_t>(head_v_dim, kSplitBlockV);
     }
   }
+  const bool split_hv = split_gdn_hv || split_single_token;
   int64_t num_hv_blocks =
-      split_single_token ? (num_v_heads + block_hv - 1) / block_hv : 1;
+      split_hv ? (num_v_heads + block_hv - 1) / block_hv : 1;
   int64_t total_blocks = ((head_k_dim + block_k - 1) / block_k) *
                          ((head_v_dim + block_v - 1) / block_v) *
                          num_sequences * num_hv_blocks;
@@ -339,10 +350,12 @@ std::pair<torch::Tensor, torch::Tensor> fused_sigmoid_gating_delta_rule_update(
            /*IS_KDA=*/is_kda ? 1 : 0,
            /*KDA_USE_SAFE_GATE=*/kda_use_safe_gate ? 1 : 0,
            kda_gate_lower_bound,
-           /*SPLIT_HV=*/split_single_token ? 1 : 0,
+           /*SPLIT_HV=*/split_hv ? 1 : 0,
            /*BLOCK_N=*/static_cast<int32_t>(block_n),
            /*BLOCK_QUERY_LEN=*/static_cast<int32_t>(kBlockQueryLen),
-           /*FACTORED_REDUCE=*/0);
+           // The factored reduction was validated for the Qwen GDN K=128
+           // path. Keep KDA and other dimensions on their existing reduction.
+           /*FACTORED_REDUCE=*/!is_kda && head_k_dim == 128 ? 1 : 0);
 
   return std::make_pair(out, final_state);
 }

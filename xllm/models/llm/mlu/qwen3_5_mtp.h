@@ -15,6 +15,8 @@ limitations under the License.
 
 #pragma once
 
+#include <algorithm>
+#include <cstdint>
 #include <memory>
 #include <tuple>
 #include <vector>
@@ -24,6 +26,36 @@ limitations under the License.
 #include "models/model_registry.h"
 
 namespace xllm {
+
+namespace qwen3_5_mtp {
+
+inline void configure_mtp_args(ModelArgs& args, bool is_python_model) {
+  if (is_python_model) {
+    return;
+  }
+  const int32_t mtp_layers =
+      std::max<int32_t>(args.num_nextn_predict_layers(), 1);
+  args.num_nextn_predict_layers(mtp_layers);
+  args.n_layers(mtp_layers);
+  args.layer_types(std::vector<std::string>(static_cast<size_t>(mtp_layers),
+                                            "full_attention"));
+  args.full_attention_interval(1);
+}
+
+}  // namespace qwen3_5_mtp
+
+const bool qwen3_5_mtp_adapter_registered = []() {
+  for (const char* name : {"qwen3_5",
+                           "qwen3_5_moe",
+                           "qwen3_5_text",
+                           "qwen3_5_moe_text",
+                           "qwen3_5_mtp",
+                           "qwen3_5_moe_mtp"}) {
+    ModelRegistry::register_mtp_args_adapter(name,
+                                             &qwen3_5_mtp::configure_mtp_args);
+  }
+  return true;
+}();
 
 class Qwen3_5MtpModelImpl final : public Qwen3_5MtpModelImplBase {
  public:
@@ -86,5 +118,27 @@ REGISTER_MODEL_ARGS_LOADER(qwen3_5_moe_mtp,
                                  "qwen3_5_moe_text",
                                  "qwen3_5_moe_mtp");
                            });
+
+const bool qwen3_5_mtp_contract_registered = []() {
+  MtpModelCapabilities target;
+  target.replay_family = MtpReplayFamily::QWEN35;
+  target.supports_expanded_replay_target = true;
+  target.supports_grouped_mtp_graph = true;
+  target.graph_history = MtpGraphHistoryPolicy::QWEN_FULL_ATTENTION;
+  MtpModelCapabilities draft;
+  draft.replay_family = MtpReplayFamily::QWEN35;
+  draft.native_draft_requires_accepted_span_replay = true;
+  draft.allow_tail_fallback = true;
+  draft.supports_grouped_mtp_graph = true;
+  draft.graph_history = MtpGraphHistoryPolicy::QWEN_FULL_ATTENTION;
+  for (const char* name :
+       {"qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text"}) {
+    ModelRegistry::register_mtp_capabilities(name, target);
+  }
+  for (const char* name : {"qwen3_5_mtp", "qwen3_5_moe_mtp"}) {
+    ModelRegistry::register_mtp_capabilities(name, draft);
+  }
+  return true;
+}();
 
 }  // namespace xllm

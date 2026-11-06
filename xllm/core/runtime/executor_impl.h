@@ -77,6 +77,7 @@ class ExecutorImpl {
   }
 
   virtual bool supports_prepared_attention_metadata() const { return false; }
+  virtual void set_dp_process_group(ProcessGroup* /*group*/) {}
   virtual void prepare_attention_metadata(std::vector<KVCache>& /*kv_caches*/,
                                           ModelParamsView& /*params*/) {
     LOG(FATAL) << "Executor does not support prepared attention metadata.";
