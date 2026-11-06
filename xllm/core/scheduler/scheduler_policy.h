@@ -70,6 +70,8 @@ struct SchedulerState {
   const SchedulerOptions& options;
   int32_t min_speculative_tokens_required;
   bool enable_prefix_cache;
+  // Cached at scheduler construction; layer_types never change at runtime.
+  bool has_linear_attention_layers;
   std::function<void(const std::shared_ptr<Request>&)> release_failed_request =
       {};
   // A submitted VMM batch can still hold pages after its sequences release

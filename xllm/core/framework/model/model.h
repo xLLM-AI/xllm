@@ -55,13 +55,8 @@ class Model {
     NOT_IMPLEMENTED();
     return nullptr;
   }
-  virtual bool has_restored_npu_word_embedding() { return false; }
   virtual void set_npu_word_embedding(layer::NpuWordEmbedding& embedding) {
     NOT_IMPLEMENTED();
-  }
-  virtual void set_restored_npu_word_embedding(
-      layer::NpuWordEmbedding& embedding) {
-    set_npu_word_embedding(embedding);
   }
 
   virtual bool init_or_refresh_rolling_runtime(Stream* load_stream,

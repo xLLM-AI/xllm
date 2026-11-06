@@ -106,7 +106,15 @@ struct Options {
 
   PROPERTY(bool, enable_mtp_draft_body_tp1) = false;
 
-  PROPERTY(bool, is_draft_engine) = false;
+  // Marks this WorkerImpl as the drafter (draft-side child) of a speculative
+  // worker pair: it owns the draft model, runs the draft forward phase, and
+  // shares the SPEC_DRAFT KV-cache namespace. A speculative worker owns both
+  // the target and the draft model as two child WorkerImpls. Set by the
+  // speculative worker when it builds the draft child's options; not a user
+  // flag. Cannot be derived from the other options: target and draft child
+  // options agree on num_decoding_tokens>1 (MTP task pipeline) and
+  // num_speculative_tokens>0 (DSpark).
+  PROPERTY(bool, is_draft_model) = false;
 
   PROPERTY(int32_t, world_size) = 1;
 

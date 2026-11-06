@@ -27,9 +27,9 @@
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
+#include "core/scheduler/fake_scheduling_engine_test_utils.h"
 #include "core/scheduler/request_output_dispatcher.h"
 #include "core/scheduler/scheduler_notifier_test_peer.h"
-#include "distributed_runtime/engine.h"
 #include "scheduler_factory.h"
 #include "util/utils.h"
 
@@ -120,27 +120,6 @@ class ControllableBlockManagerPool final : public BlockManagerPool {
       pending_;
 };
 
-class FakeTokenizer : public Tokenizer {
- public:
-  bool encode(const std::string_view& text,
-              std::vector<int32_t>* ids,
-              bool add_special_tokens = true) const {
-    NOT_IMPLEMENTED();
-  }
-  std::string decode(const Slice<int32_t>& ids,
-                     bool skip_special_tokens) const {
-    return "";
-  }
-  std::optional<int32_t> token_to_id(const std::string_view& token) const {
-    NOT_IMPLEMENTED();
-  }
-  std::string id_to_token(int32_t id) const { NOT_IMPLEMENTED(); }
-  size_t vocab_size() const { NOT_IMPLEMENTED(); }
-  std::unique_ptr<Tokenizer> clone() const {
-    return std::make_unique<FakeTokenizer>();
-  }
-};
-
 class ResponseDecodeGate final {
  public:
   void wait_until_released() {
@@ -218,7 +197,7 @@ class SpeculativeStatsLogCapture final : public google::LogSink {
   std::string messages_;
 };
 
-class FakeEngine : public Engine {
+class FakeEngine : public FakeSchedulingEngine {
  public:
   FakeEngine(int32_t num_blocks,
              int32_t block_size,
@@ -238,46 +217,31 @@ class FakeEngine : public Engine {
       opt.linear_state_num_slots_ = num_blocks + 2;
     }
     opt.enable_prefix_cache(enable_prefix_cache);
-    fake_tokenizer_ = std::make_unique<FakeTokenizer>();
-    fake_block_manager_ = std::make_unique<ControllableBlockManagerPool>(opt);
+    block_manager_ = std::make_unique<ControllableBlockManagerPool>(opt);
+    controllable_pool_ =
+        static_cast<ControllableBlockManagerPool*>(block_manager_.get());
   }
-  virtual ForwardOutput step(BatchGroup& /*batch*/) { return {}; }
-  virtual std::vector<RawForwardOutput> collect_step_outputs(
-      const BatchGroup& /*batch*/) {
-    NOT_IMPLEMENTED();
-  }
-  const Tokenizer* tokenizer() const { return fake_tokenizer_.get(); }
-  BlockManagerPool* block_manager_pool() const {
-    return fake_block_manager_.get();
-  }
-  const ModelArgs& model_args() const { return model_args_; }
-  const TokenizerArgs& tokenizer_args() const { NOT_IMPLEMENTED(); }
-  bool init() override { return true; }
 
   void set_prefetch_ready(bool ready) {
-    fake_block_manager_->set_prefetch_ready(ready);
+    controllable_pool_->set_prefetch_ready(ready);
   }
 
   void set_pending_async_release(bool pending) {
-    fake_block_manager_->set_pending_async_release(pending);
+    controllable_pool_->set_pending_async_release(pending);
   }
 
   void set_storage_prefetch_enabled(bool enabled) {
-    fake_block_manager_->set_storage_prefetch_enabled(enabled);
+    controllable_pool_->set_storage_prefetch_enabled(enabled);
   }
 
-  size_t prefetch_calls() const {
-    return fake_block_manager_->prefetch_calls();
-  }
+  size_t prefetch_calls() const { return controllable_pool_->prefetch_calls(); }
 
   size_t prefetch_pipeline_calls() const {
-    return fake_block_manager_->prefetch_pipeline_calls();
+    return controllable_pool_->prefetch_pipeline_calls();
   }
 
  private:
-  std::unique_ptr<Tokenizer> fake_tokenizer_;
-  std::unique_ptr<ControllableBlockManagerPool> fake_block_manager_;
-  ModelArgs model_args_;
+  ControllableBlockManagerPool* controllable_pool_ = nullptr;
 };
 
 class PipelinePhaseEngine final : public FakeEngine {
@@ -306,14 +270,18 @@ class PipelinePhaseEngine final : public FakeEngine {
   bool step_observed_consumed = false;
 };
 
-class TestableContinuousScheduler final : public ContinuousScheduler<> {
+// Not final: RejectingReadyScheduler inherits it to reuse the engine-wiring
+// constructor while overriding ready-queue admission.
+class TestableContinuousScheduler : public ContinuousScheduler {
  public:
-  template <typename TargetEngine>
-  TestableContinuousScheduler(TargetEngine* engine, const Options& options)
-      : ContinuousScheduler<>(engine,
-                              options,
-                              /*model_residency_coordinator=*/nullptr,
-                              /*distributed_worker_manager=*/nullptr) {}
+  TestableContinuousScheduler(FakeEngine* engine, const Options& options)
+      : ContinuousScheduler(engine->block_manager_pool(),
+                            &engine->model_args(),
+                            engine->tokenizer(),
+                            std::move(make_scheduler_callbacks(engine)),
+                            options,
+                            /*model_residency_coordinator=*/nullptr,
+                            /*distributed_worker_manager=*/nullptr) {}
 
   void drain_prefetch_for_test() {
     if (kv_cache_prefetcher_) {
@@ -401,7 +369,7 @@ class TestableContinuousScheduler final : public ContinuousScheduler<> {
       batch.front().add(running_sequences_);
       return batch;
     }
-    BatchGroup batch = ContinuousSchedulerBase::prepare_batch();
+    BatchGroup batch = ContinuousScheduler::prepare_batch();
     std::promise<void>* notification =
         std::exchange(prepared_notification_, nullptr);
     if (notification != nullptr) {
@@ -416,13 +384,9 @@ class TestableContinuousScheduler final : public ContinuousScheduler<> {
   std::promise<void>* prepared_notification_ = nullptr;
 };
 
-class RejectingReadyScheduler final : public ContinuousScheduler<> {
+class RejectingReadyScheduler final : public TestableContinuousScheduler {
  public:
-  RejectingReadyScheduler(FakeEngine* engine, const Options& options)
-      : ContinuousScheduler<>(engine,
-                              options,
-                              /*model_residency_coordinator=*/nullptr,
-                              /*distributed_worker_manager=*/nullptr) {}
+  using TestableContinuousScheduler::TestableContinuousScheduler;
 
  protected:
   bool enqueue_ready_request(std::shared_ptr<Request> /*request*/) override {
@@ -684,13 +648,16 @@ class CancelledOverlapEngine final : public FakeEngine {
   size_t completed_batches_ = 0;
 };
 
-class BlockedOverlapScheduler final : public ContinuousScheduler<> {
+class BlockedOverlapScheduler final : public ContinuousScheduler {
  public:
-  template <typename TargetEngine>
-  BlockedOverlapScheduler(TargetEngine* engine,
+  BlockedOverlapScheduler(FakeEngine* engine,
                           const SchedulerOptions& options,
                           const std::shared_ptr<Request>& request)
-      : ContinuousScheduler<>(engine, options) {
+      : ContinuousScheduler(engine->block_manager_pool(),
+                            &engine->model_args(),
+                            engine->tokenizer(),
+                            make_scheduler_callbacks(engine),
+                            options) {
     pending_step_.emplace();
     pending_step_->requests.emplace_back(request);
     pending_step_->batches = BatchGroup(1);
@@ -815,7 +782,7 @@ TEST(EnginePrefixCacheTest, FullAttentionDecodeStillReusesKvPrefixes) {
   pool->deallocate(second_sequence);
 }
 
-TEST(EnginePrefixCacheTest, DecodeLinearHostCacheRejectsStore) {
+TEST(EnginePrefixCacheTest, DecodeLinearHostCacheAcceptsStore) {
   ScopedConfigValue<bool> vmm_kvcache(
       KVCacheConfig::get_instance().enable_vmm_kvcache(), false);
   FakeEngine engine(32, 4, true, true, InstanceRole::DECODE);
@@ -831,13 +798,7 @@ TEST(EnginePrefixCacheTest, DecodeLinearHostCacheRejectsStore) {
   options.has_ssm_cache_shape = true;
   for (const bool enable_store : {false, true}) {
     options.enable_kvcache_store = enable_store;
-    const std::optional<std::string> error =
-        validate_host_cache_options(options);
-    EXPECT_EQ(error.has_value(), enable_store);
-    if (error) {
-      EXPECT_NE(error->find("linear-attention Host checkpoints"),
-                std::string::npos);
-    }
+    EXPECT_EQ(validate_host_cache_options(options), std::nullopt);
   }
 }
 
@@ -1694,14 +1655,16 @@ TEST(ContinuousSchedulerFactoryTest, ChunkedPrefillCreatesContinuousScheduler) {
 
   auto engine = std::make_unique<FakeEngine>(32, 32);
   auto scheduler =
-      create_continuous_scheduler(engine.get(),
+      create_continuous_scheduler(engine->block_manager_pool(),
+                                  &engine->model_args(),
+                                  engine->tokenizer(),
+                                  make_scheduler_callbacks(engine.get()),
                                   opt,
-                                  /*distributed_worker_manager=*/nullptr,
-                                  /*model_residency_coordinator=*/nullptr);
+                                  /*model_residency_coordinator=*/nullptr,
+                                  /*distributed_worker_manager=*/nullptr);
 
   // All non-PD paths now create ContinuousScheduler with BatchMode routing.
-  EXPECT_NE(dynamic_cast<ContinuousScheduler<FakeEngine>*>(scheduler.get()),
-            nullptr);
+  EXPECT_NE(dynamic_cast<ContinuousScheduler*>(scheduler.get()), nullptr);
 }
 
 TEST(ContinuousSchedulerFactoryTest,
@@ -1711,14 +1674,16 @@ TEST(ContinuousSchedulerFactoryTest,
 
   auto engine = std::make_unique<FakeEngine>(32, 32);
   auto scheduler =
-      create_continuous_scheduler(engine.get(),
+      create_continuous_scheduler(engine->block_manager_pool(),
+                                  &engine->model_args(),
+                                  engine->tokenizer(),
+                                  make_scheduler_callbacks(engine.get()),
                                   opt,
-                                  /*distributed_worker_manager=*/nullptr,
-                                  /*model_residency_coordinator=*/nullptr);
+                                  /*model_residency_coordinator=*/nullptr,
+                                  /*distributed_worker_manager=*/nullptr);
 
   // All non-PD paths now create ContinuousScheduler with BatchMode routing.
-  EXPECT_NE(dynamic_cast<ContinuousScheduler<FakeEngine>*>(scheduler.get()),
-            nullptr);
+  EXPECT_NE(dynamic_cast<ContinuousScheduler*>(scheduler.get()), nullptr);
 }
 
 TEST(ContinuousSchedulerFactoryTest,
@@ -1996,8 +1961,12 @@ TEST(ContinuousSchedulerTest, RejectedStreamCancelsAtSchedulingBoundary) {
   const size_t initial_free_blocks =
       util::max(block_manager_pool->num_free_blocks());
 
-  auto request = generate_request_with_prompt_tokens(
-      {1, 2, 3, 4}, 4, 30000, /*enable_schedule_overlap=*/false, &rate_limiter);
+  auto request =
+      generate_request_with_prompt_tokens({1, 2, 3, 4},
+                                          4,
+                                          30000,
+                                          /*enable_schedule_overlap=*/false,
+                                          &rate_limiter);
   request->state().stream = true;
   request->state().output_func = [](const RequestOutput&) { return false; };
   make_request_decode_ready(request);
@@ -2048,8 +2017,12 @@ TEST(ContinuousSchedulerTest, FailedStreamReturnsStatusExactlyOnce) {
   auto engine = std::make_unique<FakeEngine>(32, 4);
   auto scheduler =
       std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
-  auto request = generate_request_with_prompt_tokens(
-      {1, 2, 3, 4}, 4, 30000, /*enable_schedule_overlap=*/false, &rate_limiter);
+  auto request =
+      generate_request_with_prompt_tokens({1, 2, 3, 4},
+                                          4,
+                                          30000,
+                                          /*enable_schedule_overlap=*/false,
+                                          &rate_limiter);
   request->state().stream = true;
   make_request_decode_ready(request);
   scheduler->add_request(request);

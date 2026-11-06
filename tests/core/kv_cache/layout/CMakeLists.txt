@@ -21,23 +21,6 @@ target_link_libraries(cache_layout_builder_test
 
 cc_test(
   NAME
-    vmm_kv_cache_layout_test
-  SRCS
-    vmm_kv_cache_layout_test.cpp
-  DEPS
-    :kv_cache
-    GTest::gtest_main
-)
-target_link_libraries(vmm_kv_cache_layout_test
-                      PUBLIC
-                      Python::Python
-                      $<$<BOOL:${USE_NPU}>:ascendcl>
-                      $<$<BOOL:${USE_NPU}>:hccl>
-                      $<$<BOOL:${USE_NPU}>:c_sec>
-                      $<$<BOOL:${USE_NPU}>:nnopbase>)
-
-cc_test(
-  NAME
     kv_cache_estimation_test
   CPU_ONLY
   SRCS

@@ -37,9 +37,8 @@ class DiTMaster : public Master {
   explicit DiTMaster(const Options& options);
   ~DiTMaster();
 
-  const ModelArgs* model_args() const override {
-    return dit_engine_ != nullptr ? &dit_engine_->model_args() : nullptr;
-  }
+  // DiT engines load no language-model args; consumers null-check this.
+  const ModelArgs* model_args() const override { return nullptr; }
 
   // handle a request, the engine will execute the request asynchronously
   void handle_request(DiTRequestParams params,

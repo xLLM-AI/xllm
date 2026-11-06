@@ -39,7 +39,7 @@ class MooncakeKVCacheTransferBase : public KVCacheTransfer {
   void configure_cache_layout(const ParallelArgs& parallel_args,
                               const ModelArgs& model_args,
                               int32_t block_token_capacity,
-                              bool is_spec_draft) override;
+                              bool is_draft_model) override;
 
   void get_cache_info(uint64_t& cluster_id, std::string& addr) override;
 
@@ -107,7 +107,7 @@ class MooncakeKVCacheTransferDefault final
   bool push_kv_blocks(
       std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
       std::shared_ptr<KVPushSynchronizerImpl>& layer_synchronizer,
-      bool is_spec_draft,
+      bool is_draft_model,
       int32_t kv_split_rank,
       int32_t kv_split_size) override;
 #endif
@@ -180,7 +180,7 @@ class MooncakeVirtualKVCacheTransfer final
   bool push_kv_blocks(
       std::unordered_map<std::string, KVCacheInfo>& merged_kv_infos,
       std::shared_ptr<KVPushSynchronizerImpl>& layer_synchronizer,
-      bool is_spec_draft,
+      bool is_draft_model,
       int32_t kv_split_rank,
       int32_t kv_split_size) override;
 #endif

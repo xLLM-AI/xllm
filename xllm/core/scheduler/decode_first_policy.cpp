@@ -18,7 +18,6 @@ limitations under the License.
 #include <cstdint>
 #include <limits>
 
-#include "framework/model/model_args.h"
 #include "scheduler/scheduler_policy.h"
 #include "util/utils.h"
 
@@ -91,8 +90,8 @@ void DecodeFirstPolicy::schedule(
   }
 
   // Step 3: redistribute remaining budget to prefill sequences.
-  if (!has_linear_attention_layers(state.model_args) &&
-      !budget.kv_allocation_deferred && budget.remaining_token_budget > 0 &&
+  if (!state.has_linear_attention_layers && !budget.kv_allocation_deferred &&
+      budget.remaining_token_budget > 0 &&
       budget.latency_budget > budget.estimate_latency) {
     std::vector<Sequence*> prefill_stage_sequences;
     for (size_t i = 0; i < state.running_sequences.size(); ++i) {

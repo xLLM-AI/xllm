@@ -35,14 +35,6 @@ struct JsonDraftValidationScratch final {
   std::vector<uint8_t> invalid_draft_step_major;
 };
 
-struct JsonAcceptedTokenMismatch final {
-  size_t sequence_index = 0;
-  size_t token_offset = 0;
-  int32_t token_id = -1;
-  size_t committed_tokens = 0;
-  uint64_t state_fingerprint = 0;
-};
-
 inline std::vector<int32_t> copy_json_draft_token_ids(const int64_t* token_ids,
                                                       size_t token_count) {
   std::vector<int32_t> result(token_count);
@@ -140,28 +132,14 @@ find_json_accepted_token_mismatches(
     if (!state.initialized()) {
       continue;
     }
-
-    const size_t row_offset = sequence_index * row_width;
-    for (size_t token_offset = 0; token_offset < row_width; ++token_offset) {
-      const int64_t raw_token_id = accepted_tokens[row_offset + token_offset];
-      if (raw_token_id < 0) {
-        break;
-      }
-      CHECK_LE(raw_token_id,
-               static_cast<int64_t>(std::numeric_limits<int32_t>::max()))
-          << "JSON accepted output token id exceeds int32 range";
-      const int32_t token_id = static_cast<int32_t>(raw_token_id);
-      if (!state.can_accept_token(token_id)) {
-        const JsonObjectGrammarSnapshot snapshot = state.snapshot();
-        mismatches.push_back({sequence_index,
-                              token_offset,
-                              token_id,
-                              snapshot.token_ids.size(),
-                              state.fingerprint()});
-        break;
-      }
-      CHECK(state.accept_token(token_id));
-    }
+    ::xllm::scan_json_accepted_tokens(
+        state,
+        sequence_index,
+        row_width,
+        [accepted_tokens, row_width](size_t row, size_t offset) {
+          return accepted_tokens[row * row_width + offset];
+        },
+        mismatches);
   }
   return mismatches;
 }

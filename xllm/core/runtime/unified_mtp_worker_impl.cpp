@@ -28,6 +28,7 @@ limitations under the License.
 #include "core/runtime/llm_worker_impl.h"
 #include "core/runtime/mtp_runtime_helpers.h"
 #include "core/runtime/py_executor_impl.h"
+#include "core/runtime/spec_runtime_helpers.h"
 #include "core/runtime/task_execution_pipeline.h"
 #include "core/runtime/unified_mtp_executor.h"
 #include "core/util/tensor_helper.h"
@@ -36,12 +37,11 @@ namespace xllm {
 namespace {
 runtime::Options unified_leaf_options(const runtime::Options& options,
                                       bool draft) {
-  runtime::Options leaf_options = options;
-  leaf_options.enable_task_pipeline(false)
-      .enable_schedule_overlap(false)
-      .is_draft_engine(draft)
-      .enable_graph_aux_hidden_states(true);
+  runtime::Options leaf_options =
+      draft ? options : spec_detail::spec_target_options(options);
+  leaf_options.enable_task_pipeline(false);
   if (draft) {
+    spec_detail::mark_spec_draft_options(leaf_options);
     leaf_options.num_decoding_tokens(1).num_speculative_tokens(0);
   }
   return leaf_options;
@@ -386,7 +386,7 @@ std::optional<ForwardOutput> UnifiedMtpWorkerImpl::run_unified_python_mtp_graph(
         std::move(accepted_tokens_cpu_result);
   }
   target_output.sample_output.embeddings = torch::Tensor();
-  if (!enable_schedule_overlap() && !driver_ && !dp_driver_) {
+  if (this->suppresses_non_driver_output()) {
     return std::nullopt;
   }
   // The graph writes draft-only prefix lengths; every entry here is past the

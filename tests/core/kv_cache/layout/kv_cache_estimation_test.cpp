@@ -77,8 +77,9 @@ TEST(KVCacheEstimationTest, RuntimeBudgetUsesMinimumAcrossWorkers) {
   KVCacheEstimateContext context;
   context.dtype = torch::kFloat16;
   context.world_size = 1;
-  context.worker_memory = {{8 * 1024 * 1024, 10 * 1024 * 1024},
-                           {16 * 1024 * 1024, 20 * 1024 * 1024}};
+  context.worker_memory =
+      std::vector<KVCacheMemorySnapshot>{{8 * 1024 * 1024, 10 * 1024 * 1024},
+                                         {16 * 1024 * 1024, 20 * 1024 * 1024}};
 
   const KVCacheCapacity capacity =
       KVCacheEstimator(model_args).estimate(runtime_options, context);
@@ -97,7 +98,7 @@ TEST(KVCacheEstimationTest, RuntimeBudgetCapsBeforeVlmEncoderReservation) {
 
   KVCacheEstimateContext context;
   context.dtype = torch::kFloat16;
-  context.worker_memory = {
+  context.worker_memory = std::vector<KVCacheMemorySnapshot>{
       {8 * 1024 * 1024, 10 * 1024 * 1024},
   };
   context.is_multimodal = true;
@@ -184,9 +185,8 @@ TEST(KVCacheEstimationTest, DraftTp1OverridesTensorParallelHeadDerivation) {
   ModelArgs model_args = make_standard_args();
   model_args.n_heads(8).n_kv_heads(4);
   runtime::Options runtime_options;
-  runtime_options.block_size(16)
-      .enable_mtp_draft_body_tp1(true)
-      .is_draft_engine(true);
+  runtime_options.block_size(16).enable_mtp_draft_body_tp1(true).is_draft_model(
+      true);
 
   KVCacheEstimateContext context;
   context.dtype = torch::kFloat16;
@@ -240,7 +240,7 @@ TEST(KVCacheEstimationTest, RuntimeEstimatorRejectsNonPositiveWorkerBudget) {
   ModelArgs model_args = make_standard_args();
   runtime::Options runtime_options;
   KVCacheEstimateContext context;
-  context.worker_memory = {{0, 0}};
+  context.worker_memory = std::vector<KVCacheMemorySnapshot>{{0, 0}};
 
   EXPECT_DEATH(
       (void)KVCacheEstimator(model_args).estimate(runtime_options, context),
@@ -892,12 +892,12 @@ TEST(KVCacheEstimationTest, Qwen35NativeMtpDraftUsesFullAttentionCacheBudget) {
                         "full_attention"});
       ModelRegistry::configure_mtp_args(target_args,
                                         /*speculative_algorithm=*/"MTP",
-                                        /*is_draft_engine=*/false,
+                                        /*is_draft_model=*/false,
                                         /*is_python_model=*/false);
       ModelArgs draft_args = target_args;
       ModelRegistry::configure_mtp_args(draft_args,
                                         /*speculative_algorithm=*/"MTP",
-                                        /*is_draft_engine=*/true,
+                                        /*is_draft_model=*/true,
                                         /*is_python_model=*/false);
 
       KVCacheEstimateOptions target_options = make_linear_attention_options();
@@ -910,7 +910,7 @@ TEST(KVCacheEstimationTest, Qwen35NativeMtpDraftUsesFullAttentionCacheBudget) {
       EXPECT_GT(target_capacity.linear_cache_size_in_bytes(), 0);
 
       KVCacheEstimateOptions draft_options = target_options;
-      draft_options.is_draft_engine = true;
+      draft_options.is_draft_model = true;
       const KVCacheCapacity draft_capacity =
           estimate_kv_cache_capacity(draft_args, draft_options);
       EXPECT_EQ(draft_capacity.n_layers(), draft_layers);
@@ -1401,7 +1401,7 @@ TEST(KVCacheEstimationTest,
   target_options.max_seqs_per_batch = 4;
   target_options.max_tokens_per_batch = 2176;
   KVCacheEstimateOptions draft_options = target_options;
-  draft_options.is_draft_engine = true;
+  draft_options.is_draft_model = true;
 
   const KVCacheCapacity target_only_capacity =
       estimate_kv_cache_capacity(target_args, target_options);
