@@ -107,9 +107,10 @@ class WorkerMemoryRpcClient final {
 
  private:
   DISALLOW_COPY_AND_ASSIGN(WorkerMemoryRpcClient);
-  folly::SemiFuture<bool> finish_mapping_async(uint64_t transaction_id,
-                                               bool commit,
-                                               bool weight);
+  using TransactionRpc =
+      decltype(&proto::ModelMemoryDist_Stub::CommitKvMapping);
+  folly::SemiFuture<bool> finish_transaction_async(uint64_t transaction_id,
+                                                   TransactionRpc rpc);
 
  private:
   int32_t global_rank_;

@@ -210,7 +210,16 @@ TEST_F(NonLeaderPoolInitializationTest,
   EXPECT_EQ(coordinator_->init_physical_page_pools(0.8, 0), 0);
 }
 
-enum class MappingFailure { NONE, PREPARE, PREPARE_REPLY, COMMIT, WEIGHT };
+enum class MappingFailure {
+  NONE,
+  PREPARE,
+  PREPARE_REPLY,
+  COMMIT,
+  WEIGHT,
+  WEIGHT_PREPARE_REPLY,
+  WEIGHT_COMMIT,
+  WEIGHT_COMMIT_REPLY,
+};
 
 // Exercise the real brpc transport without requiring device allocations.
 class TransactionTestService final : public proto::ModelMemoryDist {
@@ -322,22 +331,30 @@ class TransactionTestService final : public proto::ModelMemoryDist {
     response->set_ok(true);
   }
 
-  void PrepareWeightPages(google::protobuf::RpcController* /*controller*/,
+  void PrepareWeightPages(google::protobuf::RpcController* controller,
                           const proto::PrepareWeightPagesRequest* /*request*/,
                           proto::Status* response,
                           google::protobuf::Closure* done) override {
     brpc::ClosureGuard done_guard(done);
     std::lock_guard<std::mutex> lock(mutex_);
     weights_ = failure_ != MappingFailure::WEIGHT;
+    if (failure_ == MappingFailure::WEIGHT_PREPARE_REPLY) {
+      controller->SetFailed("injected prepare reply loss after allocation");
+      return;
+    }
     response->set_ok(weights_);
   }
 
-  void CommitWeightPages(google::protobuf::RpcController* /*controller*/,
+  void CommitWeightPages(google::protobuf::RpcController* controller,
                          const proto::KvMappingTransactionRequest* /*request*/,
                          proto::Status* response,
                          google::protobuf::Closure* done) override {
     brpc::ClosureGuard done_guard(done);
-    response->set_ok(true);
+    if (failure_ == MappingFailure::WEIGHT_COMMIT_REPLY) {
+      controller->SetFailed("injected commit reply loss after allocation");
+      return;
+    }
+    response->set_ok(failure_ != MappingFailure::WEIGHT_COMMIT);
   }
 
   void AbortWeightPages(google::protobuf::RpcController* /*controller*/,
@@ -997,26 +1014,84 @@ TEST(DistributedVirtualMemoryCoordinatorTest,
 
 TEST(DistributedVirtualMemoryCoordinatorTest,
      WeightShortageRollsBackWorkersAndRestoresLedger) {
+  for (MappingFailure failure : {MappingFailure::WEIGHT,
+                                 MappingFailure::WEIGHT_PREPARE_REPLY,
+                                 MappingFailure::WEIGHT_COMMIT,
+                                 MappingFailure::WEIGHT_COMMIT_REPLY}) {
+    SCOPED_TRACE(static_cast<int32_t>(failure));
+    TransactionTestServer first;
+    TransactionTestServer second(failure);
+    ASSERT_EQ(first.start(), 0);
+    ASSERT_EQ(second.start(), 0);
+    auto coordinator = DistributedVirtualMemoryCoordinatorTestPeer::create();
+    coordinator->init_page_budget(/*total_pages=*/10,
+                                  /*dp_size=*/1,
+                                  /*worker_count=*/2,
+                                  /*page_size=*/4096,
+                                  /*enable_prealloc=*/false);
+    DistributedVirtualMemoryCoordinatorTestPeer::connect(
+        *coordinator, {first.address(), second.address()});
+    EXPECT_FALSE(coordinator->reserve_weight_pages("model", /*num_pages=*/3));
+    EXPECT_FALSE(first.service().has_mappings());
+    EXPECT_FALSE(second.service().has_mappings());
+    EXPECT_GT(first.service().abort_calls(), 0);
+    EXPECT_GT(second.service().abort_calls(), 0);
+    EXPECT_EQ(coordinator->get_worker_free_page_counts(),
+              std::vector<size_t>({10, 10}));
+    EXPECT_EQ(coordinator->get_weight_page_count("model"), 0);
+  }
+}
+
+TEST(DistributedVirtualMemoryCoordinatorTest,
+     MappingTargetsOnlyWorkersInTheModelsDpGroup) {
   TransactionTestServer first;
-  TransactionTestServer second(MappingFailure::WEIGHT);
+  TransactionTestServer second;
+  TransactionTestServer third;
   ASSERT_EQ(first.start(), 0);
   ASSERT_EQ(second.start(), 0);
+  ASSERT_EQ(third.start(), 0);
   auto coordinator = DistributedVirtualMemoryCoordinatorTestPeer::create();
   coordinator->init_page_budget(/*total_pages=*/10,
                                 /*dp_size=*/1,
-                                /*worker_count=*/2,
+                                /*worker_count=*/3,
                                 /*page_size=*/4096,
                                 /*enable_prealloc=*/false);
   DistributedVirtualMemoryCoordinatorTestPeer::connect(
-      *coordinator, {first.address(), second.address()});
-  EXPECT_FALSE(coordinator->reserve_weight_pages("model", /*num_pages=*/3));
+      *coordinator, {first.address(), second.address(), third.address()});
+  coordinator->set_model_parallel_strategy(
+      "model", /*dp_size=*/2, /*tp_size=*/1);
+
+  ASSERT_TRUE(coordinator->map_pages("model", /*dp_rank=*/1, {0}));
   EXPECT_FALSE(first.service().has_mappings());
-  EXPECT_FALSE(second.service().has_mappings());
-  EXPECT_GT(first.service().abort_calls(), 0);
-  EXPECT_GT(second.service().abort_calls(), 0);
+  EXPECT_TRUE(second.service().has_mappings());
+  EXPECT_FALSE(third.service().has_mappings());
+}
+
+TEST(DistributedVirtualMemoryCoordinatorTest,
+     WeightAllocationTargetsOnlyWorkersInTheModel) {
+  TransactionTestServer first;
+  TransactionTestServer second;
+  TransactionTestServer third;
+  ASSERT_EQ(first.start(), 0);
+  ASSERT_EQ(second.start(), 0);
+  ASSERT_EQ(third.start(), 0);
+  auto coordinator = DistributedVirtualMemoryCoordinatorTestPeer::create();
+  coordinator->init_page_budget(/*total_pages=*/10,
+                                /*dp_size=*/1,
+                                /*worker_count=*/3,
+                                /*page_size=*/4096,
+                                /*enable_prealloc=*/false);
+  DistributedVirtualMemoryCoordinatorTestPeer::connect(
+      *coordinator, {first.address(), second.address(), third.address()});
+  coordinator->set_model_parallel_strategy(
+      "model", /*dp_size=*/1, /*tp_size=*/2);
+
+  ASSERT_TRUE(coordinator->reserve_weight_pages("model", /*num_pages=*/3));
+  EXPECT_TRUE(first.service().has_mappings());
+  EXPECT_TRUE(second.service().has_mappings());
+  EXPECT_FALSE(third.service().has_mappings());
   EXPECT_EQ(coordinator->get_worker_free_page_counts(),
-            std::vector<size_t>({10, 10}));
-  EXPECT_EQ(coordinator->get_weight_page_count("model"), 0);
+            std::vector<size_t>({7, 7, 10}));
 }
 
 }  // namespace
