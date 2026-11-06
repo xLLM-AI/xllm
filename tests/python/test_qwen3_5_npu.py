@@ -879,6 +879,54 @@ def test_npu_mtp_gdn_keeps_logical_state_rows(
     assert result.num_accepted_tokens.data_ptr() == accepted.data_ptr()
 
 
+def test_npu_mtp_gdn_accepts_padded_graph_rows() -> None:
+    width = 4
+    cfg = _linear_config(
+        num_hidden_layers=2,
+        layer_types=["linear_attention", "full_attention"],
+        linear_num_key_heads=1,
+        linear_num_value_heads=1,
+        linear_key_head_dim=128,
+        linear_value_head_dim=128,
+    )
+    builder = Qwen3_5GdnMetadataBuilder(cfg)
+    caches = _shared_gdn_caches(width)
+    layout = detect_shared_kv_cache_layout(caches)
+    assert layout is not None
+    builder.bind_layer_caches(caches)
+    state_indices = torch.tensor([1] * 22 + [0] * 10, dtype=torch.int32)
+    accepted = torch.tensor([2] * 22 + [1] * 10, dtype=torch.int32)
+    metadata = SimpleNamespace(
+        slot_mapping=torch.zeros(32, dtype=torch.int32),
+        q_seq_lens_host=torch.ones(32, dtype=torch.int32),
+        linear_state_read_indices=state_indices,
+        linear_state_write_indices=state_indices,
+        num_accepted_tokens=accepted,
+        num_accepted_tokens_host_values=(2,) * 22 + (1,) * 10,
+        is_spec_verify=True,
+        is_prefill=False,
+        is_chunked_prefill=True,
+    )
+
+    result = builder.build(_input_batch(32, (1,) * 22), metadata)
+
+    assert isinstance(result, GdnVerifyMetadata)
+    torch.testing.assert_close(result.state_indices, state_indices)
+    assert result.num_accepted_tokens is accepted
+    torch.testing.assert_close(result.state_indices[22:], torch.zeros(10, dtype=torch.int32))
+    torch.testing.assert_close(result.num_accepted_tokens[:22], torch.full((22,), 2, dtype=torch.int32))
+    torch.testing.assert_close(result.num_accepted_tokens[22:], torch.ones(10, dtype=torch.int32))
+    torch.testing.assert_close(
+        result.conv_state_indices[0],
+        layout.linear_state_indices(state_indices, role="conv", slots=caches[0].linear_state_slots),
+    )
+    torch.testing.assert_close(
+        result.ssm_state_indices[0],
+        layout.linear_state_indices(state_indices, role="ssm", slots=caches[0].linear_state_slots),
+    )
+    torch.testing.assert_close(result.packed_to_dense, torch.arange(0, 32 * width, width, dtype=torch.int64))
+
+
 @pytest.mark.parametrize("width", [1, 18])
 def test_npu_mtp_gdn_rejects_unsupported_checkpoint_width(width: int) -> None:
     cfg = _linear_config(

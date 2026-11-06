@@ -460,7 +460,8 @@ class Qwen3_5GdnMetadataBuilder:
         if not lengths or any(length <= 0 or length > width for length in lengths):
             raise ValueError("Qwen3.5 MTP query lengths must be in [1, checkpoint stride]")
         token_count = sum(lengths)
-        if token_count != input_batch.num_tokens:
+        # Bound graph metadata includes dummy rows from its static input bucket.
+        if token_count != input_batch.num_tokens_after_padding:
             raise ValueError("Qwen3.5 MTP query lengths must cover every packed token")
         batch_size = len(lengths)
         if state_indices.numel() == token_count:
