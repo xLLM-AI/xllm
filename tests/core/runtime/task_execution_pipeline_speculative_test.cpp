@@ -5618,7 +5618,7 @@ TEST_F(SpeculativePipelineTest,
 }
 
 TEST_F(SpeculativePipelineTest,
-       WorkerKeepsPackedHostViewsThroughDeviceCompletion) {
+       WorkerKeepsPackedHostViewsAndReloadFenceThroughDeviceCompletion) {
   PreparedTestWorker worker(device_);
   ScopeGuard cleanup([this, &worker] {
     worker.release();
@@ -5626,13 +5626,27 @@ TEST_F(SpeculativePipelineTest,
   });
   worker.with_contiguous_input();
   auto entered = worker.entered();
-  ASSERT_TRUE(TaskExecutionPipeline::create(
-                  state_thread_,
-                  {*target_, *target_executor_, target_cache_},
-                  worker,
-                  capacity_.common,
-                  pipeline_)
-                  .ok());
+  auto load = create_layer_synchronizer(/*num_layers=*/1);
+  ASSERT_NE(load, nullptr);
+  Stream copy_stream(target_->device());
+  ASSERT_TRUE(load->record_stream(/*layer_index=*/0, &copy_stream));
+  auto producer_ready = copy_stream.record_event();
+  ASSERT_NE(producer_ready, nullptr);
+  std::weak_ptr<StreamEvent> retained_producer = producer_ready;
+  TaskKVLoad load_kv = [&](uint64_t) -> std::optional<HostKVLoadHandle> {
+    return HostKVLoadHandle{std::exchange(load, nullptr),
+                            /*layers_per_event=*/1,
+                            std::nullopt,
+                            std::exchange(producer_ready, nullptr)};
+  };
+  ASSERT_TRUE(
+      TaskExecutionPipeline::create(
+          state_thread_,
+          {*target_, *target_executor_, target_cache_, {}, std::move(load_kv)},
+          worker,
+          capacity_.common,
+          pipeline_)
+          .ok());
   proto::PackedForwardInput payload;
   ASSERT_TRUE(input(false).to_packed_proto(&payload));
   LlmForwardInput packed;
@@ -5658,10 +5672,12 @@ TEST_F(SpeculativePipelineTest,
   pending_result.wait(std::chrono::seconds(2));
   const bool consumed_before_completion = pending_result.isReady();
   const bool released_before_completion = released->load();
+  const bool producer_retained_before_completion = !retained_producer.expired();
   worker.release();
   auto result = std::move(pending_result).get();
   EXPECT_TRUE(consumed_before_completion);
   EXPECT_FALSE(released_before_completion);
+  EXPECT_TRUE(producer_retained_before_completion);
   EXPECT_TRUE(result.status.ok());
   ASSERT_NE(result.output.ready_event, nullptr);
   ASSERT_TRUE(result.output.ready_event->synchronize());
@@ -5669,6 +5685,7 @@ TEST_F(SpeculativePipelineTest,
                            torch::tensor({2, 3}, torch::kInt32)));
   pipeline_.reset();
   EXPECT_TRUE(released->load());
+  EXPECT_TRUE(retained_producer.expired());
   EXPECT_FALSE(worker.released_early());
 }
 
