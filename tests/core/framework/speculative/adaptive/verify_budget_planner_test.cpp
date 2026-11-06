@@ -428,6 +428,41 @@ TEST(VerifyBudgetPlannerTest,
   EXPECT_EQ(plan->draft_budget, 1U);
 }
 
+TEST(VerifyBudgetPlannerTest, HysteresisCanRetainAnchorOnlyPreviousPlan) {
+  const std::vector<double> confidence(7, 0.5);
+  const std::array<SpecGraphCost, 3> costs = {
+      SpecGraphCost{1, 1.0}, {2, 1.4}, {8, 10.0}};
+  VerifyBudgetOptions options;
+  options.cost_scope = SpecCostScope::FULL_STEP;
+  options.min_gain = 0.1;
+  const VerifyBudgetPlan previous{0, 1};
+  auto plan =
+      VerifyBudgetPlanner::plan(1, confidence, costs, options, previous);
+  ASSERT_TRUE(plan);
+  EXPECT_EQ(plan->draft_budget, 0U);
+  EXPECT_EQ(plan->graph_rows, 1U);
+  options.min_gain = 0.0;
+  plan = VerifyBudgetPlanner::plan(1, confidence, costs, options, previous);
+  ASSERT_TRUE(plan);
+  EXPECT_EQ(plan->draft_budget, 1U);
+  EXPECT_EQ(plan->graph_rows, 2U);
+}
+
+TEST(VerifyBudgetPlannerTest, PreservesBatchFirstRoundingAtScoreTie) {
+  // Every prefix has the same tiny path probability. Adding each term to the
+  // batch count rounds it away; summing terms before adding the count would
+  // instead change the winning graph at an otherwise exact score tie.
+  std::vector<double> confidence(7, 1.0);
+  confidence.front() = std::numeric_limits<double>::epsilon() / 4.0;
+  const std::array<SpecGraphCost, 2> costs = {SpecGraphCost{1, 1.0}, {8, 1.0}};
+  VerifyBudgetOptions options;
+  options.cost_scope = SpecCostScope::FULL_STEP;
+  const auto plan = VerifyBudgetPlanner::plan(1, confidence, costs, options);
+  ASSERT_TRUE(plan);
+  EXPECT_EQ(plan->draft_budget, 0U);
+  EXPECT_EQ(plan->graph_rows, 1U);
+}
+
 TEST(VerifyBudgetPlannerTest, ForcesPeriodicFullWidthExploration) {
   const std::vector<double> confidence(14, 0.01);
   VerifyBudgetOptions options = profile_options();

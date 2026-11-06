@@ -134,11 +134,12 @@ std::optional<SpecStartupCalibrationConfig> parse_spec_startup_calibration(
     return std::nullopt;
   }
   const std::string model = data["model"].get<std::string>();
-  if (model != "sps" && model != "additive") {
+  if (model != "sps" && model != "additive" && model != "graph") {
     return std::nullopt;
   }
-  config.model =
-      model == "sps" ? SpecCostModel::Kind::SPS : SpecCostModel::Kind::ADDITIVE;
+  config.model = model == "sps"     ? SpecCostModel::Kind::SPS
+                 : model == "graph" ? SpecCostModel::Kind::GRAPH
+                                    : SpecCostModel::Kind::ADDITIVE;
   if (!read_axis(data["request_buckets"], config.request_buckets) ||
       config.request_buckets.back() > 128 ||
       (data.contains("target_graph_rows") &&
@@ -226,14 +227,13 @@ std::string serialize_spec_startup_calibration(
                        {"min_kv_length", context.min_kv_length},
                        {"max_kv_length", context.max_kv_length}});
   }
-  nlohmann::json data{
-      {"model", config.model == SpecCostModel::Kind::SPS ? "sps" : "additive"},
-      {"request_buckets", config.request_buckets},
-      {"contexts", std::move(contexts)},
-      {"warmup_steps", config.warmup_steps},
-      {"window_steps", config.window_steps},
-      {"windows_per_point", config.windows_per_point},
-      {"token_seed", config.token_seed}};
+  nlohmann::json data{{"model", SpecCostModel::kind_name(config.model)},
+                      {"request_buckets", config.request_buckets},
+                      {"contexts", std::move(contexts)},
+                      {"warmup_steps", config.warmup_steps},
+                      {"window_steps", config.window_steps},
+                      {"windows_per_point", config.windows_per_point},
+                      {"token_seed", config.token_seed}};
   data["draft_width"] = config.draft_width;
   if (!config.target_graph_rows.empty()) {
     data["target_graph_rows"] = config.target_graph_rows;
@@ -452,7 +452,16 @@ std::optional<std::string> fit_full_step_cost_table(
   nlohmann::json table;
   std::vector<double> predictions;
   predictions.reserve(cells.size());
-  if (kind == SpecCostModel::Kind::SPS) {
+  if (kind == SpecCostModel::Kind::GRAPH) {
+    table["graph_costs"] = nlohmann::json::array();
+    for (const auto& cell : cells) {
+      table["graph_costs"].emplace_back(
+          nlohmann::json{{"draft_requests", cell.requests},
+                         {"target_graph_rows", cell.graph_rows},
+                         {"step_time_ms", cell.step_ms}});
+      predictions.emplace_back(cell.step_ms);
+    }
+  } else if (kind == SpecCostModel::Kind::SPS) {
     std::map<uint32_t, double> medians;
     table["sample_batch_tokens"] = nlohmann::json::array();
     table["sample_steps_per_sec"] = nlohmann::json::array();
@@ -549,17 +558,16 @@ std::optional<std::string> fit_full_step_cost_table(
   }
   table["max_kv_length"] = max_kv_length;
   table["draft_width"] = draft_width;
-  table["metadata"] = {
-      {"measurement", "steady_full_step"},
-      {"model", kind == SpecCostModel::Kind::SPS ? "sps" : "additive"},
-      {"min_kv_length", min_kv_length},
-      {"input_windows", windows.size()},
-      {"sampled_cells", cells.size()},
-      {"cells", std::move(cell_records)},
-      {"training_error",
-       {{"mean_absolute_ms", absolute},
-        {"root_mean_square_ms", rms},
-        {"max_relative_percent", relative}}}};
+  table["metadata"] = {{"measurement", "steady_full_step"},
+                       {"model", SpecCostModel::kind_name(kind)},
+                       {"min_kv_length", min_kv_length},
+                       {"input_windows", windows.size()},
+                       {"sampled_cells", cells.size()},
+                       {"cells", std::move(cell_records)},
+                       {"training_error",
+                        {{"mean_absolute_ms", absolute},
+                         {"root_mean_square_ms", rms},
+                         {"max_relative_percent", relative}}}};
   const std::string serialized = table.dump();
   return SpecCostModel::from_json(serialized) ? std::optional(serialized)
                                               : std::nullopt;
@@ -643,7 +651,9 @@ std::optional<SpecCostTableBundle> SpecCostTableBundle::from_json(
       }
     }
     auto model = SpecCostModel::from_json(contents);
-    if (!model) {
+    // Exact measurements require explicit request/context coverage and model
+    // compatibility; do not load them through the legacy unrestricted path.
+    if (!model || model->kind() == SpecCostModel::Kind::GRAPH) {
       return std::nullopt;
     }
     bundle.entries_.emplace_back(

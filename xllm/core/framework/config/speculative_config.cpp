@@ -100,19 +100,19 @@ DEFINE_double(
     "Minimum predicted relative throughput gain required to change the "
     "adaptive target verification budget.");
 
-DEFINE_string(
-    adaptive_target_verify_cost_table,
-    "",
-    "JSON full-step cost table for adaptive DSpark task pipelines: "
-    "one-dimensional SPS or two-dimensional additive model. Loading a "
-    "compatible saved table skips startup sampling and fitting.");
+DEFINE_string(adaptive_target_verify_cost_table,
+              "",
+              "JSON full-step cost table for adaptive DSpark task pipelines: "
+              "SPS, additive, or exact measured graph costs. Loading a "
+              "compatible saved table skips startup sampling and fitting.");
 
 DEFINE_string(
     adaptive_target_verify_calibration,
     "",
     "JSON configuration for internal startup DSpark calibration: "
     "capture graphs, drive the real asynchronous pipeline, fit CPU "
-    "SPS/additive costs, and serve without a client or restart. Empty uses "
+    "SPS/additive/graph costs, and serve without a client or restart. Empty "
+    "uses "
     "built-in defaults. Mutually exclusive with a cost-table input. "
     "The effective configuration is logged for defaults and JSON input.");
 

@@ -19,8 +19,12 @@ limitations under the License.
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <limits>
 #include <nlohmann/json.hpp>
+
+#include "core/framework/speculative/adaptive/spec_cost_profile_store.h"
+#include "core/framework/speculative/adaptive/verify_budget_planner.h"
 
 namespace xllm {
 namespace {
@@ -510,6 +514,162 @@ TEST(SpecStartupCalibrationTest, LegacySingleTableRemainsLoadable) {
   EXPECT_EQ(model->lookup(1, 4097), nullptr);
   EXPECT_NEAR(
       *model->lookup(16, 2000)->model.step_time_ms(16, 32), 20.0, 1e-12);
+}
+
+TEST(SpecStartupCalibrationTest,
+     GraphConfigurationRoundTripsAndAllowsSparseCoverage) {
+  auto data = configuration();
+  data["model"] = "graph";
+  data["request_buckets"] = {1, 8};
+  const auto config = parse_spec_startup_calibration(data.dump());
+  ASSERT_TRUE(config);
+  EXPECT_EQ(config->model, SpecCostModel::Kind::GRAPH);
+  const auto round_trip = parse_spec_startup_calibration(
+      serialize_spec_startup_calibration(*config));
+  ASSERT_TRUE(round_trip);
+  EXPECT_EQ(round_trip->model, SpecCostModel::Kind::GRAPH);
+  const std::array<uint32_t, 2> requests{1, 8};
+  const std::array<uint32_t, 7> graphs{1, 2, 4, 8, 16, 32, 64};
+  const std::vector<SpecCalibrationGraphCoverage> coverage{{1, {1, 2, 4, 8}},
+                                                           {8, {16, 32, 64}}};
+  const auto points =
+      plan_spec_calibration(*config, requests, graphs, coverage);
+  ASSERT_TRUE(points);
+  EXPECT_EQ(points->size(), 7U);
+  EXPECT_EQ(points->back().target_graph_rows, 64U);
+}
+
+TEST(SpecStartupCalibrationTest, GraphMediansRetainEachPhysicalBinding) {
+  const std::vector<SpecSteadyWindow> windows{window(1, 4, 10),
+                                              window(1, 4, 12),
+                                              window(1, 4, 100),
+                                              window(2, 4, 20),
+                                              window(1, 8, 30)};
+  const auto fitted =
+      fit_spec_cost_table(windows, SpecCostModel::Kind::GRAPH, 1800, 4096);
+  ASSERT_TRUE(fitted);
+  const auto model = SpecCostModel::from_json(*fitted);
+  ASSERT_TRUE(model);
+  EXPECT_DOUBLE_EQ(*model->step_time_ms(1, 4), 12.0);
+  EXPECT_DOUBLE_EQ(*model->step_time_ms(2, 4), 20.0);
+  EXPECT_DOUBLE_EQ(*model->step_time_ms(1, 8), 30.0);
+  EXPECT_FALSE(model->step_time_ms(2, 8));
+  EXPECT_FALSE(model->step_time_ms(1, 6));
+  const auto table = nlohmann::json::parse(*fitted);
+  EXPECT_EQ(table["metadata"]["model"], "graph");
+  EXPECT_EQ(table["metadata"]["sampled_cells"], 3);
+  EXPECT_DOUBLE_EQ(
+      table["metadata"]["training_error"]["mean_absolute_ms"].get<double>(),
+      0.0);
+  EXPECT_EQ(table["draft_width"], 7);
+  EXPECT_FALSE(SpecCostTableBundle::from_json(*fitted));
+  auto data = bundle();
+  data["profiles"][0]["min_kv_length"] = 1800;
+  data["profiles"][0]["request_buckets"] = {1, 2};
+  data["profiles"][0]["table"] = table;
+  const auto restored =
+      SpecCostTableBundle::from_json(data.dump(), data["compatibility"].dump());
+  ASSERT_TRUE(restored);
+  EXPECT_EQ(restored->lookup(1, 1799), nullptr);
+  ASSERT_NE(restored->lookup(2, 4096), nullptr);
+  EXPECT_DOUBLE_EQ(*restored->lookup(2, 4096)->model.step_time_ms(2, 4), 20.0);
+  EXPECT_EQ(restored->lookup(2, 4097), nullptr);
+}
+
+TEST(SpecStartupCalibrationTest,
+     GraphBundleRejectsMismatchedIdentityAndBounds) {
+  const std::vector<SpecSteadyWindow> windows{window(1, 8, 4.0)};
+  const auto fitted =
+      fit_spec_cost_table(windows, SpecCostModel::Kind::GRAPH, 1800, 4096);
+  ASSERT_TRUE(fitted);
+  auto data = bundle();
+  data["profiles"][0]["min_kv_length"] = 1800;
+  data["profiles"][0]["request_buckets"] = {1};
+  data["profiles"][0]["table"] = nlohmann::json::parse(*fitted);
+  const std::string identity = data["compatibility"].dump();
+  const auto restored = SpecCostTableBundle::from_json(data.dump(), identity);
+  ASSERT_TRUE(restored);
+  EXPECT_NE(restored->lookup(1, 1800), nullptr);
+  EXPECT_NE(restored->lookup(1, 4096), nullptr);
+  EXPECT_EQ(restored->lookup(1, 1799), nullptr);
+  EXPECT_EQ(restored->lookup(1, 4097), nullptr);
+  EXPECT_EQ(restored->lookup(2, 2000), nullptr);
+  data["compatibility"]["model"] = "different-model";
+  EXPECT_FALSE(SpecCostTableBundle::from_json(data.dump(), identity));
+  data["compatibility"] = nlohmann::json::parse(identity);
+  data["profiles"][0]["table"]["max_kv_length"] = 8192;
+  EXPECT_FALSE(SpecCostTableBundle::from_json(data.dump(), identity));
+}
+
+TEST(SpecStartupCalibrationTest, GraphProfilePreservesNonadditiveOptimum) {
+  const std::vector<SpecSteadyWindow> windows{window(1, 2, 2),
+                                              window(1, 4, 12),
+                                              window(1, 8, 4),
+                                              window(2, 2, 12),
+                                              window(2, 4, 2),
+                                              window(2, 8, 12),
+                                              window(2, 16, 20)};
+  const auto fitted =
+      fit_spec_cost_table(windows, SpecCostModel::Kind::GRAPH, 1800, 4096);
+  ASSERT_TRUE(fitted);
+  const auto model = SpecCostModel::from_json(*fitted);
+  ASSERT_TRUE(model);
+  const std::array<uint32_t, 5> captured{1, 2, 4, 8, 16};
+  auto measured = model->verification_costs(2, 7, captured);
+  ASSERT_TRUE(measured);
+  SpecCostProfile profile;
+  profile.draft_requests = 2;
+  profile.min_kv_length = 1800;
+  profile.max_kv_length = 4096;
+  profile.cost_scope = SpecCostScope::FULL_STEP;
+  profile.target_graph_costs = std::move(*measured);
+  SpecCostProfileStore store;
+  ASSERT_TRUE(store.store(std::move(profile)));
+  const auto installed = store.lookup(2, 2500);
+  ASSERT_TRUE(installed);
+  EXPECT_FALSE(store.lookup(3, 2500));
+  EXPECT_FALSE(store.lookup(2, 4097));
+  VerifyBudgetOptions options;
+  options.cost_scope = installed->cost_scope;
+  const auto plan = VerifyBudgetPlanner::plan(
+      2, std::vector<double>(14, 0.8), installed->target_graph_costs, options);
+  ASSERT_TRUE(plan);
+  EXPECT_EQ(plan->graph_rows, 4U);
+  EXPECT_EQ(plan->draft_budget, 2U);
+  double optimum = 0.0;
+  for (uint32_t left = 0; left <= 7; ++left) {
+    for (uint32_t right = 0; right <= 7; ++right) {
+      const uint32_t rows =
+          *std::lower_bound(captured.begin(), captured.end(), 2 + left + right);
+      double expected = 2.0;
+      for (uint32_t index = 1; index <= left; ++index) {
+        expected += std::pow(0.8, index);
+      }
+      for (uint32_t index = 1; index <= right; ++index) {
+        expected += std::pow(0.8, index);
+      }
+      optimum = std::max(optimum, expected / *model->step_time_ms(2, rows));
+    }
+  }
+  EXPECT_NEAR(optimum, 3.6 / *model->step_time_ms(2, plan->graph_rows), 1e-12);
+  // G-only projection and additive fitting lose this measured interaction.
+  // Exact cells preserve the optimum without assuming a separable surface.
+  for (const SpecCostModel::Kind kind :
+       {SpecCostModel::Kind::SPS, SpecCostModel::Kind::ADDITIVE}) {
+    SCOPED_TRACE(SpecCostModel::kind_name(kind));
+    const auto fitted_alternative =
+        fit_spec_cost_table(windows, kind, 1800, 4096);
+    ASSERT_TRUE(fitted_alternative);
+    const auto alternative = SpecCostModel::from_json(*fitted_alternative);
+    ASSERT_TRUE(alternative);
+    const auto alternative_costs =
+        alternative->verification_costs(2, 7, captured);
+    ASSERT_TRUE(alternative_costs);
+    const auto alternative_plan = VerifyBudgetPlanner::plan(
+        2, std::vector<double>(14, 0.8), *alternative_costs, options);
+    ASSERT_TRUE(alternative_plan);
+    EXPECT_NE(alternative_plan->graph_rows, plan->graph_rows);
+  }
 }
 
 }  // namespace
