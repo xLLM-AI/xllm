@@ -21,9 +21,11 @@ limitations under the License.
 #include "core/common/metrics.h"
 #include "core/distributed_runtime/worker_model_codec.h"
 #include "core/framework/config/eplb_config.h"
+#include "core/runtime/forward_params.h"
 #include "core/util/tensor_helper.h"
 #include "core/util/timer.h"
 #include "core/util/utils.h"
+#include "worker.pb.h"
 
 namespace xllm {
 namespace {
@@ -86,12 +88,52 @@ bool valid_token_output(const torch::Tensor& next_tokens,
   return true;
 }
 
-}  // namespace
+void append_token(const Token& token,
+                  const torch::Tensor& token_embeddings,
+                  proto::SquenceOutput* sequence_output) {
+  proto::Token* pb_token = sequence_output->add_tokens();
+  pb_token->set_id(token.id);
+  if (token.logprob.has_value()) {
+    pb_token->set_logprob(token.logprob.value());
+  } else {
+    pb_token->set_empty(true);
+  }
+  pb_token->mutable_top_tokens()->Reserve(
+      static_cast<int32_t>(token.top_tokens.size()));
+  for (const int64_t top_token : token.top_tokens) {
+    pb_token->add_top_tokens(top_token);
+  }
+  pb_token->mutable_top_logprobs()->Reserve(
+      static_cast<int32_t>(token.top_logprobs.size()));
+  for (const float top_logprob : token.top_logprobs) {
+    pb_token->add_top_logprobs(top_logprob);
+  }
+  if (token_embeddings.defined()) {
+    Slice<float> embedding_slice = tensor_slice<float>(token_embeddings);
+    ADD_VECTOR_TO_PROTO(pb_token->mutable_embeddings()->mutable_vals(),
+                        embedding_slice);
+  }
+}
 
-bool decode_rec_output(const proto::RECForwardResponse& response,
-                       RawForwardOutput& output) {
+template <bool IncludeDspark, typename Response>
+bool decode_token_output(const Response& response,
+                         RawForwardOutput& output,
+                         const char* model_name) {
   Timer timer;
   RawForwardOutput decoded_output;
+  if constexpr (IncludeDspark) {
+    decoded_output.dspark_feedback.confidence.assign(
+        response.dspark_confidence().begin(),
+        response.dspark_confidence().end());
+    decoded_output.dspark_feedback.rounds_since_full_width.assign(
+        response.dspark_rounds_since_full_width().begin(),
+        response.dspark_rounds_since_full_width().end());
+    if (!valid_dspark_dp_feedback(decoded_output.dspark_feedback,
+                                  response.outputs_size())) {
+      LOG(ERROR) << "Invalid adaptive DSpark feedback layout.";
+      return false;
+    }
+  }
   decoded_output.expert_load_data.assign(response.expert_load_data().begin(),
                                          response.expert_load_data().end());
   decoded_output.src_seq_idxes.assign(response.src_seq_idxes().begin(),
@@ -103,7 +145,7 @@ bool decode_rec_output(const proto::RECForwardResponse& response,
   if (decoded_output.src_seq_idxes.size() != decoded_output.out_tokens.size() ||
       decoded_output.src_seq_idxes.size() !=
           decoded_output.out_logprobs.size()) {
-    LOG(ERROR) << "Mismatched rec beam output field counts";
+    LOG(ERROR) << "Mismatched " << model_name << " beam output field counts";
     return false;
   }
   decoded_output.json_object_errors.reserve(response.json_object_errors_size());
@@ -119,7 +161,8 @@ bool decode_rec_output(const proto::RECForwardResponse& response,
     sample.tokens.reserve(sequence.tokens_size());
     for (const proto::Token& token : sequence.tokens()) {
       if (token.top_tokens_size() != token.top_logprobs_size()) {
-        LOG(ERROR) << "Mismatched rec top-k token and logprob counts";
+        LOG(ERROR) << "Mismatched " << model_name
+                   << " top-k token and logprob counts";
         return false;
       }
       RawToken decoded_token;
@@ -140,7 +183,8 @@ bool decode_rec_output(const proto::RECForwardResponse& response,
          sequence.mm_embeddings().tensors()) {
       torch::Tensor tensor = util::proto_to_torch(encoded_tensor);
       if (!tensor.defined()) {
-        LOG(ERROR) << "Failed to deserialize rec multimodal embedding tensor";
+        LOG(ERROR) << "Failed to deserialize " << model_name
+                   << " multimodal embedding tensor";
         return false;
       }
       sample.mm_embeddings.emplace_back(std::move(tensor));
@@ -158,10 +202,12 @@ bool decode_rec_output(const proto::RECForwardResponse& response,
   return true;
 }
 
-bool encode_rec_output(
+template <bool IncludeDspark, typename Response>
+bool encode_token_output(
     const ForwardOutput& output,
     const std::vector<SpeculativeTokenStats>& speculative_token_stats,
-    proto::RECForwardResponse* response) {
+    Response* response,
+    const char* model_name) {
   const auto& next_tokens = output.sample_output.next_tokens;
   const auto& logprobs = output.sample_output.logprobs;
   const auto& top_tokens = output.sample_output.top_tokens;
@@ -174,8 +220,15 @@ bool encode_rec_output(
   if (response == nullptr) {
     return false;
   }
-  proto::RECForwardResponse encoded_output;
-  proto::RECForwardResponse* pb_forward_output = &encoded_output;
+  Response encoded_output;
+  Response* pb_forward_output = &encoded_output;
+  if constexpr (IncludeDspark) {
+    ADD_VECTOR_TO_PROTO(pb_forward_output->mutable_dspark_confidence(),
+                        output.dspark_feedback.confidence);
+    ADD_VECTOR_TO_PROTO(
+        pb_forward_output->mutable_dspark_rounds_since_full_width(),
+        output.dspark_feedback.rounds_since_full_width);
+  }
   Timer timer;
   if (!valid_token_output(
           next_tokens, logprobs, top_tokens, top_logprobs, embeddings) ||
@@ -194,7 +247,7 @@ bool encode_rec_output(
       out_logprobs.defined() ? out_logprobs.numel() : 0;
   if (beam_src_seq_count != beam_token_count ||
       beam_src_seq_count != beam_logprob_count) {
-    LOG(ERROR) << "Mismatched rec beam output field counts";
+    LOG(ERROR) << "Mismatched " << model_name << " beam output field counts";
     return false;
   }
   int32_t num_seqs =
@@ -209,6 +262,12 @@ bool encode_rec_output(
       speculative_token_stats.size() != static_cast<size_t>(num_seqs)) {
     LOG(ERROR) << "Speculative token stats must match forward output rows.";
     return false;
+  }
+  if constexpr (IncludeDspark) {
+    if (!valid_dspark_dp_feedback(output.dspark_feedback, num_seqs)) {
+      LOG(ERROR) << "Invalid adaptive DSpark feedback layout.";
+      return false;
+    }
   }
   if (embeddings.defined() &&
       embeddings.size(0) < static_cast<int64_t>(num_seqs)) {
@@ -227,40 +286,13 @@ bool encode_rec_output(
     return false;
   }
 
-  const auto append_token = [](const Token& token,
-                               const torch::Tensor& token_embeddings,
-                               proto::SquenceOutput* sequence_output) {
-    proto::Token* pb_token = sequence_output->add_tokens();
-    pb_token->set_id(token.id);
-    if (token.logprob.has_value()) {
-      pb_token->set_logprob(token.logprob.value());
-    } else {
-      pb_token->set_empty(true);
-    }
-    pb_token->mutable_top_tokens()->Reserve(
-        static_cast<int32_t>(token.top_tokens.size()));
-    for (const int64_t top_token : token.top_tokens) {
-      pb_token->add_top_tokens(top_token);
-    }
-    pb_token->mutable_top_logprobs()->Reserve(
-        static_cast<int32_t>(token.top_logprobs.size()));
-    for (const float top_logprob : token.top_logprobs) {
-      pb_token->add_top_logprobs(top_logprob);
-    }
-    if (token_embeddings.defined()) {
-      Slice<float> embedding_slice = tensor_slice<float>(token_embeddings);
-      ADD_VECTOR_TO_PROTO(pb_token->mutable_embeddings()->mutable_vals(),
-                          embedding_slice);
-    }
-  };
-
   pb_forward_output->mutable_outputs()->Reserve(num_seqs);
   for (int32_t output_idx = 0; output_idx < num_seqs; ++output_idx) {
     proto::SquenceOutput* pb_seq_out = pb_forward_output->add_outputs();
     if (next_tokens.defined() && next_tokens.dim() == 2) {
       const auto curr_embeddings =
           embeddings.defined() ? embeddings[output_idx] : embeddings;
-      int32_t num_tokens = static_cast<int32_t>(next_tokens.size(1));
+      const int32_t num_tokens = static_cast<int32_t>(next_tokens.size(1));
       pb_seq_out->mutable_tokens()->Reserve(num_tokens);
       for (int32_t i = 0; i < num_tokens; ++i) {
         const Token token = output.sample_output.token_at(output_idx, i);
@@ -279,7 +311,6 @@ bool encode_rec_output(
       if (next_tokens.defined() && next_tokens.numel() > 0) {
         token = output.sample_output.token_at(output_idx);
       }
-
       const auto token_embeddings =
           embeddings.defined() ? embeddings[output_idx] : embeddings;
       append_token(token, token_embeddings, pb_seq_out);
@@ -310,7 +341,6 @@ bool encode_rec_output(
 
   if (::xllm::EPLBConfig::get_instance().enable_eplb()) {
     pb_forward_output->set_prepared_token(output.prepared_token);
-
     if (output.expert_load_data.defined()) {
       Slice<int64_t> expert_load_data_flattened_slice =
           tensor_slice<int64_t>(output.expert_load_data.view({-1}));
@@ -318,7 +348,6 @@ bool encode_rec_output(
                           expert_load_data_flattened_slice);
     }
   }
-
   if (src_seq_idxes.defined() && src_seq_idxes.numel() > 0) {
     Slice<int32_t> src_seq_idxes_slice = tensor_slice(src_seq_idxes);
     ADD_VECTOR_TO_PROTO(pb_forward_output->mutable_src_seq_idxes(),
@@ -343,6 +372,41 @@ bool encode_rec_output(
   response->Swap(pb_forward_output);
   COUNTER_ADD(proto_latency_seconds_o2proto, timer.elapsed_seconds());
   return true;
+}
+
+}  // namespace
+
+bool encode_llm_output(const ForwardOutput& output,
+                       const std::vector<SpeculativeTokenStats>& stats,
+                       proto::LLMForwardResponse* response) {
+  return encode_token_output<true>(output, stats, response, "llm");
+}
+
+bool decode_llm_output(const proto::LLMForwardResponse& response,
+                       RawForwardOutput& output) {
+  return decode_token_output<true>(response, output, "llm");
+}
+
+bool encode_vlm_output(const ForwardOutput& output,
+                       const std::vector<SpeculativeTokenStats>& stats,
+                       proto::VLMForwardResponse* response) {
+  return encode_token_output<false>(output, stats, response, "vlm");
+}
+
+bool decode_vlm_output(const proto::VLMForwardResponse& response,
+                       RawForwardOutput& output) {
+  return decode_token_output<false>(response, output, "vlm");
+}
+
+bool encode_rec_output(const ForwardOutput& output,
+                       const std::vector<SpeculativeTokenStats>& stats,
+                       proto::RECForwardResponse* response) {
+  return encode_token_output<false>(output, stats, response, "rec");
+}
+
+bool decode_rec_output(const proto::RECForwardResponse& response,
+                       RawForwardOutput& output) {
+  return decode_token_output<false>(response, output, "rec");
 }
 
 }  // namespace xllm

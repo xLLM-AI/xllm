@@ -12,9 +12,7 @@ cc_library(
   HDRS
     worker_model_codec.h
   SRCS
-    worker_model_codec_llm.cpp
-    worker_model_codec_vlm.cpp
-    worker_model_codec_rec.cpp
+    worker_model_codec_token.cpp
     worker_model_codec_dit.cpp
   DEPS
     :common
