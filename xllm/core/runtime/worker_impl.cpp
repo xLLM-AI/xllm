@@ -62,6 +62,7 @@ limitations under the License.
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/model/model_args.h"
 #include "core/kv_cache/layout/kv_cache_estimation.h"
+#include "core/kv_cache/layout/seq_lens_layout.h"
 #include "core/platform/platform.h"
 #if defined(USE_NPU)
 #include "core/platform/npu/npu_profiler.h"
@@ -245,20 +246,7 @@ LinearStateInputRows get_host_linear_state_rows(Params& input_params) {
   }
   const std::vector<int32_t>& host_q_seq_lens =
       input_params.attention.host.q_seq_lens;
-#if defined(USE_MUSA)
-  // MUSA carries cumulative query lengths. Graph bucket padding appends rows
-  // without changing meta.num_sequences, so the leading zero is the format
-  // discriminator; the logical sequence count is not.
-  const bool has_leading_zero =
-      !host_q_seq_lens.empty() && host_q_seq_lens.front() == 0;
-#else
-  const bool has_leading_zero =
-      !host_q_seq_lens.empty() && host_q_seq_lens.front() == 0 &&
-      host_q_seq_lens.size() ==
-          static_cast<size_t>(input_params.meta.num_sequences + 1);
-#endif
-  int64_t query_row_count = static_cast<int64_t>(
-      has_leading_zero ? host_q_seq_lens.size() - 1 : host_q_seq_lens.size());
+  int64_t query_row_count = static_cast<int64_t>(host_q_seq_lens.size());
   if (query_row_count == 0) {
     query_row_count = input_params.meta.num_sequences;
   }
@@ -272,16 +260,9 @@ LinearStateInputRows get_host_linear_state_rows(Params& input_params) {
   }
 
 #if defined(USE_NPU) || defined(USE_MUSA)
-  input_params.parallel.query_start_loc.resize(query_row_count + 1, 0);
-  for (int64_t i = 0; i < query_row_count; ++i) {
-    const int64_t seq_len =
-        has_leading_zero
-            ? static_cast<int64_t>(host_q_seq_lens[static_cast<size_t>(i + 1)] -
-                                   host_q_seq_lens[static_cast<size_t>(i)])
-            : static_cast<int64_t>(host_q_seq_lens[static_cast<size_t>(i)]);
-    input_params.parallel.query_start_loc[i + 1] =
-        input_params.parallel.query_start_loc[i] + seq_len;
-  }
+  seq_lens::cumulative_into(
+      input_params.parallel.query_start_loc,
+      Slice<int32_t>(host_q_seq_lens, static_cast<size_t>(query_row_count)));
 #endif
 
   const std::vector<int32_t>& cached_tokens =
@@ -314,14 +295,14 @@ LinearStateInputRows get_mlu_linear_state_rows(Params& input_params) {
   const int64_t sequence_rows = static_cast<int64_t>(cached_tokens.size());
   const int64_t active_rows =
       input_params.attention.host.kpool_query_lens.empty()
-          ? static_cast<int64_t>(host_q_seq_lens.size()) - 1
+          ? static_cast<int64_t>(host_q_seq_lens.size())
           : static_cast<int64_t>(
                 input_params.attention.host.kpool_query_lens.size());
   const int64_t slot_rows =
       static_cast<int64_t>(input_params.embedding.linear_state_ids.size());
 
   // A data-parallel worker may receive an empty shard during graph warmup.
-  if (sequence_rows == 0 && active_rows == -1 && slot_rows == 0) {
+  if (sequence_rows == 0 && active_rows == 0 && slot_rows == 0) {
     input_params.embedding.linear_state_ids = {kPaddingLinearStateId};
     return {{}, 0, /*empty_shard=*/true};
   }
@@ -334,8 +315,6 @@ LinearStateInputRows get_mlu_linear_state_rows(Params& input_params) {
       << "invalid MLU linear-state input row counts: sequence_rows="
       << sequence_rows << ", active_rows=" << active_rows
       << ", slot_rows=" << slot_rows;
-  CHECK_EQ(host_q_seq_lens.front(), 0)
-      << "MLU linear-state q_seq_lens must start with zero";
   CHECK_EQ(active_rows % sequence_rows, 0)
       << "invalid MLU linear-state input row counts: sequence_rows="
       << sequence_rows << ", active_rows=" << active_rows

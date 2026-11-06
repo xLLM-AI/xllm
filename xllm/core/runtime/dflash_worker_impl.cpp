@@ -895,11 +895,7 @@ void DFlashWorkerImpl::update_decode_step_input(
   std::vector<int32_t> kv_seq_lens_vec;
   token_ids_vec.reserve(num_sequences);
   positions_vec.reserve(num_sequences);
-#if defined(USE_NPU)
   kv_seq_lens_vec.reserve(num_sequences);
-#else
-  kv_seq_lens_vec.reserve(num_sequences + 1);
-#endif
 
   const torch::Tensor& token_ids_cpu = input.token_ids_host;
   const torch::Tensor& positions_cpu = input.positions_host;
@@ -936,7 +932,7 @@ void DFlashWorkerImpl::update_decode_step_input(
     token_ids_vec.emplace_back(rewrite_fake_token ? state.token_id
                                                   : input_token_id);
     positions_vec.emplace_back(current_position);
-    specBuilder::append_seq_len_by_layout(kv_seq_lens_vec, current_kv_len);
+    kv_seq_lens_vec.emplace_back(current_kv_len);
   }
 
   input.token_ids_host = specBuilder::make_cpu_int_tensor(token_ids_vec);
@@ -972,13 +968,8 @@ void DFlashWorkerImpl::prepare_validate_inputs(
         torch::tensor(accepted_prefix_lengths,
                       validate_input.token_ids.options().dtype(torch::kInt32));
     if (!input_params.attention.host.q_seq_lens.empty()) {
-      std::vector<int32_t> q_cu_seq_lens;
-      q_cu_seq_lens.reserve(input_params.attention.host.q_seq_lens.size() + 1);
-      q_cu_seq_lens.emplace_back(0);
-      for (int32_t q_len : input_params.attention.host.q_seq_lens) {
-        q_cu_seq_lens.emplace_back(q_cu_seq_lens.back() + q_len);
-      }
-      input_params.attention.host.q_cu_seq_lens = std::move(q_cu_seq_lens);
+      input_params.attention.host.q_cu_seq_lens =
+          seq_lens::cumulative(input_params.attention.host.q_seq_lens);
     }
     // The generic builder materializes the device buffer before the hybrid
     // cumulative lengths above are canonicalized.  Rebind it so GDN sees

@@ -34,6 +34,7 @@ limitations under the License.
 #include "core/framework/request/sequence.h"
 #include "core/framework/request/sequences_group.h"
 #include "core/framework/sampling/sampling_params.h"
+#include "core/kv_cache/layout/seq_lens_layout.h"
 #include "core/util/blocking_counter.h"
 #include "core/util/rec_model_utils.h"
 #include "core/util/slice.h"
@@ -42,30 +43,6 @@ limitations under the License.
 #include "core/util/utils.h"
 
 namespace xllm {
-namespace {
-
-std::vector<int32_t> build_q_cu_seq_lens_vec(
-    const std::vector<int32_t>& q_seq_lens) {
-  std::vector<int32_t> q_cu_seq_lens;
-  if (q_seq_lens.empty()) {
-    return q_cu_seq_lens;
-  }
-#if defined(USE_NPU)
-  q_cu_seq_lens.reserve(q_seq_lens.size());
-  int32_t cum_seq_len = 0;
-  for (int32_t q_len : q_seq_lens) {
-    cum_seq_len += q_len;
-    q_cu_seq_lens.emplace_back(cum_seq_len);
-  }
-#else
-  CHECK(q_seq_lens.front() == 0)
-      << "q_seq_lens must be cumulative with leading zero";
-  q_cu_seq_lens.assign(q_seq_lens.begin() + 1, q_seq_lens.end());
-#endif
-  return q_cu_seq_lens;
-}
-
-}  // namespace
 
 RecMultiRoundForwardInputBuilder::RecMultiRoundForwardInputBuilder(
     const BatchInputData& data,
@@ -134,14 +111,8 @@ void RecMultiRoundForwardInputBuilder::process_single_sequence(
   int32_t offset = is_mtp_decode_ ? -1 : 0;
   base_state.max_seq_len = std::max(base_state.max_seq_len, seq_len);
   base_state.q_max_seq_len = std::max(base_state.q_max_seq_len, q_seq_len);
-#if defined(USE_NPU)
-  base_state.seq_lens.push_back(seq_len);
-  base_state.q_seq_lens.push_back(q_seq_len);
-#elif defined(USE_MLU) || defined(USE_CUDA) || defined(USE_ILU) || \
-    defined(USE_DCU)
-  base_state.seq_lens.push_back(base_state.seq_lens.back() + seq_len);
-  base_state.q_seq_lens.push_back(base_state.q_seq_lens.back() + q_seq_len);
-#endif
+  base_state.seq_lens.emplace_back(seq_len);
+  base_state.q_seq_lens.emplace_back(q_seq_len);
 
   // Call our enhanced method to process tokens and positions
   // This handles both regular decode and step-level decode cases
@@ -319,7 +290,7 @@ RecForwardInput RecMultiRoundForwardInputBuilder::state_to_forward_input() {
   input_params.attention.device.q_seq_lens =
       torch::tensor(state.q_seq_lens, torch::kInt);
   std::vector<int32_t> q_cu_seq_lens =
-      build_q_cu_seq_lens_vec(state.q_seq_lens);
+      seq_lens::query_start_offsets(state.q_seq_lens);
   input_params.attention.device.q_cu_seq_lens =
       torch::tensor(q_cu_seq_lens, torch::kInt);
   input_params.attention.host.kv_seq_lens = std::move(state.seq_lens);

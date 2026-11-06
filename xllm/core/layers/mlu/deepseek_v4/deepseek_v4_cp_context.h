@@ -48,8 +48,9 @@ struct DeepseekV4CpContext {
   ProcessGroup* cp_group = nullptr;
 };
 
-std::vector<int32_t> query_lengths_from_cumulative(
-    const std::vector<int32_t>& cumulative_q_seq_lens,
+// Validates one query length per sequence against the packed token count.
+std::vector<int32_t> localize_query_lengths(
+    const std::vector<int32_t>& q_seq_lens,
     int64_t total_tokens);
 
 bool should_enable_zigzag_cp(const std::vector<int32_t>& q_seq_lens,

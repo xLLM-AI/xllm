@@ -213,7 +213,7 @@ class DeepseekV4ModelImpl final
         attn_metadata.dsa_metadata != nullptr;
     if (cp_candidate) {
       const std::vector<int32_t> query_lengths =
-          layer::mlu_v4_cp::query_lengths_from_cumulative(
+          layer::mlu_v4_cp::localize_query_lengths(
               modified_input_params.attention.host.q_seq_lens,
               positions.size(0));
       cp_context = layer::mlu_v4_cp::build_cp_context(

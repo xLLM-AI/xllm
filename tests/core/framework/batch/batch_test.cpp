@@ -1777,19 +1777,11 @@ TEST(BatchTest, Basic) {
   EXPECT_EQ(input_params.embedding.linear_state_ids,
             std::vector<int32_t>({-1, -1, -1, -1}));
 
-#if defined(USE_NPU)
   const std::vector<int32_t> q_seq_lens = {9, 1, 1, 4};
-#else
-  const std::vector<int32_t> q_seq_lens = {0, 9, 10, 11, 15};
-#endif
   EXPECT_TRUE(equal(input_params.attention.device.q_seq_lens, q_seq_lens));
 
 //  seq4's kv_seq_len = q_len + num_cached_tokens (q_len<=max_allowed_tokens)
-#if defined(USE_NPU)
   const std::vector<int32_t> kv_seq_lens = {9, 8, 16, 8};
-#else
-  const std::vector<int32_t> kv_seq_lens = {0, 9, 17, 33, 41};
-#endif
   EXPECT_TRUE(equal(input_params.attention.device.kv_seq_lens, kv_seq_lens));
 
   const std::vector<int32_t> new_cache_slots = {
@@ -3259,13 +3251,8 @@ TEST(BatchTest, ThreadedPrefillPreservesChunkSlicesAndFinalSamplingOffset) {
         torch::equal(input_params.attention.device.block_tables.flatten(),
                      make_cpu_tensor(expected_block_ids)));
 
-#if defined(USE_NPU)
     const std::vector<int32_t> expected_q_seq_lens = {32768, 32768};
     const std::vector<int32_t> expected_kv_seq_lens = {32771, 32773};
-#else
-    const std::vector<int32_t> expected_q_seq_lens = {0, 32768, 65536};
-    const std::vector<int32_t> expected_kv_seq_lens = {0, 32771, 65544};
-#endif
     EXPECT_EQ(input_params.attention.host.q_seq_lens, expected_q_seq_lens);
     EXPECT_EQ(input_params.attention.host.kv_seq_lens, expected_kv_seq_lens);
     EXPECT_TRUE(torch::equal(input_params.attention.device.q_seq_lens,

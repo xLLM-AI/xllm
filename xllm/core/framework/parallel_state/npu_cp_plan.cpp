@@ -27,6 +27,7 @@ limitations under the License.
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/parallel_state/parallel_state.h"
 #include "core/framework/parallel_state/process_group.h"
+#include "core/kv_cache/layout/seq_lens_layout.h"
 #include "core/runtime/vlm_forward_params.h"
 #include "core/util/tensor_helper.h"
 
@@ -715,19 +716,6 @@ CpOutputMergeMeta build_output_merge_meta(
   return merge_meta;
 }
 
-std::vector<int32_t> preserve_length_layout(const std::vector<int32_t>& lengths,
-                                            bool cumulative) {
-  if (!cumulative) {
-    return lengths;
-  }
-  std::vector<int32_t> cumulative_lengths = {0};
-  cumulative_lengths.reserve(lengths.size() + 1);
-  for (int32_t length : lengths) {
-    cumulative_lengths.push_back(cumulative_lengths.back() + length);
-  }
-  return cumulative_lengths;
-}
-
 float get_cp_ep_buffer_factor(int64_t length, int32_t attention_cp_size) {
   length *= attention_cp_size;
   const std::vector<std::pair<int64_t, float>> thresholds = {{1048576, 1.32f},
@@ -973,28 +961,11 @@ CpPlanInput make_plan_input(const Input& processed_input,
     return values;
   };
 
-  const int32_t num_sequences = processed_input.input_params.meta.num_sequences;
   const std::vector<int32_t>& host_q_seq_lens =
       processed_input.input_params.attention.host.q_seq_lens;
-  const std::vector<int32_t>& host_kv_seq_lens =
-      processed_input.input_params.attention.host.kv_seq_lens;
-  const bool q_seq_lens_are_cumulative =
-      static_cast<int32_t>(host_q_seq_lens.size()) == num_sequences + 1 &&
-      !host_q_seq_lens.empty() && host_q_seq_lens.front() == 0;
-  const bool kv_seq_lens_are_cumulative =
-      static_cast<int32_t>(host_kv_seq_lens.size()) == num_sequences + 1 &&
-      !host_kv_seq_lens.empty() && host_kv_seq_lens.front() == 0;
   std::vector<int32_t> global_q_seq_lens;
   if (!host_q_seq_lens.empty()) {
-    if (q_seq_lens_are_cumulative) {
-      global_q_seq_lens.reserve(num_sequences);
-      for (int32_t i = 0; i < num_sequences; ++i) {
-        global_q_seq_lens.push_back(
-            std::max(0, host_q_seq_lens[i + 1] - host_q_seq_lens[i]));
-      }
-    } else {
-      global_q_seq_lens = host_q_seq_lens;
-    }
+    global_q_seq_lens = host_q_seq_lens;
   } else {
     global_q_seq_lens = tensor_to_int32_vec(
         processed_input.input_params.attention.device.q_seq_lens);
@@ -1029,8 +1000,6 @@ CpPlanInput make_plan_input(const Input& processed_input,
                                   ? block_tables
                                   : block_tables.to(torch::kCPU);
   }
-  plan_input.q_seq_lens_are_cumulative = q_seq_lens_are_cumulative;
-  plan_input.kv_seq_lens_are_cumulative = kv_seq_lens_are_cumulative;
   return plan_input;
 }
 
@@ -1074,18 +1043,13 @@ NpuCpPlan NpuCpPlan::build(const CpPlanInput& input,
                                               config.block_size,
                                               config.kv_split_size);
   plan.attention_meta_.host_q_seq_lens =
-      preserve_length_layout(plan.input_shard_meta_.local_padded_seq_lens,
-                             input.q_seq_lens_are_cumulative);
+      plan.input_shard_meta_.local_padded_seq_lens;
   plan.attention_meta_.host_kv_seq_lens =
-      preserve_length_layout(plan.input_shard_meta_.local_padded_seq_lens,
-                             input.kv_seq_lens_are_cumulative);
-  plan.attention_meta_.host_q_cu_seq_lens.reserve(
-      plan.input_shard_meta_.local_padded_seq_lens.size());
-  int32_t cumulative_length = 0;
+      plan.input_shard_meta_.local_padded_seq_lens;
+  plan.attention_meta_.host_q_cu_seq_lens = seq_lens::query_start_offsets(
+      plan.input_shard_meta_.local_padded_seq_lens);
   int32_t max_seq_len = 0;
   for (int32_t length : plan.input_shard_meta_.local_padded_seq_lens) {
-    cumulative_length += length;
-    plan.attention_meta_.host_q_cu_seq_lens.push_back(cumulative_length);
     max_seq_len = std::max(max_seq_len, length);
   }
   plan.attention_meta_.q_max_seq_len = max_seq_len;

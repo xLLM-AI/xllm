@@ -348,10 +348,12 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
       params.meta.actual_num_sequences = static_cast<int32_t>(batch_size);
       params.meta.q_max_seq_len = max_seq_len;
       params.meta.kv_max_seq_len = max_seq_len;
+      auto per_seq_lens =
+          torch::tensor(seq_lens, torch::kInt).to(tokens.device());
       auto cu_seqlens =
           torch::tensor(cu_seqlens_vec, torch::kInt).to(tokens.device());
-      params.attention.device.q_seq_lens = cu_seqlens;
-      params.attention.device.kv_seq_lens = cu_seqlens;
+      params.attention.device.q_seq_lens = per_seq_lens;
+      params.attention.device.kv_seq_lens = per_seq_lens;
       params.attention.device.q_cu_seq_lens = cu_seqlens;
       params.attention.host.q_seq_lens = seq_lens;
       params.attention.host.q_cu_seq_lens = cu_seqlens_vec;

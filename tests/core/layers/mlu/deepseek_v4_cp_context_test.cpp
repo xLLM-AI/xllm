@@ -24,12 +24,12 @@ limitations under the License.
 namespace xllm::layer::mlu_v4_cp {
 namespace {
 
-TEST(DeepseekV4CpGeometryTest,
-     ConvertsMluCumulativeLengthsForConcurrentRequests) {
-  EXPECT_EQ(query_lengths_from_cumulative({0, 128, 256, 384}, 384),
+TEST(DeepseekV4CpGeometryTest, ValidatesPerSequenceQueryLengths) {
+  EXPECT_EQ(localize_query_lengths({128, 128, 128}, 384),
             std::vector<int32_t>({128, 128, 128}));
-  EXPECT_EQ(query_lengths_from_cumulative({0, 17, 82, 91}, 91),
+  EXPECT_EQ(localize_query_lengths({17, 65, 9}, 91),
             std::vector<int32_t>({17, 65, 9}));
+  EXPECT_EQ(localize_query_lengths({16}, 16), std::vector<int32_t>({16}));
 }
 
 TEST(DeepseekV4CpGeometryTest, RequiresEnoughTokensForTwoSidedSplit) {

@@ -276,6 +276,7 @@ class MusaGraphPersistentParam final {
   torch::Tensor persistent_paged_kv_last_page_len_;
   torch::Tensor persistent_decode_qo_indptr_;
   torch::Tensor persistent_kv_seq_lens_delta_;
+  std::vector<int32_t> host_kv_cu_seq_lens_;
 };
 
 // MUSA graph executor using torch_musa MUSAGraph for memory management.

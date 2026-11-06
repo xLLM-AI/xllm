@@ -719,30 +719,7 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
     const auto int_options =
         torch::TensorOptions().dtype(torch::kInt32).device(device);
 
-    params.attention.host.q_seq_lens = local_q;
-    torch::Tensor q_lens = torch::tensor(local_q, int_options);
-    params.attention.device.q_seq_lens = q_lens;
-    dsa.seq_lens_q = q_lens;
-    torch::Tensor q_cumsum =
-        torch::cumsum(q_lens, /*dim=*/0, /*dtype=*/torch::kInt32);
-    dsa.actual_seq_lengths_query =
-        torch::cat({torch::zeros({1}, int_options), q_cumsum});
-    params.attention.device.q_cu_seq_lens = dsa.actual_seq_lengths_query;
-    std::vector<int32_t> q_cu_host;
-    q_cu_host.reserve(local_q.size());
-    int32_t running = 0;
-    for (const int32_t len : local_q) {
-      running += len;
-      q_cu_host.push_back(running);
-    }
-    params.attention.host.q_cu_seq_lens = q_cu_host;
-
-    const int64_t local_q_max = vector_max_or_zero(local_q);
-    params.meta.q_max_seq_len = static_cast<int32_t>(local_q_max);
-    dsa.max_seqlen_q = q_lens.numel() > 0
-                           ? torch::max(q_lens).to(torch::kInt32).reshape({1})
-                           : torch::zeros({1}, int_options);
-    dsa.max_query_len = local_q_max;
+    apply_cp_local_query_lens(dsa, params, local_q, device_);
 
     // Attention-side kv view: prefix + this rank's last local row.
     const auto& local_kv = cp_ctx.local_kv_seq_lens;

@@ -24,6 +24,8 @@ limitations under the License.
 #include "framework/config/model_config.h"
 #include "framework/model/model_params_view.h"
 #include "framework/sampling/sampling_params.h"
+#include "kv_cache/layout/paged_kv_layout.h"
+#include "kv_cache/layout/seq_lens_layout.h"
 #include "layers/common/expanded_decode_metadata_builder.h"
 #include "runtime/vlm_forward_params.h"
 #include "util/tensor_helper.h"
@@ -32,13 +34,6 @@ namespace xllm::specBuilder {
 
 namespace {
 
-// Builds cumulative seq-lens layout: [0, l0, l0+l1, ...].
-void push_cumsum(std::vector<int32_t>& vec, int32_t len) {
-  if (vec.empty()) {
-    vec.emplace_back(0);
-  }
-  vec.emplace_back(vec.back() + len);
-}
 template <typename Input>
 Slice<int32_t> get_token_ids(const Input& input) {
   return tensor_slice(input.token_ids_host);
@@ -143,22 +138,15 @@ void append_paged_kv_row(const Slice<int32_t>& block_table,
                          int32_t kv_seq_len,
                          int32_t block_size,
                          DecodeBuildBuffers& buf) {
-  CHECK_GT(block_size, 0) << "invalid block_size=" << block_size;
-  const int32_t page_count = layer::kv_page_count(kv_seq_len, block_size);
-  CHECK_LE(static_cast<size_t>(page_count), block_table.size())
-      << "row KV length exceeds block-table capacity, kv_seq_len=" << kv_seq_len
-      << ", page_count=" << page_count
-      << ", block_table_size=" << block_table.size();
-  if (buf.out_paged_kv_indptr.empty()) {
-    buf.out_paged_kv_indptr.emplace_back(0);
-  }
+  const int32_t page_count =
+      append_paged_kv_geometry(kv_seq_len,
+                               static_cast<int64_t>(block_table.size()),
+                               block_size,
+                               buf.out_paged_kv_indptr,
+                               buf.out_paged_kv_last_page_len);
   buf.out_paged_kv_indices.insert(buf.out_paged_kv_indices.end(),
                                   block_table.begin(),
                                   block_table.begin() + page_count);
-  buf.out_paged_kv_indptr.emplace_back(buf.out_paged_kv_indptr.back() +
-                                       page_count);
-  buf.out_paged_kv_last_page_len.emplace_back(
-      layer::kv_last_page_len(kv_seq_len, block_size));
 }
 
 }  // namespace
@@ -187,31 +175,31 @@ MtpTopkStatePtr select_mtp_topk_state_for_next_step(
 int32_t calc_slot_id(int32_t position,
                      const Slice<int32_t>& block_table_slice,
                      int32_t block_size) {
-  CHECK_GT(block_size, 0) << "invalid block_size=" << block_size;
-  CHECK_GE(position, 0) << "invalid position=" << position;
-  const int32_t block_idx = position / block_size;
-  CHECK_LT(static_cast<size_t>(block_idx), block_table_slice.size())
-      << "block table index out of range, block_idx=" << block_idx
-      << ", block_table_size=" << block_table_slice.size()
-      << ", position=" << position << ", block_size=" << block_size;
-  const int32_t block_id = block_table_slice[block_idx];
-  CHECK_GE(block_id, 0) << "invalid block_id=" << block_id;
-  const int32_t block_offset = position % block_size;
-  return block_id * block_size + block_offset;
+  const int32_t slot = slot_for_position</*Ring=*/false>(
+      block_table_slice,
+      position,
+      block_size,
+      static_cast<int64_t>(block_table_slice.size()));
+  CHECK_NE(slot, kSkippedSlotId)
+      << "block table index out of range, position=" << position
+      << ", block_size=" << block_size
+      << ", block_table_size=" << block_table_slice.size();
+  return slot;
 }
 
 int32_t calc_ring_slot_id(int32_t position,
                           const Slice<int32_t>& block_table_slice,
                           int32_t block_size) {
-  CHECK_GT(block_size, 0) << "invalid block_size=" << block_size;
-  CHECK_GE(position, 0) << "invalid position=" << position;
   CHECK(!block_table_slice.empty()) << "circular block table must not be empty";
-  const int32_t block_idx =
-      (position / block_size) % static_cast<int32_t>(block_table_slice.size());
-  const int32_t block_id = block_table_slice[block_idx];
-  CHECK_GE(block_id, 0) << "invalid circular block_id=" << block_id;
-  const int32_t block_offset = position % block_size;
-  return block_id * block_size + block_offset;
+  const int32_t slot = slot_for_position</*Ring=*/true>(
+      block_table_slice,
+      position,
+      block_size,
+      static_cast<int64_t>(block_table_slice.size()));
+  CHECK_NE(slot, kSkippedSlotId)
+      << "invalid circular block_id, position=" << position
+      << ", block_size=" << block_size;
+  return slot;
 }
 template <typename Input>
 std::vector<int32_t> build_grouped_prefill_swa_slots(const Input& input,
@@ -248,32 +236,13 @@ std::vector<int32_t> build_grouped_prefill_swa_slots(const Input& input,
 int32_t calc_kv_len(const Slice<int32_t>& kv_seq_lens_slice,
                     int32_t seq_id,
                     int32_t offset) {
-  CHECK_GE(seq_id, 0) << "invalid seq_id=" << seq_id;
-#if defined(USE_NPU)
-  CHECK_LT(static_cast<size_t>(seq_id), kv_seq_lens_slice.size())
-      << "seq_id out of range, seq_id=" << seq_id
-      << ", kv_seq_lens_size=" << kv_seq_lens_slice.size();
-  return kv_seq_lens_slice[seq_id] + offset;
-#else
-  CHECK_LT(static_cast<size_t>(seq_id + 1), kv_seq_lens_slice.size())
-      << "seq_id out of range for cumulative layout, seq_id=" << seq_id
-      << ", kv_seq_lens_size=" << kv_seq_lens_slice.size();
-  return kv_seq_lens_slice[seq_id + 1] - kv_seq_lens_slice[seq_id] + offset;
-#endif
-}
-
-void append_seq_len_by_layout(std::vector<int32_t>& vec, int32_t len) {
-#if defined(USE_NPU)
-  vec.emplace_back(len);
-#else
-  push_cumsum(vec, len);
-#endif
+  return seq_lens::at(kv_seq_lens_slice, seq_id) + offset;
 }
 
 void append_q_seq_len(std::vector<int32_t>& q_seq_lens,
                       std::vector<int32_t>& q_cu_seq_lens,
                       int32_t len) {
-  append_seq_len_by_layout(q_seq_lens, len);
+  q_seq_lens.emplace_back(len);
   q_cu_seq_lens.emplace_back(
       (q_cu_seq_lens.empty() ? 0 : q_cu_seq_lens.back()) + len);
 }
@@ -284,7 +253,7 @@ void update_kv_seq_lens_and_max(std::vector<int32_t>& kv_seq_lens_vec,
   if (kv_len > kv_max_seq_len) {
     kv_max_seq_len = kv_len;
   }
-  append_seq_len_by_layout(kv_seq_lens_vec, kv_len);
+  kv_seq_lens_vec.emplace_back(kv_len);
 }
 template <typename Input>
 DecodeRowContext make_decode_row_context(const Input& input) {
@@ -607,11 +576,11 @@ void materialize_empty_block_draft_rows(LlmForwardInput& input,
   params.meta.q_max_seq_len = query_width;
   params.meta.kv_max_seq_len = 1;
   params.attention.host.q_seq_lens.clear();
-  append_seq_len_by_layout(params.attention.host.q_seq_lens, query_width);
+  params.attention.host.q_seq_lens.emplace_back(query_width);
   params.attention.host.q_cu_seq_lens = {0, query_width};
   params.attention.host.kv_seq_lens.clear();
-  append_seq_len_by_layout(params.attention.host.kv_seq_lens, 1);
-  params.attention.host.new_cache_slots.assign(query_width, -1);
+  params.attention.host.kv_seq_lens.emplace_back(1);
+  params.attention.host.new_cache_slots.assign(query_width, kSkippedSlotId);
   params.attention.host.block_tables = torch::zeros({1, 1}, options);
   params.attention.device.paged_kv_indptr = torch::tensor({0, 1}, options);
   params.attention.device.paged_kv_indices = torch::tensor({0}, options);

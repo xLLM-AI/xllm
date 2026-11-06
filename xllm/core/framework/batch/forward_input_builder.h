@@ -109,14 +109,8 @@ class ForwardInputBuilder final {
     std::vector<int32_t> num_scheduled_tokens;
     std::vector<int32_t> num_computed_tokens;
     std::vector<uint8_t> is_prefilling;
-#if defined(USE_NPU)
     std::vector<int32_t> seq_lens;
     std::vector<int32_t> q_seq_lens;
-#elif defined(USE_MLU) || defined(USE_CUDA) || defined(USE_ILU) || \
-    defined(USE_DCU) || defined(USE_MUSA)
-    std::vector<int32_t> seq_lens = {0};    // cu_seq_lens
-    std::vector<int32_t> q_seq_lens = {0};  // q_cu_seq_len
-#endif
 
     // Cache and block data
     std::vector<int32_t> new_token_slot_ids;

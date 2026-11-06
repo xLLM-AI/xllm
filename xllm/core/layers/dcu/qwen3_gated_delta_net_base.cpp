@@ -188,17 +188,23 @@ std::vector<int64_t> build_real_cu_seqlens(
   return cu;
 }
 
-// Extract cu_seqlens from host-side lens (or fall back to device tensor).
+// Builds leading-zero cu_seqlens from per-sequence host lengths, falling back
+// to the device tensor. The convolution adapter requires N+1 entries.
 std::vector<int64_t> extract_cu_seqlens(
     const AttentionMetadata& attn_metadata) {
-  std::vector<int64_t> cu;
+  std::vector<int64_t> cu = {0};
   if (!attn_metadata.q_seq_lens_vec.empty()) {
-    cu.assign(attn_metadata.q_seq_lens_vec.begin(),
-              attn_metadata.q_seq_lens_vec.end());
-  } else {
-    auto cpu_lens = attn_metadata.q_seq_lens.cpu();
-    auto* ptr = cpu_lens.data_ptr<int64_t>();
-    cu.assign(ptr, ptr + cpu_lens.numel());
+    cu.reserve(attn_metadata.q_seq_lens_vec.size() + 1);
+    for (const int32_t q_len : attn_metadata.q_seq_lens_vec) {
+      cu.emplace_back(cu.back() + q_len);
+    }
+    return cu;
+  }
+  auto cpu_lens = attn_metadata.q_seq_lens.to(torch::kCPU).to(torch::kInt32);
+  const auto* ptr = cpu_lens.data_ptr<int32_t>();
+  cu.reserve(static_cast<size_t>(cpu_lens.numel()) + 1);
+  for (int64_t index = 0; index < cpu_lens.numel(); ++index) {
+    cu.emplace_back(cu.back() + ptr[index]);
   }
   return cu;
 }

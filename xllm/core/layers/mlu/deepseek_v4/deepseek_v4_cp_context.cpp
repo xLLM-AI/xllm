@@ -38,26 +38,19 @@ torch::Tensor make_cu_seq_lens(const std::vector<int32_t>& seq_lens,
 
 }  // namespace
 
-std::vector<int32_t> query_lengths_from_cumulative(
-    const std::vector<int32_t>& cumulative_q_seq_lens,
+std::vector<int32_t> localize_query_lengths(
+    const std::vector<int32_t>& q_seq_lens,
     int64_t total_tokens) {
-  CHECK_GE(cumulative_q_seq_lens.size(), 2u)
-      << "MLU query lengths require cumulative endpoints with a leading zero.";
-  CHECK_EQ(cumulative_q_seq_lens.front(), 0)
-      << "MLU cumulative query lengths must start at zero.";
-  CHECK_EQ(cumulative_q_seq_lens.back(), total_tokens)
-      << "MLU cumulative query lengths must end at the current token count.";
-
-  std::vector<int32_t> query_lengths;
-  query_lengths.reserve(cumulative_q_seq_lens.size() - 1);
-  for (size_t index = 1; index < cumulative_q_seq_lens.size(); ++index) {
-    const int32_t query_length =
-        cumulative_q_seq_lens[index] - cumulative_q_seq_lens[index - 1];
-    CHECK_GE(query_length, 0)
-        << "MLU cumulative query lengths must be non-decreasing.";
-    query_lengths.emplace_back(query_length);
+  CHECK(!q_seq_lens.empty())
+      << "MLU query lengths require at least one prefill request.";
+  int64_t sum = 0;
+  for (const int32_t query_length : q_seq_lens) {
+    CHECK_GE(query_length, 0) << "MLU query lengths must be non-negative.";
+    sum += query_length;
   }
-  return query_lengths;
+  CHECK_EQ(sum, total_tokens)
+      << "MLU query lengths must sum to the current token count.";
+  return q_seq_lens;
 }
 
 bool should_enable_zigzag_cp(const std::vector<int32_t>& q_seq_lens,

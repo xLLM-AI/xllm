@@ -2611,7 +2611,7 @@ RecWorkerImpl::LlmRecMultiRoundPipeline::compute_next_round_input_async(
       auto shared_kv_offsets = full_kv_offsets.slice(2, 0, max_token_per_req_)
                                    .slice(0, 0, batch_size);
 
-      auto shared_kv_lens_each_batch = torch::diff(kv_seq_lens);
+      auto shared_kv_lens_each_batch = kv_seq_lens;
 
       auto shared_kv_lens_each_batch_broadcast =
           shared_kv_lens_each_batch.unsqueeze(1).unsqueeze(1);
@@ -2622,7 +2622,8 @@ RecWorkerImpl::LlmRecMultiRoundPipeline::compute_next_round_input_async(
       shared_mask.copy_(shared_kv_offsets <
                         shared_kv_lens_each_batch_broadcast);
 
-      auto kv_lens_batch_offsets = kv_seq_lens.slice(0, 0, -1);
+      auto kv_lens_batch_offsets =
+          torch::cumsum(kv_seq_lens, /*dim=*/0) - kv_seq_lens;
 
       auto kv_lens_batch_offsets_broadcast =
           kv_lens_batch_offsets.unsqueeze(1).unsqueeze(1);

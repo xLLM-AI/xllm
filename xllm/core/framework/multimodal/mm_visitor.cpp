@@ -55,20 +55,6 @@ std::pair<int32_t, int32_t> compute_emb_range(int32_t start_pos,
   return {upto_start_pos, upto_end_pos};
 }
 
-std::vector<int32_t> normalize_to_per_seq_lens(
-    const std::vector<int32_t>& seq_lens) {
-#if defined(USE_NPU) || defined(USE_MUSA)
-  return seq_lens;
-#else
-  // Other backends pass cumulative sequence lengths.
-  std::vector<int32_t> per_seq_lens;
-  per_seq_lens.reserve(seq_lens.empty() ? 0 : seq_lens.size() - 1);
-  for (size_t i = 1; i < seq_lens.size(); ++i) {
-    per_seq_lens.push_back(seq_lens[i] - seq_lens[i - 1]);
-  }
-  return per_seq_lens;
-#endif
-}
 }  // namespace
 
 bool MMInputGatherVisitor::visit(const MMInputItem& item) {
@@ -284,8 +270,8 @@ EncoderEmbeddingGatherVisitor::EncoderEmbeddingGatherVisitor(
     const std::vector<int32_t>& seq_lens,
     const std::vector<int32_t>& scheduled_seq_lens)
     : device_(device),
-      per_seq_context_lens_(normalize_to_per_seq_lens(seq_lens)),
-      per_seq_scheduled_lens_(normalize_to_per_seq_lens(scheduled_seq_lens)),
+      per_seq_context_lens_(seq_lens),
+      per_seq_scheduled_lens_(scheduled_seq_lens),
       per_seq_scheduled_offsets_(per_seq_scheduled_lens_.size(), 0),
       total_scheduled_tokens_(std::accumulate(per_seq_scheduled_lens_.begin(),
                                               per_seq_scheduled_lens_.end(),
