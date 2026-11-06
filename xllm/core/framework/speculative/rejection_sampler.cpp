@@ -20,7 +20,6 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <limits>
-#include <optional>
 #include <tuple>
 #include <utility>
 
@@ -92,16 +91,14 @@ void compute_logprobs(SampleOutput& output,
 }  // namespace
 
 SampleOutput rejection_sample(const SamplingParameters& params,
-                              const DraftProposal& draft_proposal,
+                              const torch::Tensor& draft_token_ids,
+                              const torch::Tensor& draft_logits,
                               torch::Tensor target_logits) {
-  const torch::Tensor& draft_token_ids = draft_proposal.token_ids();
+  CHECK_EQ(draft_token_ids.dim(), 2);
   const int64_t num_draft_tokens = draft_token_ids.size(1);
-  CHECK_EQ(target_logits.dim(), 2)
-      << "target logits must arrive flat [batch * n_spec + 1, vocab]";
-  CHECK_EQ(target_logits.size(0) % (num_draft_tokens + 1), 0)
-      << "target logits rows must be divisible by the validation width";
-  const int64_t batch_size = target_logits.size(0) / (num_draft_tokens + 1);
+  const int64_t batch_size = draft_token_ids.size(/*dim=*/0);
   const int64_t num_val_tokens = num_draft_tokens + 1;
+  CHECK_EQ(target_logits.dim(), 2);
   // Verify transforms: the penalty stages broadcast per-sequence inputs on
   // the grouped view; the grammar bitmask stays on the flat rows.
   const int64_t vocab_size = target_logits.size(1);
@@ -109,19 +106,26 @@ SampleOutput rejection_sample(const SamplingParameters& params,
       target_logits.view({batch_size, num_val_tokens, vocab_size});
   const torch::Tensor raw_logits =
       params.logprobs() ? grouped_logits.clone() : torch::Tensor();
-  if (params.has_sampling_fields()) {
+  const bool has_token_penalties = params.repetition_penalties().defined() ||
+                                   params.frequency_penalties().defined();
+  const bool has_bad_words = params.bad_words().defined();
+  if (has_token_penalties || has_bad_words ||
+      params.min_token_ids().defined() || params.logits_bias().defined()) {
     for (int64_t column = 0; column < num_val_tokens; ++column) {
       SamplingParameters step_params = params;
-      if (params.min_tokens_remaining().defined()) {
+      if (params.min_token_ids().defined() &&
+          params.min_tokens_remaining().defined()) {
         step_params.min_tokens_remaining() =
             params.min_tokens_remaining() - column;
       }
       const torch::Tensor prefix = draft_token_ids.narrow(1, 0, column);
-      step_params.prefix_tokens() =
-          params.prefix_tokens().defined()
-              ? torch::cat({params.prefix_tokens(), prefix}, 1)
-              : prefix;
-      if (params.bad_word_suffix().defined()) {
+      if (has_token_penalties) {
+        step_params.prefix_tokens() =
+            params.prefix_tokens().defined()
+                ? torch::cat({params.prefix_tokens(), prefix}, /*dim=*/1)
+                : prefix;
+      }
+      if (has_bad_words && params.bad_word_suffix().defined()) {
         step_params.bad_word_suffix() =
             append_token_suffix(params.bad_word_suffix(), prefix);
       }
@@ -227,9 +231,11 @@ SampleOutput rejection_sample(const SamplingParameters& params,
                     .to(torch::kFloat32),
                 /*dim=*/-1,
                 /*keepdim=*/false);
-  draft_proposal.validate(
-      /*expected_batch_size=*/grouped_logits.size(0),
-      /*expected_num_speculative_tokens=*/num_draft_tokens);
+  if (draft_logits.defined()) {
+    CHECK_EQ(draft_logits.dim(), 3);
+    CHECK_EQ(draft_logits.sizes().slice(/*N=*/0, /*M=*/2),
+             draft_token_ids.sizes());
+  }
   const torch::Tensor greedy_target_token_ids =
       full_greedy_token_ids.defined()
           ? full_greedy_token_ids.narrow(
@@ -255,8 +261,6 @@ SampleOutput rejection_sample(const SamplingParameters& params,
 
   auto random_sample_dispatch =
       [&]() -> std::pair<torch::Tensor, torch::Tensor> {
-    const std::optional<torch::Tensor>& draft_logits = draft_proposal.logits();
-
     // Accept p/q > u in log space. −1 sentinel drafts clamp to column 0
     // and are re-masked by the acceptance term.
     const torch::Tensor draft_index =
@@ -268,10 +272,10 @@ SampleOutput rejection_sample(const SamplingParameters& params,
     torch::Tensor target_log_prob =
         gathered_logit(grouped_logits).sub(target_lse);
     torch::Tensor draft_lse;
-    if (draft_logits.has_value()) {
+    if (draft_logits.defined()) {
       draft_lse = torch::logsumexp(
-          draft_logits->to(torch::kFloat32), /*dim=*/-1, /*keepdim=*/false);
-      target_log_prob.sub_(gathered_logit(*draft_logits).sub(draft_lse));
+          draft_logits.to(torch::kFloat32), /*dim=*/-1, /*keepdim=*/false);
+      target_log_prob.sub_(gathered_logit(draft_logits).sub(draft_lse));
     }
     torch::Tensor uniform_rand =
         torch::rand(draft_token_ids.sizes(),
@@ -304,8 +308,8 @@ SampleOutput rejection_sample(const SamplingParameters& params,
       torch::Tensor target_log_probs =
           row_log_probs(grouped_logits, target_lse);
       torch::Tensor draft_log_probs =
-          draft_logits.has_value() ? row_log_probs(*draft_logits, draft_lse)
-                                   : torch::Tensor();
+          draft_logits.defined() ? row_log_probs(draft_logits, draft_lse)
+                                 : torch::Tensor();
       if (draft_log_probs.defined()) {
         draft_log_probs.masked_fill_(rejected_tokens.lt(0),
                                      -std::numeric_limits<float>::infinity());
@@ -332,8 +336,6 @@ SampleOutput rejection_sample(const SamplingParameters& params,
 
   auto greedy_sample_dispatch =
       [&]() -> std::pair<torch::Tensor, torch::Tensor> {
-    CHECK_EQ(greedy_target_token_ids.sizes(), draft_token_ids.sizes())
-        << "target and draft token shapes must match";
 #if defined(USE_NPU)
     if (greedy_target_token_ids.device().type() == torch::kPrivateUse1) {
       const torch::Tensor committed_tokens =

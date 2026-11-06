@@ -271,21 +271,27 @@ void prepare_next_draft_from_accepted_state(
                                              base_kv_seq_lens);
   // Generate offsets on device to avoid a synchronizing host-to-device copy.
   torch::Tensor extend_offsets = torch::arange(
-      /*start=*/-1,
-      /*end=*/1,
-      torch::TensorOptions()
-          .dtype(torch::kLong)
-          .device(accepted_tokens.device()));
-  const torch::Tensor positions = make_positions(state, extend_offsets);
+                                     /*start=*/-1,
+                                     /*end=*/1,
+                                     torch::TensorOptions()
+                                         .dtype(torch::kLong)
+                                         .device(accepted_tokens.device()))
+                                     .unsqueeze(/*dim=*/0);
+  const torch::Tensor positions =
+      state.base_positions.unsqueeze(/*dim=*/1) + extend_offsets;
   draft_input.positions =
       positions.flatten().to(draft_input.positions.options());
   draft_input.input_params.attention.device.kv_seq_lens =
-      make_kv_seq_lens(state, extend_offsets)
+      (state.base_kv_seq_lens.unsqueeze(/*dim=*/1) + extend_offsets)
+          .flatten()
           .to(draft_input.input_params.attention.device.kv_seq_lens.options());
 
   // On rejection, redirect the shape-stabilizing repair row to a future
   // scratch position so it cannot overwrite valid draft KV state.
-  torch::Tensor previous_cache_positions = make_repair_cache_positions(state);
+  const torch::Tensor previous_cache_positions =
+      torch::where(state.all_draft_accepted,
+                   state.base_positions - 1,
+                   state.base_positions + 1);
   torch::Tensor cache_positions =
       torch::stack({previous_cache_positions, state.base_positions},
                    /*dim=*/1);

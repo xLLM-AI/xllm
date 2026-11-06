@@ -23,7 +23,6 @@ limitations under the License.
 #include <string>
 #include <tuple>
 
-#include "core/framework/speculative/draft_proposal.h"
 #include "core/framework/speculative/draft_vocab_mapping.h"
 #include "core/framework/speculative/embedding_cache.h"
 #include "core/framework/speculative/mtp_async_state.h"
@@ -107,7 +106,6 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
 
   void prepare_hierarchy_kv_cache_transfers();
   void finalize_hierarchy_kv_cache_transfers();
-  void init_embedding_cache(int64_t num_blocks);
   bool allocate_pools(
       const KVCacheShape& kv_cache_shape,
       absl::FunctionRef<bool(WorkerImpl&, const KVCacheShape&)> allocate);
@@ -134,29 +132,18 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
   static std::optional<ForwardOutput> run_worker_no_sync_impl(
       WorkerImpl& worker,
       const Input& input,
+      Input& forward_input,
       Stream& prepare_stream,
       Stream& compute_stream,
-      Input& processed_input) {
+      WorkerImpl::ForwardCompletion completion =
+          WorkerImpl::ForwardCompletion::CALLER_RETAINS_INPUT) {
     worker.prepare_work_before_execute_on_stream(
         input,
-        processed_input,
+        forward_input,
         prepare_stream,
         /*record_ready_event=*/&prepare_stream != &compute_stream);
     return worker.execute_no_sync_on_stream(
-        processed_input,
-        compute_stream,
-        WorkerImpl::ForwardCompletion::CALLER_MANAGED);
-  }
-
-  template <typename Input>
-  static std::optional<ForwardOutput> run_worker_no_sync_impl(
-      WorkerImpl& worker,
-      const Input& input,
-      Stream& prepare_stream,
-      Stream& compute_stream) {
-    Input processed_input;
-    return run_worker_no_sync_impl(
-        worker, input, prepare_stream, compute_stream, processed_input);
+        forward_input, compute_stream, completion);
   }
 
   std::unique_ptr<LLMWorkerImpl> draft_impl_;

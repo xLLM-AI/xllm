@@ -325,7 +325,6 @@ SamplingParameters SamplingParameters::to(const torch::Device& device,
   params.do_sample() = safe_to(do_sample(), device, true);
   params.sampling_mode() = sampling_mode();
   params.logprobs() = logprobs();
-  params.return_logits() = return_logits();
   params.max_top_logprobs() = max_top_logprobs();
   params.is_embeddings() = is_embeddings();
   return params;

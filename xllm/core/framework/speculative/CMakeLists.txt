@@ -5,7 +5,6 @@ cc_library(
     speculative
   HDRS
     draft_config.h
-    draft_proposal.h
     draft_vocab_mapping.h
     rejection_sampler.h
     mtp_async_input_builder.h
@@ -18,7 +17,6 @@ cc_library(
     spec_verify.h
   SRCS
     draft_config.cpp
-    draft_proposal.cpp
     draft_vocab_mapping.cpp
     rejection_sampler.cpp
     mtp_async_input_builder.cpp

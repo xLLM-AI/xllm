@@ -38,7 +38,6 @@ limitations under the License.
 #include "core/framework/multimodal/content_hash.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/draft_config.h"
-#include "core/framework/speculative/draft_proposal.h"
 #include "core/framework/speculative/embedding_cache.h"
 #include "core/kv_cache/layout/kv_cache_capacity.h"
 #include "core/kv_cache/layout/kv_cache_estimation.h"
@@ -122,6 +121,9 @@ ModelContext DraftModelSpecWorkerImpl<TargetInput>::load_model_config(
   if (configure_draft_config_) {
     num_speculative_tokens =
         configure_draft_config_(args, draft_impl_->options());
+  }
+  if (args.draft_vocab_size() == 0) {
+    args.draft_vocab_size(args.vocab_size());
   }
   return draft_impl_->load_model_config(
       std::move(args), loader.quant_args(), num_speculative_tokens, nullptr);
@@ -403,12 +405,9 @@ bool DraftModelSpecWorkerImpl<TargetInput>::init_model(
   }
   if (result && draft_impl_->get_status() == WorkerImpl::Status::LOADED) {
     const ModelArgs& draft_args = draft_impl_->context_.get_model_args();
-    const int64_t draft_vocab_size = draft_args.draft_vocab_size() > 0
-                                         ? draft_args.draft_vocab_size()
-                                         : draft_args.vocab_size();
     draft_vocab_ =
         DraftVocabMapping(std::move(draft_token_id_offsets),
-                          draft_vocab_size,
+                          draft_args.draft_vocab_size(),
                           impl_->context_.get_model_args().vocab_size(),
                           device_);
     draft_impl_->get_causal_lm()->share_lm_head(*impl_->get_causal_lm());
@@ -539,18 +538,6 @@ void DraftModelSpecWorkerImpl<
 }
 
 template <typename TargetInput>
-void DraftModelSpecWorkerImpl<TargetInput>::init_embedding_cache(
-    int64_t num_blocks) {
-  embedding_cache_ = std::make_unique<EmbeddingCache>(
-      num_blocks, requires_full_target_replay());
-  const int64_t placeholder_size = get_embedding_placeholder_size();
-  if (placeholder_size > 0) {
-    embedding_cache_->set_placeholder(
-        torch::zeros({placeholder_size}, torch::dtype(dtype_).device(device_)));
-  }
-}
-
-template <typename TargetInput>
 bool DraftModelSpecWorkerImpl<TargetInput>::allocate_pools(
     const KVCacheShape& kv_cache_shape,
     absl::FunctionRef<bool(WorkerImpl&, const KVCacheShape&)> allocate) {
@@ -583,7 +570,13 @@ bool DraftModelSpecWorkerImpl<TargetInput>::allocate_pools(
     CHECK_EQ(draft_impl_->get_status(), WorkerImpl::Status::READY);
   }
 
-  init_embedding_cache(kv_cache_shape.key_cache_shape()[0]);
+  embedding_cache_ = std::make_unique<EmbeddingCache>(
+      kv_cache_shape.key_cache_shape()[0], requires_full_target_replay());
+  const int64_t placeholder_size = get_embedding_placeholder_size();
+  if (placeholder_size > 0) {
+    embedding_cache_->set_placeholder(
+        torch::zeros({placeholder_size}, torch::dtype(dtype_).device(device_)));
+  }
   if (target_allocated) {
     if (bind_vmm_group) {
       // The scheduler's block IDs address both caches. Bind their mappings

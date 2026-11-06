@@ -21,6 +21,7 @@ limitations under the License.
 
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/speculative/rejection_sampler.h"
+#include "core/util/utils.h"
 
 namespace xllm {
 
@@ -59,31 +60,7 @@ torch::Tensor make_speculative_verify_control_block_table(
 int64_t speculative_verify_block_table_capacity(int64_t max_position_embeddings,
                                                 int64_t block_size) {
   CHECK_GT(max_position_embeddings, 0);
-  CHECK_GT(block_size, 0);
-  return (max_position_embeddings + block_size - 1) / block_size + 1;
-}
-
-torch::Tensor materialize_speculative_verify_tokens(
-    const torch::Tensor& verify_tokens,
-    const std::vector<torch::Tensor>& draft_token_sources) {
-  if (draft_token_sources.empty()) {
-    return verify_tokens;
-  }
-  CHECK(verify_tokens.defined());
-  CHECK_EQ(verify_tokens.dim(), 1);
-  const int64_t verify_width =
-      static_cast<int64_t>(draft_token_sources.size()) + 1;
-  CHECK_EQ(verify_tokens.numel() % verify_width, 0);
-  const int64_t batch_size = verify_tokens.numel() / verify_width;
-  torch::Tensor verify_rows = verify_tokens.view({batch_size, verify_width});
-  for (size_t step = 0; step < draft_token_sources.size(); ++step) {
-    const torch::Tensor& source = draft_token_sources[step];
-    CHECK(source.defined());
-    CHECK_EQ(source.numel(), batch_size);
-    verify_rows.select(/*dim=*/1, static_cast<int64_t>(step) + 1)
-        .copy_(source.flatten(), /*non_blocking=*/true);
-  }
-  return verify_tokens;
+  return util::ceil_div(max_position_embeddings, block_size) + 1;
 }
 
 torch::Tensor materialize_graph_speculative_verify_tokens(
@@ -93,20 +70,33 @@ torch::Tensor materialize_graph_speculative_verify_tokens(
       graph_input.input_tokens_override.defined()
           ? graph_input.input_tokens_override
           : tokens;
-  return materialize_speculative_verify_tokens(
-      verify_tokens, graph_input.spec_verify_draft_token_sources);
+  const auto& draft_token_sources = graph_input.spec_verify_draft_token_sources;
+  if (draft_token_sources.empty()) {
+    return verify_tokens;
+  }
+  CHECK_EQ(verify_tokens.dim(), 1);
+  const int64_t verify_width =
+      static_cast<int64_t>(draft_token_sources.size()) + 1;
+  const int64_t batch_size = verify_tokens.numel() / verify_width;
+  torch::Tensor verify_rows = verify_tokens.view({batch_size, verify_width});
+  for (size_t step = 0; step < draft_token_sources.size(); ++step) {
+    const torch::Tensor& source = draft_token_sources[step];
+    CHECK_EQ(source.numel(), batch_size);
+    verify_rows.select(/*dim=*/1, static_cast<int64_t>(step) + 1)
+        .copy_(source.flatten(), /*non_blocking=*/true);
+  }
+  return verify_tokens;
 }
 
-SampleOutput run_rejection_sampling(SamplingParameters sampling_params,
-                                    const DraftProposal& draft_proposal,
+SampleOutput run_rejection_sampling(const SamplingParameters& sampling_params,
+                                    const torch::Tensor& draft_token_ids,
+                                    const torch::Tensor& draft_logits,
                                     const torch::Tensor& target_logits,
                                     const torch::Tensor& target_hidden_states) {
-  SampleOutput sample_output =
-      rejection_sample(sampling_params, draft_proposal, target_logits);
+  SampleOutput sample_output = rejection_sample(
+      sampling_params, draft_token_ids, draft_logits, target_logits);
 
   if (target_hidden_states.defined()) {
-    // Reuse next_tokens' [batch, num_val_tokens] shape instead of
-    // re-deriving the width.
     const torch::Tensor& next_tokens = sample_output.next_tokens;
     sample_output.embeddings =
         target_hidden_states.view({next_tokens.size(0),

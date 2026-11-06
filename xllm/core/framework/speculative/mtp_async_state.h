@@ -71,7 +71,6 @@ torch::Tensor extract_target_base_kv_seq_lens(
 // base_kv_seq_lens point at the logical position immediately after the accepted
 // prefix and are therefore the base of the next draft iteration.
 struct AcceptedState {
-  torch::Tensor accepted_lengths;
   torch::Tensor all_draft_accepted;
   torch::Tensor last_tokens;
   torch::Tensor previous_tokens;
@@ -81,34 +80,11 @@ struct AcceptedState {
   torch::Tensor base_kv_seq_lens;
 };
 
-struct AcceptedTokenMetadata {
-  torch::Tensor accepted_lengths;
-  torch::Tensor last_tokens;
-  torch::Tensor base_positions;
-  torch::Tensor base_kv_seq_lens;
-};
-
-AcceptedTokenMetadata build_accepted_token_metadata(
-    const torch::Tensor& accepted_tokens,
-    const torch::Tensor& base_positions,
-    const torch::Tensor& base_kv_seq_lens);
-
 AcceptedState build_accepted_state(const torch::Tensor& accepted_tokens,
                                    const torch::Tensor& accepted_embeddings,
                                    const torch::Tensor& embedding_placeholder,
                                    const torch::Tensor& base_positions,
                                    const torch::Tensor& base_kv_seq_lens);
-
-torch::Tensor make_positions(const AcceptedState& state,
-                             const torch::Tensor& offsets);
-
-torch::Tensor make_kv_seq_lens(const AcceptedState& state,
-                               const torch::Tensor& offsets);
-
-// The repair row is useful only when all draft tokens were accepted. On a
-// rejection it is redirected to a future scratch position so it cannot
-// overwrite valid draft KV state.
-torch::Tensor make_repair_cache_positions(const AcceptedState& state);
 
 torch::Tensor map_positions_to_cache_slots(const torch::Tensor& block_tables,
                                            const torch::Tensor& positions,

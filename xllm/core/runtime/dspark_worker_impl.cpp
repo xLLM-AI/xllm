@@ -15,10 +15,14 @@ limitations under the License.
 
 #include "runtime/dspark_worker_impl.h"
 
-#include <c10/core/DeviceGuard.h>
+#include <c10/core/StreamGuard.h>
 #include <glog/logging.h>
 
+#include <cstdint>
 #include <optional>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "common/metrics.h"
 #include "core/common/types.h"
@@ -26,7 +30,7 @@ limitations under the License.
 #include "core/framework/config/model_config.h"
 #include "core/framework/model/model_type.h"
 #include "core/framework/sampling/sampler.h"
-#include "core/framework/speculative/draft_proposal.h"
+#include "core/framework/sampling/sampling_params.h"
 #include "runtime/llm_worker_impl.h"
 #include "util/timer.h"
 #include "util/utils.h"
@@ -88,11 +92,8 @@ bool DSparkWorkerImpl::init_model(const std::string& model_weights_path,
   CHECK_EQ(options_.num_speculative_tokens(), draft_args.block_size())
       << "Runtime block size must match the draft model configuration.";
   const ModelArgs& target_args = impl_->context_.get_model_args();
-  const int64_t draft_vocab_size = draft_args.draft_vocab_size() > 0
-                                       ? draft_args.draft_vocab_size()
-                                       : draft_args.vocab_size();
-  CHECK(draft_vocab_size == target_args.vocab_size() ||
-        draft_vocab_.draft_to_target_ids_.defined())
+  CHECK_EQ(draft_vocab_.mapped_vocab_size(draft_args.draft_vocab_size()),
+           target_args.vocab_size())
       << "A reduced draft vocabulary requires a DSpark d2t mapping.";
 
   if (draft_args.model_type() == "deepseek_v4_dspark") {
@@ -105,9 +106,10 @@ bool DSparkWorkerImpl::init_model(const std::string& model_weights_path,
   return result;
 }
 
-DraftProposal DSparkWorkerImpl::run_decode_draft(
+std::pair<torch::Tensor, torch::Tensor> DSparkWorkerImpl::run_decode_draft(
     const LlmForwardInput& input,
-    LlmForwardInput& validate_input) {
+    LlmForwardInput& validate_input,
+    LlmForwardInput& draft_forward_input) {
   Timer draft_timer;
 
   LlmForwardInput query_input;
@@ -117,11 +119,13 @@ DraftProposal DSparkWorkerImpl::run_decode_draft(
   const torch::Tensor anchors = anchor_token_ids(input);
   const int32_t num_speculative_tokens = options_.num_speculative_tokens();
 
-  LlmForwardInput logits_input = query_input.clone();
-  logits_input.skip_sampling_for_logits_only = true;
-  logits_input.return_selected_hidden = false;
-  std::optional<ForwardOutput> draft_output = run_worker_no_sync_impl(
-      *draft_impl_, logits_input, *prepare_stream_, *compute_stream_);
+  query_input.skip_sampling_for_logits_only = true;
+  std::optional<ForwardOutput> draft_output =
+      run_worker_no_sync_impl(*draft_impl_,
+                              query_input,
+                              draft_forward_input,
+                              *prepare_stream_,
+                              *compute_stream_);
   CHECK(draft_output.has_value())
       << "DSpark draft forward must return an output.";
   CHECK(draft_output->logits.defined())
@@ -130,82 +134,66 @@ DraftProposal DSparkWorkerImpl::run_decode_draft(
 
   torch::Tensor base_logits = draft_output->logits.view(
       {batch_size, num_speculative_tokens, draft_output->logits.size(-1)});
-  DraftProposal draft_proposal;
-  {
-    c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
-    SamplingParameters sampling_params_on_device = input.sampling_params;
-    prepare_draft_sampling(options_.enable_probabilistic_draft(),
-                           sampling_params_on_device);
-    sampling_params_on_device = sampling_params_on_device.to(
-        base_logits.device(), base_logits.scalar_type());
-    draft_proposal =
-        sample_markov_block(base_logits, anchors, sampling_params_on_device);
-  }
-
-  draft_proposal.keep_alive() = take_retained_inputs(*draft_output);
+  c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
+  SamplingParameters draft_sampling_params = input.sampling_params;
+  prepare_draft_sampling(options_.enable_probabilistic_draft(),
+                         draft_sampling_params);
+  auto draft_proposal =
+      sample_markov_block(base_logits,
+                          anchors,
+                          draft_sampling_params.to(base_logits.device(),
+                                                   base_logits.scalar_type()));
 
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
               draft_timer.elapsed_seconds());
   return draft_proposal;
 }
 
-DraftProposal DSparkWorkerImpl::sample_markov_block(
+std::pair<torch::Tensor, torch::Tensor> DSparkWorkerImpl::sample_markov_block(
     const torch::Tensor& base_logits,
     const torch::Tensor& anchors,
     const SamplingParameters& sampling) {
   const int64_t rows = base_logits.size(0);
   const int64_t steps = base_logits.size(1);
   const int64_t draft_model_vocab = base_logits.size(2);
-  const bool has_vocab_mapping = draft_vocab_.draft_to_target_ids_.defined();
-  const int64_t draft_vocab =
-      has_vocab_mapping ? draft_vocab_.target_vocab_size_ : draft_model_vocab;
-  DraftProposal proposal =
-      DraftProposal::preallocate(rows,
-                                 steps,
-                                 draft_vocab,
-                                 options_.enable_probabilistic_draft(),
-                                 anchors.options(),
-                                 base_logits.options().dtype(torch::kFloat32));
+  torch::Tensor token_ids = torch::empty({rows, steps}, anchors.options());
+  const auto logits_options = options_.enable_probabilistic_draft()
+                                  ? base_logits.options().dtype(torch::kFloat32)
+                                  : base_logits.options();
+  torch::Tensor draft_logits;
+  if (sampling.sampling_mode() != SamplingMode::GREEDY) {
+    draft_logits = torch::empty(
+        {rows, steps, draft_vocab_.mapped_vocab_size(draft_model_vocab)},
+        logits_options);
+  }
+  const torch::Tensor writable_draft_logits =
+      draft_vocab_.draft_logits_view(draft_logits);
+  const torch::Tensor workspace =
+      writable_draft_logits.defined()
+          ? torch::Tensor()
+          : torch::empty({rows, draft_model_vocab}, logits_options);
   auto previous = anchors;
-  torch::Tensor scratch;
   for (int64_t step = 0; step < steps; ++step) {
     auto bias = draft_impl_->get_causal_lm()->dspark_markov_bias(previous);
     CHECK_EQ(bias.sizes(), torch::IntArrayRef({rows, draft_model_vocab}))
         << "DSpark markov bias must be [rows, draft_model_vocab].";
-    torch::Tensor step_logits;
-    if (!has_vocab_mapping && proposal.logits().has_value()) {
-      // add_out into the logits page lets the sampler mutate it in place;
-      // draft_logits aliases the page directly.
-      torch::Tensor page = proposal.logits_at(step);
-      torch::add_out(page, base_logits.select(1, step), bias);
-      step_logits = page;
-    } else {
-      if (!scratch.defined()) {
-        const bool float32_scratch =
-            has_vocab_mapping && proposal.logits().has_value();
-        scratch = torch::empty(
-            base_logits.select(1, step).sizes(),
-            base_logits.options().dtype(
-                float32_scratch ? torch::kFloat32 : base_logits.scalar_type()));
-      }
-      torch::add_out(scratch, base_logits.select(1, step), bias);
-      step_logits = scratch;
-    }
+    torch::Tensor step_logits =
+        workspace.defined() ? workspace
+                            : writable_draft_logits.select(/*dim=*/1, step);
+    torch::add_out(step_logits, base_logits.select(/*dim=*/1, step), bias);
+
     auto sampled = sample(step_logits, sampling);
     maybe_broadcast_spec_tokens(sampled.next_tokens, sampling.sampling_mode());
-    if (has_vocab_mapping) {
-      if (proposal.logits().has_value()) {
-        sampled.draft_logits = step_logits;
-        draft_vocab_.remap(sampled, proposal.logits_at(step));
-      } else {
-        sampled.draft_logits = torch::Tensor();
-        draft_vocab_.remap(sampled);
-      }
+    torch::Tensor target_logits;
+    if (draft_logits.defined() && workspace.defined()) {
+      sampled.draft_logits = step_logits;
+      target_logits = draft_logits.select(/*dim=*/1, step);
     }
-    proposal.tokens_at(step).copy_(sampled.next_tokens);
+    draft_vocab_.remap(sampled, std::move(target_logits));
+    token_ids.select(/*dim=*/1, step).copy_(sampled.next_tokens);
     previous = sampled.next_tokens;
   }
-  return proposal;
+  return {std::move(token_ids), std::move(draft_logits)};
 }
 
 }  // namespace xllm

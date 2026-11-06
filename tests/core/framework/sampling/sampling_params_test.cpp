@@ -20,34 +20,7 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 
-#include <utility>
-
 namespace xllm {
-
-TEST(SamplingParamsTest, ForwardedAccessRetainsParameterValueSemantics) {
-  SamplingParameters params;
-  torch::Tensor temperatures = torch::tensor({0.5F, 1.0F});
-  SamplingParameters& configured =
-      params.temperatures(std::move(temperatures)).logprobs(true);
-  EXPECT_EQ(&configured, &params);
-  EXPECT_FALSE(temperatures.defined());
-
-  const SamplingParameters& view = params;
-  EXPECT_EQ(&view.temperatures(), &params.temperatures());
-  EXPECT_TRUE(view.logprobs());
-
-  SamplingParameters copy = params;
-  copy.temperatures() = torch::tensor({0.25F});
-  copy.logprobs() = false;
-  EXPECT_TRUE(torch::equal(view.temperatures(), torch::tensor({0.5F, 1.0F})));
-  EXPECT_TRUE(view.logprobs());
-  EXPECT_TRUE(torch::equal(copy.temperatures(), torch::tensor({0.25F})));
-  EXPECT_FALSE(copy.logprobs());
-
-  torch::Tensor moved = std::move(params).temperatures();
-  EXPECT_TRUE(torch::equal(moved, torch::tensor({0.5F, 1.0F})));
-  EXPECT_FALSE(params.temperatures().defined());
-}
 
 TEST(SamplingParamsTest, NormalizesGreedyAndSmallTemperatureRows) {
   RequestSamplingParam greedy;
@@ -79,7 +52,6 @@ TEST(SamplingParamsTest, MinimumConstraintsExpandForVerifyAndStayOffDrafts) {
   params.bad_words() = torch::ones({2, 1, 2}, torch::kInt64);
   params.bad_word_suffix() = torch::ones({2, 1}, torch::kInt64);
   params.seeds() = torch::ones({2}, torch::kInt64);
-  EXPECT_TRUE(params.has_sampling_fields());
   for (const auto& field : kSamplingFields) {
     if (!field.per_request) {
       repeat_interleave_if_defined(field.member(params), /*repeats=*/3);
@@ -104,7 +76,6 @@ TEST(SamplingParamsTest, MinimumConstraintsExpandForVerifyAndStayOffDrafts) {
     EXPECT_FALSE(draft.bad_words().defined());
     EXPECT_FALSE(draft.bad_word_suffix().defined());
     EXPECT_FALSE(draft.seeds().defined());
-    EXPECT_FALSE(draft.has_sampling_fields());
   }
   EXPECT_TRUE(params.min_token_ids().defined());
 }
@@ -136,7 +107,6 @@ TEST(SamplingParamsTest, DeviceTransferPreservesSamplingStateAndTensorTypes) {
 
   params.sampling_mode() = SamplingMode::MIXED;
   params.logprobs() = true;
-  params.return_logits() = true;
   params.is_embeddings() = true;
   params.max_top_logprobs() = 3;
 
@@ -189,7 +159,6 @@ TEST(SamplingParamsTest, DeviceTransferPreservesSamplingStateAndTensorTypes) {
   EXPECT_EQ(transferred.num_sample_seqs(), 2);
   EXPECT_EQ(transferred.sampling_mode(), SamplingMode::MIXED);
   EXPECT_TRUE(transferred.logprobs());
-  EXPECT_TRUE(transferred.return_logits());
   EXPECT_TRUE(transferred.is_embeddings());
   EXPECT_EQ(transferred.max_top_logprobs(), 3);
 }
@@ -203,7 +172,6 @@ TEST(SamplingParamsTest, ReinitializationClearsPreviousBatchState) {
 
   params.sampling_mode() = SamplingMode::MIXED;
   params.logprobs() = true;
-  params.return_logits() = true;
   params.is_embeddings() = true;
   params.max_top_logprobs() = 5;
 
@@ -221,7 +189,6 @@ TEST(SamplingParamsTest, ReinitializationClearsPreviousBatchState) {
 
   EXPECT_EQ(params.sampling_mode(), SamplingMode::GREEDY);
   EXPECT_FALSE(params.logprobs());
-  EXPECT_FALSE(params.return_logits());
   EXPECT_FALSE(params.is_embeddings());
   EXPECT_EQ(params.max_top_logprobs(), 0);
 

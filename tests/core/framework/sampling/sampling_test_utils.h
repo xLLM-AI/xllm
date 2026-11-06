@@ -98,29 +98,21 @@ inline torch::TensorOptions get_test_options(
   return torch::dtype(dtype).device(get_test_device());
 }
 
-// Drives random rejection_sample() over normalized
-// per-position probs. Without an explicit bonus_row, the bonus row repeats
-// the last target row's distribution. The seed is for reproducibility only —
-// deterministic tests construct p/q in {0, 1} so the outcome is
-// draw-independent.
 inline torch::Tensor random_sample_from_probs(
-    const DraftProposal& proposal,
     const torch::Tensor& target_probs,
     int64_t uniform_seed,
-    const torch::Tensor& bonus_row = torch::Tensor()) {
+    const torch::Tensor& draft_token_ids,
+    const torch::Tensor& draft_logits = {}) {
   const int64_t batch_size = target_probs.size(0);
-  const torch::Tensor bonus = bonus_row.defined()
-                                  ? bonus_row
-                                  : target_probs.select(/*dim=*/1, /*index=*/-1)
-                                        .log()
-                                        .unsqueeze(/*dim=*/1);
+  const torch::Tensor bonus =
+      target_probs.select(/*dim=*/1, /*index=*/-1).log().unsqueeze(/*dim=*/1);
   const torch::Tensor target_logits =
       torch::cat({target_probs.log(), bonus}, /*dim=*/1);
   const SamplingParameters params =
       make_rejection_params(torch::ones({batch_size}, torch::kBool));
   torch::manual_seed(uniform_seed);
-  SampleOutput output =
-      rejection_sample(params, proposal, flatten_rows(target_logits));
+  SampleOutput output = rejection_sample(
+      params, draft_token_ids, draft_logits, flatten_rows(target_logits));
   return output.next_tokens;
 }
 

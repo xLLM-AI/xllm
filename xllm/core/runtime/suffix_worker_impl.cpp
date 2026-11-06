@@ -216,13 +216,12 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_decode(
           .view({num_sequences, num_speculative_tokens})
           .to(target_output.logits.device());
 
-  DraftProposal draft_proposal = DraftProposal(std::move(draft_token_ids));
-
   SampleOutput val_output;
   {
     AUTO_COUNTER(speculative_execution_latency_seconds_validation);
     val_output = run_rejection_sampling(input.sampling_params,
-                                        draft_proposal,
+                                        draft_token_ids,
+                                        {},
                                         target_output.logits,
                                         target_output.sample_output.embeddings);
   }

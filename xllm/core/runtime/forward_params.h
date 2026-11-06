@@ -19,6 +19,7 @@ limitations under the License.
 #include <torch/types.h>
 
 #include <cstring>
+#include <iterator>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <numeric>
@@ -635,29 +636,6 @@ inline void append_failed_request_ids(
       std::make_move_iterator(failed_request_ids.begin()),
       std::make_move_iterator(failed_request_ids.end()));
   failed_request_ids.clear();
-}
-
-inline void transfer_retained_inputs(ForwardOutput& destination,
-                                     ForwardOutput& source) {
-  CHECK_NE(&destination, &source)
-      << "transfer_retained_inputs cannot alias source and destination";
-  if (source.retained_inputs.empty()) {
-    return;
-  }
-  if (destination.retained_inputs.empty()) {
-    destination.retained_inputs = std::move(source.retained_inputs);
-  } else {
-    destination.retained_inputs.insert(
-        destination.retained_inputs.end(),
-        std::make_move_iterator(source.retained_inputs.begin()),
-        std::make_move_iterator(source.retained_inputs.end()));
-  }
-  source.retained_inputs.clear();
-}
-
-inline std::vector<std::shared_ptr<const void>> take_retained_inputs(
-    ForwardOutput& source) {
-  return std::exchange(source.retained_inputs, {});
 }
 
 struct RawSampleOutput {

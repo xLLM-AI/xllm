@@ -158,8 +158,9 @@ void ScheduleOverlapState::retire_prior_inputs() {
     CHECK(deferred_release_->ready_event->synchronize())
         << "failed to retire deferred overlap input";
   }
-  deferred_release_ = DeferredRelease{prior_output_.ready_event,
-                                      take_retained_inputs(prior_output_)};
+  deferred_release_ =
+      DeferredRelease{prior_output_.ready_event,
+                      std::exchange(prior_output_.retained_inputs, {})};
 }
 
 void ScheduleOverlapState::retire_deferred_inputs(bool wait) {

@@ -137,11 +137,6 @@ SampleOutput sample(torch::Tensor& logits, const SamplingParameters& params) {
 
   process_logits(logits, params);
 
-  // Keep the model dtype; consumers upcast where the reduction needs fp32.
-  if (params.return_logits()) {
-    output.draft_logits = logits;
-  }
-
   if (params.sampling_mode() == SamplingMode::MIXED) {
     const torch::Tensor& do_sample = params.require_do_sample();
     CHECK_EQ(do_sample.dim(), 1)

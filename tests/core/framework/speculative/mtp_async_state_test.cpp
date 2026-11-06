@@ -136,9 +136,6 @@ TEST(MtpAsyncStateTest, ExtractsTargetBaseKvLengthsFromVerifyLayouts) {
 }
 
 TEST(MtpAsyncStateTest, ComputesSharedSpecVerifyBlockTableCapacity) {
-  EXPECT_EQ(speculative_verify_block_table_capacity(262144, 16), 16385);
-  EXPECT_EQ(speculative_verify_block_table_capacity(262144, 32), 8193);
-  EXPECT_EQ(speculative_verify_block_table_capacity(262144, 64), 4097);
   EXPECT_EQ(speculative_verify_block_table_capacity(262144, 128), 2049);
   EXPECT_EQ(speculative_verify_block_table_capacity(300000, 128), 2345);
 }
@@ -182,30 +179,6 @@ TEST(MtpAsyncStateTest, BuildsPinnedZeroFilledSpecVerifyControlBlockTable) {
 }
 #endif
 
-TEST(MtpAsyncStateTest, MaterializesDraftColumnsForEagerFallback) {
-  torch::Tensor verify_tokens =
-      torch::tensor({10, -1, -1, 20, -1, -1}, torch::kInt);
-  const std::vector<torch::Tensor> draft_sources = {
-      torch::tensor({11, 21}, torch::kLong),
-      torch::tensor({12, 22}, torch::kLong)};
-
-  torch::Tensor materialized =
-      materialize_speculative_verify_tokens(verify_tokens, draft_sources);
-
-  EXPECT_EQ(materialized.data_ptr(), verify_tokens.data_ptr());
-  EXPECT_TRUE(torch::equal(
-      materialized, torch::tensor({10, 11, 12, 20, 21, 22}, torch::kInt)));
-}
-
-TEST(MtpAsyncStateTest, LeavesOrdinaryEagerTokensUnchanged) {
-  const torch::Tensor verify_tokens = torch::tensor({10, 11}, torch::kInt);
-  torch::Tensor materialized =
-      materialize_speculative_verify_tokens(verify_tokens, {});
-
-  EXPECT_EQ(materialized.data_ptr(), verify_tokens.data_ptr());
-  EXPECT_TRUE(torch::equal(materialized, verify_tokens));
-}
-
 TEST(MtpAsyncStateTest, SelectsGraphVerifyTokenOverrideForEagerExecution) {
   const torch::Tensor tokens = torch::tensor({1, 2}, torch::kInt);
   LlmModelParams native_params;
@@ -241,8 +214,6 @@ TEST(MtpAsyncStateTest, BuildsMixedAcceptanceStateWithoutHostRoundTrip) {
                                                    base_positions,
                                                    base_kv_seq_lens);
 
-  EXPECT_TRUE(torch::equal(state.accepted_lengths,
-                           torch::tensor({4, 2, 1}, torch::kLong)));
   EXPECT_TRUE(torch::equal(state.all_draft_accepted,
                            torch::tensor({true, false, false})));
   EXPECT_TRUE(torch::equal(state.last_tokens, torch::tensor({13, 21, 30})));
@@ -261,47 +232,6 @@ TEST(MtpAsyncStateTest, BuildsMixedAcceptanceStateWithoutHostRoundTrip) {
                            torch::tensor({105, 203, 302}, torch::kLong)));
 }
 
-TEST(MtpAsyncStateTest, BuildsTargetMetadataWithoutEmbeddingGather) {
-  const torch::Tensor accepted_tokens = torch::tensor(
-      {{10, 11, 12, 13}, {20, 21, -1, -1}, {30, -1, -1, -1}}, torch::kLong);
-  const torch::Tensor base_positions = torch::tensor({100, 200, 300});
-  const torch::Tensor base_kv_seq_lens = torch::tensor({101, 201, 301});
-
-  const AcceptedTokenMetadata metadata = build_accepted_token_metadata(
-      accepted_tokens, base_positions, base_kv_seq_lens);
-
-  EXPECT_TRUE(torch::equal(metadata.accepted_lengths,
-                           torch::tensor({4, 2, 1}, torch::kLong)));
-  EXPECT_TRUE(torch::equal(metadata.last_tokens, torch::tensor({13, 21, 30})));
-  EXPECT_TRUE(torch::equal(metadata.base_positions,
-                           torch::tensor({104, 202, 301}, torch::kLong)));
-  EXPECT_TRUE(torch::equal(metadata.base_kv_seq_lens,
-                           torch::tensor({105, 203, 302}, torch::kLong)));
-}
-
-TEST(MtpAsyncStateTest, BuildsRowMetadataForChunkedAndDecodeLayouts) {
-  AcceptedState state;
-  state.base_positions = torch::tensor({104, 202, 301}, torch::kLong);
-  state.base_kv_seq_lens = torch::tensor({105, 203, 302}, torch::kLong);
-  const torch::Tensor offsets = torch::tensor({-1, 0}, torch::kLong);
-
-  EXPECT_TRUE(torch::equal(
-      make_positions(state, offsets),
-      torch::tensor({{103, 104}, {201, 202}, {300, 301}}, torch::kLong)));
-  EXPECT_TRUE(torch::equal(
-      make_kv_seq_lens(state, offsets),
-      torch::tensor({104, 105, 202, 203, 301, 302}, torch::kLong)));
-}
-
-TEST(MtpAsyncStateTest, RedirectsUnusedRepairRowsToScratchPositions) {
-  AcceptedState state;
-  state.base_positions = torch::tensor({104, 202, 301}, torch::kLong);
-  state.all_draft_accepted = torch::tensor({true, false, false});
-
-  EXPECT_TRUE(torch::equal(make_repair_cache_positions(state),
-                           torch::tensor({103, 203, 302}, torch::kLong)));
-}
-
 TEST(MtpAsyncStateTest, MapsPositionsAcrossCacheBlockBoundaries) {
   const torch::Tensor block_tables =
       torch::tensor({{10, 11, 12}, {20, 21, 22}}, torch::kInt);
@@ -310,23 +240,6 @@ TEST(MtpAsyncStateTest, MapsPositionsAcrossCacheBlockBoundaries) {
   EXPECT_TRUE(torch::equal(
       map_positions_to_cache_slots(block_tables, positions, /*block_size=*/4),
       torch::tensor({43, 44, 87, 88}, torch::kInt)));
-}
-
-TEST(MtpAsyncStateTest, BuildsLaterDraftMetadataFromAcceptedDeviceBase) {
-  AcceptedState state;
-  state.base_positions = torch::tensor({3, 7}, torch::kLong);
-  state.base_kv_seq_lens = torch::tensor({4, 8}, torch::kInt);
-  const torch::Tensor offsets = torch::tensor({2}, torch::kLong);
-  const torch::Tensor positions = make_positions(state, offsets);
-  const torch::Tensor block_tables =
-      torch::tensor({{10, 11, 12}, {20, 21, 22}}, torch::kInt);
-
-  EXPECT_TRUE(torch::equal(positions, torch::tensor({{5}, {9}}, torch::kLong)));
-  EXPECT_TRUE(torch::equal(make_kv_seq_lens(state, offsets),
-                           torch::tensor({6, 10}, torch::kLong)));
-  EXPECT_TRUE(torch::equal(
-      map_positions_to_cache_slots(block_tables, positions, /*block_size=*/4),
-      torch::tensor({45, 89}, torch::kInt)));
 }
 
 }  // namespace

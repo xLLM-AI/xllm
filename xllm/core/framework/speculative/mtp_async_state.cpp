@@ -27,11 +27,7 @@ namespace {
 
 torch::Tensor gather_sequence_rows(const torch::Tensor& values,
                                    const torch::Tensor& indices) {
-  CHECK_GE(values.dim(), 2);
-  CHECK_EQ(values.size(0), indices.numel());
-  torch::Tensor gather_index =
-      indices.to(torch::dtype(torch::kLong).device(indices.device()))
-          .view({-1, 1});
+  torch::Tensor gather_index = indices.view({-1, 1});
   for (int64_t dim = 2; dim < values.dim(); ++dim) {
     gather_index = gather_index.unsqueeze(-1);
   }
@@ -123,38 +119,40 @@ AcceptedState build_accepted_state(const torch::Tensor& accepted_tokens,
                                    const torch::Tensor& embedding_placeholder,
                                    const torch::Tensor& base_positions,
                                    const torch::Tensor& base_kv_seq_lens) {
-  AcceptedTokenMetadata token_metadata = build_accepted_token_metadata(
-      accepted_tokens, base_positions, base_kv_seq_lens);
-  const bool compact = accepted_embeddings.dim() == 2;
-  CHECK(compact || accepted_embeddings.dim() == 3);
+  CHECK_EQ(accepted_tokens.dim(), 2);
   const int64_t batch_size = accepted_tokens.size(0);
-  CHECK_EQ(accepted_embeddings.size(0), compact ? batch_size * 2 : batch_size);
-  const torch::Tensor embedding_rows =
-      compact ? accepted_embeddings.view(
-                    {batch_size, 2, accepted_embeddings.size(-1)})
-              : accepted_embeddings;
+  CHECK_GT(accepted_tokens.size(/*dim=*/1), 0);
+  CHECK_GE(base_positions.numel(), batch_size);
+  CHECK_GE(base_kv_seq_lens.numel(), batch_size);
+  CHECK_EQ(accepted_embeddings.dim(), 3);
+  CHECK_EQ(accepted_embeddings.size(/*dim=*/0), batch_size);
 
   AcceptedState state;
-  state.accepted_lengths = token_metadata.accepted_lengths;
+  const torch::Tensor accepted_lengths =
+      accepted_tokens.ge(/*other=*/0).sum(/*dim=*/1);
+  torch::Tensor last_indices = (accepted_lengths - 1).clamp_min(/*min=*/0);
+  state.last_tokens = gather_sequence_rows(accepted_tokens, last_indices);
+  state.base_positions = base_positions.flatten()
+                             .slice(/*dim=*/0, /*start=*/0, batch_size)
+                             .to(torch::kLong) +
+                         accepted_lengths;
+  state.base_kv_seq_lens = base_kv_seq_lens.flatten()
+                               .slice(/*dim=*/0, /*start=*/0, batch_size)
+                               .to(torch::kLong) +
+                           accepted_lengths;
   state.all_draft_accepted =
-      state.accepted_lengths.eq(accepted_tokens.size(/*dim=*/1));
-  state.last_tokens = token_metadata.last_tokens;
-  state.base_positions = token_metadata.base_positions;
-  state.base_kv_seq_lens = token_metadata.base_kv_seq_lens;
+      accepted_lengths.eq(accepted_tokens.size(/*dim=*/1));
 
-  torch::Tensor previous_indices = (state.accepted_lengths - 2).clamp_min(0);
+  torch::Tensor previous_indices = (accepted_lengths - 2).clamp_min(/*min=*/0);
   torch::Tensor gathered_previous_tokens =
       gather_sequence_rows(accepted_tokens, previous_indices);
-  torch::Tensor has_previous = state.accepted_lengths.gt(1);
+  torch::Tensor has_previous = accepted_lengths.gt(/*other=*/1);
   state.previous_tokens =
       torch::where(has_previous, gathered_previous_tokens, state.last_tokens);
-  torch::Tensor last_indices = (state.accepted_lengths - 1).clamp_min(0);
   state.last_embeddings =
-      compact ? embedding_rows.select(1, 1)
-              : gather_sequence_rows(embedding_rows, last_indices);
+      gather_sequence_rows(accepted_embeddings, last_indices);
   torch::Tensor gathered_previous_embeddings =
-      compact ? embedding_rows.select(1, 0)
-              : gather_sequence_rows(embedding_rows, previous_indices);
+      gather_sequence_rows(accepted_embeddings, previous_indices);
   torch::Tensor placeholder = embedding_placeholder;
   if (placeholder.dim() == 1) {
     placeholder = placeholder.unsqueeze(0);
@@ -165,49 +163,6 @@ AcceptedState build_accepted_state(const torch::Tensor& accepted_tokens,
                                            placeholder);
 
   return state;
-}
-
-AcceptedTokenMetadata build_accepted_token_metadata(
-    const torch::Tensor& accepted_tokens,
-    const torch::Tensor& base_positions,
-    const torch::Tensor& base_kv_seq_lens) {
-  CHECK_EQ(accepted_tokens.dim(), 2);
-  const int64_t batch_size = accepted_tokens.size(0);
-  CHECK_GT(accepted_tokens.size(1), 0);
-  CHECK_GE(base_positions.numel(), batch_size);
-  CHECK_GE(base_kv_seq_lens.numel(), batch_size);
-
-  AcceptedTokenMetadata metadata;
-  metadata.accepted_lengths =
-      accepted_tokens.ge(0).sum(/*dim=*/1).to(torch::kLong);
-  torch::Tensor last_indices = (metadata.accepted_lengths - 1).clamp_min(0);
-  metadata.last_tokens = gather_sequence_rows(accepted_tokens, last_indices);
-  metadata.base_positions =
-      base_positions.flatten().slice(0, 0, batch_size).to(torch::kLong) +
-      metadata.accepted_lengths;
-  metadata.base_kv_seq_lens =
-      base_kv_seq_lens.flatten().slice(0, 0, batch_size).to(torch::kLong) +
-      metadata.accepted_lengths;
-  return metadata;
-}
-
-torch::Tensor make_positions(const AcceptedState& state,
-                             const torch::Tensor& offsets) {
-  return state.base_positions.unsqueeze(1) +
-         offsets.to(state.base_positions.options()).unsqueeze(0);
-}
-
-torch::Tensor make_kv_seq_lens(const AcceptedState& state,
-                               const torch::Tensor& offsets) {
-  return (state.base_kv_seq_lens.unsqueeze(1) +
-          offsets.to(state.base_kv_seq_lens.options()).unsqueeze(0))
-      .flatten();
-}
-
-torch::Tensor make_repair_cache_positions(const AcceptedState& state) {
-  return torch::where(state.all_draft_accepted,
-                      state.base_positions - 1,
-                      state.base_positions + 1);
 }
 
 torch::Tensor map_positions_to_cache_slots(const torch::Tensor& block_tables,

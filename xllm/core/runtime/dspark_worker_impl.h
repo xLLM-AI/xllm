@@ -15,8 +15,9 @@ limitations under the License.
 
 #pragma once
 
+#include <utility>
+
 #include "core/framework/sampling/sampling_params.h"
-#include "core/framework/speculative/draft_proposal.h"
 #include "runtime/dflash_worker_impl.h"
 
 namespace xllm {
@@ -34,13 +35,16 @@ class DSparkWorkerImpl final : public DFlashWorkerImpl {
                   MasterStatus master_status) override;
 
  protected:
-  DraftProposal run_decode_draft(const LlmForwardInput& input,
-                                 LlmForwardInput& validate_input) override;
+  std::pair<torch::Tensor, torch::Tensor> run_decode_draft(
+      const LlmForwardInput& input,
+      LlmForwardInput& validate_input,
+      LlmForwardInput& draft_forward_input) override;
 
  private:
-  DraftProposal sample_markov_block(const torch::Tensor& base_logits,
-                                    const torch::Tensor& anchors,
-                                    const SamplingParameters& sampling);
+  std::pair<torch::Tensor, torch::Tensor> sample_markov_block(
+      const torch::Tensor& base_logits,
+      const torch::Tensor& anchors,
+      const SamplingParameters& sampling);
 };
 
 }  // namespace xllm

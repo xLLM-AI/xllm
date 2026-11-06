@@ -24,7 +24,6 @@ limitations under the License.
 
 #include "common/macros.h"
 #include "core/framework/parallel_state/process_group.h"
-#include "core/framework/speculative/draft_proposal.h"
 #include "core/framework/speculative/spec_verify.h"
 #include "framework/sampling/sampling_params.h"
 #include "runtime/options.h"
@@ -219,19 +218,6 @@ class SpeculativeWorkerImpl : public WorkerImpl {
       c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
       broadcast_spec_tokens(tokens);
     }
-  }
-
-  void finalize_output_on_stream(ForwardOutput& output,
-                                 Stream& stream,
-                                 bool allow_async) const {
-    if (allow_async) {
-      output.ready_event = stream.record_event_or_sync();
-      return;
-    }
-    const int32_t ret = stream.synchronize();
-    CHECK_EQ(ret, 0) << "failed to synchronize speculative compute stream, ret="
-                     << ret;
-    output.retained_inputs.clear();
   }
 
  protected:

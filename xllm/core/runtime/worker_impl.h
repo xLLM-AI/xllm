@@ -205,10 +205,9 @@ class WorkerImpl {
   enum class ForwardCompletion : int8_t {
     CALLER_MANAGED = 0,
     RECORD_EVENT,
+    CALLER_RETAINS_INPUT,
   };
 
-  // No-sync LLM/VLM outputs retain their inputs. Composite callers manage
-  // completion after their final operation; overlap callers request an event.
   virtual std::optional<ForwardOutput> execute_no_sync_on_stream(
       const LlmForwardInput& input,
       Stream& compute_stream,
@@ -372,6 +371,9 @@ class WorkerImpl {
   void finalize_no_sync_output(ForwardOutput& output,
                                const Input& input,
                                ForwardCompletion completion) {
+    if (completion == ForwardCompletion::CALLER_RETAINS_INPUT) {
+      return;
+    }
     output.retained_inputs.emplace_back(std::make_shared<Input>(input.clone()));
     if (completion == ForwardCompletion::RECORD_EVENT) {
       output.ready_event = device_.current_stream()->record_event_or_sync();
