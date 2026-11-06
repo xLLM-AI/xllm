@@ -1097,7 +1097,13 @@ ForwardOutput TaskExecutionPipeline::consume(uint32_t slot_id) {
       output.ready_event = ready;
     }
     std::vector<std::shared_ptr<const void>> owners;
-    owners.reserve(2);
+    owners.reserve(3);
+    if (slot.kv_load.has_value()) {
+      // The producer fence must outlive the reload-consuming worker task.
+      owners.emplace_back(
+          std::make_shared<HostKVLoadHandle>(std::move(*slot.kv_load)));
+      slot.kv_load.reset();
+    }
     if (input_domain_ == TaskInputDomain::VLM) {
       owners.emplace_back(
           std::make_shared<VlmForwardInput>(std::move(slot.worker_vlm_input)));

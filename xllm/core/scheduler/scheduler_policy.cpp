@@ -371,7 +371,8 @@ void SchedulerPolicy::schedule_prefill_from_queue(
     // requests are already removed by schedule_one_prefill_request; only
     // temporarily remove an unchanged queue head so later requests can run.
     if (result == PrefillScheduleResult::SCHEDULED &&
-        prefill_sequences.empty() && !queue->empty() && queue->top() == request) {
+        prefill_sequences.empty() && !queue->empty() &&
+        queue->top() == request) {
       skipped.emplace_back(request);
       queue->pop_top();
       continue;

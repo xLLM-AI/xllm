@@ -983,176 +983,98 @@ TYPED_TEST(ScheduleOverlapTest,
 }
 
 TYPED_TEST(ScheduleOverlapTest,
-           DpSpeculativeNonDriverDefersTokenlessInputsAfterClearingOutput) {
+           CacheOnlyNonDriverDefersTokenlessInputsAfterClearingOutput) {
   ScopedConfigValue<bool> eplb(EPLBConfig::get_instance().enable_eplb(), false);
-  std::promise<void> callback_entered;
-  auto entered = callback_entered.get_future();
-  std::promise<void> release_callback;
-  auto callback_release = release_callback.get_future().share();
-  std::atomic<bool> device_finished{false};
-  std::atomic<bool> owner_released{false};
-  std::atomic<bool> owner_released_early{false};
-  std::function<void()> callback = [&]() {
-    callback_entered.set_value();
-    callback_release.wait_for(10s);
-    device_finished.store(true);
-  };
-  StreamEventPtr completion;
-  const ParallelArgs parallel_args(/*rank=*/1,
-                                   /*world_size=*/4,
-                                   /*dp_size=*/2,
-                                   /*process_group=*/nullptr);
-  OverlapTestWorker worker({ForwardOutput{}, std::nullopt, token_output(31)},
-                           parallel_args,
-                           OverlapTestWorker::ContinuationMode::CUSTOM_REBUILD,
-                           /*speculative_decode=*/true);
-  worker.set_output_hook([&](ForwardOutput& output, Stream& stream) {
-    auto guard = stream.set_stream_guard();
-    CHECK_EQ(
-        aclrtLaunchHostFunc(
-            stream.get_stream()->stream(),
-            [](void* data) { (*static_cast<std::function<void()>*>(data))(); },
-            &callback),
-        ACL_SUCCESS);
-    output.ready_event = stream.record_event();
-    CHECK(output.ready_event != nullptr);
-    completion = output.ready_event;
-    output.retained_inputs.emplace_back(
-        std::shared_ptr<int32_t>(new int32_t(42), [&](int32_t* value) {
-          owner_released_early.store(!device_finished.load());
-          owner_released.store(true);
-          delete value;
-        }));
-  });
-  auto first = worker.step_async(step_input<TypeParam>(/*decode=*/false))
-                   .toUnsafeFuture()
-                   .thenValue([](std::optional<ForwardOutput> output) {
-                     return output.has_value();
-                   });
-  first.wait(2s);
-  const bool first_ready_without_completion = first.isReady();
-  const std::future_status callback_status = entered.wait_for(2s);
-  auto second = worker.step_async(step_input<TypeParam>(/*decode=*/false))
-                    .toUnsafeFuture()
-                    .thenValue([](std::optional<ForwardOutput> output) {
-                      return output.has_value();
-                    });
-  second.wait(2s);
-  const bool cleared_before_completion = second.isReady();
-  const bool released_before_completion = owner_released.load();
-  release_callback.set_value();
-  first.wait(2s);
-  second.wait(2s);
-  EXPECT_TRUE(first_ready_without_completion);
-  EXPECT_EQ(callback_status, std::future_status::ready);
-  EXPECT_TRUE(cleared_before_completion);
-  EXPECT_FALSE(released_before_completion);
-  ASSERT_TRUE(first.isReady());
-  ASSERT_TRUE(second.isReady());
-  EXPECT_TRUE(std::move(first).get());
-  EXPECT_FALSE(std::move(second).get());
-  ASSERT_NE(completion, nullptr);
-  ASSERT_TRUE(completion->synchronize());
-  worker.set_output_hook({});
-  const auto next =
-      worker.step_async(step_input<TypeParam>(/*decode=*/false)).get();
-  EXPECT_TRUE(next.has_value());
-  EXPECT_TRUE(owner_released.load());
-  EXPECT_FALSE(owner_released_early.load());
-}
-
-TYPED_TEST(ScheduleOverlapTest,
-           DpSpeculativeNonDriverRetiresInputsBeforeClearingPriorOutput) {
-  ScopedConfigValue<bool> eplb(EPLBConfig::get_instance().enable_eplb(), false);
-  std::promise<void> callback_entered;
-  auto entered = callback_entered.get_future();
-  std::promise<void> release_callback;
-  auto callback_release = release_callback.get_future().share();
-  std::atomic<bool> device_finished{false};
-  std::atomic<bool> owner_released{false};
-  std::atomic<bool> owner_released_early{false};
-  std::atomic<bool> returned_after_device_completion{false};
-  std::weak_ptr<StreamEvent> prior_ready_event;
-  std::function<void()> callback = [&]() {
-    callback_entered.set_value();
-    callback_release.wait_for(10s);
-    device_finished.store(true);
-  };
-  std::promise<void> empty_output_produced;
-  auto produced = empty_output_produced.get_future();
-  const ParallelArgs parallel_args(/*rank=*/1,
-                                   /*world_size=*/4,
-                                   /*dp_size=*/2,
-                                   /*process_group=*/nullptr);
-  OverlapTestWorker worker({token_output(17), std::nullopt},
-                           parallel_args,
-                           OverlapTestWorker::ContinuationMode::CUSTOM_REBUILD,
-                           /*speculative_decode=*/true);
-  worker.set_output_hook([&](ForwardOutput& output, Stream& stream) {
-    auto guard = stream.set_stream_guard();
-    CHECK_EQ(
-        aclrtLaunchHostFunc(
-            stream.get_stream()->stream(),
-            [](void* data) { (*static_cast<std::function<void()>*>(data))(); },
-            &callback),
-        ACL_SUCCESS);
-    output.ready_event = stream.record_event();
-    CHECK(output.ready_event != nullptr);
-    prior_ready_event = output.ready_event;
-    output.retained_inputs.emplace_back(
-        std::shared_ptr<int32_t>(new int32_t(42), [&](int32_t* value) {
-          owner_released_early.store(!device_finished.load());
-          owner_released.store(true);
-          delete value;
-        }));
-  });
-  worker.set_empty_output_hook([&]() { empty_output_produced.set_value(); });
-  auto first = worker.step_async(step_input<TypeParam>(/*decode=*/false))
-                   .toUnsafeFuture()
-                   .thenValue([](std::optional<ForwardOutput> output) {
-                     return output.has_value();
-                   });
-  first.wait(2s);
-  const bool first_ready_without_device_completion = first.isReady();
-  const std::future_status callback_status = entered.wait_for(2s);
-  auto second =
-      worker.step_async(step_input<TypeParam>(/*decode=*/false))
-          .toUnsafeFuture()
-          .thenValue([&](std::optional<ForwardOutput> output) {
-            returned_after_device_completion.store(device_finished.load());
-            return output.has_value();
-          });
-  const std::future_status produced_status = produced.wait_for(2s);
-  second.wait(50ms);
-  const bool returned_early = second.isReady();
-  const bool released_before_device_completion = owner_released.load();
-  const bool prior_event_retained =
-      produced_status == std::future_status::ready &&
-      !prior_ready_event.expired();
-
-  // Unblock device work before assertions so failures can drain the worker.
-  release_callback.set_value();
-  first.wait(2s);
-  second.wait(2s);
-  const bool first_ready = first.isReady();
-  const bool second_ready = second.isReady();
-  if (!first_ready || !second_ready) {
-    worker.begin_shutdown();
+  for (const ParallelArgs& parallel_args :
+       {ParallelArgs(/*rank=*/1,
+                     /*world_size=*/2,
+                     /*dp_size=*/1,
+                     /*process_group=*/nullptr),
+        ParallelArgs(/*rank=*/1,
+                     /*world_size=*/2,
+                     /*dp_size=*/1,
+                     /*cp_size=*/2,
+                     /*process_group=*/nullptr,
+                     /*ep_size=*/1),
+        ParallelArgs(/*rank=*/1,
+                     /*world_size=*/4,
+                     /*dp_size=*/2,
+                     /*process_group=*/nullptr)}) {
+    SCOPED_TRACE("dp_size=" + std::to_string(parallel_args.dp_size()) +
+                 ", cp_size=" + std::to_string(parallel_args.cp_size()));
+    std::promise<void> callback_entered;
+    auto entered = callback_entered.get_future();
+    std::promise<void> release_callback;
+    auto callback_release = release_callback.get_future().share();
+    std::atomic<bool> device_finished{false};
+    std::atomic<bool> owner_released{false};
+    std::atomic<bool> owner_released_early{false};
+    std::function<void()> callback = [&]() {
+      callback_entered.set_value();
+      callback_release.wait_for(10s);
+      device_finished.store(true);
+    };
+    StreamEventPtr completion;
+    OverlapTestWorker worker(
+        {ForwardOutput{}, std::nullopt, token_output(31)},
+        parallel_args,
+        OverlapTestWorker::ContinuationMode::CUSTOM_REBUILD,
+        /*speculative_decode=*/parallel_args.dp_size() > 1);
+    worker.set_output_hook([&](ForwardOutput& output, Stream& stream) {
+      auto guard = stream.set_stream_guard();
+      CHECK_EQ(aclrtLaunchHostFunc(
+                   stream.get_stream()->stream(),
+                   [](void* data) {
+                     (*static_cast<std::function<void()>*>(data))();
+                   },
+                   &callback),
+               ACL_SUCCESS);
+      output.ready_event = stream.record_event();
+      CHECK(output.ready_event != nullptr);
+      completion = output.ready_event;
+      output.retained_inputs.emplace_back(
+          std::shared_ptr<int32_t>(new int32_t(42), [&](int32_t* value) {
+            owner_released_early.store(!device_finished.load());
+            owner_released.store(true);
+            delete value;
+          }));
+    });
+    auto first = worker.step_async(step_input<TypeParam>(/*decode=*/false))
+                     .toUnsafeFuture()
+                     .thenValue([](std::optional<ForwardOutput> output) {
+                       return output.has_value();
+                     });
+    first.wait(2s);
+    const bool first_ready_without_completion = first.isReady();
+    const std::future_status callback_status = entered.wait_for(2s);
+    auto second = worker.step_async(step_input<TypeParam>(/*decode=*/false))
+                      .toUnsafeFuture()
+                      .thenValue([](std::optional<ForwardOutput> output) {
+                        return output.has_value();
+                      });
+    second.wait(2s);
+    const bool cleared_before_completion = second.isReady();
+    const bool released_before_completion = owner_released.load();
+    release_callback.set_value();
+    first.wait(2s);
+    second.wait(2s);
+    EXPECT_TRUE(first_ready_without_completion);
+    EXPECT_EQ(callback_status, std::future_status::ready);
+    EXPECT_TRUE(cleared_before_completion);
+    EXPECT_FALSE(released_before_completion);
+    ASSERT_TRUE(first.isReady());
+    ASSERT_TRUE(second.isReady());
+    EXPECT_TRUE(std::move(first).get());
+    EXPECT_FALSE(std::move(second).get());
+    ASSERT_NE(completion, nullptr);
+    ASSERT_TRUE(completion->synchronize());
+    worker.set_output_hook({});
+    const auto next =
+        worker.step_async(step_input<TypeParam>(/*decode=*/false)).get();
+    EXPECT_TRUE(next.has_value());
+    EXPECT_TRUE(owner_released.load());
+    EXPECT_FALSE(owner_released_early.load());
   }
-  EXPECT_TRUE(first_ready_without_device_completion);
-  EXPECT_EQ(callback_status, std::future_status::ready);
-  EXPECT_EQ(produced_status, std::future_status::ready);
-  EXPECT_FALSE(returned_early);
-  EXPECT_FALSE(released_before_device_completion);
-  EXPECT_TRUE(prior_event_retained);
-  ASSERT_TRUE(first_ready);
-  ASSERT_TRUE(second_ready);
-  EXPECT_TRUE(std::move(first).get());
-  EXPECT_FALSE(std::move(second).get());
-  EXPECT_TRUE(returned_after_device_completion.load());
-  EXPECT_TRUE(owner_released.load());
-  EXPECT_FALSE(owner_released_early.load());
-  EXPECT_TRUE(prior_ready_event.expired());
 }
 
 TYPED_TEST(ScheduleOverlapTest,

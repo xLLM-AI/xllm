@@ -423,6 +423,7 @@ WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
                         EPLBConfig::get_instance().enable_eplb(),
                         /*retire_unconsumed_inputs=*/
                         options.enable_task_pipeline() ||
+                            options.enable_schedule_overlap() ||
                             (options.enable_speculative_decode() &&
                              parallel_args.dp_size() > 1)),
       device_(device),
