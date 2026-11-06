@@ -47,14 +47,6 @@ class RemoteWorker : public WorkerClient {
 
   bool wait_for_server_ready(const std::string& server_address);
 
-  bool init_model(const std::string& model_weights_path,
-                  int32_t random_seed,
-                  MasterStatus master_status) override;
-
-  std::tuple<int64_t, int64_t> estimate_kv_cache_capacity() override;
-
-  bool allocate_kv_cache(const KVCacheShape& kv_cache_shape) override;
-
   std::optional<std::string> spec_calibration(
       const SpecCalibrationCommand& command) override;
 
@@ -78,8 +70,6 @@ class RemoteWorker : public WorkerClient {
                       const std::string& src_addr,
                       const std::vector<KVTransferMapping>& mappings) override;
 
-  std::optional<ForwardOutput> step(const LlmForwardInput& inputs) override;
-
   folly::SemiFuture<bool> init_model_async(
       const std::string& model_weights_path,
       int32_t random_seed,
@@ -94,11 +84,6 @@ class RemoteWorker : public WorkerClient {
   folly::SemiFuture<bool> allocate_kv_cache_with_transfer_async(
       const KVCacheShape& kv_cache_shape) override;
 
-  folly::SemiFuture<bool> pull_kv_blocks_async(
-      const uint64_t src_cluster_id,
-      const std::string& src_addr,
-      const std::vector<KVTransferMapping>& mappings) override;
-
   folly::SemiFuture<uint32_t> transfer_kv_blocks(
       const std::vector<BlockTransferInfo>& block_transfer_info) override;
 
@@ -112,23 +97,14 @@ class RemoteWorker : public WorkerClient {
       size_t worker_index) override;
 
   // Run the model and return the output.
-  folly::SemiFuture<std::optional<ForwardOutput>> step_async(
-      const LlmForwardInput& inputs) override;
-
   folly::SemiFuture<std::optional<RawForwardOutput>> step_remote_async(
       const LlmForwardInput& inputs) override;
-
-  folly::SemiFuture<std::optional<ForwardOutput>> step_async(
-      const DiTForwardInput& inputs) override;
 
   folly::SemiFuture<std::optional<RawForwardOutput>> step_remote_async(
       const DiTForwardInput& inputs) override;
 
   folly::SemiFuture<std::optional<ForwardOutput>> step_async(
       const RecForwardInput& inputs) override;
-
-  folly::SemiFuture<std::optional<ForwardOutput>> step_async(
-      const VlmForwardInput& inputs) override;
 
   folly::SemiFuture<std::optional<RawForwardOutput>> step_remote_async(
       const RecForwardInput& inputs) override;
@@ -145,8 +121,6 @@ class RemoteWorker : public WorkerClient {
 
   folly::SemiFuture<std::optional<RawForwardOutput>>
   get_last_vlm_step_result_async() override;
-
-  int64_t get_active_activation_memory() override;
 
   folly::SemiFuture<int64_t> get_active_activation_memory_async() override;
 

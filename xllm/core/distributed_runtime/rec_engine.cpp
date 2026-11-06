@@ -549,10 +549,10 @@ void RecEngine::OneRecLocalEnginePipeline::setup_workers() {
 }
 
 void RecEngine::OneRecLocalEnginePipeline::process_group_test() {
-  if (engine_.workers_.size() > 1) {
+  if (engine_.worker_clients_.size() > 1) {
     std::vector<folly::SemiFuture<folly::Unit>> futures;
-    futures.reserve(engine_.workers_.size());
-    for (auto& worker : engine_.workers_) {
+    futures.reserve(engine_.worker_clients_.size());
+    for (auto& worker : engine_.worker_clients_) {
       futures.emplace_back(worker->process_group_test_async());
     }
     const int32_t timeout_seconds =
@@ -567,6 +567,8 @@ bool RecEngine::OneRecLocalEnginePipeline::init_model_workers(
     const std::string& model_path) {
   const auto& devices = engine_.options_.devices();
   const int32_t world_size = static_cast<int32_t>(devices.size());
+  engine_.worker_clients_.clear();
+  engine_.workers_.clear();
 
   // OneRec local workers still expect valid TP group metadata even on a
   // single device. For world_size == 1, only rank/world_size metadata is
@@ -590,7 +592,6 @@ bool RecEngine::OneRecLocalEnginePipeline::init_model_workers(
   }
 #endif
 
-  engine_.workers_.clear();
   WorkerType worker_type = WorkerType::REC;
   for (int32_t rank = 0; rank < world_size; ++rank) {
     ProcessGroup* pg = engine_.process_groups_[rank].get();
@@ -598,11 +599,13 @@ bool RecEngine::OneRecLocalEnginePipeline::init_model_workers(
     parallel_args.tp_group_ = pg;
     engine_.workers_.emplace_back(std::make_unique<Worker>(
         parallel_args, devices[rank], engine_.options_, worker_type));
+    engine_.worker_clients_.emplace_back(
+        std::make_shared<WorkerClient>(engine_.workers_.back().get()));
   }
 
   std::vector<folly::SemiFuture<bool>> futures;
-  futures.reserve(engine_.workers_.size());
-  for (auto& worker : engine_.workers_) {
+  futures.reserve(engine_.worker_clients_.size());
+  for (auto& worker : engine_.worker_clients_) {
     futures.emplace_back(worker->init_model_async(
         model_path,
         ::xllm::ExecutionConfig::get_instance().random_seed(),
@@ -623,8 +626,8 @@ int64_t RecEngine::OneRecLocalEnginePipeline::estimate_min_available_memory() {
       engine_.options_.max_memory_utilization();
 
   std::vector<folly::SemiFuture<std::tuple<int64_t, int64_t>>> futures;
-  futures.reserve(engine_.workers_.size());
-  for (auto& worker : engine_.workers_) {
+  futures.reserve(engine_.worker_clients_.size());
+  for (auto& worker : engine_.worker_clients_) {
     futures.emplace_back(worker->estimate_kv_cache_capacity_async());
   }
 
@@ -657,8 +660,8 @@ int64_t RecEngine::OneRecLocalEnginePipeline::estimate_min_available_memory() {
 bool RecEngine::OneRecLocalEnginePipeline::allocate_kv_cache(
     const KVCacheShape& kv_cache_shape) {
   std::vector<folly::SemiFuture<bool>> futures;
-  futures.reserve(engine_.workers_.size());
-  for (auto& worker : engine_.workers_) {
+  futures.reserve(engine_.worker_clients_.size());
+  for (auto& worker : engine_.worker_clients_) {
     futures.emplace_back(worker->allocate_kv_cache_async(kv_cache_shape));
   }
   auto results = folly::collectAll(futures).get();
@@ -671,7 +674,7 @@ bool RecEngine::OneRecLocalEnginePipeline::allocate_kv_cache(
 }
 
 size_t RecEngine::OneRecLocalEnginePipeline::num_workers() const {
-  return engine_.workers_.size();
+  return engine_.worker_clients_.size();
 }
 
 // ============================================================
@@ -691,7 +694,7 @@ int64_t RecEngine::OneRecPrefillOnlyEnginePipeline::minimal_kv_cache_blocks()
 
 ForwardOutput RecEngine::OneRecPrefillOnlyEnginePipeline::step(
     RecBatchGroup& batches) {
-  if (engine_.workers_.empty()) {
+  if (engine_.worker_clients_.empty()) {
     return {};
   }
 
@@ -757,8 +760,8 @@ ForwardOutput RecEngine::OneRecPrefillOnlyEnginePipeline::step(
 ForwardOutput RecEngine::OneRecPrefillOnlyEnginePipeline::get_model_output(
     const RecForwardInput& model_inputs) {
   std::vector<folly::SemiFuture<std::optional<ForwardOutput>>> futures;
-  futures.reserve(engine_.workers_.size());
-  for (auto& worker : engine_.workers_) {
+  futures.reserve(engine_.worker_clients_.size());
+  for (auto& worker : engine_.worker_clients_) {
     futures.emplace_back(worker->step_async(model_inputs));
   }
   auto results = folly::collectAll(futures).get();
@@ -802,7 +805,7 @@ ForwardOutput RecEngine::OneRecPrefillOnlyEnginePipeline::get_model_output(
           safe_to(sample_output.top_logprobs, torch::kCPU, true);
     }
   }
-  Device(engine_.workers_[0]->device()).synchronize_default_stream();
+  Device(engine_.worker_clients_[0]->device()).synchronize_default_stream();
 
   return output;
 }
@@ -810,8 +813,8 @@ ForwardOutput RecEngine::OneRecPrefillOnlyEnginePipeline::get_model_output(
 std::vector<int64_t>
 RecEngine::OneRecLocalEnginePipeline::get_active_activation_memory() const {
   std::vector<folly::SemiFuture<int64_t>> futures;
-  futures.reserve(engine_.workers_.size());
-  for (auto& worker : engine_.workers_) {
+  futures.reserve(engine_.worker_clients_.size());
+  for (auto& worker : engine_.worker_clients_) {
     futures.emplace_back(worker->get_active_activation_memory_async());
   }
 
@@ -839,7 +842,7 @@ int64_t RecEngine::OneRecXAttentionEnginePipeline::minimal_kv_cache_blocks()
 
 ForwardOutput RecEngine::OneRecXAttentionEnginePipeline::step(
     RecBatchGroup& batches) {
-  if (engine_.workers_.empty()) {
+  if (engine_.worker_clients_.empty()) {
     return {};
   }
 
@@ -899,8 +902,8 @@ ForwardOutput RecEngine::OneRecXAttentionEnginePipeline::get_model_output(
     engine_timer.reset();
   };
   std::vector<folly::SemiFuture<std::optional<ForwardOutput>>> futures;
-  futures.reserve(engine_.workers_.size());
-  for (auto& worker : engine_.workers_) {
+  futures.reserve(engine_.worker_clients_.size());
+  for (auto& worker : engine_.worker_clients_) {
     futures.emplace_back(worker->step_async(model_inputs));
   }
   auto results = folly::collectAll(futures).get();
@@ -977,7 +980,7 @@ ForwardOutput RecEngine::OneRecXAttentionEnginePipeline::get_model_output(
   }
   log_engine_timing("output_d2h_submit");
   log_engine_stage("before_default_stream_sync");
-  Device(engine_.workers_[0]->device()).synchronize_default_stream();
+  Device(engine_.worker_clients_[0]->device()).synchronize_default_stream();
   log_engine_timing("default_stream_sync");
   log_engine_stage("after_default_stream_sync");
 
@@ -997,10 +1000,10 @@ void RecEngine::RecMultiRoundEnginePipeline::setup_workers() {
 }
 
 void RecEngine::RecMultiRoundEnginePipeline::process_group_test() {
-  if (engine_.workers_.size() > 1) {
+  if (engine_.worker_clients_.size() > 1) {
     std::vector<folly::SemiFuture<folly::Unit>> futures;
-    futures.reserve(engine_.workers_.size());
-    for (auto& worker : engine_.workers_) {
+    futures.reserve(engine_.worker_clients_.size());
+    for (auto& worker : engine_.worker_clients_) {
       futures.emplace_back(worker->process_group_test_async());
     }
     const int32_t timeout_seconds =
@@ -1015,6 +1018,8 @@ bool RecEngine::RecMultiRoundEnginePipeline::init_model_workers(
     const std::string& model_path) {
   const auto& devices = engine_.options_.devices();
   const int32_t world_size = static_cast<int32_t>(devices.size());
+  engine_.worker_clients_.clear();
+  engine_.workers_.clear();
 
   // Single-card REC multi-round still needs a non-null tp_group_ during
   // model/layer construction. For NPU, construct a real rank_size=1 backend
@@ -1045,7 +1050,6 @@ bool RecEngine::RecMultiRoundEnginePipeline::init_model_workers(
       parallel_state::create_local_process_groups(devices, engine_.options_);
 #endif
 
-  engine_.workers_.clear();
   WorkerType worker_type = WorkerType::REC;
   for (int32_t rank = 0; rank < world_size; ++rank) {
     ProcessGroup* pg = engine_.process_groups_[rank].get();
@@ -1054,11 +1058,13 @@ bool RecEngine::RecMultiRoundEnginePipeline::init_model_workers(
     parallel_args.tp_group_ = pg;
     engine_.workers_.emplace_back(std::make_unique<Worker>(
         parallel_args, devices[rank], engine_.options_, worker_type));
+    engine_.worker_clients_.emplace_back(
+        std::make_shared<WorkerClient>(engine_.workers_.back().get()));
   }
 
   std::vector<folly::SemiFuture<bool>> futures;
-  futures.reserve(engine_.workers_.size());
-  for (auto& worker : engine_.workers_) {
+  futures.reserve(engine_.worker_clients_.size());
+  for (auto& worker : engine_.worker_clients_) {
     futures.emplace_back(worker->init_model_async(
         model_path,
         ::xllm::ExecutionConfig::get_instance().random_seed(),
@@ -1080,8 +1086,8 @@ RecEngine::RecMultiRoundEnginePipeline::estimate_min_available_memory() {
       engine_.options_.max_memory_utilization();
 
   std::vector<folly::SemiFuture<std::tuple<int64_t, int64_t>>> futures;
-  futures.reserve(engine_.workers_.size());
-  for (auto& worker : engine_.workers_) {
+  futures.reserve(engine_.worker_clients_.size());
+  for (auto& worker : engine_.worker_clients_) {
     futures.emplace_back(worker->estimate_kv_cache_capacity_async());
   }
 
@@ -1114,8 +1120,8 @@ RecEngine::RecMultiRoundEnginePipeline::estimate_min_available_memory() {
 bool RecEngine::RecMultiRoundEnginePipeline::allocate_kv_cache(
     const KVCacheShape& kv_cache_shape) {
   std::vector<folly::SemiFuture<bool>> futures;
-  futures.reserve(engine_.workers_.size());
-  for (auto& worker : engine_.workers_) {
+  futures.reserve(engine_.worker_clients_.size());
+  for (auto& worker : engine_.worker_clients_) {
     futures.emplace_back(worker->allocate_kv_cache_async(kv_cache_shape));
   }
   auto results = folly::collectAll(futures).get();
@@ -1128,12 +1134,12 @@ bool RecEngine::RecMultiRoundEnginePipeline::allocate_kv_cache(
 }
 
 size_t RecEngine::RecMultiRoundEnginePipeline::num_workers() const {
-  return engine_.workers_.size();
+  return engine_.worker_clients_.size();
 }
 
 ForwardOutput RecEngine::RecMultiRoundEnginePipeline::step(
     RecBatchGroup& batches) {
-  if (engine_.workers_.empty()) {
+  if (engine_.worker_clients_.empty()) {
     return {};
   }
 
@@ -1167,8 +1173,8 @@ ForwardOutput RecEngine::RecMultiRoundEnginePipeline::step(
 ForwardOutput RecEngine::RecMultiRoundEnginePipeline::get_model_output(
     const RecForwardInput& model_inputs) {
   std::vector<folly::SemiFuture<std::optional<ForwardOutput>>> futures;
-  futures.reserve(engine_.workers_.size());
-  for (auto& worker : engine_.workers_) {
+  futures.reserve(engine_.worker_clients_.size());
+  for (auto& worker : engine_.worker_clients_) {
     futures.emplace_back(worker->step_async(model_inputs));
   }
   auto results = folly::collectAll(futures).get();
@@ -1201,8 +1207,8 @@ ForwardOutput RecEngine::RecMultiRoundEnginePipeline::get_model_output(
 std::vector<int64_t>
 RecEngine::RecMultiRoundEnginePipeline::get_active_activation_memory() const {
   std::vector<folly::SemiFuture<int64_t>> futures;
-  futures.reserve(engine_.workers_.size());
-  for (auto& worker : engine_.workers_) {
+  futures.reserve(engine_.worker_clients_.size());
+  for (auto& worker : engine_.worker_clients_) {
     futures.emplace_back(worker->get_active_activation_memory_async());
   }
 

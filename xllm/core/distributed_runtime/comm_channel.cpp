@@ -214,24 +214,6 @@ bool CommChannel::unlink_p2p(const std::string& remote_addr) {
   return true;
 }
 
-bool CommChannel::init_model(const std::string& model_weights_path,
-                             int32_t random_seed,
-                             MasterStatus master_status) {
-  proto::InitModelRequest request;
-
-  request.set_model_weights_path(model_weights_path);
-  request.set_random_seed(random_seed);
-  request.set_master_status(master_status.to_proto());
-  proto::Status response;
-  brpc::Controller cntl;
-  stub_->InitModel(&cntl, &request, &response, nullptr);
-  if (cntl.Failed() || !response.ok()) {
-    LOG(ERROR) << "init_model failed: " << cntl.ErrorText();
-    return false;
-  }
-  return true;
-}
-
 bool CommChannel::init_model_async(const std::string& model_weights_path,
                                    int32_t random_seed,
                                    folly::Promise<bool>& promise,
@@ -625,21 +607,6 @@ bool CommChannel::get_last_vlm_step_result_async(
     return false;
   }
   promise.setValue(std::move(output));
-  return true;
-}
-
-bool CommChannel::get_active_activation_memory(int64_t& memory) {
-  proto::Empty req;
-  proto::ActivationMemory mem;
-  brpc::Controller cntl;
-
-  stub_->GetActiveActivationMemory(&cntl, &req, &mem, nullptr);
-  if (cntl.Failed()) {
-    LOG(ERROR) << "GetActiveActivationMemory failed: " << cntl.ErrorText();
-    return false;
-  }
-
-  memory = mem.active_activation_memory();
   return true;
 }
 
