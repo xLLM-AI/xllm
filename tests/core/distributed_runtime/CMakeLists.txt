@@ -133,10 +133,10 @@ if(USE_NPU)
   # Bootstrap validation runs before device initialization or server startup.
   cc_test(
     NAME
-      worker_memory_rpc_bootstrap_test
+      worker_memory_bootstrap_test
     NO_NPU_RUNTIME
     SRCS
-      worker_memory_rpc_bootstrap_test.cpp
+      worker_memory_bootstrap_test.cpp
     DEPS
       :distributed_vmm_coordinator
       :config
@@ -205,9 +205,9 @@ cc_test(
 cc_test(
   NO_NPU_RUNTIME
   NAME
-    worker_memory_rpc_client_test
+    worker_memory_client_test
   SRCS
-    worker_memory_rpc_client_test.cpp
+    worker_memory_client_test.cpp
   DEPS
     :worker_memory_rpc
     GTest::gtest_main

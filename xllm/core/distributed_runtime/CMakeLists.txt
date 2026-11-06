@@ -171,14 +171,14 @@ cc_library(
   NAME
     worker_memory_rpc
   HDRS
-    worker_memory_rpc_options.h
-    worker_memory_rpc_client.h
-    worker_memory_rpc_service.h
-    worker_memory_rpc_server.h
+    worker_memory_options.h
+    worker_memory_client.h
+    worker_memory_service.h
+    worker_memory_server.h
   SRCS
-    worker_memory_rpc_client.cpp
-    worker_memory_rpc_service.cpp
-    worker_memory_rpc_server.cpp
+    worker_memory_client.cpp
+    worker_memory_service.cpp
+    worker_memory_server.cpp
   DEPS
     :worker_memory_resources
     :common

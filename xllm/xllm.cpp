@@ -41,7 +41,7 @@ namespace py = pybind11;
 #include "core/distributed_runtime/distributed_vmm_coordinator.h"
 #include "core/distributed_runtime/master.h"
 #include "core/distributed_runtime/master_factory.h"
-#include "core/distributed_runtime/worker_memory_rpc_options.h"
+#include "core/distributed_runtime/worker_memory_options.h"
 #include "core/framework/allocator/global_virtual_memory_region.h"
 #include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/config_utils.h"
@@ -492,12 +492,12 @@ int run() {
 
     // Setup distributed VirtualMemory service for multi-GPU/multi-node
     if (distributed_config.nnodes() > 1) {
-      WorkerMemoryRpcOptions worker_memory_rpc_options;
-      worker_memory_rpc_options.devices(devices)
+      WorkerMemoryOptions worker_memory_options;
+      worker_memory_options.devices(devices)
           .nnodes(distributed_config.nnodes())
           .node_rank(distributed_config.node_rank());
       memory_coordinator.setup_worker_memory_rpc(
-          worker_memory_rpc_options,
+          worker_memory_options,
           distributed_config.worker_memory_master_node_addr(),
           parallel_config.dp_size());
     }

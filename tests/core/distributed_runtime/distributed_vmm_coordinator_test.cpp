@@ -31,7 +31,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "core/distributed_runtime/worker_memory_rpc_client.h"
+#include "core/distributed_runtime/worker_memory_client.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/kv_cache/storage/vmm_kv_page_allocator_impl.h"
@@ -46,7 +46,7 @@ class DistributedVmmCoordinatorTestPeer final {
     const int32_t count = static_cast<int32_t>(addresses.size());
     coordinator.configure_workers(count, /*dp_size=*/1, /*tp_size=*/count);
     for (int32_t worker = 0; worker < count; ++worker) {
-      coordinator.clients_.emplace_back(std::make_shared<WorkerMemoryRpcClient>(
+      coordinator.clients_.emplace_back(std::make_shared<WorkerMemoryClient>(
           worker, addresses[worker], torch::Device(torch::kCPU)));
     }
   }

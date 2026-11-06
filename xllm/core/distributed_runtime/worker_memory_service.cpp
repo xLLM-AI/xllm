@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/distributed_runtime/worker_memory_rpc_service.h"
+#include "core/distributed_runtime/worker_memory_service.h"
 
 #include <brpc/closure_guard.h>
 #include <brpc/controller.h>
@@ -29,9 +29,9 @@ limitations under the License.
 
 namespace xllm {
 
-WorkerMemoryRpcService::WorkerMemoryRpcService(int32_t global_rank,
-                                               int32_t world_size,
-                                               const torch::Device& device)
+WorkerMemoryService::WorkerMemoryService(int32_t global_rank,
+                                         int32_t world_size,
+                                         const torch::Device& device)
     : initialized_(false),
       global_rank_(global_rank),
       world_size_(world_size),
@@ -39,13 +39,12 @@ WorkerMemoryRpcService::WorkerMemoryRpcService(int32_t global_rank,
       threadpool_(/*num_threads=*/4,
                   [device]() { Device(device).set_device(); },
                   /*cpu_binding=*/false,
-                  /*pool_name=*/"WorkerMemoryRpcService.rpc") {}
+                  /*pool_name=*/"WorkerMemoryService.rpc") {}
 
-void WorkerMemoryRpcService::Hello(
-    ::google::protobuf::RpcController* controller,
-    const proto::Status* request,
-    proto::Status* response,
-    ::google::protobuf::Closure* done) {
+void WorkerMemoryService::Hello(::google::protobuf::RpcController* controller,
+                                const proto::Status* request,
+                                proto::Status* response,
+                                ::google::protobuf::Closure* done) {
   brpc::ClosureGuard done_guard(done);
   auto ctrl = reinterpret_cast<brpc::Controller*>(controller);
   if (!initialized_) {
@@ -55,7 +54,7 @@ void WorkerMemoryRpcService::Hello(
   }
 }
 
-void WorkerMemoryRpcService::GetMemoryInfo(
+void WorkerMemoryService::GetMemoryInfo(
     ::google::protobuf::RpcController* controller,
     const proto::Status* request,
     proto::MemoryInfoResponse* response,
@@ -97,7 +96,7 @@ void WorkerMemoryRpcService::GetMemoryInfo(
   });
 }
 
-void WorkerMemoryRpcService::InitPhysicalPagePool(
+void WorkerMemoryService::InitPhysicalPagePool(
     ::google::protobuf::RpcController* controller,
     const proto::InitPhysicalPagePoolRequest* request,
     proto::Status* response,
@@ -129,7 +128,7 @@ void WorkerMemoryRpcService::InitPhysicalPagePool(
   });
 }
 
-void WorkerMemoryRpcService::PrepareKvMapping(
+void WorkerMemoryService::PrepareKvMapping(
     ::google::protobuf::RpcController* /*controller*/,
     const proto::PrepareKvMappingRequest* request,
     proto::Status* response,
@@ -151,7 +150,7 @@ void WorkerMemoryRpcService::PrepareKvMapping(
   });
 }
 
-void WorkerMemoryRpcService::CommitKvMapping(
+void WorkerMemoryService::CommitKvMapping(
     ::google::protobuf::RpcController* /*controller*/,
     const proto::KvMappingTransactionRequest* request,
     proto::Status* response,
@@ -163,7 +162,7 @@ void WorkerMemoryRpcService::CommitKvMapping(
   });
 }
 
-void WorkerMemoryRpcService::AbortKvMapping(
+void WorkerMemoryService::AbortKvMapping(
     ::google::protobuf::RpcController* /*controller*/,
     const proto::KvMappingTransactionRequest* request,
     proto::Status* response,
@@ -175,7 +174,7 @@ void WorkerMemoryRpcService::AbortKvMapping(
   });
 }
 
-void WorkerMemoryRpcService::PrepareWeightPages(
+void WorkerMemoryService::PrepareWeightPages(
     ::google::protobuf::RpcController* /*controller*/,
     const proto::PrepareWeightPagesRequest* request,
     proto::Status* response,
@@ -193,7 +192,7 @@ void WorkerMemoryRpcService::PrepareWeightPages(
   });
 }
 
-void WorkerMemoryRpcService::CommitWeightPages(
+void WorkerMemoryService::CommitWeightPages(
     ::google::protobuf::RpcController* /*controller*/,
     const proto::KvMappingTransactionRequest* request,
     proto::Status* response,
@@ -205,7 +204,7 @@ void WorkerMemoryRpcService::CommitWeightPages(
   });
 }
 
-void WorkerMemoryRpcService::AbortWeightPages(
+void WorkerMemoryService::AbortWeightPages(
     ::google::protobuf::RpcController* /*controller*/,
     const proto::KvMappingTransactionRequest* request,
     proto::Status* response,
@@ -217,7 +216,7 @@ void WorkerMemoryRpcService::AbortWeightPages(
   });
 }
 
-void WorkerMemoryRpcService::MapToKvTensors(
+void WorkerMemoryService::MapToKvTensors(
     ::google::protobuf::RpcController* controller,
     const proto::KvTensorRequest* request,
     proto::Status* response,
@@ -240,7 +239,7 @@ void WorkerMemoryRpcService::MapToKvTensors(
   });
 }
 
-void WorkerMemoryRpcService::UnmapFromKvTensors(
+void WorkerMemoryService::UnmapFromKvTensors(
     ::google::protobuf::RpcController* controller,
     const proto::KvTensorRequest* request,
     proto::Status* response,
@@ -263,7 +262,7 @@ void WorkerMemoryRpcService::UnmapFromKvTensors(
   });
 }
 
-void WorkerMemoryRpcService::AllocWeightPages(
+void WorkerMemoryService::AllocWeightPages(
     ::google::protobuf::RpcController* controller,
     const proto::AllocWeightPagesRequest* request,
     proto::Status* response,
@@ -282,7 +281,7 @@ void WorkerMemoryRpcService::AllocWeightPages(
   });
 }
 
-void WorkerMemoryRpcService::FreeWeightPages(
+void WorkerMemoryService::FreeWeightPages(
     ::google::protobuf::RpcController* controller,
     const proto::FreeWeightPagesRequest* request,
     proto::Status* response,
@@ -306,7 +305,7 @@ void WorkerMemoryRpcService::FreeWeightPages(
   });
 }
 
-void WorkerMemoryRpcService::GetVirtualKVCacheOffsets(
+void WorkerMemoryService::GetVirtualKVCacheOffsets(
     ::google::protobuf::RpcController* controller,
     const proto::GetVirtualKVCacheOffsetsRequest* request,
     proto::GetVirtualKVCacheOffsetsResponse* response,

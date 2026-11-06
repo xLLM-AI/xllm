@@ -123,7 +123,7 @@ flowchart TB
   subgraph distributed["distributed_runtime"]
     residency["ModelResidencyCoordinator<br/>模型初始化、休眠与唤醒"]
     coordination["DistributedVmmCoordinator<br/>共享 KV/权重预算、worker 选择与派发"]
-    rpc["WorkerMemoryRpc<br/>client、service、server"]
+    rpc["WorkerMemory<br/>client、service、server"]
   end
 
   subgraph cache["core/kv_cache"]
@@ -201,8 +201,8 @@ Mooncake 字节传输。KV manifest、peer 状态和重分片 plan 仍属于
 `runtime/WorkerMemoryResources` 持有本地 KV registry 和 `WeightVirtualMemoryManager`，
 管理设备初始化、物理页池以及本地资源的创建与清理。它是独立的构建目标，
 不依赖 `runtime` 聚合目标、RPC 或 distributed-runtime。
-`distributed_runtime/WorkerMemoryRpcClient`、`WorkerMemoryRpcService` 和
-`WorkerMemoryRpcServer` 负责跨 worker 请求；service 只调用本地资源，
+`distributed_runtime/WorkerMemoryClient`、`WorkerMemoryService` 和
+`WorkerMemoryServer` 负责跨 worker 请求；service 只调用本地资源，
 不反向进入分布式协调器。
 
 `core/kv_cache/storage/VmmKVPageAllocatorImpl` 管理 KV 页队列、预分配和
