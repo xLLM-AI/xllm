@@ -82,7 +82,8 @@ ForwardOutput ScheduleOverlapState::consume() {
 
   ForwardOutput output;
   if (pending_ && (has_tokens_ || retain_tokenless_output_ ||
-                   !prior_output_.json_object_errors.empty())) {
+                   !prior_output_.json_object_errors.empty() ||
+                   !prior_output_.failed_request_ids.empty())) {
     output = prior_output_;
   }
   pending_ = false;
@@ -151,7 +152,8 @@ void ScheduleOverlapState::update_prior_output(
   sample_sequence_ids_ = std::move(sample_sequence_ids);
   has_tokens_ = prior_output_.sample_output.next_tokens.defined();
   if (!output.has_value() || (!has_tokens_ && !retain_tokenless_output_ &&
-                              prior_output_.json_object_errors.empty())) {
+                              prior_output_.json_object_errors.empty() &&
+                              prior_output_.failed_request_ids.empty())) {
     request_ids_.clear();
     sample_sequence_ids_.clear();
   }

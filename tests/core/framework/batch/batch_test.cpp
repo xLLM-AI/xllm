@@ -2577,6 +2577,7 @@ TEST(BatchTest, ForwardOutputProtoRoundTripPreservesJsonObjectErrors) {
   ForwardOutput forward_output;
   forward_output.sample_output.next_tokens = next_tokens;
   forward_output.json_object_errors = errors;
+  forward_output.failed_request_ids = {"request-a", "request-b"};
   proto::LLMForwardResponse proto_output;
   ASSERT_TRUE(encode_llm_output(
       forward_output, speculative_token_stats, &proto_output));
@@ -2594,6 +2595,9 @@ TEST(BatchTest, ForwardOutputProtoRoundTripPreservesJsonObjectErrors) {
   EXPECT_EQ(round_trip.json_object_errors[0].sample_sequence_id, "req-error#0");
   EXPECT_EQ(round_trip.json_object_errors[0].message,
             "missing prior sampled output row");
+  ASSERT_EQ(round_trip.failed_request_ids.size(), 2u);
+  EXPECT_EQ(round_trip.failed_request_ids[0], "request-a");
+  EXPECT_EQ(round_trip.failed_request_ids[1], "request-b");
 }
 
 TEST(BatchTest, ForwardOutputShmRoundTripPreservesJsonObjectErrors) {
@@ -2618,6 +2622,7 @@ TEST(BatchTest, ForwardOutputShmRoundTripPreservesJsonObjectErrors) {
   ForwardOutput forward_output;
   forward_output.sample_output.next_tokens = next_tokens;
   forward_output.json_object_errors = errors;
+  forward_output.failed_request_ids = {"request-a", "request-b"};
   ASSERT_TRUE(
       writer_manager.llm_output_write(forward_output, speculative_token_stats));
 
@@ -2634,6 +2639,9 @@ TEST(BatchTest, ForwardOutputShmRoundTripPreservesJsonObjectErrors) {
   EXPECT_EQ(round_trip.json_object_errors[0].sample_sequence_id, "req-error#0");
   EXPECT_EQ(round_trip.json_object_errors[0].message,
             "prior token violates json_object grammar");
+  ASSERT_EQ(round_trip.failed_request_ids.size(), 2u);
+  EXPECT_EQ(round_trip.failed_request_ids[0], "request-a");
+  EXPECT_EQ(round_trip.failed_request_ids[1], "request-b");
 }
 
 TEST(BatchTest, ForwardInputBlockCopyKernelFieldsMatchExpectedLayout) {

@@ -137,6 +137,7 @@ cc_library(
     :mooncake_weight_transfer
     :linear_state_restore
     :kv_transfer_completion
+    :kv_transfer_failure
     :models
     :sampler
     :rec_constrained_decoding

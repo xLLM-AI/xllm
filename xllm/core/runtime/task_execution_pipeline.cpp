@@ -1017,7 +1017,8 @@ void TaskExecutionPipeline::launch(uint32_t slot_id) {
   KVTransferCompletion kv_transfers;
   if (!slot.transfer_kv_infos.empty()) {
     kv_transfers.add(
-        push_kv_(slot.transfer_kv_infos, slot.buffer->model_params()));
+        push_kv_(slot.transfer_kv_infos, slot.buffer->model_params()),
+        unique_transfer_request_ids(slot.transfer_kv_infos));
   }
   if (slot.buffer->tokens().numel() != 0) {
     if (capacity_.model.enable_linear_attention) {
@@ -1069,7 +1070,12 @@ void TaskExecutionPipeline::launch(uint32_t slot_id) {
   }
   // Every worker must finish its PUSH before the Prefill result permits
   // Decode to run or the scheduler to release source KV blocks.
-  CHECK(kv_transfers.wait()) << "Task pipeline KV cache push failed";
+  slot.failed_request_ids = finalize_kv_push_failures(
+      kv_transfers,
+      slot.transfer_kv_infos,
+      capacity_.enable_kv_push ? "PUSH" : "",
+      {capacity_.sampling_group, capacity_.cp_sampling_group},
+      device_);
   published_tail_ = slot.step;  // Zero rows invalidate all previous tokens.
   task_stream_.record_event(*slot.output_ready);
   const Status status =
@@ -1145,6 +1151,7 @@ ForwardOutput TaskExecutionPipeline::consume(uint32_t slot_id) {
   result.sample_output.logprobs = std::move(tokens.logprobs);
   result.sample_output.top_tokens = std::move(tokens.top_tokens);
   result.sample_output.top_logprobs = std::move(tokens.top_logprobs);
+  result.failed_request_ids = std::move(slot.failed_request_ids);
   release_outputs(slot);
   return result;
 }
@@ -1212,6 +1219,7 @@ void TaskExecutionPipeline::release_outputs(Slot& slot) {
   slot.buffer->model_params().parallel.layer_synchronizer.reset();
 #endif
   slot.transfer_kv_infos.clear();
+  slot.failed_request_ids.clear();
   slot.logits = torch::Tensor();
   slot.model_output = ModelOutput();
   slot.sample_output = SampleOutput();

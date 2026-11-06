@@ -20,6 +20,9 @@ limitations under the License.
 #include <chrono>
 #include <future>
 #include <memory>
+#include <string>
+#include <unordered_set>
+#include <vector>
 
 namespace xllm {
 namespace {
@@ -27,58 +30,58 @@ namespace {
 using namespace std::chrono_literals;
 
 TEST(KVTransferCompletionTest, WaitsForEveryTransfer) {
-  folly::Promise<bool> first_promise;
-  folly::Promise<bool> second_promise;
+  folly::Promise<std::vector<KVTransferTaskResult>> first_promise;
+  folly::Promise<std::vector<KVTransferTaskResult>> second_promise;
   KVTransferCompletion completion;
-  completion.add(first_promise.getSemiFuture());
-  completion.add(second_promise.getSemiFuture());
+  completion.add(first_promise.getSemiFuture(), {"request-first"});
+  completion.add(second_promise.getSemiFuture(), {"request-second"});
 
   std::promise<void> waiter_started;
   std::future<void> started = waiter_started.get_future();
-  std::future<bool> result = std::async(std::launch::async, [&]() {
-    waiter_started.set_value();
-    return completion.wait();
-  });
+  std::future<std::unordered_set<std::string>> result =
+      std::async(std::launch::async, [&]() {
+        waiter_started.set_value();
+        return completion.wait();
+      });
 
   started.wait();
-  first_promise.setValue(true);
+  first_promise.setValue(std::vector<KVTransferTaskResult>{});
   EXPECT_EQ(result.wait_for(50ms), std::future_status::timeout);
-  second_promise.setValue(true);
-  EXPECT_TRUE(result.get());
+  second_promise.setValue(std::vector<KVTransferTaskResult>{});
+  EXPECT_TRUE(result.get().empty());
 }
 
 TEST(KVTransferCompletionTest, ReportsTransferFailure) {
-  folly::Promise<bool> success_promise;
-  folly::Promise<bool> failure_promise;
+  folly::Promise<std::vector<KVTransferTaskResult>> success_promise;
+  folly::Promise<std::vector<KVTransferTaskResult>> failure_promise;
   KVTransferCompletion completion;
-  completion.add(success_promise.getSemiFuture());
-  completion.add(failure_promise.getSemiFuture());
-  success_promise.setValue(true);
-  failure_promise.setValue(false);
+  completion.add(success_promise.getSemiFuture(), {"request-success"});
+  completion.add(failure_promise.getSemiFuture(), {"request-failure"});
+  success_promise.setValue(std::vector<KVTransferTaskResult>{});
+  failure_promise.setValue(std::vector<KVTransferTaskResult>{
+      KVTransferTaskResult{{"request-failure"}, KVTransferErrorCode::FAILED}});
 
-  EXPECT_FALSE(completion.wait());
+  EXPECT_EQ(completion.wait(),
+            (std::unordered_set<std::string>{"request-failure"}));
 }
 
 TEST(KVTransferCompletionTest, RejectsPendingTransferAfterTimeout) {
   EXPECT_DEATH(
       {
-        folly::Promise<bool> promise;
+        folly::Promise<std::vector<KVTransferTaskResult>> promise;
         KVTransferCompletion completion(1ms);
-        completion.add(promise.getSemiFuture());
-        try {
-          completion.wait();
-        } catch (const folly::FutureTimeout&) {
-        }
+        completion.add(promise.getSemiFuture(), {"request-pending"});
+        completion.wait();
       },
-      "pending KV transfers");
+      "KV cache push did not finish after timeout");
 }
 
 TEST(KVTransferCompletionTest, RejectsPendingTransferAtDestruction) {
   EXPECT_DEATH(
       {
-        folly::Promise<bool> promise;
+        folly::Promise<std::vector<KVTransferTaskResult>> promise;
         KVTransferCompletion completion;
-        completion.add(promise.getSemiFuture());
+        completion.add(promise.getSemiFuture(), {"request-pending"});
       },
       "pending KV transfers");
 }

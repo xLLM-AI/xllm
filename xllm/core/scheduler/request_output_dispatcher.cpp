@@ -220,7 +220,8 @@ void RequestOutputDispatcher::process_completed_requests(
   output_requests.reserve(requests.size());
   for (const auto& request : requests) {
     // P owns computation and handoff; D owns every successful response.
-    if (!request->state().decode_address.empty()) {
+    if (!request->state().decode_address.empty() &&
+        !request->error_status().has_value()) {
       continue;
     }
     output_requests.emplace_back(request);

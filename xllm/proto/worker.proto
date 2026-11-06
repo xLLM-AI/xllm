@@ -455,6 +455,7 @@ message LLMForwardResponse {
   repeated JsonObjectOutputError json_object_errors = 9;
   repeated float dspark_confidence = 10;
   repeated uint64 dspark_rounds_since_full_width = 11;
+  repeated string failed_request_ids = 12;
 }
 
 message VLMForwardResponse {
@@ -465,6 +466,7 @@ message VLMForwardResponse {
   repeated int32 out_tokens = 6;
   repeated float out_logprobs = 7;
   repeated JsonObjectOutputError json_object_errors = 9;
+  repeated string failed_request_ids = 10;
 }
 
 message RECForwardResponse {
@@ -475,6 +477,7 @@ message RECForwardResponse {
   repeated int32 out_tokens = 6;
   repeated float out_logprobs = 7;
   repeated JsonObjectOutputError json_object_errors = 9;
+  repeated string failed_request_ids = 10;
 }
 
 message DITForwardResponse {

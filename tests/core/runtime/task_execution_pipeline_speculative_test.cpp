@@ -2060,7 +2060,7 @@ TEST_F(SpeculativePipelineTest,
   auto readable = read_mappings.get_future();
   std::promise<void> model_finished;
   auto finished = model_finished.get_future();
-  folly::Promise<bool> transfer_finished;
+  folly::Promise<std::vector<KVTransferTaskResult>> transfer_finished;
   std::vector<TransferKVInfo> observed;
   std::weak_ptr<NPULayerSynchronizerImpl> synchronizer;
   target_->after_forward = [&model_finished]() { model_finished.set_value(); };
@@ -2103,7 +2103,7 @@ TEST_F(SpeculativePipelineTest,
       });
   EXPECT_EQ(result.wait_for(std::chrono::milliseconds(50)),
             std::future_status::timeout);
-  transfer_finished.setValue(true);
+  transfer_finished.setValue(std::vector<KVTransferTaskResult>{});
   const auto completed = result.get();
   ASSERT_TRUE(completed.status.ok()) << completed.status.message();
   ASSERT_EQ(observed.size(), 1U);
@@ -2127,14 +2127,14 @@ class MtpKvPushPipelineTest : public SpeculativePipelineTest,
 TEST_P(MtpKvPushPipelineTest,
        MtpKvPushWaitsForIndependentTargetAndDraftEvents) {
   capacity_.common.enable_kv_push = true;
-  folly::Promise<bool> target_transfer;
-  folly::Promise<bool> draft_transfer;
+  folly::Promise<std::vector<KVTransferTaskResult>> target_transfer;
+  folly::Promise<std::vector<KVTransferTaskResult>> draft_transfer;
   std::promise<void> draft_finished;
   auto finished = draft_finished.get_future();
   std::weak_ptr<NPULayerSynchronizerImpl> target_sync;
   std::weak_ptr<NPULayerSynchronizerImpl> draft_sync;
   const auto push =
-      [](folly::Promise<bool>& completion,
+      [](folly::Promise<std::vector<KVTransferTaskResult>>& completion,
          std::weak_ptr<NPULayerSynchronizerImpl>& observed) -> TaskKVPush {
     return [&completion, &observed](const std::vector<TransferKVInfo>& infos,
                                     ModelParamsView& params) {
@@ -2170,16 +2170,21 @@ TEST_P(MtpKvPushPipelineTest,
       std::async(std::launch::async, [future = std::move(pending)]() mutable {
         return std::move(future).get();
       });
-  folly::Promise<bool>& first_transfer =
+  folly::Promise<std::vector<KVTransferTaskResult>>& first_transfer =
       GetParam() ? target_transfer : draft_transfer;
-  folly::Promise<bool>& second_transfer =
+  folly::Promise<std::vector<KVTransferTaskResult>>& second_transfer =
       GetParam() ? draft_transfer : target_transfer;
-  first_transfer.setValue(true);
+  first_transfer.setValue(std::vector<KVTransferTaskResult>{
+      {{prefill.transfer_kv_infos.front().request_id},
+       KVTransferErrorCode::FAILED}});
   EXPECT_EQ(result.wait_for(std::chrono::milliseconds(50)),
             std::future_status::timeout);
-  second_transfer.setValue(true);
+  second_transfer.setValue(std::vector<KVTransferTaskResult>{});
   const auto completed = result.get();
   ASSERT_TRUE(completed.status.ok()) << completed.status.message();
+  EXPECT_EQ(
+      completed.output.failed_request_ids,
+      std::vector<std::string>{prefill.transfer_kv_infos.front().request_id});
   EXPECT_TRUE(torch::equal(completed.output.sample_output.embeddings,
                            torch::tensor({{2.0f}})));
   EXPECT_TRUE(target_sync.expired());
@@ -2209,7 +2214,7 @@ TEST_F(SpeculativePipelineTest,
       ++count;
       params.parallel.layer_synchronizer =
           std::make_shared<NPULayerSynchronizerImpl>(/*num_layers=*/1);
-      return folly::makeSemiFuture(true);
+      return folly::makeSemiFuture(std::vector<KVTransferTaskResult>{});
     };
   };
   create(push(target_pushes), push(draft_pushes));

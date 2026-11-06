@@ -525,10 +525,10 @@ TEST(TransportCodecTest,
 
 TEST(TransportCodecTest, SharedOutputSizeIncludesVerifiedRoundWord) {
   const ScopedRawOutputTransport host_only;
-  // One token, twelve container lengths (one is INT32), five INT64 values
+  // One token, thirteen container lengths (one is INT32), five INT64 values
   // (id, three stats, prepared token), and two optional-payload flags.
   constexpr size_t kRequiredBytes =
-      sizeof(ControlMetadata) + 11 * sizeof(uint64_t) + sizeof(int32_t) +
+      sizeof(ControlMetadata) + 12 * sizeof(uint64_t) + sizeof(int32_t) +
       5 * sizeof(int64_t) + 2 * sizeof(bool) + 2 * sizeof(uint64_t);
   const auto tokens = torch::tensor({7}, torch::kInt64);
   for (const size_t bytes : {kRequiredBytes - 1, kRequiredBytes}) {

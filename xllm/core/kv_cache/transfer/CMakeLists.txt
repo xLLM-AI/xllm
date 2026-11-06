@@ -54,11 +54,27 @@ cc_library(
     kv_transfer_completion
   HDRS
     kv_transfer_completion.h
+    kv_transfer_types.h
   SRCS
     kv_transfer_completion.cpp
   DEPS
     glog::glog
     Folly::folly
+)
+
+cc_library(
+  NAME
+    kv_transfer_failure
+  SRCS
+    kv_transfer_failure.cpp
+  DEPS
+    :common
+    :kv_transfer_completion
+    :parallel_state
+    :platform
+    glog::glog
+    torch
+    xxHash
 )
 
 cc_library(

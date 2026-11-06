@@ -22,6 +22,7 @@ limitations under the License.
 #include <memory>
 #include <optional>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include "common/device_monitor.h"
@@ -32,6 +33,8 @@ limitations under the License.
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/rec_config.h"
 #include "core/framework/sampling/sampler.h"
+#include "core/kv_cache/transfer/kv_transfer_completion.h"
+#include "runtime/forward_params.h"
 #include "util/rec_model_utils.h"
 #include "util/tensor_helper.h"
 #if defined(USE_CUDA)
@@ -445,7 +448,16 @@ std::optional<ForwardOutput> RecWorkerImpl::RecWorkPipeline::step(
   auto& sampling_params = input.sampling_params;
   RecModelParams& input_params = input.input_params;
 
-  std::vector<folly::SemiFuture<bool>> futures;
+  KVTransferCompletion kv_transfers;
+  auto wait_kv_push = [&]() {
+    return finalize_kv_push_failures(
+        kv_transfers,
+        input.transfer_kv_infos,
+        runtime_.worker.options_.kv_cache_transfer_mode(),
+        {runtime_.context->get_parallel_args().tp_group_,
+         runtime_.context->get_parallel_args().cp_group_},
+        runtime_.worker.device_);
+  };
 
   if (runtime_.worker.options_.kv_cache_transfer_mode() == "PUSH" &&
       !input.transfer_kv_infos.empty()) {
@@ -461,12 +473,12 @@ std::optional<ForwardOutput> RecWorkerImpl::RecWorkPipeline::step(
 #if defined(USE_NPU) || defined(USE_MLU)
     input_params.parallel.layer_synchronizer = layer_synchronizer;
 
-    futures.emplace_back(
-        runtime_.worker.kv_cache_transfer_->push_kv_blocks_async(
-            input.transfer_kv_infos,
-            runtime_.context->get_parallel_args(),
-            layer_synchronizer,
-            runtime_.worker.is_spec_draft_));
+    kv_transfers.add(runtime_.worker.kv_cache_transfer_->push_kv_blocks_async(
+                         input.transfer_kv_infos,
+                         runtime_.context->get_parallel_args(),
+                         layer_synchronizer,
+                         runtime_.worker.is_spec_draft_),
+                     unique_transfer_request_ids(input.transfer_kv_infos));
 #endif
   }
 
@@ -477,6 +489,10 @@ std::optional<ForwardOutput> RecWorkerImpl::RecWorkPipeline::step(
                                                  runtime_.worker.kv_caches_,
                                                  input_params);
   if (!model_output.hidden_states.defined()) {
+    std::vector<std::string> failed_request_ids = wait_kv_push();
+    if (!failed_request_ids.empty()) {
+      return make_failed_output(std::move(failed_request_ids));
+    }
     return std::nullopt;
   }
 
@@ -490,19 +506,9 @@ std::optional<ForwardOutput> RecWorkerImpl::RecWorkPipeline::step(
   if (!runtime_.worker.driver_ && !runtime_.worker.dp_driver_ &&
       !runtime_.worker.options_.enable_speculative_decode()) {
     auto ret = runtime_.stream->synchronize();
-    // in p-d disaggregation scene, all micro batches should be in same
-    // prefill/decode stage, so, to judge transfer_kv_infos.empty,
-    if (runtime_.worker.options_.kv_cache_transfer_mode() == "PUSH" &&
-        !input.transfer_kv_infos.empty()) {
-      auto results =
-          folly::collectAll(futures).within(std::chrono::seconds(60)).get();
-      for (const auto& result : results) {
-        // TODO: Add error handling
-        if (!result.value()) {
-          LOG(ERROR) << "kv_cache_transfer_ failed";
-          break;
-        }
-      }
+    std::vector<std::string> failed_request_ids = wait_kv_push();
+    if (!failed_request_ids.empty()) {
+      return make_failed_output(std::move(failed_request_ids));
     }
     return std::nullopt;
   }
@@ -546,18 +552,8 @@ std::optional<ForwardOutput> RecWorkerImpl::RecWorkPipeline::step(
 
   auto ret = runtime_.stream->synchronize();
 
-  if (runtime_.worker.options_.kv_cache_transfer_mode() == "PUSH" &&
-      !input.transfer_kv_infos.empty()) {
-    auto results =
-        folly::collectAll(futures).within(std::chrono::seconds(60)).get();
-    for (const auto& result : results) {
-      // TODO: Add error handling
-      if (!result.value()) {
-        LOG(ERROR) << "kv_cache_transfer_ failed";
-        break;
-      }
-    }
-  }
+  std::vector<std::string> failed_request_ids = wait_kv_push();
+  output.failed_request_ids = std::move(failed_request_ids);
 
   COUNTER_ADD(execution_latency_seconds_model, timer.elapsed_seconds());
   DeviceMonitor::get_instance().update_active_activation_memory(

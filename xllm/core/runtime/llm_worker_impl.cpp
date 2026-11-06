@@ -22,6 +22,7 @@ limitations under the License.
 #include <memory>
 #include <optional>
 #include <utility>
+#include <vector>
 
 #include "common/device_monitor.h"
 #include "common/metrics.h"
@@ -268,11 +269,17 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
         kv_cache_transfer_->push_kv_blocks_async(input.transfer_kv_infos,
                                                  context_.get_parallel_args(),
                                                  layer_synchronizer,
-                                                 is_spec_draft_));
+                                                 is_spec_draft_),
+        unique_transfer_request_ids(input.transfer_kv_infos));
 #endif
   }
-  auto wait_kv_push = [&kv_transfers]() {
-    CHECK(kv_transfers.wait()) << "KV cache push failed";
+  auto wait_kv_push = [&]() {
+    return finalize_kv_push_failures(
+        kv_transfers,
+        input.transfer_kv_infos,
+        options_.kv_cache_transfer_mode(),
+        {parallel_args_.tp_group_, parallel_args_.cp_group_},
+        device_);
   };
   if (eplb_executor_ != nullptr) {
     eplb_executor_->start_eplb_step(input.input_params.expert.eplb_info);
@@ -286,7 +293,10 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     eplb_executor_->finish_eplb_step();
   }
   if (!model_output.hidden_states.defined()) {
-    wait_kv_push();
+    std::vector<std::string> failed_request_ids = wait_kv_push();
+    if (!failed_request_ids.empty()) {
+      return make_failed_output(std::move(failed_request_ids));
+    }
     return std::nullopt;
   }
 
@@ -345,13 +355,16 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
       !options_.enable_speculative_decode()) {
     MULTI_MODEL_STEP_UNLOCK();
     if (sync_policy == ForwardSyncPolicy::NO_SYNC) {
-      wait_kv_push();
+      auto failed_request_ids = wait_kv_push();
+      if (!failed_request_ids.empty()) {
+        return make_failed_output(std::move(failed_request_ids));
+      }
       return std::nullopt;
     }
     int ret = device_.synchronize_default_stream();
     CHECK_EQ(ret, 0) << "synchronize_default_stream failed";
-    wait_kv_push();
-    if (eplb_executor_ != nullptr) {
+    output.failed_request_ids = wait_kv_push();
+    if (eplb_executor_ != nullptr || !output.failed_request_ids.empty()) {
       return output;
     }
     return std::nullopt;
@@ -416,7 +429,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
       !can_skip_npu_graph_decode_sync(input.input_params);
 #endif
   if (sync_policy == ForwardSyncPolicy::NO_SYNC) {
-    wait_kv_push();
+    output.failed_request_ids = wait_kv_push();
     finalize_no_sync_output(output, input, completion);
     return output;
   }
@@ -425,7 +438,7 @@ std::optional<ForwardOutput> LLMWorkerImpl::step_internal(
     CHECK_EQ(ret, 0) << "synchronize_default_stream failed";
   }
 
-  wait_kv_push();
+  output.failed_request_ids = wait_kv_push();
 
   COUNTER_ADD(execution_latency_seconds_model, timer.elapsed_seconds());
   if (should_sync_default_stream) {

@@ -111,6 +111,46 @@ std::unordered_set<std::string> fail_json_object_requests(
   return failed_request_ids;
 }
 
+std::unordered_set<std::string> fail_kv_push_requests(
+    const std::vector<Sequence*>& sequences,
+    const std::vector<std::string>& failed_request_ids) {
+  if (failed_request_ids.empty()) {
+    return {};
+  }
+
+  const std::unordered_set<std::string> failed_request_id_set(
+      failed_request_ids.begin(), failed_request_ids.end());
+  std::unordered_set<std::string> matched_request_ids;
+  for (Sequence* sequence : sequences) {
+    if (!failed_request_id_set.contains(sequence->request_id())) {
+      continue;
+    }
+    matched_request_ids.insert(sequence->request_id());
+    if (!sequence->cancelled()) {
+      sequence->fail(Status(StatusCode::UNKNOWN, "KV cache push failed"));
+    }
+  }
+  for (const std::string& request_id : failed_request_ids) {
+    if (!matched_request_ids.contains(request_id)) {
+      LOG(ERROR) << "KV cache push failure references unknown request_id: "
+                 << request_id;
+    }
+  }
+  return matched_request_ids;
+}
+
+std::unordered_set<std::string> collect_failed_request_ids(
+    const std::vector<Sequence*>& sequences,
+    const RawForwardOutput& raw_output) {
+  std::unordered_set<std::string> failed_request_ids =
+      fail_json_object_requests(sequences, raw_output.json_object_errors);
+  const std::unordered_set<std::string> failed_kv_push_request_ids =
+      fail_kv_push_requests(sequences, raw_output.failed_request_ids);
+  failed_request_ids.insert(failed_kv_push_request_ids.begin(),
+                            failed_kv_push_request_ids.end());
+  return failed_request_ids;
+}
+
 }  // namespace
 
 void BatchOutputHandler::prepare(const BatchInputData& data) {
@@ -171,7 +211,7 @@ void BatchOutputHandler::process_sample_output(
   const bool replace_fake_token = action == BatchOutputAction::COMMIT_PENDING;
   const auto& sequences = data.sequences;
   const std::unordered_set<std::string> failed_request_ids =
-      fail_json_object_requests(sequences, raw_output.json_object_errors);
+      collect_failed_request_ids(sequences, raw_output);
 
   for (size_t output_idx = 0; output_idx < output_targets_.size();
        ++output_idx) {
@@ -390,7 +430,7 @@ void BatchOutputHandler::process_beam_search_output(
   const bool replace_fake_token = action == BatchOutputAction::COMMIT_PENDING;
   const auto& sequences = data.sequences;
   const std::unordered_set<std::string> failed_request_ids =
-      fail_json_object_requests(sequences, raw_output.json_object_errors);
+      collect_failed_request_ids(sequences, raw_output);
 
   const int32_t beam_width = data.sequences[0]->sampling_param()->beam_width;
   if (beam_width <= 1) {
