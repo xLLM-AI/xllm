@@ -66,10 +66,6 @@ class CommChannel {
   virtual bool link_p2p(const std::string& remote_addr);
   virtual bool unlink_p2p(const std::string& remote_addr);
 
-  virtual bool init_model(const std::string& model_weights_path,
-                          int32_t random_seed,
-                          MasterStatus master_status);
-
   virtual bool init_model_async(const std::string& model_weights_path,
                                 int32_t random_seed,
                                 folly::Promise<bool>& promise,
@@ -122,8 +118,6 @@ class CommChannel {
 
   virtual bool get_last_vlm_step_result_async(
       folly::Promise<std::optional<RawForwardOutput>>& promise);
-
-  virtual bool get_active_activation_memory(int64_t& memory);
 
   virtual bool get_active_activation_memory_async(
       folly::Promise<int64_t>& promise);

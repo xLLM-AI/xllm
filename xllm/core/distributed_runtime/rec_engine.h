@@ -207,15 +207,15 @@ class RecEngine : public Engine {
   std::shared_ptr<DistributedWorkerManager> distributed_worker_manager_;
   std::unique_ptr<RecForwardInputFactory> forward_input_factory_;
 
-  // LlmRec specific (managed by LlmRecEnginePipeline)
-  std::vector<std::shared_ptr<WorkerClient>> worker_clients_;
+  // LlmRec distributed-worker topology
   size_t worker_clients_num_ = 0;
   int32_t dp_size_ = 1;
   int32_t dp_local_tp_size_ = 1;
 
-  // OneRec specific (managed by prefill-only/xattention local pipelines)
+  // Local workers borrow their process groups; clients borrow the workers.
   std::vector<std::unique_ptr<ProcessGroup>> process_groups_;
   std::vector<std::unique_ptr<Worker>> workers_;
+  std::vector<std::shared_ptr<WorkerClient>> worker_clients_;
 
   // KV cache config
   int64_t n_local_kv_heads_ = 0;

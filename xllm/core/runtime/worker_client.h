@@ -41,11 +41,6 @@ class WorkerClient {
   explicit WorkerClient(Worker* w) : worker_(w) {}
   virtual ~WorkerClient() = default;
 
-  // initialize model, cache manager. blocking call
-  virtual bool init_model(const std::string& model_weights_path,
-                          int32_t random_seed,
-                          MasterStatus master_status);
-
   virtual folly::SemiFuture<bool> sleep_async(MasterStatus master_status,
                                               uint64_t transition_id = 0);
 
@@ -55,11 +50,6 @@ class WorkerClient {
   virtual folly::SemiFuture<bool> start_profile_async();
 
   virtual folly::SemiFuture<bool> stop_profile_async();
-
-  virtual std::tuple<int64_t, int64_t> estimate_kv_cache_capacity();
-
-  // allocate kv cache. blocking call
-  virtual bool allocate_kv_cache(const KVCacheShape& kv_cache_shape);
 
   virtual std::optional<std::string> spec_calibration(
       const SpecCalibrationCommand& command);
@@ -84,8 +74,6 @@ class WorkerClient {
                               const std::string& src_addr,
                               const std::vector<KVTransferMapping>& mappings);
 
-  virtual std::optional<ForwardOutput> step(const LlmForwardInput& inputs);
-
   // initialize model, cache manager. async call
   virtual folly::SemiFuture<bool> init_model_async(
       const std::string& model_weights_path,
@@ -103,11 +91,6 @@ class WorkerClient {
   virtual folly::SemiFuture<bool> allocate_kv_cache_with_transfer_async(
       const KVCacheShape& kv_cache_shape);
 
-  virtual folly::SemiFuture<bool> pull_kv_blocks_async(
-      const uint64_t src_cluster_id,
-      const std::string& src_addr,
-      const std::vector<KVTransferMapping>& mappings);
-
   virtual folly::SemiFuture<uint32_t> transfer_kv_blocks(
       const std::vector<BlockTransferInfo>& block_transfer_info);
 
@@ -120,27 +103,17 @@ class WorkerClient {
       std::shared_ptr<PrefetchResult> result,
       size_t worker_index);
 
-  // Run the model on the given input. async call
-  // the future returns a successful status with no meaningful value
-  virtual folly::SemiFuture<std::optional<ForwardOutput>> step_async(
-      const LlmForwardInput& inputs);
-
   // Remote execution path: send LlmForwardInput transport payload and decode
   // worker response as RawForwardOutput for distributed engine handling.
   virtual folly::SemiFuture<std::optional<RawForwardOutput>> step_remote_async(
       const LlmForwardInput& inputs);
 
-  virtual folly::SemiFuture<std::optional<ForwardOutput>> step_async(
-      const DiTForwardInput& inputs);
-
   virtual folly::SemiFuture<std::optional<RawForwardOutput>> step_remote_async(
       const DiTForwardInput& inputs);
 
+  // Run a local REC worker and return its device-resident output.
   virtual folly::SemiFuture<std::optional<ForwardOutput>> step_async(
       const RecForwardInput& inputs);
-
-  virtual folly::SemiFuture<std::optional<ForwardOutput>> step_async(
-      const VlmForwardInput& inputs);
 
   virtual folly::SemiFuture<std::optional<RawForwardOutput>> step_remote_async(
       const RecForwardInput& inputs);
@@ -158,15 +131,10 @@ class WorkerClient {
   virtual folly::SemiFuture<std::optional<RawForwardOutput>>
   get_last_vlm_step_result_async();
 
-  virtual folly::SemiFuture<std::optional<ForwardOutput>>
-  get_last_step_result_single_process_async();
-
-  virtual int64_t get_active_activation_memory();
-
   virtual folly::SemiFuture<int64_t> get_active_activation_memory_async();
 
  private:
-  Worker* worker_ = nullptr;  // not owend
+  Worker* worker_ = nullptr;  // not owned
 };
 
 }  // namespace xllm
