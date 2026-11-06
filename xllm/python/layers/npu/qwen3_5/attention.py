@@ -76,6 +76,16 @@ class NpuQwen3_5Attention(Qwen3_5Attention):
             persistent=False,
         )
 
+    def _apply_output_gate(self, output: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
+        context = get_forward_context_or_none()
+        if (
+            output.device.type in ("npu", "privateuseone")
+            and context is not None
+            and (context.acl_graph is not None or context.execution_state is not None)
+        ):
+            return kernels.fused_sigmoid_mul(output, gate)
+        return super()._apply_output_gate(output, gate)
+
     def load_weights(
         self,
         state: ScopedWeightLoader,
@@ -140,5 +150,9 @@ class NpuQwen3_5Attention(Qwen3_5Attention):
             key.view(num_tokens, self.kv_size),
             value.view(num_tokens, self.kv_size),
         )
-        output = output * torch.sigmoid_(gate.view(num_tokens, self.q_size))
+        if context is not None and (context.acl_graph is not None or context.execution_state is not None):
+            output = self._apply_output_gate(output, gate)
+        else:
+            # Keep the original eager expression for this single-use QKV gate.
+            output = output * torch.sigmoid_(gate.view(num_tokens, self.q_size))
         return self.o_proj(output)
