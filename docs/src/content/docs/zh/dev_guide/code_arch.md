@@ -122,7 +122,7 @@ flowchart TB
 
   subgraph distributed["distributed_runtime"]
     residency["ModelResidencyCoordinator<br/>模型初始化、休眠与唤醒"]
-    coordination["DistributedVirtualMemoryCoordinator<br/>共享 KV/权重预算、worker 选择与派发"]
+    coordination["DistributedVmmCoordinator<br/>共享 KV/权重预算、worker 选择与派发"]
     rpc["WorkerMemoryRpc<br/>client、service、server"]
   end
 
@@ -212,7 +212,7 @@ map/unmap 接收每层 K/V 区域内的字节偏移，由 allocator 将虚拟页
 `KVCacheManagerFactory` 将页分配接口经 pool 和组合 manager 注入
 `VmmKVBlockManager`，block 适配器不访问分布式单例。
 
-`DistributedVirtualMemoryCoordinator` 实现该 backend，持有分页 allocator，使用通用的
+`DistributedVmmCoordinator` 实现该 backend，持有分页 allocator，使用通用的
 `WorkerPhysicalPageBudget` 记账，并选择目标 worker、派发本地或 RPC 操作。
 模型初始化、休眠与唤醒由 `ModelResidencyCoordinator` 组织；KV 和权重的共同预算
 在唤醒时由分布式协调器以一个预算事务原子预留。初次以唤醒状态初始化时，先预留

@@ -21,6 +21,6 @@ cc_library(
 )
 target_link_libraries(disaggregation PRIVATE
   :xllm_server
-  :distributed_virtual_memory_coordinator
+  :distributed_vmm_coordinator
   :api_response
   :pd_topology_guard)

@@ -39,5 +39,5 @@ cc_library(
   DEPS
     :block
     :kv_cache
-    :distributed_virtual_memory_coordinator
+    :distributed_vmm_coordinator
 )

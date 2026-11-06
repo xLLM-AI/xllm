@@ -27,7 +27,7 @@ limitations under the License.
 #include "core/disaggregation/disagg_pd_response.h"
 #include "core/disaggregation/disagg_pd_scheduler.h"
 #include "core/distributed_runtime/disagg_pd_kv_response.h"
-#include "core/distributed_runtime/distributed_virtual_memory_coordinator.h"
+#include "core/distributed_runtime/distributed_vmm_coordinator.h"
 #include "core/distributed_runtime/engine.h"
 #include "core/framework/block/block_manager_pool.h"
 #include "core/framework/config/kv_cache_config.h"
@@ -191,9 +191,8 @@ bool DisaggPDServiceImpl::append_virtual_kv_cache_offsets(
   std::vector<VirtualKVCacheLayerGlobalOffsets> layer_offsets;
   const auto& block_options = block_manager_->options();
   const bool offsets_available =
-      DistributedVirtualMemoryCoordinator::get_instance()
-          .get_virtual_kv_cache_offsets(
-              dp_rank, block_options.model_id(), block_ids, layer_offsets);
+      DistributedVmmCoordinator::get_instance().get_virtual_kv_cache_offsets(
+          dp_rank, block_options.model_id(), block_ids, layer_offsets);
   if (!offsets_available) {
     LOG(ERROR) << "Failed to get VirtualMemory offsets for request "
                << request_id;

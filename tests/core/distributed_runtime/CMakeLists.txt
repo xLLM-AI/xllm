@@ -119,11 +119,11 @@ cc_test(
 cc_test(
   NO_NPU_RUNTIME
   NAME
-    distributed_virtual_memory_coordinator_test
+    distributed_vmm_coordinator_test
   SRCS
-    distributed_virtual_memory_coordinator_test.cpp
+    distributed_vmm_coordinator_test.cpp
   DEPS
-    :distributed_virtual_memory_coordinator
+    :distributed_vmm_coordinator
     GTest::gtest_main
     glog::glog
     brpc
@@ -138,7 +138,7 @@ if(USE_NPU)
     SRCS
       worker_memory_rpc_bootstrap_test.cpp
     DEPS
-      :distributed_virtual_memory_coordinator
+      :distributed_vmm_coordinator
       :config
       GTest::gtest_main
       glog::glog

@@ -127,7 +127,7 @@ flowchart TB
 
   subgraph distributed["distributed_runtime"]
     residency["ModelResidencyCoordinator<br/>model initialization, sleep and wakeup"]
-    coordination["DistributedVirtualMemoryCoordinator<br/>shared KV/weight budget, worker selection and dispatch"]
+    coordination["DistributedVmmCoordinator<br/>shared KV/weight budget, worker selection and dispatch"]
     rpc["WorkerMemoryRpc<br/>client, service and server"]
   end
 
@@ -226,7 +226,7 @@ computed by the allocator as virtual page ID times page size.
 pools and composite managers into `VmmKVBlockManager`, whose block
 adapter does not access a distributed singleton.
 
-`DistributedVirtualMemoryCoordinator` implements that backend, owns the paged
+`DistributedVmmCoordinator` implements that backend, owns the paged
 allocator, accounts for capacity through generic `WorkerPhysicalPageBudget`, and
 selects workers to dispatch local or RPC operations. `ModelResidencyCoordinator`
 organizes model initialization, sleep and wakeup. Distributed coordination

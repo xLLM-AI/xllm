@@ -23,7 +23,7 @@ limitations under the License.
 
 #include "core/common/device_monitor.h"
 #include "core/common/metrics.h"
-#include "core/distributed_runtime/distributed_virtual_memory_coordinator.h"
+#include "core/distributed_runtime/distributed_vmm_coordinator.h"
 #include "core/framework/allocator/virtual_memory/physical_page_pool.h"
 #include "core/framework/allocator/vmm_arena_capacity.h"
 #include "core/framework/config/kv_cache_config.h"
@@ -104,7 +104,7 @@ KVCacheEstimateContext KVCacheCapacityPlanner::observe_memory() const {
 
 void KVCacheCapacityPlanner::prepare_virtual_memory(
     KVCacheCapacity& capacity) const {
-  auto& coordinator = DistributedVirtualMemoryCoordinator::get_instance();
+  auto& coordinator = DistributedVmmCoordinator::get_instance();
   coordinator.prepare_kv_cache_pool(options_,
                                     world_size_,
                                     worker_clients_.size(),

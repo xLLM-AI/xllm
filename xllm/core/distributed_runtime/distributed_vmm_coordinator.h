@@ -44,10 +44,10 @@ struct Options;
 // Coordinates the virtual-memory subsystem across workers, including shared
 // physical-page capacity for KV caches and weights and their mapping commands.
 // Worker-local resources remain owned by WorkerMemoryResources in runtime.
-class DistributedVirtualMemoryCoordinator final : public KVCachePageBackend {
+class DistributedVmmCoordinator final : public KVCachePageBackend {
  public:
-  static DistributedVirtualMemoryCoordinator& get_instance() {
-    static DistributedVirtualMemoryCoordinator instance;
+  static DistributedVmmCoordinator& get_instance() {
+    static DistributedVmmCoordinator instance;
     return instance;
   }
 
@@ -129,13 +129,12 @@ class DistributedVirtualMemoryCoordinator final : public KVCachePageBackend {
     int32_t tp_size;
   };
 
-  friend class DistributedVirtualMemoryCoordinatorTestPeer;
-  DistributedVirtualMemoryCoordinator();
-  ~DistributedVirtualMemoryCoordinator() override;
-  DistributedVirtualMemoryCoordinator(
-      const DistributedVirtualMemoryCoordinator&) = delete;
-  DistributedVirtualMemoryCoordinator& operator=(
-      const DistributedVirtualMemoryCoordinator&) = delete;
+  friend class DistributedVmmCoordinatorTestPeer;
+  DistributedVmmCoordinator();
+  ~DistributedVmmCoordinator() override;
+  DistributedVmmCoordinator(const DistributedVmmCoordinator&) = delete;
+  DistributedVmmCoordinator& operator=(const DistributedVmmCoordinator&) =
+      delete;
 
   bool broadcast_map_to_kv_tensors(const std::string& model_id,
                                    int32_t dp_rank,

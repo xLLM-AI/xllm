@@ -30,7 +30,7 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "common/macros.h"
-#include "core/distributed_runtime/distributed_virtual_memory_coordinator.h"
+#include "core/distributed_runtime/distributed_vmm_coordinator.h"
 #include "core/distributed_runtime/kv_cache_transfer_coordinator.h"
 #include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/kv_cache_config.h"
@@ -262,8 +262,7 @@ void DisaggPDScheduler::register_instance_info(const std::string& server_name) {
   // Get total physical pages per worker (for etcd registration)
 #if defined(USE_NPU)
   if (::xllm::KVCacheConfig::get_instance().enable_vmm_kvcache()) {
-    auto& memory_coordinator =
-        DistributedVirtualMemoryCoordinator::get_instance();
+    auto& memory_coordinator = DistributedVmmCoordinator::get_instance();
     if (memory_coordinator.is_initialized()) {
       instance_info_.total_phy_pages =
           memory_coordinator.get_num_total_phy_pages();
