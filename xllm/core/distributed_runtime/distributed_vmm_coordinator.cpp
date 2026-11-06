@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/distributed_runtime/distributed_virtual_memory_coordinator.h"
+#include "core/distributed_runtime/distributed_vmm_coordinator.h"
 
 #include <folly/futures/Future.h>
 #include <glog/logging.h>
@@ -96,18 +96,16 @@ bool run_worker_memory_transaction(
 
 }  // namespace
 
-DistributedVirtualMemoryCoordinator::DistributedVirtualMemoryCoordinator() {
+DistributedVmmCoordinator::DistributedVmmCoordinator() {
   // These singletons must outlive the coordinator and its RPC shutdown.
   WorkerMemoryResources::get_instance();
   ServerRegistry::get_instance();
   kv_cache_pages_ = std::make_unique<VmmKVPageAllocatorImpl>(*this);
 }
 
-DistributedVirtualMemoryCoordinator::~DistributedVirtualMemoryCoordinator() {
-  destroy();
-}
+DistributedVmmCoordinator::~DistributedVmmCoordinator() { destroy(); }
 
-void DistributedVirtualMemoryCoordinator::prepare_kv_cache_pool(
+void DistributedVmmCoordinator::prepare_kv_cache_pool(
     const runtime::Options& options,
     int64_t world_size,
     size_t worker_count,
@@ -139,7 +137,7 @@ void DistributedVirtualMemoryCoordinator::prepare_kv_cache_pool(
       options.model_id(), options.dp_size(), static_cast<int32_t>(world_size));
 }
 
-void DistributedVirtualMemoryCoordinator::destroy() {
+void DistributedVmmCoordinator::destroy() {
   stop_worker_capacity_refresh();
   // Join executing maps and cancel queued preallocation while the backend and
   // its RPCs are still alive. Cache users must already have stopped; this is
@@ -173,9 +171,9 @@ void DistributedVirtualMemoryCoordinator::destroy() {
   }
 }
 
-void DistributedVirtualMemoryCoordinator::configure_workers(int32_t world_size,
-                                                            int32_t dp_size,
-                                                            int32_t tp_size) {
+void DistributedVmmCoordinator::configure_workers(int32_t world_size,
+                                                  int32_t dp_size,
+                                                  int32_t tp_size) {
   world_size_ = world_size;
   dp_size_ = dp_size;
   tp_size_ = tp_size;
@@ -185,7 +183,7 @@ void DistributedVirtualMemoryCoordinator::configure_workers(int32_t world_size,
   worker_allocatable_pages_.resize(static_cast<size_t>(world_size_), 0);
 }
 
-void DistributedVirtualMemoryCoordinator::setup_worker_memory_rpc(
+void DistributedVmmCoordinator::setup_worker_memory_rpc(
     const WorkerMemoryRpcOptions& options,
     const std::string& master_node_addr,
     int32_t dp_size) {
@@ -257,7 +255,7 @@ void DistributedVirtualMemoryCoordinator::setup_worker_memory_rpc(
             << ", dp_size=" << dp_size << ", tp_size=" << tp_size;
 }
 
-int64_t DistributedVirtualMemoryCoordinator::init_physical_page_pools(
+int64_t DistributedVmmCoordinator::init_physical_page_pools(
     double max_memory_utilization,
     int64_t max_cache_size,
     int64_t reserved_memory_bytes,
@@ -444,7 +442,7 @@ int64_t DistributedVirtualMemoryCoordinator::init_physical_page_pools(
   return num_pages;
 }
 
-void DistributedVirtualMemoryCoordinator::set_model_parallel_strategy(
+void DistributedVmmCoordinator::set_model_parallel_strategy(
     const std::string& model_id,
     int32_t dp_size,
     int32_t tp_size) {
@@ -459,15 +457,15 @@ void DistributedVirtualMemoryCoordinator::set_model_parallel_strategy(
 }
 
 std::pair<int32_t, int32_t>
-DistributedVirtualMemoryCoordinator::get_model_parallel_strategy(
+DistributedVmmCoordinator::get_model_parallel_strategy(
     const std::string& model_id) const {
   std::lock_guard<std::mutex> lock(mutex_);
   const ModelParallelStrategy strategy = parallel_strategy_locked(model_id);
   return {strategy.dp_size, strategy.tp_size};
 }
 
-DistributedVirtualMemoryCoordinator::ModelParallelStrategy
-DistributedVirtualMemoryCoordinator::parallel_strategy_locked(
+DistributedVmmCoordinator::ModelParallelStrategy
+DistributedVmmCoordinator::parallel_strategy_locked(
     const std::string& model_id) const {
   const auto it = model_parallel_strategies_.find(model_id);
   return it == model_parallel_strategies_.end()
@@ -475,7 +473,7 @@ DistributedVirtualMemoryCoordinator::parallel_strategy_locked(
              : it->second;
 }
 
-bool DistributedVirtualMemoryCoordinator::broadcast_map_to_kv_tensors(
+bool DistributedVmmCoordinator::broadcast_map_to_kv_tensors(
     const std::string& model_id,
     int32_t dp_rank,
     const std::vector<int64_t>& offsets) {
@@ -522,7 +520,7 @@ bool DistributedVirtualMemoryCoordinator::broadcast_map_to_kv_tensors(
   return false;
 }
 
-bool DistributedVirtualMemoryCoordinator::broadcast_unmap_from_kv_tensors(
+bool DistributedVmmCoordinator::broadcast_unmap_from_kv_tensors(
     const std::string& model_id,
     int32_t dp_rank,
     const std::vector<int64_t>& offsets) {
@@ -567,7 +565,7 @@ bool DistributedVirtualMemoryCoordinator::broadcast_unmap_from_kv_tensors(
   return true;
 }
 
-bool DistributedVirtualMemoryCoordinator::broadcast_alloc_weight_pages(
+bool DistributedVmmCoordinator::broadcast_alloc_weight_pages(
     const std::string& model_id,
     size_t num_pages) {
   std::lock_guard<std::mutex> transaction_lock(mapping_transaction_mutex_);
@@ -603,7 +601,7 @@ bool DistributedVirtualMemoryCoordinator::broadcast_alloc_weight_pages(
       "weight");
 }
 
-bool DistributedVirtualMemoryCoordinator::broadcast_free_weight_pages(
+bool DistributedVmmCoordinator::broadcast_free_weight_pages(
     const std::string& model_id) {
   std::lock_guard<std::mutex> transaction_lock(mapping_transaction_mutex_);
   // Get model-specific parallel strategy
@@ -641,7 +639,7 @@ bool DistributedVirtualMemoryCoordinator::broadcast_free_weight_pages(
   return true;
 }
 
-bool DistributedVirtualMemoryCoordinator::get_virtual_kv_cache_offsets(
+bool DistributedVmmCoordinator::get_virtual_kv_cache_offsets(
     int32_t dp_rank,
     const std::string& model_id,
     const std::vector<int32_t>& block_ids,
@@ -720,12 +718,11 @@ bool DistributedVirtualMemoryCoordinator::get_virtual_kv_cache_offsets(
   return true;
 }
 
-void DistributedVirtualMemoryCoordinator::init_page_budget(
-    size_t total_pages,
-    int32_t dp_size,
-    int32_t worker_count,
-    size_t page_size,
-    bool enable_prealloc) {
+void DistributedVmmCoordinator::init_page_budget(size_t total_pages,
+                                                 int32_t dp_size,
+                                                 int32_t worker_count,
+                                                 size_t page_size,
+                                                 bool enable_prealloc) {
   std::lock_guard<std::mutex> initialization_lock(initialization_mutex_);
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -754,30 +751,28 @@ void DistributedVirtualMemoryCoordinator::init_page_budget(
   budget_initialized_ = true;
 }
 
-bool DistributedVirtualMemoryCoordinator::is_initialized() const {
+bool DistributedVmmCoordinator::is_initialized() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return budget_initialized_;
 }
 
-size_t DistributedVirtualMemoryCoordinator::get_num_total_phy_pages() const {
+size_t DistributedVmmCoordinator::get_num_total_phy_pages() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return page_budget_.total_pages();
 }
 
-VmmKVPageAllocatorImpl&
-DistributedVirtualMemoryCoordinator::vmm_kv_page_allocator() {
+VmmKVPageAllocatorImpl& DistributedVmmCoordinator::vmm_kv_page_allocator() {
   return *kv_cache_pages_;
 }
 
-int32_t DistributedVirtualMemoryCoordinator::model_worker_count_locked(
+int32_t DistributedVmmCoordinator::model_worker_count_locked(
     const std::string& model_id) const {
   const ModelParallelStrategy strategy = parallel_strategy_locked(model_id);
   return std::min(strategy.dp_size * strategy.tp_size,
                   page_budget_.worker_count());
 }
 
-std::pair<int32_t, int32_t>
-DistributedVirtualMemoryCoordinator::dp_worker_range_locked(
+std::pair<int32_t, int32_t> DistributedVmmCoordinator::dp_worker_range_locked(
     const std::string& model_id,
     int32_t dp_rank) const {
   const ModelParallelStrategy strategy = parallel_strategy_locked(model_id);
@@ -789,10 +784,9 @@ DistributedVirtualMemoryCoordinator::dp_worker_range_locked(
           std::min(first + strategy.tp_size, page_budget_.worker_count())};
 }
 
-bool DistributedVirtualMemoryCoordinator::try_reserve_pages(
-    const std::string& model_id,
-    int32_t dp_rank,
-    size_t physical_pages) {
+bool DistributedVmmCoordinator::try_reserve_pages(const std::string& model_id,
+                                                  int32_t dp_rank,
+                                                  size_t physical_pages) {
   std::lock_guard<std::mutex> lock(mutex_);
   CHECK(budget_initialized_);
   const auto [first, last] = dp_worker_range_locked(model_id, dp_rank);
@@ -829,10 +823,9 @@ bool DistributedVirtualMemoryCoordinator::try_reserve_pages(
   return reserved;
 }
 
-void DistributedVirtualMemoryCoordinator::release_pages(
-    const std::string& model_id,
-    int32_t dp_rank,
-    size_t physical_pages) {
+void DistributedVmmCoordinator::release_pages(const std::string& model_id,
+                                              int32_t dp_rank,
+                                              size_t physical_pages) {
   std::lock_guard<std::mutex> lock(mutex_);
   CHECK(budget_initialized_);
   const auto [first, last] = dp_worker_range_locked(model_id, dp_rank);
@@ -843,9 +836,8 @@ void DistributedVirtualMemoryCoordinator::release_pages(
   update_memory_usage_locked();
 }
 
-size_t DistributedVirtualMemoryCoordinator::available_pages(
-    const std::string& model_id,
-    int32_t dp_rank) const {
+size_t DistributedVmmCoordinator::available_pages(const std::string& model_id,
+                                                  int32_t dp_rank) const {
   std::lock_guard<std::mutex> lock(mutex_);
   const auto [first, last] = dp_worker_range_locked(model_id, dp_rank);
   if (first == last) {
@@ -854,9 +846,8 @@ size_t DistributedVirtualMemoryCoordinator::available_pages(
   return available_pages_locked(first, last);
 }
 
-size_t DistributedVirtualMemoryCoordinator::available_pages_locked(
-    int32_t first,
-    int32_t last) const {
+size_t DistributedVmmCoordinator::available_pages_locked(int32_t first,
+                                                         int32_t last) const {
   size_t available = page_budget_.min_free_pages(first, last);
   if (!KVCacheConfig::get_instance().vmm_elastic()) {
     return available;
@@ -873,7 +864,7 @@ size_t DistributedVirtualMemoryCoordinator::available_pages_locked(
   return available;
 }
 
-void DistributedVirtualMemoryCoordinator::invalidate_worker_capacity_snapshot(
+void DistributedVmmCoordinator::invalidate_worker_capacity_snapshot(
     const std::string& model_id,
     int32_t dp_rank) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -884,7 +875,7 @@ void DistributedVirtualMemoryCoordinator::invalidate_worker_capacity_snapshot(
             0);
 }
 
-void DistributedVirtualMemoryCoordinator::refresh_worker_capacity_snapshot() {
+void DistributedVmmCoordinator::refresh_worker_capacity_snapshot() {
   std::vector<std::shared_ptr<WorkerMemoryRpcClient>> workers;
   bool distributed = false;
   int32_t expected_worker_count = 0;
@@ -946,7 +937,7 @@ void DistributedVirtualMemoryCoordinator::refresh_worker_capacity_snapshot() {
   }
 }
 
-void DistributedVirtualMemoryCoordinator::start_worker_capacity_refresh() {
+void DistributedVmmCoordinator::start_worker_capacity_refresh() {
   std::lock_guard<std::mutex> lock(mutex_);
   if (capacity_refresh_running_ ||
       !KVCacheConfig::get_instance().vmm_elastic()) {
@@ -972,7 +963,7 @@ void DistributedVirtualMemoryCoordinator::start_worker_capacity_refresh() {
   });
 }
 
-void DistributedVirtualMemoryCoordinator::stop_worker_capacity_refresh() {
+void DistributedVmmCoordinator::stop_worker_capacity_refresh() {
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!capacity_refresh_running_) {
@@ -986,21 +977,20 @@ void DistributedVirtualMemoryCoordinator::stop_worker_capacity_refresh() {
   }
 }
 
-bool DistributedVirtualMemoryCoordinator::map_pages(
-    const std::string& model_id,
-    int32_t dp_rank,
-    const std::vector<int64_t>& offsets) {
+bool DistributedVmmCoordinator::map_pages(const std::string& model_id,
+                                          int32_t dp_rank,
+                                          const std::vector<int64_t>& offsets) {
   return broadcast_map_to_kv_tensors(model_id, dp_rank, offsets);
 }
 
-bool DistributedVirtualMemoryCoordinator::unmap_pages(
+bool DistributedVmmCoordinator::unmap_pages(
     const std::string& model_id,
     int32_t dp_rank,
     const std::vector<int64_t>& offsets) {
   return broadcast_unmap_from_kv_tensors(model_id, dp_rank, offsets);
 }
 
-bool DistributedVirtualMemoryCoordinator::reserve_weight_pages(
+bool DistributedVmmCoordinator::reserve_weight_pages(
     const std::string& model_id,
     size_t num_pages) {
   {
@@ -1026,21 +1016,21 @@ bool DistributedVirtualMemoryCoordinator::reserve_weight_pages(
   return false;
 }
 
-void DistributedVirtualMemoryCoordinator::set_weight_page_count(
+void DistributedVmmCoordinator::set_weight_page_count(
     const std::string& model_id,
     size_t num_pages) {
   std::lock_guard<std::mutex> lock(mutex_);
   weight_page_counts_[model_id] = num_pages;
 }
 
-size_t DistributedVirtualMemoryCoordinator::get_weight_page_count(
+size_t DistributedVmmCoordinator::get_weight_page_count(
     const std::string& model_id) const {
   std::lock_guard<std::mutex> lock(mutex_);
   const auto it = weight_page_counts_.find(model_id);
   return it == weight_page_counts_.end() ? 0 : it->second;
 }
 
-void DistributedVirtualMemoryCoordinator::release_weight_pages(
+void DistributedVmmCoordinator::release_weight_pages(
     const std::string& model_id) {
   const size_t pages = get_weight_page_count(model_id);
   if (pages == 0) {
@@ -1053,13 +1043,13 @@ void DistributedVirtualMemoryCoordinator::release_weight_pages(
   update_memory_usage_locked();
 }
 
-bool DistributedVirtualMemoryCoordinator::restore_weight_pages(
+bool DistributedVmmCoordinator::restore_weight_pages(
     const std::string& model_id) {
   const size_t pages = get_weight_page_count(model_id);
   return pages == 0 || broadcast_alloc_weight_pages(model_id, pages);
 }
 
-bool DistributedVirtualMemoryCoordinator::try_reserve_model_memory(
+bool DistributedVmmCoordinator::try_reserve_model_memory(
     const std::string& model_id,
     const KVCacheMappingPlan& plan) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -1070,7 +1060,7 @@ bool DistributedVirtualMemoryCoordinator::try_reserve_model_memory(
   return reserved;
 }
 
-void DistributedVirtualMemoryCoordinator::release_model_memory_budget(
+void DistributedVmmCoordinator::release_model_memory_budget(
     const std::string& model_id,
     const KVCacheMappingPlan& plan) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -1078,8 +1068,7 @@ void DistributedVirtualMemoryCoordinator::release_model_memory_budget(
   update_memory_usage_locked();
 }
 
-std::vector<size_t>
-DistributedVirtualMemoryCoordinator::model_memory_demand_locked(
+std::vector<size_t> DistributedVmmCoordinator::model_memory_demand_locked(
     const std::string& model_id,
     const KVCacheMappingPlan& plan) const {
   std::vector<size_t> demand(page_budget_.worker_count(), 0);
@@ -1111,7 +1100,7 @@ DistributedVirtualMemoryCoordinator::model_memory_demand_locked(
   return demand;
 }
 
-void DistributedVirtualMemoryCoordinator::release_kv_mapping_budget(
+void DistributedVmmCoordinator::release_kv_mapping_budget(
     const std::string& model_id,
     const KVCacheMappingPlan& plan) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -1129,19 +1118,19 @@ void DistributedVirtualMemoryCoordinator::release_kv_mapping_budget(
   update_memory_usage_locked();
 }
 
-std::vector<size_t>
-DistributedVirtualMemoryCoordinator::get_worker_free_page_counts() const {
+std::vector<size_t> DistributedVmmCoordinator::get_worker_free_page_counts()
+    const {
   std::lock_guard<std::mutex> lock(mutex_);
   return page_budget_.free_pages_snapshot();
 }
 
-size_t DistributedVirtualMemoryCoordinator::get_free_pages_for_model(
+size_t DistributedVmmCoordinator::get_free_pages_for_model(
     const std::string& model_id) const {
   std::lock_guard<std::mutex> lock(mutex_);
   return page_budget_.min_free_pages(0, model_worker_count_locked(model_id));
 }
 
-void DistributedVirtualMemoryCoordinator::update_memory_usage_locked() const {
+void DistributedVmmCoordinator::update_memory_usage_locked() const {
   VLOG(2) << "Shared worker budget: total_pages=" << page_budget_.total_pages()
           << ", min_free_pages="
           << page_budget_.min_free_pages(0, page_budget_.worker_count());

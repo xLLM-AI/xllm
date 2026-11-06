@@ -35,7 +35,7 @@ limitations under the License.
 #include "common/metrics.h"
 #include "common/options.h"
 #include "core/common/global_flags.h"
-#include "core/distributed_runtime/distributed_virtual_memory_coordinator.h"
+#include "core/distributed_runtime/distributed_vmm_coordinator.h"
 #include "core/distributed_runtime/kv_cache_capacity_planner.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
@@ -288,8 +288,8 @@ bool LLMEngine::init_model(MasterStatus master_status,
     // Sleeping weights have no device allocation yet. Keep ordinary KV
     // tensors from consuming the page budget needed by the first wakeup.
     const size_t weight_pages =
-        DistributedVirtualMemoryCoordinator::get_instance()
-            .get_weight_page_count(options_.model_id());
+        DistributedVmmCoordinator::get_instance().get_weight_page_count(
+            options_.model_id());
     initial_weight_reservation_bytes_ =
         weight_pages *
         KVCacheConfig::get_instance().phy_page_granularity_size();

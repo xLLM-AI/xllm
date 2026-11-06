@@ -20,7 +20,7 @@ limitations under the License.
 #include <limits>
 #include <utility>
 
-#include "core/distributed_runtime/distributed_virtual_memory_coordinator.h"
+#include "core/distributed_runtime/distributed_vmm_coordinator.h"
 #include "core/framework/block/hierarchy_block_manager_pool.h"
 #include "core/kv_cache/layout/vmm_kv_cache_layout.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
@@ -87,8 +87,8 @@ KVCacheManagerFactoryResult KVCacheManagerFactory::create(
     }
     const VmmKVCacheLayout& tensors =
         shared_vmm_layout == nullptr ? *component_layout : *shared_vmm_layout;
-    auto& allocator = DistributedVirtualMemoryCoordinator::get_instance()
-                          .vmm_kv_page_allocator();
+    auto& allocator =
+        DistributedVmmCoordinator::get_instance().vmm_kv_page_allocator();
     if (options.enable_disagg_pd()) {
       tensors.validate_pd_page_size(allocator.page_size());
     }

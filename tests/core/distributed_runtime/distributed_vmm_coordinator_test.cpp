@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/distributed_runtime/distributed_virtual_memory_coordinator.h"
+#include "core/distributed_runtime/distributed_vmm_coordinator.h"
 
 #include <brpc/closure_guard.h>
 #include <brpc/server.h>
@@ -39,9 +39,9 @@ limitations under the License.
 
 namespace xllm {
 
-class DistributedVirtualMemoryCoordinatorTestPeer final {
+class DistributedVmmCoordinatorTestPeer final {
  public:
-  static void connect(DistributedVirtualMemoryCoordinator& coordinator,
+  static void connect(DistributedVmmCoordinator& coordinator,
                       const std::vector<std::string>& addresses) {
     const int32_t count = static_cast<int32_t>(addresses.size());
     coordinator.configure_workers(count, /*dp_size=*/1, /*tp_size=*/count);
@@ -51,20 +51,18 @@ class DistributedVirtualMemoryCoordinatorTestPeer final {
     }
   }
 
-  static std::shared_ptr<DistributedVirtualMemoryCoordinator> create() {
-    return std::shared_ptr<DistributedVirtualMemoryCoordinator>(
-        new DistributedVirtualMemoryCoordinator(),
-        [](DistributedVirtualMemoryCoordinator* coordinator) {
-          delete coordinator;
-        });
+  static std::shared_ptr<DistributedVmmCoordinator> create() {
+    return std::shared_ptr<DistributedVmmCoordinator>(
+        new DistributedVmmCoordinator(),
+        [](DistributedVmmCoordinator* coordinator) { delete coordinator; });
   }
 
   static void refresh_worker_capacity_snapshot(
-      DistributedVirtualMemoryCoordinator& coordinator) {
+      DistributedVmmCoordinator& coordinator) {
     coordinator.refresh_worker_capacity_snapshot();
   }
 
-  static void configure_node(DistributedVirtualMemoryCoordinator& coordinator,
+  static void configure_node(DistributedVmmCoordinator& coordinator,
                              int32_t node_rank) {
     coordinator.configure_workers(
         /*world_size=*/2, /*dp_size=*/1, /*tp_size=*/2);
@@ -72,7 +70,7 @@ class DistributedVirtualMemoryCoordinatorTestPeer final {
   }
 
   static bool has_worker_capacity_tracking(
-      DistributedVirtualMemoryCoordinator& coordinator) {
+      DistributedVmmCoordinator& coordinator) {
     std::lock_guard<std::mutex> lock(coordinator.mutex_);
     return std::any_of(coordinator.worker_allocatable_pages_.begin(),
                        coordinator.worker_allocatable_pages_.end(),
@@ -132,9 +130,9 @@ class NonLeaderPoolInitializationTest : public ::testing::Test {
     resources_initialized_ =
         WorkerMemoryResourcesTestPeer::begin_initialization();
     ASSERT_TRUE(resources_initialized_);
-    coordinator_ = DistributedVirtualMemoryCoordinatorTestPeer::create();
-    DistributedVirtualMemoryCoordinatorTestPeer::configure_node(
-        *coordinator_, /*node_rank=*/1);
+    coordinator_ = DistributedVmmCoordinatorTestPeer::create();
+    DistributedVmmCoordinatorTestPeer::configure_node(*coordinator_,
+                                                      /*node_rank=*/1);
   }
 
   void TearDown() override {
@@ -149,7 +147,7 @@ class NonLeaderPoolInitializationTest : public ::testing::Test {
         previous_startup_timeout_ms_);
   }
 
-  std::shared_ptr<DistributedVirtualMemoryCoordinator> coordinator_;
+  std::shared_ptr<DistributedVmmCoordinator> coordinator_;
 
  private:
   int32_t previous_timeout_ms_ = -1;
@@ -169,18 +167,16 @@ TEST_F(NonLeaderPoolInitializationTest, WaitsForMasterCapacityWithoutClients) {
 
   WorkerMemoryResourcesTestPeer::publish_capacity(37);
   EXPECT_EQ(result.get(), 37);
-  EXPECT_FALSE(
-      DistributedVirtualMemoryCoordinatorTestPeer::has_worker_capacity_tracking(
-          *coordinator_));
+  EXPECT_FALSE(DistributedVmmCoordinatorTestPeer::has_worker_capacity_tracking(
+      *coordinator_));
 }
 
 TEST_F(NonLeaderPoolInitializationTest, AcceptsCapacityPublishedBeforeWaiting) {
   WorkerMemoryResourcesTestPeer::publish_capacity(37);
 
   EXPECT_EQ(coordinator_->init_physical_page_pools(0.1, 1), 37);
-  EXPECT_FALSE(
-      DistributedVirtualMemoryCoordinatorTestPeer::has_worker_capacity_tracking(
-          *coordinator_));
+  EXPECT_FALSE(DistributedVmmCoordinatorTestPeer::has_worker_capacity_tracking(
+      *coordinator_));
 }
 
 TEST_F(NonLeaderPoolInitializationTest, WorkerPoolWaitTimesOutWithoutMaster) {
@@ -196,15 +192,14 @@ TEST_F(NonLeaderPoolInitializationTest, WorkerPoolWaitTimesOutWithoutMaster) {
 
   EXPECT_EQ(status, std::future_status::ready);
   EXPECT_EQ(result.get(), 0);
-  EXPECT_FALSE(
-      DistributedVirtualMemoryCoordinatorTestPeer::has_worker_capacity_tracking(
-          *coordinator_));
+  EXPECT_FALSE(DistributedVmmCoordinatorTestPeer::has_worker_capacity_tracking(
+      *coordinator_));
 }
 
 TEST_F(NonLeaderPoolInitializationTest,
        LeaderStillRejectsMissingWorkerClients) {
-  DistributedVirtualMemoryCoordinatorTestPeer::configure_node(*coordinator_,
-                                                              /*node_rank=*/0);
+  DistributedVmmCoordinatorTestPeer::configure_node(*coordinator_,
+                                                    /*node_rank=*/0);
   WorkerMemoryResourcesTestPeer::publish_capacity(37);
 
   EXPECT_EQ(coordinator_->init_physical_page_pools(0.8, 0), 0);
@@ -474,8 +469,8 @@ TEST_F(ElasticPoolInitializationTest,
         MappingFailure::NONE, 10, 36 * page_size, 40 * page_size);
     ASSERT_EQ(first.start(), 0);
     ASSERT_EQ(second.start(), 0);
-    auto coordinator = DistributedVirtualMemoryCoordinatorTestPeer::create();
-    DistributedVirtualMemoryCoordinatorTestPeer::connect(
+    auto coordinator = DistributedVmmCoordinatorTestPeer::create();
+    DistributedVmmCoordinatorTestPeer::connect(
         *coordinator, {first.address(), second.address()});
 
     EXPECT_EQ(coordinator->init_physical_page_pools(ratio, 0), 40);
@@ -498,8 +493,8 @@ TEST_F(ElasticPoolInitializationTest,
       MappingFailure::NONE, 10, 36 * page_size, 40 * page_size);
   ASSERT_EQ(first.start(), 0);
   ASSERT_EQ(second.start(), 0);
-  auto coordinator = DistributedVirtualMemoryCoordinatorTestPeer::create();
-  DistributedVirtualMemoryCoordinatorTestPeer::connect(
+  auto coordinator = DistributedVmmCoordinatorTestPeer::create();
+  DistributedVmmCoordinatorTestPeer::connect(
       *coordinator, {first.address(), second.address()});
 
   EXPECT_EQ(coordinator->init_physical_page_pools(
@@ -525,8 +520,8 @@ TEST_F(ElasticPoolInitializationTest,
       MappingFailure::NONE, 10, 36 * page_size, 40 * page_size);
   ASSERT_EQ(first.start(), 0);
   ASSERT_EQ(second.start(), 0);
-  auto coordinator = DistributedVirtualMemoryCoordinatorTestPeer::create();
-  DistributedVirtualMemoryCoordinatorTestPeer::connect(
+  auto coordinator = DistributedVmmCoordinatorTestPeer::create();
+  DistributedVmmCoordinatorTestPeer::connect(
       *coordinator, {first.address(), second.address()});
 
   EXPECT_EQ(coordinator->init_physical_page_pools(
@@ -553,8 +548,8 @@ TEST_F(ElasticPoolInitializationTest,
       MappingFailure::NONE, 10, 36 * page_size, 40 * page_size);
   ASSERT_EQ(first.start(), 0);
   ASSERT_EQ(second.start(), 0);
-  auto coordinator = DistributedVirtualMemoryCoordinatorTestPeer::create();
-  DistributedVirtualMemoryCoordinatorTestPeer::connect(
+  auto coordinator = DistributedVmmCoordinatorTestPeer::create();
+  DistributedVmmCoordinatorTestPeer::connect(
       *coordinator, {first.address(), second.address()});
 
   EXPECT_EQ(coordinator->init_physical_page_pools(0.0, 0), 40);
@@ -578,8 +573,8 @@ TEST_F(ElasticPoolInitializationTest,
       MappingFailure::NONE, 10, 36 * page_size, 40 * page_size);
   ASSERT_EQ(first.start(), 0);
   ASSERT_EQ(second.start(), 0);
-  auto coordinator = DistributedVirtualMemoryCoordinatorTestPeer::create();
-  DistributedVirtualMemoryCoordinatorTestPeer::connect(
+  auto coordinator = DistributedVmmCoordinatorTestPeer::create();
+  DistributedVmmCoordinatorTestPeer::connect(
       *coordinator, {first.address(), second.address()});
 
   EXPECT_EQ(coordinator->init_physical_page_pools(0.1, 0), 40);
@@ -600,8 +595,8 @@ TEST_F(ElasticPoolInitializationTest, MaxCacheSizeCapsElasticAddressCapacity) {
       MappingFailure::NONE, 36 * page_size, 36 * page_size, 40 * page_size);
   ASSERT_EQ(first.start(), 0);
   ASSERT_EQ(second.start(), 0);
-  auto coordinator = DistributedVirtualMemoryCoordinatorTestPeer::create();
-  DistributedVirtualMemoryCoordinatorTestPeer::connect(
+  auto coordinator = DistributedVmmCoordinatorTestPeer::create();
+  DistributedVmmCoordinatorTestPeer::connect(
       *coordinator, {first.address(), second.address()});
 
   EXPECT_EQ(coordinator->init_physical_page_pools(0.8, 12 * page_size), 12);
@@ -620,8 +615,8 @@ TEST_F(ElasticPoolInitializationTest, LowStartupFreeMemoryKeepsArenaForGrowth) {
       MappingFailure::NONE, 0, 36 * page_size, 40 * page_size);
   ASSERT_EQ(first.start(), 0);
   ASSERT_EQ(second.start(), 0);
-  auto coordinator = DistributedVirtualMemoryCoordinatorTestPeer::create();
-  DistributedVirtualMemoryCoordinatorTestPeer::connect(
+  auto coordinator = DistributedVmmCoordinatorTestPeer::create();
+  DistributedVmmCoordinatorTestPeer::connect(
       *coordinator, {first.address(), second.address()});
 
   EXPECT_EQ(coordinator->init_physical_page_pools(0.8, 0), 40);
@@ -640,8 +635,8 @@ TEST_F(ElasticPoolInitializationTest, InitialSlotsUseMostConstrainedWorker) {
       MappingFailure::NONE, 10, 36 * page_size, 40 * page_size);
   ASSERT_EQ(first.start(), 0);
   ASSERT_EQ(second.start(), 0);
-  auto coordinator = DistributedVirtualMemoryCoordinatorTestPeer::create();
-  DistributedVirtualMemoryCoordinatorTestPeer::connect(
+  auto coordinator = DistributedVmmCoordinatorTestPeer::create();
+  DistributedVmmCoordinatorTestPeer::connect(
       *coordinator, {first.address(), second.address()});
 
   EXPECT_EQ(coordinator->init_physical_page_pools(1.0, 0), 40);
@@ -665,8 +660,8 @@ TEST_F(ElasticPoolInitializationTest,
       MappingFailure::NONE, 10, 36 * page_size, 40 * page_size);
   ASSERT_EQ(first.start(), 0);
   ASSERT_EQ(second.start(), 0);
-  auto coordinator = DistributedVirtualMemoryCoordinatorTestPeer::create();
-  DistributedVirtualMemoryCoordinatorTestPeer::connect(
+  auto coordinator = DistributedVmmCoordinatorTestPeer::create();
+  DistributedVmmCoordinatorTestPeer::connect(
       *coordinator, {first.address(), second.address()});
 
   EXPECT_EQ(coordinator->init_physical_page_pools(0.8, 0), 4);
@@ -674,9 +669,8 @@ TEST_F(ElasticPoolInitializationTest,
   EXPECT_FALSE(second.service().lazy());
 }
 
-TEST(DistributedVirtualMemoryCoordinatorTest,
-     ReservesKvAndWeightsOnEveryTargetWorker) {
-  auto coordinator = DistributedVirtualMemoryCoordinatorTestPeer::create();
+TEST(DistributedVmmCoordinatorTest, ReservesKvAndWeightsOnEveryTargetWorker) {
+  auto coordinator = DistributedVmmCoordinatorTestPeer::create();
   coordinator->init_page_budget(/*total_pages=*/10,
                                 /*dp_size=*/2,
                                 /*worker_count=*/4,
@@ -695,9 +689,9 @@ TEST(DistributedVirtualMemoryCoordinatorTest,
   EXPECT_EQ(coordinator->get_free_pages_for_model("model"), 3);
 }
 
-TEST(DistributedVirtualMemoryCoordinatorTest,
+TEST(DistributedVmmCoordinatorTest,
      FailedJointReservationLeavesAllWorkersUntouched) {
-  auto coordinator = DistributedVirtualMemoryCoordinatorTestPeer::create();
+  auto coordinator = DistributedVmmCoordinatorTestPeer::create();
   coordinator->init_page_budget(/*total_pages=*/10,
                                 /*dp_size=*/2,
                                 /*worker_count=*/4,
@@ -720,9 +714,9 @@ TEST(DistributedVirtualMemoryCoordinatorTest,
   EXPECT_EQ(coordinator->get_weight_page_count("model"), 3);
 }
 
-TEST(DistributedVirtualMemoryCoordinatorTest,
+TEST(DistributedVmmCoordinatorTest,
      FailedResumeReleasesWholeReservationAndPreservesWeightDemand) {
-  auto coordinator = DistributedVirtualMemoryCoordinatorTestPeer::create();
+  auto coordinator = DistributedVmmCoordinatorTestPeer::create();
   coordinator->init_page_budget(/*total_pages=*/10,
                                 /*dp_size=*/2,
                                 /*worker_count=*/4,
@@ -741,9 +735,8 @@ TEST(DistributedVirtualMemoryCoordinatorTest,
   EXPECT_TRUE(coordinator->try_reserve_model_memory("model", plan));
 }
 
-TEST(DistributedVirtualMemoryCoordinatorTest,
-     ForkModelUsesOnlyItsOwnDpAndTpWorkers) {
-  auto coordinator = DistributedVirtualMemoryCoordinatorTestPeer::create();
+TEST(DistributedVmmCoordinatorTest, ForkModelUsesOnlyItsOwnDpAndTpWorkers) {
+  auto coordinator = DistributedVmmCoordinatorTestPeer::create();
   coordinator->init_page_budget(/*total_pages=*/10,
                                 /*dp_size=*/2,
                                 /*worker_count=*/4,
@@ -768,9 +761,9 @@ TEST(DistributedVirtualMemoryCoordinatorTest,
             std::vector<size_t>({7, 7, 10, 10}));
 }
 
-TEST(DistributedVirtualMemoryCoordinatorTest,
+TEST(DistributedVmmCoordinatorTest,
      ConcurrentJointReservationsCannotOvercommit) {
-  auto coordinator = DistributedVirtualMemoryCoordinatorTestPeer::create();
+  auto coordinator = DistributedVmmCoordinatorTestPeer::create();
   coordinator->init_page_budget(/*total_pages=*/10,
                                 /*dp_size=*/1,
                                 /*worker_count=*/2,
@@ -796,7 +789,7 @@ TEST(DistributedVirtualMemoryCoordinatorTest,
             std::vector<size_t>({4, 4}));
 }
 
-TEST(DistributedVirtualMemoryCoordinatorTest,
+TEST(DistributedVmmCoordinatorTest,
      MappingFailureRollsBackEveryWorkerIncludingUnknownResults) {
   for (MappingFailure failure : {MappingFailure::PREPARE,
                                  MappingFailure::PREPARE_REPLY,
@@ -806,16 +799,16 @@ TEST(DistributedVirtualMemoryCoordinatorTest,
     TransactionTestServer second(failure);
     ASSERT_EQ(first.start(), 0);
     ASSERT_EQ(second.start(), 0);
-    auto coordinator = DistributedVirtualMemoryCoordinatorTestPeer::create();
+    auto coordinator = DistributedVmmCoordinatorTestPeer::create();
     coordinator->init_page_budget(/*total_pages=*/10,
                                   /*dp_size=*/1,
                                   /*worker_count=*/2,
                                   /*page_size=*/4096,
                                   /*enable_prealloc=*/false);
-    DistributedVirtualMemoryCoordinatorTestPeer::connect(
+    DistributedVmmCoordinatorTestPeer::connect(
         *coordinator, {first.address(), second.address()});
-    DistributedVirtualMemoryCoordinatorTestPeer::
-        refresh_worker_capacity_snapshot(*coordinator);
+    DistributedVmmCoordinatorTestPeer::refresh_worker_capacity_snapshot(
+        *coordinator);
     ASSERT_TRUE(coordinator->try_reserve_pages(
         "model", /*dp_rank=*/0, /*physical_pages=*/2));
     EXPECT_FALSE(coordinator->map_pages("model", /*dp_rank=*/0, {0}));
@@ -844,8 +837,8 @@ TEST_F(ElasticPoolInitializationTest,
   // The bootstrap memory query succeeds, but every post-init query fails.
   first.service().set_memory_info_failure_after(1);
   second.service().set_memory_info_failure_after(1);
-  auto coordinator = DistributedVirtualMemoryCoordinatorTestPeer::create();
-  DistributedVirtualMemoryCoordinatorTestPeer::connect(
+  auto coordinator = DistributedVmmCoordinatorTestPeer::create();
+  DistributedVmmCoordinatorTestPeer::connect(
       *coordinator, {first.address(), second.address()});
   ASSERT_EQ(coordinator->init_physical_page_pools(0.75, 0), 40);
   coordinator->init_page_budget(/*total_pages=*/40,
@@ -866,17 +859,17 @@ TEST_F(ElasticPoolInitializationTest,
   TransactionTestServer second(MappingFailure::NONE, /*allocatable_pages=*/4);
   ASSERT_EQ(first.start(), 0);
   ASSERT_EQ(second.start(), 0);
-  auto coordinator = DistributedVirtualMemoryCoordinatorTestPeer::create();
+  auto coordinator = DistributedVmmCoordinatorTestPeer::create();
   coordinator->init_page_budget(/*total_pages=*/10,
                                 /*dp_size=*/2,
                                 /*worker_count=*/2,
                                 /*page_size=*/4096,
                                 /*enable_prealloc=*/false);
-  DistributedVirtualMemoryCoordinatorTestPeer::connect(
+  DistributedVmmCoordinatorTestPeer::connect(
       *coordinator, {first.address(), second.address()});
   coordinator->set_model_parallel_strategy(
       "model", /*dp_size=*/2, /*tp_size=*/1);
-  DistributedVirtualMemoryCoordinatorTestPeer::refresh_worker_capacity_snapshot(
+  DistributedVmmCoordinatorTestPeer::refresh_worker_capacity_snapshot(
       *coordinator);
   first.service().set_memory_info_failure_after(0);
   second.service().set_allocatable_pages(7);
@@ -889,8 +882,8 @@ TEST_F(ElasticPoolInitializationTest,
     released.wait();
   });
   auto refresh = std::async(std::launch::async, [&coordinator]() {
-    DistributedVirtualMemoryCoordinatorTestPeer::
-        refresh_worker_capacity_snapshot(*coordinator);
+    DistributedVmmCoordinatorTestPeer::refresh_worker_capacity_snapshot(
+        *coordinator);
   });
   const auto status = sampled_reply.wait_for(std::chrono::seconds(1));
   EXPECT_EQ(status, std::future_status::ready);
@@ -915,15 +908,15 @@ TEST_F(ElasticPoolInitializationTest, FailedMappingDiscardsOlderCapacityReply) {
   TransactionTestServer second(MappingFailure::PREPARE);
   ASSERT_EQ(first.start(), 0);
   ASSERT_EQ(second.start(), 0);
-  auto coordinator = DistributedVirtualMemoryCoordinatorTestPeer::create();
+  auto coordinator = DistributedVmmCoordinatorTestPeer::create();
   coordinator->init_page_budget(/*total_pages=*/10,
                                 /*dp_size=*/1,
                                 /*worker_count=*/2,
                                 /*page_size=*/4096,
                                 /*enable_prealloc=*/false);
-  DistributedVirtualMemoryCoordinatorTestPeer::connect(
+  DistributedVmmCoordinatorTestPeer::connect(
       *coordinator, {first.address(), second.address()});
-  DistributedVirtualMemoryCoordinatorTestPeer::refresh_worker_capacity_snapshot(
+  DistributedVmmCoordinatorTestPeer::refresh_worker_capacity_snapshot(
       *coordinator);
   ASSERT_EQ(coordinator->available_pages("model", /*dp_rank=*/0), 10);
 
@@ -936,8 +929,8 @@ TEST_F(ElasticPoolInitializationTest, FailedMappingDiscardsOlderCapacityReply) {
     released.wait();
   });
   auto refresh = std::async(std::launch::async, [&coordinator]() {
-    DistributedVirtualMemoryCoordinatorTestPeer::
-        refresh_worker_capacity_snapshot(*coordinator);
+    DistributedVmmCoordinatorTestPeer::refresh_worker_capacity_snapshot(
+        *coordinator);
   });
   const auto status = sampled_reply.wait_for(std::chrono::seconds(1));
   EXPECT_EQ(status, std::future_status::ready);
@@ -956,31 +949,31 @@ TEST_F(ElasticPoolInitializationTest, FailedMappingDiscardsOlderCapacityReply) {
   EXPECT_EQ(coordinator->available_pages("model", /*dp_rank=*/0), 0);
 
   second.service().set_memory_info_failure_after(0);
-  DistributedVirtualMemoryCoordinatorTestPeer::refresh_worker_capacity_snapshot(
+  DistributedVmmCoordinatorTestPeer::refresh_worker_capacity_snapshot(
       *coordinator);
   EXPECT_EQ(coordinator->available_pages("model", /*dp_rank=*/0), 0);
   EXPECT_FALSE(coordinator->try_reserve_pages(
       "model", /*dp_rank=*/0, /*physical_pages=*/2));
   second.service().set_memory_info_failure_after(-1);
   second.service().set_allocatable_pages(4);
-  DistributedVirtualMemoryCoordinatorTestPeer::refresh_worker_capacity_snapshot(
+  DistributedVmmCoordinatorTestPeer::refresh_worker_capacity_snapshot(
       *coordinator);
   EXPECT_EQ(coordinator->available_pages("model", /*dp_rank=*/0), 4);
 }
 
-TEST(DistributedVirtualMemoryCoordinatorTest,
+TEST(DistributedVmmCoordinatorTest,
      DynamicCapacityUsesTheMostConstrainedWorker) {
   TransactionTestServer first(MappingFailure::NONE, /*allocatable_pages=*/8);
   TransactionTestServer second(MappingFailure::NONE, /*allocatable_pages=*/3);
   ASSERT_EQ(first.start(), 0);
   ASSERT_EQ(second.start(), 0);
-  auto coordinator = DistributedVirtualMemoryCoordinatorTestPeer::create();
+  auto coordinator = DistributedVmmCoordinatorTestPeer::create();
   coordinator->init_page_budget(/*total_pages=*/10,
                                 /*dp_size=*/1,
                                 /*worker_count=*/2,
                                 /*page_size=*/4096,
                                 /*enable_prealloc=*/false);
-  DistributedVirtualMemoryCoordinatorTestPeer::connect(
+  DistributedVmmCoordinatorTestPeer::connect(
       *coordinator, {first.address(), second.address()});
   auto& config = KVCacheConfig::get_instance();
   const bool previous_elastic = config.vmm_elastic();
@@ -990,7 +983,7 @@ TEST(DistributedVirtualMemoryCoordinatorTest,
     bool previous_elastic;
     ~ElasticConfigGuard() { config.vmm_elastic(previous_elastic); }
   } config_guard{config, previous_elastic};
-  DistributedVirtualMemoryCoordinatorTestPeer::refresh_worker_capacity_snapshot(
+  DistributedVmmCoordinatorTestPeer::refresh_worker_capacity_snapshot(
       *coordinator);
   EXPECT_EQ(coordinator->available_pages("model", /*dp_rank=*/0), 3);
   const int32_t first_calls = first.service().memory_info_calls();
@@ -1007,12 +1000,12 @@ TEST(DistributedVirtualMemoryCoordinatorTest,
   EXPECT_EQ(coordinator->available_pages("model", /*dp_rank=*/0), 1);
   EXPECT_EQ(first.service().memory_info_calls(), first_calls);
   EXPECT_EQ(second.service().memory_info_calls(), second_calls);
-  DistributedVirtualMemoryCoordinatorTestPeer::refresh_worker_capacity_snapshot(
+  DistributedVmmCoordinatorTestPeer::refresh_worker_capacity_snapshot(
       *coordinator);
   EXPECT_EQ(coordinator->available_pages("model", /*dp_rank=*/0), 3);
 }
 
-TEST(DistributedVirtualMemoryCoordinatorTest,
+TEST(DistributedVmmCoordinatorTest,
      WeightShortageRollsBackWorkersAndRestoresLedger) {
   for (MappingFailure failure : {MappingFailure::WEIGHT,
                                  MappingFailure::WEIGHT_PREPARE_REPLY,
@@ -1023,13 +1016,13 @@ TEST(DistributedVirtualMemoryCoordinatorTest,
     TransactionTestServer second(failure);
     ASSERT_EQ(first.start(), 0);
     ASSERT_EQ(second.start(), 0);
-    auto coordinator = DistributedVirtualMemoryCoordinatorTestPeer::create();
+    auto coordinator = DistributedVmmCoordinatorTestPeer::create();
     coordinator->init_page_budget(/*total_pages=*/10,
                                   /*dp_size=*/1,
                                   /*worker_count=*/2,
                                   /*page_size=*/4096,
                                   /*enable_prealloc=*/false);
-    DistributedVirtualMemoryCoordinatorTestPeer::connect(
+    DistributedVmmCoordinatorTestPeer::connect(
         *coordinator, {first.address(), second.address()});
     EXPECT_FALSE(coordinator->reserve_weight_pages("model", /*num_pages=*/3));
     EXPECT_FALSE(first.service().has_mappings());
@@ -1042,7 +1035,7 @@ TEST(DistributedVirtualMemoryCoordinatorTest,
   }
 }
 
-TEST(DistributedVirtualMemoryCoordinatorTest,
+TEST(DistributedVmmCoordinatorTest,
      MappingTargetsOnlyWorkersInTheModelsDpGroup) {
   TransactionTestServer first;
   TransactionTestServer second;
@@ -1050,13 +1043,13 @@ TEST(DistributedVirtualMemoryCoordinatorTest,
   ASSERT_EQ(first.start(), 0);
   ASSERT_EQ(second.start(), 0);
   ASSERT_EQ(third.start(), 0);
-  auto coordinator = DistributedVirtualMemoryCoordinatorTestPeer::create();
+  auto coordinator = DistributedVmmCoordinatorTestPeer::create();
   coordinator->init_page_budget(/*total_pages=*/10,
                                 /*dp_size=*/1,
                                 /*worker_count=*/3,
                                 /*page_size=*/4096,
                                 /*enable_prealloc=*/false);
-  DistributedVirtualMemoryCoordinatorTestPeer::connect(
+  DistributedVmmCoordinatorTestPeer::connect(
       *coordinator, {first.address(), second.address(), third.address()});
   coordinator->set_model_parallel_strategy(
       "model", /*dp_size=*/2, /*tp_size=*/1);
@@ -1067,7 +1060,7 @@ TEST(DistributedVirtualMemoryCoordinatorTest,
   EXPECT_FALSE(third.service().has_mappings());
 }
 
-TEST(DistributedVirtualMemoryCoordinatorTest,
+TEST(DistributedVmmCoordinatorTest,
      WeightAllocationTargetsOnlyWorkersInTheModel) {
   TransactionTestServer first;
   TransactionTestServer second;
@@ -1075,13 +1068,13 @@ TEST(DistributedVirtualMemoryCoordinatorTest,
   ASSERT_EQ(first.start(), 0);
   ASSERT_EQ(second.start(), 0);
   ASSERT_EQ(third.start(), 0);
-  auto coordinator = DistributedVirtualMemoryCoordinatorTestPeer::create();
+  auto coordinator = DistributedVmmCoordinatorTestPeer::create();
   coordinator->init_page_budget(/*total_pages=*/10,
                                 /*dp_size=*/1,
                                 /*worker_count=*/3,
                                 /*page_size=*/4096,
                                 /*enable_prealloc=*/false);
-  DistributedVirtualMemoryCoordinatorTestPeer::connect(
+  DistributedVmmCoordinatorTestPeer::connect(
       *coordinator, {first.address(), second.address(), third.address()});
   coordinator->set_model_parallel_strategy(
       "model", /*dp_size=*/1, /*tp_size=*/2);

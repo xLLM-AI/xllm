@@ -88,7 +88,7 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:xllm_atb_layers>
     $<$<BOOL:${USE_NPU}>:unified_dlog>
     :collective_service
-    :distributed_virtual_memory_coordinator
+    :distributed_vmm_coordinator
     absl::strings
     absl::time
 )
@@ -196,11 +196,11 @@ cc_library(
 # Owns shared KV/weight budget transactions and implements the KV page backend.
 cc_library(
   NAME
-    distributed_virtual_memory_coordinator
+    distributed_vmm_coordinator
   HDRS
-    distributed_virtual_memory_coordinator.h
+    distributed_vmm_coordinator.h
   SRCS
-    distributed_virtual_memory_coordinator.cpp
+    distributed_vmm_coordinator.cpp
   DEPS
     :worker_memory_rpc
     :worker_memory_resources

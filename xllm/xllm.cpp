@@ -38,7 +38,7 @@ namespace py = pybind11;
 #include "core/common/native_library.h"
 #include "core/common/options.h"
 #include "core/common/types.h"
-#include "core/distributed_runtime/distributed_virtual_memory_coordinator.h"
+#include "core/distributed_runtime/distributed_vmm_coordinator.h"
 #include "core/distributed_runtime/master.h"
 #include "core/distributed_runtime/master_factory.h"
 #include "core/distributed_runtime/worker_memory_rpc_options.h"
@@ -488,8 +488,7 @@ int run() {
     const auto devices = DeviceNameUtils::parse_devices("auto");
 
     WorkerMemoryResources::get_instance().init(devices[0]);
-    auto& memory_coordinator =
-        DistributedVirtualMemoryCoordinator::get_instance();
+    auto& memory_coordinator = DistributedVmmCoordinator::get_instance();
 
     // Setup distributed VirtualMemory service for multi-GPU/multi-node
     if (distributed_config.nnodes() > 1) {

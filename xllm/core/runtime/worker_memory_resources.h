@@ -120,7 +120,7 @@ class WorkerMemoryResources final {
   get_all_model_weight_segments() const;
 
  private:
-  friend class DistributedVirtualMemoryCoordinator;
+  friend class DistributedVmmCoordinator;
   friend class WorkerMemoryResourcesTestPeer;
 
   WorkerMemoryResources();
