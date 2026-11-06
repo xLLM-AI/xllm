@@ -21,7 +21,6 @@ limitations under the License.
 
 namespace xllm {
 
-class DraftProposal;
 class GraphInputView;
 class SampleOutput;
 
@@ -45,27 +44,13 @@ torch::Tensor make_speculative_verify_control_block_table(
 int64_t speculative_verify_block_table_capacity(int64_t max_position_embeddings,
                                                 int64_t block_size);
 
-// Fill deferred draft token columns for eager target verification. The graph
-// override, when present, owns the returned tensor storage.
-torch::Tensor materialize_speculative_verify_tokens(
-    const torch::Tensor& verify_tokens,
-    const std::vector<torch::Tensor>& draft_token_sources);
 torch::Tensor materialize_graph_speculative_verify_tokens(
     const torch::Tensor& tokens,
     const GraphInputView& graph_input);
 
-// Scores the RAW target logits (sampling transforms are applied inside the
-// rejection_sample exactly once); `target_logits` arrives flat as
-// [batch * val_tokens, vocab] — callers never pre-shape, and the validation
-// width is derived from the draft proposal. Takes the sampling params by
-// value so the rejection sampler owns them: params-owning callers (MTP's
-// verify_params chain, suffix via validate) std::move through the
-// forwarding layers for one copy per verify step; callers reading a const
-// input (DFlash's run_validate) copy once at this boundary.
-// `target_hidden_states`, when defined, is attached to the output as the
-// [batch, val_tokens, hidden] view.
-SampleOutput run_rejection_sampling(SamplingParameters sampling_params,
-                                    const DraftProposal& draft_proposal,
+SampleOutput run_rejection_sampling(const SamplingParameters& sampling_params,
+                                    const torch::Tensor& draft_token_ids,
+                                    const torch::Tensor& draft_logits,
                                     const torch::Tensor& target_logits,
                                     const torch::Tensor& target_hidden_states);
 

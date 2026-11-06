@@ -57,7 +57,6 @@ limitations under the License.
 #include "framework/model/model_args.h"
 #include "framework/request/stopping_checker.h"
 #include "framework/sampling/sampling_params.h"
-#include "framework/speculative/draft_proposal.h"
 #include "framework/speculative/rejection_sampler.h"
 #include "framework/tokenizer/tokenizer.h"
 #include "platform/device.h"
@@ -1608,9 +1607,11 @@ TEST(BatchTest, ReorderedMtpAcceptedRowsCommitToOwningSequences) {
         {row, 5, bonus_token_ids.index({row, 0}).item<int64_t>()}, 20.0F);
   }
   const SamplingParameters rejection_params = testutil::make_rejection_params();
-  DraftProposal draft_proposal = DraftProposal(draft_token_ids);
-  const SampleOutput accepted_output = rejection_sample(
-      rejection_params, draft_proposal, testutil::flatten_rows(target_logits));
+  const SampleOutput accepted_output =
+      rejection_sample(rejection_params,
+                       draft_token_ids,
+                       {},
+                       testutil::flatten_rows(target_logits));
   EXPECT_TRUE(torch::equal(
       accepted_output.next_tokens,
       torch::tensor({{10, 11, 12, 13, 14, 15}, {0, 1, 2, -1, -1, -1}},

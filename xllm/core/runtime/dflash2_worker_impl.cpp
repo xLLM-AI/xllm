@@ -20,8 +20,12 @@ limitations under the License.
 
 #include "runtime/dflash2_worker_impl.h"
 
+#include <c10/core/StreamGuard.h>
 #include <glog/logging.h>
 
+#include <limits>
+#include <optional>
+#include <string>
 #include <utility>
 
 #include "common/metrics.h"
@@ -30,7 +34,7 @@ limitations under the License.
 #include "core/framework/model/model_type.h"
 #include "core/framework/sampling/logits_processor.h"
 #include "core/framework/sampling/sampler.h"
-#include "core/framework/speculative/draft_proposal.h"
+#include "core/framework/sampling/sampling_params.h"
 #include "core/util/tensor_helper.h"
 #include "runtime/llm_worker_impl.h"
 #include "util/timer.h"
@@ -48,10 +52,11 @@ int32_t configure_draft_config(ModelArgs& args,
 }
 // The selector takes only temperature — truncation, penalties, and grammar
 // constraints belong to verification.
-DraftProposal sample_dflash2_path(const DFlash2CandidateOutput& candidates,
-                                  const SamplingParameters& sampling_params,
-                                  torch::Tensor gumbel_noise,
-                                  int64_t vocab_size) {
+std::pair<torch::Tensor, torch::Tensor> sample_dflash2_path(
+    const DFlash2CandidateOutput& candidates,
+    const SamplingParameters& sampling_params,
+    torch::Tensor gumbel_noise,
+    int64_t vocab_size) {
   CHECK_EQ(candidates.candidate_ids.dim(), 3);
   CHECK_EQ(candidates.edge_logits.dim(), 4);
   const int64_t batch_size = candidates.candidate_ids.size(0);
@@ -135,7 +140,7 @@ DraftProposal sample_dflash2_path(const DFlash2CandidateOutput& candidates,
     previous_indices = sampled_indices;
   }
 
-  return DraftProposal(std::move(token_ids), std::move(draft_logits));
+  return {std::move(token_ids), std::move(draft_logits)};
 }
 
 }  // namespace
@@ -154,9 +159,7 @@ bool DFlash2WorkerImpl::init_model(const std::string& model_weights_path,
     if (options_.enable_probabilistic_draft()) {
       const ModelArgs& draft_args = draft_impl_->context_.get_model_args();
       const ModelArgs& target_args = impl_->context_.get_model_args();
-      CHECK_EQ(draft_args.draft_vocab_size() > 0 ? draft_args.draft_vocab_size()
-                                                 : draft_args.vocab_size(),
-               target_args.vocab_size())
+      CHECK_EQ(draft_args.draft_vocab_size(), target_args.vocab_size())
           << "DFlash2 probabilistic drafts require draft and target vocabulary "
              "sizes to match.";
     }
@@ -176,9 +179,10 @@ DFlash2WorkerImpl::DFlash2WorkerImpl(const ParallelArgs& parallel_args,
                                           options.num_speculative_tokens()),
           configure_draft_config) {}
 
-DraftProposal DFlash2WorkerImpl::run_decode_draft(
+std::pair<torch::Tensor, torch::Tensor> DFlash2WorkerImpl::run_decode_draft(
     const LlmForwardInput& input,
-    LlmForwardInput& validate_input) {
+    LlmForwardInput& validate_input,
+    LlmForwardInput& draft_forward_input) {
   Timer draft_timer;
   LlmForwardInput query_input;
   prepare_query_inputs(input, query_input);
@@ -207,16 +211,12 @@ DraftProposal DFlash2WorkerImpl::run_decode_draft(
 
   query_input.skip_sampling_for_logits_only = true;
   query_input.return_selected_hidden = true;
-  LlmForwardInput processed_input;
-  draft_impl_->prepare_work_before_execute_on_stream(
-      query_input,
-      processed_input,
-      *prepare_stream_,
-      /*record_ready_event=*/prepare_stream_.get() != compute_stream_.get());
-  draft_impl_->set_hierarchy_layer_synchronizer(processed_input.input_params);
   std::optional<ForwardOutput> draft_output =
-      draft_impl_->execute_no_sync_on_stream(
-          processed_input, *compute_stream_, ForwardCompletion::CALLER_MANAGED);
+      run_worker_no_sync_impl(*draft_impl_,
+                              query_input,
+                              draft_forward_input,
+                              *prepare_stream_,
+                              *compute_stream_);
   CHECK(draft_output.has_value());
   CHECK(draft_output->logits.defined());
   CHECK(draft_output->selected_hidden.defined())
@@ -230,18 +230,13 @@ DraftProposal DFlash2WorkerImpl::run_decode_draft(
        num_speculative_tokens,
        draft_output->selected_hidden.size(-1)});
 
-  DraftProposal draft_proposal;
-  {
-    c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
-    DFlash2CandidateOutput candidates =
-        draft_impl_->get_causal_lm()->dflash2_candidates(
-            hidden_states, unary_logits, anchors);
-    draft_proposal = sample_dflash2_path(candidates,
-                                         draft_sampling_params,
-                                         selector_noise,
-                                         unary_logits.size(/*dim=*/-1));
-  }
-  draft_proposal.keep_alive() = take_retained_inputs(*draft_output);
+  const DFlash2CandidateOutput candidates =
+      draft_impl_->get_causal_lm()->dflash2_candidates(
+          hidden_states, unary_logits, anchors);
+  auto draft_proposal = sample_dflash2_path(candidates,
+                                            draft_sampling_params,
+                                            selector_noise,
+                                            unary_logits.size(/*dim=*/-1));
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
               draft_timer.elapsed_seconds());
   return draft_proposal;

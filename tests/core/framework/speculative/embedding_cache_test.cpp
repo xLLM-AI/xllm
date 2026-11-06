@@ -124,56 +124,6 @@ TEST(EmbeddingCacheTest, WriteValidateTargetContext) {
   EXPECT_TRUE(tensor_equal(states[1].embedding, accepted_embeddings[1][0]));
 }
 
-TEST(EmbeddingCacheTest, CompactContextKeepsOnlyOwnedCurrentPreviousRows) {
-  EmbeddingCache cache(/*total_nums=*/2);
-  const std::vector<int32_t> ids = {0, 1};
-  const std::vector<std::string> requests = {"compact_0", "compact_1"};
-  const torch::Tensor tokens =
-      torch::tensor({{11, 12, 13, 14}, {21, -1, -1, -1}}, torch::kLong);
-  torch::Tensor hidden =
-      torch::tensor({{2.0f, 3.0f}, {4.0f, 5.0f}, {6.0f, 7.0f}, {8.0f, 9.0f}});
-  cache.write_target_context(ids,
-                             requests,
-                             tokens,
-                             hidden,
-                             torch::tensor({3, 0}, torch::kInt),
-                             /*num_speculative_tokens=*/3);
-  hidden.fill_(-9);
-  const auto states = cache.read_decode_states(ids, requests);
-  EXPECT_TRUE(tensor_equal(states[0].embedding, torch::tensor({4.0f, 5.0f})));
-  EXPECT_TRUE(
-      tensor_equal(states[0].prev_embedding, torch::tensor({2.0f, 3.0f})));
-  EXPECT_TRUE(tensor_equal(states[1].embedding, torch::tensor({8.0f, 9.0f})));
-  EXPECT_FALSE(states[1].prev_embedding.defined());
-  EXPECT_EQ(states[0].position_offset, 3);
-  EXPECT_EQ(states[1].position_offset, 0);
-  EXPECT_TRUE(states[0].all_draft_accepted);
-  EXPECT_FALSE(states[1].all_draft_accepted);
-}
-
-TEST(EmbeddingCacheTest, UnifiedB1CanRetainImmutableCompactSnapshotViews) {
-  EmbeddingCache cache(/*total_nums=*/1);
-  const std::vector<int32_t> ids = {0};
-  const std::vector<std::string> requests = {"unified"};
-  const torch::Tensor tokens = torch::tensor({{11, 12, 13, 14}}, torch::kLong);
-  torch::Tensor hidden = torch::tensor({{2.0f, 3.0f}, {4.0f, 5.0f}});
-
-  cache.write_target_context(ids,
-                             requests,
-                             tokens,
-                             hidden,
-                             torch::tensor({3}, torch::kInt),
-                             /*num_speculative_tokens=*/3,
-                             /*allow_immutable_compact_view=*/true);
-  hidden.fill_(-9);
-
-  const auto states = cache.read_decode_states(ids, requests);
-  ASSERT_EQ(states.size(), 1);
-  EXPECT_TRUE(tensor_equal(states[0].embedding, torch::tensor({-9.0f, -9.0f})));
-  EXPECT_TRUE(
-      tensor_equal(states[0].prev_embedding, torch::tensor({-9.0f, -9.0f})));
-}
-
 TEST(EmbeddingCacheTest, RequestMismatchMaterializesMissingState) {
   EmbeddingCache cache(/*total_nums=*/2);
   std::vector<int32_t> ids = {0};
@@ -209,8 +159,6 @@ TEST(EmbeddingCacheTest, ReadAcceptedPrefixLengthsRejectsStaleRequest) {
                              accepted_embeddings.slice(/*dim=*/0, 0, 1),
                              /*num_speculative_tokens=*/2);
 
-  // Matching request_id returns correction_position_offset + 1; an
-  // uninitialized entry returns 1.
   std::vector<int32_t> lengths =
       cache.read_accepted_prefix_lengths(ids, request_ids);
   ASSERT_EQ(lengths.size(), ids.size());
@@ -261,8 +209,6 @@ TEST_P(BootstrapAfterValidateTest, PreservesAcceptedStateAfterOverlapPause) {
   EXPECT_EQ(states[0].request_id, "request");
   EXPECT_EQ(states[0].token_id, 10 + accepted_count);
   EXPECT_EQ(states[0].position_offset, accepted_count - 1);
-  EXPECT_EQ(states[0].correction_token_id, 10 + accepted_count);
-  EXPECT_EQ(states[0].correction_position_offset, accepted_count - 1);
   EXPECT_EQ(states[0].all_draft_accepted, accepted_count == 3);
   EXPECT_TRUE(tensor_equal(states[0].embedding,
                            accepted_embeddings[0][accepted_count - 1]));

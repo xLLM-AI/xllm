@@ -27,7 +27,6 @@ TEST(DraftVocabMappingTest, ElidesOnlyFullIdentity) {
                                       ? torch::zeros({2}, torch::kInt64)
                                       : torch::tensor({1, -1}, torch::kInt64);
     const DraftVocabMapping mapping(offsets, 2, 2, torch::Device(torch::kCPU));
-    EXPECT_EQ(mapping.draft_to_target_ids_.defined(), !identity);
     SampleOutput output;
     output.next_tokens = torch::tensor({1}, torch::kInt64);
     output.draft_logits = torch::tensor({{0.5f, -1.0f}});

@@ -18,14 +18,14 @@ limitations under the License.
 #include <torch/types.h>
 
 #include "core/framework/sampling/sampling_params.h"
-#include "core/framework/speculative/draft_proposal.h"
 
 namespace xllm {
 
 // The single sampling owner for speculative verification; the
 // general-purpose sample() never runs for verify steps.
 SampleOutput rejection_sample(const SamplingParameters& params,
-                              const DraftProposal& draft_proposal,
+                              const torch::Tensor& draft_token_ids,
+                              const torch::Tensor& draft_logits,
                               torch::Tensor target_logits);
 
 }  // namespace xllm

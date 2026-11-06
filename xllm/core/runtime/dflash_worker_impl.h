@@ -16,14 +16,12 @@ limitations under the License.
 #pragma once
 
 #include <cstdint>
-#include <memory>
 #include <optional>
 #include <string>
-#include <tuple>
+#include <utility>
 #include <vector>
 
 #include "core/framework/batch/decode_input_builder.h"
-#include "core/framework/speculative/draft_proposal.h"
 #include "core/framework/speculative/embedding_cache.h"
 #include "core/kv_cache/transfer/kv_cache_transfer.h"
 #include "core/util/tensor_helper.h"
@@ -78,15 +76,10 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
   std::optional<ForwardOutput> step_empty(
       const LlmForwardInput& input) override;
 
-  // Draft produces all speculative tokens of a block in one forward, so its
-  // output is a single [batch, num_speculative_tokens] block rather than the
-  // per-step outputs an autoregressive drafter (e.g. MTP) yields; the
-  // proposal carries the draft forward's retained no-sync handles.
-  //
-  // virtual: DSpark overrides the draft sampling (parallel block sample ->
-  // one forward + sequential Markov-head sampling loop).
-  virtual DraftProposal run_decode_draft(const LlmForwardInput& input,
-                                         LlmForwardInput& validate_input);
+  virtual std::pair<torch::Tensor, torch::Tensor> run_decode_draft(
+      const LlmForwardInput& input,
+      LlmForwardInput& validate_input,
+      LlmForwardInput& draft_forward_input);
 
   // Shared with subclasses (DSpark): build the N/N+1-wide draft query block and
   // the target validate input. A DSpark override of run_decode_draft calls both
@@ -108,13 +101,11 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
       LlmForwardInput& query_input,
       const DecodeExpansionOptions& decode_options);
 
-  void fill_validate_input_from_draft_outputs(
-      const DraftProposal& draft_proposal,
-      LlmForwardInput& validate_input,
-      Stream& compute_stream);
-  std::optional<ForwardOutput> run_validate(const LlmForwardInput& input,
-                                            const DraftProposal& draft_proposal,
-                                            LlmForwardInput& validate_input);
+  std::optional<ForwardOutput> run_validate(
+      const LlmForwardInput& input,
+      const torch::Tensor& draft_token_ids,
+      const torch::Tensor& draft_logits,
+      LlmForwardInput& validate_input);
 
   std::vector<std::string> write_context_kv(
       const LlmForwardInput& input,

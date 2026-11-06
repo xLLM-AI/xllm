@@ -487,7 +487,6 @@ TEST(CudaLogitsTransformTest, SamplerPreservesRawLogprobsPenaltiesAndMasks) {
   params.seed_offsets() = torch::zeros({2}, params.seeds().options());
   params.logprobs() = true;
   params.max_top_logprobs() = 2;
-  params.return_logits() = true;
   params.sampling_mode() = SamplingMode::MIXED;
   params.do_sample() = torch::tensor({true, false}, fp.dtype(torch::kBool));
   params.logits_bias() =
@@ -503,7 +502,7 @@ TEST(CudaLogitsTransformTest, SamplerPreservesRawLogprobsPenaltiesAndMasks) {
   const auto before = generator.get_state().clone();
   auto logits = input.clone();
   const auto result = sample(logits, params);
-  EXPECT_TRUE(torch::allclose(result.draft_logits, expected, 1e-5, 1e-6));
+  EXPECT_TRUE(torch::allclose(logits, expected, /*rtol=*/1e-5, /*atol=*/1e-6));
   EXPECT_TRUE(torch::allclose(
       result.logprobs,
       raw.gather(1, result.next_tokens.unsqueeze(1)).squeeze(1)));

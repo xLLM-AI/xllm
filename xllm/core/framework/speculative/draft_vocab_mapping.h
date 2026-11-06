@@ -33,11 +33,16 @@ class DraftVocabMapping final {
                     const torch::Device& device);
   DraftVocabMapping() = default;
 
-  torch::Tensor draft_to_target_ids_;
-  int64_t target_vocab_size_ = 0;
+  int64_t mapped_vocab_size(int64_t draft_vocab_size) const;
+
+  torch::Tensor draft_logits_view(const torch::Tensor& target_logits) const;
 
   void remap(SampleOutput& sample_output,
              torch::Tensor target_logits = torch::Tensor()) const;
+
+ private:
+  torch::Tensor draft_to_target_ids_;
+  int64_t target_vocab_size_ = 0;
 };
 
 }  // namespace xllm

@@ -15,7 +15,8 @@ limitations under the License.
 
 #pragma once
 
-#include "core/framework/speculative/draft_proposal.h"
+#include <utility>
+
 #include "runtime/dflash_worker_impl.h"
 
 namespace xllm {
@@ -33,8 +34,10 @@ class DFlash2WorkerImpl final : public DFlashWorkerImpl {
                   MasterStatus master_status) override;
 
  protected:
-  DraftProposal run_decode_draft(const LlmForwardInput& input,
-                                 LlmForwardInput& validate_input) override;
+  std::pair<torch::Tensor, torch::Tensor> run_decode_draft(
+      const LlmForwardInput& input,
+      LlmForwardInput& validate_input,
+      LlmForwardInput& draft_forward_input) override;
 };
 
 }  // namespace xllm

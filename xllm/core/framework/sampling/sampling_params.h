@@ -15,9 +15,10 @@ limitations under the License.
 ==============================================================================*/
 
 #pragma once
+
+#include <glog/logging.h>
 #include <torch/types.h>
 
-#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <optional>
@@ -167,9 +168,6 @@ class SamplingOutput final {
   // whether to output logprobs for each generated token.
   PROPERTY(bool, logprobs) = false;
 
-  // whether to expose post-temperature sampling logits on SampleOutput.
-  PROPERTY(bool, return_logits) = false;
-
   // whether to get the embeddings of the tokens. used by embeddings model.
   PROPERTY(bool, is_embeddings) = false;
 
@@ -224,7 +222,6 @@ class SamplingParameters final {
 
   PROPERTY(SamplingOutput, output);
   FORWARD_PROPERTY(bool, logprobs, output);
-  FORWARD_PROPERTY(bool, return_logits, output);
   FORWARD_PROPERTY(bool, is_embeddings, output);
   FORWARD_PROPERTY(int64_t, max_top_logprobs, output);
 
@@ -235,14 +232,11 @@ class SamplingParameters final {
     return logits_indices().defined() ? logits_indices().numel() : 0;
   }
 
-  bool has_sampling_fields() const;
-
   // An all-greedy batch reporting no distribution values only needs the
   // argmax; the argmax-preserving transforms (temperature, min-p, top-k/
   // top-p) are dead on it.
   bool is_all_greedy() const {
-    return sampling_mode() == SamplingMode::GREEDY && !logprobs() &&
-           !return_logits();
+    return sampling_mode() == SamplingMode::GREEDY && !logprobs();
   }
 
   // Fails fast unless the batch is mixed (see do_sample()).
@@ -357,16 +351,6 @@ inline constexpr std::array<SamplingFieldDesc, 20> kSamplingFields = {
      {.member = SamplingTensorAccessor{&SamplingParameters::prefix_tokens,
                                        &SamplingParameters::prefix_tokens}}}};
 
-// Out-of-line because it derives from kSamplingFields (below the class).
-inline bool SamplingParameters::has_sampling_fields() const {
-  return std::any_of(kSamplingFields.begin(),
-                     kSamplingFields.end(),
-                     [this](const SamplingFieldDesc& field) {
-                       return !field.per_request &&
-                              field.member(*this).defined();
-                     });
-}
-
 // Clears the per-token transform and seed fields that are dead on a greedy
 // draft leg (see is_greedy above).
 inline void clear_sampling_transforms(SamplingParameters& sampling_params) {
@@ -377,8 +361,6 @@ inline void clear_sampling_transforms(SamplingParameters& sampling_params) {
   }
 }
 
-// Greedy drafts flip the batch to greedy and drop the transforms;
-// probabilistic exposes draft logits exactly when the verifier needs q.
 inline void prepare_draft_sampling(bool is_probabilistic_draft,
                                    SamplingParameters& sampling_params) {
   sampling_params.logprobs() = false;
@@ -398,8 +380,6 @@ inline void prepare_draft_sampling(bool is_probabilistic_draft,
     sampling_params.do_sample() = torch::Tensor();
     clear_sampling_transforms(sampling_params);
   }
-  sampling_params.return_logits() =
-      sampling_params.sampling_mode() != SamplingMode::GREEDY;
 }
 
 // Clears every sampling field for a logits-only forward; the rejection sampler
@@ -462,7 +442,6 @@ class SampleOutput final {
   // [num_seq, ...] LongTensor
   torch::Tensor next_tokens;
 
-  // [num_seq, ..., vocab] post-temperature logits when return_logits.
   torch::Tensor draft_logits;
 
   // [num_seq, ...] FloatTensor

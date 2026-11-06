@@ -18,10 +18,8 @@ limitations under the License.
 #include <cstdint>
 #include <deque>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <string>
-#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -73,7 +71,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   using DraftModelSpecWorkerImpl<TargetInput>::options_;
   using DraftModelSpecWorkerImpl<TargetInput>::parallel_args_;
   using DraftModelSpecWorkerImpl<TargetInput>::prepare_stream_;
-  using DraftModelSpecWorkerImpl<TargetInput>::threadpool_;
   using DraftModelSpecWorkerImpl<TargetInput>::build_draft_kv_cache_shape;
   using DraftModelSpecWorkerImpl<TargetInput>::enable_schedule_overlap;
   using DraftModelSpecWorkerImpl<TargetInput>::run_worker_no_sync_impl;
@@ -97,18 +94,22 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
       TargetInput& validate_input,
       int32_t num_speculative_tokens,
       Stream& compute_stream);
+  struct ForwardInputs {
+    TargetInput target_forward_input;
+    std::vector<LlmForwardInput> draft_forward_inputs;
+  };
+
+  void finalize_forward(ForwardOutput& output, ForwardInputs forward_inputs);
+
   std::optional<ForwardOutput> run_validate(
       const TargetInput& input,
       std::vector<ForwardOutput>& draft_outputs,
       TargetInput& validate_input,
-      int32_t num_speculative_tokens);
+      ForwardInputs forward_inputs);
 
-  // By value: run_validate owns its copy (JSON bitmask lift) and moves it to
-  // the rejection sampler's sink.
-  virtual SampleOutput validate(SamplingParameters sampling_params,
-                                const std::vector<ForwardOutput>& draft_outputs,
-                                const ForwardOutput& target_output,
-                                int32_t num_speculative_tokens);
+  SampleOutput validate(const SamplingParameters& sampling_params,
+                        const std::vector<ForwardOutput>& draft_outputs,
+                        const ForwardOutput& target_output);
 
   virtual void check_draft_input_embedding(const torch::Tensor& /*embedding*/,
                                            const std::string& /*phase*/) const {
@@ -180,20 +181,10 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
     LlmForwardInput prepared_input;
   };
 
-  void stage_target_context_write(const TargetInput& input,
-                                  const SampleOutput& validate_output,
-                                  torch::Tensor base_positions,
-                                  torch::Tensor base_kv_seq_lens,
-                                  StreamEventPtr ready_event,
-                                  torch::Tensor accepted_tokens_host,
-                                  std::vector<size_t> failed_rows);
   torch::Tensor acquire_accepted_tokens_host_buffer(
       const torch::Tensor& accepted_tokens);
-  bool pending_target_context_matches(const TargetInput& input) const;
   bool device_target_context_ready_for_batch(const TargetInput& input) const;
   void flush_pending_target_context(size_t keep_latest = 0);
-  const PendingTargetContext& latest_pending_target_context() const;
-  bool supports_combined_first_draft_execution() const;
   bool can_use_combined_first_draft() const;
   bool can_prelaunch_next_first_draft(const TargetInput& input) const;
   void prepare_first_draft_template(TargetInput& metadata_template,

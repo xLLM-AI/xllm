@@ -55,6 +55,15 @@ DraftVocabMapping::DraftVocabMapping(torch::Tensor draft_token_id_offsets,
   draft_to_target_ids_ = mapped_ids.to(device);
 }
 
+int64_t DraftVocabMapping::mapped_vocab_size(int64_t draft_vocab_size) const {
+  return draft_to_target_ids_.defined() ? target_vocab_size_ : draft_vocab_size;
+}
+
+torch::Tensor DraftVocabMapping::draft_logits_view(
+    const torch::Tensor& target_logits) const {
+  return draft_to_target_ids_.defined() ? torch::Tensor() : target_logits;
+}
+
 void DraftVocabMapping::remap(SampleOutput& sample_output,
                               torch::Tensor target_logits) const {
   if (!draft_to_target_ids_.defined() || !sample_output.next_tokens.defined() ||

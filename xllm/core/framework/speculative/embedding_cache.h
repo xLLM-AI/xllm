@@ -59,9 +59,6 @@ class EmbeddingCache final {
     std::vector<int32_t> replay_token_ids;
     torch::Tensor replay_embeddings;
     torch::Tensor replay_mrope_positions;
-
-    int32_t correction_token_id = 0;  // accepted token for step correction
-    int32_t correction_position_offset = 0;
   };
 
   explicit EmbeddingCache(int32_t total_nums, bool retain_replay_span = false);
@@ -97,15 +94,6 @@ class EmbeddingCache final {
                             const torch::Tensor& accepted_tokens,
                             const torch::Tensor& accepted_embeddings,
                             int32_t num_speculative_tokens,
-                            bool retain_previous_embedding = true);
-
-  void write_target_context(const std::vector<int32_t>& embedding_ids,
-                            const std::vector<std::string>& request_ids,
-                            const torch::Tensor& accepted_tokens,
-                            const torch::Tensor& accepted_embeddings,
-                            const torch::Tensor& accepted_count,
-                            int32_t num_speculative_tokens,
-                            bool allow_immutable_compact_view = false,
                             bool retain_previous_embedding = true);
 
   // Algorithm-specific placeholder embedding for missing target context, e.g.
