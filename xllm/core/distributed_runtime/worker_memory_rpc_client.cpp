@@ -190,14 +190,14 @@ folly::SemiFuture<bool> WorkerMemoryRpcClient::prepare_kv_mapping_async(
 
 folly::SemiFuture<bool> WorkerMemoryRpcClient::commit_kv_mapping_async(
     uint64_t transaction_id) {
-  return finish_mapping_async(
-      transaction_id, /*commit=*/true, /*weight=*/false);
+  return finish_transaction_async(
+      transaction_id, &proto::ModelMemoryDist_Stub::CommitKvMapping);
 }
 
 folly::SemiFuture<bool> WorkerMemoryRpcClient::abort_kv_mapping_async(
     uint64_t transaction_id) {
-  return finish_mapping_async(
-      transaction_id, /*commit=*/false, /*weight=*/false);
+  return finish_transaction_async(transaction_id,
+                                  &proto::ModelMemoryDist_Stub::AbortKvMapping);
 }
 
 folly::SemiFuture<bool> WorkerMemoryRpcClient::prepare_weight_pages_async(
@@ -229,46 +229,35 @@ folly::SemiFuture<bool> WorkerMemoryRpcClient::prepare_weight_pages_async(
 
 folly::SemiFuture<bool> WorkerMemoryRpcClient::commit_weight_pages_async(
     uint64_t transaction_id) {
-  return finish_mapping_async(transaction_id, /*commit=*/true, /*weight=*/true);
+  return finish_transaction_async(
+      transaction_id, &proto::ModelMemoryDist_Stub::CommitWeightPages);
 }
 
 folly::SemiFuture<bool> WorkerMemoryRpcClient::abort_weight_pages_async(
     uint64_t transaction_id) {
-  return finish_mapping_async(
-      transaction_id, /*commit=*/false, /*weight=*/true);
+  return finish_transaction_async(
+      transaction_id, &proto::ModelMemoryDist_Stub::AbortWeightPages);
 }
 
-folly::SemiFuture<bool> WorkerMemoryRpcClient::finish_mapping_async(
+folly::SemiFuture<bool> WorkerMemoryRpcClient::finish_transaction_async(
     uint64_t transaction_id,
-    bool commit,
-    bool weight) {
+    TransactionRpc rpc) {
   folly::Promise<bool> promise;
   auto future = promise.getSemiFuture();
-  threadpool_.schedule([this,
-                        transaction_id,
-                        commit,
-                        weight,
-                        promise = std::move(promise)]() mutable {
-    proto::KvMappingTransactionRequest req;
-    req.set_transaction_id(transaction_id);
-    proto::Status resp;
-    brpc::Controller cntl;
-    cntl.set_timeout_ms(transaction_timeout_ms_);
-    if (weight && commit) {
-      stub_->CommitWeightPages(&cntl, &req, &resp, nullptr);
-    } else if (weight) {
-      stub_->AbortWeightPages(&cntl, &req, &resp, nullptr);
-    } else if (commit) {
-      stub_->CommitKvMapping(&cntl, &req, &resp, nullptr);
-    } else {
-      stub_->AbortKvMapping(&cntl, &req, &resp, nullptr);
-    }
-    if (cntl.Failed()) {
-      LOG(ERROR) << "KV mapping transaction completion failed: "
-                 << cntl.ErrorText();
-    }
-    promise.setValue(!cntl.Failed() && resp.ok());
-  });
+  threadpool_.schedule(
+      [this, transaction_id, rpc, promise = std::move(promise)]() mutable {
+        proto::KvMappingTransactionRequest req;
+        req.set_transaction_id(transaction_id);
+        proto::Status resp;
+        brpc::Controller cntl;
+        cntl.set_timeout_ms(transaction_timeout_ms_);
+        (stub_.get()->*rpc)(&cntl, &req, &resp, nullptr);
+        if (cntl.Failed()) {
+          LOG(ERROR) << "Worker memory transaction completion failed: "
+                     << cntl.ErrorText();
+        }
+        promise.setValue(!cntl.Failed() && resp.ok());
+      });
   return future;
 }
 

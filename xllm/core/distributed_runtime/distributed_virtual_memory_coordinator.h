@@ -124,6 +124,11 @@ class DistributedVirtualMemoryCoordinator final : public KVCachePageBackend {
       std::vector<VirtualKVCacheLayerGlobalOffsets>& layer_offsets);
 
  private:
+  struct ModelParallelStrategy {
+    int32_t dp_size;
+    int32_t tp_size;
+  };
+
   friend class DistributedVirtualMemoryCoordinatorTestPeer;
   DistributedVirtualMemoryCoordinator();
   ~DistributedVirtualMemoryCoordinator() override;
@@ -149,7 +154,7 @@ class DistributedVirtualMemoryCoordinator final : public KVCachePageBackend {
   void refresh_worker_capacity_snapshot();
   void start_worker_capacity_refresh();
   void stop_worker_capacity_refresh();
-  std::pair<int32_t, int32_t> parallel_strategy_locked(
+  ModelParallelStrategy parallel_strategy_locked(
       const std::string& model_id) const;
   std::pair<int32_t, int32_t> dp_worker_range_locked(
       const std::string& model_id,
@@ -174,7 +179,7 @@ class DistributedVirtualMemoryCoordinator final : public KVCachePageBackend {
   WorkerPhysicalPageBudget page_budget_;
   bool budget_initialized_ = false;
   std::unordered_map<std::string, size_t> weight_page_counts_;
-  std::unordered_map<std::string, std::pair<int32_t, int32_t>>
+  std::unordered_map<std::string, ModelParallelStrategy>
       model_parallel_strategies_;
   int32_t world_size_ = 0;
   int32_t node_rank_ = 0;

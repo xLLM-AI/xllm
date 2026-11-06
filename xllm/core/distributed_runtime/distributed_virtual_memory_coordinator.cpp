@@ -48,6 +48,52 @@ namespace {
 constexpr int32_t kCapacityQueryTimeoutMs = 1000;
 constexpr std::chrono::milliseconds kCapacityRefreshInterval(250);
 
+using TransactionCommand =
+    folly::SemiFuture<bool> (WorkerMemoryRpcClient::*)(uint64_t);
+
+template <typename Prepare>
+bool run_worker_memory_transaction(
+    const std::vector<std::shared_ptr<WorkerMemoryRpcClient>>& clients,
+    int32_t first_worker,
+    int32_t last_worker,
+    uint64_t transaction_id,
+    Prepare prepare,
+    TransactionCommand commit,
+    TransactionCommand abort,
+    const char* operation) {
+  std::vector<folly::SemiFuture<bool>> futures;
+  futures.reserve(last_worker - first_worker);
+  const auto all_succeeded = [&futures]() {
+    const auto results = folly::collectAll(futures).get();
+    return std::all_of(results.begin(), results.end(), [](const auto& result) {
+      return result.hasValue() && result.value();
+    });
+  };
+
+  for (int32_t worker = first_worker; worker < last_worker; ++worker) {
+    futures.emplace_back(prepare(*clients[worker]));
+  }
+  if (all_succeeded()) {
+    futures.clear();
+    for (int32_t worker = first_worker; worker < last_worker; ++worker) {
+      futures.emplace_back((clients[worker].get()->*commit)(transaction_id));
+    }
+    if (all_succeeded()) {
+      return true;
+    }
+  }
+
+  // A failed RPC can have taken effect even when its reply was lost.
+  futures.clear();
+  for (int32_t worker = first_worker; worker < last_worker; ++worker) {
+    futures.emplace_back((clients[worker].get()->*abort)(transaction_id));
+  }
+  CHECK(all_succeeded()) << "Distributed " << operation
+                         << " rollback was not acknowledged by every worker; "
+                            "physical page ownership is uncertain";
+  return false;
+}
+
 }  // namespace
 
 DistributedVirtualMemoryCoordinator::DistributedVirtualMemoryCoordinator() {
@@ -416,15 +462,16 @@ std::pair<int32_t, int32_t>
 DistributedVirtualMemoryCoordinator::get_model_parallel_strategy(
     const std::string& model_id) const {
   std::lock_guard<std::mutex> lock(mutex_);
-  return parallel_strategy_locked(model_id);
+  const ModelParallelStrategy strategy = parallel_strategy_locked(model_id);
+  return {strategy.dp_size, strategy.tp_size};
 }
 
-std::pair<int32_t, int32_t>
+DistributedVirtualMemoryCoordinator::ModelParallelStrategy
 DistributedVirtualMemoryCoordinator::parallel_strategy_locked(
     const std::string& model_id) const {
   const auto it = model_parallel_strategies_.find(model_id);
   return it == model_parallel_strategies_.end()
-             ? std::make_pair(dp_size_, tp_size_)
+             ? ModelParallelStrategy{dp_size_, tp_size_}
              : it->second;
 }
 
@@ -457,42 +504,20 @@ bool DistributedVirtualMemoryCoordinator::broadcast_map_to_kv_tensors(
   if (end_rank > static_cast<int32_t>(clients_.size())) {
     return false;
   }
-  const auto all_succeeded = [](std::vector<folly::SemiFuture<bool>>& futures) {
-    const auto results = folly::collectAll(futures).get();
-    return std::all_of(results.begin(), results.end(), [](const auto& result) {
-      return result.hasValue() && result.value();
-    });
-  };
-
-  std::vector<folly::SemiFuture<bool>> futures;
-  futures.reserve(model_tp_size);
-  for (int32_t worker = start_rank; worker < end_rank; ++worker) {
-    futures.emplace_back(clients_[worker]->prepare_kv_mapping_async(
-        transaction_id, model_id, offsets));
-  }
-  bool succeeded = all_succeeded(futures);
-  if (succeeded) {
-    futures.clear();
-    for (int32_t worker = start_rank; worker < end_rank; ++worker) {
-      futures.emplace_back(
-          clients_[worker]->commit_kv_mapping_async(transaction_id));
-    }
-    succeeded = all_succeeded(futures);
-  }
-  if (succeeded) {
+  if (run_worker_memory_transaction(
+          clients_,
+          start_rank,
+          end_rank,
+          transaction_id,
+          [&](WorkerMemoryRpcClient& client) {
+            return client.prepare_kv_mapping_async(
+                transaction_id, model_id, offsets);
+          },
+          &WorkerMemoryRpcClient::commit_kv_mapping_async,
+          &WorkerMemoryRpcClient::abort_kv_mapping_async,
+          "KV mapping")) {
     return true;
   }
-
-  // An RPC failure does not prove the worker did nothing. Abort every
-  // participant, including workers whose prepare/commit reply was lost.
-  futures.clear();
-  for (int32_t worker = start_rank; worker < end_rank; ++worker) {
-    futures.emplace_back(
-        clients_[worker]->abort_kv_mapping_async(transaction_id));
-  }
-  CHECK(all_succeeded(futures)) << "Distributed KV mapping rollback was not "
-                                   "acknowledged by every worker; "
-                                   "physical page ownership is uncertain";
   invalidate_worker_capacity_snapshot(model_id, dp_rank);
   return false;
 }
@@ -564,41 +589,18 @@ bool DistributedVirtualMemoryCoordinator::broadcast_alloc_weight_pages(
   if (model_world_size > static_cast<int32_t>(clients_.size())) {
     return false;
   }
-  const auto all_succeeded = [](std::vector<folly::SemiFuture<bool>>& futures) {
-    const auto results = folly::collectAll(futures).get();
-    return std::all_of(results.begin(), results.end(), [](const auto& result) {
-      return result.hasValue() && result.value();
-    });
-  };
-  std::vector<folly::SemiFuture<bool>> futures;
-  futures.reserve(model_world_size);
-  for (int32_t worker = 0; worker < model_world_size; ++worker) {
-    futures.emplace_back(clients_[worker]->prepare_weight_pages_async(
-        transaction_id, model_id, num_pages));
-  }
-  bool succeeded = all_succeeded(futures);
-  if (succeeded) {
-    futures.clear();
-    for (int32_t worker = 0; worker < model_world_size; ++worker) {
-      futures.emplace_back(
-          clients_[worker]->commit_weight_pages_async(transaction_id));
-    }
-    succeeded = all_succeeded(futures);
-  }
-  if (succeeded) {
-    return true;
-  }
-  // Roll back every target, including workers whose result is unknown. The
-  // ledger remains reserved until every worker confirms physical cleanup.
-  futures.clear();
-  for (int32_t worker = 0; worker < model_world_size; ++worker) {
-    futures.emplace_back(
-        clients_[worker]->abort_weight_pages_async(transaction_id));
-  }
-  CHECK(all_succeeded(futures))
-      << "Distributed weight rollback was not acknowledged by every worker; "
-         "physical page ownership is uncertain";
-  return false;
+  return run_worker_memory_transaction(
+      clients_,
+      /*first_worker=*/0,
+      model_world_size,
+      transaction_id,
+      [&](WorkerMemoryRpcClient& client) {
+        return client.prepare_weight_pages_async(
+            transaction_id, model_id, num_pages);
+      },
+      &WorkerMemoryRpcClient::commit_weight_pages_async,
+      &WorkerMemoryRpcClient::abort_weight_pages_async,
+      "weight");
 }
 
 bool DistributedVirtualMemoryCoordinator::broadcast_free_weight_pages(
@@ -769,20 +771,22 @@ DistributedVirtualMemoryCoordinator::vmm_kv_page_allocator() {
 
 int32_t DistributedVirtualMemoryCoordinator::model_worker_count_locked(
     const std::string& model_id) const {
-  const auto [dp_size, tp_size] = parallel_strategy_locked(model_id);
-  return std::min(dp_size * tp_size, page_budget_.worker_count());
+  const ModelParallelStrategy strategy = parallel_strategy_locked(model_id);
+  return std::min(strategy.dp_size * strategy.tp_size,
+                  page_budget_.worker_count());
 }
 
 std::pair<int32_t, int32_t>
 DistributedVirtualMemoryCoordinator::dp_worker_range_locked(
     const std::string& model_id,
     int32_t dp_rank) const {
-  const auto [dp_size, tp_size] = parallel_strategy_locked(model_id);
-  if (dp_rank < 0 || dp_rank >= dp_size) {
+  const ModelParallelStrategy strategy = parallel_strategy_locked(model_id);
+  if (dp_rank < 0 || dp_rank >= strategy.dp_size) {
     return {0, 0};
   }
-  const int32_t first = dp_rank * tp_size;
-  return {first, std::min(first + tp_size, page_budget_.worker_count())};
+  const int32_t first = dp_rank * strategy.tp_size;
+  return {first,
+          std::min(first + strategy.tp_size, page_budget_.worker_count())};
 }
 
 bool DistributedVirtualMemoryCoordinator::try_reserve_pages(
