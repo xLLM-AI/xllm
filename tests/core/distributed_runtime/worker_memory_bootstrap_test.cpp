@@ -17,24 +17,24 @@ limitations under the License.
 #include <torch/types.h>
 
 #include "core/distributed_runtime/distributed_vmm_coordinator.h"
-#include "core/distributed_runtime/worker_memory_rpc_options.h"
+#include "core/distributed_runtime/worker_memory_options.h"
 #include "core/framework/config/distributed_config.h"
 
 namespace xllm {
 namespace {
 
-TEST(WorkerMemoryRpcBootstrapTest,
+TEST(WorkerMemoryBootstrapTest,
      RejectsMissingLocalDeviceBeforeStartingServers) {
-  WorkerMemoryRpcOptions options;
+  WorkerMemoryOptions options;
   EXPECT_DEATH(
       DistributedVmmCoordinator::get_instance().setup_worker_memory_rpc(
           options, "127.0.0.1:0", /*dp_size=*/1),
       "exactly one local device per process");
 }
 
-TEST(WorkerMemoryRpcBootstrapTest,
+TEST(WorkerMemoryBootstrapTest,
      RejectsMultipleLocalDevicesBeforeStartingServers) {
-  WorkerMemoryRpcOptions options;
+  WorkerMemoryOptions options;
   options.devices({torch::Device(torch::kCPU), torch::Device(torch::kCPU)});
   EXPECT_DEATH(
       DistributedVmmCoordinator::get_instance().setup_worker_memory_rpc(
@@ -42,8 +42,8 @@ TEST(WorkerMemoryRpcBootstrapTest,
       "exactly one local device per process");
 }
 
-TEST(WorkerMemoryRpcBootstrapTest, RejectsNonpositiveDpSizeBeforeDivision) {
-  WorkerMemoryRpcOptions options;
+TEST(WorkerMemoryBootstrapTest, RejectsNonpositiveDpSizeBeforeDivision) {
+  WorkerMemoryOptions options;
   options.devices({torch::Device(torch::kCPU)});
   EXPECT_DEATH(
       DistributedVmmCoordinator::get_instance().setup_worker_memory_rpc(
@@ -55,9 +55,8 @@ TEST(WorkerMemoryRpcBootstrapTest, RejectsNonpositiveDpSizeBeforeDivision) {
       "dp_size must be positive");
 }
 
-TEST(WorkerMemoryRpcBootstrapTest,
-     RejectsInvalidNodeRankBeforeStartingServers) {
-  WorkerMemoryRpcOptions options;
+TEST(WorkerMemoryBootstrapTest, RejectsInvalidNodeRankBeforeStartingServers) {
+  WorkerMemoryOptions options;
   options.devices({torch::Device(torch::kCPU)});
   EXPECT_DEATH(
       {
@@ -68,9 +67,9 @@ TEST(WorkerMemoryRpcBootstrapTest,
       "distributed_config.node_rank.*distributed_config.nnodes");
 }
 
-TEST(WorkerMemoryRpcBootstrapTest,
+TEST(WorkerMemoryBootstrapTest,
      RejectsNondivisibleTopologyBeforeStartingServers) {
-  WorkerMemoryRpcOptions options;
+  WorkerMemoryOptions options;
   options.devices({torch::Device(torch::kCPU)});
   EXPECT_DEATH(
       {

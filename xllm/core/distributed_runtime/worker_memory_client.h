@@ -48,12 +48,12 @@ struct MemoryInfo {
 };
 
 // Sends memory resource commands to a worker via brpc.
-class WorkerMemoryRpcClient final {
+class WorkerMemoryClient final {
  public:
-  explicit WorkerMemoryRpcClient(int32_t global_rank,
-                                 const std::string& server_address,
-                                 const torch::Device& device);
-  ~WorkerMemoryRpcClient() = default;
+  explicit WorkerMemoryClient(int32_t global_rank,
+                              const std::string& server_address,
+                              const torch::Device& device);
+  ~WorkerMemoryClient() = default;
 
   // Wait for server to be ready
   bool wait_for_server_ready(const std::string& server_address);
@@ -106,7 +106,7 @@ class WorkerMemoryRpcClient final {
       const std::vector<int32_t>& block_ids);
 
  private:
-  DISALLOW_COPY_AND_ASSIGN(WorkerMemoryRpcClient);
+  DISALLOW_COPY_AND_ASSIGN(WorkerMemoryClient);
   using TransactionRpc =
       decltype(&proto::ModelMemoryDist_Stub::CommitKvMapping);
   folly::SemiFuture<bool> finish_transaction_async(uint64_t transaction_id,
@@ -125,13 +125,13 @@ class WorkerMemoryRpcClient final {
   // Thread pool for async operations
   ThreadPool threadpool_{/*num_threads=*/1,
                          /*cpu_binding=*/false,
-                         /*pool_name=*/"WorkerMemoryRpcClient.async"};
+                         /*pool_name=*/"WorkerMemoryClient.async"};
 
   // Capacity probes must not wait behind mutation RPCs.
   ThreadPool capacity_query_threadpool_{
       /*num_threads=*/1,
       /*cpu_binding=*/false,
-      /*pool_name=*/"WorkerMemoryRpcClient.capacity"};
+      /*pool_name=*/"WorkerMemoryClient.capacity"};
 };
 
 }  // namespace xllm

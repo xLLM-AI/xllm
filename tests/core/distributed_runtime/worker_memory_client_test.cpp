@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/distributed_runtime/worker_memory_rpc_client.h"
+#include "core/distributed_runtime/worker_memory_client.h"
 
 #include <brpc/closure_guard.h>
 #include <brpc/server.h>
@@ -340,37 +340,37 @@ bool wait_until(Predicate ready) {
 
 struct TransactionCase {
   MemoryOperation operation;
-  folly::SemiFuture<bool> (*invoke)(WorkerMemoryRpcClient&, uint64_t);
+  folly::SemiFuture<bool> (*invoke)(WorkerMemoryClient&, uint64_t);
 };
 
 const std::array<TransactionCase, 6> kTransactionCases = {{
     {MemoryOperation::PREPARE_KV,
-     [](WorkerMemoryRpcClient& client, uint64_t id) {
+     [](WorkerMemoryClient& client, uint64_t id) {
        return client.prepare_kv_mapping_async(id, "model", {0, 4096});
      }},
     {MemoryOperation::COMMIT_KV,
-     [](WorkerMemoryRpcClient& client, uint64_t id) {
+     [](WorkerMemoryClient& client, uint64_t id) {
        return client.commit_kv_mapping_async(id);
      }},
     {MemoryOperation::ABORT_KV,
-     [](WorkerMemoryRpcClient& client, uint64_t id) {
+     [](WorkerMemoryClient& client, uint64_t id) {
        return client.abort_kv_mapping_async(id);
      }},
     {MemoryOperation::PREPARE_WEIGHT,
-     [](WorkerMemoryRpcClient& client, uint64_t id) {
+     [](WorkerMemoryClient& client, uint64_t id) {
        return client.prepare_weight_pages_async(id, "model", /*num_pages=*/2);
      }},
     {MemoryOperation::COMMIT_WEIGHT,
-     [](WorkerMemoryRpcClient& client, uint64_t id) {
+     [](WorkerMemoryClient& client, uint64_t id) {
        return client.commit_weight_pages_async(id);
      }},
     {MemoryOperation::ABORT_WEIGHT,
-     [](WorkerMemoryRpcClient& client, uint64_t id) {
+     [](WorkerMemoryClient& client, uint64_t id) {
        return client.abort_weight_pages_async(id);
      }},
 }};
 
-class WorkerMemoryRpcTimeoutTest : public ::testing::Test {
+class WorkerMemoryClientTimeoutTest : public ::testing::Test {
  protected:
   void SetUp() override {
     auto& config = ServiceConfig::get_instance();
@@ -387,15 +387,15 @@ class WorkerMemoryRpcTimeoutTest : public ::testing::Test {
 };
 
 struct OffsetLookupState {
-  WorkerMemoryRpcClient* client;
+  WorkerMemoryClient* client;
   const std::vector<int32_t>* block_ids;
   LayerOffsets offsets;
 };
 
-TEST(WorkerMemoryRpcClientTest, PreservesBlockOrderAndLayerOffsets) {
+TEST(WorkerMemoryClientTest, PreservesBlockOrderAndLayerOffsets) {
   OffsetTestServer server;
   ASSERT_EQ(server.start(), 0);
-  WorkerMemoryRpcClient client(
+  WorkerMemoryClient client(
       /*global_rank=*/1, server.address(), torch::Device(torch::kCPU));
   ASSERT_EQ(server.service().hello_calls(), 1);
   const std::vector<int32_t> block_ids = {3, 0, 7};
@@ -432,54 +432,55 @@ TEST(WorkerMemoryRpcClientTest, PreservesBlockOrderAndLayerOffsets) {
   EXPECT_EQ(block_ids, (std::vector<int32_t>{3, 0, 7}));
 }
 
-TEST(WorkerMemoryRpcClientTest, TransportFailureReturnsEmptyOffsets) {
+TEST(WorkerMemoryClientTest, TransportFailureReturnsEmptyOffsets) {
   OffsetTestServer server(ResponseMode::TRANSPORT_FAILURE);
   ASSERT_EQ(server.start(), 0);
-  WorkerMemoryRpcClient client(
+  WorkerMemoryClient client(
       /*global_rank=*/1, server.address(), torch::Device(torch::kCPU));
 
   EXPECT_TRUE(
       client.get_virtual_kv_cache_offsets("missing-model", {0}).empty());
 }
 
-TEST(WorkerMemoryRpcClientTest, RejectsPartialRoleOffsetResponses) {
+TEST(WorkerMemoryClientTest, RejectsPartialRoleOffsetResponses) {
   for (ResponseMode mode : {ResponseMode::INVALID_K_OFFSETS,
                             ResponseMode::INVALID_V_OFFSETS,
                             ResponseMode::INVALID_INDEX_OFFSETS}) {
     SCOPED_TRACE(static_cast<int32_t>(mode));
     OffsetTestServer server(mode);
     ASSERT_EQ(server.start(), 0);
-    WorkerMemoryRpcClient client(
+    WorkerMemoryClient client(
         /*global_rank=*/1, server.address(), torch::Device(torch::kCPU));
     EXPECT_TRUE(
         client.get_virtual_kv_cache_offsets("model", {3, 0, 7}).empty());
   }
 }
 
-TEST(WorkerMemoryRpcClientTest, EmptyWorkerResponseRemainsEmpty) {
+TEST(WorkerMemoryClientTest, EmptyWorkerResponseRemainsEmpty) {
   OffsetTestServer server(ResponseMode::EMPTY_RESPONSE);
   ASSERT_EQ(server.start(), 0);
-  WorkerMemoryRpcClient client(
+  WorkerMemoryClient client(
       /*global_rank=*/1, server.address(), torch::Device(torch::kCPU));
 
   EXPECT_TRUE(
       client.get_virtual_kv_cache_offsets("missing-model", {0}).empty());
 }
 
-TEST(WorkerMemoryRpcClientTest, CapacityQueryReportsTransportFailure) {
+TEST(WorkerMemoryClientTest, CapacityQueryReportsTransportFailure) {
   OffsetTestServer server(ResponseMode::TRANSPORT_FAILURE);
   ASSERT_EQ(server.start(), 0);
-  WorkerMemoryRpcClient client(
+  WorkerMemoryClient client(
       /*global_rank=*/1, server.address(), torch::Device(torch::kCPU));
 
   auto capacity = client.get_memory_info_async(/*timeout_ms=*/1000);
   EXPECT_THROW(std::move(capacity).get(), std::runtime_error);
 }
 
-TEST_F(WorkerMemoryRpcTimeoutTest, CapacityProbeBypassesBlockedMutationQueue) {
+TEST_F(WorkerMemoryClientTimeoutTest,
+       CapacityProbeBypassesBlockedMutationQueue) {
   OffsetTestServer server(ResponseMode::NORMAL, /*withhold_mutations=*/true);
   ASSERT_EQ(server.start(), 0);
-  WorkerMemoryRpcClient client(
+  WorkerMemoryClient client(
       /*global_rank=*/1, server.address(), torch::Device(torch::kCPU));
   PendingReplyGuard release_guard(server.service());
   auto initialization = client.init_physical_page_pool_async(/*num_pages=*/8);
@@ -512,11 +513,11 @@ TEST_F(WorkerMemoryRpcTimeoutTest, CapacityProbeBypassesBlockedMutationQueue) {
   EXPECT_TRUE(std::move(initialization).get());
 }
 
-TEST(WorkerMemoryRpcClientTest,
+TEST(WorkerMemoryClientTest,
      PreservesArenaAndGrowthLimitsDuringInitialization) {
   OffsetTestServer server;
   ASSERT_EQ(server.start(), 0);
-  WorkerMemoryRpcClient client(
+  WorkerMemoryClient client(
       /*global_rank=*/1, server.address(), torch::Device(torch::kCPU));
 
   EXPECT_TRUE(client
@@ -534,11 +535,10 @@ TEST(WorkerMemoryRpcClientTest,
   EXPECT_EQ(request.growth_memory_reserve_bytes(), 4096u);
 }
 
-TEST(WorkerMemoryRpcClientTest,
-     PreservesEmptyInitialArenaDuringInitialization) {
+TEST(WorkerMemoryClientTest, PreservesEmptyInitialArenaDuringInitialization) {
   OffsetTestServer server;
   ASSERT_EQ(server.start(), 0);
-  WorkerMemoryRpcClient client(
+  WorkerMemoryClient client(
       /*global_rank=*/1, server.address(), torch::Device(torch::kCPU));
 
   EXPECT_TRUE(client
@@ -554,12 +554,12 @@ TEST(WorkerMemoryRpcClientTest,
   EXPECT_EQ(request.growth_memory_reserve_bytes(), 0u);
 }
 
-TEST_F(WorkerMemoryRpcTimeoutTest,
+TEST_F(WorkerMemoryClientTimeoutTest,
        MappingTransactionsPreserveSuccessfulReplies) {
   ServiceConfig::get_instance().rpc_channel_timeout_ms(1000);
   OffsetTestServer server;
   ASSERT_EQ(server.start(), 0);
-  WorkerMemoryRpcClient client(
+  WorkerMemoryClient client(
       /*global_rank=*/1, server.address(), torch::Device(torch::kCPU));
   PendingReplyGuard release_guard(server.service());
   uint64_t transaction_id = 100;
@@ -577,13 +577,13 @@ TEST_F(WorkerMemoryRpcTimeoutTest,
   EXPECT_EQ(server.service().invocations().size(), kTransactionCases.size());
 }
 
-TEST_F(WorkerMemoryRpcTimeoutTest,
+TEST_F(WorkerMemoryClientTimeoutTest,
        MappingTransactionsFailWhenRepliesAreWithheld) {
   for (const TransactionCase& test_case : kTransactionCases) {
     SCOPED_TRACE(static_cast<int32_t>(test_case.operation));
     OffsetTestServer server(ResponseMode::NORMAL, /*withhold_mutations=*/true);
     ASSERT_EQ(server.start(), 0);
-    WorkerMemoryRpcClient client(
+    WorkerMemoryClient client(
         /*global_rank=*/1, server.address(), torch::Device(torch::kCPU));
     PendingReplyGuard release_guard(server.service());
     auto result = test_case.invoke(client, /*transaction_id=*/42);

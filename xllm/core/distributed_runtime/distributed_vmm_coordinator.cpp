@@ -28,8 +28,8 @@ limitations under the License.
 #include <utility>
 
 #include "core/distributed_runtime/collective_service.h"
-#include "core/distributed_runtime/worker_memory_rpc_client.h"
-#include "core/distributed_runtime/worker_memory_rpc_server.h"
+#include "core/distributed_runtime/worker_memory_client.h"
+#include "core/distributed_runtime/worker_memory_server.h"
 #include "core/framework/allocator/virtual_memory/physical_page_pool.h"
 #include "core/framework/allocator/vmm_arena_capacity.h"
 #include "core/framework/config/distributed_config.h"
@@ -49,11 +49,11 @@ constexpr int32_t kCapacityQueryTimeoutMs = 1000;
 constexpr std::chrono::milliseconds kCapacityRefreshInterval(250);
 
 using TransactionCommand =
-    folly::SemiFuture<bool> (WorkerMemoryRpcClient::*)(uint64_t);
+    folly::SemiFuture<bool> (WorkerMemoryClient::*)(uint64_t);
 
 template <typename Prepare>
 bool run_worker_memory_transaction(
-    const std::vector<std::shared_ptr<WorkerMemoryRpcClient>>& clients,
+    const std::vector<std::shared_ptr<WorkerMemoryClient>>& clients,
     int32_t first_worker,
     int32_t last_worker,
     uint64_t transaction_id,
@@ -184,7 +184,7 @@ void DistributedVmmCoordinator::configure_workers(int32_t world_size,
 }
 
 void DistributedVmmCoordinator::setup_worker_memory_rpc(
-    const WorkerMemoryRpcOptions& options,
+    const WorkerMemoryOptions& options,
     const std::string& master_node_addr,
     int32_t dp_size) {
   const auto& devices = options.devices();
@@ -223,7 +223,7 @@ void DistributedVmmCoordinator::setup_worker_memory_rpc(
         << master_node_addr;
   }
 
-  servers_.emplace_back(std::make_unique<WorkerMemoryRpcServer>(
+  servers_.emplace_back(std::make_unique<WorkerMemoryServer>(
       /*local_rank=*/0, master_node_addr, devices.front(), options));
   CHECK(servers_.front()->wait_until_ready())
       << "Failed to start or register local worker memory RPC server";
@@ -246,7 +246,7 @@ void DistributedVmmCoordinator::setup_worker_memory_rpc(
     CHECK(address != worker_memory_rpc_addrs->end())
         << "worker memory RPC server did not connect to master node: rank "
         << rank;
-    auto client = std::make_shared<WorkerMemoryRpcClient>(
+    auto client = std::make_shared<WorkerMemoryClient>(
         rank, address->second, devices.front());
     clients.emplace_back(client);
   }
@@ -507,12 +507,12 @@ bool DistributedVmmCoordinator::broadcast_map_to_kv_tensors(
           start_rank,
           end_rank,
           transaction_id,
-          [&](WorkerMemoryRpcClient& client) {
+          [&](WorkerMemoryClient& client) {
             return client.prepare_kv_mapping_async(
                 transaction_id, model_id, offsets);
           },
-          &WorkerMemoryRpcClient::commit_kv_mapping_async,
-          &WorkerMemoryRpcClient::abort_kv_mapping_async,
+          &WorkerMemoryClient::commit_kv_mapping_async,
+          &WorkerMemoryClient::abort_kv_mapping_async,
           "KV mapping")) {
     return true;
   }
@@ -592,12 +592,12 @@ bool DistributedVmmCoordinator::broadcast_alloc_weight_pages(
       /*first_worker=*/0,
       model_world_size,
       transaction_id,
-      [&](WorkerMemoryRpcClient& client) {
+      [&](WorkerMemoryClient& client) {
         return client.prepare_weight_pages_async(
             transaction_id, model_id, num_pages);
       },
-      &WorkerMemoryRpcClient::commit_weight_pages_async,
-      &WorkerMemoryRpcClient::abort_weight_pages_async,
+      &WorkerMemoryClient::commit_weight_pages_async,
+      &WorkerMemoryClient::abort_weight_pages_async,
       "weight");
 }
 
@@ -876,7 +876,7 @@ void DistributedVmmCoordinator::invalidate_worker_capacity_snapshot(
 }
 
 void DistributedVmmCoordinator::refresh_worker_capacity_snapshot() {
-  std::vector<std::shared_ptr<WorkerMemoryRpcClient>> workers;
+  std::vector<std::shared_ptr<WorkerMemoryClient>> workers;
   bool distributed = false;
   int32_t expected_worker_count = 0;
   uint64_t generation;

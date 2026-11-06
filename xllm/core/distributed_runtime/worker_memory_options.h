@@ -24,7 +24,7 @@ limitations under the License.
 
 namespace xllm {
 
-class WorkerMemoryRpcOptions final {
+class WorkerMemoryOptions final {
  public:
   // Devices served by worker memory RPC servers on this node.
   PROPERTY(std::vector<torch::Device>, devices);

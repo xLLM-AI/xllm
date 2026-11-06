@@ -27,14 +27,14 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/types.h"
-#include "core/distributed_runtime/worker_memory_rpc_options.h"
+#include "core/distributed_runtime/worker_memory_options.h"
 #include "core/framework/allocator/worker_physical_page_budget.h"
 #include "core/kv_cache/storage/kv_cache_page_backend.h"
 
 namespace xllm {
 
-class WorkerMemoryRpcClient;
-class WorkerMemoryRpcServer;
+class WorkerMemoryClient;
+class WorkerMemoryServer;
 class VmmKVPageAllocatorImpl;
 struct KVCacheMappingPlan;
 namespace runtime {
@@ -51,7 +51,7 @@ class DistributedVmmCoordinator final : public KVCachePageBackend {
     return instance;
   }
 
-  void setup_worker_memory_rpc(const WorkerMemoryRpcOptions& options,
+  void setup_worker_memory_rpc(const WorkerMemoryOptions& options,
                                const std::string& master_node_addr,
                                int32_t dp_size);
   int64_t init_physical_page_pools(double max_memory_utilization = 0.9,
@@ -184,8 +184,8 @@ class DistributedVmmCoordinator final : public KVCachePageBackend {
   int32_t node_rank_ = 0;
   int32_t dp_size_ = 1;
   int32_t tp_size_ = 1;
-  std::vector<std::shared_ptr<WorkerMemoryRpcClient>> clients_;
-  std::vector<std::unique_ptr<WorkerMemoryRpcServer>> servers_;
+  std::vector<std::shared_ptr<WorkerMemoryClient>> clients_;
+  std::vector<std::unique_ptr<WorkerMemoryServer>> servers_;
   std::vector<size_t> worker_allocatable_pages_;
   uint64_t worker_capacity_generation_ = 0;
   bool capacity_refresh_running_ = false;

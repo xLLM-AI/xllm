@@ -128,7 +128,7 @@ flowchart TB
   subgraph distributed["distributed_runtime"]
     residency["ModelResidencyCoordinator<br/>model initialization, sleep and wakeup"]
     coordination["DistributedVmmCoordinator<br/>shared KV/weight budget, worker selection and dispatch"]
-    rpc["WorkerMemoryRpc<br/>client, service and server"]
+    rpc["WorkerMemory<br/>client, service and server"]
   end
 
   subgraph cache["core/kv_cache"]
@@ -212,8 +212,8 @@ byte transport. KV manifests, peer state and resharding plans remain in
 `WeightVirtualMemoryManager`, managing device initialization, the physical page pool,
 and local resource creation and cleanup. Its separate build target does not
 depend on the `runtime` aggregate, RPC or distributed-runtime targets.
-`distributed_runtime/WorkerMemoryRpcClient`, `WorkerMemoryRpcService` and
-`WorkerMemoryRpcServer` handle requests between workers. The service invokes
+`distributed_runtime/WorkerMemoryClient`, `WorkerMemoryService` and
+`WorkerMemoryServer` handle requests between workers. The service invokes
 local resources without calling back into distributed coordination.
 
 `core/kv_cache/storage/VmmKVPageAllocatorImpl` owns KV page queues,

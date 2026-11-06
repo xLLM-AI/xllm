@@ -27,12 +27,12 @@ namespace xllm {
 
 // Executes memory resource commands on a worker. The protobuf service name is
 // retained for compatibility with existing RPC clients.
-class WorkerMemoryRpcService final : public proto::ModelMemoryDist {
+class WorkerMemoryService final : public proto::ModelMemoryDist {
  public:
-  WorkerMemoryRpcService(int32_t global_rank,
-                         int32_t world_size,
-                         const torch::Device& device);
-  ~WorkerMemoryRpcService() override = default;
+  WorkerMemoryService(int32_t global_rank,
+                      int32_t world_size,
+                      const torch::Device& device);
+  ~WorkerMemoryService() override = default;
 
   // Mark service as initialized
   void set_initialized(bool initialized) { initialized_ = initialized; }
@@ -112,7 +112,7 @@ class WorkerMemoryRpcService final : public proto::ModelMemoryDist {
       ::google::protobuf::Closure* done) override;
 
  private:
-  DISALLOW_COPY_AND_ASSIGN(WorkerMemoryRpcService);
+  DISALLOW_COPY_AND_ASSIGN(WorkerMemoryService);
 
  private:
   std::atomic<bool> initialized_{false};
