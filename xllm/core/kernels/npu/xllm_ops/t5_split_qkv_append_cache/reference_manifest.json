@@ -1,0 +1,148 @@
+{
+  "source": "C:\\Users\\wzy85\\Downloads\\a06a5aac7a2a4f69bf7006576ea39f7f.zip",
+  "source_sha256": "2c93dbfd270a97fc71a37ba978797644874448e3204639cdfa2f93f73cb3e624",
+  "zip_legacy_filename_encoding": "GBK (ZIP UTF-8 flag absent)",
+  "files": [
+    {
+      "archive_path": "题目3-T5QKV拆分与缓存追加算子-独立包/题目3-T5QKV拆分与缓存追加算子-独立包/README.md",
+      "path": "reference/README.md",
+      "bytes": 3832,
+      "sha256": "03cbb24ca636c45f26f5a5d1883d3678592290f4c949ef64dc20e3c0ec82acbc"
+    },
+    {
+      "archive_path": "题目3-T5QKV拆分与缓存追加算子-独立包/题目3-T5QKV拆分与缓存追加算子-独立包/SHA256SUMS.txt",
+      "path": "reference/SHA256SUMS.txt",
+      "bytes": 930,
+      "sha256": "b124c8653715e91966be15aa00395e6f9bac9a5c150aa444ead097475d2bb5b3"
+    },
+    {
+      "archive_path": "题目3-T5QKV拆分与缓存追加算子-独立包/题目3-T5QKV拆分与缓存追加算子-独立包/T5QKV拆分与缓存追加算子任务书.md",
+      "path": "reference/T5QKV拆分与缓存追加算子任务书.md",
+      "bytes": 19894,
+      "sha256": "e65bf0cc08fcb170bf9b15caac0922fa3cde539f4a58c23722c15fe3bdb7ca57"
+    },
+    {
+      "archive_path": "题目3-T5QKV拆分与缓存追加算子-独立包/题目3-T5QKV拆分与缓存追加算子-独立包/benchmark.py",
+      "path": "reference/benchmark.py",
+      "bytes": 8939,
+      "sha256": "84a198138a226f6185348c81045dde9bfac1c70e98b0d8e3a529c34261db868d"
+    },
+    {
+      "archive_path": "题目3-T5QKV拆分与缓存追加算子-独立包/题目3-T5QKV拆分与缓存追加算子-独立包/case.json",
+      "path": "reference/case.json",
+      "bytes": 61691,
+      "sha256": "9ce34ba31fc08abe1969ad4997f7b6173fa950533473d6977398a8ed4db741e8"
+    },
+    {
+      "archive_path": "题目3-T5QKV拆分与缓存追加算子-独立包/题目3-T5QKV拆分与缓存追加算子-独立包/check_performance.py",
+      "path": "reference/check_performance.py",
+      "bytes": 8180,
+      "sha256": "52f3fbb1280284c74585fbe2dfafeef91d8d77ee3ef1a8bbe4495c0c9bc0f2c5"
+    },
+    {
+      "archive_path": "题目3-T5QKV拆分与缓存追加算子-独立包/题目3-T5QKV拆分与缓存追加算子-独立包/coverage_requirements.json",
+      "path": "reference/coverage_requirements.json",
+      "bytes": 6756,
+      "sha256": "bff52ed8380d83c0e19e2c898b4507c3dd4e20a17736e17739aa44749edbdc57"
+    },
+    {
+      "archive_path": "题目3-T5QKV拆分与缓存追加算子-独立包/题目3-T5QKV拆分与缓存追加算子-独立包/generate_data.py",
+      "path": "reference/generate_data.py",
+      "bytes": 3270,
+      "sha256": "39c73731b0afebd242b2fc8e3e85df24c4b9c5c423ebe9adc1e4140507b2292d"
+    },
+    {
+      "archive_path": "题目3-T5QKV拆分与缓存追加算子-独立包/题目3-T5QKV拆分与缓存追加算子-独立包/golden.py",
+      "path": "reference/golden.py",
+      "bytes": 840,
+      "sha256": "258c322025f5875bb89a2529c2d85659d96ee5bb9526f292dce3b3ca7648021a"
+    },
+    {
+      "archive_path": "题目3-T5QKV拆分与缓存追加算子-独立包/题目3-T5QKV拆分与缓存追加算子-独立包/op.json",
+      "path": "reference/op.json",
+      "bytes": 1484,
+      "sha256": "9bccb18b2dbfb48e7f4affc30141d0c0313d7269a1edd88cb0eab76641188357"
+    },
+    {
+      "archive_path": "题目3-T5QKV拆分与缓存追加算子-独立包/题目3-T5QKV拆分与缓存追加算子-独立包/performance_targets.json",
+      "path": "reference/performance_targets.json",
+      "bytes": 4505,
+      "sha256": "bd81fce31f5664f9c8d8461d077666c0d8cc96ae9c96b871e00fa89e82651c54"
+    },
+    {
+      "archive_path": "题目3-T5QKV拆分与缓存追加算子-独立包/题目3-T5QKV拆分与缓存追加算子-独立包/verify.py",
+      "path": "reference/verify.py",
+      "bytes": 6044,
+      "sha256": "d3a467156b3aada1ef2175f51dbc3e878e80dd2a6836421574e51c36fda80bff"
+    }
+  ],
+  "supplied_sha256_checks": [
+    {
+      "file": "README.md",
+      "actual_file": "README.md",
+      "matched_by": "path",
+      "pass": true
+    },
+    {
+      "file": "benchmark.py",
+      "actual_file": "benchmark.py",
+      "matched_by": "path",
+      "pass": true
+    },
+    {
+      "file": "case.json",
+      "actual_file": "case.json",
+      "matched_by": "path",
+      "pass": true
+    },
+    {
+      "file": "check_performance.py",
+      "actual_file": "check_performance.py",
+      "matched_by": "path",
+      "pass": true
+    },
+    {
+      "file": "coverage_requirements.json",
+      "actual_file": "coverage_requirements.json",
+      "matched_by": "path",
+      "pass": true
+    },
+    {
+      "file": "generate_data.py",
+      "actual_file": "generate_data.py",
+      "matched_by": "path",
+      "pass": true
+    },
+    {
+      "file": "golden.py",
+      "actual_file": "golden.py",
+      "matched_by": "path",
+      "pass": true
+    },
+    {
+      "file": "op.json",
+      "actual_file": "op.json",
+      "matched_by": "path",
+      "pass": true
+    },
+    {
+      "file": "performance_targets.json",
+      "actual_file": "performance_targets.json",
+      "matched_by": "path",
+      "pass": true
+    },
+    {
+      "file": "verify.py",
+      "actual_file": "verify.py",
+      "matched_by": "path",
+      "pass": true
+    },
+    {
+      "file": "题目3-T5QKV拆分与缓存追加算子任务书.md",
+      "expected_sha256": "f494347ab477b13cbf9f817df2562e07701e941e4cb616fef3fcf1cba0186144",
+      "pass": false,
+      "reason": "missing path and no content hash match in original ZIP"
+    }
+  ],
+  "original_manifest_valid": false
+}
