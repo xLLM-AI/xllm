@@ -2193,4 +2193,47 @@ TEST_F(AclGraphExecutorTest, GraphExecutorUsesFirstFullAttentionKvCache) {
                               /*atol=*/1e-6));
 }
 
+// The in-place row repeat must produce the bytes of a pre-expanded vector.
+TEST(RowRepeatPackedInputTest, MatchesPreExpandedBytes) {
+  const torch::Device device("npu:0");
+  const torch::Tensor block_tables =
+      torch::tensor({{51, 52, 53}, {61, 62, 63}}, torch::kInt32);
+  constexpr int32_t kRepeat = 3;
+
+  std::vector<int32_t> pre_expanded;
+  for (int64_t row = 0; row < block_tables.size(0); ++row) {
+    for (int32_t repeat = 0; repeat < kRepeat; ++repeat) {
+      for (int64_t col = 0; col < block_tables.size(1); ++col) {
+        pre_expanded.push_back(
+            static_cast<int32_t>(block_tables[row][col].item<int32_t>()));
+      }
+    }
+  }
+
+  LlmModelParams pre_params;
+  pre_params.attention.host.q_seq_lens = std::vector<int32_t>(6, 1);
+  pre_params.attention.host.q_cu_seq_lens = {0, 1, 2, 3, 4, 5, 6};
+
+  torch::Tensor pre_expanded_flat;
+  torch::Tensor repeated_flat;
+  const std::vector<int32_t>* pre_expanded_values = &pre_expanded;
+  pre_params.attention.rebuild_device_buffer(
+      device,
+      {{pre_expanded_values, nullptr, &pre_expanded_flat}},
+      AttentionInputView::BufferReusePolicy::GROWABLE);
+
+  LlmModelParams repeat_params;
+  repeat_params.attention.host.q_seq_lens = std::vector<int32_t>(6, 1);
+  repeat_params.attention.host.q_cu_seq_lens = {0, 1, 2, 3, 4, 5, 6};
+  repeat_params.attention.rebuild_device_buffer(
+      device,
+      {{nullptr, nullptr, &repeated_flat, &block_tables, kRepeat}},
+      AttentionInputView::BufferReusePolicy::GROWABLE);
+
+  ASSERT_TRUE(repeated_flat.defined());
+  EXPECT_EQ(repeated_flat.numel(), static_cast<int64_t>(pre_expanded.size()));
+  EXPECT_TRUE(torch::equal(repeated_flat.cpu(),
+                           torch::tensor(pre_expanded, torch::kInt32)));
+}
+
 }  // namespace xllm

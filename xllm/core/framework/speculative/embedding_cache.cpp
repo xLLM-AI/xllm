@@ -339,6 +339,17 @@ std::vector<int32_t> EmbeddingCache::read_accepted_prefix_lengths(
   return accepted_prefix_lengths;
 }
 
+std::vector<int32_t> num_accepted_tokens_or_default(
+    const EmbeddingCache* cache,
+    size_t num_sequences,
+    const std::vector<int32_t>& embedding_ids,
+    const std::vector<std::string>& request_ids) {
+  if (cache != nullptr && !embedding_ids.empty()) {
+    return cache->read_accepted_prefix_lengths(embedding_ids, request_ids);
+  }
+  return std::vector<int32_t>(num_sequences, 1);
+}
+
 void EmbeddingCache::clear(const std::vector<int32_t>& ids) {
   for (int32_t id : ids) {
     DecodeState& tail = mutable_tail(id);

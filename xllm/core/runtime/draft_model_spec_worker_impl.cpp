@@ -481,6 +481,23 @@ void DraftModelSpecWorkerImpl<TargetInput>::prepare_draft_input(
   }
 }
 
+template <typename TargetInput>
+int32_t DraftModelSpecWorkerImpl<TargetInput>::logical_block_size() const {
+  CHECK_GT(options_.block_size(), 0);
+  const int32_t kv_split_size = parallel_args_.kv_split_size_effective();
+  CHECK_GT(kv_split_size, 0);
+  return options_.block_size() * kv_split_size;
+}
+
+template <typename TargetInput>
+bool DraftModelSpecWorkerImpl<
+    TargetInput>::positions_are_decoupled_from_kv_length() const {
+  if (impl_ == nullptr) {
+    return false;
+  }
+  return !impl_->context_.get_model_args().rope_scaling_mrope_section().empty();
+}
+
 template class DraftModelSpecWorkerImpl<LlmForwardInput>;
 template class DraftModelSpecWorkerImpl<VlmForwardInput>;
 

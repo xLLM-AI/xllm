@@ -22,12 +22,15 @@ limitations under the License.
 #include <tuple>
 #include <vector>
 
+#include "core/framework/batch/decode_input_builder.h"
 #include "core/framework/speculative/draft_proposal.h"
 #include "core/framework/speculative/embedding_cache.h"
+#include "core/framework/speculative/mtp_async_state.h"
 #include "core/kv_cache/transfer/kv_cache_transfer.h"
 #include "framework/model/model_args.h"
 #include "runtime/draft_model_spec_worker_impl.h"
 #include "runtime/llm_worker_impl.h"
+#include "util/tensor_helper.h"
 
 namespace xllm {
 
@@ -43,11 +46,10 @@ inline void invalidate_draft_model_geometry(LlmModelParams& input_params) {
   input_params.clear_linear_attention_state();
 }
 
-enum class DraftRowLayout : uint8_t {
-  SEQUENCE,
-  BLOCK_ROWS,
-  SPARSE_INDICES,
-};
+// On an idle DP rank materializes a synthetic query block; on every rank fills
+// idle peers' token counts. Returns whether this rank was idle.
+bool pad_empty_attention_dp_batch(LlmForwardInput& input,
+                                  const ExpandDecodePlan& plan);
 
 }  // namespace dflash_detail
 
@@ -104,16 +106,29 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
                                LlmForwardInput& validate_input);
 
   int32_t draft_query_width_;
-  dflash_detail::DraftRowLayout draft_row_layout_ =
-      dflash_detail::DraftRowLayout::SEQUENCE;
+  QueryLayout draft_query_layout_ = QueryLayout::kChunked;
   bool draft_needs_dummy_rows_ = false;
 
  private:
+  DFlashWorkerImpl(const ParallelArgs& parallel_args,
+                   const torch::Device& device,
+                   const runtime::Options& options,
+                   const std::string& model_type);
+
+  ExpandDecodePlan draft_query_plan() const;
+
+  // Scales the draft query's parallel token counts and, on an idle DP rank,
+  // rebuilds the attention device buffer with synthetic rows on the prepare
+  // stream. Returns whether this rank was idle. Both steps live here because
+  // the fill must follow the scale: a count filled to the query width first
+  // would be scaled to width².
+  bool prepare_draft_query_parallel_state(LlmForwardInput& query_input,
+                                          const ExpandDecodePlan& plan);
+
   void fill_validate_input_from_draft_outputs(
       const DraftProposal& draft_proposal,
       LlmForwardInput& validate_input,
       Stream& compute_stream);
-
   std::optional<ForwardOutput> run_validate(const LlmForwardInput& input,
                                             const DraftProposal& draft_proposal,
                                             LlmForwardInput& validate_input);
@@ -121,10 +136,6 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
   // Mirrors sampled tokens to rank 0 under schedule-overlap so every rank
   // commits the same prefix. No-op for a single rank.
   void maybe_broadcast_spec_tokens(torch::Tensor& tokens);
-
-  void update_decode_step_input(
-      LlmForwardInput& input,
-      const std::vector<EmbeddingCache::DecodeState>& last_states) const;
 
   void write_context_kv(const LlmForwardInput& input,
                         const torch::Tensor& context_hidden,
@@ -135,23 +146,27 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
                                      const SampleOutput& validate_output);
 
  protected:
+  // Block drafts seed their first step on the decode batch's first tokens.
+  torch::Tensor anchor_token_ids(const LlmForwardInput& input) const;
+
   // Shared by the DSpark/DFlash2 sampling sites.
   ProcessGroup* sampling_process_group_ = nullptr;
 
-  // Block drafts (DFlash2/DSpark) condition their first step on the decode
-  // batch's first tokens.
-  torch::Tensor anchor_token_ids(const LlmForwardInput& input) const;
   int32_t mask_token_id_ = -1;
   int64_t expected_context_hidden_size_ = 0;
   // Whether the target model owns recurrent (linear attention) layers.
-  // Fixed once the target finishes loading; hybrid spec-verify gates read
-  // this instead of re-scanning layer_types.
   bool target_is_hybrid_recurrent_ = false;
+  bool hybrid_pipeline_ = false;
+  // Classified once at load; the decode-step KV-length policy reads it.
+  mtp_async::TargetSpecVerifyMode target_spec_verify_mode_ =
+      mtp_async::TargetSpecVerifyMode::GENERIC;
 
  private:
   // Launch-thread-owned JSON context; never borrows a retired result Slot.
   ForwardOutput task_json_output_;
   std::vector<std::string> task_json_sample_sequence_ids_;
+
+  CachedDeviceIndices draft_query_indices_;
 };
 
 }  // namespace xllm

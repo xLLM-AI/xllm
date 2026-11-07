@@ -22,7 +22,6 @@ limitations under the License.
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/speculative_config.h"
-#include "core/framework/speculative/draft_proposal.h"
 #include "core/framework/speculative/verify_layout.h"
 #include "core/runtime/json_object_decode_continuation.h"
 #include "core/runtime/llm_worker_impl.h"
@@ -313,7 +312,7 @@ std::optional<ForwardOutput> UnifiedMtpWorkerImpl::run_unified_python_mtp_graph(
                                  num_speculative_tokens,
                                  context_.get_model_args().vocab_size(),
                                  logical_block_size(),
-                                 uses_step_major_validate_layout());
+                                 uses_embedded_eagle3_draft());
   const int32_t batch_size = input.input_params.meta.num_sequences;
   detail::MtpPyGraphOutput& graph_output = execution.output;
   torch::Tensor base_positions = std::move(execution.base_positions);

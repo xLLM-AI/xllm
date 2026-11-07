@@ -46,6 +46,7 @@ from xllm.python.attention.expanded_decode_metadata import (
     resolve_expanded_decode_metadata,
 )
 from xllm.python.attention.mla_index_context import is_compact_kpool_tail
+from xllm.python.attention.paged_kv_metadata import PADDING_BLOCK_ID
 from xllm.python.model_executor.cp_utils import cp_gather_kv
 from xllm.python.model_executor.forward_context import (
     get_execution_buffer,
@@ -1278,7 +1279,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         packed = torch.cat([k_nope_i8, k_rope_i8, k_scale_i8], dim=-1)
         packed_flat = packed_cache.view(-1, packed_cache.size(-1))
         # Padding writes belong to the allocator-reserved block 0.
-        indices = slot_mapping.clamp_min(0).reshape(-1, 1).to(torch.int32)
+        indices = slot_mapping.clamp_min(PADDING_BLOCK_ID).reshape(-1, 1).to(torch.int32)
         kernels.scatter_nd_update(packed_flat, indices, packed)
 
     def mla_preprocess_context(
@@ -1496,7 +1497,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             raise RuntimeError("KV shard materialization was not prepared")
         assert self._block_table_i32 is not None
         flat_blocks = self._block_table_i32.reshape(-1)
-        safe_blocks = flat_blocks.clamp_min(0).to(torch.int64)
+        safe_blocks = flat_blocks.clamp_min(PADDING_BLOCK_ID).to(torch.int64)
         local_blocks = cache.index_select(0, safe_blocks)
         gathered = distributed.all_gather(local_blocks, 0, cp_context.cp_size, "cp")
         gathered = gathered.view(cp_context.cp_size, flat_blocks.numel(), *cache.shape[1:])

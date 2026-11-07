@@ -14,7 +14,6 @@ cc_library(
     draft_proposal.h
     draft_vocab_mapping.h
     rejection_sampler.h
-    spec_input_builder.h
     mtp_async_input_builder.h
     mtp_async_state.h
     mtp_json_object_state.h
@@ -37,7 +36,6 @@ cc_library(
     draft_proposal.cpp
     draft_vocab_mapping.cpp
     rejection_sampler.cpp
-    spec_input_builder.cpp
     mtp_async_input_builder.cpp
     mtp_async_state.cpp
     adaptive/draft_step_selector.cpp

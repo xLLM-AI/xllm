@@ -418,7 +418,6 @@ class LlmForwardInput final {
     inputs.positions_host = positions_host;
     inputs.input_params = input_params.clone();
     inputs.sampling_params = sampling_params;
-    inputs.json_object_invalid_draft = json_object_invalid_draft;
     inputs.json_object_errors = json_object_errors;
     return inputs;
   }
@@ -590,9 +589,6 @@ class LlmForwardInput final {
   std::vector<int32_t> sample_prior_output_rows;
   std::vector<JsonObjectGrammarState> json_object_states;
   std::vector<JsonObjectGrammarSnapshot> json_object_state_snapshots;
-  // Flattened [sequence][draft position] flags produced during MTP
-  // validation. This is execution-local metadata and is not transported.
-  std::vector<uint8_t> json_object_invalid_draft;
   // Errors detected while aligning prior overlap output with grammar rows.
   std::vector<JsonObjectOutputError> json_object_errors;
 

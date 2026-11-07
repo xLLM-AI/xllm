@@ -17,33 +17,15 @@ limitations under the License.
 
 #include <torch/types.h>
 
-#include <algorithm>
 #include <cstdint>
 #include <vector>
 
-#include "core/util/utils.h"
 #include "layers/common/attention_metadata.h"
 
 namespace xllm {
 class ModelParamsView;
 
 namespace layer {
-
-// Row-level paged-KV geometry shared by every row-aligned paging producer
-// (the vector builders below and the per-row speculative input builder).
-// A zero-length sequence still owns one page with a last-page length of one,
-// matching the framework builders used by decode and speculative inputs.
-inline int32_t effective_kv_seq_len(int32_t kv_seq_len) {
-  return std::max(kv_seq_len, 1);
-}
-
-inline int32_t kv_page_count(int32_t kv_seq_len, int32_t block_size) {
-  return util::ceil_div(effective_kv_seq_len(kv_seq_len), block_size);
-}
-
-inline int32_t kv_last_page_len(int32_t kv_seq_len, int32_t block_size) {
-  return (effective_kv_seq_len(kv_seq_len) - 1) % block_size + 1;
-}
 
 class ExpandedDecodeMetadataBuilder final {
  public:
@@ -63,6 +45,20 @@ class ExpandedDecodeMetadataBuilder final {
   static std::vector<int32_t> build_tokenwise_kv_seq_lens(
       const std::vector<int32_t>& q_seq_lens,
       const std::vector<int32_t>& kv_seq_lens);
+
+  // Clears any stale expanded layout on `target`.
+  static void clear_spec_verify_graph_input(ModelParamsView target);
+
+  // Expands the host tokenwise KV lengths into `target` and enables the
+  // expanded spec-verify layout. Returns false (leaving it disabled) unless
+  // `target` is a spec verify with a chunked-prefill batch. Whether the layout
+  // is bound at all is caller policy (the graph-mode gate lives there).
+  static bool build_spec_verify_graph_host_input(ModelParamsView target);
+
+  // Host build plus device bind, for callers that need both in one step.
+  static void build_spec_verify_graph_input(ModelParamsView target,
+                                            const torch::Device& device,
+                                            int32_t block_size);
 
   static ExpandedDecodeMetadata build(const ModelParamsView& params);
 

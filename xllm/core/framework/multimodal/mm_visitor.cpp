@@ -24,6 +24,7 @@ limitations under the License.
 
 #include "common/metrics.h"
 #include "core/framework/encoder_cache/encoder_cache.h"
+#include "core/kv_cache/layout/seq_lens_layout.h"
 #include "processors/processor_cache.h"
 
 namespace xllm {
@@ -61,12 +62,7 @@ std::vector<int32_t> normalize_to_per_seq_lens(
   return seq_lens;
 #else
   // Other backends pass cumulative sequence lengths.
-  std::vector<int32_t> per_seq_lens;
-  per_seq_lens.reserve(seq_lens.empty() ? 0 : seq_lens.size() - 1);
-  for (size_t i = 1; i < seq_lens.size(); ++i) {
-    per_seq_lens.push_back(seq_lens[i] - seq_lens[i - 1]);
-  }
-  return per_seq_lens;
+  return CuSeqLens::to_lengths(seq_lens);
 #endif
 }
 }  // namespace

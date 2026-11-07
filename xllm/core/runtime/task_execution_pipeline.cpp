@@ -230,7 +230,6 @@ Status TaskExecutionPipeline::validate_input(const LlmForwardInput& source,
       source.skip_sampling_for_logits_only || source.return_selected_hidden ||
       !source.json_object_states.empty() ||
       !source.json_object_state_snapshots.empty() ||
-      !source.json_object_invalid_draft.empty() ||
       !source.json_object_errors.empty() || params.is_spec_verify ||
       params.prefill_without_cache ||
       ((!embedding.linear_state_read_ids.empty() ||

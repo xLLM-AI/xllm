@@ -116,6 +116,10 @@ class SpeculativeWorkerImpl : public WorkerImpl {
     impl_->get_cache_info(cluster_id, addr, port);
   };
 
+  // Speculative decode rebuilds linear-attention state from its own draft
+  // cache, so the shared prepare path must not restore it first.
+  bool restores_linear_state_on_prepare() const override { return false; }
+
   void restore_json_object_states(TargetInput& input) override;
 
   // Common step dispatch: prefill / decode / empty

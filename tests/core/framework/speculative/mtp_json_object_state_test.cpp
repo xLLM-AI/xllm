@@ -44,9 +44,8 @@ TEST(MtpJsonObjectStateTest, BuildsSequenceMajorRowsForMixedAcceptedDrafts) {
   EXPECT_FALSE(detail::append_json_draft_step(
       current_states, invalid_suffix, {2, 4}, scratch));
 
-  std::vector<uint8_t> invalid_draft;
-  const auto validation_states = detail::build_json_validation_states(
-      initial_states, scratch, invalid_draft);
+  const auto validation_states =
+      detail::build_json_validation_states(initial_states, scratch);
 
   ASSERT_EQ(validation_states.size(), 8u);
   EXPECT_EQ(validation_states[0].fingerprint(),
@@ -60,7 +59,6 @@ TEST(MtpJsonObjectStateTest, BuildsSequenceMajorRowsForMixedAcceptedDrafts) {
   for (size_t row = 4; row < validation_states.size(); ++row) {
     EXPECT_FALSE(validation_states[row].initialized());
   }
-  EXPECT_EQ(invalid_draft, std::vector<uint8_t>({0, 0, 0, 0, 0, 0}));
   EXPECT_EQ(initial_states[0].snapshot().token_ids, std::vector<int32_t>({}));
 }
 
@@ -79,11 +77,9 @@ TEST(MtpJsonObjectStateTest, FreezesFirstInvalidDraftAndItsSuffix) {
   EXPECT_FALSE(detail::append_json_draft_step(
       current_states, invalid_suffix, {-1, 0}, scratch));
 
-  std::vector<uint8_t> invalid_draft;
-  const auto validation_states = detail::build_json_validation_states(
-      initial_states, scratch, invalid_draft);
+  const auto validation_states =
+      detail::build_json_validation_states(initial_states, scratch);
 
-  EXPECT_EQ(invalid_draft, std::vector<uint8_t>({1, 1, 1, 0, 0, 0}));
   for (size_t row = 0; row < 4; ++row) {
     EXPECT_EQ(validation_states[row].fingerprint(),
               initial_states[0].fingerprint());
@@ -105,11 +101,9 @@ TEST(MtpJsonObjectStateTest, PreservesAcceptedPrefixAfterMiddleInvalidDraft) {
   EXPECT_FALSE(detail::append_json_draft_step(
       current_states, invalid_suffix, {-1}, scratch));
 
-  std::vector<uint8_t> invalid_draft;
-  const auto validation_states = detail::build_json_validation_states(
-      initial_states, scratch, invalid_draft);
+  const auto validation_states =
+      detail::build_json_validation_states(initial_states, scratch);
 
-  EXPECT_EQ(invalid_draft, std::vector<uint8_t>({0, 1, 1}));
   ASSERT_EQ(validation_states.size(), 4u);
   EXPECT_EQ(validation_states[1].fingerprint(),
             scratch.states_after[0][0].fingerprint());
@@ -133,13 +127,10 @@ TEST(MtpJsonObjectStateTest, FiveDraftRowsReplayFromCommittedState) {
         current_states, invalid_suffix, {token_id}, scratch));
   }
 
-  std::vector<uint8_t> invalid_draft;
   const std::vector<JsonObjectGrammarState> validation_states =
-      detail::build_json_validation_states(
-          initial_states, scratch, invalid_draft);
+      detail::build_json_validation_states(initial_states, scratch);
 
   ASSERT_EQ(validation_states.size(), 6u);
-  EXPECT_EQ(invalid_draft, std::vector<uint8_t>({0, 0, 0, 0, 0}));
   JsonObjectGrammarState committed_state = initial_states[0];
   for (size_t token_idx = 0; token_idx < draft_tokens.size(); ++token_idx) {
     EXPECT_EQ(validation_states[token_idx].fingerprint(),
@@ -172,10 +163,8 @@ TEST(MtpJsonObjectStateTest,
         current_states, invalid_suffix, {token_id}, scratch));
   }
 
-  std::vector<uint8_t> invalid_draft;
   const std::vector<JsonObjectGrammarState> validation_states =
-      detail::build_json_validation_states(
-          initial_states, scratch, invalid_draft);
+      detail::build_json_validation_states(initial_states, scratch);
 
   ASSERT_EQ(validation_states.size(), 6u);
   for (const JsonObjectGrammarState& state : validation_states) {

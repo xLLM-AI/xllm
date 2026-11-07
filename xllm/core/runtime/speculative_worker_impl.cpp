@@ -18,11 +18,13 @@ limitations under the License.
 #include <type_traits>
 
 #include "common/global_flags.h"
+#include "core/framework/batch/decode_input_builder.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/framework/constrained/json_object_grammar.h"
 #include "core/framework/eplb/eplb_utils.h"
-#include "core/framework/speculative/spec_input_builder.h"
 #include "core/framework/speculative/verify_layout.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
+#include "core/kv_cache/layout/seq_lens_layout.h"
 #include "runtime/llm_worker_impl.h"
 #include "runtime/vlm_worker_impl.h"
 #include "util/slice.h"
@@ -94,6 +96,22 @@ void scale_speculative_parallel_token_counts(LlmModelParams& params,
 void scale_speculative_parallel_token_counts(VlmModelParams& params,
                                              int32_t multiplier) {
   scale_speculative_parallel_token_counts_impl(params, multiplier);
+}
+
+ForwardOutput finalize_verify_output(
+    ForwardOutput target_output,
+    SampleOutput val_output,
+    const std::vector<JsonObjectGrammarState>& json_object_states) {
+  const std::vector<int32_t> num_accepted_tokens =
+      tensor_to_vector<int32_t>(val_output.num_accepted_tokens);
+  target_output.spec_verify_stats =
+      make_verify_stats(val_output.next_tokens,
+                        /*per_seq_draft_counts=*/nullptr,
+                        num_accepted_tokens,
+                        constrained_mask(json_object_states));
+  val_output.embeddings = torch::Tensor();
+  target_output.sample_output = std::move(val_output);
+  return target_output;
 }
 
 template <typename TargetInput>
@@ -173,14 +191,14 @@ std::optional<ForwardOutput> SpeculativeWorkerImpl<TargetInput>::step(
   if constexpr (std::is_same_v<TargetInput, VlmForwardInput>) {
     if (input.runtime.input_host_buffer_has_layout) {
       // Rebuild host views before speculative code derives text draft inputs.
-      // Each leaf worker still owns device preparation on its ordered stream.
-      TargetInput unpacked_input;
+      VlmForwardInput unpacked_input;
       if (input.runtime.device_tensors_ready) {
         unpacked_input = input.clone();
         unpacked_input.runtime.input_host_buffer_has_layout = false;
       } else {
         CHECK(detail::unpack_from_input_host_buffer(
-            input, torch::Device(torch::kCPU), unpacked_input));
+            input, torch::Device(torch::kCPU), unpacked_input))
+            << "failed to unpack the packed VLM input host buffer";
       }
       return step(unpacked_input);
     }
@@ -218,7 +236,6 @@ bool SpeculativeWorkerImpl<TargetInput>::prepare_model_decode_continuation(
   const int32_t num_sequences = input_params.meta.num_sequences;
   const int32_t block_size = options_.block_size();
 
-  Slice<int32_t> token_ids = tensor_slice(inputs.token_ids_host);
   const torch::Tensor last_token_ids =
       to_cpu_contiguous(prior_output.sample_output.next_tokens.flatten());
   const Slice<int64_t> last_tokens_ids_slice =
@@ -231,62 +248,28 @@ bool SpeculativeWorkerImpl<TargetInput>::prepare_model_decode_continuation(
     last_step_decode_num = prior_output.sample_output.next_tokens.size(1);
   }
 
-  specBuilder::DecodeBuildBuffers buf;
-  buf.out_token_ids.reserve(num_sequences);
-  buf.out_positions.reserve(num_sequences);
-  buf.out_kv_seq_lens.reserve(num_sequences);
-  buf.out_new_cache_slots.reserve(num_sequences);
-  specBuilder::DecodeRowContext row_ctx =
-      specBuilder::make_decode_row_context(inputs);
+  DecodeBuildBuffers buf;
+  DecodeBatchContext row_ctx = make_decode_batch_context(inputs);
+  reserve_entries(buf,
+                  row_ctx,
+                  static_cast<size_t>(num_sequences),
+                  DecodeFields::kSlotsAndKvLen);
 
   for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
-    specBuilder::append_decode_row_from_last_step(row_ctx,
-                                                  seq_id,
-                                                  token_ids[seq_id],
-                                                  last_tokens_ids_slice,
-                                                  last_step_decode_num,
-                                                  block_size,
-                                                  buf);
+    const TokenWithOffset resolved = resolve_token_with_position_offset(
+        token_at(row_ctx, seq_id), last_tokens_ids_slice, last_step_decode_num);
+    QueryEntrySpec row;
+    row.seq_id = seq_id;
+    row.token_id = resolved.token_id;
+    row.position_offset = resolved.position_offset;
+    append_decode_entry(row_ctx, row, block_size, buf);
   }
 
-  CHECK_EQ(buf.out_new_cache_slots.size(), buf.out_token_ids.size())
-      << "step-update kv slots/tokens mismatch";
-  CHECK_EQ(buf.out_positions.size(), buf.out_token_ids.size())
-      << "step-update positions/tokens mismatch";
-
-  specBuilder::set_token_position_tensors(inputs,
-                                          buf.out_token_ids,
-                                          buf.out_positions,
-                                          inputs.token_ids.options(),
-                                          inputs.positions.options());
-  // update the input_params
-  input_params.meta.kv_max_seq_len = buf.meta.kv_max_seq_len;
-  input_params.attention.host.kv_seq_lens = std::move(buf.out_kv_seq_lens);
-  input_params.attention.host.new_cache_slots =
-      std::move(buf.out_new_cache_slots);
+  set_token_position_tensors(inputs, buf.out_token_ids, buf.out_positions);
+  commit_kv_and_slots(input_params, buf);
   input_params.attention.rebuild_device_buffer(device_);
-  inputs.runtime.device_tensors_ready = true;
 
   return true;
-}
-
-ForwardOutput finalize_verify_output(
-    ForwardOutput target_output,
-    SampleOutput val_output,
-    const std::vector<JsonObjectGrammarState>& json_object_states) {
-  // Verify kernels have completed by every entry to this tail.
-  const std::vector<int32_t> num_accepted_tokens =
-      tensor_to_vector<int32_t>(val_output.num_accepted_tokens);
-  target_output.spec_verify_stats =
-      make_verify_stats(val_output.next_tokens,
-                        /*per_seq_draft_counts=*/nullptr,
-                        num_accepted_tokens,
-                        constrained_mask(json_object_states));
-  // The verify output replaces sample_output wholesale, so only its own
-  // embeddings need clearing.
-  val_output.embeddings = torch::Tensor();
-  target_output.sample_output = std::move(val_output);
-  return target_output;
 }
 
 template <typename TargetInput>
@@ -310,9 +293,6 @@ void SpeculativeWorkerImpl<TargetInput>::prepare_validate_inputs(
   validate_input.skip_sampling_for_logits_only = true;
   validate_input.runtime.device_tensors_ready = false;
   auto& input_params = validate_input.input_params;
-  torch::TensorOptions token_options = validate_input.token_ids.options();
-  torch::TensorOptions position_options = validate_input.positions.options();
-
   const int32_t num_speculative_tokens = options_.num_speculative_tokens();
   const int32_t num_sequences = input_params.meta.num_sequences;
   const int32_t num_val_tokens = num_speculative_tokens + 1;
@@ -326,92 +306,16 @@ void SpeculativeWorkerImpl<TargetInput>::prepare_validate_inputs(
   const bool use_chunked_spec_verify =
       ::xllm::SpeculativeConfig::get_instance().enable_atb_spec_kernel() ||
       input.input_params.is_spec_verify;
-  specBuilder::DecodeRowContext row_ctx =
-      specBuilder::make_decode_row_context(input);
+  DecodeBatchContext row_ctx = make_decode_batch_context(input);
 
-  Slice<int32_t> token_ids = tensor_slice(input.token_ids_host);
-  Slice<int32_t> kv_seq_lens = input.input_params.attention.host.kv_seq_lens;
-  specBuilder::DecodeBuildBuffers buf;
-  buf.out_token_ids.reserve(total_num_val_tokens);
-  buf.out_positions.reserve(total_num_val_tokens);
-  buf.out_new_cache_slots.reserve(total_num_val_tokens);
-  if (!use_chunked_spec_verify) {
-    buf.out_kv_seq_lens.reserve(total_num_val_tokens);
-    buf.out_q_seq_lens.reserve(total_num_val_tokens);
-    buf.out_q_cu_seq_lens.reserve(total_num_val_tokens);
-    buf.reserve_row_buffers(static_cast<size_t>(total_num_val_tokens),
-                            row_ctx.block_table_stride);
-  }
+  const ExpandDecodePlan plan = make_verify_plan(
+      num_val_tokens,
+      block_size,
+      use_chunked_spec_verify ? QueryLayout::kChunked : QueryLayout::kFlat,
+      /*leading_zero_cu=*/input.input_params.is_spec_verify);
+  DecodeBuildBuffers buf = expand_decode_inputs(row_ctx, plan);
 
-  std::vector<int32_t> atb_kv_seq_lens_vec = {};
-  std::vector<int32_t> atb_q_seq_lens_vec = {};
-  std::vector<int32_t> atb_q_cu_seq_lens_vec = {};
-  int32_t atb_kv_max_seq_len = 0;
-  for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
-    int32_t kv_len =
-        specBuilder::calc_kv_len(kv_seq_lens, seq_id, /*offset=*/0);
-    for (int32_t val_idx = 0; val_idx < num_val_tokens; ++val_idx) {
-      specBuilder::RowSpec row;
-      row.seq_id = seq_id;
-      if (val_idx == 0) {
-        row.token_id = token_ids[seq_id];
-      } else {
-        row.token_id = -val_idx;
-      }
-      row.position_offset = val_idx;
-      row.append_kv_len = !use_chunked_spec_verify;
-      row.append_q_len_one = !use_chunked_spec_verify;
-      row.append_block_table = !use_chunked_spec_verify;
-      specBuilder::append_decode_row(row_ctx, row, block_size, buf);
-    }
-
-    if (use_chunked_spec_verify) {
-      const int32_t kv_len_after_validation = kv_len + num_speculative_tokens;
-      specBuilder::update_kv_seq_lens_and_max(
-          atb_kv_seq_lens_vec, kv_len_after_validation, atb_kv_max_seq_len);
-      specBuilder::append_q_seq_len(
-          atb_q_seq_lens_vec, atb_q_cu_seq_lens_vec, num_val_tokens);
-    }
-  }
-
-  CHECK_EQ(buf.out_new_cache_slots.size(), buf.out_token_ids.size())
-      << "validate kv slots/tokens mismatch";
-  CHECK_EQ(buf.out_positions.size(), buf.out_token_ids.size())
-      << "validate positions/tokens mismatch";
-
-  specBuilder::set_token_position_tensors(validate_input,
-                                          buf.out_token_ids,
-                                          buf.out_positions,
-                                          token_options,
-                                          position_options);
-  // update the input_params
-  if (!use_chunked_spec_verify) {
-    input_params.meta.num_sequences = total_num_val_tokens;
-    input_params.meta.q_max_seq_len = 1;
-    input_params.meta.batch_forward_type = BatchForwardType::DECODE;
-  } else {
-    input_params.meta.q_max_seq_len = num_val_tokens;
-    input_params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
-  }
-  if (use_chunked_spec_verify) {
-    specBuilder::update_input_params(input_params,
-                                     buf,
-                                     num_val_tokens,
-                                     std::move(atb_q_seq_lens_vec),
-                                     std::move(atb_q_cu_seq_lens_vec),
-                                     atb_kv_max_seq_len,
-                                     std::move(atb_kv_seq_lens_vec));
-  } else {
-    specBuilder::update_input_params(input_params,
-                                     buf,
-                                     1,
-                                     std::move(buf.out_q_seq_lens),
-                                     std::move(buf.out_q_cu_seq_lens),
-                                     buf.meta.kv_max_seq_len,
-                                     std::move(buf.out_kv_seq_lens),
-                                     /*update_block_tables=*/true);
-  }
-  input_params.attention.rebuild_device_buffer(device_);
+  commit_decode_input(validate_input, buf, plan, device_);
 
   // Clearing here drops the ~15 dead per-token tensors the clone carried in.
   expand_sampling_params_for_verify(validate_input.sampling_params,

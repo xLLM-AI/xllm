@@ -44,18 +44,6 @@ namespace util {
 
 std::pair<int, int> find_ones_indices(std::vector<int>& q_seq_lens);
 
-template <typename T>
-void pad_2d_vector(std::vector<std::vector<T>>& vec, T pad_value) {
-  size_t max_col_size = 0;
-  for (const auto& row : vec) {
-    max_col_size = std::max(max_col_size, row.size());
-  }
-
-  for (auto& row : vec) {
-    row.resize(max_col_size, pad_value);
-  }
-}
-
 torch::ScalarType parse_dtype(const std::string& dtype_str,
                               const std::optional<torch::Device>& device);
 

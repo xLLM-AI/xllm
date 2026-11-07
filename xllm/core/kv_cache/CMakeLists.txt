@@ -5,6 +5,17 @@ add_subdirectory(events)
 add_subdirectory(prefix)
 add_subdirectory(transfer)
 
+# Header-only leaf: row-aligned paging producers link no cache storage backend.
+cc_library(
+  NAME
+    paged_kv_layout
+  HDRS
+    layout/paged_kv_layout.h
+    layout/seq_lens_layout.h
+  DEPS
+    glog::glog
+)
+
 cc_library(
   NAME
     virtual_kv_cache_page_layout

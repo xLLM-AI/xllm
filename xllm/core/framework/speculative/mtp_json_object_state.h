@@ -90,8 +90,7 @@ inline bool append_json_draft_step(
 
 inline std::vector<JsonObjectGrammarState> build_json_validation_states(
     const std::vector<JsonObjectGrammarState>& initial_states,
-    const JsonDraftValidationScratch& scratch,
-    std::vector<uint8_t>& invalid_draft) {
+    const JsonDraftValidationScratch& scratch) {
   CHECK(!scratch.states_after.empty())
       << "JSON validation requires at least one draft state";
   const size_t num_sequences = initial_states.size();
@@ -106,16 +105,11 @@ inline std::vector<JsonObjectGrammarState> build_json_validation_states(
 
   std::vector<JsonObjectGrammarState> validation_states;
   validation_states.reserve(num_sequences * (num_draft_steps + 1));
-  invalid_draft.clear();
-  invalid_draft.reserve(num_sequences * num_draft_steps);
   for (size_t seq_idx = 0; seq_idx < num_sequences; ++seq_idx) {
     for (size_t draft_idx = 0; draft_idx < num_draft_steps; ++draft_idx) {
       validation_states.push_back(
           draft_idx == 0 ? initial_states[seq_idx]
                          : scratch.states_after[draft_idx - 1][seq_idx]);
-      invalid_draft.push_back(
-          scratch
-              .invalid_draft_step_major[draft_idx * num_sequences + seq_idx]);
     }
     validation_states.push_back(scratch.states_after.back()[seq_idx]);
   }

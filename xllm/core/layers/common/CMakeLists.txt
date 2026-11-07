@@ -66,6 +66,7 @@ cc_library(
     "-Wl,--whole-archive"
     "-Wl,--no-whole-archive"
     :kv_cache
+    :paged_kv_layout
     :block
     :prefix_cache
     :parallel_state

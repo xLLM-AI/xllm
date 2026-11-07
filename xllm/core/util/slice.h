@@ -78,6 +78,18 @@ class Slice final {
   size_t size_ = 0;
 };
 
+template <typename T>
+inline Slice<T> ubatch_slices(const Slice<T>& flat,
+                              size_t row,
+                              size_t row_stride) {
+  CHECK_GT(row_stride, 0);
+  const size_t row_offset = row * row_stride;
+  CHECK_LE(row_offset + row_stride, flat.size())
+      << "row out of range, row=" << row << ", row_stride=" << row_stride
+      << ", flat_size=" << flat.size();
+  return flat.slice(row_offset, row_offset + row_stride);
+}
+
 // help comparison operators between slices and std::vector
 template <typename T>
 inline bool operator==(const Slice<T>& lhs, const std::vector<T>& rhs) {

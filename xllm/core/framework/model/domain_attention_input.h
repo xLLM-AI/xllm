@@ -33,6 +33,10 @@ struct PackedAttentionIntInput {
   const std::vector<int32_t>* values = nullptr;
   torch::Tensor* host_view = nullptr;
   torch::Tensor* device_view = nullptr;
+  // When set, `values` is ignored: each row is written `repeat_count` times
+  // during the packed memcpy.
+  const torch::Tensor* repeat_source = nullptr;
+  int32_t repeat_count = 0;
 };
 
 class AttentionHostInputView final {
@@ -134,6 +138,10 @@ class AttentionInputView final {
       uint64_t offset = 0;
       uint64_t bytes = 0;
       uint64_t aligned_bytes = 0;
+      // Rows of a (rows x row_width) source, each written `repeat_count` times.
+      int64_t repeat_count = 0;
+      int64_t src_row_count = 0;
+      size_t src_row_bytes = 0;
     };
 
     auto align_up = [](uint64_t value, uint64_t alignment) {
@@ -158,9 +166,9 @@ class AttentionInputView final {
       entries.emplace_back(Entry{
           source, std::move(sizes), dtype, host_target, target, 0, bytes, 0});
     };
-    auto add_int_vector = [&add_raw](const std::vector<int32_t>& values,
-                                     torch::Tensor* host_target,
-                                     torch::Tensor* target) {
+    auto add_int32_vector = [&add_raw](const std::vector<int32_t>& values,
+                                       torch::Tensor* host_target,
+                                       torch::Tensor* target) {
       if (values.empty()) {
         return;
       }
@@ -171,7 +179,30 @@ class AttentionInputView final {
               host_target,
               target);
     };
-    auto add_cpu_tensor = [&entries, &tensor_sources](
+    auto add_tensor = [&entries](const torch::Tensor& source,
+                                 std::vector<int64_t> sizes,
+                                 uint64_t bytes,
+                                 torch::Tensor* host_target,
+                                 torch::Tensor* target,
+                                 int64_t repeat_count = 0,
+                                 int64_t src_row_count = 0,
+                                 size_t src_row_bytes = 0) {
+      if (bytes == 0) {
+        return;
+      }
+      entries.emplace_back(Entry{source.data_ptr(),
+                                 std::move(sizes),
+                                 source.scalar_type(),
+                                 host_target,
+                                 target,
+                                 0,
+                                 bytes,
+                                 0,
+                                 repeat_count,
+                                 src_row_count,
+                                 src_row_bytes});
+    };
+    auto add_cpu_tensor = [&add_tensor, &tensor_sources](
                               const torch::Tensor& tensor,
                               torch::Tensor* target) {
       if (!tensor.defined() || !tensor.device().is_cpu()) {
@@ -179,34 +210,56 @@ class AttentionInputView final {
       }
       tensor_sources.emplace_back(tensor.contiguous());
       const torch::Tensor& source = tensor_sources.back();
-      const uint64_t bytes =
-          static_cast<uint64_t>(source.numel() * source.element_size());
-      if (bytes == 0) {
-        return;
-      }
-      entries.emplace_back(Entry{source.data_ptr(),
-                                 source.sizes().vec(),
-                                 source.scalar_type(),
-                                 nullptr,
-                                 target,
-                                 0,
-                                 bytes,
-                                 0});
+      add_tensor(source,
+                 source.sizes().vec(),
+                 static_cast<uint64_t>(source.numel() * source.element_size()),
+                 nullptr,
+                 target);
+    };
+
+    auto add_repeated_entries = [&add_tensor, &tensor_sources](
+                                    const torch::Tensor& source,
+                                    int32_t repeat_count,
+                                    torch::Tensor* host_target,
+                                    torch::Tensor* target) {
+      CHECK(source.defined() && source.dim() == 2);
+      CHECK_GT(repeat_count, 0);
+      tensor_sources.emplace_back(source.contiguous());
+      const torch::Tensor& dense = tensor_sources.back();
+      const int64_t rows = dense.size(0);
+      const int64_t row_width = dense.size(1);
+      add_tensor(dense,
+                 {rows * repeat_count * row_width},
+                 static_cast<uint64_t>(rows * repeat_count * row_width *
+                                       dense.element_size()),
+                 host_target,
+                 target,
+                 repeat_count,
+                 rows,
+                 static_cast<size_t>(row_width) * dense.element_size());
     };
 
     for (const PackedIntInput& extra : extra_int_inputs) {
+      if (extra.repeat_source != nullptr) {
+        add_repeated_entries(*extra.repeat_source,
+                             extra.repeat_count,
+                             extra.host_view,
+                             extra.device_view);
+        continue;
+      }
       CHECK(extra.values != nullptr);
-      add_int_vector(*extra.values, extra.host_view, extra.device_view);
+      add_int32_vector(*extra.values, extra.host_view, extra.device_view);
     }
-    add_int_vector(host.q_seq_lens, nullptr, &device.q_seq_lens);
-    add_int_vector(host.kv_seq_lens, nullptr, &device.kv_seq_lens);
-    add_int_vector(host.q_cu_seq_lens, nullptr, &device.q_cu_seq_lens);
-    add_int_vector(host.new_cache_slots, nullptr, &device.new_cache_slots);
+    add_int32_vector(host.q_seq_lens, nullptr, &device.q_seq_lens);
+    add_int32_vector(host.kv_seq_lens, nullptr, &device.kv_seq_lens);
+    add_int32_vector(host.q_cu_seq_lens, nullptr, &device.q_cu_seq_lens);
+    add_int32_vector(host.new_cache_slots, nullptr, &device.new_cache_slots);
     add_cpu_tensor(host.block_tables, &device.block_tables);
-    add_int_vector(
+    add_int32_vector(
         host.kv_cache_tokens_nums, nullptr, &device.kv_cache_tokens_nums);
-    add_int_vector(host.ring_cur_seqlen, nullptr, &device.ring_cur_seqlen);
-    add_int_vector(host.ring_cache_seqlen, nullptr, &device.ring_cache_seqlen);
+    add_int32_vector(host.ring_cur_seqlen, nullptr, &device.ring_cur_seqlen);
+    add_int32_vector(
+        host.ring_cache_seqlen, nullptr, &device.ring_cache_seqlen);
     add_cpu_tensor(device.paged_kv_indptr, &device.paged_kv_indptr);
     add_cpu_tensor(device.paged_kv_indices, &device.paged_kv_indices);
     add_cpu_tensor(device.paged_kv_last_page_len,
@@ -245,7 +298,20 @@ class AttentionInputView final {
 
     auto* host_base = static_cast<char*>(attention_host_buffer.data_ptr());
     for (const auto& entry : entries) {
-      std::memcpy(host_base + entry.offset, entry.source, entry.bytes);
+      char* dst = host_base + entry.offset;
+      if (entry.repeat_count > 0) {
+        const auto* src = static_cast<const char*>(entry.source);
+        for (int64_t row = 0; row < entry.src_row_count; ++row) {
+          const char* src_row =
+              src + static_cast<size_t>(row) * entry.src_row_bytes;
+          for (int64_t repeat = 0; repeat < entry.repeat_count; ++repeat) {
+            std::memcpy(dst, src_row, entry.src_row_bytes);
+            dst += entry.src_row_bytes;
+          }
+        }
+      } else {
+        std::memcpy(dst, entry.source, entry.bytes);
+      }
       if (entry.aligned_bytes > entry.bytes) {
         std::memset(host_base + entry.offset + entry.bytes,
                     0,
@@ -295,6 +361,15 @@ class AttentionInputView final {
   void reserve_device_buffer_capacity(uint64_t capacity,
                                       const torch::Device& target_device) {
     ensure_attention_buffer_capacity(capacity, target_device);
+  }
+
+  // Materializes a rectangular block-id table and mirrors it onto the host
+  // view, so every builder publishes the same device/host pair.
+  void set_block_tables_from(std::vector<std::vector<int32_t>>& tables,
+                             int32_t pad_value) {
+    util::pad_2d_vector(tables, pad_value);
+    device.block_tables = create_2d_tensor(tables, torch::kInt);
+    host.block_tables = device.block_tables;
   }
 
   AttentionHostInputView host;

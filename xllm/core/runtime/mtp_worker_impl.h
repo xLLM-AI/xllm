@@ -29,6 +29,7 @@ limitations under the License.
 #include "core/framework/speculative/mtp_async_state.h"
 #include "core/framework/speculative/mtp_json_object_state.h"
 #include "runtime/draft_model_spec_worker_impl.h"
+#include "util/tensor_helper.h"
 
 namespace xllm {
 
@@ -95,6 +96,9 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   using DraftModelSpecWorkerImpl<
       TargetInput>::estimate_kv_cache_capacity_with_draft;
   using DraftModelSpecWorkerImpl<TargetInput>::get_optimization_config;
+  using DraftModelSpecWorkerImpl<TargetInput>::logical_block_size;
+  using DraftModelSpecWorkerImpl<
+      TargetInput>::positions_are_decoupled_from_kv_length;
   using DraftModelSpecWorkerImpl<TargetInput>::prepare_draft_input;
 
   // MTP composite: leaves own model-specific NPU input preparation.
@@ -123,8 +127,7 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   virtual SampleOutput validate(SamplingParameters sampling_params,
                                 const std::vector<ForwardOutput>& draft_outputs,
                                 const ForwardOutput& target_output,
-                                int32_t num_speculative_tokens,
-                                const std::vector<uint8_t>& invalid_draft);
+                                int32_t num_speculative_tokens);
 
   virtual void check_draft_input_embedding(const torch::Tensor& /*embedding*/,
                                            const std::string& /*phase*/) const {
@@ -134,8 +137,7 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   SampleOutput validate(SamplingParameters sampling_params,
                         const DraftProposal& draft_proposal,
                         const ForwardOutput& target_output,
-                        int32_t num_speculative_tokens,
-                        const std::vector<uint8_t>& invalid_draft = {});
+                        int32_t num_speculative_tokens);
 
   // PD separation: placeholder size for empty embedding slot. Default: 1x
   // hidden_size. Eagle3 overrides to 3 * target_hidden_size.
@@ -149,10 +151,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   bool supports_expanded_spec_verify() const;
   bool should_use_explicit_spec_verify_replay_update(
       const TargetInput& input) const;
-  // A DCP block-table entry covers one logical KV page per KV split. All
-  // speculative cache-slot and expanded-attention metadata must use this
-  // logical size rather than the per-rank physical allocator block size.
-  int32_t logical_block_size() const;
   int64_t spec_verify_block_table_width(
       const torch::Tensor& block_tables) const;
   void ensure_spec_verify_control_block_table(TargetModelParams& input_params,
@@ -162,10 +160,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   bool use_chunked_prefill_spec_verify_path() const;
   bool uses_embedded_eagle3_draft() const;
   bool requires_full_target_replay() const override;
-  // Multiaxis RoPE positions can include a prompt-dependent offset and do not
-  // identify the corresponding KV cache length.
-  bool positions_are_decoupled_from_kv_length() const;
-  bool uses_step_major_validate_layout() const;
   void synchronize_embedded_eagle3_forward();
   template <typename Input>
   std::optional<ForwardOutput> run_worker_no_sync(WorkerImpl& worker,
@@ -331,6 +325,8 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   };
   std::optional<DraftContextReplayPolicy> draft_context_replay_policy_;
 
+  CachedDeviceIndices draft_query_sample_indices_;
+
 #if defined(USE_NPU)
   // Stable-address sources consumed by the target ACL graph's leading input
   // update. The existing H2D preparation overlaps with the final draft, so no
@@ -344,7 +340,7 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
   // Stable validate-sampling controls for the common single-sequence greedy
   // path.  Their values depend on speculative width, not tensor-parallel
   // topology, and are rebuilt only when that width changes.
-  torch::Tensor mtp_validate_greedy_indices_;
+  CachedDeviceIndices mtp_validate_greedy_indices_;
   std::unique_ptr<detail::NpuJsonDraftTokenHandoff> json_draft_token_handoff_;
 #endif
 };

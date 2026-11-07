@@ -23,7 +23,10 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/config/model_config.h"
+#include "core/framework/model/mtp_topk_state.h"
+#include "core/framework/sampling/sampling_params.h"
 #include "core/layers/common/attention_metadata.h"
+#include "core/runtime/mtp_runtime_helpers.h"
 #include "core/runtime/task_execution_pipeline.h"
 #include "tests/core/runtime/task_pipeline_test_peer.h"
 
@@ -966,6 +969,70 @@ TEST_F(MtpDecodeInputTest,
                    .ok());
   EXPECT_EQ(binding.get(), original);
 }
+
+TEST(MtpTopkStateSelectionTest, SelectsSampledRowsForNextDraftStep) {
+  const torch::Tensor topk_indices =
+      torch::tensor({{0, 1}, {2, 3}, {4, 5}, {6, 7}}, torch::kInt32);
+  const MtpTopkStatePtr state = MtpTopkState::from_tensor(topk_indices);
+  SamplingParameters sampling_params;
+  sampling_params.selected_token_idxes() = torch::tensor({1, 3}, torch::kInt32);
+
+  const MtpTopkStatePtr selected =
+      mtp_detail::select_mtp_topk_state_for_next_step(state, sampling_params);
+
+  ASSERT_TRUE(selected->as_tensor().has_value());
+  const torch::Tensor expected = torch::tensor({{2, 3}, {6, 7}}, torch::kInt32);
+  EXPECT_TRUE(torch::equal(*selected->as_tensor(), expected));
+
+  const MtpTopkStatePtr matched =
+      MtpTopkState::from_tensor(torch::tensor({{0, 1}, {2, 3}}, torch::kInt32));
+  sampling_params.selected_token_idxes() = torch::tensor({0, 1}, torch::kInt32);
+  EXPECT_EQ(
+      mtp_detail::select_mtp_topk_state_for_next_step(matched, sampling_params)
+          .get(),
+      matched.get());
+  EXPECT_EQ(
+      mtp_detail::select_mtp_topk_state_for_next_step(nullptr, sampling_params),
+      nullptr);
+}
+
+#if defined(USE_MLU)
+TEST(MtpTopkStateSelectionTest, SelectsMluRowsWithoutMixingLayerState) {
+  mlu::model::MluMtpTopkState::LayerStates states;
+  states.emplace_back(layer::DsaTopkState(
+      torch::tensor({{0, 1}, {2, 3}, {4, 5}}, torch::kInt32),
+      torch::tensor({10, 20, 30}, torch::kInt32)));
+  states.emplace_back(std::nullopt);
+  states.emplace_back(layer::DsaTopkState(
+      torch::tensor({{6, 7}, {8, 9}, {10, 11}}, torch::kInt32),
+      torch::tensor({40, 50, 60}, torch::kInt32)));
+  const MtpTopkStatePtr state =
+      std::make_shared<mlu::model::MluMtpTopkState>(std::move(states));
+  SamplingParameters sampling_params;
+  sampling_params.selected_token_idxes() = torch::tensor({2, 0}, torch::kInt32);
+
+  const MtpTopkStatePtr selected =
+      mtp_detail::select_mtp_topk_state_for_next_step(state, sampling_params);
+
+  EXPECT_FALSE(selected->as_tensor().has_value());
+  const auto mlu_state =
+      std::dynamic_pointer_cast<const mlu::model::MluMtpTopkState>(selected);
+  ASSERT_NE(mlu_state, nullptr);
+  const auto& selected_layers = mlu_state->layer_states();
+  ASSERT_EQ(selected_layers.size(), 3);
+  ASSERT_TRUE(selected_layers[0].has_value());
+  EXPECT_TRUE(torch::equal(selected_layers[0]->block_tables(),
+                           torch::tensor({{4, 5}, {0, 1}}, torch::kInt32)));
+  EXPECT_TRUE(torch::equal(selected_layers[0]->context_lens(),
+                           torch::tensor({30, 10}, torch::kInt32)));
+  EXPECT_FALSE(selected_layers[1].has_value());
+  ASSERT_TRUE(selected_layers[2].has_value());
+  EXPECT_TRUE(torch::equal(selected_layers[2]->block_tables(),
+                           torch::tensor({{10, 11}, {6, 7}}, torch::kInt32)));
+  EXPECT_TRUE(torch::equal(selected_layers[2]->context_lens(),
+                           torch::tensor({60, 40}, torch::kInt32)));
+}
+#endif
 
 }  // namespace
 }  // namespace xllm

@@ -32,6 +32,7 @@ limitations under the License.
 #include "compiler/triton/include/jit_kernel.h"
 #include "core/common/constants.h"
 #include "core/framework/config/execution_config.h"
+#include "core/kv_cache/layout/seq_lens_layout.h"
 #include "core/runtime/graph_input_snapshot.h"
 #include "core/runtime/rec_graph_input.h"
 #include "runtime/decode_graph_bucket.h"
@@ -386,8 +387,10 @@ void GraphPersistentParam::update_input_buffer(const torch::Tensor& tokens,
     q_seq_lens_vec.reserve(q_seq_lens_vec.size() + padding_needed);
     kv_seq_lens_vec.reserve(kv_seq_lens_vec.size() + padding_needed);
     for (size_t i = 0; i < padding_needed; i++) {
-      q_seq_lens_vec.push_back(q_seq_lens_vec.back() + num_decoding_tokens_);
-      kv_seq_lens_vec.push_back(kv_seq_lens_vec.back() + num_decoding_tokens_);
+      CuSeqLens::append_cumulative(q_seq_lens_vec,
+                                   static_cast<int32_t>(num_decoding_tokens_));
+      CuSeqLens::append_cumulative(kv_seq_lens_vec,
+                                   static_cast<int32_t>(num_decoding_tokens_));
     }
   }
 
