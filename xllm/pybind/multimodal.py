@@ -27,7 +27,7 @@ def __cache_image_processor(
     *args: Any,
     trust_remote_code: bool = False,
     **kwargs: Any,
-):
+) -> Any:
     """Load an image processor for the given model name via HuggingFace.
 
     Returns ``None`` (cached) when the processor class is unavailable — e.g.
@@ -37,12 +37,17 @@ def __cache_image_processor(
     """
     # don't put this import at the top level
     # it will call torch.cuda.device_count()
-    from transformers import AutoImageProcessor
-
     try:
+        from transformers import AutoImageProcessor
+
         return AutoImageProcessor.from_pretrained(processor_name, *args, trust_remote_code=trust_remote_code, **kwargs)
     except (ValueError, ImportError, KeyError):
         return None
+
+
+def initialize_image_processor(model: str) -> None:
+    """Load the processor before online requests pay the import and load cost."""
+    __cache_image_processor(model, trust_remote_code=True)
 
 
 def try_cat_feature(item):

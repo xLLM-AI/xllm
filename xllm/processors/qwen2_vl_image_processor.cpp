@@ -37,8 +37,8 @@ namespace {
 
 // Delegates image preprocessing to Python (HF AutoImageProcessor via
 // pybind.multimodal.preprocess_tensors) for the Python model-executor path,
-// so no per-model C++ image processor is needed. Lazily initialized on first
-// use (under the GIL acquired by run()).
+// so no per-model C++ image processor is needed. Initialize the Python loader
+// with the owning image processor before the service accepts its first image.
 class PyImagePreprocess final {
  public:
   static PyImagePreprocess& instance() {
@@ -88,14 +88,13 @@ class PyImagePreprocess final {
 
  private:
   PyImagePreprocess() {
-    // The constructor runs during the lazy singleton init (called from
-    // process(), outside any GIL scope) — importing a Python module touches
-    // the CPython C API, so the GIL MUST be held here (otherwise segfault).
+    // Processor construction runs outside Python, so imports need the GIL.
     py::gil_scoped_acquire gil;
     model_path_ = ::xllm::ModelConfig::get_instance().model();
     // node0 (master+worker) has already imported the `xllm` package via the
     // Python model, so this submodule import is cheap and safe here.
     py::module_ mm = py::module_::import("xllm.pybind.multimodal");
+    mm.attr("initialize_image_processor")(model_path_);
     preprocess_fn_ = mm.attr("preprocess_tensors");
   }
 
@@ -272,6 +271,10 @@ Qwen2VLImageProcessor::Qwen2VLImageProcessor(const ModelArgs& args) {
     image_mean_.mul_(1.0 / rescale_factor_);
     image_std_.mul_(1.0 / rescale_factor_);
     do_rescale_ = false;
+  }
+  if (::xllm::ModelConfig::is_python_model_impl(
+          ::xllm::ModelConfig::get_instance().model_impl())) {
+    static_cast<void>(PyImagePreprocess::instance());
   }
 }
 
