@@ -30,6 +30,7 @@ limitations under the License.
 #include "core/kv_cache/block/concurrent_block_manager_impl.h"
 #include "core/kv_cache/block/linear_state_block_manager.h"
 #include "core/kv_cache/block/sliding_window_block_manager.h"
+#include "core/kv_cache/layout/static_kv_cache_layout.h"
 
 namespace xllm {
 
@@ -818,6 +819,19 @@ void CompositeBlockManager::allocate_shared_for_sequence(Sequence* seq) {
   if (combination_ == LeafCombination::FLAT_KV_LINEAR &&
       kv_state.prefix_cache_matched()) {
     return;
+  }
+  if (shared_block_pool_ && shared_block_pool_->uses_slabs() &&
+      combination_ == LeafCombination::FLAT_KV_LINEAR) {
+    const size_t block_size = leaf_of(BlockType::KV)->block_size();
+    const size_t full_blocks = seq->tokens().size() / block_size +
+                               (seq->tokens().size() % block_size != 0);
+    // Restore keeps its cached source until a private Linear output exists.
+    // Decline that transient two-state footprint before pinning the prefix;
+    // cold execution needs one state and can reclaim the inactive cache pair.
+    if (!options_.shared_layout()->can_fit(full_blocks, 2)) {
+      kv_state.set_prefix_cache_matched();
+      return;
+    }
   }
   std::vector<ProbeResult> probes = probe_prefix_cache(seq, leaves_, kv_state);
   if (probes.empty()) {
