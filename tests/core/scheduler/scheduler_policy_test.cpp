@@ -56,8 +56,8 @@ class FakeTokenizer : public Tokenizer {
     NOT_IMPLEMENTED();
   }
   std::string decode(const Slice<int32_t>& ids,
-                     bool skip_special_tokens) const {
-    NOT_IMPLEMENTED();
+                     bool /*skip_special_tokens*/) const override {
+    return std::string(ids.size(), 'x');
   }
   std::optional<int32_t> token_to_id(const std::string_view& token) const {
     NOT_IMPLEMENTED();
@@ -3570,11 +3570,16 @@ TEST(SchedulerPolicyTest, BestOfPartialAdmissionReleasesPrefixUsage) {
   pool->deallocate(cached_request.get());
 
   TestableContinuousScheduler scheduler(&engine, options);
+  std::optional<bool> cancelled_response;
   RequestState request_state =
       generate_request({12}, {4}, std::nullopt, std::nullopt, 64)[0]
           ->state()
           .clone();
   request_state.best_of = 2;
+  request_state.output_func = [&](const RequestOutput& output) {
+    cancelled_response = output.cancelled;
+    return true;
+  };
   auto request = std::make_shared<Request>(
       "best-of-prefix", "best-of-prefix", "", std::move(request_state), "");
   ASSERT_TRUE(request->expand_sequences(/*share_prefix=*/false));
@@ -3615,6 +3620,8 @@ TEST(SchedulerPolicyTest, BestOfPartialAdmissionReleasesPrefixUsage) {
   scheduler.wait_for_responses();
   ASSERT_EQ(batches.size(), 1u);
   EXPECT_TRUE(batches.front().empty());
+  ASSERT_TRUE(cancelled_response.has_value());
+  EXPECT_TRUE(cancelled_response.value());
   EXPECT_EQ(first->kv_state().num_blocks(BlockType::KV), 0u);
   EXPECT_EQ(second->kv_state().num_blocks(BlockType::KV), 0u);
   EXPECT_EQ(pool->num_used_blocks(), used_blocks_before);
