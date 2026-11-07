@@ -37,7 +37,7 @@ class Glm5NextGraphMetadataState final : public ModelGraphMetadataState {
 inline void Glm5NextGraphMetadataState::prepare(const torch::Tensor& positions,
                                                 ModelParamsView& params) {
   const auto& attention = params.attention.device;
-  const size_t graph_rows = attention.kv_seq_lens.numel() - 1;
+  const size_t graph_rows = attention.kv_seq_lens.numel();
   if (!params.embedding.linear_state_ids.empty() &&
       params.embedding.linear_state_ids.size() != graph_rows) {
     params.embedding.linear_state_ids.resize(
@@ -67,8 +67,8 @@ inline void Glm5NextGraphMetadataState::prepare(const torch::Tensor& positions,
   }
   params.attn_metadata = metadata_;
   auto& attn = *params.attn_metadata;
-  torch::diff_out(attn.kv_seq_lens, attention.kv_seq_lens);
-  torch::diff_out(attn.q_seq_lens, attention.q_seq_lens);
+  attn.kv_seq_lens = attention.kv_seq_lens;
+  attn.q_seq_lens = attention.q_seq_lens;
   if (attn.has_initial_states.defined()) {
     CHECK_EQ(has_initial_states_host_.numel(),
              static_cast<int64_t>(params.linear_state_validity_mask.size()));

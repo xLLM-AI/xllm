@@ -23,6 +23,7 @@ limitations under the License.
 
 #include "core/framework/model/mtp_topk_state.h"
 #include "core/framework/speculative/draft_proposal.h"
+#include "core/kv_cache/layout/seq_lens_layout.h"
 #include "util/slice.h"
 
 namespace xllm {
@@ -150,24 +151,16 @@ template <typename Input>
 std::vector<int32_t> build_grouped_prefill_swa_slots(const Input& input,
                                                      int32_t block_size);
 
-// Computes sequence kv length with platform-specific seq-lens layout handling.
 int32_t calc_kv_len(const Slice<int32_t>& kv_seq_lens_slice,
                     int32_t seq_id,
                     int32_t offset);
 
-// Appends one q/kv length element using current backend layout policy.
-void append_seq_len_by_layout(std::vector<int32_t>& vec, int32_t len);
-
-// Rebuilds leading-zero query offsets from the backend-neutral length accessor.
 template <typename Params>
 void rebuild_q_cu_seq_lens(Params& params) {
-  auto& q_cu_seq_lens = params.attention.host.q_cu_seq_lens;
-  q_cu_seq_lens.clear();
-  q_cu_seq_lens.reserve(params.meta.num_sequences + 1);
-  q_cu_seq_lens.emplace_back(0);
-  for (int32_t i = 0; i < params.meta.num_sequences; ++i) {
-    q_cu_seq_lens.emplace_back(q_cu_seq_lens.back() + params.get_q_seq_len(i));
-  }
+  seq_lens::cumulative_into(
+      params.attention.host.q_cu_seq_lens,
+      Slice<int32_t>(params.attention.host.q_seq_lens,
+                     static_cast<size_t>(params.meta.num_sequences)));
 }
 
 // Appends one q length and the matching cumulative q length.

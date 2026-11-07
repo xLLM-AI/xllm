@@ -54,15 +54,9 @@ RecModelParams make_rec_params() {
   params.meta.num_sequences = 2;
   params.meta.q_max_seq_len = 1;
   params.meta.kv_max_seq_len = 5;
-#if defined(USE_NPU)
   params.attention.host.q_seq_lens = {1, 1};
   params.attention.host.kv_seq_lens = {3, 5};
   params.attention.host.q_cu_seq_lens = {1, 2};
-#else
-  params.attention.host.q_seq_lens = {0, 1, 2};
-  params.attention.host.kv_seq_lens = {0, 3, 8};
-  params.attention.host.q_cu_seq_lens = {0, 1, 2};
-#endif
   params.attention.device.q_seq_lens =
       torch::tensor(params.attention.host.q_seq_lens, torch::kInt32);
   params.attention.device.kv_seq_lens =

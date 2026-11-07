@@ -17,14 +17,14 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#include <algorithm>
-#include <numeric>
 #include <utility>
 #include <vector>
 
 #include "core/framework/model/llm_model_params.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/model/vlm_model_params.h"
+#include "core/kv_cache/layout/paged_kv_layout.h"
+#include "core/kv_cache/layout/seq_lens_layout.h"
 
 namespace xllm::layer {
 namespace {
@@ -53,17 +53,6 @@ std::vector<int32_t> build_page_counts(const std::vector<int32_t>& kv_seq_lens,
     page_counts.emplace_back(page_count);
   }
   return page_counts;
-}
-
-std::vector<int32_t> build_indptr(const std::vector<int32_t>& page_counts) {
-  std::vector<int32_t> indptr;
-  indptr.reserve(page_counts.size() + 1);
-  indptr.emplace_back(0);
-  for (int32_t page_count : page_counts) {
-    CHECK_GT(page_count, 0);
-    indptr.emplace_back(indptr.back() + page_count);
-  }
-  return indptr;
 }
 
 std::vector<int32_t> build_last_page_lens(
@@ -143,13 +132,9 @@ void ExpandedDecodeMetadataBuilder::populate_expanded_layout(
 
   const std::vector<int32_t> page_counts = build_page_counts(
       expanded_host_kv_seq_lens, block_size, expanded_block_tables.size(1));
-  const std::vector<int32_t> indptr = build_indptr(page_counts);
+  const std::vector<int32_t> indptr = seq_lens::cumulative(page_counts);
   const std::vector<int32_t> last_page_lens =
       build_last_page_lens(expanded_host_kv_seq_lens, block_size);
-  CHECK_EQ(indptr.front(), 0);
-  CHECK(std::is_sorted(indptr.begin(), indptr.end()));
-  CHECK_EQ(indptr.back(),
-           std::accumulate(page_counts.begin(), page_counts.end(), int32_t{0}));
   for (int32_t last_page_len : last_page_lens) {
     CHECK_GE(last_page_len, 1);
     CHECK_LE(last_page_len, block_size);

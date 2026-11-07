@@ -111,9 +111,11 @@ def test_qwen3_cuda_graph_preserves_outputs_across_replays(layers_to_capture: tu
         tokens = torch.tensor([11 + request + step for request in requests], dtype=torch.int32, device=device)
         positions = torch.tensor([lengths[request] for request in requests], dtype=torch.int32, device=device)
         cumulative_lengths = [0]
+        per_seq_lengths = []
         for request in requests:
             lengths[request] += 1
             cumulative_lengths.append(cumulative_lengths[-1] + lengths[request])
+            per_seq_lengths.append(lengths[request])
         # Give each request a separate reversed physical page; rows may reorder.
         pages = torch.tensor([3 - request for request in requests], dtype=torch.int32, device=device)
         metadata = SimpleNamespace(
@@ -121,7 +123,7 @@ def test_qwen3_cuda_graph_preserves_outputs_across_replays(layers_to_capture: tu
             is_chunked_prefill=False,
             slot_mapping=pages * 128 + positions,
             kv_cu_seq_lens=torch.tensor(cumulative_lengths, dtype=torch.int32, device=device),
-            kv_seq_lens_host=torch.tensor(cumulative_lengths, dtype=torch.int32),
+            kv_seq_lens_host=torch.tensor(per_seq_lengths, dtype=torch.int32),
             paged_kv_indptr=torch.arange(batch_size + 1, dtype=torch.int32, device=device),
             paged_kv_indices=pages,
             paged_kv_last_page_len=positions + 1,

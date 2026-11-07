@@ -32,6 +32,7 @@ limitations under the License.
 
 #include "core/framework/state_dict/utils.h"
 #include "core/kernels/ops_api.h"
+#include "core/kv_cache/layout/seq_lens_layout.h"
 #include "core/layers/common/dsa_metadata.h"
 #include "core/layers/common/dsa_metadata_builder.h"
 #include "core/layers/common/linear.h"
@@ -510,13 +511,6 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
         {0}, torch::dtype(torch::kInt32).device(reference.device())));
   }
 
-  static int64_t vector_max_or_zero(const std::vector<int32_t>& values) {
-    if (values.empty()) {
-      return 0;
-    }
-    return *std::max_element(values.begin(), values.end());
-  }
-
   void fill_empty_dp_rank_graph_metadata_input_params(
       ModelParamsView& params) const {
     params.attn_metadata = nullptr;
@@ -719,30 +713,7 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
     const auto int_options =
         torch::TensorOptions().dtype(torch::kInt32).device(device);
 
-    params.attention.host.q_seq_lens = local_q;
-    torch::Tensor q_lens = torch::tensor(local_q, int_options);
-    params.attention.device.q_seq_lens = q_lens;
-    dsa.seq_lens_q = q_lens;
-    torch::Tensor q_cumsum =
-        torch::cumsum(q_lens, /*dim=*/0, /*dtype=*/torch::kInt32);
-    dsa.actual_seq_lengths_query =
-        torch::cat({torch::zeros({1}, int_options), q_cumsum});
-    params.attention.device.q_cu_seq_lens = dsa.actual_seq_lengths_query;
-    std::vector<int32_t> q_cu_host;
-    q_cu_host.reserve(local_q.size());
-    int32_t running = 0;
-    for (const int32_t len : local_q) {
-      running += len;
-      q_cu_host.push_back(running);
-    }
-    params.attention.host.q_cu_seq_lens = q_cu_host;
-
-    const int64_t local_q_max = vector_max_or_zero(local_q);
-    params.meta.q_max_seq_len = static_cast<int32_t>(local_q_max);
-    dsa.max_seqlen_q = q_lens.numel() > 0
-                           ? torch::max(q_lens).to(torch::kInt32).reshape({1})
-                           : torch::zeros({1}, int_options);
-    dsa.max_query_len = local_q_max;
+    apply_cp_local_query_lens(dsa, params, local_q, device_);
 
     // Attention-side kv view: prefix + this rank's last local row.
     const auto& local_kv = cp_ctx.local_kv_seq_lens;
@@ -752,7 +723,7 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
     dsa.actual_seq_lengths_kv = kv_lens;
     dsa.seq_lens = kv_lens;
     dsa.kv_cu_seq_lens = cp_ctx.local_kv_cu_seq_lens;
-    const int64_t local_kv_max = vector_max_or_zero(local_kv);
+    const int64_t local_kv_max = seq_lens::max_or_zero(local_kv);
     params.meta.kv_max_seq_len = static_cast<int32_t>(local_kv_max);
     dsa.max_seqlen_kv = kv_lens.numel() > 0
                             ? torch::max(kv_lens).to(torch::kInt32).reshape({1})
@@ -891,12 +862,12 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
 
     const int64_t batch_size =
         std::max<int64_t>(dsa.actual_seq_lengths_kv.size(0), 1);
-    const int64_t max_seqlen_q =
-        std::max<int64_t>(params.meta.q_max_seq_len,
-                          vector_max_or_zero(params.attention.host.q_seq_lens));
+    const int64_t max_seqlen_q = std::max<int64_t>(
+        params.meta.q_max_seq_len,
+        seq_lens::max_or_zero(params.attention.host.q_seq_lens));
     const int64_t max_seqlen_kv = std::max<int64_t>(
         params.meta.kv_max_seq_len,
-        vector_max_or_zero(params.attention.host.kv_seq_lens));
+        seq_lens::max_or_zero(params.attention.host.kv_seq_lens));
     const int64_t ori_win_left =
         layer::deepseek_v4_ori_window_left(window_size_,
                                            /*dspark_block_size=*/0,
@@ -1023,12 +994,12 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
     const int64_t index_head_dim =
         std::max<int64_t>(index_head_dim_ > 0 ? index_head_dim_ : head_dim_, 1);
     const int64_t qli_batch_size = std::max<int64_t>(key_lens.size(0), 1);
-    const int64_t qli_max_seqlen_q =
-        std::max<int64_t>(params.meta.q_max_seq_len,
-                          vector_max_or_zero(params.attention.host.q_seq_lens));
+    const int64_t qli_max_seqlen_q = std::max<int64_t>(
+        params.meta.q_max_seq_len,
+        seq_lens::max_or_zero(params.attention.host.q_seq_lens));
     const int64_t qli_max_seqlen_k = std::max<int64_t>(
         params.meta.kv_max_seq_len,
-        vector_max_or_zero(params.attention.host.kv_seq_lens));
+        seq_lens::max_or_zero(params.attention.host.kv_seq_lens));
 
     xllm::kernel::QuantLightningIndexerMetadataParams qli_params;
     qli_params.num_heads_q = global_index_num_heads;

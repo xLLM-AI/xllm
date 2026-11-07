@@ -33,6 +33,8 @@ limitations under the License.
 #include "core/framework/config/rec_config.h"
 #include "core/kernels/musa/musa_ops_api.h"
 #include "core/kernels/musa/musa_tvmffi_stream.h"
+#include "core/kv_cache/layout/paged_kv_layout.h"
+#include "core/kv_cache/layout/seq_lens_layout.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/attention_metadata_builder.h"
 #include "core/layers/common/linear.h"
@@ -44,6 +46,7 @@ limitations under the License.
 #include "core/runtime/rec_graph_input.h"
 #include "core/util/env_var.h"
 #include "core/util/rec_model_utils.h"
+#include "core/util/tensor_helper.h"
 #include "core/util/utils.h"
 
 namespace xllm::runtime::musa {
@@ -378,16 +381,13 @@ void MusaGraphPersistentParam::update_llm_decode_metadata_fast_path(
   const torch::Tensor positions_i32 = to_int32(positions);
   const torch::Tensor new_cache_slots_i32 =
       to_int32(params.attention.device.new_cache_slots);
-  const torch::Tensor kv_seq_lens_i32 =
-      to_int32(params.attention.device.kv_seq_lens);
-
   const musaStream_t stream = c10::musa::getCurrentMUSAStream(device_.index());
   if (has_llm_decode_host_metadata(params)) {
     const layer::Fa3AttentionMetadata& host =
         params.attn_metadata->fa3_metadata;
-    CHECK_GE(static_cast<int64_t>(params.attention.host.kv_seq_lens.size()),
-             actual_batch_size + 1)
-        << "host kv_seq_lens too small for batch";
+    seq_lens::cumulative_into(
+        host_kv_cu_seq_lens_,
+        Slice<int32_t>(params.attention.host.kv_seq_lens, actual_batch_size));
     const int64_t actual_indices_size = host.paged_kv_indices_host.defined()
                                             ? host.paged_kv_indices_host.numel()
                                             : 0;
@@ -395,7 +395,7 @@ void MusaGraphPersistentParam::update_llm_decode_metadata_fast_path(
         .src_tokens = tokens_i32.data_ptr<int32_t>(),
         .src_positions = positions_i32.data_ptr<int32_t>(),
         .src_new_cache_slots = new_cache_slots_i32.data_ptr<int32_t>(),
-        .host_kv_seq_lens = params.attention.host.kv_seq_lens.data(),
+        .host_kv_seq_lens = host_kv_cu_seq_lens_.data(),
         .host_paged_kv_indptr = host.paged_kv_indptr_host.data_ptr<int32_t>(),
         .host_paged_kv_indices = host.paged_kv_indices_host.data_ptr<int32_t>(),
         .host_paged_kv_last_page_len =
@@ -421,6 +421,8 @@ void MusaGraphPersistentParam::update_llm_decode_metadata_fast_path(
     return;
   }
 
+  cumulative_with_zero_out(
+      params.attention.device.kv_seq_lens, actual_batch_size, kv_seq_lens_);
   const torch::Tensor paged_kv_indptr_i32 =
       to_int32(params.attention.device.paged_kv_indptr);
   const torch::Tensor paged_kv_indices_i32 =
@@ -432,7 +434,7 @@ void MusaGraphPersistentParam::update_llm_decode_metadata_fast_path(
       .src_tokens = tokens_i32.data_ptr<int32_t>(),
       .src_positions = positions_i32.data_ptr<int32_t>(),
       .src_new_cache_slots = new_cache_slots_i32.data_ptr<int32_t>(),
-      .src_kv_seq_lens = kv_seq_lens_i32.data_ptr<int32_t>(),
+      .src_kv_seq_lens = kv_seq_lens_.data_ptr<int32_t>(),
       .src_paged_kv_indptr = paged_kv_indptr_i32.data_ptr<int32_t>(),
       .src_paged_kv_indices = paged_kv_indices_i32.data_ptr<int32_t>(),
       .src_paged_kv_last_page_len =
@@ -681,41 +683,23 @@ std::optional<Params> MusaGraphPersistentParam::update_typed(
   }
 
   if (!is_rec_multi_round_graph_input(params) && !use_llm_decode_fast_path) {
-    // q_seq_lens is q_cu_seq_lens in GPU Model.
-    // kv_seq_lens is kv_cu_seq_lens in GPU Model.
     VLOG(kGraphExecutorLogVerboseLevel)
         << "copy_ q_seq_lens: src shape="
         << params.attention.device.q_seq_lens.sizes() << ", dst slice shape=["
         << actual_batch_size + 1 << "]";
-    CHECK_GE(params.attention.device.q_seq_lens.numel(), actual_batch_size + 1);
-    q_seq_lens_.slice(/*dim=*/0, /*start=*/0, /*end=*/actual_batch_size + 1)
-        .copy_(params.attention.device.q_seq_lens.slice(
-                   /*dim=*/0, /*start=*/0, /*end=*/actual_batch_size + 1),
-               /*non_blocking=*/true);
+    cumulative_with_zero_out(
+        params.attention.device.q_seq_lens, actual_batch_size, q_seq_lens_);
 
     VLOG(kGraphExecutorLogVerboseLevel)
         << "copy_ kv_seq_lens: src shape="
         << params.attention.device.kv_seq_lens.sizes() << ", dst slice shape=["
         << actual_batch_size + 1 << "]";
-    CHECK_GE(params.attention.device.kv_seq_lens.numel(),
-             actual_batch_size + 1);
-    kv_seq_lens_.slice(/*dim=*/0, /*start=*/0, /*end=*/actual_batch_size + 1)
-        .copy_(params.attention.device.kv_seq_lens.slice(
-                   /*dim=*/0, /*start=*/0, /*end=*/actual_batch_size + 1),
-               /*non_blocking=*/true);
+    cumulative_with_zero_out(
+        params.attention.device.kv_seq_lens, actual_batch_size, kv_seq_lens_);
     if (params.meta.batch_forward_type.is_decode() &&
         padded_num_tokens > actual_num_tokens) {
-      kv_seq_lens_
-          .slice(/*dim=*/0,
-                 /*start=*/actual_batch_size + 1,
-                 /*end=*/padded_num_tokens + 1)
-          .copy_(params.attention.device.kv_seq_lens
-                     .slice(/*dim=*/0,
-                            /*start=*/actual_batch_size,
-                            /*end=*/actual_batch_size + 1)
-                     .expand({static_cast<int64_t>(padded_num_tokens) -
-                              actual_batch_size}),
-                 /*non_blocking=*/true);
+      fill_decode_kv_cumulative_tail(
+          kv_seq_lens_, actual_batch_size, padded_num_tokens);
     }
 
     VLOG(kGraphExecutorLogVerboseLevel)
@@ -730,7 +714,8 @@ std::optional<Params> MusaGraphPersistentParam::update_typed(
           .slice(/*dim=*/0,
                  /*start=*/actual_num_tokens,
                  /*end=*/padded_num_tokens)
-          .fill_(params.meta.batch_forward_type.is_decode() ? -1 : 0);
+          .fill_(params.meta.batch_forward_type.is_decode() ? kSkippedSlotId
+                                                            : 0);
     }
 
     if (params.attention.device.kv_cache_tokens_nums.defined()) {

@@ -151,6 +151,53 @@ inline torch::Tensor safe_to(const torch::Tensor& t,
   return t.defined() ? t.to(options, non_blocking) : t;
 }
 
+// Writes the leading-zero cumulative form of the first `num_sequences` into
+// `dst[0, num_sequences + 1)`. Rebuilt every step, so graph executors write
+// into a persistent buffer instead of allocating.
+inline void cumulative_with_zero_out(const torch::Tensor& seq_lens,
+                                     int64_t num_sequences,
+                                     torch::Tensor& dst) {
+  CHECK_GE(seq_lens.numel(), num_sequences)
+      << "seq_lens too small: numel=" << seq_lens.numel()
+      << ", num_sequences=" << num_sequences;
+  torch::Tensor int_lens =
+      seq_lens.slice(/*dim=*/0, /*start=*/0, /*end=*/num_sequences)
+          .to(torch::kInt32);
+  dst[0].fill_(/*value=*/0);
+  torch::Tensor cumsum_dst =
+      dst.slice(/*dim=*/0, /*start=*/1, /*end=*/num_sequences + 1);
+  torch::cumsum_out(cumsum_dst, int_lens, /*dim=*/0);
+}
+
+// Decode graph padding rows repeat the last cumulative KV entry, so padded
+// queries see a zero-length KV and never read a padding block-table slot.
+inline void fill_decode_kv_cumulative_tail(torch::Tensor& kv_cu_seq_lens,
+                                           int64_t actual_batch_size,
+                                           int64_t padded_num_tokens) {
+  kv_cu_seq_lens
+      .slice(/*dim=*/0,
+             /*start=*/actual_batch_size + 1,
+             /*end=*/padded_num_tokens + 1)
+      .copy_(kv_cu_seq_lens
+                 .slice(/*dim=*/0,
+                        /*start=*/actual_batch_size,
+                        /*end=*/actual_batch_size + 1)
+                 .expand({padded_num_tokens - actual_batch_size}),
+             /*non_blocking=*/true);
+}
+
+// Allocating form of `cumulative_with_zero_out`.
+inline torch::Tensor cumulative_with_zero(const torch::Tensor& seq_lens,
+                                          int64_t num_sequences) {
+  if (!seq_lens.defined()) {
+    return {};
+  }
+  torch::Tensor cumulative = torch::empty(
+      {num_sequences + 1}, seq_lens.options().dtype(torch::kInt32));
+  cumulative_with_zero_out(seq_lens, num_sequences, cumulative);
+  return cumulative;
+}
+
 // Repeat defined tensors while preserving undefined optional fields. Repeats
 // can be a scalar count or a tensor of per-row counts; dim follows LibTorch.
 template <typename Repeats>

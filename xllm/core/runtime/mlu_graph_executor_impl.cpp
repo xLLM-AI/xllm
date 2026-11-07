@@ -378,17 +378,17 @@ void GraphPersistentParam::update_input_buffer(const torch::Tensor& tokens,
   }
   graph_params.meta.num_sequences = params.meta.num_sequences;
 
-  // Apply padding if required number of tokens exceeds actual input
-  // Generate padded sequence lengths by extending the last valid value
+  // Apply padding if required number of tokens exceeds actual input.
+  // Padded rows keep a decode-width query so the graph shape is stable, but
+  // own no KV pages: a non-zero KV length would make attention read the
+  // zero-filled dummy block-table rows.
   std::vector<int32_t> q_seq_lens_vec(params.attention.host.q_seq_lens);
   std::vector<int32_t> kv_seq_lens_vec(params.attention.host.kv_seq_lens);
   if (padding_needed > 0) {
-    q_seq_lens_vec.reserve(q_seq_lens_vec.size() + padding_needed);
-    kv_seq_lens_vec.reserve(kv_seq_lens_vec.size() + padding_needed);
-    for (size_t i = 0; i < padding_needed; i++) {
-      q_seq_lens_vec.push_back(q_seq_lens_vec.back() + num_decoding_tokens_);
-      kv_seq_lens_vec.push_back(kv_seq_lens_vec.back() + num_decoding_tokens_);
-    }
+    q_seq_lens_vec.resize(q_seq_lens_vec.size() + padding_needed,
+                          static_cast<int32_t>(num_decoding_tokens_));
+    kv_seq_lens_vec.resize(kv_seq_lens_vec.size() + padding_needed,
+                           /*value=*/0);
   }
 
   graph_params.attention.host.q_seq_lens = q_seq_lens_vec;
