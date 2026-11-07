@@ -35,6 +35,7 @@ decltype(auto) invoke_first_engine(Function&& function,
     return invoke_first_engine(std::forward<Function>(function), rest...);
   } else {
     LOG(FATAL) << "dispatch_engine requires a non-null engine";
+    __builtin_unreachable();
   }
 }
 

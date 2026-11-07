@@ -67,6 +67,10 @@ class ColumnParallelLinearImpl : public torch::nn::Module {
 
   torch::Tensor forward(torch::Tensor input);
 
+  torch::Tensor forward_with_hidden(const torch::Tensor& hidden_states,
+                                    const torch::Tensor& sample_indices,
+                                    torch::Tensor& out_hidden);
+
   torch::Tensor forward_quantized(const W8A8DynamicInput& input);
 
   // load the weight from the checkpoint
@@ -90,6 +94,12 @@ class ColumnParallelLinearImpl : public torch::nn::Module {
       return qweight_;
     }
     return weight_;
+  }
+  // Adopts an externally owned, already-loaded weight (e.g. the tied
+  // embed_tokens.weight).
+  void tie_weights(torch::Tensor weight) {
+    weight_ = std::move(weight);
+    weight_is_loaded_ = true;
   }
   torch::Tensor per_channel_scale() const { return per_channel_scale_; }
   torch::Tensor weight_scale() const { return weight_scale_; }

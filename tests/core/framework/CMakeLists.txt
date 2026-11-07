@@ -35,7 +35,7 @@ cc_test(
 cc_test(
   NAME
     causal_lm_test
-  CPU_ONLY
+  # ModelContext construction needs the NPU runtime on NPU builds.
   SRCS
     causal_lm_test.cpp
   DEPS

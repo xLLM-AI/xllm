@@ -54,7 +54,8 @@ class VlmExecutorImpl : public ExecutorImpl {
 
   virtual MMDict encode(const ModelParamsView& params);
 
-  // not own
+  // not own; two views of the same model object.
+  CausalLM* causal_model_;
   CausalVLM* model_;
   ModelArgs args_;
   torch::Device device_;

@@ -40,9 +40,6 @@ class MegaMoeCommResource;
 #endif
 
 namespace detail {
-void share_python_model_weights(pybind11::object& draft_model,
-                                const pybind11::object& target_model);
-
 int64_t python_mega_moe_max_num_tokens_per_rank(int64_t max_seqs_per_batch,
                                                 int64_t num_speculative_tokens,
                                                 int64_t dp_size);
@@ -59,7 +56,8 @@ int64_t python_qwen3_5_mega_moe_max_num_tokens_per_rank(
 // virtuals are stubbed: in the Python path, PyExecutorImpl::run calls the
 // Python model's own encode/get_input_embeddings via pybind (they are never
 // reached here).
-class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
+class __attribute__((visibility("hidden"))) PyCausalLM : public CausalLM,
+                                                         public CausalVLM {
  public:
   explicit PyCausalLM(const ModelContext& context,
                       std::string python_model_name = {});
@@ -126,7 +124,8 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
   void update_expert_weight(int32_t layer_id) override;
   bool last_prepare_expert_weight_ok(int32_t layer_id) const override;
 
-  bool share_weights_from(CausalLM& source) override;
+  void share_lm_head(CausalLM& target) override;
+  void share_embed_tokens(CausalLM& target) override;
 
   void tp_all_reduce(torch::Tensor& tensor);
   torch::Tensor tp_all_gather(const torch::Tensor& tensor, int64_t dim);

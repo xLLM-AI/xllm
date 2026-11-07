@@ -16,7 +16,7 @@ limitations under the License.
 #pragma once
 
 #include "core/framework/model/model_output.h"
-#include "core/layers/common/lm_head.h"
+#include "core/framework/model/vlm_language_model_host.h"
 #include "core/layers/oxygen_vision_layer.h"
 #include "core/layers/qwen2_5_vision_layer.h"
 #include "core/layers/qwen2_decoder_layer.h"
@@ -550,7 +550,9 @@ class OxygenVisionTransformerImpl : public torch::nn::Module {
 };
 TORCH_MODULE(OxygenVisionTransformer);
 
-class OxygenvlmForConditionalGenerationImpl : public torch::nn::Module {
+class OxygenvlmForConditionalGenerationImpl
+    : public torch::nn::Module,
+      public ::xllm::detail::VlmLanguageModelHost<OxygenForCausalLM> {
  public:
   OxygenvlmForConditionalGenerationImpl(const ModelContext& context)
       : model_args_(context.get_model_args()),
@@ -668,18 +670,6 @@ class OxygenvlmForConditionalGenerationImpl : public torch::nn::Module {
 
     return inputs_embeds;
   }
-  ModelOutput forward(const torch::Tensor& tokens,
-                      const torch::Tensor& positions,
-                      std::vector<KVCache>& kv_caches,
-                      const ModelParamsView& input_params) {
-    return language_model_->forward(tokens, positions, kv_caches, input_params);
-  }
-
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) {
-    return language_model_->logits(hidden_states, seleted_idxes);
-  }
-
   void load_model(std::unique_ptr<ModelLoader> loader) {
     for (const auto& state_dict : loader->get_state_dicts()) {
       visual_->load_state_dict(
@@ -690,22 +680,10 @@ class OxygenvlmForConditionalGenerationImpl : public torch::nn::Module {
     }
   }
 
-  layer::LmHead get_lm_head() { return language_model_->get_lm_head(); }
-  void set_lm_head(layer::LmHead& head) { language_model_->set_lm_head(head); }
-
-  layer::WordEmbedding get_word_embedding() {
-    return language_model_->get_word_embedding();
-  }
-
-  void set_word_embedding(layer::WordEmbedding& word_embedding) {
-    language_model_->set_word_embedding(word_embedding);
-  }
-
  private:
   ModelArgs model_args_;
   torch::TensorOptions options_;
   OxygenVisionTransformer visual_{nullptr};
-  OxygenForCausalLM language_model_{nullptr};
 };
 TORCH_MODULE(OxygenvlmForConditionalGeneration);
 

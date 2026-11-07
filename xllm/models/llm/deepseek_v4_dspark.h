@@ -214,23 +214,26 @@ class DeepseekV4DSparkForCausalLMImpl final
 
   void load_model(std::unique_ptr<ModelLoader> loader,
                   std::string prefix = "") override {
+    LlmForCausalLMImplBase<DeepseekV4DSparkModel>::load_lm_head_weights(loader);
     UNUSED_PARAMETER(prefix);
-    const int32_t last_layer = model_->last_dspark_layer_index();
-    CHECK_GE(last_layer, 0);
     for (const auto& state_dict : loader->get_state_dicts()) {
       model_->load_state_dict(*state_dict);
-      StateDict dedicated_head = state_dict->get_dict_with_prefix(
-          "mtp." + std::to_string(last_layer) + ".head.");
-      StateDict fallback_head = state_dict->get_dict_with_prefix("head.");
-      dspark_detail::load_vocab_weight(
-          head_source_, dedicated_head, fallback_head, lm_head_);
     }
     model_->verify_dspark_weights();
-    CHECK(head_source_.loaded() && lm_head_->is_weight_loaded())
+  }
+
+  void load_lm_head_weights(const StateDict& state_dict,
+                            layer::LmHead& head,
+                            bool /*tie_word_embeddings*/) override {
+    const int32_t last_layer = model_->last_dspark_layer_index();
+    StateDict dedicated_head = state_dict.get_dict_with_prefix(
+        "mtp." + std::to_string(last_layer) + ".head.");
+    StateDict fallback_head = state_dict.get_dict_with_prefix("head.");
+    dspark_detail::load_vocab_weight(
+        head_source_, dedicated_head, fallback_head, head);
+    CHECK(head->is_weight_loaded())
         << "Failed to load DeepSeek-V4 DSpark vocabulary head from mtp."
         << last_layer << ".head.weight or head.weight.";
-    LOG(INFO) << "Loaded DeepSeek-V4 DSpark LM head from "
-              << head_source_.source_name() << ".";
   }
 
   torch::Tensor dspark_markov_bias(

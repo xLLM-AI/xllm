@@ -24,6 +24,7 @@ limitations under the License.
 
 #include "core/framework/model/model_output.h"
 #include "core/framework/model/model_params_view.h"
+#include "core/framework/model/vlm_language_model_host.h"
 #include "core/framework/model_context/model_context.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/layers/npu/multi_head_attention.h"
@@ -803,7 +804,9 @@ struct MiniCPMVImageInputs {
   std::string type;
 };
 
-class MiniCPMV2_6Impl : public torch::nn::Module {
+class MiniCPMV2_6Impl
+    : public torch::nn::Module,
+      public ::xllm::detail::VlmLanguageModelHost<QWen2ForCausalLM> {
  public:
   MiniCPMV2_6Impl(const ModelContext& context)
       : model_args_(context.get_model_args()),
@@ -1031,18 +1034,6 @@ class MiniCPMV2_6Impl : public torch::nn::Module {
         inputs_embeds, multimodal_embeds, image_bounds);
     return inputs_embeds;
   }
-  ModelOutput forward(const torch::Tensor& tokens,
-                      const torch::Tensor& positions,
-                      std::vector<KVCache>& kv_caches,
-                      const ModelParamsView& input_params) {
-    return language_model_->forward(tokens, positions, kv_caches, input_params);
-  }
-
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) {
-    return language_model_->logits(hidden_states, seleted_idxes);
-  }
-
   void load_model(std::unique_ptr<ModelLoader> loader) {
     // load weight
     for (const auto& state_dict : loader->get_state_dicts()) {
@@ -1065,23 +1056,7 @@ class MiniCPMV2_6Impl : public torch::nn::Module {
     vpm_->verify_loaded_weights("vpm.");
   }
 
-  layer::NpuLmHead get_npu_lm_head() {
-    return language_model_->get_npu_lm_head();
-  }
-  void set_npu_lm_head(layer::NpuLmHead& head) {
-    language_model_->set_npu_lm_head(head);
-  }
-
-  layer::NpuWordEmbedding get_npu_word_embedding() {
-    return language_model_->get_npu_word_embedding();
-  }
-
-  void set_npu_word_embedding(layer::NpuWordEmbedding& npu_word_embedding) {
-    language_model_->set_npu_word_embedding(npu_word_embedding);
-  }
-
  private:
-  QWen2ForCausalLM language_model_{nullptr};
   ModelArgs model_args_;
   int64_t im_start_id_val_ = 151646;
   int64_t im_end_id_val_ = 151647;

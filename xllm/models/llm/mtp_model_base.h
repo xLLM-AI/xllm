@@ -281,13 +281,6 @@ class MtpDecoderLayerImplBase : public torch::nn::Module {
     }
   }
 
-  virtual void prepare_expert_weight(int32_t layer_id,
-                                     const std::vector<int32_t>& expert_ids) {
-    return;
-  }
-
-  virtual void update_expert_weight(int32_t layer_id) { return; }
-
  private:
   layer::RMSNorm enorm_{nullptr};
   layer::RMSNorm hnorm_{nullptr};

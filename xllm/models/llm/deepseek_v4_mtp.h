@@ -212,6 +212,7 @@ class DeepseekV4MtpModelImpl final : public torch::nn::Module {
   void set_word_embedding(layer::WordEmbedding& word_embedding) {
     embed_tokens_ = word_embedding;
   }
+
   ModelOutput forward(torch::Tensor tokens,
                       torch::Tensor positions,
                       std::vector<KVCache>& kv_caches,
@@ -1139,12 +1140,17 @@ class DeepseekV4MtpForCausalLMImpl final
 
   void load_model(std::unique_ptr<ModelLoader> loader,
                   std::string prefix = "model.") override {
+    LlmForCausalLMImplBase<DeepseekV4MtpModel>::load_lm_head_weights(loader);
     for (const auto& state_dict : loader->get_state_dicts()) {
       model_->load_state_dict(state_dict->get_dict_with_prefix(prefix));
-      lm_head_->load_state_dict(
-          state_dict->get_dict_with_prefix(prefix + "layers.0.head."));
     }
     model_->verify_loaded_weights(prefix);
+  }
+
+  void load_lm_head_weights(const StateDict& state_dict,
+                            layer::LmHead& head,
+                            bool /*tie_word_embeddings*/) override {
+    head->load_state_dict(state_dict.get_dict_with_prefix("layers.0.head."));
   }
 
   bool requires_graph_forward_metadata() {
@@ -1183,11 +1189,5 @@ REGISTER_MODEL_ARGS(deepseek_v4_mtp, [&] {
   validate_deepseek_v4_args(*args, args_policy);
   normalize_deepseek_v4_args(args);
 });
-
-// The draft checkpoint owns its embedding and LM head weights.
-const bool deepseek_v4_mtp_shared_weight_owner_registered = []() {
-  ModelRegistry::register_mtp_shared_weight_owner("deepseek_v4_mtp");
-  return true;
-}();
 
 }  // namespace xllm

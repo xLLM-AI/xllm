@@ -24,12 +24,14 @@ limitations under the License.
 
 #include "core/common/global_flags.h"
 #include "core/framework/config/model_config.h"
+#include "core/framework/model/lm_head_owner.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/model_context/model_context.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/layers/npu/npu_lm_head_impl.h"
 #include "core/layers/npu/npu_mistral3_vision_encoder_layer_impl.h"
 #include "core/layers/npu/npu_rms_norm_impl.h"
+#include "core/util/tensor_helper.h"
 #include "core/util/timer.h"
 #include "framework/state_dict/state_dict.h"
 #include "models/llm/npu/llm_model_base.h"
@@ -502,14 +504,16 @@ struct Mistral3_VLImageInputs {
   torch::Tensor image_grid_thw;
 };
 
-class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
+class Mistral3ForConditionalGenerationImpl
+    : public torch::nn::Module,
+      public ::xllm::detail::LmHeadOwner<::xllm::layer::NpuLmHead> {
  public:
   explicit Mistral3ForConditionalGenerationImpl(const ModelContext& context)
       : model_args_(context.get_model_args()),
         options_(context.get_tensor_options()) {
     visual_ = register_module("visual", Mistral3_VisionTransformer(context));
     language_model_ = register_module("language_model", MistralModel(context));
-    lm_head_ = register_module("npu_lm_head", layer::NpuLmHead(context));
+    init_lm_head(*this, context);
   }
 
   void prepare_encoder_input(
@@ -638,21 +642,13 @@ class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
             .enable_return_mm_full_embeddings()) {
       return h;
     }
-    if (seleted_idxes.defined()) {
-      h = h.index_select(/*dim=*/0, seleted_idxes);
-    }
+    torch::Tensor gathered;
+    gather_rows_if_defined(h, seleted_idxes, gathered);
     auto pooler_output = torch::nn::functional::normalize(
-        h, torch::nn::functional::NormalizeFuncOptions().p(2).dim(1));
+        gathered, torch::nn::functional::NormalizeFuncOptions().p(2).dim(1));
     return pooler_output;
   }
 
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) {
-    return lm_head_(hidden_states, seleted_idxes, 0);
-  }
-
-  layer::NpuLmHead get_npu_lm_head() { return lm_head_; }
-  void set_npu_lm_head(layer::NpuLmHead& head) { lm_head_ = head; }
   layer::NpuWordEmbedding get_npu_word_embedding() {
     return language_model_->get_npu_word_embedding();
   }
@@ -660,20 +656,12 @@ class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
     language_model_->set_npu_word_embedding(npu_word_embedding);
   }
 
-  virtual void prepare_expert_weight(int32_t layer_id,
-                                     const std::vector<int32_t>& expert_ids) {
-    return;
-  }
-  virtual void update_expert_weight(int32_t layer_id) { return; }
-
   void load_state_dict(const StateDict& state_dict) {
     language_model_->load_state_dict(state_dict.get_dict_with_prefix("model."));
-    lm_head_->load_state_dict(state_dict.get_dict_with_prefix("lm_head."));
   }
 
   void verify_loaded_weights(const std::string& prefix) const {
     language_model_->verify_loaded_weights(prefix);
-    lm_head_->verify_loaded_weights(prefix + "lm_head.");
   }
 
   void load_model(std::unique_ptr<ModelLoader> loader) {
@@ -696,17 +684,13 @@ class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
 
     // 3. Load language model weights
     if (!model_args_.encoder_embedding_mode()) {
+      load_lm_head_weights(loader);
       for (const auto& state_dict : loader->get_state_dicts()) {
         language_model_->load_state_dict(
             state_dict->get_dict_with_prefix("language_model.model."));
-        lm_head_->load_state_dict(
-            state_dict->get_dict_with_prefix("language_model.lm_head."));
       }
       language_model_->merge_loaded_weights();
-      lm_head_->merge_loaded_weights();
-
       language_model_->verify_loaded_weights("language_model.model.");
-      lm_head_->verify_loaded_weights("language_model.lm_head.");
     }
   }
 
@@ -717,17 +701,11 @@ class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
     if (language_model_) {
       language_model_->merge_loaded_weights();
     }
-    if (lm_head_) {
-      lm_head_->merge_loaded_weights();
-    }
   }
 
   void merge_and_move_pinned_host() {
     if (language_model_) {
       language_model_->merge_and_move_pinned_host();
-    }
-    if (lm_head_) {
-      lm_head_->merge_and_move_pinned_host();
     }
   }
 
@@ -735,26 +713,17 @@ class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
     if (language_model_) {
       language_model_->free_weights();
     }
-    if (lm_head_) {
-      lm_head_->free_weights();
-    }
   }
 
   void reload_weights() {
     if (language_model_) {
       language_model_->reload_weights();
     }
-    if (lm_head_) {
-      lm_head_->reload_weights();
-    }
   }
 
   void reload_weights_from_device() {
     if (language_model_) {
       language_model_->reload_weights_from_device();
-    }
-    if (lm_head_) {
-      lm_head_->reload_weights_from_device();
     }
   }
 
@@ -764,7 +733,6 @@ class Mistral3ForConditionalGenerationImpl : public torch::nn::Module {
 
   Mistral3_VisionTransformer visual_{nullptr};
   MistralModel language_model_{nullptr};
-  layer::NpuLmHead lm_head_{nullptr};
 };
 TORCH_MODULE(Mistral3ForConditionalGeneration);
 

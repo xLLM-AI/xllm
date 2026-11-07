@@ -31,7 +31,8 @@ VlmExecutorImpl::VlmExecutorImpl(CausalLM* model,
                                  const ModelArgs& args,
                                  const torch::Device& device,
                                  const runtime::Options& options)
-    : model_(dynamic_cast<CausalVLM*>(model)),
+    : causal_model_(model),
+      model_(dynamic_cast<CausalVLM*>(model)),
       args_(args),
       device_(device),
       options_(options) {
@@ -65,7 +66,7 @@ ModelOutput VlmExecutorImpl::run(const torch::Tensor& tokens,
     if (llm_executor_) {
       return llm_executor_->run(tokens, decode_positions, kv_caches, params);
     }
-    return model_->forward(tokens, decode_positions, kv_caches, params);
+    return causal_model_->forward(tokens, decode_positions, kv_caches, params);
   }
 
   if (encoder_cache_) {
@@ -101,7 +102,7 @@ ModelOutput VlmExecutorImpl::run(const torch::Tensor& tokens,
     return llm_executor_->run(tokens, positions, kv_caches, params);
   }
 
-  return model_->forward(tokens, positions, kv_caches, params);
+  return causal_model_->forward(tokens, positions, kv_caches, params);
 }
 
 void VlmExecutorImpl::prepare_graph_input(const torch::Tensor& tokens,

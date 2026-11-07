@@ -17,8 +17,8 @@ limitations under the License.
 
 #include "core/framework/config/kernel_config.h"
 #include "core/framework/model/model_output.h"
+#include "core/framework/model/vlm_language_model_host.h"
 #include "core/framework/multimodal/mm_data_item.h"
-#include "core/layers/common/lm_head.h"
 #include "models/model_registry.h"
 
 namespace xllm {
@@ -35,13 +35,16 @@ struct Qwen3_VLVideoInputs {
 };
 
 template <typename VisionTransformer, typename LanguageModel>
-class Qwen3VLForConditionalGenerationBase : public torch::nn::Module {
+class Qwen3VLForConditionalGenerationBase
+    : public torch::nn::Module,
+      public ::xllm::detail::VlmLanguageModelHost<LanguageModel> {
  public:
   Qwen3VLForConditionalGenerationBase(const ModelContext& context)
       : model_args_(context.get_model_args()),
         options_(context.get_tensor_options()) {
     visual_ = register_module("visual", VisionTransformer(context));
-    language_model_ = register_module("language_model", LanguageModel(context));
+    this->language_model_ =
+        register_module("language_model", LanguageModel(context));
   }
 
   virtual ~Qwen3VLForConditionalGenerationBase() = default;
@@ -143,7 +146,7 @@ class Qwen3VLForConditionalGenerationBase : public torch::nn::Module {
   torch::Tensor get_input_embeddings(const torch::Tensor input_ids,
                                      const ModelParamsView& input_params) {
     const auto& mm_data = input_params.multimodal().mm_data;
-    auto inputs_embeds = language_model_->get_input_embeddings(input_ids);
+    auto inputs_embeds = this->language_model_->get_input_embeddings(input_ids);
     if (!mm_data.valid()) {
       return inputs_embeds;
     }
@@ -175,23 +178,6 @@ class Qwen3VLForConditionalGenerationBase : public torch::nn::Module {
     return inputs_embeds;
   }
 
-  ModelOutput forward(const torch::Tensor& tokens,
-                      const torch::Tensor& positions,
-                      std::vector<KVCache>& kv_caches,
-                      const ModelParamsView& input_params) {
-    return language_model_->forward(tokens, positions, kv_caches, input_params);
-  }
-
-  torch::Tensor pooler(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) {
-    return language_model_->pooler(hidden_states, seleted_idxes);
-  }
-
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) {
-    return language_model_->logits(hidden_states, seleted_idxes);
-  }
-
   void load_model(std::unique_ptr<ModelLoader> loader) {
     for (const auto& state_dict : loader->get_state_dicts()) {
       visual_->load_state_dict(
@@ -209,34 +195,22 @@ class Qwen3VLForConditionalGenerationBase : public torch::nn::Module {
 #endif
 
     if (!model_args_.encoder_embedding_mode()) {
-      language_model_->load_model(std::move(loader), "model.language_model.");
+      this->language_model_->load_model(std::move(loader));
     }
   }
 
   bool is_hybrid_linear_attention() {
     if constexpr (detail::has_is_hybrid_linear_attention<
                       LanguageModel>::value) {
-      return language_model_->is_hybrid_linear_attention();
+      return this->language_model_->is_hybrid_linear_attention();
     }
     return false;
-  }
-
-  layer::LmHead get_lm_head() { return language_model_->get_lm_head(); }
-  void set_lm_head(layer::LmHead& head) { language_model_->set_lm_head(head); }
-
-  layer::WordEmbedding get_word_embedding() {
-    return language_model_->get_word_embedding();
-  }
-
-  void set_word_embedding(layer::WordEmbedding& word_embedding) {
-    language_model_->set_word_embedding(word_embedding);
   }
 
  protected:
   ModelArgs model_args_;
   torch::TensorOptions options_;
   VisionTransformer visual_{nullptr};
-  LanguageModel language_model_{nullptr};
 };
 
 }  // namespace xllm

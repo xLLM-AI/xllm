@@ -251,7 +251,8 @@ class NativeRecGraphModel final : public RecModel {
   }
 
   torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor&) override {
+                       const torch::Tensor&,
+                       torch::Tensor& out_hidden) override {
     return hidden_states;
   }
   void load_model(std::unique_ptr<ModelLoader>) override {}
@@ -618,15 +619,6 @@ class SimpleCausalLM : public CausalLM {
   }
 
   void update_expert_weight(int32_t layer_id) override {
-    // Simple implementation for testing
-  }
-
-  layer::NpuLmHead get_npu_lm_head() override {
-    // Simple implementation for testing
-    return layer::NpuLmHead(nullptr);
-  }
-
-  void set_npu_lm_head(layer::NpuLmHead& head) override {
     // Simple implementation for testing
   }
 

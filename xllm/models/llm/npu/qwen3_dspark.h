@@ -92,6 +92,8 @@ class DSparkQwen3ForCausalLMImpl final
 
   void load_model(std::unique_ptr<ModelLoader> loader,
                   std::string prefix = "model.") override {
+    load_lm_head_weights(loader);
+
     for (const std::unique_ptr<StateDict>& state_dict :
          loader->get_state_dicts()) {
       StateDict sub_dict = state_dict->get_dict_with_prefix(prefix);

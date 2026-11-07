@@ -357,10 +357,6 @@ class HybridConv1dMockLM final : public CausalLM {
   }
   void prepare_expert_weight(int32_t, const std::vector<int32_t>&) override {}
   void update_expert_weight(int32_t) override {}
-  layer::NpuLmHead get_npu_lm_head() override {
-    return layer::NpuLmHead(nullptr);
-  }
-  void set_npu_lm_head(layer::NpuLmHead&) override {}
   layer::NpuWordEmbedding get_npu_word_embedding() override {
     return layer::NpuWordEmbedding(nullptr);
   }

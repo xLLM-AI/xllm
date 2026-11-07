@@ -28,6 +28,7 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/framework/model/lm_head_owner.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/model_context/model_context.h"
 #include "core/framework/parallel_state/npu_dp_ep_padding.h"
@@ -35,7 +36,6 @@ limitations under the License.
 #include "core/layers/common/attention_mask.h"
 #include "core/layers/npu/npu_block_copy_impl.h"
 #include "core/layers/npu/npu_column_parallel_linear_impl.h"
-#include "core/layers/npu/npu_lm_head_impl.h"
 #include "core/layers/npu/npu_pos_embedding_impl.h"
 #include "core/layers/npu/npu_rms_norm_impl.h"
 #include "core/layers/npu/npu_word_embedding_impl.h"
@@ -207,10 +207,11 @@ class MtpModelImplBase : public torch::nn::Module {
       h = cp_plan.merge_model_output(h);
     }
 
-    // Keep the decoder output unnormalized for the next MTP draft step.
-    // shared_head.norm belongs to logits computation and must not feed back
-    // into the recurrent draft hidden state.
-    ModelOutput output(h);
+    // The next draft step consumes the raw hidden, not the final_norm output
+    // that feeds logits.
+    ModelOutput output(final_norm_(h, /*nodeId=*/0),
+                       /*residual=*/torch::Tensor(),
+                       /*aux_hidden_states=*/h);
     if (prev_topk_indices.defined()) {
       output.mtp_topk_state =
           std::make_shared<NpuMtpTopkState>(prev_topk_indices);
@@ -276,11 +277,6 @@ class MtpModelImplBase : public torch::nn::Module {
     embed_tokens_ = word_embedding;
   }
 
-  torch::Tensor normalize_for_logits(const torch::Tensor& hidden_states) {
-    torch::Tensor mutable_hidden_states = hidden_states;
-    return final_norm_(mutable_hidden_states, /*nodeId=*/0);
-  }
-
  protected:
   // Among NPU MTP models, only GLM4 currently consumes the legacy
   // ExpertInput::expert_array path.
@@ -339,10 +335,12 @@ class MtpModelImplBase : public torch::nn::Module {
 };
 
 template <typename MtpModelType>
-class MtpForCausalLMImplBase : public torch::nn::Module {
+class MtpForCausalLMImplBase : public torch::nn::Module,
+                               public detail::LmHeadOwner<layer::NpuLmHead> {
  public:
   MtpForCausalLMImplBase(const ModelContext& context) {
     model_ = register_module("model", MtpModelType(context));
+    this->init_lm_head(*this, context);
   }
 
   torch::Tensor get_input_embeddings(torch::Tensor input_ids) {
@@ -351,7 +349,6 @@ class MtpForCausalLMImplBase : public torch::nn::Module {
 
   // tokens: [num_tokens]
   // positions: [num_tokens] token pos in the sequence
-  // returns: [num_tokens, hidden_size] raw decoder hidden states
   virtual ModelOutput forward(const torch::Tensor& tokens,
                               const torch::Tensor& positions,
                               std::vector<KVCache>& kv_caches,
@@ -361,42 +358,10 @@ class MtpForCausalLMImplBase : public torch::nn::Module {
 
   // hidden_states: [num_tokens, hidden_size]
   // seleted_idxes: [num_tokens]
-  // returns: [num_tokens, vocab_size]
-  virtual torch::Tensor logits(const torch::Tensor& hidden_states,
-                               const torch::Tensor& seleted_idxes) {
-    torch::Tensor normalized_hidden =
-        model_->normalize_for_logits(hidden_states);
-    return lm_head_(normalized_hidden, seleted_idxes, /*nodeId=*/0);
-  }
-
-  // hidden_states: [num_tokens, hidden_size]
-  // seleted_idxes: [num_tokens]
-  // out_hidden: [num_seqs, hidden_size]
-  // returns: [num_tokens, vocab_size]
-  virtual torch::Tensor logits(const torch::Tensor& hidden_states,
-                               const torch::Tensor& seleted_idxes,
-                               torch::Tensor& out_hidden) {
-    torch::Tensor normalized_hidden =
-        model_->normalize_for_logits(hidden_states);
-    return lm_head_->forward_with_hidden(
-        normalized_hidden, seleted_idxes, out_hidden, /*nodeId=*/0);
-  }
-
-  // hidden_states: [num_tokens, hidden_size]
-  // seleted_idxes: [num_tokens]
-  // returns: [num_seqs, hidden_size]
-  virtual torch::Tensor pooler(const torch::Tensor& hidden_states,
-                               const torch::Tensor& seleted_idxes) {
-    auto h = hidden_states;
-    if (seleted_idxes.defined()) {
-      h = h.index_select(/*dim=*/0, seleted_idxes);
-    }
-    return h;
-  }
-
   virtual void load_model(
       std::unique_ptr<ModelLoader> loader,
       std::string prefix = "model." /*llm model weight prefix*/) {
+    this->load_lm_head_weights(loader);
     for (const auto& state_dict : loader->get_state_dicts()) {
       auto sub_dict = state_dict->get_dict_with_prefix(prefix);
       if (sub_dict.size() == 0) {
@@ -411,16 +376,6 @@ class MtpForCausalLMImplBase : public torch::nn::Module {
     model_->merge_loaded_weights();
   }
 
-  virtual void prepare_expert_weight(int32_t layer_id,
-                                     const std::vector<int32_t>& expert_ids) {
-    return;
-  }
-  virtual void update_expert_weight(int32_t layer_id) { return; }
-
-  virtual layer::NpuLmHead get_npu_lm_head() { return lm_head_; }
-
-  virtual void set_npu_lm_head(layer::NpuLmHead& head) { lm_head_ = head; }
-
   virtual layer::NpuWordEmbedding get_npu_word_embedding() {
     return model_->get_npu_word_embedding();
   }
@@ -431,6 +386,5 @@ class MtpForCausalLMImplBase : public torch::nn::Module {
 
  protected:
   MtpModelType model_{nullptr};
-  layer::NpuLmHead lm_head_{nullptr};
 };
 }  // namespace xllm::npu::model

@@ -53,16 +53,8 @@ Glm4VisionEncoderLoader::Glm4VisionEncoderLoader(uint64_t weight_count,
   encode_param_rank_ = parallel_args.rank();
   encode_param_world_size_ = parallel_args.world_size();
   working_tensors().resize(weight_count);
-  if (load_to_host()) {
-    auto host_options =
-        torch::TensorOptions().dtype(options.dtype()).device(torch::kCPU);
-    for (int i = 0; i < weight_count; ++i) {
-      working_tensors()[i] = torch::zeros({1}, host_options);
-    }
-  } else {
-    for (int i = 0; i < weight_count; ++i) {
-      working_tensors()[i] = torch::zeros({1}).to(options);
-    }
+  for (uint64_t i = 0; i < weight_count; ++i) {
+    init_dummy_weight(static_cast<int>(i), options);
   }
 }
 

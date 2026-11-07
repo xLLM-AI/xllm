@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <torch/torch.h>
 
+#include "core/framework/model/lm_head_owner.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_output.h"
 #include "core/kv_cache/storage/kv_cache.h"
@@ -431,17 +432,12 @@ class MistralModelImpl : public torch::nn::Module {
 };
 TORCH_MODULE(MistralModel);
 
-class MistralForCausalLMImpl : public torch::nn::Module {
+class MistralForCausalLMImpl : public torch::nn::Module,
+                               public detail::LmHeadOwner<layer::NpuLmHead> {
  public:
   MistralForCausalLMImpl(const ModelContext& context) {
-    auto model_args = context.get_model_args();
-    auto options = context.get_tensor_options();
-    auto parallel_args = context.get_parallel_args();
-
-    // register submodules
     model_ = register_module("model", MistralModel(context));
-
-    lm_head_ = register_module("npu_lm_head", layer::NpuLmHead(context));
+    init_lm_head(*this, context);
   }
 
   // tokens: [num_tokens]
@@ -455,64 +451,32 @@ class MistralForCausalLMImpl : public torch::nn::Module {
     return ModelOutput(hidden_states);
   }
 
-  virtual torch::Tensor pooler(const torch::Tensor& hidden_states,
-                               const torch::Tensor& seleted_idxes) {
-    auto h = hidden_states;
-    if (seleted_idxes.defined()) {
-      h = h.index_select(/*dim=*/0, seleted_idxes);
-    }
-    return h;
-  }
-
-  // hidden_states: [num_tokens, hidden_size]
-  // seleted_idxes: [num_tokens]
-  // returns: [num_tokens, vocab_size]
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& seleted_idxes) {
-    return lm_head_(hidden_states, seleted_idxes, 0);
-  }
-
   // load the weight from the checkpoint
   void load_state_dict(const StateDict& state_dict) {
     model_->load_state_dict(state_dict.get_dict_with_prefix("model."));
-    lm_head_->load_state_dict(state_dict.get_dict_with_prefix("lm_head."));
   }
 
   void verify_loaded_weights() const {
     model_->verify_loaded_weights("model.");
-    lm_head_->verify_loaded_weights("lm_head.");
   }
-
-  virtual void prepare_expert_weight(int32_t layer_id,
-                                     const std::vector<int32_t>& expert_ids) {
-    return;
-  }
-  virtual void update_expert_weight(int32_t layer_id) { return; }
 
   void load_model(std::unique_ptr<ModelLoader> loader) {
     LOG(INFO) << "Loading MistralForCausalLM from ModelLoader...";
+    load_lm_head_weights(loader);
     for (const auto& state_dict : loader->get_state_dicts()) {
       model_->load_state_dict(
           state_dict->get_dict_with_prefix("language_model."));
-      lm_head_->load_state_dict(
-          state_dict->get_dict_with_prefix("language_model.lm_head."));
     }
-    // Critical: add merge_loaded_weights call!
     if (model_) {
       model_->merge_loaded_weights();
     }
-    if (lm_head_) {
-      lm_head_->merge_loaded_weights();
-    }
     model_->verify_loaded_weights("language_model.");
-    lm_head_->verify_loaded_weights("language_model.lm_head.");
     LOG(INFO) << "MistralForCausalLM loaded successfully.";
   }
 
  private:
   // parameter members, must be registered
   MistralModel model_{nullptr};
-  layer::NpuLmHead lm_head_{nullptr};
 };
 TORCH_MODULE(MistralForCausalLM);
 

@@ -128,8 +128,8 @@ Kimik25VisionEncoderLoader::Kimik25VisionEncoderLoader(
   dtype_ = torch::typeMetaToScalarType(options.dtype());
   device_id_ = options.device().index();
   at_placeholder_ = torch::zeros({1}).to(device_).to(dtype_);
-  for (int i = 0; i < weight_count; ++i) {
-    at_weight_tensors_[i] = torch::zeros({1}).to(options);
+  for (uint64_t i = 0; i < weight_count; ++i) {
+    init_dummy_weight(static_cast<int>(i), options);
   }
 }
 

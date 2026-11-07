@@ -25,6 +25,7 @@ limitations under the License.
 
 #include "core/common/macros.h"
 #include "core/layers/common/quant_utils.h"
+#include "core/util/tensor_helper.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "kernels/ops_api.h"
@@ -739,6 +740,14 @@ torch::Tensor ColumnParallelLinearImpl::forward(torch::Tensor input) {
     output = xllm::parallel_state::gather(output, process_group_);
   }
   return output;
+}
+
+torch::Tensor ColumnParallelLinearImpl::forward_with_hidden(
+    const torch::Tensor& hidden_states,
+    const torch::Tensor& sample_indices,
+    torch::Tensor& out_hidden) {
+  gather_rows_if_defined(hidden_states, sample_indices, out_hidden);
+  return forward(out_hidden);
 }
 
 torch::Tensor ColumnParallelLinearImpl::forward_quantized(

@@ -218,6 +218,9 @@ bool DraftModelSpecWorkerImpl<TargetInput>::init_model(
                           impl_->context_.get_model_args().vocab_size(),
                           device_);
   }
+  if (task_models_loaded()) {
+    draft_impl_->share_weights_from(*impl_);
+  }
   return result;
 }
 

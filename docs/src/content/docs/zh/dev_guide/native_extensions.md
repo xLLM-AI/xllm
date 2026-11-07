@@ -59,13 +59,15 @@ REGISTER_EXECUTOR("llm", "custom", ExampleExecutor, 100);
 
 模型实现使用相同的注册入口。内置的双参数 `REGISTER_CAUSAL_MODEL` 和
 `REGISTER_CAUSAL_VLM_MODEL` 宏仍用于默认的原生实现注册，扩展可以通过
-`REGISTER_CAUSAL_LM` 或 `REGISTER_CAUSAL_VLM` 注册直接子类：
+`REGISTER_CAUSAL_LM` 或 `REGISTER_CAUSAL_VLM` 注册直接子类。两个宏都要求
+`CausalLM` 子类；VLM 扩展需派生自 `CausalVLMImpl<...>`（同时实现
+`CausalVLM` 的 `CausalLM`）：
 
 ```cpp
 #include "models/model_registry.h"
 
 REGISTER_CAUSAL_LM(example_model, "custom", ExampleCausalLM, 100);
-REGISTER_CAUSAL_VLM(example_vlm, "custom", ExampleCausalVLM, 100);
+REGISTER_CAUSAL_VLM(example_vlm, "custom", ExampleVlmAdapter, 100);
 ```
 
 启动 xLLM 时指定匹配的扩展族，例如 `--extension_impl=custom`。未知扩展族会被拒绝。
