@@ -30,7 +30,7 @@ limitations under the License.
 #include "api_service/call.h"
 #include "api_service/openai_json.h"
 #include "common/metrics.h"
-#include "core/disaggregation/disagg_pd_service_impl.h"
+#include "core/disaggregation/pd_service_impl.h"
 #include "core/distributed_runtime/engine_dispatch.h"
 #include "core/distributed_runtime/kv_cache_transfer_coordinator.h"
 #include "core/distributed_runtime/model_residency_coordinator.h"
@@ -319,7 +319,7 @@ LLMMaster::LLMMaster(const Options& options)
       .max_global_tpot_ms(options_.max_global_tpot_ms())
       .server_idx(options_.server_idx())
       .rec_worker_max_concurrency(options_.rec_worker_max_concurrency());
-  DisaggPDServiceOptions response_options;
+  PDServiceOptions response_options;
   if (options_.enable_disagg_pd()) {
     response_options.enable_response_formatting = true;
     response_options.tool_parser_format =

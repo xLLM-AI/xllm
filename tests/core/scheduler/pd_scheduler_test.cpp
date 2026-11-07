@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/disaggregation/disagg_pd_scheduler.h"
+#include "core/disaggregation/pd_scheduler.h"
 
 #include <brpc/closure_guard.h>
 #include <brpc/server.h>
@@ -38,7 +38,7 @@ limitations under the License.
 #include <vector>
 
 #include "common/metrics.h"
-#include "core/disaggregation/disagg_pd_service_impl.h"
+#include "core/disaggregation/pd_service_impl.h"
 #include "core/framework/batch/sampling_input_builder.h"
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/transfer/kv_transfer_completion.h"
@@ -66,7 +66,7 @@ class XServiceClientTestPeer final {
   }
 };
 
-class DisaggPDSchedulerTestPeer final {
+class PDSchedulerTestPeer final {
  public:
   static std::shared_ptr<KVCacheTransferCoordinator> make_transfer_coordinator(
       std::vector<std::shared_ptr<WorkerClient>> worker_clients) {
@@ -251,35 +251,34 @@ class FakeEngine final : public Engine {
   ModelArgs model_args_;
 };
 
-class TestDisaggPDServiceImpl final : public DisaggPDServiceImpl {
+class TestPDServiceImpl final : public PDServiceImpl {
  public:
-  using DisaggPDServiceImpl::DisaggPDServiceImpl;
-  using DisaggPDServiceImpl::generate_request;
+  using PDServiceImpl::generate_request;
+  using PDServiceImpl::PDServiceImpl;
 };
 
-class TestDisaggPDScheduler final : public DisaggPDScheduler {
+class TestPDScheduler final : public PDScheduler {
  public:
-  using DisaggPDScheduler::drain_request_releases;
-  using DisaggPDScheduler::enqueue_request_block_release;
-  using DisaggPDScheduler::prepare_batch;
+  using PDScheduler::drain_request_releases;
+  using PDScheduler::enqueue_request_block_release;
+  using PDScheduler::prepare_batch;
 
   template <typename TargetEngine>
-  TestDisaggPDScheduler(TargetEngine* engine,
-                        const Options& options,
-                        std::shared_ptr<KVCacheTransferCoordinator>
-                            transfer_coordinator = nullptr)
-      : DisaggPDScheduler(engine,
-                          options,
-                          SkipRuntimeStart{},
-                          /*distributed_worker_manager=*/nullptr,
-                          /*model_residency_coordinator=*/nullptr,
-                          std::move(transfer_coordinator)) {}
+  TestPDScheduler(TargetEngine* engine,
+                  const Options& options,
+                  std::shared_ptr<KVCacheTransferCoordinator>
+                      transfer_coordinator = nullptr)
+      : PDScheduler(engine,
+                    options,
+                    SkipRuntimeStart{},
+                    /*distributed_worker_manager=*/nullptr,
+                    /*model_residency_coordinator=*/nullptr,
+                    std::move(transfer_coordinator)) {}
 
   template <typename Result, typename Rep, typename Period>
-  std::future_status wait_for_ready(
-      std::future<Result>& future,
-      std::chrono::duration<Rep, Period> timeout,
-      TestDisaggPDScheduler* other_owner = nullptr) {
+  std::future_status wait_for_ready(std::future<Result>& future,
+                                    std::chrono::duration<Rep, Period> timeout,
+                                    TestPDScheduler* other_owner = nullptr) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     do {
       drain_request_releases();
@@ -298,7 +297,7 @@ class TestDisaggPDScheduler final : public DisaggPDScheduler {
   template <typename Callable>
   std::invoke_result_t<Callable> run_with_releases(
       Callable&& callable,
-      TestDisaggPDScheduler* other_owner = nullptr) {
+      TestPDScheduler* other_owner = nullptr) {
     auto result =
         std::async(std::launch::async, std::forward<Callable>(callable));
     while (wait_for_ready(result, std::chrono::seconds(5), other_owner) !=
@@ -311,20 +310,20 @@ class TestDisaggPDScheduler final : public DisaggPDScheduler {
   bool decode_schedule(std::shared_ptr<Request>& request,
                        const std::string& prefill_instance_name) {
     return run_with_releases([&] {
-      return DisaggPDScheduler::decode_schedule(request, prefill_instance_name);
+      return PDScheduler::decode_schedule(request, prefill_instance_name);
     });
   }
 
   bool release_reservation(const std::string& req_id,
                            const std::string& reservation_id) {
     return run_with_releases([&] {
-      return DisaggPDScheduler::release_reservation(req_id, reservation_id);
+      return PDScheduler::release_reservation(req_id, reservation_id);
     });
   }
 
   bool enqueue_dispatched_request(std::shared_ptr<Request> request) {
     return run_with_releases([&] {
-      return DisaggPDScheduler::enqueue_dispatched_request(std::move(request));
+      return PDScheduler::enqueue_dispatched_request(std::move(request));
     });
   }
 
@@ -347,7 +346,7 @@ class TestDisaggPDScheduler final : public DisaggPDScheduler {
       torch::Tensor mtp_bootstrap_embedding = torch::Tensor(),
       int32_t num_cached_tokens = 0) {
     return run_with_releases([&] {
-      return DisaggPDScheduler::decode_recv_first_generation(
+      return PDScheduler::decode_recv_first_generation(
           req_id,
           reservation_id,
           token_id,
@@ -369,14 +368,14 @@ class TestDisaggPDScheduler final : public DisaggPDScheduler {
   }
 
   void start_idle_runtime() {
-    server_name_ = "DisaggPDShutdownTest";
+    server_name_ = "PDShutdownTest";
     auto server = ServerRegistry::get_instance().register_server(server_name_);
-    auto service = std::make_shared<DisaggPDService>();
-    CHECK(server->start(service, "127.0.0.1:0", "DisaggPDShutdownTest"));
+    auto service = std::make_shared<PDService>();
+    CHECK(server->start(service, "127.0.0.1:0", "PDShutdownTest"));
     rpc_server_thread_ = std::make_unique<std::thread>(
         [server, service = std::move(service)] { server->run(); });
     dispatch_thread_ = std::make_unique<std::thread>(
-        &TestDisaggPDScheduler::dispatch_requests, this);
+        &TestPDScheduler::dispatch_requests, this);
   }
 
   void admit_prefill(std::shared_ptr<Request> request,
@@ -400,7 +399,7 @@ class TestDisaggPDScheduler final : public DisaggPDScheduler {
            request_to_instance_map_.empty();
   }
 
-  void wait_notifications(TestDisaggPDScheduler* other_owner = nullptr) {
+  void wait_notifications(TestPDScheduler* other_owner = nullptr) {
     std::promise<void> done;
     auto future = done.get_future();
     reservation_release_threadpool_.schedule([&done] { done.set_value(); });
@@ -487,7 +486,7 @@ class TestDisaggPDScheduler final : public DisaggPDScheduler {
 
 class DelayedReservationService final : public proto::DisaggPDService {
  public:
-  explicit DelayedReservationService(DisaggPDScheduler* scheduler)
+  explicit DelayedReservationService(PDScheduler* scheduler)
       : scheduler_(scheduler) {
     pending_releases_.reserve(3);
   }
@@ -570,7 +569,7 @@ class DelayedReservationService final : public proto::DisaggPDService {
                              : proto::ReleaseReservationResponse::NOT_WAITING);
   }
 
-  DisaggPDScheduler* scheduler_;
+  PDScheduler* scheduler_;
   std::mutex mutex_;
   bool delay_releases_ = true;
   std::promise<void> release_started_;
@@ -579,8 +578,7 @@ class DelayedReservationService final : public proto::DisaggPDService {
 
 class ReservationService final : public proto::DisaggPDService {
  public:
-  explicit ReservationService(DisaggPDScheduler* scheduler)
-      : scheduler_(scheduler) {}
+  explicit ReservationService(PDScheduler* scheduler) : scheduler_(scheduler) {}
 
   enum class Failure { NONE, LOST_ACK, TRANSPORT, UNSUPPORTED };
   Failure failure = Failure::NONE;
@@ -616,11 +614,11 @@ class ReservationService final : public proto::DisaggPDService {
   }
 
  private:
-  DisaggPDScheduler* scheduler_;
+  PDScheduler* scheduler_;
 };
 
-DisaggPDScheduler::Options make_options() {
-  DisaggPDScheduler::Options options;
+PDScheduler::Options make_options() {
+  PDScheduler::Options options;
   options.enable_disagg_pd(true)
       .enable_schedule_overlap(false)
       .instance_role(InstanceRole::PREFILL)
@@ -631,16 +629,16 @@ DisaggPDScheduler::Options make_options() {
   return options;
 }
 
-DisaggPDScheduler::Options make_mtp_decode_options(int32_t dp_size = 1) {
-  DisaggPDScheduler::Options options = make_options();
+PDScheduler::Options make_mtp_decode_options(int32_t dp_size = 1) {
+  PDScheduler::Options options = make_options();
   options.instance_role(InstanceRole::DECODE)
       .num_speculative_tokens(1)
       .dp_size(dp_size);
   return options;
 }
 
-DisaggPDScheduler::Options make_decode_options() {
-  DisaggPDScheduler::Options options = make_options();
+PDScheduler::Options make_decode_options() {
+  PDScheduler::Options options = make_options();
   options.instance_role(InstanceRole::DECODE);
   return options;
 }
@@ -716,7 +714,7 @@ void release_prefix_cache(BlockManagerPool* block_manager) {
   EXPECT_EQ(first_cache_size(*block_manager), 0u);
 }
 
-bool recv_first_generation(TestDisaggPDScheduler* scheduler,
+bool recv_first_generation(TestPDScheduler* scheduler,
                            const torch::Tensor& mtp_embedding,
                            int32_t num_cached_tokens = 0,
                            double time_to_first_token_latency_seconds = 0.1,
@@ -744,8 +742,7 @@ bool recv_first_generation(TestDisaggPDScheduler* scheduler,
 
 }  // namespace
 
-TEST(DisaggPDSchedulerShutdownTest,
-     StopsListenerAndWakesIdleDispatchBeforeJoining) {
+TEST(PDSchedulerShutdownTest, StopsListenerAndWakesIdleDispatchBeforeJoining) {
   // Execute in a fresh process and bound the wait so the old join-before-stop
   // ordering fails instead of hanging the whole scheduler test binary.
   ::testing::FLAGS_gtest_death_test_style = "threadsafe";
@@ -753,9 +750,9 @@ TEST(DisaggPDSchedulerShutdownTest,
       {
         alarm(5);
         FakeEngine engine(/*num_blocks=*/32, /*block_size=*/16);
-        DisaggPDScheduler::Options options = make_options();
+        PDScheduler::Options options = make_options();
         {
-          TestDisaggPDScheduler scheduler(&engine, options);
+          TestPDScheduler scheduler(&engine, options);
           scheduler.start_idle_runtime();
         }
         _exit(0);
@@ -764,7 +761,7 @@ TEST(DisaggPDSchedulerShutdownTest,
       "");
 }
 
-TEST(DisaggPDSchedulerTest,
+TEST(PDSchedulerTest,
      DisabledStoragePrefetchSkipsManagerCallsThroughoutLifecycle) {
   for (const bool offline : {false, true}) {
     SCOPED_TRACE(offline);
@@ -773,7 +770,7 @@ TEST(DisaggPDSchedulerTest,
     request->state().scheduler_param.offline = offline;
 
     {
-      TestDisaggPDScheduler scheduler(&engine, make_options());
+      TestPDScheduler scheduler(&engine, make_options());
       EXPECT_EQ(engine.prefetch_pipeline_calls(), 0u);
       for (int32_t iteration = 0; iteration < 3; ++iteration) {
         BatchGroup batches = scheduler.prepare_batch();
@@ -794,9 +791,9 @@ TEST(DisaggPDSchedulerTest,
   }
 }
 
-TEST(DisaggPDSchedulerTest, QueuedReleaseRetainsRequestUntilOwnerAcknowledges) {
+TEST(PDSchedulerTest, QueuedReleaseRetainsRequestUntilOwnerAcknowledges) {
   FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
-  TestDisaggPDScheduler scheduler(&engine, make_decode_options());
+  TestPDScheduler scheduler(&engine, make_decode_options());
   auto request = make_request({1, 2, 3, 4});
   ASSERT_TRUE(
       engine.block_manager_pool()->allocate(request->sequences()[0].get()));
@@ -828,10 +825,9 @@ TEST(DisaggPDSchedulerTest, QueuedReleaseRetainsRequestUntilOwnerAcknowledges) {
   EXPECT_EQ(first_cache_size(*engine.block_manager_pool()), 2u);
 }
 
-TEST(DisaggPDSchedulerTest,
-     QueuedUncachedReleaseDoesNotPublishCompletedPrefix) {
+TEST(PDSchedulerTest, QueuedUncachedReleaseDoesNotPublishCompletedPrefix) {
   FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
-  TestDisaggPDScheduler scheduler(&engine, make_decode_options());
+  TestPDScheduler scheduler(&engine, make_decode_options());
   auto request = make_request({1, 2, 3, 4});
   Sequence* sequence = request->sequences()[0].get();
   ASSERT_TRUE(engine.block_manager_pool()->allocate(sequence));
@@ -852,7 +848,7 @@ TEST(DisaggPDSchedulerTest,
   EXPECT_EQ(first_cache_size(*engine.block_manager_pool()), 0u);
 }
 
-TEST(DisaggPDSchedulerShutdownTest, DrainsQueuedReleaseBeforeDestroyingOwner) {
+TEST(PDSchedulerShutdownTest, DrainsQueuedReleaseBeforeDestroyingOwner) {
   FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
   auto request = make_request({1, 2, 3, 4});
   ASSERT_TRUE(
@@ -860,7 +856,7 @@ TEST(DisaggPDSchedulerShutdownTest, DrainsQueuedReleaseBeforeDestroyingOwner) {
   const std::weak_ptr<Request> lifetime = request;
   std::future<void> completion;
   {
-    TestDisaggPDScheduler scheduler(&engine, make_decode_options());
+    TestPDScheduler scheduler(&engine, make_decode_options());
     completion = scheduler.enqueue_request_block_release(
         std::move(request), /*cache_prefix=*/false);
     EXPECT_EQ(completion.wait_for(std::chrono::seconds(0)),
@@ -874,7 +870,7 @@ TEST(DisaggPDSchedulerShutdownTest, DrainsQueuedReleaseBeforeDestroyingOwner) {
   EXPECT_EQ(engine.block_manager_pool()->num_used_blocks()[0], 0u);
 }
 
-TEST(DisaggPDSchedulerShutdownTest,
+TEST(PDSchedulerShutdownTest,
      DrainsPrefillProducerWaitingForReleaseAcknowledgement) {
   ::testing::FLAGS_gtest_death_test_style = "threadsafe";
   ASSERT_EXIT(([] {
@@ -886,7 +882,7 @@ TEST(DisaggPDSchedulerShutdownTest,
                 const std::weak_ptr<Request> lifetime = request;
                 std::future<void> released;
                 {
-                  TestDisaggPDScheduler scheduler(&engine, make_options());
+                  TestPDScheduler scheduler(&engine, make_options());
                   released =
                       scheduler.release_from_prefill_worker(std::move(request));
                 }
@@ -900,16 +896,16 @@ TEST(DisaggPDSchedulerShutdownTest,
               "");
 }
 
-TEST(DisaggPDSchedulerTest, AdmissionRetainsCapacityUntilDispatchCompletes) {
+TEST(PDSchedulerTest, AdmissionRetainsCapacityUntilDispatchCompletes) {
   for (const bool storage_prefetch : {false, true}) {
     SCOPED_TRACE(storage_prefetch);
     for (const bool offline : {false, true}) {
       SCOPED_TRACE(offline);
       FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
       engine.set_storage_prefetch_enabled(storage_prefetch);
-      DisaggPDScheduler::Options options = make_options();
+      PDScheduler::Options options = make_options();
       options.request_queue_size(1);
-      TestDisaggPDScheduler scheduler(&engine, options);
+      TestPDScheduler scheduler(&engine, options);
       std::shared_ptr<Request> first = make_request({1, 2}, "first");
       first->state().scheduler_param.offline = offline;
       std::shared_ptr<Request> second = make_request({3, 4}, "second");
@@ -965,9 +961,9 @@ TEST(DisaggPDSchedulerTest, AdmissionRetainsCapacityUntilDispatchCompletes) {
   }
 }
 
-TEST(DisaggPDSchedulerTest, CachesPrefillBlocksBeforeRelease) {
+TEST(PDSchedulerTest, CachesPrefillBlocksBeforeRelease) {
   FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
-  TestDisaggPDScheduler scheduler(&engine, make_options());
+  TestPDScheduler scheduler(&engine, make_options());
   BlockManagerPool* block_manager = engine.block_manager_pool();
 
   std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
@@ -991,9 +987,9 @@ TEST(DisaggPDSchedulerTest, CachesPrefillBlocksBeforeRelease) {
   release_prefix_cache(block_manager);
 }
 
-TEST(DisaggPDSchedulerTest, CacheSkipsExistingSharedBlocks) {
+TEST(PDSchedulerTest, CacheSkipsExistingSharedBlocks) {
   FakeEngine engine(/*num_blocks=*/10, /*block_size=*/2);
-  TestDisaggPDScheduler scheduler(&engine, make_options());
+  TestPDScheduler scheduler(&engine, make_options());
   BlockManagerPool* block_manager = engine.block_manager_pool();
 
   std::shared_ptr<Request> seed_request = make_request({1, 2, 3, 4});
@@ -1020,11 +1016,11 @@ TEST(DisaggPDSchedulerTest, CacheSkipsExistingSharedBlocks) {
   release_prefix_cache(block_manager);
 }
 
-TEST(DisaggPDSchedulerTest, MtpFirstGenerationRequiresBootstrapBeforeQueue) {
+TEST(PDSchedulerTest, MtpFirstGenerationRequiresBootstrapBeforeQueue) {
   FakeEngine engine(/*num_blocks=*/8,
                     /*block_size=*/2,
                     /*num_speculative_tokens=*/1);
-  TestDisaggPDScheduler scheduler(&engine, make_mtp_decode_options());
+  TestPDScheduler scheduler(&engine, make_mtp_decode_options());
   std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
   ASSERT_TRUE(
       engine.block_manager_pool()->allocate(request->sequences()[0].get()));
@@ -1035,11 +1031,11 @@ TEST(DisaggPDSchedulerTest, MtpFirstGenerationRequiresBootstrapBeforeQueue) {
   EXPECT_FALSE(scheduler.pop_decode_request_for_test(&queued));
 }
 
-TEST(DisaggPDSchedulerTest, InvalidFirstGenerationSequenceReleasesReservation) {
+TEST(PDSchedulerTest, InvalidFirstGenerationSequenceReleasesReservation) {
   for (const bool empty : {false, true}) {
     SCOPED_TRACE(empty);
     FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
-    TestDisaggPDScheduler scheduler(&engine, make_decode_options());
+    TestPDScheduler scheduler(&engine, make_decode_options());
     auto request = make_request({1, 2, 3, 4});
     ASSERT_TRUE(scheduler.decode_schedule(request, "prefill"));
     if (empty) {
@@ -1056,11 +1052,11 @@ TEST(DisaggPDSchedulerTest, InvalidFirstGenerationSequenceReleasesReservation) {
   }
 }
 
-TEST(DisaggPDSchedulerTest, MtpFirstGenerationStoresBootstrapThenQueues) {
+TEST(PDSchedulerTest, MtpFirstGenerationStoresBootstrapThenQueues) {
   FakeEngine engine(/*num_blocks=*/8,
                     /*block_size=*/2,
                     /*num_speculative_tokens=*/1);
-  TestDisaggPDScheduler scheduler(&engine, make_mtp_decode_options());
+  TestPDScheduler scheduler(&engine, make_mtp_decode_options());
   std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
   Sequence* sequence = request->sequences()[0].get();
   ASSERT_TRUE(engine.block_manager_pool()->allocate(sequence));
@@ -1079,13 +1075,13 @@ TEST(DisaggPDSchedulerTest, MtpFirstGenerationStoresBootstrapThenQueues) {
       queued->sequences()[0]->get_mtp_bootstrap_embedding(), embedding));
 }
 
-TEST(DisaggPDSchedulerTest, GroupedPullAlignsActiveSwaSuffix) {
+TEST(PDSchedulerTest, GroupedPullAlignsActiveSwaSuffix) {
   FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
   auto worker = std::make_shared<RecordingPullWorkerClient>();
-  TestDisaggPDScheduler scheduler(
+  TestPDScheduler scheduler(
       &engine,
       make_decode_options(),
-      DisaggPDSchedulerTestPeer::make_transfer_coordinator({worker}));
+      PDSchedulerTestPeer::make_transfer_coordinator({worker}));
   std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
   Sequence* sequence = request->sequences()[0].get();
   ASSERT_TRUE(engine.block_manager_pool()->allocate(sequence));
@@ -1140,16 +1136,15 @@ TEST(DisaggPDSchedulerTest, GroupedPullAlignsActiveSwaSuffix) {
   queued->sequences()[0]->kv_state().erase_blocks(BlockType::SWA);
 }
 
-TEST(DisaggPDSchedulerTest, FailedPullReleasesBlocksWithoutEnqueueingDecode) {
+TEST(PDSchedulerTest, FailedPullReleasesBlocksWithoutEnqueueingDecode) {
   FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
   auto failed_worker =
       std::make_shared<RecordingPullWorkerClient>(/*pull_result=*/false);
   auto healthy_worker = std::make_shared<RecordingPullWorkerClient>();
-  TestDisaggPDScheduler scheduler(
-      &engine,
-      make_decode_options(),
-      DisaggPDSchedulerTestPeer::make_transfer_coordinator(
-          {failed_worker, healthy_worker}));
+  TestPDScheduler scheduler(&engine,
+                            make_decode_options(),
+                            PDSchedulerTestPeer::make_transfer_coordinator(
+                                {failed_worker, healthy_worker}));
   BlockManagerPool* pool = engine.block_manager_pool();
   const auto free_before = pool->num_free_blocks();
   std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
@@ -1188,9 +1183,9 @@ TEST(DisaggPDSchedulerTest, FailedPullReleasesBlocksWithoutEnqueueingDecode) {
   EXPECT_FALSE(scheduler.pop_decode_request_for_test(&queued));
 }
 
-TEST(DisaggPDSchedulerTest, FirstDecodeTokenLatencyIsNonNegative) {
+TEST(PDSchedulerTest, FirstDecodeTokenLatencyIsNonNegative) {
   FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
-  TestDisaggPDScheduler scheduler(&engine, make_options());
+  TestPDScheduler scheduler(&engine, make_options());
   std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
   Sequence* sequence = request->sequences()[0].get();
   ASSERT_TRUE(engine.block_manager_pool()->allocate(sequence));
@@ -1207,9 +1202,9 @@ TEST(DisaggPDSchedulerTest, FirstDecodeTokenLatencyIsNonNegative) {
   EXPECT_GE(first_itl, 0);
 }
 
-TEST(DisaggPDSchedulerTest, DecodeLatencyIncludesPrefillTtft) {
+TEST(PDSchedulerTest, DecodeLatencyIncludesPrefillTtft) {
   FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
-  TestDisaggPDScheduler scheduler(&engine, make_options());
+  TestPDScheduler scheduler(&engine, make_options());
   std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
   Sequence* sequence = request->sequences()[0].get();
   ASSERT_TRUE(engine.block_manager_pool()->allocate(sequence));
@@ -1228,9 +1223,9 @@ TEST(DisaggPDSchedulerTest, DecodeLatencyIncludesPrefillTtft) {
   EXPECT_LT(queued->elapsed_seconds(), kPrefillTtftSeconds);
 }
 
-TEST(DisaggPDSchedulerTest, DecodeLatencyUsesCumulativeUpstreamElapsed) {
+TEST(PDSchedulerTest, DecodeLatencyUsesCumulativeUpstreamElapsed) {
   FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
-  TestDisaggPDScheduler scheduler(&engine, make_options());
+  TestPDScheduler scheduler(&engine, make_options());
   std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
   Sequence* sequence = request->sequences()[0].get();
   ASSERT_TRUE(engine.block_manager_pool()->allocate(sequence));
@@ -1268,9 +1263,9 @@ TEST(DisaggPDSchedulerTest, DecodeLatencyUsesCumulativeUpstreamElapsed) {
                 (generated_tokens - 1));
 }
 
-TEST(DisaggPDSchedulerTest, PreservesPrefillCachedTokensOnDecodeRequest) {
+TEST(PDSchedulerTest, PreservesPrefillCachedTokensOnDecodeRequest) {
   FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
-  TestDisaggPDScheduler scheduler(&engine, make_options());
+  TestPDScheduler scheduler(&engine, make_options());
   std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
   Sequence* sequence = request->sequences()[0].get();
   ASSERT_TRUE(engine.block_manager_pool()->allocate(sequence));
@@ -1285,26 +1280,26 @@ TEST(DisaggPDSchedulerTest, PreservesPrefillCachedTokensOnDecodeRequest) {
   EXPECT_EQ(queued->num_prefix_cache_tokens(), 2u);
 }
 
-TEST(DisaggPDSchedulerTest, PromptAtDecodeBlockCapacityIsNotPermanent) {
+TEST(PDSchedulerTest, PromptAtDecodeBlockCapacityIsNotPermanent) {
   EXPECT_FALSE(exceeds_decode_capacity(
       /*num_prompt_tokens=*/6, /*block_size=*/2, /*num_blocks=*/4));
 }
 
-TEST(DisaggPDSchedulerTest, InvalidMetadataAndOversizedResponsesAreTerminal) {
+TEST(PDSchedulerTest, InvalidMetadataAndOversizedResponsesAreTerminal) {
   EXPECT_FALSE(is_permanent_rejection(/*status_code=*/404));
   EXPECT_TRUE(is_permanent_rejection(kDecodeAddNewInvalidRequestStatusCode));
   EXPECT_TRUE(is_permanent_rejection(kDecodeAddNewPromptTooLongStatusCode));
   EXPECT_FALSE(is_permanent_rejection(/*status_code=*/500));
 }
 
-TEST(DisaggPDSchedulerTest, MissingServiceMetadataFailsBeforeDecodeLookup) {
+TEST(PDSchedulerTest, MissingServiceMetadataFailsBeforeDecodeLookup) {
   for (const auto& [service_id, address] :
        std::vector<std::pair<std::string, std::string>>{
            {"service-id", ""}, {"", "127.0.0.1:1"}, {"", ""}}) {
     FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
     auto options = make_options();
     options.request_queue_size(1);
-    TestDisaggPDScheduler scheduler(&engine, options);
+    TestPDScheduler scheduler(&engine, options);
     auto request = make_request(
         {1, 2}, "invalid", false, false, false, 4, service_id, address);
     request->state().decode_address = "127.0.0.1:1";
@@ -1331,17 +1326,16 @@ TEST(DisaggPDSchedulerTest, MissingServiceMetadataFailsBeforeDecodeLookup) {
   }
 }
 
-TEST(DisaggPDSchedulerTest, DecodeBuildsMinTokenInputsFromLocalExecutionMode) {
+TEST(PDSchedulerTest, DecodeBuildsMinTokenInputsFromLocalExecutionMode) {
   const bool initialized = XServiceClientTestPeer::set_initialized(true);
   ScopeGuard restore_client(
       [initialized] { XServiceClientTestPeer::set_initialized(initialized); });
   for (const bool enable_task_pipeline : {false, true}) {
     FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
-    DisaggPDScheduler::Options options = make_decode_options();
+    PDScheduler::Options options = make_decode_options();
     options.enable_task_pipeline(enable_task_pipeline);
-    TestDisaggPDScheduler scheduler(&engine, options);
-    TestDisaggPDServiceImpl service(
-        &scheduler, &engine, /*kv_cache_block_tokens=*/2);
+    TestPDScheduler scheduler(&engine, options);
+    TestPDServiceImpl service(&scheduler, &engine, /*kv_cache_block_tokens=*/2);
     for (const uint32_t minimum : {0u, 3u}) {
       SCOPED_TRACE(::testing::Message()
                    << "task_pipeline=" << enable_task_pipeline
@@ -1383,16 +1377,16 @@ TEST(DisaggPDSchedulerTest, DecodeBuildsMinTokenInputsFromLocalExecutionMode) {
   }
 }
 
-TEST(DisaggPDSchedulerTest, DecodeRejectsMalformedMetadataBeforeKvAllocation) {
+TEST(PDSchedulerTest, DecodeRejectsMalformedMetadataBeforeKvAllocation) {
   // This rejection must not need an actual service connection or KV allocation.
   const bool initialized = XServiceClientTestPeer::set_initialized(true);
   ScopeGuard restore_client(
       [initialized] { XServiceClientTestPeer::set_initialized(initialized); });
   FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
-  TestDisaggPDScheduler scheduler(&engine, make_options());
-  DisaggPDServiceOptions options;
+  TestPDScheduler scheduler(&engine, make_options());
+  PDServiceOptions options;
   options.enable_response_formatting = true;
-  DisaggPDServiceImpl service(
+  PDServiceImpl service(
       &scheduler, &engine, /*kv_cache_block_tokens=*/2, options);
   for (int32_t invalid_field = 0; invalid_field < 4; ++invalid_field) {
     proto::DisaggRequests requests;
@@ -1419,7 +1413,7 @@ TEST(DisaggPDSchedulerTest, DecodeRejectsMalformedMetadataBeforeKvAllocation) {
   }
 }
 
-TEST(DisaggPDSchedulerTest, DetectsRankPreservingFlatKvGroups) {
+TEST(PDSchedulerTest, DetectsRankPreservingFlatKvGroups) {
   proto::DisaggResponse response;
   response.add_groups()->set_group_id(cache_group_id(BlockType::KV));
   response.add_groups()->set_group_id(cache_group_id(BlockType::LINEAR));
@@ -1427,21 +1421,21 @@ TEST(DisaggPDSchedulerTest, DetectsRankPreservingFlatKvGroups) {
   EXPECT_TRUE(has_rank_preserving_kv_groups(response));
 }
 
-TEST(DisaggPDSchedulerTest, KeepsExpandedGroupedCacheMappings) {
+TEST(PDSchedulerTest, KeepsExpandedGroupedCacheMappings) {
   proto::DisaggResponse response;
   response.add_groups()->set_group_id(cache_group_id(BlockType::C4));
 
   EXPECT_FALSE(has_rank_preserving_kv_groups(response));
 }
 
-TEST(DisaggPDSchedulerTest, PromptBeyondDecodeBlockCapacityIsPermanent) {
+TEST(PDSchedulerTest, PromptBeyondDecodeBlockCapacityIsPermanent) {
   EXPECT_TRUE(exceeds_decode_capacity(
       /*num_prompt_tokens=*/7, /*block_size=*/2, /*num_blocks=*/4));
 }
 
-TEST(DisaggPDSchedulerTest, TemporaryDecodeBlockPressureIsNotPermanent) {
+TEST(PDSchedulerTest, TemporaryDecodeBlockPressureIsNotPermanent) {
   FakeEngine engine(/*num_blocks=*/4, /*block_size=*/2);
-  TestDisaggPDScheduler scheduler(&engine, make_options());
+  TestPDScheduler scheduler(&engine, make_options());
   BlockManagerPool* block_manager = engine.block_manager_pool();
   std::shared_ptr<Request> holder = make_request({1, 2, 3, 4, 5, 6});
   ASSERT_TRUE(block_manager->try_allocate(holder->sequences()[0].get()));
@@ -1454,9 +1448,9 @@ TEST(DisaggPDSchedulerTest, TemporaryDecodeBlockPressureIsNotPermanent) {
   block_manager->deallocate(holder.get());
 }
 
-TEST(DisaggPDSchedulerTest, OversizedDecodePromptIsPermanent) {
+TEST(PDSchedulerTest, OversizedDecodePromptIsPermanent) {
   FakeEngine engine(/*num_blocks=*/4, /*block_size=*/2);
-  TestDisaggPDScheduler scheduler(&engine, make_options());
+  TestPDScheduler scheduler(&engine, make_options());
   BlockManagerPool* block_manager = engine.block_manager_pool();
   std::shared_ptr<Request> request = make_request({1, 2, 3, 4, 5, 6, 7});
   Sequence* sequence = request->sequences()[0].get();
@@ -1467,10 +1461,10 @@ TEST(DisaggPDSchedulerTest, OversizedDecodePromptIsPermanent) {
   block_manager->deallocate(request.get());
 }
 
-TEST(DisaggPDSchedulerTest, InvalidPrefillCachedTokensFallBackToZero) {
+TEST(PDSchedulerTest, InvalidPrefillCachedTokensFallBackToZero) {
   for (int32_t num_cached_tokens : {-1, 5}) {
     FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
-    TestDisaggPDScheduler scheduler(&engine, make_options());
+    TestPDScheduler scheduler(&engine, make_options());
     std::shared_ptr<Request> request = make_request({1, 2, 3, 4});
     Sequence* sequence = request->sequences()[0].get();
     ASSERT_TRUE(engine.block_manager_pool()->allocate(sequence));
@@ -1486,16 +1480,16 @@ TEST(DisaggPDSchedulerTest, InvalidPrefillCachedTokensFallBackToZero) {
   }
 }
 
-TEST(DisaggPDSchedulerTest, EmptyOverlapOutputPreservesLatencyClock) {
+TEST(PDSchedulerTest, EmptyOverlapOutputPreservesLatencyClock) {
   for (int32_t num_speculative_tokens : {0, 3}) {
     SCOPED_TRACE(num_speculative_tokens);
     FakeEngine engine(
         /*num_blocks=*/8, /*block_size=*/2, num_speculative_tokens);
-    DisaggPDScheduler::Options options = make_options();
+    PDScheduler::Options options = make_options();
     options.enable_schedule_overlap(true)
         .enable_chunked_prefill(true)
         .num_speculative_tokens(num_speculative_tokens);
-    TestDisaggPDScheduler scheduler(&engine, options);
+    TestPDScheduler scheduler(&engine, options);
     std::shared_ptr<Request> request =
         make_request({1, 2, 3, 4}, "req", /*enable_schedule_overlap=*/true);
     Sequence* sequence = request->sequences().front().get();
@@ -1547,7 +1541,7 @@ TEST(DisaggPDSchedulerTest, EmptyOverlapOutputPreservesLatencyClock) {
   }
 }
 
-TEST(DisaggPDSchedulerTest, StructuredOutputFieldsPreserveWireTags) {
+TEST(PDSchedulerTest, StructuredOutputFieldsPreserveWireTags) {
   proto::DisaggRequest request;
   request.set_include_stop_str_in_output(true);
   request.set_json_object(true);
@@ -1566,7 +1560,7 @@ TEST(DisaggPDSchedulerTest, StructuredOutputFieldsPreserveWireTags) {
   EXPECT_EQ(proto::DisaggRequest::kJsonReasoningEnabledFieldNumber, 41);
 }
 
-TEST(DisaggPDSchedulerTest, GenerationLatencyFieldsPreserveWireTags) {
+TEST(PDSchedulerTest, GenerationLatencyFieldsPreserveWireTags) {
   proto::DisaggGenerationsRequest request;
   request.set_upstream_elapsed_seconds(12.5);
   proto::RemoteToken* token = request.add_tokens();
@@ -1587,11 +1581,11 @@ TEST(DisaggPDSchedulerTest, GenerationLatencyFieldsPreserveWireTags) {
   EXPECT_EQ(proto::RemoteToken::kTimeToFirstTokenLatencySecondsFieldNumber, 6);
 }
 
-TEST(DisaggPDSchedulerTest, LocalFailureReturnsDecodeReservation) {
+TEST(PDSchedulerTest, LocalFailureReturnsDecodeReservation) {
   FakeEngine decode_engine(/*num_blocks=*/16,
                            /*block_size=*/2,
                            /*num_speculative_tokens=*/1);
-  TestDisaggPDScheduler decode(&decode_engine, make_mtp_decode_options());
+  TestPDScheduler decode(&decode_engine, make_mtp_decode_options());
   auto remote = make_request({1, 2, 3, 4, 5, 6, 7, 8});
   auto* pool = decode_engine.block_manager_pool();
   const auto free_before = pool->num_free_blocks();
@@ -1606,7 +1600,7 @@ TEST(DisaggPDSchedulerTest, LocalFailureReturnsDecodeReservation) {
   ASSERT_EQ(server.Start("127.0.0.1:0", nullptr), 0);
 
   FakeEngine prefill_engine(/*num_blocks=*/2, /*block_size=*/2);
-  TestDisaggPDScheduler prefill(&prefill_engine, make_options());
+  TestPDScheduler prefill(&prefill_engine, make_options());
   auto local = make_request({1, 2, 3, 4, 5, 6, 7, 8});
   TransferKVInfo info;
   info.request_id = local->request_id();
@@ -1631,9 +1625,9 @@ TEST(DisaggPDSchedulerTest, LocalFailureReturnsDecodeReservation) {
   server.Stop(0);
   server.Join();
 }
-TEST(DisaggPDSchedulerTest, PendingReleaseDoesNotDelayFirstGeneration) {
+TEST(PDSchedulerTest, PendingReleaseDoesNotDelayFirstGeneration) {
   FakeEngine decode_engine(/*num_blocks=*/16, /*block_size=*/2);
-  TestDisaggPDScheduler decode(&decode_engine, make_decode_options());
+  TestPDScheduler decode(&decode_engine, make_decode_options());
   auto remote_failed = make_request({1, 2, 3, 4, 5, 6, 7, 8}, "failed");
   remote_failed->state().pd_reservation_id = "failed-reservation";
   ASSERT_TRUE(decode.try_allocate(remote_failed->sequences()[0].get()));
@@ -1660,7 +1654,7 @@ TEST(DisaggPDSchedulerTest, PendingReleaseDoesNotDelayFirstGeneration) {
   FakeEngine prefill_engine(/*num_blocks=*/4, /*block_size=*/2);
   auto options = make_options();
   options.enable_chunked_prefill(false).kv_cache_transfer_mode("PUSH");
-  TestDisaggPDScheduler prefill(&prefill_engine, options);
+  TestPDScheduler prefill(&prefill_engine, options);
   auto local_failed = make_request({1, 2, 3, 4, 5, 6, 7, 8}, "failed");
   local_failed->state().pd_reservation_id = "failed-reservation";
   local_failed->state().decode_rpc_address = address;
@@ -1731,9 +1725,9 @@ TEST(DisaggPDSchedulerTest, PendingReleaseDoesNotDelayFirstGeneration) {
   server.Join();
 }
 
-TEST(DisaggPDSchedulerTest, FailedFirstGenerationDoesNotRecordServerTtft) {
+TEST(PDSchedulerTest, FailedFirstGenerationDoesNotRecordServerTtft) {
   FakeEngine decode_engine(/*num_blocks=*/4, /*block_size=*/2);
-  TestDisaggPDScheduler decode(&decode_engine, make_decode_options());
+  TestPDScheduler decode(&decode_engine, make_decode_options());
   // The Decode side has no reservation, so it rejects FirstGeneration.
   DelayedReservationService service(&decode);
   service.resume_releases();
@@ -1749,7 +1743,7 @@ TEST(DisaggPDSchedulerTest, FailedFirstGenerationDoesNotRecordServerTtft) {
   FakeEngine prefill_engine(/*num_blocks=*/4, /*block_size=*/2);
   auto options = make_options();
   options.enable_chunked_prefill(false).kv_cache_transfer_mode("PUSH");
-  TestDisaggPDScheduler prefill(&prefill_engine, options);
+  TestPDScheduler prefill(&prefill_engine, options);
   auto request = make_request({11, 12});
   request->state().arrival_time =
       std::chrono::steady_clock::now() - std::chrono::seconds(3);
@@ -1780,8 +1774,7 @@ class ReservationTest : public ::testing::Test {
                      /*block_size=*/2,
                      /*num_speculative_tokens=*/1,
                      /*dp_size=*/2};
-  TestDisaggPDScheduler decode_{&engine_,
-                                make_mtp_decode_options(/*dp_size=*/2)};
+  TestPDScheduler decode_{&engine_, make_mtp_decode_options(/*dp_size=*/2)};
   ReservationService service_{&decode_};
   brpc::Server server_;
 
@@ -1819,7 +1812,7 @@ class ReservationTest : public ::testing::Test {
     FakeEngine engine(/*num_blocks=*/2, /*block_size=*/2);
     auto options = make_options();
     options.enable_chunked_prefill(false);
-    TestDisaggPDScheduler prefill(&engine, options);
+    TestPDScheduler prefill(&engine, options);
     auto request = accepted();
     std::promise<Status> error;
     auto status = error.get_future();
@@ -1859,9 +1852,9 @@ TEST_F(ReservationTest, LostConfirmationRetriesWithoutDoubleFree) {
 TEST_F(ReservationTest, DispatchQueueOverflowReturnsReservationAndError) {
   std::shared_ptr<Request> remote = reserve();
   FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
-  DisaggPDScheduler::Options options = make_options();
+  PDScheduler::Options options = make_options();
   options.request_queue_size(1);
-  TestDisaggPDScheduler prefill(&engine, options);
+  TestPDScheduler prefill(&engine, options);
   std::shared_ptr<Request> request = accepted();
   std::promise<Status> error;
   std::future<Status> status = error.get_future();
@@ -1980,7 +1973,7 @@ TEST_F(ReservationTest, ConcurrentHandoffAndReleaseHaveOneOwner) {
   std::barrier start(2);
   auto release = std::async(std::launch::async, [&] {
     start.arrive_and_wait();
-    return decode_.DisaggPDScheduler::release_reservation("req", "reservation");
+    return decode_.PDScheduler::release_reservation("req", "reservation");
   });
   start.arrive_and_wait();
   const bool handed_off = recv_first_generation(
@@ -2041,7 +2034,7 @@ TEST_F(ReservationTest, RejectedAllocationRollsBackWithoutReservation) {
 
 TEST_F(ReservationTest, UnacceptedLocalFailureSendsNoRelease) {
   FakeEngine engine(/*num_blocks=*/2, /*block_size=*/2);
-  TestDisaggPDScheduler prefill(&engine, make_options());
+  TestPDScheduler prefill(&engine, make_options());
   auto local = accepted();
   local->state().decode_rpc_address.clear();
   prefill.admit_prefill(local);
@@ -2063,7 +2056,7 @@ TEST_P(ChunkReservationTest,
       .enable_chunked_prefill(true)
       .max_tokens_per_chunk_for_prefill(2)
       .max_tokens_per_batch(2);
-  TestDisaggPDScheduler prefill(&engine, options);
+  TestPDScheduler prefill(&engine, options);
   auto local = accepted();
   prefill.admit_prefill(local);
   folly::Promise<bool> push;
@@ -2118,7 +2111,7 @@ TEST_F(ReservationTest, BudgetFailureReleasesOnlyTarget) {
   FakeEngine engine(/*num_blocks=*/16, /*block_size=*/2);
   auto options = make_options();
   options.enable_chunked_prefill(false).max_tokens_per_batch(2);
-  TestDisaggPDScheduler prefill(&engine, options);
+  TestPDScheduler prefill(&engine, options);
   auto local = accepted();
   prefill.admit_prefill(local);
   EXPECT_TRUE(prefill.prepare_batch()[0].empty());
@@ -2148,13 +2141,13 @@ TEST_F(ReservationTest, DuplicateAdmissionRollsBackUncomputedResources) {
   EXPECT_GE(original->sequences()[0]->get_embedding_block_id(), 0);
   EXPECT_TRUE(decode_.release_reservation("req", "reservation"));
 }
-TEST(DisaggPDSchedulerTest, MtpExhaustionRollsBackKvReservation) {
+TEST(PDSchedulerTest, MtpExhaustionRollsBackKvReservation) {
   FakeEngine engine(/*num_blocks=*/8,
                     /*block_size=*/2,
                     /*num_speculative_tokens=*/1,
                     /*dp_size=*/1,
                     /*embedding_blocks=*/2);
-  TestDisaggPDScheduler decode(&engine, make_mtp_decode_options());
+  TestPDScheduler decode(&engine, make_mtp_decode_options());
   auto original = make_request({1, 2, 3, 4});
   original->state().pd_reservation_id = "reservation";
   ASSERT_TRUE(decode.try_allocate(original->sequences()[0].get()));
@@ -2192,7 +2185,7 @@ class OutputTokenizer final : public Tokenizer {
   }
 };
 
-TEST(DisaggPDSchedulerTest, PrefillEmitsNoSuccessfulOutputInEitherProtocol) {
+TEST(PDSchedulerTest, PrefillEmitsNoSuccessfulOutputInEitherProtocol) {
   for (const bool http : {false, true}) {
     for (const bool stream : {false, true}) {
       std::atomic<int32_t> callbacks{0};
@@ -2230,7 +2223,7 @@ TEST(DisaggPDSchedulerTest, PrefillEmitsNoSuccessfulOutputInEitherProtocol) {
   }
 }
 
-TEST(DisaggPDSchedulerTest,
+TEST(PDSchedulerTest,
      ServiceOutputBatchesRequestsAndMapsPartialAcknowledgements) {
   for (const bool stream : {false, true}) {
     OutputTokenizer tokenizer;
@@ -2289,8 +2282,7 @@ TEST(DisaggPDSchedulerTest,
   }
 }
 
-TEST(DisaggPDSchedulerTest,
-     DecodeEmitsFirstTokenAsynchronouslyBeforeAnyDecodeStep) {
+TEST(PDSchedulerTest, DecodeEmitsFirstTokenAsynchronouslyBeforeAnyDecodeStep) {
   const bool initialized = XServiceClientTestPeer::set_initialized(true);
   ScopeGuard restore_client(
       [initialized] { XServiceClientTestPeer::set_initialized(initialized); });
@@ -2302,7 +2294,7 @@ TEST(DisaggPDSchedulerTest,
     engine.set_tokenizer(std::make_unique<OutputTokenizer>());
     auto options = make_decode_options();
     options.enable_schedule_overlap(overlap).enable_service_routing(batched);
-    TestDisaggPDScheduler scheduler(&engine, options);
+    TestPDScheduler scheduler(&engine, options);
     auto request = make_request({65, 66},
                                 "req",
                                 overlap,
@@ -2356,7 +2348,7 @@ TEST(DisaggPDSchedulerTest,
     sequence->kv_state().set_kv_cache_tokens_num(sequence->num_prompt_tokens());
     ASSERT_TRUE(scheduler.decode_schedule(request, "prefill"));
     received = std::async(std::launch::async, [&scheduler] {
-      return scheduler.DisaggPDScheduler::decode_recv_first_generation(
+      return scheduler.PDScheduler::decode_recv_first_generation(
           "req",
           "",
           /*token_id=*/42,
@@ -2414,12 +2406,11 @@ TEST(DisaggPDSchedulerTest,
   }
 }
 
-TEST(DisaggPDSchedulerTest,
-     DecodeTerminatesFirstTokenWithoutQueueingDecodeWork) {
+TEST(PDSchedulerTest, DecodeTerminatesFirstTokenWithoutQueueingDecodeWork) {
   for (const bool stream : {false, true}) {
     FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
     engine.set_tokenizer(std::make_unique<OutputTokenizer>());
-    TestDisaggPDScheduler scheduler(&engine, make_decode_options());
+    TestPDScheduler scheduler(&engine, make_decode_options());
     auto request = make_request({65, 66},
                                 "req",
                                 /*enable_schedule_overlap=*/false,
@@ -2453,12 +2444,12 @@ TEST(DisaggPDSchedulerTest,
   }
 }
 
-TEST(DisaggPDSchedulerTest, FullDecodeQueueFailsAfterFirstTokenAndReleasesKv) {
+TEST(PDSchedulerTest, FullDecodeQueueFailsAfterFirstTokenAndReleasesKv) {
   FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
   engine.set_tokenizer(std::make_unique<OutputTokenizer>());
   auto options = make_decode_options();
   options.request_queue_size(1);
-  TestDisaggPDScheduler scheduler(&engine, options);
+  TestPDScheduler scheduler(&engine, options);
   auto occupying = make_request({65, 66}, "occupying");
   ASSERT_TRUE(scheduler.queue_decode_request_for_test(occupying));
   auto request = make_request({65, 66},

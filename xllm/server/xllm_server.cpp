@@ -25,7 +25,7 @@ limitations under the License.
 #include <csignal>
 
 #include "api_service/api_service.h"
-#include "core/disaggregation/disagg_pd_service.h"
+#include "core/disaggregation/pd_service.h"
 #include "core/distributed_runtime/collective_service.h"
 #include "core/distributed_runtime/worker_service.h"
 #include "core/framework/config/disagg_pd_config.h"
@@ -192,7 +192,7 @@ bool XllmServer::start(std::unique_ptr<APIService> service) {
   return true;
 }
 
-bool XllmServer::start(std::unique_ptr<DisaggPDService> service) {
+bool XllmServer::start(std::unique_ptr<PDService> service) {
   std::string addr("");
   if (!::xllm::ServiceConfig::get_instance().host().empty()) {
     addr =

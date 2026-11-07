@@ -30,7 +30,7 @@ class Server;
 namespace xllm {
 
 class CollectiveService;
-class DisaggPDService;
+class PDService;
 class WorkerService;
 
 class APIService;
@@ -41,7 +41,7 @@ class XllmServer final {
   ~XllmServer();
 
   bool start(std::unique_ptr<APIService> api_service);
-  bool start(std::unique_ptr<DisaggPDService> disagg_pd_service);
+  bool start(std::unique_ptr<PDService> pd_service);
   bool start(std::shared_ptr<CollectiveService> service,
              const std::string& addr,
              const std::string& server_name);

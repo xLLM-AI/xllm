@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/disaggregation/disagg_pd_scheduler.h"
+#include "core/disaggregation/pd_scheduler.h"
 
 #include <absl/time/clock.h>
 #include <absl/time/time.h>
@@ -176,7 +176,7 @@ bool has_rank_preserving_kv_groups(const proto::DisaggResponse& response) {
       });
 }
 
-DisaggPDScheduler::~DisaggPDScheduler() {
+PDScheduler::~PDScheduler() {
   if (xservice_client_ != nullptr) {
     xservice_client_->clear_heartbeat_callback(
         heartbeat_callback_registration_);
@@ -223,7 +223,7 @@ DisaggPDScheduler::~DisaggPDScheduler() {
   }
 }
 
-void DisaggPDScheduler::initialize_rpc_server(const std::string& server_name) {
+void PDScheduler::initialize_rpc_server(const std::string& server_name) {
   // wait rpc server initialized
   auto rpc_server = ServerRegistry::get_instance().get_server(server_name);
   while (!rpc_server || !rpc_server->has_initialized()) {
@@ -245,7 +245,7 @@ void DisaggPDScheduler::initialize_rpc_server(const std::string& server_name) {
   xservice_client_->clear_heartbeat_callback(previous_registration);
 }
 
-void DisaggPDScheduler::register_instance_info(const std::string& server_name) {
+void PDScheduler::register_instance_info(const std::string& server_name) {
   // register instance info
   instance_info_.name = xservice_client_->get_instance_name();
   auto rpc_server = ServerRegistry::get_instance().get_server(server_name);
@@ -271,7 +271,7 @@ void DisaggPDScheduler::register_instance_info(const std::string& server_name) {
 #endif
 }
 
-void DisaggPDScheduler::profile_ttft() {
+void PDScheduler::profile_ttft() {
   LOG(INFO) << "Start profiling TTFT.";
   // get the maximum prefill token length
   auto& model_args = engine_->model_args();
@@ -293,7 +293,7 @@ void DisaggPDScheduler::profile_ttft() {
   }
 }
 
-void DisaggPDScheduler::profile_tpot() {
+void PDScheduler::profile_tpot() {
   LOG(INFO) << "Start profiling TPOT.";
   // get the maximum token length
   auto& model_args = engine_->model_args();
@@ -331,13 +331,12 @@ void DisaggPDScheduler::profile_tpot() {
   }
 }
 
-void DisaggPDScheduler::start_rpc_server(
-    DisaggPDServiceOptions response_options) {
-  auto service = std::make_unique<DisaggPDService>(
-      this,
-      engine_,
-      KVCacheConfig::get_instance().block_size(),
-      std::move(response_options));
+void PDScheduler::start_rpc_server(PDServiceOptions response_options) {
+  auto service =
+      std::make_unique<PDService>(this,
+                                  engine_,
+                                  KVCacheConfig::get_instance().block_size(),
+                                  std::move(response_options));
   const int32_t port = ::xllm::DisaggPDConfig::get_instance().disagg_pd_port();
   auto rpc_server =
       ServerRegistry::get_instance().register_server(server_name_);
@@ -347,7 +346,7 @@ void DisaggPDScheduler::start_rpc_server(
   }
 }
 
-void DisaggPDScheduler::step(const absl::Duration& timeout) {
+void PDScheduler::step(const absl::Duration& timeout) {
   ContinuousSchedulerBase::step(timeout);
   // Send first generation token to decode instance.
   // Always check (not gated on last_step_prefill_) because chunked prefill
@@ -359,13 +358,12 @@ void DisaggPDScheduler::step(const absl::Duration& timeout) {
   }
 }
 
-size_t DisaggPDScheduler::num_queued_requests() const {
+size_t PDScheduler::num_queued_requests() const {
   return ContinuousSchedulerBase::num_queued_requests() +
          pending_dispatch_requests_;
 }
 
-bool DisaggPDScheduler::enqueue_ready_request(
-    std::shared_ptr<Request> request) {
+bool PDScheduler::enqueue_ready_request(std::shared_ptr<Request> request) {
   const bool offline = request->offline();
   const bool queued =
       offline ? prefill_request_queue_offline_.enqueue(std::move(request))
@@ -376,14 +374,13 @@ bool DisaggPDScheduler::enqueue_ready_request(
   return queued;
 }
 
-void DisaggPDScheduler::release_dispatch_admission() {
+void PDScheduler::release_dispatch_admission() {
   std::lock_guard<std::mutex> lock(request_admission_mutex_);
   CHECK_GT(pending_dispatch_requests_, 0u);
   --pending_dispatch_requests_;
 }
 
-bool DisaggPDScheduler::enqueue_dispatched_request(
-    std::shared_ptr<Request> request) {
+bool PDScheduler::enqueue_dispatched_request(std::shared_ptr<Request> request) {
   bool queued = false;
   {
     std::lock_guard<std::mutex> lock(request_admission_mutex_);
@@ -402,7 +399,7 @@ bool DisaggPDScheduler::enqueue_dispatched_request(
 }
 
 // prefill send new request to remote instance
-void DisaggPDScheduler::dispatch_requests() {
+void PDScheduler::dispatch_requests() {
   PendingQueue pending;
   while (true) {
     bool exit_requested = false;
@@ -783,7 +780,7 @@ void DisaggPDScheduler::dispatch_requests() {
   }
 }
 
-void DisaggPDScheduler::prefill_send_first_generation() {
+void PDScheduler::prefill_send_first_generation() {
   if (running_sequences_.size() == 0) {
     return;
   }
@@ -987,7 +984,7 @@ void DisaggPDScheduler::prefill_send_first_generation() {
   });
 }
 
-void DisaggPDScheduler::release_failed_request(
+void PDScheduler::release_failed_request(
     const std::shared_ptr<Request>& request) {
   {
     std::lock_guard<std::mutex> lock(req_to_channel_map_mutex_);
@@ -1018,7 +1015,7 @@ void DisaggPDScheduler::release_failed_request(
   });
 }
 
-std::shared_ptr<Request> DisaggPDScheduler::take_waiting_request(
+std::shared_ptr<Request> PDScheduler::take_waiting_request(
     const std::string& req_id) {
   auto it = received_request_map_.find(req_id);
   if (it == received_request_map_.end()) {
@@ -1040,7 +1037,7 @@ std::shared_ptr<Request> DisaggPDScheduler::take_waiting_request(
   return request;
 }
 
-std::future<void> DisaggPDScheduler::enqueue_request_block_release(
+std::future<void> PDScheduler::enqueue_request_block_release(
     std::shared_ptr<Request> request,
     bool cache_prefix) {
   auto release = std::make_unique<RequestBlockRelease>(
@@ -1051,13 +1048,12 @@ std::future<void> DisaggPDScheduler::enqueue_request_block_release(
   return completion;
 }
 
-void DisaggPDScheduler::release_request_blocks(std::shared_ptr<Request> request,
-                                               bool cache_prefix) {
+void PDScheduler::release_request_blocks(std::shared_ptr<Request> request,
+                                         bool cache_prefix) {
   enqueue_request_block_release(std::move(request), cache_prefix).get();
 }
 
-void DisaggPDScheduler::complete_request_block_release(
-    RequestBlockRelease& release) {
+void PDScheduler::complete_request_block_release(RequestBlockRelease& release) {
   if (release.cache_prefix) {
     kv_cache_manager_->deallocate(release.request.get());
   } else {
@@ -1071,15 +1067,15 @@ void DisaggPDScheduler::complete_request_block_release(
   release.completion.set_value();
 }
 
-void DisaggPDScheduler::drain_request_releases() {
+void PDScheduler::drain_request_releases() {
   std::unique_ptr<RequestBlockRelease> release;
   while (request_block_releases_.try_dequeue(release)) {
     complete_request_block_release(*release);
   }
 }
 
-bool DisaggPDScheduler::release_reservation(const std::string& req_id,
-                                            const std::string& reservation_id) {
+bool PDScheduler::release_reservation(const std::string& req_id,
+                                      const std::string& reservation_id) {
   if (reservation_id.empty()) {
     return false;
   }
@@ -1105,9 +1101,8 @@ bool DisaggPDScheduler::release_reservation(const std::string& req_id,
 }
 
 // request is received from prefill
-bool DisaggPDScheduler::decode_schedule(
-    std::shared_ptr<Request>& request,
-    const std::string& prefill_instance_name) {
+bool PDScheduler::decode_schedule(std::shared_ptr<Request>& request,
+                                  const std::string& prefill_instance_name) {
   CHECK(request != nullptr);
   CHECK(!request->sequences().empty());
 
@@ -1142,7 +1137,7 @@ bool DisaggPDScheduler::decode_schedule(
   return true;
 }
 
-bool DisaggPDScheduler::decode_recv_first_generation(
+bool PDScheduler::decode_recv_first_generation(
     const std::string& req_id,
     const std::string& reservation_id,
     int64_t token_id,
@@ -1347,7 +1342,7 @@ bool DisaggPDScheduler::decode_recv_first_generation(
   return true;
 }
 
-void DisaggPDScheduler::restore_disaggregated_latency(
+void PDScheduler::restore_disaggregated_latency(
     Request* request,
     double time_to_first_token_latency_seconds,
     double upstream_elapsed_seconds) {
@@ -1369,7 +1364,7 @@ void DisaggPDScheduler::restore_disaggregated_latency(
   }
 }
 
-bool DisaggPDScheduler::try_allocate(Sequence* sequence) {
+bool PDScheduler::try_allocate(Sequence* sequence) {
   // When the KV Cache usage reaches the threshold, prefill requests will no
   // longer be scheduled to avoid frequent preemption.
   return kv_cache_manager_->kv_cache_utilization() <
@@ -1378,7 +1373,7 @@ bool DisaggPDScheduler::try_allocate(Sequence* sequence) {
          kv_cache_manager_->try_allocate(sequence);
 }
 
-bool DisaggPDScheduler::exceeds_decode_capacity(Sequence* sequence) const {
+bool PDScheduler::exceeds_decode_capacity(Sequence* sequence) const {
   CHECK(sequence != nullptr);
   const BlockManagerPool* block_manager = engine_->block_manager_pool();
   CHECK(block_manager != nullptr);
@@ -1395,7 +1390,7 @@ bool DisaggPDScheduler::exceeds_decode_capacity(Sequence* sequence) const {
       static_cast<size_t>(block_manager->num_blocks()));
 }
 
-void DisaggPDScheduler::do_permanent_rejection(
+void PDScheduler::do_permanent_rejection(
     const std::shared_ptr<Request>& request,
     int32_t status_code) {
   CHECK(request != nullptr);
@@ -1412,17 +1407,17 @@ void DisaggPDScheduler::do_permanent_rejection(
   req_to_channel_map_.erase(request->request_id());
 }
 
-void DisaggPDScheduler::get_latency_metrics(std::vector<int64_t>& ttft,
-                                            std::vector<int64_t>& tbt) {
+void PDScheduler::get_latency_metrics(std::vector<int64_t>& ttft,
+                                      std::vector<int64_t>& tbt) {
   scheduler_metrics_->get_latency_metrics(ttft, tbt);
 }
 
-bool DisaggPDScheduler::link_instance(const std::string& instance_name,
-                                      const std::vector<uint64_t>& cluster_ids,
-                                      const std::vector<std::string>& addrs,
-                                      const std::vector<uint16_t>& ports,
-                                      const int32_t dp_size,
-                                      const int32_t src_kv_split_size) {
+bool PDScheduler::link_instance(const std::string& instance_name,
+                                const std::vector<uint64_t>& cluster_ids,
+                                const std::vector<std::string>& addrs,
+                                const std::vector<uint16_t>& ports,
+                                const int32_t dp_size,
+                                const int32_t src_kv_split_size) {
   std::lock_guard<std::mutex> lock(linked_instances_mutex_);
   if (distributed_worker_manager_ == nullptr) {
     LOG(ERROR)
@@ -1440,13 +1435,12 @@ bool DisaggPDScheduler::link_instance(const std::string& instance_name,
   return true;
 }
 
-bool DisaggPDScheduler::unlink_instance(
-    const std::string& instance_name,
-    const std::vector<uint64_t>& cluster_ids,
-    const std::vector<std::string>& addrs,
-    const std::vector<uint16_t>& ports,
-    const int32_t dp_size,
-    const int32_t src_kv_split_size) {
+bool PDScheduler::unlink_instance(const std::string& instance_name,
+                                  const std::vector<uint64_t>& cluster_ids,
+                                  const std::vector<std::string>& addrs,
+                                  const std::vector<uint16_t>& ports,
+                                  const int32_t dp_size,
+                                  const int32_t src_kv_split_size) {
   // Clear received requests from this instance
   std::vector<std::shared_ptr<Request>> requests;
   {

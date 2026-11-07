@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/disaggregation/disagg_pd_service_impl.h"
+#include "core/disaggregation/pd_service_impl.h"
 
 #include <glog/logging.h>
 
@@ -25,7 +25,7 @@ limitations under the License.
 #include "common/types.h"
 #include "core/disaggregation/disagg_pd_request_converter.h"
 #include "core/disaggregation/disagg_pd_response.h"
-#include "core/disaggregation/disagg_pd_scheduler.h"
+#include "core/disaggregation/pd_scheduler.h"
 #include "core/distributed_runtime/disagg_pd_kv_response.h"
 #include "core/distributed_runtime/distributed_vmm_coordinator.h"
 #include "core/distributed_runtime/engine.h"
@@ -37,11 +37,10 @@ limitations under the License.
 
 namespace xllm {
 
-DisaggPDServiceImpl::DisaggPDServiceImpl(
-    DisaggPDScheduler* scheduler,
-    Engine* engine,
-    int32_t /*kv_cache_block_tokens*/,
-    DisaggPDServiceOptions response_options)
+PDServiceImpl::PDServiceImpl(PDScheduler* scheduler,
+                             Engine* engine,
+                             int32_t /*kv_cache_block_tokens*/,
+                             PDServiceOptions response_options)
     : scheduler_(scheduler),
       engine_(engine),
       response_options_(std::move(response_options)),
@@ -53,9 +52,9 @@ DisaggPDServiceImpl::DisaggPDServiceImpl(
   }
 }
 
-std::shared_ptr<const JsonObjectGrammar>
-DisaggPDServiceImpl::get_json_object_grammar(bool reasoning_enabled,
-                                             std::string* error) {
+std::shared_ptr<const JsonObjectGrammar> PDServiceImpl::get_json_object_grammar(
+    bool reasoning_enabled,
+    std::string* error) {
   std::lock_guard<std::mutex> lock(json_object_grammar_mutex_);
   std::shared_ptr<const JsonObjectGrammar>& grammar =
       reasoning_enabled ? json_reasoning_grammar_ : json_object_grammar_;
@@ -71,7 +70,7 @@ DisaggPDServiceImpl::get_json_object_grammar(bool reasoning_enabled,
   return grammar;
 }
 
-std::shared_ptr<Request> DisaggPDServiceImpl::generate_request(
+std::shared_ptr<Request> PDServiceImpl::generate_request(
     const proto::DisaggRequest& req) {
   // best_of > 1 in disaggregated PD requires prefix cache on the decode
   // instance: only the first sequence's KV is pulled from prefill, and
@@ -168,7 +167,7 @@ std::shared_ptr<Request> DisaggPDServiceImpl::generate_request(
   return new_request;
 }
 
-void DisaggPDServiceImpl::release_reservation(
+void PDServiceImpl::release_reservation(
     const proto::ReleaseReservationRequest* request,
     proto::ReleaseReservationResponse* response) {
   const bool released = scheduler_->release_reservation(
@@ -178,7 +177,7 @@ void DisaggPDServiceImpl::release_reservation(
                            : proto::ReleaseReservationResponse::NOT_WAITING);
 }
 
-bool DisaggPDServiceImpl::append_virtual_kv_cache_offsets(
+bool PDServiceImpl::append_virtual_kv_cache_offsets(
     int32_t dp_rank,
     const std::string& request_id,
     const std::vector<int32_t>& block_ids,
@@ -225,7 +224,7 @@ bool DisaggPDServiceImpl::append_virtual_kv_cache_offsets(
   return true;
 }
 
-void DisaggPDServiceImpl::decode_recv_new_requests(
+void PDServiceImpl::decode_recv_new_requests(
     const proto::DisaggRequests* request,
     proto::DisaggResponses* response) {
   response->mutable_resps()->Reserve(response->resps_size() +
@@ -301,7 +300,7 @@ void DisaggPDServiceImpl::decode_recv_new_requests(
 }
 
 // TODO: support embedding later, now we only support tokens
-void DisaggPDServiceImpl::decode_recv_first_generation(
+void PDServiceImpl::decode_recv_first_generation(
     const proto::DisaggGenerationsRequests* request,
     proto::Status* response) {
   // TODO: we only support one request generation currently
@@ -362,9 +361,8 @@ void DisaggPDServiceImpl::decode_recv_first_generation(
   response->set_ok(true);
 }
 
-void DisaggPDServiceImpl::link_instance(
-    const proto::InstanceClusterInfo* request,
-    proto::Status* response) {
+void PDServiceImpl::link_instance(const proto::InstanceClusterInfo* request,
+                                  proto::Status* response) {
   // Extract parameters from proto request
   std::vector<uint64_t> cluster_ids(request->cluster_ids().begin(),
                                     request->cluster_ids().end());
@@ -391,9 +389,8 @@ void DisaggPDServiceImpl::link_instance(
   response->set_ok(true);
 }
 
-void DisaggPDServiceImpl::unlink_instance(
-    const proto::InstanceClusterInfo* request,
-    proto::Status* response) {
+void PDServiceImpl::unlink_instance(const proto::InstanceClusterInfo* request,
+                                    proto::Status* response) {
   // Extract parameters from proto request
   std::vector<uint64_t> cluster_ids(request->cluster_ids().begin(),
                                     request->cluster_ids().end());

@@ -31,10 +31,10 @@ class BlockManagerPool;
 class Engine;
 class Request;
 class Sequence;
-class DisaggPDScheduler;
+class PDScheduler;
 
 // Immutable response configuration supplied when the PD RPC service starts.
-struct DisaggPDServiceOptions {
+struct PDServiceOptions {
   bool enable_response_formatting = false;
   std::string tool_parser_format;
   std::string reasoning_parser_format;
@@ -42,13 +42,13 @@ struct DisaggPDServiceOptions {
 };
 
 // a class to handle disagg_pd requests
-class DisaggPDServiceImpl {
+class PDServiceImpl {
  public:
-  explicit DisaggPDServiceImpl(DisaggPDScheduler* scheduler,
-                               Engine* engine,
-                               int32_t kv_cache_block_tokens,
-                               DisaggPDServiceOptions response_options = {});
-  virtual ~DisaggPDServiceImpl() = default;
+  explicit PDServiceImpl(PDScheduler* scheduler,
+                         Engine* engine,
+                         int32_t kv_cache_block_tokens,
+                         PDServiceOptions response_options = {});
+  virtual ~PDServiceImpl() = default;
 
   virtual void decode_recv_new_requests(const proto::DisaggRequests* request,
                                         proto::DisaggResponses* response);
@@ -73,9 +73,9 @@ class DisaggPDServiceImpl {
       bool reasoning_enabled,
       std::string* error);
 
-  DisaggPDScheduler* scheduler_;  // not owned
-  Engine* engine_;                // not owned
-  const DisaggPDServiceOptions response_options_;
+  PDScheduler* scheduler_;  // not owned
+  Engine* engine_;          // not owned
+  const PDServiceOptions response_options_;
   XServiceClient* xservice_client_ = nullptr;
   std::mutex json_object_grammar_mutex_;
   std::shared_ptr<const JsonObjectGrammar> json_object_grammar_;
