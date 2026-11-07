@@ -84,13 +84,21 @@ BlockManagerImpl::BlockManagerImpl(const Options& options)
 }
 
 std::vector<Block> BlockManagerImpl::allocate(size_t num_blocks) {
+  return allocate_with_placement(num_blocks, nullptr);
+}
+
+std::vector<Block> BlockManagerImpl::allocate_with_placement(
+    size_t num_blocks,
+    const void* placement_hint) {
   if (options_.shared_block_pool()) {
+    const auto& pool = options_.shared_block_pool();
     std::vector<int32_t> ids =
-        options_.shared_block_pool()->allocate(num_blocks, block_type());
-    // Cached blocks of either type hold shared slots. Retire them one at a
-    // time until the request fits.
-    while (ids.size() != num_blocks && evict_prefix_cache(1) != 0) {
-      ids = options_.shared_block_pool()->allocate(num_blocks, block_type());
+        pool->allocate(num_blocks, block_type(), placement_hint);
+    // Composite coordinates typed-slab victims across leaves; coarse legacy
+    // pools retain their leaf-local cache reclamation.
+    while (ids.size() != num_blocks && !pool->uses_slabs() &&
+           evict_prefix_cache(1) != 0) {
+      ids = pool->allocate(num_blocks, block_type());
     }
     std::vector<Block> blocks;
     blocks.reserve(ids.size());
@@ -164,6 +172,22 @@ size_t BlockManagerImpl::evict_prefix_cache(size_t num_blocks) {
   }
   AUTO_COUNTER(prefix_cache_latency_seconds_evict);
   return prefix_cache_->evict(num_blocks);
+}
+
+std::vector<PrefixCacheEntry> BlockManagerImpl::prefix_cache_entries() const {
+  return prefix_cache_ ? prefix_cache_->entries()
+                       : std::vector<PrefixCacheEntry>{};
+}
+
+bool BlockManagerImpl::evict_cached_block(const XXH3Key& hash) {
+  return prefix_cache_ && prefix_cache_->evict_block(hash);
+}
+
+void BlockManagerImpl::set_prefix_dependency(const XXH3Key& hash,
+                                             const XXH3Key& dependency) {
+  if (prefix_cache_) {
+    prefix_cache_->set_dependency(hash, dependency);
+  }
 }
 
 bool BlockManagerImpl::has_enough_blocks(uint32_t num_blocks) {
@@ -290,7 +314,10 @@ std::optional<std::vector<Block>> BlockManagerImpl::allocate_for_sequence(
     return std::vector<Block>{};
   }
   const size_t num_additional = num_blocks_needed - held;
-  std::vector<Block> blocks = allocate(num_additional);
+  const auto& pool = options_.shared_block_pool();
+  std::vector<Block> blocks = pool && pool->uses_slabs()
+                                  ? allocate_with_placement(num_additional, seq)
+                                  : allocate(num_additional);
   if (blocks.size() != num_additional) {
     return std::nullopt;
   }
@@ -326,10 +353,15 @@ bool BlockManagerImpl::allocate_prefetch_range(Sequence* seq,
 
   size_t allocatable = std::min(
       missing.size(), num_free_blocks() + num_blocks_in_prefix_cache());
-  std::vector<Block> allocated = allocate(allocatable);
+  const auto& pool = options_.shared_block_pool();
+  std::vector<Block> allocated = pool && pool->uses_slabs()
+                                     ? allocate_with_placement(allocatable, seq)
+                                     : allocate(allocatable);
   if (allocated.empty() && allocatable > 0) {
     allocatable = std::min(missing.size(), num_free_blocks());
-    allocated = allocate(allocatable);
+    allocated = pool && pool->uses_slabs()
+                    ? allocate_with_placement(allocatable, seq)
+                    : allocate(allocatable);
   }
 
   seq->update_block_hashes(static_cast<uint32_t>(block_size_),

@@ -80,6 +80,10 @@ class BlockManagerImpl : public BlockManager {
                : num_free_blocks_.load(std::memory_order_relaxed);
   }
   size_t evict_prefix_cache(size_t num_blocks) override;
+  std::vector<PrefixCacheEntry> prefix_cache_entries() const override;
+  bool evict_cached_block(const XXH3Key& hash) override;
+  void set_prefix_dependency(const XXH3Key& hash,
+                             const XXH3Key& dependency) override;
 
   // used blocks num
   size_t num_used_blocks() const override {
@@ -112,6 +116,9 @@ class BlockManagerImpl : public BlockManager {
   }
 
  protected:
+  std::vector<Block> allocate_with_placement(size_t num_blocks,
+                                             const void* placement_hint);
+
   // Flip a block's entry in `usage_ids` from 0 to 1. Returns true if the flip
   // happened; false if the entry was already 1 (i.e. block was already marked
   // used). Shared with subclasses (e.g. SlidingWindowBlockManager) that need

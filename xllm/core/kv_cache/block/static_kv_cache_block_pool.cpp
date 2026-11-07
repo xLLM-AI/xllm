@@ -102,6 +102,7 @@ StaticKVCacheBlockPool::StaticKVCacheBlockPool(
         type == BlockType::KV ? full_layers_ : 2 * linear_layers_;
     CHECK_LE(logical_capacity_, std::numeric_limits<size_t>::max() / row_width);
     logical_states_[index].assign(logical_capacity_, 0);
+    placement_hints_[index].assign(logical_capacity_, nullptr);
     physical_rows_[index].assign(logical_capacity_ * row_width, 0);
     free_ids_[index].reserve(logical_capacity_ - 1);
     for (uint32_t id = logical_capacity_ - 1; id > 0; --id) {
@@ -151,7 +152,8 @@ void StaticKVCacheBlockPool::remove_available_slab(uint32_t slab_id) {
   slab.available_index = kUnavailableSlab;
 }
 
-int32_t StaticKVCacheBlockPool::allocate_object(SlabType type) {
+int32_t StaticKVCacheBlockPool::allocate_object(SlabType type,
+                                                RequestPlacement* placement) {
   const size_t index = static_cast<size_t>(type);
   if (available_slabs_[index].empty()) {
     if (free_slabs_.empty()) {
@@ -162,6 +164,7 @@ int32_t StaticKVCacheBlockPool::allocate_object(SlabType type) {
     Slab& slab = slabs_[slab_id];
     CHECK_EQ(slab.live_objects, 0u);
     slab.type = type;
+    ++slab.generation;
     const size_t capacity = slab_bytes_ / object_bytes(type);
     slab.free_objects.clear();
     slab.free_objects.reserve(capacity);
@@ -172,7 +175,16 @@ int32_t StaticKVCacheBlockPool::allocate_object(SlabType type) {
     slab.available_index = available_slabs_[index].size();
     available_slabs_[index].emplace_back(slab_id);
   }
-  const uint32_t slab_id = available_slabs_[index].back();
+  uint32_t slab_id = available_slabs_[index].back();
+  if (placement != nullptr) {
+    const SlabAffinity& affinity = placement->recent_slabs[index];
+    const Slab& preferred = slabs_[affinity.slab_id];
+    if (preferred.type == type && preferred.generation == affinity.generation &&
+        !preferred.free_objects.empty()) {
+      slab_id = affinity.slab_id;
+    }
+    placement->recent_slabs[index] = {slab_id, slabs_[slab_id].generation};
+  }
   Slab& slab = slabs_[slab_id];
   const uint32_t object = slab.free_objects.back();
   slab.free_objects.pop_back();
@@ -220,13 +232,21 @@ void StaticKVCacheBlockPool::release_object(int32_t row, SlabType type) {
 
 std::vector<int32_t> StaticKVCacheBlockPool::allocate_slab_blocks(
     size_t num_blocks,
-    BlockType type) {
+    BlockType type,
+    const void* placement_hint) {
   const size_t index = block_type_index(type);
   if (num_blocks > free_ids_[index].size()) {
     return {};
   }
   const size_t row_width =
       type == BlockType::KV ? full_layers_ : 2 * linear_layers_;
+  RequestPlacement placement;
+  if (placement_hint != nullptr) {
+    const auto existing = request_placements_.find(placement_hint);
+    if (existing != request_placements_.end()) {
+      placement = existing->second;
+    }
+  }
   std::vector<int32_t> rows;
   rows.reserve(num_blocks * row_width);
   const size_t objects = num_blocks * row_width;
@@ -235,7 +255,8 @@ std::vector<int32_t> StaticKVCacheBlockPool::allocate_slab_blocks(
         type == BlockType::KV
             ? SlabType::KV
             : (object % 2 == 0 ? SlabType::CONV : SlabType::SSM);
-    const int32_t row = allocate_object(slab_type);
+    const int32_t row = allocate_object(
+        slab_type, placement_hint == nullptr ? nullptr : &placement);
     if (row < 0) {
       // Coupled recurrent allocations either own both state roles for every
       // layer, or return every entry and any newly emptied slab.
@@ -256,12 +277,17 @@ std::vector<int32_t> StaticKVCacheBlockPool::allocate_slab_blocks(
     const int32_t id = free_ids_[index].back();
     free_ids_[index].pop_back();
     logical_states_[index][id] = 2;
+    placement_hints_[index][id] = placement_hint;
     std::copy_n(rows.begin() + block * row_width,
                 row_width,
                 physical_rows_[index].begin() + id * row_width);
     blocks.emplace_back(id);
   }
   const size_t bytes = num_blocks * slots_per_block(type);
+  if (placement_hint != nullptr && num_blocks > 0) {
+    placement.owned_blocks += num_blocks;
+    request_placements_.insert_or_assign(placement_hint, placement);
+  }
   owned_bytes_ += bytes;
   num_used_slots_ += bytes;
   return blocks;
@@ -287,11 +313,13 @@ size_t StaticKVCacheBlockPool::slots_per_block(BlockType type) const {
   }
 }
 
-std::vector<int32_t> StaticKVCacheBlockPool::allocate(size_t num_blocks,
-                                                      BlockType type) {
+std::vector<int32_t> StaticKVCacheBlockPool::allocate(
+    size_t num_blocks,
+    BlockType type,
+    const void* placement_hint) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (slab_mode_) {
-    return allocate_slab_blocks(num_blocks, type);
+    return allocate_slab_blocks(num_blocks, type, placement_hint);
   }
   const size_t cost = slots_per_block(type);
   if (num_blocks > free_slots_.size() / cost) {
@@ -344,6 +372,16 @@ void StaticKVCacheBlockPool::release(int32_t block_id, BlockType type) {
       physical_rows_[index][begin + object] = 0;
     }
     logical_states_[index][block_id] = 0;
+    const void* placement_hint = placement_hints_[index][block_id];
+    if (placement_hint != nullptr) {
+      auto placement = request_placements_.find(placement_hint);
+      CHECK(placement != request_placements_.end());
+      CHECK_GT(placement->second.owned_blocks, 0u);
+      if (--placement->second.owned_blocks == 0) {
+        request_placements_.erase(placement);
+      }
+      placement_hints_[index][block_id] = nullptr;
+    }
     free_ids_[index].emplace_back(block_id);
     return;
   }
@@ -474,6 +512,40 @@ size_t StaticKVCacheBlockPool::num_used_slots() const {
 
 size_t StaticKVCacheBlockPool::available_objects(SlabType type) const {
   return available_object_counts_[static_cast<size_t>(type)];
+}
+
+size_t StaticKVCacheBlockPool::reclaimable_slab_count(
+    BlockType type,
+    const std::vector<int32_t>& block_ids) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!slab_mode_) {
+    return 0;
+  }
+  const size_t index = block_type_index(type);
+  const size_t width =
+      type == BlockType::KV ? full_layers_ : 2 * linear_layers_;
+  std::unordered_map<uint32_t, size_t> candidate_objects;
+  for (const int32_t id : block_ids) {
+    if (id <= 0 || static_cast<uint32_t>(id) >= logical_capacity_ ||
+        logical_states_[index][id] != 1) {
+      continue;
+    }
+    for (size_t object = 0; object < width; ++object) {
+      const SlabType slab_type =
+          type == BlockType::KV
+              ? SlabType::KV
+              : (object % 2 == 0 ? SlabType::CONV : SlabType::SSM);
+      const int32_t row = physical_rows_[index][id * width + object];
+      const uint32_t slab_id = static_cast<uint32_t>(
+          static_cast<size_t>(row) * object_row_bytes(slab_type) / slab_bytes_);
+      ++candidate_objects[slab_id];
+    }
+  }
+  size_t reclaimable = 0;
+  for (const auto& [slab_id, objects] : candidate_objects) {
+    reclaimable += objects == slabs_[slab_id].live_objects;
+  }
+  return reclaimable;
 }
 
 size_t StaticKVCacheBlockPool::num_free_blocks(BlockType type) const {

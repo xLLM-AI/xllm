@@ -19,6 +19,7 @@ limitations under the License.
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <unordered_map>
 #include <vector>
 
 #include "core/kv_cache/block/block.h"
@@ -37,7 +38,10 @@ class StaticKVCacheBlockPool final {
   StaticKVCacheBlockPool(uint32_t logical_capacity,
                          const StaticKVCacheLayout& layout);
 
-  std::vector<int32_t> allocate(size_t num_blocks, BlockType type);
+  // The optional non-owning request identity affects placement only.
+  std::vector<int32_t> allocate(size_t num_blocks,
+                                BlockType type,
+                                const void* placement_hint = nullptr);
   void release(int32_t block_id, BlockType type);
   void mark_active(int32_t block_id, BlockType type);
   void mark_inactive(int32_t block_id, BlockType type);
@@ -60,15 +64,31 @@ class StaticKVCacheBlockPool final {
   size_t num_used_slots() const;
   size_t slots_per_block(BlockType type) const;
   size_t num_free_blocks(BlockType type) const;
+  // Scores distinct cache-only candidates without changing ownership.
+  size_t reclaimable_slab_count(BlockType type,
+                                const std::vector<int32_t>& block_ids) const;
   bool uses_slabs() const { return slab_mode_; }
 
  private:
+  friend class StaticKVCacheBlockPoolTestPeer;
+
   enum class SlabType : uint8_t { KV = 0, CONV = 1, SSM = 2, FREE = 3 };
+
+  struct SlabAffinity {
+    uint32_t slab_id = 0;
+    uint64_t generation = 0;
+  };
+
+  struct RequestPlacement {
+    std::array<SlabAffinity, 3> recent_slabs;
+    size_t owned_blocks = 0;
+  };
 
   struct Slab {
     SlabType type = SlabType::FREE;
     size_t live_objects = 0;
     size_t available_index = 0;
+    uint64_t generation = 0;
     std::vector<uint32_t> free_objects;
   };
 
@@ -76,10 +96,12 @@ class StaticKVCacheBlockPool final {
   size_t object_bytes(SlabType type) const;
   size_t object_row_bytes(SlabType type) const;
   size_t available_objects(SlabType type) const;
-  int32_t allocate_object(SlabType type);
+  int32_t allocate_object(SlabType type, RequestPlacement* placement);
   void release_object(int32_t row, SlabType type);
   void remove_available_slab(uint32_t slab_id);
-  std::vector<int32_t> allocate_slab_blocks(size_t num_blocks, BlockType type);
+  std::vector<int32_t> allocate_slab_blocks(size_t num_blocks,
+                                            BlockType type,
+                                            const void* placement_hint);
   void append_rows(int32_t block_id,
                    BlockType type,
                    std::vector<int32_t>* rows) const;
@@ -115,6 +137,8 @@ class StaticKVCacheBlockPool final {
   // 0 is free, 1 is owned by prefix cache, and 2 is active.
   std::array<std::vector<uint8_t>, 2> logical_states_;
   std::array<std::vector<int32_t>, 2> physical_rows_;
+  std::array<std::vector<const void*>, 2> placement_hints_;
+  std::unordered_map<const void*, RequestPlacement> request_placements_;
 };
 
 }  // namespace xllm

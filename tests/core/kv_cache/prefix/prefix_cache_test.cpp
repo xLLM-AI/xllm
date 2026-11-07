@@ -14,6 +14,44 @@
 #include "util/hash_util.h"
 namespace xllm {
 
+TEST(PrefixCacheMtpTest, DependencySnapshotsDoNotPinTargetedEviction) {
+  BlockManager::Options options;
+  options.num_blocks(8).block_size(16);
+  BlockManagerImpl allocator(options);
+  PrefixCache cache(/*block_size=*/16, BlockHasherType::MTP_TEXT);
+  const std::vector<int32_t> tokens(33, 7);
+  std::vector<Block> blocks = allocator.allocate(/*num_blocks=*/2);
+  ASSERT_EQ(cache.insert(tokens, blocks), 32u);
+  const XXH3Key first(blocks[0].get_immutable_hash_value());
+  const XXH3Key second(blocks[1].get_immutable_hash_value());
+  cache.set_dependency(first, second);
+  const std::vector<PrefixCacheEntry> initial = cache.entries();
+  ASSERT_EQ(initial.size(), 2u);
+  EXPECT_EQ(blocks[0].ref_count(), 2u);
+  EXPECT_EQ(blocks[1].ref_count(), 2u);
+  for (const PrefixCacheEntry& entry : initial) {
+    EXPECT_TRUE(entry.chain_known);
+    EXPECT_FALSE(entry.evictable);
+    if (entry.block_index == 1) {
+      ASSERT_TRUE(entry.parent.has_value());
+      EXPECT_EQ(*entry.parent, first);
+    } else {
+      EXPECT_FALSE(entry.parent.has_value());
+      ASSERT_TRUE(entry.dependency.has_value());
+      EXPECT_EQ(*entry.dependency, second);
+    }
+  }
+  allocator.deallocate(blocks);
+  Block pinned = blocks.front();
+  blocks.clear();
+  EXPECT_FALSE(cache.evict_block(first));
+  EXPECT_TRUE(cache.evict_block(second));
+  EXPECT_EQ(cache.num_blocks(), 1u);
+  pinned = Block();
+  EXPECT_TRUE(cache.evict_block(first));
+  EXPECT_TRUE(cache.entries().empty());
+}
+
 TEST(PrefixCacheMtpTest, DifferentNextTokenCannotReuseFirstBlock) {
   BlockManager::Options options;
   options.num_blocks(8).block_size(16);

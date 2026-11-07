@@ -33,6 +33,7 @@ std::vector<Block> LinearStatePrefixCache::match(
     return {};
   }
   total_blocks_.fetch_add(n_blocks);
+  const int64_t now = absl::ToUnixMicros(absl::Now());
 
   std::vector<Block> blocks;
   blocks.reserve(n_blocks);
@@ -51,6 +52,7 @@ std::vector<Block> LinearStatePrefixCache::match(
       return false;
     }
     blocks.emplace_back(iter->second->block);
+    iter->second->last_access_time = now;
     lru_lst_.remove_node(iter->second);
     node_list.push_front(iter->second);
     return true;
