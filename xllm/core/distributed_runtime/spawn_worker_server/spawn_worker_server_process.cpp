@@ -21,6 +21,14 @@ limitations under the License.
 #include <optional>
 #include <string>
 
+#if defined(USE_NPU)
+#include <pybind11/embed.h>
+
+#include "core/framework/config/model_config.h"
+#include "core/framework/transfer/mooncake_transfer_engine.h"
+#include "core/platform/npu/startup.h"
+#endif
+
 #include "core/common/native_library.h"
 #include "core/distributed_runtime/spawn_worker_server/spawn_worker_protocol.h"
 #include "core/distributed_runtime/spawn_worker_server/spawn_worker_server.h"
@@ -195,48 +203,63 @@ int main(int argc, char* argv[]) {
       << ", model_impl = " << model_impl
       << ", extension_impl = " << extension_impl;
 
-  xllm::SpawnWorkerServer worker(master_node_addr,
-                                 local_rank,
-                                 global_rank,
-                                 world_size,
-                                 device_idx,
-                                 num_decoding_tokens,
-                                 block_size,
-                                 indexer_cache_dtype,
-                                 max_tokens_per_batch,
-                                 max_seqs_per_batch,
-                                 enable_shm > 0,
-                                 input_shm_size,
-                                 output_shm_size,
-                                 is_local > 0,
-                                 task_type,
-                                 worker_type,
-                                 enable_speculative_decode > 0,
-                                 num_speculative_tokens,
-                                 speculative_algorithm,
-                                 communication_backend,
-                                 npu_kernel_backend,
-                                 rank_tablefile,
-                                 enable_graph,
-                                 enable_graph_mode_decode_no_padding,
-                                 enable_prefill_piecewise_graph,
-                                 max_tokens_for_graph_mode,
-                                 max_encoder_cache_size,
-                                 dp_size,
-                                 ep_size,
-                                 cp_size,
-                                 kv_split_size,
-                                 tp_size,
-                                 sp_size,
-                                 cfg_size,
-                                 text_encoder_tp_size,
-                                 instance_role,
-                                 enable_mtp_draft_body_tp1,
-                                 enable_probabilistic_draft,
-                                 model_impl,
-                                 extension_impl);
+#if defined(USE_NPU)
+  xllm::ModelConfig::get_instance().model_impl(model_impl);
+  pybind11::scoped_interpreter interpreter(/*init_signal_handlers=*/false);
+  if (!xllm::initialize_npu_startup(device_idx)) {
+    return 1;
+  }
+  pybind11::gil_scoped_release release;
+#endif
 
-  worker.run();
+  {
+    xllm::SpawnWorkerServer worker(master_node_addr,
+                                   local_rank,
+                                   global_rank,
+                                   world_size,
+                                   device_idx,
+                                   num_decoding_tokens,
+                                   block_size,
+                                   indexer_cache_dtype,
+                                   max_tokens_per_batch,
+                                   max_seqs_per_batch,
+                                   enable_shm > 0,
+                                   input_shm_size,
+                                   output_shm_size,
+                                   is_local > 0,
+                                   task_type,
+                                   worker_type,
+                                   enable_speculative_decode > 0,
+                                   num_speculative_tokens,
+                                   speculative_algorithm,
+                                   communication_backend,
+                                   npu_kernel_backend,
+                                   rank_tablefile,
+                                   enable_graph,
+                                   enable_graph_mode_decode_no_padding,
+                                   enable_prefill_piecewise_graph,
+                                   max_tokens_for_graph_mode,
+                                   max_encoder_cache_size,
+                                   dp_size,
+                                   ep_size,
+                                   cp_size,
+                                   kv_split_size,
+                                   tp_size,
+                                   sp_size,
+                                   cfg_size,
+                                   text_encoder_tp_size,
+                                   instance_role,
+                                   enable_mtp_draft_body_tp1,
+                                   enable_probabilistic_draft,
+                                   model_impl,
+                                   extension_impl);
+
+    worker.run();
+  }
+
+#if defined(USE_NPU)
+  xllm::MooncakeTransferEngineCore::get_instance().shutdown();
+#endif
 
   return 0;
 }

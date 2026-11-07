@@ -11,6 +11,8 @@ cc_binary(
     spawn_worker_server_process.cpp
   DEPS
     :distributed_runtime
+    $<$<BOOL:${USE_NPU}>:npu_startup>
+    $<$<BOOL:${USE_NPU}>:pybind11::embed>
 )
 
 xllm_export_native_host(spawn_worker)

@@ -13,6 +13,38 @@ cc_test(
 if(USE_NPU)
   cc_test(
     NAME
+      npu_runtime_test
+    SRCS
+      npu_runtime_test.cpp
+    DEPS
+      :platform_npu
+      :xllm_ops
+      torch
+      torch_npu
+      GTest::gtest_main
+      glog::glog
+      pybind11::embed
+  )
+
+  # A separate process verifies startup before the shared test runtime exists.
+  cc_test(
+    NAME
+      npu_startup_test
+    NO_NPU_RUNTIME
+    SRCS
+      npu_startup_test.cpp
+    DEPS
+      :npu_startup
+      :platform_npu
+      torch
+      torch_npu
+      GTest::gtest_main
+      glog::glog
+      pybind11::embed
+  )
+
+  cc_test(
+    NAME
       npu_torch_profiler_test
     SRCS
       npu_torch_profiler_test.cpp
