@@ -600,7 +600,8 @@ class TestableContinuousScheduler final : public ContinuousScheduler<> {
 // verify how many tokens are processed in one scheduling.
 TEST(SchedulerPolicyTest, AddNewRequestBase) {
   std::vector<int32_t> prompt_len{10, 1024, 2048, 2048};
-  std::vector<int32_t> num_blocks{16, 128, 128, 128};
+  // The 2048-token prompt needs 128 data blocks plus padding block zero.
+  std::vector<int32_t> num_blocks{16, 128, 129, 128};
   std::vector<int32_t> block_size{16, 16, 16, 256};
   std::vector<int32_t> chunk_size{1024, 1024, 1024, 768};
   std::vector<int32_t> kv_split_size{1, 1, 1, 2};
