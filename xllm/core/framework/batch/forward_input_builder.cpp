@@ -1179,7 +1179,7 @@ Input ForwardInputBuilder::state_to_forward_input() {
       make_cpu_tensor(state_.kv_cache_tokens_nums);
   input_params.attention.device.q_seq_lens = make_cpu_tensor(state_.q_seq_lens);
   std::vector<int32_t> q_cu_seq_lens =
-      seq_lens::query_start_offsets(state_.q_seq_lens);
+      seq_lens::query_end_offsets(state_.q_seq_lens);
   input_params.attention.device.q_cu_seq_lens = make_cpu_tensor(q_cu_seq_lens);
   input_params.attention.host.kv_cache_tokens_nums =
       std::move(state_.kv_cache_tokens_nums);

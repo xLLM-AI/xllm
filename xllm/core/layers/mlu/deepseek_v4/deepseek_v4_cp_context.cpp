@@ -21,26 +21,20 @@ limitations under the License.
 #include <numeric>
 #include <utility>
 
+#include "kv_cache/layout/seq_lens_layout.h"
+
 namespace xllm::layer::mlu_v4_cp {
 namespace {
 
 torch::Tensor make_cu_seq_lens(const std::vector<int32_t>& seq_lens,
                                const torch::TensorOptions& options) {
-  std::vector<int32_t> cu_seq_lens = {0};
-  cu_seq_lens.reserve(seq_lens.size() + 1);
-  int32_t total_tokens = 0;
-  for (int32_t seq_len : seq_lens) {
-    total_tokens += seq_len;
-    cu_seq_lens.emplace_back(total_tokens);
-  }
-  return torch::tensor(cu_seq_lens, options);
+  return torch::tensor(seq_lens::cumulative(seq_lens), options);
 }
 
 }  // namespace
 
-std::vector<int32_t> localize_query_lengths(
-    const std::vector<int32_t>& q_seq_lens,
-    int64_t total_tokens) {
+void validate_query_lengths(const std::vector<int32_t>& q_seq_lens,
+                            int64_t total_tokens) {
   CHECK(!q_seq_lens.empty())
       << "MLU query lengths require at least one prefill request.";
   int64_t sum = 0;
@@ -50,7 +44,6 @@ std::vector<int32_t> localize_query_lengths(
   }
   CHECK_EQ(sum, total_tokens)
       << "MLU query lengths must sum to the current token count.";
-  return q_seq_lens;
 }
 
 bool should_enable_zigzag_cp(const std::vector<int32_t>& q_seq_lens,

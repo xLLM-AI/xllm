@@ -238,15 +238,22 @@ AttentionMetadata build_common_attention_metadata(
   // Graph buckets pad the length buffers to the captured shape but keep
   // `meta.num_sequences` at the request count, so the row count must come from
   // the buffers themselves or the padded rows lose their cumulative offsets.
+  // A buffer shorter than `num_sequences` is a caller bug; passing the larger
+  // count makes `cumulative_with_zero_out`'s size CHECK fire instead of
+  // silently truncating the cumulative array.
   const auto row_count = [&params](const torch::Tensor& lens) {
     return lens.defined()
                ? std::max(lens.numel(),
                           static_cast<int64_t>(params.meta.num_sequences))
                : static_cast<int64_t>(params.meta.num_sequences);
   };
+#if !defined(USE_NPU)
+  // NPU derives the query form from `device.q_cu_seq_lens` further down and
+  // overwrites this, so computing it here would only add two dead ops.
   attn_metadata.q_cu_seq_lens =
       cumulative_with_zero(params.attention.device.q_seq_lens,
                            row_count(params.attention.device.q_seq_lens));
+#endif
   attn_metadata.kv_cu_seq_lens =
       cumulative_with_zero(params.attention.device.kv_seq_lens,
                            row_count(params.attention.device.kv_seq_lens));

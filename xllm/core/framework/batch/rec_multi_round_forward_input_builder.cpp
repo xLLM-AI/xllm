@@ -290,7 +290,7 @@ RecForwardInput RecMultiRoundForwardInputBuilder::state_to_forward_input() {
   input_params.attention.device.q_seq_lens =
       torch::tensor(state.q_seq_lens, torch::kInt);
   std::vector<int32_t> q_cu_seq_lens =
-      seq_lens::query_start_offsets(state.q_seq_lens);
+      seq_lens::query_end_offsets(state.q_seq_lens);
   input_params.attention.device.q_cu_seq_lens =
       torch::tensor(q_cu_seq_lens, torch::kInt);
   input_params.attention.host.kv_seq_lens = std::move(state.seq_lens);

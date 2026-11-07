@@ -49,13 +49,6 @@ torch::Device infer_metadata_device(const ModelParamsView& params,
   return torch::Device(torch::kCPU);
 }
 
-int64_t vector_max_or_zero(const std::vector<int32_t>& values) {
-  if (values.empty()) {
-    return 0;
-  }
-  return *std::max_element(values.begin(), values.end());
-}
-
 torch::Tensor pad_block_table(const torch::Tensor& block_table,
                               int32_t target_rows,
                               int32_t target_cols,
@@ -641,12 +634,12 @@ void DSAMetadataBuilder::build_seq_lengths(const ModelParamsView& params,
     dsa_metadata.max_seqlen_q = torch::zeros({1}, int_options);
   }
 
-  dsa_metadata.max_query_len =
-      std::max<int64_t>(params.meta.q_max_seq_len,
-                        vector_max_or_zero(params.attention.host.q_seq_lens));
-  dsa_metadata.max_seq_len =
-      std::max<int64_t>(params.meta.kv_max_seq_len,
-                        vector_max_or_zero(params.attention.host.kv_seq_lens));
+  dsa_metadata.max_query_len = std::max<int64_t>(
+      params.meta.q_max_seq_len,
+      seq_lens::max_or_zero(params.attention.host.q_seq_lens));
+  dsa_metadata.max_seq_len = std::max<int64_t>(
+      params.meta.kv_max_seq_len,
+      seq_lens::max_or_zero(params.attention.host.kv_seq_lens));
 }
 
 void DSAMetadataBuilder::build_positions(const ModelParamsView& params,

@@ -1046,12 +1046,10 @@ NpuCpPlan NpuCpPlan::build(const CpPlanInput& input,
       plan.input_shard_meta_.local_padded_seq_lens;
   plan.attention_meta_.host_kv_seq_lens =
       plan.input_shard_meta_.local_padded_seq_lens;
-  plan.attention_meta_.host_q_cu_seq_lens = seq_lens::query_start_offsets(
-      plan.input_shard_meta_.local_padded_seq_lens);
-  int32_t max_seq_len = 0;
-  for (int32_t length : plan.input_shard_meta_.local_padded_seq_lens) {
-    max_seq_len = std::max(max_seq_len, length);
-  }
+  plan.attention_meta_.host_q_cu_seq_lens =
+      seq_lens::query_end_offsets(plan.input_shard_meta_.local_padded_seq_lens);
+  const int32_t max_seq_len =
+      seq_lens::max_or_zero(plan.input_shard_meta_.local_padded_seq_lens);
   plan.attention_meta_.q_max_seq_len = max_seq_len;
   plan.attention_meta_.kv_max_seq_len = max_seq_len;
 

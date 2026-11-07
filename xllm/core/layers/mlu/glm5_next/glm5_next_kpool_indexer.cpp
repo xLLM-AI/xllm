@@ -32,6 +32,7 @@ limitations under the License.
 #include "compiler/triton/include/jit_kernel.h"
 #include "framework/config/kv_cache_config.h"
 #include "framework/core/MLUStream.h"
+#include "kv_cache/layout/seq_lens_layout.h"
 #include "util/linalg.h"
 #include "util/tensor_helper.h"
 
@@ -53,11 +54,7 @@ int32_t max_sequence_length(const std::vector<int32_t>& lengths) {
 
 std::vector<int64_t> make_query_offsets(const std::vector<int32_t>& lengths) {
   std::vector<int64_t> offsets;
-  offsets.reserve(lengths.size() + 1);
-  offsets.emplace_back(0);
-  for (const int32_t length : lengths) {
-    offsets.emplace_back(offsets.back() + length);
-  }
+  seq_lens::cumulative_into(offsets, lengths);
   return offsets;
 }
 

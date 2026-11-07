@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -30,6 +31,12 @@ inline int32_t at(const Slice<int32_t>& lens, int32_t seq_idx) {
       << "seq_idx out of range, seq_idx=" << seq_idx
       << ", seq_lens_size=" << lens.size();
   return lens[static_cast<size_t>(seq_idx)];
+}
+
+// Empty lens have no maximum; callers use 0 so the padded metadata stays
+// valid instead of reading past the buffer.
+inline int32_t max_or_zero(const Slice<int32_t>& lens) {
+  return lens.empty() ? 0 : *std::max_element(lens.begin(), lens.end());
 }
 
 // `T` widens the running total for callers that index tokens beyond int32
@@ -50,8 +57,9 @@ inline std::vector<int32_t> cumulative(const Slice<int32_t>& lens) {
   return cumulative_lens;
 }
 
-// [l0, l0+l1, ...] — a running total with no leading zero.
-inline std::vector<int32_t> query_start_offsets(const Slice<int32_t>& lens) {
+// [l0, l0+l1, ...] — each sequence's exclusive end, with no leading zero. Not
+// `DSAMetadata::query_start_offsets`, which is `[0, cumsum(...)]`.
+inline std::vector<int32_t> query_end_offsets(const Slice<int32_t>& lens) {
   std::vector<int32_t> offsets;
   offsets.reserve(lens.size());
   int32_t running = 0;

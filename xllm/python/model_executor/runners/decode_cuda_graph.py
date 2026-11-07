@@ -380,10 +380,12 @@ class DecodeCudaGraphRunner(BaseRunner):
         static_metadata = entry.static_metadata
         page_size = self.attention_backend.page_size
         if page_size == 1:
-            static_metadata.paged_kv_indptr_host[1 : batch_size + 1].copy_(
-                torch.cumsum(per_seq_seq_lens, dim=0)
+            # Index 0 stays at the zero from the buffer's construction.
+            torch.cumsum(
+                per_seq_seq_lens,
+                dim=0,
+                out=static_metadata.paged_kv_indptr_host[1 : batch_size + 1],
             )
-            static_metadata.paged_kv_indptr_host[0] = 0
             static_metadata.paged_kv_last_page_len_host.fill_(1)
         else:
             # TODO: Fuse these host metadata updates into one C++ loop to avoid

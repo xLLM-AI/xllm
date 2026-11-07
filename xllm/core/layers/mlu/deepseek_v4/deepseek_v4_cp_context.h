@@ -49,9 +49,8 @@ struct DeepseekV4CpContext {
 };
 
 // Validates one query length per sequence against the packed token count.
-std::vector<int32_t> localize_query_lengths(
-    const std::vector<int32_t>& q_seq_lens,
-    int64_t total_tokens);
+void validate_query_lengths(const std::vector<int32_t>& q_seq_lens,
+                            int64_t total_tokens);
 
 bool should_enable_zigzag_cp(const std::vector<int32_t>& q_seq_lens,
                              int32_t cp_size);

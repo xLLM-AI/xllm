@@ -328,8 +328,7 @@ RecForwardInput OneRecForwardInputBuilder::build_rec_forward_input(
         make_pinned_cpu_tensor(seq_lens);
     input_params.attention.device.q_seq_lens =
         input_params.attention.device.kv_seq_lens;
-    std::vector<int32_t> q_cu_seq_lens =
-        seq_lens::query_start_offsets(seq_lens);
+    std::vector<int32_t> q_cu_seq_lens = seq_lens::query_end_offsets(seq_lens);
     input_params.attention.device.q_cu_seq_lens =
         make_pinned_cpu_tensor(q_cu_seq_lens);
     input_params.attention.host.kv_seq_lens = std::move(seq_lens);

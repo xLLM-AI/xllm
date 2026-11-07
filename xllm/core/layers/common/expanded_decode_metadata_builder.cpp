@@ -17,8 +17,6 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#include <algorithm>
-#include <numeric>
 #include <utility>
 #include <vector>
 
@@ -137,10 +135,6 @@ void ExpandedDecodeMetadataBuilder::populate_expanded_layout(
   const std::vector<int32_t> indptr = seq_lens::cumulative(page_counts);
   const std::vector<int32_t> last_page_lens =
       build_last_page_lens(expanded_host_kv_seq_lens, block_size);
-  CHECK_EQ(indptr.front(), 0);
-  CHECK(std::is_sorted(indptr.begin(), indptr.end()));
-  CHECK_EQ(indptr.back(),
-           std::accumulate(page_counts.begin(), page_counts.end(), int32_t{0}));
   for (int32_t last_page_len : last_page_lens) {
     CHECK_GE(last_page_len, 1);
     CHECK_LE(last_page_len, block_size);

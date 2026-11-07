@@ -19,8 +19,10 @@ limitations under the License.
 #include <string_view>
 #include <tuple>
 
+#include "kv_cache/layout/seq_lens_layout.h"
 #include "qwen3_5_gated_delta_net.h"
 #include "qwen3_gated_delta_net_impls.h"
+#include "util/tensor_helper.h"
 
 namespace xllm {
 namespace layer {
@@ -192,20 +194,13 @@ std::vector<int64_t> build_real_cu_seqlens(
 // to the device tensor. The convolution adapter requires N+1 entries.
 std::vector<int64_t> extract_cu_seqlens(
     const AttentionMetadata& attn_metadata) {
-  std::vector<int64_t> cu = {0};
+  std::vector<int64_t> cu;
   if (!attn_metadata.q_seq_lens_vec.empty()) {
-    cu.reserve(attn_metadata.q_seq_lens_vec.size() + 1);
-    for (const int32_t q_len : attn_metadata.q_seq_lens_vec) {
-      cu.emplace_back(cu.back() + q_len);
-    }
+    seq_lens::cumulative_into(cu, attn_metadata.q_seq_lens_vec);
     return cu;
   }
-  auto cpu_lens = attn_metadata.q_seq_lens.to(torch::kCPU).to(torch::kInt32);
-  const auto* ptr = cpu_lens.data_ptr<int32_t>();
-  cu.reserve(static_cast<size_t>(cpu_lens.numel()) + 1);
-  for (int64_t index = 0; index < cpu_lens.numel(); ++index) {
-    cu.emplace_back(cu.back() + ptr[index]);
-  }
+  seq_lens::cumulative_into(
+      cu, tensor_to_vector<int32_t>(attn_metadata.q_seq_lens));
   return cu;
 }
 

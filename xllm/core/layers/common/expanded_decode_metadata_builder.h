@@ -17,11 +17,9 @@ limitations under the License.
 
 #include <torch/types.h>
 
-#include <algorithm>
 #include <cstdint>
 #include <vector>
 
-#include "core/util/utils.h"
 #include "layers/common/attention_metadata.h"
 
 namespace xllm {

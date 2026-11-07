@@ -212,10 +212,10 @@ class DeepseekV4ModelImpl final
         modified_input_params.meta.batch_forward_type.no_decode() &&
         attn_metadata.dsa_metadata != nullptr;
     if (cp_candidate) {
-      const std::vector<int32_t> query_lengths =
-          layer::mlu_v4_cp::localize_query_lengths(
-              modified_input_params.attention.host.q_seq_lens,
-              positions.size(0));
+      const std::vector<int32_t>& query_lengths =
+          modified_input_params.attention.host.q_seq_lens;
+      layer::mlu_v4_cp::validate_query_lengths(query_lengths,
+                                               positions.size(0));
       cp_context = layer::mlu_v4_cp::build_cp_context(
           cp_size_, cp_rank_, cp_group_, query_lengths, positions);
       if (cp_context.has_value()) {
