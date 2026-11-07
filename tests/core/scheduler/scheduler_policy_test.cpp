@@ -2138,12 +2138,20 @@ TEST(SchedulerPolicyTest, ResourceNotEnough) {
     // request prompt len: 1000
     auto requests = generate_request(
         {1, 1000}, {1, 100}, std::nullopt, std::nullopt, 10000);
+    std::optional<Status> callback_status;
+    requests[1]->state().output_func = [&](const RequestOutput& output) {
+      callback_status = output.status;
+      return true;
+    };
     scheduler->add_request(requests[0]);
     scheduler->add_request(requests[1]);
 
     auto batch = scheduler->prepare_batch_test();
-    EXPECT_TRUE(batch.size() == 1);
-    EXPECT_TRUE(batch[0].size() == 1);  // can not schedule the second.
+    scheduler->wait_for_responses();
+    ASSERT_EQ(batch.size(), 1u);
+    EXPECT_EQ(batch[0].size(), 1u);
+    ASSERT_TRUE(callback_status.has_value());
+    EXPECT_EQ(callback_status->code(), StatusCode::RESOURCE_EXHAUSTED);
   }
 }
 
