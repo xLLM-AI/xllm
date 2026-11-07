@@ -28,7 +28,7 @@ class KVCacheState;
 // positions, including shared prefixes and expired SWA placeholders.
 // When provided, virtual_memory_block_ids receives the unshared flat KV
 // IDs appended during serialization; grouped and linear IDs are excluded.
-void append_disagg_kv_transfer_groups(
+void append_pd_kv_transfer_groups(
     const KVCacheState& kv_state,
     bool include_linear_state,
     proto::DisaggResponse* response,

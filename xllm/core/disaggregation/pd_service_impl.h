@@ -41,7 +41,6 @@ struct PDServiceOptions {
   std::string system_fingerprint;
 };
 
-// a class to handle disagg_pd requests
 class PDServiceImpl {
  public:
   explicit PDServiceImpl(PDScheduler* scheduler,

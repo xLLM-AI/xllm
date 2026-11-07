@@ -97,7 +97,7 @@ void drain_dispatch_queue(
 }
 
 // Keep request-to-wire conversion separate from dispatch admission and retries.
-void fill_disagg_request(Request& request, proto::DisaggRequest* req) {
+void fill_pd_request(Request& request, proto::DisaggRequest* req) {
   RequestState& state = request.state();
   req->set_req_id(request.request_id());
   req->set_reservation_id(state.pd_reservation_id);
@@ -594,7 +594,7 @@ void PDScheduler::dispatch_requests() {
     proto::DisaggResponses resps;
     reqs.set_prefill_name(xservice_client_->get_instance_name());
     // The RPC supports batches; dispatch admits one request at a time.
-    fill_disagg_request(*request, reqs.add_reqs());
+    fill_pd_request(*request, reqs.add_reqs());
     reqs.mutable_cluster_infos()->mutable_cluster_ids()->Add(
         instance_info_.cluster_ids.begin(), instance_info_.cluster_ids.end());
     reqs.mutable_cluster_infos()->mutable_addrs()->Add(

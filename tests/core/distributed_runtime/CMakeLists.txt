@@ -170,9 +170,9 @@ endif()
 cc_test(
   NO_NPU_RUNTIME
   NAME
-    disagg_pd_request_converter_test
+    pd_request_converter_test
   SRCS
-    disagg_pd_request_converter_test.cpp
+    pd_request_converter_test.cpp
   DEPS
     :disaggregation
     GTest::gtest_main
@@ -181,11 +181,11 @@ cc_test(
 cc_test(
   NO_NPU_RUNTIME
   NAME
-    disagg_pd_kv_response_test
+    pd_kv_response_test
   SRCS
-    disagg_pd_kv_response_test.cpp
+    pd_kv_response_test.cpp
   DEPS
-    :distributed_runtime
+    :disaggregation
     GTest::gtest_main
 )
 

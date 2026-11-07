@@ -7,14 +7,16 @@ cc_library(
     pd_scheduler.h
     pd_service.h
     pd_service_impl.h
-    disagg_pd_request_converter.h
-    disagg_pd_response.h
+    pd_request_converter.h
+    pd_response.h
+    pd_kv_response.h
   SRCS
     pd_scheduler.cpp
     pd_service.cpp
     pd_service_impl.cpp
-    disagg_pd_request_converter.cpp
-    disagg_pd_response.cpp
+    pd_request_converter.cpp
+    pd_response.cpp
+    pd_kv_response.cpp
   DEPS
     :scheduler
     :distributed_runtime

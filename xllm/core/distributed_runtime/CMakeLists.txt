@@ -34,7 +34,6 @@ cc_library(
     vlm_engine.h
     speculative_engine.h
     rec_engine.h
-    disagg_pd_kv_response.h
     distributed_worker_manager.h
     remote_worker.h
     worker_server.h
@@ -53,7 +52,6 @@ cc_library(
     vlm_engine.cpp
     speculative_engine.cpp
     rec_engine.cpp
-    disagg_pd_kv_response.cpp
     distributed_worker_manager.cpp
     kv_cache_transfer_coordinator.cpp
     remote_worker.cpp

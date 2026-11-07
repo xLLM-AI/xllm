@@ -32,7 +32,7 @@ limitations under the License.
 #include "api_service/openai_json.h"
 #include "api_service/stream_call.h"
 #include "chat.pb.h"
-#include "core/disaggregation/disagg_pd_response.h"
+#include "core/disaggregation/pd_response.h"
 #include "core/distributed_runtime/http_callback_channel_cache.h"
 #include "core/distributed_runtime/xservice_client.h"
 #include "core/framework/config/distributed_config.h"

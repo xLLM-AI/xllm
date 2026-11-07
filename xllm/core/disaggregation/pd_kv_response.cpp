@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/distributed_runtime/disagg_pd_kv_response.h"
+#include "core/disaggregation/pd_kv_response.h"
 
 #include <glog/logging.h>
 
@@ -26,7 +26,7 @@ limitations under the License.
 
 namespace xllm {
 
-void append_disagg_kv_transfer_groups(
+void append_pd_kv_transfer_groups(
     const KVCacheState& kv_state,
     bool include_linear_state,
     proto::DisaggResponse* response,
