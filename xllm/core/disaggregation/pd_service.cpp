@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/disaggregation/disagg_pd_service.h"
+#include "core/disaggregation/pd_service.h"
 
 #include <brpc/closure_guard.h>
 
@@ -21,60 +21,59 @@ limitations under the License.
 
 namespace xllm {
 
-DisaggPDService::DisaggPDService(DisaggPDScheduler* scheduler,
-                                 Engine* engine,
-                                 int32_t kv_cache_block_tokens,
-                                 DisaggPDServiceOptions response_options) {
-  disagg_pd_service_impl_ = std::make_unique<DisaggPDServiceImpl>(
-      scheduler, engine, kv_cache_block_tokens, std::move(response_options));
-}
+PDService::PDService(PDScheduler* scheduler,
+                     Engine* engine,
+                     PDServiceOptions response_options)
+    : pd_service_impl_(
+          std::make_unique<PDServiceImpl>(scheduler,
+                                          engine,
+                                          std::move(response_options))) {}
 
-void DisaggPDService::ReleaseReservation(
+void PDService::ReleaseReservation(
     ::google::protobuf::RpcController* /*controller*/,
     const proto::ReleaseReservationRequest* request,
     proto::ReleaseReservationResponse* response,
     ::google::protobuf::Closure* done) {
   brpc::ClosureGuard done_guard(done);
-  disagg_pd_service_impl_->release_reservation(request, response);
+  pd_service_impl_->release_reservation(request, response);
 }
 
-void DisaggPDService::AddNewRequests(
-    ::google::protobuf::RpcController* controller,
+void PDService::AddNewRequests(
+    ::google::protobuf::RpcController* /*controller*/,
     const proto::DisaggRequests* request,
     proto::DisaggResponses* response,
     ::google::protobuf::Closure* done) {
   brpc::ClosureGuard done_guard(done);
   // try to allocate blocks for new requests
-  disagg_pd_service_impl_->decode_recv_new_requests(request, response);
+  pd_service_impl_->decode_recv_new_requests(request, response);
 }
 
 // TODO: support embedding later, now we only support tokens
-void DisaggPDService::FirstGeneration(
-    ::google::protobuf::RpcController* controller,
+void PDService::FirstGeneration(
+    ::google::protobuf::RpcController* /*controller*/,
     const proto::DisaggGenerationsRequests* request,
     proto::Status* response,
     ::google::protobuf::Closure* done) {
   // Receive first token from Prefill, schedule the request to running queue
   brpc::ClosureGuard done_guard(done);
-  disagg_pd_service_impl_->decode_recv_first_generation(request, response);
+  pd_service_impl_->decode_recv_first_generation(request, response);
 }
 
-void DisaggPDService::LinkInstance(
-    ::google::protobuf::RpcController* controller,
+void PDService::LinkInstance(::google::protobuf::RpcController* /*controller*/,
+                             const proto::InstanceClusterInfo* request,
+                             proto::Status* response,
+                             ::google::protobuf::Closure* done) {
+  brpc::ClosureGuard done_guard(done);
+  pd_service_impl_->link_instance(request, response);
+}
+
+void PDService::UnlinkInstance(
+    ::google::protobuf::RpcController* /*controller*/,
     const proto::InstanceClusterInfo* request,
     proto::Status* response,
     ::google::protobuf::Closure* done) {
   brpc::ClosureGuard done_guard(done);
-  disagg_pd_service_impl_->link_instance(request, response);
-}
-
-void DisaggPDService::UnlinkInstance(
-    ::google::protobuf::RpcController* controller,
-    const proto::InstanceClusterInfo* request,
-    proto::Status* response,
-    ::google::protobuf::Closure* done) {
-  brpc::ClosureGuard done_guard(done);
-  disagg_pd_service_impl_->unlink_instance(request, response);
+  pd_service_impl_->unlink_instance(request, response);
 }
 
 }  // namespace xllm

@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/disaggregation/disagg_pd_scheduler.h"
+#include "core/disaggregation/pd_scheduler.h"
 
 #include <absl/time/clock.h>
 #include <absl/time/time.h>
@@ -22,13 +22,10 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include <algorithm>
-#include <iomanip>
 #include <limits>
 #include <queue>
-#include <random>
 #include <vector>
 
-#include "common/global_flags.h"
 #include "common/macros.h"
 #include "core/distributed_runtime/distributed_vmm_coordinator.h"
 #include "core/distributed_runtime/kv_cache_transfer_coordinator.h"
@@ -48,7 +45,6 @@ limitations under the License.
 #include "framework/request/sequence.h"
 #include "scheduler/continuous_scheduler.h"
 #include "server/xllm_server_registry.h"
-#include "util/env_var.h"
 #include "util/timer.h"
 #include "util/utils.h"
 #include "util/uuid.h"
@@ -68,7 +64,8 @@ constexpr std::chrono::minutes kReservationReleaseRetention{5};
 // wait_dequeue_timed(online) / try_dequeue(offline) loop:
 //   1. online requests always come before offline ones, and
 //   2. within each group the earliest created_time wins.
-struct RequestPriorityComparator {
+class RequestPriorityComparator final {
+ public:
   bool operator()(const RequestPtr& a, const RequestPtr& b) const {
     const bool a_online = !a->offline();
     const bool b_online = !b->offline();
@@ -97,6 +94,81 @@ void drain_dispatch_queue(
     }
     pending->push(std::move(incoming));
   }
+}
+
+// Keep request-to-wire conversion separate from dispatch admission and retries.
+void fill_disagg_request(Request& request, proto::DisaggRequest* req) {
+  RequestState& state = request.state();
+  req->set_req_id(request.request_id());
+  req->set_reservation_id(state.pd_reservation_id);
+  req->set_service_req_id(request.service_request_id());
+  req->set_source_xservice_addr(request.source_xservice_addr());
+  req->set_tokens_num(state.prompt_tokens.size());
+  req->set_prompt(state.prompt);
+  req->set_response_type(state.response_type);
+  req->set_model(state.response_model);
+  req->mutable_tools()->Assign(state.response_tools.begin(),
+                               state.response_tools.end());
+  req->set_tool_choice(state.response_tool_choice);
+  *req->mutable_chat_template_kwargs() = state.response_chat_template_kwargs;
+  *req->mutable_stream_options() = state.response_stream_options;
+  ADD_VECTOR_TO_PROTO(req->mutable_prompt_tokens(), state.prompt_tokens);
+  req->set_stream(state.stream);
+  req->set_x_request_id(request.x_request_id());
+  req->set_x_request_time(request.x_request_time());
+  req->set_seq_capacity(state.seq_capacity);
+  req->set_max_tokens(state.stopping_checker.get_max_generated_tokens());
+  req->set_max_context_len(state.stopping_checker.get_max_context_len());
+  req->set_ignore_eos(state.stopping_checker.get_ignore_eos());
+  req->set_eos_token_id(state.stopping_checker.get_eos_token());
+  if (!state.stopping_checker.get_stop_tokens().empty()) {
+    ADD_VECTOR_TO_PROTO(req->mutable_stop_token_ids(),
+                        state.stopping_checker.get_stop_tokens());
+  }
+  const auto& stop_sequences = state.stopping_checker.get_stop_sequences();
+  const auto& stop_strings = state.stopping_checker.get_stop_strings();
+  for (size_t index = 0; index < stop_sequences.size(); ++index) {
+    auto* proto_seq = req->add_stop_sequences();
+    ADD_VECTOR_TO_PROTO(proto_seq->mutable_seq_tokens(), stop_sequences[index]);
+    if (index < stop_strings.size()) {
+      proto_seq->set_stop_string(stop_strings[index]);
+    }
+  }
+  req->set_n(state.n);
+  req->set_best_of(state.best_of);
+  req->set_frequency_penalty(state.sampling_param.frequency_penalty);
+  req->set_presence_penalty(state.sampling_param.presence_penalty);
+  req->set_repetition_penalty(state.sampling_param.repetition_penalty);
+  req->set_temperature(state.sampling_param.temperature);
+  req->set_top_p(state.sampling_param.top_p);
+  req->set_min_p(state.sampling_param.min_p);
+  const RequestSamplingParam& sampling = state.sampling_param;
+  if (sampling.seed.has_value()) {
+    req->set_seed(*sampling.seed);
+  }
+  req->set_min_tokens(sampling.min_tokens);
+  req->set_vocab_size(sampling.vocab_size);
+  req->mutable_logit_bias()->insert(sampling.logit_bias.begin(),
+                                    sampling.logit_bias.end());
+  if (sampling.allowed_token_ids.has_value()) {
+    ADD_VECTOR_TO_PROTO(req->mutable_allowed_token_ids(),
+                        sampling.allowed_token_ids.value());
+  }
+  ADD_VECTOR_TO_PROTO(req->mutable_all_stop_token_ids(),
+                      sampling.all_stop_token_ids);
+  for (const auto& word : sampling.bad_words_token_ids) {
+    ADD_VECTOR_TO_PROTO(req->add_bad_words_token_ids()->mutable_seq_tokens(),
+                        word);
+  }
+  req->set_top_k(state.sampling_param.top_k);
+  req->set_logprobs(state.sampling_param.logprobs);
+  req->set_top_logprobs(state.sampling_param.top_logprobs);
+  req->set_is_embeddings(state.sampling_param.is_embeddings);
+  req->set_echo(state.echo);
+  req->set_skip_special_tokens(state.skip_special_tokens);
+  req->set_include_stop_str_in_output(state.include_stop_str_in_output);
+  req->set_json_object(state.sampling_param.json_object);
+  req->set_json_reasoning_enabled(state.json_reasoning_enabled);
 }
 
 void send_reservation_release(const std::string& req_id,
@@ -176,7 +248,7 @@ bool has_rank_preserving_kv_groups(const proto::DisaggResponse& response) {
       });
 }
 
-DisaggPDScheduler::~DisaggPDScheduler() {
+PDScheduler::~PDScheduler() {
   if (xservice_client_ != nullptr) {
     xservice_client_->clear_heartbeat_callback(
         heartbeat_callback_registration_);
@@ -223,7 +295,7 @@ DisaggPDScheduler::~DisaggPDScheduler() {
   }
 }
 
-void DisaggPDScheduler::initialize_rpc_server(const std::string& server_name) {
+void PDScheduler::initialize_rpc_server(const std::string& server_name) {
   // wait rpc server initialized
   auto rpc_server = ServerRegistry::get_instance().get_server(server_name);
   while (!rpc_server || !rpc_server->has_initialized()) {
@@ -245,7 +317,7 @@ void DisaggPDScheduler::initialize_rpc_server(const std::string& server_name) {
   xservice_client_->clear_heartbeat_callback(previous_registration);
 }
 
-void DisaggPDScheduler::register_instance_info(const std::string& server_name) {
+void PDScheduler::register_instance_info(const std::string& server_name) {
   // register instance info
   instance_info_.name = xservice_client_->get_instance_name();
   auto rpc_server = ServerRegistry::get_instance().get_server(server_name);
@@ -271,7 +343,7 @@ void DisaggPDScheduler::register_instance_info(const std::string& server_name) {
 #endif
 }
 
-void DisaggPDScheduler::profile_ttft() {
+void PDScheduler::profile_ttft() {
   LOG(INFO) << "Start profiling TTFT.";
   // get the maximum prefill token length
   auto& model_args = engine_->model_args();
@@ -293,7 +365,7 @@ void DisaggPDScheduler::profile_ttft() {
   }
 }
 
-void DisaggPDScheduler::profile_tpot() {
+void PDScheduler::profile_tpot() {
   LOG(INFO) << "Start profiling TPOT.";
   // get the maximum token length
   auto& model_args = engine_->model_args();
@@ -331,13 +403,9 @@ void DisaggPDScheduler::profile_tpot() {
   }
 }
 
-void DisaggPDScheduler::start_rpc_server(
-    DisaggPDServiceOptions response_options) {
-  auto service = std::make_unique<DisaggPDService>(
-      this,
-      engine_,
-      KVCacheConfig::get_instance().block_size(),
-      std::move(response_options));
+void PDScheduler::start_rpc_server(PDServiceOptions response_options) {
+  auto service =
+      std::make_unique<PDService>(this, engine_, std::move(response_options));
   const int32_t port = ::xllm::DisaggPDConfig::get_instance().disagg_pd_port();
   auto rpc_server =
       ServerRegistry::get_instance().register_server(server_name_);
@@ -347,7 +415,7 @@ void DisaggPDScheduler::start_rpc_server(
   }
 }
 
-void DisaggPDScheduler::step(const absl::Duration& timeout) {
+void PDScheduler::step(const absl::Duration& timeout) {
   ContinuousSchedulerBase::step(timeout);
   // Send first generation token to decode instance.
   // Always check (not gated on last_step_prefill_) because chunked prefill
@@ -359,13 +427,12 @@ void DisaggPDScheduler::step(const absl::Duration& timeout) {
   }
 }
 
-size_t DisaggPDScheduler::num_queued_requests() const {
+size_t PDScheduler::num_queued_requests() const {
   return ContinuousSchedulerBase::num_queued_requests() +
          pending_dispatch_requests_;
 }
 
-bool DisaggPDScheduler::enqueue_ready_request(
-    std::shared_ptr<Request> request) {
+bool PDScheduler::enqueue_ready_request(std::shared_ptr<Request> request) {
   const bool offline = request->offline();
   const bool queued =
       offline ? prefill_request_queue_offline_.enqueue(std::move(request))
@@ -376,14 +443,13 @@ bool DisaggPDScheduler::enqueue_ready_request(
   return queued;
 }
 
-void DisaggPDScheduler::release_dispatch_admission() {
+void PDScheduler::release_dispatch_admission() {
   std::lock_guard<std::mutex> lock(request_admission_mutex_);
   CHECK_GT(pending_dispatch_requests_, 0u);
   --pending_dispatch_requests_;
 }
 
-bool DisaggPDScheduler::enqueue_dispatched_request(
-    std::shared_ptr<Request> request) {
+bool PDScheduler::enqueue_dispatched_request(std::shared_ptr<Request> request) {
   bool queued = false;
   {
     std::lock_guard<std::mutex> lock(request_admission_mutex_);
@@ -402,7 +468,7 @@ bool DisaggPDScheduler::enqueue_dispatched_request(
 }
 
 // prefill send new request to remote instance
-void DisaggPDScheduler::dispatch_requests() {
+void PDScheduler::dispatch_requests() {
   PendingQueue pending;
   while (true) {
     bool exit_requested = false;
@@ -453,9 +519,6 @@ void DisaggPDScheduler::dispatch_requests() {
            "PD request requires a service address and request ID"});
       continue;
     }
-
-    std::vector<std::shared_ptr<Request>> requests;
-    requests.emplace_back(request);
 
     const InstanceInfo remote_info =
         xservice_client_->get_instance_info(selected_instance);
@@ -521,119 +584,17 @@ void DisaggPDScheduler::dispatch_requests() {
       request->state().pd_reservation_id = ShortUUID().random();
     }
 
-    // NOTE: TODO: maybe we need to support batch disatch
-    // later, this maybe decrease the communication cost.
-    // currently we only support one request per dispatch.
-
-    // TODO: try to get a batch request.
-
     {
       std::lock_guard<std::mutex> lock(req_to_channel_map_mutex_);
-      for (auto& req : requests) {
-        req_to_channel_map_[req->request_id()] = stub;
-      }
+      req_to_channel_map_[request->request_id()] = stub;
     }
 
-    // TODO: send the request to the selected D instance
-    // Send 'DisaggRequests' and recv 'DisaggResponses'
     Timer decode_allocation_timer;
-    xllm::proto::DisaggRequests reqs;
-    xllm::proto::DisaggResponses resps;
-    // prefill name (ID)
+    proto::DisaggRequests reqs;
+    proto::DisaggResponses resps;
     reqs.set_prefill_name(xservice_client_->get_instance_name());
-    reqs.mutable_reqs()->Reserve(requests.size());
-    // currently we only support one request once.
-    for (size_t i = 0; i < requests.size(); ++i) {
-      // proto::DisaggRequest req;
-      auto req = reqs.mutable_reqs()->Add();
-      req->set_req_id(requests[i]->request_id());
-      req->set_reservation_id(requests[i]->state().pd_reservation_id);
-      req->set_service_req_id(requests[i]->service_request_id());
-      req->set_source_xservice_addr(requests[i]->source_xservice_addr());
-      req->set_tokens_num(requests[i]->state().prompt_tokens.size());
-      req->set_prompt(requests[i]->state().prompt);
-      const auto& state = requests[i]->state();
-      req->set_response_type(state.response_type);
-      req->set_model(state.response_model);
-      req->mutable_tools()->Assign(state.response_tools.begin(),
-                                   state.response_tools.end());
-      req->set_tool_choice(state.response_tool_choice);
-      *req->mutable_chat_template_kwargs() =
-          state.response_chat_template_kwargs;
-      *req->mutable_stream_options() = state.response_stream_options;
-      ADD_VECTOR_TO_PROTO(req->mutable_prompt_tokens(),
-                          requests[i]->state().prompt_tokens);
-      req->set_stream(requests[i]->state().stream);
-      req->set_x_request_id(requests[i]->x_request_id());
-      req->set_x_request_time(requests[i]->x_request_time());
-      req->set_seq_capacity(requests[i]->state().seq_capacity);
-      req->set_max_tokens(
-          requests[i]->state().stopping_checker.get_max_generated_tokens());
-      req->set_max_context_len(
-          requests[i]->state().stopping_checker.get_max_context_len());
-      req->set_ignore_eos(
-          requests[i]->state().stopping_checker.get_ignore_eos());
-      req->set_eos_token_id(
-          requests[i]->state().stopping_checker.get_eos_token());
-      if (requests[i]->state().stopping_checker.get_stop_tokens().size() > 0) {
-        ADD_VECTOR_TO_PROTO(
-            req->mutable_stop_token_ids(),
-            requests[i]->state().stopping_checker.get_stop_tokens());
-      }
-      const auto& stop_sequences =
-          requests[i]->state().stopping_checker.get_stop_sequences();
-      const auto& stop_strings =
-          requests[i]->state().stopping_checker.get_stop_strings();
-      for (size_t index = 0; index < stop_sequences.size(); ++index) {
-        auto* proto_seq = req->add_stop_sequences();
-        ADD_VECTOR_TO_PROTO(proto_seq->mutable_seq_tokens(),
-                            stop_sequences[index]);
-        if (index < stop_strings.size()) {
-          proto_seq->set_stop_string(stop_strings[index]);
-        }
-      }
-      req->set_n(requests[i]->state().n);
-      req->set_best_of(requests[i]->state().best_of);
-      req->set_frequency_penalty(
-          requests[i]->state().sampling_param.frequency_penalty);
-      req->set_presence_penalty(
-          requests[i]->state().sampling_param.presence_penalty);
-      req->set_repetition_penalty(
-          requests[i]->state().sampling_param.repetition_penalty);
-      req->set_temperature(requests[i]->state().sampling_param.temperature);
-      req->set_top_p(requests[i]->state().sampling_param.top_p);
-      req->set_min_p(requests[i]->state().sampling_param.min_p);
-      const auto& sampling = requests[i]->state().sampling_param;
-      if (sampling.seed.has_value()) {
-        req->set_seed(*sampling.seed);
-      }
-      req->set_min_tokens(sampling.min_tokens);
-      req->set_vocab_size(sampling.vocab_size);
-      req->mutable_logit_bias()->insert(sampling.logit_bias.begin(),
-                                        sampling.logit_bias.end());
-      if (sampling.allowed_token_ids.has_value()) {
-        ADD_VECTOR_TO_PROTO(req->mutable_allowed_token_ids(),
-                            sampling.allowed_token_ids.value());
-      }
-      ADD_VECTOR_TO_PROTO(req->mutable_all_stop_token_ids(),
-                          sampling.all_stop_token_ids);
-      for (const auto& word : sampling.bad_words_token_ids) {
-        ADD_VECTOR_TO_PROTO(
-            req->add_bad_words_token_ids()->mutable_seq_tokens(), word);
-      }
-      req->set_top_k(requests[i]->state().sampling_param.top_k);
-      req->set_logprobs(requests[i]->state().sampling_param.logprobs);
-      req->set_top_logprobs(requests[i]->state().sampling_param.top_logprobs);
-      req->set_is_embeddings(requests[i]->state().sampling_param.is_embeddings);
-      req->set_echo(requests[i]->state().echo);
-      req->set_skip_special_tokens(requests[i]->state().skip_special_tokens);
-      req->set_include_stop_str_in_output(
-          requests[i]->state().include_stop_str_in_output);
-      req->set_json_object(requests[i]->state().sampling_param.json_object);
-      req->set_json_reasoning_enabled(
-          requests[i]->state().json_reasoning_enabled);
-      //*reqs.mutable_reqs()->Add() = req;
-    }
+    // The RPC supports batches; dispatch admits one request at a time.
+    fill_disagg_request(*request, reqs.add_reqs());
     reqs.mutable_cluster_infos()->mutable_cluster_ids()->Add(
         instance_info_.cluster_ids.begin(), instance_info_.cluster_ids.end());
     reqs.mutable_cluster_infos()->mutable_addrs()->Add(
@@ -653,145 +614,135 @@ void DisaggPDScheduler::dispatch_requests() {
     if (cntl.Failed()) {
       LOG(ERROR) << "Failed to add new requests to decode instance : "
                  << selected_instance << ", error text : " << cntl.ErrorText();
-      for (auto& request : requests) {
-        request->state().decode_rpc_address =
-            cntl.remote_side().port > 0
-                ? butil::endpoint2str(cntl.remote_side()).c_str()
-                : remote_info.rpc_address;
-        release_failed_request(request);
-        output_dispatcher_->process_failed_request(
-            request,
-            {StatusCode::UNKNOWN,
-             "Failed to add new requests to decode instance"});
-      }
+      request->state().decode_rpc_address =
+          cntl.remote_side().port > 0
+              ? butil::endpoint2str(cntl.remote_side()).c_str()
+              : remote_info.rpc_address;
+      release_failed_request(request);
+      output_dispatcher_->process_failed_request(
+          request,
+          {StatusCode::UNKNOWN,
+           "Failed to add new requests to decode instance"});
       continue;
     }
 
-    // check reqs which can not dispatch to D instance,
-    // and push back to prefill_request_queue_
-    CHECK_EQ(requests.size(), resps.resps().size())
+    CHECK_EQ(resps.resps_size(), 1)
         << "selected_instance : " << selected_instance;
     // insert instance name to linked_instance_
     {
       std::lock_guard<std::mutex> lock(linked_instances_mutex_);
       linked_instance_.emplace(selected_instance);
     }
-    for (size_t i = 0; i < requests.size(); ++i) {
-      if (resps.resps()[i].status_code() != 200) {
-        if (is_permanent_rejection(resps.resps()[i].status_code())) {
-          LOG(ERROR) << "Decode permanently rejected request, status_code="
-                     << resps.resps()[i].status_code()
-                     << ", request_id=" << requests[i]->request_id()
-                     << ", prompt_tokens="
-                     << requests[i]->state().prompt_tokens.size()
-                     << ", selected_instance=" << selected_instance;
-          do_permanent_rejection(requests[i], resps.resps()[i].status_code());
-          continue;
-        }
+    const proto::DisaggResponse& resp = resps.resps(0);
+    if (resp.status_code() != 200) {
+      if (is_permanent_rejection(resp.status_code())) {
+        LOG(ERROR) << "Decode permanently rejected request, status_code="
+                   << resp.status_code()
+                   << ", request_id=" << request->request_id()
+                   << ", prompt_tokens="
+                   << request->state().prompt_tokens.size()
+                   << ", selected_instance=" << selected_instance;
+        do_permanent_rejection(request, resp.status_code());
+      } else {
         // Keep created_time order: retry from the local pending queue instead
         // of the MPMC queue, which is not FIFO across HTTP threads.
-        pending.push(requests[i]);
+        pending.push(request);
         release_admission.dismiss();
+      }
+    } else {
+      for (auto& sequence : request->sequences()) {
+        TransferKVInfo info;
+        info.request_id = request->request_id();
+        info.rank_local_mapping = instance_info_.kv_split_size > 1 &&
+                                  has_rank_preserving_kv_groups(resp);
+        info.mappings.reserve(resp.groups_size());
+        for (const proto::KVTransferGroup& proto_group : resp.groups()) {
+          KVTransferMapping mapping;
+          mapping.group_id = proto_group.group_id();
+          mapping.remote_ids.assign(proto_group.ids().begin(),
+                                    proto_group.ids().end());
+          mapping.remote_shared_num = proto_group.remote_shared_num();
+          info.mappings.emplace_back(std::move(mapping));
+        }
+        info.dp_rank = resp.dp_rank();
+        info.remote_instance_info = remote_info;
 
-      } else {
-        for (auto& sequence : requests[i]->sequences()) {
-          TransferKVInfo info;
-          info.request_id = requests[i]->request_id();
-          const auto& resp = resps.resps()[i];
-          info.rank_local_mapping = instance_info_.kv_split_size > 1 &&
-                                    has_rank_preserving_kv_groups(resp);
-          info.mappings.reserve(resp.groups_size());
-          for (const proto::KVTransferGroup& proto_group : resp.groups()) {
-            KVTransferMapping mapping;
-            mapping.group_id = proto_group.group_id();
-            mapping.remote_ids.assign(proto_group.ids().begin(),
-                                      proto_group.ids().end());
-            mapping.remote_shared_num = proto_group.remote_shared_num();
-            info.mappings.emplace_back(std::move(mapping));
+        // VirtualMemory mode: save destination offsets from D-node
+        if (resp.virtual_kv_cache_layer_global_offsets_size() > 0) {
+          info.dst_virtual_kv_cache_layer_global_offsets.reserve(
+              resp.virtual_kv_cache_layer_global_offsets_size());
+          for (const auto& layer_offsets :
+               resp.virtual_kv_cache_layer_global_offsets()) {
+            VirtualKVCacheLayerGlobalOffsets layer;
+            layer.k_offsets.assign(layer_offsets.k_offsets().begin(),
+                                   layer_offsets.k_offsets().end());
+            layer.v_offsets.assign(layer_offsets.v_offsets().begin(),
+                                   layer_offsets.v_offsets().end());
+            layer.index_offsets.assign(layer_offsets.index_offsets().begin(),
+                                       layer_offsets.index_offsets().end());
+            info.dst_virtual_kv_cache_layer_global_offsets.emplace_back(
+                std::move(layer));
           }
-          info.dp_rank = resps.resps()[i].dp_rank();
-          info.remote_instance_info = remote_info;
-
-          // VirtualMemory mode: save destination offsets from D-node
-          if (resp.virtual_kv_cache_layer_global_offsets_size() > 0) {
-            info.dst_virtual_kv_cache_layer_global_offsets.reserve(
-                resp.virtual_kv_cache_layer_global_offsets_size());
-            for (const auto& layer_offsets :
-                 resp.virtual_kv_cache_layer_global_offsets()) {
-              VirtualKVCacheLayerGlobalOffsets layer;
-              layer.k_offsets.assign(layer_offsets.k_offsets().begin(),
-                                     layer_offsets.k_offsets().end());
-              layer.v_offsets.assign(layer_offsets.v_offsets().begin(),
-                                     layer_offsets.v_offsets().end());
-              layer.index_offsets.assign(layer_offsets.index_offsets().begin(),
-                                         layer_offsets.index_offsets().end());
-              info.dst_virtual_kv_cache_layer_global_offsets.emplace_back(
-                  std::move(layer));
-            }
-            VLOG(5) << "Received VirtualMemory offsets from D-node for request "
-                    << requests[i]->request_id() << ", num_layers="
-                    << info.dst_virtual_kv_cache_layer_global_offsets.size();
-          }
-
-          sequence->kv_state().set_transfer_kv_info(std::move(info));
-
-          // Compress per-group transfer cursors to the D-side shared count.
-          // advance_group_transfer_block_idx is monotonic max, so this is a
-          // no-op if the group's remote_shared_num is 0 (SWA / LINEAR under
-          // DECODE, or D that got no prefix cache hit); when it is >0, P
-          // starts pushing at the first block D actually needs, skipping the
-          // shared prefix without touching P's own local shared_num.
-          const auto& mappings =
-              sequence->kv_state().transfer_kv_info()->mappings;
-          for (const KVTransferMapping& mapping : mappings) {
-            if (mapping.remote_shared_num == 0) {
-              continue;
-            }
-            const std::optional<BlockType> block_type =
-                block_type_from_cache_group_id(mapping.group_id);
-            if (!block_type.has_value()) {
-              LOG(ERROR) << "Unknown KV cache transfer group_id: "
-                         << mapping.group_id;
-              continue;
-            }
-            if (block_type.value() == BlockType::KV) {
-              sequence->kv_state().advance_transfer_block_idx(
-                  static_cast<size_t>(mapping.remote_shared_num));
-            } else {
-              sequence->kv_state().advance_group_transfer_block_idx(
-                  block_type.value(),
-                  static_cast<size_t>(mapping.remote_shared_num));
-            }
-          }
+          VLOG(5) << "Received VirtualMemory offsets from D-node for request "
+                  << request->request_id() << ", num_layers="
+                  << info.dst_virtual_kv_cache_layer_global_offsets.size();
         }
 
-        // Retain the peer that actually accepted this RPC, even if discovery
-        // changes before the asynchronous release task runs.
-        requests[i]->state().decode_rpc_address =
-            butil::endpoint2str(cntl.remote_side()).c_str();
-        // Push to request_queue_; it will be executed by the engine.
-        release_admission.dismiss();
-        enqueue_dispatched_request(requests[i]);
+        sequence->kv_state().set_transfer_kv_info(std::move(info));
+
+        // Compress per-group transfer cursors to the D-side shared count.
+        // advance_group_transfer_block_idx is monotonic max, so this is a
+        // no-op if the group's remote_shared_num is 0 (SWA / LINEAR under
+        // DECODE, or D that got no prefix cache hit); when it is >0, P
+        // starts pushing at the first block D actually needs, skipping the
+        // shared prefix without touching P's own local shared_num.
+        const auto& mappings =
+            sequence->kv_state().transfer_kv_info()->mappings;
+        for (const KVTransferMapping& mapping : mappings) {
+          if (mapping.remote_shared_num == 0) {
+            continue;
+          }
+          const std::optional<BlockType> block_type =
+              block_type_from_cache_group_id(mapping.group_id);
+          if (!block_type.has_value()) {
+            LOG(ERROR) << "Unknown KV cache transfer group_id: "
+                       << mapping.group_id;
+            continue;
+          }
+          if (block_type.value() == BlockType::KV) {
+            sequence->kv_state().advance_transfer_block_idx(
+                static_cast<size_t>(mapping.remote_shared_num));
+          } else {
+            sequence->kv_state().advance_group_transfer_block_idx(
+                block_type.value(),
+                static_cast<size_t>(mapping.remote_shared_num));
+          }
+        }
       }
+
+      // Retain the peer that actually accepted this RPC, even if discovery
+      // changes before the asynchronous release task runs.
+      request->state().decode_rpc_address =
+          butil::endpoint2str(cntl.remote_side()).c_str();
+      // Push to request_queue_; it will be executed by the engine.
+      release_admission.dismiss();
+      enqueue_dispatched_request(request);
     }
-    VLOG(1) << "Prefill Decode allocation request_id="
-            << requests.front()->request_id()
-            << ", request_count=" << requests.size()
+    VLOG(1) << "Prefill Decode allocation request_id=" << request->request_id()
+            << ", request_count=1"
             << ", prepare_ms=" << allocation_prepare_seconds * 1000.0
             << ", rpc_ms=" << allocation_rpc_seconds * 1000.0 << ", total_ms="
             << decode_allocation_timer.elapsed_seconds() * 1000.0;
   }
 }
 
-void DisaggPDScheduler::prefill_send_first_generation() {
-  if (running_sequences_.size() == 0) {
+void PDScheduler::prefill_send_first_generation() {
+  if (running_sequences_.empty()) {
     return;
   }
 
   std::vector<std::shared_ptr<Request>> requests;
-  requests.reserve(running_requests_.size());
-  for (size_t i = 0; i < running_requests_.size(); ++i) {
-    auto request = running_requests_[i];
+  for (auto& request : running_requests_) {
     // Check if the request is a recently completed prefill request
     if (request->sequences()[0]->num_generated_tokens() == 1) {
       if (!options_.disable_log_stats()) {
@@ -799,12 +750,14 @@ void DisaggPDScheduler::prefill_send_first_generation() {
       }
       // Retain the accepting peer until FirstGeneration succeeds so a failed
       // handoff can release the matching decode reservation.
-      requests.emplace_back(request);
-      running_requests_[i] = nullptr;
+      if (requests.empty()) {
+        requests.reserve(running_requests_.size());
+      }
+      requests.emplace_back(std::move(request));
     }
   }
   // No prefill request needs to be transferred to decode.
-  if (requests.size() == 0) {
+  if (requests.empty()) {
     return;
   }
 
@@ -987,7 +940,7 @@ void DisaggPDScheduler::prefill_send_first_generation() {
   });
 }
 
-void DisaggPDScheduler::release_failed_request(
+void PDScheduler::release_failed_request(
     const std::shared_ptr<Request>& request) {
   {
     std::lock_guard<std::mutex> lock(req_to_channel_map_mutex_);
@@ -1018,7 +971,7 @@ void DisaggPDScheduler::release_failed_request(
   });
 }
 
-std::shared_ptr<Request> DisaggPDScheduler::take_waiting_request(
+std::shared_ptr<Request> PDScheduler::take_waiting_request(
     const std::string& req_id) {
   auto it = received_request_map_.find(req_id);
   if (it == received_request_map_.end()) {
@@ -1040,7 +993,7 @@ std::shared_ptr<Request> DisaggPDScheduler::take_waiting_request(
   return request;
 }
 
-std::future<void> DisaggPDScheduler::enqueue_request_block_release(
+std::future<void> PDScheduler::enqueue_request_block_release(
     std::shared_ptr<Request> request,
     bool cache_prefix) {
   auto release = std::make_unique<RequestBlockRelease>(
@@ -1051,13 +1004,12 @@ std::future<void> DisaggPDScheduler::enqueue_request_block_release(
   return completion;
 }
 
-void DisaggPDScheduler::release_request_blocks(std::shared_ptr<Request> request,
-                                               bool cache_prefix) {
+void PDScheduler::release_request_blocks(std::shared_ptr<Request> request,
+                                         bool cache_prefix) {
   enqueue_request_block_release(std::move(request), cache_prefix).get();
 }
 
-void DisaggPDScheduler::complete_request_block_release(
-    RequestBlockRelease& release) {
+void PDScheduler::complete_request_block_release(RequestBlockRelease& release) {
   if (release.cache_prefix) {
     kv_cache_manager_->deallocate(release.request.get());
   } else {
@@ -1071,15 +1023,15 @@ void DisaggPDScheduler::complete_request_block_release(
   release.completion.set_value();
 }
 
-void DisaggPDScheduler::drain_request_releases() {
+void PDScheduler::drain_request_releases() {
   std::unique_ptr<RequestBlockRelease> release;
   while (request_block_releases_.try_dequeue(release)) {
     complete_request_block_release(*release);
   }
 }
 
-bool DisaggPDScheduler::release_reservation(const std::string& req_id,
-                                            const std::string& reservation_id) {
+bool PDScheduler::release_reservation(const std::string& req_id,
+                                      const std::string& reservation_id) {
   if (reservation_id.empty()) {
     return false;
   }
@@ -1105,9 +1057,8 @@ bool DisaggPDScheduler::release_reservation(const std::string& req_id,
 }
 
 // request is received from prefill
-bool DisaggPDScheduler::decode_schedule(
-    std::shared_ptr<Request>& request,
-    const std::string& prefill_instance_name) {
+bool PDScheduler::decode_schedule(std::shared_ptr<Request>& request,
+                                  const std::string& prefill_instance_name) {
   CHECK(request != nullptr);
   CHECK(!request->sequences().empty());
 
@@ -1142,7 +1093,7 @@ bool DisaggPDScheduler::decode_schedule(
   return true;
 }
 
-bool DisaggPDScheduler::decode_recv_first_generation(
+bool PDScheduler::decode_recv_first_generation(
     const std::string& req_id,
     const std::string& reservation_id,
     int64_t token_id,
@@ -1347,7 +1298,7 @@ bool DisaggPDScheduler::decode_recv_first_generation(
   return true;
 }
 
-void DisaggPDScheduler::restore_disaggregated_latency(
+void PDScheduler::restore_disaggregated_latency(
     Request* request,
     double time_to_first_token_latency_seconds,
     double upstream_elapsed_seconds) {
@@ -1369,7 +1320,7 @@ void DisaggPDScheduler::restore_disaggregated_latency(
   }
 }
 
-bool DisaggPDScheduler::try_allocate(Sequence* sequence) {
+bool PDScheduler::try_allocate(Sequence* sequence) {
   // When the KV Cache usage reaches the threshold, prefill requests will no
   // longer be scheduled to avoid frequent preemption.
   return kv_cache_manager_->kv_cache_utilization() <
@@ -1378,7 +1329,7 @@ bool DisaggPDScheduler::try_allocate(Sequence* sequence) {
          kv_cache_manager_->try_allocate(sequence);
 }
 
-bool DisaggPDScheduler::exceeds_decode_capacity(Sequence* sequence) const {
+bool PDScheduler::exceeds_decode_capacity(Sequence* sequence) const {
   CHECK(sequence != nullptr);
   const BlockManagerPool* block_manager = engine_->block_manager_pool();
   CHECK(block_manager != nullptr);
@@ -1395,7 +1346,7 @@ bool DisaggPDScheduler::exceeds_decode_capacity(Sequence* sequence) const {
       static_cast<size_t>(block_manager->num_blocks()));
 }
 
-void DisaggPDScheduler::do_permanent_rejection(
+void PDScheduler::do_permanent_rejection(
     const std::shared_ptr<Request>& request,
     int32_t status_code) {
   CHECK(request != nullptr);
@@ -1412,17 +1363,17 @@ void DisaggPDScheduler::do_permanent_rejection(
   req_to_channel_map_.erase(request->request_id());
 }
 
-void DisaggPDScheduler::get_latency_metrics(std::vector<int64_t>& ttft,
-                                            std::vector<int64_t>& tbt) {
+void PDScheduler::get_latency_metrics(std::vector<int64_t>& ttft,
+                                      std::vector<int64_t>& tbt) {
   scheduler_metrics_->get_latency_metrics(ttft, tbt);
 }
 
-bool DisaggPDScheduler::link_instance(const std::string& instance_name,
-                                      const std::vector<uint64_t>& cluster_ids,
-                                      const std::vector<std::string>& addrs,
-                                      const std::vector<uint16_t>& ports,
-                                      const int32_t dp_size,
-                                      const int32_t src_kv_split_size) {
+bool PDScheduler::link_instance(const std::string& instance_name,
+                                const std::vector<uint64_t>& cluster_ids,
+                                const std::vector<std::string>& addrs,
+                                const std::vector<uint16_t>& ports,
+                                const int32_t dp_size,
+                                const int32_t src_kv_split_size) {
   std::lock_guard<std::mutex> lock(linked_instances_mutex_);
   if (distributed_worker_manager_ == nullptr) {
     LOG(ERROR)
@@ -1440,13 +1391,12 @@ bool DisaggPDScheduler::link_instance(const std::string& instance_name,
   return true;
 }
 
-bool DisaggPDScheduler::unlink_instance(
-    const std::string& instance_name,
-    const std::vector<uint64_t>& cluster_ids,
-    const std::vector<std::string>& addrs,
-    const std::vector<uint16_t>& ports,
-    const int32_t dp_size,
-    const int32_t src_kv_split_size) {
+bool PDScheduler::unlink_instance(const std::string& instance_name,
+                                  const std::vector<uint64_t>& cluster_ids,
+                                  const std::vector<std::string>& addrs,
+                                  const std::vector<uint16_t>& ports,
+                                  const int32_t dp_size,
+                                  const int32_t src_kv_split_size) {
   // Clear received requests from this instance
   std::vector<std::shared_ptr<Request>> requests;
   {

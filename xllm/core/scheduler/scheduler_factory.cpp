@@ -16,7 +16,7 @@ limitations under the License.
 #include "scheduler/scheduler_factory.h"
 
 #include "core/common/global_flags.h"
-#include "core/disaggregation/disagg_pd_scheduler.h"
+#include "core/disaggregation/pd_scheduler.h"
 #include "core/distributed_runtime/rec_engine.h"
 #include "core/framework/config/parallel_config.h"
 #include "scheduler/continuous_scheduler.h"
@@ -27,7 +27,7 @@ namespace xllm {
 
 SchedulerKind select_scheduler_kind(const SchedulerOptions& options) {
   if (options.enable_disagg_pd()) {
-    return SchedulerKind::DISAGG_PD;
+    return SchedulerKind::PD;
   }
 
   return SchedulerKind::CONTINUOUS;

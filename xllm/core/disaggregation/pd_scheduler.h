@@ -28,10 +28,11 @@ limitations under the License.
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
-#include "core/disaggregation/disagg_pd_service.h"
+#include "core/disaggregation/pd_service.h"
 #include "core/distributed_runtime/distributed_worker_manager.h"
 #include "disagg_pd.pb.h"
 #include "distributed_runtime/xservice_client.h"
@@ -59,7 +60,7 @@ bool exceeds_decode_capacity(size_t num_prompt_tokens,
 
 bool has_rank_preserving_kv_groups(const proto::DisaggResponse& response);
 
-class DisaggPDScheduler : public ContinuousScheduler<> {
+class PDScheduler : public ContinuousScheduler<> {
  public:
   // Skips dispatch and RPC startup. Unit tests construct through this so they
   // do not block in initialize_rpc_server.
@@ -73,7 +74,7 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
         engine->collect_step_outputs(batch)
       } -> std::same_as<std::vector<RawForwardOutput>>;
     }
-  DisaggPDScheduler(
+  PDScheduler(
       TargetEngine* engine,
       const Options& options,
       std::shared_ptr<DistributedWorkerManager> distributed_worker_manager,
@@ -81,19 +82,19 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
           nullptr,
       std::shared_ptr<KVCacheTransferCoordinator> kv_transfer_coordinator =
           nullptr,
-      DisaggPDServiceOptions response_options = {})
-      : DisaggPDScheduler(engine,
-                          options,
-                          SkipRuntimeStart{},
-                          std::move(distributed_worker_manager),
-                          std::move(model_residency_coordinator),
-                          std::move(kv_transfer_coordinator)) {
+      PDServiceOptions response_options = {})
+      : PDScheduler(engine,
+                    options,
+                    SkipRuntimeStart{},
+                    std::move(distributed_worker_manager),
+                    std::move(model_residency_coordinator),
+                    std::move(kv_transfer_coordinator)) {
     CHECK(distributed_worker_manager_ != nullptr)
         << "Disaggregated PD requires a distributed worker manager.";
     CHECK(kv_transfer_coordinator_ != nullptr)
         << "Disaggregated PD requires a KV cache transfer coordinator.";
-    dispatch_thread_ = std::make_unique<std::thread>(
-        &DisaggPDScheduler::dispatch_requests, this);
+    dispatch_thread_ =
+        std::make_unique<std::thread>(&PDScheduler::dispatch_requests, this);
     server_name_.append(std::to_string(options_.server_idx()));
     rpc_server_thread_ = std::make_unique<std::thread>(
         [this, response_options = std::move(response_options)]() mutable {
@@ -108,7 +109,7 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
     }
   }
 
-  ~DisaggPDScheduler() override;
+  ~PDScheduler() override;
 
   uint32_t get_waiting_requests_num() const override {
     return prefill_queue_->size() + num_prefetching_requests();
@@ -162,7 +163,9 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
   // count.
   bool exceeds_decode_capacity(Sequence* sequence) const;
 
-  bool enable_schedule_overlap() { return options_.enable_schedule_overlap(); };
+  bool enable_schedule_overlap() const {
+    return options_.enable_schedule_overlap();
+  }
 
   bool enable_task_pipeline() const { return options_.enable_task_pipeline(); }
 
@@ -192,7 +195,7 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
         engine->collect_step_outputs(batch)
       } -> std::same_as<std::vector<RawForwardOutput>>;
     }
-  DisaggPDScheduler(
+  PDScheduler(
       TargetEngine* engine,
       const Options& options,
       SkipRuntimeStart,
@@ -207,7 +210,7 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
                               std::move(model_residency_coordinator),
                               std::move(distributed_worker_manager)),
         kv_transfer_coordinator_(std::move(kv_transfer_coordinator)),
-        server_name_("DisaggPDServer") {
+        server_name_("PDServer") {
     if (!options_.instance_role().has_value()) {
       LOG(FATAL) << "Instance type is not set in disagg pd mode.";
     }
@@ -241,7 +244,7 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
                                      double time_to_first_token_latency_seconds,
                                      double upstream_elapsed_seconds);
 
-  void start_rpc_server(DisaggPDServiceOptions response_options);
+  void start_rpc_server(PDServiceOptions response_options);
 
   // Initialize RPC server and xservice client
   // This method waits for the RPC server to be initialized and sets up the
@@ -296,18 +299,12 @@ class DisaggPDScheduler : public ContinuousScheduler<> {
   ThreadPool reservation_release_threadpool_{
       /*num_threads=*/1,
       /*cpu_binding=*/false,
-      /*pool_name=*/"DisaggPDScheduler.reservation_release"};
+      /*pool_name=*/"PDScheduler.reservation_release"};
 
   // use threadpool to handle prefill-completed request
   ThreadPool prefill_threadpool_{/*num_threads=*/1,
                                  /*cpu_binding=*/false,
-                                 /*pool_name=*/"DisaggPDScheduler.prefill"};
-
-  // related decode instance name(ID) list
-  std::vector<std::string> decode_inst_names_;
-  // TODO later
-  // std::vector<std::string> updated_decode_inst_names;
-  int current_decode_idx_ = 0;
+                                 /*pool_name=*/"PDScheduler.prefill"};
 
   // for decode
   // request_id -> Request object

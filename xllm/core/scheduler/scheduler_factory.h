@@ -21,7 +21,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "core/disaggregation/disagg_pd_scheduler.h"
+#include "core/disaggregation/pd_scheduler.h"
 #include "scheduler/continuous_scheduler.h"
 #include "scheduler/dit_scheduler.h"
 #include "scheduler/fixed_steps_scheduler.h"
@@ -30,7 +30,7 @@ namespace xllm {
 
 class RecEngine;
 
-enum class SchedulerKind : int8_t { CONTINUOUS = 0, DISAGG_PD = 5 };
+enum class SchedulerKind : int8_t { CONTINUOUS = 0, PD = 5 };
 
 SchedulerKind select_scheduler_kind(const SchedulerOptions& options);
 
@@ -51,10 +51,10 @@ std::unique_ptr<Scheduler> create_continuous_scheduler(
         nullptr,
     std::shared_ptr<KVCacheTransferCoordinator> kv_transfer_coordinator =
         nullptr,
-    DisaggPDServiceOptions response_options = {}) {
+    PDServiceOptions response_options = {}) {
   switch (select_scheduler_kind(options)) {
-    case SchedulerKind::DISAGG_PD:
-      return std::make_unique<DisaggPDScheduler>(
+    case SchedulerKind::PD:
+      return std::make_unique<PDScheduler>(
           engine,
           options,
           std::move(distributed_worker_manager),

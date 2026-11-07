@@ -15,23 +15,21 @@ limitations under the License.
 
 #pragma once
 
-#include <cstdint>
 #include <memory>
 
 #include "common/macros.h"
-#include "core/disaggregation/disagg_pd_service_impl.h"
+#include "core/disaggregation/pd_service_impl.h"
 #include "disagg_pd.pb.h"
 
 namespace xllm {
 
-class DisaggPDService : public proto::DisaggPDService {
+class PDService : public proto::DisaggPDService {
  public:
-  explicit DisaggPDService(DisaggPDScheduler* scheduler,
-                           Engine* engine,
-                           int32_t kv_cache_block_tokens,
-                           DisaggPDServiceOptions response_options = {});
-  explicit DisaggPDService() {}
-  virtual ~DisaggPDService() = default;
+  explicit PDService(PDScheduler* scheduler,
+                     Engine* engine,
+                     PDServiceOptions response_options = {});
+  PDService() = default;
+  ~PDService() override = default;
 
   // for decode recv prefill request
   void AddNewRequests(::google::protobuf::RpcController* controller,
@@ -61,10 +59,10 @@ class DisaggPDService : public proto::DisaggPDService {
                           ::google::protobuf::Closure* done) override;
 
  protected:
-  std::unique_ptr<DisaggPDServiceImpl> disagg_pd_service_impl_;
+  std::unique_ptr<PDServiceImpl> pd_service_impl_;
 
  private:
-  DISALLOW_COPY_AND_ASSIGN(DisaggPDService);
+  DISALLOW_COPY_AND_ASSIGN(PDService);
 };
 
 }  // namespace xllm
