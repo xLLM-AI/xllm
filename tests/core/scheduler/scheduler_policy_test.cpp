@@ -284,7 +284,8 @@ class PendingReleaseBlockManagerPool final : public BlockManagerPool {
  private:
   static BlockManagerPool::Options make_options() {
     BlockManagerPool::Options options;
-    options.num_blocks_ = 256;
+    // The 34025-token prompt needs 266 data blocks plus padding block zero.
+    options.num_blocks_ = 267;
     options.block_size_ = 128;
     options.max_seqs_per_batch_ = 16;
     options.enable_prefix_cache_ = true;
@@ -605,8 +606,10 @@ TEST(SchedulerPolicyTest, AddNewRequestBase) {
   std::vector<int32_t> block_size{16, 16, 16, 256};
   std::vector<int32_t> chunk_size{1024, 1024, 1024, 768};
   std::vector<int32_t> kv_split_size{1, 1, 1, 2};
-  std::vector<int32_t> validate_allowed_max_tokens{10, 1024, 1024, 768};
+  // Mixed prefill can redistribute unused budget to finish the full prompt.
+  std::vector<int32_t> validate_allowed_max_tokens{10, 1024, 2048, 768};
   for (size_t idx = 0; idx < prompt_len.size(); ++idx) {
+    SCOPED_TRACE(idx);
     SchedulerOptions opt =
         create_scheduler_options(10000, 256, 0, chunk_size[idx], 1);
     ScopedConfigValue<int32_t> kv_split_guard(
@@ -630,7 +633,7 @@ TEST(SchedulerPolicyTest, AddNewRequestBase) {
         batch[0].get_allowed_max_tokens();
     for (size_t i = 0; i < batch[0].size(); ++i) {
       auto seq = batch[0][i];
-      EXPECT_TRUE(allowed_max_tokens[i] == validate_allowed_max_tokens[idx]);
+      EXPECT_EQ(allowed_max_tokens[i], validate_allowed_max_tokens[idx]);
     }
   }
 }
