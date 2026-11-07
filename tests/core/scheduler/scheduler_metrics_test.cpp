@@ -26,7 +26,9 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "common/metrics.h"
 #include "core/distributed_runtime/distributed_worker_manager.h"
+#include "core/kv_cache/layout/static_kv_cache_layout.h"
 #include "framework/block/block_manager_pool.h"
 #include "framework/request/request.h"
 #include "framework/request/request_state.h"
@@ -231,6 +233,50 @@ TEST(SchedulerMetricsTest, SharedArenaCountsFullTailsAndKeepsLinearState) {
   sequence->kv_state().set_kv_cache_tokens_num(4);
   EXPECT_EQ(SchedulerMetricsTestPeer::occupied_slots(metrics, {sequence}),
             (std::vector<int64_t>{8}));
+  block_manager.deallocate(sequence);
+}
+
+TEST(SchedulerMetricsTest, SharedSlabCountsPayloadBytesAndPartialFullTails) {
+  StaticKVCacheLayoutSpec spec;
+  spec.num_slots = 64;
+  spec.num_slabs = 9;
+  spec.full_row_bytes = 16;
+  spec.conv_row_bytes = 8;
+  spec.ssm_row_bytes = 32;
+  spec.checkpoint_stride = 2;
+  spec.full_layer_ids = {0, 3};
+  spec.linear_layer_ids = {1, 2};
+  BlockManagerPool::Options options;
+  options.num_blocks(64)
+      .block_size(2)
+      .enable_prefix_cache(false)
+      .enable_linear_state(true)
+      .linear_state_num_slots(64)
+      .enable_shared_kv_cache(true)
+      .shared_layout(
+          std::make_shared<const StaticKVCacheLayout>(std::move(spec)));
+  BlockManagerPool block_manager(options);
+  SchedulerMetrics metrics(nullptr, &block_manager, 1, 0, false);
+  std::shared_ptr<Request> request = make_request();
+  Sequence* sequence = request->sequences().front().get();
+  ASSERT_TRUE(block_manager.allocate(sequence, /*num_tokens=*/4));
+  ASSERT_EQ(block_manager.num_used_blocks()[0], 272u);
+  ASSERT_EQ(block_manager.admission_capacity(0), 512u);
+  ASSERT_EQ(block_manager.num_blocks(), 64u);
+
+  sequence->kv_state().set_kv_cache_tokens_num(3);
+  EXPECT_EQ(SchedulerMetricsTestPeer::occupied_slots(metrics, {sequence}),
+            (std::vector<int64_t>{480}));
+  sequence->kv_state().set_kv_cache_tokens_num(4);
+  EXPECT_EQ(SchedulerMetricsTestPeer::occupied_slots(metrics, {sequence}),
+            (std::vector<int64_t>{544}));
+  bvar::LatencyRecorder* recorder =
+      MULTI_HISTOGRAM_active_kv_cache_size_in_kilobytes.get_stats({"0"});
+  ASSERT_NE(recorder, nullptr);
+  const int64_t samples_before = recorder->count();
+  std::vector<Sequence*> sequences = {sequence};
+  metrics.update(sequences);
+  EXPECT_EQ(recorder->count(), samples_before + 1);
   block_manager.deallocate(sequence);
 }
 

@@ -331,22 +331,14 @@ class Qwen3_5GdnMetadataBuilder:
                 self._shared_layout.linear_state_indices(read_indices, role="ssm", slots=slots)
                 for slots in self._group_slots
             )
-            conv_write_indices = tuple(
-                self._shared_layout.linear_state_indices(write_indices, role="conv", slots=slots)
-                for slots in self._group_slots
-            )
-            ssm_write_indices = tuple(
-                self._shared_layout.linear_state_indices(write_indices, role="ssm", slots=slots)
-                for slots in self._group_slots
-            )
             return GdnDecodeMetadata(
                 self._state_caches,
                 read_indices,
                 write_indices,
                 conv_state_indices,
-                conv_write_indices,
+                conv_state_indices,
                 ssm_state_indices,
-                ssm_write_indices,
+                ssm_state_indices,
                 self._layer_groups,
             )
         query_lengths_host = metadata.q_seq_lens_host

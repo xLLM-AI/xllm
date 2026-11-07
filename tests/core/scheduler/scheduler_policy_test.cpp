@@ -36,6 +36,7 @@ limitations under the License.
 #include "core/framework/config/kv_cache_store_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/kv_cache/layout/static_kv_cache_layout.h"
 #include "core/scheduler/request_output_dispatcher.h"
 #include "core/scheduler/zero_eviction_scheduler.h"
 #include "distributed_runtime/engine.h"
@@ -2568,6 +2569,51 @@ TEST(SchedulerPolicyTest, SharedArenaZeroEvictionReservesStateAndDecodeGrowth) {
     EXPECT_EQ(guard.if_accept_candidate_sequences(
                   {sequence}, running_queue, /*running_sequences=*/{}),
               num_slots == 13);
+  }
+}
+
+TEST(SchedulerPolicyTest,
+     SharedSlabZeroEvictionPreservesByteUnitsAboveFourGiB) {
+  ScopedConfigValue<bool> prefix_cache_guard(
+      KVCacheConfig::get_instance().enable_prefix_cache(), false);
+  ScopedConfigValue<int32_t> decode_limit_guard(
+      SchedulerConfig::get_instance().max_decode_token_per_sequence(), 6);
+  auto requests = generate_request({4}, {6}, std::nullopt, std::nullopt, 64);
+  Sequence* sequence = requests.front()->sequences().front().get();
+  std::unique_ptr<RequestPriorityQueue> running_queue =
+      std::make_unique<DequeQueue>();
+  constexpr size_t kGiB = size_t{1} << 30;
+  for (const size_t num_slabs : {8u, 9u}) {
+    SCOPED_TRACE(num_slabs);
+    StaticKVCacheLayoutSpec spec;
+    spec.num_slots = 64;
+    spec.num_slabs = num_slabs;
+    spec.full_row_bytes = kGiB / 4;
+    spec.conv_row_bytes = kGiB / 8;
+    spec.ssm_row_bytes = kGiB / 2;
+    spec.checkpoint_stride = 2;
+    spec.full_layer_ids = {0, 3};
+    spec.linear_layer_ids = {1, 2};
+    BlockManagerPool::Options options;
+    options.num_blocks(64)
+        .block_size(2)
+        .enable_prefix_cache(false)
+        .enable_linear_state(true)
+        .linear_state_num_slots(64)
+        .enable_shared_kv_cache(true)
+        .shared_layout(
+            std::make_shared<const StaticKVCacheLayout>(std::move(spec)));
+    BlockManagerPool pool(options);
+    BlockCapacityGuard guard(&pool);
+    // Only mappings are allocated: the real layout accounts for a 4.25 GiB
+    // prompt/state footprint and another 3 GiB of decode growth.
+    EXPECT_EQ(pool.sequence_resource_units(4), 4 * kGiB + kGiB / 4);
+    EXPECT_EQ(pool.admission_capacity(0), (num_slabs - 1) * kGiB);
+    EXPECT_GT(pool.sequence_resource_units(4),
+              std::numeric_limits<uint32_t>::max());
+    EXPECT_EQ(guard.if_accept_candidate_sequences(
+                  {sequence}, running_queue, /*running_sequences=*/{}),
+              num_slabs == 9);
   }
 }
 

@@ -118,6 +118,26 @@ StaticKVCacheLayout::StaticKVCacheLayout(StaticKVCacheLayoutSpec spec)
   }
 }
 
+bool StaticKVCacheLayout::can_fit(size_t full_blocks,
+                                  size_t linear_states) const {
+  if (spec_.num_slabs == 0 || full_blocks >= spec_.num_slots ||
+      linear_states >= spec_.num_slots) {
+    return false;
+  }
+  const auto slabs_for = [this](size_t objects, size_t object_bytes) {
+    const size_t per_slab = slab_bytes_ / object_bytes;
+    return objects / per_slab + static_cast<size_t>(objects % per_slab != 0);
+  };
+  const size_t full_objects = checked_multiply(full_blocks, full_layer_count());
+  const size_t linear_objects =
+      checked_multiply(linear_states, linear_layer_count());
+  const size_t required_slabs =
+      checked_add(slabs_for(full_objects, full_pair_bytes_),
+                  checked_add(slabs_for(linear_objects, spec_.conv_row_bytes),
+                              slabs_for(linear_objects, ssm_bundle_bytes_)));
+  return required_slabs <= spec_.num_slabs - 1;
+}
+
 size_t StaticKVCacheLayout::row_bytes(KVCacheTensorRole role) const {
   switch (role) {
     case KVCacheTensorRole::KEY:

@@ -80,6 +80,8 @@ class StaticKVCacheLayout final {
   size_t num_linear_groups() const { return 2 * linear_layer_count(); }
   size_t rows_per_slab(KVCacheTensorRole role) const;
   size_t full_layer_index(int64_t layer_id) const;
+  // Capacity of an empty arena, including typed-slab fragmentation and IDs.
+  bool can_fit(size_t full_blocks, size_t linear_states) const;
 
   size_t page_bytes() const { return slab_bytes(); }
   size_t pages_per_slot() const { return 1; }

@@ -239,6 +239,40 @@ TEST(StaticKVCacheBlockPoolTest, CapacityQueriesMatchAllocationAfterRetyping) {
 }
 
 TEST(StaticKVCacheBlockPoolTest,
+     RejectsHybridFootprintsNeedingTooManyTypedSlabs) {
+  StaticKVCacheLayoutSpec spec;
+  spec.num_slots = 32;
+  spec.num_slabs = 4;
+  spec.full_row_bytes = 16;
+  spec.conv_row_bytes = 6;
+  spec.ssm_row_bytes = 4;
+  spec.full_layer_ids = {1, 3};
+  spec.linear_layer_ids = {0, 2};
+  const StaticKVCacheLayout layout(spec);
+  StaticKVCacheBlockPool pool(/*logical_capacity=*/32, layout);
+  ASSERT_EQ(layout.slab_bytes(), 96);
+  EXPECT_TRUE(layout.can_fit(/*full_blocks=*/1, /*linear_states=*/1));
+  EXPECT_FALSE(layout.can_fit(/*full_blocks=*/3, /*linear_states=*/1));
+  EXPECT_FALSE(layout.can_fit(/*full_blocks=*/2, /*linear_states=*/2));
+  const auto full = pool.allocate(/*num_blocks=*/3, BlockType::KV);
+  ASSERT_EQ(full.size(), 3);
+  EXPECT_LT(pool.slots_per_block(BlockType::KV) * full.size() +
+                pool.slots_per_block(BlockType::LINEAR),
+            pool.num_total_slots());
+  EXPECT_TRUE(pool.allocate(/*num_blocks=*/1, BlockType::LINEAR).empty());
+  for (const int32_t id : full) {
+    pool.release(id, BlockType::KV);
+  }
+  const auto one_full = pool.allocate(/*num_blocks=*/1, BlockType::KV);
+  const auto one_linear = pool.allocate(/*num_blocks=*/1, BlockType::LINEAR);
+  ASSERT_EQ(one_full.size(), 1);
+  ASSERT_EQ(one_linear.size(), 1);
+  pool.release(one_full.front(), BlockType::KV);
+  pool.release(one_linear.front(), BlockType::LINEAR);
+  EXPECT_EQ(pool.num_free_slots(), pool.num_total_slots());
+}
+
+TEST(StaticKVCacheBlockPoolTest,
      AccountsPayloadAboveFourGiBWithoutArenaMemory) {
   auto spec = make_spec(/*num_slabs=*/17);
   spec.full_row_bytes = size_t{1} << 27;

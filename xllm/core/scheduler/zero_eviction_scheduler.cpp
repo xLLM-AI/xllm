@@ -51,8 +51,8 @@ std::vector<Sequence*> get_running_sequences(
 
 void update_request_status_each_step(
     std::vector<SequenceStatus>* sequence_status_vec,
-    uint32_t* num_remaining_block_after_prefill,
-    uint32_t full_block_units) {
+    size_t* num_remaining_block_after_prefill,
+    size_t full_block_units) {
   for (auto it = sequence_status_vec->begin();
        it != sequence_status_vec->end();) {
     if (it->num_block_need_to_use_ == 0) {
@@ -90,9 +90,9 @@ uint32_t get_max_iter_num(const std::vector<SequenceStatus>& sequence_status) {
   return max_iter_num;
 }
 
-uint32_t get_num_reserved_full_blocks(
+size_t get_num_reserved_full_blocks(
     const std::vector<SequenceStatus>& sequence_status) {
-  uint32_t reserved_full_blocks = 0;
+  size_t reserved_full_blocks = 0;
   for (const auto& status : sequence_status) {
     reserved_full_blocks += status.num_block_need_to_use_;
   }
@@ -132,7 +132,7 @@ void BlockCapacityGuard::prefix_cache_for_candidate_sequences() {
   }
 }
 
-uint32_t BlockCapacityGuard::get_needed_block_num_for_prefill() {
+size_t BlockCapacityGuard::get_needed_block_num_for_prefill() {
   if (kv_cache_manager_->block_resource_units(BlockType::LINEAR, 1) > 0) {
     size_t needed_units = 0;
     for (auto* sequence : candidate_sequences_) {
@@ -145,7 +145,7 @@ uint32_t BlockCapacityGuard::get_needed_block_num_for_prefill() {
     return num_reserved_block_for_prefill_;
   }
 
-  uint32_t total_num_prefix_cache_block = 0;
+  size_t total_num_prefix_cache_block = 0;
   for (auto* sequence : candidate_sequences_) {
     uint32_t num_prefix_cache_block =
         sequence->kv_state().num_blocks(BlockType::KV);
@@ -164,7 +164,7 @@ std::vector<SequenceStatus> BlockCapacityGuard::get_all_sequence_status() {
 
   for (auto* sequence : running_sequences_for_test) {
     uint32_t num_block_need_to_use = num_block_need_to_use_for(sequence);
-    uint32_t num_release_block = num_release_block_for(sequence);
+    size_t num_release_block = num_release_block_for(sequence);
 
     result.emplace_back(num_block_need_to_use, num_release_block);
   }
@@ -185,7 +185,7 @@ uint32_t BlockCapacityGuard::num_block_need_to_use_for(
   return remaining_decode_block_num;
 }
 
-uint32_t BlockCapacityGuard::num_release_block_for(Sequence* sequence) {
+size_t BlockCapacityGuard::num_release_block_for(Sequence* sequence) {
   uint32_t num_tokens_block = ceiling_div(sequence->num_tokens(), block_size());
   uint32_t num_release_block =
       num_tokens_block - sequence->kv_state().num_blocks(BlockType::KV);
@@ -218,15 +218,15 @@ uint32_t BlockCapacityGuard::num_release_block_for(Sequence* sequence) {
 bool BlockCapacityGuard::simulate_is_satisfied_for_candidate_sequences() {
   prefix_cache_for_candidate_sequences();
 
-  uint32_t num_needed_block_for_prefill = get_needed_block_num_for_prefill();
+  size_t num_needed_block_for_prefill = get_needed_block_num_for_prefill();
 
   CHECK_GE(num_needed_block_for_prefill, 0);
 
-  const uint32_t available_units = num_blocks_in_useless();
+  const size_t available_units = num_blocks_in_useless();
   if (num_needed_block_for_prefill >= available_units) {
     return false;
   }
-  uint32_t num_remaining_block_after_prefill =
+  size_t num_remaining_block_after_prefill =
       available_units - num_needed_block_for_prefill;
 
   std::vector<SequenceStatus> sequence_status = get_all_sequence_status();
@@ -239,7 +239,7 @@ bool BlockCapacityGuard::simulate_is_satisfied_for_candidate_sequences() {
   uint32_t max_iter_num = get_max_iter_num(sequence_status);
 
   for (std::size_t i = 0; i < max_iter_num; ++i) {
-    uint32_t num_needed_block_each_step =
+    size_t num_needed_block_each_step =
         sequence_status.size() * full_block_units;
     if (num_remaining_block_after_prefill < num_needed_block_each_step) {
       return false;
@@ -251,7 +251,7 @@ bool BlockCapacityGuard::simulate_is_satisfied_for_candidate_sequences() {
     update_request_status_each_step(
         &sequence_status, &num_remaining_block_after_prefill, full_block_units);
 
-    uint32_t num_reserved_full_blocks = kv_cache_manager_->block_resource_units(
+    size_t num_reserved_full_blocks = kv_cache_manager_->block_resource_units(
         BlockType::KV, get_num_reserved_full_blocks(sequence_status));
 
     if (num_remaining_block_after_prefill > num_reserved_full_blocks) {

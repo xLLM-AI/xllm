@@ -289,6 +289,32 @@ TEST_F(BlockManagerPoolTest,
   EXPECT_EQ(result.manager->num_free_blocks(), std::vector<size_t>{1056});
 }
 
+TEST_F(BlockManagerPoolTest, SharedFactoryAccountsForTypedSlabFragmentation) {
+  BlockManagerPool::Options options;
+  options.block_size(8).enable_linear_state(true).enable_prefix_cache(false);
+  KVCacheCapacity capacity = make_shared_cache_capacity();
+  capacity.shared_slab_count(4);
+  auto result = KVCacheManagerFactory::create(capacity,
+                                              make_shared_cache_model_args(),
+                                              /*world_size=*/1,
+                                              torch::kBFloat16,
+                                              options,
+                                              /*transfer_coordinator=*/nullptr);
+  auto first = make_sequence(0, {1, 2, 3, 4, 5, 6, 7, 8});
+  auto second = make_sequence(1, {9, 10, 11, 12, 13, 14, 15, 16});
+  EXPECT_FALSE(result.manager->exceeds_total_capacity(&first, 8));
+  // Three Full blocks plus one state cost 212 B, below the 288 B budget,
+  // but require two KV slabs and one slab for each recurrent role.
+  EXPECT_TRUE(result.manager->exceeds_total_capacity(&first, 24));
+  EXPECT_TRUE(result.manager->exceeds_total_capacity(
+      std::vector<KVCacheManager::KVCacheReservation>{{&first, 8},
+                                                      {&second, 8}}));
+  ASSERT_TRUE(result.manager->allocate(&first));
+  EXPECT_FALSE(result.manager->allocate(&second));
+  result.manager->deallocate(&first);
+  EXPECT_EQ(result.manager->num_free_blocks(), std::vector<size_t>{288});
+}
+
 TEST(KVCacheManagerFactoryTest, RejectsSharedStorageCostMismatch) {
   BlockManagerPool::Options options;
   options.block_size(8).enable_linear_state(true).enable_prefix_cache(false);

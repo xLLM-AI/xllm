@@ -1414,6 +1414,23 @@ def test_npu_shared_gdn_verify_updates_persistent_physical_indices(packed: bool)
         assert pointers == (persistent.conv_state_indices[0].data_ptr(), persistent.ssm_state_indices[0].data_ptr())
 
 
+def test_npu_slab_gdn_prefill_maps_distinct_read_and_write_roles() -> None:
+    layout = SharedKVCacheLayout(128, 8, 4, 8, 3, 32, 262144, num_slabs=4)
+    slots = torch.tensor([[0, 3, 5], [0, 12, 18]], dtype=torch.int32)
+    conv_read, conv_write, ssm_read, ssm_write = _build_mega_prefill_indices(
+        torch.tensor([1], dtype=torch.int32),
+        torch.tensor([2], dtype=torch.int32),
+        torch.tensor([True]),
+        3,
+        layout,
+        (slots,),
+    )
+    assert conv_read[0].tolist() == [3]
+    assert conv_write[0].tolist() == [5]
+    assert ssm_read[0].tolist() == [12]
+    assert ssm_write[0].tolist() == [18]
+
+
 def test_npu_slab_gdn_verify_refreshes_each_layers_role_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     layout = SharedKVCacheLayout(128, 8, 4, 8, 3, 32, 262144, num_linear_groups=2, num_slabs=4)
     monkeypatch.setattr(

@@ -15,12 +15,14 @@ limitations under the License.
 
 #pragma once
 
+#include <cstddef>
+
 #include "scheduler/continuous_scheduler.h"
 
 namespace xllm {
 
 struct SequenceStatus {
-  SequenceStatus(uint32_t need_to_use, uint32_t release_block)
+  SequenceStatus(uint32_t need_to_use, size_t release_block)
       : num_block_need_to_use_(need_to_use),
         num_release_block_(release_block) {}
 
@@ -31,7 +33,7 @@ struct SequenceStatus {
   }
 
   uint32_t num_block_need_to_use_;
-  uint32_t num_release_block_;
+  size_t num_release_block_;
 };
 
 template <typename Func>
@@ -65,7 +67,7 @@ class BlockCapacityGuard {
  private:
   int32_t block_size() const { return kv_cache_manager_->block_size(); }
 
-  uint32_t num_blocks_in_useless() const {
+  size_t num_blocks_in_useless() const {
     // TODO for mutil dp
     const size_t capacity = kv_cache_manager_->admission_capacity(0);
     const size_t used = kv_cache_manager_->num_used_blocks()[0];
@@ -78,13 +80,13 @@ class BlockCapacityGuard {
 
   void prefix_cache_for_candidate_sequences();
 
-  uint32_t get_needed_block_num_for_prefill();
+  size_t get_needed_block_num_for_prefill();
 
   std::vector<SequenceStatus> get_all_sequence_status();
 
   uint32_t num_block_need_to_use_for(const Sequence* sequence);
 
-  uint32_t num_release_block_for(Sequence* sequence);
+  size_t num_release_block_for(Sequence* sequence);
 
   std::vector<SequenceStatus> get_running_sequence_status();
 
@@ -95,7 +97,7 @@ class BlockCapacityGuard {
   std::vector<Sequence*> decode_queue_;
   std::vector<Sequence*> running_sequences_;
 
-  uint32_t num_reserved_block_for_prefill_;
+  size_t num_reserved_block_for_prefill_;
 };
 
 class ZeroEvictionScheduler final : public ContinuousScheduler<> {

@@ -301,8 +301,13 @@ bool BlockManagerPool::exceeds_total_capacity(Sequence* sequence,
     const auto* composite = static_cast<const CompositeBlockManager*>(
         block_managers_[dp_rank].get());
     if (options_.enable_shared_kv_cache()) {
-      if (sequence_resource_units(num_tokens) <=
-          composite->admission_capacity()) {
+      const size_t full_blocks =
+          num_tokens / block_size() + (num_tokens % block_size() != 0);
+      const bool fits = options_.shared_layout()
+                            ? options_.shared_layout()->can_fit(full_blocks, 1)
+                            : sequence_resource_units(num_tokens) <=
+                                  composite->admission_capacity();
+      if (fits) {
         return false;
       }
       continue;
@@ -379,6 +384,26 @@ bool BlockManagerPool::exceeds_total_capacity(
     if (options_.enable_shared_kv_cache()) {
       remaining_slots[dp_rank] =
           composite->admission_capacity() / sequence_resource_units(num_tokens);
+      if (options_.shared_layout()) {
+        const StaticKVCacheLayout& layout = *options_.shared_layout();
+        const size_t full_blocks =
+            num_tokens / block_size() + (num_tokens % block_size() != 0);
+        size_t lower = 0;
+        size_t upper =
+            std::min(remaining_slots[dp_rank], layout.num_slots() - 1);
+        if (full_blocks != 0) {
+          upper = std::min(upper, (layout.num_slots() - 1) / full_blocks);
+        }
+        while (lower < upper) {
+          const size_t middle = lower + (upper - lower + 1) / 2;
+          if (layout.can_fit(full_blocks * middle, middle)) {
+            lower = middle;
+          } else {
+            upper = middle - 1;
+          }
+        }
+        remaining_slots[dp_rank] = lower;
+      }
       continue;
     }
     for (const auto& [type, entry] : composite->leaf_entries()) {
