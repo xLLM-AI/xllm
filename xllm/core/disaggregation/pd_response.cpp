@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/disaggregation/disagg_pd_response.h"
+#include "core/disaggregation/pd_response.h"
 
 #include <absl/time/clock.h>
 #include <absl/time/time.h>

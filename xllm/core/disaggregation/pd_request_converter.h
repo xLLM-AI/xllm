@@ -22,11 +22,10 @@ limitations under the License.
 
 namespace xllm {
 
-RequestSamplingParam make_disagg_sampling_param(
-    const proto::DisaggRequest& req);
+RequestSamplingParam make_pd_sampling_param(const proto::DisaggRequest& req);
 
-SchedulerParam make_disagg_scheduler_param(const proto::DisaggRequest& req);
+SchedulerParam make_pd_scheduler_param(const proto::DisaggRequest& req);
 
-StoppingChecker make_disagg_stopping_checker(const proto::DisaggRequest& req);
+StoppingChecker make_pd_stopping_checker(const proto::DisaggRequest& req);
 
 }  // namespace xllm

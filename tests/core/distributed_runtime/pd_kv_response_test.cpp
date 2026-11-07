@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/distributed_runtime/disagg_pd_kv_response.h"
+#include "core/disaggregation/pd_kv_response.h"
 
 #include <gtest/gtest.h>
 
@@ -31,7 +31,7 @@ std::vector<uint64_t> group_ids(const proto::KVTransferGroup& group) {
   return {group.ids().begin(), group.ids().end()};
 }
 
-TEST(DisaggPDKVResponseTest, FlatKVExportsOnlyUnsharedSuffix) {
+TEST(PDKVResponseTest, FlatKVExportsOnlyUnsharedSuffix) {
   KVCacheState state;
   auto* blocks = state.mutable_blocks(BlockType::KV);
   blocks->emplace_back(/*id=*/17, /*allocator=*/nullptr);
@@ -40,7 +40,7 @@ TEST(DisaggPDKVResponseTest, FlatKVExportsOnlyUnsharedSuffix) {
   state.incr_shared_blocks_num(BlockType::KV, /*num=*/1);
   proto::DisaggResponse response;
 
-  append_disagg_kv_transfer_groups(
+  append_pd_kv_transfer_groups(
       state, /*include_linear_state=*/false, &response);
 
   ASSERT_EQ(response.groups_size(), 1);
@@ -51,7 +51,7 @@ TEST(DisaggPDKVResponseTest, FlatKVExportsOnlyUnsharedSuffix) {
   EXPECT_EQ((*blocks)[0].ref_count(), 1u);
 }
 
-TEST(DisaggPDKVResponseTest, CollectsOnlyUnsharedFlatBlockIdsForVirtualMemory) {
+TEST(PDKVResponseTest, CollectsOnlyUnsharedFlatBlockIdsForVirtualMemory) {
   KVCacheState state;
   auto* blocks = state.mutable_blocks(BlockType::KV);
   blocks->emplace_back(/*id=*/17, /*allocator=*/nullptr);
@@ -63,10 +63,10 @@ TEST(DisaggPDKVResponseTest, CollectsOnlyUnsharedFlatBlockIdsForVirtualMemory) {
   state.mutable_blocks(BlockType::LINEAR)
       ->emplace_back(/*id=*/42, /*allocator=*/nullptr);
 
-  append_disagg_kv_transfer_groups(state,
-                                   /*include_linear_state=*/true,
-                                   &response,
-                                   &block_ids);
+  append_pd_kv_transfer_groups(state,
+                               /*include_linear_state=*/true,
+                               &response,
+                               &block_ids);
 
   ASSERT_EQ(response.groups_size(), 2);
   EXPECT_EQ(block_ids, (std::vector<int32_t>{91, 0, 29}));
@@ -74,7 +74,7 @@ TEST(DisaggPDKVResponseTest, CollectsOnlyUnsharedFlatBlockIdsForVirtualMemory) {
   EXPECT_EQ(group_ids(response.groups(1)), (std::vector<uint64_t>{42}));
 }
 
-TEST(DisaggPDKVResponseTest, FlatKVRetainsEmptyGroupForFullySharedPrompt) {
+TEST(PDKVResponseTest, FlatKVRetainsEmptyGroupForFullySharedPrompt) {
   KVCacheState state;
   state.mutable_blocks(BlockType::KV)
       ->emplace_back(/*id=*/7,
@@ -83,7 +83,7 @@ TEST(DisaggPDKVResponseTest, FlatKVRetainsEmptyGroupForFullySharedPrompt) {
   proto::DisaggResponse response;
   std::vector<int32_t> block_ids;
 
-  append_disagg_kv_transfer_groups(
+  append_pd_kv_transfer_groups(
       state, /*include_linear_state=*/false, &response, &block_ids);
 
   EXPECT_TRUE(block_ids.empty());
@@ -92,7 +92,7 @@ TEST(DisaggPDKVResponseTest, FlatKVRetainsEmptyGroupForFullySharedPrompt) {
   EXPECT_TRUE(response.groups(0).ids().empty());
 }
 
-TEST(DisaggPDKVResponseTest, GroupedCachesPreserveOrderPrefixesAndSWAGaps) {
+TEST(PDKVResponseTest, GroupedCachesPreserveOrderPrefixesAndSWAGaps) {
   KVCacheState state;
   state.mutable_blocks(BlockType::C128)
       ->emplace_back(/*id=*/128,
@@ -113,7 +113,7 @@ TEST(DisaggPDKVResponseTest, GroupedCachesPreserveOrderPrefixesAndSWAGaps) {
   proto::DisaggResponse response;
 
   std::vector<int32_t> block_ids;
-  append_disagg_kv_transfer_groups(
+  append_pd_kv_transfer_groups(
       state, /*include_linear_state=*/true, &response, &block_ids);
 
   EXPECT_TRUE(block_ids.empty());
@@ -130,8 +130,7 @@ TEST(DisaggPDKVResponseTest, GroupedCachesPreserveOrderPrefixesAndSWAGaps) {
   EXPECT_EQ(group_ids(response.groups(3)), (std::vector<uint64_t>{42}));
 }
 
-TEST(DisaggPDKVResponseTest,
-     IgnoresEmptyGroupedLeavesAndUnrequestedLinearSlot) {
+TEST(PDKVResponseTest, IgnoresEmptyGroupedLeavesAndUnrequestedLinearSlot) {
   KVCacheState state;
   state.mutable_blocks(BlockType::SWA);
   state.mutable_blocks(BlockType::LINEAR)
@@ -139,7 +138,7 @@ TEST(DisaggPDKVResponseTest,
                      /*allocator=*/nullptr);
   proto::DisaggResponse response;
 
-  append_disagg_kv_transfer_groups(
+  append_pd_kv_transfer_groups(
       state, /*include_linear_state=*/false, &response);
 
   ASSERT_EQ(response.groups_size(), 1);
@@ -147,21 +146,21 @@ TEST(DisaggPDKVResponseTest,
   EXPECT_TRUE(response.groups(0).ids().empty());
 }
 
-TEST(DisaggPDKVResponseDeathTest, RejectsInvalidNonSWABlocks) {
+TEST(PDKVResponseDeathTest, RejectsInvalidNonSWABlocks) {
   KVCacheState state;
   state.mutable_blocks(BlockType::C4)->emplace_back();
   proto::DisaggResponse response;
 
-  EXPECT_DEATH(append_disagg_kv_transfer_groups(
+  EXPECT_DEATH(append_pd_kv_transfer_groups(
                    state, /*include_linear_state=*/false, &response),
                "non-SWA leaf");
 }
 
-TEST(DisaggPDKVResponseDeathTest, RequiresRequestedLinearStateSlot) {
+TEST(PDKVResponseDeathTest, RequiresRequestedLinearStateSlot) {
   KVCacheState state;
   proto::DisaggResponse response;
 
-  EXPECT_DEATH(append_disagg_kv_transfer_groups(
+  EXPECT_DEATH(append_pd_kv_transfer_groups(
                    state, /*include_linear_state=*/true, &response),
                "linear-state slot");
 }

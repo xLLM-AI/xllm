@@ -23,10 +23,10 @@ limitations under the License.
 #include <vector>
 
 #include "common/types.h"
-#include "core/disaggregation/disagg_pd_request_converter.h"
-#include "core/disaggregation/disagg_pd_response.h"
+#include "core/disaggregation/pd_kv_response.h"
+#include "core/disaggregation/pd_request_converter.h"
+#include "core/disaggregation/pd_response.h"
 #include "core/disaggregation/pd_scheduler.h"
-#include "core/distributed_runtime/disagg_pd_kv_response.h"
 #include "core/distributed_runtime/distributed_vmm_coordinator.h"
 #include "core/distributed_runtime/engine.h"
 #include "core/framework/block/block_manager_pool.h"
@@ -88,12 +88,12 @@ std::shared_ptr<Request> PDServiceImpl::generate_request(
   std::vector<int32_t> prompt_tokens(req.prompt_tokens().begin(),
                                      req.prompt_tokens().end());
 
-  RequestSamplingParam sampling_param = make_disagg_sampling_param(req);
+  RequestSamplingParam sampling_param = make_pd_sampling_param(req);
   sampling_param.device_min_tokens =
       scheduler_->enable_task_pipeline() && sampling_param.min_tokens > 0;
   const bool json_object = sampling_param.json_object;
-  SchedulerParam scheduler_param = make_disagg_scheduler_param(req);
-  StoppingChecker stopping_checker = make_disagg_stopping_checker(req);
+  SchedulerParam scheduler_param = make_pd_scheduler_param(req);
+  StoppingChecker stopping_checker = make_pd_stopping_checker(req);
 
   // Queued outputs can outlive the RPC service during scheduler shutdown.
   // Capture the process-wide client without retaining the service.
@@ -267,7 +267,7 @@ void PDServiceImpl::decode_recv_new_requests(
 
     resp->set_dp_rank(sequence->dp_rank());
     std::vector<int32_t> virtual_memory_block_ids;
-    append_disagg_kv_transfer_groups(
+    append_pd_kv_transfer_groups(
         sequence->kv_state(),
         has_linear_attention_layers(engine_->model_args()),
         resp,

@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/disaggregation/disagg_pd_request_converter.h"
+#include "core/disaggregation/pd_request_converter.h"
 
 #include <cstdint>
 #include <string>
@@ -23,8 +23,7 @@ limitations under the License.
 
 namespace xllm {
 
-RequestSamplingParam make_disagg_sampling_param(
-    const proto::DisaggRequest& req) {
+RequestSamplingParam make_pd_sampling_param(const proto::DisaggRequest& req) {
   RequestSamplingParam sampling_param;
   sampling_param.frequency_penalty = req.frequency_penalty();
   sampling_param.presence_penalty = req.presence_penalty();
@@ -62,7 +61,7 @@ RequestSamplingParam make_disagg_sampling_param(
   return sampling_param;
 }
 
-SchedulerParam make_disagg_scheduler_param(const proto::DisaggRequest& req) {
+SchedulerParam make_pd_scheduler_param(const proto::DisaggRequest& req) {
   SchedulerParam scheduler_param;
   scheduler_param.offline = req.offline();
   scheduler_param.priority = static_cast<RequestPriority>(req.priority());
@@ -78,7 +77,7 @@ SchedulerParam make_disagg_scheduler_param(const proto::DisaggRequest& req) {
   return scheduler_param;
 }
 
-StoppingChecker make_disagg_stopping_checker(const proto::DisaggRequest& req) {
+StoppingChecker make_pd_stopping_checker(const proto::DisaggRequest& req) {
   std::unordered_set<int32_t> stop_tokens;
   if (!req.stop_token_ids().empty()) {
     stop_tokens.reserve(req.stop_token_ids_size());

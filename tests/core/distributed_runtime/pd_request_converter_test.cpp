@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/disaggregation/disagg_pd_request_converter.h"
+#include "core/disaggregation/pd_request_converter.h"
 
 #include <gtest/gtest.h>
 
@@ -27,7 +27,7 @@ limitations under the License.
 namespace xllm {
 namespace {
 
-TEST(DisaggPDRequestConverterTest, PreservesSamplingValuesAndTokenOrder) {
+TEST(PDRequestConverterTest, PreservesSamplingValuesAndTokenOrder) {
   proto::DisaggRequest req;
   req.set_frequency_penalty(0.25f);
   req.set_presence_penalty(0.5f);
@@ -55,7 +55,7 @@ TEST(DisaggPDRequestConverterTest, PreservesSamplingValuesAndTokenOrder) {
   first_bad_word->add_seq_tokens(5);
   req.add_bad_words_token_ids()->add_seq_tokens(6);
 
-  const RequestSamplingParam param = make_disagg_sampling_param(req);
+  const RequestSamplingParam param = make_pd_sampling_param(req);
 
   EXPECT_FLOAT_EQ(param.frequency_penalty, 0.25f);
   EXPECT_FLOAT_EQ(param.presence_penalty, 0.5f);
@@ -84,9 +84,9 @@ TEST(DisaggPDRequestConverterTest, PreservesSamplingValuesAndTokenOrder) {
   EXPECT_EQ(param.num_return_sequences, 0);
 }
 
-TEST(DisaggPDRequestConverterTest, KeepsWireDefaultsAndOptionalSeedPresence) {
+TEST(PDRequestConverterTest, KeepsWireDefaultsAndOptionalSeedPresence) {
   proto::DisaggRequest req;
-  const RequestSamplingParam absent = make_disagg_sampling_param(req);
+  const RequestSamplingParam absent = make_pd_sampling_param(req);
 
   EXPECT_FALSE(absent.seed.has_value());
   EXPECT_FALSE(absent.allowed_token_ids.has_value());
@@ -108,12 +108,12 @@ TEST(DisaggPDRequestConverterTest, KeepsWireDefaultsAndOptionalSeedPresence) {
   EXPECT_TRUE(absent.bad_words_token_ids.empty());
 
   req.set_seed(0);
-  const RequestSamplingParam explicit_zero = make_disagg_sampling_param(req);
+  const RequestSamplingParam explicit_zero = make_pd_sampling_param(req);
   ASSERT_TRUE(explicit_zero.seed.has_value());
   EXPECT_EQ(explicit_zero.seed.value(), 0);
 }
 
-TEST(DisaggPDRequestConverterTest, CopiesOnlineSchedulingFields) {
+TEST(PDRequestConverterTest, CopiesOnlineSchedulingFields) {
   proto::DisaggRequest req;
   req.set_priority(proto::Priority::HIGH);
   req.set_ttft_slo_ms(101);
@@ -124,7 +124,7 @@ TEST(DisaggPDRequestConverterTest, CopiesOnlineSchedulingFields) {
   req.set_ttlt_priority_weight(6);
   req.set_priority_weight(7);
 
-  const SchedulerParam param = make_disagg_scheduler_param(req);
+  const SchedulerParam param = make_pd_scheduler_param(req);
 
   EXPECT_FALSE(param.offline);
   EXPECT_EQ(param.priority, RequestPriority::HIGH);
@@ -137,7 +137,7 @@ TEST(DisaggPDRequestConverterTest, CopiesOnlineSchedulingFields) {
   EXPECT_EQ(param.priority_weight, 7);
 }
 
-TEST(DisaggPDRequestConverterTest, KeepsOfflineSchedulingDefaults) {
+TEST(PDRequestConverterTest, KeepsOfflineSchedulingDefaults) {
   proto::DisaggRequest req;
   req.set_offline(true);
   req.set_priority(proto::Priority::LOW);
@@ -149,7 +149,7 @@ TEST(DisaggPDRequestConverterTest, KeepsOfflineSchedulingDefaults) {
   req.set_ttlt_priority_weight(6);
   req.set_priority_weight(7);
 
-  const SchedulerParam param = make_disagg_scheduler_param(req);
+  const SchedulerParam param = make_pd_scheduler_param(req);
 
   EXPECT_TRUE(param.offline);
   EXPECT_EQ(param.priority, RequestPriority::LOW);
@@ -162,9 +162,8 @@ TEST(DisaggPDRequestConverterTest, KeepsOfflineSchedulingDefaults) {
   EXPECT_EQ(param.priority_weight, 1);
 }
 
-TEST(DisaggPDRequestConverterTest, UsesWireDefaultsForAbsentOnlineScheduling) {
-  const SchedulerParam param =
-      make_disagg_scheduler_param(proto::DisaggRequest{});
+TEST(PDRequestConverterTest, UsesWireDefaultsForAbsentOnlineScheduling) {
+  const SchedulerParam param = make_pd_scheduler_param(proto::DisaggRequest{});
 
   EXPECT_FALSE(param.offline);
   EXPECT_EQ(param.priority, RequestPriority::DEFAULT);
@@ -177,7 +176,7 @@ TEST(DisaggPDRequestConverterTest, UsesWireDefaultsForAbsentOnlineScheduling) {
   EXPECT_EQ(param.priority_weight, 0);
 }
 
-TEST(DisaggPDRequestConverterTest, PreservesStopSequenceOrderAndMetadata) {
+TEST(PDRequestConverterTest, PreservesStopSequenceOrderAndMetadata) {
   proto::DisaggRequest req;
   req.set_max_tokens(2);
   req.set_max_context_len(20);
@@ -192,7 +191,7 @@ TEST(DisaggPDRequestConverterTest, PreservesStopSequenceOrderAndMetadata) {
   auto* second_stop = req.add_stop_sequences();
   second_stop->add_seq_tokens(5);
 
-  StoppingChecker checker = make_disagg_stopping_checker(req);
+  StoppingChecker checker = make_pd_stopping_checker(req);
 
   EXPECT_EQ(checker.get_max_generated_tokens(), 2u);
   EXPECT_EQ(checker.get_max_context_len(), 20u);
@@ -234,14 +233,14 @@ TEST(DisaggPDRequestConverterTest, PreservesStopSequenceOrderAndMetadata) {
   EXPECT_EQ(std::get<int32_t>(stop_reason), 3);
 }
 
-TEST(DisaggPDRequestConverterTest, EnforcesMinTokensBeforeStopCriteria) {
+TEST(PDRequestConverterTest, EnforcesMinTokensBeforeStopCriteria) {
   proto::DisaggRequest req;
   req.set_max_tokens(10);
   req.set_eos_token_id(2);
   req.set_min_tokens(2);
   req.add_stop_token_ids(3);
   req.add_stop_sequences()->add_seq_tokens(4);
-  const StoppingChecker checker = make_disagg_stopping_checker(req);
+  const StoppingChecker checker = make_pd_stopping_checker(req);
 
   for (int32_t token : {2, 3, 4}) {
     EXPECT_EQ(checker.check(std::vector<int32_t>{1, token},
@@ -256,18 +255,18 @@ TEST(DisaggPDRequestConverterTest, EnforcesMinTokensBeforeStopCriteria) {
             FinishReason::NONE);
 }
 
-TEST(DisaggPDRequestConverterTest, EnforcesGenerationAndContextLimits) {
+TEST(PDRequestConverterTest, EnforcesGenerationAndContextLimits) {
   proto::DisaggRequest req;
   req.set_max_tokens(2);
   req.set_max_context_len(5);
   req.set_eos_token_id(2);
-  const StoppingChecker generation_checker = make_disagg_stopping_checker(req);
+  const StoppingChecker generation_checker = make_pd_stopping_checker(req);
   EXPECT_EQ(generation_checker.check(std::vector<int32_t>{1, 5, 6},
                                      /*num_prompt_tokens=*/1),
             FinishReason::LENGTH);
 
   req.set_max_tokens(10);
-  const StoppingChecker context_checker = make_disagg_stopping_checker(req);
+  const StoppingChecker context_checker = make_pd_stopping_checker(req);
   EXPECT_EQ(context_checker.check(std::vector<int32_t>{1, 5, 6, 7, 8},
                                   /*num_prompt_tokens=*/4),
             FinishReason::LENGTH);
