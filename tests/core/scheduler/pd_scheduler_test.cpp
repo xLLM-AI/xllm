@@ -2159,13 +2159,22 @@ TEST_P(ChunkReservationTest,
   auto blocker = make_request(std::vector<int32_t>(12, 99), "blocker");
   ASSERT_TRUE(
       engine.block_manager_pool()->allocate(blocker->sequences()[0].get()));
+  // Physical pressure is retried before a persistent failure releases the
+  // reservation. Exhaust that window without collecting forward outputs.
   constexpr size_t kRetryLimit = 4096;
-  for (size_t attempt = 0; attempt < kRetryLimit; ++attempt) {
+  for (size_t attempt = 1; attempt < kRetryLimit; ++attempt) {
     EXPECT_TRUE(prefill.prepare_batch()[0].empty());
   }
   prefill.wait_notifications(&decode_);
+  EXPECT_EQ(service_.released, 0);
+  EXPECT_FALSE(decode_.reservations_empty());
+  EXPECT_GE(remote->sequences()[0]->get_embedding_block_id(), 0);
+  EXPECT_TRUE(prefill.prepare_batch()[0].empty());
+  prefill.wait_notifications(&decode_);
   EXPECT_EQ(service_.released, 1);
   EXPECT_TRUE(decode_.reservations_empty());
+  EXPECT_EQ(local->sequences()[0]->kv_state().num_blocks(BlockType::KV), 0u);
+  EXPECT_FALSE(prefill.has_channel(local->request_id()));
   if (GetParam()) {
     engine.complete_forward = [&](const BatchGroup&) {
       EXPECT_EQ(service_.released, 1);

@@ -57,8 +57,8 @@ class FakeTokenizer : public Tokenizer {
     NOT_IMPLEMENTED();
   }
   std::string decode(const Slice<int32_t>& ids,
-                     bool skip_special_tokens) const {
-    return {};
+                     bool /*skip_special_tokens*/) const override {
+    return std::string(ids.size(), 'x');
   }
   std::optional<int32_t> token_to_id(const std::string_view& token) const {
     NOT_IMPLEMENTED();
@@ -285,7 +285,8 @@ class PendingReleaseBlockManagerPool final : public BlockManagerPool {
  private:
   static BlockManagerPool::Options make_options() {
     BlockManagerPool::Options options;
-    options.num_blocks_ = 256;
+    // The 34025-token prompt needs 266 data blocks plus padding block zero.
+    options.num_blocks_ = 267;
     options.block_size_ = 128;
     options.max_seqs_per_batch_ = 16;
     options.enable_prefix_cache_ = true;
@@ -602,12 +603,15 @@ class TestableContinuousScheduler final : public ContinuousScheduler<> {
 // verify how many tokens are processed in one scheduling.
 TEST(SchedulerPolicyTest, AddNewRequestBase) {
   std::vector<int32_t> prompt_len{10, 1024, 2048, 2048};
+  // The 2048-token prompt needs 128 data blocks plus padding block zero.
   std::vector<int32_t> num_blocks{16, 128, 129, 128};
   std::vector<int32_t> block_size{16, 16, 16, 256};
   std::vector<int32_t> chunk_size{1024, 1024, 1024, 768};
   std::vector<int32_t> kv_split_size{1, 1, 1, 2};
+  // Mixed prefill can redistribute unused budget to finish the full prompt.
   std::vector<int32_t> validate_allowed_max_tokens{10, 1024, 2048, 768};
   for (size_t idx = 0; idx < prompt_len.size(); ++idx) {
+    SCOPED_TRACE(idx);
     SchedulerOptions opt =
         create_scheduler_options(10000, 256, 0, chunk_size[idx], 1);
     ScopedConfigValue<int32_t> kv_split_guard(
@@ -631,7 +635,7 @@ TEST(SchedulerPolicyTest, AddNewRequestBase) {
         batch[0].get_allowed_max_tokens();
     for (size_t i = 0; i < batch[0].size(); ++i) {
       auto seq = batch[0][i];
-      EXPECT_TRUE(allowed_max_tokens[i] == validate_allowed_max_tokens[idx]);
+      EXPECT_EQ(allowed_max_tokens[i], validate_allowed_max_tokens[idx]);
     }
   }
 }
@@ -2136,12 +2140,20 @@ TEST(SchedulerPolicyTest, ResourceNotEnough) {
     // request prompt len: 1000
     auto requests = generate_request(
         {1, 1000}, {1, 100}, std::nullopt, std::nullopt, 10000);
+    std::optional<Status> callback_status;
+    requests[1]->state().output_func = [&](const RequestOutput& output) {
+      callback_status = output.status;
+      return true;
+    };
     scheduler->add_request(requests[0]);
     scheduler->add_request(requests[1]);
 
     auto batch = scheduler->prepare_batch_test();
-    EXPECT_TRUE(batch.size() == 1);
-    EXPECT_TRUE(batch[0].size() == 1);  // can not schedule the second.
+    scheduler->wait_for_responses();
+    ASSERT_EQ(batch.size(), 1u);
+    EXPECT_EQ(batch[0].size(), 1u);
+    ASSERT_TRUE(callback_status.has_value());
+    EXPECT_EQ(callback_status->code(), StatusCode::RESOURCE_EXHAUSTED);
   }
 }
 
@@ -3560,11 +3572,16 @@ TEST(SchedulerPolicyTest, BestOfPartialAdmissionReleasesPrefixUsage) {
   pool->deallocate(cached_request.get());
 
   TestableContinuousScheduler scheduler(&engine, options);
+  std::optional<bool> cancelled_response;
   RequestState request_state =
       generate_request({12}, {4}, std::nullopt, std::nullopt, 64)[0]
           ->state()
           .clone();
   request_state.best_of = 2;
+  request_state.output_func = [&](const RequestOutput& output) {
+    cancelled_response = output.cancelled;
+    return true;
+  };
   auto request = std::make_shared<Request>(
       "best-of-prefix", "best-of-prefix", "", std::move(request_state), "");
   ASSERT_TRUE(request->expand_sequences(/*share_prefix=*/false));
@@ -3605,6 +3622,8 @@ TEST(SchedulerPolicyTest, BestOfPartialAdmissionReleasesPrefixUsage) {
   scheduler.wait_for_responses();
   ASSERT_EQ(batches.size(), 1u);
   EXPECT_TRUE(batches.front().empty());
+  ASSERT_TRUE(cancelled_response.has_value());
+  EXPECT_TRUE(cancelled_response.value());
   EXPECT_EQ(first->kv_state().num_blocks(BlockType::KV), 0u);
   EXPECT_EQ(second->kv_state().num_blocks(BlockType::KV), 0u);
   EXPECT_EQ(pool->num_used_blocks(), used_blocks_before);
