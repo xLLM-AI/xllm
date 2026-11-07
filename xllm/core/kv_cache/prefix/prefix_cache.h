@@ -33,6 +33,7 @@ limitations under the License.
 #include "core/kv_cache/block/block.h"
 #include "core/kv_cache/events/kv_cache_event_journal.h"
 #include "core/kv_cache/prefix/block_hasher.h"
+#include "core/kv_cache/prefix/prefix_cache_entry.h"
 #include "util/hash_util.h"
 #include "util/slice.h"
 
@@ -119,6 +120,10 @@ class PrefixCache {
   // Evict up to `n_blocks` LRU-oldest entries. Returns the number evicted.
   virtual size_t evict(size_t n_blocks);
 
+  std::vector<PrefixCacheEntry> entries() const;
+  bool evict_block(const XXH3Key& hash);
+  void set_dependency(const XXH3Key& hash, const XXH3Key& dependency);
+
   virtual size_t num_blocks() const {
     CHECK(num_blocks_ == cached_blocks_.size()) << "check block num failed";
     return num_blocks_;
@@ -141,6 +146,10 @@ class PrefixCache {
   KVCacheEventScope event_scope_;
   struct Node {
     Block block;
+    std::optional<XXH3Key> parent;
+    std::optional<XXH3Key> dependency;
+    bool chain_known = false;
+    size_t block_index = 0;
     int64_t last_access_time = 0;
     Node* prev = nullptr;
     Node* next = nullptr;
@@ -217,6 +226,9 @@ class PrefixCache {
   std::unordered_set<int32_t> cached_block_ids_;
 
   std::atomic<uint64_t> total_blocks_{0}, matched_blocks_{0};
+
+ private:
+  Node* evict_node(Node* node);
 };
 
 }  // namespace xllm

@@ -17,7 +17,9 @@ limitations under the License.
 
 #include <algorithm>
 #include <limits>
+#include <numeric>
 #include <optional>
+#include <unordered_map>
 #include <utility>
 
 #include "core/framework/block/embedding_block_manager.h"
@@ -28,6 +30,7 @@ limitations under the License.
 #include "core/kv_cache/block/concurrent_block_manager_impl.h"
 #include "core/kv_cache/block/linear_state_block_manager.h"
 #include "core/kv_cache/block/sliding_window_block_manager.h"
+#include "core/kv_cache/layout/static_kv_cache_layout.h"
 
 namespace xllm {
 
@@ -653,6 +656,8 @@ bool CompositeBlockManager::allocate_sequence(Sequence* seq,
     return false;
   }
   KVCacheState& kv_state = kv_state_for(*seq);
+  const size_t previous_checkpoint =
+      kv_state.num_cached_blocks(BlockType::LINEAR);
 
   // Publish blocks completed by the previous forward before growing again.
   // SlidingWindowBlockManager can then release a cached, slid-out block and
@@ -693,6 +698,12 @@ bool CompositeBlockManager::allocate_sequence(Sequence* seq,
     if (!blocks->empty()) {
       staged.emplace(type, std::move(*blocks));
     }
+  }
+
+  const size_t checkpoint = kv_state.num_cached_blocks(BlockType::LINEAR);
+  if (shared_block_pool_ && shared_block_pool_->uses_slabs() &&
+      checkpoint > previous_checkpoint) {
+    record_shared_checkpoint(*seq, checkpoint);
   }
 
   // Grow-or-fail: every cache-bearing leaf must cover num_tokens now.
@@ -832,6 +843,19 @@ void CompositeBlockManager::allocate_shared_for_sequence(Sequence* seq) {
       kv_state.prefix_cache_matched()) {
     return;
   }
+  if (shared_block_pool_ && shared_block_pool_->uses_slabs() &&
+      combination_ == LeafCombination::FLAT_KV_LINEAR) {
+    const size_t block_size = leaf_of(BlockType::KV)->block_size();
+    const size_t full_blocks = seq->tokens().size() / block_size +
+                               (seq->tokens().size() % block_size != 0);
+    // Restore keeps its cached source until a private Linear output exists.
+    // Decline that transient two-state footprint before pinning the prefix;
+    // cold execution needs one state and can reclaim the inactive cache pair.
+    if (!options_.shared_layout()->can_fit(full_blocks, 2)) {
+      kv_state.set_prefix_cache_matched();
+      return;
+    }
+  }
   std::vector<ProbeResult> probes = probe_prefix_cache(seq, leaves_, kv_state);
   if (probes.empty()) {
     kv_state.set_prefix_cache_matched();
@@ -851,6 +875,13 @@ void CompositeBlockManager::allocate_shared_for_sequence(Sequence* seq) {
       break;
     case LeafCombination::UNSUPPORTED:
       return;
+  }
+  if (shared_block_pool_ && shared_block_pool_->uses_slabs() &&
+      combination_ == LeafCombination::FLAT_KV_LINEAR &&
+      trimmed.safe_hit_tokens > 0) {
+    record_shared_checkpoint(
+        *seq,
+        trimmed.safe_hit_tokens / leaf_of(BlockType::LINEAR)->block_size());
   }
 
   release_probes(&trimmed.to_drop);
@@ -879,6 +910,27 @@ void CompositeBlockManager::allocate_shared_for_sequence(Sequence* seq) {
       break;
   }
   kv_state.set_prefix_cache_matched();
+}
+
+void CompositeBlockManager::record_shared_checkpoint(Sequence& seq,
+                                                     size_t checkpoint_index) {
+  BlockManager* full = leaf_of(BlockType::KV);
+  BlockManager* linear = leaf_of(BlockType::LINEAR);
+  CHECK(full != nullptr && linear != nullptr);
+  const size_t tokens = checkpoint_index * linear->block_size();
+  if (tokens == 0 || tokens % full->block_size() != 0) {
+    return;
+  }
+  seq.update_block_hashes(static_cast<uint32_t>(full->block_size()),
+                          full->options().hasher_type());
+  seq.update_linear_state_hashes(static_cast<uint32_t>(linear->block_size()));
+  const size_t full_count = tokens / full->block_size();
+  CHECK_LE(full_count, seq.block_hashes().size());
+  CHECK_LE(checkpoint_index, seq.linear_state_hashes().size());
+  // MTP Full keys include the next token, while the recurrent checkpoint key
+  // describes only the prefix. Multiple Full endpoints may share one state.
+  full->set_prefix_dependency(seq.block_hashes()[full_count - 1],
+                              seq.linear_state_hashes()[checkpoint_index - 1]);
 }
 
 void CompositeBlockManager::publish_prefix(Sequence* seq, size_t num_tokens) {
@@ -1040,6 +1092,9 @@ const CompositeBlockManager::LeafEntry* CompositeBlockManager::capacity_leaf()
 
 bool CompositeBlockManager::reclaim_shared_cache() {
   CHECK(shared_block_pool_ != nullptr);
+  if (shared_block_pool_->uses_slabs()) {
+    return reclaim_shared_prefix();
+  }
   for (auto& [type, entry] : leaves_) {
     if (entry.leaf->options().shared_block_pool() != shared_block_pool_) {
       continue;
@@ -1049,6 +1104,193 @@ bool CompositeBlockManager::reclaim_shared_cache() {
     if (entry.leaf->evict_prefix_cache(1) != 0) {
       return true;
     }
+  }
+  return false;
+}
+
+bool CompositeBlockManager::reclaim_shared_prefix() {
+  BlockManager& full_leaf = *leaf_of(BlockType::KV);
+  BlockManager& linear_leaf = *leaf_of(BlockType::LINEAR);
+  const std::vector<PrefixCacheEntry> full = full_leaf.prefix_cache_entries();
+  const std::vector<PrefixCacheEntry> linear =
+      linear_leaf.prefix_cache_entries();
+  using HashIndex = std::
+      unordered_map<XXH3Key, size_t, FixedStringKeyHash, FixedStringKeyEqual>;
+  HashIndex full_indices;
+  full_indices.reserve(full.size());
+  for (size_t index = 0; index < full.size(); ++index) {
+    full_indices.emplace(full[index].hash, index);
+  }
+  std::vector<size_t> order(full.size());
+  std::iota(order.begin(), order.end(), size_t{0});
+  std::sort(order.begin(), order.end(), [&full](size_t left, size_t right) {
+    return full[left].block_index < full[right].block_index;
+  });
+  std::vector<std::optional<size_t>> parents(full.size());
+  std::vector<bool> complete(full.size(), false);
+  for (const size_t index : order) {
+    const auto parent = full[index].parent
+                            ? full_indices.find(*full[index].parent)
+                            : full_indices.end();
+    if (parent != full_indices.end()) {
+      parents[index] = parent->second;
+    }
+    complete[index] = full[index].chain_known &&
+                      (!full[index].parent || (parents[index].has_value() &&
+                                               complete[*parents[index]]));
+  }
+  HashIndex linear_indices;
+  linear_indices.reserve(linear.size());
+  for (size_t index = 0; index < linear.size(); ++index) {
+    linear_indices.emplace(linear[index].hash, index);
+  }
+  constexpr size_t kNoCheckpoint = std::numeric_limits<size_t>::max();
+  constexpr size_t kSharedCheckpoint = kNoCheckpoint - 1;
+  std::vector<size_t> owners(full.size(), kNoCheckpoint);
+  std::vector<std::optional<size_t>> checkpoints(full.size());
+  std::vector<bool> restorable(linear.size(), false);
+  for (size_t index = 0; index < full.size(); ++index) {
+    const auto checkpoint = full[index].dependency
+                                ? linear_indices.find(*full[index].dependency)
+                                : linear_indices.end();
+    if (complete[index] && checkpoint != linear_indices.end()) {
+      checkpoints[index] = checkpoint->second;
+      owners[index] = checkpoint->second;
+      restorable[checkpoint->second] = true;
+    }
+  }
+  // Merge checkpoint identity, rather than counting endpoints: MTP branches
+  // belonging to one state still have exclusive ownership of their ancestors.
+  for (auto it = order.rbegin(); it != order.rend(); ++it) {
+    if (parents[*it].has_value()) {
+      size_t& parent_owner = owners[*parents[*it]];
+      if (parent_owner == kNoCheckpoint) {
+        parent_owner = owners[*it];
+      } else if (owners[*it] != kNoCheckpoint && parent_owner != owners[*it]) {
+        parent_owner = kSharedCheckpoint;
+      }
+    }
+  }
+  const auto slab_benefit =
+      [this](BlockType type,
+             const std::vector<const PrefixCacheEntry*>& entries) {
+        std::vector<int32_t> ids;
+        ids.reserve(entries.size());
+        for (const PrefixCacheEntry* entry : entries) {
+          ids.emplace_back(entry->block_id);
+        }
+        return shared_block_pool_->reclaimable_slab_count(type, ids);
+      };
+  std::vector<const PrefixCacheEntry*> full_orphans;
+  std::vector<const PrefixCacheEntry*> linear_orphans;
+  full_orphans.reserve(full.size());
+  linear_orphans.reserve(linear.size());
+  for (size_t index = 0; index < full.size(); ++index) {
+    if (owners[index] == kNoCheckpoint && full[index].evictable) {
+      full_orphans.emplace_back(&full[index]);
+    }
+  }
+  for (size_t index = 0; index < linear.size(); ++index) {
+    if (!restorable[index] && linear[index].evictable) {
+      linear_orphans.emplace_back(&linear[index]);
+    }
+  }
+  const size_t full_benefit = slab_benefit(BlockType::KV, full_orphans);
+  const size_t linear_benefit = slab_benefit(BlockType::LINEAR, linear_orphans);
+  const auto evict_orphans =
+      [](BlockManager& leaf,
+         const std::vector<const PrefixCacheEntry*>& entries,
+         size_t benefit) {
+        bool reclaimed = false;
+        for (const PrefixCacheEntry* entry : entries) {
+          reclaimed = leaf.evict_cached_block(entry->hash) || reclaimed;
+          if (reclaimed && benefit == 0) {
+            break;
+          }
+        }
+        return reclaimed;
+      };
+  const bool prefer_full = linear_orphans.empty() ||
+                           (!full_orphans.empty() &&
+                            (full_benefit > linear_benefit ||
+                             (full_benefit == linear_benefit &&
+                              full_orphans.front()->last_access_time <=
+                                  linear_orphans.front()->last_access_time)));
+  if (prefer_full) {
+    if (evict_orphans(full_leaf, full_orphans, full_benefit) ||
+        evict_orphans(linear_leaf, linear_orphans, linear_benefit)) {
+      return true;
+    }
+  } else if (evict_orphans(linear_leaf, linear_orphans, linear_benefit) ||
+             evict_orphans(full_leaf, full_orphans, full_benefit)) {
+    return true;
+  }
+
+  // A checkpoint and the Full suffix used only by it form one eviction unit.
+  // Shared ancestors stay cached for other recoverable checkpoints.
+  std::vector<size_t> exclusive_counts(linear.size(), 0);
+  for (size_t index = 0; index < full.size(); ++index) {
+    if (owners[index] < linear.size() && full[index].evictable) {
+      ++exclusive_counts[owners[index]];
+    }
+  }
+  std::vector<std::vector<const PrefixCacheEntry*>> exclusive(linear.size());
+  for (size_t index = 0; index < linear.size(); ++index) {
+    exclusive[index].reserve(exclusive_counts[index]);
+  }
+  for (size_t index = 0; index < full.size(); ++index) {
+    if (owners[index] < linear.size() && full[index].evictable) {
+      exclusive[owners[index]].emplace_back(&full[index]);
+    }
+  }
+  std::optional<size_t> victim;
+  size_t best_benefit = 0;
+  for (size_t index = 0; index < linear.size(); ++index) {
+    if (!linear[index].evictable || !restorable[index]) {
+      continue;
+    }
+    const size_t benefit = slab_benefit(BlockType::KV, exclusive[index]) +
+                           shared_block_pool_->reclaimable_slab_count(
+                               BlockType::LINEAR, {linear[index].block_id});
+    if (!victim.has_value() || benefit > best_benefit) {
+      victim = index;
+      best_benefit = benefit;
+    }
+  }
+  if (victim.has_value() &&
+      linear_leaf.evict_cached_block(linear[*victim].hash)) {
+    for (const PrefixCacheEntry* entry : exclusive[*victim]) {
+      full_leaf.evict_cached_block(entry->hash);
+    }
+    return true;
+  }
+
+  // If checkpoints are pinned, an unused Full block may still be reclaimed.
+  // Drop its dependent cache records where possible; live aliases remain valid.
+  for (size_t index = 0; index < full.size(); ++index) {
+    if (!full[index].evictable ||
+        !full_leaf.evict_cached_block(full[index].hash)) {
+      continue;
+    }
+    std::vector<bool> survives(linear.size(), false);
+    for (size_t endpoint = 0; endpoint < full.size(); ++endpoint) {
+      if (!checkpoints[endpoint].has_value()) {
+        continue;
+      }
+      std::optional<size_t> current = endpoint;
+      while (current.has_value() && *current != index) {
+        current = parents[*current];
+      }
+      if (!current.has_value()) {
+        survives[*checkpoints[endpoint]] = true;
+      }
+    }
+    for (size_t state = 0; state < linear.size(); ++state) {
+      if (restorable[state] && !survives[state]) {
+        linear_leaf.evict_cached_block(linear[state].hash);
+      }
+    }
+    return true;
   }
   return false;
 }

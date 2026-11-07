@@ -37,6 +37,7 @@ std::vector<Block> PrefixCache::match(const Slice<int32_t>& token_ids,
   }
 
   total_blocks_.fetch_add(n_blocks);
+  const int64_t now = absl::ToUnixMicros(absl::Now());
 
   std::vector<Block> blocks;
   blocks.reserve(n_blocks);
@@ -55,6 +56,7 @@ std::vector<Block> PrefixCache::match(const Slice<int32_t>& token_ids,
       return false;
     }
     blocks.emplace_back(iter->second->block);
+    iter->second->last_access_time = now;
     lru_lst_.remove_node(iter->second);
     node_list.push_front(iter->second);
     return true;
@@ -152,6 +154,13 @@ size_t PrefixCache::insert(const Slice<int32_t>& token_ids,
     auto iter = cached_blocks_.find(token_hash_key);
     if (iter != cached_blocks_.end()) {
       iter->second->last_access_time = now;
+      iter->second->chain_known = true;
+      iter->second->block_index = block_idx;
+      iter->second->parent =
+          block_idx == 0
+              ? std::nullopt
+              : std::optional<XXH3Key>(
+                    XXH3Key(blocks[block_idx - 1].get_immutable_hash_value()));
 
       lru_lst_.remove_node(iter->second);
       node_list.push_front(iter->second);
@@ -161,6 +170,12 @@ size_t PrefixCache::insert(const Slice<int32_t>& token_ids,
       new_node->block = blocks[block_idx];
       cached_block_ids_.insert(new_node->block.id());
       new_node->last_access_time = now;
+      new_node->chain_known = true;
+      new_node->block_index = block_idx;
+      if (block_idx != 0) {
+        new_node->parent =
+            XXH3Key(blocks[block_idx - 1].get_immutable_hash_value());
+      }
 
       node_list.push_front(new_node);
 
@@ -250,6 +265,7 @@ Block PrefixCache::find(const XXH3Key& hash) {
   if (iter == cached_blocks_.end()) {
     return Block();
   }
+  iter->second->last_access_time = absl::ToUnixMicros(absl::Now());
   lru_lst_.move_back(iter->second);
   return iter->second->block;
 }
@@ -260,6 +276,56 @@ bool PrefixCache::contains(const XXH3Key& hash) const {
 
 bool PrefixCache::owns(const Block& block) const {
   return cached_block_ids_.contains(block.id());
+}
+
+std::vector<PrefixCacheEntry> PrefixCache::entries() const {
+  std::vector<PrefixCacheEntry> result;
+  result.reserve(num_blocks_);
+  for (const Node* node = lru_lst_.lst_front.next; node != &lru_lst_.lst_back;
+       node = node->next) {
+    result.emplace_back(PrefixCacheEntry{
+        .hash = XXH3Key(node->block.get_immutable_hash_value()),
+        .parent = node->parent,
+        .dependency = node->dependency,
+        .block_id = node->block.id(),
+        .block_index = node->block_index,
+        .last_access_time = node->last_access_time,
+        .chain_known = node->chain_known,
+        .evictable = !node->block.is_shared(),
+    });
+  }
+  return result;
+}
+
+void PrefixCache::set_dependency(const XXH3Key& hash,
+                                 const XXH3Key& dependency) {
+  const auto it = cached_blocks_.find(hash);
+  if (it != cached_blocks_.end()) {
+    it->second->dependency = dependency;
+  }
+}
+
+PrefixCache::Node* PrefixCache::evict_node(Node* node) {
+  Node* next = lru_lst_.remove_node(node);
+  const XXH3Key hash(node->block.get_immutable_hash_value());
+  cached_blocks_.erase(hash);
+  cached_block_ids_.erase(node->block.id());
+  if (event_journal_ && event_journal_->enabled()) {
+    event_journal_->remove(event_scope_,
+                           KVCacheEventJournal::encode_hash(hash.data));
+  }
+  delete node;
+  --num_blocks_;
+  return next;
+}
+
+bool PrefixCache::evict_block(const XXH3Key& hash) {
+  const auto it = cached_blocks_.find(hash);
+  if (it == cached_blocks_.end() || it->second->block.is_shared()) {
+    return false;
+  }
+  evict_node(it->second);
+  return true;
 }
 
 size_t PrefixCache::evict(size_t n_blocks) {
@@ -280,22 +346,8 @@ size_t PrefixCache::evict(size_t n_blocks) {
       continue;
     }
 
-    Node* del_node = iter_node;
-
-    iter_node = lru_lst_.remove_node(del_node);
-
-    XXH3Key token_hash_key(del_node->block.get_immutable_hash_value());
-
-    cached_blocks_.erase(token_hash_key);
-    cached_block_ids_.erase(del_node->block.id());
-    if (event_journal_ && event_journal_->enabled()) {
-      event_journal_->remove(
-          event_scope_, KVCacheEventJournal::encode_hash(token_hash_key.data));
-    }
-
-    delete del_node;
+    iter_node = evict_node(iter_node);
     ++evict_count;
-    --num_blocks_;
   }
 
   return evict_count;
