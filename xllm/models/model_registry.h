@@ -93,10 +93,30 @@ enum class CpShardingMode : int8_t {
 using MtpArgsAdapter =
     std::function<void(ModelArgs& args, bool is_python_model)>;
 
+using GraphHistoryCapacityAdapter = std::function<int64_t(const ModelArgs&)>;
+
+enum class MtpReplayFamily : int8_t {
+  NONE,
+  GLM5,
+  QWEN35,
+};
+
+enum class MtpGraphHistoryPolicy : int8_t {
+  MAX_CONTEXT,
+  QWEN_FULL_ATTENTION,
+  KPOOL_FIXED,
+};
+
 struct MtpModelCapabilities {
   bool native_draft_requires_accepted_span_replay = false;
   bool native_draft_owns_embedding_and_lm_head = false;
   bool python_draft_owns_embedding_and_lm_head = false;
+  bool allow_tail_fallback = false;
+  MtpReplayFamily replay_family = MtpReplayFamily::NONE;
+  bool supports_causal_replay_target = false;
+  bool supports_expanded_replay_target = false;
+  bool supports_grouped_mtp_graph = false;
+  MtpGraphHistoryPolicy graph_history = MtpGraphHistoryPolicy::MAX_CONTEXT;
 };
 
 // TODO: add default args loader.
@@ -114,6 +134,7 @@ struct ModelMeta {
   bool supports_dcp = false;
   MtpModelCapabilities mtp_capabilities;
   MtpArgsAdapter mtp_args_adapter;
+  GraphHistoryCapacityAdapter graph_history_capacity_adapter;
 };
 
 // Model config names may be aliases, but registry lookups use one canonical
@@ -202,6 +223,14 @@ class ModelRegistry {
                                         MtpModelCapabilities capabilities);
 
   static MtpModelCapabilities get_mtp_capabilities(const std::string& name);
+
+  static void register_graph_history_capacity(
+      const std::string& name,
+      GraphHistoryCapacityAdapter adapter);
+
+  static int64_t get_graph_history_capacity(const std::string& name,
+                                            const ModelArgs& args,
+                                            int64_t default_capacity);
 
   static void configure_mtp_args(ModelArgs& args,
                                  std::string_view algorithm,

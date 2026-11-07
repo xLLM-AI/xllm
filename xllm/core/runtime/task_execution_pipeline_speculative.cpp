@@ -3694,10 +3694,14 @@ void TaskExecutionPipeline::launch_speculative(uint32_t slot_id) {
   KVTransferCompletion kv_transfers;
   const auto& transfers = slots_[slot_id]->transfer_kv_infos;
   if (!transfers.empty()) {
+    std::vector<std::string> fallback_request_ids =
+        unique_transfer_request_ids(transfers);
     CHECK(!slot.decode && !block_draft() && slot.rows != 0);
-    kv_transfers.add(push_kv_(transfers, slot.target_prefill->model_params()));
+    kv_transfers.add(push_kv_(transfers, slot.target_prefill->model_params()),
+                     fallback_request_ids);
     kv_transfers.add(
-        draft_->push_kv(transfers, slot.draft_prefill->model_params()));
+        draft_->push_kv(transfers, slot.draft_prefill->model_params()),
+        std::move(fallback_request_ids));
   }
   if (slot.rows == 0 && slot.run_models) {
     launch_empty_shard(slot);
@@ -3710,7 +3714,12 @@ void TaskExecutionPipeline::launch_speculative(uint32_t slot_id) {
   }
   // Target and Draft have independent layer events and cache namespaces.
   // Both transfers must finish before publishing tokens/bootstrap hidden.
-  CHECK(kv_transfers.wait()) << "Task pipeline MTP KV cache push failed";
+  slots_[slot_id]->failed_request_ids = finalize_kv_push_failures(
+      kv_transfers,
+      transfers,
+      capacity_.enable_kv_push,
+      {capacity_.sampling_group, capacity_.cp_sampling_group},
+      device_);
   // Prefill, empty and unchanged legacy paths still publish a generation for
   // a following Prepare. Decode normally records it before prefix refresh.
   publish_mtp_context(slot);
@@ -3831,6 +3840,7 @@ ForwardOutput TaskExecutionPipeline::consume_speculative(uint32_t slot_id) {
   }
   release_outputs(slot);
   slots_[slot_id]->transfer_kv_infos.clear();
+  output.failed_request_ids = std::move(slots_[slot_id]->failed_request_ids);
   return output;
 }
 
@@ -3897,6 +3907,7 @@ void TaskExecutionPipeline::discard_speculative(uint32_t slot_id) {
   }
   release_outputs(slot);
   slots_[slot_id]->transfer_kv_infos.clear();
+  slots_[slot_id]->failed_request_ids.clear();
 }
 
 void TaskExecutionPipeline::release_outputs(SpeculativeSlot& slot) {

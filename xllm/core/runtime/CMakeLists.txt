@@ -33,6 +33,7 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:acl_graph_persistent_param.h>
     $<$<BOOL:${USE_XLITE}>:xlite_executor_impl.h>
     $<$<BOOL:${USE_MLU}>:mlu_graph_executor_impl.h>
+    $<$<BOOL:${USE_MLU}>:mlu_graph_planner.h>
     $<$<BOOL:${USE_CUDA}>:cuda_graph_executor_impl.h>
     $<$<BOOL:${USE_MUSA}>:musa_graph_executor_impl.h>
     py_executor_impl.h
@@ -84,6 +85,7 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:acl_graph_persistent_param.cpp>
     $<$<BOOL:${USE_XLITE}>:xlite_executor_impl.cpp>
     $<$<BOOL:${USE_MLU}>:mlu_graph_executor_impl.cpp>
+    $<$<BOOL:${USE_MLU}>:mlu_graph_planner.cpp>
     $<$<BOOL:${USE_CUDA}>:cuda_graph_executor_impl.cpp>
     $<$<BOOL:${USE_MUSA}>:musa_graph_executor_impl.cpp>
     py_executor_impl.cpp
@@ -137,6 +139,7 @@ cc_library(
     :mooncake_weight_transfer
     :linear_state_restore
     :kv_transfer_completion
+    :kv_transfer_failure
     :models
     :sampler
     :rec_constrained_decoding
@@ -153,6 +156,7 @@ cc_library(
     absl::strings
     absl::synchronization
     absl::flat_hash_map
+    absl::inlined_vector
     proto::xllm_proto
     $<$<BOOL:${USE_MLU}>:torch_mlu>
     $<$<BOOL:${USE_MLU}>::triton_jit>

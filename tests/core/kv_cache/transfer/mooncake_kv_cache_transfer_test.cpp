@@ -2911,9 +2911,13 @@ TEST(MooncakeKVCacheTransferDefaultTest,
                                                /*dp_size=*/1);
   std::shared_ptr<KVPushSynchronizerImpl> synchronizer;
 
-  folly::SemiFuture<bool> future = transfer.push_kv_blocks_async(
-      {info}, parallel_args, synchronizer, /*is_spec_draft=*/false);
-  EXPECT_FALSE(std::move(future).get());
+  folly::SemiFuture<std::vector<KVTransferTaskResult>> future =
+      transfer.push_kv_blocks_async(
+          {info}, parallel_args, synchronizer, /*is_spec_draft=*/false);
+  const std::vector<KVTransferTaskResult> results = std::move(future).get();
+  ASSERT_EQ(results.size(), 1U);
+  EXPECT_EQ(results[0].request_ids, (std::vector<std::string>{"req"}));
+  EXPECT_EQ(results[0].error_code, KVTransferErrorCode::FAILED);
   EXPECT_TRUE(engine_observer->move_calls.empty());
 }
 
@@ -2996,9 +3000,13 @@ TEST(MooncakeKVCacheTransferDefaultTest,
   parallel_args.kv_split_size(2);
   std::shared_ptr<KVPushSynchronizerImpl> synchronizer;
 
-  folly::SemiFuture<bool> future = transfer.push_kv_blocks_async(
-      {info}, parallel_args, synchronizer, /*is_spec_draft=*/false);
-  EXPECT_FALSE(std::move(future).get());
+  folly::SemiFuture<std::vector<KVTransferTaskResult>> future =
+      transfer.push_kv_blocks_async(
+          {info}, parallel_args, synchronizer, /*is_spec_draft=*/false);
+  const std::vector<KVTransferTaskResult> results = std::move(future).get();
+  ASSERT_EQ(results.size(), 1U);
+  EXPECT_EQ(results[0].request_ids, (std::vector<std::string>{"req"}));
+  EXPECT_EQ(results[0].error_code, KVTransferErrorCode::FAILED);
   EXPECT_TRUE(engine_observer->move_calls.empty());
 }
 
@@ -3027,9 +3035,13 @@ TEST(MooncakeKVCacheTransferDefaultTest,
   parallel_args.kv_split_size(2);
   std::shared_ptr<KVPushSynchronizerImpl> synchronizer;
 
-  folly::SemiFuture<bool> future = transfer.push_kv_blocks_async(
-      {info}, parallel_args, synchronizer, /*is_spec_draft=*/false);
-  EXPECT_FALSE(std::move(future).get());
+  folly::SemiFuture<std::vector<KVTransferTaskResult>> future =
+      transfer.push_kv_blocks_async(
+          {info}, parallel_args, synchronizer, /*is_spec_draft=*/false);
+  const std::vector<KVTransferTaskResult> results = std::move(future).get();
+  ASSERT_EQ(results.size(), 1U);
+  EXPECT_EQ(results[0].request_ids, (std::vector<std::string>{"req"}));
+  EXPECT_EQ(results[0].error_code, KVTransferErrorCode::FAILED);
   EXPECT_TRUE(engine_observer->move_calls.empty());
 }
 
@@ -3245,11 +3257,13 @@ TEST(MooncakeKVCacheTransferDefaultTest,
                                          /*device_index=*/0));
   ASSERT_TRUE(synchronizer->record_event(/*layer_index=*/1,
                                          /*device_index=*/0));
-  ASSERT_TRUE(local_transfer.push_kv_blocks(merged_infos,
-                                            synchronizer,
-                                            /*is_spec_draft=*/false,
-                                            /*kv_split_rank=*/0,
-                                            /*kv_split_size=*/1));
+  const std::vector<KVTransferTaskResult> results =
+      local_transfer.push_kv_blocks(merged_infos,
+                                    synchronizer,
+                                    /*is_spec_draft=*/false,
+                                    /*kv_split_rank=*/0,
+                                    /*kv_split_size=*/1);
+  EXPECT_TRUE(results.empty());
 
   int32_t command = kValidatePushCommand;
   ASSERT_TRUE(write_all(parent_to_child[1], &command, sizeof(command)));
@@ -3331,11 +3345,17 @@ TEST(MooncakeKVCacheTransferDefaultTest,
       std::make_shared<KVPushSynchronizerImpl>(/*num_layers=*/1);
   synchronizer->abort();
 
-  EXPECT_FALSE(transfer.push_kv_blocks(merged_infos,
-                                       synchronizer,
-                                       /*is_spec_draft=*/false,
-                                       /*kv_split_rank=*/0,
-                                       /*kv_split_size=*/1));
+  const std::vector<KVTransferTaskResult> results =
+      transfer.push_kv_blocks(merged_infos,
+                              synchronizer,
+                              /*is_spec_draft=*/false,
+                              /*kv_split_rank=*/0,
+                              /*kv_split_size=*/1);
+  // merged_infos is constructed directly without merge_kv_blocks, so the
+  // failed task carries no request IDs.
+  ASSERT_EQ(results.size(), 1U);
+  EXPECT_TRUE(results[0].request_ids.empty());
+  EXPECT_EQ(results[0].error_code, KVTransferErrorCode::FAILED);
   EXPECT_TRUE(engine_observer->move_calls.empty());
 }
 

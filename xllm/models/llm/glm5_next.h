@@ -256,10 +256,18 @@ REGISTER_MODEL_ARGS_LOADER(glm5_next, &glm5_next_args::load_model_args);
 REGISTER_MODEL_ARGS_LOADER(glm5_next_mtp, &glm5_next_args::load_model_args);
 
 // Exported MTP checkpoints contain their own embedding and LM head weights.
+// The target and draft share the same GLM5 replay family and graph history
+// policy; register both under the same capability set so graph planning and
+// MTP replay read a single authoritative contract.
 const bool glm5_next_mtp_capabilities_registered = []() {
   MtpModelCapabilities capabilities;
   capabilities.native_draft_requires_accepted_span_replay = true;
+  capabilities.replay_family = MtpReplayFamily::GLM5;
+  capabilities.supports_causal_replay_target = true;
+  capabilities.supports_grouped_mtp_graph = true;
+  capabilities.graph_history = MtpGraphHistoryPolicy::KPOOL_FIXED;
   capabilities.python_draft_owns_embedding_and_lm_head = true;
+  ModelRegistry::register_mtp_capabilities("glm5_next", capabilities);
   ModelRegistry::register_mtp_capabilities("glm5_next_mtp", capabilities);
   return true;
 }();

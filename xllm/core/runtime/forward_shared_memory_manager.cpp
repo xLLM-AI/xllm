@@ -3395,6 +3395,21 @@ bool read_raw_sample_output(ShmOutputReader& reader, RawSampleOutput& sample) {
          reader.read(sample.speculative_token_stats.verified_rounds);
 }
 
+bool read_string_vector(ShmOutputReader& reader,
+                        std::vector<std::string>& values) {
+  uint64_t count = 0;
+  if (!reader.read_count(count, get_string_size(""))) {
+    return false;
+  }
+  values.resize(count);
+  for (std::string& value : values) {
+    if (!reader.read_string(value)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool read_json_object_errors(ShmOutputReader& reader,
                              std::vector<JsonObjectOutputError>& errors) {
   uint64_t count = 0;
@@ -4006,6 +4021,7 @@ bool ForwardSharedMemoryManager::llm_output_write(
     payload_bytes += sizeof(uint64_t) + 3 * sizeof(int64_t);
   }
   payload_bytes += calculate_json_object_errors_size(output.json_object_errors);
+  payload_bytes += get_string_vector_size(output.failed_request_ids);
   payload_bytes +=
       4 * sizeof(uint64_t) + expert_count * sizeof(int64_t) +
       static_cast<uint64_t>(beam_count) * (2 * sizeof(int32_t) + sizeof(float));
@@ -4073,6 +4089,7 @@ bool ForwardSharedMemoryManager::llm_output_write(
     write_data(cursor, stats.verified_rounds);
   }
   write_json_object_errors(cursor, output.json_object_errors);
+  write_string_vector(cursor, output.failed_request_ids);
   write_output_values(cursor,
                       expert_count > 0
                           ? output.expert_load_data.const_data_ptr<int64_t>()
@@ -4131,6 +4148,7 @@ bool ForwardSharedMemoryManager::llm_output_read(RawForwardOutput& output) {
   }
   bool has_dit_output = false;
   if (!read_json_object_errors(reader, decoded.json_object_errors) ||
+      !read_string_vector(reader, decoded.failed_request_ids) ||
       !reader.read_vector(decoded.expert_load_data) ||
       !reader.read_vector(decoded.src_seq_idxes) ||
       !reader.read_vector(decoded.out_tokens) ||
@@ -4278,6 +4296,7 @@ bool ForwardSharedMemoryManager::vlm_output_write(
     payload_bytes += sizeof(uint64_t) + 3 * sizeof(int64_t);
   }
   payload_bytes += calculate_json_object_errors_size(output.json_object_errors);
+  payload_bytes += get_string_vector_size(output.failed_request_ids);
   payload_bytes +=
       4 * sizeof(uint64_t) + expert_count * sizeof(int64_t) +
       static_cast<uint64_t>(beam_count) * (2 * sizeof(int32_t) + sizeof(float));
@@ -4341,6 +4360,7 @@ bool ForwardSharedMemoryManager::vlm_output_write(
     write_data(cursor, stats.verified_rounds);
   }
   write_json_object_errors(cursor, output.json_object_errors);
+  write_string_vector(cursor, output.failed_request_ids);
   write_output_values(cursor,
                       expert_count > 0
                           ? output.expert_load_data.const_data_ptr<int64_t>()
@@ -4393,6 +4413,7 @@ bool ForwardSharedMemoryManager::vlm_output_read(RawForwardOutput& output) {
   }
   bool has_dit_output = false;
   if (!read_json_object_errors(reader, decoded.json_object_errors) ||
+      !read_string_vector(reader, decoded.failed_request_ids) ||
       !reader.read_vector(decoded.expert_load_data) ||
       !reader.read_vector(decoded.src_seq_idxes) ||
       !reader.read_vector(decoded.out_tokens) ||
@@ -4537,6 +4558,7 @@ bool ForwardSharedMemoryManager::rec_output_write(
     payload_bytes += sizeof(uint64_t) + 3 * sizeof(int64_t);
   }
   payload_bytes += calculate_json_object_errors_size(output.json_object_errors);
+  payload_bytes += get_string_vector_size(output.failed_request_ids);
   payload_bytes +=
       4 * sizeof(uint64_t) + expert_count * sizeof(int64_t) +
       static_cast<uint64_t>(beam_count) * (2 * sizeof(int32_t) + sizeof(float));
@@ -4600,6 +4622,7 @@ bool ForwardSharedMemoryManager::rec_output_write(
     write_data(cursor, stats.verified_rounds);
   }
   write_json_object_errors(cursor, output.json_object_errors);
+  write_string_vector(cursor, output.failed_request_ids);
   write_output_values(cursor,
                       expert_count > 0
                           ? output.expert_load_data.const_data_ptr<int64_t>()
@@ -4652,6 +4675,7 @@ bool ForwardSharedMemoryManager::rec_output_read(RawForwardOutput& output) {
   }
   bool has_dit_output = false;
   if (!read_json_object_errors(reader, decoded.json_object_errors) ||
+      !read_string_vector(reader, decoded.failed_request_ids) ||
       !reader.read_vector(decoded.expert_load_data) ||
       !reader.read_vector(decoded.src_seq_idxes) ||
       !reader.read_vector(decoded.out_tokens) ||

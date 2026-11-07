@@ -635,6 +635,10 @@ void ContinuousSchedulerBase::process_batch_output(
     if (request->cancelled()) {
       continue;
     }
+    if (request->error_status().has_value()) {
+      release_failed_request(request);
+      continue;
+    }
     // PD Prefill records at handoff acknowledgement; Decode has no local
     // ingress timestamp and must not contribute a second sample.
     if (request->state().decode_address.empty()) {
@@ -643,9 +647,6 @@ void ContinuousSchedulerBase::process_batch_output(
     // ignore cancelled/finished requests when enable_schedule_overlap.
     if (options_.enable_schedule_overlap()) {
       if (request->state().stream) {
-        if (request->error_status().has_value()) {
-          continue;
-        }
         if (!request->finished()) {
           stream_requests.emplace_back(request);
           continue;
@@ -658,8 +659,7 @@ void ContinuousSchedulerBase::process_batch_output(
       } else if (request->finished() && !request->last_token_handled()) {
         request->handle_last_token();
       }
-    } else if (request->state().stream &&
-               !request->error_status().has_value()) {
+    } else if (request->state().stream) {
       stream_requests.emplace_back(request);
     }
   }

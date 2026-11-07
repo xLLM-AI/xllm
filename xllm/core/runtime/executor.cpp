@@ -49,6 +49,10 @@ bool Executor::supports_prepared_attention_metadata() const {
   return impl_->supports_prepared_attention_metadata();
 }
 
+void Executor::set_dp_process_group(ProcessGroup* group) {
+  impl_->set_dp_process_group(group);
+}
+
 bool Executor::supports_adaptive_unified_graph() const {
   return impl_->supports_adaptive_unified_graph();
 }

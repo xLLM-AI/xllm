@@ -168,6 +168,7 @@ class ModelParamsView final {
     embedding.linear_state_read_ids.clear();
     embedding.linear_state_read_indices = torch::Tensor();
     linear_state_validity_mask.clear();
+    linear_state_validity_mask_tensor = torch::Tensor();
   }
 
   void print() const {
@@ -260,6 +261,7 @@ class ModelParamsView final {
   ExpertInput& expert;
   GraphInputView graph;
   std::vector<int64_t>& linear_state_validity_mask;
+  torch::Tensor& linear_state_validity_mask_tensor;
   std::vector<torch::Tensor>& multi_block_tables;
   torch::Tensor& mtp_shifted_token_ids;
   bool& is_spec_verify;
@@ -285,6 +287,8 @@ class ModelParamsView final {
         expert(owner.expert),
         graph(owner.graph, spec.graph),
         linear_state_validity_mask(owner.linear_state_validity_mask),
+        linear_state_validity_mask_tensor(
+            spec.linear_state_validity_mask_tensor),
         multi_block_tables(spec.multi_block_tables),
         mtp_shifted_token_ids(spec.mtp_shifted_token_ids),
         is_spec_verify(spec.is_spec_verify),

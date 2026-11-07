@@ -262,14 +262,11 @@ class Qwen3HybridModelImplBase : public Qwen3HybridModelModule {
 
  protected:
   torch::Tensor build_attention_mask(const ModelParamsView& input_params) {
-#if defined(USE_NPU)
-    // On NPU the hybrid path never consumes attn_metadata.attn_mask: full
-    // attention runs through the fused-infer / paged-attention kernels (which
-    // carry their own fixed fia_attn_mask or need no mask at all) and linear
-    // attention is mask-free by construction. Materializing a dense
-    // [seq_len, seq_len] mask here is pure waste and, for long sequences,
-    // triggers an NPU OOM. Hand the kernels an empty mask unless a graph buffer
-    // already supplies one.
+#if defined(USE_NPU) || defined(USE_MLU)
+    // NPU and MLU hybrid attention do not consume attn_metadata.attn_mask:
+    // their full-attention kernels handle causality internally, and linear
+    // attention needs no mask. Avoid quadratic allocations for long contexts,
+    // including MTP decode graph capture. Preserve an explicit graph buffer.
     if (input_params.graph.attn_mask.defined()) {
       return input_params.graph.attn_mask;
     }

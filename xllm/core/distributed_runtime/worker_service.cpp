@@ -450,6 +450,7 @@ void WorkerService::collect_llm_output(
   stats = record_speculative_metrics(output);
   cpu_output.prepared_token = output.prepared_token;
   cpu_output.json_object_errors = output.json_object_errors;
+  cpu_output.failed_request_ids = output.failed_request_ids;
   cpu_output.dspark_feedback = output.dspark_feedback;
   const auto& sample = output.sample_output;
   const auto& beam = output.beam_search_output;
@@ -684,6 +685,7 @@ void WorkerService::collect_vlm_output(
   stats = record_speculative_metrics(output);
   cpu_output.prepared_token = output.prepared_token;
   cpu_output.json_object_errors = output.json_object_errors;
+  cpu_output.failed_request_ids = output.failed_request_ids;
   const auto& sample = output.sample_output;
   const auto& beam = output.beam_search_output;
   auto copy_output_to_host = [&]() {
@@ -899,6 +901,7 @@ void WorkerService::step_rec_model(
   const ForwardOutput& output = *result;
   cpu_output.prepared_token = output.prepared_token;
   cpu_output.json_object_errors = output.json_object_errors;
+  cpu_output.failed_request_ids = output.failed_request_ids;
   const auto& sample = output.sample_output;
   const auto& beam = output.beam_search_output;
   auto copy_output_to_host = [&]() {

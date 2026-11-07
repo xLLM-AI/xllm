@@ -36,6 +36,7 @@ limitations under the License.
 #include "models/llm/mlu/mtp_topk_state.h"
 #include "platform/device.h"
 #include "runtime/decode_graph_bucket.h"
+#include "runtime/graph_input_snapshot.h"
 #include "runtime/options.h"
 
 namespace xllm {
@@ -665,13 +666,18 @@ TEST_F(MluGraphExecutorTest, LinearStatePaddingTailUsesPaddingId) {
       torch::tensor(first_input.input_params.embedding.linear_state_ids,
                     tensor_options_.dtype(torch::kInt32));
 
-  param.init_params(ModelParamsView(first_input.input_params),
-                    /*padding_num_tokens=*/4,
-                    /*padding_needed=*/0);
+  ::xllm::mlu::GraphPlan first_plan;
+  first_plan.layout.num_reqs = 4;
+  first_plan.layout.padded_num_reqs = 4;
+  first_plan.layout.padded_num_tokens = 4;
+  ModelParamsView graph_params =
+      clone_graph_input(ModelParamsView(first_input.input_params));
+  param.bind_buffers(graph_params, first_plan);
   param.update_input_buffer(first_input.token_ids,
                             first_input.positions,
                             ModelParamsView(first_input.input_params),
-                            /*padding_needed=*/0);
+                            graph_params,
+                            first_plan);
 
   LlmForwardInput second_input = prepare_inputs(/*batch_size=*/3, /*seed=*/89);
   second_input.input_params.embedding.linear_state_ids = {11, 21, 31};
@@ -679,14 +685,17 @@ TEST_F(MluGraphExecutorTest, LinearStatePaddingTailUsesPaddingId) {
       torch::tensor(second_input.input_params.embedding.linear_state_ids,
                     tensor_options_.dtype(torch::kInt32));
 
+  ::xllm::mlu::GraphPlan second_plan = first_plan;
+  second_plan.layout.num_reqs = 3;
   param.update_input_buffer(second_input.token_ids,
                             second_input.positions,
                             ModelParamsView(second_input.input_params),
-                            /*padding_needed=*/1);
+                            graph_params,
+                            second_plan);
 
   torch_mlu::synchronize();
   torch::Tensor linear_state_indices =
-      param.params_->embedding.linear_state_indices.cpu();
+      graph_params.embedding.linear_state_indices.cpu();
   EXPECT_TRUE(torch::equal(linear_state_indices,
                            torch::tensor({11, 21, 31, kPaddingLinearStateId},
                                          torch::dtype(torch::kInt32))));

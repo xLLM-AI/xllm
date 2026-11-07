@@ -340,10 +340,12 @@ LinearStateInputRows get_mlu_linear_state_rows(Params& input_params) {
       << "invalid MLU linear-state input row counts: sequence_rows="
       << sequence_rows << ", active_rows=" << active_rows
       << ", slot_rows=" << slot_rows;
-  CHECK_EQ(slot_rows, active_rows)
-      << "invalid MLU linear-state input row counts: sequence_rows="
-      << sequence_rows << ", active_rows=" << active_rows
-      << ", slot_rows=" << slot_rows;
+  // Spec verify expands one sequence into several validity rows; the mask is
+  // then sequence-scoped rather than active-row-scoped.
+  CHECK(slot_rows == active_rows ||
+        (input_params.is_spec_verify && slot_rows == sequence_rows))
+      << "invalid MLU linear-state slot layout: sequence_rows=" << sequence_rows
+      << ", active_rows=" << active_rows << ", slot_rows=" << slot_rows;
   return {cached_tokens, active_rows, /*empty_shard=*/false};
 }
 #endif
@@ -2380,6 +2382,10 @@ bool WorkerImpl::init_model_impl(const std::string& model_weights_path,
               {"glm_moe_dsa", "glm_moe_dsa_mtp"},
               {"joyai_llm_flash", "joyai_llm_flash_mtp"},
               {"mimo", "mimo_mtp"},
+              {"qwen3_5", "qwen3_5_mtp"},
+              {"qwen3_5_moe", "qwen3_5_moe_mtp"},
+              {"qwen3_5_text", "qwen3_5_mtp"},
+              {"qwen3_5_moe_text", "qwen3_5_moe_mtp"},
           };
       const std::string& current_type = args.model_type();
       auto it = kModelTypeToMtpType.find(current_type);

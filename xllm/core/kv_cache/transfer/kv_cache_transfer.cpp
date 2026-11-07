@@ -38,6 +38,21 @@ void KVCacheTransfer::drain() {
   std::move(future).get();
 }
 
+namespace {
+
+std::vector<KVTransferTaskResult> failed_tasks_for_requests(
+    const std::vector<TransferKVInfo>& transfer_kv_infos) {
+  std::vector<std::string> request_ids =
+      unique_transfer_request_ids(transfer_kv_infos);
+  if (request_ids.empty()) {
+    return {};
+  }
+  return {KVTransferTaskResult{std::move(request_ids),
+                               KVTransferErrorCode::FAILED}};
+}
+
+}  // namespace
+
 bool KVCacheTransfer::validate_transfer_mappings(
     const std::vector<KVTransferMapping>& mappings,
     const std::string& request_id,
@@ -245,12 +260,13 @@ std::vector<std::string> KVCacheTransfer::rotate_dst_rank(
 }
 
 #if defined(USE_NPU) || defined(USE_MLU) || defined(USE_DCU)
-folly::SemiFuture<bool> KVCacheTransfer::push_kv_blocks_async(
+folly::SemiFuture<std::vector<KVTransferTaskResult>>
+KVCacheTransfer::push_kv_blocks_async(
     const std::vector<TransferKVInfo>& transfer_kv_infos,
     const ParallelArgs& parallel_args,
     std::shared_ptr<KVPushSynchronizerImpl> layer_synchronizer,
     bool is_spec_draft) {
-  folly::Promise<bool> promise;
+  folly::Promise<std::vector<KVTransferTaskResult>> promise;
   auto future = promise.getSemiFuture();
   threadpool_.schedule([this,
                         transfer_kv_infos,
@@ -267,7 +283,7 @@ folly::SemiFuture<bool> KVCacheTransfer::push_kv_blocks_async(
     // remote_ids 1:1.
     const int32_t kv_split_size = parallel_args.kv_split_size_effective();
     if (!validate_transfer_mappings(*kv_infos, kv_split_size)) {
-      promise.setValue(false);
+      promise.setValue(failed_tasks_for_requests(transfer_kv_infos));
       return;
     }
     if (kv_split_size > 1) {
@@ -275,24 +291,24 @@ folly::SemiFuture<bool> KVCacheTransfer::push_kv_blocks_async(
           parallel_args.kv_split_rank(), kv_split_size, *kv_infos);
       kv_infos = &filtered_kv_infos;
       if (kv_infos->empty()) {
-        promise.setValue(true);
+        promise.setValue(std::vector<KVTransferTaskResult>{});
         return;
       }
     }
     if (!validate_transfer_mappings(*kv_infos, /*kv_split_size=*/1)) {
-      promise.setValue(false);
+      promise.setValue(failed_tasks_for_requests(transfer_kv_infos));
       return;
     }
     merge_kv_blocks(merged_kv_infos, *kv_infos, parallel_args);
-    bool success = true;
+    std::vector<KVTransferTaskResult> results;
     if (!merged_kv_infos.empty()) {
-      success = this->push_kv_blocks(merged_kv_infos,
+      results = this->push_kv_blocks(merged_kv_infos,
                                      layer_synchronizer,
                                      is_spec_draft,
                                      parallel_args.kv_split_rank(),
                                      parallel_args.kv_split_size_effective());
     }
-    promise.setValue(success);
+    promise.setValue(std::move(results));
   });
   return future;
 }
@@ -335,6 +351,8 @@ void KVCacheTransfer::merge_kv_blocks(
                             src_mapping.remote_ids.end());
     }
   };
+  std::unordered_map<std::string, std::unordered_set<std::string>>
+      seen_request_ids;
   for (auto& info : transfer_kv_infos) {
     // Obtain the parallel parameters of the destination instance.
     int32_t dst_dp_rank = info.dp_rank;
@@ -370,6 +388,8 @@ void KVCacheTransfer::merge_kv_blocks(
         kv_info.dst_cluster_id = dst_cluster_id;
         kv_info.dst_addr = dst_addr;
         append_mappings(kv_info.mappings, info.mappings);
+        append_unique_request_id(
+            seen_request_ids, key, kv_info.request_ids, info.request_id);
 
         // VirtualMemory mode: copy destination offsets
         if (!info.dst_virtual_kv_cache_layer_global_offsets.empty()) {
@@ -379,6 +399,10 @@ void KVCacheTransfer::merge_kv_blocks(
         merged_kv_infos[key] = std::move(kv_info);
       } else {
         append_mappings(merged_kv_infos[key].mappings, info.mappings);
+        append_unique_request_id(seen_request_ids,
+                                 key,
+                                 merged_kv_infos[key].request_ids,
+                                 info.request_id);
 
         // VirtualMemory mode: merge destination offsets (append to each layer)
         if (!info.dst_virtual_kv_cache_layer_global_offsets.empty()) {

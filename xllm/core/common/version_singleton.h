@@ -72,7 +72,7 @@ class VersionSingleton {
   }
 
   static std::vector<std::string> GetVersions() {
-    std::lock_guard<std::mutex> lock(instance_map_mutex_);
+    std::shared_lock<std::shared_mutex> lock(instance_map_mutex_);
     std::vector<std::string> versions;
     for (const auto& pair : instance_map_) {
       versions.push_back(pair.first);
@@ -81,7 +81,7 @@ class VersionSingleton {
   }
 
   static void DestroyAllInstances() {
-    std::lock_guard<std::mutex> lock(instance_map_mutex_);
+    std::unique_lock<std::shared_mutex> lock(instance_map_mutex_);
     instance_map_.clear();
     instance_version_list_.clear();
   }

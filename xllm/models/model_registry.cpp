@@ -819,6 +819,24 @@ MtpModelCapabilities ModelRegistry::get_mtp_capabilities(
   return entry->second.mtp_capabilities;
 }
 
+void ModelRegistry::register_graph_history_capacity(
+    const std::string& name,
+    GraphHistoryCapacityAdapter adapter) {
+  get_instance()->model_registry_[name].graph_history_capacity_adapter =
+      std::move(adapter);
+}
+
+int64_t ModelRegistry::get_graph_history_capacity(const std::string& name,
+                                                  const ModelArgs& args,
+                                                  int64_t default_capacity) {
+  const auto& registry = get_instance()->model_registry_;
+  const auto it = registry.find(name);
+  if (it == registry.end() || !it->second.graph_history_capacity_adapter) {
+    return default_capacity;
+  }
+  return it->second.graph_history_capacity_adapter(args);
+}
+
 void ModelRegistry::configure_mtp_args(ModelArgs& args,
                                        std::string_view algorithm,
                                        bool is_draft_engine,

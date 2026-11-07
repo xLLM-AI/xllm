@@ -22,6 +22,7 @@ limitations under the License.
 #include <future>
 
 #include "core/kv_cache/transfer/kv_cache_transfer.h"
+#include "core/kv_cache/transfer/kv_transfer_types.h"
 #include "core/runtime/worker_impl.h"
 
 namespace xllm {
@@ -216,13 +217,13 @@ class BlockingKVCacheTransfer final : public KVCacheTransfer {
     release_future_.wait_for(10s);
     return true;
   }
-  bool push_kv_blocks(
+  std::vector<KVTransferTaskResult> push_kv_blocks(
       std::unordered_map<std::string, KVCacheInfo>& /*merged_kv_infos*/,
       std::shared_ptr<KVPushSynchronizerImpl>& /*layer_synchronizer*/,
       bool /*is_spec_draft*/,
       int32_t /*kv_split_rank*/,
       int32_t /*kv_split_size*/) override {
-    return true;
+    return {};
   }
 
   std::future<void> entered() { return entered_.get_future(); }

@@ -20,6 +20,7 @@ limitations under the License.
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -337,6 +338,19 @@ struct TransferKVInfo {
   // One entry per cache id space. group_id is unique within one request.
   std::vector<KVTransferMapping> mappings;
 };
+
+inline std::vector<std::string> unique_transfer_request_ids(
+    const std::vector<TransferKVInfo>& transfer_kv_infos) {
+  std::unordered_set<std::string> seen_request_ids;
+  std::vector<std::string> request_ids;
+  request_ids.reserve(transfer_kv_infos.size());
+  for (const TransferKVInfo& info : transfer_kv_infos) {
+    if (seen_request_ids.emplace(info.request_id).second) {
+      request_ids.emplace_back(info.request_id);
+    }
+  }
+  return request_ids;
+}
 
 // in bytes
 struct DeviceStats {

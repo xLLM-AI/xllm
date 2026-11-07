@@ -24,6 +24,7 @@ limitations under the License.
 #include <numeric>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "common/types.h"
@@ -629,6 +630,7 @@ class ForwardOutput final {
   SpecVerifyStats spec_verify_stats;
   DSparkDpFeedback dspark_feedback;
   std::vector<JsonObjectOutputError> json_object_errors;
+  std::vector<std::string> failed_request_ids;
   // Keep no-sync input tensor handles alive until downstream consumers finish
   // using outputs on the same compute stream. Composite workers append child
   // outputs' retained inputs here. Local runtime handles; not in proto/shm.
@@ -658,6 +660,13 @@ class ForwardOutput final {
   // dit output data
   DiTForwardOutput dit_forward_output;
 };
+
+inline ForwardOutput make_failed_output(
+    std::vector<std::string> failed_request_ids) {
+  ForwardOutput output;
+  output.failed_request_ids = std::move(failed_request_ids);
+  return output;
+}
 
 inline void copy_retained_inputs(ForwardOutput& destination,
                                  const ForwardOutput& source) {
@@ -695,6 +704,7 @@ class RawForwardOutput final {
   DSparkDpFeedback dspark_feedback;
   std::vector<RawSampleOutput> outputs;  // num seqs
   std::vector<JsonObjectOutputError> json_object_errors;
+  std::vector<std::string> failed_request_ids;
   std::vector<int64_t> expert_load_data;
   int64_t prepared_token = -1;
   // beam search kernel output

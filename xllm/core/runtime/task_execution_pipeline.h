@@ -31,6 +31,7 @@ limitations under the License.
 #include "core/framework/speculative/draft_proposal.h"
 #include "core/framework/speculative/draft_vocab_mapping.h"
 #include "core/kv_cache/transfer/host_transfer/transfer.h"
+#include "core/kv_cache/transfer/kv_transfer_types.h"
 #include "core/platform/device.h"
 #include "core/runtime/executor.h"
 #include "core/runtime/forward_params.h"
@@ -76,8 +77,9 @@ struct LlmTaskCapacity {
 };
 
 using TaskKVPush =
-    std::function<folly::SemiFuture<bool>(const std::vector<TransferKVInfo>&,
-                                          ModelParamsView&)>;
+    std::function<folly::SemiFuture<std::vector<KVTransferTaskResult>>(
+        const std::vector<TransferKVInfo>&,
+        ModelParamsView&)>;
 using TaskKVLoad = std::function<std::optional<HostKVLoadHandle>(uint64_t)>;
 using TaskKVFence = std::function<void(const Stream&)>;
 
@@ -279,6 +281,7 @@ class TaskExecutionPipeline final {
     Step expected_producer;
     bool is_warmup = false;
     std::vector<TransferKVInfo> transfer_kv_infos;
+    std::vector<std::string> failed_request_ids;
     std::optional<HostKVLoadHandle> kv_load;
     StreamEventPtr input_ready;
     StreamEventPtr output_ready;

@@ -90,7 +90,9 @@ void prepare_first_draft_inputs(EmbeddingCache& embedding_cache,
       input.input_params.embedding.embedding_ids,
       input.input_params.embedding.request_ids,
       output.sample_output.next_tokens,
-      sample_hidden_states);
+      sample_hidden_states,
+      input.sampling_params.selected_token_idxes(),
+      input.positions);
   output.sample_output.embeddings = sample_hidden_states.detach();
   clear_selected_embeddings(output);
 }

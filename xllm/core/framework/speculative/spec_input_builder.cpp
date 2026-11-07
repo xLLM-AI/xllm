@@ -299,6 +299,11 @@ DecodeRowContext make_decode_row_context(const Input& input) {
   }
   CHECK(input.positions_host.defined())
       << "positions_host must be defined for decode row build";
+  CHECK(input.positions_host.is_contiguous());
+  ctx.position_axes =
+      input.positions_host.dim() == 2 ? input.positions_host.size(0) : 1;
+  CHECK(ctx.position_axes == 1 || ctx.position_axes == 3)
+      << "positions must be one- or three-axis, axes=" << ctx.position_axes;
   ctx.positions = get_positions(input);
   CHECK_GE(static_cast<int32_t>(ctx.positions.size()), ctx.num_sequences)
       << "positions size is smaller than num_sequences, positions_size="

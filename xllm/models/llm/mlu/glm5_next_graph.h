@@ -70,18 +70,34 @@ inline void Glm5NextGraphMetadataState::prepare(const torch::Tensor& positions,
   torch::diff_out(attn.kv_seq_lens, attention.kv_seq_lens);
   torch::diff_out(attn.q_seq_lens, attention.q_seq_lens);
   if (attn.has_initial_states.defined()) {
-    CHECK_EQ(has_initial_states_host_.numel(),
-             static_cast<int64_t>(params.linear_state_validity_mask.size()));
-    auto* staging = has_initial_states_host_.data_ptr<bool>();
-    for (size_t i = 0; i < params.linear_state_validity_mask.size(); ++i) {
-      staging[i] = params.linear_state_validity_mask[i] != 0;
+    // The executor refreshes the graph-owned device mask, preferring an
+    // explicit device input over the host source just like the builder.
+    if (params.linear_state_validity_mask_tensor.defined()) {
+      if (attn.has_initial_states.data_ptr() !=
+          params.linear_state_validity_mask_tensor.data_ptr()) {
+        attn.has_initial_states.copy_(params.linear_state_validity_mask_tensor);
+      }
+    } else {
+      CHECK_EQ(has_initial_states_host_.numel(),
+               static_cast<int64_t>(params.linear_state_validity_mask.size()));
+      auto* staging = has_initial_states_host_.data_ptr<bool>();
+      for (size_t i = 0; i < params.linear_state_validity_mask.size(); ++i) {
+        staging[i] = params.linear_state_validity_mask[i] != 0;
+      }
+      attn.has_initial_states.copy_(has_initial_states_host_, false);
     }
-    attn.has_initial_states.copy_(has_initial_states_host_, false);
   }
-  // Block table and linear state indices alias graph-owned storage that the
-  // executor rewrites per replay, including same-shape page remaps.
-  CHECK_EQ(attn.kpool_batch_metadata->block_table.data_ptr(),
-           attention.block_tables.data_ptr());
+  // Ordinary decode aliases graph-owned storage, refreshed by the executor.
+  // Expanded attention rows materialize a request-level table instead. Copy
+  // its current page IDs on every replay without replacing captured storage.
+  auto* batch = attn.kpool_batch_metadata.get();
+  if (batch != nullptr && batch->block_table.defined() &&
+      batch->block_table.data_ptr() != attention.block_tables.data_ptr()) {
+    batch->block_table.copy_(attention.block_tables.index_select(
+        /*dim=*/0,
+        batch->query_starts.narrow(
+            /*dim=*/0, /*start=*/0, batch->q_seq_lens.size())));
+  }
 }
 
 }  // namespace xllm::mlu::model
