@@ -23,11 +23,9 @@ limitations under the License.
 
 namespace xllm {
 
-// Worker copy of the scheduler's recurrent-state slot assignment in the shared
-// static arena. A state id is its group-0 slot; the other groups' slots arrive
-// with each batch that uses the state. A state keeps its slots until it is
-// released, so rows for states outside the current batch may be stale but are
-// never read.
+// Worker copy of stable logical-ID to physical-row mappings. Linear tables
+// contain Conv and SSM rows per layer; Full tables contain one paired K/V row
+// per layer. Rows outside the current batch may be stale but are never read.
 class LinearStateSlotTable final {
  public:
   LinearStateSlotTable(size_t num_slots,
@@ -36,7 +34,7 @@ class LinearStateSlotTable final {
 
   size_t num_groups() const { return num_groups_; }
 
-  // Each row is [state id, slot of group 0, ..., slot of group G-1].
+  // Each update is [logical id, physical row of group 0, ..., group G-1].
   void update(const std::vector<int32_t>& rows);
 
   // Negative ids are sentinels and map to themselves.

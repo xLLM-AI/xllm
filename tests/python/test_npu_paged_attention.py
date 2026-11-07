@@ -1290,6 +1290,35 @@ def test_shared_paged_graph_refreshes_private_physical_indices(monkeypatch: pyte
     assert mappings[1].tolist() == [3073, -1]
 
 
+def test_slab_full_layers_refresh_independent_graph_block_tables() -> None:
+    from xllm.python.model_executor.forward_context import AclGraphExecutionState
+
+    backend = _ordinary_backend()
+    backend._shared_kv_layout = SharedKVCacheLayout(128, 8, 4, 8, 2, 32, 262144, num_slabs=4)
+    rows = [torch.zeros(32, dtype=torch.int32) for _ in range(2)]
+    rows[0][1:3] = torch.tensor([16, 18])
+    rows[1][1:3] = torch.tensor([48, 50])
+    backend._kv_caches = [
+        LayerCache(torch.empty(1, 128, 1, 2), torch.empty(1, 128, 1, 2), full_block_rows=table) for table in rows
+    ]
+    metadata = _mla_metadata()
+    execution = AclGraphExecutionState({})
+    context = ForwardContext(backend, torch.device("cpu"), metadata, backend._kv_caches, execution_state=execution)
+    with forward_context(context):
+        backend._block_table_i32 = torch.tensor([[1, 2, -1]], dtype=torch.int32)
+        backend._prepare_shared_full_tables()
+        first, second = backend._shared_full_block_tables.values()
+        pointers = first.data_ptr(), second.data_ptr()
+        assert first.tolist() == [[16, 18, -1]]
+        assert second.tolist() == [[48, 50, -1]]
+        rows[0][1] = 72
+        backend._prepare_shared_full_tables()
+        assert first.tolist() == [[72, 18, -1]]
+        assert second.tolist() == [[48, 50, -1]]
+        assert pointers == tuple(table.data_ptr() for table in backend._shared_full_block_tables.values())
+        assert pointers[0] != pointers[1]
+
+
 def _sparse_attention_out_args(
     query: torch.Tensor, output: torch.Tensor, layout: str, *, rope: bool = False
 ) -> tuple[object, ...]:

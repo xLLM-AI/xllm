@@ -133,6 +133,7 @@ class ForwardInputBuilder final {
     std::vector<int32_t> linear_state_ids;
     std::vector<int32_t> linear_state_read_ids;
     std::vector<int32_t> linear_state_slot_rows;
+    std::vector<int32_t> full_block_slot_rows;
     std::vector<std::string> request_ids;
     std::vector<int32_t> extra_token_ids;
     std::vector<int32_t> mtp_shifted_token_ids;

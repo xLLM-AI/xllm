@@ -1414,6 +1414,62 @@ def test_npu_shared_gdn_verify_updates_persistent_physical_indices(packed: bool)
         assert pointers == (persistent.conv_state_indices[0].data_ptr(), persistent.ssm_state_indices[0].data_ptr())
 
 
+def test_npu_slab_gdn_verify_refreshes_each_layers_role_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    layout = SharedKVCacheLayout(128, 8, 4, 8, 3, 32, 262144, num_linear_groups=2, num_slabs=4)
+    monkeypatch.setattr(
+        "xllm.python.layers.npu.qwen3_5.gdn_metadata_builder.detect_shared_kv_cache_layout", lambda caches: layout
+    )
+    cfg = _linear_config(
+        num_hidden_layers=3,
+        layer_types=["linear_attention", "full_attention", "linear_attention"],
+        linear_num_key_heads=1,
+        linear_num_value_heads=1,
+        linear_key_head_dim=128,
+        linear_value_head_dim=128,
+    )
+    caches = []
+    for layer in range(2):
+        rows = torch.zeros(2, 32, dtype=torch.int32)
+        rows[:, 1:3] = torch.tensor([[3 + layer * 4, 5 + layer * 4], [12 + layer * 18, 18 + layer * 18]])
+        caches.append(
+            LayerCache(
+                key=None,
+                value=None,
+                conv=torch.zeros(20, 5, 384, dtype=torch.bfloat16),
+                ssm=torch.zeros(64, 1, 128, 128),
+                linear_state_slots=rows,
+            )
+        )
+    caches.insert(1, LayerCache(torch.empty(1, 128, 1, 128), torch.empty(1, 128, 1, 128)))
+    builder = Qwen3_5GdnMetadataBuilder(cfg)
+    builder.bind_layer_caches(caches)
+    graph = LinearVerifyGraphInputs(
+        torch.tensor([1, 2], dtype=torch.int32),
+        torch.tensor([1, 3], dtype=torch.int32),
+        3,
+        torch.arange(6),
+        torch.arange(6),
+    )
+    source = SimpleNamespace(linear_verify_graph=graph, is_spec_verify=True)
+    batch = _input_batch(6, (3, 3))
+    persistent = builder.allocate_persistent(batch, source)
+    assert isinstance(persistent, GdnVerifyMetadata)
+    assert persistent.layer_groups == {0: 0, 2: 1}
+    pointers = tuple(tensor.data_ptr() for tensor in (*persistent.conv_state_indices, *persistent.ssm_state_indices))
+    torch.testing.assert_close(persistent.conv_state_indices[0], torch.tensor([3, 5], dtype=torch.int32))
+    torch.testing.assert_close(persistent.conv_state_indices[1], torch.tensor([7, 9], dtype=torch.int32))
+    caches[0].linear_state_slots[:, 1] = torch.tensor([11, 42])
+    caches[2].linear_state_slots[:, 1] = torch.tensor([13, 48])
+    builder.update_persistent(persistent, batch, source)
+    torch.testing.assert_close(persistent.conv_state_indices[0], torch.tensor([11, 5], dtype=torch.int32))
+    torch.testing.assert_close(persistent.conv_state_indices[1], torch.tensor([13, 9], dtype=torch.int32))
+    torch.testing.assert_close(persistent.ssm_state_indices[0], torch.tensor([42, 18], dtype=torch.int32))
+    torch.testing.assert_close(persistent.ssm_state_indices[1], torch.tensor([48, 36], dtype=torch.int32))
+    assert pointers == tuple(
+        tensor.data_ptr() for tensor in (*persistent.conv_state_indices, *persistent.ssm_state_indices)
+    )
+
+
 @pytest.mark.parametrize("lengths", [(3, 3), (1, 3)], ids=["uniform", "ragged"])
 def test_npu_shared_gdn_eager_verify_maps_logical_pages(lengths: tuple[int, int]) -> None:
     cfg = _linear_config(

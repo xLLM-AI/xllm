@@ -2674,6 +2674,7 @@ inline void deserialize_forward_input_payload(
   read_string_vector(context, input_params.embedding.request_ids);
   if constexpr (!std::is_same_v<Input, RecForwardInput>) {
     read_vector(context, input_params.embedding.linear_state_slot_rows);
+    read_vector(context, input_params.embedding.full_block_slot_rows);
     read_vector(context, input_params.embedding.extra_token_ids);
     read_tensor(context, input_params.mtp_shifted_token_ids, stream);
     read_tensor(context, input_params.embedding.mtp_shifted_token_ids, stream);
@@ -3028,6 +3029,8 @@ inline void serialize_forward_input_sections(
   if constexpr (!std::is_same_v<Input, RecForwardInput>) {
     write_vector(context.descriptor,
                  input_params.embedding.linear_state_slot_rows);
+    write_vector(context.descriptor,
+                 input_params.embedding.full_block_slot_rows);
     write_vector(context.descriptor, input_params.embedding.extra_token_ids);
     write_tensor(context, input_params.mtp_shifted_token_ids);
     write_tensor(context, input_params.embedding.mtp_shifted_token_ids);

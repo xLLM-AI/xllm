@@ -24,6 +24,7 @@ limitations under the License.
 #include "core/kv_cache/block/concurrent_block_manager_impl.h"
 #include "core/kv_cache/block/linear_state_block_manager.h"
 #include "core/kv_cache/events/kv_cache_event_publisher.h"
+#include "core/kv_cache/layout/static_kv_cache_layout.h"
 #include "framework/model/model_params_view.h"
 
 namespace xllm {
@@ -92,6 +93,7 @@ BlockManagerPool::BlockManagerPool(const Options& options,
       .enable_vmm_kvcache(options_.enable_vmm_kvcache())
       .enable_shared_kv_cache(options_.enable_shared_kv_cache())
       .shared_linear_state_slots(options_.shared_linear_state_slots())
+      .shared_layout(options_.shared_layout())
       .num_layers(options_.num_layers())
       .slot_size(options_.slot_size())
       .virtual_block_bytes(options_.virtual_block_bytes())
@@ -541,6 +543,19 @@ size_t BlockManagerPool::block_resource_units(BlockType type,
                                               size_t count) const {
   if (!options_.enable_shared_kv_cache()) {
     return KVCacheManager::block_resource_units(type, count);
+  }
+  if (options_.shared_layout()) {
+    const StaticKVCacheLayout& layout = *options_.shared_layout();
+    if (type == BlockType::KV) {
+      return count * layout.full_layer_count() * 2 *
+             layout.row_bytes(KVCacheTensorRole::KEY);
+    }
+    return type == BlockType::LINEAR
+               ? count * layout.linear_layer_count() *
+                     (layout.row_bytes(KVCacheTensorRole::CONV) +
+                      layout.checkpoint_stride() *
+                          layout.row_bytes(KVCacheTensorRole::SSM))
+               : 0;
   }
   if (type == BlockType::KV) {
     return count;

@@ -76,7 +76,7 @@ class BlockManagerImpl : public BlockManager {
   // free blocks num
   size_t num_free_blocks() const override {
     return options_.shared_block_pool()
-               ? options_.shared_block_pool()->num_free_slots()
+               ? options_.shared_block_pool()->num_free_blocks(block_type())
                : num_free_blocks_.load(std::memory_order_relaxed);
   }
   size_t evict_prefix_cache(size_t num_blocks) override;

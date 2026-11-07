@@ -153,10 +153,11 @@ class Qwen3_5GdnMetadataBuilder:
         self._layer_groups = {}
         self._group_slots = ()
         if shared_layout is not None:
-            # Consecutive Linear layers fill one group's page lanes, so the
-            # i-th Linear layer belongs to group i // pages_per_slot.
+            # Slab storage allocates Conv and SSM rows independently for each
+            # layer. Legacy fixed pages instead share one map per lane group.
             self._layer_groups = {
-                layer_id: index // shared_layout.pages_per_slot for index, layer_id in enumerate(self._layer_ids)
+                layer_id: index if shared_layout.num_slabs else index // shared_layout.pages_per_slot
+                for index, layer_id in enumerate(self._layer_ids)
             }
             group_slots: list[torch.Tensor] = [None] * shared_layout.num_linear_groups  # type: ignore[list-item]
             for layer_id, group in self._layer_groups.items():
@@ -330,14 +331,22 @@ class Qwen3_5GdnMetadataBuilder:
                 self._shared_layout.linear_state_indices(read_indices, role="ssm", slots=slots)
                 for slots in self._group_slots
             )
+            conv_write_indices = tuple(
+                self._shared_layout.linear_state_indices(write_indices, role="conv", slots=slots)
+                for slots in self._group_slots
+            )
+            ssm_write_indices = tuple(
+                self._shared_layout.linear_state_indices(write_indices, role="ssm", slots=slots)
+                for slots in self._group_slots
+            )
             return GdnDecodeMetadata(
                 self._state_caches,
                 read_indices,
                 write_indices,
                 conv_state_indices,
-                conv_state_indices,
+                conv_write_indices,
                 ssm_state_indices,
-                ssm_state_indices,
+                ssm_write_indices,
                 self._layer_groups,
             )
         query_lengths_host = metadata.q_seq_lens_host

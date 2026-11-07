@@ -66,10 +66,12 @@ class LayerCache:
     compress_index_score_state: torch.Tensor | None = None
     indexer_scale: torch.Tensor | None = None
     kpool_tail: torch.Tensor | None = None
-    # Shared static storage only: this layer's recurrent state id to physical
-    # slot row. A state owns one slot per Linear group, so layers of different
-    # groups read different slots for the same state.
+    # Shared slabs expose [2, logical capacity]: Conv rows and SSM checkpoint
+    # starts for this layer. Legacy fixed storage exposes one group slot row.
     linear_state_slots: torch.Tensor | None = None
+    # Slab storage maps logical Full blocks to this layer's paired K/V rows.
+    full_block_rows: torch.Tensor | None = None
+    shared_checkpoint_stride: int | None = None
 
     @property
     def index_scale(self) -> torch.Tensor | None:
@@ -79,9 +81,13 @@ class LayerCache:
 
 @dataclass(frozen=True, slots=True)
 class SharedKVCacheLayout:
-    """Physical row geometry for a static Full/Linear cache arena.
+    """Physical row geometry for a shared Full/Linear cache arena.
 
-    Scheduler block ids remain logical.  A Full block id is one slot, and the
+    Slab storage resolves logical ids with each layer's stable physical row
+    maps. Full K/V allocations are adjacent, while Conv and SSM allocations
+    are independent. Slab count and logical id capacity need not agree.
+
+    Legacy fixed storage uses the strides below: a Full block id is one slot, and the
     layer reads its lane's page inside that slot.  A recurrent state id is its
     group-0 slot; layers of other groups first map the state id through their
     own ``LayerCache.linear_state_slots`` row.  Both then apply the
@@ -106,6 +112,7 @@ class SharedKVCacheLayout:
     scratch_full_offset: int = 0
     scratch_conv_offset: int = 0
     scratch_ssm_offset: int = 0
+    num_slabs: int = 0
 
     def __post_init__(self) -> None:
         values = (
@@ -140,8 +147,15 @@ class SharedKVCacheLayout:
         if any(offset < 0 or rows < 0 for offset, rows in scratch_values):
             raise ValueError("shared KV cache scratch extents must be non-negative")
 
-    def full_block_table(self, block_table: torch.Tensor) -> torch.Tensor:
+    def full_block_table(self, block_table: torch.Tensor, rows: torch.Tensor | None = None) -> torch.Tensor:
         """Translate logical Full page ids while preserving negative sentinels."""
+        if rows is not None:
+            physical = rows.index_select(0, block_table.clamp_min(0).reshape(-1).to(torch.int64)).reshape_as(
+                block_table
+            )
+            return torch.where(block_table >= 0, physical.to(block_table.dtype), block_table)
+        if self.num_slabs:
+            raise ValueError("shared slab Full cache requires the reading layer's block rows")
         if block_table.numel() == 0 or self.full_row_stride == 1:
             return block_table
         return torch.where(
@@ -150,8 +164,15 @@ class SharedKVCacheLayout:
             block_table,
         )
 
-    def full_slot_mapping(self, slot_mapping: torch.Tensor) -> torch.Tensor:
+    def full_slot_mapping(self, slot_mapping: torch.Tensor, rows: torch.Tensor | None = None) -> torch.Tensor:
         """Translate logical token slots and retain their in-page offsets."""
+        if rows is not None:
+            logical_rows = torch.div(slot_mapping, self.page_size_tokens, rounding_mode="floor")
+            physical_rows = self.full_block_table(logical_rows, rows)
+            translated = physical_rows * self.page_size_tokens + torch.remainder(slot_mapping, self.page_size_tokens)
+            return torch.where(slot_mapping >= 0, translated, slot_mapping)
+        if self.num_slabs:
+            raise ValueError("shared slab Full cache requires the writing layer's block rows")
         if slot_mapping.numel() == 0 or self.full_row_stride == 1:
             return slot_mapping
         rows = torch.div(slot_mapping, self.page_size_tokens, rounding_mode="floor")
@@ -172,6 +193,18 @@ class SharedKVCacheLayout:
         ``slots`` is the reading layer's ``LayerCache.linear_state_slots`` row
         and is required whenever the arena holds more than one Linear group.
         """
+        if self.num_slabs:
+            if role not in ("conv", "ssm"):
+                raise ValueError(f"unsupported shared linear cache role: {role}")
+            if slots is None:
+                raise ValueError("shared slab Linear cache requires the reading layer's role rows")
+            if role == "conv" and checkpoint_offsets is not None:
+                raise ValueError("checkpoint offsets are valid only for SSM indices")
+            role_rows = slots[0 if role == "conv" else 1]
+            physical = role_rows.index_select(0, state_indices.clamp_min(0).to(torch.int64))
+            if checkpoint_offsets is not None:
+                physical = physical + checkpoint_offsets
+            return torch.where(state_indices >= 0, physical.to(state_indices.dtype), state_indices)
         if slots is not None:
             physical = slots.index_select(0, state_indices.clamp_min(0).to(torch.int64))
             state_indices = torch.where(state_indices >= 0, physical.to(state_indices.dtype), state_indices)
@@ -214,16 +247,86 @@ def _tensor_row_bytes(tensor: torch.Tensor) -> int:
     return tensor.element_size() * tensor[0].numel()
 
 
+def _detect_shared_slab_layout(
+    full: Sequence[LayerCache], linear: Sequence[LayerCache], arena_bytes: int
+) -> SharedKVCacheLayout:
+    key, conv, ssm = full[0].key, linear[0].conv, linear[0].ssm
+    assert key is not None and conv is not None and ssm is not None
+    stride = linear[0].shared_checkpoint_stride
+    if not isinstance(stride, int) or stride <= 0:
+        raise ValueError("shared slab caches require an explicit positive checkpoint stride")
+    full_bytes, conv_bytes, ssm_bytes = (_tensor_row_bytes(tensor) for tensor in (key, conv, ssm))
+    slab_bytes = lcm(2 * full_bytes, conv_bytes, stride * ssm_bytes)
+    num_slabs, remainder = divmod(arena_bytes, slab_bytes)
+    if remainder or num_slabs < 2:
+        raise ValueError("shared slab arena must hold scratch and allocatable physical slabs")
+    first_rows = full[0].full_block_rows
+    if first_rows is None or first_rows.ndim != 1 or first_rows.numel() < 2:
+        raise ValueError("shared slab Full caches require a logical block row map")
+    num_slots = first_rows.numel()
+    for cache in (*full, *linear):
+        if cache.shared_checkpoint_stride != stride:
+            raise ValueError("shared slab caches must use one checkpoint stride")
+    for cache in full:
+        assert cache.key is not None and cache.value is not None
+        rows = cache.full_block_rows
+        if rows is None or rows.shape != (num_slots,) or rows.dtype != torch.int32 or rows.device != key.device:
+            raise ValueError("shared slab Full caches require device int32 block row maps")
+        if cache.linear_state_slots is not None:
+            raise ValueError("shared Full cache layers do not own recurrent state slots")
+        for tensor, offset in ((cache.key, 0), (cache.value, full_bytes)):
+            expected_rows = (arena_bytes - offset) // full_bytes
+            if (
+                tensor.shape[1:] != key.shape[1:]
+                or tensor.shape[0] != expected_rows
+                or tensor.dtype != key.dtype
+                or _tensor_storage_span(tensor)[1] != offset
+                or _tensor_row_bytes(tensor) != full_bytes
+            ):
+                raise ValueError("shared slab Full views must expose paired dense arena rows")
+    for cache in linear:
+        assert cache.conv is not None and cache.ssm is not None
+        rows = cache.linear_state_slots
+        if rows is None or rows.shape != (2, num_slots) or rows.dtype != torch.int32 or rows.device != conv.device:
+            raise ValueError("shared slab Linear caches require device Conv and SSM row maps")
+        if cache.full_block_rows is not None:
+            raise ValueError("shared Linear cache layers do not own Full block rows")
+        for tensor, prototype, row_bytes in ((cache.conv, conv, conv_bytes), (cache.ssm, ssm, ssm_bytes)):
+            if (
+                tensor.shape[1:] != prototype.shape[1:]
+                or tensor.shape[0] != arena_bytes // row_bytes
+                or tensor.dtype != prototype.dtype
+                or _tensor_storage_span(tensor)[1] != 0
+                or _tensor_row_bytes(tensor) != row_bytes
+            ):
+                raise ValueError("shared slab Linear views must expose dense zero-origin arena rows")
+    return SharedKVCacheLayout(
+        page_size_tokens=int(key.shape[1]),
+        full_row_stride=slab_bytes // full_bytes,
+        conv_row_stride=slab_bytes // conv_bytes,
+        ssm_row_stride=slab_bytes // ssm_bytes,
+        checkpoint_stride=stride,
+        num_slots=num_slots,
+        slot_bytes=slab_bytes,
+        num_linear_groups=len(linear),
+        conv_row_bytes=conv_bytes,
+        scratch_full_rows=1,
+        scratch_conv_rows=1,
+        scratch_ssm_rows=stride,
+        num_slabs=num_slabs,
+    )
+
+
 def detect_shared_kv_cache_layout(
     layer_caches: Sequence[LayerCache],
 ) -> SharedKVCacheLayout | None:
     """Detect and validate the static arena layout exposed as tensor views.
 
-    The native bridge currently passes tensors only.  A normal cache owns one
+    The native bridge passes cache tensors and the shared checkpoint stride. A normal cache owns one
     storage per role and returns ``None``.  A shared arena is accepted only
     when all Full and Conv/SSM views share one storage and their dimensions
-    solve the static allocator equations exactly; shape ratios alone are not
-    used as a layout signal.
+    match the slab allocator's dense views or the legacy static equations.
+    Shape ratios alone are not used as a layout signal.
     """
     full = [cache for cache in layer_caches if cache.key is not None or cache.value is not None]
     linear = [cache for cache in layer_caches if cache.conv is not None or cache.ssm is not None]
@@ -274,6 +377,8 @@ def detect_shared_kv_cache_layout(
     page_size_tokens = int(key.shape[1])
     if page_size_tokens <= 0 or min(full_row_bytes, conv_row_bytes, ssm_row_bytes) <= 0:
         raise ValueError("shared KV cache rows and Full page size must be positive")
+    if any(cache.full_block_rows is not None or cache.shared_checkpoint_stride is not None for cache in full + linear):
+        return _detect_shared_slab_layout(full, linear, arena_bytes)
     pages_per_slot = (len(full) + 3) // 4
     num_linear_groups = (len(linear) + pages_per_slot - 1) // pages_per_slot
     full_base = (int(key.shape[0]) - 1) * full_row_bytes
@@ -368,7 +473,7 @@ def detect_shared_kv_cache_layout(
 #: Field order of the tuple form, which is what the C++ executor hands over.
 _LAYER_CACHE_SLOTS = tuple(field.name for field in fields(LayerCache))
 
-LayerCacheInput = LayerCache | tuple[torch.Tensor | None, ...]
+LayerCacheInput = LayerCache | tuple[torch.Tensor | int | None, ...]
 
 
 def normalize_layer_caches(caches: Sequence[LayerCacheInput]) -> list[LayerCache]:
@@ -379,8 +484,11 @@ def normalize_layer_caches(caches: Sequence[LayerCacheInput]) -> list[LayerCache
             normalized.append(cache)
             continue
         if not 2 <= len(cache) <= len(_LAYER_CACHE_SLOTS):
-            raise ValueError(f"layer cache must hold between K/V and {'/'.join(_LAYER_CACHE_SLOTS)} tensors")
-        slots = [None if tensor is None or not tensor.numel() else tensor for tensor in cache]
+            raise ValueError(f"layer cache must hold between K/V and {'/'.join(_LAYER_CACHE_SLOTS)} fields")
+        slots = [
+            tensor if isinstance(tensor, int) else None if tensor is None or not tensor.numel() else tensor
+            for tensor in cache
+        ]
         slots.extend([None] * (len(_LAYER_CACHE_SLOTS) - len(slots)))
         normalized.append(LayerCache(*slots))
     return normalized

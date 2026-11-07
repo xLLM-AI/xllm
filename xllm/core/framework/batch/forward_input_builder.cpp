@@ -732,6 +732,9 @@ void ForwardInputBuilder::process_sequences_multithreaded() {
     state_.linear_state_slot_rows.insert(state_.linear_state_slot_rows.end(),
                                          state.linear_state_slot_rows.begin(),
                                          state.linear_state_slot_rows.end());
+    state_.full_block_slot_rows.insert(state_.full_block_slot_rows.end(),
+                                       state.full_block_slot_rows.begin(),
+                                       state.full_block_slot_rows.end());
     state_.request_ids.insert(state_.request_ids.end(),
                               state.request_ids.begin(),
                               state.request_ids.end());
@@ -996,8 +999,13 @@ void ForwardInputBuilder::append_linear_state_row(Sequence* sequence,
   }
   for (const int32_t state_id : {linear_state_id, read_id}) {
     state.linear_state_slot_rows.emplace_back(state_id);
-    shared_pool->append_linear_state_slots(state_id,
-                                           &state.linear_state_slot_rows);
+    if (shared_pool->uses_slabs()) {
+      shared_pool->append_linear_state_rows(state_id,
+                                            &state.linear_state_slot_rows);
+    } else {
+      shared_pool->append_linear_state_slots(state_id,
+                                             &state.linear_state_slot_rows);
+    }
     if (read_id == linear_state_id) {
       break;
     }
@@ -1065,6 +1073,24 @@ void ForwardInputBuilder::setup_kv_cache_info(Sequence* sequence,
   sequence->kv_state().incr_kv_cache_tokens_num(/*size=*/q_seq_len);
 
   const auto blocks = sequence->kv_state().blocks(BlockType::KV);
+  const auto shared_block =
+      std::find_if(blocks.begin(), blocks.end(), [](const Block& block) {
+        return block.is_valid() && block.manager() != nullptr;
+      });
+  if (shared_block != blocks.end()) {
+    const auto& shared_pool =
+        shared_block->manager()->options().shared_block_pool();
+    if (shared_pool != nullptr && shared_pool->uses_slabs()) {
+      for (const auto& block : blocks) {
+        if (!block.is_valid()) {
+          continue;
+        }
+        state.full_block_slot_rows.emplace_back(block.id());
+        shared_pool->append_full_block_rows(block.id(),
+                                            &state.full_block_slot_rows);
+      }
+    }
+  }
   if (sequence->kv_state().has_multi_block_export()) {
     const auto export_view = sequence->kv_state().multi_block_export_view();
     if (state.multi_block_tables.empty()) {
@@ -1330,6 +1356,8 @@ Input ForwardInputBuilder::state_to_forward_input() {
   if constexpr (!std::is_same_v<Input, RecForwardInput>) {
     input_params.embedding.linear_state_slot_rows =
         std::move(state_.linear_state_slot_rows);
+    input_params.embedding.full_block_slot_rows =
+        std::move(state_.full_block_slot_rows);
     input_params.embedding.extra_token_ids = std::move(state_.extra_token_ids);
     if (!state_.mtp_shifted_token_ids.empty()) {
       // Write both the upstream "root" path (consumed by non-CP MTP code paths

@@ -89,6 +89,7 @@ struct KVCacheCreateOptions {
   PROPERTY(std::shared_ptr<KVCacheTensorAllocator>, tensor_allocator);
   PROPERTY(std::shared_ptr<const StaticKVCacheLayout>, static_layout);
   PROPERTY(std::shared_ptr<LinearStateSlotTable>, linear_state_slot_table);
+  PROPERTY(std::shared_ptr<LinearStateSlotTable>, full_block_slot_table);
 
   // Convenience: true when this options set drives the SFA C8 packed KV cache
   // (int8 nope + bf16 rope + fp32 scale in one row, K==V). Every call site was

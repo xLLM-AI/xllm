@@ -15,6 +15,8 @@ limitations under the License.
 
 #pragma once
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
 #include <vector>
@@ -23,14 +25,17 @@ limitations under the License.
 
 namespace xllm {
 
-// Owns the fixed-size slots shared by Full KV blocks and recurrent states.
-// A Full block costs one slot and is identified by it. A recurrent state costs
-// one slot per Linear group; its id is the group-0 slot, and the other slots
-// are recorded for execution. Slot 0 is padding for every group. Any free slot
-// can serve either type, so free capacity is never fragmented.
+class StaticKVCacheLayout;
+
+// Owns stable logical IDs backed by a shared physical slab pool. Each slab
+// packs Full K/V pairs, Conv rows, or contiguous SSM checkpoint bundles; an
+// empty slab can change type. Slab 0 is reserved for graph-padding scratch.
+// The legacy constructor retains coarse slots for existing callers.
 class StaticKVCacheBlockPool final {
  public:
   StaticKVCacheBlockPool(uint32_t num_slots, uint32_t linear_state_slots);
+  StaticKVCacheBlockPool(uint32_t logical_capacity,
+                         const StaticKVCacheLayout& layout);
 
   std::vector<int32_t> allocate(size_t num_blocks, BlockType type);
   void release(int32_t block_id, BlockType type);
@@ -41,14 +46,44 @@ class StaticKVCacheBlockPool final {
   // stay sentinels in every group.
   void append_linear_state_slots(int32_t state_id,
                                  std::vector<int32_t>* slots) const;
+  // Full-layer order; KEY and VALUE use the same row through adjacent views.
+  void append_full_block_rows(int32_t block_id,
+                              std::vector<int32_t>* rows) const;
+  // Linear-layer order: Conv row, then the first SSM checkpoint row.
+  void append_linear_state_rows(int32_t state_id,
+                                std::vector<int32_t>* rows) const;
 
-  size_t num_slots() const { return owners_.size(); }
-  size_t num_total_slots() const { return owners_.size() - 1; }
+  size_t num_slots() const;
+  // In slab mode these resource-accounting methods return payload bytes.
+  size_t num_total_slots() const;
   size_t num_free_slots() const;
   size_t num_used_slots() const;
   size_t slots_per_block(BlockType type) const;
+  size_t num_free_blocks(BlockType type) const;
+  bool uses_slabs() const { return slab_mode_; }
 
  private:
+  enum class SlabType : uint8_t { KV = 0, CONV = 1, SSM = 2, FREE = 3 };
+
+  struct Slab {
+    SlabType type = SlabType::FREE;
+    size_t live_objects = 0;
+    size_t available_index = 0;
+    std::vector<uint32_t> free_objects;
+  };
+
+  size_t block_type_index(BlockType type) const;
+  size_t object_bytes(SlabType type) const;
+  size_t object_row_bytes(SlabType type) const;
+  size_t available_objects(SlabType type) const;
+  int32_t allocate_object(SlabType type);
+  void release_object(int32_t row, SlabType type);
+  void remove_available_slab(uint32_t slab_id);
+  std::vector<int32_t> allocate_slab_blocks(size_t num_blocks, BlockType type);
+  void append_rows(int32_t block_id,
+                   BlockType type,
+                   std::vector<int32_t>* rows) const;
+
   void release_slot(int32_t slot);
 
   mutable std::mutex mutex_;
@@ -61,6 +96,25 @@ class StaticKVCacheBlockPool final {
   std::vector<int32_t> linear_state_slots_;
   size_t slots_per_linear_state_;
   size_t num_used_slots_ = 0;
+
+  bool slab_mode_ = false;
+  uint32_t logical_capacity_ = 0;
+  size_t slab_bytes_ = 0;
+  size_t full_row_bytes_ = 0;
+  size_t conv_row_bytes_ = 0;
+  size_t ssm_row_bytes_ = 0;
+  size_t checkpoint_stride_ = 0;
+  size_t full_layers_ = 0;
+  size_t linear_layers_ = 0;
+  size_t owned_bytes_ = 0;
+  std::vector<Slab> slabs_;
+  std::vector<uint32_t> free_slabs_;
+  std::array<std::vector<uint32_t>, 3> available_slabs_;
+  std::array<size_t, 3> available_object_counts_{};
+  std::array<std::vector<int32_t>, 2> free_ids_;
+  // 0 is free, 1 is owned by prefix cache, and 2 is active.
+  std::array<std::vector<uint8_t>, 2> logical_states_;
+  std::array<std::vector<int32_t>, 2> physical_rows_;
 };
 
 }  // namespace xllm

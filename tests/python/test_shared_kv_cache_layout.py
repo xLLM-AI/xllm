@@ -23,6 +23,7 @@ from xllm.python.attention.backend import (
     LayerCache,
     SharedKVCacheLayout,
     detect_shared_kv_cache_layout,
+    normalize_layer_caches,
 )
 
 
@@ -35,6 +36,113 @@ def _arena_view(arena: torch.Tensor, offset: int, shape: tuple[int, ...], dtype:
 
 def _identity_slots(num_slots: int) -> torch.Tensor:
     return torch.arange(num_slots, dtype=torch.int32)
+
+
+def _make_slab_caches() -> list[LayerCache]:
+    # Four 240-byte slabs contain dense 8-byte Full rows, 20-byte Conv
+    # rows, and 16-byte SSM rows. Logical capacity is independent of slabs.
+    arena = torch.zeros(960, dtype=torch.uint8)
+    caches = []
+    for layer in range(2):
+        full_rows = torch.zeros(32, dtype=torch.int32)
+        full_rows[1:3] = torch.tensor([30 + 4 * layer, 32 + 4 * layer])
+        linear_rows = torch.zeros(2, 32, dtype=torch.int32)
+        linear_rows[0, 1:3] = torch.tensor([24 + 2 * layer, 25 + 2 * layer])
+        linear_rows[1, 1:3] = torch.tensor([45 + 6 * layer, 48 + 6 * layer])
+        caches.append(
+            LayerCache(
+                key=_arena_view(arena, 0, (120, 2, 1, 2), torch.bfloat16),
+                value=_arena_view(arena, 8, (119, 2, 1, 2), torch.bfloat16),
+                full_block_rows=full_rows,
+                shared_checkpoint_stride=3,
+            )
+        )
+        caches.append(
+            LayerCache(
+                key=None,
+                value=None,
+                conv=_arena_view(arena, 0, (48, 5, 2), torch.bfloat16),
+                ssm=_arena_view(arena, 0, (60, 1, 2, 2), torch.float32),
+                linear_state_slots=linear_rows,
+                shared_checkpoint_stride=3,
+            )
+        )
+    return caches
+
+
+def test_slab_full_mapping_is_per_layer_and_preserves_token_offsets() -> None:
+    caches = _make_slab_caches()
+    layout = detect_shared_kv_cache_layout(caches)
+    assert layout is not None
+    assert layout.num_slots == 32
+    assert layout.num_slabs == 4
+    blocks = torch.tensor([[1, 2, 0, -1]], dtype=torch.int32)
+    torch.testing.assert_close(
+        layout.full_block_table(blocks, caches[0].full_block_rows),
+        torch.tensor([[30, 32, 0, -1]], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        layout.full_block_table(blocks, caches[2].full_block_rows),
+        torch.tensor([[34, 36, 0, -1]], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        layout.full_slot_mapping(torch.tensor([2, 3, 4, -1]), caches[0].full_block_rows),
+        torch.tensor([60, 61, 64, -1]),
+    )
+    # Both operands use the K-row index; V's one-row view offset selects
+    # the adjacent allocation without changing FIA's common block table.
+    assert caches[0].value[30].data_ptr() == caches[0].key[31].data_ptr()
+
+
+def test_slab_linear_mapping_uses_independent_role_and_layer_rows() -> None:
+    caches = _make_slab_caches()
+    layout = detect_shared_kv_cache_layout(caches)
+    assert layout is not None
+    indices = torch.tensor([2, 1, 0, -1], dtype=torch.int32)
+    torch.testing.assert_close(
+        layout.linear_state_indices(indices, role="conv", slots=caches[1].linear_state_slots),
+        torch.tensor([25, 24, 0, -1], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        layout.linear_state_indices(
+            indices, role="ssm", slots=caches[3].linear_state_slots, checkpoint_offsets=torch.tensor([2, 1, 0, 2])
+        ),
+        torch.tensor([56, 52, 0, -1], dtype=torch.int32),
+    )
+
+
+def test_slab_map_reuse_keeps_logical_ids_and_storage_addresses() -> None:
+    caches = _make_slab_caches()
+    layout = detect_shared_kv_cache_layout(caches)
+    assert layout is not None
+    rows = caches[0].full_block_rows
+    assert rows is not None
+    address = rows.data_ptr()
+    rows[1] = 72
+    torch.testing.assert_close(layout.full_block_table(torch.tensor([1]), rows), torch.tensor([72]))
+    assert rows.data_ptr() == address
+
+
+@pytest.mark.parametrize(
+    "field,value,error",
+    [
+        ("full_block_rows", torch.zeros(2, 32, dtype=torch.int32), "logical block row map"),
+        ("shared_checkpoint_stride", None, "one checkpoint stride"),
+    ],
+)
+def test_slab_layout_rejects_incomplete_full_metadata(field: str, value: object, error: str) -> None:
+    caches = _make_slab_caches()
+    caches[0] = replace(caches[0], **{field: value})
+    with pytest.raises(ValueError, match=error):
+        detect_shared_kv_cache_layout(caches)
+
+
+def test_normalize_cache_tuple_retains_slab_rows_and_checkpoint_stride() -> None:
+    cache = _make_slab_caches()[0]
+    raw = (cache.key, cache.value, *(None for _ in range(11)), cache.full_block_rows, 3)
+    normalized = normalize_layer_caches([raw])[0]
+    assert normalized.full_block_rows is cache.full_block_rows
+    assert normalized.shared_checkpoint_stride == 3
 
 
 def _make_shared_caches(page_bytes: int = 1024, group_slots: tuple[torch.Tensor, ...] = ()) -> list[LayerCache]:

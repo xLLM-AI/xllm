@@ -42,6 +42,7 @@ namespace xllm {
 class Sequence;
 class KVCacheState;
 class StaticKVCacheBlockPool;
+class StaticKVCacheLayout;
 
 class BlockManager {
  public:
@@ -83,6 +84,7 @@ class BlockManager {
     PROPERTY(bool, enable_vmm_kvcache) = false;
     PROPERTY(bool, enable_shared_kv_cache) = false;
     PROPERTY(uint32_t, shared_linear_state_slots) = 1;
+    PROPERTY(std::shared_ptr<const StaticKVCacheLayout>, shared_layout);
     PROPERTY(std::shared_ptr<StaticKVCacheBlockPool>, shared_block_pool);
     PROPERTY(int64_t, num_layers) = 0;
     PROPERTY(int64_t, slot_size) = 0;

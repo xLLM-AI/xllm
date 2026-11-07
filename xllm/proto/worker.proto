@@ -55,6 +55,8 @@ message KVCacheShape {
   bool grouped_cache_layout = 7;
   int32 kpool_layout = 8;
   repeated int64 kpool_tail_shape = 9;
+  // Physical arena slabs are independent of logical cache ID capacity.
+  int64 shared_slab_count = 10;
 }
 
 message AllocateKVCacheRequest {

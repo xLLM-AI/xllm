@@ -585,47 +585,53 @@ void init_shared_counts(const ModelArgs& model_args,
     }
   }
   const StaticKVCacheLayout layout(std::move(spec));
-  CHECK_LE(layout.slot_bytes(),
+  CHECK_LE(layout.slab_bytes(),
            static_cast<size_t>(std::numeric_limits<int64_t>::max()));
-  const int64_t slot_bytes = static_cast<int64_t>(layout.slot_bytes());
-  int64_t slots = capacity->cache_size_in_bytes() / slot_bytes;
-  // Shared GDN uses generic physical indices, so the separate MegaGdn
-  // state-slot limit does not bound this arena.
-  // ForwardInputBuilder stores token slots and recurrent indices as int32.
-  // Expanded dense views must preserve that limit after page translation.
+  const int64_t slab_bytes = static_cast<int64_t>(layout.slab_bytes());
+  int64_t slabs = capacity->cache_size_in_bytes() / slab_bytes;
+  // Native token slots and recurrent row indices use int32. Bound the dense
+  // arena, not the unrelated logical-ID mapping-table length.
   const size_t max_index = std::numeric_limits<int32_t>::max();
-  const size_t full_stride = layout.role_row_stride(KVCacheTensorRole::KEY);
-  CHECK_LE(full_stride, max_index / capacity->block_size());
-  slots = std::min(
-      slots,
-      static_cast<int64_t>(max_index / full_stride / capacity->block_size()));
+  const size_t full_rows = layout.rows_per_slab(KVCacheTensorRole::KEY);
+  CHECK_LE(full_rows, max_index / capacity->block_size());
+  slabs = std::min(
+      slabs,
+      static_cast<int64_t>(max_index / capacity->block_size() / full_rows));
   for (const KVCacheTensorRole role :
        {KVCacheTensorRole::CONV, KVCacheTensorRole::SSM}) {
-    size_t lower = 0;
-    size_t upper = static_cast<size_t>(slots);
-    // The byte-budget bound above makes every probed slot offset fit int64.
-    // Conv can have a rational row stride, so bound the actual ceiling map.
-    while (lower < upper) {
-      const size_t middle = lower + (upper - lower + 1) / 2;
-      if (layout.row_index(middle, role) <= max_index) {
-        lower = middle;
-      } else {
-        upper = middle - 1;
-      }
-    }
-    slots = static_cast<int64_t>(lower);
+    slabs = std::min(
+        slabs, static_cast<int64_t>(max_index / layout.rows_per_slab(role)));
   }
-  const size_t linear_state_slots = layout.num_linear_groups();
-  // Padding slot, one Full block and one recurrent state.
-  CHECK_GE(slots, static_cast<int64_t>(2 + linear_state_slots))
+  const auto slabs_for = [&layout](size_t count, size_t object_bytes) {
+    const size_t objects_per_slab = layout.slab_bytes() / object_bytes;
+    return (count + objects_per_slab - 1) / objects_per_slab;
+  };
+  // The scratch slab cannot change type. One live hybrid sequence needs
+  // separate typed slabs for its Full pairs, Conv rows and SSM bundles.
+  const int64_t minimum_slabs = static_cast<int64_t>(
+      1 + slabs_for(layout.full_layer_count(), layout.full_pair_bytes()) +
+      slabs_for(layout.linear_layer_count(), layout.conv_row_bytes()) +
+      slabs_for(layout.linear_layer_count(), layout.ssm_bundle_bytes()));
+  CHECK_GE(slabs, minimum_slabs)
       << "Static shared KV budget cannot fit padding and one hybrid sequence.";
-  CHECK_LE(slots, std::numeric_limits<int32_t>::max());
-  CHECK_LE(linear_state_slots, std::numeric_limits<uint32_t>::max());
-  capacity->n_blocks(slots)
-      .num_linear_state_blocks(slots)
-      .shared_slot_bytes(slot_bytes)
-      .shared_linear_state_slots(static_cast<uint32_t>(linear_state_slots))
-      .cache_size_in_bytes(slots * slot_bytes)
+  const int64_t full_block_bytes = static_cast<int64_t>(
+      layout.full_layer_count() * layout.full_pair_bytes());
+  const int64_t linear_state_bytes = static_cast<int64_t>(
+      layout.linear_layer_count() *
+      (layout.conv_row_bytes() + layout.ssm_bundle_bytes()));
+  const int64_t logical_capacity =
+      std::min<int64_t>(1 + (slabs - 1) * slab_bytes /
+                                std::min(full_block_bytes, linear_state_bytes),
+                        std::numeric_limits<int32_t>::max());
+  CHECK_LE(layout.num_linear_groups(), std::numeric_limits<uint32_t>::max());
+  capacity->n_blocks(logical_capacity)
+      .num_linear_state_blocks(logical_capacity)
+      .shared_slot_bytes(slab_bytes)
+      .shared_slab_count(slabs)
+      .shared_min_slab_count(minimum_slabs)
+      .shared_linear_state_slots(
+          static_cast<uint32_t>(layout.num_linear_groups()))
+      .cache_size_in_bytes(slabs * slab_bytes)
       .linear_cache_size_in_bytes(0);
 }
 
@@ -769,18 +775,37 @@ SharedStaticKVCachePlan plan_shared_static_kv_cache(KVCacheCapacity target_cap,
                                   draft_cap.cache_size_in_bytes());
   const int64_t draft_block_bytes =
       standard_full_cache_block_size_in_bytes(draft_cap);
-  // Every shared slot is also a dense draft block ID. The draft therefore pays
-  // one ordinary KV row per slot, including slots currently owned by recurrent
-  // state or reserved as padding.
-  const int64_t slot_bytes = target_cap.shared_slot_bytes();
-  CHECK_LE(draft_block_bytes, std::numeric_limits<int64_t>::max() - slot_bytes);
-  const int64_t slots = std::min(target_cap.n_blocks(),
-                                 budget / (slot_bytes + draft_block_bytes));
-  CHECK_GE(slots,
-           2 + static_cast<int64_t>(target_cap.shared_linear_state_slots()))
+  const int64_t slab_bytes = target_cap.shared_slot_bytes();
+  const int64_t smallest_allocation = std::min(
+      standard_full_cache_block_size_in_bytes(target_cap),
+      target_cap.num_linear_attention_layers() * target_cap.linear_slot_size());
+  CHECK_GT(smallest_allocation, 0);
+  const auto logical_capacity = [&](int64_t slabs) {
+    return std::min(target_cap.n_blocks(),
+                    1 + (slabs - 1) * slab_bytes / smallest_allocation);
+  };
+  // The draft keeps dense Full rows indexed by logical IDs. It does not pay
+  // for one draft block per physical slab or per Linear mapping-table entry.
+  int64_t lower = 0;
+  int64_t upper = target_cap.shared_slab_count();
+  while (lower < upper) {
+    const int64_t middle = lower + (upper - lower + 1) / 2;
+    const int64_t target_bytes = middle * slab_bytes;
+    const int64_t remaining_bytes = budget - target_bytes;
+    if (remaining_bytes >= 0 &&
+        logical_capacity(middle) <= remaining_bytes / draft_block_bytes) {
+      lower = middle;
+    } else {
+      upper = middle - 1;
+    }
+  }
+  CHECK_GE(lower, target_cap.shared_min_slab_count())
       << "Shared target and draft budget cannot fit one hybrid sequence.";
-  target_cap.n_blocks(slots).num_linear_state_blocks(slots).cache_size_in_bytes(
-      slots * slot_bytes);
+  const int64_t slots = logical_capacity(lower);
+  target_cap.n_blocks(slots)
+      .num_linear_state_blocks(slots)
+      .shared_slab_count(lower)
+      .cache_size_in_bytes(lower * slab_bytes);
   draft_cap.n_blocks(slots).cache_size_in_bytes(slots * draft_block_bytes);
   return {std::move(target_cap), std::move(draft_cap)};
 }

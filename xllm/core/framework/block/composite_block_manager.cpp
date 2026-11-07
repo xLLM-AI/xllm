@@ -338,8 +338,12 @@ CompositeBlockManager::LeafMap build_composite_leaves(
     CHECK(options.manager_types().empty());
     CHECK_EQ(options.num_blocks(),
              static_cast<uint32_t>(options.linear_state_num_slots()));
-    cache_options.shared_block_pool(std::make_shared<StaticKVCacheBlockPool>(
-        options.num_blocks(), options.shared_linear_state_slots()));
+    cache_options.shared_block_pool(
+        options.shared_layout()
+            ? std::make_shared<StaticKVCacheBlockPool>(options.num_blocks(),
+                                                       *options.shared_layout())
+            : std::make_shared<StaticKVCacheBlockPool>(
+                  options.num_blocks(), options.shared_linear_state_slots()));
   }
 
   const bool prefix_cache_on = options.enable_prefix_cache();

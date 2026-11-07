@@ -33,18 +33,14 @@ StaticKVCacheTensorAllocator::StaticKVCacheTensorAllocator(
   arena_ =
       torch::zeros({static_cast<int64_t>(layout_.bytes_used())},
                    torch::TensorOptions().dtype(torch::kUInt8).device(device));
-  LOG(INFO) << "Static shared KV arena: slots=" << layout_.num_slots()
-            << ", pages_per_slot=" << layout_.pages_per_slot()
-            << ", page_bytes=" << layout_.page_bytes()
-            << ", Linear_slots_per_state=" << layout_.num_linear_groups()
-            << ", four_Full_layers_payload_bytes="
-            << layout_.full_page_payload_bytes()
-            << ", one_Linear_layer_payload_bytes="
-            << layout_.linear_page_payload_bytes()
-            << ", Full_page_padding_bytes="
-            << layout_.page_bytes() - layout_.full_page_payload_bytes()
-            << ", Linear_page_padding_bytes="
-            << layout_.page_bytes() - layout_.linear_page_payload_bytes();
+  LOG(INFO) << "Static shared KV arena: logical_slots=" << layout_.num_slots()
+            << ", physical_slabs=" << layout_.num_slabs()
+            << ", slab_bytes=" << layout_.slab_bytes()
+            << ", arena_bytes=" << layout_.bytes_used()
+            << ", Full_pair_bytes=" << layout_.full_pair_bytes()
+            << ", Conv_bytes=" << layout_.conv_row_bytes()
+            << ", SSM_bundle_bytes=" << layout_.ssm_bundle_bytes()
+            << ", checkpoint_stride=" << layout_.checkpoint_stride();
 }
 
 void StaticKVCacheTensorAllocator::begin_layer(int64_t layer_id) {

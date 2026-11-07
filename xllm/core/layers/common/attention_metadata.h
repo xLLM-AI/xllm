@@ -131,15 +131,7 @@ struct Fa3AttentionMetadata {
 // for metadata that is identical across layers (e.g., sequence lengths, paged
 // KV cache indices, plan_info). Use
 // AttentionMetadataBuilder to build instances from ModelParamsView.
-struct StaticKVCacheAttentionIndices {
-  int64_t row_stride = 1;
-  torch::Tensor block_table;
-  torch::Tensor slot_mapping;
-};
-
 struct AttentionMetadata {
-  mutable std::optional<StaticKVCacheAttentionIndices> static_cache_indices;
-
   torch::Tensor q_cu_seq_lens;
   // Optional Host metadata retained for asynchronous attention preparation.
   torch::Tensor q_seq_lens_host;

@@ -398,6 +398,9 @@ class LlmEmbeddingInput final {
   // recurrent state this batch reads or writes.
   std::vector<int32_t> linear_state_slot_rows;
 
+  // Shared slab storage: [logical Full block id, physical row per Full layer].
+  std::vector<int32_t> full_block_slot_rows;
+
   // request ids of each sequence, used by suffix decoding request identity
   std::vector<std::string> request_ids;
 
@@ -422,6 +425,7 @@ class LlmEmbeddingInput final {
     out.linear_state_read_indices =
         safe_to(linear_state_read_indices, device, true);
     out.linear_state_slot_rows = linear_state_slot_rows;
+    out.full_block_slot_rows = full_block_slot_rows;
     out.request_ids = request_ids;
     out.extra_token_ids = extra_token_ids;
     out.mtp_shifted_token_ids = safe_to(mtp_shifted_token_ids, device, true);
@@ -711,6 +715,9 @@ class VlmEmbeddingInput final {
   // recurrent state this batch reads or writes.
   std::vector<int32_t> linear_state_slot_rows;
 
+  // Shared slab storage: [logical Full block id, physical row per Full layer].
+  std::vector<int32_t> full_block_slot_rows;
+
   // request ids of each sequence, used by suffix decoding request identity
   std::vector<std::string> request_ids;
 
@@ -735,6 +742,7 @@ class VlmEmbeddingInput final {
     out.linear_state_read_indices =
         safe_to(linear_state_read_indices, device, true);
     out.linear_state_slot_rows = linear_state_slot_rows;
+    out.full_block_slot_rows = full_block_slot_rows;
     out.request_ids = request_ids;
     out.extra_token_ids = extra_token_ids;
     out.mtp_shifted_token_ids = safe_to(mtp_shifted_token_ids, device, true);

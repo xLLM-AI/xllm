@@ -3857,6 +3857,8 @@ TEST(BatchTest, SharedMemoryRoundTripPreservesLinearStateIds) {
   forward_input.input_params.embedding.linear_state_ids = {4, 6};
   forward_input.input_params.embedding.linear_state_slot_rows = {
       4, 4, 9, 6, 6, 11};
+  forward_input.input_params.embedding.full_block_slot_rows = {
+      4, 120, 122, 6, 180, 182};
   forward_input.input_params.embedding.embedding_ids = {2, 7};
   forward_input.input_params.embedding.request_ids = {"mtp-a", "mtp-b"};
 
@@ -3889,6 +3891,8 @@ TEST(BatchTest, SharedMemoryRoundTripPreservesLinearStateIds) {
             std::vector<int32_t>({4, 6}));
   EXPECT_EQ(from_shm.input_params.embedding.linear_state_slot_rows,
             std::vector<int32_t>({4, 4, 9, 6, 6, 11}));
+  EXPECT_EQ(from_shm.input_params.embedding.full_block_slot_rows,
+            std::vector<int32_t>({4, 120, 122, 6, 180, 182}));
   EXPECT_EQ(from_shm.input_params.embedding.embedding_ids,
             std::vector<int32_t>({2, 7}));
   EXPECT_EQ(from_shm.input_params.embedding.request_ids,

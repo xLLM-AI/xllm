@@ -727,6 +727,8 @@ bool WorkerImpl::allocate_kv_cache_storage(
     create_options
         .linear_state_slot_table(std::make_shared<LinearStateSlotTable>(
             layout.num_slots(), layout.num_linear_groups(), device_.unwrap()))
+        .full_block_slot_table(std::make_shared<LinearStateSlotTable>(
+            layout.num_slots(), layout.full_layer_count(), device_.unwrap()))
         .static_layout(std::make_shared<const StaticKVCacheLayout>(layout));
     create_options.tensor_allocator(std::move(allocator));
   }
@@ -1506,6 +1508,17 @@ void WorkerImpl::prepare_work_before_execute_on_stream_impl(
     // inner target worker (which owns the recurrent cache) perform preparation
     // and restore; attempting it here would treat target cache operations as
     // draft operations and fail discover_num_slots().
+    if (has_request_state_cache() &&
+        !input_params.embedding.full_block_slot_rows.empty()) {
+      const auto shared_cache = std::find_if(
+          kv_caches_.begin(), kv_caches_.end(), [](const KVCache& cache) {
+            return cache.is_static_shared();
+          });
+      CHECK(shared_cache != kv_caches_.end())
+          << "Full block row maps require shared slab storage";
+      shared_cache->update_full_block_rows(
+          input_params.embedding.full_block_slot_rows);
+    }
     if (has_request_state_cache()) {
       update_linear_state_slots(kv_caches_,
                                 input_params.embedding.linear_state_slot_rows);
