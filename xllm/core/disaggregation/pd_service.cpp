@@ -23,11 +23,11 @@ namespace xllm {
 
 PDService::PDService(PDScheduler* scheduler,
                      Engine* engine,
-                     int32_t kv_cache_block_tokens,
-                     PDServiceOptions response_options) {
-  pd_service_impl_ = std::make_unique<PDServiceImpl>(
-      scheduler, engine, kv_cache_block_tokens, std::move(response_options));
-}
+                     PDServiceOptions response_options)
+    : pd_service_impl_(
+          std::make_unique<PDServiceImpl>(scheduler,
+                                          engine,
+                                          std::move(response_options))) {}
 
 void PDService::ReleaseReservation(
     ::google::protobuf::RpcController* /*controller*/,
@@ -38,26 +38,28 @@ void PDService::ReleaseReservation(
   pd_service_impl_->release_reservation(request, response);
 }
 
-void PDService::AddNewRequests(::google::protobuf::RpcController* controller,
-                               const proto::DisaggRequests* request,
-                               proto::DisaggResponses* response,
-                               ::google::protobuf::Closure* done) {
+void PDService::AddNewRequests(
+    ::google::protobuf::RpcController* /*controller*/,
+    const proto::DisaggRequests* request,
+    proto::DisaggResponses* response,
+    ::google::protobuf::Closure* done) {
   brpc::ClosureGuard done_guard(done);
   // try to allocate blocks for new requests
   pd_service_impl_->decode_recv_new_requests(request, response);
 }
 
 // TODO: support embedding later, now we only support tokens
-void PDService::FirstGeneration(::google::protobuf::RpcController* controller,
-                                const proto::DisaggGenerationsRequests* request,
-                                proto::Status* response,
-                                ::google::protobuf::Closure* done) {
+void PDService::FirstGeneration(
+    ::google::protobuf::RpcController* /*controller*/,
+    const proto::DisaggGenerationsRequests* request,
+    proto::Status* response,
+    ::google::protobuf::Closure* done) {
   // Receive first token from Prefill, schedule the request to running queue
   brpc::ClosureGuard done_guard(done);
   pd_service_impl_->decode_recv_first_generation(request, response);
 }
 
-void PDService::LinkInstance(::google::protobuf::RpcController* controller,
+void PDService::LinkInstance(::google::protobuf::RpcController* /*controller*/,
                              const proto::InstanceClusterInfo* request,
                              proto::Status* response,
                              ::google::protobuf::Closure* done) {
@@ -65,10 +67,11 @@ void PDService::LinkInstance(::google::protobuf::RpcController* controller,
   pd_service_impl_->link_instance(request, response);
 }
 
-void PDService::UnlinkInstance(::google::protobuf::RpcController* controller,
-                               const proto::InstanceClusterInfo* request,
-                               proto::Status* response,
-                               ::google::protobuf::Closure* done) {
+void PDService::UnlinkInstance(
+    ::google::protobuf::RpcController* /*controller*/,
+    const proto::InstanceClusterInfo* request,
+    proto::Status* response,
+    ::google::protobuf::Closure* done) {
   brpc::ClosureGuard done_guard(done);
   pd_service_impl_->unlink_instance(request, response);
 }

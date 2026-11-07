@@ -40,6 +40,7 @@ limitations under the License.
 #include "common/metrics.h"
 #include "core/disaggregation/pd_service_impl.h"
 #include "core/framework/batch/sampling_input_builder.h"
+#include "core/framework/config/distributed_config.h"
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/transfer/kv_transfer_completion.h"
 #include "core/util/scope_guard.h"
@@ -1335,7 +1336,7 @@ TEST(PDSchedulerTest, DecodeBuildsMinTokenInputsFromLocalExecutionMode) {
     PDScheduler::Options options = make_decode_options();
     options.enable_task_pipeline(enable_task_pipeline);
     TestPDScheduler scheduler(&engine, options);
-    TestPDServiceImpl service(&scheduler, &engine, /*kv_cache_block_tokens=*/2);
+    TestPDServiceImpl service(&scheduler, &engine);
     for (const uint32_t minimum : {0u, 3u}) {
       SCOPED_TRACE(::testing::Message()
                    << "task_pipeline=" << enable_task_pipeline
@@ -1377,6 +1378,95 @@ TEST(PDSchedulerTest, DecodeBuildsMinTokenInputsFromLocalExecutionMode) {
   }
 }
 
+TEST(PDSchedulerTest, DecodeOutputCallbacksOutliveRpcService) {
+  DistributedConfig& config = DistributedConfig::get_instance();
+  const std::string previous_protocol = config.xservice_rpc_protocol();
+  ScopeGuard restore_protocol([&config, previous_protocol] {
+    config.xservice_rpc_protocol(previous_protocol);
+  });
+  config.xservice_rpc_protocol("baidu_std");
+
+  class GenerationService final : public xllm_service::proto::XllmRpcService {
+   public:
+    GenerationService() { requests_.reserve(2); }
+
+    void Generations(google::protobuf::RpcController* /*controller*/,
+                     const proto::DisaggStreamGenerations* request,
+                     proto::StatusSet* response,
+                     google::protobuf::Closure* done) override {
+      brpc::ClosureGuard done_guard(done);
+      std::lock_guard<std::mutex> lock(mutex_);
+      requests_.emplace_back(*request);
+      for (const auto& generation : request->gens()) {
+        response->add_all_status()->set_ok(generation.req_id() != "rejected");
+      }
+    }
+
+    std::vector<proto::DisaggStreamGenerations> requests() {
+      std::lock_guard<std::mutex> lock(mutex_);
+      return requests_;
+    }
+
+   private:
+    std::mutex mutex_;
+    std::vector<proto::DisaggStreamGenerations> requests_;
+  } service;
+
+  brpc::Server server;
+  ASSERT_EQ(server.AddService(&service, brpc::SERVER_DOESNT_OWN_SERVICE), 0);
+  ASSERT_EQ(server.Start("127.0.0.1:0", nullptr), 0);
+  ScopeGuard stop_server([&server] {
+    server.Stop(/*timeout_ms=*/0);
+    server.Join();
+  });
+  const std::string address =
+      "127.0.0.1:" + std::to_string(server.listen_address().port);
+  const bool initialized = XServiceClientTestPeer::set_initialized(true);
+  ScopeGuard restore_client(
+      [initialized] { XServiceClientTestPeer::set_initialized(initialized); });
+  FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
+  TestPDScheduler scheduler(&engine, make_decode_options());
+  std::shared_ptr<Request> request;
+  {
+    auto rpc_service = std::make_unique<TestPDServiceImpl>(&scheduler, &engine);
+    proto::DisaggRequest wire_request;
+    wire_request.set_req_id("retained");
+    wire_request.set_service_req_id("service-retained");
+    wire_request.set_source_xservice_addr(address);
+    wire_request.add_prompt_tokens(1);
+    wire_request.set_seq_capacity(16);
+    wire_request.set_n(1);
+    wire_request.set_best_of(1);
+    wire_request.set_max_tokens(8);
+    wire_request.set_max_context_len(16);
+    wire_request.set_vocab_size(8);
+    wire_request.set_repetition_penalty(1.0f);
+    wire_request.set_eos_token_id(7);
+    request = rpc_service->generate_request(wire_request);
+    ASSERT_NE(request, nullptr);
+  }
+
+  // Queued outputs retain the request after its RPC service is destroyed.
+  RequestOutput output;
+  output.request_id = request->request_id();
+  output.service_request_id = request->service_request_id();
+  output.target_xservice_addr = request->source_xservice_addr();
+  EXPECT_TRUE(request->state().output_func(output));
+  RequestOutput rejected = output;
+  rejected.request_id = "rejected";
+  EXPECT_EQ(request->state().outputs_func({output, rejected}),
+            (std::vector<bool>{true, false}));
+
+  const auto received = service.requests();
+  ASSERT_EQ(received.size(), 2);
+  ASSERT_EQ(received[0].gens_size(), 1);
+  EXPECT_EQ(received[0].gens(0).req_id(), "retained");
+  EXPECT_EQ(received[0].gens(0).service_req_id(), "service-retained");
+  ASSERT_EQ(received[1].gens_size(), 2);
+  EXPECT_EQ(received[1].gens(0).req_id(), "retained");
+  EXPECT_EQ(received[1].gens(1).req_id(), "rejected");
+}
+
 TEST(PDSchedulerTest, DecodeRejectsMalformedMetadataBeforeKvAllocation) {
   // This rejection must not need an actual service connection or KV allocation.
   const bool initialized = XServiceClientTestPeer::set_initialized(true);
@@ -1386,8 +1476,7 @@ TEST(PDSchedulerTest, DecodeRejectsMalformedMetadataBeforeKvAllocation) {
   TestPDScheduler scheduler(&engine, make_options());
   PDServiceOptions options;
   options.enable_response_formatting = true;
-  PDServiceImpl service(
-      &scheduler, &engine, /*kv_cache_block_tokens=*/2, options);
+  PDServiceImpl service(&scheduler, &engine, options);
   for (int32_t invalid_field = 0; invalid_field < 4; ++invalid_field) {
     proto::DisaggRequests requests;
     auto* request = requests.add_reqs();

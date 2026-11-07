@@ -28,6 +28,7 @@ limitations under the License.
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -162,7 +163,9 @@ class PDScheduler : public ContinuousScheduler<> {
   // count.
   bool exceeds_decode_capacity(Sequence* sequence) const;
 
-  bool enable_schedule_overlap() { return options_.enable_schedule_overlap(); };
+  bool enable_schedule_overlap() const {
+    return options_.enable_schedule_overlap();
+  }
 
   bool enable_task_pipeline() const { return options_.enable_task_pipeline(); }
 
@@ -302,12 +305,6 @@ class PDScheduler : public ContinuousScheduler<> {
   ThreadPool prefill_threadpool_{/*num_threads=*/1,
                                  /*cpu_binding=*/false,
                                  /*pool_name=*/"PDScheduler.prefill"};
-
-  // related decode instance name(ID) list
-  std::vector<std::string> decode_inst_names_;
-  // TODO later
-  // std::vector<std::string> updated_decode_inst_names;
-  int current_decode_idx_ = 0;
 
   // for decode
   // request_id -> Request object

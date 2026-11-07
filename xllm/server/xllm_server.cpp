@@ -199,7 +199,7 @@ bool XllmServer::start(std::unique_ptr<PDService> service) {
         ::xllm::ServiceConfig::get_instance().host() + ":" +
         std::to_string(::xllm::DisaggPDConfig::get_instance().disagg_pd_port());
   }
-  if (!create_server((google::protobuf::Service*)(service.get()),
+  if (!create_server(service.get(),
                      addr,
                      ::xllm::DisaggPDConfig::get_instance().disagg_pd_port(),
                      "Disagg PD")) {

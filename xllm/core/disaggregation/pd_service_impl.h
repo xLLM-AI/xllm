@@ -46,7 +46,6 @@ class PDServiceImpl {
  public:
   explicit PDServiceImpl(PDScheduler* scheduler,
                          Engine* engine,
-                         int32_t kv_cache_block_tokens,
                          PDServiceOptions response_options = {});
   virtual ~PDServiceImpl() = default;
 

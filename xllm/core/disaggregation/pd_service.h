@@ -15,7 +15,6 @@ limitations under the License.
 
 #pragma once
 
-#include <cstdint>
 #include <memory>
 
 #include "common/macros.h"
@@ -28,10 +27,9 @@ class PDService : public proto::DisaggPDService {
  public:
   explicit PDService(PDScheduler* scheduler,
                      Engine* engine,
-                     int32_t kv_cache_block_tokens,
                      PDServiceOptions response_options = {});
-  explicit PDService() {}
-  virtual ~PDService() = default;
+  PDService() = default;
+  ~PDService() override = default;
 
   // for decode recv prefill request
   void AddNewRequests(::google::protobuf::RpcController* controller,

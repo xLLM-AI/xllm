@@ -39,13 +39,12 @@ namespace xllm {
 
 PDServiceImpl::PDServiceImpl(PDScheduler* scheduler,
                              Engine* engine,
-                             int32_t /*kv_cache_block_tokens*/,
                              PDServiceOptions response_options)
     : scheduler_(scheduler),
       engine_(engine),
       response_options_(std::move(response_options)),
+      xservice_client_(XServiceClient::get_instance()),
       block_manager_(engine->block_manager_pool()) {
-  xservice_client_ = XServiceClient::get_instance();
   if (!xservice_client_->initialize_done()) {
     LOG(FATAL) << "XServiceClient not init.";
     return;
@@ -96,21 +95,24 @@ std::shared_ptr<Request> PDServiceImpl::generate_request(
   SchedulerParam scheduler_param = make_disagg_scheduler_param(req);
   StoppingChecker stopping_checker = make_disagg_stopping_checker(req);
 
-  OutputCallback output_callback = [this](const RequestOutput& output) -> bool {
+  // Queued outputs can outlive the RPC service during scheduler shutdown.
+  // Capture the process-wide client without retaining the service.
+  OutputCallback output_callback =
+      [client = xservice_client_](const RequestOutput& output) -> bool {
     // response to xllm service to avoid the redirect cost.
-    if (xservice_client_ == nullptr) {
+    if (client == nullptr) {
       return false;
     }
-    return xservice_client_->generation(output);
+    return client->generation(output);
   };
 
   OutputsFunc batch_output_callback =
-      [this](const std::vector<RequestOutput>& outputs) {
+      [client = xservice_client_](const std::vector<RequestOutput>& outputs) {
         // response to xllm service to avoid the redirect cost.
-        if (xservice_client_ == nullptr) {
+        if (client == nullptr) {
           return std::vector<bool>(outputs.size(), false);
         }
-        return xservice_client_->generations(outputs);
+        return client->generations(outputs);
       };
 
   std::shared_ptr<ServiceOutputFormatter> response_formatter;
@@ -350,7 +352,7 @@ void PDServiceImpl::decode_recv_first_generation(
         std::move(source_mappings),
         gen.dp_size(),
         gen.dp_rank(),
-        mtp_bootstrap_embedding,
+        std::move(mtp_bootstrap_embedding),
         gen.num_cached_tokens());
     if (!success) {
       response->set_ok(false);
