@@ -388,8 +388,10 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
                                                          &options_,
                                                          get_rate_limiter());
 
+  Tokenizer* request_tokenizer = tokenizer_.get();
   threadpool_ = std::make_unique<ThreadPool>(
       /*num_threads=*/options_.num_request_handling_threads(),
+      [request_tokenizer]() { request_tokenizer->warmup(); },
       /*cpu_binding=*/false,
       /*pool_name=*/"VLMMaster.request");
 }
