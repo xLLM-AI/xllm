@@ -160,6 +160,8 @@ class CompositeBlockManager : public BlockManager {
   KVCacheState& kv_state_for(Sequence& seq) const;
 
   bool reclaim_shared_cache();
+  bool reclaim_shared_prefix();
+  void record_shared_checkpoint(Sequence& seq, size_t checkpoint_index);
 
   std::shared_ptr<StaticKVCacheBlockPool> shared_block_pool_;
   LeafMap leaves_;

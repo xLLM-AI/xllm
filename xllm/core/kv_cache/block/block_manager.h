@@ -36,6 +36,7 @@ limitations under the License.
 #include "core/kv_cache/block/block.h"
 #include "core/kv_cache/events/kv_cache_event_journal.h"
 #include "core/kv_cache/prefix/block_hasher.h"
+#include "core/kv_cache/prefix/prefix_cache_entry.h"
 #include "util/timer.h"
 
 namespace xllm {
@@ -160,6 +161,12 @@ class BlockManager {
   virtual size_t num_blocks_in_prefix_cache() const = 0;
   // The composite reclaims across groups without holding another leaf lock.
   virtual size_t evict_prefix_cache(size_t /*num_blocks*/) { return 0; }
+  virtual std::vector<PrefixCacheEntry> prefix_cache_entries() const {
+    return {};
+  }
+  virtual bool evict_cached_block(const XXH3Key& /*hash*/) { return false; }
+  virtual void set_prefix_dependency(const XXH3Key& /*hash*/,
+                                     const XXH3Key& /*dependency*/) {}
   virtual size_t num_free_blocks() const = 0;
   virtual size_t num_used_blocks() const = 0;
   virtual double kv_cache_utilization() const = 0;
