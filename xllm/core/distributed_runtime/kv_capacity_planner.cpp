@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/distributed_runtime/kv_cache_capacity_planner.h"
+#include "core/distributed_runtime/kv_capacity_planner.h"
 
 #include <glog/logging.h>
 
@@ -34,7 +34,7 @@ limitations under the License.
 
 namespace xllm {
 
-KVCacheCapacityPlanner::KVCacheCapacityPlanner(
+KVCapacityPlanner::KVCapacityPlanner(
     const ModelArgs& model_args,
     const runtime::Options& options,
     torch::ScalarType dtype,
@@ -50,7 +50,7 @@ KVCacheCapacityPlanner::KVCacheCapacityPlanner(
       is_multimodal_(is_multimodal),
       reserved_memory_bytes_(reserved_memory_bytes) {}
 
-KVCacheEstimateContext KVCacheCapacityPlanner::observe_memory() const {
+KVCacheEstimateContext KVCapacityPlanner::observe_memory() const {
   KVCacheEstimateContext context;
   context.dtype = dtype_;
   context.world_size = world_size_;
@@ -102,7 +102,7 @@ KVCacheEstimateContext KVCacheCapacityPlanner::observe_memory() const {
   return context;
 }
 
-void KVCacheCapacityPlanner::prepare_virtual_memory(
+void KVCapacityPlanner::prepare_virtual_memory(
     KVCacheCapacity& capacity) const {
   auto& coordinator = DistributedVmmCoordinator::get_instance();
   coordinator.prepare_kv_cache_pool(options_,
@@ -122,8 +122,7 @@ void KVCacheCapacityPlanner::prepare_virtual_memory(
                            capacity.linear_cache_size_in_bytes());
 }
 
-KVCacheCapacity KVCacheCapacityPlanner::plan(
-    bool initialize_virtual_memory) const {
+KVCacheCapacity KVCapacityPlanner::plan(bool initialize_virtual_memory) const {
   const KVCacheEstimateContext context = observe_memory();
   KVCacheCapacity capacity =
       KVCacheEstimator(model_args_).estimate(options_, context);

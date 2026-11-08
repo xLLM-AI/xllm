@@ -44,7 +44,7 @@ limitations under the License.
 
 namespace xllm {
 
-class KVCacheTransferCoordinator;
+class KVTransferCoordinator;
 
 inline constexpr int32_t kDecodeAddNewInvalidRequestStatusCode = 400;
 inline constexpr int32_t kDecodeAddNewPromptTooLongStatusCode = 413;
@@ -80,8 +80,7 @@ class PDScheduler : public ContinuousScheduler<> {
       std::shared_ptr<DistributedWorkerManager> distributed_worker_manager,
       std::shared_ptr<ModelResidencyCoordinator> model_residency_coordinator =
           nullptr,
-      std::shared_ptr<KVCacheTransferCoordinator> kv_transfer_coordinator =
-          nullptr,
+      std::shared_ptr<KVTransferCoordinator> kv_transfer_coordinator = nullptr,
       PDServiceOptions response_options = {})
       : PDScheduler(engine,
                     options,
@@ -203,8 +202,7 @@ class PDScheduler : public ContinuousScheduler<> {
           nullptr,
       std::shared_ptr<ModelResidencyCoordinator> model_residency_coordinator =
           nullptr,
-      std::shared_ptr<KVCacheTransferCoordinator> kv_transfer_coordinator =
-          nullptr)
+      std::shared_ptr<KVTransferCoordinator> kv_transfer_coordinator = nullptr)
       : ContinuousScheduler<>(engine,
                               options,
                               std::move(model_residency_coordinator),
@@ -255,7 +253,7 @@ class PDScheduler : public ContinuousScheduler<> {
   // info
   void register_instance_info(const std::string& server_name);
 
-  std::shared_ptr<KVCacheTransferCoordinator> kv_transfer_coordinator_;
+  std::shared_ptr<KVTransferCoordinator> kv_transfer_coordinator_;
 
   struct RequestBlockRelease {
     std::shared_ptr<Request> request;

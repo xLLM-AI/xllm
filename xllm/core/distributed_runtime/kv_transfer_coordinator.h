@@ -29,7 +29,7 @@ class DistributedWorkerManager;
 
 // Coordinates KV transfer participation and completion across distributed
 // workers. The master composes this alongside the model engine.
-class KVCacheTransferCoordinator final : public KVCacheTransferCoordinatorBase {
+class KVTransferCoordinator final : public KVCacheTransferCoordinatorBase {
  public:
   struct Options {
     int32_t dp_size = 1;
@@ -37,7 +37,7 @@ class KVCacheTransferCoordinator final : public KVCacheTransferCoordinatorBase {
     uint32_t prefetch_batch_size = 2;
   };
 
-  KVCacheTransferCoordinator(
+  KVTransferCoordinator(
       Options options,
       std::shared_ptr<DistributedWorkerManager> distributed_worker_manager);
 

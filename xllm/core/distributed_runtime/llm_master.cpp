@@ -32,7 +32,7 @@ limitations under the License.
 #include "common/metrics.h"
 #include "core/disaggregation/pd_service_impl.h"
 #include "core/distributed_runtime/engine_dispatch.h"
-#include "core/distributed_runtime/kv_cache_transfer_coordinator.h"
+#include "core/distributed_runtime/kv_transfer_coordinator.h"
 #include "core/distributed_runtime/model_residency_coordinator.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
@@ -246,8 +246,8 @@ LLMMaster::LLMMaster(const Options& options)
     return;
   }
 
-  kv_transfer_coordinator_ = std::make_shared<KVCacheTransferCoordinator>(
-      KVCacheTransferCoordinator::Options{
+  kv_transfer_coordinator_ = std::make_shared<KVTransferCoordinator>(
+      KVTransferCoordinator::Options{
           .dp_size = options_.dp_size(),
           .prefetch_timeout_ms = options_.prefetch_timeout(),
           .prefetch_batch_size = options_.prefetch_batch_size()},

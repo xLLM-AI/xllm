@@ -42,10 +42,10 @@ cc_library(
     heartbeat_callback_registry.h
     http_callback_channel_cache.h
     kv_transfer_topology.h
-    kv_cache_transfer_coordinator.h
+    kv_transfer_coordinator.h
     xservice_client.h
     model_residency_coordinator.h
-    kv_cache_capacity_planner.h
+    kv_capacity_planner.h
   SRCS
     dit_engine.cpp
     llm_engine.cpp
@@ -53,14 +53,14 @@ cc_library(
     speculative_engine.cpp
     rec_engine.cpp
     distributed_worker_manager.cpp
-    kv_cache_transfer_coordinator.cpp
+    kv_transfer_coordinator.cpp
     remote_worker.cpp
     worker_server.cpp
     comm_channel.cpp
     shm_channel.cpp
     xservice_client.cpp
     model_residency_coordinator.cpp
-    kv_cache_capacity_planner.cpp
+    kv_capacity_planner.cpp
   DEPS
     :common
     :worker_service
