@@ -22,6 +22,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/block/composite_block_manager.h"
+#include "core/framework/request/sequence_kv_state.h"
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/block/concurrent_block_manager_impl.h"
 #include "core/kv_cache/prefix/prefix_cache.h"
@@ -124,6 +125,134 @@ TEST(ConcurrentBlockManagerTest, AllocatesWhileBlocksReleaseConcurrently) {
 
   EXPECT_EQ(manager.num_free_blocks(), manager.num_total_blocks());
   EXPECT_EQ(manager.num_used_blocks(), 0);
+}
+
+TEST(ConcurrentBlockManagerTest, ReleasesEveryCachedAliasInOneOperation) {
+  BlockManager::Options options;
+  options.num_blocks(5).block_size(2).enable_prefix_cache(true);
+  ConcurrentBlockManagerImpl manager(
+      std::make_unique<BlockManagerImpl>(options));
+  const std::vector<int32_t> tokens = {11, 12};
+  std::vector<Block> blocks = manager.allocate(/*num_blocks=*/1);
+  ASSERT_EQ(blocks.size(), 1u);
+  manager.cache(tokens, blocks);
+  blocks.reserve(2);
+  blocks.emplace_back(blocks.front());
+
+  manager.release(blocks);
+
+  EXPECT_FALSE(blocks[0].is_valid());
+  EXPECT_FALSE(blocks[1].is_valid());
+  EXPECT_EQ(manager.num_used_blocks(), 0u);
+  EXPECT_EQ(manager.num_blocks_in_prefix_cache(), 1u);
+  EXPECT_EQ(manager.num_free_blocks(), manager.num_total_blocks() - 1);
+  release_prefix_cache(&manager);
+}
+
+TEST(ConcurrentBlockManagerTest, LeaseAndStateReleaseCachedUsageInEitherOrder) {
+  for (const bool retire_lease_first : {false, true}) {
+    SCOPED_TRACE(retire_lease_first);
+    BlockManager::Options options;
+    options.num_blocks(5).block_size(2).enable_prefix_cache(true);
+    ConcurrentBlockManagerImpl manager(
+        std::make_unique<BlockManagerImpl>(options));
+    const std::vector<int32_t> tokens = {11, 12};
+    std::vector<Block> blocks = manager.allocate(/*num_blocks=*/1);
+    ASSERT_EQ(blocks.size(), 1u);
+    manager.cache(tokens, blocks);
+    auto lease = std::make_unique<KVCacheBlockLease>(blocks);
+    KVCacheState state;
+    state.add_blocks(BlockType::KV, blocks);
+    blocks.clear();
+
+    if (retire_lease_first) {
+      lease.reset();
+    } else {
+      state.reset();
+    }
+    EXPECT_EQ(manager.num_used_blocks(), 1u);
+    EXPECT_EQ(manager.num_blocks_in_prefix_cache(), 1u);
+
+    lease.reset();
+    state.reset();
+    EXPECT_EQ(manager.num_used_blocks(), 0u);
+    EXPECT_EQ(manager.num_blocks_in_prefix_cache(), 1u);
+    EXPECT_EQ(manager.num_free_blocks(), manager.num_total_blocks() - 1);
+    release_prefix_cache(&manager);
+  }
+}
+
+TEST(ConcurrentBlockManagerTest,
+     LeaseAndStateRetainUncachedUsageUntilLastAliasRelease) {
+  for (const bool enable_prefix_cache : {false, true}) {
+    for (const bool retire_lease_first : {false, true}) {
+      SCOPED_TRACE(enable_prefix_cache);
+      SCOPED_TRACE(retire_lease_first);
+      BlockManager::Options options;
+      options.num_blocks(5).block_size(2).enable_prefix_cache(
+          enable_prefix_cache);
+      ConcurrentBlockManagerImpl manager(
+          std::make_unique<BlockManagerImpl>(options));
+      std::vector<Block> blocks = manager.allocate(/*num_blocks=*/1);
+      ASSERT_EQ(blocks.size(), 1u);
+      const int32_t retained_block_id = blocks.front().id();
+      auto lease = std::make_unique<KVCacheBlockLease>(blocks);
+      KVCacheState state;
+      state.add_blocks(BlockType::KV, blocks);
+      blocks.clear();
+
+      if (retire_lease_first) {
+        lease.reset();
+        EXPECT_EQ(state.blocks(BlockType::KV).front().id(), retained_block_id);
+      } else {
+        state.reset();
+      }
+      EXPECT_EQ(manager.num_used_blocks(), 1u);
+      EXPECT_EQ(manager.num_free_blocks(), manager.num_total_blocks() - 1);
+
+      lease.reset();
+      state.reset();
+      EXPECT_EQ(manager.num_used_blocks(), 0u);
+      EXPECT_EQ(manager.num_blocks_in_prefix_cache(), 0u);
+      EXPECT_EQ(manager.num_free_blocks(), manager.num_total_blocks());
+    }
+  }
+}
+
+TEST(ConcurrentBlockManagerTest, BatchRetirementDuringStateResetClearsUsage) {
+  BlockManager::Options options;
+  options.num_blocks(5).block_size(2).enable_prefix_cache(true);
+  ConcurrentBlockManagerImpl manager(
+      std::make_unique<BlockManagerImpl>(options));
+  const std::vector<int32_t> tokens = {11, 12};
+
+  constexpr int32_t kNumIterations = 256;
+  for (int32_t iteration = 0; iteration < kNumIterations; ++iteration) {
+    SCOPED_TRACE(iteration);
+    std::vector<Block> blocks = manager.allocate(/*num_blocks=*/1);
+    ASSERT_EQ(blocks.size(), 1u);
+    manager.cache(tokens, blocks);
+    auto lease = std::make_unique<KVCacheBlockLease>(blocks);
+    KVCacheState state;
+    state.add_blocks(BlockType::KV, blocks);
+    blocks.clear();
+    std::atomic<bool> start{false};
+    std::thread completion([&start, lease = std::move(lease)]() mutable {
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      lease.reset();
+    });
+
+    start.store(true, std::memory_order_release);
+    state.reset();
+    completion.join();
+
+    EXPECT_EQ(manager.num_used_blocks(), 0u);
+    release_prefix_cache(&manager);
+    EXPECT_EQ(manager.num_blocks_in_prefix_cache(), 0u);
+    EXPECT_EQ(manager.num_free_blocks(), manager.num_total_blocks());
+  }
 }
 
 class LinearConcurrentAllocationTest

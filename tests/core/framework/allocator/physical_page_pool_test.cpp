@@ -18,6 +18,7 @@ limitations under the License.
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -41,7 +42,11 @@ class PhysicalPagePoolTestPeer final {
       std::function<int64_t()> memory_query,
       std::function<std::unique_ptr<PhysicalPage>(page_id_t)> factory) {
     std::lock_guard<std::mutex> lock(pool.mtx_);
-    pool.free_memory_query_ = std::move(memory_query);
+    pool.free_memory_query_ =
+        [memory_query = std::move(memory_query)]() -> std::optional<int64_t> {
+      const int64_t free_bytes = memory_query();
+      return free_bytes < 0 ? std::nullopt : std::optional<int64_t>(free_bytes);
+    };
     pool.allocator_memory_query_ = []() {
       return std::optional<AllocatorMemoryStats>{};
     };
@@ -53,6 +58,13 @@ class PhysicalPagePoolTestPeer final {
       std::function<std::optional<AllocatorMemoryStats>()> memory_query) {
     std::lock_guard<std::mutex> lock(pool.mtx_);
     pool.allocator_memory_query_ = std::move(memory_query);
+  }
+
+  static void inject_clock(
+      PhysicalPagePool& pool,
+      std::function<std::chrono::steady_clock::time_point()> clock) {
+    std::lock_guard<std::mutex> lock(pool.mtx_);
+    pool.growth_clock_ = std::move(clock);
   }
 
   static std::unique_ptr<PhysicalPage> make_page(page_id_t page_id) {
@@ -91,6 +103,8 @@ class PhysicalPagePoolTest : public ::testing::Test {
           }
           return PhysicalPagePoolTestPeer::make_page(page_id);
         });
+    PhysicalPagePoolTestPeer::inject_clock(PhysicalPagePool::get_instance(),
+                                           [this]() { return now_; });
   }
 
   void reset_with_active_pages(size_t initial_pages) {
@@ -113,6 +127,7 @@ class PhysicalPagePoolTest : public ::testing::Test {
   int64_t free_bytes_ = kCapacity * kPageSize;
   size_t allocation_attempts_ = 0;
   size_t fail_on_attempt_ = 0;
+  std::chrono::steady_clock::time_point now_;
   std::optional<AllocatorMemoryStats> allocator_stats_;
 };
 
@@ -130,6 +145,69 @@ TEST_F(PhysicalPagePoolTest, LazyInitializationSeparatesCapacityAndBacking) {
   EXPECT_TRUE(pool.batch_get(/*count=*/0).empty());
   EXPECT_TRUE(pool.batch_get(kCapacity + 1).empty());
   EXPECT_EQ(allocation_attempts_, 0);
+}
+
+TEST_F(PhysicalPagePoolTest, ReportsLogicalCapacityFailureReason) {
+  auto& pool = PhysicalPagePool::get_instance();
+
+  const PhysicalPageBatchResult result =
+      pool.batch_get_with_reason(kCapacity + 1);
+
+  EXPECT_TRUE(result.pages.empty());
+  EXPECT_EQ(result.failure_reason,
+            PhysicalPagePoolFailureReason::LOGICAL_CAPACITY);
+  EXPECT_STREQ(physical_page_pool_failure_reason_name(result.failure_reason),
+               "logical_capacity");
+  EXPECT_EQ(allocation_attempts_, 0);
+}
+
+TEST_F(PhysicalPagePoolTest, ReportsInsufficientFreeMemoryFailureReason) {
+  auto& pool = PhysicalPagePool::get_instance();
+  free_bytes_ = 0;
+
+  const PhysicalPageBatchResult result = pool.batch_get_with_reason(1);
+
+  EXPECT_TRUE(result.pages.empty());
+  EXPECT_EQ(result.failure_reason,
+            PhysicalPagePoolFailureReason::INSUFFICIENT_FREE_MEMORY);
+  EXPECT_EQ(pool.num_committed(), 0);
+  EXPECT_EQ(allocation_attempts_, 0);
+}
+
+TEST_F(PhysicalPagePoolTest, ReportsPhysicalPageCreationFailureReason) {
+  auto& pool = PhysicalPagePool::get_instance();
+  fail_on_attempt_ = 1;
+
+  const PhysicalPageBatchResult result = pool.batch_get_with_reason(2);
+
+  EXPECT_TRUE(result.pages.empty());
+  EXPECT_EQ(result.failure_reason,
+            PhysicalPagePoolFailureReason::PHYSICAL_PAGE_CREATION);
+  EXPECT_EQ(pool.num_available(), kCapacity);
+  EXPECT_EQ(pool.num_committed(), 0);
+  EXPECT_EQ(allocation_attempts_, 1);
+}
+
+TEST_F(PhysicalPagePoolTest, ReportsPostAllocationMemoryQueryFailureReason) {
+  reset_with_active_pages(/*initial_pages=*/1);
+  auto& pool = PhysicalPagePool::get_instance();
+  PhysicalPagePoolTestPeer::inject(
+      pool,
+      [this]() { return free_bytes_; },
+      [this](page_id_t page_id) {
+        ++allocation_attempts_;
+        free_bytes_ = -1;
+        return PhysicalPagePoolTestPeer::make_page(page_id);
+      });
+
+  const PhysicalPageBatchResult result = pool.batch_get_with_reason(1);
+
+  EXPECT_TRUE(result.pages.empty());
+  EXPECT_EQ(result.failure_reason,
+            PhysicalPagePoolFailureReason::POST_ALLOCATION_MEMORY_QUERY_FAILED);
+  EXPECT_EQ(pool.num_active(), 1);
+  EXPECT_EQ(pool.num_committed(), 0);
+  EXPECT_EQ(allocation_attempts_, 1);
 }
 
 TEST_F(PhysicalPagePoolTest, ActivatesAdditionalSlotsWhenStartupArenaIsFull) {
@@ -481,6 +559,7 @@ TEST_F(PhysicalPagePoolTest,
   EXPECT_EQ(pool.get_all_pages()[1], nullptr);
   pool.put(std::move(page));
   fail_on_attempt_ = 0;
+  now_ += std::chrono::milliseconds(250);
   auto pages = pool.batch_get(/*count=*/3);
   ASSERT_EQ(pages.size(), 3);
   EXPECT_EQ(pages.front().get(), original);
@@ -533,6 +612,7 @@ TEST_F(PhysicalPagePoolTest, FailedWeightGrowthDoesNotActivateRightHandSlots) {
   EXPECT_EQ(pool.num_available(), 1);
   EXPECT_EQ(pool.num_committed(), 0);
   fail_on_attempt_ = allocation_attempts_ + 2;
+  now_ += std::chrono::milliseconds(250);
   EXPECT_TRUE(pool.allocate_pages_from_right(/*count=*/3).empty());
   EXPECT_EQ(pool.num_active(), 1);
   EXPECT_EQ(pool.num_available(), 1);
@@ -566,6 +646,54 @@ TEST_F(PhysicalPagePoolTest,
   EXPECT_EQ(pool.num_committed(), 2);
 }
 
+TEST_F(PhysicalPagePoolTest, PhysicalGrowthUsesLiveBudgetIndependentOfRatio) {
+  const VmmArenaCapacity capacity = calculate_vmm_arena_capacity(
+      /*available_memory=*/16 * kPageSize,
+      /*total_memory=*/32 * kPageSize,
+      /*max_memory_utilization=*/0.75,
+      /*lazy=*/true,
+      /*max_cache_size=*/0);
+  auto& pool = PhysicalPagePool::get_instance();
+  ASSERT_TRUE(pool.reset());
+  pool.init(torch::Device(torch::kCPU),
+            capacity.maximum_bytes / kPageSize,
+            capacity.initial_bytes / kPageSize,
+            kPageSize,
+            /*lazy=*/true);
+  pool.set_growth_reserve(capacity.growth_memory_reserve_bytes);
+  pool.set_allocation_headroom(2 * kPageSize);
+  PhysicalPagePoolTestPeer::inject(
+      pool,
+      [this]() { return free_bytes_; },
+      [this](page_id_t page_id) {
+        ++allocation_attempts_;
+        free_bytes_ -= kPageSize;
+        return PhysicalPagePoolTestPeer::make_page(page_id);
+      });
+  inject_allocator_stats();
+
+  // Resident execution cache already reduces live free memory.
+  allocator_stats_ = AllocatorMemoryStats{10 * kPageSize, 10 * kPageSize};
+  free_bytes_ = 6 * kPageSize;
+  pool.observe_execution_memory();
+  auto pages = pool.batch_get(/*count=*/4);
+  ASSERT_EQ(pages.size(), 4);
+  EXPECT_EQ(free_bytes_, 2 * kPageSize);
+
+  // Released execution cache must remain recoverable alongside explicit
+  // headroom, even though the ratio does not constrain live free bytes.
+  allocator_stats_ = AllocatorMemoryStats{6 * kPageSize, 10 * kPageSize};
+  free_bytes_ = 6 * kPageSize;
+  EXPECT_TRUE(pool.batch_get(/*count=*/1).empty());
+  EXPECT_EQ(allocation_attempts_, 4);
+  free_bytes_ += kPageSize;
+  auto growth_pages = pool.batch_get(/*count=*/1);
+  ASSERT_EQ(growth_pages.size(), 1);
+  EXPECT_EQ(free_bytes_, 6 * kPageSize);
+  pool.batch_put(growth_pages);
+  pool.batch_put(pages);
+}
+
 TEST_F(PhysicalPagePoolTest, MapsPaddingPagesAfterPersistentStateAllocation) {
   constexpr int64_t kAvailableBytes = 100 * kPageSize;
   constexpr int64_t kResidentStateBytes = 60 * kPageSize;
@@ -574,7 +702,6 @@ TEST_F(PhysicalPagePoolTest, MapsPaddingPagesAfterPersistentStateAllocation) {
       calculate_vmm_arena_capacity(kAvailableBytes,
                                    /*total_memory=*/200 * kPageSize,
                                    /*max_memory_utilization=*/0.0,
-                                   /*max_memory_utilization_configured=*/true,
                                    /*lazy=*/true,
                                    /*max_cache_size=*/0,
                                    /*reserved_memory_bytes=*/0,
@@ -615,6 +742,9 @@ TEST_F(PhysicalPagePoolTest, PartialAllocationFailurePublishesNoBacking) {
     EXPECT_EQ(page, nullptr);
   }
   fail_on_attempt_ = 0;
+  EXPECT_TRUE(pool.batch_get(/*count=*/3).empty());
+  EXPECT_EQ(allocation_attempts_, 2);
+  now_ += std::chrono::milliseconds(250);
   auto pages = pool.batch_get(/*count=*/3);
   ASSERT_EQ(pages.size(), 3);
   EXPECT_EQ(pages.front()->page_id(), 0);
@@ -634,6 +764,149 @@ TEST_F(PhysicalPagePoolTest, FailedGrowthPreservesResidentBackingAndFreeSlots) {
   EXPECT_EQ(pool.num_available(), kCapacity);
   EXPECT_EQ(pool.get_all_pages()[0], original);
   EXPECT_EQ(pool.get_all_pages()[1], nullptr);
+  const size_t attempts_after_failure = allocation_attempts_;
+  free_bytes_ = 0;
+  EXPECT_EQ(pool.num_allocatable(), 1);
+  page = pool.get();
+  ASSERT_NE(page, nullptr);
+  EXPECT_EQ(page.get(), original);
+  pool.put(std::move(page));
+  free_bytes_ = kCapacity * kPageSize;
+  EXPECT_EQ(pool.num_allocatable(), 1);
+  EXPECT_EQ(pool.batch_get_with_reason(/*count=*/2).failure_reason,
+            PhysicalPagePoolFailureReason::GROWTH_BACKOFF);
+  EXPECT_EQ(allocation_attempts_, attempts_after_failure);
+}
+
+TEST_F(PhysicalPagePoolTest,
+       GrowthFailuresBackOffExponentiallyWithoutBlocking) {
+  auto& pool = PhysicalPagePool::get_instance();
+  const std::vector<std::chrono::milliseconds> delays = {
+      std::chrono::milliseconds(250),
+      std::chrono::milliseconds(500),
+      std::chrono::milliseconds(1000),
+      std::chrono::milliseconds(2000),
+      std::chrono::milliseconds(4000),
+      std::chrono::milliseconds(4000)};
+  for (const std::chrono::milliseconds delay : delays) {
+    fail_on_attempt_ = allocation_attempts_ + 1;
+    EXPECT_EQ(pool.batch_get_with_reason(/*count=*/1).failure_reason,
+              PhysicalPagePoolFailureReason::PHYSICAL_PAGE_CREATION);
+    EXPECT_EQ(allocation_attempts_, fail_on_attempt_);
+    now_ += delay - std::chrono::milliseconds(1);
+    EXPECT_EQ(pool.num_allocatable(), 0);
+    const PhysicalPageBatchResult result =
+        pool.batch_get_with_reason(/*count=*/1);
+    EXPECT_EQ(result.failure_reason,
+              PhysicalPagePoolFailureReason::GROWTH_BACKOFF);
+    EXPECT_STREQ(physical_page_pool_failure_reason_name(result.failure_reason),
+                 "growth_backoff");
+    EXPECT_EQ(allocation_attempts_, fail_on_attempt_);
+    now_ += std::chrono::milliseconds(1);
+    EXPECT_EQ(pool.num_allocatable(), kCapacity);
+  }
+  fail_on_attempt_ = 0;
+  auto page = pool.get();
+  ASSERT_NE(page, nullptr);
+  pool.put(std::move(page));
+}
+
+TEST_F(PhysicalPagePoolTest, WholePageBudgetRecoveryAllowsAnEarlierProbe) {
+  auto& pool = PhysicalPagePool::get_instance();
+  allocator_stats_ = AllocatorMemoryStats{};
+  inject_allocator_stats();
+  free_bytes_ = 2 * kPageSize;
+  fail_on_attempt_ = 1;
+  EXPECT_EQ(pool.batch_get_with_reason(/*count=*/1).failure_reason,
+            PhysicalPagePoolFailureReason::PHYSICAL_PAGE_CREATION);
+  free_bytes_ += kPageSize - 1;
+  EXPECT_EQ(pool.num_allocatable(), 0);
+  EXPECT_EQ(pool.batch_get_with_reason(/*count=*/1).failure_reason,
+            PhysicalPagePoolFailureReason::GROWTH_BACKOFF);
+  EXPECT_EQ(allocation_attempts_, 1);
+  ++free_bytes_;
+  EXPECT_EQ(pool.num_allocatable(), 3);
+  EXPECT_EQ(pool.num_allocatable(), 3);
+  fail_on_attempt_ = 2;
+  EXPECT_EQ(pool.batch_get_with_reason(/*count=*/1).failure_reason,
+            PhysicalPagePoolFailureReason::PHYSICAL_PAGE_CREATION);
+  EXPECT_EQ(allocation_attempts_, 2);
+  free_bytes_ = kPageSize;
+  EXPECT_EQ(pool.num_allocatable(), 0);
+  EXPECT_EQ(pool.batch_get_with_reason(/*count=*/1).failure_reason,
+            PhysicalPagePoolFailureReason::GROWTH_BACKOFF);
+  EXPECT_EQ(allocation_attempts_, 2);
+  free_bytes_ = 3 * kPageSize;
+  EXPECT_EQ(pool.batch_get_with_reason(/*count=*/1).failure_reason,
+            PhysicalPagePoolFailureReason::GROWTH_BACKOFF);
+  EXPECT_EQ(allocation_attempts_, 2);
+  now_ += std::chrono::milliseconds(500);
+  auto page = pool.get();
+  ASSERT_NE(page, nullptr);
+  pool.put(std::move(page));
+}
+
+TEST_F(PhysicalPagePoolTest, PartialRollbackDoesNotCountAsBudgetRecovery) {
+  auto& pool = PhysicalPagePool::get_instance();
+  free_bytes_ = 3 * kPageSize;
+  PhysicalPagePoolTestPeer::inject(
+      pool,
+      [this]() { return free_bytes_; },
+      [this](page_id_t page_id) {
+        ++allocation_attempts_;
+        if (allocation_attempts_ == 2) {
+          now_ += std::chrono::seconds(1);
+          return std::unique_ptr<PhysicalPage>{};
+        }
+        free_bytes_ -= kPageSize;
+        return PhysicalPagePoolTestPeer::make_page(page_id);
+      });
+  EXPECT_TRUE(pool.batch_get(/*count=*/3).empty());
+  EXPECT_EQ(allocation_attempts_, 2);
+  EXPECT_EQ(pool.num_committed(), 0);
+  free_bytes_ = 3 * kPageSize;
+  inject_factory();
+  now_ += std::chrono::milliseconds(249);
+  EXPECT_EQ(pool.num_allocatable(), 0);
+  EXPECT_EQ(pool.batch_get_with_reason(/*count=*/3).failure_reason,
+            PhysicalPagePoolFailureReason::GROWTH_BACKOFF);
+  EXPECT_EQ(allocation_attempts_, 2);
+  now_ += std::chrono::milliseconds(1);
+  auto pages = pool.batch_get(/*count=*/3);
+  ASSERT_EQ(pages.size(), 3);
+  pool.batch_put(pages);
+}
+
+TEST_F(PhysicalPagePoolTest, SuccessfulGrowthResetsTheFailureDelay) {
+  auto& pool = PhysicalPagePool::get_instance();
+  fail_on_attempt_ = 1;
+  EXPECT_TRUE(pool.batch_get(/*count=*/1).empty());
+  now_ += std::chrono::milliseconds(250);
+  fail_on_attempt_ = 2;
+  EXPECT_TRUE(pool.batch_get(/*count=*/1).empty());
+  now_ += std::chrono::milliseconds(500);
+  auto page = pool.get();
+  ASSERT_NE(page, nullptr);
+  fail_on_attempt_ = allocation_attempts_ + 1;
+  EXPECT_TRUE(pool.batch_get(/*count=*/1).empty());
+  EXPECT_EQ(pool.num_allocatable(), 0);
+  now_ += std::chrono::milliseconds(250);
+  auto next_page = pool.get();
+  ASSERT_NE(next_page, nullptr);
+  pool.put(std::move(page));
+  pool.put(std::move(next_page));
+}
+
+TEST_F(PhysicalPagePoolTest, ResetClearsGrowthBackoff) {
+  auto& pool = PhysicalPagePool::get_instance();
+  fail_on_attempt_ = 1;
+  EXPECT_TRUE(pool.batch_get(/*count=*/1).empty());
+  EXPECT_EQ(pool.num_allocatable(), 0);
+  reset_with_active_pages(kCapacity);
+  EXPECT_EQ(pool.num_allocatable(), kCapacity);
+  auto page = pool.get();
+  ASSERT_NE(page, nullptr);
+  pool.put(std::move(page));
 }
 
 TEST_F(PhysicalPagePoolTest,
@@ -732,8 +1005,32 @@ TEST_F(PhysicalPagePoolTest, FailedWeightReservationLeavesNoPinnedSlots) {
   EXPECT_EQ(pool.num_committed(), 0);
   EXPECT_EQ(pool.num_available(), kCapacity);
   fail_on_attempt_ = allocation_attempts_ + 2;
+  now_ += std::chrono::milliseconds(250);
   EXPECT_TRUE(pool.allocate_pages_from_right(/*count=*/3).empty());
   EXPECT_EQ(pool.num_committed(), 0);
+  EXPECT_EQ(pool.num_available(), kCapacity);
+}
+
+TEST_F(PhysicalPagePoolTest, RejectsFragmentedContiguousAllocation) {
+  auto& pool = PhysicalPagePool::get_instance();
+  auto pages = pool.batch_get(kCapacity);
+  ASSERT_EQ(pages.size(), kCapacity);
+
+  std::vector<std::unique_ptr<PhysicalPage>> held_pages;
+  held_pages.reserve(3);
+  for (size_t i = 0; i < pages.size(); ++i) {
+    if (i % 2 == 0) {
+      held_pages.emplace_back(std::move(pages[i]));
+    } else {
+      pool.put(std::move(pages[i]));
+    }
+  }
+
+  EXPECT_EQ(pool.num_available(), 3);
+  EXPECT_EQ(pool.allocate_contiguous_from_right(/*count=*/2), -1);
+  EXPECT_EQ(pool.num_available(), 3);
+
+  pool.batch_put(held_pages);
   EXPECT_EQ(pool.num_available(), kCapacity);
 }
 

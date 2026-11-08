@@ -33,6 +33,8 @@ struct HostCacheStoreEntry {
   uint32_t cache_handle = 0;
   std::string key_component;
   KVCache* cache = nullptr;
+  bool enable_mla = false;
+  bool is_target = true;
 };
 
 using HostCacheStoreIndex =
@@ -48,10 +50,10 @@ struct KVCacheStoreInitConfig {
   int32_t replica_num = 1;
   uint32_t tp_rank = 0;
   uint32_t tp_size = 1;
+  uint32_t dp_local_rank = 0;
+  uint32_t kv_replica_rank = 0;
   int32_t kv_split_size = 1;
   int32_t kv_split_rank = 0;
-  bool write_enabled = true;
-  bool enable_mla = false;
 };
 
 class KVCacheStore final {
@@ -83,13 +85,11 @@ class KVCacheStore final {
   friend class KVCacheStoreTestPeer;
 
   struct StoreEntry {
-    uint32_t cache_handle = 0;
-    std::string key_component;
-    std::string schema_hash;
     KVCache* cache = nullptr;
     BlockType block_type = BlockType::KV;
     std::string key_prefix;
     std::vector<torch::Tensor> block_tensors;
+    bool is_put_owner = false;
   };
 
   struct PhysicalRequest {
@@ -113,10 +113,13 @@ class KVCacheStore final {
 
   void initialize_store_index(HostCacheStoreIndex store_index);
   std::string build_schema_hash(BlockType block_type,
-                                const KVCache& cache) const;
+                                const KVCache& cache,
+                                bool is_tp_replicated) const;
   std::string build_key_prefix(const std::string& key_component,
                                BlockType block_type,
-                               const std::string& schema_hash) const;
+                               const std::string& schema_hash,
+                               bool is_tp_replicated,
+                               bool is_kv_split_cache) const;
   std::string build_key(const StoreEntry& entry,
                         const BlockTransferInfo& block_info) const;
   std::vector<PhysicalRequest> build_requests(
@@ -140,6 +143,7 @@ class KVCacheStore final {
   KVCacheStoreInitConfig config_;
   std::map<BlockType, std::vector<StoreEntry>> store_index_;
   size_t max_entries_per_type_ = 0;
+  bool is_storage_writer_ = false;
   std::unique_ptr<MooncakeStoreBackend> backend_;
 };
 

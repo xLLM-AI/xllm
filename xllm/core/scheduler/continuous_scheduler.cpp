@@ -351,6 +351,7 @@ void ContinuousSchedulerBase::drain_decode_restore_waiting(
 
 BatchGroup ContinuousSchedulerBase::prepare_batch() {
   Timer timer;
+  drain_request_releases();
   if (kv_cache_prefetcher_ != nullptr) {
     kv_cache_prefetcher_->drain();
   }

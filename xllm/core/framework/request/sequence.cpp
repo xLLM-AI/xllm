@@ -785,10 +785,6 @@ std::shared_ptr<KVCacheBlockLease> Sequence::retain_host_restore_blocks(
   CHECK(pending_host_restore_ == nullptr);
   pending_host_restore_ =
       std::make_shared<KVCacheBlockLease>(std::move(blocks));
-  std::erase_if(host_restore_owners_,
-                [](const auto& owner) { return owner.use_count() == 1; });
-  host_restore_owners_.reserve(host_restore_owners_.size() + 1);
-  host_restore_owners_.emplace_back(pending_host_restore_->owner());
   return pending_host_restore_;
 }
 
@@ -796,20 +792,13 @@ std::shared_ptr<KVCacheBlockLease> Sequence::take_host_restore_blocks() {
   return std::exchange(pending_host_restore_, nullptr);
 }
 
-std::vector<std::shared_ptr<KVCacheBlockLeaseOwner>>
-Sequence::host_restore_owners() const {
-  return host_restore_owners_;
-}
+Sequence::~Sequence() { reset(); }
 
 // release all cache blocks
 void Sequence::reset() {
-  for (const auto& owner : host_restore_owners_) {
-    owner->release();
-  }
   kv_state_.reset();
   host_kv_state_.reset();
   pending_host_restore_.reset();
-  host_restore_owners_.clear();
   clear_host_cache_match();
   volatile_num_prompt_tokens_ = num_tokens_;
 }

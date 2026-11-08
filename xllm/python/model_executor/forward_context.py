@@ -18,6 +18,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING, Protocol, TypeVar, cast
 
 import torch
@@ -26,7 +27,6 @@ if TYPE_CHECKING:
     from xllm.python.attention.backend import (
         AttentionBackend,
         AttentionMetadata,
-        ExecutionMetadataSource,
         LayerCache,
     )
     from xllm.python.attention.npu_paged_attention import PagedAttentionGraphState
@@ -35,16 +35,17 @@ if TYPE_CHECKING:
 
 
 class ExecutionMetadataBuilder(Protocol):
-    metadata_type: type[object]
+    @property
+    def metadata_type(self) -> type[object]: ...
 
     def bind_layer_caches(self, layer_caches: list[LayerCache]) -> None: ...
 
-    def build(self, input_batch: InputBatch, metadata: ExecutionMetadataSource) -> object: ...
+    def build(self, input_batch: InputBatch, metadata: AttentionMetadata) -> object: ...
 
-    def allocate_persistent(self, input_batch: InputBatch, metadata: ExecutionMetadataSource) -> object: ...
+    def allocate_persistent(self, input_batch: InputBatch, metadata: AttentionMetadata) -> object: ...
 
     def update_persistent(
-        self, persistent_metadata: object, input_batch: InputBatch, metadata: ExecutionMetadataSource
+        self, persistent_metadata: object, input_batch: InputBatch, metadata: AttentionMetadata
     ) -> None: ...
 
 
@@ -109,7 +110,7 @@ class KVLoadContext:
 class AclGraphTask:
     event: object
     handle: object
-    update: Callable[[], None]
+    update: Callable[[], object]
 
 
 @dataclass(slots=True)
@@ -133,6 +134,18 @@ class AclGraphExecutionState:
 class AclGraphCaptureContext:
     stream: object
     tasks: list[AclGraphTask]
+
+    def capture_task(self, update: Callable[..., object], *args: object, **kwargs: object) -> None:
+        update = partial(update, *args, **kwargs)
+        event = torch.npu.ExternalEvent()
+        event.wait(self.stream)
+        event.reset(self.stream)
+        torch.npu.graph_task_group_begin(self.stream)
+        try:
+            update()
+        finally:
+            handle = torch.npu.graph_task_group_end(self.stream)
+        self.tasks.append(AclGraphTask(event, handle, update))
 
 
 @dataclass(slots=True)
@@ -243,6 +256,19 @@ def get_execution_buffer(
     if not isinstance(buffer, torch.Tensor):
         raise TypeError("execution buffer must be a torch.Tensor")
     return buffer
+
+
+def shares_execution_workspace() -> bool:
+    """Whether every graph entry of this runner reuses one scratch allocation.
+
+    Large per-entry scratch, such as the FIA workspace, is only affordable
+    when the runner serializes replay and can therefore share it.
+    """
+    ctx = get_forward_context_or_none()
+    state = None if ctx is None else ctx.execution_state
+    return state is not None and (
+        state.serial_workspace_pool is not None or state.shared_persistent_buffers is not None
+    )
 
 
 def get_execution_workspace(key: tuple[object, ...], factory: Callable[[], torch.Tensor]) -> torch.Tensor:

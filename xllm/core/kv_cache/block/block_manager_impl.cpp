@@ -131,6 +131,17 @@ void BlockManagerImpl::deallocate(const Slice<Block>& blocks) {
   }
 }
 
+void BlockManagerImpl::release(std::span<Block> blocks) {
+  for (Block& block : blocks) {
+    if (block.is_valid() && prefix_cache_ && block.ref_count() == 2u &&
+        prefix_cache_->owns(block)) {
+      deallocate(Slice<Block>(&block, /*size=*/1));
+    }
+    // Uncached blocks remain active until free() retires their final alias.
+    block = Block();
+  }
+}
+
 bool BlockManagerImpl::has_enough_blocks(uint32_t num_blocks) {
   if (num_blocks <= num_free_blocks_) {
     return true;
@@ -284,23 +295,11 @@ bool BlockManagerImpl::allocate_prefetch_range(Sequence* seq,
     }
   }
 
-  size_t allocatable = std::min(
-      missing.size(), num_free_blocks() + num_blocks_in_prefix_cache());
-  std::vector<Block> allocated = allocate(allocatable);
-  if (allocated.empty() && allocatable > 0) {
-    allocatable = std::min(missing.size(), num_free_blocks());
-    allocated = allocate(allocatable);
-  }
-
   seq->update_block_hashes(static_cast<uint32_t>(block_size_),
                            options_.hasher_type());
   const Slice<XXH3Key> hashes = seq->block_hashes();
   CHECK_GE(hashes.size(), target_blocks);
-  for (size_t index = 0; index < allocated.size(); ++index) {
-    const size_t block_index = missing[index];
-    allocated[index].set_hash_value(hashes[block_index].data);
-    blocks[block_index] = std::move(allocated[index]);
-  }
+  const bool complete = allocate_missing_blocks(missing, hashes, blocks);
 
   if (!blocks.empty()) {
     host_state.replace_composite_blocks(block_type(),
@@ -308,7 +307,58 @@ bool BlockManagerImpl::allocate_prefetch_range(Sequence* seq,
                                         std::min(shared_blocks, target_blocks),
                                         std::min(cached_blocks, target_blocks));
   }
+  return complete;
+}
+
+bool BlockManagerImpl::allocate_missing_blocks(
+    const std::vector<size_t>& missing,
+    const Slice<XXH3Key>& hashes,
+    std::vector<Block>& blocks) {
+  size_t allocatable = std::min(
+      missing.size(), num_free_blocks() + num_blocks_in_prefix_cache());
+  std::vector<Block> allocated = allocate(allocatable);
+  if (allocated.empty() && allocatable > 0) {
+    allocatable = std::min(missing.size(), num_free_blocks());
+    allocated = allocate(allocatable);
+  }
+  for (size_t index = 0; index < allocated.size(); ++index) {
+    const size_t block_index = missing[index];
+    allocated[index].set_hash_value(hashes[block_index].data);
+    blocks[block_index] = std::move(allocated[index]);
+  }
   return allocated.size() == missing.size();
+}
+
+void BlockManagerImpl::trim_prefetch_blocks(Sequence& seq,
+                                            size_t max_hit_tokens) {
+  KVCacheState& host_state = seq.host_kv_state();
+  const size_t keep = std::min(max_hit_tokens / block_size_,
+                               host_state.num_blocks(block_type()));
+  const size_t cached =
+      std::min(host_state.num_cached_blocks(block_type()), keep);
+  std::vector<Block> blocks = host_state.take_blocks(block_type());
+  if (blocks.size() > keep) {
+    deallocate(Slice<Block>(blocks).slice(keep, blocks.size()));
+    blocks.resize(keep);
+  }
+
+  if (blocks.empty()) {
+    host_state.erase_blocks(block_type());
+    return;
+  }
+
+  // Store prefetch owns newly materialized Host blocks until this point. Once
+  // the gate boundary is known, publish exactly the retained range and make
+  // both state cursors describe that published logical range.
+  seq.update_block_hashes(static_cast<uint32_t>(block_size_),
+                          options_.hasher_type());
+  cache(seq.hash_tokens(options_.hasher_type()),
+        blocks,
+        cached,
+        seq.mm_data(),
+        seq.block_hashes());
+  host_state.replace_composite_blocks(
+      block_type(), std::move(blocks), keep, keep);
 }
 
 }  // namespace xllm

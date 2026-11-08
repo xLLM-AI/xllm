@@ -20,7 +20,7 @@ limitations under the License.
 #include <limits>
 #include <utility>
 
-#include "core/distributed_runtime/distributed_virtual_memory_coordinator.h"
+#include "core/distributed_runtime/distributed_vmm_coordinator.h"
 #include "core/framework/block/hierarchy_block_manager_pool.h"
 #include "core/kv_cache/layout/vmm_kv_cache_layout.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
@@ -40,12 +40,6 @@ KVCacheManagerFactoryResult KVCacheManagerFactory::create(
     const VmmKVCacheLayout* shared_vmm_layout) {
   CHECK_GT(world_size, 0) << "world_size must be greater than 0";
   CHECK_GT(dp_size, 0) << "dp_size must be greater than 0";
-  CHECK(!options.enable_vmm_kvcache() ||
-        (!options.enable_host_offload() &&
-         (!host_validation_options.has_value() ||
-          host_validation_options->host_blocks_factor <= 1.0)))
-      << "Virtual memory does not support host KV cache offload; set "
-         "--host_blocks_factor=0.";
   KVCacheShape shape(kv_cache_capacity, model_args, world_size);
   CHECK(shape.has_key_cache_shape())
       << "KV cache shape must contain a key cache shape";
@@ -93,8 +87,8 @@ KVCacheManagerFactoryResult KVCacheManagerFactory::create(
     }
     const VmmKVCacheLayout& tensors =
         shared_vmm_layout == nullptr ? *component_layout : *shared_vmm_layout;
-    auto& allocator = DistributedVirtualMemoryCoordinator::get_instance()
-                          .vmm_kv_page_allocator();
+    auto& allocator =
+        DistributedVmmCoordinator::get_instance().vmm_kv_page_allocator();
     if (options.enable_disagg_pd()) {
       tensors.validate_pd_page_size(allocator.page_size());
     }

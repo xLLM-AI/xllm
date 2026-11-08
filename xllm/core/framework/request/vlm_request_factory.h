@@ -72,7 +72,7 @@ class VLMRequestFactory final {
   std::shared_ptr<Request> create(
       std::vector<Message> messages,
       const RequestParams& sp,
-      std::string payload,
+      MMInput mm_input,
       OutputCallback callback,
       bool use_prompt_as_is = false,
       std::chrono::steady_clock::time_point arrival_time =

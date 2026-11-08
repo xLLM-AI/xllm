@@ -57,12 +57,14 @@ class RecordingTransferWorkerClient final : public WorkerClient {
     return folly::makeSemiFuture(transfer_result_);
   }
 
-  void transfer_kv_blocks(
+  folly::SemiFuture<uint32_t> transfer_kv_blocks(
       uint64_t batch_id,
       const std::vector<BlockTransferInfo>& block_transfer_info) override {
     ++batch_transfer_calls_;
     batch_id_ = batch_id;
     transfer_info_ = block_transfer_info;
+    return folly::makeSemiFuture(
+        static_cast<uint32_t>(block_transfer_info.size()));
   }
 
   void prefetch_from_storage(
@@ -112,17 +114,27 @@ std::vector<BlockTransferInfo> make_transfer_info(TransferType type) {
 std::shared_ptr<const StoragePrefetchRequest> make_prefetch_request() {
   auto request = std::make_shared<StoragePrefetchRequest>();
   const uint8_t hash_key[XXH3_128BITS_HASH_VALUE_LEN] = {};
+  request->units.reserve(4);
   request->transfer_infos.reserve(4);
   for (int32_t offset = 0; offset < 4; ++offset) {
-    request->transfer_infos.emplace_back(
-        /*src_id=*/offset + 1,
-        /*dst_id=*/offset + 7,
-        hash_key,
-        TransferType::G2H);
+    request->transfer_infos.emplace_back(/*src_id=*/offset + 1,
+                                         /*dst_id=*/offset + 7,
+                                         hash_key,
+                                         TransferType::G2H);
+    PrefetchUnit unit;
+    unit.gated_end = static_cast<uint32_t>(offset + 1);
+    unit.end = unit.gated_end;
+    request->units.emplace_back(unit);
   }
-  request->unit_end_offsets = {1, 2, 3, 4};
-  request->batch_end_unit_offsets = {2, 4};
   return request;
+}
+
+size_t contiguous_gated_prefix(const PrefetchSummary& summary) {
+  size_t prefix = 0;
+  while (prefix < summary.gated_hits.size() && summary.gated_hits[prefix]) {
+    ++prefix;
+  }
+  return prefix;
 }
 
 void expect_transfer_info(const std::vector<BlockTransferInfo>& actual,
@@ -157,7 +169,9 @@ class KVCacheTransferCoordinatorTest : public ::testing::Test {
         new DistributedWorkerManager(std::move(worker_clients)));
     return KVCacheTransferCoordinator(
         KVCacheTransferCoordinator::Options{
-            .dp_size = dp_size, .prefetch_timeout_ms = prefetch_timeout_ms},
+            .dp_size = dp_size,
+            .prefetch_timeout_ms = prefetch_timeout_ms,
+            .prefetch_batch_size = 2},
         std::move(manager));
   }
 };
@@ -349,9 +363,9 @@ TEST_F(KVCacheTransferCoordinatorTest, PrefetchCompletesAllCPWorkersOnce) {
       /*dp_rank=*/1,
       request,
       [] { return false; },
-      [&](size_t hit_units, bool quiescent) {
+      [&](PrefetchSummary summary, bool quiescent) {
         ++done_calls;
-        common_hit_units = hit_units;
+        common_hit_units = contiguous_gated_prefix(summary);
         workers_quiescent = quiescent;
       });
   const auto result = clients[4]->prefetch_result_;
@@ -365,11 +379,13 @@ TEST_F(KVCacheTransferCoordinatorTest, PrefetchCompletesAllCPWorkersOnce) {
     EXPECT_EQ(target->prefetch_request_, request);
     EXPECT_EQ(target->prefetch_result_, result);
     EXPECT_EQ(target->prefetch_worker_index_, rank);
-    EXPECT_EQ(result->record_batch_result(rank, /*prefix_hit_units=*/2),
+    EXPECT_EQ(result->record_batch_result(
+                  rank, /*gated_hits=*/{1, 1}, /*non_gated_hits=*/{1, 1}),
               PrefetchControl::CONTINUE);
   }
   for (size_t rank = 0; rank < 3; ++rank) {
-    EXPECT_EQ(result->record_batch_result(rank, /*prefix_hit_units=*/2),
+    EXPECT_EQ(result->record_batch_result(
+                  rank, /*gated_hits=*/{1, 1}, /*non_gated_hits=*/{1, 1}),
               PrefetchControl::STOP);
     result->mark_worker_ended(rank,
                               /*worker_ok=*/true,
@@ -377,7 +393,8 @@ TEST_F(KVCacheTransferCoordinatorTest, PrefetchCompletesAllCPWorkersOnce) {
     EXPECT_EQ(done_calls, 0);
   }
   EXPECT_EQ(result->record_batch_result(/*worker_index=*/3,
-                                        /*prefix_hit_units=*/1),
+                                        /*gated_hits=*/{1, 0},
+                                        /*non_gated_hits=*/{1, 0}),
             PrefetchControl::STOP);
   result->mark_worker_ended(/*worker_index=*/3,
                             /*worker_ok=*/true,
@@ -402,9 +419,9 @@ TEST_F(KVCacheTransferCoordinatorTest, PrefetchPreservesTimeoutAndStop) {
       /*dp_rank=*/0,
       make_prefetch_request(),
       [&stop_requested] { return stop_requested; },
-      [&done_calls](size_t hit_units, bool workers_quiescent) {
+      [&done_calls](PrefetchSummary summary, bool workers_quiescent) {
         ++done_calls;
-        EXPECT_EQ(hit_units, 2u);
+        EXPECT_EQ(contiguous_gated_prefix(summary), 2u);
         EXPECT_TRUE(workers_quiescent);
       });
   const auto result = clients[0]->prefetch_result_;
@@ -412,7 +429,8 @@ TEST_F(KVCacheTransferCoordinatorTest, PrefetchPreservesTimeoutAndStop) {
   EXPECT_EQ(result->stream_idle_timeout_ms(), 60000);
   stop_requested = true;
   for (size_t rank = 0; rank < clients.size(); ++rank) {
-    EXPECT_EQ(result->record_batch_result(rank, /*prefix_hit_units=*/2),
+    EXPECT_EQ(result->record_batch_result(
+                  rank, /*gated_hits=*/{1, 1}, /*non_gated_hits=*/{1, 1}),
               PrefetchControl::STOP);
     result->mark_worker_ended(rank,
                               /*worker_ok=*/true,
@@ -429,15 +447,16 @@ TEST_F(KVCacheTransferCoordinatorTest, PrefetchReportsUncertainCompletion) {
       /*dp_rank=*/0,
       make_prefetch_request(),
       [] { return false; },
-      [&done_calls](size_t hit_units, bool workers_quiescent) {
+      [&done_calls](PrefetchSummary summary, bool workers_quiescent) {
         ++done_calls;
-        EXPECT_EQ(hit_units, 0u);
+        EXPECT_EQ(contiguous_gated_prefix(summary), 0u);
         EXPECT_FALSE(workers_quiescent);
       });
   const auto result = clients[0]->prefetch_result_;
   ASSERT_NE(result, nullptr);
   EXPECT_EQ(result->record_batch_result(/*worker_index=*/0,
-                                        /*prefix_hit_units=*/1),
+                                        /*gated_hits=*/{1, 0},
+                                        /*non_gated_hits=*/{1, 0}),
             PrefetchControl::STOP);
   result->mark_worker_ended(/*worker_index=*/0,
                             /*worker_ok=*/true,

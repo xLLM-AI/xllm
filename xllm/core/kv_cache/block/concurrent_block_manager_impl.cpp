@@ -51,6 +51,11 @@ void ConcurrentBlockManagerImpl::deallocate(const Slice<Block>& blocks) {
   inner_->deallocate(blocks);
 }
 
+void ConcurrentBlockManagerImpl::release(std::span<Block> blocks) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  inner_->release(blocks);
+}
+
 void ConcurrentBlockManagerImpl::free(int32_t block_id) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   inner_->free(block_id);
@@ -115,6 +120,18 @@ bool ConcurrentBlockManagerImpl::allocate_for_prefetch(Sequence* seq,
   return complete;
 }
 
+void ConcurrentBlockManagerImpl::trim_prefetch_blocks(Sequence& seq,
+                                                      size_t max_hit_tokens) {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  inner_->trim_prefetch_blocks(seq, max_hit_tokens);
+  std::vector<Block>* blocks = seq.host_kv_state().mutable_blocks(block_type());
+  for (Block& block : *blocks) {
+    if (block.is_valid()) {
+      block.set_manager(this);
+    }
+  }
+}
+
 void ConcurrentBlockManagerImpl::release_out_of_window(Sequence* seq,
                                                        KVCacheState& kv_state) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -149,6 +166,11 @@ size_t ConcurrentBlockManagerImpl::admission_capacity() const {
 double ConcurrentBlockManagerImpl::kv_cache_utilization() const {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   return inner_->kv_cache_utilization();
+}
+
+void ConcurrentBlockManagerImpl::reserve_virtual_memory_padding_blocks() {
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  inner_->reserve_virtual_memory_padding_blocks();
 }
 
 }  // namespace xllm

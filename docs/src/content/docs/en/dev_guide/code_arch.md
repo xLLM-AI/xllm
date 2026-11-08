@@ -127,8 +127,8 @@ flowchart TB
 
   subgraph distributed["distributed_runtime"]
     residency["ModelResidencyCoordinator<br/>model initialization, sleep and wakeup"]
-    coordination["DistributedVirtualMemoryCoordinator<br/>shared KV/weight budget, worker selection and dispatch"]
-    rpc["WorkerMemoryRpc<br/>client, service and server"]
+    coordination["DistributedVmmCoordinator<br/>shared KV/weight budget, worker selection and dispatch"]
+    rpc["WorkerMemory<br/>client, service and server"]
   end
 
   subgraph cache["core/kv_cache"]
@@ -212,8 +212,8 @@ byte transport. KV manifests, peer state and resharding plans remain in
 `WeightVirtualMemoryManager`, managing device initialization, the physical page pool,
 and local resource creation and cleanup. Its separate build target does not
 depend on the `runtime` aggregate, RPC or distributed-runtime targets.
-`distributed_runtime/WorkerMemoryRpcClient`, `WorkerMemoryRpcService` and
-`WorkerMemoryRpcServer` handle requests between workers. The service invokes
+`distributed_runtime/WorkerMemoryClient`, `WorkerMemoryService` and
+`WorkerMemoryServer` handle requests between workers. The service invokes
 local resources without calling back into distributed coordination.
 
 `core/kv_cache/storage/VmmKVPageAllocatorImpl` owns KV page queues,
@@ -226,7 +226,7 @@ computed by the allocator as virtual page ID times page size.
 pools and composite managers into `VmmKVBlockManager`, whose block
 adapter does not access a distributed singleton.
 
-`DistributedVirtualMemoryCoordinator` implements that backend, owns the paged
+`DistributedVmmCoordinator` implements that backend, owns the paged
 allocator, accounts for capacity through generic `WorkerPhysicalPageBudget`, and
 selects workers to dispatch local or RPC operations. `ModelResidencyCoordinator`
 organizes model initialization, sleep and wakeup. Distributed coordination
@@ -281,17 +281,20 @@ is returned; live pages, the padding block, weights, and transfer leases remain
 pinned. Only the consumers enabled by the two VMM flags use these pages.
 `vmm_elastic=false` uses a fixed, eagerly resident VMM arena. Weight VMM currently supports the LLM backend. Weight-only VMM requires `vmm_elastic=true`; a fixed weight pool would consume the memory needed by the physical KV Cache.
 
-`max_memory_utilization` and `max_cache_size` are optional growth ceilings,
-shared by KV and weight pages. Elastic mode reserves stable virtual addresses
-up to total device memory, clipped by an explicitly configured positive ratio
-and the byte ceiling. Only the initially available slots are activated at
-startup; allocations activate more slots as demand grows, without relocating
-live pages. Omitting the ratio or setting `max_memory_utilization=0` disables
-the ratio ceiling; `max_cache_size=0` leaves the byte ceiling unset. Every
-physical growth checks live free memory and keeps the ratio reserve, when set,
-as well as execution headroom. Memory released outside the pool can therefore
-enable growth beyond the startup slot count. Fixed VMM and the original
-physical cache retain their positive default ratio and fixed capacity.
+Elastic VMM ignores `max_memory_utilization` for startup sizing, virtual arena
+reservation, and physical growth, including explicitly configured values such
+as `0.75`. The stable virtual arena can cover total device memory, subject to
+the optional `max_cache_size` byte quota and allocations reserved outside the
+pool. KV and weight pages share this quota; `max_cache_size=0` leaves it unset.
+Startup capacity uses currently available memory, so resident hybrid states
+are sized against memory available at initialization rather than future virtual
+capacity. Their bytes are deducted from the pool budget; once allocated, they
+already reduce live free memory. Only the initially available slots are
+activated at startup; allocations activate more slots as demand grows, without
+relocating live pages. Every physical growth checks live free memory and
+execution headroom. Memory released outside the pool can therefore enable
+growth beyond the startup slot count. Fixed VMM and the original physical
+cache retain their positive ratio and fixed capacity.
 
 Elastic VMM follows the configured graph or eager warmup behavior without
 additional VMM-specific warmup. Physical backing grows on demand, with growth
@@ -310,10 +313,21 @@ pool. These checks cannot predict unobserved execution shapes or SDK buffers
 allocated directly outside the caching allocator. Configure the extra reserve
 from device measurements for those cases; it also applies during bootstrap.
 
-Admission and DP selection use the minimum live capacity of the target workers,
-bounded by the shared reservation ledger. Mapping checks the device budget
-before allocating backing and again before publishing the new pages. A failed
-check releases unpublished handles and leaves existing mappings intact.
+Admission converts request token demand to blocks using the actual model cache
+layout, including target/draft tensors. Admission and DP selection use the
+minimum live capacity of the target workers, bounded by the shared reservation
+ledger. Fresh chunked-prefill admission checks the full prompt footprint along
+with existing reservations; decode allocates more blocks as tokens are
+generated. It does not reserve the maximum possible output for each request's
+entire lifetime. The composite block manager also allocates MTP embedding and
+hybrid recurrent-state slots; a failed resource allocation rolls back staged
+blocks and defers the new request. Concurrency varies with request lengths,
+prefix reuse, and live memory within configured scheduler and state-slot
+limits, rather than a separate fixed VMM concurrency estimate.
+
+Mapping checks the device budget before allocating backing and again before
+publishing the new pages. A failed check releases unpublished handles and
+leaves existing mappings intact.
 Allocator and driver samples are separate observations; continuous concurrent
 memory changes still require explicit reserve and can cause allocation failure.
 KV and weight prepare/commit/abort operations compensate

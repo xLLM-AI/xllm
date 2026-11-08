@@ -109,6 +109,23 @@ cc_test(
     :kv_cache_transfer
     GTest::gtest_main
 )
+if(USE_NPU)
+  cc_test(
+    NAME
+      virtual_hierarchy_kv_cache_transfer_test
+    SRCS
+      virtual_hierarchy_kv_cache_transfer_test.cpp
+    DEPS
+      :kv_cache_transfer
+      :virtual_memory_kv_cache_storage
+      GTest::gtest_main
+  )
+  set_tests_properties(
+    VirtualHierarchyKVCacheTransferTest.RestoresVirtualKVAfterSourcePagesAreUnmapped
+    VirtualHierarchyKVCacheTransferTest.RestoresVirtualMLAAndIndexAfterSourcePagesAreUnmapped
+    PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE
+  )
+endif()
 endif()
 
 if(USE_NPU OR USE_MLU)

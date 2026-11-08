@@ -19,6 +19,21 @@ xLLM 可以分别为 KV Cache 和模型权重启用虚拟内存管理（VMM）�
 
 前缀匹配沿用物理 KV Cache 的 token 与多模态哈希。Chunked prefill 只发布完整 block；混合注意力模型还需要可恢复的线性状态检查点。此选项不会启用 VMM 的 KV Cache 事件发布。
 
+## 虚拟 KV Cache 的 HostKV offload
+
+开启前缀缓存，并将 `host_blocks_factor` 设置为大于 `1`，可在 Host 内存中保留已完成的 KV block。当设备前缀因显存压力被淘汰后，命中的请求可从 Host 缓存恢复到新映射的 VMM block。传输完成前会持续持有设备和 Host block，请求取消时也不会提前释放。只换出已完成的 block，不会将执行中的请求整体换出。
+
+在已有 NPU 启动命令中加入以下参数：
+
+```bash
+--enable_vmm_kvcache=true \
+--enable_prefix_cache=true \
+--host_blocks_factor=2 \
+--enable_task_pipeline=false
+```
+
+Host 容量按配置的设备 KV 张量容量乘以 `host_blocks_factor` 预分配，弹性模式也遵循这一规则。请结合可用 Host 内存配置 `max_cache_size` 和该系数。本 LLM 路径支持 `kv_cache_dtype=auto` 的 flat KV 和 MLA+INDEX 张量布局；VLM、grouped cache 和混合线性注意力的 conv/SSM cache 仍不支持 VMM HostKV offload。
+
 ## MTP 与虚拟 KV Cache
 
 部署在相同设备上的 MTP target 和 draft 模型可以同时开启 `enable_vmm_kvcache=true`。调度器会一起映射和释放两者的缓存，也支持 target 与 draft 的 KV 张量宽度不同。对于混合注意力模型，只有全注意力层的 KV 张量使用 VMM；卷积与循环状态保持常驻，提前从物理 KV 页池的预算中预留。
@@ -36,20 +51,21 @@ xLLM 可以分别为 KV Cache 和模型权重启用虚拟内存管理（VMM）�
 --enable_task_pipeline=false
 ```
 
-混合线性状态缓存和外部 draft 暂不支持同时使用权重 VMM。虚拟 KV Cache 暂不支持内嵌 Eagle3 draft，以及投机解码结合 PD 分离。KV VMM 原有的限制仍适用，包括不支持量化 KV Cache 和 host offload。
+混合线性状态缓存和外部 draft 暂不支持同时使用权重 VMM。虚拟 KV Cache 暂不支持内嵌 Eagle3 draft，以及投机解码结合 PD 分离。KV VMM 仍不支持量化 KV Cache。
 
 ## 弹性 KV Cache
 
 设置 `enable_vmm_kvcache=true` 和 `vmm_elastic=true` 后，KV 页映射时按需增长物理 backing。页面上的最后一个 block 归还后，空闲 backing 会被释放。VMM 池会预留稳定的虚拟地址，并随需求激活逻辑槽位。
 
-显式配置正数 `max_memory_utilization` 时，arena 不超过设备总显存的该比例，物理页增长也会在每个 worker 上保留剩余比例的空闲显存。不配置 ratio 或设为 `0` 时，arena 可覆盖设备总显存；`max_cache_size` 仍可作为字节上限。实际增长和请求准入始终依据当前空闲显存，为已观察到的执行峰值及 `vmm_memory_reserve_bytes` 保留余量，执行显存观测在运行时持续更新。支持原生 allocator 统计的后端可以将池外释放的显存用于新增 KV 容量，无需重启；不支持可靠统计的后端保留保守执行水位。尚未观察到的执行形状和直接分配的 SDK buffer 可通过显式 reserve 预留空间。
+弹性 VMM 在启动容量估算、虚拟地址 arena 预留和物理页增长时均忽略 `max_memory_utilization`。已有的 `max_memory_utilization=0.75` 等配置在此模式下不生效；物理 KV Cache 和固定 VMM 继续使用该比例。`max_cache_size` 仍可作为 KV 与权重共享池的显式字节配额。实际增长和请求准入依据当前空闲显存，为已观察到的执行峰值及 `vmm_memory_reserve_bytes` 保留余量。已驻留的 graph 和算子缓存已计入显存占用，执行显存观测在运行时持续更新。支持原生 allocator 统计的后端可以将池外释放的显存用于新增 KV 容量，无需重启；不支持可靠统计的后端保留保守执行水位。尚未观察到的执行形状和直接分配的 SDK buffer 可通过显式 reserve 预留空间。
 
-可在现有启动命令中加入以下参数，取消两个显式容量上限，并为执行额外保留 1 GiB 空闲显存。弹性模式下，不配置 `max_memory_utilization` 与设为 `0` 效果相同：
+请求准入根据模型实际的缓存布局，将请求的 token 需求换算为 KV block，并取相关 worker 的最小实时可用容量。MTP embedding 槽位和混合注意力的循环状态槽位也必须满足分配需求。因此，运行并发数会在调度器配置允许的范围内，随请求长度和实时显存变化。新的 chunked-prefill 请求按完整 prompt 占用检查，decode 则随 token 生成继续分配 block，不会提前为每个请求预留最大可能输出。
+
+可在现有启动命令中加入以下参数，不设置字节配额，并为执行额外保留 1 GiB 空闲显存：
 
 ```bash
 --enable_vmm_kvcache=true \
 --vmm_elastic=true \
---max_memory_utilization=0 \
 --max_cache_size=0 \
 --vmm_memory_reserve_bytes=1073741824
 ```

@@ -24,24 +24,9 @@ limitations under the License.
 #include <optional>
 #include <utility>
 
-#include "common/metrics.h"
-#include "core/kv_cache/storage/kv_cache.h"
-#include "framework/model/model_params_view.h"
-#include "framework/state_dict/state_dict.h"
 #include "runtime/vlm_forward_params.h"
-#include "util/timer.h"
 
 namespace xllm {
-
-bool WorkerClient::init_model(const std::string& model_weights_path,
-                              int32_t random_seed,
-                              MasterStatus master_status) {
-  return worker_->init_model(model_weights_path, random_seed, master_status);
-}
-
-bool WorkerClient::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
-  return worker_->allocate_kv_cache(kv_cache_shape);
-}
 
 std::optional<std::string> WorkerClient::spec_calibration(
     const SpecCalibrationCommand& command) {
@@ -74,10 +59,6 @@ bool WorkerClient::unlink_p2p(const std::string& remote_addr) {
   return worker_->unlink_p2p(remote_addr);
 }
 
-std::tuple<int64_t, int64_t> WorkerClient::estimate_kv_cache_capacity() {
-  return worker_->estimate_kv_cache_capacity();
-}
-
 bool WorkerClient::pull_kv_blocks(
     const uint64_t src_cluster_id,
     const std::string& src_addr,
@@ -87,18 +68,9 @@ bool WorkerClient::pull_kv_blocks(
   return std::move(future).get();
 }
 
-std::optional<ForwardOutput> WorkerClient::step(const LlmForwardInput& inputs) {
-  return worker_->step(inputs);
-}
-
 folly::SemiFuture<std::tuple<int64_t, int64_t>>
 WorkerClient::estimate_kv_cache_capacity_async() {
   return worker_->estimate_kv_cache_capacity_async();
-}
-
-folly::SemiFuture<std::optional<ForwardOutput>> WorkerClient::step_async(
-    const LlmForwardInput& input) {
-  return worker_->step_async(input);
 }
 
 folly::SemiFuture<std::optional<RawForwardOutput>>
@@ -106,11 +78,6 @@ WorkerClient::step_remote_async(const LlmForwardInput& input) {
   LOG(FATAL) << "WorkerClient Method step_remote_async with LlmForwardInput "
                 "param is UnImplemented.";
   return folly::makeSemiFuture(std::optional<RawForwardOutput>(std::nullopt));
-}
-
-folly::SemiFuture<std::optional<ForwardOutput>> WorkerClient::step_async(
-    const DiTForwardInput& input) {
-  return worker_->step_async(input);
 }
 
 folly::SemiFuture<std::optional<RawForwardOutput>>
@@ -121,11 +88,6 @@ WorkerClient::step_remote_async(const DiTForwardInput& /*input*/) {
 
 folly::SemiFuture<std::optional<ForwardOutput>> WorkerClient::step_async(
     const RecForwardInput& input) {
-  return worker_->step_async(input);
-}
-
-folly::SemiFuture<std::optional<ForwardOutput>> WorkerClient::step_async(
-    const VlmForwardInput& input) {
   return worker_->step_async(input);
 }
 
@@ -164,13 +126,6 @@ folly::SemiFuture<bool> WorkerClient::allocate_kv_cache_with_transfer_async(
   return worker_->allocate_kv_cache_with_transfer_async(kv_cache_shape);
 }
 
-folly::SemiFuture<bool> WorkerClient::pull_kv_blocks_async(
-    const uint64_t src_cluster_id,
-    const std::string& src_addr,
-    const std::vector<KVTransferMapping>& mappings) {
-  return worker_->pull_kv_blocks_async(src_cluster_id, src_addr, mappings);
-}
-
 folly::SemiFuture<uint32_t> WorkerClient::transfer_kv_blocks(
     const std::vector<BlockTransferInfo>& block_transfer_info) {
   LOG(FATAL) << "WorkerClient Method transfer_kv_blocks with return "
@@ -186,10 +141,11 @@ void WorkerClient::prefetch_from_storage(
   NOT_IMPLEMENTED();
 }
 
-void WorkerClient::transfer_kv_blocks(
+folly::SemiFuture<uint32_t> WorkerClient::transfer_kv_blocks(
     const uint64_t batch_id,
     const std::vector<BlockTransferInfo>& block_transfer_info) {
   NOT_IMPLEMENTED();
+  return folly::makeSemiFuture(uint32_t(0));
 }
 
 folly::SemiFuture<bool> WorkerClient::sleep_async(MasterStatus master_status,
@@ -220,15 +176,6 @@ WorkerClient::get_last_llm_step_result_async() {
 folly::SemiFuture<std::optional<RawForwardOutput>>
 WorkerClient::get_last_vlm_step_result_async() {
   return folly::makeSemiFuture(std::optional<RawForwardOutput>(std::nullopt));
-}
-
-folly::SemiFuture<std::optional<ForwardOutput>>
-WorkerClient::get_last_step_result_single_process_async() {
-  return worker_->get_last_step_result_async();
-}
-
-int64_t WorkerClient::get_active_activation_memory() {
-  return worker_->get_active_activation_memory();
 }
 
 folly::SemiFuture<int64_t> WorkerClient::get_active_activation_memory_async() {

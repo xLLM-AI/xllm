@@ -15,15 +15,13 @@ limitations under the License.
 
 #pragma once
 
-#include "fast_tokenizer.h"
-#include "rec_tokenizer.h"
-#include "rwkv_tokenizer.h"
-#include "sentencepiece_tokenizer.h"
-#include "tiktoken_tokenizer.h"
-#include "tokenizer_args.h"
-#include "tokenizer_proxy.h"
+#include <memory>
+#include <string>
 
 namespace xllm {
+
+class Tokenizer;
+struct TokenizerArgs;
 
 class TokenizerFactory {
  public:

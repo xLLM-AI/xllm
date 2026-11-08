@@ -24,7 +24,7 @@ limitations under the License.
 #include <utility>
 
 #include "common/metrics.h"
-#include "core/distributed_runtime/distributed_virtual_memory_coordinator.h"
+#include "core/distributed_runtime/distributed_vmm_coordinator.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/parallel_config.h"
@@ -237,7 +237,7 @@ bool SpeculativeEngineBase<TargetEngine>::allocate_kv_cache(
     const int64_t reserved_state_bytes =
         target_kv_cache_cap.linear_cache_size_in_bytes() +
         draft_kv_cache_cap.linear_cache_size_in_bytes();
-    auto& coordinator = DistributedVirtualMemoryCoordinator::get_instance();
+    auto& coordinator = DistributedVmmCoordinator::get_instance();
     coordinator.prepare_kv_cache_pool(
         engine_->options_,
         engine_->dp_local_tp_size_,

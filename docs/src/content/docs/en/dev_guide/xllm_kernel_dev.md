@@ -2,58 +2,54 @@
 title: "xLLM-Kernel Development Guide"
 ---
 
-`xllm-kernel/` provides operator interfaces, implementation registration and
-preparation, and independent numerical validation and benchmarking for Python
-models. This guide covers adding an operator, adding an implementation of an
-existing operator, and integrating it into a model. See the
+`xllm-kernel/` provides operator APIs, implementation registration and preparation,
+and independent numerical validation and benchmarking for Python models.
+This guide covers the common workflow for adding operators, extending implementations,
+and integrating and validating model call sites. RMSNorm is only an example;
+other operators use the same interfaces. See the
 [package README](https://github.com/xLLM-AI/xllm/blob/main/xllm-kernel/README.md)
-for installation. Architecture, public APIs, and the development and validation
-workflow are documented here.
+for installation.
 
 ## 1. Responsibilities and directories
 
-The component organizes kernels by operation, keeping model-facing APIs
-independent of the selected solution. Contracts make numerical behavior,
-mutation, aliasing, supported devices, and input domains explicit. Implementations
-can reuse vendor operators or provide package-owned extensions without changing
-the model API.
+The component organizes implementations by operator, keeping model-facing APIs
+independent of the selected solution. Contracts describe numerical behavior,
+mutation, aliasing, supported devices, and input domains. Implementations can
+reuse vendor operators or provide package-owned extensions without changing the
+model API.
 
 Registration, dependency checks, and binding happen before model execution and
-graph capture. Models retain the prepared callable, keeping selection and
-compilation off the serving path. Numerical validation and performance measurement
-run independently of an xLLM server. New operator families and platforms extend
-these same boundaries, with tests and measurements for each implementation.
+graph capture. Models retain prepared callables, keeping selection and compilation
+off the serving path. Numerical validation and benchmarking run independently of
+an xLLM server. Additional operator families and platforms follow these boundaries,
+with tests and measurements for each implementation.
 
-The following files separate operation definitions, shared infrastructure, and
-backend dependencies:
+Directories are organized by responsibility:
 
-| Location | Responsibility | When adding an operator |
-| --- | --- | --- |
-| `pyproject.toml`, `python/xllm_kernel/__init__.py` | Standalone package metadata, initialization and public re-exports; ordinary import stays SDK-free | Export the intended public API |
-| `python/xllm_kernel/catalog.py` | `Operation` / `BackendModule` definitions and discovery of runtime operations | Add the operation module to `_BUILTINS` |
-| `python/xllm_kernel/selection.py` | Unified overrides, compatibility filtering and priority selection | Reuse the selector and declare implementation metadata |
-| `python/xllm_kernel/runtime.py` | Load candidates for all operations, freeze once, and publish fixed bindings together | Reuse shared initialization |
-| `python/xllm_kernel/ops/<operation>/` | Public operator semantics, solution implementations and registration, runtime binding | Define the interface or add an implementation |
-| `python/xllm_kernel/registry.py` | `OpContract`, `KernelSpec`, `PreparedKernel`, and preparation-time selection | Reuse without branches on operator names |
-| `python/xllm_kernel/custom_ops.py` | Torch registration with optional `fake_impl`; implementations keep fake functions beside their kernels | Reuse for new Python ops or existing C++ schemas |
-| `csrc/<solution>/` | Optional native extensions, Torch bridges, and device launcher adapters; currently `xlite/` | Add the implementation and device registration |
-| `setup.py` | Extension sources, library dependencies, and independent build options | Wire the required extension while keeping default installation pure Python |
-| `python/xllm_kernel/numerics/<operation>.py` | Operator arguments, inputs, reference, tolerances, supported domain, and `OperationSuite` | Provide a suite for each operator |
-| `python/xllm_kernel/numerics/catalog.py` | Explicit discovery of built-in suites | Add the module entry, without operator logic |
-| `python/xllm_kernel/numerics/{arguments,suite,verify,report}.py` | Common CLI arguments, case interfaces, validation lifecycle, and numerical reports | Reuse through the interfaces |
-| `python/xllm_kernel/benchmark/` | Common benchmark CLI, NPU timing, and reports | Reuse prepared cases without interpreting operator tensor arguments |
-| `test/`, `test/npu/` | Common infrastructure tests, independent device tests, and fixtures | Add the corresponding pytest cases |
+| Location | Responsibility and integration point |
+| --- | --- |
+| `python/xllm_kernel/ops/<operation>/` | Operator contracts, public APIs, implementations, and registration |
+| `python/xllm_kernel/registry.py` | `OpContract`, `KernelSpec`, `PreparedKernel`, and the registry |
+| `python/xllm_kernel/{catalog,runtime,selection}.py` | Discover operators, load dependencies, select implementations, and publish bindings |
+| `python/xllm_kernel/custom_ops.py` | Register package-owned Torch schemas, device implementations, and fakes |
+| `csrc/<solution>/` | Directory convention for native extension sources and device launcher bridges |
+| `pyproject.toml`, `setup.py`, `MANIFEST.in` | Package metadata, extension builds, and distribution artifacts |
+| `python/xllm_kernel/numerics/<operation>.py` | Operator-specific arguments, inputs, references, tolerances, and suite |
+| `python/xllm_kernel/numerics/catalog.py` | Register suite modules in `_BUILTINS` |
+| `python/xllm_kernel/numerics/{suite,factory,inputs,tensor_case}.py` | Case interfaces, input construction, tensor-tree validation, and reset |
+| `python/xllm_kernel/numerics/{arguments,verify,report,distributed}.py` | Shared CLI, validation, reporting, and distributed execution |
+| `python/xllm_kernel/benchmark/` | Reuse suites for timing and performance reports |
+| `test/`, `test/npu/` | Shared interface tests and device implementation tests |
 
 All paths above are relative to `xllm-kernel/`. Model structure, batch metadata,
-KV cache management, and request scheduling remain in the xLLM runtime.
-Operators consume prepared inputs; a solution must not introduce its own
-request scheduler or cache lifecycle.
+KV cache management, and request scheduling belong to the xLLM runtime. Operators
+consume prepared inputs; a solution must not introduce its own request scheduler
+or cache lifecycle.
 
-Shared files must not hard-code operator report titles, input roles, shapes,
-tolerances, references, or implementation-specific domains. Public API
-re-exports, runtime and suite catalog module lists, and extension source lists in
-build scripts are explicit integration points and may name operators. Computation
-semantics and conditional logic belong in the corresponding operator module.
+Each operator module defines its inputs, shapes, reference, tolerances, and supported
+domain. The shared registry, runners, and reports reuse these through interfaces.
+Public API exports, catalog module lists, and extension source lists are the
+integration points for new operators.
 
 ## 2. Define the contract before implementing the kernel
 
@@ -72,448 +68,288 @@ documentation consistent:
   build artifacts.
 
 [`OpContract`](https://github.com/xLLM-AI/xllm/blob/main/xllm-kernel/python/xllm_kernel/registry.py)
-currently describes `operation`, `version`, `mutates`, `aliases_inputs`, and
-`numerical_mode`. `KernelSpec` also declares the implementation name, `device`,
-`execution_modes`, `input_domain`, `solution`, and `priority`. `input_domain` is
-currently a descriptive string: the registry does not use it to validate shapes
-or layouts automatically. The implementation must check arguments before launch.
+describes operator semantics: `operation`, `version`, `mutates`, `aliases_inputs`,
+and `numerical_mode`. `KernelSpec` describes an implementation: its name, device,
+execution modes, input domain, solution, variant, binding, and priority.
+`input_domain` is a descriptive string; the underlying implementation or vendor
+operator validates actual arguments.
 
-Only implementations with matching semantics may share an `OpContract` when
-adding a solution for an existing operator. Changes to mutation, aliasing,
-quantization, or output semantics require a distinct contract; an implementation
-name alone does not express that difference. Numerical equivalence may use
-declared tolerances and should not imply bitwise equality by default.
+Implementations of the same operator can share an `OpContract` only when their
+semantics match. Changes to mutation, aliasing, quantization, or output semantics
+require a distinct contract, rather than just a different implementation name.
+Numerical equivalence may use declared tolerances and should not imply bitwise
+equality by default.
 
 ## 3. Implementation, registration, and model integration
 
 ### 3.1 Implementation and registration
 
-Declare the callable at module scope in `ops/<operation>/<solution>.py` with
-`@register_kernel(...)`. Importing the module resolves dependencies and runs the
-decorator, which constructs `KernelSpec`, registers it in `KernelRegistry.get()`,
-and returns the same callable without a forward wrapper. No backend-specific
-`register(registry)` entry point or explicit registry argument is needed.
+Place implementations in `ops/<operation>/`, usually in `<solution>.py`; separate
+modules may distinguish bindings or variants. Declare the callable at module scope
+with `@register_kernel(...)`. Importing the module registers it in the shared
+registry and returns the callable unchanged, without a forward wrapper.
+
+Use this naming convention for `name`:
+
+```text
+<device>.<solution>.<operation>[.<variant>]
+```
+
+- `device`: the target device, matching the `device` field, such as `npu`.
+- `solution`: the execution solution, matching the `solution` field, such as `torch`.
+- `operation`: the operator name from `OpContract.operation`, such as `rms_norm`.
+- `variant`: an optional suffix distinguishing implementations of the same
+  operator within a device and solution.
+
+Square brackets denote an optional segment and are not part of the actual name.
+When omitting `variant`, omit its leading dot as well; for example, RMSNorm uses
+`npu.torch.rms_norm`. Names must be unique across the process registry.
+This format is a naming convention; the registry does not parse it to populate
+metadata, so declare the corresponding fields separately.
+The following example registers RMSNorm through a vendor API:
 
 ```python
 import torch
-import torch_npu
-from xllm_kernel import register_kernel
-from xllm_kernel.ops.rms_norm import RMS_NORM_CONTRACT
 
-_native_rms_norm = torch_npu.npu_rms_norm
+from xllm_kernel import Platform, PlatformEnum, register_kernel
+from xllm_kernel.ops.normalization import RMS_NORM_CONTRACT
+
+if Platform.is_npu():
+    import torch_npu
+
+    _native_rms_norm = torch_npu.npu_rms_norm
 
 
-@register_kernel(
-    name="npu.xllm_native.rms_norm",
-    contract=RMS_NORM_CONTRACT,
-    device="npu",
-    execution_modes=("eager", "aclgraph"),
-    input_domain="torch_npu.npu_rms_norm tensor domain",
-    solution="native",
-    priority=10,
-)
-def rms_norm(input: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
-    return _native_rms_norm(input, weight, epsilon=eps)[0]
+    @register_kernel(
+        name="npu.torch.rms_norm",
+        contract=RMS_NORM_CONTRACT,
+        platform=PlatformEnum.NPU,
+        execution_modes=("eager", "aclgraph"),
+        input_domain="torch_npu.npu_rms_norm tensor domain",
+        solution="torch",
+        binding="torch_npu",
+        priority=20,
+    )
+    def rms_norm(input: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+        return _native_rms_norm(input, weight, epsilon=eps)[0]
 ```
-
-For an existing Torch op or callable instance, use
-`register_kernel(...)(existing_callable)`. xlite uses this form after checking
-and loading its bridge and registering the fake implementation. The implementation
-name, contract, device, execution modes, input domain and solution are required;
-priority defaults to 0. Duplicate names and registration after `freeze()` are errors.
-
-The package and decorator import without Torch or a device SDK. Backend modules
-load their dependencies when imported. Each operation exports an `OPERATION`
-with its contract and `BackendModule` declarations; the shared catalog discovers
-these SDK-free definitions before importing available backend candidates.
-
-`register_kernel` handles implementation selection metadata.
-`custom_ops.register_custom_op` separately handles Torch schemas, device kernels
-and optional fake implementations. See the existing
-[native adapter](https://github.com/xLLM-AI/xllm/blob/main/xllm-kernel/python/xllm_kernel/ops/rms_norm/npu.py)
-and
-[xlite adapter](https://github.com/xLLM-AI/xllm/blob/main/xllm-kernel/python/xllm_kernel/ops/rms_norm/xlite.py).
-
-When reusing a host-owned Torch operator, preserve ownership of its schema,
-implementation, and fake registration. For a new package-owned Torch operator,
-use the package namespace and provide both a real device bridge and its fake
-implementation. Check build artifacts and versions during preparation. Do not
-download dependencies, compile, or reselect implementations during request
-execution or graph replay.
-
-NPU implementations use the current PyTorch stream and follow torch_npu's
-submission queue and Tensor lifetime rules. Do not create private streams or
-synchronize the device inside an operator for implementation convenience.
-Cross-stream execution, device switching, and asynchronous resource release
-require corresponding tests. FakeTensor checks logical shape, dtype, and device
-semantics where possible; real device implementations still check device
-conditions such as physical formats.
 
 ### 3.2 Automatic selection and preparation
 
-```text
-initialize(device, execution_mode, overrides)
-    -> discover all OPERATION definitions from catalog._BUILTINS
-    -> resolve XLLM_KERNEL_OVERRIDE_<OPERATION> and explicit overrides
-    -> import available backend modules; decorators register callables
-    -> freeze the shared registry once
-    -> select every operation by contract/device/mode, priority and stable name
-    -> publish all bindings together as a read-only mapping
-    -> model retains the callable for eager or graph execution
-```
-
-No override is required for normal startup. Selection uses declared metadata and
-priority; it does not inspect input tensors, benchmark candidates, specialize on
-shape, or reselect during forward/replay. The selected implementation still
-validates its own input domain. Current RMSNorm choices and their supported
-domains are described in [section 3.4](#34-public-api-and-current-coverage).
-
-The host calls `xllm_kernel.initialize(device="npu")` after loading native
-operators and before model import or graph capture, then logs the resulting
-operation/name pairs. Direct callers receive `Mapping[str, PreparedKernel]`:
+Call `initialize()` before model import and graph capture to obtain read-only
+operator bindings:
 
 ```python
 from xllm_kernel import initialize
 
-bindings = initialize(device="npu", overrides={"rms_norm": "xlite"})
+bindings = initialize(device="npu", operations=("rms_norm",))
 plan = bindings["rms_norm"]
 ```
 
-Use `XLLM_KERNEL_OVERRIDE_RMS_NORM=xlite` for the same choice at worker startup.
-The generic rule is `XLLM_KERNEL_OVERRIDE_<OPERATION>` with an uppercase operation
-name. Each value is a solution or exact implementation name; exact names take
-precedence over solution names. Environment values override the explicit mapping.
-Unknown operation keys, unknown targets and incompatible explicit choices fail
-before bindings are published. Overrides preserve contract/device/mode checks.
+```text
+Discover definitions → Import/register required implementations → Freeze the registry
+                     → Select implementations → Publish bindings
+```
 
-Missing declared backend dependencies exclude that module and are reported in
-`PreparedKernel.excluded`. Errors while importing an installed backend, including
-ABI or launcher-hash mismatches, propagate. They never trigger another backend.
-All operations must prepare successfully before any binding is published.
-Repeating the same effective configuration returns the same mapping; changing
-it requires a new worker and graphs. Numerical and benchmark CLIs use this same
-initializer and reject a policy that changes their requested implementation.
+- Declare the process's complete required operator set in one `operations` argument;
+  omitting it prepares the entire catalog. Implementations are filtered by contract,
+  device, and execution mode, then selected by descending priority and lexicographic
+  name order.
+- Use `overrides` or `XLLM_KERNEL_OVERRIDE_<OPERATION>` to select a full implementation
+  name or solution; environment variables take precedence.
+- The same configuration reuses its bindings, without selection during forward/replay.
+  Configuration changes require a new worker.
+- Missing dependencies exclude an implementation; errors loading an installed
+  implementation propagate. Bindings are published only after all required operators
+  prepare successfully.
 
-To add an operation, export an `OPERATION = Operation(contract, backends)` from
-its public module and add that module to `catalog._BUILTINS`. Each `BackendModule`
-declares its import path, device and required modules. Add solutions to that
-operation's backend list and use `@register_kernel` for their metadata/priority.
-The host needs no new operator-specific environment-variable handling. Extend
-the operation's offline suite and model call sites separately.
+### 3.3 Vendor operators and custom registration
 
-The unified initializer currently serves RMSNorm; multi-operation behavior is
-covered by CPU test operations. Model integration tests remain necessary when
-adding a real operator or changing its semantics.
-
-### 3.3 Vendor operators, custom registration, and extension builds
-
-RMSNorm currently provides these implementation entry points:
-
-| Implementation | Execution entry | Torch schema owner | Package build option |
-| --- | --- | --- | --- |
-| `npu.xllm_native.rms_norm` | `torch_npu.npu_rms_norm(input, weight, epsilon=eps)[0]` | torch_npu | None |
-| `npu.xlite.rms_norm` | `csrc/xlite/rms_norm.cpp` | `xllm_kernel::xlite_rms_norm` | `XLLM_KERNEL_BUILD_XLITE=1` |
-
-Native calls torch_npu directly and returns only its normalized output, matching
-the former C++ wrapper's tuple selection. It requires neither an xLLM host nor
-a package-owned native extension. Its selector is retained for configuration
-compatibility. The vendor owns its schema and FakeTensor implementation.
-
-`custom_ops.register_custom_op` is the shared preparation-time Torch registration
-helper. For a new Python kernel, provide its callable, explicit `mutates_args`
-and `dispatch_key`, and an optional `fake_impl`. For a schema/device kernel
-already registered by C++, omit the callable, mutation metadata and dispatch key;
-the helper resolves that existing operator and registers the optional fake.
-It retains its Torch library and propagates registration errors. Repeated backend
-initialization must reuse the prepared state rather than redefine schemas or fake
-implementations. Fake functions live in the corresponding operation module,
-not a separate `fake/` directory.
+Reuse vendor-owned Torch schemas directly. For new package-owned Torch operators,
+use `register_custom_op()`:
 
 ```python
 from xllm_kernel.custom_ops import register_custom_op
 
-# New Python kernel: the operation module supplies my_kernel and my_fake.
+# Python implementation: declare mutation and the dispatch key explicitly.
 register_custom_op(
     "my_op", my_kernel, mutates_args=(),
     dispatch_key="PrivateUse1", fake_impl=my_fake,
 )
-# Existing C++ schema: load the xlite bridge before adding its fake.
-register_custom_op("xlite_rms_norm", fake_impl=_fake_rms_norm)
+
+# Existing C++ schema: load its extension first, then add only the fake.
+register_custom_op("my_native_op", fake_impl=my_native_fake)
 ```
 
-Native support needs no package-owned extension. For xlite bridge development,
-use a matching Torch/torch_npu and CANN environment with GVirt revision
-`4a6dc3102d5778928e4d21116bc4d4694d51e584`, as required by the package's `setup.py`.
-The bridge records dependency versions and launcher hashes in its build manifest.
-Follow the package README for installation; after editing the C++ bridge, rebuild
-it in place before starting a new worker:
+- Place native extensions in `csrc/<solution>/` and update `setup.py`, source
+  manifests, and wheel artifacts together.
+- Load extensions and register operators during preparation, then reuse that state.
+- Fakes infer metadata such as shape, dtype, and device; they do not replace
+  numerical validation.
 
-```bash
-(cd xllm-kernel && XLLM_KERNEL_BUILD_XLITE=1 MAX_JOBS=4 python setup.py build_ext --inplace)
-```
+### 3.4 Public API and model integration
 
-Extensions load through `torch.ops.load_library` during preparation, not ordinary
-package import. Existing host `xllm_ops` schemas and C++ model callers retain their
-ownership and behavior. FakeTensor support describes metadata for tracing and
-compilation; it is not required by eager/device-graph execution itself and is not
-a numerical reference. Validate these paths separately.
+Keep public definition modules SDK-free; implementation modules load device
+dependencies. To add an operator:
 
-### 3.4 Public API and current coverage
+1. Declare its contract and `OPERATION` in `ops/<group>/__init__.py`.
+   Use `BackendModule` to list implementation modules, dependencies, and names.
+   Export an `OPERATIONS` tuple, even when the group contains only one operator:
 
-Public operators are exposed through `xllm_kernel.ops`. After package
-initialization, model code uses the public function or retains its prepared
-callable for the lifetime of the graph:
+   ```python
+   OPERATIONS = (OPERATION,)
+   ```
+
+   Groups with several operators export every declaration in that tuple, as
+   `ops/normalization/__init__.py` does for the three normalization operators.
+2. Add the group module to `catalog._BUILTINS` and export its public API
+   from `ops/__init__.py`.
+3. Have the public API obtain its fixed binding through `OPERATION.get_prepared()`;
+   include the operation name, rather than the group name, in `operations` during
+   model initialization.
+4. Connect the model or layer call sites. Add an offline suite when a custom kernel
+   needs numerical or performance validation; native Torch adapters do not require
+   a duplicate numerical-comparison suite.
+
+Example public API call after initialization:
 
 ```python
-from xllm_kernel import prepare_rms_norm
 from xllm_kernel.ops import rms_norm
 
-plan = prepare_rms_norm()
 output = rms_norm(input, weight, eps)
-# A model may retain plan.function directly for repeated calls or graph capture.
 ```
 
-| Operator | Implementation | Execution modes | Priority and selection |
-| --- | --- | --- | --- |
-| `rms_norm` | `npu.xllm_native.rms_norm` | Eager, ACLGraph | Priority 10; automatic choice when both are available |
-| `rms_norm` | `npu.xlite.rms_norm` | Eager, ACLGraph | Priority 0; selectable through the unified override |
-
-Native preserves torch_npu's tensor domain. Its higher priority retains that
-broader domain as the default; it does not imply that native is faster for every
-shape. xlite accepts FP16/BF16 inputs and weights on the same NPU with the same
-dtype, ND layout, widths divisible by 64 and at most 8192, at most `2**32 - 1`
-input elements, and finite nonnegative FP32 epsilon. Strided ND inputs and empty
-rows are supported. Neither implementation mutates or aliases its inputs;
-numerical equivalence is tolerance-based.
-
-The current host integration covers plain RMSNorm in shared layers and GLM-5.3
-MLA preprocessing. Residual, quantized, and Gemma normalization keep their
-existing paths. Other operator families, CUDA adapters, shape specialization,
-profiling/replay, compiler monitoring, and tuning remain future extensions.
-Adding a declaration or test double does not establish device or model support.
+Models may also retain `bindings[operation].function` for the graph's entire lifetime.
 
 ## 4. Provide an operator-specific offline suite
 
-The common interfaces are defined in
-[`numerics/suite.py`](https://github.com/xLLM-AI/xllm/blob/main/xllm-kernel/python/xllm_kernel/numerics/suite.py).
-The numerical and benchmark CLIs share the same suite so they do not maintain
-separate shapes, inputs, or references. `numerics/` owns input generation,
-independent references, tolerances, contract validation, and numerical reports;
-`benchmark/` reuses prepared cases and adds timing. The package's `test/` tree
-owns pytest cases and fixtures and is excluded from the runtime wheel; there is
-no intermediate `testing/` package.
+Numerical validation and benchmarking share an `OperationSuite`. Each operator
+defines its inputs, reference, and tolerances.
 
 ### 4.1 `OperationSuite`
 
-Each `numerics/<operation>.py` exports a `SUITE`:
+There are currently no built-in numerical suites, including RMSNorm. The shared
+numerical and benchmark tools remain available for custom kernels. Before using
+operation-specific CLI options, implement a suite in `numerics/<operation>.py`,
+export `SUITE`, and add its full module path to `_BUILTINS` in
+`numerics/catalog.py`.
 
-| Field | Contract |
-| --- | --- |
-| `operation` | Matches the prepared implementation's `OpContract.operation` |
-| `implementations` | Full implementation names supported by the suite; unique across the catalog |
-| `add_arguments(parser)` | Registers operator-specific CLI arguments |
-| `cases(args)` | Validates operator-specific arguments and returns `KernelCase` instances without allocating device inputs |
-| `prepare(device, mode, implementation)` | Loads the selected implementation and returns a `PreparedKernel` |
+The following is a template for a custom operation. Define all three callbacks
+in that module and use the operation and implementation names from its catalog:
 
-Add the module entry to `_BUILTINS` in `numerics/catalog.py`. Importing a suite
-through the catalog must require only Python metadata. Defer Torch, device SDK,
-and native extension imports until preparation or execution so that `--help`
-works without a device environment.
+```python
+from xllm_kernel.numerics.suite import OperationSuite
 
-The shared CLI handles device, execution mode, explicit implementation name,
-warmup, revision, and output; the benchmark CLI also handles iterations and
-repeats. `--operation` can be explicit or inferred from `--implementation`.
-Operator arguments such as shape and dtype combinations belong in
-`add_arguments` and `cases`, without operator-specific branches in the shared CLI.
+SUITE = OperationSuite(
+    operation="my_operation",
+    implementations=("npu.my_solution.my_operation",),
+    add_arguments=_add_arguments,  # Register CLI arguments
+    cases=_cases,                # Generate cases
+    prepare=_prepare,            # Prepare the implementation
+)
+```
+
+Suite discovery loads only metadata. Import Torch, device SDKs, and extensions
+during preparation or execution so that `--help` works independently.
 
 ### 4.2 `KernelCase` and `PreparedCase`
 
-Each logical case implements these interfaces:
-
-| Interface | Result and responsibility |
+| Object | Interfaces and fields |
 | --- | --- |
-| `case_id` | Reproducible identifier that distinguishes case parameters and seed |
-| `parameters` | JSON-serializable parameter dictionary |
-| `unsupported_reason(plan)` | Returns a reason when inapplicable, otherwise `None`; do not infer support from execution failures |
-| `prepare(plan)` | Creates inputs and returns a `PreparedCase` |
+| `KernelCase` | `case_id`, `parameters`, `unsupported_reason(plan)`, `prepare(plan)` |
+| `PreparedCase` | `function`, `validate`, `metadata`, optional `reset` |
 
-`PreparedCase` has three fields:
+`prepare(plan)` creates inputs and returns a `PreparedCase`. `validate(function)`
+uses an independent reference and tolerances to check the supplied callable's
+output, mutation, and aliasing; under ACLGraph it checks captured outputs.
+Restore mutable inputs through `reset`.
+`unsupported_reason(plan)` returns a reason for unsupported cases, otherwise `None`.
 
-- `function()`: a zero-argument callable binding the inputs, scalar parameters,
-  and prepared implementation. It may return a tensor, tuple, or another
-  structure defined by the operator.
-- `validate(function)`: invokes the supplied zero-argument callable and returns
-  a result containing `status`, using the operator's reference and tolerances.
-  It checks the output structure, numerical values, mutation, aliasing, and
-  other contract requirements.
-- `metadata`: serializable operator-specific details such as input strides and
-  formats.
+### 4.3 Reusable tensor-tree cases
 
-The validator must check the supplied callable's result. It must not ignore
-that callable and invoke the original implementation again. ACLGraph validation
-supplies a function that reads captured outputs; executing the eager operator
-again would hide incorrect graph outputs. Validation results and metadata must
-also avoid overwriting common identity fields such as case ID, operation, and
-implementation.
-
-By default, generate inputs on the CPU with a fixed seed and move them to the
-device as required, so candidates receive the same logical data. The reference
-must be independent of the implementation under test. Numerical references are
-not serving implementations or execution-error fallbacks. Domain filtering must
-match the implementation's argument checks. Direct device tests still cover
-boundaries; marking every case `not_applicable` is not validation.
-
-[`numerics/rms_norm.py`](https://github.com/xLLM-AI/xllm/blob/main/xllm-kernel/python/xllm_kernel/numerics/rms_norm.py)
-provides a complete example. Shared CLI tests also use a test operator with
-size/scale arguments and dictionary outputs to verify that runners do not depend
-on RMSNorm's input/weight/eps structure. That operator tests the shared workflow;
-it does not represent additional device operator support.
+For tensor-tree outputs, reuse `tensor_suite()` in `numerics/factory.py` to generate
+a suite from positive dimension matrices; the builder returns an `Example`.
+`TensorCase` binds inputs during preparation, and `numerics/inputs.py` provides
+random inputs with a fixed CPU seed. Use a custom `KernelCase` for empty dimensions.
+See the generic helpers in
+[`numerics/factory.py`](https://github.com/xLLM-AI/xllm/blob/main/xllm-kernel/python/xllm_kernel/numerics/factory.py)
+and the `Example` / `TensorCase` interfaces in
+[`numerics/tensor_case.py`](https://github.com/xLLM-AI/xllm/blob/main/xllm-kernel/python/xllm_kernel/numerics/tensor_case.py).
+The synthetic suites in
+[`test/test_kernel_cli.py`](https://github.com/xLLM-AI/xllm/blob/main/xllm-kernel/test/test_kernel_cli.py)
+illustrate the CLI protocol using CPU test doubles, rather than device kernels.
 
 ## 5. Shared validation, timing, and reporting
 
 ```text
-Parse common arguments + suite-specific arguments
-    -> suite.prepare
-    -> check case support
-    -> case.prepare
-    -> validate(function)
-    -> warmup
-    -> optional graph capture/replay + validate(captured_output)
-    -> benchmark timing
-    -> JSON / Markdown reports
+Prepare implementation → Check support and create inputs → Validate → Warmup
+                      → Optional graph capture/replay and output validation
+                      → Benchmark timing → JSON / Markdown
 ```
 
-`numerics/verify.py` manages preparation, status, and the reporting lifecycle. It
-does not interpret tensor roles or choose an operator's reference.
-`numerics/report.py` and `benchmark/report.py` use generic titles and record the
-operation per row, without inferring operator types from names or reading an
-operator's shape fields. JSON and Markdown reports include implementation,
-environment, coverage, validation results, and failure reasons.
+Time only cases that pass validation. Record reasons for inapplicable cases and
+propagate execution or graph errors. Zero passing cases cannot produce a successful
+report.
 
-Failures must remain visible: record reasons for inapplicable cases; do not time
-numerical failures; report and raise capture/replay failures. A run with no
-passing cases cannot produce a successful report. Device execution errors must
-not trigger eager or solution fallback followed by accepted performance results.
+| Mode | Execution and timing |
+| --- | --- |
+| Eager | Call the implementation repeatedly; report host enqueue time, device-event intervals, and synchronized wall time |
+| ACLGraph | Capture and replay, validating graph output first; benchmarks capture 64 calls per graph by default, or 1 with `reset` |
 
-The current timer supports NPU eager and ACLGraph execution. It reports host
-enqueue time, NPU event intervals, and synchronized wall time. Each graph benchmark
-capture contains 64 independent calls, and replay timings are normalized per
-operator call. Cases must therefore be safe to invoke
-repeatedly, with reusable input state during timing. For new operators that
-mutate inputs, consume state, or depend on randomness, first design explicit
-reset behavior and timing boundaries, then extend the common case interface.
-Do not apply the current loop unchanged.
+- Preparation, warmup, and capture are excluded from steady-state timing;
+  the numerical CLI captures only one call per graph.
+- Run `reset` outside device-event and host enqueue intervals. The mutating path's
+  wall time includes its cost.
+- Reports record implementation, environment, coverage, and validation results;
+  performance reports also include raw timing samples. Record `solution`, `variant`,
+  and `binding` separately.
+- Launch `--distributed` with torchrun and at least two NPU ranks. Write reports per
+  rank and aggregate validation consensus and maximum timing samples across ranks.
 
-Preparation, warmup, and capture are excluded from steady-state timing. Keep
-inputs, cases, devices, execution modes, and timing settings consistent. Report
-raw samples and dispersion, and record resource occupancy. Eager device-event
-intervals include host submission gaps and do not directly measure the pure
-device execution time of one kernel. Inputs are reused with a hot-cache policy;
-monitor other work throughout timing and use repeated baseline/candidate/baseline
-runs to expose drift. Distinguish operator-level performance from end-to-end
-results.
+Keep inputs and configuration consistent for performance comparisons, record device
+occupancy, and use baseline/candidate/baseline runs to check drift.
+Eager event intervals include host submission gaps. Report operator-level and
+end-to-end performance separately.
 
 ## 6. Tests and validation
 
-Run these commands from the repository root after installing the package and
-the dependencies of the implementation being tested.
+Run the following commands from the repository root after installing the package.
+Device execution also requires the dependencies of the implementation being tested
+and an idle NPU.
 
 ### 6.1 Standalone numerical validation and benchmarks
 
-The native suite calls torch_npu directly, and the xlite suite loads its optional
-bridge; neither imports the xLLM host or requires a server. Both CLIs provide
-`--help` without loading Torch or a device SDK. Use `--operation NAME --help` for
-suite-specific options. For example:
+```bash
+python -m xllm_kernel.numerics --help
+python -m xllm_kernel.benchmark --help
+```
+
+The suite catalog is empty by default, so operation-specific commands are not yet
+available. First register a custom suite as described in section 4. The following
+templates assume it declares `my_operation` and `npu.my_solution.my_operation`;
+replace those names and add any arguments required by your suite:
 
 ```bash
-python -m xllm_kernel.numerics --operation rms_norm --device npu --mode eager \
-  --implementation npu.xllm_native.rms_norm --rows 1 16 --widths 6144 \
+python -m xllm_kernel.numerics --operation my_operation --help
+python -m xllm_kernel.benchmark --operation my_operation --help
+
+python -m xllm_kernel.numerics --operation my_operation --device npu --mode eager \
+  --implementation npu.my_solution.my_operation \
   --revision "$(git rev-parse HEAD)" --output numerics.json
-python -m xllm_kernel.benchmark --operation rms_norm --device npu --mode aclgraph \
-  --implementation npu.xllm_native.rms_norm --rows 1 16 --widths 6144 \
+python -m xllm_kernel.benchmark --operation my_operation --device npu --mode aclgraph \
+  --implementation npu.my_solution.my_operation \
   --iterations 50 --revision "$(git rev-parse HEAD)" --output benchmark.json
 ```
 
-Use `npu.xlite.rms_norm` for the xlite bridge. Omitting the shape and dtype
-options uses the RMSNorm suite's default matrix: BF16/FP16, rows 1/16/128/4096,
-and widths 512/2048/6144. Inputs are generated deterministically on the CPU and
-checked against an FP32 CPU reference. Additional operators supply their own
-parameters and reference through the same interfaces.
+Each registered suite defines its operator's arguments and defaults. Use
+`--operation NAME --help` only after registering that suite.
 
-Only numerically passing cases are timed; ACLGraph timings additionally require
-captured-output validation. Zero passing cases or failed validation cannot yield
-a successful report. Follow section 5's timing and resource controls when
-comparing implementations.
+### 6.2 Package tests
 
-### 6.2 Package and host-integration tests
-
-Package tests run independently through pytest. They are not wired into the
-host's `tests/CMakeLists.txt`, CTest, or `all_tests`. Common tests require the
-package, PyTorch, pytest, and setuptools, but no NPU or host extension:
+Package tests run independently through pytest. They are not wired into the host's
+`tests/CMakeLists.txt`, CTest, or `all_tests`. Common tests require the package,
+PyTorch, pytest, and setuptools:
 
 ```bash
 python -m pytest -q xllm-kernel/test --ignore=xllm-kernel/test/npu
 ```
-
-NPU integration tests require matching host and backend build artifacts. Run
-the backends sequentially in separate processes on idle devices:
-
-```bash
-XLLM_KERNEL_OVERRIDE_RMS_NORM=npu.xllm_native.rms_norm \
-  python -m pytest -q xllm-kernel/test/npu/test_kernel_rms_norm_npu.py
-XLLM_KERNEL_OVERRIDE_RMS_NORM=npu.xlite.rms_norm \
-  python -m pytest -q xllm-kernel/test/npu/test_kernel_xlite_rms_norm_npu.py
-```
-
-The device fixture in `test/npu/conftest.py` loads the host and initializes
-Python kernels; pytest does not build them. Native tests compare the torch_npu
-adapter against the host and use a subprocess to check execution and FakeTensor
-behavior without a host or native package extension. A process keeps its original
-binding, so native and xlite use separate processes. Direct pytest does not
-acquire CTest resource locks; ensure devices are idle separately. Device-guard
-tests require two visible NPUs. Use the standalone CLIs above when host artifacts
-are not part of the validation scope.
-
-### 6.3 Validation order and evidence
-
-Validate a new operator in this order, with coverage determined by its contract:
-
-1. SDK-free imports, registration/preparation, independent installation, and
-   CLI arguments.
-2. CPU references, tolerances, incorrect outputs, nonfinite values, and
-   mutation/alias detection.
-3. Real-device dtypes, shapes, layouts, strides, empty inputs, boundaries, and
-   invalid arguments.
-4. Non-default streams, device guards, asynchronous object lifetimes, repeated
-   calls, and memory stability.
-5. Eager/ACLGraph output agreement and interleaved replay after input changes.
-6. Operator performance comparisons on exclusive devices, followed by
-   integration validation for the intended model paths.
-
-CPU test doubles and FakeTensor establish only the corresponding logical
-behavior. They are not evidence of NPU accuracy or performance.
-
-## 7. Delivery checklist
-
-For a new operator, define its contract and public API first, implement and
-register its backends, connect the `OPERATION` and runtime catalog, then provide
-its offline suite and tests before integrating model call sites. For another
-solution of the same contract, reuse the public API and operation definition;
-extend its backend list, suite implementation list, supported cases, and device
-tests. Shared initialization handles the selection without a new host branch.
-
-- Keep the contract, real argument checks, fake checks, suite domain, and
-  operator documentation consistent.
-- Do not add branches for the new operator's name, shapes, input roles, or
-  tolerances to shared runners, reports, or the registry.
-- Keep suite imports free of device dependencies. Reject unknown
-  implementations and mismatched operations before execution preparation.
-- Connect a new solution through its operation's backend declarations, offline
-  suite, and device tests; preserve current-stream and resource-lifetime rules.
-- Keep unit tests under the independent package's `test/`; do not modify host
-  test targets to run them automatically.
-- Check formatting, wheel contents, CLI examples, and reports. Distinguish
-  source checks, CPU tests, builds, NPU tests, and model evidence in the change
-  description.
-- Before adding JIT, state reset, multiple devices, or a new platform, define
-  explicit interfaces and lifecycles, then add implementations.

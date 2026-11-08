@@ -12,6 +12,8 @@ sidebar:
 python setup.py install
 ```
 
+模型路径可以直接放在 `serve` 后，例如 `xllm serve /path/to/model`。原有的 `--model=/path/to/model` 和 `--model /path/to/model` 写法仍然支持；不要同时使用位置参数和 `--model` 指定模型。
+
 单机部署时，将 `NNODES` 设置为所选设备的数量（一张卡对应一个 node）。以下脚本适用于单机单卡和单机多卡：
 
 ```bash
@@ -23,7 +25,7 @@ PORT=8010
 MASTER_NODE_ADDR="127.0.0.1:9748"
 NNODES=1
 
-xllm serve --model=$MODEL_PATH \
+xllm serve "$MODEL_PATH" \
        --port=$PORT \
        --nnodes=$NNODES \
        --master_node_addr=$MASTER_NODE_ADDR \

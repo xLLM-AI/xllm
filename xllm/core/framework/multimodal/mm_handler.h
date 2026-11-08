@@ -41,7 +41,7 @@ class MMHandlerBase {
                          MMInputItem& input,
                          MMPayload& payload) = 0;
 
-  virtual MMErrCode decode(MMInputItem& input) = 0;
+  virtual MMErrCode decode(const MMContent& content, MMInputItem& input) = 0;
 
  protected:
   MMErrCode load_from_dataurl(const std::string& url,
@@ -67,7 +67,7 @@ class ImageHandler : public MMHandlerBase {
   MMErrCode load(const MMContent& content,
                  MMInputItem& input,
                  MMPayload& payload) override;
-  MMErrCode decode(MMInputItem& input) override;
+  MMErrCode decode(const MMContent& content, MMInputItem& input) override;
 
  private:
   std::string dataurl_prefix_{"data:image"};
@@ -81,7 +81,7 @@ class VideoHandler : public MMHandlerBase {
   MMErrCode load(const MMContent& content,
                  MMInputItem& input,
                  MMPayload& payload) override;
-  MMErrCode decode(MMInputItem& input) override;
+  MMErrCode decode(const MMContent& content, MMInputItem& input) override;
 
  private:
   std::string dataurl_prefix_{"data:video"};
@@ -95,7 +95,7 @@ class AudioHandler : public MMHandlerBase {
   MMErrCode load(const MMContent& content,
                  MMInputItem& input,
                  MMPayload& payload) override;
-  MMErrCode decode(MMInputItem& input) override;
+  MMErrCode decode(const MMContent& content, MMInputItem& input) override;
 
  private:
   std::string dataurl_prefix_{"data:audio"};

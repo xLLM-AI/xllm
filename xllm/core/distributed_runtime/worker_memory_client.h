@@ -1,0 +1,137 @@
+/* Copyright 2025-2026 The xLLM Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://github.com/xLLM-AI/xllm/blob/main/LICENSE
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
+#pragma once
+
+#include <brpc/channel.h>
+#include <folly/futures/Future.h>
+#include <torch/types.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "core/common/macros.h"
+#include "core/common/types.h"
+#include "core/framework/allocator/virtual_memory/mapped_virtual_memory_region.h"  // For offset_t type definition
+#include "core/util/threadpool.h"
+#include "model_memory_dist.pb.h"
+
+namespace xllm {
+
+// Memory info returned by GetMemoryInfo RPC
+struct MemoryInfo {
+  int64_t available_memory = 0;  // Available memory in bytes
+  int64_t total_memory = 0;      // Total memory in bytes
+  bool pool_initialized = false;
+  size_t pool_capacity_pages = 0;
+  size_t pool_committed_pages = 0;
+  size_t pool_allocatable_pages = 0;
+  size_t execution_memory_reserve_bytes = 0;
+  size_t pool_active_pages = 0;
+  size_t growth_memory_reserve_bytes = 0;
+};
+
+// Sends memory resource commands to a worker via brpc.
+class WorkerMemoryClient final {
+ public:
+  explicit WorkerMemoryClient(int32_t global_rank,
+                              const std::string& server_address,
+                              const torch::Device& device);
+  ~WorkerMemoryClient() = default;
+
+  // Wait for server to be ready
+  bool wait_for_server_ready(const std::string& server_address);
+
+  // Get memory info from remote worker (available/total memory)
+  folly::SemiFuture<MemoryInfo> get_memory_info_async(
+      int32_t timeout_ms = 1000);
+
+  // Initialize PhysicalPagePool on remote worker with specified number of pages
+  folly::SemiFuture<bool> init_physical_page_pool_async(int64_t num_pages,
+                                                        bool lazy = true);
+  folly::SemiFuture<bool> init_physical_page_pool_async(
+      int64_t max_pages,
+      int64_t initial_pages,
+      bool lazy,
+      size_t growth_memory_reserve_bytes);
+
+  folly::SemiFuture<bool> prepare_kv_mapping_async(
+      uint64_t transaction_id,
+      const std::string& model_id,
+      const std::vector<offset_t>& offsets);
+  folly::SemiFuture<bool> commit_kv_mapping_async(uint64_t transaction_id);
+  folly::SemiFuture<bool> abort_kv_mapping_async(uint64_t transaction_id);
+  folly::SemiFuture<bool> prepare_weight_pages_async(
+      uint64_t transaction_id,
+      const std::string& model_id,
+      size_t num_pages);
+  folly::SemiFuture<bool> commit_weight_pages_async(uint64_t transaction_id);
+  folly::SemiFuture<bool> abort_weight_pages_async(uint64_t transaction_id);
+
+  // KV tensor operations (partial mapping by offsets)
+  folly::SemiFuture<bool> map_to_kv_tensors_async(
+      const std::string& model_id,
+      const std::vector<offset_t>& offsets);
+  folly::SemiFuture<bool> unmap_from_kv_tensors_async(
+      const std::string& model_id,
+      const std::vector<offset_t>& offsets);
+
+  // Allocate weight pages from the worker's GlobalVirtualMemoryRegion.
+  folly::SemiFuture<bool> alloc_weight_pages_async(const std::string& model_id,
+                                                   size_t num_pages);
+  folly::SemiFuture<bool> free_weight_pages_async(const std::string& model_id);
+
+  // Get virtual-memory KV block byte offsets in the shared physical-page pool
+  // mapping for PD disaggregation. Returns an empty vector on error.
+  // Result vectors retain the requested block order within every layer.
+  // Waits through brpc::Join so callers running in bthreads yield the worker.
+  std::vector<VirtualKVCacheLayerGlobalOffsets> get_virtual_kv_cache_offsets(
+      const std::string& model_id,
+      const std::vector<int32_t>& block_ids);
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(WorkerMemoryClient);
+  using TransactionRpc =
+      decltype(&proto::ModelMemoryDist_Stub::CommitKvMapping);
+  folly::SemiFuture<bool> finish_transaction_async(uint64_t transaction_id,
+                                                   TransactionRpc rpc);
+
+ private:
+  int32_t global_rank_;
+  torch::Device device_;
+  const int32_t transaction_timeout_ms_;
+
+  // brpc connection resources
+  brpc::Channel channel_;
+  brpc::ChannelOptions options_;
+  std::unique_ptr<proto::ModelMemoryDist_Stub> stub_;
+
+  // Thread pool for async operations
+  ThreadPool threadpool_{/*num_threads=*/1,
+                         /*cpu_binding=*/false,
+                         /*pool_name=*/"WorkerMemoryClient.async"};
+
+  // Capacity probes must not wait behind mutation RPCs.
+  ThreadPool capacity_query_threadpool_{
+      /*num_threads=*/1,
+      /*cpu_binding=*/false,
+      /*pool_name=*/"WorkerMemoryClient.capacity"};
+};
+
+}  // namespace xllm

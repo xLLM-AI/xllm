@@ -636,8 +636,7 @@ class JoyImageEditPlusPipelineImpl : public torch::nn::Module,
       item.decode_image = std::move(image);
       input_items.emplace_back(std::move(item));
     }
-    MMInput multimodal_input;
-    multimodal_input.insert(input_items);
+    MMInput multimodal_input(std::move(input_items));
     MMData mm_data;
     CHECK(multimodal_processor_->process_multimodal(multimodal_input, mm_data))
         << "JoyImageEditPlus Qwen3-VL image preprocessing failed";

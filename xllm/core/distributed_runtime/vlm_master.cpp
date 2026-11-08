@@ -290,7 +290,8 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
   kv_transfer_coordinator_ = std::make_shared<KVCacheTransferCoordinator>(
       KVCacheTransferCoordinator::Options{
           .dp_size = options_.dp_size(),
-          .prefetch_timeout_ms = options_.prefetch_timeout()},
+          .prefetch_timeout_ms = options_.prefetch_timeout(),
+          .prefetch_batch_size = options_.prefetch_batch_size()},
       dispatch_engine(
           [](auto* engine) { return engine->get_distributed_worker_manager(); },
           vlm_engine_.get(),
@@ -387,8 +388,10 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
                                                          &options_,
                                                          get_rate_limiter());
 
+  Tokenizer* request_tokenizer = tokenizer_.get();
   threadpool_ = std::make_unique<ThreadPool>(
       /*num_threads=*/options_.num_request_handling_threads(),
+      [request_tokenizer]() { request_tokenizer->warmup(); },
       /*cpu_binding=*/false,
       /*pool_name=*/"VLMMaster.request");
 }
@@ -419,8 +422,7 @@ void VLMMaster::handle_request(std::string prompt,
                                OutputCallback callback) {
   const auto arrival_time = std::chrono::steady_clock::now();
   scheduler_->incr_pending_requests(1);
-  auto cb = [callback = std::move(callback),
-             scheduler = scheduler_.get()](const RequestOutput& output) {
+  auto cb = [callback = std::move(callback)](const RequestOutput& output) {
     output.log_request_status();
     return callback(output);
   };
@@ -457,15 +459,16 @@ void VLMMaster::handle_request(std::string prompt,
     }
 
     if (!scheduler_->add_request(request)) {
-      CALLBACK_WITH_ERROR(StatusCode::RESOURCE_EXHAUSTED,
-                          "No available resources to schedule request");
+      request->state().output_func(
+          Status{StatusCode::RESOURCE_EXHAUSTED,
+                 "No available resources to schedule request"});
     }
   });
 }
 
 void VLMMaster::handle_request(std::vector<Message> messages,
                                RequestParams sp,
-                               std::string payload,
+                               MMInput mm_input,
                                OutputCallback callback,
                                bool use_prompt_as_is) {
   const auto arrival_time = std::chrono::steady_clock::now();
@@ -476,8 +479,7 @@ void VLMMaster::handle_request(std::vector<Message> messages,
   }
 
   scheduler_->incr_pending_requests(1);
-  auto cb = [callback = std::move(callback),
-             scheduler = scheduler_.get()](const RequestOutput& output) {
+  auto cb = [callback = std::move(callback)](const RequestOutput& output) {
     output.log_request_status();
     return callback(output);
   };
@@ -485,7 +487,7 @@ void VLMMaster::handle_request(std::vector<Message> messages,
   threadpool_->schedule([this,
                          messages = std::move(messages),
                          sp = std::move(sp),
-                         payload = std::move(payload),
+                         mm_input = std::move(mm_input),
                          use_prompt_as_is,
                          arrival_time,
                          callback = std::move(cb)]() mutable {
@@ -506,7 +508,7 @@ void VLMMaster::handle_request(std::vector<Message> messages,
     rate_limit_guard.dismiss();
     auto request = request_factory_->create(std::move(messages),
                                             sp,
-                                            std::move(payload),
+                                            std::move(mm_input),
                                             std::move(callback),
                                             use_prompt_as_is,
                                             arrival_time);
@@ -515,8 +517,9 @@ void VLMMaster::handle_request(std::vector<Message> messages,
     }
 
     if (!scheduler_->add_request(request)) {
-      CALLBACK_WITH_ERROR(StatusCode::RESOURCE_EXHAUSTED,
-                          "No available resources to schedule request");
+      request->state().output_func(
+          Status{StatusCode::RESOURCE_EXHAUSTED,
+                 "No available resources to schedule request"});
     }
   });
 }
@@ -564,7 +567,6 @@ void VLMMaster::handle_batch_request_with_image_urls(
         std::move(prompts[i]), image_urls[i]));
   }
 
-  std::string payload;
   for (size_t i = 0; i < num_requests; ++i) {
     // Offline vLLM-style requests hand in a final prompt. The text-only
     // offline path never applies the chat template either, so use the
@@ -574,7 +576,7 @@ void VLMMaster::handle_batch_request_with_image_urls(
         std::move(conversations[i]),
         // the sampling parameter may be shared
         sps.size() == 1 ? sps[0] : std::move(sps[i]),
-        std::move(payload),
+        MMInput{},
         [i, callback](const RequestOutput& output) {
           output.log_request_status();
           return callback(i, output);
@@ -590,13 +592,12 @@ void VLMMaster::handle_batch_request(
   CHECK(conversations.size() == sps.size() || sps.size() == 1)
       << "Number of conversations and sampling parameters should be the same";
 
-  std::string payload;
   const size_t num_requests = conversations.size();
   for (size_t i = 0; i < num_requests; ++i) {
     handle_request(std::move(conversations[i]),
                    // the sampling parameter may be shared
                    sps.size() == 1 ? sps[0] : std::move(sps[i]),
-                   std::move(payload),
+                   MMInput{},
                    [i, callback](const RequestOutput& output) {
                      output.log_request_status();
                      return callback(i, output);

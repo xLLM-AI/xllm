@@ -287,7 +287,7 @@ def _update_mtp_dsa_topk_config(
         "index_topk_freq": max(index_topk_freq, 2),
         "index_skip_topk_offset": 0,
         "index_topk_pattern": "S",
-        "indexer_types": ["full"],
+        "indexer_types": ["shared"],
     }
     for key, value in mtp_topk_updates.items():
         if key in config:

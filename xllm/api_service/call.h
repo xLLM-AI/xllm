@@ -52,6 +52,10 @@ class Call {
   }
   void init_request_payload();
 
+  void set_request_payload(butil::IOBuf&& payload) {
+    request_payload_ = payload.movable();
+  }
+
   virtual bool is_disconnected() const = 0;
 
  protected:

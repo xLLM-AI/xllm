@@ -76,15 +76,14 @@ limitations under the License.
 #if defined(USE_CUDA)
 #include "platform/cuda_profiler.h"
 #endif
-#include "core/distributed_runtime/master.h"
 #include "core/framework/allocator/global_virtual_memory_region.h"
 #include "core/framework/allocator/virtual_memory/physical_page_pool.h"
 #include "core/framework/model_loader/model_loader.h"
 #include "core/framework/speculative/draft_config.h"
 #include "core/framework/speculative/mtp_utils.h"
 #include "core/kv_cache/layout/layerwise_split_layout.h"
-#include "core/kv_cache/linear_state_restore.h"
 #include "core/kv_cache/storage/kv_cache.h"
+#include "core/kv_cache/storage/linear_state_restore.h"
 #include "core/kv_cache/storage/vmm_kv_tensor_allocator.h"
 #include "core/kv_cache/transfer/virtual_kv_cache_transfer_memory_provider_impl.h"
 #include "core/runtime/decode_graph_bucket.h"
@@ -424,6 +423,7 @@ WorkerImpl::WorkerImpl(const ParallelArgs& parallel_args,
                         EPLBConfig::get_instance().enable_eplb(),
                         /*retire_unconsumed_inputs=*/
                         options.enable_task_pipeline() ||
+                            options.enable_schedule_overlap() ||
                             (options.enable_speculative_decode() &&
                              parallel_args.dp_size() > 1)),
       device_(device),
@@ -1036,16 +1036,21 @@ void WorkerImpl::prepare_schedule_overlap(const VlmForwardInput& input) {
 
 template <typename Input>
 std::optional<ForwardOutput> WorkerImpl::step_for_schedule_overlap_impl(
-    const Input& input) {
+    const Input& input,
+    const std::function<void()>& prepare_sampling) {
   prepare_schedule_overlap(input);
   // Composite workers own their phase dispatch in step(). Leaf workers
   // override this method when they can expose a no-sync forward boundary.
+  if (prepare_sampling) {
+    prepare_sampling();
+  }
   return step(input);
 }
 
 std::optional<ForwardOutput> WorkerImpl::step_for_schedule_overlap(
-    const LlmForwardInput& input) {
-  return step_for_schedule_overlap_impl(input);
+    const LlmForwardInput& input,
+    const std::function<void()>& prepare_sampling) {
+  return step_for_schedule_overlap_impl(input, prepare_sampling);
 }
 
 bool WorkerImpl::model_supports_model_cp() const {
@@ -1256,7 +1261,8 @@ folly::SemiFuture<std::optional<ForwardOutput>> WorkerImpl::step_async(
 std::optional<ForwardOutput> WorkerImpl::execute_no_sync_on_stream(
     const LlmForwardInput& /*input*/,
     Stream& /*compute_stream*/,
-    ForwardCompletion /*completion*/) {
+    ForwardCompletion /*completion*/,
+    const std::function<void()>& /*prepare_sampling*/) {
   LOG(FATAL) << "execute_no_sync_on_stream is not supported by this worker";
   return std::nullopt;
 }
@@ -1759,6 +1765,11 @@ std::optional<ForwardOutput> WorkerImpl::execute_task_pipeline(
     return schedule_overlap_.execute(*this, prepared);
   }
   return step(prepared);
+}
+
+StreamEventPtr WorkerImpl::record_task_pipeline_completion() const {
+  CHECK(compute_stream_ != nullptr);
+  return compute_stream_->record_event_or_sync();
 }
 
 ForwardOutput WorkerImpl::get_last_step_result() {
@@ -2602,6 +2613,11 @@ uint32_t WorkerImpl::transfer_kv_blocks(
   return 0;
 }
 
+bool WorkerImpl::wait_for_kv_blocks_transfer(uint64_t batch_id) {
+  return hierarchy_kv_cache_transfer_ != nullptr &&
+         hierarchy_kv_cache_transfer_->wait_for_load(batch_id);
+}
+
 uint32_t WorkerImpl::transfer_kv_blocks(
     const uint64_t batch_id,
     Slice<BlockTransferInfo>& block_transfer_info) {
@@ -2636,18 +2652,18 @@ WorkerImpl::create_hierarchy_kv_cache_transfer(
   const int32_t kv_split_size = parallel_args.kv_split_size_effective();
   CHECK_GT(kv_split_size, 0);
   CHECK_EQ(dp_local_size % kv_split_size, 0U);
+  const uint32_t dp_local_rank = worker_id % dp_local_size;
   // Pure DCP interleaves shards; PCP groups each shard's replicas contiguously.
-  const bool store_write_enabled =
-      !options_.enable_mla() ||
-      (options_.cp_size() == 1
-           ? worker_id % dp_local_size < static_cast<uint32_t>(kv_split_size)
-           : worker_id % (dp_local_size / kv_split_size) == 0);
+  const uint32_t kv_replica_rank =
+      options_.cp_size() == 1 ? dp_local_rank / kv_split_size
+                              : dp_local_rank % (dp_local_size / kv_split_size);
   HierarchyKVCacheTransfer::Options transfer_options;
   transfer_options.tp_rank(worker_id % tp_size)
       .tp_size(tp_size)
       .kv_split_size(kv_split_size)
       .kv_split_rank(parallel_args.kv_split_rank())
-      .store_write_enabled(store_write_enabled)
+      .dp_local_rank(dp_local_rank)
+      .kv_replica_rank(kv_replica_rank)
       .layers(context_.get_model_args().n_layers())
       .host_blocks_factor(options_.host_blocks_factor())
       .layers_wise_copy_batchs(options_.layers_wise_copy_batchs())
@@ -2688,6 +2704,7 @@ void WorkerImpl::register_hierarchy_kv_cache(
 
   HierarchyKVCacheTransfer::CacheRegistration registration;
   registration.role = role;
+  registration.enable_mla = context_.get_model_args().enable_mla();
   registration.device_kv_caches = &kv_caches_;
   registration.kv_cache_shape =
       hierarchy_kv_cache_transfer_context_->kv_cache_shape;
@@ -2937,14 +2954,16 @@ std::optional<ForwardOutput> WorkerImpl::step(
 std::optional<ForwardOutput> WorkerImpl::execute_no_sync_on_stream(
     const VlmForwardInput& /*input*/,
     Stream& /*compute_stream*/,
-    ForwardCompletion /*completion*/) {
+    ForwardCompletion /*completion*/,
+    const std::function<void()>& /*prepare_sampling*/) {
   LOG(FATAL) << "execute_no_sync_on_stream is not supported by this worker";
   return std::nullopt;
 }
 
 std::optional<ForwardOutput> WorkerImpl::step_for_schedule_overlap(
-    const VlmForwardInput& input) {
-  return step_for_schedule_overlap_impl(input);
+    const VlmForwardInput& input,
+    const std::function<void()>& prepare_sampling) {
+  return step_for_schedule_overlap_impl(input, prepare_sampling);
 }
 
 void WorkerImpl::set_hierarchy_layer_synchronizer(

@@ -38,10 +38,10 @@ namespace py = pybind11;
 #include "core/common/native_library.h"
 #include "core/common/options.h"
 #include "core/common/types.h"
-#include "core/distributed_runtime/distributed_virtual_memory_coordinator.h"
+#include "core/distributed_runtime/distributed_vmm_coordinator.h"
 #include "core/distributed_runtime/master.h"
 #include "core/distributed_runtime/master_factory.h"
-#include "core/distributed_runtime/worker_memory_rpc_options.h"
+#include "core/distributed_runtime/worker_memory_options.h"
 #include "core/framework/allocator/global_virtual_memory_region.h"
 #include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/config_utils.h"
@@ -488,17 +488,16 @@ int run() {
     const auto devices = DeviceNameUtils::parse_devices("auto");
 
     WorkerMemoryResources::get_instance().init(devices[0]);
-    auto& memory_coordinator =
-        DistributedVirtualMemoryCoordinator::get_instance();
+    auto& memory_coordinator = DistributedVmmCoordinator::get_instance();
 
     // Setup distributed VirtualMemory service for multi-GPU/multi-node
     if (distributed_config.nnodes() > 1) {
-      WorkerMemoryRpcOptions worker_memory_rpc_options;
-      worker_memory_rpc_options.devices(devices)
+      WorkerMemoryOptions worker_memory_options;
+      worker_memory_options.devices(devices)
           .nnodes(distributed_config.nnodes())
           .node_rank(distributed_config.node_rank());
       memory_coordinator.setup_worker_memory_rpc(
-          worker_memory_rpc_options,
+          worker_memory_options,
           distributed_config.worker_memory_master_node_addr(),
           parallel_config.dp_size());
     }
@@ -508,8 +507,7 @@ int run() {
     if (load_config.enable_vmm_weights()) {
       const int64_t num_pages = memory_coordinator.init_physical_page_pools(
           kv_cache_config.max_memory_utilization(),
-          kv_cache_config.max_cache_size(),
-          kv_cache_config.max_memory_utilization_configured());
+          kv_cache_config.max_cache_size());
       CHECK_GT(num_pages, 0) << "Failed to initialize PhysicalPagePool";
       LOG(INFO) << "VirtualMemory initialized with " << num_pages
                 << " physical pages";

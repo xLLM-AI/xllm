@@ -149,7 +149,7 @@ MMErrCode MMEmbeddingHandler::load(const MMContent& content,
   return MMErrCode::SUCCESS;
 }
 
-MMErrCode MMEmbeddingHandler::decode(MMInputItem& input) {
+MMErrCode MMEmbeddingHandler::decode(const MMContent&, MMInputItem& input) {
   return MMErrCode::SUCCESS;
 }
 

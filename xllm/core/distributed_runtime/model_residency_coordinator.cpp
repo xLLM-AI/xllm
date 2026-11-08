@@ -22,7 +22,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "core/distributed_runtime/distributed_virtual_memory_coordinator.h"
+#include "core/distributed_runtime/distributed_vmm_coordinator.h"
 #include "core/distributed_runtime/distributed_worker_manager.h"
 #include "core/framework/allocator/virtual_memory/physical_page_pool.h"
 #include "core/framework/config/kv_cache_config.h"
@@ -145,7 +145,7 @@ bool ModelResidencyCoordinator::initialize_model(
   CHECK_GT(num_layers, 0);
   CHECK_GT(dp_size, 0);
   CHECK_GT(tp_size, 0);
-  auto& coordinator = DistributedVirtualMemoryCoordinator::get_instance();
+  auto& coordinator = DistributedVmmCoordinator::get_instance();
   if (!coordinator.is_initialized()) {
     auto& phy_pool = PhysicalPagePool::get_instance();
     CHECK(phy_pool.is_initialized())
@@ -236,7 +236,7 @@ void ModelResidencyCoordinator::get_virtual_memory_info(
     return;
   }
 
-  auto& coordinator = DistributedVirtualMemoryCoordinator::get_instance();
+  auto& coordinator = DistributedVmmCoordinator::get_instance();
   if (coordinator.is_initialized()) {
     worker_free_phy_pages = coordinator.get_worker_free_page_counts();
   }
@@ -334,7 +334,7 @@ bool ModelResidencyCoordinator::wakeup(const WakeupOptions& options) {
             << ". Worker clients count: " << worker_clients.size();
 
   // Restore weight and KV cache pages before workers load or transfer weights.
-  auto& coordinator = DistributedVirtualMemoryCoordinator::get_instance();
+  auto& coordinator = DistributedVmmCoordinator::get_instance();
   auto& pages = coordinator.vmm_kv_page_allocator();
   if (!pending_wakeup_.has_value()) {
     const auto plan = pages.begin_resume(options_.model_id);
@@ -432,7 +432,7 @@ bool ModelResidencyCoordinator::is_suspended() const {
   if (!options_.enabled || !LoadConfig::get_instance().enable_vmm_weights()) {
     return false;
   }
-  auto& coordinator = DistributedVirtualMemoryCoordinator::get_instance();
+  auto& coordinator = DistributedVmmCoordinator::get_instance();
   return coordinator.is_initialized() &&
          coordinator.vmm_kv_page_allocator().is_suspended(options_.model_id);
 }
@@ -475,7 +475,7 @@ bool ModelResidencyCoordinator::finish_worker_sleep() {
 }
 
 bool ModelResidencyCoordinator::suspend_memory(bool skip_weight_release) {
-  auto& coordinator = DistributedVirtualMemoryCoordinator::get_instance();
+  auto& coordinator = DistributedVmmCoordinator::get_instance();
   auto& pages = coordinator.vmm_kv_page_allocator();
   const auto plan = pages.begin_suspend(options_.model_id);
   if (!plan.has_value()) {

@@ -20,6 +20,7 @@ limitations under the License.
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 
 #include "common/global_flags.h"
 #include "core/distributed_runtime/worker_model_codec.h"
@@ -213,24 +214,6 @@ bool CommChannel::unlink_p2p(const std::string& remote_addr) {
   return true;
 }
 
-bool CommChannel::init_model(const std::string& model_weights_path,
-                             int32_t random_seed,
-                             MasterStatus master_status) {
-  proto::InitModelRequest request;
-
-  request.set_model_weights_path(model_weights_path);
-  request.set_random_seed(random_seed);
-  request.set_master_status(master_status.to_proto());
-  proto::Status response;
-  brpc::Controller cntl;
-  stub_->InitModel(&cntl, &request, &response, nullptr);
-  if (cntl.Failed() || !response.ok()) {
-    LOG(ERROR) << "init_model failed: " << cntl.ErrorText();
-    return false;
-  }
-  return true;
-}
-
 bool CommChannel::init_model_async(const std::string& model_weights_path,
                                    int32_t random_seed,
                                    folly::Promise<bool>& promise,
@@ -362,6 +345,20 @@ void CommChannel::transfer_kv_blocks(
       << batch_id;
 }
 
+bool CommChannel::wait_for_kv_blocks_transfer(uint64_t batch_id) {
+  proto::WaitForKVBlocksTransferRequest request;
+  request.set_batch_id(batch_id);
+  proto::Status response;
+  brpc::Controller controller;
+  stub_->WaitForKVBlocksTransfer(&controller, &request, &response, nullptr);
+  if (controller.Failed() || !response.ok()) {
+    LOG(ERROR) << "Host KV restore completion RPC failed for batch_id="
+               << batch_id << ": " << controller.ErrorText();
+    return false;
+  }
+  return true;
+}
+
 bool CommChannel::sleep(MasterStatus master_status, uint64_t transition_id) {
   proto::SleepRequest req;
   proto::Status s;
@@ -434,12 +431,15 @@ bool CommChannel::stop_profile() {
 class ClientStreamReceiver final : public brpc::StreamInputHandler {
  private:
   std::shared_ptr<PrefetchResult> result_;
+  std::vector<uint8_t> gated_hits_;
+  std::vector<uint8_t> non_gated_hits_;
   size_t worker_index_ = 0;
   bool stop_sent_ = false;
   bool failed_ = false;
 
   void fail_and_close(brpc::StreamId id) {
     failed_ = true;
+    result_->mark_worker_failed();
     brpc::StreamClose(id);
   }
 
@@ -463,28 +463,35 @@ class ClientStreamReceiver final : public brpc::StreamInputHandler {
       : result_(std::move(result)), worker_index_(worker_index) {
     CHECK(result_ != nullptr);
     CHECK_LT(worker_index_, result_->worker_count());
+    gated_hits_.resize(result_->batch_wire_size());
+    non_gated_hits_.resize(result_->batch_wire_size());
   }
 
   int on_received_messages(brpc::StreamId id,
                            butil::IOBuf* const messages[],
                            size_t size) override {
-    if (size != 1 || messages[0]->length() != 1) {
-      LOG(ERROR) << "Invalid Mooncake prefetch result frame: worker="
-                 << worker_index_ << ", messages=" << size;
+    if (stop_sent_) {
       fail_and_close(id);
       return -1;
     }
-    if (stop_sent_) {
-      LOG(ERROR) << "Mooncake prefetch continued after stop: worker="
-                 << worker_index_;
+    const size_t batch_size = result_->batch_wire_size();
+    // The worker pads a short final batch to the configured batch size. The
+    // result object validates the configured size and ignores padding units.
+    const size_t expected_bytes = batch_size * 2;
+    if (size != 1 || messages[0]->length() != expected_bytes) {
+      LOG(ERROR) << "Invalid Mooncake prefetch result frame: worker="
+                 << worker_index_ << ", messages=" << size
+                 << ", bytes=" << (size == 1 ? messages[0]->length() : 0)
+                 << ", expected_bytes=" << expected_bytes;
       fail_and_close(id);
       return -1;
     }
 
-    uint8_t prefix_hit_units = 0;
-    messages[0]->copy_to(&prefix_hit_units, sizeof(prefix_hit_units));
-    const std::optional<PrefetchControl> control =
-        result_->record_batch_result(worker_index_, prefix_hit_units);
+    messages[0]->copy_to(gated_hits_.data(), gated_hits_.size());
+    messages[0]->copy_to(
+        non_gated_hits_.data(), non_gated_hits_.size(), gated_hits_.size());
+    const std::optional<PrefetchControl> control = result_->record_batch_result(
+        worker_index_, gated_hits_, non_gated_hits_);
     if (!control.has_value()) {
       LOG(ERROR) << "Unexpected Mooncake prefetch result: worker="
                  << worker_index_;
@@ -509,6 +516,7 @@ class ClientStreamReceiver final : public brpc::StreamInputHandler {
                  int /*error_code*/,
                  const std::string& /*error_text*/) override {
     failed_ = true;
+    result_->mark_worker_failed();
   }
 
   void on_closed(brpc::StreamId /*id*/) override {
@@ -524,7 +532,6 @@ void CommChannel::prefetch_from_storage(const StoragePrefetchRequest& request,
                                         std::shared_ptr<PrefetchResult> result,
                                         size_t worker_index) {
   CHECK(result != nullptr);
-  CHECK(request.valid());
   proto::PrefetchRequest proto_request;
   if (!request.to_proto(&proto_request)) {
     LOG(ERROR) << "Failed to serialize Mooncake prefetch request.";
@@ -532,6 +539,8 @@ void CommChannel::prefetch_from_storage(const StoragePrefetchRequest& request,
         worker_index, /*worker_ok=*/false, /*worker_quiescent=*/true);
     return;
   }
+
+  proto_request.set_batch_size(result->batch_wire_size());
 
   auto* receiver = new ClientStreamReceiver(result, worker_index);
   brpc::Controller cntl;
@@ -554,6 +563,7 @@ void CommChannel::prefetch_from_storage(const StoragePrefetchRequest& request,
   if (cntl.Failed() || !response.ok()) {
     LOG(ERROR) << "Failed to connect Mooncake prefetch stream: "
                << cntl.ErrorText();
+    result->mark_worker_failed();
     brpc::StreamClose(stream_id);
   }
 }
@@ -597,21 +607,6 @@ bool CommChannel::get_last_vlm_step_result_async(
     return false;
   }
   promise.setValue(std::move(output));
-  return true;
-}
-
-bool CommChannel::get_active_activation_memory(int64_t& memory) {
-  proto::Empty req;
-  proto::ActivationMemory mem;
-  brpc::Controller cntl;
-
-  stub_->GetActiveActivationMemory(&cntl, &req, &mem, nullptr);
-  if (cntl.Failed()) {
-    LOG(ERROR) << "GetActiveActivationMemory failed: " << cntl.ErrorText();
-    return false;
-  }
-
-  memory = mem.active_activation_memory();
   return true;
 }
 

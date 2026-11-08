@@ -176,17 +176,7 @@ SampleOutput sample(torch::Tensor& logits,
           ? torch::log_softmax(logits, /*dim=*/-1, torch::kFloat32)
           : torch::Tensor();
 
-  const torch::Tensor& effective_filter_mask =
-      filter_mask.defined() ? filter_mask : params.filter_mask();
-  apply_sampling_penalties(logits, params);
-
-  if (params.filter_bitmask().defined()) {
-    apply_token_bitmask_inplace(logits, params.filter_bitmask());
-  } else if (effective_filter_mask.defined()) {
-    CHECK_EQ(effective_filter_mask.sizes(), logits.sizes())
-        << "filter_mask must match the logits shape";
-    logits.add_(effective_filter_mask);
-  }
+  apply_logits_constraints(logits, params, filter_mask);
   if (!params.is_all_greedy()) {
 #if defined(USE_NPU)
     // Only random rows consume distribution transforms. Keep the original

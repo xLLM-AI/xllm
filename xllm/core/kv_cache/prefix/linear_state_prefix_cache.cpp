@@ -174,6 +174,7 @@ size_t LinearStatePrefixCache::insert(const Slice<int32_t>& token_ids,
       Node* new_node = new Node();
 
       new_node->block = blocks[block_idx];
+      cached_block_ids_.insert(new_node->block.id());
       new_node->last_access_time = now;
 
       node_list.push_front(new_node);

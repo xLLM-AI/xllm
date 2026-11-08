@@ -48,11 +48,12 @@ from xllm.python.attention.expanded_decode_metadata import (
 from xllm.python.attention.mla_index_context import is_compact_kpool_tail
 from xllm.python.model_executor.cp_utils import cp_gather_kv
 from xllm.python.model_executor.forward_context import (
-    AclGraphTask,
     get_execution_buffer,
     get_execution_workspace,
     get_forward_context,
+    get_forward_context_or_none,
     in_acl_graph,
+    shares_execution_workspace,
 )
 
 if TYPE_CHECKING:
@@ -71,7 +72,7 @@ from xllm.python.attention.kda_linear_attention import (
 #    attend the full cached prefix plus their own tokens (mode 2, leftUpCausal,
 #    only aligns when q_len == kv_len and would misalign on a cache hit).
 _SPARSE_MODE_NONE = 0
-_SPARSE_MODE_RIGHT_DOWN_CAUSAL = 3
+SPARSE_MODE_RIGHT_DOWN_CAUSAL = 3
 
 _HAS_FIA_V2 = hasattr(torch.ops.npu, "npu_fused_infer_attention_score_v2") and hasattr(
     torch_npu, "_npu_fused_infer_attention_score_v2_get_max_workspace"
@@ -197,7 +198,9 @@ class _PreparedPagedAttention:
 class PagedAttentionGraphState:
     """One entry's paged attention buffers and captured Host parameter lists."""
 
-    workspace: torch.Tensor
+    # None lets CANN size its own scratch, which is far smaller than the
+    # shape-independent maximum the recurrent verifier must reserve.
+    workspace: torch.Tensor | None
     output: torch.Tensor
     lse: torch.Tensor
     block_table: torch.Tensor
@@ -649,6 +652,17 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 # The Slot owns conservative Host bounds, not accepted Device
                 # lengths. Captured FIA tasks retain this entry-private list.
                 prepared.actual_seq_kv[:] = metadata.kv_seq_lens_host_values
+            context = get_forward_context_or_none() if graph_mode else None
+            execution_state = None if context is None else context.execution_state
+            bounded = (
+                execution_state.paged_attention.get(len(prepared.actual_seq_kv))
+                if execution_state is not None and prepared.device_kv_lengths is not None
+                else None
+            )
+            if bounded is not None and bounded.kv is not prepared.actual_seq_kv:
+                # Ordinary decode graphs prepare a new Slot view per replay,
+                # while captured bounded FIA tasks read the capture-time list.
+                bounded.kv[:] = prepared.actual_seq_kv
             if graph_mode and prepared.device_kv_lengths is None:
                 self._prepare_paged_graph()
             else:
@@ -1785,7 +1799,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             num_key_value_heads=1,
             softmax_scale=self.scale,
             input_layout="TND",
-            sparse_mode=(_SPARSE_MODE_RIGHT_DOWN_CAUSAL if is_prefill else _SPARSE_MODE_NONE),
+            sparse_mode=(SPARSE_MODE_RIGHT_DOWN_CAUSAL if is_prefill else _SPARSE_MODE_NONE),
             block_size=block_size,
             return_softmax_lse=False,
             workspace=workspace,
@@ -1827,7 +1841,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             "num_key_value_heads": 1,
             "softmax_scale": self.scale,
             "input_layout": "TND",
-            "sparse_mode": (_SPARSE_MODE_RIGHT_DOWN_CAUSAL if is_prefill else _SPARSE_MODE_NONE),
+            "sparse_mode": (SPARSE_MODE_RIGHT_DOWN_CAUSAL if is_prefill else _SPARSE_MODE_NONE),
             "block_size": block_size,
             "return_softmax_lse": False,
         }
@@ -1882,40 +1896,17 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 shared=True,
             )
 
-        stream = graph_context.stream
-        event = torch.npu.ExternalEvent()
-        event.wait(stream)
-        event.reset(stream)
-        torch.npu.graph_task_group_begin(stream)
-        try:
-            self._mla_dense_fia_v2_out(
-                q_latent,
-                q_pe,
-                nope_cache,
-                rope_cache,
-                block_table,
-                workspace,
-                output,
-                softmax_lse,
-            )
-        except Exception:
-            torch.npu.graph_task_group_end(stream)
-            raise
-        handle = torch.npu.graph_task_group_end(stream)
-
-        def _update_mla_fia_v2_args() -> None:
-            self._mla_dense_fia_v2_out(
-                q_latent,
-                q_pe,
-                nope_cache,
-                rope_cache,
-                block_table,
-                workspace,
-                output,
-                softmax_lse,
-            )
-
-        graph_context.tasks.append(AclGraphTask(event, handle, _update_mla_fia_v2_args))
+        graph_context.capture_task(
+            self._mla_dense_fia_v2_out,
+            q_latent,
+            q_pe,
+            nope_cache,
+            rope_cache,
+            block_table,
+            workspace,
+            output,
+            softmax_lse,
+        )
         return output
 
     # ------------------------------------------------------------------
@@ -1979,7 +1970,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
     ) -> torch.Tensor:
         context = get_forward_context()
         graph_context = context.acl_graph
-        assert graph_context is not None and context.execution_state is not None
+        assert context.execution_state is not None
         workspace_rows = prepared.workspace_query_capacity or query.shape[0]
 
         def _allocate_workspace() -> torch.Tensor:
@@ -2010,9 +2001,13 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         state = context.execution_state.paged_attention.get(query.shape[0])
         if state is None:
             state = PagedAttentionGraphState(
-                workspace=get_execution_workspace(
-                    ("BOUNDED_FIA_WORKSPACE", workspace_rows, prepared.kv_capacity),
-                    _allocate_workspace,
+                workspace=(
+                    get_execution_workspace(
+                        ("BOUNDED_FIA_WORKSPACE", workspace_rows, prepared.kv_capacity),
+                        _allocate_workspace,
+                    )
+                    if prepared.workspace_query_capacity
+                    else None
                 ),
                 output=get_execution_buffer(("BOUNDED_FIA_OUTPUT", query.shape[0]), lambda: torch.empty_like(query)),
                 lse=get_execution_buffer(
@@ -2047,18 +2042,12 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 out=[state.output, state.lse],
             )
 
-        stream = graph_context.stream
-        event = torch.npu.ExternalEvent()
-        event.wait(stream)
-        event.reset(stream)
-        torch.npu.graph_task_group_begin(stream)
-        try:
+        if graph_context is None:
+            # Capture warmup acquires the scratch here: a workspace first
+            # requested during capture stays pinned in that graph's pool.
             _update_bounded_fia_args()
-        except Exception:
-            torch.npu.graph_task_group_end(stream)
-            raise
-        handle = torch.npu.graph_task_group_end(stream)
-        graph_context.tasks.append(AclGraphTask(event, handle, _update_bounded_fia_args))
+            return state.output
+        graph_context.capture_task(_update_bounded_fia_args)
         return state.output
 
     def _prefill(
@@ -2079,7 +2068,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
         )
         sparse_mode = layer.fia_sparse_mode
         if sparse_mode is None:
-            sparse_mode = _SPARSE_MODE_RIGHT_DOWN_CAUSAL if layer.causal else _SPARSE_MODE_NONE
+            sparse_mode = SPARSE_MODE_RIGHT_DOWN_CAUSAL if layer.causal else _SPARSE_MODE_NONE
 
         # Prefix-cache hit (or chunked prefill with prior context): part of the
         # KV already lives in the paged cache, so this forward only carries the
@@ -2109,10 +2098,12 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 if left_context is None:
                     atten_mask = self._block_attention_mask(prepared, layer)
                     block_table = self._block_table_i32
-                    # Taskless ACL graphs freeze FIA's Host lengths at capture.
-                    # The live Device mask can shorten that bound, but cannot
-                    # extend a short warmup prefix when later requests grow.
-                    kv_lengths = [prepared.kv_capacity] * len(widths) if in_acl_graph() else prepared.actual_seq_kv
+                    kv_lengths = prepared.actual_seq_kv
+                    context = get_forward_context_or_none()
+                    if context is not None and context.acl_graph is not None and not shares_execution_workspace():
+                        # This direct FIA call cannot update Host arguments on
+                        # replay. The Device mask limits the capacity bound.
+                        kv_lengths = [prepared.kv_capacity] * len(widths)
                 else:
                     window = self._windowed_block_table(prepared, left_context)
                     atten_mask = self._block_attention_mask(prepared, layer, window.key_positions)
@@ -2123,12 +2114,7 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 # mask and the same paged KV without a Host length readback.
                 query = q_3d.view(len(widths), widths[0], self.num_heads, self.head_dim)
                 query = query.transpose(1, 2).contiguous()
-                if (
-                    getattr(metadata, "linear_verify_graph", None) is not None
-                    and left_context is None
-                    and in_acl_graph()
-                    and get_forward_context().acl_graph is not None
-                ):
+                if left_context is None and shares_execution_workspace():
                     output = self._bounded_paged_graph_attention(
                         query, k_flat, v_flat, atten_mask, prepared, block_size
                     )
@@ -2358,10 +2344,31 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             # The speculative prefix is committed on Device after Host
             # preparation. Capture fixed Host capacities and mask their tail
             # from the live Slot lengths, including inside ACL graph replay.
+            bounded = shares_execution_workspace()
             lengths = prepared.device_kv_lengths.view(-1, 1, 1, 1)
-            keys = torch.arange(prepared.kv_capacity, device=q_3d.device).view(1, 1, 1, -1)
-            mask = (keys >= lengths).contiguous()
+            # A captured graph pins this capacity-wide mask. Inside one, the
+            # layers of a forward share a single pooled mask; eager callers
+            # may change Device lengths between calls and must rebuild it.
+            mask_key = ("decode", prepared.kv_capacity)
+            mask = self._block_attention_masks.get(mask_key) if bounded else None
+            if mask is None:
+                keys = torch.arange(prepared.kv_capacity, dtype=torch.int32, device=q_3d.device).view(1, 1, 1, -1)
+                if bounded:
+                    elements = num_tokens * prepared.kv_capacity
+                    mask = get_execution_workspace(
+                        ("DEVICE_LENGTH_DECODE_MASK", num_tokens, prepared.kv_capacity),
+                        lambda: torch.empty(elements, dtype=torch.bool, device=q_3d.device),
+                    ).view(num_tokens, 1, 1, prepared.kv_capacity)
+                    torch.ge(keys, lengths, out=mask)
+                    self._block_attention_masks[mask_key] = mask
+                else:
+                    mask = (keys >= lengths).contiguous()
             query = q_3d.view(num_tokens, 1, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
+            if bounded:
+                # FIA reads every captured KV position even when the mask
+                # hides it, so replay must refresh the Host upper bounds.
+                output = self._bounded_paged_graph_attention(query, k_flat, v_flat, mask, prepared, block_size)
+                return output.transpose(1, 2).reshape(num_tokens, self.num_heads * self.head_dim)
             output, _ = torch.ops.npu.npu_fused_infer_attention_score(
                 query,
                 k_flat,
@@ -2393,44 +2400,20 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             workspace = state.workspace
             output = state.output
             lse = state.lse
-            stream = graph_context.stream
-            event = torch.npu.ExternalEvent()
-            event.wait(stream)
-            event.reset(stream)
-            torch.npu.graph_task_group_begin(stream)
-            try:
-                self._fia_out(
-                    q_3d,
-                    k_flat,
-                    v_flat,
-                    block_size,
-                    actual_seq_q=actual_seq_q,
-                    actual_seq_kv=actual_seq_kv,
-                    block_table=block_table,
-                    workspace=workspace,
-                    output=output,
-                    lse=lse,
-                )
-            except Exception:
-                torch.npu.graph_task_group_end(stream)
-                raise
-            handle = torch.npu.graph_task_group_end(stream)
 
-            def _update_fia_args() -> None:
-                self._fia_out(
-                    q_3d,
-                    k_flat,
-                    v_flat,
-                    block_size,
-                    actual_seq_q=actual_seq_q,
-                    actual_seq_kv=actual_seq_kv,
-                    block_table=block_table,
-                    workspace=workspace,
-                    output=output,
-                    lse=lse,
-                )
-
-            graph_context.tasks.append(AclGraphTask(event, handle, _update_fia_args))
+            graph_context.capture_task(
+                self._fia_out,
+                q_3d,
+                k_flat,
+                v_flat,
+                block_size,
+                actual_seq_q=actual_seq_q,
+                actual_seq_kv=actual_seq_kv,
+                block_table=block_table,
+                workspace=workspace,
+                output=output,
+                lse=lse,
+            )
             return output.reshape(num_tokens, self.num_heads * self.head_dim)
 
         if self._use_fia_v2:

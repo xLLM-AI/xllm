@@ -136,28 +136,6 @@ _SCORES_SLAB_CAP_BYTES = int(1.5 * 1024**3)
 # (see glm5_next_kpool.py).
 
 
-class _UnweightedRMSNorm(nn.Module):
-    """Unweighted RMSNorm (transformers Glm5NextTextUnweightedRMSNorm).
-
-    Used inside the mHC input projection: no weight parameter, just rescale by
-    the fp32 RMS then cast back (input_norm in the reference HyperConnection).
-    The vendor npu_rms_norm needs a weight and this norm only runs on the
-    non-fused-mHC fallback (fused hc_pre folds the mHC rsqrt in), so keep it
-    pure-torch.
-    """
-
-    def __init__(self, eps: float) -> None:
-        super().__init__()
-        self.variance_epsilon = eps
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        input_dtype = x.dtype
-        x = x.to(torch.float32)
-        variance = x.pow(2).mean(-1, keepdim=True)
-        x = x * torch.rsqrt(variance + self.variance_epsilon)
-        return x.to(input_dtype)
-
-
 class _RMSNormGated(nn.Module):
     """RMSNorm + sigmoid gate (transformers Glm5NextRMSNormGated)."""
 
@@ -2307,7 +2285,7 @@ class Glm5NextHyperConnection(nn.Module):
         self.hc_mult = cfg.hc_mult
         self.hc_sinkhorn_iters = cfg.hc_sinkhorn_iters
         self.hc_eps = cfg.hc_eps
-        self.input_norm = _UnweightedRMSNorm(cfg.rms_norm_eps)
+        self.rms_norm_eps = cfg.rms_norm_eps
         mix = (2 + self.hc_mult) * self.hc_mult
         self.fn = nn.Parameter(torch.empty(mix, self.hc_mult * cfg.hidden_size, dtype=torch.float32, device=device))
         self.base = nn.Parameter(torch.empty(mix, dtype=torch.float32, device=device))
@@ -2347,7 +2325,7 @@ class Glm5NextHyperConnection(nn.Module):
             self._base_compute,
             self.hc_mult,
             self.hc_sinkhorn_iters,
-            self.input_norm.variance_epsilon,
+            self.rms_norm_eps,
             self.hc_eps,
         )
         return post, comb, collapsed

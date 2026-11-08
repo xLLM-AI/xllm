@@ -53,6 +53,10 @@ class StreamEvent final {
   // installs a device-stream dependency and returns immediately on the host.
   bool synchronize();
 
+  // Return whether the recorded device work has completed without blocking
+  // the calling host thread.
+  bool query() const;
+
   DISALLOW_COPY_AND_ASSIGN(StreamEvent);
 
  private:

@@ -409,10 +409,15 @@ class MemoryAudioReader : public MemoryMediaReader {
   MemoryAudioReader(const uint8_t* data,
                     size_t size,
                     int64_t target_sr = 16000,
-                    int32_t target_channels = 1)
+                    int32_t target_channels = 1,
+                    double max_duration_s = 0.0)
       : MemoryMediaReader(data, size) {
     target_sr_ = target_sr;
     target_ch_ = target_channels;
+    max_pcm_values_ =
+        max_duration_s > 0.0
+            ? static_cast<int64_t>(max_duration_s * target_sr_) * target_ch_
+            : -1;
   }
 
   ~MemoryAudioReader() {
@@ -484,15 +489,16 @@ class MemoryAudioReader : public MemoryMediaReader {
     CHECK(swr_ctx_) << "SwrContext is null";
     CHECK(pcm_.empty()) << "PCM buffer is not cleared before read";
 
-    if (!decode()) {
-      return false;
+    const bool decoded = decode();
+    int32_t flushed = 0;
+    if (decoded) {
+      do {
+        flushed = resample_to_pcm(nullptr, 0);
+      } while (flushed > 0);
     }
-
-    // flush resampler buffered samples after decode
-    while (true) {
-      if (resample_to_pcm(nullptr, 0) <= 0) {
-        break;
-      }
+    if (!decoded || flushed < 0) {
+      metadata.duration = exceeded_duration_s_;
+      return false;
     }
 
     if (pcm_.empty()) {
@@ -549,9 +555,14 @@ class MemoryAudioReader : public MemoryMediaReader {
       return 0;
     }
 
-    // append converted samples to pcm buffer
-    const int64_t n = static_cast<int64_t>(converted * target_ch_);
-    pcm_.reserve(pcm_.size() + static_cast<size_t>(n));
+    const int64_t n = static_cast<int64_t>(converted) * target_ch_;
+    if (max_pcm_values_ >= 0 &&
+        n > max_pcm_values_ - static_cast<int64_t>(pcm_.size())) {
+      exceeded_duration_s_ =
+          static_cast<double>(pcm_.size() + n) / target_ch_ / target_sr_;
+      return -1;
+    }
+
     pcm_.insert(pcm_.end(), out_buf.data(), out_buf.data() + n);
     return converted;
   }
@@ -560,6 +571,8 @@ class MemoryAudioReader : public MemoryMediaReader {
   SwrContext* swr_ctx_ = nullptr;
   int32_t target_sr_ = 16000;
   int32_t target_ch_ = 1;
+  int64_t max_pcm_values_ = -1;
+  double exceeded_duration_s_ = 0.0;
   std::vector<float> pcm_;
 };
 
@@ -646,7 +659,8 @@ bool FFmpegAudioDecoder::decode(std::string_view raw_data,
   MemoryAudioReader reader(reinterpret_cast<const uint8_t*>(raw_data.data()),
                            raw_data.size(),
                            target_sr,
-                           target_channels);
+                           target_channels,
+                           max_duration_s_);
 
   if (!reader.init(metadata) || !reader.read(t, metadata)) {
     LOG(INFO) << "audio decode failed";

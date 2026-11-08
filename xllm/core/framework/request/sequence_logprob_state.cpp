@@ -123,7 +123,7 @@ void LogprobState::generate_output_tokens_logprobs(
 
     const int32_t token_id = tokens[i];
     auto token =
-        tokenizer.decode(std::vector<int32_t>{token_id}, skip_special_tokens);
+        tokenizer.decode(Slice<int32_t>(&token_id, 1), skip_special_tokens);
     if (token.empty()) {
       continue;
     }
@@ -154,12 +154,13 @@ void LogprobState::generate_output_tokens_logprobs(
     const auto& top_logprobs = top_logprobs_[i];
     DCHECK_EQ(top_tokens.size(), top_logprobs.size());
     std::vector<LogProbData> logprobs;
+    logprobs.reserve(top_tokens.size());
     for (size_t j = 0; j < top_tokens.size(); ++j) {
       LogProbData logprob;
       const int32_t top_token_id = static_cast<int32_t>(top_tokens[j]);
       const float top_logprob = top_logprobs[j];
 
-      auto top_token = tokenizer.decode(std::vector<int32_t>{top_token_id},
+      auto top_token = tokenizer.decode(Slice<int32_t>(&top_token_id, 1),
                                         skip_special_tokens);
       if (absl::EndsWith(top_token, "�")) {
         top_token = tokenizer.id_to_token(top_token_id);

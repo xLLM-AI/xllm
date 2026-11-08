@@ -18,13 +18,22 @@ limitations under the License.
 #include <google/protobuf/service.h>
 
 #include <memory>
+#include <string>
+#include <thread>
 
-#include "api_service/api_service.h"
-#include "core/distributed_runtime/collective_service.h"
-#include "core/distributed_runtime/disagg_pd_service.h"
-#include "core/distributed_runtime/worker_service.h"
+#include "core/common/macros.h"
+
+namespace brpc {
+class Server;
+}
 
 namespace xllm {
+
+class CollectiveService;
+class PDService;
+class WorkerService;
+
+class APIService;
 
 class XllmServer final {
  public:
@@ -32,7 +41,7 @@ class XllmServer final {
   ~XllmServer();
 
   bool start(std::unique_ptr<APIService> api_service);
-  bool start(std::unique_ptr<DisaggPDService> disagg_pd_service);
+  bool start(std::unique_ptr<PDService> pd_service);
   bool start(std::shared_ptr<CollectiveService> service,
              const std::string& addr,
              const std::string& server_name);

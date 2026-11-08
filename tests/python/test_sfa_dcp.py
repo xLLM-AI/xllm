@@ -24,14 +24,14 @@ import pytest
 import torch
 import torch.nn as nn
 
-from xllm.python.attention.backend import MlaIndexContext
+from xllm.python.attention.backend import MlaIndexContext, normalize_attention_lse
 from xllm.python.attention.kv_shard_layout import KVShardLayout
 from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend
 from xllm.python.attention.sfa_dcp_backend import SfaDcpAttentionBackend
+from xllm.python.distributed import finish_all_gather
 from xllm.python.layers.sfa_dcp import (
     AscendSFADCPImpl,
     AscendSFADCPMetadataBuilder,
-    _lse_as_token_head,
 )
 from xllm.python.model_executor.forward_context import (
     AclGraphExecutionState,
@@ -269,38 +269,30 @@ def test_glm_quant_indexer_without_cp_uses_materialized_scale() -> None:
     assert quant_lightning_indexer.call_args.args[8] is materialized_table
 
 
-def test_lse_as_token_head_squeezes_graph_leading_one() -> None:
+def test_normalize_attention_lse_squeezes_graph_leading_one() -> None:
     num_tokens = 8
     num_heads = 16
     lse = torch.randn(1, num_tokens, num_heads, dtype=torch.float32)
-    out = _lse_as_token_head(lse, num_tokens, num_heads)
+    out = normalize_attention_lse(lse, num_tokens, num_heads)
     assert tuple(out.shape) == (num_tokens, num_heads)
     torch.testing.assert_close(out, lse[0])
 
 
-class _IdentityDcpGroup:
-    world_size = 1
-    rank_in_group = 0
-    device_group = None
-
-
 def _dcp_impl() -> AscendSFADCPImpl:
     return AscendSFADCPImpl(
-        _IdentityDcpGroup(),
+        None,
         scale=0.1,
         index_topk=8,
         layout=KVShardLayout(physical_block_size=4, dcp_size=2, dcp_rank=0),
     )
 
 
-def test_query_gather_nope_returns_none_q_pe() -> None:
+def test_query_gather_without_rope_preserves_query() -> None:
     impl = _dcp_impl()
     ql_nope = torch.randn(2, 4, 8)
     gather_context = impl._start_dcp_query_gather(ql_nope, None)
-    assert gather_context.split_sizes == (8,)
-    gathered_ql, gathered_q_pe = impl._finish_dcp_gather(gather_context)
+    gathered_ql = finish_all_gather(gather_context)
     torch.testing.assert_close(gathered_ql, ql_nope)
-    assert gathered_q_pe is None
 
 
 def test_query_gather_with_rope_keeps_fused_split() -> None:
@@ -308,10 +300,10 @@ def test_query_gather_with_rope_keeps_fused_split() -> None:
     ql_nope = torch.randn(2, 4, 8)
     q_pe = torch.randn(2, 4, 4)
     gather_context = impl._start_dcp_query_gather(ql_nope, q_pe)
-    assert gather_context.split_sizes == (8, 4)
-    gathered_ql, gathered_q_pe = impl._finish_dcp_gather(gather_context)
+    gathered_ql, gathered_q_pe = torch.split(
+        finish_all_gather(gather_context), (ql_nope.shape[-1], q_pe.shape[-1]), dim=-1
+    )
     torch.testing.assert_close(gathered_ql, ql_nope)
-    assert gathered_q_pe is not None
     torch.testing.assert_close(gathered_q_pe, q_pe)
 
 
@@ -341,7 +333,12 @@ def test_decode_nope_query_gather_unpacks_none_before_sfa() -> None:
             "_npu_sparse_flash_attention",
             return_value=(sfa_out, softmax_max, softmax_sum),
         ) as sparse_attn,
-        patch.object(impl, "_merge_dcp_outputs", return_value=merged) as merge,
+        patch("xllm.python.kernels_npu.triton.dcp_packed_a2a.pack_dcp_output_lse") as pack,
+        patch(
+            "xllm.python.kernels_npu.triton.dcp_packed_a2a.fused_dcp_lse_combine",
+            return_value=merged,
+        ) as combine,
+        patch("xllm.python.layers.sfa_dcp.dist.all_to_all_single") as exchange,
     ):
         out = impl._execute_sparse_flash_attention_process(
             ql_nope,
@@ -354,7 +351,9 @@ def test_decode_nope_query_gather_unpacks_none_before_sfa() -> None:
         )
     assert out is merged
     assert sparse_attn.call_args.args[1] is None
-    merge.assert_called_once()
+    assert pack.call_args.args[0] is sfa_out
+    exchange.assert_called_once()
+    assert combine.call_args.args[0] is exchange.call_args.args[0]
 
 
 def test_prefill_kv_gather_with_rope_still_fuses() -> None:
@@ -373,9 +372,9 @@ def test_prefill_kv_gather_with_rope_still_fuses() -> None:
     impl._record_dcp_kv_gather_context((nope, rope), metadata)
     gather_context = metadata.dcp_context.gather_context
     assert gather_context is not None
-    assert gather_context.split_sizes == (16, 4)
-    gathered_kv, gathered_rope = impl._finish_dcp_gather(gather_context)
-    assert gathered_rope is not None
+    gathered_kv, gathered_rope = torch.split(
+        finish_all_gather(gather_context), (nope.shape[-1], rope.shape[-1]), dim=-1
+    )
     assert gathered_kv.shape[-1] == 16
     assert gathered_rope.shape[-1] == 4
 
@@ -395,9 +394,7 @@ def test_prefill_kv_gather_without_rope_cache() -> None:
     impl._record_dcp_kv_gather_context((nope,), metadata)
     gather_context = metadata.dcp_context.gather_context
     assert gather_context is not None
-    assert gather_context.split_sizes == (16,)
-    gathered_kv, gathered_rope = impl._finish_dcp_gather(gather_context)
-    assert gathered_rope is None
+    gathered_kv = finish_all_gather(gather_context)
     assert gathered_kv.shape[-1] == 16
 
     sfa_out = torch.randn(2, 4, 16)
@@ -435,9 +432,8 @@ def test_prefill_kv_gather_skips_zero_width_rope_cache() -> None:
     impl._record_dcp_kv_gather_context((nope, rope), metadata)
     gather_context = metadata.dcp_context.gather_context
     assert gather_context is not None
-    assert gather_context.split_sizes == (16,)
-    _, gathered_rope = impl._finish_dcp_gather(gather_context)
-    assert gathered_rope is None
+    gathered_kv = finish_all_gather(gather_context)
+    assert gathered_kv.shape[-1] == 16
 
 
 def test_npu_sparse_flash_attention_passes_none_rope() -> None:
@@ -496,7 +492,7 @@ def test_empty_cp_query_finishes_kv_collective_before_returning() -> None:
     metadata.dcp_context.gather_context = SimpleNamespace(handle=MagicMock())
     query = torch.empty(0, 2, 4)
     with (
-        patch.object(impl, "_finish_dcp_gather", return_value=(cache, None)) as finish,
+        patch("xllm.python.layers.sfa_dcp.finish_all_gather", return_value=cache) as finish,
         patch.object(impl, "_npu_sparse_flash_attention") as kernel,
     ):
         output = impl._execute_sparse_flash_attention_process(

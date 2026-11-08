@@ -23,6 +23,7 @@ from typing import Any, cast
 import torch
 import torch.nn as nn
 
+from xllm.python import distributed
 from xllm.python.layers import ColumnParallelLinear, HiddenParallelEmbedding
 from xllm.python.layers.flash_comm1 import FlashComm1MetadataBuilder, get_flash_comm1_context
 from xllm.python.layers.qwen3_5.common import PartialRotaryEmbedding
@@ -282,6 +283,11 @@ class Qwen3_5Model(nn.Module):
                 from xllm.python.layers.npu.mega_moe_metadata_builder import TokenOwnerMegaMoeMetadataBuilder
 
                 builders.append(TokenOwnerMegaMoeMetadataBuilder(cfg))
+            dcp_group = distributed.dcp_group(device)
+            if dcp_group is not None and dcp_group.size() > 1:
+                from xllm.python.attention.dense_dcp_metadata_builder import DenseDcpMetadataBuilder
+
+                builders.append(DenseDcpMetadataBuilder(dcp_group.size(), dcp_group.rank()))
             if builders:
                 self.execution_metadata_builders = tuple(builders)
         if cfg.hidden_size % cfg.tp_size:

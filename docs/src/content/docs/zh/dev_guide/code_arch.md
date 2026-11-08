@@ -122,8 +122,8 @@ flowchart TB
 
   subgraph distributed["distributed_runtime"]
     residency["ModelResidencyCoordinator<br/>模型初始化、休眠与唤醒"]
-    coordination["DistributedVirtualMemoryCoordinator<br/>共享 KV/权重预算、worker 选择与派发"]
-    rpc["WorkerMemoryRpc<br/>client、service、server"]
+    coordination["DistributedVmmCoordinator<br/>共享 KV/权重预算、worker 选择与派发"]
+    rpc["WorkerMemory<br/>client、service、server"]
   end
 
   subgraph cache["core/kv_cache"]
@@ -201,8 +201,8 @@ Mooncake 字节传输。KV manifest、peer 状态和重分片 plan 仍属于
 `runtime/WorkerMemoryResources` 持有本地 KV registry 和 `WeightVirtualMemoryManager`，
 管理设备初始化、物理页池以及本地资源的创建与清理。它是独立的构建目标，
 不依赖 `runtime` 聚合目标、RPC 或 distributed-runtime。
-`distributed_runtime/WorkerMemoryRpcClient`、`WorkerMemoryRpcService` 和
-`WorkerMemoryRpcServer` 负责跨 worker 请求；service 只调用本地资源，
+`distributed_runtime/WorkerMemoryClient`、`WorkerMemoryService` 和
+`WorkerMemoryServer` 负责跨 worker 请求；service 只调用本地资源，
 不反向进入分布式协调器。
 
 `core/kv_cache/storage/VmmKVPageAllocatorImpl` 管理 KV 页队列、预分配和
@@ -212,7 +212,7 @@ map/unmap 接收每层 K/V 区域内的字节偏移，由 allocator 将虚拟页
 `KVCacheManagerFactory` 将页分配接口经 pool 和组合 manager 注入
 `VmmKVBlockManager`，block 适配器不访问分布式单例。
 
-`DistributedVirtualMemoryCoordinator` 实现该 backend，持有分页 allocator，使用通用的
+`DistributedVmmCoordinator` 实现该 backend，持有分页 allocator，使用通用的
 `WorkerPhysicalPageBudget` 记账，并选择目标 worker、派发本地或 RPC 操作。
 模型初始化、休眠与唤醒由 `ModelResidencyCoordinator` 组织；KV 和权重的共同预算
 在唤醒时由分布式协调器以一个预算事务原子预留。初次以唤醒状态初始化时，先预留
@@ -250,13 +250,15 @@ rank 0 再连接这些地址，派发内存操作。这套注册服务独立于 
 释放物理 backing；活跃页、padding block、权重及持有传输 lease 的页仍被固定。
 只有对应 VMM 开关启用的资源才使用这些页。`vmm_elastic=false` 使用固定整体驻留的 VMM 池。
 
-`max_memory_utilization` 和 `max_cache_size` 是 KV 与权重共享的可选扩张上限。
-弹性模式预留最多覆盖设备总显存的稳定虚拟地址，再按显式配置的正数 ratio 和字节
-上限裁剪。启动时只激活当时可用的槽位；分配需求增长时自动激活更多槽位，已有页
-地址保持不变。不配置 ratio 或设为 `max_memory_utilization=0` 可取消比例上限，
-`max_cache_size=0` 表示不设字节上限。每次物理增长均检查实时空闲显存，并同时保留
-配置 ratio 要求的空闲比例和执行余量。因此池外显存释放后，可扩张到超过启动槽位数。
-固定 VMM 及原有物理 cache 保持正数默认 ratio 和固定容量。
+弹性 VMM 在启动容量估算、虚拟地址 arena 预留和物理页增长时均忽略
+`max_memory_utilization`，显式配置为 `0.75` 等值也不生效。稳定虚拟地址最多可
+覆盖设备总显存，受可选的 `max_cache_size` 字节配额约束，并扣除池外预留。KV 与权重页
+共享该配额，`max_cache_size=0` 表示不设字节配额。启动容量依据当时可用的显存，
+因此混合注意力常驻状态按初始化时的可用显存估算，不按未来虚拟容量估算。状态
+字节数会从页池预算中扣除；状态分配后，其驻留量已计入实时显存占用。启动时只
+激活当时可用的槽位；分配需求增长时自动激活更多槽位，已有页地址保持不变。
+每次物理增长均检查实时空闲显存和执行余量，因此池外显存释放后，可扩张到超过
+启动槽位数。固定 VMM 及原有物理 cache 保持正数 ratio 和固定容量。
 
 弹性 VMM 遵循已配置的 graph 或 eager 预热行为，不增加 VMM 专用预热。物理页按需
 增长，受当前空闲显存、已观察到的执行峰值及显式 reserve 约束。worker 在执行期间
@@ -270,9 +272,16 @@ rank 0 再连接这些地址，派发内存操作。这套注册服务独立于 
 直接分配的 SDK buffer；这些额外余量需要根据设备实测配置。显式 reserve 在启动
 阶段也生效。
 
-请求准入和 DP 选择取目标 worker 的最小实时容量，并受共享预留账本约束；实际
-映射在创建物理页前及发布前复核设备预算，检查失败时释放未发布的 handle，已有
-映射保持不变。allocator 与 driver 采样并非原子快照；持续并发显存变化仍需显式
+请求准入根据模型实际缓存布局，将 token 需求换算为 block，也计入 target/draft
+张量。准入和 DP 选择取目标 worker 的最小实时容量，并受共享预留账本约束。
+新的 chunked-prefill 请求按完整 prompt 占用与已有预留之和检查，decode 则随
+token 生成继续分配 block，不会提前为每个请求的整个生命周期预留最大可能输出。
+复合 block manager 还会分配 MTP embedding 与混合注意力循环状态槽位；任一
+资源分配失败都会回滚暂存的 block，推迟新请求。并发数随请求长度、前缀复用和
+实时显存变化，并受调度器配置及状态槽位限制，无需单独估算一个固定的 VMM 并发数。
+
+实际映射在创建物理页前及发布前复核设备预算，检查失败时释放未发布的 handle，
+已有映射保持不变。allocator 与 driver 采样并非原子快照；持续并发显存变化仍需显式
 余量保护，也可能导致分配失败。KV 与权重的 prepare/commit/abort 对全部参与 worker
 补偿完成后才归还失败分配的账本。回滚无法确认时直接终止，避免复用所有权不明确的页。
 

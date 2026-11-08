@@ -802,7 +802,7 @@ TEST(EnginePrefixCacheTest, FullAttentionDecodeStillReusesKvPrefixes) {
   auto first_request = generate_request_with_prompt_tokens(prompt, 4, 32);
   Sequence* first_sequence = first_request->sequences().front().get();
   ASSERT_TRUE(pool->try_allocate(first_sequence));
-  pool->cache(first_sequence);
+  pool->publish_prefix(first_sequence);
   EXPECT_GT(pool->num_blocks_in_prefix_cache().front(), 0u);
 
   auto second_request = generate_request_with_prompt_tokens(prompt, 4, 32);
@@ -1766,12 +1766,12 @@ TEST(ContinuousSchedulerFactoryTest,
             opt.max_tokens_per_chunk_for_prefill());
 }
 
-TEST(SchedulerFactoryTest, DisaggPDChunkedPrefillUsesDisaggPD) {
+TEST(SchedulerFactoryTest, PDChunkedPrefillUsesPD) {
   SchedulerOptions opt = create_scheduler_options(10000, 256, 2, 1024, 1);
   opt.enable_disagg_pd() = true;
   opt.enable_chunked_prefill() = true;
 
-  EXPECT_EQ(select_scheduler_kind(opt), SchedulerKind::DISAGG_PD);
+  EXPECT_EQ(select_scheduler_kind(opt), SchedulerKind::PD);
 }
 
 TEST(ContinuousSchedulerTest, BeamStrictNoPartialScheduling) {

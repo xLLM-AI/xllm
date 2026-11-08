@@ -19,14 +19,21 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from importlib import import_module
 
+from xllm_kernel.platform import PlatformEnum
 from xllm_kernel.registry import OpContract, PreparedKernel
 
 
 @dataclass(frozen=True)
 class BackendModule:
     module: str
-    device: str
+    platform: PlatformEnum
     requires: tuple[str, ...]
+    implementations: tuple[str, ...] = ()
+
+    @property
+    def device(self) -> str:
+        """Return the platform identifier for reports and CLI output."""
+        return self.platform.value
 
 
 @dataclass
@@ -35,6 +42,11 @@ class Operation:
     backends: tuple[BackendModule, ...]
     prepared: PreparedKernel | None = field(default=None, init=False, repr=False)
 
+    @property
+    def implementations(self) -> tuple[str, ...]:
+        """Expose CLI choices without importing device backends."""
+        return tuple(name for backend in self.backends for name in backend.implementations)
+
     def get_prepared(self) -> PreparedKernel:
         """Return the startup binding without performing selection."""
         if self.prepared is None:
@@ -42,9 +54,12 @@ class Operation:
         return self.prepared
 
 
-_BUILTINS = ("xllm_kernel.ops.rms_norm",)
+_BUILTINS = (
+    "xllm_kernel.ops.normalization",
+    "xllm_kernel.ops.activation",
+)
 
 
 def load_operations() -> tuple[Operation, ...]:
     """Import operation definitions without importing their device backends."""
-    return tuple(import_module(module).OPERATION for module in _BUILTINS)
+    return tuple(operation for module in _BUILTINS for operation in import_module(module).OPERATIONS)

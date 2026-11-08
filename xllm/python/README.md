@@ -297,7 +297,7 @@ compiled into native AOT artifacts require rebuilding those artifacts.
 3. Add `_custom_op.py` with the FakeTensor implementations of the platform's
    C++ operators. Import it from the package's `_initialize_runtime()` hook
    after native operators have been registered.
-4. Teach `Platform` in `xllm/python/platform.py` to report `<device>` (extend
+4. Teach `Platform` in `xllm-kernel/python/xllm_kernel/platform.py` to report `<device>` (extend
    `PlatformEnum` and `_torch_device_type()`) and add the matching
    branch to `xllm.python.initialize_runtime()`.
 5. `python setup.py build --device <device>` then stages it. Before that, a build

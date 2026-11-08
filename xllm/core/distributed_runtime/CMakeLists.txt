@@ -12,9 +12,7 @@ cc_library(
   HDRS
     worker_model_codec.h
   SRCS
-    worker_model_codec_llm.cpp
-    worker_model_codec_vlm.cpp
-    worker_model_codec_rec.cpp
+    worker_model_codec_token.cpp
     worker_model_codec_dit.cpp
   DEPS
     :common
@@ -31,26 +29,14 @@ cc_library(
     distributed_runtime
   HDRS
     engine.h
-    master.h
-    master_factory.h
     dit_engine.h
-    dit_master.h
     llm_engine.h
-    llm_master.h
     vlm_engine.h
-    vlm_master.h
     speculative_engine.h
     rec_engine.h
-    rec_master.h
-    disagg_pd_service.h
-    disagg_pd_service_impl.h
-    disagg_pd_kv_response.h
-    disagg_pd_request_converter.h
-    disagg_pd_response.h
     distributed_worker_manager.h
     remote_worker.h
     worker_server.h
-    worker_service.h
     comm_channel.h
     shm_channel.h
     heartbeat_callback_registry.h
@@ -61,34 +47,25 @@ cc_library(
     model_residency_coordinator.h
     kv_cache_capacity_planner.h
   SRCS
-    master.cpp
-    master_factory.cpp
     dit_engine.cpp
-    dit_master.cpp
     llm_engine.cpp
-    llm_master.cpp
     vlm_engine.cpp
-    vlm_master.cpp
     speculative_engine.cpp
     rec_engine.cpp
-    rec_master.cpp
-    disagg_pd_service.cpp
-    disagg_pd_service_impl.cpp
-    disagg_pd_kv_response.cpp
-    disagg_pd_request_converter.cpp
-    disagg_pd_response.cpp
     distributed_worker_manager.cpp
     kv_cache_transfer_coordinator.cpp
     remote_worker.cpp
     worker_server.cpp
-    worker_service.cpp
     comm_channel.cpp
     shm_channel.cpp
     xservice_client.cpp
     model_residency_coordinator.cpp
     kv_cache_capacity_planner.cpp
   DEPS
+    :common
+    :worker_service
     :api_response
+    :batch
     :worker_model_codec
     :chat_template_factory
     :jinja_chat_template
@@ -97,8 +74,8 @@ cc_library(
     :speculative
     :parallel_config_validation
     :runtime
-    :scheduler
     :kv_cache_manager_factory
+    :xllm_server
     :util
     glog::glog
     nlohmann_json::nlohmann_json
@@ -109,7 +86,7 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:xllm_atb_layers>
     $<$<BOOL:${USE_NPU}>:unified_dlog>
     :collective_service
-    :distributed_virtual_memory_coordinator
+    :distributed_vmm_coordinator
     absl::strings
     absl::time
 )
@@ -122,6 +99,7 @@ cc_library(
   SRCS
     worker_service.cpp
   DEPS
+    :runtime
     :worker_model_codec
     :request
     :speculative
@@ -146,6 +124,7 @@ cc_library(
 )
 
 target_link_libraries(worker_service PRIVATE brpc leveldb::leveldb protobuf::libprotobuf)
+target_link_libraries(collective_service PRIVATE brpc)
 
 cc_library(
   NAME 
@@ -153,6 +132,7 @@ cc_library(
   HDRS
     llm_master.h
     master.h
+    rec_master.h
     master_manager.h
     master_factory.h
     vlm_master.h
@@ -160,6 +140,7 @@ cc_library(
   SRCS
     llm_master.cpp
     master.cpp
+    rec_master.cpp
     master_manager.cpp
     master_factory.cpp
     vlm_master.cpp
@@ -169,6 +150,7 @@ cc_library(
     :common
     :distributed_runtime
     :scheduler
+    :scheduler_factory
     :request
     :runtime
     :model
@@ -187,19 +169,18 @@ cc_library(
   NAME
     worker_memory_rpc
   HDRS
-    worker_memory_rpc_options.h
-    worker_memory_rpc_client.h
-    worker_memory_rpc_service.h
-    worker_memory_rpc_server.h
+    worker_memory_options.h
+    worker_memory_client.h
+    worker_memory_service.h
+    worker_memory_server.h
   SRCS
-    worker_memory_rpc_client.cpp
-    worker_memory_rpc_service.cpp
-    worker_memory_rpc_server.cpp
+    worker_memory_client.cpp
+    worker_memory_service.cpp
+    worker_memory_server.cpp
   DEPS
     :worker_memory_resources
     :common
     :config
-    :collective_service
     :platform
     :util
     :xllm_server
@@ -213,11 +194,11 @@ cc_library(
 # Owns shared KV/weight budget transactions and implements the KV page backend.
 cc_library(
   NAME
-    distributed_virtual_memory_coordinator
+    distributed_vmm_coordinator
   HDRS
-    distributed_virtual_memory_coordinator.h
+    distributed_vmm_coordinator.h
   SRCS
-    distributed_virtual_memory_coordinator.cpp
+    distributed_vmm_coordinator.cpp
   DEPS
     :worker_memory_rpc
     :worker_memory_resources

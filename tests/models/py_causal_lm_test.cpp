@@ -169,6 +169,38 @@ ModelContext make_bridge_model_context(const char* model_type,
       /*context=*/nullptr);
 }
 
+TEST(PyCausalLMPoolingTest,
+     DefaultModelPreservesSelectedRowsWithoutNormalization) {
+  ModelContext context = make_bridge_model_context(kBridgeTestModelType);
+  PyCausalLM model(context, kBridgeTestModelType);
+  const torch::Tensor hidden = torch::tensor({{3.0F, 4.0F}, {0.0F, 5.0F}});
+  const torch::Tensor selected = torch::tensor({1, 0}, torch::kInt32);
+  EXPECT_TRUE(torch::equal(model.pooler(hidden, selected),
+                           hidden.index_select(0, selected)));
+  EXPECT_TRUE(torch::equal(model.pooler(hidden, torch::Tensor()), hidden));
+  EXPECT_EQ(model.pooler(hidden, torch::empty({0}, torch::kInt64)).size(0), 0);
+}
+
+TEST(PyCausalLMPoolingTest, DispatchesQwen3PoolerAndPreservesEmptySelection) {
+  ModelContext context = make_bridge_model_context(kBridgeTestModelType);
+  PyCausalLM model(context, kBridgeTestModelType);
+  {
+    py::gil_scoped_acquire gil;
+    py::object pooler = py::module_::import("xllm.python.models.qwen3")
+                            .attr("Qwen3ForCausalLM")
+                            .attr("pooler");
+    model.python_model().attr("pooler") = py::module_::import("types").attr(
+        "MethodType")(pooler, model.python_model());
+  }
+  const torch::Tensor hidden = torch::tensor({{3.0F, 4.0F}, {0.0F, 5.0F}});
+  const torch::Tensor selected = torch::tensor({1, 0}, torch::kInt32);
+  const torch::Tensor expected = torch::tensor({{0.0F, 1.0F}, {0.6F, 0.8F}});
+  EXPECT_TRUE(torch::allclose(model.pooler(hidden, selected), expected));
+  EXPECT_TRUE(torch::allclose(model.pooler(hidden, torch::Tensor()),
+                              expected.flip({0})));
+  EXPECT_EQ(model.pooler(hidden, torch::empty({0}, torch::kInt64)).size(0), 0);
+}
+
 TEST(PyCausalLMConfigBridgeTest, PreservesBlockDraftWindowEnablement) {
   std::string pattern =
       (std::filesystem::temp_directory_path() / "xllm_draft_window_XXXXXX")

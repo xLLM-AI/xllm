@@ -28,23 +28,42 @@ ScheduleOverlapState::ScheduleOverlapState(bool publish_to_host,
                                            bool retire_unconsumed_inputs)
     : publish_to_host_(publish_to_host),
       retain_tokenless_output_(retain_tokenless_output),
-      retire_unconsumed_inputs_(!publish_to_host && retire_unconsumed_inputs) {}
+      retire_unconsumed_inputs_(publish_to_host || retire_unconsumed_inputs) {}
+
+ScheduleOverlapState::~ScheduleOverlapState() {
+  if (!retire_unconsumed_inputs_) {
+    return;
+  }
+  retire_deferred_inputs(/*wait=*/true);
+  if (prior_output_.ready_event != nullptr &&
+      !prior_output_.retained_inputs.empty()) {
+    CHECK(prior_output_.ready_event->synchronize())
+        << "failed to retire final asynchronous overlap input";
+  }
+}
 
 bool ScheduleOverlapState::record(
     std::optional<ForwardOutput> output,
     std::vector<std::string> request_ids,
     std::vector<std::string> sample_sequence_ids) {
-  // Only the producer replaces prior_output_. Wait outside the publication
-  // mutex so device work cannot block shutdown or the host consumer.
-  if (retire_unconsumed_inputs_) {
-    retire_prior_inputs();
-  }
   std::unique_lock<std::mutex> lock(mutex_);
   if (publish_to_host_) {
     condition_.wait(lock, [this] { return !pending_ || shutting_down_; });
   }
   if (shutting_down_) {
     return false;
+  }
+  // Wait for the consumer to finish copying before moving cached owners.
+  // Tokenless publications may be filtered, leaving no host copy to retain
+  // their asynchronous inputs. Keep device waits outside the publication
+  // mutex so they cannot block shutdown or the host consumer.
+  if (retire_unconsumed_inputs_) {
+    lock.unlock();
+    retire_prior_inputs();
+    lock.lock();
+    if (shutting_down_) {
+      return false;
+    }
   }
   update_prior_output(std::move(output),
                       std::move(request_ids),
@@ -86,17 +105,40 @@ bool ScheduleOverlapState::can_reuse_tokens(
          detail::has_request_id_overlap(request_ids, request_ids_);
 }
 
-void ScheduleOverlapState::retire_prior_inputs() const {
-#if defined(USE_NPU)
-  // Cache-only DP speculative results have no host consumer to wait for their
-  // device work. Retire temporary input owners before replacing or clearing
-  // the prior output; a device-stream wait alone cannot protect host owners.
-  if (has_tokens_ && !prior_output_.retained_inputs.empty() &&
-      prior_output_.ready_event != nullptr) {
-    CHECK(prior_output_.ready_event->synchronize())
-        << "failed to retire previous DP speculative input";
+void ScheduleOverlapState::retire_prior_inputs() {
+  retire_deferred_inputs(/*wait=*/false);
+  // Cache-only and filtered tokenless results have no host copy to retain
+  // their device inputs. Defer owners before replacing or clearing the cache.
+  if (prior_output_.retained_inputs.empty() ||
+      prior_output_.ready_event == nullptr) {
+    return;
   }
-#endif
+  if (prior_output_.ready_event->query()) {
+    prior_output_.retained_inputs.clear();
+    return;
+  }
+  if (deferred_releases_.size() >= kMaxDeferredReleases) {
+    DeferredRelease& release = deferred_releases_.front();
+    CHECK(release.ready_event->synchronize())
+        << "failed to retire deferred overlap input";
+    deferred_releases_.erase(deferred_releases_.begin());
+  }
+  deferred_releases_.push_back(
+      {prior_output_.ready_event, take_retained_inputs(prior_output_)});
+}
+
+void ScheduleOverlapState::retire_deferred_inputs(bool wait) {
+  auto it = deferred_releases_.begin();
+  while (it != deferred_releases_.end()) {
+    const bool complete =
+        wait ? it->ready_event->synchronize() : it->ready_event->query();
+    CHECK(complete || !wait) << "failed to retire deferred overlap input";
+    if (complete) {
+      it = deferred_releases_.erase(it);
+    } else {
+      ++it;
+    }
+  }
 }
 
 void ScheduleOverlapState::update_prior_output(

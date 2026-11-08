@@ -2,6 +2,7 @@
 """Shared CLI options and dispatch to operation-owned argument definitions."""
 
 import argparse
+import os
 from pathlib import Path
 
 from xllm_kernel.numerics.catalog import load_suites
@@ -20,6 +21,7 @@ def parse_arguments(
     parser.add_argument(
         "--implementation", required=True, choices=[name for suite in suites for name in suite.implementations]
     )
+    parser.add_argument("--distributed", action="store_true", help="Use torchrun HCCL ranks; write one report per rank")
     parser.add_argument("--warmup", type=int, default=100)
     parser.add_argument(
         "--revision", required=True, help="Exact source revision or an explicitly labeled dirty snapshot"
@@ -37,8 +39,6 @@ def parse_arguments(
         if (selected.operation is None or suite.operation == selected.operation)
         and (selected.implementation is None or selected.implementation in suite.implementations)
     ]
-    if not matches:
-        parser.error("no operation suite matches the requested operation and implementation")
     if len(matches) == 1:
         matches[0].add_arguments(parser)
     args = parser.parse_args()
@@ -46,6 +46,12 @@ def parse_arguments(
         parser.error("select exactly one operation suite")
     if args.warmup < 0:
         parser.error("warmup must be nonnegative")
+    if args.distributed:
+        rank = os.environ.get("RANK")
+        if rank is None:
+            parser.error("--distributed must be launched with torchrun")
+        suffix = args.output.suffix or ".json"
+        args.output = args.output.with_name(f"{args.output.stem}.rank{rank}{suffix}")
     suite = matches[0]
     args.operation = suite.operation
     try:

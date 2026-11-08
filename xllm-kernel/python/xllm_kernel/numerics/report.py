@@ -14,9 +14,12 @@ def write_report(path: Path, report: dict[str, Any]) -> None:
         "",
         f"Status: {report['status']}",
         "",
-        "| Case | Operation | Implementation | Status |",
-        "| --- | --- | --- | --- |",
+        "| Case | Operation | Solution | Variant | Binding | Implementation | Status |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
     ]
     for row in report["cases"]:
-        lines.append(f"| {row['case_id']} | {row['operation']} | {row['implementation']} | {row['status']} |")
+        lines.append(
+            f"| {row['case_id']} | {row['operation']} | {row['solution']} | {row['variant'] or '—'} | "
+            f"{row['binding']} | {row['implementation']} | {row['status']} |"
+        )
     path.with_suffix(".md").write_text("\n".join(lines) + "\n")

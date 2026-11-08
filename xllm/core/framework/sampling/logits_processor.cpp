@@ -123,7 +123,7 @@ void apply_top_k_top_p(torch::Tensor& logits,
     params.logits = logits;
     params.top_k = top_k;
     params.top_p = top_p;
-    logits = xllm::kernel::apply_top_k_top_p(params);
+    xllm::kernel::apply_top_k_top_p(params);
     return;
   }
 #endif
@@ -155,7 +155,8 @@ void apply_top_k_top_p(torch::Tensor& logits,
   if (top_p.defined()) {
     const torch::Tensor probabilities =
         sorted_logits.softmax(-1, torch::kFloat32);
-    torch::Tensor mask = probabilities.cumsum(-1) <= (1 - top_p.unsqueeze(-1));
+    const torch::Tensor cutoff = 1 - top_p.to(torch::kFloat32).unsqueeze(-1);
+    torch::Tensor mask = probabilities.cumsum(-1) <= cutoff;
     mask.select(/*dim=*/-1, /*index=*/vocab_size - 1).fill_(false);
     sorted_logits.masked_fill_(mask, filter_value);
   }
@@ -339,16 +340,27 @@ void apply_sampling_penalties(torch::Tensor& logits,
   apply_bad_words(logits, params);
 }
 
+void apply_logits_constraints(torch::Tensor& logits,
+                              const SamplingParameters& params,
+                              const torch::Tensor& filter_mask) {
+  const torch::Tensor& effective_filter_mask =
+      filter_mask.defined() ? filter_mask : params.filter_mask();
+  apply_sampling_penalties(logits, params);
+
+  if (params.filter_bitmask().defined()) {
+    apply_token_bitmask_inplace(logits, params.filter_bitmask());
+  } else if (effective_filter_mask.defined()) {
+    CHECK_EQ(effective_filter_mask.sizes(), logits.sizes())
+        << "filter_mask must match the logits shape";
+    logits.add_(effective_filter_mask);
+  }
+}
+
 void apply_logits_transforms(torch::Tensor& logits,
                              const torch::Tensor& temperatures,
                              const torch::Tensor& min_p,
                              const torch::Tensor& top_k,
-                             const torch::Tensor& top_p_values) {
-  torch::Tensor top_p = top_p_values;
-  if (top_k.defined() && top_p.defined()) {
-    // Native top-k/top-p consumes top-p in the logits dtype.
-    top_p = top_p.to(logits.scalar_type());
-  }
+                             const torch::Tensor& top_p) {
   const bool has_transforms = temperatures.defined() || min_p.defined() ||
                               top_k.defined() || top_p.defined();
   if (has_transforms) {
@@ -370,24 +382,15 @@ void apply_logits_transforms(torch::Tensor& logits,
 void process_logits(torch::Tensor& logits,
                     const SamplingParameters& params,
                     const torch::Tensor& filter_mask) {
-  const torch::Tensor& effective_filter_mask =
-      filter_mask.defined() ? filter_mask : params.filter_mask();
-  apply_sampling_penalties(logits, params);
-
-  if (params.filter_bitmask().defined()) {
-    apply_token_bitmask_inplace(logits, params.filter_bitmask());
-  } else if (effective_filter_mask.defined()) {
-    CHECK_EQ(effective_filter_mask.sizes(), logits.sizes())
-        << "filter_mask must match the logits shape";
-    logits.add_(effective_filter_mask);
+  apply_logits_constraints(logits, params, filter_mask);
+  if (params.is_all_greedy()) {
+    return;
   }
-  if (!params.is_all_greedy()) {
-    apply_logits_transforms(logits,
-                            params.temperatures(),
-                            params.min_p(),
-                            params.top_k(),
-                            params.top_p());
-  }
+  apply_logits_transforms(logits,
+                          params.temperatures(),
+                          params.min_p(),
+                          params.top_k(),
+                          params.top_p());
 }
 
 }  // namespace xllm

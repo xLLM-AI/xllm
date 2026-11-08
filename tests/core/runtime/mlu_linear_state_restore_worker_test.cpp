@@ -17,6 +17,7 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 
+#include <functional>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -165,7 +166,8 @@ class OverlapLinearStateRestoreWorker final : public LLMWorkerImpl {
   std::optional<ForwardOutput> execute_no_sync_on_stream(
       const LlmForwardInput& /*input*/,
       Stream& compute_stream,
-      ForwardCompletion completion) override {
+      ForwardCompletion completion,
+      const std::function<void()>& prepare_sampling = {}) override {
     EXPECT_EQ(completion, ForwardCompletion::RECORD_EVENT);
     c10::StreamGuard stream_guard = compute_stream.set_stream_guard();
     for (KVCache& kv_cache : kv_caches_) {
@@ -179,6 +181,9 @@ class OverlapLinearStateRestoreWorker final : public LLMWorkerImpl {
       ssm_cache
           .narrow(/*dim=*/0, forward_destination_slot_ * ssm_stride, ssm_stride)
           .add_(4.0f);
+    }
+    if (prepare_sampling) {
+      prepare_sampling();
     }
     return std::nullopt;
   }

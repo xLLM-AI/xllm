@@ -17,7 +17,7 @@ cc_test(
   NAME
     scheduler_test
   SRCS
-    disagg_pd_scheduler_test.cpp
+    pd_scheduler_test.cpp
     scheduler_metrics_test.cpp
     continuous_scheduler_test.cpp
     fixed_steps_scheduler_test.cpp
@@ -25,6 +25,8 @@ cc_test(
   DEPS
     :config
     :scheduler
+    :scheduler_factory
+    :disaggregation
     :xllm_server
     :block
     GTest::gtest_main

@@ -40,6 +40,7 @@ class ConcurrentBlockManagerImpl : public BlockManager {
   std::vector<Block> allocate(size_t num_blocks) override;
   Block allocate() override;
   void deallocate(const Slice<Block>& blocks) override;
+  void release(std::span<Block> blocks) override;
   void free(int32_t block_id) override;
 
   std::vector<Block> allocate_shared(
@@ -62,6 +63,7 @@ class ConcurrentBlockManagerImpl : public BlockManager {
       KVCacheState& kv_state,
       size_t num_tokens) override;
   bool allocate_for_prefetch(Sequence* seq, size_t num_tokens) override;
+  void trim_prefetch_blocks(Sequence& seq, size_t max_hit_tokens) override;
   void release_out_of_window(Sequence* seq, KVCacheState& kv_state) override;
 
   size_t num_blocks_in_prefix_cache() const override;
@@ -70,14 +72,16 @@ class ConcurrentBlockManagerImpl : public BlockManager {
   size_t num_total_blocks() const override;
   size_t admission_capacity() const override;
   double kv_cache_utilization() const override;
+  void reserve_virtual_memory_padding_blocks() override;
 
  private:
-  std::unique_ptr<BlockManager> inner_;  // always a leaf, never a composite
   // Recursive: Block dtors call free() through this wrapper (we rewrite each
   // returned Block's manager_ to this), and inner_->allocate() may trigger
   // prefix-cache eviction which destroys cached Blocks while we still hold the
-  // lock from the outer wrapper call.
+  // lock from the outer wrapper call. Outlive inner_ because cached Blocks also
+  // call back during its destruction.
   mutable std::recursive_mutex mutex_;
+  std::unique_ptr<BlockManager> inner_;  // always a leaf, never a composite
 };
 
 }  // namespace xllm

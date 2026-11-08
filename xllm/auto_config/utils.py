@@ -18,13 +18,8 @@
 Hosts the per-model tuning base class (`BaseTuner`) and the launcher helpers
 that resolve a model's tuning profile and generate its tuned config.
 
-Hardware typing (`Platform`, `PlatformEnum`, `CpuArchEnum`, `detect_hardware`)
-lives in `xllm/python/platform.py`, the single home shared with the C++ worker.
-The launcher has no hard `torch` dependency and cannot `import
-xllm.python.platform` normally -- that would execute `xllm/python/__init__.py`,
-which imports `torch` and binds a kernel package. So this module loads that one
-file by path (the same technique `load_tuning_module` uses for tuning profiles)
-and re-exports the symbols, keeping the tuning profiles' imports unchanged.
+Hardware typing is owned by xllm-kernel and shared with the C++ worker.
+The compatibility import also supports source checkouts without loading Torch.
 """
 
 from __future__ import annotations
@@ -38,38 +33,13 @@ from types import ModuleType
 from typing import Any
 
 from scripts.logger import logger
-
-
-def _load_platform_module() -> ModuleType:
-    """Load `xllm/python/platform.py` by file path, dodging its package init.
-
-    `platform.py` only imports the stdlib and the shared logger, so it loads
-    cleanly here without pulling in `torch` or a kernel package. A private
-    module name keeps it from clashing with the worker's real
-    `xllm.python.platform`.
-    """
-    platform_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
-        "python",
-        "platform.py",
-    )
-    spec = importlib.util.spec_from_file_location("xllm.auto_config._platform", platform_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"failed to load platform module: {platform_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-_platform_module = _load_platform_module()
-
-# Re-export the shared hardware-typing surface so tuning profiles keep importing
-# it from `xllm.auto_config.utils` while the definitions live in one place.
-Platform = _platform_module.Platform
-PlatformEnum = _platform_module.PlatformEnum
-CpuArchEnum = _platform_module.CpuArchEnum
-current_platform = _platform_module.current_platform
-detect_hardware = _platform_module.detect_hardware
+from xllm.python.platform import (  # noqa: F401
+    CpuArchEnum,
+    Platform,
+    PlatformEnum,
+    current_platform,
+    detect_hardware,
+)
 
 
 def check_device_count(

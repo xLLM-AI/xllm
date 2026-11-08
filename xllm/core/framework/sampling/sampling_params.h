@@ -525,6 +525,11 @@ torch::Tensor append_token_suffix(const torch::Tensor& suffix,
 void advance_sampling_history(SamplingParameters& params,
                               const torch::Tensor& prior_tokens,
                               const std::vector<int32_t>& output_rows);
+// Int64 row indices on prior_tokens' device. Asynchronous callers retain their
+// own H2D staging until the copy completes.
+void advance_sampling_history(SamplingParameters& params,
+                              const torch::Tensor& prior_tokens,
+                              const torch::Tensor& output_rows);
 
 // Draft proposals and acceptances executed by the verifier, before output
 // truncation. Accepted drafts exclude the target replacement/bonus token.

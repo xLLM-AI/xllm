@@ -126,25 +126,30 @@ bool StoragePrefetchRequest::to_proto(
   }
 
   proto::PrefetchRequest encoded_request;
-  encoded_request.mutable_transfer_infos()->Reserve(transfer_infos.size());
-  for (const BlockTransferInfo& info : transfer_infos) {
-    if (!valid_transfer_type(static_cast<int32_t>(info.transfer_type)) ||
-        !valid_prefetch_source_id(info.src_block_id) ||
-        !valid_block_id(info.dst_block_id) ||
-        !valid_block_type(static_cast<int32_t>(info.block_type))) {
-      return false;
+  encoded_request.mutable_units()->Reserve(units.size());
+  size_t begin = 0;
+  for (const PrefetchUnit& unit : units) {
+    proto::PrefetchUnit* proto_unit = encoded_request.add_units();
+    proto_unit->set_has_non_gated(unit.has_non_gated);
+    for (size_t offset = begin; offset < unit.end; ++offset) {
+      const BlockTransferInfo& info = transfer_infos[offset];
+      if (!valid_transfer_type(static_cast<int32_t>(info.transfer_type)) ||
+          !valid_prefetch_source_id(info.src_block_id) ||
+          !valid_block_id(info.dst_block_id) ||
+          !valid_block_type(static_cast<int32_t>(info.block_type))) {
+        return false;
+      }
+      auto* proto_info = offset < unit.gated_end
+                             ? proto_unit->add_gated_blocks()
+                             : proto_unit->add_non_gated_blocks();
+      proto_info->set_src_block_id(info.src_block_id);
+      proto_info->set_dst_block_id(info.dst_block_id);
+      proto_info->set_hash_key(info.hash_key, XXH3_128BITS_HASH_VALUE_LEN);
+      proto_info->set_block_type(
+          static_cast<proto::BlockType>(static_cast<int8_t>(info.block_type)));
     }
-    proto::BlockTransferInfo* proto_info = encoded_request.add_transfer_infos();
-    proto_info->set_src_block_id(info.src_block_id);
-    proto_info->set_dst_block_id(info.dst_block_id);
-    proto_info->set_hash_key(info.hash_key, XXH3_128BITS_HASH_VALUE_LEN);
-    proto_info->set_block_type(
-        static_cast<proto::BlockType>(static_cast<int8_t>(info.block_type)));
+    begin = unit.end;
   }
-  encoded_request.mutable_unit_end_offsets()->Add(unit_end_offsets.begin(),
-                                                  unit_end_offsets.end());
-  encoded_request.mutable_batch_end_unit_offsets()->Add(
-      batch_end_unit_offsets.begin(), batch_end_unit_offsets.end());
   proto_request->Swap(&encoded_request);
   return true;
 }
@@ -152,28 +157,48 @@ bool StoragePrefetchRequest::to_proto(
 bool StoragePrefetchRequest::from_proto(
     const proto::PrefetchRequest& proto_request) {
   StoragePrefetchRequest decoded_request;
-  decoded_request.transfer_infos.reserve(proto_request.transfer_infos_size());
-  for (const proto::BlockTransferInfo& proto_info :
-       proto_request.transfer_infos()) {
-    if (!valid_prefetch_source_id(proto_info.src_block_id()) ||
-        !valid_block_id(proto_info.dst_block_id()) ||
-        proto_info.hash_key().size() != XXH3_128BITS_HASH_VALUE_LEN ||
-        !valid_block_type(proto_info.block_type())) {
-      return false;
-    }
-    decoded_request.transfer_infos.emplace_back(
-        proto_info.src_block_id(),
-        proto_info.dst_block_id(),
-        reinterpret_cast<const uint8_t*>(proto_info.hash_key().data()),
-        TransferType::G2H,
-        static_cast<BlockType>(proto_info.block_type()));
+  auto append_transfer =
+      [&decoded_request](const proto::BlockTransferInfo& proto_info) {
+        if (!valid_prefetch_source_id(proto_info.src_block_id()) ||
+            !valid_block_id(proto_info.dst_block_id()) ||
+            proto_info.hash_key().size() != XXH3_128BITS_HASH_VALUE_LEN ||
+            !valid_block_type(proto_info.block_type())) {
+          return false;
+        }
+        decoded_request.transfer_infos.emplace_back(
+            proto_info.src_block_id(),
+            proto_info.dst_block_id(),
+            reinterpret_cast<const uint8_t*>(proto_info.hash_key().data()),
+            TransferType::G2H,
+            static_cast<BlockType>(proto_info.block_type()));
+        return true;
+      };
+  size_t transfer_count = 0;
+  for (const proto::PrefetchUnit& proto_unit : proto_request.units()) {
+    transfer_count += static_cast<size_t>(proto_unit.gated_blocks_size()) +
+                      proto_unit.non_gated_blocks_size();
   }
-  decoded_request.unit_end_offsets.assign(
-      proto_request.unit_end_offsets().begin(),
-      proto_request.unit_end_offsets().end());
-  decoded_request.batch_end_unit_offsets.assign(
-      proto_request.batch_end_unit_offsets().begin(),
-      proto_request.batch_end_unit_offsets().end());
+  decoded_request.transfer_infos.reserve(transfer_count);
+  decoded_request.units.reserve(proto_request.units_size());
+  for (const proto::PrefetchUnit& proto_unit : proto_request.units()) {
+    PrefetchUnit unit;
+    unit.has_non_gated = proto_unit.has_non_gated();
+    for (const proto::BlockTransferInfo& proto_info :
+         proto_unit.gated_blocks()) {
+      if (!append_transfer(proto_info)) {
+        return false;
+      }
+    }
+    unit.gated_end = decoded_request.transfer_infos.size();
+    for (const proto::BlockTransferInfo& proto_info :
+         proto_unit.non_gated_blocks()) {
+      if (!append_transfer(proto_info)) {
+        return false;
+      }
+    }
+    unit.end = decoded_request.transfer_infos.size();
+    decoded_request.units.emplace_back(unit);
+  }
   if (!decoded_request.valid()) {
     return false;
   }

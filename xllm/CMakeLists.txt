@@ -108,10 +108,11 @@ else()
     SRCS
       xllm.cpp
     DEPS
-      :distributed_virtual_memory_coordinator
+      :distributed_vmm_coordinator
       :worker_memory_resources
       $<$<BOOL:${USE_NPU}>:npu_startup>
       :config
+      :api_service
       :xllm_server
       :master
       :model_loader

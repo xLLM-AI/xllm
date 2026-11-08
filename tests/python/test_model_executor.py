@@ -490,6 +490,101 @@ class TestCreateAttentionBackend:
         "xllm.python.model_executor.executor.current_platform.is_npu",
         return_value=True,
     )
+    def test_qwen35_uses_dense_dcp_backend(self, _mock_is_npu: MagicMock) -> None:
+        attn = _make_attention_layer(num_kv_heads=1, head_dim=128)
+        dcp_group = MagicMock()
+        dcp_group.size.return_value = 2
+        dense_module = types.ModuleType("xllm.python.attention.dense_dcp_backend")
+        dense_module.DenseDcpAttentionBackend = StubAttentionBackend
+
+        with (
+            patch(
+                "xllm.python.model_executor.executor.distributed.dcp_group",
+                return_value=dcp_group,
+            ),
+            patch.dict(sys.modules, {dense_module.__name__: dense_module}),
+        ):
+            backend = _create_attention_backend(
+                attn,
+                torch.device("npu"),
+                torch.bfloat16,
+                {
+                    "model_type": "qwen3_5_moe_text",
+                    "cp_size": 1,
+                    "enable_mla": False,
+                    "tp_size": 8,
+                    "n_kv_heads": 2,
+                },
+            )
+
+        assert isinstance(backend, StubAttentionBackend)
+        assert backend.init_kwargs["dcp_group"] is dcp_group
+        assert backend.init_kwargs["num_heads"] == 8
+        assert backend.init_kwargs["num_kv_heads"] == 1
+        assert backend.init_kwargs["head_dim"] == 128
+
+    @patch(
+        "xllm.python.model_executor.executor.current_platform.is_npu",
+        return_value=True,
+    )
+    def test_qwen35_rejects_dcp_outside_kv_replica_group(self, _mock_is_npu: MagicMock) -> None:
+        attn = _make_attention_layer(num_kv_heads=1, head_dim=128)
+        dcp_group = MagicMock()
+        dcp_group.size.return_value = 4
+
+        with (
+            patch(
+                "xllm.python.model_executor.executor.distributed.dcp_group",
+                return_value=dcp_group,
+            ),
+            pytest.raises(ValueError, match="replicated KV-head group"),
+        ):
+            _create_attention_backend(
+                attn,
+                torch.device("npu"),
+                torch.bfloat16,
+                {
+                    "model_type": "qwen3_5_moe_text",
+                    "cp_size": 1,
+                    "enable_mla": False,
+                    "tp_size": 8,
+                    "n_kv_heads": 4,
+                },
+            )
+
+    @patch(
+        "xllm.python.model_executor.executor.current_platform.is_npu",
+        return_value=True,
+    )
+    def test_qwen35_dcp_rejects_disaggregated_pd(self, _mock_is_npu: MagicMock) -> None:
+        attn = _make_attention_layer(num_kv_heads=1, head_dim=128)
+        dcp_group = MagicMock()
+        dcp_group.size.return_value = 2
+
+        with (
+            patch(
+                "xllm.python.model_executor.executor.distributed.dcp_group",
+                return_value=dcp_group,
+            ),
+            pytest.raises(NotImplementedError, match="disaggregated P/D"),
+        ):
+            _create_attention_backend(
+                attn,
+                torch.device("npu"),
+                torch.bfloat16,
+                {
+                    "model_type": "qwen3_5_moe_text",
+                    "cp_size": 1,
+                    "tp_size": 8,
+                    "n_kv_heads": 2,
+                    "enable_disagg_pd": True,
+                },
+            )
+
+    @patch(
+        "xllm.python.model_executor.executor.current_platform.is_npu",
+        return_value=True,
+    )
     def test_decode_cp1_uses_sfa_dcp_backend(self, _mock_is_npu: MagicMock) -> None:
         attn = _make_attention_layer(num_kv_heads=1, head_dim=256)
         device = torch.device("cpu")
@@ -1266,6 +1361,7 @@ class TestDecodeAclGraphSpeculativeMetadata:
             eplb=None,
             graph_tasks=[object()] if task_updates else [],
             execution_state=SimpleNamespace(persistent_buffers={}),
+            layer_shared_cache={},
         )
         embedding = torch.zeros(batch_size, 3) if with_embedding else None
         topk = torch.zeros(batch_size, 1, 1, dtype=torch.int32) if with_topk else None

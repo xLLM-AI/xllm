@@ -47,6 +47,8 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 | `enable_return_mm_full_embeddings` | `bool` | `false` | VLM 模型是否返回 ViT embedding 与序列 embedding。 |
 | `mm_download_headers` | `string` | `""` | 多模态下载的 service 级默认 HTTP header，为 JSON 对象；per-request header 优先级更高。示例：`{"Authorization":"Bearer xxx"}`。 |
 | `use_audio_in_video` | `bool` | `false` | 输入为视频时，是否同时解码音频和视频。 |
+| `audio_max_upload_file_mb` | `int32` | `25` | 语音转文本音频上传大小上限，单位 MiB，必须为正数。 |
+| `audio_max_decode_duration_s` | `int32` | `600` | 语音转文本音频解码后的时长上限，单位秒。`0` 表示不限制。 |
 | `use_cpp_chat_template` | `bool` | `true` | 对支持的模型使用原生 C++ chat template，例如 `deepseek_v32`、`deepseek_v4`；设为 `false` 可回退到 Jinja 以便调试。 |
 
 ## LoadConfig
@@ -66,7 +68,7 @@ xLLM 使用 gflags 管理服务启动参数。`--model <PATH>` 是唯一必填�
 |:---------|:-----|:-------|:---------|
 | `block_size` | `int32` | `128` | 每个 KV Cache block 的 slot 数。 |
 | `max_cache_size` | `int64` | `0` | KV Cache 的容量上限，单位 byte；虚拟内存模式下限制 KV 与权重共享池的容量。`0` 表示不设显式字节上限，根据可用显存推导容量。 |
-| `max_memory_utilization` | `double` | `0.8` | 模型推理可使用的设备显存比例，包括模型权重和 KV Cache。原有物理 KV Cache 和固定 VMM 要求取值在 `(0, 1]` 内。弹性 VMM 仅在显式配置时应用该上限；不配置或设为 `0` 时按实时可用显存扩张。 |
+| `max_memory_utilization` | `double` | `0.8` | 模型推理可使用的设备显存比例，包括模型权重和 KV Cache。物理 KV Cache 和固定 VMM 要求取值在 `(0, 1]` 内。弹性 VMM 在启动容量估算、arena 预留和物理页增长时均忽略该比例，容量由实时可用显存和已观察到的执行余量决定。 |
 | `kv_cache_dtype` | `string` | `"auto"` | KV Cache 量化数据类型；`auto` 表示与模型 dtype 对齐且不量化，`int8` 表示启用 INT8 量化，仅 MLU 后端支持。 |
 | `indexer_cache_dtype` | `string` | `"auto"` | 带 indexer cache 的模型所使用的 indexer cache 数据类型。支持 `auto` 和 `int8`；`auto` 表示与模型 dtype 对齐且不量化，`int8` 表示启用 INT8 indexer cache 量化。 |
 | `enable_prefix_cache` | `bool` | `true` | 是否在 block manager 中启用 prefix cache；详见 [Prefix Cache](/zh/features/prefix_cache/)。 |
@@ -142,8 +144,6 @@ VMM 的使用方式和容量配置说明见[KV Cache 与模型权重的虚拟内
 | `enable_chunked_prefill` | `bool` | `true` | 是否启用 chunked prefill。 |
 | `max_tokens_per_chunk_for_prefill` | `int32` | `-1` | prefill 阶段每个 chunk 的最大 token 数；`-1` 表示使用默认策略。 |
 | `chunked_match_frequency` | `int32` | `2` | sequence prefix cache 匹配频率。 |
-| `use_zero_evict` | `bool` | `false` | 是否使用 ZeroEvictionScheduler；详见 [Zero Evict Scheduler](/zh/features/zero_evict_scheduler/)。 |
-| `max_decode_token_per_sequence` | `int32` | `256` | ZeroEvictionScheduler 中每个 sequence 的最大 decode token 数。 |
 | `priority_strategy` | `string` | `"fcfs"` | 请求优先级策略，例如 `fcfs`、`priority`、`deadline`。 |
 | `enable_mix_batch` | `bool` | `true` | 是否在同一 batch 中运行 prefill 和 decode。启用 CP 或 MTP 时会被强制设为 `false`。 |
 | `aggressive_coeff` | `double` | `1.0` | MixScheduler 紧急度判断的激进系数。 |

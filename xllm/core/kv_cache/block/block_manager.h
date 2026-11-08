@@ -24,6 +24,7 @@ limitations under the License.
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -109,6 +110,16 @@ class BlockManager {
 
   virtual void deallocate(const Slice<Block>& blocks) = 0;
 
+  // Consume these aliases, invalidating every handle before returning. Leaf
+  // concurrency adapters hold their existing lock across accounting and the
+  // reference drop so another releaser observes the updated ownership count.
+  virtual void release(std::span<Block> blocks) {
+    for (Block& block : blocks) {
+      deallocate(Slice<Block>(&block, /*size=*/1));
+      block = Block();
+    }
+  }
+
   virtual std::vector<Block> allocate(size_t num_blocks) = 0;
 
   // Returns the shared-prefix vector for the caller's Sequence. The vector's
@@ -192,6 +203,12 @@ class BlockManager {
   virtual bool allocate_for_prefetch(Sequence* /*seq*/, size_t /*num_tokens*/) {
     return false;
   }
+
+  // Finalize a Store prefetch on the Host tier. The leaf owns the physical
+  // block accounting and prefix-cache insertion policy for its block type;
+  // `max_hit_tokens` is the common gate-derived logical boundary.
+  virtual void trim_prefetch_blocks(Sequence& /*seq*/,
+                                    size_t /*max_hit_tokens*/) {}
 
   // Sliding-window hook: release leading blocks that have slid out of the
   // window. The composite calls this on every leaf after a successful commit;

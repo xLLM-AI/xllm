@@ -131,7 +131,8 @@ std::vector<int32_t> VmmKVBlockManager::alloc_internal(size_t need_size) {
             continue;
           }
         }
-        LOG(ERROR) << "Failed to allocate new page for dp_rank=" << dp_rank_;
+        LOG_EVERY_N(ERROR, 1000)
+            << "Failed to allocate new page for dp_rank=" << dp_rank_;
         // Return what we have allocated so far (caller should handle partial
         // allocation)
         return ret_index;
@@ -300,6 +301,21 @@ void VmmKVBlockManager::deallocate(const Slice<Block>& blocks) {
   }
 }
 
+void VmmKVBlockManager::release(std::span<Block> blocks) {
+  if (!prefix_cache_) {
+    BlockManager::release(blocks);
+    return;
+  }
+  std::lock_guard<std::mutex> cache_lock(prefix_cache_mtx_);
+  for (Block& block : blocks) {
+    if (block.is_valid() && block.ref_count() == 2u &&
+        prefix_cache_->owns(block)) {
+      deallocate(Slice<Block>(&block, /*size=*/1));
+    }
+    block = Block();
+  }
+}
+
 void VmmKVBlockManager::free(int32_t block_id) { free_blocks({block_id}); }
 
 std::vector<Block> VmmKVBlockManager::allocate_shared(
@@ -351,18 +367,25 @@ size_t VmmKVBlockManager::num_free_blocks() const { return available_size(); }
 
 size_t VmmKVBlockManager::num_used_blocks() const {
   std::lock_guard<std::mutex> lock(mtx_);
-  return get_num_allocated_blocks() - inactive_blocks_.size();
+  size_t used_blocks = get_num_allocated_blocks() - inactive_blocks_.size();
+  if (padding_block_.has_value()) {
+    --used_blocks;
+  }
+  return used_blocks;
 }
 
 double VmmKVBlockManager::kv_cache_utilization() const {
   std::lock_guard<std::mutex> lock(mtx_);
   size_t total = num_total_blocks();
+  size_t used_blocks = get_num_allocated_blocks() - inactive_blocks_.size();
+  if (padding_block_.has_value()) {
+    --total;
+    --used_blocks;
+  }
   if (total == 0) {
     return 0.0;
   }
-  return static_cast<double>(get_num_allocated_blocks() -
-                             inactive_blocks_.size()) /
-         total;
+  return static_cast<double>(used_blocks) / total;
 }
 
 size_t VmmKVBlockManager::num_total_blocks() const {
@@ -371,13 +394,19 @@ size_t VmmKVBlockManager::num_total_blocks() const {
 
 size_t VmmKVBlockManager::admission_capacity() const {
   size_t resident_blocks = 0;
+  bool padding_reserved = false;
   {
     std::lock_guard<std::mutex> lock(mtx_);
     resident_blocks = get_num_allocated_blocks() + num_avail_blocks_.load() +
                       reserved_blocks_.size();
+    padding_reserved = padding_block_.has_value();
   }
-  return std::min(static_cast<size_t>(options_.num_blocks()),
-                  resident_blocks + unallocated_block_capacity());
+  size_t capacity = std::min(static_cast<size_t>(options_.num_blocks()),
+                             resident_blocks + unallocated_block_capacity());
+  if (padding_reserved && capacity > 0) {
+    --capacity;
+  }
+  return capacity;
 }
 
 size_t VmmKVBlockManager::unallocated_block_capacity() const {
@@ -416,7 +445,7 @@ bool VmmKVBlockManager::try_to_reserve(size_t need_size) {
     // The live device budget can shrink after the advisory capacity check.
     // A failed reservation must not retain a partially allocated block batch.
     free_blocks(reserved);
-    LOG(WARNING) << "Failed to reserve blocks.";
+    LOG_EVERY_N(WARNING, 1000) << "Failed to reserve blocks.";
     return false;
   }
 

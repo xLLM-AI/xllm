@@ -34,14 +34,14 @@ class ScheduleOverlapState final {
   ScheduleOverlapState(bool publish_to_host,
                        bool retain_tokenless_output,
                        bool retire_unconsumed_inputs = false);
-  ~ScheduleOverlapState() = default;
+  ~ScheduleOverlapState();
 
   ScheduleOverlapState(const ScheduleOverlapState&) = delete;
   ScheduleOverlapState& operator=(const ScheduleOverlapState&) = delete;
 
   // Called by the single producer to replace the device continuation and, for
   // host-visible ranks, publish it with one-slot backpressure. Retires cached
-  // asynchronous inputs before replacement when no host consumer can do so.
+  // asynchronous inputs before replacement, including filtered publications.
   // Returns false after shutdown; the caller must drain device work before
   // releasing the rejected output.
   bool record(std::optional<ForwardOutput> output,
@@ -74,7 +74,15 @@ class ScheduleOverlapState final {
   bool can_reuse_tokens(const std::vector<std::string>& request_ids) const;
 
  private:
-  void retire_prior_inputs() const;
+  struct DeferredRelease final {
+    StreamEventPtr ready_event;
+    std::vector<std::shared_ptr<const void>> owners;
+  };
+
+  static constexpr size_t kMaxDeferredReleases = 1;
+
+  void retire_prior_inputs();
+  void retire_deferred_inputs(bool wait);
   void update_prior_output(std::optional<ForwardOutput> output,
                            std::vector<std::string> request_ids,
                            std::vector<std::string> sample_sequence_ids);
@@ -90,6 +98,7 @@ class ScheduleOverlapState final {
   bool has_tokens_ = false;
   bool pending_ = false;
   bool shutting_down_ = false;
+  std::vector<DeferredRelease> deferred_releases_;
 };
 
 }  // namespace xllm

@@ -35,7 +35,9 @@ class Qwen3_5ForConditionalGeneration(Qwen3_5ForCausalLM):
         super().__init__(config)
         self.image_token_id = int(config.get("image_token_id", 248056))
         self.video_token_id = int(config.get("video_token_id", 248057))
-        self.vision_model = Qwen3VLVisionTransformer(self.vision_cfg, dtype=self.dtype, device=self.device)
+        self.vision_model = Qwen3VLVisionTransformer(
+            self.vision_cfg, dtype=self.dtype, device=self.device, tp_size=self.cfg.tp_size
+        )
 
     def encode(self, pixel_values: torch.Tensor, grid_thw: torch.Tensor) -> torch.Tensor:
         """Encode image patches or video frames with the shared vision tower."""
@@ -75,5 +77,5 @@ class Qwen3_5ForConditionalGeneration(Qwen3_5ForCausalLM):
         return inputs_embeds
 
     def load_weights(self, state_dicts: list, tp_rank: int, tp_size: int) -> None:
-        self.vision_model.load_weights(ScopedWeightLoader(state_dicts, src_prefixes=("model.visual.",)))
+        self.vision_model.load_weights(ScopedWeightLoader(state_dicts, src_prefixes=("model.visual.",)), tp_rank)
         super().load_weights(state_dicts, tp_rank, tp_size)

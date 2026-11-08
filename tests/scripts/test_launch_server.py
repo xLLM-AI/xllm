@@ -13,7 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 
-"""Verify bundled operators for packaged serving and offline entry points."""
+"""Verify serving arguments and bundled operators for packaged entry points."""
 
 import argparse
 import json
@@ -34,6 +34,79 @@ from xllm._npu_runtime import configure_npu_runtime
 
 _CC = shutil.which("cc")
 _COMPILER_PATH = os.environ.get("PATH", os.defpath)
+
+
+class LaunchServerArgumentsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory(prefix="xllm serve arguments ")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.binary = self.root / "server"
+        self.binary.write_text(
+            f"#!{sys.executable}\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n",
+            encoding="utf-8",
+        )
+        self.binary.chmod(0o755)
+
+    def _run_serve(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "xllm.launch_server",
+                "serve",
+                *args,
+                "--binary-path",
+                str(self.binary),
+                "--no-log-files",
+            ],
+            cwd=Path(xllm.__file__).parent.parent,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+
+    def test_model_forms_preserve_server_flag_values(self) -> None:
+        model_path = str(self.root / "model with spaces")
+        for model_args, expected in (
+            ([model_path], [f"--model={model_path}"]),
+            ([f"--model={model_path}"], [f"--model={model_path}"]),
+            (["--model", model_path], ["--model", model_path]),
+        ):
+            with self.subTest(model_args=model_args):
+                result = self._run_serve(*model_args, "--port", "8015", "--devices", "npu:0", "--enable_graph=false")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    json.loads(result.stdout),
+                    [
+                        "--port=8015",
+                        "--nnodes=1",
+                        "--node_rank=0",
+                        *expected,
+                        "--devices",
+                        "npu:0",
+                        "--enable_graph=false",
+                    ],
+                )
+
+    def test_config_only_launch_preserves_server_flag_values(self) -> None:
+        config_path = self.root / "config.json"
+        config_path.write_text(json.dumps({"model": "/models/from-config", "port": 8020}), encoding="utf-8")
+        result = self._run_serve("--config_json_file", str(config_path), "--devices", "npu:0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout),
+            [f"--config_json_file={config_path}", "--port=8020", "--nnodes=1", "--node_rank=0", "--devices", "npu:0"],
+        )
+
+    def test_positional_model_rejects_explicit_model_before_launch(self) -> None:
+        for model_args in (["--model=/models/other"], ["--model", "/models/other"]):
+            with self.subTest(model_args=model_args):
+                result = self._run_serve("/models/positional", *model_args)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("specify the model either as MODEL_PATH or with --model, not both", result.stderr)
+                self.assertEqual(result.stdout, "")
 
 
 class NpuRuntimeTest(unittest.TestCase):

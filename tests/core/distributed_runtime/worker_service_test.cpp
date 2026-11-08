@@ -16,6 +16,7 @@ limitations under the License.
 #include "core/distributed_runtime/worker_service.h"
 
 #include <brpc/controller.h>
+#include <c10/core/DeviceGuard.h>
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 #include <unistd.h>
@@ -24,6 +25,7 @@ limitations under the License.
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <future>
 #include <memory>
 #include <stdexcept>
@@ -31,6 +33,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/config/execution_config.h"
+#include "core/platform/stream.h"
 #include "core/runtime/options.h"
 #include "core/runtime/worker_residency_state.h"
 
@@ -38,17 +41,68 @@ namespace xllm {
 
 class WorkerServiceOutputTest : public ::testing::Test {
  protected:
-  void collect(const ForwardOutput& source, ForwardOutput& destination) {
-    runtime::Options options;
-    options.backend("llm");
-    WorkerService service(options, torch::Device("npu:0"), nullptr);
+  void collect(WorkerService& service,
+               const ForwardOutput& source,
+               ForwardOutput& destination) {
     std::vector<SpeculativeTokenStats> stats;
     service.collect_llm_output(
         source, destination, /*cpu_ready_result=*/true, stats);
   }
+
+  void collect(const ForwardOutput& source, ForwardOutput& destination) {
+    runtime::Options options;
+    options.backend("llm");
+    WorkerService service(options, torch::Device("npu:0"), nullptr);
+    collect(service, source, destination);
+  }
 };
 
 namespace {
+
+TEST_F(WorkerServiceOutputTest, WaitsForPendingCpuTokenSnapshot) {
+  using namespace std::chrono_literals;
+  runtime::Options options;
+  options.backend("llm").enable_schedule_overlap(true);
+  WorkerService service(options, torch::Device("npu:0"), nullptr);
+  Stream producer(torch::Device("npu:0"));
+  ForwardOutput source;
+  source.next_tokens_host = torch::full({1}, -1, torch::kInt64);
+  int64_t* token = source.next_tokens_host.data_ptr<int64_t>();
+  std::promise<void> callback_entered;
+  auto entered = callback_entered.get_future();
+  std::promise<void> release_callback;
+  auto callback_release = release_callback.get_future().share();
+  std::function<void()> callback = [&]() {
+    callback_entered.set_value();
+    callback_release.wait_for(10s);
+    *token = 17;
+  };
+  const aclError launch_status = aclrtLaunchHostFunc(
+      producer.get_stream()->stream(),
+      [](void* data) { (*static_cast<std::function<void()>*>(data))(); },
+      &callback);
+  ASSERT_EQ(launch_status, ACL_SUCCESS);
+  source.ready_event = producer.record_event();
+  const std::future_status callback_status = entered.wait_for(2s);
+  std::promise<void> collection_started;
+  auto started = collection_started.get_future();
+  ForwardOutput collected;
+  auto result = std::async(std::launch::async, [&]() {
+    collection_started.set_value();
+    c10::DeviceGuard device_guard(torch::Device("npu:0"));
+    collect(service, source, collected);
+  });
+  started.wait();
+  const std::future_status early_status = result.wait_for(200ms);
+  release_callback.set_value();
+  result.get();
+  EXPECT_EQ(producer.synchronize(), ACL_SUCCESS);
+  EXPECT_NE(source.ready_event, nullptr);
+  EXPECT_EQ(callback_status, std::future_status::ready);
+  EXPECT_EQ(early_status, std::future_status::timeout);
+  ASSERT_TRUE(collected.sample_output.next_tokens.defined());
+  EXPECT_EQ(collected.sample_output.next_tokens.item<int64_t>(), 17);
+}
 
 TEST_F(WorkerServiceOutputTest, PreservesRetiredDsparkFeedbackBeforeEncoding) {
   ForwardOutput source;

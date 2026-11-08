@@ -1030,9 +1030,8 @@ class DecodeAclGraphRunner(AclGraphRunner):
                 accepted.fill_(1)
                 entry.static_metadata.num_accepted_tokens_host_values = (1,) * accepted.numel()
 
-        self._prepare_attention(entry, entry.static_metadata, replay=not first_capture)
-
         self._bind_graph_input_batch(entry, input_batch)
+        self._prepare_attention(entry, entry.static_metadata, replay=not first_capture)
         if first_capture:
             self._capture(entry, self._stream)
             if capture_linear_state:
@@ -1050,8 +1049,8 @@ class DecodeAclGraphRunner(AclGraphRunner):
                     expanded=expanded,
                     **decode_kwargs,
                 )
-                self._prepare_attention(entry, entry.static_metadata, replay=True)
                 self._bind_graph_input_batch(entry, input_batch)
+                self._prepare_attention(entry, entry.static_metadata, replay=True)
         return entry
 
     @staticmethod
@@ -1359,30 +1358,47 @@ class DecodeAclGraphRunner(AclGraphRunner):
             slot_mapping,
             block_table.shape[0],
         )
-        is_expanded = expanded is not None
         cumulative_kv_seq_lens = self._cumulative_lengths(
             kv_seq_lens,
-            None if is_expanded else metadata.kv_cu_seq_lens,
+            None if expanded is not None else metadata.kv_cu_seq_lens,
         )
-        graph_positions = positions.to(torch.int32).contiguous()
-        kernels.update_decode_graph_metadata(
-            input_ids,
-            graph_positions,
-            slot_mapping,
-            cumulative_kv_seq_lens,
-            paged_kv_indptr,
-            paged_kv_indices,
-            paged_kv_last_page_len,
-            entry.static_input_ids,
-            entry.static_positions,
-            static_metadata.slot_mapping,
-            static_metadata.kv_cu_seq_lens,
-            entry.kv_seq_lens_delta,
-            static_metadata.paged_kv_indptr,
-            static_metadata.paged_kv_indices,
-            static_metadata.paged_kv_last_page_len,
-            padded_batch_size,
-        )
+        if self._device_kv_lengths and not self.attention_backend.is_mla:
+            # Ordinary FIA consumes the block table and per-row lengths.
+            # Its capacity graphs never read CSR paging or cumulative KV
+            # lengths, so copying those buffers only adds device launches.
+            entry.static_input_ids[:batch_size].copy_(input_ids)
+            entry.static_positions[:batch_size].copy_(positions)
+            static_metadata.slot_mapping[:batch_size].copy_(slot_mapping)
+            # Preserve the generic update's authoritative cumulative lengths,
+            # but write their differences directly into the consumed buffer.
+            torch.sub(
+                cumulative_kv_seq_lens[1 : batch_size + 1],
+                cumulative_kv_seq_lens[:batch_size],
+                out=entry.kv_seq_lens_delta[:batch_size],
+            )
+            if padded_batch_size > batch_size:
+                entry.static_input_ids[batch_size:].zero_()
+                entry.static_positions[batch_size:].zero_()
+        else:
+            graph_positions = positions.to(torch.int32).contiguous()
+            kernels.update_decode_graph_metadata(
+                input_ids,
+                graph_positions,
+                slot_mapping,
+                cumulative_kv_seq_lens,
+                paged_kv_indptr,
+                paged_kv_indices,
+                paged_kv_last_page_len,
+                entry.static_input_ids,
+                entry.static_positions,
+                static_metadata.slot_mapping,
+                static_metadata.kv_cu_seq_lens,
+                entry.kv_seq_lens_delta,
+                static_metadata.paged_kv_indptr,
+                static_metadata.paged_kv_indices,
+                static_metadata.paged_kv_last_page_len,
+                padded_batch_size,
+            )
         if expanded is not None and static_metadata.q_cu_seq_lens is not None and not self._device_kv_lengths:
             # Expanded attention has one query token per physical row. The
             # caller can still provide cumulative ends per logical request;
@@ -1422,12 +1438,6 @@ class DecodeAclGraphRunner(AclGraphRunner):
                     )
                 repeat_count = batch_size // linear_state_indices.numel()
                 linear_state_indices = linear_state_indices.repeat_interleave(repeat_count)
-            if linear_state_indices.numel() < batch_size:
-                raise RuntimeError(
-                    "ACL graph linear_state_indices must contain one value "
-                    f"per decode row (rows={batch_size}, "
-                    f"values={linear_state_indices.numel()})"
-                )
             static_metadata.linear_state_indices[:batch_size].copy_(linear_state_indices[:batch_size])
         if static_metadata.num_accepted_tokens is None and padded_batch_size > batch_size:
             static_metadata.linear_state_indices[batch_size:].zero_()

@@ -36,7 +36,7 @@ class KVCacheTransferCoordinatorBase {
       uint32_t dp_rank,
       const std::vector<BlockTransferInfo>& block_transfer_info) = 0;
 
-  virtual void transfer_kv_blocks(
+  virtual std::vector<folly::SemiFuture<uint32_t>> transfer_kv_blocks(
       uint32_t dp_rank,
       uint64_t batch_id,
       const std::vector<BlockTransferInfo>& block_transfer_info) = 0;

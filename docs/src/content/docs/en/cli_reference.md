@@ -47,6 +47,8 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 | `enable_return_mm_full_embeddings` | `bool` | `false` | Whether VLM models return ViT embeddings and sequence embeddings. |
 | `mm_download_headers` | `string` | `""` | Service-level default HTTP headers for multimodal downloads, as a JSON object. Per-request headers take precedence. Example: `{"Authorization":"Bearer xxx"}`. |
 | `use_audio_in_video` | `bool` | `false` | Whether to decode both audio and video when the input is a video. |
+| `audio_max_upload_file_mb` | `int32` | `25` | Maximum speech-to-text audio upload size in MiB. Must be positive. |
+| `audio_max_decode_duration_s` | `int32` | `600` | Maximum decoded speech-to-text audio duration in seconds. `0` disables the limit. |
 | `use_cpp_chat_template` | `bool` | `true` | Use native C++ chat templates for supported models, for example `deepseek_v32` and `deepseek_v4`. Set to `false` to fall back to Jinja for debugging. |
 
 ## LoadConfig
@@ -66,7 +68,7 @@ xLLM uses gflags to manage service startup parameters. `--model <PATH>` is the o
 |:----------|:-----|:--------|:------------|
 | `block_size` | `int32` | `128` | Number of slots per KV Cache block. |
 | `max_cache_size` | `int64` | `0` | Maximum KV Cache size in bytes. With virtual memory, caps the shared KV/weight pool. `0` leaves the explicit byte ceiling unset and derives capacity from available memory. |
-| `max_memory_utilization` | `double` | `0.8` | Fraction of device memory used for model inference, including model weights and KV Cache. Must be in `(0, 1]` for physical KV Cache and fixed VMM. Elastic VMM uses this ceiling only when explicitly configured; omitting it or setting `0` allows growth according to live available memory. |
+| `max_memory_utilization` | `double` | `0.8` | Fraction of device memory used for model inference, including model weights and KV Cache. Must be in `(0, 1]` for physical KV Cache and fixed VMM. Elastic VMM ignores this ratio during startup sizing, arena reservation, and physical growth; capacity follows live available memory and observed execution headroom. |
 | `kv_cache_dtype` | `string` | `"auto"` | KV Cache dtype for quantization. `auto` aligns with model dtype and disables quantization. `int8` enables INT8 quantization and is only supported on the MLU backend. |
 | `indexer_cache_dtype` | `string` | `"auto"` | Indexer cache dtype for models with an indexer cache. Supported values are `auto` and `int8`. `auto` aligns with model dtype and disables indexer cache quantization. `int8` enables INT8 indexer cache quantization. |
 | `enable_prefix_cache` | `bool` | `true` | Whether to enable prefix cache in the block manager. See [Prefix Cache](/en/features/prefix_cache/). |
@@ -142,8 +144,6 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | `enable_chunked_prefill` | `bool` | `true` | Whether to enable chunked prefill. |
 | `max_tokens_per_chunk_for_prefill` | `int32` | `-1` | Maximum number of tokens per chunk in the prefill stage. `-1` uses the default policy. |
 | `chunked_match_frequency` | `int32` | `2` | Sequence prefix-cache match frequency. |
-| `use_zero_evict` | `bool` | `false` | Whether to use ZeroEvictionScheduler. See [Zero Evict Scheduler](/en/features/zero_evict_scheduler/). |
-| `max_decode_token_per_sequence` | `int32` | `256` | Maximum decode tokens per sequence for ZeroEvictionScheduler. |
 | `priority_strategy` | `string` | `"fcfs"` | Request priority strategy, for example `fcfs`, `priority`, or `deadline`. |
 | `enable_mix_batch` | `bool` | `true` | Whether to run prefill and decode in the same batch. Forced to `false` when CP or MTP is active. |
 | `aggressive_coeff` | `double` | `1.0` | Aggressive coefficient for MixScheduler urgency judgment. |

@@ -125,7 +125,7 @@ TEST(RequestCachedTokensTest, RecordsCachedTokensFromPrefixCache) {
         MakeSequence(0, /*prompt_tokens=*/{1, 2, 3, 4, 5, 6, 7, 8, 9});
     ASSERT_TRUE(pool.allocate(&seq1));
     seq1.kv_state().set_kv_cache_tokens_num(seq1.num_prompt_tokens());
-    pool.cache(&seq1);
+    pool.publish_prefix(&seq1);
 
     // Create a Request whose prompt overlaps with the cached prefix.
     auto request = MakeRequest({1, 2, 3, 4, 5, 6, 7, 8, 10});
@@ -157,7 +157,7 @@ TEST(RequestCachedTokensTest, CachedTokensSurvivesKVBlockRelease) {
         MakeSequence(0, /*prompt_tokens=*/{1, 2, 3, 4, 5, 6, 7, 8, 9});
     ASSERT_TRUE(pool.allocate(&seq1));
     seq1.kv_state().set_kv_cache_tokens_num(seq1.num_prompt_tokens());
-    pool.cache(&seq1);
+    pool.publish_prefix(&seq1);
 
     request = MakeRequest({1, 2, 3, 4, 5, 6, 7, 8, 10});
     auto* seq = request->sequences()[0].get();
@@ -210,7 +210,7 @@ TEST(RequestCachedTokensTest, RecordIsIdempotentWithMaxSemantics) {
         MakeSequence(0, /*prompt_tokens=*/{1, 2, 3, 4, 5, 6, 7, 8, 9});
     ASSERT_TRUE(pool.allocate(&seq1));
     seq1.kv_state().set_kv_cache_tokens_num(seq1.num_prompt_tokens());
-    pool.cache(&seq1);
+    pool.publish_prefix(&seq1);
 
     request = MakeRequest({1, 2, 3, 4, 5, 6, 7, 8, 10});
     auto* seq = request->sequences()[0].get();

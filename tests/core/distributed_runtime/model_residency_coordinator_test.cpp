@@ -27,7 +27,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "core/distributed_runtime/distributed_virtual_memory_coordinator.h"
+#include "core/distributed_runtime/distributed_vmm_coordinator.h"
 #include "core/distributed_runtime/distributed_worker_manager.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
@@ -36,17 +36,16 @@ limitations under the License.
 
 namespace xllm {
 
-class DistributedVirtualMemoryCoordinatorTestPeer final {
+class DistributedVmmCoordinatorTestPeer final {
  public:
   static std::unique_ptr<VmmKVPageAllocatorImpl> swap_allocator(
-      DistributedVirtualMemoryCoordinator& coordinator,
+      DistributedVmmCoordinator& coordinator,
       std::unique_ptr<VmmKVPageAllocatorImpl> replacement) {
     coordinator.kv_cache_pages_.swap(replacement);
     return replacement;
   }
-  static int32_t set_world_size(
-      DistributedVirtualMemoryCoordinator& coordinator,
-      int32_t world_size) {
+  static int32_t set_world_size(DistributedVmmCoordinator& coordinator,
+                                int32_t world_size) {
     const int32_t previous = coordinator.world_size_;
     coordinator.world_size_ = world_size;
     return previous;
@@ -66,13 +65,13 @@ class ResumePageBackend final : public KVCachePageBackend {
   bool try_reserve_pages(const std::string& model_id,
                          int32_t dp_rank,
                          size_t physical_pages) override {
-    return DistributedVirtualMemoryCoordinator::get_instance()
-        .try_reserve_pages(model_id, dp_rank, physical_pages);
+    return DistributedVmmCoordinator::get_instance().try_reserve_pages(
+        model_id, dp_rank, physical_pages);
   }
   void release_pages(const std::string& model_id,
                      int32_t dp_rank,
                      size_t physical_pages) override {
-    DistributedVirtualMemoryCoordinator::get_instance().release_pages(
+    DistributedVmmCoordinator::get_instance().release_pages(
         model_id, dp_rank, physical_pages);
   }
   size_t available_pages(const std::string& /*model_id*/,
@@ -104,10 +103,9 @@ class ResumePageBackend final : public KVCachePageBackend {
 class ScopedResumePageAllocator final {
  public:
   explicit ScopedResumePageAllocator(ResumePageBackend& backend) {
-    auto& coordinator = DistributedVirtualMemoryCoordinator::get_instance();
-    previous_world_size_ =
-        DistributedVirtualMemoryCoordinatorTestPeer::set_world_size(
-            coordinator, /*world_size=*/2);
+    auto& coordinator = DistributedVmmCoordinator::get_instance();
+    previous_world_size_ = DistributedVmmCoordinatorTestPeer::set_world_size(
+        coordinator, /*world_size=*/2);
     auto replacement = std::make_unique<VmmKVPageAllocatorImpl>(backend);
     replacement->init(
         /*total_pages=*/8,
@@ -115,15 +113,15 @@ class ScopedResumePageAllocator final {
         /*dp_size=*/1,
         /*enable_prealloc=*/false,
         /*max_reserved_pages=*/0);
-    previous_ = DistributedVirtualMemoryCoordinatorTestPeer::swap_allocator(
+    previous_ = DistributedVmmCoordinatorTestPeer::swap_allocator(
         coordinator, std::move(replacement));
   }
   ~ScopedResumePageAllocator() {
-    auto& coordinator = DistributedVirtualMemoryCoordinator::get_instance();
-    DistributedVirtualMemoryCoordinatorTestPeer::swap_allocator(
-        coordinator, std::move(previous_));
-    DistributedVirtualMemoryCoordinatorTestPeer::set_world_size(
-        coordinator, previous_world_size_);
+    auto& coordinator = DistributedVmmCoordinator::get_instance();
+    DistributedVmmCoordinatorTestPeer::swap_allocator(coordinator,
+                                                      std::move(previous_));
+    DistributedVmmCoordinatorTestPeer::set_world_size(coordinator,
+                                                      previous_world_size_);
   }
 
  private:
@@ -141,10 +139,9 @@ class RecordingWorkerClient final : public WorkerClient {
     ++sleep_calls_;
     sleep_status_ = master_status;
     sleep_transition_id_ = transition_id;
-    pages_sleeping_at_sleep_ =
-        DistributedVirtualMemoryCoordinator::get_instance()
-            .vmm_kv_page_allocator()
-            .is_suspended(model_id_);
+    pages_sleeping_at_sleep_ = DistributedVmmCoordinator::get_instance()
+                                   .vmm_kv_page_allocator()
+                                   .is_suspended(model_id_);
     if (sleep_exception_) {
       return folly::makeSemiFuture<bool>(folly::exception_wrapper(
           std::runtime_error("injected sleep failure")));
@@ -155,10 +152,9 @@ class RecordingWorkerClient final : public WorkerClient {
   folly::SemiFuture<bool> wakeup_async(const WakeupOptions& options) override {
     ++wakeup_calls_;
     wakeup_options_ = options;
-    pages_awake_at_wakeup_ =
-        !DistributedVirtualMemoryCoordinator::get_instance()
-             .vmm_kv_page_allocator()
-             .is_suspended(model_id_);
+    pages_awake_at_wakeup_ = !DistributedVmmCoordinator::get_instance()
+                                  .vmm_kv_page_allocator()
+                                  .is_suspended(model_id_);
     if (wakeup_exception_) {
       return folly::makeSemiFuture<bool>(folly::exception_wrapper(
           std::runtime_error("injected wakeup failure")));
@@ -238,7 +234,7 @@ class ModelResidencyCoordinatorTest : public ::testing::Test {
   static void SetUpTestSuite() {
     // Empty models exercise lifecycle transitions without physical pages,
     // device initialization, distributed mapping, or background preallocation.
-    DistributedVirtualMemoryCoordinator::get_instance().init_page_budget(
+    DistributedVmmCoordinator::get_instance().init_page_budget(
         /*total_pages=*/8,
         /*dp_size=*/1,
         /*worker_count=*/2,
@@ -250,7 +246,7 @@ class ModelResidencyCoordinatorTest : public ::testing::Test {
     static uint64_t next_model_id = 0;
     model_id_ =
         "model_residency_coordinator_test_" + std::to_string(next_model_id++);
-    ASSERT_TRUE(DistributedVirtualMemoryCoordinator::get_instance()
+    ASSERT_TRUE(DistributedVmmCoordinator::get_instance()
                     .vmm_kv_page_allocator()
                     .register_model(model_id_, /*num_layers=*/2));
 
@@ -305,14 +301,14 @@ class ModelResidencyCoordinatorTest : public ::testing::Test {
 
   void register_model_for_test(const std::string& model_id,
                                int32_t num_layers) {
-    ASSERT_TRUE(DistributedVirtualMemoryCoordinator::get_instance()
+    ASSERT_TRUE(DistributedVmmCoordinator::get_instance()
                     .vmm_kv_page_allocator()
                     .register_model(model_id, num_layers));
   }
 
   void suspend_model_pages() {
-    auto& page_allocator = DistributedVirtualMemoryCoordinator::get_instance()
-                               .vmm_kv_page_allocator();
+    auto& page_allocator =
+        DistributedVmmCoordinator::get_instance().vmm_kv_page_allocator();
     const auto plan = page_allocator.begin_suspend(model_id_);
     ASSERT_TRUE(plan.has_value());
     page_allocator.finish_suspend(model_id_);
@@ -321,7 +317,7 @@ class ModelResidencyCoordinatorTest : public ::testing::Test {
   void expect_resume_failure(bool map_failure) {
     ResumePageBackend backend;
     ScopedResumePageAllocator injected_pages(backend);
-    auto& memory = DistributedVirtualMemoryCoordinator::get_instance();
+    auto& memory = DistributedVmmCoordinator::get_instance();
     auto& pages = memory.vmm_kv_page_allocator();
     ASSERT_TRUE(pages.register_model(model_id_, /*num_layers=*/2));
     const auto page = pages.alloc_kv_cache_page(model_id_, /*dp_rank=*/0);
@@ -375,7 +371,7 @@ TEST_F(ModelResidencyCoordinatorTest,
   KVCacheConfig::get_instance().enable_vmm_kvcache(true).vmm_elastic(true);
   ResumePageBackend backend;
   ScopedResumePageAllocator injected_pages(backend);
-  auto& memory = DistributedVirtualMemoryCoordinator::get_instance();
+  auto& memory = DistributedVmmCoordinator::get_instance();
   auto& pages = memory.vmm_kv_page_allocator();
   ASSERT_TRUE(pages.register_model(model_id_, /*num_layers=*/2));
   const auto page = pages.alloc_kv_cache_page(model_id_, /*dp_rank=*/0);
@@ -419,7 +415,7 @@ TEST_F(ModelResidencyCoordinatorTest,
   EXPECT_FALSE(coordinator.sleep(MasterStatus::DEEP_SLEEP));
   EXPECT_FALSE(
       coordinator.wakeup(make_wakeup_options(MasterStatus::DEEP_SLEEP)));
-  EXPECT_FALSE(DistributedVirtualMemoryCoordinator::get_instance()
+  EXPECT_FALSE(DistributedVmmCoordinator::get_instance()
                    .vmm_kv_page_allocator()
                    .is_suspended(model_id_));
   EXPECT_EQ(worker->sleep_calls_, 0);
@@ -441,7 +437,7 @@ TEST_F(ModelResidencyCoordinatorTest,
   auto worker = std::make_shared<RecordingWorkerClient>(model_id_);
   auto coordinator = make_coordinator(/*enabled=*/true, make_manager({worker}));
   const MetadataModelLoader model_loader{};
-  auto& memory = DistributedVirtualMemoryCoordinator::get_instance();
+  auto& memory = DistributedVmmCoordinator::get_instance();
   const auto free_pages = memory.get_worker_free_page_counts();
 
   EXPECT_TRUE(coordinator.initialize_model(model_loader,
@@ -469,7 +465,7 @@ TEST_F(ModelResidencyCoordinatorTest,
       /*enabled=*/true, make_manager({worker}), model_id);
   MetadataModelLoader model_loader{};
   model_loader.total_weight_size_ = 1;
-  auto& memory = DistributedVirtualMemoryCoordinator::get_instance();
+  auto& memory = DistributedVmmCoordinator::get_instance();
   const auto free_pages = memory.get_worker_free_page_counts();
 
   ASSERT_TRUE(coordinator.initialize_model(model_loader,
@@ -517,8 +513,7 @@ TEST_F(ModelResidencyCoordinatorTest,
                                              /*tp_size=*/2,
                                              statuses[index]));
 
-    auto& memory_coordinator =
-        DistributedVirtualMemoryCoordinator::get_instance();
+    auto& memory_coordinator = DistributedVmmCoordinator::get_instance();
     EXPECT_EQ(memory_coordinator.get_model_parallel_strategy(model_id),
               std::make_pair(/*dp_size=*/1, /*tp_size=*/2));
     // 5 pages + 1 byte across two TP ranks needs 3 pages per worker, plus
@@ -564,8 +559,7 @@ TEST_F(ModelResidencyCoordinatorTest,
                                            /*tp_size=*/2,
                                            MasterStatus::LIGHT_SLEEP));
 
-  auto& memory_coordinator =
-      DistributedVirtualMemoryCoordinator::get_instance();
+  auto& memory_coordinator = DistributedVmmCoordinator::get_instance();
   // Non-decoder weights + two cached layers total 7 pages + 3 bytes.
   // Two TP ranks need 4 pages each, plus the 20-page weight safety margin.
   EXPECT_EQ(memory_coordinator.get_weight_page_count(model_id), 24);
@@ -607,9 +601,9 @@ TEST_F(ModelResidencyCoordinatorTest,
                                               /*dp_size=*/1,
                                               /*tp_size=*/2,
                                               MasterStatus::DEEP_SLEEP));
-    EXPECT_EQ(DistributedVirtualMemoryCoordinator::get_instance()
-                  .get_worker_free_page_counts(),
-              std::vector<size_t>({8, 8}));
+    EXPECT_EQ(
+        DistributedVmmCoordinator::get_instance().get_worker_free_page_counts(),
+        std::vector<size_t>({8, 8}));
   }
 }
 
@@ -617,7 +611,7 @@ TEST_F(ModelResidencyCoordinatorTest, AwakeInitializationLeavesModelAwake) {
   auto coordinator = make_coordinator(/*enabled=*/true, make_manager({}));
 
   EXPECT_TRUE(coordinator.finish_initialization(MasterStatus::WAKEUP));
-  EXPECT_FALSE(DistributedVirtualMemoryCoordinator::get_instance()
+  EXPECT_FALSE(DistributedVmmCoordinator::get_instance()
                    .vmm_kv_page_allocator()
                    .is_suspended(model_id_));
 }
@@ -631,18 +625,19 @@ TEST_F(ModelResidencyCoordinatorTest, MissingWorkerManagerPreservesModelState) {
                                             /*dp_size=*/1,
                                             /*tp_size=*/1,
                                             MasterStatus::DEEP_SLEEP));
-  EXPECT_EQ(DistributedVirtualMemoryCoordinator::get_instance()
-                .get_model_parallel_strategy(model_id_),
-            std::make_pair(/*dp_size=*/1, /*tp_size=*/2));
+  EXPECT_EQ(
+      DistributedVmmCoordinator::get_instance().get_model_parallel_strategy(
+          model_id_),
+      std::make_pair(/*dp_size=*/1, /*tp_size=*/2));
   EXPECT_FALSE(coordinator.sleep(MasterStatus::DEEP_SLEEP));
-  EXPECT_FALSE(DistributedVirtualMemoryCoordinator::get_instance()
+  EXPECT_FALSE(DistributedVmmCoordinator::get_instance()
                    .vmm_kv_page_allocator()
                    .is_suspended(model_id_));
 
   suspend_model_pages();
   EXPECT_FALSE(
       coordinator.wakeup(make_wakeup_options(MasterStatus::DEEP_SLEEP)));
-  EXPECT_TRUE(DistributedVirtualMemoryCoordinator::get_instance()
+  EXPECT_TRUE(DistributedVmmCoordinator::get_instance()
                   .vmm_kv_page_allocator()
                   .is_suspended(model_id_));
 }
@@ -656,18 +651,19 @@ TEST_F(ModelResidencyCoordinatorTest, EmptyWorkerManagerPreservesModelState) {
                                             /*dp_size=*/1,
                                             /*tp_size=*/1,
                                             MasterStatus::DEEP_SLEEP));
-  EXPECT_EQ(DistributedVirtualMemoryCoordinator::get_instance()
-                .get_model_parallel_strategy(model_id_),
-            std::make_pair(/*dp_size=*/1, /*tp_size=*/2));
+  EXPECT_EQ(
+      DistributedVmmCoordinator::get_instance().get_model_parallel_strategy(
+          model_id_),
+      std::make_pair(/*dp_size=*/1, /*tp_size=*/2));
   EXPECT_FALSE(coordinator.sleep(MasterStatus::DEEP_SLEEP));
-  EXPECT_FALSE(DistributedVirtualMemoryCoordinator::get_instance()
+  EXPECT_FALSE(DistributedVmmCoordinator::get_instance()
                    .vmm_kv_page_allocator()
                    .is_suspended(model_id_));
 
   suspend_model_pages();
   EXPECT_FALSE(
       coordinator.wakeup(make_wakeup_options(MasterStatus::DEEP_SLEEP)));
-  EXPECT_TRUE(DistributedVirtualMemoryCoordinator::get_instance()
+  EXPECT_TRUE(DistributedVmmCoordinator::get_instance()
                   .vmm_kv_page_allocator()
                   .is_suspended(model_id_));
 }
@@ -720,7 +716,7 @@ TEST_F(ModelResidencyCoordinatorTest,
       make_coordinator(/*enabled=*/true, make_manager({first, second}));
 
   EXPECT_FALSE(coordinator.sleep(MasterStatus::LIGHT_SLEEP));
-  EXPECT_TRUE(DistributedVirtualMemoryCoordinator::get_instance()
+  EXPECT_TRUE(DistributedVmmCoordinator::get_instance()
                   .vmm_kv_page_allocator()
                   .is_suspended(model_id_));
   EXPECT_EQ(first->sleep_calls_, 1);
@@ -771,7 +767,7 @@ TEST_F(ModelResidencyCoordinatorTest, InvalidSleepModeLeavesModelAwake) {
 TEST_F(ModelResidencyCoordinatorTest, WrongWakeupModePreservesSuspendedPages) {
   ResumePageBackend backend;
   ScopedResumePageAllocator injected_pages(backend);
-  auto& memory = DistributedVirtualMemoryCoordinator::get_instance();
+  auto& memory = DistributedVmmCoordinator::get_instance();
   auto& pages = memory.vmm_kv_page_allocator();
   ASSERT_TRUE(pages.register_model(model_id_, /*num_layers=*/2));
   const auto page = pages.alloc_kv_cache_page(model_id_, /*dp_rank=*/0);
@@ -831,7 +827,7 @@ TEST_F(ModelResidencyCoordinatorTest, NewSleepAdvancesTransitionGeneration) {
 TEST_F(ModelResidencyCoordinatorTest, WakeupCompletesPendingSleepBeforeMap) {
   ResumePageBackend backend;
   ScopedResumePageAllocator injected_pages(backend);
-  auto& memory = DistributedVirtualMemoryCoordinator::get_instance();
+  auto& memory = DistributedVmmCoordinator::get_instance();
   auto& pages = memory.vmm_kv_page_allocator();
   ASSERT_TRUE(pages.register_model(model_id_, /*num_layers=*/2));
   const auto page = pages.alloc_kv_cache_page(model_id_, /*dp_rank=*/0);
@@ -970,7 +966,7 @@ TEST_F(ModelResidencyCoordinatorTest,
 TEST_F(ModelResidencyCoordinatorTest, WakeupRetryRetainsMappedPagesAndBudget) {
   ResumePageBackend backend;
   ScopedResumePageAllocator injected_pages(backend);
-  auto& memory = DistributedVirtualMemoryCoordinator::get_instance();
+  auto& memory = DistributedVmmCoordinator::get_instance();
   auto& pages = memory.vmm_kv_page_allocator();
   ASSERT_TRUE(pages.register_model(model_id_, /*num_layers=*/2));
   const auto page = pages.alloc_kv_cache_page(model_id_, /*dp_rank=*/0);

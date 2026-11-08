@@ -146,7 +146,7 @@ class LlmModelParams final {
   LlmGraphInput graph;
   std::vector<torch::Tensor> multi_block_tables;
   torch::Tensor mtp_shifted_token_ids;
-  LinearStateValidityMask linear_state_validity_mask;
+  std::vector<int64_t> linear_state_validity_mask;
   bool is_spec_verify = false;
   bool prefill_without_cache = false;
   torch::Tensor num_accepted_tokens;

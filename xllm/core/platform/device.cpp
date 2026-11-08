@@ -128,27 +128,72 @@ void Device::init_device_context() const {
 }
 
 // set device before get device mem
-Device::DeviceMem Device::get_device_mem() const {
+std::optional<Device::DeviceMem> Device::query_device_mem() const {
   DeviceMem device_mem;
   size_t total_memory = 0;
   size_t free_memory = 0;
 #if defined(USE_NPU)
-  aclrtGetMemInfo(ACL_HBM_MEM, &free_memory, &total_memory);
+  const aclError result =
+      aclrtGetMemInfo(ACL_HBM_MEM, &free_memory, &total_memory);
+  if (result != ACL_SUCCESS) {
+    const char* error_message = aclGetRecentErrMsg();
+    LOG(WARNING) << "Device memory query failed: api=aclrtGetMemInfo"
+                 << " device_index=" << index()
+                 << " driver_error=" << static_cast<int32_t>(result)
+                 << " driver_error_message="
+                 << (error_message == nullptr ? "unavailable" : error_message);
+    return std::nullopt;
+  }
 #elif defined(USE_MLU)
-  cnrtMemGetInfo(&free_memory, &total_memory);
+  const cnrtRet_t result = cnrtMemGetInfo(&free_memory, &total_memory);
+  if (result != cnrtSuccess) {
+    LOG(WARNING) << "Device memory query failed: api=cnrtMemGetInfo"
+                 << " device_index=" << index()
+                 << " driver_error=" << static_cast<int32_t>(result);
+    return std::nullopt;
+  }
 #elif defined(USE_CUDA) || defined(USE_ILU)
-  cudaMemGetInfo(&free_memory, &total_memory);
+  const cudaError_t result = cudaMemGetInfo(&free_memory, &total_memory);
+  if (result != cudaSuccess) {
+    LOG(WARNING) << "Device memory query failed: api=cudaMemGetInfo"
+                 << " device_index=" << index()
+                 << " driver_error=" << static_cast<int32_t>(result);
+    return std::nullopt;
+  }
 #elif defined(USE_MUSA)
-  musaMemGetInfo(&free_memory, &total_memory);
+  const musaError_t result = musaMemGetInfo(&free_memory, &total_memory);
+  if (result != musaSuccess) {
+    LOG(WARNING) << "Device memory query failed: api=musaMemGetInfo"
+                 << " device_index=" << index()
+                 << " driver_error=" << static_cast<int32_t>(result);
+    return std::nullopt;
+  }
 #elif defined(USE_DCU)
-  hipMemGetInfo(&free_memory, &total_memory);
+  const hipError_t result = hipMemGetInfo(&free_memory, &total_memory);
+  if (result != hipSuccess) {
+    LOG(WARNING) << "Device memory query failed: api=hipMemGetInfo"
+                 << " device_index=" << index()
+                 << " driver_error=" << static_cast<int32_t>(result);
+    return std::nullopt;
+  }
 #endif
   device_mem.total_memory = static_cast<int64_t>(total_memory);
   device_mem.free_memory = static_cast<int64_t>(free_memory);
   return device_mem;
 }
 
-int64_t Device::total_memory() { return get_device_mem().total_memory; }
+std::optional<int64_t> Device::try_free_memory() const {
+  const auto device_mem = query_device_mem();
+  if (!device_mem.has_value()) {
+    return std::nullopt;
+  }
+  return device_mem->free_memory;
+}
+
+int64_t Device::total_memory() {
+  const auto device_mem = query_device_mem();
+  return device_mem.has_value() ? device_mem->total_memory : 0;
+}
 
 void Device::empty_cache(int32_t device_index) {
   (void)device_index;
@@ -166,7 +211,10 @@ void Device::empty_cache(int32_t device_index) {
 #endif
 }
 
-int64_t Device::free_memory() { return get_device_mem().free_memory; }
+int64_t Device::free_memory() {
+  const auto device_mem = query_device_mem();
+  return device_mem.has_value() ? device_mem->free_memory : 0;
+}
 
 std::optional<AllocatorMemoryStats> Device::allocator_memory_stats() const {
   if (device_.type() != Platform::type_torch() || index() < 0) {
@@ -205,13 +253,16 @@ std::optional<AllocatorMemoryStats> Device::allocator_memory_stats() const {
 #if defined(USE_NPU) || defined(USE_CUDA) || defined(USE_ILU) || \
     defined(USE_MUSA)
   const auto& reserved = stats.reserved_bytes[stat_index];
-  if (reserved.current < 0 || reserved.peak < reserved.current ||
+  const auto& allocated = stats.allocated_bytes[stat_index];
+  if (allocated.current < 0 || reserved.current < allocated.current ||
+      reserved.peak < reserved.current ||
       static_cast<uint64_t>(reserved.peak) >
           std::numeric_limits<size_t>::max()) {
     return std::nullopt;
   }
   return AllocatorMemoryStats{static_cast<size_t>(reserved.current),
-                              static_cast<size_t>(reserved.peak)};
+                              static_cast<size_t>(reserved.peak),
+                              static_cast<size_t>(allocated.current)};
 #endif
 }
 

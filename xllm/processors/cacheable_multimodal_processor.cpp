@@ -46,32 +46,19 @@ bool CacheableMultimodalProcessor::process_multimodal(const MMInput& inputs,
   inputs.foreach (cache_lookup_visitor);
 
   MMItemVec miss_items;
-  if (!process_misses(cache_lookup_visitor.miss_inputs_, miss_items)) {
-    return false;
+  MMInput miss_inputs(std::move(cache_lookup_visitor.miss_inputs_));
+  if (!miss_inputs.empty()) {
+    MMData miss_data;
+    if (!inner_->process_multimodal(miss_inputs, miss_data)) {
+      return false;
+    }
+    CHECK_EQ(miss_data.items<MMItemVec>().size(), miss_inputs.size())
+        << "Multimodal processor returned mismatched item count.";
+    ProcessorCacheInsertVisitor insert(*cache_);
+    CHECK(miss_data.foreach (insert));
+    miss_items = std::move(miss_data.items<MMItemVec>());
   }
-
   assemble(cache_lookup_visitor.cache_hits_, std::move(miss_items), data);
-  return true;
-}
-
-bool CacheableMultimodalProcessor::process_misses(
-    const std::vector<MMInputItem>& miss_inputs,
-    MMItemVec& miss_items) const {
-  if (miss_inputs.empty()) {
-    return true;
-  }
-
-  MMInput inputs;
-  inputs.insert(miss_inputs);
-  MMData miss_data;
-  if (!inner_->process_multimodal(inputs, miss_data)) {
-    return false;
-  }
-  CHECK_EQ(miss_data.items<MMItemVec>().size(), miss_inputs.size())
-      << "Multimodal processor returned mismatched item count.";
-  ProcessorCacheInsertVisitor insert(*cache_);
-  CHECK(miss_data.foreach (insert));
-  miss_items = std::move(miss_data.items<MMItemVec>());
   return true;
 }
 

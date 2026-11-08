@@ -26,6 +26,7 @@ limitations under the License.
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 
@@ -117,12 +118,20 @@ class StreamCall : public Call {
     return true;
   }
 
+  bool write_text_and_finish(std::string_view text) {
+    controller_->http_response().set_content_type("text/plain; charset=utf-8");
+    controller_->response_attachment().append(text.data(), text.size());
+    XLLM_VERBOSE_TRACE() << "event=response_serialized x-request-id="
+                         << x_request_id_;
+    return true;
+  }
+
   bool finish_with_error(const StatusCode& code,
                          const std::string& error_message,
                          const std::string& param = "") {
     XLLM_VERBOSE_TRACE() << "event=request_error x-request-id=" << x_request_id_
                          << " message=" << error_message;
-    if (openai_http_) {
+    if (openai_http_ || (stream_ && !stream_started_)) {
       if (stream_finished_.load(std::memory_order_acquire)) {
         return false;
       }
@@ -154,11 +163,12 @@ class StreamCall : public Call {
   }
 
   // For stream response
-  bool write(Response& response) {
+  template <typename Message>
+  bool write(const Message& response) {
     if (stream_finished_.load(std::memory_order_acquire)) {
       return false;
     }
-    if (openai_http_ && !stream_started_) {
+    if (!stream_started_ && (stream_ || openai_http_)) {
       start_stream();
     }
     if (pa_ == nullptr) {
@@ -167,8 +177,9 @@ class StreamCall : public Call {
 
     io_buf_.clear();
     io_buf_.append("data: ");
-    if constexpr (std::is_same_v<Response, proto::ChatResponse> ||
-                  std::is_same_v<Response, proto::CompletionResponse>) {
+    if constexpr (std::is_same_v<Message, Response> &&
+                  (std::is_same_v<Response, proto::ChatResponse> ||
+                   std::is_same_v<Response, proto::CompletionResponse>)) {
       if (openai_http_ && use_openai_json(response)) {
         io_buf_.append(
             api_service::serialize_openai_response(*request_,
@@ -202,7 +213,7 @@ class StreamCall : public Call {
       return true;
     }
 
-    if (openai_http_ && !stream_started_) {
+    if (!stream_started_ && (stream_ || openai_http_)) {
       start_stream();
     }
     io_buf_.clear();

@@ -17,7 +17,9 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include "core/framework/chat_template/chat_template.h"
 #include "core/framework/config/model_config.h"
+#include "core/framework/tokenizer/tokenizer_args.h"
 #include "framework/chat_template/deepseek_v32_cpp_template.h"
 #include "framework/chat_template/deepseek_v4_cpp_template.h"
 #include "framework/chat_template/jinja_chat_template.h"

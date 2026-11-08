@@ -17,6 +17,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -200,7 +201,8 @@ class LifecycleWorker final : public LLMWorkerImpl {
   std::optional<ForwardOutput> execute_no_sync_on_stream(
       const LlmForwardInput& input,
       Stream& compute_stream,
-      ForwardCompletion /*completion*/) override {
+      ForwardCompletion /*completion*/,
+      const std::function<void()>& prepare_sampling = {}) override {
     auto stream_guard = compute_stream.set_stream_guard();
     CHECK(compute_stream.wait_event(input.runtime.metadata_ready_event));
     snapshots_.push_back(clone_states(states_));
@@ -211,6 +213,9 @@ class LifecycleWorker final : public LLMWorkerImpl {
             ? input.input_params.embedding.linear_state_ids.front()
             : input.input_params.embedding.linear_state_read_ids.front(),
         stride_);
+    if (prepare_sampling) {
+      prepare_sampling();
+    }
     return std::nullopt;
   }
 

@@ -17,17 +17,23 @@ limitations under the License.
 
 #include <brpc/server.h>
 #include <butil/at_exit.h>
+#include <butil/endpoint.h>
+#include <glog/logging.h>
 #include <unistd.h>
 
 #include <array>
 #include <csignal>
 
-#include "core/common/global_flags.h"
+#include "api_service/api_service.h"
+#include "core/disaggregation/pd_service.h"
+#include "core/distributed_runtime/collective_service.h"
+#include "core/distributed_runtime/worker_service.h"
 #include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/distributed_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/service_config.h"
 #include "health_reporter.h"
+#include "xllm_service.pb.h"
 
 namespace xllm {
 
@@ -44,6 +50,8 @@ constexpr const char* kApiServiceRoutes =
     "v1/models => ModelsHttp,"
     "v1/image/generation => ImageGenerationHttp,"
     "v1/audio/generation => AudioGenerationHttp,"
+    "v1/audio/transcriptions => AudioTranscriptionHttp,"
+    "v1/audio/translations => AudioTranslationHttp,"
     "v1/text/generation => TextGenerationHttp,"
     "v1/video/generation => VideoGenerationHttp,"
     "v1/rerank => RerankHttp,"
@@ -184,14 +192,14 @@ bool XllmServer::start(std::unique_ptr<APIService> service) {
   return true;
 }
 
-bool XllmServer::start(std::unique_ptr<DisaggPDService> service) {
+bool XllmServer::start(std::unique_ptr<PDService> service) {
   std::string addr("");
   if (!::xllm::ServiceConfig::get_instance().host().empty()) {
     addr =
         ::xllm::ServiceConfig::get_instance().host() + ":" +
         std::to_string(::xllm::DisaggPDConfig::get_instance().disagg_pd_port());
   }
-  if (!create_server((google::protobuf::Service*)(service.get()),
+  if (!create_server(service.get(),
                      addr,
                      ::xllm::DisaggPDConfig::get_instance().disagg_pd_port(),
                      "Disagg PD")) {

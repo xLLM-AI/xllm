@@ -67,7 +67,7 @@ namespace xllm {
 class PhysicalPagePoolTestPeer final {
  public:
   static void set_memory_query(PhysicalPagePool& pool,
-                               std::function<int64_t()> query) {
+                               std::function<std::optional<int64_t>()> query) {
     std::lock_guard<std::mutex> lock(pool.mtx_);
     pool.free_memory_query_ = std::move(query);
   }
@@ -982,6 +982,11 @@ class PreparedTestWorker final : public WorkerImpl {
       const LlmForwardInput& prepared) override {
     auto guard = compute_stream_->set_stream_guard();
     CHECK(compute_stream_->wait_event(prepared.runtime.metadata_ready_event));
+    StreamEventPtr inner_completion;
+    if (early_output_event_) {
+      inner_completion = compute_stream_->record_event();
+      CHECK(inner_completion != nullptr);
+    }
     CHECK_EQ(aclrtLaunchHostFunc(
                  compute_stream_->get_stream()->stream(),
                  [](void* data) {
@@ -994,11 +999,16 @@ class PreparedTestWorker final : public WorkerImpl {
                  },
                  this),
              ACL_SUCCESS);
+    if (without_output_) {
+      return std::nullopt;
+    }
     ForwardOutput output;
     if (with_tokens_) {
       output.sample_output.next_tokens = prepared.token_ids + 1;
     }
-    output.ready_event = compute_stream_->record_event();
+    output.ready_event = inner_completion != nullptr
+                             ? std::move(inner_completion)
+                             : compute_stream_->record_event();
     CHECK(output.ready_event != nullptr);
     return output;
   }
@@ -1027,13 +1037,17 @@ class PreparedTestWorker final : public WorkerImpl {
     }
   }
   bool finished() const { return finished_.load(); }
+  void without_output() { without_output_ = true; }
   void without_tokens() { with_tokens_ = false; }
+  void with_early_output_event() { early_output_event_ = true; }
   void with_contiguous_input() { contiguous_input_ = true; }
   bool released_early() const { return released_early_.load(); }
   int32_t released_inputs() const { return released_inputs_.load(); }
 
  private:
+  bool without_output_ = false;
   bool with_tokens_ = true;
+  bool early_output_event_ = false;
   bool contiguous_input_ = false;
   std::promise<void> entered_;
   std::promise<void> release_;
@@ -5509,34 +5523,64 @@ TEST_F(SpeculativePipelineTest,
 }
 
 TEST_F(SpeculativePipelineTest,
-       WorkerResultWaitsForDeviceBeforeReleasingPreparedInput) {
-  PreparedTestWorker worker(device_);
-  auto entered = worker.entered();
-  ASSERT_TRUE(TaskExecutionPipeline::create(
-                  state_thread_,
-                  {*target_, *target_executor_, target_cache_},
-                  worker,
-                  capacity_.common,
-                  pipeline_)
-                  .ok());
-  const auto submitted = pipeline_->submit(input(true));
-  ASSERT_TRUE(submitted.status.ok());
-  EXPECT_EQ(entered.wait_for(std::chrono::seconds(5)),
-            std::future_status::ready);
-  auto result = pipeline_->take_result_async(submitted.task_id);
-  result.wait(std::chrono::milliseconds(50));
-  EXPECT_FALSE(result.isReady());
-  EXPECT_EQ(worker.released_inputs(), 0);
-  worker.release();
-  auto completed = std::move(result).get();
-  EXPECT_TRUE(completed.status.ok());
-  EXPECT_EQ(completed.task_id, submitted.task_id);
-  EXPECT_FALSE(worker.released_early());
-  EXPECT_EQ(worker.released_inputs(), 1);
-  EXPECT_TRUE(completed.output.retained_inputs.empty());
-  EXPECT_TRUE(torch::equal(completed.output.sample_output.next_tokens.cpu(),
-                           torch::tensor({4}, torch::kInt32)));
-  pipeline_.reset();
+       WorkerConsumptionDefersInputsThroughWholeWorkerCompletion) {
+  for (const bool with_tokens : {false, true}) {
+    SCOPED_TRACE(with_tokens);
+    PreparedTestWorker worker(device_);
+    ScopeGuard cleanup([this, &worker] {
+      worker.release();
+      pipeline_.reset();
+    });
+    if (!with_tokens) {
+      worker.without_tokens();
+    }
+    // A composite worker can expose an inner event before its final input use.
+    worker.with_early_output_event();
+    auto entered = worker.entered();
+    ASSERT_TRUE(TaskExecutionPipeline::create(
+                    state_thread_,
+                    {*target_, *target_executor_, target_cache_},
+                    worker,
+                    capacity_.common,
+                    pipeline_)
+                    .ok());
+    const auto submitted = pipeline_->submit(input(true));
+    ASSERT_TRUE(submitted.status.ok());
+    EXPECT_EQ(entered.wait_for(std::chrono::seconds(5)),
+              std::future_status::ready);
+    auto result = pipeline_->take_result_async(submitted.task_id);
+    result.wait(std::chrono::seconds(2));
+    const bool consumed_before_completion = result.isReady();
+    const int32_t released_before_completion = worker.released_inputs();
+    const bool device_finished_before_release = worker.finished();
+    worker.release();
+    auto completed = std::move(result).get();
+    EXPECT_TRUE(consumed_before_completion);
+    EXPECT_FALSE(device_finished_before_release);
+    EXPECT_EQ(released_before_completion, 0);
+    EXPECT_TRUE(completed.status.ok());
+    EXPECT_EQ(completed.task_id, submitted.task_id);
+    ASSERT_NE(completed.output.ready_event, nullptr);
+    ASSERT_TRUE(completed.output.ready_event->synchronize());
+    EXPECT_FALSE(worker.released_early());
+    EXPECT_TRUE(completed.output.retained_inputs.empty());
+    EXPECT_EQ(completed.output.sample_output.next_tokens.defined(),
+              with_tokens);
+    if (with_tokens) {
+      EXPECT_TRUE(torch::equal(completed.output.sample_output.next_tokens.cpu(),
+                               torch::tensor({4}, torch::kInt32)));
+    }
+
+    const auto reused =
+        pipeline_->submit(input(true, /*token=*/8, /*position=*/7));
+    ASSERT_TRUE(reused.status.ok());
+    auto next = pipeline_->take_result_async(reused.task_id).get();
+    EXPECT_TRUE(next.status.ok());
+    EXPECT_GE(worker.released_inputs(), 1);
+    pipeline_.reset();
+    EXPECT_EQ(worker.released_inputs(), 2);
+    EXPECT_FALSE(worker.released_early());
+  }
 }
 
 TEST_F(SpeculativePipelineTest,
@@ -5566,9 +5610,13 @@ TEST_F(SpeculativePipelineTest,
 }
 
 TEST_F(SpeculativePipelineTest,
-       WorkerKeepsPackedHostViewsUntilResultCompletes) {
+       WorkerNulloptConsumptionDefersInputsUntilWorkerCompletion) {
   PreparedTestWorker worker(device_);
-  worker.with_contiguous_input();
+  ScopeGuard cleanup([this, &worker] {
+    worker.release();
+    pipeline_.reset();
+  });
+  worker.without_output();
   auto entered = worker.entered();
   ASSERT_TRUE(TaskExecutionPipeline::create(
                   state_thread_,
@@ -5577,6 +5625,62 @@ TEST_F(SpeculativePipelineTest,
                   capacity_.common,
                   pipeline_)
                   .ok());
+
+  const auto submitted = pipeline_->submit(input(true));
+  ASSERT_TRUE(submitted.status.ok());
+  ASSERT_EQ(entered.wait_for(std::chrono::seconds(5)),
+            std::future_status::ready);
+  auto result = pipeline_->take_result_async(submitted.task_id);
+  result.wait(std::chrono::seconds(2));
+  const bool consumed_before_completion = result.isReady();
+  const int32_t released_before_completion = worker.released_inputs();
+  const bool device_finished_before_release = worker.finished();
+
+  worker.release();
+  const auto completed = std::move(result).get();
+  EXPECT_TRUE(consumed_before_completion);
+  EXPECT_FALSE(device_finished_before_release);
+  EXPECT_EQ(released_before_completion, 0);
+  ASSERT_TRUE(completed.status.ok()) << completed.status.message();
+  EXPECT_EQ(completed.task_id, submitted.task_id);
+  EXPECT_EQ(completed.output.ready_event, nullptr);
+  EXPECT_FALSE(completed.output.sample_output.next_tokens.defined());
+
+  pipeline_.reset();
+  EXPECT_EQ(worker.released_inputs(), 1);
+  EXPECT_FALSE(worker.released_early());
+}
+
+TEST_F(SpeculativePipelineTest,
+       WorkerKeepsPackedHostViewsAndReloadFenceThroughDeviceCompletion) {
+  PreparedTestWorker worker(device_);
+  ScopeGuard cleanup([this, &worker] {
+    worker.release();
+    pipeline_.reset();
+  });
+  worker.with_contiguous_input();
+  auto entered = worker.entered();
+  auto load = create_layer_synchronizer(/*num_layers=*/1);
+  ASSERT_NE(load, nullptr);
+  Stream copy_stream(target_->device());
+  ASSERT_TRUE(load->record_stream(/*layer_index=*/0, &copy_stream));
+  auto producer_ready = copy_stream.record_event();
+  ASSERT_NE(producer_ready, nullptr);
+  std::weak_ptr<StreamEvent> retained_producer = producer_ready;
+  TaskKVLoad load_kv = [&](uint64_t) -> std::optional<HostKVLoadHandle> {
+    return HostKVLoadHandle{std::exchange(load, nullptr),
+                            /*layers_per_event=*/1,
+                            std::nullopt,
+                            std::exchange(producer_ready, nullptr)};
+  };
+  ASSERT_TRUE(
+      TaskExecutionPipeline::create(
+          state_thread_,
+          {*target_, *target_executor_, target_cache_, {}, std::move(load_kv)},
+          worker,
+          capacity_.common,
+          pipeline_)
+          .ok());
   proto::PackedForwardInput payload;
   ASSERT_TRUE(input(false).to_packed_proto(&payload));
   LlmForwardInput packed;
@@ -5598,13 +5702,25 @@ TEST_F(SpeculativePipelineTest,
             std::future_status::ready);
   packed = LlmForwardInput();
   EXPECT_FALSE(released->load());
+  auto pending_result = pipeline_->take_result_async(submitted.task_id);
+  pending_result.wait(std::chrono::seconds(2));
+  const bool consumed_before_completion = pending_result.isReady();
+  const bool released_before_completion = released->load();
+  const bool producer_retained_before_completion = !retained_producer.expired();
   worker.release();
-  auto result = pipeline_->take_result_async(submitted.task_id).get();
+  auto result = std::move(pending_result).get();
+  EXPECT_TRUE(consumed_before_completion);
+  EXPECT_FALSE(released_before_completion);
+  EXPECT_TRUE(producer_retained_before_completion);
   EXPECT_TRUE(result.status.ok());
-  EXPECT_TRUE(released->load());
+  ASSERT_NE(result.output.ready_event, nullptr);
+  ASSERT_TRUE(result.output.ready_event->synchronize());
   EXPECT_TRUE(torch::equal(result.output.sample_output.next_tokens.cpu(),
                            torch::tensor({2, 3}, torch::kInt32)));
   pipeline_.reset();
+  EXPECT_TRUE(released->load());
+  EXPECT_TRUE(retained_producer.expired());
+  EXPECT_FALSE(worker.released_early());
 }
 
 TEST_F(SpeculativePipelineTest, WorkerReloadLookupUsesUnpackedBatchIdentity) {
@@ -5710,11 +5826,20 @@ TEST_F(SpeculativePipelineTest,
   payload.Clear();
   owner = torch::Tensor();
   EXPECT_FALSE(released->load());
+  auto pending_result = pipeline_->take_result_async(submission.task_id);
+  pending_result.wait(std::chrono::seconds(2));
+  const bool consumed_before_completion = pending_result.isReady();
+  const bool released_before_completion = released->load();
   worker.release();
-  const auto result = pipeline_->take_result_async(submission.task_id).get();
+  const auto result = std::move(pending_result).get();
+  EXPECT_TRUE(consumed_before_completion);
+  EXPECT_FALSE(released_before_completion);
   ASSERT_TRUE(result.status.ok()) << result.status.message();
+  ASSERT_NE(result.output.ready_event, nullptr);
+  ASSERT_TRUE(result.output.ready_event->synchronize());
   // token 3, three distinct mRoPE coordinates 2/3/4, pixel 5 and increment 1.
   EXPECT_EQ(result.output.sample_output.next_tokens.cpu().item<int32_t>(), 18);
+  pipeline_.reset();
   EXPECT_TRUE(released->load());
   EXPECT_FALSE(worker.released_early());
 }

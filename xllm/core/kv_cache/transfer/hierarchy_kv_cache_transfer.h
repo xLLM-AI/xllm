@@ -51,6 +51,7 @@ class HierarchyKVCacheTransfer final {
 
   struct CacheRegistration {
     CacheRole role = CacheRole::TARGET;
+    bool enable_mla = false;
     std::vector<KVCache>* device_kv_caches = nullptr;
     KVCacheShape kv_cache_shape;
     KVCacheCreateOptions create_options;
@@ -63,7 +64,8 @@ class HierarchyKVCacheTransfer final {
     PROPERTY(uint32_t, tp_size);
     PROPERTY(int32_t, kv_split_size) = 1;
     PROPERTY(int32_t, kv_split_rank) = 0;
-    PROPERTY(bool, store_write_enabled) = true;
+    PROPERTY(uint32_t, dp_local_rank) = 0;
+    PROPERTY(uint32_t, kv_replica_rank) = 0;
     PROPERTY(uint32_t, layers);
     PROPERTY(double, host_blocks_factor) = 0.0;
     PROPERTY(uint32_t, layers_wise_copy_batchs) = 1;
@@ -98,6 +100,7 @@ class HierarchyKVCacheTransfer final {
   uint32_t transfer_kv_blocks(
       uint64_t batch_id,
       const std::vector<BlockTransferInfo>& block_transfer_info);
+  bool wait_for_load(uint64_t batch_id);
   uint32_t transfer_kv_blocks(uint64_t batch_id,
                               Slice<BlockTransferInfo>& block_transfer_info);
   std::vector<uint8_t> prefetch_kv_blocks(
@@ -112,6 +115,7 @@ class HierarchyKVCacheTransfer final {
   struct CacheDomain {
     CacheHandle handle = 0;
     CacheRole role = CacheRole::TARGET;
+    bool enable_mla = false;
     std::vector<KVCache>* device_kv_caches = nullptr;
     KVCacheShape kv_cache_shape;
     KVCacheCreateOptions create_options;
@@ -149,6 +153,8 @@ class HierarchyKVCacheTransfer final {
 
   mutable std::mutex mutex_;
   std::unordered_map<uint64_t, HostKVLoadHandle> load_handles_;
+  std::unordered_map<uint64_t, std::shared_ptr<LayerSynchronizer>>
+      load_completion_synchronizers_;
 };
 
 }  // namespace xllm

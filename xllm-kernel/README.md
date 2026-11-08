@@ -8,8 +8,10 @@ and standalone numerical validation and benchmarking. The package starts
 with Ascend NPU support and is organized to accommodate more operator
 families and backend implementations.
 
+
 It features:
 
+- Shared lazy platform detection and platform-specific backend discovery.
 - Operator contracts that define numerical, mutation and aliasing semantics.
 - A preparation-only registry that separates implementation selection from
   model execution.
@@ -25,41 +27,22 @@ for architecture, public APIs, operator development, and validation.
 
 ## Installation
 
-### Install xllm-kernel with the xlite backend
+### Install the standalone package
 
 Run the following from the **xLLM repository root**:
 
 ```bash
-# Adjust this path to your CANN installation.
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-python -m pip install "setuptools>=68" wheel
-
-# Install the Python package and compile its xlite backend in place.
-XLLM_KERNEL_BUILD_XLITE=1 MAX_JOBS=4 python -m pip install \
-  --no-build-isolation --no-deps -e ./xllm-kernel
+python -m pip install --no-deps -e ./xllm-kernel
 ```
-
-Check that the xlite backend can be loaded and prepared:
-
-```bash
-python - <<'PY'
-from xllm_kernel import initialize
-
-prepared = initialize(device="npu", overrides={"rms_norm": "xlite"})["rms_norm"]
-print(prepared.spec.name)  # npu.xlite.rms_norm
-PY
-```
-
 
 ### Use xllm-kernel with the xLLM wheel
 
-Complete the kernel installation above first, then build and install the xLLM
-wheel with the normal
+The xLLM wheel includes the kernel package. Build and install it with the normal
 [xLLM build prerequisites](../docs/src/content/docs/en/getting_started/quick_start.md).
 `xllm-kernel` is used by the Python model executor, so launch with
-`--model_impl=python` and a supported Python model. 
+`--model_impl=python` and a supported Python model.
 
-From the same repository root, after installing xllm-kernel :
+From the repository root:
 
 ```bash
 # 1. build the xLLM wheel and then install it

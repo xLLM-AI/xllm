@@ -18,6 +18,7 @@ limitations under the License.
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <utility>
 
 #include "common/metrics.h"
 #include "core/framework/config/kv_cache_store_config.h"
@@ -104,6 +105,16 @@ void UnifiedPolicy::schedule_from_unified_queue(
           : std::numeric_limits<int32_t>::max();
 
   std::vector<std::shared_ptr<Request>> preempted_request_vec;
+  const auto preempt_request = [&](auto it) {
+    std::shared_ptr<Request> request = *it;
+    ++budget.num_preempted_requests;
+    clear_mtp_bootstrap(request.get(), state);
+    state.kv_cache_manager->deallocate(request.get());
+    unified.erase(it);
+    request->set_preempted();
+    preempted_request_vec.emplace_back(std::move(request));
+  };
+  std::list<std::shared_ptr<Request>> deferred_prefill;
   bool is_preempt_iterator_valid = true;
   auto preempt_iterator = std::prev(unified.end());
 
@@ -128,6 +139,27 @@ void UnifiedPolicy::schedule_from_unified_queue(
     const size_t num_sequences = request->sequences().size();
     CHECK(num_sequences == 1) << "MixScheduler currently only supports one "
                                  "sequence per request.";
+
+    Sequence* candidate = request->sequences().front().get();
+    const size_t total_target_tokens =
+        candidate->is_prefill_stage()
+            ? candidate->num_tokens()
+            : candidate->num_tokens() + state.min_speculative_tokens_required;
+    if (state.kv_cache_manager->exceeds_total_capacity(candidate,
+                                                       total_target_tokens)) {
+      unified.pop_front();
+      clear_mtp_bootstrap(request.get(), state);
+      state.kv_cache_manager->deallocate(request.get());
+      state.output_dispatcher->process_failed_request(
+          request,
+          {StatusCode::RESOURCE_EXHAUSTED,
+           "Request exceeds total KV cache capacity"});
+      continue;
+    }
+    if (budget.kv_allocation_deferred && candidate->is_prefill_stage()) {
+      deferred_prefill.splice(deferred_prefill.end(), unified, unified.begin());
+      continue;
+    }
 
     std::vector<Sequence*> candidate_sequences;
     std::vector<size_t> candidate_token_budgets;
@@ -267,6 +299,7 @@ void UnifiedPolicy::schedule_from_unified_queue(
       }
       if (!alloc_success) {
         blocks_exhausted = true;
+        budget.kv_allocation_deferred = true;
         break;
       }
 
@@ -314,6 +347,10 @@ void UnifiedPolicy::schedule_from_unified_queue(
       break;
     }
 
+    if (candidate->is_prefill_stage()) {
+      deferred_prefill.splice(deferred_prefill.end(), unified, unified.begin());
+      continue;
+    }
     if (has_pending_block_release(state)) {
       break;
     }
@@ -326,14 +363,9 @@ void UnifiedPolicy::schedule_from_unified_queue(
         if (request_to_preempt->sequences()[0]
                 ->kv_state()
                 .kv_cache_tokens_num() != 0) {
-          ++budget.num_preempted_requests;
-          clear_mtp_bootstrap(request_to_preempt.get(), state);
-          state.kv_cache_manager->deallocate(request_to_preempt.get());
-          auto prev = preempt_iterator;
+          auto victim = preempt_iterator;
           preempt_iterator--;
-          unified.erase(prev);
-          request_to_preempt->set_preempted();
-          preempted_request_vec.push_back(request_to_preempt);
+          preempt_request(victim);
           find_preempt = true;
           break;
         } else {
@@ -347,26 +379,25 @@ void UnifiedPolicy::schedule_from_unified_queue(
       continue;
     }
 
-    // No enough memory to preempt.
-    if (candidate_sequences.empty() && state.running_sequences.empty()) {
-      if (has_pending_block_release(state)) {
-        VLOG(1) << "[HostCache][AdmissionDeferred] request="
-                << request->request_id()
-                << " waiting for asynchronous block release";
-      } else {
-        LOG(ERROR)
-            << "Request prompt is too long, no enough memory to schedule "
-            << "a single sequence.";
-        unified.pop_front();
-        clear_mtp_bootstrap(request.get(), state);
-        state.kv_cache_manager->deallocate(request.get());
-        state.output_dispatcher->process_failed_request(
-            request,
-            {StatusCode::RESOURCE_EXHAUSTED,
-             "No enough resource to schedule a single sequence"});
+    // Static capacity was checked before allocation. With no lower-priority
+    // work left to preempt, retain the request until backing memory is free.
+    break;
+  }
+
+  const bool reclaim_for_progress =
+      !deferred_prefill.empty() && state.running_sequences.empty() &&
+      preempted_request_vec.empty() && !has_pending_block_release(state);
+  unified.splice(unified.begin(), deferred_prefill);
+  if (reclaim_for_progress && unified.size() > 1) {
+    // An empty batch cannot release memory. Reclaim one lower-priority request
+    // so mutually blocked chunks can make progress on the next round.
+    for (auto victim = std::prev(unified.end()); victim != unified.begin();
+         --victim) {
+      if ((*victim)->sequences().front()->kv_cache_tokens_num() != 0) {
+        preempt_request(victim);
+        break;
       }
     }
-    break;
   }
 
   // Push preempted requests back to unified queue.

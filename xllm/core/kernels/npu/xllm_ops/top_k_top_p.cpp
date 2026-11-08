@@ -117,9 +117,13 @@ void top_k_top_p(torch::Tensor& logits,
   aclTensor* topP_ids = nullptr;
   int32_t device_id = logits.device().index();
   aclrtStream stream = c10_npu::getCurrentNPUStream(device_id).stream();
+  // aclnn compares in the logits dtype (unlike the CUDA/CPU fp32 cutoff);
+  // named so the converted storage outlives dispatch — create_acltensor
+  // keeps only the raw pointer.
+  const torch::Tensor top_p = topP.to(logits.scalar_type());
   create_acltensor(&logits_ids, logits);
   create_acltensor(&topK_ids, topK);
-  create_acltensor(&topP_ids, topP.to(logits.scalar_type()));
+  create_acltensor(&topP_ids, top_p);
 
   uint64_t workspace_size = 0;
   aclOpExecutor* executor = nullptr;

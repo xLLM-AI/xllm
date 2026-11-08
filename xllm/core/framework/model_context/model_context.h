@@ -16,9 +16,9 @@ limitations under the License.
 #pragma once
 
 #if defined(USE_NPU)
-#include <acl/acl.h>
-
-#include "layers/npu/buffer/atb_workspace.h"
+namespace atb {
+class Context;
+}  // namespace atb
 #endif
 
 #include <memory>
@@ -29,10 +29,14 @@ limitations under the License.
 #include "core/framework/model/model_args.h"
 #include "core/framework/parallel_state/parallel_args.h"
 #include "core/framework/quantization/quant_args.h"
-#include "core/platform/model_stream_registry.h"
-#include "framework/parallel_state/parallel_args.h"
 
 namespace xllm {
+
+class ModelStreamRegistry;
+
+#if defined(USE_NPU)
+class AtbWorkspace;
+#endif
 
 // Internal optimization configuration.
 // This struct holds all optimization techniques that are automatically

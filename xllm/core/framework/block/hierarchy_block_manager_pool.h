@@ -20,6 +20,7 @@ limitations under the License.
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 
 #include "core/framework/block/block_manager_pool.h"
 #include "core/framework/block/composite_block_manager.h"
@@ -65,6 +66,8 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
                        const HostCacheRestorePoint& selected_restore) override;
 
   void deallocate(Sequence* sequence) override;
+  void publish_prefix(Sequence* sequence) override;
+  void publish_prefix(Sequence* sequence, size_t num_tokens) override;
 
   void transfer_blocks(BatchGroup& batches) override;
   void transfer_blocks(RecBatchGroup& batches) override;
@@ -80,12 +83,32 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
   void drain_prefetch_completions() override;
 
  private:
+  struct PendingLoadTransfer {
+    Sequence* sequence;
+    size_t restore_tokens;
+    BlockTransferInfo transfer_info;
+  };
+
+  struct RestoringSequence {
+    Sequence* sequence;
+    size_t restore_tokens;
+    std::shared_ptr<KVCacheBlockLease> lease;
+  };
+
+  struct RestoreCompletion {
+    int32_t dp_rank;
+    uint64_t batch_id;
+    bool success;
+  };
+
   friend class HierarchyPoolTestPeer;
-  void release_host_match(Sequence* sequence, int32_t dp_rank);
+  void release_host_match(Sequence* sequence);
   void quarantine_prefetch(Sequence* sequence, int32_t dp_rank);
   void collect_offload_pairs(Sequence* sequence);
   bool should_probe_prefix_cache(Sequence* sequence) const;
   void transfer_offload_blocks();
+  void transfer_load_blocks(int32_t dp_rank, uint64_t batch_id);
+  void complete_restore(const RestoreCompletion& completion);
 
  private:
   std::shared_ptr<KVCacheTransferCoordinatorBase> transfer_coordinator_;
@@ -99,9 +122,15 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
   std::vector<bool> storage_prefetch_disabled_;
 
   // Per-DP H2D descriptions waiting to be registered with workers. Blocks stay
-  // pinned by the sequence and then its batch's restore lease.
-  std::vector<std::vector<BlockTransferInfo>> load_block_transfer_infos_;
+  // pinned by the sequence and then its batch's restore lease. The scheduler
+  // owns restore registration, cancellation and publication; completion threads
+  // only enqueue events under prefetch_completion_mutex_.
+  std::vector<std::vector<PendingLoadTransfer>> load_block_transfer_infos_;
   std::vector<std::weak_ptr<KVCacheBlockLease>> host_restore_leases_;
+  std::unordered_map<Sequence*, std::weak_ptr<KVCacheBlockLease>>
+      restoring_sequences_;
+  std::vector<std::unordered_map<uint64_t, std::vector<RestoringSequence>>>
+      inflight_restores_;
   std::vector<OffloadBlockPairQueue> offload_block_pair_queues_;
 
   // Guards the destruction-time invariant for asynchronous prefetch callbacks.
@@ -110,10 +139,12 @@ class HierarchyBlockManagerPool : public BlockManagerPool {
   std::mutex prefetch_completion_mutex_;
   PrefetchCompletionCallback prefetch_completion_callback_;
   std::deque<std::function<void()>> prefetch_completions_;
+  std::deque<RestoreCompletion> restore_completions_;
 
   // Declared last so destruction waits for callbacks before any manager or
   // block storage captured by those callbacks is released.
   KVTransferTracker offload_transfers_;
+  KVTransferTracker restore_transfers_;
 };
 
 }  // namespace xllm

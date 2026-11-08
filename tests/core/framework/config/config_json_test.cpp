@@ -732,7 +732,6 @@ TEST(ConfigJsonTest, FromJsonUsesParsedOverrides) {
 
   EXPECT_EQ(kv_cache_config.kv_cache_dtype(), "auto");
   EXPECT_EQ(kv_cache_config.indexer_cache_dtype(), "auto");
-  EXPECT_EQ(scheduler_config.max_decode_token_per_sequence(), 256);
 }
 
 TEST(ExecutionConfigTest, GraphWarmupIsEnabledByDefault) {
@@ -877,7 +876,7 @@ TEST(KVCacheConfigValidationTest, RejectsUnsetCeilingOutsideElasticVmm) {
         config.enable_vmm_kvcache(false).max_memory_utilization(0.0);
         config.validate();
       },
-      "Only elastic VMM");
+      "Physical KV cache and fixed VMM require positive utilization");
   EXPECT_DEATH(
       {
         KVCacheConfig config;
@@ -886,7 +885,7 @@ TEST(KVCacheConfigValidationTest, RejectsUnsetCeilingOutsideElasticVmm) {
             .max_memory_utilization(0.0);
         config.validate();
       },
-      "Only elastic VMM");
+      "Physical KV cache and fixed VMM require positive utilization");
 }
 
 TEST(KVCacheConfigValidationTest, RejectsInvalidUtilizationCeilings) {
@@ -1115,8 +1114,6 @@ TEST(ConfigJsonTest, LoadJsonFileReadsConfigFixture) {
   EXPECT_FALSE(scheduler_config.enable_chunked_prefill());
   EXPECT_EQ(scheduler_config.max_tokens_per_chunk_for_prefill(), 512);
   EXPECT_EQ(scheduler_config.chunked_match_frequency(), 3);
-  EXPECT_TRUE(scheduler_config.use_zero_evict());
-  EXPECT_EQ(scheduler_config.max_decode_token_per_sequence(), 128);
   EXPECT_EQ(scheduler_config.priority_strategy(), "priority");
   EXPECT_DOUBLE_EQ(scheduler_config.aggressive_coeff(), 1.5);
   EXPECT_DOUBLE_EQ(scheduler_config.starve_threshold(), 2.0);
@@ -1241,7 +1238,6 @@ TEST(ConfigPrecedenceTest, CommandLineFlagOverridesJson) {
   // CLI > Config: the command-line value wins over the JSON entry.
   EXPECT_EQ(kv_cache_config.block_size(), 64);
   EXPECT_DOUBLE_EQ(kv_cache_config.max_memory_utilization(), 0.7);
-  EXPECT_TRUE(kv_cache_config.max_memory_utilization_configured());
   EXPECT_EQ(scheduler_config.max_tokens_per_batch(), 2048);
   EXPECT_EQ(model_config.model_impl(), "native");
 
@@ -1273,42 +1269,11 @@ TEST(ConfigPrecedenceTest, JsonOverridesDefaultWhenFlagUnspecified) {
   // Config > Defaults.
   EXPECT_EQ(kv_cache_config.block_size(), 16);
   EXPECT_DOUBLE_EQ(kv_cache_config.max_memory_utilization(), 0.5);
-  EXPECT_TRUE(kv_cache_config.max_memory_utilization_configured());
   EXPECT_FALSE(kv_cache_config.enable_prefix_cache());
   EXPECT_EQ(scheduler_config.max_seqs_per_batch(), 64);
 }
 
-TEST(ConfigPrecedenceTest, SerializesExplicitDefaultMemoryUtilization) {
-  google::FlagSaver flag_saver;
-  KVCacheConfig kv_cache_config;
-  const JsonReader json =
-      config::parse_json_string(R"json({"max_memory_utilization":0.8})json");
-
-  kv_cache_config.from_flags();
-  kv_cache_config.from_json(json);
-
-  EXPECT_TRUE(kv_cache_config.max_memory_utilization_configured());
-  nlohmann::ordered_json serialized = nlohmann::ordered_json::object();
-  kv_cache_config.append_config_json(serialized);
-  ASSERT_TRUE(serialized.contains("max_memory_utilization"));
-  EXPECT_DOUBLE_EQ(serialized.at("max_memory_utilization"), 0.8);
-}
-
-TEST(ConfigPrecedenceTest, PreservesExplicitCommandLineDefaultMemoryCap) {
-  google::FlagSaver flag_saver;
-  google::SetCommandLineOption("max_memory_utilization", "0.8");
-  KVCacheConfig kv_cache_config;
-  kv_cache_config.from_flags();
-  kv_cache_config.from_json(config::parse_json_string(R"json({})json"));
-
-  EXPECT_TRUE(kv_cache_config.max_memory_utilization_configured());
-  nlohmann::ordered_json serialized = nlohmann::ordered_json::object();
-  kv_cache_config.append_config_json(serialized);
-  ASSERT_TRUE(serialized.contains("max_memory_utilization"));
-  EXPECT_DOUBLE_EQ(serialized.at("max_memory_utilization"), 0.8);
-}
-
-TEST(ConfigPrecedenceTest, LeavesMemoryUtilizationUnconfiguredWhenAbsent) {
+TEST(ConfigPrecedenceTest, OmitsDefaultMemoryUtilizationFromSerializedConfig) {
   google::FlagSaver flag_saver;
   KVCacheConfig kv_cache_config;
   const JsonReader json = config::parse_json_string(R"json({})json");
@@ -1316,26 +1281,12 @@ TEST(ConfigPrecedenceTest, LeavesMemoryUtilizationUnconfiguredWhenAbsent) {
   kv_cache_config.from_flags();
   kv_cache_config.from_json(json);
 
-  EXPECT_FALSE(kv_cache_config.max_memory_utilization_configured());
   nlohmann::ordered_json serialized = nlohmann::ordered_json::object();
   kv_cache_config.append_config_json(serialized);
   EXPECT_FALSE(serialized.contains("max_memory_utilization"));
 }
 
-TEST(ConfigPrecedenceTest, PreservesProgrammaticDefaultMemoryUtilizationCap) {
-  google::FlagSaver flag_saver;
-  KVCacheConfig kv_cache_config;
-  kv_cache_config.max_memory_utilization(0.8);
-  kv_cache_config.from_json(config::parse_json_string(R"json({})json"));
-
-  EXPECT_TRUE(kv_cache_config.max_memory_utilization_configured());
-  nlohmann::ordered_json serialized = nlohmann::ordered_json::object();
-  kv_cache_config.append_config_json(serialized);
-  ASSERT_TRUE(serialized.contains("max_memory_utilization"));
-  EXPECT_DOUBLE_EQ(serialized.at("max_memory_utilization"), 0.8);
-}
-
-TEST(ConfigPrecedenceTest, PreservesDisabledMemoryUtilizationCapOnRoundTrip) {
+TEST(ConfigPrecedenceTest, PreservesZeroMemoryUtilizationOnRoundTrip) {
   nlohmann::ordered_json serialized = nlohmann::ordered_json::object();
   {
     google::FlagSaver flag_saver;
@@ -1351,7 +1302,6 @@ TEST(ConfigPrecedenceTest, PreservesDisabledMemoryUtilizationCapOnRoundTrip) {
   KVCacheConfig restored;
   restored.from_flags();
   restored.from_json(config::parse_json_string(serialized.dump()));
-  EXPECT_TRUE(restored.max_memory_utilization_configured());
   EXPECT_DOUBLE_EQ(restored.max_memory_utilization(), 0.0);
 }
 
@@ -1387,7 +1337,7 @@ TEST(ConfigPrecedenceTest, InitializeAppliesCliOverConfigOverDefault) {
 
   // Pin the default-asserted flag so this test is self-contained regardless of
   // sibling tests; FlagSaver reverts it on exit.
-  FLAGS_max_decode_token_per_sequence = 256;
+  FLAGS_chunked_match_frequency = 2;
 
   const std::filesystem::path config_path =
       std::filesystem::temp_directory_path() /
@@ -1407,8 +1357,7 @@ TEST(ConfigPrecedenceTest, InitializeAppliesCliOverConfigOverDefault) {
   EXPECT_EQ(kv_cache_config.block_size(), 64);               // CLI    > Config
   EXPECT_EQ(scheduler_config.max_tokens_per_batch(), 8192);  // Config > Default
   EXPECT_EQ(scheduler_config.max_seqs_per_batch(), 64);      // Config > Default
-  EXPECT_EQ(scheduler_config.max_decode_token_per_sequence(),
-            256);  // Default
+  EXPECT_EQ(scheduler_config.chunked_match_frequency(), 2);  // Default
 
   std::filesystem::remove(config_path);
 }

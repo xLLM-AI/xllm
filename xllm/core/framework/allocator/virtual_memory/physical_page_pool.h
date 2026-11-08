@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <torch/types.h>
 
+#include <chrono>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -30,6 +31,29 @@ limitations under the License.
 namespace xllm {
 
 class SharedPhysicalPageMapping;
+
+enum class PhysicalPagePoolFailureReason {
+  NONE,
+  LOGICAL_CAPACITY,
+  LOGICAL_ACCOUNTING_MISMATCH,
+  FREE_MEMORY_QUERY_FAILED,
+  REQUEST_SIZE_OVERFLOW,
+  INSUFFICIENT_FREE_MEMORY,
+  PHYSICAL_PAGE_CREATION,
+  GROWTH_BACKOFF,
+  POST_ALLOCATION_MEMORY_QUERY_FAILED,
+  POST_ALLOCATION_HEADROOM,
+  SHARED_PAGE_MAPPING,
+};
+
+const char* physical_page_pool_failure_reason_name(
+    PhysicalPagePoolFailureReason reason);
+
+struct PhysicalPageBatchResult {
+  std::vector<std::unique_ptr<PhysicalPage>> pages;
+  PhysicalPagePoolFailureReason failure_reason =
+      PhysicalPagePoolFailureReason::NONE;
+};
 
 // Owns stable logical page slots and their optional physical backing. Eager
 // initialization preserves fixed-pool callers; lazy initialization commits
@@ -74,6 +98,8 @@ class PhysicalPagePool final {
   // Returns empty vector if not enough pages available
   // If partial allocation fails, all acquired pages are returned to pool
   std::vector<std::unique_ptr<PhysicalPage>> batch_get(size_t count);
+  // Return pages and the reason when this request cannot be satisfied.
+  PhysicalPageBatchResult batch_get_with_reason(size_t count);
 
   // Reserve contiguous pages by scanning from the right side.
   // Returns the starting page_id of the contiguous segment, or -1 if not found
@@ -144,12 +170,22 @@ class PhysicalPagePool final {
  private:
   friend class PhysicalPagePoolTestPeer;
 
-  bool materialize_pages_locked(const std::vector<page_id_t>& page_ids);
+  bool materialize_pages_locked(
+      const std::vector<page_id_t>& page_ids,
+      PhysicalPagePoolFailureReason* failure_reason = nullptr);
   void activate_pages_locked(const std::vector<page_id_t>& page_ids);
   size_t allocation_headroom_locked(
       size_t free_bytes,
       std::optional<AllocatorMemoryStats> allocator_stats) const;
   void reserve_pages_locked(const std::vector<page_id_t>& page_ids);
+  bool growth_backoff_active_locked(size_t growth_pages) const;
+  void record_growth_failure_locked(size_t growth_pages);
+
+  struct GrowthPressure {
+    size_t failed_growth_pages;
+    std::chrono::milliseconds retry_delay;
+    std::chrono::steady_clock::time_point retry_after;
+  };
 
   PhysicalPagePool() = default;
   ~PhysicalPagePool() = default;
@@ -167,6 +203,7 @@ class PhysicalPagePool final {
   size_t allocation_headroom_bytes_ = 0;
   size_t growth_reserve_bytes_ = 0;
   VmmMemoryBudget execution_memory_budget_;
+  std::optional<GrowthPressure> growth_pressure_;
 
   mutable std::mutex mtx_;
   // Pages owned by the pool, indexed by page_id.
@@ -190,9 +227,10 @@ class PhysicalPagePool final {
 
   // Only the slow physical-growth path uses these boundaries. Tests can inject
   // deterministic memory snapshots and partial allocation failures.
-  std::function<int64_t()> free_memory_query_;
+  std::function<std::optional<int64_t>()> free_memory_query_;
   std::function<std::optional<AllocatorMemoryStats>()> allocator_memory_query_;
   std::function<std::unique_ptr<PhysicalPage>(page_id_t)> page_factory_;
+  std::function<std::chrono::steady_clock::time_point()> growth_clock_;
 };
 
 }  // namespace xllm

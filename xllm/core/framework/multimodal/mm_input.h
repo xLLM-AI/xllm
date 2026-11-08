@@ -16,6 +16,7 @@ limitations under the License.
 #pragma once
 
 #include <cstddef>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <string>
@@ -92,13 +93,14 @@ struct MMPayload {
   }
 
   std::string data;
-  size_t offset;
+  size_t offset = 0;
 };
 
 class MMInput {
  public:
   MMInput() = default;
   explicit MMInput(std::string payload) : payload_(std::move(payload)) {}
+  explicit MMInput(std::vector<MMInputItem> items) : items_(std::move(items)) {}
 
   bool empty() const { return items_.empty(); }
   void clear() { items_.clear(); }
@@ -106,8 +108,10 @@ class MMInput {
 
   const std::vector<MMInputItem>& items() const { return items_; }
 
-  void insert(const std::vector<MMInputItem>& inputs) {
-    items_.insert(items_.end(), inputs.begin(), inputs.end());
+  void insert(std::vector<MMInputItem>&& inputs) {
+    items_.insert(items_.end(),
+                  std::make_move_iterator(inputs.begin()),
+                  std::make_move_iterator(inputs.end()));
   }
 
   std::vector<torch::Tensor> get_decode_data(MMType type) const {
@@ -146,6 +150,8 @@ enum class MMErrCode : uint8_t {
   PARSE_EMB_ERR = 5,
   DECODE_ERR = 6,
   HANDLER_ERR = 7,
+  DURATION_EXCEEDED = 8,
+  AUDIO_DECODE_ERR = 9,
 };
 
 inline const char* MMErrToString(MMErrCode code) {
@@ -160,6 +166,10 @@ inline const char* MMErrToString(MMErrCode code) {
       return "Failed to parse input multimodal embedding.";
     case MMErrCode::DECODE_ERR:
       return "Failed to decode multimodal input.";
+    case MMErrCode::DURATION_EXCEEDED:
+      return "Maximum audio duration exceeded.";
+    case MMErrCode::AUDIO_DECODE_ERR:
+      return "Failed to decode audio file.";
     case MMErrCode::INVALID_URL_ERR:
       return "Multimodal input url must be data URL (base64 or binary) / "
              "http(s) URL / local file URL.";

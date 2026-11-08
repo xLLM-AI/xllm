@@ -14,13 +14,14 @@ def write_report(path: Path, report: dict[str, Any]) -> None:
         "",
         f"Status: {report['status']}",
         "",
-        "| Case | Operation | Implementation | Status | Device median (µs/op) |",
-        "| --- | --- | --- | --- | ---: |",
+        "| Case | Operation | Solution | Variant | Binding | Implementation | Status | Device median (µs/op) |",
+        "| --- | --- | --- | --- | --- | --- | --- | ---: |",
     ]
     for row in report["cases"]:
         median = row.get("timing", {}).get("device_interval_us", {}).get("median")
         lines.append(
-            f"| {row['case_id']} | {row['operation']} | {row['implementation']} | {row['status']} | "
+            f"| {row['case_id']} | {row['operation']} | {row['solution']} | {row['variant'] or '—'} | "
+            f"{row['binding']} | {row['implementation']} | {row['status']} | "
             f"{median if median is not None else '—'} |"
         )
     path.with_suffix(".md").write_text("\n".join(lines) + "\n")

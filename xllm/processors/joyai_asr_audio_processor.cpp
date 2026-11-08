@@ -210,6 +210,7 @@ bool JoyaiASRAudioProcessor::process(const torch::Tensor& origin_audio,
       (frames + kConformerSubsampling - 1) / kConformerSubsampling;
   const int64_t token_num = subsampled / downsample_rate_;
 
+  output_item.set_metadata(metadata);
   output_item.add("input_features", mel);
   output_item.add("speech_lengths",
                   torch::tensor({static_cast<int64_t>(frames)}, torch::kInt64));

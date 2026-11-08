@@ -15,7 +15,6 @@ limitations under the License.
 
 #include "remote_worker.h"
 
-#include <brpc/controller.h>
 #include <folly/Unit.h>
 #include <folly/futures/Future.h>
 #include <glog/logging.h>
@@ -26,15 +25,9 @@ limitations under the License.
 #include <optional>
 #include <utility>
 
-#include "common/global_flags.h"
-#include "common/metrics.h"
 #include "core/framework/config/service_config.h"
-#include "core/kv_cache/storage/kv_cache.h"
-#include "framework/model/model_params_view.h"
-#include "framework/state_dict/state_dict.h"
 #include "runtime/rec_forward_params.h"
 #include "runtime/vlm_forward_params.h"
-#include "util/hash_util.h"
 
 namespace xllm {
 
@@ -75,10 +68,6 @@ bool RemoteWorker::wait_for_server_ready(const std::string& server_address) {
   return true;
 }
 
-bool RemoteWorker::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
-  return channel_->allocate_kv_cache(kv_cache_shape);
-}
-
 std::optional<std::string> RemoteWorker::spec_calibration(
     const SpecCalibrationCommand& command) {
   return channel_->spec_calibration(command);
@@ -110,24 +99,6 @@ bool RemoteWorker::unlink_p2p(const std::string& remote_addr) {
   return channel_->unlink_p2p(remote_addr);
 }
 
-bool RemoteWorker::init_model(const std::string& model_weights_path,
-                              int32_t random_seed,
-                              MasterStatus master_status) {
-  return channel_->init_model(model_weights_path, random_seed, master_status);
-}
-
-std::tuple<int64_t, int64_t> RemoteWorker::estimate_kv_cache_capacity() {
-  proto::Empty req;
-  proto::DeviceMemory mem;
-  brpc::Controller cntl;
-  int64_t available_memory = 0;
-  int64_t total_memory = 0;
-
-  channel_->estimate_kv_cache_capacity(available_memory, total_memory);
-  std::tuple<int64_t, int64_t> result(available_memory, total_memory);
-  return result;
-}
-
 bool RemoteWorker::pull_kv_blocks(
     const uint64_t src_cluster_id,
     const std::string& src_addr,
@@ -135,19 +106,11 @@ bool RemoteWorker::pull_kv_blocks(
   return channel_->pull_kv_blocks(src_cluster_id, src_addr, mappings);
 }
 
-std::optional<ForwardOutput> RemoteWorker::step(const LlmForwardInput& inputs) {
-  NOT_IMPLEMENTED();
-  return std::nullopt;
-}
-
 folly::SemiFuture<std::tuple<int64_t, int64_t>>
 RemoteWorker::estimate_kv_cache_capacity_async() {
   folly::Promise<std::tuple<int64_t, int64_t>> promise;
   auto future = promise.getSemiFuture();
   threadpool_.schedule([this, promise = std::move(promise)]() mutable {
-    proto::Empty req;
-    proto::DeviceMemory mem;
-    brpc::Controller cntl;
     int64_t available_memory = 0;
     int64_t total_memory = 0;
 
@@ -156,13 +119,6 @@ RemoteWorker::estimate_kv_cache_capacity_async() {
     promise.setValue(result);
   });
   return future;
-}
-
-folly::SemiFuture<std::optional<ForwardOutput>> RemoteWorker::step_async(
-    const LlmForwardInput& input) {
-  LOG(FATAL) << "RemoteWorker Method step_async with "
-                "LlmForwardInput param is UnImplemented.";
-  return folly::makeSemiFuture(std::optional<ForwardOutput>(std::nullopt));
 }
 
 folly::SemiFuture<std::optional<RawForwardOutput>>
@@ -174,12 +130,6 @@ RemoteWorker::step_remote_async(const LlmForwardInput& input) {
         channel_->execute_llm_model_async(input, promise);
       });
   return future;
-}
-
-folly::SemiFuture<std::optional<ForwardOutput>> RemoteWorker::step_async(
-    const DiTForwardInput& /*input*/) {
-  LOG(FATAL) << "Native DiT remote execution requires step_remote_async";
-  return folly::makeSemiFuture(std::optional<ForwardOutput>{});
 }
 
 folly::SemiFuture<std::optional<RawForwardOutput>>
@@ -196,12 +146,6 @@ RemoteWorker::step_remote_async(const DiTForwardInput& input) {
 folly::SemiFuture<std::optional<ForwardOutput>> RemoteWorker::step_async(
     const RecForwardInput& /*input*/) {
   LOG(FATAL) << "Native Rec remote execution requires step_remote_async";
-  return folly::makeSemiFuture(std::optional<ForwardOutput>{});
-}
-
-folly::SemiFuture<std::optional<ForwardOutput>> RemoteWorker::step_async(
-    const VlmForwardInput& /*input*/) {
-  LOG(FATAL) << "Native VLM remote execution requires step_remote_async";
   return folly::makeSemiFuture(std::optional<ForwardOutput>{});
 }
 
@@ -287,27 +231,6 @@ folly::SemiFuture<bool> RemoteWorker::allocate_kv_cache_with_transfer_async(
   return future;
 }
 
-folly::SemiFuture<bool> RemoteWorker::pull_kv_blocks_async(
-    const uint64_t src_cluster_id,
-    const std::string& src_addr,
-    const std::vector<KVTransferMapping>& mappings) {
-  folly::Promise<bool> promise;
-  auto future = promise.getSemiFuture();
-  threadpool_.schedule([this,
-                        src_cluster_id,
-                        src_addr,
-                        mappings,
-                        promise = std::move(promise)]() mutable {
-    if (!channel_->pull_kv_blocks(src_cluster_id, src_addr, mappings)) {
-      LOG(ERROR) << "PullKVCache failed";
-      promise.setValue(false);
-    } else {
-      promise.setValue(true);
-    }
-  });
-  return future;
-}
-
 folly::SemiFuture<uint32_t> RemoteWorker::transfer_kv_blocks(
     const std::vector<BlockTransferInfo>& block_transfer_info) {
   folly::Promise<uint32_t> promise;
@@ -320,14 +243,31 @@ folly::SemiFuture<uint32_t> RemoteWorker::transfer_kv_blocks(
   return future;
 }
 
-void RemoteWorker::transfer_kv_blocks(
+folly::SemiFuture<uint32_t> RemoteWorker::transfer_kv_blocks(
     const uint64_t batch_id,
     const std::vector<BlockTransferInfo>& block_transfer_info) {
+  folly::Promise<uint32_t> promise;
+  auto future = promise.getSemiFuture();
   threadpool_.schedule([this,
                         batch_id = batch_id,
-                        block_transfer_info = block_transfer_info]() mutable {
+                        block_transfer_info = block_transfer_info,
+                        promise = std::move(promise)]() mutable {
+    // Registration must finish before this queue can submit the matching
+    // forward. Device completion waits independently to preserve overlap.
     channel_->transfer_kv_blocks(batch_id, block_transfer_info);
+    const uint32_t block_count =
+        static_cast<uint32_t>(block_transfer_info.size());
+    copy_threadpool_.schedule([this,
+                               batch_id,
+                               block_count,
+                               promise = std::move(promise)]() mutable {
+      CHECK(channel_->wait_for_kv_blocks_transfer(batch_id))
+          << "Host KV restore completion could not be confirmed for batch_id="
+          << batch_id;
+      promise.setValue(block_count);
+    });
   });
+  return future;
 }
 
 void RemoteWorker::prefetch_from_storage(
@@ -364,12 +304,6 @@ RemoteWorker::get_last_vlm_step_result_async() {
     channel_->get_last_vlm_step_result_async(promise);
   });
   return future;
-}
-
-int64_t RemoteWorker::get_active_activation_memory() {
-  int64_t memory = 0;
-  channel_->get_active_activation_memory(memory);
-  return memory;
 }
 
 folly::SemiFuture<int64_t> RemoteWorker::get_active_activation_memory_async() {

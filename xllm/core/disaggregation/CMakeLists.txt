@@ -1,0 +1,28 @@
+include(cc_library)
+
+cc_library(
+  NAME
+    disaggregation
+  HDRS
+    pd_scheduler.h
+    pd_service.h
+    pd_service_impl.h
+    pd_request_converter.h
+    pd_response.h
+    pd_kv_response.h
+  SRCS
+    pd_scheduler.cpp
+    pd_service.cpp
+    pd_service_impl.cpp
+    pd_request_converter.cpp
+    pd_response.cpp
+    pd_kv_response.cpp
+  DEPS
+    :scheduler
+    :distributed_runtime
+)
+target_link_libraries(disaggregation PRIVATE
+  :xllm_server
+  :distributed_vmm_coordinator
+  :api_response
+  :pd_topology_guard)

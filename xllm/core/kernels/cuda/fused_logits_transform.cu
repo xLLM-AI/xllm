@@ -436,16 +436,12 @@ __device__ float parameter_value(const void* values,
   return static_cast<float>(static_cast<const c10::BFloat16*>(values)[row]);
 }
 
+// The cutoff stays fp32 regardless of the parameter dtype; the CPU fallback
+// compares its fp32 cumsum the same way.
 __device__ float probability_cutoff(const void* top_p,
                                     torch::ScalarType dtype,
                                     int32_t row) {
-  float cutoff = 1.0F - parameter_value(top_p, dtype, row);
-  if (dtype == torch::kFloat16) {
-    cutoff = static_cast<float>(static_cast<c10::Half>(cutoff));
-  } else if (dtype == torch::kBFloat16) {
-    cutoff = static_cast<float>(static_cast<c10::BFloat16>(cutoff));
-  }
-  return cutoff;
+  return 1.0F - parameter_value(top_p, dtype, row);
 }
 
 struct TopPBoundary {

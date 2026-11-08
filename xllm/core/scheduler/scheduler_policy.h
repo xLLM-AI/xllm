@@ -22,6 +22,7 @@ limitations under the License.
 #include <functional>
 #include <list>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 #include "framework/block/kv_cache_manager.h"
@@ -90,6 +91,9 @@ struct ScheduleBudget {
   // current scheduling round.
   std::vector<size_t> dp_group_token_caps;
   std::vector<size_t> dp_group_token_used;
+  // A real allocation failure stops further prefill growth in this round.
+  // The next round retries after already scheduled work can release memory.
+  bool kv_allocation_deferred = false;
 };
 
 inline bool budget_exhausted(const ScheduleBudget& budget) {
@@ -220,13 +224,38 @@ class SchedulerPolicy {
   const SchedulerOptions& options_;
 
  private:
+  enum class PrefillScheduleResult {
+    SCHEDULED,
+    BUDGET_EXHAUSTED,
+    BLOCKS_EXHAUSTED,
+    STOPPED,
+    DEFERRED,
+  };
+
+  PrefillScheduleResult schedule_one_prefill_request(
+      RequestPriorityQueue* queue,
+      SchedulerState& state,
+      ScheduleBudget& budget,
+      std::vector<std::shared_ptr<Request>>& finished,
+      std::vector<size_t>& reserved_full_footprint,
+      std::vector<Sequence*>& prefill_sequences,
+      std::vector<size_t>& prefill_sequences_budget,
+      std::vector<KVCacheManager::KVCacheReservation>& reservations);
+
   bool collect_terminal(std::shared_ptr<Request>& request,
                         SchedulerState& state,
                         std::vector<std::shared_ptr<Request>>& finished);
 
+  // Physical VMM pressure can recover between scheduling rounds, but a
+  // permanently unmaterializable request must not occupy the FCFS head
+  // forever. The counter is reset after any successful allocation.
+  bool record_kv_allocation_failure(Request* request);
+  void clear_kv_allocation_failures(Request* request);
+
   // FCFS decode handoffs staged by drain_request_queue() until the policy
   // requeue phase ends.
   std::vector<std::shared_ptr<Request>> pending_decode_handoffs_;
+  std::unordered_map<Request*, size_t> kv_allocation_failures_;
 };
 
 // =============================================================================

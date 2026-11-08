@@ -77,6 +77,12 @@ void ServiceImplFactory::create(
              std::make_unique<MMChatServiceImpl>(vlm_master, models);
          self->mm_embedding_service_impl_ =
              std::make_unique<MMEmbeddingServiceImpl>(vlm_master, models);
+         self->audio_transcription_service_impl_ =
+             std::make_unique<SpeechToTextServiceImpl>(
+                 vlm_master, models, SpeechToTextTask::TRANSCRIBE);
+         self->audio_translation_service_impl_ =
+             std::make_unique<SpeechToTextServiceImpl>(
+                 vlm_master, models, SpeechToTextTask::TRANSLATE);
        }},
       {static_cast<int8_t>(ServingMode::DIT),
        [](APIService* self,
