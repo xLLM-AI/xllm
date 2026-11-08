@@ -27,7 +27,8 @@ namespace xllm {
 StaticKVCacheTensorAllocator::StaticKVCacheTensorAllocator(
     StaticKVCacheLayout layout,
     const torch::Device& device)
-    : layout_(std::move(layout)) {
+    : layout_(std::move(layout)),
+      initialized_full_block_epochs_(layout_.num_slots(), 0) {
   CHECK_GT(layout_.bytes_used(), 0u)
       << "Static tensor storage requires an arena capacity";
   arena_ =
@@ -41,6 +42,59 @@ StaticKVCacheTensorAllocator::StaticKVCacheTensorAllocator(
             << ", Conv_bytes=" << layout_.conv_row_bytes()
             << ", SSM_bundle_bytes=" << layout_.ssm_bundle_bytes()
             << ", checkpoint_stride=" << layout_.checkpoint_stride();
+}
+
+bool StaticKVCacheTensorAllocator::needs_full_block_initialization(
+    const std::vector<int32_t>& rows,
+    const std::vector<uint64_t>& lease_epochs) const {
+  const size_t row_width = layout_.full_layer_count() + 1;
+  CHECK_EQ(rows.size() % row_width, 0u);
+  CHECK_EQ(lease_epochs.size(), rows.size() / row_width);
+  bool needs_initialization = false;
+  for (size_t i = 0; i < lease_epochs.size(); ++i) {
+    const int32_t id = rows[i * row_width];
+    CHECK_GE(id, 0);
+    CHECK_LT(static_cast<size_t>(id), layout_.num_slots());
+    if (id != 0) {
+      CHECK_GT(lease_epochs[i], 0u);
+      needs_initialization |=
+          initialized_full_block_epochs_[id] != lease_epochs[i];
+    }
+  }
+  return needs_initialization;
+}
+
+void StaticKVCacheTensorAllocator::initialize_full_blocks(
+    const std::vector<int32_t>& rows,
+    const std::vector<uint64_t>& lease_epochs) {
+  const size_t row_width = layout_.full_layer_count() + 1;
+  std::vector<int64_t> pair_indices;
+  pair_indices.reserve(lease_epochs.size() * layout_.full_layer_count());
+  for (size_t i = 0; i < lease_epochs.size(); ++i) {
+    const int32_t* entry = rows.data() + i * row_width;
+    const int32_t id = entry[0];
+    if (id == 0 || initialized_full_block_epochs_[id] == lease_epochs[i]) {
+      continue;
+    }
+    for (size_t layer = 0; layer < layout_.full_layer_count(); ++layer) {
+      pair_indices.emplace_back(entry[layer + 1] / 2);
+    }
+    initialized_full_block_epochs_[id] = lease_epochs[i];
+  }
+  if (pair_indices.empty()) {
+    return;
+  }
+  const torch::Tensor indices =
+      torch::from_blob(pair_indices.data(),
+                       {static_cast<int64_t>(pair_indices.size())},
+                       torch::kInt64)
+          .to(arena_.device());
+  // Use the Full dtype: Ascend IndexFill does not accept the UInt8 arena.
+  // Both K/V rows become zero bits, including former FP32 SSM storage.
+  const torch::ScalarType dtype = layout_.dtype(KVCacheTensorRole::KEY);
+  const int64_t pair_elements = static_cast<int64_t>(layout_.full_pair_bytes() /
+                                                     torch::elementSize(dtype));
+  arena_.view(dtype).view({-1, pair_elements}).index_fill_(0, indices, 0);
 }
 
 void StaticKVCacheTensorAllocator::begin_layer(int64_t layer_id) {

@@ -93,6 +93,97 @@ using TokenInputTypes = ::testing::Types<LlmForwardInput, VlmForwardInput>;
 
 TYPED_TEST_SUITE(ForwardSharedMemoryInputTest, TokenInputTypes);
 
+template <typename Input>
+class ForwardSharedFullLeaseInputTest
+    : public ForwardSharedMemoryInputTest<Input> {};
+
+using SharedFullLeaseInputTypes =
+    ::testing::Types<LlmForwardInput, VlmForwardInput>;
+TYPED_TEST_SUITE(ForwardSharedFullLeaseInputTest, SharedFullLeaseInputTypes);
+
+TYPED_TEST(ForwardSharedFullLeaseInputTest,
+           PackedInputPreservesFullLeasesAfterSourceRelease) {
+  constexpr uint64_t kReusedEpoch = (uint64_t{1} << 35) + 7;
+  const std::vector<int32_t> expected_rows = {
+      4, 120, 122, 6, 180, 182, 6, 180, 182};
+  const std::vector<uint64_t> expected_epochs = {1, kReusedEpoch, kReusedEpoch};
+  TypeParam lazy;
+  {
+    TypeParam source = make_input<TypeParam>({});
+    source.input_params.embedding.full_block_slot_rows = expected_rows;
+    source.input_params.embedding.full_block_lease_epochs = expected_epochs;
+    const TypeParam copied =
+        source.to(torch::Device(torch::kCPU), torch::kFloat32);
+    EXPECT_EQ(copied.input_params.embedding.full_block_slot_rows,
+              expected_rows);
+    EXPECT_EQ(copied.input_params.embedding.full_block_lease_epochs,
+              expected_epochs);
+    proto::PackedForwardInput packed;
+    ASSERT_TRUE(copied.to_packed_proto(&packed));
+    ASSERT_TRUE(lazy.from_packed_proto(packed));
+    packed.mutable_payload()->assign(packed.payload().size(), '\0');
+  }
+  const TypeParam decoded =
+      lazy.to(torch::Device(torch::kCPU), torch::kFloat32);
+  EXPECT_EQ(decoded.input_params.embedding.full_block_slot_rows, expected_rows);
+  EXPECT_EQ(decoded.input_params.embedding.full_block_lease_epochs,
+            expected_epochs);
+}
+
+TYPED_TEST(ForwardSharedFullLeaseInputTest,
+           SharedMemoryReplacesFullLeaseEpochsOnFollowingInput) {
+  std::string name = "forward_full_leases_" + std::to_string(getpid()) + "_" +
+                     ::testing::UnitTest::GetInstance()
+                         ->current_test_info()
+                         ->test_suite_name();
+  std::replace(name.begin(), name.end(), '/', '_');
+  bool is_creator = false;
+  constexpr size_t kSegmentBytes = 1 << 20;
+  ForwardSharedMemoryTransport writer(
+      name, kSegmentBytes, is_creator, ForwardType::RAW_INPUT);
+  ASSERT_TRUE(is_creator);
+  ForwardSharedMemoryTransport reader(
+      name, kSegmentBytes, is_creator, ForwardType::RAW_INPUT);
+  ASSERT_FALSE(is_creator);
+  TypeParam source = make_input<TypeParam>({});
+  source.input_params.embedding.full_block_slot_rows = {
+      4, 120, 122, 6, 180, 182};
+  constexpr uint64_t kReusedEpoch = uint64_t{1} << 36;
+  source.input_params.embedding.full_block_lease_epochs = {1, kReusedEpoch};
+  ASSERT_TRUE(
+      ForwardSharedMemoryTransport::can_write_input(source, kSegmentBytes));
+  ASSERT_TRUE(writer.input_write(source));
+  TypeParam decoded;
+  ASSERT_TRUE(reader.input_read(
+      decoded,
+      torch::Device(torch::kCPU),
+      InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE));
+  EXPECT_EQ(decoded.input_params.embedding.full_block_lease_epochs,
+            (std::vector<uint64_t>{1, kReusedEpoch}));
+
+  source.input_params.embedding.full_block_slot_rows = {4, 120, 122};
+  source.input_params.embedding.full_block_lease_epochs = {2};
+  ASSERT_TRUE(writer.input_write(source));
+  ASSERT_TRUE(reader.input_read(
+      decoded,
+      torch::Device(torch::kCPU),
+      InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE));
+  EXPECT_EQ(decoded.input_params.embedding.full_block_slot_rows,
+            (std::vector<int32_t>{4, 120, 122}));
+  EXPECT_EQ(decoded.input_params.embedding.full_block_lease_epochs,
+            (std::vector<uint64_t>{2}));
+
+  source.input_params.embedding.full_block_slot_rows.clear();
+  source.input_params.embedding.full_block_lease_epochs.clear();
+  ASSERT_TRUE(writer.input_write(source));
+  ASSERT_TRUE(reader.input_read(
+      decoded,
+      torch::Device(torch::kCPU),
+      InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE));
+  EXPECT_TRUE(decoded.input_params.embedding.full_block_slot_rows.empty());
+  EXPECT_TRUE(decoded.input_params.embedding.full_block_lease_epochs.empty());
+}
+
 TYPED_TEST(ForwardSharedMemoryInputTest, RejectsPreviousPackedInputSchema) {
   const TypeParam source = make_input<TypeParam>(make_sparse_role_offsets());
   proto::PackedForwardInput packed;

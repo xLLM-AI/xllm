@@ -30,7 +30,8 @@ class StaticKVCacheLayout;
 
 // Owns stable logical IDs backed by a shared physical slab pool. Each slab
 // packs Full K/V pairs, Conv rows, or contiguous SSM checkpoint bundles; an
-// empty slab can change type. Slab 0 is reserved for graph-padding scratch.
+// empty slab can change type. Leading slabs isolate writable graph scratch
+// and immutable Full read padding from allocatable objects.
 // The legacy constructor retains coarse slots for existing callers.
 class StaticKVCacheBlockPool final {
  public:
@@ -51,8 +52,10 @@ class StaticKVCacheBlockPool final {
   void append_linear_state_slots(int32_t state_id,
                                  std::vector<int32_t>* slots) const;
   // Full-layer order; KEY and VALUE use the same row through adjacent views.
-  void append_full_block_rows(int32_t block_id,
-                              std::vector<int32_t>* rows) const;
+  void append_full_block_rows(
+      int32_t block_id,
+      std::vector<int32_t>* rows,
+      std::vector<uint64_t>* lease_epochs = nullptr) const;
   // Linear-layer order: Conv row, then the first SSM checkpoint row.
   void append_linear_state_rows(int32_t state_id,
                                 std::vector<int32_t>* rows) const;
@@ -104,7 +107,8 @@ class StaticKVCacheBlockPool final {
                                             const void* placement_hint);
   void append_rows(int32_t block_id,
                    BlockType type,
-                   std::vector<int32_t>* rows) const;
+                   std::vector<int32_t>* rows,
+                   std::vector<uint64_t>* lease_epochs = nullptr) const;
 
   void release_slot(int32_t slot);
 
@@ -122,6 +126,7 @@ class StaticKVCacheBlockPool final {
   bool slab_mode_ = false;
   uint32_t logical_capacity_ = 0;
   size_t slab_bytes_ = 0;
+  size_t num_reserved_slabs_ = 0;
   size_t full_row_bytes_ = 0;
   size_t conv_row_bytes_ = 0;
   size_t ssm_row_bytes_ = 0;
@@ -137,6 +142,8 @@ class StaticKVCacheBlockPool final {
   // 0 is free, 1 is owned by prefix cache, and 2 is active.
   std::array<std::vector<uint8_t>, 2> logical_states_;
   std::array<std::vector<int32_t>, 2> physical_rows_;
+  // Full logical ID allocation epochs survive physical row and type reuse.
+  std::vector<uint64_t> full_block_lease_epochs_;
   std::array<std::vector<const void*>, 2> placement_hints_;
   std::unordered_map<const void*, RequestPlacement> request_placements_;
 };

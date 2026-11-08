@@ -347,6 +347,9 @@ class LlmEmbeddingInput final {
   // Shared slab storage: [logical Full block id, physical row per Full layer].
   std::vector<int32_t> full_block_slot_rows;
 
+  // One allocation epoch per Full mapping row, including retained prefixes.
+  std::vector<uint64_t> full_block_lease_epochs;
+
   // request ids of each sequence, used by suffix decoding request identity
   std::vector<std::string> request_ids;
 
@@ -372,6 +375,7 @@ class LlmEmbeddingInput final {
         safe_to(linear_state_read_indices, device, true);
     out.linear_state_slot_rows = linear_state_slot_rows;
     out.full_block_slot_rows = full_block_slot_rows;
+    out.full_block_lease_epochs = full_block_lease_epochs;
     out.request_ids = request_ids;
     out.extra_token_ids = extra_token_ids;
     out.mtp_shifted_token_ids = safe_to(mtp_shifted_token_ids, device, true);
@@ -610,6 +614,9 @@ class VlmEmbeddingInput final {
   // Shared slab storage: [logical Full block id, physical row per Full layer].
   std::vector<int32_t> full_block_slot_rows;
 
+  // One allocation epoch per Full mapping row, including retained prefixes.
+  std::vector<uint64_t> full_block_lease_epochs;
+
   // request ids of each sequence, used by suffix decoding request identity
   std::vector<std::string> request_ids;
 
@@ -635,6 +642,7 @@ class VlmEmbeddingInput final {
         safe_to(linear_state_read_indices, device, true);
     out.linear_state_slot_rows = linear_state_slot_rows;
     out.full_block_slot_rows = full_block_slot_rows;
+    out.full_block_lease_epochs = full_block_lease_epochs;
     out.request_ids = request_ids;
     out.extra_token_ids = extra_token_ids;
     out.mtp_shifted_token_ids = safe_to(mtp_shifted_token_ids, device, true);

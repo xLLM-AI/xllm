@@ -704,6 +704,7 @@ bool WorkerImpl::allocate_kv_cache_storage(
         .full_block_slot_table(std::make_shared<LinearStateSlotTable>(
             layout.num_slots(), layout.full_layer_count(), device_.unwrap()))
         .static_layout(std::make_shared<const StaticKVCacheLayout>(layout));
+    static_kv_cache_allocator_ = allocator;
     create_options.tensor_allocator(std::move(allocator));
   }
 
@@ -1288,6 +1289,40 @@ void WorkerImpl::prepare_work_before_execute(const LlmForwardInput& input,
       input, processed_input, *prepare_stream_);
 }
 
+void WorkerImpl::prepare_shared_kv_cache(
+    const std::vector<int32_t>& full_block_rows,
+    const std::vector<uint64_t>& full_block_lease_epochs,
+    const std::vector<int32_t>& linear_state_rows,
+    Stream& prepare_stream) {
+  if (static_kv_cache_allocator_ == nullptr ||
+      (full_block_rows.empty() && linear_state_rows.empty())) {
+    return;
+  }
+  c10::StreamGuard stream_guard = prepare_stream.set_stream_guard();
+  const auto shared_cache = std::find_if(
+      kv_caches_.begin(), kv_caches_.end(), [](const KVCache& cache) {
+        return cache.is_static_shared();
+      });
+  CHECK(shared_cache != kv_caches_.end());
+  if (!full_block_rows.empty()) {
+    if (static_kv_cache_allocator_->needs_full_block_initialization(
+            full_block_rows, full_block_lease_epochs)) {
+      // Reused rows may still be read by the preceding batch. Composite MTP
+      // invokes this on its compute stream, where prior cache accesses already
+      // precede initialization and no prepare/compute handoff is needed.
+      if (compute_stream_ != nullptr &&
+          prepare_stream.get_stream()->unwrap() !=
+              compute_stream_->get_stream()->unwrap()) {
+        prepare_stream.wait_stream(*compute_stream_);
+      }
+      static_kv_cache_allocator_->initialize_full_blocks(
+          full_block_rows, full_block_lease_epochs);
+    }
+    shared_cache->update_full_block_rows(full_block_rows);
+  }
+  shared_cache->update_linear_state_slots(linear_state_rows);
+}
+
 std::optional<ForwardOutput> WorkerImpl::step(
     const DiTForwardInput& /*inputs*/) {
   LOG(FATAL) << "Native DiT input requires a DiT worker";
@@ -1441,6 +1476,13 @@ void WorkerImpl::prepare_work_before_execute_on_stream_impl(
       return;
     }
 
+    prepare_shared_kv_cache(input_params.embedding.full_block_slot_rows,
+                            input_params.embedding.full_block_lease_epochs,
+                            input_params.embedding.linear_state_slot_rows,
+                            prepare_stream);
+
+    // Initialize new destinations before copy-on-write or reload data is
+    // placed there, and publish their row maps before resolving copies.
     apply_kv_block_swaps(input_params);
 
 #if defined(USE_NPU)
@@ -1464,20 +1506,7 @@ void WorkerImpl::prepare_work_before_execute_on_stream_impl(
     // inner target worker (which owns the recurrent cache) perform preparation
     // and restore; attempting it here would treat target cache operations as
     // draft operations and fail discover_num_slots().
-    if (has_request_state_cache() &&
-        !input_params.embedding.full_block_slot_rows.empty()) {
-      const auto shared_cache = std::find_if(
-          kv_caches_.begin(), kv_caches_.end(), [](const KVCache& cache) {
-            return cache.is_static_shared();
-          });
-      CHECK(shared_cache != kv_caches_.end())
-          << "Full block row maps require shared slab storage";
-      shared_cache->update_full_block_rows(
-          input_params.embedding.full_block_slot_rows);
-    }
     if (has_request_state_cache()) {
-      update_linear_state_slots(kv_caches_,
-                                input_params.embedding.linear_state_slot_rows);
       prepare_input_params_for_linear_attention(input_params);
       // Overlap restores in the worker thread on compute_stream_, after the
       // preceding chunk finishes writing its live slots.

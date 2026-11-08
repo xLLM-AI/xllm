@@ -162,12 +162,30 @@ class SharedKVCacheLayout:
         if any(offset < 0 or rows < 0 for offset, rows in scratch_values):
             raise ValueError("shared KV cache scratch extents must be non-negative")
 
+    @property
+    def full_read_padding_row(self) -> int:
+        """K row of the immutable padding pair beyond every writable scratch extent."""
+        if not self.num_slabs:
+            return 0
+        full_pair_bytes = 2 * (self.slot_bytes // self.full_row_stride)
+        conv_row_bytes = self.conv_row_bytes
+        if not conv_row_bytes and self.conv_row_stride is not None:
+            conv_row_bytes = self.slot_bytes // self.conv_row_stride
+        scratch_bytes = max(
+            full_pair_bytes,
+            conv_row_bytes,
+            self.checkpoint_stride * (self.slot_bytes // self.ssm_row_stride),
+        )
+        return 2 * ((scratch_bytes + full_pair_bytes - 1) // full_pair_bytes)
+
     def full_block_table(self, block_table: torch.Tensor, rows: torch.Tensor | None = None) -> torch.Tensor:
         """Translate logical Full page ids while preserving negative sentinels."""
         if rows is not None:
             physical = rows.index_select(0, block_table.clamp_min(0).reshape(-1).to(torch.int64)).reshape_as(
                 block_table
             )
+            if self.num_slabs:
+                physical = torch.where(block_table == 0, self.full_read_padding_row, physical)
             return torch.where(block_table >= 0, physical.to(block_table.dtype), block_table)
         if self.num_slabs:
             raise ValueError("shared slab Full cache requires the reading layer's block rows")
@@ -183,7 +201,11 @@ class SharedKVCacheLayout:
         """Translate logical token slots and retain their in-page offsets."""
         if rows is not None:
             logical_rows = torch.div(slot_mapping, self.page_size_tokens, rounding_mode="floor")
-            physical_rows = self.full_block_table(logical_rows, rows)
+            # Logical zero remains writable warmup scratch. Only read tables
+            # redirect zero to the immutable finite padding pair.
+            physical_rows = rows.index_select(0, logical_rows.clamp_min(0).reshape(-1).to(torch.int64)).reshape_as(
+                slot_mapping
+            )
             translated = physical_rows * self.page_size_tokens + torch.remainder(slot_mapping, self.page_size_tokens)
             return torch.where(slot_mapping >= 0, translated, slot_mapping)
         if self.num_slabs:
@@ -315,7 +337,7 @@ def _detect_shared_slab_layout(
                 or _tensor_row_bytes(tensor) != row_bytes
             ):
                 raise ValueError("shared slab Linear views must expose dense zero-origin arena rows")
-    return SharedKVCacheLayout(
+    layout = SharedKVCacheLayout(
         page_size_tokens=int(key.shape[1]),
         full_row_stride=slab_bytes // full_bytes,
         conv_row_stride=slab_bytes // conv_bytes,
@@ -330,6 +352,11 @@ def _detect_shared_slab_layout(
         scratch_ssm_rows=stride,
         num_slabs=num_slabs,
     )
+    reserved_bytes = (layout.full_read_padding_row + 2) * full_bytes
+    reserved_slabs = (reserved_bytes + slab_bytes - 1) // slab_bytes
+    if num_slabs <= reserved_slabs:
+        raise ValueError("shared slab arena must hold writable scratch, read padding, and allocatable physical slabs")
+    return layout
 
 
 def detect_shared_kv_cache_layout(

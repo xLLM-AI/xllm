@@ -309,6 +309,222 @@ def test_shared_full_attention_matches_dense_after_chunked_prefill(layer_id: int
     torch.npu.synchronize()
 
 
+@pytest.mark.parametrize("layer_id", [0, 3], ids=["first-full-role", "last-full-role"])
+@pytest.mark.parametrize("graph", [False, True], ids=["eager", "graph"])
+@torch.inference_mode()
+def test_slab_full_device_lengths_ignore_poisoned_writable_scratch(layer_id: int, graph: bool) -> None:
+    from xllm.python.attention.backend import LayerCache
+    from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend
+    from xllm.python.layers.attention import Attention
+    from xllm.python.model_executor.forward_context import (
+        AclGraphExecutionState,
+        ForwardContext,
+        forward_context,
+    )
+
+    device = torch.device("npu:0")
+    heads, kv_heads, dimension, page_size, width, num_slots = 4, 2, 64, 128, 5, 8
+    full_row_bytes, conv_row_bytes, ssm_row_bytes, stride = 32768, 4096, 65536, 3
+    slab_bytes, num_slabs = stride * ssm_row_bytes, 8
+    arena_bytes = num_slabs * slab_bytes
+    arena = torch.zeros(arena_bytes, device=device, dtype=torch.uint8)
+
+    def _arena_view(offset: int, shape: tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
+        byte_count = prod(shape) * torch.empty((), dtype=dtype).element_size()
+        return arena.narrow(0, offset, byte_count).view(dtype).view(shape)
+
+    shared_caches = []
+    row_maps: dict[int, torch.Tensor] = {}
+    for index in range(4):
+        if index in (0, 3):
+            rows = torch.zeros(num_slots, dtype=torch.int32, device=device)
+            rows[1:4].copy_(torch.tensor([12, 24, 36], dtype=torch.int32, device=device) + (2 if index else 0))
+            row_maps[index] = rows
+            shared_caches.append(
+                LayerCache(
+                    key=_arena_view(0, (arena_bytes // full_row_bytes, page_size, kv_heads, dimension), torch.bfloat16),
+                    value=_arena_view(
+                        full_row_bytes,
+                        (arena_bytes // full_row_bytes - 1, page_size, kv_heads, dimension),
+                        torch.bfloat16,
+                    ),
+                    full_block_rows=rows,
+                    shared_checkpoint_stride=stride,
+                )
+            )
+        else:
+            shared_caches.append(
+                LayerCache(
+                    key=None,
+                    value=None,
+                    conv=_arena_view(0, (arena_bytes // conv_row_bytes, 4, 512), torch.bfloat16),
+                    ssm=_arena_view(0, (arena_bytes // ssm_row_bytes, 1, 128, 128), torch.float32),
+                    linear_state_slots=torch.zeros(2, num_slots, dtype=torch.int32, device=device),
+                    shared_checkpoint_stride=stride,
+                )
+            )
+    dense_caches = [
+        LayerCache(
+            key=torch.zeros(num_slots, page_size, kv_heads, dimension, device=device, dtype=torch.bfloat16),
+            value=torch.zeros(num_slots, page_size, kv_heads, dimension, device=device, dtype=torch.bfloat16),
+        )
+        for _ in shared_caches
+    ]
+    cache_sets = [dense_caches, shared_caches]
+    backends = [
+        NpuPagedAttentionBackend(heads, kv_heads, dimension, dimension**-0.5, 0, False, device, torch.bfloat16)
+        for _ in cache_sets
+    ]
+    for backend, caches in zip(backends, cache_sets):
+        backend.bind_kv_caches(caches)
+    layout = backends[1].shared_kv_layout
+    assert layout is not None and layout.num_slabs == num_slabs
+    assert layout.full_read_padding_row == 6
+    attention = Attention(heads, kv_heads, dimension, dimension**-0.5, 0, layer_id)
+    generator = torch.Generator().manual_seed(70301 + layer_id)
+    prefix_tokens = 2 * page_size
+    prefix_keys = (torch.randn(prefix_tokens, kv_heads, dimension, generator=generator) * 0.2).to(torch.bfloat16)
+    prefix_values = (
+        torch.randn(prefix_tokens, kv_heads, dimension, generator=generator) * 0.1
+        + torch.arange(prefix_tokens).view(-1, 1, 1) / page_size
+    ).to(torch.bfloat16)
+    logical_prefix = torch.tensor([2, 1], dtype=torch.int64, device=device)
+    physical_prefix = layout.full_block_table(logical_prefix, row_maps[layer_id]).to(torch.int64)
+    for index, caches in enumerate(cache_sets):
+        selected_rows = logical_prefix if index == 0 else physical_prefix
+        caches[layer_id].key.index_copy_(
+            0, selected_rows, prefix_keys.view(2, page_size, kv_heads, dimension).to(device)
+        )
+        caches[layer_id].value.index_copy_(
+            0, selected_rows, prefix_values.view(2, page_size, kv_heads, dimension).to(device)
+        )
+    # A new Full lease initializes its whole K/V pair once; its unwritten
+    # 123-token tail stays finite. Native allocator tests cover lease reuse.
+    new_row = int(row_maps[layer_id][3].item())
+    shared_full = shared_caches[layer_id]
+    protected_full = shared_caches[3 if layer_id == 0 else 0]
+    protected_rows = row_maps[3 if layer_id == 0 else 0][1:4].to(torch.int64)
+    protected_keys = protected_full.key.index_select(0, protected_rows).clone()
+    protected_values = protected_full.value.index_select(0, protected_rows).clone()
+    linear_slab = arena.narrow(0, 7 * slab_bytes, slab_bytes)
+    linear_slab.fill_(0x3F)
+    protected_linear = linear_slab.clone()
+    query = torch.zeros(width, heads, dimension, dtype=torch.bfloat16, device=device)
+    keys = torch.zeros(width, kv_heads, dimension, dtype=torch.bfloat16, device=device)
+    values = torch.zeros_like(keys)
+    live_lengths = list(range(prefix_tokens + 1, prefix_tokens + width + 1))
+    metadata_sets = []
+    for backend in backends:
+        metadata = SimpleNamespace(
+            slot_mapping=torch.arange(3 * page_size, 3 * page_size + width, dtype=torch.int32, device=device),
+            block_table=torch.tensor([[2, 1, 3, 0, 0, 0, 0, 0]] * width, dtype=torch.int32, device=device),
+            q_seq_lens=torch.ones(width, dtype=torch.int32, device=device),
+            q_cu_seq_lens=torch.arange(width + 1, dtype=torch.int32, device=device),
+            q_cu_seq_lens_host_values=list(range(width + 1)),
+            kv_seq_lens=torch.tensor(live_lengths, dtype=torch.int32, device=device),
+            kv_seq_lens_host_values=[num_slots * page_size] * width,
+            is_prefill=False,
+            is_chunked_prefill=False,
+            is_spec_verify=True,
+            is_mixed=False,
+            has_kv_shard=False,
+            expanded_decode_metadata=None,
+            linear_state_indices=torch.ones(1, dtype=torch.int32, device=device),
+            num_accepted_tokens=torch.ones(1, dtype=torch.int32, device=device),
+        )
+        metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=True)
+        metadata_sets.append(metadata)
+    states = [AclGraphExecutionState({}) for _ in backends]
+
+    def _forward(index: int) -> torch.Tensor:
+        context = ForwardContext(
+            backends[index],
+            device,
+            metadata_sets[index],
+            cache_sets[index],
+            execution_state=states[index] if graph else None,
+        )
+        with forward_context(context):
+            backends[index].prepare(metadata_sets[index])
+            return attention(query, keys, values)
+
+    captures, captured_outputs = [], []
+    if graph:
+        for index in range(2):
+            _forward(index)
+            torch.npu.synchronize()
+            captured = torch.npu.NPUGraph()
+            with torch.npu.graph(captured):
+                captured_outputs.append(_forward(index))
+            captures.append(captured)
+        torch.npu.synchronize()
+
+    # Writable scratch can retain NaNs from Linear state or graph warmup.
+    # The fixed-capacity FIA table must read the separate finite padding pair.
+    shared_full.key[0].fill_(float("nan"))
+    shared_full.value[0].fill_(float("nan"))
+    shared_caches[1].conv[0].fill_(float("nan"))
+    shared_caches[1].ssm[:stride].fill_(float("nan"))
+    assert torch.isnan(shared_full.value[0]).any().item()
+    padding = layout.full_read_padding_row
+    torch.testing.assert_close(shared_full.key[padding], torch.zeros_like(shared_full.key[padding]), rtol=0, atol=0)
+    torch.testing.assert_close(shared_full.value[padding], torch.zeros_like(shared_full.value[padding]), rtol=0, atol=0)
+
+    for iteration in range(2):
+        query_host = (torch.randn(width, heads, dimension, generator=generator) * 0.2).to(torch.bfloat16)
+        key_host = (torch.randn(width, kv_heads, dimension, generator=generator) * 0.2).to(torch.bfloat16)
+        value_host = (torch.randn(width, kv_heads, dimension, generator=generator) * 0.1 + iteration + 2).to(
+            torch.bfloat16
+        )
+        query.copy_(query_host.to(device))
+        keys.copy_(key_host.to(device))
+        values.copy_(value_host.to(device))
+        outputs = []
+        for index in range(2):
+            if graph:
+                captures[index].replay()
+                outputs.append(captured_outputs[index])
+            else:
+                outputs.append(_forward(index))
+        all_keys = torch.cat((prefix_keys, key_host)).float().repeat_interleave(heads // kv_heads, dim=1)
+        all_values = torch.cat((prefix_values, value_host)).float().repeat_interleave(heads // kv_heads, dim=1)
+        scores = torch.einsum("thd,khd->htk", query_host.float(), all_keys) * dimension**-0.5
+        invalid = torch.arange(prefix_tokens + width)[None] >= torch.tensor(live_lengths)[:, None]
+        scores.masked_fill_(invalid[None], float("-inf"))
+        expected = torch.einsum("htk,khd->thd", scores.softmax(-1), all_values).reshape(width, -1)
+        torch.testing.assert_close(outputs[1], outputs[0], rtol=_OUTPUT_RTOL, atol=_OUTPUT_ATOL)
+        torch.testing.assert_close(outputs[1].float().cpu(), expected, rtol=_OUTPUT_RTOL, atol=_OUTPUT_ATOL)
+        torch.testing.assert_close(
+            shared_full.key.index_select(0, physical_prefix).cpu(),
+            prefix_keys.view(2, page_size, kv_heads, dimension),
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(
+            shared_full.value.index_select(0, physical_prefix).cpu(),
+            prefix_values.view(2, page_size, kv_heads, dimension),
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(shared_full.key[new_row, :width], keys, rtol=0, atol=0)
+        torch.testing.assert_close(shared_full.value[new_row, :width], values, rtol=0, atol=0)
+        torch.testing.assert_close(
+            shared_full.key[new_row, width:], torch.zeros_like(shared_full.key[new_row, width:]), rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            shared_full.value[new_row, width:], torch.zeros_like(shared_full.value[new_row, width:]), rtol=0, atol=0
+        )
+        torch.testing.assert_close(protected_full.key.index_select(0, protected_rows), protected_keys, rtol=0, atol=0)
+        torch.testing.assert_close(
+            protected_full.value.index_select(0, protected_rows), protected_values, rtol=0, atol=0
+        )
+        torch.testing.assert_close(linear_slab, protected_linear, rtol=0, atol=0)
+        torch.testing.assert_close(
+            shared_full.value[padding], torch.zeros_like(shared_full.value[padding]), rtol=0, atol=0
+        )
+    torch.npu.synchronize()
+
+
 @pytest.mark.parametrize("rows", [1, 5], ids=["draft-step", "draft-prefix"])
 @torch.inference_mode()
 def test_ordinary_draft_graph_reads_growing_kv_prefix(rows: int, monkeypatch: pytest.MonkeyPatch) -> None:

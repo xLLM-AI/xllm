@@ -57,6 +57,7 @@ if(USE_NPU)
   )
   set_tests_properties(
     StaticKVCacheTensorAllocatorNpuTest.KeepsDenseNdViewsInOnePhysicalArena
+    StaticKVCacheTensorAllocatorNpuTest.InitializesFreshFullPairsWithoutChangingScratchOrPrefixes
     PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE
   )
 
