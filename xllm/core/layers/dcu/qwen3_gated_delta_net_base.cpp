@@ -21,6 +21,8 @@ limitations under the License.
 
 #include "qwen3_5_gated_delta_net.h"
 #include "qwen3_gated_delta_net_impls.h"
+#include "util/seq_lens.h"
+#include "util/tensor_helper.h"
 
 namespace xllm {
 namespace layer {
@@ -188,18 +190,16 @@ std::vector<int64_t> build_real_cu_seqlens(
   return cu;
 }
 
-// Extract cu_seqlens from host-side lens (or fall back to device tensor).
 std::vector<int64_t> extract_cu_seqlens(
     const AttentionMetadata& attn_metadata) {
   std::vector<int64_t> cu;
   if (!attn_metadata.q_seq_lens_vec.empty()) {
-    cu.assign(attn_metadata.q_seq_lens_vec.begin(),
-              attn_metadata.q_seq_lens_vec.end());
-  } else {
-    auto cpu_lens = attn_metadata.q_seq_lens.cpu();
-    auto* ptr = cpu_lens.data_ptr<int64_t>();
-    cu.assign(ptr, ptr + cpu_lens.numel());
+    util::fill_query_start_loc(cu, attn_metadata.q_seq_lens_vec);
+    return cu;
   }
+  const torch::Tensor cpu_lens =
+      to_cpu_contiguous(attn_metadata.q_seq_lens, torch::kInt32);
+  util::fill_query_start_loc(cu, tensor_slice<int32_t>(cpu_lens));
   return cu;
 }
 

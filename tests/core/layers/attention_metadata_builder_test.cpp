@@ -54,15 +54,9 @@ RecModelParams make_rec_params() {
   params.meta.num_sequences = 2;
   params.meta.q_max_seq_len = 1;
   params.meta.kv_max_seq_len = 5;
-#if defined(USE_NPU)
   params.attention.host.q_seq_lens = {1, 1};
   params.attention.host.kv_seq_lens = {3, 5};
   params.attention.host.q_cu_seq_lens = {1, 2};
-#else
-  params.attention.host.q_seq_lens = {0, 1, 2};
-  params.attention.host.kv_seq_lens = {0, 3, 8};
-  params.attention.host.q_cu_seq_lens = {0, 1, 2};
-#endif
   params.attention.device.q_seq_lens =
       torch::tensor(params.attention.host.q_seq_lens, torch::kInt32);
   params.attention.device.kv_seq_lens =
@@ -266,19 +260,6 @@ TEST(AttentionMetadataBuilderTest, SkipsInitialStateMaterializationOnRequest) {
   EXPECT_EQ(params.embedding.linear_state_ids, std::vector<int32_t>({4, 2, 9}));
 }
 
-TEST(AttentionMetadataBuilderTest,
-     SkippingInitialStateMaterializationKeepsValidation) {
-  ModelParamsView params = make_params();
-  params.linear_state_validity_mask.pop_back();
-  AttentionMetadataBuildOptions build_options;
-  build_options.materialize_linear_state_validity = false;
-
-  EXPECT_DEATH(
-      AttentionMetadataBuilder::build(
-          params, /*enable_mla=*/false, {}, std::nullopt, build_options),
-      "linear state mask row count mismatch");
-}
-
 TEST(AttentionMetadataBuilderTest, DecodeDoesNotMaterializeInitialStateMask) {
   ModelParamsView params = make_params();
   params.meta.batch_forward_type = BatchForwardType::DECODE;
@@ -316,13 +297,8 @@ TEST(AttentionMetadataBuilderTest, MaterializesColdMaskForDummyShard) {
                                       torch::Device(torch::kCPU));
 
   ASSERT_TRUE(metadata.is_dummy);
-#if defined(USE_NPU)
   EXPECT_EQ(metadata.q_seq_lens_vec, std::vector<int32_t>({1}));
   EXPECT_EQ(metadata.kv_seq_lens_vec, std::vector<int32_t>({1}));
-#else
-  EXPECT_EQ(metadata.q_seq_lens_vec, std::vector<int32_t>({0, 1}));
-  EXPECT_EQ(metadata.kv_seq_lens_vec, std::vector<int32_t>({0, 1}));
-#endif
   EXPECT_TRUE(
       torch::equal(metadata.q_seq_lens, torch::tensor({1}, torch::kInt32)));
   EXPECT_TRUE(

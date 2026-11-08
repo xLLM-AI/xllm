@@ -21,6 +21,7 @@ limitations under the License.
 #include <algorithm>
 #include <numeric>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "core/common/metrics.h"
@@ -30,6 +31,8 @@ limitations under the License.
 #include "core/layers/common/attention_metadata_builder.h"
 #include "core/runtime/graph_execution_input.h"
 #include "core/runtime/rec_graph_input.h"
+#include "core/util/seq_lens.h"
+#include "core/util/tensor_helper.h"
 #include "core/util/utils.h"
 #include "kernels/dcu/attention_runner.h"
 #include "kernels/dcu/global_capture_instance.h"
@@ -39,50 +42,26 @@ namespace xllm::runtime::dcu {
 
 namespace {
 
-torch::Tensor make_int_tensor_on_device(const std::vector<int32_t>& values,
-                                        const torch::TensorOptions& options) {
-  return torch::tensor(values, options);
-}
-
-void extend_q_cu_seq_lens(std::vector<int32_t>* cu_seq_lens,
-                          uint32_t padding_needed,
-                          uint32_t num_decoding_tokens) {
-  if (cu_seq_lens == nullptr || cu_seq_lens->empty()) {
-    return;
+std::pair<torch::Tensor, torch::Tensor> stage_seq_lens(
+    const std::vector<int32_t>& host_lens,
+    const torch::Tensor& device_lens,
+    torch::Tensor& values_buf,
+    torch::Tensor& cu_buf) {
+  if (host_lens.empty() && !device_lens.defined()) {
+    return {torch::Tensor(), torch::Tensor()};
   }
-
-  cu_seq_lens->reserve(cu_seq_lens->size() + padding_needed);
-  for (uint32_t i = 0; i < padding_needed; ++i) {
-    cu_seq_lens->push_back(cu_seq_lens->back() +
-                           static_cast<int32_t>(num_decoding_tokens));
+  const int64_t rows = host_lens.empty()
+                           ? device_lens.numel()
+                           : static_cast<int64_t>(host_lens.size());
+  torch::Tensor per_seq =
+      values_buf.slice(/*dim=*/0, /*start=*/0, /*end=*/rows);
+  if (!host_lens.empty()) {
+    per_seq.copy_(make_pinned_cpu_tensor(host_lens), /*non_blocking=*/true);
+  } else {
+    per_seq.copy_(device_lens, /*non_blocking=*/true);
   }
-}
-
-void extend_kv_cu_seq_lens_for_padding(std::vector<int32_t>* cu_seq_lens,
-                                       uint32_t padding_needed) {
-  if (cu_seq_lens == nullptr || cu_seq_lens->empty()) {
-    return;
-  }
-
-  // Padded decode rows have query tokens so the graph shape is stable, but
-  // they do not own KV pages. Keep their KV length at zero; otherwise flash
-  // attention may try to read a padding block table entry (-1).
-  cu_seq_lens->resize(cu_seq_lens->size() + padding_needed,
-                      cu_seq_lens->back());
-}
-
-std::vector<int32_t> compute_cu_seq_lens_diff(
-    const std::vector<int32_t>& cu_seq_lens) {
-  std::vector<int32_t> seq_lens;
-  if (cu_seq_lens.size() < 2) {
-    return seq_lens;
-  }
-
-  seq_lens.reserve(cu_seq_lens.size() - 1);
-  for (std::size_t i = 1; i < cu_seq_lens.size(); ++i) {
-    seq_lens.push_back(cu_seq_lens[i] - cu_seq_lens[i - 1]);
-  }
-  return seq_lens;
+  util::fill_query_start_loc(per_seq, rows, cu_buf);
+  return {per_seq, cu_buf.slice(/*dim=*/0, /*start=*/0, /*end=*/rows + 1)};
 }
 
 std::size_t tensor_bytes(const torch::Tensor& tensor) {
@@ -186,11 +165,11 @@ std::optional<Params> DcuGraphPersistentParam::update(
     params_for_capture.emplace(copy_graph_execution_input(params));
   }
 
+  const GraphExecutionInput<Params> graph_input(params);
   std::shared_ptr<layer::AttentionMetadata> attn_metadata =
-      std::make_shared<layer::AttentionMetadata>(
-          layer::AttentionMetadataBuilder::build(params, args_.enable_mla()));
-  CHECK(attn_metadata) << "attn_metadata should not be null";
-  attn_metadata->enable_cuda_graph = true;
+      build_graph_attention_metadata(graph_input,
+                                     args_,
+                                     /*skip_cu_seq_lens=*/true);
   if (params.meta.batch_forward_type.is_decode()) {
     // Flash decode receives max_seq_len as a scalar kernel argument. Full graph
     // replay cannot update that scalar, so capture with a bucketed upper bound
@@ -211,10 +190,9 @@ std::optional<Params> DcuGraphPersistentParam::update(
     params_for_capture->enable_graph = true;
     params_for_capture->attn_metadata = attn_metadata;
 
-    params_for_capture->attention.device.q_seq_lens =
-        attn_metadata->q_cu_seq_lens;
+    params_for_capture->attention.device.q_seq_lens = attn_metadata->q_seq_lens;
     params_for_capture->attention.device.kv_seq_lens =
-        attn_metadata->kv_cu_seq_lens;
+        attn_metadata->kv_seq_lens;
     params_for_capture->attention.device.new_cache_slots =
         attn_metadata->slot_mapping;
     params_for_capture->attention.device.block_tables =
@@ -251,74 +229,24 @@ std::optional<Params> DcuGraphPersistentParam::update(
   std::vector<int32_t> q_seq_lens_vec(params.attention.host.q_seq_lens);
   std::vector<int32_t> kv_seq_lens_vec(params.attention.host.kv_seq_lens);
 
-  if (!q_seq_lens_vec.empty()) {
-    extend_q_cu_seq_lens(&q_seq_lens_vec, padding_needed, num_decoding_tokens_);
-
-    auto q_seq_lens =
-        make_int_tensor_on_device(q_seq_lens_vec, q_seq_lens_.options());
-
-    q_seq_lens_.slice(0, 0, q_seq_lens.size(0))
-        .copy_(q_seq_lens, /*non_blocking=*/true);
-
-    attn_metadata->q_cu_seq_lens = q_seq_lens_.slice(0, 0, q_seq_lens.size(0));
-
-    if (q_seq_lens.size(0) > 1) {
-      auto q_seq_lens_diff_vec = compute_cu_seq_lens_diff(q_seq_lens_vec);
-      auto q_seq_lens_diff = make_int_tensor_on_device(
-          q_seq_lens_diff_vec, q_seq_lens_values_.options());
-      q_seq_lens_values_.slice(0, 0, q_seq_lens_diff.size(0))
-          .copy_(q_seq_lens_diff, /*non_blocking=*/true);
-      attn_metadata->q_seq_lens = q_seq_lens_values(q_seq_lens_diff.size(0));
-    }
-  } else if (params.attention.device.q_seq_lens.defined()) {
-    q_seq_lens_.slice(0, 0, params.attention.device.q_seq_lens.size(0))
-        .copy_(params.attention.device.q_seq_lens, /*non_blocking=*/true);
-
-    attn_metadata->q_cu_seq_lens =
-        q_seq_lens_.slice(0, 0, params.attention.device.q_seq_lens.size(0));
-
-    if (params.attention.device.q_seq_lens.size(0) > 1) {
-      auto q_seq_lens_diff = torch::diff(attn_metadata->q_cu_seq_lens);
-      q_seq_lens_values_.slice(0, 0, q_seq_lens_diff.size(0))
-          .copy_(q_seq_lens_diff, /*non_blocking=*/true);
-      attn_metadata->q_seq_lens = q_seq_lens_values(q_seq_lens_diff.size(0));
-    }
-  }
-
-  if (!kv_seq_lens_vec.empty()) {
-    extend_kv_cu_seq_lens_for_padding(&kv_seq_lens_vec, padding_needed);
-
-    auto kv_seq_lens =
-        make_int_tensor_on_device(kv_seq_lens_vec, kv_seq_lens_.options());
-
-    kv_seq_lens_.slice(0, 0, kv_seq_lens.size(0))
-        .copy_(kv_seq_lens, /*non_blocking=*/true);
-
-    attn_metadata->kv_cu_seq_lens =
-        kv_seq_lens_.slice(0, 0, kv_seq_lens.size(0));
-
-    if (kv_seq_lens.size(0) > 1) {
-      auto kv_seq_lens_diff_vec = compute_cu_seq_lens_diff(kv_seq_lens_vec);
-      auto kv_seq_lens_diff = make_int_tensor_on_device(
-          kv_seq_lens_diff_vec, kv_seq_lens_values_.options());
-      kv_seq_lens_values_.slice(0, 0, kv_seq_lens_diff.size(0))
-          .copy_(kv_seq_lens_diff, /*non_blocking=*/true);
-      attn_metadata->kv_seq_lens = kv_seq_lens_values(kv_seq_lens_diff.size(0));
-    }
-  } else if (params.attention.device.kv_seq_lens.defined()) {
-    kv_seq_lens_.slice(0, 0, params.attention.device.kv_seq_lens.size(0))
-        .copy_(params.attention.device.kv_seq_lens, /*non_blocking=*/true);
-
-    attn_metadata->kv_cu_seq_lens =
-        kv_seq_lens_.slice(0, 0, params.attention.device.kv_seq_lens.size(0));
-
-    if (params.attention.device.kv_seq_lens.size(0) > 1) {
-      auto kv_seq_lens_diff = torch::diff(attn_metadata->kv_cu_seq_lens);
-      kv_seq_lens_values_.slice(0, 0, kv_seq_lens_diff.size(0))
-          .copy_(kv_seq_lens_diff, /*non_blocking=*/true);
-      attn_metadata->kv_seq_lens = kv_seq_lens_values(kv_seq_lens_diff.size(0));
-    }
-  }
+  util::pad_uniform_decode_lens(q_seq_lens_vec,
+                                kv_seq_lens_vec,
+                                padding_needed,
+                                static_cast<int32_t>(num_decoding_tokens_));
+  const auto [q_lens, q_cu_lens] =
+      stage_seq_lens(q_seq_lens_vec,
+                     params.attention.device.q_seq_lens,
+                     q_seq_lens_values_,
+                     q_seq_lens_);
+  attn_metadata->q_seq_lens = q_lens;
+  attn_metadata->q_cu_seq_lens = q_cu_lens;
+  const auto [kv_lens, kv_cu_lens] =
+      stage_seq_lens(kv_seq_lens_vec,
+                     params.attention.device.kv_seq_lens,
+                     kv_seq_lens_values_,
+                     kv_seq_lens_);
+  attn_metadata->kv_seq_lens = kv_lens;
+  attn_metadata->kv_cu_seq_lens = kv_cu_lens;
 
   if (params.attention.device.new_cache_slots.defined()) {
     const uint32_t src_size =
@@ -328,7 +256,8 @@ std::optional<Params> DcuGraphPersistentParam::update(
         .copy_(params.attention.device.new_cache_slots, /*non_blocking=*/true);
 
     if (padded_num_tokens > src_size) {
-      new_cache_slots_.slice(0, src_size, padded_num_tokens).fill_(-1);
+      new_cache_slots_.slice(0, src_size, padded_num_tokens)
+          .fill_(util::kPadSlotId);
     }
 
     attn_metadata->slot_mapping = new_cache_slots(padded_num_tokens);
@@ -377,13 +306,8 @@ std::optional<Params> DcuGraphPersistentParam::update(
                /*non_blocking=*/true);
 
     if (graph_batch_size + 1 > static_cast<uint32_t>(indptr_size)) {
-      auto last_value =
-          paged_kv_indptr_.slice(0, indptr_size - 1, indptr_size).clone();
-
-      for (uint32_t i = indptr_size; i < graph_batch_size + 1; ++i) {
-        paged_kv_indptr_.slice(0, i, i + 1)
-            .copy_(last_value, /*non_blocking=*/true);
-      }
+      util::pad_query_start_loc(
+          paged_kv_indptr_, indptr_size, graph_batch_size + 1);
     }
 
     attn_metadata->paged_kv_indptr = paged_kv_indptr(graph_batch_size);
@@ -454,59 +378,18 @@ void DcuGraphPersistentParam::update_decode_input_buffer(
   std::vector<int32_t> q_seq_lens_vec(params.attention.host.q_seq_lens);
   std::vector<int32_t> kv_seq_lens_vec(params.attention.host.kv_seq_lens);
 
-  if (!q_seq_lens_vec.empty()) {
-    extend_q_cu_seq_lens(&q_seq_lens_vec, padding_needed, num_decoding_tokens_);
-
-    auto q_seq_lens =
-        make_int_tensor_on_device(q_seq_lens_vec, q_seq_lens_.options());
-    q_seq_lens_.slice(0, 0, q_seq_lens.size(0))
-        .copy_(q_seq_lens, /*non_blocking=*/true);
-
-    auto q_seq_lens_diff_vec = compute_cu_seq_lens_diff(q_seq_lens_vec);
-    if (!q_seq_lens_diff_vec.empty()) {
-      auto q_seq_lens_diff = make_int_tensor_on_device(
-          q_seq_lens_diff_vec, q_seq_lens_values_.options());
-      q_seq_lens_values_.slice(0, 0, q_seq_lens_diff.size(0))
-          .copy_(q_seq_lens_diff, /*non_blocking=*/true);
-    }
-  } else if (params.attention.device.q_seq_lens.defined()) {
-    q_seq_lens_.slice(0, 0, params.attention.device.q_seq_lens.size(0))
-        .copy_(params.attention.device.q_seq_lens, /*non_blocking=*/true);
-
-    if (params.attention.device.q_seq_lens.size(0) > 1) {
-      auto q_seq_lens_diff = torch::diff(q_seq_lens(
-          static_cast<uint32_t>(params.attention.device.q_seq_lens.size(0))));
-      q_seq_lens_values_.slice(0, 0, q_seq_lens_diff.size(0))
-          .copy_(q_seq_lens_diff, /*non_blocking=*/true);
-    }
-  }
-
-  if (!kv_seq_lens_vec.empty()) {
-    extend_kv_cu_seq_lens_for_padding(&kv_seq_lens_vec, padding_needed);
-
-    auto kv_seq_lens =
-        make_int_tensor_on_device(kv_seq_lens_vec, kv_seq_lens_.options());
-    kv_seq_lens_.slice(0, 0, kv_seq_lens.size(0))
-        .copy_(kv_seq_lens, /*non_blocking=*/true);
-
-    auto kv_seq_lens_diff_vec = compute_cu_seq_lens_diff(kv_seq_lens_vec);
-    if (!kv_seq_lens_diff_vec.empty()) {
-      auto kv_seq_lens_diff = make_int_tensor_on_device(
-          kv_seq_lens_diff_vec, kv_seq_lens_values_.options());
-      kv_seq_lens_values_.slice(0, 0, kv_seq_lens_diff.size(0))
-          .copy_(kv_seq_lens_diff, /*non_blocking=*/true);
-    }
-  } else if (params.attention.device.kv_seq_lens.defined()) {
-    kv_seq_lens_.slice(0, 0, params.attention.device.kv_seq_lens.size(0))
-        .copy_(params.attention.device.kv_seq_lens, /*non_blocking=*/true);
-
-    if (params.attention.device.kv_seq_lens.size(0) > 1) {
-      auto kv_seq_lens_diff = torch::diff(kv_seq_lens(
-          static_cast<uint32_t>(params.attention.device.kv_seq_lens.size(0))));
-      kv_seq_lens_values_.slice(0, 0, kv_seq_lens_diff.size(0))
-          .copy_(kv_seq_lens_diff, /*non_blocking=*/true);
-    }
-  }
+  util::pad_uniform_decode_lens(q_seq_lens_vec,
+                                kv_seq_lens_vec,
+                                padding_needed,
+                                static_cast<int32_t>(num_decoding_tokens_));
+  stage_seq_lens(q_seq_lens_vec,
+                 params.attention.device.q_seq_lens,
+                 q_seq_lens_values_,
+                 q_seq_lens_);
+  stage_seq_lens(kv_seq_lens_vec,
+                 params.attention.device.kv_seq_lens,
+                 kv_seq_lens_values_,
+                 kv_seq_lens_);
 
   if (params.attention.device.new_cache_slots.defined()) {
     const uint32_t src_size =
@@ -516,7 +399,8 @@ void DcuGraphPersistentParam::update_decode_input_buffer(
         .copy_(params.attention.device.new_cache_slots, /*non_blocking=*/true);
 
     if (padded_num_tokens > src_size) {
-      new_cache_slots_.slice(0, src_size, padded_num_tokens).fill_(-1);
+      new_cache_slots_.slice(0, src_size, padded_num_tokens)
+          .fill_(util::kPadSlotId);
     }
   }
 
@@ -562,9 +446,10 @@ Params DcuGraphPersistentParam::init_decode_params(
 
   Params decode_params = copy_graph_execution_input(params);
   decode_params.enable_graph = true;
-  decode_params.attention.device.q_seq_lens = q_seq_lens(padded_num_tokens + 1);
+  decode_params.attention.device.q_seq_lens =
+      q_seq_lens_values(padded_num_tokens);
   decode_params.attention.device.kv_seq_lens =
-      kv_seq_lens(padded_num_tokens + 1);
+      kv_seq_lens_values(padded_num_tokens);
   decode_params.attention.device.new_cache_slots =
       new_cache_slots(padded_num_tokens);
   decode_params.attention.device.block_tables = block_tables(padded_num_tokens);
@@ -575,8 +460,10 @@ Params DcuGraphPersistentParam::init_decode_params(
   }
 
   auto attn_metadata = std::make_shared<layer::AttentionMetadata>();
-  attn_metadata->q_cu_seq_lens = decode_params.attention.device.q_seq_lens;
-  attn_metadata->kv_cu_seq_lens = decode_params.attention.device.kv_seq_lens;
+  attn_metadata->q_cu_seq_lens =
+      q_seq_lens_.slice(/*dim=*/0, /*start=*/0, /*end=*/padded_num_tokens + 1);
+  attn_metadata->kv_cu_seq_lens =
+      kv_seq_lens_.slice(/*dim=*/0, /*start=*/0, /*end=*/padded_num_tokens + 1);
   attn_metadata->q_seq_lens = q_seq_lens_values(padded_num_tokens);
   attn_metadata->kv_seq_lens = kv_seq_lens_values(padded_num_tokens);
   attn_metadata->block_table = decode_params.attention.device.block_tables;
@@ -593,16 +480,10 @@ Params DcuGraphPersistentParam::init_decode_params(
   attn_metadata->enable_cuda_graph = true;
 
   if (!params.attention.host.kv_seq_lens.empty()) {
-    const bool is_cu_seq_lens =
-        params.attention.host.kv_seq_lens.size() ==
-            static_cast<std::size_t>(params.meta.num_sequences + 1) &&
-        params.attention.host.kv_seq_lens.front() == 0;
     attn_metadata->total_kv_len =
-        is_cu_seq_lens
-            ? params.attention.host.kv_seq_lens.back()
-            : std::accumulate(params.attention.host.kv_seq_lens.begin(),
-                              params.attention.host.kv_seq_lens.end(),
-                              int64_t{0});
+        std::accumulate(params.attention.host.kv_seq_lens.begin(),
+                        params.attention.host.kv_seq_lens.end(),
+                        int64_t{0});
   }
 
   decode_params.attn_metadata = attn_metadata;

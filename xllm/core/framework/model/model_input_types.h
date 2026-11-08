@@ -21,10 +21,8 @@ limitations under the License.
 
 #include <cstdint>
 #include <cstring>
-#include <iterator>
 #include <limits>
 #include <memory>
-#include <numeric>
 #include <optional>
 #include <span>
 #include <string>
@@ -34,6 +32,7 @@ limitations under the License.
 #include "core/framework/eplb/eplb_info.h"
 #include "core/kv_cache/block/block.h"
 #include "core/platform/layer_synchronizer.h"
+#include "core/util/seq_lens.h"
 #if defined(USE_NPU)
 #include "core/platform/npu/npu_layer_synchronizer.h"
 #endif
@@ -353,11 +352,7 @@ inline void fill_request_layout(
     }
     return;
   }
-  starts.reserve(num_reqs + 1);
-  starts.assign(1, 0);
-  std::partial_sum(batch.num_scheduled_tokens.begin(),
-                   batch.num_scheduled_tokens.end(),
-                   std::back_inserter(starts));
+  util::fill_query_start_loc(starts, batch.num_scheduled_tokens);
 }
 
 struct BatchInputMeta {

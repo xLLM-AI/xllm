@@ -38,8 +38,6 @@ struct CpPlanInput {
   std::vector<int32_t> prefix_token_counts;
   torch::Tensor block_tables;
   bool has_prefix_slots = false;
-  bool q_seq_lens_are_cumulative = false;
-  bool kv_seq_lens_are_cumulative = false;
 };
 
 // Typed parallel configuration used by CP planning. JSON and global config

@@ -145,7 +145,7 @@ class DecodeCudaGraphRunner(BaseRunner):
                 paged_kv_indptr=torch.arange(batch_size + 1, dtype=torch.int32, device=device),
                 paged_kv_indices=torch.zeros(batch_size, dtype=torch.int32, device=device),
                 paged_kv_last_page_len=torch.ones(batch_size, dtype=torch.int32, device=device),
-                kv_seq_lens_host=torch.arange(batch_size + 1, dtype=torch.int32, device="cpu"),
+                kv_seq_lens_host=torch.ones(batch_size, dtype=torch.int32, device="cpu"),
                 kv_cu_seq_lens=torch.arange(batch_size + 1, dtype=torch.int32, device=device),
                 dp_execution_token_counts=(batch_size,) * self.dp_size,
                 dp_is_decode=(1,) * self.dp_size,
@@ -372,24 +372,25 @@ class DecodeCudaGraphRunner(BaseRunner):
         metadata: AttentionMetadata,
         batch_size: int,
     ) -> None:
-        cumulative_seq_lens = metadata.kv_seq_lens_host
-        if cumulative_seq_lens is None or cumulative_seq_lens.numel() != batch_size + 1:
-            raise RuntimeError("decode CUDA graph requires cumulative host KV lengths")
+        per_seq_seq_lens = metadata.kv_seq_lens_host
+        if per_seq_seq_lens is None or per_seq_seq_lens.numel() != batch_size:
+            raise RuntimeError("decode CUDA graph requires per-sequence host KV lengths")
 
         padded_batch_size = entry.batch_size
         static_metadata = entry.static_metadata
         page_size = self.attention_backend.page_size
         if page_size == 1:
-            static_metadata.paged_kv_indptr_host[: batch_size + 1].copy_(cumulative_seq_lens)
+            # Index 0 stays at the zero from the buffer's construction.
+            torch.cumsum(
+                per_seq_seq_lens,
+                dim=0,
+                out=static_metadata.paged_kv_indptr_host[1 : batch_size + 1],
+            )
             static_metadata.paged_kv_last_page_len_host.fill_(1)
         else:
             # TODO: Fuse these host metadata updates into one C++ loop to avoid
             # dispatching multiple small CPU tensor operations per decode step.
-            torch.sub(
-                cumulative_seq_lens[1:],
-                cumulative_seq_lens[:-1],
-                out=entry.host_seq_lens[:batch_size],
-            )
+            entry.host_seq_lens[:batch_size].copy_(per_seq_seq_lens)
             if padded_batch_size > batch_size:
                 # Keep padding sequences empty in FlashInfer's host planner
                 # metadata. Using seq_len=1 dummy sequences would schedule the
@@ -431,7 +432,7 @@ class DecodeCudaGraphRunner(BaseRunner):
 
         if page_size == 1 and padded_batch_size > batch_size:
             static_metadata.paged_kv_indptr_host[batch_size + 1 : padded_batch_size + 1].fill_(
-                int(cumulative_seq_lens[-1])
+                int(static_metadata.paged_kv_indptr_host[batch_size])
             )
 
     def _capture(self, entry: _DecodeGraphEntry) -> None:

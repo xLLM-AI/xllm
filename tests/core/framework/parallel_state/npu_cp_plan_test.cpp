@@ -794,23 +794,6 @@ TEST(NpuCpPlanTest, MtpTargetAndDraftShardGlobalInputsExactlyOnce) {
 #endif
 }
 
-TEST(NpuCpPlanTest, CumulativeHostLayoutIsPreserved) {
-  CpPlanInput input = aligned_input();
-  input.q_seq_lens_are_cumulative = true;
-  input.kv_seq_lens_are_cumulative = true;
-  const NpuCpPlan plan = NpuCpPlan::build(input, cp2_rank0_config());
-  EXPECT_EQ(plan.attention_meta().host_q_seq_lens,
-            std::vector<int32_t>({0, 4, 10}));
-  EXPECT_EQ(plan.attention_meta().host_kv_seq_lens,
-            std::vector<int32_t>({0, 4, 10}));
-  expect_tensor_bytes_equal(plan.attention_meta().q_seq_lens,
-                            int32_tensor({0, 4, 10}));
-  expect_tensor_bytes_equal(plan.attention_meta().kv_seq_lens,
-                            int32_tensor({0, 4, 10}));
-  expect_tensor_bytes_equal(plan.attention_meta().q_cu_seq_lens,
-                            int32_tensor({4, 10}));
-}
-
 TEST(NpuCpPlanTest, EmptyPlanDropsWorkerFakeModelRow) {
   const NpuCpPlan plan =
       NpuCpPlan::build(make_plan_input({}, {}), cp2_rank0_config());

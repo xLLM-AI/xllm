@@ -256,7 +256,7 @@ TEST(MluLinearStateRestoreWorkerTest,
   input.runtime.device_tensors_ready = true;
   input.input_params.meta.num_sequences = 4;
   input.input_params.meta.batch_id = 42;
-  input.input_params.attention.host.q_seq_lens = {0, 1, 2, 3, 4};
+  input.input_params.attention.host.q_seq_lens = {1, 1, 1, 1};
   input.input_params.attention.host.kv_cache_tokens_nums = {0, 8, 0, 0};
   input.input_params.embedding.linear_state_ids = {1, 2, 3, 5};
   input.input_params.embedding.linear_state_read_ids = {
@@ -320,7 +320,7 @@ TEST(MluLinearStateRestoreWorkerTest,
   input.positions = torch::zeros_like(input.token_ids);
   input.runtime.device_tensors_ready = true;
   input.input_params.meta.num_sequences = 2;
-  input.input_params.attention.host.q_seq_lens = {0, 1, 2, 3, 4, 5, 6};
+  input.input_params.attention.host.q_seq_lens = {1, 1, 1, 1, 1, 1};
   input.input_params.attention.host.kv_cache_tokens_nums = {0, 8};
   input.input_params.embedding.linear_state_ids = {1, 2, 3, 4, 5, 6};
   input.input_params.embedding.linear_state_read_ids = {1, 2, 3, 4, 5, 6};

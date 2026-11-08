@@ -201,21 +201,6 @@ class ModelParamsView final {
                  /*max_elements=*/4);
   }
 
-  int32_t get_q_seq_len(int32_t seq_idx) const {
-    CHECK_GE(seq_idx, 0) << "seq_idx out of range";
-#if defined(USE_NPU)
-    CHECK_LT(seq_idx, static_cast<int32_t>(attention.host.q_seq_lens.size()))
-        << "seq_idx out of range";
-    return attention.host.q_seq_lens[seq_idx];
-#else
-    CHECK_LT(seq_idx + 1,
-             static_cast<int32_t>(attention.host.q_seq_lens.size()))
-        << "seq_idx out of range";
-    return attention.host.q_seq_lens[seq_idx + 1] -
-           attention.host.q_seq_lens[seq_idx];
-#endif
-  }
-
   bool synchronize_layer(int64_t layer_idx) const {
     if (parallel.layer_wise_load_synchronizer == nullptr) {
       return true;

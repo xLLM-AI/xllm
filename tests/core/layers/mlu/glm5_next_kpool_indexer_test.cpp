@@ -314,8 +314,8 @@ TEST(Glm5NextKPoolIndexerTest,
   AttentionMetadata meta{};
   meta.q_seq_lens = torch::tensor({2, 0, 3}, torch::kInt32);
   meta.kv_seq_lens = torch::tensor({5, 7, 9}, torch::kInt32);
-  meta.q_seq_lens_vec = {0, 2, 2, 5};
-  meta.kv_seq_lens_vec = {0, 5, 12, 21};
+  meta.q_seq_lens_vec = {2, 0, 3};
+  meta.kv_seq_lens_vec = {5, 7, 9};
   prepare_glm5_next_kpool_metadata(meta, device);
   const auto first = meta.kpool_batch_metadata;
   EXPECT_EQ(first->q_seq_lens, (std::vector<int32_t>{2, 0, 3}));
@@ -1073,7 +1073,7 @@ TEST(Glm5NextKPoolIndexerTest,
   auto& params = input.input_params;
   params.meta.num_sequences = 2;
   params.meta.batch_forward_type = BatchForwardType::DECODE;
-  params.attention.host.kv_seq_lens = {0, 7, 17};
+  params.attention.host.kv_seq_lens = {7, 10};
   params.attention.host.block_tables =
       torch::tensor({{2, 1}, {3, 0}}, torch::kInt32);
   params.embedding.linear_state_indices = torch::tensor({1, 2}, torch::kInt32);

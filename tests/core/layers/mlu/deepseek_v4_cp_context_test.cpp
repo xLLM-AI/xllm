@@ -24,14 +24,6 @@ limitations under the License.
 namespace xllm::layer::mlu_v4_cp {
 namespace {
 
-TEST(DeepseekV4CpGeometryTest,
-     ConvertsMluCumulativeLengthsForConcurrentRequests) {
-  EXPECT_EQ(query_lengths_from_cumulative({0, 128, 256, 384}, 384),
-            std::vector<int32_t>({128, 128, 128}));
-  EXPECT_EQ(query_lengths_from_cumulative({0, 17, 82, 91}, 91),
-            std::vector<int32_t>({17, 65, 9}));
-}
-
 TEST(DeepseekV4CpGeometryTest, RequiresEnoughTokensForTwoSidedSplit) {
   EXPECT_FALSE(should_enable_zigzag_cp({3, 2}, /*cp_size=*/2));
   EXPECT_TRUE(should_enable_zigzag_cp({4, 1}, /*cp_size=*/2));

@@ -34,6 +34,7 @@ struct AttentionMetadata;
 
 struct AttentionMetadataBuildOptions {
   bool materialize_linear_state_validity = true;
+  bool skip_cu_seq_lens = false;
   std::optional<KVShardLayout> kv_shard_layout;
 };
 

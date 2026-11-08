@@ -34,6 +34,7 @@ limitations under the License.
 #include "core/framework/config/execution_config.h"
 #include "core/runtime/graph_execution_input.h"
 #include "core/runtime/rec_graph_input.h"
+#include "core/util/seq_lens.h"
 #include "runtime/decode_graph_bucket.h"
 #include "util/utils.h"
 
@@ -376,18 +377,12 @@ void GraphPersistentParam::update_input_buffer(const torch::Tensor& tokens,
   }
   graph_params.meta.num_sequences = params.meta.num_sequences;
 
-  // Apply padding if required number of tokens exceeds actual input
-  // Generate padded sequence lengths by extending the last valid value
   std::vector<int32_t> q_seq_lens_vec(params.attention.host.q_seq_lens);
   std::vector<int32_t> kv_seq_lens_vec(params.attention.host.kv_seq_lens);
-  if (padding_needed > 0) {
-    q_seq_lens_vec.reserve(q_seq_lens_vec.size() + padding_needed);
-    kv_seq_lens_vec.reserve(kv_seq_lens_vec.size() + padding_needed);
-    for (size_t i = 0; i < padding_needed; i++) {
-      q_seq_lens_vec.push_back(q_seq_lens_vec.back() + num_decoding_tokens_);
-      kv_seq_lens_vec.push_back(kv_seq_lens_vec.back() + num_decoding_tokens_);
-    }
-  }
+  util::pad_uniform_decode_lens(q_seq_lens_vec,
+                                kv_seq_lens_vec,
+                                padding_needed,
+                                static_cast<int32_t>(num_decoding_tokens_));
 
   graph_params.attention.host.q_seq_lens = q_seq_lens_vec;
   graph_params.attention.host.kv_seq_lens = kv_seq_lens_vec;

@@ -1371,10 +1371,10 @@ std::optional<Params> GraphPersistentParam::update(
       } else {
         plan_params.meta.num_sequences =
             static_cast<int32_t>(padded_batch_size);
-        plan_params.attention.device.kv_seq_lens =
-            kv_seq_lens(static_cast<uint32_t>(padded_batch_size));
-        plan_params.attention.device.q_seq_lens =
-            q_seq_lens(static_cast<uint32_t>(padded_batch_size));
+        plan_params.attention.device.kv_seq_lens = kv_seq_lens_.slice(
+            /*dim=*/0, /*start=*/0, /*end=*/padded_batch_size);
+        plan_params.attention.device.q_seq_lens = q_seq_lens_.slice(
+            /*dim=*/0, /*start=*/0, /*end=*/padded_batch_size);
         plan_params.attention.host.kv_seq_lens = padded_kv_seq_lens_vec;
         plan_params.attention.host.q_seq_lens = padded_q_seq_lens_vec;
         plan_block_tables =
@@ -1437,9 +1437,9 @@ std::optional<Params> GraphPersistentParam::update(
         std::make_optional<Params>(copy_graph_execution_input(params));
     // Set persistent buffers in graph_params.
     graph_params->attention.device.kv_seq_lens =
-        kv_seq_lens(static_cast<uint32_t>(padded_batch_size));
+        kv_seq_lens_.slice(/*dim=*/0, /*start=*/0, /*end=*/padded_batch_size);
     graph_params->attention.device.q_seq_lens =
-        q_seq_lens(static_cast<uint32_t>(padded_batch_size));
+        q_seq_lens_.slice(/*dim=*/0, /*start=*/0, /*end=*/padded_batch_size);
     graph_params->meta.actual_num_sequences =
         is_empty_dp_decode_rank ? 0 : static_cast<int32_t>(actual_num_tokens);
     if (supports_mla_graph_kv_bucketing_) {

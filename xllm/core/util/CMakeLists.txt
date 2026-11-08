@@ -22,6 +22,7 @@ cc_library(
     pybind_helper.h
     rec_model_utils.h
     scope_guard.h
+    seq_lens.h
     slice.h
     spin_lock.h
     spin_rw_lock.h

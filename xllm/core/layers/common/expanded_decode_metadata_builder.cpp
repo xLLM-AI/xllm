@@ -17,8 +17,6 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#include <algorithm>
-#include <numeric>
 #include <utility>
 #include <vector>
 
@@ -39,42 +37,6 @@ std::vector<int32_t> expand_host_kv_seq_lens(
     expanded.emplace_back(kv_seq_len);
   }
   return expanded;
-}
-
-std::vector<int32_t> build_page_counts(const std::vector<int32_t>& kv_seq_lens,
-                                       int32_t block_size,
-                                       int64_t block_table_capacity) {
-  std::vector<int32_t> page_counts;
-  page_counts.reserve(kv_seq_lens.size());
-  for (int32_t kv_seq_len : kv_seq_lens) {
-    const int32_t page_count = kv_page_count(kv_seq_len, block_size);
-    CHECK_LE(page_count, block_table_capacity)
-        << "Expanded KV length exceeds block-table capacity";
-    page_counts.emplace_back(page_count);
-  }
-  return page_counts;
-}
-
-std::vector<int32_t> build_indptr(const std::vector<int32_t>& page_counts) {
-  std::vector<int32_t> indptr;
-  indptr.reserve(page_counts.size() + 1);
-  indptr.emplace_back(0);
-  for (int32_t page_count : page_counts) {
-    CHECK_GT(page_count, 0);
-    indptr.emplace_back(indptr.back() + page_count);
-  }
-  return indptr;
-}
-
-std::vector<int32_t> build_last_page_lens(
-    const std::vector<int32_t>& kv_seq_lens,
-    int32_t block_size) {
-  std::vector<int32_t> last_page_lens;
-  last_page_lens.reserve(kv_seq_lens.size());
-  for (int32_t kv_seq_len : kv_seq_lens) {
-    last_page_lens.emplace_back(kv_last_page_len(kv_seq_len, block_size));
-  }
-  return last_page_lens;
 }
 
 }  // namespace
@@ -138,21 +100,20 @@ void ExpandedDecodeMetadataBuilder::populate_expanded_layout(
   CHECK_EQ(expanded_block_tables.size(0), expanded_kv_seq_lens.numel());
   CHECK_EQ(expanded_host_kv_seq_lens.size(),
            static_cast<size_t>(expanded_kv_seq_lens.numel()));
-  CHECK_GT(expanded_block_tables.size(1), 0);
-  CHECK_GT(block_size, 0);
 
-  const std::vector<int32_t> page_counts = build_page_counts(
-      expanded_host_kv_seq_lens, block_size, expanded_block_tables.size(1));
-  const std::vector<int32_t> indptr = build_indptr(page_counts);
-  const std::vector<int32_t> last_page_lens =
-      build_last_page_lens(expanded_host_kv_seq_lens, block_size);
-  CHECK_EQ(indptr.front(), 0);
-  CHECK(std::is_sorted(indptr.begin(), indptr.end()));
-  CHECK_EQ(indptr.back(),
-           std::accumulate(page_counts.begin(), page_counts.end(), int32_t{0}));
-  for (int32_t last_page_len : last_page_lens) {
-    CHECK_GE(last_page_len, 1);
-    CHECK_LE(last_page_len, block_size);
+  std::vector<int32_t> page_counts;
+  std::vector<int32_t> last_page_lens;
+  std::vector<int32_t> indptr = {0};
+  page_counts.reserve(expanded_host_kv_seq_lens.size());
+  last_page_lens.reserve(expanded_host_kv_seq_lens.size());
+  indptr.reserve(expanded_host_kv_seq_lens.size() + 1);
+  for (const int32_t kv_seq_len : expanded_host_kv_seq_lens) {
+    page_counts.emplace_back(
+        util::append_paged_kv_indptr(kv_seq_len,
+                                     expanded_block_tables.size(1),
+                                     block_size,
+                                     indptr,
+                                     last_page_lens));
   }
 
   torch::Tensor page_counts_tensor = torch::tensor(
@@ -278,7 +239,7 @@ void ExpandedDecodeMetadataBuilder::validate(
     for (int32_t kv_seq_len : metadata.kv_seq_lens_host_vec) {
       CHECK_GE(kv_seq_len, 0);
       if (block_size > 0) {
-        CHECK_LE(kv_page_count(kv_seq_len, block_size),
+        CHECK_LE(util::kv_page_count(kv_seq_len, block_size),
                  metadata.block_table.size(1));
       }
     }

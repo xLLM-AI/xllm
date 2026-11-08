@@ -247,6 +247,8 @@ Params MakeDecodeParams(const torch::Device& device,
 
   auto iopt = torch::TensorOptions().dtype(torch::kInt32).device(device);
 
+  std::vector<int32_t> q_seq_lens(num_tokens, /*value=*/1);
+  std::vector<int32_t> kv_seq_lens(num_tokens, kv_len);
   std::vector<int32_t> q_cu_seq_lens;
   std::vector<int32_t> kv_cu_seq_lens;
 
@@ -258,13 +260,13 @@ Params MakeDecodeParams(const torch::Device& device,
     kv_cu_seq_lens.push_back(i * kv_len);
   }
 
-  p.attention.host.q_seq_lens = q_cu_seq_lens;
-  p.attention.host.kv_seq_lens = kv_cu_seq_lens;
+  p.attention.host.q_seq_lens = q_seq_lens;
+  p.attention.host.kv_seq_lens = kv_seq_lens;
   p.attention.host.q_cu_seq_lens = q_cu_seq_lens;
 
-  p.attention.device.q_seq_lens = torch::tensor(q_cu_seq_lens, iopt);
-  p.attention.device.kv_seq_lens = torch::tensor(kv_cu_seq_lens, iopt);
-  p.attention.device.q_cu_seq_lens = p.attention.device.q_seq_lens;
+  p.attention.device.q_seq_lens = torch::tensor(q_seq_lens, iopt);
+  p.attention.device.kv_seq_lens = torch::tensor(kv_seq_lens, iopt);
+  p.attention.device.q_cu_seq_lens = torch::tensor(q_cu_seq_lens, iopt);
 
   std::vector<int32_t> slots;
   slots.reserve(num_tokens);
@@ -301,13 +303,13 @@ ModelParamsView MakePrefillParams(const torch::Device& device,
 
   auto iopt = torch::TensorOptions().dtype(torch::kInt32).device(device);
 
-  p.attention.host.q_seq_lens = {0, num_tokens};
-  p.attention.host.kv_seq_lens = {0, num_tokens};
+  p.attention.host.q_seq_lens = {num_tokens};
+  p.attention.host.kv_seq_lens = {num_tokens};
   p.attention.host.q_cu_seq_lens = {0, num_tokens};
 
-  p.attention.device.q_seq_lens = torch::tensor({0, num_tokens}, iopt);
-  p.attention.device.kv_seq_lens = torch::tensor({0, num_tokens}, iopt);
-  p.attention.device.q_cu_seq_lens = p.attention.device.q_seq_lens;
+  p.attention.device.q_seq_lens = torch::tensor({num_tokens}, iopt);
+  p.attention.device.kv_seq_lens = torch::tensor({num_tokens}, iopt);
+  p.attention.device.q_cu_seq_lens = torch::tensor({0, num_tokens}, iopt);
 
   p.attention.host.new_cache_slots = std::vector<int32_t>(num_tokens);
   std::iota(p.attention.host.new_cache_slots.begin(),

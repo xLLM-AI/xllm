@@ -15,13 +15,21 @@ limitations under the License.
 
 #pragma once
 
+#include <torch/torch.h>
+
 #include <algorithm>
 #include <cstdint>
+#include <memory>
 #include <optional>
 
+#include "core/common/global_flags.h"
+#include "core/framework/model/model_args.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/model/rec_model_params.h"
+#include "core/layers/common/attention_metadata.h"
+#include "core/layers/common/attention_metadata_builder.h"
 #include "core/util/rec_model_utils.h"
+#include "core/util/seq_lens.h"
 
 namespace xllm {
 
@@ -90,6 +98,52 @@ inline bool has_llmrec_graph_input(const ModelParamsView&) { return false; }
 
 inline bool has_llmrec_graph_input(const RecModelParams& params) {
   return params.has_llmrec_params();
+}
+
+template <typename Params>
+inline void fill_persistent_graph_cu_seq_lens(const Params& params,
+                                              int64_t actual_batch_size,
+                                              int64_t actual_num_tokens,
+                                              int64_t padded_num_tokens,
+                                              torch::Tensor& q_cu_seq_lens,
+                                              torch::Tensor& kv_cu_seq_lens) {
+  VLOG(kGraphExecutorLogVerboseLevel)
+      << "cumsum q_seq_lens into persistent buffer: src shape="
+      << params.attention.device.q_seq_lens.sizes()
+      << ", rows=" << actual_batch_size;
+  util::fill_query_start_loc(
+      params.attention.device.q_seq_lens, actual_batch_size, q_cu_seq_lens);
+
+  VLOG(kGraphExecutorLogVerboseLevel)
+      << "cumsum kv_seq_lens into persistent buffer: src shape="
+      << params.attention.device.kv_seq_lens.sizes()
+      << ", rows=" << actual_batch_size;
+  util::fill_query_start_loc(
+      params.attention.device.kv_seq_lens, actual_batch_size, kv_cu_seq_lens);
+
+  if (params.meta.batch_forward_type.is_decode() &&
+      padded_num_tokens > actual_num_tokens) {
+    util::pad_query_start_loc(
+        kv_cu_seq_lens, actual_batch_size + 1, padded_num_tokens + 1);
+  }
+}
+
+template <typename Params>
+inline std::shared_ptr<layer::AttentionMetadata> build_graph_attention_metadata(
+    const GraphExecutionInput<Params>& graph_input,
+    const ModelArgs& args,
+    bool skip_cu_seq_lens) {
+  const layer::AttentionMetadataBuildOptions build_options{
+      .skip_cu_seq_lens = skip_cu_seq_lens};
+  std::shared_ptr<layer::AttentionMetadata> attn_metadata =
+      std::make_shared<layer::AttentionMetadata>(
+          layer::AttentionMetadataBuilder::build(graph_input.params(),
+                                                 args.enable_mla(),
+                                                 /*attn_mask=*/{},
+                                                 /*device=*/std::nullopt,
+                                                 build_options));
+  attn_metadata->enable_cuda_graph = true;
+  return attn_metadata;
 }
 
 }  // namespace xllm

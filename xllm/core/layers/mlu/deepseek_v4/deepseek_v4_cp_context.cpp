@@ -21,62 +21,24 @@ limitations under the License.
 #include <numeric>
 #include <utility>
 
+#include "util/seq_lens.h"
+
 namespace xllm::layer::mlu_v4_cp {
-namespace {
-
-torch::Tensor make_cu_seq_lens(const std::vector<int32_t>& seq_lens,
-                               const torch::TensorOptions& options) {
-  std::vector<int32_t> cu_seq_lens = {0};
-  cu_seq_lens.reserve(seq_lens.size() + 1);
-  int32_t total_tokens = 0;
-  for (int32_t seq_len : seq_lens) {
-    total_tokens += seq_len;
-    cu_seq_lens.emplace_back(total_tokens);
-  }
-  return torch::tensor(cu_seq_lens, options);
-}
-
-}  // namespace
-
-std::vector<int32_t> query_lengths_from_cumulative(
-    const std::vector<int32_t>& cumulative_q_seq_lens,
-    int64_t total_tokens) {
-  CHECK_GE(cumulative_q_seq_lens.size(), 2u)
-      << "MLU query lengths require cumulative endpoints with a leading zero.";
-  CHECK_EQ(cumulative_q_seq_lens.front(), 0)
-      << "MLU cumulative query lengths must start at zero.";
-  CHECK_EQ(cumulative_q_seq_lens.back(), total_tokens)
-      << "MLU cumulative query lengths must end at the current token count.";
-
-  std::vector<int32_t> query_lengths;
-  query_lengths.reserve(cumulative_q_seq_lens.size() - 1);
-  for (size_t index = 1; index < cumulative_q_seq_lens.size(); ++index) {
-    const int32_t query_length =
-        cumulative_q_seq_lens[index] - cumulative_q_seq_lens[index - 1];
-    CHECK_GE(query_length, 0)
-        << "MLU cumulative query lengths must be non-decreasing.";
-    query_lengths.emplace_back(query_length);
-  }
-  return query_lengths;
-}
 
 bool should_enable_zigzag_cp(const std::vector<int32_t>& q_seq_lens,
                              int32_t cp_size) {
   if (cp_size <= 1 || q_seq_lens.empty()) {
     return false;
   }
-  const int32_t max_query_len =
-      *std::max_element(q_seq_lens.begin(), q_seq_lens.end());
+  const int32_t max_query_len = util::max_len(q_seq_lens);
   return max_query_len >= 2 * cp_size;
 }
 
 DeepseekV4CpGeometry build_cp_geometry(int32_t cp_size,
                                        const std::vector<int32_t>& q_seq_lens) {
-  CHECK_GT(cp_size, 1) << "DeepSeek V4 CP requires cp_size > 1.";
-  CHECK(!q_seq_lens.empty())
-      << "DeepSeek V4 CP requires at least one prefill request.";
   CHECK(should_enable_zigzag_cp(q_seq_lens, cp_size))
-      << "DeepSeek V4 CP requires a query with at least 2 * cp_size tokens.";
+      << "DeepSeek V4 CP requires cp_size > 1, a non-empty request list and a "
+         "query with at least 2 * cp_size tokens.";
 
   DeepseekV4CpGeometry geometry;
   geometry.total_tokens =
@@ -211,11 +173,14 @@ std::optional<DeepseekV4CpContext> build_cp_context(
                     int64_options);
   context.restore_indices =
       torch::tensor(context.geometry.restore_indices, int64_options);
-  context.front_cu_seq_lens = make_cu_seq_lens(
-      context.geometry.front_seq_lens_by_rank[static_cast<size_t>(cp_rank)],
+  context.front_cu_seq_lens = torch::tensor(
+      util::query_start_loc(
+          context.geometry
+              .front_seq_lens_by_rank[static_cast<size_t>(cp_rank)]),
       int32_options);
-  context.back_cu_seq_lens = make_cu_seq_lens(
-      context.geometry.back_seq_lens_by_rank[static_cast<size_t>(cp_rank)],
+  context.back_cu_seq_lens = torch::tensor(
+      util::query_start_loc(
+          context.geometry.back_seq_lens_by_rank[static_cast<size_t>(cp_rank)]),
       int32_options);
   context.local_positions = global_positions.index_select(
       /*dim=*/0, context.local_row_indices);

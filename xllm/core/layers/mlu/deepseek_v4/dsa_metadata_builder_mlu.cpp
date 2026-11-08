@@ -26,6 +26,7 @@ limitations under the License.
 #include "layers/common/attention_metadata.h"
 #include "layers/common/attention_metadata_builder.h"
 #include "layers/common/dsa_metadata.h"
+#include "util/seq_lens.h"
 #include "util/tensor_helper.h"
 
 namespace xllm::layer {
@@ -161,16 +162,16 @@ torch::Tensor build_decode_slot_mapping(const torch::Tensor& cache_block_table,
   auto block_table_acc = block_table_cpu.accessor<int32_t, 2>();
   auto pos_cpu = dsa.input_positions.contiguous().to(torch::kCPU);
   auto pos_acc = pos_cpu.accessor<int32_t, 1>();
+  const int64_t block_table_width = block_table_cpu.size(1);
   std::vector<int32_t> slot_mapping_vec;
   slot_mapping_vec.reserve(static_cast<size_t>(dsa.input_positions.numel()));
   for (int64_t seq_idx = 0; seq_idx < batch_size; ++seq_idx) {
     const int64_t q_begin = dsa.query_start_offsets[seq_idx];
     const int64_t q_end = dsa.query_start_offsets[seq_idx + 1];
     for (int64_t ci = q_begin; ci < q_end; ++ci) {
-      int32_t lid = pos_acc[ci] / compress_ratio;
-      int32_t block_col = lid / block_size;
-      slot_mapping_vec.push_back(
-          block_table_acc[seq_idx][block_col] * block_size + lid % block_size);
+      const int32_t lid = pos_acc[ci] / compress_ratio;
+      slot_mapping_vec.push_back(util::slot_for_position</*Ring=*/false>(
+          block_table_acc[seq_idx], lid, block_size, block_table_width));
     }
   }
   return torch::tensor(
@@ -362,7 +363,7 @@ torch::Tensor DSAMetadataBuilderMlu::expand_blocks_to_slots(
     int32_t batch_size,
     int64_t total_tokens) {
   const int32_t bs = gi.block_size;
-  auto slots = torch::full({total_tokens}, -1, torch::kInt32);
+  auto slots = torch::full({total_tokens}, util::kPadSlotId, torch::kInt32);
   auto slots_acc = slots.accessor<int32_t, 1>();
   auto bt_acc = block_table.accessor<int32_t, 2>();
   const int32_t max_blocks = block_table.size(1);
@@ -471,29 +472,11 @@ void DSAMetadataBuilderMlu::process_token_group(
 
   // Token caches write only the compressed rows produced by the current
   // forward step. Padded RoPE/compressor rows must not become cache writes.
-  auto out_slots_tensor = torch::full({committed_rows}, -1, raw_bt.options());
+  auto out_slots_tensor =
+      torch::full({committed_rows}, util::kPadSlotId, raw_bt.options());
   auto out_slots_acc = out_slots_tensor.accessor<int32_t, 1>();
   auto raw_bt_acc = raw_bt.accessor<int32_t, 2>();
-  const int64_t max_blocks = raw_bt.size(1);
-  const int64_t block_size_i64 = static_cast<int64_t>(block_size);
-
-  auto slot_for_compressed_index = [&](int32_t seq,
-                                       int64_t compressed_idx) -> int32_t {
-    if (max_blocks <= 0) {
-      return -1;
-    }
-    const int64_t block_idx = compressed_idx / block_size_i64;
-    if (block_idx >= max_blocks) {
-      return -1;
-    }
-    const int32_t block_id = raw_bt_acc[seq][block_idx];
-    if (block_id < 0) {
-      return -1;
-    }
-    const int64_t block_offset = compressed_idx % block_size_i64;
-    return static_cast<int32_t>(
-        static_cast<int64_t>(block_id) * block_size_i64 + block_offset);
-  };
+  const int64_t block_table_width = raw_bt.size(1);
 
   int64_t write_idx = 0;
   for (int32_t seq = 0; seq < batch_size; ++seq) {
@@ -505,8 +488,8 @@ void DSAMetadataBuilderMlu::process_token_group(
     const int64_t committed = ctx_len / ratio;
     const int64_t new_committed = committed - prev_committed;
     for (int64_t i = 0; i < new_committed; ++i) {
-      out_slots_acc[write_idx++] =
-          slot_for_compressed_index(seq, prev_committed + i);
+      out_slots_acc[write_idx++] = util::slot_for_position</*Ring=*/false>(
+          raw_bt_acc[seq], prev_committed + i, block_size, block_table_width);
     }
   }
 
@@ -551,28 +534,10 @@ void DSAMetadataBuilderMlu::process_swa_group(
   // Decode has one kv row; prefix slot 0 would incorrectly overwrite cache row
   // 0.
   auto out_slots_tensor =
-      torch::full({query_total_tokens}, -1, raw_bt.options());
+      torch::full({query_total_tokens}, util::kPadSlotId, raw_bt.options());
   auto out_slots_acc = out_slots_tensor.accessor<int32_t, 1>();
   auto raw_bt_acc = raw_bt.accessor<int32_t, 2>();
   const int64_t current_cols = raw_bt.size(1);
-  const int64_t block_size_i64 = static_cast<int64_t>(block_size);
-
-  auto slot_for_position = [&](int32_t seq, int64_t pos) -> int32_t {
-    if (current_cols <= 0) {
-      return -1;
-    }
-    const int64_t block_idx = pos / block_size_i64;
-    if (block_idx >= current_cols) {
-      return -1;
-    }
-    const int32_t block_id = raw_bt_acc[seq][block_idx];
-    if (block_id < 0) {
-      return -1;
-    }
-    const int64_t block_offset = pos % block_size_i64;
-    return static_cast<int32_t>(
-        static_cast<int64_t>(block_id) * block_size_i64 + block_offset);
-  };
 
   int64_t write_idx = 0;
   for (int32_t seq = 0; seq < batch_size; ++seq) {
@@ -581,7 +546,8 @@ void DSAMetadataBuilderMlu::process_swa_group(
         std::clamp<int64_t>(static_cast<int64_t>(q_lens[seq]), 0, ctx_len);
     const int64_t q_start = ctx_len - q_len;
     for (int64_t i = 0; i < q_len; ++i) {
-      out_slots_acc[write_idx++] = slot_for_position(seq, q_start + i);
+      out_slots_acc[write_idx++] = util::slot_for_position</*Ring=*/false>(
+          raw_bt_acc[seq], q_start + i, block_size, current_cols);
     }
   }
 
@@ -605,8 +571,8 @@ void DSAMetadataBuilderMlu::process_swa_group(
     return;
   }
 
-  torch::Tensor new_bt =
-      torch::full({batch_size, max_dst_len}, -1, raw_bt.options());
+  torch::Tensor new_bt = torch::full(
+      {batch_size, max_dst_len}, util::kPadSlotId, raw_bt.options());
   auto new_acc = new_bt.accessor<int32_t, 2>();
   auto old_acc = raw_bt.accessor<int32_t, 2>();
 
@@ -657,10 +623,10 @@ void DSAMetadataBuilderMlu::build_c128_meta(
 
   const torch::TensorOptions int_options =
       torch::TensorOptions().dtype(torch::kInt32);
-  const int64_t table_cols =
-      std::max<int64_t>((max_context_len + block_size - 1) / block_size, 1);
-  torch::Tensor table =
-      torch::full({total_tokens, table_cols}, -1, int_options);
+  const int64_t block_table_width =
+      util::kv_page_count(static_cast<int32_t>(max_context_len), block_size);
+  torch::Tensor table = torch::full(
+      {total_tokens, block_table_width}, util::kPadSlotId, int_options);
   torch::Tensor src =
       block_table
           .to(torch::TensorOptions().device(torch::kCPU).dtype(torch::kInt32))
@@ -737,18 +703,14 @@ void DSAMetadataBuilderMlu::build_seq_lengths(
   dsa_metadata.index_c4_seq_lens = index_c4_lens;
   dsa_metadata.seq_lens = kv_lens;
 
-  dsa_metadata.query_start_offsets.clear();
-  dsa_metadata.query_start_offsets.reserve(static_cast<size_t>(batch_size) + 1);
-  dsa_metadata.query_start_offsets.emplace_back(0);
-  dsa_metadata.start_pos_vec.clear();
-  dsa_metadata.start_pos_vec.reserve(static_cast<size_t>(batch_size));
-  int64_t query_offset = 0;
-  for (int32_t seq_idx = 0; seq_idx < batch_size; ++seq_idx) {
-    const int64_t q_len = static_cast<int64_t>(q_lens_vec[seq_idx]);
-    const int64_t kv_len = static_cast<int64_t>(kv_lens_vec[seq_idx]);
-    query_offset += q_len;
-    dsa_metadata.query_start_offsets.emplace_back(query_offset);
-    dsa_metadata.start_pos_vec.emplace_back(kv_len - q_len);
+  util::fill_query_start_loc(
+      dsa_metadata.query_start_offsets,
+      Slice<int32_t>(q_lens_vec, static_cast<size_t>(batch_size)));
+  dsa_metadata.start_pos_vec.resize(static_cast<size_t>(batch_size));
+  for (int32_t i = 0; i < batch_size; ++i) {
+    dsa_metadata.start_pos_vec[static_cast<size_t>(i)] =
+        static_cast<int64_t>(kv_lens_vec[static_cast<size_t>(i)]) -
+        q_lens_vec[static_cast<size_t>(i)];
   }
 }
 

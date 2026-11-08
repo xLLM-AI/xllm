@@ -150,13 +150,7 @@ ModelParamsView make_input_params(int32_t num_sequences,
   ModelParamsView params = ModelInputSnapshot(LlmModelParams()).view();
   params.meta.num_sequences = num_sequences;
 
-  std::vector<int32_t> q_cu_seq_lens;
-  q_cu_seq_lens.reserve(static_cast<size_t>(q_lens.size()) + 1);
-  q_cu_seq_lens.push_back(0);
-  for (int32_t len : q_lens) {
-    q_cu_seq_lens.push_back(q_cu_seq_lens.back() + len);
-  }
-  params.attention.host.q_seq_lens = q_cu_seq_lens;
+  params.attention.host.q_seq_lens = q_lens;
 
   std::vector<int64_t> state_indices;
   state_indices.reserve(static_cast<size_t>(num_sequences));

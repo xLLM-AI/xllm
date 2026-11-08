@@ -155,18 +155,24 @@ torch::Tensor make_block_table(const std::vector<std::vector<int32_t>>& rows) {
       .view({static_cast<int64_t>(rows.size()), cols});
 }
 
-int32_t max_seq_len(const std::vector<int>& cu_lens) {
-  int32_t max_len = 0;
+std::vector<int32_t> per_seq_lens(const std::vector<int32_t>& cu_lens) {
+  std::vector<int32_t> lens;
+  lens.reserve(cu_lens.empty() ? 0 : cu_lens.size() - 1);
   for (size_t idx = 1; idx < cu_lens.size(); ++idx) {
-    max_len = std::max(max_len, cu_lens[idx] - cu_lens[idx - 1]);
+    lens.emplace_back(cu_lens[idx] - cu_lens[idx - 1]);
   }
-  return max_len;
+  return lens;
+}
+
+int32_t max_seq_len(const std::vector<int32_t>& cu_lens) {
+  const std::vector<int32_t> lens = per_seq_lens(cu_lens);
+  return lens.empty() ? 0 : *std::max_element(lens.begin(), lens.end());
 }
 
 ModelParamsView make_c128_params(BatchForwardType batch_forward_type,
                                  int32_t num_sequences,
-                                 const std::vector<int>& q_cu_lens,
-                                 const std::vector<int>& kv_cu_lens,
+                                 const std::vector<int32_t>& q_cu_lens,
+                                 const std::vector<int32_t>& kv_cu_lens,
                                  const torch::Tensor& block_table) {
   ModelParamsView params = ModelInputSnapshot(LlmModelParams()).view();
   params.meta.batch_forward_type = batch_forward_type;
@@ -174,14 +180,14 @@ ModelParamsView make_c128_params(BatchForwardType batch_forward_type,
   params.meta.actual_num_sequences = num_sequences;
   params.meta.q_max_seq_len = max_seq_len(q_cu_lens);
   params.meta.kv_max_seq_len = max_seq_len(kv_cu_lens);
-  params.attention.host.q_seq_lens.assign(q_cu_lens.begin(), q_cu_lens.end());
-  params.attention.host.kv_seq_lens.assign(kv_cu_lens.begin(),
-                                           kv_cu_lens.end());
+  params.attention.host.q_seq_lens = per_seq_lens(q_cu_lens);
+  params.attention.host.kv_seq_lens = per_seq_lens(kv_cu_lens);
   params.attention.host.q_cu_seq_lens.assign(q_cu_lens.begin() + 1,
                                              q_cu_lens.end());
-  params.attention.device.q_seq_lens = torch::tensor(q_cu_lens, torch::kInt32);
+  params.attention.device.q_seq_lens =
+      torch::tensor(params.attention.host.q_seq_lens, torch::kInt32);
   params.attention.device.kv_seq_lens =
-      torch::tensor(kv_cu_lens, torch::kInt32);
+      torch::tensor(params.attention.host.kv_seq_lens, torch::kInt32);
   params.attention.device.q_cu_seq_lens =
       torch::tensor(params.attention.host.q_cu_seq_lens, torch::kInt32);
   params.attention.device.new_cache_slots = torch::empty(
@@ -194,8 +200,8 @@ ModelParamsView make_c128_params(BatchForwardType batch_forward_type,
 
 AttentionMetadata build_c128_metadata(BatchForwardType batch_forward_type,
                                       int32_t num_sequences,
-                                      const std::vector<int>& q_cu_lens,
-                                      const std::vector<int>& kv_cu_lens,
+                                      const std::vector<int32_t>& q_cu_lens,
+                                      const std::vector<int32_t>& kv_cu_lens,
                                       const torch::Tensor& block_table,
                                       int32_t block_size) {
   ModelParamsView params = make_c128_params(

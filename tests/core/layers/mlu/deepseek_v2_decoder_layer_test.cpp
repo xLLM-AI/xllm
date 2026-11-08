@@ -773,14 +773,12 @@ class DeepseekV2DecoderLayerTest : public ::testing::Test {
     input_params.meta.num_sequences = batch_size;
     input_params.meta.q_max_seq_len = seq_len;
     input_params.meta.kv_max_seq_len = batch_size * seq_len;
-    input_params.attention.device.q_seq_lens = torch::arange(
-        0,
-        (batch_size + 1) * seq_len,
+    input_params.attention.device.q_seq_lens = torch::full(
+        {batch_size},
         seq_len,
         torch::TensorOptions().dtype(torch::kInt32).device(options_.device()));
-    input_params.attention.device.kv_seq_lens = torch::arange(
-        0,
-        (batch_size + 1) * seq_len,
+    input_params.attention.device.kv_seq_lens = torch::full(
+        {batch_size},
         seq_len,
         torch::TensorOptions().dtype(torch::kInt32).device(options_.device()));
     input_params.attention.host.q_seq_lens.resize(batch_size, seq_len);
@@ -1372,10 +1370,10 @@ TEST_F(DeepseekV2DecoderLayerTest, ForwardMixedDpMoEReturnsLocalSlice) {
   input_params.meta.q_max_seq_len = 1;
   input_params.meta.kv_max_seq_len = 2;
   input_params.attention.device.q_seq_lens = torch::tensor(
-      {0, 1, 2},
+      {1, 1},
       torch::TensorOptions().dtype(torch::kInt32).device(options_.device()));
   input_params.attention.device.kv_seq_lens = torch::tensor(
-      {0, 1, 2},
+      {1, 1},
       torch::TensorOptions().dtype(torch::kInt32).device(options_.device()));
   input_params.attention.host.q_seq_lens = {1, 1};
   input_params.attention.host.kv_seq_lens = {1, 1};
