@@ -13,30 +13,19 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "hash_util.h"
-
-#include "core/framework/config/kv_cache_config.h"
+#include "core/util/hash_util.h"
 
 namespace xllm {
 
-XXH3Key hash_tensor(const torch::Tensor& tensor) {
+XXH3Key hash_bytes(const void* data, size_t size, uint64_t seed) {
+  const XXH128_hash_t hash = XXH3_128bits_withSeed(data, size, seed);
   XXH3Key key;
-  torch::Tensor contiguous_tensor = tensor.contiguous();
-  XXH128_hash_t hash = XXH3_128bits_withSeed(
-      reinterpret_cast<const void*>(contiguous_tensor.data_ptr()),
-      tensor.numel() * tensor.element_size(),
-      KVCacheConfig::get_instance().xxh3_128bits_seed());
   std::memcpy(key.data, &hash, sizeof(hash));
   return key;
 }
 
-XXH3Key hash_string(const std::string& str) {
-  XXH3Key key;
-  XXH128_hash_t hash =
-      XXH3_128bits_withSeed(reinterpret_cast<const void*>(str.data()),
-                            str.size(),
-                            KVCacheConfig::get_instance().xxh3_128bits_seed());
-  std::memcpy(key.data, &hash, sizeof(hash));
-  return key;
+XXH3Key hash_string(std::string_view value, uint64_t seed) {
+  return hash_bytes(value.data(), value.size(), seed);
 }
+
 }  // namespace xllm

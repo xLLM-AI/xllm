@@ -30,6 +30,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
+#include "core/framework/model/seq_lens.h"
 #include "core/framework/state_dict/utils.h"
 #include "core/kernels/ops_api.h"
 #include "core/layers/common/dsa_metadata.h"
@@ -38,7 +39,6 @@ limitations under the License.
 #include "core/layers/common/rms_norm.h"
 #include "core/layers/common/word_embedding.h"
 #include "core/layers/deepseek_v4_decoder_layer.h"
-#include "core/util/seq_lens.h"
 #include "layers/npu/deepseek_v4_rotary_embedding.h"
 #include "layers/npu_torch/deepseek_v4_cp_context.h"
 #include "models/llm/deepseek_v4.h"

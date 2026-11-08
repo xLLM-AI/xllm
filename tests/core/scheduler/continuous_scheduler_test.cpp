@@ -23,6 +23,7 @@
 
 #include "core/common/metrics.h"
 #include "core/common/rate_limiter.h"
+#include "core/common/types.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"

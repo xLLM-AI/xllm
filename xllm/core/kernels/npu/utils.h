@@ -23,7 +23,7 @@ limitations under the License.
 #include <vector>
 
 #include "acl/acl.h"
-#include "util/tensor_helper.h"
+#include "core/framework/tensor/tensor_helper.h"
 
 namespace xllm::kernel::npu {
 struct type_info {

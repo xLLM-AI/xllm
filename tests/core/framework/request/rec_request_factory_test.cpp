@@ -26,12 +26,12 @@ limitations under the License.
 #include "common/options.h"
 #include "common/rate_limiter.h"
 #include "core/common/types.h"
+#include "core/framework/model/rec_model_utils.h"
 #include "framework/model/model_args.h"
 #include "framework/request/rec_type.h"
 #include "framework/request/request_params.h"
 #include "rec.pb.h"
 #include "tests/core/framework/request/request_factory_test_utils.h"
-#include "util/rec_model_utils.h"
 
 namespace xllm {
 namespace {

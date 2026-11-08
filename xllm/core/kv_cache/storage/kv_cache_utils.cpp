@@ -34,6 +34,8 @@ limitations under the License.
 #endif
 #if defined(USE_NPU)
 #include "acl/acl_rt.h"
+#include "core/common/types.h"
+#include "core/framework/model/model_type.h"
 
 extern "C" aclError aclrtHostRegister(void* ptr,
                                       uint64_t size,

@@ -27,13 +27,13 @@ limitations under the License.
 #include <limits>
 
 #include "compiler/triton/include/jit_kernel.h"
+#include "core/framework/tensor/linalg.h"
 #include "framework/config/kv_cache_config.h"
 #include "framework/speculative/spec_input_builder.h"
 #include "layers/common/attention_metadata_builder.h"
 #include "platform/device.h"
 #include "platform/platform.h"
 #include "runtime/forward_params.h"
-#include "util/linalg.h"
 
 namespace xllm::layer {
 namespace {

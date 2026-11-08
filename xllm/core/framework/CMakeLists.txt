@@ -6,6 +6,7 @@ if(USE_NPU)
     ${CMAKE_SOURCE_DIR}/third_party/spdlog/include
   )
 endif()
+add_subdirectory(tensor)
 add_subdirectory(batch)
 add_subdirectory(block)
 add_subdirectory(allocator)

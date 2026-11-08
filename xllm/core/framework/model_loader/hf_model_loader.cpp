@@ -35,12 +35,15 @@ limitations under the License.
 #include <unordered_map>
 #include <vector>
 
+#include "core/common/types.h"
 #include "core/common/version_singleton.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/rec_config.h"
+#include "core/framework/model/rec_model_utils.h"
 #include "core/framework/model_loader/hf_model_args.h"
 #include "core/framework/state_dict/rec_vocab_dict.h"
 #include "core/framework/state_dict/safetensors/safetensors.h"
+#include "core/framework/tensor/tensor_helper.h"
 #include "core/framework/tokenizer/fast_tokenizer.h"
 #include "core/framework/tokenizer/rec_tokenizer.h"
 #include "core/framework/tokenizer/sentencepiece_tokenizer.h"
@@ -52,9 +55,7 @@ limitations under the License.
 #include "core/platform/device.h"
 #include "core/util/blocking_counter.h"
 #include "core/util/json_reader.h"
-#include "core/util/rec_model_utils.h"
 #include "core/util/scope_guard.h"
-#include "core/util/tensor_helper.h"
 #include "core/util/utils.h"
 #include "models/model_registry.h"
 

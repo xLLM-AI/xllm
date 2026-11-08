@@ -25,6 +25,7 @@ limitations under the License.
 #include <unordered_set>
 #include <utility>
 
+#include "core/framework/multimodal/content_hash.h"
 #include "util/hash_util.h"
 
 namespace xllm {

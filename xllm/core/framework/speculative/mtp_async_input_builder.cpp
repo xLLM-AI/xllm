@@ -19,7 +19,7 @@ limitations under the License.
 
 #include <algorithm>
 
-#include "core/util/tensor_helper.h"
+#include "core/framework/tensor/tensor_helper.h"
 
 #if defined(USE_NPU)
 #include "kernels/npu/tilelang/mtp_prepare_next_draft.h"

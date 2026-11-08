@@ -15,8 +15,8 @@ limitations under the License.
 
 #include "core/runtime/mtp_runtime_helpers.h"
 
+#include "core/framework/tensor/tensor_helper.h"
 #include "core/util/slice.h"
-#include "core/util/tensor_helper.h"
 namespace xllm::mtp_detail {
 void check_mtp_decode_states(
     const std::vector<EmbeddingCache::DecodeState>& states,

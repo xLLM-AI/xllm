@@ -29,9 +29,9 @@ limitations under the License.
 #include "core/common/instance_name.h"
 #include "core/distributed_runtime/llm_master.h"
 #include "core/distributed_runtime/rec_master.h"
+#include "core/framework/model/rec_model_utils.h"
 #include "core/framework/request/request_output.h"
 #include "core/framework/request/request_params.h"
-#include "core/util/rec_model_utils.h"
 
 /**
  * @brief Opaque handle for LLM inference instance

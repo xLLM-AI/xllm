@@ -26,7 +26,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "int32_map.h"
+#include "core/util/int32_map.h"
 
 namespace xllm {
 

@@ -34,11 +34,11 @@ limitations under the License.
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/rec_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/framework/model/rec_model_utils.h"
 #include "core/framework/request/priority_comparator.h"
 #include "core/framework/request/rec_type.h"
 #include "core/framework/request/request.h"
 #include "core/framework/request/sequence.h"
-#include "core/util/rec_model_utils.h"
 #include "core/util/timer.h"
 
 namespace xllm {

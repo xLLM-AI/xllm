@@ -21,13 +21,13 @@ limitations under the License.
 #include <limits>
 #include <utility>
 
+#include "core/framework/model/seq_lens.h"
+#include "core/framework/tensor/tensor_helper.h"
 #include "framework/config/model_config.h"
 #include "framework/model/model_params_view.h"
 #include "framework/sampling/sampling_params.h"
 #include "layers/common/expanded_decode_metadata_builder.h"
 #include "runtime/vlm_forward_params.h"
-#include "util/seq_lens.h"
-#include "util/tensor_helper.h"
 
 namespace xllm::specBuilder {
 

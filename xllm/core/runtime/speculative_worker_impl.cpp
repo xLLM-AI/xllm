@@ -18,15 +18,16 @@ limitations under the License.
 #include <type_traits>
 
 #include "common/global_flags.h"
+#include "core/common/types.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/eplb/eplb_utils.h"
 #include "core/framework/speculative/spec_input_builder.h"
 #include "core/framework/speculative/verify_layout.h"
+#include "core/framework/tensor/tensor_helper.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "runtime/llm_worker_impl.h"
 #include "runtime/vlm_worker_impl.h"
 #include "util/slice.h"
-#include "util/tensor_helper.h"
 #include "util/timer.h"
 #include "util/utils.h"
 

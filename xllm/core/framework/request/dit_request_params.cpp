@@ -21,12 +21,15 @@ limitations under the License.
 
 #include "core/common/instance_name.h"
 #include "core/common/macros.h"
+#include "core/common/types.h"
 #include "core/framework/config/dit_config.h"
 #include "core/framework/multimodal/mm_codec.h"
 #include "core/framework/request/dit_source_decoder.h"
+#include "core/framework/tensor/tensor_codec.h"
 #include "core/util/utils.h"
 #include "core/util/uuid.h"
 #include "request.h"
+#include "tensor.pb.h"
 
 namespace xllm {
 namespace {

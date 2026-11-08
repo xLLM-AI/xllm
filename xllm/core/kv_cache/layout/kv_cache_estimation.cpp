@@ -23,11 +23,15 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/metrics.h"
+#include "core/common/types.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/framework/model/model_type.h"
+#include "core/framework/tensor/tensor_helper.h"
+#include "core/framework/tensor/tensor_options.h"
 #include "core/kv_cache/block/block_utils.h"
 #include "core/kv_cache/layout/deepseek_v4_cache_policy.h"
 #include "core/kv_cache/layout/kpool_cache_policy.h"
@@ -37,7 +41,6 @@ limitations under the License.
 #include "core/runtime/options.h"
 #include "framework/model/model_args.h"
 #include "util/pretty_print.h"
-#include "util/tensor_helper.h"
 #include "util/utils.h"
 
 namespace xllm {
@@ -885,9 +888,10 @@ KVCacheCapacity estimate_kv_cache_capacity(
       CHECK_GT(model_args.index_kpool(), 0)
           << "KPool requires index_kpool > 0.";
     }
-    const int64_t split_factor = Platform::supports_dsa_indexer_cache_sharding()
-                                     ? util::kv_split_size_effective()
-                                     : 1;
+    const int64_t split_factor =
+        Platform::supports_dsa_indexer_cache_sharding()
+            ? ParallelConfig::get_instance().kv_split_size_effective()
+            : 1;
     if (enable_indexer_cache_quantization) {
       // int8 index cache: one byte per element plus a per-token fp32 scale.
       index_cache_slot_size =

@@ -20,6 +20,7 @@ limitations under the License.
 #include <sstream>
 
 #include "base_format_detector.h"
+#include "core/common/types.h"
 #include "utils.h"
 
 namespace xllm {

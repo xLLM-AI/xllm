@@ -40,26 +40,9 @@ struct DitModelLayout final {
 std::optional<std::vector<DitDiscoveredComponent>> discover_dit_components(
     const std::filesystem::path& model_path);
 
-// Map discovered component types to a registered DiT pipeline type.
-// Implemented in models/model_registry.cpp.
-std::string resolve_dit_pipeline_type(
-    const std::vector<DitDiscoveredComponent>& components);
-
-inline std::optional<DitModelLayout> discover_dit_model_layout(
-    const std::filesystem::path& model_path) {
-  std::optional<std::vector<DitDiscoveredComponent>> components =
-      discover_dit_components(model_path);
-  if (!components.has_value()) {
-    return std::nullopt;
-  }
-  DitModelLayout layout;
-  layout.components = std::move(components.value());
-  layout.pipeline_type = resolve_dit_pipeline_type(layout.components);
-  if (layout.pipeline_type.empty()) {
-    return std::nullopt;
-  }
-  return layout;
-}
+// Resolve a discovered layout through the registered model factories.
+std::optional<DitModelLayout> discover_dit_model_layout(
+    const std::filesystem::path& model_path);
 
 }  // namespace util
 }  // namespace xllm

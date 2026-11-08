@@ -23,7 +23,8 @@ limitations under the License.
 #include <string>
 #include <utility>
 
-#include "core/util/dit_model_discovery.h"
+#include "core/framework/model/model_type.h"
+#include "core/framework/model_loader/dit_model_discovery.h"
 #include "core/util/json_reader.h"
 #include "core/util/utils.h"
 #include "models/model_registry.h"

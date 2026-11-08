@@ -37,6 +37,7 @@ limitations under the License.
 #endif
 #include <torch_npu/csrc/core/npu/NPUFormat.h>
 
+#include "core/framework/model/model_type.h"
 #include "framework/config/eplb_config.h"
 #include "framework/config/kernel_config.h"
 #include "framework/config/scheduler_config.h"

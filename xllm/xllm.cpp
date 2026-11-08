@@ -72,6 +72,7 @@ namespace py = pybind11;
 #if defined(USE_NPU)
 #include "core/platform/npu/startup.h"
 #endif
+#include "core/framework/model/model_path.h"
 #include "core/util/net.h"
 #include "core/util/utils.h"
 #include "core/util/verbose_trace_logger.h"

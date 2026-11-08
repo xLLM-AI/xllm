@@ -20,6 +20,7 @@ limitations under the License.
 
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/model/model_args.h"
+#include "core/framework/model/model_type.h"
 #include "core/util/utils.h"
 
 namespace xllm {

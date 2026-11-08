@@ -7,6 +7,7 @@ cc_test(
   SRCS
     encoder_cache_test.cpp
   DEPS
+    :content_hash
     :encoder_cache
     :util
     :config

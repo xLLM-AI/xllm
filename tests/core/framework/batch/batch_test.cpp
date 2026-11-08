@@ -38,6 +38,7 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/framework/tensor/tensor_helper.h"
 #include "core/kv_cache/block/block.h"
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/block/block_utils.h"
@@ -60,7 +61,6 @@ limitations under the License.
 #include "runtime/dit_forward_params.h"
 #include "runtime/forward_shared_memory_transport.h"
 #include "tests/core/framework/sampling/sampling_test_utils.h"
-#include "util/tensor_helper.h"
 #include "worker.pb.h"
 
 namespace xllm {

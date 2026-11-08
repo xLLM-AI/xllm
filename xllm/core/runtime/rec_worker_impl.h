@@ -24,11 +24,11 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/model/rec_model.h"
+#include "core/framework/model/rec_model_utils.h"
 #include "runtime/rec_executor.h"
 #include "runtime/rec_forward_params.h"
 #include "runtime/worker_impl.h"
 #include "util/blockingconcurrentqueue.h"
-#include "util/rec_model_utils.h"
 #include "util/threadpool.h"
 
 namespace xllm {

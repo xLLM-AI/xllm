@@ -44,6 +44,7 @@ cc_library(
     device_monitor.cpp
     flash_comm1_context.cpp
   DEPS
+    :tensor_codec
     :native_library
     :extension_registry
     :config

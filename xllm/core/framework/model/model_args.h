@@ -27,6 +27,7 @@ limitations under the License.
 #include <vector>
 
 #include "common/macros.h"
+#include "core/framework/model/model_type.h"
 
 namespace xllm {
 

@@ -37,6 +37,7 @@ limitations under the License.
 #include "core/framework/multimodal/mm_visitor.h"
 #include "core/framework/parallel_state/process_group.h"
 #include "core/framework/state_dict/state_dict.h"
+#include "core/framework/tensor/tensor_helper.h"
 #include "core/framework/tokenizer/tokenizer.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "models/dit/autoencoders/autoencoder_kl_wan.h"
@@ -49,7 +50,6 @@ limitations under the License.
 #include "models/vlm/mposition/mposition.h"
 #include "models/vlm/qwen3_vl.h"
 #include "processors/multimodal_processor.h"
-#include "util/tensor_helper.h"
 
 namespace xllm {
 

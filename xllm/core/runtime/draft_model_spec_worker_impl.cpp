@@ -24,14 +24,18 @@ limitations under the License.
 #include <system_error>
 #include <tuple>
 
+#include "core/common/types.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_params_view.h"
+#include "core/framework/model/model_type.h"
+#include "core/framework/multimodal/content_hash.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/draft_proposal.h"
 #include "core/framework/speculative/embedding_cache.h"
+#include "core/framework/tensor/tensor_helper.h"
 #include "core/kv_cache/layout/kv_cache_capacity.h"
 #include "core/kv_cache/layout/kv_cache_estimation.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
@@ -41,7 +45,6 @@ limitations under the License.
 #include "runtime/llm_worker_impl.h"
 #include "runtime/worker_memory_resources.h"
 #include "util/hash_util.h"
-#include "util/tensor_helper.h"
 #include "util/utils.h"
 
 namespace xllm {

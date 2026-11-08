@@ -4,6 +4,11 @@ cc_library(
   NAME 
     model
   HDRS
+    model_type.h
+    model_path.h
+    vocab_validation.h
+    seq_lens.h
+    rec_model_utils.h
     causal_lm.h
     model.h
     moe_execution_input.h

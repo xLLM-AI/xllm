@@ -47,6 +47,7 @@ limitations under the License.
 #if defined(USE_NPU)
 #include "models/model_registry.h"
 #endif
+#include "core/common/types.h"
 #include "distributed_runtime/xservice_client.h"
 #include "runtime/options.h"
 #include "scheduler/profile/profile_manager.h"

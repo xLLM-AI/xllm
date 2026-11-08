@@ -4,6 +4,7 @@ cc_library(
   NAME
     config
   HDRS
+    batch_sizes.h
     beam_search_config.h
     config_utils.h
     kv_cache_config.h
@@ -25,6 +26,7 @@ cc_library(
     service_config.h
     speculative_config.h
   SRCS
+    batch_sizes.cpp
     beam_search_config.cpp
     config_utils.cpp
     kv_cache_config.cpp
@@ -44,6 +46,7 @@ cc_library(
     service_config.cpp
     speculative_config.cpp
   DEPS
+    absl::strings
     gflags::gflags
     glog::glog
     nlohmann_json::nlohmann_json

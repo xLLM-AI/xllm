@@ -33,11 +33,13 @@ limitations under the License.
 #if defined(USE_NPU)
 #include "models/model_registry.h"
 #endif
+#include "core/common/types.h"
+#include "core/framework/model/rec_model_utils.h"
 #include "distributed_runtime/xservice_client.h"
+#include "rec.pb.h"
 #include "rec_engine.h"
 #include "runtime/options.h"
 #include "scheduler/scheduler_factory.h"
-#include "util/rec_model_utils.h"
 #include "util/scope_guard.h"
 #include "util/threadpool.h"
 #include "util/timer.h"

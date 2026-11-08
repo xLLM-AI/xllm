@@ -16,33 +16,20 @@ limitations under the License.
 #pragma once
 
 #include <glog/logging.h>
-#include <torch/types.h>
 
 #include <algorithm>
-#include <cctype>
-#include <filesystem>
+#include <cstddef>
+#include <cstdint>
 #include <numeric>
-#include <optional>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <unordered_set>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
-#include "core/common/types.h"
-#include "core/framework/config/disagg_pd_config.h"
-#include "core/framework/config/parallel_config.h"
-#include "core/util/binary_payload.h"
-#include "rec.pb.h"
-#include "slice.h"
-#include "tensor.pb.h"
-#include "worker.pb.h"
+#include "core/util/slice.h"
 
-namespace xllm {
+namespace xllm::util {
 
-namespace util {
-
-std::pair<int, int> find_ones_indices(std::vector<int>& q_seq_lens);
+std::pair<int32_t, int32_t> find_ones_indices(std::vector<int32_t>& q_seq_lens);
 
 template <typename T>
 void pad_2d_vector(std::vector<std::vector<T>>& vec, T pad_value) {
@@ -56,27 +43,27 @@ void pad_2d_vector(std::vector<std::vector<T>>& vec, T pad_value) {
   }
 }
 
-torch::ScalarType parse_dtype(const std::string& dtype_str,
-                              const std::optional<torch::Device>& device);
-
-std::optional<std::vector<uint32_t>> parse_batch_sizes(
-    const std::string& batch_sizes_str);
-
 template <typename T>
 T sum(const std::vector<T>& vec) {
-  if (vec.empty()) LOG(FATAL) << "vector is empty.";
+  if (vec.empty()) {
+    LOG(FATAL) << "vector is empty.";
+  }
   return std::accumulate(vec.begin(), vec.end(), T{});
 }
 
 template <typename T>
 const T& min(const std::vector<T>& vec) {
-  if (vec.empty()) LOG(FATAL) << "vector is empty.";
+  if (vec.empty()) {
+    LOG(FATAL) << "vector is empty.";
+  }
   return *std::min_element(vec.begin(), vec.end());
 }
 
 template <typename T>
 const T& max(const std::vector<T>& vec) {
-  if (vec.empty()) LOG(FATAL) << "vector is empty.";
+  if (vec.empty()) {
+    LOG(FATAL) << "vector is empty.";
+  }
   return *std::max_element(vec.begin(), vec.end());
 }
 
@@ -93,208 +80,10 @@ static inline int64_t align_up(int64_t value, int64_t alignment) {
   return ((value + alignment - 1) / alignment) * alignment;
 }
 
-// Returns the first token id in `token_ids` that falls outside the valid
-// vocabulary range [0, vocab_size); std::nullopt if all ids are in range.
-// Callers must skip the scan when vocab_size <= 0 (range unknown).
-inline std::optional<int32_t> find_out_of_vocab_token(
-    const std::vector<int32_t>& token_ids,
-    int64_t vocab_size) {
-  for (int32_t token_id : token_ids) {
-    if (token_id < 0 || token_id >= vocab_size) {
-      return token_id;
-    }
-  }
-  return std::nullopt;
-}
-
 bool match_suffix(const Slice<int32_t>& data, const Slice<int32_t>& suffix);
 
 std::vector<uint32_t> cal_vec_split_index(uint32_t vec_size, uint32_t part_num);
 
-torch::Tensor convert_rec_tensor_to_torch(
-    const proto::InferInputTensor& input_tensor);
-
-torch::Tensor proto_to_torch(const proto::Tensor& proto_tensor);
-
-torch::Tensor proto_to_torch(const proto::Tensor& proto_tensor,
-                             const std::string& binary_payload);
-
-torch::Tensor proto_to_torch(const proto::Tensor& proto_tensor,
-                             const BinaryPayload& binary_payload);
-
-bool torch_to_proto(const torch::Tensor& torch_tensor,
-                    proto::Tensor* proto_tensor);
-
-bool torch_to_proto(const torch::Tensor& torch_tensor,
-                    proto::Tensor* proto_tensor,
-                    std::string& binary_payload);
-
 int32_t ceil_pow2(int32_t n);
 
-torch::ScalarType datatype_proto_to_torch(const std::string& proto_datatype);
-
-std::string torch_datatype_to_proto(torch::ScalarType torch_dtype);
-
-inline const std::unordered_set<std::string>& mla_model_type_set() {
-  static const std::unordered_set<std::string> kMlaModelTypeSet = {
-      "deepseek_v2",
-      "deepseek_v3",
-      "deepseek_v32",
-      "deepseek_v3_mtp",
-      "deepseek_v32_mtp",
-      "kimi_k2",
-      "kimi_k25",
-      "glm4_moe_lite",
-      "glm_moe_dsa",  // glm5 model type
-      "glm_moe_dsa_mtp",
-      "glm5_dspark",    // Dense MLA DSpark draft; no sparse indexer.
-      "glm5_next",      // GLM-5.3-Flash (absorbed MLA, NoPE, kv_lora=512)
-      "glm5_3_flash",   // GLM-5.3-Flash public alias
-      "glm5_next_mtp",  // GLM-5.3-Flash MTP draft (same absorbed-MLA attention)
-      "joyai_llm_flash"};
-  return kMlaModelTypeSet;
-}
-
-inline bool is_mla_model_type(std::string_view model_type) {
-  return mla_model_type_set().contains(std::string(model_type));
-}
-
-inline bool has_mtp_model_type_marker(std::string_view model_type) {
-  return model_type.find("mtp") != std::string_view::npos;
-}
-
-inline bool starts_with_model_type(std::string_view model_type,
-                                   std::string_view target_model_type) {
-  return model_type.size() >= target_model_type.size() &&
-         model_type.compare(0, target_model_type.size(), target_model_type) ==
-             0;
-}
-
-inline bool is_target_mtp_model_type(std::string_view model_type,
-                                     std::string_view target_model_type) {
-  return starts_with_model_type(model_type, target_model_type) &&
-         has_mtp_model_type_marker(model_type);
-}
-
-inline constexpr std::string_view kDeepseekV4DSparkModelType =
-    "deepseek_v4_dspark";
-
-inline bool is_deepseek_v4_dspark_model_type(std::string_view model_type) {
-  return model_type == kDeepseekV4DSparkModelType;
-}
-
-inline bool is_deepseek_v4_model_type(std::string_view model_type) {
-  constexpr std::string_view kTargetModelType = "deepseek_v4";
-  return model_type == kTargetModelType ||
-         is_deepseek_v4_dspark_model_type(model_type) ||
-         is_target_mtp_model_type(model_type, kTargetModelType);
-}
-
-// Returns whether a model's KV cache can be transferred between different TP
-// sizes without concatenating TP-local head shards. This is a PD cache-layout
-// capability, not an attention-runtime classification: DeepSeek-V4 DSA has
-// TP-invariant cache blocks even though it does not use the generic MLA path.
-inline bool is_tp_invariant_kv_cache_model_type(std::string_view model_type) {
-  return is_mla_model_type(model_type) || is_deepseek_v4_model_type(model_type);
-}
-
-inline bool is_target_model_type(std::string_view model_type,
-                                 std::string_view target_model_type,
-                                 bool match_mtp) {
-  if (model_type == target_model_type) {
-    return true;
-  }
-  return match_mtp && is_target_mtp_model_type(model_type, target_model_type);
-}
-
-inline std::string get_model_name(
-    const std::filesystem::path& normalized_model_path) {
-  std::string model_name;
-
-  if (normalized_model_path.has_filename()) {
-    model_name = normalized_model_path.filename().string();
-  } else {
-    model_name = normalized_model_path.parent_path().filename().string();
-  }
-
-  if (model_name.empty()) {
-    LOG(FATAL) << "Cannot extract model name from path, as it appears to be a "
-                  "root directory: "
-               << normalized_model_path.string();
-    return "";
-  }
-
-  return model_name;
-}
-
-inline std::string get_model_repository_name(
-    const std::filesystem::path& normalized_model_path) {
-  std::filesystem::path version_path = normalized_model_path;
-  if (!version_path.has_filename()) {
-    version_path = version_path.parent_path();
-  }
-
-  const std::string model_version = version_path.filename().string();
-  const bool is_numeric_version =
-      !model_version.empty() &&
-      std::all_of(
-          model_version.begin(), model_version.end(), [](char character) {
-            return std::isdigit(static_cast<unsigned char>(character)) != 0;
-          });
-  if (!is_numeric_version) {
-    return get_model_name(normalized_model_path);
-  }
-
-  const std::string repository_name =
-      version_path.parent_path().filename().string();
-  if (repository_name.empty()) {
-    return get_model_name(normalized_model_path);
-  }
-  return repository_name;
-}
-
-// SFA C8: packed [int8 nope | bf16 rope | fp32 scale] KV cache. Currently only
-// GLM-5.2 (glm_moe_dsa) drives the packed 656B write/read pipeline.
-inline bool supports_mla_kv_cache_quant(std::string_view model_type) {
-  return model_type == "glm_moe_dsa" || model_type == "glm_moe_dsa_mtp";
-}
-
-// Combined predicate for the SFA C8 packed KV-cache layout. The C8 layout is
-// only defined for the (small) set of models covered by
-// supports_mla_kv_cache_quant(), and every such model_type is by construction
-// in mla_model_type_set(), so a redundant enable_mla parameter is not needed
-// here. Callers that also need to honor the runtime enable_mla config bit
-// AND it in at the call site (estimation is the only such caller today).
-//
-// The packed 656B layout is implemented on NPU only. Gating the build here
-// rather than at each consumer is what lets every caller read this flat: on a
-// non-NPU build the predicate is unconditionally false, so a caller that
-// eagerly forwards it into KVCacheCapacity / KVCacheCreateOptions can never
-// push a packed shape at a backend that has no write or read kernel for it.
-// If the layout ever lands on another backend, flip this single gate and every
-// consumer follows.
-inline bool enable_mla_packed_c8(bool enable_kv_cache_quant,
-                                 std::string_view model_type) {
-#if defined(USE_NPU)
-  return enable_kv_cache_quant && supports_mla_kv_cache_quant(model_type);
-#else
-  (void)enable_kv_cache_quant;
-  (void)model_type;
-  return false;
-#endif
-}
-
-// Shared message for the three sites that reject non-MLU KV-cache quant. Kept
-// as one string so the sites cannot drift apart.
-inline constexpr const char* kNonMluKvCacheQuantRejectMsg =
-    "KV cache quantization on non-MLU backends only supports GLM-5.2 "
-    "MLA SFA C8 (model_type=glm_moe_dsa).";
-
-inline int32_t kv_split_size_effective(void) {
-  return ParallelConfig::get_instance().kv_split_size_effective();
-}
-
-inline bool enable_kvcache_split(void) { return kv_split_size_effective() > 1; }
-
-}  // namespace util
-}  // namespace xllm
+}  // namespace xllm::util

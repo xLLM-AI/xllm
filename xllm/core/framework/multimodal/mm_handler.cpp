@@ -24,6 +24,8 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "core/framework/config/model_config.h"
+#include "core/framework/multimodal/content_hash.h"
+#include "core/framework/multimodal/download_headers.h"
 #include "core/util/hash_util.h"
 #include "core/util/http_downloader.h"
 #include "mm_codec.h"
@@ -107,8 +109,8 @@ MMErrCode MMHandlerBase::load_from_http(
     const std::string& url,
     std::string& data,
     const std::unordered_map<std::string, std::string>& headers) {
-  BRpcDownloader helper_;
-  if (!helper_.fetch_data(url, data, headers)) {
+  static BRpcDownloader downloader(multimodal_download_headers());
+  if (!downloader.fetch_data(url, data, headers)) {
     return MMErrCode::LOAD_HTTP_ERR;
   }
   return MMErrCode::SUCCESS;

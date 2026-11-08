@@ -22,9 +22,9 @@ limitations under the License.
 #include <utility>
 
 #include "core/framework/model/model_params_view.h"
+#include "core/framework/tensor/pybind_helper.h"
+#include "core/framework/tensor/tensor_helper.h"
 #include "core/layers/common/attention_metadata.h"
-#include "core/util/pybind_helper.h"
-#include "core/util/tensor_helper.h"
 
 namespace py = pybind11;
 

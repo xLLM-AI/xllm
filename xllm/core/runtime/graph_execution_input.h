@@ -26,10 +26,10 @@ limitations under the License.
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/model/rec_model_params.h"
+#include "core/framework/model/rec_model_utils.h"
+#include "core/framework/model/seq_lens.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/attention_metadata_builder.h"
-#include "core/util/rec_model_utils.h"
-#include "core/util/seq_lens.h"
 
 namespace xllm {
 

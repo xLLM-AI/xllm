@@ -21,6 +21,7 @@ limitations under the License.
 
 #include "common/macros.h"
 #include "core/distributed_runtime/distributed_worker_manager.h"
+#include "core/framework/model/rec_model_utils.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
 #include "engine.h"
 #include "framework/batch/rec_batch_group.h"
@@ -29,7 +30,6 @@ limitations under the License.
 #include "framework/tokenizer/tokenizer.h"
 #include "framework/tokenizer/tokenizer_args.h"
 #include "runtime/worker.h"
-#include "util/rec_model_utils.h"
 
 namespace xllm {
 

@@ -20,6 +20,7 @@ limitations under the License.
 
 #include <optional>
 
+#include "core/framework/multimodal/content_hash.h"
 #include "util/hash_util.h"
 
 namespace xllm {

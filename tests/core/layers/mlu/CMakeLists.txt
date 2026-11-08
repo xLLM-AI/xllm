@@ -58,6 +58,7 @@ cc_test(
   SRCS
     glm5_next_kpool_indexer_test.cpp
   DEPS
+    :tensor_support
     :speculative
     :config
     :mlu_layers
@@ -115,6 +116,7 @@ cc_test(
     deepseek_v4_ref_utils.cpp
     tests_utils.cpp
   DEPS
+    :tensor_support
     :mlu_layers
     :common_layers
     :block
@@ -155,6 +157,7 @@ cc_test(
     deepseek_v4_ref_utils.cpp
     tests_utils.cpp
   DEPS
+    :tensor_support
     :mlu_layers
     :common_layers
     :block
@@ -226,6 +229,7 @@ cc_test(
     deep_ep_test.cpp
     tests_utils.cpp
   DEPS
+    :tensor_support
     :mlu_layers
     :common_layers
     :parallel_state
@@ -247,6 +251,7 @@ cc_test(
     fused_moe_all2all_test.cpp
     tests_utils.cpp
   DEPS
+    :tensor_support
     :config
     :mlu_layers
     :common_layers

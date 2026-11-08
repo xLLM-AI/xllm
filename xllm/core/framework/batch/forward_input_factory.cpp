@@ -25,6 +25,7 @@ limitations under the License.
 #include "core/framework/config/execution_config.h"
 #include "core/framework/eplb/eplb_controller.h"
 #include "core/framework/model/model_args.h"
+#include "core/framework/model/model_type.h"
 #include "core/util/threadpool.h"
 #include "core/util/utils.h"
 

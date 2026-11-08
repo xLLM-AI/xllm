@@ -97,6 +97,7 @@ cc_library(
   SRCS
     layout/kv_cache_estimation.cpp
   DEPS
+    :tensor_support
     :common
     :config
     :deepseek_v4_cache_policy
@@ -143,6 +144,7 @@ cc_library(
     storage/linear_attention_kv_cache_impl.cpp
     storage/quantized_kv_cache_impl.cpp
   DEPS
+    :tensor_support
     :block_utils
     :common
     :deepseek_v4_cache_policy

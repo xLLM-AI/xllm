@@ -26,7 +26,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/config/model_config.h"
-#include "core/util/pybind_helper.h"
+#include "core/framework/tensor/pybind_helper.h"
 #include "processors/transforms.h"
 
 namespace py = pybind11;

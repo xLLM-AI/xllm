@@ -13,20 +13,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "http_downloader.h"
+#include "core/util/http_downloader.h"
 
 #include <glog/logging.h>
 
 #include <nlohmann/json.hpp>
-
-#include "core/framework/config/model_config.h"
 
 namespace xllm {
 
 std::unordered_map<std::string, std::string> parse_headers_json(
     const std::string& raw) {
   std::unordered_map<std::string, std::string> result;
-  if (raw.empty()) return result;
+  if (raw.empty()) {
+    return result;
+  }
 
   try {
     auto j = nlohmann::json::parse(raw);
@@ -34,15 +34,9 @@ std::unordered_map<std::string, std::string> parse_headers_json(
       result[k] = v.get<std::string>();
     }
   } catch (const std::exception& e) {
-    LOG(ERROR) << "Failed to parse mm_download_headers JSON: " << e.what();
+    LOG(ERROR) << "Failed to parse HTTP headers JSON: " << e.what();
   }
   return result;
-}
-
-std::unordered_map<std::string, std::string> parse_global_headers() {
-  static const std::unordered_map<std::string, std::string> cached =
-      parse_headers_json(ModelConfig::get_instance().mm_download_headers());
-  return cached;
 }
 
 bool HttpDownloader::fetch_data(
@@ -113,11 +107,10 @@ bool BRpcDownloader::download(
     const std::unordered_map<std::string, std::string>& headers) {
   brpc::Controller cntl;
   cntl.http_request().uri() = url;
-  // 1) global defaults (lowest priority)
-  for (const auto& [k, v] : parse_global_headers()) {
+  // Per-request headers override the injected defaults.
+  for (const auto& [k, v] : default_headers_) {
     cntl.http_request().SetHeader(k, v);
   }
-  // 2) per-request headers (override global)
   for (const auto& [k, v] : headers) {
     cntl.http_request().SetHeader(k, v);
   }
@@ -140,7 +133,7 @@ bool BRpcDownloader::download(
   }
 
   const butil::IOBuf& io = cntl.response_attachment();
-  data = std::move(io.to_string());
+  data = io.to_string();
   return true;
 }
 

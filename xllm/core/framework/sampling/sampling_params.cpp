@@ -26,7 +26,7 @@ limitations under the License.
 
 #include "core/common/metrics.h"
 #include "core/common/types.h"
-#include "core/util/tensor_helper.h"
+#include "core/framework/tensor/tensor_helper.h"
 
 namespace xllm {
 

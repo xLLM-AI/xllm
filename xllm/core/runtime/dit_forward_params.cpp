@@ -23,6 +23,8 @@ limitations under the License.
 #include <utility>
 
 #include "core/framework/request/dit_input_sources.h"
+#include "core/framework/tensor/tensor_codec.h"
+#include "tensor.pb.h"
 #include "util/utils.h"
 #include "worker.pb.h"
 

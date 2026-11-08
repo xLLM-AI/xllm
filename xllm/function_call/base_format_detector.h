@@ -24,6 +24,7 @@ limitations under the License.
 #include <vector>
 
 #include "chat.pb.h"
+#include "core/common/types.h"
 #include "core_types.h"
 #include "utils.h"
 

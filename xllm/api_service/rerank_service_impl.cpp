@@ -21,6 +21,7 @@ limitations under the License.
 #include <utility>
 
 #include "common/instance_name.h"
+#include "core/common/types.h"
 #include "distributed_runtime/llm_master.h"
 #include "distributed_runtime/master_manager.h"
 #include "framework/request/request_params.h"

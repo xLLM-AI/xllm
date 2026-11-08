@@ -50,6 +50,8 @@ limitations under the License.
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 #include "core/layers/common/expanded_decode_metadata_builder.h"
 #endif
+#include "core/common/types.h"
+#include "core/framework/model/seq_lens.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/draft_extend_input.h"
 #include "core/framework/speculative/mtp_async_input_builder.h"
@@ -57,6 +59,7 @@ limitations under the License.
 #include "core/framework/speculative/rejection_sampler.h"
 #include "core/framework/speculative/spec_input_builder.h"
 #include "core/framework/speculative/spec_verify.h"
+#include "core/framework/tensor/tensor_helper.h"
 #include "core/layers/common/dsa_topk_share_plan.h"
 #include "core/platform/platform.h"
 #include "core/runtime/mtp_runtime_helpers.h"
@@ -64,9 +67,7 @@ limitations under the License.
 #include "models/model_registry.h"
 #include "runtime/llm_worker_impl.h"
 #include "util/pretty_print.h"
-#include "util/seq_lens.h"
 #include "util/slice.h"
-#include "util/tensor_helper.h"
 #include "util/timer.h"
 #include "util/utils.h"
 

@@ -23,9 +23,9 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/batch/batch_output_action.h"
+#include "core/framework/model/rec_model_utils.h"
 #include "core/framework/request/onerec_sequence.h"
 #include "core/framework/request/rec_sequence.h"
-#include "core/util/rec_model_utils.h"
 
 namespace xllm {
 

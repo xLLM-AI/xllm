@@ -28,11 +28,12 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/metrics.h"
+#include "core/common/types.h"
 #include "core/distributed_runtime/dit_engine.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/request/dit_request.h"
+#include "core/framework/tensor/tensor_helper.h"
 #include "core/util/blocking_counter.h"
-#include "core/util/tensor_helper.h"
 #include "core/util/utils.h"
 
 namespace xllm {

@@ -24,10 +24,10 @@ limitations under the License.
 #include <utility>
 
 #include "core/framework/config/kv_cache_config.h"
+#include "core/framework/tensor/linalg.h"
 #include "kernels/mlu/mlu_ops_api.h"
 #include "kernels/ops_api.h"
 #include "layers/common/kv_shard_batch_metadata.h"
-#include "util/linalg.h"
 
 namespace xllm {
 namespace layer {

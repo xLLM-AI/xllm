@@ -32,6 +32,7 @@ limitations under the License.
 #include "common/metrics.h"
 #include "common/types.h"
 #include "core/common/global_flags.h"
+#include "core/common/types.h"
 #include "core/distributed_runtime/kv_capacity_planner.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
@@ -39,6 +40,8 @@ limitations under the License.
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/model_loader/model_loader.h"
+#include "core/framework/tensor/tensor_helper.h"
+#include "core/framework/tensor/tensor_options.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/prefix/block_hasher.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
@@ -51,7 +54,6 @@ limitations under the License.
 #include "runtime/worker.h"
 #include "util/env_var.h"
 #include "util/pretty_print.h"
-#include "util/tensor_helper.h"
 #include "util/utils.h"
 namespace xllm {
 

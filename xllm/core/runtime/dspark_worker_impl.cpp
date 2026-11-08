@@ -22,7 +22,9 @@ limitations under the License.
 #include <utility>
 
 #include "common/metrics.h"
+#include "core/common/types.h"
 #include "core/framework/config/model_config.h"
+#include "core/framework/model/model_type.h"
 #include "core/framework/parallel_state/process_group.h"
 #include "core/framework/sampling/sampler.h"
 #include "core/framework/speculative/draft_proposal.h"

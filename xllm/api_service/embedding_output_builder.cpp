@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "embedding_output_builder.h"
 
+#include "core/framework/tensor/tensor_codec.h"
+
 namespace xllm {
 
 TensorProtoBuilder::TensorProtoBuilder(bool use_binary_encoding)

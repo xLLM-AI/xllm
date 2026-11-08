@@ -22,6 +22,7 @@ limitations under the License.
 #include <utility>
 
 #include "core/framework/model/moe_execution_input.h"
+#include "core/framework/tensor/tensor_helper.h"
 #include "framework/model/model_args.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/quantization/quant_args.h"
@@ -32,7 +33,6 @@ limitations under the License.
 #include "layers/common/fused_moe_base.h"
 #include "layers/mlu/moe_gate.h"
 #include "platform/device.h"
-#include "util/tensor_helper.h"
 
 namespace xllm {
 class ModelContext;

@@ -27,11 +27,11 @@ limitations under the License.
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/model_context/model_context.h"
+#include "core/framework/tensor/tensor_helper.h"
 #include "core/layers/common/quant_utils.h"
 #include "kernels/ops_api.h"
 #include "layers/common/dp_utils.h"
 #include "platform/model_stream_registry.h"
-#include "util/tensor_helper.h"
 #include "util/utils.h"
 
 namespace xllm {

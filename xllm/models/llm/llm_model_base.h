@@ -24,13 +24,13 @@ limitations under the License.
 #include "core/framework/model/model_output.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/model/rec_model_params.h"
+#include "core/framework/model/rec_model_utils.h"
 #include "core/framework/model_context/model_context.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/attention_metadata_builder.h"
 #include "core/layers/common/lm_head.h"
 #include "core/layers/common/rms_norm.h"
-#include "core/util/rec_model_utils.h"
 #include "models/model_registry.h"
 
 namespace xllm {

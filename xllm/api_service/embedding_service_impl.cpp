@@ -22,6 +22,7 @@ limitations under the License.
 
 #include "api_service/openai_batch.h"
 #include "common/instance_name.h"
+#include "core/common/types.h"
 #include "distributed_runtime/llm_master.h"
 #include "distributed_runtime/master_manager.h"
 #include "embedding_output_builder.h"

@@ -22,8 +22,8 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/layers/common/attention_mask.h"
 #endif
+#include "core/framework/model/rec_model_utils.h"
 #include "core/layers/qwen3_moe_decoder_layer.h"
-#include "core/util/rec_model_utils.h"
 #include "models/llm/llm_model_base.h"
 
 namespace xllm {

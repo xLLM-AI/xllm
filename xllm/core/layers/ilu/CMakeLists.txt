@@ -10,5 +10,6 @@ cc_library(
     attention.cpp
     fused_moe.cpp
   DEPS
+    :tensor_support
     :common_layers
 )

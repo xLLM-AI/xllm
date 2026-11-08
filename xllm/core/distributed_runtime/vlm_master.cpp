@@ -46,6 +46,7 @@ limitations under the License.
 #include "core/framework/config/eplb_config.h"
 #include "models/model_registry.h"
 #endif
+#include "core/common/types.h"
 #include "distributed_runtime/xservice_client.h"
 #include "runtime/options.h"
 #include "scheduler/scheduler_factory.h"

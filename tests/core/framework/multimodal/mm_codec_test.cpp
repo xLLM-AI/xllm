@@ -20,6 +20,8 @@ limitations under the License.
 #include <cstdint>
 #include <string>
 
+#include "core/common/message.h"
+
 namespace xllm {
 namespace {
 
@@ -76,6 +78,67 @@ TEST(FFmpegAudioDecoderTest, DurationBudgetBoundsDecoding) {
     EXPECT_EQ(tensor.numel(), 16000);
     EXPECT_DOUBLE_EQ(meta.duration, 1.0);
   }
+}
+
+}  // namespace xllm
+
+namespace xllm {
+
+// ============================================================
+// ImageURL / VideoURL / AudioURL struct tests
+// ============================================================
+
+TEST(ImageUrlTest, DefaultHeadersEmpty) {
+  ImageURL url;
+  url.url = "http://example.com/img.jpg";
+  EXPECT_TRUE(url.headers.empty());
+  EXPECT_EQ("http://example.com/img.jpg", url.url);
+}
+
+TEST(ImageUrlTest, SetHeaders) {
+  ImageURL url;
+  url.url = "http://example.com/img.jpg";
+  url.headers["Authorization"] = "Bearer abc";
+  url.headers["Referer"] = "https://ref.com";
+  EXPECT_EQ(2, url.headers.size());
+  EXPECT_EQ("Bearer abc", url.headers["Authorization"]);
+  EXPECT_EQ("https://ref.com", url.headers["Referer"]);
+}
+
+TEST(VideoUrlTest, DefaultHeadersEmpty) {
+  VideoURL url;
+  url.url = "http://example.com/video.mp4";
+  EXPECT_TRUE(url.headers.empty());
+}
+
+TEST(AudioUrlTest, DefaultHeadersEmpty) {
+  AudioURL url;
+  url.url = "http://example.com/audio.mp3";
+  EXPECT_TRUE(url.headers.empty());
+}
+
+// ============================================================
+// MMContent struct with headers
+// ============================================================
+
+TEST(MMContentTest, ImageUrlWithHeaders) {
+  ImageURL img;
+  img.url = "http://example.com/img.jpg";
+  img.headers["Authorization"] = "Bearer test";
+
+  MMContent content("image_url", img);
+  EXPECT_EQ("image_url", content.type);
+  EXPECT_EQ("http://example.com/img.jpg", content.image_url.url);
+  EXPECT_EQ(1, content.image_url.headers.size());
+  EXPECT_EQ("Bearer test", content.image_url.headers["Authorization"]);
+}
+
+TEST(MMContentTest, ImageUrlWithoutHeaders) {
+  ImageURL img;
+  img.url = "http://example.com/img.jpg";
+
+  MMContent content("image_url", img);
+  EXPECT_TRUE(content.image_url.headers.empty());
 }
 
 }  // namespace xllm

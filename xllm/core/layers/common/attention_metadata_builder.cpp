@@ -27,7 +27,7 @@ limitations under the License.
 #include "core/common/global_flags.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/rec_config.h"
-#include "core/util/seq_lens.h"
+#include "core/framework/model/seq_lens.h"
 #include "framework/model/model_args.h"
 #include "framework/model/model_params_view.h"
 #include "framework/model/rec_model_params.h"

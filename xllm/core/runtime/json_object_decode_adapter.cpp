@@ -24,11 +24,11 @@ limitations under the License.
 
 #include "core/framework/constrained/json_object_constraint_batch.h"
 #include "core/framework/constrained/json_object_output_binding.h"
+#include "core/framework/tensor/tensor_helper.h"
 #include "core/platform/stream.h"
 #include "core/runtime/decode_input_placeholders.h"
 #include "core/runtime/forward_params.h"
 #include "core/runtime/vlm_forward_params.h"
-#include "core/util/tensor_helper.h"
 
 namespace xllm {
 

@@ -47,6 +47,9 @@ limitations under the License.
 #include <customize/custom_paged_attention_function.h>
 #include <customize/customize_op_params.h>
 
+#include "core/common/types.h"
+#include "core/framework/model/model_type.h"
+#include "core/framework/tensor/tensor_options.h"
 #include "pytorch/adapter/utils/utils.h"
 
 namespace xllm::npu {

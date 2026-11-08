@@ -59,3 +59,14 @@ endif()
 if(USE_MLU)
   add_subdirectory(mlu)
 endif()
+
+cc_test(
+  NAME
+    device_name_utils_test
+  CPU_ONLY
+  SRCS
+    device_name_utils_test.cpp
+  DEPS
+    :platform
+    GTest::gtest_main
+)

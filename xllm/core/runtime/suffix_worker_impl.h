@@ -20,8 +20,8 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/speculative/draft_proposal.h"
+#include "core/framework/speculative/suffix_decoding_cache.h"
 #include "runtime/speculative_worker_impl.h"
-#include "util/suffix_decoding_cache.h"
 
 namespace xllm {
 

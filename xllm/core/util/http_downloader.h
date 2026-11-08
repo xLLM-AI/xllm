@@ -22,14 +22,14 @@ limitations under the License.
 #include <memory>
 #include <string>
 #include <unordered_map>
-#include <vector>
+#include <utility>
 
 namespace xllm {
 
 class HttpDownloader {
  public:
   HttpDownloader() = default;
-  virtual ~HttpDownloader() {}
+  virtual ~HttpDownloader() = default;
 
   bool fetch_data(
       const std::string& url,
@@ -45,10 +45,12 @@ class HttpDownloader {
       const std::unordered_map<std::string, std::string>& headers = {}) = 0;
 };
 
-class BRpcDownloader : public HttpDownloader {
+class BRpcDownloader final : public HttpDownloader {
  public:
-  BRpcDownloader() = default;
-  ~BRpcDownloader() = default;
+  explicit BRpcDownloader(
+      std::unordered_map<std::string, std::string> default_headers = {})
+      : default_headers_(std::move(default_headers)) {}
+  ~BRpcDownloader() override = default;
 
   bool download(const std::string& host,
                 const std::string& url,
@@ -60,6 +62,7 @@ class BRpcDownloader : public HttpDownloader {
   std::shared_ptr<brpc::Channel> get_channel(const std::string& host);
 
  private:
+  const std::unordered_map<std::string, std::string> default_headers_;
   inline static bthread::RWLock rw_lock_;
   inline static std::unordered_map<std::string, std::shared_ptr<brpc::Channel>>
       channels_;
@@ -70,8 +73,5 @@ class BRpcDownloader : public HttpDownloader {
 // Exposed for testing.
 std::unordered_map<std::string, std::string> parse_headers_json(
     const std::string& raw);
-
-// Parse the --mm_download_headers gflag. Cached after first call.
-std::unordered_map<std::string, std::string> parse_global_headers();
 
 }  // namespace xllm

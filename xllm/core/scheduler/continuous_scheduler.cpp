@@ -28,6 +28,7 @@ limitations under the License.
 #include <memory>
 #include <vector>
 
+#include "core/common/types.h"
 #include "core/distributed_runtime/distributed_worker_manager.h"
 #include "core/distributed_runtime/engine.h"
 #include "core/distributed_runtime/model_residency_coordinator.h"

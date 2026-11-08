@@ -21,13 +21,14 @@ limitations under the License.
 
 #include <cstdint>
 #include <deque>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
-#include "suffix_tree.h"
+#include "core/framework/speculative/suffix_tree.h"
 
 namespace xllm {
 
@@ -37,14 +38,12 @@ struct SuffixDecodingDraft {
   std::vector<float> probs;
   float score = 0.0;
   int32_t match_len = 0;
-
-  static SuffixDecodingDraft from_native(const Draft& draft);
 };
 
-class SuffixDecodingCache {
+class SuffixDecodingCache final {
  public:
-  SuffixDecodingCache(int32_t max_tree_depth = 64,
-                      int32_t max_cached_requests = -1);
+  explicit SuffixDecodingCache(int32_t max_tree_depth = 64,
+                               int32_t max_cached_requests = -1);
 
   int32_t max_tree_depth() const { return max_tree_depth_; }
 

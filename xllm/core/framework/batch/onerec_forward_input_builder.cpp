@@ -27,10 +27,10 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/model/rec_model_params.h"
+#include "core/framework/model/seq_lens.h"
 #include "core/framework/request/onerec_sequence.h"
 #include "core/framework/sampling/sampling_params.h"
-#include "core/util/seq_lens.h"
-#include "core/util/tensor_helper.h"
+#include "core/framework/tensor/tensor_helper.h"
 #include "core/util/threadpool.h"
 #include "core/util/utils.h"
 
