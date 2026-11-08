@@ -11,7 +11,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Keep util independent of xLLM domain code and tensor/Python frameworks."""
+"""Keep util independent of other xLLM source layers."""
 
 import re
 import unittest
@@ -22,7 +22,6 @@ _XLLM_ROOT = _REPO_ROOT / "xllm"
 _UTIL_ROOT = _XLLM_ROOT / "core/util"
 _INCLUDE = re.compile(r'^\s*#\s*include\s*[<"]([^>"]+)[>"]', re.MULTILINE)
 _SOURCE_SUFFIXES = {".h", ".hpp", ".c", ".cc", ".cpp", ".cu", ".cuh", ".inl"}
-_FRAMEWORK_PREFIXES = ("torch/", "torch_npu/", "ATen/", "c10/", "pybind11/")
 
 
 def _project_include(source: Path, include: str) -> Path | None:
@@ -44,15 +43,12 @@ class UtilDependenciesTest(unittest.TestCase):
                 include = match.group(1)
                 target = _project_include(source, include)
                 forbidden = (
-                    include.endswith(".pb.h")
-                    or include == "Python.h"
-                    or include.startswith(_FRAMEWORK_PREFIXES)
-                    or (target is not None and not target.is_relative_to(_UTIL_ROOT))
+                    target is not None and not target.is_relative_to(_UTIL_ROOT) and not include.endswith(".pb.h")
                 )
                 if forbidden:
                     line = contents.count("\n", 0, match.start()) + 1
                     violations.append(f"{source.relative_to(_REPO_ROOT)}:{line}: {include}")
-        self.assertEqual(violations, [], "util must only include its own project headers")
+        self.assertEqual(violations, [], "util must not include another xLLM source layer")
 
     def test_build_dependencies_do_not_point_to_project_layers(self) -> None:
         project_targets = set()
@@ -60,16 +56,14 @@ class UtilDependenciesTest(unittest.TestCase):
             contents = re.sub(r"#[^\n]*", "", cmake.read_text())
             project_targets.update(re.findall(r"cc_library\s*\(\s*NAME\s+(\w+)", contents))
             project_targets.update(re.findall(r"add_library\s*\(\s*(\w+)", contents))
-        project_targets.discard("util")
+        project_targets.difference_update({"util", "xllm_proto"})
 
         cmake = re.sub(r"#[^\n]*", "", (_UTIL_ROOT / "CMakeLists.txt").read_text())
         # Target names cannot occur in filenames; tokenizing also handles the
         # project's :target aliases without interpreting CMake expressions.
         tokens = set(re.findall(r"[A-Za-z_][A-Za-z0-9_:.-]*", cmake))
         local_dependencies = project_targets.intersection(token.lstrip(":") for token in tokens)
-        framework_dependencies = {token for token in tokens if token.startswith(("torch", "proto::", "Python"))}
         self.assertEqual(local_dependencies, set(), "util must not depend on another project layer")
-        self.assertEqual(framework_dependencies, set(), "tensor, proto and Python dependencies belong above util")
 
 
 if __name__ == "__main__":

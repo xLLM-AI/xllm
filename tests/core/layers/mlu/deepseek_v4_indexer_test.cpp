@@ -28,7 +28,7 @@ limitations under the License.
 #include <vector>
 
 #include "common/global_flags.h"
-#include "core/framework/tensor/linalg.h"
+#include "core/util/linalg.h"
 #include "framework/model/model_params_view.h"
 #include "framework/state_dict/state_dict.h"
 #include "layers/mlu/deepseek_v4/dsa_metadata_builder_mlu.h"

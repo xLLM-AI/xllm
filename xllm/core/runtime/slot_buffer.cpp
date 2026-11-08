@@ -27,11 +27,11 @@ limitations under the License.
 #include <unordered_set>
 
 #include "core/framework/config/model_config.h"
-#include "core/framework/tensor/tensor_helper.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/platform/platform.h"
 #include "core/runtime/forward_params.h"
 #include "core/runtime/task_execution_pipeline_speculative.h"
+#include "core/util/tensor_helper.h"
 
 namespace xllm {
 namespace {

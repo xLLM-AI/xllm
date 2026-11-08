@@ -30,7 +30,7 @@ limitations under the License.
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 #endif
 
-#include "core/framework/tensor/tensor_helper.h"
+#include "core/util/tensor_helper.h"
 
 namespace xllm {
 

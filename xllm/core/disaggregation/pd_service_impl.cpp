@@ -34,7 +34,7 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/constrained/json_object_grammar.h"
 #include "core/framework/request/request_output.h"
-#include "core/framework/tensor/tensor_codec.h"
+#include "core/util/tensor_codec.h"
 #include "util/utils.h"
 
 namespace xllm {

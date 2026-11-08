@@ -20,7 +20,7 @@ limitations under the License.
 #include <tuple>
 
 #include "core/framework/model/seq_lens.h"
-#include "core/framework/tensor/tensor_helper.h"
+#include "core/util/tensor_helper.h"
 #include "qwen3_5_gated_delta_net.h"
 #include "qwen3_gated_delta_net_impls.h"
 

@@ -72,7 +72,6 @@ cc_library(
     qwen3_5/qwen3_next_rms_norm.cpp
     moe_softplus_topk.cpp
   DEPS
-    :tensor_support
     :common_layers
     :util
 )

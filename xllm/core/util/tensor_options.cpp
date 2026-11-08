@@ -13,13 +13,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/framework/tensor/tensor_options.h"
+#include "core/util/tensor_options.h"
 
 #include <glog/logging.h>
 
 #include <boost/algorithm/string.hpp>
 
-#include "core/framework/tensor/tensor_helper.h"
+#include "core/util/tensor_helper.h"
 
 namespace xllm::util {
 

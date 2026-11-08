@@ -29,7 +29,7 @@ limitations under the License.
 #include "common/macros.h"
 #include "core/common/constants.h"
 #include "core/common/types.h"
-#include "core/framework/tensor/tensor_helper.h"
+#include "core/util/tensor_helper.h"
 
 #if defined(USE_NPU)
 #ifdef TORCH_HIGHER_THAN_PTA6

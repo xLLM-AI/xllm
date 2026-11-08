@@ -29,7 +29,7 @@ limitations under the License.
 #include "core/common/types.h"
 #include "core/framework/model/rec_model_utils.h"
 #include "core/framework/multimodal/mm_data.h"
-#include "core/framework/tensor/tensor_codec.h"
+#include "core/util/tensor_codec.h"
 #include "framework/request/request_state.h"
 #include "framework/request/stopping_checker.h"
 #include "framework/sampling/sampling_params.h"

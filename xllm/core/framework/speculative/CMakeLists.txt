@@ -48,7 +48,6 @@ cc_library(
     verify_layout.cpp
     spec_verify.cpp
   DEPS
-    :tensor_support
     Threads::Threads
     torch
     $<$<BOOL:${USE_NPU}>:torch_npu>

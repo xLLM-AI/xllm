@@ -25,7 +25,7 @@ limitations under the License.
 #include <unordered_map>
 #include <vector>
 
-#include "core/framework/tensor/linalg.h"
+#include "core/util/linalg.h"
 #include "framework/state_dict/state_dict.h"
 #include "layers/common/dsa_metadata.h"
 #include "layers/mlu/deepseek_v4/compressor.h"

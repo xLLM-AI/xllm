@@ -15,8 +15,6 @@ cc_library(
     worker_model_codec_token.cpp
     worker_model_codec_dit.cpp
   DEPS
-    :tensor_codec
-    :tensor_support
     :common
     :config
     :sampler
@@ -64,7 +62,6 @@ cc_library(
     model_residency_coordinator.cpp
     kv_capacity_planner.cpp
   DEPS
-    :tensor_support
     :common
     :worker_service
     :api_response
@@ -102,7 +99,7 @@ cc_library(
   SRCS
     worker_service.cpp
   DEPS
-    :tensor_support
+    :util
     :runtime
     :worker_model_codec
     :request

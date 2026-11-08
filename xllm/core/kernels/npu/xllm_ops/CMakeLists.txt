@@ -48,7 +48,7 @@ cc_library(
   INCLUDES
     ${PROJECT_SOURCE_DIR}/third_party/xllm_ops/build/autogen
   DEPS
-    :tensor_support
+    :util
     atb
     Python::Python
     torch_npu

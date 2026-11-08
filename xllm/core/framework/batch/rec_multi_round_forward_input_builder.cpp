@@ -36,9 +36,9 @@ limitations under the License.
 #include "core/framework/request/sequence.h"
 #include "core/framework/request/sequences_group.h"
 #include "core/framework/sampling/sampling_params.h"
-#include "core/framework/tensor/tensor_helper.h"
 #include "core/util/blocking_counter.h"
 #include "core/util/slice.h"
+#include "core/util/tensor_helper.h"
 #include "core/util/threadpool.h"
 #include "core/util/utils.h"
 

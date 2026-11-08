@@ -49,7 +49,7 @@ limitations under the License.
 
 #include "core/common/types.h"
 #include "core/framework/model/model_type.h"
-#include "core/framework/tensor/tensor_options.h"
+#include "core/util/tensor_options.h"
 #include "pytorch/adapter/utils/utils.h"
 
 namespace xllm::npu {

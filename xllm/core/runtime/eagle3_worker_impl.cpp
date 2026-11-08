@@ -19,7 +19,7 @@ limitations under the License.
 
 #include "core/framework/model/aux_hidden_capture.h"
 #include "core/framework/sampling/logits_processor.h"
-#include "core/framework/tensor/tensor_helper.h"
+#include "core/util/tensor_helper.h"
 #include "runtime/llm_worker_impl.h"
 
 namespace xllm {

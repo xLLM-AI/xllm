@@ -34,7 +34,7 @@ limitations under the License.
 #include "core/framework/model/rec_model_utils.h"
 #include "core/framework/model/seq_lens.h"
 #include "core/framework/sampling/sampler.h"
-#include "core/framework/tensor/tensor_helper.h"
+#include "core/util/tensor_helper.h"
 #if defined(USE_CUDA)
 #include "kernels/cuda/cuda_ops_api.h"
 #include "kernels/cuda/xattention/xattention_ops_api.h"

@@ -17,7 +17,7 @@ limitations under the License.
 
 #include <torch/torch.h>
 
-#include "core/framework/tensor/tensor_helper.h"
+#include "core/util/tensor_helper.h"
 #include "framework/parallel_state/parallel_args.h"
 
 namespace xllm {

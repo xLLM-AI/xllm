@@ -22,3 +22,14 @@ cc_test(
 )
 target_link_libraries(util_test PRIVATE brpc leveldb::leveldb OpenSSL::SSL OpenSSL::Crypto)
 add_dependencies(util_test brpc-static)
+
+cc_test(
+  NAME
+    tensor_proto_test
+  CPU_ONLY
+  SRCS
+    tensor_proto_test.cpp
+  DEPS
+    :util
+    GTest::gtest_main
+)

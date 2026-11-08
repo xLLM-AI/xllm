@@ -17,8 +17,8 @@ limitations under the License.
 
 #include <cstring>
 
-#include "core/framework/tensor/tensor_codec.h"
-#include "core/framework/tensor/tensor_helper.h"
+#include "core/util/tensor_codec.h"
+#include "core/util/tensor_helper.h"
 #include "core/util/utils.h"
 #include "mm_visitor.h"
 #include "tensor.pb.h"

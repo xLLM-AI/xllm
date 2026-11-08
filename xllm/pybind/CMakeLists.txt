@@ -12,7 +12,6 @@ pybind_extension(
   LINKDIRS
     ${TORCH_INSTALL_PREFIX}/lib
   DEPS
-    :tensor_support
     :config
     :master
     :request

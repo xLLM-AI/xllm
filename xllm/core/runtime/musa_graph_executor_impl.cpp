@@ -33,7 +33,6 @@ limitations under the License.
 #include "core/framework/config/rec_config.h"
 #include "core/framework/model/rec_model_utils.h"
 #include "core/framework/model/seq_lens.h"
-#include "core/framework/tensor/tensor_options.h"
 #include "core/kernels/musa/musa_ops_api.h"
 #include "core/kernels/musa/musa_tvmffi_stream.h"
 #include "core/layers/common/attention_metadata.h"
@@ -46,6 +45,7 @@ limitations under the License.
 #include "core/runtime/graph_execution_input.h"
 #include "core/runtime/rec_graph_input.h"
 #include "core/util/env_var.h"
+#include "core/util/tensor_options.h"
 #include "core/util/utils.h"
 
 namespace xllm::runtime::musa {

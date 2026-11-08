@@ -26,7 +26,7 @@ limitations under the License.
 #include <memory>
 #include <vector>
 
-#include "core/framework/tensor/tensor_helper.h"
+#include "core/util/tensor_helper.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "layers/mlu/tests_utils.h"
 #include "platform/device.h"

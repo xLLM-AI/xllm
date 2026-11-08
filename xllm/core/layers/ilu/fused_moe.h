@@ -18,7 +18,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include "core/framework/model/moe_execution_input.h"
-#include "core/framework/tensor/tensor_helper.h"
+#include "core/util/tensor_helper.h"
 #include "framework/model/model_args.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/quantization/quant_args.h"

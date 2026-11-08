@@ -24,13 +24,13 @@ limitations under the License.
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/speculative/draft_proposal.h"
 #include "core/framework/speculative/verify_layout.h"
-#include "core/framework/tensor/tensor_helper.h"
 #include "core/runtime/json_object_decode_adapter.h"
 #include "core/runtime/llm_worker_impl.h"
 #include "core/runtime/mtp_runtime_helpers.h"
 #include "core/runtime/py_executor_impl.h"
 #include "core/runtime/task_execution_pipeline.h"
 #include "core/runtime/unified_mtp_executor.h"
+#include "core/util/tensor_helper.h"
 
 namespace xllm {
 namespace {

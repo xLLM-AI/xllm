@@ -18,7 +18,7 @@ cc_library(
     dit_model_loader.cpp
     model_loader.cpp
   DEPS
-    :tensor_support
+    :util
     :dit_model_discovery
     :common
     :model

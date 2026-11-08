@@ -20,8 +20,8 @@ limitations under the License.
 #include <limits>
 #include <string>
 
-#include "core/framework/tensor/tensor_codec.h"
 #include "core/util/binary_payload.h"
+#include "core/util/tensor_codec.h"
 #include "core/util/utils.h"
 #include "tensor.pb.h"
 

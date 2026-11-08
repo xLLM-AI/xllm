@@ -25,7 +25,7 @@ limitations under the License.
 #include "core/framework/config/dit_config.h"
 #include "core/framework/multimodal/mm_codec.h"
 #include "core/framework/request/dit_source_decoder.h"
-#include "core/framework/tensor/tensor_codec.h"
+#include "core/util/tensor_codec.h"
 #include "core/util/utils.h"
 #include "core/util/uuid.h"
 #include "request.h"

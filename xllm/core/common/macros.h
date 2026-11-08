@@ -20,7 +20,7 @@ limitations under the License.
 #include <utility>
 
 #include "core/common/property_reflect.h"
-#include "core/framework/tensor/tensor_codec.h"
+#include "core/util/tensor_codec.h"
 
 namespace xllm {
 

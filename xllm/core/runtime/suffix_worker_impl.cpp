@@ -20,7 +20,7 @@ limitations under the License.
 #include "common/metrics.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/spec_verify.h"
-#include "core/framework/tensor/tensor_helper.h"
+#include "core/util/tensor_helper.h"
 #include "util/slice.h"
 #include "util/timer.h"
 

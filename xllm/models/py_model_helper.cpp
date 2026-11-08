@@ -32,9 +32,9 @@ limitations under the License.
 
 #include "core/framework/config/model_config.h"
 #include "core/framework/state_dict/state_dict.h"
-#include "core/framework/tensor/pybind_helper.h"
 #include "core/kernels/xllm_torch_ops.h"
 #include "core/kv_cache/storage/kv_cache.h"
+#include "core/util/pybind_helper.h"
 
 namespace py = pybind11;
 

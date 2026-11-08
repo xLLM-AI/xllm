@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/framework/tensor/tensor_codec.h"
+#include "core/util/tensor_codec.h"
 
 #include <glog/logging.h>
 

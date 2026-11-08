@@ -23,7 +23,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/model/seq_lens.h"
-#include "core/framework/tensor/tensor_helper.h"
+#include "core/util/tensor_helper.h"
 #include "framework/model/model_params_view.h"
 #include "layers/common/attention_metadata.h"
 #include "layers/common/attention_metadata_builder.h"

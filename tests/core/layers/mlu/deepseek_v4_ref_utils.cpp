@@ -24,7 +24,7 @@ limitations under the License.
 #include <limits>
 #include <numeric>
 
-#include "core/framework/tensor/linalg.h"
+#include "core/util/linalg.h"
 
 namespace {
 

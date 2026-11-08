@@ -23,7 +23,7 @@ limitations under the License.
 #include <string_view>
 #include <vector>
 
-#include "core/framework/tensor/tensor_helper.h"
+#include "core/util/tensor_helper.h"
 
 namespace xllm::proto {
 class Tensor;

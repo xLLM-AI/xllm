@@ -17,7 +17,7 @@ limitations under the License.
 
 #include "core/framework/allocator/torch/mapped_virtual_memory_tensor_view_internal.h"
 #include "core/framework/allocator/virtual_memory/mapped_virtual_memory_region.h"
-#include "core/framework/tensor/tensor_helper.h"
+#include "core/util/tensor_helper.h"
 
 namespace xllm {
 

@@ -43,7 +43,6 @@ limitations under the License.
 #include "core/framework/model_loader/hf_model_args.h"
 #include "core/framework/state_dict/rec_vocab_dict.h"
 #include "core/framework/state_dict/safetensors/safetensors.h"
-#include "core/framework/tensor/tensor_helper.h"
 #include "core/framework/tokenizer/fast_tokenizer.h"
 #include "core/framework/tokenizer/rec_tokenizer.h"
 #include "core/framework/tokenizer/sentencepiece_tokenizer.h"
@@ -56,6 +55,7 @@ limitations under the License.
 #include "core/util/blocking_counter.h"
 #include "core/util/json_reader.h"
 #include "core/util/scope_guard.h"
+#include "core/util/tensor_helper.h"
 #include "core/util/utils.h"
 #include "models/model_registry.h"
 
