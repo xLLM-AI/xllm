@@ -42,6 +42,15 @@ from xllm.python.models.qwen3_dflash2 import DFlash2Qwen3Config
 from xllm.python.models.qwen3_dspark import Qwen3DSparkConfig
 
 
+def _require_mega_gdn_varlen_npu() -> None:
+    import torch_npu
+
+    # The varlen kernel registers only ascend910_93, whose SoC IDs are 250..255.
+    soc_version = torch_npu._C._npu_get_soc_version()
+    if not 250 <= soc_version <= 255:
+        pytest.skip(f"MegaGdnMtpDecodeVarlen requires Ascend A3 (ascend910_93), got SoC version {soc_version}")
+
+
 class _ResidualLayer(nn.Module):
     def __init__(self, delta: float) -> None:
         super().__init__()
