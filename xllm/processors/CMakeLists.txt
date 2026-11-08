@@ -80,6 +80,6 @@ cc_library(
     qwen3_vl_prompt_processor.cpp
     qwen3_vl_video_processor.cpp
   DEPS
-    :tensor_support
+    :util
     ${BASE_DEPS}
 )

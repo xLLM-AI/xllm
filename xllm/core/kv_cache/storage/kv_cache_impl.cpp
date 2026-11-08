@@ -17,9 +17,9 @@ limitations under the License.
 
 #include <utility>
 
-#include "core/framework/tensor/tensor_helper.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
+#include "core/util/tensor_helper.h"
 
 namespace xllm {
 

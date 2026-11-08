@@ -18,7 +18,7 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#include "core/framework/tensor/tensor_helper.h"
+#include "core/util/tensor_helper.h"
 #include "fused_moe.h"
 #include "kernels/ops_api.h"
 

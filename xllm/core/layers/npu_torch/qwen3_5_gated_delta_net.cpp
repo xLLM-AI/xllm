@@ -24,9 +24,9 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/constants.h"
-#include "core/framework/tensor/tensor_helper.h"
 #include "core/kernels/npu/xllm_ops/mega_gdn_constants.h"
 #include "core/kernels/ops_api.h"
+#include "core/util/tensor_helper.h"
 #include "core/util/utils.h"
 
 namespace xllm {

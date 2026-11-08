@@ -47,7 +47,7 @@ limitations under the License.
 #if defined(USE_DCU)
 #include "models/vlm/qwen2_5_vl.h"
 #endif
-#include "core/framework/tensor/tensor_helper.h"
+#include "core/util/tensor_helper.h"
 #include "processors/qwen2_vl_image_processor.h"
 
 #define CONDITION_IMAGE_SIZE 147456

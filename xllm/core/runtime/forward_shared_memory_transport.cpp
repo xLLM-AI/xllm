@@ -50,8 +50,8 @@ limitations under the License.
 #include "platform/cuda/device_capture_lock.h"
 #endif
 #include "core/common/types.h"
-#include "core/framework/tensor/tensor_helper.h"
 #include "core/util/net.h"
+#include "core/util/tensor_helper.h"
 #include "util/utils.h"
 #include "worker.pb.h"
 

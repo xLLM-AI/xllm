@@ -26,7 +26,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/common/macros.h"
-#include "core/framework/tensor/tensor_helper.h"
+#include "core/util/tensor_helper.h"
 
 namespace xllm {
 

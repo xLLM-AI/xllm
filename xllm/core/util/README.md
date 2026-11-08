@@ -2,13 +2,16 @@
 
 # Base utilities
 
-`core/util` contains reusable infrastructure components with no knowledge of
-xLLM models, inference policies, requests, tensor frameworks, or xLLM wire protocols.
-Examples include thread pools, queues, locks, timers, byte payloads, networking,
-shared memory, hashing, and generic container algorithms.
+`core/util` contains reusable infrastructure and generic tensor tools with no
+knowledge of xLLM models, inference policies, or request orchestration. Examples
+include thread pools, queues, locks, timers, byte payloads, networking, shared
+memory, hashing, tensor operations, tensor serialization, and Python tensor
+bindings.
 
-Project includes and library dependencies must stay within `core/util`.
-Standard-library and external infrastructure libraries are allowed. Do not add
+Source includes and library dependencies must not point to other xLLM source
+layers. Standard-library and external infrastructure libraries, Torch, Python,
+and generated protobuf support are allowed. Generic tensor tools belong here;
+model-specific tensor policies belong with their model or feature. Do not add
 forwarding headers that pull domain components back into this directory.
 
 Place domain code with its owner:
@@ -16,8 +19,6 @@ Place domain code with its owner:
 - Model identity, model paths, and model input metadata: `core/framework/model`.
 - Model discovery and loading: `core/framework/model_loader`.
 - Speculative decoding algorithms and caches: `core/framework/speculative`.
-- Tensor operations, tensor serialization, and Python tensor boundaries:
-  `core/framework/tensor`.
 - Model-specific multimodal download policy: `core/framework/multimodal`.
 - Configuration parsing and defaults: `core/framework/config`.
 

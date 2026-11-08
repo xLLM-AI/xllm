@@ -102,7 +102,6 @@ cc_library(
     qwen3_rerank_service_impl.cpp
     embedding_output_builder.cpp
   DEPS
-    :tensor_codec
     :api_response
     :common
     :config

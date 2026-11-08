@@ -28,8 +28,8 @@ limitations under the License.
 #include "core/framework/model/seq_lens.h"
 #include "core/framework/parallel_state/parallel_state.h"
 #include "core/framework/parallel_state/process_group.h"
-#include "core/framework/tensor/tensor_helper.h"
 #include "core/runtime/vlm_forward_params.h"
+#include "core/util/tensor_helper.h"
 
 namespace xllm {
 namespace {

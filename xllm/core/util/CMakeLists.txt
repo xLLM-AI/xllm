@@ -17,13 +17,18 @@ cc_library(
     int32_map.h
     json_reader.h
     lightweightsemaphore.h
+    linalg.h
     net.h
     pretty_print.h
+    pybind_helper.h
     scope_guard.h
     shared_memory_manager.h
     slice.h
     spin_lock.h
     spin_rw_lock.h
+    tensor_codec.h
+    tensor_helper.h
+    tensor_options.h
     threadpool.h
     timer.h
     type_traits.h
@@ -37,9 +42,12 @@ cc_library(
     hash_util.cpp
     http_downloader.cpp
     json_reader.cpp
+    linalg.cpp
     net.cpp
     pretty_print.cpp
     shared_memory_manager.cpp
+    tensor_codec.cpp
+    tensor_options.cpp
     threadpool.cpp
     timer.cpp
     utils.cpp
@@ -47,12 +55,15 @@ cc_library(
     verbose_trace_logger.cpp
   DEPS
     Folly::folly
+    torch
     brpc
     OpenSSL::SSL
     OpenSSL::Crypto
     leveldb::leveldb
     nlohmann_json::nlohmann_json
     glog::glog
+    Boost::serialization
+    proto::xllm_proto
     absl::synchronization
     absl::time
     absl::random_random

@@ -24,12 +24,12 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/model/model_type.h"
-#include "core/framework/tensor/tensor_helper.h"
 #include "core/kv_cache/storage/deepseek_v4_kv_cache_impl.h"
 #include "core/kv_cache/storage/indexed_kv_cache_impl.h"
 #include "core/kv_cache/storage/kpool_kv_cache_impl.h"
 #include "core/kv_cache/storage/linear_attention_kv_cache_impl.h"
 #include "core/kv_cache/storage/quantized_kv_cache_impl.h"
+#include "core/util/tensor_helper.h"
 #include "util/utils.h"
 
 namespace xllm {

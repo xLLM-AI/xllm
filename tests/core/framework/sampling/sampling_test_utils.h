@@ -17,7 +17,7 @@ limitations under the License.
 
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/rejection_sampler.h"
-#include "core/framework/tensor/tensor_helper.h"
+#include "core/util/tensor_helper.h"
 #include "platform/platform.h"
 
 namespace xllm {

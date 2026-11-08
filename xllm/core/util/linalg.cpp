@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/framework/tensor/linalg.h"
+#include "core/util/linalg.h"
 
 #include <glog/logging.h>
 #include <torch/torch.h>

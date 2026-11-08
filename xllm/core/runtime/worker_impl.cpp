@@ -101,8 +101,8 @@ limitations under the License.
 #endif
 #include "core/common/types.h"
 #include "core/framework/model/model_type.h"
-#include "core/framework/tensor/tensor_helper.h"
-#include "core/framework/tensor/tensor_options.h"
+#include "core/util/tensor_helper.h"
+#include "core/util/tensor_options.h"
 #include "util/json_reader.h"
 #include "util/threadpool.h"
 #include "util/timer.h"

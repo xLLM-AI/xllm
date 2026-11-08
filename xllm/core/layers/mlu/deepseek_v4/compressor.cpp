@@ -20,7 +20,7 @@ limitations under the License.
 #include <cmath>
 #include <optional>
 
-#include "core/framework/tensor/linalg.h"
+#include "core/util/linalg.h"
 #include "kernels/mlu/mlu_ops_api.h"
 #include "kernels/ops_api.h"
 

@@ -62,7 +62,6 @@ cc_library(
     rec_multi_round_forward_input_builder.cpp
     beam_search.h
   DEPS
-    :tensor_support
     :config
     :eplb
     :request

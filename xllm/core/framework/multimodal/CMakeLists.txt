@@ -28,8 +28,6 @@ cc_library(
     mm_input.cpp
     mm_type.cpp
   DEPS
-    :tensor_codec
-    :tensor_support
     :content_hash
     common
     util

@@ -45,7 +45,7 @@ cc_library(
     deepseek_v4_indexer.cpp
     deepseek_v4_gate.cpp
   DEPS
-    :tensor_support
+    :util
     :common_layers
     :npu_layers
     :xllm_ops

@@ -24,7 +24,7 @@ limitations under the License.
 #include <vector>
 
 #include "common/global_flags.h"
-#include "core/framework/tensor/linalg.h"
+#include "core/util/linalg.h"
 #include "kernels/ops_api.h"
 
 namespace {

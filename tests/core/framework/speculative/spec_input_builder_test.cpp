@@ -22,8 +22,8 @@ limitations under the License.
 
 #include "core/framework/config/model_config.h"
 #include "core/framework/model/mtp_topk_state.h"
-#include "core/framework/tensor/tensor_helper.h"
 #include "core/util/scope_guard.h"
+#include "core/util/tensor_helper.h"
 #include "framework/model/model_params_view.h"
 #include "models/llm/mlu/mtp_topk_state.h"
 #include "runtime/forward_params.h"

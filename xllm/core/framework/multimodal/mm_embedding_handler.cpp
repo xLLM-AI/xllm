@@ -25,8 +25,8 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/multimodal/embedding_output.h"
-#include "core/framework/tensor/tensor_codec.h"
 #include "core/util/hash_util.h"
+#include "core/util/tensor_codec.h"
 #include "core/util/utils.h"
 #include "mm_input.h"
 #include "tensor.pb.h"

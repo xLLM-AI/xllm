@@ -19,8 +19,8 @@ limitations under the License.
 
 #include <cstring>
 
-#include "core/framework/tensor/tensor_helper.h"
 #include "core/layers/npu/loader/rolling_weight_buffer.h"
+#include "core/util/tensor_helper.h"
 
 namespace xllm {
 namespace dit {

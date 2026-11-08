@@ -48,8 +48,8 @@ limitations under the License.
 #include "core/framework/multimodal/mm_batch_data.h"
 #include "core/framework/parallel_state/npu_cp_plan.h"
 #include "core/framework/parallel_state/npu_dp_ep_padding.h"
-#include "core/framework/tensor/tensor_helper.h"
 #include "core/util/hash_util.h"
+#include "core/util/tensor_helper.h"
 
 namespace xllm {
 

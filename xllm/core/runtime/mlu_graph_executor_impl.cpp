@@ -33,9 +33,9 @@ limitations under the License.
 #include "core/common/constants.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/model/seq_lens.h"
-#include "core/framework/tensor/tensor_options.h"
 #include "core/runtime/graph_execution_input.h"
 #include "core/runtime/rec_graph_input.h"
+#include "core/util/tensor_options.h"
 #include "runtime/decode_graph_bucket.h"
 #include "util/utils.h"
 

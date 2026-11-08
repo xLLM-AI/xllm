@@ -39,7 +39,7 @@ limitations under the License.
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/adaptive/dspark_dp_coordinator.h"
 #include "core/framework/speculative/verify_layout.h"
-#include "core/framework/tensor/tensor_helper.h"
+#include "core/util/tensor_helper.h"
 #include "platform/device.h"
 #include "platform/platform.h"
 #include "runtime/dit_forward_params.h"

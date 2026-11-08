@@ -38,7 +38,6 @@ cc_library(
   SRCS
     rec_constrained_decoding.cpp
   DEPS
-    :tensor_support
     :state_dict
     :common
     util

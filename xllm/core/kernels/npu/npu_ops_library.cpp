@@ -32,8 +32,8 @@ limitations under the License.
 #include <tuple>
 #include <vector>
 
-#include "core/framework/tensor/tensor_helper.h"
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
+#include "core/util/tensor_helper.h"
 #include "kernels/npu/xllm_ops/xllm_ops_api.h"
 #include "npu_ops_api.h"
 #include "triton_npu/torch_api/triton_ops_api.h"

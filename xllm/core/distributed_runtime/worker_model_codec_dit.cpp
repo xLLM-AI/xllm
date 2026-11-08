@@ -18,7 +18,7 @@ limitations under the License.
 
 #include "core/common/metrics.h"
 #include "core/distributed_runtime/worker_model_codec.h"
-#include "core/framework/tensor/tensor_codec.h"
+#include "core/util/tensor_codec.h"
 #include "core/util/timer.h"
 #include "core/util/utils.h"
 #include "tensor.pb.h"

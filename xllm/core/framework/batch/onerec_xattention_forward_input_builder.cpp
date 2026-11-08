@@ -22,7 +22,7 @@ limitations under the License.
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/model/rec_model_utils.h"
 #include "core/framework/request/onerec_sequence.h"
-#include "core/framework/tensor/tensor_helper.h"
+#include "core/util/tensor_helper.h"
 #include "core/util/utils.h"
 
 namespace xllm {

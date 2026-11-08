@@ -29,7 +29,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/config/eplb_config.h"
-#include "core/framework/tensor/tensor_helper.h"
+#include "core/util/tensor_helper.h"
 #include "framework/model/model_args.h"
 #include "framework/parallel_state/parallel_args.h"
 #include "framework/quantization/quant_args.h"
