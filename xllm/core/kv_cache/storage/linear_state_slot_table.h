@@ -35,6 +35,7 @@ class LinearStateSlotTable final {
   size_t num_groups() const { return num_groups_; }
 
   // Each update is [logical id, physical row of group 0, ..., group G-1].
+  // Repeated ids use their last row; unchanged mappings are not published.
   void update(const std::vector<int32_t>& rows);
 
   // Negative ids are sentinels and map to themselves.
@@ -50,6 +51,7 @@ class LinearStateSlotTable final {
   // Both are [num_groups, num_slots].
   std::vector<int32_t> host_slots_;
   torch::Tensor device_slots_;
+  std::vector<size_t> last_update_rows_;
 };
 
 }  // namespace xllm

@@ -14,29 +14,15 @@
 """Collect the custom operator vendor used by an NPU build into its wheel."""
 
 import shutil
-import subprocess
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 
+from scripts.build_support.npu_ops_source import xllm_ops_source_identity
 from scripts.logger import logger
 
 _BUNDLED_VENDOR = "custom_xllm_math"
 _VERSION_MARKER = ".xllm_ops_git_head"
-
-
-def _source_git_head(base_dir: str) -> str:
-    source = Path(base_dir) / "third_party" / "xllm_ops"
-    if not (source / ".git").exists():
-        raise RuntimeError(f"Initialize the xllm_ops submodule before packaging NPU operators: {source}")
-    try:
-        return subprocess.check_output(
-            ["git", "-c", f"safe.directory={source}", "-C", str(source), "rev-parse", "HEAD"],
-            text=True,
-            stderr=subprocess.PIPE,
-        ).strip()
-    except (OSError, subprocess.CalledProcessError) as error:
-        raise RuntimeError(f"Cannot determine the xllm_ops source revision at {source}") from error
 
 
 def _vendor_path(env: Mapping[str, str]) -> Path:
@@ -63,16 +49,16 @@ def _vendor_path(env: Mapping[str, str]) -> Path:
     return vendors / "xllm"
 
 
-def _validate_vendor(vendor: Path, source_git_head: str) -> None:
+def _validate_vendor(vendor: Path, source_identity: str) -> None:
     for relative_path in (_VERSION_MARKER, "op_api/lib/libcust_opapi.so", "bin/set_env.bash", "version.info"):
         resource = vendor / relative_path
         if not resource.is_file() or resource.stat().st_size == 0:
             raise RuntimeError(f"Incomplete NPU operator vendor: missing or empty {resource}")
 
-    installed_git_head = (vendor / _VERSION_MARKER).read_text(encoding="utf-8").strip()
-    if installed_git_head != source_git_head:
+    installed_identity = (vendor / _VERSION_MARKER).read_text(encoding="utf-8").strip()
+    if installed_identity != source_identity:
         raise RuntimeError(
-            f"NPU operator revision mismatch at {vendor}: installed {installed_git_head}, source {source_git_head}"
+            f"NPU operator revision mismatch at {vendor}: installed {installed_identity}, source {source_identity}"
         )
 
     resources = (
@@ -106,7 +92,7 @@ def stage_npu_ops_vendor(base_dir: str, extdir: str, device: str, env: Mapping[s
         return
 
     vendor = _vendor_path(env)
-    source_git_head = _source_git_head(base_dir)
+    source_identity = xllm_ops_source_identity(base_dir)
     if not vendor.is_dir():
         raise RuntimeError(f"NPU operator vendor was not installed by this build: {vendor}")
 
@@ -117,7 +103,7 @@ def stage_npu_ops_vendor(base_dir: str, extdir: str, device: str, env: Mapping[s
             shutil.copytree(vendor, staged_vendor, symlinks=False)
         except OSError as error:
             raise RuntimeError(f"Failed to collect the complete NPU operator vendor from {vendor}: {error}") from error
-        _validate_vendor(staged_vendor, source_git_head)
+        _validate_vendor(staged_vendor, source_identity)
         destination = destination_root / "vendors" / _BUNDLED_VENDOR
         destination.parent.mkdir(parents=True)
         staged_vendor.rename(destination)

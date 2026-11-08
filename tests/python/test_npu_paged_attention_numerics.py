@@ -40,6 +40,164 @@ _OUTPUT_RTOL = 0.02
 _OUTPUT_ATOL = 1e-3
 
 
+@torch.inference_mode()
+def test_prepared_slab_replay_reads_current_maps_into_each_graph_entry() -> None:
+    from xllm.python.attention.backend import LayerCache, SharedKVCacheLayout
+    from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend
+    from xllm.python.model_executor.forward_context import (
+        AclGraphExecutionState,
+        ForwardContext,
+        forward_context,
+    )
+
+    device = torch.device("npu:0")
+    backend = NpuPagedAttentionBackend(1, 1, 2, 1.0, 0, False, device, torch.float16)
+    rows = torch.zeros(2, 32, dtype=torch.int32, device=device)
+    rows[:, 1:3].copy_(torch.tensor([[16, 18], [48, 50]], dtype=torch.int32, device=device))
+    caches = [
+        LayerCache(
+            torch.empty(1, 128, 1, 2, device=device),
+            torch.empty(1, 128, 1, 2, device=device),
+            full_block_rows=row,
+        )
+        for row in rows.unbind(0)
+    ]
+    backend.bind_kv_caches(caches)
+    layout = SharedKVCacheLayout(128, 8, 4, 8, 2, 32, 262144, num_slabs=4)
+    backend._shared_kv_layout = layout
+    contexts = []
+    for _ in range(2):
+        metadata = SimpleNamespace(
+            block_table=torch.tensor([[1, 0, -1], [2, 0, -1]], dtype=torch.int32, device=device),
+            slot_mapping=torch.tensor([129, -1], dtype=torch.int32, device=device),
+            q_seq_lens=torch.ones(2, dtype=torch.int32, device=device),
+            q_cu_seq_lens_host_values=[0, 1, 2],
+            kv_seq_lens=torch.tensor([6, 4], dtype=torch.int32, device=device),
+            kv_seq_lens_host_values=[6, 4],
+            is_prefill=False,
+            is_chunked_prefill=False,
+            is_spec_verify=False,
+        )
+        metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=True)
+        contexts.append(ForwardContext(backend, device, metadata, caches, execution_state=AclGraphExecutionState({})))
+
+    captures, outputs, pointers = [], [], []
+    for context in contexts:
+        with forward_context(context):
+            backend.prepare(context.metadata, graph_mode=True)
+            torch.npu.synchronize()
+            captured = torch.npu.NPUGraph()
+            with torch.npu.graph(captured):
+                backend.prepare(context.metadata, graph_mode=True)
+            captures.append(captured)
+            tensors = (*backend._shared_full_block_tables.values(), *backend._shared_full_slot_mappings.values())
+            outputs.append(tensors)
+            pointers.append(tuple(tensor.data_ptr() for tensor in tensors))
+    torch.npu.synchronize()
+    assert all(first != second for first, second in zip(pointers[0], pointers[1], strict=True))
+
+    # Logical IDs and the native row tables retain their addresses while a
+    # released lease acquires new physical rows. Replay must read both anew.
+    rows[:, 2].copy_(torch.tensor([72, 80], dtype=torch.int32, device=device))
+    contexts[0].metadata.block_table[0, 0] = 2
+    contexts[0].metadata.slot_mapping[0] = 258
+    with forward_context(contexts[0]):
+        backend.prepare_graph_replay(contexts[0].metadata)
+        assert pointers[0] == tuple(
+            tensor.data_ptr()
+            for tensor in (*backend._shared_full_block_tables.values(), *backend._shared_full_slot_mappings.values())
+        )
+    captures[0].replay()
+    torch.npu.synchronize()
+    padding = layout.full_read_padding_row
+    assert outputs[0][0].cpu().tolist() == [[72, padding, -1], [72, padding, -1]]
+    assert outputs[0][1].cpu().tolist() == [[80, padding, -1], [80, padding, -1]]
+    assert outputs[0][2].cpu().tolist() == [9218, -1]
+    assert outputs[0][3].cpu().tolist() == [10242, -1]
+    assert outputs[1][0].cpu().tolist() == [[16, padding, -1], [18, padding, -1]]
+    assert outputs[1][2].cpu().tolist() == [2049, -1]
+
+    with forward_context(contexts[1]):
+        backend.prepare_graph_replay(contexts[1].metadata)
+    captures[1].replay()
+    torch.npu.synchronize()
+    assert outputs[1][0].cpu().tolist() == [[16, padding, -1], [72, padding, -1]]
+    assert outputs[1][1].cpu().tolist() == [[48, padding, -1], [80, padding, -1]]
+    assert outputs[1][2].cpu().tolist() == [2049, -1]
+    assert outputs[0][2].cpu().tolist() == [9218, -1]
+
+
+@torch.inference_mode()
+def test_ordinary_prepared_runner_refreshes_slab_tables_on_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    from xllm.python.attention.backend import LayerCache, SharedKVCacheLayout
+    from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend
+    from xllm.python.model_executor.runners.prepared_acl_graph import PreparedAclGraphRunner
+
+    monkeypatch.setattr("xllm.python.model_executor.runners.acl_graph._GRAPH_POOL", None)
+    device = torch.device("npu:0")
+    backend = NpuPagedAttentionBackend(2, 1, 64, 0.125, 0, False, device, torch.bfloat16)
+    rows = torch.zeros(32, dtype=torch.int32, device=device)
+    rows[1:3].copy_(torch.tensor([16, 18], dtype=torch.int32, device=device))
+    cache = torch.empty(128, 128, 1, 64, dtype=torch.bfloat16, device=device)
+    backend.bind_kv_caches([LayerCache(cache, cache, full_block_rows=rows)])
+    layout = SharedKVCacheLayout(128, 8, 4, 8, 2, 32, 262144, num_slabs=4)
+    backend._shared_kv_layout = layout
+
+    class PhysicalMetadataModel(torch.nn.Module):
+        def forward(self, tokens: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+            table = backend._shared_full_block_tables[0]
+            mapping = backend._shared_full_slot_mappings[0]
+            return torch.cat((table.flatten(), mapping))
+
+    runner = PreparedAclGraphRunner(PhysicalMetadataModel(), backend, device, 2)
+    capture_stream = torch.npu.Stream(device=device)
+    inputs = []
+    for _ in range(2):
+        tokens = torch.zeros(2, dtype=torch.int32, device=device)
+        positions = torch.zeros_like(tokens)
+        metadata = SimpleNamespace(
+            block_table=torch.tensor([[1, 0, -1], [2, 0, -1]], dtype=torch.int32, device=device),
+            slot_mapping=torch.tensor([129, -1], dtype=torch.int32, device=device),
+            q_seq_lens=torch.ones(2, dtype=torch.int32, device=device),
+            q_cu_seq_lens=torch.tensor([1, 2], dtype=torch.int32, device=device),
+            q_cu_seq_lens_host_values=[1, 2],
+            kv_seq_lens=torch.tensor([6, 4], dtype=torch.int32, device=device),
+            kv_seq_lens_host_values=[6, 4],
+            paged_kv_indptr=None,
+            paged_kv_indices=None,
+            paged_kv_last_page_len=None,
+            is_prefill=False,
+            is_chunked_prefill=False,
+            is_spec_verify=False,
+        )
+        metadata.prepared_attention_state = backend.prepare_metadata(metadata)
+        assert metadata.prepared_attention_state.device_kv_lengths is None
+        torch.npu.synchronize()
+        with torch.npu.stream(capture_stream):
+            runner.warmup_prepared(tokens, positions, metadata)
+        entry = runner._resolve_entry(tokens, positions, metadata)
+        assert entry.static_metadata.prepared_attention_state is None
+        inputs.append((tokens, positions, metadata, entry))
+    torch.npu.synchronize()
+    first_output = inputs[0][3].static_output
+    second_output = inputs[1][3].static_output
+    assert first_output.data_ptr() != second_output.data_ptr()
+    padding = layout.full_read_padding_row
+
+    for step, index in enumerate((0, 1, 0)):
+        tokens, positions, metadata, entry = inputs[index]
+        physical = 72 + 2 * step
+        rows[2] = physical
+        metadata.block_table[0, 0] = 2
+        metadata.slot_mapping[0] = 258
+        result = runner.execute(tokens, positions, metadata)
+        torch.npu.synchronize()
+        assert result is entry.static_output
+        assert result.cpu().tolist() == [physical, padding, -1, physical, padding, -1, physical * 128 + 2, -1]
+    assert second_output.cpu().tolist() == [74, padding, -1, 74, padding, -1, 9474, -1]
+    assert len(runner._prepared_graphs) == 2
+
+
 @pytest.mark.parametrize("layer_id", [0, 3], ids=["first-full-role", "last-full-role"])
 @pytest.mark.parametrize("width", [1, 3], ids=["decode", "expanded-verify"])
 @pytest.mark.parametrize("graph", [False, True], ids=["eager", "graph"])

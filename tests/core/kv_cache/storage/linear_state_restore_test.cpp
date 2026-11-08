@@ -29,6 +29,94 @@ limitations under the License.
 namespace xllm {
 namespace {
 
+TEST(LinearStateSlotTableTest, SkipsInitiallyZeroAndUnchangedMappings) {
+  LinearStateSlotTable table(/*num_slots=*/4, /*num_groups=*/2, torch::kCPU);
+  const int32_t* storage = table.device_slots().data_ptr<int32_t>();
+  const int64_t initial_version = table.device_slots()._version();
+
+  table.update({});
+  table.update({0, 0, 0, 3, 0, 0});
+  EXPECT_EQ(table.device_slots()._version(), initial_version);
+  EXPECT_EQ(table.slot(3, 0), 0);
+  EXPECT_EQ(table.slot(3, 1), 0);
+
+  table.update({1, 5, 7, 2, 11, 13});
+  const int64_t published_version = table.device_slots()._version();
+  EXPECT_GT(published_version, initial_version);
+  table.update({2, 11, 13, 1, 5, 7, 0, 0, 0});
+
+  EXPECT_EQ(table.device_slots()._version(), published_version);
+  EXPECT_EQ(table.device_slots().data_ptr<int32_t>(), storage);
+  EXPECT_TRUE(torch::equal(
+      table.device_slots(),
+      torch::tensor({{0, 5, 11, 0}, {0, 7, 13, 0}}, torch::kInt32)));
+}
+
+TEST(LinearStateSlotTableTest, PublishesChangedRowsWithoutRelocatingStorage) {
+  LinearStateSlotTable table(/*num_slots=*/5, /*num_groups=*/3, torch::kCPU);
+  table.update({1, 3, 5, 7, 2, 11, 13, 17});
+  const int32_t* storage = table.device_slots().data_ptr<int32_t>();
+
+  table.update({1, 3, 5, 7, 2, 11, 19, 17, 3, 23, 29, 31});
+
+  EXPECT_EQ(table.device_slots().data_ptr<int32_t>(), storage);
+  EXPECT_EQ(table.slot(1, 1), 5);
+  EXPECT_EQ(table.slot(2, 1), 19);
+  EXPECT_EQ(table.slot(3, 2), 31);
+  EXPECT_TRUE(torch::equal(
+      table.device_slots(),
+      torch::tensor({{0, 3, 11, 23, 0}, {0, 5, 19, 29, 0}, {0, 7, 17, 31, 0}},
+                    torch::kInt32)));
+}
+
+TEST(LinearStateSlotTableTest, ReusedLogicalIdsPublishNewPhysicalRows) {
+  LinearStateSlotTable table(/*num_slots=*/4, /*num_groups=*/2, torch::kCPU);
+  table.update({1, 3, 5, 2, 7, 11});
+  const int32_t* storage = table.device_slots().data_ptr<int32_t>();
+
+  table.update({1, 0, 0});
+  EXPECT_EQ(table.slot(1, 0), 0);
+  EXPECT_EQ(table.device_slots()[1][1].item<int32_t>(), 0);
+  table.update({1, 13, 17});
+
+  EXPECT_EQ(table.slot(1, 0), 13);
+  EXPECT_EQ(table.slot(1, 1), 17);
+  EXPECT_EQ(table.device_slots().data_ptr<int32_t>(), storage);
+  EXPECT_TRUE(torch::equal(
+      table.device_slots(),
+      torch::tensor({{0, 13, 7, 0}, {0, 17, 11, 0}}, torch::kInt32)));
+}
+
+TEST(LinearStateSlotTableTest, RepeatedIdsUseOnlyTheirFinalMapping) {
+  LinearStateSlotTable table(/*num_slots=*/4, /*num_groups=*/2, torch::kCPU);
+  table.update({1, 3, 5, 1, 7, 11, 2, 13, 17, 1, 19, 23});
+  const int64_t published_version = table.device_slots()._version();
+
+  table.update({1, 29, 31, 2, 37, 41, 1, 19, 23, 2, 13, 17});
+  EXPECT_EQ(table.device_slots()._version(), published_version);
+  EXPECT_EQ(table.slot(1, 0), 19);
+  EXPECT_EQ(table.slot(2, 1), 17);
+  EXPECT_TRUE(torch::equal(
+      table.device_slots(),
+      torch::tensor({{0, 19, 13, 0}, {0, 23, 17, 0}}, torch::kInt32)));
+
+  table.update({2, 43, 47, 1, 53, 59, 2, 61, 67});
+  EXPECT_EQ(table.slot(1, 1), 59);
+  EXPECT_EQ(table.slot(2, 0), 61);
+  EXPECT_TRUE(torch::equal(
+      table.device_slots(),
+      torch::tensor({{0, 53, 61, 0}, {0, 59, 67, 0}}, torch::kInt32)));
+}
+
+TEST(LinearStateSlotTableTest, ValidatesAllRowsBeforeFilteringChanges) {
+  LinearStateSlotTable table(/*num_slots=*/4, /*num_groups=*/2, torch::kCPU);
+
+  EXPECT_DEATH(table.update({1, 0}), "Linear state slot rows must be");
+  EXPECT_DEATH(table.update({-1, 0, 0}), "state_id");
+  EXPECT_DEATH(table.update({4, 0, 0}), "state_id");
+  EXPECT_DEATH(table.update({1, -1, 0, 1, 0, 0}), "entry");
+}
+
 TEST(LinearStateRestoreTest, BuildsColdMaskForUncachedRow) {
   EXPECT_EQ(build_linear_state_mask(/*cached_tokens=*/{0}, /*active_rows=*/1),
             std::vector<int64_t>({0}));

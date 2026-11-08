@@ -109,6 +109,8 @@ TEST(StaticKVCacheTensorAllocatorNpuTest,
   const torch::Tensor value = allocator.allocate(
       KVCacheTensorRole::VALUE, {8, 2, 4}, torch::kBFloat16, device);
   allocator.begin_layer(1);
+  const torch::Tensor conv = allocator.allocate(
+      KVCacheTensorRole::CONV, {8, 4}, torch::kBFloat16, device);
   const torch::Tensor ssm = allocator.allocate(
       KVCacheTensorRole::SSM, {16, 2, 4}, torch::kFloat32, device);
   ssm.narrow(0, 0, 2).fill_(std::numeric_limits<float>::quiet_NaN());
@@ -149,6 +151,54 @@ TEST(StaticKVCacheTensorAllocatorNpuTest,
       static_cast<int64_t>(layout.full_read_padding_row());
   EXPECT_TRUE(key[padding_row].eq(0).all().item<bool>());
   EXPECT_TRUE(value[padding_row].eq(0).all().item<bool>());
+
+  // Two disjoint new ranges surround live recurrent objects. Existing Full
+  // leases and their adjacent physical pairs must keep their contents.
+  for (const int64_t row : {8, 10, 38}) {
+    key[row].fill_(7);
+    value[row].fill_(9);
+  }
+  ssm.narrow(/*dim=*/0, /*start=*/12, /*length=*/2)
+      .fill_(std::numeric_limits<float>::quiet_NaN());
+  conv.narrow(/*dim=*/0, /*start=*/68, /*length=*/8)
+      .fill_(std::numeric_limits<float>::quiet_NaN());
+  ssm.narrow(/*dim=*/0, /*start=*/14, /*length=*/2).fill_(29);
+  conv[64].fill_(31);
+  const std::vector<int32_t> mixed_rows = {2, 36, 24, 1, 8, 10, 3, 34, 26};
+  const std::vector<uint64_t> mixed_epochs = {1, 2, 1};
+  EXPECT_TRUE(
+      allocator.needs_full_block_initialization(mixed_rows, mixed_epochs));
+  allocator.initialize_full_blocks(mixed_rows, mixed_epochs);
+  EXPECT_FALSE(
+      allocator.needs_full_block_initialization(mixed_rows, mixed_epochs));
+  EXPECT_TRUE(ssm.narrow(/*dim=*/0, /*start=*/12, /*length=*/2)
+                  .eq(0)
+                  .all()
+                  .item<bool>());
+  EXPECT_TRUE(conv.narrow(/*dim=*/0, /*start=*/68, /*length=*/8)
+                  .eq(0)
+                  .all()
+                  .item<bool>());
+  for (const int64_t row : {24, 26, 34, 36}) {
+    EXPECT_TRUE(key[row].eq(0).all().item<bool>());
+    EXPECT_TRUE(value[row].eq(0).all().item<bool>());
+    key[row].fill_(11);
+    value[row].fill_(13);
+  }
+  allocator.initialize_full_blocks(mixed_rows, mixed_epochs);
+  for (const int64_t row : {24, 26, 34, 36}) {
+    EXPECT_TRUE(key[row].eq(11).all().item<bool>());
+    EXPECT_TRUE(value[row].eq(13).all().item<bool>());
+  }
+  for (const int64_t row : {8, 10, 38}) {
+    EXPECT_TRUE(key[row].eq(7).all().item<bool>());
+    EXPECT_TRUE(value[row].eq(9).all().item<bool>());
+  }
+  EXPECT_TRUE(ssm.narrow(/*dim=*/0, /*start=*/14, /*length=*/2)
+                  .eq(29)
+                  .all()
+                  .item<bool>());
+  EXPECT_TRUE(conv[64].eq(31).all().item<bool>());
 }
 
 }  // namespace
