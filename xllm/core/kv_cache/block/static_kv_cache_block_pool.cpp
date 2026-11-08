@@ -60,6 +60,7 @@ StaticKVCacheBlockPool::StaticKVCacheBlockPool(
       slab_mode_(true),
       logical_capacity_(logical_capacity),
       slab_bytes_(layout.slab_bytes()),
+      num_reserved_slabs_(layout.num_reserved_slabs()),
       full_row_bytes_(layout.row_bytes(KVCacheTensorRole::KEY)),
       conv_row_bytes_(layout.row_bytes(KVCacheTensorRole::CONV)),
       ssm_row_bytes_(layout.row_bytes(KVCacheTensorRole::SSM)),
@@ -70,7 +71,7 @@ StaticKVCacheBlockPool::StaticKVCacheBlockPool(
   CHECK_GT(logical_capacity_, 1u);
   CHECK_LE(logical_capacity_,
            static_cast<uint32_t>(std::numeric_limits<int32_t>::max()));
-  CHECK_GT(slabs_.size(), 1u);
+  CHECK_GT(slabs_.size(), num_reserved_slabs_);
   CHECK_GT(full_layers_, 0u);
   CHECK_GT(linear_layers_, 0u);
   CHECK_GT(checkpoint_stride_, 0u);
@@ -92,10 +93,12 @@ StaticKVCacheBlockPool::StaticKVCacheBlockPool(
         (layout.bytes_used() - object_bytes(type)) / object_row_bytes(type),
         static_cast<size_t>(std::numeric_limits<int32_t>::max()));
   }
-  free_slabs_.reserve(slabs_.size() - 1);
-  for (size_t slab = slabs_.size() - 1; slab > 0; --slab) {
+  free_slabs_.reserve(slabs_.size() - num_reserved_slabs_);
+  for (size_t slab = slabs_.size(); slab > num_reserved_slabs_;) {
+    --slab;
     free_slabs_.emplace_back(static_cast<uint32_t>(slab));
   }
+  full_block_lease_epochs_.assign(logical_capacity_, 0);
   for (const BlockType type : {BlockType::KV, BlockType::LINEAR}) {
     const size_t index = block_type_index(type);
     const size_t row_width =
@@ -202,7 +205,7 @@ int32_t StaticKVCacheBlockPool::allocate_object(SlabType type,
 void StaticKVCacheBlockPool::release_object(int32_t row, SlabType type) {
   const size_t bytes = static_cast<size_t>(row) * object_row_bytes(type);
   const uint32_t slab_id = static_cast<uint32_t>(bytes / slab_bytes_);
-  CHECK_GT(slab_id, 0u);
+  CHECK_GE(slab_id, num_reserved_slabs_);
   Slab& slab = slabs_[slab_id];
   CHECK(slab.type == type);
   CHECK_GT(slab.live_objects, 0u);
@@ -278,6 +281,11 @@ std::vector<int32_t> StaticKVCacheBlockPool::allocate_slab_blocks(
     free_ids_[index].pop_back();
     logical_states_[index][id] = 2;
     placement_hints_[index][id] = placement_hint;
+    if (type == BlockType::KV) {
+      CHECK_LT(full_block_lease_epochs_[id],
+               std::numeric_limits<uint64_t>::max());
+      ++full_block_lease_epochs_[id];
+    }
     std::copy_n(rows.begin() + block * row_width,
                 row_width,
                 physical_rows_[index].begin() + id * row_width);
@@ -458,15 +466,20 @@ void StaticKVCacheBlockPool::append_linear_state_slots(
   slots->insert(slots->end(), row, row + slots_per_linear_state_);
 }
 
-void StaticKVCacheBlockPool::append_rows(int32_t block_id,
-                                         BlockType type,
-                                         std::vector<int32_t>* rows) const {
+void StaticKVCacheBlockPool::append_rows(
+    int32_t block_id,
+    BlockType type,
+    std::vector<int32_t>* rows,
+    std::vector<uint64_t>* lease_epochs) const {
   CHECK(rows != nullptr);
   CHECK(slab_mode_);
   const size_t width =
       type == BlockType::KV ? full_layers_ : 2 * linear_layers_;
   if (block_id < 0) {
     rows->insert(rows->end(), width, block_id);
+    if (lease_epochs != nullptr) {
+      lease_epochs->emplace_back(0);
+    }
     return;
   }
   std::lock_guard<std::mutex> lock(mutex_);
@@ -475,12 +488,16 @@ void StaticKVCacheBlockPool::append_rows(int32_t block_id,
   CHECK(block_id == 0 || logical_states_[index][block_id] != 0);
   const auto begin = physical_rows_[index].begin() + block_id * width;
   rows->insert(rows->end(), begin, begin + width);
+  if (lease_epochs != nullptr) {
+    lease_epochs->emplace_back(full_block_lease_epochs_[block_id]);
+  }
 }
 
 void StaticKVCacheBlockPool::append_full_block_rows(
     int32_t block_id,
-    std::vector<int32_t>* rows) const {
-  append_rows(block_id, BlockType::KV, rows);
+    std::vector<int32_t>* rows,
+    std::vector<uint64_t>* lease_epochs) const {
+  append_rows(block_id, BlockType::KV, rows, lease_epochs);
 }
 
 void StaticKVCacheBlockPool::append_linear_state_rows(
@@ -494,7 +511,8 @@ size_t StaticKVCacheBlockPool::num_slots() const {
 }
 
 size_t StaticKVCacheBlockPool::num_total_slots() const {
-  return slab_mode_ ? (slabs_.size() - 1) * slab_bytes_ : owners_.size() - 1;
+  return slab_mode_ ? (slabs_.size() - num_reserved_slabs_) * slab_bytes_
+                    : owners_.size() - 1;
 }
 
 size_t StaticKVCacheBlockPool::num_free_slots() const {

@@ -55,6 +55,7 @@ limitations under the License.
 namespace xllm {
 
 class WorkerRendezvous;
+class StaticKVCacheTensorAllocator;
 
 class WorkerImpl {
  public:
@@ -145,6 +146,12 @@ class WorkerImpl {
                                bool record_ready_event,
                                bool restore_linear_state,
                                bool wait_for_compute_stream);
+  // Composite execution prepares the cache-owning target on its actual stream.
+  void prepare_shared_kv_cache(
+      const std::vector<int32_t>& full_block_rows,
+      const std::vector<uint64_t>& full_block_lease_epochs,
+      const std::vector<int32_t>& linear_state_rows,
+      Stream& prepare_stream);
 #if defined(USE_NPU)
   // Per-worker-static configuration handed to NpuCpPlan::prepare(); built once
   // and cached.
@@ -588,6 +595,7 @@ class WorkerImpl {
 
   // kv caches
   std::vector<xllm::KVCache> kv_caches_;
+  std::shared_ptr<StaticKVCacheTensorAllocator> static_kv_cache_allocator_;
 
   // causal LM model
   std::unique_ptr<CausalLM> model_;

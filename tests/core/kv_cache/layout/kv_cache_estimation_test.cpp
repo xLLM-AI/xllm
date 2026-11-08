@@ -607,6 +607,54 @@ TEST(KVCacheEstimationTest, SharedStaticRequiresOneHybridWorkingSet) {
   EXPECT_EQ(capacity.n_blocks(), 42);
 }
 
+TEST(KVCacheEstimationTest,
+     SharedStaticRequiresSeparateReadPaddingWhenFullScratchFillsASlab) {
+  ModelArgs model_args = make_linear_attention_args();
+  model_args.linear_value_head_dim(4).linear_num_value_heads(4).mamba_ssm_dtype(
+      "float32");
+  KVCacheEstimateOptions options = make_linear_attention_options();
+  options.enable_shared_kv_cache = true;
+  options.n_local_linear_v_heads = 4;
+  // Two local KV heads give a 2 KiB Full pair. Four Linear value heads
+  // give 128-byte Conv rows and 256-byte FP32 SSM rows, both divisors of
+  // that pair. The 2 KiB slab holds writable Full scratch or read padding,
+  // so they need two reserved slabs instead of sharing the first slab.
+  constexpr int64_t kSlabBytes = 2048;
+  options.cache_size_in_bytes = 5 * kSlabBytes;
+  EXPECT_DEATH((void)estimate_kv_cache_capacity(model_args, options),
+               "cannot fit padding and one hybrid sequence");
+
+  // Two Full layers need two typed slabs; both Conv layers fit in one,
+  // and both SSM layers fit in one. With the two reserved slabs, six
+  // slabs are the smallest complete hybrid working set.
+  options.cache_size_in_bytes = 6 * kSlabBytes;
+  const KVCacheCapacity capacity =
+      estimate_kv_cache_capacity(model_args, options);
+  EXPECT_EQ(capacity.shared_slot_bytes(), kSlabBytes);
+  EXPECT_EQ(capacity.shared_min_slab_count(), 6);
+  EXPECT_EQ(capacity.shared_slab_count(), 6);
+  // Four allocatable slabs hold 8 KiB, and one two-layer Linear state
+  // uses 2 * (128 + 256) = 768 bytes: ten IDs plus reserved logical zero.
+  EXPECT_EQ(capacity.n_blocks(), 11);
+  EXPECT_EQ(capacity.num_linear_state_blocks(), 11);
+
+  StaticKVCacheLayoutSpec spec;
+  spec.num_slots = capacity.n_blocks();
+  spec.num_slabs = capacity.shared_slab_count();
+  spec.full_row_bytes = 1024;
+  spec.conv_row_bytes = 128;
+  spec.ssm_row_bytes = 256;
+  spec.dtype = torch::kFloat16;
+  spec.ssm_dtype = torch::kFloat32;
+  spec.full_layer_ids = {1, 3};
+  spec.linear_layer_ids = {0, 2};
+  const StaticKVCacheLayout layout(std::move(spec));
+  EXPECT_EQ(layout.num_reserved_slabs(), 2u);
+  EXPECT_EQ(layout.full_read_padding_row(), 2u);
+  EXPECT_TRUE(layout.can_fit(/*full_blocks=*/1, /*linear_states=*/1));
+  EXPECT_FALSE(layout.can_fit(/*full_blocks=*/2, /*linear_states=*/1));
+}
+
 TEST(KVCacheEstimationTest, SharedStaticRejectsIndependentLinearSlotOverride) {
   ModelArgs model_args = make_linear_attention_args();
   model_args.linear_value_head_dim(4).mamba_ssm_dtype("float32");

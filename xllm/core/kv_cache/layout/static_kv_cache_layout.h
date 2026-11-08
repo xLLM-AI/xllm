@@ -68,6 +68,7 @@ class StaticKVCacheLayout final {
                       const KVCacheCreateOptions& options);
 
   size_t num_slabs() const { return spec_.num_slabs; }
+  size_t num_reserved_slabs() const { return num_reserved_slabs_; }
   size_t slab_bytes() const { return slab_bytes_; }
   size_t num_slots() const { return spec_.num_slots; }
   size_t full_row_bytes() const { return spec_.full_row_bytes; }
@@ -75,6 +76,9 @@ class StaticKVCacheLayout final {
   size_t ssm_row_bytes() const { return spec_.ssm_row_bytes; }
   size_t full_pair_bytes() const { return full_pair_bytes_; }
   size_t ssm_bundle_bytes() const { return ssm_bundle_bytes_; }
+  // Shared by every Full layer and never targeted by cache writes. Logical
+  // ID zero still maps to writable scratch at row zero for scatter updates.
+  size_t full_read_padding_row() const { return full_read_padding_row_; }
   size_t full_layer_count() const { return spec_.full_layer_ids.size(); }
   size_t linear_layer_count() const { return spec_.linear_layer_ids.size(); }
   size_t num_linear_groups() const { return 2 * linear_layer_count(); }
@@ -110,6 +114,8 @@ class StaticKVCacheLayout final {
   size_t slab_bytes_ = 0;
   size_t full_pair_bytes_ = 0;
   size_t ssm_bundle_bytes_ = 0;
+  size_t full_read_padding_row_ = 0;
+  size_t num_reserved_slabs_ = 0;
   size_t bytes_used_ = 0;
 };
 

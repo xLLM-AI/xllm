@@ -42,6 +42,7 @@ limitations under the License.
 #include "core/kv_cache/block/block_manager_impl.h"
 #include "core/kv_cache/block/block_utils.h"
 #include "core/kv_cache/block/concurrent_block_manager_impl.h"
+#include "core/kv_cache/layout/static_kv_cache_layout.h"
 #include "core/kv_cache/prefix/block_hasher.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/util/scope_guard.h"
@@ -3059,6 +3060,61 @@ TEST(BatchTest, SharedArenaPublishesLinearGroupSlotsForReadAndWriteStates) {
   EXPECT_EQ(embedding.linear_state_read_ids, std::vector<int32_t>({2}));
   EXPECT_EQ(embedding.linear_state_slot_rows,
             std::vector<int32_t>({4, 4, 5, 2, 2, 3}));
+}
+
+TEST(BatchTest, ThreadedSharedSlabBuilderKeepsFullLeaseRowsAligned) {
+  constexpr uint32_t kQueryTokens = 32768;
+  ScopedPrefillChunkStride chunk_stride(kQueryTokens);
+  StaticKVCacheLayoutSpec spec;
+  spec.num_slots = 64;
+  spec.num_slabs = 16;
+  spec.full_row_bytes = 16;
+  spec.conv_row_bytes = 8;
+  spec.ssm_row_bytes = 32;
+  spec.checkpoint_stride = 2;
+  spec.full_layer_ids = {0, 3};
+  spec.linear_layer_ids = {1, 2};
+  BlockManager::Options options;
+  options.num_blocks(64)
+      .block_size(kQueryTokens)
+      .enable_linear_state(true)
+      .linear_state_num_slots(64)
+      .enable_shared_kv_cache(true)
+      .shared_layout(std::make_shared<StaticKVCacheLayout>(spec))
+      .enable_prefix_cache(false);
+  CompositeBlockManager manager(build_composite_leaves(options), options);
+  // Releasing a warmup allocation advances only this logical ID's lease.
+  auto warmup = manager.allocate_blocks(BlockType::KV, 1);
+  ASSERT_EQ(warmup.size(), 1u);
+  warmup.clear();
+  Sequence first = make_basic_sequence(std::vector<int32_t>(kQueryTokens, 1));
+  Sequence second =
+      make_basic_sequence(std::vector<int32_t>(2 * kQueryTokens, 2));
+  first.add_blocks(BlockType::KV, manager.allocate_blocks(BlockType::KV, 1));
+  second.add_blocks(BlockType::KV, manager.allocate_blocks(BlockType::KV, 2));
+  first.add_blocks(BlockType::LINEAR,
+                   manager.allocate_blocks(BlockType::LINEAR, 1));
+  second.add_blocks(BlockType::LINEAR,
+                    manager.allocate_blocks(BlockType::LINEAR, 1));
+  second.kv_state().set_kv_cache_tokens_num(kQueryTokens);
+  Batch batch({&first, &second});
+  ThreadPool thread_pool(/*num_threads=*/2);
+  ModelArgs args;
+  args.layer_types({"full_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention"});
+  const LlmForwardInput input = batch.prepare_forward_input(args, &thread_pool);
+  const auto& embedding = input.input_params.embedding;
+  ASSERT_EQ(embedding.full_block_slot_rows.size(), 9u);
+  EXPECT_EQ(embedding.full_block_lease_epochs,
+            (std::vector<uint64_t>{2, 1, 1}));
+  EXPECT_EQ(embedding.full_block_slot_rows[0],
+            first.kv_state().blocks(BlockType::KV)[0].id());
+  EXPECT_EQ(embedding.full_block_slot_rows[3],
+            second.kv_state().blocks(BlockType::KV)[0].id());
+  EXPECT_EQ(embedding.full_block_slot_rows[6],
+            second.kv_state().blocks(BlockType::KV)[1].id());
 }
 
 class LinearBatchLifetimeTest : public ::testing::TestWithParam<bool> {};

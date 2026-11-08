@@ -59,6 +59,19 @@ StaticKVCacheLayout::StaticKVCacheLayout(StaticKVCacheLayoutSpec spec)
       checked_multiply(spec_.checkpoint_stride, spec_.ssm_row_bytes);
   slab_bytes_ = checked_lcm(checked_lcm(full_pair_bytes_, ssm_bundle_bytes_),
                             spec_.conv_row_bytes);
+  // Recurrent scratch contains FP32 values whose BF16 aliases may be NaNs.
+  // Masked attention still reads V, so its padding must remain separate from
+  // every writable scratch role and from slabs that can be leased or retyped.
+  const size_t scratch_bytes =
+      std::max({full_pair_bytes_, spec_.conv_row_bytes, ssm_bundle_bytes_});
+  const size_t padding_offset = checked_multiply(
+      scratch_bytes / full_pair_bytes_ +
+          static_cast<size_t>(scratch_bytes % full_pair_bytes_ != 0),
+      full_pair_bytes_);
+  full_read_padding_row_ = padding_offset / spec_.full_row_bytes;
+  const size_t reserved_bytes = checked_add(padding_offset, full_pair_bytes_);
+  num_reserved_slabs_ = reserved_bytes / slab_bytes_ +
+                        static_cast<size_t>(reserved_bytes % slab_bytes_ != 0);
   bytes_used_ = checked_multiply(spec_.num_slabs, slab_bytes_);
   CHECK_LE(bytes_used_,
            static_cast<size_t>(std::numeric_limits<int64_t>::max()));
@@ -120,7 +133,7 @@ StaticKVCacheLayout::StaticKVCacheLayout(StaticKVCacheLayoutSpec spec)
 
 bool StaticKVCacheLayout::can_fit(size_t full_blocks,
                                   size_t linear_states) const {
-  if (spec_.num_slabs == 0 || full_blocks >= spec_.num_slots ||
+  if (spec_.num_slabs < num_reserved_slabs_ || full_blocks >= spec_.num_slots ||
       linear_states >= spec_.num_slots) {
     return false;
   }
@@ -135,7 +148,7 @@ bool StaticKVCacheLayout::can_fit(size_t full_blocks,
       checked_add(slabs_for(full_objects, full_pair_bytes_),
                   checked_add(slabs_for(linear_objects, spec_.conv_row_bytes),
                               slabs_for(linear_objects, ssm_bundle_bytes_)));
-  return required_slabs <= spec_.num_slabs - 1;
+  return required_slabs <= spec_.num_slabs - num_reserved_slabs_;
 }
 
 size_t StaticKVCacheLayout::row_bytes(KVCacheTensorRole role) const {

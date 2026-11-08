@@ -18,6 +18,7 @@ limitations under the License.
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 namespace xllm {
@@ -51,6 +52,8 @@ TEST(StaticKVCacheTensorAllocatorTest, PlansGeometryWithoutAllocatingCapacity) {
       /*num_slots=*/0, /*checkpoint_stride=*/1, /*num_slabs=*/0));
   EXPECT_EQ(layout.slab_bytes(), 32);
   EXPECT_EQ(layout.num_slabs(), 0);
+  EXPECT_EQ(layout.num_reserved_slabs(), 2);
+  EXPECT_EQ(layout.full_read_padding_row(), 2);
   EXPECT_EQ(layout.full_pair_bytes(), 32);
   EXPECT_EQ(layout.ssm_bundle_bytes(), 32);
   EXPECT_EQ(layout.full_layer_count(), 2);
@@ -109,12 +112,148 @@ TEST(StaticKVCacheTensorAllocatorTest, DerivesQwen38SlabsFromRealObjectSizes) {
   EXPECT_EQ(layout.conv_row_bytes(), 71680);
   EXPECT_EQ(layout.ssm_bundle_bytes(), 7864320);
   EXPECT_EQ(layout.slab_bytes(), 55050240);
+  EXPECT_EQ(layout.num_reserved_slabs(), 1);
+  EXPECT_EQ(layout.full_read_padding_row(), 60);
+  EXPECT_GE(layout.full_read_padding_row() * layout.full_row_bytes(),
+            layout.ssm_bundle_bytes());
+  EXPECT_LE(layout.full_read_padding_row() * layout.full_row_bytes() +
+                layout.full_pair_bytes(),
+            layout.num_reserved_slabs() * layout.slab_bytes());
   EXPECT_EQ(layout.slab_bytes() % layout.full_pair_bytes(), 0);
   EXPECT_EQ(layout.slab_bytes() % layout.conv_row_bytes(), 0);
   EXPECT_EQ(layout.slab_bytes() % layout.ssm_bundle_bytes(), 0);
   EXPECT_EQ(layout.rows_per_slab(KVCacheTensorRole::KEY), 420);
   EXPECT_EQ(layout.rows_per_slab(KVCacheTensorRole::CONV), 768);
   EXPECT_EQ(layout.rows_per_slab(KVCacheTensorRole::SSM), 35);
+}
+
+TEST(StaticKVCacheTensorAllocatorTest,
+     KeepsReadPaddingFiniteAfterEveryWritableScratchRoleChanges) {
+  const StaticKVCacheLayout layout(
+      make_spec(/*num_slots=*/12, /*checkpoint_stride=*/2));
+  StaticKVCacheTensorAllocator allocator(layout, torch::kCPU);
+  allocator.begin_layer(0);
+  const torch::Tensor key0 =
+      allocate_float_tensor(allocator, KVCacheTensorRole::KEY, {12, 2, 2});
+  const torch::Tensor value0 =
+      allocate_float_tensor(allocator, KVCacheTensorRole::VALUE, {12, 2, 2});
+  allocator.begin_layer(3);
+  const torch::Tensor key3 =
+      allocate_float_tensor(allocator, KVCacheTensorRole::KEY, {12, 2, 2});
+  const torch::Tensor value3 =
+      allocate_float_tensor(allocator, KVCacheTensorRole::VALUE, {12, 2, 2});
+  allocator.begin_layer(1);
+  const torch::Tensor conv =
+      allocate_float_tensor(allocator, KVCacheTensorRole::CONV, {12, 2});
+  const torch::Tensor ssm =
+      allocate_float_tensor(allocator, KVCacheTensorRole::SSM, {24, 2, 4});
+
+  key0[0].fill_(std::numeric_limits<float>::quiet_NaN());
+  value0[0].fill_(std::numeric_limits<float>::quiet_NaN());
+  conv[0].fill_(std::numeric_limits<float>::quiet_NaN());
+  ssm.narrow(0, 0, layout.checkpoint_stride())
+      .fill_(std::numeric_limits<float>::quiet_NaN());
+
+  const int64_t padding_row =
+      static_cast<int64_t>(layout.full_read_padding_row());
+  EXPECT_TRUE(key0[padding_row].eq(0).all().item<bool>());
+  EXPECT_TRUE(value0[padding_row].eq(0).all().item<bool>());
+  EXPECT_EQ(key0[padding_row].data_ptr(), key3[padding_row].data_ptr());
+  EXPECT_EQ(value0[padding_row].data_ptr(), value3[padding_row].data_ptr());
+}
+
+TEST(StaticKVCacheTensorAllocatorTest,
+     InitializesOnlyFreshFullLeasesAndPreservesPrefixes) {
+  const StaticKVCacheLayout layout(
+      make_spec(/*num_slots=*/12, /*checkpoint_stride=*/2));
+  StaticKVCacheTensorAllocator allocator(layout, torch::kCPU);
+  allocator.begin_layer(0);
+  const torch::Tensor key =
+      allocate_float_tensor(allocator, KVCacheTensorRole::KEY, {12, 2, 2});
+  const torch::Tensor value =
+      allocate_float_tensor(allocator, KVCacheTensorRole::VALUE, {12, 2, 2});
+  key[0].fill_(47);
+  value[0].fill_(48);
+  key[12].fill_(53);
+  value[12].fill_(54);
+  for (const int64_t row : {8, 10}) {
+    key[row].fill_(std::numeric_limits<float>::quiet_NaN());
+    value[row].fill_(std::numeric_limits<float>::quiet_NaN());
+  }
+  const std::vector<int32_t> rows = {0, 0, 0, 1, 8, 10};
+  const std::vector<uint64_t> epochs = {0, 1};
+  EXPECT_TRUE(allocator.needs_full_block_initialization(rows, epochs));
+  allocator.initialize_full_blocks(rows, epochs);
+  for (const int64_t row : {8, 10}) {
+    EXPECT_TRUE(key[row].eq(0).all().item<bool>());
+    EXPECT_TRUE(value[row].eq(0).all().item<bool>());
+    key[row].fill_(11);
+    value[row].fill_(12);
+  }
+  EXPECT_FALSE(allocator.needs_full_block_initialization(rows, epochs));
+  allocator.initialize_full_blocks(rows, epochs);
+  for (const int64_t row : {8, 10}) {
+    EXPECT_TRUE(key[row].eq(11).all().item<bool>());
+    EXPECT_TRUE(value[row].eq(12).all().item<bool>());
+  }
+  EXPECT_TRUE(key[12].eq(53).all().item<bool>());
+  EXPECT_TRUE(value[12].eq(54).all().item<bool>());
+  EXPECT_TRUE(key[0].eq(47).all().item<bool>());
+  EXPECT_TRUE(value[0].eq(48).all().item<bool>());
+  EXPECT_FALSE(allocator.needs_full_block_initialization(
+      /*rows=*/{0, 0, 0}, /*lease_epochs=*/{0}));
+  const int64_t padding_row =
+      static_cast<int64_t>(layout.full_read_padding_row());
+  EXPECT_TRUE(key[padding_row].eq(0).all().item<bool>());
+  EXPECT_TRUE(value[padding_row].eq(0).all().item<bool>());
+}
+
+TEST(StaticKVCacheTensorAllocatorTest,
+     ClearsReusedFullLeasesAtTheSameAndDifferentPhysicalRows) {
+  StaticKVCacheTensorAllocator allocator(
+      StaticKVCacheLayout(make_spec(/*num_slots=*/12, /*checkpoint_stride=*/2)),
+      torch::kCPU);
+  allocator.begin_layer(0);
+  const torch::Tensor key =
+      allocate_float_tensor(allocator, KVCacheTensorRole::KEY, {12, 2, 2});
+  const torch::Tensor value =
+      allocate_float_tensor(allocator, KVCacheTensorRole::VALUE, {12, 2, 2});
+  const std::vector<int32_t> first_rows = {1, 8, 10};
+  EXPECT_TRUE(allocator.needs_full_block_initialization(first_rows,
+                                                        /*lease_epochs=*/{1}));
+  allocator.initialize_full_blocks(first_rows, /*lease_epochs=*/{1});
+  for (const int64_t row : {8, 10}) {
+    key[row].fill_(std::numeric_limits<float>::quiet_NaN());
+    value[row].fill_(std::numeric_limits<float>::quiet_NaN());
+  }
+  EXPECT_TRUE(allocator.needs_full_block_initialization(first_rows,
+                                                        /*lease_epochs=*/{2}));
+  allocator.initialize_full_blocks(first_rows, /*lease_epochs=*/{2});
+  for (const int64_t row : {8, 10}) {
+    EXPECT_TRUE(key[row].eq(0).all().item<bool>());
+    EXPECT_TRUE(value[row].eq(0).all().item<bool>());
+    key[row].fill_(31);
+    value[row].fill_(32);
+  }
+  // Retyping can return the same logical ID with another layer-row mapping.
+  const std::vector<int32_t> moved_rows = {1, 12, 14};
+  for (const int64_t row : {12, 14}) {
+    key[row].fill_(std::numeric_limits<float>::quiet_NaN());
+    value[row].fill_(std::numeric_limits<float>::quiet_NaN());
+  }
+  EXPECT_TRUE(allocator.needs_full_block_initialization(moved_rows,
+                                                        /*lease_epochs=*/{3}));
+  allocator.initialize_full_blocks(moved_rows, /*lease_epochs=*/{3});
+  EXPECT_FALSE(allocator.needs_full_block_initialization(moved_rows,
+                                                         /*lease_epochs=*/{3}));
+  for (const int64_t row : {12, 14}) {
+    EXPECT_TRUE(key[row].eq(0).all().item<bool>());
+    EXPECT_TRUE(value[row].eq(0).all().item<bool>());
+  }
+  for (const int64_t row : {8, 10}) {
+    EXPECT_TRUE(key[row].eq(31).all().item<bool>());
+    EXPECT_TRUE(value[row].eq(32).all().item<bool>());
+  }
 }
 
 TEST(StaticKVCacheTensorAllocatorTest,
@@ -157,25 +296,25 @@ TEST(StaticKVCacheTensorAllocatorTest,
     ASSERT_TRUE(tensor.is_contiguous());
   }
 
-  // The pool reserves slab zero, then maps live objects to independent rows.
+  // Live objects begin after the writable scratch and immutable read padding.
   key0[0].fill_(7);
-  key0[4].fill_(11);
-  value0[4].fill_(12);
-  key3[6].fill_(13);
-  value3[6].fill_(14);
-  conv1[16].fill_(21);
-  ssm1.narrow(0, 6, 2).fill_(22);
-  conv2[32].fill_(23);
-  ssm2.narrow(0, 10, 2).fill_(24);
+  key0[8].fill_(11);
+  value0[8].fill_(12);
+  key3[10].fill_(13);
+  value3[10].fill_(14);
+  conv1[24].fill_(21);
+  ssm1.narrow(0, 8, 2).fill_(22);
+  conv2[40].fill_(23);
+  ssm2.narrow(0, 12, 2).fill_(24);
   EXPECT_TRUE(key0[0].eq(7).all().item<bool>());
-  EXPECT_TRUE(key0[4].eq(11).all().item<bool>());
-  EXPECT_TRUE(value0[4].eq(12).all().item<bool>());
-  EXPECT_TRUE(key3[6].eq(13).all().item<bool>());
-  EXPECT_TRUE(value3[6].eq(14).all().item<bool>());
-  EXPECT_TRUE(conv1[16].eq(21).all().item<bool>());
-  EXPECT_TRUE(ssm1.narrow(0, 6, 2).eq(22).all().item<bool>());
-  EXPECT_TRUE(conv2[32].eq(23).all().item<bool>());
-  EXPECT_TRUE(ssm2.narrow(0, 10, 2).eq(24).all().item<bool>());
+  EXPECT_TRUE(key0[8].eq(11).all().item<bool>());
+  EXPECT_TRUE(value0[8].eq(12).all().item<bool>());
+  EXPECT_TRUE(key3[10].eq(13).all().item<bool>());
+  EXPECT_TRUE(value3[10].eq(14).all().item<bool>());
+  EXPECT_TRUE(conv1[24].eq(21).all().item<bool>());
+  EXPECT_TRUE(ssm1.narrow(0, 8, 2).eq(22).all().item<bool>());
+  EXPECT_TRUE(conv2[40].eq(23).all().item<bool>());
+  EXPECT_TRUE(ssm2.narrow(0, 12, 2).eq(24).all().item<bool>());
 }
 
 TEST(StaticKVCacheTensorAllocatorTest, ReusesTheSameBytesAcrossAttentionTypes) {

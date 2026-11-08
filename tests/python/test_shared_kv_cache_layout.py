@@ -79,11 +79,11 @@ def test_slab_full_mapping_is_per_layer_and_preserves_token_offsets() -> None:
     blocks = torch.tensor([[1, 2, 0, -1]], dtype=torch.int32)
     torch.testing.assert_close(
         layout.full_block_table(blocks, caches[0].full_block_rows),
-        torch.tensor([[30, 32, 0, -1]], dtype=torch.int32),
+        torch.tensor([[30, 32, 6, -1]], dtype=torch.int32),
     )
     torch.testing.assert_close(
         layout.full_block_table(blocks, caches[2].full_block_rows),
-        torch.tensor([[34, 36, 0, -1]], dtype=torch.int32),
+        torch.tensor([[34, 36, 6, -1]], dtype=torch.int32),
     )
     torch.testing.assert_close(
         layout.full_slot_mapping(torch.tensor([2, 3, 4, -1]), caches[0].full_block_rows),
@@ -92,6 +92,82 @@ def test_slab_full_mapping_is_per_layer_and_preserves_token_offsets() -> None:
     # Both operands use the K-row index; V's one-row view offset selects
     # the adjacent allocation without changing FIA's common block table.
     assert caches[0].value[30].data_ptr() == caches[0].key[31].data_ptr()
+
+
+def test_slab_read_padding_stays_finite_after_writable_scratch_is_poisoned() -> None:
+    caches = _make_slab_caches()
+    layout = detect_shared_kv_cache_layout(caches)
+    assert layout is not None
+    full, linear = caches[:2]
+    assert full.key is not None and full.value is not None
+    assert linear.conv is not None and linear.ssm is not None
+    full.key[0].fill_(float("nan"))
+    full.value[0].fill_(float("nan"))
+    linear.conv[0].fill_(float("nan"))
+    linear.ssm[: layout.checkpoint_stride].fill_(float("nan"))
+
+    physical = layout.full_block_table(torch.tensor([0], dtype=torch.int32), full.full_block_rows)
+    assert physical.item() == layout.full_read_padding_row == 6
+    torch.testing.assert_close(full.key[physical], torch.zeros_like(full.key[physical]))
+    torch.testing.assert_close(full.value[physical], torch.zeros_like(full.value[physical]))
+    torch.testing.assert_close(
+        layout.full_slot_mapping(torch.tensor([0, 1, -1]), full.full_block_rows),
+        torch.tensor([0, 1, -1]),
+    )
+
+
+def test_manual_slab_conv_stride_keeps_read_padding_outside_poisoned_scratch() -> None:
+    layout = SharedKVCacheLayout(
+        page_size_tokens=128,
+        full_row_stride=8,
+        conv_row_stride=1,
+        ssm_row_stride=8,
+        checkpoint_stride=2,
+        num_slots=32,
+        slot_bytes=262144,
+        scratch_full_rows=1,
+        scratch_conv_rows=1,
+        scratch_ssm_rows=2,
+        num_slabs=4,
+    )
+    # The optional Conv byte count is omitted, but one Conv row spans an
+    # entire 256 KiB slab. The immutable Full pair must use the next slab.
+    arena = torch.zeros(layout.num_slabs * layout.slot_bytes, dtype=torch.uint8)
+    full_row_bytes = layout.slot_bytes // layout.full_row_stride
+    rows = torch.zeros(layout.num_slots, dtype=torch.int32)
+    rows[1] = 16
+    full = LayerCache(
+        key=arena.view(torch.bfloat16).view(32, 128, 1, 128),
+        value=arena[full_row_bytes:].view(torch.bfloat16).view(31, 128, 1, 128),
+        full_block_rows=rows,
+    )
+    linear = LayerCache(
+        key=None,
+        value=None,
+        conv=arena.view(torch.bfloat16).view(4, 512, 256),
+        ssm=arena.view(torch.float32).view(32, 1, 64, 128),
+    )
+    assert full.key is not None and full.value is not None
+    assert linear.conv is not None and linear.ssm is not None
+    full.value[16].fill_(3.25)
+    protected_live = full.value[16].clone()
+    full.key[0].fill_(float("nan"))
+    full.value[0].fill_(float("nan"))
+    linear.conv[0].fill_(float("nan"))
+    linear.ssm[: layout.checkpoint_stride].fill_(float("nan"))
+    # Ignoring conv_row_stride would select row 2 inside the poisoned Conv.
+    assert torch.isnan(full.value[2]).all()
+    physical = layout.full_block_table(torch.tensor([0, 1, -1], dtype=torch.int32), rows)
+    torch.testing.assert_close(physical, torch.tensor([8, 16, -1], dtype=torch.int32))
+    padding_row = int(physical[0].item())
+    torch.testing.assert_close(full.key[padding_row], torch.zeros_like(full.key[padding_row]))
+    torch.testing.assert_close(full.value[padding_row], torch.zeros_like(full.value[padding_row]))
+
+    write_slots = layout.full_slot_mapping(torch.tensor([0, 127, -1], dtype=torch.int32), rows)
+    torch.testing.assert_close(write_slots, torch.tensor([0, 127, -1], dtype=torch.int32))
+    full.value.view(-1, 1, 128).index_fill_(0, write_slots[:2].to(torch.int64), 5)
+    torch.testing.assert_close(full.value[padding_row], torch.zeros_like(full.value[padding_row]))
+    torch.testing.assert_close(full.value[16], protected_live)
 
 
 def test_slab_linear_mapping_uses_independent_role_and_layer_rows() -> None:

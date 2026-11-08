@@ -609,10 +609,11 @@ void init_shared_counts(const ModelArgs& model_args,
     const size_t objects_per_slab = layout.slab_bytes() / object_bytes;
     return (count + objects_per_slab - 1) / objects_per_slab;
   };
-  // The scratch slab cannot change type. One live hybrid sequence needs
-  // separate typed slabs for its Full pairs, Conv rows and SSM bundles.
+  // Reserved scratch and read-padding slabs cannot change type. One sequence
+  // needs separate typed slabs for its Full pairs, Conv rows and SSM bundles.
   const int64_t minimum_slabs = static_cast<int64_t>(
-      1 + slabs_for(layout.full_layer_count(), layout.full_pair_bytes()) +
+      layout.num_reserved_slabs() +
+      slabs_for(layout.full_layer_count(), layout.full_pair_bytes()) +
       slabs_for(layout.linear_layer_count(), layout.conv_row_bytes()) +
       slabs_for(layout.linear_layer_count(), layout.ssm_bundle_bytes()));
   CHECK_GE(slabs, minimum_slabs)
@@ -622,8 +623,10 @@ void init_shared_counts(const ModelArgs& model_args,
   const int64_t linear_state_bytes = static_cast<int64_t>(
       layout.linear_layer_count() *
       (layout.conv_row_bytes() + layout.ssm_bundle_bytes()));
+  const int64_t allocatable_slabs =
+      slabs - static_cast<int64_t>(layout.num_reserved_slabs());
   const int64_t logical_capacity =
-      std::min<int64_t>(1 + (slabs - 1) * slab_bytes /
+      std::min<int64_t>(1 + allocatable_slabs * slab_bytes /
                                 std::min(full_block_bytes, linear_state_bytes),
                         std::numeric_limits<int32_t>::max());
   CHECK_LE(layout.num_linear_groups(), std::numeric_limits<uint32_t>::max());

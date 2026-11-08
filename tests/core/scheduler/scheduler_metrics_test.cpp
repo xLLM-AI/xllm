@@ -239,13 +239,14 @@ TEST(SchedulerMetricsTest, SharedArenaCountsFullTailsAndKeepsLinearState) {
 TEST(SchedulerMetricsTest, SharedSlabCountsPayloadBytesAndPartialFullTails) {
   StaticKVCacheLayoutSpec spec;
   spec.num_slots = 64;
-  spec.num_slabs = 9;
   spec.full_row_bytes = 16;
   spec.conv_row_bytes = 8;
   spec.ssm_row_bytes = 32;
   spec.checkpoint_stride = 2;
   spec.full_layer_ids = {0, 3};
   spec.linear_layer_ids = {1, 2};
+  const StaticKVCacheLayout layout(spec);
+  spec.num_slabs = layout.num_reserved_slabs() + 8;
   BlockManagerPool::Options options;
   options.num_blocks(64)
       .block_size(2)

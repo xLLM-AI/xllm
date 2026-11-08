@@ -38,12 +38,21 @@ class StaticKVCacheTensorAllocator final : public KVCacheTensorAllocator {
                          torch::ScalarType dtype,
                          const torch::Device& device) override;
 
+  // Epochs correspond to the logical-id entries in rows. Existing leases,
+  // including cached prefixes, retain their contents.
+  bool needs_full_block_initialization(
+      const std::vector<int32_t>& rows,
+      const std::vector<uint64_t>& lease_epochs) const;
+  void initialize_full_blocks(const std::vector<int32_t>& rows,
+                              const std::vector<uint64_t>& lease_epochs);
+
   const StaticKVCacheLayout& layout() const { return layout_; }
   size_t bytes_used() const { return layout_.bytes_used(); }
 
  private:
   StaticKVCacheLayout layout_;
   torch::Tensor arena_;
+  std::vector<uint64_t> initialized_full_block_epochs_;
   std::unordered_set<int64_t> started_layers_;
   int64_t current_layer_id_ = -1;
   uint32_t allocated_roles_ = 0;

@@ -2675,6 +2675,7 @@ inline void deserialize_forward_input_payload(
   read_string_vector(context, input_params.embedding.request_ids);
   read_vector(context, input_params.embedding.linear_state_slot_rows);
   read_vector(context, input_params.embedding.full_block_slot_rows);
+  read_vector(context, input_params.embedding.full_block_lease_epochs);
   read_vector(context, input_params.embedding.extra_token_ids);
   read_tensor(context, input_params.mtp_shifted_token_ids, stream);
   read_tensor(context, input_params.embedding.mtp_shifted_token_ids, stream);
@@ -3012,6 +3013,8 @@ inline void serialize_forward_input_sections(
   write_vector(context.descriptor,
                input_params.embedding.linear_state_slot_rows);
   write_vector(context.descriptor, input_params.embedding.full_block_slot_rows);
+  write_vector(context.descriptor,
+               input_params.embedding.full_block_lease_epochs);
   write_vector(context.descriptor, input_params.embedding.extra_token_ids);
   write_tensor(context, input_params.mtp_shifted_token_ids);
   write_tensor(context, input_params.embedding.mtp_shifted_token_ids);

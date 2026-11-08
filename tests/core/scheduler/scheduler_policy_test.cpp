@@ -2597,17 +2597,18 @@ TEST(SchedulerPolicyTest,
   std::unique_ptr<RequestPriorityQueue> running_queue =
       std::make_unique<DequeQueue>();
   constexpr size_t kGiB = size_t{1} << 30;
-  for (const size_t num_slabs : {8u, 9u}) {
-    SCOPED_TRACE(num_slabs);
+  for (const size_t num_allocatable_slabs : {7u, 8u}) {
+    SCOPED_TRACE(num_allocatable_slabs);
     StaticKVCacheLayoutSpec spec;
     spec.num_slots = 64;
-    spec.num_slabs = num_slabs;
     spec.full_row_bytes = kGiB / 4;
     spec.conv_row_bytes = kGiB / 8;
     spec.ssm_row_bytes = kGiB / 2;
     spec.checkpoint_stride = 2;
     spec.full_layer_ids = {0, 3};
     spec.linear_layer_ids = {1, 2};
+    const StaticKVCacheLayout layout(spec);
+    spec.num_slabs = layout.num_reserved_slabs() + num_allocatable_slabs;
     BlockManagerPool::Options options;
     options.num_blocks(64)
         .block_size(2)
@@ -2622,12 +2623,12 @@ TEST(SchedulerPolicyTest,
     // Only mappings are allocated: the real layout accounts for a 4.25 GiB
     // prompt/state footprint and another 3 GiB of decode growth.
     EXPECT_EQ(pool.sequence_resource_units(4), 4 * kGiB + kGiB / 4);
-    EXPECT_EQ(pool.admission_capacity(0), (num_slabs - 1) * kGiB);
+    EXPECT_EQ(pool.admission_capacity(0), num_allocatable_slabs * kGiB);
     EXPECT_GT(pool.sequence_resource_units(4),
               std::numeric_limits<uint32_t>::max());
     EXPECT_EQ(guard.if_accept_candidate_sequences(
                   {sequence}, running_queue, /*running_sequences=*/{}),
-              num_slabs == 9);
+              num_allocatable_slabs == 8);
   }
 }
 

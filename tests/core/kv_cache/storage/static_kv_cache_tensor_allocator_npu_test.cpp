@@ -16,6 +16,8 @@ limitations under the License.
 #include <acl/acl.h>
 #include <gtest/gtest.h>
 
+#include <limits>
+
 #include "core/kv_cache/storage/kv_cache_utils.h"
 #include "core/kv_cache/storage/static_kv_cache_tensor_allocator.h"
 
@@ -78,6 +80,75 @@ TEST(StaticKVCacheTensorAllocatorNpuTest, KeepsDenseNdViewsInOnePhysicalArena) {
   EXPECT_TRUE(value[8].eq(4).all().item<bool>());
   EXPECT_TRUE(conv[64].eq(5).all().item<bool>());
   EXPECT_TRUE(ssm[10].eq(6).all().item<bool>());
+}
+
+TEST(StaticKVCacheTensorAllocatorNpuTest,
+     InitializesFreshFullPairsWithoutChangingScratchOrPrefixes) {
+  uint32_t device_count = 0;
+  ASSERT_EQ(aclrtGetDeviceCount(&device_count), ACL_SUCCESS);
+  if (device_count == 0) {
+    GTEST_SKIP() << "An NPU is required to verify shared arena initialization.";
+  }
+  const torch::Device device("npu:0");
+  StaticKVCacheLayoutSpec spec;
+  spec.num_slots = 8;
+  spec.num_slabs = 20;
+  spec.full_row_bytes = 16;
+  spec.conv_row_bytes = 8;
+  spec.ssm_row_bytes = 32;
+  spec.checkpoint_stride = 2;
+  spec.dtype = torch::kBFloat16;
+  spec.ssm_dtype = torch::kFloat32;
+  spec.full_layer_ids = {0, 2};
+  spec.linear_layer_ids = {1};
+  const StaticKVCacheLayout layout(spec);
+  StaticKVCacheTensorAllocator allocator(layout, device);
+  allocator.begin_layer(0);
+  const torch::Tensor key = allocator.allocate(
+      KVCacheTensorRole::KEY, {8, 2, 4}, torch::kBFloat16, device);
+  const torch::Tensor value = allocator.allocate(
+      KVCacheTensorRole::VALUE, {8, 2, 4}, torch::kBFloat16, device);
+  allocator.begin_layer(1);
+  const torch::Tensor ssm = allocator.allocate(
+      KVCacheTensorRole::SSM, {16, 2, 4}, torch::kFloat32, device);
+  ssm.narrow(0, 0, 2).fill_(std::numeric_limits<float>::quiet_NaN());
+  key[12].fill_(17);
+  value[12].fill_(19);
+  for (const int64_t row : {8, 10}) {
+    key[row].fill_(std::numeric_limits<float>::quiet_NaN());
+    value[row].fill_(std::numeric_limits<float>::quiet_NaN());
+  }
+  const std::vector<int32_t> rows = {0, 0, 0, 1, 8, 10};
+  EXPECT_TRUE(
+      allocator.needs_full_block_initialization(rows, /*lease_epochs=*/{0, 1}));
+  allocator.initialize_full_blocks(rows, /*lease_epochs=*/{0, 1});
+  for (const int64_t row : {8, 10}) {
+    EXPECT_TRUE(key[row].eq(0).all().item<bool>());
+    EXPECT_TRUE(value[row].eq(0).all().item<bool>());
+    key[row].fill_(7);
+    value[row].fill_(9);
+  }
+  EXPECT_FALSE(
+      allocator.needs_full_block_initialization(rows, /*lease_epochs=*/{0, 1}));
+  allocator.initialize_full_blocks(rows, /*lease_epochs=*/{0, 1});
+  for (const int64_t row : {8, 10}) {
+    EXPECT_TRUE(key[row].eq(7).all().item<bool>());
+    EXPECT_TRUE(value[row].eq(9).all().item<bool>());
+  }
+  EXPECT_TRUE(
+      allocator.needs_full_block_initialization(rows, /*lease_epochs=*/{0, 2}));
+  allocator.initialize_full_blocks(rows, /*lease_epochs=*/{0, 2});
+  for (const int64_t row : {8, 10}) {
+    EXPECT_TRUE(key[row].eq(0).all().item<bool>());
+    EXPECT_TRUE(value[row].eq(0).all().item<bool>());
+  }
+  EXPECT_TRUE(torch::isnan(ssm.narrow(0, 0, 2)).all().item<bool>());
+  EXPECT_TRUE(key[12].eq(17).all().item<bool>());
+  EXPECT_TRUE(value[12].eq(19).all().item<bool>());
+  const int64_t padding_row =
+      static_cast<int64_t>(layout.full_read_padding_row());
+  EXPECT_TRUE(key[padding_row].eq(0).all().item<bool>());
+  EXPECT_TRUE(value[padding_row].eq(0).all().item<bool>());
 }
 
 }  // namespace
