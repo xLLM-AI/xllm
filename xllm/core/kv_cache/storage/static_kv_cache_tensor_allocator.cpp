@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <algorithm>
 #include <limits>
 #include <utility>
 
@@ -84,17 +85,25 @@ void StaticKVCacheTensorAllocator::initialize_full_blocks(
   if (pair_indices.empty()) {
     return;
   }
-  const torch::Tensor indices =
-      torch::from_blob(pair_indices.data(),
-                       {static_cast<int64_t>(pair_indices.size())},
-                       torch::kInt64)
-          .to(arena_.device());
-  // Use the Full dtype: Ascend IndexFill does not accept the UInt8 arena.
-  // Both K/V rows become zero bits, including former FP32 SSM storage.
+  std::sort(pair_indices.begin(), pair_indices.end());
   const torch::ScalarType dtype = layout_.dtype(KVCacheTensorRole::KEY);
-  const int64_t pair_elements = static_cast<int64_t>(layout_.full_pair_bytes() /
-                                                     torch::elementSize(dtype));
-  arena_.view(dtype).view({-1, pair_elements}).index_fill_(0, indices, 0);
+  const int64_t pair_bytes = static_cast<int64_t>(layout_.full_pair_bytes());
+  size_t range_begin = 0;
+  while (range_begin < pair_indices.size()) {
+    size_t range_end = range_begin + 1;
+    while (range_end < pair_indices.size() &&
+           pair_indices[range_end] <= pair_indices[range_end - 1] + 1) {
+      ++range_end;
+    }
+    const int64_t offset_bytes = pair_indices[range_begin] * pair_bytes;
+    const int64_t length_bytes =
+        (pair_indices[range_end - 1] - pair_indices[range_begin] + 1) *
+        pair_bytes;
+    // Narrow before dispatch so initialization touches only newly leased pairs.
+    // Zero bits also clear pairs retyped from FP32 SSM or Conv storage.
+    arena_.narrow(/*dim=*/0, offset_bytes, length_bytes).view(dtype).zero_();
+    range_begin = range_end;
+  }
 }
 
 void StaticKVCacheTensorAllocator::begin_layer(int64_t layer_id) {

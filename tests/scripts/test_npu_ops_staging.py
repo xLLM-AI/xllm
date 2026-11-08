@@ -29,6 +29,7 @@ from setuptools import Distribution
 from setuptools.command.install_lib import install_lib
 
 from scripts.build_support.npu_ops import stage_npu_ops_vendor
+from scripts.build_support.npu_ops_source import xllm_ops_source_identity
 from scripts.build_support.utils import get_python_version
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -305,6 +306,26 @@ class NpuOpsStagingTest(unittest.TestCase):
                     self.assertFalse(self.destination.exists())
                     self.assertEqual(list(self.extdir.glob(".xllm-ops-*")), [])
                     resource.write_text(self.files[name], encoding="utf-8")
+
+    def test_rejects_unpatched_vendor_for_patched_kernel_abi(self) -> None:
+        patches = self.source / "patches" / "xllm_ops"
+        patches.mkdir(parents=True)
+        (patches / "0001-kernel.patch").write_text(
+            "diff --git a/kernel.cpp b/kernel.cpp\n"
+            "new file mode 100644\n"
+            "--- /dev/null\n"
+            "+++ b/kernel.cpp\n"
+            "@@ -0,0 +1 @@\n"
+            "+patched kernel ABI\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(RuntimeError, "NPU operator revision mismatch"):
+            self._stage()
+        self.assertFalse(self.destination.exists())
+        identity = xllm_ops_source_identity(self.source)
+        (self.vendor / ".xllm_ops_git_head").write_text(identity + "\n", encoding="utf-8")
+        self._stage()
+        self.assertEqual((self.destination / ".xllm_ops_git_head").read_text().strip(), identity)
 
     def test_rejects_different_operator_revision(self) -> None:
         (self.vendor / ".xllm_ops_git_head").write_text("different revision\n", encoding="utf-8")

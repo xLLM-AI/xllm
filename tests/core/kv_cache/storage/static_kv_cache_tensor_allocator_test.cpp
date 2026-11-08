@@ -257,6 +257,82 @@ TEST(StaticKVCacheTensorAllocatorTest,
 }
 
 TEST(StaticKVCacheTensorAllocatorTest,
+     ClearsDisjointReusedPairsWithoutChangingLiveNeighborRoles) {
+  auto spec = make_spec(/*num_slots=*/12, /*checkpoint_stride=*/2);
+  spec.dtype = torch::kBFloat16;
+  StaticKVCacheTensorAllocator allocator(StaticKVCacheLayout(spec),
+                                         torch::kCPU);
+  allocator.begin_layer(0);
+  const torch::Tensor key = allocator.allocate(
+      KVCacheTensorRole::KEY, {12, 2, 4}, torch::kBFloat16, torch::kCPU);
+  const torch::Tensor value = allocator.allocate(
+      KVCacheTensorRole::VALUE, {12, 2, 4}, torch::kBFloat16, torch::kCPU);
+  allocator.begin_layer(1);
+  const torch::Tensor conv = allocator.allocate(
+      KVCacheTensorRole::CONV, {12, 4}, torch::kBFloat16, torch::kCPU);
+  const torch::Tensor ssm = allocator.allocate(
+      KVCacheTensorRole::SSM, {24, 2, 4}, torch::kFloat32, torch::kCPU);
+
+  allocator.initialize_full_blocks(/*rows=*/{3, 22, 24}, /*lease_epochs=*/{1});
+  for (const int64_t row : {22, 24}) {
+    key[row].fill_(13);
+    value[row].fill_(17);
+  }
+  // Former recurrent objects cover two adjacent pairs in each range. Live
+  // SSM and Conv objects occupy the gap; an existing Full lease follows it.
+  ssm.narrow(/*dim=*/0, /*start=*/4, /*length=*/2)
+      .fill_(std::numeric_limits<float>::quiet_NaN());
+  conv.narrow(/*dim=*/0, /*start=*/36, /*length=*/8)
+      .fill_(std::numeric_limits<float>::quiet_NaN());
+  ssm.narrow(/*dim=*/0, /*start=*/6, /*length=*/2).fill_(29);
+  conv[32].fill_(31);
+  const std::vector<int32_t> rows = {0, 0, 0, 1, 20, 8, 3, 22, 24, 2, 18, 10};
+  const std::vector<uint64_t> epochs = {0, 1, 1, 1};
+  EXPECT_TRUE(allocator.needs_full_block_initialization(rows, epochs));
+  allocator.initialize_full_blocks(rows, epochs);
+  EXPECT_FALSE(allocator.needs_full_block_initialization(rows, epochs));
+  EXPECT_TRUE(ssm.narrow(/*dim=*/0, /*start=*/4, /*length=*/2)
+                  .eq(0)
+                  .all()
+                  .item<bool>());
+  EXPECT_TRUE(conv.narrow(/*dim=*/0, /*start=*/36, /*length=*/8)
+                  .eq(0)
+                  .all()
+                  .item<bool>());
+  for (const int64_t row : {8, 10, 18, 20}) {
+    EXPECT_TRUE(key[row].eq(0).all().item<bool>());
+    EXPECT_TRUE(value[row].eq(0).all().item<bool>());
+    key[row].fill_(7);
+    value[row].fill_(9);
+  }
+  allocator.initialize_full_blocks(rows, epochs);
+  for (const int64_t row : {8, 10, 18, 20}) {
+    EXPECT_TRUE(key[row].eq(7).all().item<bool>());
+    EXPECT_TRUE(value[row].eq(9).all().item<bool>());
+  }
+
+  // Renew only one logical block; the neighboring new block remains live.
+  allocator.initialize_full_blocks(/*rows=*/{1, 8, 20}, /*lease_epochs=*/{2});
+  for (const int64_t row : {8, 20}) {
+    EXPECT_TRUE(key[row].eq(0).all().item<bool>());
+    EXPECT_TRUE(value[row].eq(0).all().item<bool>());
+  }
+  for (const int64_t row : {10, 18}) {
+    EXPECT_TRUE(key[row].eq(7).all().item<bool>());
+    EXPECT_TRUE(value[row].eq(9).all().item<bool>());
+  }
+  for (const int64_t row : {22, 24}) {
+    EXPECT_TRUE(key[row].eq(13).all().item<bool>());
+    EXPECT_TRUE(value[row].eq(17).all().item<bool>());
+  }
+  EXPECT_TRUE(ssm.narrow(/*dim=*/0, /*start=*/6, /*length=*/2)
+                  .eq(29)
+                  .all()
+                  .item<bool>());
+  EXPECT_TRUE(conv[32].eq(31).all().item<bool>());
+}
+
+TEST(StaticKVCacheTensorAllocatorTest,
      KeepsSimultaneousResourceExtentsAndScratchIsolated) {
   StaticKVCacheTensorAllocator allocator(
       StaticKVCacheLayout(make_spec(/*num_slots=*/12, /*checkpoint_stride=*/2)),

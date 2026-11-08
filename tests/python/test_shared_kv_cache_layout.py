@@ -20,6 +20,7 @@ import pytest
 import torch
 
 from xllm.python.attention.backend import (
+    CacheRowTable,
     LayerCache,
     SharedKVCacheLayout,
     detect_shared_kv_cache_layout,
@@ -197,6 +198,42 @@ def test_slab_map_reuse_keeps_logical_ids_and_storage_addresses() -> None:
     rows[1] = 72
     torch.testing.assert_close(layout.full_block_table(torch.tensor([1]), rows), torch.tensor([72]))
     assert rows.data_ptr() == address
+
+
+def test_batched_native_cache_rows_keep_live_storage_including_layer_subsets() -> None:
+    native_rows = torch.arange(6 * 8, dtype=torch.int32).view(6, 8)
+    table = CacheRowTable([native_rows[index] for index in (1, 3, 5)])
+    batched = table.rows()
+    assert batched.data_ptr() == native_rows[1].data_ptr()
+    torch.testing.assert_close(batched, native_rows[1::2])
+    native_rows[3, 2] = 1024
+    assert batched[1, 2].item() == 1024
+    assert table.rows().data_ptr() == batched.data_ptr()
+
+
+def test_batched_independent_cache_rows_refresh_updated_mappings() -> None:
+    rows = [torch.tensor([0, 16, 18], dtype=torch.int32), torch.tensor([0, 48, 50], dtype=torch.int32)]
+    table = CacheRowTable(rows)
+    torch.testing.assert_close(table.rows(), torch.tensor([[0, 16, 18], [0, 48, 50]], dtype=torch.int32))
+    rows[0][1] = 72
+    torch.testing.assert_close(table.rows(), torch.tensor([[0, 72, 18], [0, 48, 50]], dtype=torch.int32))
+
+
+def test_batched_full_translation_preserves_read_padding_and_writable_scratch() -> None:
+    caches = _make_slab_caches()
+    layout = detect_shared_kv_cache_layout(caches)
+    assert layout is not None
+    rows = CacheRowTable([caches[0].full_block_rows, caches[2].full_block_rows]).rows()
+    blocks = torch.tensor([[1, 2, 0, -1]], dtype=torch.int32)
+    tables = torch.empty(2, 1, 4, dtype=torch.int32)
+    pointer = tables.data_ptr()
+    assert layout.full_block_table(blocks, rows, out=tables) is tables
+    assert tables.data_ptr() == pointer
+    torch.testing.assert_close(tables, torch.tensor([[[30, 32, 6, -1]], [[34, 36, 6, -1]]], dtype=torch.int32))
+    slots = torch.tensor([2, 3, 4, 0, -1], dtype=torch.int64)
+    mappings = torch.empty(2, 5, dtype=torch.int64)
+    assert layout.full_slot_mapping(slots, rows, out=mappings) is mappings
+    torch.testing.assert_close(mappings, torch.tensor([[60, 61, 64, 0, -1], [68, 69, 72, 0, -1]]))
 
 
 @pytest.mark.parametrize(

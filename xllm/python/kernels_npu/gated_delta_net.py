@@ -77,7 +77,11 @@ def mega_gdn_decode(
     norm_weight: torch.Tensor,
     fla_ssm_state_layout: bool = True,
 ) -> torch.Tensor:
-    """Run fused single-token Qwen3.5 decode and update both state caches."""
+    """Run fused single-token Qwen3.5 decode and update both state caches.
+
+    State indices are either legacy common slots ``[batch]`` or independent
+    ``[batch, 2]`` Conv slots and SSM rows. A negative pair disables a row.
+    """
     return torch.ops.xllm_ops.mega_gdn_decode(
         qkv,
         z,
@@ -111,7 +115,11 @@ def mega_gdn_mtp_decode(
     norm_weight: torch.Tensor,
     fla_ssm_state_layout: bool = True,
 ) -> torch.Tensor:
-    """Restore the accepted checkpoint and record each new verify-token state."""
+    """Restore the accepted checkpoint and record each verify-token state.
+
+    Paired ``[batch, 2]`` indices name the Conv slot and the first SSM
+    checkpoint row independently; legacy ``[batch]`` slots retain their stride.
+    """
     return torch.ops.xllm_ops.mega_gdn_mtp_decode(
         qkv,
         z,
@@ -147,7 +155,7 @@ def mega_gdn_mtp_decode_varlen(
     out: torch.Tensor,
     fla_ssm_state_layout: bool = True,
 ) -> None:
-    """Verify packed prefixes in place in each request's unique state slot."""
+    """Verify packed prefixes using common slots or independent role rows."""
     torch.ops.xllm_ops.mega_gdn_mtp_decode_varlen(
         qkv,
         z,

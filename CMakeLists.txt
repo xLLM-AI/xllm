@@ -48,12 +48,26 @@ if(USE_NPU)
   # CANN 8.5+ migration: ascend_direct_transport replaces ascend_transport
   set(USE_ASCEND_DIRECT ON CACHE BOOL "Enable ADXL engine for Ascend NPU" FORCE)
 
+  if(Python_EXECUTABLE)
+    set(XLLM_OPS_PYTHON "${Python_EXECUTABLE}")
+  else()
+    find_program(XLLM_OPS_PYTHON NAMES python3 python REQUIRED)
+  endif()
+  set(XLLM_OPS_SOURCE_HELPER "${CMAKE_SOURCE_DIR}/scripts/build_support/npu_ops_source.py")
+  file(GLOB XLLM_OPS_PATCHES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/patches/xllm_ops/*.patch")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${XLLM_OPS_SOURCE_HELPER}" ${XLLM_OPS_PATCHES})
   execute_process(
-    COMMAND git -c "safe.directory=${CMAKE_SOURCE_DIR}/third_party/xllm_ops" -C "${CMAKE_SOURCE_DIR}/third_party/xllm_ops" rev-parse HEAD
-    OUTPUT_VARIABLE XLLM_OPS_GIT_HEAD
+    COMMAND "${XLLM_OPS_PYTHON}" "${XLLM_OPS_SOURCE_HELPER}" identity
+            --base-dir "${CMAKE_SOURCE_DIR}"
+    OUTPUT_VARIABLE XLLM_OPS_SOURCE_IDENTITY
     OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
+    RESULT_VARIABLE XLLM_OPS_IDENTITY_RESULT
+    ERROR_VARIABLE XLLM_OPS_IDENTITY_ERROR
   )
+  if(NOT XLLM_OPS_IDENTITY_RESULT EQUAL 0)
+    message(FATAL_ERROR "Cannot identify xllm_ops sources: ${XLLM_OPS_IDENTITY_ERROR}")
+  endif()
 
   if(DEFINED ENV{ASCEND_OPP_PATH} AND NOT "$ENV{ASCEND_OPP_PATH}" STREQUAL "")
     set(XLLM_OPS_MARKER_PATH "$ENV{ASCEND_OPP_PATH}/vendors/xllm/.xllm_ops_git_head")
@@ -68,28 +82,43 @@ if(USE_NPU)
   if(DEFINED ENV{XLLM_OPS_BUILD_DIR})
     get_filename_component(XLLM_OPS_BUILD_DIR "$ENV{XLLM_OPS_BUILD_DIR}" ABSOLUTE)
   else()
-    set(XLLM_OPS_BUILD_DIR "${CMAKE_SOURCE_DIR}/third_party/xllm_ops/build")
+    if(XLLM_OPS_PATCHES)
+      set(XLLM_OPS_BUILD_DIR "${CMAKE_BINARY_DIR}/xllm_ops_build")
+    else()
+      set(XLLM_OPS_BUILD_DIR "${CMAKE_SOURCE_DIR}/third_party/xllm_ops/build")
+    endif()
   endif()
 
-  if(NOT DEFINED XLLM_OPS_GIT_HEAD_CACHED OR NOT XLLM_OPS_GIT_HEAD STREQUAL XLLM_OPS_GIT_HEAD_CACHED)
-    message(STATUS "xllm_ops git HEAD changed; running precompile via execute_process")
+  if(NOT DEFINED XLLM_OPS_GIT_HEAD_CACHED OR NOT XLLM_OPS_SOURCE_IDENTITY STREQUAL XLLM_OPS_GIT_HEAD_CACHED)
+    message(STATUS "xllm_ops source identity changed; preparing sources and running precompile")
+    execute_process(
+      COMMAND "${XLLM_OPS_PYTHON}" "${XLLM_OPS_SOURCE_HELPER}" prepare
+              --base-dir "${CMAKE_SOURCE_DIR}"
+              --destination "${CMAKE_BINARY_DIR}/xllm_ops_source"
+      OUTPUT_VARIABLE XLLM_OPS_SOURCE_DIR
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      RESULT_VARIABLE XLLM_OPS_PREPARE_RESULT
+    )
+    if(NOT XLLM_OPS_PREPARE_RESULT EQUAL 0)
+      message(FATAL_ERROR "Failed to prepare patched xllm_ops sources.")
+    endif()
     execute_process(
       COMMAND ${CMAKE_COMMAND} -E env "XLLM_OPS_BUILD_DIR=${XLLM_OPS_BUILD_DIR}"
-              bash ${CMAKE_SOURCE_DIR}/third_party/xllm_ops/build.sh
-      WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/third_party/xllm_ops
+              bash "${XLLM_OPS_SOURCE_DIR}/build.sh"
+      WORKING_DIRECTORY "${XLLM_OPS_SOURCE_DIR}"
       RESULT_VARIABLE XLLM_OPS_RESULT
     )
     if(NOT XLLM_OPS_RESULT EQUAL 0)
       message(FATAL_ERROR
         "Failed to precompile xllm ops, error code: ${XLLM_OPS_RESULT}.\n"
-        "This precompile ran because the xllm_ops git HEAD changed "
-        "(e.g. after switching commits/branches or updating the submodule).\n"
+        "This precompile ran because the xllm_ops source identity changed "
+        "(after a submodule revision or tracked operator patch changed).\n"
         "A common cause of failure here is a stale incremental build cache: "
         "removed or renamed operators leave dangling CMake targets and opc "
         "reports 'xxx.json not generated'.\n"
         "Fix by removing the stale xllm_ops build directory and re-running the "
         "build. CMake re-triggers the xllm_ops precompile automatically (the "
-        "HEAD cache is only updated after a successful precompile), and the "
+        "source cache is only updated after a successful precompile), and the "
         "main C++ incremental build is unaffected:\n"
         "  rm -rf ${XLLM_OPS_BUILD_DIR}")
     endif()
@@ -102,13 +131,13 @@ if(USE_NPU)
     endif()
     message(STATUS "XLLM_OPS_MARKER_PATH: ${XLLM_OPS_MARKER_PATH}")
 
-    set(XLLM_OPS_GIT_HEAD_CACHED "${XLLM_OPS_GIT_HEAD}" CACHE INTERNAL "" FORCE)
+    set(XLLM_OPS_GIT_HEAD_CACHED "${XLLM_OPS_SOURCE_IDENTITY}" CACHE INTERNAL "" FORCE)
     get_filename_component(XLLM_OPS_MARKER_DIR "${XLLM_OPS_MARKER_PATH}" DIRECTORY)
     file(MAKE_DIRECTORY "${XLLM_OPS_MARKER_DIR}")
-    file(WRITE "${XLLM_OPS_MARKER_PATH}" "${XLLM_OPS_GIT_HEAD}\n")
-    message(STATUS "xllm ops precompiled and HEAD cache updated")
+    file(WRITE "${XLLM_OPS_MARKER_PATH}" "${XLLM_OPS_SOURCE_IDENTITY}\n")
+    message(STATUS "xllm ops precompiled and source identity cache updated")
   else()
-    message(STATUS "xllm_ops git HEAD unchanged; skipping precompile")
+    message(STATUS "xllm_ops source identity unchanged; skipping precompile")
   endif()
 endif()
 

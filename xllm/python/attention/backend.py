@@ -94,6 +94,42 @@ class LayerCache:
         return self.indexer_scale
 
 
+class CacheRowTable:
+    """Batch stable per-layer cache row maps without copying native tables."""
+
+    def __init__(self, rows: Sequence[torch.Tensor]) -> None:
+        self._source_rows = tuple(rows)
+        if not self._source_rows:
+            raise ValueError("cache row table requires at least one row map")
+        first = self._source_rows[0]
+        if first.ndim != 1 or any(
+            row.shape != first.shape or row.dtype != first.dtype or row.device != first.device
+            for row in self._source_rows
+        ):
+            raise ValueError("cache row maps must have matching one-dimensional shapes, dtypes, and devices")
+        self._view: torch.Tensor | None = None
+        if len(self._source_rows) == 1:
+            self._view = first.unsqueeze(0)
+            return
+        row_stride = self._source_rows[1].storage_offset() - first.storage_offset()
+        storage = first.untyped_storage().data_ptr()
+        if row_stride > 0 and all(
+            row.is_contiguous()
+            and row.untyped_storage().data_ptr() == storage
+            and row.storage_offset() == first.storage_offset() + index * row_stride
+            for index, row in enumerate(self._source_rows)
+        ):
+            # Native Full and Linear row maps are views of one persistent
+            # [layer/role, logical capacity] table, updated in place by workers.
+            self._view = first.as_strided((len(self._source_rows), first.numel()), (row_stride, 1))
+
+    def rows(self) -> torch.Tensor:
+        """Read current mappings, including independently supplied row maps."""
+        if self._view is not None:
+            return self._view
+        return torch.stack(self._source_rows)
+
+
 @dataclass(frozen=True, slots=True)
 class SharedKVCacheLayout:
     """Physical row geometry for a shared Full/Linear cache arena.
@@ -178,44 +214,61 @@ class SharedKVCacheLayout:
         )
         return 2 * ((scratch_bytes + full_pair_bytes - 1) // full_pair_bytes)
 
-    def full_block_table(self, block_table: torch.Tensor, rows: torch.Tensor | None = None) -> torch.Tensor:
+    def full_block_table(
+        self,
+        block_table: torch.Tensor,
+        rows: torch.Tensor | None = None,
+        *,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Translate logical Full page ids while preserving negative sentinels."""
         if rows is not None:
-            physical = rows.index_select(0, block_table.clamp_min(0).reshape(-1).to(torch.int64)).reshape_as(
-                block_table
+            physical = rows.index_select(rows.ndim - 1, block_table.clamp_min(0).reshape(-1).to(torch.int64)).reshape(
+                (*rows.shape[:-1], *block_table.shape)
             )
             if self.num_slabs:
                 physical = torch.where(block_table == 0, self.full_read_padding_row, physical)
-            return torch.where(block_table >= 0, physical.to(block_table.dtype), block_table)
+            return torch.where(block_table >= 0, physical.to(block_table.dtype), block_table, out=out)
         if self.num_slabs:
             raise ValueError("shared slab Full cache requires the reading layer's block rows")
         if block_table.numel() == 0 or self.full_row_stride == 1:
+            if out is not None:
+                return out.copy_(block_table)
             return block_table
         return torch.where(
             block_table >= 0,
             block_table * self.full_row_stride,
             block_table,
+            out=out,
         )
 
-    def full_slot_mapping(self, slot_mapping: torch.Tensor, rows: torch.Tensor | None = None) -> torch.Tensor:
+    def full_slot_mapping(
+        self,
+        slot_mapping: torch.Tensor,
+        rows: torch.Tensor | None = None,
+        *,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Translate logical token slots and retain their in-page offsets."""
         if rows is not None:
             logical_rows = torch.div(slot_mapping, self.page_size_tokens, rounding_mode="floor")
             # Logical zero remains writable warmup scratch. Only read tables
             # redirect zero to the immutable finite padding pair.
-            physical_rows = rows.index_select(0, logical_rows.clamp_min(0).reshape(-1).to(torch.int64)).reshape_as(
-                slot_mapping
-            )
+            physical_rows = rows.index_select(
+                rows.ndim - 1, logical_rows.clamp_min(0).reshape(-1).to(torch.int64)
+            ).reshape((*rows.shape[:-1], *slot_mapping.shape))
             translated = physical_rows * self.page_size_tokens + torch.remainder(slot_mapping, self.page_size_tokens)
-            return torch.where(slot_mapping >= 0, translated, slot_mapping)
+            return torch.where(slot_mapping >= 0, translated, slot_mapping, out=out)
         if self.num_slabs:
             raise ValueError("shared slab Full cache requires the writing layer's block rows")
         if slot_mapping.numel() == 0 or self.full_row_stride == 1:
+            if out is not None:
+                return out.copy_(slot_mapping)
             return slot_mapping
         rows = torch.div(slot_mapping, self.page_size_tokens, rounding_mode="floor")
         offsets = torch.remainder(slot_mapping, self.page_size_tokens)
         translated = rows * self.full_row_stride * self.page_size_tokens + offsets
-        return torch.where(slot_mapping >= 0, translated, slot_mapping)
+        return torch.where(slot_mapping >= 0, translated, slot_mapping, out=out)
 
     def linear_state_indices(
         self,

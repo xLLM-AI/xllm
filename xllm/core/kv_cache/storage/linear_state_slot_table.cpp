@@ -30,6 +30,7 @@ LinearStateSlotTable::LinearStateSlotTable(size_t num_slots,
   CHECK_LE(num_slots_,
            static_cast<size_t>(std::numeric_limits<int32_t>::max()));
   host_slots_.assign(num_groups_ * num_slots_, 0);
+  last_update_rows_.resize(num_slots_);
   device_slots_ = torch::from_blob(host_slots_.data(),
                                    {static_cast<int64_t>(num_groups_),
                                     static_cast<int64_t>(num_slots_)},
@@ -48,32 +49,65 @@ void LinearStateSlotTable::update(const std::vector<int32_t>& rows) {
   CHECK_EQ(rows.size() % row_width, 0u)
       << "Linear state slot rows must be [state id, group slots...]";
   const size_t num_rows = rows.size() / row_width;
-  std::vector<int64_t> state_ids;
-  state_ids.reserve(num_rows);
-  std::vector<int32_t> group_slots(num_groups_ * num_rows);
   for (size_t row = 0; row < num_rows; ++row) {
     const int32_t* entry = rows.data() + row * row_width;
     const int32_t state_id = entry[0];
     CHECK_GE(state_id, 0);
     CHECK_LT(static_cast<size_t>(state_id), num_slots_);
-    state_ids.emplace_back(state_id);
     for (size_t group = 0; group < num_groups_; ++group) {
-      const int32_t slot = entry[group + 1];
-      CHECK_GE(slot, 0);
-      host_slots_[group * num_slots_ + static_cast<size_t>(state_id)] = slot;
-      group_slots[group * num_rows + row] = slot;
+      CHECK_GE(entry[group + 1], 0);
+    }
+    last_update_rows_[state_id] = row;
+  }
+
+  std::vector<int64_t> state_ids;
+  for (size_t row = 0; row < num_rows; ++row) {
+    const int32_t* entry = rows.data() + row * row_width;
+    const int32_t state_id = entry[0];
+    if (last_update_rows_[state_id] != row) {
+      continue;
+    }
+    bool changed = false;
+    for (size_t group = 0; group < num_groups_; ++group) {
+      int32_t& slot = host_slots_[group * num_slots_ + state_id];
+      if (slot == entry[group + 1]) {
+        continue;
+      }
+      slot = entry[group + 1];
+      changed = true;
+    }
+    if (!changed) {
+      continue;
+    }
+    if (state_ids.empty()) {
+      state_ids.reserve(num_rows);
+    }
+    state_ids.emplace_back(state_id);
+  }
+  if (state_ids.empty()) {
+    return;
+  }
+
+  const size_t num_changed_rows = state_ids.size();
+  std::vector<int32_t> group_slots(num_groups_ * num_changed_rows);
+  for (size_t row = 0; row < num_changed_rows; ++row) {
+    const size_t state_id = static_cast<size_t>(state_ids[row]);
+    for (size_t group = 0; group < num_groups_; ++group) {
+      group_slots[group * num_changed_rows + row] =
+          host_slots_[group * num_slots_ + state_id];
     }
   }
   const torch::Device device = device_slots_.device();
   const torch::Tensor index =
-      torch::from_blob(
-          state_ids.data(), {static_cast<int64_t>(num_rows)}, torch::kInt64)
+      torch::from_blob(state_ids.data(),
+                       {static_cast<int64_t>(num_changed_rows)},
+                       torch::kInt64)
           .to(device);
   const torch::Tensor source =
-      torch::from_blob(
-          group_slots.data(),
-          {static_cast<int64_t>(num_groups_), static_cast<int64_t>(num_rows)},
-          torch::kInt32)
+      torch::from_blob(group_slots.data(),
+                       {static_cast<int64_t>(num_groups_),
+                        static_cast<int64_t>(num_changed_rows)},
+                       torch::kInt32)
           .to(device);
   device_slots_.index_copy_(1, index, source);
 }

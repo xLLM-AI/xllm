@@ -1264,6 +1264,123 @@ def test_slab_full_layers_refresh_independent_graph_block_tables() -> None:
         assert pointers[0] != pointers[1]
 
 
+def test_batched_slab_tables_and_write_slots_preserve_graph_entry_ownership() -> None:
+    from xllm.python.model_executor.forward_context import AclGraphExecutionState
+
+    backend = _ordinary_backend()
+    backend._shared_kv_layout = SharedKVCacheLayout(128, 8, 4, 8, 2, 32, 262144, num_slabs=4)
+    rows = torch.zeros(2, 32, dtype=torch.int32)
+    rows[:, 1:3] = torch.tensor([[16, 18], [48, 50]])
+    backend._kv_caches = [
+        LayerCache(torch.empty(1, 128, 1, 2), torch.empty(1, 128, 1, 2), full_block_rows=row) for row in rows.unbind(0)
+    ]
+    metadata = [_mla_metadata(), _mla_metadata()]
+    contexts = [
+        ForwardContext(
+            backend, torch.device("cpu"), view, backend._kv_caches, execution_state=AclGraphExecutionState({})
+        )
+        for view in metadata
+    ]
+    tables = []
+    mappings = []
+    for view, context in zip(metadata, contexts):
+        view.slot_mapping = torch.tensor([129, -1], dtype=torch.int32)
+        with forward_context(context):
+            backend._metadata = view
+            backend._block_table_i32 = torch.tensor([[1, 2, 0, -1]], dtype=torch.int32)
+            backend._prepare_shared_full_tables()
+            backend._active_full_layer = 0
+            tables.append(backend._shared_full_block_tables[0])
+            mappings.append(backend._full_slot_mapping(view))
+    pointers = tables[0].data_ptr(), mappings[0].data_ptr()
+    assert tables[0].data_ptr() != tables[1].data_ptr()
+    assert mappings[0].data_ptr() != mappings[1].data_ptr()
+    assert mappings[1].tolist() == [2049, -1]
+
+    rows[0, 1] = 72
+    metadata[0].slot_mapping.copy_(torch.tensor([130, -1], dtype=torch.int32))
+    with forward_context(contexts[0]):
+        backend._metadata = metadata[0]
+        backend._block_table_i32 = torch.tensor([[1, 2, 0, -1]], dtype=torch.int32)
+        backend._prepare_shared_full_tables()
+        backend._active_full_layer = 0
+        refreshed = backend._full_slot_mapping(metadata[0])
+    assert pointers == (tables[0].data_ptr(), refreshed.data_ptr())
+    assert tables[0].tolist() == [[72, 18, backend._shared_kv_layout.full_read_padding_row, -1]]
+    assert refreshed.tolist() == [9218, -1]
+    assert tables[1].tolist() == [[16, 18, backend._shared_kv_layout.full_read_padding_row, -1]]
+    assert mappings[1].tolist() == [2049, -1]
+
+
+@pytest.mark.parametrize("mode", ["ordinary", "prepared", "device-length"])
+def test_slab_graph_replay_preserves_full_table_update_owner(mode: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    from xllm.python.model_executor.forward_context import AclGraphExecutionState
+
+    backend = _ordinary_backend()
+
+    def _workspace(*args: object, **kwargs: object) -> torch.Tensor:
+        return torch.empty(0)
+
+    monkeypatch.setattr(backend, "_allocate_graph_workspace", _workspace)
+    backend._shared_kv_layout = SharedKVCacheLayout(128, 8, 4, 8, 2, 32, 262144, num_slabs=4)
+    rows = torch.zeros(2, 32, dtype=torch.int32)
+    rows[:, 1:3] = torch.tensor([[16, 18], [48, 50]])
+    backend._kv_caches = [
+        LayerCache(torch.empty(1, 128, 1, 2), torch.empty(1, 128, 1, 2), full_block_rows=row) for row in rows.unbind(0)
+    ]
+    metadata = _ordinary_metadata(paged=True)
+    metadata.block_table = torch.tensor([[1, 0, -1], [2, 0, -1]], dtype=torch.int32)
+    metadata.slot_mapping = torch.tensor([129, -1], dtype=torch.int32)
+    if mode != "ordinary":
+        metadata.prepared_attention_state = backend.prepare_metadata(
+            metadata, device_kv_lengths=mode == "device-length"
+        )
+    context = ForwardContext(
+        backend, torch.device("cpu"), metadata, backend._kv_caches, execution_state=AclGraphExecutionState({})
+    )
+    with forward_context(context):
+        backend.prepare(metadata, graph_mode=True)
+        tables = tuple(backend._shared_full_block_tables.values())
+        mappings = tuple(backend._shared_full_slot_mappings.values())
+        pointers = tuple(tensor.data_ptr() for tensor in (*tables, *mappings))
+        rows[0, 2] = 72
+        metadata.block_table[0, 0] = 2
+        metadata.slot_mapping[0] = 258
+        backend.prepare_graph_replay(metadata)
+        assert pointers == tuple(
+            tensor.data_ptr()
+            for tensor in (*backend._shared_full_block_tables.values(), *backend._shared_full_slot_mappings.values())
+        )
+        padding = backend._shared_kv_layout.full_read_padding_row
+        if mode == "device-length":
+            # Host replay binds the captured entry's outputs. The captured
+            # prepare owns reading the new logical IDs and native row maps.
+            assert tables[0].tolist() == [[16, padding, -1], [18, padding, -1]]
+            assert mappings[0].tolist() == [2049, -1]
+        else:
+            assert tables[0].tolist() == [[72, padding, -1], [72, padding, -1]]
+            assert mappings[0].tolist() == [9218, -1]
+
+
+def test_prepared_slab_replay_requires_captured_entry_buffers() -> None:
+    from xllm.python.model_executor.forward_context import AclGraphExecutionState
+
+    backend = _ordinary_backend()
+    backend._shared_kv_layout = SharedKVCacheLayout(128, 8, 4, 8, 2, 32, 262144, num_slabs=4)
+    backend._kv_caches = [
+        LayerCache(
+            torch.empty(1, 128, 1, 2), torch.empty(1, 128, 1, 2), full_block_rows=torch.zeros(32, dtype=torch.int32)
+        )
+    ]
+    metadata = _ordinary_metadata(paged=True)
+    metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=True)
+    context = ForwardContext(
+        backend, torch.device("cpu"), metadata, backend._kv_caches, execution_state=AclGraphExecutionState({})
+    )
+    with forward_context(context), pytest.raises(RuntimeError, match="owned by a captured graph entry"):
+        backend.prepare_graph_replay(metadata)
+
+
 def _sparse_attention_out_args(
     query: torch.Tensor, output: torch.Tensor, layout: str, *, rope: bool = False
 ) -> tuple[object, ...]:
