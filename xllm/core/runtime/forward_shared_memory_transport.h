@@ -13,13 +13,17 @@ limitations under the License.
 
 #pragma once
 
-#include <stddef.h>
-
 #include <atomic>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <string>
+#include <thread>
+#include <vector>
 
-#include "runtime/forward_params.h"
-#include "util/shared_memory_manager.h"
+#include "core/runtime/forward_params.h"
+#include "core/util/shared_memory_manager.h"
 #include "worker.pb.h"
 
 namespace xllm {
@@ -50,13 +54,18 @@ enum class InputDeviceMaterializationPolicy : int8_t {
   DEFER_TO_WORKER_PREPARE,
 };
 
-class ForwardSharedMemoryManager : public SharedMemoryManager {
+// Owns a shared segment and transports forward messages in its wire format.
+class ForwardSharedMemoryTransport final {
  public:
-  explicit ForwardSharedMemoryManager(const std::string& name,
-                                      size_t size,
-                                      bool& is_creator,
-                                      ForwardType type);
-  ~ForwardSharedMemoryManager();
+  explicit ForwardSharedMemoryTransport(const std::string& name,
+                                        size_t size,
+                                        bool& is_creator,
+                                        ForwardType type);
+  ~ForwardSharedMemoryTransport();
+
+  void* base_address() const { return segment_.base_address(); }
+  int64_t size() const { return segment_.size(); }
+  std::string name() const { return segment_.name(); }
   static std::string create_unique_name(const std::string& prefix,
                                         int dp_group,
                                         ForwardType forward_type,
@@ -159,13 +168,22 @@ class ForwardSharedMemoryManager : public SharedMemoryManager {
   bool rec_output_read(RawForwardOutput& output);
   bool dit_output_read(RawForwardOutput& output);
 
-  // Permanently cancel input reads on this local manager without publishing
+  // Permanently cancel input reads on this transport without publishing
   // a synthetic request or changing the shared segment for other readers.
   void stop_input_read();
 
   void clear();
 
  private:
+  template <bool IncludeDsparkFeedback>
+  bool write_token_output(
+      const ForwardOutput& output,
+      const std::vector<SpeculativeTokenStats>& speculative_token_stats,
+      const char* domain);
+
+  template <bool IncludeDsparkFeedback>
+  bool read_token_output(RawForwardOutput& output, const char* domain);
+
   template <typename Input>
   bool write_token_input(const Input& input);
 
@@ -176,6 +194,7 @@ class ForwardSharedMemoryManager : public SharedMemoryManager {
                         const torch::Device& device,
                         InputDeviceMaterializationPolicy policy);
 
+  SharedMemoryManager segment_;
   std::atomic<bool> input_read_stopped_{false};
   ForwardType forward_type_;
   uint64_t last_version_ = 0;

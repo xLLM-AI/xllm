@@ -30,7 +30,7 @@ limitations under the License.
 #include "framework/state_dict/state_dict.h"
 #include "runtime/executor.h"
 #include "runtime/forward_params.h"
-#include "runtime/forward_shared_memory_manager.h"
+#include "runtime/forward_shared_memory_transport.h"
 #include "runtime/worker_client.h"
 #include "util/threadpool.h"
 #include "worker.pb.h"

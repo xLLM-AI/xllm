@@ -41,7 +41,7 @@ limitations under the License.
 #include "core/platform/shared_vmm_allocator.h"
 #include "core/platform/stream.h"
 #include "core/platform/vmm_torch_allocator.h"
-#include "core/runtime/graph_input_snapshot.h"
+#include "core/runtime/graph_execution_input.h"
 #include "core/util/rec_model_utils.h"
 #include "core/util/utils.h"
 #include "kernels/cuda/global_capture_instance.h"
@@ -357,7 +357,7 @@ std::optional<Params> CudaGraphPersistentParam::update(
   if (return_capture_params) {
     CHECK_GT(padded_num_tokens, 0)
         << "padded_num_tokens must be > 0 when return_capture_params is true";
-    params_for_capture.emplace(clone_graph_input(params));
+    params_for_capture.emplace(copy_graph_execution_input(params));
   }
   // Build attn_metadata with original model_input_params. So we can set actual
   // batch size in plan_info.

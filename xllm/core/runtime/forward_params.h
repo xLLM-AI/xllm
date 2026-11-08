@@ -38,11 +38,11 @@ limitations under the License.
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/adaptive/dspark_dp_coordinator.h"
 #include "core/framework/speculative/verify_layout.h"
+#include "core/runtime/json_object_output_error.h"
 #include "platform/device.h"
 #include "platform/platform.h"
 #include "runtime/dit_forward_params.h"
 #include "runtime/forward_runtime_state.h"
-#include "runtime/json_object_output_rows.h"
 #include "util/tensor_helper.h"
 
 namespace xllm {

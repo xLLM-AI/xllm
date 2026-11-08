@@ -20,7 +20,7 @@ limitations under the License.
 
 #include <algorithm>
 
-#include "core/runtime/json_object_decode_continuation.h"
+#include "core/runtime/json_object_decode_adapter.h"
 #include "core/runtime/vlm_forward_params.h"
 #include "core/runtime/worker_impl.h"
 #if defined(USE_NPU)
@@ -106,11 +106,11 @@ void ScheduleOverlap::prepare_continuation_impl(WorkerImpl& worker,
     CHECK(compute_stream.wait_event(prior_output.ready_event))
         << "failed to wait last step output before overlap continuation";
   }
-  JsonObjectDecodeContinuation::prepare(input,
-                                        prior_output,
-                                        state_.sample_sequence_ids(),
-                                        worker.device_,
-                                        compute_stream);
+  JsonObjectDecodeAdapter::prepare(input,
+                                   prior_output,
+                                   state_.sample_sequence_ids(),
+                                   worker.device_,
+                                   compute_stream);
   if (reuse_tokens &&
       !worker.prepare_model_decode_continuation(input, prior_output)) {
     replace_tokens(

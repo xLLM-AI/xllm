@@ -32,7 +32,7 @@ limitations under the License.
 #include "compiler/triton/include/jit_kernel.h"
 #include "core/common/constants.h"
 #include "core/framework/config/execution_config.h"
-#include "core/runtime/graph_input_snapshot.h"
+#include "core/runtime/graph_execution_input.h"
 #include "core/runtime/rec_graph_input.h"
 #include "runtime/decode_graph_bucket.h"
 #include "util/utils.h"
@@ -194,14 +194,12 @@ uint32_t get_graph_dp_tokens(uint32_t actual_tokens,
 }
 
 template <typename Params>
-Params make_graph_params(const Params& params, uint32_t padding_num_tokens) {
-  Params graph_params = xllm::clone_graph_input(params);
-  if (params.parallel.dp_global_token_nums.size() > 1) {
-    graph_params.parallel.dp_global_token_nums =
-        std::vector<int32_t>(params.parallel.dp_global_token_nums.size(),
-                             static_cast<int32_t>(padding_num_tokens));
-  }
-  return graph_params;
+xllm::GraphExecutionInput<Params> prepare_graph_input(
+    const Params& params,
+    uint32_t padding_num_tokens) {
+  xllm::GraphExecutionInput<Params> graph_input(params);
+  graph_input.pad_dp_token_counts(static_cast<int32_t>(padding_num_tokens));
+  return graph_input;
 }
 
 template <typename Params>
@@ -490,7 +488,8 @@ void MluGraph::prepare_model_graph_metadata(CausalLM* model,
   if (!model_graph_metadata_state_) {
     model_graph_metadata_state_ = model->create_graph_forward_metadata_state();
   }
-  auto graph_params = make_graph_params(params, padding_num_tokens_);
+  auto graph_input = prepare_graph_input(params, padding_num_tokens_);
+  ModelParamsView& graph_params = graph_input.mutable_params();
   // Metadata captured by the model must use the same bucket-shaped tensors
   // as graph execution, while retaining the current logical batch metadata.
   const auto& graph_attention = persistent_param_->params_->attention.device;
@@ -755,7 +754,8 @@ ModelOutput MluGraphExecutorImpl::run_impl(ModelType* model,
 
   init_param_once();
 
-  const Params graph_params = make_graph_params(params, graph_tokens);
+  auto graph_input = prepare_graph_input(params, graph_tokens);
+  const Params& graph_params = graph_input.params();
 
   if (graph_params.parallel.dp_global_token_nums !=
       params.parallel.dp_global_token_nums) {

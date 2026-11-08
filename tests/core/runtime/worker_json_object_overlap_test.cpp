@@ -19,7 +19,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/constrained/json_object_grammar.h"
-#include "core/runtime/json_object_output_rows.h"
+#include "core/runtime/json_object_output_binding.h"
 
 namespace xllm {
 namespace {
@@ -27,30 +27,6 @@ namespace {
 JsonObjectGrammar make_grammar() {
   return JsonObjectGrammar({"{", "}", "stop"},
                            /*stop_token_ids=*/{2});
-}
-
-TEST(WorkerJsonObjectOverlapTest, FindsStableRequestIdOverlap) {
-  EXPECT_TRUE(
-      detail::has_request_id_overlap({"req-a", "req-b"}, {"req-a", "req-b"}));
-  EXPECT_TRUE(
-      detail::has_request_id_overlap({"req-b", "req-a"}, {"req-a", "req-b"}));
-}
-
-TEST(WorkerJsonObjectOverlapTest, FindsOverlapAfterInsertedFirstRequest) {
-  EXPECT_TRUE(
-      detail::has_request_id_overlap({"req-new", "req-b"}, {"req-a", "req-b"}));
-}
-
-TEST(WorkerJsonObjectOverlapTest, HandlesMissingDuplicateAndEmptyRequestIds) {
-  EXPECT_FALSE(
-      detail::has_request_id_overlap({"req-c", "req-d"}, {"req-a", "req-b"}));
-  EXPECT_TRUE(
-      detail::has_request_id_overlap({"req-b", "req-b"}, {"req-a", "req-b"}));
-  EXPECT_TRUE(detail::has_request_id_overlap({}, {"req-a"}));
-  EXPECT_TRUE(detail::has_request_id_overlap({"req-a"}, {}));
-  EXPECT_TRUE(
-      detail::has_request_id_overlap({"", "req-b"}, {"req-a", "req-b"}));
-  EXPECT_FALSE(detail::has_request_id_overlap({"", ""}, {"req-a"}));
 }
 
 TEST(WorkerJsonObjectOverlapTest, ResolvesReorderedAndInsertedRows) {
@@ -176,32 +152,46 @@ TEST(WorkerJsonObjectOverlapTest, RejectsInvalidNegativePriorOutputRow) {
   EXPECT_NE(error.find("-1 or non-negative"), std::string::npos);
 }
 
-TEST(WorkerJsonObjectOverlapTest, SanitizesOnlyFailedRowPlaceholder) {
-  torch::Tensor token_ids = torch::tensor({-1, 17, -2}, torch::kInt);
+TEST(WorkerJsonObjectOverlapTest, KeepsRowErrorsInStateOrder) {
+  JsonObjectGrammar grammar = make_grammar();
+  std::vector<JsonObjectGrammarState> states = {grammar.initial_state(),
+                                                grammar.initial_state(),
+                                                grammar.initial_state()};
+  std::vector<int32_t> output_rows;
+  std::vector<JsonObjectOutputError> output_errors;
   std::string error;
 
-  ASSERT_TRUE(detail::sanitize_json_object_error_token_ids(
-      &token_ids,
-      {"req-failed#0", "req-healthy#0"},
-      {0, 1},
-      {{"req-failed#0", "row mismatch"}},
+  ASSERT_TRUE(detail::resolve_json_object_output_rows(
+      states,
+      {"duplicated", "unexpected", "missing"},
+      {0, -1, 3},
+      {"duplicated", "duplicated", "unexpected"},
+      &output_rows,
+      &output_errors,
       &error))
       << error;
-  EXPECT_TRUE(torch::equal(token_ids, torch::tensor({0, 17, -2})));
+  EXPECT_EQ(output_rows, std::vector<int32_t>({-2, -2, -2}));
+  ASSERT_EQ(output_errors.size(), 3u);
+  EXPECT_EQ(output_errors[0].sample_sequence_id, "duplicated");
+  EXPECT_EQ(output_errors[0].message, "duplicate prior sampled output rows");
+  EXPECT_EQ(output_errors[1].sample_sequence_id, "unexpected");
+  EXPECT_EQ(output_errors[1].message, "unexpected prior sampled output row");
+  EXPECT_EQ(output_errors[2].sample_sequence_id, "missing");
+  EXPECT_EQ(output_errors[2].message, "missing prior sampled output row");
 }
 
-TEST(WorkerJsonObjectOverlapTest, RejectsAmbiguousFailedRowPlaceholder) {
-  torch::Tensor token_ids = torch::tensor({-1, 17, -1}, torch::kInt);
+TEST(WorkerJsonObjectOverlapTest, ValidatesPriorRowsBeforeConstrainedIdentity) {
+  JsonObjectGrammar grammar = make_grammar();
+  std::vector<JsonObjectGrammarState> states = {grammar.initial_state()};
+  std::vector<int32_t> output_rows;
+  std::vector<JsonObjectOutputError> output_errors;
   std::string error;
 
-  EXPECT_FALSE(detail::sanitize_json_object_error_token_ids(
-      &token_ids,
-      {"req-failed#0"},
-      {0},
-      {{"req-failed#0", "row mismatch"}},
-      &error));
-  EXPECT_NE(error.find("exactly one"), std::string::npos);
-  EXPECT_TRUE(torch::equal(token_ids, torch::tensor({-1, 17, -1})));
+  EXPECT_FALSE(detail::resolve_json_object_output_rows(
+      states, {""}, {-2}, {}, &output_rows, &output_errors, &error));
+  EXPECT_EQ(error, "JSON prior output row must be -1 or non-negative");
+  EXPECT_TRUE(output_rows.empty());
+  EXPECT_TRUE(output_errors.empty());
 }
 
 }  // namespace

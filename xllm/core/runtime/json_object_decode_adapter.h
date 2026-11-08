@@ -29,7 +29,7 @@ class VlmForwardInput;
 
 // Adapts prior runtime output to JSON constraints and makes failed rows safe
 // before decode tokens are replaced or rebuilt.
-class JsonObjectDecodeContinuation final {
+class JsonObjectDecodeAdapter final {
  public:
   static void prepare(LlmForwardInput& input,
                       const ForwardOutput& prior_output,
