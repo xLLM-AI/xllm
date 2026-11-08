@@ -36,7 +36,7 @@ limitations under the License.
 #include "common/options.h"
 #include "core/common/global_flags.h"
 #include "core/distributed_runtime/distributed_vmm_coordinator.h"
-#include "core/distributed_runtime/kv_cache_capacity_planner.h"
+#include "core/distributed_runtime/kv_capacity_planner.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
@@ -318,13 +318,13 @@ bool LLMEngine::init_model(MasterStatus master_status,
 
 KVCacheCapacity LLMEngine::estimate_kv_cache_capacity(
     bool initialize_virtual_memory) {
-  return KVCacheCapacityPlanner(args_,
-                                options_,
-                                dtype_,
-                                dp_local_tp_size_,
-                                worker_clients_,
-                                /*is_multimodal=*/false,
-                                initial_weight_reservation_bytes_)
+  return KVCapacityPlanner(args_,
+                           options_,
+                           dtype_,
+                           dp_local_tp_size_,
+                           worker_clients_,
+                           /*is_multimodal=*/false,
+                           initial_weight_reservation_bytes_)
       .plan(initialize_virtual_memory);
 }
 

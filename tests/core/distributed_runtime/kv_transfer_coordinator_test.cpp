@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/distributed_runtime/kv_cache_transfer_coordinator.h"
+#include "core/distributed_runtime/kv_transfer_coordinator.h"
 
 #include <folly/ExceptionWrapper.h>
 #include <folly/futures/Future.h>
@@ -153,9 +153,9 @@ void expect_transfer_info(const std::vector<BlockTransferInfo>& actual,
 
 }  // namespace
 
-class KVCacheTransferCoordinatorTest : public ::testing::Test {
+class KVTransferCoordinatorTest : public ::testing::Test {
  protected:
-  KVCacheTransferCoordinator make_coordinator(
+  KVTransferCoordinator make_coordinator(
       const std::vector<std::shared_ptr<RecordingTransferWorkerClient>>&
           clients,
       int32_t dp_size = 1,
@@ -167,8 +167,8 @@ class KVCacheTransferCoordinatorTest : public ::testing::Test {
     }
     auto manager = std::shared_ptr<DistributedWorkerManager>(
         new DistributedWorkerManager(std::move(worker_clients)));
-    return KVCacheTransferCoordinator(
-        KVCacheTransferCoordinator::Options{
+    return KVTransferCoordinator(
+        KVTransferCoordinator::Options{
             .dp_size = dp_size,
             .prefetch_timeout_ms = prefetch_timeout_ms,
             .prefetch_batch_size = 2},
@@ -176,7 +176,7 @@ class KVCacheTransferCoordinatorTest : public ::testing::Test {
   }
 };
 
-TEST_F(KVCacheTransferCoordinatorTest, PullWaitsForAllWorkersAfterFailure) {
+TEST_F(KVTransferCoordinatorTest, PullWaitsForAllWorkersAfterFailure) {
   auto clients = make_clients(/*worker_count=*/8);
   clients[4]->pull_result_ = false;
   auto coordinator = make_coordinator(clients, /*dp_size=*/2);
@@ -220,7 +220,7 @@ TEST_F(KVCacheTransferCoordinatorTest, PullWaitsForAllWorkersAfterFailure) {
                                          mappings));
 }
 
-TEST_F(KVCacheTransferCoordinatorTest, PullRejectsInvalidInputsBeforeDispatch) {
+TEST_F(KVTransferCoordinatorTest, PullRejectsInvalidInputsBeforeDispatch) {
   auto clients = make_clients(/*worker_count=*/4);
   auto coordinator = make_coordinator(clients, /*dp_size=*/2);
   const std::vector<uint64_t> ids = {101, 102, 103, 104};
@@ -291,7 +291,7 @@ TEST_F(KVCacheTransferCoordinatorTest, PullRejectsInvalidInputsBeforeDispatch) {
                                                 /*mappings=*/{}));
 }
 
-TEST_F(KVCacheTransferCoordinatorTest, TransferReturnsFullDPGroupInOrder) {
+TEST_F(KVTransferCoordinatorTest, TransferReturnsFullDPGroupInOrder) {
   // DP=2, CP=2, attention TP=2: all four workers in DP 1 must participate.
   auto clients = make_clients(/*worker_count=*/8);
   folly::Promise<uint32_t> first_result;
@@ -317,7 +317,7 @@ TEST_F(KVCacheTransferCoordinatorTest, TransferReturnsFullDPGroupInOrder) {
   EXPECT_EQ(std::move(futures[2]).get(), 7u);
 }
 
-TEST_F(KVCacheTransferCoordinatorTest, TransferKeepsFailuresAndDispatchesAll) {
+TEST_F(KVTransferCoordinatorTest, TransferKeepsFailuresAndDispatchesAll) {
   auto clients = make_clients(/*worker_count=*/3);
   clients[1]->transfer_query_ = [] {
     folly::Promise<uint32_t> result;
@@ -338,7 +338,7 @@ TEST_F(KVCacheTransferCoordinatorTest, TransferKeepsFailuresAndDispatchesAll) {
   }
 }
 
-TEST_F(KVCacheTransferCoordinatorTest, BatchTransferUsesFullDPGroup) {
+TEST_F(KVTransferCoordinatorTest, BatchTransferUsesFullDPGroup) {
   auto clients = make_clients(/*worker_count=*/8);
   auto coordinator = make_coordinator(clients, /*dp_size=*/2);
   const auto infos = make_transfer_info(TransferType::H2D);
@@ -352,7 +352,7 @@ TEST_F(KVCacheTransferCoordinatorTest, BatchTransferUsesFullDPGroup) {
   }
 }
 
-TEST_F(KVCacheTransferCoordinatorTest, PrefetchCompletesAllCPWorkersOnce) {
+TEST_F(KVTransferCoordinatorTest, PrefetchCompletesAllCPWorkersOnce) {
   auto clients = make_clients(/*worker_count=*/8);
   auto coordinator = make_coordinator(clients, /*dp_size=*/2);
   const auto request = make_prefetch_request();
@@ -408,7 +408,7 @@ TEST_F(KVCacheTransferCoordinatorTest, PrefetchCompletesAllCPWorkersOnce) {
   EXPECT_EQ(done_calls, 1);
 }
 
-TEST_F(KVCacheTransferCoordinatorTest, PrefetchPreservesTimeoutAndStop) {
+TEST_F(KVTransferCoordinatorTest, PrefetchPreservesTimeoutAndStop) {
   auto clients = make_clients(/*worker_count=*/2);
   auto coordinator = make_coordinator(clients,
                                       /*dp_size=*/1,
@@ -439,7 +439,7 @@ TEST_F(KVCacheTransferCoordinatorTest, PrefetchPreservesTimeoutAndStop) {
   EXPECT_EQ(done_calls, 1);
 }
 
-TEST_F(KVCacheTransferCoordinatorTest, PrefetchReportsUncertainCompletion) {
+TEST_F(KVTransferCoordinatorTest, PrefetchReportsUncertainCompletion) {
   auto clients = make_clients(/*worker_count=*/2);
   auto coordinator = make_coordinator(clients);
   int32_t done_calls = 0;

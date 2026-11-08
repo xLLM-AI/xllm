@@ -46,7 +46,7 @@ limitations under the License.
 #include "core/util/scope_guard.h"
 #include "distributed_runtime/distributed_worker_manager.h"
 #include "distributed_runtime/engine.h"
-#include "distributed_runtime/kv_cache_transfer_coordinator.h"
+#include "distributed_runtime/kv_transfer_coordinator.h"
 #include "framework/block/block_manager_pool.h"
 #include "framework/model/model_args.h"
 #include "framework/request/request.h"
@@ -69,12 +69,12 @@ class XServiceClientTestPeer final {
 
 class PDSchedulerTestPeer final {
  public:
-  static std::shared_ptr<KVCacheTransferCoordinator> make_transfer_coordinator(
+  static std::shared_ptr<KVTransferCoordinator> make_transfer_coordinator(
       std::vector<std::shared_ptr<WorkerClient>> worker_clients) {
     auto manager = std::shared_ptr<DistributedWorkerManager>(
         new DistributedWorkerManager(std::move(worker_clients)));
-    return std::make_shared<KVCacheTransferCoordinator>(
-        KVCacheTransferCoordinator::Options{}, std::move(manager));
+    return std::make_shared<KVTransferCoordinator>(
+        KVTransferCoordinator::Options{}, std::move(manager));
   }
 };
 
@@ -265,10 +265,10 @@ class TestPDScheduler final : public PDScheduler {
   using PDScheduler::prepare_batch;
 
   template <typename TargetEngine>
-  TestPDScheduler(TargetEngine* engine,
-                  const Options& options,
-                  std::shared_ptr<KVCacheTransferCoordinator>
-                      transfer_coordinator = nullptr)
+  TestPDScheduler(
+      TargetEngine* engine,
+      const Options& options,
+      std::shared_ptr<KVTransferCoordinator> transfer_coordinator = nullptr)
       : PDScheduler(engine,
                     options,
                     SkipRuntimeStart{},

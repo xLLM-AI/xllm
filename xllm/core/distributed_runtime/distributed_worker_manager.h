@@ -33,7 +33,7 @@ class WorkerServer;
 class ThreadPool;
 class DistributedWorkerManagerTest;
 class ModelResidencyCoordinatorTest;
-class KVCacheTransferCoordinatorTest;
+class KVTransferCoordinatorTest;
 class PDSchedulerTestPeer;
 class SchedulerMetricsTestPeer;
 
@@ -79,7 +79,7 @@ class DistributedWorkerManager final {
  private:
   friend class DistributedWorkerManagerTest;
   friend class ModelResidencyCoordinatorTest;
-  friend class KVCacheTransferCoordinatorTest;
+  friend class KVTransferCoordinatorTest;
   friend class PDSchedulerTestPeer;
   friend class SchedulerMetricsTestPeer;
 

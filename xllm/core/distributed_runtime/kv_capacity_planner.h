@@ -34,9 +34,9 @@ struct Options;
 // Plans one engine's cache against its workers' memory. Model capacity rules
 // stay in KVCacheEstimator; this runtime boundary supplies memory observations
 // and prepares the shared VMM resources before manager construction.
-class KVCacheCapacityPlanner final {
+class KVCapacityPlanner final {
  public:
-  KVCacheCapacityPlanner(
+  KVCapacityPlanner(
       const ModelArgs& model_args,
       const runtime::Options& options,
       torch::ScalarType dtype,
