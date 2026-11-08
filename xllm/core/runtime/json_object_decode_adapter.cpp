@@ -18,12 +18,15 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
+#include <string_view>
+#include <unordered_set>
 #include <utility>
 
 #include "core/framework/constrained/json_object_constraint_batch.h"
+#include "core/framework/constrained/json_object_output_binding.h"
 #include "core/platform/stream.h"
 #include "core/runtime/forward_params.h"
-#include "core/runtime/json_object_output_binding.h"
+#include "core/runtime/overlap_token_sanitizer.h"
 #include "core/runtime/vlm_forward_params.h"
 #include "core/util/tensor_helper.h"
 
@@ -142,13 +145,21 @@ void JsonObjectDecodeAdapter::advance_constraints(
 
 template <typename Input>
 void JsonObjectDecodeAdapter::sanitize_error_inputs(Input& input) {
+  if (input.json_object_errors.empty() || !input.token_ids.defined()) {
+    return;
+  }
+  std::unordered_set<std::string_view> failed_sequence_ids;
+  failed_sequence_ids.reserve(input.json_object_errors.size());
+  for (const JsonObjectOutputError& output_error : input.json_object_errors) {
+    failed_sequence_ids.emplace(output_error.sample_sequence_id);
+  }
   std::string error;
-  CHECK(detail::sanitize_json_object_error_token_ids(
-      &input.token_ids,
-      input.sample_sequence_ids,
-      input.sample_prior_output_rows,
-      input.json_object_errors,
-      &error))
+  CHECK(
+      detail::sanitize_failed_overlap_token_ids(&input.token_ids,
+                                                input.sample_sequence_ids,
+                                                input.sample_prior_output_rows,
+                                                failed_sequence_ids,
+                                                &error))
       << error;
 }
 

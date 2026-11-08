@@ -15,8 +15,7 @@ cc_library(
     slot_buffer.h
     task_execution_pipeline_speculative.h
     json_object_decode_adapter.h
-    json_object_output_binding.h
-    json_object_output_error.h
+    overlap_token_sanitizer.h
     schedule_overlap.h
     schedule_overlap_state.h
     executor_impl.h

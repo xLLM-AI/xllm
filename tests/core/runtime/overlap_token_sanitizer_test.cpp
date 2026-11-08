@@ -13,58 +13,86 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include "core/runtime/overlap_token_sanitizer.h"
+
 #include <gtest/gtest.h>
 
 #include <string>
-#include <vector>
-
-#include "core/runtime/json_object_output_binding.h"
+#include <string_view>
+#include <unordered_set>
 
 namespace xllm {
 namespace {
 
-TEST(JsonObjectErrorSanitizerTest, SanitizesOnlyFailedRowPlaceholder) {
+TEST(OverlapTokenSanitizerTest, LeavesInputsWithoutFailedSequencesUntouched) {
+  torch::Tensor token_ids = torch::tensor({-1, 17}, torch::kInt32);
+  const torch::Tensor original = token_ids;
+  std::string error = "previous error";
+
+  ASSERT_TRUE(detail::sanitize_failed_overlap_token_ids(
+      &token_ids, {"healthy"}, {}, {}, &error));
+  EXPECT_TRUE(error.empty());
+  EXPECT_EQ(token_ids.data_ptr(), original.data_ptr());
+  EXPECT_TRUE(torch::equal(token_ids, original));
+}
+
+TEST(OverlapTokenSanitizerTest, LeavesUndefinedInputsUntouched) {
+  torch::Tensor token_ids;
+  std::string error = "previous error";
+
+  ASSERT_TRUE(detail::sanitize_failed_overlap_token_ids(
+      &token_ids, {"failed"}, {}, {"failed"}, &error));
+  EXPECT_TRUE(error.empty());
+  EXPECT_FALSE(token_ids.defined());
+}
+
+TEST(OverlapTokenSanitizerTest, RejectsMisalignedMetadataBeforeChangingTokens) {
+  torch::Tensor token_ids = torch::tensor({-1, 17}, torch::kInt32);
+  const torch::Tensor original = token_ids;
+  std::string error;
+
+  EXPECT_FALSE(detail::sanitize_failed_overlap_token_ids(
+      &token_ids, {"failed"}, {}, {"failed"}, &error));
+  EXPECT_EQ(error, "overlap error sanitization metadata must align");
+  EXPECT_EQ(token_ids.data_ptr(), original.data_ptr());
+  EXPECT_TRUE(torch::equal(token_ids, original));
+}
+
+TEST(OverlapTokenSanitizerTest, SanitizesOnlyFailedRowPlaceholder) {
   torch::Tensor token_ids = torch::tensor({-1, 17, -2}, torch::kInt);
   std::string error;
 
-  ASSERT_TRUE(detail::sanitize_json_object_error_token_ids(
+  ASSERT_TRUE(detail::sanitize_failed_overlap_token_ids(
       &token_ids,
       {"req-failed#0", "req-healthy#0"},
       {0, 1},
-      {{"req-failed#0", "row mismatch"}},
+      {"req-failed#0"},
       &error))
       << error;
   EXPECT_TRUE(torch::equal(token_ids, torch::tensor({0, 17, -2})));
 }
 
-TEST(JsonObjectErrorSanitizerTest, RejectsAmbiguousFailedRowPlaceholder) {
+TEST(OverlapTokenSanitizerTest, RejectsAmbiguousFailedRowPlaceholder) {
   torch::Tensor token_ids = torch::tensor({-1, 17, -1}, torch::kInt);
   std::string error;
 
-  EXPECT_FALSE(detail::sanitize_json_object_error_token_ids(
-      &token_ids,
-      {"req-failed#0"},
-      {0},
-      {{"req-failed#0", "row mismatch"}},
-      &error));
+  EXPECT_FALSE(detail::sanitize_failed_overlap_token_ids(
+      &token_ids, {"req-failed#0"}, {0}, {"req-failed#0"}, &error));
   EXPECT_NE(error.find("exactly one"), std::string::npos);
   EXPECT_TRUE(torch::equal(token_ids, torch::tensor({-1, 17, -1})));
 }
 
-TEST(JsonObjectErrorSanitizerTest,
-     SanitizesMultipleRowsWithoutChangingAliases) {
+TEST(OverlapTokenSanitizerTest, SanitizesMultipleRowsWithoutChangingAliases) {
   for (const torch::ScalarType dtype : {torch::kInt32, torch::kInt64}) {
     torch::Tensor token_ids = torch::tensor({{-1, 17}, {-3, -2}}, dtype);
     const torch::Tensor original = token_ids;
     std::string error;
 
-    ASSERT_TRUE(detail::sanitize_json_object_error_token_ids(
+    ASSERT_TRUE(detail::sanitize_failed_overlap_token_ids(
         &token_ids,
         {"failed-a", "healthy", "failed-b"},
         {0, 1, 2},
-        {{"failed-b", "invalid"},
-         {"failed-a", "invalid"},
-         {"failed-a", "repeated error"}},
+        {"failed-b", "failed-a", "failed-a"},
         &error))
         << error;
     EXPECT_TRUE(torch::equal(token_ids, torch::tensor({{0, 17}, {0, -2}})));
@@ -75,86 +103,76 @@ TEST(JsonObjectErrorSanitizerTest,
   }
 }
 
-TEST(JsonObjectErrorSanitizerTest, KeepsEarlierSanitizationWhenLaterRowFails) {
+TEST(OverlapTokenSanitizerTest, KeepsEarlierSanitizationWhenLaterRowFails) {
   torch::Tensor token_ids = torch::tensor({-1, -2, -2}, torch::kInt64);
   const torch::Tensor original = token_ids;
   std::string error;
 
-  EXPECT_FALSE(detail::sanitize_json_object_error_token_ids(
-      &token_ids,
-      {"first", "ambiguous"},
-      {0, 1},
-      {{"first", "invalid"}, {"ambiguous", "invalid"}},
-      &error));
+  EXPECT_FALSE(detail::sanitize_failed_overlap_token_ids(&token_ids,
+                                                         {"first", "ambiguous"},
+                                                         {0, 1},
+                                                         {"first", "ambiguous"},
+                                                         &error));
   EXPECT_EQ(
       error,
-      "failed JSON row placeholder must identify exactly one input token");
+      "failed overlap row placeholder must identify exactly one input token");
   EXPECT_TRUE(torch::equal(token_ids, torch::tensor({0, -2, -2})));
   EXPECT_TRUE(torch::equal(original, torch::tensor({-1, -2, -2})));
 }
 
-TEST(JsonObjectErrorSanitizerTest, DoesNotSanitizePastFirstInvalidRow) {
+TEST(OverlapTokenSanitizerTest, DoesNotSanitizePastFirstInvalidRow) {
   torch::Tensor token_ids = torch::tensor({-1, -1, -2}, torch::kInt32);
   const torch::Tensor original = token_ids;
   std::string error;
 
-  EXPECT_FALSE(detail::sanitize_json_object_error_token_ids(
-      &token_ids,
-      {"ambiguous", "later"},
-      {0, 1},
-      {{"ambiguous", "invalid"}, {"later", "invalid"}},
-      &error));
+  EXPECT_FALSE(detail::sanitize_failed_overlap_token_ids(&token_ids,
+                                                         {"ambiguous", "later"},
+                                                         {0, 1},
+                                                         {"ambiguous", "later"},
+                                                         &error));
   EXPECT_TRUE(torch::equal(token_ids, original));
   EXPECT_EQ(token_ids.data_ptr(), original.data_ptr());
 }
 
-TEST(JsonObjectErrorSanitizerTest, RejectsSecondUseOfSanitizedPlaceholder) {
+TEST(OverlapTokenSanitizerTest, RejectsSecondUseOfSanitizedPlaceholder) {
   torch::Tensor token_ids = torch::tensor({-1, 17}, torch::kInt32);
   const torch::Tensor original = token_ids;
   std::string error;
 
-  EXPECT_FALSE(detail::sanitize_json_object_error_token_ids(
-      &token_ids,
-      {"first", "second"},
-      {0, 0},
-      {{"first", "invalid"}, {"second", "invalid"}},
-      &error));
+  EXPECT_FALSE(detail::sanitize_failed_overlap_token_ids(
+      &token_ids, {"first", "second"}, {0, 0}, {"first", "second"}, &error));
   EXPECT_NE(error.find("exactly one"), std::string::npos);
   EXPECT_TRUE(torch::equal(token_ids, torch::tensor({0, 17})));
   EXPECT_TRUE(torch::equal(original, torch::tensor({-1, 17})));
 }
 
-TEST(JsonObjectErrorSanitizerTest, LeavesUnmatchedAndNewFailedRowsUntouched) {
+TEST(OverlapTokenSanitizerTest, LeavesUnmatchedAndNewFailedRowsUntouched) {
   torch::Tensor token_ids = torch::tensor({-1, 17}, torch::kInt64);
   const torch::Tensor original = token_ids;
   std::string error;
 
-  ASSERT_TRUE(detail::sanitize_json_object_error_token_ids(
-      &token_ids,
-      {"healthy", "new"},
-      {0, -1},
-      {{"absent", "invalid"}, {"new", "invalid"}},
-      &error))
+  ASSERT_TRUE(detail::sanitize_failed_overlap_token_ids(
+      &token_ids, {"healthy", "new"}, {0, -1}, {"absent", "new"}, &error))
       << error;
   EXPECT_TRUE(torch::equal(token_ids, original));
   EXPECT_EQ(token_ids.data_ptr(), original.data_ptr());
 }
 
-TEST(JsonObjectErrorSanitizerTest, SanitizesStridedAndFloatingPointInputs) {
+TEST(OverlapTokenSanitizerTest, SanitizesStridedAndFloatingPointInputs) {
   torch::Tensor strided =
       torch::tensor({{-1, 17}, {-2, 19}}, torch::kInt32).t();
   ASSERT_FALSE(strided.is_contiguous());
   const torch::Tensor original = strided;
   std::string error;
-  ASSERT_TRUE(detail::sanitize_json_object_error_token_ids(
-      &strided, {"failed"}, {0}, {{"failed", "invalid"}}, &error))
+  ASSERT_TRUE(detail::sanitize_failed_overlap_token_ids(
+      &strided, {"failed"}, {0}, {"failed"}, &error))
       << error;
   EXPECT_TRUE(torch::equal(strided, torch::tensor({{0, -2}, {17, 19}})));
   EXPECT_TRUE(torch::equal(original, torch::tensor({{-1, -2}, {17, 19}})));
 
   torch::Tensor floating = torch::tensor({-1.0, 17.5}, torch::kFloat64);
-  ASSERT_TRUE(detail::sanitize_json_object_error_token_ids(
-      &floating, {"failed"}, {0}, {{"failed", "invalid"}}, &error))
+  ASSERT_TRUE(detail::sanitize_failed_overlap_token_ids(
+      &floating, {"failed"}, {0}, {"failed"}, &error))
       << error;
   EXPECT_TRUE(
       torch::equal(floating, torch::tensor({0.0, 17.5}, torch::kFloat64)));
