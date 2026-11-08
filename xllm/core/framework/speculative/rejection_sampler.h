@@ -22,8 +22,8 @@ limitations under the License.
 
 namespace xllm {
 
-// The single sampling owner for speculative verification; the
-// general-purpose sample() never runs for verify steps. Negative draft token
+// Owns verification transforms, proposal acceptance, recovery, and logprobs.
+// Seeded NPU draws reuse sample() after the transforms. Negative draft token
 // IDs force rejection and recovery from the target distribution.
 SampleOutput rejection_sample(const SamplingParameters& params,
                               const DraftProposal& draft_proposal,

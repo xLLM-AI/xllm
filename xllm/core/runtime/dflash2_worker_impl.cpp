@@ -22,14 +22,13 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#include <memory>
+#include <limits>
 #include <utility>
 
 #include "common/metrics.h"
 #include "core/framework/model/causal_lm.h"
 #include "core/framework/parallel_state/process_group.h"
 #include "core/framework/sampling/logits_processor.h"
-#include "core/framework/sampling/npu_sampling_policy.h"
 #include "core/framework/sampling/sampler.h"
 #include "core/framework/speculative/draft_proposal.h"
 #include "core/util/tensor_helper.h"
@@ -96,7 +95,6 @@ DraftProposal sample_dflash2_path(const DFlash2CandidateOutput& candidates,
     CHECK_EQ(token_ids.sizes(), torch::IntArrayRef({batch_size, num_steps}));
   }
   const bool sparse_distribution =
-      npu_sampling_enabled(NpuSamplingOptimization::SPARSE_DFLASH2) &&
       is_probabilistic_draft && device.type() == c10::DeviceType::PrivateUse1;
   torch::Tensor draft_logits;
   if (sparse_distribution) {

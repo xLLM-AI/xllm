@@ -49,15 +49,6 @@ torch::Tensor sample_from_logits(const torch::Tensor& logits,
                                  const torch::Tensor& offsets,
                                  const torch::Tensor& uniforms);
 
-#if defined(XLLM_NPU_SAMPLING_ABLATION)
-// Offline A-only reference: finite, nonnegative FP32 weights [B,V] with a
-// positive sum in each row. RNG and layout contracts match sample_from_logits.
-torch::Tensor seeded_sample(const torch::Tensor& weights,
-                            const torch::Tensor& seeds,
-                            const torch::Tensor& offsets,
-                            const torch::Tensor& uniforms);
-#endif
-
 // Draft5/7 adaptive verification. All buffers are preallocated contiguous
 // tensors on one NPU; these APIs enqueue on its current stream without copying
 // tensor values to Host. Admission validates the supported geometry first.

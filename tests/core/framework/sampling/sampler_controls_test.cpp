@@ -356,6 +356,24 @@ TEST(RejectionSamplerControlsTest, BadWordsAdvanceAcrossDraftAndBonusTokens) {
   EXPECT_NE(result.next_tokens[0][2].item<int64_t>(), 3);
 }
 
+TEST(RejectionSamplerControlsTest, MixedSeedsPreserveGroupedRandomDraws) {
+  auto params = make_sampling_params(3, true);
+  params.seeds() = torch::tensor({42, -1, -1}, torch::kInt64);
+  params.seed_offsets() = torch::tensor({7, 0, 0}, torch::kInt64);
+  params.has_unseeded_sample() = true;
+  const torch::Tensor logits = torch::zeros({3, 3, 16});
+  torch::manual_seed(137);
+  const torch::Tensor expected = gumbel_argmax(
+      logits, gumbel_noise(params, logits.sizes(), logits.device()));
+  const DraftProposal proposal(expected.narrow(1, 0, 2).clone());
+
+  torch::manual_seed(137);
+  const SampleOutput result =
+      rejection_sample(params, proposal, logits.view({9, 16}).clone());
+  EXPECT_TRUE(torch::equal(result.next_tokens, expected));
+  EXPECT_TRUE(result.num_accepted_tokens.eq(2).all().item<bool>());
+}
+
 TEST(RejectionSamplerControlsTest, SeededVerifyMatchesOrdinaryTokenOffsets) {
   for (const int64_t seed : {-2, 0, 42}) {
     auto params = make_sampling_params(1, true);

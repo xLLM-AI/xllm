@@ -20,6 +20,7 @@ limitations under the License.
 #include <array>
 #include <cmath>
 #include <limits>
+#include <mutex>
 
 #include "core/framework/sampling/logits_processor.h"
 #include "core/framework/sampling/rec_sampler.h"
@@ -148,6 +149,41 @@ TEST(SeededSamplerTest, NpuVerificationMatchesOrdinaryDrawsAtTokenOffsets) {
   }
 }
 
+TEST(SeededSamplerTest, NpuFallbackPreservesMixedSeedRandomDraws) {
+  const auto options = torch::TensorOptions().device(torch::kPrivateUse1, 0);
+  const torch::Tensor seeds =
+      torch::tensor({{42, 0}, {-1, 0}, {-1, 0}}, torch::kInt64)
+          .to(options.device());
+  const torch::Tensor offsets = torch::zeros_like(seeds);
+  for (const bool strided_seeds : {true, false}) {
+    SCOPED_TRACE(strided_seeds ? "strided seeds" : "strided offsets");
+    SamplingParameters params;
+    params.sampling_mode() = SamplingMode::RANDOM;
+    params.seeds() =
+        strided_seeds ? seeds.select(1, 0) : seeds.select(1, 0).contiguous();
+    params.seed_offsets() = strided_seeds ? offsets.select(1, 0).contiguous()
+                                          : offsets.select(1, 0);
+    params.has_unseeded_sample() = true;
+    const torch::Tensor logits = torch::zeros({3, 3, 16}, options);
+    auto generator = at_npu::detail::getDefaultNPUGenerator(0);
+    {
+      std::lock_guard<std::mutex> lock(generator.mutex());
+      generator.set_current_seed(137);
+    }
+    const torch::Tensor expected = gumbel_argmax(
+        logits, gumbel_noise(params, logits.sizes(), logits.device()));
+    const DraftProposal proposal(expected.narrow(1, 0, 2).clone());
+    {
+      std::lock_guard<std::mutex> lock(generator.mutex());
+      generator.set_current_seed(137);
+    }
+    const SampleOutput result =
+        rejection_sample(params, proposal, logits.view({9, 16}).clone());
+    EXPECT_TRUE(torch::equal(result.next_tokens, expected));
+    EXPECT_TRUE(result.num_accepted_tokens.eq(2).all().item<bool>());
+  }
+}
+
 TEST(SeededSamplerTest, NpuVerificationLogprobsUseRawLogitsWithBiasAndTopK) {
   constexpr int64_t kRows = 64;
   constexpr int64_t kVocab = 65536;
@@ -244,45 +280,6 @@ TEST(SeededSamplerTest, NpuRequestsAreReproducibleAndIsolated) {
   }
   EXPECT_TRUE(torch::equal(before, global_generator.get_state()));
 }
-
-#if defined(XLLM_NPU_SAMPLING_ABLATION)
-TEST(SeededSamplerTest,
-     NpuWeightsSamplingHandlesTailsZerosAndUniformEndpoints) {
-  const torch::Device device(torch::kPrivateUse1, 0);
-  for (const int64_t vocab : {int64_t{1},
-                              int64_t{31},
-                              int64_t{33},
-                              int64_t{4095},
-                              int64_t{4096},
-                              int64_t{4097},
-                              int64_t{248320}}) {
-    constexpr int64_t kRows = 49;
-    // Include padding so the kernel must honor row_stride, not just vocab.
-    torch::Tensor storage = torch::zeros({kRows, vocab + 8});
-    torch::Tensor weights = storage.narrow(1, 0, vocab);
-    weights.select(1, 0).fill_(0.25F);
-    weights.select(1, vocab - 1).fill_(0.75F);
-    torch::Tensor uniforms = torch::linspace(0.0, 1.0, kRows);
-    uniforms.select(0, kRows - 1).fill_(1.0F - 0x1p-24F);
-    const torch::Tensor expected =
-        vocab == 1
-            ? torch::zeros({kRows}, torch::kInt64)
-            : torch::where(uniforms.lt(0.25F), 0, vocab - 1).to(torch::kInt64);
-    const torch::Tensor device_storage = storage.to(device);
-    const torch::Tensor actual = kernel::npu::tilelang::seeded_sample(
-        device_storage.narrow(1, 0, vocab),
-        torch::full({kRows},
-                    -1,
-                    torch::TensorOptions().dtype(torch::kInt64).device(device)),
-        torch::zeros(
-            {kRows},
-            torch::TensorOptions().dtype(torch::kInt64).device(device)),
-        uniforms.to(device));
-    EXPECT_TRUE(torch::equal(actual.cpu(), expected)) << "vocab=" << vocab;
-  }
-}
-
-#endif
 
 TEST(SeededSamplerTest, NpuLogitsSamplingHandlesDtypesTailsAndMissingSeeds) {
   const torch::Device device(torch::kPrivateUse1, 0);
@@ -419,10 +416,6 @@ TEST(SeededSamplerTest, NpuCategoricalPreservesSupportAndDistribution) {
   };
   check_distribution(kernel::npu::tilelang::sample_from_logits(
       weights.log(), seeds, offsets, {}));
-#if defined(XLLM_NPU_SAMPLING_ABLATION)
-  check_distribution(
-      kernel::npu::tilelang::seeded_sample(weights, seeds, offsets, {}));
-#endif
 }
 
 TEST(SeededSamplerTest,

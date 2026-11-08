@@ -29,9 +29,7 @@ limitations under the License.
 #include <cstdint>
 #include <limits>
 #include <memory>
-#include <tuple>
 
-#include "core/framework/sampling/npu_sampling_policy.h"
 #include "core/framework/sampling/sampler.h"
 #include "tests/core/framework/sampling/sampling_test_utils.h"
 
@@ -348,21 +346,7 @@ TEST(RejectionSamplerTest, Random) {
 
 namespace {
 
-class SparseDraftTest
-    : public testing::TestWithParam<std::tuple<torch::Device, bool, bool>> {
-#if defined(XLLM_NPU_SAMPLING_ABLATION)
- protected:
-  void SetUp() override {
-    const uint8_t normalization = std::get<1>(GetParam()) ? 8 : 0;
-    const uint8_t verification = std::get<2>(GetParam()) ? 32 : 0;
-    xllm_npu_sampling_ablation_mask = 23 | normalization | verification;
-  }
-  void TearDown() override { xllm_npu_sampling_ablation_mask = saved_mask_; }
-
- private:
-  uint8_t saved_mask_ = xllm_npu_sampling_ablation_mask;
-#endif
-};
+class SparseDraftTest : public testing::TestWithParam<torch::Device> {};
 
 torch::Tensor sample_sparse_draft(const DraftProposal& proposal,
                                   const torch::Tensor& probabilities,
@@ -378,9 +362,8 @@ torch::Tensor sample_sparse_draft(const DraftProposal& proposal,
 }
 
 TEST_P(SparseDraftTest, PreservesRoundedTopLogprobTieIds) {
-  const auto options = torch::TensorOptions()
-                           .device(std::get<0>(GetParam()))
-                           .dtype(torch::kBFloat16);
+  const auto options =
+      torch::TensorOptions().device(GetParam()).dtype(torch::kBFloat16);
   torch::Tensor logits = torch::zeros({192, 65536}, options);
   logits.narrow(1, 0, 16).copy_(
       torch::arange(16, options.dtype(torch::kFloat32)).mul(1e-8));
@@ -401,7 +384,7 @@ TEST_P(SparseDraftTest, PreservesRoundedTopLogprobTieIds) {
 }
 
 TEST_P(SparseDraftTest, SentinelRejectionPreservesOriginalDraftTokens) {
-  const auto options = torch::TensorOptions().device(std::get<0>(GetParam()));
+  const auto options = torch::TensorOptions().device(GetParam());
   const auto ids_options = options.dtype(torch::kInt64);
   const torch::Tensor tokens = torch::tensor({{1, 2}, {1, 2}}, ids_options);
   const DraftProposal proposal(tokens);
@@ -429,7 +412,7 @@ TEST_P(SparseDraftTest, SentinelRejectionPreservesOriginalDraftTokens) {
 }
 
 TEST_P(SparseDraftTest, PointMassMatchesOneHotDenseVerification) {
-  const auto options = torch::TensorOptions().device(std::get<0>(GetParam()));
+  const auto options = torch::TensorOptions().device(GetParam());
   for (const int64_t rows : {1, 8}) {
     const torch::Tensor tokens =
         torch::tensor({{1, 2}}, options.dtype(torch::kInt64)).repeat({rows, 1});
@@ -452,9 +435,8 @@ TEST_P(SparseDraftTest, PointMassMatchesOneHotDenseVerification) {
 }
 
 TEST_P(SparseDraftTest, SelectedLogprobsPreserveLargeCommonOffsets) {
-  const auto options = torch::TensorOptions()
-                           .device(std::get<0>(GetParam()))
-                           .dtype(torch::kBFloat16);
+  const auto options =
+      torch::TensorOptions().device(GetParam()).dtype(torch::kBFloat16);
   const torch::Tensor tokens =
       torch::zeros({64, 2}, options.dtype(torch::kInt64));
   SamplingParameters params;
@@ -474,9 +456,8 @@ TEST_P(SparseDraftTest, SelectedLogprobsPreserveLargeCommonOffsets) {
 }
 
 TEST_P(SparseDraftTest, MatchesDenseWideVocabularyVerification) {
-  const auto options = torch::TensorOptions()
-                           .device(std::get<0>(GetParam()))
-                           .dtype(torch::kFloat32);
+  const auto options =
+      torch::TensorOptions().device(GetParam()).dtype(torch::kFloat32);
   const auto ids_options = options.dtype(torch::kInt64);
   constexpr int64_t kVocab = 248320;
   const torch::Tensor ids =
@@ -513,9 +494,8 @@ TEST_P(SparseDraftTest, MatchesDenseWideVocabularyVerification) {
 }
 
 TEST_P(SparseDraftTest, MatchesDenseSupportAndSentinelRecovery) {
-  const auto options = torch::TensorOptions()
-                           .device(std::get<0>(GetParam()))
-                           .dtype(torch::kFloat32);
+  const auto options =
+      torch::TensorOptions().device(GetParam()).dtype(torch::kFloat32);
   const auto ids_options = options.dtype(torch::kInt64);
   const torch::Tensor tokens = torch::tensor({{1, 3}, {-1, 2}}, ids_options);
   const torch::Tensor candidates =
@@ -545,9 +525,8 @@ TEST_P(SparseDraftTest, MatchesDenseSupportAndSentinelRecovery) {
 }
 
 TEST_P(SparseDraftTest, MatchesDenseRandomRejection) {
-  const auto options = torch::TensorOptions()
-                           .device(std::get<0>(GetParam()))
-                           .dtype(torch::kFloat32);
+  const auto options =
+      torch::TensorOptions().device(GetParam()).dtype(torch::kFloat32);
   constexpr int64_t kRows = 256;
   const torch::Tensor candidates =
       torch::tensor({{{0, 2}, {1, 3}}}, options.dtype(torch::kInt64))
@@ -579,9 +558,8 @@ TEST_P(SparseDraftTest, MatchesDenseRandomRejection) {
 TEST_P(SparseDraftTest, RecoveredDistributionMatchesTarget) {
   constexpr int64_t kRows = 2048;
   constexpr int64_t kRounds = 16;
-  const auto options = torch::TensorOptions()
-                           .device(std::get<0>(GetParam()))
-                           .dtype(torch::kFloat32);
+  const auto options =
+      torch::TensorOptions().device(GetParam()).dtype(torch::kFloat32);
   const torch::Tensor candidates =
       torch::tensor({{{0, 2}}}, options.dtype(torch::kInt64))
           .repeat({kRows, 1, 1});
@@ -615,19 +593,9 @@ const std::array<torch::Device, 1> kSparseDevices = {
     torch::Device(torch::kCPU)};
 #endif
 
-#if defined(XLLM_NPU_SAMPLING_ABLATION)
 INSTANTIATE_TEST_SUITE_P(Devices,
                          SparseDraftTest,
-                         testing::Combine(testing::ValuesIn(kSparseDevices),
-                                          testing::Bool(),
-                                          testing::Bool()));
-#else
-INSTANTIATE_TEST_SUITE_P(Devices,
-                         SparseDraftTest,
-                         testing::Combine(testing::ValuesIn(kSparseDevices),
-                                          testing::Values(true),
-                                          testing::Values(true)));
-#endif
+                         testing::ValuesIn(kSparseDevices));
 
 }  // namespace
 

@@ -132,13 +132,6 @@ tilelang_register_runtime_kernel(
   WRAPPER_SRCS rope_wrapper.cpp
 )
 
-if(BUILD_NPU_SAMPLING_ABLATION)
-  tilelang_register_runtime_kernel(
-    NAME seeded_sample
-    WRAPPER_SRCS seeded_sample_wrapper.cpp
-  )
-endif()
-
 tilelang_register_runtime_kernel(
   NAME sample_from_logits
   WRAPPER_SRCS sample_from_logits_wrapper.cpp

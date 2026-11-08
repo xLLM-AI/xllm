@@ -32,7 +32,6 @@ limitations under the License.
 
 #include "core/framework/config/model_config.h"
 #include "core/framework/sampling/logits_processor.h"
-#include "core/framework/sampling/npu_sampling_policy.h"
 #include "core/framework/sampling/sampling_params.h"
 
 namespace xllm {
@@ -111,8 +110,7 @@ torch::Tensor gumbel_noise(const SamplingParameters& params,
 
 torch::Tensor categorical_sample(const torch::Tensor& logits) {
 #if defined(USE_NPU)
-  if (npu_sampling_enabled(NpuSamplingOptimization::VERIFICATION) &&
-      kernel::npu::tilelang::supports_sample_from_logits(logits) &&
+  if (kernel::npu::tilelang::supports_sample_from_logits(logits) &&
       logits.size(0) >= 8) {
     const torch::Tensor uniforms =
         torch::rand({logits.size(0)}, logits.options().dtype(torch::kFloat32));
@@ -152,7 +150,6 @@ SampleOutput sample(torch::Tensor& logits,
   bool compact_logprobs = false;
 #if defined(USE_NPU)
   compact_logprobs =
-      npu_sampling_enabled(NpuSamplingOptimization::COMPACT_NORMALIZATION) &&
       params.logprobs() && params.max_top_logprobs() == 0 &&
       !params.use_beam_search() &&
       !ModelConfig::get_instance().enable_qwen3_reranker() &&
@@ -181,8 +178,7 @@ SampleOutput sample(torch::Tensor& logits,
 #if defined(USE_NPU)
     // Only random rows consume distribution transforms. Keep the original
     // logits for greedy rows after applying their constraints above.
-    if (npu_sampling_enabled(NpuSamplingOptimization::RANDOM_ROW_FILTER) &&
-        logits.device().type() == torch::kPrivateUse1 &&
+    if (logits.device().type() == torch::kPrivateUse1 &&
         params.sampling_mode() == SamplingMode::MIXED && !params.logprobs() &&
         !params.return_logits() && !params.use_beam_search() &&
         logits.size(0) >= 2 && logits.size(1) >= 32768 &&
@@ -232,7 +228,6 @@ SampleOutput sample(torch::Tensor& logits,
   torch::Tensor samples;
 #if defined(USE_NPU)
   const bool use_batched_sampling =
-      npu_sampling_enabled(NpuSamplingOptimization::BATCHED) &&
       params.sampling_mode() != SamplingMode::GREEDY &&
       kernel::npu::tilelang::supports_sample_from_logits(logits) &&
       (!params.seeds().defined() ||
@@ -245,18 +240,8 @@ SampleOutput sample(torch::Tensor& logits,
         (!params.seeds().defined() || params.has_unseeded_sample())
             ? torch::rand({logits.size(0)}, uniform_options)
             : torch::Tensor();
-#if defined(XLLM_NPU_SAMPLING_ABLATION)
-    if (!npu_sampling_enabled(NpuSamplingOptimization::FUSED_LOGITS)) {
-      const torch::Tensor weights =
-          torch::softmax(logits, /*dim=*/-1, torch::kFloat32);
-      samples = kernel::npu::tilelang::seeded_sample(
-          weights, params.seeds(), params.seed_offsets(), uniforms);
-    } else
-#endif
-    {
-      samples = kernel::npu::tilelang::sample_from_logits(
-          logits, params.seeds(), params.seed_offsets(), uniforms);
-    }
+    samples = kernel::npu::tilelang::sample_from_logits(
+        logits, params.seeds(), params.seed_offsets(), uniforms);
     if (params.sampling_mode() == SamplingMode::MIXED) {
       samples = torch::where(
           params.require_do_sample(), samples, greedy_sample(logits));

@@ -19,12 +19,10 @@ limitations under the License.
 #include <glog/logging.h>
 #include <torch/torch.h>
 
-#include <limits>
 #include <tuple>
 #include <utility>
 
 #include "core/framework/sampling/logits_processor.h"
-#include "core/framework/sampling/npu_sampling_policy.h"
 #include "core/framework/sampling/sampler.h"
 #if defined(USE_NPU)
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
@@ -78,8 +76,7 @@ void compute_logprobs(SampleOutput& output,
 #if defined(USE_NPU)
   const torch::Tensor flat_logits =
       grouped_logits.view({-1, grouped_logits.size(-1)});
-  if (npu_sampling_enabled(NpuSamplingOptimization::COMPACT_NORMALIZATION) &&
-      params.max_top_logprobs() == 0 &&
+  if (params.max_top_logprobs() == 0 &&
       kernel::npu::tilelang::supports_sample_from_logits(flat_logits) &&
       flat_logits.numel() >= 8 * 1024 * 1024) {
     auto [compact_max, compact_log_sum] =
@@ -192,20 +189,34 @@ SampleOutput rejection_sample(const SamplingParameters& params,
   if (params.seeds().defined() && !params.is_all_greedy()) {
     // Sampling the target at each logical token offset makes seeded requests
     // independent of batch position and the number of accepted MTP drafts.
-    torch::Tensor sampled =
-        torch::empty({batch_size, num_val_tokens}, draft_token_ids.options());
-    SamplingParameters draw_params;
-    draw_params.sampling_mode() = params.sampling_mode();
-    draw_params.seeds() = params.seeds();
-    draw_params.do_sample() = params.do_sample();
-    draw_params.has_unseeded_sample() = params.has_unseeded_sample();
-    for (int64_t column = 0; column < num_val_tokens; ++column) {
-      draw_params.seed_offsets() = params.seed_offsets() + column;
-      // Match ordinary sampling's row layout and dispatch at each offset.
-      // Penalties and filtering have already been applied above.
-      torch::Tensor row_logits = grouped_logits.select(1, column).contiguous();
-      sampled.select(1, column).copy_(
-          sample(row_logits, draw_params).next_tokens);
+    torch::Tensor sampled;
+#if defined(USE_NPU)
+    if (params.seeds().is_contiguous() &&
+        params.seed_offsets().is_contiguous() &&
+        kernel::npu::tilelang::supports_sample_from_logits(
+            grouped_logits.select(1, 0))) {
+      sampled =
+          torch::empty({batch_size, num_val_tokens}, draft_token_ids.options());
+      SamplingParameters draw_params;
+      draw_params.sampling_mode() = params.sampling_mode();
+      draw_params.seeds() = params.seeds();
+      draw_params.do_sample() = params.do_sample();
+      draw_params.has_unseeded_sample() = params.has_unseeded_sample();
+      for (int64_t column = 0; column < num_val_tokens; ++column) {
+        draw_params.seed_offsets() = params.seed_offsets() + column;
+        // The NPU kernel reads strided rows directly. Penalties and filtering
+        // have already been applied above.
+        torch::Tensor row_logits = grouped_logits.select(1, column);
+        sampled.select(1, column).copy_(
+            sample(row_logits, draw_params).next_tokens);
+      }
+    } else
+#endif
+    {
+      sampled = gumbel_argmax(
+          grouped_logits,
+          gumbel_noise(
+              params, grouped_logits.sizes(), grouped_logits.device()));
     }
     SampleOutput output;
     if (num_draft_tokens == 0) {
@@ -231,8 +242,7 @@ SampleOutput rejection_sample(const SamplingParameters& params,
   torch::Tensor compact_max;
   torch::Tensor compact_log_sum;
 #if defined(USE_NPU)
-  if (npu_sampling_enabled(NpuSamplingOptimization::COMPACT_NORMALIZATION) &&
-      kernel::npu::tilelang::supports_sample_from_logits(target_logits) &&
+  if (kernel::npu::tilelang::supports_sample_from_logits(target_logits) &&
       target_logits.numel() >= 8 * 1024 * 1024 &&
       params.sampling_mode() != SamplingMode::GREEDY) {
     std::tie(compact_max, compact_log_sum) =
