@@ -18,6 +18,8 @@ cc_library(
     dit_model_loader.cpp
     model_loader.cpp
   DEPS
+    :tensor_support
+    :dit_model_discovery
     :common
     :model
     :model_context
@@ -27,4 +29,16 @@ cc_library(
     $<$<BOOL:${USE_NPU}>:npu_layers>
     :tokenizer
     torch
+)
+
+# Model discovery shares scanning without a reverse dependency from util.
+cc_library(
+  NAME
+    dit_model_discovery
+  HDRS
+    dit_model_discovery.h
+  SRCS
+    dit_model_discovery.cpp
+  DEPS
+    :util
 )

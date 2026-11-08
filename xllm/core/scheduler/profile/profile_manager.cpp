@@ -29,6 +29,7 @@ limitations under the License.
 #include <sstream>
 
 #include "core/common/global_flags.h"
+#include "core/common/types.h"
 #include "core/distributed_runtime/distributed_worker_manager.h"
 #include "core/framework/batch/batch_factory.h"
 #include "core/framework/config/disagg_pd_config.h"
@@ -37,10 +38,10 @@ limitations under the License.
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/framework/model/rec_model_utils.h"
 #include "core/framework/request/request_state.h"
 #include "core/runtime/acl_graph_bucket_policy.h"
 #include "core/scheduler/profile/graph_warmup.h"
-#include "core/util/rec_model_utils.h"
 #include "core/util/utils.h"
 #include "platform/platform.h"
 

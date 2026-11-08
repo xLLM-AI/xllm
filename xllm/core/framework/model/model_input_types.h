@@ -30,9 +30,9 @@ limitations under the License.
 
 #include "core/common/types.h"
 #include "core/framework/eplb/eplb_info.h"
+#include "core/framework/model/seq_lens.h"
 #include "core/kv_cache/block/block.h"
 #include "core/platform/layer_synchronizer.h"
-#include "core/util/seq_lens.h"
 #if defined(USE_NPU)
 #include "core/platform/npu/npu_layer_synchronizer.h"
 #endif
@@ -48,8 +48,8 @@ limitations under the License.
 #include "core/framework/multimodal/mm_batch_data.h"
 #include "core/framework/parallel_state/npu_cp_plan.h"
 #include "core/framework/parallel_state/npu_dp_ep_padding.h"
+#include "core/framework/tensor/tensor_helper.h"
 #include "core/util/hash_util.h"
-#include "core/util/tensor_helper.h"
 
 namespace xllm {
 

@@ -21,7 +21,7 @@ limitations under the License.
 #include <numeric>
 #include <utility>
 
-#include "util/seq_lens.h"
+#include "core/framework/model/seq_lens.h"
 
 namespace xllm::layer::mlu_v4_cp {
 

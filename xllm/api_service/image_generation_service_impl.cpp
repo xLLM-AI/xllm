@@ -21,6 +21,7 @@ limitations under the License.
 
 #include "butil/base64.h"
 #include "common/instance_name.h"
+#include "core/common/types.h"
 #include "core/util/binary_payload.h"
 #include "distributed_runtime/dit_master.h"
 #include "framework/request/dit_request_output.h"

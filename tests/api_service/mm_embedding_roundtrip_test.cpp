@@ -27,6 +27,7 @@ limitations under the License.
 
 #include "api_service/embedding_output_builder.h"
 #include "core/framework/config/model_config.h"
+#include "core/framework/multimodal/content_hash.h"
 #include "core/framework/multimodal/mm_embedding_handler.h"
 #include "core/framework/multimodal/mm_input.h"
 #include "core/framework/request/sequence.h"

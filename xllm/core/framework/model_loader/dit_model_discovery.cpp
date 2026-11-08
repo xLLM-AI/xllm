@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/util/dit_model_discovery.h"
+#include "core/framework/model_loader/dit_model_discovery.h"
 
 #include <filesystem>
 #include <string>

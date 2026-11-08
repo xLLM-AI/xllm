@@ -32,6 +32,7 @@ limitations under the License.
 #include <vector>
 
 #include "continuous_scheduler.h"
+#include "core/common/types.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/kv_cache_store_config.h"
 #include "core/framework/config/parallel_config.h"

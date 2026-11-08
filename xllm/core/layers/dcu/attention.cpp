@@ -18,7 +18,7 @@ limitations under the License.
 #include <cstdlib>
 #include <cstring>
 
-#include "core/util/rec_model_utils.h"
+#include "core/framework/model/rec_model_utils.h"
 #include "layers/dcu/base_attention_impl.h"
 #include "layers/dcu/flash_attention.h"
 #include "layers/dcu/torch_attention.h"

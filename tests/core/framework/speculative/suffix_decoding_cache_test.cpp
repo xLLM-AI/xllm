@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "suffix_decoding_cache.h"
+#include "core/framework/speculative/suffix_decoding_cache.h"
 
 #include <gtest/gtest.h>
 
@@ -138,6 +138,94 @@ TEST(SuffixDecodingCacheTest, MaxCachedRequestsZeroDisablesGlobalCache) {
 
   auto cached = cache.cached_requests();
   EXPECT_TRUE(cached.empty());
+}
+
+TEST(SuffixDecodingCacheTest, LocalDraftOwnsResultsAfterCacheDestruction) {
+  SuffixDecodingDraft draft;
+  {
+    SuffixDecodingCache cache(/*max_tree_depth=*/16, /*max_cached_requests=*/0);
+    const std::vector<int32_t> prompt = {1, 2, 3, 4, 5};
+    const std::vector<int32_t> context = {9, 2, 3};
+    cache.start_request("local", prompt);
+    draft = cache.speculate("local",
+                            context,
+                            /*max_spec_tokens=*/4,
+                            /*max_spec_factor=*/2.0f,
+                            /*max_spec_offset=*/0.0f,
+                            /*min_token_prob=*/0.1f,
+                            /*use_tree_spec=*/false);
+    auto second_draft = cache.speculate("local", context);
+    EXPECT_EQ(second_draft.token_ids, draft.token_ids);
+    cache.stop_request("local");
+  }
+
+  EXPECT_EQ(draft.token_ids, (std::vector<int32_t>{4, 5}));
+  EXPECT_EQ(draft.parents, (std::vector<int32_t>{-1, 0}));
+  EXPECT_EQ(draft.probs, (std::vector<float>{1.0f, 1.0f}));
+  EXPECT_FLOAT_EQ(draft.score, 2.0f);
+  EXPECT_EQ(draft.match_len, 2);
+}
+
+TEST(SuffixDecodingCacheTest,
+     GlobalTreeDraftPreservesBranchesAndProbabilities) {
+  SuffixDecodingDraft draft;
+  {
+    SuffixDecodingCache cache(/*max_tree_depth=*/16, /*max_cached_requests=*/8);
+    const std::vector<int32_t> prompt = {1};
+    const std::vector<int32_t> first_response = {10, 20, 30, 40};
+    const std::vector<int32_t> second_response = {10, 20, 31, 41};
+    cache.start_request("first", prompt);
+    cache.add_active_response("first", first_response);
+    cache.stop_request("first");
+    cache.start_request("second", prompt);
+    cache.add_active_response("second", second_response);
+    cache.stop_request("second");
+
+    const std::vector<int32_t> context = {99, 10, 20};
+    cache.start_request("current", context);
+    draft = cache.speculate("current",
+                            context,
+                            /*max_spec_tokens=*/4,
+                            /*max_spec_factor=*/4.0f,
+                            /*max_spec_offset=*/0.0f,
+                            /*min_token_prob=*/0.4f,
+                            /*use_tree_spec=*/true);
+    auto filtered_draft = cache.speculate("current",
+                                          context,
+                                          /*max_spec_tokens=*/4,
+                                          /*max_spec_factor=*/4.0f,
+                                          /*max_spec_offset=*/0.0f,
+                                          /*min_token_prob=*/0.6f,
+                                          /*use_tree_spec=*/true);
+    EXPECT_TRUE(filtered_draft.token_ids.empty());
+    EXPECT_TRUE(filtered_draft.parents.empty());
+    EXPECT_TRUE(filtered_draft.probs.empty());
+    EXPECT_FLOAT_EQ(filtered_draft.score, 0.0f);
+    cache.evict_cached_response("first");
+    cache.evict_cached_response("second");
+    cache.stop_request("current");
+  }
+
+  ASSERT_EQ(draft.token_ids.size(), 4);
+  ASSERT_EQ(draft.parents.size(), draft.token_ids.size());
+  ASSERT_EQ(draft.probs.size(), draft.token_ids.size());
+  EXPECT_FLOAT_EQ(draft.score, 2.0f);
+  EXPECT_EQ(draft.match_len, 2);
+  for (int32_t token : {30, 31, 40, 41}) {
+    auto position =
+        std::find(draft.token_ids.begin(), draft.token_ids.end(), token);
+    ASSERT_NE(position, draft.token_ids.end());
+    size_t index = static_cast<size_t>(position - draft.token_ids.begin());
+    EXPECT_FLOAT_EQ(draft.probs[index], 0.5f);
+    if (token < 40) {
+      EXPECT_EQ(draft.parents[index], -1);
+      continue;
+    }
+    int32_t parent = draft.parents[index];
+    ASSERT_GE(parent, 0);
+    ASSERT_LT(static_cast<size_t>(parent), index);
+    EXPECT_EQ(draft.token_ids[parent], token - 10);
+  }
 }
 
 }  // namespace xllm

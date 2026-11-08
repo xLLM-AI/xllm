@@ -19,12 +19,15 @@ limitations under the License.
 
 #include "core/common/macros.h"
 #include "core/common/metrics.h"
+#include "core/common/types.h"
 #include "core/distributed_runtime/worker_model_codec.h"
 #include "core/framework/config/eplb_config.h"
+#include "core/framework/tensor/tensor_codec.h"
+#include "core/framework/tensor/tensor_helper.h"
 #include "core/runtime/forward_params.h"
-#include "core/util/tensor_helper.h"
 #include "core/util/timer.h"
 #include "core/util/utils.h"
+#include "tensor.pb.h"
 #include "worker.pb.h"
 
 namespace xllm {

@@ -21,6 +21,8 @@ limitations under the License.
 #include <cstddef>
 #include <utility>
 
+#include "core/framework/config/parallel_config.h"
+#include "core/framework/model/model_type.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
 #include "core/platform/platform.h"
 #include "util/utils.h"
@@ -432,7 +434,7 @@ void KVCacheShape::init_index_cache_shape(const KVCacheCapacity& kv_cache_cap,
                                           const ModelArgs& model_args) {
   const int64_t replication_factor =
       Platform::supports_dsa_indexer_cache_sharding()
-          ? util::kv_split_size_effective()
+          ? ParallelConfig::get_instance().kv_split_size_effective()
           : 1;
   const int64_t index_block_count =
       kv_cache_cap.n_blocks() * replication_factor;

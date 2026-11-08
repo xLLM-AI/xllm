@@ -127,6 +127,7 @@ cc_test(
   SRCS
     mm_embedding_roundtrip_test.cpp
   DEPS
+    :content_hash
     api_service
     GTest::gtest_main
 )

@@ -12,6 +12,7 @@ cc_library(
   SRCS
     mapped_virtual_memory_tensor_view.cpp
   DEPS
+    :tensor_support
     :virtual_memory
     :platform
     torch

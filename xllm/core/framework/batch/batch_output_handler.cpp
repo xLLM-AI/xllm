@@ -25,7 +25,7 @@ limitations under the License.
 #include <unordered_set>
 #include <vector>
 
-#include "core/util/tensor_helper.h"
+#include "core/framework/tensor/tensor_helper.h"
 
 namespace xllm {
 namespace {

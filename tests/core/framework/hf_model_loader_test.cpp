@@ -29,6 +29,7 @@ limitations under the License.
 #include "core/framework/model/causal_lm.h"
 #include "core/framework/model/causal_rec.h"
 #include "core/framework/model/generic_rec.h"
+#include "core/framework/model/model_type.h"
 #include "core/framework/model/rec_model.h"
 #include "core/framework/model_loader/hf_model_args.h"
 #include "core/framework/model_loader/hf_model_config.h"

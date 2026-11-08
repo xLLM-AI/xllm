@@ -19,8 +19,8 @@ limitations under the License.
 
 #include <utility>
 
+#include "core/framework/tensor/pybind_helper.h"
 #include "core/runtime/py_executor_impl.h"
-#include "core/util/pybind_helper.h"
 
 namespace py = pybind11;
 

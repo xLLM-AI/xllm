@@ -20,6 +20,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/model/model_args.h"
+#include "core/framework/model/model_type.h"
 
 namespace xllm::mtp_async {
 namespace {

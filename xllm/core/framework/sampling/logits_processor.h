@@ -17,7 +17,7 @@ limitations under the License.
 #include <torch/types.h>
 
 #include "core/framework/sampling/sampling_params.h"
-#include "core/util/tensor_helper.h"
+#include "core/framework/tensor/tensor_helper.h"
 
 namespace xllm {
 

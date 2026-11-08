@@ -45,6 +45,7 @@ cc_library(
     qwen3_gated_delta_net_kernel_impl.cpp
     qwen3_5_gated_delta_net.cpp
   DEPS
+    :tensor_support
     :common_layers
     flash_attention
     dcu_kernels

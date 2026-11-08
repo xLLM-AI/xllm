@@ -13,10 +13,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "suffix_decoding_cache.h"
+#include "core/framework/speculative/suffix_decoding_cache.h"
 
 #include <algorithm>
 #include <stdexcept>
+#include <utility>
 
 namespace xllm {
 
@@ -25,16 +26,6 @@ namespace {
 constexpr int32_t kMaxInt32SeqId = 0x7FFFFFFF;
 
 }  // namespace
-
-SuffixDecodingDraft SuffixDecodingDraft::from_native(const Draft& draft) {
-  return {
-      .token_ids = draft.token_ids,
-      .parents = draft.parents,
-      .probs = draft.probs,
-      .score = draft.score,
-      .match_len = draft.match_len,
-  };
-}
 
 SuffixDecodingCache::SuffixDecodingCache(int32_t max_tree_depth,
                                          int32_t max_cached_requests)
@@ -178,8 +169,15 @@ SuffixDecodingDraft SuffixDecodingCache::speculate(
                                               min_token_prob,
                                               use_tree_spec);
 
-  return SuffixDecodingDraft::from_native(
-      draft_local.score >= draft_global.score ? draft_local : draft_global);
+  Draft& selected_draft =
+      draft_local.score >= draft_global.score ? draft_local : draft_global;
+  return {
+      .token_ids = std::move(selected_draft.token_ids),
+      .parents = std::move(selected_draft.parents),
+      .probs = std::move(selected_draft.probs),
+      .score = selected_draft.score,
+      .match_len = selected_draft.match_len,
+  };
 }
 
 int32_t SuffixDecodingCache::generate_seq_id(const std::string& req_id) {

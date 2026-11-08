@@ -17,7 +17,7 @@ limitations under the License.
 // https://
 // github.com/snowflakedb/ArcticInference/blob/main/csrc/suffix_decoding/suffix_tree.cc
 
-#include "suffix_tree.h"
+#include "core/framework/speculative/suffix_tree.h"
 
 #include <algorithm>
 #include <cassert>

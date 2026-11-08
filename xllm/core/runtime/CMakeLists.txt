@@ -116,6 +116,10 @@ cc_library(
     dspark_worker_impl.cpp
     forward_shared_memory_transport.cpp
   DEPS
+    :tensor_codec
+    :tensor_support
+    :content_hash
+    :suffix_decoding
     torch
     $<$<BOOL:${USE_NPU}>:torch_npu>
     :common

@@ -61,6 +61,8 @@ cc_library(
     stopping_checker.cpp
     priority_comparator.cpp
   DEPS
+    :tensor_codec
+    :tensor_support
     :config
     :kv_cache
     :block_hasher

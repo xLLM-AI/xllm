@@ -18,9 +18,9 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include "core/framework/tensor/tensor_helper.h"
 #include "fused_moe.h"
 #include "kernels/ops_api.h"
-#include "util/tensor_helper.h"
 
 namespace xllm {
 namespace layer {

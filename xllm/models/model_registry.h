@@ -21,6 +21,7 @@ limitations under the License.
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 #include "core/framework/model/causal_lm.h"
 #include "core/framework/model/causal_rec.h"
@@ -38,6 +39,13 @@ limitations under the License.
 namespace xllm {
 
 class Options;
+
+namespace util {
+struct DitDiscoveredComponent;
+
+std::string resolve_dit_pipeline_type(
+    const std::vector<DitDiscoveredComponent>& components);
+}  // namespace util
 
 using CausalLMFactory =
     std::function<std::unique_ptr<CausalLM>(const ModelContext& context)>;

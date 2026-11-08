@@ -44,10 +44,12 @@ limitations under the License.
 #if defined(USE_MUSA)
 #include "layers/common/attention_metadata.h"
 #endif
+#include "core/common/types.h"
+#include "core/framework/config/parallel_config.h"
+#include "core/framework/model/seq_lens.h"
+#include "core/framework/tensor/tensor_helper.h"
 #include "core/platform/platform.h"
 #include "core/util/blocking_counter.h"
-#include "core/util/seq_lens.h"
-#include "core/util/tensor_helper.h"
 #include "core/util/threadpool.h"
 #include "core/util/utils.h"
 #include "models/vlm/mposition/mposition.h"
@@ -1023,7 +1025,8 @@ void ForwardInputBuilder::setup_kv_cache_info(Sequence* sequence,
           transfer_kv_info.value(),
           sequence,
           seq_len,
-          static_cast<uint32_t>(util::kv_split_size_effective()));
+          static_cast<uint32_t>(
+              ParallelConfig::get_instance().kv_split_size_effective()));
       const bool has_transfer =
           std::any_of(step_info.mappings.begin(),
                       step_info.mappings.end(),
@@ -1070,7 +1073,8 @@ void ForwardInputBuilder::setup_kv_cache_info(Sequence* sequence,
         transfer_kv_info.value(),
         sequence,
         seq_len,
-        static_cast<uint32_t>(util::kv_split_size_effective()));
+        static_cast<uint32_t>(
+            ParallelConfig::get_instance().kv_split_size_effective()));
     const bool has_transfer = std::any_of(step_info.mappings.begin(),
                                           step_info.mappings.end(),
                                           [](const KVTransferMapping& mapping) {

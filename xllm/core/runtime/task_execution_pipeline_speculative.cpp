@@ -40,12 +40,12 @@ limitations under the License.
 #if defined(USE_NPU)
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 #endif
+#include "core/framework/tensor/tensor_helper.h"
 #include "core/platform/device.h"
 #include "core/platform/platform.h"
 #include "core/runtime/decode_graph_bucket.h"
 #include "core/runtime/py_executor_impl.h"
 #include "core/runtime/task_execution_pipeline.h"
-#include "core/util/tensor_helper.h"
 
 namespace xllm {
 bool TaskExecutionPipeline::block_draft() const {

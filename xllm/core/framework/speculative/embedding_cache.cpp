@@ -22,7 +22,7 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#include "util/tensor_helper.h"
+#include "core/framework/tensor/tensor_helper.h"
 
 namespace xllm {
 

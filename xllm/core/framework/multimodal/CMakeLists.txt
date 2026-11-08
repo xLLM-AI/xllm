@@ -4,6 +4,7 @@ cc_library(
   NAME 
     multimodal
   HDRS
+    download_headers.h
     mm_batch_data.h
     mm_codec.h
     mm_data.h
@@ -16,6 +17,7 @@ cc_library(
     mm_item_state.h
     mm_type.h
   SRCS
+    download_headers.cpp
     mm_batch_data.cpp
     mm_codec.cpp
     mm_data.cpp
@@ -26,6 +28,9 @@ cc_library(
     mm_input.cpp
     mm_type.cpp
   DEPS
+    :tensor_codec
+    :tensor_support
+    :content_hash
     common
     util
     encoder_cache
@@ -38,4 +43,18 @@ cc_library(
     torch
     ${OpenCV_LIBS}
     ${FFMPEG_LIBRARIES}
+)
+
+# Content identities are shared without depending on the multimodal handler graph.
+cc_library(
+  NAME
+    content_hash
+  HDRS
+    content_hash.h
+  SRCS
+    content_hash.cpp
+  DEPS
+    :config
+    :util
+    torch
 )

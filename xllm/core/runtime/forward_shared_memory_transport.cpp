@@ -49,9 +49,11 @@ limitations under the License.
 #elif defined(USE_CUDA) || defined(USE_MUSA)
 #include "platform/cuda/device_capture_lock.h"
 #endif
+#include "core/common/types.h"
+#include "core/framework/tensor/tensor_helper.h"
 #include "core/util/net.h"
-#include "core/util/tensor_helper.h"
 #include "util/utils.h"
+#include "worker.pb.h"
 
 #if defined(__GNUC__)
 static inline bool(likely)(bool x) { return __builtin_expect((x), true); }

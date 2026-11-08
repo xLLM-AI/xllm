@@ -7,6 +7,7 @@ cc_test(
     batch_test.cpp
     batch_factory_test.cpp
   DEPS
+    :tensor_support
     :config
     :batch
     :worker_model_codec

@@ -29,6 +29,7 @@ cc_library(
     fixed_steps_scheduler.cpp
     kv_cache_prefetcher.cpp
   DEPS
+    :tensor_support
     :batch
     :distributed_runtime
     :request

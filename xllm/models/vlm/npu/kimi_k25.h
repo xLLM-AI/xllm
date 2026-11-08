@@ -28,12 +28,12 @@ limitations under the License.
 
 #include "core/framework/model/model_output.h"
 #include "core/framework/model/model_params_view.h"
+#include "core/framework/tensor/tensor_helper.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/layers/npu/npu_kimik25_vision_encoder_layer_impl.h"
 #include "core/layers/npu/npu_lm_head_impl.h"
 #include "core/layers/npu/npu_qwen2_decoder_layer_impl.h"
 #include "core/layers/npu/npu_rms_norm_impl.h"
-#include "core/util/tensor_helper.h"
 #include "models/llm/npu/deepseek_v3.h"
 #include "models/model_registry.h"
 #include "processors/kimi25_image_processor.h"

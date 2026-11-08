@@ -30,7 +30,7 @@ limitations under the License.
 #include "core/framework/request/request_output.h"
 #include "core/framework/request/request_params.h"
 #include "core/framework/request/sample_slot.h"
-#include "core/util/pybind_helper.h"
+#include "core/framework/tensor/pybind_helper.h"
 #include "models/model_registry.h"
 
 namespace xllm {

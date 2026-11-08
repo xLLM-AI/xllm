@@ -20,8 +20,8 @@ limitations under the License.
 #include <memory>
 #include <optional>
 
+#include "core/framework/model/rec_model_utils.h"
 #include "sampling_params.h"
-#include "util/rec_model_utils.h"
 
 namespace xllm {
 

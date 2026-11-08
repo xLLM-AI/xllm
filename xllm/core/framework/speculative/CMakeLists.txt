@@ -48,6 +48,7 @@ cc_library(
     verify_layout.cpp
     spec_verify.cpp
   DEPS
+    :tensor_support
     Threads::Threads
     torch
     $<$<BOOL:${USE_NPU}>:torch_npu>
@@ -60,4 +61,19 @@ cc_library(
     glog::glog
     nlohmann_json::nlohmann_json
     proto::xllm_proto
+)
+
+# Suffix proposals are CPU-only token structures and do not require model runtime.
+cc_library(
+  NAME
+    suffix_decoding
+  HDRS
+    suffix_decoding_cache.h
+    suffix_tree.h
+  SRCS
+    suffix_decoding_cache.cpp
+    suffix_tree.cpp
+  DEPS
+    :util
+    glog::glog
 )

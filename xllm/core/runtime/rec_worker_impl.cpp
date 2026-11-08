@@ -31,10 +31,10 @@ limitations under the License.
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/rec_config.h"
+#include "core/framework/model/rec_model_utils.h"
+#include "core/framework/model/seq_lens.h"
 #include "core/framework/sampling/sampler.h"
-#include "util/rec_model_utils.h"
-#include "util/seq_lens.h"
-#include "util/tensor_helper.h"
+#include "core/framework/tensor/tensor_helper.h"
 #if defined(USE_CUDA)
 #include "kernels/cuda/cuda_ops_api.h"
 #include "kernels/cuda/xattention/xattention_ops_api.h"

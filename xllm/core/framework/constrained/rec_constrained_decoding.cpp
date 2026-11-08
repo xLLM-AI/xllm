@@ -18,8 +18,8 @@ limitations under the License.
 #include <glog/logging.h>
 
 #include "core/framework/state_dict/rec_vocab_dict.h"
+#include "core/framework/tensor/tensor_helper.h"
 #include "core/util/slice.h"
-#include "core/util/tensor_helper.h"
 
 namespace xllm {
 RecConstrainedDecoding::RecConstrainedDecoding(RecVocabDict* vocab_dict,

@@ -20,6 +20,7 @@ limitations under the License.
 #include <boost/algorithm/string.hpp>
 #include <string_view>
 
+#include "core/common/types.h"
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/config/kv_cache_config.h"
@@ -29,6 +30,7 @@ limitations under the License.
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/model/model_args.h"
+#include "core/framework/model/model_type.h"
 #include "core/framework/parallel_state/parallel_topology.h"
 #include "core/kv_cache/layout/layerwise_split_layout.h"
 #include "core/platform/platform.h"

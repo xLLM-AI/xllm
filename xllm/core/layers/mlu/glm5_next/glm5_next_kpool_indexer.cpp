@@ -30,11 +30,11 @@ limitations under the License.
 
 #include "common/constants.h"
 #include "compiler/triton/include/jit_kernel.h"
+#include "core/framework/model/seq_lens.h"
+#include "core/framework/tensor/linalg.h"
+#include "core/framework/tensor/tensor_helper.h"
 #include "framework/config/kv_cache_config.h"
 #include "framework/core/MLUStream.h"
-#include "util/linalg.h"
-#include "util/seq_lens.h"
-#include "util/tensor_helper.h"
 
 namespace xllm::layer {
 namespace {

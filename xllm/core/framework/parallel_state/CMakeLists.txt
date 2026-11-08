@@ -38,6 +38,7 @@ cc_library(
     parallel_topology.cpp
     dit_collective_communicator.cpp
   DEPS
+    :tensor_support
     :common
     torch
     $<$<BOOL:${USE_MLU}>:torch_mlu>

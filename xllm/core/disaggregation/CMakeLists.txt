@@ -18,6 +18,7 @@ cc_library(
     pd_response.cpp
     pd_kv_response.cpp
   DEPS
+    :tensor_codec
     :scheduler
     :distributed_runtime
 )

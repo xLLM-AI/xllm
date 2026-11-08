@@ -27,11 +27,11 @@ limitations under the License.
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/scheduler_config.h"
+#include "core/framework/model/rec_model_utils.h"
 #include "core/layers/npu/loader/qwen3_decoder_loader.h"
 #include "operations/aclnn/ops/quant_matmul_nz_decode_operation.h"
 #include "operations/aclnn/utils/utils.h"
 #include "operations/fusion/mlp/mlp.h"
-#include "util/rec_model_utils.h"
 
 // #include "attn_mask.h"
 #include "torch_npu/csrc/core/npu/NPUCachingAllocator.h"

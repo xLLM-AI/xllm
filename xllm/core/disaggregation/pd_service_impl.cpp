@@ -23,6 +23,7 @@ limitations under the License.
 #include <vector>
 
 #include "common/types.h"
+#include "core/common/types.h"
 #include "core/disaggregation/pd_kv_response.h"
 #include "core/disaggregation/pd_request_converter.h"
 #include "core/disaggregation/pd_response.h"
@@ -33,6 +34,7 @@ limitations under the License.
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/constrained/json_object_grammar.h"
 #include "core/framework/request/request_output.h"
+#include "core/framework/tensor/tensor_codec.h"
 #include "util/utils.h"
 
 namespace xllm {

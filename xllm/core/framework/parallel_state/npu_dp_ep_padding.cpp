@@ -20,7 +20,7 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "core/framework/config/eplb_config.h"
-#include "util/tensor_helper.h"
+#include "core/framework/tensor/tensor_helper.h"
 
 namespace xllm {
 

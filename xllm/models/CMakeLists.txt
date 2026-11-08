@@ -26,6 +26,8 @@ cc_library(
     llm/py_causal_lm.cpp
     py_model_helper.cpp
   DEPS
+    :tensor_support
+    :dit_model_discovery
     :model
     :kv_cache
     :request

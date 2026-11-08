@@ -33,8 +33,8 @@ limitations under the License.
 #include "core/framework/parallel_state/parallel_topology.h"
 #include "core/framework/parallel_state/process_group.h"
 #include "core/framework/state_dict/state_dict.h"
+#include "core/framework/tensor/pybind_helper.h"
 #include "core/kv_cache/layout/kpool_cache_policy.h"
-#include "core/util/pybind_helper.h"
 #include "core/util/utils.h"
 #include "models/py_model_helper.h"
 

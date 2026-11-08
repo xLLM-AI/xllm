@@ -25,10 +25,9 @@ limitations under the License.
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
-
-#include "utils.h"
 
 namespace xllm {
 

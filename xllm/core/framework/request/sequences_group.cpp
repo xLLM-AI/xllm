@@ -21,9 +21,9 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "core/framework/config/rec_config.h"
+#include "core/framework/model/rec_model_utils.h"
 #include "core/framework/request/rec_sequence.h"
 #include "core/framework/request/sequence_factory.h"
-#include "core/util/rec_model_utils.h"
 #include "framework/batch/beam_search.h"
 #include "util/blocking_counter.h"
 #include "util/slice.h"

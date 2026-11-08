@@ -27,6 +27,7 @@ limitations under the License.
 #include <vector>
 
 #include "common/macros.h"
+#include "core/common/types.h"
 #include "core/distributed_runtime/distributed_vmm_coordinator.h"
 #include "core/distributed_runtime/kv_transfer_coordinator.h"
 #include "core/framework/config/disagg_pd_config.h"
@@ -34,6 +35,7 @@ limitations under the License.
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/config/speculative_config.h"
+#include "core/framework/tensor/tensor_codec.h"
 #include "core/kv_cache/transfer/pd_topology_guard.h"
 #include "core/util/scope_guard.h"
 #include "disagg_pd.pb.h"

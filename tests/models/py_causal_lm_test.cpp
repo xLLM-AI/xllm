@@ -32,6 +32,7 @@ limitations under the License.
 #include "core/framework/model/llm_model_params.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_params_view.h"
+#include "core/framework/model/model_type.h"
 #include "core/framework/model_context/model_context.h"
 #include "core/framework/model_loader/hf_model_args.h"
 #include "core/framework/parallel_state/parallel_args.h"

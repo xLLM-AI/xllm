@@ -25,8 +25,8 @@ limitations under the License.
 #include <numeric>
 #include <vector>
 
-#include "util/slice.h"
-#include "util/utils.h"
+#include "core/util/slice.h"
+#include "core/util/utils.h"
 
 namespace xllm::util {
 

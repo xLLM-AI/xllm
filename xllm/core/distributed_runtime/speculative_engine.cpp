@@ -24,12 +24,14 @@ limitations under the License.
 #include <utility>
 
 #include "common/metrics.h"
+#include "core/common/types.h"
 #include "core/distributed_runtime/distributed_vmm_coordinator.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/load_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/eplb/eplb_controller.h"
+#include "core/framework/tensor/tensor_options.h"
 #include "core/kv_cache/layout/kv_cache_estimation.h"
 #include "core/kv_cache/layout/vmm_kv_cache_layout.h"
 #include "framework/speculative/mtp_utils.h"

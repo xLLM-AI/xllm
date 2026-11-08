@@ -61,9 +61,9 @@ limitations under the License.
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/speculative_config.h"
 #include "core/framework/model/model_args.h"
+#include "core/framework/model/seq_lens.h"
 #include "core/kv_cache/layout/kv_cache_estimation.h"
 #include "core/platform/platform.h"
-#include "core/util/seq_lens.h"
 #if defined(USE_NPU)
 #include "core/platform/npu/npu_profiler.h"
 #include "core/platform/npu/npu_torch_profiler.h"
@@ -99,8 +99,11 @@ limitations under the License.
 #if defined(USE_NPU)
 #include "layers/npu/loader/rolling_weight_buffer.h"
 #endif
+#include "core/common/types.h"
+#include "core/framework/model/model_type.h"
+#include "core/framework/tensor/tensor_helper.h"
+#include "core/framework/tensor/tensor_options.h"
 #include "util/json_reader.h"
-#include "util/tensor_helper.h"
 #include "util/threadpool.h"
 #include "util/timer.h"
 #include "util/utils.h"

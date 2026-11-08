@@ -25,15 +25,35 @@ limitations under the License.
 #include <boost/algorithm/string.hpp>
 #include <filesystem>
 #include <fstream>
+#include <utility>
 #include <vector>
 
+#include "core/framework/model_loader/dit_model_discovery.h"
 #include "core/framework/tokenizer/tokenizer_args.h"
 #include "core/framework/tokenizer/tokenizer_factory.h"
-#include "core/util/dit_model_discovery.h"
 #include "core/util/json_reader.h"
 #include "models/model_registry.h"
 
 namespace xllm {
+namespace util {
+
+std::optional<DitModelLayout> discover_dit_model_layout(
+    const std::filesystem::path& model_path) {
+  auto components = discover_dit_components(model_path);
+  if (!components.has_value()) {
+    return std::nullopt;
+  }
+  DitModelLayout layout;
+  layout.components = std::move(*components);
+  layout.pipeline_type = resolve_dit_pipeline_type(layout.components);
+  if (layout.pipeline_type.empty()) {
+    return std::nullopt;
+  }
+  return layout;
+}
+
+}  // namespace util
+
 DiTFolderLoader::DiTFolderLoader(const std::string& folder_path,
                                  const std::string& component_name,
                                  const std::string& model_type)

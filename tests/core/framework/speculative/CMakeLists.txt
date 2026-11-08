@@ -54,6 +54,7 @@ cc_test(
     spec_input_builder_test.cpp
     "${PROJECT_SOURCE_DIR}/xllm/core/framework/speculative/spec_input_builder.cpp"
   DEPS
+    :tensor_support
     :multimodal
     :parallel_state
     :request
@@ -113,3 +114,14 @@ target_link_libraries(embedding_cache_test
                       $<$<BOOL:${USE_NPU}>:hccl>
                       $<$<BOOL:${USE_NPU}>:c_sec>
                       $<$<BOOL:${USE_NPU}>:nnopbase>)
+
+cc_test(
+  NAME
+    suffix_decoding_cache_test
+  CPU_ONLY
+  SRCS
+    suffix_decoding_cache_test.cpp
+  DEPS
+    :suffix_decoding
+    GTest::gtest_main
+)

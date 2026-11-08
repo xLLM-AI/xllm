@@ -20,10 +20,10 @@ limitations under the License.
 
 #include "attention_metadata.h"
 #include "attention_metadata_builder.h"
+#include "core/framework/model/seq_lens.h"
+#include "core/framework/tensor/tensor_helper.h"
 #include "dsa_metadata.h"
 #include "framework/model/model_params_view.h"
-#include "util/seq_lens.h"
-#include "util/tensor_helper.h"
 
 namespace xllm::layer {
 

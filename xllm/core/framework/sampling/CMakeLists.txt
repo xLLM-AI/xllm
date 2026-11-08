@@ -16,6 +16,7 @@ cc_library(
     rec_sampler.cpp
     beam_searcher.cpp
   DEPS
+    :tensor_support
     util
     :common
     glog::glog

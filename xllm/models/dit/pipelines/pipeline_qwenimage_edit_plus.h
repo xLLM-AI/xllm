@@ -30,13 +30,13 @@ limitations under the License.
 #include "core/framework/model/dit_model_output.h"
 #include "core/framework/model/dit_model_params.h"
 #include "core/framework/model/model_params_view.h"
+#include "core/framework/model/seq_lens.h"
 #include "core/framework/model_context/model_context.h"
 #include "core/framework/model_loader/dit_model_loader.h"
 #include "core/framework/parallel_state/process_group.h"
 #include "core/framework/request/dit_request_state.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/framework/state_dict/utils.h"
-#include "core/util/seq_lens.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "models/dit/autoencoders/autoencoder_kl.h"
 #include "models/dit/autoencoders/autoencoder_kl_qwenimage.h"
@@ -47,8 +47,8 @@ limitations under the License.
 #if defined(USE_DCU)
 #include "models/vlm/qwen2_5_vl.h"
 #endif
+#include "core/framework/tensor/tensor_helper.h"
 #include "processors/qwen2_vl_image_processor.h"
-#include "util/tensor_helper.h"
 
 #define CONDITION_IMAGE_SIZE 147456
 

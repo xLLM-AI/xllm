@@ -32,6 +32,7 @@ limitations under the License.
 #include "api_service/response_usage.h"
 #include "common/instance_name.h"
 #include "completion.pb.h"
+#include "core/common/types.h"
 #include "core/distributed_runtime/llm_master.h"
 #include "core/distributed_runtime/master_manager.h"
 #include "core/distributed_runtime/xservice_client.h"

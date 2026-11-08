@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/util/tensor_helper.h"
+#include "core/framework/tensor/tensor_helper.h"
 #include "mm_data.h"
 
 namespace xllm {

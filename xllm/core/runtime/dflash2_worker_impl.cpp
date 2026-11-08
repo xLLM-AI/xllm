@@ -30,7 +30,7 @@ limitations under the License.
 #include "core/framework/sampling/logits_processor.h"
 #include "core/framework/sampling/sampler.h"
 #include "core/framework/speculative/draft_proposal.h"
-#include "core/util/tensor_helper.h"
+#include "core/framework/tensor/tensor_helper.h"
 #include "util/timer.h"
 
 namespace xllm {

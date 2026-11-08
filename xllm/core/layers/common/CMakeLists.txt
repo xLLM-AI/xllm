@@ -63,6 +63,7 @@ cc_library(
     dflash2_grouped_conv.cpp
     moe_fused_topk.cpp
   DEPS
+    :tensor_support
     "-Wl,--whole-archive"
     "-Wl,--no-whole-archive"
     :kv_cache
