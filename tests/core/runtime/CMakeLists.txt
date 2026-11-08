@@ -376,10 +376,10 @@ cc_test(
 
 cc_test(
   NAME
-    overlap_token_sanitizer_test
+    decode_input_placeholders_test
   CPU_ONLY
   SRCS
-    overlap_token_sanitizer_test.cpp
+    decode_input_placeholders_test.cpp
   DEPS
     torch
     glog::glog

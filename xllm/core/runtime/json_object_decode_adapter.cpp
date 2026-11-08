@@ -25,8 +25,8 @@ limitations under the License.
 #include "core/framework/constrained/json_object_constraint_batch.h"
 #include "core/framework/constrained/json_object_output_binding.h"
 #include "core/platform/stream.h"
+#include "core/runtime/decode_input_placeholders.h"
 #include "core/runtime/forward_params.h"
-#include "core/runtime/overlap_token_sanitizer.h"
 #include "core/runtime/vlm_forward_params.h"
 #include "core/util/tensor_helper.h"
 
@@ -155,11 +155,11 @@ void JsonObjectDecodeAdapter::sanitize_error_inputs(Input& input) {
   }
   std::string error;
   CHECK(
-      detail::sanitize_failed_overlap_token_ids(&input.token_ids,
-                                                input.sample_sequence_ids,
-                                                input.sample_prior_output_rows,
-                                                failed_sequence_ids,
-                                                &error))
+      detail::reset_failed_sequence_placeholders(&input.token_ids,
+                                                 input.sample_sequence_ids,
+                                                 input.sample_prior_output_rows,
+                                                 failed_sequence_ids,
+                                                 &error))
       << error;
 }
 

@@ -30,19 +30,19 @@ namespace detail {
 
 // Decode overlap encodes a prior output row as -(row + 1) in the input tokens.
 // Failed sequences must have exactly one such placeholder before replacement.
-struct OverlapPlaceholderLocation final {
+struct DecodeInputPlaceholderLocation final {
   int64_t match_count = 0;
   int64_t token_offset = 0;
 };
 
 template <typename Token>
-inline bool sanitize_cpu_failed_overlap_token_ids(
+inline bool reset_cpu_failed_sequence_placeholders(
     torch::Tensor& token_ids,
     const std::vector<std::string>& sample_sequence_ids,
     const std::vector<int32_t>& prior_output_rows,
     const std::unordered_set<std::string_view>& failed_sequence_ids,
     std::string& error) {
-  std::unordered_map<Token, OverlapPlaceholderLocation> placeholders;
+  std::unordered_map<Token, DecodeInputPlaceholderLocation> placeholders;
   placeholders.reserve(failed_sequence_ids.size());
   for (size_t state_idx = 0; state_idx < sample_sequence_ids.size();
        ++state_idx) {
@@ -107,7 +107,7 @@ inline bool sanitize_cpu_failed_overlap_token_ids(
   return true;
 }
 
-inline bool sanitize_failed_overlap_token_ids(
+inline bool reset_failed_sequence_placeholders(
     torch::Tensor* token_ids,
     const std::vector<std::string>& sample_sequence_ids,
     const std::vector<int32_t>& prior_output_rows,
@@ -127,18 +127,20 @@ inline bool sanitize_failed_overlap_token_ids(
 
   if (token_ids->device().is_cpu() && token_ids->is_contiguous()) {
     if (token_ids->scalar_type() == torch::kInt32) {
-      return sanitize_cpu_failed_overlap_token_ids<int32_t>(*token_ids,
-                                                            sample_sequence_ids,
-                                                            prior_output_rows,
-                                                            failed_sequence_ids,
-                                                            *error);
+      return reset_cpu_failed_sequence_placeholders<int32_t>(
+          *token_ids,
+          sample_sequence_ids,
+          prior_output_rows,
+          failed_sequence_ids,
+          *error);
     }
     if (token_ids->scalar_type() == torch::kInt64) {
-      return sanitize_cpu_failed_overlap_token_ids<int64_t>(*token_ids,
-                                                            sample_sequence_ids,
-                                                            prior_output_rows,
-                                                            failed_sequence_ids,
-                                                            *error);
+      return reset_cpu_failed_sequence_placeholders<int64_t>(
+          *token_ids,
+          sample_sequence_ids,
+          prior_output_rows,
+          failed_sequence_ids,
+          *error);
     }
   }
 
