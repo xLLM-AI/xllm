@@ -13,3 +13,4 @@ description: "xLLM 扩散模型推理实践"
 - [Wan2.1](/zh/cookbook/diffusion_models/wan/wan2_1/)
 - [Wan2.2](/zh/cookbook/diffusion_models/wan/wan2_2/)
 - [Qwen-Image](/zh/cookbook/diffusion_models/qwen_image/qwen_image/)
+- [MiniMax-H3](/zh/cookbook/diffusion_models/minimax_h3/minimax_h3/)

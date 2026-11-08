@@ -20,8 +20,11 @@ limitations under the License.
 #include <string>
 
 #include "core/util/binary_payload.h"
-#include "rec.pb.h"
-#include "tensor.pb.h"
+
+namespace xllm::proto {
+class InferInputTensor;
+class Tensor;
+}  // namespace xllm::proto
 
 namespace xllm::util {
 

@@ -13,3 +13,4 @@ Content will be added as the recipes are organized.
 - [Wan2.1](/en/cookbook/diffusion_models/wan/wan2_1/)
 - [Wan2.2](/en/cookbook/diffusion_models/wan/wan2_2/)
 - [Qwen-Image](/en/cookbook/diffusion_models/qwen_image/qwen_image/)
+- [MiniMax-H3](/en/cookbook/diffusion_models/minimax_h3/minimax_h3/)

@@ -26,6 +26,9 @@ limitations under the License.
 #include <unordered_set>
 #include <vector>
 
+#include "rec.pb.h"
+#include "tensor.pb.h"
+
 namespace xllm::util {
 namespace {
 

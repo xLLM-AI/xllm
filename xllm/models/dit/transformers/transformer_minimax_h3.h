@@ -23,6 +23,7 @@ limitations under the License.
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <numeric>
 #include <string>
 #include <utility>
 #include <vector>
@@ -47,6 +48,7 @@ namespace xllm {
 namespace minimax_h3 {
 
 constexpr char kPackedSequenceTensorName[] = "packed";
+constexpr int64_t kPackedSequenceAlignment = 64;
 
 // Loads and verifies the weight/bias pair of a plain nn::Linear; shared by
 // the transformer's projection layers and the smaller sub-modules.
@@ -102,11 +104,11 @@ class H3SwiGLUFFNImpl final : public torch::nn::Module {
   H3SwiGLUFFNImpl(int64_t hidden_size,
                   int64_t ffn_dim,
                   bool bias,
-                  const ModelContext& context)
-      : options_(context.get_tensor_options()),
-        tp_group_(context.get_parallel_args().dit_tp_group_) {
+                  const ModelContext& context) {
     CHECK(!bias) << "MiniMax-H3 SwiGLU checkpoint does not use bias";
     const QuantArgs& quant_args = context.get_quant_args();
+    const auto& options = context.get_tensor_options();
+    ProcessGroup* tp_group = context.get_parallel_args().dit_tp_group_;
     proj_in_ =
         register_module("proj_in",
                         layer::ColumnParallelLinear(hidden_size,
@@ -114,8 +116,8 @@ class H3SwiGLUFFNImpl final : public torch::nn::Module {
                                                     bias,
                                                     /*gather_output=*/false,
                                                     quant_args,
-                                                    tp_group_,
-                                                    options_));
+                                                    tp_group,
+                                                    options));
     proj_out_ = register_module(
         "proj_out",
         layer::RowParallelLinear(ffn_dim,
@@ -124,70 +126,73 @@ class H3SwiGLUFFNImpl final : public torch::nn::Module {
                                  /*input_is_parallelized=*/true,
                                  /*enable_result_reduction=*/true,
                                  quant_args,
-                                 tp_group_,
-                                 options_));
+                                 tp_group,
+                                 options));
   }
 
   torch::Tensor forward(const torch::Tensor& hidden_states) {
-    torch::Tensor x = proj_in_->forward(hidden_states);
+    torch::Tensor x =
+        proj_in_->forward(hidden_states.reshape({-1, hidden_states.size(-1)}));
     std::vector<torch::Tensor> chunks = x.chunk(2, -1);
-    torch::Tensor activation = chunks[0] * torch::silu(chunks[1]);
-    return proj_out_->forward(activation);
+    torch::Tensor activation = torch::silu(chunks[0]) * chunks[1];
+    return proj_out_->forward(activation).view(hidden_states.sizes());
   }
 
   void load_state_dict(const StateDict& state_dict) {
     const StateDict proj_in_state =
         state_dict.get_dict_with_prefix("net.0.proj.");
-    const int64_t tp_size = tp_group_ == nullptr ? 1 : tp_group_->world_size();
-    if (tp_size == 1) {
-      proj_in_->load_state_dict(proj_in_state);
-    } else {
-      const int64_t tp_rank = tp_group_->rank();
-      torch::Tensor weight = proj_in_state.get_tensor("weight");
-      if (weight.defined()) {
-        torch::Tensor local_weight =
-            dit::shard_swiglu_weight(weight, tp_size, tp_rank).to(options_);
-        torch::NoGradGuard no_grad;
-        for (auto& parameter : proj_in_->named_parameters()) {
-          if (parameter.key() == "weight") {
-            CHECK_EQ(parameter.value().sizes(), local_weight.sizes());
-            parameter.value().data().copy_(local_weight);
-            proj_in_weight_is_loaded_ = true;
-            break;
-          }
-        }
-      }
+    const torch::Tensor weight = proj_in_state.get_tensor("weight");
+    if (weight.defined()) {
+      // Converted checkpoints store [up, gate]. Match the native [gate, up]
+      // projected-column order; the fused loader shards each half separately.
+      const auto parts = weight.chunk(2, /*dim=*/0);
+      proj_in_->load_state_dict(
+          StateDict({{"gate.weight", parts[1]}, {"up.weight", parts[0]}}),
+          {"gate.", "up."});
     }
     proj_out_->load_state_dict(state_dict.get_dict_with_prefix("net.2."));
   }
 
   void verify_loaded_weights(const std::string& prefix) {
-    CHECK(proj_in_weight_is_loaded_ || proj_in_->is_weight_loaded())
+    CHECK(proj_in_->is_weight_loaded())
         << "weight is not loaded for " << prefix + "net.0.proj.weight";
     CHECK(proj_out_->is_weight_loaded())
         << "weight is not loaded for " << prefix + "net.2.weight";
   }
 
  private:
-  torch::TensorOptions options_;
-  ProcessGroup* tp_group_ = nullptr;
   layer::ColumnParallelLinear proj_in_{nullptr};
   layer::RowParallelLinear proj_out_{nullptr};
-  bool proj_in_weight_is_loaded_ = false;
 };
 TORCH_MODULE(H3SwiGLUFFN);
 
 class H3TimestepEmbeddingImpl final : public torch::nn::Module {
  public:
-  H3TimestepEmbeddingImpl(int64_t in_dim, int64_t hidden_dim, int64_t out_dim) {
-    linear_1_ = register_module(
-        "linear_1",
-        torch::nn::Linear(
-            torch::nn::LinearOptions(in_dim, hidden_dim).bias(true)));
+  H3TimestepEmbeddingImpl(int64_t in_dim,
+                          int64_t hidden_dim,
+                          int64_t out_dim,
+                          const ModelContext& context) {
+    const auto options = context.get_tensor_options().dtype(torch::kFloat32);
+    ProcessGroup* tp_group = context.get_parallel_args().dit_tp_group_;
+    linear_1_ =
+        register_module("linear_1",
+                        layer::ColumnParallelLinear(in_dim,
+                                                    hidden_dim,
+                                                    /*bias=*/true,
+                                                    /*gather_output=*/false,
+                                                    QuantArgs(),
+                                                    tp_group,
+                                                    options));
     linear_2_ = register_module(
         "linear_2",
-        torch::nn::Linear(
-            torch::nn::LinearOptions(hidden_dim, out_dim).bias(true)));
+        layer::RowParallelLinear(hidden_dim,
+                                 out_dim,
+                                 /*bias=*/true,
+                                 /*input_is_parallelized=*/true,
+                                 /*enable_result_reduction=*/true,
+                                 QuantArgs(),
+                                 tp_group,
+                                 options));
   }
 
   torch::Tensor forward(const torch::Tensor& sample) {
@@ -195,35 +200,27 @@ class H3TimestepEmbeddingImpl final : public torch::nn::Module {
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    load_linear(state_dict,
-                "linear_1",
-                linear_1_,
-                linear_1_weight_is_loaded_,
-                linear_1_bias_is_loaded_);
-    load_linear(state_dict,
-                "linear_2",
-                linear_2_,
-                linear_2_weight_is_loaded_,
-                linear_2_bias_is_loaded_);
+    linear_1_->load_state_dict(state_dict.get_dict_with_prefix("linear_1."));
+    if (state_dict.get_tensor("linear_1.bias").defined()) {
+      linear_1_bias_is_loaded_ = true;
+    }
+    linear_2_->load_state_dict(state_dict.get_dict_with_prefix("linear_2."));
+    if (state_dict.get_tensor("linear_2.bias").defined()) {
+      linear_2_bias_is_loaded_ = true;
+    }
   }
 
   void verify_loaded_weights(const std::string& prefix) {
-    verify_linear(prefix,
-                  "linear_1",
-                  linear_1_weight_is_loaded_,
-                  linear_1_bias_is_loaded_);
-    verify_linear(prefix,
-                  "linear_2",
-                  linear_2_weight_is_loaded_,
-                  linear_2_bias_is_loaded_);
+    CHECK(linear_1_->is_weight_loaded()) << prefix + "linear_1.weight";
+    CHECK(linear_1_bias_is_loaded_) << prefix + "linear_1.bias";
+    CHECK(linear_2_->is_weight_loaded()) << prefix + "linear_2.weight";
+    CHECK(linear_2_bias_is_loaded_) << prefix + "linear_2.bias";
   }
 
  private:
-  torch::nn::Linear linear_1_{nullptr};
-  torch::nn::Linear linear_2_{nullptr};
-  bool linear_1_weight_is_loaded_ = false;
+  layer::ColumnParallelLinear linear_1_{nullptr};
+  layer::RowParallelLinear linear_2_{nullptr};
   bool linear_1_bias_is_loaded_ = false;
-  bool linear_2_weight_is_loaded_ = false;
   bool linear_2_bias_is_loaded_ = false;
 };
 TORCH_MODULE(H3TimestepEmbedding);
@@ -290,20 +287,15 @@ class H3AttentionImpl final : public torch::nn::Module,
     const int64_t inner_dim = heads * dim_head;
     const QuantArgs& quant_args = context.get_quant_args();
     const torch::TensorOptions& options = context.get_tensor_options();
-    for (auto& [name, member] :
-         {std::pair<const char*, layer::ColumnParallelLinear*>{"to_q", &to_q_},
-          {"to_k", &to_k_},
-          {"to_v", &to_v_}}) {
-      *member =
-          register_module(name,
-                          layer::ColumnParallelLinear(hidden_size,
-                                                      inner_dim,
-                                                      /*bias=*/false,
-                                                      /*gather_output=*/false,
-                                                      quant_args,
-                                                      tp_group,
-                                                      options));
-    }
+    to_qkv_ =
+        register_module("to_qkv",
+                        layer::ColumnParallelLinear(hidden_size,
+                                                    3 * inner_dim,
+                                                    /*bias=*/false,
+                                                    /*gather_output=*/false,
+                                                    quant_args,
+                                                    tp_group,
+                                                    options));
     to_out_ = register_module(
         "to_out",
         layer::RowParallelLinear(inner_dim,
@@ -323,15 +315,15 @@ class H3AttentionImpl final : public torch::nn::Module,
         DiTConfig::get_instance().dit_sp_communication_overlap();
     const int64_t batch_size = hidden_states.size(0);
     const int64_t local_sequence_length = hidden_states.size(1);
-    const std::array<layer::ColumnParallelLinear*, 3> projections = qkv();
+    const std::vector<torch::Tensor> projections =
+        to_qkv_->forward(hidden_states.reshape({-1, hidden_states.size(-1)}))
+            .view({batch_size, local_sequence_length, -1})
+            .chunk(3, -1);
     std::array<torch::Tensor, 3> qkv_tensor{};
     std::array<std::function<torch::Tensor()>, 3> qkv_work{};
     for (size_t index = 0; index < projections.size(); ++index) {
-      qkv_tensor[index] =
-          (*projections[index])
-              ->forward(hidden_states)
-              .view(
-                  {batch_size, local_sequence_length, local_heads_, dim_head_});
+      qkv_tensor[index] = projections[index].contiguous().view(
+          {batch_size, local_sequence_length, local_heads_, dim_head_});
       if (sp_size_ > 1) {
         qkv_work[index] = parallel_state::all_to_all_4D(
             qkv_tensor[index],
@@ -346,9 +338,9 @@ class H3AttentionImpl final : public torch::nn::Module,
     torch::Tensor& k = qkv_tensor[1];
     torch::Tensor& v = qkv_tensor[2];
     if (sp_size_ > 1) {
-      q = unpad_tensor(qkv_work[0](), kPackedSequenceTensorName, /*dim=*/1);
-      k = unpad_tensor(qkv_work[1](), kPackedSequenceTensorName, /*dim=*/1);
-      v = unpad_tensor(qkv_work[2](), kPackedSequenceTensorName, /*dim=*/1);
+      q = qkv_work[0]();
+      k = qkv_work[1]();
+      v = qkv_work[2]();
     }
     q = norm_q_->forward(q);
     k = norm_k_->forward(k);
@@ -359,31 +351,77 @@ class H3AttentionImpl final : public torch::nn::Module,
       q = dit::apply_rotary(q, cos_b, sin_b);
       k = dit::apply_rotary(k, cos_b, sin_b);
     }
+#if defined(USE_NPU)
+    const int64_t sequence_length = q.size(1);
+    const int64_t live_sequence_length =
+        sp_size_ > 1
+            ? unpad_tensor(q, kPackedSequenceTensorName, /*dim=*/1).size(1)
+            : sequence_length;
+    const int64_t attention_heads = q.size(2);
+    std::vector<c10::SymInt> sequence_ends;
+    sequence_ends.reserve(2 * batch_size);
+    for (int64_t batch = 0; batch < batch_size; ++batch) {
+      sequence_ends.emplace_back(batch * sequence_length +
+                                 live_sequence_length);
+      if (live_sequence_length < sequence_length) {
+        sequence_ends.emplace_back((batch + 1) * sequence_length);
+      }
+    }
+    const auto results =
+        at_npu::native::custom_ops::npu_fused_infer_attention_score(
+            q.reshape({-1, attention_heads, dim_head_}),
+            k.reshape({-1, attention_heads, dim_head_}),
+            v.reshape({-1, attention_heads, dim_head_}),
+            /*pse_shift=*/std::nullopt,
+            /*atten_mask=*/std::nullopt,
+            /*actual_seq_lengths=*/c10::SymIntArrayRef(sequence_ends),
+            /*actual_seq_lengths_kv=*/c10::SymIntArrayRef(sequence_ends),
+            /*dequant_scale1=*/std::nullopt,
+            /*quant_scale1=*/std::nullopt,
+            /*dequant_scale2=*/std::nullopt,
+            /*quant_scale2=*/std::nullopt,
+            /*quant_offset2=*/std::nullopt,
+            /*antiquant_scale=*/std::nullopt,
+            /*antiquant_offset=*/std::nullopt,
+            /*key_antiquant_scale=*/std::nullopt,
+            /*key_antiquant_offset=*/std::nullopt,
+            /*value_antiquant_scale=*/std::nullopt,
+            /*value_antiquant_offset=*/std::nullopt,
+            /*block_table=*/std::nullopt,
+            /*query_padding_size=*/std::nullopt,
+            /*kv_padding_size=*/std::nullopt,
+            /*key_shared_prefix=*/std::nullopt,
+            /*value_shared_prefix=*/std::nullopt,
+            /*actual_shared_prefix_len=*/std::nullopt,
+            /*query_rope=*/std::nullopt,
+            /*key_rope=*/std::nullopt,
+            /*key_rope_antiquant_scale=*/std::nullopt,
+            /*num_heads=*/attention_heads,
+            /*scale=*/std::pow(dim_head_, -0.5),
+            /*pre_tokens=*/2147483647,
+            /*next_tokens=*/2147483647,
+            /*input_layout=*/"TND",
+            /*num_key_value_heads=*/attention_heads);
+    torch::Tensor out = std::get<0>(results).view(
+        {batch_size, sequence_length, attention_heads, dim_head_});
+#else
+    // SDPA has no packed-segment metadata; exclude SP padding explicitly.
+    if (sp_size_ > 1) {
+      q = unpad_tensor(q, kPackedSequenceTensorName, /*dim=*/1);
+      k = unpad_tensor(k, kPackedSequenceTensorName, /*dim=*/1);
+      v = unpad_tensor(v, kPackedSequenceTensorName, /*dim=*/1);
+    }
     q = q.permute({0, 2, 1, 3}).contiguous();
     k = k.permute({0, 2, 1, 3}).contiguous();
     v = v.permute({0, 2, 1, 3}).contiguous();
-#if defined(USE_NPU)
-    const auto results = at_npu::native::custom_ops::npu_fusion_attention(
-        q,
-        k,
-        v,
-        q.size(1),
-        "BNSD",
-        torch::nullopt,
-        torch::nullopt,
-        torch::nullopt,
-        std::pow(dim_head_, -0.5),
-        1.0,
-        65535,
-        65535);
-    torch::Tensor out = std::get<0>(results);
-#else
     torch::Tensor out = torch::scaled_dot_product_attention(
         q, k, v, std::nullopt, /*dropout_p=*/0.0, /*is_causal=*/false);
-#endif
     out = out.permute({0, 2, 1, 3}).contiguous();
     if (sp_size_ > 1) {
       out = pad_tensor(out, kPackedSequenceTensorName, /*dim=*/1);
+    }
+#endif
+    if (sp_size_ > 1) {
       auto out_work = parallel_state::all_to_all_4D(out,
                                                     /*scatter_idx=*/1,
                                                     /*gather_idx=*/2,
@@ -393,29 +431,20 @@ class H3AttentionImpl final : public torch::nn::Module,
     }
     out =
         out.view({batch_size, local_sequence_length, local_heads_ * dim_head_});
-    return to_out_->forward(out);
+    return to_out_->forward(out.reshape({-1, local_heads_ * dim_head_}))
+        .view({batch_size, local_sequence_length, -1});
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    constexpr std::array<const char*, 3> kNames{"to_q", "to_k", "to_v"};
-    const std::array<layer::ColumnParallelLinear*, 3> projections = qkv();
-    for (size_t index = 0; index < projections.size(); ++index) {
-      (*projections[index])
-          ->load_state_dict(state_dict.get_dict_with_prefix(
-              std::string(kNames[index]) + "."));
-    }
+    to_qkv_->load_state_dict(state_dict, {"to_q.", "to_k.", "to_v."});
     to_out_->load_state_dict(state_dict.get_dict_with_prefix("to_out.0."));
     norm_q_->load_state_dict(state_dict.get_dict_with_prefix("norm_q."));
     norm_k_->load_state_dict(state_dict.get_dict_with_prefix("norm_k."));
   }
 
   void verify_loaded_weights(const std::string& prefix) {
-    constexpr std::array<const char*, 3> kNames{"to_q", "to_k", "to_v"};
-    const std::array<layer::ColumnParallelLinear*, 3> projections = qkv();
-    for (size_t index = 0; index < projections.size(); ++index) {
-      CHECK((*projections[index])->is_weight_loaded())
-          << "weight is not loaded for " << prefix + kNames[index] + ".weight";
-    }
+    CHECK(to_qkv_->is_weight_loaded())
+        << "Q/K/V weights are not loaded for " << prefix;
     CHECK(to_out_->is_weight_loaded())
         << "weight is not loaded for " << prefix + "to_out.0.weight";
     norm_q_->verify_loaded_weights(prefix + "norm_q.");
@@ -423,16 +452,10 @@ class H3AttentionImpl final : public torch::nn::Module,
   }
 
  private:
-  std::array<layer::ColumnParallelLinear*, 3> qkv() {
-    return std::array<layer::ColumnParallelLinear*, 3>{&to_q_, &to_k_, &to_v_};
-  }
-
   int64_t local_heads_;
   int64_t dim_head_;
   int64_t sp_size_;
-  layer::ColumnParallelLinear to_q_{nullptr};
-  layer::ColumnParallelLinear to_k_{nullptr};
-  layer::ColumnParallelLinear to_v_{nullptr};
+  layer::ColumnParallelLinear to_qkv_{nullptr};
   layer::RowParallelLinear to_out_{nullptr};
   H3RMSNorm norm_q_{nullptr};
   H3RMSNorm norm_k_{nullptr};
@@ -669,20 +692,25 @@ class H3AdaLayerNormOutImpl final : public torch::nn::Module {
  public:
   H3AdaLayerNormOutImpl(int64_t hidden_size,
                         int64_t time_embed_dim,
-                        double eps) {
+                        double eps,
+                        const ModelContext& context) {
     norm_ = register_module("norm", H3RMSNorm(hidden_size, eps));
-    linear_ =
-        register_module("linear",
-                        torch::nn::Linear(torch::nn::LinearOptions(
-                                              time_embed_dim, 2 * hidden_size)
-                                              .bias(true)));
+    linear_ = register_module(
+        "linear",
+        layer::ColumnParallelLinear(time_embed_dim,
+                                    2 * hidden_size,
+                                    /*bias=*/true,
+                                    /*gather_output=*/true,
+                                    context.get_quant_args(),
+                                    context.get_parallel_args().dit_tp_group_,
+                                    context.get_tensor_options()));
   }
 
   torch::Tensor forward(const torch::Tensor& hidden_states,
                         const torch::Tensor& temb,
                         const torch::Tensor& timestep_indices) {
     torch::Tensor x =
-        linear_->forward(torch::silu(temb).to(linear_->weight.scalar_type()));
+        linear_->forward(torch::silu(temb).to(linear_->weight().scalar_type()));
     auto chunks = x.index_select(0, timestep_indices).unsqueeze(0).chunk(2, -1);
     const torch::Tensor& shift = chunks[0];
     const torch::Tensor& scale = chunks[1];
@@ -692,23 +720,21 @@ class H3AdaLayerNormOutImpl final : public torch::nn::Module {
 
   void load_state_dict(const StateDict& state_dict) {
     norm_->load_state_dict(state_dict.get_dict_with_prefix("norm."));
-    load_linear(state_dict,
-                "linear",
-                linear_,
-                linear_weight_is_loaded_,
-                linear_bias_is_loaded_);
+    linear_->load_state_dict(state_dict.get_dict_with_prefix("linear."));
+    if (state_dict.get_tensor("linear.bias").defined()) {
+      linear_bias_is_loaded_ = true;
+    }
   }
 
   void verify_loaded_weights(const std::string& prefix) {
     norm_->verify_loaded_weights(prefix + "norm.");
-    verify_linear(
-        prefix, "linear", linear_weight_is_loaded_, linear_bias_is_loaded_);
+    CHECK(linear_->is_weight_loaded()) << prefix + "linear.weight";
+    CHECK(linear_bias_is_loaded_) << prefix + "linear.bias";
   }
 
  private:
   H3RMSNorm norm_{nullptr};
-  torch::nn::Linear linear_{nullptr};
-  bool linear_weight_is_loaded_ = false;
+  layer::ColumnParallelLinear linear_{nullptr};
   bool linear_bias_is_loaded_ = false;
 };
 TORCH_MODULE(H3AdaLayerNormOut);
@@ -742,11 +768,7 @@ class MiniMaxH3Transformer3DModelImpl final
           parallel_args.dit_sp_group_ != nullptr)
         << "MiniMax-H3 SP requires a DiT SP process group";
     use_rolling_load_ = dit_rolling_load_enabled(parallel_args);
-    ModelContext transformer_context(parallel_args,
-                                     context.get_model_args("transformer"),
-                                     context.get_quant_args("transformer"),
-                                     options_);
-    const ModelArgs& model_args = transformer_context.get_model_args();
+    const ModelArgs& model_args = context.get_model_args("transformer");
     const int64_t heads = model_args.n_heads();
     const int64_t head_dim = model_args.head_dim();
     hidden_size_ = model_args.hidden_size();
@@ -785,6 +807,14 @@ class MiniMaxH3Transformer3DModelImpl final
            "size";
     video_patch_dim_ =
         in_channels * patch_size[0] * patch_size[1] * patch_size[2];
+    CHECK_EQ(video_patch_dim_ % parallel_args.tp_size(), 0)
+        << "MiniMax-H3 video projection dimension must be divisible by TP size";
+    CHECK_EQ(audio_in_channels_ % parallel_args.tp_size(), 0)
+        << "MiniMax-H3 audio projection dimension must be divisible by TP size";
+    ModelContext transformer_context(parallel_args,
+                                     model_args,
+                                     context.get_quant_args("transformer"),
+                                     options_);
     const auto register_linear =
         [this](const char* name, int64_t in_dim, int64_t out_dim) {
           return register_module(
@@ -792,14 +822,38 @@ class MiniMaxH3Transformer3DModelImpl final
               torch::nn::Linear(
                   torch::nn::LinearOptions(in_dim, out_dim).bias(true)));
         };
-    proj_in_ = register_linear("proj_in", video_patch_dim_, hidden_size_);
-    audio_proj_in_ =
-        register_linear("audio_proj_in", audio_in_channels_, hidden_size_);
+    const auto register_projection = [this,
+                                      &transformer_context,
+                                      &parallel_args](const char* name,
+                                                      int64_t in_dim,
+                                                      int64_t out_dim,
+                                                      bool gather_output) {
+      return register_module(
+          name,
+          layer::ColumnParallelLinear(
+              in_dim,
+              out_dim,
+              /*bias=*/true,
+              gather_output,
+              QuantArgs(),
+              parallel_args.dit_tp_group_,
+              transformer_context.get_tensor_options().dtype(torch::kFloat32)));
+    };
+    proj_in_ = register_projection("proj_in",
+                                   video_patch_dim_,
+                                   hidden_size_,
+                                   /*gather_output=*/true);
+    audio_proj_in_ = register_projection("audio_proj_in",
+                                         audio_in_channels_,
+                                         hidden_size_,
+                                         /*gather_output=*/true);
     context_embedder_ =
         register_linear("context_embedder", text_dim, hidden_size_);
-    time_embedder_ = register_module(
-        "time_embedder",
-        H3TimestepEmbedding(freq_dim_, time_embed_hidden_dim, time_embed_dim));
+    time_embedder_ = register_module("time_embedder",
+                                     H3TimestepEmbedding(freq_dim_,
+                                                         time_embed_hidden_dim,
+                                                         time_embed_dim,
+                                                         transformer_context));
     rope_ =
         register_module("rope", H3RotaryPosEmbed(rope_freq_dim, rope_theta));
     token_refiner_ = register_module("token_refiner",
@@ -832,10 +886,16 @@ class MiniMaxH3Transformer3DModelImpl final
     }
     norm_out_ = register_module(
         "norm_out",
-        H3AdaLayerNormOut(hidden_size_, time_embed_dim, final_norm_eps));
-    proj_out_ = register_linear("proj_out", hidden_size_, video_patch_dim_);
-    audio_proj_out_ =
-        register_linear("audio_proj_out", hidden_size_, audio_in_channels_);
+        H3AdaLayerNormOut(
+            hidden_size_, time_embed_dim, final_norm_eps, transformer_context));
+    proj_out_ = register_projection("proj_out",
+                                    hidden_size_,
+                                    video_patch_dim_,
+                                    /*gather_output=*/false);
+    audio_proj_out_ = register_projection("audio_proj_out",
+                                          hidden_size_,
+                                          audio_in_channels_,
+                                          /*gather_output=*/false);
   }
 
   static bool dit_rolling_load_enabled(const ParallelArgs& parallel_args) {
@@ -902,11 +962,28 @@ class MiniMaxH3Transformer3DModelImpl final
   MiniMaxH3TransformerConditioning prepare_conditioning(
       const torch::Tensor& encoder_hidden_states,
       const torch::Tensor& position_ids) {
-    torch::Tensor text_embeds = context_embedder_->forward(
-        encoder_hidden_states.to(context_embedder_->weight.scalar_type()));
+    // The ATen operator fuses bias for packed 3-D inputs, matching the
+    // reference BF16 rounding instead of adding bias after a rounded matmul.
+    torch::Tensor text_embeds = torch::linear(
+        encoder_hidden_states.to(context_embedder_->weight.scalar_type()),
+        context_embedder_->weight,
+        context_embedder_->bias);
     text_embeds = token_refiner_->forward(text_embeds);
+    torch::Tensor rotary_positions = position_ids;
+    if (process_group_ != nullptr && process_group_->world_size() > 1) {
+      const int64_t alignment =
+          std::lcm(static_cast<int64_t>(process_group_->world_size()),
+                   minimax_h3::kPackedSequenceAlignment);
+      const int64_t padding =
+          (alignment - position_ids.size(0) % alignment) % alignment;
+      rotary_positions =
+          torch::cat({position_ids,
+                      torch::zeros({padding, position_ids.size(1)},
+                                   position_ids.options())},
+                     /*dim=*/0);
+    }
     std::pair<torch::Tensor, torch::Tensor> rotary =
-        rope_->forward(position_ids);
+        rope_->forward(rotary_positions);
     // Attention blocks keep a single dtype for the whole denoising pass.
     // Convert the cache once here instead of once for Q and K in every block.
     rotary.first = rotary.first.to(attention_dtype_);
@@ -927,12 +1004,7 @@ class MiniMaxH3Transformer3DModelImpl final
       const torch::Tensor& text_indices,
       std::function<void(int32_t)> before_layer_cb = nullptr,
       std::function<void(int32_t)> after_layer_cb = nullptr) {
-    torch::Tensor video_embeds =
-        proj_in_->forward(hidden_states.to(proj_in_->weight.scalar_type()));
-    torch::Tensor audio_embeds = audio_proj_in_->forward(
-        audio_hidden_states.to(audio_proj_in_->weight.scalar_type()));
     const torch::Tensor& text_embeds = conditioning.text_embeds;
-
     const int64_t batch = text_embeds.size(0);
     const int64_t sequence_length = position_ids.size(0);
     CHECK_EQ(
@@ -941,10 +1013,47 @@ class MiniMaxH3Transformer3DModelImpl final
     torch::Tensor packed = torch::zeros({batch, sequence_length, hidden_size_},
                                         text_embeds.options());
     packed.index_copy_(1, text_indices, text_embeds);
-    packed.index_copy_(
-        1, video_indices, video_embeds.to(text_embeds.scalar_type()));
-    packed.index_copy_(
-        1, audio_indices, audio_embeds.to(text_embeds.scalar_type()));
+    const auto embed_media = [this,
+                              batch,
+                              &hidden_states,
+                              &audio_hidden_states,
+                              &video_indices,
+                              &audio_indices](torch::Tensor local_packed,
+                                              int64_t row_start) {
+      const int64_t row_stop = row_start + local_packed.size(1);
+      const torch::Tensor video_sources =
+          torch::nonzero((video_indices >= row_start) &
+                         (video_indices < row_stop))
+              .flatten();
+      const torch::Tensor audio_sources =
+          torch::nonzero((audio_indices >= row_start) &
+                         (audio_indices < row_stop))
+              .flatten();
+      if (video_sources.numel() > 0) {
+        const torch::Tensor rows = hidden_states.index_select(1, video_sources)
+                                       .reshape({-1, video_patch_dim_})
+                                       .to(torch::kFloat32);
+        const torch::Tensor embedded = proj_in_->forward(rows).view(
+            {batch, video_sources.numel(), hidden_size_});
+        local_packed.index_copy_(
+            1,
+            video_indices.index_select(0, video_sources) - row_start,
+            embedded.to(local_packed.scalar_type()));
+      }
+      if (audio_sources.numel() > 0) {
+        const torch::Tensor rows =
+            audio_hidden_states.index_select(1, audio_sources)
+                .reshape({-1, audio_in_channels_})
+                .to(torch::kFloat32);
+        const torch::Tensor embedded = audio_proj_in_->forward(rows).view(
+            {batch, audio_sources.numel(), hidden_size_});
+        local_packed.index_copy_(
+            1,
+            audio_indices.index_select(0, audio_sources) - row_start,
+            embedded.to(local_packed.scalar_type()));
+      }
+      return local_packed;
+    };
     torch::Tensor timestep_proj =
         dit::get_timestep_embedding(timestep.flatten(),
                                     freq_dim_,
@@ -954,8 +1063,6 @@ class MiniMaxH3Transformer3DModelImpl final
     torch::Tensor timestep_indices_long = timestep_indices.to(torch::kLong);
     torch::Tensor adaln_indices =
         timestep_indices_long * 3 + token_tags.to(torch::kLong);
-    const bool use_sequence_parallel =
-        process_group_ != nullptr && process_group_->world_size() > 1;
     auto run_blocks =
         [this, &temb, &conditioning, &before_layer_cb, &after_layer_cb](
             torch::Tensor local_packed,
@@ -977,98 +1084,75 @@ class MiniMaxH3Transformer3DModelImpl final
             }
             ++block_index;
           }
-          return norm_out_->forward(local_packed, temb, local_timestep_indices);
+          local_packed =
+              norm_out_->forward(local_packed, temb, local_timestep_indices);
+          return local_packed;
         };
-
-    if (!use_sequence_parallel) {
-      packed = run_blocks(packed, adaln_indices, timestep_indices_long);
-      torch::Tensor video_output =
-          proj_out_->forward(packed.index_select(1, video_indices)
-                                 .to(proj_out_->weight.scalar_type()));
-      torch::Tensor audio_output = audio_proj_out_->forward(
-          packed.index_select(1, audio_indices)
-              .to(audio_proj_out_->weight.scalar_type()));
-      return {video_output, audio_output};
+    // Preserve the reference's TP-local full-row FP32 GEMM geometry before
+    // selecting media rows; its rounding affects the denoising trajectory.
+    const auto project_heads = [this,
+                                batch](const torch::Tensor& local_packed) {
+      const torch::Tensor head_input =
+          local_packed.to(torch::kFloat32).reshape({-1, hidden_size_});
+      const torch::Tensor video = proj_out_->forward(head_input)
+                                      .view({batch, local_packed.size(1), -1});
+      const torch::Tensor audio = audio_proj_out_->forward(head_input)
+                                      .view({batch, local_packed.size(1), -1});
+      return torch::cat({video, audio}, /*dim=*/-1);
+    };
+    const bool use_sequence_parallel =
+        process_group_ != nullptr && process_group_->world_size() > 1;
+    if (use_sequence_parallel) {
+      dit::SequenceParallelTensorMap outputs = sequence_parallel_forward(
+          {{minimax_h3::kPackedSequenceTensorName, {packed, /*dim=*/1}},
+           {"adaln_indices", {adaln_indices, /*dim=*/0}},
+           {"timestep_indices", {timestep_indices_long, /*dim=*/0}}},
+          [this, &embed_media, &run_blocks, &project_heads](
+              const dit::SequenceParallelTensorMap& inputs) {
+            torch::Tensor local =
+                inputs.at(minimax_h3::kPackedSequenceTensorName).first;
+            const int64_t row_start = process_group_->rank() * local.size(1);
+            local = embed_media(local, row_start);
+            local = run_blocks(local,
+                               inputs.at("adaln_indices").first,
+                               inputs.at("timestep_indices").first);
+            return dit::SequenceParallelTensorMap{
+                {minimax_h3::kPackedSequenceTensorName,
+                 {project_heads(local), /*dim=*/1}}};
+          },
+          minimax_h3::kPackedSequenceAlignment);
+      packed = outputs.at(minimax_h3::kPackedSequenceTensorName).first;
+    } else {
+      packed = embed_media(packed, /*row_start=*/0);
+      packed = project_heads(
+          run_blocks(packed, adaln_indices, timestep_indices_long));
     }
-
-    // Keep the sequence-parallel output shape dense for the gather, but mark
-    // the rows that each output head actually consumes.  Text rows only pass
-    // through the transformer and must not pay for either output projection.
-    torch::Tensor video_mask =
-        torch::zeros({sequence_length}, packed.options().dtype(torch::kBool));
-    torch::Tensor audio_mask =
-        torch::zeros({sequence_length}, packed.options().dtype(torch::kBool));
-    video_mask.index_fill_(0, video_indices, true);
-    audio_mask.index_fill_(0, audio_indices, true);
-
-    dit::SequenceParallelTensorMap model_outputs = sequence_parallel_forward(
-        {{minimax_h3::kPackedSequenceTensorName, {packed, /*dim=*/1}},
-         {"adaln_indices", {adaln_indices, /*dim=*/0}},
-         {"timestep_indices", {timestep_indices_long, /*dim=*/0}},
-         {"video_mask", {video_mask, /*dim=*/0}},
-         {"audio_mask", {audio_mask, /*dim=*/0}}},
-        [this,
-         &run_blocks](const dit::SequenceParallelTensorMap& model_inputs) {
-          torch::Tensor local_packed =
-              model_inputs.at(minimax_h3::kPackedSequenceTensorName).first;
-          const torch::Tensor& local_adaln_indices =
-              model_inputs.at("adaln_indices").first;
-          const torch::Tensor& local_timestep_indices =
-              model_inputs.at("timestep_indices").first;
-          local_packed = run_blocks(
-              local_packed, local_adaln_indices, local_timestep_indices);
-          const torch::Tensor video_positions =
-              torch::nonzero(model_inputs.at("video_mask").first).flatten();
-          const torch::Tensor audio_positions =
-              torch::nonzero(model_inputs.at("audio_mask").first).flatten();
-          torch::Tensor local_output =
-              torch::zeros({local_packed.size(0),
-                            local_packed.size(1),
-                            video_patch_dim_ + audio_in_channels_},
-                           proj_out_->weight.options());
-          if (video_positions.numel() > 0) {
-            torch::Tensor local_video_head =
-                proj_out_->forward(local_packed.index_select(1, video_positions)
-                                       .to(proj_out_->weight.scalar_type()));
-            local_output.slice(/*dim=*/-1, /*start=*/0, video_patch_dim_)
-                .index_copy_(1, video_positions, local_video_head);
-          }
-          if (audio_positions.numel() > 0) {
-            torch::Tensor local_audio_head = audio_proj_out_->forward(
-                local_packed.index_select(1, audio_positions)
-                    .to(audio_proj_out_->weight.scalar_type()));
-            local_output
-                .slice(/*dim=*/-1,
-                       /*start=*/video_patch_dim_,
-                       /*end=*/video_patch_dim_ + audio_in_channels_)
-                .index_copy_(1, audio_positions, local_audio_head);
-          }
-          return dit::SequenceParallelTensorMap{
-              {minimax_h3::kPackedSequenceTensorName,
-               {local_output, /*dim=*/1}}};
-        });
-    torch::Tensor packed_output =
-        model_outputs.at(minimax_h3::kPackedSequenceTensorName).first;
-    std::vector<torch::Tensor> output_heads =
-        torch::split(packed_output,
-                     {video_patch_dim_, audio_in_channels_},
-                     /*dim=*/-1);
-    torch::Tensor video_output = output_heads[0].index_select(1, video_indices);
-    torch::Tensor audio_output = output_heads[1].index_select(1, audio_indices);
-    return {video_output, audio_output};
+    const int64_t video_width = proj_out_->weight().size(0);
+    torch::Tensor video =
+        packed.slice(-1, 0, video_width).index_select(1, video_indices);
+    torch::Tensor audio =
+        packed.slice(-1, video_width).index_select(1, audio_indices);
+    ProcessGroup* tp_group = proj_out_->process_group();
+    if (tp_group != nullptr && tp_group->world_size() > 1) {
+      video = parallel_state::gather(video.contiguous(), tp_group);
+      audio = parallel_state::gather(audio.contiguous(), tp_group);
+    }
+    return {video, audio};
   }
 
   void load_state_dict(const StateDict& state_dict) {
-    minimax_h3::load_linear(state_dict,
-                            "proj_in",
-                            proj_in_,
-                            proj_in_weight_loaded_,
-                            proj_in_bias_loaded_);
-    minimax_h3::load_linear(state_dict,
-                            "audio_proj_in",
-                            audio_proj_in_,
-                            audio_proj_in_weight_loaded_,
-                            audio_proj_in_bias_loaded_);
+    const auto load_projection = [&state_dict](
+                                     layer::ColumnParallelLinear& projection,
+                                     const std::string& name,
+                                     bool& bias_loaded) {
+      projection->load_state_dict(state_dict.get_dict_with_prefix(name + "."));
+      if (state_dict.get_tensor(name + ".bias").defined()) {
+        bias_loaded = true;
+      }
+    };
+    load_projection(proj_in_, "proj_in", proj_in_bias_loaded_);
+    load_projection(
+        audio_proj_in_, "audio_proj_in", audio_proj_in_bias_loaded_);
     minimax_h3::load_linear(state_dict,
                             "context_embedder",
                             context_embedder_,
@@ -1081,25 +1165,17 @@ class MiniMaxH3Transformer3DModelImpl final
     dit::load_module_list<minimax_h3::H3TransformerBlock>(
         *blocks_, state_dict, "transformer_blocks.");
     norm_out_->load_state_dict(state_dict.get_dict_with_prefix("norm_out."));
-    minimax_h3::load_linear(state_dict,
-                            "proj_out",
-                            proj_out_,
-                            proj_out_weight_loaded_,
-                            proj_out_bias_loaded_);
-    minimax_h3::load_linear(state_dict,
-                            "audio_proj_out",
-                            audio_proj_out_,
-                            audio_proj_out_weight_loaded_,
-                            audio_proj_out_bias_loaded_);
+    load_projection(proj_out_, "proj_out", proj_out_bias_loaded_);
+    load_projection(
+        audio_proj_out_, "audio_proj_out", audio_proj_out_bias_loaded_);
   }
 
   void verify_loaded_weights(const std::string& prefix) {
-    minimax_h3::verify_linear(
-        prefix, "proj_in", proj_in_weight_loaded_, proj_in_bias_loaded_);
-    minimax_h3::verify_linear(prefix,
-                              "audio_proj_in",
-                              audio_proj_in_weight_loaded_,
-                              audio_proj_in_bias_loaded_);
+    CHECK(proj_in_->is_weight_loaded()) << prefix + "proj_in.weight";
+    CHECK(proj_in_bias_loaded_) << prefix + "proj_in.bias";
+    CHECK(audio_proj_in_->is_weight_loaded())
+        << prefix + "audio_proj_in.weight";
+    CHECK(audio_proj_in_bias_loaded_) << prefix + "audio_proj_in.bias";
     minimax_h3::verify_linear(prefix,
                               "context_embedder",
                               context_embedder_weight_loaded_,
@@ -1109,12 +1185,11 @@ class MiniMaxH3Transformer3DModelImpl final
     dit::verify_module_list<minimax_h3::H3TransformerBlock>(
         *blocks_, prefix + "transformer_blocks.");
     norm_out_->verify_loaded_weights(prefix + "norm_out.");
-    minimax_h3::verify_linear(
-        prefix, "proj_out", proj_out_weight_loaded_, proj_out_bias_loaded_);
-    minimax_h3::verify_linear(prefix,
-                              "audio_proj_out",
-                              audio_proj_out_weight_loaded_,
-                              audio_proj_out_bias_loaded_);
+    CHECK(proj_out_->is_weight_loaded()) << prefix + "proj_out.weight";
+    CHECK(proj_out_bias_loaded_) << prefix + "proj_out.bias";
+    CHECK(audio_proj_out_->is_weight_loaded())
+        << prefix + "audio_proj_out.weight";
+    CHECK(audio_proj_out_bias_loaded_) << prefix + "audio_proj_out.bias";
   }
 
   void load_model(std::unique_ptr<DiTFolderLoader> loader) {
@@ -1152,26 +1227,22 @@ class MiniMaxH3Transformer3DModelImpl final
   int64_t freq_dim_;
   int64_t audio_in_channels_;
   int64_t video_patch_dim_;
-  torch::nn::Linear proj_in_{nullptr};
-  torch::nn::Linear audio_proj_in_{nullptr};
+  layer::ColumnParallelLinear proj_in_{nullptr};
+  bool proj_in_bias_loaded_ = false;
+  layer::ColumnParallelLinear audio_proj_in_{nullptr};
+  bool audio_proj_in_bias_loaded_ = false;
   torch::nn::Linear context_embedder_{nullptr};
   minimax_h3::H3TimestepEmbedding time_embedder_{nullptr};
   minimax_h3::H3RotaryPosEmbed rope_{nullptr};
   minimax_h3::H3TokenRefiner token_refiner_{nullptr};
   torch::nn::ModuleList blocks_{nullptr};
   minimax_h3::H3AdaLayerNormOut norm_out_{nullptr};
-  torch::nn::Linear proj_out_{nullptr};
-  torch::nn::Linear audio_proj_out_{nullptr};
-  bool proj_in_weight_loaded_ = false;
-  bool proj_in_bias_loaded_ = false;
-  bool audio_proj_in_weight_loaded_ = false;
-  bool audio_proj_in_bias_loaded_ = false;
+  layer::ColumnParallelLinear proj_out_{nullptr};
+  bool proj_out_bias_loaded_ = false;
+  layer::ColumnParallelLinear audio_proj_out_{nullptr};
+  bool audio_proj_out_bias_loaded_ = false;
   bool context_embedder_weight_loaded_ = false;
   bool context_embedder_bias_loaded_ = false;
-  bool proj_out_weight_loaded_ = false;
-  bool proj_out_bias_loaded_ = false;
-  bool audio_proj_out_weight_loaded_ = false;
-  bool audio_proj_out_bias_loaded_ = false;
 };
 TORCH_MODULE(MiniMaxH3Transformer3DModel);
 

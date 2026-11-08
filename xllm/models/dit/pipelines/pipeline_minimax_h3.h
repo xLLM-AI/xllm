@@ -19,6 +19,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -50,6 +51,30 @@ limitations under the License.
 #include "models/model_registry.h"
 
 namespace xllm {
+
+namespace minimax_h3 {
+
+// Video is [B,C,T,H,W]; audio is [channels,features,time]. Each modality
+// starts its own CPU RNG stream, with audio drawn in packed time/feature order.
+inline std::pair<torch::Tensor, torch::Tensor> prepare_noise(
+    const std::vector<int64_t>& video_shape,
+    const std::array<int64_t, 3>& audio_shape,
+    int64_t seed,
+    const torch::TensorOptions& options) {
+  torch::Generator generator = torch::make_generator<torch::CPUGeneratorImpl>();
+  generator.set_current_seed(seed);
+  torch::Tensor video = dit::randn_tensor(video_shape, generator, options);
+  generator.set_current_seed(seed);
+  torch::Tensor audio =
+      dit::randn_tensor(
+          {audio_shape[0] * audio_shape[2], audio_shape[1]}, generator, options)
+          .view({audio_shape[0], audio_shape[2], audio_shape[1]})
+          .permute({0, 2, 1})
+          .contiguous();
+  return {video, audio};
+}
+
+}  // namespace minimax_h3
 
 struct MiniMaxH3TimestepLayout {
   torch::Tensor timesteps;
@@ -275,8 +300,11 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
       }
     }
 
-    std::pair<torch::Tensor, torch::Tensor> noise = prepare_noise(
-        latent_frames, latent_height, latent_width, audio_latents, generator);
+    std::pair<torch::Tensor, torch::Tensor> noise = minimax_h3::prepare_noise(
+        {1, video_latent_channels_, latent_frames, latent_height, latent_width},
+        {audio_channels_, audio_latent_channels_, audio_latents},
+        seed,
+        options_);
     torch::Tensor video_rows = patchify_video(noise.first);
     if (condition_rows.defined()) {
       video_rows = torch::cat({condition_rows, video_rows}, 1);
@@ -1031,30 +1059,6 @@ class MiniMaxH3PipelineImpl final : public torch::nn::Module {
       position += rope_frame_scale_ * frame_span(frame);
     }
     return torch::tensor(values, torch::dtype(torch::kFloat64));
-  }
-
-  std::pair<torch::Tensor, torch::Tensor> prepare_noise(
-      int64_t latent_frames,
-      int64_t latent_height,
-      int64_t latent_width,
-      int64_t audio_latents,
-      torch::Generator& generator) const {
-    const int64_t video_values =
-        video_latent_channels_ * latent_frames * latent_height * latent_width;
-    const int64_t audio_values =
-        audio_channels_ * audio_latent_channels_ * audio_latents;
-    torch::Tensor noise =
-        dit::randn_tensor({video_values + audio_values}, generator, options_);
-    torch::Tensor video = noise.slice(0, 0, video_values)
-                              .view({1,
-                                     video_latent_channels_,
-                                     latent_frames,
-                                     latent_height,
-                                     latent_width});
-    torch::Tensor audio =
-        noise.slice(0, video_values)
-            .view({audio_channels_, audio_latent_channels_, audio_latents});
-    return {video, audio};
   }
 
   // Keep TP ranks on the same random stream without allocating unused device
