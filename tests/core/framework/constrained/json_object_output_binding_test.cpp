@@ -13,13 +13,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include "core/framework/constrained/json_object_output_binding.h"
+
 #include <gtest/gtest.h>
 
 #include <string>
 #include <vector>
 
 #include "core/framework/constrained/json_object_grammar.h"
-#include "core/runtime/json_object_output_binding.h"
 
 namespace xllm {
 namespace {
@@ -29,7 +30,7 @@ JsonObjectGrammar make_grammar() {
                            /*stop_token_ids=*/{2});
 }
 
-TEST(WorkerJsonObjectOverlapTest, ResolvesReorderedAndInsertedRows) {
+TEST(JsonObjectOutputBindingTest, ResolvesReorderedAndInsertedRows) {
   JsonObjectGrammar grammar = make_grammar();
   std::vector<JsonObjectGrammarState> states = {grammar.initial_state(),
                                                 grammar.initial_state()};
@@ -49,7 +50,7 @@ TEST(WorkerJsonObjectOverlapTest, ResolvesReorderedAndInsertedRows) {
   EXPECT_TRUE(output_errors.empty());
 }
 
-TEST(WorkerJsonObjectOverlapTest, ReportsDuplicateConstrainedSequenceId) {
+TEST(JsonObjectOutputBindingTest, ReportsDuplicateConstrainedSequenceId) {
   JsonObjectGrammar grammar = make_grammar();
   std::vector<JsonObjectGrammarState> states = {grammar.initial_state()};
   std::vector<int32_t> output_rows;
@@ -69,7 +70,7 @@ TEST(WorkerJsonObjectOverlapTest, ReportsDuplicateConstrainedSequenceId) {
   EXPECT_NE(output_errors[0].message.find("duplicate"), std::string::npos);
 }
 
-TEST(WorkerJsonObjectOverlapTest, IgnoresDuplicateUnconstrainedRows) {
+TEST(JsonObjectOutputBindingTest, IgnoresDuplicateUnconstrainedRows) {
   std::vector<JsonObjectGrammarState> states = {JsonObjectGrammarState()};
   std::vector<int32_t> output_rows;
   std::vector<JsonObjectOutputError> output_errors;
@@ -88,7 +89,7 @@ TEST(WorkerJsonObjectOverlapTest, IgnoresDuplicateUnconstrainedRows) {
   EXPECT_TRUE(output_errors.empty());
 }
 
-TEST(WorkerJsonObjectOverlapTest, RejectsEmptyConstrainedSequenceId) {
+TEST(JsonObjectOutputBindingTest, RejectsEmptyConstrainedSequenceId) {
   JsonObjectGrammar grammar = make_grammar();
   std::vector<JsonObjectGrammarState> states = {grammar.initial_state()};
   std::vector<int32_t> output_rows;
@@ -100,7 +101,7 @@ TEST(WorkerJsonObjectOverlapTest, RejectsEmptyConstrainedSequenceId) {
   EXPECT_NE(error.find("non-empty"), std::string::npos);
 }
 
-TEST(WorkerJsonObjectOverlapTest, ReportsMissingExpectedOutputRow) {
+TEST(JsonObjectOutputBindingTest, ReportsMissingExpectedOutputRow) {
   JsonObjectGrammar grammar = make_grammar();
   std::vector<JsonObjectGrammarState> states = {grammar.initial_state()};
   std::vector<int32_t> output_rows;
@@ -115,7 +116,7 @@ TEST(WorkerJsonObjectOverlapTest, ReportsMissingExpectedOutputRow) {
   EXPECT_NE(output_errors[0].message.find("missing"), std::string::npos);
 }
 
-TEST(WorkerJsonObjectOverlapTest, ReportsUnexpectedOutputRow) {
+TEST(JsonObjectOutputBindingTest, ReportsUnexpectedOutputRow) {
   JsonObjectGrammar grammar = make_grammar();
   std::vector<JsonObjectGrammarState> states = {grammar.initial_state()};
   std::vector<int32_t> output_rows;
@@ -135,7 +136,7 @@ TEST(WorkerJsonObjectOverlapTest, ReportsUnexpectedOutputRow) {
   EXPECT_NE(output_errors[0].message.find("unexpected"), std::string::npos);
 }
 
-TEST(WorkerJsonObjectOverlapTest, RejectsInvalidNegativePriorOutputRow) {
+TEST(JsonObjectOutputBindingTest, RejectsInvalidNegativePriorOutputRow) {
   JsonObjectGrammar grammar = make_grammar();
   std::vector<JsonObjectGrammarState> states = {grammar.initial_state()};
   std::vector<int32_t> output_rows;
@@ -152,7 +153,7 @@ TEST(WorkerJsonObjectOverlapTest, RejectsInvalidNegativePriorOutputRow) {
   EXPECT_NE(error.find("-1 or non-negative"), std::string::npos);
 }
 
-TEST(WorkerJsonObjectOverlapTest, KeepsRowErrorsInStateOrder) {
+TEST(JsonObjectOutputBindingTest, KeepsRowErrorsInStateOrder) {
   JsonObjectGrammar grammar = make_grammar();
   std::vector<JsonObjectGrammarState> states = {grammar.initial_state(),
                                                 grammar.initial_state(),
@@ -180,7 +181,7 @@ TEST(WorkerJsonObjectOverlapTest, KeepsRowErrorsInStateOrder) {
   EXPECT_EQ(output_errors[2].message, "missing prior sampled output row");
 }
 
-TEST(WorkerJsonObjectOverlapTest, ValidatesPriorRowsBeforeConstrainedIdentity) {
+TEST(JsonObjectOutputBindingTest, ValidatesPriorRowsBeforeConstrainedIdentity) {
   JsonObjectGrammar grammar = make_grammar();
   std::vector<JsonObjectGrammarState> states = {grammar.initial_state()};
   std::vector<int32_t> output_rows;

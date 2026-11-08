@@ -366,17 +366,6 @@ endif()
 
 cc_test(
   NAME
-    worker_json_object_overlap_test
-  CPU_ONLY
-  SRCS
-    worker_json_object_overlap_test.cpp
-  DEPS
-    :json_object_grammar
-    GTest::gtest_main
-)
-
-cc_test(
-  NAME
     schedule_overlap_state_test
   SRCS
     schedule_overlap_state_test.cpp
@@ -387,10 +376,10 @@ cc_test(
 
 cc_test(
   NAME
-    json_object_error_sanitizer_test
+    overlap_token_sanitizer_test
   CPU_ONLY
   SRCS
-    json_object_error_sanitizer_test.cpp
+    overlap_token_sanitizer_test.cpp
   DEPS
     torch
     glog::glog
