@@ -16,7 +16,6 @@ limitations under the License.
 
 #include <torch/torch.h>
 
-#include <algorithm>
 #include <limits>
 #include <memory>
 #include <string>
@@ -37,6 +36,7 @@ limitations under the License.
 #include "core/framework/request/dit_request_state.h"
 #include "core/framework/state_dict/state_dict.h"
 #include "core/framework/state_dict/utils.h"
+#include "core/util/seq_lens.h"
 #include "framework/parallel_state/parallel_state.h"
 #include "models/dit/autoencoders/autoencoder_kl.h"
 #include "models/dit/autoencoders/autoencoder_kl_qwenimage.h"
@@ -328,30 +328,27 @@ class QwenImageEditPlusPipelineImpl : public torch::nn::Module {
       const int64_t* lengths_data = lengths_cpu.data_ptr<int64_t>();
       std::vector<int32_t> seq_lens;
       seq_lens.reserve(static_cast<size_t>(batch_size));
-      std::vector<int32_t> cu_seqlens_vec;
-      cu_seqlens_vec.reserve(static_cast<size_t>(batch_size) + 1);
-      cu_seqlens_vec.emplace_back(0);
-      int32_t max_seq_len = 0;
       for (int64_t i = 0; i < batch_size; ++i) {
         CHECK_GT(lengths_data[i], 0)
             << "QwenImageEditPlus text encoder sequence length must be > 0";
         CHECK_LE(lengths_data[i], std::numeric_limits<int32_t>::max())
             << "QwenImageEditPlus text encoder sequence length exceeds int32";
-        int32_t seq_len = static_cast<int32_t>(lengths_data[i]);
-        seq_lens.emplace_back(seq_len);
-        cu_seqlens_vec.emplace_back(cu_seqlens_vec.back() + seq_len);
-        max_seq_len = std::max(max_seq_len, seq_len);
+        seq_lens.emplace_back(static_cast<int32_t>(lengths_data[i]));
       }
+      std::vector<int32_t> cu_seqlens_vec = util::query_start_loc(seq_lens);
+      const int32_t max_seq_len = util::max_len(seq_lens);
       CHECK_EQ(tokens.numel(), cu_seqlens_vec.back())
           << "packed token count does not match attention mask";
       params.meta.num_sequences = static_cast<int32_t>(batch_size);
       params.meta.actual_num_sequences = static_cast<int32_t>(batch_size);
       params.meta.q_max_seq_len = max_seq_len;
       params.meta.kv_max_seq_len = max_seq_len;
+      auto per_seq_lens =
+          torch::tensor(seq_lens, torch::kInt).to(tokens.device());
       auto cu_seqlens =
           torch::tensor(cu_seqlens_vec, torch::kInt).to(tokens.device());
-      params.attention.device.q_seq_lens = cu_seqlens;
-      params.attention.device.kv_seq_lens = cu_seqlens;
+      params.attention.device.q_seq_lens = per_seq_lens;
+      params.attention.device.kv_seq_lens = per_seq_lens;
       params.attention.device.q_cu_seq_lens = cu_seqlens;
       params.attention.host.q_seq_lens = seq_lens;
       params.attention.host.q_cu_seq_lens = cu_seqlens_vec;

@@ -135,20 +135,6 @@ class MusaGraphPersistentParam final {
         .copy_(value, /*non_blocking=*/true);
   }
   const torch::Device& device() const { return device_; }
-  torch::Tensor q_seq_lens(uint32_t actual_batch_size) const {
-    if (actual_batch_size > 0) {
-      return q_seq_lens_.slice(
-          /*dim=*/0, /*start=*/0, /*end=*/actual_batch_size);
-    }
-    return q_seq_lens_;
-  }
-  torch::Tensor kv_seq_lens(uint32_t actual_batch_size) const {
-    if (actual_batch_size > 0) {
-      return kv_seq_lens_.slice(
-          /*dim=*/0, /*start=*/0, /*end=*/actual_batch_size);
-    }
-    return kv_seq_lens_;
-  }
   torch::Tensor persistent_kv_cache_tokens_nums(
       uint32_t actual_batch_size) const {
     if (actual_batch_size > 0) {
@@ -277,6 +263,7 @@ class MusaGraphPersistentParam final {
   torch::Tensor persistent_paged_kv_last_page_len_;
   torch::Tensor persistent_decode_qo_indptr_;
   torch::Tensor persistent_kv_seq_lens_delta_;
+  std::vector<int32_t> host_kv_cu_seq_lens_;
 };
 
 // MUSA graph executor using torch_musa MUSAGraph for memory management.

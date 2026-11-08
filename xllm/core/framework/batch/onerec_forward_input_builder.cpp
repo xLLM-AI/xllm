@@ -29,6 +29,7 @@ limitations under the License.
 #include "core/framework/model/rec_model_params.h"
 #include "core/framework/request/onerec_sequence.h"
 #include "core/framework/sampling/sampling_params.h"
+#include "core/util/seq_lens.h"
 #include "core/util/tensor_helper.h"
 #include "core/util/threadpool.h"
 #include "core/util/utils.h"
@@ -42,27 +43,6 @@ namespace {
 // rows give per-task work in the tens of microseconds on aarch64.
 constexpr size_t kSequenceParallelGrain = 32;
 constexpr size_t kGroupParallelGrain = 16;
-
-std::vector<int32_t> build_q_cu_seq_lens_vec(
-    const std::vector<int32_t>& q_seq_lens) {
-  std::vector<int32_t> q_cu_seq_lens;
-  if (q_seq_lens.empty()) {
-    return q_cu_seq_lens;
-  }
-#if defined(USE_NPU)
-  q_cu_seq_lens.reserve(q_seq_lens.size());
-  int32_t cum_seq_len = 0;
-  for (int32_t q_len : q_seq_lens) {
-    cum_seq_len += q_len;
-    q_cu_seq_lens.emplace_back(cum_seq_len);
-  }
-#else
-  CHECK(q_seq_lens.front() == 0)
-      << "q_seq_lens must be cumulative with leading zero";
-  q_cu_seq_lens.assign(q_seq_lens.begin() + 1, q_seq_lens.end());
-#endif
-  return q_cu_seq_lens;
-}
 
 }  // namespace
 
@@ -333,70 +313,44 @@ RecForwardInput OneRecForwardInputBuilder::build_rec_forward_input(
   // the main thread can overlap unrelated CPU work (seq-lens, encoder
   // tensors, sampling params...) with the memcpy fan-out below.
   std::unique_ptr<TaskGroup> decoder_embedding_group;
-  // std::vector<std::future<void>> decoder_embedding_futures;
   torch::Tensor result_embedding;
+
+  auto uniform_decode_lens = [&]() {
+    const int32_t uniform_len = seq_len + num_decoder_embeddings;
+    std::vector<int32_t> seq_lens(static_cast<size_t>(num_sequences),
+                                  uniform_len);
+    input_params.meta.num_sequences = num_sequences;
+    input_params.meta.kv_max_seq_len = uniform_len;
+    input_params.meta.q_max_seq_len = uniform_len;
+
+    input_params.attention.device.kv_seq_lens =
+        make_pinned_cpu_tensor(seq_lens);
+    input_params.attention.device.q_seq_lens =
+        input_params.attention.device.kv_seq_lens;
+    std::vector<int32_t> q_cu_seq_lens = util::cu_num_tokens(seq_lens);
+    input_params.attention.device.q_cu_seq_lens =
+        make_pinned_cpu_tensor(q_cu_seq_lens);
+    input_params.attention.host.kv_seq_lens = std::move(seq_lens);
+    input_params.attention.host.q_seq_lens =
+        input_params.attention.host.kv_seq_lens;
+    input_params.attention.host.q_cu_seq_lens = std::move(q_cu_seq_lens);
+  };
 
   // ========== Parallel tensor construction tasks ==========
   if (thread_pool_ && num_sequences >= kSequenceParallelGrain) {
-    // Only use parallelization for time-consuming tasks (token_ids and
-    // encoder_token_ids)
     std::promise<torch::Tensor> token_ids_promise;
-    std::promise<torch::Tensor> encoder_token_ids_promise;
 
     auto token_ids_future = token_ids_promise.get_future();
-    // auto encoder_token_ids_future = encoder_token_ids_promise.get_future();
 
-    // Task 1: Build token_ids tensor -
-    // Optimization: Use torch::empty+std::memcpy instead of
-    // torch::from_blob().clone()
     thread_pool_->schedule([&flatten_tokens_vec,
                             promise = std::move(token_ids_promise)]() mutable {
       try {
-        // Optimization: Pre-allocate memory and use std::memcpy to avoid clone
-        // operations
-        auto tensor =
-            torch::empty({static_cast<int64_t>(flatten_tokens_vec.size())},
-                         torch::TensorOptions()
-                             .dtype(torch::kInt)
-                             .device(torch::kCPU)
-                             .pinned_memory(true));
-        std::memcpy(tensor.data_ptr<int>(),
-                    flatten_tokens_vec.data(),
-                    flatten_tokens_vec.size() * sizeof(int));
-        promise.set_value(std::move(tensor));
+        promise.set_value(make_pinned_cpu_tensor(flatten_tokens_vec));
       } catch (...) {
         promise.set_exception(std::current_exception());
       }
     });
 
-    // Task 2: Build encoder_token_ids tensor (if needed) -
-    // Optimization: Use torch::empty+std::memcpy instead of
-    // torch::from_blob().clone()
-    /*
-    thread_pool_->schedule(
-        [&encoder_tokens,
-         promise = std::move(encoder_token_ids_promise)]() mutable {
-          try {
-            torch::Tensor tensor;
-            if (!encoder_tokens.empty()) {
-              // Optimization: Pre-allocate memory and use std::memcpy to avoid
-              // clone operations
-              tensor =
-                  torch::empty({static_cast<int64_t>(encoder_tokens.size())},
-                               torch::TensorOptions()
-                                   .dtype(torch::kInt)
-                                   .device(torch::kCPU)
-                                   .pinned_memory(true));
-              std::memcpy(tensor.data_ptr<int>(),
-                          encoder_tokens.data(),
-                          encoder_tokens.size() * sizeof(int));
-            }
-            promise.set_value(std::move(tensor));
-          } catch (...) {
-            promise.set_exception(std::current_exception());
-          }
-        });
-    */
     if (!cache_data.decoder_context_embeddings.empty()) {
       // Task 3: Synchronously process decoder_embedding, inner group dimension
       // parallelization optimization
@@ -497,202 +451,36 @@ RecForwardInput OneRecForwardInputBuilder::build_rec_forward_input(
       result_embedding = combined_embedding;
     }
 
-    // Task 4: Build sequence length vector - changed to serial execution (very
-    // time-consuming, ~0.001785ms)
-    std::vector<int32_t> cu_seq_lens, q_cu_seq_lens;
-#if defined(USE_NPU)
-    // use all prefill;
-    cu_seq_lens.assign(num_sequences, seq_len + num_decoder_embeddings);
-    q_cu_seq_lens.assign(num_sequences, seq_len + num_decoder_embeddings);
-#else
-    cu_seq_lens.reserve(num_sequences + 1);
-    q_cu_seq_lens.reserve(num_sequences + 1);
-    cu_seq_lens.push_back(0);
-    q_cu_seq_lens.push_back(0);
-
-    for (int32_t i = 0; i < num_sequences; ++i) {
-      cu_seq_lens.push_back(cu_seq_lens.back() + seq_len +
-                            num_decoder_embeddings);
-      q_cu_seq_lens.push_back(q_cu_seq_lens.back() + seq_len +
-                              num_decoder_embeddings);
-    }
-#endif
-
-    // Task 5: Build encoder_seq_lens_tensor - changed to serial execution (less
-    // time-consuming)
-    torch::Tensor encoder_seq_lens_tensor;
-    if (!cache_data.encoder_seq_lens.empty()) {
-      // Optimization: Pre-allocate memory and use std::memcpy to avoid clone
-      // operations
-      encoder_seq_lens_tensor = torch::empty(
-          {static_cast<int64_t>(cache_data.encoder_seq_lens.size())},
-          torch::TensorOptions()
-              .dtype(torch::kInt)
-              .device(torch::kCPU)
-              .pinned_memory(true));
-      std::memcpy(encoder_seq_lens_tensor.data_ptr<int>(),
-                  cache_data.encoder_seq_lens.data(),
-                  cache_data.encoder_seq_lens.size() * sizeof(int));
-    }
-
-    // Set basic parameters simultaneously (not dependent on asynchronous tasks)
-    input_params.meta.num_sequences = num_sequences;
-    input_params.meta.kv_max_seq_len = seq_len + num_decoder_embeddings;
-    input_params.meta.q_max_seq_len = seq_len + num_decoder_embeddings;
     forward_input.positions = perf_cache.fixed_positions_tensor;
 
-    // Wait and collect results
-    forward_input.token_ids = token_ids_future.get();
-    // auto encoder_token_ids = encoder_token_ids_future.get();
-
-    // seq_lens has been changed to serial execution, use the constructed
-    // variable directly
-
-    // Optimization: Use torch::empty+std::memcpy instead of
-    // torch::from_blob().clone()
-    input_params.attention.device.kv_seq_lens =
-        torch::empty({static_cast<int64_t>(cu_seq_lens.size())},
-                     torch::TensorOptions()
-                         .dtype(torch::kInt)
-                         .device(torch::kCPU)
-                         .pinned_memory(true));
-    std::memcpy(input_params.attention.device.kv_seq_lens.data_ptr<int>(),
-                cu_seq_lens.data(),
-                cu_seq_lens.size() * sizeof(int));
-
-    input_params.attention.device.q_seq_lens =
-        torch::empty({static_cast<int64_t>(q_cu_seq_lens.size())},
-                     torch::TensorOptions()
-                         .dtype(torch::kInt)
-                         .device(torch::kCPU)
-                         .pinned_memory(true));
-    std::memcpy(input_params.attention.device.q_seq_lens.data_ptr<int>(),
-                q_cu_seq_lens.data(),
-                q_cu_seq_lens.size() * sizeof(int));
-    std::vector<int32_t> device_q_cu_seq_lens =
-        build_q_cu_seq_lens_vec(q_cu_seq_lens);
-    input_params.attention.device.q_cu_seq_lens =
-        torch::tensor(device_q_cu_seq_lens,
-                      torch::TensorOptions()
-                          .dtype(torch::kInt)
-                          .device(torch::kCPU)
-                          .pinned_memory(true));
-    input_params.attention.host.kv_seq_lens = std::move(cu_seq_lens);
-    input_params.attention.host.q_cu_seq_lens = std::move(device_q_cu_seq_lens);
-    input_params.attention.host.q_seq_lens = std::move(q_cu_seq_lens);
-
-    // encoder_seq_lens_tensor has been changed to serial execution, use the
-    // constructed variable directly
-    if (encoder_seq_lens_tensor.defined()) {
-      onerec_params.encoder_seq_lens_tensor =
-          std::move(encoder_seq_lens_tensor);
-      onerec_params.encoder_seq_lens = cache_data.encoder_seq_lens;
+    uniform_decode_lens();
+    // Overlap this pinned copy with the token_ids task below.
+    torch::Tensor encoder_seq_lens_tensor;
+    if (!cache_data.encoder_seq_lens.empty()) {
+      encoder_seq_lens_tensor =
+          make_pinned_cpu_tensor(cache_data.encoder_seq_lens);
     }
-    onerec_params.encoder_positions = perf_cache.fixed_encoder_positions_tensor;
+
+    forward_input.token_ids = token_ids_future.get();
+    onerec_params.encoder_seq_lens_tensor = std::move(encoder_seq_lens_tensor);
   } else {
-    // Single-threaded execution (original logic)
-    // Optimization: Use torch::empty+std::memcpy instead of
-    // torch::from_blob().clone()
-    forward_input.token_ids =
-        torch::empty({static_cast<int64_t>(flatten_tokens_vec.size())},
-                     torch::TensorOptions()
-                         .dtype(torch::kInt)
-                         .device(torch::kCPU)
-                         .pinned_memory(true));
-    std::memcpy(forward_input.token_ids.data_ptr<int>(),
-                flatten_tokens_vec.data(),
-                flatten_tokens_vec.size() * sizeof(int));
+    uniform_decode_lens();
+    forward_input.token_ids = make_pinned_cpu_tensor(flatten_tokens_vec);
     forward_input.positions = perf_cache.fixed_positions_tensor;
 
     if (!encoder_tokens.empty()) {
-      // Optimization: Use torch::empty+std::memcpy instead of
-      // torch::from_blob().clone()
-      onerec_params.encoder_token_ids =
-          torch::empty({static_cast<int64_t>(encoder_tokens.size())},
-                       torch::TensorOptions()
-                           .dtype(torch::kInt)
-                           .device(torch::kCPU)
-                           .pinned_memory(true));
-      std::memcpy(onerec_params.encoder_token_ids.data_ptr<int>(),
-                  encoder_tokens.data(),
-                  encoder_tokens.size() * sizeof(int));
-    }
-    onerec_params.encoder_positions = perf_cache.fixed_encoder_positions_tensor;
-    // Pre-allocate and batch fill
-    std::vector<int32_t> cu_seq_lens, q_cu_seq_lens;
-#if defined(USE_NPU)
-    // use all prefill;
-    cu_seq_lens.assign(num_sequences, seq_len + num_decoder_embeddings);
-    q_cu_seq_lens.assign(num_sequences, seq_len + num_decoder_embeddings);
-#else
-    cu_seq_lens.reserve(num_sequences + 1);
-    q_cu_seq_lens.reserve(num_sequences + 1);
-    cu_seq_lens.push_back(0);
-    q_cu_seq_lens.push_back(0);
-
-    for (int32_t i = 0; i < num_sequences; ++i) {
-      cu_seq_lens.push_back(cu_seq_lens.back() + seq_len +
-                            num_decoder_embeddings);
-      q_cu_seq_lens.push_back(q_cu_seq_lens.back() + seq_len +
-                              num_decoder_embeddings);
-    }
-#endif
-
-    input_params.meta.num_sequences = num_sequences;
-    input_params.meta.kv_max_seq_len = seq_len + num_decoder_embeddings;
-    input_params.meta.q_max_seq_len = seq_len + num_decoder_embeddings;
-
-    // Optimization: Use torch::empty+std::memcpy instead of
-    // torch::from_blob().clone()
-    input_params.attention.device.kv_seq_lens =
-        torch::empty({static_cast<int64_t>(cu_seq_lens.size())},
-                     torch::TensorOptions()
-                         .dtype(torch::kInt)
-                         .device(torch::kCPU)
-                         .pinned_memory(true));
-    std::memcpy(input_params.attention.device.kv_seq_lens.data_ptr<int>(),
-                cu_seq_lens.data(),
-                cu_seq_lens.size() * sizeof(int));
-
-    input_params.attention.device.q_seq_lens =
-        torch::empty({static_cast<int64_t>(q_cu_seq_lens.size())},
-                     torch::TensorOptions()
-                         .dtype(torch::kInt)
-                         .device(torch::kCPU)
-                         .pinned_memory(true));
-    std::memcpy(input_params.attention.device.q_seq_lens.data_ptr<int>(),
-                q_cu_seq_lens.data(),
-                q_cu_seq_lens.size() * sizeof(int));
-
-    std::vector<int32_t> device_q_cu_seq_lens =
-        build_q_cu_seq_lens_vec(q_cu_seq_lens);
-    input_params.attention.device.q_cu_seq_lens =
-        torch::tensor(device_q_cu_seq_lens,
-                      torch::TensorOptions()
-                          .dtype(torch::kInt)
-                          .device(torch::kCPU)
-                          .pinned_memory(true));
-    input_params.attention.host.kv_seq_lens = std::move(cu_seq_lens);
-    input_params.attention.host.q_cu_seq_lens = std::move(device_q_cu_seq_lens);
-    input_params.attention.host.q_seq_lens = std::move(q_cu_seq_lens);
-
-    if (!cache_data.encoder_seq_lens.empty()) {
-      // Set OneRecModelInputParams encoder data
-      onerec_params.encoder_seq_lens = cache_data.encoder_seq_lens;
-
-      // Optimization: Use torch::empty+std::memcpy instead of
-      // torch::from_blob().clone()
-      onerec_params.encoder_seq_lens_tensor = torch::empty(
-          {static_cast<int64_t>(cache_data.encoder_seq_lens.size())},
-          torch::TensorOptions()
-              .dtype(torch::kInt)
-              .device(torch::kCPU)
-              .pinned_memory(true));
-      std::memcpy(onerec_params.encoder_seq_lens_tensor.data_ptr<int>(),
-                  cache_data.encoder_seq_lens.data(),
-                  cache_data.encoder_seq_lens.size() * sizeof(int));
+      onerec_params.encoder_token_ids = make_pinned_cpu_tensor(encoder_tokens);
     }
   }
+
+  if (!cache_data.encoder_seq_lens.empty()) {
+    onerec_params.encoder_seq_lens = cache_data.encoder_seq_lens;
+    if (!onerec_params.encoder_seq_lens_tensor.defined()) {
+      onerec_params.encoder_seq_lens_tensor =
+          make_pinned_cpu_tensor(cache_data.encoder_seq_lens);
+    }
+  }
+  onerec_params.encoder_positions = perf_cache.fixed_encoder_positions_tensor;
 
   auto init_sampling_params = [&]() {
     if (!selected_token_idxes.empty()) {
@@ -727,16 +515,8 @@ RecForwardInput OneRecForwardInputBuilder::build_rec_forward_input(
     input_params.attention.host.block_tables =
         input_params.attention.device.block_tables;
 
-    std::vector<int32_t> paged_kv_indptr(num_sequences + 1, 0);
     input_params.attention.device.new_cache_slots =
-        torch::empty({static_cast<int64_t>(paged_kv_indptr.size())},
-                     torch::TensorOptions()
-                         .dtype(torch::kInt)
-                         .device(torch::kCPU)
-                         .pinned_memory(true));
-    std::memcpy(input_params.attention.device.new_cache_slots.data_ptr<int>(),
-                paged_kv_indptr.data(),
-                paged_kv_indptr.size() * sizeof(int));
+        make_pinned_cpu_tensor(std::vector<int32_t>(num_sequences + 1, 0));
   };
 
   if (thread_pool_ && num_sequences >= kSequenceParallelGrain) {
@@ -773,10 +553,7 @@ RecForwardInput OneRecForwardInputBuilder::build_rec_forward_input(
   onerec_params.group_width = group_width;
   onerec_params.seq_len = seq_len;
   onerec_params.encoder_max_seq_len =
-      cache_data.encoder_seq_lens.empty()
-          ? 0
-          : *std::max_element(cache_data.encoder_seq_lens.begin(),
-                              cache_data.encoder_seq_lens.end());
+      util::max_len(cache_data.encoder_seq_lens);
 
   onerec_params.generated_tokens = std::move(generated_tokens);
 

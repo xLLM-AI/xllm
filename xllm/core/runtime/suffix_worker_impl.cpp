@@ -111,7 +111,8 @@ std::optional<ForwardOutput> SuffixWorkerImpl::step_prefill(
 
     int32_t start_idx = 0;
     for (int32_t seq_id = 0; seq_id < num_sequences; ++seq_id) {
-      int32_t q_len = input_params.get_q_seq_len(seq_id);
+      int32_t q_len =
+          input_params.attention.host.q_seq_lens[static_cast<size_t>(seq_id)];
       Slice<int32_t> seq_tokens =
           tokens_ids_slice.slice(start_idx, start_idx + q_len);
       start_idx += q_len;

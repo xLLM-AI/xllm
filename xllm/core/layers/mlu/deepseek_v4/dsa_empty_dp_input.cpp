@@ -66,8 +66,8 @@ void fill_dsv4_empty_dp_params(ModelParamsView& params,
                                        ? BatchForwardType::CHUNKED_PREFILL
                                        : BatchForwardType::DECODE;
 
-  params.attention.host.q_seq_lens = {0, 1};
-  params.attention.host.kv_seq_lens = {0, kv_len};
+  params.attention.host.q_seq_lens = {1};
+  params.attention.host.kv_seq_lens = {kv_len};
   params.attention.host.q_cu_seq_lens = {1};
   params.attention.host.kv_cu_seq_lens = {kv_len};
   params.attention.host.new_cache_slots = {0};

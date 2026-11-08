@@ -33,6 +33,7 @@ limitations under the License.
 #include "framework/config/kv_cache_config.h"
 #include "framework/core/MLUStream.h"
 #include "util/linalg.h"
+#include "util/seq_lens.h"
 #include "util/tensor_helper.h"
 
 namespace xllm::layer {
@@ -46,34 +47,10 @@ constexpr char kKPoolSelectKernelPath[] =
     "xllm.core.kernels.mlu.triton_kernel.glm5_next_kpool_select";
 constexpr int64_t kWorkspaceBytes = 64 * 1024 * 1024;
 
-int32_t max_sequence_length(const std::vector<int32_t>& lengths) {
-  return lengths.empty() ? 0
-                         : *std::max_element(lengths.begin(), lengths.end());
-}
-
-std::vector<int64_t> make_query_offsets(const std::vector<int32_t>& lengths) {
-  std::vector<int64_t> offsets;
-  offsets.reserve(lengths.size() + 1);
-  offsets.emplace_back(0);
-  for (const int32_t length : lengths) {
-    offsets.emplace_back(offsets.back() + length);
-  }
-  return offsets;
-}
-
 std::vector<int32_t> resolve_seq_lens(const std::vector<int32_t>& host_lens,
                                       const torch::Tensor& device_lens,
                                       const char* name) {
   if (!host_lens.empty()) {
-    if (device_lens.defined() && host_lens.front() == 0 &&
-        host_lens.size() == static_cast<size_t>(device_lens.numel() + 1)) {
-      std::vector<int32_t> per_sequence_lens;
-      per_sequence_lens.reserve(host_lens.size() - 1);
-      for (size_t i = 1; i < host_lens.size(); ++i) {
-        per_sequence_lens.emplace_back(host_lens[i] - host_lens[i - 1]);
-      }
-      return per_sequence_lens;
-    }
     return host_lens;
   }
   CHECK(device_lens.defined()) << name << " must be defined.";
@@ -210,7 +187,8 @@ std::shared_ptr<KPoolBatchMetadata> make_kpool_batch_metadata(
     }
   }
   const int64_t requests = static_cast<int64_t>(batch->q_seq_lens.size());
-  const std::vector<int64_t> offsets = make_query_offsets(batch->q_seq_lens);
+  std::vector<int64_t> offsets;
+  util::fill_query_start_loc(offsets, batch->q_seq_lens);
   const int64_t tokens = offsets.back();
   if (graph) {
     // The ordinary graph path has live cumulative query offsets. Explicit
@@ -255,7 +233,7 @@ std::shared_ptr<KPoolBatchMetadata> make_kpool_batch_metadata(
       }
       batch->kv_seq_lens = std::move(logical_lens);
     }
-    batch->max_kv_len = max_sequence_length(batch->kv_seq_lens);
+    batch->max_kv_len = util::max_len(batch->kv_seq_lens);
   }
   return batch;
 }
@@ -293,7 +271,7 @@ torch::Tensor glm5_next_kpool_select(const torch::Tensor& query,
   }
   CHECK_GE(workspace_bytes, max_pools * static_cast<int64_t>(sizeof(float)));
   const int64_t max_query_rows =
-      batch ? max_sequence_length(batch->q_seq_lens) : query.size(0);
+      batch ? util::max_len(batch->q_seq_lens) : query.size(0);
   const bool dense = batch && max_query_rows > 32;
   const int64_t chunk_size =
       std::min<int64_t>(dense ? max_query_rows : query.size(0),
@@ -772,7 +750,7 @@ std::tuple<torch::Tensor, torch::Tensor> Glm5NextKPoolIndexerImpl::forward(
   CHECK_EQ(execution.batch->row_batch.numel(), positions.numel());
   CHECK(execution.batch->tail_indices.defined());
   if (attn_metadata.is_spec_verify) {
-    CHECK_LE(max_sequence_length(execution.batch->q_seq_lens),
+    CHECK_LE(util::max_len(execution.batch->q_seq_lens),
              tail_cache.size(2) - index_kpool_)
         << "KPool tail capacity does not cover the speculative write window.";
   }

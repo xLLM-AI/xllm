@@ -128,8 +128,8 @@ class EncoderEmbeddingGatherVisitor : public MMDataItem::IVisitor {
  public:
   EncoderEmbeddingGatherVisitor(const torch::Device& device,
                                 uint32_t mm_type,
-                                const std::vector<int32_t>& seq_lens,
-                                const std::vector<int32_t>& scheduled_seq_lens);
+                                std::vector<int32_t> seq_lens,
+                                std::vector<int32_t> scheduled_seq_lens);
   bool visit(MMDataItem& data) override;
   bool finish(MMBatchData& mm_data);
 

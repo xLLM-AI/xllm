@@ -64,6 +64,7 @@ limitations under the License.
 #include "models/model_registry.h"
 #include "runtime/llm_worker_impl.h"
 #include "util/pretty_print.h"
+#include "util/seq_lens.h"
 #include "util/slice.h"
 #include "util/tensor_helper.h"
 #include "util/timer.h"
@@ -1427,7 +1428,8 @@ void MTPWorkerImpl<TargetInput>::prepare_prefill_inputs(
   std::vector<int32_t> new_token_ids;
   new_token_ids.reserve(token_ids.numel());
   for (int32_t i = 0; i < input_params.meta.num_sequences; ++i) {
-    int32_t q_len = input_params.get_q_seq_len(i);
+    int32_t q_len =
+        input_params.attention.host.q_seq_lens[static_cast<size_t>(i)];
     Slice<int32_t> tokens_ids_slice_i =
         tokens_ids_slice.slice(start_idx + 1, start_idx + q_len);
     start_idx += q_len;
@@ -2907,11 +2909,7 @@ void MTPWorkerImpl<TargetInput>::update_decode_step_input(
   std::vector<int32_t> token_ids_vec;
   std::vector<int32_t> kv_seq_lens_vec;
   token_ids_vec.reserve(num_sequences);
-#if defined(USE_NPU)
   kv_seq_lens_vec.reserve(num_sequences);
-#else
-  kv_seq_lens_vec.reserve(num_sequences + 1);
-#endif
 
   const torch::Tensor& token_ids_cpu = input.token_ids_host;
   const torch::Tensor& positions_cpu = input.positions_host;
@@ -2999,7 +2997,7 @@ void MTPWorkerImpl<TargetInput>::update_decode_step_input(
                                    ? state.token_id
                                    : input_token_id);
     positions_vec.emplace_back(current_position);
-    specBuilder::append_seq_len_by_layout(kv_seq_lens_vec, current_kv_len);
+    kv_seq_lens_vec.emplace_back(current_kv_len);
   }
 
   input.token_ids_host = specBuilder::make_cpu_int_tensor(token_ids_vec);
@@ -3217,13 +3215,8 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
     input_params.embedding.input_embedding = torch::Tensor();
     input_params.is_spec_verify = true;
     if (!input_params.attention.host.q_seq_lens.empty()) {
-      std::vector<int32_t> q_cu_seq_lens_vec;
-      q_cu_seq_lens_vec.reserve(input_params.meta.num_sequences + 1);
-      q_cu_seq_lens_vec.emplace_back(0);
-      for (int32_t q_len : input_params.attention.host.q_seq_lens) {
-        q_cu_seq_lens_vec.emplace_back(q_cu_seq_lens_vec.back() + q_len);
-      }
-      input_params.attention.host.q_cu_seq_lens = std::move(q_cu_seq_lens_vec);
+      input_params.attention.host.q_cu_seq_lens =
+          util::query_start_loc(input_params.attention.host.q_seq_lens);
     }
     accepted_prefix_lengths.assign(num_sequences, 1);
     if (embedding_cache_ != nullptr &&
@@ -3701,7 +3694,7 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
         buf.out_new_cache_slots.back() = 0;
       }
       add_row(state.token_id, /*position_offset=*/0, state.embedding);
-      specBuilder::append_seq_len_by_layout(buf.out_q_seq_lens, 2);
+      buf.out_q_seq_lens.emplace_back(/*value=*/2);
       const int32_t kv_len = specBuilder::calc_kv_len(
           base_input.input_params.attention.host.kv_seq_lens,
           seq_id,
@@ -3764,13 +3757,8 @@ void MTPWorkerImpl<TargetInput>::prepare_draft_extend_inputs(
   if (use_chunked_prefill) {
     input_params.meta.num_sequences = num_sequences;
     input_params.meta.batch_forward_type = BatchForwardType::CHUNKED_PREFILL;
-    std::vector<int32_t> q_cu_seq_lens_vec;
-    q_cu_seq_lens_vec.reserve(buf.out_q_seq_lens.size());
-    int32_t cumulative_q_len = 0;
-    for (int32_t q_len : buf.out_q_seq_lens) {
-      cumulative_q_len += q_len;
-      q_cu_seq_lens_vec.emplace_back(cumulative_q_len);
-    }
+    std::vector<int32_t> q_cu_seq_lens_vec =
+        util::cu_num_tokens(buf.out_q_seq_lens);
     specBuilder::update_input_params(input_params,
                                      buf,
                                      /*q_max_seq_len=*/2,

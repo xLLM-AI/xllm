@@ -123,20 +123,6 @@ class CudaGraphPersistentParam {
     hidden_states_.slice(/*dim=*/0, /*start=*/0, /*end=*/result_tokens)
         .copy_(value, /*non_blocking=*/true);
   }
-  torch::Tensor q_seq_lens(uint32_t actual_batch_size) const {
-    if (actual_batch_size > 0) {
-      return q_seq_lens_.slice(
-          /*dim=*/0, /*start=*/0, /*end=*/actual_batch_size);
-    }
-    return q_seq_lens_;
-  }
-  torch::Tensor kv_seq_lens(uint32_t actual_batch_size) const {
-    if (actual_batch_size > 0) {
-      return kv_seq_lens_.slice(
-          /*dim=*/0, /*start=*/0, /*end=*/actual_batch_size);
-    }
-    return kv_seq_lens_;
-  }
   torch::Tensor persistent_embedding(uint32_t actual_tokens) const {
     if (actual_tokens > 0) {
       return persistent_embedding_.slice(

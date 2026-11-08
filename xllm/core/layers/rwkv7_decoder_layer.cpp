@@ -568,7 +568,8 @@ torch::Tensor RWKV7DecoderLayerImpl::forward(
 
   std::vector<int32_t> seq_lens(static_cast<size_t>(num_seqs));
   for (int32_t s = 0; s < num_seqs; ++s) {
-    seq_lens[static_cast<size_t>(s)] = input_params.get_q_seq_len(s);
+    seq_lens[static_cast<size_t>(s)] =
+        input_params.attention.host.q_seq_lens[static_cast<size_t>(s)];
   }
 
   // Use scheduler-provided slot indices when available; otherwise fall back

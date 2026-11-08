@@ -112,14 +112,6 @@ class DcuGraphPersistentParam final {
   bool use_mrope() const { return use_mrope_; }
 
  private:
-  torch::Tensor q_seq_lens(uint32_t size) const {
-    return size > 0 ? q_seq_lens_.slice(0, 0, size) : q_seq_lens_;
-  }
-
-  torch::Tensor kv_seq_lens(uint32_t size) const {
-    return size > 0 ? kv_seq_lens_.slice(0, 0, size) : kv_seq_lens_;
-  }
-
   torch::Tensor q_seq_lens_values(uint32_t size) const {
     return size > 0 ? q_seq_lens_values_.slice(0, 0, size) : q_seq_lens_values_;
   }

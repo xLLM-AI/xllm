@@ -290,9 +290,9 @@ RecModelParams make_native_rec_decode_params(const torch::Device& device,
   params.meta.q_max_seq_len = 1;
   const auto options =
       torch::TensorOptions().dtype(torch::kInt32).device(device);
-  params.attention.device.q_seq_lens = torch::tensor({0, 1}, options);
-  params.attention.device.kv_seq_lens = torch::tensor({0, 1}, options);
-  params.attention.device.q_cu_seq_lens = params.attention.device.q_seq_lens;
+  params.attention.device.q_seq_lens = torch::tensor({1}, options);
+  params.attention.device.kv_seq_lens = torch::tensor({1}, options);
+  params.attention.device.q_cu_seq_lens = torch::tensor({1}, options);
   params.attention.device.new_cache_slots = torch::tensor({0}, options);
   params.attention.device.block_tables = torch::zeros({1, 1}, options);
   params.attention.device.paged_kv_indptr = torch::tensor({0, 1}, options);
@@ -314,10 +314,9 @@ ModelParamsView MakeDecodeParams(const torch::Device& device) {
   p.enable_graph = false;  // executor will set metadata->enable_cuda_graph
 
   auto iopt = torch::TensorOptions().dtype(torch::kInt32).device(device);
-  // cumulative lengths (cu_seq_lens)
-  p.attention.device.q_seq_lens = torch::tensor({0, 1}, iopt);
-  p.attention.device.kv_seq_lens = torch::tensor({0, 4}, iopt);
-  p.attention.device.q_cu_seq_lens = p.attention.device.q_seq_lens;
+  p.attention.device.q_seq_lens = torch::tensor({1}, iopt);
+  p.attention.device.kv_seq_lens = torch::tensor({4}, iopt);
+  p.attention.device.q_cu_seq_lens = torch::tensor({1}, iopt);
 
   // slot mapping for the single token -> last slot in the 4-length kv cache
   p.attention.device.new_cache_slots = torch::tensor({3}, iopt);
@@ -345,14 +344,16 @@ ModelParamsView MakeBatchDecodeParams(const torch::Device& device,
 
   torch::TensorOptions iopt =
       torch::TensorOptions().dtype(torch::kInt32).device(device);
-  torch::Tensor cumulative_lens = torch::arange(0, num_sequences + 1, iopt);
-  p.attention.device.q_seq_lens = cumulative_lens;
-  p.attention.device.kv_seq_lens = cumulative_lens.clone();
-  p.attention.device.q_cu_seq_lens = p.attention.device.q_seq_lens;
-  p.attention.device.new_cache_slots = torch::arange(0, num_sequences, iopt);
+  p.attention.device.q_seq_lens = torch::ones({num_sequences}, iopt);
+  p.attention.device.kv_seq_lens = torch::ones({num_sequences}, iopt);
+  p.attention.device.q_cu_seq_lens =
+      torch::arange(/*start=*/1, num_sequences + 1, iopt);
+  p.attention.device.new_cache_slots =
+      torch::arange(/*start=*/0, num_sequences, iopt);
   p.attention.device.block_tables =
-      torch::arange(0, num_sequences, iopt).unsqueeze(/*dim=*/1);
-  p.attention.device.paged_kv_indptr = cumulative_lens.clone();
+      torch::arange(/*start=*/0, num_sequences, iopt).unsqueeze(/*dim=*/1);
+  p.attention.device.paged_kv_indptr =
+      torch::arange(/*start=*/0, num_sequences + 1, iopt);
   p.attention.device.paged_kv_indices = torch::arange(0, num_sequences, iopt);
   p.attention.device.paged_kv_last_page_len =
       torch::ones({num_sequences}, iopt);
@@ -371,10 +372,9 @@ ModelParamsView MakePrefillParams(const torch::Device& device,
   p.enable_graph = false;  // executor will set metadata->enable_cuda_graph
 
   auto iopt = torch::TensorOptions().dtype(torch::kInt32).device(device);
-  // cumulative lengths (cu_seq_lens)
-  p.attention.device.q_seq_lens = torch::tensor({0, num_tokens}, iopt);
-  p.attention.device.kv_seq_lens = torch::tensor({0, num_tokens}, iopt);
-  p.attention.device.q_cu_seq_lens = p.attention.device.q_seq_lens;
+  p.attention.device.q_seq_lens = torch::tensor({num_tokens}, iopt);
+  p.attention.device.kv_seq_lens = torch::tensor({num_tokens}, iopt);
+  p.attention.device.q_cu_seq_lens = torch::tensor({num_tokens}, iopt);
 
   // prefill writes all tokens into kv-cache slots [0, num_tokens)
   p.attention.device.new_cache_slots = torch::arange(0, num_tokens, iopt);
@@ -454,9 +454,9 @@ ModelParamsView make_multi_sequence_decode_params(const torch::Device& device) {
 
   torch::TensorOptions iopt =
       torch::TensorOptions().dtype(torch::kInt32).device(device);
-  p.attention.device.q_seq_lens = torch::tensor({0, 1, 2}, iopt);
-  p.attention.device.kv_seq_lens = torch::tensor({0, 4, 9}, iopt);
-  p.attention.device.q_cu_seq_lens = p.attention.device.q_seq_lens;
+  p.attention.device.q_seq_lens = torch::tensor({1, 1}, iopt);
+  p.attention.device.kv_seq_lens = torch::tensor({4, 5}, iopt);
+  p.attention.device.q_cu_seq_lens = torch::tensor({1, 2}, iopt);
   p.attention.device.new_cache_slots = torch::tensor({5, 7}, iopt);
   p.attention.device.block_tables =
       torch::tensor({{0, 1, 2, 3}, {4, 5, 6, 7}}, iopt);
@@ -568,9 +568,6 @@ TEST(CudaGraphExecutorTest, DecodeMetadataFastPathUpdatesPersistentBuffers) {
   EXPECT_TRUE(torch::equal(
       persistent.persistent_new_cache_slots(/*actual_tokens=*/4).cpu(),
       torch::tensor({5, 7, -1, -1}, torch::dtype(torch::kInt32))));
-  EXPECT_TRUE(torch::equal(
-      persistent.kv_seq_lens(/*actual_batch_size=*/5).cpu(),
-      torch::tensor({0, 4, 9, 9, 9}, torch::dtype(torch::kInt32))));
   EXPECT_TRUE(torch::equal(
       persistent.persistent_kv_seq_lens_delta(/*actual_batch_size=*/4).cpu(),
       torch::tensor({4, 5, 0, 0}, torch::dtype(torch::kInt32))));
@@ -720,9 +717,6 @@ TEST(CudaGraphExecutorTest, DecodeMetadataFastPathFallbackMatchesLegacyPath) {
       fallback_persistent.persistent_new_cache_slots(/*actual_tokens=*/4)
           .cpu()));
   EXPECT_TRUE(torch::equal(
-      fast_path_persistent.kv_seq_lens(/*actual_batch_size=*/5).cpu(),
-      fallback_persistent.kv_seq_lens(/*actual_batch_size=*/5).cpu()));
-  EXPECT_TRUE(torch::equal(
       fast_path_persistent.persistent_kv_seq_lens_delta(/*actual_batch_size=*/4)
           .cpu(),
       fallback_persistent.persistent_kv_seq_lens_delta(/*actual_batch_size=*/4)
@@ -836,8 +830,6 @@ TEST(CudaGraphExecutorTest, BatchDecodePaddedBucket100CaptureAndReplay) {
       make_test_runtime_options(/*max_seqs_per_batch=*/100);
 
   runtime::cuda::CudaGraphPersistentParam persistent(args, device, options);
-  EXPECT_EQ(persistent.q_seq_lens(/*actual_batch_size=*/0).size(0), 113);
-  EXPECT_EQ(persistent.kv_seq_lens(/*actual_batch_size=*/0).size(0), 113);
   EXPECT_EQ(
       persistent.persistent_paged_kv_indptr(/*actual_batch_size=*/0).size(0),
       113);
@@ -911,8 +903,6 @@ TEST(CudaGraphExecutorTest, BatchDecodeNoPaddingBucket100CaptureAndReplay) {
       make_test_runtime_options(/*max_seqs_per_batch=*/100);
 
   runtime::cuda::CudaGraphPersistentParam persistent(args, device, options);
-  EXPECT_EQ(persistent.q_seq_lens(/*actual_batch_size=*/0).size(0), 101);
-  EXPECT_EQ(persistent.kv_seq_lens(/*actual_batch_size=*/0).size(0), 101);
   EXPECT_EQ(
       persistent.persistent_paged_kv_indptr(/*actual_batch_size=*/0).size(0),
       101);

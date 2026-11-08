@@ -173,20 +173,6 @@ class GraphPersistentParam final {
     hidden_states_.slice(/*dim=*/0, /*start=*/0, /*end=*/result_tokens)
         .copy_(value, /*non_blocking=*/true);
   }
-  torch::Tensor q_seq_lens(uint32_t actual_batch_size = 0) const {
-    if (actual_batch_size > 0) {
-      return q_seq_lens_.slice(
-          /*dim=*/0, /*start=*/0, /*end=*/actual_batch_size);
-    }
-    return q_seq_lens_;
-  }
-  torch::Tensor kv_seq_lens(uint32_t actual_batch_size = 0) const {
-    if (actual_batch_size > 0) {
-      return kv_seq_lens_.slice(
-          /*dim=*/0, /*start=*/0, /*end=*/actual_batch_size);
-    }
-    return kv_seq_lens_;
-  }
   const int32_t* persistent_host_q_seq_lens_data() const {
     return persistent_host_q_seq_lens_.data();
   }

@@ -43,6 +43,7 @@ limitations under the License.
 #include "core/platform/vmm_torch_allocator.h"
 #include "core/runtime/graph_execution_input.h"
 #include "core/util/rec_model_utils.h"
+#include "core/util/seq_lens.h"
 #include "core/util/utils.h"
 #include "kernels/cuda/global_capture_instance.h"
 #include "kernels/cuda/utils.h"
@@ -256,13 +257,14 @@ void CudaGraphPersistentParam::update_llm_decode_metadata_fast_path(
   CHECK_GE(actual_num_tokens, 0) << "actual_num_tokens must be >= 0";
   const int64_t actual_indices_size =
       params.attention.device.paged_kv_indices.size(0);
+  util::fill_query_start_loc(
+      params.attention.device.kv_seq_lens, actual_batch_size, kv_seq_lens_);
   xllm::kernel::cuda::LlmDecodeMetadataUpdateParams update_params{
       .src_tokens = tokens.template data_ptr<int32_t>(),
       .src_positions = positions.template data_ptr<int32_t>(),
       .src_new_cache_slots =
           params.attention.device.new_cache_slots.template data_ptr<int32_t>(),
-      .src_kv_seq_lens =
-          params.attention.device.kv_seq_lens.template data_ptr<int32_t>(),
+      .src_kv_seq_lens = kv_seq_lens_.template data_ptr<int32_t>(),
       .src_paged_kv_indptr =
           params.attention.device.paged_kv_indptr.template data_ptr<int32_t>(),
       .src_paged_kv_indices =
@@ -359,12 +361,12 @@ std::optional<Params> CudaGraphPersistentParam::update(
         << "padded_num_tokens must be > 0 when return_capture_params is true";
     params_for_capture.emplace(copy_graph_execution_input(params));
   }
-  // Build attn_metadata with original model_input_params. So we can set actual
-  // batch size in plan_info.
+  const GraphExecutionInput<Params> graph_input(params);
   std::shared_ptr<layer::AttentionMetadata> attn_metadata =
-      std::make_shared<layer::AttentionMetadata>(
-          layer::AttentionMetadataBuilder::build(params, args_.enable_mla()));
-  attn_metadata->enable_cuda_graph = true;
+      build_graph_attention_metadata(
+          graph_input,
+          args_,
+          /*skip_cu_seq_lens=*/!is_rec_multi_round_graph_input(params));
   auto build_capture_params_if_needed = [&]() -> std::optional<Params> {
     if (!return_capture_params) {
       return std::nullopt;
@@ -436,30 +438,12 @@ std::optional<Params> CudaGraphPersistentParam::update(
   }
 
   if (!is_rec_multi_round_graph_input(params) && !use_llm_decode_fast_path) {
-    // q_seq_lens is q_cu_seq_lens in GPU Model.
-    // kv_seq_lens is kv_cu_seq_lens in GPU Model.
-    VLOG(kGraphExecutorLogVerboseLevel)
-        << "copy_ q_seq_lens: src shape="
-        << params.attention.device.q_seq_lens.sizes() << ", dst slice shape=["
-        << actual_batch_size + 1 << "]";
-    q_seq_lens_.slice(/*dim=*/0, /*start=*/0, /*end=*/actual_batch_size + 1)
-        .copy_(params.attention.device.q_seq_lens, /*non_blocking=*/true);
-
-    VLOG(kGraphExecutorLogVerboseLevel)
-        << "copy_ kv_seq_lens: src shape="
-        << params.attention.device.kv_seq_lens.sizes() << ", dst slice shape=["
-        << actual_batch_size + 1 << "]";
-    kv_seq_lens_.slice(/*dim=*/0, /*start=*/0, /*end=*/actual_batch_size + 1)
-        .copy_(params.attention.device.kv_seq_lens, /*non_blocking=*/true);
-    if (params.meta.batch_forward_type.is_decode() &&
-        padded_num_tokens > actual_num_tokens) {
-      kv_seq_lens_
-          .slice(/*dim=*/0,
-                 /*start=*/actual_batch_size + 1,
-                 /*end=*/padded_num_tokens + 1)
-          .fill_(
-              params.attention.device.kv_seq_lens[-1].template item<int32_t>());
-    }
+    fill_persistent_graph_cu_seq_lens(params,
+                                      actual_batch_size,
+                                      actual_num_tokens,
+                                      padded_num_tokens,
+                                      q_seq_lens_,
+                                      kv_seq_lens_);
 
     VLOG(kGraphExecutorLogVerboseLevel)
         << "copy_ new_cache_slots: src shape="
@@ -473,16 +457,16 @@ std::optional<Params> CudaGraphPersistentParam::update(
           .slice(/*dim=*/0,
                  /*start=*/actual_num_tokens,
                  /*end=*/padded_num_tokens)
-          .fill_(-1);
+          .fill_(util::kPadSlotId);
     }
 
     // Keep metadata tensors pointing to persistent buffers used by graph
     // capture/replay so their addresses are stable and shapes match padded
     // tensors in capture path.
-    attn_metadata->q_cu_seq_lens = q_seq_lens(/*actual_batch_size=*/
-                                              actual_batch_size + 1);
-    attn_metadata->kv_cu_seq_lens = kv_seq_lens(/*actual_batch_size=*/
-                                                actual_batch_size + 1);
+    attn_metadata->q_cu_seq_lens = q_seq_lens_.slice(
+        /*dim=*/0, /*start=*/0, /*end=*/actual_batch_size + 1);
+    attn_metadata->kv_cu_seq_lens = kv_seq_lens_.slice(
+        /*dim=*/0, /*start=*/0, /*end=*/actual_batch_size + 1);
     const uint32_t slot_mapping_tokens =
         padded_num_tokens > 0 ? padded_num_tokens : actual_num_tokens;
     attn_metadata->slot_mapping =
@@ -594,23 +578,20 @@ std::optional<Params> CudaGraphPersistentParam::update(
       if (params.attention.device.q_seq_lens.defined() &&
           params.attention.device.q_seq_lens.numel() > 0) {
         const int64_t q_numel = params.attention.device.q_seq_lens.numel();
-        q_seq_lens_.slice(/*dim=*/0, /*start=*/0, /*end=*/q_numel)
-            .copy_(params.attention.device.q_seq_lens, /*non_blocking=*/true);
+        util::fill_query_start_loc(
+            params.attention.device.q_seq_lens, q_numel, q_seq_lens_);
         attn_metadata->q_cu_seq_lens =
-            q_seq_lens(/*actual_batch_size=*/q_numel);
+            q_seq_lens_.slice(/*dim=*/0, /*start=*/0, /*end=*/q_numel + 1);
       }
 
       if (params.attention.device.kv_seq_lens.defined() &&
           params.attention.device.kv_seq_lens.numel() > 0) {
         const int64_t kv_numel = params.attention.device.kv_seq_lens.numel();
-        kv_seq_lens_.slice(/*dim=*/0, /*start=*/0, /*end=*/kv_numel)
-            .copy_(params.attention.device.kv_seq_lens, /*non_blocking=*/true);
+        util::fill_query_start_loc(
+            params.attention.device.kv_seq_lens, kv_numel, kv_seq_lens_);
         attn_metadata->kv_cu_seq_lens =
-            kv_seq_lens(/*actual_batch_size=*/kv_numel);
-        if (kv_numel > 1) {
-          attn_metadata->kv_seq_lens =
-              torch::diff(attn_metadata->kv_cu_seq_lens);
-        }
+            kv_seq_lens_.slice(/*dim=*/0, /*start=*/0, /*end=*/kv_numel + 1);
+        attn_metadata->kv_seq_lens = params.attention.device.kv_seq_lens;
       }
 
       attn_metadata->paged_kv_indptr = torch::Tensor();
@@ -744,7 +725,8 @@ std::optional<Params> CudaGraphPersistentParam::update(
         padded_num_tokens > 0 ? padded_num_tokens
                               : static_cast<uint32_t>(actual_batch_size);
     attn_metadata->q_cu_seq_lens = persistent_decode_qo_indptr(metadata_batch);
-    attn_metadata->kv_cu_seq_lens = kv_seq_lens(metadata_batch + 1);
+    attn_metadata->kv_cu_seq_lens =
+        kv_seq_lens_.slice(/*dim=*/0, /*start=*/0, /*end=*/metadata_batch + 1);
     attn_metadata->kv_seq_lens = persistent_kv_seq_lens_delta(metadata_batch);
     attn_metadata->slot_mapping =
         persistent_new_cache_slots(slot_mapping_tokens);
@@ -821,15 +803,15 @@ std::optional<Params> CudaGraphPersistentParam::update(
     if (params.meta.batch_forward_type.is_decode()) {
       attn_metadata->q_cu_seq_lens =
           persistent_decode_qo_indptr(metadata_batch);
-      attn_metadata->kv_cu_seq_lens = kv_seq_lens(metadata_batch + 1);
+      attn_metadata->kv_cu_seq_lens = kv_seq_lens_.slice(
+          /*dim=*/0, /*start=*/0, /*end=*/metadata_batch + 1);
       torch::Tensor kv_seq_lens_delta =
           persistent_kv_seq_lens_delta(metadata_batch);
       kv_seq_lens_delta.copy_(torch::diff(attn_metadata->kv_cu_seq_lens),
                               /*non_blocking=*/true);
       attn_metadata->kv_seq_lens = kv_seq_lens_delta;
     } else {
-      attn_metadata->kv_seq_lens =
-          torch::diff(kv_seq_lens(/*actual_batch_size=*/metadata_batch + 1));
+      attn_metadata->kv_seq_lens = params.attention.device.kv_seq_lens;
     }
     attn_metadata->paged_kv_indptr = persistent_paged_kv_indptr(metadata_batch);
     attn_metadata->paged_kv_indices = persistent_paged_kv_indices_;

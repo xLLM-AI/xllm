@@ -1766,10 +1766,6 @@ void AclGraph::print_graph_tensors() const {
       << "graph persistent_new_cache_slots_: "
       << persistent_param_.persistent_new_cache_slots();
   VLOG(kGraphExecutorLogVerboseLevel)
-      << "graph q_seq_lens_: " << persistent_param_.q_seq_lens();
-  VLOG(kGraphExecutorLogVerboseLevel)
-      << "graph kv_seq_lens_: " << persistent_param_.kv_seq_lens();
-  VLOG(kGraphExecutorLogVerboseLevel)
       << "graph persistent_block_tables_: "
       << persistent_param_.persistent_block_tables();
   VLOG(kGraphExecutorLogVerboseLevel)

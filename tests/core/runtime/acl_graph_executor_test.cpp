@@ -1473,8 +1473,6 @@ TEST(AclGraphPersistentParamTest, SpecVerifyMetadataUsesTokenCapacity) {
           static_cast<int64_t>(options.max_seqs_per_batch()) *
               options.num_decoding_tokens(),
           options.enable_graph_mode_decode_no_padding());
-  EXPECT_EQ(persistent_param.q_seq_lens().size(0), expected_token_capacity);
-  EXPECT_EQ(persistent_param.kv_seq_lens().size(0), expected_token_capacity);
   EXPECT_EQ(persistent_param.persistent_block_tables().size(0),
             expected_token_capacity);
 
@@ -1524,7 +1522,6 @@ TEST(AclGraphPersistentParamTest, SpecVerifyMetadataUsesTokenCapacity) {
       /*need_update_attn_mask=*/false,
       /*is_hybrid_linear_attention=*/true);
   // 10 seqs x 3 decoding tokens = 30 rows -> bucket 32 -> 11 metadata rows.
-  EXPECT_EQ(hybrid_persistent_param.q_seq_lens().size(0), 11);
   EXPECT_EQ(hybrid_persistent_param.persistent_block_tables().size(0), 11);
 
   speculative_config.enable_atb_spec_kernel(original_enable_atb_spec_kernel);
@@ -1567,7 +1564,6 @@ TEST_P(HybridSpecVerifyPaddingTest, MetadataCoversBucketPadding) {
       options,
       /*need_update_attn_mask=*/false,
       /*is_hybrid_linear_attention=*/true);
-  EXPECT_EQ(persistent_param.q_seq_lens().size(0), kMetadataRows);
   EXPECT_EQ(persistent_param.persistent_block_tables().size(0), kMetadataRows);
   const torch::TensorOptions int_options =
       torch::dtype(torch::kInt).device(device);
@@ -1996,12 +1992,6 @@ TEST(AclGraphPersistentParamTest, SpecVerifyGraphUpdateSupportsRuntimeBatch) {
   EXPECT_TRUE(torch::equal(
       persistent_param.persistent_new_cache_slots(kNumTokens).cpu(),
       params.attention.device.new_cache_slots.cpu()));
-  EXPECT_TRUE(
-      torch::equal(persistent_param.q_seq_lens().narrow(0, 0, kBatchSize).cpu(),
-                   params.attention.device.q_seq_lens.cpu()));
-  EXPECT_TRUE(torch::equal(
-      persistent_param.kv_seq_lens().narrow(0, 0, kBatchSize).cpu(),
-      params.attention.device.kv_seq_lens.cpu()));
   EXPECT_TRUE(torch::equal(persistent_param.persistent_block_tables()
                                .narrow(0, 0, kBatchSize)
                                .narrow(1, 0, 2)

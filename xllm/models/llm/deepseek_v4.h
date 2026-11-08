@@ -44,6 +44,7 @@ limitations under the License.
 #include "core/layers/common/rms_norm.h"
 #include "core/layers/common/word_embedding.h"
 #include "core/layers/deepseek_v4_decoder_layer.h"
+#include "core/util/seq_lens.h"
 #include "core/util/tensor_helper.h"
 #include "layers/npu/deepseek_v4_rotary_embedding.h"
 #include "layers/npu_torch/deepseek_v4_cp_context.h"
@@ -413,6 +414,46 @@ inline void deepseek_v4_build_cache_specs(
       caches_info[layer_id].push_back({gid, ce.type, ce.ratio, ce.block_size});
     }
   }
+}
+
+inline void build_dcp_local_seq_lens(
+    layer::DSAMetadata& dsa,
+    ModelParamsView& params,
+    const layer::v4_cp::DeepseekV4CpContext& cp_ctx,
+    const torch::Device& fallback_device) {
+  std::vector<int32_t> local_q = cp_ctx.local_q_seq_lens;
+  std::vector<int32_t> local_kv = cp_ctx.local_kv_seq_lens;
+  torch::Tensor local_kv_cu_seq_lens = cp_ctx.local_kv_cu_seq_lens;
+  const torch::Device device =
+      dsa.seq_lens_q.defined() ? dsa.seq_lens_q.device() : fallback_device;
+  const auto int_options =
+      torch::TensorOptions().dtype(torch::kInt32).device(device);
+
+  torch::Tensor q_lens = torch::tensor(local_q, int_options);
+  params.attention.device.q_seq_lens = q_lens;
+  dsa.seq_lens_q = q_lens;
+  dsa.actual_seq_lengths_query = util::make_query_start_loc(q_lens);
+  params.attention.device.q_cu_seq_lens = dsa.actual_seq_lengths_query;
+  params.attention.host.q_cu_seq_lens = util::cu_num_tokens(local_q);
+
+  const int64_t local_q_max = util::max_len(local_q);
+  params.meta.q_max_seq_len = static_cast<int32_t>(local_q_max);
+  dsa.max_seqlen_q =
+      torch::full({1}, static_cast<int32_t>(local_q_max), int_options);
+  dsa.max_query_len = local_q_max;
+  params.attention.host.q_seq_lens = std::move(local_q);
+
+  const int64_t local_kv_max = util::max_len(local_kv);
+  torch::Tensor kv_lens = torch::tensor(local_kv, int_options);
+  params.attention.host.kv_seq_lens = std::move(local_kv);
+  params.attention.device.kv_seq_lens = kv_lens;
+  dsa.actual_seq_lengths_kv = kv_lens;
+  dsa.seq_lens = kv_lens;
+  dsa.kv_cu_seq_lens = std::move(local_kv_cu_seq_lens);
+  params.meta.kv_max_seq_len = static_cast<int32_t>(local_kv_max);
+  dsa.max_seqlen_kv =
+      torch::full({1}, static_cast<int32_t>(local_kv_max), int_options);
+  dsa.max_seq_len = local_kv_max;
 }
 
 class DeepseekV4ModelImpl
@@ -1514,52 +1555,7 @@ class DeepseekV4ModelImpl
       const layer::v4_cp::DeepseekV4CpContext& cp_ctx,
       std::unordered_map<int32_t, layer::DeepseekV4RotaryEmbedding::CosSinPair>&
           input_rope_by_ratio) const {
-    const auto& local_q = cp_ctx.local_q_seq_lens;
-    const torch::Device device =
-        dsa.seq_lens_q.defined() ? dsa.seq_lens_q.device() : device_;
-    const auto int_options =
-        torch::TensorOptions().dtype(torch::kInt32).device(device);
-
-    params.attention.host.q_seq_lens = local_q;
-    torch::Tensor q_lens = torch::tensor(local_q, int_options);
-    params.attention.device.q_seq_lens = q_lens;
-    dsa.seq_lens_q = q_lens;
-    torch::Tensor q_cumsum =
-        torch::cumsum(q_lens, /*dim=*/0, /*dtype=*/torch::kInt32);
-    dsa.actual_seq_lengths_query =
-        torch::cat({torch::zeros({1}, int_options), q_cumsum});
-    params.attention.device.q_cu_seq_lens = dsa.actual_seq_lengths_query;
-    std::vector<int32_t> q_cu_host;
-    q_cu_host.reserve(local_q.size());
-    int32_t running = 0;
-    for (const int32_t len : local_q) {
-      running += len;
-      q_cu_host.push_back(running);
-    }
-    params.attention.host.q_cu_seq_lens = q_cu_host;
-
-    const int64_t local_q_max = vector_max_or_zero(local_q);
-    params.meta.q_max_seq_len = static_cast<int32_t>(local_q_max);
-    dsa.max_seqlen_q = q_lens.numel() > 0
-                           ? torch::max(q_lens).to(torch::kInt32).reshape({1})
-                           : torch::zeros({1}, int_options);
-    dsa.max_query_len = local_q_max;
-
-    // Attention-side kv view: prefix + this rank's last local row. Everything
-    // written above and below stays on the global view.
-    const auto& local_kv = cp_ctx.local_kv_seq_lens;
-    torch::Tensor kv_lens = torch::tensor(local_kv, int_options);
-    params.attention.host.kv_seq_lens = local_kv;
-    params.attention.device.kv_seq_lens = kv_lens;
-    dsa.actual_seq_lengths_kv = kv_lens;
-    dsa.seq_lens = kv_lens;
-    dsa.kv_cu_seq_lens = cp_ctx.local_kv_cu_seq_lens;
-    const int64_t local_kv_max = vector_max_or_zero(local_kv);
-    params.meta.kv_max_seq_len = static_cast<int32_t>(local_kv_max);
-    dsa.max_seqlen_kv = kv_lens.numel() > 0
-                            ? torch::max(kv_lens).to(torch::kInt32).reshape({1})
-                            : torch::zeros({1}, int_options);
-    dsa.max_seq_len = local_kv_max;
+    build_dcp_local_seq_lens(dsa, params, cp_ctx, device_);
 
     // Query RoPE follows the local rows. local_positions keeps true global
     // positions, so RoPE values are unchanged -- only the row set shrinks.
@@ -1633,13 +1629,6 @@ class DeepseekV4ModelImpl
     }
   }
 
-  static int64_t vector_max_or_zero(const std::vector<int32_t>& values) {
-    if (values.empty()) {
-      return 0;
-    }
-    return *std::max_element(values.begin(), values.end());
-  }
-
   void build_dspark_swa_metadata(layer::DSAMetadata& dsa) const {
     if (!model_args_.dspark_use_native_sas() ||
         model_args_.dspark_block_size() <= 0) {
@@ -1708,10 +1697,10 @@ class DeepseekV4ModelImpl
         std::max<int64_t>(dsa.actual_seq_lengths_kv.size(0), 1);
     const int64_t max_seqlen_q =
         std::max<int64_t>(params.meta.q_max_seq_len,
-                          vector_max_or_zero(params.attention.host.q_seq_lens));
-    const int64_t max_seqlen_kv = std::max<int64_t>(
-        params.meta.kv_max_seq_len,
-        vector_max_or_zero(params.attention.host.kv_seq_lens));
+                          util::max_len(params.attention.host.q_seq_lens));
+    const int64_t max_seqlen_kv =
+        std::max<int64_t>(params.meta.kv_max_seq_len,
+                          util::max_len(params.attention.host.kv_seq_lens));
     // The batch type, not q_max_seq_len, is the authoritative metadata
     // selector: native DSpark decode may use a gamma-wide query, while the
     // compatibility fallback uses q_len=1 with CHUNKED_PREFILL semantics.
@@ -1855,13 +1844,6 @@ class DeepseekV4ModelImpl
     const int64_t qli_batch_size = std::max<int64_t>(key_lens.size(0), 1);
     const int64_t index_head_dim =
         std::max<int64_t>(index_head_dim_ > 0 ? index_head_dim_ : head_dim_, 1);
-    const int64_t qli_max_seqlen_q =
-        std::max<int64_t>(params.meta.q_max_seq_len,
-                          vector_max_or_zero(params.attention.host.q_seq_lens));
-    const int64_t qli_max_seqlen_k = std::max<int64_t>(
-        params.meta.kv_max_seq_len,
-        vector_max_or_zero(params.attention.host.kv_seq_lens));
-
     xllm::kernel::QuantLightningIndexerMetadataParams qli_params;
     qli_params.num_heads_q = global_index_num_heads;
     qli_params.num_heads_k = 1;
@@ -1871,8 +1853,8 @@ class DeepseekV4ModelImpl
     qli_params.actual_seq_lengths_query = as_optional_tensor(query_lens);
     qli_params.actual_seq_lengths_key = as_optional_tensor(key_lens);
     qli_params.batch_size = qli_batch_size;
-    qli_params.max_seqlen_q = qli_max_seqlen_q;
-    qli_params.max_seqlen_k = qli_max_seqlen_k;
+    qli_params.max_seqlen_q = max_seqlen_q;
+    qli_params.max_seqlen_k = max_seqlen_kv;
     qli_params.layout_query = "TND";
     qli_params.layout_key = "PA_BSND";
     qli_params.sparse_count = sparse_topk;

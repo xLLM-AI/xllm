@@ -51,13 +51,12 @@ ModelParamsView make_params(BatchForwardType forward_type,
     params.meta.q_max_seq_len = std::max(params.meta.q_max_seq_len, q_len);
     params.meta.kv_max_seq_len = std::max(params.meta.kv_max_seq_len, kv_len);
   }
-  params.attention.host.q_seq_lens = q_cu_lens;
-  params.attention.host.kv_seq_lens = kv_cu_lens;
+  params.attention.host.q_seq_lens = q_lens;
+  params.attention.host.kv_seq_lens = kv_lens;
   params.attention.host.q_cu_seq_lens.assign(q_cu_lens.begin() + 1,
                                              q_cu_lens.end());
-  params.attention.device.q_seq_lens = torch::tensor(q_cu_lens, torch::kInt32);
-  params.attention.device.kv_seq_lens =
-      torch::tensor(kv_cu_lens, torch::kInt32);
+  params.attention.device.q_seq_lens = torch::tensor(q_lens, torch::kInt32);
+  params.attention.device.kv_seq_lens = torch::tensor(kv_lens, torch::kInt32);
   params.attention.device.q_cu_seq_lens =
       torch::tensor(params.attention.host.q_cu_seq_lens, torch::kInt32);
   params.attention.device.new_cache_slots = torch::arange(
