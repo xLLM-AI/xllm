@@ -34,7 +34,6 @@ limitations under the License.
 namespace xllm {
 class RecForwardInput;
 class VlmForwardInput;
-struct SpecCalibrationCommand;
 
 class CommChannel {
  public:
@@ -46,9 +45,6 @@ class CommChannel {
   virtual bool hello();
 
   virtual bool allocate_kv_cache(const KVCacheShape& kv_cache_shape);
-
-  virtual std::optional<std::string> spec_calibration(
-      const SpecCalibrationCommand& command);
 
   virtual bool get_cache_info(uint64_t& cluster_id,
                               std::string& addr,

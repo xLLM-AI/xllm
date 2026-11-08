@@ -27,19 +27,9 @@ limitations under the License.
 
 #include "common/metrics.h"
 #include "core/common/extension_registry.h"
-#include "core/framework/config/eplb_config.h"
-#include "core/framework/config/execution_config.h"
-#include "core/framework/config/kv_cache_config.h"
-#include "core/framework/config/load_config.h"
-#include "core/framework/config/model_config.h"
 #include "core/framework/config/speculative_config.h"
-#include "core/framework/speculative/adaptive/spec_startup_calibration.h"
-#include "core/platform/platform.h"
-#include "core/runtime/task_execution_pipeline.h"
-#if defined(USE_NPU)
-#include "core/runtime/unified_mtp_worker_impl.h"
-#endif
 #include "core/kv_cache/storage/kv_cache.h"
+#include "core/platform/platform.h"
 #include "framework/model/model_params_view.h"
 #include "framework/state_dict/state_dict.h"
 #include "runtime/dflash2_worker_impl.h"
@@ -62,122 +52,11 @@ namespace xllm {
 Worker::Worker(const ParallelArgs& parallel_args,
                const torch::Device& device,
                const runtime::Options& options,
-               WorkerType worker_type)
-    : enable_task_pipeline_(options.enable_task_pipeline()) {
+               WorkerType worker_type) {
   const std::string& extension_impl = options.extension_impl();
   CHECK(extension_impl.empty() ||
         ExtensionRegistry::get_instance().has_implementation(extension_impl))
       << "Unknown extension implementation: " << extension_impl;
-  CHECK(!options.enable_adaptive_draft_step() ||
-        (enable_task_pipeline_ && options.enable_speculative_decode() &&
-         options.enable_schedule_overlap() && options.enable_graph() &&
-         options.dp_size() == 1 && options.cp_size() == 1 &&
-         SpeculativeConfig::is_mtp_algorithm(options.speculative_algorithm()) &&
-         !ExecutionConfig::get_instance().enable_unified_mtp_graph() &&
-         !ExecutionConfig::get_instance().disable_graph_warmup()))
-      << "Adaptive MTP requires ordinary prewarmed Python graphs, async MTP "
-         "task pipeline and DP=CP=1; unified MTP is not supported yet.";
-  CHECK(
-      !options.enable_adaptive_target_verify() ||
-      (options.enable_speculative_decode() && enable_task_pipeline_ &&
-       SpeculativeConfig::supports_adaptive_target_verify(
-           options.speculative_algorithm()) &&
-       (!SpeculativeConfig::is_mtp_algorithm(options.speculative_algorithm()) ||
-        (options.enable_graph() && options.enable_schedule_overlap() &&
-         options.dp_size() == 1 && options.cp_size() == 1)) &&
-       (options.num_speculative_tokens() == 5 ||
-        options.num_speculative_tokens() == 7)))
-      << "Adaptive speculative decoding requires MTP/DSpark Draft5/7 with task "
-         "pipeline; the legacy synchronous adaptive path is not supported.";
-  if (enable_task_pipeline_) {
-    CHECK(ModelConfig::is_python_model_impl(
-        ModelConfig::get_instance().model_impl()))
-        << "Task pipeline requires the Python model implementation.";
-    const auto& execution = ExecutionConfig::get_instance();
-    CHECK(!options.enable_speculative_decode() ||
-          !SpeculativeConfig::is_dspark_algorithm(
-              options.speculative_algorithm()) ||
-          parallel_args.dp_size() <= 1 || !execution.enable_unified_mtp_graph())
-        << "DP DSpark task pipeline requires split ACL graphs; "
-           "disable unified graphs.";
-    const std::string& graph_backend = execution.python_graph_backend();
-    CHECK(graph_backend.empty() || graph_backend == "off" ||
-          graph_backend == "none" || graph_backend == "0" ||
-          graph_backend == "aclgraph")
-        << "Task pipeline supports only the Python ACL graph backend.";
-    CHECK(graph_backend != "aclgraph" || options.enable_graph())
-        << "Task pipeline ACL graphs require enable_graph.";
-    CHECK(!options.enable_graph() || !execution.disable_graph_warmup())
-        << "Task pipeline ACL graphs require initialization warmup.";
-    const int32_t kv_split_size = parallel_args.kv_split_size_effective();
-    CHECK(
-        parallel_args.cp_size() == 1 ||
-        (Platform::is_npu() && parallel_args.dp_size() == 1 &&
-         (kv_split_size > 0 && parallel_args.cp_size() % kv_split_size == 0) &&
-         (!options.enable_speculative_decode() ||
-          SpeculativeConfig::is_mtp_algorithm(
-              options.speculative_algorithm()))))
-        << "Task pipeline prefill CP requires NPU, DP=1, KV split dividing CP "
-           "and ordinary or fixed MTP decoding.";
-    CHECK(kv_split_size == 1 ||
-          (kv_split_size > 1 && parallel_args.dp_size() == 1 &&
-           (!options.enable_speculative_decode() ||
-            SpeculativeConfig::is_mtp_algorithm(
-                options.speculative_algorithm()))))
-        << "Task pipeline DCP requires DP=1 and ordinary or fixed MTP "
-           "decoding.";
-    if (options.enable_disagg_pd()) {
-      CHECK(Platform::is_npu() && options.kv_cache_transfer_mode() == "PUSH" &&
-            kv_split_size == 1 &&
-            (options.instance_role() == InstanceRole::PREFILL ||
-             options.instance_role() == InstanceRole::DECODE) &&
-            (!options.enable_speculative_decode() ||
-             (SpeculativeConfig::is_mtp_algorithm(
-                  options.speculative_algorithm()) &&
-              !options.enable_adaptive_target_verify())))
-          << "Task pipeline PD requires NPU PUSH, PREFILL or DECODE roles, "
-             "replicated KV caches and ordinary or fixed MTP decoding.";
-      CHECK(options.instance_role() != InstanceRole::PREFILL ||
-            !options.enable_schedule_overlap())
-          << "Task pipeline PD requires schedule overlap disabled on PREFILL.";
-    }
-    CHECK((worker_type == WorkerType::LLM || worker_type == WorkerType::VLM) &&
-          options.task_type() == "generate" &&
-          (!options.enable_speculative_decode() ||
-           (SpeculativeConfig::supports_task_pipeline(
-                options.speculative_algorithm()) &&
-            (!options.enable_adaptive_target_verify() ||
-             (SpeculativeConfig::supports_adaptive_target_verify(
-                  options.speculative_algorithm()) &&
-              options.enable_graph())))) &&
-          !options.enable_prefill_piecewise_graph() &&
-          !options.enable_offline_inference() &&
-          !EPLBConfig::get_instance().enable_eplb() &&
-          !KVCacheConfig::get_instance().enable_vmm_kvcache() &&
-          !LoadConfig::get_instance().enable_vmm_weights() &&
-          !LoadConfig::get_instance().enable_rolling_load() &&
-          parallel_args.layerwise_split_size() == 1)
-        << "Task pipeline requires Python LLM/VLM, fixed "
-           "MTP/DFlash/DFlash2/DSpark or adaptive MTP/DSpark graphs and "
-           "a layerwise split of one.";
-    if (worker_type == WorkerType::VLM) {
-      CHECK(parallel_args.dp_size() == 1 && parallel_args.cp_size() == 1 &&
-            (!options.enable_speculative_decode() ||
-             (SpeculativeConfig::is_mtp_algorithm(
-                  options.speculative_algorithm()) &&
-              !execution.enable_unified_mtp_graph())))
-          << "VLM task pipeline requires DP=CP=1 and ordinary or fixed MTP "
-             "decode without unified graphs.";
-    }
-    CHECK(options.host_blocks_factor() <= 1.0 ||
-          (Platform::is_npu() && (!options.enable_speculative_decode() ||
-                                  (SpeculativeConfig::is_mtp_algorithm(
-                                       options.speculative_algorithm()) &&
-                                   !options.enable_adaptive_draft_step() &&
-                                   !options.enable_adaptive_target_verify()))))
-        << "Task pipeline Host KV cache requires NPU ordinary or fixed MTP "
-           "decoding.";
-  }
   if (options.enable_speculative_decode()) {
     const std::string& algorithm = options.speculative_algorithm();
     LOG(INFO) << "Speculative decode is enabled, algorithm: " << algorithm;
@@ -204,15 +83,6 @@ Worker::Worker(const ParallelArgs& parallel_args,
       if (worker_type == WorkerType::VLM) {
         impl_ = new MTPWorkerImpl<VlmForwardInput>(
             parallel_args, device, options, worker_type);
-#if defined(USE_NPU)
-      } else if (worker_type == WorkerType::LLM && device.is_privateuseone() &&
-                 ModelConfig::is_python_model_impl(
-                     ModelConfig::get_instance().model_impl()) &&
-                 ExecutionConfig::get_instance().enable_unified_mtp_graph()) {
-        LOG(INFO) << "Unified MTP worker enabled";
-        impl_ = new UnifiedMtpWorkerImpl(
-            parallel_args, device, options, worker_type);
-#endif
       } else {
         impl_ = new MTPWorkerImpl<LlmForwardInput>(
             parallel_args, device, options, worker_type);
@@ -241,14 +111,13 @@ Worker::Worker(const ParallelArgs& parallel_args,
 
 Worker::~Worker() {
   begin_shutdown();
-  // Async methods outside the task pipeline also capture the implementation.
+  // Async methods capture the implementation until their queue drains.
   folly::Promise<folly::Unit> promise;
   auto future = promise.getFuture();
   threadpool_.schedule([promise = std::move(promise)]() mutable {
     promise.setValue(folly::unit);
   });
   std::move(future).get();
-  task_pipeline_.reset();
   if (impl_ != nullptr) {
     impl_->drain_pending_execution();
   }
@@ -261,45 +130,14 @@ void Worker::begin_shutdown() {
   }
 }
 
-bool Worker::initialize_task_pipeline() {
-  if (!enable_task_pipeline_) {
-    return true;
-  }
-  if (!impl_->task_models_loaded()) {
-    // Composite workers can receive target and draft model-load RPCs
-    // separately. Wait until both are ready before creating the shared task
-    // pipeline.
-    return true;
-  }
-  if (task_pipeline_ != nullptr) {
-    return true;
-  }
-  const Status status = impl_->create_task_pipeline(task_pipeline_);
-  if (!status.ok()) {
-    LOG(ERROR) << status.message();
-    return false;
-  }
-  return true;
-}
-
 bool Worker::init_model(const std::string& model_weights_path,
                         int32_t random_seed,
                         MasterStatus master_status) {
-  CHECK(!enable_task_pipeline_ || master_status == MasterStatus::WAKEUP);
-  return impl_->init_model(model_weights_path, random_seed, master_status) &&
-         initialize_task_pipeline();
+  return impl_->init_model(model_weights_path, random_seed, master_status);
 }
 
 bool Worker::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
   return impl_->allocate_kv_cache(kv_cache_shape);
-}
-
-std::optional<std::string> Worker::spec_calibration(
-    const SpecCalibrationCommand& command) {
-  if (!task_pipeline_) {
-    return std::nullopt;
-  }
-  return task_pipeline_->spec_calibration(command);
 }
 
 void Worker::get_cache_info(uint64_t& cluster_id,
@@ -333,66 +171,37 @@ std::tuple<int64_t, int64_t> Worker::estimate_kv_cache_capacity() {
 }
 
 std::optional<ForwardOutput> Worker::step(const RecForwardInput& inputs) {
-  CHECK(!enable_task_pipeline_) << "Rec does not support the LLM task pipeline";
   return impl_->step(inputs);
 }
 
 std::optional<ForwardOutput> Worker::step(const VlmForwardInput& inputs) {
-  if (enable_task_pipeline_) {
-    return std::move(step_async(inputs)).get();
-  }
   return impl_->step(inputs);
 }
 
 folly::SemiFuture<std::optional<ForwardOutput>> Worker::step_async(
     const RecForwardInput& inputs) {
-  CHECK(!enable_task_pipeline_) << "Rec does not support the LLM task pipeline";
   return impl_->step_async(inputs);
 }
 
 folly::SemiFuture<std::optional<ForwardOutput>> Worker::step_async(
     const VlmForwardInput& inputs) {
-  if (enable_task_pipeline_) {
-    CHECK(task_pipeline_ != nullptr);
-    const TaskSubmission submission = task_pipeline_->submit(inputs);
-    CHECK(submission.status.ok()) << submission.status.message();
-    if (impl_->enable_schedule_overlap()) {
-      return folly::makeSemiFuture(std::optional<ForwardOutput>{});
-    }
-    auto result = task_pipeline_->take_result_async(submission.task_id);
-    return std::move(result)
-        .thenValue([](TaskResult result) -> std::optional<ForwardOutput> {
-          CHECK(result.status.ok()) << result.status.message();
-          return std::move(result.output);
-        })
-        .semi();
-  }
   return impl_->step_async(inputs);
 }
 
 std::optional<ForwardOutput> Worker::step(const LlmForwardInput& inputs) {
-  if (enable_task_pipeline_) {
-    return std::move(step_async(inputs)).get();
-  }
   return impl_->step(inputs);
 }
 
 std::optional<ForwardOutput> Worker::step(const DiTForwardInput& inputs) {
-  CHECK(!enable_task_pipeline_) << "DiT does not support the LLM task pipeline";
   return impl_->step(inputs);
 }
 
 folly::SemiFuture<std::optional<ForwardOutput>> Worker::step_async(
     const DiTForwardInput& inputs) {
-  CHECK(!enable_task_pipeline_) << "DiT does not support the LLM task pipeline";
   return impl_->step_async(inputs);
 }
 
 const bool Worker::is_driver() { return impl_->is_driver(); }
-
-bool Worker::task_pipeline_uses_worker_prepare() const {
-  return impl_->uses_worker_task_pipeline();
-}
 
 folly::SemiFuture<std::tuple<int64_t, int64_t>>
 Worker::estimate_kv_cache_capacity_async() {
@@ -401,22 +210,6 @@ Worker::estimate_kv_cache_capacity_async() {
 
 folly::SemiFuture<std::optional<ForwardOutput>> Worker::step_async(
     const LlmForwardInput& inputs) {
-  if (enable_task_pipeline_) {
-    CHECK(task_pipeline_ != nullptr);
-    const TaskSubmission submission = task_pipeline_->submit(inputs);
-    CHECK(submission.status.ok()) << submission.status.message();
-    if (impl_->enable_schedule_overlap()) {
-      // PrepareAck releases all caller views. GetLast consumes the FIFO later.
-      return folly::makeSemiFuture(std::optional<ForwardOutput>{});
-    }
-    auto result = task_pipeline_->take_result_async(submission.task_id);
-    return std::move(result)
-        .thenValue([](TaskResult result) -> std::optional<ForwardOutput> {
-          CHECK(result.status.ok()) << result.status.message();
-          return std::move(result.output);
-        })
-        .semi();
-  }
   return impl_->step_async(inputs);
 }
 
@@ -429,25 +222,8 @@ folly::SemiFuture<bool> Worker::init_model_async(
     const std::string& model_weights_path,
     int32_t random_seed,
     MasterStatus master_status) {
-  CHECK(!enable_task_pipeline_ || master_status == MasterStatus::WAKEUP);
-  if (!enable_task_pipeline_) {
-    return impl_->init_model_async(
-        model_weights_path, random_seed, master_status);
-  }
-  folly::Promise<bool> promise;
-  auto future = promise.getSemiFuture();
-  threadpool_.schedule([this,
-                        model_weights_path,
-                        random_seed,
-                        master_status,
-                        promise = std::move(promise)]() mutable {
-    const bool loaded =
-        std::move(impl_->init_model_async(
-                      model_weights_path, random_seed, master_status))
-            .get();
-    promise.setValue(loaded && initialize_task_pipeline());
-  });
-  return future;
+  return impl_->init_model_async(
+      model_weights_path, random_seed, master_status);
 }
 
 folly::SemiFuture<bool> Worker::allocate_kv_cache_async(
@@ -470,16 +246,6 @@ folly::SemiFuture<bool> Worker::pull_kv_blocks_async(
 uint32_t Worker::transfer_kv_blocks(
     const uint64_t batch_id,
     const std::vector<BlockTransferInfo>& block_transfer_info) {
-  if (enable_task_pipeline_ &&
-      impl_->get_hierarchy_kv_cache_transfer() != nullptr &&
-      !block_transfer_info.empty() &&
-      (block_transfer_info.front().transfer_type == TransferType::D2H2G ||
-       block_transfer_info.front().transfer_type == TransferType::H2D)) {
-    CHECK(task_pipeline_ != nullptr);
-    // PrepareAck can precede Launch. Publish the actual task-stream producer
-    // before the hierarchy records either copy direction's dependency.
-    task_pipeline_->fence_kv_cache();
-  }
   return impl_->transfer_kv_blocks(batch_id, block_transfer_info);
 }
 
@@ -502,18 +268,6 @@ const torch::Device& Worker::device() const { return impl_->device(); }
 
 folly::SemiFuture<std::optional<ForwardOutput>>
 Worker::get_last_step_result_async() {
-  if (enable_task_pipeline_) {
-    CHECK(impl_->enable_schedule_overlap())
-        << "Task results without scheduler overlap are returned by step_async.";
-    CHECK(task_pipeline_ != nullptr);
-    auto result = task_pipeline_->take_result_async();
-    return std::move(result)
-        .thenValue([](TaskResult result) -> std::optional<ForwardOutput> {
-          CHECK(result.status.ok()) << result.status.message();
-          return std::move(result.output);
-        })
-        .semi();
-  }
   folly::Promise<std::optional<ForwardOutput>> promise;
   auto future = promise.getSemiFuture();
   threadpool_.schedule([this, promise = std::move(promise)]() mutable {
@@ -536,18 +290,10 @@ folly::SemiFuture<int64_t> Worker::get_active_activation_memory_async() {
 }
 
 bool Worker::sleep(MasterStatus master_status, uint64_t transition_id) {
-  if (enable_task_pipeline_) {
-    LOG(ERROR) << "Task pipeline resource rebuild is not supported yet.";
-    return false;
-  }
   return impl_->sleep(master_status, transition_id);
 }
 
 bool Worker::wakeup(const WakeupOptions& options) {
-  if (enable_task_pipeline_) {
-    LOG(ERROR) << "Task pipeline resource rebuild is not supported yet.";
-    return false;
-  }
   return impl_->wakeup(options);
 }
 

@@ -24,25 +24,22 @@ DEPENDENCY_MODULES = (kernel_impl,)
 class DSparkPackVerifyInputsKernel(TilelangKernel):
     DISPATCH_SCHEMA = [
         DispatchField("max_batch_size", "int32"),
-        DispatchField("device_control", "int32"),
         DispatchField("draft_width", "int32"),
     ]
     SPECIALIZATIONS = [
         {
-            "variant_key": f"batch_{batch}_control_{control}_draft_{width}",
+            "variant_key": f"batch_{batch}_draft_{width}",
             "max_batch_size": batch,
-            "device_control": control,
             "draft_width": width,
         }
         for batch in (1, 2, 4, 8, 16, 32, 64, 128)
-        for control in (0, 1)
         for width in (5, 7)
     ]
 
     @staticmethod
-    def generate_source(max_batch_size: int, device_control: int, draft_width: int) -> str:
+    def generate_source(max_batch_size: int, draft_width: int) -> str:
         tilelang.disable_cache()
-        kernel = kernel_impl.build_dspark_pack_verify_inputs_kernel(max_batch_size, bool(device_control), draft_width)
+        kernel = kernel_impl.build_dspark_pack_verify_inputs_kernel(max_batch_size, draft_width)
         with tilelang.tvm.transform.PassContext(opt_level=3, config=kernel_impl.DSPARK_PACK_VERIFY_INPUTS_PASS_CONFIGS):
             lowered = tilelang.engine.lower(kernel)
         return lowered.kernel_source

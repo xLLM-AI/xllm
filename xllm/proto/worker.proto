@@ -61,27 +61,6 @@ message AllocateKVCacheRequest {
   KVCacheShape kv_cache_shape = 1;
 }
 
-// Startup-only speculative calibration control. The DSpark RPC/message names
-// are retained for transport compatibility; MTP also uses this control plane.
-// Each command is handled only after
-// all previously submitted task-pipeline results have been retired.
-message DSparkCalibrationRequest {
-  enum Action {
-    UNSPECIFIED = 0;
-    CAPABILITIES = 1;
-    BEGIN_SAMPLE = 2;
-    FINISH_SAMPLE = 3;
-    INSTALL_COSTS = 4;
-  }
-  Action action = 1;
-  string payload = 2;
-}
-
-message DSparkCalibrationResponse {
-  bool ok = 1;
-  string payload = 2;
-}
-
 message SleepRequest {
   MasterStatus master_status = 1;
   // Sleep/wakeup retries use the same model-local generation.
@@ -453,8 +432,7 @@ message LLMForwardResponse {
   repeated int32 out_tokens = 6;
   repeated float out_logprobs = 7;
   repeated JsonObjectOutputError json_object_errors = 9;
-  repeated float dspark_confidence = 10;
-  repeated uint64 dspark_rounds_since_full_width = 11;
+  reserved 10, 11;
 }
 
 message VLMForwardResponse {
@@ -494,8 +472,6 @@ service DistributeWorker {
   rpc ProcessGroupTest (Empty) returns (Status);
   rpc ProfileDeviceMemory (Empty) returns (DeviceMemory);
   rpc AllocateKVCache (AllocateKVCacheRequest) returns (Status);
-  rpc DSparkCalibration(DSparkCalibrationRequest)
-      returns (DSparkCalibrationResponse) {}
   rpc AllocateKVCacheWithTransfer(AllocateKVCacheRequest) returns (Status) {}
   rpc PullKVCache(PullKVCacheRequest) returns (Status) {}
   rpc GetCacheInfo(Empty) returns (CacheInfo) {}

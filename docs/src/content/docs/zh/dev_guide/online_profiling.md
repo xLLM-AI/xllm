@@ -62,7 +62,7 @@ Engine 会将请求并发广播到所有本地和远程 worker，并等待全部
 python -c 'from torch_npu.profiler import analyse; analyse("/absolute/path/to/session_ascend_pt")'
 ```
 
-torch_npu 采集器是进程级单例，采集当前设备。分布式部署请采用一进程一卡，设置 `--nnodes=<world-size>`，各进程使用不同的 `--node_rank`。同进程多 worker 会被拒绝，该场景使用 `ascend`。CPU 回调绑定 worker 的计算线程，因此 `torch` 需要 `--enable_task_pipeline=false`，暂不支持独立的 task pipeline 发射线程。支持计算线程上的原生 C++ 和 Python 模型，以及 ACLGraph replay 的设备活动；replay 不会重新执行图内的每个 PyTorch CPU 算子。
+torch_npu 采集器是进程级单例，采集当前设备。分布式部署请采用一进程一卡，设置 `--nnodes=<world-size>`，各进程使用不同的 `--node_rank`。同进程多 worker 会被拒绝，该场景使用 `ascend`。CPU 回调绑定 worker 的计算线程。支持计算线程上的原生 C++ 和 Python 模型，以及 ACLGraph replay 的设备活动；replay 不会重新执行图内的每个 PyTorch CPU 算子。
 
 ### Ascend NPU 后端（`ascend`）
 

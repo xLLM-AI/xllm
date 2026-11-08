@@ -28,11 +28,6 @@ limitations under the License.
 
 namespace xllm {
 
-std::optional<std::string> WorkerClient::spec_calibration(
-    const SpecCalibrationCommand& command) {
-  return worker_->spec_calibration(command);
-}
-
 void WorkerClient::get_cache_info(uint64_t& cluster_id,
                                   std::string& addr,
                                   uint16_t& port) {

@@ -75,7 +75,6 @@ void materialize_linear_state_indices(Embedding& embedding,
   }
 }
 
-class PythonAttentionMetadata;
 namespace npu {
 struct AclGraphTaskUpdateContext;
 }  // namespace npu
@@ -365,11 +364,6 @@ struct BatchInputMeta {
   uint64_t batch_id = 0;
   bool requires_host_restore = false;
   bool is_graph_warmup = false;
-  // Engine-selected MTP depth for this task; zero keeps configured maximum.
-  // Transported with the input, never inferred independently on TP ranks.
-  uint32_t mtp_draft_steps = 0;
-  // Startup-only padded target shape for measuring the full MTP cost surface.
-  uint32_t mtp_target_graph_rows = 0;
 };
 
 class LlmEmbeddingInput final {
@@ -481,11 +475,6 @@ class ParallelInput final {
   // prelaunch admission. Missing metadata disables the prelaunch.
   std::vector<int32_t> dp_global_json_object_active;
   std::vector<int32_t> dp_is_decode;
-  // Request-ordered, n-2 DSpark feedback replicated by the engine. This is
-  // Host planning metadata, not a Device input or an additional readback.
-  std::vector<float> dp_dspark_confidence;
-  std::vector<uint64_t> dp_dspark_rounds_since_full_width;
-
   // Persistent int8 mask for real MegaMoE rows in a captured graph bucket.
   torch::Tensor mega_active_mask;
 
@@ -515,8 +504,6 @@ class ParallelInput final {
     out.dp_global_kv_max_seq_lens = dp_global_kv_max_seq_lens;
     out.dp_global_json_object_active = dp_global_json_object_active;
     out.dp_is_decode = dp_is_decode;
-    out.dp_dspark_confidence = dp_dspark_confidence;
-    out.dp_dspark_rounds_since_full_width = dp_dspark_rounds_since_full_width;
     out.mega_active_mask = mega_active_mask;
     out.dp_ep_padding_data = dp_ep_padding_data;
     out.cp_plan = cp_plan.to(device);
@@ -563,50 +550,6 @@ class ExpertInput final {
   }
 };
 
-// Borrowed fixed-capacity sources for in-graph adaptive DSpark packing. The
-// control word stores the active request count in its low 32 bits and a
-// startup/profiling KV-write suppression bit in its high 32 bits. No control
-// value or compact-arena offset is captured as a Host kernel argument.
-struct DSparkAdaptiveGraphInput {
-  torch::Tensor arena;
-  torch::Tensor control;
-  torch::Tensor anchors;
-  torch::Tensor base_positions;
-  torch::Tensor base_kv_lengths;
-  torch::Tensor base_block_table;
-  torch::Tensor offsets;
-  torch::Tensor owners;
-  torch::Tensor columns;
-  torch::Tensor linear_state_indices;
-  torch::Tensor num_accepted_tokens;
-  uint32_t block_size = 0;
-  uint32_t draft_width = 7;
-};
-
-namespace detail {
-inline DSparkAdaptiveGraphInput dspark_adaptive_graph_input_to(
-    const DSparkAdaptiveGraphInput& input,
-    const torch::Device& device) {
-  DSparkAdaptiveGraphInput out = input;
-  for (torch::Tensor* tensor : {&out.arena,
-                                &out.control,
-                                &out.anchors,
-                                &out.base_positions,
-                                &out.base_kv_lengths,
-                                &out.base_block_table,
-                                &out.offsets,
-                                &out.owners,
-                                &out.columns,
-                                &out.linear_state_indices,
-                                &out.num_accepted_tokens}) {
-    if (tensor->defined()) {
-      *tensor = safe_to(*tensor, device, /*non_blocking=*/true);
-    }
-  }
-  return out;
-}
-}  // namespace detail
-
 class LlmGraphInput final {
  public:
   torch::Tensor attn_mask;
@@ -638,7 +581,6 @@ class LlmGraphInput final {
   // already been recorded on the signal stream. Replay can skip cold-path
   // signaling on the final-draft-to-target critical path.
   bool spec_verify_static_graph_tasks_prepared = false;
-  DSparkAdaptiveGraphInput dspark_adaptive;
 
   LlmGraphInput to(const torch::Device& device) const {
     LlmGraphInput out;
@@ -674,8 +616,6 @@ class LlmGraphInput final {
         spec_verify_source_addresses_stable;
     out.spec_verify_static_graph_tasks_prepared =
         spec_verify_static_graph_tasks_prepared;
-    out.dspark_adaptive =
-        detail::dspark_adaptive_graph_input_to(dspark_adaptive, device);
     return out;
   }
 };
@@ -761,7 +701,6 @@ class VlmGraphInput final {
   // already been recorded on the signal stream. Replay can skip cold-path
   // signaling on the final-draft-to-target critical path.
   bool spec_verify_static_graph_tasks_prepared = false;
-  DSparkAdaptiveGraphInput dspark_adaptive;
 
   VlmGraphInput to(const torch::Device& device) const {
     VlmGraphInput out;
@@ -797,8 +736,6 @@ class VlmGraphInput final {
         spec_verify_source_addresses_stable;
     out.spec_verify_static_graph_tasks_prepared =
         spec_verify_static_graph_tasks_prepared;
-    out.dspark_adaptive =
-        detail::dspark_adaptive_graph_input_to(dspark_adaptive, device);
     return out;
   }
 };

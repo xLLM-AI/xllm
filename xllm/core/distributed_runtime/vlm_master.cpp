@@ -165,11 +165,6 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
   CHECK(!speculative_error.has_value()) << speculative_error.value();
   validate_layerwise_split_size_startup_config(
       options_, model_type, options_.nnodes());
-  if (options_.enable_task_pipeline()) {
-    CHECK(options_.dp_size() == 1 && options_.cp_size() == 1 &&
-          !options_.enable_disagg_pd())
-        << "VLM task pipeline requires DP=CP=1 without disaggregated PD.";
-  }
   CHECK(options_.host_blocks_factor() <= 1.0)
       << "Basic host KV cache offload supports the LLM engine and "
          "model-based speculative engines only.";
@@ -192,7 +187,6 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
       .ep_size(options_.ep_size())
       .cp_size(options_.cp_size())
       .enable_schedule_overlap(options_.enable_schedule_overlap())
-      .enable_task_pipeline(options_.enable_task_pipeline())
       .enable_chunked_prefill(options_.enable_chunked_prefill())
       .enable_offline_inference(options_.enable_offline_inference())
       .disable_log_stats(options_.disable_log_stats())
@@ -228,9 +222,6 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
         << "VLM speculative decoding does not support disaggregated PD";
     CHECK(!options_.enable_service_routing())
         << "VLM speculative decoding does not support service routing";
-    CHECK(!options_.enable_adaptive_target_verify())
-        << "VLM speculative decoding does not support adaptive speculative "
-           "decode";
     const std::string draft_model_path =
         options_.draft_model_path().value_or("");
     CHECK(!draft_model_path.empty())
@@ -252,13 +243,6 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
             options_.speculative_suffix_max_cached_requests())
         .speculative_suffix_use_tree_spec(
             options_.speculative_suffix_use_tree_spec())
-        .enable_adaptive_target_verify(options_.enable_adaptive_target_verify())
-        .adaptive_target_verify_min_gain(
-            options_.adaptive_target_verify_min_gain())
-        .adaptive_target_verify_cost_table(
-            options_.adaptive_target_verify_cost_table())
-        .adaptive_target_verify_calibration(
-            options_.adaptive_target_verify_calibration())
         .kv_cache_transfer_mode(options_.kv_cache_transfer_mode())
         .transfer_listen_port(options_.transfer_listen_port())
         .host_blocks_factor(options_.host_blocks_factor())
@@ -329,7 +313,6 @@ VLMMaster::VLMMaster(const Options& options) : Master(options) {
   SchedulerOptions scheduler_options;
   scheduler_options.max_tokens_per_batch(options.max_tokens_per_batch())
       .max_seqs_per_batch(options.max_seqs_per_batch())
-      .enable_task_pipeline(options_.enable_task_pipeline())
       .request_queue_size(options.request_queue_size())
       .max_tokens_per_chunk_for_prefill(
           options.max_tokens_per_chunk_for_prefill())

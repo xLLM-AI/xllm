@@ -271,10 +271,6 @@ class CsaIndexContext:
 
 
 class AttentionBackend(ABC):
-    def prepare_owned_graph_metadata(self, metadata: AttentionMetadata) -> None:
-        """Prepare metadata whose storage is owned by this graph entry."""
-        self.prepare(metadata, graph_mode=True)
-
     @property
     def uses_executor_cp_context(self) -> bool:
         return True

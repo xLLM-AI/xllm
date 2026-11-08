@@ -68,11 +68,6 @@ bool RemoteWorker::wait_for_server_ready(const std::string& server_address) {
   return true;
 }
 
-std::optional<std::string> RemoteWorker::spec_calibration(
-    const SpecCalibrationCommand& command) {
-  return channel_->spec_calibration(command);
-}
-
 void RemoteWorker::get_cache_info(uint64_t& cluster_id,
                                   std::string& addr,
                                   uint16_t& port) {

@@ -796,21 +796,6 @@ KVCacheCapacity KVCacheEstimator::estimate(
         options.is_draft_engine()
             ? 1
             : ParallelConfig::get_instance().layerwise_split_size();
-
-    if (options.enable_task_pipeline() &&
-        options.num_speculative_tokens() > 0 && !options.is_draft_engine()) {
-      estimate_options.embedding_context_bytes_per_block =
-          sizeof(int64_t) + 2 * sizeof(int32_t);
-      if (!SpeculativeConfig::is_block_diffusion_algorithm(
-              options.speculative_algorithm())) {
-        CHECK_GT(model_args_.hidden_size(), 0);
-        const int64_t element_bytes = static_cast<int64_t>(
-            torch::scalarTypeToTypeMeta(context.dtype).itemsize());
-        estimate_options.embedding_context_bytes_per_block +=
-            sizeof(int64_t) + 2 * model_args_.hidden_size() * element_bytes +
-            sizeof(bool);
-      }
-    }
   }
 
   return estimate(std::move(estimate_options));

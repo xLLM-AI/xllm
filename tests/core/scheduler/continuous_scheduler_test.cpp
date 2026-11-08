@@ -1084,30 +1084,23 @@ TEST(ContinuousSchedulerTest, OverlapRetainsRequestsUntilPendingStepCompletes) {
   EXPECT_EQ(engine.calls, (std::vector<std::string>{"step", "consume"}));
 }
 
-TEST(ContinuousSchedulerTest,
-     SpeculativePipelineConsumesBeforePrefillTransitionOnly) {
-  for (bool stateful_pipeline : {false, true}) {
-    for (bool decode : {false, true}) {
-      auto options = create_scheduler_options(64, 4, 2, 64, 1);
-      options.enable_schedule_overlap(true);
-      options.enable_task_pipeline(stateful_pipeline);
-      PipelinePhaseEngine engine;
-      TestableContinuousScheduler scheduler(&engine, options);
-      auto pending = generate_request_with_prompt_tokens({1, 2}, 16, 256);
-      auto request = generate_request_with_prompt_tokens({3, 4}, 16, 256);
-      if (decode) {
-        make_request_decode_ready(request);
-      }
-      scheduler.seed_pending_batch(pending);
-      ASSERT_TRUE(scheduler.add_request(request));
-      scheduler.step(absl::ZeroDuration());
-      const std::vector<std::string> expected =
-          stateful_pipeline && !decode
-              ? std::vector<std::string>{"consume", "step"}
-              : std::vector<std::string>{"step", "consume"};
-      EXPECT_EQ(engine.calls, expected);
-      EXPECT_EQ(engine.step_observed_consumed, stateful_pipeline && !decode);
+TEST(ContinuousSchedulerTest, SpeculativeOverlapSubmitsBeforeCollectingOutput) {
+  for (const bool decode : {false, true}) {
+    SCOPED_TRACE(decode);
+    auto options = create_scheduler_options(64, 4, 2, 64, 1);
+    options.enable_schedule_overlap(true);
+    PipelinePhaseEngine engine;
+    TestableContinuousScheduler scheduler(&engine, options);
+    auto pending = generate_request_with_prompt_tokens({1, 2}, 16, 256);
+    auto request = generate_request_with_prompt_tokens({3, 4}, 16, 256);
+    if (decode) {
+      make_request_decode_ready(request);
     }
+    scheduler.seed_pending_batch(pending);
+    ASSERT_TRUE(scheduler.add_request(request));
+    scheduler.step(absl::ZeroDuration());
+    EXPECT_EQ(engine.calls, (std::vector<std::string>{"step", "consume"}));
+    EXPECT_FALSE(engine.step_observed_consumed);
   }
 }
 

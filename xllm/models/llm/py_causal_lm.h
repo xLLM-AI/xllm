@@ -109,12 +109,6 @@ class __attribute__((visibility("hidden"))) PyCausalLM : public CausalVLM {
   torch::Tensor dspark_markov_bias(
       const torch::Tensor& previous_token_ids) override;
 
-  torch::Tensor dspark_confidence_probs(
-      const torch::Tensor& hidden_all,
-      const torch::Tensor& prev_matrix) override;
-
-  bool has_dspark_confidence_head() const override;
-
   void load_model(std::unique_ptr<ModelLoader> loader) override;
 
   torch::Device device() const override { return device_; }

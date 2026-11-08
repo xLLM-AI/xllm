@@ -76,21 +76,6 @@ DistributedWorkerManager::DistributedWorkerManager(
     std::vector<std::shared_ptr<WorkerClient>> worker_clients)
     : worker_clients_(std::move(worker_clients)) {}
 
-std::optional<std::vector<std::string>>
-DistributedWorkerManager::spec_calibration(
-    const SpecCalibrationCommand& command) {
-  std::vector<std::string> results;
-  results.reserve(worker_clients_.size());
-  for (const auto& worker : worker_clients_) {
-    auto result = worker->spec_calibration(command);
-    if (!result) {
-      return std::nullopt;
-    }
-    results.emplace_back(std::move(*result));
-  }
-  return results;
-}
-
 DistributedWorkerManager::~DistributedWorkerManager() {
   std::lock_guard<std::mutex> lock(link_mutex_);
   // Drain connection work while the worker clients and servers are still alive.

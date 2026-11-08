@@ -177,20 +177,6 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .speculative_suffix_use_tree_spec(
           speculative_config.speculative_suffix_use_tree_spec())
       .enable_mtp_draft_body_tp1(speculative_config.enable_mtp_draft_body_tp1())
-      .enable_adaptive_target_verify(
-          speculative_config.enable_adaptive_target_verify())
-      .enable_adaptive_draft_step(
-          speculative_config.enable_adaptive_draft_step())
-      .adaptive_draft_step_config(
-          speculative_config.adaptive_draft_step_config())
-      .adaptive_target_verify_min_gain(
-          speculative_config.adaptive_target_verify_min_gain())
-      .adaptive_target_verify_cost_table(
-          speculative_config.adaptive_target_verify_cost_table())
-      .adaptive_target_verify_calibration(
-          speculative_config.adaptive_target_verify_calibration())
-      .adaptive_target_verify_cost_table_output(
-          speculative_config.adaptive_target_verify_cost_table_output())
       .num_request_handling_threads(
           service_config.num_request_handling_threads())
       .communication_backend(parallel_config.communication_backend())
@@ -248,7 +234,6 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .profile_max_prompt_length(profile_config.profile_max_prompt_length())
       .enable_profile_kv_blocks(profile_config.enable_profile_kv_blocks())
       .disable_ttft_profiling(profile_config.disable_ttft_profiling())
-      .enable_task_pipeline(execution_config.enable_task_pipeline())
       .enable_graph(execution_config.enable_graph())
       .enable_graph_mode_decode_no_padding(
           execution_config.enable_graph_mode_decode_no_padding())

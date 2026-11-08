@@ -722,37 +722,6 @@ TORCH_LIBRARY(xllm_ops, m) {
       "Tensor(c!) positions, Tensor(d!) kv_seq_lens, Tensor(e!) slot_mapping, "
       "Tensor(f!) block_table, Tensor(g!) q_seq_lens, Tensor(h!) owners, "
       "Tensor(i!) columns, int block_size) -> ()");
-  m.def(
-      "dspark_pack_verify_inputs_graph(Tensor anchors, Tensor arena, "
-      "Tensor base_positions, Tensor base_kv_lengths, Tensor base_block_table, "
-      "Tensor control, Tensor(a!) offsets, Tensor(b!) tokens, "
-      "Tensor(c!) positions, Tensor(d!) kv_seq_lens, Tensor(e!) slot_mapping, "
-      "Tensor(f!) block_table, Tensor(g!) q_seq_lens, Tensor(h!) owners, "
-      "Tensor(i!) columns, int block_size, int draft_width=7) -> ()");
-  m.def(
-      "dspark_pack_recurrent_verify_inputs_graph(Tensor anchors, Tensor arena, "
-      "Tensor base_positions, Tensor base_kv_lengths, Tensor base_block_table, "
-      "Tensor control, Tensor(a!) offsets, Tensor(b!) tokens, "
-      "Tensor(c!) positions, Tensor(d!) kv_seq_lens, Tensor(e!) slot_mapping, "
-      "Tensor(f!) block_table, Tensor(g!) q_seq_lens, Tensor(h!) owners, "
-      "Tensor(i!) columns, Tensor state_indices, Tensor accepted, "
-      "Tensor(j!) graph_state_indices, Tensor(k!) graph_accepted, "
-      "Tensor(l!) cu_seqlens, int block_size, int draft_width=7) -> ()");
-  m.def(
-      "dspark_greedy_verify_commit(Tensor proposals, Tensor target_tokens, "
-      "Tensor widths, Tensor offsets, Tensor owners, Tensor columns, "
-      "Tensor source_slots, Tensor(a!) result_tokens, "
-      "Tensor(b!) result_lengths, Tensor(c!) context_slots) -> ()");
-  m.def(
-      "mtp_greedy_commit(Tensor draft, Tensor target, Tensor hidden) -> "
-      "(Tensor, Tensor)");
-  m.def(
-      "mtp_sparse_metadata_update(Tensor block_table, Tensor base_positions, "
-      "Tensor base_kv_lengths, Tensor first_kv_lengths, Tensor first_slots, "
-      "Tensor layout, Tensor(a!) draft_arena, Tensor(b!) target_arena, "
-      "Tensor(c!) position_arena, "
-      "int speculative_tokens, int table_capacity, int block_size, "
-      "bool target_step_major) -> ()");
   m.def("rms_norm(Tensor input, Tensor weight, float eps) -> Tensor");
   m.def(
       "rms_norm_gated(Tensor input, Tensor gate, Tensor weight, float eps) -> "
@@ -1045,18 +1014,6 @@ TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
           xllm::kernel::npu::tilelang::dspark_allocate_verify_prefixes_graph));
   m.impl("dspark_pack_verify_inputs",
          TORCH_FN(xllm::kernel::npu::tilelang::dspark_pack_verify_inputs));
-  m.impl(
-      "dspark_pack_verify_inputs_graph",
-      TORCH_FN(xllm::kernel::npu::tilelang::dspark_pack_verify_inputs_graph));
-  m.impl("dspark_pack_recurrent_verify_inputs_graph",
-         TORCH_FN(xllm::kernel::npu::tilelang::
-                      dspark_pack_recurrent_verify_inputs_graph));
-  m.impl("dspark_greedy_verify_commit",
-         TORCH_FN(xllm::kernel::npu::tilelang::dspark_greedy_verify_commit));
-  m.impl("mtp_greedy_commit",
-         TORCH_FN(xllm::kernel::npu::tilelang::mtp_greedy_commit));
-  m.impl("mtp_sparse_metadata_update",
-         TORCH_FN(xllm::kernel::npu::tilelang::mtp_sparse_metadata_update));
   m.impl("rms_norm", TORCH_FN(xllm::rms_norm_npu));
   m.impl("rms_norm_gated", TORCH_FN(xllm::rms_norm_gated_npu));
   m.impl("fused_add_gemma_rms_norm",

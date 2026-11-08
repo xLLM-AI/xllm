@@ -100,15 +100,6 @@ class Options {
   PROPERTY(bool, speculative_suffix_use_tree_spec) = false;
 
   PROPERTY(bool, enable_mtp_draft_body_tp1) = false;
-  PROPERTY(bool, enable_adaptive_target_verify) = false;
-  PROPERTY(bool, enable_adaptive_draft_step) = false;
-  PROPERTY(std::string, adaptive_draft_step_config);
-
-  PROPERTY(double, adaptive_target_verify_min_gain) = 0.0;
-
-  PROPERTY(std::string, adaptive_target_verify_cost_table);
-  PROPERTY(std::string, adaptive_target_verify_calibration);
-  PROPERTY(std::string, adaptive_target_verify_cost_table_output);
 
   // thread num to handle requests
   PROPERTY(size_t, num_request_handling_threads) = 4;
@@ -217,8 +208,6 @@ class Options {
   PROPERTY(bool, enable_profile_kv_blocks) = true;
   // true if disable ttft profiling
   PROPERTY(bool, disable_ttft_profiling) = false;
-  // Enable the task pipeline; scheduler overlap determines the slot count.
-  PROPERTY(bool, enable_task_pipeline) = false;
 
   // enable CUDA graph/ACL graph for performance optimization
   PROPERTY(bool, enable_graph) = false;

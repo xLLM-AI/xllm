@@ -101,7 +101,6 @@ class RecModelParams final {
     out.linear_state_validity_mask = linear_state_validity_mask;
     out.rec_params = rec_params;
     out.attn_metadata = attn_metadata;
-    out.python_attention_metadata = python_attention_metadata;
     out.prefill_without_cache = prefill_without_cache;
     out.enable_graph = enable_graph;
     return out;
@@ -216,7 +215,6 @@ class RecModelParams final {
   std::vector<int64_t> linear_state_validity_mask;
   RecModelInputParams rec_params;
   std::shared_ptr<layer::AttentionMetadata> attn_metadata;
-  std::shared_ptr<PythonAttentionMetadata> python_attention_metadata;
   bool prefill_without_cache = false;
   bool enable_graph = false;
 };

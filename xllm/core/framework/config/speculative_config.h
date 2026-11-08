@@ -77,16 +77,6 @@ class SpeculativeConfig final {
            is_dspark_algorithm(algorithm);
   }
 
-  // Algorithm-level admission only; callers validate runtime geometry.
-  static bool supports_task_pipeline(std::string_view algorithm) {
-    return is_mtp_algorithm(algorithm) ||
-           is_block_diffusion_algorithm(algorithm);
-  }
-
-  static bool supports_adaptive_target_verify(std::string_view algorithm) {
-    return is_dspark_algorithm(algorithm) || is_mtp_algorithm(algorithm);
-  }
-
   static bool requires_aux_hidden_capture(std::string_view algorithm) {
     return is_eagle3_algorithm(algorithm) ||
            is_block_diffusion_algorithm(algorithm);
@@ -126,14 +116,7 @@ class SpeculativeConfig final {
          "speculative_suffix_use_tree_spec",
          "enable_probabilistic_draft",
          "enable_mtp_draft_body_tp1",
-         "enable_atb_spec_kernel",
-         "enable_adaptive_target_verify",
-         "enable_adaptive_draft_step",
-         "adaptive_draft_step_config",
-         "adaptive_target_verify_min_gain",
-         "adaptive_target_verify_cost_table",
-         "adaptive_target_verify_calibration",
-         "adaptive_target_verify_cost_table_output"}};
+         "enable_atb_spec_kernel"}};
     return kOptionCategory;
   }
 
@@ -160,16 +143,6 @@ class SpeculativeConfig final {
   PROPERTY(bool, enable_mtp_draft_body_tp1) = false;
 
   PROPERTY(bool, enable_atb_spec_kernel) = false;
-
-  PROPERTY(bool, enable_adaptive_target_verify) = false;
-  PROPERTY(bool, enable_adaptive_draft_step) = false;
-  PROPERTY(std::string, adaptive_draft_step_config);
-
-  PROPERTY(double, adaptive_target_verify_min_gain) = 0.0;
-
-  PROPERTY(std::string, adaptive_target_verify_cost_table);
-  PROPERTY(std::string, adaptive_target_verify_calibration);
-  PROPERTY(std::string, adaptive_target_verify_cost_table_output);
 };
 
 }  // namespace xllm

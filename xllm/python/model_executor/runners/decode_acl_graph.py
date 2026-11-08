@@ -135,7 +135,7 @@ class DecodeAclGraphRunner(AclGraphRunner):
         self._enable_decode_no_padding = enable_graph_mode_decode_no_padding
         # New exact shapes can arrive while native input preparation copies
         # the next batch on another thread. Only this thread captures the
-        # runner's owned static buffers, as in the unified MTP graph runner.
+        # runner's owned static buffers.
         if enable_graph_mode_decode_no_padding:
             self._capture_error_mode = "thread_local"
         self._serial_workspace_pool: list[torch.Tensor] | None = [] if enable_graph_mode_decode_no_padding else None

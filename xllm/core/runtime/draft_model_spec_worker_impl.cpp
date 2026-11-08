@@ -225,13 +225,6 @@ bool DraftModelSpecWorkerImpl<TargetInput>::init_model(
 }
 
 template <typename TargetInput>
-bool DraftModelSpecWorkerImpl<TargetInput>::task_models_loaded() const {
-  return impl_ != nullptr && draft_impl_ != nullptr &&
-         impl_->get_status() == WorkerImpl::Status::LOADED &&
-         draft_impl_->get_status() == WorkerImpl::Status::LOADED;
-}
-
-template <typename TargetInput>
 KVCacheShape DraftModelSpecWorkerImpl<TargetInput>::draft_kv_cache_shape(
     const KVCacheShape& target_kv_cache_shape) const {
   return build_draft_kv_cache_shape(target_kv_cache_shape);
@@ -313,8 +306,7 @@ void DraftModelSpecWorkerImpl<
   if (unified_transfer == nullptr) {
     unified_transfer = draft_transfer
                            ? draft_transfer
-                           : impl_->create_hierarchy_kv_cache_transfer(
-                                 options_.enable_task_pipeline());
+                           : impl_->create_hierarchy_kv_cache_transfer();
   }
 
   if (target_transfer == nullptr) {

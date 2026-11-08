@@ -13,8 +13,6 @@ cc_library(
     decode_graph_warmup_plan.cpp
     graph_warmup.cpp
     profile_manager.cpp
-    spec_startup_calibration.cpp
-    draft_step_startup_calibration.cpp
     time_predictor.cpp
   DEPS
     :batch

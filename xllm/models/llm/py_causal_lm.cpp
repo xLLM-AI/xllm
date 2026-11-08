@@ -498,16 +498,7 @@ ModelOutput PyCausalLM::write_context_kv(
   set_active_instance(this);
   if (context_kv_graph_runner_ && !context_kv_graph_runner_.is_none() &&
       input_params.meta.batch_forward_type.is_decode() &&
-      layer_synchronizer.is_none() &&
-      (!input_params.python_attention_metadata || input_params.enable_graph)) {
-    if (input_params.python_attention_metadata && input_params.enable_graph) {
-      py::object output = context_kv_graph_runner_.attr("execute_borrowed")(
-          target_hidden,
-          positions,
-          device_cache_slots,
-          py::arg("warmup") = input_params.meta.is_graph_warmup);
-      return ModelOutput(output.cast<torch::Tensor>());
-    }
+      layer_synchronizer.is_none()) {
     py::object output = context_kv_graph_runner_.attr("execute")(
         target_hidden, positions, device_cache_slots);
     return ModelOutput(output.cast<torch::Tensor>());
@@ -549,21 +540,6 @@ torch::Tensor PyCausalLM::dspark_markov_bias(
   py::gil_scoped_acquire gil;
   return py_model_.attr("dspark_markov_bias")(previous_token_ids)
       .cast<torch::Tensor>();
-}
-
-torch::Tensor PyCausalLM::dspark_confidence_probs(
-    const torch::Tensor& hidden_all,
-    const torch::Tensor& prev_matrix) {
-  torch::NoGradGuard no_grad;
-  py::gil_scoped_acquire gil;
-  py::object previous = optional_tensor(prev_matrix);
-  return py_model_.attr("dspark_confidence_probs")(hidden_all, previous)
-      .cast<torch::Tensor>();
-}
-
-bool PyCausalLM::has_dspark_confidence_head() const {
-  py::gil_scoped_acquire gil;
-  return py_model_.attr("has_dspark_confidence_head")().cast<bool>();
 }
 
 void PyCausalLM::prepare_expert_weight(int32_t layer_id,

@@ -28,7 +28,6 @@ limitations under the License.
 #include "common/macros.h"
 #include "common/metrics.h"
 #include "core/common/types.h"
-#include "core/framework/config/execution_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/config/speculative_config.h"
@@ -42,21 +41,6 @@ limitations under the License.
 
 namespace xllm {
 namespace {
-
-bool task_worker_supports_json_object(const Options& options) {
-#if defined(USE_NPU)
-  return ExecutionConfig::get_instance().enable_unified_mtp_graph() &&
-         options.num_speculative_tokens() > 0 &&
-         options.draft_model_path().has_value() &&
-         !options.draft_model_path()->empty() &&
-         SpeculativeConfig::is_mtp_algorithm(options.speculative_algorithm()) &&
-         ModelConfig::is_python_model_impl(
-             ModelConfig::get_instance().model_impl());
-#else
-  static_cast<void>(options);
-  return false;
-#endif
-}
 
 bool get_enable_thinking(const nlohmann::json& chat_template_kwargs) {
   const bool default_value =
@@ -405,18 +389,6 @@ std::shared_ptr<Request> LLMRequestFactory::create(
 
   const size_t best_of = sp.best_of.value_or(sp.n);
   RequestSamplingParam sampling_param = build_sampling_param(sp, best_of);
-  const bool has_constraints = !sp.logit_bias.empty() ||
-                               sp.allowed_token_ids.has_value() ||
-                               !sp.bad_words.empty();
-  if (options_->enable_task_pipeline() &&
-      (has_constraints || sp.seed.has_value() || sp.top_logprobs == -1)) {
-    CALLBACK_WITH_ERROR(
-        StatusCode::INVALID_ARGUMENT,
-        "The requested sampling controls require enable_task_pipeline=false",
-        sp.service_request_id,
-        sp.source_xservice_addr);
-    return nullptr;
-  }
   if (options_->num_speculative_tokens() > 0 &&
       !SpeculativeConfig::is_mtp_algorithm(options_->speculative_algorithm()) &&
       (sp.seed.has_value() ||
@@ -452,15 +424,6 @@ std::shared_ptr<Request> LLMRequestFactory::create(
     return nullptr;
   }
   const bool json_object = sampling_param.json_object;
-  if (json_object && options_->enable_task_pipeline() &&
-      !task_worker_supports_json_object(*options_)) {
-    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                        "response_format=json_object is not supported with "
-                        "enable_task_pipeline",
-                        sp.service_request_id,
-                        sp.source_xservice_addr);
-    return nullptr;
-  }
   SchedulerParam scheduler_param = sp.to_scheduler_param();
 
   std::optional<StoppingChecker> stopping_checker =

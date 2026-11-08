@@ -148,11 +148,6 @@ tilelang_register_runtime_kernel(
 )
 
 tilelang_register_runtime_kernel(
-  NAME dspark_greedy_verify_commit
-  WRAPPER_SRCS dspark_greedy_verify_commit_wrapper.cpp
-)
-
-tilelang_register_runtime_kernel(
   NAME spec_verify_attention_tiling_update
   WRAPPER_SRCS spec_verify_attention_tiling_update_wrapper.cpp
 )
@@ -160,16 +155,6 @@ tilelang_register_runtime_kernel(
 tilelang_register_runtime_kernel(
   NAME mtp_prepare_next_draft
   WRAPPER_SRCS mtp_prepare_next_draft_wrapper.cpp
-)
-
-tilelang_register_runtime_kernel(
-  NAME mtp_greedy_commit
-  WRAPPER_SRCS mtp_greedy_commit_wrapper.cpp
-)
-
-tilelang_register_runtime_kernel(
-  NAME mtp_sparse_metadata_update
-  WRAPPER_SRCS mtp_sparse_metadata_update_wrapper.cpp
 )
 
 tilelang_register_runtime_kernel(

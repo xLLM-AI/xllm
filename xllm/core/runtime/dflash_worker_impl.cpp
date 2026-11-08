@@ -51,8 +51,6 @@ limitations under the License.
 #include "core/framework/speculative/spec_input_builder.h"
 #include "core/framework/speculative/spec_verify.h"
 #include "core/platform/platform.h"
-#include "core/runtime/json_object_decode_adapter.h"
-#include "core/runtime/task_execution_pipeline.h"
 #include "core/util/tensor_helper.h"
 #include "runtime/llm_worker_impl.h"
 #include "util/json_reader.h"
@@ -62,30 +60,11 @@ limitations under the License.
 namespace xllm {
 namespace {
 
-// Ordinary DFlash retains its worker-owned recurrent target path. DSpark and
-// DFlash2 use the shared block task pipeline and its capability validation.
-bool uses_hybrid_worker_pipeline(const runtime::Options& options) {
-  if (!options.enable_task_pipeline() || !Platform::is_npu() ||
-      options.enable_adaptive_target_verify() ||
-      !SpeculativeConfig::is_dflash_algorithm(
-          options.speculative_algorithm())) {
-    return false;
-  }
-  const std::string model_type =
-      get_model_type(options.model_path(), options.backend());
-  return model_type == "qwen3_5" || model_type == "qwen3_5_text";
-}
-
 runtime::Options target_options(const runtime::Options& options) {
   runtime::Options opts = options;
   opts.enable_schedule_overlap(false)
       .is_draft_engine(false)
       .enable_graph_aux_hidden_states(true);
-  if (uses_hybrid_worker_pipeline(options)) {
-    // The outer worker owns the pipeline; the recurrent target keeps its
-    // ordinary ACL runner, just like the draft leaf.
-    opts.enable_task_pipeline(false);
-  }
   return opts;
 }
 
@@ -96,7 +75,6 @@ runtime::Options draft_options(const runtime::Options& options) {
       SpeculativeConfig::is_dspark_algorithm(options.speculative_algorithm());
   const bool is_dflash2 =
       SpeculativeConfig::is_dflash2_algorithm(options.speculative_algorithm());
-  const bool hybrid_pipeline = uses_hybrid_worker_pipeline(options);
   const int32_t draft_num_speculative_tokens =
       is_dspark ? options.num_speculative_tokens() : 0;
   runtime::Options opts = options;
@@ -106,13 +84,6 @@ runtime::Options draft_options(const runtime::Options& options) {
                                       : 1)
       .num_speculative_tokens(draft_num_speculative_tokens)
       .enable_graph_aux_hidden_states(false);
-  if (hybrid_pipeline) {
-    // The outer worker owns the task queue. Its leaf executors retain their
-    // recurrent-aware ACL runners instead of borrowing full-attention slots.
-    opts.enable_task_pipeline(false);
-  } else if (options.enable_task_pipeline() && !is_dspark && !is_dflash2) {
-    opts.enable_graph(false);
-  }
   return opts;
 }
 
@@ -332,146 +303,11 @@ DFlashWorkerImpl::DFlashWorkerImpl(const ParallelArgs& parallel_args,
       draft_query_width_(options.num_speculative_tokens() + 1),
       sampling_process_group_(parallel_args.tp_group_ != nullptr
                                   ? parallel_args.tp_group_
-                                  : parallel_args.process_group_) {
-  CHECK((options.adaptive_target_verify_cost_table().empty() &&
-         options.adaptive_target_verify_calibration().empty()) ||
-        (options.enable_task_pipeline() &&
-         options.enable_adaptive_target_verify() &&
-         SpeculativeConfig::is_dspark_algorithm(
-             options.speculative_algorithm()) &&
-         (options.num_speculative_tokens() == 5 ||
-          options.num_speculative_tokens() == 7)))
-      << "DSpark startup calibration options require an adaptive DSpark "
-         "Draft5/7 "
-         "task "
-         "pipeline.";
-}
+                                  : parallel_args.process_group_) {}
 
 DFlashWorkerImpl::~DFlashWorkerImpl() {
   // Keep launch-thread-owned context alive until queued execution completes.
   drain_pending_execution();
-}
-
-::xllm::Status DFlashWorkerImpl::create_task_pipeline(
-    std::unique_ptr<TaskExecutionPipeline>& output) {
-  if (target_is_hybrid_recurrent_ && uses_hybrid_worker_pipeline(options_)) {
-    if (!options_.enable_graph() || options_.enable_adaptive_target_verify() ||
-        parallel_args_.dp_size() != 1) {
-      return ::xllm::Status(
-          StatusCode::INVALID_ARGUMENT,
-          "Hybrid block task pipeline requires fixed-width Qwen3.5 Python "
-          "ACL graphs with DP=1.");
-    }
-    LlmTaskCapacity capacity;
-    ::xllm::Status status = impl_->task_capacity(options_, capacity);
-    if (!status.ok()) {
-      return status;
-    }
-    status = TaskExecutionPipeline::create(
-        threadpool_, impl_->task_model(), *this, capacity, output);
-    if (status.ok()) {
-      LOG(INFO) << options_.speculative_algorithm()
-                << " hybrid worker task execution pipeline: slots="
-                << capacity.slot_count
-                << ", speculative_tokens=" << options_.num_speculative_tokens();
-    }
-    return status;
-  }
-  if (impl_ == nullptr || draft_impl_ == nullptr ||
-      (options_.enable_adaptive_target_verify() &&
-       !SpeculativeConfig::is_dspark_algorithm(
-           options_.speculative_algorithm())) ||
-      options_.num_speculative_tokens() <= 0) {
-    return ::xllm::Status(StatusCode::INVALID_ARGUMENT,
-                          "Block task pipeline requires fixed-width or "
-                          "adaptive DSpark full-attention models.");
-  }
-  SpeculativeTaskCapacity capacity;
-  ::xllm::Status status = impl_->task_capacity(options_, capacity.common);
-  if (!status.ok()) {
-    return status;
-  }
-  capacity.hybrid_recurrent_target = target_is_hybrid_recurrent_;
-  if (!capacity.common.enable_mla && !capacity.hybrid_recurrent_target) {
-    return ::xllm::Status(
-        StatusCode::INVALID_ARGUMENT,
-        "Block task pipeline currently requires a GLM DSA target; "
-        "dense target attention needs a device-length prepared contract.");
-  }
-  const auto& draft_args = draft_impl_->context_.get_model_args();
-  if (SpeculativeConfig::is_dspark_algorithm(
-          options_.speculative_algorithm()) &&
-      parallel_args_.dp_size() > 1 &&
-      ExecutionConfig::get_instance().enable_unified_mtp_graph()) {
-    return ::xllm::Status(StatusCode::INVALID_ARGUMENT,
-                          "DP DSpark task pipeline requires split ACL graphs; "
-                          "disable unified graphs.");
-  }
-  if (draft_args.hidden_size() != capacity.common.hidden_size ||
-      (draft_args.vocab_size() != capacity.common.vocab_size &&
-       !draft_vocab_.draft_to_target_ids_.defined()) ||
-      expected_context_hidden_size_ <= 0 ||
-      expected_context_hidden_size_ > std::numeric_limits<int32_t>::max()) {
-    return ::xllm::Status(StatusCode::INVALID_ARGUMENT,
-                          "Block task model hidden/vocabulary or captured "
-                          "context geometry mismatch.");
-  }
-  capacity.kind =
-      SpeculativeConfig::is_dspark_algorithm(options_.speculative_algorithm())
-          ? SpeculativeTaskKind::DSPARK
-      : SpeculativeConfig::is_dflash2_algorithm(
-            options_.speculative_algorithm())
-          ? SpeculativeTaskKind::DFLASH2
-          : SpeculativeTaskKind::DFLASH;
-  capacity.num_speculative_tokens = options_.num_speculative_tokens();
-  capacity.context_hidden_size =
-      static_cast<uint32_t>(expected_context_hidden_size_);
-  capacity.mask_token_id = mask_token_id_;
-  capacity.selector_top_k = draft_args.dflash2_selector_top_k();
-  capacity.common.sampling_group = sampling_process_group_;
-  capacity.is_probabilistic_draft = is_probabilistic_draft_;
-  capacity.draft_vocab = draft_vocab_;
-  capacity.unified_graph =
-      Platform::is_npu() && options_.enable_graph() &&
-      ExecutionConfig::get_instance().enable_unified_mtp_graph() &&
-      impl_->context_.get_model_args().model_type() == "glm_moe_dsa" &&
-      (draft_args.model_type() == "DFlashDraftModel" ||
-       is_dflash2_draft_model_type(draft_args.model_type()) ||
-       draft_args.model_type() == "DSparkDraftModel") &&
-      parallel_args_.dp_size() == 1 && parallel_args_.cp_size() == 1 &&
-      parallel_args_.kv_split_size_effective() == 1;
-  capacity.adaptive_target_verify = options_.enable_adaptive_target_verify();
-  capacity.adaptive_min_gain = options_.adaptive_target_verify_min_gain();
-  capacity.startup_calibration = capacity.adaptive_target_verify;
-  capacity.calibration_leader = parallel_args_.rank() == 0;
-  if (capacity.startup_calibration &&
-      (!options_.enable_graph() || !options_.enable_schedule_overlap() ||
-       ExecutionConfig::get_instance().disable_graph_warmup() ||
-       (!options_.adaptive_target_verify_calibration().empty() &&
-        !options_.adaptive_target_verify_cost_table().empty()))) {
-    return ::xllm::Status(
-        StatusCode::INVALID_ARGUMENT,
-        "Adaptive DSpark calibration requires graph warmup, schedule overlap "
-        "and at most one calibration-config or saved-table input.");
-  }
-  const auto& target_args = impl_->context_.get_model_args();
-  capacity.sparse_dsa_target = target_args.model_type() == "glm_moe_dsa" &&
-                               target_args.enable_mla() &&
-                               target_args.index_topk() > 0;
-  status = TaskExecutionPipeline::create(threadpool_,
-                                         impl_->task_model(),
-                                         draft_impl_->task_model(),
-                                         capacity,
-                                         output);
-  if (!status.ok()) {
-    return status;
-  }
-  LOG(INFO) << options_.speculative_algorithm()
-            << " task execution pipeline: slots=" << capacity.common.slot_count
-            << ", speculative_tokens=" << capacity.num_speculative_tokens
-            << ", pinned_bytes=" << output->pinned_bytes()
-            << ", device_bytes=" << output->device_bytes();
-  return ::xllm::Status();
 }
 
 bool DFlashWorkerImpl::init_model(const std::string& model_weights_path,
@@ -1190,60 +1026,6 @@ void DFlashWorkerImpl::write_target_context_to_cache(
       validate_output.embeddings,
       options_.num_speculative_tokens(),
       /*retain_previous_embedding=*/false);
-}
-
-void DFlashWorkerImpl::prepare_task_pipeline_input(const LlmForwardInput& input,
-                                                   LlmForwardInput& prepared) {
-  // Prepare owns only transport storage. The target leaf restores recurrent
-  // state on the ordered execution stream, after preceding model work.
-  prepare_input_on_stream(input,
-                          prepared,
-                          *prepare_stream_,
-                          /*record_ready_event=*/true,
-                          /*restore_linear_state=*/false,
-                          /*wait_for_compute_stream=*/false);
-}
-
-std::optional<ForwardOutput> DFlashWorkerImpl::execute_task_pipeline(
-    const LlmForwardInput& prepared) {
-  // A worker-owned queue must not use the driver's legacy last-step slot.
-  if (!enable_schedule_overlap() || prepared.json_object_states.empty()) {
-    task_json_output_ = ForwardOutput();
-    task_json_sample_sequence_ids_.clear();
-    return step(prepared);
-  }
-  LlmForwardInput input = prepared.clone();
-  c10::StreamGuard stream_guard = compute_stream_->set_stream_guard();
-  CHECK(compute_stream_->wait_event(input.runtime.metadata_ready_event));
-  if (input.token_ids.numel() > 0 &&
-      input.input_params.meta.batch_forward_type.has_decode()) {
-    JsonObjectDecodeAdapter::prepare(input,
-                                     task_json_output_,
-                                     task_json_sample_sequence_ids_,
-                                     device_,
-                                     *compute_stream_);
-  }
-  auto output = step(input);
-  task_json_output_ = ForwardOutput();
-  task_json_sample_sequence_ids_.clear();
-  if (output.has_value()) {
-    output->json_object_errors.insert(output->json_object_errors.end(),
-                                      input.json_object_errors.begin(),
-                                      input.json_object_errors.end());
-    if (output->sample_output.next_tokens.defined()) {
-      if (output->ready_event != nullptr) {
-        CHECK(output->ready_event->synchronize());
-      }
-      task_json_output_.sample_output.next_tokens =
-          safe_to(
-              output->sample_output.next_tokens,
-              torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU),
-              /*non_blocking=*/false)
-              .clone();
-      task_json_sample_sequence_ids_ = input.sample_sequence_ids;
-    }
-  }
-  return output;
 }
 
 }  // namespace xllm

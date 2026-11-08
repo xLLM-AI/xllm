@@ -118,25 +118,12 @@ void append_token(const Token& token,
   }
 }
 
-template <bool IncludeDspark, typename Response>
+template <typename Response>
 bool decode_token_output(const Response& response,
                          RawForwardOutput& output,
                          const char* model_name) {
   Timer timer;
   RawForwardOutput decoded_output;
-  if constexpr (IncludeDspark) {
-    decoded_output.dspark_feedback.confidence.assign(
-        response.dspark_confidence().begin(),
-        response.dspark_confidence().end());
-    decoded_output.dspark_feedback.rounds_since_full_width.assign(
-        response.dspark_rounds_since_full_width().begin(),
-        response.dspark_rounds_since_full_width().end());
-    if (!valid_dspark_dp_feedback(decoded_output.dspark_feedback,
-                                  response.outputs_size())) {
-      LOG(ERROR) << "Invalid adaptive DSpark feedback layout.";
-      return false;
-    }
-  }
   decoded_output.expert_load_data.assign(response.expert_load_data().begin(),
                                          response.expert_load_data().end());
   decoded_output.src_seq_idxes.assign(response.src_seq_idxes().begin(),
@@ -205,7 +192,7 @@ bool decode_token_output(const Response& response,
   return true;
 }
 
-template <bool IncludeDspark, typename Response>
+template <typename Response>
 bool encode_token_output(
     const ForwardOutput& output,
     const std::vector<SpeculativeTokenStats>& speculative_token_stats,
@@ -225,13 +212,6 @@ bool encode_token_output(
   }
   Response encoded_output;
   Response* pb_forward_output = &encoded_output;
-  if constexpr (IncludeDspark) {
-    ADD_VECTOR_TO_PROTO(pb_forward_output->mutable_dspark_confidence(),
-                        output.dspark_feedback.confidence);
-    ADD_VECTOR_TO_PROTO(
-        pb_forward_output->mutable_dspark_rounds_since_full_width(),
-        output.dspark_feedback.rounds_since_full_width);
-  }
   Timer timer;
   if (!valid_token_output(
           next_tokens, logprobs, top_tokens, top_logprobs, embeddings) ||
@@ -265,12 +245,6 @@ bool encode_token_output(
       speculative_token_stats.size() != static_cast<size_t>(num_seqs)) {
     LOG(ERROR) << "Speculative token stats must match forward output rows.";
     return false;
-  }
-  if constexpr (IncludeDspark) {
-    if (!valid_dspark_dp_feedback(output.dspark_feedback, num_seqs)) {
-      LOG(ERROR) << "Invalid adaptive DSpark feedback layout.";
-      return false;
-    }
   }
   if (embeddings.defined() &&
       embeddings.size(0) < static_cast<int64_t>(num_seqs)) {
@@ -382,34 +356,34 @@ bool encode_token_output(
 bool encode_llm_output(const ForwardOutput& output,
                        const std::vector<SpeculativeTokenStats>& stats,
                        proto::LLMForwardResponse* response) {
-  return encode_token_output<true>(output, stats, response, "llm");
+  return encode_token_output(output, stats, response, "llm");
 }
 
 bool decode_llm_output(const proto::LLMForwardResponse& response,
                        RawForwardOutput& output) {
-  return decode_token_output<true>(response, output, "llm");
+  return decode_token_output(response, output, "llm");
 }
 
 bool encode_vlm_output(const ForwardOutput& output,
                        const std::vector<SpeculativeTokenStats>& stats,
                        proto::VLMForwardResponse* response) {
-  return encode_token_output<false>(output, stats, response, "vlm");
+  return encode_token_output(output, stats, response, "vlm");
 }
 
 bool decode_vlm_output(const proto::VLMForwardResponse& response,
                        RawForwardOutput& output) {
-  return decode_token_output<false>(response, output, "vlm");
+  return decode_token_output(response, output, "vlm");
 }
 
 bool encode_rec_output(const ForwardOutput& output,
                        const std::vector<SpeculativeTokenStats>& stats,
                        proto::RECForwardResponse* response) {
-  return encode_token_output<false>(output, stats, response, "rec");
+  return encode_token_output(output, stats, response, "rec");
 }
 
 bool decode_rec_output(const proto::RECForwardResponse& response,
                        RawForwardOutput& output) {
-  return decode_token_output<false>(response, output, "rec");
+  return decode_token_output(response, output, "rec");
 }
 
 }  // namespace xllm

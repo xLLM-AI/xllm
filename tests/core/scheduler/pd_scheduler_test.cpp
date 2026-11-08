@@ -1327,53 +1327,42 @@ TEST(PDSchedulerTest, MissingServiceMetadataFailsBeforeDecodeLookup) {
   }
 }
 
-TEST(PDSchedulerTest, DecodeBuildsMinTokenInputsFromLocalExecutionMode) {
+TEST(PDSchedulerTest, DecodeBuildsMinimumLengthLogitsBias) {
   const bool initialized = XServiceClientTestPeer::set_initialized(true);
   ScopeGuard restore_client(
       [initialized] { XServiceClientTestPeer::set_initialized(initialized); });
-  for (const bool enable_task_pipeline : {false, true}) {
-    FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
-    PDScheduler::Options options = make_decode_options();
-    options.enable_task_pipeline(enable_task_pipeline);
-    TestPDScheduler scheduler(&engine, options);
-    TestPDServiceImpl service(&scheduler, &engine);
-    for (const uint32_t minimum : {0u, 3u}) {
-      SCOPED_TRACE(::testing::Message()
-                   << "task_pipeline=" << enable_task_pipeline
-                   << ", min_tokens=" << minimum);
-      proto::DisaggRequest wire_request;
-      wire_request.set_req_id("decode-min-tokens");
-      wire_request.add_prompt_tokens(1);
-      wire_request.set_seq_capacity(16);
-      wire_request.set_n(1);
-      wire_request.set_best_of(1);
-      wire_request.set_max_tokens(8);
-      wire_request.set_max_context_len(16);
-      wire_request.set_vocab_size(8);
-      wire_request.set_min_tokens(minimum);
-      wire_request.set_repetition_penalty(1.0f);
-      wire_request.set_eos_token_id(7);
-      wire_request.add_all_stop_token_ids(7);
-      auto request = service.generate_request(wire_request);
-      ASSERT_NE(request, nullptr);
-      EXPECT_EQ(request->state().sampling_param.min_tokens, minimum);
+  FakeEngine engine(/*num_blocks=*/8, /*block_size=*/2);
+  PDScheduler::Options options = make_decode_options();
+  TestPDScheduler scheduler(&engine, options);
+  TestPDServiceImpl service(&scheduler, &engine);
+  for (const uint32_t minimum : {0u, 3u}) {
+    SCOPED_TRACE(minimum);
+    proto::DisaggRequest wire_request;
+    wire_request.set_req_id("decode-min-tokens");
+    wire_request.add_prompt_tokens(1);
+    wire_request.set_seq_capacity(16);
+    wire_request.set_n(1);
+    wire_request.set_best_of(1);
+    wire_request.set_max_tokens(8);
+    wire_request.set_max_context_len(16);
+    wire_request.set_vocab_size(8);
+    wire_request.set_min_tokens(minimum);
+    wire_request.set_repetition_penalty(1.0f);
+    wire_request.set_eos_token_id(7);
+    wire_request.add_all_stop_token_ids(7);
+    auto request = service.generate_request(wire_request);
+    ASSERT_NE(request, nullptr);
+    EXPECT_EQ(request->state().sampling_param.min_tokens, minimum);
 
-      SamplingInputBuilder builder;
-      builder.append(&request->state().sampling_param, /*token_index=*/0);
-      const SamplingParameters input = builder.build();
-      const bool device_min_tokens = enable_task_pipeline && minimum > 0;
-      EXPECT_EQ(input.min_token_ids().defined(), device_min_tokens);
-      EXPECT_EQ(input.min_tokens_remaining().defined(), device_min_tokens);
-      EXPECT_EQ(input.logits_bias().defined(),
-                !enable_task_pipeline && minimum > 0);
-      if (input.min_tokens_remaining().defined()) {
-        EXPECT_EQ(input.min_tokens_remaining().item<int64_t>(), minimum);
-        EXPECT_EQ(input.min_token_ids()[0][0].item<int64_t>(), 7);
-      }
-      if (input.logits_bias().defined()) {
-        EXPECT_EQ(input.logits_bias()[0][7].item<float>(),
-                  -std::numeric_limits<float>::infinity());
-      }
+    SamplingInputBuilder builder;
+    builder.append(&request->state().sampling_param, /*token_index=*/0);
+    const SamplingParameters input = builder.build();
+    EXPECT_FALSE(input.min_token_ids().defined());
+    EXPECT_FALSE(input.min_tokens_remaining().defined());
+    EXPECT_EQ(input.logits_bias().defined(), minimum > 0);
+    if (input.logits_bias().defined()) {
+      EXPECT_EQ(input.logits_bias()[0][7].item<float>(),
+                -std::numeric_limits<float>::infinity());
     }
   }
 }

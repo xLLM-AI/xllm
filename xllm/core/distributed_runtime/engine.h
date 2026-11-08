@@ -27,13 +27,10 @@ limitations under the License.
 #include "runtime/options.h"
 
 namespace xllm {
-class DraftStepController;
 
 class Engine {
  public:
   virtual ~Engine() = default;
-
-  virtual DraftStepController* draft_step_controller() { return nullptr; }
 
   virtual bool init() { return true; };
 

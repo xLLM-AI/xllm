@@ -20,7 +20,7 @@ A request first checks the Host prefix cache. Missing full blocks can be fetched
 
 The current implementation uses `HierarchyBlockManagerPool` to manage block allocation, mounting, and lifetime; `HierarchyKVCacheTransfer` to perform unified Host-to-Device and Device-to-Host transfers; and one `KVCacheStore` in each worker to access Mooncake Store. A single Store client can manage the target model, a speculative draft model, and multiple `BlockType` values from the same model.
 
-NPU Python LLMs can use Host Cache and Mooncake Store with eager execution, ACL graphs, and the task pipeline. Speculative task-pipeline offload currently supports fixed-width GLM DSA MTP, including Unified MTP. GLM (`glm5_2.py`) eager prefill waits for each Host KV copy group at its attention consumer, allowing reload and computation to overlap. Other Python models, graph replay, and speculative task-pipeline execution retain whole-batch target/draft reload dependencies. Task-pipeline load/offload waits for preceding model submissions and uses stream events to order previous computation before H2D/D2H, including writes to reused device blocks.
+NPU Python LLMs can use Host Cache and Mooncake Store with eager execution and ACL graphs. GLM (`glm5_2.py`) eager prefill waits for each Host KV copy group at its attention consumer, allowing reload and computation to overlap. Other Python models and graph replay retain whole-batch target/draft reload dependencies.
 
 ## Architecture
 

@@ -200,32 +200,6 @@ TEST(KVCacheEstimationTest, DraftTp1OverridesTensorParallelHeadDerivation) {
   EXPECT_EQ(capacity.slot_size(), 256);
 }
 
-TEST(KVCacheEstimationTest, SpeculativeEmbeddingCostDependsOnAlgorithm) {
-  ModelArgs model_args = make_standard_args();
-  // Large enough that the MTP hidden-state rows change the block count.
-  model_args.hidden_size(512);
-  runtime::Options runtime_options;
-  runtime_options.block_size(16)
-      .enable_task_pipeline(true)
-      .num_speculative_tokens(2);
-
-  KVCacheEstimateContext context;
-  context.dtype = torch::kFloat16;
-  context.virtual_memory_cache_size = 1024 * 1024;
-
-  runtime_options.speculative_algorithm("DFlash");
-  const KVCacheCapacity block_diffusion_capacity =
-      KVCacheEstimator(model_args).estimate(runtime_options, context);
-
-  runtime_options.speculative_algorithm("MTP");
-  const KVCacheCapacity mtp_capacity =
-      KVCacheEstimator(model_args).estimate(runtime_options, context);
-
-  // DFlash stores only token/position metadata; MTP also stores two hidden
-  // rows and therefore fits fewer blocks in the same budget.
-  EXPECT_GT(block_diffusion_capacity.n_blocks(), mtp_capacity.n_blocks());
-}
-
 TEST(KVCacheEstimationTest, RuntimeEstimatorRejectsMissingWorkerBudget) {
   ModelArgs model_args = make_standard_args();
   runtime::Options runtime_options;

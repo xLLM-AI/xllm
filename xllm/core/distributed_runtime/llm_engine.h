@@ -42,10 +42,8 @@ limitations under the License.
 namespace xllm {
 
 class EplbController;
-class DSparkDpCoordinator;
 class KVCacheTransferCoordinatorBase;
 class ModelLoader;
-class DraftStepController;
 class VmmKVCacheLayout;
 
 class LLMEngine : public Engine {
@@ -87,16 +85,9 @@ class LLMEngine : public Engine {
 
   bool stop_profile() override;
 
-  DraftStepController* draft_step_controller() override {
-    return draft_step_controller_.get();
-  }
-
  private:
   bool profile_workers(bool is_start);
-  void select_draft_steps(std::vector<LlmForwardInput>& inputs);
-  void observe_draft_step_acceptance(const RawForwardOutput& output);
   std::mutex profile_mutex_;
-  std::unique_ptr<DSparkDpCoordinator> dspark_dp_coordinator_;
   int64_t initial_weight_reservation_bytes_ = 0;
 
   template <typename TargetEngine>
@@ -144,7 +135,6 @@ class LLMEngine : public Engine {
       nullptr;
 
   std::unique_ptr<EplbController> eplb_controller_;
-  std::unique_ptr<DraftStepController> draft_step_controller_;
 };
 
 }  // namespace xllm

@@ -579,61 +579,6 @@ def test_mla_block_graph_matches_cpu_attention_after_prefix_changes() -> None:
         torch.testing.assert_close(captured.cpu().float(), torch.cat(expected), rtol=1e-2, atol=2e-3)
 
 
-def test_sparse_mtp_page_crossing_updates_without_host_lengths_or_query_rebuild(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from xllm.python.model_executor.forward_context import (
-        AclGraphExecutionState,
-        ForwardContext,
-        forward_context,
-    )
-
-    backend = _mla_backend()
-    cache = torch.empty(4, 128, 1, 512)
-    backend.bind_kv_caches([LayerCache(key=cache, value=cache, index=cache)])
-    metadata = SimpleNamespace(
-        slot_mapping=torch.tensor([127], dtype=torch.int32),
-        block_table=torch.tensor([[0, 1]], dtype=torch.int32),
-        kv_seq_lens=torch.tensor([128], dtype=torch.int32),
-        q_cu_seq_lens=None,
-        q_seq_lens=None,
-        kv_seq_lens_host_values=[],
-        expanded_decode_metadata=None,
-        is_prefill=False,
-        is_chunked_prefill=False,
-    )
-
-    def reject_readback(*args: object, **kwargs: object) -> None:
-        raise AssertionError("sparse MTP metadata must stay on Device")
-
-    context = ForwardContext(backend, torch.device("cpu"), metadata, [], execution_state=AclGraphExecutionState({}))
-    with monkeypatch.context() as no_readback, forward_context(context):
-        no_readback.setattr(torch.Tensor, "cpu", reject_readback)
-        no_readback.setattr(torch.Tensor, "item", reject_readback)
-        backend.prepare_owned_graph_metadata(metadata)
-        assert backend.graph_metadata_updated_in_place
-        assert backend._mla_actual_seq_kv.data_ptr() == metadata.kv_seq_lens.data_ptr()
-        destinations = tuple(
-            (tensor.shape, tensor.dtype, tensor.device, tensor.data_ptr())
-            for tensor in (metadata.slot_mapping, metadata.block_table, metadata.kv_seq_lens)
-        )
-        query_ptr = backend._mla_actual_seq_q.data_ptr()
-        metadata.kv_seq_lens.fill_(129)
-        metadata.slot_mapping.fill_(128)
-        metadata.block_table.copy_(torch.tensor([[2, 3]], dtype=torch.int32))
-    assert backend._causal_mask is None
-    assert destinations == tuple(
-        (tensor.shape, tensor.dtype, tensor.device, tensor.data_ptr())
-        for tensor in (metadata.slot_mapping, metadata.block_table, metadata.kv_seq_lens)
-    )
-    assert backend._mla_actual_seq_q.data_ptr() == query_ptr
-    assert backend._mla_actual_seq_q.tolist() == [1]
-    assert backend._mla_actual_seq_kv.tolist() == [129]
-    assert backend._block_table_i32.tolist() == [[2, 3]]
-    backend.prepare(metadata)
-    assert not backend.graph_metadata_updated_in_place
-
-
 @pytest.mark.parametrize("prefill,chunked", [(True, False), (False, True), (False, False)])
 def test_prepared_mla_borrows_final_views_without_device_work(
     prefill: bool,

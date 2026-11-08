@@ -65,16 +65,6 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
 
   std::tuple<int64_t, int64_t> estimate_kv_cache_capacity() override;
 
-  ::xllm::Status create_task_pipeline(
-      std::unique_ptr<TaskExecutionPipeline>& output) override;
-  bool uses_worker_task_pipeline() const override {
-    return target_is_hybrid_recurrent_;
-  }
-  void prepare_task_pipeline_input(const LlmForwardInput& input,
-                                   LlmForwardInput& prepared) override;
-  std::optional<ForwardOutput> execute_task_pipeline(
-      const LlmForwardInput& prepared) override;
-
  protected:
   std::optional<ForwardOutput> step_prefill(
       const LlmForwardInput& input) override;
@@ -147,11 +137,6 @@ class DFlashWorkerImpl : public DraftModelSpecWorkerImpl<LlmForwardInput> {
   // Fixed once the target finishes loading; hybrid spec-verify gates read
   // this instead of re-scanning layer_types.
   bool target_is_hybrid_recurrent_ = false;
-
- private:
-  // Launch-thread-owned JSON context; never borrows a retired result Slot.
-  ForwardOutput task_json_output_;
-  std::vector<std::string> task_json_sample_sequence_ids_;
 };
 
 }  // namespace xllm

@@ -49,9 +49,6 @@ class DistributedWorkerManager final {
     return worker_clients_;
   }
 
-  std::optional<std::vector<std::string>> spec_calibration(
-      const SpecCalibrationCommand& command);
-
   // Appends the transport endpoints in global worker rank order.
   void get_cache_info(std::vector<uint64_t>& cluster_ids,
                       std::vector<std::string>& addrs,

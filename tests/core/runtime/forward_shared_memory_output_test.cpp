@@ -118,59 +118,6 @@ class ForwardSharedMemoryOutputTest : public ::testing::Test {
   std::unique_ptr<ForwardSharedMemoryTransport> reader_;
 };
 
-TEST_F(ForwardSharedMemoryOutputTest, LlmPreservesDsparkHostFeedback) {
-  ForwardOutput source;
-  source.sample_output.next_tokens = torch::tensor({7, 9}, torch::kInt64);
-  source.dspark_feedback.confidence.assign(14, 0.5F);
-  source.dspark_feedback.rounds_since_full_width = {3, 4};
-  ASSERT_TRUE(
-      writer_->llm_output_write(source, /*speculative_token_stats=*/{}));
-  RawForwardOutput decoded;
-  ASSERT_TRUE(reader_->llm_output_read(decoded));
-  EXPECT_EQ(decoded.dspark_feedback.confidence,
-            source.dspark_feedback.confidence);
-  EXPECT_EQ(decoded.dspark_feedback.rounds_since_full_width,
-            source.dspark_feedback.rounds_since_full_width);
-  const uint64_t version = published_version();
-  source.dspark_feedback.confidence.pop_back();
-  EXPECT_FALSE(
-      writer_->llm_output_write(source, /*speculative_token_stats=*/{}));
-  EXPECT_EQ(published_version(), version);
-}
-
-TEST_F(ForwardSharedMemoryOutputTest,
-       TokenDomainsKeepDistinctDsparkFeedbackLayouts) {
-  ForwardOutput source;
-  source.sample_output.next_tokens = torch::tensor({7}, torch::kInt64);
-  source.dspark_feedback.confidence.assign(7, 0.5F);
-  source.dspark_feedback.rounds_since_full_width = {3};
-  ASSERT_TRUE(writer_->llm_output_write(source, {}));
-  RawForwardOutput decoded;
-  ASSERT_TRUE(reader_->llm_output_read(decoded));
-  EXPECT_EQ(decoded.dspark_feedback.confidence,
-            source.dspark_feedback.confidence);
-
-  // Only the LLM wire format carries and validates adaptive DSpark feedback.
-  source.dspark_feedback.confidence.pop_back();
-  const uint64_t version = published_version();
-  EXPECT_FALSE(writer_->llm_output_write(source, {}));
-  EXPECT_EQ(published_version(), version);
-  const std::array non_llm_methods = {
-      std::pair{&ForwardSharedMemoryTransport::vlm_output_write,
-                &ForwardSharedMemoryTransport::vlm_output_read},
-      std::pair{&ForwardSharedMemoryTransport::rec_output_write,
-                &ForwardSharedMemoryTransport::rec_output_read}};
-  for (const auto& [write, read] : non_llm_methods) {
-    ASSERT_TRUE((writer_.get()->*write)(source, {}));
-    ASSERT_TRUE((reader_.get()->*read)(decoded));
-    ASSERT_EQ(decoded.outputs.size(), 1);
-    ASSERT_EQ(decoded.outputs[0].tokens.size(), 1);
-    EXPECT_EQ(decoded.outputs[0].tokens[0].id, 7);
-    EXPECT_TRUE(decoded.dspark_feedback.confidence.empty());
-    EXPECT_TRUE(decoded.dspark_feedback.rounds_since_full_width.empty());
-  }
-}
-
 TEST_F(ForwardSharedMemoryOutputTest,
        LlmPreservesSpeculativeTokensAndJsonErrors) {
   ForwardOutput source;

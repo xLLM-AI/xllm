@@ -42,7 +42,6 @@ class DraftModelSpecWorkerImpl : public SpeculativeWorkerImpl<TargetInput> {
   bool init_model(const std::string& model_weights_path,
                   int32_t random_seed,
                   MasterStatus master_status) override;
-  bool task_models_loaded() const override;
 
   bool allocate_kv_cache(const KVCacheShape& kv_cache_shape) override;
 

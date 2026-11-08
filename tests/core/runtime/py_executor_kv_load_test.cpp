@@ -24,7 +24,6 @@ limitations under the License.
 #include "core/framework/parallel_state/process_group.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/platform/layer_synchronizer.h"
-#include "core/runtime/py_attention_metadata.h"
 #include "core/runtime/py_executor_impl.h"
 #include "models/llm/py_causal_lm.h"
 
@@ -150,11 +149,7 @@ patch.__enter__()
         storage.parallel.layer_wise_load_synchronizer = load;
         storage.parallel.layers_per_event = 1;
         storage.parallel.draft_load_event_index = 2;
-        if (graph) {
-          storage.enable_graph = true;
-          storage.python_attention_metadata =
-              std::make_shared<PythonAttentionMetadata>(py::none());
-        }
+        storage.enable_graph = graph;
         const ModelOutput output = executor.run(torch::tensor({3}),
                                                 torch::tensor({0}),
                                                 caches,
