@@ -18,7 +18,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 
-#include "runtime/forward_shared_memory_manager.h"
+#include "runtime/forward_shared_memory_transport.h"
 #include "runtime/worker.h"
 #include "worker.pb.h"
 
@@ -39,8 +39,8 @@ class WorkerService : public proto::DistributeWorker {
   void set_worker(std::unique_ptr<Worker> worker);
 
   void create_polling_shm_thread(
-      std::unique_ptr<ForwardSharedMemoryManager> input_shm_manager,
-      std::unique_ptr<ForwardSharedMemoryManager> output_shm_manager);
+      std::unique_ptr<ForwardSharedMemoryTransport> input_shm_manager,
+      std::unique_ptr<ForwardSharedMemoryTransport> output_shm_manager);
 
   // service functions
   void Hello(::google::protobuf::RpcController* controller,
@@ -205,13 +205,13 @@ class WorkerService : public proto::DistributeWorker {
                           std::vector<SpeculativeTokenStats>& stats);
 
   void poll_llm_shm(
-      std::unique_ptr<ForwardSharedMemoryManager> output_shm_manager);
+      std::unique_ptr<ForwardSharedMemoryTransport> output_shm_manager);
   void poll_vlm_shm(
-      std::unique_ptr<ForwardSharedMemoryManager> output_shm_manager);
+      std::unique_ptr<ForwardSharedMemoryTransport> output_shm_manager);
   void poll_rec_shm(
-      std::unique_ptr<ForwardSharedMemoryManager> output_shm_manager);
+      std::unique_ptr<ForwardSharedMemoryTransport> output_shm_manager);
   void poll_dit_shm(
-      std::unique_ptr<ForwardSharedMemoryManager> output_shm_manager);
+      std::unique_ptr<ForwardSharedMemoryTransport> output_shm_manager);
 
   DISALLOW_COPY_AND_ASSIGN(WorkerService);
 
@@ -227,7 +227,7 @@ class WorkerService : public proto::DistributeWorker {
 
   std::unique_ptr<Worker> worker_;
 
-  std::unique_ptr<ForwardSharedMemoryManager> input_shm_manager_;
+  std::unique_ptr<ForwardSharedMemoryTransport> input_shm_manager_;
   std::unique_ptr<std::thread> polling_thread_;
 
   std::unique_ptr<ThreadPool> threadpool_;

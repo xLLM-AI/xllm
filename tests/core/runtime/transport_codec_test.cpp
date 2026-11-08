@@ -29,7 +29,7 @@ limitations under the License.
 #include "core/kv_cache/transfer/kv_transport_codec.h"
 #include "core/kv_cache/transfer/prefetch_result.h"
 #include "core/runtime/forward_params.h"
-#include "core/runtime/forward_shared_memory_manager.h"
+#include "core/runtime/forward_shared_memory_transport.h"
 #include "worker.pb.h"
 
 namespace xllm {
@@ -77,7 +77,7 @@ StoragePrefetchRequest make_prefetch_request() {
 }
 
 bool write_shared_tokens(
-    ForwardSharedMemoryManager& writer,
+    ForwardSharedMemoryTransport& writer,
     const torch::Tensor& tokens,
     const std::vector<SpeculativeTokenStats>& stats,
     int64_t prepared_token = -1,
@@ -485,16 +485,16 @@ TEST(TransportCodecTest, MissingLegacyVerifiedRoundsDecodeAsZeroOnReuse) {
 TEST(TransportCodecTest,
      SharedOutputPreservesVerifiedRoundsAndFollowingFields) {
   const ScopedRawOutputTransport host_only;
-  const std::string name = ForwardSharedMemoryManager::create_unique_name(
+  const std::string name = ForwardSharedMemoryTransport::create_unique_name(
       "verified_rounds_" + std::to_string(static_cast<int64_t>(getpid())),
       /*dp_group=*/0,
       ForwardType::RAW_OUTPUT,
       /*rank=*/0);
   bool writer_is_creator = false;
-  ForwardSharedMemoryManager writer(
+  ForwardSharedMemoryTransport writer(
       name, /*size=*/4096, writer_is_creator, ForwardType::RAW_OUTPUT);
   bool reader_is_creator = false;
-  ForwardSharedMemoryManager reader(
+  ForwardSharedMemoryTransport reader(
       name, /*size=*/4096, reader_is_creator, ForwardType::RAW_OUTPUT);
   constexpr int64_t kLargeRoundCount = (int64_t{1} << 33) + 7;
   const std::vector<SpeculativeTokenStats> stats{
@@ -532,14 +532,14 @@ TEST(TransportCodecTest, SharedOutputSizeIncludesVerifiedRoundWord) {
       5 * sizeof(int64_t) + 2 * sizeof(bool) + 2 * sizeof(uint64_t);
   const auto tokens = torch::tensor({7}, torch::kInt64);
   for (const size_t bytes : {kRequiredBytes - 1, kRequiredBytes}) {
-    const std::string name = ForwardSharedMemoryManager::create_unique_name(
+    const std::string name = ForwardSharedMemoryTransport::create_unique_name(
         "round_size_" + std::to_string(static_cast<int64_t>(getpid())) + "_" +
             std::to_string(bytes),
         /*dp_group=*/0,
         ForwardType::RAW_OUTPUT,
         /*rank=*/0);
     bool is_creator = false;
-    ForwardSharedMemoryManager writer(
+    ForwardSharedMemoryTransport writer(
         name, bytes, is_creator, ForwardType::RAW_OUTPUT);
     EXPECT_EQ(write_shared_tokens(writer, tokens, {{0, 0, 1}}),
               bytes == kRequiredBytes);

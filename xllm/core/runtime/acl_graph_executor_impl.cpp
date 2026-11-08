@@ -43,7 +43,7 @@ limitations under the License.
 #include "core/kv_cache/layout/kv_shard_layout.h"
 #include "core/platform/device.h"
 #include "core/platform/npu/acl_graph_task_update_context.h"
-#include "core/runtime/graph_input_snapshot.h"
+#include "core/runtime/graph_execution_input.h"
 #include "core/util/utils.h"
 #include "platform/npu/device_capture_lock.h"
 #include "runtime/decode_graph_bucket.h"
@@ -1244,7 +1244,7 @@ ModelOutput AclGraphExecutorImpl::run_typed(Model* model,
                                             std::vector<KVCache>& kv_caches,
                                             const Params& params) {
   auto run_eager = [&]() {
-    Params eager_params = clone_graph_input(params);
+    Params eager_params = copy_graph_execution_input(params);
     eager_params.enable_graph = false;
     eager_params.attn_metadata.reset();
     return forward_eager(model, tokens, positions, kv_caches, eager_params);

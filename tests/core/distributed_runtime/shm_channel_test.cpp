@@ -104,13 +104,13 @@ class ShmChannelTest : public ::testing::Test {
     channel_ = std::make_unique<ShmChannel>(
         /*dp_group=*/0, /*rank=*/0, /*is_driver=*/false, options_);
     ASSERT_TRUE(channel_->init_brpc(address_));
-    const std::string name = ForwardSharedMemoryManager::create_unique_name(
+    const std::string name = ForwardSharedMemoryTransport::create_unique_name(
         "xllm_" + net::extract_port(address_),
         /*dp_group=*/0,
         ForwardType::RAW_OUTPUT,
         /*rank=*/0);
     bool is_creator = true;
-    writer_ = std::make_unique<ForwardSharedMemoryManager>(
+    writer_ = std::make_unique<ForwardSharedMemoryTransport>(
         name, kOutputBytes, is_creator, ForwardType::RAW_OUTPUT);
     ASSERT_FALSE(is_creator);
   }
@@ -137,15 +137,15 @@ class ShmChannelTest : public ::testing::Test {
     const size_t segment_size =
         sizeof(ControlMetadata) + sizeof(uint64_t) + packed.payload().size();
     EXPECT_TRUE(
-        ForwardSharedMemoryManager::can_write_input(input, segment_size));
+        ForwardSharedMemoryTransport::can_write_input(input, segment_size));
     EXPECT_FALSE(
-        ForwardSharedMemoryManager::can_write_input(input, segment_size - 1));
-    EXPECT_FALSE(ForwardSharedMemoryManager::can_write_input(input, 0));
+        ForwardSharedMemoryTransport::can_write_input(input, segment_size - 1));
+    EXPECT_FALSE(ForwardSharedMemoryTransport::can_write_input(input, 0));
     bool is_creator = false;
-    ForwardSharedMemoryManager writer(writer_->name() + "_input_capacity",
-                                      segment_size,
-                                      is_creator,
-                                      ForwardType::RAW_INPUT);
+    ForwardSharedMemoryTransport writer(writer_->name() + "_input_capacity",
+                                        segment_size,
+                                        is_creator,
+                                        ForwardType::RAW_INPUT);
     ASSERT_TRUE(is_creator);
     EXPECT_TRUE(writer.input_write(input));
   }
@@ -156,9 +156,9 @@ class ShmChannelTest : public ::testing::Test {
       const Input& small,
       void (ShmChannel::*execute)(const Input&, OutputPromise&)) {
     ASSERT_FALSE(
-        ForwardSharedMemoryManager::can_write_input(oversized, kInputBytes));
+        ForwardSharedMemoryTransport::can_write_input(oversized, kInputBytes));
     ASSERT_TRUE(
-        ForwardSharedMemoryManager::can_write_input(small, kInputBytes));
+        ForwardSharedMemoryTransport::can_write_input(small, kInputBytes));
     use_driver_channel();
     ShmChannel follower(
         /*dp_group=*/0, /*rank=*/1, /*is_driver=*/false, options_);
@@ -176,13 +176,13 @@ class ShmChannelTest : public ::testing::Test {
       }
     }
     EXPECT_EQ(service_.execution_count(), 4);
-    const std::string name = ForwardSharedMemoryManager::create_unique_name(
+    const std::string name = ForwardSharedMemoryTransport::create_unique_name(
         "xllm_" + net::extract_port(address_),
         /*dp_group=*/0,
         ForwardType::RAW_INPUT,
         /*rank=*/0);
     bool is_creator = true;
-    ForwardSharedMemoryManager input_reader(
+    ForwardSharedMemoryTransport input_reader(
         name, kInputBytes, is_creator, ForwardType::RAW_INPUT);
     ASSERT_FALSE(is_creator);
     EXPECT_EQ(static_cast<const ControlMetadata*>(input_reader.base_address())
@@ -198,7 +198,7 @@ class ShmChannelTest : public ::testing::Test {
   ShmFallbackService service_;
   brpc::Server server_;
   std::unique_ptr<ShmChannel> channel_;
-  std::unique_ptr<ForwardSharedMemoryManager> writer_;
+  std::unique_ptr<ForwardSharedMemoryTransport> writer_;
 };
 
 TEST_F(ShmChannelTest, ReadsLlmOutputWithoutRpcExecution) {
@@ -310,13 +310,13 @@ TEST_F(ShmChannelTest, InputWriteFailureFallsBackBeforePublishingRequest) {
   ASSERT_EQ(output->outputs.size(), 1);
   EXPECT_EQ(output->outputs[0].tokens[0].id, 99);
   EXPECT_EQ(service_.execution_count(), 1);
-  const std::string name = ForwardSharedMemoryManager::create_unique_name(
+  const std::string name = ForwardSharedMemoryTransport::create_unique_name(
       "xllm_" + net::extract_port(address_),
       /*dp_group=*/0,
       ForwardType::RAW_INPUT,
       /*rank=*/0);
   bool is_creator = true;
-  ForwardSharedMemoryManager input_reader(
+  ForwardSharedMemoryTransport input_reader(
       name, kSmallInputBytes, is_creator, ForwardType::RAW_INPUT);
   ASSERT_FALSE(is_creator);
   EXPECT_EQ(
@@ -371,23 +371,26 @@ TEST_F(ShmChannelTest, InputPreflightMatchesExactPackedSize) {
 
 TEST_F(ShmChannelTest, RecPreflightRejectsUnsupportedFieldsBeforePublishing) {
   bool is_creator = false;
-  ForwardSharedMemoryManager writer(writer_->name() + "_rec_input",
-                                    kInputBytes,
-                                    is_creator,
-                                    ForwardType::RAW_INPUT);
+  ForwardSharedMemoryTransport writer(writer_->name() + "_rec_input",
+                                      kInputBytes,
+                                      is_creator,
+                                      ForwardType::RAW_INPUT);
   ASSERT_TRUE(is_creator);
   RecForwardInput input;
   input.decoder_sampling_params.selected_token_idxes() =
       torch::tensor({0}, torch::kInt32);
-  EXPECT_FALSE(ForwardSharedMemoryManager::can_write_input(input, kInputBytes));
+  EXPECT_FALSE(
+      ForwardSharedMemoryTransport::can_write_input(input, kInputBytes));
   EXPECT_FALSE(writer.input_write(input));
   input.decoder_sampling_params.selected_token_idxes() = torch::Tensor();
   input.step_decode.emplace();
-  EXPECT_FALSE(ForwardSharedMemoryManager::can_write_input(input, kInputBytes));
+  EXPECT_FALSE(
+      ForwardSharedMemoryTransport::can_write_input(input, kInputBytes));
   EXPECT_FALSE(writer.input_write(input));
   input.step_decode.reset();
   input.input_params.mutable_onerec_params();
-  EXPECT_FALSE(ForwardSharedMemoryManager::can_write_input(input, kInputBytes));
+  EXPECT_FALSE(
+      ForwardSharedMemoryTransport::can_write_input(input, kInputBytes));
   EXPECT_FALSE(writer.input_write(input));
   EXPECT_EQ(static_cast<const ControlMetadata*>(writer.base_address())->version,
             0);

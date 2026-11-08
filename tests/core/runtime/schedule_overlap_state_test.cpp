@@ -70,6 +70,38 @@ TEST(ScheduleOverlapStateTest, ChecksContinuationTokensAndRequestOwnership) {
   EXPECT_FALSE(state.can_reuse_tokens({"other"}));
 }
 
+TEST(ScheduleOverlapStateTest, MissingRequestIdsPreserveLegacyContinuation) {
+  ScheduleOverlapState state(/*publish_to_host=*/false,
+                             /*retain_tokenless_output=*/false);
+  ASSERT_TRUE(state.record(token_output(7), {}, {"sequence"}));
+  EXPECT_TRUE(state.can_reuse_tokens({"request"}));
+  EXPECT_TRUE(state.can_reuse_tokens({}));
+
+  ASSERT_TRUE(state.record(token_output(9), {"request"}, {"sequence"}));
+  EXPECT_TRUE(state.can_reuse_tokens({}));
+}
+
+TEST(ScheduleOverlapStateTest, RequestChurnRetainsMatchingContinuation) {
+  ScheduleOverlapState state(/*publish_to_host=*/false,
+                             /*retain_tokenless_output=*/false);
+  ASSERT_TRUE(state.record(
+      token_output(7), {"", "old_request", "retained_request"}, {"sequence"}));
+  EXPECT_TRUE(state.can_reuse_tokens({"", "new_request", "retained_request"}));
+  EXPECT_TRUE(state.can_reuse_tokens(
+      {"new_request", "new_request", "retained_request"}));
+  EXPECT_FALSE(state.can_reuse_tokens({"", "new_request", "other_request"}));
+}
+
+TEST(ScheduleOverlapStateTest, EmptyRequestIdsDoNotEstablishOwnership) {
+  ScheduleOverlapState state(/*publish_to_host=*/false,
+                             /*retain_tokenless_output=*/false);
+  ASSERT_TRUE(state.record(token_output(7), {"request"}, {"sequence"}));
+  EXPECT_FALSE(state.can_reuse_tokens({"", ""}));
+
+  ASSERT_TRUE(state.record(token_output(9), {"", ""}, {"sequence"}));
+  EXPECT_FALSE(state.can_reuse_tokens({"request"}));
+}
+
 TEST(ScheduleOverlapStateTest,
      CacheOnlyRecordsRefreshContinuationWithoutHostConsumption) {
   ScheduleOverlapState state(/*publish_to_host=*/false,

@@ -15,65 +15,23 @@ limitations under the License.
 
 #pragma once
 
-#include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <iterator>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 #include "core/framework/constrained/json_object_grammar.h"
+#include "core/runtime/json_object_output_error.h"
 
 namespace xllm {
-
-struct JsonObjectOutputError final {
-  std::string sample_sequence_id;
-  std::string message;
-};
 
 namespace detail {
 
 constexpr int32_t kNoPriorJsonObjectOutputRow = -1;
 constexpr int32_t kInvalidJsonObjectOutputRow = -2;
-
-inline bool has_request_id_overlap(
-    const std::vector<std::string>& current_request_ids,
-    const std::vector<std::string>& last_request_ids) {
-  if (current_request_ids.empty() || last_request_ids.empty()) {
-    return true;
-  }
-
-  const auto first_current = std::find_if(
-      current_request_ids.begin(),
-      current_request_ids.end(),
-      [](const std::string& request_id) { return !request_id.empty(); });
-  if (first_current == current_request_ids.end()) {
-    return false;
-  }
-  // Stable decode batches usually match near the front. Allocate a hash set
-  // only after that common path misses and the batch may have churned.
-  if (std::find(last_request_ids.begin(),
-                last_request_ids.end(),
-                *first_current) != last_request_ids.end()) {
-    return true;
-  }
-
-  std::unordered_set<std::string> last_request_id_set;
-  last_request_id_set.reserve(last_request_ids.size());
-  for (const std::string& request_id : last_request_ids) {
-    if (!request_id.empty()) {
-      last_request_id_set.emplace(request_id);
-    }
-  }
-  return std::any_of(std::next(first_current),
-                     current_request_ids.end(),
-                     [&last_request_id_set](const std::string& request_id) {
-                       return !request_id.empty() &&
-                              last_request_id_set.contains(request_id);
-                     });
-}
 
 inline bool resolve_json_object_output_rows(
     const std::vector<JsonObjectGrammarState>& states,
@@ -103,24 +61,22 @@ inline bool resolve_json_object_output_rows(
     }
   }
 
-  std::unordered_map<std::string, int32_t> last_step_output_rows;
+  std::unordered_map<std::string_view, int32_t> last_step_output_rows;
   last_step_output_rows.reserve(last_sample_sequence_ids.size());
   for (size_t output_idx = 0; output_idx < last_sample_sequence_ids.size();
        ++output_idx) {
     const std::string& sequence_id = last_sample_sequence_ids[output_idx];
-    const auto iter = last_step_output_rows.find(sequence_id);
-    if (iter == last_step_output_rows.end()) {
-      last_step_output_rows.emplace(sequence_id,
-                                    static_cast<int32_t>(output_idx));
-    } else {
-      iter->second = -2;
+    const auto [iter, inserted] = last_step_output_rows.try_emplace(
+        sequence_id, static_cast<int32_t>(output_idx));
+    if (!inserted) {
+      iter->second = kInvalidJsonObjectOutputRow;
     }
   }
 
   output_rows->reserve(states.size());
   for (size_t state_idx = 0; state_idx < states.size(); ++state_idx) {
     if (!states[state_idx].initialized()) {
-      output_rows->emplace_back(-1);
+      output_rows->emplace_back(kNoPriorJsonObjectOutputRow);
       continue;
     }
 
@@ -164,6 +120,83 @@ inline bool resolve_json_object_output_rows(
   return true;
 }
 
+struct JsonObjectPlaceholderLocation final {
+  int64_t match_count = 0;
+  int64_t token_offset = 0;
+};
+
+template <typename Token>
+inline bool sanitize_cpu_json_object_error_token_ids(
+    torch::Tensor& token_ids,
+    const std::vector<std::string>& sample_sequence_ids,
+    const std::vector<int32_t>& prior_output_rows,
+    const std::unordered_set<std::string_view>& failed_sequence_ids,
+    std::string& error) {
+  std::unordered_map<Token, JsonObjectPlaceholderLocation> placeholders;
+  placeholders.reserve(failed_sequence_ids.size());
+  for (size_t state_idx = 0; state_idx < sample_sequence_ids.size();
+       ++state_idx) {
+    if (!failed_sequence_ids.contains(sample_sequence_ids[state_idx]) ||
+        prior_output_rows[state_idx] < 0) {
+      continue;
+    }
+    const int32_t placeholder_token = -prior_output_rows[state_idx] - 1;
+    placeholders.try_emplace(static_cast<Token>(placeholder_token));
+  }
+  if (placeholders.empty()) {
+    return true;
+  }
+
+  const Token* input_tokens = token_ids.data_ptr<Token>();
+  if (placeholders.size() == 1) {
+    auto& [placeholder_token, location] = *placeholders.begin();
+    for (int64_t token_offset = 0; token_offset < token_ids.numel();
+         ++token_offset) {
+      if (input_tokens[token_offset] != placeholder_token) {
+        continue;
+      }
+      ++location.match_count;
+      location.token_offset = token_offset;
+    }
+  } else {
+    for (int64_t token_offset = 0; token_offset < token_ids.numel();
+         ++token_offset) {
+      const auto iter = placeholders.find(input_tokens[token_offset]);
+      if (iter == placeholders.end()) {
+        continue;
+      }
+      ++iter->second.match_count;
+      iter->second.token_offset = token_offset;
+    }
+  }
+
+  Token* sanitized_tokens = nullptr;
+  for (size_t state_idx = 0; state_idx < sample_sequence_ids.size();
+       ++state_idx) {
+    if (!failed_sequence_ids.contains(sample_sequence_ids[state_idx]) ||
+        prior_output_rows[state_idx] < 0) {
+      continue;
+    }
+    const int32_t placeholder_token = -prior_output_rows[state_idx] - 1;
+    auto& location = placeholders.at(static_cast<Token>(placeholder_token));
+    if (location.match_count != 1) {
+      error =
+          "failed JSON row placeholder must identify exactly one input "
+          "token";
+      return false;
+    }
+    // Match the tensor path's row-by-row commit order without changing aliases
+    // of the original input, including when a later row is invalid.
+    if (sanitized_tokens == nullptr) {
+      token_ids = token_ids.clone();
+      sanitized_tokens = token_ids.data_ptr<Token>();
+    }
+    sanitized_tokens[location.token_offset] = 0;
+    location.match_count = 0;
+  }
+  return true;
+}
+
 inline bool sanitize_json_object_error_token_ids(
     torch::Tensor* token_ids,
     const std::vector<std::string>& sample_sequence_ids,
@@ -182,10 +215,29 @@ inline bool sanitize_json_object_error_token_ids(
     return false;
   }
 
-  std::unordered_set<std::string> failed_sequence_ids;
+  std::unordered_set<std::string_view> failed_sequence_ids;
   failed_sequence_ids.reserve(errors.size());
   for (const JsonObjectOutputError& output_error : errors) {
     failed_sequence_ids.emplace(output_error.sample_sequence_id);
+  }
+
+  if (token_ids->device().is_cpu() && token_ids->is_contiguous()) {
+    if (token_ids->scalar_type() == torch::kInt32) {
+      return sanitize_cpu_json_object_error_token_ids<int32_t>(
+          *token_ids,
+          sample_sequence_ids,
+          prior_output_rows,
+          failed_sequence_ids,
+          *error);
+    }
+    if (token_ids->scalar_type() == torch::kInt64) {
+      return sanitize_cpu_json_object_error_token_ids<int64_t>(
+          *token_ids,
+          sample_sequence_ids,
+          prior_output_rows,
+          failed_sequence_ids,
+          *error);
+    }
   }
 
   for (size_t state_idx = 0; state_idx < sample_sequence_ids.size();

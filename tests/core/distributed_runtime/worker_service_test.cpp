@@ -591,10 +591,10 @@ void expect_deferred_input_rebuilds_owned_host_views() {
         "worker_deferred_input_" + std::to_string(getpid()) + "_" +
         ::testing::UnitTest::GetInstance()->current_test_info()->name();
     bool is_creator = false;
-    ForwardSharedMemoryManager writer(
+    ForwardSharedMemoryTransport writer(
         name, /*size=*/1 << 20, is_creator, ForwardType::RAW_INPUT);
     ASSERT_TRUE(is_creator);
-    ForwardSharedMemoryManager reader(
+    ForwardSharedMemoryTransport reader(
         name, /*size=*/1 << 20, is_creator, ForwardType::RAW_INPUT);
     ASSERT_FALSE(is_creator);
     Input source;
@@ -654,15 +654,15 @@ TEST(WorkerServiceShutdownTest, JoinsIdleShmPollingThreadForEveryBackend) {
         "worker_shutdown_" + std::to_string(getpid()) + "_" + backend;
     bool is_creator = false;
     auto input =
-        std::make_unique<ForwardSharedMemoryManager>(prefix + "_input",
-                                                     /*size=*/1 << 20,
-                                                     is_creator,
-                                                     ForwardType::RAW_INPUT);
+        std::make_unique<ForwardSharedMemoryTransport>(prefix + "_input",
+                                                       /*size=*/1 << 20,
+                                                       is_creator,
+                                                       ForwardType::RAW_INPUT);
     auto output =
-        std::make_unique<ForwardSharedMemoryManager>(prefix + "_output",
-                                                     /*size=*/1 << 20,
-                                                     is_creator,
-                                                     ForwardType::RAW_OUTPUT);
+        std::make_unique<ForwardSharedMemoryTransport>(prefix + "_output",
+                                                       /*size=*/1 << 20,
+                                                       is_creator,
+                                                       ForwardType::RAW_OUTPUT);
     service->create_polling_shm_thread(std::move(input), std::move(output));
     // No input is ever published: destruction must cancel the read and join,
     // including when shutdown races with the polling thread's first read.

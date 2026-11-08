@@ -51,6 +51,7 @@ using c10::musa::MUSAStream;
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/runtime/executor_impl.h"
 #include "core/runtime/executor_impl_factory.h"
+#include "core/runtime/graph_execution_input.h"
 #include "core/runtime/options.h"
 #include "core/runtime/rec_executor_backend.h"
 #include "core/runtime/rec_executor_impl_factory.h"
@@ -512,9 +513,9 @@ class MusaGraphExecutorImpl final : public ExecutorImpl,
       uint32_t n_tokens) const;
 
   template <typename Model, typename Params>
-  Params maybe_precompute_embedding_for_graph(Model* model,
-                                              const torch::Tensor& tokens,
-                                              const Params& params) const;
+  void prepare_graph_embedding(Model* model,
+                               const torch::Tensor& tokens,
+                               GraphExecutionInput<Params>& graph_input) const;
 
   // Get MUSA graph memory pool id for capture. When VMM is enabled, uses
   // per-shape MemPool under (physical_pool_id, shape_id). Same physical_pool_id
