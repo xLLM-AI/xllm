@@ -40,7 +40,7 @@ limitations under the License.
 #include "core/platform/cuda/device_capture_lock.h"
 #include "core/platform/device.h"
 #include "core/runtime/decode_graph_bucket.h"
-#include "core/runtime/graph_input_snapshot.h"
+#include "core/runtime/graph_execution_input.h"
 #include "core/runtime/rec_graph_input.h"
 #include "core/util/env_var.h"
 #include "core/util/rec_model_utils.h"
@@ -523,7 +523,7 @@ std::optional<Params> MusaGraphPersistentParam::update_typed(
   if (return_capture_params) {
     CHECK_GT(padded_num_tokens, 0)
         << "padded_num_tokens must be > 0 when return_capture_params is true";
-    params_for_capture.emplace(clone_graph_input(params));
+    params_for_capture.emplace(copy_graph_execution_input(params));
   }
   // Build attn_metadata with original model_input_params. So we can set actual
   // batch size in plan_info.
@@ -1823,43 +1823,25 @@ ModelOutput MusaGraphExecutorImpl::attach_aux_hidden_states_if_needed(
 }
 
 template <typename Model, typename Params>
-Params MusaGraphExecutorImpl::maybe_precompute_embedding_for_graph(
+void MusaGraphExecutorImpl::prepare_graph_embedding(
     Model* model,
     const torch::Tensor& tokens,
-    const Params& params) const {
-  if (!params.meta.batch_forward_type.is_decode()) {
-    return clone_graph_input(params);
+    GraphExecutionInput<Params>& graph_input) const {
+  const Params& params = graph_input.params();
+  if (!params.meta.batch_forward_type.is_decode() ||
+      params.embedding.input_embedding.defined()) {
+    return;
   }
 
   auto embed_layer = model->get_word_embedding();
   if (embed_layer.is_empty()) {
-    return clone_graph_input(params);
+    return;
   }
 
-  if (params.embedding.input_embedding.defined()) {
-    return clone_graph_input(params);
-  }
-
-  // The downstream wiring is already in place:
-  //   * MusaGraphPersistentParam::update() copies `params.embedding
-  //     .input_embedding` into `persistent_embedding_` (see the update path
-  //     under "Update persistent embedding from input_embedding if
-  //     available").
-  //   * For capture, `build_capture_params_if_needed` rewrites
-  //     `params_for_capture->embedding.input_embedding` to a view of
-  //     `persistent_embedding_`, so the captured forward references the
-  //     persistent buffer's stable address.
-  //   * For replay, the captured graph already references that same
-  //     persistent address; refreshing the buffer contents here is sufficient
-  //     to feed each step with the correct per-token embeddings.
-  //
-  // Qwen3Next-family models (including Qwen3.5) already honour
-  // `input_params.embedding.input_embedding` in their forward, branching
-  // around the in-graph `embed_tokens_(tokens)` call when the field is
-  // defined (see xllm/models/llm/qwen3_next_hybrid_base.h).
-  Params new_params = clone_graph_input(params);
-  new_params.embedding.input_embedding = embed_layer(tokens);
-  return new_params;
+  // IndexSelect cannot be captured on MUSA. The persistent update copies
+  // these embeddings before capture/replay binds the persistent buffer.
+  Params& prepared_params = graph_input.mutable_params();
+  prepared_params.embedding.input_embedding = embed_layer(tokens);
 }
 
 template <typename Model, typename Params>
@@ -1941,9 +1923,10 @@ ModelOutput MusaGraphExecutorImpl::run_typed(Model* model,
     // stream region, and pass it through `params.embedding.input_embedding`
     // so both capture and replay paths read from the persistent embedding
     // buffer. No-op on other platforms / non-decode forwards. See
-    // maybe_precompute_embedding_for_graph() for the full rationale.
-    const Params graph_params =
-        maybe_precompute_embedding_for_graph(model, tokens, params);
+    // prepare_graph_embedding() for the ownership boundary.
+    GraphExecutionInput<Params> graph_input(params);
+    prepare_graph_embedding(model, tokens, graph_input);
+    const Params& graph_params = graph_input.params();
 
     // Check if captured graph exists for this bucket num_tokens
     auto it = graphs_.find(bucket_num_tokens);
@@ -2008,10 +1991,10 @@ ModelOutput MusaGraphExecutorImpl::run_typed(Model* model,
       // reflects the current token batch (the capture-time embedding above
       // would otherwise be reused unchanged, which is only correct in the
       // unlikely case the post-capture request happens to match exactly).
-      const Params replay_params =
-          maybe_precompute_embedding_for_graph(model, tokens, params);
+      GraphExecutionInput<Params> replay_input(params);
+      prepare_graph_embedding(model, tokens, replay_input);
       auto result = graphs_[bucket_num_tokens]->replay(
-          tokens, positions, kv_caches, replay_params);
+          tokens, positions, kv_caches, replay_input.params());
       auto output =
           attach_aux_hidden_states_if_needed(result.hidden_states, n_tokens);
       return output;

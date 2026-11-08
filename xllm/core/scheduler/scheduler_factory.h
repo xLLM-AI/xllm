@@ -49,8 +49,7 @@ std::unique_ptr<Scheduler> create_continuous_scheduler(
         nullptr,
     std::shared_ptr<ModelResidencyCoordinator> model_residency_coordinator =
         nullptr,
-    std::shared_ptr<KVCacheTransferCoordinator> kv_transfer_coordinator =
-        nullptr,
+    std::shared_ptr<KVTransferCoordinator> kv_transfer_coordinator = nullptr,
     PDServiceOptions response_options = {}) {
   switch (select_scheduler_kind(options)) {
     case SchedulerKind::PD:

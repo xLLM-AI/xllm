@@ -38,7 +38,7 @@ limitations under the License.
 namespace xllm {
 
 class ModelResidencyCoordinator;
-class KVCacheTransferCoordinator;
+class KVTransferCoordinator;
 
 class VLMMaster : public Master {
  public:
@@ -92,7 +92,7 @@ class VLMMaster : public Master {
   const std::string& model_type() const { return model_args_.model_type(); }
 
  private:
-  std::shared_ptr<KVCacheTransferCoordinator> kv_transfer_coordinator_;
+  std::shared_ptr<KVTransferCoordinator> kv_transfer_coordinator_;
 
   // The LLM draft prepares VirtualMemory pages before loading worker weights.
   std::unique_ptr<ModelResidencyCoordinator> draft_model_residency_coordinator_;

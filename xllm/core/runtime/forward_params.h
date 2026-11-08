@@ -29,6 +29,7 @@ limitations under the License.
 #include "common/types.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/constrained/json_object_grammar.h"
+#include "core/framework/constrained/json_object_output_error.h"
 #include "core/framework/model/llm_model_params.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/multimodal/embedding_output.h"
@@ -42,7 +43,6 @@ limitations under the License.
 #include "platform/platform.h"
 #include "runtime/dit_forward_params.h"
 #include "runtime/forward_runtime_state.h"
-#include "runtime/json_object_output_rows.h"
 #include "util/tensor_helper.h"
 
 namespace xllm {

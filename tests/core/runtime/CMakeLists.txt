@@ -14,6 +14,13 @@ cc_test(
   DEPS :model GTest::gtest_main
 )
 
+cc_test(
+  NO_NPU_RUNTIME
+  NAME graph_execution_input_test
+  SRCS graph_execution_input_test.cpp
+  DEPS :model GTest::gtest_main
+)
+
 if(USE_ILU)
   cc_test(
     NAME rec_executor_test
@@ -370,22 +377,23 @@ endif()
 
 cc_test(
   NAME
-    worker_json_object_overlap_test
-  CPU_ONLY
-  SRCS
-    worker_json_object_overlap_test.cpp
-  DEPS
-    :json_object_grammar
-    GTest::gtest_main
-)
-
-cc_test(
-  NAME
     schedule_overlap_state_test
   SRCS
     schedule_overlap_state_test.cpp
   DEPS
     :runtime
+    GTest::gtest_main
+)
+
+cc_test(
+  NAME
+    decode_input_placeholders_test
+  CPU_ONLY
+  SRCS
+    decode_input_placeholders_test.cpp
+  DEPS
+    torch
+    glog::glog
     GTest::gtest_main
 )
 

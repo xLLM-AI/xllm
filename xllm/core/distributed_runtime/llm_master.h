@@ -41,7 +41,7 @@ namespace xllm {
 class Call;
 class Tokenizer;
 class ModelResidencyCoordinator;
-class KVCacheTransferCoordinator;
+class KVTransferCoordinator;
 
 class LLMMaster : public Master {
  public:
@@ -134,7 +134,7 @@ class LLMMaster : public Master {
                               std::vector<RequestParams> params,
                               BatchOutputCallback callback);
 
-  std::shared_ptr<KVCacheTransferCoordinator> kv_transfer_coordinator_;
+  std::shared_ptr<KVTransferCoordinator> kv_transfer_coordinator_;
 
   MasterStatus master_status_;
   XServiceClient* xservice_client_ = nullptr;

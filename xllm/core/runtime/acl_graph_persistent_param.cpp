@@ -37,7 +37,7 @@ limitations under the License.
 #include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 #include "core/layers/common/expanded_decode_metadata_builder.h"
 #include "core/runtime/decode_graph_bucket.h"
-#include "core/runtime/graph_input_snapshot.h"
+#include "core/runtime/graph_execution_input.h"
 #include "core/util/utils.h"
 
 // ATB includes
@@ -1353,7 +1353,7 @@ std::optional<Params> GraphPersistentParam::update(
 
     if (k_cache.defined() && v_cache.defined() && k_cache.numel() > 0 &&
         v_cache.numel() > 0) {
-      Params plan_params = clone_graph_input(params);
+      Params plan_params = copy_graph_execution_input(params);
       torch::Tensor plan_block_tables;
       if (use_expanded_spec_decode_attention) {
         plan_params.meta.num_sequences =
@@ -1434,7 +1434,7 @@ std::optional<Params> GraphPersistentParam::update(
   // refreshes them with the actual per-step lengths above before graph replay.
   if (return_capture_params) {
     std::optional<Params> graph_params =
-        std::make_optional<Params>(clone_graph_input(params));
+        std::make_optional<Params>(copy_graph_execution_input(params));
     // Set persistent buffers in graph_params.
     graph_params->attention.device.kv_seq_lens =
         kv_seq_lens(static_cast<uint32_t>(padded_batch_size));

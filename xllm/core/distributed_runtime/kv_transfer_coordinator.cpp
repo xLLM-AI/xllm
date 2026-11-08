@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/distributed_runtime/kv_cache_transfer_coordinator.h"
+#include "core/distributed_runtime/kv_transfer_coordinator.h"
 
 #include <glog/logging.h>
 
@@ -26,7 +26,7 @@ limitations under the License.
 
 namespace xllm {
 
-KVCacheTransferCoordinator::KVCacheTransferCoordinator(
+KVTransferCoordinator::KVTransferCoordinator(
     Options options,
     std::shared_ptr<DistributedWorkerManager> distributed_worker_manager)
     : options_(std::move(options)),
@@ -35,7 +35,7 @@ KVCacheTransferCoordinator::KVCacheTransferCoordinator(
   CHECK(distributed_worker_manager_ != nullptr);
 }
 
-bool KVCacheTransferCoordinator::pull_kv_blocks(
+bool KVTransferCoordinator::pull_kv_blocks(
     int32_t src_dp_size,
     int32_t src_dp_rank,
     const std::vector<uint64_t>& src_cluster_ids,
@@ -72,7 +72,7 @@ bool KVCacheTransferCoordinator::pull_kv_blocks(
 }
 
 std::vector<folly::SemiFuture<uint32_t>>
-KVCacheTransferCoordinator::transfer_kv_blocks(
+KVTransferCoordinator::transfer_kv_blocks(
     uint32_t dp_rank,
     const std::vector<BlockTransferInfo>& block_transfer_info) {
   const auto& worker_clients =
@@ -92,7 +92,7 @@ KVCacheTransferCoordinator::transfer_kv_blocks(
 }
 
 std::vector<folly::SemiFuture<uint32_t>>
-KVCacheTransferCoordinator::transfer_kv_blocks(
+KVTransferCoordinator::transfer_kv_blocks(
     uint32_t dp_rank,
     uint64_t batch_id,
     const std::vector<BlockTransferInfo>& block_transfer_info) {
@@ -111,7 +111,7 @@ KVCacheTransferCoordinator::transfer_kv_blocks(
   return futures;
 }
 
-void KVCacheTransferCoordinator::prefetch_from_storage(
+void KVTransferCoordinator::prefetch_from_storage(
     uint32_t dp_rank,
     std::shared_ptr<const StoragePrefetchRequest> request,
     PrefetchResult::StopPredicate stop_requested,

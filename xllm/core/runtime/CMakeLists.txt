@@ -14,7 +14,8 @@ cc_library(
     task_execution_pipeline.h
     slot_buffer.h
     task_execution_pipeline_speculative.h
-    json_object_decode_continuation.h
+    json_object_decode_adapter.h
+    decode_input_placeholders.h
     schedule_overlap.h
     schedule_overlap_state.h
     executor_impl.h
@@ -25,7 +26,7 @@ cc_library(
     rec_executor_impl.h
     rec_executor_backend.h
     rec_executor_impl_factory.h
-    graph_input_snapshot.h
+    graph_execution_input.h
     rec_graph_input.h
     dit_executor.h
     $<$<BOOL:${USE_NPU}>:acl_graph_bucket_policy.h>
@@ -61,7 +62,7 @@ cc_library(
     dflash_worker_impl.h
     dflash2_worker_impl.h
     dspark_worker_impl.h
-    forward_shared_memory_manager.h
+    forward_shared_memory_transport.h
     worker_rendezvous.h
   SRCS
     decode_graph_bucket.cpp
@@ -70,7 +71,7 @@ cc_library(
     task_execution_pipeline.cpp
     slot_buffer.cpp
     task_execution_pipeline_speculative.cpp
-    json_object_decode_continuation.cpp
+    json_object_decode_adapter.cpp
     schedule_overlap.cpp
     schedule_overlap_state.cpp
     executor_impl_factory.cpp
@@ -113,7 +114,7 @@ cc_library(
     dflash_worker_impl.cpp
     dflash2_worker_impl.cpp
     dspark_worker_impl.cpp
-    forward_shared_memory_manager.cpp
+    forward_shared_memory_transport.cpp
   DEPS
     torch
     $<$<BOOL:${USE_NPU}>:torch_npu>

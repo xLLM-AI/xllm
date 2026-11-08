@@ -30,7 +30,7 @@ limitations under the License.
 #include "framework/model/model_params_view.h"
 #include "runtime/executor.h"
 #include "runtime/forward_params.h"
-#include "runtime/forward_shared_memory_manager.h"
+#include "runtime/forward_shared_memory_transport.h"
 #include "runtime/options.h"
 #include "runtime/worker_impl.h"
 #include "worker.pb.h"
@@ -77,8 +77,8 @@ class WorkerServer {
                            WorkerType& worker_type);
 
   void create_shared_memory_polling(
-      std::unique_ptr<ForwardSharedMemoryManager> input_shm_manager,
-      std::unique_ptr<ForwardSharedMemoryManager> output_shm_manager);
+      std::unique_ptr<ForwardSharedMemoryTransport> input_shm_manager,
+      std::unique_ptr<ForwardSharedMemoryTransport> output_shm_manager);
 
   void stop_spawn_worker();
 
@@ -89,8 +89,8 @@ class WorkerServer {
   void prepare_shm(
       const ParallelArgs& parallel_args,
       const runtime::Options& options,
-      std::unique_ptr<ForwardSharedMemoryManager>& input_shm_manager,
-      std::unique_ptr<ForwardSharedMemoryManager>& output_shm_manager);
+      std::unique_ptr<ForwardSharedMemoryTransport>& input_shm_manager,
+      std::unique_ptr<ForwardSharedMemoryTransport>& output_shm_manager);
 
  private:
   std::unique_ptr<std::thread> worker_thread_;

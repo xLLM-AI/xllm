@@ -28,18 +28,18 @@ limitations under the License.
 
 #include "core/framework/config/eplb_config.h"
 #include "core/framework/config/execution_config.h"
-#include "core/runtime/forward_shared_memory_manager.h"
+#include "core/runtime/forward_shared_memory_transport.h"
 
 namespace xllm {
 namespace {
 
 constexpr std::array kTokenOutputMethods = {
-    std::pair{&ForwardSharedMemoryManager::llm_output_write,
-              &ForwardSharedMemoryManager::llm_output_read},
-    std::pair{&ForwardSharedMemoryManager::vlm_output_write,
-              &ForwardSharedMemoryManager::vlm_output_read},
-    std::pair{&ForwardSharedMemoryManager::rec_output_write,
-              &ForwardSharedMemoryManager::rec_output_read}};
+    std::pair{&ForwardSharedMemoryTransport::llm_output_write,
+              &ForwardSharedMemoryTransport::llm_output_read},
+    std::pair{&ForwardSharedMemoryTransport::vlm_output_write,
+              &ForwardSharedMemoryTransport::vlm_output_read},
+    std::pair{&ForwardSharedMemoryTransport::rec_output_write,
+              &ForwardSharedMemoryTransport::rec_output_read}};
 
 template <typename Value>
 void append_wire_value(std::string& frame, const Value& value) {
@@ -72,13 +72,13 @@ class ForwardSharedMemoryOutputTest : public ::testing::Test {
     const std::string prefix =
         "forward_output_" + std::to_string(getpid()) + "_" +
         ::testing::UnitTest::GetInstance()->current_test_info()->name();
-    const std::string name = ForwardSharedMemoryManager::create_unique_name(
+    const std::string name = ForwardSharedMemoryTransport::create_unique_name(
         prefix, /*dp_group=*/0, ForwardType::RAW_OUTPUT, /*rank=*/0);
     bool is_creator = false;
-    writer_ = std::make_unique<ForwardSharedMemoryManager>(
+    writer_ = std::make_unique<ForwardSharedMemoryTransport>(
         name, kSegmentBytes, is_creator, ForwardType::RAW_OUTPUT);
     ASSERT_TRUE(is_creator);
-    reader_ = std::make_unique<ForwardSharedMemoryManager>(
+    reader_ = std::make_unique<ForwardSharedMemoryTransport>(
         name, kSegmentBytes, is_creator, ForwardType::RAW_OUTPUT);
     ASSERT_FALSE(is_creator);
   }
@@ -114,8 +114,8 @@ class ForwardSharedMemoryOutputTest : public ::testing::Test {
   static constexpr size_t kSegmentBytes = 4096;
   bool previous_contiguous_ = false;
   bool previous_eplb_ = false;
-  std::unique_ptr<ForwardSharedMemoryManager> writer_;
-  std::unique_ptr<ForwardSharedMemoryManager> reader_;
+  std::unique_ptr<ForwardSharedMemoryTransport> writer_;
+  std::unique_ptr<ForwardSharedMemoryTransport> reader_;
 };
 
 TEST_F(ForwardSharedMemoryOutputTest, LlmPreservesDsparkHostFeedback) {
@@ -136,6 +136,39 @@ TEST_F(ForwardSharedMemoryOutputTest, LlmPreservesDsparkHostFeedback) {
   EXPECT_FALSE(
       writer_->llm_output_write(source, /*speculative_token_stats=*/{}));
   EXPECT_EQ(published_version(), version);
+}
+
+TEST_F(ForwardSharedMemoryOutputTest,
+       TokenDomainsKeepDistinctDsparkFeedbackLayouts) {
+  ForwardOutput source;
+  source.sample_output.next_tokens = torch::tensor({7}, torch::kInt64);
+  source.dspark_feedback.confidence.assign(7, 0.5F);
+  source.dspark_feedback.rounds_since_full_width = {3};
+  ASSERT_TRUE(writer_->llm_output_write(source, {}));
+  RawForwardOutput decoded;
+  ASSERT_TRUE(reader_->llm_output_read(decoded));
+  EXPECT_EQ(decoded.dspark_feedback.confidence,
+            source.dspark_feedback.confidence);
+
+  // Only the LLM wire format carries and validates adaptive DSpark feedback.
+  source.dspark_feedback.confidence.pop_back();
+  const uint64_t version = published_version();
+  EXPECT_FALSE(writer_->llm_output_write(source, {}));
+  EXPECT_EQ(published_version(), version);
+  const std::array non_llm_methods = {
+      std::pair{&ForwardSharedMemoryTransport::vlm_output_write,
+                &ForwardSharedMemoryTransport::vlm_output_read},
+      std::pair{&ForwardSharedMemoryTransport::rec_output_write,
+                &ForwardSharedMemoryTransport::rec_output_read}};
+  for (const auto& [write, read] : non_llm_methods) {
+    ASSERT_TRUE((writer_.get()->*write)(source, {}));
+    ASSERT_TRUE((reader_.get()->*read)(decoded));
+    ASSERT_EQ(decoded.outputs.size(), 1);
+    ASSERT_EQ(decoded.outputs[0].tokens.size(), 1);
+    EXPECT_EQ(decoded.outputs[0].tokens[0].id, 7);
+    EXPECT_TRUE(decoded.dspark_feedback.confidence.empty());
+    EXPECT_TRUE(decoded.dspark_feedback.rounds_since_full_width.empty());
+  }
 }
 
 TEST_F(ForwardSharedMemoryOutputTest,

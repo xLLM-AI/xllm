@@ -17,11 +17,50 @@ limitations under the License.
 
 #include <glog/logging.h>
 
+#include <algorithm>
+#include <iterator>
+#include <string_view>
+#include <unordered_set>
 #include <utility>
 
-#include "core/runtime/json_object_output_rows.h"
-
 namespace xllm {
+namespace {
+
+bool has_request_overlap(const std::vector<std::string>& current_request_ids,
+                         const std::vector<std::string>& prior_request_ids) {
+  if (current_request_ids.empty() || prior_request_ids.empty()) {
+    return true;
+  }
+  const auto first_current = std::find_if(
+      current_request_ids.begin(),
+      current_request_ids.end(),
+      [](const std::string& request_id) { return !request_id.empty(); });
+  if (first_current == current_request_ids.end()) {
+    return false;
+  }
+  // Stable decode batches usually match before a lookup table is needed.
+  if (std::find(prior_request_ids.begin(),
+                prior_request_ids.end(),
+                *first_current) != prior_request_ids.end()) {
+    return true;
+  }
+
+  std::unordered_set<std::string_view> prior_requests;
+  prior_requests.reserve(prior_request_ids.size());
+  for (const std::string& request_id : prior_request_ids) {
+    if (!request_id.empty()) {
+      prior_requests.emplace(request_id);
+    }
+  }
+  return std::any_of(std::next(first_current),
+                     current_request_ids.end(),
+                     [&prior_requests](const std::string& request_id) {
+                       return !request_id.empty() &&
+                              prior_requests.contains(request_id);
+                     });
+}
+
+}  // namespace
 
 ScheduleOverlapState::ScheduleOverlapState(bool publish_to_host,
                                            bool retain_tokenless_output,
@@ -101,8 +140,7 @@ void ScheduleOverlapState::shutdown() {
 bool ScheduleOverlapState::can_reuse_tokens(
     const std::vector<std::string>& request_ids) const {
   std::lock_guard<std::mutex> lock(mutex_);
-  return has_tokens_ &&
-         detail::has_request_id_overlap(request_ids, request_ids_);
+  return has_tokens_ && has_request_overlap(request_ids, request_ids_);
 }
 
 void ScheduleOverlapState::retire_prior_inputs() {

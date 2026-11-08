@@ -21,6 +21,8 @@ cc_library(
     json_object_constraint_batch
   HDRS
     json_object_constraint_batch.h
+    json_object_output_binding.h
+    json_object_output_error.h
   SRCS
     json_object_constraint_batch.cpp
   DEPS

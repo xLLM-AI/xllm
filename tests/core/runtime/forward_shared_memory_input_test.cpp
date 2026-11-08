@@ -26,7 +26,7 @@ limitations under the License.
 #include "core/common/types.h"
 #include "core/framework/config/execution_config.h"
 #include "core/runtime/forward_params.h"
-#include "core/runtime/forward_shared_memory_manager.h"
+#include "core/runtime/forward_shared_memory_transport.h"
 #include "core/runtime/rec_forward_params.h"
 #include "core/runtime/vlm_forward_params.h"
 #include "worker.pb.h"
@@ -185,16 +185,16 @@ TYPED_TEST(ForwardSharedMemoryInputTest,
   std::replace(name.begin(), name.end(), '/', '_');
   bool is_creator = false;
   constexpr size_t kSegmentBytes = 1 << 20;
-  ForwardSharedMemoryManager writer(
+  ForwardSharedMemoryTransport writer(
       name, kSegmentBytes, is_creator, ForwardType::RAW_INPUT);
   ASSERT_TRUE(is_creator);
-  ForwardSharedMemoryManager reader(
+  ForwardSharedMemoryTransport reader(
       name, kSegmentBytes, is_creator, ForwardType::RAW_INPUT);
   ASSERT_FALSE(is_creator);
   const LayerOffsets expected = make_sparse_role_offsets();
   TypeParam source = make_input<TypeParam>(expected);
   ASSERT_TRUE(
-      ForwardSharedMemoryManager::can_write_input(source, kSegmentBytes));
+      ForwardSharedMemoryTransport::can_write_input(source, kSegmentBytes));
   ASSERT_TRUE(writer.input_write(source));
   source.transfer_kv_infos.clear();
 
@@ -219,6 +219,30 @@ TYPED_TEST(ForwardSharedMemoryInputTest,
   expect_role_offsets(decoded.transfer_kv_infos.front()
                           .dst_virtual_kv_cache_layer_global_offsets,
                       shorter);
+}
+
+TYPED_TEST(ForwardSharedMemoryInputTest,
+           PackedInputPreservesNoncontiguousCpuTensorValues) {
+  TypeParam source = make_input<TypeParam>({});
+  source.token_ids = torch::tensor({11, 0, 23, 0}, torch::kInt32)
+                         .slice(/*dim=*/0, /*start=*/0, /*end=*/4, /*step=*/2);
+  source.positions = torch::tensor({0, 0, 1, 0}, torch::kInt32)
+                         .slice(/*dim=*/0, /*start=*/0, /*end=*/4, /*step=*/2);
+  ASSERT_FALSE(source.token_ids.is_contiguous());
+  ASSERT_FALSE(source.positions.is_contiguous());
+  proto::PackedForwardInput packed;
+  ASSERT_TRUE(source.to_packed_proto(&packed));
+  source.token_ids.zero_();
+  source.positions.zero_();
+
+  TypeParam lazy;
+  ASSERT_TRUE(lazy.from_packed_proto(packed));
+  const TypeParam decoded =
+      lazy.to(torch::Device(torch::kCPU), torch::kFloat32);
+  EXPECT_TRUE(
+      torch::equal(decoded.token_ids, torch::tensor({11, 23}, torch::kInt32)));
+  EXPECT_TRUE(
+      torch::equal(decoded.positions, torch::tensor({0, 1}, torch::kInt32)));
 }
 
 TYPED_TEST(ForwardSharedMemoryInputTest,

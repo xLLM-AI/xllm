@@ -24,3 +24,14 @@ cc_test(
     :json_object_constraint_batch
     GTest::gtest_main
 )
+
+cc_test(
+  NAME
+    json_object_output_binding_test
+  CPU_ONLY
+  SRCS
+    json_object_output_binding_test.cpp
+  DEPS
+    :json_object_constraint_batch
+    GTest::gtest_main
+)

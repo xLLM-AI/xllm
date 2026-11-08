@@ -101,8 +101,8 @@ void WorkerServer::create_server(const runtime::Options& options,
   device.set_device();
   LOG(INFO) << "Create worker server with device: " << device.index();
 
-  std::unique_ptr<ForwardSharedMemoryManager> input_shm_manager = nullptr;
-  std::unique_ptr<ForwardSharedMemoryManager> output_shm_manager = nullptr;
+  std::unique_ptr<ForwardSharedMemoryTransport> input_shm_manager = nullptr;
+  std::unique_ptr<ForwardSharedMemoryTransport> output_shm_manager = nullptr;
   prepare_shm(
       startup_parallel_args, options, input_shm_manager, output_shm_manager);
 
@@ -404,8 +404,8 @@ void WorkerServer::create_spawn_server(int32_t local_rank,
 void WorkerServer::prepare_shm(
     const ParallelArgs& parallel_args,
     const runtime::Options& options,
-    std::unique_ptr<ForwardSharedMemoryManager>& input_shm_manager,
-    std::unique_ptr<ForwardSharedMemoryManager>& output_shm_manager) {
+    std::unique_ptr<ForwardSharedMemoryTransport>& input_shm_manager,
+    std::unique_ptr<ForwardSharedMemoryTransport>& output_shm_manager) {
   if (options.is_local() && options.enable_shm()) {
     bool is_creator;
     int32_t dp_local_tp_size =
@@ -414,15 +414,15 @@ void WorkerServer::prepare_shm(
 
     std::string name_prefix =
         "xllm_" + net::extract_port(options.master_node_addr().value());
-    string name = ForwardSharedMemoryManager::create_unique_name(
+    string name = ForwardSharedMemoryTransport::create_unique_name(
         name_prefix, dp_group, ForwardType::RAW_INPUT, parallel_args.rank());
-    input_shm_manager = std::make_unique<ForwardSharedMemoryManager>(
+    input_shm_manager = std::make_unique<ForwardSharedMemoryTransport>(
         name, options.input_shm_size(), is_creator, ForwardType::RAW_INPUT);
     LOG(INFO) << "Create input shared memory manager with name: " << name;
 
-    name = ForwardSharedMemoryManager::create_unique_name(
+    name = ForwardSharedMemoryTransport::create_unique_name(
         name_prefix, dp_group, ForwardType::RAW_OUTPUT, parallel_args.rank());
-    output_shm_manager = std::make_unique<ForwardSharedMemoryManager>(
+    output_shm_manager = std::make_unique<ForwardSharedMemoryTransport>(
         name, options.output_shm_size(), is_creator, ForwardType::RAW_OUTPUT);
     LOG(INFO) << "Create output shared memory manager with name: " << name;
   }

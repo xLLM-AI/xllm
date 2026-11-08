@@ -28,7 +28,7 @@ limitations under the License.
 #include "core/framework/config/scheduler_config.h"
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/attention_metadata_builder.h"
-#include "core/runtime/graph_input_snapshot.h"
+#include "core/runtime/graph_execution_input.h"
 #include "core/runtime/rec_graph_input.h"
 #include "core/util/utils.h"
 #include "kernels/dcu/attention_runner.h"
@@ -183,7 +183,7 @@ std::optional<Params> DcuGraphPersistentParam::update(
 
   std::optional<Params> params_for_capture;
   if (return_capture_params) {
-    params_for_capture.emplace(clone_graph_input(params));
+    params_for_capture.emplace(copy_graph_execution_input(params));
   }
 
   std::shared_ptr<layer::AttentionMetadata> attn_metadata =
@@ -560,7 +560,7 @@ Params DcuGraphPersistentParam::init_decode_params(
     uint32_t graph_max_seq_len) {
   update_decode_input_buffer(tokens, positions, params, padded_num_tokens);
 
-  Params decode_params = clone_graph_input(params);
+  Params decode_params = copy_graph_execution_input(params);
   decode_params.enable_graph = true;
   decode_params.attention.device.q_seq_lens = q_seq_lens(padded_num_tokens + 1);
   decode_params.attention.device.kv_seq_lens =

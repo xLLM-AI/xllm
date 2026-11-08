@@ -13,24 +13,27 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "core/runtime/json_object_decode_continuation.h"
+#include "core/runtime/json_object_decode_adapter.h"
 
 #include <glog/logging.h>
 #include <torch/torch.h>
 
-#include <algorithm>
+#include <string_view>
+#include <unordered_set>
+#include <utility>
 
 #include "core/framework/constrained/json_object_constraint_batch.h"
+#include "core/framework/constrained/json_object_output_binding.h"
 #include "core/platform/stream.h"
+#include "core/runtime/decode_input_placeholders.h"
 #include "core/runtime/forward_params.h"
-#include "core/runtime/json_object_output_rows.h"
 #include "core/runtime/vlm_forward_params.h"
 #include "core/util/tensor_helper.h"
 
 namespace xllm {
 
 template <typename Input>
-void JsonObjectDecodeContinuation::advance_constraints(
+void JsonObjectDecodeAdapter::advance_constraints(
     Input& input,
     const ForwardOutput& prior_output,
     const std::vector<std::string>& prior_sample_sequence_ids,
@@ -90,26 +93,27 @@ void JsonObjectDecodeContinuation::advance_constraints(
       &row_error))
       << row_error;
 
-  for (const JsonObjectOutputError& output_error : output_errors) {
+  input.json_object_errors.reserve(input.json_object_errors.size() +
+                                   output_errors.size());
+  for (JsonObjectOutputError& output_error : output_errors) {
     LOG(ERROR) << "JSON overlap row mismatch: sequence_id="
                << output_error.sample_sequence_id
                << ", error=" << output_error.message;
-    input.json_object_errors.emplace_back(output_error);
+    input.json_object_errors.emplace_back(std::move(output_error));
   }
 
+  bool needs_prior_tokens = false;
   for (size_t state_idx = 0; state_idx < input.json_object_states.size();
        ++state_idx) {
     if (output_rows[state_idx] == detail::kInvalidJsonObjectOutputRow) {
       input.json_object_states[state_idx] = JsonObjectGrammarState();
       output_rows[state_idx] = detail::kNoPriorJsonObjectOutputRow;
+      continue;
     }
+    needs_prior_tokens = needs_prior_tokens || output_rows[state_idx] >= 0;
   }
 
   torch::Tensor next_tokens;
-  const bool needs_prior_tokens =
-      std::any_of(output_rows.begin(), output_rows.end(), [](int32_t row) {
-        return row >= 0;
-      });
   if (needs_prior_tokens) {
     c10::StreamGuard stream_guard = compute_stream.set_stream_guard();
     next_tokens =
@@ -140,18 +144,26 @@ void JsonObjectDecodeContinuation::advance_constraints(
 }
 
 template <typename Input>
-void JsonObjectDecodeContinuation::sanitize_error_inputs(Input& input) {
+void JsonObjectDecodeAdapter::sanitize_error_inputs(Input& input) {
+  if (input.json_object_errors.empty() || !input.token_ids.defined()) {
+    return;
+  }
+  std::unordered_set<std::string_view> failed_sequence_ids;
+  failed_sequence_ids.reserve(input.json_object_errors.size());
+  for (const JsonObjectOutputError& output_error : input.json_object_errors) {
+    failed_sequence_ids.emplace(output_error.sample_sequence_id);
+  }
   std::string error;
-  CHECK(detail::sanitize_json_object_error_token_ids(
-      &input.token_ids,
-      input.sample_sequence_ids,
-      input.sample_prior_output_rows,
-      input.json_object_errors,
-      &error))
+  CHECK(
+      detail::reset_failed_sequence_placeholders(&input.token_ids,
+                                                 input.sample_sequence_ids,
+                                                 input.sample_prior_output_rows,
+                                                 failed_sequence_ids,
+                                                 &error))
       << error;
 }
 
-void JsonObjectDecodeContinuation::prepare(
+void JsonObjectDecodeAdapter::prepare(
     LlmForwardInput& input,
     const ForwardOutput& prior_output,
     const std::vector<std::string>& prior_sample_sequence_ids,
@@ -162,7 +174,7 @@ void JsonObjectDecodeContinuation::prepare(
   sanitize_error_inputs(input);
 }
 
-void JsonObjectDecodeContinuation::prepare(
+void JsonObjectDecodeAdapter::prepare(
     VlmForwardInput& input,
     const ForwardOutput& prior_output,
     const std::vector<std::string>& prior_sample_sequence_ids,
