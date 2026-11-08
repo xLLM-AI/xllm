@@ -56,9 +56,6 @@ limitations under the License.
 namespace xllm {
 
 class WorkerRendezvous;
-class TaskExecutionPipeline;
-struct LlmTaskCapacity;
-struct TaskModel;
 
 class WorkerImpl {
  public:
@@ -80,16 +77,6 @@ class WorkerImpl {
   // destructor's drain cannot protect members of already-destroyed subclasses.
   void begin_shutdown();
   virtual void drain_pending_execution();
-
-  // Call outside the state executor, after weights load and before KV
-  // budgeting.
-  virtual ::xllm::Status create_task_pipeline(
-      std::unique_ptr<TaskExecutionPipeline>& output);
-  virtual bool task_models_loaded() const { return status_ == Status::LOADED; }
-  virtual bool uses_worker_task_pipeline() const { return false; }
-  ::xllm::Status task_capacity(const runtime::Options& options,
-                               LlmTaskCapacity& output) const;
-  TaskModel task_model();
 
   // initialize model, cache manager. blocking call
   virtual bool init_model(ModelContext& context) = 0;
@@ -218,17 +205,6 @@ class WorkerImpl {
 
   virtual void process_group_test();
 
-  virtual void prepare_task_pipeline_input(const LlmForwardInput& input,
-                                           LlmForwardInput& prepared);
-  virtual std::optional<ForwardOutput> execute_task_pipeline(
-      const LlmForwardInput& prepared);
-  virtual void prepare_task_pipeline_input(const VlmForwardInput& input,
-                                           VlmForwardInput& prepared);
-  virtual std::optional<ForwardOutput> execute_task_pipeline(
-      VlmForwardInput& prepared);
-  // Records the ordered worker compute-stream boundary used to retire task
-  // pipeline inputs without blocking the state thread.
-  StreamEventPtr record_task_pipeline_completion() const;
   // Warmup waits for execution allocations; serving keeps stream overlap.
   void observe_execution_memory(bool is_warmup);
 
@@ -273,8 +249,8 @@ class WorkerImpl {
       const uint64_t batch_id,
       Slice<BlockTransferInfo>& block_transfer_info);
 
-  std::shared_ptr<HierarchyKVCacheTransfer> create_hierarchy_kv_cache_transfer(
-      std::optional<bool> enable_task_pipeline = std::nullopt);
+  std::shared_ptr<HierarchyKVCacheTransfer>
+  create_hierarchy_kv_cache_transfer();
 
   void bind_hierarchy_kv_cache_transfer(
       std::shared_ptr<HierarchyKVCacheTransfer> transfer,

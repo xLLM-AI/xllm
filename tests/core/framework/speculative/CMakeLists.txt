@@ -1,7 +1,5 @@
 include(cc_test)
 
-add_subdirectory(adaptive)
-
 cc_test(
   NAME
     draft_config_test

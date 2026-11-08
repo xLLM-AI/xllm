@@ -51,9 +51,6 @@ class WorkerClient {
 
   virtual folly::SemiFuture<bool> stop_profile_async();
 
-  virtual std::optional<std::string> spec_calibration(
-      const SpecCalibrationCommand& command);
-
   virtual void get_cache_info(uint64_t& cluster_id,
                               std::string& addr,
                               uint16_t& port);

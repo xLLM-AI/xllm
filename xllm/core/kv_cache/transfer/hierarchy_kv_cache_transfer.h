@@ -71,7 +71,6 @@ class HierarchyKVCacheTransfer final {
     PROPERTY(uint32_t, layers_wise_copy_batchs) = 1;
     PROPERTY(bool, enable_mla) = false;
     PROPERTY(bool, enable_kvcache_store) = false;
-    PROPERTY(bool, enable_task_pipeline) = false;
     PROPERTY(std::string, store_protocol) = "rdma";
     PROPERTY(std::string, store_rdma_devices) = "";
     PROPERTY(std::string, store_master_server_address) = "";

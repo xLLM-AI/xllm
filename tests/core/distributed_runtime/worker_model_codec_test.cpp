@@ -396,24 +396,5 @@ TEST(WorkerModelDitCodecTest, InvalidAudioTensorDecodePreservesDestination) {
                            original_audio));
 }
 
-TEST(WorkerModelCodecTest, LlmDsparkFeedbackRoundTripRejectsMalformedRows) {
-  ForwardOutput source;
-  source.sample_output.next_tokens = torch::tensor({7, 9}, torch::kInt64);
-  source.dspark_feedback.confidence.assign(10, 0.4F);
-  source.dspark_feedback.rounds_since_full_width = {2, 3};
-  proto::LLMForwardResponse response;
-  ASSERT_TRUE(encode_llm_output(source, {}, &response));
-  RawForwardOutput decoded;
-  ASSERT_TRUE(decode_llm_output(response, decoded));
-  EXPECT_EQ(decoded.dspark_feedback.confidence,
-            source.dspark_feedback.confidence);
-  EXPECT_EQ(decoded.dspark_feedback.rounds_since_full_width,
-            source.dspark_feedback.rounds_since_full_width);
-  response.add_dspark_confidence(0.5F);
-  decoded = original_output();
-  EXPECT_FALSE(decode_llm_output(response, decoded));
-  expect_original_output(decoded);
-}
-
 }  // namespace
 }  // namespace xllm

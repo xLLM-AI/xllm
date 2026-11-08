@@ -107,16 +107,6 @@ ContinuousSchedulerBase::ContinuousSchedulerBase(
   profile_manager_options.dp_size(options.dp_size())
       .decode_graph_warmup_config(options.decode_graph_warmup_config())
       .enable_schedule_overlap(options.enable_schedule_overlap())
-      .enable_task_pipeline(options.enable_task_pipeline())
-      .adaptive_target_verify_calibration(
-          options.adaptive_target_verify_calibration())
-      .enable_adaptive_target_verify(options.enable_adaptive_target_verify())
-      .enable_adaptive_draft_step(options.enable_adaptive_draft_step())
-      .adaptive_target_verify_cost_table(
-          options.adaptive_target_verify_cost_table())
-      .adaptive_target_verify_cost_table_output(
-          options.adaptive_target_verify_cost_table_output())
-      .spec_calibration_compatibility(options.spec_calibration_compatibility())
       .enable_profile_step_time(options.enable_profile_step_time())
       .profile_max_prompt_length(options.profile_max_prompt_length())
       .enable_profile_kv_blocks(options.enable_profile_kv_blocks())
@@ -545,33 +535,13 @@ void ContinuousSchedulerBase::step_with_schedule_overlap(
     return;
   }
 
-  bool needs_prefill_state = false;
-  if (options_.enable_task_pipeline() &&
-      options_.num_speculative_tokens() > 0) {
-    // Speculative pipelines use accepted device state during pure
-    // Decode. Prefill, including mixed DP phases, requires concrete Host tokens
-    // and lengths before preparing the target/draft inputs. Retire the previous
-    // result at this transition; defer response processing until after Step so
-    // the already scheduled batch keeps its Sequence and KV ownership.
-    for (auto& peer : batch) {
-      for (uint64_t row = 0; row < peer.size(); ++row) {
-        needs_prefill_state =
-            needs_prefill_state || peer[row]->is_prefill_stage();
-      }
-    }
-  }
-  const bool consumed_before_step =
-      pending_step_.has_value() && needs_prefill_state;
-  if (consumed_before_step) {
-    result_callback_(pending_step_->batches);
-  }
   if (!cur_batch_all_empty) {
     step_callback_(batch);
   }
 
   // producer-consumer mode, make sure only one step is scheduled in advance
   if (pending_step_.has_value()) {
-    complete_pending_step(consumed_before_step);
+    complete_pending_step();
   }
   if (cur_batch_all_empty) {
     // An empty current batch drains the previous step without submitting work.
@@ -587,11 +557,9 @@ void ContinuousSchedulerBase::step_with_schedule_overlap(
   pending_step_->requests = running_requests_;
 }
 
-void ContinuousSchedulerBase::complete_pending_step(bool outputs_collected) {
+void ContinuousSchedulerBase::complete_pending_step() {
   CHECK(pending_step_.has_value());
-  if (!outputs_collected) {
-    result_callback_(pending_step_->batches);
-  }
+  result_callback_(pending_step_->batches);
   process_batch_output(pending_step_->requests);
 }
 

@@ -24,7 +24,6 @@ limitations under the License.
 
 #include "common/global_flags.h"
 #include "core/distributed_runtime/worker_model_codec.h"
-#include "core/framework/speculative/adaptive/spec_startup_calibration.h"
 #include "core/kv_cache/transfer/kv_transport_codec.h"
 #include "runtime/rec_forward_params.h"
 #include "runtime/vlm_forward_params.h"
@@ -96,23 +95,6 @@ bool CommChannel::allocate_kv_cache(const KVCacheShape& kv_cache_shape) {
   }
 
   return true;
-}
-
-std::optional<std::string> CommChannel::spec_calibration(
-    const SpecCalibrationCommand& command) {
-  proto::DSparkCalibrationRequest request;
-  request.set_action(
-      static_cast<proto::DSparkCalibrationRequest::Action>(command.action));
-  request.set_payload(command.payload);
-  proto::DSparkCalibrationResponse response;
-  brpc::Controller controller;
-  stub_->DSparkCalibration(&controller, &request, &response, nullptr);
-  if (controller.Failed() || !response.ok()) {
-    LOG(ERROR) << "DSpark startup calibration control failed: "
-               << controller.ErrorText();
-    return std::nullopt;
-  }
-  return response.payload();
 }
 
 bool CommChannel::get_cache_info(uint64_t& cluster_id,

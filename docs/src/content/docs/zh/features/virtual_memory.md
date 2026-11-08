@@ -28,8 +28,7 @@ xLLM 可以分别为 KV Cache 和模型权重启用虚拟内存管理（VMM）�
 ```bash
 --enable_vmm_kvcache=true \
 --enable_prefix_cache=true \
---host_blocks_factor=2 \
---enable_task_pipeline=false
+--host_blocks_factor=2
 ```
 
 Host 容量按配置的设备 KV 张量容量乘以 `host_blocks_factor` 预分配，弹性模式也遵循这一规则。请结合可用 Host 内存配置 `max_cache_size` 和该系数。本 LLM 路径支持 `kv_cache_dtype=auto` 的 flat KV 和 MLA+INDEX 张量布局；VLM、grouped cache 和混合线性注意力的 conv/SSM cache 仍不支持 VMM HostKV offload。
@@ -38,8 +37,6 @@ Host 容量按配置的设备 KV 张量容量乘以 `host_blocks_factor` 预分�
 
 部署在相同设备上的 MTP target 和 draft 模型可以同时开启 `enable_vmm_kvcache=true`。调度器会一起映射和释放两者的缓存，也支持 target 与 draft 的 KV 张量宽度不同。对于混合注意力模型，只有全注意力层的 KV 张量使用 VMM；卷积与循环状态保持常驻，提前从物理 KV 页池的预算中预留。
 
-请设置 `enable_task_pipeline=false`；当前任务执行流水线尚不支持虚拟 KV Cache。
-
 在已有 MTP 启动命令中加入以下参数：
 
 ```bash
@@ -47,8 +44,7 @@ Host 容量按配置的设备 KV 张量容量乘以 `host_blocks_factor` 预分�
 --speculative_algorithm=MTP \
 --num_speculative_tokens=3 \
 --enable_vmm_kvcache=true \
---enable_vmm_weights=false \
---enable_task_pipeline=false
+--enable_vmm_weights=false
 ```
 
 混合线性状态缓存和外部 draft 暂不支持同时使用权重 VMM。虚拟 KV Cache 暂不支持内嵌 Eagle3 draft，以及投机解码结合 PD 分离。KV VMM 仍不支持量化 KV Cache。

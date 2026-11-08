@@ -69,8 +69,7 @@ class GraphInputView final {
         spec_verify_source_addresses_stable(
             spec.spec_verify_source_addresses_stable),
         spec_verify_static_graph_tasks_prepared(
-            spec.spec_verify_static_graph_tasks_prepared),
-        dspark_adaptive(spec.dspark_adaptive)
+            spec.spec_verify_static_graph_tasks_prepared)
 #if defined(USE_DCU)
         ,
         use_dense_flash_attention(common.use_dense_flash_attention)
@@ -95,7 +94,6 @@ class GraphInputView final {
   std::vector<torch::Tensor>& spec_verify_draft_token_sources;
   bool& spec_verify_source_addresses_stable;
   bool& spec_verify_static_graph_tasks_prepared;
-  DSparkAdaptiveGraphInput& dspark_adaptive;
 
 #if defined(USE_DCU)
   bool& use_dense_flash_attention;
@@ -253,7 +251,6 @@ class ModelParamsView final {
   MtpTopkStatePtr& mtp_topk_state;
   std::vector<int64_t>& num_accepted_tokens_host;
   std::shared_ptr<layer::AttentionMetadata>& attn_metadata;
-  std::shared_ptr<PythonAttentionMetadata>& python_attention_metadata;
   bool& enable_graph;
 
  private:
@@ -278,7 +275,6 @@ class ModelParamsView final {
         mtp_topk_state(spec.mtp_topk_state),
         num_accepted_tokens_host(spec.num_accepted_tokens_host),
         attn_metadata(owner.attn_metadata),
-        python_attention_metadata(owner.python_attention_metadata),
         enable_graph(owner.enable_graph) {}
 };
 template <typename NativeParams>

@@ -26,16 +26,6 @@ DEFINE_string(extension_impl,
               "components, including models and executors. An empty value "
               "preserves the normal implementation selection.");
 
-DEFINE_bool(enable_task_pipeline,
-            false,
-            "Enable the task execution pipeline. Uses two slots with "
-            "scheduler overlap and one slot without it. "
-            "Python eager/ACL Graph models with prepared attention metadata; "
-            "Supports DP, or GLM DSA DCP with DP=1 for ordinary/fixed MTP "
-            "decoding. Qwen3.5-family hybrid DFlash2/DSpark uses worker-owned "
-            "fixed-width ACL graphs with DP=1. CP/layerwise split are "
-            "unsupported.");
-
 DEFINE_bool(
     enable_graph,
     false,
@@ -43,14 +33,6 @@ DEFINE_bool(
     "the engine uses graph mode (CUDA Graph for GPU, ACL Graph for NPU, "
     "MLU Graph, or DCU Graph) to optimize decode performance by reducing "
     "kernel launch overhead and device idle time.");
-
-DEFINE_bool(
-    enable_unified_mtp_graph,
-    false,
-    "Whether to route supported NPU speculative decode requests through a "
-    "unified Python graph. Supports GLM MTP and task-pipeline "
-    "DFlash/DFlash2/DSpark. "
-    "When disabled, ordinary model graph execution remains unchanged.");
 
 DEFINE_bool(disable_graph_warmup,
             false,
@@ -151,9 +133,7 @@ namespace xllm {
 
 void ExecutionConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(extension_impl);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_task_pipeline);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_graph);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_unified_mtp_graph);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(disable_graph_warmup);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(block_draft_graph_warmup_max_kv_len);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_graph_double_buffer);
@@ -175,9 +155,7 @@ void ExecutionConfig::from_flags() {
 
 void ExecutionConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(extension_impl);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_task_pipeline);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_graph);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_unified_mtp_graph);
   XLLM_CONFIG_ASSIGN_FROM_JSON(disable_graph_warmup);
   XLLM_CONFIG_ASSIGN_FROM_JSON(block_draft_graph_warmup_max_kv_len);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_graph_double_buffer);
@@ -203,11 +181,7 @@ void ExecutionConfig::append_config_json(
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, extension_impl);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, enable_task_pipeline);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_graph);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, enable_unified_mtp_graph);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, disable_graph_warmup);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
@@ -268,28 +242,9 @@ DecodeGraphWarmupConfig ExecutionConfig::decode_graph_warmup_config(
       .enable_graph_mode_decode_no_padding = enable_no_padding,
       .max_graph_batch_size =
           Platform::is_npu() ? acl_graph_decode_batch_size_limit() : 0};
-  // Unified capture owns a combined graph key rather than independent draft
-  // graphs. Keep exact/no-padding admission on its existing schedule as well.
-  if (num_speculative_tokens <= 0 || enable_unified_mtp_graph() ||
-      enable_no_padding) {
-    return config;
-  }
-  if (SpeculativeConfig::is_mtp_algorithm(speculative_algorithm)) {
-    if (enable_task_pipeline()) {
-      // The first invocation also repairs the previous accepted boundary.
-      config.draft_shapes.emplace_back(DraftGraphWarmupShape{2, false});
-    }
-    if (!enable_task_pipeline() || num_speculative_tokens > 1) {
-      config.draft_shapes.emplace_back(DraftGraphWarmupShape{1, false});
-    }
-  } else if (enable_task_pipeline() &&
-             SpeculativeConfig::is_dspark_algorithm(speculative_algorithm)) {
-    config.draft_shapes.emplace_back(
-        DraftGraphWarmupShape{num_speculative_tokens, true});
-  } else if (enable_task_pipeline() &&
-             SpeculativeConfig::is_dflash2_algorithm(speculative_algorithm)) {
-    config.draft_shapes.emplace_back(
-        DraftGraphWarmupShape{num_speculative_tokens + 1, true});
+  if (num_speculative_tokens > 0 && !enable_no_padding &&
+      SpeculativeConfig::is_mtp_algorithm(speculative_algorithm)) {
+    config.draft_shapes.emplace_back(DraftGraphWarmupShape{1, false});
   }
   return config;
 }

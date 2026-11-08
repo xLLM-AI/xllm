@@ -85,31 +85,9 @@ LLMMaster::LLMMaster(const Options& options)
           options_.num_speculative_tokens(),
           options_.speculative_algorithm());
   CHECK(!speculative_error.has_value()) << speculative_error.value();
-  CHECK(
-      !options_.enable_adaptive_draft_step() ||
-      (options_.enable_task_pipeline() && options_.enable_schedule_overlap() &&
-       options_.enable_graph() && !options_.enable_disagg_pd() &&
-       options_.dp_size() == 1 && options_.cp_size() == 1 &&
-       SpeculativeConfig::is_mtp_algorithm(options_.speculative_algorithm()) &&
-       model_type == "glm_moe_dsa"))
-      << "Adaptive MTP requires Python GLM DSA, ordinary graphs, async task "
-         "pipeline and DP=CP=1.";
   validate_layerwise_split_size_startup_config(
       options_, model_type, options_.nnodes());
 
-  if (options_.enable_task_pipeline()) {
-    const bool supported_speculation =
-        SpeculativeConfig::supports_task_pipeline(
-            options_.speculative_algorithm());
-    CHECK((engine_type == EngineType::LLM ||
-           (engine_type == EngineType::SSM && supported_speculation)) &&
-          options_.task_type() == "generate" &&
-          !options_.enable_offline_inference())
-        << "Task pipeline requires online LLM, MTP, DFlash, DFlash2 or DSpark "
-           "generation.";
-    CHECK(master_status_ == MasterStatus::WAKEUP)
-        << "Task pipeline must start with loaded weights.";
-  }
   if (options_.host_blocks_factor() > 1.0) {
     const bool supports_host_offload =
         engine_type == EngineType::LLM ||
@@ -167,7 +145,6 @@ LLMMaster::LLMMaster(const Options& options)
       .transfer_listen_port(options_.transfer_listen_port())
       .enable_service_routing(options_.enable_service_routing())
       .server_idx(options_.server_idx())
-      .enable_task_pipeline(options_.enable_task_pipeline())
       .enable_graph(options_.enable_graph())
       .enable_graph_mode_decode_no_padding(
           options_.enable_graph_mode_decode_no_padding())
@@ -214,16 +191,7 @@ LLMMaster::LLMMaster(const Options& options)
         .speculative_suffix_max_cached_requests(
             options_.speculative_suffix_max_cached_requests())
         .speculative_suffix_use_tree_spec(
-            options_.speculative_suffix_use_tree_spec())
-        .enable_adaptive_target_verify(options_.enable_adaptive_target_verify())
-        .enable_adaptive_draft_step(options_.enable_adaptive_draft_step())
-        .adaptive_draft_step_config(options_.adaptive_draft_step_config())
-        .adaptive_target_verify_min_gain(
-            options_.adaptive_target_verify_min_gain())
-        .adaptive_target_verify_cost_table(
-            options_.adaptive_target_verify_cost_table())
-        .adaptive_target_verify_calibration(
-            options_.adaptive_target_verify_calibration());
+            options_.speculative_suffix_use_tree_spec());
     if (use_suffix_spec) {
       suffix_engine_ =
           std::make_unique<SuffixSpeculativeEngine>(engine_options);
@@ -288,7 +256,6 @@ LLMMaster::LLMMaster(const Options& options)
   SchedulerOptions scheduler_options;
   scheduler_options.max_tokens_per_batch(options_.max_tokens_per_batch())
       .max_seqs_per_batch(options_.max_seqs_per_batch())
-      .enable_task_pipeline(options_.enable_task_pipeline())
       .request_queue_size(options_.request_queue_size())
       .max_tokens_per_chunk_for_prefill(
           options_.max_tokens_per_chunk_for_prefill())
@@ -332,29 +299,6 @@ LLMMaster::LLMMaster(const Options& options)
   }
   auto create_scheduler =
       [this, &scheduler_options, &response_options](auto* engine) {
-        scheduler_options
-            .enable_adaptive_draft_step(options_.enable_adaptive_draft_step())
-            .adaptive_target_verify_calibration(
-                options_.adaptive_target_verify_calibration())
-            .enable_adaptive_target_verify(
-                options_.enable_task_pipeline() &&
-                options_.enable_adaptive_target_verify() &&
-                SpeculativeConfig::supports_adaptive_target_verify(
-                    options_.speculative_algorithm()))
-            .adaptive_target_verify_cost_table(
-                options_.adaptive_target_verify_cost_table())
-            .adaptive_target_verify_cost_table_output(
-                options_.adaptive_target_verify_cost_table_output());
-        CHECK(options_.adaptive_target_verify_cost_table_output().empty() ||
-              scheduler_options.enable_adaptive_target_verify())
-            << "DSpark cost-table output requires an adaptive DSpark task "
-               "pipeline.";
-        if (scheduler_options.enable_adaptive_target_verify() ||
-            !options_.adaptive_target_verify_calibration().empty() ||
-            !options_.adaptive_target_verify_cost_table().empty()) {
-          scheduler_options.spec_calibration_compatibility(
-              spec_calibration_compatibility(engine->options()));
-        }
         scheduler_ = create_continuous_scheduler(
             engine,
             scheduler_options,

@@ -68,11 +68,6 @@ class WorkerService : public proto::DistributeWorker {
                        proto::Status* response,
                        ::google::protobuf::Closure* done) override;
 
-  void DSparkCalibration(::google::protobuf::RpcController* controller,
-                         const proto::DSparkCalibrationRequest* request,
-                         proto::DSparkCalibrationResponse* response,
-                         ::google::protobuf::Closure* done) override;
-
   void AllocateKVCacheWithTransfer(
       ::google::protobuf::RpcController* controller,
       const proto::AllocateKVCacheRequest* req,
@@ -198,7 +193,6 @@ class WorkerService : public proto::DistributeWorker {
 
   void collect_llm_output(const ForwardOutput& output,
                           ForwardOutput& cpu_output,
-                          bool cpu_ready_result,
                           std::vector<SpeculativeTokenStats>& stats);
   void collect_vlm_output(const ForwardOutput& output,
                           ForwardOutput& cpu_output,

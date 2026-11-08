@@ -24,9 +24,7 @@ limitations under the License.
 #include <vector>
 
 #include "core/framework/model_loader/model_loader.h"
-#include "framework/config/speculative_config.h"
 #include "framework/state_dict/state_dict.h"
-#include "models/llm/dspark_confidence_head.h"
 #include "models/llm/dspark_markov_head.h"
 #include "models/llm/npu/qwen3_dflash.h"
 #include "models/model_registry.h"
@@ -50,45 +48,12 @@ class DSparkQwen3ForCausalLMImpl final
   explicit DSparkQwen3ForCausalLMImpl(const ModelContext& context)
       : LlmForCausalLMImplBase<DSparkQwen3Model>(context),
         markov_head_(context.get_tensor_options(),
-                     context.get_model_args().markov_rank()) {
-    const ModelArgs& model_args = context.get_model_args();
-    // Only stand up the ConfidenceHead when adaptive speculative decode is on:
-    // it is consumed solely by the adaptive pruning controller, so under static
-    // decoding its weights would occupy device memory and never be read.
-    if (model_args.enable_confidence_head() &&
-        SpeculativeConfig::get_instance().enable_adaptive_target_verify()) {
-      confidence_head_.initialize(context.get_tensor_options(),
-                                  model_args.hidden_size(),
-                                  model_args.markov_rank(),
-                                  model_args.confidence_head_with_markov());
-    }
-  }
+                     context.get_model_args().markov_rank()) {}
 
   torch::Tensor dspark_markov_bias(
       const torch::Tensor& previous_token_ids) const {
     return markov_head_.bias(previous_token_ids);
   }
-
-  // Compute per-request acceptance probability using the trained ConfidenceHead
-  // over the whole draft block.
-  //   hidden_all:  [num_reqs, num_spec, hidden_size]
-  //   prev_matrix: [num_reqs, num_spec] int64 — column k is step k's "prev"
-  //                token (col 0 = anchor, col k = draft token sampled at k-1).
-  // Returns [num_reqs, num_spec] fp32 in [0, 1]. Defined only when
-  // enable_confidence_head.
-  torch::Tensor dspark_confidence_probs(
-      const torch::Tensor& hidden_all,
-      const torch::Tensor& prev_matrix) const {
-    CHECK(confidence_head_.defined())
-        << "DSpark ConfidenceHead is not initialized (enable_confidence_head?)";
-    torch::Tensor markov_embed_all;
-    if (prev_matrix.defined()) {
-      markov_embed_all = markov_head_.markov_embed(prev_matrix);
-    }
-    return confidence_head_.forward_batched(hidden_all, markov_embed_all);
-  }
-
-  bool has_dspark_confidence_head() const { return confidence_head_.defined(); }
 
   void load_model(std::unique_ptr<ModelLoader> loader,
                   std::string prefix = "model.") override {
@@ -103,14 +68,10 @@ class DSparkQwen3ForCausalLMImpl final
       // so strip the "markov_head." prefix the checkpoint stores them under.
       markov_head_.load_state_dict(
           sub_dict.get_dict_with_prefix("markov_head."));
-      confidence_head_.load_state_dict(sub_dict);
     }
     model_->verify_loaded_weights("");
     model_->merge_loaded_weights();
     markov_head_.verify_loaded_weights("");
-    if (confidence_head_.defined()) {
-      confidence_head_.verify_loaded_weights("");
-    }
   }
 
   ModelOutput write_context_kv(const torch::Tensor& target_hidden,
@@ -124,7 +85,6 @@ class DSparkQwen3ForCausalLMImpl final
 
  private:
   DSparkMarkovHead markov_head_;
-  DSparkConfidenceHead confidence_head_;
 };
 TORCH_MODULE(DSparkQwen3ForCausalLM);
 

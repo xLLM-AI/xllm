@@ -26,8 +26,6 @@ limitations under the License.
 
 namespace xllm {
 
-class PyExecutorImpl;
-
 class Executor final {
  public:
   Executor(CausalLM* model,
@@ -36,25 +34,6 @@ class Executor final {
            const runtime::Options& options);
 
   virtual ~Executor() = default;
-
-  bool supports_prepared_attention_metadata() const;
-  bool supports_adaptive_unified_graph() const;
-  void warmup_adaptive_unified_graph(Executor& draft_executor,
-                                     const AdaptiveDSparkGraphTask& task,
-                                     ProcessGroup* sampling_group);
-  torch::Tensor run_adaptive_unified_graph(Executor& draft_executor,
-                                           const AdaptiveDSparkGraphTask& task,
-                                           ProcessGroup* sampling_group);
-  // Called on Prepare after binding Slot-owned tensor and native metadata.
-  // No model computation; the supported backend must not mutate active state.
-  void prepare_attention_metadata(std::vector<KVCache>& kv_caches,
-                                  ModelParamsView& params);
-
-  // Regular warmup Tasks capture final Slot views before serving uses them.
-  void warmup_prepared_graph(const torch::Tensor& tokens,
-                             const torch::Tensor& positions,
-                             std::vector<KVCache>& kv_caches,
-                             const ModelParamsView& params);
 
   ModelOutput forward(const torch::Tensor& tokens,
                       const torch::Tensor& positions,
@@ -68,12 +47,6 @@ class Executor final {
 
   bool prepare_static_mtp_graph_tasks(const SpecVerifyGraphTaskSignal& signal,
                                       const Stream& signal_stream);
-
-  // Returns the Python executor when this instance is backed by
-  // ``model_impl=python``. Native executors return nullptr. The accessor is
-  // used by the MTP pair bridge to share one Python composite graph between
-  // target and draft workers.
-  PyExecutorImpl* python_impl();
 
  private:
   std::unique_ptr<ExecutorImpl> impl_;

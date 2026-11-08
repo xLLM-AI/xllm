@@ -68,12 +68,6 @@ class MTPWorkerImpl : public DraftModelSpecWorkerImpl<TargetInput> {
                   int32_t random_seed,
                   MasterStatus master_status) override;
 
-  ::xllm::Status create_task_pipeline(
-      std::unique_ptr<TaskExecutionPipeline>& output) override;
-  bool uses_worker_task_pipeline() const override {
-    return std::is_same_v<TargetInput, VlmForwardInput>;
-  }
-
   std::tuple<int64_t, int64_t> estimate_kv_cache_capacity() override;
 
  protected:

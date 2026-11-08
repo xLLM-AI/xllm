@@ -92,15 +92,6 @@ struct Options {
 
   PROPERTY(bool, speculative_suffix_use_tree_spec) = false;
 
-  PROPERTY(bool, enable_adaptive_target_verify) = false;
-  PROPERTY(bool, enable_adaptive_draft_step) = false;
-  PROPERTY(std::string, adaptive_draft_step_config);
-
-  PROPERTY(double, adaptive_target_verify_min_gain) = 0.0;
-
-  PROPERTY(std::string, adaptive_target_verify_cost_table);
-  PROPERTY(std::string, adaptive_target_verify_calibration);
-
   // enable speculative decode
   PROPERTY(bool, enable_speculative_decode) = false;
 
@@ -263,9 +254,6 @@ struct Options {
   // Index ID for internal server ID, which must be set different values
   // if the model supports multiple version or there are multiple models.
   PROPERTY(int64_t, server_idx) = 0;
-
-  // Enable the task pipeline; scheduler overlap determines the slot count.
-  PROPERTY(bool, enable_task_pipeline) = false;
 
   // enable CUDA graph/ACL graph for performance optimization
   PROPERTY(bool, enable_graph) = false;

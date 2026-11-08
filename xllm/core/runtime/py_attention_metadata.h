@@ -33,18 +33,6 @@ class ModelParamsView;
 
 void register_attention_metadata_views(pybind11::module_& module);
 
-// Owns only the Python attention metadata object. Destruction releases Python
-// references with the GIL; model inputs and execution remain in the Slot.
-class PythonAttentionMetadata final {
- public:
-  explicit PythonAttentionMetadata(pybind11::object value);
-  // Caller holds the GIL, as for all Python view accessors in this file.
-  pybind11::object value() const;
-
- private:
-  std::shared_ptr<void> object_holder_;
-};
-
 class PyExpandedDecodeMetadataView final {
  public:
   explicit PyExpandedDecodeMetadataView(

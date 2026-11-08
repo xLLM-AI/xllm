@@ -85,14 +85,6 @@ DECLARE_string(speculative_algorithm);
 DECLARE_bool(enable_probabilistic_draft);
 
 DECLARE_bool(enable_mtp_draft_body_tp1);
-DECLARE_bool(enable_adaptive_target_verify);
-DECLARE_bool(enable_adaptive_draft_step);
-DECLARE_string(adaptive_draft_step_config);
-
-DECLARE_double(adaptive_target_verify_min_gain);
-DECLARE_string(adaptive_target_verify_cost_table);
-DECLARE_string(adaptive_target_verify_calibration);
-DECLARE_string(adaptive_target_verify_cost_table_output);
 
 DECLARE_int32(speculative_suffix_cache_max_depth);
 
@@ -161,8 +153,6 @@ DECLARE_string(rank_tablefile);
 constexpr int32_t kGraphExecutorLogVerboseLevel = 50;
 
 DECLARE_bool(enable_graph);
-
-DECLARE_bool(enable_unified_mtp_graph);
 
 DECLARE_bool(disable_graph_warmup);
 

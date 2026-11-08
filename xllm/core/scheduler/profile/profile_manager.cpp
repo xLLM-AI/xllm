@@ -37,7 +37,6 @@ limitations under the License.
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
-#include "core/framework/config/speculative_config.h"
 #include "core/framework/model/rec_model_utils.h"
 #include "core/framework/request/request_state.h"
 #include "core/runtime/acl_graph_bucket_policy.h"
@@ -79,19 +78,6 @@ int32_t warmup_decode_seq_len(bool fia_enabled, int32_t max_context_len) {
 
 namespace {
 
-void configure_profile_sampling(RequestSamplingParam& sampling,
-                                const SpeculativeConfig& speculative_config,
-                                bool enable_task_pipeline) {
-  if (enable_task_pipeline &&
-      speculative_config.enable_adaptive_target_verify() &&
-      SpeculativeConfig::supports_adaptive_target_verify(
-          speculative_config.speculative_algorithm())) {
-    // Startup costs use a fixed greedy sampling policy. Serving may sample
-    // random target tokens, whose extra sampler cost is not calibrated here.
-    sampling.temperature = 0.0F;
-  }
-}
-
 int32_t decode_warmup_token_bucket(const DecodeGraphWarmupPlan& plan,
                                    int32_t global_batch_size,
                                    int32_t dp_size) {
@@ -114,10 +100,7 @@ DecodeGraphWarmupPlan build_profile_decode_warmup_plan(
   DecodeGraphWarmupPlan plan = build_decode_graph_warmup_plan(
       config, max_global_batch_size, options.dp_size());
   const auto& model = ModelConfig::get_instance();
-  const bool requires_exact_shapes =
-      Platform::is_npu() ||
-      (options.enable_task_pipeline() && model.backend() == "vlm");
-  if (!requires_exact_shapes || options.dp_size() != 1 ||
+  if (!Platform::is_npu() || options.dp_size() != 1 ||
       !ModelConfig::is_python_model_impl(model.model_impl()) ||
       !config.enable_graph_mode_decode_no_padding) {
     return plan;
@@ -213,14 +196,6 @@ ProfileManager::ProfileManager(
     }
   }
 #endif
-  if (options_.enable_adaptive_target_verify() ||
-      !options_.adaptive_target_verify_calibration().empty() ||
-      !options_.adaptive_target_verify_cost_table().empty()) {
-    calibrate_spec_startup();
-  }
-  if (options_.enable_adaptive_draft_step()) {
-    calibrate_draft_step_startup();
-  }
 }
 
 // --------------------- for test only ---------------------------
@@ -750,9 +725,6 @@ std::shared_ptr<Request> ProfileManager::generate_single_request(
   });
 
   RequestState req_state(token_ids);
-  configure_profile_sampling(req_state.sampling_param,
-                             SpeculativeConfig::get_instance(),
-                             options_.enable_task_pipeline());
   req_state.enable_schedule_overlap = options_.enable_schedule_overlap();
   req_state.is_graph_warmup = is_graph_warmup;
   auto request = std::make_shared<Request>(
@@ -821,9 +793,6 @@ std::shared_ptr<Request> ProfileManager::try_generate_single_decode_request(
   });
 
   RequestState req_state(prompt_token_ids);
-  configure_profile_sampling(req_state.sampling_param,
-                             SpeculativeConfig::get_instance(),
-                             options_.enable_task_pipeline());
   req_state.enable_schedule_overlap = options_.enable_schedule_overlap();
   req_state.is_graph_warmup = is_graph_warmup;
   const int32_t num_speculative_tokens =
@@ -1221,11 +1190,10 @@ void ProfileManager::warmup_decode_for_graph() {
                                       .acl_graph_decode_batch_size_limit())),
             static_cast<uint32_t>(std::max<int32_t>(1, options_.dp_size()))));
   }
-  const int32_t decode_seq_len =
-      adaptive_calibration_warmup_seq_len(warmup_decode_seq_len(
-          Platform::is_npu() &&
-              ::xllm::ExecutionConfig::get_instance().enable_fia_decode(),
-          max_context_len));
+  const int32_t decode_seq_len = warmup_decode_seq_len(
+      Platform::is_npu() &&
+          ::xllm::ExecutionConfig::get_instance().enable_fia_decode(),
+      max_context_len);
 
   const int32_t allocatable_sequences =
       measure_graph_decode_capacity(max_decode_batch_size, decode_seq_len);

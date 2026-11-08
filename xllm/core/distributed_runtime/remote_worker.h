@@ -47,9 +47,6 @@ class RemoteWorker : public WorkerClient {
 
   bool wait_for_server_ready(const std::string& server_address);
 
-  std::optional<std::string> spec_calibration(
-      const SpecCalibrationCommand& command) override;
-
   void get_cache_info(uint64_t& cluster_id,
                       std::string& addr,
                       uint16_t& port) override;

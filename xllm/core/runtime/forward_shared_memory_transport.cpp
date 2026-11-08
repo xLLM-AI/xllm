@@ -105,7 +105,7 @@ constexpr PackedInputDomain packed_input_domain() {
   return PackedInputDomain::LLM;
 }
 constexpr uint64_t kPackedInputMagic = 0x584c4c4d494e5032;
-constexpr uint16_t kPackedInputSchemaVersion = 10;
+constexpr uint16_t kPackedInputSchemaVersion = 11;
 constexpr uint32_t kPackedInputHeaderBytes = 40;
 
 struct RawInputLayoutHeader final {
@@ -2606,8 +2606,6 @@ inline void deserialize_forward_input_payload(
   read_vector(context, input_params.meta.execution_batch.num_computed_tokens);
   read_vector(context, input_params.meta.execution_batch.query_start_loc);
   read_vector(context, input_params.meta.execution_batch.is_prefilling);
-  read_data(context, input_params.meta.mtp_draft_steps);
-  read_data(context, input_params.meta.mtp_target_graph_rows);
   read_tensor_and_vector(context,
                          input_params.attention.device.q_seq_lens,
                          input_params.attention.host.q_seq_lens,
@@ -2663,8 +2661,6 @@ inline void deserialize_forward_input_payload(
   read_vector(context, input_params.parallel.dp_global_kv_max_seq_lens);
   read_vector(context, input_params.parallel.dp_global_json_object_active);
   read_vector(context, input_params.parallel.dp_is_decode);
-  read_vector(context, input_params.parallel.dp_dspark_confidence);
-  read_vector(context, input_params.parallel.dp_dspark_rounds_since_full_width);
   read_vector(context, input_params.embedding.embedding_ids);
   read_vector(context, input_params.embedding.linear_state_ids);
   read_vector(context, input_params.embedding.linear_state_read_ids);
@@ -2967,8 +2963,6 @@ inline void serialize_forward_input_sections(
                input_params.meta.execution_batch.query_start_loc);
   write_vector(context.descriptor,
                input_params.meta.execution_batch.is_prefilling);
-  write_data(context.descriptor, input_params.meta.mtp_draft_steps);
-  write_data(context.descriptor, input_params.meta.mtp_target_graph_rows);
 
   write_host_vector_or_tensor(context,
                               input_params.attention.host.q_seq_lens,
@@ -3025,9 +3019,6 @@ inline void serialize_forward_input_sections(
   write_vector(context.descriptor,
                input_params.parallel.dp_global_json_object_active);
   write_vector(context.descriptor, input_params.parallel.dp_is_decode);
-  write_vector(context.descriptor, input_params.parallel.dp_dspark_confidence);
-  write_vector(context.descriptor,
-               input_params.parallel.dp_dspark_rounds_since_full_width);
   write_vector(context.descriptor, input_params.embedding.embedding_ids);
   write_vector(context.descriptor, input_params.embedding.linear_state_ids);
   write_vector(context.descriptor,
@@ -3883,7 +3874,6 @@ bool ForwardSharedMemoryTransport::input_read(
   return read_token_input(input, device, policy);
 }
 
-template <bool IncludeDsparkFeedback>
 bool ForwardSharedMemoryTransport::write_token_output(
     const ForwardOutput& output,
     const std::vector<SpeculativeTokenStats>& speculative_token_stats,
@@ -3967,12 +3957,6 @@ bool ForwardSharedMemoryTransport::write_token_output(
     return false;
   }
 
-  if constexpr (IncludeDsparkFeedback) {
-    if (!valid_dspark_dp_feedback(output.dspark_feedback, row_count)) {
-      LOG(ERROR) << "Invalid adaptive DSpark shared-memory feedback layout.";
-      return false;
-    }
-  }
   const bool speculative = tokens.defined() && tokens.dim() == 2;
   const int64_t token_columns = speculative ? tokens.size(1) : 1;
   const bool has_tokens = tokens.defined() && tokens.numel() > 0;
@@ -4024,12 +4008,6 @@ bool ForwardSharedMemoryTransport::write_token_output(
       4 * sizeof(uint64_t) + expert_count * sizeof(int64_t) +
       static_cast<uint64_t>(beam_count) * (2 * sizeof(int32_t) + sizeof(float));
   payload_bytes += sizeof(int64_t) + sizeof(bool);
-  if constexpr (IncludeDsparkFeedback) {
-    payload_bytes += 2 * sizeof(uint64_t) +
-                     output.dspark_feedback.confidence.size() * sizeof(float) +
-                     output.dspark_feedback.rounds_since_full_width.size() *
-                         sizeof(uint64_t);
-  }
   if (size() < static_cast<int64_t>(sizeof(ControlMetadata)) ||
       payload_bytes > static_cast<uint64_t>(size()) - sizeof(ControlMetadata)) {
     LOG(ERROR) << domain
@@ -4109,21 +4087,12 @@ bool ForwardSharedMemoryTransport::write_token_output(
       static_cast<uint64_t>(beam_count));
   write_data(cursor, output.prepared_token);
   write_data(cursor, /*has_dit_output=*/false);
-  if constexpr (IncludeDsparkFeedback) {
-    write_output_values(cursor,
-                        output.dspark_feedback.confidence.data(),
-                        output.dspark_feedback.confidence.size());
-    write_output_values(cursor,
-                        output.dspark_feedback.rounds_since_full_width.data(),
-                        output.dspark_feedback.rounds_since_full_width.size());
-  }
   CHECK_EQ(static_cast<uint64_t>(cursor - payload_begin), payload_bytes);
   std::atomic_thread_fence(std::memory_order_release);
   control_ptr_->version = ++last_version_;
   return true;
 }
 
-template <bool IncludeDsparkFeedback>
 bool ForwardSharedMemoryTransport::read_token_output(RawForwardOutput& output,
                                                      const char* domain) {
   while (control_ptr_->version == last_version_) {
@@ -4159,13 +4128,6 @@ bool ForwardSharedMemoryTransport::read_token_output(RawForwardOutput& output,
       reader.read_vector(decoded.out_logprobs) &&
       reader.read(decoded.prepared_token) && reader.read_bool(has_dit_output) &&
       !has_dit_output;
-  if constexpr (IncludeDsparkFeedback) {
-    valid_fields =
-        valid_fields &&
-        reader.read_vector(decoded.dspark_feedback.confidence) &&
-        reader.read_vector(decoded.dspark_feedback.rounds_since_full_width) &&
-        valid_dspark_dp_feedback(decoded.dspark_feedback, rows);
-  }
   if (!valid_fields ||
       decoded.src_seq_idxes.size() != decoded.out_tokens.size() ||
       decoded.src_seq_idxes.size() != decoded.out_logprobs.size()) {
@@ -4179,34 +4141,31 @@ bool ForwardSharedMemoryTransport::read_token_output(RawForwardOutput& output,
 bool ForwardSharedMemoryTransport::llm_output_write(
     const ForwardOutput& output,
     const std::vector<SpeculativeTokenStats>& speculative_token_stats) {
-  return write_token_output<true>(
-      output, speculative_token_stats, /*domain=*/"LLM");
+  return write_token_output(output, speculative_token_stats, /*domain=*/"LLM");
 }
 
 bool ForwardSharedMemoryTransport::llm_output_read(RawForwardOutput& output) {
-  return read_token_output<true>(output, /*domain=*/"LLM");
+  return read_token_output(output, /*domain=*/"LLM");
 }
 
 bool ForwardSharedMemoryTransport::vlm_output_write(
     const ForwardOutput& output,
     const std::vector<SpeculativeTokenStats>& speculative_token_stats) {
-  return write_token_output<false>(
-      output, speculative_token_stats, /*domain=*/"VLM");
+  return write_token_output(output, speculative_token_stats, /*domain=*/"VLM");
 }
 
 bool ForwardSharedMemoryTransport::vlm_output_read(RawForwardOutput& output) {
-  return read_token_output<false>(output, /*domain=*/"VLM");
+  return read_token_output(output, /*domain=*/"VLM");
 }
 
 bool ForwardSharedMemoryTransport::rec_output_write(
     const ForwardOutput& output,
     const std::vector<SpeculativeTokenStats>& speculative_token_stats) {
-  return write_token_output<false>(
-      output, speculative_token_stats, /*domain=*/"REC");
+  return write_token_output(output, speculative_token_stats, /*domain=*/"REC");
 }
 
 bool ForwardSharedMemoryTransport::rec_output_read(RawForwardOutput& output) {
-  return read_token_output<false>(output, /*domain=*/"REC");
+  return read_token_output(output, /*domain=*/"REC");
 }
 
 bool ForwardSharedMemoryTransport::dit_output_write(

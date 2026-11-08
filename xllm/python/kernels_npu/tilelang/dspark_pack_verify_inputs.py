@@ -28,15 +28,12 @@ DSPARK_PACK_VERIFY_INPUTS_PASS_CONFIGS = {
 DSPARK_BLOCK_TABLE_TILE = 4096
 
 
-def build_dspark_pack_verify_inputs_kernel(
-    max_batch_size: int, device_control: bool = False, draft_width: int = 7
-) -> tvm.tir.PrimFunc:
+def build_dspark_pack_verify_inputs_kernel(max_batch_size: int, draft_width: int = 7) -> tvm.tir.PrimFunc:
     """Read widths after TP broadcast; fuse mapping, gathers, metadata and tables."""
     if max_batch_size not in (1, 2, 4, 8, 16, 32, 64, 128):
         raise ValueError("max_batch_size must be a supported power-of-two bucket")
     if draft_width not in (5, 7):
         raise ValueError("draft_width must be 5 or 7")
-    arena_words = 3 * draft_width + 1
     batch_tile = ((max_batch_size + 31) // 32) * 32
     offset_tile = ((max_batch_size + 32) // 32) * 32
     proposal_tile = ((max_batch_size * draft_width + 15) // 16) * 16
@@ -59,18 +56,11 @@ def build_dspark_pack_verify_inputs_kernel(
         query_lengths_handle: T.handle,
         owners_handle: T.handle,
         columns_handle: T.handle,
-        control_handle: T.handle,
-        state_indices_handle: T.handle,
-        accepted_handle: T.handle,
-        graph_state_indices_handle: T.handle,
-        graph_accepted_handle: T.handle,
-        cu_seqlens_handle: T.handle,
         batch_size: T.int32,
         capacity: T.int32,
         table_columns: T.int32,
         block_size: T.int32,
         copy_cores: T.int32,
-        linear_capacity: T.int32,
     ):
         # Guarded shape expressions avoid duplicate inferred shape parameters;
         # exact dynamic spans still equal the caller-validated tensor storage.
@@ -79,11 +69,7 @@ def build_dspark_pack_verify_inputs_kernel(
         base_positions = T.match_buffer(base_positions_handle, (T.Select(batch_size > 0, batch_size, 0),), "int32")
         base_lengths = T.match_buffer(base_lengths_handle, (T.Select(batch_size > 0, batch_size, 0),), "int32")
         base_tables = T.match_buffer(base_tables_handle, (batch_size * table_columns,), "int32")
-        widths = T.match_buffer(
-            widths_handle,
-            (batch_size * arena_words if device_control else T.Select(batch_size > 0, batch_size, 0),),
-            "int32",
-        )
+        widths = T.match_buffer(widths_handle, (T.Select(batch_size > 0, batch_size, 0),), "int32")
         offsets = T.match_buffer(offsets_handle, (batch_size + 1,), "int32")
         tokens = T.match_buffer(tokens_handle, (T.Select(capacity > 0, capacity, 0),), "int32")
         positions = T.match_buffer(positions_handle, (T.Select(capacity > 0, capacity, 0),), "int32")
@@ -93,18 +79,6 @@ def build_dspark_pack_verify_inputs_kernel(
         query_lengths = T.match_buffer(query_lengths_handle, (T.Select(capacity > 0, capacity, 0),), "int32")
         owners = T.match_buffer(owners_handle, (T.Select(capacity > 0, capacity, 0),), "int32")
         columns = T.match_buffer(columns_handle, (T.Select(capacity > 0, capacity, 0),), "int32")
-        control = T.match_buffer(control_handle, (1,), "int64")
-        state_indices = T.match_buffer(state_indices_handle, (T.Select(linear_capacity > 0, batch_size, 0),), "int32")
-        accepted = T.match_buffer(accepted_handle, (T.Select(linear_capacity > 0, batch_size, 0),), "int32")
-        graph_state_indices = T.match_buffer(
-            graph_state_indices_handle, (T.Select(linear_capacity > 0, linear_capacity, 0),), "int32"
-        )
-        graph_accepted = T.match_buffer(
-            graph_accepted_handle, (T.Select(linear_capacity > 0, linear_capacity, 0),), "int32"
-        )
-        cu_seqlens = T.match_buffer(
-            cu_seqlens_handle, (T.Select(linear_capacity > 0, linear_capacity + 1, 0),), "int32"
-        )
         with T.Kernel(copy_cores, is_npu=True) as (core, vid), T.Scope("V"):
             if vid == 0:
                 # Kernel IDs are INT64 in this backend. Keep buffer/index
@@ -132,21 +106,12 @@ def build_dspark_pack_verify_inputs_kernel(
                 position = T.alloc_var("int32", init=0)
                 total = T.alloc_var("int32", init=0)
                 active_rows = T.alloc_var("int32", init=batch_size)
-                width_offset = T.alloc_var("int32", init=0)
-                suppress_kv_writes = T.alloc_var("int32", init=0)
-                if device_control:
-                    control_ub = T.alloc_ub((4,), "int64")
-                    T.copy(control[0:1], control_ub)
-                    T.barrier_all()
-                    active_rows = T.Cast("int32", control_ub[0])
-                    suppress_kv_writes = T.Cast("int32", control_ub[0] // T.int64(4294967296))
-                    width_offset = active_rows * (3 * draft_width)
                 # A sentinel makes owner+1 safe even when the compound while
                 # condition evaluates both operands after the final request.
                 T.tile.fill(offsets_ub, 2147483647)
                 offsets_ub[0] = 0
                 if active_rows > 0:
-                    T.copy(widths[width_offset : width_offset + active_rows], width_ub)
+                    T.copy(widths[0:active_rows], width_ub)
                     T.copy(anchors[0:active_rows], anchors_ub)
                     T.copy(proposals[0 : active_rows * draft_width], proposals_ub)
                     T.copy(base_positions[0:active_rows], base_positions_ub)
@@ -156,31 +121,6 @@ def build_dspark_pack_verify_inputs_kernel(
                         offsets_ub[row + 1] = total
                 if task == 0:
                     T.copy(offsets_ub, offsets[0 : active_rows + 1])
-                    if linear_capacity > 0:
-                        # Reuse the authoritative prefix scan, without a
-                        # second kernel or Device-to-Host acceptance readback.
-                        state_indices_ub = T.alloc_ub((batch_tile,), "int32")
-                        accepted_ub = T.alloc_ub((batch_tile,), "int32")
-                        endpoints_ub = T.alloc_ub((offset_tile,), "int32")
-                        T.copy(state_indices[0:linear_capacity], state_indices_ub)
-                        T.copy(accepted[0:linear_capacity], accepted_ub)
-                        T.barrier_all()
-                        for row in T.serial(linear_capacity):
-                            if row >= active_rows:
-                                state_indices_ub[row] = 0
-                                accepted_ub[row] = 1
-                            if suppress_kv_writes != 0:
-                                state_indices_ub[row] = 0
-                        for row in T.serial(linear_capacity + 1):
-                            if suppress_kv_writes != 0:
-                                endpoints_ub[row] = 0
-                            elif row <= active_rows:
-                                endpoints_ub[row] = offsets_ub[row]
-                            else:
-                                endpoints_ub[row] = total
-                        T.copy(state_indices_ub, graph_state_indices[0:linear_capacity])
-                        T.copy(accepted_ub, graph_accepted[0:linear_capacity])
-                        T.copy(endpoints_ub, cu_seqlens[0 : linear_capacity + 1])
                 # The wrapper caps the mixed-grid count to the device's actual
                 # AI core count. Persistent groups cover G without oversubscribing
                 # the launch grid or recopying immutable base metadata per group.
@@ -228,11 +168,7 @@ def build_dspark_pack_verify_inputs_kernel(
                                     # the tile containing this row's page owns it.
                                     T.barrier_all()
                                     page = position // block_size
-                                    if (
-                                        (suppress_kv_writes == 0)
-                                        and (page >= table_start)
-                                        and (page < table_start + table_count)
-                                    ):
+                                    if (page >= table_start) and (page < table_start + table_count):
                                         slots_ub[lane] = (
                                             table_ub[page - table_start] * block_size + position % block_size
                                         )

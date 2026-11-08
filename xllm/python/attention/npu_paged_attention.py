@@ -575,9 +575,6 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             )
         return _PreparedPagedAttention(block_table, query_ends, actual_seq_q, actual_seq_kv)
 
-    def prepare_owned_graph_metadata(self, metadata: AttentionMetadata) -> None:
-        self.prepare(metadata, graph_mode=True, owned_metadata=True)
-
     def prepare(
         self,
         metadata: AttentionMetadata,

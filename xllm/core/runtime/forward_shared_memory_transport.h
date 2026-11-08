@@ -175,13 +175,11 @@ class ForwardSharedMemoryTransport final {
   void clear();
 
  private:
-  template <bool IncludeDsparkFeedback>
   bool write_token_output(
       const ForwardOutput& output,
       const std::vector<SpeculativeTokenStats>& speculative_token_stats,
       const char* domain);
 
-  template <bool IncludeDsparkFeedback>
   bool read_token_output(RawForwardOutput& output, const char* domain);
 
   template <typename Input>
