@@ -39,7 +39,6 @@ limitations under the License.
 #include "core/framework/config/scheduler_config.h"
 #include "core/kv_cache/layout/static_kv_cache_layout.h"
 #include "core/scheduler/request_output_dispatcher.h"
-#include "core/scheduler/zero_eviction_scheduler.h"
 #include "distributed_runtime/engine.h"
 #include "framework/block/block_manager_pool.h"
 #include "framework/model/model_args.h"
@@ -2558,44 +2557,78 @@ TEST(SchedulerPolicyTest, SharedArenaAdmissionReservesFullAndLinearResources) {
   }
 }
 
-TEST(SchedulerPolicyTest, SharedArenaZeroEvictionReservesStateAndDecodeGrowth) {
+TEST(SchedulerPolicyTest, SharedArenaDecodeAdmissionReservesStateAndGrowth) {
   ScopedConfigValue<bool> prefix_cache_guard(
       KVCacheConfig::get_instance().enable_prefix_cache(), false);
-  ScopedConfigValue<int32_t> decode_limit_guard(
-      SchedulerConfig::get_instance().max_decode_token_per_sequence(), 6);
-  auto requests = generate_request({4}, {6}, std::nullopt, std::nullopt, 64);
-  Sequence* sequence = requests.front()->sequences().front().get();
-  std::unique_ptr<RequestPriorityQueue> running_queue =
-      std::make_unique<DequeQueue>();
+  ScopedConfigValue<bool> mix_batch_guard(
+      SchedulerConfig::get_instance().enable_mix_batch(), true);
   // Admission capacities of 8 and 12 slots bracket the request's demand.
   for (const uint32_t num_slots : {9u, 13u}) {
     SCOPED_TRACE(num_slots);
-    BlockManagerPool::Options options;
-    options.num_blocks(num_slots)
+    BlockManagerPool::Options pool_options;
+    pool_options.num_blocks(num_slots)
         .block_size(2)
         .enable_prefix_cache(false)
         .enable_linear_state(true)
         .linear_state_num_slots(num_slots)
         .enable_shared_kv_cache(true)
         .shared_linear_state_slots(4);
-    BlockManagerPool pool(options);
-    BlockCapacityGuard guard(&pool);
-    EXPECT_EQ(guard.if_accept_candidate_sequences(
-                  {sequence}, running_queue, /*running_sequences=*/{}),
-              num_slots == 13);
+    FakeEngine engine(std::make_unique<BlockManagerPool>(pool_options));
+    BlockManagerPool* pool = engine.block_manager_pool();
+    SchedulerOptions options = create_scheduler_options(8, 1, 0, 4, 1);
+    options.enable_chunked_prefill(true)
+        .enable_schedule_overlap(false)
+        .disable_log_stats(true);
+    TestableContinuousScheduler scheduler(&engine, options);
+    const std::vector<size_t> initial_free_blocks = pool->num_free_blocks();
+    auto request =
+        generate_request({4}, {6}, std::nullopt, std::nullopt, 64)[0];
+    std::optional<Status> callback_status;
+    request->state().output_func = [&](const RequestOutput& output) {
+      callback_status = output.status;
+      return true;
+    };
+    Sequence* sequence = request->sequences().front().get();
+    ASSERT_TRUE(scheduler.add_request(request));
+    BatchGroup batches = scheduler.prepare_batch_test();
+    ASSERT_EQ(batches.size(), 1u);
+    ASSERT_EQ(batches.front().size(), 1u);
+    for (int32_t step = 0; step < 4; ++step) {
+      update_requests({request});
+      batches = scheduler.prepare_batch_test();
+      ASSERT_EQ(batches.size(), 1u);
+      ASSERT_EQ(batches.front().size(), 1u);
+      EXPECT_EQ(batches.front()[0], sequence);
+    }
+    ASSERT_EQ(sequence->num_tokens(), 8u);
+    EXPECT_EQ(sequence->kv_state().num_blocks(BlockType::KV), 4u);
+    EXPECT_EQ(sequence->kv_state().num_blocks(BlockType::LINEAR), 1u);
+
+    // The fifth Full block and the live Linear state need nine slots.
+    update_requests({request});
+    batches = scheduler.prepare_batch_test();
+    scheduler.wait_for_responses();
+    ASSERT_EQ(batches.size(), 1u);
+    if (num_slots == 13) {
+      ASSERT_EQ(batches.front().size(), 1u);
+      EXPECT_EQ(batches.front()[0], sequence);
+      EXPECT_FALSE(callback_status.has_value());
+    } else {
+      EXPECT_TRUE(batches.front().empty());
+      ASSERT_TRUE(callback_status.has_value());
+      EXPECT_EQ(callback_status->code(), StatusCode::RESOURCE_EXHAUSTED);
+    }
+    pool->deallocate(request.get());
+    EXPECT_EQ(pool->num_free_blocks(), initial_free_blocks);
   }
 }
 
 TEST(SchedulerPolicyTest,
-     SharedSlabZeroEvictionPreservesByteUnitsAboveFourGiB) {
+     SharedSlabDecodeAdmissionPreservesByteUnitsAboveFourGiB) {
   ScopedConfigValue<bool> prefix_cache_guard(
       KVCacheConfig::get_instance().enable_prefix_cache(), false);
-  ScopedConfigValue<int32_t> decode_limit_guard(
-      SchedulerConfig::get_instance().max_decode_token_per_sequence(), 6);
-  auto requests = generate_request({4}, {6}, std::nullopt, std::nullopt, 64);
-  Sequence* sequence = requests.front()->sequences().front().get();
-  std::unique_ptr<RequestPriorityQueue> running_queue =
-      std::make_unique<DequeQueue>();
+  ScopedConfigValue<bool> mix_batch_guard(
+      SchedulerConfig::get_instance().enable_mix_batch(), true);
   constexpr size_t kGiB = size_t{1} << 30;
   for (const size_t num_allocatable_slabs : {7u, 8u}) {
     SCOPED_TRACE(num_allocatable_slabs);
@@ -2609,8 +2642,8 @@ TEST(SchedulerPolicyTest,
     spec.linear_layer_ids = {1, 2};
     const StaticKVCacheLayout layout(spec);
     spec.num_slabs = layout.num_reserved_slabs() + num_allocatable_slabs;
-    BlockManagerPool::Options options;
-    options.num_blocks(64)
+    BlockManagerPool::Options pool_options;
+    pool_options.num_blocks(64)
         .block_size(2)
         .enable_prefix_cache(false)
         .enable_linear_state(true)
@@ -2618,17 +2651,59 @@ TEST(SchedulerPolicyTest,
         .enable_shared_kv_cache(true)
         .shared_layout(
             std::make_shared<const StaticKVCacheLayout>(std::move(spec)));
-    BlockManagerPool pool(options);
-    BlockCapacityGuard guard(&pool);
-    // Only mappings are allocated: the real layout accounts for a 4.25 GiB
-    // prompt/state footprint and another 3 GiB of decode growth.
-    EXPECT_EQ(pool.sequence_resource_units(4), 4 * kGiB + kGiB / 4);
-    EXPECT_EQ(pool.admission_capacity(0), num_allocatable_slabs * kGiB);
-    EXPECT_GT(pool.sequence_resource_units(4),
+    FakeEngine engine(std::make_unique<BlockManagerPool>(pool_options));
+    BlockManagerPool* pool = engine.block_manager_pool();
+    // Only mappings are allocated; no multi-GiB backing tensor is needed.
+    EXPECT_EQ(pool->sequence_resource_units(4), 4 * kGiB + kGiB / 4);
+    EXPECT_EQ(pool->admission_capacity(0), num_allocatable_slabs * kGiB);
+    EXPECT_GT(pool->sequence_resource_units(4),
               std::numeric_limits<uint32_t>::max());
-    EXPECT_EQ(guard.if_accept_candidate_sequences(
-                  {sequence}, running_queue, /*running_sequences=*/{}),
-              num_allocatable_slabs == 8);
+    SchedulerOptions options = create_scheduler_options(8, 1, 0, 4, 1);
+    options.enable_chunked_prefill(true)
+        .enable_schedule_overlap(false)
+        .disable_log_stats(true);
+    TestableContinuousScheduler scheduler(&engine, options);
+    const std::vector<size_t> initial_free_blocks = pool->num_free_blocks();
+    auto request =
+        generate_request({4}, {6}, std::nullopt, std::nullopt, 64)[0];
+    std::optional<Status> callback_status;
+    request->state().output_func = [&](const RequestOutput& output) {
+      callback_status = output.status;
+      return true;
+    };
+    Sequence* sequence = request->sequences().front().get();
+    ASSERT_TRUE(scheduler.add_request(request));
+    BatchGroup batches = scheduler.prepare_batch_test();
+    ASSERT_EQ(batches.size(), 1u);
+    ASSERT_EQ(batches.front().size(), 1u);
+    for (int32_t step = 0; step < 4; ++step) {
+      update_requests({request});
+      batches = scheduler.prepare_batch_test();
+      ASSERT_EQ(batches.size(), 1u);
+      ASSERT_EQ(batches.front().size(), 1u);
+      EXPECT_EQ(batches.front()[0], sequence);
+    }
+    ASSERT_EQ(sequence->num_tokens(), 8u);
+    EXPECT_EQ(sequence->kv_state().num_blocks(BlockType::LINEAR), 1u);
+
+    // Nine tokens need 7.25 GiB of payload and eight typed slabs.
+    update_requests({request});
+    EXPECT_EQ(pool->sequence_resource_units(sequence->num_tokens()),
+              7 * kGiB + kGiB / 4);
+    batches = scheduler.prepare_batch_test();
+    scheduler.wait_for_responses();
+    ASSERT_EQ(batches.size(), 1u);
+    if (num_allocatable_slabs == 8) {
+      ASSERT_EQ(batches.front().size(), 1u);
+      EXPECT_EQ(batches.front()[0], sequence);
+      EXPECT_FALSE(callback_status.has_value());
+    } else {
+      EXPECT_TRUE(batches.front().empty());
+      ASSERT_TRUE(callback_status.has_value());
+      EXPECT_EQ(callback_status->code(), StatusCode::RESOURCE_EXHAUSTED);
+    }
+    pool->deallocate(request.get());
+    EXPECT_EQ(pool->num_free_blocks(), initial_free_blocks);
   }
 }
 

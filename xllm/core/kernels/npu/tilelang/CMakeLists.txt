@@ -123,6 +123,16 @@ set(TILELANG_KERNEL_SRCS)
 set(TILELANG_KERNEL_PRIVATE_DEFINITIONS)
 
 tilelang_register_runtime_kernel(
+  NAME shared_linear_state_indices
+  WRAPPER_SRCS shared_linear_state_indices_wrapper.cpp
+)
+
+tilelang_register_runtime_kernel(
+  NAME shared_full_indices
+  WRAPPER_SRCS shared_full_indices_wrapper.cpp
+)
+
+tilelang_register_runtime_kernel(
   NAME apply_token_bitmask
   WRAPPER_SRCS apply_token_bitmask_wrapper.cpp
 )

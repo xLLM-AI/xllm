@@ -333,11 +333,13 @@ LlmForwardInput BatchState::build_sequence_input(
   return input;
 }
 
-LlmForwardInput BatchState::build_distributed_input(const BatchInputData& data,
-                                                    const ModelArgs& args,
-                                                    ThreadPool* thread_pool,
-                                                    int32_t cp_size) {
-  ForwardInputBuilder builder(data, &args, cp_size, thread_pool);
+LlmForwardInput BatchState::build_distributed_input(
+    const BatchInputData& data,
+    const ModelArgs& args,
+    ThreadPool* thread_pool,
+    int32_t cp_size,
+    SharedKVCachePublication* publication) {
+  ForwardInputBuilder builder(data, &args, cp_size, thread_pool, publication);
   auto input = builder.build_forward_input(/*num_decoding_tokens=*/0,
                                            /*min_decoding_batch_size=*/0);
   if (has_partial_finished_beam_group()) {

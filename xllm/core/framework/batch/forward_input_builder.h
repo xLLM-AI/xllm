@@ -37,13 +37,15 @@ namespace xllm {
 
 class ForwardInputBuilderTestPeer;
 struct ModelArgs;
+class SharedKVCachePublication;
 
 class ForwardInputBuilder final {
  public:
   ForwardInputBuilder(const BatchInputData& data,
                       const ModelArgs* args,
                       int32_t cp_size = 1,
-                      ThreadPool* thread_pool = nullptr);
+                      ThreadPool* thread_pool = nullptr,
+                      SharedKVCachePublication* publication = nullptr);
 
   explicit ForwardInputBuilder(
       const std::vector<Sequence*>& sequences,
@@ -196,6 +198,8 @@ class ForwardInputBuilder final {
   // thread pool for multithreaded processing, not owned
   ThreadPool* thread_pool_ = nullptr;
   uint64_t batch_id_;
+  // Owned by the ordered engine input factory, outlives this builder.
+  SharedKVCachePublication* shared_kv_publication_ = nullptr;
 };
 
 }  // namespace xllm
