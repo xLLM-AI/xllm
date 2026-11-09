@@ -103,6 +103,7 @@ class StaticGraphAttentionMetadata:
     dsa_c128_cos_sin: torch.Tensor | None = None
     dsa_graph_mode: bool = False
     dsa_graph_block_table_cols: int = 0
+    dsa_graph_token_capacity: int = 0
     prepared_attention_state: object | None = None
 
 

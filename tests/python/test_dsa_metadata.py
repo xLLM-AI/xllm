@@ -28,8 +28,11 @@ import torch
 from xllm.python.attention.dsa_metadata import (
     DSA_CACHE_SLIDING_WINDOW,
     DSA_CACHE_TOKEN,
+    READ_TABLE_LAYOUT_RIGHT_ALIGNED,
+    READ_TABLE_LAYOUT_RING,
     DsaMetadataBuilder,
     build_cache_specs,
+    last_ring_writes,
 )
 
 
@@ -66,16 +69,7 @@ def test_build_cache_specs_does_not_silently_accept_unknown_ratio() -> None:
 
 
 def test_build_cache_specs_real_dsv4_config() -> None:
-    """The shipped DeepSeek-V4-Flash config produces 2 C1 + 21 C4 + 20 C128.
-
-    config.json has ``compress_ratios`` of length 44 (3 zeros, 21 fours, 20
-    one-twenty-eights) but ``num_hidden_layers=43``; only layers 0..42 are
-    built, so the trailing zero (index 43) is ignored and two C1 layers
-    remain (indices 0 and 1).
-    """
-    compress_ratios = (
-        [0, 0] + [4, 128] * 20 + [4, 0]  # layer 42 is C4; index 43 (zero) is ignored.
-    )
+    compress_ratios = [0, 0] + [4, 128] * 20 + [4, 0]
     assert len(compress_ratios) == 44
     caches_info, group_infos = build_cache_specs(compress_ratios, 128, 43)
 
@@ -89,10 +83,17 @@ def test_build_cache_specs_real_dsv4_config() -> None:
     assert c1 + c4 + c128 == 43
 
 
-def _make_builder(n_layers: int = 4) -> tuple[DsaMetadataBuilder, list, list]:
+def _make_builder(
+    n_layers: int = 4,
+    read_table_layout: str = READ_TABLE_LAYOUT_RIGHT_ALIGNED,
+) -> tuple[DsaMetadataBuilder, list, list]:
     compress_ratios = [0, 4, 128, 4]
     caches_info, group_infos = build_cache_specs(compress_ratios, 128, n_layers)
-    return DsaMetadataBuilder(caches_info, group_infos), caches_info, group_infos
+    return (
+        DsaMetadataBuilder(caches_info, group_infos, read_table_layout=read_table_layout),
+        caches_info,
+        group_infos,
+    )
 
 
 def test_build_seq_lengths_and_start_pos() -> None:
@@ -226,6 +227,82 @@ def test_build_c4_pad_positions(enable_graph: bool) -> None:
     assert dsa.c128_pad_positions.tolist() == [128] + [0] * (7 if enable_graph else 0)
 
 
+def _swa_read_table(
+    raw_bt: torch.Tensor,
+    ctx_lens: list[int],
+    *,
+    block_size: int = 128,
+    graph_cols: int = 0,
+    layout: str = READ_TABLE_LAYOUT_RING,
+) -> torch.Tensor:
+    builder, _, _ = _make_builder(read_table_layout=layout)
+    read_bt, _ = builder._process_swa_group(
+        raw_bt=raw_bt,
+        block_size=block_size,
+        ctx_lens=list(ctx_lens),
+        q_lens=[1] * len(ctx_lens),
+        batch_size=len(ctx_lens),
+        graph_slot_capacity=len(ctx_lens) if graph_cols > 0 else 0,
+        graph_block_table_capacity_cols=graph_cols,
+        new_cache_slots=None,
+    )
+    return read_bt
+
+
+@pytest.mark.parametrize("ctx_len", [129, 257, 513])
+def test_swa_read_table_rings_every_addressed_column(ctx_len: int) -> None:
+    raw_bt = torch.tensor([[8]], dtype=torch.int32)
+    read_bt = _swa_read_table(raw_bt, [ctx_len])
+    addressed = (ctx_len + 127) // 128
+    assert read_bt.shape == (1, addressed)
+    assert read_bt[0, :addressed].tolist() == [8] * addressed
+
+
+def test_swa_read_table_resolves_each_sequence_ring_block() -> None:
+    rings = [8, 9, 10, 11]
+    raw_bt = torch.tensor([[ring] for ring in rings], dtype=torch.int32)
+    read_bt = _swa_read_table(raw_bt, [257] * len(rings))
+    addressed = (257 + 127) // 128
+    assert read_bt.shape == (len(rings), addressed)
+    for seq, ring in enumerate(rings):
+        assert read_bt[seq].tolist() == [ring] * addressed
+
+
+def test_swa_read_table_modulos_by_semantic_cols() -> None:
+    raw_bt = torch.tensor([[8, 9]], dtype=torch.int32)
+    read_bt = _swa_read_table(raw_bt, [385])
+    addressed = (385 + 127) // 128
+    assert read_bt.shape == (1, addressed)
+    assert read_bt[0].tolist() == [8, 9, 8, 9]
+
+
+def test_swa_read_table_rings_the_full_graph_storage_width() -> None:
+    raw_bt = torch.tensor([[8]], dtype=torch.int32)
+    read_bt = _swa_read_table(raw_bt, [257], graph_cols=8192)
+    assert read_bt.shape == (1, 8192)
+    assert bool((read_bt[0] == 8).all())
+
+
+def test_swa_read_table_matches_the_write_path_ring_resolution() -> None:
+    block_size = 128
+    ctx_len = 513
+    raw_bt = torch.tensor([[8]], dtype=torch.int32)
+    read_bt = _swa_read_table(raw_bt, [ctx_len], block_size=block_size)
+    read_cols = int(read_bt.size(1))
+    semantic_cols = int(raw_bt.size(1))
+    for pos in range(ctx_len):
+        write_block = int(raw_bt[0, (pos // block_size) % semantic_cols].item())
+        eager_block = int(read_bt[0, (pos // block_size) % read_cols].clamp_min(0).item())
+        assert eager_block == write_block, f"pos={pos}"
+
+
+def test_default_swa_read_table_stays_right_aligned() -> None:
+    raw_bt = torch.tensor([[8]], dtype=torch.int32)
+    read_bt = _swa_read_table(raw_bt, [257], layout=READ_TABLE_LAYOUT_RIGHT_ALIGNED)
+    assert read_bt.shape == (1, 3)
+    assert read_bt[0].tolist() == [-1, -1, 8]
+
+
 def test_empty_batch_preserves_cpp_zero_length_buffers() -> None:
     builder, _, _ = _make_builder()
     dsa = builder.build(
@@ -352,3 +429,64 @@ def test_graph_rejects_block_table_larger_than_bucket_capacity() -> None:
             enable_graph=True,
             graph_block_table_capacity_cols=2,
         )
+
+
+@pytest.mark.parametrize(
+    "slots, keep_rows",
+    [
+        ([4, 1, 4, -1, 1, 2], [4, 5, 2]),
+        ([-1, -1], []),
+        ([3], [0]),
+        ([-1], []),
+        ([], []),
+        ([3, 1, 2], [1, 2, 0]),
+        ([16777214, 16777215, 16777214, -1], [2, 1]),
+        ([16777216, 16777217, 16777216, -1], [2, 1]),
+    ],
+)
+@pytest.mark.parametrize("slot_dtype", [torch.int32, torch.int64])
+def test_last_ring_writes_keeps_latest_valid_rows(
+    slots: list[int], keep_rows: list[int], slot_dtype: torch.dtype
+) -> None:
+    physical_slots = torch.tensor(slots, dtype=slot_dtype)
+    values = torch.arange(len(slots) * 2).reshape(-1, 2)
+    actual_slots, actual_values = last_ring_writes(physical_slots, values, slot_capacity=max(slots, default=-1) + 1)
+    expected_rows = torch.tensor(keep_rows, dtype=torch.int64)
+    assert actual_slots.dtype == slot_dtype
+    assert torch.equal(actual_slots, physical_slots[expected_rows])
+    assert torch.equal(actual_values, values[expected_rows])
+
+
+@pytest.mark.parametrize("preserve_padding", [False, True])
+@pytest.mark.parametrize("ctx_lens,live_slots", [([0, 1], [256]), ([1, 0], [0])])
+@pytest.mark.parametrize("graph_rows", [0, 4])
+@pytest.mark.parametrize("supplied_slots", [None, "compact", "padded"])
+def test_swa_query_padding_keeps_input_row_alignment(
+    preserve_padding: bool,
+    ctx_lens: list[int],
+    live_slots: list[int],
+    graph_rows: int,
+    supplied_slots: str | None,
+) -> None:
+    caches_info, group_infos = build_cache_specs([0], 128, 1)
+    builder = DsaMetadataBuilder(caches_info, group_infos, preserve_query_padding=preserve_padding)
+    expected = [(-1 if length == 0 else slot) for length, slot in zip(ctx_lens, [0, 256])]
+    provided = None
+    if supplied_slots == "compact":
+        provided = live_slots
+    elif supplied_slots == "padded":
+        provided = expected
+    _, slots = builder._process_swa_group(
+        raw_bt=torch.tensor([[0, 1], [2, 3]], dtype=torch.int32),
+        block_size=128,
+        ctx_lens=ctx_lens,
+        q_lens=[1, 1],
+        batch_size=2,
+        graph_slot_capacity=graph_rows,
+        graph_block_table_capacity_cols=0,
+        new_cache_slots=provided,
+    )
+    if not preserve_padding:
+        expected = list(live_slots)
+    expected += [-1] * max(0, graph_rows - len(expected))
+    assert slots.tolist() == expected

@@ -64,18 +64,6 @@ class LogprobState {
 
   void update_logprob(size_t index, const Token& token, int64_t num_top_tokens);
 
-  const std::vector<std::vector<float>>& get_top_logprobs() const {
-    return top_logprobs_;
-  }
-
-  const std::vector<std::vector<int64_t>>& get_top_tokens() const {
-    return top_tokens_;
-  }
-
-  const std::vector<std::optional<float>>& get_logprobs() const {
-    return logprobs_;
-  }
-
  private:
   int64_t num_prompt_tokens_ = 0;
   std::vector<std::optional<float>> logprobs_;

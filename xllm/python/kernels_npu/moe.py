@@ -504,12 +504,12 @@ def grouped_moe_bf16(
     num_total_experts: int,
     start_expert_id: int,
     num_experts_per_rank: int,
+    swiglu_limit: float = 0.0,
+    router_weight_before_down: bool = False,
 ) -> torch.Tensor:
-    """Run Qwen3.5 BF16 experts with NPU routing and grouped matmuls."""
-    active_expert_range = [
-        start_expert_id,
-        start_expert_id + num_experts_per_rank,
-    ]
+    if router_weight_before_down and hidden_states.shape[0] == 0:
+        return torch.empty_like(hidden_states, dtype=torch.float32)
+    active_expert_range = [start_expert_id, start_expert_id + num_experts_per_rank]
     expanded_hidden, expanded_row_idx, group_list, _ = torch_npu.npu_moe_init_routing_v2(
         hidden_states,
         topk_ids,
@@ -533,9 +533,33 @@ def grouped_moe_bf16(
         group_list_type=1,
         output_dtype=hidden_states.dtype,
     )
-    from xllm.python import kernels as _kernels
+    clamp_swiglu = 0.0 < swiglu_limit < 1_000_000.0
+    if router_weight_before_down or clamp_swiglu:
+        if clamp_swiglu:
+            activated = torch_npu.npu_clipped_swiglu(
+                gate_up.float(),
+                dim=-1,
+                alpha=1.0,
+                limit=swiglu_limit,
+                bias=0.0,
+                interleaved=False,
+            )
+        else:
+            gate, up = gate_up.chunk(2, dim=-1)
+            activated = torch.nn.functional.silu(gate.float()) * up.float()
+        if router_weight_before_down:
+            local_expert_mask = (topk_ids >= active_expert_range[0]) & (topk_ids < active_expert_range[1])
+            packed_weights = torch.zeros_like(topk_weights.reshape(-1))
+            # Foreign routes may alias local rows; their zeros must not overwrite packed local tokens.
+            packed_weights.scatter_add_(
+                0, expanded_row_idx.abs().long(), (topk_weights * local_expert_mask).reshape(-1)
+            )
+            activated = activated * packed_weights.unsqueeze(-1)
+        activated = activated.to(hidden_states.dtype)
+    else:
+        from xllm.python import kernels as _kernels
 
-    activated = _kernels.silu_and_mul(gate_up)
+        activated = _kernels.silu_and_mul(gate_up)
     expert_output = _group_gemm(
         x=activated,
         weight=w2,
@@ -547,12 +571,18 @@ def grouped_moe_bf16(
         group_list_type=1,
         output_dtype=hidden_states.dtype,
     )
-    local_expert_mask = (topk_ids >= active_expert_range[0]) & (topk_ids < active_expert_range[1])
-    local_topk_weights = topk_weights * local_expert_mask
+    if router_weight_before_down:
+        # Grouped GEMM leaves padding uninitialized; clear it before unpermute to avoid NaNs.
+        valid = torch.arange(expert_output.shape[0], device=expert_output.device) < group_list.sum()
+        expert_output = torch.where(valid.unsqueeze(-1), expert_output, 0).float()
+        probs = local_expert_mask.float()
+    else:
+        local_expert_mask = (topk_ids >= active_expert_range[0]) & (topk_ids < active_expert_range[1])
+        probs = _unpermute_probs(topk_weights * local_expert_mask, expert_output)
     return torch_npu.npu_moe_token_unpermute(
         permuted_tokens=expert_output,
         sorted_indices=expanded_row_idx.abs(),
-        probs=_unpermute_probs(local_topk_weights, expert_output),
+        probs=probs,
     )
 
 
@@ -566,6 +596,8 @@ def _grouped_moe_bf16_fake(
     num_total_experts: int,
     start_expert_id: int,
     num_experts_per_rank: int,
+    swiglu_limit: float = 0.0,
+    router_weight_before_down: bool = False,
 ) -> torch.Tensor:
     del (
         topk_weights,
@@ -575,7 +607,10 @@ def _grouped_moe_bf16_fake(
         num_total_experts,
         start_expert_id,
         num_experts_per_rank,
+        swiglu_limit,
     )
+    if router_weight_before_down:
+        return torch.empty_like(hidden_states, dtype=torch.float32)
     return torch.empty_like(hidden_states)
 
 

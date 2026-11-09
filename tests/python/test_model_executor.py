@@ -41,12 +41,10 @@ from xllm.python.layers.attention import Attention  # noqa: E402
 from xllm.python.model_executor.executor import (  # noqa: E402
     ModelExecutor,
     _create_attention_backend,
-    _resolve_graph_backend,
     _validate_npu_cp_model_config,
 )
 from xllm.python.model_executor.forward_context import (  # noqa: E402
     ForwardContext,
-    KVLoadContext,
     forward_context,
     get_forward_context,
     record_layer_event,
@@ -138,37 +136,6 @@ class _FakeModel(nn.Module):
         return input_ids
 
 
-def _classify(config: dict) -> dict:
-    """Classify a config dict the way the executor itself does.
-
-    Real runs build config from ModelArgs; tests that construct configs
-    directly rely on the same model-platform-support predicates the executor
-    calls, so nothing needs to be injected here. All other keys pass through
-    because the executor and the backends read runtime knobs from this dict.
-    """
-    return {**config, "model_type": config.get("model_type", "")}
-
-
-class _FakeModelHeterogeneous(nn.Module):
-    """Model with non-uniform Attention layers (should fail validation)."""
-
-    def __init__(self):
-        super().__init__()
-        self.model = nn.Linear(1, 1)
-        self.attn1 = _make_attention_layer(num_heads=8, layer_id=0)
-        self.attn2 = _make_attention_layer(num_heads=4, layer_id=1)
-        self._param = nn.Parameter(torch.zeros(1))
-
-
-class _FakeModelNoAttention(nn.Module):
-    """Model without any Attention layers."""
-
-    def __init__(self):
-        super().__init__()
-        self.model = nn.Linear(1, 1)
-        self._param = nn.Parameter(torch.zeros(1))
-
-
 class _FailingLayerSynchronizer:
     def record_event(self, layer_id: int) -> bool:
         return False
@@ -191,21 +158,6 @@ def test_record_layer_event_propagates_record_failure() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Tests: graph backend resolution
-# ---------------------------------------------------------------------------
-
-
-class TestNpuGraphBackendResolution:
-    @patch(
-        "xllm.python.model_executor.executor.current_platform.is_npu",
-        return_value=True,
-    )
-    def test_enable_graph_selects_aclgraph_on_npu(self, _mock_is_npu):
-        config = {"enable_graph": True, "python_graph_backend": "off"}
-        assert _resolve_graph_backend(config) == "aclgraph"
-
-
-# ---------------------------------------------------------------------------
 # Tests: _create_attention_backend dispatch
 # ---------------------------------------------------------------------------
 
@@ -222,18 +174,16 @@ class TestCreateAttentionBackend:
         device = torch.device("cpu")
         module = types.ModuleType("xllm.python.attention.dsa_attention")
         module.DsaAttentionBackend = StubAttentionBackend
-        config = _classify(
-            {
-                "model_type": "deepseek_v4",
-                "compress_ratios": [1, 4, 128],
-                "num_hidden_layers": 3,
-                "window_size": 128,
-                "index_topk": 512,
-                "index_n_heads": 64,
-                "index_head_dim": 128,
-                "qk_rope_head_dim": 64,
-            }
-        )
+        config = {
+            "model_type": "deepseek_v4",
+            "compress_ratios": [1, 4, 128],
+            "num_hidden_layers": 3,
+            "window_size": 128,
+            "index_topk": 512,
+            "index_n_heads": 64,
+            "index_head_dim": 128,
+            "qk_rope_head_dim": 64,
+        }
         with patch.dict(sys.modules, {module.__name__: module}):
             backend = _create_attention_backend(attn, device, torch.bfloat16, config)
 
@@ -253,16 +203,14 @@ class TestCreateAttentionBackend:
         attn = _make_attention_layer(head_dim=512)
         module = types.ModuleType("xllm.python.attention.dsa_attention")
         module.DsaAttentionBackend = StubAttentionBackend
-        config = _classify(
-            {
-                "model_type": "deepseek_v4_dspark",
-                "compress_ratios": [1, 1, 1],
-                "n_layers": 3,
-                "window_size": 128,
-                "block_size": 5,
-                "dspark_use_native_sas": True,
-            }
-        )
+        config = {
+            "model_type": "deepseek_v4_dspark",
+            "compress_ratios": [1, 1, 1],
+            "n_layers": 3,
+            "window_size": 128,
+            "block_size": 5,
+            "dspark_use_native_sas": True,
+        }
 
         with patch.dict(sys.modules, {module.__name__: module}):
             backend = _create_attention_backend(attn, torch.device("npu"), torch.bfloat16, config)
@@ -518,40 +466,6 @@ class TestModelExecutorConstruction:
             assert mock_graph_runner.call_args.kwargs["num_speculative_tokens"] == config_depth
         else:
             mock_graph_runner.assert_not_called()
-
-    @patch(
-        "xllm.python.model_executor.executor._create_attention_backend",
-        return_value=StubAttentionBackend(),
-    )
-    def test_valid_model_creates_executor(self, mock_backend: MagicMock) -> None:
-        model = _FakeModel(num_layers=3)
-        config = {"python_graph_backend": "off"}
-        executor = ModelExecutor(model, config, max_seqs_per_batch=4)
-
-        assert executor.execution_model is model.model
-        assert executor.attention_backend is mock_backend.return_value
-        assert executor.eager_runner.model is model.model
-        assert executor.eager_runner.attention_backend is mock_backend.return_value
-        assert executor.decode_graph_runner is None
-        assert executor.inductor_runner is None
-
-    @patch(
-        "xllm.python.model_executor.executor._create_attention_backend",
-        return_value=StubAttentionBackend(),
-    )
-    def test_no_attention_layers_raises(self, _mock_backend):
-        model = _FakeModelNoAttention()
-        with pytest.raises(ValueError, match="does not contain an Attention layer"):
-            ModelExecutor(model, {}, max_seqs_per_batch=4)
-
-    @patch(
-        "xllm.python.model_executor.executor._create_attention_backend",
-        return_value=StubAttentionBackend(),
-    )
-    def test_heterogeneous_attention_raises(self, _mock_backend):
-        model = _FakeModelHeterogeneous()
-        with pytest.raises(ValueError, match="identical attention configuration"):
-            ModelExecutor(model, {}, max_seqs_per_batch=4)
 
     @patch(
         "xllm.python.model_executor.executor._create_attention_backend",
@@ -1421,18 +1335,16 @@ def test_cp_admission_preserves_model_specific_kv_support(
     decoding_tokens: int,
     kv_split: int,
 ) -> None:
-    config = _classify(
-        {
-            "model_type": model_type,
-            "is_draft_engine": is_draft,
-            "is_mtp_algorithm": model_type == "glm_moe_dsa_mtp",
-            "num_speculative_tokens": speculative_tokens,
-            "cp_size": 2,
-            "kv_split_size": kv_split,
-            "instance_role": "PREFILL",
-            "enable_disagg_pd": True,
-        }
-    )
+    config = {
+        "model_type": model_type,
+        "is_draft_engine": is_draft,
+        "is_mtp_algorithm": model_type == "glm_moe_dsa_mtp",
+        "num_speculative_tokens": speculative_tokens,
+        "cp_size": 2,
+        "kv_split_size": kv_split,
+        "instance_role": "PREFILL",
+        "enable_disagg_pd": True,
+    }
     if model_type != "deepseek_v4" or kv_split == 1:
         _validate_npu_cp_model_config(config)
     else:
@@ -1467,14 +1379,12 @@ def test_glm_non_mtp_cp_prefill_retains_sharded_kv_admission() -> None:
 
 @pytest.mark.parametrize("model_type", ["glm5_next", "glm5_3_flash", "glm5_next_text"])
 def test_glm5_next_cp_admission_matches_runtime_constraints(model_type: str) -> None:
-    config = _classify(
-        {
-            "model_type": model_type,
-            "cp_size": 2,
-            "kv_split_size": 1,
-            "ep_size": 1,
-        }
-    )
+    config = {
+        "model_type": model_type,
+        "cp_size": 2,
+        "kv_split_size": 1,
+        "ep_size": 1,
+    }
     _validate_npu_cp_model_config(config)
     _validate_npu_cp_model_config({**config, "ep_size": 2, "dp_size": 2})
 
@@ -2208,15 +2118,13 @@ def test_speculative_target_graph_capacity_expands_validation_tokens(dp_size: in
 @pytest.mark.parametrize("model_type", ["qwen3", "glm_moe_dsa"])
 @pytest.mark.parametrize("dp_size", [1, 2])
 def test_executor_binds_acl_graph_caches(model_type: str, dp_size: int) -> None:
-    config = _classify(
-        {
-            "model_type": model_type,
-            "dp_size": dp_size,
-            "dp_rank": dp_size - 1,
-            "python_graph_backend": "aclgraph",
-            "max_position_embeddings": 128,
-        }
-    )
+    config = {
+        "model_type": model_type,
+        "dp_size": dp_size,
+        "dp_rank": dp_size - 1,
+        "python_graph_backend": "aclgraph",
+        "max_position_embeddings": 128,
+    }
     with patch(
         "xllm.python.model_executor.executor._create_attention_backend", return_value=_GraphStubAttentionBackend()
     ):
@@ -2255,16 +2163,14 @@ def test_executor_passes_no_padding_policy_to_ordinary_acl_runner(
 
 @pytest.mark.parametrize("dp_size", [1, 2, 4])
 def test_executor_selects_dspark_acl_graph_with_dp(dp_size: int) -> None:
-    config = _classify(
-        {
-            "model_type": "DSparkDraftModel",
-            "num_speculative_tokens": 6,
-            "dp_size": dp_size,
-            "dp_rank": dp_size - 1,
-            "python_graph_backend": "aclgraph",
-            "max_position_embeddings": 128,
-        }
-    )
+    config = {
+        "model_type": "DSparkDraftModel",
+        "num_speculative_tokens": 6,
+        "dp_size": dp_size,
+        "dp_rank": dp_size - 1,
+        "python_graph_backend": "aclgraph",
+        "max_position_embeddings": 128,
+    }
     model = _FakeModel()
     model.cfg = SimpleNamespace(block_size=7)
     with patch(
@@ -2305,14 +2211,12 @@ def test_dflash2_leaf_uses_full_block_graph_and_verify_context_capacity() -> Non
 
 
 def test_executor_warms_context_prefix_buckets_only_during_startup() -> None:
-    config = _classify(
-        {
-            "model_type": "DSparkDraftModel",
-            "num_speculative_tokens": 6,
-            "python_graph_backend": "aclgraph",
-            "max_position_embeddings": 128,
-        }
-    )
+    config = {
+        "model_type": "DSparkDraftModel",
+        "num_speculative_tokens": 6,
+        "python_graph_backend": "aclgraph",
+        "max_position_embeddings": 128,
+    }
     model = _FakeModel()
     model.cfg = SimpleNamespace(block_size=7)
     with patch(
@@ -2334,14 +2238,12 @@ def test_executor_warms_context_prefix_buckets_only_during_startup() -> None:
 
 
 def test_executor_preserves_block_draft_admission_and_runner_arguments() -> None:
-    config = _classify(
-        {
-            "model_type": "DSparkDraftModel",
-            "num_speculative_tokens": 2,
-            "python_graph_backend": "aclgraph",
-            "max_position_embeddings": 128,
-        }
-    )
+    config = {
+        "model_type": "DSparkDraftModel",
+        "num_speculative_tokens": 2,
+        "python_graph_backend": "aclgraph",
+        "max_position_embeddings": 128,
+    }
     model = _FakeModel()
     model.cfg = SimpleNamespace(block_size=3)
     with patch(

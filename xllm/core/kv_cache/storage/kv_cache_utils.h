@@ -108,6 +108,7 @@ struct KVCacheCreateOptions {
   PROPERTY(int64_t, index_head_dim) = 0;
   PROPERTY(int64_t, window_size) = 0;
   PROPERTY(std::vector<int32_t>, compress_ratios);
+  PROPERTY(std::vector<int32_t>, kv_source_layer_ids);
 };
 
 struct KVCacheTensors {

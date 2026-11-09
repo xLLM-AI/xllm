@@ -2073,6 +2073,63 @@ INSTANTIATE_TEST_SUITE_P(KvSplits,
                          DcpIndexerEstimationTest,
                          ::testing::Values(1, 2, 4, 0));
 
+TEST(KVCacheEstimationTest, EstimatesDeepSeekV41Pools) {
+  ModelArgs model_args;
+  model_args.model_type("deepseek_v41")
+      .n_layers(6)
+      .head_dim(16)
+      .index_head_dim(8)
+      .window_size(128)
+      .compress_ratios({0, 0, 2, 2, 1, 1})
+      .kv_source_layer_ids({2, 4});
+
+  KVCacheEstimateOptions options;
+  options.dtype = torch::kFloat32;
+  options.kv_cache_dtype = "auto";
+  options.cache_size_in_bytes = /*swa=*/27 * 65536 + /*ten units=*/10 * 36864;
+  options.block_size = 128;
+  options.max_seqs_per_batch = 4;
+  options.max_tokens_per_batch = 2176;
+
+  const KVCacheCapacity capacity =
+      estimate_kv_cache_capacity(model_args, options);
+
+  EXPECT_EQ(capacity.swa_count(), 27);
+  EXPECT_EQ(capacity.c1_count(), 20);
+  EXPECT_EQ(capacity.c2_count(), 10);
+  EXPECT_EQ(capacity.c4_count(), 0);
+  EXPECT_EQ(capacity.c128_count(), 0);
+  EXPECT_EQ(capacity.n_blocks(), 20);
+}
+
+TEST(KVCacheEstimationTest, DeepSeekV41CountsOnlyKvSourceLayersForTokenGroups) {
+  ModelArgs model_args;
+  model_args.model_type("deepseek_v41")
+      .n_layers(6)
+      .head_dim(16)
+      .index_head_dim(8)
+      .window_size(128)
+      .compress_ratios({0, 0, 2, 2, 1, 1})
+      .kv_source_layer_ids({2});
+
+  KVCacheEstimateOptions options;
+  options.dtype = torch::kFloat32;
+  options.kv_cache_dtype = "auto";
+  options.cache_size_in_bytes = 16 * 1024 * 1024;
+  options.block_size = 128;
+  options.max_seqs_per_batch = 4;
+  options.max_tokens_per_batch = 2176;
+
+  const KVCacheCapacity capacity =
+      estimate_kv_cache_capacity(model_args, options);
+
+  EXPECT_GT(capacity.c2_count(), 0);
+  EXPECT_EQ(capacity.c1_count(), 0);
+  EXPECT_EQ(capacity.c4_count(), 0);
+  EXPECT_EQ(capacity.c128_count(), 0);
+  EXPECT_EQ(capacity.n_blocks(), 2 * capacity.c2_count());
+}
+
 #if defined(USE_NPU)
 TEST(KVCacheIndexCacheBytesTest, CompressedTailChargesWholePools) {
   ModelArgs args;

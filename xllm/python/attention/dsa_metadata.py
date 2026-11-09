@@ -42,8 +42,10 @@ if TYPE_CHECKING:
 # Cache-type enum (mirrors ``DSACacheType`` in dsa_metadata.h).
 # ---------------------------------------------------------------------------
 DSA_CACHE_TOKEN = 0
-DSA_CACHE_SEQUENCE = 1
 DSA_CACHE_SLIDING_WINDOW = 2
+
+READ_TABLE_LAYOUT_RIGHT_ALIGNED = "right_aligned"
+READ_TABLE_LAYOUT_RING = "ring"
 
 
 @dataclass
@@ -76,6 +78,7 @@ class DsaMetadata:
     # Sequence lengths (host, int32).
     seq_lens: torch.Tensor
     seq_lens_q: torch.Tensor
+    seq_lens_q_host: list[int] = field(default_factory=list[int], init=False)
     actual_seq_lengths_kv: torch.Tensor
     actual_seq_lengths_query: torch.Tensor
     kv_cu_seq_lens: torch.Tensor
@@ -132,6 +135,8 @@ class DsaMetadata:
 
     is_acl_graph: bool = False
 
+    graph_token_capacity: int = 0
+
     # Per-forward DeepSeek-V4 context-parallel state. This is the Python
     # counterpart of DSAMetadata::v4_cp_context; it is populated only for
     # prefill when cp_size > 1 and must never survive into a later forward.
@@ -141,6 +146,23 @@ class DsaMetadata:
 def _normalize_compress_ratio(ratio: int) -> int:
     """Mirrors ``deepseek_v4_normalize_compress_ratio``."""
     return 1 if ratio <= 1 else ratio
+
+
+def _register_dsa_group(
+    group_infos: list[DSAGroupInfo],
+    group_key_map: dict[tuple[int, int, int], int],
+    cache_type: int,
+    ratio: int,
+    block_size: int,
+) -> int:
+    key = (ratio, cache_type, block_size)
+    gid = group_key_map.get(key)
+    if gid is not None:
+        return gid
+    gid = len(group_infos)
+    group_key_map[key] = gid
+    group_infos.append(DSAGroupInfo(cache_type, ratio, block_size))
+    return gid
 
 
 def build_cache_specs(
@@ -159,21 +181,11 @@ def build_cache_specs(
     group_infos: list[DSAGroupInfo] = []
     group_key_map: dict[tuple[int, int, int], int] = {}
 
-    def register_group(cache_type: int, ratio: int, block_size: int) -> int:
-        key = (ratio, cache_type, block_size)
-        gid = group_key_map.get(key)
-        if gid is not None:
-            return gid
-        gid = len(group_infos)
-        group_key_map[key] = gid
-        group_infos.append(DSAGroupInfo(cache_type, ratio, block_size))
-        return gid
-
-    register_group(DSA_CACHE_SLIDING_WINDOW, 1, window_size)
+    _register_dsa_group(group_infos, group_key_map, DSA_CACHE_SLIDING_WINDOW, 1, window_size)
     for ratio in compress_ratios:
         cr = _normalize_compress_ratio(ratio)
         if cr in (4, 128):
-            register_group(DSA_CACHE_TOKEN, cr, base_block_size)
+            _register_dsa_group(group_infos, group_key_map, DSA_CACHE_TOKEN, cr, base_block_size)
 
     caches_info: list[list[DSACacheInfo]] = [[] for _ in range(n_layers)]
     for layer_id in range(n_layers):
@@ -206,9 +218,74 @@ def build_cache_specs(
             entries = []
 
         for cache_type, ratio, block_size in entries:
-            gid = register_group(cache_type, ratio, block_size)
+            gid = _register_dsa_group(group_infos, group_key_map, cache_type, ratio, block_size)
             caches_info[layer_id].append(DSACacheInfo(gid, cache_type, ratio, block_size))
 
+    return caches_info, group_infos
+
+
+def last_ring_writes(
+    slots: torch.Tensor, values: torch.Tensor, *, slot_capacity: int | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    slots = slots.reshape(-1)
+    if slots.numel() != values.size(0):
+        raise ValueError("cache slot and value row counts must match")
+    if slots.numel() <= 1:
+        keep = slots >= 0
+        return slots[keep], values[keep]
+    # NPU integer sorting falls back to AI CPU; these slots, including -1, are exact in FP32.
+    sort_slots = slots
+    if slots.device.type == "npu" and slot_capacity is not None and 0 < slot_capacity <= 2**24:
+        sort_slots = slots.to(torch.float32)
+    order = torch.argsort(sort_slots, stable=True)
+    sorted_slots = slots[order]
+    keep = sorted_slots >= 0
+    keep[:-1] &= sorted_slots[:-1] != sorted_slots[1:]
+    rows = order[keep]
+    return slots[rows], values[rows]
+
+
+def build_cache_specs_v41(
+    compress_ratios: Sequence[int],
+    kv_source_layer_ids: Sequence[int],
+    window_size: int,
+    n_layers: int,
+) -> tuple[list[list[DSACacheInfo]], list[DSAGroupInfo]]:
+    base_block_size = 128
+    group_infos: list[DSAGroupInfo] = []
+    group_key_map: dict[tuple[int, int, int], int] = {}
+
+    _register_dsa_group(group_infos, group_key_map, DSA_CACHE_SLIDING_WINDOW, 1, window_size)
+    kv_sources = {int(source) for source in kv_source_layer_ids}
+    token_ratios: set[int] = set()
+    for source in kv_sources:
+        if not 0 <= source < n_layers:
+            raise ValueError(f"kv source layer {source} is outside the model's {n_layers} layers")
+        ratio = int(compress_ratios[source]) if source < len(compress_ratios) else 0
+        if ratio <= 0:
+            raise ValueError(f"kv source layer {source} must have a positive compress ratio")
+        token_ratios.add(ratio)
+    for ratio in sorted(token_ratios):
+        _register_dsa_group(group_infos, group_key_map, DSA_CACHE_TOKEN, ratio, base_block_size)
+
+    caches_info: list[list[DSACacheInfo]] = [[] for _ in range(n_layers)]
+    for layer_id in range(n_layers):
+        ratio = int(compress_ratios[layer_id]) if layer_id < len(compress_ratios) else 0
+        entries: list[tuple[int, int, int]]
+        if layer_id in kv_sources and ratio > 0:
+            entries = [
+                (DSA_CACHE_TOKEN, ratio, base_block_size),
+                (DSA_CACHE_TOKEN, ratio, base_block_size),
+                (DSA_CACHE_SLIDING_WINDOW, 1, window_size),
+            ]
+            if ratio > 1:
+                entries.append((DSA_CACHE_SLIDING_WINDOW, 1, window_size))
+                entries.append((DSA_CACHE_SLIDING_WINDOW, 1, window_size))
+        else:
+            entries = [(DSA_CACHE_SLIDING_WINDOW, 1, window_size)]
+        for cache_type, entry_ratio, block_size in entries:
+            gid = _register_dsa_group(group_infos, group_key_map, cache_type, entry_ratio, block_size)
+            caches_info[layer_id].append(DSACacheInfo(gid, cache_type, entry_ratio, block_size))
     return caches_info, group_infos
 
 
@@ -224,9 +301,20 @@ class DsaMetadataBuilder:
         self,
         caches_info: list[list[DSACacheInfo]],
         group_infos: list[DSAGroupInfo],
+        read_table_layout: str = READ_TABLE_LAYOUT_RIGHT_ALIGNED,
+        *,
+        preserve_query_padding: bool = False,
     ) -> None:
+        if read_table_layout not in (READ_TABLE_LAYOUT_RIGHT_ALIGNED, READ_TABLE_LAYOUT_RING):
+            raise ValueError(
+                f"unknown SWA read-table layout: {read_table_layout!r} "
+                f"(expected {READ_TABLE_LAYOUT_RIGHT_ALIGNED!r} or {READ_TABLE_LAYOUT_RING!r})"
+            )
         self.caches_info = caches_info
         self.group_infos = group_infos
+        # DSV4 readers expect right alignment; V4.1 readers require absolute ring columns.
+        self.read_table_layout = read_table_layout
+        self.preserve_query_padding = preserve_query_padding
 
     # -- public API ---------------------------------------------------------
 
@@ -256,6 +344,7 @@ class DsaMetadataBuilder:
             max_query_len=max_query_len,
             max_seq_len=max_seq_len,
         )
+        dsa.seq_lens_q_host = q_lens
         dsa.input_positions = positions
         dsa.is_acl_graph = enable_graph
         if positions is not None and positions.numel() > 0:
@@ -554,8 +643,12 @@ class DsaMetadataBuilder:
         new_cache_slots: Sequence[int] | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         query_total_tokens = 0
+        valid_total_tokens = 0
         for seq in range(batch_size):
-            query_total_tokens += max(0, min(int(q_lens[seq]), int(ctx_lens[seq])))
+            q_len = max(0, int(q_lens[seq]))
+            valid_q_len = min(q_len, max(0, int(ctx_lens[seq])))
+            query_total_tokens += q_len if self.preserve_query_padding else valid_q_len
+            valid_total_tokens += valid_q_len
 
         out_slot_rows = max(graph_slot_capacity, query_total_tokens) if graph_slot_capacity > 0 else query_total_tokens
         semantic_cols = int(raw_bt.size(1))
@@ -571,24 +664,27 @@ class DsaMetadataBuilder:
             return block_id * block_size + block_offset
 
         slots_list = [-1] * out_slot_rows
-        if new_cache_slots is not None and len(new_cache_slots) == query_total_tokens:
+        if (
+            new_cache_slots is not None
+            and len(new_cache_slots) == query_total_tokens
+            and valid_total_tokens == query_total_tokens
+        ):
             slots_list[:query_total_tokens] = [int(slot) for slot in new_cache_slots]
         else:
             write_idx = 0
             for seq in range(batch_size):
                 ctx_len = int(ctx_lens[seq])
-                q_len = max(0, min(int(q_lens[seq]), ctx_len))
-                if seq >= raw_bt.size(0):
-                    write_idx += q_len
-                    continue
-                q_start = ctx_len - q_len
-                for i in range(q_len):
-                    slots_list[write_idx] = slot_for_position(seq, q_start + i)
-                    write_idx += 1
+                query_rows = max(0, int(q_lens[seq]))
+                q_len = max(0, min(query_rows, ctx_len))
+                row_count = query_rows if self.preserve_query_padding else q_len
+                if seq < raw_bt.size(0):
+                    q_start = ctx_len - q_len
+                    for i in range(q_len):
+                        slots_list[write_idx + i] = slot_for_position(seq, q_start + i)
+                write_idx += row_count
         out_slots = torch.tensor(slots_list, dtype=torch.int32, device=raw_bt.device)
 
-        # Rebuild the read-side block table: keep only the SWA window columns,
-        # right-aligned.
+        # V4.1 indexes absolute ring columns; V4 retains right-aligned history.
         dst_lens = [(max(int(ctx_lens[s]), 0) + block_size - 1) // block_size for s in range(batch_size)]
         max_dst_len = max(max(dst_lens) if dst_lens else 0, semantic_cols)
         if graph_slot_capacity > 0 and graph_block_table_capacity_cols > 0:
@@ -600,15 +696,21 @@ class DsaMetadataBuilder:
             dtype=torch.int32,
             device=raw_bt.device,
         )
-        for s in range(batch_size):
-            if s >= raw_bt.size(0):
-                continue
-            retained_cols = min(semantic_cols, dst_lens[s])
-            start_col = dst_lens[s] - retained_cols
-            for j in range(retained_cols):
-                logical_col = start_col + j
-                physical_col = logical_col % semantic_cols
-                new_bt[s, logical_col] = raw_bt[s, physical_col]
+        rows = min(batch_size, int(raw_bt.size(0)))
+        if self.read_table_layout == READ_TABLE_LAYOUT_RING:
+            if rows > 0 and max_dst_len > 0 and semantic_cols > 0:
+                cols = torch.arange(max_dst_len, device=raw_bt.device) % semantic_cols
+                new_bt[:rows] = raw_bt[:rows, cols]
+        else:
+            for s in range(batch_size):
+                if s >= raw_bt.size(0):
+                    continue
+                retained_cols = min(semantic_cols, dst_lens[s])
+                start_col = dst_lens[s] - retained_cols
+                for j in range(retained_cols):
+                    logical_col = start_col + j
+                    physical_col = logical_col % semantic_cols
+                    new_bt[s, logical_col] = raw_bt[s, physical_col]
         return new_bt, out_slots
 
     # -- SEQUENCE group (expand_blocks_to_slots, cpp:270-307) --------------

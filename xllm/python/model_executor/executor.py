@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 import torch.nn as nn
@@ -118,24 +118,49 @@ def _create_attention_backend(
     dtype: torch.dtype,
     config: dict[str, Any] | None = None,
     max_num_reqs: int = 1,
+    acl_graph_enabled: bool = False,
+    quant_mode: str | None = None,
 ) -> AttentionBackend:
     config = config or {}
     model_type = config.get("model_type", "")
+    if model_type == "deepseek_v41" and not current_platform.is_npu():
+        raise NotImplementedError(
+            f"DeepSeek-V4.1 runs on NPU only; no attention backend available for device type '{device.type}'"
+        )
     if is_deepseek_v4_model(config) and current_platform.is_npu():
-        from xllm.python.attention.dsa_attention import DsaAttentionBackend
-
-        return DsaAttentionBackend(
+        dsa_kwargs: dict[str, Any] = dict(
             compress_ratios=list(config.get("compress_ratios", [])),
             window_size=int(config.get("window_size", 128)),
             n_layers=int(config.get("n_layers", config.get("num_hidden_layers", 0))),
             num_heads=first_attention.num_heads,
             attn_head_dim=first_attention.head_dim,
             index_topk=int(config.get("index_topk", 512)),
-            index_n_heads=int(config.get("index_n_heads", 64)),
+            index_n_heads=int(config.get("index_n_heads", 32 if model_type == "deepseek_v41" else 64)),
             index_head_dim=int(config.get("index_head_dim", 128)),
             rope_head_dim=int(config.get("qk_rope_head_dim", 64)),
             device=device,
             dtype=dtype,
+        )
+        if model_type == "deepseek_v41":
+            from xllm.python.attention.csa2_attention import Csa2AttentionBackend
+            from xllm.python.models.deepseek_v41 import V41_QUANT_NONE
+
+            serving_len = int(config.get("max_position_embeddings", 0) or 0)
+            return Csa2AttentionBackend(
+                **dsa_kwargs,
+                kv_source_layer_ids=list(config.get("kv_source_layer_ids", [])),
+                index_source_layer_ids=list(config.get("index_source_layer_ids", [])),
+                candidate_source_layer_id=int(config.get("candidate_source_layer_id", -1)),
+                candidate_topk_blocks=int(config.get("candidate_topk_blocks", 2048)),
+                candidate_block_size=int(config.get("candidate_block_size", 8)),
+                max_model_len=serving_len,
+                quant_mode=quant_mode if quant_mode is not None else V41_QUANT_NONE,
+                acl_graph_enabled=acl_graph_enabled,
+            )
+        from xllm.python.attention.dsa_attention import DsaAttentionBackend
+
+        return DsaAttentionBackend(
+            **dsa_kwargs,
             block_size=int(config.get("block_size", 0)),
             dspark_use_native_sas=bool(config.get("dspark_use_native_sas", False)),
         )
@@ -346,6 +371,8 @@ class ModelExecutor:
             first_parameter.dtype,
             config,
             max(max_seqs_per_batch, 1) * max_decode_rows_per_request,
+            acl_graph_enabled=graph_backend == "aclgraph",
+            quant_mode=cast("str", model.quant_mode) if config.get("model_type") == "deepseek_v41" else None,
         )
 
         execution_model = model.model

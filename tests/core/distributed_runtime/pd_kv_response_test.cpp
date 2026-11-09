@@ -37,7 +37,7 @@ TEST(PDKVResponseTest, FlatKVExportsOnlyUnsharedSuffix) {
   blocks->emplace_back(/*id=*/17, /*allocator=*/nullptr);
   blocks->emplace_back(/*id=*/0, /*allocator=*/nullptr);
   blocks->emplace_back(/*id=*/29, /*allocator=*/nullptr);
-  state.incr_shared_blocks_num(BlockType::KV, /*num=*/1);
+  state.set_shared_blocks_num(BlockType::KV, /*num=*/1);
   proto::DisaggResponse response;
 
   append_pd_kv_transfer_groups(
@@ -57,7 +57,7 @@ TEST(PDKVResponseTest, CollectsOnlyUnsharedFlatBlockIdsForVirtualMemory) {
   blocks->emplace_back(/*id=*/17, /*allocator=*/nullptr);
   blocks->emplace_back(/*id=*/0, /*allocator=*/nullptr);
   blocks->emplace_back(/*id=*/29, /*allocator=*/nullptr);
-  state.incr_shared_blocks_num(BlockType::KV, /*num=*/1);
+  state.set_shared_blocks_num(BlockType::KV, /*num=*/1);
   proto::DisaggResponse response;
   std::vector<int32_t> block_ids{91};
   state.mutable_blocks(BlockType::LINEAR)
@@ -79,7 +79,7 @@ TEST(PDKVResponseTest, FlatKVRetainsEmptyGroupForFullySharedPrompt) {
   state.mutable_blocks(BlockType::KV)
       ->emplace_back(/*id=*/7,
                      /*allocator=*/nullptr);
-  state.incr_shared_blocks_num(BlockType::KV, /*num=*/1);
+  state.set_shared_blocks_num(BlockType::KV, /*num=*/1);
   proto::DisaggResponse response;
   std::vector<int32_t> block_ids;
 
@@ -103,7 +103,7 @@ TEST(PDKVResponseTest, GroupedCachesPreserveOrderPrefixesAndSWAGaps) {
   auto* swa_blocks = state.mutable_blocks(BlockType::SWA);
   swa_blocks->emplace_back();
   swa_blocks->emplace_back(/*id=*/8, /*allocator=*/nullptr);
-  state.incr_shared_blocks_num(BlockType::C4, /*num=*/1);
+  state.set_shared_blocks_num(BlockType::C4, /*num=*/1);
   state.mutable_blocks(BlockType::EMBEDDING)
       ->emplace_back(
           /*id=*/99, /*allocator=*/nullptr);

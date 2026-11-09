@@ -700,7 +700,8 @@ std::optional<std::string> validate_host_cache_options(
     std::ostringstream violation;
     violation << "model \"" << options.model_type
               << "\" uses a grouped cache layout (for example DeepSeek-V4 "
-                 "SWA/C4/C128) that host offload does not support";
+                 "SWA/C4/C128 or DeepSeek-V4.1 SWA/C1/C2) that host offload "
+                 "does not support";
     violations.emplace_back(violation.str());
   }
   if (options.has_conv_cache_shape != options.has_ssm_cache_shape) {

@@ -435,7 +435,7 @@ void allocate_kv_caches(std::vector<KVCache>& kv_caches,
   if (util::is_deepseek_v4_model_type(create_options.model_type())) {
     std::vector<int32_t> layer_compress_ratios;
     layer_compress_ratios.reserve(static_cast<size_t>(num_layers));
-    std::map<int32_t, std::string> ratio_shape_summaries;
+    std::map<std::pair<int32_t, BlockType>, std::string> ratio_shape_summaries;
     const std::vector<int32_t>& compress_ratios =
         create_options.compress_ratios();
 
@@ -447,20 +447,20 @@ void allocate_kv_caches(std::vector<KVCache>& kv_caches,
       DeepSeekV4KVCacheTensors tensors =
           create_dsv4_cache_tensors(kv_cache_shape, create_options, layer_idx);
       layer_compress_ratios.emplace_back(compress_ratio);
-      if (ratio_shape_summaries.find(compress_ratio) ==
-          ratio_shape_summaries.end()) {
-        ratio_shape_summaries.emplace(
-            compress_ratio, dsv4_shape_summary(tensors, compress_ratio));
+      const auto summary_key =
+          std::make_pair(compress_ratio, tensors.compressed_block_type);
+      if (auto [it, inserted] = ratio_shape_summaries.try_emplace(summary_key);
+          inserted) {
+        it->second = dsv4_shape_summary(tensors);
       }
       kv_caches.emplace_back(tensors);
     }
 
     LOG(INFO) << "[DSV4][KVCacheInit] layer_crs: "
               << int32_vector_string(layer_compress_ratios);
-    for (const std::pair<const int32_t, std::string>& summary :
-         ratio_shape_summaries) {
-      LOG(INFO) << "[DSV4][KVCacheInit] cr_" << summary.first
-                << " shapes: " << summary.second;
+    for (const auto& [key, summary] : ratio_shape_summaries) {
+      LOG(INFO) << "[DSV4][KVCacheInit] cr_" << key.first
+                << " shapes: " << summary;
     }
     return;
   }

@@ -48,7 +48,7 @@ TEST(KVCacheStateTest, TransferCursorTracksAndResets) {
   KVCacheState state;
   EXPECT_EQ(state.next_transfer_block_idx(), 0u);
 
-  state.set_next_transfer_block_idx(2);
+  state.advance_transfer_block_idx(2);
   EXPECT_EQ(state.next_transfer_block_idx(), 2u);
 
   state.advance_transfer_block_idx(5);
@@ -93,16 +93,20 @@ TEST(KVCacheStateTest, HasAnyBlocksIgnoresSingle) {
     EXPECT_FALSE(state.has_any_blocks());
   }
 
-  // EMBEDDING-only must NOT count as cache.
-  {
+  for (const BlockType type : {BlockType::EMBEDDING, BlockType::LINEAR}) {
     KVCacheState state;
-    state.add_blocks(BlockType::EMBEDDING, make_block(1));
+    state.mutable_blocks(BlockType::C1);
+    state.add_blocks(type, make_block(1));
     EXPECT_FALSE(state.has_any_blocks());
   }
 
   // Each cache-bearing type alone counts.
-  for (const BlockType type :
-       {BlockType::KV, BlockType::SWA, BlockType::C4, BlockType::C128}) {
+  for (const BlockType type : {BlockType::KV,
+                               BlockType::SWA,
+                               BlockType::C1,
+                               BlockType::C2,
+                               BlockType::C4,
+                               BlockType::C128}) {
     KVCacheState state;
     state.add_blocks(type, make_block(2));
     EXPECT_TRUE(state.has_any_blocks()) << "type=" << static_cast<int>(type);

@@ -26,6 +26,7 @@ from xllm.python import registry
 from xllm.python.model_loader.module_loaders import load_w8a8_dynamic_projection
 from xllm.python.model_platform_support import is_deepseek_v4_model
 from xllm.python.models import deepseek_v4_dspark, deepseek_v32
+from xllm.python.models.deepseek_v4 import DeepseekV4ForCausalLM
 from xllm.python.models.deepseek_v4_dspark import (
     DeepseekV4DSparkConfig,
     DeepseekV4DSparkForCausalLM,
@@ -386,6 +387,7 @@ def test_dspark_moe_loader_receives_explicit_checkpoint_prefix(
     model = DeepseekV4DSparkForCausalLM(_DSPARK_CONFIG)
     loader = _StateDict({"mtp.0.ffn.experts.0.w1.weight": torch.ones(1)})
     attention = model.model.layers[0].self_attn
+    mlp = model.model.layers[0].mlp
     calls: list[tuple[object, ...]] = []
 
     monkeypatch.setattr(
@@ -394,12 +396,8 @@ def test_dspark_moe_loader_receives_explicit_checkpoint_prefix(
         lambda *args, **kwargs: attention,
     )
     monkeypatch.setattr(attention, "process_weights_after_loading", lambda: None)
-    monkeypatch.setattr(
-        model.model.layers[0].mlp,
-        "process_weights_after_loading",
-        lambda: None,
-    )
-    monkeypatch.setattr(model, "_load_dsv4_moe", lambda *args: calls.append(args))
+    monkeypatch.setattr(mlp, "process_weights_after_loading", lambda: None)
+    monkeypatch.setattr(DeepseekV4ForCausalLM, "_load_dsv4_moe", staticmethod(lambda *args: calls.append(args)))
 
     model._load_dsv4_decoder_layer(
         loader,
@@ -411,6 +409,7 @@ def test_dspark_moe_loader_receives_explicit_checkpoint_prefix(
 
     assert calls == [
         (
+            mlp,
             loader,
             "mtp.0.",
             "model.layers.0.",

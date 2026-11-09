@@ -68,28 +68,18 @@ inline bool is_deepseek_v4_dspark_model_type(std::string_view model_type) {
   return model_type == kDeepseekV4DSparkModelType;
 }
 
+inline constexpr std::string_view kDeepseekV4ModelType = "deepseek_v4";
+inline constexpr std::string_view kDeepseekV41ModelType = "deepseek_v41";
+
+inline bool is_deepseek_v41_model_type(std::string_view model_type) {
+  return model_type == kDeepseekV41ModelType;
+}
+
 inline bool is_deepseek_v4_model_type(std::string_view model_type) {
-  constexpr std::string_view kTargetModelType = "deepseek_v4";
-  return model_type == kTargetModelType ||
+  return model_type == kDeepseekV4ModelType ||
+         is_deepseek_v41_model_type(model_type) ||
          is_deepseek_v4_dspark_model_type(model_type) ||
-         is_target_mtp_model_type(model_type, kTargetModelType);
-}
-
-// Returns whether a model's KV cache can be transferred between different TP
-// sizes without concatenating TP-local head shards. This is a PD cache-layout
-// capability, not an attention-runtime classification: DeepSeek-V4 DSA has
-// TP-invariant cache blocks even though it does not use the generic MLA path.
-inline bool is_tp_invariant_kv_cache_model_type(std::string_view model_type) {
-  return is_mla_model_type(model_type) || is_deepseek_v4_model_type(model_type);
-}
-
-inline bool is_target_model_type(std::string_view model_type,
-                                 std::string_view target_model_type,
-                                 bool match_mtp) {
-  if (model_type == target_model_type) {
-    return true;
-  }
-  return match_mtp && is_target_mtp_model_type(model_type, target_model_type);
+         is_target_mtp_model_type(model_type, kDeepseekV4ModelType);
 }
 
 // SFA C8: packed [int8 nope | bf16 rope | fp32 scale] KV cache. Currently only

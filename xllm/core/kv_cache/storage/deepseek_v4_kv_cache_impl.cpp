@@ -16,8 +16,10 @@ limitations under the License.
 #include "core/kv_cache/storage/deepseek_v4_kv_cache_impl.h"
 
 #include <glog/logging.h>
+#include <torch/types.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <sstream>
 #include <utility>
 
@@ -31,6 +33,7 @@ limitations under the License.
 #endif
 #endif
 
+#include "core/framework/model/model_type.h"
 #include "core/kv_cache/layout/deepseek_v4_cache_policy.h"
 #include "core/kv_cache/layout/kv_cache_shape.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
@@ -373,11 +376,10 @@ DeepSeekV4KVCacheTensors create_dsv4_cache_tensors(
     const KVCacheShape& kv_cache_shape,
     const KVCacheCreateOptions& create_options,
     int64_t layer_idx) {
-  CHECK(kv_cache_shape.has_key_cache_shape())
-      << "DeepSeek V4 cache shape must contain cache pool counts.";
   const std::vector<int64_t>& pool_counts = kv_cache_shape.key_cache_shape();
   CHECK_GE(pool_counts.size(), 3)
-      << "DeepSeek V4 cache shape must be [swa_count, c4_count, c128_count].";
+      << "DeepSeek V4/V4.1 cache shape must be [swa_count, c4_count, "
+         "c128_count] (V4) or [swa_count, c1_count, c2_count] (V4.1).";
   CHECK_GT(create_options.block_size(), 0)
       << "DeepSeek V4 block_size must be positive.";
   CHECK_GT(create_options.head_dim(), 0)
@@ -425,6 +427,50 @@ DeepSeekV4KVCacheTensors create_dsv4_cache_tensors(
     return cast_to_nd_format(torch::empty(
         dims, torch::dtype(dtype).device(create_options.device())));
   };
+
+  if (util::is_deepseek_v41_model_type(create_options.model_type())) {
+    const int64_t c1_count = pool_counts[1];
+    const int64_t c2_count = pool_counts[2];
+    const std::vector<int32_t>& kv_source_layer_ids =
+        create_options.kv_source_layer_ids();
+    const bool is_kv_source_layer =
+        std::find(kv_source_layer_ids.begin(),
+                  kv_source_layer_ids.end(),
+                  static_cast<int32_t>(layer_idx)) != kv_source_layer_ids.end();
+
+    DeepSeekV4KVCacheTensors tensors;
+    const bool is_c1_source = is_kv_source_layer && compress_ratio == 1;
+    const bool is_c2_source = is_kv_source_layer && compress_ratio == 2;
+    if (is_c1_source || is_c2_source) {
+      const int64_t compressed_count = is_c1_source ? c1_count : c2_count;
+      tensors.compressed_block_type =
+          is_c1_source ? BlockType::C1 : BlockType::C2;
+      tensors.key_cache = allocate_tensor(
+          KVCacheTensorRole::KEY,
+          dsv4_block_shape(compressed_count, block_size, n_heads, head_dim),
+          create_options.dtype());
+      tensors.index_cache = allocate_tensor(
+          KVCacheTensorRole::INDEX,
+          dsv4_block_shape(
+              compressed_count, block_size, index_n_heads, index_head_dim),
+          create_options.dtype());
+    }
+    tensors.swa_cache = allocate_tensor(
+        KVCacheTensorRole::WINDOW,
+        dsv4_block_shape(swa_count, block_size, n_heads, head_dim),
+        create_options.dtype());
+    if (is_c2_source) {
+      tensors.compress_kv_state =
+          allocate_tensor(KVCacheTensorRole::KV_STATE,
+                          {swa_count, block_size, head_dim},
+                          torch::kFloat32);
+      tensors.compress_score_state =
+          allocate_tensor(KVCacheTensorRole::SCORE_STATE,
+                          {swa_count, block_size, head_dim},
+                          torch::kFloat32);
+    }
+    return tensors;
+  }
 
   DeepSeekV4KVCacheTensors tensors;
   if (compress_ratio == 1) {
@@ -534,12 +580,22 @@ DeepSeekV4KVCacheTensors create_dsv4_cache_tensors(
   return tensors;
 }
 
-std::string dsv4_shape_summary(const DeepSeekV4KVCacheTensors& tensors,
-                               int32_t compress_ratio) {
+std::string dsv4_shape_summary(const DeepSeekV4KVCacheTensors& tensors) {
   std::ostringstream summary;
-  if (compress_ratio == 1) {
-    summary << "swa_cache=" << tensor_shape_string(tensors.swa_cache);
-  } else if (compress_ratio == 4) {
+  if (tensors.compressed_block_type == BlockType::C1 ||
+      tensors.compressed_block_type == BlockType::C2) {
+    summary << "key_cache=" << tensor_shape_string(tensors.key_cache)
+            << ", index_cache=" << tensor_shape_string(tensors.index_cache)
+            << ", swa_cache=" << tensor_shape_string(tensors.swa_cache);
+    if (tensors.compressed_block_type == BlockType::C2) {
+      summary << ", compress_kv_state="
+              << tensor_shape_string(tensors.compress_kv_state)
+              << ", compress_score_state="
+              << tensor_shape_string(tensors.compress_score_state);
+    }
+    return summary.str();
+  }
+  if (tensors.compressed_block_type == BlockType::C4) {
     summary << "key_cache=" << tensor_shape_string(tensors.key_cache)
             << ", index_cache=" << tensor_shape_string(tensors.index_cache)
             << ", indexer_cache_scale="
@@ -553,7 +609,7 @@ std::string dsv4_shape_summary(const DeepSeekV4KVCacheTensors& tensors,
             << tensor_shape_string(tensors.compress_index_kv_state)
             << ", compress_index_score_state="
             << tensor_shape_string(tensors.compress_index_score_state);
-  } else if (compress_ratio == 128) {
+  } else if (tensors.compressed_block_type == BlockType::C128) {
     summary << "key_cache=" << tensor_shape_string(tensors.key_cache)
             << ", swa_cache=" << tensor_shape_string(tensors.swa_cache)
             << ", compress_kv_state="

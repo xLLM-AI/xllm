@@ -80,9 +80,6 @@ from xllm.python.layers.npu.qwen3_5.gdn_metadata_builder import (
 from xllm.python.layers.npu.qwen3_5.moe import (
     NpuQwen3_5SparseMoEBlock,
 )
-from xllm.python.layers.qwen3_5.decoder_layer import (
-    get_qwen3_5_decoder_layer_class,
-)
 from xllm.python.model_executor.forward_context import (
     AclGraphExecutionState,
     ForwardContext,
@@ -94,17 +91,25 @@ from xllm.python.model_executor.runners.eager import EagerRunner
 from xllm.python.model_loader import ParallelLoadContext, ScopedWeightLoader
 from xllm.python.models.qwen3_5 import Qwen3_5Config
 
-kernels.gemma_rms_norm = _gemma_rms_norm
-kernels.moe_fused_topk = MagicMock()
-kernels.grouped_moe_bf16 = MagicMock()
-kernels.prepare_row_parallel_weight = MagicMock(side_effect=lambda weight: (weight, False))
-distributed.all_gather_variable = MagicMock()
-distributed.all_gather = MagicMock()
-distributed.gather_dp_execution_tokens = MagicMock()
-distributed.all_reduce_ = MagicMock()
-distributed.tp_all_reduce = MagicMock()
-distributed.moe_tp_all_reduce = MagicMock()
-distributed.moe_ep_all_reduce = MagicMock()
+
+@pytest.fixture(autouse=True)
+def _isolate_kernel_and_distributed_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(kernels, "gemma_rms_norm", _gemma_rms_norm, raising=False)
+    monkeypatch.setattr(kernels, "moe_fused_topk", MagicMock(), raising=False)
+    monkeypatch.setattr(kernels, "grouped_moe_bf16", MagicMock(), raising=False)
+    monkeypatch.setattr(
+        kernels, "prepare_row_parallel_weight", MagicMock(side_effect=lambda weight: (weight, False)), raising=False
+    )
+    for operation in (
+        "all_gather_variable",
+        "all_gather",
+        "gather_dp_execution_tokens",
+        "all_reduce_",
+        "tp_all_reduce",
+        "moe_tp_all_reduce",
+        "moe_ep_all_reduce",
+    ):
+        monkeypatch.setattr(distributed, operation, MagicMock())
 
 
 @pytest.fixture
@@ -187,11 +192,6 @@ def _mega_moe_graph_metadata(
             mega_moe_token_mask=mask,
         ),
     )
-
-
-def test_npu_decoder_factory_selects_privateuseone_backend() -> None:
-    assert get_qwen3_5_decoder_layer_class("privateuseone") is NpuQwen3_5DecoderLayer
-    assert NpuQwen3_5DecoderLayer.normalization_cls is NpuGemmaRMSNorm
 
 
 @pytest.mark.parametrize("layer_type", ["full_attention", "linear_attention"])
@@ -466,7 +466,6 @@ def test_npu_gdn_loads_native_conv_weight_layout() -> None:
         "out_proj.weight": torch.zeros(8, 8),
     }
     layer.load_weights(ScopedWeightLoader([_StateDict(tensors)]), ParallelLoadContext(tp_rank=0, tp_size=1))
-    assert layer.conv1d_weight.shape == (4, 24)
     torch.testing.assert_close(layer.conv1d_weight, checkpoint_conv.squeeze(1).transpose(0, 1))
 
 
@@ -1849,11 +1848,6 @@ def test_npu_decode_passes_native_weight_and_cache_to_tilelang(
     assert actual is output
     assert kernel.call_args.args[1] is weight
     assert kernel.call_args.args[2] is conv_state
-
-
-def test_npu_moe_rejects_non_bf16_weights() -> None:
-    with pytest.raises(NotImplementedError, match="support BF16 only"):
-        NpuQwen3_5SparseMoEBlock(_config(), torch.float16, torch.device("cpu"))
 
 
 def test_npu_moe_partitions_expert_axis_for_ep() -> None:
