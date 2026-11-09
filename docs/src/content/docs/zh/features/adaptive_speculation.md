@@ -257,11 +257,11 @@ Event、耗时采样 D2H 或文件写入；原有结果就绪 Event、结果回�
 
 #### 成本模型与覆盖范围
 
-`model` 支持 `sps` 和 `additive`。一维 SPS 表按物理 target graph 行数 `G`
+`model` 支持 `sps`、`additive` 和 `graph`。一维 SPS 表按物理 target graph 行数 `G`
 描述每秒完整步数，成本为 `1000 / SPS(G)` 毫秒；二维加性模型拟合
 `bias + alpha(Bcap) + theta(G)` 秒，其中 `Bcap` 是物理 draft request 桶，
 不是 HTTP 逻辑并发数。这些都是完整一步的成本，不能再次加上 draft/commit 耗时。
-二维网格必须通过共同的 G 值连通；request 桶和可选的 `target_graph_rows` 必须
+加性模型的二维网格必须通过共同的 G 值连通；request 桶和可选的 `target_graph_rows` 必须
 已经捕获，并保留完整宽度覆盖。上下文区间不能重叠，且必须满足模型、KV 容量和
 最坏采样进度的限制。
 
@@ -276,6 +276,56 @@ Unified 启动为每个实际请求数 `B` 捕获最多四个 target 桶：分�
 `DSpark adaptive effective configuration`，包含来源、补齐默认项后的生效配置
 及实际捕获的图几何。服务过程中不做标定、拟合或 graph recapture。未标定的
 KV 区间或 request 桶使用已经预热的完整宽度准入策略，不做 eager 重试。
+
+### Graph 成本感知验证（NPU）
+
+将启动标定配置中的 `model` 设为 `graph`，按实际预热的
+`(物理请求桶 Bcap, 物理验证图 G, KV 区间)` 保留完整步耗时的中位数。
+相同 G 在不同 Bcap 下可以有不同成本；相邻 G 的延迟跳变和非单调关系也会保留。
+预算规划器继续用 n−2 及更早的 confidence 计算预期输出量，并按
+`预期输出 token 数 / 实测完整步毫秒数` 比较已预热的候选图。
+
+这种按图成本选择预算的方式参考
+[DeepInfer 的 MTPVarlen](https://github.com/deepseek-ai/DeepInfer/blob/553741557a57df44a46fb3ab72b6aafeaf945337/csrc/engine/mtp_varlen.hpp)。
+xLLM 使用现有 NPU 异步流水线的稳定完成窗口，成本包含 draft、验证、提交及回收；
+不把 CUDA 计时事件迁入 NPU，也不重复计入 draft/commit 耗时。此模式的成本表仍然
+在启动阶段生成并一致地安装到所有 worker，在线成本回归不属于此模式。
+
+例如创建 `/configs/npu-graph-cost.json`：
+
+```json
+{
+  "model": "graph",
+  "request_buckets": [1, 2, 4, 8],
+  "contexts": [
+    {"prefill_tokens": 128, "min_kv_length": 1, "max_kv_length": 1024}
+  ],
+  "warmup_steps": 4,
+  "window_steps": 8,
+  "windows_per_point": 3,
+  "token_seed": 1
+}
+```
+
+在上面的 NPU 自适应 target 验证启动命令中使用：
+
+```bash
+--adaptive_target_verify_calibration=/configs/npu-graph-cost.json \
+--adaptive_target_verify_cost_table_output=/results/npu-graph-costs.json
+```
+
+请求桶必须存在于该服务的预热结果中；省略 `target_graph_rows` 会测量对应 Bcap
+下所有合法预热图。显式选择较少的图时，每个 Bcap 的完整宽度图必须保留。
+没有实测成本的图不参与成本评分；缺少当前逻辑批次的完整宽度成本时，采用已有的
+预热完整宽度准入策略。无法覆盖物理请求桶完整宽度的表会在服务就绪前被拒绝。
+`graph_costs` 保存 `draft_requests`、`target_graph_rows` 和 `step_time_ms` 三个字段，
+Graph 表必须声明 `max_kv_length`，并通过带版本及兼容性信息的 bundle 加载；
+不能使用旧版裸表入口。外围 bundle 继续校验模型、并行拓扑、Draft5/7 和 KV 区间。
+
+精确表不需要加性拟合的连通性假设，也不将不同 Bcap 的窗口合并成一个 G 成本。
+其训练误差为零仅表示保存了各单元的中位数，不代表真实请求已经获得性能提升；
+应在相同权重、上下文、并发及 Graph 设置下比较 SPS/加性模式与 `graph` 模式的
+TPOT、吞吐和输出一致性。
 
 ### 复用已保存成本表
 

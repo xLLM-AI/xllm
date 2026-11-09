@@ -24,6 +24,8 @@ cc_test(
   NO_NPU_RUNTIME
   SRCS
     spec_startup_calibration_test.cpp
+    "${PROJECT_SOURCE_DIR}/xllm/core/framework/speculative/adaptive/spec_cost_profile_store.cpp"
+    "${PROJECT_SOURCE_DIR}/xllm/core/framework/speculative/adaptive/verify_budget_planner.cpp"
     "${PROJECT_SOURCE_DIR}/xllm/core/framework/speculative/adaptive/spec_startup_calibration.cpp"
     "${PROJECT_SOURCE_DIR}/xllm/core/framework/speculative/adaptive/spec_cost_model.cpp"
     "${PROJECT_SOURCE_DIR}/xllm/core/framework/speculative/adaptive/spec_window_collector.cpp"

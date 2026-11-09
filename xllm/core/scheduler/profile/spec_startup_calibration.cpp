@@ -280,9 +280,7 @@ void ProfileManager::calibrate_spec_startup() {
           {"min_kv_length", entry.min_kv_length},
           {"max_kv_length", entry.max_kv_length},
           {"request_buckets", entry.request_buckets},
-          {"model",
-           entry.model.kind() == SpecCostModel::Kind::SPS ? "sps"
-                                                          : "additive"}});
+          {"model", SpecCostModel::kind_name(entry.model.kind())}});
     }
     const auto data = nlohmann::json::parse(serialized);
     LOG(INFO) << "DSpark adaptive effective configuration: "
