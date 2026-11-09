@@ -59,6 +59,13 @@ class StaticKVCacheBlockPool final {
   // Linear-layer order: Conv row, then the first SSM checkpoint row.
   void append_linear_state_rows(int32_t state_id,
                                 std::vector<int32_t>* rows) const;
+  // Append [logical id, physical rows...] only for newer allocations. The
+  // caller owns consumer epochs; reading mappings never consumes pool state.
+  void append_changed_rows(BlockType type,
+                           Slice<Block> blocks,
+                           const std::vector<uint64_t>& known_epochs,
+                           std::vector<int32_t>* rows,
+                           std::vector<uint64_t>* epochs) const;
 
   size_t num_slots() const;
   // In slab mode these resource-accounting methods return payload bytes.
@@ -144,6 +151,7 @@ class StaticKVCacheBlockPool final {
   std::array<std::vector<int32_t>, 2> physical_rows_;
   // Full logical ID allocation epochs survive physical row and type reuse.
   std::vector<uint64_t> full_block_lease_epochs_;
+  std::vector<uint64_t> linear_state_lease_epochs_;
   std::array<std::vector<const void*>, 2> placement_hints_;
   std::unordered_map<const void*, RequestPlacement> request_placements_;
 };

@@ -38,6 +38,273 @@ pytestmark = pytest.mark.skipif(
 
 _OUTPUT_RTOL = 0.02
 _OUTPUT_ATOL = 1e-3
+_INDEX_GUARD_SIZE = 37
+_INDEX_GUARD_VALUE = -123456789
+
+
+def _guarded_shared_indices(shape: tuple[int, ...], device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    storage = torch.full((prod(shape) + 2 * _INDEX_GUARD_SIZE,), _INDEX_GUARD_VALUE, dtype=torch.int32, device=device)
+    return storage, storage.narrow(0, _INDEX_GUARD_SIZE, prod(shape)).view(shape)
+
+
+def _assert_guarded_shared_indices(storage: torch.Tensor, expected: torch.Tensor) -> None:
+    actual = storage.cpu()
+    guard = [_INDEX_GUARD_VALUE] * _INDEX_GUARD_SIZE
+    assert actual[:_INDEX_GUARD_SIZE].tolist() == guard
+    assert actual[-_INDEX_GUARD_SIZE:].tolist() == guard
+    torch.testing.assert_close(
+        actual[_INDEX_GUARD_SIZE:-_INDEX_GUARD_SIZE].view(expected.shape), expected, rtol=0, atol=0
+    )
+
+
+@pytest.mark.parametrize(("groups", "batch", "row_gap"), [(1, 1, 0), (3, 259, 7)], ids=["c1", "strided-tail"])
+@pytest.mark.parametrize("graph", [False, True], ids=["eager", "graph"])
+@torch.inference_mode()
+def test_shared_linear_index_fusion_refreshes_rows_and_ids(groups: int, batch: int, row_gap: int, graph: bool) -> None:
+    device = torch.device("npu:0")
+    capacity = 19
+    row_storage = torch.full((2 * groups + 2, capacity + row_gap), -71, dtype=torch.int32, device=device)
+    rows = row_storage[1:-1, :capacity]
+    ids = torch.empty(batch, dtype=torch.int32, device=device)
+    storage, output = _guarded_shared_indices((groups, batch, 2), device)
+    addresses = ids.data_ptr(), rows.data_ptr(), output.data_ptr()
+    captured = None
+    for phase in range(3):
+        # Python integer values distinguish adjacent rows above float32's exact
+        # range. The row gaps and output guards also exercise partial stores.
+        row_values = [
+            [0, *((1 << 24) + 1009 * row + 3 * logical + 2003 * phase for logical in range(1, capacity))]
+            for row in range(2 * groups)
+        ]
+        choices = (1, capacity - 1, 0, -1, 2, -(1 << 31))
+        logical_ids = (
+            [1 + phase % 2] if batch == 1 else [choices[(index + phase) % len(choices)] for index in range(batch)]
+        )
+        rows.copy_(torch.tensor(row_values, dtype=torch.int32, device=device))
+        ids.copy_(torch.tensor(logical_ids, dtype=torch.int32, device=device))
+        if captured is None:
+            torch.ops.xllm_ops.shared_linear_state_indices_out(ids, rows, output)
+            if graph:
+                torch.npu.synchronize()
+                captured = torch.npu.NPUGraph()
+                with torch.npu.graph(captured):
+                    torch.ops.xllm_ops.shared_linear_state_indices_out(ids, rows, output)
+        else:
+            captured.replay()
+        torch.npu.synchronize()
+        expected = torch.tensor(
+            [
+                [
+                    [row_values[2 * group + role][logical] if logical > 0 else -1 for role in range(2)]
+                    for logical in logical_ids
+                ]
+                for group in range(groups)
+            ],
+            dtype=torch.int32,
+        )
+        _assert_guarded_shared_indices(storage, expected)
+        assert addresses == (ids.data_ptr(), rows.data_ptr(), output.data_ptr())
+
+
+@pytest.mark.parametrize(
+    ("layers", "batch", "columns", "tokens", "row_gap", "page_size"),
+    [(1, 1, 1, 1, 0, 128), (3, 2, 131, 259, 7, 128), (2, 1, 7, 11, 5, 1)],
+    ids=["c1", "strided-tail", "large-physical-pages"],
+)
+@pytest.mark.parametrize("graph", [False, True], ids=["eager", "graph"])
+@torch.inference_mode()
+def test_shared_full_index_fusion_refreshes_tables_and_slots(
+    layers: int, batch: int, columns: int, tokens: int, row_gap: int, page_size: int, graph: bool
+) -> None:
+    device = torch.device("npu:0")
+    capacity, padding_row = 19, 10
+    row_storage = torch.full((layers + 2, capacity + row_gap), -71, dtype=torch.int32, device=device)
+    rows = row_storage[1:-1, :capacity]
+    table = torch.empty((batch, columns), dtype=torch.int32, device=device)
+    slots = torch.empty(tokens, dtype=torch.int32, device=device)
+    table_storage, output_tables = _guarded_shared_indices((layers, batch, columns), device)
+    slot_storage, output_slots = _guarded_shared_indices((layers, tokens), device)
+    addresses = tuple(tensor.data_ptr() for tensor in (rows, table, slots, output_tables, output_slots))
+    captured = None
+
+    def _run() -> None:
+        torch.ops.xllm_ops.shared_full_indices_out(
+            table, slots, rows, page_size, padding_row, output_tables, output_slots
+        )
+
+    for phase in range(3):
+        base = (1 << 24) + 1 if page_size == 1 else (1 << 17) + 1
+        row_values = [
+            [0, *(base + 1009 * layer + 3 * logical + 2003 * phase for logical in range(1, capacity))]
+            for layer in range(layers)
+        ]
+        choices = (1, 0, -1, capacity - 1, 2, -(1 << 31))
+        table_values = (
+            [1 + phase % 2]
+            if batch * columns == 1
+            else [choices[(index + phase) % len(choices)] for index in range(batch * columns)]
+        )
+        slot_choices = (
+            page_size + min(1, page_size - 1),
+            0,
+            -1,
+            3 * page_size - 1,
+            (capacity - 1) * page_size + min(7, page_size - 1),
+            -(1 << 31),
+        )
+        slot_values = (
+            [(1 + phase % 2) * page_size + min(1, page_size - 1)]
+            if tokens == 1
+            else [slot_choices[(index + phase) % len(slot_choices)] for index in range(tokens)]
+        )
+        rows.copy_(torch.tensor(row_values, dtype=torch.int32, device=device))
+        table.copy_(torch.tensor(table_values, dtype=torch.int32, device=device).view(batch, columns))
+        slots.copy_(torch.tensor(slot_values, dtype=torch.int32, device=device))
+        if captured is None:
+            _run()
+            if graph:
+                torch.npu.synchronize()
+                captured = torch.npu.NPUGraph()
+                with torch.npu.graph(captured):
+                    _run()
+        else:
+            captured.replay()
+        torch.npu.synchronize()
+        expected_tables = torch.tensor(
+            [
+                [
+                    row_values[layer][logical] if logical > 0 else padding_row if logical == 0 else logical
+                    for logical in table_values
+                ]
+                for layer in range(layers)
+            ],
+            dtype=torch.int32,
+        ).view(layers, batch, columns)
+        expected_slots = torch.tensor(
+            [
+                [
+                    slot if slot < 0 else row_values[layer][slot // page_size] * page_size + slot % page_size
+                    for slot in slot_values
+                ]
+                for layer in range(layers)
+            ],
+            dtype=torch.int32,
+        )
+        _assert_guarded_shared_indices(table_storage, expected_tables)
+        _assert_guarded_shared_indices(slot_storage, expected_slots)
+        assert addresses == tuple(tensor.data_ptr() for tensor in (rows, table, slots, output_tables, output_slots))
+
+
+@torch.inference_mode()
+def test_shared_linear_index_fusion_preserves_empty_output_guards() -> None:
+    device = torch.device("npu:0")
+    rows = torch.zeros((4, 8), dtype=torch.int32, device=device)
+    ids = torch.empty(0, dtype=torch.int32, device=device)
+    storage, output = _guarded_shared_indices((2, 0, 2), device)
+    torch.ops.xllm_ops.shared_linear_state_indices_out(ids, rows, output)
+    torch.npu.synchronize()
+    _assert_guarded_shared_indices(storage, torch.empty((2, 0, 2), dtype=torch.int32))
+
+
+@pytest.mark.parametrize(("batch", "tokens"), [(0, 0), (0, 3), (2, 0)])
+@torch.inference_mode()
+def test_shared_full_index_fusion_handles_independent_empty_outputs(batch: int, tokens: int) -> None:
+    device = torch.device("npu:0")
+    rows = torch.tensor([[0, 6], [0, 14]], dtype=torch.int32, device=device)
+    table = torch.tensor([[0, 1, -1]] * batch, dtype=torch.int32, device=device).view(batch, 3)
+    slots = torch.tensor([0, 129, -1][:tokens], dtype=torch.int32, device=device)
+    table_storage, output_tables = _guarded_shared_indices((2, batch, 3), device)
+    slot_storage, output_slots = _guarded_shared_indices((2, tokens), device)
+    torch.ops.xllm_ops.shared_full_indices_out(table, slots, rows, 128, 10, output_tables, output_slots)
+    torch.npu.synchronize()
+    expected_tables = torch.tensor([[[10, physical, -1]] * batch for physical in (6, 14)], dtype=torch.int32).view(
+        2, batch, 3
+    )
+    expected_slots = torch.tensor([[0, physical * 128 + 1, -1][:tokens] for physical in (6, 14)], dtype=torch.int32)
+    _assert_guarded_shared_indices(table_storage, expected_tables)
+    _assert_guarded_shared_indices(slot_storage, expected_slots)
+
+
+@pytest.mark.parametrize(
+    ("batch", "columns", "fused"),
+    [(5, 256, True), (8, 255, True), (8, 256, False), (32, 256, False)],
+    ids=["c1-captured-table", "fusion-limit", "above-fusion-limit", "large-parallel-map"],
+)
+@torch.inference_mode()
+def test_slab_full_mapping_size_dispatch_preserves_graph_updates(
+    batch: int, columns: int, fused: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from xllm.python.attention.backend import LayerCache, SharedKVCacheLayout
+    from xllm.python.attention.npu_paged_attention import NpuPagedAttentionBackend
+    from xllm.python.model_executor.forward_context import (
+        AclGraphExecutionState,
+        ForwardContext,
+        forward_context,
+    )
+
+    device = torch.device("npu:0")
+    layers, capacity = 16, 32
+    backend = NpuPagedAttentionBackend(1, 1, 2, 1.0, 0, False, device, torch.float16)
+    backend._shared_kv_layout = SharedKVCacheLayout(128, 8, 4, 8, 2, capacity, 262144, num_slabs=4)
+    rows = torch.zeros((layers, capacity), dtype=torch.int32, device=device)
+    cache = torch.empty((1, 128, 1, 2), device=device)
+    backend._kv_caches = [LayerCache(cache, cache, full_block_rows=row) for row in rows.unbind(0)]
+    table = torch.empty((batch, columns), dtype=torch.int32, device=device)
+    slots = torch.empty(batch, dtype=torch.int32, device=device)
+    backend._block_table_i32 = table
+    metadata = SimpleNamespace(slot_mapping=slots, has_kv_shard=False)
+    backend._metadata = metadata
+    context = ForwardContext(backend, device, metadata, backend._kv_caches, execution_state=AclGraphExecutionState({}))
+    native = torch.ops.xllm_ops.shared_full_indices_out
+    fused_calls: list[int] = []
+
+    def _fused(
+        block_table: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        row_maps: torch.Tensor,
+        page_size: int,
+        padding_row: int,
+        output_tables: torch.Tensor,
+        output_slots: torch.Tensor,
+    ) -> None:
+        fused_calls.append(output_tables.numel() + output_slots.numel())
+        native(block_table, slot_mapping, row_maps, page_size, padding_row, output_tables, output_slots)
+
+    monkeypatch.setattr(torch.ops.xllm_ops, "shared_full_indices_out", _fused)
+    captured = None
+    pointers = None
+    with forward_context(context):
+        for phase in range(3):
+            logical = 1 + phase % 2
+            physical = [16 + 8 * layer + 32 * phase for layer in range(layers)]
+            rows[:, logical].copy_(torch.tensor(physical, dtype=torch.int32, device=device))
+            table.fill_(logical)
+            table[:, -2] = 0
+            table[:, -1] = -1
+            slots.fill_(logical * 128 + phase)
+            slots[0] = 0
+            slots[-1] = -1
+            if captured is None:
+                backend._prepare_shared_full_tables()
+                torch.npu.synchronize()
+                captured = torch.npu.NPUGraph()
+                with torch.npu.graph(captured):
+                    backend._prepare_shared_full_tables()
+            else:
+                captured.replay()
+            torch.npu.synchronize()
+            outputs = (*backend._shared_full_block_tables.values(), *backend._shared_full_slot_mappings.values())
+            current_pointers = tuple(output.data_ptr() for output in outputs)
+            if pointers is None:
+                pointers = current_pointers
+            assert current_pointers == pointers
+            padding = backend._shared_kv_layout.full_read_padding_row
+            for layer, (output_table, output_slots) in enumerate(
+                zip(backend._shared_full_block_tables.values(), backend._shared_full_slot_mappings.values())
+            ):
+                assert output_table.cpu().tolist() == [[physical[layer]] * (columns - 2) + [padding, -1]] * batch
+                assert output_slots.cpu().tolist() == [0] + [physical[layer] * 128 + phase] * (batch - 2) + [-1]
+    assert fused_calls == ([16 * (batch * columns + batch)] * 2 if fused else [])
 
 
 @torch.inference_mode()

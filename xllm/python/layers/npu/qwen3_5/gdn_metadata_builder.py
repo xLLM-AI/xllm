@@ -406,7 +406,22 @@ class Qwen3_5GdnMetadataBuilder:
             out.shape != (groups, indices.numel(), 2) or out.dtype != indices.dtype or out.device != indices.device
         ):
             raise ValueError("Qwen3.5 GDN graph packed state indices changed shape, dtype, or device")
-        rows = self._row_table.rows().index_select(1, indices.clamp_min(0).to(torch.int64))
+        rows = self._row_table.rows()
+        if (
+            layout.num_slabs
+            and indices.device.type == "npu"
+            and indices.dtype == torch.int32
+            and indices.is_contiguous()
+            and rows.dtype == torch.int32
+            and rows.stride(1) == 1
+            and rows.stride(0) >= rows.shape[1]
+            and (out is None or out.is_contiguous())
+        ):
+            if out is None:
+                out = indices.new_empty((groups, indices.numel(), 2))
+            torch.ops.xllm_ops.shared_linear_state_indices_out(indices, rows, out)
+            return out
+        rows = rows.index_select(1, indices.clamp_min(0).to(torch.int64))
         if layout.num_slabs:
             packed = rows.view(groups, 2, -1).transpose(1, 2).contiguous()
         else:
