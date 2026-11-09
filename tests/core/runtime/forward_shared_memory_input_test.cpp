@@ -99,7 +99,7 @@ TYPED_TEST(ForwardSharedMemoryInputTest,
   const TypeParam source = make_input<TypeParam>(make_sparse_role_offsets());
   proto::PackedForwardInput packed;
   ASSERT_TRUE(source.to_packed_proto(&packed));
-  constexpr uint16_t kPreviousVersion = 9;
+  constexpr uint16_t kPreviousVersion = 10;
   ASSERT_GE(packed.payload().size(),
             sizeof(uint64_t) + sizeof(kPreviousVersion));
   std::memcpy(packed.mutable_payload()->data() + sizeof(uint64_t),
@@ -107,6 +107,24 @@ TYPED_TEST(ForwardSharedMemoryInputTest,
               sizeof(kPreviousVersion));
   TypeParam decoded;
   EXPECT_FALSE(decoded.from_packed_proto(packed));
+}
+
+TYPED_TEST(ForwardSharedMemoryInputTest,
+           SamplingDispatchMetadataSurvivesPackedInputs) {
+  TypeParam source = make_input<TypeParam>(make_sparse_role_offsets());
+  source.sampling_params.selected_token_idxes() = torch::tensor({1});
+  source.sampling_params.has_unseeded_sample() = true;
+  source.sampling_params.num_random_rows() = 1;
+  source.sampling_params.sampling_mode() = SamplingMode::RANDOM;
+  proto::PackedForwardInput packed;
+  ASSERT_TRUE(source.to_packed_proto(&packed));
+  TypeParam lazy;
+  ASSERT_TRUE(lazy.from_packed_proto(packed));
+  const TypeParam decoded =
+      lazy.to(torch::Device(torch::kCPU), torch::kFloat32);
+  EXPECT_TRUE(decoded.sampling_params.has_unseeded_sample());
+  EXPECT_EQ(decoded.sampling_params.num_random_rows(), 1);
+  EXPECT_EQ(decoded.sampling_params.sampling_mode(), SamplingMode::RANDOM);
 }
 
 TYPED_TEST(ForwardSharedMemoryInputTest,

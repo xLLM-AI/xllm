@@ -1342,6 +1342,8 @@ void SlotBuffer::prepare_sampling(const SamplingParameters& input) {
       device.copy_(host, /*non_blocking=*/true);
       field.member(prepared) = device.view(source.sizes());
     }
+    prepared.has_unseeded_sample() = input.has_unseeded_sample();
+    prepared.num_random_rows() = input.num_random_rows();
     prepared.sampling_mode() = input.sampling_mode();
     prepared.logprobs() = input.logprobs();
     prepared.return_logits() = input.return_logits();

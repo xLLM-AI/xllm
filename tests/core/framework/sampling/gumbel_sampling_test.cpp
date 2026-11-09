@@ -16,6 +16,8 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include <torch/torch.h>
 
+#include <limits>
+
 #include "core/framework/sampling/sampler.h"
 #include "tests/core/framework/sampling/sampling_test_utils.h"
 
@@ -34,6 +36,14 @@ TEST(GumbelSamplingTest, MasksGreedyRowsInMixedBatch) {
   EXPECT_TRUE(noise.select(/*dim=*/0, /*index=*/0).eq(0).all().item<bool>());
   EXPECT_TRUE(torch::isfinite(noise).all().item<bool>());
   EXPECT_TRUE(noise.select(/*dim=*/0, /*index=*/1).ne(0).any().item<bool>());
+}
+
+TEST(GumbelSamplingTest, CategoricalSamplingPreservesGroupedMaskedSupport) {
+  torch::Tensor logits =
+      torch::full({2, 3, 4}, -std::numeric_limits<float>::infinity());
+  logits.select(/*dim=*/-1, /*index=*/2).fill_(0.0F);
+  const torch::Tensor expected = torch::full({2, 3}, 2, torch::kInt64);
+  EXPECT_TRUE(torch::equal(categorical_sample(logits), expected));
 }
 
 }  // namespace xllm

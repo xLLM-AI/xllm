@@ -70,6 +70,29 @@ TEST(SamplingParamsTest, NormalizesGreedyAndSmallTemperatureRows) {
   EXPECT_FALSE(params.sampling_mode() == SamplingMode::GREEDY);
 }
 
+TEST(SamplingParamsTest, HostDispatchMetadataTracksOnlyRandomUnseededRows) {
+  RequestSamplingParam seeded;
+  seeded.temperature = 1.0F;
+  seeded.seed = 42;
+  RequestSamplingParam greedy;
+  greedy.temperature = 0.0F;
+  RequestSamplingParam unseeded;
+  unseeded.temperature = 1.0F;
+  SamplingParameters params;
+  params.init({&seeded, &greedy}, {0, 1}, {}, {}, {});
+  EXPECT_FALSE(params.has_unseeded_sample());
+  EXPECT_EQ(params.num_random_rows(), 1);
+  const auto copied = params.to(torch::Device(torch::kCPU), torch::kFloat32);
+  EXPECT_FALSE(copied.has_unseeded_sample());
+  EXPECT_EQ(copied.num_random_rows(), 1);
+  params.init({&seeded, &unseeded}, {0, 1}, {}, {}, {});
+  EXPECT_TRUE(params.has_unseeded_sample());
+  EXPECT_EQ(params.num_random_rows(), 2);
+  params.init({&greedy}, {0}, {}, {}, {});
+  EXPECT_FALSE(params.has_unseeded_sample());
+  EXPECT_EQ(params.num_random_rows(), 0);
+}
+
 TEST(SamplingParamsTest, MinimumConstraintsExpandForVerifyAndStayOffDrafts) {
   SamplingParameters params;
   params.selected_token_idxes() = torch::arange(2, torch::kInt32);

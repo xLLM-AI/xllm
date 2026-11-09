@@ -22,9 +22,12 @@ limitations under the License.
 #include <algorithm>
 #include <limits>
 #include <mutex>
+#include <tuple>
 
 #if defined(USE_NPU)
 #include <torch_npu/csrc/aten/NPUGeneratorImpl.h>
+
+#include "core/kernels/npu/tilelang/tilelang_ops_api.h"
 #endif
 
 #include "core/framework/config/model_config.h"
@@ -105,6 +108,18 @@ torch::Tensor gumbel_noise(const SamplingParameters& params,
   return noise;
 }
 
+torch::Tensor categorical_sample(const torch::Tensor& logits) {
+#if defined(USE_NPU)
+  if (kernel::npu::tilelang::supports_sample_from_logits(logits) &&
+      logits.size(0) >= 8) {
+    const torch::Tensor uniforms =
+        torch::rand({logits.size(0)}, logits.options().dtype(torch::kFloat32));
+    return kernel::npu::tilelang::sample_from_logits(logits, {}, {}, uniforms);
+  }
+#endif
+  return gumbel_sample(logits);
+}
+
 torch::Tensor gumbel_sample(const torch::Tensor& logits) {
   // clamp_min_ before log_: an exact 0.0 Exp draw would become -inf noise.
   return gumbel_argmax(
@@ -132,12 +147,70 @@ SampleOutput sample(torch::Tensor& logits,
                     const torch::Tensor& filter_mask) {
   SampleOutput output;
   // vLLM reports probabilities from the unmodified model distribution.
+  bool compact_logprobs = false;
+#if defined(USE_NPU)
+  compact_logprobs =
+      params.logprobs() && params.max_top_logprobs() == 0 &&
+      !params.use_beam_search() &&
+      !ModelConfig::get_instance().enable_qwen3_reranker() &&
+      kernel::npu::tilelang::supports_sample_from_logits(logits) &&
+      logits.size(0) >= 128 && logits.size(1) >= 65536 &&
+      (logits.scalar_type() == torch::kBFloat16 ||
+       logits.scalar_type() == torch::kFloat16);
+#endif
+  const torch::Tensor raw_logits =
+      compact_logprobs ? logits.clone() : torch::Tensor();
+  torch::Tensor raw_max;
+  torch::Tensor raw_log_sum;
+#if defined(USE_NPU)
+  if (compact_logprobs) {
+    std::tie(raw_max, raw_log_sum) =
+        kernel::npu::tilelang::row_log_normalization(logits);
+  }
+#endif
   const torch::Tensor raw_logprobs =
-      params.logprobs() && !params.use_beam_search()
+      params.logprobs() && !params.use_beam_search() && !compact_logprobs
           ? torch::log_softmax(logits, /*dim=*/-1, torch::kFloat32)
           : torch::Tensor();
 
-  process_logits(logits, params, filter_mask);
+  apply_logits_constraints(logits, params, filter_mask);
+  if (!params.is_all_greedy()) {
+#if defined(USE_NPU)
+    // Only random rows consume distribution transforms. Keep the original
+    // logits for greedy rows after applying their constraints above.
+    if (logits.device().type() == torch::kPrivateUse1 &&
+        params.sampling_mode() == SamplingMode::MIXED && !params.logprobs() &&
+        !params.return_logits() && !params.use_beam_search() &&
+        logits.size(0) >= 2 && logits.size(1) >= 32768 &&
+        params.num_random_rows() > 0 &&
+        params.num_random_rows() <= logits.size(0) / 2 &&
+        params.require_do_sample().numel() == logits.size(0) &&
+        (params.top_k().defined() || params.top_p().defined())) {
+      const torch::Tensor rows =
+          std::get<1>(params.require_do_sample()
+                          .to(torch::kFloat32)
+                          .topk(params.num_random_rows(), /*dim=*/0));
+      torch::Tensor selected = logits.index_select(/*dim=*/0, rows);
+      const auto select_control = [&](const torch::Tensor& control) {
+        return control.defined() ? control.index_select(/*dim=*/0, rows)
+                                 : torch::Tensor();
+      };
+      apply_logits_transforms(selected,
+                              select_control(params.temperatures()),
+                              select_control(params.min_p()),
+                              select_control(params.top_k()),
+                              select_control(params.top_p()));
+      logits.index_copy_(/*dim=*/0, rows, selected);
+    } else
+#endif
+    {
+      apply_logits_transforms(logits,
+                              params.temperatures(),
+                              params.min_p(),
+                              params.top_k(),
+                              params.top_p());
+    }
+  }
 
   // Keep the model dtype; consumers upcast where the reduction needs fp32.
   if (params.return_logits()) {
@@ -153,8 +226,30 @@ SampleOutput sample(torch::Tensor& logits,
   }
 
   torch::Tensor samples;
-  if (params.seeds().defined() &&
-      params.sampling_mode() != SamplingMode::GREEDY) {
+#if defined(USE_NPU)
+  const bool use_batched_sampling =
+      params.sampling_mode() != SamplingMode::GREEDY &&
+      kernel::npu::tilelang::supports_sample_from_logits(logits) &&
+      (!params.seeds().defined() ||
+       (params.seeds().dim() == 1 && params.seed_offsets().defined() &&
+        params.seed_offsets().dim() == 1 && params.seeds().is_contiguous() &&
+        params.seed_offsets().is_contiguous()));
+  if (use_batched_sampling) {
+    const auto uniform_options = logits.options().dtype(torch::kFloat32);
+    const torch::Tensor uniforms =
+        (!params.seeds().defined() || params.has_unseeded_sample())
+            ? torch::rand({logits.size(0)}, uniform_options)
+            : torch::Tensor();
+    samples = kernel::npu::tilelang::sample_from_logits(
+        logits, params.seeds(), params.seed_offsets(), uniforms);
+    if (params.sampling_mode() == SamplingMode::MIXED) {
+      samples = torch::where(
+          params.require_do_sample(), samples, greedy_sample(logits));
+    }
+  } else
+#endif
+      if (params.seeds().defined() &&
+          params.sampling_mode() != SamplingMode::GREEDY) {
     samples = gumbel_argmax(
         logits, gumbel_noise(params, logits.sizes(), logits.device()));
   } else if (params.sampling_mode() == SamplingMode::RANDOM) {
@@ -168,6 +263,14 @@ SampleOutput sample(torch::Tensor& logits,
   output.next_tokens = samples;
 
   if (params.logprobs()) {
+    if (compact_logprobs) {
+      output.logprobs = raw_logits.gather(/*dim=*/-1, samples.view({-1, 1}))
+                            .to(torch::kFloat32)
+                            .view({-1})
+                            .sub(raw_max)
+                            .sub_(raw_log_sum);
+      return output;
+    }
     if (::xllm::ModelConfig::get_instance().enable_qwen3_reranker()) {
       int32_t false_id = 2152;  // "no"
       int32_t true_id = 9693;   // "yes"

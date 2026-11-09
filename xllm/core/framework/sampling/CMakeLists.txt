@@ -18,6 +18,7 @@ cc_library(
   DEPS
     util
     :common
+    :config
     glog::glog
     torch
     :kernels
