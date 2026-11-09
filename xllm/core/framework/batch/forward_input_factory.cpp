@@ -22,6 +22,7 @@ limitations under the License.
 #include <utility>
 
 #include "core/framework/batch/batch_group.h"
+#include "core/framework/batch/shared_kv_cache_publication.h"
 #include "core/framework/config/execution_config.h"
 #include "core/framework/eplb/eplb_controller.h"
 #include "core/framework/model/model_args.h"
@@ -36,6 +37,13 @@ ForwardInputFactory::ForwardInputFactory(ForwardInputFactoryOptions options)
   CHECK_GT(options_.dp_size, 0);
   CHECK_GT(options_.cp_size, 0);
   CHECK_LE(options_.cp_size, std::numeric_limits<int32_t>::max());
+  if (options_.enable_shared_kv_cache_deltas) {
+    dp_shared_kv_publications_.reserve(options_.dp_size);
+    for (uint32_t rank = 0; rank < options_.dp_size; ++rank) {
+      dp_shared_kv_publications_.emplace_back(
+          std::make_unique<SharedKVCachePublication>());
+    }
+  }
   dp_batch_embedding_ids_.resize(options_.dp_size);
   dp_batch_request_ids_.resize(options_.dp_size);
   dp_batch_generations_.resize(options_.dp_size, 0);
@@ -46,6 +54,10 @@ ForwardInputFactory::ForwardInputFactory(ForwardInputFactoryOptions options)
 }
 
 ForwardInputFactory::~ForwardInputFactory() = default;
+ForwardInputFactory::ForwardInputFactory(ForwardInputFactory&&) noexcept =
+    default;
+ForwardInputFactory& ForwardInputFactory::operator=(
+    ForwardInputFactory&&) noexcept = default;
 
 void ForwardInputFactory::create_inputs(BatchGroup& batches,
                                         const ModelArgs& model_args,
@@ -55,6 +67,9 @@ void ForwardInputFactory::create_inputs(BatchGroup& batches,
       << "Split DP batch failed with dp_size as " << options_.dp_size
       << " and actual batch size as " << batches.size() << ".";
 
+  for (const auto& publication : dp_shared_kv_publications_) {
+    publication->begin();
+  }
   inputs.clear();
   PreparationState state;
   state.inputs.swap(inputs);
@@ -73,6 +88,18 @@ void ForwardInputFactory::create_inputs(BatchGroup& batches,
   is_graph_warmup = state.is_graph_warmup;
 }
 
+void ForwardInputFactory::acknowledge_shared_kv_cache() {
+  for (const auto& publication : dp_shared_kv_publications_) {
+    publication->acknowledge();
+  }
+}
+
+void ForwardInputFactory::reset_shared_kv_cache_publication() {
+  for (const auto& publication : dp_shared_kv_publications_) {
+    publication->reset();
+  }
+}
+
 void ForwardInputFactory::set_eplb_controller(EplbController* controller) {
   eplb_controller_ = controller;
 }
@@ -81,8 +108,15 @@ void ForwardInputFactory::prepare_rank_inputs(BatchGroup& batches,
                                               const ModelArgs& model_args,
                                               PreparationState& state) {
   for (uint32_t dp_rank = 0; dp_rank < options_.dp_size; ++dp_rank) {
+    SharedKVCachePublication* publication =
+        options_.enable_shared_kv_cache_deltas
+            ? dp_shared_kv_publications_[dp_rank].get()
+            : nullptr;
     state.inputs.emplace_back(batches[dp_rank].prepare_forward_input(
-        model_args, threadpool_.get(), static_cast<int32_t>(options_.cp_size)));
+        model_args,
+        threadpool_.get(),
+        static_cast<int32_t>(options_.cp_size),
+        publication));
     const auto& input = state.inputs[dp_rank];
     const auto& meta = input.input_params.meta;
     const BatchForwardType& current_forward_type = meta.batch_forward_type;
