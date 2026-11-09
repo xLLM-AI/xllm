@@ -19,6 +19,7 @@ limitations under the License.
 #include <torch/torch.h>
 
 #include <algorithm>
+#include <utility>
 
 #include "core/runtime/json_object_decode_adapter.h"
 #include "core/runtime/vlm_forward_params.h"
@@ -164,7 +165,7 @@ torch::Tensor ScheduleOverlap::prepare_sampling_impl(WorkerImpl& worker,
 }
 
 template <typename Input>
-void ScheduleOverlap::complete_step_impl(const Input& input,
+void ScheduleOverlap::complete_step_impl(Input& input,
                                          Stream& compute_stream,
                                          std::optional<ForwardOutput>& output) {
   if (output.has_value()) {
@@ -173,18 +174,10 @@ void ScheduleOverlap::complete_step_impl(const Input& input,
                                       input.json_object_errors.begin(),
                                       input.json_object_errors.end());
   }
-  record_output(compute_stream,
-                output,
-                input.input_params.embedding.request_ids,
-                input.sample_sequence_ids);
-}
-
-void ScheduleOverlap::record_output(
-    Stream& compute_stream,
-    const std::optional<ForwardOutput>& output,
-    const std::vector<std::string>& request_ids,
-    const std::vector<std::string>& sample_sequence_ids) {
-  if (!state_.record(output, request_ids, sample_sequence_ids)) {
+  // Model submission is complete; transfer this step's provenance to the cache.
+  if (!state_.record(output,
+                     std::move(input.input_params.embedding.request_ids),
+                     std::move(input.sample_sequence_ids))) {
     // Shutdown rejects publication and cache-only updates alike. Drain before
     // the caller releases the output and its asynchronous input owners.
     CHECK_EQ(compute_stream.synchronize(), 0);
