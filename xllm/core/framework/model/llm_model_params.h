@@ -36,7 +36,6 @@ class LlmModelParams final {
     out.attention = attention;
     out.embedding = embedding;
     out.parallel = parallel;
-    out.block_copy = block_copy;
     out.expert = expert;
     out.graph = graph;
     out.multi_block_tables = multi_block_tables;
@@ -57,7 +56,6 @@ class LlmModelParams final {
     params.meta = meta;
     params.attention = attention.to(device);
     params.embedding = embedding.to(device);
-    params.block_copy = block_copy.to(device);
     params.parallel = parallel.to(device);
     params.expert = expert.to(device);
     params.graph = graph.to(device);
@@ -127,7 +125,6 @@ class LlmModelParams final {
   LlmAttentionInput attention;
   LlmEmbeddingInput embedding;
   ParallelInput parallel;
-  BlockCopyInput block_copy;
   ExpertInput expert;
   LlmGraphInput graph;
   std::vector<torch::Tensor> multi_block_tables;

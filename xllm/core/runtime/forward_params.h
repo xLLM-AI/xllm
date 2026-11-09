@@ -35,7 +35,6 @@ limitations under the License.
 #include "core/framework/multimodal/embedding_output.h"
 #include "core/framework/multimodal/mm_batch_data.h"
 #include "core/framework/multimodal/mm_data.h"
-#include "core/framework/sampling/beam_searcher.h"
 #include "core/framework/sampling/sampling_params.h"
 #include "core/framework/speculative/verify_layout.h"
 #include "core/util/tensor_helper.h"
@@ -220,8 +219,7 @@ inline bool add_sampling_to_plan(const SamplingParameters& source,
          plan.add(source.unique_token_ids_lens(),
                   &target.unique_token_ids_lens()) &&
          plan.add(source.do_sample(), &target.do_sample()) &&
-         plan.add(source.filter_bitmask(), &target.filter_bitmask()) &&
-         plan.add(source.acc_logprob(), &target.acc_logprob());
+         plan.add(source.filter_bitmask(), &target.filter_bitmask());
 }
 
 inline torch::Tensor normalize_positions_for_device(
@@ -238,9 +236,6 @@ inline void clear_contiguous_input_buffer_tensor_targets(Params& params) {
   params.embedding.input_embedding = torch::Tensor();
   params.embedding.linear_state_indices = torch::Tensor();
   params.embedding.mtp_bootstrap_embeddings = torch::Tensor();
-  params.block_copy.src_block_indices = torch::Tensor();
-  params.block_copy.dst_block_indices = torch::Tensor();
-  params.block_copy.cum_sum = torch::Tensor();
   params.graph.attn_mask = torch::Tensor();
   params.graph.tiling_data = torch::Tensor();
 }
@@ -287,11 +282,6 @@ inline bool add_model_tensors_to_plan(const Params& source,
                   &target.embedding.linear_state_indices) &&
          plan.add(source.embedding.mtp_bootstrap_embeddings,
                   &target.embedding.mtp_bootstrap_embeddings) &&
-         plan.add(source.block_copy.src_block_indices,
-                  &target.block_copy.src_block_indices) &&
-         plan.add(source.block_copy.dst_block_indices,
-                  &target.block_copy.dst_block_indices) &&
-         plan.add(source.block_copy.cum_sum, &target.block_copy.cum_sum) &&
          plan.add(source.graph.attn_mask, &target.graph.attn_mask) &&
          plan.add(source.graph.tiling_data, &target.graph.tiling_data);
 }
@@ -639,8 +629,6 @@ class ForwardOutput final {
   // EPLB prepare-attempt token completed by this worker.
   int64_t prepared_token = -1;
 
-  BeamSearchOutput beam_search_output;
-
   // dit output data
   DiTForwardOutput dit_forward_output;
 };
@@ -682,11 +670,6 @@ class RawForwardOutput final {
   std::vector<JsonObjectOutputError> json_object_errors;
   std::vector<int64_t> expert_load_data;
   int64_t prepared_token = -1;
-  // beam search kernel output
-  std::vector<int32_t> src_seq_idxes;
-  std::vector<int32_t> out_tokens;
-  std::vector<float> out_logprobs;
-
   // dit output data
   DiTForwardOutput dit_forward_output;
 };

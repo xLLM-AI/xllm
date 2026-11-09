@@ -258,9 +258,6 @@ class Options {
   // Host KV layer-wise copy batches.
   PROPERTY(uint32_t, layers_wise_copy_batchs) = 4;
 
-  // beam width for beam search
-  PROPERTY(int32_t, beam_width) = 128;
-
   // KV cache data type for quantization.
   // "auto" (default): KV cache dtype aligns with model dtype (no quantization).
   // "int8": Enables INT8 quantization. Only supported on MLU backend.

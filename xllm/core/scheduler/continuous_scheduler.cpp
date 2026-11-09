@@ -243,12 +243,12 @@ bool ContinuousSchedulerBase::add_request(std::shared_ptr<Request>& request) {
   CHECK(request != nullptr);
   CHECK(!request->sequences().empty());
 
-  if ((request->check_beam_search() || request->best_of() > 1) &&
+  if (request->best_of() > 1 &&
       ::xllm::has_linear_attention_layers(resource_engine_->model_args())) {
     output_dispatcher_->process_failed_request(
         request,
         {StatusCode::INVALID_ARGUMENT,
-         "Beam search and best_of > 1 are not supported with LINEAR "
+         "best_of > 1 is not supported with LINEAR "
          "attention."});
     return true;
   }
@@ -403,11 +403,8 @@ BatchGroup ContinuousSchedulerBase::prepare_batch() {
     output_dispatcher_->process_completed_requests(finished);
   }
 
-  auto batches = batch_factory_.create_batches(
-      running_requests_,
-      running_sequences_,
-      running_sequences_budgets_,
-      kv_cache_manager_->get_swap_block_transfer_infos());
+  auto batches = batch_factory_.create_batches(running_sequences_,
+                                               running_sequences_budgets_);
 
   bool is_batches_empty = std::all_of(
       batches.begin(), batches.end(), [](const Batch& b) { return b.empty(); });
@@ -591,8 +588,6 @@ void ContinuousSchedulerBase::generate() {
 
 void ContinuousSchedulerBase::process_batch_output(
     const std::vector<std::shared_ptr<Request>>& requests) {
-  // Beam search may replace Sequence objects inside SequencesGroup.
-  // Always refresh the sequence pointers from requests before dereferencing.
   refresh_sequences_from_requests(requests, output_sequences_);
   scheduler_metrics_->update(output_sequences_);
 

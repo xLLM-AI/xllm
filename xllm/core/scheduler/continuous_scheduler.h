@@ -265,7 +265,6 @@ class ContinuousSchedulerBase : public Scheduler {
 
   std::optional<PendingStep> pending_step_;
 
-  // Refreshed at output consumption because beam search can replace sequences.
   std::vector<Sequence*> output_sequences_;
 
   // Construct a SchedulerState snapshot for the policy.

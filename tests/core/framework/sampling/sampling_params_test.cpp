@@ -133,14 +133,12 @@ TEST(SamplingParamsTest, DeviceTransferPreservesSamplingStateAndTensorTypes) {
   params.unique_token_counts() = torch::tensor({{2, 1}, {1, 3}}, torch::kInt32);
   params.unique_token_ids_lens() = torch::tensor({2, 2}, torch::kInt32);
   params.do_sample() = torch::tensor({true, false});
-  params.acc_logprob() = torch::tensor({{-0.5F}, {-1.0F}});
+
   params.sampling_mode() = SamplingMode::MIXED;
   params.logprobs() = true;
   params.return_logits() = true;
   params.is_embeddings() = true;
   params.max_top_logprobs() = 3;
-  params.num_return_sequences() = 2;
-  params.use_beam_search() = true;
 
   const SamplingParameters transferred =
       params.to(torch::Device(torch::kCPU), torch::kFloat64);
@@ -187,15 +185,13 @@ TEST(SamplingParamsTest, DeviceTransferPreservesSamplingStateAndTensorTypes) {
                            params.unique_token_ids_lens()));
   EXPECT_TRUE(torch::equal(transferred.do_sample(), params.do_sample()));
   EXPECT_EQ(transferred.do_sample().scalar_type(), torch::kBool);
-  EXPECT_TRUE(torch::equal(transferred.acc_logprob(), params.acc_logprob()));
+
   EXPECT_EQ(transferred.num_sample_seqs(), 2);
   EXPECT_EQ(transferred.sampling_mode(), SamplingMode::MIXED);
   EXPECT_TRUE(transferred.logprobs());
   EXPECT_TRUE(transferred.return_logits());
   EXPECT_TRUE(transferred.is_embeddings());
   EXPECT_EQ(transferred.max_top_logprobs(), 3);
-  EXPECT_EQ(transferred.num_return_sequences(), 2);
-  EXPECT_TRUE(transferred.use_beam_search());
 }
 
 TEST(SamplingParamsTest, ReinitializationClearsPreviousBatchState) {
@@ -204,14 +200,13 @@ TEST(SamplingParamsTest, ReinitializationClearsPreviousBatchState) {
     field.member(params) = torch::ones({2});
   }
   params.do_sample() = torch::tensor({true, false});
-  params.acc_logprob() = torch::ones({2, 1});
+
   params.sampling_mode() = SamplingMode::MIXED;
   params.logprobs() = true;
   params.return_logits() = true;
   params.is_embeddings() = true;
   params.max_top_logprobs() = 5;
-  params.num_return_sequences() = 3;
-  params.use_beam_search() = true;
+
   RequestSamplingParam greedy;
   greedy.temperature = 0.0F;
 
@@ -223,14 +218,13 @@ TEST(SamplingParamsTest, ReinitializationClearsPreviousBatchState) {
     EXPECT_FALSE(field.member(params).defined());
   }
   EXPECT_FALSE(params.do_sample().defined());
-  EXPECT_FALSE(params.acc_logprob().defined());
+
   EXPECT_EQ(params.sampling_mode(), SamplingMode::GREEDY);
   EXPECT_FALSE(params.logprobs());
   EXPECT_FALSE(params.return_logits());
   EXPECT_FALSE(params.is_embeddings());
   EXPECT_EQ(params.max_top_logprobs(), 0);
-  EXPECT_EQ(params.num_return_sequences(), 0);
-  EXPECT_FALSE(params.use_beam_search());
+
   EXPECT_TRUE(params.is_all_greedy());
 }
 

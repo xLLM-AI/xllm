@@ -773,8 +773,8 @@ TEST_F(LLMRequestFactoryTest, RejectsTopLogprobsAboveVocabulary) {
   CallbackCapture capture;
   RequestParams sp;
   sp.max_tokens = 16;
-  sp.beam_width = 4;
-  sp.logprobs = false;
+
+  sp.logprobs = true;
   // Under the 2000 cap, so it passes verify_params, but above the vocabulary.
   sp.top_logprobs = 1500;
 
@@ -792,55 +792,12 @@ TEST_F(LLMRequestFactoryTest, RejectsTopLogprobsAboveVocabulary) {
   EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 0);
 }
 
-TEST_F(LLMRequestFactoryTest,
-       DisaggregatedPdRejectsBeamSearchAndReleasesRateLimitSlot) {
-  options_.enable_disagg_pd(true);
-  auto factory = make_factory();
-  CallbackCapture capture;
-  RequestParams sp;
-  sp.beam_width = 2;
-  sp.max_tokens = 16;
-
-  auto request = factory->create(/*prompt=*/"hello",
-                                 /*prompt_tokens=*/std::nullopt,
-                                 sp,
-                                 /*call=*/std::nullopt,
-                                 make_capture_callback(&capture));
-
-  EXPECT_EQ(request, nullptr);
-  ASSERT_TRUE(capture.status.has_value());
-  EXPECT_EQ(capture.status->code(), StatusCode::INVALID_ARGUMENT);
-  EXPECT_NE(capture.status->message().find("beam_width > 1"),
-            std::string::npos);
-  EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 0);
-}
-
-TEST_F(LLMRequestFactoryTest, NonDisaggregatedBeamSearchRemainsSupported) {
-  options_.enable_disagg_pd(false);
-  auto factory = make_factory();
-  CallbackCapture capture;
-  RequestParams sp;
-  sp.beam_width = 2;
-  sp.max_tokens = 16;
-
-  auto request = factory->create(/*prompt=*/"hello",
-                                 /*prompt_tokens=*/std::nullopt,
-                                 sp,
-                                 /*call=*/std::nullopt,
-                                 make_capture_callback(&capture));
-
-  ASSERT_NE(request, nullptr);
-  EXPECT_FALSE(capture.called);
-  EXPECT_EQ(request->state().sampling_param.beam_width, 2);
-  EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 1);
-}
-
 TEST_F(LLMRequestFactoryTest, RetainsHttpResponseOptionsForDecodeDispatch) {
   options_.enable_disagg_pd(true);
   auto factory = make_factory();
   CallbackCapture capture;
   RequestParams sp;
-  sp.beam_width = 1;
+
   sp.max_tokens = 16;
   sp.source_xservice_addr = "worker:1234";
   sp.response_model = "response-model";
@@ -868,7 +825,7 @@ TEST_F(LLMRequestFactoryTest, RetainsHttpResponseOptionsForDecodeDispatch) {
                    .bool_value());
   EXPECT_TRUE(state.response_stream_options.include_usage());
   EXPECT_TRUE(state.response_stream_options.continuous_usage_stats());
-  EXPECT_EQ(state.sampling_param.beam_width, 1);
+
   EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 1);
   EXPECT_FALSE(capture.called);
 }
@@ -1118,14 +1075,11 @@ TEST_F(LLMRequestFactoryTest,
 TEST_F(LLMRequestFactoryTest, BatchPreservesValidationErrorPrecedence) {
   options_.enable_disagg_pd(true);
   auto factory = make_factory(/*vocab_size=*/1000, /*max_position=*/8);
-  const std::vector<std::string> prompts = {
-      "", "", "12345678", "", "FAIL", "ok"};
+  const std::vector<std::string> prompts = {"", "", "12345678", "ok"};
   acquire_batch_slots(prompts.size());
   std::vector<RequestParams> params(prompts.size());
   params[0].temperature = -1;
-  params[0].beam_width = 2;
-  params[3].beam_width = 2;
-  params[4].beam_width = 2;
+
   BatchCallbackCapture capture(prompts.size());
 
   auto requests = factory->create_batch(prompts, params, capture.callback());
@@ -1134,9 +1088,7 @@ TEST_F(LLMRequestFactoryTest, BatchPreservesValidationErrorPrecedence) {
   const std::vector<std::string> expected_errors = {
       "temperature must be finite and non-negative",
       "Prompt is empty",
-      "Prompt is too long",
-      "beam_width > 1 is not supported in disaggregated PD mode",
-      "beam_width > 1 is not supported in disaggregated PD mode"};
+      "Prompt is too long"};
   for (size_t i = 0; i < expected_errors.size(); ++i) {
     EXPECT_EQ(requests[i], nullptr);
     EXPECT_EQ(capture.call_count(i), 1);
@@ -1146,7 +1098,7 @@ TEST_F(LLMRequestFactoryTest, BatchPreservesValidationErrorPrecedence) {
     EXPECT_EQ(capture.output(i)->status->message(), expected_errors[i]);
   }
   ASSERT_NE(requests.back(), nullptr);
-  EXPECT_EQ(capture.call_count(/*index=*/5), 0);
+  EXPECT_EQ(capture.call_count(/*index=*/3), 0);
   EXPECT_EQ(tokenizer_->attempted_texts(),
             std::vector<std::string>({"12345678", "ok"}));
   EXPECT_EQ(rate_limiter_.get_num_concurrent_requests(), 1);

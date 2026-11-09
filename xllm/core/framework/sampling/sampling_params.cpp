@@ -183,7 +183,6 @@ void SamplingParameters::init(
   bool logprobs = false;
   int64_t max_top_logprobs = 0;
   bool is_embeddings = false;
-  int32_t num_return_sequences = 0;
   for (const auto* p : req_sampling_params) {
     frequency_penalties.push_back(p->frequency_penalty);
     presence_penalties.push_back(p->presence_penalty);
@@ -196,11 +195,6 @@ void SamplingParameters::init(
     logprobs = logprobs || p->logprobs;
     is_embeddings = is_embeddings || p->is_embeddings;
     max_top_logprobs = std::max(max_top_logprobs, p->top_logprobs);
-    num_return_sequences =
-        std::max(num_return_sequences, p->num_return_sequences);
-    if (p->beam_width > 0) {
-      this->use_beam_search() = true;
-    }
   }
 
   bool need_token_stats = false;
@@ -278,7 +272,6 @@ void SamplingParameters::init(
   this->logprobs() = logprobs;
   this->max_top_logprobs() = max_top_logprobs;
   this->is_embeddings() = is_embeddings;
-  this->num_return_sequences() = num_return_sequences;
 }
 
 SamplingParameters SamplingParameters::to(const torch::Device& device,
@@ -331,15 +324,11 @@ SamplingParameters SamplingParameters::to(const torch::Device& device,
       safe_to(unique_token_ids_lens(), device, true);
 
   params.do_sample() = safe_to(do_sample(), device, true);
-  params.acc_logprob() = safe_to(acc_logprob(), device, true);
   params.sampling_mode() = sampling_mode();
   params.logprobs() = logprobs();
   params.return_logits() = return_logits();
   params.max_top_logprobs() = max_top_logprobs();
   params.is_embeddings() = is_embeddings();
-  params.num_return_sequences() = num_return_sequences();
-
-  params.use_beam_search() = use_beam_search();
   return params;
 }
 

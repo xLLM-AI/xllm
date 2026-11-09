@@ -60,12 +60,9 @@ class BatchState final {
   const std::vector<SequencesGroup*>& sequence_groups() const {
     return sequence_groups_;
   }
-  void set_swap_block_transfer_infos(std::vector<BlockTransferInfo> infos) {
-    swap_block_transfer_infos_ = std::move(infos);
-  }
+
   void update_forward_type(Sequence* sequence);
   void refresh_forward_type(const std::vector<Sequence*>& sequences);
-  void refresh_sequences_from_groups();
   std::vector<Sequence*> group_sequences() const;
   size_t num_group_sequences() const;
   Sequence* group_sequence(size_t index) const;
@@ -98,10 +95,8 @@ class BatchState final {
  private:
   void retain_host_restore_blocks(Sequence& sequence);
   void dp_balance_shuffle_seqs();
-  bool has_partial_finished_beam_group() const;
   BatchSequencePlan sequence_plan_;
   std::vector<SequencesGroup*> sequence_groups_;
-  std::vector<BlockTransferInfo> swap_block_transfer_infos_;
   std::vector<torch::Tensor> input_embeddings_vec_;
   std::vector<MMData> mm_data_vec_;
   // A cancelled sequence may release its own aliases before its pending

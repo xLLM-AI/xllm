@@ -195,33 +195,4 @@ std::vector<std::vector<int64_t>> IndexedKVCacheImpl::get_shapes() const {
   return shapes;
 }
 
-void IndexedKVCacheImpl::swap_blocks(torch::Tensor& src_tensor,
-                                     torch::Tensor& dst_tensor) {
-  KVCacheImpl::swap_blocks(src_tensor, dst_tensor);
-
-  if (key_cache_scale_.has_value() && has_data(key_cache_scale_.value())) {
-    torch::Tensor selected_key_scales =
-        torch::index_select(key_cache_scale_.value(), 0, src_tensor);
-    key_cache_scale_->index_copy_(0, dst_tensor, selected_key_scales);
-  }
-
-  if (value_cache_scale_.has_value() && has_data(value_cache_scale_.value())) {
-    torch::Tensor selected_value_scales =
-        torch::index_select(value_cache_scale_.value(), 0, src_tensor);
-    value_cache_scale_->index_copy_(0, dst_tensor, selected_value_scales);
-  }
-
-  torch::Tensor selected_index =
-      torch::index_select(index_cache_, 0, src_tensor);
-  index_cache_.index_copy_(0, dst_tensor, selected_index);
-
-  // INT8 indexer cache keeps a per-token fp32 scale that must move with the
-  // int8 values, otherwise dequantization reads mismatched coefficients.
-  if (index_cache_scale_.has_value() && has_data(index_cache_scale_.value())) {
-    torch::Tensor selected_index_scales =
-        torch::index_select(index_cache_scale_.value(), 0, src_tensor);
-    index_cache_scale_->index_copy_(0, dst_tensor, selected_index_scales);
-  }
-}
-
 }  // namespace xllm

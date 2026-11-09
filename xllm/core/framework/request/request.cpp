@@ -184,10 +184,6 @@ void Request::log_statistic(double total_latency,
               << "avg tpot: " << tpot << "ms, "
               << "generation speed: " << gen_speed << " tokens/s"
               << speculative_stats_log;
-    // only log once when beam search is enabled
-    if (check_beam_search()) {
-      break;
-    }
   }
 }
 

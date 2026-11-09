@@ -32,14 +32,12 @@ class NpuDecoderInputView final {
       : meta(params.meta),
         attention(params.attention),
         parallel(params.parallel),
-        block_copy(params.block_copy),
         expert(params.expert),
         tiling_data(params.graph.tiling_data) {}
 
   const BatchInputMeta& meta;
   AttentionInputView attention;
   const ParallelInput& parallel;
-  const BlockCopyInput& block_copy;
   const ExpertInput& expert;
   const torch::Tensor& tiling_data;
 };

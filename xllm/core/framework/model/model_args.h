@@ -411,10 +411,7 @@ class VisionArgs final {
   PROPERTY(float, mm_initializer_range) = 0.0f;
   PROPERTY(float, mm_layer_norm_eps) = 0.0f;
   PROPERTY(int64_t, mm_num_attention_heads) = 0;
-  PROPERTY(int64_t, mm_num_beam_groups) = 0;
-  PROPERTY(int64_t, mm_num_beams) = 0;
   PROPERTY(int64_t, mm_num_hidden_layers) = 0;
-  PROPERTY(int64_t, mm_num_return_sequences) = 0;
   PROPERTY(bool, mm_output_attentions) = false;
   PROPERTY(bool, mm_output_hidden_states) = false;
   PROPERTY(bool, mm_output_scores) = false;
@@ -924,10 +921,7 @@ struct ModelArgs {
   FORWARD_PROPERTY(float, mm_initializer_range, vision_args);
   FORWARD_PROPERTY(float, mm_layer_norm_eps, vision_args);
   FORWARD_PROPERTY(int64_t, mm_num_attention_heads, vision_args);
-  FORWARD_PROPERTY(int64_t, mm_num_beam_groups, vision_args);
-  FORWARD_PROPERTY(int64_t, mm_num_beams, vision_args);
   FORWARD_PROPERTY(int64_t, mm_num_hidden_layers, vision_args);
-  FORWARD_PROPERTY(int64_t, mm_num_return_sequences, vision_args);
   FORWARD_PROPERTY(bool, mm_output_attentions, vision_args);
   FORWARD_PROPERTY(bool, mm_output_hidden_states, vision_args);
   FORWARD_PROPERTY(bool, mm_output_scores, vision_args);
@@ -1358,10 +1352,7 @@ inline std::ostream& operator<<(std::ostream& os, const ModelArgs& args) {
   os << ", mm_initializer_range: " << args.mm_initializer_range();
   os << ", mm_layer_norm_eps: " << args.mm_layer_norm_eps();
   os << ", mm_num_attention_heads: " << args.mm_num_attention_heads();
-  os << ", mm_num_beam_groups: " << args.mm_num_beam_groups();
-  os << ", mm_num_beams: " << args.mm_num_beams();
   os << ", mm_num_hidden_layers: " << args.mm_num_hidden_layers();
-  os << ", mm_num_return_sequences: " << args.mm_num_return_sequences();
   os << ", mm_output_attentions: " << args.mm_output_attentions();
   os << ", mm_output_hidden_states: " << args.mm_output_hidden_states();
   os << ", mm_output_scores: " << args.mm_output_scores();

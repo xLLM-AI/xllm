@@ -141,8 +141,6 @@ BlockManagerPool::BlockManagerPool(const Options& options,
     block_managers_.emplace_back(std::make_unique<CompositeBlockManager>(
         std::move(leaves), block_options));
   }
-  swap_block_transfer_infos_.clear();
-  swap_block_transfer_infos_.resize(block_managers_.size());
 }
 
 int32_t BlockManagerPool::get_manager_with_max_available_blocks() const {
@@ -220,11 +218,6 @@ void BlockManagerPool::deallocate(Sequence* sequence) {
   composite->deallocate_for_sequence(sequence);
 }
 
-std::vector<std::vector<BlockTransferInfo>>*
-BlockManagerPool::get_swap_block_transfer_infos() {
-  return &swap_block_transfer_infos_;
-}
-
 bool BlockManagerPool::allocate(Sequence* sequence) {
   DCHECK(sequence != nullptr);
   return allocate(sequence, sequence->num_tokens());
@@ -251,26 +244,11 @@ bool BlockManagerPool::allocate(Sequence* sequence, size_t num_tokens) {
   // failure, wrongly deallocate + reset the already-held SWA/C4/C128 blocks.
   const bool started_empty = !sequence->has_any_blocks();
 
-  // The leaves (KV / SWA / C4 / C128 / EMBEDDING / LINEAR) each apply their own
-  // strategy; the pool only orchestrates prefix-share-then-beam-then-grow,
-  // which beam (KV copy-on-write) must sit between.
   auto* composite =
       static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
   if (started_empty) {
     composite->allocate_shared_for_sequence(sequence);
   }
-  // Beam swap decision uses the KV block count after the shared attach.
-  const size_t kv_blocks = sequence->kv_state().num_blocks(BlockType::KV);
-  const size_t block_size = options_.block_size();
-  const size_t kv_blocks_needed = (num_tokens + block_size - 1) / block_size;
-  const bool kv_already_satisfied = kv_blocks_needed <= kv_blocks;
-  if (!process_beam_search(sequence, /*need_swap*/ kv_already_satisfied)) {
-    return false;
-  }
-  // Always run the composite growth pass: even when KV is already satisfied, a
-  // sequence (e.g. a fork/clone of a beam parent) may still be missing its
-  // per-sequence EMBEDDING / LINEAR block. The composite skips no-op leaves
-  // internally.
   if (!composite->allocate_sequence(sequence, num_tokens)) {
     if (started_empty) {
       composite->deallocate_for_sequence(sequence);
@@ -349,10 +327,9 @@ bool BlockManagerPool::exceeds_total_capacity(
         static_cast<size_t>(assigned_rank) >= block_managers_.size()) {
       return false;
     }
-    // Prefix hits and beam/preempted states can share physical blocks. Their
+    // Prefix hits and preempted states can share physical blocks. Their
     // combined token footprint is not an exact physical reservation.
-    can_aggregate = can_aggregate && !sequence->check_beam_search() &&
-                    !sequence->has_any_blocks();
+    can_aggregate = can_aggregate && !sequence->has_any_blocks();
   }
   if (reservations.size() == 1 || !can_aggregate) {
     return false;
@@ -476,39 +453,6 @@ bool BlockManagerPool::try_allocate(Sequence* sequence) {
   if (total_tokens > already_counted) {
     sequence->kv_state().incr_kv_cache_tokens_num(total_tokens -
                                                   already_counted);
-  }
-  return true;
-}
-
-bool BlockManagerPool::process_beam_search(Sequence* sequence, bool need_swap) {
-  if (!sequence->check_beam_search()) {
-    return true;
-  }
-
-  auto src_blocks = sequence->kv_state().src_blocks();
-  if (src_blocks.size() == 0) {
-    return true;
-  }
-
-  // when sequence need to swap the last block and no new block appended,
-  // allocate a new block for this sequence
-  if (need_swap && sequence->kv_state().need_swap()) {
-    int32_t dp_rank = get_dp_rank(sequence);
-    // Beam copy-on-write needs exactly one KV block; route through the
-    // composite's typed allocation so it reaches the (possibly concurrency-
-    // wrapped) KV leaf.
-    auto* composite =
-        static_cast<CompositeBlockManager*>(block_managers_[dp_rank].get());
-    std::vector<Block> new_blocks =
-        composite->allocate_blocks(BlockType::KV, 1);
-    if (new_blocks.size() == 0) {
-      return false;
-    }
-    swap_block_transfer_infos_[dp_rank].emplace_back(src_blocks.back().id(),
-                                                     new_blocks[0].id());
-    sequence->kv_state().process_beam_search(new_blocks[0]);
-  } else {
-    sequence->kv_state().process_beam_search(std::nullopt);
   }
   return true;
 }

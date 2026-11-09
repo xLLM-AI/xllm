@@ -27,7 +27,6 @@ limitations under the License.
 #include <string>
 #include <system_error>
 
-#include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/distributed_config.h"
 #include "core/framework/config/dit_config.h"
@@ -121,7 +120,6 @@ nlohmann::ordered_json build_startup_config_json() {
   LoadConfig::get_instance().append_config_json(config_json);
   KVCacheConfig::get_instance().append_config_json(config_json);
   KVCacheStoreConfig::get_instance().append_config_json(config_json);
-  BeamSearchConfig::get_instance().append_config_json(config_json);
   SchedulerConfig::get_instance().append_config_json(config_json);
   ParallelConfig::get_instance().append_config_json(config_json);
   EPLBConfig::get_instance().append_config_json(config_json);

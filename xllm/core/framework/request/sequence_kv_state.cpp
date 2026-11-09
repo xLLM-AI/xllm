@@ -426,23 +426,8 @@ void KVCacheState::reset() {
   }
   composite_blocks_.clear();
   block_sizes_.clear();
-  Block::release(std::move(src_blocks_));
-  need_swap_ = false;
   transfer_kv_info_.reset();
   next_transfer_block_idx_ = 0;
   next_group_transfer_block_idxes_.clear();
 }
-
-void KVCacheState::process_beam_search(std::optional<Block> new_block) {
-  // Beam search only operates on the flat attention KV group.
-  std::vector<Block>& kv = composite_blocks_[BlockType::KV];
-  kv.clear();
-  kv = std::move(src_blocks_);
-
-  if (new_block.has_value()) {
-    kv.pop_back();
-    kv.emplace_back(new_block.value());
-  }
-}
-
 }  // namespace xllm

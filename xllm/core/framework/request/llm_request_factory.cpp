@@ -222,9 +222,6 @@ RequestSamplingParam LLMRequestFactory::build_sampling_param(
   sampling_param.json_object =
       ServiceConfig::get_instance().enable_json_object_output() &&
       sp.response_format == ResponseFormatType::JSON_OBJECT;
-  // Enforces the beam-search logprob requirements; see
-  // RequestSamplingParam::enable_beam_search.
-  sampling_param.enable_beam_search(sp.beam_width);
   return sampling_param;
 }
 
@@ -342,16 +339,6 @@ std::shared_ptr<Request> LLMRequestFactory::create(
   // early return below; we dismiss it right before Request takes ownership.
   xllm::ScopeGuard rate_limit_guard(
       [this] { rate_limiter_->decrease_one_request(); });
-
-  // PD transfers a single sampled token, not the beam candidates and scores.
-  if (options_->enable_disagg_pd() && sp.beam_width > 1) {
-    CALLBACK_WITH_ERROR(StatusCode::INVALID_ARGUMENT,
-                        "beam_width > 1 is not supported in disaggregated PD "
-                        "mode",
-                        sp.service_request_id,
-                        sp.source_xservice_addr);
-    return nullptr;
-  }
 
   std::optional<std::vector<int>> encoded = encode_and_validate_prompt(
       prompt, std::move(prompt_tokens), sp, callback);
@@ -616,8 +603,7 @@ std::vector<std::shared_ptr<Request>> LLMRequestFactory::create_batch(
       continue;
     }
     // Let create preserve the single-request error priority before encoding.
-    if ((options_->enable_disagg_pd() && sp.beam_width > 1) ||
-        prompt->text.empty()) {
+    if (prompt->text.empty()) {
       rate_limit_guard.dismiss();
       requests[i] = create(std::move(prompt->text),
                            std::nullopt,

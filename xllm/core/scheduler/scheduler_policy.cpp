@@ -65,18 +65,6 @@ inline size_t maybe_align_cp_chunk_tokens(size_t num_tokens,
   return (num_tokens / kv_term) * kv_term;
 }
 
-size_t get_sequence_free_blocks_for_rank(KVCacheManager* kv_cache_manager,
-                                         int32_t dp_rank) {
-  const auto free_blocks = kv_cache_manager->num_free_blocks();
-  if (free_blocks.empty()) {
-    return 0;
-  }
-  if (dp_rank >= 0 && static_cast<size_t>(dp_rank) < free_blocks.size()) {
-    return free_blocks[dp_rank];
-  }
-  return util::max(free_blocks);
-}
-
 }  // namespace
 
 // =============================================================================
@@ -545,8 +533,7 @@ SchedulerPolicy::schedule_one_prefill_request(
     }
   }
 
-  if (result != PrefillScheduleResult::SCHEDULED &&
-      (prefill_sequences.empty() || request->check_beam_search())) {
+  if (result != PrefillScheduleResult::SCHEDULED && prefill_sequences.empty()) {
     if (!budget.dp_group_token_used.empty()) {
       for (size_t i = 0; i < prefill_sequences.size(); ++i) {
         budget.dp_group_token_used[prefill_sequences[i]->dp_rank()] -=
@@ -559,7 +546,7 @@ SchedulerPolicy::schedule_one_prefill_request(
     return result;
   }
 
-  // Non-beam best-of sequences can progress independently.
+  // Best-of sequences can progress independently.
   budget.remaining_token_budget -= allocated_tokens;
   budget.remaining_seq_budget -= allocated_seqs;
   budget.estimate_latency += allocated_estimate_latency;
@@ -766,7 +753,6 @@ void SchedulerPolicy::schedule_decode_from_queue(
   // Keep scratch storage local to the call, but avoid allocating per request.
   std::vector<Sequence*> candidate_sequences;
   std::vector<size_t> candidate_token_budgets;
-  std::vector<Sequence*> active_sequences;
   while (!queue->empty() &&
          budget.remaining_token_budget >
              static_cast<size_t>(state.min_speculative_tokens_required) &&
@@ -790,163 +776,66 @@ void SchedulerPolicy::schedule_decode_from_queue(
     size_t allocated_seqs = 0;
     double allocated_estimate_latency = 0;
 
-    if (request->check_beam_search()) {
-      // Beam search path.
-      active_sequences.clear();
-      active_sequences.reserve(num_sequences);
-      for (auto& seq : request->sequences()) {
-        if (!seq->finished()) {
-          active_sequences.emplace_back(seq.get());
-        }
-      }
-      if (active_sequences.empty()) {
-        queue->pop_top();
+    for (auto& sequence : request->sequences()) {
+      if (sequence->finished()) {
         continue;
       }
-
-      const size_t decode_step_tokens =
-          state.min_speculative_tokens_required + 1;
-      if (decode_step_tokens * active_sequences.size() >
-              budget.remaining_token_budget ||
-          active_sequences.size() > budget.remaining_seq_budget) {
-        has_enough_budget = false;
+      const bool is_prefill = sequence->is_prefill_stage();
+      const size_t remaining_tokens =
+          budget.remaining_token_budget - allocated_tokens;
+      size_t num_tokens = state.min_speculative_tokens_required + 1;
+      if (is_prefill) {
+        allocate_shared_blocks_for(sequence.get(), state);
+        num_tokens = std::min(
+            compute_prefill_tokens(sequence.get(), remaining_tokens, state),
+            sequence->num_need_compute_tokens());
       }
-
-      if (has_enough_budget && options_.enable_latency_aware_schedule() &&
+      if (num_tokens == 0 || num_tokens > remaining_tokens ||
+          allocated_seqs >= budget.remaining_seq_budget) {
+        has_enough_budget = false;
+        break;
+      }
+      double seq_estimate_latency = 0;
+      if (options_.enable_latency_aware_schedule() &&
           !(options_.instance_role().has_value() &&
             options_.instance_role().value() == InstanceRole::PREFILL)) {
-        for (auto* sequence : active_sequences) {
-          const double seq_latency =
-              state.profile_manager->predict_step_time(sequence, false);
-          if (budget.estimate_latency + allocated_estimate_latency +
-                  seq_latency >
-              budget.latency_budget) {
-            has_enough_budget = false;
-            break;
-          }
-          allocated_estimate_latency += seq_latency;
-        }
-      }
-      allocated_estimate_latency = 0.0;
-
-      if (has_enough_budget) {
-        size_t needed_blocks = 0;
-        for (auto* sequence : active_sequences) {
-          const size_t updated_num_tokens =
-              sequence->num_tokens() + state.min_speculative_tokens_required;
-          needed_blocks += state.kv_cache_manager->additional_resource_units(
-              sequence, updated_num_tokens);
-        }
-        const int32_t dp_rank = active_sequences.front()->dp_rank();
-        const size_t free_blocks =
-            get_sequence_free_blocks_for_rank(state.kv_cache_manager, dp_rank);
-        if (needed_blocks > free_blocks) {
-          has_enough_blocks = false;
-        }
-      }
-
-      if (has_enough_budget && has_enough_blocks) {
-        bool allocate_failed = false;
-        for (auto* sequence : active_sequences) {
-          const size_t updated_num_tokens =
-              sequence->num_tokens() + state.min_speculative_tokens_required;
-          if (!state.kv_cache_manager->allocate(sequence, updated_num_tokens)) {
-            allocate_failed = true;
-            break;
-          }
-          if (sequence->if_cache_block_for_prefill()) {
-            state.kv_cache_manager->publish_prefix(sequence);
-          }
-          candidate_sequences.emplace_back(sequence);
-          candidate_token_budgets.emplace_back(decode_step_tokens);
-          allocated_tokens += decode_step_tokens;
-          allocated_seqs += 1;
-        }
-
-        if (allocate_failed) {
-          budget.kv_allocation_deferred = true;
-          LOG(ERROR) << "Beam strict scheduling allocation failed. "
-                     << "request_id=" << request->request_id()
-                     << ", beam=" << request->check_beam_search();
-          state.kv_cache_manager->deallocate(request.get());
-          queue->pop_top();
-          request->set_preempted();
-          state.prefill_queue.push(request);
-          continue;
-        }
-
-        if (options_.enable_latency_aware_schedule() &&
-            !(options_.instance_role().has_value() &&
-              options_.instance_role().value() == InstanceRole::PREFILL)) {
-          for (auto* sequence : candidate_sequences) {
-            allocated_estimate_latency +=
-                state.profile_manager->predict_step_time(sequence, false);
-          }
-        }
-      }
-    } else {
-      // Non-beam-search decode path.
-      for (auto& sequence : request->sequences()) {
-        if (sequence->finished()) {
-          continue;
-        }
-        const bool is_prefill = sequence->is_prefill_stage();
-        const size_t remaining_tokens =
-            budget.remaining_token_budget - allocated_tokens;
-        size_t num_tokens = state.min_speculative_tokens_required + 1;
-        if (is_prefill) {
-          allocate_shared_blocks_for(sequence.get(), state);
-          num_tokens = std::min(
-              compute_prefill_tokens(sequence.get(), remaining_tokens, state),
-              sequence->num_need_compute_tokens());
-        }
-        if (num_tokens == 0 || num_tokens > remaining_tokens ||
-            allocated_seqs >= budget.remaining_seq_budget) {
+        seq_estimate_latency =
+            is_prefill ? state.profile_manager->predict_step_time(
+                             sequence->kv_cache_tokens_num() + num_tokens,
+                             sequence->kv_cache_tokens_num(),
+                             false)
+                       : state.profile_manager->predict_step_time(
+                             sequence.get(), false);
+        if (budget.estimate_latency + allocated_estimate_latency +
+                seq_estimate_latency >
+            budget.latency_budget) {
           has_enough_budget = false;
           break;
         }
-        double seq_estimate_latency = 0;
-        if (options_.enable_latency_aware_schedule() &&
-            !(options_.instance_role().has_value() &&
-              options_.instance_role().value() == InstanceRole::PREFILL)) {
-          seq_estimate_latency =
-              is_prefill ? state.profile_manager->predict_step_time(
-                               sequence->kv_cache_tokens_num() + num_tokens,
-                               sequence->kv_cache_tokens_num(),
-                               false)
-                         : state.profile_manager->predict_step_time(
-                               sequence.get(), false);
-          if (budget.estimate_latency + allocated_estimate_latency +
-                  seq_estimate_latency >
-              budget.latency_budget) {
-            has_enough_budget = false;
-            break;
-          }
-        }
-        const bool allocated =
-            is_prefill ? allocate_for_prefill(sequence.get(),
-                                              num_tokens,
-                                              &num_tokens,
-                                              state,
-                                              /*skip_shared=*/true)
-                       : state.kv_cache_manager->allocate(
-                             sequence.get(),
-                             sequence->num_tokens() +
-                                 state.min_speculative_tokens_required);
-        if (!allocated) {
-          has_enough_blocks = false;
-          budget.kv_allocation_deferred = true;
-          break;
-        }
-        if (sequence->if_cache_block_for_prefill()) {
-          state.kv_cache_manager->publish_prefix(sequence.get());
-        }
-        allocated_tokens += num_tokens;
-        allocated_seqs += 1;
-        allocated_estimate_latency += seq_estimate_latency;
-        candidate_sequences.emplace_back(sequence.get());
-        candidate_token_budgets.emplace_back(num_tokens);
       }
+      const bool allocated =
+          is_prefill ? allocate_for_prefill(sequence.get(),
+                                            num_tokens,
+                                            &num_tokens,
+                                            state,
+                                            /*skip_shared=*/true)
+                     : state.kv_cache_manager->allocate(
+                           sequence.get(),
+                           sequence->num_tokens() +
+                               state.min_speculative_tokens_required);
+      if (!allocated) {
+        has_enough_blocks = false;
+        budget.kv_allocation_deferred = true;
+        break;
+      }
+      if (sequence->if_cache_block_for_prefill()) {
+        state.kv_cache_manager->publish_prefix(sequence.get());
+      }
+      allocated_tokens += num_tokens;
+      allocated_seqs += 1;
+      allocated_estimate_latency += seq_estimate_latency;
+      candidate_sequences.emplace_back(sequence.get());
+      candidate_token_budgets.emplace_back(num_tokens);
     }
 
     if (has_enough_budget && has_enough_blocks) {
@@ -1038,8 +927,7 @@ bool SchedulerPolicy::should_wait_for_decode_restore(
       !state.enable_prefix_cache || state.options.enable_schedule_overlap() ||
       !state.kv_cache_manager->supports_host_cache_restore() ||
       ::xllm::KVCacheStoreConfig::get_instance().host_blocks_factor() <= 1.0 ||
-      request == nullptr || request->sequences().size() != 1 ||
-      request->check_beam_search()) {
+      request == nullptr || request->sequences().size() != 1) {
     return false;
   }
 
@@ -1080,7 +968,7 @@ void SchedulerPolicy::handle_abnormal_decode_request(
     size_t allocated_seqs,
     double allocated_estimate_latency,
     bool budget_exhausted) {
-  if (!candidate_sequences.empty() && !request->check_beam_search()) {
+  if (!candidate_sequences.empty()) {
     // Partial schedule: commit the sequences we already allocated.
     queue->pop_top();
     state.running_requests.emplace_back(request);

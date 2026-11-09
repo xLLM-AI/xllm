@@ -126,18 +126,6 @@ bool decode_token_output(const Response& response,
   RawForwardOutput decoded_output;
   decoded_output.expert_load_data.assign(response.expert_load_data().begin(),
                                          response.expert_load_data().end());
-  decoded_output.src_seq_idxes.assign(response.src_seq_idxes().begin(),
-                                      response.src_seq_idxes().end());
-  decoded_output.out_tokens.assign(response.out_tokens().begin(),
-                                   response.out_tokens().end());
-  decoded_output.out_logprobs.assign(response.out_logprobs().begin(),
-                                     response.out_logprobs().end());
-  if (decoded_output.src_seq_idxes.size() != decoded_output.out_tokens.size() ||
-      decoded_output.src_seq_idxes.size() !=
-          decoded_output.out_logprobs.size()) {
-    LOG(ERROR) << "Mismatched " << model_name << " beam output field counts";
-    return false;
-  }
   decoded_output.json_object_errors.reserve(response.json_object_errors_size());
   for (const proto::JsonObjectOutputError& error :
        response.json_object_errors()) {
@@ -204,9 +192,6 @@ bool encode_token_output(
   const auto& top_logprobs = output.sample_output.top_logprobs;
   const auto& embeddings = output.sample_output.embeddings;
   const auto& mm_embeddings = output.sample_output.mm_embeddings;
-  const auto& src_seq_idxes = output.beam_search_output.src_seq_idxes;
-  const auto& out_tokens = output.beam_search_output.out_tokens;
-  const auto& out_logprobs = output.beam_search_output.out_logprobs;
   if (response == nullptr) {
     return false;
   }
@@ -215,22 +200,8 @@ bool encode_token_output(
   Timer timer;
   if (!valid_token_output(
           next_tokens, logprobs, top_tokens, top_logprobs, embeddings) ||
-      !valid_host_tensor(output.expert_load_data, torch::kInt64) ||
-      !valid_host_tensor(src_seq_idxes, torch::kInt32) ||
-      !valid_host_tensor(out_tokens, torch::kInt32) ||
-      !valid_host_tensor(out_logprobs, torch::kFloat32)) {
+      !valid_host_tensor(output.expert_load_data, torch::kInt64)) {
     LOG(ERROR) << "Invalid forward output tensor layout.";
-    return false;
-  }
-  const int64_t beam_src_seq_count =
-      src_seq_idxes.defined() ? src_seq_idxes.numel() : 0;
-  const int64_t beam_token_count =
-      out_tokens.defined() ? out_tokens.numel() : 0;
-  const int64_t beam_logprob_count =
-      out_logprobs.defined() ? out_logprobs.numel() : 0;
-  if (beam_src_seq_count != beam_token_count ||
-      beam_src_seq_count != beam_logprob_count) {
-    LOG(ERROR) << "Mismatched " << model_name << " beam output field counts";
     return false;
   }
   int32_t num_seqs =
@@ -325,21 +296,7 @@ bool encode_token_output(
                           expert_load_data_flattened_slice);
     }
   }
-  if (src_seq_idxes.defined() && src_seq_idxes.numel() > 0) {
-    Slice<int32_t> src_seq_idxes_slice = tensor_slice(src_seq_idxes);
-    ADD_VECTOR_TO_PROTO(pb_forward_output->mutable_src_seq_idxes(),
-                        src_seq_idxes_slice);
-  }
-  if (out_tokens.defined() && out_tokens.numel() > 0) {
-    Slice<int32_t> out_tokens_slice = tensor_slice(out_tokens);
-    ADD_VECTOR_TO_PROTO(pb_forward_output->mutable_out_tokens(),
-                        out_tokens_slice);
-  }
-  if (out_logprobs.defined() && out_logprobs.numel() > 0) {
-    Slice<float> out_logprobs_slice = tensor_slice<float>(out_logprobs);
-    ADD_VECTOR_TO_PROTO(pb_forward_output->mutable_out_logprobs(),
-                        out_logprobs_slice);
-  }
+
   for (const JsonObjectOutputError& error : output.json_object_errors) {
     proto::JsonObjectOutputError* pb_error =
         pb_forward_output->add_json_object_errors();

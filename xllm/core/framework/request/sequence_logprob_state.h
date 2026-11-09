@@ -53,7 +53,6 @@ class LogprobState {
   // for generated tokens
   float get_acc_logprob(int64_t num_tokens);
   // Returns the accumulated logprob excluding the last generated token.
-  float get_base_logprob(int64_t num_tokens);
 
   void generate_output_tokens_logprobs(
       size_t start_idx,
@@ -75,12 +74,6 @@ class LogprobState {
 
   const std::vector<std::optional<float>>& get_logprobs() const {
     return logprobs_;
-  }
-
-  void set_acc_logprob(float acc_logprob) { acc_logprob_ = acc_logprob; }
-
-  void set_last_acc_token_idx(int64_t last_acc_token_idx) {
-    last_acc_token_idx_ = last_acc_token_idx;
   }
 
  private:

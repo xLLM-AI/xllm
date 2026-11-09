@@ -2152,30 +2152,6 @@ TEST(CompositeBlockManagerTest, SequenceResetReleasesCachedVirtualBlocks) {
   EXPECT_EQ(manager->num_used_blocks(), 0u);
 }
 
-TEST(CompositeBlockManagerTest, StateResetReleasesAliasedBeamSourceBlocks) {
-  BlockManager::Options options;
-  options.num_blocks(5).block_size(2).enable_prefix_cache(true);
-  ConcurrentBlockManagerImpl manager(
-      std::make_unique<BlockManagerImpl>(options));
-  const std::vector<int32_t> tokens = {11, 12};
-  std::vector<Block> blocks = manager.allocate(/*num_blocks=*/1);
-  ASSERT_EQ(blocks.size(), 1u);
-  manager.cache(tokens, blocks);
-  KVCacheState state;
-  state.set_src_blocks(blocks, /*need_swap=*/true);
-  state.add_blocks(BlockType::KV, blocks);
-  blocks.clear();
-
-  state.reset();
-
-  EXPECT_TRUE(state.src_blocks().empty());
-  EXPECT_FALSE(state.has_any_blocks());
-  EXPECT_FALSE(state.need_swap());
-  EXPECT_EQ(manager.num_used_blocks(), 0u);
-  EXPECT_EQ(manager.num_blocks_in_prefix_cache(), 1u);
-  EXPECT_EQ(manager.num_free_blocks(), manager.num_total_blocks() - 1);
-}
-
 TEST(CompositeBlockManagerTest, ForkPreservesParentPrivateBlockUsage) {
   for (const BlockType type : {BlockType::EMBEDDING, BlockType::LINEAR}) {
     SCOPED_TRACE(static_cast<int32_t>(type));

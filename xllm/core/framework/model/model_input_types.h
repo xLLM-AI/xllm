@@ -386,26 +386,6 @@ class LlmEmbeddingInput final {
   }
 };
 
-class BlockCopyInput final {
- public:
-  // swap
-  std::vector<BlockTransferInfo> swap_blocks;
-
-  // block copy kernel
-  torch::Tensor src_block_indices;
-  torch::Tensor dst_block_indices;
-  torch::Tensor cum_sum;
-
-  BlockCopyInput to(const torch::Device& device) const {
-    BlockCopyInput out;
-    out.swap_blocks = swap_blocks;
-    out.src_block_indices = safe_to(src_block_indices, device, true);
-    out.dst_block_indices = safe_to(dst_block_indices, device, true);
-    out.cum_sum = safe_to(cum_sum, device, true);
-    return out;
-  }
-};
-
 class VlmVisionInput final {
  public:
   // multimodal

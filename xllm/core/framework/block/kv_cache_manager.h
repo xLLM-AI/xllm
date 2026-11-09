@@ -112,9 +112,6 @@ class KVCacheManager {
   // deallocated, so later requests in the same batch can share them.
   virtual void publish_prefix(Sequence* sequence, size_t num_tokens) = 0;
 
-  virtual std::vector<std::vector<BlockTransferInfo>>*
-  get_swap_block_transfer_infos() = 0;
-
   virtual uint32_t num_blocks() const = 0;
   // Scheduler counters use the same resource units as free/used capacity.
   // Separate state pools do not consume token-KV capacity; a shared arena
@@ -135,12 +132,7 @@ class KVCacheManager {
     const size_t full_blocks =
         num_tokens / tokens_per_block + (num_tokens % tokens_per_block != 0);
     const size_t held = sequence->kv_state().num_blocks(BlockType::KV);
-    size_t additional = full_blocks > held ? full_blocks - held : 0;
-    if (additional == 0 && sequence->check_beam_search() &&
-        !sequence->kv_state().src_blocks().empty() &&
-        sequence->kv_state().need_swap()) {
-      additional = 1;
-    }
+    const size_t additional = full_blocks > held ? full_blocks - held : 0;
     return block_resource_units(BlockType::KV, additional) +
            block_resource_units(
                BlockType::LINEAR,

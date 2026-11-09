@@ -462,7 +462,6 @@ std::vector<std::shared_ptr<Request>> generate_request(
     std::optional<std::vector<bool>> offlines,
     std::optional<std::vector<int32_t>> priorities,
     std::optional<std::vector<int32_t>> ns,
-    std::optional<std::vector<int32_t>> beam_widths,
     int32_t max_context_len) {
   std::vector<std::shared_ptr<Request>> requests;
   EXPECT_TRUE(prompt_lens.size() == max_tokens.size());
@@ -484,23 +483,17 @@ std::vector<std::shared_ptr<Request>> generate_request(
   }
 
   std::vector<int32_t> n_vec;
-  std::vector<int32_t> beam_width_vec;
   if (ns.has_value()) {
     n_vec = *ns;
   } else {
     n_vec = std::vector<int32_t>(batch_size, 1);
-  }
-  if (beam_widths.has_value()) {
-    beam_width_vec = *beam_widths;
-  } else {
-    beam_width_vec = std::vector<int32_t>(batch_size, 0);
   }
 
   for (size_t i = 0; i < batch_size; ++i) {
     std::vector<int32_t> prompt_token_ids;
     prompt_token_ids.resize(prompt_lens[i]);
     RequestSamplingParam sampling_param;
-    sampling_param.beam_width = beam_width_vec[i];
+
     SchedulerParam scheduler_param;
     scheduler_param.offline = offline_vec[i];
     scheduler_param.priority = static_cast<RequestPriority>(priority_vec[i]);
@@ -1258,17 +1251,15 @@ TEST(ContinuousSchedulerTest,
 
 TEST(ContinuousSchedulerTest,
      AdmissionRejectsMultipleCandidatesForLinearModels) {
-  const std::vector<std::pair<int32_t, size_t>> sampling_modes = {
-      {0, 1}, {1, 1}, {2, 1}, {0, 2}};
   for (const bool linear_state : {false, true}) {
-    for (const auto& [beam_width, best_of] : sampling_modes) {
+    for (size_t best_of : {1u, 2u}) {
       SCOPED_TRACE(::testing::Message() << "linear_state=" << linear_state
-                                        << ", beam_width=" << beam_width);
+                                        << ", best_of=" << best_of);
       FakeEngine engine(32, 4, false, linear_state);
       auto options = create_scheduler_options(16, 4, 0, 4, 1);
       TestableContinuousScheduler scheduler(&engine, options);
       auto request = generate_request_with_prompt_tokens({1, 2, 3, 4}, 8, 32);
-      request->state().sampling_param.beam_width = beam_width;
+
       request->state().best_of = best_of;
       int32_t callback_count = 0;
       std::optional<Status> callback_status;
@@ -1282,12 +1273,12 @@ TEST(ContinuousSchedulerTest,
       EXPECT_TRUE(scheduler.add_request(request));
       scheduler.drain_prefetch_for_test();
       scheduler.wait_for_responses();
-      if (linear_state && (beam_width > 1 || best_of > 1)) {
+      if (linear_state && best_of > 1) {
         EXPECT_EQ(callback_count, 1);
         ASSERT_TRUE(callback_status.has_value());
         EXPECT_EQ(callback_status->code(), StatusCode::INVALID_ARGUMENT);
         EXPECT_EQ(callback_status->message(),
-                  "Beam search and best_of > 1 are not supported with LINEAR "
+                  "best_of > 1 is not supported with LINEAR "
                   "attention.");
         EXPECT_EQ(scheduler.scheduler_queue_size(), 0u);
         EXPECT_EQ(engine.prefetch_calls(), 0u);
@@ -1313,7 +1304,6 @@ TEST(ContinuousSchedulerTest, PrefetchCompletesBeforeSchedulerQueueAdmission) {
   std::shared_ptr<Request> request =
       generate_request({8},
                        {4},
-                       std::nullopt,
                        std::nullopt,
                        std::nullopt,
                        std::nullopt,
@@ -1398,7 +1388,6 @@ TEST(ContinuousSchedulerTest,
   TestableContinuousScheduler scheduler(&engine, options);
   auto requests = generate_request(/*prompt_lens=*/{8, 8, 8},
                                    /*max_tokens=*/{4, 4, 4},
-                                   std::nullopt,
                                    std::nullopt,
                                    std::nullopt,
                                    std::nullopt,
@@ -1591,7 +1580,6 @@ TEST(ContinuousSchedulerTest,
                        std::nullopt,
                        std::nullopt,
                        std::nullopt,
-                       std::nullopt,
                        /*max_context_len=*/30000)[0];
 
   ASSERT_TRUE(scheduler->add_request(request));
@@ -1630,7 +1618,6 @@ TEST(ContinuousSchedulerTest, QueueCapacityRejectsBeforePrefetchStarts) {
                        std::nullopt,
                        std::nullopt,
                        std::nullopt,
-                       std::nullopt,
                        /*max_context_len=*/30000);
 
   ASSERT_TRUE(scheduler->add_request(requests[0]));
@@ -1660,7 +1647,6 @@ TEST(ContinuousSchedulerTest,
   std::vector<std::shared_ptr<Request>> requests =
       generate_request({8, 8},
                        {4, 4},
-                       std::nullopt,
                        std::nullopt,
                        std::nullopt,
                        std::nullopt,
@@ -1726,13 +1712,8 @@ TEST(ContinuousSchedulerFactoryTest,
       std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
   ASSERT_NE(scheduler.get(), nullptr);
 
-  auto requests = generate_request({2, 10},
-                                   {8, 8},
-                                   std::nullopt,
-                                   std::nullopt,
-                                   std::nullopt,
-                                   std::nullopt,
-                                   30000);
+  auto requests = generate_request(
+      {2, 10}, {8, 8}, std::nullopt, std::nullopt, std::nullopt, 30000);
   for (auto& req : requests) {
     scheduler->add_request(req);
   }
@@ -1766,47 +1747,6 @@ TEST(SchedulerFactoryTest, PDChunkedPrefillUsesPD) {
   opt.enable_chunked_prefill() = true;
 
   EXPECT_EQ(select_scheduler_kind(opt), SchedulerKind::PD);
-}
-
-TEST(ContinuousSchedulerTest, BeamStrictNoPartialScheduling) {
-  SchedulerOptions opt = create_scheduler_options(2, 8, 0, 1024, 1, "fcfs");
-  auto engine = std::make_unique<FakeEngine>(64, 32);
-  auto scheduler =
-      std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
-  EXPECT_TRUE(scheduler != nullptr);
-
-  auto req1 = generate_request({64},
-                               {10},
-                               std::nullopt,
-                               std::nullopt,
-                               std::vector<int32_t>{1},
-                               std::vector<int32_t>{0},
-                               30000)[0];
-  make_request_decode_ready(req1);
-
-  auto beam_req = generate_request({64},
-                                   {10},
-                                   std::nullopt,
-                                   std::nullopt,
-                                   std::vector<int32_t>{1},
-                                   std::vector<int32_t>{2},
-                                   30000)[0];
-  // Manually duplicate beam sequence to simulate a decoded beam group.
-  beam_req->sequences().emplace_back(
-      std::make_unique<Sequence>(*beam_req->sequences()[0]));
-  ASSERT_EQ(beam_req->sequences().size(), 2u);
-  make_request_decode_ready(beam_req);
-
-  scheduler->add_request(req1);
-  scheduler->add_request(beam_req);
-  auto batch = scheduler->prepare_batch_test();
-  ASSERT_EQ(batch.size(), 1u);
-  EXPECT_EQ(batch[0].size(), 1u);
-  EXPECT_EQ(batch[0][0], req1->sequences()[0].get());
-  EXPECT_EQ(scheduler->get_running_requests().size(), 1u);
-  EXPECT_EQ(scheduler->get_waiting_requests_num(), 0u);
-  EXPECT_NE(batch[0][0], beam_req->sequences()[0].get());
-  EXPECT_NE(batch[0][0], beam_req->sequences()[1].get());
 }
 
 TEST(BlockManagerPoolTest, AllocateFailureRollsBackSharedPrefixBlocks) {
@@ -2094,14 +2034,8 @@ TEST(ContinuousSchedulerTest, BatchRejectedStreamsCancelAtSchedulingBoundary) {
       std::make_unique<TestableContinuousScheduler>(engine.get(), opt);
   BlockManagerPool* block_manager_pool = engine->block_manager_pool();
 
-  std::vector<std::shared_ptr<Request>> requests =
-      generate_request({4, 4},
-                       {4, 4},
-                       std::nullopt,
-                       std::nullopt,
-                       std::nullopt,
-                       std::nullopt,
-                       30000);
+  std::vector<std::shared_ptr<Request>> requests = generate_request(
+      {4, 4}, {4, 4}, std::nullopt, std::nullopt, std::nullopt, 30000);
   for (std::shared_ptr<Request>& request : requests) {
     request->state().stream = true;
     request->state().output_func = [](const RequestOutput&) { return true; };

@@ -80,8 +80,6 @@ TEST(PDRequestConverterTest, PreservesSamplingValuesAndTokenOrder) {
   EXPECT_EQ(param.all_stop_token_ids, (std::vector<int32_t>{7, 2}));
   EXPECT_EQ(param.bad_words_token_ids,
             (std::vector<std::vector<int32_t>>{{8, 5}, {6}}));
-  EXPECT_EQ(param.beam_width, 0);
-  EXPECT_EQ(param.num_return_sequences, 0);
 }
 
 TEST(PDRequestConverterTest, KeepsWireDefaultsAndOptionalSeedPresence) {

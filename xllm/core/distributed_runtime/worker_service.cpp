@@ -423,7 +423,6 @@ void WorkerService::collect_llm_output(
   cpu_output.prepared_token = output.prepared_token;
   cpu_output.json_object_errors = output.json_object_errors;
   const auto& sample = output.sample_output;
-  const auto& beam = output.beam_search_output;
   auto copy_output_to_host = [&]() {
     // Every D2H, including expert data, runs under the selected output stream.
     cpu_output.expert_load_data =
@@ -452,24 +451,11 @@ void WorkerService::collect_llm_output(
     if (cpu_output.sample_output.next_tokens.defined()) {
       cpu_output.sample_output.logprobs =
           safe_to(sample.logprobs, torch::kCPU, /*non_blocking=*/true);
-      // Beam results already carry the final tokens and logprobs.
-      if (!beam.src_seq_idxes.defined()) {
-        cpu_output.sample_output.top_tokens =
-            safe_to(sample.top_tokens, torch::kCPU, /*non_blocking=*/true);
-        cpu_output.sample_output.top_logprobs =
-            safe_to(sample.top_logprobs, torch::kCPU, /*non_blocking=*/true);
-      }
-    }
-    // Keep optional beam results independent of sample next_tokens.
-    cpu_output.beam_search_output.src_seq_idxes =
-        safe_to(beam.src_seq_idxes, torch::kCPU, /*non_blocking=*/true);
-    if (beam.src_seq_idxes.defined()) {
-      cpu_output.beam_search_output.out_tokens =
-          safe_to(beam.out_tokens, torch::kCPU, /*non_blocking=*/true);
-      cpu_output.beam_search_output.out_logprobs =
-          safe_to(beam.out_logprobs,
-                  torch::dtype(torch::kFloat32).device(torch::kCPU),
-                  /*non_blocking=*/true);
+
+      cpu_output.sample_output.top_tokens =
+          safe_to(sample.top_tokens, torch::kCPU, /*non_blocking=*/true);
+      cpu_output.sample_output.top_logprobs =
+          safe_to(sample.top_logprobs, torch::kCPU, /*non_blocking=*/true);
     }
   };
   const bool use_default_stream = !options_.enable_schedule_overlap();
@@ -613,7 +599,7 @@ void WorkerService::GetLastLLMStepResult(
     if (output.has_value()) {
       collect_llm_output(*output, cpu_output, speculative_token_stats);
     }
-    // Embedding-only and beam-only results are valid completed outputs.
+    // Embedding-only results are valid completed outputs.
     if (!encode_llm_output(cpu_output, speculative_token_stats, response)) {
       controller->SetFailed("Failed to serialize LLM last-step output");
     }
@@ -628,7 +614,6 @@ void WorkerService::collect_vlm_output(
   cpu_output.prepared_token = output.prepared_token;
   cpu_output.json_object_errors = output.json_object_errors;
   const auto& sample = output.sample_output;
-  const auto& beam = output.beam_search_output;
   auto copy_output_to_host = [&]() {
     // Every D2H, including expert data, runs under the selected output stream.
     cpu_output.expert_load_data =
@@ -657,24 +642,11 @@ void WorkerService::collect_vlm_output(
     if (cpu_output.sample_output.next_tokens.defined()) {
       cpu_output.sample_output.logprobs =
           safe_to(sample.logprobs, torch::kCPU, /*non_blocking=*/true);
-      // Beam results already carry the final tokens and logprobs.
-      if (!beam.src_seq_idxes.defined()) {
-        cpu_output.sample_output.top_tokens =
-            safe_to(sample.top_tokens, torch::kCPU, /*non_blocking=*/true);
-        cpu_output.sample_output.top_logprobs =
-            safe_to(sample.top_logprobs, torch::kCPU, /*non_blocking=*/true);
-      }
-    }
-    // Keep optional beam results independent of sample next_tokens.
-    cpu_output.beam_search_output.src_seq_idxes =
-        safe_to(beam.src_seq_idxes, torch::kCPU, /*non_blocking=*/true);
-    if (beam.src_seq_idxes.defined()) {
-      cpu_output.beam_search_output.out_tokens =
-          safe_to(beam.out_tokens, torch::kCPU, /*non_blocking=*/true);
-      cpu_output.beam_search_output.out_logprobs =
-          safe_to(beam.out_logprobs,
-                  torch::dtype(torch::kFloat32).device(torch::kCPU),
-                  /*non_blocking=*/true);
+
+      cpu_output.sample_output.top_tokens =
+          safe_to(sample.top_tokens, torch::kCPU, /*non_blocking=*/true);
+      cpu_output.sample_output.top_logprobs =
+          safe_to(sample.top_logprobs, torch::kCPU, /*non_blocking=*/true);
     }
   };
   c10::StreamGuard stream_guard = stream_->set_stream_guard();
@@ -809,7 +781,7 @@ void WorkerService::GetLastVLMStepResult(
     if (output.has_value()) {
       collect_vlm_output(*output, cpu_output, speculative_token_stats);
     }
-    // Embedding-only and beam-only results are valid completed outputs.
+    // Embedding-only results are valid completed outputs.
     if (!encode_vlm_output(cpu_output, speculative_token_stats, response)) {
       controller->SetFailed("Failed to serialize VLM last-step output");
     }

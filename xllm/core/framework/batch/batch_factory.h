@@ -17,12 +17,11 @@ limitations under the License.
 
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <vector>
 
 #include "core/framework/batch/batch_builder.h"
 #include "core/framework/batch/batch_group.h"
-#include "core/framework/request/request.h"
+#include "core/framework/request/sequence.h"
 
 namespace xllm {
 
@@ -33,11 +32,8 @@ class BatchFactory final {
   explicit BatchFactory(int32_t dp_size);
 
   BatchGroup create_batches(
-      const std::vector<std::shared_ptr<Request>>& running_requests,
       const std::vector<Sequence*>& running_sequences,
-      const std::vector<size_t>& running_sequences_budgets,
-      std::vector<std::vector<BlockTransferInfo>>* swap_block_transfer_infos =
-          nullptr) const;
+      const std::vector<size_t>& running_sequences_budgets) const;
 
  private:
   BatchBuilder builder_;

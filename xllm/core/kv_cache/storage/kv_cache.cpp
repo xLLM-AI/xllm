@@ -158,8 +158,7 @@ KVCache create_layerwise_scratch_cache(
   scratch_options.enable_linear_attention(false);
   return KVCache(kv_cache_shape,
                  scratch_options,
-                 /*layer_id=*/0,
-                 /*owns_layer_cache=*/false);
+                 /*layer_id=*/0);
 }
 
 }  // namespace
@@ -188,10 +187,8 @@ KVCache::KVCache(const DeepSeekV4KVCacheTensors& tensors)
 
 KVCache::KVCache(const KVCacheShape& kv_cache_shape,
                  const KVCacheCreateOptions& create_options,
-                 int64_t layer_id,
-                 bool owns_layer_cache)
-    : owns_layer_cache_(owns_layer_cache),
-      impl_(create_kv_cache_impl(kv_cache_shape, create_options, layer_id)),
+                 int64_t layer_id)
+    : impl_(create_kv_cache_impl(kv_cache_shape, create_options, layer_id)),
       static_layout_(create_options.static_layout()),
       linear_state_slots_(create_options.linear_state_slot_table()),
       full_block_slots_(create_options.full_block_slot_table()) {
@@ -350,7 +347,6 @@ torch::Tensor KVCache::physical_token_slots(const torch::Tensor& token_slots,
 
 KVCache KVCache::create_shared_view() const {
   KVCache view;
-  view.owns_layer_cache_ = false;
   view.impl_ = impl_;
   view.static_layout_ = static_layout_;
   view.linear_state_slots_ = linear_state_slots_;
@@ -391,14 +387,6 @@ void KVCache::update_linear_state_slots(
   if (linear_state_slots_ != nullptr) {
     linear_state_slots_->update(rows);
   }
-}
-
-void KVCache::swap_blocks(torch::Tensor& src_tensor,
-                          torch::Tensor& dst_tensor) {
-  if (!owns_layer_cache_) {
-    return;
-  }
-  impl_->swap_blocks(src_tensor, dst_tensor);
 }
 
 void allocate_kv_caches(std::vector<KVCache>& kv_caches,
@@ -477,10 +465,7 @@ void allocate_kv_caches(std::vector<KVCache>& kv_caches,
 
   if (layer_cache_owned.empty()) {
     for (int64_t layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
-      kv_caches.emplace_back(kv_cache_shape,
-                             create_options,
-                             layer_idx,
-                             /*owns_layer_cache=*/true);
+      kv_caches.emplace_back(kv_cache_shape, create_options, layer_idx);
     }
     return;
   }
@@ -494,10 +479,7 @@ void allocate_kv_caches(std::vector<KVCache>& kv_caches,
       kv_caches.emplace_back(scratch_cache.create_shared_view());
       continue;
     }
-    kv_caches.emplace_back(kv_cache_shape,
-                           create_options,
-                           layer_idx,
-                           /*owns_layer_cache=*/true);
+    kv_caches.emplace_back(kv_cache_shape, create_options, layer_idx);
   }
 }
 

@@ -27,7 +27,6 @@ from xllm_export import LLMMaster, Options, RequestOutput, RequestParams, VLMMas
 from . import utils
 from .errors import ValidationError
 from .params import (
-    BeamSearchParams,
     PoolingParams,
     SamplingParams,
     _RequestParamsProxy,
@@ -50,15 +49,6 @@ def _get_tqdm(
             "tqdm is required when use_tqdm=True. Set use_tqdm=False to disable the progress bar."
         ) from exc
     return tqdm
-
-
-class BeamSearchOutput:
-    def __init__(self, output: RequestOutput) -> None:
-        self.prompt = output.prompt
-        self.sequences = output.outputs
-        self.status = output.status
-        self.usage = output.usage
-        self.request_output = output
 
 
 class EmbeddingOutputs:
@@ -305,45 +295,6 @@ class LLM:
                 progress_bar.close()
 
         return outputs
-
-    def beam_search(
-        self,
-        prompts: str | dict[str, str] | list[str | dict[str, str]],
-        params: RequestParams | BeamSearchParams | None = None,
-        wait_for_schedule: bool = True,
-        use_tqdm: bool | Callable[..., Any] = True,
-    ) -> list[BeamSearchOutput]:
-        if isinstance(prompts, (str, dict)):
-            prompts = [prompts]
-
-        parsed_prompts: list[str] = []
-        for prompt in prompts:
-            if isinstance(prompt, str):
-                parsed_prompts.append(prompt)
-                continue
-            if isinstance(prompt, dict):
-                if "prompt" not in prompt:
-                    raise ValueError("beam_search prompt dict must contain key 'prompt'")
-                parsed_prompts.append(prompt["prompt"])
-                continue
-            raise TypeError("prompts must be str or dict with key 'prompt'")
-
-        explicit_fields = params.explicit_fields() if isinstance(params, _RequestParamsProxy) else set()
-        params = to_request_params(params, default_cls=BeamSearchParams)
-        if params.beam_width <= 0:
-            raise ValueError("beam_width must be greater than 0")
-        elif params.beam_width > 1:
-            # Beam search relies on top-k logprob candidates from sampler.
-            # Keep this aligned with the LLM request-path default.
-            if "logprobs" not in explicit_fields:
-                params.logprobs = True
-            if "top_logprobs" not in explicit_fields and params.top_logprobs == 0:
-                params.top_logprobs = params.beam_width
-
-        outputs = self.generate(
-            parsed_prompts, request_params=params, wait_for_schedule=wait_for_schedule, use_tqdm=use_tqdm
-        )
-        return [BeamSearchOutput(output) for output in outputs]
 
     def embed(
         self,

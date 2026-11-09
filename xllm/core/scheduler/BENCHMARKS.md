@@ -31,7 +31,7 @@ per call, with items counted as requests.
 The fixture uses 512-token prompts, one DP group, FCFS, and the default batch mode.
 The new cases use up to 256 requests and 4 sequences per request. They cover a
 stable decode batch and completion churn, but not memory-pressure preemption,
-PD transfer, latency prediction, or real beam-search execution.
+PD transfer or latency prediction.
 
 ## Build and compare
 
@@ -66,8 +66,8 @@ with the 16-round window.
 Prefill and decode previously constructed two candidate vectors for every
 request. Their storage now lives for one scheduling call and is cleared between
 requests. For N requests with one sequence each, this changes those scratch
-allocations from 2N to 2 per call. Beam decode also reuses its active-sequence
-buffer. Varying sequence counts can grow capacity; storage is released at the end
+allocations from 2N to 2 per call. Varying sequence counts can grow capacity;
+storage is released at the end
 of the call, so it is not retained indefinitely by the scheduler.
 
 The request filtering, budget checks, KV allocation, queue order, and output

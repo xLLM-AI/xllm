@@ -33,7 +33,6 @@ limitations under the License.
 #include "core/framework/parallel_state/npu_dp_ep_padding.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/layers/common/attention_mask.h"
-#include "core/layers/npu/npu_block_copy_impl.h"
 #include "core/layers/npu/npu_column_parallel_linear_impl.h"
 #include "core/layers/npu/npu_lm_head_impl.h"
 #include "core/layers/npu/npu_pos_embedding_impl.h"

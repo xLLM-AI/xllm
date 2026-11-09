@@ -47,7 +47,7 @@ class ScopedValue final {
 
 Sequence MakeSequence(size_t index, const std::vector<int32_t>& prompt_tokens) {
   RequestSamplingParam sampling_param;
-  sampling_param.beam_width = 0;
+
   sampling_param.is_embeddings = false;
 
   StoppingChecker stopping_checker;

@@ -127,14 +127,6 @@ VMM 的使用方式和容量配置说明见[KV Cache 与模型权重的虚拟内
 | `store_local_hostname` | `string` | `""` | KV Cache Store client 的本地主机名。 |
 | `enable_control_h2d_block_num` | `bool` | `false` | 是否控制 H2D 拷贝的 block 数。 |
 
-## BeamSearchConfig
-
-| 参数名称 | 类型 | 默认值 | 参数含义 |
-|:---------|:-----|:-------|:---------|
-| `enable_beam_search_kernel` | `bool` | `false` | 是否启用 beam search kernel。 |
-| `beam_width` | `int32` | `1` | Beam search 的 beam width。 |
-| `enable_block_copy_kernel` | `bool` | `true`（NPU/CUDA/MUSA/DCU）；`false`（其他后端） | 是否在支持的后端使用 block copy kernel。 |
-
 ## SchedulerConfig
 
 | 参数名称 | 类型 | 默认值 | 参数含义 |

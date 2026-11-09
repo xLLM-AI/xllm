@@ -298,13 +298,6 @@ DECLARE_int32(rolling_load_num_rolling_slots);
 
 DECLARE_bool(enable_prefetch_weight);
 
-// --- beam search config ---
-DECLARE_bool(enable_beam_search_kernel);
-
-DECLARE_int32(beam_width);
-
-DECLARE_bool(enable_block_copy_kernel);
-
 // --- qwen3 reranker config ---
 DECLARE_bool(enable_qwen3_reranker);
 

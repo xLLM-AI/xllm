@@ -418,10 +418,10 @@ ForwardOutput VLMEngine::step(BatchGroup& batch) {
     CHECK(results[worker_rank].value().has_value())
         << "Failed to execute model, result has no value";
     auto& result = results[worker_rank].value();
-    if (result.value().src_seq_idxes.empty()) {
-      attach_embedding_output_metadata(
-          args_, batch[dp_rank].get_sequences(), result.value());
-    }
+
+    attach_embedding_output_metadata(
+        args_, batch[dp_rank].get_sequences(), result.value());
+
     outputs.emplace_back(std::move(result.value()));
     ++dp_rank;
   }

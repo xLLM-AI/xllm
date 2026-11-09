@@ -239,7 +239,6 @@ class ModelParamsView final {
   AttentionInputView attention;
   EmbeddingInputView embedding;
   ParallelInput& parallel;
-  BlockCopyInput& block_copy;
   ExpertInput& expert;
   GraphInputView graph;
   std::vector<int64_t>& linear_state_validity_mask;
@@ -263,7 +262,6 @@ class ModelParamsView final {
         attention(owner.attention),
         embedding(owner.embedding, spec.embedding),
         parallel(owner.parallel),
-        block_copy(owner.block_copy),
         expert(owner.expert),
         graph(owner.graph, spec.graph),
         linear_state_validity_mask(owner.linear_state_validity_mask),

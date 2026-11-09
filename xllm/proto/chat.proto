@@ -141,10 +141,7 @@ message ChatRequest {
   // request priority. default = DEFAULT
   optional Priority priority = 32;
 
-  optional int32 beam_width = 33;
-
-  // Final number of beam results to return. Defaults to beam_width when unset.
-  optional int32 num_return_sequences = 45;
+  reserved 33, 45;
 
   optional bool add_special_tokens = 34;
 

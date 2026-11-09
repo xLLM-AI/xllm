@@ -41,7 +41,6 @@ struct BatchInputData {
   const std::vector<uint32_t>& allowed_max_tokens;
   const std::vector<torch::Tensor>& input_embeddings;
   const std::vector<MMData>& mm_data;
-  std::vector<BlockTransferInfo>* swap_block_transfer_infos;
   uint64_t batch_id;
   BatchForwardType forward_type;
 };

@@ -233,14 +233,13 @@ void BatchOutputHandler::process_sample_output(
       }
     }
   }
-  finish_sample_output(data, action);
+  finish_sample_output(action);
 }
 
 void BatchOutputHandler::process_sample_output(
     const BatchOutputData& data,
     const SampleOutput& sample_output,
-    BatchOutputAction action,
-    bool force_requested_beam_result_size) {
+    BatchOutputAction action) {
   const bool replace_fake_token = action == BatchOutputAction::COMMIT_PENDING;
   const bool has_next_tokens = sample_output.next_tokens.defined() &&
                                sample_output.next_tokens.numel() > 0;
@@ -343,20 +342,13 @@ void BatchOutputHandler::process_sample_output(
     // always append a token, maybe true or fake token
     append_token_for_sequence(seq, token, 0, replace_fake_token);
   }
-  finish_sample_output(data, action, force_requested_beam_result_size);
+  finish_sample_output(action);
 }
 
-void BatchOutputHandler::finish_sample_output(
-    const BatchOutputData& data,
-    BatchOutputAction action,
-    bool force_requested_beam_result_size) {
-  if (action == BatchOutputAction::RESERVE_PENDING) {
-    return;
-  }
+void BatchOutputHandler::finish_sample_output(BatchOutputAction action) {
   if (action == BatchOutputAction::COMMIT_PENDING) {
     output_targets_.clear();
   }
-  process_beam_search(data, force_requested_beam_result_size);
 }
 
 void BatchOutputHandler::append_token_for_sequence(Sequence* seq,
@@ -371,127 +363,4 @@ void BatchOutputHandler::append_token_for_sequence(Sequence* seq,
     seq->update_last_step_token(token, token_idx);
   }
 }
-
-void BatchOutputHandler::process_beam_search(const BatchOutputData& data,
-                                             bool force_requested_result_size) {
-  for (auto* sequence_group : data.sequence_groups) {
-    const auto& sequences = sequence_group->sequences();
-    if (!sequences.empty() && sequences.front()->cancelled()) {
-      continue;
-    }
-    sequence_group->process_beam_search(force_requested_result_size);
-  }
-}
-
-void BatchOutputHandler::process_beam_search_output(
-    const BatchOutputData& data,
-    const RawForwardOutput& raw_output,
-    BatchOutputAction action) {
-  const bool replace_fake_token = action == BatchOutputAction::COMMIT_PENDING;
-  const auto& sequences = data.sequences;
-  const std::unordered_set<std::string> failed_request_ids =
-      fail_json_object_requests(sequences, raw_output.json_object_errors);
-
-  const int32_t beam_width = data.sequences[0]->sampling_param()->beam_width;
-  if (beam_width <= 1) {
-    return;
-  }
-
-  CHECK_EQ(raw_output.src_seq_idxes.size(), data.sequences.size());
-  CHECK_EQ(raw_output.out_tokens.size(), data.sequences.size());
-  CHECK_EQ(raw_output.out_logprobs.size(), data.sequences.size());
-
-  auto update_for_sequence_group = [&](size_t sequence_group_id) {
-    CHECK_LT(sequence_group_id, data.sequence_groups.size());
-    const auto& group_sequences =
-        data.sequence_groups[sequence_group_id]->sequences();
-    CHECK(!group_sequences.empty());
-    if (group_sequences[0]->cancelled() ||
-        failed_request_ids.contains(group_sequences[0]->request_id())) {
-      return;
-    }
-
-    std::unordered_set<int32_t> seq_idx_set;
-    std::vector<float> src_acc_logprob_vec;
-    std::vector<std::vector<int32_t>> src_token_ids;
-    std::vector<std::vector<std::optional<float>>> src_logprobs;
-    const bool restore_json_states =
-        group_sequences[0]->json_object_state() != nullptr;
-    std::vector<JsonObjectGrammarSnapshot> src_json_states;
-    src_acc_logprob_vec.resize(beam_width);
-    src_token_ids.resize(beam_width);
-    src_logprobs.resize(beam_width);
-    if (restore_json_states) {
-      src_json_states.resize(beam_width);
-    }
-
-    for (size_t i = 0; i < beam_width; i++) {
-      size_t task_id = sequence_group_id * beam_width + i;
-      int32_t src_seq_idx = raw_output.src_seq_idxes[task_id];
-      CHECK_GE(src_seq_idx, 0);
-      CHECK_LT(static_cast<size_t>(src_seq_idx), data.sequences.size());
-      auto src_seq = data.sequences[src_seq_idx];
-      src_acc_logprob_vec[i] = src_seq->get_acc_logprob();
-      src_token_ids[i] = std::vector<int32_t>(src_seq->tokens());
-      src_logprobs[i] = src_seq->logprob_state()->get_logprobs();
-      if (restore_json_states) {
-        const JsonObjectGrammarState* json_state = src_seq->json_object_state();
-        CHECK(json_state != nullptr)
-            << "beam sequences in one request must share JSON grammar state";
-        src_json_states[i] = json_state->snapshot();
-      }
-    }
-
-    for (size_t i = 0; i < beam_width; i++) {
-      size_t task_id = sequence_group_id * beam_width + i;
-      int32_t src_seq_idx = raw_output.src_seq_idxes[task_id];
-      CHECK_GE(src_seq_idx, 0);
-      CHECK_LT(static_cast<size_t>(src_seq_idx), data.sequences.size());
-      auto& base_seq = data.sequences[task_id];
-      auto& src_seq = data.sequences[src_seq_idx];
-
-      if (restore_json_states &&
-          !base_seq->restore_json_object_state(src_json_states[i])) {
-        return;
-      }
-
-      for (size_t token_idx = base_seq->num_prompt_tokens();
-           token_idx < base_seq->num_tokens();
-           token_idx++) {
-        Token new_token(src_token_ids[i][token_idx]);
-        new_token.logprob = src_logprobs[i][token_idx];
-        base_seq->update_token(token_idx, new_token);
-      }
-
-      Token new_token(raw_output.out_tokens[task_id]);
-      new_token.logprob =
-          raw_output.out_logprobs[task_id] - src_acc_logprob_vec[i];
-      append_token_for_sequence(base_seq, new_token, 0, replace_fake_token);
-      if (base_seq->error_status().has_value()) {
-        return;
-      }
-
-      base_seq->logprob_state()->set_acc_logprob(
-          raw_output.out_logprobs[task_id]);
-      base_seq->logprob_state()->set_last_acc_token_idx(base_seq->num_tokens());
-
-      bool need_swap = false;
-      if (seq_idx_set.find(src_seq_idx) != seq_idx_set.end()) {
-        need_swap = true;
-      } else {
-        seq_idx_set.insert(src_seq_idx);
-      }
-
-      auto src_blocks = src_seq->kv_state().blocks(BlockType::KV);
-      base_seq->kv_state().set_src_blocks(src_blocks, need_swap);
-    }
-  };
-
-  for (size_t sequence_group_id = 0;
-       sequence_group_id < data.sequence_groups.size();
-       sequence_group_id++) {
-    update_for_sequence_group(sequence_group_id);
-  }
-}
-
 }  // namespace xllm

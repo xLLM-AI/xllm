@@ -43,7 +43,6 @@ namespace py = pybind11;
 #include "core/distributed_runtime/master_factory.h"
 #include "core/distributed_runtime/worker_memory_options.h"
 #include "core/framework/allocator/global_virtual_memory_region.h"
-#include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/config_utils.h"
 #include "core/framework/config/disagg_pd_config.h"
 #include "core/framework/config/distributed_config.h"
@@ -85,7 +84,6 @@ static std::atomic<uint32_t> signal_received{0};
 namespace {
 
 void initialize_configs() {
-  BeamSearchConfig::get_instance().initialize();
   DisaggPDConfig::get_instance().initialize();
   DistributedConfig::get_instance().initialize();
   DiTConfig::get_instance().initialize();
@@ -109,7 +107,6 @@ Options create_options(const std::string& instance_name, bool is_local) {
   const KVCacheConfig& kv_cache_config = KVCacheConfig::get_instance();
   const KVCacheStoreConfig& kv_cache_store_config =
       KVCacheStoreConfig::get_instance();
-  const BeamSearchConfig& beam_search_config = BeamSearchConfig::get_instance();
   const SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
   const ParallelConfig& parallel_config = ParallelConfig::get_instance();
   const EPLBConfig& eplb_config = EPLBConfig::get_instance();
@@ -243,7 +240,6 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .enable_shm(execution_config.enable_shm())
       .input_shm_size(execution_config.input_shm_size())
       .output_shm_size(execution_config.output_shm_size())
-      .beam_width(beam_search_config.beam_width())
       .kv_cache_dtype(kv_cache_config.kv_cache_dtype())
 
       .is_local(is_local);
@@ -381,7 +377,6 @@ int run() {
   ModelConfig& model_config = ModelConfig::get_instance();
   LoadConfig& load_config = LoadConfig::get_instance();
   KVCacheConfig& kv_cache_config = KVCacheConfig::get_instance();
-  BeamSearchConfig& beam_search_config = BeamSearchConfig::get_instance();
   SchedulerConfig& scheduler_config = SchedulerConfig::get_instance();
   ParallelConfig& parallel_config = ParallelConfig::get_instance();
   DistributedConfig& distributed_config = DistributedConfig::get_instance();
@@ -429,10 +424,6 @@ int run() {
         scheduler_config.max_tokens_per_batch());
   }
 
-// disable block copy kernel on unsupported backends
-#if !defined(USE_NPU) && !defined(USE_CUDA) && !defined(USE_MUSA)
-  beam_search_config.enable_block_copy_kernel(false);
-#endif
   std::string model_type = "";
   if (model_config.backend() != "dit") {
     model_type = xllm::get_model_type(model_path, model_config.backend());

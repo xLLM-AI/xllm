@@ -123,7 +123,6 @@ set(CUDA_SOURCE_FILES
   batch_decode.cpp
   batch_prefill.cpp
   batch_chunked_prefill.cpp
-  block_copy.cu
   cutlass_extensions/common.cpp
   cutlass_w8a8/scaled_mm_entry.cu
   fp8_quant.cu

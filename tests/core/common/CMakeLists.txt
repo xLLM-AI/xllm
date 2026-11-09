@@ -4,7 +4,7 @@ cc_test(
   NO_NPU_RUNTIME
   NAME property_reflect_test
   SRCS property_reflect_test.cpp
-  DEPS GTest::gtest_main
+  DEPS GTest::gtest_main proto::xllm_proto torch
 )
 
 foreach(_fixture valid mismatch backend_mismatch missing_descriptor host_dependent)

@@ -902,8 +902,7 @@ double ProfileManager::run_request(int32_t token_length,
     sequences_budget.emplace_back(token_length - prefix_length);
   }
   // build batch
-  auto batches =
-      batch_factory_.create_batches(requests, sequences, sequences_budget);
+  auto batches = batch_factory_.create_batches(sequences, sequences_budget);
 
   absl::Time start_time = absl::Now();
   step_callback_(batches);
@@ -944,8 +943,7 @@ double ProfileManager::run_request(
     sequences_budget.emplace_back(token_length - prefix_length);
   }
   // build batch
-  auto batches = batch_factory_.create_batches(
-      requests, sequences, sequences_budget, nullptr);
+  auto batches = batch_factory_.create_batches(sequences, sequences_budget);
 
   absl::Time start_time = absl::Now();
   step_callback_(batches);
@@ -975,8 +973,7 @@ double ProfileManager::run_decode_request(
     sequences_budget.emplace_back(1);
   }
 
-  auto batches = batch_factory_.create_batches(
-      requests, sequences, sequences_budget, nullptr);
+  auto batches = batch_factory_.create_batches(sequences, sequences_budget);
 
   absl::Time start_time = absl::Now();
   step_callback_(batches);
@@ -1012,8 +1009,7 @@ double ProfileManager::run_graph_decode_request(
     sequences_budget.emplace_back(1);
   }
 
-  auto batches = batch_factory_.create_batches(
-      requests, sequences, sequences_budget, nullptr);
+  auto batches = batch_factory_.create_batches(sequences, sequences_budget);
 
   absl::Time start_time = absl::Now();
   step_callback_(batches);

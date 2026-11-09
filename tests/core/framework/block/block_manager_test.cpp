@@ -128,10 +128,7 @@ bool allocate_next_linear_chunk(BlockManagerPool& pool, Sequence& sequence) {
 
 class BlockManagerPoolTest : public ::testing::Test {
  protected:
-  BlockManagerPoolTest() {
-    sampling_param_.beam_width = 0;
-    sampling_param_.is_embeddings = false;
-  }
+  BlockManagerPoolTest() { sampling_param_.is_embeddings = false; }
 
   Sequence make_sequence(size_t index,
                          const std::vector<int32_t>& prompt_tokens) {
@@ -1261,7 +1258,7 @@ TEST_F(BlockManagerPoolTest, SequenceUpdateBlockHashes) {
 
   // Build the Sequence in-test so the sampling/stopping params outlive it.
   RequestSamplingParam sampling_param;
-  sampling_param.beam_width = 0;
+
   sampling_param.is_embeddings = false;
   StoppingChecker stopping_checker;
   SequenceParams params;

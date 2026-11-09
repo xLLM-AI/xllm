@@ -286,7 +286,6 @@ inline LlmForwardInput make_llm_draft_input(const VlmForwardInput& target) {
   params.embedding.mtp_bootstrap_embeddings =
       source.embedding.mtp_bootstrap_embeddings;
   params.parallel = source.parallel;
-  params.block_copy = source.block_copy;
   params.expert = source.expert;
   params.graph.attn_mask = source.graph.attn_mask;
   params.graph.tiling_data = source.graph.tiling_data;

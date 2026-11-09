@@ -38,7 +38,6 @@ cc_library(
     forward_input_factory.cpp
     vlm_forward_input_factory.cpp
     sampling_input_builder.cpp
-    beam_search.h
   DEPS
     :config
     :eplb

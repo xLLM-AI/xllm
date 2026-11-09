@@ -39,18 +39,6 @@ limitations under the License.
 namespace xllm {
 namespace {
 
-torch::Tensor swap_tensor_blocks(const torch::Tensor& tensor,
-                                 const torch::Tensor& src_tensor,
-                                 const torch::Tensor& dst_tensor) {
-  if (!tensor.defined()) {
-    return tensor;
-  }
-  torch::Tensor selected = torch::index_select(tensor, 0, src_tensor);
-  torch::Tensor result = tensor.clone();
-  result.index_copy_(0, dst_tensor, selected);
-  return result;
-}
-
 torch::Tensor cast_to_nd_format(const torch::Tensor& tensor) {
   if (!tensor.defined()) {
     return tensor;
@@ -99,7 +87,6 @@ Dsv4StateCache Dsv4StateCache::from_packed(torch::Tensor packed,
                                            torch::Tensor fallback_kv,
                                            torch::Tensor fallback_score) {
   Dsv4StateCache state;
-  state.packed_layout_ = true;
   if (packed.defined()) {
     state.packed_ = std::move(packed);
   } else {
@@ -127,16 +114,6 @@ torch::Tensor Dsv4StateCache::score() const {
 }
 
 torch::Tensor Dsv4StateCache::packed() const { return packed_; }
-
-void Dsv4StateCache::swap_blocks(const torch::Tensor& src,
-                                 const torch::Tensor& dst) {
-  if (packed_layout_) {
-    packed_ = swap_tensor_blocks(packed_, src, dst);
-    return;
-  }
-  kv_ = swap_tensor_blocks(kv_, src, dst);
-  score_ = swap_tensor_blocks(score_, src, dst);
-}
 
 DeepSeekV4KVCacheImpl::DeepSeekV4KVCacheImpl(
     const DeepSeekV4KVCacheTensors& tensors)
@@ -390,17 +367,6 @@ std::vector<std::vector<int64_t>> DeepSeekV4KVCacheImpl::get_shapes() const {
     shapes.emplace_back(swa_cache_.sizes().vec());
   }
   return shapes;
-}
-
-void DeepSeekV4KVCacheImpl::swap_blocks(torch::Tensor& src_tensor,
-                                        torch::Tensor& dst_tensor) {
-  key_cache_ = swap_tensor_blocks(key_cache_, src_tensor, dst_tensor);
-  index_cache_ = swap_tensor_blocks(index_cache_, src_tensor, dst_tensor);
-  indexer_cache_scale_ =
-      swap_tensor_blocks(indexer_cache_scale_, src_tensor, dst_tensor);
-  swa_cache_ = swap_tensor_blocks(swa_cache_, src_tensor, dst_tensor);
-  compress_state_.swap_blocks(src_tensor, dst_tensor);
-  index_state_.swap_blocks(src_tensor, dst_tensor);
 }
 
 DeepSeekV4KVCacheTensors create_dsv4_cache_tensors(
