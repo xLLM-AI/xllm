@@ -274,9 +274,6 @@ struct Options {
   // "auto" (default): KV cache dtype aligns with model dtype (no quantization).
   // "int8": Enables INT8 quantization. Only supported on MLU backend.
   PROPERTY(std::string, kv_cache_dtype) = "auto";
-
-  // max concurrency for rec worker
-  PROPERTY(int32_t, rec_worker_max_concurrency) = 1;
 };
 
 }  // namespace runtime

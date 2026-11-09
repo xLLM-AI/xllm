@@ -17,11 +17,9 @@ limitations under the License.
 
 #include "core/common/global_flags.h"
 #include "core/disaggregation/pd_scheduler.h"
-#include "core/distributed_runtime/rec_engine.h"
 #include "core/framework/config/parallel_config.h"
 #include "scheduler/continuous_scheduler.h"
 #include "scheduler/dit_scheduler.h"
-#include "scheduler/fixed_steps_scheduler.h"
 
 namespace xllm {
 
@@ -37,12 +35,6 @@ std::unique_ptr<DiTScheduler> create_dit_scheduler(
     DiTEngine* engine,
     DiTScheduler::Options options) {
   return std::make_unique<DiTDynamicBatchScheduler>(engine, options);
-}
-
-std::unique_ptr<FixedStepsScheduler> create_fixed_steps_scheduler(
-    RecEngine* engine,
-    SchedulerOptions options) {
-  return std::make_unique<FixedStepsScheduler>(engine, options);
 }
 
 }  // namespace xllm

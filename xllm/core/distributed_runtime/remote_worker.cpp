@@ -26,7 +26,6 @@ limitations under the License.
 #include <utility>
 
 #include "core/framework/config/service_config.h"
-#include "runtime/rec_forward_params.h"
 #include "runtime/vlm_forward_params.h"
 
 namespace xllm {
@@ -134,23 +133,6 @@ RemoteWorker::step_remote_async(const DiTForwardInput& input) {
   threadpool_.schedule(
       [this, input = input, promise = std::move(promise)]() mutable {
         channel_->execute_dit_model_async(input, promise);
-      });
-  return future;
-}
-
-folly::SemiFuture<std::optional<ForwardOutput>> RemoteWorker::step_async(
-    const RecForwardInput& /*input*/) {
-  LOG(FATAL) << "Native Rec remote execution requires step_remote_async";
-  return folly::makeSemiFuture(std::optional<ForwardOutput>{});
-}
-
-folly::SemiFuture<std::optional<RawForwardOutput>>
-RemoteWorker::step_remote_async(const RecForwardInput& input) {
-  folly::Promise<std::optional<RawForwardOutput>> promise;
-  auto future = promise.getSemiFuture();
-  threadpool_.schedule(
-      [this, input = input.clone(), promise = std::move(promise)]() mutable {
-        channel_->execute_rec_model_async(input, promise);
       });
   return future;
 }

@@ -434,14 +434,6 @@ LlmForwardInput ForwardInputBuilder::build_forward_input(
   return state_to_forward_input<LlmForwardInput>();
 }
 
-RecForwardInput ForwardInputBuilder::build_rec_forward_input(
-    uint32_t num_decoding_tokens,
-    uint32_t min_decoding_batch_size) {
-  process_sequences();
-  padding_decode_batch_size(num_decoding_tokens, min_decoding_batch_size);
-  return state_to_forward_input<RecForwardInput>();
-}
-
 VlmForwardInput ForwardInputBuilder::build_vlm_forward_input(
     uint32_t num_decoding_tokens,
     uint32_t min_decoding_batch_size) {
@@ -1214,8 +1206,7 @@ Input ForwardInputBuilder::state_to_forward_input() {
       make_cpu_tensor(state_.paged_kv_last_page_len);
 #endif
 
-  if constexpr (std::is_same_v<Input, VlmForwardInput> ||
-                std::is_same_v<Input, RecForwardInput>) {
+  if constexpr (std::is_same_v<Input, VlmForwardInput>) {
     std::vector<MMData> batch_mm_data_vec = mm_data_vec_;
     batch_mm_data_vec.insert(batch_mm_data_vec.end(),
                              state_.scheduled_mm_data_vec.begin(),
@@ -1235,13 +1226,11 @@ Input ForwardInputBuilder::state_to_forward_input() {
       input_params.attention.device.block_tables;
 
   // Setup grouped cache block tables.
-  if constexpr (!std::is_same_v<Input, RecForwardInput>) {
-    input_params.multi_block_tables.reserve(state_.multi_block_tables.size());
-    for (auto& mgr_tables : state_.multi_block_tables) {
-      util::pad_2d_vector(mgr_tables, /*pad_value=*/-1);
-      input_params.multi_block_tables.emplace_back(
-          create_2d_tensor(mgr_tables, torch::kInt));
-    }
+  input_params.multi_block_tables.reserve(state_.multi_block_tables.size());
+  for (auto& mgr_tables : state_.multi_block_tables) {
+    util::pad_2d_vector(mgr_tables, /*pad_value=*/-1);
+    input_params.multi_block_tables.emplace_back(
+        create_2d_tensor(mgr_tables, torch::kInt));
   }
 
   if (input_embeddings_vec_.size() != 0) {
@@ -1257,27 +1246,25 @@ Input ForwardInputBuilder::state_to_forward_input() {
         make_cpu_tensor(input_params.embedding.linear_state_ids);
   }
   input_params.embedding.request_ids = std::move(state_.request_ids);
-  if constexpr (!std::is_same_v<Input, RecForwardInput>) {
-    input_params.embedding.extra_token_ids = std::move(state_.extra_token_ids);
-    if (!state_.mtp_shifted_token_ids.empty()) {
-      // Write both the upstream "root" path (consumed by non-CP MTP code paths
-      // and by the existing shm serializer) and the CP-specific embedding path
-      // (consumed by mtp_worker_impl). Both fields share the same tensor
-      // storage; assigning the second handle does not copy the values.
-      auto mtp_tensor = make_cpu_tensor(state_.mtp_shifted_token_ids);
-      input_params.embedding.mtp_shifted_token_ids = mtp_tensor;
-      input_params.mtp_shifted_token_ids = mtp_tensor;
-    }
-    if (!state_.mtp_bootstrap_embeddings.empty()) {
-      CHECK_EQ(state_.mtp_bootstrap_row_idxes.size(),
-               state_.mtp_bootstrap_embeddings.size());
-      input_params.embedding.mtp_bootstrap_row_idxes =
-          std::move(state_.mtp_bootstrap_row_idxes);
-      input_params.embedding.mtp_bootstrap_embeddings =
-          torch::cat(state_.mtp_bootstrap_embeddings, /*dim=*/0);
-      for (Sequence* sequence : sequences_) {
-        sequence->clear_mtp_bootstrap_embedding();
-      }
+  input_params.embedding.extra_token_ids = std::move(state_.extra_token_ids);
+  if (!state_.mtp_shifted_token_ids.empty()) {
+    // Write both the upstream "root" path (consumed by non-CP MTP code paths
+    // and by the existing shm serializer) and the CP-specific embedding path
+    // (consumed by mtp_worker_impl). Both fields share the same tensor
+    // storage; assigning the second handle does not copy the values.
+    auto mtp_tensor = make_cpu_tensor(state_.mtp_shifted_token_ids);
+    input_params.embedding.mtp_shifted_token_ids = mtp_tensor;
+    input_params.mtp_shifted_token_ids = mtp_tensor;
+  }
+  if (!state_.mtp_bootstrap_embeddings.empty()) {
+    CHECK_EQ(state_.mtp_bootstrap_row_idxes.size(),
+             state_.mtp_bootstrap_embeddings.size());
+    input_params.embedding.mtp_bootstrap_row_idxes =
+        std::move(state_.mtp_bootstrap_row_idxes);
+    input_params.embedding.mtp_bootstrap_embeddings =
+        torch::cat(state_.mtp_bootstrap_embeddings, /*dim=*/0);
+    for (Sequence* sequence : sequences_) {
+      sequence->clear_mtp_bootstrap_embedding();
     }
   }
   input_params.meta.batch_id = batch_id_;

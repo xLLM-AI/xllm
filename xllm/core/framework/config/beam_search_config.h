@@ -38,11 +38,11 @@ class BeamSearchConfig final {
   void initialize();
 
   [[nodiscard]] static const OptionCategory& option_category() {
-    static const OptionCategory kOptionCategory = {"BEAM SEARCH OPTIONS",
-                                                   {"enable_beam_search_kernel",
-                                                    "beam_width",
-                                                    "enable_block_copy_kernel",
-                                                    "enable_topk_sorted"}};
+    static const OptionCategory kOptionCategory = {
+        "BEAM SEARCH OPTIONS",
+        {"enable_beam_search_kernel",
+         "beam_width",
+         "enable_block_copy_kernel"}};
     return kOptionCategory;
   }
 
@@ -55,8 +55,6 @@ class BeamSearchConfig final {
 #else
   PROPERTY(bool, enable_block_copy_kernel) = false;
 #endif
-
-  PROPERTY(bool, enable_topk_sorted) = true;
 };
 
 }  // namespace xllm

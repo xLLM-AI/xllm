@@ -420,15 +420,13 @@ void expect_rpc_rejection(runtime::Options options,
 }
 
 void make_packed_inputs(
-    std::array<proto::PackedForwardInput, 4>& packed_inputs) {
+    std::array<proto::PackedForwardInput, 3>& packed_inputs) {
   LlmForwardInput llm_input;
   VlmForwardInput vlm_input;
-  RecForwardInput rec_input;
   DiTForwardInput dit_input;
   ASSERT_TRUE(llm_input.to_packed_proto(&packed_inputs[0]));
   ASSERT_TRUE(vlm_input.to_packed_proto(&packed_inputs[1]));
-  ASSERT_TRUE(rec_input.to_packed_proto(&packed_inputs[2]));
-  ASSERT_TRUE(dit_input.to_packed_proto(&packed_inputs[3]));
+  ASSERT_TRUE(dit_input.to_packed_proto(&packed_inputs[2]));
 }
 
 template <typename Request, typename Response>
@@ -451,7 +449,7 @@ void expect_execute_rejections(const std::string& backend,
                        rpc,
                        "input domain, schema, or layout");
 
-  std::array<proto::PackedForwardInput, 4> packed_inputs;
+  std::array<proto::PackedForwardInput, 3> packed_inputs;
   ASSERT_NO_FATAL_FAILURE(make_packed_inputs(packed_inputs));
   for (size_t index = 0; index < packed_inputs.size(); ++index) {
     if (index == input_index) {
@@ -494,16 +492,9 @@ TEST(WorkerServiceModelRpcTest,
 }
 
 TEST(WorkerServiceModelRpcTest,
-     ExecuteRECRejectsInvalidRequestsBeforeExecution) {
-  expect_execute_rejections("rec",
-                            /*input_index=*/2,
-                            &WorkerService::ExecuteRECModel);
-}
-
-TEST(WorkerServiceModelRpcTest,
      ExecuteDITRejectsInvalidRequestsBeforeExecution) {
   expect_execute_rejections("dit",
-                            /*input_index=*/3,
+                            /*input_index=*/2,
                             &WorkerService::ExecuteDITModel);
 }
 
@@ -625,7 +616,7 @@ TEST_F(WorkerServiceInputLifetimeTest,
 }
 
 TEST(WorkerServiceShutdownTest, JoinsIdleShmPollingThreadForEveryBackend) {
-  for (const std::string& backend : {"llm", "vlm", "rec", "dit"}) {
+  for (const std::string& backend : {"llm", "vlm", "dit"}) {
     SCOPED_TRACE(backend);
     runtime::Options options;
     options.backend(backend);

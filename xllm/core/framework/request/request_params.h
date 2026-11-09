@@ -91,7 +91,7 @@ class RequestParams final {
   // produced. Model-specific fields/rules are intentionally left out and
   // layered on by the individual request factories: json_object (LLM), and the
   // beam-search fields beam_width/num_return_sequences plus their logprob
-  // normalization, which differ per model (LLM normalizes, REC copies both, VLM
+  // normalization, which differ per model (LLM normalizes, VLM
   // omits them).
   RequestSamplingParam to_sampling_param(size_t best_of) const;
 

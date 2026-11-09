@@ -20,13 +20,9 @@ limitations under the License.
 #include <string>
 
 #include "core/util/binary_payload.h"
-#include "rec.pb.h"
 #include "tensor.pb.h"
 
 namespace xllm::util {
-
-torch::Tensor convert_rec_tensor_to_torch(
-    const proto::InferInputTensor& input_tensor);
 
 torch::Tensor proto_to_torch(const proto::Tensor& proto_tensor);
 

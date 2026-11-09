@@ -59,7 +59,6 @@ namespace py = pybind11;
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/profile_config.h"
-#include "core/framework/config/rec_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/config/speculative_config.h"
@@ -99,7 +98,6 @@ void initialize_configs() {
   ModelConfig::get_instance().initialize();
   ParallelConfig::get_instance().initialize();
   ProfileConfig::get_instance().initialize();
-  RecConfig::get_instance().initialize();
   SchedulerConfig::get_instance().initialize();
   ServiceConfig::get_instance().initialize();
   SpeculativeConfig::get_instance().initialize();
@@ -124,7 +122,6 @@ Options create_options(const std::string& instance_name, bool is_local) {
   const ExecutionConfig& execution_config = ExecutionConfig::get_instance();
   const KernelConfig& kernel_config = KernelConfig::get_instance();
   const DiTConfig& dit_config = DiTConfig::get_instance();
-  const RecConfig& rec_config = RecConfig::get_instance();
 
 #if !defined(USE_NPU)
   CHECK(!speculative_config.enable_mtp_draft_body_tp1())
@@ -248,8 +245,7 @@ Options create_options(const std::string& instance_name, bool is_local) {
       .output_shm_size(execution_config.output_shm_size())
       .beam_width(beam_search_config.beam_width())
       .kv_cache_dtype(kv_cache_config.kv_cache_dtype())
-      .rec_worker_max_concurrency(
-          static_cast<int32_t>(rec_config.rec_worker_max_concurrency()))
+
       .is_local(is_local);
 
   return options;

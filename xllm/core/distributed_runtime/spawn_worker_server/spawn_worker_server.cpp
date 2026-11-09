@@ -49,9 +49,7 @@ std::string get_backend_from_worker_type(const std::string& worker_type) {
       worker_type == "MMEVLM") {
     return "vlm";
   }
-  if (worker_type == "REC") {
-    return "rec";
-  }
+
   if (worker_type == "DIT") {
     return "dit";
   }

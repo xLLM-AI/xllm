@@ -34,36 +34,6 @@ TEST(GraphExecutionInputTest, BorrowsUnchangedModelInput) {
             source.parallel.dp_global_token_nums.data());
 }
 
-TEST(GraphExecutionInputTest, KeepsSingleRankTokenCountUnchanged) {
-  RecModelParams source;
-  source.parallel.dp_global_token_nums = {2};
-  GraphExecutionInput<RecModelParams> input(source);
-
-  input.pad_dp_token_counts(8);
-
-  EXPECT_EQ(&input.params(), &source);
-  EXPECT_EQ(source.parallel.dp_global_token_nums, std::vector<int32_t>({2}));
-}
-
-TEST(GraphExecutionInputTest, PadsRecMetadataWithoutChangingSource) {
-  RecModelParams source;
-  source.parallel.dp_global_token_nums = {2, 4};
-  source.attention.host.kv_seq_lens = {5, 9};
-  source.embedding.input_embedding = torch::ones({2, 3});
-  GraphExecutionInput<RecModelParams> input(source);
-
-  input.pad_dp_token_counts(8);
-
-  EXPECT_NE(&input.params(), &source);
-  EXPECT_EQ(input.params().parallel.dp_global_token_nums,
-            std::vector<int32_t>({8, 8}));
-  EXPECT_EQ(source.parallel.dp_global_token_nums, std::vector<int32_t>({2, 4}));
-  EXPECT_EQ(input.params().attention.host.kv_seq_lens,
-            source.attention.host.kv_seq_lens);
-  EXPECT_EQ(input.params().embedding.input_embedding.data_ptr(),
-            source.embedding.input_embedding.data_ptr());
-}
-
 TEST(GraphExecutionInputTest, ReusesDetachedMetadataForFurtherPreparation) {
   LlmModelParams source;
   source.parallel.dp_global_token_nums = {1, 2};

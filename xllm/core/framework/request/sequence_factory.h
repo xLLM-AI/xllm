@@ -24,9 +24,7 @@ limitations under the License.
 
 namespace xllm {
 
-// Creates the Sequence type matching `seq_params.rec_type`: a plain Sequence
-// for LLM / VLM requests, LlmRecSequence or OneRecSequence for recommendation
-// requests.
+// Creates a sequence for LLM and VLM requests.
 std::unique_ptr<Sequence> create_sequence(
     size_t index,
     const std::vector<int32_t>& prompt_token_ids,

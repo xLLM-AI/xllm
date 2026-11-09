@@ -6,7 +6,6 @@ proto_library(
   SRCS
     tensor.proto
     common.proto
-    rec.proto
     completion.proto
     sample.proto
     chat.proto

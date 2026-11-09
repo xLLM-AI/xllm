@@ -26,7 +26,7 @@ namespace xllm {
 
 class Sequence;
 
-// Common sampling-row layout for sequence and Rec inputs. Request parameters
+// Common sampling-row layout for sequence inputs. Request parameters
 // are non-owning; row indices and token statistics belong to this build.
 class SamplingInputBuilder final {
  public:

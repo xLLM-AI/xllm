@@ -269,7 +269,7 @@ For xLLM's `beam_width` extension, see [Online Service](/en/basic_usage/online_s
 
 ## Compatibility limits and errors
 
-- For the LLM backend, all implemented sampling controls support schedule overlap either enabled or disabled. MTP also supports `seed` and `bad_words`: constraints and penalties advance through each candidate and bonus token using accepted generated history. Seeded MTP verifies independently sampled target tokens at logical token offsets; fixed seeds are independent of batch position. VLM and REC restrictions are unchanged.
+- For the LLM backend, all implemented sampling controls support schedule overlap either enabled or disabled. MTP also supports `seed` and `bad_words`: constraints and penalties advance through each candidate and bonus token using accepted generated history. Seeded MTP verifies independently sampled target tokens at logical token offsets; fixed seeds are independent of batch position. VLM restrictions are unchanged.
 - The seed and bad-word speculative support described above applies to MTP; other speculative algorithms retain their existing restrictions.
 - For the LLM backend, `min_tokens` supports ordinary generation and MTP. MTP applies the minimum only to target sampling, including each verification candidate and the bonus token; draft sampling remains unconstrained. VLM requests with `min_tokens` still require `num_speculative_tokens=0`.
 - Non-null `prompt_logprobs`, `logprob_token_ids`, `structured_outputs`, and `prompt_embeds` remain unsupported and return HTTP 400.

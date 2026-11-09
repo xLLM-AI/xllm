@@ -86,7 +86,7 @@ target_link_libraries(forward_input_factory_test
                       $<$<BOOL:${USE_NPU}>:c_sec>
                       $<$<BOOL:${USE_NPU}>:nnopbase>)
 
-foreach(factory IN ITEMS vlm rec dit)
+foreach(factory IN ITEMS vlm dit)
   cc_test(
     NAME
       ${factory}_forward_input_factory_test

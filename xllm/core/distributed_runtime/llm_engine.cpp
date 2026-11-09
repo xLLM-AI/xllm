@@ -617,9 +617,6 @@ ForwardOutput LLMEngine::step(BatchGroup& batch) {
   for (uint32_t worker_rank = 0; worker_rank < worker_clients_num_;
        worker_rank += dp_local_size_) {
     auto& result = results[worker_rank].value();
-    if (!options_.enable_schedule_overlap() && !is_graph_warmup) {
-      observe_draft_step_acceptance(*result);
-    }
     outputs.emplace_back(std::move(result.value()));
   }
   batch.apply_outputs(outputs,

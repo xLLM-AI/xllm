@@ -31,9 +31,6 @@ namespace xllm {
 // Selected by the scheduler's factory, independent of mutable sequence views.
 enum class BatchInputType : int8_t {
   SEQUENCE,
-  ONEREC,
-  ONEREC_XATTENTION,
-  REC_MULTI_ROUND,
 };
 
 // Non-owning per-forward view. Its sequence plan, owning batch and requests

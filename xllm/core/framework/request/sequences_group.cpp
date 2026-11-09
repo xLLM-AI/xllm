@@ -20,9 +20,6 @@ limitations under the License.
 #include <unordered_set>
 
 #include "common/global_flags.h"
-#include "core/framework/config/rec_config.h"
-#include "core/framework/model/rec_model_utils.h"
-#include "core/framework/request/rec_sequence.h"
 #include "core/framework/request/sequence_factory.h"
 #include "framework/batch/beam_search.h"
 #include "util/blocking_counter.h"
@@ -125,18 +122,6 @@ void SequencesGroup::generate_outputs(std::vector<SequenceOutput>& outputs,
         outputs.end(),
         [](const auto& lhs, const auto& rhs) { return lhs.index < rhs.index; });
     return;
-  }
-
-  // Check for multi-round beam search results
-  if (is_rec_multi_round_mode() && check_beam_search() &&
-      sequences_.size() == 1) {
-    // Multi-round mode is a deployment-wide flag; only REC sequences carry a
-    // device-side beam result.
-    const auto* base = dynamic_cast<const RecSequence*>(sequences_[0].get());
-    if (base != nullptr && base->beam_search_result().ready()) {
-      generate_multi_round_output(outputs, tokenizer, *base);
-      return;
-    }
   }
 
   if (sequence_params_.streaming) {
@@ -463,51 +448,6 @@ void SequencesGroup::process_beam_search(bool force_requested_result_size) {
 void SequencesGroup::finish() {
   for (auto& sequence : sequences_) {
     sequence->finish();
-  }
-}
-
-void SequencesGroup::generate_multi_round_output(
-    std::vector<SequenceOutput>& outputs,
-    const Tokenizer& tokenizer,
-    const RecSequence& base) {
-  const RecBeamSearchResult& beam_result = base.beam_search_result();
-  size_t bw = static_cast<size_t>(beam_result.beam_width());
-  const auto& last_lps = beam_result.last_logprobs();
-
-  // Rank by logprob
-  std::vector<std::pair<float, size_t>> rank;
-  rank.reserve(bw);
-  for (size_t b = 0; b < bw; ++b) {
-    float lp = (b < last_lps.size()) ? last_lps[b] : 0.0f;
-    rank.emplace_back(lp, b);
-  }
-  std::sort(rank.begin(), rank.end(), [](const auto& l, const auto& r) {
-    return l.first > r.first;
-  });
-
-  const auto& flat2d = beam_result.beams();
-  outputs.reserve(bw);
-
-  for (size_t i = 0; i < bw; ++i) {
-    size_t b = rank[i].second;
-    std::vector<int32_t> gen_ids(flat2d[b].begin(), flat2d[b].end());
-
-    SequenceOutput out;
-    out.index = i;
-    out.text = tokenizer.decode(Slice<int32_t>{gen_ids.data(), gen_ids.size()},
-                                sequence_params_.skip_special_tokens);
-    out.token_ids = std::move(gen_ids);
-    std::vector<LogProb> log_probs;
-    log_probs.resize(1);
-    log_probs[0].logprob = rank[i].first;
-    out.logprobs = log_probs;
-
-    auto fr = base.finish_reason().to_string();
-    if (fr.has_value()) {
-      out.finish_reason = fr.value();
-      out.stop_reason = base.stop_reason();
-    }
-    outputs.push_back(std::move(out));
   }
 }
 

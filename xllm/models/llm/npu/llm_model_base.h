@@ -30,7 +30,6 @@ limitations under the License.
 #include "core/framework/model/model_output.h"
 #include "core/framework/model/model_params_view.h"
 #include "core/framework/model/model_traits.h"
-#include "core/framework/model/rec_model_params.h"
 #include "core/framework/model_context/model_context.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/layers/common/attention_mask.h"
@@ -77,33 +76,6 @@ class LlmDecoderLayerImplBase : public torch::nn::Module {
                   0);
     }
 
-    return decoder_layer_->forward(x,
-                                   cos_pos,
-                                   sin_pos,
-                                   attn_mask,
-                                   kv_cache,
-                                   input_params,
-                                   event,
-                                   event_flag,
-                                   layer_id_);
-  }
-
-  torch::Tensor forward(torch::Tensor& x,
-                        torch::Tensor& cos_pos,
-                        torch::Tensor& sin_pos,
-                        torch::Tensor& attn_mask,
-                        KVCache& kv_cache,
-                        RecModelParams& input_params,
-                        aclrtEvent* event,
-                        std::atomic<bool>* event_flag) {
-    if (input_params.block_copy.src_block_indices.numel() > 0) {
-      block_copy_(kv_cache.get_k_cache(),
-                  kv_cache.get_v_cache(),
-                  input_params.block_copy.src_block_indices,
-                  input_params.block_copy.dst_block_indices,
-                  input_params.block_copy.cum_sum,
-                  0);
-    }
     return decoder_layer_->forward(x,
                                    cos_pos,
                                    sin_pos,
@@ -180,14 +152,6 @@ class LlmModelImplBase : public torch::nn::Module {
                               std::vector<KVCache>& kv_caches,
                               const ModelParamsView& input_params) {
     auto local_params = input_params;
-    return forward_impl(tokens, positions, kv_caches, local_params);
-  }
-
-  ModelOutput forward(torch::Tensor tokens,
-                      torch::Tensor positions,
-                      std::vector<KVCache>& kv_caches,
-                      const RecModelParams& input_params) {
-    auto local_params = input_params.clone();
     return forward_impl(tokens, positions, kv_caches, local_params);
   }
 

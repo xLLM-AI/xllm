@@ -131,7 +131,6 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | `enable_beam_search_kernel` | `bool` | `false` | Whether to enable the beam search kernel. |
 | `beam_width` | `int32` | `1` | Beam width for beam search. |
 | `enable_block_copy_kernel` | `bool` | `true` (NPU/CUDA/MUSA/DCU); `false` (other backends) | Whether to use the block copy kernel on supported backends. |
-| `enable_topk_sorted` | `bool` | `true` | Whether to enable sorted top-k output. |
 
 ## SchedulerConfig
 
@@ -300,20 +299,3 @@ Current support covers ordinary non-PD text inference with prefix caching enable
 | `dit_sparse_attention_sparse_start_step` | `int64` | `0` | Sparse attention step index to start sparse attention. Steps before this use dense attention. |
 | `dit_sparse_attention_version` | `string` | `"rain_fusion"` | Sparse attention version: `rain_fusion` (frame-pairing + `aclnnRainFusionAttention`) or `sparse_attention` (block-decompose + `aclnnBlockSparseAttention`). |
 | `dit_sparse_attention_mask_refresh_steps` | `int64` | `1` | Recompute the block sparse mask every N diffusion steps. `1` means every step, higher values reuse the mask longer. |
-
-## RecConfig
-
-| Parameter | Type | Default | Description |
-|:----------|:-----|:--------|:------------|
-| `enable_rec_fast_sampler` | `bool` | `true` | Whether to enable the RecSampler fast sampling path for Rec pipelines. |
-| `enable_rec_prefill_only` | `bool` | `false` | Whether to enable Rec prefill-only mode without decoder self-attention block allocation. |
-| `enable_xattention_one_stage` | `bool` | `false` | Whether to force xattention one-stage decode for Rec multi-round mode. |
-| `max_decode_rounds` | `int32` | `0` | Maximum number of decode rounds for multi-step decoding. `0` means disabled. |
-| `enable_constrained_decoding` | `bool` | `false` | Whether to enable constrained decoding with predefined rules for output format or structure. |
-| `output_rec_logprobs` | `bool` | `false` | Whether to output Rec multi-round token-aligned logprobs. Missing per-token logprobs are filled with the final beam logprob. |
-| `enable_convert_tokens_to_item` | `bool` | `false` | Whether to convert token IDs to item IDs in REC/OneRec responses. |
-| `enable_output_sku_logprobs` | `bool` | `false` | Whether to output REC/OneRec token-aligned logprobs tensors. |
-| `enable_extended_item_info` | `bool` | `false` | Whether to parse and output REC extended item info tensors. |
-| `each_conversion_threshold` | `int32` | `50` | Maximum number of items emitted for each REC token triplet. |
-| `total_conversion_threshold` | `int32` | `1000` | Maximum total number of items emitted in one REC response. |
-| `rec_worker_max_concurrency` | `uint32` | `1` | Concurrency for Rec worker parallel execution. Values less than or equal to `1` disable concurrent Rec workers. |

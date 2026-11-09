@@ -37,7 +37,6 @@ limitations under the License.
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
-#include "core/framework/model/rec_model_utils.h"
 #include "core/framework/request/request_state.h"
 #include "core/runtime/acl_graph_bucket_policy.h"
 #include "core/scheduler/profile/graph_warmup.h"
@@ -178,22 +177,20 @@ ProfileManager::ProfileManager(
   // prediction.
 
 #if defined(USE_NPU) || defined(USE_CUDA) || defined(USE_MLU)
-  if (!is_rec_multi_round_mode()) {
-    const auto& execution_config = ::xllm::ExecutionConfig::get_instance();
-    if (execution_config.enable_graph()) {
-      if (execution_config.disable_graph_warmup()) {
-        LOG(INFO) << "Graph warmup disabled by execution config; graphs will "
-                     "be captured lazily from real requests";
-      } else {
-        warmup_for_graph();
-      }
-#if defined(USE_NPU)
-    } else if (options_.instance_role() == InstanceRole::DECODE) {
-      LOG(INFO) << "Skipping eager warmup for decode-only instance";
+  const auto& execution_config = ::xllm::ExecutionConfig::get_instance();
+  if (execution_config.enable_graph()) {
+    if (execution_config.disable_graph_warmup()) {
+      LOG(INFO) << "Graph warmup disabled by execution config; graphs will "
+                   "be captured lazily from real requests";
     } else {
-      warmup_for_eager();
-#endif
+      warmup_for_graph();
     }
+#if defined(USE_NPU)
+  } else if (options_.instance_role() == InstanceRole::DECODE) {
+    LOG(INFO) << "Skipping eager warmup for decode-only instance";
+  } else {
+    warmup_for_eager();
+#endif
   }
 #endif
 }

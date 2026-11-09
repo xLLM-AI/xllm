@@ -29,18 +29,3 @@ cc_library(
     :json_object_grammar
     glog::glog
     torch)
-
-cc_library(
-  NAME
-    rec_constrained_decoding
-  HDRS
-    rec_constrained_decoding.h
-  SRCS
-    rec_constrained_decoding.cpp
-  DEPS
-    :state_dict
-    :common
-    util
-    glog::glog
-    torch
-)

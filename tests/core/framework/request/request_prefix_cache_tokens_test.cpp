@@ -58,7 +58,6 @@ Sequence MakeSequence(size_t index, const std::vector<int32_t>& prompt_tokens) {
   params.skip_special_tokens = true;
   params.streaming = false;
   params.enable_schedule_overlap = false;
-  params.rec_type = RecType::kNone;
   params.bos_token_id = 0;
   params.request_id = "cached_tokens_test";
   params.sampling_param = &sampling_param;

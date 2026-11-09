@@ -26,7 +26,6 @@ limitations under the License.
 #include <mutex>
 
 #include "core/distributed_runtime/remote_worker.h"
-#include "runtime/rec_forward_params.h"
 #include "runtime/vlm_forward_params.h"
 
 namespace xllm {
@@ -154,20 +153,6 @@ class ModelRoutingService final : public proto::DistributeWorker {
       return;
     }
     response->add_outputs()->add_tokens()->set_id(2);
-  }
-
-  void ExecuteRECModel(google::protobuf::RpcController* controller,
-                       const proto::RECForwardRequest* request,
-                       proto::RECForwardResponse* response,
-                       google::protobuf::Closure* done) override {
-    brpc::ClosureGuard guard(done);
-    if (!request->has_packed_input() ||
-        request->packed_input().payload().size() < 11 ||
-        static_cast<uint8_t>(request->packed_input().payload()[10]) != 3) {
-      controller->SetFailed("Unexpected packed input domain");
-      return;
-    }
-    response->add_outputs()->add_tokens()->set_id(3);
   }
 
   void ExecuteDITModel(google::protobuf::RpcController* controller,
@@ -309,18 +294,6 @@ TEST_F(CommChannelTest, RoutesVLMInputToItsOwnRpc) {
   ASSERT_EQ(output->outputs.size(), 1);
   ASSERT_EQ(output->outputs[0].tokens.size(), 1);
   EXPECT_EQ(output->outputs[0].tokens[0].id, 2);
-}
-
-TEST_F(CommChannelTest, RoutesRECInputToItsOwnRpc) {
-  RecForwardInput input;
-  folly::Promise<std::optional<RawForwardOutput>> promise;
-  auto future = promise.getSemiFuture();
-  channel_.execute_rec_model_async(input, promise);
-  const auto output = std::move(future).get();
-  ASSERT_TRUE(output.has_value());
-  ASSERT_EQ(output->outputs.size(), 1);
-  ASSERT_EQ(output->outputs[0].tokens.size(), 1);
-  EXPECT_EQ(output->outputs[0].tokens[0].id, 3);
 }
 
 TEST_F(CommChannelTest, RoutesDITInputToItsOwnRpc) {

@@ -1,5 +1,4 @@
 include(cc_binary)
-include(cc_shared_library)
 
 include_directories(.)
 
@@ -60,8 +59,6 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   endif()
 endif()
 
-option(GENERATE_SO "Enable compile to generate .so" OFF)
-
 add_subdirectory(api_service)
 add_subdirectory(compiler)
 add_subdirectory(core)
@@ -73,60 +70,30 @@ add_subdirectory(proto)
 add_subdirectory(pybind)
 add_subdirectory(server)
 
-if(GENERATE_SO)
-  message(STATUS "build libxllm.so and install")
-  cc_shared_library(
-    EXPORT_DEPS
-    NAME
-      xllm
-    HDRS
-      c_api/llm.h
-      c_api/rec.h
-      c_api/default.h
-      c_api/types.h
-      c_api/internal/helper.h
-    SRCS
-      c_api/internal/llm.cpp
-      c_api/internal/rec.cpp
-      c_api/internal/helper.cpp
-    DEPS
-      :config
-      :master
-      absl::strings
-      Boost::serialization
-      gflags::gflags
-      glog::glog
-      Folly::folly
-      nlohmann_json::nlohmann_json
-  )
-
-else()
-  message(STATUS "build xllm binary and install")
-  cc_binary(
-    NAME
-      xllm
-    SRCS
-      xllm.cpp
-    DEPS
-      :distributed_vmm_coordinator
-      :worker_memory_resources
-      $<$<BOOL:${USE_NPU}>:npu_startup>
-      :config
-      :api_service
-      :xllm_server
-      :master
-      :model_loader
-      :kv_cache_store_config_validation
-      :util
-      absl::strings
-      Boost::serialization
-      gflags::gflags
-      glog::glog
-      Folly::folly
-      nlohmann_json::nlohmann_json
-  )
-
-endif()
+message(STATUS "build xllm binary and install")
+cc_binary(
+  NAME
+    xllm
+  SRCS
+    xllm.cpp
+  DEPS
+    :distributed_vmm_coordinator
+    :worker_memory_resources
+    $<$<BOOL:${USE_NPU}>:npu_startup>
+    :config
+    :api_service
+    :xllm_server
+    :master
+    :model_loader
+    :kv_cache_store_config_validation
+    :util
+    absl::strings
+    Boost::serialization
+    gflags::gflags
+    glog::glog
+    Folly::folly
+    nlohmann_json::nlohmann_json
+)
 
 xllm_export_native_host(xllm)
 xllm_export_native_host(xllm_export)
@@ -187,25 +154,14 @@ if (USE_XLITE)
   xllm_link_xlite(xllm)
 endif()
 # install xllm
-if(GENERATE_SO)
-  install(TARGETS xllm
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-else()
-  install(TARGETS xllm RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-endif()
+install(TARGETS xllm RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # Install all dependencies for xllm
 install(CODE [[
-  if("$<TARGET_PROPERTY:xllm,TYPE>" STREQUAL "SHARED_LIBRARY")
-    set(_xllm_artifact_kind LIBRARIES)
-  else()
-    set(_xllm_artifact_kind EXECUTABLES)
-  endif()
   file(GET_RUNTIME_DEPENDENCIES
         RESOLVED_DEPENDENCIES_VAR DEPENDENCIES
         UNRESOLVED_DEPENDENCIES_VAR UNRESOLVED_DEPENDENCIES
-        ${_xllm_artifact_kind}
+        EXECUTABLES
         $<TARGET_FILE:xllm>)
 
   file(INSTALL

@@ -7,12 +7,6 @@ cc_test(
   DEPS :runtime GTest::gtest_main
 )
 
-cc_test(
-  NO_NPU_RUNTIME
-  NAME rec_graph_input_test
-  SRCS rec_graph_input_test.cpp
-  DEPS :model GTest::gtest_main
-)
 
 cc_test(
   NO_NPU_RUNTIME
@@ -21,17 +15,6 @@ cc_test(
   DEPS :model GTest::gtest_main
 )
 
-if(USE_ILU)
-  cc_test(
-    NAME rec_executor_test
-    SRCS rec_executor_test.cpp
-    DEPS :runtime GTest::gtest_main
-  )
-  target_link_options(rec_executor_test PRIVATE
-    "-Wl,--whole-archive"
-    "${CMAKE_BINARY_DIR}/third_party/spdlog/libspdlog.a"
-    "-Wl,--no-whole-archive")
-endif()
 
 cc_test(
   NO_NPU_RUNTIME

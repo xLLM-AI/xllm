@@ -16,9 +16,7 @@ limitations under the License.
 #include "attention.h"
 
 #include "base_attention_impl.h"
-#include "core/framework/model/rec_model_utils.h"
 #include "flashinfer_attention.h"
-#include "xattention.h"
 
 namespace xllm {
 namespace layer {
@@ -30,13 +28,8 @@ AttentionImpl::AttentionImpl(int64_t num_heads,
   // Select implementation based on mode. Use polymorphism via base class
   // pointer to manage different implementations.
 
-  if (is_rec_multi_round_mode()) {
-    attention_impl_ = std::make_shared<XAttentionImpl>(
-        num_heads, head_size, scale, num_kv_heads, sliding_window);
-  } else {
-    attention_impl_ = std::make_shared<FlashInferAttentionImpl>(
-        num_heads, head_size, scale, num_kv_heads, sliding_window);
-  }
+  attention_impl_ = std::make_shared<FlashInferAttentionImpl>(
+      num_heads, head_size, scale, num_kv_heads, sliding_window);
 }
 
 std::tuple<torch::Tensor, std::optional<torch::Tensor>> AttentionImpl::forward(

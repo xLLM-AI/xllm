@@ -43,7 +43,6 @@ limitations under the License.
 #include "core/runtime/dit_forward_params.h"
 #include "core/runtime/forward_params.h"
 #include "core/runtime/forward_shared_memory_transport.h"
-#include "core/runtime/rec_forward_params.h"
 #include "core/runtime/vlm_forward_params.h"
 #include "worker.pb.h"
 
@@ -53,42 +52,18 @@ namespace {
 
 static_assert(!std::is_same_v<decltype(LlmAttentionInput::host),
                               decltype(VlmAttentionInput::host)> &&
-                  !std::is_same_v<decltype(LlmAttentionInput::host),
-                                  decltype(RecAttentionInput::host)> &&
-                  !std::is_same_v<decltype(VlmAttentionInput::host),
-                                  decltype(RecAttentionInput::host)> &&
                   !std::is_same_v<decltype(LlmAttentionInput::device),
-                                  decltype(VlmAttentionInput::device)> &&
-                  !std::is_same_v<decltype(LlmAttentionInput::device),
-                                  decltype(RecAttentionInput::device)> &&
-                  !std::is_same_v<decltype(VlmAttentionInput::device),
-                                  decltype(RecAttentionInput::device)>,
+                                  decltype(VlmAttentionInput::device)>,
               "Each domain must declare its own attention storage types");
 static_assert(
     !std::is_assignable_v<decltype(LlmAttentionInput::host)&,
                           const decltype(VlmAttentionInput::host)&> &&
         !std::is_assignable_v<decltype(VlmAttentionInput::host)&,
                               const decltype(LlmAttentionInput::host)&> &&
-        !std::is_assignable_v<decltype(LlmAttentionInput::host)&,
-                              const decltype(RecAttentionInput::host)&> &&
-        !std::is_assignable_v<decltype(RecAttentionInput::host)&,
-                              const decltype(LlmAttentionInput::host)&> &&
-        !std::is_assignable_v<decltype(VlmAttentionInput::host)&,
-                              const decltype(RecAttentionInput::host)&> &&
-        !std::is_assignable_v<decltype(RecAttentionInput::host)&,
-                              const decltype(VlmAttentionInput::host)&> &&
         !std::is_assignable_v<decltype(LlmAttentionInput::device)&,
                               const decltype(VlmAttentionInput::device)&> &&
         !std::is_assignable_v<decltype(VlmAttentionInput::device)&,
-                              const decltype(LlmAttentionInput::device)&> &&
-        !std::is_assignable_v<decltype(LlmAttentionInput::device)&,
-                              const decltype(RecAttentionInput::device)&> &&
-        !std::is_assignable_v<decltype(RecAttentionInput::device)&,
-                              const decltype(LlmAttentionInput::device)&> &&
-        !std::is_assignable_v<decltype(VlmAttentionInput::device)&,
-                              const decltype(RecAttentionInput::device)&> &&
-        !std::is_assignable_v<decltype(RecAttentionInput::device)&,
-                              const decltype(VlmAttentionInput::device)&>,
+                              const decltype(LlmAttentionInput::device)&>,
     "Cross-domain attention copies must be explicit");
 
 class ScopedContiguousInputBuffer final {
@@ -133,13 +108,6 @@ void expect_input_read_cancellation(const std::string& suffix) {
             std::future_status::ready);
   EXPECT_FALSE(result.get());
   EXPECT_FALSE(read_input());
-}
-
-TEST(ForwardSharedMemoryShutdownTest, CancelsIdleReadsForEveryInputDomain) {
-  expect_input_read_cancellation<LlmForwardInput>("llm");
-  expect_input_read_cancellation<VlmForwardInput>("vlm");
-  expect_input_read_cancellation<RecForwardInput>("rec");
-  expect_input_read_cancellation<DiTForwardInput>("dit");
 }
 
 TEST(ForwardSharedMemoryShutdownTest,
@@ -242,56 +210,6 @@ uint64_t read_packed_uint64(const std::string& payload, size_t offset) {
   return value;
 }
 
-RecForwardInput make_rec_transport_input() {
-  RecForwardInput input;
-  input.token_ids = torch::tensor({11, 23}, torch::kInt32);
-  input.positions = torch::tensor({0, 1}, torch::kInt32);
-  input.input_params.meta.num_sequences = 1;
-  input.input_params.meta.batch_id = 31;
-  input.input_params.meta.batch_forward_type = BatchForwardType::PREFILL;
-  input.input_params.attention.host.q_seq_lens = {2};
-  input.input_params.attention.host.q_cu_seq_lens = {0, 2};
-  input.input_params.attention.host.kv_seq_lens = {2};
-  input.input_params.attention.host.new_cache_slots = {3, 4};
-  input.input_params.attention.host.block_tables =
-      torch::tensor({{7, 9}}, torch::kInt32);
-  input.input_params.features.mm_data.batch({MMData(
-      MMType::EMBEDDING,
-      MMDict{{"MULTI_MODAL_VALUES", torch::tensor({{1.5F, 2.5F}})},
-             {"MULTI_MODAL_INDICES", torch::tensor({1}, torch::kInt64)}})});
-  input.sampling_params.selected_token_idxes() =
-      torch::tensor({1}, torch::kInt32);
-  input.sample_sequence_ids = {"rec#0"};
-  input.sample_prior_output_rows = {-1};
-  return input;
-}
-
-void expect_rec_transport_input(const RecForwardInput& input) {
-  EXPECT_TRUE(
-      torch::equal(input.token_ids, torch::tensor({11, 23}, torch::kInt32)));
-  EXPECT_TRUE(torch::equal(input.positions,
-                           torch::tensor({0, 1}, input.positions.options())));
-  EXPECT_EQ(input.input_params.meta.batch_id, 31);
-  EXPECT_EQ(input.input_params.attention.host.kv_seq_lens,
-            (std::vector<int32_t>{2}));
-  EXPECT_TRUE(torch::equal(input.sampling_params.selected_token_idxes(),
-                           torch::tensor({1}, torch::kInt32)));
-  EXPECT_EQ(input.sample_sequence_ids, (std::vector<std::string>{"rec#0"}));
-  EXPECT_EQ(input.sample_prior_output_rows, (std::vector<int32_t>{-1}));
-  const auto values = input.input_params.features.mm_data.get<torch::Tensor>(
-      "MULTI_MODAL_VALUES");
-  const auto indices = input.input_params.features.mm_data.get<torch::Tensor>(
-      "MULTI_MODAL_INDICES");
-  ASSERT_TRUE(values.has_value());
-  ASSERT_TRUE(indices.has_value());
-  EXPECT_TRUE(torch::equal(*values, torch::tensor({{1.5F, 2.5F}})));
-  EXPECT_TRUE(torch::equal(*indices, torch::tensor({1}, torch::kInt64)));
-  EXPECT_EQ(indices->scalar_type(), torch::kInt64);
-  EXPECT_FALSE(input.has_step_meta());
-  EXPECT_FALSE(input.input_params.has_onerec_params());
-  EXPECT_FALSE(input.input_params.has_llmrec_params());
-}
-
 VlmForwardInput make_vlm_transport_input() {
   VlmForwardInput input;
   input.token_ids = torch::tensor({11, 23}, torch::kInt32);
@@ -347,8 +265,8 @@ void expect_vlm_transport_input(const VlmForwardInput& input) {
 template <typename Input>
 class NoncontiguousSharedMemoryInputTest : public ::testing::Test {};
 
-using TokenInputTypes =
-    ::testing::Types<LlmForwardInput, RecForwardInput, VlmForwardInput>;
+using TokenInputTypes = ::testing::Types<LlmForwardInput, VlmForwardInput>;
+
 TYPED_TEST_SUITE(NoncontiguousSharedMemoryInputTest, TokenInputTypes);
 
 TYPED_TEST(NoncontiguousSharedMemoryInputTest,
@@ -904,6 +822,161 @@ void expect_packed_sample_count_mismatch_rejected() {
       "Packed sample count does not match the sampling sequence count");
 }
 
+TEST(ForwardSharedMemoryShutdownTest, CancelsIdleReadsForEveryInputDomain) {
+  expect_input_read_cancellation<LlmForwardInput>("llm");
+  expect_input_read_cancellation<VlmForwardInput>("vlm");
+  expect_input_read_cancellation<DiTForwardInput>("dit");
+}
+
+TEST(BatchPackedInputTest, NativeDomainsRejectUnsupportedPackedSchemas) {
+  LlmForwardInput llm_source;
+  VlmForwardInput vlm_source;
+  DiTForwardInput dit_source;
+  std::vector<proto::PackedForwardInput> packed_inputs(4);
+  ASSERT_TRUE(llm_source.to_packed_proto(&packed_inputs[0]));
+  ASSERT_TRUE(vlm_source.to_packed_proto(&packed_inputs[1]));
+  ASSERT_TRUE(dit_source.to_packed_proto(&packed_inputs[3]));
+
+  for (const auto& packed_input : packed_inputs) {
+    ASSERT_GE(packed_input.payload().size(), 40u);
+    for (int32_t version : {0, 2, 4, 6, 127}) {
+      SCOPED_TRACE(version);
+      std::string payload = packed_input.payload();
+      payload[8] = static_cast<char>(version);
+      payload[9] = '\0';
+      proto::PackedForwardInput unsupported_input;
+      unsupported_input.set_payload(std::move(payload));
+      LlmForwardInput llm_input;
+      VlmForwardInput vlm_input;
+      DiTForwardInput dit_input;
+      EXPECT_FALSE(llm_input.from_packed_proto(unsupported_input));
+      EXPECT_FALSE(vlm_input.from_packed_proto(unsupported_input));
+      EXPECT_FALSE(dit_input.from_packed_proto(unsupported_input));
+      EXPECT_FALSE(llm_input.runtime.input_host_buffer.defined());
+      EXPECT_FALSE(vlm_input.runtime.input_host_buffer.defined());
+      EXPECT_EQ(dit_input.model_params.tensor_sources.size(), 0u);
+    }
+  }
+}
+
+TEST(BatchPackedInputTest, NativeVlmDecodeKeepsDomainWithoutVisionData) {
+  VlmForwardInput source;
+  source.token_ids = torch::tensor({29}, torch::kInt32);
+  source.positions = torch::tensor({9}, torch::kInt32);
+  source.input_params.meta.batch_forward_type = BatchForwardType::DECODE;
+  proto::PackedForwardInput payload;
+  ASSERT_TRUE(source.to_packed_proto(&payload));
+  VlmForwardInput lazy_input;
+  ASSERT_TRUE(lazy_input.from_packed_proto(payload));
+  const auto prepared =
+      lazy_input.to(torch::Device(torch::kCPU), torch::kFloat32);
+  EXPECT_TRUE(prepared.input_params.meta.batch_forward_type.is_decode());
+  EXPECT_FALSE(prepared.input_params.multimodal.mm_data.valid());
+  EXPECT_TRUE(torch::equal(prepared.token_ids.cpu(), source.token_ids));
+  LlmForwardInput llm_input;
+  DiTForwardInput dit_input;
+  EXPECT_FALSE(llm_input.from_packed_proto(payload));
+  EXPECT_FALSE(dit_input.from_packed_proto(payload));
+  payload.mutable_payload()->at(10) = 1;
+  EXPECT_FALSE(lazy_input.from_packed_proto(payload));
+}
+
+TEST(BatchPackedInputTest, BorrowedExecutionViewUpdatesNativeMetadata) {
+  static_assert(!std::is_copy_constructible_v<LlmForwardInput>);
+  static_assert(!std::is_copy_constructible_v<VlmForwardInput>);
+  static_assert(!std::is_copy_constructible_v<LlmModelParams>);
+  static_assert(!std::is_copy_constructible_v<VlmModelParams>);
+  static_assert(!std::is_default_constructible_v<ModelParamsView>);
+  LlmModelParams owner;
+  owner.attention.host.kv_seq_lens = {2};
+  ModelParamsView view(owner);
+  EXPECT_EQ(view.attention.host.kv_seq_lens.data(),
+            owner.attention.host.kv_seq_lens.data());
+  view.attention.host.kv_seq_lens[0] = 7;
+  EXPECT_EQ(owner.attention.host.kv_seq_lens[0], 7);
+  view.graph.input_tokens_override = torch::tensor({13}, torch::kInt32);
+  EXPECT_TRUE(torch::equal(owner.graph.input_tokens_override,
+                           torch::tensor({13}, torch::kInt32)));
+  EXPECT_FALSE(view.has_multimodal());
+}
+
+TEST(BatchPackedInputTest, NativeDiTPackedProtoRejectsMalformedPayloads) {
+  DiTForwardInput input;
+  input.model_params.batch_size = 1;
+  input.model_params.prompts = {"prompt"};
+  input.model_params.tensor_sources.add("latent", torch::tensor({1.5f, 2.5f}));
+  proto::PackedForwardInput packed_input;
+  ASSERT_TRUE(input.to_packed_proto(&packed_input));
+  DiTForwardInput baseline;
+  ASSERT_TRUE(baseline.from_packed_proto(packed_input));
+  ASSERT_GT(packed_input.payload().size(), 40u);
+  const uint64_t descriptor_bytes =
+      read_packed_uint64(packed_input.payload(), /*offset=*/16);
+  const uint64_t arena_offset =
+      read_packed_uint64(packed_input.payload(), /*offset=*/24);
+  const uint64_t arena_bytes =
+      read_packed_uint64(packed_input.payload(), /*offset=*/32);
+
+  std::vector<std::pair<std::string, std::string>> malformed_payloads;
+  malformed_payloads.reserve(13);
+  malformed_payloads.emplace_back("empty", "");
+  malformed_payloads.emplace_back("truncated header",
+                                  packed_input.payload().substr(0, 39));
+  malformed_payloads.emplace_back("unknown version", packed_input.payload());
+  malformed_payloads.back().second[8] = 127;
+  malformed_payloads.emplace_back("token domain", packed_input.payload());
+  malformed_payloads.back().second[10] = 1;
+  malformed_payloads.emplace_back("reserved VLM domain",
+                                  packed_input.payload());
+  malformed_payloads.back().second[10] = 2;
+  malformed_payloads.emplace_back("unsupported domain", packed_input.payload());
+  malformed_payloads.back().second[10] = 3;
+  malformed_payloads.emplace_back("unknown domain", packed_input.payload());
+  malformed_payloads.back().second[10] = 127;
+  malformed_payloads.emplace_back("overlapping arena", packed_input.payload());
+  overwrite_packed_uint64(malformed_payloads.back().second,
+                          /*offset=*/24,
+                          /*value=*/0);
+  malformed_payloads.emplace_back("arena beyond payload",
+                                  packed_input.payload());
+  overwrite_packed_uint64(
+      malformed_payloads.back().second,
+      /*offset=*/24,
+      static_cast<uint64_t>(packed_input.payload().size()) + 16);
+  malformed_payloads.emplace_back("overflowing descriptor",
+                                  packed_input.payload());
+  overwrite_packed_uint64(malformed_payloads.back().second,
+                          /*offset=*/16,
+                          std::numeric_limits<uint64_t>::max());
+  malformed_payloads.emplace_back(
+      "truncated arena",
+      packed_input.payload().substr(0, packed_input.payload().size() - 1));
+  malformed_payloads.emplace_back("unconsumed descriptor byte",
+                                  packed_input.payload());
+  malformed_payloads.back().second.insert(
+      static_cast<size_t>(40 + descriptor_bytes), /*count=*/16, /*ch=*/'\0');
+  overwrite_packed_uint64(malformed_payloads.back().second,
+                          /*offset=*/16,
+                          descriptor_bytes + 1);
+  overwrite_packed_uint64(malformed_payloads.back().second,
+                          /*offset=*/24,
+                          arena_offset + 16);
+  malformed_payloads.emplace_back("unconsumed arena byte",
+                                  packed_input.payload());
+  malformed_payloads.back().second += '\0';
+  overwrite_packed_uint64(malformed_payloads.back().second,
+                          /*offset=*/32,
+                          arena_bytes + 1);
+
+  for (const auto& [name, payload] : malformed_payloads) {
+    SCOPED_TRACE(name);
+    proto::PackedForwardInput malformed_input;
+    malformed_input.set_payload(payload);
+    DiTForwardInput unpacked_input;
+    EXPECT_FALSE(unpacked_input.from_packed_proto(malformed_input));
+  }
+}
+
 }  // namespace
 
 TEST(BatchPackedInputTest, LlmPackedSampleCountAvoidsMaterialization) {
@@ -1055,42 +1128,6 @@ TEST(BatchPackedInputTest, PackedProtoRejectsLegacyTokenLayout) {
   EXPECT_FALSE(dit_input.from_packed_proto(legacy_input));
 }
 
-TEST(BatchPackedInputTest, NativeDomainsRejectUnsupportedPackedSchemas) {
-  LlmForwardInput llm_source;
-  VlmForwardInput vlm_source;
-  RecForwardInput rec_source;
-  DiTForwardInput dit_source;
-  std::vector<proto::PackedForwardInput> packed_inputs(4);
-  ASSERT_TRUE(llm_source.to_packed_proto(&packed_inputs[0]));
-  ASSERT_TRUE(vlm_source.to_packed_proto(&packed_inputs[1]));
-  ASSERT_TRUE(rec_source.to_packed_proto(&packed_inputs[2]));
-  ASSERT_TRUE(dit_source.to_packed_proto(&packed_inputs[3]));
-
-  for (const auto& packed_input : packed_inputs) {
-    ASSERT_GE(packed_input.payload().size(), 40u);
-    for (int32_t version : {0, 2, 4, 6, 127}) {
-      SCOPED_TRACE(version);
-      std::string payload = packed_input.payload();
-      payload[8] = static_cast<char>(version);
-      payload[9] = '\0';
-      proto::PackedForwardInput unsupported_input;
-      unsupported_input.set_payload(std::move(payload));
-      LlmForwardInput llm_input;
-      VlmForwardInput vlm_input;
-      RecForwardInput rec_input;
-      DiTForwardInput dit_input;
-      EXPECT_FALSE(llm_input.from_packed_proto(unsupported_input));
-      EXPECT_FALSE(vlm_input.from_packed_proto(unsupported_input));
-      EXPECT_FALSE(rec_input.from_packed_proto(unsupported_input));
-      EXPECT_FALSE(dit_input.from_packed_proto(unsupported_input));
-      EXPECT_FALSE(llm_input.runtime.input_host_buffer.defined());
-      EXPECT_FALSE(vlm_input.runtime.input_host_buffer.defined());
-      EXPECT_FALSE(rec_input.runtime.input_host_buffer.defined());
-      EXPECT_EQ(dit_input.model_params.tensor_sources.size(), 0u);
-    }
-  }
-}
-
 TEST(BatchPackedInputTest, PackedTokenDecoderRejectsNativeDiTDomain) {
   DiTForwardInput input;
   input.model_params.batch_size = 1;
@@ -1102,99 +1139,6 @@ TEST(BatchPackedInputTest, PackedTokenDecoderRejectsNativeDiTDomain) {
   LlmForwardInput token_input;
   EXPECT_FALSE(token_input.from_packed_proto(packed_input));
   EXPECT_FALSE(token_input.runtime.input_host_buffer.defined());
-}
-
-TEST(BatchPackedInputTest,
-     NativeRecPackedCopyPreservesPayloadAfterSourceRelease) {
-  ScopedContiguousInputBuffer contiguous_input_buffer(/*enabled=*/false);
-  RecForwardInput lazy_input;
-  {
-    auto input = make_rec_transport_input();
-    proto::PackedForwardInput packed_input;
-    ASSERT_TRUE(input.to_packed_proto(&packed_input));
-    ASSERT_GE(packed_input.payload().size(), 40u);
-    EXPECT_EQ(static_cast<uint8_t>(packed_input.payload()[10]), 3u);
-    ASSERT_TRUE(lazy_input.from_packed_proto(packed_input));
-    LlmForwardInput token_input;
-    EXPECT_FALSE(token_input.from_packed_proto(packed_input));
-    DiTForwardInput dit_input;
-    EXPECT_FALSE(dit_input.from_packed_proto(packed_input));
-  }
-  ASSERT_TRUE(lazy_input.runtime.input_host_buffer_has_layout);
-  RecForwardInput copied_input = lazy_input.clone();
-  lazy_input = RecForwardInput();
-  const auto input =
-      copied_input.to(torch::Device(torch::kCPU), torch::kFloat32);
-  copied_input = RecForwardInput();
-  EXPECT_TRUE(input.runtime.device_tensors_ready);
-  EXPECT_FALSE(input.runtime.input_host_buffer_has_layout);
-  expect_rec_transport_input(input);
-}
-
-TEST(BatchPackedInputTest, NativeRecSharedMemoryRetainsPayloadAfterOverwrite) {
-  ScopedContiguousInputBuffer contiguous_input_buffer(/*enabled=*/false);
-  RecForwardInput lazy_input;
-  {
-    const std::string shm_name =
-        ForwardSharedMemoryTransport::create_unique_name(
-            "batch_test_native_rec",
-            /*dp_group=*/0,
-            ForwardType::RAW_INPUT,
-            /*rank=*/0);
-    bool is_creator = false;
-    ForwardSharedMemoryTransport writer(
-        shm_name, /*size=*/1 << 20, is_creator, ForwardType::RAW_INPUT);
-    bool is_reader_creator = false;
-    ForwardSharedMemoryTransport reader(
-        shm_name, /*size=*/1 << 20, is_reader_creator, ForwardType::RAW_INPUT);
-    auto source = make_rec_transport_input();
-    ASSERT_TRUE(writer.input_write(source));
-    reader.input_read(
-        lazy_input,
-        torch::Device(torch::kCPU),
-        InputDeviceMaterializationPolicy::DEFER_TO_WORKER_PREPARE);
-    ASSERT_TRUE(lazy_input.runtime.input_host_buffer_has_layout);
-    source.token_ids = torch::tensor({91, 92}, torch::kInt32);
-    ASSERT_TRUE(writer.input_write(source));
-  }
-  const auto input = lazy_input.to(torch::Device(torch::kCPU), torch::kFloat32);
-  expect_rec_transport_input(input);
-}
-
-TEST(BatchPackedInputTest, NativeRecDecoderRejectsTokenAndDiTPayloads) {
-  LlmForwardInput token_input;
-  token_input.token_ids = torch::tensor({11}, torch::kInt32);
-  token_input.positions = torch::tensor({0}, torch::kInt32);
-  proto::PackedForwardInput token_payload;
-  ASSERT_TRUE(token_input.to_packed_proto(&token_payload));
-  RecForwardInput input;
-  EXPECT_FALSE(input.from_packed_proto(token_payload));
-  EXPECT_FALSE(input.runtime.input_host_buffer.defined());
-  DiTForwardInput dit_input;
-  dit_input.model_params.batch_size = 1;
-  dit_input.model_params.prompts = {"prompt"};
-  proto::PackedForwardInput dit_payload;
-  ASSERT_TRUE(dit_input.to_packed_proto(&dit_payload));
-  EXPECT_FALSE(input.from_packed_proto(dit_payload));
-  EXPECT_FALSE(input.runtime.input_host_buffer.defined());
-}
-
-TEST(BatchPackedInputTest, NativeRecTransportRejectsLocalDecodeStrategies) {
-  proto::PackedForwardInput packed_input;
-  auto input = make_rec_transport_input();
-  input.input_params.mutable_onerec_params();
-  EXPECT_FALSE(input.to_packed_proto(&packed_input));
-  input.input_params.mutable_onerec_xattention_params();
-  EXPECT_FALSE(input.to_packed_proto(&packed_input));
-  input.input_params.mutable_llmrec_params();
-  EXPECT_FALSE(input.to_packed_proto(&packed_input));
-  input = make_rec_transport_input();
-  input.step_decode = StepDecodeMeta{};
-  EXPECT_FALSE(input.to_packed_proto(&packed_input));
-  input = make_rec_transport_input();
-  input.decoder_sampling_params.selected_token_idxes() =
-      torch::tensor({0}, torch::kInt32);
-  EXPECT_FALSE(input.to_packed_proto(&packed_input));
 }
 
 TEST(BatchPackedInputTest, NativeVlmPackedCopyRetainsVisionAndMrope) {
@@ -1247,52 +1191,6 @@ TEST(BatchPackedInputTest, NativeVlmSharedMemoryRetainsVisionAfterOverwrite) {
   const auto prepared =
       lazy_input.to(torch::Device(torch::kCPU), torch::kFloat32);
   expect_vlm_transport_input(prepared);
-}
-
-TEST(BatchPackedInputTest, NativeVlmDecodeKeepsDomainWithoutVisionData) {
-  VlmForwardInput source;
-  source.token_ids = torch::tensor({29}, torch::kInt32);
-  source.positions = torch::tensor({9}, torch::kInt32);
-  source.input_params.meta.batch_forward_type = BatchForwardType::DECODE;
-  proto::PackedForwardInput payload;
-  ASSERT_TRUE(source.to_packed_proto(&payload));
-  VlmForwardInput lazy_input;
-  ASSERT_TRUE(lazy_input.from_packed_proto(payload));
-  const auto prepared =
-      lazy_input.to(torch::Device(torch::kCPU), torch::kFloat32);
-  EXPECT_TRUE(prepared.input_params.meta.batch_forward_type.is_decode());
-  EXPECT_FALSE(prepared.input_params.multimodal.mm_data.valid());
-  EXPECT_TRUE(torch::equal(prepared.token_ids.cpu(), source.token_ids));
-  LlmForwardInput llm_input;
-  RecForwardInput rec_input;
-  DiTForwardInput dit_input;
-  EXPECT_FALSE(llm_input.from_packed_proto(payload));
-  EXPECT_FALSE(rec_input.from_packed_proto(payload));
-  EXPECT_FALSE(dit_input.from_packed_proto(payload));
-  payload.mutable_payload()->at(10) = 1;
-  EXPECT_FALSE(lazy_input.from_packed_proto(payload));
-}
-
-TEST(BatchPackedInputTest, BorrowedExecutionViewUpdatesNativeMetadata) {
-  static_assert(!std::is_copy_constructible_v<LlmForwardInput>);
-  static_assert(!std::is_copy_constructible_v<VlmForwardInput>);
-  static_assert(!std::is_copy_constructible_v<RecForwardInput>);
-  static_assert(!std::is_copy_constructible_v<LlmModelParams>);
-  static_assert(!std::is_copy_constructible_v<VlmModelParams>);
-  static_assert(!std::is_copy_constructible_v<RecModelParams>);
-  static_assert(!std::is_default_constructible_v<ModelParamsView>);
-  static_assert(!std::is_constructible_v<ModelParamsView, RecModelParams&>);
-  LlmModelParams owner;
-  owner.attention.host.kv_seq_lens = {2};
-  ModelParamsView view(owner);
-  EXPECT_EQ(view.attention.host.kv_seq_lens.data(),
-            owner.attention.host.kv_seq_lens.data());
-  view.attention.host.kv_seq_lens[0] = 7;
-  EXPECT_EQ(owner.attention.host.kv_seq_lens[0], 7);
-  view.graph.input_tokens_override = torch::tensor({13}, torch::kInt32);
-  EXPECT_TRUE(torch::equal(owner.graph.input_tokens_override,
-                           torch::tensor({13}, torch::kInt32)));
-  EXPECT_FALSE(view.has_multimodal());
 }
 
 TEST(BatchPackedInputTest,
@@ -1381,48 +1279,6 @@ TEST(BatchPackedInputTest, LlmSnapshotTransferMovesSpecExecutionTensors) {
   EXPECT_EQ(params.graph.expanded_kv_seq_lens_vec, (std::vector<int32_t>{5}));
   EXPECT_TRUE(params.num_accepted_tokens.device().is_cpu());
   EXPECT_TRUE(params.mtp_topk_state->device().is_cpu());
-}
-
-TEST(BatchPackedInputTest, RecSnapshotTransfersNativeExecutionTensors) {
-  RecModelParams source;
-  const torch::Tensor values = torch::tensor({1, 2}, torch::kInt32);
-  source.attention.host.kv_seq_lens = {2};
-  source.attention.device.kv_seq_lens = values;
-  source.embedding.input_embedding = values;
-  source.embedding.linear_state_indices = values;
-  source.embedding.request_ids = {"rec"};
-  source.graph.attn_mask = values;
-  source.graph.tiling_data = values;
-  auto& strategy = source.mutable_llmrec_params();
-  strategy.current_round_tensor = values;
-  strategy.full_k_caches = {values};
-  strategy.full_v_caches = {values};
-  strategy.decode_positions_tensor_list = {values};
-
-  const torch::Device target_device("meta");
-  auto converted = source.clone().to(target_device);
-  ASSERT_TRUE(converted.has_llmrec_params());
-  EXPECT_FALSE(converted.has_onerec_params());
-  const std::vector<torch::Tensor> tensors = {
-      converted.attention.device.kv_seq_lens,
-      converted.embedding.input_embedding,
-      converted.embedding.linear_state_indices,
-      converted.graph.attn_mask,
-      converted.graph.tiling_data,
-      converted.llmrec_params()->current_round_tensor,
-      converted.llmrec_params()->full_k_caches.at(0),
-      converted.llmrec_params()->full_v_caches.at(0),
-      converted.llmrec_params()->decode_positions_tensor_list.at(0)};
-  for (const auto& tensor : tensors) {
-    ASSERT_TRUE(tensor.defined());
-    EXPECT_EQ(tensor.device(), target_device);
-    EXPECT_EQ(tensor.sizes(), values.sizes());
-    EXPECT_EQ(tensor.scalar_type(), values.scalar_type());
-  }
-  converted.attention.host.kv_seq_lens[0] = 9;
-  EXPECT_EQ(source.attention.host.kv_seq_lens, (std::vector<int32_t>{2}));
-  EXPECT_EQ(converted.embedding.request_ids, (std::vector<std::string>{"rec"}));
-  EXPECT_TRUE(source.llmrec_params()->full_k_caches[0].device().is_cpu());
 }
 
 TEST(BatchPackedInputTest, VlmDraftConversionExcludesTargetOnlyState) {
@@ -1676,84 +1532,6 @@ TEST(BatchPackedInputTest, NativeDiTPackedProtoRoundTripsEmptyInput) {
   DiTForwardInput unpacked_input;
   ASSERT_TRUE(unpacked_input.from_packed_proto(packed_input));
   expect_dit_forward_input_eq(unpacked_input, input);
-}
-
-TEST(BatchPackedInputTest, NativeDiTPackedProtoRejectsMalformedPayloads) {
-  DiTForwardInput input;
-  input.model_params.batch_size = 1;
-  input.model_params.prompts = {"prompt"};
-  input.model_params.tensor_sources.add("latent", torch::tensor({1.5f, 2.5f}));
-  proto::PackedForwardInput packed_input;
-  ASSERT_TRUE(input.to_packed_proto(&packed_input));
-  DiTForwardInput baseline;
-  ASSERT_TRUE(baseline.from_packed_proto(packed_input));
-  ASSERT_GT(packed_input.payload().size(), 40u);
-  const uint64_t descriptor_bytes =
-      read_packed_uint64(packed_input.payload(), /*offset=*/16);
-  const uint64_t arena_offset =
-      read_packed_uint64(packed_input.payload(), /*offset=*/24);
-  const uint64_t arena_bytes =
-      read_packed_uint64(packed_input.payload(), /*offset=*/32);
-
-  std::vector<std::pair<std::string, std::string>> malformed_payloads;
-  malformed_payloads.reserve(13);
-  malformed_payloads.emplace_back("empty", "");
-  malformed_payloads.emplace_back("truncated header",
-                                  packed_input.payload().substr(0, 39));
-  malformed_payloads.emplace_back("unknown version", packed_input.payload());
-  malformed_payloads.back().second[8] = 127;
-  malformed_payloads.emplace_back("token domain", packed_input.payload());
-  malformed_payloads.back().second[10] = 1;
-  malformed_payloads.emplace_back("reserved VLM domain",
-                                  packed_input.payload());
-  malformed_payloads.back().second[10] = 2;
-  malformed_payloads.emplace_back("reserved Rec domain",
-                                  packed_input.payload());
-  malformed_payloads.back().second[10] = 3;
-  malformed_payloads.emplace_back("unknown domain", packed_input.payload());
-  malformed_payloads.back().second[10] = 127;
-  malformed_payloads.emplace_back("overlapping arena", packed_input.payload());
-  overwrite_packed_uint64(malformed_payloads.back().second,
-                          /*offset=*/24,
-                          /*value=*/0);
-  malformed_payloads.emplace_back("arena beyond payload",
-                                  packed_input.payload());
-  overwrite_packed_uint64(
-      malformed_payloads.back().second,
-      /*offset=*/24,
-      static_cast<uint64_t>(packed_input.payload().size()) + 16);
-  malformed_payloads.emplace_back("overflowing descriptor",
-                                  packed_input.payload());
-  overwrite_packed_uint64(malformed_payloads.back().second,
-                          /*offset=*/16,
-                          std::numeric_limits<uint64_t>::max());
-  malformed_payloads.emplace_back(
-      "truncated arena",
-      packed_input.payload().substr(0, packed_input.payload().size() - 1));
-  malformed_payloads.emplace_back("unconsumed descriptor byte",
-                                  packed_input.payload());
-  malformed_payloads.back().second.insert(
-      static_cast<size_t>(40 + descriptor_bytes), /*count=*/16, /*ch=*/'\0');
-  overwrite_packed_uint64(malformed_payloads.back().second,
-                          /*offset=*/16,
-                          descriptor_bytes + 1);
-  overwrite_packed_uint64(malformed_payloads.back().second,
-                          /*offset=*/24,
-                          arena_offset + 16);
-  malformed_payloads.emplace_back("unconsumed arena byte",
-                                  packed_input.payload());
-  malformed_payloads.back().second += '\0';
-  overwrite_packed_uint64(malformed_payloads.back().second,
-                          /*offset=*/32,
-                          arena_bytes + 1);
-
-  for (const auto& [name, payload] : malformed_payloads) {
-    SCOPED_TRACE(name);
-    proto::PackedForwardInput malformed_input;
-    malformed_input.set_payload(payload);
-    DiTForwardInput unpacked_input;
-    EXPECT_FALSE(unpacked_input.from_packed_proto(malformed_input));
-  }
 }
 
 TEST(BatchPackedInputTest, PackedProtoLazyToPreservesJsonMetadata) {

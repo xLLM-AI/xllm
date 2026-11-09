@@ -447,31 +447,4 @@ class VlmAttentionInput final {
   std::shared_ptr<int> attention_buffer_owner = std::make_shared<int>(0);
 };
 
-class RecAttentionInput final {
- public:
-  using BufferReusePolicy = AttentionBufferReusePolicy;
-  using PackedIntInput = PackedAttentionIntInput;
-  RecAttentionInput to(const torch::Device& target) const {
-    return detail::attention_to(*this, target);
-  }
-  bool rebuild_device_buffer(
-      const torch::Device& target,
-      const std::vector<PackedIntInput>& extra = {},
-      BufferReusePolicy policy = BufferReusePolicy::COPY_ON_WRITE) {
-    return AttentionInputView(*this).rebuild_device_buffer(
-        target, extra, policy);
-  }
-  void reserve_device_buffer_capacity(uint64_t bytes,
-                                      const torch::Device& target) {
-    AttentionInputView(*this).reserve_device_buffer_capacity(bytes, target);
-  }
-  RecAttentionHostInput host;
-  RecAttentionDeviceInput device;
-  torch::Tensor attention_host_buffer;
-  torch::Tensor attention_device_buffer;
-  uint64_t attention_buffer_bytes = 0;
-  uint64_t attention_buffer_capacity = 0;
-  std::shared_ptr<int> attention_buffer_owner = std::make_shared<int>(0);
-};
-
 }  // namespace xllm

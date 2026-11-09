@@ -32,7 +32,6 @@ limitations under the License.
 #include "core/framework/model/causal_lm.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_params_view.h"
-#include "core/framework/model/rec_model.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/platform/device.h"
 #include "core/runtime/dcu_graph_executor_impl.h"
@@ -166,39 +165,6 @@ class FakeSimpleCausalLM final : public CausalLM {
   torch::nn::Linear proj_{nullptr};
 };
 
-class CountingRecModel final : public RecModel {
- public:
-  explicit CountingRecModel(torch::TensorOptions options)
-      : options_(std::move(options)) {}
-
-  RecModelKind model_kind() const override { return RecModelKind::kOneRec; }
-
-  ModelOutput forward(const torch::Tensor& tokens,
-                      const torch::Tensor& positions,
-                      std::vector<KVCache>& kv_caches,
-                      const RecModelParams& params) override {
-    ++forward_count_;
-    const auto* strategy = params.onerec_xattention_params();
-    CHECK(strategy != nullptr);
-    torch::Tensor cache = strategy->unshared_k_caches.front();
-    cache.add_(1);
-    return ModelOutput(params.embedding.input_embedding + cache);
-  }
-
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& selected_idxes) override {
-    return hidden_states;
-  }
-  void load_model(std::unique_ptr<ModelLoader> loader) override {}
-  torch::Device device() const override { return options_.device(); }
-  const torch::TensorOptions& options() const override { return options_; }
-  int32_t forward_count() const { return forward_count_; }
-
- private:
-  torch::TensorOptions options_;
-  int32_t forward_count_ = 0;
-};
-
 ModelArgs MakeFakeModelArgs(int64_t hidden_size = 64) {
   ModelArgs args;
 
@@ -231,13 +197,7 @@ Params MakeDecodeParams(const torch::Device& device,
   CHECK_GT(num_tokens, 0);
   CHECK_GT(kv_len, 0);
 
-  Params p = [] {
-    if constexpr (std::is_same_v<Params, ModelParamsView>) {
-      return ModelInputSnapshot(LlmModelParams()).view();
-    } else {
-      return RecModelParams();
-    }
-  }();
+  Params p = [] { return ModelInputSnapshot(LlmModelParams()).view(); }();
 
   p.meta.batch_forward_type = BatchForwardType::DECODE;
   p.meta.num_sequences = num_tokens;
@@ -349,70 +309,6 @@ bool AllCloseBf16(const torch::Tensor& lhs,
                   double atol = 1e-2) {
   return torch::allclose(
       lhs.to(torch::kFloat32), rhs.to(torch::kFloat32), rtol, atol);
-}
-
-class ScopedRecGraphConfig final {
- public:
-  ScopedRecGraphConfig()
-      : enable_graph_(ExecutionConfig::get_instance().enable_graph()),
-        no_padding_(ExecutionConfig::get_instance()
-                        .enable_graph_mode_decode_no_padding()) {
-    ExecutionConfig::get_instance().enable_graph(true);
-    ExecutionConfig::get_instance().enable_graph_mode_decode_no_padding(true);
-  }
-  ~ScopedRecGraphConfig() {
-    ExecutionConfig::get_instance().enable_graph(enable_graph_);
-    ExecutionConfig::get_instance().enable_graph_mode_decode_no_padding(
-        no_padding_);
-  }
-
- private:
-  bool enable_graph_;
-  bool no_padding_;
-};
-
-TEST(DcuGraphExecutorTest, NativeRecReplaysAndRecapturesChangedKvStorage) {
-  if (!IsDcuAvailable()) {
-    GTEST_SKIP() << "DCU/HIP is not available at runtime.";
-  }
-  ScopedRecGraphConfig config;
-  const torch::Device device = InitXllmDcuDeviceForTest(0);
-  const auto tensor_options =
-      torch::TensorOptions().dtype(torch::kBFloat16).device(device);
-  const auto int_options = tensor_options.dtype(torch::kInt32);
-  const ModelArgs args = MakeFakeModelArgs(64);
-  const runtime::Options options = MakeRuntimeOptions(8);
-  CountingRecModel model(tensor_options);
-  runtime::dcu::DcuGraphExecutorImpl executor(&model, args, device, options);
-  auto params = MakeDecodeParams<RecModelParams>(device, 1);
-  params.embedding.input_embedding = torch::ones({1, 64}, tensor_options);
-  auto& strategy = params.mutable_onerec_xattention_params();
-  strategy.rec_stage = OneRecModelInputParams::RecStage::DECODE;
-  strategy.unshared_k_caches = {torch::zeros({1, 64}, tensor_options)};
-  const auto tokens = torch::ones({1}, int_options);
-  const auto positions = torch::zeros({1}, int_options);
-  std::vector<KVCache> kv_caches;
-
-  auto first = executor.run(tokens, positions, kv_caches, params);
-  DcuSynchronize();
-  EXPECT_TRUE(AllCloseBf16(first.hidden_states,
-                           torch::full({1, 64}, 2, tensor_options)));
-  EXPECT_EQ(model.forward_count(), 1);
-
-  auto replay = executor.run(tokens, positions, kv_caches, params);
-  DcuSynchronize();
-  EXPECT_TRUE(AllCloseBf16(replay.hidden_states,
-                           torch::full({1, 64}, 3, tensor_options)));
-  EXPECT_EQ(model.forward_count(), 1);
-
-  strategy.unshared_k_caches[0] = torch::full({1, 64}, 7, tensor_options);
-  auto recaptured = executor.run(tokens, positions, kv_caches, params);
-  DcuSynchronize();
-  EXPECT_TRUE(AllCloseBf16(recaptured.hidden_states,
-                           torch::full({1, 64}, 9, tensor_options)));
-  EXPECT_TRUE(AllCloseBf16(strategy.unshared_k_caches[0],
-                           torch::full({1, 64}, 8, tensor_options)));
-  EXPECT_EQ(model.forward_count(), 2);
 }
 
 TEST(DcuGraphExecutorTest, DecodeCaptureAndReplay) {

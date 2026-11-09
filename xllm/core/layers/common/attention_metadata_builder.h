@@ -26,7 +26,6 @@ limitations under the License.
 namespace xllm {
 struct ModelArgs;
 class ModelParamsView;
-class RecModelParams;
 
 namespace layer {
 
@@ -39,7 +38,7 @@ struct AttentionMetadataBuildOptions {
 };
 
 // Builder class for AttentionMetadata to avoid circular dependency.
-// Common attention tensors are shared; LLM and Rec extensions remain typed.
+// Common attention tensors are shared; domain extensions remain typed.
 // attention_metadata.h does not depend on domain input owners.
 class AttentionMetadataBuilder {
  public:
@@ -70,21 +69,6 @@ class AttentionMetadataBuilder {
   // Build AttentionMetadata from ModelParamsView with specified compute_dtype.
   static AttentionMetadata build(
       const ModelParamsView& params,
-      bool enable_mla,
-      const std::string& compute_dtype,
-      const std::optional<torch::Tensor>& attn_mask = {},
-      const std::optional<torch::Device>& device = std::nullopt,
-      const AttentionMetadataBuildOptions& build_options = {});
-
-  static AttentionMetadata build(
-      const RecModelParams& params,
-      bool enable_mla,
-      const std::optional<torch::Tensor>& attn_mask = {},
-      const std::optional<torch::Device>& device = std::nullopt,
-      const AttentionMetadataBuildOptions& build_options = {});
-
-  static AttentionMetadata build(
-      const RecModelParams& params,
       bool enable_mla,
       const std::string& compute_dtype,
       const std::optional<torch::Tensor>& attn_mask = {},

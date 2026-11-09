@@ -32,7 +32,6 @@ limitations under the License.
 #include "worker.pb.h"
 
 namespace xllm {
-class RecForwardInput;
 class VlmForwardInput;
 
 class CommChannel {
@@ -80,10 +79,6 @@ class CommChannel {
 
   virtual void execute_dit_model_async(
       const DiTForwardInput& input,
-      folly::Promise<std::optional<RawForwardOutput>>& promise);
-
-  virtual void execute_rec_model_async(
-      const RecForwardInput& input,
       folly::Promise<std::optional<RawForwardOutput>>& promise);
 
   virtual void execute_vlm_model_async(
@@ -138,10 +133,6 @@ class CommChannel {
       const DiTForwardInput& input,
       folly::Promise<std::optional<RawForwardOutput>>& promise);
 
-  bool execute_rec_model_with_brpc(
-      const RecForwardInput& input,
-      folly::Promise<std::optional<RawForwardOutput>>& promise);
-
   bool execute_vlm_model_with_brpc(
       const VlmForwardInput& input,
       folly::Promise<std::optional<RawForwardOutput>>& promise);
@@ -175,15 +166,6 @@ class ExecuteVLMModelClosure final : public google::protobuf::Closure {
   void Run() override;
 
   proto::VLMForwardResponse pb_output;
-  brpc::Controller cntl;
-  folly::Promise<std::optional<RawForwardOutput>> promise;
-};
-
-class ExecuteRECModelClosure final : public google::protobuf::Closure {
- public:
-  void Run() override;
-
-  proto::RECForwardResponse pb_output;
   brpc::Controller cntl;
   folly::Promise<std::optional<RawForwardOutput>> promise;
 };

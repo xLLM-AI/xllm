@@ -38,13 +38,9 @@ limitations under the License.
 #include "core/common/types.h"
 #include "core/common/version_singleton.h"
 #include "core/framework/config/model_config.h"
-#include "core/framework/config/rec_config.h"
-#include "core/framework/model/rec_model_utils.h"
 #include "core/framework/model_loader/hf_model_args.h"
-#include "core/framework/state_dict/rec_vocab_dict.h"
 #include "core/framework/state_dict/safetensors/safetensors.h"
 #include "core/framework/tokenizer/fast_tokenizer.h"
-#include "core/framework/tokenizer/rec_tokenizer.h"
 #include "core/framework/tokenizer/sentencepiece_tokenizer.h"
 #include "core/framework/tokenizer/tiktoken_tokenizer.h"
 #include "core/framework/tokenizer/tokenizer.h"
@@ -238,11 +234,6 @@ HFModelLoader::HFModelLoader(const std::string& model_weights_path)
       /*num_threads=*/32,
       /*cpu_binding=*/false,
       /*pool_name=*/"HFModelLoader.load_weights");
-  if (::xllm::ModelConfig::get_instance().backend() == "rec" &&
-      is_onerec_model_type(args_.model_type())) {
-    CHECK(load_rec_vocab(model_weights_path))
-        << "Failed to load rec content from " << model_weights_path;
-  }
 }
 
 std::unique_ptr<Tokenizer> HFModelLoader::tokenizer() const {
@@ -469,40 +460,6 @@ int64_t HFModelLoader::get_max_decoder_layer_weight_size() const {
             << max_layer_size << ", observed_layers=" << observed_layers << "/"
             << args_.n_layers();
   return max_layer_size;
-}
-
-bool HFModelLoader::load_rec_vocab(const std::string& model_weights_path) {
-  if (!tokenizer_args_.vocab_file().empty()) {
-    std::filesystem::path path = model_weights_path;
-    std::string model_version = path.filename();
-    std::string vocab_full_path =
-        path.append(tokenizer_args_.vocab_file()).string();
-
-    LOG(INFO) << "Model_version: " << model_version
-              << ", vocab_full_path: " << vocab_full_path;
-
-    CHECK(nullptr != VersionSingleton<RecVocabDict>::GetInstance(model_version))
-        << "Failed to get vocab dict instance";
-    CHECK(VersionSingleton<RecVocabDict>::GetInstance(model_version)
-              ->initialize(vocab_full_path))
-        << "Failed to initialize vocab dict from " << vocab_full_path;
-  } else {
-    if (::xllm::RecConfig::get_instance().enable_constrained_decoding()) {
-      LOG(ERROR) << "Vocab file is not set for OneRec REC tokenizer under "
-                 << model_weights_path
-                 << ". Constrained decoding requires `vocab_file` in "
-                    "tokenizer_config.json.";
-      return false;
-    }
-
-    LOG(WARNING) << "Vocab file is not set for OneRec REC tokenizer under "
-                 << model_weights_path
-                 << ". Skip vocab dict initialization because constrained "
-                    "decoding is disabled.";
-    return true;
-  }
-
-  return true;
 }
 
 bool HFModelLoader::load_args(const std::string& model_weights_path) {

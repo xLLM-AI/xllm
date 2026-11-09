@@ -140,7 +140,7 @@ Typical response:
 
 `/v1/sample` notes:
 
-- Only `--backend=llm` is supported. VLM/DiT/Rec are not supported yet.
+- Only `--backend=llm` is supported. VLM/DiT are not supported yet.
 - `selector.type` is currently fixed to `literal`. `selector.value` is matched against prompt text in full and in order.
 - `logprobs` defaults to `5`, with an allowed range of `[1, 5]`.
 - `choices[i].index` is the matched `sample_id`, corresponding one-to-one with the matched order in prompt.

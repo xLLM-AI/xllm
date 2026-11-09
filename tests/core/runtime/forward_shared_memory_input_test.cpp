@@ -27,7 +27,6 @@ limitations under the License.
 #include "core/framework/config/execution_config.h"
 #include "core/runtime/forward_params.h"
 #include "core/runtime/forward_shared_memory_transport.h"
-#include "core/runtime/rec_forward_params.h"
 #include "core/runtime/vlm_forward_params.h"
 #include "worker.pb.h"
 
@@ -90,8 +89,8 @@ class ForwardSharedMemoryInputTest : public ::testing::Test {
   bool previous_contiguous_ = false;
 };
 
-using TokenInputTypes =
-    ::testing::Types<LlmForwardInput, VlmForwardInput, RecForwardInput>;
+using TokenInputTypes = ::testing::Types<LlmForwardInput, VlmForwardInput>;
+
 TYPED_TEST_SUITE(ForwardSharedMemoryInputTest, TokenInputTypes);
 
 TYPED_TEST(ForwardSharedMemoryInputTest, RejectsPreviousPackedInputSchema) {

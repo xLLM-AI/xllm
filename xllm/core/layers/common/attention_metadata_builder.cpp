@@ -26,11 +26,9 @@ limitations under the License.
 
 #include "core/common/global_flags.h"
 #include "core/framework/config/execution_config.h"
-#include "core/framework/config/rec_config.h"
 #include "core/framework/model/seq_lens.h"
 #include "framework/model/model_args.h"
 #include "framework/model/model_params_view.h"
-#include "framework/model/rec_model_params.h"
 #include "layers/common/attention_metadata.h"
 #include "layers/common/expanded_decode_metadata_builder.h"
 
@@ -273,8 +271,6 @@ AttentionMetadata build_common_attention_metadata(
       params.attention.device.paged_kv_last_page_len;
 #if defined(USE_CUDA) || defined(USE_MUSA)
   attn_metadata.plan_info = std::make_shared<PlanInfo>();
-  attn_metadata.shared_plan_info = std::make_shared<PlanInfo>();
-  attn_metadata.unshared_plan_info = std::make_shared<PlanInfo>();
 #endif
 
 #if defined(USE_CUDA) || defined(USE_DCU) || defined(USE_NPU) || \
@@ -459,56 +455,6 @@ AttentionMetadata build_common_attention_metadata(
   return attn_metadata;
 }
 
-void populate_rec_attention_metadata(const RecModelParams& params,
-                                     AttentionMetadata& attn_metadata) {
-  if (params.has_llmrec_params()) {
-    const auto& llmrec_params = *params.llmrec_params();
-    if (llmrec_params.current_round_tensor.defined() &&
-        llmrec_params.current_round_tensor.numel() > 0) {
-      attn_metadata.step_tensor = llmrec_params.current_round_tensor;
-    }
-
-    if (!::xllm::RecConfig::get_instance().enable_xattention_one_stage()) {
-#if defined(USE_CUDA) || defined(USE_MUSA)
-      attn_metadata.xattention_two_stage_decode_cache.emplace(
-          XAttentionTwoStageDecodeCache{});
-      auto& cache = attn_metadata.xattention_two_stage_decode_cache.value();
-
-      cache.shared_lse = llmrec_params.two_stage_shared_lse;
-      cache.shared_o = llmrec_params.two_stage_shared_o;
-      cache.unshared_lse = llmrec_params.two_stage_unshared_lse;
-      cache.unshared_o = llmrec_params.two_stage_unshared_o;
-      cache.q_cu_seq_lens_shared = llmrec_params.two_stage_q_cu_seq_lens_shared;
-      cache.qo_indptr_expanded = llmrec_params.two_stage_qo_indptr_expanded;
-      cache.paged_kv_indptr_expanded =
-          llmrec_params.two_stage_paged_kv_indptr_expanded;
-      cache.paged_kv_indices_expanded =
-          llmrec_params.two_stage_paged_kv_indices_expanded;
-      cache.paged_kv_last_page_len_expanded =
-          llmrec_params.two_stage_paged_kv_last_page_len_expanded;
-
-      if (cache.q_cu_seq_lens_shared.defined()) {
-        cache.cached_batch_size =
-            static_cast<int32_t>(cache.q_cu_seq_lens_shared.numel()) - 1;
-      }
-      cache.cached_beam_size = llmrec_params.beam_width;
-      if (!llmrec_params.unshared_k_caches.empty()) {
-        cache.cached_max_decode_step =
-            static_cast<int32_t>(llmrec_params.unshared_k_caches[0].size(2));
-      }
-      if (cache.shared_o.defined() && cache.shared_o.dim() == 3) {
-        cache.cached_num_heads = static_cast<int32_t>(cache.shared_o.size(1));
-        cache.cached_head_size = static_cast<int32_t>(cache.shared_o.size(2));
-      }
-      if (llmrec_params.current_round_tensor.defined() &&
-          llmrec_params.current_round_tensor.numel() > 0) {
-        cache.cached_step = llmrec_params.current_round_tensor.item<int32_t>();
-      }
-#endif
-    }
-  }
-}
-
 }  // namespace
 
 AttentionMetadata AttentionMetadataBuilder::build_mtp_sparse_decode(
@@ -556,33 +502,6 @@ AttentionMetadata AttentionMetadataBuilder::build(
                                                   attn_mask,
                                                   build_options);
   metadata.expanded_decode = ExpandedDecodeMetadataBuilder::build(params);
-  return metadata;
-}
-
-AttentionMetadata AttentionMetadataBuilder::build(
-    const RecModelParams& params,
-    bool enable_mla,
-    const std::optional<torch::Tensor>& attn_mask,
-    const std::optional<torch::Device>& device,
-    const AttentionMetadataBuildOptions& build_options) {
-  return build(params, enable_mla, "float", attn_mask, device, build_options);
-}
-
-AttentionMetadata AttentionMetadataBuilder::build(
-    const RecModelParams& params,
-    bool enable_mla,
-    const std::string& compute_dtype,
-    const std::optional<torch::Tensor>& attn_mask,
-    const std::optional<torch::Device>& device,
-    const AttentionMetadataBuildOptions& build_options) {
-  auto metadata = build_common_attention_metadata(params,
-                                                  /*is_spec_verify=*/false,
-                                                  enable_mla,
-                                                  compute_dtype,
-                                                  device,
-                                                  attn_mask,
-                                                  build_options);
-  populate_rec_attention_metadata(params, metadata);
   return metadata;
 }
 

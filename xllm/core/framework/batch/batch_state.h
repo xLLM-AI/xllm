@@ -25,7 +25,6 @@ limitations under the License.
 #include "core/framework/batch/batch_input_data.h"
 #include "core/framework/batch/batch_sequence_plan.h"
 #include "core/runtime/forward_params.h"
-#include "core/runtime/rec_forward_params.h"
 #include "core/runtime/vlm_forward_params.h"
 #include "core/util/threadpool.h"
 
@@ -34,7 +33,6 @@ namespace xllm {
 struct ModelArgs;
 constexpr uint64_t UNINITIALIZED_BATCH_ID = 0x0;
 
-// Shared sequence execution state, composed by Batch and RecBatchState. It
 // maintains scheduling invariants and forward resources across model domains.
 class BatchState final {
  public:
@@ -85,15 +83,6 @@ class BatchState final {
                                           const ModelArgs& args,
                                           ThreadPool* thread_pool,
                                           int32_t cp_size);
-  RecForwardInput build_rec_sequence_input(const BatchInputData& data,
-                                           uint32_t num_decoding_tokens,
-                                           uint32_t min_decoding_batch_size,
-                                           const ModelArgs& args,
-                                           int32_t cp_size);
-  RecForwardInput build_rec_sequence_input(const BatchInputData& data,
-                                           const ModelArgs& args,
-                                           ThreadPool* thread_pool,
-                                           int32_t cp_size);
   VlmForwardInput build_vlm_sequence_input(const BatchInputData& data,
                                            uint32_t num_decoding_tokens,
                                            uint32_t min_decoding_batch_size,

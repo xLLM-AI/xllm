@@ -81,17 +81,6 @@ WorkerClient::step_remote_async(const DiTForwardInput& /*input*/) {
   return folly::makeSemiFuture(std::optional<RawForwardOutput>{});
 }
 
-folly::SemiFuture<std::optional<ForwardOutput>> WorkerClient::step_async(
-    const RecForwardInput& input) {
-  return worker_->step_async(input);
-}
-
-folly::SemiFuture<std::optional<RawForwardOutput>>
-WorkerClient::step_remote_async(const RecForwardInput& /*input*/) {
-  LOG(FATAL) << "Native Rec local execution requires step_async";
-  return folly::makeSemiFuture(std::optional<RawForwardOutput>{});
-}
-
 folly::SemiFuture<std::optional<RawForwardOutput>>
 WorkerClient::step_remote_async(const VlmForwardInput& /*input*/) {
   LOG(FATAL) << "Native VLM local execution requires step_async";

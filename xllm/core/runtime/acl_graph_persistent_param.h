@@ -25,7 +25,6 @@ limitations under the License.
 
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_params_view.h"
-#include "core/framework/model/rec_model_params.h"
 #include "core/kernels/npu/paged_attention_tiling_layout.h"
 #include "core/runtime/options.h"
 

@@ -27,7 +27,6 @@ limitations under the License.
 #include <functional>
 
 #include "atb/atb_infer.h"
-#include "core/framework/model/rec_model_params.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "core/layers/npu/npu_decoder_input.h"
 #include "framework/model_context/model_context.h"
@@ -69,29 +68,7 @@ class NpuQwen3DecoderLayerImpl : public BaseLayer {
                         input_params,
                         event,
                         event_flag,
-                        node_id,
-                        nullptr);
-  }
-
-  torch::Tensor forward(torch::Tensor& x,
-                        torch::Tensor& cos_pos,
-                        torch::Tensor& sin_pos,
-                        torch::Tensor& attn_mask,
-                        KVCache& kv_cache,
-                        RecModelParams& input_params,
-                        aclrtEvent* event = nullptr,
-                        std::atomic<bool>* event_flag = nullptr,
-                        int node_id = 0) {
-    return forward_impl(x,
-                        cos_pos,
-                        sin_pos,
-                        attn_mask,
-                        kv_cache,
-                        NpuDecoderInputView(input_params),
-                        event,
-                        event_flag,
-                        node_id,
-                        input_params.llmrec_params());
+                        node_id);
   }
 
   template <typename InputParams>
@@ -131,8 +108,7 @@ class NpuQwen3DecoderLayerImpl : public BaseLayer {
                              NpuDecoderInputView input_params,
                              aclrtEvent* event,
                              std::atomic<bool>* event_flag,
-                             int node_id,
-                             const LlmRecMultiRoundParams* llmrec);
+                             int node_id);
   void param_from_args(atb_speed::qwen::QwenLayerParam& param,
                        const ModelArgs& args,
                        const ParallelArgs& parallel_args,
@@ -147,8 +123,7 @@ class NpuQwen3DecoderLayerImpl : public BaseLayer {
                                NpuDecoderInputView input_params,
                                bool is_prefill,
                                int node_id,
-                               bool use_graph_decode_input,
-                               const LlmRecMultiRoundParams* llmrec);
+                               bool use_graph_decode_input);
 
   void initialize_parallel_parameters(atb_speed::qwen::QwenLayerParam& param,
                                       const ParallelArgs& parallel_args);

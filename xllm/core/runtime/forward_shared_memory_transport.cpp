@@ -36,7 +36,6 @@ limitations under the License.
 #include "layers/common/attention_metadata.h"
 #endif
 #include "platform/stream.h"
-#include "runtime/rec_forward_params.h"
 #include "runtime/vlm_forward_params.h"
 #if defined(USE_MUSA)
 #include <musa_runtime.h>
@@ -93,13 +92,11 @@ inline bool is_aligned_for_cuda_zero_copy(const void* ptr) {
 }
 
 // Domain values are stable across the forward-input migrations.
-enum class PackedInputDomain : uint8_t { LLM = 1, VLM = 2, REC = 3, DIT = 4 };
+enum class PackedInputDomain : uint8_t { LLM = 1, VLM = 2, DIT = 4 };
 
 template <typename Input>
 constexpr PackedInputDomain packed_input_domain() {
-  if constexpr (std::is_same_v<Input, RecForwardInput>) {
-    return PackedInputDomain::REC;
-  } else if constexpr (std::is_same_v<Input, VlmForwardInput>) {
+  if constexpr (std::is_same_v<Input, VlmForwardInput>) {
     return PackedInputDomain::VLM;
   }
   return PackedInputDomain::LLM;
@@ -2676,14 +2673,11 @@ inline void deserialize_forward_input_payload(
     }
   }
   read_string_vector(context, input_params.embedding.request_ids);
-  if constexpr (!std::is_same_v<Input, RecForwardInput>) {
-    read_vector(context, input_params.embedding.extra_token_ids);
-    read_tensor(context, input_params.mtp_shifted_token_ids, stream);
-    read_tensor(context, input_params.embedding.mtp_shifted_token_ids, stream);
-    read_vector(context, input_params.embedding.mtp_bootstrap_row_idxes);
-    read_tensor(
-        context, input_params.embedding.mtp_bootstrap_embeddings, stream);
-  }
+  read_vector(context, input_params.embedding.extra_token_ids);
+  read_tensor(context, input_params.mtp_shifted_token_ids, stream);
+  read_tensor(context, input_params.embedding.mtp_shifted_token_ids, stream);
+  read_vector(context, input_params.embedding.mtp_bootstrap_row_idxes);
+  read_tensor(context, input_params.embedding.mtp_bootstrap_embeddings, stream);
   read_swap_blocks(context, input_params.block_copy.swap_blocks);
   read_tensor(context, input_params.block_copy.src_block_indices, stream);
   read_tensor(context, input_params.block_copy.dst_block_indices, stream);
@@ -2691,8 +2685,6 @@ inline void deserialize_forward_input_payload(
   if constexpr (std::is_same_v<Input, VlmForwardInput>) {
     read_mm_batch_data(context, input_params.multimodal.mm_data);
     read_vector_tensor(context, input_params.multimodal.deep_stacks, stream);
-  } else if constexpr (std::is_same_v<Input, RecForwardInput>) {
-    read_mm_batch_data(context, input_params.features.mm_data);
   }
   read_tensor_and_vector(context,
                          input_params.attention.device.kv_cache_tokens_nums,
@@ -2765,23 +2757,21 @@ inline void deserialize_forward_input_payload(
                        input_params.attention.device.block_tables,
                        input_params.attention.host.block_tables,
                        stream);
-  if constexpr (!std::is_same_v<Input, RecForwardInput>) {
-    int32_t manager_num = 0;
-    read_data(context, manager_num);
-    CHECK_GE(manager_num, 0) << "multi_block_tables manager num is invalid.";
-    input_params.multi_block_tables.clear();
-    input_params.multi_block_tables.reserve(static_cast<size_t>(manager_num));
-    for (int32_t i = 0; i < manager_num; ++i) {
-      torch::Tensor manager_table;
-      read_tensor(context,
-                  manager_table,
-                  /*stream=*/nullptr,
-                  /*force_host_materialize=*/true);
-      // Clone to decouple from shared memory buffer. With schedule_overlap the
-      // buffer may be overwritten by the next step while the worker is still
-      // reading multi_block_tables (which stay on CPU for DSA metadata).
-      input_params.multi_block_tables.emplace_back(manager_table.clone());
-    }
+  int32_t manager_num = 0;
+  read_data(context, manager_num);
+  CHECK_GE(manager_num, 0) << "multi_block_tables manager num is invalid.";
+  input_params.multi_block_tables.clear();
+  input_params.multi_block_tables.reserve(static_cast<size_t>(manager_num));
+  for (int32_t i = 0; i < manager_num; ++i) {
+    torch::Tensor manager_table;
+    read_tensor(context,
+                manager_table,
+                /*stream=*/nullptr,
+                /*force_host_materialize=*/true);
+    // Clone to decouple from shared memory buffer. With schedule_overlap the
+    // buffer may be overwritten by the next step while the worker is still
+    // reading multi_block_tables (which stay on CPU for DSA metadata).
+    input_params.multi_block_tables.emplace_back(manager_table.clone());
   }
   CHECK_EQ(context.descriptor_cursor, descriptor_base + layout.descriptor_bytes)
       << "forward input descriptor was not consumed exactly";
@@ -2809,13 +2799,6 @@ bool input_layout_fits(const RawInputLayoutHeader& layout,
          layout.tensor_arena_offset <= segment_size - kOverhead &&
          layout.tensor_arena_bytes <=
              segment_size - kOverhead - layout.tensor_arena_offset;
-}
-
-bool supports_rec_shm_input(const RecForwardInput& input) {
-  return input.decoder_sampling_params.num_sample_seqs() == 0 &&
-         std::holds_alternative<std::monostate>(
-             input.input_params.rec_params) &&
-         !input.step_decode.has_value();
 }
 
 template <typename Input>
@@ -3024,14 +3007,12 @@ inline void serialize_forward_input_sections(
   write_vector(context.descriptor,
                input_params.embedding.linear_state_read_ids);
   write_string_vector(context.descriptor, input_params.embedding.request_ids);
-  if constexpr (!std::is_same_v<Input, RecForwardInput>) {
-    write_vector(context.descriptor, input_params.embedding.extra_token_ids);
-    write_tensor(context, input_params.mtp_shifted_token_ids);
-    write_tensor(context, input_params.embedding.mtp_shifted_token_ids);
-    write_vector(context.descriptor,
-                 input_params.embedding.mtp_bootstrap_row_idxes);
-    write_tensor(context, input_params.embedding.mtp_bootstrap_embeddings);
-  }
+  write_vector(context.descriptor, input_params.embedding.extra_token_ids);
+  write_tensor(context, input_params.mtp_shifted_token_ids);
+  write_tensor(context, input_params.embedding.mtp_shifted_token_ids);
+  write_vector(context.descriptor,
+               input_params.embedding.mtp_bootstrap_row_idxes);
+  write_tensor(context, input_params.embedding.mtp_bootstrap_embeddings);
   write_swap_blocks(context, input_params.block_copy.swap_blocks);
   write_tensor(context, input_params.block_copy.src_block_indices);
   write_tensor(context, input_params.block_copy.dst_block_indices);
@@ -3039,8 +3020,6 @@ inline void serialize_forward_input_sections(
   if constexpr (std::is_same_v<Input, VlmForwardInput>) {
     write_mm_batch_data(context, input_params.multimodal.mm_data);
     write_vector_tensor(context, input_params.multimodal.deep_stacks);
-  } else if constexpr (std::is_same_v<Input, RecForwardInput>) {
-    write_mm_batch_data(context, input_params.features.mm_data);
   }
   write_host_vector_or_tensor(
       context,
@@ -3105,12 +3084,10 @@ inline void serialize_forward_input_sections(
       context,
       choose_host_or_device_tensor(input_params.attention.host.block_tables,
                                    input_params.attention.device.block_tables));
-  if constexpr (!std::is_same_v<Input, RecForwardInput>) {
-    write_data(context.descriptor,
-               static_cast<int32_t>(input_params.multi_block_tables.size()));
-    for (const auto& manager_table : input_params.multi_block_tables) {
-      write_tensor(context, manager_table);
-    }
+  write_data(context.descriptor,
+             static_cast<int32_t>(input_params.multi_block_tables.size()));
+  for (const auto& manager_table : input_params.multi_block_tables) {
+    write_tensor(context, manager_table);
   }
 }
 
@@ -3461,17 +3438,7 @@ bool unpack_native_input_host_buffer(const Input& input,
     normalize_float_param(output.sampling_params.temperatures());
     normalize_float_param(output.sampling_params.top_p());
     normalize_float_param(output.sampling_params.min_p());
-    if constexpr (std::is_same_v<Input, RecForwardInput>) {
-      normalize_float_param(
-          output.decoder_sampling_params.frequency_penalties());
-      normalize_float_param(
-          output.decoder_sampling_params.presence_penalties());
-      normalize_float_param(
-          output.decoder_sampling_params.repetition_penalties());
-      normalize_float_param(output.decoder_sampling_params.temperatures());
-      normalize_float_param(output.decoder_sampling_params.top_p());
-      normalize_float_param(output.decoder_sampling_params.min_p());
-    }
+
     output.positions = detail::normalize_positions_for_device(output.positions);
     return output.runtime.device_tensors_ready;
   }
@@ -3487,15 +3454,6 @@ bool unpack_from_input_host_buffer(const LlmForwardInput& input,
                                    const torch::Device& device,
                                    torch::ScalarType dtype,
                                    LlmForwardInput& output,
-                                   bool materialize_device_buffer) {
-  return unpack_native_input_host_buffer(
-      input, device, dtype, output, materialize_device_buffer);
-}
-
-bool unpack_from_input_host_buffer(const RecForwardInput& input,
-                                   const torch::Device& device,
-                                   torch::ScalarType dtype,
-                                   RecForwardInput& output,
                                    bool materialize_device_buffer) {
   return unpack_native_input_host_buffer(
       input, device, dtype, output, materialize_device_buffer);
@@ -3544,14 +3502,7 @@ bool token_input_to_packed_proto(
     const Input& input,
     proto::PackedForwardInput* packed_forward_input) {
   CHECK(packed_forward_input != nullptr);
-  if constexpr (std::is_same_v<Input, RecForwardInput>) {
-    if (!std::holds_alternative<std::monostate>(
-            input.input_params.rec_params) ||
-        input.step_decode.has_value()) {
-      LOG(ERROR) << "Rec input transport is not supported";
-      return false;
-    }
-  }
+
   const auto& sampling = input.sampling_params;
   // The packed layout stores the per-sequence fields as flat vectors;
   // anything else (e.g. a reshaped [1, N] view) would serialize with a
@@ -3602,20 +3553,6 @@ int64_t num_accepted_tokens(const TokenIdAt& token_id_at,
 bool LlmForwardInput::to_packed_proto(
     proto::PackedForwardInput* packed_forward_input) const {
   return token_input_to_packed_proto(*this, packed_forward_input);
-}
-
-bool RecForwardInput::to_packed_proto(
-    proto::PackedForwardInput* packed_forward_input) const {
-  if (decoder_sampling_params.num_sample_seqs() > 0) {
-    LOG(ERROR) << "Decoder sampling requires local Rec execution";
-    return false;
-  }
-  return token_input_to_packed_proto(*this, packed_forward_input);
-}
-
-bool RecForwardInput::from_packed_proto(
-    const proto::PackedForwardInput& packed_forward_input) {
-  return packed_proto_to_forward_input_impl(packed_forward_input, *this);
 }
 
 bool VlmForwardInput::to_packed_proto(
@@ -3700,12 +3637,6 @@ bool ForwardSharedMemoryTransport::can_write_input(const LlmForwardInput& input,
 bool ForwardSharedMemoryTransport::can_write_input(const VlmForwardInput& input,
                                                    size_t segment_size) {
   return input_layout_fits(calculate_forward_input_layout(input), segment_size);
-}
-
-bool ForwardSharedMemoryTransport::can_write_input(const RecForwardInput& input,
-                                                   size_t segment_size) {
-  return supports_rec_shm_input(input) &&
-         input_layout_fits(calculate_forward_input_layout(input), segment_size);
 }
 
 bool ForwardSharedMemoryTransport::input_write(const DiTForwardInput& input) {
@@ -3841,27 +3772,12 @@ bool ForwardSharedMemoryTransport::input_write(const LlmForwardInput& input) {
   return write_token_input(input);
 }
 
-bool ForwardSharedMemoryTransport::input_write(const RecForwardInput& input) {
-  if (!supports_rec_shm_input(input)) {
-    LOG(ERROR) << "Rec input transport is not supported";
-    return false;
-  }
-  return write_token_input(input);
-}
-
 bool ForwardSharedMemoryTransport::input_write(const VlmForwardInput& input) {
   return write_token_input(input);
 }
 
 bool ForwardSharedMemoryTransport::input_read(
     LlmForwardInput& input,
-    const torch::Device& device,
-    InputDeviceMaterializationPolicy policy) {
-  return read_token_input(input, device, policy);
-}
-
-bool ForwardSharedMemoryTransport::input_read(
-    RecForwardInput& input,
     const torch::Device& device,
     InputDeviceMaterializationPolicy policy) {
   return read_token_input(input, device, policy);
@@ -4156,16 +4072,6 @@ bool ForwardSharedMemoryTransport::vlm_output_write(
 
 bool ForwardSharedMemoryTransport::vlm_output_read(RawForwardOutput& output) {
   return read_token_output(output, /*domain=*/"VLM");
-}
-
-bool ForwardSharedMemoryTransport::rec_output_write(
-    const ForwardOutput& output,
-    const std::vector<SpeculativeTokenStats>& speculative_token_stats) {
-  return write_token_output(output, speculative_token_stats, /*domain=*/"REC");
-}
-
-bool ForwardSharedMemoryTransport::rec_output_read(RawForwardOutput& output) {
-  return read_token_output(output, /*domain=*/"REC");
 }
 
 bool ForwardSharedMemoryTransport::dit_output_write(

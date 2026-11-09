@@ -42,7 +42,6 @@ limitations under the License.
 #include "runtime/llm_worker_impl.h"
 #include "runtime/mm_embed_vlm_worker_impl.h"
 #include "runtime/mtp_worker_impl.h"
-#include "runtime/rec_worker_impl.h"
 #include "runtime/suffix_worker_impl.h"
 #include "runtime/vlm_forward_params.h"
 #include "runtime/vlm_worker_impl.h"
@@ -98,8 +97,6 @@ Worker::Worker(const ParallelArgs& parallel_args,
     impl_ = new EmbedWorkerImpl(parallel_args, device, options);
   } else if (worker_type == WorkerType::EVLM) {
     impl_ = new EmbedVLMWorkerImpl(parallel_args, device, options);
-  } else if (worker_type == WorkerType::REC) {
-    impl_ = new RecWorkerImpl(parallel_args, device, options);
   } else if (worker_type == WorkerType::MMEVLM) {
     impl_ = new MMEmbedVLMWorkerImpl(parallel_args, device, options);
   } else if (worker_type == WorkerType::DIT) {
@@ -170,17 +167,8 @@ std::tuple<int64_t, int64_t> Worker::estimate_kv_cache_capacity() {
   return impl_->estimate_kv_cache_capacity();
 }
 
-std::optional<ForwardOutput> Worker::step(const RecForwardInput& inputs) {
-  return impl_->step(inputs);
-}
-
 std::optional<ForwardOutput> Worker::step(const VlmForwardInput& inputs) {
   return impl_->step(inputs);
-}
-
-folly::SemiFuture<std::optional<ForwardOutput>> Worker::step_async(
-    const RecForwardInput& inputs) {
-  return impl_->step_async(inputs);
 }
 
 folly::SemiFuture<std::optional<ForwardOutput>> Worker::step_async(

@@ -40,7 +40,6 @@ limitations under the License.
 #include "core/util/slice.h"
 #include "finish_reason.h"
 #include "incremental_decoder.h"
-#include "rec_type.h"
 #include "request_output.h"
 #include "sample_slot.h"
 #include "sequence_kv_state.h"
@@ -100,8 +99,6 @@ struct SequenceParams {
 
   bool is_graph_warmup = false;
 
-  RecType rec_type = RecType::kNone;
-
   int32_t bos_token_id = 0;
 
   // request id for suffix-decoding request identity
@@ -125,9 +122,7 @@ struct SequenceParams {
 
 // One generation stream of a request: the token buffer, KV/logprob state,
 // stopping and timing bookkeeping, and the detokenizing output path of a plain
-// LLM / VLM request. Request kinds whose sequences behave differently derive
-// from it (see RecSequence / OneRecSequence) and override the few hooks below;
-// create_sequence() picks the concrete type.
+// LLM / VLM request.
 class Sequence {
  public:
   // Decoder seeded by the prompt tokens (LLM / VLM).
@@ -333,7 +328,7 @@ class Sequence {
   }
   // check finish status, use cached value if not invalidated
   bool finished() const;
-  // mark sequence as finished (used by rec model multi-round decoding)
+  // Mark the sequence as finished.
   void finish();
   void fail(Status status);
 
@@ -479,8 +474,6 @@ class Sequence {
   // get sequence id
   int32_t seq_id() const { return seq_id_; }
 
-  RecType rec_type() const { return sequence_params_.rec_type; }
-
   void set_cancel() { cancelled_.store(true, std::memory_order_relaxed); }
 
   bool cancelled() const { return cancelled_.load(std::memory_order_relaxed); }
@@ -501,9 +494,7 @@ class Sequence {
     size_t capacity = 0;
   };
 
-  // Decoder seeded by BOS tokens (OneRec). `force_token_logprobs` keeps the
-  // per-token logprob buffer allocated even when the request did not ask for
-  // logprobs, for derived types that emit them in their output anyway.
+  // Internal construction with an explicit decoder seed and logprob policy.
   Sequence(size_t index,
            const DecoderSeed& seed,
            torch::Tensor input_embedding,

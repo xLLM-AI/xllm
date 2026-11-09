@@ -269,7 +269,7 @@ xLLM 的 `beam_width` 扩展请参阅[在线服务](/zh/basic_usage/online_servi
 
 ## 兼容性限制与错误处理
 
-- LLM 后端已实现的采样参数均兼容开启或关闭 schedule overlap。MTP 同时支持 `seed` 和 `bad_words`：约束与惩罚依据已确认的生成历史，逐个推进候选 token 和 bonus token。带 seed 的 MTP 按逻辑 token 位置独立采样 target 并验证前缀，固定种子不依赖 batch 中的位置。VLM 和 REC 的限制保持不变。
+- LLM 后端已实现的采样参数均兼容开启或关闭 schedule overlap。MTP 同时支持 `seed` 和 `bad_words`：约束与惩罚依据已确认的生成历史，逐个推进候选 token 和 bonus token。带 seed 的 MTP 按逻辑 token 位置独立采样 target 并验证前缀，固定种子不依赖 batch 中的位置。VLM 的限制保持不变。
 - 上述 seed 和禁词的推测解码支持适用于 MTP；其他推测算法保留原有限制。
 - LLM 后端的普通生成和 MTP 均支持 `min_tokens`。MTP 只约束 target 采样，逐个处理验证候选和 bonus token，draft 采样不受最小长度限制。VLM 请求使用 `min_tokens` 时，仍要求 `num_speculative_tokens=0`。
 - 非空的 `prompt_logprobs`、`logprob_token_ids`、`structured_outputs` 和 `prompt_embeds` 仍不受支持，会返回 HTTP 400。

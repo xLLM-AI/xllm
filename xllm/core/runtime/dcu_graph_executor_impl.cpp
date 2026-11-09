@@ -31,7 +31,6 @@ limitations under the License.
 #include "core/layers/common/attention_metadata.h"
 #include "core/layers/common/attention_metadata_builder.h"
 #include "core/runtime/graph_execution_input.h"
-#include "core/runtime/rec_graph_input.h"
 #include "core/util/tensor_helper.h"
 #include "core/util/tensor_options.h"
 #include "core/util/utils.h"
@@ -87,9 +86,6 @@ DcuGraphPersistentParam::DcuGraphPersistentParam(
       SchedulerConfig::get_instance().max_tokens_per_batch();
 
   int64_t max_seqs_per_batch = options.max_seqs_per_batch();
-  if (is_rec_multi_round_mode()) {
-    max_seqs_per_batch *= options.beam_width();
-  }
 
   const int64_t max_seq_len = args.max_position_embeddings();
   const uint32_t block_size = options.block_size();
@@ -597,10 +593,6 @@ bool DcuGraph::capture(ModelType* model,
          "parameters "
          "during capture";
 
-  if constexpr (std::is_same_v<Params, RecModelParams>) {
-    rec_graph_input_.emplace(graph_params_opt->clone());
-  }
-
   VLOG(1) << "DCU graph capture begin, bucket_num_tokens=" << bucket_num_tokens
           << ", actual_num_tokens=" << actual_num_tokens
           << ", graph_max_seq_len=" << graph_max_seq_len
@@ -727,22 +719,6 @@ DcuGraphExecutorImpl::DcuGraphExecutorImpl(CausalLM* model,
           << " bytes (" << (persistent_bytes / (1024 * 1024)) << " MB)";
 }
 
-DcuGraphExecutorImpl::DcuGraphExecutorImpl(RecModel* model,
-                                           const ModelArgs& args,
-                                           const torch::Device& device,
-                                           const runtime::Options& options)
-    : DcuGraphExecutorImpl(static_cast<CausalLM*>(nullptr),
-                           args,
-                           device,
-                           options) {
-  rec_model_ = model;
-}
-
-bool DcuGraph::matches_graph_input(const RecModelParams& params) const {
-  return rec_graph_input_.has_value() &&
-         rec_graph_bindings_match(*rec_graph_input_, params);
-}
-
 DcuGraphExecutorImpl::~DcuGraphExecutorImpl() {
   prefill_graphs_.clear();
   graphs_.clear();
@@ -842,13 +818,6 @@ ModelOutput DcuGraphExecutorImpl::run(const torch::Tensor& tokens,
                                       std::vector<KVCache>& kv_caches,
                                       const ModelParamsView& params) {
   return run_impl(model_, tokens, positions, kv_caches, params);
-}
-
-ModelOutput DcuGraphExecutorImpl::run(const torch::Tensor& tokens,
-                                      const torch::Tensor& positions,
-                                      std::vector<KVCache>& kv_caches,
-                                      const RecModelParams& params) {
-  return run_impl(rec_model_, tokens, positions, kv_caches, params);
 }
 
 template <typename ModelType, typename Params>
@@ -968,13 +937,6 @@ ModelOutput DcuGraphExecutorImpl::run_impl(ModelType* model,
     return model->forward(tokens, positions, kv_caches, params);
   }
 
-  if (has_llmrec_graph_input(params)) {
-    VLOG(1) << "DCU graph does not support LLMRec/xAttention yet; "
-            << "falling back to eager.";
-    COUNTER_INC(num_model_execution_total_eager);
-    return model->forward(tokens, positions, kv_caches, params);
-  }
-
   const int64_t max_seq_len = args_.max_position_embeddings();
   if (params.meta.kv_max_seq_len > max_seq_len) {
     LOG(WARNING) << "Not suitable for DCU graph: kv_max_seq_len="
@@ -1054,34 +1016,16 @@ DcuGraphPersistentParam::update<ModelParamsView>(const torch::Tensor&,
                                                  uint32_t,
                                                  bool,
                                                  uint32_t);
-template std::optional<RecModelParams>
-DcuGraphPersistentParam::update<RecModelParams>(const torch::Tensor&,
-                                                const torch::Tensor&,
-                                                const RecModelParams&,
-                                                uint32_t,
-                                                bool,
-                                                uint32_t);
 template ModelParamsView DcuGraphPersistentParam::init_decode_params<
     ModelParamsView>(const torch::Tensor&,
                      const torch::Tensor&,
                      const ModelParamsView&,
                      uint32_t,
                      uint32_t);
-template RecModelParams DcuGraphPersistentParam::init_decode_params<
-    RecModelParams>(const torch::Tensor&,
-                    const torch::Tensor&,
-                    const RecModelParams&,
-                    uint32_t,
-                    uint32_t);
 template void DcuGraphPersistentParam::update_decode_input_buffer<
     ModelParamsView>(const torch::Tensor&,
                      const torch::Tensor&,
                      const ModelParamsView&,
                      uint32_t);
-template void DcuGraphPersistentParam::update_decode_input_buffer<
-    RecModelParams>(const torch::Tensor&,
-                    const torch::Tensor&,
-                    const RecModelParams&,
-                    uint32_t);
 
 }  // namespace xllm::runtime::dcu

@@ -40,7 +40,6 @@ limitations under the License.
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/parallel_config.h"
 #include "core/framework/config/profile_config.h"
-#include "core/framework/config/rec_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/config/service_config.h"
 #include "core/framework/config/speculative_config.h"
@@ -133,7 +132,6 @@ nlohmann::ordered_json build_startup_config_json() {
   ExecutionConfig::get_instance().append_config_json(config_json);
   KernelConfig::get_instance().append_config_json(config_json);
   DiTConfig::get_instance().append_config_json(config_json);
-  RecConfig::get_instance().append_config_json(config_json);
 
   return config_json;
 }

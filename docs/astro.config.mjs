@@ -392,7 +392,6 @@ export default defineConfig({
 						'dev_guide/code_arch',
 						'design/cpp_framework_python_model_architecture',
 						'design/graph_mode_design',
-						'design/generative_recommendation_design',
 						'dev_guide/ai_coding_workflow',
 						'dev_guide/xllm_kernel_dev',
 						'dev_guide/tilelang_ascend_kernel_dev',

@@ -35,24 +35,18 @@ DEFINE_bool(enable_block_copy_kernel,
             "Whether to use block copy kernel on supported backends.");
 #endif
 
-DEFINE_bool(enable_topk_sorted,
-            true,
-            "Whether to enable sorted output for topk.");
-
 namespace xllm {
 
 void BeamSearchConfig::from_flags() {
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_beam_search_kernel);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(beam_width);
   XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_block_copy_kernel);
-  XLLM_CONFIG_ASSIGN_FROM_FLAG(enable_topk_sorted);
 }
 
 void BeamSearchConfig::from_json(const JsonReader& json) {
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_beam_search_kernel);
   XLLM_CONFIG_ASSIGN_FROM_JSON(beam_width);
   XLLM_CONFIG_ASSIGN_FROM_JSON(enable_block_copy_kernel);
-  XLLM_CONFIG_ASSIGN_FROM_JSON(enable_topk_sorted);
 }
 
 void BeamSearchConfig::append_config_json(
@@ -64,8 +58,6 @@ void BeamSearchConfig::append_config_json(
       config_json, default_config, beam_width);
   APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
       config_json, default_config, enable_block_copy_kernel);
-  APPEND_CONFIG_JSON_VALUE_IF_NOT_DEFAULT(
-      config_json, default_config, enable_topk_sorted);
 }
 
 BeamSearchConfig& BeamSearchConfig::get_instance() {

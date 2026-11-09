@@ -21,7 +21,6 @@ limitations under the License.
 
 #include "common/macros.h"
 #include "framework/batch/batch_group.h"
-#include "framework/batch/rec_batch_group.h"
 #include "framework/model/model_params_view.h"
 #include "framework/request/request.h"
 #include "framework/request/sequence.h"
@@ -64,7 +63,6 @@ class KVCacheManager {
   virtual bool try_allocate(Sequence* sequence) = 0;
 
   virtual void transfer_blocks(BatchGroup& batches) {};
-  virtual void transfer_blocks(RecBatchGroup& batches) {};
   virtual void transfer_blocks() {};
 
   // Managers without storage prefetch admit directly to the ready queue.

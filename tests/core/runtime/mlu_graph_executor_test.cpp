@@ -30,7 +30,6 @@ limitations under the License.
 #include "core/framework/config/execution_config.h"
 #include "core/framework/model/model_args.h"
 #include "core/framework/model/model_output.h"
-#include "core/framework/model/rec_model.h"
 #include "core/kv_cache/storage/kv_cache.h"
 #include "mlu_graph_executor_impl.h"
 #include "models/llm/mlu/mtp_topk_state.h"
@@ -147,42 +146,7 @@ class MockCausalLM : public CausalLM {
   std::vector<int32_t> last_dp_token_nums_;
 };
 
-namespace {
-
-class CountingRecModel final : public RecModel {
- public:
-  explicit CountingRecModel(torch::TensorOptions options)
-      : options_(std::move(options)) {}
-
-  RecModelKind model_kind() const override { return RecModelKind::kOneRec; }
-
-  ModelOutput forward(const torch::Tensor& tokens,
-                      const torch::Tensor& positions,
-                      std::vector<KVCache>& kv_caches,
-                      const RecModelParams& params) override {
-    ++forward_count_;
-    const auto* strategy = params.onerec_xattention_params();
-    CHECK(strategy != nullptr);
-    torch::Tensor cache = strategy->unshared_k_caches.front();
-    cache.add_(1);
-    return ModelOutput(params.embedding.input_embedding + cache);
-  }
-
-  torch::Tensor logits(const torch::Tensor& hidden_states,
-                       const torch::Tensor& selected_idxes) override {
-    return hidden_states;
-  }
-  void load_model(std::unique_ptr<ModelLoader> loader) override {}
-  torch::Device device() const override { return options_.device(); }
-  const torch::TensorOptions& options() const override { return options_; }
-  int32_t forward_count() const { return forward_count_; }
-
- private:
-  torch::TensorOptions options_;
-  int32_t forward_count_ = 0;
-};
-
-}  // namespace
+namespace {}  // namespace
 
 class MluGraphExecutorTest : public ::testing::Test {
  protected:
@@ -450,54 +414,6 @@ TEST_F(MluGraphExecutorTest, DraftEagerPreservesTypedTopkWhenAuxIsDisabled) {
   EXPECT_EQ(output.mtp_topk_state.get(), expected_state.get());
   EXPECT_FALSE(output.aux_hidden_states.defined());
   EXPECT_EQ(model_->forward_cnt(), 1);
-}
-
-TEST_F(MluGraphExecutorTest, NativeRecReplaysAndRecapturesChangedKvStorage) {
-  const torch::Device device("mlu:0");
-  CountingRecModel model(tensor_options_);
-  ::xllm::mlu::MluGraphExecutorImpl executor(
-      &model, model_args_, device, options_);
-  RecModelParams params;
-  params.meta.batch_forward_type = BatchForwardType::DECODE;
-  params.meta.num_sequences = 1;
-  params.meta.q_max_seq_len = 1;
-  params.meta.kv_max_seq_len = 1;
-  params.parallel.dp_global_token_nums = {1};
-  params.parallel.dp_is_decode = {1};
-  params.attention.host.q_seq_lens = {0, 1};
-  params.attention.host.kv_seq_lens = {0, 1};
-  const auto int_options = tensor_options_.dtype(torch::kInt32);
-  params.attention.device.q_seq_lens = torch::tensor({0, 1}, int_options);
-  params.attention.device.kv_seq_lens = torch::tensor({0, 1}, int_options);
-  params.attention.device.new_cache_slots = torch::zeros({1}, int_options);
-  params.attention.device.block_tables = torch::zeros({1, 1}, int_options);
-  params.embedding.input_embedding = torch::ones({1, 1024}, tensor_options_);
-  auto& strategy = params.mutable_onerec_xattention_params();
-  strategy.rec_stage = OneRecModelInputParams::RecStage::DECODE;
-  strategy.unshared_k_caches = {torch::zeros({1, 1024}, tensor_options_)};
-  const auto tokens = torch::ones({1}, int_options);
-  const auto positions = torch::zeros({1}, int_options);
-
-  auto first = executor.run(tokens, positions, kv_caches_, params);
-  torch_mlu::synchronize();
-  EXPECT_TRUE(torch::allclose(first.hidden_states,
-                              torch::full({1, 1024}, 2, tensor_options_)));
-  EXPECT_EQ(model.forward_count(), 1);
-
-  auto replay = executor.run(tokens, positions, kv_caches_, params);
-  torch_mlu::synchronize();
-  EXPECT_TRUE(torch::allclose(replay.hidden_states,
-                              torch::full({1, 1024}, 3, tensor_options_)));
-  EXPECT_EQ(model.forward_count(), 1);
-
-  strategy.unshared_k_caches[0] = torch::full({1, 1024}, 7, tensor_options_);
-  auto recaptured = executor.run(tokens, positions, kv_caches_, params);
-  torch_mlu::synchronize();
-  EXPECT_TRUE(torch::allclose(recaptured.hidden_states,
-                              torch::full({1, 1024}, 9, tensor_options_)));
-  EXPECT_TRUE(torch::allclose(strategy.unshared_k_caches[0],
-                              torch::full({1, 1024}, 8, tensor_options_)));
-  EXPECT_EQ(model.forward_count(), 2);
 }
 
 TEST_F(MluGraphExecutorTest, TargetDecodeCapturesThenReplays) {

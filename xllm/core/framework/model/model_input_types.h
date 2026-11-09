@@ -114,22 +114,6 @@ struct VlmAttentionHostInput final {
   const int32_t* graph_kv_seq_lens_data = nullptr;
 };
 
-struct RecAttentionHostInput final {
-  std::vector<int32_t> kpool_query_lens;
-  std::vector<int32_t> q_seq_lens;
-  std::vector<int32_t> q_cu_seq_lens;
-  std::vector<int32_t> kv_seq_lens;
-  std::vector<int32_t> kv_cu_seq_lens;
-  std::vector<int32_t> new_cache_slots;
-  std::vector<int32_t> kv_cache_tokens_nums;
-  std::vector<int32_t> ring_cur_seqlen;
-  std::vector<int32_t> ring_cache_seqlen;
-  torch::Tensor block_tables;
-
-  const int32_t* graph_q_seq_lens_data = nullptr;
-  const int32_t* graph_kv_seq_lens_data = nullptr;
-};
-
 namespace detail {
 template <typename Input>
 Input attention_device_to(const Input& source, const torch::Device& device) {
@@ -208,33 +192,6 @@ class VlmAttentionDeviceInput final {
   torch::Tensor in_prefix_slots;
 
   VlmAttentionDeviceInput to(const torch::Device& device) const {
-    return detail::attention_device_to(*this, device);
-  }
-};
-
-class RecAttentionDeviceInput final {
- public:
-  torch::Tensor q_seq_lens;
-  torch::Tensor kv_seq_lens;
-  torch::Tensor q_cu_seq_lens;
-  torch::Tensor new_cache_slots;
-  torch::Tensor block_tables;
-  torch::Tensor paged_kv_indptr;
-  torch::Tensor paged_kv_indices;
-  torch::Tensor paged_kv_last_page_len;
-  torch::Tensor new_cache_slot_offsets;
-  torch::Tensor kv_cache_start_offsets;
-  torch::Tensor kv_cache_tokens_nums;
-  torch::Tensor history_compressed_kv;
-  torch::Tensor history_k_rope;
-  torch::Tensor ring_cur_seqlen;
-  torch::Tensor ring_cache_seqlen;
-
-  // Per-rank prefix slot indices for KV-split prefix AllGather. NpuCpPlan
-  // supplies this graph input with the rest of the CP attention metadata.
-  torch::Tensor in_prefix_slots;
-
-  RecAttentionDeviceInput to(const torch::Device& device) const {
     return detail::attention_device_to(*this, device);
   }
 };

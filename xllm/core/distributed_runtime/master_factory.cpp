@@ -24,7 +24,6 @@ limitations under the License.
 
 #include "core/distributed_runtime/dit_master.h"
 #include "core/distributed_runtime/llm_master.h"
-#include "core/distributed_runtime/rec_master.h"
 #include "core/distributed_runtime/vlm_master.h"
 #include "core/framework/config/load_config.h"
 
@@ -41,10 +40,6 @@ std::unique_ptr<Master> create_master(const std::string& backend,
   if (backend == "dit") {
     LOG(INFO) << "creating dit master";
     return std::make_unique<DiTMaster>(options);
-  }
-  if (backend == "rec") {
-    LOG(INFO) << "creating rec master";
-    return std::make_unique<RecMaster>(options);
   }
 
   LOG(FATAL) << "Failed to create master, backend is " << backend;

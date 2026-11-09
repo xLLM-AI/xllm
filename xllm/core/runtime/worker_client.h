@@ -108,13 +108,6 @@ class WorkerClient {
   virtual folly::SemiFuture<std::optional<RawForwardOutput>> step_remote_async(
       const DiTForwardInput& inputs);
 
-  // Run a local REC worker and return its device-resident output.
-  virtual folly::SemiFuture<std::optional<ForwardOutput>> step_async(
-      const RecForwardInput& inputs);
-
-  virtual folly::SemiFuture<std::optional<RawForwardOutput>> step_remote_async(
-      const RecForwardInput& inputs);
-
   virtual folly::SemiFuture<std::optional<RawForwardOutput>> step_remote_async(
       const VlmForwardInput& inputs);
 

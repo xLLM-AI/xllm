@@ -34,7 +34,7 @@ namespace xllm {
 class Stream;
 
 // Input-independent model weights and runtime resources. Forward contracts stay
-// on the language-model and recommendation-model interfaces.
+// on the language-model interfaces.
 class Model {
  public:
   virtual ~Model() = default;

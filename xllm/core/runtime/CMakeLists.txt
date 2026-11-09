@@ -19,12 +19,7 @@ cc_library(
     executor_impl_factory.h
     vlm_executor_impl.h
     base_executor_impl.h
-    rec_executor.h
-    rec_executor_impl.h
-    rec_executor_backend.h
-    rec_executor_impl_factory.h
     graph_execution_input.h
-    rec_graph_input.h
     dit_executor.h
     $<$<BOOL:${USE_NPU}>:acl_graph_bucket_policy.h>
     $<$<BOOL:${USE_NPU}>:acl_graph_executor_impl.h>
@@ -44,7 +39,6 @@ cc_library(
     dit_worker_impl.h
     embed_worker_impl.h
     embed_vlm_worker_impl.h
-    rec_worker_impl.h
     mm_embed_vlm_worker_impl.h
     worker_client.h
     draft_model_spec_worker_impl.h
@@ -66,9 +60,6 @@ cc_library(
     schedule_overlap_state.cpp
     executor_impl_factory.cpp
     base_executor_impl.cpp
-    rec_executor.cpp
-    rec_executor_impl.cpp
-    rec_executor_impl_factory.cpp
     vlm_executor_impl.cpp
     dit_executor.cpp
     $<$<BOOL:${USE_NPU}>:acl_graph_executor_impl.cpp>
@@ -88,7 +79,6 @@ cc_library(
     dit_worker_impl.cpp
     embed_worker_impl.cpp
     embed_vlm_worker_impl.cpp
-    rec_worker_impl.cpp
     mm_embed_vlm_worker_impl.cpp
     worker_client.cpp
     dit_forward_params.cpp
@@ -129,7 +119,6 @@ cc_library(
     :kv_transfer_completion
     :models
     :sampler
-    :rec_constrained_decoding
     :json_object_constraint_batch
     :tokenizer
     :model_loader

@@ -1,7 +1,6 @@
 include(cc_test)
 
 add_subdirectory(moe)
-add_subdirectory(xattention)
 
 cc_test(
   NAME
