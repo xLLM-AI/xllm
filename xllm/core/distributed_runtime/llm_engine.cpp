@@ -117,6 +117,8 @@ LLMEngine::LLMEngine(
           .enable_dp_global_json_object_active =
               dp_size_ > 1 && !options_.is_draft_engine() &&
               options_.num_speculative_tokens() > 0,
+          .enable_shared_kv_cache_deltas =
+              KVCacheConfig::get_instance().enable_shared_kv_cache(),
       });
   worker_clients_num_ = worker_clients_.size();
   dp_local_size_ = worker_clients_num_ / dp_size_;
@@ -549,6 +551,7 @@ bool LLMEngine::allocate_kv_cache(
       return false;
     }
   }
+  forward_input_factory_->reset_shared_kv_cache_publication();
   // VirtualMemory mode: reserve padding blocks and start prealloc thread.
   kv_cache_manager_->reserve_virtual_memory_padding_blocks();
 
@@ -599,6 +602,8 @@ ForwardOutput LLMEngine::step(BatchGroup& batch) {
       LOG(FATAL) << "Failed to execute model, result has no value";
     }
   }
+
+  forward_input_factory_->acknowledge_shared_kv_cache();
 
   if (eplb_controller_ != nullptr && !options_.enable_schedule_overlap() &&
       !is_graph_warmup) {

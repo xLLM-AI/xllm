@@ -99,6 +99,7 @@ StaticKVCacheBlockPool::StaticKVCacheBlockPool(
     free_slabs_.emplace_back(static_cast<uint32_t>(slab));
   }
   full_block_lease_epochs_.assign(logical_capacity_, 0);
+  linear_state_lease_epochs_.assign(logical_capacity_, 0);
   for (const BlockType type : {BlockType::KV, BlockType::LINEAR}) {
     const size_t index = block_type_index(type);
     const size_t row_width =
@@ -281,11 +282,10 @@ std::vector<int32_t> StaticKVCacheBlockPool::allocate_slab_blocks(
     free_ids_[index].pop_back();
     logical_states_[index][id] = 2;
     placement_hints_[index][id] = placement_hint;
-    if (type == BlockType::KV) {
-      CHECK_LT(full_block_lease_epochs_[id],
-               std::numeric_limits<uint64_t>::max());
-      ++full_block_lease_epochs_[id];
-    }
+    auto& epochs = type == BlockType::KV ? full_block_lease_epochs_
+                                         : linear_state_lease_epochs_;
+    CHECK_LT(epochs[id], std::numeric_limits<uint64_t>::max());
+    ++epochs[id];
     std::copy_n(rows.begin() + block * row_width,
                 row_width,
                 physical_rows_[index].begin() + id * row_width);
@@ -504,6 +504,41 @@ void StaticKVCacheBlockPool::append_linear_state_rows(
     int32_t state_id,
     std::vector<int32_t>* rows) const {
   append_rows(state_id, BlockType::LINEAR, rows);
+}
+
+void StaticKVCacheBlockPool::append_changed_rows(
+    BlockType type,
+    Slice<Block> blocks,
+    const std::vector<uint64_t>& known_epochs,
+    std::vector<int32_t>* rows,
+    std::vector<uint64_t>* epochs) const {
+  CHECK(slab_mode_);
+  CHECK(rows != nullptr);
+  CHECK(epochs != nullptr);
+  CHECK_EQ(known_epochs.size(), logical_capacity_);
+  const size_t index = block_type_index(type);
+  const size_t width =
+      type == BlockType::KV ? full_layers_ : 2 * linear_layers_;
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto& allocation_epochs = type == BlockType::KV
+                                      ? full_block_lease_epochs_
+                                      : linear_state_lease_epochs_;
+  for (const Block& block : blocks) {
+    if (!block.is_valid()) {
+      continue;
+    }
+    const int32_t id = block.id();
+    CHECK_GE(id, 0);
+    CHECK_LT(static_cast<uint32_t>(id), logical_capacity_);
+    CHECK(id == 0 || logical_states_[index][id] != 0);
+    if (known_epochs[id] == allocation_epochs[id]) {
+      continue;
+    }
+    rows->emplace_back(id);
+    const auto begin = physical_rows_[index].begin() + id * width;
+    rows->insert(rows->end(), begin, begin + width);
+    epochs->emplace_back(allocation_epochs[id]);
+  }
 }
 
 size_t StaticKVCacheBlockPool::num_slots() const {

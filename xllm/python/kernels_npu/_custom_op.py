@@ -1287,6 +1287,26 @@ def _sfa_dcp_remap_out_fake(
     return out
 
 
+def _shared_linear_state_indices_out_fake(
+    ids: torch.Tensor,
+    rows: torch.Tensor,
+    out: torch.Tensor,
+) -> None:
+    return None
+
+
+def _shared_full_indices_out_fake(
+    block_table: torch.Tensor,
+    slots: torch.Tensor,
+    rows: torch.Tensor,
+    page_size: int,
+    padding_row: int,
+    out_tables: torch.Tensor,
+    out_slots: torch.Tensor,
+) -> None:
+    return None
+
+
 def _npu_all_reduce_fake(x: torch.Tensor, comm: int) -> None:
     return None
 
@@ -1299,6 +1319,8 @@ def _npu_reduce_scatter_fake(input: torch.Tensor, output: torch.Tensor, comm: in
     return None
 
 
+register_fake("xllm_ops::shared_linear_state_indices_out", _shared_linear_state_indices_out_fake)
+register_fake("xllm_ops::shared_full_indices_out", _shared_full_indices_out_fake)
 register_fake("xllm_ops::npu_all_reduce", _npu_all_reduce_fake)
 register_fake("xllm_ops::npu_all_gather", _npu_all_gather_fake)
 register_fake("xllm_ops::npu_reduce_scatter", _npu_reduce_scatter_fake)

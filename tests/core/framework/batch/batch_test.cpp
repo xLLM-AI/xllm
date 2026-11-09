@@ -35,6 +35,7 @@ limitations under the License.
 #include "core/distributed_runtime/worker_model_codec.h"
 #include "core/framework/batch/batch_group.h"
 #include "core/framework/batch/forward_input_builder.h"
+#include "core/framework/batch/shared_kv_cache_publication.h"
 #include "core/framework/config/kv_cache_config.h"
 #include "core/framework/config/model_config.h"
 #include "core/framework/config/scheduler_config.h"
@@ -2958,9 +2959,12 @@ TEST(BatchTest, ThreadedSharedSlabBuilderKeepsFullLeaseRowsAligned) {
   first.add_blocks(BlockType::KV, manager.allocate_blocks(BlockType::KV, 1));
   second.add_blocks(BlockType::KV, manager.allocate_blocks(BlockType::KV, 2));
   first.add_blocks(BlockType::LINEAR,
-                   manager.allocate_blocks(BlockType::LINEAR, 1));
+                   manager.allocate_blocks(BlockType::LINEAR, 2));
   second.add_blocks(BlockType::LINEAR,
                     manager.allocate_blocks(BlockType::LINEAR, 1));
+  const int32_t read_id = first.kv_state().blocks(BlockType::LINEAR)[0].id();
+  const int32_t write_id = first.kv_state().blocks(BlockType::LINEAR)[1].id();
+  ASSERT_NE(read_id, write_id);
   second.kv_state().set_kv_cache_tokens_num(kQueryTokens);
   Batch batch({&first, &second});
   ThreadPool thread_pool(/*num_threads=*/2);
@@ -2969,7 +2973,9 @@ TEST(BatchTest, ThreadedSharedSlabBuilderKeepsFullLeaseRowsAligned) {
                     "linear_attention",
                     "linear_attention",
                     "full_attention"});
-  const LlmForwardInput input = batch.prepare_forward_input(args, &thread_pool);
+  SharedKVCachePublication publication;
+  const LlmForwardInput input = batch.prepare_forward_input(
+      args, &thread_pool, /*cp_size=*/1, &publication);
   const auto& embedding = input.input_params.embedding;
   ASSERT_EQ(embedding.full_block_slot_rows.size(), 9u);
   EXPECT_EQ(embedding.full_block_lease_epochs,
@@ -2980,6 +2986,49 @@ TEST(BatchTest, ThreadedSharedSlabBuilderKeepsFullLeaseRowsAligned) {
             second.kv_state().blocks(BlockType::KV)[0].id());
   EXPECT_EQ(embedding.full_block_slot_rows[6],
             second.kv_state().blocks(BlockType::KV)[1].id());
+  EXPECT_EQ(embedding.linear_state_read_ids[0], read_id);
+  EXPECT_EQ(embedding.linear_state_ids[0], write_id);
+  ASSERT_EQ(embedding.linear_state_slot_rows.size(), 15u);
+  const std::unordered_set<int32_t> published_linear_ids = {
+      embedding.linear_state_slot_rows[0],
+      embedding.linear_state_slot_rows[5],
+      embedding.linear_state_slot_rows[10]};
+  EXPECT_EQ(published_linear_ids,
+            (std::unordered_set<int32_t>{
+                read_id,
+                write_id,
+                second.kv_state().blocks(BlockType::LINEAR)[0].id()}));
+
+  publication.acknowledge();
+  publication.begin();
+  first.kv_state().set_kv_cache_tokens_num(0);
+  second.kv_state().set_kv_cache_tokens_num(kQueryTokens);
+  const LlmForwardInput unchanged = batch.prepare_forward_input(
+      args, &thread_pool, /*cp_size=*/1, &publication);
+  EXPECT_TRUE(unchanged.input_params.embedding.full_block_slot_rows.empty());
+  EXPECT_TRUE(unchanged.input_params.embedding.full_block_lease_epochs.empty());
+  EXPECT_TRUE(unchanged.input_params.embedding.linear_state_slot_rows.empty());
+  publication.acknowledge();
+
+  // Replacing only the write state preserves the published read mapping and
+  // republishes its recycled logical ID even when the context is unchanged.
+  first.kv_state().mutable_blocks(BlockType::LINEAR)->pop_back();
+  auto replacement = manager.allocate_blocks(BlockType::LINEAR, 1);
+  ASSERT_EQ(replacement.size(), 1u);
+  ASSERT_EQ(replacement[0].id(), write_id);
+  first.add_blocks(BlockType::LINEAR, replacement);
+  publication.begin();
+  first.kv_state().set_kv_cache_tokens_num(0);
+  second.kv_state().set_kv_cache_tokens_num(kQueryTokens);
+  const LlmForwardInput reused_write = batch.prepare_forward_input(
+      args, &thread_pool, /*cp_size=*/1, &publication);
+  const auto& reused_embedding = reused_write.input_params.embedding;
+  EXPECT_TRUE(reused_embedding.full_block_slot_rows.empty());
+  EXPECT_TRUE(reused_embedding.full_block_lease_epochs.empty());
+  EXPECT_EQ(reused_embedding.linear_state_read_ids[0], read_id);
+  EXPECT_EQ(reused_embedding.linear_state_ids[0], write_id);
+  ASSERT_EQ(reused_embedding.linear_state_slot_rows.size(), 5u);
+  EXPECT_EQ(reused_embedding.linear_state_slot_rows[0], write_id);
 }
 
 class LinearBatchLifetimeTest : public ::testing::TestWithParam<bool> {};
