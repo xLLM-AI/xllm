@@ -53,6 +53,9 @@ namespace xllm::npu {
 
 struct AclGraphTaskUpdateContext;
 
+uint64_t adapter_aware_graph_key(uint64_t base_key,
+                                 const std::vector<uint64_t>& adapter_ids);
+
 struct StaticGraphTaskSignature {
   int64_t linear_state_id = 0;
   int64_t num_accepted_tokens = 0;
