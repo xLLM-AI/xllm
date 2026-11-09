@@ -120,7 +120,7 @@ cc_library(
     :kv_transfer_completion
     :models
     :sampler
-    :json_object_constraint_batch
+    :json_object_grammar
     :tokenizer
     :model_loader
     :util

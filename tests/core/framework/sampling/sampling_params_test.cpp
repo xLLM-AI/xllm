@@ -112,7 +112,6 @@ TEST(SamplingParamsTest, MinimumConstraintsExpandForVerifyAndStayOffDrafts) {
 TEST(SamplingParamsTest, DeviceTransferPreservesSamplingStateAndTensorTypes) {
   SamplingParameters params;
   params.selected_token_idxes() = torch::tensor({2, 5}, torch::kInt32);
-  params.filter_mask() = torch::tensor({{0.0F, -1.0F}, {-2.0F, 0.0F}});
   params.filter_bitmask() = torch::tensor({{1}, {2}}, torch::kInt32);
   params.frequency_penalties() = torch::tensor({0.5F, 0.25F});
   params.presence_penalties() = torch::tensor({0.75F, 0.5F});
@@ -149,9 +148,6 @@ TEST(SamplingParamsTest, DeviceTransferPreservesSamplingStateAndTensorTypes) {
   EXPECT_TRUE(torch::equal(transferred.selected_token_idxes(),
                            params.selected_token_idxes()));
   EXPECT_EQ(transferred.selected_token_idxes().scalar_type(), torch::kInt32);
-  EXPECT_TRUE(torch::equal(transferred.filter_mask(), params.filter_mask()));
-  EXPECT_EQ(transferred.filter_mask().scalar_type(), torch::kFloat64);
-  EXPECT_TRUE(transferred.filter_mask().is_contiguous());
   EXPECT_TRUE(
       torch::equal(transferred.filter_bitmask(), params.filter_bitmask()));
   EXPECT_EQ(transferred.filter_bitmask().scalar_type(), torch::kInt32);

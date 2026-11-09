@@ -138,12 +138,6 @@ SampleOutput rejection_sample(const SamplingParameters& params,
                                                         /*dim=*/0)
             : params.filter_bitmask();
     apply_token_bitmask_inplace(target_logits, bitmask);
-  } else if (params.filter_mask().defined()) {
-    CHECK_EQ(params.filter_mask().sizes(),
-             torch::IntArrayRef({batch_size, vocab_size}))
-        << "verify filter_mask must be per-sequence [batch, vocab]";
-    grouped_logits.add_(
-        expand_batch_to_tokens(params.filter_mask(), num_val_tokens));
   }
   if (!params.is_all_greedy()) {
     if (params.temperatures().defined()) {

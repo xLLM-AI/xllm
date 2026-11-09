@@ -1357,9 +1357,6 @@ Input ForwardInputBuilder::state_to_forward_input() {
                forward_input.json_object_states.size());
       forward_input.sampling_params.filter_bitmask() =
           build_json_object_filter_bitmask(forward_input.json_object_states);
-      // JSON rows use the compact packed mask. Keep the generic dense API
-      // available for other callers without constructing a dense JSON mask.
-      forward_input.sampling_params.filter_mask() = torch::Tensor();
       forward_input.json_object_state_snapshots.reserve(
           forward_input.json_object_states.size());
       for (const auto& json_state : forward_input.json_object_states) {

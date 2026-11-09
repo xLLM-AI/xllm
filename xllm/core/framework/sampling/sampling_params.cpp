@@ -162,8 +162,7 @@ void SamplingParameters::init(
     const std::vector<int32_t>& selected_token_idxes,
     const std::vector<std::vector<int64_t>>& unique_token_ids_vec,
     const std::vector<std::vector<int32_t>>& unique_token_counts_vec,
-    const std::vector<int32_t>& unique_token_lens_vec,
-    const std::vector<torch::Tensor>& filter_mask_rows) {
+    const std::vector<int32_t>& unique_token_lens_vec) {
   *this = SamplingParameters();
   CHECK_EQ(req_sampling_params.size(), selected_token_idxes.size());
 
@@ -242,42 +241,6 @@ void SamplingParameters::init(
   }
 
   this->selected_token_idxes() = make_pinned_cpu_tensor(selected_token_idxes);
-  const bool has_filter_mask =
-      std::any_of(filter_mask_rows.begin(),
-                  filter_mask_rows.end(),
-                  [](const torch::Tensor& row) { return row.defined(); });
-  if (has_filter_mask) {
-    Timer mask_batch_timer;
-    CHECK_EQ(filter_mask_rows.size(), req_sampling_params.size());
-    int64_t vocab_size = 0;
-    for (const auto& row : filter_mask_rows) {
-      if (row.defined()) {
-        CHECK_EQ(row.dim(), 1) << "filter mask rows must be 1-D";
-        vocab_size = row.size(0);
-        break;
-      }
-    }
-    CHECK_GT(vocab_size, 0)
-        << "a filter mask batch must contain a constrained row";
-    std::vector<torch::Tensor> rows;
-    rows.reserve(filter_mask_rows.size());
-    for (const auto& row : filter_mask_rows) {
-      if (row.defined()) {
-        CHECK_EQ(row.size(0), vocab_size)
-            << "filter mask vocabulary sizes must match";
-        rows.push_back(row);
-      } else {
-        rows.push_back(torch::zeros(
-            {vocab_size}, torch::TensorOptions().dtype(torch::kFloat32)));
-      }
-    }
-    this->filter_mask() =
-        torch::cat(rows, /*dim=*/0)
-            .view({static_cast<int64_t>(rows.size()), vocab_size});
-    HISTOGRAM_OBSERVE(
-        json_object_mask_batch_build_latency_microseconds,
-        static_cast<int64_t>(mask_batch_timer.elapsed_microseconds()));
-  }
   if (need_token_stats) {
     CHECK_EQ(req_sampling_params.size(), unique_token_ids_vec.size());
     CHECK_EQ(req_sampling_params.size(), unique_token_counts_vec.size());
@@ -330,17 +293,6 @@ SamplingParameters SamplingParameters::to(const torch::Device& device,
           ? safe_to(selected_token_idxes(), device).contiguous()
           : selected_token_idxes();
   const torch::TensorOptions options = torch::device(device).dtype(dtype);
-  if (filter_mask().defined()) {
-    if (device.is_cpu()) {
-      params.filter_mask() = safe_to(filter_mask(), options, true).contiguous();
-    } else {
-      Timer transfer_timer;
-      params.filter_mask() = safe_to(filter_mask(), options, true).contiguous();
-      HISTOGRAM_OBSERVE(
-          json_object_mask_transfer_submission_latency_microseconds,
-          static_cast<int64_t>(transfer_timer.elapsed_microseconds()));
-    }
-  }
   if (filter_bitmask().defined()) {
     if (device.is_cpu()) {
       params.filter_bitmask() =

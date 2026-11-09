@@ -1947,7 +1947,6 @@ TEST(BatchTest, JsonObjectSampleSequenceIdsFollowSamplingRows) {
             std::vector<int32_t>({-1, -1}));
   ASSERT_EQ(forward_input.json_object_states.size(), 2u);
   ASSERT_TRUE(forward_input.sampling_params.filter_bitmask().defined());
-  EXPECT_FALSE(forward_input.sampling_params.filter_mask().defined());
   EXPECT_EQ(forward_input.sampling_params.filter_bitmask().size(0), 2);
   EXPECT_EQ(forward_input.sampling_params.filter_bitmask().size(1), 1);
   EXPECT_EQ(forward_input.sampling_params.filter_bitmask()
@@ -2080,7 +2079,8 @@ TEST(BatchTest, ReorderedMtpAcceptedRowsCommitToOwningSequences) {
   JsonObjectGrammarState expected_constrained_state = grammar->initial_state();
   ASSERT_TRUE(expected_constrained_state.accept_token(0));
   ASSERT_TRUE(expected_constrained_state.accept_token(1));
-  EXPECT_FALSE(expected_constrained_state.can_accept_token(9));
+  JsonObjectGrammarState probe = expected_constrained_state;
+  EXPECT_FALSE(probe.accept_token(9));
   ASSERT_TRUE(expected_constrained_state.accept_token(2));
 
   ForwardOutput forward_output;
@@ -2154,7 +2154,6 @@ TEST(BatchTest, JsonObjectMetadataIsSkippedWhenDisabled) {
             std::vector<std::string>{sequence.sample_sequence_id()});
   EXPECT_EQ(forward_input.sample_prior_output_rows, std::vector<int32_t>{-1});
   EXPECT_FALSE(forward_input.sampling_params.filter_bitmask().defined());
-  EXPECT_FALSE(forward_input.sampling_params.filter_mask().defined());
 }
 
 TEST(BatchTest, ChunkedPDTransferUsesStepWindow) {

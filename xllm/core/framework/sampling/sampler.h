@@ -21,9 +21,7 @@ limitations under the License.
 
 namespace xllm {
 
-SampleOutput sample(torch::Tensor& logits,
-                    const SamplingParameters& params,
-                    const torch::Tensor& filter_mask = torch::Tensor());
+SampleOutput sample(torch::Tensor& logits, const SamplingParameters& params);
 
 // Gumbel primitives: argmax(logits + g), g ~ Gumbel(0, 1), samples exactly
 // categorical(softmax(logits)) without materializing probs. Noise buffers

@@ -119,9 +119,6 @@ class OverlapTestWorker final : public WorkerImpl {
   const torch::Tensor& executed_filter_bitmask() const {
     return executed_filter_bitmask_;
   }
-  const torch::Tensor& executed_filter_mask() const {
-    return executed_filter_mask_;
-  }
   const torch::Tensor& forward_prefix_tokens() const {
     return forward_prefix_tokens_;
   }
@@ -192,7 +189,6 @@ class OverlapTestWorker final : public WorkerImpl {
       const std::function<void()>& prepare_sampling) {
     executed_tokens_ = input.token_ids;
     executed_filter_bitmask_ = input.sampling_params.filter_bitmask();
-    executed_filter_mask_ = input.sampling_params.filter_mask();
     executed_grammar_initialized_ =
         !input.json_object_states.empty() &&
         input.json_object_states.front().initialized();
@@ -228,7 +224,6 @@ class OverlapTestWorker final : public WorkerImpl {
   int32_t continuation_count_ = 0;
   torch::Tensor executed_tokens_;
   torch::Tensor executed_filter_bitmask_;
-  torch::Tensor executed_filter_mask_;
   torch::Tensor forward_prefix_tokens_;
   SamplingParameters executed_sampling_params_;
   torch::Tensor sampling_logits_;
@@ -401,7 +396,6 @@ TYPED_TEST(ScheduleOverlapTest,
   input.json_object_states = {grammar.initial_state()};
   input.sample_prior_output_rows = {0};
   input.sampling_params.filter_bitmask() = torch::zeros({1, 1}, torch::kInt32);
-  input.sampling_params.filter_mask() = torch::ones({1, 3});
   auto step = worker.step_async(input);
   const auto output = std::move(step).get();
   ASSERT_TRUE(output.has_value());
@@ -414,11 +408,8 @@ TYPED_TEST(ScheduleOverlapTest,
   EXPECT_EQ(
       worker.executed_filter_bitmask().to(torch::kCPU).template item<int32_t>(),
       1 << 2);
-  EXPECT_FALSE(worker.executed_filter_mask().defined());
   EXPECT_TRUE(input.json_object_states.front().snapshot().token_ids.empty());
   EXPECT_EQ(input.sampling_params.filter_bitmask().template item<int32_t>(), 0);
-  EXPECT_TRUE(
-      torch::equal(input.sampling_params.filter_mask(), torch::ones({1, 3})));
   worker.get_last_step_result();
 }
 
