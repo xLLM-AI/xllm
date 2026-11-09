@@ -431,8 +431,9 @@ SchedulerPolicy::schedule_one_prefill_request(
   // enough capacity for this request's full KV and all prior reservations.
   if (batch_mode_.enable_chunked_prefill &&
       request->sequences()[0]->kv_state().kv_cache_tokens_num() == 0) {
-    const size_t full_footprint = state.kv_cache_manager->sequence_resource_units(
-        request->sequences()[0]->num_tokens());
+    const size_t full_footprint =
+        state.kv_cache_manager->sequence_resource_units(
+            request->sequences()[0]->num_tokens());
     // Predict and pre-assign the target DP rank so admission and allocation use
     // the same rank selection.
     const int32_t dp_rank = state.kv_cache_manager->select_dp_rank();
@@ -582,7 +583,8 @@ SchedulerPolicy::schedule_one_prefill_request(
           << "seq dp_rank=" << dp_rank << " out of range [0,"
           << reserved_full_footprint.size() << ")";
       reserved_full_footprint[dp_rank] +=
-          state.kv_cache_manager->sequence_resource_units(sequence->num_tokens());
+          state.kv_cache_manager->sequence_resource_units(
+              sequence->num_tokens());
     }
   }
   return result == PrefillScheduleResult::SCHEDULED

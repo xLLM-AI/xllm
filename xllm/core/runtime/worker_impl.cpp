@@ -140,9 +140,8 @@ void validate_shared_kv_cache_support(const ModelArgs& args,
          "Python Qwen3.5 VLM.";
   CHECK(!python_vlm || parallel_args.dp_size() == 1)
       << "Shared Python Qwen3.5 VLM requires a single data-parallel rank.";
-  CHECK(!options.enable_prefill_piecewise_graph() &&
-        !options.enable_task_pipeline())
-      << "Shared KV cache does not support piecewise graphs or task pipelines.";
+  CHECK(!options.enable_prefill_piecewise_graph())
+      << "Shared KV cache does not support piecewise graphs.";
   if (python_model) {
     CHECK_EQ(options.npu_kernel_backend(), "TORCH");
     const bool mtp_draft =
@@ -1307,9 +1306,8 @@ void WorkerImpl::prepare_shared_kv_cache(
   if (!full_block_rows.empty()) {
     if (static_kv_cache_allocator_->needs_full_block_initialization(
             full_block_rows, full_block_lease_epochs)) {
-      // Reused rows may still be read by the preceding batch. Composite MTP
-      // invokes this on its compute stream, where prior cache accesses already
-      // precede initialization and no prepare/compute handoff is needed.
+      // Reused rows may still be read by the preceding batch. A caller on the
+      // compute stream already orders those reads before initialization.
       if (compute_stream_ != nullptr &&
           prepare_stream.get_stream()->unwrap() !=
               compute_stream_->get_stream()->unwrap()) {

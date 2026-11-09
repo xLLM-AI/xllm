@@ -397,7 +397,7 @@ ModelOutput PyExecutorImpl::run(const torch::Tensor& tokens,
       if (args_.model_type() == "qwen3_5" ||
           args_.model_type() == "qwen3_5_moe") {
         // Qwen3.5 passes chunk-local visual rows explicitly; no mutable
-        // embedding state can survive into a decode or unified MTP replay.
+        // embedding state can survive into subsequent decode steps.
         input_embedding = std::move(visual_embedding);
       }
     }

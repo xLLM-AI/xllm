@@ -26,6 +26,7 @@ limitations under the License.
 #include "core/kv_cache/layout/vmm_kv_cache_layout.h"
 #include "core/kv_cache/storage/kv_cache_utils.h"
 #include "core/kv_cache/storage/vmm_kv_page_allocator_impl.h"
+#include "core/util/tensor_options.h"
 
 namespace xllm {
 

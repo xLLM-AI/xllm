@@ -21,7 +21,6 @@ Prefill uses FIA TND with causal mask; decode uses FIA TND with block_table.
 from __future__ import annotations
 
 import os
-from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
@@ -211,20 +210,6 @@ class PagedAttentionGraphState:
     block_table: torch.Tensor
     query: list[int]
     kv: list[int]
-
-
-@dataclass(frozen=True, slots=True)
-class FullKvGraphStateSnapshot:
-    """Restore the exact Full KV token slots modified by graph capture."""
-
-    slots: torch.Tensor
-    caches: tuple[tuple[torch.Tensor, torch.Tensor], ...]
-    layer_slots: tuple[torch.Tensor, ...] = ()
-
-    def restore(self) -> None:
-        for index, (cache, values) in enumerate(self.caches):
-            slots = self.layer_slots[index] if self.layer_slots else self.slots
-            cache.index_copy_(0, slots, values)
 
 
 def write_mla_paged_cache(
@@ -449,35 +434,6 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             self._is_mla = True
         self._uses_sparse_mla = self._is_mla and has_sparse_index
 
-    def snapshot_full_cache_state(self, slot_mappings: Sequence[torch.Tensor]) -> FullKvGraphStateSnapshot:
-        """Preserve live Full K/V at slots a cold graph capture will write.
-
-        Graph warmup and capture execute the real request against its allocated
-        pages. The caller restores this snapshot before each warmup and after
-        capture, then lets the first replay write the request once.
-        """
-        if not slot_mappings:
-            raise ValueError("Full KV graph snapshot requires at least one slot mapping")
-        logical_slots = torch.cat([mapping.reshape(-1) for mapping in slot_mappings])
-        logical_slots = logical_slots[logical_slots >= 0].to(torch.long)
-        layout = self._shared_kv_layout
-        caches: list[tuple[torch.Tensor, torch.Tensor]] = []
-        layer_slots: list[torch.Tensor] = []
-        for layer in self._kv_caches:
-            if layer.key is None or layer.value is None:
-                continue
-            physical_slots = (
-                layout.full_slot_mapping(logical_slots, layer.full_block_rows) if layout is not None else logical_slots
-            )
-            selected_slots = torch.unique(physical_slots, sorted=True)
-            for cache in (layer.key, layer.value):
-                tokens = cache.view(-1, *cache.shape[2:])
-                caches.append((tokens, tokens.index_select(0, selected_slots)))
-                layer_slots.append(selected_slots)
-        if not caches:
-            raise RuntimeError("Full KV graph snapshot requires bound key/value caches")
-        return FullKvGraphStateSnapshot(layer_slots[0], tuple(caches), tuple(layer_slots))
-
     @staticmethod
     def _query_sequence_ends(
         q_cu_seq_lens: torch.Tensor | None,
@@ -665,8 +621,8 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
             and context.execution_state is not None
         )
         # Device-length graphs retain prepared metadata inside capture and
-        # calculate physical tables there. Ordinary prepared decode drops it
-        # from static metadata, so replay must continue updating on the Host.
+        # calculate physical tables there. Ordinary decode does not retain
+        # prepared metadata, so replay must continue updating on the Host.
         self._prepare(
             metadata, graph_mode=True, owned_metadata=False, update_shared_full_tables=not graph_owns_full_tables
         )
@@ -753,15 +709,15 @@ class NpuPagedAttentionBackend(KdaLinearAttentionMixin, AttentionBackend):
                 prepared.actual_seq_kv[:] = metadata.kv_seq_lens_host_values
             context = get_forward_context_or_none() if graph_mode else None
             execution_state = None if context is None else context.execution_state
-            bounded = (
-                execution_state.paged_attention.get(len(prepared.actual_seq_kv))
-                if execution_state is not None and prepared.device_kv_lengths is not None
-                else None
-            )
-            if bounded is not None and bounded.kv is not prepared.actual_seq_kv:
-                # Ordinary decode graphs prepare a new Slot view per replay,
-                # while captured bounded FIA tasks read the capture-time list.
-                bounded.kv[:] = prepared.actual_seq_kv
+            if execution_state is not None and prepared.device_kv_lengths is not None:
+                # Shared slabs retain one bounded FIA state per Full layer.
+                # Only refresh the current row geometry's capture-time Host
+                # lists, including the ordinary row-keyed state.
+                row_count = len(prepared.actual_seq_kv)
+                for state_key, bounded in execution_state.paged_attention.items():
+                    state_rows = state_key[0] if isinstance(state_key, tuple) else state_key
+                    if state_rows == row_count and bounded.kv is not prepared.actual_seq_kv:
+                        bounded.kv[:] = prepared.actual_seq_kv
             if graph_mode and prepared.device_kv_lengths is None:
                 self._prepare_paged_graph()
             else:

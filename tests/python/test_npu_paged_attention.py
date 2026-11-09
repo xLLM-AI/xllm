@@ -62,49 +62,16 @@ def test_uses_first_nonempty_key_cache() -> None:
     assert backend.page_size == 128
 
 
-@pytest.mark.parametrize("shared_pool", [False, True])
-def test_full_kv_graph_snapshot_restores_only_written_slots(shared_pool: bool) -> None:
-    backend = NpuPagedAttentionBackend(
-        num_heads=1,
-        num_kv_heads=1,
-        head_dim=2,
-        scale=1.0,
-        sliding_window=0,
-        is_mla=False,
-        device=torch.device("cpu"),
-        dtype=torch.float32,
-    )
-    caches = [
-        LayerCache(
-            key=(torch.arange(48, dtype=torch.float32) + 100 * layer).view(12, 2, 1, 2),
-            value=(torch.arange(48, dtype=torch.float32) + 100 * layer + 50).view(12, 2, 1, 2),
-        )
-        for layer in range(2)
-    ]
-    backend.bind_kv_caches(caches)
-    if shared_pool:
-        backend._shared_kv_layout = SharedKVCacheLayout(2, 4, 2, 4, 2, 8, 64, conv_row_bytes=32)
-    physical_slots = torch.tensor([8, 9, 16] if shared_pool else [2, 3, 4])
-    snapshot = backend.snapshot_full_cache_state(
-        [torch.tensor([2, 3, -1, 2], dtype=torch.int32), torch.tensor([4, 2], dtype=torch.int32)]
-    )
-    original = [
-        cache.view(-1, 1, 2).index_select(0, physical_slots).clone()
-        for layer in caches
-        for cache in (layer.key, layer.value)
-    ]
-    for layer in caches:
-        for cache in (layer.key, layer.value):
-            tokens = cache.view(-1, 1, 2)
-            tokens.index_fill_(0, physical_slots, -1)
-            tokens[0].fill_(-2)
-    snapshot.restore()
-    for cache, expected in zip(
-        (cache for layer in caches for cache in (layer.key, layer.value)), original, strict=True
-    ):
-        tokens = cache.view(-1, 1, 2)
-        torch.testing.assert_close(tokens.index_select(0, physical_slots), expected)
-        assert torch.all(tokens[0] == -2)
+@pytest.mark.parametrize("query_ends", [None, [3, 5], [0, 3, 5]])
+def test_query_sequence_ends_accepts_runtime_cumulative_layouts(query_ends: list[int] | None) -> None:
+    backend = _ordinary_backend()
+    tensor = None if query_ends is None else torch.tensor(query_ends, dtype=torch.int64)
+    result = backend._query_sequence_ends(tensor, 2)
+    if query_ends is None:
+        assert result is None
+    else:
+        assert result.dtype == torch.int32
+        assert result.tolist() == [3, 5]
 
 
 @pytest.mark.parametrize("host_ends", [[3, 5], [0, 3, 5]])
@@ -1360,6 +1327,57 @@ def test_slab_graph_replay_preserves_full_table_update_owner(mode: str, monkeypa
         else:
             assert tables[0].tolist() == [[72, padding, -1], [72, padding, -1]]
             assert mappings[0].tolist() == [9218, -1]
+
+
+@pytest.mark.parametrize("shared_pool", [False, True])
+def test_device_length_replay_refreshes_all_captured_layer_host_bounds(shared_pool: bool) -> None:
+    from xllm.python.model_executor.forward_context import AclGraphExecutionState
+
+    backend = _ordinary_backend()
+    if shared_pool:
+        backend._shared_kv_layout = SharedKVCacheLayout(128, 8, 4, 8, 2, 32, 262144, num_slabs=4)
+        rows = torch.zeros(2, 32, dtype=torch.int32)
+        rows[:, 1:3] = torch.tensor([[16, 18], [48, 50]])
+        backend._kv_caches = [
+            LayerCache(torch.empty(1, 128, 1, 2), torch.empty(1, 128, 1, 2), full_block_rows=row)
+            for row in rows.unbind(0)
+        ]
+    metadata = _ordinary_metadata(paged=True)
+    metadata.slot_mapping = torch.tensor([129, -1], dtype=torch.int32)
+    metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=True)
+    execution = AclGraphExecutionState({})
+    context = ForwardContext(backend, torch.device("cpu"), metadata, backend._kv_caches, execution_state=execution)
+    with forward_context(context):
+        backend.prepare(metadata, graph_mode=True)
+        state_keys = ((2, 0), (2, 1)) if shared_pool else (2,)
+        for key in state_keys:
+            execution.paged_attention[key] = PagedAttentionGraphState(
+                workspace=None,
+                output=torch.empty(0),
+                lse=torch.empty(0),
+                block_table=metadata.block_table,
+                query=[1, 1],
+                kv=[6, 4],
+            )
+        captured_bounds = [execution.paged_attention[key].kv for key in state_keys]
+        unrelated_key = (3, 0) if shared_pool else 3
+        unrelated = PagedAttentionGraphState(
+            workspace=None,
+            output=torch.empty(0),
+            lse=torch.empty(0),
+            block_table=metadata.block_table,
+            query=[1, 1, 1],
+            kv=[7, 5, 3],
+        )
+        execution.paged_attention[unrelated_key] = unrelated
+        metadata.kv_seq_lens.copy_(torch.tensor([10, 8], dtype=torch.int32))
+        metadata.kv_seq_lens_host_values = [10, 8]
+        metadata.prepared_attention_state = backend.prepare_metadata(metadata, device_kv_lengths=True)
+        backend.prepare_graph_replay(metadata)
+
+    assert all(bounds == [10, 8] for bounds in captured_bounds)
+    assert all(execution.paged_attention[key].kv is bounds for key, bounds in zip(state_keys, captured_bounds))
+    assert unrelated.kv == [7, 5, 3]
 
 
 def test_prepared_slab_replay_requires_captured_entry_buffers() -> None:
