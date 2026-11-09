@@ -710,6 +710,13 @@ void ensure_xllm_ops_registered() {
 // compiled only under USE_NPU (mutually exclusive with USE_CUDA).
 TORCH_LIBRARY(xllm_ops, m) {
   m.def(
+      "shared_linear_state_indices_out(Tensor ids, Tensor rows, Tensor(a!) "
+      "out) -> ()");
+  m.def(
+      "shared_full_indices_out(Tensor block_table, Tensor slots, Tensor rows, "
+      "int page_size, int padding_row, Tensor(a!) out_tables, "
+      "Tensor(b!) out_slots) -> ()");
+  m.def(
       "dspark_allocate_verify_prefixes(Tensor confidence, "
       "Tensor(a!) widths, int budget) -> ()");
   m.def(
@@ -1005,6 +1012,11 @@ TORCH_LIBRARY(xllm_ops, m) {
 }
 
 TORCH_LIBRARY_IMPL(xllm_ops, PrivateUse1, m) {
+  m.impl(
+      "shared_linear_state_indices_out",
+      TORCH_FN(xllm::kernel::npu::tilelang::shared_linear_state_indices_out));
+  m.impl("shared_full_indices_out",
+         TORCH_FN(xllm::kernel::npu::tilelang::shared_full_indices_out));
   m.impl(
       "dspark_allocate_verify_prefixes",
       TORCH_FN(xllm::kernel::npu::tilelang::dspark_allocate_verify_prefixes));

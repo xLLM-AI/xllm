@@ -28,6 +28,29 @@ namespace xllm::kernel::npu::tilelang {
 
 // Public TileLang kernel APIs exported to the xLLM NPU runtime.
 
+// Slab metadata mapping without temporary tensors. All tensors are int32 on
+// one NPU, and outputs are preallocated contiguous non-overlapping storage.
+// rows is [2*groups, capacity] with unit inner stride; gaps between rows are
+// supported. ids is contiguous [batch] and out is [groups, batch, 2].
+// ids <= 0 maps to -1; positive ids must be within the row capacity.
+void shared_linear_state_indices_out(const torch::Tensor& ids,
+                                     const torch::Tensor& rows,
+                                     torch::Tensor& out);
+
+// Map Full read tables and write slots in a single current-stream launch.
+// block_table is [batch, columns], slots is [tokens], rows is [layers,
+// capacity] with unit inner stride, and outputs are [layers, batch, columns]
+// and [layers, tokens]. Negative sentinels are preserved. Read-table zero maps
+// to padding_row, while write-slot zero still addresses writable scratch. Live
+// logical ids must be within capacity and translated token slots fit int32.
+void shared_full_indices_out(const torch::Tensor& block_table,
+                             const torch::Tensor& slots,
+                             const torch::Tensor& rows,
+                             int64_t page_size,
+                             int64_t padding_row,
+                             torch::Tensor& out_tables,
+                             torch::Tensor& out_slots);
+
 // Draft5/7 adaptive verification. All buffers are preallocated contiguous
 // tensors on one NPU; these APIs enqueue on its current stream without copying
 // tensor values to Host. Admission validates the supported geometry first.
