@@ -46,11 +46,6 @@ void apply_top_k_top_p(torch::Tensor& logits,
 void apply_token_bitmask_inplace(torch::Tensor& logits,
                                  const torch::Tensor& bitmask);
 
-// Penalties plus the token filter mask/bitmask.
-void apply_logits_constraints(torch::Tensor& logits,
-                              const SamplingParameters& params,
-                              const torch::Tensor& filter_mask);
-
 // Temperature, min-p, then top-k/top-p on 2-D [rows, vocab] logits, fused
 // when supported.
 void apply_logits_transforms(torch::Tensor& logits,
@@ -59,11 +54,9 @@ void apply_logits_transforms(torch::Tensor& logits,
                              const torch::Tensor& top_k,
                              const torch::Tensor& top_p);
 
-// Constraints, then transforms. All-greedy batches without distribution
-// outputs skip the transform stage.
-void process_logits(torch::Tensor& logits,
-                    const SamplingParameters& params,
-                    const torch::Tensor& filter_mask = {});
+// Penalties, token filter bitmask, then transforms. All-greedy batches without
+// distribution outputs skip the transform stage.
+void process_logits(torch::Tensor& logits, const SamplingParameters& params);
 
 // Penalties only, for paths that skip the transform stage.
 void apply_sampling_penalties(torch::Tensor& logits,

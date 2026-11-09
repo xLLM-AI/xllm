@@ -22,7 +22,7 @@ limitations under the License.
 #include <unordered_set>
 #include <utility>
 
-#include "core/framework/constrained/json_object_constraint_batch.h"
+#include "core/framework/constrained/json_object_grammar.h"
 #include "core/framework/constrained/json_object_output_binding.h"
 #include "core/platform/stream.h"
 #include "core/runtime/decode_input_placeholders.h"
@@ -122,14 +122,14 @@ void JsonObjectDecodeAdapter::advance_constraints(
                 /*non_blocking=*/false);
   }
 
-  JsonObjectConstraintBatch constraints(input.json_object_states);
-  const auto violations = constraints.advance(next_tokens, output_rows);
-  for (const JsonObjectConstraintViolation& violation : violations) {
+  const std::vector<JsonTokenMismatch> violations = apply_json_constraints(
+      input.json_object_states, next_tokens, output_rows);
+  for (const JsonTokenMismatch& violation : violations) {
     const std::string& sequence_id =
-        input.sample_sequence_ids[violation.state_index];
+        input.sample_sequence_ids[violation.sequence_index];
     LOG(ERROR) << "last-step token violates json_object grammar, sequence_id="
                << sequence_id
-               << ", output_row=" << output_rows[violation.state_index]
+               << ", output_row=" << output_rows[violation.sequence_index]
                << ", token_offset=" << violation.token_offset
                << ", token_id=" << violation.token_id
                << ", committed_tokens=" << violation.committed_tokens
@@ -138,9 +138,7 @@ void JsonObjectDecodeAdapter::advance_constraints(
         {sequence_id, "prior token violates json_object grammar"});
   }
   input.sampling_params.filter_bitmask() =
-      constraints.build_filter_bitmask(device);
-  // Prefer compact bitmask; clear dense float mask to avoid duplicate H2D.
-  input.sampling_params.filter_mask() = torch::Tensor();
+      build_json_object_filter_bitmask(input.json_object_states, device);
 }
 
 template <typename Input>

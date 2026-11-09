@@ -2700,7 +2700,6 @@ inline void deserialize_forward_input_payload(
   if (selected_token_idxes_size > 0) {
     auto& sampling_params = forward_input.sampling_params;
     read_tensor(context, sampling_params.selected_token_idxes(), stream);
-    read_tensor(context, sampling_params.filter_mask(), stream);
     read_tensor(context, sampling_params.filter_bitmask(), stream);
     read_tensor(context, sampling_params.frequency_penalties(), stream);
     read_tensor(context, sampling_params.presence_penalties(), stream);
@@ -2879,15 +2878,6 @@ void write_json_object_errors(
   }
 }
 
-template <typename T>
-std::vector<T> host_vector_or_tensor(const std::vector<T>& host_values,
-                                     const torch::Tensor& tensor) {
-  if (!host_values.empty()) {
-    return host_values;
-  }
-  return tensor_to_vector<T>(tensor);
-}
-
 const torch::Tensor& choose_host_or_device_tensor(
     const torch::Tensor& host_tensor,
     const torch::Tensor& device_tensor) {
@@ -3040,7 +3030,6 @@ inline void serialize_forward_input_sections(
   write_data(context.descriptor, selected_token_idxes_size);
   if (selected_token_idxes_size > 0) {
     write_tensor(context, sampling_params.selected_token_idxes());
-    write_tensor(context, sampling_params.filter_mask());
     write_tensor(context, sampling_params.filter_bitmask());
     write_tensor(context, sampling_params.frequency_penalties());
     write_tensor(context, sampling_params.presence_penalties());

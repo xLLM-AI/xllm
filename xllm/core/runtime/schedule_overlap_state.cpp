@@ -155,27 +155,25 @@ void ScheduleOverlapState::retire_prior_inputs() {
     prior_output_.retained_inputs.clear();
     return;
   }
-  if (deferred_releases_.size() >= kMaxDeferredReleases) {
-    DeferredRelease& release = deferred_releases_.front();
-    CHECK(release.ready_event->synchronize())
+  // Only one deferred release can be pending; a full one waits for its device
+  // work before being replaced.
+  if (deferred_release_.has_value()) {
+    CHECK(deferred_release_->ready_event->synchronize())
         << "failed to retire deferred overlap input";
-    deferred_releases_.erase(deferred_releases_.begin());
   }
-  deferred_releases_.push_back(
-      {prior_output_.ready_event, take_retained_inputs(prior_output_)});
+  deferred_release_ = DeferredRelease{prior_output_.ready_event,
+                                      take_retained_inputs(prior_output_)};
 }
 
 void ScheduleOverlapState::retire_deferred_inputs(bool wait) {
-  auto it = deferred_releases_.begin();
-  while (it != deferred_releases_.end()) {
-    const bool complete =
-        wait ? it->ready_event->synchronize() : it->ready_event->query();
-    CHECK(complete || !wait) << "failed to retire deferred overlap input";
-    if (complete) {
-      it = deferred_releases_.erase(it);
-    } else {
-      ++it;
-    }
+  if (!deferred_release_.has_value()) {
+    return;
+  }
+  const bool complete = wait ? deferred_release_->ready_event->synchronize()
+                             : deferred_release_->ready_event->query();
+  CHECK(complete || !wait) << "failed to retire deferred overlap input";
+  if (complete) {
+    deferred_release_.reset();
   }
 }
 

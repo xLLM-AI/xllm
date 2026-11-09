@@ -41,6 +41,6 @@ SpecVerifyStats make_verify_stats(
     const torch::Tensor& next_tokens,
     const std::vector<int32_t>* per_seq_draft_counts,
     const std::vector<int32_t>& num_accepted_tokens,
-    const std::vector<bool>& constrained_mask);
+    const std::vector<char>& constrained_mask);
 
 }  // namespace xllm

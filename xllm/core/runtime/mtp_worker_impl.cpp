@@ -17,18 +17,11 @@ limitations under the License.
 
 #include <glog/logging.h>
 
-#if defined(USE_NPU)
-#include <acl/acl.h>
-#include <c10/core/DeviceType.h>
-#include <torch_npu/csrc/core/npu/NPUStream.h>
-#endif
-
 #include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <exception>
 #include <limits>
 #include <memory>
 #include <string>
@@ -427,273 +420,6 @@ ParallelArgs mtp_draft_parallel_args(const ParallelArgs& parallel_args,
 }
 
 }  // namespace
-
-#if defined(USE_NPU)
-namespace detail {
-
-struct DraftTokenHandoffMetrics final {
-  bvar::LatencyRecorder* copy_submission = nullptr;
-  bvar::LatencyRecorder* ready_wait = nullptr;
-  bvar::LatencyRecorder* bulk_read = nullptr;
-  bvar::LatencyRecorder* total_handoff = nullptr;
-};
-
-class NpuJsonDraftTokenHandoff final {
- public:
-  NpuJsonDraftTokenHandoff(const int64_t max_sequences_per_batch,
-                           const int32_t num_speculative_tokens)
-      : max_sequences_per_batch_(max_sequences_per_batch) {
-    const int32_t metric_count = std::max(num_speculative_tokens, 0);
-    metrics_.reserve(metric_count);
-    for (int32_t draft_index = 0; draft_index < metric_count; ++draft_index) {
-      const std::string metric_key = std::to_string(draft_index);
-      DraftTokenHandoffMetrics metrics;
-      metrics.copy_submission =
-          MULTI_HISTOGRAM_speculative_draft_token_copy_submission_latency_microseconds
-              .get_stats({metric_key});
-      metrics.ready_wait =
-          MULTI_HISTOGRAM_speculative_draft_token_ready_wait_latency_microseconds
-              .get_stats({metric_key});
-      metrics.bulk_read =
-          MULTI_HISTOGRAM_speculative_draft_token_bulk_read_latency_microseconds
-              .get_stats({metric_key});
-      metrics.total_handoff =
-          MULTI_HISTOGRAM_speculative_draft_token_handoff_latency_microseconds
-              .get_stats({metric_key});
-      metrics_.emplace_back(metrics);
-    }
-  }
-
-  ~NpuJsonDraftTokenHandoff() {
-    if (wait_stream_ != nullptr) {
-      const aclError ret = aclrtDestroyStream(wait_stream_);
-      if (ret != ACL_SUCCESS) {
-        LOG(WARNING)
-            << "Failed to destroy JSON draft token handoff wait stream: "
-            << ret;
-      }
-    }
-    if (ready_event_ == nullptr) {
-      return;
-    }
-    const aclError ret = aclrtDestroyEvent(ready_event_);
-    if (ret != ACL_SUCCESS) {
-      LOG(WARNING) << "Failed to destroy JSON draft token handoff event: "
-                   << ret;
-    }
-  }
-
-  std::vector<int32_t> read_tokens(const torch::Tensor& next_tokens,
-                                   Stream& compute_stream,
-                                   const int32_t draft_index) {
-    Timer total_timer;
-    const DraftTokenHandoffMetrics* metrics = get_metrics(draft_index);
-    const int64_t token_count = next_tokens.numel();
-    bool copy_submitted = false;
-    bool handoff_ready = false;
-    std::vector<int32_t> token_ids;
-
-    if (can_use_async_handoff(next_tokens, token_count)) {
-      c10::StreamGuard stream_guard = compute_stream.set_stream_guard();
-      if (ensure_resources()) {
-        Timer copy_submission_timer;
-        try {
-          torch::Tensor host_tokens =
-              pinned_tokens_.narrow(/*dim=*/0, /*start=*/0, token_count);
-          copy_submitted = true;
-          host_tokens.copy_(next_tokens.flatten(), /*non_blocking=*/true);
-        } catch (const c10::Error& error) {
-          disable_event_path("submit host copy", error.what());
-        } catch (const std::exception& error) {
-          disable_event_path("submit host copy", error.what());
-        }
-        observe(metrics == nullptr ? nullptr : metrics->copy_submission,
-                copy_submission_timer.elapsed_microseconds());
-
-        if (copy_submitted && event_path_enabled_) {
-          const aclError record_ret = aclrtRecordEvent(
-              ready_event_, compute_stream.get_stream()->stream());
-          if (record_ret != ACL_SUCCESS) {
-            disable_event_path("record host-copy event", record_ret);
-          } else {
-            Timer ready_wait_timer;
-            const aclError wait_event_ret =
-                aclrtStreamWaitEvent(wait_stream_, ready_event_);
-            const aclError reset_ret =
-                wait_event_ret == ACL_SUCCESS
-                    ? aclrtResetEvent(ready_event_, wait_stream_)
-                    : wait_event_ret;
-            const aclError wait_ret =
-                reset_ret == ACL_SUCCESS
-                    ? aclrtSynchronizeStreamWithTimeout(wait_stream_,
-                                                        /*timeout=*/-1)
-                    : reset_ret;
-            observe(metrics == nullptr ? nullptr : metrics->ready_wait,
-                    ready_wait_timer.elapsed_microseconds());
-            if (wait_ret != ACL_SUCCESS) {
-              disable_event_path("synchronize host-copy event", wait_ret);
-            } else {
-              Timer bulk_read_timer;
-              token_ids =
-                  copy_json_draft_token_ids(pinned_tokens_.data_ptr<int64_t>(),
-                                            static_cast<size_t>(token_count));
-              observe(metrics == nullptr ? nullptr : metrics->bulk_read,
-                      bulk_read_timer.elapsed_microseconds());
-              handoff_ready = true;
-            }
-          }
-        }
-      }
-    }
-
-    if (!handoff_ready) {
-      if (copy_submitted) {
-        synchronize_after_failed_handoff(compute_stream);
-      }
-      COUNTER_INC(speculative_draft_token_handoff_fallback_total);
-      token_ids = read_tokens_synchronously(next_tokens);
-    }
-
-    const int64_t total_microseconds =
-        static_cast<int64_t>(total_timer.elapsed_microseconds());
-    observe(metrics == nullptr ? nullptr : metrics->total_handoff,
-            total_microseconds);
-    HISTOGRAM_OBSERVE(speculative_draft_token_d2h_latency_microseconds,
-                      total_microseconds);
-    return token_ids;
-  }
-
- private:
-  bool can_use_async_handoff(const torch::Tensor& next_tokens,
-                             const int64_t token_count) const {
-    return event_path_enabled_ && max_sequences_per_batch_ > 0 &&
-           token_count >= 0 && token_count <= max_sequences_per_batch_ &&
-           !next_tokens.device().is_cpu() && next_tokens.is_contiguous() &&
-           next_tokens.scalar_type() == torch::kLong;
-  }
-
-  bool ensure_resources() {
-    if (!pinned_tokens_.defined()) {
-      try {
-        pinned_tokens_ = torch::empty({max_sequences_per_batch_},
-                                      torch::TensorOptions()
-                                          .dtype(torch::kLong)
-                                          .device(torch::kCPU)
-                                          .pinned_memory(true));
-      } catch (const c10::Error& error) {
-        disable_event_path("allocate pinned host token buffer", error.what());
-        return false;
-      } catch (const std::exception& error) {
-        disable_event_path("allocate pinned host token buffer", error.what());
-        return false;
-      }
-    }
-
-    if (ready_event_ == nullptr) {
-      aclError create_ret =
-          aclrtCreateEventWithFlag(&ready_event_, ACL_EVENT_SYNC);
-      if (create_ret != ACL_SUCCESS) {
-        create_ret = aclrtCreateEvent(&ready_event_);
-      }
-      if (create_ret != ACL_SUCCESS) {
-        ready_event_ = nullptr;
-        disable_event_path("create host-copy event", create_ret);
-        return false;
-      }
-    }
-
-    if (wait_stream_ == nullptr) {
-      const aclError create_ret = aclrtCreateStream(&wait_stream_);
-      if (create_ret != ACL_SUCCESS) {
-        wait_stream_ = nullptr;
-        disable_event_path("create host-copy wait stream", create_ret);
-        return false;
-      }
-    }
-    return true;
-  }
-
-  std::vector<int32_t> read_tokens_synchronously(
-      const torch::Tensor& next_tokens) const {
-    torch::Tensor host_tokens = to_cpu_contiguous(next_tokens.flatten());
-    if (host_tokens.scalar_type() == torch::kLong) {
-      return copy_json_draft_token_ids(
-          host_tokens.data_ptr<int64_t>(),
-          static_cast<size_t>(host_tokens.numel()));
-    }
-
-    std::vector<int32_t> token_ids;
-    token_ids.reserve(host_tokens.numel());
-    for (int64_t token_index = 0; token_index < host_tokens.numel();
-         ++token_index) {
-      token_ids.emplace_back(
-          static_cast<int32_t>(host_tokens[token_index].item<int64_t>()));
-    }
-    return token_ids;
-  }
-
-  void synchronize_after_failed_handoff(Stream& compute_stream) const {
-    if (wait_stream_ != nullptr) {
-      const aclError wait_ret =
-          aclrtSynchronizeStreamWithTimeout(wait_stream_, /*timeout=*/-1);
-      if (wait_ret != ACL_SUCCESS) {
-        LOG(ERROR) << "Failed to synchronize JSON draft token handoff wait "
-                      "stream after fallback: "
-                   << wait_ret;
-      }
-    }
-    const int32_t compute_ret = compute_stream.synchronize();
-    if (compute_ret != 0) {
-      LOG(ERROR) << "Failed to synchronize MTP compute stream after JSON draft "
-                    "token handoff fallback: "
-                 << compute_ret;
-    }
-  }
-
-  const DraftTokenHandoffMetrics* get_metrics(const int32_t draft_index) const {
-    if (draft_index < 0 ||
-        draft_index >= static_cast<int32_t>(metrics_.size())) {
-      return nullptr;
-    }
-    return &metrics_[draft_index];
-  }
-
-  void observe(bvar::LatencyRecorder* recorder,
-               const double elapsed_microseconds) const {
-    if (recorder != nullptr) {
-      *recorder << static_cast<int64_t>(elapsed_microseconds);
-    }
-  }
-
-  void disable_event_path(const std::string& operation, const aclError ret) {
-    if (event_path_enabled_) {
-      LOG(WARNING)
-          << "Disabling NPU JSON draft token asynchronous handoff after "
-          << operation << " failed: " << ret;
-    }
-    event_path_enabled_ = false;
-  }
-
-  void disable_event_path(const std::string& operation,
-                          const std::string& error) {
-    if (event_path_enabled_) {
-      LOG(WARNING)
-          << "Disabling NPU JSON draft token asynchronous handoff after "
-          << operation << " failed: " << error;
-    }
-    event_path_enabled_ = false;
-  }
-
-  int64_t max_sequences_per_batch_ = 0;
-  torch::Tensor pinned_tokens_;
-  aclrtEvent ready_event_ = nullptr;
-  aclrtStream wait_stream_ = nullptr;
-  bool event_path_enabled_ = true;
-  std::vector<DraftTokenHandoffMetrics> metrics_;
-};
-
-}  // namespace detail
-#endif
 
 template <typename TargetInput>
 MTPWorkerImpl<TargetInput>::MTPWorkerImpl(const ParallelArgs& parallel_args,
@@ -1400,9 +1126,6 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_decode(
   LlmForwardInput current_draft_input, next_step_input;
   TargetInput validate_input;
   std::vector<LlmForwardInput> draft_prepared(num_speculative_tokens);
-  detail::JsonDraftValidationScratch json_scratch;
-  const bool has_json_object_states = !input.json_object_states.empty();
-  std::vector<uint8_t> json_invalid_suffix;
   // Records before the validate tail so its phases stay out of this window.
   Timer draft_timer;
   CHECK(embedding_cache_ != nullptr) << "MTP embedding cache is not allocated";
@@ -1523,14 +1246,6 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_decode(
     metadata_template = input.clone();
   };
 
-  if (has_json_object_states) {
-    json_invalid_suffix.assign(current_draft_input.json_object_states.size(),
-                               static_cast<uint8_t>(0));
-    json_scratch.states_after.reserve(num_speculative_tokens);
-    json_scratch.invalid_draft_step_major.reserve(
-        current_draft_input.json_object_states.size() *
-        static_cast<size_t>(num_speculative_tokens));
-  }
   draft_outputs.reserve(num_speculative_tokens);
   const bool reuse_mtp_topk_state = layer::is_mtp_dsa_topk_reuse_enabled(
       draft_impl_->context_.get_model_args());
@@ -1650,51 +1365,13 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_decode(
       }
       this->draft_vocab_.remap(draft_outputs.back().sample_output);
     }
-    bool halt_json_draft = false;
-    if (has_json_object_states) {
-      const torch::Tensor& next_tokens =
-          draft_outputs.back().sample_output.next_tokens;
-      CHECK(next_tokens.defined())
-          << "draft next_tokens must be defined for JSON grammar handling";
-      std::vector<int32_t> draft_token_ids;
-#if defined(USE_NPU)
-      if (json_draft_token_handoff_ == nullptr) {
-        json_draft_token_handoff_ =
-            std::make_unique<detail::NpuJsonDraftTokenHandoff>(
-                static_cast<int64_t>(options_.max_seqs_per_batch()),
-                num_speculative_tokens);
-      }
-      draft_token_ids = json_draft_token_handoff_->read_tokens(
-          next_tokens, *compute_stream_, draft_idx);
-#else
-      Timer draft_token_d2h_timer;
-      torch::Tensor draft_tokens = to_cpu_contiguous(next_tokens.flatten());
-      HISTOGRAM_OBSERVE(
-          speculative_draft_token_d2h_latency_microseconds,
-          static_cast<int64_t>(draft_token_d2h_timer.elapsed_microseconds()));
-      draft_token_ids.reserve(draft_tokens.numel());
-      for (int64_t token_idx = 0; token_idx < draft_tokens.numel();
-           ++token_idx) {
-        draft_token_ids.emplace_back(static_cast<int32_t>(
-            draft_tokens[token_idx].template item<int64_t>()));
-      }
-#endif
-      halt_json_draft =
-          detail::append_json_draft_step(current_draft_input.json_object_states,
-                                         json_invalid_suffix,
-                                         draft_token_ids,
-                                         json_scratch);
-    }
     if (draft_idx == num_speculative_tokens - 1) {
       continue;
     }
 
     const SampleOutput& last_output = draft_outputs.back().sample_output;
     check_draft_input_embedding(last_output.embeddings, "decode");
-    std::vector<JsonObjectGrammarState> previous_draft_states =
-        std::move(current_draft_input.json_object_states);
     current_draft_input = std::move(next_step_input);
-    current_draft_input.json_object_states = std::move(previous_draft_states);
     set_token_ids_device_tensor(current_draft_input,
                                 last_output.next_tokens,
                                 current_draft_input.token_ids.options(),
@@ -1705,34 +1382,6 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_decode(
       // input_embedding is produced and consumed on compute_stream_; FIFO
       // ordering replaces the same-stream EventRecord/EventWait pair.
     }
-    if (has_json_object_states) {
-      if (halt_json_draft) {
-        // Illegal draft under the current mask: stop further draft forwards
-        // and pad remaining speculative slots with -1 so validate rejects them.
-        prepare_validate_inputs(input, validate_input);
-        while (draft_outputs.size() <
-               static_cast<size_t>(num_speculative_tokens)) {
-          ForwardOutput rejected_output = draft_outputs.back();
-          CHECK(rejected_output.sample_output.next_tokens.defined());
-          rejected_output.sample_output.next_tokens = torch::full_like(
-              rejected_output.sample_output.next_tokens, /*fill_value=*/-1);
-          draft_outputs.push_back(std::move(rejected_output));
-          detail::append_json_draft_step(
-              current_draft_input.json_object_states,
-              json_invalid_suffix,
-              std::vector<int32_t>(
-                  current_draft_input.json_object_states.size(), -1),
-              json_scratch);
-        }
-        break;
-      }
-      current_draft_input.sampling_params.filter_bitmask() =
-          build_json_object_filter_bitmask(
-              current_draft_input.json_object_states,
-              device_,
-              JsonObjectMaskBuildPhase::DRAFT);
-      current_draft_input.sampling_params.filter_mask() = torch::Tensor();
-    }
     CHECK(compute_stream_->wait_event(
         current_draft_input.runtime.metadata_ready_event))
         << "failed to wait speculative metadata ready event";
@@ -1741,11 +1390,8 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::step_decode(
   }
   COUNTER_ADD(speculative_execution_latency_seconds_draft,
               draft_timer.elapsed_seconds());
-  return run_validate(input,
-                      draft_outputs,
-                      validate_input,
-                      num_speculative_tokens,
-                      has_json_object_states ? &json_scratch : nullptr);
+  return run_validate(
+      input, draft_outputs, validate_input, num_speculative_tokens);
 }
 
 template <typename TargetInput>
@@ -1754,7 +1400,6 @@ void MTPWorkerImpl<TargetInput>::fill_validate_input_from_draft_outputs(
     const std::vector<ForwardOutput>& draft_outputs,
     TargetInput& validate_input,
     int32_t num_val_tokens,
-    const detail::JsonDraftValidationScratch* json_scratch,
     Stream& compute_stream) {
   const int32_t num_sequences = input.input_params.meta.num_sequences;
   CHECK_GT(num_val_tokens, 0);
@@ -1771,22 +1416,45 @@ void MTPWorkerImpl<TargetInput>::fill_validate_input_from_draft_outputs(
   CHECK(compute_stream.wait_event(validate_input.runtime.metadata_ready_event))
       << "failed to wait speculative metadata ready event";
 
-  if (json_scratch != nullptr) {
+  if (!input.json_object_states.empty()) {
     CHECK_EQ(input.json_object_states.size(),
              static_cast<size_t>(num_sequences))
         << "JSON grammar state rows must match validation sequences";
-    const int32_t num_speculative_tokens = num_val_tokens - 1;
-    CHECK_EQ(json_scratch->states_after.size(),
-             static_cast<size_t>(num_speculative_tokens));
-    validate_input.json_object_states = detail::build_json_validation_states(
-        input.json_object_states,
-        *json_scratch,
-        validate_input.json_object_invalid_draft);
+  }
+
+  // Shared by JSON replay, the fused verify update, and the validate token
+  // fill.
+  const int32_t num_draft_steps = num_val_tokens - 1;
+  std::vector<torch::Tensor> draft_token_steps;
+  draft_token_steps.reserve(static_cast<size_t>(num_draft_steps));
+  for (int32_t i = 0; i < num_draft_steps; ++i) {
+    CHECK(static_cast<size_t>(i) < draft_outputs.size())
+        << "draft_outputs index out of range for step " << i;
+    const torch::Tensor& next_tokens =
+        draft_outputs[static_cast<size_t>(i)].sample_output.next_tokens;
+    CHECK(next_tokens.defined())
+        << "draft next_tokens must be defined for draft step " << i;
+    draft_token_steps.push_back(next_tokens.flatten());
+  }
+
+  if (!input.json_object_states.empty()) {
+    std::vector<std::vector<int32_t>> draft_token_ids;
+    draft_token_ids.reserve(draft_token_steps.size());
+    if (!draft_token_steps.empty()) {
+      const std::vector<int32_t> flat_draft_tokens =
+          tensor_to_vector<int32_t>(torch::stack(draft_token_steps, /*dim=*/0));
+      for (size_t i = 0; i < draft_token_steps.size(); ++i) {
+        const size_t row_begin = i * static_cast<size_t>(num_sequences);
+        draft_token_ids.emplace_back(
+            flat_draft_tokens.begin() + row_begin,
+            flat_draft_tokens.begin() + row_begin + num_sequences);
+      }
+    }
+    validate_input.json_object_states =
+        detail::replay_draft_states(input.json_object_states, draft_token_ids);
     validate_input.sampling_params.filter_bitmask() =
         build_json_object_filter_bitmask(validate_input.json_object_states,
-                                         device_,
-                                         JsonObjectMaskBuildPhase::TARGET);
-    validate_input.sampling_params.filter_mask() = torch::Tensor();
+                                         device_);
   }
 
   validate_input.runtime.device_tensors_ready = false;
@@ -1803,40 +1471,32 @@ void MTPWorkerImpl<TargetInput>::fill_validate_input_from_draft_outputs(
       kernel::npu::tilelang::has_spec_verify_graph_update_specialization(
           num_val_tokens, options_.block_size());
   if (use_fused_verify_token_update) {
-    fused_draft_tokens.reserve(draft_outputs.size());
-    for (const ForwardOutput& draft_output : draft_outputs) {
-      const torch::Tensor& next_tokens = draft_output.sample_output.next_tokens;
-      CHECK(next_tokens.defined() && next_tokens.numel() == num_sequences &&
+    fused_draft_tokens.reserve(draft_token_steps.size());
+    for (const torch::Tensor& next_tokens : draft_token_steps) {
+      CHECK(next_tokens.numel() == num_sequences &&
             next_tokens.scalar_type() == torch::kInt64 &&
             next_tokens.device() == validate_input.token_ids.device() &&
             next_tokens.is_contiguous())
-          << "fused speculative verify input update requires one contiguous "
-             "int64 token per sequence and draft step";
-      fused_draft_tokens.emplace_back(next_tokens.flatten());
+          << "fused speculative verify input update requires one int64 token "
+             "per sequence and draft step";
+      fused_draft_tokens.emplace_back(next_tokens);
     }
     validate_input.runtime.device_tensors_ready = true;
     return;
   }
 #endif
   // Stack the draft columns once and copy into the fixed-width rows.
-  const int32_t num_draft_tokens = num_val_tokens - 1;
   const bool step_major_validate_layout = uses_step_major_validate_layout();
   torch::Tensor validate_token_rows =
       step_major_validate_layout
           ? validate_input.token_ids.view({num_val_tokens, num_sequences})
           : validate_input.token_ids.view({num_sequences, num_val_tokens});
-  if (num_draft_tokens > 0) {
+  if (!draft_token_steps.empty()) {
     std::vector<torch::Tensor> draft_token_columns;
-    draft_token_columns.reserve(static_cast<size_t>(num_draft_tokens));
-    for (int32_t i = 0; i < num_draft_tokens; ++i) {
-      CHECK(static_cast<size_t>(i) < draft_outputs.size())
-          << "draft_outputs index out of range for step " << i;
-      const torch::Tensor& next_tokens =
-          draft_outputs[static_cast<size_t>(i)].sample_output.next_tokens;
-      CHECK(next_tokens.defined())
-          << "draft next_tokens must be defined for validate token fill";
+    draft_token_columns.reserve(draft_token_steps.size());
+    for (const torch::Tensor& draft_tokens : draft_token_steps) {
       draft_token_columns.push_back(
-          safe_to(next_tokens.flatten(), token_options, /*non_blocking=*/true));
+          safe_to(draft_tokens, token_options, /*non_blocking=*/true));
     }
     torch::Tensor packed_drafts = torch::stack(draft_token_columns, /*dim=*/1);
     if (step_major_validate_layout) {
@@ -1858,15 +1518,13 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
     const TargetInput& input,
     const std::vector<ForwardOutput>& draft_outputs,
     TargetInput& validate_input,
-    int32_t num_speculative_tokens,
-    const detail::JsonDraftValidationScratch* json_scratch) {
+    int32_t num_speculative_tokens) {
   Timer target_timer;
   TargetInput target_prepared;
   fill_validate_input_from_draft_outputs(input,
                                          draft_outputs,
                                          validate_input,
                                          num_speculative_tokens + 1,
-                                         json_scratch,
                                          *compute_stream_);
   ForwardOutput target_output;
   if (uses_embedded_eagle3_draft()) {
@@ -1945,13 +1603,11 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
     if (validate_input.sampling_params.filter_bitmask().defined()) {
       verify_params.filter_bitmask() =
           validate_input.sampling_params.filter_bitmask();
-      verify_params.filter_mask() = torch::Tensor();
     }
     val_output = validate(std::move(verify_params),
                           draft_outputs,
                           target_output,
-                          num_speculative_tokens,
-                          validate_input.json_object_invalid_draft);
+                          num_speculative_tokens);
   }
 
   if (uses_embedded_eagle3_draft()) {
@@ -2040,8 +1696,8 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
 
     const torch::Tensor accepted_tokens =
         to_cpu_contiguous(accepted_tokens_host, torch::kInt64);
-    const std::vector<detail::JsonAcceptedTokenMismatch> mismatches =
-        detail::find_json_accepted_token_mismatches(
+    const std::vector<JsonTokenMismatch> mismatches =
+        detail::find_json_token_mismatches(
             input.json_object_states,
             accepted_tokens.const_data_ptr<int64_t>(),
             static_cast<size_t>(accepted_tokens.size(0)),
@@ -2061,7 +1717,7 @@ std::optional<ForwardOutput> MTPWorkerImpl<TargetInput>::run_validate(
           << "MTP JSON output error requires a sampled sequence id";
       failed_sequence_ids.emplace(error.sample_sequence_id);
     }
-    for (const detail::JsonAcceptedTokenMismatch& mismatch : mismatches) {
+    for (const JsonTokenMismatch& mismatch : mismatches) {
       const std::string& sample_sequence_id =
           input.sample_sequence_ids[mismatch.sequence_index];
       CHECK(!sample_sequence_id.empty())
@@ -3061,7 +2717,6 @@ void MTPWorkerImpl<TargetInput>::prepare_validate_inputs(
   if (!input.json_object_states.empty()) {
     // Validation installs exact per-position JSON masks after the draft
     // tokens are known. Do not repeat the inherited one-row mask here.
-    validate_input.sampling_params.filter_mask() = torch::Tensor();
     validate_input.sampling_params.filter_bitmask() = torch::Tensor();
   }
   // The validate forward is logits-only (see
@@ -3803,8 +3458,7 @@ SampleOutput MTPWorkerImpl<TargetInput>::validate(
     SamplingParameters sampling_params,
     const std::vector<ForwardOutput>& draft_outputs,
     const ForwardOutput& target_output,
-    int32_t num_speculative_tokens,
-    const std::vector<uint8_t>& invalid_draft) {
+    int32_t num_speculative_tokens) {
   CHECK(!draft_outputs.empty())
       << "MTP validate requires at least one draft step";
   // An all-greedy batch under probabilistic mode carries no draft logits.
@@ -3835,8 +3489,7 @@ SampleOutput MTPWorkerImpl<TargetInput>::validate(
   return validate(std::move(sampling_params),
                   proposal,
                   target_output,
-                  num_speculative_tokens,
-                  invalid_draft);
+                  num_speculative_tokens);
 }
 
 template <typename TargetInput>
@@ -3844,8 +3497,7 @@ SampleOutput MTPWorkerImpl<TargetInput>::validate(
     SamplingParameters sampling_params,
     const DraftProposal& draft_proposal,
     const ForwardOutput& target_output,
-    int32_t num_speculative_tokens,
-    const std::vector<uint8_t>& invalid_draft) {
+    int32_t num_speculative_tokens) {
   const int32_t num_val_tokens = num_speculative_tokens + 1;
   const int32_t batch_size =
       static_cast<int32_t>(draft_proposal.token_ids().size(0));
@@ -3869,27 +3521,11 @@ SampleOutput MTPWorkerImpl<TargetInput>::validate(
     }
   }
 
-  // Grammar-invalid draft positions carry the -1 sentinel directly in the
-  // proposal token ids; the rejection sampler rejects negative ids.
-  torch::Tensor validation_token_ids;
-  if (!invalid_draft.empty()) {
-    CHECK_EQ(invalid_draft.size(),
-             static_cast<size_t>(batch_size * (num_val_tokens - 1)))
-        << "MTP invalid draft mask shape mismatch";
-    torch::Tensor invalid_mask =
-        async_h2d_tensor(invalid_draft, draft_proposal.token_ids().device())
-            .view({batch_size, num_val_tokens - 1})
-            .to(torch::kBool);
-    validation_token_ids =
-        draft_proposal.token_ids().masked_fill(invalid_mask, /*sentinel=*/-1);
-  }
-  SampleOutput sample_output = spec_verify::run_rejection_sampling(
-      std::move(sampling_params),
-      DraftProposal(validation_token_ids.defined() ? validation_token_ids
-                                                   : draft_proposal.token_ids(),
-                    draft_proposal.logits()),
-      target_logits,
-      target_hidden_states);
+  SampleOutput sample_output =
+      spec_verify::run_rejection_sampling(std::move(sampling_params),
+                                          draft_proposal,
+                                          target_logits,
+                                          target_hidden_states);
 
   return sample_output;
 }

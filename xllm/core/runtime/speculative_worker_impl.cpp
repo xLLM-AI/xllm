@@ -278,11 +278,16 @@ ForwardOutput finalize_verify_output(
   // Verify kernels have completed by every entry to this tail.
   const std::vector<int32_t> num_accepted_tokens =
       tensor_to_vector<int32_t>(val_output.num_accepted_tokens);
+  std::vector<char> constrained_mask;
+  constrained_mask.reserve(json_object_states.size());
+  for (const JsonObjectGrammarState& state : json_object_states) {
+    constrained_mask.push_back(static_cast<char>(state.initialized()));
+  }
   target_output.spec_verify_stats =
       make_verify_stats(val_output.next_tokens,
                         /*per_seq_draft_counts=*/nullptr,
                         num_accepted_tokens,
-                        constrained_mask(json_object_states));
+                        constrained_mask);
   // The verify output replaces sample_output wholesale, so only its own
   // embeddings need clearing.
   val_output.embeddings = torch::Tensor();

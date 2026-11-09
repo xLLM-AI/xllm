@@ -22,14 +22,9 @@ limitations under the License.
 #include <cstdint>
 #include <numeric>
 #include <type_traits>
-#include <utility>
 #include <vector>
 
-#include "core/util/slice.h"
-
 namespace xllm::util {
-
-std::pair<int32_t, int32_t> find_ones_indices(std::vector<int32_t>& q_seq_lens);
 
 template <typename T>
 void pad_2d_vector(std::vector<std::vector<T>>& vec, T pad_value) {
@@ -79,10 +74,6 @@ static inline int64_t align_up(int64_t value, int64_t alignment) {
   }
   return ((value + alignment - 1) / alignment) * alignment;
 }
-
-bool match_suffix(const Slice<int32_t>& data, const Slice<int32_t>& suffix);
-
-std::vector<uint32_t> cal_vec_split_index(uint32_t vec_size, uint32_t part_num);
 
 int32_t ceil_pow2(int32_t n);
 

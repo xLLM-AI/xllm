@@ -167,12 +167,7 @@ class SamplingPenalties final {
 
 class SamplingConstraints final {
  public:
-  // Dense additive mask for token-level structured output constraints. Zero
-  // entries are allowed and negative entries are forbidden.
-  PROPERTY(torch::Tensor, filter_mask);
-
-  // Compact allowed-token bitmask [num_tokens, ceil(vocab/32)] int32. When
-  // defined, sample() prefers this over filter_mask (smaller H2D).
+  // Compact allowed-token bitmask [num_tokens, ceil(vocab/32)] int32.
   PROPERTY(torch::Tensor, filter_bitmask);
 
   // Per-selected-row additive logits bias.
@@ -236,8 +231,7 @@ class SamplingParameters final {
             const std::vector<int32_t>& selected_token_idxes,
             const std::vector<std::vector<int64_t>>& unique_token_ids_vec,
             const std::vector<std::vector<int32_t>>& unique_token_counts_vec,
-            const std::vector<int32_t>& unique_token_lens_vec,
-            const std::vector<torch::Tensor>& filter_mask_rows = {});
+            const std::vector<int32_t>& unique_token_lens_vec);
 
   SamplingParameters to(const torch::Device& device,
                         torch::ScalarType dtype) const;
@@ -262,8 +256,8 @@ class SamplingParameters final {
   FORWARD_PROPERTY(torch::Tensor, unique_token_ids_lens, penalties);
 
   PROPERTY(SamplingConstraints, constraints);
-  FORWARD_PROPERTY(torch::Tensor, filter_mask, constraints);
   FORWARD_PROPERTY(torch::Tensor, filter_bitmask, constraints);
+
   FORWARD_PROPERTY(torch::Tensor, logits_bias, constraints);
   FORWARD_PROPERTY(torch::Tensor, min_token_positions, constraints);
   FORWARD_PROPERTY(torch::Tensor, min_tokens_remaining, constraints);
@@ -366,7 +360,7 @@ struct SamplingFieldDesc {
 
 // Omitted flags default to false; a plain token-indexed field is a bare
 // {.member=...}.
-inline constexpr std::array<SamplingFieldDesc, 21> kSamplingFields = {
+inline constexpr std::array<SamplingFieldDesc, 20> kSamplingFields = {
     {{.member =
           SamplingTensorAccessor{&SamplingParameters::frequency_penalties,
                                  &SamplingParameters::frequency_penalties}},
@@ -412,9 +406,6 @@ inline constexpr std::array<SamplingFieldDesc, 21> kSamplingFields = {
      {.member =
           SamplingTensorAccessor{&SamplingParameters::unique_token_ids_lens,
                                  &SamplingParameters::unique_token_ids_lens}},
-     {.member = SamplingTensorAccessor{&SamplingParameters::filter_mask,
-                                       &SamplingParameters::filter_mask},
-      .post_penalty_transform = true},
      {.member = SamplingTensorAccessor{&SamplingParameters::filter_bitmask,
                                        &SamplingParameters::filter_bitmask},
       .post_penalty_transform = true},
@@ -478,6 +469,8 @@ inline void prepare_draft_sampling(bool is_probabilistic_draft,
   sampling_params.prefix_tokens() = torch::Tensor();
   sampling_params.seeds() = torch::Tensor();
   sampling_params.seed_offsets() = torch::Tensor();
+  // Drafts no longer advance a JSON grammar per step, so no mask is inherited.
+  sampling_params.filter_bitmask() = torch::Tensor();
   if (!is_probabilistic_draft) {
     sampling_params.sampling_mode() = SamplingMode::GREEDY;
     sampling_params.do_sample() = torch::Tensor();

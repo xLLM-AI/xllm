@@ -87,16 +87,15 @@ void populate_fa3_attention_metadata(
     const InputParams& params,
     const std::optional<torch::Tensor>& attn_mask,
     bool skip_cu_seq_lens) {
-  const int64_t q_sequence_count =
-      params.attention.host.q_seq_lens.empty()
-          ? params.meta.num_sequences
-          : static_cast<int64_t>(params.attention.host.q_seq_lens.size());
-  const int64_t kv_sequence_count =
-      params.attention.host.kv_seq_lens.empty()
-          ? params.meta.num_sequences
-          : static_cast<int64_t>(params.attention.host.kv_seq_lens.size());
-
   if (!skip_cu_seq_lens) {
+    const int64_t q_sequence_count =
+        params.attention.host.q_seq_lens.empty()
+            ? params.meta.num_sequences
+            : static_cast<int64_t>(params.attention.host.q_seq_lens.size());
+    const int64_t kv_sequence_count =
+        params.attention.host.kv_seq_lens.empty()
+            ? params.meta.num_sequences
+            : static_cast<int64_t>(params.attention.host.kv_seq_lens.size());
     if (attn_metadata.q_cu_seq_lens.defined()) {
       if (attn_metadata.q_cu_seq_lens.numel() == q_sequence_count) {
         attn_metadata.q_cu_seq_lens =

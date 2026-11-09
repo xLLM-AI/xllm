@@ -20,7 +20,6 @@ limitations under the License.
 #include <utility>
 
 #include "core/common/property_reflect.h"
-#include "core/util/tensor_codec.h"
 
 namespace xllm {
 
@@ -117,18 +116,6 @@ namespace xllm {
     for (const auto& value : vec) {           \
       *proto_field->Add() = value;            \
     }                                         \
-  } while (0)
-
-#define TORCH_TENSOR_VEC_TO_PROTO_TENSOR_LIST(proto_field, torch_tensor_vec) \
-  do {                                                                       \
-    proto_field->mutable_tensors()->Reserve(torch_tensor_vec.size());        \
-    for (const auto& torch_tensor : torch_tensor_vec) {                      \
-      proto::Tensor* pb_tensor = proto_field->add_tensors();                 \
-      if (!util::torch_to_proto(torch_tensor, pb_tensor)) {                  \
-        LOG(ERROR)                                                           \
-            << "Failed to convert torch Tensor to PB Tensor (list item)";    \
-      }                                                                      \
-    }                                                                        \
   } while (0)
 
 #define CALLBACK_WITH_ERROR_ARGS2(CODE, MSG) callback(Status{CODE, MSG})
